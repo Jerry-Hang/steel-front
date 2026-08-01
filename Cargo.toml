@@ -1,0 +1,24 @@
+[package]
+name = "steel-front"
+version = "0.1.0"
+description = "钢铁前线 (Steel Front) - 二战FPS游戏引擎"
+edition = "2021"
+
+[dependencies]
+# Vulkan 绑定
+ash = { version = "0.38", features = ["debug"] }
+# Vulkan 窗口表面创建
+ash-window = "0.13"
+# 窗口管理（使用 rwh_06 以匹配 ash-window 0.13）
+winit = { version = "0.30", features = ["rwh_06"] }
+# 线性代数（向量、矩阵）
+glam = "0.29"
+# 原始窗口句柄（vulkan 需要，rwh_06 以匹配 ash-window）
+raw-window-handle = "0.6"
+# 日志
+log = "0.4"
+env_logger = "0.11"
+
+[build-dependencies]
+# 编译 WGSL 着色器为 SPIR-V（构建时）
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
