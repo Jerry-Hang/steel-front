@@ -36,6 +36,18 @@ struct NetworkDemo {
     last_log: f32,
 }
 
+/// 游戏主状态机（开始菜单 → 游戏中 → 死亡结算）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // StartMenu/GameOver 在 commit e（完整状态机）接入，当前仅 Playing
+pub enum GameState {
+    /// 开始菜单：任意键开始
+    StartMenu,
+    /// 游戏中：波次战斗
+    Playing,
+    /// 死亡结算：R 重开
+    GameOver,
+}
+
 /// 单个 NPC：A* 路径 + 状态机 + 世界位置（y 采样地形高度）
 pub struct Npc {
     /// 全局 id（也用于确定性巡逻相位）
@@ -129,6 +141,8 @@ pub struct Game {
     audio_sample_rate: u32,
     /// 网络环回演示（默认关闭，RV3D_NET=1 启用）
     net_demo: Option<NetworkDemo>,
+    /// 游戏主状态（commit a 先提供枚举与查询；e 接入完整状态机）
+    game_state: GameState,
 }
 
 impl Game {
@@ -247,7 +261,13 @@ impl Game {
                     }
                 }
             },
+            game_state: GameState::Playing,
         }
+    }
+
+    /// 当前游戏状态（供 main.rs 控制光标捕获等输入行为）
+    pub fn state(&self) -> GameState {
+        self.game_state
     }
 
     /// 初始化网络环回演示：绑定环回 Server + 连入 Client，发起 Join
@@ -681,6 +701,13 @@ mod tests {
             let (wx, wz) = grid_to_world(g);
             assert_eq!(g, world_to_grid(wx, wz));
         }
+    }
+
+    /// 初始状态为 Playing（commit a；e 阶段改为 StartMenu + 完整状态机）
+    #[test]
+    fn game_state_starts_playing() {
+        let game = Game::new();
+        assert_eq!(game.state(), GameState::Playing);
     }
 
     /// 网络环回演示：init 能绑定环回 server，client 的 Join 能被 server 收到并回 ack

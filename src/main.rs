@@ -22,9 +22,10 @@ use winit::{
 };
 
 use engine::camera::{Camera, CameraMode, KeyState};
-use engine::game::Game;
+use engine::game::{Game, GameState};
 use engine::renderer::Renderer;
 use engine::window::{self, WINDOW_HEIGHT, WINDOW_WIDTH};
+use winit::window::CursorGrabMode;
 
 /// 帧率上限（present 节流）：300 FPS，避免空闲轮询无意义打满 GPU
 const MAX_FPS: u64 = 300;
@@ -51,6 +52,12 @@ struct GameApp {
     last_frame: Instant,
     /// 是否请求开火（Space 按下置位，update 消费）
     fire_requested: bool,
+    /// 光标是否已捕获（Playing 下鼠标视角）
+    cursor_captured: bool,
+    /// 窗口是否聚焦（失焦时释放捕获，防止卡视角）
+    focused: bool,
+    /// 上次相机参数日志时间（1 秒一条，冒烟/调试用）
+    last_cam_log: Instant,
     /// 游戏运行时中枢（物理/武器/AI/UI/音频/网络）
     game: Game,
     /// 程序是否正在运行
@@ -70,6 +77,9 @@ impl GameApp {
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             fire_requested: false,
+            cursor_captured: false,
+            focused: true,
+            last_cam_log: Instant::now(),
             game: Game::new(),
             running: true,
         }
@@ -77,6 +87,9 @@ impl GameApp {
 
     /// 更新逻辑（每帧调用）
     fn update(&mut self) {
+        // 同步光标捕获状态（Playing + 聚焦 = 捕获；菜单/结算/失焦 = 释放）
+        self.sync_cursor();
+
         // 计算帧时间差
         let now = Instant::now();
         let delta_time = now.duration_since(self.last_frame).as_secs_f32();
@@ -98,6 +111,44 @@ impl GameApp {
             self.game
                 .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
             self.fire_requested = false;
+        }
+
+        // 相机参数日志（1 秒一条，冒烟断言 yaw/pitch 变化用）
+        if self.last_cam_log.elapsed().as_secs_f32() >= 1.0 {
+            let (yaw, pitch, dist) = self.camera.orbit_params();
+            log::info!(
+                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?}",
+                yaw.to_degrees(),
+                pitch.to_degrees(),
+                dist,
+                self.camera.mode
+            );
+            self.last_cam_log = Instant::now();
+        }
+    }
+
+    /// 按游戏状态同步光标捕获：Playing = 捕获 + 隐藏；否则释放。
+    fn sync_cursor(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let want = self.focused && self.game.state() == GameState::Playing;
+        if want && !self.cursor_captured {
+            let grabbed = window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
+                .is_ok();
+            if grabbed {
+                window.set_cursor_visible(false);
+                self.cursor_captured = true;
+                log::info!("input: cursor captured (mouse look on)");
+            }
+        } else if !want && self.cursor_captured {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+            self.cursor_captured = false;
+            self.camera.set_rotation_active(false);
+            log::info!("input: cursor released");
         }
     }
 
@@ -223,21 +274,27 @@ impl ApplicationHandler for GameApp {
                 }
             }
 
-            // 窗口失去焦点时重置按键状态，防止"卡键"
-            WindowEvent::Focused(false) => {
-                self.key_state.reset();
-                self.dragging = false;
-                self.right_dragging = false;
-                self.camera.set_rotation_active(false);
+            // 焦点变化：失焦时重置按键/拖拽并释放捕获，防止"卡键"
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.key_state.reset();
+                    self.dragging = false;
+                    self.right_dragging = false;
+                    self.camera.set_rotation_active(false);
+                }
             }
 
-            // 鼠标按键：左键 = 轨道拖拽；右键 = 飞行视角拖拽
+            // 鼠标按键：左键 = 开火（Playing）兼轨道拖拽；右键 = 飞行视角拖拽
             WindowEvent::MouseInput {
                 state, button, ..
             } => {
                 let pressed = state == ElementState::Pressed;
                 match button {
                     MouseButton::Left => {
+                        if pressed && self.game.state() == GameState::Playing {
+                            self.fire_requested = true;
+                        }
                         self.dragging = pressed;
                     }
                     MouseButton::Right => {
@@ -248,19 +305,39 @@ impl ApplicationHandler for GameApp {
                 }
             }
 
-            // 拖拽中移动鼠标：左键 = 轨道旋转（位控）；右键 = 飞行视角旋转（惯性速度）
+            // 鼠标移动：捕获态 = 视角（轨道位控 / 飞行惯性）；非捕获态 = 拖拽旋转
             WindowEvent::CursorMoved { position, .. } => {
-                let (dx, dy) = (
-                    position.x - self.last_cursor.0,
-                    position.y - self.last_cursor.1,
-                );
-                if self.dragging && self.camera.mode == CameraMode::Orbit {
-                    self.camera.orbit(dx as f32, dy as f32);
+                let (px, py) = (position.x, position.y);
+                if self.cursor_captured {
+                    let dx = (px - self.last_cursor.0) as f32;
+                    let dy = (py - self.last_cursor.1) as f32;
+                    match self.camera.mode {
+                        CameraMode::Orbit => self.camera.orbit(dx, dy),
+                        CameraMode::Flight => {
+                            self.camera.set_rotation_active(true);
+                            self.camera.add_rotation_input(dx, dy);
+                        }
+                    }
+                    // 回中光标，避免撞到屏幕边缘导致视角停顿
+                    if let Some(window) = &self.window {
+                        let size = window.inner_size();
+                        let center = winit::dpi::PhysicalPosition::new(
+                            size.width as f64 / 2.0,
+                            size.height as f64 / 2.0,
+                        );
+                        let _ = window.set_cursor_position(center);
+                        self.last_cursor = (center.x, center.y);
+                    }
+                } else {
+                    let (dx, dy) = (px - self.last_cursor.0, py - self.last_cursor.1);
+                    if self.dragging && self.camera.mode == CameraMode::Orbit {
+                        self.camera.orbit(dx as f32, dy as f32);
+                    }
+                    if self.right_dragging && self.camera.mode == CameraMode::Flight {
+                        self.camera.add_rotation_input(dx as f32, dy as f32);
+                    }
+                    self.last_cursor = (px, py);
                 }
-                if self.right_dragging && self.camera.mode == CameraMode::Flight {
-                    self.camera.add_rotation_input(dx as f32, dy as f32);
-                }
-                self.last_cursor = (position.x, position.y);
             }
 
             // 滚轮：轨道 = 推拉距离；飞行 = 沿视线前进/后退
