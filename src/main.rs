@@ -8,7 +8,7 @@
 
 mod engine;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::{
     application::ApplicationHandler,
@@ -21,6 +21,11 @@ use winit::{
 use engine::camera::{Camera, KeyState};
 use engine::renderer::Renderer;
 use engine::window::{self, lock_cursor, unlock_cursor, WINDOW_HEIGHT, WINDOW_WIDTH};
+
+/// 帧率上限（present 节流）：300 FPS，避免空闲轮询无意义打满 GPU
+const MAX_FPS: u64 = 300;
+/// 单帧预算（纳秒）
+const FRAME_BUDGET: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS);
 
 /// 游戏应用主管理结构
 struct GameApp {
@@ -232,6 +237,19 @@ impl ApplicationHandler for GameApp {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if !self.running || self.window.is_none() {
             return;
+        }
+
+        // 帧率上限（present 节流）：低于单帧预算则补齐
+        // thread::sleep 粒度约 1ms，先粗睡到剩 ~1ms，再自旋精确到预算
+        let elapsed = self.last_frame.elapsed();
+        if elapsed < FRAME_BUDGET {
+            let remaining = FRAME_BUDGET - elapsed;
+            if remaining > Duration::from_millis(1) {
+                std::thread::sleep(remaining - Duration::from_millis(1));
+            }
+            while self.last_frame.elapsed() < FRAME_BUDGET {
+                std::hint::spin_loop();
+            }
         }
 
         // 更新逻辑（相机、物理等）
