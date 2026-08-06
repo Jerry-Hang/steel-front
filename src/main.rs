@@ -246,12 +246,27 @@ impl ApplicationHandler for GameApp {
             } => {
                 let pressed = state == ElementState::Pressed;
 
+                // 开始菜单：任意键（除 ESC）开始游戏
+                if pressed
+                    && self.game.state() == GameState::StartMenu
+                    && key_code != KeyCode::Escape
+                {
+                    self.game.on_any_key(&self.camera.position());
+                }
+
                 match key_code {
                     KeyCode::Escape => {
                         if pressed {
                             log::info!("ESC 键按下，退出程序");
                             self.running = false;
                             event_loop.exit();
+                        }
+                    }
+                    // 死亡结算界面：R 重开一局
+                    KeyCode::KeyR => {
+                        if pressed && self.game.state() == GameState::GameOver {
+                            log::info!("game: R 键重开一局");
+                            self.game.request_restart(&self.camera.position());
                         }
                     }
                     // Tab 切换相机模式（轨道 ↔ 飞行）

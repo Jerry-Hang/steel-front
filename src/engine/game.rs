@@ -42,7 +42,6 @@ struct NetworkDemo {
 
 /// 游戏主状态机（开始菜单 → 游戏中 → 死亡结算）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // StartMenu/GameOver 在 commit e（完整状态机）接入，当前仅 Playing
 pub enum GameState {
     /// 开始菜单：任意键开始
     StartMenu,
@@ -281,7 +280,7 @@ impl Game {
                     }
                 }
             },
-            game_state: GameState::Playing,
+            game_state: GameState::StartMenu,
             wave: 1,
             wave_timer: 0.0,
             score: 0,
@@ -293,6 +292,43 @@ impl Game {
     /// 当前游戏状态（供 main.rs 控制光标捕获等输入行为）
     pub fn state(&self) -> GameState {
         self.game_state
+    }
+
+    /// 开始菜单任意键：进入游戏（开始/重开一局）
+    pub fn on_any_key(&mut self, player: &glam::Vec3) {
+        if self.game_state == GameState::StartMenu {
+            self.start_run(player);
+        }
+    }
+
+    /// 死亡结算界面 R：重开一局
+    pub fn request_restart(&mut self, player: &glam::Vec3) {
+        if self.game_state != GameState::GameOver {
+            return;
+        }
+        self.start_run(player);
+    }
+
+    /// 开始一局：复位血量/弹药/分数/波次，清掉残留 NPC 后生成第 1 波，进入 Playing
+    fn start_run(&mut self, player: &glam::Vec3) {
+        self.hud.health = self.hud.max_health;
+        self.hud.ammo = self.hud.max_ammo;
+        self.score = 0;
+        self.wave = 1;
+        self.wave_timer = 0.0;
+        self.fire_cooldown = 0.0;
+        self.projectiles.clear();
+        self.shots = 0;
+        self.hits = 0;
+        self.total_collisions = 0;
+        self.last_damage_time = 0.0;
+        if !self.npcs.is_empty() {
+            log::info!("game: purged {} leftover npcs on run start", self.npcs.len());
+            self.npcs.clear();
+        }
+        self.spawn_wave(1, player);
+        self.game_state = GameState::Playing;
+        log::info!("game: run started (wave 1)");
     }
 
     /// 初始化网络环回演示：绑定环回 Server + 连入 Client，发起 Join
@@ -858,19 +894,47 @@ mod tests {
         }
     }
 
-    /// 初始状态为 Playing（commit a；e 阶段改为 StartMenu + 完整状态机）
+    /// 初始状态为 StartMenu（开始菜单）
     #[test]
-    fn game_state_starts_playing() {
+    fn game_state_starts_in_menu() {
         let game = Game::new();
+        assert_eq!(game.state(), GameState::StartMenu);
+    }
+
+    /// 开始菜单任意键 → Playing，重置并生成第 1 波
+    #[test]
+    fn start_menu_any_key_begins_run() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
         assert_eq!(game.state(), GameState::Playing);
+        assert_eq!(game.wave, 1);
+        assert_eq!(game.score, 0);
+        assert_eq!(game.hud.health, game.hud.max_health);
+        assert_eq!(game.npcs.len(), (4 + 2 * 1).min(24), "wave 1 spawns 6");
+    }
+
+    /// 死亡结算 R 重开：状态复位并重新生成第 1 波
+    #[test]
+    fn gameover_restart_resets_run() {
+        let mut game = Game::new();
+        game.game_state = GameState::GameOver;
+        game.score = 999;
+        game.hud.health = 0.0;
+        game.request_restart(&glam::Vec3::ZERO);
+        assert_eq!(game.state(), GameState::Playing);
+        assert_eq!(game.score, 0);
+        assert_eq!(game.wave, 1);
+        assert_eq!(game.hud.health, game.hud.max_health);
+        assert!(!game.npcs.is_empty());
     }
 
     /// 波次清空（npcs 空）后开始 3 秒倒计时，随后刷出下一波
     #[test]
     fn wave_spawns_after_clear() {
         let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
         assert_eq!(game.wave, 1);
-        assert_eq!(game.npcs.len(), 8);
+        assert_eq!(game.npcs.len(), 6);
         game.npcs.clear();
         game.update(0.01, &Camera::new());
         assert!(game.wave_timer > 0.0, "countdown should start after clear");
@@ -916,6 +980,7 @@ mod tests {
     #[test]
     fn player_damage_and_gameover() {
         let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
         // 把一只 NPC 放到玩家（原点）脚边，保证进入 Attack
         game.npcs[0].position = [1.0, 0.0, 1.0];
         game.hud.health = 6.0;
