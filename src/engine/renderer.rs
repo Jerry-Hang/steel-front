@@ -68,6 +68,14 @@ struct Vertex {
     uv: [f32; 2],
 }
 
+/// HUD 覆盖层顶点：屏幕空间 NDC 位置（Y 已翻转）+ RGBA 颜色
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HudVertex {
+    pos: [f32; 2],
+    color: [f32; 4],
+}
+
 /// 立方体 24 顶点（每面 4 个，CCW 外侧绕序；每面 UV 铺满 0..1）
 const VERTICES: [Vertex; 24] = [
     // 前 (+Z) 红色调
@@ -421,6 +429,18 @@ pub struct Renderer {
     texture_image_memory: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
     texture_sampler: vk::Sampler,
+    // ---- HUD 覆盖层（自包含：独立 pipeline / 独立顶点缓冲，不侵入主 pass）----
+    hud_pipeline: vk::Pipeline,
+    hud_pipeline_layout: vk::PipelineLayout,
+    hud_vertex_buffer: vk::Buffer,
+    hud_vertex_buffer_memory: vk::DeviceMemory,
+    hud_mapped: *mut std::ffi::c_void,
+    hud_vertex_count: u32,
+    hud_capacity_quads: u32,
+    /// 上一帧渲染统计（供 HUD / 日志）
+    last_near_count: u32,
+    last_far_count: u32,
+    last_terrain_lod_name: &'static str,
 }
 
 fn load_spirv(path: &str) -> Result<Vec<u32>, String> {
@@ -438,6 +458,7 @@ impl Renderer {
         renderer.init_depth_resources()?;
         renderer.init_descriptors()?;       // ← 新增
         renderer.init_pipeline()?;
+        renderer.init_hud()?;
         renderer.init_framebuffers()?;
         renderer.init_texture()?;
         renderer.update_texture_descriptor_sets()?;
@@ -710,6 +731,16 @@ impl Renderer {
             texture_image_memory: vk::DeviceMemory::null(),
             texture_image_view: vk::ImageView::null(),
             texture_sampler: vk::Sampler::null(),
+            hud_pipeline: vk::Pipeline::null(),
+            hud_pipeline_layout: vk::PipelineLayout::null(),
+            hud_vertex_buffer: vk::Buffer::null(),
+            hud_vertex_buffer_memory: vk::DeviceMemory::null(),
+            hud_mapped: std::ptr::null_mut(),
+            hud_vertex_count: 0,
+            hud_capacity_quads: 4096,
+            last_near_count: 0,
+            last_far_count: 0,
+            last_terrain_lod_name: "high",
         })
     }
 
@@ -1412,6 +1443,202 @@ impl Renderer {
         self.create_terrain_lods()?;
         log::info!("图形管线创建完成");
         Ok(())
+    }
+
+    /// 初始化 HUD 覆盖层：自包含 pipeline（无描述符、depth off、alpha 混合）+ 独立 HOST_VISIBLE 顶点缓冲
+    fn init_hud(&mut self) -> Result<(), String> {
+        let vs_spirv = load_spirv("assets/hud.vert.spv")?;
+        let fs_spirv = load_spirv("assets/hud.frag.spv")?;
+        let vs_module = self.create_shader_module(&vs_spirv)?;
+        let fs_module = self.create_shader_module(&fs_spirv)?;
+
+        let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs_module)
+            .name(c"vs_main");
+        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs_module)
+            .name(c"fs_main");
+        let shader_stages = [vs_stage, fs_stage];
+
+        let hud_binding = vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(std::mem::size_of::<HudVertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX);
+        let hud_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(1)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(std::mem::size_of::<[f32; 2]>() as u32),
+        ];
+        let hud_bindings = [hud_binding];
+        let hud_vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&hud_bindings)
+            .vertex_attribute_descriptions(&hud_attributes);
+
+        let hud_input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        let hud_viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(self.swapchain_extent.width as f32)
+            .height(self.swapchain_extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let hud_scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D { x: 0, y: 0 })
+            .extent(self.swapchain_extent);
+        let hud_viewports = [hud_viewport];
+        let hud_scissors = [hud_scissor];
+        let hud_viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&hud_viewports)
+            .scissors(&hud_scissors);
+
+        let hud_rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false);
+
+        let hud_multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let hud_depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(false)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::ALWAYS);
+
+        let hud_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD);
+        let hud_blend_attachments = [hud_blend_attachment];
+        let hud_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&hud_blend_attachments);
+
+        // 独立 pipeline layout：无描述符
+        let hud_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&[])
+            .push_constant_ranges(&[]);
+        self.hud_pipeline_layout = unsafe {
+            self.device
+                .create_pipeline_layout(&hud_layout_info, None)
+                .map_err(|e| format!("创建 HUD 管线布局失败: {}", e))?
+        };
+
+        let hud_create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&hud_vertex_input)
+            .input_assembly_state(&hud_input_assembly)
+            .viewport_state(&hud_viewport_state)
+            .rasterization_state(&hud_rasterizer)
+            .multisample_state(&hud_multisampling)
+            .depth_stencil_state(&hud_depth_stencil)
+            .color_blend_state(&hud_blend_state)
+            .layout(self.hud_pipeline_layout)
+            .render_pass(self.render_pass)
+            .subpass(0);
+        self.hud_pipeline = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[hud_create_info], None)
+                .map_err(|(_, e)| format!("创建 HUD 图形管线失败: {}", e))?
+                .remove(0)
+        };
+
+        unsafe {
+            self.device.destroy_shader_module(vs_module, None);
+            self.device.destroy_shader_module(fs_module, None);
+        }
+
+        // 独立 HOST_VISIBLE 顶点缓冲（容量 4096 quad × 6 顶点 × 24B）
+        let hud_size =
+            (self.hud_capacity_quads as usize * 6 * std::mem::size_of::<HudVertex>()) as u64;
+        let (buffer, memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, hud_size)?;
+        self.hud_vertex_buffer = buffer;
+        self.hud_vertex_buffer_memory = memory;
+        self.hud_mapped = unsafe {
+            self.device
+                .map_memory(memory, 0, hud_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射 HUD 顶点缓冲失败: {}", e))?
+        };
+        log::info!(
+            "HUD 覆盖层初始化完成（独立 pipeline，容量 {} quads）",
+            self.hud_capacity_quads
+        );
+        Ok(())
+    }
+
+    /// 上传 HUD quad 列表（屏幕像素坐标 → NDC 顶点）；render 前调用，随主 command buffer 绘制
+    pub fn set_hud_quads(&mut self, quads: &[crate::ui::Quad]) {
+        let (w, h) = (
+            self.swapchain_extent.width.max(1) as f32,
+            self.swapchain_extent.height.max(1) as f32,
+        );
+        let count = quads.len().min(self.hud_capacity_quads as usize);
+        self.hud_vertex_count = (count * 6) as u32;
+        if count == 0 || self.hud_mapped.is_null() {
+            return;
+        }
+        let mut verts: Vec<HudVertex> = Vec::with_capacity(count * 6);
+        for q in quads.iter().take(count) {
+            let x0 = q.rect.x / w * 2.0 - 1.0;
+            let y0 = 1.0 - q.rect.y / h * 2.0;
+            let x1 = (q.rect.x + q.rect.w) / w * 2.0 - 1.0;
+            let y1 = 1.0 - (q.rect.y + q.rect.h) / h * 2.0;
+            let color = [q.color.r, q.color.g, q.color.b, q.color.a];
+            for (px, py) in [
+                (x0, y0),
+                (x1, y0),
+                (x0, y1),
+                (x1, y0),
+                (x1, y1),
+                (x0, y1),
+            ] {
+                verts.push(HudVertex { pos: [px, py], color });
+            }
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                verts.as_ptr() as *const u8,
+                self.hud_mapped as *mut u8,
+                verts.len() * std::mem::size_of::<HudVertex>(),
+            );
+        }
+    }
+
+    /// 上一帧统计：near/far 可见实例数与地形 LOD 名（供 HUD / 日志）
+    pub fn last_stats(&self) -> (u32, u32, &'static str) {
+        (
+            self.last_near_count,
+            self.last_far_count,
+            self.last_terrain_lod_name,
+        )
     }
 
     fn create_shader_module(&self, spirv: &[u32]) -> Result<vk::ShaderModule, String> {
@@ -2618,6 +2845,26 @@ impl Renderer {
             }
         }
 
+        // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
+        if self.hud_vertex_count > 0 && self.hud_pipeline != vk::Pipeline::null() {
+            let hud_vertex_buffers = [self.hud_vertex_buffer];
+            let hud_offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.hud_pipeline,
+                );
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &hud_vertex_buffers,
+                    &hud_offsets,
+                );
+                self.device.cmd_draw(command_buffer, self.hud_vertex_count, 1, 0, 0);
+            }
+        }
+
         unsafe {
             self.device.cmd_end_render_pass(command_buffer);
             self.device
@@ -2697,11 +2944,14 @@ impl Renderer {
         let cull_start = Instant::now();
         let (near_count, far_count) = self.cull_and_upload(view, proj);
         let cull_us = cull_start.elapsed().as_micros() as u64;
+        self.last_near_count = near_count;
+        self.last_far_count = far_count;
 
         // ---- 地形网格 LOD：按相机到地形中心地面距离选级，过渡带内 morph 高度 ----
         let cam_pos = view.inverse().w_axis.truncate();
         let terrain_dist = (cam_pos.x * cam_pos.x + cam_pos.z * cam_pos.z).sqrt();
         let (terrain_lod, terrain_blend) = terrain_lod_blend(terrain_dist);
+        self.last_terrain_lod_name = terrain_lod.name();
         self.update_terrain_lod_morph(terrain_lod, terrain_blend);
         let terrain_lod_index = terrain_lod as usize;
 
@@ -2924,6 +3174,19 @@ impl Drop for Renderer {
             }
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            }
+            // 释放 HUD 覆盖层（独立 pipeline / 顶点缓冲）
+            if self.hud_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.hud_pipeline, None);
+            }
+            if self.hud_pipeline_layout != vk::PipelineLayout::null() {
+                self.device.destroy_pipeline_layout(self.hud_pipeline_layout, None);
+            }
+            if self.hud_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.hud_vertex_buffer, None);
+            }
+            if self.hud_vertex_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.hud_vertex_buffer_memory, None);
             }
             if self.render_pass != vk::RenderPass::null() {
                 self.device.destroy_render_pass(self.render_pass, None);

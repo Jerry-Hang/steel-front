@@ -222,10 +222,44 @@ fn compile_wgsl(source: &str) -> Vec<u32> {
     naga::back::spv::write_vec(&module, &info, &options, None).expect("SPIR-V 生成失败")
 }
 
+/// HUD 覆盖层顶点着色器：屏幕空间直通（位置已由 CPU 转为 NDC，Y 翻转完成）
+const HUD_VERTEX_SHADER_WGSL: &str = r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+) -> VertexOutput {
+    var output: VertexOutput;
+    output.position = vec4<f32>(position, 0.0, 1.0);
+    output.color = color;
+    return output;
+}
+"#;
+
+/// HUD 覆盖层片元着色器：直接输出顶点色（alpha 混合由管线状态控制）
+const HUD_FRAGMENT_SHADER_WGSL: &str = r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let vs_spirv = compile_wgsl(VERTEX_SHADER_WGSL);
     let fs_spirv = compile_wgsl(FRAGMENT_SHADER_WGSL);
+    let hud_vs_spirv = compile_wgsl(HUD_VERTEX_SHADER_WGSL);
+    let hud_fs_spirv = compile_wgsl(HUD_FRAGMENT_SHADER_WGSL);
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR 环境变量未设置");
     let dest_path = Path::new(&out_dir).join("shaders.rs");
     let mut output = String::new();
@@ -236,6 +270,12 @@ fn main() {
     output.push_str("/// 片元着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const FS_SPIRV: &[u32] = &{:?};\n", fs_spirv));
+    output.push_str("/// HUD 顶点着色器 SPIR-V 字节码\n");
+    output.push_str("#[allow(dead_code)]\n");
+    output.push_str(&format!("pub const HUD_VS_SPIRV: &[u32] = &{:?};\n\n", hud_vs_spirv));
+    output.push_str("/// HUD 片元着色器 SPIR-V 字节码\n");
+    output.push_str("#[allow(dead_code)]\n");
+    output.push_str(&format!("pub const HUD_FS_SPIRV: &[u32] = &{:?};\n", hud_fs_spirv));
     fs::write(&dest_path, &output).expect("写入着色器数据失败");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 未设置");
     let assets_dir = Path::new(&manifest_dir).join("assets");
@@ -248,5 +288,7 @@ fn main() {
     };
     write_spv(&vs_spirv, "triangle.vert.spv");
     write_spv(&fs_spirv, "triangle.frag.spv");
+    write_spv(&hud_vs_spirv, "hud.vert.spv");
+    write_spv(&hud_fs_spirv, "hud.frag.spv");
     println!("cargo:info=着色器编译完成");
 }

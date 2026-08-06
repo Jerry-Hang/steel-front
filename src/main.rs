@@ -110,6 +110,11 @@ impl GameApp {
             let mut proj = self.camera.projection_matrix(aspect);
             proj.y_axis = -proj.y_axis;
 
+            // HUD：用上一帧渲染统计生成覆盖层 quad 并上传（首帧统计为 0）
+            let (near, far, lod) = renderer.last_stats();
+            let quads = self.game.hud_quads(near, far, lod);
+            renderer.set_hud_quads(&quads);
+
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
                     log::warn!("交换链过期，尝试重建...");

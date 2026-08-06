@@ -7,12 +7,15 @@
 //! 本文件只做模块间编排与少量胶水逻辑，具体算法仍留在各模块内。
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use super::camera::Camera;
 use super::ai::{find_path, GridMap, GridPos, NpcPerception, NpcState, NpcStateMachine};
 use super::physics::{self, Body, CollisionEvent, CollisionListener, SphereBody, Vec3 as Pv};
 use super::renderer::terrain_height_at;
+use super::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
 use super::weapons::{Projectile, ProjectileWeapon, Weapon};
+use crate::ui::HudState;
 
 /// AI 网格覆盖范围：128×128 格 × 4m = ±256m（与实例场/地形同域）
 const GRID_CELL: f32 = 4.0;
@@ -102,6 +105,14 @@ pub struct Game {
     pub npcs: Vec<Npc>,
     /// 上次 AI 统计日志时间（限频）
     ai_log_time: f32,
+    /// 上次对玩家造成伤害的时间（攻击态 NPC 每秒扣血）
+    last_damage_time: f32,
+    /// HUD 状态（每帧喂 fps/血量，渲染前取 quad 列表）
+    pub hud: HudState,
+    /// fps 统计：时间窗内帧数
+    frames: u64,
+    /// fps 统计时间窗起点
+    fps_window_start: Instant,
 }
 
 impl Game {
@@ -180,6 +191,10 @@ impl Game {
             grid,
             npcs,
             ai_log_time: 0.0,
+            last_damage_time: 0.0,
+            hud: HudState::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
+            frames: 0,
+            fps_window_start: Instant::now(),
         }
     }
 
@@ -188,10 +203,45 @@ impl Game {
         self.last_dt = dt;
         self.time += dt;
         self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
+        // fps 统计（1 秒窗口）
+        self.frames += 1;
+        let window_secs = self.fps_window_start.elapsed().as_secs_f32();
+        if window_secs >= 1.0 {
+            self.hud.fps = self.frames as f32 / window_secs;
+            self.frames = 0;
+            self.fps_window_start = Instant::now();
+        }
         self.world.step(dt);
         self.drain_collisions();
         self.update_projectiles(dt);
         self.update_ai(dt, camera);
+    }
+
+    /// 构建 HUD quad 列表：血条/弹药/FPS + 调试行（LOD、实体数、NPC 状态、碰撞/命中）
+    pub fn hud_quads(&mut self, near: u32, far: u32, lod: &str) -> Vec<crate::ui::Quad> {
+        use crate::ui::{render_text, Color};
+        let mut quads = self.hud.layout();
+        let mut counts = [0u32; 4];
+        for npc in &self.npcs {
+            counts[npc.state_machine.state() as usize] += 1;
+        }
+        let line1 = format!(
+            "LOD: {}  entities: {}/65536  npc: I{} P{} C{} A{}",
+            lod,
+            near + far,
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3]
+        );
+        render_text(&line1, 10.0, 44.0, Color::YELLOW, 1.3, &mut quads);
+        let line2 = format!(
+            "collisions: {}  hits: {}",
+            self.total_collisions(),
+            self.hits()
+        );
+        render_text(&line2, 10.0, 62.0, Color::CYAN, 1.3, &mut quads);
+        quads
     }
 
     /// 尝试开火（受射速冷却限制）。`origin`/`direction` 来自相机；返回是否真的开火。
@@ -317,6 +367,17 @@ impl Game {
                 counts[3]
             );
         }
+        // 攻击态 NPC 对玩家造成伤害（1 秒一次），驱动 HUD 血条
+        if self.time - self.last_damage_time >= 1.0
+            && self
+                .npcs
+                .iter()
+                .any(|n| n.state_machine.state() == NpcState::Attack)
+            && self.hud.health > 0.0
+        {
+            self.hud.health = (self.hud.health - 5.0).max(0.0);
+            self.last_damage_time = self.time;
+        }
     }
 
     /// 累计碰撞事件数（供 UI / 日志）
@@ -397,6 +458,16 @@ mod tests {
             game.update(1.0 / 240.0, &Camera::new());
         }
         assert_eq!(game.shots, 1);
+    }
+
+    /// HUD：喂入渲染统计后能产出覆盖层 quad（血条 + 调试文本）
+    #[test]
+    fn hud_quads_produce_overlay() {
+        let mut game = Game::new();
+        game.hud.fps = 60.0;
+        let quads = game.hud_quads(100, 200, "high");
+        assert!(!quads.is_empty(), "hud should produce overlay quads");
+        assert!(quads.len() >= 3, "health bar + debug text lines expected");
     }
 
     /// AI：NPC 站在地形高度上，且相机在原点时能离开 Idle 状态
