@@ -31,6 +31,8 @@ const NPC_SIGHT: f32 = 60.0;
 const WAVE_INTERMISSION: f32 = 3.0;
 /// 击杀得分
 const KILL_SCORE: u64 = 10;
+/// 清波奖励分
+const WAVE_CLEAR_BONUS: u64 = 25;
 
 /// 网络环回演示（仅 RV3D_NET=1 启用）：同进程 Server + Client
 struct NetworkDemo {
@@ -636,9 +638,11 @@ impl Game {
         if self.npcs.is_empty() {
             if self.wave_timer <= 0.0 {
                 self.wave_timer = WAVE_INTERMISSION;
+                self.score += WAVE_CLEAR_BONUS;
                 log::info!(
-                    "wave: wave {} cleared, next in {:.0}s",
+                    "wave: wave {} cleared (+{}), next in {:.0}s",
                     self.wave,
+                    WAVE_CLEAR_BONUS,
                     WAVE_INTERMISSION
                 );
             } else {
@@ -982,6 +986,47 @@ mod tests {
         assert_eq!(game.wave, 2, "next wave should spawn after countdown");
         assert!(!game.npcs.is_empty(), "wave 2 should spawn enemies");
         assert_eq!(game.npcs.len(), (4 + 2 * 2).min(24));
+    }
+
+    /// 波次递进：下一波数量/速度/血量都高于上一波
+    #[test]
+    fn wave_scales_count_speed_hp() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let (c1, s1, h1) = (game.npcs.len(), game.npcs[0].speed, game.npcs[0].max_hp);
+        game.npcs.clear();
+        for _ in 0..320 {
+            game.update(0.01, &Camera::new());
+        }
+        assert_eq!(game.wave, 2);
+        let (c2, s2, h2) = (game.npcs.len(), game.npcs[0].speed, game.npcs[0].max_hp);
+        assert!(c2 > c1, "wave 2 should have more enemies: {} vs {}", c2, c1);
+        assert!(s2 > s1, "wave 2 should be faster: {} vs {}", s2, s1);
+        assert!(h2 > h1, "wave 2 should have more hp: {} vs {}", h2, h1);
+    }
+
+    /// 清空一波奖励分
+    #[test]
+    fn wave_clear_awards_bonus() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.clear();
+        game.update(0.01, &Camera::new());
+        assert_eq!(game.score, WAVE_CLEAR_BONUS, "clearing wave 1 awards bonus");
+    }
+
+    /// 残留 NPC 清除：刷新波前清掉旧波存活 NPC，新旧不共存
+    #[test]
+    fn spawn_wave_purges_leftovers() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let old_ids: Vec<usize> = game.npcs.iter().map(|n| n.id).collect();
+        game.spawn_wave(3, &glam::Vec3::ZERO);
+        assert_eq!(game.npcs.len(), (4 + 2 * 3).min(24), "wave 3 count");
+        assert!(
+            game.npcs.iter().all(|n| !old_ids.contains(&n.id)),
+            "all old-wave npcs must be purged before the new wave"
+        );
     }
 
     /// 投射物命中 NPC 扣血（一次命中 25 伤害）
