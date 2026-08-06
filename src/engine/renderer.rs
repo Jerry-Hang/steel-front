@@ -14,6 +14,7 @@ use ash::{
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
+use super::lighting::{LightUniform, LIGHT_UBO_BINDING};
 
 // ============================================================
 // 数据类型
@@ -31,33 +32,8 @@ struct CameraUniform {
     lod_params: [f32; 4],
 }
 
-/// 光照 Uniform（与 build.rs FRAGMENT_SHADER_WGSL 的 LightUniform 布局一致）。
-/// 默认全零 = 光照关闭：片元着色器走原「纹理+顶点颜色 50% 混合」路径，向后兼容。
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct LightUniform {
-    flags: glam::Vec4,
-    ambient: glam::Vec4,
-    directional: [glam::Vec4; 2],
-    points: [[glam::Vec4; 3]; 4],
-    shadow: [glam::Vec4; 6],
-}
-/// 光照 Uniform 的 descriptor binding（与 WGSL `@binding(4)` 一致）
-const LIGHT_UBO_BINDING: u32 = 4;
-const _: () = assert!(std::mem::size_of::<LightUniform>() == 352);
-
-impl LightUniform {
-    /// 默认禁用的光照 Uniform（全零）
-    fn disabled() -> Self {
-        Self {
-            flags: glam::Vec4::ZERO,
-            ambient: glam::Vec4::ZERO,
-            directional: [glam::Vec4::ZERO; 2],
-            points: [[glam::Vec4::ZERO; 3]; 4],
-            shadow: [glam::Vec4::ZERO; 6],
-        }
-    }
-}
+// 光照 Uniform 类型与布局由 lighting 模块统一维护（`lighting::LightUniform`，352 字节）。
+// 默认全零 = 光照关闭：片元着色器走原「纹理+顶点颜色 50% 混合」路径，向后兼容。
 
 /// 立方体顶点数据
 #[derive(Debug, Clone, Copy)]
@@ -441,6 +417,8 @@ pub struct Renderer {
     last_near_count: u32,
     last_far_count: u32,
     last_terrain_lod_name: &'static str,
+    /// 当前光照 uniform（每帧由 set_lights 更新，render 时写入帧 slot）
+    light_data: LightUniform,
 }
 
 fn load_spirv(path: &str) -> Result<Vec<u32>, String> {
@@ -741,6 +719,7 @@ impl Renderer {
             last_near_count: 0,
             last_far_count: 0,
             last_terrain_lod_name: "high",
+            light_data: LightUniform::default(),
         })
     }
 
@@ -1639,6 +1618,11 @@ impl Renderer {
             self.last_far_count,
             self.last_terrain_lod_name,
         )
+    }
+
+    /// 更新光照 uniform（每帧渲染前调用；默认全零 = 光照关闭）
+    pub fn set_lights(&mut self, lights: &LightUniform) {
+        self.light_data = *lights;
     }
 
     fn create_shader_module(&self, spirv: &[u32]) -> Result<vk::ShaderModule, String> {
@@ -2997,8 +2981,8 @@ impl Renderer {
             }
         }
 
-        // ---- 光照 Uniform：默认全零（光照关闭），合入主仓库后画面保持不变 ----
-        let light_ubo = LightUniform::disabled();
+        // ---- 光照 Uniform：写入 game 每帧更新的 light_data（默认全零 = 光照关闭）----
+        let light_ubo = self.light_data;
         if let Some(&ptr) = self.light_uniform_mapped.get(self.current_frame) {
             unsafe {
                 std::ptr::copy_nonoverlapping(

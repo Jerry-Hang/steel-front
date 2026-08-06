@@ -114,6 +114,7 @@ impl GameApp {
             let (near, far, lod) = renderer.last_stats();
             let quads = self.game.hud_quads(near, far, lod);
             renderer.set_hud_quads(&quads);
+            renderer.set_lights(&self.game.light_uniform());
 
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {

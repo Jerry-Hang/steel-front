@@ -244,6 +244,33 @@ impl Game {
         quads
     }
 
+    /// 构建默认光照场景（方向光 + 环境光 + 2 点光；阴影未绑定贴图，保持关闭）
+    pub fn light_uniform(&self) -> super::lighting::LightUniform {
+        use super::lighting::{DirectionalLight, LightUniform, PointLight};
+        let sun = DirectionalLight::new(
+            glam::Vec3::new(-0.4, 0.9, -0.3).normalize(),
+            glam::Vec3::new(1.0, 0.95, 0.85),
+            1.2,
+        );
+        let point_a = PointLight::new(
+            glam::Vec3::new(0.0, 6.0, 0.0),
+            glam::Vec3::new(0.9, 0.6, 0.4),
+            1.5,
+        );
+        let point_b = PointLight::new(
+            glam::Vec3::new(-24.0, 5.0, -16.0),
+            glam::Vec3::new(0.4, 0.7, 1.0),
+            1.0,
+        );
+        LightUniform::build(
+            Some(&sun),
+            &[point_a, point_b],
+            glam::Vec3::new(0.5, 0.55, 0.6),
+            0.35,
+            None,
+        )
+    }
+
     /// 尝试开火（受射速冷却限制）。`origin`/`direction` 来自相机；返回是否真的开火。
     pub fn fire(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
         if self.fire_cooldown > 0.0 {
@@ -468,6 +495,18 @@ mod tests {
         let quads = game.hud_quads(100, 200, "high");
         assert!(!quads.is_empty(), "hud should produce overlay quads");
         assert!(quads.len() >= 3, "health bar + debug text lines expected");
+    }
+
+    /// 光照场景：开启标志位、方向光与环境光生效
+    #[test]
+    fn light_uniform_enabled() {
+        let game = Game::new();
+        let u = game.light_uniform();
+        assert!(u.flags.x >= 1.0, "lighting should be enabled");
+        assert!(u.directional.direction.w >= 1.0, "directional enabled");
+        assert!(u.ambient.w > 0.0, "ambient intensity set");
+        assert!(u.points[0].position.w >= 1.0, "point light A enabled");
+        assert!(u.points[1].position.w >= 1.0, "point light B enabled");
     }
 
     /// AI：NPC 站在地形高度上，且相机在原点时能离开 Idle 状态
