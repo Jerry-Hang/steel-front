@@ -18,6 +18,8 @@ raw-window-handle = "0.6"
 # 日志
 log = "0.4"
 env_logger = "0.11"
+# 图片解码（PNG 等本地贴图加载）
+image = "0.25"
 
 [build-dependencies]
 # 编译 WGSL 着色器为 SPIR-V（构建时）
