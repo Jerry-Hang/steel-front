@@ -12,15 +12,15 @@ use std::time::{Duration, Instant};
 
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, ElementState, KeyEvent, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
-use engine::camera::{Camera, KeyState};
+use engine::camera::{Camera, CameraMode, KeyState};
 use engine::renderer::Renderer;
-use engine::window::{self, lock_cursor, unlock_cursor, WINDOW_HEIGHT, WINDOW_WIDTH};
+use engine::window::{self, WINDOW_HEIGHT, WINDOW_WIDTH};
 
 /// 帧率上限（present 节流）：300 FPS，避免空闲轮询无意义打满 GPU
 const MAX_FPS: u64 = 300;
@@ -37,6 +37,12 @@ struct GameApp {
     camera: Camera,
     /// 键盘按键状态
     key_state: KeyState,
+    /// 鼠标左键是否按住（拖拽轨道旋转）
+    dragging: bool,
+    /// 鼠标右键是否按住（飞行模式拖拽转视角）
+    right_dragging: bool,
+    /// 上一帧光标位置（屏幕坐标）
+    last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
     last_frame: Instant,
     /// 程序是否正在运行
@@ -51,6 +57,9 @@ impl GameApp {
             renderer: None,
             camera: Camera::new(),
             key_state: KeyState::new(),
+            dragging: false,
+            right_dragging: false,
+            last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             running: true,
         }
@@ -66,17 +75,20 @@ impl GameApp {
         // 确保 delta_time 不会太大（防止卡顿时大跳）
         let delta_time = delta_time.min(0.1);
 
-        // 更新相机位置（处理 WASD 输入）
-        self.camera.process_keyboard(&self.key_state, delta_time);
+        // 更新相机（双模式：轨道/飞行，含惯性速度与边界 clamp）
+        self.camera.update(&self.key_state, delta_time);
     }
 
     /// 渲染一帧
     fn render(&mut self) {
         if let Some(renderer) = &mut self.renderer {
-            let aspect = 1280.0_f32 / 720.0_f32;
-            let view_proj = self.camera.view_proj_for_vulkan(aspect);
+            let aspect = WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32;
+            let view = self.camera.view_matrix();
+            // Vulkan NDC 的 Y 轴向下，投影矩阵需翻转 Y
+            let mut proj = self.camera.projection_matrix(aspect);
+            proj.y_axis = -proj.y_axis;
 
-            if let Err(e) = renderer.render(view_proj) {
+            if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
                     log::warn!("交换链过期，尝试重建...");
                     let _ = renderer.recreate_swapchain();
@@ -109,8 +121,6 @@ impl ApplicationHandler for GameApp {
             }
         };
 
-        // 锁定鼠标为 FPS 模式
-        lock_cursor(&window);
         log::info!("窗口创建成功: {}x{}", WINDOW_WIDTH, WINDOW_HEIGHT);
 
         // ---- 初始化 Vulkan 渲染器 ----
@@ -165,29 +175,81 @@ impl ApplicationHandler for GameApp {
                             event_loop.exit();
                         }
                     }
-                    // WASD 移动键
+                    // Tab 切换相机模式（轨道 ↔ 飞行）
+                    KeyCode::Tab => {
+                        if pressed {
+                            let mode = self.camera.toggle_mode();
+                            log::info!("相机模式切换: {:?}", mode);
+                        }
+                    }
+                    // WASD 平移目标点 / QE 升降
                     KeyCode::KeyW => self.key_state.forward = pressed,
                     KeyCode::KeyS => self.key_state.backward = pressed,
                     KeyCode::KeyA => self.key_state.left = pressed,
                     KeyCode::KeyD => self.key_state.right = pressed,
+                    KeyCode::KeyQ => self.key_state.down = pressed,
+                    KeyCode::KeyE => self.key_state.up = pressed,
                     _ => {}
                 }
             }
 
-            // 窗口获得焦点时重新锁定鼠标
-            WindowEvent::Focused(true) => {
-                if let Some(window) = &self.window {
-                    lock_cursor(window);
+            // 窗口失去焦点时重置按键状态，防止"卡键"
+            WindowEvent::Focused(false) => {
+                self.key_state.reset();
+                self.dragging = false;
+                self.right_dragging = false;
+                self.camera.set_rotation_active(false);
+            }
+
+            // 鼠标按键：左键 = 轨道拖拽；右键 = 飞行视角拖拽
+            WindowEvent::MouseInput {
+                state, button, ..
+            } => {
+                let pressed = state == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => {
+                        self.dragging = pressed;
+                    }
+                    MouseButton::Right => {
+                        self.right_dragging = pressed;
+                        self.camera.set_rotation_active(pressed);
+                    }
+                    _ => {}
                 }
             }
 
-            // 窗口失去焦点时解锁鼠标
-            WindowEvent::Focused(false) => {
-                if let Some(window) = &self.window {
-                    unlock_cursor(window);
-                    // 失去焦点时重置按键状态，防止"卡键"
-                    self.key_state.reset();
+            // 拖拽中移动鼠标：左键 = 轨道旋转（位控）；右键 = 飞行视角旋转（惯性速度）
+            WindowEvent::CursorMoved { position, .. } => {
+                let (dx, dy) = (
+                    position.x - self.last_cursor.0,
+                    position.y - self.last_cursor.1,
+                );
+                if self.dragging && self.camera.mode == CameraMode::Orbit {
+                    self.camera.orbit(dx as f32, dy as f32);
                 }
+                if self.right_dragging && self.camera.mode == CameraMode::Flight {
+                    self.camera.add_rotation_input(dx as f32, dy as f32);
+                }
+                self.last_cursor = (position.x, position.y);
+            }
+
+            // 滚轮：轨道 = 推拉距离；飞行 = 沿视线前进/后退
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as f32,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.05,
+                };
+                match self.camera.mode {
+                    CameraMode::Orbit => self.camera.zoom(scroll),
+                    CameraMode::Flight => self.camera.flight_wheel(scroll),
+                }
+            }
+
+            // 光标移出窗口：停止拖拽，防止视角卡住
+            WindowEvent::CursorLeft { .. } => {
+                self.dragging = false;
+                self.right_dragging = false;
+                self.camera.set_rotation_active(false);
             }
 
             // 窗口大小变化时重建交换链
@@ -201,35 +263,7 @@ impl ApplicationHandler for GameApp {
                 }
             }
 
-            // 鼠标移入窗口
-            WindowEvent::CursorEntered { .. } => {
-                if let Some(window) = &self.window {
-                    lock_cursor(window);
-                }
-            }
-
-            // 鼠标移出窗口
-            WindowEvent::CursorLeft { .. } => {
-                if let Some(window) = &self.window {
-                    unlock_cursor(window);
-                }
-            }
-
             _ => {}
-        }
-    }
-
-    /// 处理设备事件（鼠标相对运动等）
-    fn device_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: winit::event::DeviceId,
-        event: DeviceEvent,
-    ) {
-        // 当鼠标处于 Locked 模式时，MouseMotion 提供原始相对位移
-        if let DeviceEvent::MouseMotion { delta } = event {
-            // 更新相机视角
-            self.camera.process_mouse(delta.0 as f32, delta.1 as f32);
         }
     }
 
