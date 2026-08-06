@@ -31,6 +31,34 @@ struct CameraUniform {
     lod_params: [f32; 4],
 }
 
+/// 光照 Uniform（与 build.rs FRAGMENT_SHADER_WGSL 的 LightUniform 布局一致）。
+/// 默认全零 = 光照关闭：片元着色器走原「纹理+顶点颜色 50% 混合」路径，向后兼容。
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LightUniform {
+    flags: glam::Vec4,
+    ambient: glam::Vec4,
+    directional: [glam::Vec4; 2],
+    points: [[glam::Vec4; 3]; 4],
+    shadow: [glam::Vec4; 6],
+}
+/// 光照 Uniform 的 descriptor binding（与 WGSL `@binding(4)` 一致）
+const LIGHT_UBO_BINDING: u32 = 4;
+const _: () = assert!(std::mem::size_of::<LightUniform>() == 352);
+
+impl LightUniform {
+    /// 默认禁用的光照 Uniform（全零）
+    fn disabled() -> Self {
+        Self {
+            flags: glam::Vec4::ZERO,
+            ambient: glam::Vec4::ZERO,
+            directional: [glam::Vec4::ZERO; 2],
+            points: [[glam::Vec4::ZERO; 3]; 4],
+            shadow: [glam::Vec4::ZERO; 6],
+        }
+    }
+}
+
 /// 立方体顶点数据
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -380,6 +408,10 @@ pub struct Renderer {
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffers_memory: Vec<vk::DeviceMemory>,
     uniform_mapped: Vec<*mut std::ffi::c_void>,
+    /// 光照 Uniform（每帧一份，默认全零 = 光照关闭）
+    light_uniform_buffers: Vec<vk::Buffer>,
+    light_uniform_buffers_memory: Vec<vk::DeviceMemory>,
+    light_uniform_mapped: Vec<*mut std::ffi::c_void>,
     texture_image: vk::Image,
     texture_image_memory: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
@@ -666,6 +698,9 @@ impl Renderer {
             uniform_buffers: Vec::new(),
             uniform_buffers_memory: Vec::new(),
             uniform_mapped: Vec::new(),
+            light_uniform_buffers: Vec::new(),
+            light_uniform_buffers_memory: Vec::new(),
+            light_uniform_mapped: Vec::new(),
             texture_image: vk::Image::null(),
             texture_image_memory: vk::DeviceMemory::null(),
             texture_image_view: vk::ImageView::null(),
@@ -933,6 +968,69 @@ impl Renderer {
     // ============================================================
     // 新增：初始化 Descriptor（Uniform Buffer + 布局 + 池 + 分配）
     // ============================================================
+    /// 创建并持久映射一个 HOST_VISIBLE | HOST_COHERENT 的 Uniform Buffer
+    fn create_uniform_buffer(
+        &self,
+        size: u64,
+    ) -> Result<(vk::Buffer, vk::DeviceMemory, *mut std::ffi::c_void), String> {
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let buffer = unsafe {
+            self.device
+                .create_buffer(&buffer_info, None)
+                .map_err(|e| format!("创建 Uniform Buffer 失败: {}", e))?
+        };
+
+        let mem_requirements = unsafe {
+            self.device.get_buffer_memory_requirements(buffer)
+        };
+
+        let mem_properties = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+
+        let memory_type = mem_properties
+            .memory_types
+            .iter()
+            .enumerate()
+            .find(|(i, mem_type)| {
+                let type_mask = 1 << i;
+                (mem_requirements.memory_type_bits & type_mask) != 0
+                    && mem_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+                    && mem_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+            })
+            .map(|(i, _)| i as u32)
+            .ok_or_else(|| "没有找到合适的内存类型（Uniform Buffer）".to_string())?;
+
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_requirements.size)
+            .memory_type_index(memory_type);
+
+        let buffer_memory = unsafe {
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| format!("分配 Uniform Buffer 内存失败: {}", e))?
+        };
+
+        unsafe {
+            self.device
+                .bind_buffer_memory(buffer, buffer_memory, 0)
+                .map_err(|e| format!("绑定 Uniform Buffer 内存失败: {}", e))?;
+        }
+
+        let mapped = unsafe {
+            self.device
+                .map_memory(buffer_memory, 0, size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射 Uniform Buffer 内存失败: {}", e))?
+        };
+
+        Ok((buffer, buffer_memory, mapped))
+    }
+
     fn init_descriptors(&mut self) -> Result<(), String> {
         let max_frames = self.max_frames_in_flight;
 
@@ -960,11 +1058,18 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        // 光照 Uniform（binding=4，Fragment 阶段读取；默认全零 = 关闭）
+        let light_ubo_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(LIGHT_UBO_BINDING)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let bindings = [
             ubo_layout_binding,
             sampled_image_binding,
             storage_binding,
             sampler_binding,
+            light_ubo_binding,
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -1046,11 +1151,20 @@ impl Renderer {
             self.uniform_mapped.push(mapped);
         }
 
+        // ---- 2b. 创建光照 Uniform Buffer（每帧一份，默认全零 = 光照关闭）----
+        let light_ubo_size = std::mem::size_of::<LightUniform>() as u64;
+        for _ in 0..max_frames {
+            let (buffer, buffer_memory, mapped) = self.create_uniform_buffer(light_ubo_size)?;
+            self.light_uniform_buffers.push(buffer);
+            self.light_uniform_buffers_memory.push(buffer_memory);
+            self.light_uniform_mapped.push(mapped);
+        }
+
         // ---- 3. 创建 Descriptor Pool ----
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(max_frames as u32),
+                .descriptor_count((max_frames * 2) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
                 .descriptor_count(max_frames as u32),
@@ -1122,6 +1236,23 @@ impl Renderer {
             let instance_writes = [instance_write];
             unsafe {
                 self.device.update_descriptor_sets(&instance_writes, &[]);
+            }
+
+            // 光照 Uniform（默认全零 = 关闭）
+            let light_info = vk::DescriptorBufferInfo::default()
+                .buffer(self.light_uniform_buffers[i])
+                .offset(0)
+                .range(light_ubo_size);
+            let light_infos = [light_info];
+            let light_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(LIGHT_UBO_BINDING)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&light_infos);
+            let light_writes = [light_write];
+            unsafe {
+                self.device.update_descriptor_sets(&light_writes, &[]);
             }
         }
 
@@ -2611,6 +2742,18 @@ impl Renderer {
             }
         }
 
+        // ---- 光照 Uniform：默认全零（光照关闭），合入主仓库后画面保持不变 ----
+        let light_ubo = LightUniform::disabled();
+        if let Some(&ptr) = self.light_uniform_mapped.get(self.current_frame) {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &light_ubo as *const _ as *const u8,
+                    ptr as *mut u8,
+                    std::mem::size_of::<LightUniform>(),
+                );
+            }
+        }
+
         // 每帧重录 command buffer（instance_count 随剔除结果变化）
         self.record_command_buffer(
             self.command_buffers[image_index as usize],
@@ -2799,6 +2942,18 @@ impl Drop for Renderer {
                     self.device.destroy_buffer(buffer, None);
                 }
                 if let Some(&mem) = self.uniform_buffers_memory.get(i) {
+                    if mem != vk::DeviceMemory::null() {
+                        self.device.free_memory(mem, None);
+                    }
+                }
+            }
+
+            // 释放光照 Uniform Buffer
+            for (i, &buffer) in self.light_uniform_buffers.iter().enumerate() {
+                if buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(buffer, None);
+                }
+                if let Some(&mem) = self.light_uniform_buffers_memory.get(i) {
                     if mem != vk::DeviceMemory::null() {
                         self.device.free_memory(mem, None);
                     }
