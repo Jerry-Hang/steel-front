@@ -25,7 +25,9 @@ use winit::window::Window;
 struct CameraUniform {
     view: glam::Mat4,
     proj: glam::Mat4,
-    /// (lod_dist, fade_start, fade_end, 0)
+    /// (terrain_lod_high_end, fade_start, fade_end, terrain_lod_med_end)
+    /// x/w：地形网格 LOD 切换距离（shader 不读这两个分量，仅 CPU 侧语义扩展）
+    /// y/z：实例远档十字 quad 地面淡出区间（shader 读取，语义保持不变）
     lod_params: [f32; 4],
 }
 
@@ -109,12 +111,120 @@ const FADE_START: f32 = 400.0;
 const FADE_END: f32 = 900.0;
 
 // ============================================================
-// 地形常量（257×257 顶点，世界 512×512，与实例场同域）
+// 地形常量（世界 512×512，与实例场同域）
 // ============================================================
 const TERRAIN_VERTS: usize = 257;
 const TERRAIN_CELLS: usize = 256;
 const TERRAIN_HALF: f32 = 255.0;
 const TERRAIN_UV_SCALE: f32 = 32.0; // uv 铺 0..16 重复采样
+
+// ---- 地形网格 LOD（3 级密度：高 257² / 中 129² / 低 65² 顶点）----
+/// 各级每边格数（256 / 128 / 64），顶点数 = 格数 + 1，格间距 = 512 / 格数。
+/// 粗网格顶点恰为细网格顶点子集（间距 2.0 / 4.0 / 8.0，起点同为 -255）。
+const TERRAIN_LOD_CELLS: [usize; 3] = [TERRAIN_CELLS, TERRAIN_CELLS / 2, TERRAIN_CELLS / 4];
+const _: () = assert!(TERRAIN_LOD_CELLS[0] + 1 == TERRAIN_VERTS);
+
+/// 相机到地形中心地面距离的 LOD 阈值：
+/// dist < TERRAIN_LOD_HIGH_END → 高级（高密度）；dist < TERRAIN_LOD_MED_END → 中级；其余低级。
+const TERRAIN_LOD_HIGH_END: f32 = 110.0;
+const TERRAIN_LOD_MED_END: f32 = 260.0;
+/// 各级进入高度 morph 过渡带的距离起点（起点→END 之间做 smoothstep 渐变）。
+const TERRAIN_LOD_HIGH_MORPH_START: f32 = 70.0;
+const TERRAIN_LOD_MED_MORPH_START: f32 = 200.0;
+
+/// 地形网格 LOD 级别（索引 0/1/2 = 高级/中级/低级，对应 TERRAIN_LOD_CELLS）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerrainLod {
+    High = 0,
+    Medium = 1,
+    Low = 2,
+}
+
+impl TerrainLod {
+    fn from_idx(idx: usize) -> TerrainLod {
+        match idx {
+            0 => TerrainLod::High,
+            1 => TerrainLod::Medium,
+            _ => TerrainLod::Low,
+        }
+    }
+    fn cells(self) -> usize {
+        TERRAIN_LOD_CELLS[self as usize]
+    }
+    fn verts(self) -> usize {
+        TERRAIN_LOD_CELLS[self as usize] + 1
+    }
+    fn cell_size(self) -> f32 {
+        512.0 / TERRAIN_LOD_CELLS[self as usize] as f32
+    }
+    fn index_count(self) -> u32 {
+        (self.cells() * self.cells() * 6) as u32
+    }
+    fn name(self) -> &'static str {
+        match self {
+            TerrainLod::High => "high",
+            TerrainLod::Medium => "medium",
+            TerrainLod::Low => "low",
+        }
+    }
+}
+
+/// 纯函数：相机到地形中心地面距离 → 基础 LOD 级别
+/// （非测试构建下仅被 #[cfg(test)] 单元测试调用）
+#[allow(dead_code)]
+fn terrain_lod_for_distance(dist: f32) -> TerrainLod {
+    if dist < TERRAIN_LOD_HIGH_END {
+        TerrainLod::High
+    } else if dist < TERRAIN_LOD_MED_END {
+        TerrainLod::Medium
+    } else {
+        TerrainLod::Low
+    }
+}
+
+/// 纯函数：距离 → (要绘制的网格级别, morph 进度 t∈[0,1])。
+/// t 为该级网格顶点高度向下一级（更粗）曲面三角形插值的进度：
+/// t=0 完全细曲面，t=1 完全等于下一级曲面（几何重合，切换无 popping）。
+fn terrain_lod_blend(dist: f32) -> (TerrainLod, f32) {
+    if dist < TERRAIN_LOD_HIGH_END {
+        let t = ((dist - TERRAIN_LOD_HIGH_MORPH_START)
+            / (TERRAIN_LOD_HIGH_END - TERRAIN_LOD_HIGH_MORPH_START))
+        .clamp(0.0, 1.0);
+        (TerrainLod::High, smooth_t(t))
+    } else if dist < TERRAIN_LOD_MED_END {
+        let t = ((dist - TERRAIN_LOD_MED_MORPH_START)
+            / (TERRAIN_LOD_MED_END - TERRAIN_LOD_MED_MORPH_START))
+        .clamp(0.0, 1.0);
+        (TerrainLod::Medium, smooth_t(t))
+    } else {
+        (TerrainLod::Low, 1.0)
+    }
+}
+
+/// 某顶点 (x,z) 在下一级（更粗）网格曲面上的高度：
+/// 先定位所在粗网格 cell，再用与地形索引一致的三角形剖分做重心插值。
+/// 粗网格点与细网格点重合处返回值与该点粗网格高度完全一致。
+fn terrain_coarse_height(x: f32, z: f32, coarse: &[f32], coarse_cells: usize) -> f32 {
+    let cell = 512.0 / coarse_cells as f32;
+    let uf = (x + TERRAIN_HALF) / cell;
+    let vf = (z + TERRAIN_HALF) / cell;
+    let cw = coarse_cells + 1;
+    let cx = (uf.floor().max(0.0) as usize).min(coarse_cells - 1);
+    let cz = (vf.floor().max(0.0) as usize).min(coarse_cells - 1);
+    let u = uf - cx as f32;
+    let v = vf - cz as f32;
+    let h00 = coarse[cz * cw + cx];
+    let h10 = coarse[cz * cw + cx + 1];
+    let h01 = coarse[(cz + 1) * cw + cx];
+    let h11 = coarse[(cz + 1) * cw + cx + 1];
+    if u >= v {
+        // 三角形 (v0,v1,v2)：右下三角
+        (1.0 - u) * h00 + (u - v) * h10 + v * h11
+    } else {
+        // 三角形 (v0,v3,v2)：左上三角
+        (1.0 - v) * h00 + (v - u) * h01 + u * h11
+    }
+}
 
 /// 实例网格（256×256 = 65536）
 const GRID_SIZE: u32 = 256;
@@ -128,6 +238,23 @@ struct InstanceData {
     tint: [f32; 4],
 }
 const _: () = assert!(std::mem::size_of::<InstanceData>() == 80);
+
+/// 单个地形 LOD 网格：静态几何（顶点/索引）+ CPU 侧顶点（供高度 morph 逐帧更新）
+struct TerrainLodMesh {
+    vertex_buffer: vk::Buffer,
+    vertex_memory: vk::DeviceMemory,
+    /// 持久映射的顶点内存指针（每帧 morph 后整块重传）
+    vertex_mapped: *mut std::ffi::c_void,
+    index_buffer: vk::Buffer,
+    index_memory: vk::DeviceMemory,
+    index_count: u32,
+    /// CPU 侧顶点（pos.y 每帧按 morph 更新后整块上传）
+    verts: Vec<Vertex>,
+    /// 顶点原始细高度（terrain_height，永不改变）
+    base_heights: Vec<f32>,
+    /// 顶点向下一级曲面插值的高度目标（Low 级为空 Vec）
+    coarse_heights: Vec<f32>,
+}
 
 // ============================================================
 // 地形 value noise（CPU 唯一实现：地形顶点与实例 Y 共用同一函数）
@@ -226,11 +353,8 @@ pub struct Renderer {
     far_vertex_buffer_memory: vk::DeviceMemory,
     far_index_buffer: vk::Buffer,
     far_index_buffer_memory: vk::DeviceMemory,
-    /// 地形 heightmap 网格（257×257 顶点，静态一次性上传）
-    terrain_vertex_buffer: vk::Buffer,
-    terrain_vertex_buffer_memory: vk::DeviceMemory,
-    terrain_index_buffer: vk::Buffer,
-    terrain_index_buffer_memory: vk::DeviceMemory,
+    /// 地形 LOD 网格（索引 0/1/2 = 高/中/低密度；顶点缓冲 HOST_VISIBLE 供 morph 每帧更新）
+    terrain_lods: Vec<TerrainLodMesh>,
     /// 每帧一份 instance buffer（双缓冲，避免 CPU 写与上一帧 GPU 读竞态）
     instance_buffers: Vec<vk::Buffer>,
     instance_buffers_memory: Vec<vk::DeviceMemory>,
@@ -523,10 +647,7 @@ impl Renderer {
             far_vertex_buffer_memory: vk::DeviceMemory::null(),
             far_index_buffer: vk::Buffer::null(),
             far_index_buffer_memory: vk::DeviceMemory::null(),
-            terrain_vertex_buffer: vk::Buffer::null(),
-            terrain_vertex_buffer_memory: vk::DeviceMemory::null(),
-            terrain_index_buffer: vk::Buffer::null(),
-            terrain_index_buffer_memory: vk::DeviceMemory::null(),
+            terrain_lods: Vec::new(),
             instance_buffers: Vec::new(),
             instance_buffers_memory: Vec::new(),
             instance_mapped: Vec::new(),
@@ -1152,7 +1273,7 @@ impl Renderer {
         self.create_vertex_buffer()?;
         self.create_index_buffer()?;
         self.create_far_geometry()?;
-        self.create_terrain()?;
+        self.create_terrain_lods()?;
         log::info!("图形管线创建完成");
         Ok(())
     }
@@ -1422,72 +1543,182 @@ impl Renderer {
         Ok(())
     }
 
-    /// 创建地形 heightmap 网格（257×257 顶点，世界 512×512，间距 2.0）。
-    /// 高度用与实例 Y 完全相同的 terrain_height() 生成，一次性静态上传。
-    fn create_terrain(&mut self) -> Result<(), String> {
-        let mut verts: Vec<Vertex> = Vec::with_capacity(TERRAIN_VERTS * TERRAIN_VERTS);
-        for iz in 0..TERRAIN_VERTS {
-            for ix in 0..TERRAIN_VERTS {
-                let x = -TERRAIN_HALF + ix as f32 * 2.0;
-                let z = -TERRAIN_HALF + iz as f32 * 2.0;
-                let y = terrain_height(x, z);
-                verts.push(Vertex {
-                    pos: [x, y, z],
-                    color: [1.0, 1.0, 1.0],
-                    uv: [(x + TERRAIN_HALF) / TERRAIN_UV_SCALE, (z + TERRAIN_HALF) / TERRAIN_UV_SCALE],
-                });
+    /// 创建 3 级地形 LOD 网格（高 257² / 中 129² / 低 65² 顶点）。
+    /// 高度用与实例 Y 完全相同的 terrain_height() 生成；顶点缓冲 HOST_VISIBLE，
+    /// 过渡带内每帧 morph 高度后整块重传；索引缓冲一次性上传。
+    fn create_terrain_lods(&mut self) -> Result<(), String> {
+        // 1. 各级网格原始高度（粗网格顶点恰为细网格顶点子集）
+        let grid_heights: Vec<Vec<f32>> = TERRAIN_LOD_CELLS
+            .iter()
+            .map(|&cells| {
+                let w = cells + 1;
+                let cell = 512.0 / cells as f32;
+                let mut hs = Vec::with_capacity(w * w);
+                for iz in 0..w {
+                    let z = -TERRAIN_HALF + iz as f32 * cell;
+                    for ix in 0..w {
+                        let x = -TERRAIN_HALF + ix as f32 * cell;
+                        hs.push(terrain_height(x, z));
+                    }
+                }
+                hs
+            })
+            .collect();
+
+        for idx in 0..TERRAIN_LOD_CELLS.len() {
+            let level = TerrainLod::from_idx(idx);
+            let cells = level.cells();
+            let w = level.verts();
+            let cell = level.cell_size();
+            let heights = &grid_heights[idx];
+
+            // 顶点（UV 用世界坐标，保证各级贴图对齐；颜色白）
+            let mut verts: Vec<Vertex> = Vec::with_capacity(w * w);
+            let mut base_heights: Vec<f32> = Vec::with_capacity(w * w);
+            for iz in 0..w {
+                for ix in 0..w {
+                    let x = -TERRAIN_HALF + ix as f32 * cell;
+                    let z = -TERRAIN_HALF + iz as f32 * cell;
+                    let y = heights[iz * w + ix];
+                    base_heights.push(y);
+                    verts.push(Vertex {
+                        pos: [x, y, z],
+                        color: [1.0, 1.0, 1.0],
+                        uv: [
+                            (x + TERRAIN_HALF) / TERRAIN_UV_SCALE,
+                            (z + TERRAIN_HALF) / TERRAIN_UV_SCALE,
+                        ],
+                    });
+                }
             }
-        }
 
-        let mut idx: Vec<u32> = Vec::with_capacity(TERRAIN_CELLS * TERRAIN_CELLS * 6);
-        for iz in 0..TERRAIN_CELLS {
-            for ix in 0..TERRAIN_CELLS {
-                let v0 = (iz * TERRAIN_VERTS + ix) as u32;
-                let v1 = v0 + 1;
-                let v2 = v0 + TERRAIN_VERTS as u32 + 1;
-                let v3 = v0 + TERRAIN_VERTS as u32;
-                idx.push(v0);
-                idx.push(v2);
-                idx.push(v1);
-                idx.push(v0);
-                idx.push(v3);
-                idx.push(v2);
+            // morph 目标高度：下一级（更粗）曲面三角形插值；Low 级无下一级
+            let coarse_heights: Vec<f32> = if idx + 1 < TERRAIN_LOD_CELLS.len() {
+                let coarse = &grid_heights[idx + 1];
+                let coarse_cells = TERRAIN_LOD_CELLS[idx + 1];
+                (0..w)
+                    .flat_map(|iz| {
+                        (0..w).map(move |ix| {
+                            let x = -TERRAIN_HALF + ix as f32 * cell;
+                            let z = -TERRAIN_HALF + iz as f32 * cell;
+                            terrain_coarse_height(x, z, coarse, coarse_cells)
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // 索引（与原有地形相同的三角形剖分：cell 对角 v0→v2）
+            let mut idx_buf: Vec<u32> = Vec::with_capacity(cells * cells * 6);
+            for iz in 0..cells {
+                for ix in 0..cells {
+                    let v0 = (iz * w + ix) as u32;
+                    let v1 = v0 + 1;
+                    let v2 = v0 + w as u32 + 1;
+                    let v3 = v0 + w as u32;
+                    idx_buf.push(v0);
+                    idx_buf.push(v2);
+                    idx_buf.push(v1);
+                    idx_buf.push(v0);
+                    idx_buf.push(v3);
+                    idx_buf.push(v2);
+                }
             }
+
+            // 顶点缓冲：HOST_VISIBLE 并持久映射（每帧 morph 后整块重传）
+            let vert_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    verts.as_ptr() as *const u8,
+                    verts.len() * std::mem::size_of::<Vertex>(),
+                )
+            };
+            let (v_buffer, v_memory) = self.create_host_buffer(
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                vert_bytes.len() as u64,
+            )?;
+            let v_ptr = unsafe {
+                self.device
+                    .map_memory(
+                        v_memory,
+                        0,
+                        vert_bytes.len() as u64,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .map_err(|e| format!("映射地形 LOD[{}] 顶点内存失败: {}", idx, e))?
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(vert_bytes.as_ptr(), v_ptr as *mut u8, vert_bytes.len());
+            }
+
+            // 索引缓冲：静态数据，DEVICE_LOCAL 一次性上传（staging 拷贝）
+            let idx_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    idx_buf.as_ptr() as *const u8,
+                    idx_buf.len() * std::mem::size_of::<u32>(),
+                )
+            };
+            let (i_buffer, i_memory) = self.create_device_local_buffer(
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                idx_bytes,
+                "地形索引",
+            )?;
+
+            self.terrain_lods.push(TerrainLodMesh {
+                vertex_buffer: v_buffer,
+                vertex_memory: v_memory,
+                vertex_mapped: v_ptr,
+                index_buffer: i_buffer,
+                index_memory: i_memory,
+                index_count: level.index_count(),
+                verts,
+                base_heights,
+                coarse_heights,
+            });
+
+            log::info!(
+                "地形 LOD[{}] 创建完成: {} 顶点 / {} 索引（{}×{} 网格，间距 {}）",
+                idx,
+                w * w,
+                cells * cells * 6,
+                w,
+                w,
+                cell
+            );
         }
-
-        let vert_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                verts.as_ptr() as *const u8,
-                verts.len() * std::mem::size_of::<Vertex>(),
-            )
-        };
-        let (v_buffer, v_memory) = self.create_device_local_buffer(
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            vert_bytes,
-            "地形顶点",
-        )?;
-        self.terrain_vertex_buffer = v_buffer;
-        self.terrain_vertex_buffer_memory = v_memory;
-
-        let idx_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * std::mem::size_of::<u32>())
-        };
-        let (i_buffer, i_memory) = self.create_device_local_buffer(
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            idx_bytes,
-            "地形索引",
-        )?;
-        self.terrain_index_buffer = i_buffer;
-        self.terrain_index_buffer_memory = i_memory;
-
-        log::info!(
-            "地形创建完成: {} 顶点 / {} 索引（{}×{} 网格，512×512，振幅 ≤2.0，中心 60×60 压平）",
-            verts.len(),
-            idx.len(),
-            TERRAIN_VERTS,
-            TERRAIN_VERTS
-        );
+        log::info!("地形 3 级 LOD 全部创建完成（高/中/低）");
         Ok(())
+    }
+
+    /// 每帧按 morph 进度 t 更新当前 LOD 网格顶点高度：
+    /// h = 细高度 + t × (下一级曲面插值高度 − 细高度)。t=1 时几何与下一级完全重合，
+    /// 因此切换级别无 popping。仅在过渡带内（0<t<1）执行，整块重传顶点缓冲。
+    fn update_terrain_lod_morph(&mut self, level: TerrainLod, blend: f32) {
+        if blend <= 0.0 || blend >= 1.0 {
+            return;
+        }
+        let idx = level as usize;
+        let mesh = match self.terrain_lods.get_mut(idx) {
+            Some(m) => m,
+            None => return,
+        };
+        if mesh.coarse_heights.is_empty() {
+            return;
+        }
+        let base = &mesh.base_heights;
+        let coarse = &mesh.coarse_heights;
+        let n = mesh.verts.len();
+        for i in 0..n {
+            mesh.verts[i].pos[1] = base[i] + (coarse[i] - base[i]) * blend;
+        }
+        let bytes = n * std::mem::size_of::<Vertex>();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                mesh.verts.as_ptr() as *const u8,
+                mesh.vertex_mapped as *mut u8,
+                bytes,
+            );
+        }
     }
 
     /// 生成 256×256 网格实例；按 frame-in-flight 数量双缓冲
@@ -2090,7 +2321,7 @@ impl Renderer {
         };
 
         for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0)?;
+            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
         }
         Ok(())
     }
@@ -2101,6 +2332,7 @@ impl Renderer {
         image_index: usize,
         near_count: u32,
         far_count: u32,
+        terrain_lod: usize,
     ) -> Result<(), String> {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::empty());
@@ -2165,9 +2397,10 @@ impl Renderer {
             );
         }
 
-        // 地形 draw call（非实例，instance_index = 65536 读保留 identity 实例）
-        {
-            let terrain_vertex_buffers = [self.terrain_vertex_buffer];
+        // 地形 draw call（非实例，instance_index = 65536 读保留 identity 实例；
+        // 每帧按 LOD 选择绘制 3 级网格之一，mesh.index_count 随密度变化）
+        if let Some(mesh) = self.terrain_lods.get(terrain_lod) {
+            let terrain_vertex_buffers = [mesh.vertex_buffer];
             let offsets = [0u64];
             unsafe {
                 self.device.cmd_bind_vertex_buffers(
@@ -2178,13 +2411,13 @@ impl Renderer {
                 );
                 self.device.cmd_bind_index_buffer(
                     command_buffer,
-                    self.terrain_index_buffer,
+                    mesh.index_buffer,
                     0,
                     vk::IndexType::UINT32,
                 );
                 self.device.cmd_draw_indexed(
                     command_buffer,
-                    (TERRAIN_CELLS * TERRAIN_CELLS * 6) as u32,
+                    mesh.index_count,
                     1,
                     0,
                     0,
@@ -2329,6 +2562,13 @@ impl Renderer {
         let (near_count, far_count) = self.cull_and_upload(view, proj);
         let cull_us = cull_start.elapsed().as_micros() as u64;
 
+        // ---- 地形网格 LOD：按相机到地形中心地面距离选级，过渡带内 morph 高度 ----
+        let cam_pos = view.inverse().w_axis.truncate();
+        let terrain_dist = (cam_pos.x * cam_pos.x + cam_pos.z * cam_pos.z).sqrt();
+        let (terrain_lod, terrain_blend) = terrain_lod_blend(terrain_dist);
+        self.update_terrain_lod_morph(terrain_lod, terrain_blend);
+        let terrain_lod_index = terrain_lod as usize;
+
         // ---- 性能日志（1 次/秒）：visible / cull_us / fps ----
         self.frame_count += 1;
         if self.last_perf_log.elapsed().as_secs_f32() >= 1.0 {
@@ -2339,13 +2579,15 @@ impl Renderer {
                 0.0
             };
             log::info!(
-                "visible={}/{} near={} far={} cull_us={} fps={:.1}",
+                "visible={}/{} near={} far={} cull_us={} fps={:.1} terrain_lod={} blend={:.3}",
                 near_count + far_count,
                 INSTANCE_COUNT,
                 near_count,
                 far_count,
                 cull_us,
-                fps
+                fps,
+                terrain_lod.name(),
+                terrain_blend
             );
             self.frame_count = 0;
             self.perf_window_start = Instant::now();
@@ -2356,7 +2598,8 @@ impl Renderer {
         let ubo = CameraUniform {
             view,
             proj,
-            lod_params: [LOD_DISTANCE, FADE_START, FADE_END, 0.0],
+            // x/w = 地形 LOD 切换距离（shader 未读取，仅 CPU 侧语义），y/z = 实例淡出区间
+            lod_params: [TERRAIN_LOD_HIGH_END, FADE_START, FADE_END, TERRAIN_LOD_MED_END],
         };
         if let Some(&ptr) = self.uniform_mapped.get(self.current_frame) {
             unsafe {
@@ -2374,6 +2617,7 @@ impl Renderer {
             image_index as usize,
             near_count,
             far_count,
+            terrain_lod_index,
         )?;
 
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
@@ -2457,7 +2701,7 @@ impl Renderer {
                 .map_err(|e| format!("重新分配命令缓冲失败: {}", e))?
         };
         for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0)?;
+            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
         }
         Ok(())
     }
@@ -2609,17 +2853,20 @@ impl Drop for Renderer {
             if self.far_index_buffer_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.far_index_buffer_memory, None);
             }
-            if self.terrain_vertex_buffer != vk::Buffer::null() {
-                self.device.destroy_buffer(self.terrain_vertex_buffer, None);
-            }
-            if self.terrain_vertex_buffer_memory != vk::DeviceMemory::null() {
-                self.device.free_memory(self.terrain_vertex_buffer_memory, None);
-            }
-            if self.terrain_index_buffer != vk::Buffer::null() {
-                self.device.destroy_buffer(self.terrain_index_buffer, None);
-            }
-            if self.terrain_index_buffer_memory != vk::DeviceMemory::null() {
-                self.device.free_memory(self.terrain_index_buffer_memory, None);
+            // 释放地形 LOD 网格（顶点/索引缓冲）
+            for mesh in &self.terrain_lods {
+                if mesh.vertex_buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(mesh.vertex_buffer, None);
+                }
+                if mesh.vertex_memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(mesh.vertex_memory, None);
+                }
+                if mesh.index_buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(mesh.index_buffer, None);
+                }
+                if mesh.index_memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(mesh.index_memory, None);
+                }
             }
             for &buffer in &self.instance_buffers {
                 if buffer != vk::Buffer::null() {
@@ -2708,4 +2955,160 @@ unsafe extern "system" fn vulkan_debug_callback(
         }
     }
     vk::FALSE
+}
+
+// ============================================================
+// 地形 LOD 单元测试
+// ============================================================
+
+#[cfg(test)]
+mod terrain_lod_tests {
+    use super::*;
+
+    #[test]
+    fn terrain_lod_level_selection_by_distance() {
+        // 近距离 → 高级
+        assert_eq!(terrain_lod_for_distance(0.0), TerrainLod::High);
+        assert_eq!(
+            terrain_lod_for_distance(TERRAIN_LOD_HIGH_END - 1.0),
+            TerrainLod::High
+        );
+        // 中距离 → 中级
+        assert_eq!(
+            terrain_lod_for_distance(TERRAIN_LOD_HIGH_END),
+            TerrainLod::Medium
+        );
+        assert_eq!(
+            terrain_lod_for_distance(TERRAIN_LOD_MED_END - 1.0),
+            TerrainLod::Medium
+        );
+        // 远距离 → 低级
+        assert_eq!(
+            terrain_lod_for_distance(TERRAIN_LOD_MED_END),
+            TerrainLod::Low
+        );
+        assert_eq!(terrain_lod_for_distance(f32::MAX), TerrainLod::Low);
+    }
+
+    #[test]
+    fn terrain_lod_density_table() {
+        // 高级 257²（256 格，间距 2.0）
+        assert_eq!(TerrainLod::High.cells(), 256);
+        assert_eq!(TerrainLod::High.verts(), 257);
+        assert_eq!(TerrainLod::High.cell_size(), 2.0);
+        assert_eq!(TerrainLod::High.index_count(), (256 * 256 * 6) as u32);
+        // 中级 129²（128 格，间距 4.0）
+        assert_eq!(TerrainLod::Medium.cells(), 128);
+        assert_eq!(TerrainLod::Medium.verts(), 129);
+        assert_eq!(TerrainLod::Medium.cell_size(), 4.0);
+        // 低级 65²（64 格，间距 8.0）
+        assert_eq!(TerrainLod::Low.cells(), 64);
+        assert_eq!(TerrainLod::Low.verts(), 65);
+        assert_eq!(TerrainLod::Low.cell_size(), 8.0);
+        assert_eq!(TerrainLod::Low.index_count(), (64 * 64 * 6) as u32);
+    }
+
+    #[test]
+    fn terrain_lod_blend_morphs_between_levels() {
+        // 过渡带端点：blend 0→1，smoothstep 中点 = 0.5
+        assert_eq!(terrain_lod_blend(0.0), (TerrainLod::High, 0.0));
+        assert_eq!(
+            terrain_lod_blend(TERRAIN_LOD_HIGH_MORPH_START),
+            (TerrainLod::High, 0.0)
+        );
+        let mid = (TERRAIN_LOD_HIGH_MORPH_START + TERRAIN_LOD_HIGH_END) * 0.5;
+        let (level, blend) = terrain_lod_blend(mid);
+        assert_eq!(level, TerrainLod::High);
+        assert!((blend - 0.5).abs() < 1e-4, "blend={}", blend);
+
+        // 级别边界：High@blend→1 与 Medium@blend=0 几何重合，无 popping
+        let (level, blend) = terrain_lod_blend(TERRAIN_LOD_HIGH_END - 0.5);
+        assert_eq!(level, TerrainLod::High);
+        assert!(blend > 0.99, "blend={}", blend);
+        assert_eq!(
+            terrain_lod_blend(TERRAIN_LOD_HIGH_END),
+            (TerrainLod::Medium, 0.0)
+        );
+        assert_eq!(
+            terrain_lod_blend(TERRAIN_LOD_HIGH_END + 1.0),
+            (TerrainLod::Medium, 0.0)
+        );
+
+        let (level, blend) = terrain_lod_blend(TERRAIN_LOD_MED_END - 0.5);
+        assert_eq!(level, TerrainLod::Medium);
+        assert!(blend > 0.99, "blend={}", blend);
+        assert_eq!(
+            terrain_lod_blend(TERRAIN_LOD_MED_END),
+            (TerrainLod::Low, 1.0)
+        );
+        assert_eq!(
+            terrain_lod_blend(TERRAIN_LOD_MED_END + 1.0),
+            (TerrainLod::Low, 1.0)
+        );
+
+        // 全距离扫描：级别只前进不后退，同级内 blend 单调不减
+        let mut last_blend = -1.0f32;
+        let mut last_level = 0usize;
+        for i in 0..=1000 {
+            let dist = i as f32 * 3.0;
+            let (level, blend) = terrain_lod_blend(dist);
+            let level_idx = level as usize;
+            assert!(level_idx >= last_level, "级别回退 at dist={}", dist);
+            if level_idx == last_level {
+                assert!(blend + 1e-6 >= last_blend, "blend 回退 at dist={}", dist);
+            }
+            last_blend = blend;
+            last_level = level_idx;
+        }
+    }
+
+    #[test]
+    fn terrain_coarse_height_interpolates_coarse_surface() {
+        // 低级网格高度
+        let low_cells = TerrainLod::Low.cells();
+        let w = low_cells + 1;
+        let cell = TerrainLod::Low.cell_size();
+        let mut heights = Vec::with_capacity(w * w);
+        for iz in 0..w {
+            for ix in 0..w {
+                let x = -TERRAIN_HALF + ix as f32 * cell;
+                let z = -TERRAIN_HALF + iz as f32 * cell;
+                heights.push(terrain_height(x, z));
+            }
+        }
+
+        // 中级网格中与低级网格重合的顶点（ix/iz 均为偶数）：
+        // 粗曲面插值必须精确等于该点 terrain_height
+        let med_w = TerrainLod::Medium.verts();
+        let med_cell = TerrainLod::Medium.cell_size();
+        for iz in 0..med_w {
+            for ix in 0..med_w {
+                if ix % 2 != 0 || iz % 2 != 0 {
+                    continue;
+                }
+                let x = -TERRAIN_HALF + ix as f32 * med_cell;
+                let z = -TERRAIN_HALF + iz as f32 * med_cell;
+                let interp = terrain_coarse_height(x, z, &heights, low_cells);
+                let direct = terrain_height(x, z);
+                assert!(
+                    (interp - direct).abs() < 1e-4,
+                    "({}, {}): interp={} direct={}",
+                    x,
+                    z,
+                    interp,
+                    direct
+                );
+            }
+        }
+
+        // 低级 cell 中心位于对角线上：插值 = 两对角角点高度均值（两三角形一致）
+        let cx = 3usize;
+        let cz = 5usize;
+        let x = -TERRAIN_HALF + (cx as f32 + 0.5) * cell;
+        let z = -TERRAIN_HALF + (cz as f32 + 0.5) * cell;
+        let h00 = heights[cz * w + cx];
+        let h11 = heights[(cz + 1) * w + cx + 1];
+        let interp = terrain_coarse_height(x, z, &heights, low_cells);
+        assert!((interp - (h00 + h11) * 0.5).abs() < 1e-5);
+    }
 }
