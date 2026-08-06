@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::audio::{AudioClip, AudioListener, AudioPlayer, AudioSource, Channel, SilentSink};
+use crate::net::{Client, NetworkMessage, PlayerState, Server};
 use super::camera::Camera;
 use super::ai::{find_path, GridMap, GridPos, NpcPerception, NpcState, NpcStateMachine};
 use super::physics::{self, Body, CollisionEvent, CollisionListener, SphereBody, Vec3 as Pv};
@@ -26,6 +27,14 @@ const GRID_HALF: f32 = GRID_CELL * (GRID_SIZE as f32) * 0.5;
 const NPC_COUNT: usize = 8;
 /// NPC 发现玩家距离（米）
 const NPC_SIGHT: f32 = 60.0;
+
+/// 网络环回演示（仅 RV3D_NET=1 启用）：同进程 Server + Client
+struct NetworkDemo {
+    server: Server,
+    client: Client,
+    seq: u32,
+    last_log: f32,
+}
 
 /// 单个 NPC：A* 路径 + 状态机 + 世界位置（y 采样地形高度）
 pub struct Npc {
@@ -118,6 +127,8 @@ pub struct Game {
     audio: AudioPlayer<SilentSink>,
     /// 音频采样率
     audio_sample_rate: u32,
+    /// 网络环回演示（默认关闭，RV3D_NET=1 启用）
+    net_demo: Option<NetworkDemo>,
 }
 
 impl Game {
@@ -217,7 +228,45 @@ impl Game {
                 }
                 player
             },
+            net_demo: {
+                let enabled = std::env::var("RV3D_NET")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if !enabled {
+                    None
+                } else {
+                    match Self::init_network_demo() {
+                        Ok(demo) => {
+                            log::info!("net: loopback demo enabled (in-process server+client)");
+                            Some(demo)
+                        }
+                        Err(e) => {
+                            log::warn!("net: 环回演示初始化失败，已禁用: {}", e);
+                            None
+                        }
+                    }
+                }
+            },
         }
+    }
+
+    /// 初始化网络环回演示：绑定环回 Server + 连入 Client，发起 Join
+    fn init_network_demo() -> Result<NetworkDemo, String> {
+        let server = Server::bind("127.0.0.1:0").map_err(|e| format!("bind 失败: {}", e))?;
+        let addr = server.local_addr().map_err(|e| format!("local_addr 失败: {}", e))?;
+        let client = Client::connect(addr).map_err(|e| format!("connect 失败: {}", e))?;
+        client
+            .send(&NetworkMessage::Join {
+                player_id: 0,
+                name: "local".into(),
+            })
+            .map_err(|e| format!("发送 Join 失败: {}", e))?;
+        Ok(NetworkDemo {
+            server,
+            client,
+            seq: 0,
+            last_log: 0.0,
+        })
     }
 
     /// 每帧推进所有已接入系统
@@ -241,6 +290,53 @@ impl Game {
         let frames = ((self.audio_sample_rate as f32) * dt) as usize;
         self.audio
             .tick(&AudioListener::new(camera.position()), frames.min(8192));
+        self.update_net(camera);
+    }
+
+    /// 网络环回演示：server 收包回环广播，client 发包/收包做远端插值；不参与帧率逻辑
+    fn update_net(&mut self, camera: &Camera) {
+        let Some(demo) = &mut self.net_demo else {
+            return;
+        };
+        // 服务器收包：Join 分配 id 回 ack；其余消息回环广播给所有客户端（含发送者）
+        while let Ok(Some((msg, from))) = demo.server.recv() {
+            match &msg {
+                NetworkMessage::Join { name, .. } => {
+                    if let Ok(ack) = demo.server.handle_join(from, name.clone()) {
+                        let _ = demo.server.send_to(&ack, from);
+                    }
+                }
+                _ => {
+                    let _ = demo.server.broadcast(&msg, None);
+                }
+            }
+        }
+        // 客户端：每帧发送自身位置
+        demo.seq = demo.seq.wrapping_add(1);
+        let pos = camera.position();
+        let player_id = demo.client.player_id().unwrap_or(0);
+        let _ = demo.client.send(&NetworkMessage::Position {
+            player_id,
+            seq: demo.seq,
+            state: PlayerState::new([pos.x, pos.y, pos.z], 0.0),
+        });
+        // 客户端收包：Join 确认 + 回环 Position（进入远端插值缓冲）
+        while let Ok(Some((msg, _))) = demo.client.recv() {
+            demo.client.handle_message(msg);
+        }
+        // 每秒一条日志：远端玩家数与插值采样
+        if self.time - demo.last_log >= 1.0 {
+            demo.last_log = self.time;
+            let t = demo.client.now();
+            let n = demo.client.remote_players().len();
+            let sample = demo
+                .client
+                .remote_players()
+                .values()
+                .next()
+                .map(|r| r.state_at(t));
+            log::info!("net: remote_players={} sample={:?}", n, sample);
+        }
     }
 
     /// 构建 HUD quad 列表：血条/弹药/FPS + 调试行（LOD、实体数、NPC 状态、碰撞/命中）
@@ -585,6 +681,22 @@ mod tests {
             let (wx, wz) = grid_to_world(g);
             assert_eq!(g, world_to_grid(wx, wz));
         }
+    }
+
+    /// 网络环回演示：init 能绑定环回 server，client 的 Join 能被 server 收到并回 ack
+    #[test]
+    fn net_loopback_demo_join_roundtrip() {
+        let mut demo = Game::init_network_demo().expect("loopback demo should init");
+        let mut got_join = false;
+        for _ in 0..10 {
+            if let Ok(Some((msg, from))) = demo.server.recv() {
+                if let NetworkMessage::Join { player_id, .. } = &msg {
+                    got_join = *player_id == 0;
+                    assert!(demo.server.handle_join(from, "local".into()).is_ok());
+                }
+            }
+        }
+        assert!(got_join, "server should receive the Join sent at init");
     }
 }
 
