@@ -9,6 +9,7 @@
 //! `// DEP: crate = version` 格式声明。
 
 /// 武器特征：近战与投射物武器的公共接口
+#[allow(dead_code)] // 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire
 pub trait Weapon {
     /// 武器名称
     fn name(&self) -> &'static str;
@@ -60,6 +61,7 @@ impl MeleeWeapon {
     }
 
     /// 挥击夹角（弧度）
+    #[allow(dead_code)] // MeleeWeapon 预留，近战接线时启用
     pub fn arc(&self) -> f32 {
         self.arc
     }
@@ -118,11 +120,13 @@ impl ProjectileWeapon {
     }
 
     /// 投射物飞行速度（米/秒）
+    #[allow(dead_code)] // getter 预留：fire() 内部直接读字段
     pub fn projectile_speed(&self) -> f32 {
         self.projectile_speed
     }
 
     /// 投射物最长存活时间（秒）
+    #[allow(dead_code)] // getter 预留：fire() 内部直接读字段
     pub fn projectile_lifetime(&self) -> f32 {
         self.projectile_lifetime
     }
@@ -218,11 +222,13 @@ impl Projectile {
     }
 
     /// 已飞行距离（米）
+    #[allow(dead_code)] // 调试/诊断预留 getter
     pub fn distance_traveled(&self) -> f32 {
         self.distance_traveled
     }
 
     /// 已存活时间（秒）
+    #[allow(dead_code)] // 调试/诊断预留 getter
     pub fn age(&self) -> f32 {
         self.age
     }

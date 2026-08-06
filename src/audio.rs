@@ -21,6 +21,7 @@ const DEFAULT_ROLLOFF: f32 = 0.02;
 
 /// WAV 解析错误
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // WAV 解析错误类型：随 parse_wav 管线预留（rodio 集成后启用）
 pub enum WavError {
     /// 不是 RIFF 容器
     NotRiff,
@@ -62,6 +63,7 @@ impl std::error::Error for WavError {}
 
 /// 音频片段：持有 f32 样本（帧交错）与采样率
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // 字段/访问器随 WAV 管线预留；new 已用于程序化测试音
 pub struct AudioClip {
     /// 样本数据，按帧交错：[f0_ch0, f0_ch1, f1_ch0, ...]
     samples: Vec<f32>,
@@ -71,6 +73,7 @@ pub struct AudioClip {
     channels: u16,
 }
 
+#[allow(dead_code)] // 访问器随 WAV 管线预留（new/sample_mono 已用）
 impl AudioClip {
     /// 创建片段；声道数或采样率为 0、样本数与声道不匹配时返回 None
     pub fn new(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Option<Self> {
@@ -126,27 +129,34 @@ impl AudioClip {
     }
 }
 
+#[allow(dead_code)] // parse_wav 辅助，随 WAV 管线预留
 fn read_u16_le(b: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([b[off], b[off + 1]])
 }
 
+#[allow(dead_code)] // parse_wav 辅助，随 WAV 管线预留
 fn read_u32_le(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
+#[allow(dead_code)] // parse_wav 辅助，随 WAV 管线预留
 fn read_i16_le(b: &[u8], off: usize) -> i16 {
     i16::from_le_bytes([b[off], b[off + 1]])
 }
 
+#[allow(dead_code)] // parse_wav 辅助，随 WAV 管线预留
 fn read_i32_le(b: &[u8], off: usize) -> i32 {
     i32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
 /// PCM 音频格式：format 1 = 整数 PCM，format 3 = IEEE float
+#[allow(dead_code)] // parse_wav 常量，随 WAV 管线预留
 const FORMAT_PCM: u16 = 1;
+#[allow(dead_code)] // parse_wav 常量，随 WAV 管线预留
 const FORMAT_FLOAT: u16 = 3;
 
 /// 解析 WAV 字节流为 `AudioClip`（支持 PCM 8/16/24/32 位整数与 32 位 float）
+#[allow(dead_code)] // WAV 文件加载预留（rodio 未装，当前用程序化测试音）
 pub fn parse_wav(bytes: &[u8]) -> Result<AudioClip, WavError> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" {
         return Err(WavError::NotRiff);
@@ -218,6 +228,7 @@ pub fn parse_wav(bytes: &[u8]) -> Result<AudioClip, WavError> {
 }
 
 /// 整数 PCM 解码：8 位无符号，16/24/32 位有符号小端，统一转 f32（[-1, 1]）
+#[allow(dead_code)] // parse_wav 内部辅助，随 WAV 管线预留
 fn decode_pcm_int(data: &[u8], bits: u16) -> Result<Vec<f32>, WavError> {
     Ok(match bits {
         8 => data.iter().map(|&b| (b as f32 / 128.0) - 1.0).collect(),
@@ -246,12 +257,14 @@ fn decode_pcm_int(data: &[u8], bits: u16) -> Result<Vec<f32>, WavError> {
 }
 
 /// OGG(Vorbis) 解码器接口：std 无法直接解码，集成阶段用 lewton 实现
+#[allow(dead_code)] // OGG 解码接口预留（lewton 集成阶段实现）
 pub trait OggDecoder {
     /// 解码 OGG 字节流；失败返回 None
     fn decode_ogg(&self, data: &[u8]) -> Option<AudioClip>;
 }
 
 /// 无依赖时的空实现：始终返回 None（集成阶段替换为 lewton 实现）
+#[allow(dead_code)] // lewton 未装时的占位实现，预留
 pub struct NullOggDecoder;
 
 impl OggDecoder for NullOggDecoder {
@@ -261,6 +274,7 @@ impl OggDecoder for NullOggDecoder {
 }
 
 /// 播放后端 trait：接收混音器输出的交错样本，送往平台音频设备
+#[allow(dead_code)] // sample_rate/channels 查询预留；write 已用于 SilentSink
 pub trait AudioSink {
     /// 设备采样率（Hz）
     fn sample_rate(&self) -> u32;
@@ -272,6 +286,7 @@ pub trait AudioSink {
 
 /// 静默后端：丢弃所有样本（无音频设备时的默认实现）
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // 字段仅供 trait 查询实现，预留
 pub struct SilentSink {
     sample_rate: u32,
     channels: u16,
@@ -302,6 +317,7 @@ impl AudioSink for SilentSink {
 
 /// 收集后端：保存写入的样本，供测试/调试检查输出
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // 测试收集后端，仅测试构造
 pub struct CollectingSink {
     /// 已写入的交错样本
     pub samples: Vec<f32>,
@@ -310,6 +326,7 @@ pub struct CollectingSink {
 }
 
 impl CollectingSink {
+    #[allow(dead_code)] // 仅供测试构造
     pub fn new(sample_rate: u32, channels: u16) -> Self {
         Self {
             samples: Vec::new(),
@@ -338,6 +355,7 @@ impl AudioSink for CollectingSink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Channel {
     /// 音乐
+    #[allow(dead_code)] // Music 通道预留，当前仅用 Sfx
     Music,
     /// 音效
     Sfx,
@@ -402,6 +420,7 @@ impl MasterVolume {
     }
 
     /// 当前主音量
+    #[allow(dead_code)] // 查询 getter 预留（set/gain 已用）
     pub fn get(&self) -> f32 {
         self.0
     }
@@ -458,6 +477,7 @@ pub struct VoiceId(usize);
 /// 正在播放的声音实例
 #[derive(Debug, Clone)]
 struct Voice {
+    #[allow(dead_code)] // 供 stop/stop_all 匹配使用；stop 系列当前未接线
     id: usize,
     clip: Arc<AudioClip>,
     /// 播放游标（帧）
@@ -484,6 +504,7 @@ impl Default for Mixer {
     }
 }
 
+#[allow(dead_code)] // Mixer 公共控制/查询 API 预留（主循环当前仅 play/set_*/tick 链路）
 impl Mixer {
     pub fn new() -> Self {
         Self {
@@ -610,6 +631,7 @@ pub struct AudioPlayer<S: AudioSink> {
     sink: S,
 }
 
+#[allow(dead_code)] // 访问器预留（sink 直读/调试用；mixer_mut 已用）
 impl<S: AudioSink> AudioPlayer<S> {
     pub fn new(sink: S) -> Self {
         Self {

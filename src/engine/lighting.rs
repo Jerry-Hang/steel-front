@@ -23,16 +23,22 @@ pub const LIGHT_UBO_BINDING: u32 = 4;
 pub const LIGHT_UBO_SIZE: usize = 352;
 
 /// Shadow map 默认尺寸（基础实现：2048×2048）
+#[allow(dead_code)] // 阴影/光照参考常量：GPU 光照已在 WGSL 实现，Rust 侧为测试与对照保留（见模块头注释）
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 /// Shadow map 深度格式（对应 Vulkan `VK_FORMAT_D32_SFLOAT` = 126）
+#[allow(dead_code)]
 pub const SHADOW_MAP_FORMAT: u32 = 126;
 /// 默认阴影深度 bias（缓解 shadow acne）
+#[allow(dead_code)]
 pub const DEFAULT_SHADOW_DEPTH_BIAS: f32 = 0.005;
 /// 默认阴影法线 bias
+#[allow(dead_code)]
 pub const DEFAULT_SHADOW_NORMAL_BIAS: f32 = 0.02;
 /// 默认高光指数（与 WGSL 一致）
+#[allow(dead_code)]
 pub const DEFAULT_SHININESS: f32 = 32.0;
 /// 高光强度系数（与 WGSL 一致）
+#[allow(dead_code)]
 pub const SPECULAR_STRENGTH: f32 = 0.4;
 
 /// 方向光：`direction` 为从表面指向光源的方向
@@ -100,6 +106,7 @@ pub struct ShadowConfig {
 }
 
 impl ShadowConfig {
+    #[allow(dead_code)] // 构造器预留：阴影 pass 未启用，开启时创建光空间配置
     pub fn new(light_dir: Vec3, target: Vec3, extent: f32, near: f32, far: f32) -> Self {
         Self {
             map_size: SHADOW_MAP_SIZE,
@@ -237,17 +244,20 @@ impl LightUniform {
 // ============================================================
 
 /// Blinn-Phong 漫反射系数：`max(dot(n, l), 0)`
+#[allow(dead_code)] // Blinn-Phong/阴影数学参考实现：供测试与 WGSL 着色器对照（见模块头注释）
 pub fn blinn_phong_diffuse(normal: Vec3, light_dir: Vec3) -> f32 {
     normal.dot(light_dir).max(0.0)
 }
 
 /// Blinn-Phong 高光系数：`pow(max(dot(n, h), 0), shininess)`，`h = normalize(l + v)`
+#[allow(dead_code)]
 pub fn blinn_phong_specular(normal: Vec3, light_dir: Vec3, view_dir: Vec3, shininess: f32) -> f32 {
     let half = (light_dir + view_dir).normalize_or_zero();
     normal.dot(half).max(0.0).powf(shininess)
 }
 
 /// 点光源衰减：`1 / (c + l*d + q*d²)`，clamp 到 [0, 1]
+#[allow(dead_code)]
 pub fn point_attenuation(distance: f32, constant: f32, linear: f32, quadratic: f32) -> f32 {
     let denom = constant + linear * distance + quadratic * distance * distance;
     if denom <= 0.0 {
@@ -258,6 +268,7 @@ pub fn point_attenuation(distance: f32, constant: f32, linear: f32, quadratic: f
 }
 
 /// 方向光辐射度（与 WGSL `evaluate_directional` 一致）
+#[allow(dead_code)]
 pub fn directional_radiance(
     light: &DirectionalLight,
     normal: Vec3,
@@ -271,6 +282,7 @@ pub fn directional_radiance(
 }
 
 /// 点光源辐射度（与 WGSL `evaluate_point` 一致；`range = 0` 时不限距离）
+#[allow(dead_code)]
 pub fn point_radiance(
     light: &PointLight,
     world_pos: Vec3,
@@ -315,6 +327,7 @@ pub fn shadow_view_proj(light_dir: Vec3, target: Vec3, extent: f32, near: f32, f
 }
 
 /// 把世界坐标投影到光空间：返回 (shadow uv, 光空间深度)
+#[allow(dead_code)]
 pub fn world_to_shadow_uv(world_pos: Vec3, shadow_vp: Mat4) -> (Vec2, f32) {
     let p = shadow_vp * world_pos.extend(1.0);
     let uv = Vec2::new(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5);
@@ -322,11 +335,13 @@ pub fn world_to_shadow_uv(world_pos: Vec3, shadow_vp: Mat4) -> (Vec2, f32) {
 }
 
 /// 阴影深度比较（bias 缓解 acne）：`fragment_depth - bias > shadow_depth` 判定为阴影
+#[allow(dead_code)]
 pub fn shadow_depth_test(shadow_depth: f32, fragment_depth: f32, depth_bias: f32) -> bool {
     fragment_depth - depth_bias > shadow_depth
 }
 
 /// 阴影可见性：0.0 = 阴影，1.0 = 照亮（与片元着色器 `1.0 - shadow_test(...)` 语义一致）
+#[allow(dead_code)]
 pub fn shadow_visibility(shadow_depth: f32, fragment_depth: f32, depth_bias: f32) -> f32 {
     if shadow_depth_test(shadow_depth, fragment_depth, depth_bias) {
         0.0
