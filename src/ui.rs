@@ -98,6 +98,18 @@ impl HudElement {
     }
 }
 
+/// 当前画面（由游戏状态机驱动，HUD 只做纯布局）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HudScreen {
+    /// 游戏中：血条/弹药/分数/波次/准星
+    #[default]
+    Game,
+    /// 开始菜单：标题 + 操作提示
+    Start,
+    /// 死亡结算：分数 + 重开提示
+    GameOver,
+}
+
 /// HUD 状态（每帧由游戏逻辑更新，`layout()` 读取它生成绘制命令）
 #[derive(Debug, Clone, PartialEq)]
 pub struct HudState {
@@ -117,6 +129,14 @@ pub struct HudState {
     pub fps: f32,
     /// 小地图占位是否显示
     pub minimap_visible: bool,
+    /// 当前得分
+    pub score: u64,
+    /// 当前波次
+    pub wave: u32,
+    /// 波间倒计时（秒，>0 时顶部显示"下一波"）
+    pub countdown: f32,
+    /// 当前画面（游戏/菜单/结算）
+    pub screen: HudScreen,
 }
 
 /// 血条文字缩放
@@ -134,6 +154,10 @@ impl HudState {
             max_ammo: 30,
             fps: 0.0,
             minimap_visible: true,
+            score: 0,
+            wave: 1,
+            countdown: 0.0,
+            screen: HudScreen::Game,
         }
     }
 
@@ -155,14 +179,23 @@ impl HudState {
         }
     }
 
-    /// 纯布局函数：把 HUD 状态展开为元素列表。
+    /// 纯布局函数：按当前画面展开为元素列表。
+    pub fn layout_elements(&self) -> Vec<HudElement> {
+        match self.screen {
+            HudScreen::Game => self.game_elements(),
+            HudScreen::Start => self.start_menu_elements(),
+            HudScreen::GameOver => self.game_over_elements(),
+        }
+    }
+
+    /// 游戏画面元素：血条/弹药/FPS/小地图 + 分数/波次/倒计时/准星
     ///
     /// 布局规则（左上角原点，像素坐标）：
     /// - 左下角：血条（宽度约屏幕 30%，上限 360px）+ 文字 `HP x/y`
     /// - 血条右侧：弹药条 + 文字 `AMMO x/y`
     /// - 左上角：FPS 文本
     /// - 右上角：小地图占位（半透明底 + 边框 + 中心玩家十字标记）
-    pub fn layout_elements(&self) -> Vec<HudElement> {
+    fn game_elements(&self) -> Vec<HudElement> {
         let mut elems = Vec::new();
         let w = self.screen_w;
         let h = self.screen_h;
@@ -225,6 +258,55 @@ impl HudState {
             scale: 2.0,
         });
 
+        // ---- 波次/分数（顶部中央）----
+        let center_x = w * 0.5;
+        let top = margin;
+        let wave_txt = format!("WAVE {}", self.wave);
+        let wave_x = center_x - text_width(&wave_txt, 1.8) * 0.5;
+        elems.push(HudElement::Text {
+            text: wave_txt,
+            x: wave_x,
+            y: top,
+            color: Color::WHITE,
+            scale: 1.8,
+        });
+        let score_txt = format!("SCORE {}", self.score);
+        let score_x = center_x - text_width(&score_txt, 1.4) * 0.5;
+        elems.push(HudElement::Text {
+            text: score_txt,
+            x: score_x,
+            y: top + 20.0,
+            color: Color::YELLOW,
+            scale: 1.4,
+        });
+        // ---- 波间倒计时 ----
+        if self.countdown > 0.0 {
+            let next_txt = format!("WAVE {} IN {:.0}", self.wave + 1, self.countdown.ceil());
+            let next_x = center_x - text_width(&next_txt, 1.6) * 0.5;
+            elems.push(HudElement::Text {
+                text: next_txt,
+                x: next_x,
+                y: top + 44.0,
+                color: Color::CYAN,
+                scale: 1.6,
+            });
+        }
+        // ---- 准星（屏幕中心）----
+        let cx = w * 0.5;
+        let cy = h * 0.5;
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(cx - 8.0, cy - 1.5, 16.0, 3.0),
+            Color::WHITE,
+        )));
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(cx - 1.5, cy - 8.0, 3.0, 16.0),
+            Color::WHITE,
+        )));
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0),
+            Color::RED,
+        )));
+
         // ---- 小地图占位（右上角）----
         if self.minimap_visible {
             let size = 180.0;
@@ -264,6 +346,105 @@ impl HudState {
             )));
         }
 
+        elems
+    }
+
+    /// 开始菜单：暗色遮罩 + 标题 + 操作提示
+    fn start_menu_elements(&self) -> Vec<HudElement> {
+        let mut elems = Vec::new();
+        let w = self.screen_w;
+        let h = self.screen_h;
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(0.0, 0.0, w, h),
+            Color::new(0.0, 0.0, 0.0, 0.72),
+        )));
+        let title = "STEEL FRONT";
+        elems.push(HudElement::Text {
+            text: title.to_string(),
+            x: w * 0.5 - text_width(title, 4.0) * 0.5,
+            y: h * 0.30,
+            color: Color::WHITE,
+            scale: 4.0,
+        });
+        let sub = "A RUST + VULKAN FPS TECH DEMO";
+        elems.push(HudElement::Text {
+            text: sub.to_string(),
+            x: w * 0.5 - text_width(sub, 1.2) * 0.5,
+            y: h * 0.30 + 44.0,
+            color: Color::CYAN,
+            scale: 1.2,
+        });
+        let hint = "PRESS ANY KEY TO START";
+        elems.push(HudElement::Text {
+            text: hint.to_string(),
+            x: w * 0.5 - text_width(hint, 2.0) * 0.5,
+            y: h * 0.55,
+            color: Color::YELLOW,
+            scale: 2.0,
+        });
+        let ctrl1 = "WASD MOVE   SPACE / LMB FIRE   TAB CAMERA";
+        let ctrl2 = "R RESTART (GAME OVER)   ESC QUIT";
+        let gray = Color::new(0.6, 0.6, 0.6, 1.0);
+        elems.push(HudElement::Text {
+            text: ctrl1.to_string(),
+            x: w * 0.5 - text_width(ctrl1, 1.0) * 0.5,
+            y: h * 0.62,
+            color: gray,
+            scale: 1.0,
+        });
+        elems.push(HudElement::Text {
+            text: ctrl2.to_string(),
+            x: w * 0.5 - text_width(ctrl2, 1.0) * 0.5,
+            y: h * 0.62 + 16.0,
+            color: gray,
+            scale: 1.0,
+        });
+        elems
+    }
+
+    /// 死亡结算：暗色遮罩 + 分数/波次 + 重开提示
+    fn game_over_elements(&self) -> Vec<HudElement> {
+        let mut elems = Vec::new();
+        let w = self.screen_w;
+        let h = self.screen_h;
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(0.0, 0.0, w, h),
+            Color::new(0.1, 0.0, 0.0, 0.78),
+        )));
+        let title = "GAME OVER";
+        elems.push(HudElement::Text {
+            text: title.to_string(),
+            x: w * 0.5 - text_width(title, 4.0) * 0.5,
+            y: h * 0.30,
+            color: Color::RED,
+            scale: 4.0,
+        });
+        let score_txt = format!("SCORE {}", self.score);
+        let score_x = w * 0.5 - text_width(&score_txt, 2.0) * 0.5;
+        elems.push(HudElement::Text {
+            text: score_txt,
+            x: score_x,
+            y: h * 0.45,
+            color: Color::WHITE,
+            scale: 2.0,
+        });
+        let wave_txt = format!("WAVE {}", self.wave);
+        let wave_x = w * 0.5 - text_width(&wave_txt, 1.6) * 0.5;
+        elems.push(HudElement::Text {
+            text: wave_txt,
+            x: wave_x,
+            y: h * 0.45 + 30.0,
+            color: Color::CYAN,
+            scale: 1.6,
+        });
+        let hint = "PRESS R TO RESTART";
+        elems.push(HudElement::Text {
+            text: hint.to_string(),
+            x: w * 0.5 - text_width(hint, 1.8) * 0.5,
+            y: h * 0.62,
+            color: Color::YELLOW,
+            scale: 1.8,
+        });
         elems
     }
 
@@ -566,8 +747,11 @@ mod tests {
         hidden.minimap_visible = false;
         let elems2 = hidden.layout_elements();
         assert!(
-            !elems2.iter().any(|e| matches!(e, HudElement::Quad(_))),
-            "隐藏小地图后不应有占位 quad"
+            !elems2.iter().any(|e| matches!(
+                e,
+                HudElement::Quad(q) if q.rect.x >= hud.screen_w * 0.5 && q.rect.y < hud.screen_h * 0.5
+            )),
+            "隐藏小地图后右上角不应有占位 quad"
         );
     }
 

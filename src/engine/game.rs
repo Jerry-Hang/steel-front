@@ -450,8 +450,20 @@ impl Game {
 
     /// 构建 HUD quad 列表：血条/弹药/FPS + 调试行（LOD、实体数、NPC 状态、碰撞/命中）
     pub fn hud_quads(&mut self, near: u32, far: u32, lod: &str) -> Vec<crate::ui::Quad> {
-        use crate::ui::{render_text, Color};
+        use crate::ui::{render_text, Color, HudScreen};
+        // 每帧同步 HUD 显示字段
+        self.hud.score = self.score;
+        self.hud.wave = self.wave;
+        self.hud.countdown = self.wave_timer.max(0.0);
+        self.hud.screen = match self.game_state {
+            GameState::StartMenu => HudScreen::Start,
+            GameState::GameOver => HudScreen::GameOver,
+            GameState::Playing => HudScreen::Game,
+        };
         let mut quads = self.hud.layout();
+        if self.game_state != GameState::Playing {
+            return quads;
+        }
         let mut counts = [0u32; 4];
         for npc in &self.npcs {
             counts[npc.state_machine.state() as usize] += 1;
@@ -828,6 +840,30 @@ mod tests {
         let quads = game.hud_quads(100, 200, "high");
         assert!(!quads.is_empty(), "hud should produce overlay quads");
         assert!(quads.len() >= 3, "health bar + debug text lines expected");
+    }
+
+    /// HUD：游戏画面含分数/波次/准星等元素
+    #[test]
+    fn hud_game_screen_has_score_wave_crosshair() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.hud.fps = 60.0;
+        game.score = 30;
+        game.wave = 2;
+        let quads = game.hud_quads(100, 200, "high");
+        assert!(!quads.is_empty());
+        assert!(quads.len() >= 5, "health/ammo bars + score/wave + crosshair");
+    }
+
+    /// HUD：开始菜单与死亡结算画面都产出元素
+    #[test]
+    fn hud_menu_and_gameover_screens() {
+        let mut game = Game::new();
+        let menu = game.hud_quads(0, 0, "high");
+        assert!(!menu.is_empty(), "start menu should draw overlay + title");
+        game.game_state = GameState::GameOver;
+        let over = game.hud_quads(0, 0, "high");
+        assert!(!over.is_empty(), "game over screen should draw overlay + score");
     }
 
     /// 光照场景：开启标志位、方向光与环境光生效
