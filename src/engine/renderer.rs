@@ -1,8 +1,8 @@
 //! Vulkan 渲染器模块
 //!
-//! 使用 ash 0.38 初始化 Vulkan，渲染一个彩色三角形。
+//! 使用 ash 0.38 初始化 Vulkan，渲染一个旋转的带纹理立方体。
 //! 包含完整的 Vulkan 管线生命周期管理。
-//! 已接入 Uniform Buffer（相机矩阵），当前写入单位矩阵。
+//! 已接入 MVP Uniform Buffer（model/view/proj）与深度缓冲。
 
 use std::ffi::CStr;
 use std::time::Instant;
@@ -19,48 +19,164 @@ use winit::window::Window;
 // 数据类型
 // ============================================================
 
-/// 相机 Uniform 数据（4x4 矩阵，64 字节）
+/// Camera Uniform 数据（view/proj 两个 4x4 矩阵 + lod_params，144 字节）
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct CameraUniform {
-    mvp: [[f32; 4]; 4],
+    view: glam::Mat4,
+    proj: glam::Mat4,
+    /// (lod_dist, fade_start, fade_end, 0)
+    lod_params: [f32; 4],
 }
 
-impl CameraUniform {
-    #[allow(dead_code)]
-    /// 单位矩阵（不旋转、不缩放、不平移）
-    fn identity() -> Self {
-        Self {
-            mvp: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        }
-    }
-}
-
-/// 三角形顶点数据
+/// 立方体顶点数据
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Vertex {
-    pos: [f32; 2],
+    pos: [f32; 3],
     color: [f32; 3],
+    uv: [f32; 2],
 }
 
-/// 三角形三个顶点（红、绿、蓝）
-const VERTICES: [Vertex; 3] = [
-    Vertex { pos: [-0.5, -0.5], color: [1.0, 0.0, 0.0] },
-    Vertex { pos: [ 0.5, -0.5], color: [0.0, 1.0, 0.0] },
-    Vertex { pos: [ 0.0,  0.5], color: [0.0, 0.0, 1.0] },
+/// 立方体 24 顶点（每面 4 个，CCW 外侧绕序；每面 UV 铺满 0..1）
+const VERTICES: [Vertex; 24] = [
+    // 前 (+Z) 红色调
+    Vertex { pos: [-1.0, -1.0,  1.0], color: [1.0, 0.3, 0.3], uv: [0.0, 0.0] },
+    Vertex { pos: [ 1.0, -1.0,  1.0], color: [1.0, 0.3, 0.3], uv: [1.0, 0.0] },
+    Vertex { pos: [ 1.0,  1.0,  1.0], color: [1.0, 0.3, 0.3], uv: [1.0, 1.0] },
+    Vertex { pos: [-1.0,  1.0,  1.0], color: [1.0, 0.3, 0.3], uv: [0.0, 1.0] },
+    // 后 (-Z) 橙色调
+    Vertex { pos: [ 1.0, -1.0, -1.0], color: [1.0, 0.6, 0.2], uv: [0.0, 0.0] },
+    Vertex { pos: [-1.0, -1.0, -1.0], color: [1.0, 0.6, 0.2], uv: [1.0, 0.0] },
+    Vertex { pos: [-1.0,  1.0, -1.0], color: [1.0, 0.6, 0.2], uv: [1.0, 1.0] },
+    Vertex { pos: [ 1.0,  1.0, -1.0], color: [1.0, 0.6, 0.2], uv: [0.0, 1.0] },
+    // 右 (+X) 绿色调
+    Vertex { pos: [ 1.0, -1.0,  1.0], color: [0.3, 1.0, 0.3], uv: [0.0, 0.0] },
+    Vertex { pos: [ 1.0, -1.0, -1.0], color: [0.3, 1.0, 0.3], uv: [1.0, 0.0] },
+    Vertex { pos: [ 1.0,  1.0, -1.0], color: [0.3, 1.0, 0.3], uv: [1.0, 1.0] },
+    Vertex { pos: [ 1.0,  1.0,  1.0], color: [0.3, 1.0, 0.3], uv: [0.0, 1.0] },
+    // 左 (-X) 青色调
+    Vertex { pos: [-1.0, -1.0, -1.0], color: [0.3, 1.0, 1.0], uv: [0.0, 0.0] },
+    Vertex { pos: [-1.0, -1.0,  1.0], color: [0.3, 1.0, 1.0], uv: [1.0, 0.0] },
+    Vertex { pos: [-1.0,  1.0,  1.0], color: [0.3, 1.0, 1.0], uv: [1.0, 1.0] },
+    Vertex { pos: [-1.0,  1.0, -1.0], color: [0.3, 1.0, 1.0], uv: [0.0, 1.0] },
+    // 上 (+Y) 蓝色调
+    Vertex { pos: [-1.0,  1.0,  1.0], color: [0.4, 0.4, 1.0], uv: [0.0, 0.0] },
+    Vertex { pos: [ 1.0,  1.0,  1.0], color: [0.4, 0.4, 1.0], uv: [1.0, 0.0] },
+    Vertex { pos: [ 1.0,  1.0, -1.0], color: [0.4, 0.4, 1.0], uv: [1.0, 1.0] },
+    Vertex { pos: [-1.0,  1.0, -1.0], color: [0.4, 0.4, 1.0], uv: [0.0, 1.0] },
+    // 下 (-Y) 品红调
+    Vertex { pos: [-1.0, -1.0, -1.0], color: [1.0, 0.4, 1.0], uv: [0.0, 0.0] },
+    Vertex { pos: [ 1.0, -1.0, -1.0], color: [1.0, 0.4, 1.0], uv: [1.0, 0.0] },
+    Vertex { pos: [ 1.0, -1.0,  1.0], color: [1.0, 0.4, 1.0], uv: [1.0, 1.0] },
+    Vertex { pos: [-1.0, -1.0,  1.0], color: [1.0, 0.4, 1.0], uv: [0.0, 1.0] },
 ];
 
+/// 立方体 36 索引（6 面 × 2 三角形）
+const INDICES: [u32; 36] = [
+     0,  1,  2,  0,  2,  3, // 前
+     4,  5,  6,  4,  6,  7, // 后
+     8,  9, 10,  8, 10, 11, // 右
+    12, 13, 14, 12, 14, 15, // 左
+    16, 17, 18, 16, 18, 19, // 上
+    20, 21, 22, 20, 22, 23, // 下
+];
+
+/// 远档 LOD：十字交叉双 quad（8 顶点 / 12 索引），边长与立方体一致（±1.0）。
+/// quad1 位于 XY 平面（面向 ±Z），quad2 位于 ZY 平面（面向 ±X），绕序 CCW 与立方体一致。
+/// 顶点色用白色：远档实例 tint 不变，纹理/颜色混合结果与近档一致。
+const FAR_VERTS: [Vertex; 8] = [
+    Vertex { pos: [-1.0, -1.0,  0.0], color: [1.0, 1.0, 1.0], uv: [0.0, 0.0] },
+    Vertex { pos: [ 1.0, -1.0,  0.0], color: [1.0, 1.0, 1.0], uv: [1.0, 0.0] },
+    Vertex { pos: [ 1.0,  1.0,  0.0], color: [1.0, 1.0, 1.0], uv: [1.0, 1.0] },
+    Vertex { pos: [-1.0,  1.0,  0.0], color: [1.0, 1.0, 1.0], uv: [0.0, 1.0] },
+    Vertex { pos: [ 0.0, -1.0,  1.0], color: [1.0, 1.0, 1.0], uv: [0.0, 0.0] },
+    Vertex { pos: [ 0.0, -1.0, -1.0], color: [1.0, 1.0, 1.0], uv: [1.0, 0.0] },
+    Vertex { pos: [ 0.0,  1.0, -1.0], color: [1.0, 1.0, 1.0], uv: [1.0, 1.0] },
+    Vertex { pos: [ 0.0,  1.0,  1.0], color: [1.0, 1.0, 1.0], uv: [0.0, 1.0] },
+];
+const FAR_INDICES: [u32; 12] = [
+     0,  1,  2,  0,  2,  3, // XY 平面 quad
+     4,  5,  6,  4,  6,  7, // ZY 平面 quad
+];
+
+/// 距离 LOD 阈值：相机到实例中心距离 < 120 用近档立方体，否则远档十字 quad
+const LOD_DISTANCE: f32 = 120.0;
 /// 远档十字 quad 地面距离淡出区间（地平线处自然消失）
 /// FADE_END=900 保证任何可达机位（|x|,|z|<=600）最近场点距离 <=486 < 900，
 /// 场外不再“实例全灭”；远角 1210 > 900 仍自然淡出（地平线无硬边）。
 const FADE_START: f32 = 400.0;
 const FADE_END: f32 = 900.0;
+
+// ============================================================
+// 地形常量（257×257 顶点，世界 512×512，与实例场同域）
+// ============================================================
+const TERRAIN_VERTS: usize = 257;
+const TERRAIN_CELLS: usize = 256;
+const TERRAIN_HALF: f32 = 255.0;
+const TERRAIN_UV_SCALE: f32 = 32.0; // uv 铺 0..16 重复采样
+
+/// 实例网格（256×256 = 65536）
+const GRID_SIZE: u32 = 256;
+const INSTANCE_COUNT: u32 = GRID_SIZE * GRID_SIZE;
+
+/// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct InstanceData {
+    model: [f32; 16],
+    tint: [f32; 4],
+}
+const _: () = assert!(std::mem::size_of::<InstanceData>() == 80);
+
+// ============================================================
+// 地形 value noise（CPU 唯一实现：地形顶点与实例 Y 共用同一函数）
+// ============================================================
+
+/// 确定性整数格点哈希 → [0,1)
+fn noise_hash(ix: i32, iz: i32) -> f32 {
+    let mut n = (ix as u32).wrapping_mul(0x9E37_79B9) ^ (iz as u32).wrapping_mul(0x85EB_CA6B);
+    n ^= n >> 13;
+    n = n.wrapping_mul(0x7FEB_352D);
+    n ^= n >> 16;
+    (n & 0xFF_FFFF) as f32 / 0xFF_FFFF as f32
+}
+
+fn smooth_t(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// 双线性平滑插值 value noise
+fn value_noise(x: f32, z: f32) -> f32 {
+    let ix = x.floor() as i32;
+    let iz = z.floor() as i32;
+    let fx = x - x.floor();
+    let fz = z - z.floor();
+    let u = smooth_t(fx);
+    let v = smooth_t(fz);
+    let a = noise_hash(ix, iz);
+    let b = noise_hash(ix + 1, iz);
+    let c = noise_hash(ix, iz + 1);
+    let d = noise_hash(ix + 1, iz + 1);
+    a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v
+}
+
+/// 中心 ±30（60×60）压平为 0，30→45 平滑过渡的掩码
+fn flatten_mask(x: f32, z: f32) -> f32 {
+    let m = |v: f32| {
+        let t = ((v - 30.0) / 15.0).clamp(0.0, 1.0);
+        smooth_t(t)
+    };
+    m(x.abs()) * m(z.abs())
+}
+
+/// 地形高度：3 层 value noise（总振幅 1.75 ≤ 2.0），中心 60×60 压平
+fn terrain_height(x: f32, z: f32) -> f32 {
+    let h = 0.9 * (value_noise(x / 96.0, z / 96.0) * 2.0 - 1.0)
+        + 0.55 * (value_noise(x / 24.0, z / 24.0) * 2.0 - 1.0)
+        + 0.3 * (value_noise(x / 6.0, z / 6.0) * 2.0 - 1.0);
+    h * flatten_mask(x, z)
+}
 
 // ============================================================
 // 渲染器
@@ -103,6 +219,36 @@ pub struct Renderer {
     first_frame_done: bool,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
+    index_buffer: vk::Buffer,
+    index_buffer_memory: vk::DeviceMemory,
+    /// 远档 LOD 十字 quad 几何（独立 vertex/index buffer）
+    far_vertex_buffer: vk::Buffer,
+    far_vertex_buffer_memory: vk::DeviceMemory,
+    far_index_buffer: vk::Buffer,
+    far_index_buffer_memory: vk::DeviceMemory,
+    /// 地形 heightmap 网格（257×257 顶点，静态一次性上传）
+    terrain_vertex_buffer: vk::Buffer,
+    terrain_vertex_buffer_memory: vk::DeviceMemory,
+    terrain_index_buffer: vk::Buffer,
+    terrain_index_buffer_memory: vk::DeviceMemory,
+    /// 每帧一份 instance buffer（双缓冲，避免 CPU 写与上一帧 GPU 读竞态）
+    instance_buffers: Vec<vk::Buffer>,
+    instance_buffers_memory: Vec<vk::DeviceMemory>,
+    /// 每帧对应的持久映射指针
+    instance_mapped: Vec<*mut std::ffi::c_void>,
+    /// 全量实例（CPU 侧保留，每帧剔除后压缩上传）
+    instances: Vec<InstanceData>,
+    /// 剔除后可见实例（每帧复用，避免重新分配）
+    culled: Vec<InstanceData>,
+    /// 性能日志节流（1 次/秒）
+    last_perf_log: Instant,
+    /// 时间窗内帧计数（fps 统计）
+    frame_count: u32,
+    /// fps 统计时间窗起点
+    perf_window_start: Instant,
+    depth_images: Vec<vk::Image>,
+    depth_images_memory: Vec<vk::DeviceMemory>,
+    depth_image_views: Vec<vk::ImageView>,
     // ---- 新增：Uniform / Descriptor 相关 ----
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -110,7 +256,10 @@ pub struct Renderer {
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffers_memory: Vec<vk::DeviceMemory>,
     uniform_mapped: Vec<*mut std::ffi::c_void>,
-    start_time: Instant,
+    texture_image: vk::Image,
+    texture_image_memory: vk::DeviceMemory,
+    texture_image_view: vk::ImageView,
+    texture_sampler: vk::Sampler,
 }
 
 fn load_spirv(path: &str) -> Result<Vec<u32>, String> {
@@ -123,9 +272,14 @@ impl Renderer {
         let mut renderer = Self::init_instance(window)?;
         renderer.init_swapchain()?;
         renderer.init_render_pass()?;
+        renderer.init_command_pool()?;
+        renderer.create_instance_buffer()?;
+        renderer.init_depth_resources()?;
         renderer.init_descriptors()?;       // ← 新增
         renderer.init_pipeline()?;
         renderer.init_framebuffers()?;
+        renderer.init_texture()?;
+        renderer.update_texture_descriptor_sets()?;
         renderer.init_command_buffers()?;
         renderer.init_sync_objects()?;
         Ok(renderer)
@@ -363,6 +517,27 @@ impl Renderer {
             first_frame_done: false,
             vertex_buffer: vk::Buffer::null(),
             vertex_buffer_memory: vk::DeviceMemory::null(),
+            index_buffer: vk::Buffer::null(),
+            index_buffer_memory: vk::DeviceMemory::null(),
+            far_vertex_buffer: vk::Buffer::null(),
+            far_vertex_buffer_memory: vk::DeviceMemory::null(),
+            far_index_buffer: vk::Buffer::null(),
+            far_index_buffer_memory: vk::DeviceMemory::null(),
+            terrain_vertex_buffer: vk::Buffer::null(),
+            terrain_vertex_buffer_memory: vk::DeviceMemory::null(),
+            terrain_index_buffer: vk::Buffer::null(),
+            terrain_index_buffer_memory: vk::DeviceMemory::null(),
+            instance_buffers: Vec::new(),
+            instance_buffers_memory: Vec::new(),
+            instance_mapped: Vec::new(),
+            instances: Vec::new(),
+            culled: Vec::with_capacity(INSTANCE_COUNT as usize),
+            last_perf_log: Instant::now(),
+            frame_count: 0,
+            perf_window_start: Instant::now(),
+            depth_images: Vec::new(),
+            depth_images_memory: Vec::new(),
+            depth_image_views: Vec::new(),
             // ---- 新增字段初始值 ----
             descriptor_set_layout: vk::DescriptorSetLayout::null(),
             descriptor_pool: vk::DescriptorPool::null(),
@@ -370,7 +545,10 @@ impl Renderer {
             uniform_buffers: Vec::new(),
             uniform_buffers_memory: Vec::new(),
             uniform_mapped: Vec::new(),
-            start_time: Instant::now(),
+            texture_image: vk::Image::null(),
+            texture_image_memory: vk::DeviceMemory::null(),
+            texture_image_view: vk::ImageView::null(),
+            texture_sampler: vk::Sampler::null(),
         })
     }
 
@@ -503,19 +681,43 @@ impl Renderer {
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let color_attachment_refs = [color_attachment_ref];
 
+        // 深度附件（D32_SFLOAT）
+        let depth_attachment = vk::AttachmentDescription::default()
+            .format(vk::Format::D32_SFLOAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let depth_attachment_ref = vk::AttachmentReference::default()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_attachment_refs);
+            .color_attachments(&color_attachment_refs)
+            .depth_stencil_attachment(&depth_attachment_ref);
         let subpasses = [subpass];
-        let attachments = [color_attachment];
+        let attachments = [color_attachment, depth_attachment];
 
         let dependency = vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
             .dst_subpass(0)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .src_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
+            .dst_stage_mask(
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            )
             .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+            .dst_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            );
         let dependencies = [dependency];
 
         let render_pass_create_info = vk::RenderPassCreateInfo::default()
@@ -528,6 +730,82 @@ impl Renderer {
                 .create_render_pass(&render_pass_create_info, None)
                 .map_err(|e| format!("创建渲染流程失败: {}", e))?
         };
+        Ok(())
+    }
+
+    /// 为每个交换链图像创建深度缓冲（D32_SFLOAT Image + depth aspect ImageView）
+    fn init_depth_resources(&mut self) -> Result<(), String> {
+        let depth_format = vk::Format::D32_SFLOAT;
+        self.depth_images.clear();
+        self.depth_images_memory.clear();
+        self.depth_image_views.clear();
+
+        for _ in 0..self.swapchain_images.len() {
+            let image_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(depth_format)
+                .extent(vk::Extent3D {
+                    width: self.swapchain_extent.width,
+                    height: self.swapchain_extent.height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let image = unsafe {
+                self.device
+                    .create_image(&image_info, None)
+                    .map_err(|e| format!("创建深度 Image 失败: {}", e))?
+            };
+
+            let mem_reqs = unsafe { self.device.get_image_memory_requirements(image) };
+            let memory_type = self.pick_memory_type(mem_reqs, true)?;
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(mem_reqs.size)
+                .memory_type_index(memory_type);
+            let memory = unsafe {
+                self.device
+                    .allocate_memory(&alloc_info, None)
+                    .map_err(|e| format!("分配深度 Image 内存失败: {}", e))?
+            };
+            unsafe {
+                self.device
+                    .bind_image_memory(image, memory, 0)
+                    .map_err(|e| format!("绑定深度 Image 内存失败: {}", e))?;
+            }
+
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(depth_format)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                        .base_mip_level(0)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                );
+            let view = unsafe {
+                self.device
+                    .create_image_view(&view_info, None)
+                    .map_err(|e| format!("创建深度 Image View 失败: {}", e))?
+            };
+
+            self.depth_images.push(image);
+            self.depth_images_memory.push(memory);
+            self.depth_image_views.push(view);
+        }
+        log::info!(
+            "深度缓冲创建完成: {} 张 {}x{} D32_SFLOAT",
+            self.depth_images.len(),
+            self.swapchain_extent.width,
+            self.swapchain_extent.height
+        );
         Ok(())
     }
 
@@ -544,7 +822,29 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::VERTEX);
-        let bindings = [ubo_layout_binding];
+        // 纹理采样（贴图 binding=1，采样器 binding=3，均只在 Fragment 阶段使用）
+        let sampled_image_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        // 实例 storage buffer（binding=2，Vertex 阶段读取）
+        let storage_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(2)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+        let sampler_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(3)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let bindings = [
+            ubo_layout_binding,
+            sampled_image_binding,
+            storage_binding,
+            sampler_binding,
+        ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
             .bindings(&bindings);
@@ -554,6 +854,11 @@ impl Renderer {
                 .create_descriptor_set_layout(&layout_info, None)
                 .map_err(|e| format!("创建 Descriptor Set Layout 失败: {}", e))?
         };
+        // binding 0 = view/proj UBO；binding 1 = 贴图；binding 2 = 实例 storage buffer；
+        // 原采样器 binding 2 顺延到 binding 3（与 WGSL 一致）。
+        log::info!(
+            "Descriptor Set Layout: binding 0 = UBO(view/proj), binding 1 = 贴图, binding 2 = 实例 STORAGE_BUFFER, binding 3 = 采样器"
+        );
 
         // ---- 2. 创建 Uniform Buffer（每帧一个）----
         let buffer_size = std::mem::size_of::<CameraUniform>() as u64;
@@ -621,10 +926,20 @@ impl Renderer {
         }
 
         // ---- 3. 创建 Descriptor Pool ----
-        let pool_size = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(max_frames as u32);
-        let pool_sizes = [pool_size];
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(max_frames as u32),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(max_frames as u32),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(max_frames as u32),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(max_frames as u32),
+        ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
@@ -670,6 +985,23 @@ impl Renderer {
             unsafe {
                 self.device.update_descriptor_sets(&descriptor_writes, &[]);
             }
+
+            // 实例 storage buffer（每帧 set 指向该帧自己的 buffer，消除读写竞态）
+            let instance_info = vk::DescriptorBufferInfo::default()
+                .buffer(self.instance_buffers[i])
+                .offset(0)
+                .range(std::mem::size_of::<InstanceData>() as u64 * (INSTANCE_COUNT as u64 + 1));
+            let instance_infos = [instance_info];
+            let instance_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&instance_infos);
+            let instance_writes = [instance_write];
+            unsafe {
+                self.device.update_descriptor_sets(&instance_writes, &[]);
+            }
         }
 
         log::info!("Descriptor 初始化完成（{} 帧）", max_frames);
@@ -701,16 +1033,24 @@ impl Renderer {
             .input_rate(vk::VertexInputRate::VERTEX);
 
         let vertex_attributes = [
+            // location 0: position vec3
             vk::VertexInputAttributeDescription::default()
                 .binding(0)
                 .location(0)
-                .format(vk::Format::R32G32_SFLOAT)
+                .format(vk::Format::R32G32B32_SFLOAT)
                 .offset(0),
+            // location 1: color vec3
             vk::VertexInputAttributeDescription::default()
                 .binding(0)
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
-                .offset(std::mem::size_of::<[f32; 2]>() as u32),
+                .offset(std::mem::size_of::<[f32; 3]>() as u32),
+            // location 2: uv vec2
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(2)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset((std::mem::size_of::<[f32; 3]>() * 2) as u32),
         ];
 
         let vertex_bindings = [vertex_binding];
@@ -743,8 +1083,8 @@ impl Renderer {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::CLOCKWISE)
             .depth_bias_enable(false);
 
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
@@ -752,9 +1092,11 @@ impl Renderer {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(false)
-            .depth_write_enable(false)
-            .depth_compare_op(vk::CompareOp::ALWAYS);
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
 
         let color_write_mask = vk::ColorComponentFlags::R
 
@@ -808,6 +1150,9 @@ impl Renderer {
         }
 
         self.create_vertex_buffer()?;
+        self.create_index_buffer()?;
+        self.create_far_geometry()?;
+        self.create_terrain()?;
         log::info!("图形管线创建完成");
         Ok(())
     }
@@ -821,57 +1166,166 @@ impl Renderer {
         }
     }
 
-    fn create_vertex_buffer(&mut self) -> Result<(), String> {
-        let buffer_size = std::mem::size_of_val(&VERTICES) as u64;
-
-        let buffer_create_info = vk::BufferCreateInfo::default()
-            .size(buffer_size)
-            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        self.vertex_buffer = unsafe {
-            self.device
-                .create_buffer(&buffer_create_info, None)
-                .map_err(|e| format!("创建顶点缓冲失败: {}", e))?
-        };
-
-        let mem_requirements = unsafe {
-            self.device.get_buffer_memory_requirements(self.vertex_buffer)
-        };
-
+    /// 选择内存类型：prefer_device_local=true 优先 DEVICE_LOCAL（否则回退任意可用）；
+    /// 否则要求 HOST_VISIBLE | HOST_COHERENT
+    fn pick_memory_type(
+        &self,
+        requirements: vk::MemoryRequirements,
+        prefer_device_local: bool,
+    ) -> Result<u32, String> {
         let mem_properties = unsafe {
             self.instance
                 .get_physical_device_memory_properties(self.physical_device)
         };
+        let find = |flags: vk::MemoryPropertyFlags| {
+            mem_properties
+                .memory_types
+                .iter()
+                .enumerate()
+                .find(|(i, mem_type)| {
+                    let type_mask = 1 << i;
+                    (requirements.memory_type_bits & type_mask) != 0
+                        && mem_type.property_flags.contains(flags)
+                })
+                .map(|(i, _)| i as u32)
+        };
+        if prefer_device_local {
+            find(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .or_else(|| find(vk::MemoryPropertyFlags::empty()))
+                .ok_or_else(|| "没有找到合适的内存类型（Device Local）".to_string())
+        } else {
+            find(
+                vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .ok_or_else(|| "没有找到合适的内存类型（Host Buffer）".to_string())
+        }
+    }
 
-        let memory_type = mem_properties
-            .memory_types
-            .iter()
-            .enumerate()
-            .find(|(i, mem_type)| {
-                let type_mask = 1 << i;
-                (mem_requirements.memory_type_bits & type_mask) != 0
-                    && mem_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
-                    && mem_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT)
-            })
-            .map(|(i, _)| i as u32)
-            .ok_or_else(|| "没有找到合适的内存类型".to_string())?;
-
+    /// 创建 buffer 并分配 HOST_VISIBLE | HOST_COHERENT 内存
+    fn create_host_buffer(
+        &self,
+        usage: vk::BufferUsageFlags,
+        size: u64,
+    ) -> Result<(vk::Buffer, vk::DeviceMemory), String> {
+        let buffer_create_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe {
+            self.device
+                .create_buffer(&buffer_create_info, None)
+                .map_err(|e| format!("创建缓冲失败: {}", e))?
+        };
+        let mem_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_type = self.pick_memory_type(mem_requirements, false)?;
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(memory_type);
-
-        self.vertex_buffer_memory = unsafe {
+        let memory = unsafe {
             self.device
                 .allocate_memory(&alloc_info, None)
-                .map_err(|e| format!("分配顶点缓冲内存失败: {}", e))?
+                .map_err(|e| format!("分配缓冲内存失败: {}", e))?
         };
-
         unsafe {
             self.device
-                .bind_buffer_memory(self.vertex_buffer, self.vertex_buffer_memory, 0)
+                .bind_buffer_memory(buffer, memory, 0)
                 .map_err(|e| format!("绑定缓冲内存失败: {}", e))?;
         }
+        Ok((buffer, memory))
+    }
+
+    /// 创建 DEVICE_LOCAL 静态缓冲（一次性：staging 上传后即释放）。
+    /// 用于地形等一次性数据，避免 GPU 每帧从 host 内存读顶点/索引。
+    fn create_device_local_buffer(
+        &self,
+        usage: vk::BufferUsageFlags,
+        data: &[u8],
+        label: &str,
+    ) -> Result<(vk::Buffer, vk::DeviceMemory), String> {
+        let size = data.len() as u64;
+
+        // 1. staging buffer（HOST_VISIBLE | HOST_COHERENT，TRANSFER_SRC）
+        let staging_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let staging_buffer = unsafe {
+            self.device
+                .create_buffer(&staging_info, None)
+                .map_err(|e| format!("创建 {} staging buffer 失败: {}", label, e))?
+        };
+        let staging_reqs = unsafe { self.device.get_buffer_memory_requirements(staging_buffer) };
+        let staging_type = self.pick_memory_type(staging_reqs, false)?;
+        let staging_alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(staging_reqs.size)
+            .memory_type_index(staging_type);
+        let staging_memory = unsafe {
+            self.device
+                .allocate_memory(&staging_alloc, None)
+                .map_err(|e| format!("分配 {} staging 内存失败: {}", label, e))?
+        };
+        unsafe {
+            self.device
+                .bind_buffer_memory(staging_buffer, staging_memory, 0)
+                .map_err(|e| format!("绑定 {} staging buffer 失败: {}", label, e))?;
+            let ptr = self
+                .device
+                .map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射 {} staging 内存失败: {}", label, e))?;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            self.device.unmap_memory(staging_memory);
+        }
+
+        // 2. 目标 buffer（DEVICE_LOCAL 优先，usage | TRANSFER_DST）
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(usage | vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe {
+            self.device
+                .create_buffer(&buffer_info, None)
+                .map_err(|e| format!("创建 {} buffer 失败: {}", label, e))?
+        };
+        let mem_reqs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_type = self.pick_memory_type(mem_reqs, true)?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type);
+        let memory = unsafe {
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| format!("分配 {} 内存失败: {}", label, e))?
+        };
+        unsafe {
+            self.device
+                .bind_buffer_memory(buffer, memory, 0)
+                .map_err(|e| format!("绑定 {} buffer 失败: {}", label, e))?;
+        }
+
+        // 3. staging → 目标 一次性拷贝
+        self.run_single_time_commands(|cmd| {
+            let region = vk::BufferCopy::default().size(size);
+            unsafe {
+                self.device.cmd_copy_buffer(cmd, staging_buffer, buffer, &[region]);
+            }
+        })?;
+
+        // 4. 释放 staging
+        unsafe {
+            self.device.free_memory(staging_memory, None);
+            self.device.destroy_buffer(staging_buffer, None);
+        }
+        Ok((buffer, memory))
+    }
+
+    /// 创建立方体顶点缓冲（24 顶点）
+    fn create_vertex_buffer(&mut self) -> Result<(), String> {
+        let buffer_size = std::mem::size_of_val(&VERTICES) as u64;
+        let (buffer, memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, buffer_size)?;
+        self.vertex_buffer = buffer;
+        self.vertex_buffer_memory = memory;
 
         let data_ptr = unsafe {
             self.device
@@ -883,7 +1337,6 @@ impl Renderer {
                 )
                 .map_err(|e| format!("映射顶点缓冲内存失败: {}", e))?
         };
-
         unsafe {
             std::ptr::copy_nonoverlapping(
                 VERTICES.as_ptr() as *const u8,
@@ -895,15 +1348,708 @@ impl Renderer {
         Ok(())
     }
 
+    /// 创建立方体索引缓冲（36 索引，UINT32）
+    fn create_index_buffer(&mut self) -> Result<(), String> {
+        let buffer_size = std::mem::size_of_val(&INDICES) as u64;
+        let (buffer, memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, buffer_size)?;
+        self.index_buffer = buffer;
+        self.index_buffer_memory = memory;
+
+        let data_ptr = unsafe {
+            self.device
+                .map_memory(
+                    self.index_buffer_memory,
+                    0,
+                    buffer_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(|e| format!("映射索引缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                INDICES.as_ptr() as *const u8,
+                data_ptr as *mut u8,
+                buffer_size as usize,
+            );
+            self.device.unmap_memory(self.index_buffer_memory);
+        }
+        Ok(())
+    }
+
+    /// 创建远档 LOD 十字双 quad 的顶点/索引缓冲（8 顶点 / 12 索引）
+    fn create_far_geometry(&mut self) -> Result<(), String> {
+        let vert_size = std::mem::size_of_val(&FAR_VERTS) as u64;
+        let (v_buffer, v_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vert_size)?;
+        self.far_vertex_buffer = v_buffer;
+        self.far_vertex_buffer_memory = v_memory;
+
+        let v_ptr = unsafe {
+            self.device
+                .map_memory(v_memory, 0, vert_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射远档顶点缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                FAR_VERTS.as_ptr() as *const u8,
+                v_ptr as *mut u8,
+                vert_size as usize,
+            );
+            self.device.unmap_memory(v_memory);
+        }
+
+        let idx_size = std::mem::size_of_val(&FAR_INDICES) as u64;
+        let (i_buffer, i_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, idx_size)?;
+        self.far_index_buffer = i_buffer;
+        self.far_index_buffer_memory = i_memory;
+
+        let i_ptr = unsafe {
+            self.device
+                .map_memory(i_memory, 0, idx_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射远档索引缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                FAR_INDICES.as_ptr() as *const u8,
+                i_ptr as *mut u8,
+                idx_size as usize,
+            );
+            self.device.unmap_memory(i_memory);
+        }
+        log::info!("远档 LOD 几何创建完成: {} 顶点 / {} 索引（十字双 quad）", FAR_VERTS.len(), FAR_INDICES.len());
+        Ok(())
+    }
+
+    /// 创建地形 heightmap 网格（257×257 顶点，世界 512×512，间距 2.0）。
+    /// 高度用与实例 Y 完全相同的 terrain_height() 生成，一次性静态上传。
+    fn create_terrain(&mut self) -> Result<(), String> {
+        let mut verts: Vec<Vertex> = Vec::with_capacity(TERRAIN_VERTS * TERRAIN_VERTS);
+        for iz in 0..TERRAIN_VERTS {
+            for ix in 0..TERRAIN_VERTS {
+                let x = -TERRAIN_HALF + ix as f32 * 2.0;
+                let z = -TERRAIN_HALF + iz as f32 * 2.0;
+                let y = terrain_height(x, z);
+                verts.push(Vertex {
+                    pos: [x, y, z],
+                    color: [1.0, 1.0, 1.0],
+                    uv: [(x + TERRAIN_HALF) / TERRAIN_UV_SCALE, (z + TERRAIN_HALF) / TERRAIN_UV_SCALE],
+                });
+            }
+        }
+
+        let mut idx: Vec<u32> = Vec::with_capacity(TERRAIN_CELLS * TERRAIN_CELLS * 6);
+        for iz in 0..TERRAIN_CELLS {
+            for ix in 0..TERRAIN_CELLS {
+                let v0 = (iz * TERRAIN_VERTS + ix) as u32;
+                let v1 = v0 + 1;
+                let v2 = v0 + TERRAIN_VERTS as u32 + 1;
+                let v3 = v0 + TERRAIN_VERTS as u32;
+                idx.push(v0);
+                idx.push(v2);
+                idx.push(v1);
+                idx.push(v0);
+                idx.push(v3);
+                idx.push(v2);
+            }
+        }
+
+        let vert_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                verts.as_ptr() as *const u8,
+                verts.len() * std::mem::size_of::<Vertex>(),
+            )
+        };
+        let (v_buffer, v_memory) = self.create_device_local_buffer(
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            vert_bytes,
+            "地形顶点",
+        )?;
+        self.terrain_vertex_buffer = v_buffer;
+        self.terrain_vertex_buffer_memory = v_memory;
+
+        let idx_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * std::mem::size_of::<u32>())
+        };
+        let (i_buffer, i_memory) = self.create_device_local_buffer(
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            idx_bytes,
+            "地形索引",
+        )?;
+        self.terrain_index_buffer = i_buffer;
+        self.terrain_index_buffer_memory = i_memory;
+
+        log::info!(
+            "地形创建完成: {} 顶点 / {} 索引（{}×{} 网格，512×512，振幅 ≤2.0，中心 60×60 压平）",
+            verts.len(),
+            idx.len(),
+            TERRAIN_VERTS,
+            TERRAIN_VERTS
+        );
+        Ok(())
+    }
+
+    /// 生成 256×256 网格实例；按 frame-in-flight 数量双缓冲
+    /// （每帧一份 HOST_VISIBLE|HOST_COHERENT buffer，剔除后压缩上传到当前帧 slot）
+    fn create_instance_buffer(&mut self) -> Result<(), String> {
+        debug_assert!(
+            std::mem::size_of::<InstanceData>() == 80,
+            "InstanceData 必须对齐 std430 步长 80 字节"
+        );
+
+        // 256×256 网格：间距 2.0、以原点为中心、y=0 平面（场地 512×512）。
+        // 实例 Y 采样地形高度（同一 terrain_height()），底部下沉 0.05 防 z-fighting。
+        self.instances = Vec::with_capacity(INSTANCE_COUNT as usize);
+        for iz in 0..GRID_SIZE {
+            for ix in 0..GRID_SIZE {
+                let x = (ix as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
+                let z = (iz as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
+                let y = terrain_height(x, z) - 0.05;
+                let model = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
+                self.instances.push(InstanceData {
+                    model: model.to_cols_array(),
+                    tint: Self::random_light_tint(ix, iz),
+                });
+            }
+        }
+
+        // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次）
+        let buffer_elems = (INSTANCE_COUNT + 1) as u64;
+        let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
+        let identity = InstanceData {
+            model: glam::Mat4::IDENTITY.to_cols_array(),
+            tint: [1.0, 1.0, 1.0, 1.0],
+        };
+
+        // 每帧一份 HOST_VISIBLE | HOST_COHERENT buffer，STORAGE_BUFFER（每帧 CPU 直接写）
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(buffer_size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        for _ in 0..self.max_frames_in_flight {
+            let buffer = unsafe {
+                self.device
+                    .create_buffer(&buffer_info, None)
+                    .map_err(|e| format!("创建实例 buffer 失败: {}", e))?
+            };
+            let mem_reqs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+            let memory_type = self.pick_memory_type(mem_reqs, false)?;
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(mem_reqs.size)
+                .memory_type_index(memory_type);
+            let memory = unsafe {
+                self.device
+                    .allocate_memory(&alloc_info, None)
+                    .map_err(|e| format!("分配实例 buffer 内存失败: {}", e))?
+            };
+            unsafe {
+                self.device
+                    .bind_buffer_memory(buffer, memory, 0)
+                    .map_err(|e| format!("绑定实例 buffer 内存失败: {}", e))?;
+            }
+            let mapped = unsafe {
+                self.device
+                    .map_memory(memory, 0, buffer_size, vk::MemoryMapFlags::empty())
+                    .map_err(|e| format!("映射实例 buffer 失败: {}", e))?
+            };
+            self.instance_buffers.push(buffer);
+            self.instance_buffers_memory.push(memory);
+            self.instance_mapped.push(mapped);
+            // 写入 identity 实例（地形 draw 读取，永不覆盖）
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &identity as *const InstanceData as *const u8,
+                    mapped as *mut u8,
+                    std::mem::size_of::<InstanceData>(),
+                );
+            }
+        }
+
+        log::info!(
+            "实例缓冲创建完成: {} 个实例，stride {} 字节，{} 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）",
+            INSTANCE_COUNT,
+            std::mem::size_of::<InstanceData>(),
+            self.max_frames_in_flight
+        );
+        log::info!("instances={} draw_calls=1", INSTANCE_COUNT);
+        Ok(())
+    }
+
+    /// 确定性随机浅色 tint（无新依赖，按网格坐标哈希）
+    fn random_light_tint(ix: u32, iz: u32) -> [f32; 4] {
+        let mut n = ix.wrapping_mul(0x9E37_79B9) ^ iz.wrapping_mul(0x85EB_CA6B);
+        n ^= n >> 16;
+        n = n.wrapping_mul(0x7FEB_352D);
+        n ^= n >> 15;
+        let channel = |shift: u32| 0.6 + 0.4 * (((n >> shift) & 0xFF) as f32 / 255.0);
+        [channel(0), channel(8), channel(16), 1.0]
+    }
+
+    /// Gribb–Hartmann：从 proj*view 提取 6 个视锥平面（法线朝内、归一化）
+    ///
+    /// 公式来源：G. Gribb, K. Hartmann, "Fast Extraction of Viewing Frustum
+    /// Planes from the World-View-Projection Matrix" (2001)。
+    /// 平面系数来自 M 的行向量组合：左=r3+r0、右=r3−r0、下=r3+r1、上=r3−r1；
+    /// Vulkan NDC z∈[0,1]，故近=r2、远=r3−r2。内部满足 dot(n,c)+d ≥ 0。
+    fn extract_frustum_planes(
+        view: glam::Mat4,
+        proj: glam::Mat4,
+    ) -> [[f32; 4]; 6] {
+        let m = (proj * view).to_cols_array_2d(); // m[col][row]
+        let row = |i: usize| [m[0][i], m[1][i], m[2][i], m[3][i]];
+        let r0 = row(0);
+        let r1 = row(1);
+        let r2 = row(2);
+        let r3 = row(3);
+
+        let add = |a: [f32; 4], b: [f32; 4]| [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]];
+        let sub = |a: [f32; 4], b: [f32; 4]| [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]];
+        let normalize = |p: [f32; 4]| {
+            let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            [p[0] / len, p[1] / len, p[2] / len, p[3] / len]
+        };
+
+        [
+            normalize(add(r3, r0)), // 左
+            normalize(sub(r3, r0)), // 右
+            normalize(add(r3, r1)), // 下
+            normalize(sub(r3, r1)), // 上
+            normalize(r2),          // 近
+            normalize(sub(r3, r2)), // 远
+        ]
+    }
+
+    /// 每帧视锥剔除 + 距离 LOD 分档：
+    /// 可见实例按 [近档(d<LOD_DISTANCE)][远档] 连续压缩上传到当前帧 slot，
+    /// 返回 (near, far) 两个档的实例数（近档在前，远档紧跟其后）。
+    fn cull_and_upload(&mut self, view: glam::Mat4, proj: glam::Mat4) -> (u32, u32) {
+        let planes = Self::extract_frustum_planes(view, proj);
+        // 相机世界位置（view 为刚体变换，其逆矩阵的平移列即相机坐标）
+        let cam_pos = view.inverse().w_axis.truncate();
+        self.culled.clear();
+
+        for inst in &self.instances {
+            // 球心 = model 平移列；半径 = 0.5 * max(三轴列向量长度)
+            let center = [
+                inst.model[12],
+                inst.model[13],
+                inst.model[14],
+            ];
+            let ax = [
+                inst.model[0],
+                inst.model[1],
+                inst.model[2],
+            ];
+            let ay = [
+                inst.model[4],
+                inst.model[5],
+                inst.model[6],
+            ];
+            let az = [
+                inst.model[8],
+                inst.model[9],
+                inst.model[10],
+            ];
+            let len = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            let radius = 0.5 * len(ax).max(len(ay)).max(len(az));
+
+            let mut visible = true;
+            for p in &planes {
+                // dot(n, c) + d < -r 即剔除
+                let d = p[0] * center[0] + p[1] * center[1] + p[2] * center[2] + p[3];
+                if d < -radius {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible {
+                self.culled.push(*inst);
+            }
+        }
+
+        let stride = std::mem::size_of::<InstanceData>();
+        let slot = match self.instance_mapped.get(self.current_frame) {
+            Some(&p) if !p.is_null() => p as *mut u8,
+            _ => return (0, 0),
+        };
+
+        // 近档区（d < 60）
+        let near_sq = LOD_DISTANCE * LOD_DISTANCE;
+        let mut near_count = 0u32;
+        for inst in &self.culled {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz < near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add((near_count as usize) * stride),
+                        stride,
+                    );
+                }
+                near_count += 1;
+            }
+        }
+
+        // 远档区（紧跟近档区之后，偏移 = near_count * stride）
+        let mut far_count = 0u32;
+        for inst in &self.culled {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz >= near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((near_count as usize) + (far_count as usize)) * stride),
+                        stride,
+                    );
+                }
+                far_count += 1;
+            }
+        }
+        (near_count, far_count)
+    }
+
+    /// 提交一次性命令（用于纹理布局转换、数据拷贝等）
+    fn run_single_time_commands(&self, f: impl FnOnce(vk::CommandBuffer)) -> Result<(), String> {
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd_buffer = unsafe {
+            self.device
+                .allocate_command_buffers(&alloc_info)
+                .map_err(|e| format!("分配一次性命令缓冲失败: {}", e))?
+        }[0];
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            self.device
+                .begin_command_buffer(cmd_buffer, &begin_info)
+                .map_err(|e| format!("开始一次性命令缓冲失败: {}", e))?;
+        }
+
+        f(cmd_buffer);
+
+        unsafe {
+            self.device
+                .end_command_buffer(cmd_buffer)
+                .map_err(|e| format!("结束一次性命令缓冲失败: {}", e))?;
+        }
+
+        let cmd_buffers = [cmd_buffer];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
+                .map_err(|e| format!("提交一次性命令失败: {}", e))?;
+            self.device
+                .queue_wait_idle(self.graphics_queue)
+                .map_err(|e| format!("等待一次性命令失败: {}", e))?;
+            self.device.free_command_buffers(self.command_pool, &[cmd_buffer]);
+        }
+        Ok(())
+    }
+
+    /// 加载 assets/textures/test.png 并创建纹理资源
+    fn init_texture(&mut self) -> Result<(), String> {
+        // 从文件加载真实贴图（image crate）。
+        // image crate 行序为自上而下，与 Vulkan 默认 UV 原点一致，无需翻转。
+        let texture_path = "assets/textures/test.png";
+        let img = image::open(texture_path)
+            .map_err(|e| format!("加载纹理图片失败 '{}': {}", texture_path, e))?
+            .to_rgba8();
+        let width = img.width();
+        let height = img.height();
+        let pixels = img.as_raw().clone();
+        let image_size = (width * height * 4) as u64;
+
+        // ---- 1. staging buffer：CPU 写入像素数据 ----
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(image_size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let staging_buffer = unsafe {
+            self.device
+                .create_buffer(&buffer_info, None)
+                .map_err(|e| format!("创建纹理 staging buffer 失败: {}", e))?
+        };
+
+        let mem_reqs = unsafe { self.device.get_buffer_memory_requirements(staging_buffer) };
+        let mem_props = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+        let memory_type = mem_props
+            .memory_types
+            .iter()
+            .enumerate()
+            .find(|(i, mem_type)| {
+                let type_mask = 1 << i;
+                (mem_reqs.memory_type_bits & type_mask) != 0
+                    && mem_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+                    && mem_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+            })
+            .map(|(i, _)| i as u32)
+            .ok_or_else(|| "没有找到合适的内存类型（纹理 staging buffer）".to_string())?;
+
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type);
+        let staging_memory = unsafe {
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| format!("分配纹理 staging buffer 内存失败: {}", e))?
+        };
+        unsafe {
+            self.device
+                .bind_buffer_memory(staging_buffer, staging_memory, 0)
+                .map_err(|e| format!("绑定纹理 staging buffer 内存失败: {}", e))?;
+            let data_ptr = self
+                .device
+                .map_memory(staging_memory, 0, image_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射纹理 staging buffer 失败: {}", e))?;
+            std::ptr::copy_nonoverlapping(
+                pixels.as_ptr() as *const u8,
+                data_ptr as *mut u8,
+                pixels.len(),
+            );
+            self.device.unmap_memory(staging_memory);
+        }
+
+        // ---- 2. Vulkan Image（SAMPLED | TRANSFER_DST）----
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_SRGB)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        self.texture_image = unsafe {
+            self.device
+                .create_image(&image_info, None)
+                .map_err(|e| format!("创建纹理 Image 失败: {}", e))?
+        };
+
+        let img_reqs = unsafe { self.device.get_image_memory_requirements(self.texture_image) };
+        let img_mem_props = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+        let img_memory_type = img_mem_props
+            .memory_types
+            .iter()
+            .enumerate()
+            .find(|(i, mem_type)| {
+                let type_mask = 1 << i;
+                (img_reqs.memory_type_bits & type_mask) != 0
+                    && mem_type.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            })
+            .or_else(|| {
+                img_mem_props.memory_types.iter().enumerate().find(|(i, _)| {
+                    let type_mask = 1 << i;
+                    (img_reqs.memory_type_bits & type_mask) != 0
+                })
+            })
+            .map(|(i, _)| i as u32)
+            .ok_or_else(|| "没有找到合适的内存类型（纹理 Image）".to_string())?;
+
+        let img_alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(img_reqs.size)
+            .memory_type_index(img_memory_type);
+        self.texture_image_memory = unsafe {
+            self.device
+                .allocate_memory(&img_alloc_info, None)
+                .map_err(|e| format!("分配纹理 Image 内存失败: {}", e))?
+        };
+        unsafe {
+            self.device
+                .bind_image_memory(self.texture_image, self.texture_image_memory, 0)
+                .map_err(|e| format!("绑定纹理 Image 内存失败: {}", e))?;
+        }
+
+        // ---- 3. 拷贝 staging buffer → Image，并转换布局 ----
+        let image = self.texture_image;
+        self.run_single_time_commands(|cmd| {
+            let subresource_range = vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .base_mip_level(0)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1);
+
+            // UNDEFINED → TRANSFER_DST_OPTIMAL
+            let barrier_to_transfer = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(subresource_range)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_to_transfer],
+                );
+            }
+
+            // 拷贝像素数据
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(0)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D { width, height, depth: 1 });
+            unsafe {
+                self.device.cmd_copy_buffer_to_image(
+                    cmd,
+                    staging_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[region],
+                );
+            }
+
+            // TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+            let barrier_to_read = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(subresource_range)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier_to_read],
+                );
+            }
+        })?;
+
+        // 释放 staging buffer
+        unsafe {
+            self.device.free_memory(staging_memory, None);
+            self.device.destroy_buffer(staging_buffer, None);
+        }
+
+        // ---- 4. Image View（2D 类型）----
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(self.texture_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_SRGB)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        self.texture_image_view = unsafe {
+            self.device
+                .create_image_view(&view_info, None)
+                .map_err(|e| format!("创建纹理 Image View 失败: {}", e))?
+        };
+
+        // ---- 5. Sampler（线性过滤）----
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .anisotropy_enable(false)
+            .max_anisotropy(1.0)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .min_lod(0.0)
+            .max_lod(0.0);
+        self.texture_sampler = unsafe {
+            self.device
+                .create_sampler(&sampler_info, None)
+                .map_err(|e| format!("创建纹理 Sampler 失败: {}", e))?
+        };
+
+        log::info!(
+            "纹理初始化完成: {}x{}（来自 {}）",
+            width,
+            height,
+            texture_path
+        );
+        Ok(())
+    }
+
+    /// 把纹理 Image View 和 Sampler 写入每个 DescriptorSet（binding 1 / 2）
+    fn update_texture_descriptor_sets(&mut self) -> Result<(), String> {
+        for i in 0..self.descriptor_sets.len() {
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(self.texture_image_view)
+                .sampler(self.texture_sampler);
+            let image_infos = [image_info];
+
+            let sampled_image_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image_infos);
+
+            let sampler_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(3)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&image_infos);
+
+            let writes = [sampled_image_write, sampler_write];
+            unsafe {
+                self.device.update_descriptor_sets(&writes, &[]);
+            }
+        }
+        Ok(())
+    }
+
     fn init_framebuffers(&mut self) -> Result<(), String> {
         self.framebuffers = self
             .swapchain_image_views
             .iter()
-            .map(|&image_view| {
-                let image_views = [image_view];
+            .enumerate()
+            .map(|(i, &image_view)| {
+                let attachments = [image_view, self.depth_image_views[i]];
                 let framebuffer_create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(self.render_pass)
-                    .attachments(&image_views)
+                    .attachments(&attachments)
                     .width(self.swapchain_extent.width)
                     .height(self.swapchain_extent.height)
                     .layers(1);
@@ -917,7 +2063,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn init_command_buffers(&mut self) -> Result<(), String> {
+    fn init_command_pool(&mut self) -> Result<(), String> {
         let pool_create_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(self.graphics_queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
@@ -927,6 +2073,10 @@ impl Renderer {
                 .create_command_pool(&pool_create_info, None)
                 .map_err(|e| format!("创建命令池失败: {}", e))?
         };
+        Ok(())
+    }
+
+    fn init_command_buffers(&mut self) -> Result<(), String> {
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
@@ -940,7 +2090,7 @@ impl Renderer {
         };
 
         for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i)?;
+            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0)?;
         }
         Ok(())
     }
@@ -949,9 +2099,11 @@ impl Renderer {
         &self,
         command_buffer: vk::CommandBuffer,
         image_index: usize,
+        near_count: u32,
+        far_count: u32,
     ) -> Result<(), String> {
         let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE);
+            .flags(vk::CommandBufferUsageFlags::empty());
 
         unsafe {
             self.device
@@ -959,12 +2111,19 @@ impl Renderer {
                 .map_err(|e| format!("开始命令缓冲失败: {}", e))?;
         }
 
-        let clear_color = vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.1, 0.1, 0.15, 1.0],
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.1, 0.1, 0.15, 1.0],
+                },
             },
-        };
-        let clear_values = [clear_color];
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        ];
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::default()
             .render_pass(self.render_pass)
@@ -991,14 +2150,10 @@ impl Renderer {
             );
         }
 
-        // ---- 新增：绑定 Descriptor Set ----
-        // 用 current_frame 对应的 descriptor_set
-        // 注意：record 时 image_index 可能 != current_frame，
-        // 但因为我们每帧写的是 uniform_buffers[current_frame]，
-        // 这里绑定 current_frame 对应的 set 即可。
-        // 简化处理：绑定 image_index % max_frames 对应的 set
-        let ds_index = image_index % self.max_frames_in_flight;
-        let descriptor_sets = [self.descriptor_sets[ds_index]];
+        // ---- 绑定 Descriptor Set ----
+        // 本帧写入的 UBO 与 instance buffer 都是 current_frame 对应的 slot，
+        // 因此必须绑定 descriptor_sets[current_frame]（image_index 与帧 slot 无关）。
+        let descriptor_sets = [self.descriptor_sets[self.current_frame]];
         unsafe {
             self.device.cmd_bind_descriptor_sets(
                 command_buffer,
@@ -1010,19 +2165,88 @@ impl Renderer {
             );
         }
 
-        let vertex_buffers = [self.vertex_buffer];
-        let offsets = [0u64];
-        unsafe {
-            self.device.cmd_bind_vertex_buffers(
-                command_buffer,
-                0,
-                &vertex_buffers,
-                &offsets,
-            );
+        // 地形 draw call（非实例，instance_index = 65536 读保留 identity 实例）
+        {
+            let terrain_vertex_buffers = [self.terrain_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &terrain_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.terrain_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    (TERRAIN_CELLS * TERRAIN_CELLS * 6) as u32,
+                    1,
+                    0,
+                    0,
+                    INSTANCE_COUNT,
+                );
+            }
         }
 
-        unsafe {
-            self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+        // 近档 draw call：立方体几何，实例区从 0 开始
+        if near_count > 0 {
+            let vertex_buffers = [self.vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    INDICES.len() as u32,
+                    near_count,
+                    0,
+                    0,
+                    0,
+                );
+            }
+        }
+
+        // 远档 draw call：十字双 quad 几何，实例区偏移 = near_count（[近档][远档] 连续排布）
+        if far_count > 0 {
+            let far_vertex_buffers = [self.far_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &far_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.far_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    FAR_INDICES.len() as u32,
+                    far_count,
+                    0,
+                    0,
+                    near_count,
+                );
+            }
         }
 
         unsafe {
@@ -1066,7 +2290,7 @@ impl Renderer {
     // 渲染循环
     // ============================================================
 
-    pub fn render(&mut self, view_proj: [[f32; 4]; 4]) -> Result<(), String> {
+    pub fn render(&mut self, view: glam::Mat4, proj: glam::Mat4) -> Result<(), String> {
         let fence = self.in_flight_fences[self.current_frame];
         unsafe {
             self.device
@@ -1100,22 +2324,57 @@ impl Renderer {
                 .map_err(|e| format!("重置围栏失败: {}", e))?;
         }
 
-        // ---- 新增：每帧把相机矩阵写进 Uniform Buffer ----
-        let elapsed = self.start_time.elapsed().as_secs_f32();
-        let model = glam::Mat4::from_rotation_y(elapsed * 0.8);
-        let mvp = glam::Mat4::from_cols_array_2d(&view_proj) * model;
-        let cam = CameraUniform {
-            mvp: mvp.to_cols_array_2d(),
+        // ---- 每帧视锥剔除：可见实例压缩上传到当前帧 slot 的 HOST_VISIBLE buffer ----
+        let cull_start = Instant::now();
+        let (near_count, far_count) = self.cull_and_upload(view, proj);
+        let cull_us = cull_start.elapsed().as_micros() as u64;
+
+        // ---- 性能日志（1 次/秒）：visible / cull_us / fps ----
+        self.frame_count += 1;
+        if self.last_perf_log.elapsed().as_secs_f32() >= 1.0 {
+            let window_secs = self.perf_window_start.elapsed().as_secs_f32();
+            let fps = if window_secs > 0.0 {
+                self.frame_count as f32 / window_secs
+            } else {
+                0.0
+            };
+            log::info!(
+                "visible={}/{} near={} far={} cull_us={} fps={:.1}",
+                near_count + far_count,
+                INSTANCE_COUNT,
+                near_count,
+                far_count,
+                cull_us,
+                fps
+            );
+            self.frame_count = 0;
+            self.perf_window_start = Instant::now();
+            self.last_perf_log = Instant::now();
+        }
+
+        // ---- 每帧把 view/proj 写进 Uniform Buffer（按 frame-in-flight 多份）----
+        let ubo = CameraUniform {
+            view,
+            proj,
+            lod_params: [LOD_DISTANCE, FADE_START, FADE_END, 0.0],
         };
         if let Some(&ptr) = self.uniform_mapped.get(self.current_frame) {
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    &cam as *const _ as *const u8,
+                    &ubo as *const _ as *const u8,
                     ptr as *mut u8,
                     std::mem::size_of::<CameraUniform>(),
                 );
             }
         }
+
+        // 每帧重录 command buffer（instance_count 随剔除结果变化）
+        self.record_command_buffer(
+            self.command_buffers[image_index as usize],
+            image_index as usize,
+            near_count,
+            far_count,
+        )?;
 
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -1177,6 +2436,7 @@ impl Renderer {
         self.wait_idle()?;
         self.destroy_swapchain();
         self.init_swapchain()?;
+        self.init_depth_resources()?;
         self.init_framebuffers()?;
         self.recreate_command_buffers()?;
         Ok(())
@@ -1197,7 +2457,7 @@ impl Renderer {
                 .map_err(|e| format!("重新分配命令缓冲失败: {}", e))?
         };
         for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i)?;
+            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0)?;
         }
         Ok(())
     }
@@ -1211,6 +2471,23 @@ impl Renderer {
             unsafe { self.device.destroy_image_view(image_view, None) };
         }
         self.swapchain_image_views.clear();
+        // 深度资源
+        for &view in &self.depth_image_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        self.depth_image_views.clear();
+        for (&image, &memory) in self
+            .depth_images
+            .iter()
+            .zip(self.depth_images_memory.iter())
+        {
+            unsafe {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+            }
+        }
+        self.depth_images.clear();
+        self.depth_images_memory.clear();
         if self.swapchain != vk::SwapchainKHR::null() {
             unsafe {
                 self.swapchain_loader
@@ -1289,6 +2566,19 @@ impl Drop for Renderer {
                 self.device.destroy_image_view(image_view, None);
             }
 
+            // 释放深度资源
+            for &view in &self.depth_image_views {
+                self.device.destroy_image_view(view, None);
+            }
+            for (&image, &memory) in self
+                .depth_images
+                .iter()
+                .zip(self.depth_images_memory.iter())
+            {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+            }
+
             // 释放交换链
             if self.swapchain != vk::SwapchainKHR::null() {
                 self.swapchain_loader.destroy_swapchain(self.swapchain, None);
@@ -1300,6 +2590,60 @@ impl Drop for Renderer {
             }
             if self.vertex_buffer_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.vertex_buffer_memory, None);
+            }
+            if self.index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.index_buffer, None);
+            }
+            if self.index_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.index_buffer_memory, None);
+            }
+            if self.far_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.far_vertex_buffer, None);
+            }
+            if self.far_vertex_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.far_vertex_buffer_memory, None);
+            }
+            if self.far_index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.far_index_buffer, None);
+            }
+            if self.far_index_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.far_index_buffer_memory, None);
+            }
+            if self.terrain_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.terrain_vertex_buffer, None);
+            }
+            if self.terrain_vertex_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.terrain_vertex_buffer_memory, None);
+            }
+            if self.terrain_index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.terrain_index_buffer, None);
+            }
+            if self.terrain_index_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.terrain_index_buffer_memory, None);
+            }
+            for &buffer in &self.instance_buffers {
+                if buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(buffer, None);
+                }
+            }
+            for &memory in &self.instance_buffers_memory {
+                if memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(memory, None);
+                }
+            }
+
+            // 释放纹理资源
+            if self.texture_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.texture_sampler, None);
+            }
+            if self.texture_image_view != vk::ImageView::null() {
+                self.device.destroy_image_view(self.texture_image_view, None);
+            }
+            if self.texture_image != vk::Image::null() {
+                self.device.destroy_image(self.texture_image, None);
+            }
+            if self.texture_image_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.texture_image_memory, None);
             }
 
             // 释放逻辑设备
