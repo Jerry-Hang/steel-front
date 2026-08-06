@@ -329,9 +329,22 @@ impl Game {
         }
         self.world.step(dt);
         self.drain_collisions();
-        self.update_projectiles(dt);
-        self.update_ai(dt, camera);
-        self.update_waves(dt, &camera.position());
+        match self.game_state {
+            GameState::StartMenu => {
+                // 菜单吸引模式：世界照常运行（NPC 游走/追击），不结算伤害与波次
+                self.update_projectiles(dt, true);
+                self.update_ai(dt, camera);
+            }
+            GameState::Playing => {
+                self.update_projectiles(dt, true);
+                self.update_ai(dt, camera);
+                self.update_waves(dt, &camera.position());
+            }
+            GameState::GameOver => {
+                // 冻结玩法：AI/伤害/波次停止；投射物继续飞行但不再判定命中/击杀
+                self.update_projectiles(dt, false);
+            }
+        }
         // 状态日志（1 秒一条，冒烟断言 game: wave= 序列用）
         if self.time - self.last_status_log >= 1.0 {
             self.last_status_log = self.time;
@@ -474,8 +487,10 @@ impl Game {
         self.hits
     }
 
-    /// 投射物推进 + 碰撞检测：物理刚体/球体命中即销毁；NPC 命中扣血，hp≤0 移除并计分
-    fn update_projectiles(&mut self, dt: f32) {
+    /// 投射物推进 + 碰撞检测：物理刚体/球体命中即销毁；NPC 命中扣血，hp≤0 移除并计分。
+    ///
+    /// `allow_kills = false`（GameOver 冻结）：投射物照常飞行/到期，但不判定任何命中。
+    fn update_projectiles(&mut self, dt: f32, allow_kills: bool) {
         for p in self.projectiles.iter_mut() {
             if p.is_alive() {
                 p.update(dt);
@@ -486,6 +501,10 @@ impl Game {
         let mut alive = Vec::with_capacity(old.len());
         for p in old {
             if !p.is_alive() {
+                continue;
+            }
+            if !allow_kills {
+                alive.push(p);
                 continue;
             }
             if self.collide_physics(&p) {
@@ -665,6 +684,7 @@ impl Game {
         }
         // 攻击态 NPC 对玩家造成伤害（1 秒一次），驱动 HUD 血条
         if self.time - self.last_damage_time >= 1.0
+            && self.game_state == GameState::Playing
             && self
                 .npcs
                 .iter()
@@ -673,6 +693,14 @@ impl Game {
         {
             self.hud.health = (self.hud.health - 5.0).max(0.0);
             self.last_damage_time = self.time;
+            if self.hud.health <= 0.0 {
+                self.game_state = GameState::GameOver;
+                log::info!(
+                    "game: player down, score={} wave={} (GameOver: gameplay frozen, projectiles coast without kills)",
+                    self.score,
+                    self.wave
+                );
+            }
         }
     }
 
@@ -882,6 +910,40 @@ mod tests {
         }
         assert_eq!(game.npcs.len(), 7, "killed npc should be removed");
         assert_eq!(game.score, KILL_SCORE);
+    }
+
+    /// 玩家受伤：攻击态 NPC 每秒扣血，血量为 0 进入 GameOver
+    #[test]
+    fn player_damage_and_gameover() {
+        let mut game = Game::new();
+        // 把一只 NPC 放到玩家（原点）脚边，保证进入 Attack
+        game.npcs[0].position = [1.0, 0.0, 1.0];
+        game.hud.health = 6.0;
+        let cam = Camera::new();
+        for _ in 0..300 {
+            game.update(1.0 / 60.0, &cam);
+            if game.state() == GameState::GameOver {
+                break;
+            }
+        }
+        assert_eq!(game.state(), GameState::GameOver, "health 0 should end the run");
+        assert_eq!(game.hud.health, 0.0);
+    }
+
+    /// GameOver 冻结：投射物继续飞行但不产生新击杀、不计分
+    #[test]
+    fn gameover_freezes_kills() {
+        let mut game = Game::new();
+        game.game_state = GameState::GameOver;
+        game.npcs[0].hp = 20.0;
+        let npc_pos = game.npcs[0].position;
+        assert!(game.fire([npc_pos[0], npc_pos[1] + 2.0, npc_pos[2]], [0.0, -1.0, 0.0]));
+        for _ in 0..10 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert_eq!(game.npcs.len(), 8, "no kills allowed after game over");
+        assert_eq!(game.score, 0, "no score after game over");
+        assert_eq!(game.hud.health, 100.0, "player health locked after game over");
     }
 
     /// 网络环回演示：init 能绑定环回 server，client 的 Join 能被 server 收到并回 ack
