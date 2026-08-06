@@ -7,6 +7,9 @@
 //! 4. 每帧更新相机并渲染
 
 mod engine;
+mod audio;
+mod net;
+mod ui;
 
 use std::time::{Duration, Instant};
 
