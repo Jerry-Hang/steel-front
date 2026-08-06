@@ -49,6 +49,8 @@ struct GameApp {
     last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
     last_frame: Instant,
+    /// 是否请求开火（Space 按下置位，update 消费）
+    fire_requested: bool,
     /// 游戏运行时中枢（物理/武器/AI/UI/音频/网络）
     game: Game,
     /// 程序是否正在运行
@@ -67,6 +69,7 @@ impl GameApp {
             right_dragging: false,
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
+            fire_requested: false,
             game: Game::new(),
             running: true,
         }
@@ -87,6 +90,15 @@ impl GameApp {
 
         // 更新游戏逻辑（物理、武器、AI 等）
         self.game.update(delta_time, &self.camera);
+
+        // 开火：从相机位置沿视线发射投射物
+        if self.fire_requested {
+            let pos = self.camera.position();
+            let dir = self.camera.forward();
+            self.game
+                .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+            self.fire_requested = false;
+        }
     }
 
     /// 渲染一帧
@@ -199,6 +211,8 @@ impl ApplicationHandler for GameApp {
                     KeyCode::KeyD => self.key_state.right = pressed,
                     KeyCode::KeyQ => self.key_state.down = pressed,
                     KeyCode::KeyE => self.key_state.up = pressed,
+                    // Space 开火（投射物武器）
+                    KeyCode::Space => self.fire_requested = pressed,
                     _ => {}
                 }
             }
