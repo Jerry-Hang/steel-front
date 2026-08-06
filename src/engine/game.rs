@@ -27,6 +27,10 @@ const GRID_HALF: f32 = GRID_CELL * (GRID_SIZE as f32) * 0.5;
 const NPC_COUNT: usize = 8;
 /// NPC 发现玩家距离（米）
 const NPC_SIGHT: f32 = 60.0;
+/// 波间倒计时（秒）
+const WAVE_INTERMISSION: f32 = 3.0;
+/// 击杀得分
+const KILL_SCORE: u64 = 10;
 
 /// 网络环回演示（仅 RV3D_NET=1 启用）：同进程 Server + Client
 struct NetworkDemo {
@@ -68,6 +72,10 @@ pub struct Npc {
     pub path: Vec<GridPos>,
     /// 路径游标
     path_index: usize,
+    /// 当前血量
+    pub hp: f32,
+    /// 血量上限（出生时设定，随波次递进）
+    pub max_hp: f32,
 }
 
 /// 世界坐标 → 网格坐标（±256 → 0..128）
@@ -143,6 +151,16 @@ pub struct Game {
     net_demo: Option<NetworkDemo>,
     /// 游戏主状态（commit a 先提供枚举与查询；e 接入完整状态机）
     game_state: GameState,
+    /// 当前波次（Game::new 预置的 8 个 NPC 即第 1 波）
+    wave: u32,
+    /// 波间倒计时（清空后 3 秒刷下一波）
+    wave_timer: f32,
+    /// 击杀累计得分
+    score: u64,
+    /// 下一个 NPC 全局 id（出生用，保证巡逻相位唯一）
+    next_npc_id: u32,
+    /// 上次状态日志时间（1 秒一条 game: wave=...）
+    last_status_log: f32,
 }
 
 impl Game {
@@ -196,6 +214,8 @@ impl Game {
                 perception: NpcPerception::default(),
                 path: Vec::new(),
                 path_index: 0,
+                hp: 100.0,
+                max_hp: 100.0,
             });
         }
         log::info!(
@@ -262,6 +282,11 @@ impl Game {
                 }
             },
             game_state: GameState::Playing,
+            wave: 1,
+            wave_timer: 0.0,
+            score: 0,
+            next_npc_id: NPC_COUNT as u32,
+            last_status_log: 0.0,
         }
     }
 
@@ -306,6 +331,21 @@ impl Game {
         self.drain_collisions();
         self.update_projectiles(dt);
         self.update_ai(dt, camera);
+        self.update_waves(dt, &camera.position());
+        // 状态日志（1 秒一条，冒烟断言 game: wave= 序列用）
+        if self.time - self.last_status_log >= 1.0 {
+            self.last_status_log = self.time;
+            let enemy_hp = self.npcs.first().map(|n| n.max_hp).unwrap_or(0.0);
+            log::info!(
+                "game: wave={} enemies={} enemy_hp={:.0} hp={:.0}/{:.0} score={}",
+                self.wave,
+                self.npcs.len(),
+                enemy_hp,
+                self.hud.health,
+                self.hud.max_health,
+                self.score
+            );
+        }
         // 音频：每帧按 dt 渲染样本（SilentSink 丢弃输出，混音/衰减链路真实运行）
         let frames = ((self.audio_sample_rate as f32) * dt) as usize;
         self.audio
@@ -434,7 +474,7 @@ impl Game {
         self.hits
     }
 
-    /// 投射物推进 + 与物理刚体碰撞检测（命中即销毁）
+    /// 投射物推进 + 碰撞检测：物理刚体/球体命中即销毁；NPC 命中扣血，hp≤0 移除并计分
     fn update_projectiles(&mut self, dt: f32) {
         for p in self.projectiles.iter_mut() {
             if p.is_alive() {
@@ -448,11 +488,29 @@ impl Game {
             if !p.is_alive() {
                 continue;
             }
-            if self.collide_projectile(&p) {
+            if self.collide_physics(&p) {
                 hit_count += 1;
-            } else {
-                alive.push(p);
+                continue;
             }
+            if let Some(idx) = self.hit_npc_index(&p) {
+                hit_count += 1;
+                let dmg = p.damage;
+                let npc = &mut self.npcs[idx];
+                npc.hp -= dmg;
+                if npc.hp <= 0.0 {
+                    let id = npc.id;
+                    self.npcs.remove(idx);
+                    self.score += KILL_SCORE;
+                    log::info!(
+                        "kill: npc #{} eliminated (wave {}) score={}",
+                        id,
+                        self.wave,
+                        self.score
+                    );
+                }
+                continue;
+            }
+            alive.push(p);
         }
         self.projectiles = alive;
         self.hits += hit_count as u64;
@@ -465,18 +523,14 @@ impl Game {
         }
     }
 
-    /// 投射物点是否落在某个 AABB 刚体内或球体内
-    fn collide_projectile(&self, p: &Projectile) -> bool {
+    /// 投射物是否命中物理刚体/球体（命中即销毁，不产生击杀）
+    fn collide_physics(&self, p: &Projectile) -> bool {
         let (px, py, pz) = (p.position[0], p.position[1], p.position[2]);
         for body in &self.world.bodies {
             let aabb = body.aabb();
-            if px >= aabb.min.x
-                && px <= aabb.max.x
-                && py >= aabb.min.y
-                && py <= aabb.max.y
-                && pz >= aabb.min.z
-                && pz <= aabb.max.z
-            {
+            if px >= aabb.min.x && px <= aabb.max.x
+                && py >= aabb.min.y && py <= aabb.max.y
+                && pz >= aabb.min.z && pz <= aabb.max.z {
                 return true;
             }
         }
@@ -488,8 +542,13 @@ impl Game {
                 return true;
             }
         }
-        // NPC 命中判定（物理球体：中心在 NPC 头顶，半径 0.8）
-        for npc in &self.npcs {
+        false
+    }
+
+    /// 投射物命中的 NPC 下标（命中球：中心在 NPC 头顶，半径 0.8）；未命中返回 None
+    fn hit_npc_index(&self, p: &Projectile) -> Option<usize> {
+        let (px, py, pz) = (p.position[0], p.position[1], p.position[2]);
+        for (i, npc) in self.npcs.iter().enumerate() {
             let cx = npc.position[0];
             let cy = npc.position[1] + 0.8;
             let cz = npc.position[2];
@@ -497,10 +556,78 @@ impl Game {
             let dy = py - cy;
             let dz = pz - cz;
             if dx * dx + dy * dy + dz * dz <= 0.8 * 0.8 {
-                return true;
+                return Some(i);
             }
         }
-        false
+        None
+    }
+
+    /// 波次推进：全部 NPC hp≤0 移除（`npcs` 为空）才算清空；清空后 3 秒倒计时刷下一波。
+    ///
+    /// 跑远的存活 NPC 仍留在列表里，不算清空（必须击杀全部）。
+    fn update_waves(&mut self, dt: f32, player: &glam::Vec3) {
+        if self.npcs.is_empty() {
+            if self.wave_timer <= 0.0 {
+                self.wave_timer = WAVE_INTERMISSION;
+                log::info!(
+                    "wave: wave {} cleared, next in {:.0}s",
+                    self.wave,
+                    WAVE_INTERMISSION
+                );
+            } else {
+                self.wave_timer -= dt;
+                if self.wave_timer <= 0.0 {
+                    self.wave += 1;
+                    self.spawn_wave(self.wave, player);
+                }
+            }
+        }
+    }
+
+    /// 生成第 n 波敌人：数量/速度/血量随波次递进，环形出生在玩家周围。
+    ///
+    /// 出生前清掉残留存活 NPC，保证新旧波不共存。
+    fn spawn_wave(&mut self, n: u32, player: &glam::Vec3) {
+        if !self.npcs.is_empty() {
+            log::info!(
+                "wave: purged {} leftover npcs before wave {}",
+                self.npcs.len(),
+                n
+            );
+            self.npcs.clear();
+        }
+        let count = (4 + 2 * n).min(24) as usize;
+        let speed = (4.0 * (1.0 + 0.06 * (n as f32 - 1.0))).min(8.0);
+        let hp = 100.0 + 20.0 * (n as f32 - 1.0);
+        let tau = std::f32::consts::TAU;
+        for i in 0..count {
+            let angle = i as f32 * (tau / count as f32) + n as f32 * 0.37;
+            let radius = 40.0 + 40.0 * ((i as u32 * 7 + n * 3) % 5) as f32 / 4.0;
+            let x = (player.x + angle.cos() * radius).clamp(-250.0, 250.0);
+            let z = (player.z + angle.sin() * radius).clamp(-250.0, 250.0);
+            let id = self.next_npc_id as usize;
+            self.next_npc_id += 1;
+            self.npcs.push(Npc {
+                id,
+                position: [x, terrain_height_at(x, z), z],
+                speed,
+                attack_range: 12.0,
+                home: [x, z],
+                state_machine: NpcStateMachine::new(),
+                perception: NpcPerception::default(),
+                path: Vec::new(),
+                path_index: 0,
+                hp,
+                max_hp: hp,
+            });
+        }
+        log::info!(
+            "wave: wave {} spawned {} enemies (speed={:.1} hp={:.0})",
+            n,
+            count,
+            speed,
+            hp
+        );
     }
 
     /// 推进 NPC：感知 → 状态机 → A* 路径 → 移动 → 地形高度
@@ -708,6 +835,53 @@ mod tests {
     fn game_state_starts_playing() {
         let game = Game::new();
         assert_eq!(game.state(), GameState::Playing);
+    }
+
+    /// 波次清空（npcs 空）后开始 3 秒倒计时，随后刷出下一波
+    #[test]
+    fn wave_spawns_after_clear() {
+        let mut game = Game::new();
+        assert_eq!(game.wave, 1);
+        assert_eq!(game.npcs.len(), 8);
+        game.npcs.clear();
+        game.update(0.01, &Camera::new());
+        assert!(game.wave_timer > 0.0, "countdown should start after clear");
+        assert_eq!(game.wave, 1, "wave must not advance during countdown");
+        // 推进 3 秒以上
+        for _ in 0..320 {
+            game.update(0.01, &Camera::new());
+        }
+        assert_eq!(game.wave, 2, "next wave should spawn after countdown");
+        assert!(!game.npcs.is_empty(), "wave 2 should spawn enemies");
+        assert_eq!(game.npcs.len(), (4 + 2 * 2).min(24));
+    }
+
+    /// 投射物命中 NPC 扣血（一次命中 25 伤害）
+    #[test]
+    fn projectile_damages_npc() {
+        let mut game = Game::new();
+        let npc_pos = game.npcs[0].position;
+        let hp_before = game.npcs[0].hp;
+        assert!(game.fire([npc_pos[0], npc_pos[1] + 2.0, npc_pos[2]], [0.0, -1.0, 0.0]));
+        for _ in 0..3 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert_eq!(game.npcs[0].hp, hp_before - 25.0, "one hit should deal weapon damage");
+        assert_eq!(game.npcs.len(), 8, "non-lethal hit keeps the npc");
+    }
+
+    /// 击杀：hp≤0 移除 NPC 并计分
+    #[test]
+    fn projectile_kill_scores_and_removes_npc() {
+        let mut game = Game::new();
+        game.npcs[0].hp = 20.0;
+        let npc_pos = game.npcs[0].position;
+        assert!(game.fire([npc_pos[0], npc_pos[1] + 2.0, npc_pos[2]], [0.0, -1.0, 0.0]));
+        for _ in 0..3 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert_eq!(game.npcs.len(), 7, "killed npc should be removed");
+        assert_eq!(game.score, KILL_SCORE);
     }
 
     /// 网络环回演示：init 能绑定环回 server，client 的 Join 能被 server 收到并回 ack
