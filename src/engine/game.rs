@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::audio::{AudioClip, AudioListener, AudioPlayer, AudioSource, Channel, SilentSink};
 use super::camera::Camera;
 use super::ai::{find_path, GridMap, GridPos, NpcPerception, NpcState, NpcStateMachine};
 use super::physics::{self, Body, CollisionEvent, CollisionListener, SphereBody, Vec3 as Pv};
@@ -113,6 +114,10 @@ pub struct Game {
     frames: u64,
     /// fps 统计时间窗起点
     fps_window_start: Instant,
+    /// 音频播放器（SilentSink：rodio 未安装，样本被丢弃，但混音/衰减链路真实运行）
+    audio: AudioPlayer<SilentSink>,
+    /// 音频采样率
+    audio_sample_rate: u32,
 }
 
 impl Game {
@@ -195,6 +200,23 @@ impl Game {
             hud: HudState::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             frames: 0,
             fps_window_start: Instant::now(),
+            audio_sample_rate: 48_000,
+            audio: {
+                let player = AudioPlayer::new(SilentSink::new(48_000, 2));
+                let mut player = player;
+                // 440Hz 测试音（0.5 秒）循环播放，声源放场地中央
+                if let Some(clip) = make_test_clip(48_000) {
+                    player.mixer_mut().set_master(0.8);
+                    player.mixer_mut().set_channel_volume(Channel::Sfx, 1.0);
+                    player.mixer_mut().play(
+                        Arc::new(clip),
+                        AudioSource::new(glam::Vec3::new(0.0, 2.0, 0.0), 1.0),
+                        Channel::Sfx,
+                        true,
+                    );
+                }
+                player
+            },
         }
     }
 
@@ -215,6 +237,10 @@ impl Game {
         self.drain_collisions();
         self.update_projectiles(dt);
         self.update_ai(dt, camera);
+        // 音频：每帧按 dt 渲染样本（SilentSink 丢弃输出，混音/衰减链路真实运行）
+        let frames = ((self.audio_sample_rate as f32) * dt) as usize;
+        self.audio
+            .tick(&AudioListener::new(camera.position()), frames.min(8192));
     }
 
     /// 构建 HUD quad 列表：血条/弹药/FPS + 调试行（LOD、实体数、NPC 状态、碰撞/命中）
@@ -509,6 +535,24 @@ mod tests {
         assert!(u.points[1].position.w >= 1.0, "point light B enabled");
     }
 
+    /// 音频：测试音循环播放，tick 每帧运行且 voice 持续存在
+    #[test]
+    fn audio_mixer_runs_with_voice() {
+        let mut game = Game::new();
+        assert!(
+            game.audio.mixer().voice_count() >= 1,
+            "test tone should be playing"
+        );
+        let cam = Camera::new();
+        for _ in 0..60 {
+            game.update(1.0 / 60.0, &cam);
+        }
+        assert!(
+            game.audio.mixer().voice_count() >= 1,
+            "looping voice should persist"
+        );
+    }
+
     /// AI：NPC 站在地形高度上，且相机在原点时能离开 Idle 状态
     #[test]
     fn ai_npcs_stand_on_terrain_and_leave_idle() {
@@ -595,4 +639,17 @@ fn advance_npc(
         npc.position[2] += dz / d * step;
     }
     npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+}
+
+/// 生成 440Hz 正弦测试音（0.5 秒，双声道），用于驱动混音链路
+fn make_test_clip(sample_rate: u32) -> Option<AudioClip> {
+    let frames = (sample_rate as f32 * 0.5) as usize;
+    let mut samples = Vec::with_capacity(frames * 2);
+    for i in 0..frames {
+        let t = i as f32 / sample_rate as f32;
+        let v = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.4;
+        samples.push(v);
+        samples.push(v);
+    }
+    AudioClip::new(samples, sample_rate, 2)
 }
