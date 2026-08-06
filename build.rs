@@ -27,6 +27,8 @@ struct VertexOutput {
     @location(0) color: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) fade: f32,
+    @location(3) world_pos: vec3<f32>,
+    @location(4) view_dir: vec3<f32>,
 }
 @vertex
 fn vs_main(
@@ -37,15 +39,19 @@ fn vs_main(
 ) -> VertexOutput {
     var output: VertexOutput;
     let inst = instances[instance_index];
-    output.position = camera.proj * camera.view * inst.model * vec4<f32>(position, 1.0);
+    let world_pos = inst.model * vec4<f32>(position, 1.0);
+    output.position = camera.proj * camera.view * world_pos;
+    output.world_pos = world_pos.xyz;
+    // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（刚体变换）
+    let t = camera.view[3].xyz;
+    let cam_pos = -(camera.view[0].xyz * t.x + camera.view[1].xyz * t.y + camera.view[2].xyz * t.z);
+    // 片元光照使用：表面 → 相机方向
+    output.view_dir = normalize(cam_pos - world_pos.xyz);
     output.color = color * inst.tint.rgb;
     output.uv = uv;
     if (instance_index == TERRAIN_INSTANCE_INDEX) {
         output.fade = 1.0;
     } else {
-        // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（刚体变换）
-        let t = camera.view[3].xyz;
-        let cam_pos = -(camera.view[0].xyz * t.x + camera.view[1].xyz * t.y + camera.view[2].xyz * t.z);
         // 地面平面距离（不随相机高度变化，俯瞰全场时不误淡出）
         let center = inst.model[3].xyz;
         let dx = center.x - cam_pos.x;
@@ -64,10 +70,100 @@ struct VertexOutput {
     @location(0) color: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) fade: f32,
+    @location(3) world_pos: vec3<f32>,
+    @location(4) view_dir: vec3<f32>,
 }
 
 @group(0) @binding(1) var texture_sampled: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
+
+// ---- 光照 Uniform（默认全零 = 光照关闭，保持原混合渲染向后兼容）----
+struct DirectionalLight {
+    // xyz = 表面→光源方向, w = enabled(1.0/0.0)
+    direction: vec4<f32>,
+    // rgb = 颜色, w = 强度
+    color_intensity: vec4<f32>,
+}
+struct PointLight {
+    // xyz = 世界位置, w = enabled(1.0/0.0)
+    position: vec4<f32>,
+    // rgb = 颜色, w = 强度
+    color_intensity: vec4<f32>,
+    // x = constant, y = linear, z = quadratic, w = range
+    attenuation: vec4<f32>,
+}
+struct ShadowInfo {
+    // 光空间 view-proj（世界空间 → 光裁剪空间）
+    light_view_proj: mat4x4<f32>,
+    // x = depth_bias, y = normal_bias, z = enabled, w = 0
+    bias: vec4<f32>,
+    // x = shadow map 尺寸, y/z/w = 0
+    config: vec4<f32>,
+}
+struct LightUniform {
+    // x = lighting enabled, y = shadow enabled, z/w = 0
+    flags: vec4<f32>,
+    // rgb = 环境色, w = 环境强度
+    ambient: vec4<f32>,
+    directional: DirectionalLight,
+    points: array<PointLight, 4>,
+    shadow: ShadowInfo,
+}
+@group(0) @binding(4) var<uniform> light_data: LightUniform;
+
+/// Blinn-Phong 漫反射：max(dot(n, l), 0)
+fn bp_diffuse(normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
+    return max(dot(normal, light_dir), 0.0);
+}
+
+/// Blinn-Phong 高光：pow(max(dot(n, h), 0), shininess)，h = normalize(l + v)
+fn bp_specular(normal: vec3<f32>, light_dir: vec3<f32>, view_dir: vec3<f32>, shininess: f32) -> f32 {
+    let half_dir = normalize(light_dir + view_dir);
+    return pow(max(dot(normal, half_dir), 0.0), shininess);
+}
+
+/// 点光源衰减：1 / (c + l*d + q*d*d)，clamp 到 [0, 1]
+fn point_attenuation(dist: f32, constant: f32, linear: f32, quadratic: f32) -> f32 {
+    let denom = constant + linear * dist + quadratic * dist * dist;
+    if (denom <= 0.0) {
+        return 1.0;
+    }
+    return min(1.0, 1.0 / denom);
+}
+
+/// 阴影深度比较：1.0 = 阴影，0.0 = 照亮（bias 缓解 acne）
+fn shadow_test(shadow_depth: f32, fragment_depth: f32, bias: f32) -> f32 {
+    if (fragment_depth - bias > shadow_depth) {
+        return 1.0;
+    }
+    return 0.0;
+}
+
+fn evaluate_directional(light: DirectionalLight, normal: vec3<f32>, view_dir: vec3<f32>, shininess: f32) -> vec3<f32> {
+    if (light.direction.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+    let light_dir = normalize(light.direction.xyz);
+    let diffuse = bp_diffuse(normal, light_dir);
+    let spec = bp_specular(normal, light_dir, view_dir, shininess);
+    return light.color_intensity.xyz * light.color_intensity.w * (diffuse + 0.4 * spec);
+}
+
+fn evaluate_point(light: PointLight, world_pos: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, shininess: f32) -> vec3<f32> {
+    if (light.position.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+    let to_light = light.position.xyz - world_pos;
+    let dist = length(to_light);
+    if (light.attenuation.w > 0.0 && dist > light.attenuation.w) {
+        return vec3<f32>(0.0);
+    }
+    let light_dir = to_light / dist;
+    let diffuse = bp_diffuse(normal, light_dir);
+    let spec = bp_specular(normal, light_dir, view_dir, shininess);
+    let atten = point_attenuation(dist, light.attenuation.x, light.attenuation.y, light.attenuation.z);
+    return light.color_intensity.xyz * light.color_intensity.w * atten * (diffuse + 0.4 * spec);
+}
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
@@ -76,7 +172,41 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     let texel = textureSample(texture_sampled, texture_sampler, input.uv);
     let mixed = mix(input.color, texel.rgb, 0.5) * input.fade;
-    return vec4<f32>(mixed, 1.0);
+
+    // 默认关闭：light UBO 全零（flags.x = 0）时保持原「纹理+顶点颜色 50% 混合」渲染
+    if (light_data.flags.x < 0.5) {
+        return vec4<f32>(mixed, 1.0);
+    }
+
+    // 法线：顶点数据无法线，用世界坐标的屏幕导数求面法线，并朝向相机（双面凸体近似）
+    let view_dir = normalize(input.view_dir);
+    var normal = normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos)));
+    if (dot(normal, view_dir) < 0.0) {
+        normal = -normal;
+    }
+
+    // 阴影因子（方向光）：光空间深度比较 + bias。
+    // 基础实现未接入 shadow map 贴图，占位采样深度 1.0（远平面外 = 无遮挡）。
+    var shadow_factor = 0.0;
+    if (light_data.flags.y >= 0.5 && light_data.shadow.bias.z >= 0.5) {
+        let sp = light_data.shadow.light_view_proj * vec4<f32>(input.world_pos, 1.0);
+        let shadow_uv = sp.xy * 0.5 + vec2<f32>(0.5, 0.5);
+        if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0
+            && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0
+            && sp.z >= 0.0 && sp.z <= 1.0) {
+            shadow_factor = shadow_test(1.0, sp.z, light_data.shadow.bias.x);
+        }
+    }
+
+    // Blinn-Phong 光照：环境光 + 方向光（乘阴影因子）+ 点光源（最多 4 个）
+    let shininess = 32.0;
+    var radiance = light_data.ambient.rgb * light_data.ambient.w;
+    radiance = radiance + evaluate_directional(light_data.directional, normal, view_dir, shininess) * (1.0 - shadow_factor);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        radiance = radiance + evaluate_point(light_data.points[i], input.world_pos, normal, view_dir, shininess);
+    }
+    let lit = mixed * min(radiance, vec3<f32>(1.0));
+    return vec4<f32>(lit, 1.0);
 }
 "#;
 
