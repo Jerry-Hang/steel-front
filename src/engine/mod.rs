@@ -8,9 +8,11 @@
 //! - `lighting`: 光照与阴影
 //! - `physics`: 物理碰撞系统
 //! - `weapons`: 武器系统
+//! - `game`: 运行时中枢（模块接线）
 
 pub mod ai;
 pub mod camera;
+pub mod game;
 pub mod lighting;
 pub mod physics;
 pub mod renderer;

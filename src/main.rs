@@ -22,6 +22,7 @@ use winit::{
 };
 
 use engine::camera::{Camera, CameraMode, KeyState};
+use engine::game::Game;
 use engine::renderer::Renderer;
 use engine::window::{self, WINDOW_HEIGHT, WINDOW_WIDTH};
 
@@ -48,6 +49,8 @@ struct GameApp {
     last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
     last_frame: Instant,
+    /// 游戏运行时中枢（物理/武器/AI/UI/音频/网络）
+    game: Game,
     /// 程序是否正在运行
     running: bool,
 }
@@ -64,6 +67,7 @@ impl GameApp {
             right_dragging: false,
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
+            game: Game::new(),
             running: true,
         }
     }
@@ -80,6 +84,9 @@ impl GameApp {
 
         // 更新相机（双模式：轨道/飞行，含惯性速度与边界 clamp）
         self.camera.update(&self.key_state, delta_time);
+
+        // 更新游戏逻辑（物理、武器、AI 等）
+        self.game.update(delta_time, &self.camera);
     }
 
     /// 渲染一帧
