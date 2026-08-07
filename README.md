@@ -27,29 +27,24 @@
 
 ## 三、当前工作状态（重要）
 
-- HEAD = 276b395（docs 交接提交）；工作区唯一未提交改动：
-  - `M src/engine/game.rs`：spawn_wave 出生点日志（冒烟辅助，是否保留待定）
-- 最终 20s gameplay 冒烟**尚未通过**：kills=0。根因已定位（见下），方案待确认。
+- HEAD = 0707075（chore(scripts)），docs 交接提交紧随其后；工作区干净，push 已完成。
+- 最终 20s gameplay 冒烟**已通过**（方案 A，游戏侧 + harness 适配）：
+  `kills=1`、4 发命中、VUID=0、fps 249–299、yaw/pitch 变化、无 panic。
+- 落地 commit：
+  - `feat(game)`：演示刚体挪到场地角落（距原点 >150m，不再拦截过原点射线）
+  - `feat(game)`：NPC 进 Attack 站定时打位置日志 `npc: #id stand (x,y,z)`
+  - `chore(scripts)`：冒烟改为 读站定日志 → 滚轮拉近 dist=1.5 → 对跖点瞄准 → 点射 6 发
 
-### 冒烟卡点根因（已定位，勿重复排查）
-1. Orbit 模式射线必过原点，只能打中原点对面窄走廊；
-2. NPC 走 A* 路径，攻击态才站定，停车点不在固定射线上；
-3. 真实 bug：原点附近 3 个演示 AABB + 2 个球体拦截投射物（"吃子弹的箱子"）。
-
-### 待确认方案
-- 游戏侧（各一个 commit）：演示刚体挪到场地角落（feat(fix)）；NPC 进 Attack 站定时打位置日志；
-- 冒烟脚本改为：等 NPC 站定 → 读日志 → 对跖点瞄准 → 点射 4–6 发；
-- 或纯 harness 侧（飞行模式 + 反馈瞄准，不动游戏代码）。
+### 冒烟关键机制（勿回退）
+1. Orbit 射线必过原点：相机站在目标 NPC 对跖点（`direction = -C/|C|`）；
+2. NPC 攻击态站定（距相机 <12m）；只选 `|C| ≤ 10.4` 的对侧 NPC——
+   拉近到 dist=1.5 后对跖点距离 = |C|+1.5 < 12，目标全程保持站定；
+3. 演示刚体在角落，12m 射线路径上无拦截体；点射 6 发 × 25 伤害 ≥ 100 hp。
 
 ## 四、待办任务（Next Steps）
 
-1. 确认并执行上述冒烟方案，通过最终 20s 冒烟（断言：kill 日志、yaw/pitch 变化、
-   wave= 序列、VUID=0、fps≥200、不崩溃）；
-2. 提交 game.rs 的 spawn 日志改动（若保留）；
-3. 冒烟脚本（/tmp/gameplay_smoke.py、/tmp/run_gameplay_smoke.sh、/tmp/release_keys.py）
-   迁入仓库 scripts/ 并提交——/tmp 重启即失；
-4. push 到 GitHub：WSL 直连不通，**在 Windows PowerShell 窗口执行 git push**；
-5. 验收约束：dead-code 保持 0、测试全绿、不破坏现有 111 个测试。
+- 全部完成：20s 冒烟通过、scripts/ 已迁入并提交、push 已执行。
+- 后续若重跑：`bash scripts/run_gameplay_smoke.sh`（需沙箱外 X/Vulkan 权限）。
 
 ## 五、关键约定与环境备忘
 
@@ -67,4 +62,4 @@
 | 测试 | 111 passed, 0 failed |
 | 警告 | 0 |
 | 冒烟（飞行） | VUID=0, fps 228–300 |
-| gameplay 冒烟 | FOCUS/yaw/pitch/掉血 OK，kills=0（待修） |
+| gameplay 冒烟 | ALL-OK：kills=1、hit_events=4、VUID=0、fps 249–299、无 panic |
