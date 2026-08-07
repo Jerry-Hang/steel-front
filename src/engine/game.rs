@@ -678,9 +678,11 @@ impl Game {
             let z = (player.z + angle.sin() * radius).clamp(-250.0, 250.0);
             let id = self.next_npc_id as usize;
             self.next_npc_id += 1;
+            let y = terrain_height_at(x, z);
+            log::info!("wave: npc #{} spawn ({:.1}, {:.1}, {:.1})", id, x, y, z);
             self.npcs.push(Npc {
                 id,
-                position: [x, terrain_height_at(x, z), z],
+                position: [x, y, z],
                 speed,
                 attack_range: 12.0,
                 home: [x, z],
