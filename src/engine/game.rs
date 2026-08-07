@@ -169,14 +169,15 @@ impl Game {
     pub fn new() -> Self {
         let mut world = physics::World::new();
         world.gravity = 9.8;
-        // 地形中央 60×60 区域已压平到 y=0，演示刚体放在该区域
+        // 地形中央 60×60 区域已压平到 y=0；演示刚体放在场地角落
         world.ground_y = 0.0;
-        for (x, z) in [(-12.0, -8.0), (0.0, -8.0), (12.0, -8.0)] {
+        // 演示刚体远离原点（>150m）：轨道相机射线必过原点，放在中心区会拦截射向 NPC 的投射物
+        for (x, z) in [(120.0, 120.0), (140.0, 130.0), (125.0, 145.0)] {
             world
                 .bodies
                 .push(Body::new(Pv::new(x, 3.0, z), Pv::new(1.2, 1.2, 1.2)));
         }
-        for (x, z) in [(-6.0, 8.0), (6.0, 8.0)] {
+        for (x, z) in [(135.0, 110.0), (110.0, 135.0)] {
             let mut sphere = SphereBody::new(Pv::new(x, 4.0, z), 1.0);
             sphere.restitution = 0.5;
             world.spheres.push(sphere);
