@@ -44,6 +44,19 @@ const PLAYER_SPEED: f32 = 6.0;
 const COVER_MAX_DIST: u32 = 10;
 /// 脚步声音效限频间隔（秒）
 const FOOTSTEP_INTERVAL: f32 = 0.5;
+/// 每关波次数：清完 WAVES_PER_LEVEL 波升关，难度按累计有效波次递进（跨关不回落）
+const WAVES_PER_LEVEL: u32 = 3;
+/// 程序化障碍环带内半径（米）。
+///
+/// 必须 > NPC 最大攻击距离(16) + 掩体搜索半径(40) = 56：否则攻击态 NPC 会就近跑去掩体，
+/// 不再原地站定（冒烟依赖 `npc: #id stand` 日志瞄准点射）；同时保证玩家出生点附近弹道无阻挡。
+const MAP_RING_INNER: f32 = 58.0;
+/// 程序化障碍环带外半径（米）
+const MAP_RING_OUTER: f32 = 130.0;
+/// 障碍簇数量基数：实际簇数 = MAP_CLUSTERS + seed % 5（6..=10）
+const MAP_CLUSTERS: u32 = 6;
+/// 障碍盒高度（米）
+const MAP_BLOCK_HEIGHT: f32 = 2.4;
 
 /// 网络环回演示（仅 RV3D_NET=1 启用）：同进程 Server + Client
 struct NetworkDemo {
@@ -102,6 +115,109 @@ pub fn grid_to_world(g: GridPos) -> (f32, f32) {
     let x = (g.x as f32 + 0.5) * GRID_CELL - GRID_HALF;
     let z = (g.y as f32 + 0.5) * GRID_CELL - GRID_HALF;
     (x, z)
+}
+
+/// 程序化地图上的静态障碍盒（AABB：世界坐标中心 + x/z 半尺寸，贴地高度 MAP_BLOCK_HEIGHT）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapObstacle {
+    pub x: f32,
+    pub z: f32,
+    pub half_w: f32,
+    pub half_d: f32,
+}
+
+/// 程序化关卡布局：确定性（种子 = 关卡号），障碍全部位于中央安全环带之外
+#[derive(Debug, Clone, Default)]
+pub struct LevelMap {
+    pub obstacles: Vec<MapObstacle>,
+}
+
+/// 确定性 LCG（与 audio.rs 同款常数，零第三方依赖）：同一种子恒同布局，可测试
+fn map_lcg_next(state: &mut u32) -> u32 {
+    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    *state
+}
+
+/// [0,1) 确定性随机数（取 LCG 高 24 位，避免低位周期过短）
+fn map_lcg_unit(state: &mut u32) -> f32 {
+    (map_lcg_next(state) >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// 把障碍盒径向推出安全环（若侵入 MAP_RING_INNER 以内则沿原方向外推），并 clamp 到地图范围
+fn push_out_of_safe_ring(ob: &mut MapObstacle) {
+    let d = (ob.x * ob.x + ob.z * ob.z).sqrt();
+    if d < MAP_RING_INNER && d > 1e-4 {
+        let k = MAP_RING_INNER / d;
+        ob.x *= k;
+        ob.z *= k;
+    }
+    ob.x = ob.x.clamp(-240.0, 240.0);
+    ob.z = ob.z.clamp(-240.0, 240.0);
+}
+
+/// 程序化关卡地图：以 seed 生成 6..=10 簇障碍墙，分布在 58..130m 环带。
+///
+/// 布局规则（注释即约定，勿随意改动）：
+/// 1. 中央 MAP_RING_INNER 内刻意留空：攻击态 NPC 需原地站定（冒烟机制），
+///    且玩家出生点/近距离战斗弹道不受阻挡（见 MAP_RING_INNER 注释）。
+/// 2. 每簇沿切线方向并排 1..=3 个盒子（带间隙），形成可绕行的掩体墙。
+/// 3. 盒子两两不重叠（最多重试 8 次，仍冲突则跳过），确定性可测。
+pub fn generate_level_map(seed: u32) -> LevelMap {
+    let mut state = seed.wrapping_mul(0x9E37_79B9) ^ 0x5EED_1234;
+    let clusters = MAP_CLUSTERS + (state.wrapping_add(seed) % 5);
+    let mut obstacles: Vec<MapObstacle> = Vec::new();
+    let tau = std::f32::consts::TAU;
+    for _ in 0..clusters {
+        // 每簇 1..=3 个盒子，沿切线方向并排成墙
+        let n_boxes = 1 + (map_lcg_unit(&mut state) * 3.0) as usize;
+        let angle = map_lcg_unit(&mut state) * tau;
+        let dir = (angle.cos(), angle.sin());
+        let half_w = 1.2 + map_lcg_unit(&mut state) * 2.0; // 1.2..3.2
+        let half_d = 0.7 + map_lcg_unit(&mut state) * 1.0; // 0.7..1.7
+        let gap = 0.6;
+        let span = n_boxes as f32 * (half_w * 2.0 + gap);
+        // 簇中心到原点距离：内缘留出半墙余量，避免墙体侵入安全环
+        let min_dist = MAP_RING_INNER + span * 0.5 + 1.0;
+        let dist = min_dist + map_lcg_unit(&mut state) * (MAP_RING_OUTER - min_dist).max(1.0);
+        let cx = dir.0 * dist;
+        let cz = dir.1 * dist;
+        let tx = -dir.1; // 切线方向（垂直径向）
+        let tz = dir.0;
+        for i in 0..n_boxes {
+            let off = (i as f32 - (n_boxes as f32 - 1.0) * 0.5) * (half_w * 2.0 + gap);
+            let mut ob = MapObstacle {
+                x: cx + tx * off,
+                z: cz + tz * off,
+                half_w,
+                half_d,
+            };
+            // 冲突检测 + 抖动重试：先径向推出安全环，再与已有障碍查重叠；
+            // 重叠则小幅随机移位（最多 8 次），保证放置后同时满足安全环与非重叠约束
+            let mut placed = false;
+            for _ in 0..8 {
+                push_out_of_safe_ring(&mut ob);
+                let mut overlap = false;
+                for o in &obstacles {
+                    if (ob.x - o.x).abs() < ob.half_w + o.half_w
+                        && (ob.z - o.z).abs() < ob.half_d + o.half_d
+                    {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if !overlap {
+                    placed = true;
+                    break;
+                }
+                ob.x += (map_lcg_unit(&mut state) - 0.5) * 6.0;
+                ob.z += (map_lcg_unit(&mut state) - 0.5) * 6.0;
+            }
+            if placed {
+                obstacles.push(ob);
+            }
+        }
+    }
+    LevelMap { obstacles }
 }
 
 /// 碰撞事件缓冲：监听者写入，Game 每帧 drain 取走
@@ -178,6 +294,10 @@ pub struct Game {
     game_state: GameState,
     /// 当前波次（Game::new 预置的 8 个 NPC 即第 1 波）
     wave: u32,
+    /// 当前关卡（1 起；每关 WAVES_PER_LEVEL 波，清完升关并重新生成地图）
+    level: u32,
+    /// 当前关卡的程序化布局（种子 = level，供物理刚体 / AI 网格 / 渲染 marker 使用）
+    map: LevelMap,
     /// 波间倒计时（清空后 3 秒刷下一波）
     wave_timer: f32,
     /// 击杀累计得分
@@ -193,30 +313,10 @@ impl Game {
     pub fn new() -> Self {
         let mut world = physics::World::new();
         world.gravity = 9.8;
-        // 地形中央 60×60 区域已压平到 y=0；演示刚体放在场地角落
+        // 地形中央 60×60 区域已压平到 y=0（renderer.rs flatten_mask）；障碍刚体由关卡布局生成
         world.ground_y = 0.0;
-        // 演示刚体远离原点（>150m）：轨道相机射线必过原点，放在中心区会拦截射向 NPC 的投射物
-        for (x, z) in [(120.0, 120.0), (140.0, 130.0), (125.0, 145.0)] {
-            world
-                .bodies
-                .push(Body::new(Pv::new(x, 3.0, z), Pv::new(1.2, 1.2, 1.2)));
-        }
-        for (x, z) in [(135.0, 110.0), (110.0, 135.0)] {
-            let mut sphere = SphereBody::new(Pv::new(x, 4.0, z), 1.0);
-            sphere.restitution = 0.5;
-            world.spheres.push(sphere);
-        }
         let event_buf = Arc::new(Mutex::new(Vec::new()));
         world.add_listener(Box::new(EventBuffer(event_buf.clone())));
-        // AI 导航网格：加两块障碍簇，让 A* 有路可绕
-        let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
-        for (bx, bz) in [(48, 48), (70, 84)] {
-            for dx in 0..3 {
-                for dz in 0..3 {
-                    grid.block(GridPos::new(bx + dx, bz + dz));
-                }
-            }
-        }
         // NPC 出生点：集中在中心 ±40m（相机默认在原点附近，可触发 Chase）
         let spawns = [
             (-30.0, -20.0),
@@ -244,14 +344,7 @@ impl Game {
                 max_hp: 100.0,
             });
         }
-        log::info!(
-            "physics: {} AABB bodies, {} spheres, gravity={}, ground_y={}",
-            world.bodies.len(),
-            world.spheres.len(),
-            world.gravity,
-            world.ground_y
-        );
-        Self {
+        let mut game = Self {
             world,
             collisions: Vec::new(),
             total_collisions: 0,
@@ -279,7 +372,7 @@ impl Game {
             fire_cooldown: 0.0,
             shots: 0,
             hits: 0,
-            grid,
+            grid: GridMap::new(GRID_SIZE, GRID_SIZE),
             npcs,
             ai_log_time: 0.0,
             last_damage_time: 0.0,
@@ -287,6 +380,8 @@ impl Game {
             frames: 0,
             fps_window_start: Instant::now(),
             audio_sample_rate: 48_000,
+            level: 1,
+            map: LevelMap::default(),
             audio: {
                 let player = AudioPlayer::new(SilentSink::new(48_000, 2));
                 let mut player = player;
@@ -327,7 +422,10 @@ impl Game {
             score: 0,
             next_npc_id: NPC_COUNT as u32,
             last_status_log: 0.0,
-        }
+        };
+        // 初始关卡布局（level 1，种子 = 1）：物理刚体 + AI 网格 + 玩家安全区复位
+        game.apply_level(1);
+        game
     }
 
     /// 当前游戏状态（供 main.rs 控制光标捕获等输入行为）
@@ -350,18 +448,21 @@ impl Game {
         self.start_run(player);
     }
 
-    /// 开始一局：复位血量/弹药/分数/波次，清掉残留 NPC 后生成第 1 波，进入 Playing
+    /// 开始一局：复位血量/弹药/分数/波次/关卡，重建第 1 关地图，清掉残留 NPC 后生成第 1 波
     fn start_run(&mut self, player: &glam::Vec3) {
         self.hud.health = self.hud.max_health;
         self.hud.ammo = self.hud.max_ammo;
         self.hud.reserve = self.firearm.reserve();
         self.hud.settings_open = false;
+        self.hud.cancel_rebind();
         self.score = 0;
         self.wave = 1;
         self.wave_timer = 0.0;
         self.fire_cooldown = 0.0;
         self.firearm.reset();
         self.pending_kick = (0.0, 0.0);
+        // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
+        self.apply_level(1);
         self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
         self.player_body.vel = Pv::ZERO;
         self.move_forward = false;
@@ -381,6 +482,97 @@ impl Game {
         self.spawn_wave(1, player);
         self.game_state = GameState::Playing;
         log::info!("game: run started (wave 1)");
+    }
+
+    /// 累计有效波次：跨关不回落（level 2 第 1 波 ≈ 原第 4 波强度）
+    fn effective_wave(&self, wave: u32) -> u32 {
+        wave + (self.level.saturating_sub(1)) * WAVES_PER_LEVEL
+    }
+
+    /// 应用关卡布局：重建物理障碍刚体 + AI 导航网格（确定性，种子 = 关卡号）。
+    ///
+    /// 由 new() / start_run() / 升关时调用；同时把玩家拉回原点安全区，防止卡进障碍。
+    fn apply_level(&mut self, level: u32) {
+        self.level = level;
+        self.map = generate_level_map(level);
+        // 物理世界：清掉上一关障碍，重建为当前关卡障碍盒（贴地 AABB，供玩家碰撞/投射物拦截）
+        self.world.bodies.clear();
+        self.world.spheres.clear();
+        for ob in &self.map.obstacles {
+            self.world.bodies.push(Body::new(
+                Pv::new(ob.x, MAP_BLOCK_HEIGHT * 0.5, ob.z),
+                Pv::new(ob.half_w, MAP_BLOCK_HEIGHT * 0.5, ob.half_d),
+            ));
+        }
+        // AI 网格：障碍盒覆盖的格全部标记阻挡（NPC 寻路绕行 / 掩体点判定共用同一网格）
+        let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
+        let mut blocked_cells = 0usize;
+        for ob in &self.map.obstacles {
+            let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
+            let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
+            for gx in g0.x..=g1.x {
+                for gz in g0.y..=g1.y {
+                    let pos = GridPos::new(gx, gz);
+                    if grid.in_bounds(pos) {
+                        grid.block(pos);
+                        blocked_cells += 1;
+                    }
+                }
+            }
+        }
+        self.grid = grid;
+        // 升关/重开时把玩家拉回原点安全区（中央环带无阻碍，见 MAP_RING_INNER 注释）
+        self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
+        self.player_body.vel = Pv::ZERO;
+        log::info!(
+            "map: level {} generated: {} obstacle bodies, {} grid cells blocked",
+            level,
+            self.map.obstacles.len(),
+            blocked_cells
+        );
+    }
+
+    /// 当前关卡障碍列表（main.rs 每帧转成渲染 marker 用）
+    pub fn map_obstacles(&self) -> &[MapObstacle] {
+        &self.map.obstacles
+    }
+
+    /// 当前关卡（HUD/日志）
+    pub fn level(&self) -> u32 {
+        self.level
+    }
+
+    /// 设置面板：进入"等待按键绑定"（Enter 触发，绑定当前选中的键位动作）
+    pub fn begin_rebind(&mut self) {
+        if let Some(action) = self.hud.selected_action() {
+            self.hud.begin_rebind(action);
+        }
+    }
+
+    /// 设置面板：完成绑定（非 ESC 按键触发），绑定后持久化配置
+    pub fn complete_rebind(&mut self, code: u32) {
+        if self.hud.complete_rebind(code).is_some() {
+            crate::config::save(&self.current_config());
+        }
+    }
+
+    /// 设置面板：取消绑定（ESC 触发）
+    pub fn cancel_rebind(&mut self) {
+        self.hud.cancel_rebind();
+    }
+
+    /// 设置面板是否正在等待按键绑定（main.rs 据此拦截按键）
+    pub fn rebinding_active(&self) -> bool {
+        self.hud.rebinding_action().is_some()
+    }
+
+    /// 当前可持久化配置（键位 + 音量 + 灵敏度）
+    fn current_config(&self) -> crate::config::GameConfig {
+        crate::config::GameConfig {
+            volume: self.hud.volume,
+            sensitivity: self.hud.sensitivity,
+            bindings: self.hud.key_bindings,
+        }
     }
 
     /// 初始化网络环回演示：绑定环回 Server + 连入 Client，发起 Join
@@ -414,6 +606,8 @@ impl Game {
         self.hud.reserve = self.firearm.reserve();
         self.hud.reloading = self.firearm.is_reloading();
         self.hud.reload_progress = self.firearm.reload_progress();
+        // 关卡号同步（由关卡推进 / 重开写入，供 HUD 显示）
+        self.hud.level = self.level;
         // 命中标记衰减 + 音量同步
         self.hud.tick(dt);
         self.audio.mixer_mut().set_master(self.hud.volume);
@@ -705,7 +899,13 @@ impl Game {
 
     /// 设置面板开关（ESC 切换）：开/关都播提示音
     pub fn toggle_settings(&mut self) {
+        let was_open = self.hud.settings_open;
         self.hud.toggle_settings();
+        if was_open {
+            // 关闭设置面板：取消进行中的键位绑定，并持久化键位/音量/灵敏度
+            self.hud.cancel_rebind();
+            crate::config::save(&self.current_config());
+        }
         let src = AudioSource::new(self.player_eye(), 1.0);
         self.sfx.play(
             &mut self.audio.mixer_mut(),
@@ -721,7 +921,7 @@ impl Game {
         self.hud.settings_open
     }
 
-    /// 循环切换设置面板选中项（音量 ↔ 灵敏度）
+    /// 循环切换设置面板选中项（音量/灵敏度/7 个键位动作）
     pub fn cycle_settings(&mut self) {
         self.hud.cycle_settings_selection();
     }
@@ -730,9 +930,10 @@ impl Game {
     pub fn adjust_settings(&mut self, delta: f32) {
         if self.hud.settings_selection == 0 {
             self.hud.adjust_volume(delta);
-        } else {
+        } else if self.hud.settings_selection == 1 {
             self.hud.adjust_sensitivity(delta);
         }
+        // selection >= 2 是键位行，滚轮不做调整（Enter 进入绑定）
     }
 
     /// 灵敏度（0..=1）→ 相机 rad/px（0.001..=0.005，默认 0.5 → 0.003）
@@ -905,7 +1106,19 @@ impl Game {
             } else {
                 self.wave_timer -= dt;
                 if self.wave_timer <= 0.0 {
-                    self.wave += 1;
+                    // 每关 WAVES_PER_LEVEL 波清完 → 升关：重新生成地图并回到本关第 1 波；
+                    // 难度按累计有效波次递进（effective_wave），跨关不回落
+                    if self.wave >= WAVES_PER_LEVEL {
+                        let next_level = self.level + 1;
+                        self.apply_level(next_level);
+                        self.wave = 1;
+                        log::info!(
+                            "level: advanced to level {} (map regenerated)",
+                            next_level
+                        );
+                    } else {
+                        self.wave += 1;
+                    }
                     self.spawn_wave(self.wave, player);
                 }
             }
@@ -924,7 +1137,9 @@ impl Game {
             );
             self.npcs.clear();
         }
-        let profile = wave_profile(n);
+        // 难度按累计有效波次：跨关不回落（level 2 第 1 波 ≈ 原第 4 波强度）
+        let effective = self.effective_wave(n);
+        let profile = wave_profile(effective);
         let count = profile.count as usize;
         let speed = profile.speed;
         let hp = profile.hp;
@@ -935,6 +1150,19 @@ impl Game {
             let radius = 40.0 + 40.0 * ((i as u32 * 7 + n * 3) % 5) as f32 / 4.0;
             let x = (player.x + angle.cos() * radius).clamp(-250.0, 250.0);
             let z = (player.z + angle.sin() * radius).clamp(-250.0, 250.0);
+            // 出生点避开障碍盒（网格阻挡格）：沿径向向外推，最多 8 步（每步 4m），确定性
+            let mut sx = x;
+            let mut sz = z;
+            for _ in 0..8 {
+                if self.grid.is_passable(world_to_grid(sx, sz)) {
+                    break;
+                }
+                let d = (sx * sx + sz * sz).sqrt().max(1.0);
+                sx += sx / d * 4.0;
+                sz += sz / d * 4.0;
+            }
+            let x = sx.clamp(-250.0, 250.0);
+            let z = sz.clamp(-250.0, 250.0);
             let id = self.next_npc_id as usize;
             self.next_npc_id += 1;
             let y = terrain_height_at(x, z);
@@ -954,11 +1182,12 @@ impl Game {
             });
         }
         log::info!(
-            "wave: wave {} spawned {} enemies (speed={:.1} hp={:.0})",
+            "wave: wave {} spawned {} enemies (speed={:.1} hp={:.0} effective={})",
             n,
             count,
             speed,
-            hp
+            hp,
+            effective
         );
     }
 
@@ -1059,12 +1288,12 @@ impl Game {
 mod tests {
     use super::*;
 
-    /// 演示刚体应在地面附近落地并静止
+    /// 关卡障碍刚体应贴地落地并静止（程序化地图替代原 3 AABB + 2 球体演示场景）
     #[test]
-    fn physics_demo_bodies_settle() {
+    fn map_obstacles_ground_and_settle() {
         let mut game = Game::new();
-        assert_eq!(game.world.bodies.len(), 3);
-        assert_eq!(game.world.spheres.len(), 2);
+        assert!(!game.world.bodies.is_empty(), "level 1 map should populate physics");
+        assert!(game.world.spheres.is_empty(), "procedural map uses AABB walls only");
         for _ in 0..120 {
             game.update(1.0 / 60.0, &Camera::new());
         }
@@ -1073,6 +1302,64 @@ mod tests {
             let bottom = body.position.y - body.half_extents.y;
             assert!((bottom - game.world.ground_y).abs() < 0.01, "body should rest on ground");
         }
+    }
+
+    /// 程序化地图：同种子确定、异种子不同、障碍都在安全环外且两两不重叠
+    #[test]
+    fn map_generation_is_deterministic_and_safe() {
+        let a = generate_level_map(1);
+        let b = generate_level_map(1);
+        let c = generate_level_map(2);
+        assert_eq!(a.obstacles, b.obstacles, "same seed must produce identical layout");
+        assert_ne!(a.obstacles, c.obstacles, "different seed must produce different layout");
+        assert!(!a.obstacles.is_empty() && !c.obstacles.is_empty());
+        for ob in a.obstacles.iter().chain(c.obstacles.iter()) {
+            let d = (ob.x * ob.x + ob.z * ob.z).sqrt();
+            assert!(d >= MAP_RING_INNER - 0.5, "obstacle too close to origin: {:.1}m", d);
+        }
+        for (i, o1) in a.obstacles.iter().enumerate() {
+            for o2 in a.obstacles.iter().skip(i + 1) {
+                let overlap = (o1.x - o2.x).abs() < o1.half_w + o2.half_w
+                    && (o1.z - o2.z).abs() < o1.half_d + o2.half_d;
+                assert!(!overlap, "obstacles must not overlap");
+            }
+        }
+    }
+
+    /// 升关：每关 WAVES_PER_LEVEL 波清完后 level+1、wave 回 1、地图重新生成、难度按有效波次递进
+    #[test]
+    fn level_advances_after_waves_per_level() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        assert_eq!(game.level, 1);
+        let l1 = game.map.obstacles.clone();
+        // 快速清完 3 波（每波清空 npcs 后推进 3.3s 倒计时）
+        for _ in 0..3 {
+            game.npcs.clear();
+            for _ in 0..330 {
+                game.update(0.01, &Camera::new());
+            }
+        }
+        assert_eq!(game.level, 2, "level should advance after WAVES_PER_LEVEL waves");
+        assert_eq!(game.wave, 1, "wave resets to 1 on level up");
+        assert!(!game.npcs.is_empty(), "level 2 wave 1 should spawn enemies");
+        let l2 = game.map.obstacles.clone();
+        assert_ne!(l1, l2, "level 2 must regenerate the map layout");
+        // 物理世界与网格同步重建
+        assert_eq!(game.world.bodies.len(), l2.len());
+    }
+
+    /// 清第 WAVES_PER_LEVEL 波之前不应升关（wave 3 是升关临界，wave 2 仍停留原关）
+    #[test]
+    fn level_does_not_advance_before_last_wave() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.clear();
+        for _ in 0..330 {
+            game.update(0.01, &Camera::new());
+        }
+        assert_eq!(game.level, 1, "wave 1 → 2 must not advance level");
+        assert_eq!(game.wave, 2);
     }
 
     /// 开火产生投射物，命中物理刚体后销毁并计数

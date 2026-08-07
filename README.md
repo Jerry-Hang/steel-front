@@ -52,18 +52,39 @@
   - `scripts/gameplay_smoke.py`：FPS 拖拽视角瞄准（相对注入 + 回中 + 点射）
 - 未实施（下一阶段）：程序化地图生成/多关卡切换；主菜单美化与键位重绑定。
 
-### 冒烟关键机制（勿回退）
-1. Orbit 射线必过原点：相机站在目标 NPC 对跖点（`direction = -C/|C|`）；
-2. NPC 攻击态站定（距相机 <12m）；只选 `|C| ≤ 10.4` 的对侧 NPC——
-   拉近到 dist=1.5 后对跖点距离 = |C|+1.5 < 12，目标全程保持站定；
-3. 演示刚体在角落，12m 射线路径上无拦截体；点射 6 发 × 25 伤害 ≥ 100 hp。
+### Wave 3（进行中，checkpoint 提交，未编译验证）
+
+已写入工作区、随 checkpoint 提交保存（新会话从 `git status` + 本节继续）：
+- `src/engine/game.rs`：程序化地图 `generate_level_map(seed)`（LCG 确定性、零依赖；
+  障碍环带 58–130m，中央安全区保冒烟站定与弹道）+ 多关卡（每关 3 波，清完升关重建地图、
+  难度按累计有效波次递进）+ NPC 出生点避障外推 + 关卡/地图/升关测试
+- `src/engine/renderer.rs`：世界障碍 marker 渲染（复用现有实例 pipeline，
+  独立槽位 65537+ 与 2 个额外 draw call，零 pipeline/shader/swapchain 改动）
+- `src/ui.rs`：主菜单美化（装饰条/闪烁 PRESS ANY KEY/版本行）、键位绑定 API
+  （`BindingAction` / `action_for` / `bind` 互斥复位 / rebind 流程）、设置面板 9 项循环、
+  HUD `LEVEL` 显示；33 测试 rustc 自检通过
+
+**尚未完成（新会话第一步）**：
+1. 新建 `src/config.rs`（std::fs 持久化键位/音量/灵敏度；`game.rs` 已引用
+   `crate::config::save` / `GameConfig`，**当前代码无法编译**）
+2. `src/main.rs`：`mod config;` + 启动加载配置 + 每帧传障碍 marker +
+   键盘改键位驱动（movement/reload/fire/menu）+ Enter 进入绑定 / 非 ESC 键完成 / ESC 取消
+3. 每步 `cargo build --release && cargo test` 全绿
+4. 20s gameplay 冒烟复验（58m 安全环保证 NPC 站定与弹道无阻挡）
+5. 提交（feat(game)/feat(ui)/chore/docs）+ push（当前网络不通 github.com:443）
+
+### 冒烟关键机制（勿回退，当前为 FPS 拖拽版）
+1. 玩家在原点不动（FPS 相机），冒烟读 `npc: #id stand` 日志选距原点最近的站定 NPC，
+   按 `(x, y+0.8-EYE, z)` 算 yaw/pitch，按住左键拖拽视角瞄准后点射 6 发；
+2. NPC 攻击态无就近掩体时原地站定（`|C| ≤ 16m` 内，掩体搜索半径 40m）；
+3. 障碍全在 58m 环带外，12–16m 弹道路径无拦截体；点射 6 发 × 25 伤害 ≥ 100 hp。
 
 ## 四、待办任务（Next Steps）
 
 - 本批完成：Wave 2 六项功能（1–4 全量、6 部分）实施并提交。
-- 下一阶段（Wave 3）：
-  - 地形/关卡：程序化地图生成、多关卡切换
-  - UI polish：主菜单美化、键位重绑定
+- Wave 3 剩余步骤（见"三、当前工作状态"的 Wave 3 小节）：
+  config.rs → main.rs 接线（marker + 键位驱动 + 配置加载）→ build/test 全绿 →
+  20s 冒烟复验 → 提交 + push
 - 重跑冒烟：`bash scripts/run_gameplay_smoke.sh`（需沙箱外 X/Vulkan 权限）。
 
 ## 五、关键约定与环境备忘

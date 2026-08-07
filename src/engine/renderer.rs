@@ -241,6 +241,13 @@ fn terrain_coarse_height(x: f32, z: f32, coarse: &[f32], coarse_cells: usize) ->
 /// 实例网格（256×256 = 65536）
 const GRID_SIZE: u32 = 256;
 const INSTANCE_COUNT: u32 = GRID_SIZE * GRID_SIZE;
+/// 世界障碍 marker 上限（程序化地图每关障碍盒数远小于此；同时决定实例 buffer 的额外容量）
+const MAX_MARKER_INSTANCES: u32 = 64;
+/// marker 在实例 buffer 中的起始 slot：跳过 0..=INSTANCE_COUNT。
+///
+/// slot 65536 是地形 identity（shader 硬编码 TERRAIN_INSTANCE_INDEX=65536 读取，
+/// cull_and_upload 只写 0..visible-1，永不触碰），marker 从 65537 起，互不干扰。
+const MARKER_SLOT_BASE: u32 = INSTANCE_COUNT + 1;
 
 /// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
 #[repr(C)]
@@ -250,6 +257,13 @@ struct InstanceData {
     tint: [f32; 4],
 }
 const _: () = assert!(std::mem::size_of::<InstanceData>() == 80);
+
+/// 世界障碍 marker 输入（模型矩阵 = 平移+缩放，tint = 颜色）。
+/// 由 main.rs 从游戏关卡地图转换而来，经 `set_world_markers` 缓存为实例数据。
+pub struct WorldMarker {
+    pub model: glam::Mat4,
+    pub tint: [f32; 4],
+}
 
 /// 单个地形 LOD 网格：静态几何（顶点/索引）+ CPU 侧顶点（供高度 morph 逐帧更新）
 struct TerrainLodMesh {
@@ -381,6 +395,11 @@ pub struct Renderer {
     instances: Vec<InstanceData>,
     /// 剔除后可见实例（每帧复用，避免重新分配）
     culled: Vec<InstanceData>,
+    /// 世界障碍 marker（关卡切换时由 main.rs 设置；独立于实例场，见 MARKER_SLOT_BASE）
+    markers: Vec<InstanceData>,
+    /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
+    last_marker_near: u32,
+    last_marker_far: u32,
     /// 性能日志节流（1 次/秒）
     last_perf_log: Instant,
     /// 时间窗内帧计数（fps 统计）
@@ -689,6 +708,9 @@ impl Renderer {
             instance_mapped: Vec::new(),
             instances: Vec::new(),
             culled: Vec::with_capacity(INSTANCE_COUNT as usize),
+            markers: Vec::new(),
+            last_marker_near: 0,
+            last_marker_far: 0,
             last_perf_log: Instant::now(),
             frame_count: 0,
             perf_window_start: Instant::now(),
@@ -1240,7 +1262,12 @@ impl Renderer {
             let instance_info = vk::DescriptorBufferInfo::default()
                 .buffer(self.instance_buffers[i])
                 .offset(0)
-                .range(std::mem::size_of::<InstanceData>() as u64 * (INSTANCE_COUNT as u64 + 1));
+                // 范围必须覆盖 marker 区（INSTANCE_COUNT+1+MAX_MARKER_INSTANCES），
+                // 否则 shader 读 marker slot 会触发 VUID 越界校验
+                .range(
+                    std::mem::size_of::<InstanceData>() as u64
+                        * (INSTANCE_COUNT as u64 + 1 + MAX_MARKER_INSTANCES as u64),
+                );
             let instance_infos = [instance_info];
             let instance_write = vk::WriteDescriptorSet::default()
                 .dst_set(self.descriptor_sets[i])
@@ -2092,8 +2119,9 @@ impl Renderer {
             }
         }
 
-        // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次）
-        let buffer_elems = (INSTANCE_COUNT + 1) as u64;
+        // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次），
+        // 再追加 MAX_MARKER_INSTANCES 个 slot 给世界障碍 marker（见 MARKER_SLOT_BASE）
+        let buffer_elems = (INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES) as u64;
         let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
         let identity = InstanceData {
             model: glam::Mat4::IDENTITY.to_cols_array(),
@@ -2196,6 +2224,68 @@ impl Renderer {
             normalize(r2),          // 近
             normalize(sub(r3, r2)), // 远
         ]
+    }
+
+    /// 每帧视锥剔除 + 距离 LOD 分档：
+    /// 设置世界障碍 marker（关卡切换时由 main.rs 调用；容量截断到 MAX_MARKER_INSTANCES）
+    pub fn set_world_markers(&mut self, markers: &[WorldMarker]) {
+        self.markers = markers
+            .iter()
+            .take(MAX_MARKER_INSTANCES as usize)
+            .map(|m| InstanceData {
+                model: m.model.to_cols_array(),
+                tint: m.tint,
+            })
+            .collect();
+    }
+
+    /// 每帧上传世界障碍 marker 到实例 buffer 的 MARKER_SLOT_BASE 之后区域
+    /// （跳过 65536 identity slot，见 MARKER_SLOT_BASE 注释），返回 (近档, 远档) 计数。
+    /// marker 量小（≤64），不做视锥剔除，仅按距离分近/远档。
+    fn upload_markers(&mut self, view: glam::Mat4) -> (u32, u32) {
+        let cam_pos = view.inverse().w_axis.truncate();
+        let slot = match self.instance_mapped.get(self.current_frame) {
+            Some(&p) if !p.is_null() => p as *mut u8,
+            _ => return (0, 0),
+        };
+        let stride = std::mem::size_of::<InstanceData>();
+        let near_sq = LOD_DISTANCE * LOD_DISTANCE;
+        let mut near_count = 0u32;
+        // 近档先写（base..base+near-1），远档紧随（base+near..），两遍遍历避免槽位交错
+        for inst in &self.markers {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz < near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((MARKER_SLOT_BASE + near_count) as usize) * stride),
+                        stride,
+                    );
+                }
+                near_count += 1;
+            }
+        }
+        let mut far_count = 0u32;
+        for inst in &self.markers {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz >= near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(
+                            ((MARKER_SLOT_BASE + near_count + far_count) as usize) * stride,
+                        ),
+                        stride,
+                    );
+                }
+                far_count += 1;
+            }
+        }
+        (near_count, far_count)
     }
 
     /// 每帧视锥剔除 + 距离 LOD 分档：
@@ -2829,6 +2919,60 @@ impl Renderer {
             }
         }
 
+        // ---- 世界障碍 marker draw（复用同一 pipeline 与几何，实例槽从 MARKER_SLOT_BASE 起）----
+        if self.last_marker_near > 0 {
+            let marker_vertex_buffers = [self.vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &marker_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    INDICES.len() as u32,
+                    self.last_marker_near,
+                    0,
+                    0,
+                    MARKER_SLOT_BASE,
+                );
+            }
+        }
+        if self.last_marker_far > 0 {
+            let far_vertex_buffers = [self.far_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &far_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.far_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    FAR_INDICES.len() as u32,
+                    self.last_marker_far,
+                    0,
+                    0,
+                    MARKER_SLOT_BASE + self.last_marker_near,
+                );
+            }
+        }
+
         // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
         if self.hud_vertex_count > 0 && self.hud_pipeline != vk::Pipeline::null() {
             let hud_vertex_buffers = [self.hud_vertex_buffer];
@@ -2927,6 +3071,10 @@ impl Renderer {
         // ---- 每帧视锥剔除：可见实例压缩上传到当前帧 slot 的 HOST_VISIBLE buffer ----
         let cull_start = Instant::now();
         let (near_count, far_count) = self.cull_and_upload(view, proj);
+        // ---- 世界障碍 marker：独立槽位上传（见 MARKER_SLOT_BASE），计数供 draw call 使用 ----
+        let (marker_near, marker_far) = self.upload_markers(view);
+        self.last_marker_near = marker_near;
+        self.last_marker_far = marker_far;
         let cull_us = cull_start.elapsed().as_micros() as u64;
         self.last_near_count = near_count;
         self.last_far_count = far_count;

@@ -112,6 +112,25 @@ pub enum HudScreen {
     Settings,
 }
 
+/// 键位绑定动作（枚举顺序 = 设置面板键位行顺序，`selected_action()` 索引映射依赖此顺序）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingAction {
+    /// 前进
+    Forward,
+    /// 后退
+    Backward,
+    /// 左移
+    Left,
+    /// 右移
+    Right,
+    /// 换弹
+    Reload,
+    /// 开火
+    Fire,
+    /// 菜单/设置
+    Menu,
+}
+
 /// 键位配置（纯数据，u32 物理键码，winit 风格 HID 值）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyBindings {
@@ -142,6 +161,100 @@ impl KeyBindings {
             reload: 21,       // R
             menu: 41,         // ESC
             fire: 44,         // SPACE
+        }
+    }
+
+    /// 动作的默认键码（W/S/A/D 移动、R 换弹、ESC 菜单、SPACE 开火）
+    pub fn default_code(action: BindingAction) -> u32 {
+        match action {
+            BindingAction::Forward => 26,  // W
+            BindingAction::Backward => 22, // S
+            BindingAction::Left => 4,      // A
+            BindingAction::Right => 7,     // D
+            BindingAction::Reload => 21,   // R
+            BindingAction::Fire => 44,     // SPACE
+            BindingAction::Menu => 41,     // ESC
+        }
+    }
+
+    /// 查询指定动作当前绑定的键码
+    pub fn code_for(&self, action: BindingAction) -> u32 {
+        match action {
+            BindingAction::Forward => self.move_forward,
+            BindingAction::Backward => self.move_backward,
+            BindingAction::Left => self.move_left,
+            BindingAction::Right => self.move_right,
+            BindingAction::Reload => self.reload,
+            BindingAction::Fire => self.fire,
+            BindingAction::Menu => self.menu,
+        }
+    }
+
+    /// 按 Forward→Menu 顺序返回第一个绑定该键码的动作（互斥后通常唯一，顺序仅兜底）
+    pub fn action_for(&self, code: u32) -> Option<BindingAction> {
+        [
+            BindingAction::Forward,
+            BindingAction::Backward,
+            BindingAction::Left,
+            BindingAction::Right,
+            BindingAction::Reload,
+            BindingAction::Fire,
+            BindingAction::Menu,
+        ]
+        .into_iter()
+        .find(|&a| self.code_for(a) == code)
+    }
+
+    /// 动作显示名（设置面板/按键提示用，ASCII 大写）
+    pub fn action_name(action: BindingAction) -> &'static str {
+        match action {
+            BindingAction::Forward => "FORWARD",
+            BindingAction::Backward => "BACKWARD",
+            BindingAction::Left => "LEFT",
+            BindingAction::Right => "RIGHT",
+            BindingAction::Reload => "RELOAD",
+            BindingAction::Fire => "FIRE",
+            BindingAction::Menu => "MENU",
+        }
+    }
+
+    /// 把动作绑定到新键码；同时把其它所有"当前键码 == code"的动作重置回各自默认键码。
+    ///
+    /// 互斥原因：同一键码同时绑定两个动作时，按下该键会产生歧义行为，
+    /// 因此优先保证新绑定生效，冲突动作一律退回默认键位。
+    pub fn bind(&mut self, action: BindingAction, code: u32) {
+        let slot = match action {
+            BindingAction::Forward => &mut self.move_forward,
+            BindingAction::Backward => &mut self.move_backward,
+            BindingAction::Left => &mut self.move_left,
+            BindingAction::Right => &mut self.move_right,
+            BindingAction::Reload => &mut self.reload,
+            BindingAction::Fire => &mut self.fire,
+            BindingAction::Menu => &mut self.menu,
+        };
+        *slot = code;
+        // 冲突动作复位：按 Forward→Menu 顺序检查其它动作，凡当前键码 == code 者
+        // 重置回各自的默认键码，避免两个动作共用同一键。
+        for other in [
+            BindingAction::Forward,
+            BindingAction::Backward,
+            BindingAction::Left,
+            BindingAction::Right,
+            BindingAction::Reload,
+            BindingAction::Fire,
+            BindingAction::Menu,
+        ] {
+            if other != action && self.code_for(other) == code {
+                match other {
+                    BindingAction::Forward => self.move_forward = Self::default_code(other),
+                    BindingAction::Backward => self.move_backward = Self::default_code(other),
+                    BindingAction::Left => self.move_left = Self::default_code(other),
+                    BindingAction::Right => self.move_right = Self::default_code(other),
+                    BindingAction::Reload => self.reload = Self::default_code(other),
+                    BindingAction::Fire => self.fire = Self::default_code(other),
+                    BindingAction::Menu => self.menu = Self::default_code(other),
+                }
+            }
         }
     }
 
@@ -240,6 +353,12 @@ pub struct HudState {
     pub reloading: bool,
     /// 换弹进度（0..=1）
     pub reload_progress: f32,
+    /// 当前关卡（默认 1，由 game.rs 每帧同步）
+    pub level: u32,
+    /// 正在等待重新绑定的动作（None = 无；Some = 设置面板等待按键）
+    pub rebinding: Option<BindingAction>,
+    /// 累计运行时间（秒，由 `tick(dt)` 累加，驱动开始菜单闪烁）
+    pub elapsed: f32,
 }
 
 /// 血条文字缩放
@@ -273,6 +392,9 @@ impl HudState {
             hit_marker_timer: 0.0,
             reloading: false,
             reload_progress: 0.0,
+            level: 1,
+            rebinding: None,
+            elapsed: 0.0,
         }
     }
 
@@ -422,6 +544,16 @@ impl HudState {
             color: Color::YELLOW,
             scale: 1.4,
         });
+        // ---- 关卡（level 由 game.rs 每帧同步）----
+        let level_txt = format!("LEVEL {}", self.level);
+        let level_x = center_x - text_width(&level_txt, 1.2) * 0.5;
+        elems.push(HudElement::Text {
+            text: level_txt,
+            x: level_x,
+            y: top + 38.0,
+            color: Color::WHITE,
+            scale: 1.2,
+        });
         // ---- 波间倒计时 ----
         if self.countdown > 0.0 {
             let next_txt = format!("WAVE {} IN {:.0}", self.wave + 1, self.countdown.ceil());
@@ -429,7 +561,7 @@ impl HudState {
             elems.push(HudElement::Text {
                 text: next_txt,
                 x: next_x,
-                y: top + 44.0,
+                y: top + 58.0,
                 color: Color::CYAN,
                 scale: 1.6,
             });
@@ -516,7 +648,7 @@ impl HudState {
         elems
     }
 
-    /// 开始菜单：暗色遮罩 + 标题 + 操作提示
+    /// 开始菜单：暗色遮罩 + 标题装饰条 + 操作提示 + 版本行
     fn start_menu_elements(&self) -> Vec<HudElement> {
         let mut elems = Vec::new();
         let w = self.screen_w;
@@ -525,11 +657,24 @@ impl HudState {
             Rect::new(0.0, 0.0, w, h),
             Color::new(0.0, 0.0, 0.0, 0.72),
         )));
+        // 标题上下各一条全宽细条（高约 3px，CYAN 半透明 0.5），作为装饰
+        let title_y = h * 0.30;
+        let title_h = 7.0 * 4.0; // 5x7 字形 7 行 * scale 4.0
+        let bar_h = 3.0;
+        let bar_color = Color::new(0.2, 0.8, 0.9, 0.5); // CYAN 半透明
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(0.0, title_y - bar_h - 10.0, w, bar_h),
+            bar_color,
+        )));
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(0.0, title_y + title_h + 10.0, w, bar_h),
+            bar_color,
+        )));
         let title = "STEEL FRONT";
         elems.push(HudElement::Text {
             text: title.to_string(),
             x: w * 0.5 - text_width(title, 4.0) * 0.5,
-            y: h * 0.30,
+            y: title_y,
             color: Color::WHITE,
             scale: 4.0,
         });
@@ -550,12 +695,15 @@ impl HudState {
             color: Color::new(0.8, 0.8, 0.8, 1.0),
             scale: 1.0,
         });
+        // "PRESS ANY KEY TO START" 闪烁：由 tick(dt) 累加的 elapsed 驱动，
+        // 每 0.5 秒在 1.0（亮）与 0.35（暗）之间切换
         let hint = "PRESS ANY KEY TO START";
+        let blink_alpha = if (self.elapsed * 2.0) % 2.0 < 1.0 { 1.0 } else { 0.35 };
         elems.push(HudElement::Text {
             text: hint.to_string(),
             x: w * 0.5 - text_width(hint, 2.0) * 0.5,
             y: h * 0.55,
-            color: Color::YELLOW,
+            color: Color::new(0.95, 0.8, 0.2, blink_alpha),
             scale: 2.0,
         });
         let ctrl1 = "WASD MOVE   SPACE / LMB FIRE   TAB CAMERA";
@@ -572,6 +720,15 @@ impl HudState {
             text: ctrl2.to_string(),
             x: w * 0.5 - text_width(ctrl2, 1.0) * 0.5,
             y: h * 0.62 + 16.0,
+            color: gray,
+            scale: 1.0,
+        });
+        // 底部版本行（ASCII）
+        let version = "V0.3 WAVE-DEFENSE TECH DEMO";
+        elems.push(HudElement::Text {
+            text: version.to_string(),
+            x: w * 0.5 - text_width(version, 1.0) * 0.5,
+            y: h * 0.90,
             color: gray,
             scale: 1.0,
         });
@@ -650,6 +807,21 @@ impl HudState {
             color: Color::WHITE,
             scale: 3.0,
         });
+        // 正在等待按键（rebinding 非 None）：显示 PRESS KEY FOR <NAME> (ESC CANCEL) 提示行
+        if let Some(action) = self.rebinding {
+            let prompt = format!(
+                "PRESS KEY FOR {} (ESC CANCEL)",
+                KeyBindings::action_name(action)
+            );
+            let prompt_x = w * 0.5 - text_width(&prompt, 1.2) * 0.5;
+            elems.push(HudElement::Text {
+                text: prompt,
+                x: prompt_x,
+                y: h * 0.14 + 38.0,
+                color: Color::YELLOW,
+                scale: 1.2,
+            });
+        }
         // 音量 / 灵敏度条
         let bar_w = (w * 0.32).min(320.0);
         let bar_h = 20.0;
@@ -689,24 +861,33 @@ impl HudState {
                 ratio: *ratio,
             });
         }
-        // 键位列表
+        // 键位列表（顺序 = BindingAction 枚举顺序，与 selected_action() 索引映射一致）
         let keys = [
             ("FORWARD", self.key_bindings.move_forward),
             ("BACKWARD", self.key_bindings.move_backward),
             ("LEFT", self.key_bindings.move_left),
             ("RIGHT", self.key_bindings.move_right),
             ("RELOAD", self.key_bindings.reload),
-            ("MENU", self.key_bindings.menu),
             ("FIRE", self.key_bindings.fire),
+            ("MENU", self.key_bindings.menu),
         ];
         let key_start_y = start_y + 2.0 * row_h + 24.0;
         for (i, (name, code)) in keys.iter().enumerate() {
             let y = key_start_y + i as f32 * 18.0;
+            let selected = (2 + i as u8) == self.settings_selection;
             elems.push(HudElement::Text {
-                text: name.to_string(),
+                text: if selected {
+                    format!("> {}", name)
+                } else {
+                    name.to_string()
+                },
                 x: left + 40.0,
                 y,
-                color: Color::new(0.75, 0.75, 0.75, 1.0),
+                color: if selected {
+                    Color::YELLOW
+                } else {
+                    Color::new(0.75, 0.75, 0.75, 1.0)
+                },
                 scale: 1.0,
             });
             elems.push(HudElement::Text {
@@ -718,7 +899,7 @@ impl HudState {
             });
         }
         // 底部提示
-        let hint = "ESC: BACK / SCROLL: ADJUST";
+        let hint = "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: REBIND";
         elems.push(HudElement::Text {
             text: hint.to_string(),
             x: w * 0.5 - text_width(hint, 1.2) * 0.5,
@@ -763,14 +944,65 @@ impl HudState {
         self.sensitivity = (self.sensitivity + delta).clamp(0.0, 1.0);
     }
 
-    /// 循环切换设置面板选中项（0=音量 / 1=灵敏度）
-    pub fn cycle_settings_selection(&mut self) {
-        self.settings_selection = (self.settings_selection + 1) % 2;
+    /// 开始等待重新绑定指定动作（设置面板进入"等待按键"状态）
+    ///
+    /// 预留：尚未接入 main.rs，由其在设置面板按 ENTER 时接线调用。
+    pub fn begin_rebind(&mut self, action: BindingAction) {
+        self.rebinding = Some(action);
     }
 
-    /// 当前选中项（0=音量 / 1=灵敏度）
+    /// 当前正在等待重新绑定的动作（无则 None）
+    ///
+    /// 预留：尚未接入 main.rs，由其在等待按键时读取。
+    pub fn rebinding_action(&self) -> Option<BindingAction> {
+        self.rebinding
+    }
+
+    /// 完成重新绑定：若正在等待按键，则把 `code` 绑定到该动作并返回该动作；否则 None
+    ///
+    /// 预留：尚未接入 main.rs，由其在收到键码后调用。
+    pub fn complete_rebind(&mut self, code: u32) -> Option<BindingAction> {
+        let action = self.rebinding?;
+        self.key_bindings.bind(action, code);
+        self.rebinding = None;
+        Some(action)
+    }
+
+    /// 取消正在进行的重新绑定（ESC 取消）
+    ///
+    /// 预留：尚未接入 main.rs，由其在等待按键收到 ESC 时调用。
+    pub fn cancel_rebind(&mut self) {
+        self.rebinding = None;
+    }
+
+    /// 循环切换设置面板选中项（9 项：0=音量 / 1=灵敏度 / 2..=8=7 个键位动作，
+    /// 顺序与 `BindingAction` 及设置面板键位行一致）
+    pub fn cycle_settings_selection(&mut self) {
+        self.settings_selection = (self.settings_selection + 1) % 9;
+    }
+
+    /// 当前选中项（0=音量 / 1=灵敏度 / 2..=8=键位动作）
     pub fn settings_selection(&self) -> u8 {
         self.settings_selection
+    }
+
+    /// 当前选中项对应的键位动作：`settings_selection` 在 2..=8 时返回
+    /// `2 + i → BindingAction` 第 i 个（与设置面板键位行顺序一致），否则 None
+    ///
+    /// 预留：尚未接入 main.rs，由其在设置面板按 ENTER 时决定重绑定哪个动作。
+    pub fn selected_action(&self) -> Option<BindingAction> {
+        const ACTIONS: [BindingAction; 7] = [
+            BindingAction::Forward,
+            BindingAction::Backward,
+            BindingAction::Left,
+            BindingAction::Right,
+            BindingAction::Reload,
+            BindingAction::Fire,
+            BindingAction::Menu,
+        ];
+        (2..=8)
+            .contains(&self.settings_selection)
+            .then(|| ACTIONS[(self.settings_selection - 2) as usize])
     }
 
     /// 显示命中标记（准星外圈闪一下）
@@ -778,9 +1010,10 @@ impl HudState {
         self.hit_marker_timer = HIT_MARKER_DURATION;
     }
 
-    /// 每帧衰减计时器（`hit_marker_timer` 递减到 0）
+    /// 每帧推进计时器（`hit_marker_timer` 递减到 0；`elapsed` 累加驱动开始菜单闪烁）
     pub fn tick(&mut self, dt: f32) {
         self.hit_marker_timer = (self.hit_marker_timer - dt).max(0.0);
+        self.elapsed += dt;
     }
 }
 
@@ -1316,6 +1549,209 @@ mod tests {
             .collect();
         assert_eq!(bars.len(), 3, "换弹时应有 血条+弹药条+换弹进度 三个 Bar");
         assert!((bars[2] - 0.5).abs() < 1e-5, "换弹进度比例应透传");
+    }
+
+    #[test]
+    fn binding_action_codes_names_and_lookup() {
+        assert_eq!(KeyBindings::default_code(BindingAction::Forward), 26);
+        assert_eq!(KeyBindings::default_code(BindingAction::Backward), 22);
+        assert_eq!(KeyBindings::default_code(BindingAction::Left), 4);
+        assert_eq!(KeyBindings::default_code(BindingAction::Right), 7);
+        assert_eq!(KeyBindings::default_code(BindingAction::Reload), 21);
+        assert_eq!(KeyBindings::default_code(BindingAction::Menu), 41);
+        assert_eq!(KeyBindings::default_code(BindingAction::Fire), 44);
+        assert_eq!(KeyBindings::action_name(BindingAction::Forward), "FORWARD");
+        assert_eq!(KeyBindings::action_name(BindingAction::Backward), "BACKWARD");
+        assert_eq!(KeyBindings::action_name(BindingAction::Left), "LEFT");
+        assert_eq!(KeyBindings::action_name(BindingAction::Right), "RIGHT");
+        assert_eq!(KeyBindings::action_name(BindingAction::Reload), "RELOAD");
+        assert_eq!(KeyBindings::action_name(BindingAction::Fire), "FIRE");
+        assert_eq!(KeyBindings::action_name(BindingAction::Menu), "MENU");
+        let kb = KeyBindings::defaults();
+        assert_eq!(kb.code_for(BindingAction::Forward), 26);
+        assert_eq!(kb.code_for(BindingAction::Menu), 41);
+        assert_eq!(kb.action_for(26), Some(BindingAction::Forward));
+        assert_eq!(kb.action_for(22), Some(BindingAction::Backward));
+        assert_eq!(kb.action_for(44), Some(BindingAction::Fire));
+        assert_eq!(kb.action_for(41), Some(BindingAction::Menu));
+        assert_eq!(kb.action_for(999), None, "未绑定键码应返回 None");
+    }
+
+    #[test]
+    fn bind_is_mutually_exclusive_with_default_reset() {
+        let mut kb = KeyBindings::defaults();
+        // 把 BACKWARD 绑到 W(26)（当前 FORWARD 的键码）→ FORWARD 应复位回默认 W
+        kb.bind(BindingAction::Backward, 26);
+        assert_eq!(kb.code_for(BindingAction::Backward), 26, "BACKWARD 应占用 W");
+        assert_eq!(kb.code_for(BindingAction::Forward), 26, "FORWARD 应复位回默认 26");
+        assert_eq!(
+            kb.action_for(26),
+            Some(BindingAction::Forward),
+            "冲突键码应按 Forward→Menu 顺序归属默认动作"
+        );
+        // 把 FORWARD 绑到 SPACE(44)（当前 FIRE 的键码）→ FIRE 应复位回默认 SPACE
+        kb.bind(BindingAction::Forward, 44);
+        assert_eq!(kb.code_for(BindingAction::Forward), 44);
+        assert_eq!(kb.code_for(BindingAction::Fire), 44, "FIRE 应复位回默认 44");
+        // 未冲突动作不受影响
+        assert_eq!(kb.code_for(BindingAction::Right), 7, "RIGHT 应保持 D");
+        assert_eq!(kb.code_for(BindingAction::Reload), 21, "RELOAD 应保持 R");
+    }
+
+    #[test]
+    fn rebind_begin_complete_cancel_flow() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.rebinding, None);
+        assert_eq!(hud.rebinding_action(), None);
+        assert_eq!(hud.complete_rebind(30), None, "无 rebinding 时完成应返回 None");
+        // begin → complete
+        hud.begin_rebind(BindingAction::Fire);
+        assert_eq!(hud.rebinding_action(), Some(BindingAction::Fire));
+        assert_eq!(hud.complete_rebind(30), Some(BindingAction::Fire), "完成应返回动作");
+        assert_eq!(hud.rebinding, None, "完成后应清除 rebinding");
+        assert_eq!(hud.key_bindings.code_for(BindingAction::Fire), 30, "FIRE 应改为 1");
+        // begin → cancel
+        hud.begin_rebind(BindingAction::Menu);
+        hud.cancel_rebind();
+        assert_eq!(hud.rebinding, None, "取消后应清除 rebinding");
+        assert_eq!(hud.key_bindings.code_for(BindingAction::Menu), 41, "取消不应改键");
+        // 再次 begin 且 complete 时冲突键复位
+        hud.begin_rebind(BindingAction::Forward);
+        assert_eq!(hud.complete_rebind(41), Some(BindingAction::Forward));
+        assert_eq!(hud.key_bindings.code_for(BindingAction::Forward), 41);
+        assert_eq!(hud.key_bindings.code_for(BindingAction::Menu), 41, "MENU 应复位回默认 ESC");
+    }
+
+    #[test]
+    fn start_menu_hint_blinks_by_elapsed() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.screen = HudScreen::Start;
+        let hint_alpha = |hud: &HudState| {
+            hud.layout_elements()
+                .iter()
+                .find_map(|e| match e {
+                    HudElement::Text { text, color, .. }
+                        if text == "PRESS ANY KEY TO START" =>
+                    {
+                        Some(color.a)
+                    }
+                    _ => None,
+                })
+                .expect("开始菜单应有提示行")
+        };
+        hud.elapsed = 0.0; // (0.0*2)%2.0 = 0.0 < 1.0 → 亮
+        let bright = hint_alpha(&hud);
+        hud.elapsed = 0.6; // (0.6*2)%2.0 = 1.2 >= 1.0 → 暗
+        let dim = hint_alpha(&hud);
+        assert!((bright - 1.0).abs() < 1e-5, "前半周期应全亮，实际 {}", bright);
+        assert!((dim - 0.35).abs() < 1e-5, "后半周期应 0.35，实际 {}", dim);
+        assert!((bright - dim).abs() > 0.5, "两个时刻 alpha 应不同");
+        // tick(dt) 驱动 elapsed 累加（闪烁时钟来源）
+        hud.elapsed = 0.0;
+        hud.tick(0.5);
+        assert!((hud.elapsed - 0.5).abs() < 1e-5, "tick 应累加 elapsed");
+    }
+
+    #[test]
+    fn selected_action_maps_settings_selection() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.selected_action(), None, "0=音量，非键位动作");
+        hud.settings_selection = 1;
+        assert_eq!(hud.selected_action(), None, "1=灵敏度，非键位动作");
+        let expected = [
+            BindingAction::Forward,
+            BindingAction::Backward,
+            BindingAction::Left,
+            BindingAction::Right,
+            BindingAction::Reload,
+            BindingAction::Fire,
+            BindingAction::Menu,
+        ];
+        for (i, action) in expected.iter().enumerate() {
+            hud.settings_selection = 2 + i as u8;
+            assert_eq!(
+                hud.selected_action(),
+                Some(*action),
+                "选中 2+{} 应对应 {:?}",
+                i,
+                action
+            );
+        }
+        hud.settings_selection = 9;
+        assert_eq!(hud.selected_action(), None, "越界应返回 None");
+    }
+
+    #[test]
+    fn cycle_settings_selection_wraps_9_rows() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.settings_selection(), 0);
+        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 0] {
+            hud.cycle_settings_selection();
+            assert_eq!(hud.settings_selection(), expected);
+        }
+    }
+
+    #[test]
+    fn level_defaults_to_one() {
+        let hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.level, 1, "默认关卡应为 1");
+    }
+
+    #[test]
+    fn game_hud_shows_level() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.level = 3;
+        let elems = hud.layout_elements();
+        let level_text = find_text(&elems, "LEVEL").expect("游戏 HUD 应显示 LEVEL 行");
+        assert!(level_text.contains("3"), "LEVEL 文本应含关卡: {}", level_text);
+    }
+
+    #[test]
+    fn settings_key_rows_selectable() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.screen = HudScreen::Settings;
+        hud.settings_selection = 4; // 2+2 → LEFT
+        let elems = hud.settings_elements();
+        assert!(find_text(&elems, "> LEFT").is_some(), "选中键位行应有 '> ' 前缀");
+        assert!(
+            find_text(&elems, "> FORWARD").is_none(),
+            "未选中键位行不应有前缀"
+        );
+        let selected_color = elems.iter().find_map(|e| match e {
+            HudElement::Text { text, color, .. } if text == "> LEFT" => Some(*color),
+            _ => None,
+        });
+        assert_eq!(selected_color, Some(Color::YELLOW), "选中行应高亮为 YELLOW");
+    }
+
+    #[test]
+    fn settings_shows_rebind_prompt() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.screen = HudScreen::Settings;
+        hud.begin_rebind(BindingAction::Fire);
+        let elems = hud.settings_elements();
+        assert!(
+            find_text(&elems, "PRESS KEY FOR FIRE (ESC CANCEL)").is_some(),
+            "等待按键时应显示 PRESS KEY FOR FIRE (ESC CANCEL)"
+        );
+        // 无 rebinding 时不应显示按键提示
+        hud.cancel_rebind();
+        let elems = hud.settings_elements();
+        assert!(
+            find_text(&elems, "PRESS KEY FOR").is_none(),
+            "无 rebinding 时不应显示按键提示"
+        );
+    }
+
+    #[test]
+    fn settings_hint_lists_rebind_controls() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.screen = HudScreen::Settings;
+        let elems = hud.settings_elements();
+        assert!(
+            find_text(&elems, "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: REBIND").is_some(),
+            "底部提示应说明重绑入口"
+        );
     }
 
     #[test]
