@@ -80,6 +80,22 @@ def warp_to_center():
     cx, cy = rx.value + size[0] // 2, ry.value + size[1] // 2
     x11.XWarpPointer(d, 0, root, 0, 0, 0, 0, cx, cy); flush(); time.sleep(0.15)
     print(f"warp to window center ({cx},{cy}) size={size[0]}x{size[1]}", flush=True)
+
+def zoom_to_min():
+    """滚轮拉近到最近（0.15/格 × 6 格 ≈ 3.35→1.5，MIN_DISTANCE 兜底）。"""
+    for _ in range(6):
+        xtst.XTestFakeButtonEvent(d, 4, 1, 0); flush()
+        xtst.XTestFakeButtonEvent(d, 4, 0, 0); flush()
+        time.sleep(0.05)
+    last = -1.0
+    for _ in range(5):
+        time.sleep(1.0)
+        m = re.findall(r"cam: yaw=[-\d.]+ pitch=[-\d.]+ dist=([\d.]+)", log_tail())
+        if m:
+            last = float(m[-1])
+            if last <= 1.6:
+                break
+    print(f"zoom: dist={last:.2f}", flush=True)
 def press_release(kc):
     xtst.XTestFakeKeyEvent(d, kc, 1, 0); flush(); time.sleep(0.08)
     xtst.XTestFakeKeyEvent(d, kc, 0, 0); flush()
@@ -123,14 +139,27 @@ warp_to_center()
 time.sleep(0.5)
 press_release(SPACE); time.sleep(1.2)          # 任意键开始
 time.sleep(1.0)
-txt = log_tail()
-spawns = [(int(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)))
-          for m in re.finditer(r"wave: npc #(\d+) spawn \(([-\d.]+), ([-\d.]+), ([-\d.]+)\)", txt)]
-cands = [(i, x, y, z) for (i, x, y, z) in spawns if math.hypot(x, z - 3.0) <= 55.0]
-cands.sort(key=lambda t: math.hypot(t[1], t[3] - 3.0))
-print(f"spawns={len(spawns)} candidates={[(t[0], round(math.hypot(t[1], t[3]-3.0),1)) for t in cands]}", flush=True)
-if not cands:
-    print("NO-CANDIDATES", flush=True); sys.exit(2)
+# 等 NPC 进入 Attack 站定：菜单期预置 NPC 的站定日志在 "run started" 之前，必须过滤
+def stands_after_run():
+    txt = log_tail()
+    base = txt.find("run started")
+    if base < 0:
+        return []
+    out = []
+    for m in re.finditer(r"npc: #(\d+) stand \(([-\d.]+), ([-\d.]+), ([-\d.]+)\)", txt):
+        if m.start() > base:
+            out.append((int(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))))
+    return out
+
+# 等一个"对侧"站定 NPC：轨道相机对跖点瞄准后 NPC 距相机 = |C| + dist，
+# 拉近到 dist=1.5 后需 |C| ≤ 10.4 才能留在 12m 攻击距离内站定
+t0 = time.time()
+while time.time() - t0 < 16.0:
+    stands = stands_after_run()
+    if any(math.hypot(s[1], s[3]) <= 10.4 for s in stands):
+        break
+    time.sleep(0.5)
+
 def fire_at(npc):
     _, nx, ny, nz = npc
     cx, cy, cz = nx, ny + 0.8, nz               # 命中球中心（头顶 +0.8m）
@@ -141,18 +170,34 @@ def fire_at(npc):
     d3 = math.hypot(cx, cz)
     print(f"aim npc #{npc[0]} C=({cx:.1f},{cy:.1f},{cz:.1f}) dist={d3:.1f} "
           f"yaw={yaw_tgt:.1f} pitch={pitch_tgt:.1f}", flush=True)
+    zoom_to_min()
     warp_to_center()
     xtst.XTestFakeButtonEvent(d, LMB, 1, 0); flush(); time.sleep(0.2)
     aim(yaw_tgt, pitch_tgt, True)
-    # 点射：LMB 每按一次 = fire_requested 一次（不依赖键盘重复，fire rate 上限 3/s）
-    for _ in range(15):
+    xtst.XTestFakeButtonEvent(d, LMB, 0, 0); flush(); time.sleep(0.15)  # 松开：停止拖拽
+    # 点射 6 发：25 伤害 × 4 = 100 hp；射速上限 3/s，间隔 0.35s
+    for _ in range(6):
         xtst.XTestFakeButtonEvent(d, LMB, 1, 0); flush()
         xtst.XTestFakeButtonEvent(d, LMB, 0, 0); flush()
         time.sleep(0.35)
     time.sleep(0.5)
     return "kill:" in log_tail()
+
 killed = False
-for npc in cands[:2]:
+tried = set()
+for attempt in range(2):
+    # 每个 id 只取最新站定位置；离原点最近的先打
+    latest = {}
+    for s in stands_after_run():
+        latest[s[0]] = s
+    cands = [s for s in latest.values() if s[0] not in tried]
+    cands.sort(key=lambda t: math.hypot(t[1], t[3]))
+    if not cands or time.time() - t0 > 19.0:
+        break
+    npc = cands[0]
+    tried.add(npc[0])
+    print(f"attempt {attempt + 1}/2: target npc #{npc[0]} "
+          f"C=({npc[1]:.1f},{npc[2]:.1f},{npc[3]:.1f})", flush=True)
     if fire_at(npc):
         killed = True
         break
