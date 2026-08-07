@@ -4,6 +4,7 @@
 //! - `MeleeWeapon`：近战武器，基于射程与挥击夹角判定命中，不产生投射物
 //! - `ProjectileWeapon`：投射物武器，发射沿直线运动的 `Projectile`
 //! - `Projectile`：投射物，直线运动 + 生命周期（飞行距离超过射程或存活超过寿命即销毁）
+//! - `Firearm`：弹匣武器状态机，封装弹匣/换弹/后坐力手感，集成时由游戏侧每帧驱动
 //!
 //! 当前仅使用标准库，无第三方依赖；如将来需要新增依赖，在文件头部按
 //! `// DEP: crate = version` 格式声明。
@@ -255,6 +256,152 @@ impl Projectile {
     }
 }
 
+/// 弹匣武器状态机：在 `ProjectileWeapon` 之上封装弹匣、换弹与后坐力手感
+///
+/// 集成时由游戏侧每帧驱动：扣扳机调用 `try_fire`，每帧调用 `update` 推进换弹，
+/// 开火后读取 `current_kick` 施加相机后坐力。
+pub struct Firearm {
+    /// 底层投射物武器（伤害/射速/射程/投射物属性）
+    weapon: ProjectileWeapon,
+    /// 当前弹匣内弹药
+    magazine: u32,
+    /// 弹匣容量
+    max_magazine: u32,
+    /// 备弹（弹匣外）
+    reserve: u32,
+    /// 换弹所需时间（秒）
+    reload_time: f32,
+    /// 换弹剩余时间（秒）
+    reload_timer: f32,
+    /// 是否正在换弹
+    reloading: bool,
+    /// 每发上跳后坐力（弧度），默认 0.014 ≈ 0.8°
+    kick_pitch: f32,
+    /// 每发水平后坐力（弧度），默认 0.004
+    kick_yaw: f32,
+    /// 累计发射数，用于生成确定性的后坐力微扰
+    shots_fired: u32,
+}
+
+impl Firearm {
+    /// 创建弹匣武器：初始弹匣装满 `max_magazine` 发，`reserve` 为备弹
+    pub fn new(
+        weapon: ProjectileWeapon,
+        max_magazine: u32,
+        reserve: u32,
+        reload_time: f32,
+        kick_pitch: f32,
+        kick_yaw: f32,
+    ) -> Self {
+        Self {
+            weapon,
+            magazine: max_magazine,
+            max_magazine,
+            reserve,
+            reload_time,
+            reload_timer: 0.0,
+            reloading: false,
+            kick_pitch,
+            kick_yaw,
+            shots_fired: 0,
+        }
+    }
+
+    /// 是否可开火：未在换弹且弹匣内有弹药
+    pub fn can_fire(&self) -> bool {
+        !self.reloading && self.magazine > 0
+    }
+
+    /// 当前弹匣内弹药
+    pub fn magazine(&self) -> u32 {
+        self.magazine
+    }
+
+    /// 弹匣容量
+    pub fn max_magazine(&self) -> u32 {
+        self.max_magazine
+    }
+
+    /// 备弹（弹匣外）
+    pub fn reserve(&self) -> u32 {
+        self.reserve
+    }
+
+    /// 是否正在换弹
+    pub fn is_reloading(&self) -> bool {
+        self.reloading
+    }
+
+    /// 重置为满弹匣、非换弹状态（新一局/复活用）
+    pub fn reset(&mut self) {
+        self.magazine = self.max_magazine;
+        self.reloading = false;
+        self.reload_timer = 0.0;
+        self.shots_fired = 0;
+    }
+
+    /// 尝试发射：可开火时扣弹并返回投射物；空弹匣自动开始换弹并返回 None；
+    /// 换弹期间返回 None 且不打断换弹
+    pub fn try_fire(&mut self, origin: [f32; 3], direction: [f32; 3]) -> Option<Projectile> {
+        if !self.can_fire() {
+            // 空弹匣（且未在换弹）自动开始换弹；换弹中不重复触发
+            if self.magazine == 0 && !self.reloading {
+                self.start_reload();
+            }
+            return None;
+        }
+        self.magazine -= 1;
+        self.shots_fired += 1;
+        Some(self.weapon.fire(origin, direction))
+    }
+
+    /// 开始换弹：弹匣未满、有备弹且未在换弹时才生效
+    pub fn start_reload(&mut self) {
+        if self.magazine < self.max_magazine && self.reserve > 0 && !self.reloading {
+            self.reloading = true;
+            self.reload_timer = self.reload_time;
+        }
+    }
+
+    /// 按时间步长推进换弹；完成后从备弹补满弹匣（备弹不足则只补剩余）
+    pub fn update(&mut self, dt: f32) {
+        if !self.reloading || dt <= 0.0 {
+            return;
+        }
+        self.reload_timer -= dt;
+        if self.reload_timer <= 0.0 {
+            let take = (self.max_magazine - self.magazine).min(self.reserve);
+            self.magazine += take;
+            self.reserve -= take;
+            self.reloading = false;
+        }
+    }
+
+    /// 本次射击应施加的相机后坐力：上跳 + 确定性微扰，水平后坐力
+    pub fn current_kick(&self) -> (f32, f32) {
+        let perturbation = (self.shots_fired % 5) as f32 * 0.001;
+        (self.kick_pitch + perturbation, self.kick_yaw)
+    }
+
+    /// 弹匣余量比例（0.0 ~ 1.0）
+    pub fn ammo_ratio(&self) -> f32 {
+        self.magazine as f32 / self.max_magazine.max(1) as f32
+    }
+
+    /// 换弹进度（reload_timer / reload_time，从 1.0 递减到 0.0）；未换弹返回 1.0
+    pub fn reload_progress(&self) -> f32 {
+        if !self.reloading || self.reload_time <= 0.0 {
+            return 1.0;
+        }
+        (self.reload_timer / self.reload_time).clamp(0.0, 1.0)
+    }
+
+    /// 射速冷却间隔（秒），转发底层武器语义
+    pub fn fire_interval(&self) -> f32 {
+        self.weapon.fire_interval()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +497,164 @@ mod tests {
 
         proj.update(0.5); // 存活 1.1 秒，超过寿命 1.0 秒 → 销毁
         assert!(!proj.is_alive());
+    }
+
+    #[test]
+    fn firearm_full_magazine_fires_and_consumes() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        let mut gun = Firearm::new(rifle, 3, 12, 1.5, 0.014, 0.004);
+
+        assert!(gun.can_fire());
+        assert!((gun.ammo_ratio() - 1.0).abs() < 1e-6);
+
+        let proj = gun.try_fire([0.0, 1.0, 0.0], [1.0, 0.0, 0.0]);
+        assert!(proj.is_some());
+        // 满弹开火扣 1 发：3 → 2
+        assert!((gun.ammo_ratio() - (2.0 / 3.0)).abs() < 1e-6);
+        assert!(gun.can_fire());
+    }
+
+    #[test]
+    fn firearm_empty_magazine_auto_reloads_and_cannot_fire() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        let mut gun = Firearm::new(rifle, 3, 12, 1.5, 0.014, 0.004);
+
+        // 打空弹匣：3 发全部返回投射物
+        for _ in 0..3 {
+            assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_some());
+        }
+        assert_eq!(gun.ammo_ratio(), 0.0);
+        assert!(!gun.can_fire());
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6); // 尚未开始换弹
+        gun.update(0.5);
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6); // 仅打空弹匣不会自动换弹
+
+        // 空弹匣再扣扳机：自动开始换弹并返回 None
+        assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_none());
+        assert!(!gun.can_fire());
+        gun.update(0.5); // 换弹进度开始推进 → 证明已进入换弹
+        assert!(gun.reload_progress() < 1.0);
+    }
+
+    #[test]
+    fn firearm_reload_advances_and_refills_from_reserve() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        let mut gun = Firearm::new(rifle, 3, 12, 1.5, 0.014, 0.004);
+
+        for _ in 0..3 {
+            let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        }
+        let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]); // 触发自动换弹
+
+        // 换弹中途：进度减半，仍不可开火
+        gun.update(0.75);
+        assert!((gun.reload_progress() - 0.5).abs() < 1e-6);
+        assert!(!gun.can_fire());
+        // 换弹期间扣扳机：返回 None 且不重置/打断换弹
+        assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_none());
+        assert!((gun.reload_progress() - 0.5).abs() < 1e-6);
+
+        // 完成换弹：弹匣补满 3 发（reserve 12 → 9）
+        gun.update(0.75);
+        assert!(gun.can_fire());
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6);
+        assert!((gun.ammo_ratio() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn firearm_reload_refills_only_remaining_reserve() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        let mut gun = Firearm::new(rifle, 3, 2, 1.0, 0.014, 0.004);
+
+        for _ in 0..3 {
+            let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        }
+        let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]); // 自动换弹
+        gun.update(1.0);
+
+        // reserve 只有 2 发：只补 2 发，弹匣不再满
+        assert!((gun.ammo_ratio() - (2.0 / 3.0)).abs() < 1e-6);
+        assert!(gun.can_fire());
+
+        // 打光后 reserve 为 0：扣扳机不会进入换弹，也无法开火
+        for _ in 0..2 {
+            let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        }
+        assert!(!gun.can_fire());
+        assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_none());
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6); // 无备弹，未进入换弹
+    }
+
+    #[test]
+    fn firearm_fire_interval_forwards_to_weapon() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        let expected_interval = rifle.fire_interval();
+        let mut gun = Firearm::new(rifle, 5, 20, 1.5, 0.014, 0.004);
+
+        // 射速冷却语义由 ProjectileWeapon 推导，Firearm 仅转发
+        assert!((gun.fire_interval() - 0.5).abs() < 1e-6);
+        assert!((gun.fire_interval() - expected_interval).abs() < 1e-6);
+
+        // Firearm 不重复实现冷却：连续扣扳机均能正常发射直至打空
+        let mut shots = 0;
+        while gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_some() {
+            shots += 1;
+        }
+        assert_eq!(shots, 5);
+    }
+
+    #[test]
+    fn firearm_current_kick_deterministic_and_bounded() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        let mut gun = Firearm::new(rifle, 10, 30, 1.5, 0.014, 0.004);
+
+        // 未开火：微扰为 0，返回基础后坐力
+        let (pitch0, yaw0) = gun.current_kick();
+        assert!((pitch0 - 0.014).abs() < 1e-6);
+        assert_eq!(yaw0, 0.004);
+
+        // 每次开火 shots_fired+1，微扰按 (shots_fired % 5) * 0.001 递增
+        let mut last = (0.0, 0.0);
+        for i in 1..=5 {
+            let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+            let (pitch, yaw) = gun.current_kick();
+            let expected_pitch = 0.014 + ((i % 5) as f32) * 0.001;
+            assert!((pitch - expected_pitch).abs() < 1e-6);
+            assert_eq!(yaw, 0.004);
+            last = (pitch, yaw);
+        }
+
+        // 确定性：同一次射击多次读取结果一致；微扰范围 0.0 ~ 0.004
+        let (pitch, yaw) = gun.current_kick();
+        assert_eq!((pitch, yaw), last);
+        assert!((0.014..=0.018).contains(&pitch));
+    }
+
+    #[test]
+    fn firearm_ammo_ratio_and_reload_progress_bounds() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        let mut gun = Firearm::new(rifle, 3, 9, 1.0, 0.014, 0.004);
+
+        // 满弹夹且未换弹：两个比值均为 1.0；满弹夹时手动换弹无效
+        assert!((gun.ammo_ratio() - 1.0).abs() < 1e-6);
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6);
+        gun.start_reload();
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6);
+
+        // 打空并触发换弹：弹夹比 0.0，换弹进度从 1.0 开始
+        for _ in 0..3 {
+            let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        }
+        assert_eq!(gun.ammo_ratio(), 0.0);
+        let _ = gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6);
+
+        // 进度过半且被 clamp 在 (0, 1)；超时一次性完成
+        gun.update(0.3);
+        let mid = gun.reload_progress();
+        assert!(mid > 0.0 && mid < 1.0);
+        gun.update(10.0);
+        assert!((gun.reload_progress() - 1.0).abs() < 1e-6);
+        assert!((gun.ammo_ratio() - 1.0).abs() < 1e-6);
     }
 }

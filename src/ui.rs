@@ -108,6 +108,91 @@ pub enum HudScreen {
     Start,
     /// 死亡结算：分数 + 重开提示
     GameOver,
+    /// 设置面板：音量/灵敏度/键位
+    Settings,
+}
+
+/// 键位配置（纯数据，u32 物理键码，winit 风格 HID 值）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyBindings {
+    /// 前进键
+    pub move_forward: u32,
+    /// 后退键
+    pub move_backward: u32,
+    /// 左移键
+    pub move_left: u32,
+    /// 右移键
+    pub move_right: u32,
+    /// 换弹键
+    pub reload: u32,
+    /// 菜单/设置键
+    pub menu: u32,
+    /// 开火键
+    pub fire: u32,
+}
+
+impl KeyBindings {
+    /// 默认键位：W/S/A/D 移动、R 换弹、ESC 菜单、SPACE 开火
+    pub fn defaults() -> Self {
+        Self {
+            move_forward: 26, // W
+            move_backward: 22, // S
+            move_left: 4,     // A
+            move_right: 7,    // D
+            reload: 21,       // R
+            menu: 41,         // ESC
+            fire: 44,         // SPACE
+        }
+    }
+
+    /// 常见键码 → 显示名（供设置面板文本）；其余回退 `KEY#<code>`
+    pub fn label(code: u32) -> String {
+        match code {
+            4..=29 => char::from(b'A' + (code - 4) as u8).to_string(),
+            30..=39 => char::from(b'1' + (code - 30) as u8).to_string(),
+            40 => "ENTER".to_string(),
+            41 => "ESC".to_string(),
+            42 => "BACKSPACE".to_string(),
+            43 => "TAB".to_string(),
+            44 => "SPACE".to_string(),
+            45 => "MINUS".to_string(),
+            46 => "EQUALS".to_string(),
+            47 => "LBRACKET".to_string(),
+            48 => "RBRACKET".to_string(),
+            49 => "BACKSLASH".to_string(),
+            51 => "SEMICOLON".to_string(),
+            52 => "APOSTROPHE".to_string(),
+            53 => "GRAVE".to_string(),
+            54 => "COMMA".to_string(),
+            55 => "PERIOD".to_string(),
+            56 => "SLASH".to_string(),
+            57 => "CAPSLOCK".to_string(),
+            58..=69 => format!("F{}", code - 57),
+            70 => "PRINTSCREEN".to_string(),
+            71 => "SCROLLLOCK".to_string(),
+            72 => "PAUSE".to_string(),
+            73 => "INSERT".to_string(),
+            74 => "HOME".to_string(),
+            75 => "PAGEUP".to_string(),
+            76 => "DELETE".to_string(),
+            77 => "END".to_string(),
+            78 => "PAGEDOWN".to_string(),
+            79 => "RIGHT".to_string(),
+            80 => "LEFT".to_string(),
+            81 => "DOWN".to_string(),
+            82 => "UP".to_string(),
+            224 => "LCTRL".to_string(),
+            225 => "LSHIFT".to_string(),
+            226 => "LALT".to_string(),
+            227 => "LGUI".to_string(),
+            228 => "RCTRL".to_string(),
+            229 => "RSHIFT".to_string(),
+            230 => "RALT".to_string(),
+            231 => "RGUI".to_string(),
+            232 => "MENU".to_string(),
+            other => format!("KEY#{}", other),
+        }
+    }
 }
 
 /// HUD 状态（每帧由游戏逻辑更新，`layout()` 读取它生成绘制命令）
@@ -125,6 +210,8 @@ pub struct HudState {
     pub ammo: u32,
     /// 弹匣容量
     pub max_ammo: u32,
+    /// 备弹（弹匣外，随换弹补充）
+    pub reserve: u32,
     /// 最近一帧 FPS（用于 FPS 文本显示）
     pub fps: f32,
     /// 小地图占位是否显示
@@ -137,10 +224,29 @@ pub struct HudState {
     pub countdown: f32,
     /// 当前画面（游戏/菜单/结算）
     pub screen: HudScreen,
+    /// 设置面板是否打开（由 `toggle_settings()` 切换，接入主循环后用于拦截游戏输入）
+    pub settings_open: bool,
+    /// 音量（0..=1，默认 0.8）
+    pub volume: f32,
+    /// 鼠标灵敏度（0..=1，默认 0.5）
+    pub sensitivity: f32,
+    /// 键位配置（默认 WASD + R + ESC + SPACE）
+    pub key_bindings: KeyBindings,
+    /// 设置面板当前选中项（0=音量 / 1=灵敏度，Tab 循环）
+    pub settings_selection: u8,
+    /// 命中标记剩余显示时间（秒，>0 时准星外圈闪一下）
+    pub hit_marker_timer: f32,
+    /// 是否正在换弹（由游戏逻辑写入）
+    pub reloading: bool,
+    /// 换弹进度（0..=1）
+    pub reload_progress: f32,
 }
 
 /// 血条文字缩放
 const TEXT_SCALE: f32 = 1.4;
+
+/// 命中标记闪烁时长（秒）
+const HIT_MARKER_DURATION: f32 = 0.15;
 
 impl HudState {
     /// 创建 HUD 状态（默认满血满弹、FPS 0、显示小地图占位）
@@ -152,12 +258,21 @@ impl HudState {
             max_health: 100.0,
             ammo: 30,
             max_ammo: 30,
+            reserve: 120,
             fps: 0.0,
             minimap_visible: true,
             score: 0,
             wave: 1,
             countdown: 0.0,
             screen: HudScreen::Game,
+            settings_open: false,
+            volume: 0.8,
+            sensitivity: 0.5,
+            key_bindings: KeyBindings::defaults(),
+            settings_selection: 0,
+            hit_marker_timer: 0.0,
+            reloading: false,
+            reload_progress: 0.0,
         }
     }
 
@@ -185,6 +300,7 @@ impl HudState {
             HudScreen::Game => self.game_elements(),
             HudScreen::Start => self.start_menu_elements(),
             HudScreen::GameOver => self.game_over_elements(),
+            HudScreen::Settings => self.settings_elements(),
         }
     }
 
@@ -242,12 +358,39 @@ impl HudState {
             ratio: self.ammo_ratio(),
         });
         elems.push(HudElement::Text {
-            text: format!("AMMO {}/{}", self.ammo, self.max_ammo),
+            text: format!("AMMO {}/{} +{}", self.ammo, self.max_ammo, self.reserve),
             x: ammo_x + 6.0,
             y: h - margin - bar_h + (bar_h - 7.0 * TEXT_SCALE) * 0.5,
             color: Color::WHITE,
             scale: TEXT_SCALE,
         });
+
+        // ---- 换弹指示（弹药条下方，黄字 + 进度条）----
+        if self.reloading {
+            let reload_txt = "RELOADING";
+            elems.push(HudElement::Text {
+                text: reload_txt.to_string(),
+                x: ammo_x + (ammo_w - text_width(reload_txt, 1.0)) * 0.5,
+                y: h - margin + 2.0,
+                color: Color::YELLOW,
+                scale: 1.0,
+            });
+            let pbar_w = ammo_w * 0.7;
+            let pbar_h = 5.0;
+            let pbar_x = ammo_x + (ammo_w - pbar_w) * 0.5;
+            let pbar_y = h - margin + 13.0;
+            elems.push(HudElement::Bar {
+                back: Quad::new(
+                    Rect::new(pbar_x, pbar_y, pbar_w, pbar_h),
+                    Color::new(0.10, 0.10, 0.12, 0.85),
+                ),
+                fill: Quad::new(
+                    Rect::new(pbar_x + 1.0, pbar_y + 1.0, pbar_w - 2.0, pbar_h - 2.0),
+                    Color::YELLOW,
+                ),
+                ratio: self.reload_progress.clamp(0.0, 1.0),
+            });
+        }
 
         // ---- FPS（左上角）----
         elems.push(HudElement::Text {
@@ -306,6 +449,30 @@ impl HudState {
             Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0),
             Color::RED,
         )));
+
+        // ---- 命中标记（准星外圈四个短臂，闪一下）----
+        if self.hit_marker_timer > 0.0 {
+            let arm_len = 7.0;
+            let thick = 3.0;
+            let radius = 14.0;
+            let hit = Color::RED;
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - radius - arm_len, cy - thick * 0.5, arm_len, thick),
+                hit,
+            )));
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx + radius, cy - thick * 0.5, arm_len, thick),
+                hit,
+            )));
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - thick * 0.5, cy - radius - arm_len, thick, arm_len),
+                hit,
+            )));
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - thick * 0.5, cy + radius, thick, arm_len),
+                hit,
+            )));
+        }
 
         // ---- 小地图占位（右上角）----
         if self.minimap_visible {
@@ -373,6 +540,15 @@ impl HudState {
             y: h * 0.30 + 44.0,
             color: Color::CYAN,
             scale: 1.2,
+        });
+        // 标题区域下方的操作提示
+        let ops = "WASD MOVE / MOUSE AIM / LMB FIRE / R RELOAD / TAB CAMERA / ESC SETTINGS";
+        elems.push(HudElement::Text {
+            text: ops.to_string(),
+            x: w * 0.5 - text_width(ops, 1.0) * 0.5,
+            y: h * 0.30 + 68.0,
+            color: Color::new(0.8, 0.8, 0.8, 1.0),
+            scale: 1.0,
         });
         let hint = "PRESS ANY KEY TO START";
         elems.push(HudElement::Text {
@@ -448,6 +624,111 @@ impl HudState {
         elems
     }
 
+    /// 设置面板：半透明底 + 标题 + 音量/灵敏度条 + 键位列表 + 操作提示
+    ///
+    /// 布局规则（左上角原点，像素坐标）：
+    /// - 全屏半透明遮罩
+    /// - 顶部中央 `SETTINGS` 标题
+    /// - 中部两行：`VOLUME` / `SENSITIVITY` 标签 + 右侧按比例填充的条
+    /// - 中下部键位列表（动作名 + `KeyBindings::label` 键名）
+    /// - 底部提示（字体仅 ASCII，意图为：ESC: 返回 / 滚轮: 调整）
+    fn settings_elements(&self) -> Vec<HudElement> {
+        let mut elems = Vec::new();
+        let w = self.screen_w;
+        let h = self.screen_h;
+        // 半透明底
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(0.0, 0.0, w, h),
+            Color::new(0.0, 0.0, 0.0, 0.60),
+        )));
+        // 标题
+        let title = "SETTINGS";
+        elems.push(HudElement::Text {
+            text: title.to_string(),
+            x: w * 0.5 - text_width(title, 3.0) * 0.5,
+            y: h * 0.14,
+            color: Color::WHITE,
+            scale: 3.0,
+        });
+        // 音量 / 灵敏度条
+        let bar_w = (w * 0.32).min(320.0);
+        let bar_h = 20.0;
+        let label_w = 160.0;
+        let row_h = 34.0;
+        let start_y = h * 0.28;
+        let left = w * 0.5 - (label_w + bar_w + 16.0) * 0.5;
+        let rows = [
+            ("VOLUME", self.volume, Color::CYAN),
+            ("SENSITIVITY", self.sensitivity, Color::ORANGE),
+        ];
+        for (i, (name, ratio, color)) in rows.iter().enumerate() {
+            let y = start_y + i as f32 * row_h;
+            let selected = (i as u8) == self.settings_selection;
+            elems.push(HudElement::Text {
+                text: if selected {
+                    format!("> {}", name)
+                } else {
+                    name.to_string()
+                },
+                x: left,
+                y: y + (bar_h - 7.0) * 0.5,
+                color: if selected { Color::YELLOW } else { Color::WHITE },
+                scale: 1.0,
+            });
+            let back = Quad::new(
+                Rect::new(left + label_w, y, bar_w, bar_h),
+                Color::new(0.10, 0.10, 0.12, 0.85),
+            );
+            let fill = Quad::new(
+                Rect::new(left + label_w + 3.0, y + 3.0, bar_w - 6.0, bar_h - 6.0),
+                *color,
+            );
+            elems.push(HudElement::Bar {
+                back,
+                fill,
+                ratio: *ratio,
+            });
+        }
+        // 键位列表
+        let keys = [
+            ("FORWARD", self.key_bindings.move_forward),
+            ("BACKWARD", self.key_bindings.move_backward),
+            ("LEFT", self.key_bindings.move_left),
+            ("RIGHT", self.key_bindings.move_right),
+            ("RELOAD", self.key_bindings.reload),
+            ("MENU", self.key_bindings.menu),
+            ("FIRE", self.key_bindings.fire),
+        ];
+        let key_start_y = start_y + 2.0 * row_h + 24.0;
+        for (i, (name, code)) in keys.iter().enumerate() {
+            let y = key_start_y + i as f32 * 18.0;
+            elems.push(HudElement::Text {
+                text: name.to_string(),
+                x: left + 40.0,
+                y,
+                color: Color::new(0.75, 0.75, 0.75, 1.0),
+                scale: 1.0,
+            });
+            elems.push(HudElement::Text {
+                text: KeyBindings::label(*code),
+                x: left + label_w + 40.0,
+                y,
+                color: Color::YELLOW,
+                scale: 1.0,
+            });
+        }
+        // 底部提示
+        let hint = "ESC: BACK / SCROLL: ADJUST";
+        elems.push(HudElement::Text {
+            text: hint.to_string(),
+            x: w * 0.5 - text_width(hint, 1.2) * 0.5,
+            y: h * 0.88,
+            color: Color::new(0.6, 0.6, 0.6, 1.0),
+            scale: 1.2,
+        });
+        elems
+    }
+
     /// 纯布局函数：输出渲染可直接消费的 quad 列表（位置/尺寸/颜色）。
     ///
     /// 等价于 `layout_elements()` 后逐个 `to_quads()` 拍平。
@@ -465,6 +746,41 @@ impl HudState {
     pub fn handle_event(&mut self, _event: &UiEvent) -> bool {
         let _ = _event;
         false
+    }
+
+    /// 切换设置面板开关
+    pub fn toggle_settings(&mut self) {
+        self.settings_open = !self.settings_open;
+    }
+
+    /// 调整音量（`delta` 为增量，结果 clamp 到 0..=1）
+    pub fn adjust_volume(&mut self, delta: f32) {
+        self.volume = (self.volume + delta).clamp(0.0, 1.0);
+    }
+
+    /// 调整灵敏度（`delta` 为增量，结果 clamp 到 0..=1）
+    pub fn adjust_sensitivity(&mut self, delta: f32) {
+        self.sensitivity = (self.sensitivity + delta).clamp(0.0, 1.0);
+    }
+
+    /// 循环切换设置面板选中项（0=音量 / 1=灵敏度）
+    pub fn cycle_settings_selection(&mut self) {
+        self.settings_selection = (self.settings_selection + 1) % 2;
+    }
+
+    /// 当前选中项（0=音量 / 1=灵敏度）
+    pub fn settings_selection(&self) -> u8 {
+        self.settings_selection
+    }
+
+    /// 显示命中标记（准星外圈闪一下）
+    pub fn show_hit_marker(&mut self) {
+        self.hit_marker_timer = HIT_MARKER_DURATION;
+    }
+
+    /// 每帧衰减计时器（`hit_marker_timer` 递减到 0）
+    pub fn tick(&mut self, dt: f32) {
+        self.hit_marker_timer = (self.hit_marker_timer - dt).max(0.0);
     }
 }
 
@@ -859,6 +1175,166 @@ mod tests {
         assert_eq!(health_color(0.1), Color::RED);
         assert_eq!(health_color(-1.0), Color::RED, "负值应 clamp");
         assert_eq!(health_color(2.0), Color::GREEN, "超值应 clamp");
+    }
+
+    #[test]
+    fn key_bindings_defaults_and_labels() {
+        let kb = KeyBindings::defaults();
+        assert_eq!(kb.move_forward, 26, "W");
+        assert_eq!(kb.move_backward, 22, "S");
+        assert_eq!(kb.move_left, 4, "A");
+        assert_eq!(kb.move_right, 7, "D");
+        assert_eq!(kb.reload, 21, "R");
+        assert_eq!(kb.menu, 41, "ESC");
+        assert_eq!(kb.fire, 44, "SPACE");
+        // label 映射
+        assert_eq!(KeyBindings::label(26), "W");
+        assert_eq!(KeyBindings::label(22), "S");
+        assert_eq!(KeyBindings::label(4), "A");
+        assert_eq!(KeyBindings::label(7), "D");
+        assert_eq!(KeyBindings::label(21), "R");
+        assert_eq!(KeyBindings::label(41), "ESC");
+        assert_eq!(KeyBindings::label(44), "SPACE");
+        assert_eq!(KeyBindings::label(30), "1");
+        assert_eq!(KeyBindings::label(58), "F1");
+        assert_eq!(KeyBindings::label(225), "LSHIFT");
+        assert_eq!(KeyBindings::label(999), "KEY#999", "未知键码应回退");
+    }
+
+    #[test]
+    fn settings_toggle_and_elements() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert!(!hud.settings_open, "初始应关闭设置面板");
+        hud.toggle_settings();
+        assert!(hud.settings_open, "toggle 后应打开");
+        hud.toggle_settings();
+        assert!(!hud.settings_open, "再 toggle 应关闭");
+
+        hud.screen = HudScreen::Settings;
+        let elems = hud.settings_elements();
+        assert!(!elems.is_empty(), "设置面板元素不应为空");
+        assert!(
+            find_text(&elems, "SETTINGS").is_some(),
+            "应有 SETTINGS 标题"
+        );
+        let bars: Vec<f32> = elems
+            .iter()
+            .filter_map(|e| match e {
+                HudElement::Bar { ratio, .. } => Some(*ratio),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bars.len(), 2, "应有音量+灵敏度两个条");
+        assert!((bars[0] - 0.8).abs() < 1e-5, "音量条应反映默认音量");
+        assert!((bars[1] - 0.5).abs() < 1e-5, "灵敏度条应反映默认灵敏度");
+        // 键位列表含默认键名
+        let texts: String = elems
+            .iter()
+            .filter_map(|e| match e {
+                HudElement::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(texts.contains("W"), "键位列表应含 FORWARD 键名 W: {}", texts);
+        assert!(
+            texts.contains("SPACE"),
+            "键位列表应含 FIRE 键名 SPACE: {}",
+            texts
+        );
+        // layout_elements 在 Settings 画面应走 settings_elements
+        let via_layout = hud.layout_elements();
+        assert!(
+            find_text(&via_layout, "SETTINGS").is_some(),
+            "Settings 画面应输出设置面板"
+        );
+    }
+
+    #[test]
+    fn adjust_volume_sensitivity_clamps() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert!((hud.volume - 0.8).abs() < 1e-5);
+        assert!((hud.sensitivity - 0.5).abs() < 1e-5);
+        hud.adjust_volume(0.3);
+        assert!((hud.volume - 1.0).abs() < 1e-5, "音量上限 1.0");
+        hud.adjust_volume(-2.0);
+        assert!((hud.volume - 0.0).abs() < 1e-5, "音量下限 0.0");
+        hud.adjust_sensitivity(1.0);
+        assert!((hud.sensitivity - 1.0).abs() < 1e-5, "灵敏度上限 1.0");
+        hud.adjust_sensitivity(-5.0);
+        assert!((hud.sensitivity - 0.0).abs() < 1e-5, "灵敏度下限 0.0");
+        hud.adjust_sensitivity(0.2);
+        assert!((hud.sensitivity - 0.2).abs() < 1e-5, "正常增量应生效");
+    }
+
+    #[test]
+    fn hit_marker_shows_and_decays() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.hit_marker_timer, 0.0);
+        let base = hud.layout_elements().len();
+        hud.show_hit_marker();
+        assert!(hud.hit_marker_timer > 0.0, "show_hit_marker 应启动计时");
+        let with_marker = hud.layout_elements().len();
+        assert!(
+            with_marker > base,
+            "命中标记应增加元素（{} -> {}）",
+            base,
+            with_marker
+        );
+        hud.tick(0.05);
+        assert!(hud.hit_marker_timer > 0.0, "部分衰减后仍应 > 0");
+        hud.tick(10.0);
+        assert_eq!(hud.hit_marker_timer, 0.0, "tick 后应衰减到 0");
+        assert_eq!(
+            hud.layout_elements().len(),
+            base,
+            "计时归零后应恢复原元素数"
+        );
+    }
+
+    #[test]
+    fn reloading_indicator_shown() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        let base = hud.layout_elements();
+        assert!(
+            find_text(&base, "RELOADING").is_none(),
+            "非换弹时不应有 RELOADING 文本"
+        );
+        hud.reloading = true;
+        hud.reload_progress = 0.5;
+        let elems = hud.layout_elements();
+        assert!(
+            find_text(&elems, "RELOADING").is_some(),
+            "换弹时应显示 RELOADING 文本"
+        );
+        let bars: Vec<f32> = elems
+            .iter()
+            .filter_map(|e| match e {
+                HudElement::Bar { ratio, .. } => Some(*ratio),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bars.len(), 3, "换弹时应有 血条+弹药条+换弹进度 三个 Bar");
+        assert!((bars[2] - 0.5).abs() < 1e-5, "换弹进度比例应透传");
+    }
+
+    #[test]
+    fn start_menu_has_controls_hint() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.screen = HudScreen::Start;
+        let elems = hud.layout_elements();
+        let ops = "WASD MOVE / MOUSE AIM / LMB FIRE / R RELOAD / TAB CAMERA / ESC SETTINGS";
+        assert!(
+            elems.iter().any(|e| matches!(
+                e,
+                HudElement::Text { text, .. } if text.as_str() == ops
+            )),
+            "开始菜单标题下方应有操作提示行"
+        );
+        assert!(
+            find_text(&elems, "STEEL FRONT").is_some(),
+            "标题文本结构应保留"
+        );
     }
 
     #[test]

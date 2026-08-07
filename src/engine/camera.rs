@@ -1,6 +1,7 @@
-//! 双模式相机模块
+//! 三模式相机模块
 //!
-//! - 轨道模式（默认）：围绕目标点旋转（左键拖拽）、推拉距离（滚轮）、平移目标点（WASD/QE）
+//! - 第一人称模式（默认）：眼睛位置由游戏侧驱动，鼠标视角 + 后坐力衰减
+//! - 轨道模式：围绕目标点旋转（左键拖拽）、推拉距离（滚轮）、平移目标点（WASD/QE）
 //! - 飞行模式：WASD 相机本地系平移、QE 升降、右键拖拽转视角、滚轮沿视线前进/后退
 //! - 惯性阻尼：平移/旋转速度指数衰减（v *= exp(-damping*dt)，damping≈8），松手后自然滑行
 //! - 边界 clamp（飞行模式）：x/z ∈ [-600,600]、y ∈ [0.5,800]，撞边界速度清零对应分量
@@ -35,13 +36,15 @@ const FLIGHT_WHEEL_STEP: f32 = 12.0;
 /// 相机模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
-    /// 轨道模式（默认）：围绕目标点旋转/缩放/平移
+    /// 第一人称模式（默认）：眼睛位置由游戏侧驱动，鼠标视角 + 后坐力
+    FirstPerson,
+    /// 轨道模式：围绕目标点旋转/缩放/平移
     Orbit,
     /// 飞行模式：自由飞行（RTS 手感）
     Flight,
 }
 
-/// 双模式相机
+/// 三模式相机
 #[allow(dead_code)]
 pub struct Camera {
     /// 当前模式
@@ -62,6 +65,15 @@ pub struct Camera {
     pub far_plane: f32,
     /// 飞行模式位置
     flight_pos: Vec3,
+    /// 第一人称眼睛位置
+    fp_pos: Vec3,
+    /// 第一人称速度（预留：Wave2 玩家移动由游戏侧写入）
+    fp_vel: Vec3,
+    /// 视角后坐力累计（pitch/yaw，弧度），FirstPerson 更新时指数衰减
+    recoil_pitch: f32,
+    recoil_yaw: f32,
+    /// 鼠标灵敏度（弧度/像素），look() 使用
+    mouse_sens: f32,
     /// 平移速度（轨道=目标点速度，飞行=位置速度），指数衰减
     move_vel: Vec3,
     /// 旋转速度（yaw/pitch，弧度/秒），指数衰减（飞行模式右键拖拽）
@@ -82,21 +94,25 @@ impl Default for Camera {
 
 #[allow(dead_code)]
 impl Camera {
-    /// 创建默认轨道相机
+    /// 创建默认第一人称相机
     ///
-    /// 默认值：目标 (0,0,0)，yaw=0°，pitch=26.565°，距离 3.3541。
-    /// 等价于旧默认相机位于 (0, 1.5, 3) 看向原点，无输入时画面一致。
+    /// 默认值：眼睛 (0,1.6,0)，yaw=0°、pitch=0°（平视 -Z），距离 3.3541（轨道/飞行切换沿用）。
     pub fn new() -> Self {
         Self {
-            mode: CameraMode::Orbit,
+            mode: CameraMode::FirstPerson,
             target: Vec3::ZERO,
             yaw: 0.0,
-            pitch: 26.565_f32.to_radians(),
+            pitch: 0.0,
             distance: 3.3541,
             fov: 70.0_f32.to_radians(), // 视野 70 度
             near_plane: 0.1,
             far_plane: 1500.0,
             flight_pos: Vec3::new(0.0, 1.5, 3.0),
+            fp_pos: Vec3::new(0.0, 1.6, 0.0),
+            fp_vel: Vec3::ZERO,
+            recoil_pitch: 0.0,
+            recoil_yaw: 0.0,
+            mouse_sens: MOUSE_SENSITIVITY,
             move_vel: Vec3::ZERO,
             yaw_vel: 0.0,
             pitch_vel: 0.0,
@@ -118,6 +134,7 @@ impl Camera {
     /// 相机位置
     pub fn position(&self) -> Vec3 {
         match self.mode {
+            CameraMode::FirstPerson => self.fp_pos,
             CameraMode::Orbit => self.target + self.direction() * self.distance,
             CameraMode::Flight => self.flight_pos,
         }
@@ -145,6 +162,35 @@ impl Camera {
     pub fn orbit(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw += delta_x * MOUSE_SENSITIVITY;
         self.pitch = (self.pitch - delta_y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+
+    /// 第一人称鼠标视角（供 FPS 主视角）：`delta_x` / `delta_y` 为屏幕像素位移，
+    /// pitch 夹在 [-89°, 89°]；灵敏度用 `mouse_sens`（默认 0.003）。
+    pub fn look(&mut self, delta_x: f32, delta_y: f32) {
+        self.yaw += delta_x * self.mouse_sens;
+        self.pitch = (self.pitch - delta_y * self.mouse_sens).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+
+    /// 累计视角后坐力（弧度），update() 的 FirstPerson 分支以指数衰减施加到 yaw/pitch
+    pub fn add_recoil(&mut self, pitch_kick: f32, yaw_kick: f32) {
+        self.recoil_pitch += pitch_kick;
+        self.recoil_yaw += yaw_kick;
+    }
+
+    /// 设置第一人称眼睛位置（玩家移动由游戏侧驱动）
+    pub fn set_first_person_eye(&mut self, pos: Vec3) {
+        self.fp_pos = pos;
+    }
+
+    /// 设置鼠标灵敏度（弧度/像素，设置面板用；clamp 到 [0.0005, 0.02]）
+    pub fn set_mouse_sens(&mut self, sens: f32) {
+        self.mouse_sens = sens.clamp(0.0005, 0.02);
+    }
+
+    /// 获取第一人称眼睛位置
+    #[allow(dead_code)] // 预留：Wave2 集成 game.rs/main.rs 时启用
+    pub fn first_person_eye(&self) -> Vec3 {
+        self.fp_pos
     }
 
     /// 滚轮推拉距离（轨道模式），clamp 到 [1.5, 500]
@@ -183,7 +229,7 @@ impl Camera {
         self.enforce_flight_bounds();
     }
 
-    /// 切换相机模式（Tab），保持位姿与朝向不变；清零全部速度
+    /// 切换相机模式（Tab）：Orbit → Flight → FirstPerson → Orbit，保持位姿与朝向不变；清零全部速度
     pub fn toggle_mode(&mut self) -> CameraMode {
         match self.mode {
             CameraMode::Orbit => {
@@ -191,7 +237,15 @@ impl Camera {
                 self.mode = CameraMode::Flight;
             }
             CameraMode::Flight => {
-                self.target = self.flight_pos - self.direction() * self.distance;
+                // 切入第一人称：眼睛位置取当前相机位置，朝向沿用 yaw/pitch
+                self.fp_pos = self.position();
+                self.mode = CameraMode::FirstPerson;
+            }
+            CameraMode::FirstPerson => {
+                // 切出第一人称：飞行位置取眼睛位置；轨道目标取视线前方 distance 处，
+                // 保证切回后相机仍停留在原眼睛位置（位姿连续）
+                self.flight_pos = self.fp_pos;
+                self.target = self.fp_pos + self.forward() * self.distance;
                 self.mode = CameraMode::Orbit;
             }
         }
@@ -200,6 +254,8 @@ impl Camera {
         self.pitch_vel = 0.0;
         self.rotate_dx = 0.0;
         self.rotate_dy = 0.0;
+        self.recoil_pitch = 0.0;
+        self.recoil_yaw = 0.0;
         self.mode
     }
 
@@ -286,6 +342,15 @@ impl Camera {
                 // 边界 clamp + 撞边界速度清零
                 self.enforce_flight_bounds();
             }
+            CameraMode::FirstPerson => {
+                // 不做位置移动（玩家移动由游戏侧负责），只做后坐力衰减与 pitch clamp。
+                // 后坐力按角速度积分并指数衰减：残留 = exp(-8*0.35)≈6% < 10%（0.35s 内）。
+                self.yaw += self.recoil_yaw * dt;
+                self.pitch += self.recoil_pitch * dt;
+                self.recoil_yaw *= decay;
+                self.recoil_pitch *= decay;
+                self.pitch = self.pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            }
         }
     }
 
@@ -320,6 +385,10 @@ impl Camera {
     /// 获取视图矩阵（从世界空间变换到相机空间）
     pub fn view_matrix(&self) -> Mat4 {
         match self.mode {
+            CameraMode::FirstPerson => {
+                let pos = self.fp_pos;
+                Mat4::look_at_rh(pos, pos + self.forward(), Vec3::Y)
+            }
             CameraMode::Orbit => Mat4::look_at_rh(self.position(), self.target, Vec3::Y),
             CameraMode::Flight => {
                 let pos = self.flight_pos;
@@ -370,5 +439,184 @@ impl KeyState {
         self.right = false;
         self.up = false;
         self.down = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FirstPerson 默认位姿：眼睛 (0,1.6,0)、平视（yaw/pitch=0）、前向 -Z
+    #[test]
+    fn first_person_default_pose() {
+        let cam = Camera::new();
+        assert_eq!(cam.mode, CameraMode::FirstPerson);
+        assert_eq!(cam.position(), Vec3::new(0.0, 1.6, 0.0));
+        assert_eq!(cam.first_person_eye(), Vec3::new(0.0, 1.6, 0.0));
+        assert_eq!(cam.yaw, 0.0);
+        assert_eq!(cam.pitch, 0.0);
+        assert!(
+            (cam.forward() - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-6,
+            "默认前向应为 -Z"
+        );
+    }
+
+    /// FirstPerson view_matrix：look_at(eye, eye+forward, Y)，眼睛经视图变换后应位于原点
+    #[test]
+    fn first_person_view_matrix() {
+        let cam = Camera::new();
+        let eye = cam.position();
+        let center = eye + cam.forward();
+        let expect = Mat4::look_at_rh(eye, center, Vec3::Y);
+        assert_eq!(cam.view_matrix(), expect);
+        let view_eye = cam.view_matrix().transform_point3(eye);
+        assert!(view_eye.length() < 1e-5, "眼睛在视图空间中应位于原点，实际 {:?}", view_eye);
+    }
+
+    /// set_first_person_eye：更新眼睛位置，position() 同步反映
+    #[test]
+    fn set_first_person_eye_updates_position() {
+        let mut cam = Camera::new();
+        cam.set_first_person_eye(Vec3::new(5.0, 3.0, 1.0));
+        assert_eq!(cam.first_person_eye(), Vec3::new(5.0, 3.0, 1.0));
+        assert_eq!(cam.position(), Vec3::new(5.0, 3.0, 1.0));
+    }
+
+    /// look：右移 dx 增加 yaw，下移 dy（屏幕 Y 向下）减小 pitch，灵敏度取 mouse_sens
+    #[test]
+    fn look_updates_yaw_pitch() {
+        let mut cam = Camera::new();
+        cam.look(100.0, 50.0);
+        assert!((cam.yaw - 100.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
+        assert!((cam.pitch - (-50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6);
+    }
+
+    /// look：pitch 夹在 [-89°, 89°]
+    #[test]
+    fn look_clamps_pitch() {
+        let mut cam = Camera::new();
+        cam.look(0.0, 1e6);
+        assert_eq!(cam.pitch, -PITCH_LIMIT);
+        cam.look(0.0, -1e6);
+        assert_eq!(cam.pitch, PITCH_LIMIT);
+    }
+
+    /// add_recoil：0.35s 内后坐力残留 <10%，且确实转动了视角；FirstPerson 不做位置移动
+    #[test]
+    fn add_recoil_decays_within_035s() {
+        let mut cam = Camera::new();
+        let (kick_pitch, kick_yaw) = (0.3, 0.2);
+        cam.add_recoil(kick_pitch, kick_yaw);
+        let dt: f32 = 1.0 / 60.0;
+        let steps = (0.35 / dt).round() as usize;
+        for _ in 0..steps {
+            cam.update(&KeyState::default(), dt);
+        }
+        assert!(
+            cam.recoil_pitch.abs() < kick_pitch * 0.10,
+            "0.35s 后 recoil_pitch 残留应 <10%，实际 {}",
+            cam.recoil_pitch
+        );
+        assert!(
+            cam.recoil_yaw.abs() < kick_yaw * 0.10,
+            "0.35s 后 recoil_yaw 残留应 <10%，实际 {}",
+            cam.recoil_yaw
+        );
+        assert!(cam.pitch.abs() > 0.0, "后坐力应改变 pitch");
+        assert!(cam.yaw.abs() > 0.0, "后坐力应改变 yaw");
+        assert_eq!(cam.position(), Vec3::new(0.0, 1.6, 0.0), "FirstPerson 不移动位置");
+    }
+
+    /// 超大后坐力：pitch 始终被 clamp 在 [-89°, 89°]
+    #[test]
+    fn recoil_pitch_is_clamped() {
+        let mut cam = Camera::new();
+        cam.add_recoil(20.0, 0.0);
+        let dt: f32 = 1.0 / 60.0;
+        for _ in 0..60 {
+            cam.update(&KeyState::default(), dt);
+        }
+        assert!(cam.pitch <= PITCH_LIMIT + 1e-6);
+        assert!(cam.pitch >= -PITCH_LIMIT - 1e-6);
+    }
+
+    /// toggle_mode 三态循环：FirstPerson → Orbit → Flight → FirstPerson，位姿连续
+    #[test]
+    fn toggle_mode_cycles_three_ways() {
+        let mut cam = Camera::new();
+        assert_eq!(cam.mode, CameraMode::FirstPerson);
+        cam.set_first_person_eye(Vec3::new(10.0, 2.0, -5.0));
+        cam.yaw = 0.5;
+        cam.pitch = 0.2;
+
+        // FirstPerson → Orbit：相机停在眼睛处，target 在视线前方 distance
+        assert_eq!(cam.toggle_mode(), CameraMode::Orbit);
+        assert!(
+            (cam.position() - Vec3::new(10.0, 2.0, -5.0)).length() < 1e-5,
+            "切到 Orbit 后位置应连续"
+        );
+        let expect_target = Vec3::new(10.0, 2.0, -5.0) + cam.forward() * cam.distance;
+        assert!((cam.target - expect_target).length() < 1e-5);
+
+        // Orbit → Flight：flight_pos = 当前 position
+        assert_eq!(cam.toggle_mode(), CameraMode::Flight);
+        assert!((cam.flight_pos - cam.position()).length() < 1e-6);
+        assert!((cam.flight_pos - Vec3::new(10.0, 2.0, -5.0)).length() < 1e-5);
+
+        // Flight → FirstPerson：fp_pos = 当前 position
+        assert_eq!(cam.toggle_mode(), CameraMode::FirstPerson);
+        assert!((cam.first_person_eye() - cam.position()).length() < 1e-6);
+        assert!((cam.first_person_eye() - Vec3::new(10.0, 2.0, -5.0)).length() < 1e-5);
+    }
+
+    /// Orbit 既有行为：位姿公式与 orbit() 位控旋转保持不变
+    #[test]
+    fn orbit_pose_and_rotation_unchanged() {
+        let mut cam = Camera::new();
+        cam.mode = CameraMode::Orbit;
+        cam.target = Vec3::ZERO;
+        cam.yaw = 0.0;
+        cam.pitch = 26.565_f32.to_radians();
+        cam.distance = 3.3541;
+        assert!(
+            (cam.position() - Vec3::new(0.0, 1.5, 3.0)).length() < 1e-3,
+            "默认轨道机位应等价 (0,1.5,3)"
+        );
+        let expect = Mat4::look_at_rh(cam.position(), cam.target, Vec3::Y);
+        assert_eq!(cam.view_matrix(), expect);
+
+        cam.orbit(100.0, 50.0);
+        assert!((cam.yaw - 100.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
+        assert!(
+            (cam.pitch - (26.565_f32.to_radians() - 50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6
+        );
+    }
+
+    /// Flight 既有行为：W 沿水平前向（-Z）移动，切到 FirstPerson 位置连续
+    #[test]
+    fn flight_moves_and_toggle_preserves_pose() {
+        let mut cam = Camera::new();
+        cam.mode = CameraMode::Flight;
+        cam.flight_pos = Vec3::new(0.0, 10.0, 0.0);
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        let before = cam.flight_pos;
+        let keys = KeyState {
+            forward: true,
+            ..KeyState::default()
+        };
+        cam.update(&keys, 1.0 / 60.0);
+        assert!(
+            (cam.flight_pos - before).length() > 0.0,
+            "W 应让飞行相机前进"
+        );
+        assert!(cam.flight_pos.z < before.z, "默认前向 -Z，应沿 -Z 前进");
+        let pos = cam.position();
+        cam.toggle_mode();
+        assert_eq!(cam.mode, CameraMode::FirstPerson);
+        assert!(
+            (cam.first_person_eye() - pos).length() < 1e-5,
+            "Flight → FirstPerson 位置应连续"
+        );
     }
 }

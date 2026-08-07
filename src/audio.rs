@@ -663,6 +663,183 @@ impl<S: AudioSink> AudioPlayer<S> {
     }
 }
 
+/// 游戏音效种类
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfxKind {
+    /// 枪声
+    Gunshot,
+    /// 脚步声
+    Footstep,
+    /// 命中
+    Hit,
+    /// 换弹
+    Reload,
+    /// HUD 提示音
+    UiBlip,
+    /// 环境音（供循环播放）
+    Ambient,
+}
+
+/// 游戏音效库：全部 CPU 程序化合成，确定性（无 rand 依赖），无外部音频文件
+#[derive(Debug, Clone)]
+pub struct SfxBank {
+    /// 按 `SfxKind` 下标索引的预合成 clip（与枚举顺序一致，共 6 个）
+    clips: [Arc<AudioClip>; 6],
+}
+
+impl SfxBank {
+    /// 以指定采样率确定性合成 6 种音效（sample_rate 为 0 时回退 44100）
+    pub fn new(sample_rate: u32) -> Self {
+        let sr = if sample_rate == 0 { 44_100 } else { sample_rate };
+        Self {
+            clips: [
+                synth_gunshot(sr),
+                synth_footstep(sr),
+                synth_hit(sr),
+                synth_reload(sr),
+                synth_ui_blip(sr),
+                synth_ambient(sr),
+            ],
+        }
+    }
+
+    /// 取指定音效的 clip
+    pub fn clip(&self, kind: SfxKind) -> &Arc<AudioClip> {
+        &self.clips[self.kind_index(kind)]
+    }
+
+    /// 播放指定音效（内部复用 `Mixer::play`）
+    pub fn play(
+        &self,
+        mixer: &mut Mixer,
+        kind: SfxKind,
+        source: AudioSource,
+        channel: Channel,
+        looping: bool,
+    ) -> VoiceId {
+        mixer.play(self.clip(kind).clone(), source, channel, looping)
+    }
+
+    /// `SfxKind` → clips 数组下标（内部/测试用）
+    pub fn kind_index(&self, kind: SfxKind) -> usize {
+        match kind {
+            SfxKind::Gunshot => 0,
+            SfxKind::Footstep => 1,
+            SfxKind::Hit => 2,
+            SfxKind::Reload => 3,
+            SfxKind::UiBlip => 4,
+            SfxKind::Ambient => 5,
+        }
+    }
+}
+
+/// 合成辅助：按帧数生成单声道 clip（采样率合法且帧数 > 0）
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn build_clip(sample_rate: u32, frames: usize, f: impl FnMut(usize) -> f32) -> Arc<AudioClip> {
+    let samples: Vec<f32> = (0..frames).map(f).collect();
+    Arc::new(AudioClip::new(samples, sample_rate, 1).expect("SfxBank 合成参数合法"))
+}
+
+/// 确定性伪随机数（LCG，固定种子，std-only，无 rand 依赖）
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn lcg_next(state: &mut u32) -> u32 {
+    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    *state
+}
+
+/// LCG 输出归一化为 [-1, 1) 的白噪声样本
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn noise_unit(state: &mut u32) -> f32 {
+    (lcg_next(state) as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
+/// 枪声：0.15s，白噪声 × 快指数衰减 + 80Hz 低频 thump（峰值约 0.55）
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn synth_gunshot(sample_rate: u32) -> Arc<AudioClip> {
+    let frames = (0.15 * sample_rate as f32) as usize;
+    let sr = sample_rate as f32;
+    let mut state: u32 = 0x9E37_79B9; // 固定种子（确定性）
+    build_clip(sample_rate, frames, |i| {
+        let t = i as f32 / sr;
+        let noise = noise_unit(&mut state) * (-t * 28.0).exp();
+        let thump = (std::f32::consts::TAU * 80.0 * t).sin() * (-t * 22.0).exp();
+        noise * 0.35 + thump * 0.20
+    })
+}
+
+/// 脚步声：0.08s，120Hz 低频衰减脉冲 + 轻微噪声（峰值约 0.48）
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn synth_footstep(sample_rate: u32) -> Arc<AudioClip> {
+    let frames = (0.08 * sample_rate as f32) as usize;
+    let sr = sample_rate as f32;
+    let mut state: u32 = 0xABCD_EF01; // 固定种子（确定性）
+    build_clip(sample_rate, frames, |i| {
+        let t = i as f32 / sr;
+        let pulse = (std::f32::consts::TAU * 120.0 * t).sin() * (-t * 40.0).exp();
+        let noise = noise_unit(&mut state) * (-t * 60.0).exp() * 0.06;
+        pulse * 0.42 + noise
+    })
+}
+
+/// 命中：0.06s，短促 1kHz tick（正弦 × 快衰减，峰值约 0.5）
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn synth_hit(sample_rate: u32) -> Arc<AudioClip> {
+    let frames = (0.06 * sample_rate as f32) as usize;
+    let sr = sample_rate as f32;
+    build_clip(sample_rate, frames, |i| {
+        let t = i as f32 / sr;
+        (std::f32::consts::TAU * 1000.0 * t).sin() * (-t * 90.0).exp() * 0.5
+    })
+}
+
+/// 换弹：0.25s，两个短噪声脉冲 click（间隔约 0.12s，峰值约 0.52）
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn synth_reload(sample_rate: u32) -> Arc<AudioClip> {
+    let frames = (0.25 * sample_rate as f32) as usize;
+    let sr = sample_rate as f32;
+    let mut state: u32 = 0x1357_9BDF; // 固定种子（确定性）
+    build_clip(sample_rate, frames, |i| {
+        let t = i as f32 / sr;
+        let mut s = 0.0;
+        for t0 in [0.02f32, 0.14] {
+            let dt = t - t0;
+            if dt >= 0.0 {
+                s += noise_unit(&mut state) * (-dt * 300.0).exp();
+            }
+        }
+        s * 0.26
+    })
+}
+
+/// HUD 提示音：0.08s，880Hz 正弦 × 起落包络（峰值约 0.4）
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn synth_ui_blip(sample_rate: u32) -> Arc<AudioClip> {
+    let frames = (0.08 * sample_rate as f32) as usize;
+    let sr = sample_rate as f32;
+    build_clip(sample_rate, frames, |i| {
+        let t = i as f32 / sr;
+        // 起落包络：0.01s 快起，随后指数落
+        let env = if t < 0.01 { t / 0.01 } else { (-(t - 0.01) * 45.0).exp() };
+        (std::f32::consts::TAU * 880.0 * t).sin() * env * 0.4
+    })
+}
+
+/// 环境音：2.0s，60Hz + 120Hz 低频 drone + 0.5Hz 缓动（峰值约 0.35）
+///
+/// 60Hz/120Hz/0.5Hz 在 2.0s 内均为整数周期，循环点无缝，供 `looping` 播放。
+#[allow(dead_code)] // 预留：SfxBank 合成辅助
+fn synth_ambient(sample_rate: u32) -> Arc<AudioClip> {
+    let frames = (2.0 * sample_rate as f32) as usize;
+    let sr = sample_rate as f32;
+    build_clip(sample_rate, frames, |i| {
+        let t = i as f32 / sr;
+        let drone = (std::f32::consts::TAU * 60.0 * t).sin() * 0.5
+            + (std::f32::consts::TAU * 120.0 * t).sin() * 0.25;
+        let lfo = 1.0 + 0.15 * (std::f32::consts::TAU * 0.5 * t).sin();
+        drone * lfo * 0.4
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,5 +1125,88 @@ mod tests {
         // 播放完毕后再 tick 输出静音
         player.tick(&AudioListener::new(Vec3::ZERO), 2);
         assert_eq!(player.sink().samples[4..], [0.0; 4]);
+    }
+
+    /// 全部 6 种音效（与 SfxKind 枚举顺序一致）
+    const ALL_SFX_KINDS: [SfxKind; 6] = [
+        SfxKind::Gunshot,
+        SfxKind::Footstep,
+        SfxKind::Hit,
+        SfxKind::Reload,
+        SfxKind::UiBlip,
+        SfxKind::Ambient,
+    ];
+
+    #[test]
+    fn sfx_bank_new_has_all_kinds_with_frames() {
+        let bank = SfxBank::new(44100);
+        for kind in ALL_SFX_KINDS {
+            let clip = bank.clip(kind);
+            assert!(clip.frame_count() > 0, "{kind:?} 帧数应为正数");
+            assert_eq!(clip.sample_rate(), 44100);
+            assert_eq!(clip.channels(), 1);
+        }
+    }
+
+    #[test]
+    fn sfx_bank_clips_have_nonzero_samples() {
+        let bank = SfxBank::new(44100);
+        for kind in ALL_SFX_KINDS {
+            let clip = bank.clip(kind);
+            assert!(
+                clip.samples().iter().any(|&s| s != 0.0),
+                "{kind:?} 应包含非零样本"
+            );
+        }
+    }
+
+    #[test]
+    fn sfx_bank_play_adds_one_voice() {
+        let bank = SfxBank::new(44100);
+        let mut mixer = Mixer::new();
+        for kind in ALL_SFX_KINDS {
+            let before = mixer.voice_count();
+            bank.play(&mut mixer, kind, AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
+            assert_eq!(mixer.voice_count(), before + 1, "{kind:?} 播放后应新增 1 个 voice");
+        }
+    }
+
+    #[test]
+    fn sfx_bank_ambient_looping_never_ends() {
+        let bank = SfxBank::new(44100);
+        let mut mixer = Mixer::new();
+        bank.play(
+            &mut mixer,
+            SfxKind::Ambient,
+            AudioSource::new(Vec3::ZERO, 1.0),
+            Channel::Sfx,
+            true,
+        );
+        // 混 3 倍 clip 时长，循环声音应始终存活且输出非零
+        let frames = bank.clip(SfxKind::Ambient).frame_count() * 3;
+        let out = mixer.mix_vec(&AudioListener::new(Vec3::ZERO), frames);
+        assert_eq!(mixer.voice_count(), 1, "Ambient 循环播放不应结束");
+        assert!(out.iter().any(|&s| s != 0.0), "Ambient 循环输出不应全零");
+    }
+
+    #[test]
+    fn sfx_bank_synthesis_is_deterministic() {
+        let a = SfxBank::new(48000);
+        let b = SfxBank::new(48000);
+        for kind in ALL_SFX_KINDS {
+            assert_eq!(
+                a.clip(kind).samples(),
+                b.clip(kind).samples(),
+                "{kind:?} 两次合成应逐样本一致"
+            );
+        }
+    }
+
+    #[test]
+    fn sfx_bank_kind_index_maps_in_order() {
+        let bank = SfxBank::new(44100);
+        for (i, kind) in ALL_SFX_KINDS.iter().enumerate() {
+            assert_eq!(bank.kind_index(*kind), i, "kind_index 应与枚举顺序一致");
+        }
     }
 }

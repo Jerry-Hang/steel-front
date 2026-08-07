@@ -303,6 +303,137 @@ impl SphereBody {
     }
 }
 
+/// FPS 玩家碰撞体：以脚底位置为圆心、`radius` 为半径的水平圆柱（高 `eye_height`）。
+/// 只处理水平（x/z）碰撞，y 由地形高度在游戏侧决定，本实现不改变 `pos.y`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerBody {
+    /// 脚底位置（x/z 参与碰撞，y 由地形高度决定）
+    pub pos: Vec3,
+    /// 水平碰撞半径
+    pub radius: f32,
+    /// 眼睛高度（身高）
+    pub eye_height: f32,
+    /// 水平速度（单位/秒）
+    pub vel: Vec3,
+    /// 是否着地
+    pub grounded: bool,
+}
+
+impl PlayerBody {
+    pub fn new(pos: Vec3, radius: f32, eye_height: f32) -> Self {
+        Self {
+            pos,
+            radius,
+            eye_height,
+            vel: Vec3::ZERO,
+            grounded: false,
+        }
+    }
+
+    pub fn pos(&self) -> Vec3 {
+        self.pos
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    pub fn eye_height(&self) -> f32 {
+        self.eye_height
+    }
+
+    pub fn vel(&self) -> Vec3 {
+        self.vel
+    }
+
+    pub fn grounded(&self) -> bool {
+        self.grounded
+    }
+
+    /// 把玩家从单个 AABB 中水平推出（圆-AABB 最近点推挤）。
+    /// 圆心 clamp 到 AABB 的 [min,max] 得到最近点，距离 < radius 即重叠；
+    /// 推挤方向为 圆心→最近点（水平投影重合时取最小穿透轴，参考 `aabb_separation` 风格）。
+    /// 发生推挤时返回穿透深度，否则返回 None。只改 pos.x/z，不碰 pos.y。
+    fn push_out_of_aabb(&mut self, aabb: &Aabb) -> Option<f32> {
+        let cx = self.pos.x;
+        let cz = self.pos.z;
+        let closest_x = cx.clamp(aabb.min.x, aabb.max.x);
+        let closest_z = cz.clamp(aabb.min.z, aabb.max.z);
+        let dx = cx - closest_x;
+        let dz = cz - closest_z;
+        let dist_sq = dx * dx + dz * dz;
+        if dist_sq >= self.radius * self.radius {
+            return None; // 相切/分离不算碰撞
+        }
+        // 推挤时多推 1e-6，避免浮点误差残留导致边界反复判定重叠
+        let eps = 1e-6;
+        let (nx, nz, penetration) = if dist_sq > 1e-12 {
+            // 圆心在 AABB 外：沿 圆心→最近点 方向推出
+            let dist = dist_sq.sqrt();
+            (dx / dist, dz / dist, self.radius - dist + eps)
+        } else {
+            // 圆心水平投影在 AABB 内部：取最小穿透轴（X 或 Z），朝较近的面推出
+            let pen_x = (cx - aabb.min.x).min(aabb.max.x - cx);
+            let pen_z = (cz - aabb.min.z).min(aabb.max.z - cz);
+            if pen_x <= pen_z {
+                if cx - aabb.min.x <= aabb.max.x - cx {
+                    (-1.0, 0.0, pen_x + self.radius + eps)
+                } else {
+                    (1.0, 0.0, pen_x + self.radius + eps)
+                }
+            } else if cz - aabb.min.z <= aabb.max.z - cz {
+                (0.0, -1.0, pen_z + self.radius + eps)
+            } else {
+                (0.0, 1.0, pen_z + self.radius + eps)
+            }
+        };
+        self.pos.x += nx * penetration;
+        self.pos.z += nz * penetration;
+        Some(penetration)
+    }
+
+    /// 对 `world.bodies` 中每个 AABB 做水平推挤（内部 1-2 次迭代，
+    /// 避免一次推挤把玩家挤进相邻刚体）。发生任何推挤时返回 true。
+    pub fn collide_world(&mut self, world: &World) -> bool {
+        let mut pushed = false;
+        for _ in 0..2 {
+            let mut any = false;
+            for body in &world.bodies {
+                if self.push_out_of_aabb(&body.aabb()).is_some() {
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+            pushed = true;
+        }
+        pushed
+    }
+
+    /// 请求移动 (dx, dz)：先叠加位移，再 `collide_world` 推回，
+    /// 返回实际位移 (f32, f32)。y 始终不被改动。
+    pub fn try_move(&mut self, world: &World, dx: f32, dz: f32) -> (f32, f32) {
+        let old_x = self.pos.x;
+        let old_z = self.pos.z;
+        self.pos.x += dx;
+        self.pos.z += dz;
+        self.collide_world(world);
+        (self.pos.x - old_x, self.pos.z - old_z)
+    }
+
+    /// 是否与任一刚体的 AABB（水平扩展 radius 后）重叠
+    pub fn collides(&self, world: &World) -> bool {
+        world.bodies.iter().any(|body| {
+            let a = body.aabb();
+            self.pos.x > a.min.x - self.radius
+                && self.pos.x < a.max.x + self.radius
+                && self.pos.z > a.min.z - self.radius
+                && self.pos.z < a.max.z + self.radius
+        })
+    }
+}
+
 /// 物理世界：重力积分、地面碰撞响应、物体间碰撞检测与事件回调
 pub struct World {
     /// 重力加速度（Y 轴向下，正值）
@@ -658,5 +789,132 @@ mod tests {
             kinds.contains(&CollisionKind::AabbResolved),
             "解析后应发出 AabbResolved 事件"
         );
+    }
+
+    #[test]
+    fn player_body_new_and_getters() {
+        let p = PlayerBody::new(Vec3::new(1.0, 2.0, 3.0), 0.4, 1.6);
+        assert_eq!(p.pos(), Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(p.radius(), 0.4);
+        assert_eq!(p.eye_height(), 1.6);
+        assert_eq!(p.vel(), Vec3::ZERO);
+        assert!(!p.grounded(), "新建玩家默认未着地");
+    }
+
+    #[test]
+    fn player_free_move_when_far_from_bodies() {
+        let mut world = World::new();
+        world
+            .bodies
+            .push(Body::new(Vec3::new(100.0, 0.0, 100.0), Vec3::new(1.0, 1.0, 1.0)));
+        let mut player = PlayerBody::new(Vec3::new(0.0, 3.0, 0.0), 0.4, 1.6);
+        let moved = player.try_move(&world, 1.5, -2.0);
+        assert_eq!(moved, (1.5, -2.0), "远离刚体时实际位移应等于请求位移");
+        assert_eq!(player.pos(), Vec3::new(1.5, 3.0, -2.0));
+        assert!(!player.collides(&world), "远离刚体时不应判定碰撞");
+    }
+
+    #[test]
+    fn player_pushed_out_of_aabb() {
+        let mut world = World::new();
+        // 一堵墙：x ∈ [0, 2]，z ∈ [-1, 1]
+        world
+            .bodies
+            .push(Body::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0)));
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 5.0, 0.0), 0.4, 1.6);
+        let moved = player.try_move(&world, 0.4, 0.0);
+        assert!(!player.collides(&world), "被推挤后不应穿透墙体");
+        assert!(moved.0 < 0.4, "撞墙后 X 位移应被截断");
+        assert!(
+            (player.pos.x + player.radius).abs() < 1e-4,
+            "圆右缘应贴住墙面 x = 0，实际 x = {}",
+            player.pos.x
+        );
+        assert_eq!(moved.0, player.pos.x - (-0.5), "返回的实际位移应与位置变化一致");
+    }
+
+    #[test]
+    fn player_diagonal_move_keeps_free_axis() {
+        let mut world = World::new();
+        // 一堵宽墙横在 +Z 方向：x ∈ [-2, 2]，z ∈ [2, 3]
+        world
+            .bodies
+            .push(Body::new(Vec3::new(0.0, 0.0, 2.5), Vec3::new(2.0, 2.0, 0.5)));
+        let mut player = PlayerBody::new(Vec3::new(0.0, 5.0, 0.0), 0.4, 1.6);
+        let (mx, mz) = player.try_move(&world, 0.5, 2.5);
+        assert!(mx > 0.49, "斜向移动时 X 方向不应被阻挡");
+        assert!(mz < 2.5, "斜向移动时 Z 方向应被墙阻挡");
+        assert!(!player.collides(&world), "推挤后不应穿透墙体");
+        assert!(
+            (player.pos.z + player.radius - 2.0).abs() < 1e-4,
+            "圆前缘应贴住墙面 z = 2，实际 z = {}",
+            player.pos.z
+        );
+        assert!((player.pos.x - 0.5).abs() < 1e-4, "X 分量应保持请求位移");
+    }
+
+    #[test]
+    fn player_pushed_out_of_stacked_aabbs() {
+        let mut world = World::new();
+        // 两个 X 方向叠放的箱子（先放远的 B：x ∈ [0.5, 2]，再放近的 A：x ∈ [0, 1.5]），
+        // 玩家一次撞进两个箱子，应经两次推挤后被完整推出
+        world
+            .bodies
+            .push(Body::new(Vec3::new(1.25, 0.0, 0.0), Vec3::new(0.75, 2.0, 0.3)));
+        world
+            .bodies
+            .push(Body::new(Vec3::new(0.75, 0.0, 0.0), Vec3::new(0.75, 2.0, 0.3)));
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 5.0, 0.0), 0.4, 1.6);
+        let (mx, _) = player.try_move(&world, 0.8, 0.0);
+        assert!(!player.collides(&world), "多个 AABB 叠放时也应被推出，不穿透");
+        assert!(mx < 0.8, "X 位移应被截断");
+        assert!(
+            (player.pos.x + player.radius).abs() < 1e-4,
+            "圆右缘应贴住最近的箱子左缘 x = 0，实际 x = {}",
+            player.pos.x
+        );
+    }
+
+    #[test]
+    fn player_y_untouched_by_collision() {
+        let mut world = World::new();
+        // 墙的 y 范围 [−2, 2] 不包含玩家 y，但水平碰撞仍应生效
+        world
+            .bodies
+            .push(Body::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0)));
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 7.25, 0.0), 0.4, 1.6);
+        player.try_move(&world, 0.8, 0.0);
+        assert!(!player.collides(&world), "推挤后不应穿透墙体");
+        assert_eq!(player.pos.y, 7.25, "碰撞推挤不应改动 y（y 由地形高度决定）");
+    }
+
+    #[test]
+    fn player_collides_uses_expanded_aabb() {
+        let mut world = World::new();
+        world
+            .bodies
+            .push(Body::new(Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.5, 2.0, 0.5)));
+        // 箱面 z = 1.5，玩家圆心 z = 1.7：距箱面 0.2 < radius 0.4 → 碰撞
+        let near = PlayerBody::new(Vec3::new(0.0, 5.0, 1.7), 0.4, 1.6);
+        assert!(near.collides(&world), "距箱面小于 radius 时应判定碰撞");
+        // 圆心 z = 1.1：距箱面 0.4 == radius → 相切不算碰撞
+        let touching = PlayerBody::new(Vec3::new(0.0, 5.0, 1.1), 0.4, 1.6);
+        assert!(!touching.collides(&world), "相切不应判定为碰撞");
+        // 圆心 z = 1.0：距箱面 0.5 > radius → 分离
+        let far = PlayerBody::new(Vec3::new(0.0, 5.0, 1.0), 0.4, 1.6);
+        assert!(!far.collides(&world), "分离时不应判定为碰撞");
+    }
+
+    #[test]
+    fn player_collide_world_reports_push() {
+        let mut world = World::new();
+        world
+            .bodies
+            .push(Body::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0)));
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 5.0, 0.0), 0.4, 1.6);
+        player.pos.x += 0.3; // 进入重叠：距墙面 0.2 < radius
+        assert!(player.collide_world(&world), "发生推挤时应返回 true");
+        assert!(!player.collides(&world), "推挤后不应再重叠");
+        assert!(!player.collide_world(&world), "无重叠时不应返回 true");
     }
 }

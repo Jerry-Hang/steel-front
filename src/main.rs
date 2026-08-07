@@ -104,6 +104,12 @@ impl GameApp {
         // 更新游戏逻辑（物理、武器、AI 等）
         self.game.update(delta_time, &self.camera);
 
+        // 第一人称：玩家身体位置 → 相机眼睛（FP 相机不自己移动），并同步灵敏度
+        if self.camera.mode == CameraMode::FirstPerson {
+            self.camera.set_first_person_eye(self.game.player_eye());
+            self.camera.set_mouse_sens(self.game.sensitivity_rads());
+        }
+
         // 开火：从相机位置沿视线发射投射物
         if self.fire_requested {
             let pos = self.camera.position();
@@ -111,6 +117,12 @@ impl GameApp {
             self.game
                 .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
             self.fire_requested = false;
+        }
+
+        // 武器后坐力：取走本帧开火累计的 kick 施加到相机（指数衰减由 camera.update 处理）
+        let (kick_pitch, kick_yaw) = self.game.drain_kick();
+        if kick_pitch != 0.0 || kick_yaw != 0.0 {
+            self.camera.add_recoil(kick_pitch, kick_yaw);
         }
 
         // 相机参数日志（1 秒一条，冒烟断言 yaw/pitch 变化用）
@@ -132,12 +144,13 @@ impl GameApp {
         let Some(window) = &self.window else {
             return;
         };
-        let want = self.focused && self.game.state() == GameState::Playing;
+        let want = self.focused
+            && self.game.state() == GameState::Playing
+            && !self.game.settings_open();
         if want && !self.cursor_captured {
-            let grabbed = window
-                .set_cursor_grab(CursorGrabMode::Confined)
-                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
-                .is_ok();
+            // 仅用 Confined（X11 指针锁定回退会在"锁定 + 应用回中"之间形成 warp 反馈环，
+            // 导致第一人称视角每帧自转；Confined 只限制边界不 warp，无此问题）
+            let grabbed = window.set_cursor_grab(CursorGrabMode::Confined).is_ok();
             if grabbed {
                 window.set_cursor_visible(false);
                 self.cursor_captured = true;
@@ -150,6 +163,12 @@ impl GameApp {
             self.camera.set_rotation_active(false);
             log::info!("input: cursor released");
         }
+    }
+
+    /// 把 WASD 按键状态转发给游戏（FPS 玩家移动）
+    fn sync_game_movement(&mut self) {
+        let k = &self.key_state;
+        self.game.set_movement(k.forward, k.backward, k.left, k.right);
     }
 
     /// 渲染一帧
@@ -257,34 +276,70 @@ impl ApplicationHandler for GameApp {
                 match key_code {
                     KeyCode::Escape => {
                         if pressed {
-                            log::info!("ESC 键按下，退出程序");
-                            self.running = false;
-                            event_loop.exit();
+                            if self.game.settings_open() {
+                                log::info!("ESC 关闭设置面板");
+                                self.game.toggle_settings();
+                            } else {
+                                log::info!("ESC 键按下，退出程序");
+                                self.running = false;
+                                event_loop.exit();
+                            }
                         }
                     }
                     // 死亡结算界面：R 重开一局
                     KeyCode::KeyR => {
-                        if pressed && self.game.state() == GameState::GameOver {
-                            log::info!("game: R 键重开一局");
-                            self.game.request_restart(&self.camera.position());
+                        if pressed {
+                            if self.game.state() == GameState::GameOver {
+                                log::info!("game: R 键重开一局");
+                                self.game.request_restart(&self.camera.position());
+                            } else if self.game.state() == GameState::Playing
+                                && !self.game.settings_open()
+                            {
+                                self.game.request_reload();
+                            }
                         }
                     }
-                    // Tab 切换相机模式（轨道 ↔ 飞行）
+                    // Tab：设置面板打开时循环选中项；否则切换相机模式
                     KeyCode::Tab => {
                         if pressed {
-                            let mode = self.camera.toggle_mode();
-                            log::info!("相机模式切换: {:?}", mode);
+                            if self.game.settings_open() {
+                                self.game.cycle_settings();
+                            } else {
+                                let mode = self.camera.toggle_mode();
+                                log::info!("相机模式切换: {:?}", mode);
+                            }
                         }
                     }
                     // WASD 平移目标点 / QE 升降
-                    KeyCode::KeyW => self.key_state.forward = pressed,
-                    KeyCode::KeyS => self.key_state.backward = pressed,
-                    KeyCode::KeyA => self.key_state.left = pressed,
-                    KeyCode::KeyD => self.key_state.right = pressed,
+                    KeyCode::KeyW => {
+                        self.key_state.forward = pressed;
+                        self.sync_game_movement();
+                    }
+                    KeyCode::KeyS => {
+                        self.key_state.backward = pressed;
+                        self.sync_game_movement();
+                    }
+                    KeyCode::KeyA => {
+                        self.key_state.left = pressed;
+                        self.sync_game_movement();
+                    }
+                    KeyCode::KeyD => {
+                        self.key_state.right = pressed;
+                        self.sync_game_movement();
+                    }
                     KeyCode::KeyQ => self.key_state.down = pressed,
                     KeyCode::KeyE => self.key_state.up = pressed,
                     // Space 开火（投射物武器）
-                    KeyCode::Space => self.fire_requested = pressed,
+                    KeyCode::Space => {
+                        self.fire_requested = pressed && !self.game.settings_open();
+                    }
+                    // 设置面板调试补给（N 键补满弹匣）
+                    KeyCode::KeyN => {
+                        if pressed && self.game.settings_open() {
+                            log::info!("settings: N 键补给弹药");
+                            self.game.give_ammo();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -294,6 +349,7 @@ impl ApplicationHandler for GameApp {
                 self.focused = focused;
                 if !focused {
                     self.key_state.reset();
+                    self.game.set_movement(false, false, false, false);
                     self.dragging = false;
                     self.right_dragging = false;
                     self.camera.set_rotation_active(false);
@@ -307,10 +363,16 @@ impl ApplicationHandler for GameApp {
                 let pressed = state == ElementState::Pressed;
                 match button {
                     MouseButton::Left => {
-                        if pressed && self.game.state() == GameState::Playing {
-                            self.fire_requested = true;
+                        if pressed && !self.game.settings_open() {
+                            // 开始菜单：点击也视为"任意键"开局（键盘焦点不可靠的环境兜底）
+                            if self.game.state() == GameState::StartMenu {
+                                self.game.on_any_key(&self.camera.position());
+                            }
+                            if self.game.state() == GameState::Playing {
+                                self.fire_requested = true;
+                            }
                         }
-                        self.dragging = pressed;
+                        self.dragging = pressed && !self.game.settings_open();
                     }
                     MouseButton::Right => {
                         self.right_dragging = pressed;
@@ -327,6 +389,7 @@ impl ApplicationHandler for GameApp {
                     let dx = (px - self.last_cursor.0) as f32;
                     let dy = (py - self.last_cursor.1) as f32;
                     match self.camera.mode {
+                        CameraMode::FirstPerson => self.camera.look(dx, dy),
                         CameraMode::Orbit => self.camera.orbit(dx, dy),
                         CameraMode::Flight => {
                             self.camera.set_rotation_active(true);
@@ -345,13 +408,35 @@ impl ApplicationHandler for GameApp {
                     }
                 } else {
                     let (dx, dy) = (px - self.last_cursor.0, py - self.last_cursor.1);
-                    if self.dragging && self.camera.mode == CameraMode::Orbit {
-                        self.camera.orbit(dx as f32, dy as f32);
+                    // 非捕获态拖拽视角（菜单/设置预览 + 冒烟在无焦点环境下的瞄准路径）：
+                    // 左键按住 = 轨道/第一人称转视角，右键 = 飞行视角
+                    if self.dragging {
+                        match self.camera.mode {
+                            CameraMode::Orbit => self.camera.orbit(dx as f32, dy as f32),
+                            CameraMode::FirstPerson => self.camera.look(dx as f32, dy as f32),
+                            CameraMode::Flight => {}
+                        }
                     }
                     if self.right_dragging && self.camera.mode == CameraMode::Flight {
                         self.camera.add_rotation_input(dx as f32, dy as f32);
                     }
-                    self.last_cursor = (px, py);
+                    // 拖拽转视角时回中光标，避免把指针拖出窗口导致事件丢失（与捕获态一致）
+                    if self.dragging
+                        && (self.camera.mode == CameraMode::Orbit
+                            || self.camera.mode == CameraMode::FirstPerson)
+                    {
+                        if let Some(window) = &self.window {
+                            let size = window.inner_size();
+                            let center = winit::dpi::PhysicalPosition::new(
+                                size.width as f64 / 2.0,
+                                size.height as f64 / 2.0,
+                            );
+                            let _ = window.set_cursor_position(center);
+                            self.last_cursor = (center.x, center.y);
+                        }
+                    } else {
+                        self.last_cursor = (px, py);
+                    }
                 }
             }
 
@@ -361,9 +446,14 @@ impl ApplicationHandler for GameApp {
                     MouseScrollDelta::LineDelta(_, y) => y as f32,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.05,
                 };
-                match self.camera.mode {
-                    CameraMode::Orbit => self.camera.zoom(scroll),
-                    CameraMode::Flight => self.camera.flight_wheel(scroll),
+                if self.game.settings_open() {
+                    self.game.adjust_settings(scroll * 0.05);
+                } else {
+                    match self.camera.mode {
+                        CameraMode::FirstPerson => {}
+                        CameraMode::Orbit => self.camera.zoom(scroll),
+                        CameraMode::Flight => self.camera.flight_wheel(scroll),
+                    }
                 }
             }
 

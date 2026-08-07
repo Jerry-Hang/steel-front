@@ -9,14 +9,19 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::audio::{AudioClip, AudioListener, AudioPlayer, AudioSource, Channel, SilentSink};
+use crate::audio::{AudioListener, AudioPlayer, AudioSource, Channel, SilentSink, SfxBank, SfxKind};
 use crate::net::{Client, NetworkMessage, PlayerState, Server};
-use super::camera::Camera;
-use super::ai::{find_path, GridMap, GridPos, NpcPerception, NpcState, NpcStateMachine};
-use super::physics::{self, Body, CollisionEvent, CollisionListener, SphereBody, Vec3 as Pv};
+use super::camera::{Camera, CameraMode};
+use super::ai::{
+    find_cover_points, find_path, flank_goal, should_flank, wave_profile, GridMap, GridPos,
+    NpcPerception, NpcState, NpcStateMachine,
+};
+use super::physics::{
+    self, Body, CollisionEvent, CollisionListener, PlayerBody, SphereBody, Vec3 as Pv,
+};
 use super::renderer::terrain_height_at;
 use super::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
-use super::weapons::{Projectile, ProjectileWeapon, Weapon};
+use super::weapons::{Firearm, Projectile, ProjectileWeapon};
 use crate::ui::HudState;
 
 /// AI 网格覆盖范围：128×128 格 × 4m = ±256m（与实例场/地形同域）
@@ -33,6 +38,12 @@ const WAVE_INTERMISSION: f32 = 3.0;
 const KILL_SCORE: u64 = 10;
 /// 清波奖励分
 const WAVE_CLEAR_BONUS: u64 = 25;
+/// 玩家移动速度（米/秒，第一人称 WASD）
+const PLAYER_SPEED: f32 = 6.0;
+/// NPC 就近掩体搜索半径（网格格数）
+const COVER_MAX_DIST: u32 = 10;
+/// 脚步声音效限频间隔（秒）
+const FOOTSTEP_INTERVAL: f32 = 0.5;
 
 /// 网络环回演示（仅 RV3D_NET=1 启用）：同进程 Server + Client
 struct NetworkDemo {
@@ -120,8 +131,21 @@ pub struct Game {
     event_buf: Arc<Mutex<Vec<CollisionEvent>>>,
     /// 上次碰撞日志时间（限频用）
     last_event_log_time: f32,
-    /// 主武器（投射物步枪）
-    rifle: ProjectileWeapon,
+    /// 主武器：弹匣 + 换弹 + 后坐力（M1 步枪）
+    firearm: Firearm,
+    /// 待施加到相机的后坐力（pitch/yaw 弧度，main.rs 每帧 drain 取走）
+    pending_kick: (f32, f32),
+    /// 第一人称玩家身体（WASD 移动 + 与演示刚体碰撞，y 每帧贴地形）
+    player_body: PlayerBody,
+    /// 移动输入标志（main.rs 转发 WASD；仅 Playing + FPS 生效）
+    move_forward: bool,
+    move_backward: bool,
+    move_left: bool,
+    move_right: bool,
+    /// 脚步声音效限频计时
+    footstep_timer: f32,
+    /// 程序化合成音效库（枪声/脚步/命中/换弹/提示/环境）
+    sfx: SfxBank,
     /// 在场投射物
     projectiles: Vec<Projectile>,
     /// 开火冷却剩余时间（秒）
@@ -235,7 +259,22 @@ impl Game {
             last_dt: 0.0,
             event_buf,
             last_event_log_time: 0.0,
-            rifle: ProjectileWeapon::new("M1 Rifle", 25.0, 3.0, 200.0, 60.0, 5.0),
+            firearm: Firearm::new(
+                ProjectileWeapon::new("M1 Rifle", 25.0, 3.0, 200.0, 60.0, 5.0),
+                30,
+                120,
+                2.0,
+                0.006,
+                0.003,
+            ),
+            pending_kick: (0.0, 0.0),
+            player_body: PlayerBody::new(Pv::new(0.0, 0.0, 0.0), 0.5, 1.6),
+            move_forward: false,
+            move_backward: false,
+            move_left: false,
+            move_right: false,
+            footstep_timer: 0.0,
+            sfx: SfxBank::new(48_000),
             projectiles: Vec::new(),
             fire_cooldown: 0.0,
             shots: 0,
@@ -251,17 +290,16 @@ impl Game {
             audio: {
                 let player = AudioPlayer::new(SilentSink::new(48_000, 2));
                 let mut player = player;
-                // 440Hz 测试音（0.5 秒）循环播放，声源放场地中央
-                if let Some(clip) = make_test_clip(48_000) {
-                    player.mixer_mut().set_master(0.8);
-                    player.mixer_mut().set_channel_volume(Channel::Sfx, 1.0);
-                    player.mixer_mut().play(
-                        Arc::new(clip),
-                        AudioSource::new(glam::Vec3::new(0.0, 2.0, 0.0), 1.0),
-                        Channel::Sfx,
-                        true,
-                    );
-                }
+                player.mixer_mut().set_master(0.8);
+                player.mixer_mut().set_channel_volume(Channel::Sfx, 1.0);
+                // 环境音循环（SilentSink：输出被丢弃，但混音/衰减链路真实运行）
+                SfxBank::new(48_000).play(
+                    player.mixer_mut(),
+                    SfxKind::Ambient,
+                    AudioSource::new(glam::Vec3::new(0.0, 2.0, 0.0), 0.4),
+                    Channel::Sfx,
+                    true,
+                );
                 player
             },
             net_demo: {
@@ -316,10 +354,21 @@ impl Game {
     fn start_run(&mut self, player: &glam::Vec3) {
         self.hud.health = self.hud.max_health;
         self.hud.ammo = self.hud.max_ammo;
+        self.hud.reserve = self.firearm.reserve();
+        self.hud.settings_open = false;
         self.score = 0;
         self.wave = 1;
         self.wave_timer = 0.0;
         self.fire_cooldown = 0.0;
+        self.firearm.reset();
+        self.pending_kick = (0.0, 0.0);
+        self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
+        self.player_body.vel = Pv::ZERO;
+        self.move_forward = false;
+        self.move_backward = false;
+        self.move_left = false;
+        self.move_right = false;
+        self.footstep_timer = 0.0;
         self.projectiles.clear();
         self.shots = 0;
         self.hits = 0;
@@ -358,6 +407,20 @@ impl Game {
         self.last_dt = dt;
         self.time += dt;
         self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
+        // 武器换弹计时 + HUD 弹药/换弹状态同步
+        self.firearm.update(dt);
+        self.hud.ammo = self.firearm.magazine();
+        self.hud.max_ammo = self.firearm.max_magazine();
+        self.hud.reserve = self.firearm.reserve();
+        self.hud.reloading = self.firearm.is_reloading();
+        self.hud.reload_progress = self.firearm.reload_progress();
+        // 命中标记衰减 + 音量同步
+        self.hud.tick(dt);
+        self.audio.mixer_mut().set_master(self.hud.volume);
+        // 第一人称玩家移动（WASD + 碰撞）
+        if self.game_state == GameState::Playing && camera.mode == CameraMode::FirstPerson {
+            self.move_first_person(camera, dt);
+        }
         // fps 统计（1 秒窗口）
         self.frames += 1;
         let window_secs = self.fps_window_start.elapsed().as_secs_f32();
@@ -458,10 +521,14 @@ impl Game {
         self.hud.score = self.score;
         self.hud.wave = self.wave;
         self.hud.countdown = self.wave_timer.max(0.0);
-        self.hud.screen = match self.game_state {
-            GameState::StartMenu => HudScreen::Start,
-            GameState::GameOver => HudScreen::GameOver,
-            GameState::Playing => HudScreen::Game,
+        self.hud.screen = if self.hud.settings_open {
+            HudScreen::Settings
+        } else {
+            match self.game_state {
+                GameState::StartMenu => HudScreen::Start,
+                GameState::GameOver => HudScreen::GameOver,
+                GameState::Playing => HudScreen::Game,
+            }
         };
         let mut quads = self.hud.layout();
         if self.game_state != GameState::Playing {
@@ -482,9 +549,10 @@ impl Game {
         );
         render_text(&line1, 10.0, 44.0, Color::YELLOW, 1.3, &mut quads);
         let line2 = format!(
-            "collisions: {}  hits: {}",
+            "collisions: {}  hits: {}  ammo: {:.0}%",
             self.total_collisions(),
-            self.hits()
+            self.hits(),
+            self.firearm.ammo_ratio() * 100.0
         );
         render_text(&line2, 10.0, 62.0, Color::CYAN, 1.3, &mut quads);
         quads
@@ -522,20 +590,199 @@ impl Game {
         if self.fire_cooldown > 0.0 {
             return false;
         }
-        self.fire_cooldown = self.rifle.fire_interval();
-        self.projectiles.push(self.rifle.fire(origin, direction));
-        self.shots += 1;
-        log::info!(
-            "weapons: shot #{} ({} alive)",
-            self.shots,
-            self.projectiles.len()
-        );
-        true
+        match self.firearm.try_fire(origin, direction) {
+            Some(projectile) => {
+                self.fire_cooldown = self.firearm.fire_interval();
+                let (kick_pitch, kick_yaw) = self.firearm.current_kick();
+                self.pending_kick.0 += kick_pitch;
+                self.pending_kick.1 += kick_yaw;
+                self.projectiles.push(projectile);
+                self.shots += 1;
+                let src = AudioSource::new(
+                    glam::Vec3::new(origin[0], origin[1], origin[2]),
+                    1.0,
+                );
+                self.sfx.play(
+                    &mut self.audio.mixer_mut(),
+                    SfxKind::Gunshot,
+                    src,
+                    Channel::Sfx,
+                    false,
+                );
+                log::info!(
+                    "weapons: shot #{} ({} alive)",
+                    self.shots,
+                    self.projectiles.len()
+                );
+                true
+            }
+            None => {
+                // 空弹匣自动换弹（try_fire 内部触发）或换弹中：换弹提示音
+                if self.firearm.is_reloading() {
+                    let src = AudioSource::new(
+                        glam::Vec3::new(origin[0], origin[1], origin[2]),
+                        1.0,
+                    );
+                    self.sfx.play(
+                        &mut self.audio.mixer_mut(),
+                        SfxKind::Reload,
+                        src,
+                        Channel::Sfx,
+                        false,
+                    );
+                }
+                false
+            }
+        }
     }
 
     /// 累计命中数（供 UI / 日志）
     pub fn hits(&self) -> u64 {
         self.hits
+    }
+
+    /// 取走本帧开火累计的后坐力（pitch/yaw 弧度），由 main.rs 施加到相机
+    pub fn drain_kick(&mut self) -> (f32, f32) {
+        let kick = self.pending_kick;
+        self.pending_kick = (0.0, 0.0);
+        kick
+    }
+
+    /// 玩家脚底位置（世界坐标）
+    pub fn player_pos(&self) -> glam::Vec3 {
+        glam::Vec3::new(
+            self.player_body.pos.x,
+            self.player_body.pos.y,
+            self.player_body.pos.z,
+        )
+    }
+
+    /// 玩家眼睛位置（脚底 + 身高），main.rs 每帧同步给第一人称相机
+    pub fn player_eye(&self) -> glam::Vec3 {
+        glam::Vec3::new(
+            self.player_body.pos.x,
+            self.player_body.pos.y + self.player_body.eye_height,
+            self.player_body.pos.z,
+        )
+    }
+
+    /// 转发 WASD 按键状态（FPS 玩家移动；仅 Playing + 第一人称生效）
+    pub fn set_movement(&mut self, forward: bool, backward: bool, left: bool, right: bool) {
+        self.move_forward = forward;
+        self.move_backward = backward;
+        self.move_left = left;
+        self.move_right = right;
+    }
+
+    /// 请求换弹（R 键）；已在换弹/满弹匣/无备弹时无副作用
+    pub fn request_reload(&mut self) {
+        let was_reloading = self.firearm.is_reloading();
+        self.firearm.start_reload();
+        if !was_reloading && self.firearm.is_reloading() {
+            let src = AudioSource::new(self.player_eye(), 1.0);
+            self.sfx.play(
+                &mut self.audio.mixer_mut(),
+                SfxKind::Reload,
+                src,
+                Channel::Sfx,
+                false,
+            );
+        }
+    }
+
+    /// 调试补给（设置面板 N 键）：弹匣补满 + 提示音
+    pub fn give_ammo(&mut self) {
+        self.firearm.reset();
+        let src = AudioSource::new(self.player_eye(), 1.0);
+        self.sfx.play(
+            &mut self.audio.mixer_mut(),
+            SfxKind::UiBlip,
+            src,
+            Channel::Sfx,
+            false,
+        );
+    }
+
+    /// 设置面板开关（ESC 切换）：开/关都播提示音
+    pub fn toggle_settings(&mut self) {
+        self.hud.toggle_settings();
+        let src = AudioSource::new(self.player_eye(), 1.0);
+        self.sfx.play(
+            &mut self.audio.mixer_mut(),
+            SfxKind::UiBlip,
+            src,
+            Channel::Sfx,
+            false,
+        );
+    }
+
+    /// 设置面板是否打开（main.rs 据此拦截游戏输入/释放光标）
+    pub fn settings_open(&self) -> bool {
+        self.hud.settings_open
+    }
+
+    /// 循环切换设置面板选中项（音量 ↔ 灵敏度）
+    pub fn cycle_settings(&mut self) {
+        self.hud.cycle_settings_selection();
+    }
+
+    /// 按当前选中项调整设置（滚轮 delta）
+    pub fn adjust_settings(&mut self, delta: f32) {
+        if self.hud.settings_selection == 0 {
+            self.hud.adjust_volume(delta);
+        } else {
+            self.hud.adjust_sensitivity(delta);
+        }
+    }
+
+    /// 灵敏度（0..=1）→ 相机 rad/px（0.001..=0.005，默认 0.5 → 0.003）
+    pub fn sensitivity_rads(&self) -> f32 {
+        0.001 + self.hud.sensitivity * 0.004
+    }
+
+    /// 第一人称玩家移动：WASD 相对相机朝向，与演示刚体碰撞推回，y 每帧贴地形
+    fn move_first_person(&mut self, camera: &Camera, dt: f32) {
+        let fwd = glam::Vec3::new(camera.forward().x, 0.0, camera.forward().z).normalize_or_zero();
+        let right = camera.right();
+        let mut dx = 0.0f32;
+        let mut dz = 0.0f32;
+        if self.move_forward {
+            dx += fwd.x;
+            dz += fwd.z;
+        }
+        if self.move_backward {
+            dx -= fwd.x;
+            dz -= fwd.z;
+        }
+        if self.move_right {
+            dx += right.x;
+            dz += right.z;
+        }
+        if self.move_left {
+            dx -= right.x;
+            dz -= right.z;
+        }
+        let len = (dx * dx + dz * dz).sqrt();
+        if len > 1e-4 {
+            let step = (PLAYER_SPEED * dt).min(0.5);
+            let (mx, mz) = self
+                .player_body
+                .try_move(&self.world, dx / len * step, dz / len * step);
+            let moved = (mx * mx + mz * mz).sqrt();
+            if moved > 0.01 && self.time - self.footstep_timer >= FOOTSTEP_INTERVAL {
+                self.footstep_timer = self.time;
+                let src = AudioSource::new(self.player_pos(), 0.5);
+                self.sfx.play(
+                    &mut self.audio.mixer_mut(),
+                    SfxKind::Footstep,
+                    src,
+                    Channel::Sfx,
+                    false,
+                );
+            }
+        }
+        self.player_body.pos.y = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
+        self.player_body.grounded = true;
     }
 
     /// 投射物推进 + 碰撞检测：物理刚体/球体命中即销毁；NPC 命中扣血，hp≤0 移除并计分。
@@ -585,6 +832,15 @@ impl Game {
         self.projectiles = alive;
         self.hits += hit_count as u64;
         if hit_count > 0 {
+            self.hud.show_hit_marker();
+            let src = AudioSource::new(self.player_eye(), 1.0);
+            self.sfx.play(
+                &mut self.audio.mixer_mut(),
+                SfxKind::Hit,
+                src,
+                Channel::Sfx,
+                false,
+            );
             log::info!(
                 "weapons: {} projectile hit(s), total_hits={}",
                 hit_count,
@@ -668,9 +924,11 @@ impl Game {
             );
             self.npcs.clear();
         }
-        let count = (4 + 2 * n).min(24) as usize;
-        let speed = (4.0 * (1.0 + 0.06 * (n as f32 - 1.0))).min(8.0);
-        let hp = 100.0 + 20.0 * (n as f32 - 1.0);
+        let profile = wave_profile(n);
+        let count = profile.count as usize;
+        let speed = profile.speed;
+        let hp = profile.hp;
+        let attack_range = profile.attack_range;
         let tau = std::f32::consts::TAU;
         for i in 0..count {
             let angle = i as f32 * (tau / count as f32) + n as f32 * 0.37;
@@ -685,7 +943,7 @@ impl Game {
                 id,
                 position: [x, y, z],
                 speed,
-                attack_range: 12.0,
+                attack_range,
                 home: [x, z],
                 state_machine: NpcStateMachine::new(),
                 perception: NpcPerception::default(),
@@ -708,6 +966,7 @@ impl Game {
     fn update_ai(&mut self, dt: f32, camera: &Camera) {
         let player = camera.position();
         let grid = self.grid.clone();
+        let flank_chance = wave_profile(self.wave).flank_chance;
         for i in 0..self.npcs.len() {
             let (npc, time) = (&mut self.npcs[i], self.time);
             let dx = npc.position[0] - player.x;
@@ -721,7 +980,7 @@ impl Game {
                 patrol_finished: false,
             };
             let state = npc.state_machine.update(npc.perception);
-            advance_npc(npc, state, &player, &grid, time, dt);
+            advance_npc(npc, state, &player, &grid, time, dt, flank_chance, self.wave);
             // 攻击态站定：打位置日志，冒烟 harness 读日志后从对跖点瞄准点射
             if state == NpcState::Attack && prev != NpcState::Attack {
                 log::info!(
@@ -1121,6 +1380,153 @@ mod tests {
         }
         assert!(got_join, "server should receive the Join sent at init");
     }
+
+    /// FPS 玩家：WASD 移动改变位置，眼睛高度 1.6m
+    #[test]
+    fn fps_player_moves_with_wasd() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let cam = Camera::new(); // yaw=0 → forward -Z
+        let start_z = game.player_body.pos.z;
+        game.set_movement(true, false, false, false);
+        for _ in 0..60 {
+            game.update(1.0 / 60.0, &cam);
+        }
+        assert!(
+            game.player_pos().z < start_z - 5.0,
+            "W 应沿 -Z 移动约 6m: {} -> {}",
+            start_z,
+            game.player_pos().z
+        );
+        assert!(
+            (game.player_eye().y - 1.6).abs() < 1e-5,
+            "眼睛高度应为 1.6m"
+        );
+        // S 后退回原点附近
+        game.set_movement(false, true, false, false);
+        for _ in 0..60 {
+            game.update(1.0 / 60.0, &cam);
+        }
+        assert!(
+            game.player_body.pos.z > start_z - 0.5,
+            "S 应退回原点附近: {}",
+            game.player_body.pos.z
+        );
+    }
+
+    /// FPS 玩家：撞到演示刚体被推回，不会穿模
+    #[test]
+    fn fps_player_collides_with_demo_bodies() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        // 角落刚体 (120,120) 半边长 1.2 → AABB x/z ∈ [118.8, 121.2]；
+        // 玩家放其 -Z 侧 5m，W 前进应被挡在 0.5m（半径）外
+        game.player_body.pos = Pv::new(119.5, 0.0, 125.0);
+        let cam = Camera::new();
+        game.set_movement(true, false, false, false);
+        for _ in 0..120 {
+            game.update(1.0 / 60.0, &cam);
+        }
+        let z = game.player_body.pos.z;
+        assert!(z < 125.0, "玩家应朝刚体移动: {}", z);
+        assert!(
+            z > 121.3 && z < 122.1,
+            "碰撞应把玩家挡在刚体 +Z 面外约 0.5m (期望 ~121.7): {}",
+            z
+        );
+    }
+
+    /// 换弹：R 触发后计时完成，弹匣补满
+    #[test]
+    fn firearm_reload_cycle_via_game() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let origin = [0.0, 5.0, 0.0];
+        let dir = [0.0, 0.0, -1.0];
+        let mut fired = 0;
+        for _ in 0..120 {
+            if game.fire(origin, dir) {
+                fired += 1;
+            }
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert!(fired >= 5, "2 秒内应打出至少 5 发: {}", fired);
+        let before = game.firearm.magazine();
+        assert!(before < 30, "弹匣应消耗过");
+        game.request_reload();
+        assert!(game.firearm.is_reloading(), "R 应开始换弹");
+        for _ in 0..200 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert!(!game.firearm.is_reloading(), "换弹应完成");
+        assert_eq!(game.firearm.magazine(), 30, "换弹后弹匣应补满");
+    }
+
+    /// 开火产生后坐力，drain 一次后清零
+    #[test]
+    fn fire_applies_recoil_kick() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        assert!(game.fire([0.0, 5.0, 0.0], [0.0, 0.0, -1.0]));
+        let (pitch_kick, _) = game.drain_kick();
+        assert!(pitch_kick > 0.0, "上跳后坐力应为正");
+        assert_eq!(game.drain_kick(), (0.0, 0.0), "drain 后应清零");
+    }
+
+    /// 命中 NPC 触发命中标记
+    #[test]
+    fn projectile_hit_shows_hit_marker() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let npc_pos = game.npcs[0].position;
+        assert!(game.fire(
+            [npc_pos[0], npc_pos[1] + 2.0, npc_pos[2]],
+            [0.0, -1.0, 0.0]
+        ));
+        for _ in 0..3 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert!(
+            game.hud.hit_marker_timer > 0.0,
+            "命中应触发准星命中标记"
+        );
+    }
+
+    /// 波次难度曲线：spawn 数量/速度/血量/攻击距离与 wave_profile 一致
+    #[test]
+    fn wave_profile_drives_spawn() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let p = wave_profile(1);
+        assert_eq!(game.npcs.len(), p.count as usize, "波次数量");
+        for npc in &game.npcs {
+            assert!((npc.speed - p.speed).abs() < 1e-6, "速度");
+            assert!((npc.max_hp - p.hp).abs() < 1e-6, "血量");
+            assert!((npc.attack_range - p.attack_range).abs() < 1e-6, "攻击距离");
+        }
+    }
+
+    /// 设置面板：开关、音量/灵敏度调整、选中项循环
+    #[test]
+    fn settings_panel_toggle_and_adjust() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        assert!(!game.settings_open(), "初始应关闭");
+        game.toggle_settings();
+        assert!(game.settings_open(), "toggle 后应打开");
+        let vol = game.hud.volume;
+        game.adjust_settings(0.1);
+        assert!(
+            (game.hud.volume - (vol + 0.1).min(1.0)).abs() < 1e-6,
+            "音量应增加"
+        );
+        game.cycle_settings();
+        let sens = game.hud.sensitivity;
+        game.adjust_settings(-0.1);
+        assert!(game.hud.sensitivity < sens, "灵敏度应降低");
+        game.toggle_settings();
+        assert!(!game.settings_open(), "再 toggle 应关闭");
+    }
 }
 
 /// 按状态推进单个 NPC：目标选择 → A* 寻路 → 沿路径移动 → 地形高度采样
@@ -1131,12 +1537,31 @@ fn advance_npc(
     grid: &GridMap,
     time: f32,
     dt: f32,
+    flank_chance: f32,
+    wave: u32,
 ) {
     // 无路径（或已走完）时按状态选择目标
     if npc.path.is_empty() || npc.path_index >= npc.path.len() {
         let goal = match state {
-            NpcState::Chase => world_to_grid(player.x, player.z),
-            NpcState::Attack => world_to_grid(npc.position[0], npc.position[2]),
+            NpcState::Chase => {
+                let player_g = world_to_grid(player.x, player.z);
+                let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                if should_flank(flank_chance, npc.id as u32, wave) {
+                    // 包抄：沿 玩家→NPC 轴 的垂直方向偏移 2 格（8m），从侧翼逼近
+                    let side = if npc.id % 2 == 0 { 1 } else { -1 };
+                    flank_goal(grid, player_g, npc_g, side, 2)
+                } else {
+                    player_g
+                }
+            }
+            NpcState::Attack => {
+                // 就近掩体站定（贴障碍簇）；无掩体原地（保持攻击站定日志供冒烟瞄准）
+                let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                match find_cover_points(grid, npc_g, COVER_MAX_DIST).first() {
+                    Some(cover) => cover.pos,
+                    None => npc_g,
+                }
+            }
             NpcState::Patrol | NpcState::Idle => {
                 // 确定性巡逻点：随 id 相位与时间缓慢旋转
                 let angle = npc.id as f32 * 2.399 + (time / 8.0).floor() * 0.7;
@@ -1174,17 +1599,4 @@ fn advance_npc(
         npc.position[2] += dz / d * step;
     }
     npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
-}
-
-/// 生成 440Hz 正弦测试音（0.5 秒，双声道），用于驱动混音链路
-fn make_test_clip(sample_rate: u32) -> Option<AudioClip> {
-    let frames = (sample_rate as f32 * 0.5) as usize;
-    let mut samples = Vec::with_capacity(frames * 2);
-    for i in 0..frames {
-        let t = i as f32 / sample_rate as f32;
-        let v = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.4;
-        samples.push(v);
-        samples.push(v);
-    }
-    AudioClip::new(samples, sample_rate, 2)
 }
