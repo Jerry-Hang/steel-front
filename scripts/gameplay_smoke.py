@@ -44,7 +44,9 @@ def window_attrs(win):
         return None
     return window_size_from_log()
 def activate():
-    """等窗口出现且 mapped（IsViewable=2），再设置输入焦点。"""
+    """等窗口出现且 mapped（IsViewable=2）；设置输入焦点为尽力而为。
+    本环境（WSLg/Xwayland）核心焦点常为 None，拖拽视角路径不需要焦点，
+    因此焦点失败不致命，只要窗口可定位（warp 用）即可。"""
     global win
     win = find_window(root, "Steel Front")
     t0 = time.time()
@@ -71,7 +73,7 @@ def activate():
             break
     print(f"FOCUS-OK win=0x{win:x}" if ok else f"FOCUS-FAIL foc=0x{foc.value:x}", flush=True)
     return ok
-def warp_to_center():
+def warp_to_center(quiet=False):
     size = window_size_from_log() or (1280, 720)
     rx = ctypes.c_int(); ry = ctypes.c_int(); child = ctypes.c_ulong()
     if not x11.XTranslateCoordinates(d, win, root, 0, 0, ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(child)):
@@ -79,23 +81,9 @@ def warp_to_center():
         return
     cx, cy = rx.value + size[0] // 2, ry.value + size[1] // 2
     x11.XWarpPointer(d, 0, root, 0, 0, 0, 0, cx, cy); flush(); time.sleep(0.15)
-    print(f"warp to window center ({cx},{cy}) size={size[0]}x{size[1]}", flush=True)
+    if not quiet:
+        print(f"warp to window center ({cx},{cy}) size={size[0]}x{size[1]}", flush=True)
 
-def zoom_to_min():
-    """滚轮拉近到最近（0.15/格 × 6 格 ≈ 3.35→1.5，MIN_DISTANCE 兜底）。"""
-    for _ in range(6):
-        xtst.XTestFakeButtonEvent(d, 4, 1, 0); flush()
-        xtst.XTestFakeButtonEvent(d, 4, 0, 0); flush()
-        time.sleep(0.05)
-    last = -1.0
-    for _ in range(5):
-        time.sleep(1.0)
-        m = re.findall(r"cam: yaw=[-\d.]+ pitch=[-\d.]+ dist=([\d.]+)", log_tail())
-        if m:
-            last = float(m[-1])
-            if last <= 1.6:
-                break
-    print(f"zoom: dist={last:.2f}", flush=True)
 def press_release(kc):
     xtst.XTestFakeKeyEvent(d, kc, 1, 0); flush(); time.sleep(0.08)
     xtst.XTestFakeKeyEvent(d, kc, 0, 0); flush()
@@ -110,35 +98,44 @@ def cam_now(txt):
     m = re.findall(r"cam: yaw=([-\d.]+) pitch=([-\d.]+)", txt)
     if not m: return None
     return (float(m[-1][0]), float(m[-1][1]))
-def aim(yaw_tgt_deg, pitch_tgt_deg, left_held):
+def aim(yaw_tgt_deg, pitch_tgt_deg, hold_lmb):
     for _ in range(6):
+        warp_to_center(quiet=True)               # 每轮回中：相对位移不累积漂出窗口
         txt = log_tail()
         cur = cam_now(txt)
         if not cur:
             time.sleep(1.0); continue
         dyaw = ((yaw_tgt_deg - cur[0] + 540.0) % 360.0) - 180.0
-        dpitch = cur[1] - pitch_tgt_deg          # orbit(): pitch -= dy*SENS
+        dpitch = cur[1] - pitch_tgt_deg          # look(): pitch -= dy*SENS
         dx = int(dyaw / DEG_PX)
         dy = int(dpitch / DEG_PX)
         print(f"  aim round: cur=({cur[0]:.1f},{cur[1]:.1f}) tgt=({yaw_tgt_deg:.1f},{pitch_tgt_deg:.1f}) "
               f"inject=({dx},{dy})", flush=True)
         if abs(dx) < 2 and abs(dy) < 2:
             return True
-        if not left_held:
+        if hold_lmb:
             xtst.XTestFakeButtonEvent(d, 1, 1, 0); flush()
         xtst.XTestFakeRelativeMotionEvent(d, max(-400, min(400, dx)), max(-400, min(400, dy)), 0)
         flush(); time.sleep(1.2)
+    if hold_lmb:
+        xtst.XTestFakeButtonEvent(d, 1, 0, 0); flush()   # 松键：拖拽瞄准结束
     return True
 SPACE, LMB = 65, 1
-if not activate(): sys.exit(1)
+activate()
+if not win:
+    print("NO-WINDOW, aborting", flush=True); sys.exit(1)
 # 守卫：开始前必须处于 StartMenu（日志里没有 "run started"）；若已误触发则退出
 txt = log_tail()
 if "run started" in txt:
-    print("ALREADY-RUNNING (stale input), aborting", flush=True); sys.exit(3)
-warp_to_center()
-time.sleep(0.5)
-press_release(SPACE); time.sleep(1.2)          # 任意键开始
-time.sleep(1.0)
+    print("RUN-ALREADY-ACTIVE (proceeding: game already in Playing)", flush=True)
+else:
+    warp_to_center()
+    time.sleep(0.5)
+    press_release(SPACE); time.sleep(0.3)
+    xtst.XTestFakeButtonEvent(d, LMB, 1, 0); flush()   # 点击也开局：键盘焦点不可靠时兜底
+    xtst.XTestFakeButtonEvent(d, LMB, 0, 0); flush()
+    time.sleep(1.2)
+    time.sleep(1.0)
 # 等 NPC 进入 Attack 站定：菜单期预置 NPC 的站定日志在 "run started" 之前，必须过滤
 def stands_after_run():
     txt = log_tail()
@@ -151,31 +148,28 @@ def stands_after_run():
             out.append((int(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))))
     return out
 
-# 等一个"对侧"站定 NPC：轨道相机对跖点瞄准后 NPC 距相机 = |C| + dist，
-# 拉近到 dist=1.5 后需 |C| ≤ 10.4 才能留在 12m 攻击距离内站定
+# FPS：玩家在原点不动，任意方向站定 NPC 都可直接瞄准（射线不需要过原点）
 t0 = time.time()
 while time.time() - t0 < 16.0:
     stands = stands_after_run()
-    if any(math.hypot(s[1], s[3]) <= 10.4 for s in stands):
+    if stands:
         break
     time.sleep(0.5)
 
 def fire_at(npc):
     _, nx, ny, nz = npc
-    cx, cy, cz = nx, ny + 0.8, nz               # 命中球中心（头顶 +0.8m）
-    # orbit 相机永远看向 target(0,0,0)，射线从相机穿原点打到远侧：
-    # 相机站在 NPC 对跖点，direction = -C/|C|
+    EYE = 1.6                                    # 玩家眼睛高度
+    cx, cy, cz = nx, ny + 0.8 - EYE, nz          # 命中球相对眼睛（头顶 +0.8m）
     yaw_tgt = math.degrees(math.atan2(-cx, -cz))
     pitch_tgt = math.degrees(math.atan2(-cy, math.hypot(cx, cz)))
     d3 = math.hypot(cx, cz)
     print(f"aim npc #{npc[0]} C=({cx:.1f},{cy:.1f},{cz:.1f}) dist={d3:.1f} "
           f"yaw={yaw_tgt:.1f} pitch={pitch_tgt:.1f}", flush=True)
-    zoom_to_min()
     warp_to_center()
-    xtst.XTestFakeButtonEvent(d, LMB, 1, 0); flush(); time.sleep(0.2)
+    # FPS 拖拽视角：按住左键拖拽（捕获态/非捕获态都能转视角，不依赖焦点）
     aim(yaw_tgt, pitch_tgt, True)
-    xtst.XTestFakeButtonEvent(d, LMB, 0, 0); flush(); time.sleep(0.15)  # 松开：停止拖拽
-    # 点射 6 发：25 伤害 × 4 = 100 hp；射速上限 3/s，间隔 0.35s
+    warp_to_center()
+    # 点射 6 发：25 伤害 × 4 = 100 hp；射速上限 3/s，间隔 0.35s；后坐力快速恢复
     for _ in range(6):
         xtst.XTestFakeButtonEvent(d, LMB, 1, 0); flush()
         xtst.XTestFakeButtonEvent(d, LMB, 0, 0); flush()
