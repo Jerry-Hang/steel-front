@@ -713,14 +713,25 @@ impl Game {
             let dx = npc.position[0] - player.x;
             let dz = npc.position[2] - player.z;
             let dist = (dx * dx + dz * dz).sqrt();
+            let prev = npc.state_machine.state();
             npc.perception = NpcPerception {
                 enemy_visible: dist < NPC_SIGHT,
                 enemy_in_range: dist < npc.attack_range,
-                start_patrol: npc.state_machine.state() == NpcState::Idle,
+                start_patrol: prev == NpcState::Idle,
                 patrol_finished: false,
             };
             let state = npc.state_machine.update(npc.perception);
             advance_npc(npc, state, &player, &grid, time, dt);
+            // 攻击态站定：打位置日志，冒烟 harness 读日志后从对跖点瞄准点射
+            if state == NpcState::Attack && prev != NpcState::Attack {
+                log::info!(
+                    "npc: #{} stand ({:.1}, {:.1}, {:.1})",
+                    npc.id,
+                    npc.position[0],
+                    npc.position[1],
+                    npc.position[2]
+                );
+            }
         }
         if self.time - self.ai_log_time >= 1.0 {
             self.ai_log_time = self.time;
