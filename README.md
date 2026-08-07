@@ -25,15 +25,32 @@
 - f 波次递进缩放与清波奖励（9fd83d8）
 - 验收：111 测试全绿、0 警告
 
+### 阶段 2.5：20s gameplay 冒烟收口（方案 A，到 3e6a20f）
+- 演示刚体挪到场地角落（距原点 >150m，不再拦截过原点射线）
+- NPC 进 Attack 站定时打位置日志 `npc: #id stand (x,y,z)`
+- 冒烟改为：读站定日志 → 对跖点瞄准 → 点射 6 发；20s 内 kills=1
+- 验收：111 测试全绿、0 警告、冒烟 ALL-OK；scripts/ 迁入仓库并 push
+
+### 阶段 3：Wave 2 六项功能（本会话，基于 3e6a20f）
+- 真实玩家移动：WASD + PlayerBody 碰撞推回 + 地形贴地，FirstPerson 相机
+- 武器手感：Firearm 弹匣/备弹/换弹进度、后坐力 kick、命中 hit marker 与音效
+- AI 增强：就近掩体 `find_cover_points`、包抄 `should_flank`/`flank_goal`、波次难度曲线 `wave_profile`
+- 音效接入：SfxBank（Gunshot/Footstep/Hit/Reload/UiBlip/Ambient）经 mixer 播放
+- UI polish（部分）：ESC 设置面板（音量/灵敏度 + 键位列表）、HUD 备弹显示、hit marker
+- 验收：160 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK
+
 ## 三、当前工作状态（重要）
 
-- HEAD = 0707075（chore(scripts)），docs 交接提交紧随其后；工作区干净，push 已完成。
-- 最终 20s gameplay 冒烟**已通过**（方案 A，游戏侧 + harness 适配）：
-  `kills=1`、4 发命中、VUID=0、fps 249–299、yaw/pitch 变化、无 panic。
-- 落地 commit：
-  - `feat(game)`：演示刚体挪到场地角落（距原点 >150m，不再拦截过原点射线）
-  - `feat(game)`：NPC 进 Attack 站定时打位置日志 `npc: #id stand (x,y,z)`
-  - `chore(scripts)`：冒烟改为 读站定日志 → 滚轮拉近 dist=1.5 → 对跖点瞄准 → 点射 6 发
+- Wave 2 六项功能已实施并通过验收（160 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK）。
+- 落地范围（基于 3e6a20f 的新 commit，见 git log）：
+  - `src/engine/game.rs`：FPS 玩家移动（WASD + PlayerBody 碰撞 + 贴地）、Firearm
+    （弹匣 30/备弹 120/换弹 2s/后坐力）、SFX 播放链路、AI 掩体/包抄、波次难度曲线、
+    设置面板与 hit marker 同步、7 个新集成测试
+  - `src/main.rs`：FirstPerson 输入分支（拖拽转视角 + 回中）、WASD 转发、R 换弹、
+    ESC 设置面板、Tab 循环选中项、滚轮调音量/灵敏度、N 补给、后坐力加回相机
+  - `src/ui.rs`：设置面板渲染、HUD 备弹 `AMMO x/y +z`、hit marker、清理已接线注解
+  - `scripts/gameplay_smoke.py`：FPS 拖拽视角瞄准（相对注入 + 回中 + 点射）
+- 未实施（下一阶段）：程序化地图生成/多关卡切换；主菜单美化与键位重绑定。
 
 ### 冒烟关键机制（勿回退）
 1. Orbit 射线必过原点：相机站在目标 NPC 对跖点（`direction = -C/|C|`）；
@@ -43,8 +60,11 @@
 
 ## 四、待办任务（Next Steps）
 
-- 全部完成：20s 冒烟通过、scripts/ 已迁入并提交、push 已执行。
-- 后续若重跑：`bash scripts/run_gameplay_smoke.sh`（需沙箱外 X/Vulkan 权限）。
+- 本批完成：Wave 2 六项功能（1–4 全量、6 部分）实施并提交。
+- 下一阶段（Wave 3）：
+  - 地形/关卡：程序化地图生成、多关卡切换
+  - UI polish：主菜单美化、键位重绑定
+- 重跑冒烟：`bash scripts/run_gameplay_smoke.sh`（需沙箱外 X/Vulkan 权限）。
 
 ## 五、关键约定与环境备忘
 
@@ -59,7 +79,7 @@
 
 | 指标 | 数值 |
 |---|---|
-| 测试 | 111 passed, 0 failed |
+| 测试 | 160 passed, 0 failed |
 | 警告 | 0 |
 | 冒烟（飞行） | VUID=0, fps 228–300 |
-| gameplay 冒烟 | ALL-OK：kills=1、hit_events=4、VUID=0、fps 249–299、无 panic |
+| gameplay 冒烟 | ALL-OK：kills=1、hit_events=4、VUID=0、fps 233.8–290.9、无 panic |
