@@ -2707,14 +2707,16 @@ impl Renderer {
             .ok_or_else(|| "截图围栏未初始化".to_string())?;
         let buffer_size = (width as u64) * (height as u64) * 4;
 
-        // 1. 主机侧等待本帧渲染完成信号量（vkWaitSemaphores 不消费信号量，present 等待不受影响）。
-        //    信号量数组用具名局部变量持有：SemaphoreWaitInfo 只存裸指针，临时数组会提前失效。
-        let wait_semaphores = [self.render_finished_semaphores[slot]];
-        let wait_info = vk::SemaphoreWaitInfo::default().semaphores(&wait_semaphores);
+        // 1. 主机侧等待本帧渲染完成：vkWaitSemaphores 只接受 timeline 信号量，
+        //    这里复用 in_flight_fence（本帧 queue_submit 已提交，等待不会死锁）。
         unsafe {
             self.device
-                .wait_semaphores(&wait_info, SCREENSHOT_WAIT_TIMEOUT_NS)
-                .map_err(|e| format!("等待渲染完成信号量失败: {}", e))?;
+                .wait_for_fences(
+                    &[self.in_flight_fences[slot]],
+                    true,
+                    SCREENSHOT_WAIT_TIMEOUT_NS,
+                )
+                .map_err(|e| format!("等待渲染完成围栏失败: {}", e))?;
         }
 
         // 2. 一次性命令缓冲：PRESENT_SRC_KHR → TRANSFER_SRC_OPTIMAL → 拷贝 → 回 PRESENT_SRC_KHR
