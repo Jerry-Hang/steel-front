@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{
+        DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+    },
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -60,6 +62,12 @@ struct GameApp {
     fire_requested: bool,
     /// 光标是否已捕获（Playing 下鼠标视角）
     cursor_captured: bool,
+    /// 捕获模式是否为系统级 Locked（相对 MouseMotion 驱动视角，光标不出窗口）；
+    /// false = 回退 Confined + warp 回中（绝对位置路径）
+    cursor_locked: bool,
+    /// 本会话是否收到过 DeviceEvent::MouseMotion（XInput2 相对增量）。
+    /// 收到后视角改由相对事件驱动，绝对位置路径只作基准，避免 warp 回声乱转。
+    mouse_relative_ok: bool,
     /// 窗口是否聚焦（失焦时释放捕获，防止卡视角）
     focused: bool,
     /// 回中 warp 回声事件吞噬窗口：recenter 后短时间内到达的下一个 CursorMoved
@@ -106,6 +114,8 @@ impl GameApp {
             last_frame: Instant::now(),
             fire_requested: false,
             cursor_captured: false,
+            cursor_locked: false,
+            mouse_relative_ok: false,
             focused: true,
             recenter_pending_until: None,
             last_cam_log: Instant::now(),
@@ -178,12 +188,20 @@ impl GameApp {
             && self.game.state() == GameState::Playing
             && !self.game.settings_open();
         if want && !self.cursor_captured {
-            // 仅用 Confined（X11 指针锁定回退会在"锁定 + 应用回中"之间形成 warp 反馈环，
-            // 导致第一人称视角每帧自转；Confined 只限制边界不 warp，无此问题）
-            let grabbed = window.set_cursor_grab(CursorGrabMode::Confined).is_ok();
-            if grabbed {
-                window.set_cursor_visible(false);
-                self.cursor_captured = true;
+            // 优先 Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
+            // Xwayland 等不支持 Locked 的环境回退 Confined；即使 grab 全不可用，
+            // 只要 DeviceEvent::MouseMotion 到达（XInput2 raw motion），视角仍由相对增量驱动。
+            let locked = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
+            let grabbed = if locked {
+                true
+            } else {
+                window.set_cursor_grab(CursorGrabMode::Confined).is_ok()
+            };
+            window.set_cursor_visible(false);
+            self.cursor_captured = true;
+            self.cursor_locked = locked;
+            self.mouse_relative_ok = false;
+            if !locked {
                 // 捕获瞬间回中光标：随后 warp 回声事件被吞掉作为新基准，
                 // 避免把"捕获前光标位置到窗口中心"的差量当成视角位移
                 let size = window.inner_size();
@@ -194,12 +212,23 @@ impl GameApp {
                 let _ = window.set_cursor_position(center);
                 self.last_cursor = (center.x, center.y);
                 self.recenter_pending_until = Some(Instant::now() + Duration::from_millis(150));
-                log::info!("input: cursor captured (mouse look on)");
             }
+            log::info!(
+                "input: cursor captured (mouse look on, grab={})",
+                if locked {
+                    "locked"
+                } else if grabbed {
+                    "confined"
+                } else {
+                    "none-relative"
+                }
+            );
         } else if !want && self.cursor_captured {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.cursor_captured = false;
+            self.cursor_locked = false;
+            self.mouse_relative_ok = false;
             self.recenter_pending_until = None;
             self.camera.set_rotation_active(false);
             log::info!("input: cursor released");
@@ -392,6 +421,30 @@ impl ApplicationHandler for GameApp {
         // 应用持久化的分辨率与画质（窗口/渲染器就绪后即时生效）
         self.apply_resolution();
         self.apply_quality();
+    }
+
+    /// 设备级事件：系统相对鼠标增量（XInput2 raw motion，与光标位置无关）驱动视角。
+    /// 本环境（WSLg/Xwayland）grab 不可靠，此路径是视角不飞出窗口、不产生 warp 回声乱转的关键。
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.mouse_relative_ok = true;
+            if self.cursor_captured {
+                let (dx, dy) = (delta.0 as f32, delta.1 as f32);
+                match self.camera.mode {
+                    CameraMode::FirstPerson => self.camera.look(dx, dy),
+                    CameraMode::Orbit => self.camera.orbit(dx, dy),
+                    CameraMode::Flight => {
+                        self.camera.set_rotation_active(true);
+                        self.camera.add_rotation_input(dx, dy);
+                    }
+                }
+            }
+        }
     }
 
     /// 处理窗口事件
@@ -606,8 +659,11 @@ impl ApplicationHandler for GameApp {
                 }
             }
 
-            // 鼠标移动：捕获态 = 视角（轨道位控 / 飞行惯性）；非捕获态 = 拖拽旋转
+            // 鼠标移动（绝对位置）：Confined 回退路径 或 非捕获态拖拽旋转
             WindowEvent::CursorMoved { position, .. } => {
+                if self.cursor_locked {
+                    return;
+                }
                 let (px, py) = (position.x, position.y);
                 // warp 回声事件吞噬窗口：recenter 后短时间内的下一个 CursorMoved
                 // 只是回中回声，把它作为新基准并跳过，防止回声环把落点偏移当视角位移
@@ -619,6 +675,12 @@ impl ApplicationHandler for GameApp {
                     }
                 }
                 if self.cursor_captured {
+                    // 相对 MouseMotion 已接管视角：绝对位置只重基准，不再驱动视角，
+                    // 避免 Xwayland 下 warp 回声（可能延迟 >150ms 到达）被当成位移导致乱转
+                    if self.mouse_relative_ok {
+                        self.last_cursor = (px, py);
+                        return;
+                    }
                     let dx = (px - self.last_cursor.0) as f32;
                     let dy = (py - self.last_cursor.1) as f32;
                     // 光标传送（回中 warp/服务端跳变）：忽略该事件并重基准，防止视角自转
