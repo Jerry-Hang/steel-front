@@ -10,6 +10,7 @@ mod engine;
 mod audio;
 mod net;
 mod ui;
+mod config;
 
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ use engine::camera::{Camera, CameraMode, KeyState};
 use engine::game::{Game, GameState};
 use engine::renderer::Renderer;
 use engine::window::{self, WINDOW_HEIGHT, WINDOW_WIDTH};
+use ui::BindingAction;
 use winit::window::CursorGrabMode;
 
 /// 帧率上限（present 节流）：300 FPS，避免空闲轮询无意义打满 GPU
@@ -67,6 +69,12 @@ struct GameApp {
 impl GameApp {
     /// 创建游戏应用实例
     fn new() -> Self {
+        let mut game = Game::new();
+        // 加载持久化配置（键位/音量/灵敏度）；文件缺失回退默认，见 config.rs
+        let cfg = config::load();
+        game.hud.volume = cfg.volume;
+        game.hud.sensitivity = cfg.sensitivity;
+        game.hud.key_bindings = cfg.bindings;
         Self {
             window: None,
             renderer: None,
@@ -80,7 +88,7 @@ impl GameApp {
             cursor_captured: false,
             focused: true,
             last_cam_log: Instant::now(),
-            game: Game::new(),
+            game,
             running: true,
         }
     }
@@ -185,6 +193,22 @@ impl GameApp {
             let quads = self.game.hud_quads(near, far, lod);
             renderer.set_hud_quads(&quads);
             renderer.set_lights(&self.game.light_uniform());
+            // 世界障碍 marker：关卡地图障碍盒 → 红色盒实例（复用主 pipeline，见 renderer.rs MARKER_SLOT_BASE）
+            let markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .map_obstacles()
+                .iter()
+                .map(|ob| engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, 1.2, ob.z))
+                        * glam::Mat4::from_scale(glam::Vec3::new(
+                            ob.half_w * 2.0,
+                            2.4,
+                            ob.half_d * 2.0,
+                        )),
+                    tint: [0.85, 0.25, 0.15, 1.0],
+                })
+                .collect();
+            renderer.set_world_markers(&markers);
 
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
@@ -273,32 +297,79 @@ impl ApplicationHandler for GameApp {
                     self.game.on_any_key(&self.camera.position());
                 }
 
-                match key_code {
-                    KeyCode::Escape => {
-                        if pressed {
-                            if self.game.settings_open() {
-                                log::info!("ESC 关闭设置面板");
+                // 设置面板键位绑定监听：非 ESC 按键完成绑定，ESC 取消；随后不再走常规按键
+                if self.game.settings_open() && self.game.rebinding_active() {
+                    if pressed {
+                        if key_code == KeyCode::Escape {
+                            log::info!("settings: 取消键位绑定");
+                            self.game.cancel_rebind();
+                        } else {
+                            log::info!("settings: 键位绑定完成 code={:?}", key_code);
+                            self.game.complete_rebind(key_code as u32);
+                        }
+                    }
+                    return;
+                }
+
+                // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭，否则退出
+                if pressed && key_code == KeyCode::Escape {
+                    if self.game.settings_open() {
+                        log::info!("ESC 关闭设置面板");
+                        self.game.toggle_settings();
+                    } else {
+                        log::info!("ESC 键按下，退出程序");
+                        self.running = false;
+                        event_loop.exit();
+                    }
+                    return;
+                }
+
+                // 键位驱动：查当前键码绑定的可重绑定动作（移动/换弹/开火/菜单）
+                if let Some(action) = self.game.hud.key_bindings.action_for(key_code as u32) {
+                    match action {
+                        BindingAction::Forward => {
+                            self.key_state.forward = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Backward => {
+                            self.key_state.backward = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Left => {
+                            self.key_state.left = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Right => {
+                            self.key_state.right = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Reload => {
+                            if pressed {
+                                if self.game.state() == GameState::GameOver {
+                                    log::info!("game: 重开一局");
+                                    self.game.request_restart(&self.camera.position());
+                                } else if self.game.state() == GameState::Playing
+                                    && !self.game.settings_open()
+                                {
+                                    self.game.request_reload();
+                                }
+                            }
+                        }
+                        BindingAction::Fire => {
+                            self.fire_requested = pressed && !self.game.settings_open();
+                        }
+                        BindingAction::Menu => {
+                            if pressed && !self.game.settings_open() {
+                                log::info!("键位菜单键：打开设置面板");
                                 self.game.toggle_settings();
-                            } else {
-                                log::info!("ESC 键按下，退出程序");
-                                self.running = false;
-                                event_loop.exit();
                             }
                         }
                     }
-                    // 死亡结算界面：R 重开一局
-                    KeyCode::KeyR => {
-                        if pressed {
-                            if self.game.state() == GameState::GameOver {
-                                log::info!("game: R 键重开一局");
-                                self.game.request_restart(&self.camera.position());
-                            } else if self.game.state() == GameState::Playing
-                                && !self.game.settings_open()
-                            {
-                                self.game.request_reload();
-                            }
-                        }
-                    }
+                    return;
+                }
+
+                // 系统键（不可重绑定）：Tab 设置循环/相机切换，Q/E 升降，N 补给
+                match key_code {
                     // Tab：设置面板打开时循环选中项；否则切换相机模式
                     KeyCode::Tab => {
                         if pressed {
@@ -310,28 +381,14 @@ impl ApplicationHandler for GameApp {
                             }
                         }
                     }
-                    // WASD 平移目标点 / QE 升降
-                    KeyCode::KeyW => {
-                        self.key_state.forward = pressed;
-                        self.sync_game_movement();
-                    }
-                    KeyCode::KeyS => {
-                        self.key_state.backward = pressed;
-                        self.sync_game_movement();
-                    }
-                    KeyCode::KeyA => {
-                        self.key_state.left = pressed;
-                        self.sync_game_movement();
-                    }
-                    KeyCode::KeyD => {
-                        self.key_state.right = pressed;
-                        self.sync_game_movement();
-                    }
                     KeyCode::KeyQ => self.key_state.down = pressed,
                     KeyCode::KeyE => self.key_state.up = pressed,
-                    // Space 开火（投射物武器）
-                    KeyCode::Space => {
-                        self.fire_requested = pressed && !self.game.settings_open();
+                    // Enter：设置面板选中键位行时进入"等待按键绑定"
+                    KeyCode::Enter => {
+                        if pressed && self.game.settings_open() {
+                            log::info!("settings: Enter 进入键位绑定");
+                            self.game.begin_rebind();
+                        }
                     }
                     // 设置面板调试补给（N 键补满弹匣）
                     KeyCode::KeyN => {
