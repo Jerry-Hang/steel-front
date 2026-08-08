@@ -23,10 +23,10 @@ use winit::{
 };
 
 use engine::camera::{Camera, CameraMode, KeyState};
-use engine::game::{Game, GameState};
-use engine::renderer::Renderer;
+use engine::game::{Game, GameState, ObstacleKind};
+use engine::renderer::{QualityPreset, Renderer};
 use engine::window::{self, WINDOW_HEIGHT, WINDOW_WIDTH};
-use ui::BindingAction;
+use ui::{BindingAction, RESOLUTIONS};
 use winit::window::CursorGrabMode;
 
 /// 帧率上限（present 节流）：300 FPS，避免空闲轮询无意义打满 GPU
@@ -75,6 +75,12 @@ impl GameApp {
         game.hud.volume = cfg.volume;
         game.hud.sensitivity = cfg.sensitivity;
         game.hud.key_bindings = cfg.bindings;
+        // 分辨率/画质索引与 ui.rs 选项表对齐；配置异常值回退默认
+        game.hud.resolution_index = RESOLUTIONS
+            .iter()
+            .position(|&r| r == cfg.resolution)
+            .unwrap_or(0) as u8;
+        game.hud.quality_index = cfg.quality.min(2) as u8;
         Self {
             window: None,
             renderer: None,
@@ -179,6 +185,51 @@ impl GameApp {
         self.game.set_movement(k.forward, k.backward, k.left, k.right);
     }
 
+    /// 把当前分辨率应用到窗口（尺寸相同则跳过；`Resized` 事件会触发渲染器重建交换链）
+    fn apply_resolution(&self) {
+        let (w, h) = self.game.hud.resolution();
+        let Some(window) = &self.window else {
+            log::info!("settings: 窗口未就绪，分辨率 {}x{} 待应用", w, h);
+            return;
+        };
+        let cur = window.inner_size();
+        if cur.width == w && cur.height == h {
+            log::info!("settings: 分辨率保持 {}x{}", w, h);
+            return;
+        }
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+        log::info!("settings: 应用分辨率 {}x{}", w, h);
+    }
+
+    /// 把当前画质应用到渲染器（设置面板切换后即时生效）
+    fn apply_quality(&mut self) {
+        let preset = match self.game.hud.quality_index {
+            0 => QualityPreset::Low,
+            1 => QualityPreset::Medium,
+            _ => QualityPreset::High,
+        };
+        log::info!("settings: 应用画质 {}", preset.label());
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_quality(preset);
+        }
+    }
+
+    /// F12 截图：调渲染器把当前帧保存到 /tmp/steel_front_<秒时间戳>.png
+    fn capture_screenshot(&mut self) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = std::path::PathBuf::from(format!("/tmp/steel_front_{}.png", ts));
+        match self.renderer.as_mut() {
+            Some(renderer) => match renderer.capture_screenshot(&path) {
+                Ok(()) => log::info!("截图已保存: {}", path.display()),
+                Err(e) => log::error!("截图失败 {}: {}", path.display(), e),
+            },
+            None => log::warn!("截图跳过：渲染器未就绪"),
+        }
+    }
+
     /// 渲染一帧
     fn render(&mut self) {
         if let Some(renderer) = &mut self.renderer {
@@ -198,14 +249,22 @@ impl GameApp {
                 .game
                 .map_obstacles()
                 .iter()
-                .map(|ob| engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, 1.2, ob.z))
-                        * glam::Mat4::from_scale(glam::Vec3::new(
-                            ob.half_w * 2.0,
-                            2.4,
-                            ob.half_d * 2.0,
-                        )),
-                    tint: [0.85, 0.25, 0.15, 1.0],
+                .map(|ob| {
+                    // 障碍种类配色：墙=红、块=橙、栅栏=蓝灰（便于区分地图主题）
+                    let tint = match ob.kind {
+                        ObstacleKind::Wall => [0.85, 0.25, 0.15, 1.0],
+                        ObstacleKind::Block => [0.85, 0.6, 0.15, 1.0],
+                        ObstacleKind::Barrier => [0.35, 0.5, 0.8, 1.0],
+                    };
+                    engine::renderer::WorldMarker {
+                        model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, 1.2, ob.z))
+                            * glam::Mat4::from_scale(glam::Vec3::new(
+                                ob.half_w * 2.0,
+                                2.4,
+                                ob.half_d * 2.0,
+                            )),
+                        tint,
+                    }
                 })
                 .collect();
             renderer.set_world_markers(&markers);
@@ -260,6 +319,10 @@ impl ApplicationHandler for GameApp {
 
         self.window = Some(window);
         self.last_frame = Instant::now();
+
+        // 应用持久化的分辨率与画质（窗口/渲染器就绪后即时生效）
+        self.apply_resolution();
+        self.apply_quality();
     }
 
     /// 处理窗口事件
@@ -383,11 +446,25 @@ impl ApplicationHandler for GameApp {
                     }
                     KeyCode::KeyQ => self.key_state.down = pressed,
                     KeyCode::KeyE => self.key_state.up = pressed,
-                    // Enter：设置面板选中键位行时进入"等待按键绑定"
+                    // Enter：设置面板选中分辨率/画质行时循环切换；选中键位行时进入"等待按键绑定"
                     KeyCode::Enter => {
                         if pressed && self.game.settings_open() {
-                            log::info!("settings: Enter 进入键位绑定");
-                            self.game.begin_rebind();
+                            match self.game.hud.settings_selection() {
+                                2 => {
+                                    // RESOLUTION 行：循环切换分辨率并即时应用
+                                    self.game.hud.cycle_resolution();
+                                    self.apply_resolution();
+                                }
+                                3 => {
+                                    // QUALITY 行：循环切换画质并即时应用
+                                    self.game.hud.cycle_quality();
+                                    self.apply_quality();
+                                }
+                                _ => {
+                                    log::info!("settings: Enter 进入键位绑定");
+                                    self.game.begin_rebind();
+                                }
+                            }
                         }
                     }
                     // 设置面板调试补给（N 键补满弹匣）
@@ -395,6 +472,12 @@ impl ApplicationHandler for GameApp {
                         if pressed && self.game.settings_open() {
                             log::info!("settings: N 键补给弹药");
                             self.game.give_ammo();
+                        }
+                    }
+                    // F12：截图（任意画面可用，渲染器把当前帧写到 /tmp）
+                    KeyCode::F12 => {
+                        if pressed {
+                            self.capture_screenshot();
                         }
                     }
                     _ => {}
