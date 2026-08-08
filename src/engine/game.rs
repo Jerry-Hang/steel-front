@@ -49,8 +49,6 @@ const WAVES_PER_LEVEL: u32 = 3;
 /// 必须 > NPC 最大攻击距离(16) + 掩体搜索半径(40) = 56：否则攻击态 NPC 会就近跑去掩体，
 /// 不再原地站定（冒烟依赖 `npc: #id stand` 日志瞄准点射）；同时保证玩家出生点附近弹道无阻挡。
 const MAP_RING_INNER: f32 = 58.0;
-/// 程序化障碍环带外半径（米）
-const MAP_RING_OUTER: f32 = 130.0;
 /// 障碍簇数量基数：实际簇数 = MAP_CLUSTERS + seed % 5（6..=10）
 const MAP_CLUSTERS: u32 = 6;
 /// 障碍盒高度（米）
@@ -115,6 +113,17 @@ pub fn grid_to_world(g: GridPos) -> (f32, f32) {
     (x, z)
 }
 
+/// 障碍种类：决定摆放形态与尺寸（渲染侧 marker 颜色由 main.rs 按 kind 映射）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObstacleKind {
+    /// 墙体：1..=3 个中等盒子沿切线并排成墙（第一关基准形态）
+    Wall,
+    /// 大块：1..=2 个大尺寸独立方块（密度高、体型大）
+    Block,
+    /// 路障：2..=4 个长条薄墙（单簇更长、更稀疏）
+    Barrier,
+}
+
 /// 程序化地图上的静态障碍盒（AABB：世界坐标中心 + x/z 半尺寸，贴地高度 MAP_BLOCK_HEIGHT）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapObstacle {
@@ -122,6 +131,8 @@ pub struct MapObstacle {
     pub z: f32,
     pub half_w: f32,
     pub half_d: f32,
+    /// 障碍种类（第一关全部为 Wall；主题轮换见 theme_for_level）
+    pub kind: ObstacleKind,
 }
 
 /// 程序化关卡布局：确定性（种子 = 关卡号），障碍全部位于中央安全环带之外
@@ -141,11 +152,11 @@ fn map_lcg_unit(state: &mut u32) -> f32 {
     (map_lcg_next(state) >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// 把障碍盒径向推出安全环（若侵入 MAP_RING_INNER 以内则沿原方向外推），并 clamp 到地图范围
-fn push_out_of_safe_ring(ob: &mut MapObstacle) {
+/// 把障碍盒径向推出安全环（若侵入 `ring_inner` 以内则沿原方向外推），并 clamp 到地图范围
+fn push_out_of_safe_ring(ob: &mut MapObstacle, ring_inner: f32) {
     let d = (ob.x * ob.x + ob.z * ob.z).sqrt();
-    if d < MAP_RING_INNER && d > 1e-4 {
-        let k = MAP_RING_INNER / d;
+    if d < ring_inner && d > 1e-4 {
+        let k = ring_inner / d;
         ob.x *= k;
         ob.z *= k;
     }
@@ -153,30 +164,131 @@ fn push_out_of_safe_ring(ob: &mut MapObstacle) {
     ob.z = ob.z.clamp(-240.0, 240.0);
 }
 
-/// 程序化关卡地图：以 seed 生成 6..=10 簇障碍墙，分布在 58..130m 环带。
+/// 关卡主题：安全环半径 / 障碍密度 / 种类按关卡轮换（第一关固定为冒烟基准）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapTheme {
+    /// 安全环内半径（米）：环内保持无障碍（NPC 站定 + 玩家出生点弹道无阻挡）
+    pub ring_inner: f32,
+    /// 障碍环带外半径（米）
+    pub ring_outer: f32,
+    /// 障碍簇数量基数：实际簇数 = base + (seed 派生值) % var
+    pub clusters_base: u32,
+    /// 障碍簇数量浮动幅度
+    pub clusters_var: u32,
+    /// 障碍种类（决定盒子尺寸与簇形态）
+    pub kind: ObstacleKind,
+}
+
+/// 关卡主题轮换：每 3 关一个周期。
+///
+/// 第 1 关 = 冒烟基准主题（58m 安全环 + 现状墙体布局），见 MAP_RING_INNER 注释；
+/// 第 2/3 关依次切换大块/路障主题，安全环半径与密度同步变化（安全环都不低于 58m，
+/// 保证任意关卡攻击态 NPC 站定与出生点弹道规则一致）。
+pub fn theme_for_level(level: u32) -> MapTheme {
+    match (level.saturating_sub(1)) % 3 {
+        0 => MapTheme {
+            ring_inner: MAP_RING_INNER,
+            ring_outer: 130.0,
+            clusters_base: MAP_CLUSTERS,
+            clusters_var: 5,
+            kind: ObstacleKind::Wall,
+        },
+        1 => MapTheme {
+            ring_inner: 64.0,
+            ring_outer: 125.0,
+            clusters_base: 8,
+            clusters_var: 4,
+            kind: ObstacleKind::Block,
+        },
+        _ => MapTheme {
+            ring_inner: 60.0,
+            ring_outer: 120.0,
+            clusters_base: 9,
+            clusters_var: 4,
+            kind: ObstacleKind::Barrier,
+        },
+    }
+}
+
+/// 障碍种类对应的摆放风格：簇内盒数范围 + 盒子半尺寸范围 + 盒间间隙
+#[derive(Debug, Clone, Copy)]
+struct KindStyle {
+    min_boxes: u32,
+    max_boxes: u32,
+    min_w: f32,
+    max_w: f32,
+    min_d: f32,
+    max_d: f32,
+    gap: f32,
+}
+
+/// 每种障碍的摆放风格（Wall = 第一关基准参数，勿改动）
+fn kind_style(kind: ObstacleKind) -> KindStyle {
+    match kind {
+        ObstacleKind::Wall => KindStyle {
+            min_boxes: 1,
+            max_boxes: 3,
+            min_w: 1.2,
+            max_w: 3.2,
+            min_d: 0.7,
+            max_d: 1.7,
+            gap: 0.6,
+        },
+        ObstacleKind::Block => KindStyle {
+            min_boxes: 1,
+            max_boxes: 2,
+            min_w: 2.0,
+            max_w: 4.0,
+            min_d: 2.0,
+            max_d: 4.0,
+            gap: 1.0,
+        },
+        ObstacleKind::Barrier => KindStyle {
+            min_boxes: 2,
+            max_boxes: 4,
+            min_w: 3.0,
+            max_w: 5.0,
+            min_d: 0.5,
+            max_d: 0.8,
+            gap: 0.5,
+        },
+    }
+}
+
+/// 程序化关卡地图：以 seed（= 关卡号）按主题生成障碍簇，分布在安全环带内。
 ///
 /// 布局规则（注释即约定，勿随意改动）：
-/// 1. 中央 MAP_RING_INNER 内刻意留空：攻击态 NPC 需原地站定（冒烟机制），
+/// 1. 中央 theme.ring_inner 内刻意留空：攻击态 NPC 需原地站定（冒烟机制），
 ///    且玩家出生点/近距离战斗弹道不受阻挡（见 MAP_RING_INNER 注释）。
 /// 2. 每簇沿切线方向并排 1..=3 个盒子（带间隙），形成可绕行的掩体墙。
 /// 3. 盒子两两不重叠（最多重试 8 次，仍冲突则跳过），确定性可测。
 pub fn generate_level_map(seed: u32) -> LevelMap {
+    generate_level_map_with_theme(seed, theme_for_level(seed))
+}
+
+/// 以指定主题生成关卡布局：主题轮换测试 / 外部定制布局用。
+///
+/// Wall 主题的参数与 RNG 消耗顺序与旧版 generate_level_map 完全一致，
+/// 保证第 1 关布局不因主题化而改变。
+pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
     let mut state = seed.wrapping_mul(0x9E37_79B9) ^ 0x5EED_1234;
-    let clusters = MAP_CLUSTERS + (state.wrapping_add(seed) % 5);
+    let clusters = theme.clusters_base + (state.wrapping_add(seed) % theme.clusters_var);
+    let style = kind_style(theme.kind);
     let mut obstacles: Vec<MapObstacle> = Vec::new();
     let tau = std::f32::consts::TAU;
     for _ in 0..clusters {
-        // 每簇 1..=3 个盒子，沿切线方向并排成墙
-        let n_boxes = 1 + (map_lcg_unit(&mut state) * 3.0) as usize;
+        // 每簇 style 范围内个盒子，沿切线方向并排成墙/块
+        let n_boxes = style.min_boxes as usize
+            + (map_lcg_unit(&mut state) * (style.max_boxes - style.min_boxes + 1) as f32) as usize;
         let angle = map_lcg_unit(&mut state) * tau;
         let dir = (angle.cos(), angle.sin());
-        let half_w = 1.2 + map_lcg_unit(&mut state) * 2.0; // 1.2..3.2
-        let half_d = 0.7 + map_lcg_unit(&mut state) * 1.0; // 0.7..1.7
-        let gap = 0.6;
+        let half_w = style.min_w + map_lcg_unit(&mut state) * (style.max_w - style.min_w);
+        let half_d = style.min_d + map_lcg_unit(&mut state) * (style.max_d - style.min_d);
+        let gap = style.gap;
         let span = n_boxes as f32 * (half_w * 2.0 + gap);
         // 簇中心到原点距离：内缘留出半墙余量，避免墙体侵入安全环
-        let min_dist = MAP_RING_INNER + span * 0.5 + 1.0;
-        let dist = min_dist + map_lcg_unit(&mut state) * (MAP_RING_OUTER - min_dist).max(1.0);
+        let min_dist = theme.ring_inner + span * 0.5 + 1.0;
+        let dist = min_dist + map_lcg_unit(&mut state) * (theme.ring_outer - min_dist).max(1.0);
         let cx = dir.0 * dist;
         let cz = dir.1 * dist;
         let tx = -dir.1; // 切线方向（垂直径向）
@@ -188,12 +300,13 @@ pub fn generate_level_map(seed: u32) -> LevelMap {
                 z: cz + tz * off,
                 half_w,
                 half_d,
+                kind: theme.kind,
             };
             // 冲突检测 + 抖动重试：先径向推出安全环，再与已有障碍查重叠；
             // 重叠则小幅随机移位（最多 8 次），保证放置后同时满足安全环与非重叠约束
             let mut placed = false;
             for _ in 0..8 {
-                push_out_of_safe_ring(&mut ob);
+                push_out_of_safe_ring(&mut ob, theme.ring_inner);
                 let mut overlap = false;
                 for o in &obstacles {
                     if (ob.x - o.x).abs() < ob.half_w + o.half_w
@@ -522,10 +635,22 @@ impl Game {
         // 升关/重开时把玩家拉回原点安全区（中央环带无阻碍，见 MAP_RING_INNER 注释）
         self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
         self.player_body.vel = Pv::ZERO;
+        // 障碍种类分布统计（供日志/调试；渲染 marker 颜色由 main.rs 按 kind 映射）
+        let mut kind_counts = [0u32; 3];
+        for ob in &self.map.obstacles {
+            kind_counts[match ob.kind {
+                ObstacleKind::Wall => 0,
+                ObstacleKind::Block => 1,
+                ObstacleKind::Barrier => 2,
+            }] += 1;
+        }
         log::info!(
-            "map: level {} generated: {} obstacle bodies, {} grid cells blocked",
+            "map: level {} generated: {} obstacle bodies (wall={} block={} barrier={}), {} grid cells blocked",
             level,
             self.map.obstacles.len(),
+            kind_counts[0],
+            kind_counts[1],
+            kind_counts[2],
             blocked_cells
         );
     }
@@ -1325,6 +1450,55 @@ mod tests {
                 assert!(!overlap, "obstacles must not overlap");
             }
         }
+    }
+
+    /// 地图主题：第一关保持冒烟基准（58m 安全环 + Wall 种类 + 与主题化生成完全一致）
+    #[test]
+    fn map_theme_level1_preserves_smoke_ring() {
+        let t1 = theme_for_level(1);
+        assert_eq!(t1.ring_inner, MAP_RING_INNER, "第一关安全环必须 58m");
+        assert_eq!(t1.kind, ObstacleKind::Wall);
+        let a = generate_level_map(1);
+        let b = generate_level_map_with_theme(1, theme_for_level(1));
+        assert_eq!(a.obstacles, b.obstacles, "generate_level_map 必须等于主题化生成");
+        assert!(
+            a.obstacles.iter().all(|o| o.kind == ObstacleKind::Wall),
+            "第一关障碍全部为 Wall"
+        );
+        for ob in &a.obstacles {
+            let d = (ob.x * ob.x + ob.z * ob.z).sqrt();
+            assert!(d >= MAP_RING_INNER - 0.5, "58m 环带内必须无障碍: {:.1}m", d);
+        }
+    }
+
+    /// 地图主题：按关卡轮换种类/安全环/密度，同主题确定性一致、异主题布局不同
+    #[test]
+    fn map_themes_rotate_and_differ() {
+        // 主题轮换周期：1/4/7 同主题，2/5/8、3/6/9 依次轮换
+        assert_eq!(theme_for_level(1), theme_for_level(4));
+        assert_ne!(theme_for_level(1), theme_for_level(2));
+        assert_ne!(theme_for_level(2), theme_for_level(3));
+        assert_ne!(theme_for_level(3), theme_for_level(4));
+        assert_eq!(theme_for_level(2).kind, ObstacleKind::Block);
+        assert_eq!(theme_for_level(3).kind, ObstacleKind::Barrier);
+        // 安全环半径随主题变化，且都不低于 NPC 站定下限（见 MAP_RING_INNER 注释）
+        for level in 1..=6 {
+            assert!(
+                theme_for_level(level).ring_inner >= MAP_RING_INNER - 0.5,
+                "level {} 安全环过低",
+                level
+            );
+        }
+        // 同 seed 不同主题 → 不同布局；同主题同 seed → 确定性一致
+        let wall = generate_level_map_with_theme(1, theme_for_level(1));
+        let block = generate_level_map_with_theme(1, theme_for_level(2));
+        assert_ne!(wall.obstacles, block.obstacles, "不同主题必须产生不同布局");
+        assert_eq!(
+            wall.obstacles,
+            generate_level_map_with_theme(1, theme_for_level(1)).obstacles
+        );
+        assert!(wall.obstacles.iter().all(|o| o.kind == ObstacleKind::Wall));
+        assert!(block.obstacles.iter().all(|o| o.kind == ObstacleKind::Block));
     }
 
     /// 升关：每关 WAVES_PER_LEVEL 波清完后 level+1、wave 回 1、地图重新生成、难度按有效波次递进
