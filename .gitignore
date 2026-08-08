@@ -3,3 +3,4 @@
 *.bak2
 *.orig
 overnight_*.txt
+__pycache__/
