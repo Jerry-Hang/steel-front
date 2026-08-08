@@ -113,9 +113,10 @@ pub enum HudScreen {
 }
 
 /// 分辨率选项（设置面板 RESOLUTION 行循环切换；索引与 config.rs 持久化的 resolution 对齐）
-pub const RESOLUTIONS: [(u32, u32); 3] = [(1280, 720), (1600, 900), (1920, 1080)];
+/// 含 16:10 档位 1280x800：16:10 显示器首次运行默认用它（见 main.rs 默认分辨率选择）
+pub const RESOLUTIONS: [(u32, u32); 4] = [(1280, 720), (1280, 800), (1600, 900), (1920, 1080)];
 /// 分辨率显示名（设置面板/日志用，ASCII 大写，位图字体可用）
-pub const RESOLUTION_LABELS: [&str; 3] = ["1280x720", "1600x900", "1920x1080"];
+pub const RESOLUTION_LABELS: [&str; 4] = ["1280x720", "1280x800", "1600x900", "1920x1080"];
 /// 画质选项（0=LOW / 1=MEDIUM / 2=HIGH；索引 = config.rs 持久化的 quality）
 pub const QUALITY_LABELS: [&str; 3] = ["LOW", "MEDIUM", "HIGH"];
 
@@ -138,7 +139,7 @@ pub enum BindingAction {
     Menu,
 }
 
-/// 键位配置（纯数据，u32 物理键码，winit 风格 HID 值）
+/// 键位配置（纯数据，u32 物理键码 = winit 0.30 `KeyCode` 枚举序号，非 USB HID 码）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyBindings {
     /// 前进键
@@ -158,29 +159,33 @@ pub struct KeyBindings {
 }
 
 impl KeyBindings {
-    /// 默认键位：W/S/A/D 移动、R 换弹、ESC 菜单、SPACE 开火
+    /// 默认键位：W/S/A/D 移动、R 换弹、MENU 键设置、SPACE 开火。
+    ///
+    /// 键码是 winit 0.30 `KeyCode` 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/
+    /// KeyR=36/ContextMenu=54/Space=62），不是 USB HID 码；由测试
+    /// `winit_keycode_indices_match_table` 锁死，winit 升级导致序号漂移会立刻暴露。
     pub fn defaults() -> Self {
         Self {
-            move_forward: 26, // W
-            move_backward: 22, // S
-            move_left: 4,     // A
-            move_right: 7,    // D
-            reload: 21,       // R
-            menu: 41,         // ESC
-            fire: 44,         // SPACE
+            move_forward: 41,  // KeyW
+            move_backward: 37, // KeyS
+            move_left: 19,     // KeyA
+            move_right: 22,    // KeyD
+            reload: 36,        // KeyR
+            menu: 54,          // ContextMenu（物理菜单键）
+            fire: 62,          // Space
         }
     }
 
-    /// 动作的默认键码（W/S/A/D 移动、R 换弹、ESC 菜单、SPACE 开火）
+    /// 动作的默认键码（W/S/A/D 移动、R 换弹、MENU 键设置、SPACE 开火）
     pub fn default_code(action: BindingAction) -> u32 {
         match action {
-            BindingAction::Forward => 26,  // W
-            BindingAction::Backward => 22, // S
-            BindingAction::Left => 4,      // A
-            BindingAction::Right => 7,     // D
-            BindingAction::Reload => 21,   // R
-            BindingAction::Fire => 44,     // SPACE
-            BindingAction::Menu => 41,     // ESC
+            BindingAction::Forward => 41,  // KeyW
+            BindingAction::Backward => 37, // KeyS
+            BindingAction::Left => 19,     // KeyA
+            BindingAction::Right => 22,    // KeyD
+            BindingAction::Reload => 36,   // KeyR
+            BindingAction::Fire => 62,     // Space
+            BindingAction::Menu => 54,     // ContextMenu
         }
     }
 
@@ -268,50 +273,67 @@ impl KeyBindings {
     /// 常见键码 → 显示名（供设置面板文本）；其余回退 `KEY#<code>`
     pub fn label(code: u32) -> String {
         match code {
-            4..=29 => char::from(b'A' + (code - 4) as u8).to_string(),
-            30..=39 => char::from(b'1' + (code - 30) as u8).to_string(),
-            40 => "ENTER".to_string(),
-            41 => "ESC".to_string(),
-            42 => "BACKSPACE".to_string(),
-            43 => "TAB".to_string(),
-            44 => "SPACE".to_string(),
+            // 序号 = winit 0.30 KeyCode 枚举隐式值（0,1,2,...），见 keyboard.rs
+            0 => "GRAVE".to_string(),
+            1 => "BACKSLASH".to_string(),
+            2 => "LBRACKET".to_string(),
+            3 => "RBRACKET".to_string(),
+            4 => "COMMA".to_string(),
+            5..=14 => char::from(b'0' + (code - 5) as u8).to_string(),
+            15 => "EQUALS".to_string(),
+            16 => "INTL-BS".to_string(),
+            19..=44 => char::from(b'A' + (code - 19) as u8).to_string(),
             45 => "MINUS".to_string(),
-            46 => "EQUALS".to_string(),
-            47 => "LBRACKET".to_string(),
-            48 => "RBRACKET".to_string(),
-            49 => "BACKSLASH".to_string(),
-            51 => "SEMICOLON".to_string(),
-            52 => "APOSTROPHE".to_string(),
-            53 => "GRAVE".to_string(),
-            54 => "COMMA".to_string(),
-            55 => "PERIOD".to_string(),
-            56 => "SLASH".to_string(),
-            57 => "CAPSLOCK".to_string(),
-            58..=69 => format!("F{}", code - 57),
-            70 => "PRINTSCREEN".to_string(),
-            71 => "SCROLLLOCK".to_string(),
-            72 => "PAUSE".to_string(),
-            73 => "INSERT".to_string(),
-            74 => "HOME".to_string(),
-            75 => "PAGEUP".to_string(),
-            76 => "DELETE".to_string(),
-            77 => "END".to_string(),
-            78 => "PAGEDOWN".to_string(),
-            79 => "RIGHT".to_string(),
+            46 => "PERIOD".to_string(),
+            47 => "APOSTROPHE".to_string(),
+            48 => "SEMICOLON".to_string(),
+            49 => "SLASH".to_string(),
+            50 => "LALT".to_string(),
+            51 => "RALT".to_string(),
+            52 => "BACKSPACE".to_string(),
+            53 => "CAPSLOCK".to_string(),
+            54 => "MENU".to_string(),
+            55 => "LCTRL".to_string(),
+            56 => "RCTRL".to_string(),
+            57 => "ENTER".to_string(),
+            58 => "LSUPER".to_string(),
+            59 => "RSUPER".to_string(),
+            60 => "LSHIFT".to_string(),
+            61 => "RSHIFT".to_string(),
+            62 => "SPACE".to_string(),
+            63 => "TAB".to_string(),
+            72 => "DELETE".to_string(),
+            73 => "END".to_string(),
+            74 => "HELP".to_string(),
+            75 => "HOME".to_string(),
+            76 => "INSERT".to_string(),
+            77 => "PAGEDOWN".to_string(),
+            78 => "PAGEUP".to_string(),
+            79 => "DOWN".to_string(),
             80 => "LEFT".to_string(),
-            81 => "DOWN".to_string(),
+            81 => "RIGHT".to_string(),
             82 => "UP".to_string(),
-            224 => "LCTRL".to_string(),
-            225 => "LSHIFT".to_string(),
-            226 => "LALT".to_string(),
-            227 => "LGUI".to_string(),
-            228 => "RCTRL".to_string(),
-            229 => "RSHIFT".to_string(),
-            230 => "RALT".to_string(),
-            231 => "RGUI".to_string(),
-            232 => "MENU".to_string(),
+            83 => "NUMLOCK".to_string(),
+            84..=93 => format!("NUM{}", code - 84),
+            94 => "NUM+".to_string(),
+            99 => "NUM.".to_string(),
+            100 => "NUM/".to_string(),
+            101 => "NUMENTER".to_string(),
+            109 => "NUM*".to_string(),
+            113 => "NUM-".to_string(),
+            114 => "ESC".to_string(),
+            117 => "PRINTSCREEN".to_string(),
+            118 => "SCROLLLOCK".to_string(),
+            119 => "PAUSE".to_string(),
+            159..=170 => format!("F{}", code - 158),
             other => format!("KEY#{}", other),
         }
+    }
+
+    /// 保留系统键（设置面板导航/截图/垂直移动/补给），不可作为可重绑定键位
+    pub fn is_reserved(code: u32) -> bool {
+        // KeyE=23 / KeyN=32 / KeyQ=35 / Enter=57 / Tab=63 / Escape=114 / F12=170
+        matches!(code, 23 | 32 | 35 | 57 | 63 | 114 | 170)
     }
 }
 
@@ -350,7 +372,7 @@ pub struct HudState {
     pub volume: f32,
     /// 鼠标灵敏度（0..=1，默认 0.5）
     pub sensitivity: f32,
-    /// 分辨率索引（0..=2，对应 RESOLUTIONS；默认 0 = 1280x720）
+    /// 分辨率索引（0..=3，对应 RESOLUTIONS；默认按显示器宽高比取 0=1280x720 或 1=1280x800）
     pub resolution_index: u8,
     /// 画质索引（0..=2，对应 QUALITY_LABELS；默认 1 = MEDIUM）
     pub quality_index: u8,
@@ -368,6 +390,8 @@ pub struct HudState {
     pub level: u32,
     /// 正在等待重新绑定的动作（None = 无；Some = 设置面板等待按键）
     pub rebinding: Option<BindingAction>,
+    /// 退出确认：ESC 首次按下置位（HUD 提示再按一次退出），任意其它键取消
+    pub confirm_quit: bool,
     /// 累计运行时间（秒，由 `tick(dt)` 累加，驱动开始菜单闪烁）
     pub elapsed: f32,
 }
@@ -407,6 +431,7 @@ impl HudState {
             reload_progress: 0.0,
             level: 1,
             rebinding: None,
+            confirm_quit: false,
             elapsed: 0.0,
         }
     }
@@ -535,6 +560,18 @@ impl HudState {
             color: Color::CYAN,
             scale: 2.0,
         });
+
+        // ---- ESC 退出确认提示（居中偏上，仅在首次 ESC 后显示）----
+        if self.confirm_quit {
+            let quit_txt = "PRESS ESC AGAIN TO QUIT (ANY KEY CANCELS)";
+            elems.push(HudElement::Text {
+                text: quit_txt.to_string(),
+                x: w * 0.5 - text_width(quit_txt, 1.2) * 0.5,
+                y: h * 0.45,
+                color: Color::YELLOW,
+                scale: 1.2,
+            });
+        }
 
         // ---- 波次/分数（顶部中央）----
         let center_x = w * 0.5;
@@ -700,7 +737,7 @@ impl HudState {
             scale: 1.2,
         });
         // 标题区域下方的操作提示
-        let ops = "WASD MOVE / MOUSE AIM / LMB FIRE / R RELOAD / TAB CAMERA / ESC SETTINGS";
+        let ops = "WASD MOVE / MOUSE AIM / LMB FIRE / R RELOAD / TAB CAMERA / MENU KEY: SETTINGS";
         elems.push(HudElement::Text {
             text: ops.to_string(),
             x: w * 0.5 - text_width(ops, 1.0) * 0.5,
@@ -720,7 +757,7 @@ impl HudState {
             scale: 2.0,
         });
         let ctrl1 = "WASD MOVE   SPACE / LMB FIRE   TAB CAMERA";
-        let ctrl2 = "R RESTART (GAME OVER)   ESC QUIT";
+        let ctrl2 = "R / ENTER RESTART (GAME OVER)   ESC QUIT (PRESS AGAIN)";
         let gray = Color::new(0.6, 0.6, 0.6, 1.0);
         elems.push(HudElement::Text {
             text: ctrl1.to_string(),
@@ -783,7 +820,7 @@ impl HudState {
             color: Color::CYAN,
             scale: 1.6,
         });
-        let hint = "PRESS R TO RESTART";
+        let hint = "PRESS R / ENTER TO RESTART";
         elems.push(HudElement::Text {
             text: hint.to_string(),
             x: w * 0.5 - text_width(hint, 1.8) * 0.5,
@@ -791,6 +828,16 @@ impl HudState {
             color: Color::YELLOW,
             scale: 1.8,
         });
+        if self.confirm_quit {
+            let quit_txt = "PRESS ESC AGAIN TO QUIT";
+            elems.push(HudElement::Text {
+                text: quit_txt.to_string(),
+                x: w * 0.5 - text_width(quit_txt, 1.0) * 0.5,
+                y: h * 0.62 + 34.0,
+                color: Color::YELLOW,
+                scale: 1.0,
+            });
+        }
         elems
     }
 
@@ -873,6 +920,14 @@ impl HudState {
                 back,
                 fill,
                 ratio: *ratio,
+            });
+            let pct = format!("{:.0}%", ratio * 100.0);
+            elems.push(HudElement::Text {
+                text: pct,
+                x: left + label_w + bar_w + 10.0,
+                y: y + (bar_h - 7.0) * 0.5,
+                color: Color::new(0.7, 0.7, 0.7, 1.0),
+                scale: 1.0,
             });
         }
         // 分辨率 / 画质行（右侧显示当前值，Enter 循环切换，与键位行同一套高亮交互）
@@ -986,7 +1041,7 @@ impl HudState {
         self.sensitivity = (self.sensitivity + delta).clamp(0.0, 1.0);
     }
 
-    /// 循环切换分辨率索引（0=1280x720 → 1=1600x900 → 2=1920x1080 → 0，与 RESOLUTIONS 对齐）
+    /// 循环切换分辨率索引（0=1280x720 → 1=1280x800 → 2=1600x900 → 3=1920x1080 → 0）
     pub fn cycle_resolution(&mut self) {
         self.resolution_index = (self.resolution_index + 1) % RESOLUTIONS.len() as u8;
     }
@@ -994,6 +1049,12 @@ impl HudState {
     /// 当前分辨率 (宽, 高)（与 config.rs 持久化的 resolution 对齐）
     pub fn resolution(&self) -> (u32, u32) {
         RESOLUTIONS[self.resolution_index as usize]
+    }
+
+    /// 窗口尺寸变化时同步 HUD 布局基准（16:10 等非 16:9 分辨率下保证 HUD 不错位）
+    pub fn set_screen_size(&mut self, w: f32, h: f32) {
+        self.screen_w = w;
+        self.screen_h = h;
     }
 
     /// 循环切换画质索引（0=LOW → 1=MEDIUM → 2=HIGH → 0，与 QUALITY_LABELS 对齐）
@@ -1470,25 +1531,49 @@ mod tests {
     #[test]
     fn key_bindings_defaults_and_labels() {
         let kb = KeyBindings::defaults();
-        assert_eq!(kb.move_forward, 26, "W");
-        assert_eq!(kb.move_backward, 22, "S");
-        assert_eq!(kb.move_left, 4, "A");
-        assert_eq!(kb.move_right, 7, "D");
-        assert_eq!(kb.reload, 21, "R");
-        assert_eq!(kb.menu, 41, "ESC");
-        assert_eq!(kb.fire, 44, "SPACE");
+        assert_eq!(kb.move_forward, 41, "W");
+        assert_eq!(kb.move_backward, 37, "S");
+        assert_eq!(kb.move_left, 19, "A");
+        assert_eq!(kb.move_right, 22, "D");
+        assert_eq!(kb.reload, 36, "R");
+        assert_eq!(kb.menu, 54, "MENU");
+        assert_eq!(kb.fire, 62, "SPACE");
         // label 映射
-        assert_eq!(KeyBindings::label(26), "W");
-        assert_eq!(KeyBindings::label(22), "S");
-        assert_eq!(KeyBindings::label(4), "A");
-        assert_eq!(KeyBindings::label(7), "D");
-        assert_eq!(KeyBindings::label(21), "R");
-        assert_eq!(KeyBindings::label(41), "ESC");
-        assert_eq!(KeyBindings::label(44), "SPACE");
-        assert_eq!(KeyBindings::label(30), "1");
-        assert_eq!(KeyBindings::label(58), "F1");
-        assert_eq!(KeyBindings::label(225), "LSHIFT");
+        assert_eq!(KeyBindings::label(41), "W");
+        assert_eq!(KeyBindings::label(37), "S");
+        assert_eq!(KeyBindings::label(19), "A");
+        assert_eq!(KeyBindings::label(22), "D");
+        assert_eq!(KeyBindings::label(36), "R");
+        assert_eq!(KeyBindings::label(114), "ESC");
+        assert_eq!(KeyBindings::label(62), "SPACE");
+        assert_eq!(KeyBindings::label(6), "1");
+        assert_eq!(KeyBindings::label(159), "F1");
+        assert_eq!(KeyBindings::label(60), "LSHIFT");
         assert_eq!(KeyBindings::label(999), "KEY#999", "未知键码应回退");
+    }
+
+    #[test]
+    fn winit_keycode_indices_match_table() {
+        // winit 0.30 `KeyCode` 是无显式判别值的枚举（隐式 0,1,2,...），键位表按此序号填写；
+        // 若 winit 升级导致序号漂移，此测试立刻失败，防止再出现"W 开设置"类错位。
+        use winit::keyboard::KeyCode;
+        assert_eq!(KeyCode::KeyA as u32, 19);
+        assert_eq!(KeyCode::KeyD as u32, 22);
+        assert_eq!(KeyCode::KeyE as u32, 23);
+        assert_eq!(KeyCode::KeyN as u32, 32);
+        assert_eq!(KeyCode::KeyQ as u32, 35);
+        assert_eq!(KeyCode::KeyR as u32, 36);
+        assert_eq!(KeyCode::KeyS as u32, 37);
+        assert_eq!(KeyCode::KeyW as u32, 41);
+        assert_eq!(KeyCode::Space as u32, 62);
+        assert_eq!(KeyCode::ContextMenu as u32, 54);
+        assert_eq!(KeyCode::Escape as u32, 114);
+        assert_eq!(KeyCode::Enter as u32, 57);
+        assert_eq!(KeyCode::Tab as u32, 63);
+        assert_eq!(KeyCode::F12 as u32, 170);
+        assert!(KeyBindings::is_reserved(114), "ESC 应保留");
+        assert!(KeyBindings::is_reserved(63), "TAB 应保留");
+        assert!(!KeyBindings::is_reserved(41), "W 不应是保留键");
     }
 
     #[test]
@@ -1610,13 +1695,13 @@ mod tests {
 
     #[test]
     fn binding_action_codes_names_and_lookup() {
-        assert_eq!(KeyBindings::default_code(BindingAction::Forward), 26);
-        assert_eq!(KeyBindings::default_code(BindingAction::Backward), 22);
-        assert_eq!(KeyBindings::default_code(BindingAction::Left), 4);
-        assert_eq!(KeyBindings::default_code(BindingAction::Right), 7);
-        assert_eq!(KeyBindings::default_code(BindingAction::Reload), 21);
-        assert_eq!(KeyBindings::default_code(BindingAction::Menu), 41);
-        assert_eq!(KeyBindings::default_code(BindingAction::Fire), 44);
+        assert_eq!(KeyBindings::default_code(BindingAction::Forward), 41);
+        assert_eq!(KeyBindings::default_code(BindingAction::Backward), 37);
+        assert_eq!(KeyBindings::default_code(BindingAction::Left), 19);
+        assert_eq!(KeyBindings::default_code(BindingAction::Right), 22);
+        assert_eq!(KeyBindings::default_code(BindingAction::Reload), 36);
+        assert_eq!(KeyBindings::default_code(BindingAction::Menu), 54);
+        assert_eq!(KeyBindings::default_code(BindingAction::Fire), 62);
         assert_eq!(KeyBindings::action_name(BindingAction::Forward), "FORWARD");
         assert_eq!(KeyBindings::action_name(BindingAction::Backward), "BACKWARD");
         assert_eq!(KeyBindings::action_name(BindingAction::Left), "LEFT");
@@ -1625,34 +1710,34 @@ mod tests {
         assert_eq!(KeyBindings::action_name(BindingAction::Fire), "FIRE");
         assert_eq!(KeyBindings::action_name(BindingAction::Menu), "MENU");
         let kb = KeyBindings::defaults();
-        assert_eq!(kb.code_for(BindingAction::Forward), 26);
-        assert_eq!(kb.code_for(BindingAction::Menu), 41);
-        assert_eq!(kb.action_for(26), Some(BindingAction::Forward));
-        assert_eq!(kb.action_for(22), Some(BindingAction::Backward));
-        assert_eq!(kb.action_for(44), Some(BindingAction::Fire));
-        assert_eq!(kb.action_for(41), Some(BindingAction::Menu));
+        assert_eq!(kb.code_for(BindingAction::Forward), 41);
+        assert_eq!(kb.code_for(BindingAction::Menu), 54);
+        assert_eq!(kb.action_for(41), Some(BindingAction::Forward));
+        assert_eq!(kb.action_for(37), Some(BindingAction::Backward));
+        assert_eq!(kb.action_for(62), Some(BindingAction::Fire));
+        assert_eq!(kb.action_for(54), Some(BindingAction::Menu));
         assert_eq!(kb.action_for(999), None, "未绑定键码应返回 None");
     }
 
     #[test]
     fn bind_is_mutually_exclusive_with_default_reset() {
         let mut kb = KeyBindings::defaults();
-        // 把 BACKWARD 绑到 W(26)（当前 FORWARD 的键码）→ FORWARD 应复位回默认 W
-        kb.bind(BindingAction::Backward, 26);
-        assert_eq!(kb.code_for(BindingAction::Backward), 26, "BACKWARD 应占用 W");
-        assert_eq!(kb.code_for(BindingAction::Forward), 26, "FORWARD 应复位回默认 26");
+        // 把 BACKWARD 绑到 W(41)（当前 FORWARD 的键码）→ FORWARD 应复位回默认 W
+        kb.bind(BindingAction::Backward, 41);
+        assert_eq!(kb.code_for(BindingAction::Backward), 41, "BACKWARD 应占用 W");
+        assert_eq!(kb.code_for(BindingAction::Forward), 41, "FORWARD 应复位回默认 41");
         assert_eq!(
-            kb.action_for(26),
+            kb.action_for(41),
             Some(BindingAction::Forward),
             "冲突键码应按 Forward→Menu 顺序归属默认动作"
         );
-        // 把 FORWARD 绑到 SPACE(44)（当前 FIRE 的键码）→ FIRE 应复位回默认 SPACE
-        kb.bind(BindingAction::Forward, 44);
-        assert_eq!(kb.code_for(BindingAction::Forward), 44);
-        assert_eq!(kb.code_for(BindingAction::Fire), 44, "FIRE 应复位回默认 44");
+        // 把 FORWARD 绑到 SPACE(62)（当前 FIRE 的键码）→ FIRE 应复位回默认 SPACE
+        kb.bind(BindingAction::Forward, 62);
+        assert_eq!(kb.code_for(BindingAction::Forward), 62);
+        assert_eq!(kb.code_for(BindingAction::Fire), 62, "FIRE 应复位回默认 62");
         // 未冲突动作不受影响
-        assert_eq!(kb.code_for(BindingAction::Right), 7, "RIGHT 应保持 D");
-        assert_eq!(kb.code_for(BindingAction::Reload), 21, "RELOAD 应保持 R");
+        assert_eq!(kb.code_for(BindingAction::Right), 22, "RIGHT 应保持 D");
+        assert_eq!(kb.code_for(BindingAction::Reload), 36, "RELOAD 应保持 R");
     }
 
     #[test]
@@ -1671,12 +1756,16 @@ mod tests {
         hud.begin_rebind(BindingAction::Menu);
         hud.cancel_rebind();
         assert_eq!(hud.rebinding, None, "取消后应清除 rebinding");
-        assert_eq!(hud.key_bindings.code_for(BindingAction::Menu), 41, "取消不应改键");
+        assert_eq!(hud.key_bindings.code_for(BindingAction::Menu), 54, "取消不应改键");
         // 再次 begin 且 complete 时冲突键复位
         hud.begin_rebind(BindingAction::Forward);
-        assert_eq!(hud.complete_rebind(41), Some(BindingAction::Forward));
-        assert_eq!(hud.key_bindings.code_for(BindingAction::Forward), 41);
-        assert_eq!(hud.key_bindings.code_for(BindingAction::Menu), 41, "MENU 应复位回默认 ESC");
+        assert_eq!(hud.complete_rebind(54), Some(BindingAction::Forward));
+        assert_eq!(hud.key_bindings.code_for(BindingAction::Forward), 54);
+        assert_eq!(
+            hud.key_bindings.code_for(BindingAction::Menu),
+            54,
+            "MENU 应复位回默认 ContextMenu"
+        );
     }
 
     #[test]
@@ -1824,11 +1913,13 @@ mod tests {
     }
 
     #[test]
-    fn resolution_cycles_three_options() {
+    fn resolution_cycles_four_options() {
         let mut hud = HudState::new(1280.0, 720.0);
         assert_eq!(hud.resolution(), (1280, 720));
         hud.cycle_resolution();
-        assert_eq!(hud.resolution(), (1600, 900), "1280x720 → 1600x900");
+        assert_eq!(hud.resolution(), (1280, 800), "1280x720 → 1280x800（16:10 档）");
+        hud.cycle_resolution();
+        assert_eq!(hud.resolution(), (1600, 900), "1280x800 → 1600x900");
         hud.cycle_resolution();
         assert_eq!(hud.resolution(), (1920, 1080), "1600x900 → 1920x1080");
         hud.cycle_resolution();
@@ -1883,7 +1974,7 @@ mod tests {
         let mut hud = HudState::new(1280.0, 720.0);
         hud.screen = HudScreen::Start;
         let elems = hud.layout_elements();
-        let ops = "WASD MOVE / MOUSE AIM / LMB FIRE / R RELOAD / TAB CAMERA / ESC SETTINGS";
+        let ops = "WASD MOVE / MOUSE AIM / LMB FIRE / R RELOAD / TAB CAMERA / MENU KEY: SETTINGS";
         assert!(
             elems.iter().any(|e| matches!(
                 e,

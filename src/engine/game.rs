@@ -571,6 +571,7 @@ impl Game {
         self.hud.ammo = self.hud.max_ammo;
         self.hud.reserve = self.firearm.reserve();
         self.hud.settings_open = false;
+        self.hud.confirm_quit = false;
         self.hud.cancel_rebind();
         self.score = 0;
         self.wave = 1;
@@ -697,6 +698,7 @@ impl Game {
             sensitivity: self.hud.sensitivity,
             bindings: self.hud.key_bindings,
             resolution: self.hud.resolution(),
+            resolution_explicit: true, // 保存时总是写 resolution 行，加载后视为显式选择
             quality: self.hud.quality_index as u32,
         }
     }

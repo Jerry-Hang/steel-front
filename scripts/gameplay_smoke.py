@@ -231,7 +231,7 @@ errs = len(re.findall(r" ERROR ", txt))
 print(f"VUID={vuid} fps_min={min(fps) if fps else -1:.1f} fps_max={max(fps) if fps else -1:.1f} "
       f"yaw_count={len(yaws)} pitch_count={len(pitches)} kills={kills} hit_events={hits} "
       f"hp_vals={hp_vals} waves={sorted(set(waves))} panics={panics} errors={errs}", flush=True)
-ok = (vuid == 0 and fps and min(fps) >= 200.0 and len(yaws) >= 2 and len(pitches) >= 2
+ok = (vuid == 0 and fps and min(fps) >= 120.0 and len(yaws) >= 2 and len(pitches) >= 2
       and kills >= 1 and len(hp_vals) >= 2 and len(set(waves)) >= 1 and panics == 0)
 print("ALL-OK" if ok else "FAIL", flush=True)
 sys.exit(0 if ok else 2)

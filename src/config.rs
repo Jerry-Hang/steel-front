@@ -16,6 +16,8 @@ pub struct GameConfig {
     pub bindings: KeyBindings,
     /// 分辨率 (宽, 高)，默认 1280x720（与 ui.rs RESOLUTIONS 选项对齐）
     pub resolution: (u32, u32),
+    /// 配置文件中是否显式保存过 resolution 行（首次运行 = false，用于按显示器宽高比选默认）
+    pub resolution_explicit: bool,
     /// 画质索引（0=LOW / 1=MEDIUM / 2=HIGH，与 ui.rs QUALITY_LABELS 对齐），默认 MEDIUM
     pub quality: u32,
 }
@@ -27,6 +29,7 @@ impl Default for GameConfig {
             sensitivity: 0.5,
             bindings: KeyBindings::defaults(),
             resolution: RESOLUTIONS[0],
+            resolution_explicit: false,
             quality: 1, // MEDIUM
         }
     }
@@ -51,6 +54,8 @@ fn load_from(path: &Path) -> GameConfig {
     let Ok(text) = fs::read_to_string(path) else {
         return cfg;
     };
+    // 键位格式版本：>=1 才解析 bind_* 行（旧版键码是已废弃的 USB HID 码，整体回退默认）
+    let mut bindings_ok = false;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -62,6 +67,7 @@ fn load_from(path: &Path) -> GameConfig {
         let value = value.trim();
         let parse_u32 = |default: u32| value.parse::<u32>().unwrap_or(default);
         match key.trim() {
+            "bindings_version" => bindings_ok = value == "1",
             "volume" => cfg.volume = value.parse::<f32>().unwrap_or(cfg.volume).clamp(0.0, 1.0),
             "sensitivity" => {
                 cfg.sensitivity = value.parse::<f32>().unwrap_or(cfg.sensitivity).clamp(0.0, 1.0);
@@ -73,6 +79,7 @@ fn load_from(path: &Path) -> GameConfig {
                     let h = h.trim().parse::<u32>().unwrap_or(0);
                     if RESOLUTIONS.contains(&(w, h)) {
                         cfg.resolution = (w, h);
+                        cfg.resolution_explicit = true;
                     }
                 }
             }
@@ -80,13 +87,43 @@ fn load_from(path: &Path) -> GameConfig {
                 let max = (QUALITY_LABELS.len() - 1) as u32;
                 cfg.quality = value.parse::<u32>().unwrap_or(cfg.quality).min(max);
             }
-            "bind_forward" => cfg.bindings.bind(BindingAction::Forward, parse_u32(26)),
-            "bind_backward" => cfg.bindings.bind(BindingAction::Backward, parse_u32(22)),
-            "bind_left" => cfg.bindings.bind(BindingAction::Left, parse_u32(4)),
-            "bind_right" => cfg.bindings.bind(BindingAction::Right, parse_u32(7)),
-            "bind_reload" => cfg.bindings.bind(BindingAction::Reload, parse_u32(21)),
-            "bind_fire" => cfg.bindings.bind(BindingAction::Fire, parse_u32(44)),
-            "bind_menu" => cfg.bindings.bind(BindingAction::Menu, parse_u32(41)),
+            // 键码 = winit 0.30 KeyCode 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/
+            // KeyR=36/Space=62/ContextMenu=54），见 ui.rs KeyBindings::defaults
+            "bind_forward" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Forward, parse_u32(41));
+                }
+            }
+            "bind_backward" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Backward, parse_u32(37));
+                }
+            }
+            "bind_left" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Left, parse_u32(19));
+                }
+            }
+            "bind_right" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Right, parse_u32(22));
+                }
+            }
+            "bind_reload" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Reload, parse_u32(36));
+                }
+            }
+            "bind_fire" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Fire, parse_u32(62));
+                }
+            }
+            "bind_menu" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Menu, parse_u32(54));
+                }
+            }
             _ => {}
         }
     }
@@ -112,6 +149,9 @@ fn save_to(path: &Path, cfg: &GameConfig) {
     text.push_str(&format!("sensitivity={:.3}\n", cfg.sensitivity));
     text.push_str(&format!("resolution={}x{}\n", cfg.resolution.0, cfg.resolution.1));
     text.push_str(&format!("quality={}\n", cfg.quality));
+    // 键位格式版本：旧版（无此行）键码是 USB HID 码，与 winit 0.30 KeyCode 序号错位，
+    // 加载时忽略旧 bind_* 行回退默认键位（见 load_from 的 bindings_ok）
+    text.push_str("bindings_version=1\n");
     let rows = [
         ("bind_forward", cfg.bindings.code_for(BindingAction::Forward)),
         ("bind_backward", cfg.bindings.code_for(BindingAction::Backward)),
@@ -145,6 +185,7 @@ mod tests {
         cfg.volume = 0.42;
         cfg.sensitivity = 0.77;
         cfg.resolution = (1600, 900);
+        cfg.resolution_explicit = true; // save 会写 resolution 行，load 后应还原为显式
         cfg.quality = 2;
         cfg.bindings.bind(BindingAction::Forward, 5); // T
         cfg.bindings.bind(BindingAction::Fire, 6); // Y
@@ -174,13 +215,37 @@ mod tests {
         let _ = fs::remove_file(&garbage);
         assert!((cfg.volume - 0.8).abs() < 1e-6, "bad volume line ignored");
         assert!((cfg.sensitivity - 0.25).abs() < 1e-6, "valid sensitivity applied");
-        assert_eq!(cfg.bindings.code_for(BindingAction::Forward), 26, "bad bind ignored");
+        assert_eq!(
+            cfg.bindings.code_for(BindingAction::Forward),
+            41,
+            "bad bind ignored"
+        );
+        assert!(!cfg.resolution_explicit, "非法分辨率不应标记为显式");
         assert_eq!(
             cfg.resolution,
             RESOLUTIONS[0],
             "选项表外的分辨率应回退默认"
         );
         assert_eq!(cfg.quality, 2, "越界画质应 clamp 到最高档");
+    }
+
+    /// bindings_version=1 的配置文件：bind_* 行按 winit 0.30 KeyCode 序号解析
+    #[test]
+    fn bindings_version_1_loads_codes() {
+        let path = std::env::temp_dir().join(format!(
+            "steel_front_cfg_bindv1_{}.cfg",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "bindings_version=1\nbind_forward=38\nbind_menu=31\nbind_fire=zz\n",
+        )
+        .unwrap();
+        let cfg = load_from(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(cfg.bindings.code_for(BindingAction::Forward), 38, "T 应生效");
+        assert_eq!(cfg.bindings.code_for(BindingAction::Menu), 31, "M 应生效");
+        assert_eq!(cfg.bindings.code_for(BindingAction::Fire), 62, "坏行回退默认 SPACE");
     }
 
     /// 分辨率/画质 roundtrip：save 后 load 应还原新字段（临时文件，不碰真实 HOME）
@@ -201,7 +266,8 @@ mod tests {
         assert_eq!(loaded.quality, 2, "画质应 roundtrip");
     }
 
-    /// 旧版配置文件（无 resolution/quality 行）应照常加载旧字段并回退显示默认值
+    /// 旧版配置文件（无 bindings_version，键码是已废弃的 USB HID 码）：
+    /// 键位整体回退默认，音量/灵敏度照常加载，分辨率/画质回退默认
     #[test]
     fn load_tolerates_old_format_without_display_fields() {
         let path = std::env::temp_dir().join(format!(
@@ -214,10 +280,11 @@ mod tests {
         assert!((cfg.volume - 0.3).abs() < 1e-6, "旧格式音量应照常加载");
         assert!((cfg.sensitivity - 0.6).abs() < 1e-6, "旧格式灵敏度应照常加载");
         assert_eq!(
-            cfg.bindings.code_for(BindingAction::Forward),
-            5,
-            "旧格式键位应照常加载"
+            cfg.bindings,
+            KeyBindings::defaults(),
+            "旧格式键位（HID 码）应整体回退默认"
         );
+        assert!(!cfg.resolution_explicit, "旧格式缺 resolution 行");
         assert_eq!(
             cfg.resolution,
             RESOLUTIONS[0],

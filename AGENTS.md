@@ -45,3 +45,17 @@
 - F12 截图读回用 in_flight_fences 等待（vkWaitSemaphores 只接受 timeline 信号量，会 VUID + PNG 不落盘）
 - 光标捕获瞬间 last_cursor 对齐窗口中心 + 512px 跳变守卫，防回中 warp 被当视角位移致自转
 - test.png 四象限调试图导致面劈裂，已换中灰（2026-08-08 修复）
+
+### 输入/键位与分辨率约定（勿回退）
+- 键码一律用 winit 0.30 KeyCode 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/KeyR=36/
+  Space=62/ContextMenu=54/Escape=114），不是 USB HID 码；ui.rs 测试
+  `winit_keycode_indices_match_table` 锁死，winit 升级先跑它
+- config.rs `bindings_version=1`：旧版 HID 键码配置整体忽略回退默认键位（勿删迁移逻辑）
+- 鼠标 Y 方向：camera.look() `pitch -= dy*sens`（winit Y 向下）为标准方向，
+  /tmp/probe_mouse.py X11 实测确认、冒烟瞄准按此方向，禁止再翻 pitch
+- ESC 两段式退出：首次显示提示、再按退出、任意其它键取消（hud.confirm_quit）；
+  ESC 在设置面板打开时仍只负责关闭面板
+- 死亡重开：R（Reload 绑定）或 Enter（系统键兜底）；保留键 ESC/TAB/ENTER/F12/Q/E/N 不可重绑
+- 默认分辨率按主显示器宽高比：16:10 → 1280x800，16:9 及其它 → 1280x720
+  （仅首次运行/配置无 resolution 行时生效；配置显式保存后以配置为准）
+- 冒烟 FPS 阈值 120（默认 1280x800 下 dzn 转译驱动约 165-275 FPS，勿回调到 200）

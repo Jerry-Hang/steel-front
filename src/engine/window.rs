@@ -5,7 +5,7 @@
 
 /// 窗口标题
 pub const WINDOW_TITLE: &str = "Steel Front - Vulkan";
-/// 窗口宽度
+/// 窗口宽度（回退尺寸；实际默认按主显示器宽高比，见 main.rs）
 pub const WINDOW_WIDTH: u32 = 1280;
-/// 窗口高度
+/// 窗口高度（回退尺寸）
 pub const WINDOW_HEIGHT: u32 = 720;

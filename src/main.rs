@@ -25,8 +25,8 @@ use winit::{
 use engine::camera::{Camera, CameraMode, KeyState};
 use engine::game::{Game, GameState, ObstacleKind};
 use engine::renderer::{QualityPreset, Renderer};
-use engine::window::{self, WINDOW_HEIGHT, WINDOW_WIDTH};
-use ui::{BindingAction, RESOLUTIONS};
+use engine::window;
+use ui::{BindingAction, KeyBindings, RESOLUTIONS};
 use winit::window::CursorGrabMode;
 
 /// 单次鼠标位移最大像素：超过视为光标传送伪事件（X 服务端 warp/焦点切换跳变），
@@ -71,6 +71,8 @@ struct GameApp {
     game: Game,
     /// 程序是否正在运行
     running: bool,
+    /// 配置中是否显式保存过分辨率（false = 首次运行，窗口创建时按显示器宽高比选默认）
+    resolution_explicit: bool,
 }
 
 impl GameApp {
@@ -82,11 +84,16 @@ impl GameApp {
         game.hud.volume = cfg.volume;
         game.hud.sensitivity = cfg.sensitivity;
         game.hud.key_bindings = cfg.bindings;
-        // 分辨率/画质索引与 ui.rs 选项表对齐；配置异常值回退默认
-        game.hud.resolution_index = RESOLUTIONS
-            .iter()
-            .position(|&r| r == cfg.resolution)
-            .unwrap_or(0) as u8;
+        // 分辨率索引：显式保存过 → 用配置值；首次运行 → 0（resumed() 按显示器宽高比重选）
+        game.hud.resolution_index = if cfg.resolution_explicit {
+            RESOLUTIONS
+                .iter()
+                .position(|&r| r == cfg.resolution)
+                .unwrap_or(0) as u8
+        } else {
+            0
+        };
+        // 画质索引与 ui.rs 选项表对齐；配置异常值回退默认
         game.hud.quality_index = cfg.quality.min(2) as u8;
         Self {
             window: None,
@@ -104,6 +111,7 @@ impl GameApp {
             last_cam_log: Instant::now(),
             game,
             running: true,
+            resolution_explicit: cfg.resolution_explicit,
         }
     }
 
@@ -252,7 +260,15 @@ impl GameApp {
     /// 渲染一帧
     fn render(&mut self) {
         if let Some(renderer) = &mut self.renderer {
-            let aspect = WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32;
+            // 投影宽高比取实际窗口尺寸（16:10 等非 16:9 分辨率下不拉伸）
+            let aspect = self
+                .window
+                .as_ref()
+                .map(|w| {
+                    let s = w.inner_size();
+                    s.width.max(1) as f32 / s.height.max(1) as f32
+                })
+                .unwrap_or(16.0 / 9.0);
             let view = self.camera.view_matrix();
             // 投影矩阵不翻转 Y：主 shader（triangle.vert.spv）已在 gl_Position.y 上完成
             // Vulkan 翻转，若这里再翻一次会双重翻转导致画面上下颠倒（与 HUD shader 一致）。
@@ -307,10 +323,33 @@ impl ApplicationHandler for GameApp {
             return;
         }
 
-        // ---- 创建窗口 ----
+        // 首次运行（配置无显式分辨率）：按主显示器宽高比选默认
+        // 16:10 → 1280x800，16:9 及其它 → 1280x720
+        if !self.resolution_explicit {
+            let default_res = event_loop
+                .primary_monitor()
+                .map(|m| {
+                    let size = m.size();
+                    let aspect = size.width as f32 / size.height.max(1) as f32;
+                    if (1.5..=1.67).contains(&aspect) {
+                        (1280, 800)
+                    } else {
+                        (1280, 720)
+                    }
+                })
+                .unwrap_or((1280, 720));
+            self.game.hud.resolution_index = RESOLUTIONS
+                .iter()
+                .position(|&r| r == default_res)
+                .unwrap_or(0) as u8;
+            log::info!("默认分辨率: {}x{}", default_res.0, default_res.1);
+        }
+
+        // ---- 创建窗口（尺寸取 HUD 当前分辨率：配置显式值或按显示器选定的默认值）----
+        let (w, h) = self.game.hud.resolution();
         let winit_attr = Window::default_attributes()
             .with_title(window::WINDOW_TITLE)
-            .with_inner_size(winit::dpi::PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+            .with_inner_size(winit::dpi::PhysicalSize::new(w, h));
 
         let window = match event_loop.create_window(winit_attr) {
             Ok(w) => w,
@@ -321,7 +360,7 @@ impl ApplicationHandler for GameApp {
             }
         };
 
-        log::info!("窗口创建成功: {}x{}", WINDOW_WIDTH, WINDOW_HEIGHT);
+        log::info!("窗口创建成功: {}x{}", w, h);
 
         // ---- 初始化 Vulkan 渲染器 ----
         match Renderer::new(&window) {
@@ -337,6 +376,10 @@ impl ApplicationHandler for GameApp {
         }
 
         self.window = Some(window);
+        if let Some(win) = &self.window {
+            let size = win.inner_size();
+            self.game.hud.set_screen_size(size.width as f32, size.height as f32);
+        }
         self.last_frame = Instant::now();
 
         // 应用持久化的分辨率与画质（窗口/渲染器就绪后即时生效）
@@ -371,6 +414,11 @@ impl ApplicationHandler for GameApp {
             } => {
                 let pressed = state == ElementState::Pressed;
 
+                // 退出确认中：任意非 ESC 按键取消待确认退出
+                if pressed && key_code != KeyCode::Escape && self.game.hud.confirm_quit {
+                    self.game.hud.confirm_quit = false;
+                }
+
                 // 开始菜单：任意键（除 ESC）开始游戏
                 if pressed
                     && self.game.state() == GameState::StartMenu
@@ -385,6 +433,9 @@ impl ApplicationHandler for GameApp {
                         if key_code == KeyCode::Escape {
                             log::info!("settings: 取消键位绑定");
                             self.game.cancel_rebind();
+                        } else if KeyBindings::is_reserved(key_code as u32) {
+                            log::info!("settings: 保留键不可绑定 {:?}", key_code);
+                            self.game.cancel_rebind();
                         } else {
                             log::info!("settings: 键位绑定完成 code={:?}", key_code);
                             self.game.complete_rebind(key_code as u32);
@@ -393,15 +444,19 @@ impl ApplicationHandler for GameApp {
                     return;
                 }
 
-                // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭，否则退出
+                // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭；
+                // 否则两段式确认退出（首次显示提示，再按一次才退出，任意其它键取消）
                 if pressed && key_code == KeyCode::Escape {
                     if self.game.settings_open() {
                         log::info!("ESC 关闭设置面板");
                         self.game.toggle_settings();
-                    } else {
-                        log::info!("ESC 键按下，退出程序");
+                    } else if self.game.hud.confirm_quit {
+                        log::info!("ESC 再次按下，确认退出");
                         self.running = false;
                         event_loop.exit();
+                    } else {
+                        log::info!("ESC 按下，再按一次确认退出（任意其它键取消）");
+                        self.game.hud.confirm_quit = true;
                     }
                     return;
                 }
@@ -484,6 +539,9 @@ impl ApplicationHandler for GameApp {
                                     self.game.begin_rebind();
                                 }
                             }
+                        } else if pressed && self.game.state() == GameState::GameOver {
+                            log::info!("game: Enter 重开一局");
+                            self.game.request_restart(&self.camera.position());
                         }
                     }
                     // 设置面板调试补给（N 键补满弹匣）
@@ -652,6 +710,9 @@ impl ApplicationHandler for GameApp {
                     return; // 窗口最小化
                 }
                 log::info!("窗口大小变化: {}x{}", new_size.width, new_size.height);
+                self.game
+                    .hud
+                    .set_screen_size(new_size.width as f32, new_size.height as f32);
                 if let Some(renderer) = &mut self.renderer {
                     let _ = renderer.recreate_swapchain();
                 }
