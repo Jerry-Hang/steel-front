@@ -1905,12 +1905,17 @@ mod tests {
     fn net_loopback_demo_join_roundtrip() {
         let mut demo = Game::init_network_demo().expect("loopback demo should init");
         let mut got_join = false;
-        for _ in 0..10 {
+        // UDP 环回投递可能有毫秒级延迟：带超时轮询（与 net.rs recv_until 同款模式），避免偶发失败
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        while !got_join && std::time::Instant::now() < deadline {
             if let Ok(Some((msg, from))) = demo.server.recv() {
                 if let NetworkMessage::Join { player_id, .. } = &msg {
                     got_join = *player_id == 0;
                     assert!(demo.server.handle_join(from, "local".into()).is_ok());
                 }
+            }
+            if !got_join {
+                std::thread::sleep(std::time::Duration::from_millis(2));
             }
         }
         assert!(got_join, "server should receive the Join sent at init");
