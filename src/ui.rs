@@ -112,6 +112,13 @@ pub enum HudScreen {
     Settings,
 }
 
+/// 分辨率选项（设置面板 RESOLUTION 行循环切换；索引与 config.rs 持久化的 resolution 对齐）
+pub const RESOLUTIONS: [(u32, u32); 3] = [(1280, 720), (1600, 900), (1920, 1080)];
+/// 分辨率显示名（设置面板/日志用，ASCII 大写，位图字体可用）
+pub const RESOLUTION_LABELS: [&str; 3] = ["1280x720", "1600x900", "1920x1080"];
+/// 画质选项（0=LOW / 1=MEDIUM / 2=HIGH；索引 = config.rs 持久化的 quality）
+pub const QUALITY_LABELS: [&str; 3] = ["LOW", "MEDIUM", "HIGH"];
+
 /// 键位绑定动作（枚举顺序 = 设置面板键位行顺序，`selected_action()` 索引映射依赖此顺序）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingAction {
@@ -343,9 +350,13 @@ pub struct HudState {
     pub volume: f32,
     /// 鼠标灵敏度（0..=1，默认 0.5）
     pub sensitivity: f32,
+    /// 分辨率索引（0..=2，对应 RESOLUTIONS；默认 0 = 1280x720）
+    pub resolution_index: u8,
+    /// 画质索引（0..=2，对应 QUALITY_LABELS；默认 1 = MEDIUM）
+    pub quality_index: u8,
     /// 键位配置（默认 WASD + R + ESC + SPACE）
     pub key_bindings: KeyBindings,
-    /// 设置面板当前选中项（0=音量 / 1=灵敏度，Tab 循环）
+    /// 设置面板当前选中项（0=音量 / 1=灵敏度 / 2=分辨率 / 3=画质 / 4..=10=键位，Tab 循环）
     pub settings_selection: u8,
     /// 命中标记剩余显示时间（秒，>0 时准星外圈闪一下）
     pub hit_marker_timer: f32,
@@ -387,6 +398,8 @@ impl HudState {
             settings_open: false,
             volume: 0.8,
             sensitivity: 0.5,
+            resolution_index: 0,
+            quality_index: 1,
             key_bindings: KeyBindings::defaults(),
             settings_selection: 0,
             hit_marker_timer: 0.0,
@@ -781,12 +794,13 @@ impl HudState {
         elems
     }
 
-    /// 设置面板：半透明底 + 标题 + 音量/灵敏度条 + 键位列表 + 操作提示
+    /// 设置面板：半透明底 + 标题 + 音量/灵敏度条 + 分辨率/画质行 + 键位列表 + 操作提示
     ///
     /// 布局规则（左上角原点，像素坐标）：
     /// - 全屏半透明遮罩
     /// - 顶部中央 `SETTINGS` 标题
     /// - 中部两行：`VOLUME` / `SENSITIVITY` 标签 + 右侧按比例填充的条
+    /// - 中部两行：`RESOLUTION` / `QUALITY` 标签 + 右侧当前值文本（Enter 循环切换）
     /// - 中下部键位列表（动作名 + `KeyBindings::label` 键名）
     /// - 底部提示（字体仅 ASCII，意图为：ESC: 返回 / 滚轮: 调整）
     fn settings_elements(&self) -> Vec<HudElement> {
@@ -861,6 +875,34 @@ impl HudState {
                 ratio: *ratio,
             });
         }
+        // 分辨率 / 画质行（右侧显示当前值，Enter 循环切换，与键位行同一套高亮交互）
+        let display_rows = [
+            ("RESOLUTION", RESOLUTION_LABELS[self.resolution_index as usize]),
+            ("QUALITY", QUALITY_LABELS[self.quality_index as usize]),
+        ];
+        for (i, (name, value)) in display_rows.iter().enumerate() {
+            let row = 2 + i as u8; // 0=音量 1=灵敏度 2=分辨率 3=画质
+            let y = start_y + row as f32 * row_h;
+            let selected = row == self.settings_selection;
+            elems.push(HudElement::Text {
+                text: if selected {
+                    format!("> {}", name)
+                } else {
+                    name.to_string()
+                },
+                x: left,
+                y: y + (bar_h - 7.0) * 0.5,
+                color: if selected { Color::YELLOW } else { Color::WHITE },
+                scale: 1.0,
+            });
+            elems.push(HudElement::Text {
+                text: value.to_string(),
+                x: left + label_w,
+                y: y + (bar_h - 7.0) * 0.5,
+                color: Color::YELLOW,
+                scale: 1.0,
+            });
+        }
         // 键位列表（顺序 = BindingAction 枚举顺序，与 selected_action() 索引映射一致）
         let keys = [
             ("FORWARD", self.key_bindings.move_forward),
@@ -871,10 +913,10 @@ impl HudState {
             ("FIRE", self.key_bindings.fire),
             ("MENU", self.key_bindings.menu),
         ];
-        let key_start_y = start_y + 2.0 * row_h + 24.0;
+        let key_start_y = start_y + 4.0 * row_h + 24.0;
         for (i, (name, code)) in keys.iter().enumerate() {
             let y = key_start_y + i as f32 * 18.0;
-            let selected = (2 + i as u8) == self.settings_selection;
+            let selected = (4 + i as u8) == self.settings_selection;
             elems.push(HudElement::Text {
                 text: if selected {
                     format!("> {}", name)
@@ -899,7 +941,7 @@ impl HudState {
             });
         }
         // 底部提示
-        let hint = "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: REBIND";
+        let hint = "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: CHANGE";
         elems.push(HudElement::Text {
             text: hint.to_string(),
             x: w * 0.5 - text_width(hint, 1.2) * 0.5,
@@ -944,6 +986,21 @@ impl HudState {
         self.sensitivity = (self.sensitivity + delta).clamp(0.0, 1.0);
     }
 
+    /// 循环切换分辨率索引（0=1280x720 → 1=1600x900 → 2=1920x1080 → 0，与 RESOLUTIONS 对齐）
+    pub fn cycle_resolution(&mut self) {
+        self.resolution_index = (self.resolution_index + 1) % RESOLUTIONS.len() as u8;
+    }
+
+    /// 当前分辨率 (宽, 高)（与 config.rs 持久化的 resolution 对齐）
+    pub fn resolution(&self) -> (u32, u32) {
+        RESOLUTIONS[self.resolution_index as usize]
+    }
+
+    /// 循环切换画质索引（0=LOW → 1=MEDIUM → 2=HIGH → 0，与 QUALITY_LABELS 对齐）
+    pub fn cycle_quality(&mut self) {
+        self.quality_index = (self.quality_index + 1) % QUALITY_LABELS.len() as u8;
+    }
+
     /// 开始等待重新绑定指定动作（设置面板进入"等待按键"状态）
     ///
     /// 预留：尚未接入 main.rs，由其在设置面板按 ENTER 时接线调用。
@@ -975,19 +1032,19 @@ impl HudState {
         self.rebinding = None;
     }
 
-    /// 循环切换设置面板选中项（9 项：0=音量 / 1=灵敏度 / 2..=8=7 个键位动作，
+    /// 循环切换设置面板选中项（11 项：0=音量 / 1=灵敏度 / 2=分辨率 / 3=画质 / 4..=10=7 个键位动作，
     /// 顺序与 `BindingAction` 及设置面板键位行一致）
     pub fn cycle_settings_selection(&mut self) {
-        self.settings_selection = (self.settings_selection + 1) % 9;
+        self.settings_selection = (self.settings_selection + 1) % 11;
     }
 
-    /// 当前选中项（0=音量 / 1=灵敏度 / 2..=8=键位动作）
+    /// 当前选中项（0=音量 / 1=灵敏度 / 2=分辨率 / 3=画质 / 4..=10=键位动作）
     pub fn settings_selection(&self) -> u8 {
         self.settings_selection
     }
 
-    /// 当前选中项对应的键位动作：`settings_selection` 在 2..=8 时返回
-    /// `2 + i → BindingAction` 第 i 个（与设置面板键位行顺序一致），否则 None
+    /// 当前选中项对应的键位动作：`settings_selection` 在 4..=10 时返回
+    /// `4 + i → BindingAction` 第 i 个（与设置面板键位行顺序一致），否则 None
     ///
     /// 预留：尚未接入 main.rs，由其在设置面板按 ENTER 时决定重绑定哪个动作。
     pub fn selected_action(&self) -> Option<BindingAction> {
@@ -1000,9 +1057,9 @@ impl HudState {
             BindingAction::Fire,
             BindingAction::Menu,
         ];
-        (2..=8)
+        (4..=10)
             .contains(&self.settings_selection)
-            .then(|| ACTIONS[(self.settings_selection - 2) as usize])
+            .then(|| ACTIONS[(self.settings_selection - 4) as usize])
     }
 
     /// 显示命中标记（准星外圈闪一下）
@@ -1658,6 +1715,10 @@ mod tests {
         assert_eq!(hud.selected_action(), None, "0=音量，非键位动作");
         hud.settings_selection = 1;
         assert_eq!(hud.selected_action(), None, "1=灵敏度，非键位动作");
+        hud.settings_selection = 2;
+        assert_eq!(hud.selected_action(), None, "2=分辨率，非键位动作");
+        hud.settings_selection = 3;
+        assert_eq!(hud.selected_action(), None, "3=画质，非键位动作");
         let expected = [
             BindingAction::Forward,
             BindingAction::Backward,
@@ -1668,24 +1729,24 @@ mod tests {
             BindingAction::Menu,
         ];
         for (i, action) in expected.iter().enumerate() {
-            hud.settings_selection = 2 + i as u8;
+            hud.settings_selection = 4 + i as u8;
             assert_eq!(
                 hud.selected_action(),
                 Some(*action),
-                "选中 2+{} 应对应 {:?}",
+                "选中 4+{} 应对应 {:?}",
                 i,
                 action
             );
         }
-        hud.settings_selection = 9;
+        hud.settings_selection = 11;
         assert_eq!(hud.selected_action(), None, "越界应返回 None");
     }
 
     #[test]
-    fn cycle_settings_selection_wraps_9_rows() {
+    fn cycle_settings_selection_wraps_11_rows() {
         let mut hud = HudState::new(1280.0, 720.0);
         assert_eq!(hud.settings_selection(), 0);
-        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 0] {
+        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0] {
             hud.cycle_settings_selection();
             assert_eq!(hud.settings_selection(), expected);
         }
@@ -1710,7 +1771,7 @@ mod tests {
     fn settings_key_rows_selectable() {
         let mut hud = HudState::new(1280.0, 720.0);
         hud.screen = HudScreen::Settings;
-        hud.settings_selection = 4; // 2+2 → LEFT
+        hud.settings_selection = 6; // 4+2 → LEFT
         let elems = hud.settings_elements();
         assert!(find_text(&elems, "> LEFT").is_some(), "选中键位行应有 '> ' 前缀");
         assert!(
@@ -1749,8 +1810,71 @@ mod tests {
         hud.screen = HudScreen::Settings;
         let elems = hud.settings_elements();
         assert!(
-            find_text(&elems, "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: REBIND").is_some(),
-            "底部提示应说明重绑入口"
+            find_text(&elems, "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: CHANGE").is_some(),
+            "底部提示应说明调整入口"
+        );
+    }
+
+    #[test]
+    fn settings_defaults_resolution_and_quality() {
+        let hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.resolution_index, 0, "默认分辨率索引应为 0");
+        assert_eq!(hud.resolution(), (1280, 720), "默认分辨率应为 1280x720");
+        assert_eq!(hud.quality_index, 1, "默认画质应为 MEDIUM");
+    }
+
+    #[test]
+    fn resolution_cycles_three_options() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.resolution(), (1280, 720));
+        hud.cycle_resolution();
+        assert_eq!(hud.resolution(), (1600, 900), "1280x720 → 1600x900");
+        hud.cycle_resolution();
+        assert_eq!(hud.resolution(), (1920, 1080), "1600x900 → 1920x1080");
+        hud.cycle_resolution();
+        assert_eq!(hud.resolution(), (1280, 720), "循环应回到首项");
+    }
+
+    #[test]
+    fn quality_cycles_three_options() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        assert_eq!(hud.quality_index, 1, "默认 MEDIUM");
+        hud.cycle_quality();
+        assert_eq!(hud.quality_index, 2, "MEDIUM → HIGH");
+        hud.cycle_quality();
+        assert_eq!(hud.quality_index, 0, "HIGH → LOW");
+        hud.cycle_quality();
+        assert_eq!(hud.quality_index, 1, "LOW → MEDIUM");
+    }
+
+    #[test]
+    fn settings_shows_resolution_and_quality_rows() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.screen = HudScreen::Settings;
+        hud.settings_selection = 2; // RESOLUTION 行
+        let elems = hud.settings_elements();
+        assert!(
+            find_text(&elems, "> RESOLUTION").is_some(),
+            "选中分辨率行应有 '> ' 前缀"
+        );
+        assert!(
+            find_text(&elems, "1280x720").is_some(),
+            "分辨率行应显示当前值"
+        );
+        assert!(
+            find_text(&elems, "MEDIUM").is_some(),
+            "画质行应显示当前值 MEDIUM"
+        );
+        // 切到 QUALITY 行：高亮跟随，分辨率行前缀消失
+        hud.settings_selection = 3;
+        let elems = hud.settings_elements();
+        assert!(
+            find_text(&elems, "> QUALITY").is_some(),
+            "选中画质行应有 '> ' 前缀"
+        );
+        assert!(
+            find_text(&elems, "> RESOLUTION").is_none(),
+            "未选中分辨率行不应有前缀"
         );
     }
 

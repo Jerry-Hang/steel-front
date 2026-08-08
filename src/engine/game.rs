@@ -565,6 +565,8 @@ impl Game {
             volume: self.hud.volume,
             sensitivity: self.hud.sensitivity,
             bindings: self.hud.key_bindings,
+            resolution: self.hud.resolution(),
+            quality: self.hud.quality_index as u32,
         }
     }
 

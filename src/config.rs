@@ -6,14 +6,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::ui::{BindingAction, KeyBindings};
+use crate::ui::{BindingAction, KeyBindings, QUALITY_LABELS, RESOLUTIONS};
 
-/// 可持久化的配置子集（对应 HudState 中 volume/sensitivity/key_bindings 三个字段）
+/// 可持久化的配置子集（对应 HudState 中 volume/sensitivity/key_bindings/resolution_index/quality_index）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GameConfig {
     pub volume: f32,
     pub sensitivity: f32,
     pub bindings: KeyBindings,
+    /// 分辨率 (宽, 高)，默认 1280x720（与 ui.rs RESOLUTIONS 选项对齐）
+    pub resolution: (u32, u32),
+    /// 画质索引（0=LOW / 1=MEDIUM / 2=HIGH，与 ui.rs QUALITY_LABELS 对齐），默认 MEDIUM
+    pub quality: u32,
 }
 
 impl Default for GameConfig {
@@ -22,6 +26,8 @@ impl Default for GameConfig {
             volume: 0.8,
             sensitivity: 0.5,
             bindings: KeyBindings::defaults(),
+            resolution: RESOLUTIONS[0],
+            quality: 1, // MEDIUM
         }
     }
 }
@@ -60,6 +66,20 @@ fn load_from(path: &Path) -> GameConfig {
             "sensitivity" => {
                 cfg.sensitivity = value.parse::<f32>().unwrap_or(cfg.sensitivity).clamp(0.0, 1.0);
             }
+            "resolution" => {
+                // 格式 "宽x高"；必须落在 ui.rs 选项表内才采纳（缺失/非法时保持默认）
+                if let Some((w, h)) = value.split_once('x') {
+                    let w = w.trim().parse::<u32>().unwrap_or(0);
+                    let h = h.trim().parse::<u32>().unwrap_or(0);
+                    if RESOLUTIONS.contains(&(w, h)) {
+                        cfg.resolution = (w, h);
+                    }
+                }
+            }
+            "quality" => {
+                let max = (QUALITY_LABELS.len() - 1) as u32;
+                cfg.quality = value.parse::<u32>().unwrap_or(cfg.quality).min(max);
+            }
             "bind_forward" => cfg.bindings.bind(BindingAction::Forward, parse_u32(26)),
             "bind_backward" => cfg.bindings.bind(BindingAction::Backward, parse_u32(22)),
             "bind_left" => cfg.bindings.bind(BindingAction::Left, parse_u32(4)),
@@ -90,6 +110,8 @@ fn save_to(path: &Path, cfg: &GameConfig) {
     text.push_str("# Steel Front config (auto-generated)\n");
     text.push_str(&format!("volume={:.3}\n", cfg.volume));
     text.push_str(&format!("sensitivity={:.3}\n", cfg.sensitivity));
+    text.push_str(&format!("resolution={}x{}\n", cfg.resolution.0, cfg.resolution.1));
+    text.push_str(&format!("quality={}\n", cfg.quality));
     let rows = [
         ("bind_forward", cfg.bindings.code_for(BindingAction::Forward)),
         ("bind_backward", cfg.bindings.code_for(BindingAction::Backward)),
@@ -122,6 +144,8 @@ mod tests {
         let mut cfg = GameConfig::default();
         cfg.volume = 0.42;
         cfg.sensitivity = 0.77;
+        cfg.resolution = (1600, 900);
+        cfg.quality = 2;
         cfg.bindings.bind(BindingAction::Forward, 5); // T
         cfg.bindings.bind(BindingAction::Fire, 6); // Y
         save_to(&path, &cfg);
@@ -140,12 +164,65 @@ mod tests {
         assert_eq!(cfg, GameConfig::default());
         // 含坏行的文件：只认合法行
         let garbage = std::env::temp_dir().join("steel_front_cfg_garbage.cfg");
-        fs::write(&garbage, "not a config\nvolume=abc\nsensitivity=0.25\nbind_forward=zz\n")
-            .unwrap();
+        fs::write(
+            &garbage,
+            "not a config\nvolume=abc\nsensitivity=0.25\nbind_forward=zz\n\
+             resolution=999x999\nquality=99\n",
+        )
+        .unwrap();
         let cfg = load_from(&garbage);
         let _ = fs::remove_file(&garbage);
         assert!((cfg.volume - 0.8).abs() < 1e-6, "bad volume line ignored");
         assert!((cfg.sensitivity - 0.25).abs() < 1e-6, "valid sensitivity applied");
         assert_eq!(cfg.bindings.code_for(BindingAction::Forward), 26, "bad bind ignored");
+        assert_eq!(
+            cfg.resolution,
+            RESOLUTIONS[0],
+            "选项表外的分辨率应回退默认"
+        );
+        assert_eq!(cfg.quality, 2, "越界画质应 clamp 到最高档");
+    }
+
+    /// 分辨率/画质 roundtrip：save 后 load 应还原新字段（临时文件，不碰真实 HOME）
+    #[test]
+    fn display_fields_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "steel_front_cfg_display_{}.cfg",
+            std::process::id()
+        ));
+        let mut cfg = GameConfig::default();
+        cfg.resolution = (1920, 1080);
+        cfg.quality = 2;
+        save_to(&path, &cfg);
+        let loaded = load_from(&path);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("cfg.tmp"));
+        assert_eq!(loaded.resolution, (1920, 1080), "分辨率应 roundtrip");
+        assert_eq!(loaded.quality, 2, "画质应 roundtrip");
+    }
+
+    /// 旧版配置文件（无 resolution/quality 行）应照常加载旧字段并回退显示默认值
+    #[test]
+    fn load_tolerates_old_format_without_display_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "steel_front_cfg_old_{}.cfg",
+            std::process::id()
+        ));
+        fs::write(&path, "volume=0.3\nsensitivity=0.6\nbind_forward=5\n").unwrap();
+        let cfg = load_from(&path);
+        let _ = fs::remove_file(&path);
+        assert!((cfg.volume - 0.3).abs() < 1e-6, "旧格式音量应照常加载");
+        assert!((cfg.sensitivity - 0.6).abs() < 1e-6, "旧格式灵敏度应照常加载");
+        assert_eq!(
+            cfg.bindings.code_for(BindingAction::Forward),
+            5,
+            "旧格式键位应照常加载"
+        );
+        assert_eq!(
+            cfg.resolution,
+            RESOLUTIONS[0],
+            "旧格式缺 resolution 行应回退默认"
+        );
+        assert_eq!(cfg.quality, 1, "旧格式缺 quality 行应回退默认");
     }
 }
