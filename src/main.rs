@@ -58,6 +58,8 @@ struct GameApp {
     last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
     last_frame: Instant,
+    /// 上一帧 update+render 总耗时（微秒，性能日志用）
+    last_cycle_us: u64,
     /// 是否请求开火（Space 按下置位，update 消费）
     fire_requested: bool,
     /// 光标是否已捕获（Playing 下鼠标视角）
@@ -112,6 +114,7 @@ impl GameApp {
             right_dragging: false,
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
+            last_cycle_us: 0,
             fire_requested: false,
             cursor_captured: false,
             cursor_locked: false,
@@ -169,11 +172,12 @@ impl GameApp {
         if self.last_cam_log.elapsed().as_secs_f32() >= 1.0 {
             let (yaw, pitch, dist) = self.camera.orbit_params();
             log::info!(
-                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?}",
+                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} cycle_us={}",
                 yaw.to_degrees(),
                 pitch.to_degrees(),
                 dist,
-                self.camera.mode
+                self.camera.mode,
+                self.last_cycle_us
             );
             self.last_cam_log = Instant::now();
         }
@@ -810,11 +814,11 @@ impl ApplicationHandler for GameApp {
             }
         }
 
-        // 更新逻辑（相机、物理等）
+        // 更新逻辑（相机、物理等）+ 渲染（记录周期耗时供性能定位）
+        let cycle_start = Instant::now();
         self.update();
-
-        // 渲染当前帧
         self.render();
+        self.last_cycle_us = cycle_start.elapsed().as_micros() as u64;
     }
 }
 

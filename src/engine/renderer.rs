@@ -476,6 +476,8 @@ pub struct Renderer {
     current_frame: usize,
     max_frames_in_flight: usize,
     first_frame_done: bool,
+    /// 上一帧 render() 总耗时（微秒，性能日志用）
+    last_frame_us: u64,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
@@ -494,8 +496,10 @@ pub struct Renderer {
     instance_mapped: Vec<*mut std::ffi::c_void>,
     /// 全量实例（CPU 侧保留，每帧剔除后压缩上传）
     instances: Vec<InstanceData>,
-    /// 剔除后可见实例（每帧复用，避免重新分配）
-    culled: Vec<InstanceData>,
+    /// 剔除后可见实例索引（4B/个，上传时直接从 instances 拷贝 80B）
+    culled: Vec<u32>,
+    /// 每实例包围球半径（创建时预算，剔除循环查表免每帧 sqrt）
+    instance_radii: Vec<f32>,
     /// 世界障碍 marker（关卡切换时由 main.rs 设置；独立于实例场，见 MARKER_SLOT_BASE）
     markers: Vec<InstanceData>,
     /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
@@ -804,6 +808,7 @@ impl Renderer {
             current_frame: 0,
             max_frames_in_flight: 2,
             first_frame_done: false,
+            last_frame_us: 0,
             vertex_buffer: vk::Buffer::null(),
             vertex_buffer_memory: vk::DeviceMemory::null(),
             index_buffer: vk::Buffer::null(),
@@ -818,6 +823,7 @@ impl Renderer {
             instance_mapped: Vec::new(),
             instances: Vec::new(),
             culled: Vec::with_capacity(INSTANCE_COUNT as usize),
+            instance_radii: Vec::with_capacity(INSTANCE_COUNT as usize),
             markers: Vec::new(),
             last_marker_near: 0,
             last_marker_far: 0,
@@ -2229,6 +2235,13 @@ impl Renderer {
                 let z = (iz as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
                 let y = terrain_height(x, z) - 0.05;
                 let model = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
+                // 半径 = 0.5 * max(三轴列长度)；预算一次供剔除查表（纯平移时恒 0.5）
+                let r = 0.5 * model
+                    .x_axis
+                    .length()
+                    .max(model.y_axis.length())
+                    .max(model.z_axis.length());
+                self.instance_radii.push(r);
                 self.instances.push(InstanceData {
                     model: model.to_cols_array(),
                     tint: [0.7, 0.7, 0.7, 1.0],
@@ -2349,8 +2362,7 @@ impl Renderer {
     /// 每帧上传世界障碍 marker 到实例 buffer 的 MARKER_SLOT_BASE 之后区域
     /// （跳过 65536 identity slot，见 MARKER_SLOT_BASE 注释），返回 (近档, 远档) 计数。
     /// marker 量小（≤64），不做视锥剔除，仅按距离分近/远档。
-    fn upload_markers(&mut self, view: glam::Mat4) -> (u32, u32) {
-        let cam_pos = view.inverse().w_axis.truncate();
+    fn upload_markers(&mut self, cam_pos: glam::Vec3) -> (u32, u32) {
         let slot = match self.instance_mapped.get(self.current_frame) {
             Some(&p) if !p.is_null() => p as *mut u8,
             _ => return (0, 0),
@@ -2400,37 +2412,20 @@ impl Renderer {
     /// 每帧视锥剔除 + 距离 LOD 分档：
     /// 可见实例按 [近档(d<LOD_DISTANCE)][远档] 连续压缩上传到当前帧 slot，
     /// 返回 (near, far) 两个档的实例数（近档在前，远档紧跟其后）。
-    fn cull_and_upload(&mut self, view: glam::Mat4, proj: glam::Mat4) -> (u32, u32) {
+    fn cull_and_upload(
+        &mut self,
+        view: glam::Mat4,
+        proj: glam::Mat4,
+        cam_pos: glam::Vec3,
+    ) -> (u32, u32) {
         let planes = Self::extract_frustum_planes(view, proj);
-        // 相机世界位置（view 为刚体变换，其逆矩阵的平移列即相机坐标）
-        let cam_pos = view.inverse().w_axis.truncate();
         self.culled.clear();
 
-        for inst in &self.instances {
-            // 球心 = model 平移列；半径 = 0.5 * max(三轴列向量长度)
-            let center = [
-                inst.model[12],
-                inst.model[13],
-                inst.model[14],
-            ];
-            let ax = [
-                inst.model[0],
-                inst.model[1],
-                inst.model[2],
-            ];
-            let ay = [
-                inst.model[4],
-                inst.model[5],
-                inst.model[6],
-            ];
-            let az = [
-                inst.model[8],
-                inst.model[9],
-                inst.model[10],
-            ];
-            let len = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-            let radius = 0.5 * len(ax).max(len(ay)).max(len(az));
-
+        // 单遍剔除：半径查表（创建时预算），可见实例只存索引（4B）避免 80B 中转拷贝
+        for (i, inst) in self.instances.iter().enumerate() {
+            // 球心 = model 平移列
+            let center = [inst.model[12], inst.model[13], inst.model[14]];
+            let radius = self.instance_radii[i];
             let mut visible = true;
             for p in &planes {
                 // dot(n, c) + d < -r 即剔除
@@ -2441,7 +2436,7 @@ impl Renderer {
                 }
             }
             if visible {
-                self.culled.push(*inst);
+                self.culled.push(i as u32);
             }
         }
 
@@ -2451,11 +2446,13 @@ impl Renderer {
             _ => return (0, 0),
         };
 
-        // 近档区（d < 分界距离；分界随画质预设变化，Medium 与原 LOD_DISTANCE 一致）
+        // 单遍分档上传：近档写前段、远档紧跟其后（偏移 = near + far），距离²只算一次
         let near_sq = quality_params(self.quality).instance_lod_distance;
         let near_sq = near_sq * near_sq;
         let mut near_count = 0u32;
-        for inst in &self.culled {
+        let mut far_count = 0u32;
+        for &idx in &self.culled {
+            let inst = &self.instances[idx as usize];
             let dx = inst.model[12] - cam_pos.x;
             let dy = inst.model[13] - cam_pos.y;
             let dz = inst.model[14] - cam_pos.z;
@@ -2468,16 +2465,7 @@ impl Renderer {
                     );
                 }
                 near_count += 1;
-            }
-        }
-
-        // 远档区（紧跟近档区之后，偏移 = near_count * stride）
-        let mut far_count = 0u32;
-        for inst in &self.culled {
-            let dx = inst.model[12] - cam_pos.x;
-            let dy = inst.model[13] - cam_pos.y;
-            let dz = inst.model[14] - cam_pos.z;
-            if dx * dx + dy * dy + dz * dz >= near_sq {
+            } else {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         inst as *const InstanceData as *const u8,
@@ -3438,6 +3426,7 @@ impl Renderer {
     // ============================================================
 
     pub fn render(&mut self, view: glam::Mat4, proj: glam::Mat4) -> Result<(), String> {
+        let frame_start = Instant::now();
         let fence = self.in_flight_fences[self.current_frame];
         unsafe {
             self.device
@@ -3472,10 +3461,12 @@ impl Renderer {
         }
 
         // ---- 每帧视锥剔除：可见实例压缩上传到当前帧 slot 的 HOST_VISIBLE buffer ----
+        // 相机世界位置（view 为刚体变换，其逆矩阵的平移列即相机坐标），每帧只算一次
+        let cam_pos = view.inverse().w_axis.truncate();
         let cull_start = Instant::now();
-        let (near_count, far_count) = self.cull_and_upload(view, proj);
+        let (near_count, far_count) = self.cull_and_upload(view, proj, cam_pos);
         // ---- 世界障碍 marker：独立槽位上传（见 MARKER_SLOT_BASE），计数供 draw call 使用 ----
-        let (marker_near, marker_far) = self.upload_markers(view);
+        let (marker_near, marker_far) = self.upload_markers(cam_pos);
         self.last_marker_near = marker_near;
         self.last_marker_far = marker_far;
         let cull_us = cull_start.elapsed().as_micros() as u64;
@@ -3483,7 +3474,6 @@ impl Renderer {
         self.last_far_count = far_count;
 
         // ---- 地形网格 LOD：按相机到地形中心地面距离选级，过渡带内 morph 高度 ----
-        let cam_pos = view.inverse().w_axis.truncate();
         let terrain_dist = (cam_pos.x * cam_pos.x + cam_pos.z * cam_pos.z).sqrt();
         let quality = quality_params(self.quality);
         let (terrain_lod, terrain_blend) = terrain_lod_blend_with_params(terrain_dist, quality);
@@ -3501,12 +3491,13 @@ impl Renderer {
                 0.0
             };
             log::info!(
-                "visible={}/{} near={} far={} cull_us={} fps={:.1} terrain_lod={} blend={:.3} quality={}",
+                "visible={}/{} near={} far={} cull_us={} frame_us={} fps={:.1} terrain_lod={} blend={:.3} quality={}",
                 near_count + far_count,
                 INSTANCE_COUNT,
                 near_count,
                 far_count,
                 cull_us,
+                self.last_frame_us,
                 fps,
                 terrain_lod.name(),
                 terrain_blend,
@@ -3622,6 +3613,7 @@ impl Renderer {
             return Err(format!("截图失败: {}", e));
         }
 
+        self.last_frame_us = frame_start.elapsed().as_micros() as u64;
         self.current_frame = (self.current_frame + 1) % self.max_frames_in_flight;
         Ok(())
     }
