@@ -14,7 +14,7 @@ use crate::net::{Client, NetworkMessage, PlayerState, Server};
 use super::camera::{Camera, CameraMode};
 use super::ai::{
     find_cover_points, find_path, flank_goal, should_flank, wave_profile, GridMap, GridPos,
-    NpcPerception, NpcState, NpcStateMachine,
+    NpcPerception, NpcState, NpcStateMachine, WaveKind,
 };
 use super::physics::{self, Body, CollisionEvent, CollisionListener, PlayerBody, Vec3 as Pv};
 use super::renderer::terrain_height_at;
@@ -415,6 +415,10 @@ pub struct Game {
     score: u64,
     /// 下一个 NPC 全局 id（出生用，保证巡逻相位唯一）
     next_npc_id: u32,
+    /// 当前波开始时间（秒；援军波计时基准，spawn_wave 时重置）
+    wave_started_at: f32,
+    /// 本波援军是否已触发（每波重置，防止重复补怪）
+    reinforcement_done: bool,
     /// 上次状态日志时间（1 秒一条 game: wave=...）
     last_status_log: f32,
 }
@@ -463,6 +467,8 @@ impl Game {
             last_dt: 0.0,
             event_buf,
             last_event_log_time: 0.0,
+            wave_started_at: 0.0,
+            reinforcement_done: false,
             firearm: Firearm::new(
                 ProjectileWeapon::new("M1 Rifle", 25.0, 3.0, 200.0, 60.0, 5.0),
                 30,
@@ -1219,6 +1225,33 @@ impl Game {
     ///
     /// 跑远的存活 NPC 仍留在列表里，不算清空（必须击杀全部）。
     fn update_waves(&mut self, dt: f32, player: &glam::Vec3) {
+        // 援军波：波开始后 reinforcement_at 秒补怪 1..=2 只；波已清空则不再补（清波条件不变）
+        let profile = wave_profile(self.effective_wave(self.wave));
+        if !self.reinforcement_done
+            && profile.kind == WaveKind::Reinforced
+            && !self.npcs.is_empty()
+            && self.time - self.wave_started_at >= profile.reinforcement_at.unwrap_or(f32::MAX)
+        {
+            self.reinforcement_done = true;
+            let slot_base = profile.count;
+            let divisor = profile.count.max(1);
+            for k in 0..profile.reinforcement_count {
+                self.spawn_npc_ring(
+                    player,
+                    slot_base + k,
+                    divisor,
+                    self.wave,
+                    profile.speed,
+                    profile.hp,
+                    profile.attack_range,
+                );
+            }
+            log::info!(
+                "wave: reinforcement +{} on wave {}",
+                profile.reinforcement_count,
+                self.wave
+            );
+        }
         if self.npcs.is_empty() {
             if self.wave_timer <= 0.0 {
                 self.wave_timer = WAVE_INTERMISSION;
@@ -1253,8 +1286,11 @@ impl Game {
 
     /// 生成第 n 波敌人：数量/速度/血量随波次递进，环形出生在玩家周围。
     ///
-    /// 出生前清掉残留存活 NPC，保证新旧波不共存。
+    /// 出生前清掉残留存活 NPC，保证新旧波不共存；
+    /// Boss 波最后一只为主怪（高血量/慢速/攻击距离略长，见 wave_profile）；援军波重置补怪计时。
     fn spawn_wave(&mut self, n: u32, player: &glam::Vec3) {
+        // 同步波次号：update_waves/update_ai 都按 self.wave 取 profile，直接调用时也必须一致
+        self.wave = n;
         if !self.npcs.is_empty() {
             log::info!(
                 "wave: purged {} leftover npcs before wave {}",
@@ -1270,51 +1306,86 @@ impl Game {
         let speed = profile.speed;
         let hp = profile.hp;
         let attack_range = profile.attack_range;
-        let tau = std::f32::consts::TAU;
         for i in 0..count {
-            let angle = i as f32 * (tau / count as f32) + n as f32 * 0.37;
-            let radius = 40.0 + 40.0 * ((i as u32 * 7 + n * 3) % 5) as f32 / 4.0;
-            let x = (player.x + angle.cos() * radius).clamp(-250.0, 250.0);
-            let z = (player.z + angle.sin() * radius).clamp(-250.0, 250.0);
-            // 出生点避开障碍盒（网格阻挡格）：沿径向向外推，最多 8 步（每步 4m），确定性
-            let mut sx = x;
-            let mut sz = z;
-            for _ in 0..8 {
-                if self.grid.is_passable(world_to_grid(sx, sz)) {
-                    break;
-                }
-                let d = (sx * sx + sz * sz).sqrt().max(1.0);
-                sx += sx / d * 4.0;
-                sz += sz / d * 4.0;
+            // Boss 波最后一只为主怪：替换常规小怪，max_hp 大 → 渲染侧体型/外观体现
+            let (spd, hpx, rng) = match profile.boss {
+                Some(b) if i + 1 == count => (b.speed, b.hp, b.attack_range),
+                _ => (speed, hp, attack_range),
+            };
+            let id = self.spawn_npc_ring(player, i as u32, count as u32, n, spd, hpx, rng);
+            if profile.boss.is_some() && i + 1 == count {
+                log::info!(
+                    "wave: boss #{} spawn (hp={:.0} speed={:.1} attack={:.0})",
+                    id,
+                    hpx,
+                    spd,
+                    rng
+                );
             }
-            let x = sx.clamp(-250.0, 250.0);
-            let z = sz.clamp(-250.0, 250.0);
-            let id = self.next_npc_id as usize;
-            self.next_npc_id += 1;
-            let y = terrain_height_at(x, z);
-            log::info!("wave: npc #{} spawn ({:.1}, {:.1}, {:.1})", id, x, y, z);
-            self.npcs.push(Npc {
-                id,
-                position: [x, y, z],
-                speed,
-                attack_range,
-                home: [x, z],
-                state_machine: NpcStateMachine::new(),
-                perception: NpcPerception::default(),
-                path: Vec::new(),
-                path_index: 0,
-                hp,
-                max_hp: hp,
-            });
         }
+        // 援军波计时基准：波开始时间 + 补怪标志重置
+        self.wave_started_at = self.time;
+        self.reinforcement_done = false;
         log::info!(
-            "wave: wave {} spawned {} enemies (speed={:.1} hp={:.0} effective={})",
+            "wave: wave {} spawned {} enemies (kind={:?} total={} speed={:.1} hp={:.0} effective={})",
             n,
             count,
+            profile.kind,
+            profile.total_count,
             speed,
             hp,
             effective
         );
+    }
+
+    /// 环形出生一只 NPC：按 `slot/divisor` 均分角度 + 波次相位，半径 40..80m 确定性抖动，
+    /// 出生点避开障碍格（沿径向外推最多 8 步，每步 4m）。返回新 NPC id。
+    fn spawn_npc_ring(
+        &mut self,
+        player: &glam::Vec3,
+        slot: u32,
+        divisor: u32,
+        wave_n: u32,
+        speed: f32,
+        hp: f32,
+        attack_range: f32,
+    ) -> usize {
+        let tau = std::f32::consts::TAU;
+        let angle = slot as f32 * (tau / divisor.max(1) as f32) + wave_n as f32 * 0.37;
+        let radius = 40.0 + 40.0 * ((slot * 7 + wave_n * 3) % 5) as f32 / 4.0;
+        let x = (player.x + angle.cos() * radius).clamp(-250.0, 250.0);
+        let z = (player.z + angle.sin() * radius).clamp(-250.0, 250.0);
+        // 出生点避开障碍盒（网格阻挡格）：沿径向向外推，最多 8 步（每步 4m），确定性
+        let mut sx = x;
+        let mut sz = z;
+        for _ in 0..8 {
+            if self.grid.is_passable(world_to_grid(sx, sz)) {
+                break;
+            }
+            let d = (sx * sx + sz * sz).sqrt().max(1.0);
+            sx += sx / d * 4.0;
+            sz += sz / d * 4.0;
+        }
+        let x = sx.clamp(-250.0, 250.0);
+        let z = sz.clamp(-250.0, 250.0);
+        let id = self.next_npc_id as usize;
+        self.next_npc_id += 1;
+        let y = terrain_height_at(x, z);
+        log::info!("wave: npc #{} spawn ({:.1}, {:.1}, {:.1})", id, x, y, z);
+        self.npcs.push(Npc {
+            id,
+            position: [x, y, z],
+            speed,
+            attack_range,
+            home: [x, z],
+            state_machine: NpcStateMachine::new(),
+            perception: NpcPerception::default(),
+            path: Vec::new(),
+            path_index: 0,
+            hp,
+            max_hp: hp,
+        });
+        id
     }
 
     /// 推进 NPC：感知 → 状态机 → A* 路径 → 移动 → 地形高度
@@ -1363,6 +1434,8 @@ impl Game {
             );
         }
         // 攻击态 NPC 对玩家造成伤害（1 秒一次），驱动 HUD 血条
+        // 伤害值取当前有效波次的 dps（Boss 波更高，见 wave_profile）
+        let dps = wave_profile(self.effective_wave(self.wave)).dps;
         if self.time - self.last_damage_time >= 1.0
             && self.game_state == GameState::Playing
             && self
@@ -1371,7 +1444,7 @@ impl Game {
                 .any(|n| n.state_machine.state() == NpcState::Attack)
             && self.hud.health > 0.0
         {
-            self.hud.health = (self.hud.health - 5.0).max(0.0);
+            self.hud.health = (self.hud.health - dps).max(0.0);
             self.last_damage_time = self.time;
             if self.hud.health <= 0.0 {
                 self.game_state = GameState::GameOver;
@@ -1968,6 +2041,92 @@ mod tests {
             assert!((npc.max_hp - p.hp).abs() < 1e-6, "血量");
             assert!((npc.attack_range - p.attack_range).abs() < 1e-6, "攻击距离");
         }
+    }
+
+    /// 特殊波次：Boss 波最后一只为主怪（高血量/慢速/攻击距离略长），其余仍按 profile
+    #[test]
+    fn boss_wave_spawns_slow_tanky_elite() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.spawn_wave(5, &glam::Vec3::ZERO);
+        let p = wave_profile(5);
+        assert_eq!(p.kind, WaveKind::Boss);
+        assert_eq!(game.npcs.len(), p.count as usize, "Boss 波数量仍按 count");
+        let boss = game.npcs.last().unwrap();
+        let b = p.boss.expect("Boss 波应有主怪参数");
+        assert!((boss.max_hp - b.hp).abs() < 1e-6, "主怪血量");
+        assert!((boss.speed - b.speed).abs() < 1e-6, "主怪速度");
+        assert!((boss.attack_range - b.attack_range).abs() < 1e-6, "主怪攻击距离");
+        for npc in game.npcs.iter().take(game.npcs.len() - 1) {
+            assert!((npc.max_hp - p.hp).abs() < 1e-6, "小怪血量按 profile");
+            assert!(npc.speed > boss.speed, "主怪应慢于小怪");
+        }
+    }
+
+    /// 特殊波次：援军波在波开始 1.5s 后补怪 1..=2 只，且只触发一次
+    #[test]
+    fn reinforcement_wave_spawns_mid_wave() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.spawn_wave(3, &glam::Vec3::ZERO);
+        let p = wave_profile(3);
+        assert_eq!(p.kind, WaveKind::Reinforced);
+        assert_eq!(game.npcs.len(), p.count as usize, "援军补怪前数量 = count");
+        // 推进 2 秒：1.5s 处应触发补怪
+        for _ in 0..120 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert!(game.reinforcement_done, "援军应已触发");
+        assert_eq!(
+            game.npcs.len(),
+            (p.count + p.reinforcement_count) as usize,
+            "补怪后数量 = count + reinforcement_count"
+        );
+        // 再推进 1 秒：不应二次补怪
+        let before = game.npcs.len();
+        for _ in 0..60 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert_eq!(game.npcs.len(), before, "援军只触发一次");
+    }
+
+    /// 特殊波次：清波条件不变（全歼才算清空），Boss/援军波后波次推进正常
+    #[test]
+    fn special_waves_keep_clear_and_progress() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        // 常规波（波 2）：清掉当前 npc 后应正常推进到波 3
+        game.spawn_wave(2, &glam::Vec3::ZERO);
+        assert_eq!(game.wave, 2);
+        game.npcs.clear();
+        for _ in 0..330 {
+            game.update(0.01, &Camera::new());
+        }
+        assert_eq!(game.wave, 3, "常规波清空后应推进");
+        assert_eq!(
+            wave_profile(3).kind,
+            WaveKind::Reinforced,
+            "推进后的波 3 应为援军波"
+        );
+        // 第 3 波是每关最后一波：清空后升关到 level 2 wave 1
+        game.npcs.clear();
+        for _ in 0..330 {
+            game.update(0.01, &Camera::new());
+        }
+        assert_eq!(game.level, 2, "第 3 波清空应升关");
+        assert_eq!(game.wave, 1, "升关后回本关第 1 波");
+        // Boss 波：level 2 第 2 波 = 累计有效波 5，清空后推进到本关第 3 波
+        game.spawn_wave(2, &glam::Vec3::ZERO);
+        assert_eq!(game.wave, 2);
+        let p5 = wave_profile(5);
+        assert_eq!(p5.kind, WaveKind::Boss, "有效波 5 应为 Boss 波");
+        assert_eq!(p5.total_count, p5.count, "Boss 波总敌人数 = count（含主怪）");
+        game.npcs.clear();
+        for _ in 0..330 {
+            game.update(0.01, &Camera::new());
+        }
+        assert_eq!(game.level, 2, "Boss 波清空后应留在本关");
+        assert_eq!(game.wave, 3, "Boss 波清空后应推进到本关第 3 波");
     }
 
     /// 设置面板：开关、音量/灵敏度调整、选中项循环

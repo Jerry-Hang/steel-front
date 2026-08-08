@@ -4,6 +4,7 @@
 //! - NPC 状态机：Idle → Patrol → Chase → Attack（含状态转换条件）
 //! - 网格阻挡避障：A* 搜索自动绕过阻挡格
 //! - 掩体点搜索 / 包抄目标点 / 波次难度曲线（供 Wave2 集成使用）
+//! - 特殊波次：每 5 波 Boss 主怪、每 3 波援军补怪（wave_kind / boss_profile / wave_profile）
 //!
 //! 本模块仅依赖 std，暂未在 `main` 中接线（先独立提供实现与单元测试）。
 
@@ -385,6 +386,28 @@ pub fn flank_goal(grid: &GridMap, player: GridPos, target: GridPos, side: i32, o
     GridPos::new(raw.x.clamp(0, max_x), raw.y.clamp(0, max_y))
 }
 
+/// 波次类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveKind {
+    /// 常规波
+    Normal,
+    /// Boss 波：每 5 波，最后一只为主怪（高血量/慢速/高伤害）
+    Boss,
+    /// 援军波：每 3 波，波中途补怪 1..=2 只
+    Reinforced,
+}
+
+/// Boss 主怪参数：体型/外观通过 max_hp 在渲染侧体现
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BossProfile {
+    /// 主怪血量（远超同波小怪）
+    pub hp: f32,
+    /// 主怪移动速度（慢于同波小怪）
+    pub speed: f32,
+    /// 主怪攻击距离（略长，站定压力更大）
+    pub attack_range: f32,
+}
+
 /// 单个波次的难度参数
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaveProfile {
@@ -398,17 +421,90 @@ pub struct WaveProfile {
     pub attack_range: f32,
     /// 本波包抄概率
     pub flank_chance: f32,
+    /// 波次类型（常规 / Boss / 援军）
+    pub kind: WaveKind,
+    /// 本波实际出场总敌人数：
+    /// - 常规/Boss 波 = count（Boss 波最后一只为主怪，替换常规小怪）
+    /// - 援军波 = count + reinforcement_count（含波中途补怪）
+    pub total_count: u32,
+    /// 援军触发时间（距波开始的秒数；非援军波为 None）
+    pub reinforcement_at: Option<f32>,
+    /// 单次援军补怪数量（1..=2）
+    pub reinforcement_count: u32,
+    /// Boss 主怪参数（仅 Boss 波为 Some）
+    pub boss: Option<BossProfile>,
+    /// 攻击态 NPC 每秒伤害（Boss 波更高）
+    pub dps: f32,
+}
+
+/// 波次类型判定：每 5 波为 Boss 波，其余每 3 波为援军波，否则常规波。
+pub fn wave_kind(n: u32) -> WaveKind {
+    if n > 0 && n % 5 == 0 {
+        WaveKind::Boss
+    } else if n > 0 && n % 3 == 0 {
+        WaveKind::Reinforced
+    } else {
+        WaveKind::Normal
+    }
+}
+
+/// Boss 主怪参数曲线：血量每 5 波 +150，速度 3.2 起小幅爬升（仍慢于同波小怪），
+/// 攻击距离固定取上限 16m（任何波次都不短于同波小怪，站定压力最大）
+pub fn boss_profile(n: u32) -> BossProfile {
+    let tier = (n / 5).max(1) as f32;
+    BossProfile {
+        hp: 300.0 + 150.0 * (tier - 1.0),
+        speed: (3.2 + 0.1 * (tier - 1.0)).min(6.0),
+        attack_range: 16.0,
+    }
+}
+
+/// 援军参数：触发时间固定波开始后 1.5s，补怪 1..=2 只（按波次奇偶确定，确定性可测）
+fn reinforcement_params(n: u32) -> (f32, u32) {
+    (1.5, 1 + (n % 2))
 }
 
 /// 第 `n` 波的难度曲线（缩放与 `game.rs` 的 `spawn_wave` 保持一致）。
+///
+/// 速度曲线分段爬升（1..=5 慢速 / 6..=15 中速 / 15+ 高速，全程不回落、封顶 8.0）；
+/// HP/数量/攻击距离/包抄沿用原曲线；每 5 波 Boss、每 3 波援军。
 pub fn wave_profile(n: u32) -> WaveProfile {
     let nf = n as f32;
+    let kind = wave_kind(n);
+    // 速度分段：保证全程不回落且封顶 8.0
+    let speed = (if n <= 5 {
+        4.0 * (1.0 + 0.06 * (nf - 1.0))
+    } else if n <= 15 {
+        4.0 * (1.0 + 0.06 * 4.0 + 0.10 * (nf - 5.0))
+    } else {
+        4.0 * (1.0 + 0.06 * 4.0 + 0.10 * 10.0 + 0.05 * (nf - 15.0))
+    })
+    .min(8.0);
+    let count = (4 + 2 * n).min(24);
+    let (reinforcement_at, reinforcement_count) = if kind == WaveKind::Reinforced {
+        let (at, count) = reinforcement_params(n);
+        (Some(at), count)
+    } else {
+        (None, 0)
+    };
+    let boss = if kind == WaveKind::Boss {
+        Some(boss_profile(n))
+    } else {
+        None
+    };
+    let total_count = count + reinforcement_count;
     WaveProfile {
-        count: (4 + 2 * n).min(24),
-        speed: (4.0 * (1.0 + 0.06 * (nf - 1.0))).min(8.0),
+        count,
+        speed,
         hp: 100.0 + 20.0 * (nf - 1.0),
         attack_range: 12.0 + ((n / 2).min(4)) as f32,
         flank_chance: (0.1 + 0.08 * nf).min(0.6),
+        kind,
+        total_count,
+        reinforcement_at,
+        reinforcement_count,
+        boss,
+        dps: if kind == WaveKind::Boss { 12.0 } else { 5.0 },
     }
 }
 
@@ -808,5 +904,71 @@ mod tests {
         assert!(!should_flank(0.0, 0, 0), "概率 0 永不包抄");
         assert!(should_flank(1.0, 0, 0), "概率 1 必包抄");
         assert!(should_flank(1.0, u32::MAX, u32::MAX), "大 id/wave 不溢出且必包抄");
+    }
+
+    /// 波次类型判定：每 5 波 Boss、其余每 3 波援军、其余常规
+    #[test]
+    fn wave_kind_classification() {
+        assert_eq!(wave_kind(1), WaveKind::Normal);
+        assert_eq!(wave_kind(2), WaveKind::Normal);
+        assert_eq!(wave_kind(3), WaveKind::Reinforced);
+        assert_eq!(wave_kind(4), WaveKind::Normal);
+        assert_eq!(wave_kind(5), WaveKind::Boss);
+        assert_eq!(wave_kind(6), WaveKind::Reinforced);
+        assert_eq!(wave_kind(10), WaveKind::Boss);
+        assert_eq!(wave_kind(15), WaveKind::Boss);
+        assert_eq!(wave_kind(0), WaveKind::Normal, "n=0 防御性归为常规");
+    }
+
+    /// Boss 波参数：主怪高血量/慢速/攻击距离略长，血量随波次递增
+    #[test]
+    fn boss_wave_profile_params() {
+        let p5 = wave_profile(5);
+        assert_eq!(p5.kind, WaveKind::Boss);
+        let b5 = p5.boss.expect("Boss 波应有主怪参数");
+        assert_eq!(b5.hp, 300.0);
+        assert!(b5.hp > p5.hp, "主怪血量应远超同波小怪: {} vs {}", b5.hp, p5.hp);
+        assert!(b5.speed < p5.speed, "主怪应慢于同波小怪: {} vs {}", b5.speed, p5.speed);
+        assert!(b5.attack_range >= p5.attack_range, "主怪攻击距离不短于小怪");
+        let b10 = wave_profile(10).boss.expect("第 10 波应有主怪参数");
+        assert!(b10.hp > b5.hp, "主怪血量应随波次递增");
+        assert!(b10.speed >= b5.speed, "主怪速度不应回落");
+        // 主怪参数确定性
+        assert_eq!(boss_profile(5), boss_profile(5));
+    }
+
+    /// 援军波参数：触发时间固定 1.5s、补怪 1..=2、total_count 与补怪数自洽
+    #[test]
+    fn reinforcement_wave_params() {
+        let p3 = wave_profile(3);
+        assert_eq!(p3.kind, WaveKind::Reinforced);
+        assert_eq!(p3.reinforcement_at, Some(1.5));
+        assert!((1..=2).contains(&p3.reinforcement_count), "补怪数应为 1..=2");
+        assert_eq!(p3.total_count, p3.count + p3.reinforcement_count);
+        let p6 = wave_profile(6);
+        assert_eq!(p6.kind, WaveKind::Reinforced);
+        assert_eq!(p6.total_count, p6.count + p6.reinforcement_count);
+        // 常规/Boss 波无援军
+        assert_eq!(wave_profile(1).reinforcement_at, None);
+        assert_eq!(wave_profile(1).total_count, wave_profile(1).count);
+        assert_eq!(wave_profile(5).reinforcement_at, None);
+        assert_eq!(wave_profile(5).total_count, wave_profile(5).count);
+    }
+
+    /// 难度曲线关键阈值：速度分段与封顶、Boss 波 dps 更高、常规波主曲线不变
+    #[test]
+    fn wave_profile_thresholds_locked() {
+        assert_eq!(wave_profile(1).speed, 4.0);
+        assert!((wave_profile(5).speed - 4.96).abs() < 1e-4, "第 5 波速度 4.96");
+        assert!((wave_profile(6).speed - 5.36).abs() < 1e-4, "第 6 波进入中速段");
+        assert_eq!(wave_profile(15).speed, 8.0, "第 15 波封顶");
+        assert_eq!(wave_profile(16).speed, 8.0);
+        assert_eq!(wave_profile(100).speed, 8.0);
+        assert_eq!(wave_profile(1).dps, 5.0);
+        assert_eq!(wave_profile(3).dps, 5.0);
+        assert_eq!(wave_profile(5).dps, 12.0, "Boss 波 dps 更高");
+        // 常规波主曲线保持原样（供集成回归）
+        assert_eq!(wave_profile(4).count, (4 + 2 * 4).min(24));
+        assert_eq!(wave_profile(4).hp, 100.0 + 20.0 * 3.0);
     }
 }
