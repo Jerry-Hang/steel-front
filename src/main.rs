@@ -323,14 +323,21 @@ impl ApplicationHandler for GameApp {
             return;
         }
 
-        // 首次运行（配置无显式分辨率）：按主显示器宽高比选默认
+        // 首次运行（配置无显式分辨率）：按显示器宽高比选默认
         // 16:10 → 1280x800，16:9 及其它 → 1280x720
         if !self.resolution_explicit {
-            let default_res = event_loop
-                .primary_monitor()
+            // Wayland 没有"主显示器"概念（winit primary_monitor() 恒 None），
+            // 回退到面积最大的可用显示器；两者都拿不到时退回 1280x720
+            let monitor = event_loop.primary_monitor().or_else(|| {
+                event_loop
+                    .available_monitors()
+                    .max_by_key(|m| m.size().width * m.size().height)
+            });
+            let default_res = monitor
                 .map(|m| {
                     let size = m.size();
                     let aspect = size.width as f32 / size.height.max(1) as f32;
+                    log::info!("显示器: {}x{} aspect={:.3}", size.width, size.height, aspect);
                     if (1.5..=1.67).contains(&aspect) {
                         (1280, 800)
                     } else {
