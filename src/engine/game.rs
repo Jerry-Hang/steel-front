@@ -1067,9 +1067,9 @@ impl Game {
         // selection >= 2 是键位行，滚轮不做调整（Enter 进入绑定）
     }
 
-    /// 灵敏度（0..=1）→ 相机 rad/px（0.001..=0.005，默认 0.5 → 0.003）
+    /// 灵敏度（0..=1）→ 相机 rad/px（0.0005..=0.0025，默认 0.5 → 0.0015）
     pub fn sensitivity_rads(&self) -> f32 {
-        0.001 + self.hud.sensitivity * 0.004
+        0.0005 + self.hud.sensitivity * 0.002
     }
 
     /// 第一人称玩家移动：WASD 相对相机朝向，与演示刚体碰撞推回，y 每帧贴地形
