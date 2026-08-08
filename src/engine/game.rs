@@ -16,9 +16,7 @@ use super::ai::{
     find_cover_points, find_path, flank_goal, should_flank, wave_profile, GridMap, GridPos,
     NpcPerception, NpcState, NpcStateMachine,
 };
-use super::physics::{
-    self, Body, CollisionEvent, CollisionListener, PlayerBody, SphereBody, Vec3 as Pv,
-};
+use super::physics::{self, Body, CollisionEvent, CollisionListener, PlayerBody, Vec3 as Pv};
 use super::renderer::terrain_height_at;
 use super::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
 use super::weapons::{Firearm, Projectile, ProjectileWeapon};
@@ -535,11 +533,6 @@ impl Game {
     /// 当前关卡障碍列表（main.rs 每帧转成渲染 marker 用）
     pub fn map_obstacles(&self) -> &[MapObstacle] {
         &self.map.obstacles
-    }
-
-    /// 当前关卡（HUD/日志）
-    pub fn level(&self) -> u32 {
-        self.level
     }
 
     /// 设置面板：进入"等待按键绑定"（Enter 触发，绑定当前选中的键位动作）
@@ -1703,22 +1696,24 @@ mod tests {
 
     /// FPS 玩家：撞到演示刚体被推回，不会穿模
     #[test]
-    fn fps_player_collides_with_demo_bodies() {
+    fn fps_player_collides_with_map_obstacle() {
         let mut game = Game::new();
         game.on_any_key(&glam::Vec3::ZERO);
-        // 角落刚体 (120,120) 半边长 1.2 → AABB x/z ∈ [118.8, 121.2]；
-        // 玩家放其 -Z 侧 5m，W 前进应被挡在 0.5m（半径）外
-        game.player_body.pos = Pv::new(119.5, 0.0, 125.0);
+        // 取关卡地图第一个障碍盒（AABB 中心 (x,z) 半宽 half_w/half_d）；
+        // 玩家放其 +Z 侧 5m，W 前进（-Z 方向）应被挡在 0.5m（玩家半径）外
+        let ob = game.map.obstacles[0];
+        game.player_body.pos = Pv::new(ob.x, 0.0, ob.z + ob.half_d + 5.0);
         let cam = Camera::new();
         game.set_movement(true, false, false, false);
         for _ in 0..120 {
             game.update(1.0 / 60.0, &cam);
         }
         let z = game.player_body.pos.z;
-        assert!(z < 125.0, "玩家应朝刚体移动: {}", z);
+        assert!(z < ob.z + ob.half_d + 5.0, "玩家应朝障碍移动: {}", z);
         assert!(
-            z > 121.3 && z < 122.1,
-            "碰撞应把玩家挡在刚体 +Z 面外约 0.5m (期望 ~121.7): {}",
+            z > ob.z + ob.half_d + 0.3 && z < ob.z + ob.half_d + 0.7,
+            "碰撞应把玩家挡在障碍 +Z 面外约 0.5m (期望 ~{}): {}",
+            ob.z + ob.half_d + 0.5,
             z
         );
     }
