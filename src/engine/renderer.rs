@@ -419,52 +419,17 @@ struct TerrainLodMesh {
 }
 
 // ============================================================
-// 地形 value noise（CPU 唯一实现：地形顶点与实例 Y 共用同一函数）
+// 地形高度（全图拍平 y=0）
 // ============================================================
 
-/// 确定性整数格点哈希 → [0,1)
-fn noise_hash(ix: i32, iz: i32) -> f32 {
-    let mut n = (ix as u32).wrapping_mul(0x9E37_79B9) ^ (iz as u32).wrapping_mul(0x85EB_CA6B);
-    n ^= n >> 13;
-    n = n.wrapping_mul(0x7FEB_352D);
-    n ^= n >> 16;
-    (n & 0xFF_FFFF) as f32 / 0xFF_FFFF as f32
-}
-
+/// Hermite 平滑插值（LOD morph 过渡系数复用）
 fn smooth_t(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// 双线性平滑插值 value noise
-fn value_noise(x: f32, z: f32) -> f32 {
-    let ix = x.floor() as i32;
-    let iz = z.floor() as i32;
-    let fx = x - x.floor();
-    let fz = z - z.floor();
-    let u = smooth_t(fx);
-    let v = smooth_t(fz);
-    let a = noise_hash(ix, iz);
-    let b = noise_hash(ix + 1, iz);
-    let c = noise_hash(ix, iz + 1);
-    let d = noise_hash(ix + 1, iz + 1);
-    a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v
-}
-
-/// 中心 ±30（60×60）压平为 0，30→45 平滑过渡的掩码
-fn flatten_mask(x: f32, z: f32) -> f32 {
-    let m = |v: f32| {
-        let t = ((v - 30.0) / 15.0).clamp(0.0, 1.0);
-        smooth_t(t)
-    };
-    m(x.abs()) * m(z.abs())
-}
-
-/// 地形高度：3 层 value noise（总振幅 1.75 ≤ 2.0），中心 60×60 压平
-fn terrain_height(x: f32, z: f32) -> f32 {
-    let h = 0.9 * (value_noise(x / 96.0, z / 96.0) * 2.0 - 1.0)
-        + 0.55 * (value_noise(x / 24.0, z / 24.0) * 2.0 - 1.0)
-        + 0.3 * (value_noise(x / 6.0, z / 6.0) * 2.0 - 1.0);
-    h * flatten_mask(x, z)
+/// 地形高度：全图恒定 0（地形顶点与实例 Y 共用同一函数）
+fn terrain_height(_x: f32, _z: f32) -> f32 {
+    0.0
 }
 
 /// 供 CPU 侧（NPC/实例）查询地形高度，与 GPU 地形完全同源
