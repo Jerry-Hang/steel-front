@@ -29,6 +29,10 @@ use engine::window::{self, WINDOW_HEIGHT, WINDOW_WIDTH};
 use ui::{BindingAction, RESOLUTIONS};
 use winit::window::CursorGrabMode;
 
+/// 单次鼠标位移最大像素：超过视为光标传送伪事件（X 服务端 warp/焦点切换跳变），
+/// 跳过该事件并重基准 last_cursor，防止第一人称视角跳变/自转。
+const MAX_LOOK_DELTA_PX: f64 = 512.0;
+
 /// 帧率上限（present 节流）：300 FPS，避免空闲轮询无意义打满 GPU
 const MAX_FPS: u64 = 300;
 /// 单帧预算（纳秒）
@@ -58,6 +62,9 @@ struct GameApp {
     cursor_captured: bool,
     /// 窗口是否聚焦（失焦时释放捕获，防止卡视角）
     focused: bool,
+    /// 回中 warp 回声事件吞噬窗口：recenter 后短时间内到达的下一个 CursorMoved
+    /// 视为 warp 回声（只作新基准、不应用视角位移），防止回声环把落点偏移当视角。
+    recenter_pending_until: Option<Instant>,
     /// 上次相机参数日志时间（1 秒一条，冒烟/调试用）
     last_cam_log: Instant,
     /// 游戏运行时中枢（物理/武器/AI/UI/音频/网络）
@@ -93,6 +100,7 @@ impl GameApp {
             fire_requested: false,
             cursor_captured: false,
             focused: true,
+            recenter_pending_until: None,
             last_cam_log: Instant::now(),
             game,
             running: true,
@@ -168,12 +176,23 @@ impl GameApp {
             if grabbed {
                 window.set_cursor_visible(false);
                 self.cursor_captured = true;
+                // 捕获瞬间回中光标：随后 warp 回声事件被吞掉作为新基准，
+                // 避免把"捕获前光标位置到窗口中心"的差量当成视角位移
+                let size = window.inner_size();
+                let center = winit::dpi::PhysicalPosition::new(
+                    size.width as f64 / 2.0,
+                    size.height as f64 / 2.0,
+                );
+                let _ = window.set_cursor_position(center);
+                self.last_cursor = (center.x, center.y);
+                self.recenter_pending_until = Some(Instant::now() + Duration::from_millis(150));
                 log::info!("input: cursor captured (mouse look on)");
             }
         } else if !want && self.cursor_captured {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.cursor_captured = false;
+            self.recenter_pending_until = None;
             self.camera.set_rotation_active(false);
             log::info!("input: cursor released");
         }
@@ -525,9 +544,25 @@ impl ApplicationHandler for GameApp {
             // 鼠标移动：捕获态 = 视角（轨道位控 / 飞行惯性）；非捕获态 = 拖拽旋转
             WindowEvent::CursorMoved { position, .. } => {
                 let (px, py) = (position.x, position.y);
+                // warp 回声事件吞噬窗口：recenter 后短时间内的下一个 CursorMoved
+                // 只是回中回声，把它作为新基准并跳过，防止回声环把落点偏移当视角位移
+                if let Some(until) = self.recenter_pending_until {
+                    self.recenter_pending_until = None;
+                    if Instant::now() < until {
+                        self.last_cursor = (px, py);
+                        return;
+                    }
+                }
                 if self.cursor_captured {
                     let dx = (px - self.last_cursor.0) as f32;
                     let dy = (py - self.last_cursor.1) as f32;
+                    // 光标传送（回中 warp/服务端跳变）：忽略该事件并重基准，防止视角自转
+                    if (px - self.last_cursor.0).abs() > MAX_LOOK_DELTA_PX
+                        || (py - self.last_cursor.1).abs() > MAX_LOOK_DELTA_PX
+                    {
+                        self.last_cursor = (px, py);
+                        return;
+                    }
                     match self.camera.mode {
                         CameraMode::FirstPerson => self.camera.look(dx, dy),
                         CameraMode::Orbit => self.camera.orbit(dx, dy),
@@ -545,19 +580,24 @@ impl ApplicationHandler for GameApp {
                         );
                         let _ = window.set_cursor_position(center);
                         self.last_cursor = (center.x, center.y);
+                        self.recenter_pending_until =
+                            Some(Instant::now() + Duration::from_millis(150));
                     }
                 } else {
                     let (dx, dy) = (px - self.last_cursor.0, py - self.last_cursor.1);
                     // 非捕获态拖拽视角（菜单/设置预览 + 冒烟在无焦点环境下的瞄准路径）：
                     // 左键按住 = 轨道/第一人称转视角，右键 = 飞行视角
-                    if self.dragging {
+                    // 跳变（warp/传送）事件不转视角，只重基准
+                    let teleported = (px - self.last_cursor.0).abs() > MAX_LOOK_DELTA_PX
+                        || (py - self.last_cursor.1).abs() > MAX_LOOK_DELTA_PX;
+                    if self.dragging && !teleported {
                         match self.camera.mode {
                             CameraMode::Orbit => self.camera.orbit(dx as f32, dy as f32),
                             CameraMode::FirstPerson => self.camera.look(dx as f32, dy as f32),
                             CameraMode::Flight => {}
                         }
                     }
-                    if self.right_dragging && self.camera.mode == CameraMode::Flight {
+                    if self.right_dragging && self.camera.mode == CameraMode::Flight && !teleported {
                         self.camera.add_rotation_input(dx as f32, dy as f32);
                     }
                     // 拖拽转视角时回中光标，避免把指针拖出窗口导致事件丢失（与捕获态一致）
@@ -573,6 +613,8 @@ impl ApplicationHandler for GameApp {
                             );
                             let _ = window.set_cursor_position(center);
                             self.last_cursor = (center.x, center.y);
+                            self.recenter_pending_until =
+                                Some(Instant::now() + Duration::from_millis(150));
                         }
                     } else {
                         self.last_cursor = (px, py);
