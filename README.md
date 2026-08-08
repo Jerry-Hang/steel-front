@@ -65,6 +65,21 @@
 - 键盘改键位驱动：移动/换弹/开火/菜单可重绑定；ESC 保留为系统键（关面板/退出）
 - 验收：176 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK
 
+### 阶段 5：Wave 4 六项功能（本会话，7 commits，已 push）
+- 程序化地图主题 `MapTheme`/`theme_for_level`：每 3 关轮换 Wall/Block/Barrier 三种
+  障碍种类与安全环/密度参数（第一关逐位保持冒烟基准 58m 环）；`MapObstacle.kind`
+  驱动渲染侧 marker 配色（墙=红/块=橙/栅栏=蓝灰）
+- 特殊波次：每 5 波 Boss 主怪（高血量/慢速/16m 攻击）+ 每 3 波援军（波中 1.5s 补怪
+  1..=2 只），玩家受伤按 `wave_profile.dps`（Boss 波更高）；`spawn_wave` 同步波次号
+- 难度曲线精调：速度分段爬升（1..=5 / 6..=15 / 15+，封顶 8.0 不回落），端点不变
+- 画质预设 `QualityPreset`（Low/Medium/High，纯 CPU 参数：地形 LOD 阈值 + 实例近/远档
+  分界；Medium = 原行为）+ 设置面板 RESOLUTION/QUALITY 两项（循环切换即时生效）+
+  分辨率/画质持久化到 `~/.steel_front.cfg`（旧配置缺字段回退默认）
+- F12 截图：swapchain 图像读回（TRANSFER_SRC + 双缓冲 staging + 独立 fence）存
+  `/tmp/steel_front_<ts>.png`；读回失败不跳过 present（防图像耗尽卡死）
+- 音效变体 `play_variant(kind, volume_scale)`：开火 0.95..1.0 抖动、脚步 0.8/1.0 交替
+- 验收：203 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK（VUID=0）
+
 ### 冒烟关键机制（勿回退，当前为 FPS 拖拽版）
 1. 玩家在原点不动（FPS 相机），冒烟读 `npc: #id stand` 日志选距原点最近的站定 NPC，
    按 `(x, y+0.8-EYE, z)` 算 yaw/pitch，按住左键拖拽视角瞄准后点射 6 发；
@@ -75,8 +90,12 @@
 
 - 本批完成：Wave 2 六项功能（1–4 全量、6 部分）实施并提交。
 - 本批完成：Wave 3（第 5 项程序化地图/多关卡全量、第 6 项主菜单美化/键位绑定完成）已提交。
-- 后续候选：音效/难度曲线精调、更多地图风格（不同安全环半径/障碍密度）、
-  新关卡特殊波次（Boss/援军）、主菜单选项（分辨率/画质）。
+- 本批完成：Wave 4（地图主题、Boss/援军波、难度曲线、画质/分辨率设置、F12 截图、
+  音效变体）已提交并 push。
+- 后续候选：真实音频输出后端（当前 SilentSink 静默，需新增依赖）、阴影 pass 启用、
+  真实联机（当前仅环回 demo）、离屏渲染模式（当前仅窗口 present + 截图读回）。
+- 已知抖动：gameplay 冒烟对拖拽瞄准时序敏感，偶发瞄准螺旋导致 20s 内未击杀
+  （非代码回归，重跑即过；后续可加瞄准收敛断言或延长窗口）。
 - 重跑冒烟：`bash scripts/run_gameplay_smoke.sh`（需沙箱外 X/Vulkan 权限）。
 
 ## 五、关键约定与环境备忘
@@ -93,7 +112,7 @@
 
 | 指标 | 数值 |
 |---|---|
-| 测试 | 176 passed, 0 failed |
+| 测试 | 203 passed, 0 failed |
 | 警告 | 0 |
 | 冒烟（飞行） | VUID=0, fps 228–300 |
-| gameplay 冒烟 | ALL-OK：kills=1、hit_events=4、VUID=0、fps 214.8–292.7、无 panic |
+| gameplay 冒烟 | ALL-OK：kills=1、hit_events=4、VUID=0、fps 212–298、无 panic |
