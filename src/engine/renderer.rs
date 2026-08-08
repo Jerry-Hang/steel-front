@@ -182,35 +182,171 @@ impl TerrainLod {
 }
 
 /// 纯函数：相机到地形中心地面距离 → 基础 LOD 级别
-/// （非测试构建下仅被 #[cfg(test)] 单元测试调用）
+/// （默认 Medium 画质；非测试构建下仅被 #[cfg(test)] 单元测试调用）
 #[allow(dead_code)]
 fn terrain_lod_for_distance(dist: f32) -> TerrainLod {
-    if dist < TERRAIN_LOD_HIGH_END {
+    terrain_lod_for_distance_with_params(dist, quality_params(QualityPreset::DEFAULT))
+}
+
+/// 纯函数：按画质参数计算相机到地形中心地面距离 → 基础 LOD 级别
+fn terrain_lod_for_distance_with_params(dist: f32, params: QualityParams) -> TerrainLod {
+    if dist < params.terrain_lod_high_end {
         TerrainLod::High
-    } else if dist < TERRAIN_LOD_MED_END {
+    } else if dist < params.terrain_lod_med_end {
         TerrainLod::Medium
     } else {
         TerrainLod::Low
     }
 }
 
-/// 纯函数：距离 → (要绘制的网格级别, morph 进度 t∈[0,1])。
+/// 纯函数（默认 Medium 画质）：距离 → (要绘制的网格级别, morph 进度 t∈[0,1])。
+/// （非测试构建下仅被 #[cfg(test)] 单元测试调用）
+#[allow(dead_code)]
+fn terrain_lod_blend(dist: f32) -> (TerrainLod, f32) {
+    terrain_lod_blend_with_params(dist, quality_params(QualityPreset::DEFAULT))
+}
+
+/// 纯函数：按画质参数计算距离 → (要绘制的网格级别, morph 进度 t∈[0,1])。
 /// t 为该级网格顶点高度向下一级（更粗）曲面三角形插值的进度：
 /// t=0 完全细曲面，t=1 完全等于下一级曲面（几何重合，切换无 popping）。
-fn terrain_lod_blend(dist: f32) -> (TerrainLod, f32) {
-    if dist < TERRAIN_LOD_HIGH_END {
-        let t = ((dist - TERRAIN_LOD_HIGH_MORPH_START)
-            / (TERRAIN_LOD_HIGH_END - TERRAIN_LOD_HIGH_MORPH_START))
+fn terrain_lod_blend_with_params(dist: f32, params: QualityParams) -> (TerrainLod, f32) {
+    if dist < params.terrain_lod_high_end {
+        let t = ((dist - params.terrain_lod_high_morph_start)
+            / (params.terrain_lod_high_end - params.terrain_lod_high_morph_start))
         .clamp(0.0, 1.0);
         (TerrainLod::High, smooth_t(t))
-    } else if dist < TERRAIN_LOD_MED_END {
-        let t = ((dist - TERRAIN_LOD_MED_MORPH_START)
-            / (TERRAIN_LOD_MED_END - TERRAIN_LOD_MED_MORPH_START))
+    } else if dist < params.terrain_lod_med_end {
+        let t = ((dist - params.terrain_lod_med_morph_start)
+            / (params.terrain_lod_med_end - params.terrain_lod_med_morph_start))
         .clamp(0.0, 1.0);
         (TerrainLod::Medium, smooth_t(t))
     } else {
         (TerrainLod::Low, 1.0)
     }
+}
+
+/// 画质预设（纯 CPU 侧参数：地形 LOD 切换距离 + 实例近/远档分界距离等；
+/// 不触碰 pipeline/shader/swapchain 创建路径，零 VUID 风险）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityPreset {
+    Low,
+    Medium,
+    High,
+}
+
+impl QualityPreset {
+    /// 默认画质：Medium（与现有渲染行为完全一致）
+    pub const DEFAULT: QualityPreset = QualityPreset::Medium;
+
+    /// 画质显示标签（供 HUD / 日志使用）
+    pub fn label(&self) -> &'static str {
+        match self {
+            QualityPreset::Low => "低画质",
+            QualityPreset::Medium => "中画质",
+            QualityPreset::High => "高画质",
+        }
+    }
+}
+
+/// 画质参数（纯 CPU 侧）：地形 LOD 两级切换距离与 morph 过渡带起点、实例近/远档分界距离
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct QualityParams {
+    /// 相机到地形中心距离 < 该值 → 高级（高密度）网格
+    terrain_lod_high_end: f32,
+    /// 距离 < 该值 → 中级网格；其余低级
+    terrain_lod_med_end: f32,
+    /// 高级→中级 morph 过渡带起点（起点→high_end 之间做 smoothstep 渐变）
+    terrain_lod_high_morph_start: f32,
+    /// 中级→低级 morph 过渡带起点
+    terrain_lod_med_morph_start: f32,
+    /// 实例近档/远档分界距离（近档立方体 / 远档十字 quad 的切换半径）
+    instance_lod_distance: f32,
+}
+
+/// 画质参数表：Medium 与现有常量完全一致（TERRAIN_LOD_HIGH_END / TERRAIN_LOD_MED_END /
+/// TERRAIN_LOD_HIGH_MORPH_START / TERRAIN_LOD_MED_MORPH_START / LOD_DISTANCE）；
+/// Low 各阈值减小（更早降级、更小近档半径），High 各阈值增大（更晚降级、更大近档半径）。
+const QUALITY_PARAMS: [QualityParams; 3] = [
+    // Low
+    QualityParams {
+        terrain_lod_high_end: 80.0,
+        terrain_lod_med_end: 180.0,
+        terrain_lod_high_morph_start: 50.0,
+        terrain_lod_med_morph_start: 140.0,
+        instance_lod_distance: 90.0,
+    },
+    // Medium（沿用现有常量，行为不变）
+    QualityParams {
+        terrain_lod_high_end: TERRAIN_LOD_HIGH_END,
+        terrain_lod_med_end: TERRAIN_LOD_MED_END,
+        terrain_lod_high_morph_start: TERRAIN_LOD_HIGH_MORPH_START,
+        terrain_lod_med_morph_start: TERRAIN_LOD_MED_MORPH_START,
+        instance_lod_distance: LOD_DISTANCE,
+    },
+    // High
+    QualityParams {
+        terrain_lod_high_end: 145.0,
+        terrain_lod_med_end: 340.0,
+        terrain_lod_high_morph_start: 95.0,
+        terrain_lod_med_morph_start: 260.0,
+        instance_lod_distance: 160.0,
+    },
+];
+
+/// 纯函数：画质预设 → 参数表
+fn quality_params(preset: QualityPreset) -> QualityParams {
+    match preset {
+        QualityPreset::Low => QUALITY_PARAMS[0],
+        QualityPreset::Medium => QUALITY_PARAMS[1],
+        QualityPreset::High => QUALITY_PARAMS[2],
+    }
+}
+
+// ============================================================
+// PNG 截图（swapchain 图像读回，纯逻辑部分）
+// ============================================================
+
+/// 截图读回时主机侧等待 render_finished 信号量的超时（纳秒，2 秒足够完成一帧渲染）
+const SCREENSHOT_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
+
+/// 像素字节序策略（由 swapchain 像素格式决定）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelOrder {
+    /// 源为 B,G,R,A 字节序（转 RGBA 需交换 R/B）
+    Bgra,
+    /// 源为 R,G,B,A 字节序（直接拷贝）
+    Rgba,
+}
+
+/// 纯函数：swapchain 像素格式 → 字节序策略。
+/// 支持 B8G8R8A8 / R8G8B8A8 的 UNORM/SRGB 四种格式；SRGB 仅影响解码语义，
+/// 存储字节序与 UNORM 相同，写 PNG 时保持原始编码；未知格式返回 Err。
+fn pixel_order_for_format(format: vk::Format) -> Result<PixelOrder, String> {
+    match format {
+        vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => Ok(PixelOrder::Bgra),
+        vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => Ok(PixelOrder::Rgba),
+        _ => Err(format!("不支持的交换链像素格式: {:?}", format)),
+    }
+}
+
+/// 纯函数：把 staging buffer 中的像素字节流（swapchain 格式字节序）转换为 RGBA8。
+/// src/dst 长度必须相等且为 4 的倍数（每像素 4 字节）；未知格式返回 Err。
+fn convert_pixels_to_rgba(format: vk::Format, src: &[u8], dst: &mut [u8]) -> Result<(), String> {
+    if src.len() != dst.len() || src.len() % 4 != 0 {
+        return Err("像素缓冲区长度非法".to_string());
+    }
+    match pixel_order_for_format(format)? {
+        PixelOrder::Bgra => {
+            for (chunk, out) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                out[0] = chunk[2];
+                out[1] = chunk[1];
+                out[2] = chunk[0];
+                out[3] = chunk[3];
+            }
+        }
+        PixelOrder::Rgba => dst.copy_from_slice(src),
+    }
+    Ok(())
 }
 
 /// 某顶点 (x,z) 在下一级（更粗）网格曲面上的高度：
@@ -438,6 +574,15 @@ pub struct Renderer {
     last_terrain_lod_name: &'static str,
     /// 当前光照 uniform（每帧由 set_lights 更新，render 时写入帧 slot）
     light_data: LightUniform,
+    /// 当前画质预设（默认 Medium = 现有行为；纯 CPU 侧参数）
+    quality: QualityPreset,
+    /// 截图请求路径（Some 表示本帧渲染完成后读回 swapchain 图像并写 PNG）
+    screenshot_request: Option<std::path::PathBuf>,
+    /// 截图读回 staging buffer（按 max_frames_in_flight 双缓冲，惰性创建）
+    screenshot_buffers: Vec<vk::Buffer>,
+    screenshot_buffers_memory: Vec<vk::DeviceMemory>,
+    /// 截图读回 fence（每帧 slot 一个，提交拷贝后等待）
+    screenshot_fences: Vec<vk::Fence>,
 }
 
 fn load_spirv(path: &str) -> Result<Vec<u32>, String> {
@@ -742,6 +887,11 @@ impl Renderer {
             last_far_count: 0,
             last_terrain_lod_name: "high",
             light_data: LightUniform::default(),
+            quality: QualityPreset::DEFAULT,
+            screenshot_request: None,
+            screenshot_buffers: Vec::new(),
+            screenshot_buffers_memory: Vec::new(),
+            screenshot_fences: Vec::new(),
         })
     }
 
@@ -807,7 +957,9 @@ impl Renderer {
             .image_color_space(format.color_space)
             .image_extent(extent)
             .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            // COLOR_ATTACHMENT | TRANSFER_SRC：截图读回需要把 swapchain 图像作为
+            // TRANSFER 源拷贝到 staging buffer（vkCmdCopyImageToBuffer 的 VUID 要求）。
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
             .image_sharing_mode(sharing_mode)
             .queue_family_indices(&queue_family_indices)
             .pre_transform(surface_capabilities.current_transform)
@@ -2249,7 +2401,9 @@ impl Renderer {
             _ => return (0, 0),
         };
         let stride = std::mem::size_of::<InstanceData>();
-        let near_sq = LOD_DISTANCE * LOD_DISTANCE;
+        // 近/远档分界距离随画质预设变化（Medium 与原 LOD_DISTANCE 一致）
+        let near_sq = quality_params(self.quality).instance_lod_distance;
+        let near_sq = near_sq * near_sq;
         let mut near_count = 0u32;
         // 近档先写（base..base+near-1），远档紧随（base+near..），两遍遍历避免槽位交错
         for inst in &self.markers {
@@ -2342,8 +2496,9 @@ impl Renderer {
             _ => return (0, 0),
         };
 
-        // 近档区（d < 60）
-        let near_sq = LOD_DISTANCE * LOD_DISTANCE;
+        // 近档区（d < 分界距离；分界随画质预设变化，Medium 与原 LOD_DISTANCE 一致）
+        let near_sq = quality_params(self.quality).instance_lod_distance;
+        let near_sq = near_sq * near_sq;
         let mut near_count = 0u32;
         for inst in &self.culled {
             let dx = inst.model[12] - cam_pos.x;
@@ -2420,6 +2575,269 @@ impl Renderer {
                 .map_err(|e| format!("等待一次性命令失败: {}", e))?;
             self.device.free_command_buffers(self.command_pool, &[cmd_buffer]);
         }
+        Ok(())
+    }
+
+    /// 惰性创建截图读回资源：按 max_frames_in_flight 双缓冲 HOST_VISIBLE staging buffer + fence，
+    /// 避免与 in-flight 帧竞态（capture_screenshot 首次调用时创建；交换链重建后作废重建）。
+    fn init_screenshot_resources(&mut self) -> Result<(), String> {
+        let size = (self.swapchain_extent.width as u64) * (self.swapchain_extent.height as u64) * 4;
+        if size == 0 {
+            return Err("交换链尺寸为 0，无法创建截图缓冲".to_string());
+        }
+        let mem_props = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+        for _ in 0..self.max_frames_in_flight {
+            let buffer_info = vk::BufferCreateInfo::default()
+                .size(size)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let buffer = match unsafe { self.device.create_buffer(&buffer_info, None) } {
+                Ok(b) => b,
+                Err(e) => {
+                    self.destroy_screenshot_resources();
+                    return Err(format!("创建截图 staging buffer 失败: {}", e));
+                }
+            };
+            self.screenshot_buffers.push(buffer);
+
+            let mem_reqs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+            let memory_type = mem_props
+                .memory_types
+                .iter()
+                .enumerate()
+                .find(|(i, mem_type)| {
+                    let type_mask = 1 << i;
+                    (mem_reqs.memory_type_bits & type_mask) != 0
+                        && mem_type
+                            .property_flags
+                            .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+                        && mem_type
+                            .property_flags
+                            .contains(vk::MemoryPropertyFlags::HOST_COHERENT)
+                })
+                .map(|(i, _)| i as u32)
+                .ok_or_else(|| "没有找到合适的内存类型（截图 staging buffer）".to_string())
+                .map_err(|e| {
+                    self.destroy_screenshot_resources();
+                    e
+                })?;
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(mem_reqs.size)
+                .memory_type_index(memory_type);
+            let memory = match unsafe { self.device.allocate_memory(&alloc_info, None) } {
+                Ok(m) => m,
+                Err(e) => {
+                    self.destroy_screenshot_resources();
+                    return Err(format!("分配截图 staging buffer 内存失败: {}", e));
+                }
+            };
+            self.screenshot_buffers_memory.push(memory);
+
+            if let Err(e) = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) } {
+                self.destroy_screenshot_resources();
+                return Err(format!("绑定截图 staging buffer 内存失败: {}", e));
+            }
+
+            let fence = match unsafe {
+                self.device
+                    .create_fence(&vk::FenceCreateInfo::default(), None)
+            } {
+                Ok(f) => f,
+                Err(e) => {
+                    self.destroy_screenshot_resources();
+                    return Err(format!("创建截图围栏失败: {}", e));
+                }
+            };
+            self.screenshot_fences.push(fence);
+        }
+        Ok(())
+    }
+
+    /// 销毁截图读回资源（交换链重建 / Drop 时调用；字段归零，下次截图惰性重建）
+    fn destroy_screenshot_resources(&mut self) {
+        for (&buffer, &memory) in self
+            .screenshot_buffers
+            .iter()
+            .zip(self.screenshot_buffers_memory.iter())
+        {
+            if buffer != vk::Buffer::null() {
+                unsafe { self.device.destroy_buffer(buffer, None) };
+            }
+            if memory != vk::DeviceMemory::null() {
+                unsafe { self.device.free_memory(memory, None) };
+            }
+        }
+        self.screenshot_buffers.clear();
+        self.screenshot_buffers_memory.clear();
+        for &fence in &self.screenshot_fences {
+            if fence != vk::Fence::null() {
+                unsafe { self.device.destroy_fence(fence, None) };
+            }
+        }
+        self.screenshot_fences.clear();
+    }
+
+    /// 读回当前帧 swapchain 图像并保存 PNG。
+    /// 在 render() 提交渲染之后、present 之前调用：此时图像内容已确定，
+    /// 且 render_finished 信号量尚未被 present 消费，主机侧等待不会死锁。
+    /// 流程：等待信号量 → 一次性命令（布局转换 + 拷贝）→ wait fence → map 读取 → 保存。
+    fn do_screenshot_readback(&mut self, image: vk::Image) -> Result<(), String> {
+        let path = match self.screenshot_request.take() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let width = self.swapchain_extent.width;
+        let height = self.swapchain_extent.height;
+        let format = self.swapchain_format;
+        let slot = self.current_frame;
+        let buffer = *self
+            .screenshot_buffers
+            .get(slot)
+            .ok_or_else(|| "截图缓冲未初始化".to_string())?;
+        let memory = *self
+            .screenshot_buffers_memory
+            .get(slot)
+            .ok_or_else(|| "截图缓冲内存未初始化".to_string())?;
+        let fence = *self
+            .screenshot_fences
+            .get(slot)
+            .ok_or_else(|| "截图围栏未初始化".to_string())?;
+        let buffer_size = (width as u64) * (height as u64) * 4;
+
+        // 1. 主机侧等待本帧渲染完成信号量（vkWaitSemaphores 不消费信号量，present 等待不受影响）。
+        //    信号量数组用具名局部变量持有：SemaphoreWaitInfo 只存裸指针，临时数组会提前失效。
+        let wait_semaphores = [self.render_finished_semaphores[slot]];
+        let wait_info = vk::SemaphoreWaitInfo::default().semaphores(&wait_semaphores);
+        unsafe {
+            self.device
+                .wait_semaphores(&wait_info, SCREENSHOT_WAIT_TIMEOUT_NS)
+                .map_err(|e| format!("等待渲染完成信号量失败: {}", e))?;
+        }
+
+        // 2. 一次性命令缓冲：PRESENT_SRC_KHR → TRANSFER_SRC_OPTIMAL → 拷贝 → 回 PRESENT_SRC_KHR
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd_buffer = unsafe {
+            self.device
+                .allocate_command_buffers(&alloc_info)
+                .map_err(|e| format!("分配截图命令缓冲失败: {}", e))?
+        }[0];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let subresource_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let barrier_to_transfer = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(subresource_range)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+        let barrier_to_present = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(subresource_range)
+            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .dst_access_mask(vk::AccessFlags::empty());
+        let copy_region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D { width, height, depth: 1 });
+        unsafe {
+            self.device
+                .begin_command_buffer(cmd_buffer, &begin_info)
+                .map_err(|e| format!("开始截图命令缓冲失败: {}", e))?;
+            self.device.cmd_pipeline_barrier(
+                cmd_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_to_transfer],
+            );
+            self.device.cmd_copy_image_to_buffer(
+                cmd_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &[copy_region],
+            );
+            self.device.cmd_pipeline_barrier(
+                cmd_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier_to_present],
+            );
+            self.device
+                .end_command_buffer(cmd_buffer)
+                .map_err(|e| format!("结束截图命令缓冲失败: {}", e))?;
+        }
+
+        // 3. 提交拷贝命令（独立 fence），等待完成后再释放命令缓冲
+        unsafe {
+            self.device
+                .reset_fences(&[fence])
+                .map_err(|e| format!("重置截图围栏失败: {}", e))?;
+        }
+        let cmd_buffers = [cmd_buffer];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], fence)
+                .map_err(|e| format!("提交截图命令失败: {}", e))?;
+            self.device
+                .wait_for_fences(&[fence], true, u64::MAX)
+                .map_err(|e| format!("等待截图围栏失败: {}", e))?;
+            self.device.free_command_buffers(self.command_pool, &[cmd_buffer]);
+        }
+
+        // 4. map 读取像素 → 格式转换 → 保存 PNG
+        let data_ptr = unsafe {
+            self.device
+                .map_memory(memory, 0, buffer_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射截图缓冲失败: {}", e))?
+        };
+        let mut raw = vec![0u8; (width * height * 4) as usize];
+        unsafe {
+            std::ptr::copy_nonoverlapping(data_ptr as *const u8, raw.as_mut_ptr(), raw.len());
+        }
+        unsafe {
+            self.device.unmap_memory(memory);
+        }
+        let mut rgba = vec![0u8; raw.len()];
+        convert_pixels_to_rgba(format, &raw, &mut rgba)?;
+        let img = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| "创建 RGBA 图像失败".to_string())?;
+        img.save_with_format(&path, image::ImageFormat::Png)
+            .map_err(|e| format!("保存截图失败 '{}': {}", path.display(), e))?;
+        log::info!("截图已保存: {}", path.display());
         Ok(())
     }
 
@@ -3031,6 +3449,34 @@ impl Renderer {
     }
 
     // ============================================================
+    // 画质预设 / PNG 截图（公开 API）
+    // ============================================================
+
+    /// 设置画质预设（纯 CPU 侧参数：地形 LOD 切换距离 + 实例近/远档分界距离等，
+    /// 不触碰 pipeline/shader/swapchain 创建路径）。由外部（main.rs）按需调用。
+    #[allow(dead_code)]
+    pub fn set_quality(&mut self, preset: QualityPreset) {
+        self.quality = preset;
+        log::info!("画质预设已切换: {}", preset.label());
+    }
+
+    /// 当前画质预设
+    pub fn quality(&self) -> QualityPreset {
+        self.quality
+    }
+
+    /// 请求截图：置 pending 标记，本帧渲染完成后读回 swapchain 图像并保存 PNG。
+    /// 支持 B8G8R8A8 / R8G8B8A8 的 UNORM/SRGB 像素格式；一切失败返回 Err（不 panic）。
+    #[allow(dead_code)]
+    pub fn capture_screenshot(&mut self, path: &std::path::Path) -> Result<(), String> {
+        if self.screenshot_buffers.is_empty() {
+            self.init_screenshot_resources()?;
+        }
+        self.screenshot_request = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    // ============================================================
     // 渲染循环
     // ============================================================
 
@@ -3082,7 +3528,8 @@ impl Renderer {
         // ---- 地形网格 LOD：按相机到地形中心地面距离选级，过渡带内 morph 高度 ----
         let cam_pos = view.inverse().w_axis.truncate();
         let terrain_dist = (cam_pos.x * cam_pos.x + cam_pos.z * cam_pos.z).sqrt();
-        let (terrain_lod, terrain_blend) = terrain_lod_blend(terrain_dist);
+        let quality = quality_params(self.quality);
+        let (terrain_lod, terrain_blend) = terrain_lod_blend_with_params(terrain_dist, quality);
         self.last_terrain_lod_name = terrain_lod.name();
         self.update_terrain_lod_morph(terrain_lod, terrain_blend);
         let terrain_lod_index = terrain_lod as usize;
@@ -3097,7 +3544,7 @@ impl Renderer {
                 0.0
             };
             log::info!(
-                "visible={}/{} near={} far={} cull_us={} fps={:.1} terrain_lod={} blend={:.3}",
+                "visible={}/{} near={} far={} cull_us={} fps={:.1} terrain_lod={} blend={:.3} quality={}",
                 near_count + far_count,
                 INSTANCE_COUNT,
                 near_count,
@@ -3105,7 +3552,8 @@ impl Renderer {
                 cull_us,
                 fps,
                 terrain_lod.name(),
-                terrain_blend
+                terrain_blend,
+                self.quality().label()
             );
             self.frame_count = 0;
             self.perf_window_start = Instant::now();
@@ -3117,7 +3565,12 @@ impl Renderer {
             view,
             proj,
             // x/w = 地形 LOD 切换距离（shader 未读取，仅 CPU 侧语义），y/z = 实例淡出区间
-            lod_params: [TERRAIN_LOD_HIGH_END, FADE_START, FADE_END, TERRAIN_LOD_MED_END],
+            lod_params: [
+                quality.terrain_lod_high_end,
+                FADE_START,
+                FADE_END,
+                quality.terrain_lod_med_end,
+            ],
         };
         if let Some(&ptr) = self.uniform_mapped.get(self.current_frame) {
             unsafe {
@@ -3167,6 +3620,21 @@ impl Renderer {
                 .map_err(|e| format!("提交队列失败: {}", e))?;
         }
 
+        // ---- 截图：本帧若已请求，在 present 前读回 swapchain 图像并保存 PNG ----
+        // （图像内容已确定；render_finished 信号量尚未被 present 消费，主机等待不会死锁）
+        // 读回失败不跳过 present：未呈现的 swapchain 图像不会被回收，连续失败会耗尽图像导致卡死
+        let mut screenshot_err: Option<String> = None;
+        if self.screenshot_request.is_some() {
+            if let Some(&image) = self.swapchain_images.get(image_index as usize) {
+                if let Err(e) = self.do_screenshot_readback(image) {
+                    screenshot_err = Some(e);
+                }
+            } else {
+                self.screenshot_request = None;
+                screenshot_err = Some("交换链图像索引越界".to_string());
+            }
+        }
+
         let swapchains = [self.swapchain];
         let image_indices = [image_index];
         let present_info = vk::PresentInfoKHR::default()
@@ -3193,6 +3661,10 @@ impl Renderer {
             println!("=== RENDERER OK ===");
         }
 
+        if let Some(e) = screenshot_err {
+            return Err(format!("截图失败: {}", e));
+        }
+
         self.current_frame = (self.current_frame + 1) % self.max_frames_in_flight;
         Ok(())
     }
@@ -3213,6 +3685,10 @@ impl Renderer {
         self.init_depth_resources()?;
         self.init_framebuffers()?;
         self.recreate_command_buffers()?;
+        // 交换链尺寸/图像已变化：截图读回资源按旧 extent 创建，作废并清掉 pending 请求
+        // （下次 capture_screenshot 时惰性重建）
+        self.destroy_screenshot_resources();
+        self.screenshot_request = None;
         Ok(())
     }
 
@@ -3280,6 +3756,9 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+
+            // 释放截图读回资源（staging buffer + fence）
+            self.destroy_screenshot_resources();
 
             // 释放同步对象
             for &fence in &self.in_flight_fences {
@@ -3665,5 +4144,153 @@ mod terrain_lod_tests {
         let h11 = heights[(cz + 1) * w + cx + 1];
         let interp = terrain_coarse_height(x, z, &heights, low_cells);
         assert!((interp - (h00 + h11) * 0.5).abs() < 1e-5);
+    }
+}
+
+// ============================================================
+// 画质预设单元测试
+// ============================================================
+
+#[cfg(test)]
+mod quality_preset_tests {
+    use super::*;
+
+    #[test]
+    fn quality_medium_matches_existing_constants() {
+        // Medium 必须保持当前行为：阈值与现有常量完全一致
+        let p = quality_params(QualityPreset::Medium);
+        assert_eq!(p.terrain_lod_high_end, TERRAIN_LOD_HIGH_END);
+        assert_eq!(p.terrain_lod_med_end, TERRAIN_LOD_MED_END);
+        assert_eq!(p.terrain_lod_high_morph_start, TERRAIN_LOD_HIGH_MORPH_START);
+        assert_eq!(p.terrain_lod_med_morph_start, TERRAIN_LOD_MED_MORPH_START);
+        assert_eq!(p.instance_lod_distance, LOD_DISTANCE);
+    }
+
+    #[test]
+    fn quality_low_medium_high_ordering() {
+        // Low 阈值减小、High 阈值增大
+        let low = quality_params(QualityPreset::Low);
+        let med = quality_params(QualityPreset::Medium);
+        let high = quality_params(QualityPreset::High);
+        assert!(low.terrain_lod_high_end < med.terrain_lod_high_end);
+        assert!(med.terrain_lod_high_end < high.terrain_lod_high_end);
+        assert!(low.terrain_lod_med_end < med.terrain_lod_med_end);
+        assert!(med.terrain_lod_med_end < high.terrain_lod_med_end);
+        assert!(low.instance_lod_distance < med.instance_lod_distance);
+        assert!(med.instance_lod_distance < high.instance_lod_distance);
+        // morph 过渡带起点必须小于对应终点
+        assert!(low.terrain_lod_high_morph_start < low.terrain_lod_high_end);
+        assert!(low.terrain_lod_med_morph_start < low.terrain_lod_med_end);
+        assert!(high.terrain_lod_high_morph_start < high.terrain_lod_high_end);
+        assert!(high.terrain_lod_med_morph_start < high.terrain_lod_med_end);
+    }
+
+    #[test]
+    fn quality_preset_default_and_label() {
+        assert_eq!(QualityPreset::DEFAULT, QualityPreset::Medium);
+        assert_eq!(QualityPreset::Low.label(), "低画质");
+        assert_eq!(QualityPreset::Medium.label(), "中画质");
+        assert_eq!(QualityPreset::High.label(), "高画质");
+    }
+
+    #[test]
+    fn terrain_lod_switch_uses_quality_params() {
+        // 同一距离下不同画质的 LOD 级别不同：距离 90 时 Low 已降级、Medium/High 仍高级
+        let low = quality_params(QualityPreset::Low);
+        let med = quality_params(QualityPreset::Medium);
+        let high = quality_params(QualityPreset::High);
+        assert_eq!(
+            terrain_lod_for_distance_with_params(90.0, low),
+            TerrainLod::Medium
+        );
+        assert_eq!(
+            terrain_lod_for_distance_with_params(90.0, med),
+            TerrainLod::High
+        );
+        assert_eq!(
+            terrain_lod_for_distance_with_params(90.0, high),
+            TerrainLod::High
+        );
+        // 距离 150：Medium 已中级；High 高阈值 145，140 时仍高级、150 时降为中级
+        assert_eq!(
+            terrain_lod_for_distance_with_params(150.0, med),
+            TerrainLod::Medium
+        );
+        assert_eq!(
+            terrain_lod_for_distance_with_params(140.0, high),
+            TerrainLod::High
+        );
+        assert_eq!(
+            terrain_lod_for_distance_with_params(150.0, high),
+            TerrainLod::Medium
+        );
+    }
+}
+
+// ============================================================
+// PNG 截图纯逻辑单元测试
+// ============================================================
+
+#[cfg(test)]
+mod screenshot_pixel_tests {
+    use super::*;
+
+    #[test]
+    fn pixel_order_supported_formats() {
+        assert_eq!(
+            pixel_order_for_format(vk::Format::B8G8R8A8_UNORM),
+            Ok(PixelOrder::Bgra)
+        );
+        assert_eq!(
+            pixel_order_for_format(vk::Format::B8G8R8A8_SRGB),
+            Ok(PixelOrder::Bgra)
+        );
+        assert_eq!(
+            pixel_order_for_format(vk::Format::R8G8B8A8_UNORM),
+            Ok(PixelOrder::Rgba)
+        );
+        assert_eq!(
+            pixel_order_for_format(vk::Format::R8G8B8A8_SRGB),
+            Ok(PixelOrder::Rgba)
+        );
+        // 未知格式 → Err
+        assert!(pixel_order_for_format(vk::Format::A2B10G10R10_UNORM_PACK32).is_err());
+        assert!(pixel_order_for_format(vk::Format::UNDEFINED).is_err());
+    }
+
+    #[test]
+    fn convert_bgra_pixels_to_rgba() {
+        // BGRA 蓝色 [255,0,0,255] → RGBA 红色 [0,0,255,255]
+        let src = [255u8, 0, 0, 255];
+        let mut dst = [0u8; 4];
+        convert_pixels_to_rgba(vk::Format::B8G8R8A8_UNORM, &src, &mut dst).unwrap();
+        assert_eq!(dst, [0, 0, 255, 255]);
+        // 多像素行：R/B 交换、G/A 保持
+        let src2 = [10u8, 20, 30, 40, 1, 2, 3, 4];
+        let mut dst2 = [0u8; 8];
+        convert_pixels_to_rgba(vk::Format::B8G8R8A8_SRGB, &src2, &mut dst2).unwrap();
+        assert_eq!(dst2, [30, 20, 10, 40, 3, 2, 1, 4]);
+    }
+
+    #[test]
+    fn convert_rgba_pixels_passthrough() {
+        let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut dst = [0u8; 8];
+        convert_pixels_to_rgba(vk::Format::R8G8B8A8_SRGB, &src, &mut dst).unwrap();
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn convert_pixels_rejects_bad_length_or_format() {
+        // 长度不匹配 → Err
+        let src = [1u8, 2, 3];
+        let mut dst = [0u8; 4];
+        assert!(convert_pixels_to_rgba(vk::Format::R8G8B8A8_UNORM, &src, &mut dst).is_err());
+        let src2 = [1u8, 2, 3, 4];
+        let mut dst2 = [0u8; 3];
+        assert!(convert_pixels_to_rgba(vk::Format::R8G8B8A8_UNORM, &src2, &mut dst2).is_err());
+        // 未知格式 → Err
+        let mut dst3 = [0u8; 4];
+        assert!(convert_pixels_to_rgba(vk::Format::UNDEFINED, &src2, &mut dst3).is_err());
     }
 }
