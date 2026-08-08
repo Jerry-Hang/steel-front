@@ -235,9 +235,9 @@ impl GameApp {
         if let Some(renderer) = &mut self.renderer {
             let aspect = WINDOW_WIDTH as f32 / WINDOW_HEIGHT as f32;
             let view = self.camera.view_matrix();
-            // Vulkan NDC 的 Y 轴向下，投影矩阵需翻转 Y
-            let mut proj = self.camera.projection_matrix(aspect);
-            proj.y_axis = -proj.y_axis;
+            // 投影矩阵不翻转 Y：主 shader（triangle.vert.spv）已在 gl_Position.y 上完成
+            // Vulkan 翻转，若这里再翻一次会双重翻转导致画面上下颠倒（与 HUD shader 一致）。
+            let proj = self.camera.projection_matrix(aspect);
 
             // HUD：用上一帧渲染统计生成覆盖层 quad 并上传（首帧统计为 0）
             let (near, far, lod) = renderer.last_stats();

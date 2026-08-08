@@ -501,6 +501,16 @@ mod tests {
         assert_eq!(cam.pitch, PITCH_LIMIT);
     }
 
+    /// 投影矩阵保持 y-up NDC（Y 轴缩放为正）：Vulkan 的 Y 翻转由 shader
+    /// （triangle.vert.spv 的 gl_Position.y）完成，main.rs 不再翻转投影，
+    /// 避免双重翻转导致画面上下颠倒。
+    #[test]
+    fn projection_keeps_y_up_for_shader_flip() {
+        let cam = Camera::new();
+        let p = cam.projection_matrix(16.0 / 9.0);
+        assert!(p.y_axis.y > 0.0, "projection_matrix 应保持 y-up NDC");
+    }
+
     /// add_recoil：0.35s 内后坐力残留 <10%，且确实转动了视角；FirstPerson 不做位置移动
     #[test]
     fn add_recoil_decays_within_035s() {
