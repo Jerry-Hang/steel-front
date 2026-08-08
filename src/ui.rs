@@ -792,7 +792,7 @@ impl HudState {
         let h = self.screen_h;
         elems.push(HudElement::Quad(Quad::new(
             Rect::new(0.0, 0.0, w, h),
-            Color::new(0.1, 0.0, 0.0, 0.78),
+            Color::new(0.08, 0.08, 0.10, 0.72),
         )));
         let title = "GAME OVER";
         elems.push(HudElement::Text {
