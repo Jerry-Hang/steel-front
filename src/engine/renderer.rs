@@ -2266,7 +2266,7 @@ impl Renderer {
                 let model = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
                 self.instances.push(InstanceData {
                     model: model.to_cols_array(),
-                    tint: Self::random_light_tint(ix, iz),
+                    tint: [0.7, 0.7, 0.7, 1.0],
                 });
             }
         }
@@ -2332,16 +2332,6 @@ impl Renderer {
         );
         log::info!("instances={} draw_calls=1", INSTANCE_COUNT);
         Ok(())
-    }
-
-    /// 确定性随机浅色 tint（无新依赖，按网格坐标哈希）
-    fn random_light_tint(ix: u32, iz: u32) -> [f32; 4] {
-        let mut n = ix.wrapping_mul(0x9E37_79B9) ^ iz.wrapping_mul(0x85EB_CA6B);
-        n ^= n >> 16;
-        n = n.wrapping_mul(0x7FEB_352D);
-        n ^= n >> 15;
-        let channel = |shift: u32| 0.6 + 0.4 * (((n >> shift) & 0xFF) as f32 / 255.0);
-        [channel(0), channel(8), channel(16), 1.0]
     }
 
     /// Gribb–Hartmann：从 proj*view 提取 6 个视锥平面（法线朝内、归一化）
