@@ -789,12 +789,15 @@ impl Game {
                     glam::Vec3::new(origin[0], origin[1], origin[2]),
                     1.0,
                 );
-                self.sfx.play(
+                // 开火音效带确定性音量抖动（0.95..=1.0，按射击计数循环），避免机械重复
+                let shot_scale = 0.95 + 0.05 * ((self.shots % 5) as f32 / 4.0);
+                self.sfx.play_variant(
                     &mut self.audio.mixer_mut(),
                     SfxKind::Gunshot,
                     src,
                     Channel::Sfx,
                     false,
+                    shot_scale,
                 );
                 log::info!(
                     "weapons: shot #{} ({} alive)",
@@ -966,12 +969,15 @@ impl Game {
             if moved > 0.01 && self.time - self.footstep_timer >= FOOTSTEP_INTERVAL {
                 self.footstep_timer = self.time;
                 let src = AudioSource::new(self.player_pos(), 0.5);
-                self.sfx.play(
+                // 脚步声交替强弱（0.8 / 1.0），确定性变化
+                let step_scale = 0.8 + 0.2 * ((self.time * 2.0) as u32 % 2) as f32;
+                self.sfx.play_variant(
                     &mut self.audio.mixer_mut(),
                     SfxKind::Footstep,
                     src,
                     Channel::Sfx,
                     false,
+                    step_scale,
                 );
             }
         }

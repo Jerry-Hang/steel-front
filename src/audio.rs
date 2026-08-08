@@ -720,6 +720,23 @@ impl SfxBank {
         mixer.play(self.clip(kind).clone(), source, channel, looping)
     }
 
+    /// 播放指定音效并叠加音量缩放：`volume_scale` 先 clamp 到 0.0..=1.0，
+    /// 再乘到声源音量上（结果同样 clamp 到 0.0..=1.0），复用 `Mixer::play` 链路
+    pub fn play_variant(
+        &self,
+        mixer: &mut Mixer,
+        kind: SfxKind,
+        source: AudioSource,
+        channel: Channel,
+        looping: bool,
+        volume_scale: f32,
+    ) -> VoiceId {
+        let scale = volume_scale.clamp(0.0, 1.0);
+        let mut src = source;
+        src.volume = (src.volume * scale).clamp(0.0, 1.0);
+        mixer.play(self.clip(kind).clone(), src, channel, looping)
+    }
+
     /// `SfxKind` → clips 数组下标（内部/测试用）
     pub fn kind_index(&self, kind: SfxKind) -> usize {
         match kind {
@@ -1169,6 +1186,113 @@ mod tests {
             bank.play(&mut mixer, kind, AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
             assert_eq!(mixer.voice_count(), before + 1, "{kind:?} 播放后应新增 1 个 voice");
         }
+    }
+
+    /// 同一设置下混 `frames` 帧，返回首帧样本值（便于与 play 输出对比）
+    fn mix_first_sample(mixer: &mut Mixer, frames: usize) -> f32 {
+        let out = mixer.mix_vec(&AudioListener::new(Vec3::ZERO), frames);
+        out[0]
+    }
+
+    #[test]
+    fn sfx_bank_play_variant_volume_scale_bounds() {
+        let bank = SfxBank::new(44100);
+        // 0.0 缩放 → 静音
+        let mut mixer = Mixer::new();
+        bank.play_variant(
+            &mut mixer,
+            SfxKind::Gunshot,
+            AudioSource::new(Vec3::ZERO, 1.0),
+            Channel::Sfx,
+            false,
+            0.0,
+        );
+        assert_eq!(mix_first_sample(&mut mixer, 4), 0.0);
+        // 负值 clamp 到 0.0 → 同样静音
+        let mut mixer = Mixer::new();
+        bank.play_variant(
+            &mut mixer,
+            SfxKind::Gunshot,
+            AudioSource::new(Vec3::ZERO, 1.0),
+            Channel::Sfx,
+            false,
+            -1.0,
+        );
+        assert_eq!(mix_first_sample(&mut mixer, 4), 0.0);
+        // 超 1.0 clamp 到 1.0 → 与原始声源音量一致（不放大）
+        let mut mixer = Mixer::new();
+        bank.play_variant(
+            &mut mixer,
+            SfxKind::Gunshot,
+            AudioSource::new(Vec3::ZERO, 0.5),
+            Channel::Sfx,
+            false,
+            2.0,
+        );
+        assert!((mix_first_sample(&mut mixer, 4) - bank.clip(SfxKind::Gunshot).sample_frame(0, 0) * 0.5).abs() < EPS);
+    }
+
+    #[test]
+    fn sfx_bank_play_variant_scale_one_matches_play() {
+        let bank = SfxBank::new(44100);
+        for kind in ALL_SFX_KINDS {
+            let mut a = Mixer::new();
+            bank.play(&mut a, kind, AudioSource::new(Vec3::ZERO, 0.8), Channel::Sfx, false);
+            let baseline = mix_first_sample(&mut a, 4);
+
+            let mut b = Mixer::new();
+            bank.play_variant(
+                &mut b,
+                kind,
+                AudioSource::new(Vec3::ZERO, 0.8),
+                Channel::Sfx,
+                false,
+                1.0,
+            );
+            let scaled = mix_first_sample(&mut b, 4);
+            assert!((scaled - baseline).abs() < EPS, "{kind:?} scale=1.0 应与 play 等价");
+        }
+    }
+
+    #[test]
+    fn sfx_bank_play_variant_scales_output_amplitude() {
+        let bank = SfxBank::new(44100);
+        for kind in ALL_SFX_KINDS {
+            let mut full = Mixer::new();
+            bank.play(&mut full, kind, AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
+            let baseline = mix_first_sample(&mut full, 4);
+
+            let mut half = Mixer::new();
+            bank.play_variant(
+                &mut half,
+                kind,
+                AudioSource::new(Vec3::ZERO, 1.0),
+                Channel::Sfx,
+                false,
+                0.5,
+            );
+            let scaled = mix_first_sample(&mut half, 4);
+            assert!((scaled - baseline * 0.5).abs() < EPS, "{kind:?} 0.5 缩放应减半");
+        }
+    }
+
+    #[test]
+    fn sfx_bank_play_variant_silent_sink_no_panic() {
+        let bank = SfxBank::new(44100);
+        let mut player = AudioPlayer::new(SilentSink::new(44100, 2));
+        for kind in ALL_SFX_KINDS {
+            bank.play_variant(
+                player.mixer_mut(),
+                kind,
+                AudioSource::new(Vec3::ZERO, 1.0),
+                Channel::Sfx,
+                false,
+                0.5,
+            );
+        }
+        // 静默后端下 tick 不应 panic；4 帧远短于 clip 时长，6 个 voice 应全部存活
+        player.tick(&AudioListener::new(Vec3::ZERO), 4);
+        assert_eq!(player.mixer().voice_count(), ALL_SFX_KINDS.len());
     }
 
     #[test]
