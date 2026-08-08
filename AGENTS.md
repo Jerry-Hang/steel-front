@@ -13,11 +13,17 @@
 
 ## 当前进度快照（2026-08-08，wsl --shutdown 前固化）
 
-### 已完成（Wave 2/3/4 已推送 origin/master）
+### 已完成（Wave 2/3/4 + 2026-08-08 渲染/输入修复，全部已推送 origin/master）
 - Wave 2：`d5a4240` feat(game) / `5bd5f57` chore(scripts) / `0b7f5e6` docs
 - Wave 3：`e593272` chore(wip) checkpoint / `bd2bb1f` feat(config) / `1010447` chore(game) / `f7e5f01` docs
 - Wave 4 + 修复：主题/波次/截图/画质等已推送；`18ad6ca` docs(AGENTS.md)
-- 2026-08-08 修复：投影双重 Y 翻转致画面倒立 / F12 截图读回 VUID 不落盘 / 光标捕获自转
+- 2026-08-08 渲染修复：投影双重 Y 翻转致画面倒立（camera 用 perspective_rh、翻转只归 shader）/
+  F12 截图读回 VUID 不落盘（用 in_flight_fences 等待）/ test.png 四象限调试图改纯中灰 128 /
+  GAME OVER 全屏暗红遮罩改中性深灰 / 地面彩虹棋盘格来自立方体 6 面多色顶点色 × tint，
+  已白化 VERTICES 顶点色（`91a6489`）+ 实例 tint 固定 0.7 灰（`fc7b50a`）
+- 2026-08-08 地形/输入修复：地形全图拍平 y=0（`d08cd21`，删 value_noise/flatten_mask/noise_hash，
+  保留 smooth_t 供 LOD morph）/ 鼠标灵敏度默认减半 0.003→0.0015 rad/px（`e068b02`）/
+  视角改 XInput2 相对增量驱动（`5373a08`，WSLg/Xwayland 下 grab 不可靠，勿回退）
 - `.wslconfig` 已配置 `[wsl2] networkingMode=mirrored + dnsTunneling + firewall + autoProxy`，待 `wsl --shutdown` 生效
 - 验收快照：176 tests passed、0 警告、20s 冒烟 ALL-OK（kills=1、VUID=0、fps 214.8–292.7）
 
@@ -45,6 +51,9 @@
 - F12 截图读回用 in_flight_fences 等待（vkWaitSemaphores 只接受 timeline 信号量，会 VUID + PNG 不落盘）
 - 光标捕获瞬间 last_cursor 对齐窗口中心 + 512px 跳变守卫，防回中 warp 被当视角位移致自转
 - test.png 四象限调试图导致面劈裂，已换中灰（2026-08-08 修复）
+- 地形已全图拍平 y=0（terrain_height 返回 0.0，terrain_height_at 同源；NPC/实例/网格共用）
+- 实例场/障碍立方体顶点色全部白化（VERTICES/FAR_VERTS），颜色只走 tint；
+  地形实例 tint=0.7 灰、marker tint=WorldMarker.tint（勿混）
 
 ### 输入/键位与分辨率约定（勿回退）
 - 键码一律用 winit 0.30 KeyCode 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/KeyR=36/
@@ -59,3 +68,14 @@
 - 默认分辨率按主显示器宽高比：16:10 → 1280x800，16:9 及其它 → 1280x720
   （仅首次运行/配置无 resolution 行时生效；配置显式保存后以配置为准）
 - 冒烟 FPS 阈值 120（默认 1280x800 下 dzn 转译驱动约 165-275 FPS，勿回调到 200）
+- 灵敏度映射：`sensitivity_rads() = 0.0005 + hud.sensitivity*0.002`（默认 0.5 → 0.0015 rad/px，
+  main.rs 每帧 set_mouse_sens 同步到 camera；勿改回 0.003 起步）
+- 鼠标视角驱动：捕获态优先 DeviceEvent::MouseMotion（XInput2 相对增量，与光标位置无关）；
+  WSLg/Xwayland 下 set_cursor_grab(Locked) 返回 Err、Confined 无效，绝对位置+warp 路径
+  会产生回声乱转，勿回退到纯 CursorMoved+warp
+
+### 已知问题/待办（2026-08-08 快照）
+- 低头剔除 bug：pitch < 约 -30° 时近档实例场被视锥剔除全灭（日志 visible=near=0），
+  画面只剩远档+雾；排查 extract_frustum_planes / near plane（与地形拍平无关，既有问题）
+- mipmap 缺失：纹理 mip_levels(1) + sampler mipmap_mode(LINEAR) 无 mip 链，
+  地平线远处锯齿闪烁（渲染约定勿回退：加 mip 链需同步放宽 image view/sampler）
