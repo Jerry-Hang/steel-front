@@ -112,6 +112,8 @@ def aim(yaw_tgt_deg, pitch_tgt_deg, hold_lmb):
         print(f"  aim round: cur=({cur[0]:.1f},{cur[1]:.1f}) tgt=({yaw_tgt_deg:.1f},{pitch_tgt_deg:.1f}) "
               f"inject=({dx},{dy})", flush=True)
         if abs(dx) < 2 and abs(dy) < 2:
+            if hold_lmb:
+                xtst.XTestFakeButtonEvent(d, 1, 0, 0); flush()   # 松键：收敛即结束拖拽
             return True
         if hold_lmb:
             xtst.XTestFakeButtonEvent(d, 1, 1, 0); flush()
@@ -119,7 +121,7 @@ def aim(yaw_tgt_deg, pitch_tgt_deg, hold_lmb):
         flush(); time.sleep(1.2)
     if hold_lmb:
         xtst.XTestFakeButtonEvent(d, 1, 0, 0); flush()   # 松键：拖拽瞄准结束
-    return True
+    return False
 SPACE, LMB = 65, 1
 activate()
 if not win:
@@ -165,10 +167,28 @@ def fire_at(npc):
     d3 = math.hypot(cx, cz)
     print(f"aim npc #{npc[0]} C=({cx:.1f},{cy:.1f},{cz:.1f}) dist={d3:.1f} "
           f"yaw={yaw_tgt:.1f} pitch={pitch_tgt:.1f}", flush=True)
-    warp_to_center()
-    # FPS 拖拽视角：按住左键拖拽（捕获态/非捕获态都能转视角，不依赖焦点）
-    aim(yaw_tgt, pitch_tgt, True)
-    warp_to_center()
+    # FPS 拖拽视角：按住左键拖拽（捕获态/非捕获态都能转视角，不依赖焦点）。
+    # 收敛校验：最多 3 次瞄准尝试，未收敛绝不开火（防瞄准螺旋浪费窗口被 NPC 抢杀）
+    converged = False
+    for sub in range(3):
+        warp_to_center()
+        if aim(yaw_tgt, pitch_tgt, True):
+            converged = True
+            break
+        print(f"  aim sub-attempt {sub + 1}/3 NOT converged, retrying", flush=True)
+    if not converged:
+        print("  aim FAILED to converge, skipping fire", flush=True)
+        return False
+    # 静置：等回中 warp 事件消化，避免开火瞬间相机仍在转动
+    time.sleep(0.6)
+    # 开火前最后复核：若相机偏离目标 > 3° 则放弃本次（宁可换目标也不空射）
+    cur = cam_now(log_tail())
+    if cur:
+        dyaw = ((yaw_tgt - cur[0] + 540.0) % 360.0) - 180.0
+        dpitch = cur[1] - pitch_tgt
+        if abs(dyaw) > 3.0 or abs(dpitch) > 3.0:
+            print(f"  aim drift before fire: dyaw={dyaw:.1f} dpitch={dpitch:.1f}, skip", flush=True)
+            return False
     # 点射 6 发：25 伤害 × 4 = 100 hp；射速上限 3/s，间隔 0.35s；后坐力快速恢复
     for _ in range(6):
         xtst.XTestFakeButtonEvent(d, LMB, 1, 0); flush()
