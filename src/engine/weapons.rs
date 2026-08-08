@@ -228,6 +228,11 @@ impl Projectile {
         self.distance_traveled
     }
 
+    /// 速度向量（米/秒；供 AI 火力威胁感知判断子弹是否朝自身飞来）
+    pub fn velocity(&self) -> [f32; 3] {
+        self.velocity
+    }
+
     /// 已存活时间（秒）
     #[allow(dead_code)] // 调试/诊断预留 getter
     pub fn age(&self) -> f32 {

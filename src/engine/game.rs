@@ -13,8 +13,9 @@ use crate::audio::{AudioListener, AudioPlayer, AudioSource, Channel, SilentSink,
 use crate::net::{Client, NetworkMessage, PlayerState, Server};
 use super::camera::{Camera, CameraMode};
 use super::ai::{
-    find_cover_points, find_path, flank_goal, should_flank, wave_profile, GridMap, GridPos,
-    NpcPerception, NpcState, NpcStateMachine, WaveKind,
+    ambush_goal, angle_diff, find_cover_points, find_cover_shielding, find_path, flank_goal,
+    pick_tactic, role_for, should_charge, wave_profile, yaw_to_target, zigzag_offset, GridMap,
+    GridPos, NpcPerception, NpcState, NpcStateMachine, TacticalRole, Tactic, WaveKind,
 };
 use super::physics::{self, Body, CollisionEvent, CollisionListener, PlayerBody, Vec3 as Pv};
 use super::renderer::terrain_height_at;
@@ -40,6 +41,30 @@ const WAVE_CLEAR_BONUS: u64 = 25;
 const PLAYER_SPEED: f32 = 6.0;
 /// NPC 就近掩体搜索半径（网格格数）
 const COVER_MAX_DIST: u32 = 10;
+/// 玩家准星对准判定角（弧度，≈14°）
+const AIM_ANGLE: f32 = 0.25;
+/// 低血量撤退阈值（hp 占比）
+const LOW_HP_RATIO: f32 = 0.35;
+/// 火力威胁感知半径（米）：子弹水平距离小于该值且朝 NPC 飞来
+const THREAT_RADIUS: f32 = 10.0;
+/// 躲避触发距离（米）
+const DODGE_TRIGGER_DIST: f32 = 30.0;
+/// 受击躲避持续（秒）
+const DODGE_HIT_TIME: f32 = 0.5;
+/// 火力威胁躲避持续（秒）
+const DODGE_THREAT_TIME: f32 = 0.35;
+/// 两次躲避最小间隔（秒）
+const DODGE_COOLDOWN: f32 = 2.0;
+/// 锯齿机动触发距离（米）
+const ZIGZAG_DIST: f32 = 40.0;
+/// 常规锯齿幅度（米）
+const ZIGZAG_AMP: f32 = 1.5;
+/// 被瞄准/火力威胁时的锯齿幅度（米）
+const ZIGZAG_AMP_HIGH: f32 = 2.5;
+/// 侧翼包抄偏移（格，12m）
+const FLANK_OFFSET: u32 = 3;
+/// 偷袭绕背偏移（格，20m）
+const AMBUSH_OFFSET: u32 = 5;
 /// 脚步声音效限频间隔（秒）
 const FOOTSTEP_INTERVAL: f32 = 0.5;
 /// 每关波次数：清完 WAVES_PER_LEVEL 波升关，难度按累计有效波次递进（跨关不回落）
@@ -97,6 +122,16 @@ pub struct Npc {
     pub hp: f32,
     /// 血量上限（出生时设定，随波次递进）
     pub max_hp: f32,
+    /// 战术角色（每波确定性分配，见 ai::role_for）
+    pub role: TacticalRole,
+    /// 当前战术（移动态行为，每帧由 pick_tactic 决策）
+    pub tactic: Tactic,
+    /// 受击/火力威胁后的侧向躲避剩余时间（秒）
+    dodge_timer: f32,
+    /// 两次躲避的最小间隔倒计时（秒）
+    hit_cooldown: f32,
+    /// 上一帧血量（受击检测）
+    last_hp: f32,
 }
 
 /// 世界坐标 → 网格坐标（±256 → 0..128）
@@ -387,6 +422,8 @@ pub struct Game {
     pub npcs: Vec<Npc>,
     /// 上次 AI 统计日志时间（限频）
     ai_log_time: f32,
+    /// 同步冲锋滞回状态（开启后需 <60% 才取消）
+    charge_active: bool,
     /// 上次对玩家造成伤害的时间（攻击态 NPC 每秒扣血）
     last_damage_time: f32,
     /// HUD 状态（每帧喂 fps/血量，渲染前取 quad 列表）
@@ -457,6 +494,11 @@ impl Game {
                 path_index: 0,
                 hp: 100.0,
                 max_hp: 100.0,
+                role: TacticalRole::Rusher,
+                tactic: Tactic::Advance,
+                dodge_timer: 0.0,
+                hit_cooldown: 0.0,
+                last_hp: 100.0,
             });
         }
         let mut game = Self {
@@ -492,6 +534,7 @@ impl Game {
             grid: GridMap::new(GRID_SIZE, GRID_SIZE),
             npcs,
             ai_log_time: 0.0,
+            charge_active: false,
             last_damage_time: 0.0,
             hud: HudState::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             frames: 0,
@@ -1237,6 +1280,7 @@ impl Game {
             self.reinforcement_done = true;
             let slot_base = profile.count;
             let divisor = profile.count.max(1);
+            let effective = self.effective_wave(self.wave);
             for k in 0..profile.reinforcement_count {
                 self.spawn_npc_ring(
                     player,
@@ -1246,6 +1290,7 @@ impl Game {
                     profile.speed,
                     profile.hp,
                     profile.attack_range,
+                    role_for(slot_base + k, effective, profile.flank_chance),
                 );
             }
             log::info!(
@@ -1314,7 +1359,13 @@ impl Game {
                 Some(b) if i + 1 == count => (b.speed, b.hp, b.attack_range),
                 _ => (speed, hp, attack_range),
             };
-            let id = self.spawn_npc_ring(player, i as u32, count as u32, n, spd, hpx, rng);
+            // Boss 主怪固定突击角色：高血量压阵直线推进（保证参团冲锋，不绕侧/站桩）
+            let role = if profile.boss.is_some() && i + 1 == count {
+                TacticalRole::Rusher
+            } else {
+                role_for(i as u32, effective, profile.flank_chance)
+            };
+            let id = self.spawn_npc_ring(player, i as u32, count as u32, n, spd, hpx, rng, role);
             if profile.boss.is_some() && i + 1 == count {
                 log::info!(
                     "wave: boss #{} spawn (hp={:.0} speed={:.1} attack={:.0})",
@@ -1351,6 +1402,7 @@ impl Game {
         speed: f32,
         hp: f32,
         attack_range: f32,
+        role: TacticalRole,
     ) -> usize {
         let tau = std::f32::consts::TAU;
         let angle = slot as f32 * (tau / divisor.max(1) as f32) + wave_n as f32 * 0.37;
@@ -1386,29 +1438,107 @@ impl Game {
             path_index: 0,
             hp,
             max_hp: hp,
+            role,
+            tactic: Tactic::Advance,
+            dodge_timer: 0.0,
+            hit_cooldown: 0.0,
+            last_hp: hp,
         });
         id
     }
 
-    /// 推进 NPC：感知 → 状态机 → A* 路径 → 移动 → 地形高度
+    /// 推进 NPC：感知 → 状态机 → 战术决策 → A* 路径 → 移动 → 地形高度
+    ///
+    /// 战术层（见 ai.rs）：
+    /// - 角色分工：每波确定性分配 突击/包抄/压制/掩体跃进，左右包抄按 id 奇偶分工
+    /// - 进攻协同：Chase/Attack 过半 → 同步冲锋（压制手除外，保持压制）
+    /// - 躲避攻击：移动态受击/被火力威胁 → 侧向弹开（Attack 站定是冒烟瞄准依据，不躲）
+    /// - 偷袭绕路：包抄手在玩家未面朝时绕大圈逼近，被发现转侧翼
     fn update_ai(&mut self, dt: f32, camera: &Camera) {
         let player = camera.position();
         let grid = self.grid.clone();
-        let flank_chance = wave_profile(self.wave).flank_chance;
+        let time = self.time;
+        let player_yaw = camera.yaw;
+        // 同步冲锋判定：本帧开始时 Chase/Attack 数量过半 → 全队突进
+        let active = self
+            .npcs
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.state_machine.state(),
+                    NpcState::Chase | NpcState::Attack
+                )
+            })
+            .count() as u32;
+        let charge = should_charge(active, self.npcs.len() as u32, self.charge_active);
+        self.charge_active = charge;
+        // 弹道威胁预扫：存活子弹水平距离 < THREAT_RADIUS 且朝 NPC 方向飞行 → 该 NPC 受火力威胁
+        let under_fire = {
+            let mut flags = vec![false; self.npcs.len()];
+            for p in &self.projectiles {
+                if !p.is_alive() {
+                    continue;
+                }
+                let v = p.velocity();
+                for (i, npc) in self.npcs.iter().enumerate() {
+                    if flags[i] {
+                        continue;
+                    }
+                    let dx = npc.position[0] - p.position[0];
+                    let dz = npc.position[2] - p.position[2];
+                    if dx * dx + dz * dz > THREAT_RADIUS * THREAT_RADIUS {
+                        continue;
+                    }
+                    if dx * v[0] + dz * v[2] > 0.0 {
+                        flags[i] = true;
+                    }
+                }
+            }
+            flags
+        };
         for i in 0..self.npcs.len() {
-            let (npc, time) = (&mut self.npcs[i], self.time);
+            let npc = &mut self.npcs[i];
             let dx = npc.position[0] - player.x;
             let dz = npc.position[2] - player.z;
             let dist = (dx * dx + dz * dz).sqrt();
+            let yaw_to = yaw_to_target(player.x, player.z, npc.position[0], npc.position[2]);
+            let facing_angle = angle_diff(player_yaw, yaw_to).abs();
             let prev = npc.state_machine.state();
+            let took_hit = npc.hp < npc.last_hp - 0.001;
             npc.perception = NpcPerception {
                 enemy_visible: dist < NPC_SIGHT,
                 enemy_in_range: dist < npc.attack_range,
                 start_patrol: prev == NpcState::Idle,
                 patrol_finished: false,
+                player_aiming: facing_angle < AIM_ANGLE && dist < NPC_SIGHT,
+                player_facing: facing_angle < std::f32::consts::FRAC_PI_2,
+                took_hit,
+                low_hp: npc.hp < npc.max_hp * LOW_HP_RATIO,
+                under_fire: under_fire[i],
             };
             let state = npc.state_machine.update(npc.perception);
-            advance_npc(npc, state, &player, &grid, time, dt, flank_chance, self.wave);
+            // 躲避触发：仅移动态（Attack 站定是冒烟瞄准依据）；受击反应更强、冷却更久
+            if state != NpcState::Attack
+                && npc.hit_cooldown <= 0.0
+                && dist < DODGE_TRIGGER_DIST
+                && (took_hit || under_fire[i])
+            {
+                npc.dodge_timer = if took_hit {
+                    DODGE_HIT_TIME
+                } else {
+                    DODGE_THREAT_TIME
+                };
+                npc.hit_cooldown = DODGE_COOLDOWN;
+            }
+            npc.last_hp = npc.hp;
+            // 战术决策：低血量撤退 / 角色行为 / 玩家是否面朝（偷袭）；冲锋覆盖为突进
+            let mut tactic = pick_tactic(npc.role, &npc.perception);
+            // 冲锋覆盖为突进，但不剥夺低血量撤退
+            if charge && npc.role != TacticalRole::Suppressor && tactic != Tactic::Retreat {
+                tactic = Tactic::Advance;
+            }
+            npc.tactic = tactic;
+            advance_npc(npc, state, tactic, &player, player_yaw, &grid, time, dt);
             // 攻击态站定：打位置日志，冒烟 harness 读日志后从对跖点瞄准点射
             if state == NpcState::Attack && prev != NpcState::Attack {
                 log::info!(
@@ -1423,16 +1553,19 @@ impl Game {
         if self.time - self.ai_log_time >= 1.0 {
             self.ai_log_time = self.time;
             let mut counts = [0u32; 4];
+            let mut tactics = [0u32; 7];
             for npc in &self.npcs {
                 counts[npc.state_machine.state() as usize] += 1;
+                tactics[npc.tactic as usize] += 1;
             }
             log::info!(
-                "ai: npcs={} idle={} patrol={} chase={} attack={}",
+                "ai: npcs={} idle={} patrol={} chase={} attack={} tactics={:?}",
                 self.npcs.len(),
                 counts[0],
                 counts[1],
                 counts[2],
-                counts[3]
+                counts[3],
+                tactics
             );
         }
         // 攻击态 NPC 对玩家造成伤害（1 秒一次），驱动 HUD 血条
@@ -2159,31 +2292,60 @@ mod tests {
     }
 }
 
-/// 按状态推进单个 NPC：目标选择 → A* 寻路 → 沿路径移动 → 地形高度采样
+/// 按状态与战术推进单个 NPC：目标选择 → A* 寻路 → 移动（锯齿/躲避）→ 地形高度采样
 fn advance_npc(
     npc: &mut Npc,
     state: NpcState,
+    tactic: Tactic,
     player: &glam::Vec3,
+    player_yaw: f32,
     grid: &GridMap,
     time: f32,
     dt: f32,
-    flank_chance: f32,
-    wave: u32,
 ) {
-    // 无路径（或已走完）时按状态选择目标
+    // 无路径（或已走完）时按状态 + 战术选择目标
     if npc.path.is_empty() || npc.path_index >= npc.path.len() {
         let goal = match state {
-            NpcState::Chase => {
-                let player_g = world_to_grid(player.x, player.z);
-                let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                if should_flank(flank_chance, npc.id as u32, wave) {
-                    // 包抄：沿 玩家→NPC 轴 的垂直方向偏移 2 格（8m），从侧翼逼近
+            NpcState::Chase => match tactic {
+                // 突击/压制：直线逼近（压制手到射程边缘即转 Attack 站定）
+                Tactic::Advance | Tactic::Suppress => world_to_grid(player.x, player.z),
+                // 侧翼包抄：垂直轴向偏移 3 格（12m），id 奇偶定左右形成钳形
+                Tactic::Flank => {
+                    let player_g = world_to_grid(player.x, player.z);
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
                     let side = if npc.id % 2 == 0 { 1 } else { -1 };
-                    flank_goal(grid, player_g, npc_g, side, 2)
-                } else {
-                    player_g
+                    flank_goal(grid, player_g, npc_g, side, FLANK_OFFSET)
                 }
-            }
+                // 偷袭绕背：玩家未面朝时绕大圈（20m 偏移）从背后逼近
+                Tactic::Ambush => {
+                    let player_g = world_to_grid(player.x, player.z);
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    ambush_goal(grid, player_g, npc_g, player_yaw, AMBUSH_OFFSET)
+                }
+                // 掩体跃进：逐掩体推进（只选比当前更靠近玩家的掩体）
+                Tactic::CoverAdvance => {
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let player_g = world_to_grid(player.x, player.z);
+                    let cur = npc_g.manhattan(player_g);
+                    match find_cover_points(grid, npc_g, COVER_MAX_DIST)
+                        .into_iter()
+                        .find(|c| c.dist < cur)
+                    {
+                        Some(cover) => cover.pos,
+                        None => player_g,
+                    }
+                }
+                // 低血量撤退：撤向最封闭且较远的遮挡掩体（阻挡格挡在 NPC 与玩家之间）
+                Tactic::Retreat => {
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let player_g = world_to_grid(player.x, player.z);
+                    find_cover_shielding(grid, npc_g, player_g, COVER_MAX_DIST)
+                        .first()
+                        .map(|c| c.pos)
+                        .unwrap_or(npc_g)
+                }
+                Tactic::Hold => world_to_grid(npc.position[0], npc.position[2]),
+            },
             NpcState::Attack => {
                 // 就近掩体站定（贴障碍簇）；无掩体原地（保持攻击站定日志供冒烟瞄准）
                 let npc_g = world_to_grid(npc.position[0], npc.position[2]);
@@ -2207,8 +2369,25 @@ fn advance_npc(
         npc.path_index = 0;
     }
 
+    // 躲避冷却/计时无条件递减（含 Attack 态，防冻结窗口；残留计时归零防"幽灵侧移"）
+    npc.hit_cooldown = (npc.hit_cooldown - dt).max(0.0);
+    npc.dodge_timer = (npc.dodge_timer - dt).max(0.0);
+
+    // 攻击态原地站定（冒烟瞄准依据 `npc: #id stand`）
     if state == NpcState::Attack {
-        // 攻击态原地站定
+        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+        return;
+    }
+
+    // 受击/火力威胁后侧向弹开（垂直于 玩家→NPC 方向，id 奇偶定左右）
+    if npc.dodge_timer > 0.0 {
+        let dx = npc.position[0] - player.x;
+        let dz = npc.position[2] - player.z;
+        let d = (dx * dx + dz * dz).sqrt().max(1e-4);
+        let side = if npc.id % 2 == 0 { 1.0 } else { -1.0 };
+        let step = npc.speed * dt;
+        npc.position[0] += -dz / d * side * step;
+        npc.position[2] += dx / d * side * step;
         npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
         return;
     }
@@ -2224,9 +2403,27 @@ fn advance_npc(
     if d < 1.0 {
         npc.path_index += 1;
     } else if d > 1e-4 {
+        // 推进态锯齿机动：垂直前进方向横向摆动（被瞄准/火力威胁时幅度加大）
+        let dxp = npc.position[0] - player.x;
+        let dzp = npc.position[2] - player.z;
+        let dist_p = (dxp * dxp + dzp * dzp).sqrt();
+        let (mut mx, mut mz) = (dx / d, dz / d);
+        if state == NpcState::Chase && dist_p < ZIGZAG_DIST && tactic != Tactic::Retreat {
+            let amp = if npc.perception.under_fire || npc.perception.player_aiming {
+                ZIGZAG_AMP_HIGH
+            } else {
+                ZIGZAG_AMP
+            };
+            let off = zigzag_offset(time, npc.id as u32, amp);
+            mx += -dz / d * off;
+            mz += dx / d * off;
+            let mlen = (mx * mx + mz * mz).sqrt().max(1e-4);
+            mx /= mlen;
+            mz /= mlen;
+        }
         let step = npc.speed * dt;
-        npc.position[0] += dx / d * step;
-        npc.position[2] += dz / d * step;
+        npc.position[0] += mx * step;
+        npc.position[2] += mz * step;
     }
     npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
 }

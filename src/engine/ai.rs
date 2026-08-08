@@ -1,12 +1,13 @@
-//! AI 寻路系统模块
+//! AI 寻路与战术决策系统模块
 //!
 //! - 网格地图 A* 寻路（2D grid，可通行/阻挡）
 //! - NPC 状态机：Idle → Patrol → Chase → Attack（含状态转换条件）
-//! - 网格阻挡避障：A* 搜索自动绕过阻挡格
-//! - 掩体点搜索 / 包抄目标点 / 波次难度曲线（供 Wave2 集成使用）
+//! - 战术层：角色分工（突击/包抄/压制/掩体跃进）、战术决策（推进/侧翼/偷袭/撤退/站定）、
+//!   多 AI 协同（同步冲锋、左右包抄分工）、躲避机动（锯齿推进/受击侧向弹开/火力威胁感知）
+//! - 掩体点搜索（含遮挡掩体）/ 包抄目标点 / 偷袭绕背目标点 / 波次难度曲线
 //! - 特殊波次：每 5 波 Boss 主怪、每 3 波援军补怪（wave_kind / boss_profile / wave_profile）
 //!
-//! 本模块仅依赖 std，暂未在 `main` 中接线（先独立提供实现与单元测试）。
+//! 本模块仅依赖 std；`game.rs` 每帧按「感知填充 → 状态机 → 战术决策 → `advance_npc` 推进」接线。
 
 #![allow(dead_code)]
 
@@ -222,7 +223,9 @@ pub enum NpcState {
 }
 
 /// 状态机感知输入（由 AI 感知层每帧填充）
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// 前 4 项为状态机转换条件；后 5 项为战术决策与躲避机动的输入。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NpcPerception {
     /// 视野内是否存在敌人
     pub enemy_visible: bool,
@@ -232,6 +235,16 @@ pub struct NpcPerception {
     pub start_patrol: bool,
     /// 巡逻路线是否完成
     pub patrol_finished: bool,
+    /// 玩家准星是否大致对准本 NPC（水平夹角 < 约 14°）
+    pub player_aiming: bool,
+    /// 玩家是否面朝本 NPC（水平夹角 < 90°；false 时包抄手可偷袭绕背）
+    pub player_facing: bool,
+    /// 本帧受击（血量较上一帧下降）
+    pub took_hit: bool,
+    /// 低血量（hp < 35% 上限）
+    pub low_hp: bool,
+    /// 有子弹正朝本 NPC 接近（火力威胁，供移动态躲避）
+    pub under_fire: bool,
 }
 
 /// NPC 状态机（Idle → Patrol → Chase → Attack）
@@ -513,6 +526,181 @@ pub fn wave_profile(n: u32) -> WaveProfile {
 pub fn should_flank(flank_chance: f32, npc_id: u32, wave: u32) -> bool {
     let r = ((npc_id as u64 * 7 + wave as u64 * 13) % 100) as f32 / 100.0;
     r < flank_chance
+}
+
+/// 战术角色（多 AI 协同的分工基础，每波按 NPC id 与波次确定性分配）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TacticalRole {
+    /// 突击手：直线突进，接近时锯齿机动
+    Rusher,
+    /// 侧翼包抄：沿垂直轴向大偏移绕到玩家侧面
+    Flanker,
+    /// 压制手：推进到射程边缘站定压制
+    Suppressor,
+    /// 掩体跃进：逐掩体推进
+    CoverCrawler,
+}
+
+/// 战术角色分配：由 `(spawn 槽位, wave)` 确定性哈希生成，同参数永远同角色。
+///
+/// 分配规则（按序取第一命中）：
+/// - 哈希值落入 `flank_chance` 区间 → `Flanker`（沿用波次包抄概率）
+/// - 第 2 波起，其余哈希为偶数 → `Suppressor`（约半数转为压制手）
+/// - 第 3 波起，其余哈希能被 3 整除 → `CoverCrawler`
+/// - 其余 → `Rusher`
+pub fn role_for(slot: u32, wave: u32, flank_chance: f32) -> TacticalRole {
+    let h = slot.wrapping_mul(31).wrapping_add(wave.wrapping_mul(17)) % 100;
+    let flank_pct = (flank_chance.clamp(0.0, 1.0) * 100.0) as u32;
+    if h < flank_pct {
+        TacticalRole::Flanker
+    } else if wave >= 2 && h % 2 == 0 {
+        TacticalRole::Suppressor
+    } else if wave >= 3 && h % 3 == 0 {
+        TacticalRole::CoverCrawler
+    } else {
+        TacticalRole::Rusher
+    }
+}
+
+/// 战斗战术（移动态行为选择；Attack 态统一站定开火，保证冒烟瞄准机制）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tactic {
+    /// 直线突进（接近时锯齿躲避机动）
+    Advance,
+    /// 侧翼包抄（垂直轴向偏移绕到侧面）
+    Flank,
+    /// 偷袭绕背：玩家未面朝时绕大圈逼近；被发现后转侧翼
+    Ambush,
+    /// 压制：推进到射程边缘站定
+    Suppress,
+    /// 掩体间跃进
+    CoverAdvance,
+    /// 低血量撤向遮挡掩体
+    Retreat,
+    /// 站定开火（Attack 态）
+    Hold,
+}
+
+/// 战术决策：低血量且未进入射程 → 撤退；否则按角色 + 玩家是否面朝本 NPC。
+///
+/// 进入射程后状态机切到 `Attack`（站定开火），战术退居其次。
+pub fn pick_tactic(role: TacticalRole, p: &NpcPerception) -> Tactic {
+    if p.low_hp && !p.enemy_in_range {
+        return Tactic::Retreat;
+    }
+    match role {
+        TacticalRole::Rusher => Tactic::Advance,
+        TacticalRole::Flanker => {
+            if p.player_facing {
+                Tactic::Flank
+            } else {
+                Tactic::Ambush
+            }
+        }
+        TacticalRole::Suppressor => Tactic::Suppress,
+        TacticalRole::CoverCrawler => Tactic::CoverAdvance,
+    }
+}
+
+/// 同步冲锋判定（带滞回，防边界震荡）：未激活时 Chase/Attack ≥50% 且 ≥2 只 → 触发；
+/// 已激活后需 ≥60% 保持，低于 60% 才取消。
+pub fn should_charge(attacking: u32, total: u32, active: bool) -> bool {
+    if total == 0 {
+        return false;
+    }
+    if active {
+        attacking * 10 >= total * 6
+    } else {
+        attacking >= 2 && attacking * 10 >= total * 5
+    }
+}
+
+/// 角度差归一到 `[-π, π]`（camera.yaw 无界累加，跨 ±π 比较前必须归一）。
+pub fn angle_diff(a: f32, b: f32) -> f32 {
+    let mut d = a - b;
+    while d > std::f32::consts::PI {
+        d -= std::f32::consts::TAU;
+    }
+    while d < -std::f32::consts::PI {
+        d += std::f32::consts::TAU;
+    }
+    d
+}
+
+/// 目标方位角（弧度，与 camera.yaw 同约定：yaw=0 看向 -Z，逆时针为正）。
+pub fn yaw_to_target(from_x: f32, from_z: f32, to_x: f32, to_z: f32) -> f32 {
+    // 写成 (from - to) 避免 -0.0 参与 atan2（atan2(-0.0, -1.0) = -π 而非 π）
+    (from_x - to_x).atan2(from_z - to_z)
+}
+
+/// 锯齿躲避横向偏移：时间驱动正弦，相位按 id 确定性错开，结果在 `[-amplitude, amplitude]`。
+pub fn zigzag_offset(time: f32, id: u32, amplitude: f32) -> f32 {
+    amplitude * (time * 2.2 + id as f32 * 1.7).sin()
+}
+
+/// 遮挡掩体搜索：仅返回「邻接阻挡格位于 NPC 与玩家之间」的掩体候选
+/// （即玩家视线/弹道会被该阻挡格挡住），排序与 `find_cover_points` 一致。
+pub fn find_cover_shielding(
+    grid: &GridMap,
+    npc: GridPos,
+    player: GridPos,
+    max_dist: u32,
+) -> Vec<CoverPoint> {
+    if npc == player {
+        return Vec::new();
+    }
+    let px = (player.x - npc.x) as f32;
+    let pz = (player.y - npc.y) as f32;
+    let player_len = (px * px + pz * pz).sqrt();
+    let mut covers = find_cover_points(grid, npc, max_dist);
+    covers.retain(|c| {
+        NEIGHBOR_OFFSETS.iter().any(|&(dx, dy)| {
+            let n = GridPos::new(c.pos.x + dx, c.pos.y + dy);
+            if !grid.in_bounds(n) || grid.is_passable(n) {
+                return false;
+            }
+            let bx = (n.x - npc.x) as f32;
+            let bz = (n.y - npc.y) as f32;
+            let block_len = (bx * bx + bz * bz).sqrt();
+            // 阻挡格在 npc → player 方向（点积 > 0）
+            (bx * px + bz * pz) / (block_len * player_len) > 0.0
+        })
+    });
+    // 撤退掩体排序：封闭性优先（openness 升序），同封闭性取离 NPC 更远者（dist 降序），
+    // 避免取到"最开放"的暴露点；调用方取 `.first()`。
+    covers.sort_by(|a, b| {
+        a.openness
+            .cmp(&b.openness)
+            .then(b.dist.cmp(&a.dist))
+            .then(a.pos.x.cmp(&b.pos.x))
+            .then(a.pos.y.cmp(&b.pos.y))
+    });
+    covers
+}
+
+/// 偷袭绕背目标点：从两个侧翼偏移中选「玩家朝向得分更低」的一侧
+/// （得分 = 玩家朝向与 玩家→目标 方向的单位点积，越小越在玩家背后）。
+///
+/// `player_yaw` 用 camera.yaw（yaw=0 → 朝向 -Z）；两侧得分相同时取 +1 侧，保证确定性。
+pub fn ambush_goal(
+    grid: &GridMap,
+    player_g: GridPos,
+    npc_g: GridPos,
+    player_yaw: f32,
+    offset: u32,
+) -> GridPos {
+    let a = flank_goal(grid, player_g, npc_g, 1, offset);
+    let b = flank_goal(grid, player_g, npc_g, -1, offset);
+    let fwd_x = -player_yaw.sin();
+    let fwd_z = -player_yaw.cos();
+    let score = |g: GridPos| -> f32 {
+        let dx = (g.x - player_g.x) as f32;
+        let dz = (g.y - player_g.y) as f32;
+        let len = (dx * dx + dz * dz).sqrt().max(1e-4);
+        (fwd_x * dx + fwd_z * dz) / len
+    };
+    // 容差平局裁决：两侧得分差 < 1e-6 视为平分（f32 三角函数噪声不翻转选择），平分取 +1 侧
+    if score(b) < score(a) - 1e-6 { b } else { a }
 }
 
 #[cfg(test)]
@@ -970,5 +1158,245 @@ mod tests {
         // 常规波主曲线保持原样（供集成回归）
         assert_eq!(wave_profile(4).count, (4 + 2 * 4).min(24));
         assert_eq!(wave_profile(4).hp, 100.0 + 20.0 * 3.0);
+    }
+
+    /// 角色分配：确定性、波次门槛、概率边界
+    #[test]
+    fn role_for_deterministic_and_wave_gates() {
+        for &(id, wave, chance) in &[
+            (1u32, 1u32, 0.2f32),
+            (7, 3, 0.35),
+            (0, 0, 0.0),
+            (999, 42, 1.0),
+        ] {
+            assert_eq!(
+                role_for(id, wave, chance),
+                role_for(id, wave, chance),
+                "同参数必须同角色"
+            );
+        }
+        // 第 1 波只允许 Flanker/Rusher（无压制/掩体跃进）
+        for id in 0..200u32 {
+            let r = role_for(id, 1, 0.2);
+            assert!(
+                r == TacticalRole::Flanker || r == TacticalRole::Rusher,
+                "第 1 波不应出现高级角色: id={} role={:?}",
+                id,
+                r
+            );
+        }
+        // 第 2 波出现压制手、第 3 波出现掩体跃进
+        let has_role = |wave: u32, want: TacticalRole| {
+            (0..64u32).any(|id| role_for(id, wave, 0.2) == want)
+        };
+        assert!(has_role(1, TacticalRole::Rusher), "第 1 波应有突击手");
+        assert!(has_role(2, TacticalRole::Suppressor), "第 2 波应有压制手");
+        assert!(!has_role(1, TacticalRole::Suppressor), "第 1 波无压制手");
+        assert!(has_role(3, TacticalRole::CoverCrawler), "第 3 波应有掩体跃进");
+        assert!(!has_role(2, TacticalRole::CoverCrawler), "第 2 波无掩体跃进");
+        // 概率边界：0 无包抄、1 全包抄
+        for id in 0..100u32 {
+            assert_ne!(role_for(id, 1, 0.0), TacticalRole::Flanker, "概率 0 不包抄");
+            assert_eq!(role_for(id, 1, 1.0), TacticalRole::Flanker, "概率 1 全包抄");
+        }
+    }
+
+    /// 战术决策：低血量撤退优先；角色与玩家面朝决定侧翼/偷袭
+    #[test]
+    fn pick_tactic_respects_hp_role_and_facing() {
+        let mut p = NpcPerception {
+            low_hp: true,
+            ..NpcPerception::default()
+        };
+        for role in [
+            TacticalRole::Rusher,
+            TacticalRole::Flanker,
+            TacticalRole::Suppressor,
+            TacticalRole::CoverCrawler,
+        ] {
+            assert_eq!(pick_tactic(role, &p), Tactic::Retreat, "低血量未进射程应撤退");
+        }
+        p.low_hp = false;
+        p.enemy_in_range = true;
+        for role in [
+            TacticalRole::Rusher,
+            TacticalRole::Flanker,
+            TacticalRole::Suppressor,
+            TacticalRole::CoverCrawler,
+        ] {
+            assert_ne!(pick_tactic(role, &p), Tactic::Retreat, "已进射程不应撤退");
+        }
+        p.enemy_in_range = false;
+        assert_eq!(pick_tactic(TacticalRole::Rusher, &p), Tactic::Advance);
+        assert_eq!(pick_tactic(TacticalRole::Suppressor, &p), Tactic::Suppress);
+        assert_eq!(pick_tactic(TacticalRole::CoverCrawler, &p), Tactic::CoverAdvance);
+        // 包抄手：被面朝 → 侧翼；未面朝 → 偷袭绕背
+        p.player_facing = true;
+        assert_eq!(pick_tactic(TacticalRole::Flanker, &p), Tactic::Flank);
+        p.player_facing = false;
+        assert_eq!(pick_tactic(TacticalRole::Flanker, &p), Tactic::Ambush);
+    }
+
+    /// 同步冲锋：开启 ≥50%（且 ≥2 只），激活后 <60% 才关闭（滞回）
+    #[test]
+    fn charge_thresholds() {
+        // 未激活：≥50% 且 ≥2 只触发
+        assert!(!should_charge(0, 0, false), "空场不冲锋");
+        assert!(!should_charge(0, 3, false));
+        assert!(!should_charge(1, 3, false), "未过半不冲锋");
+        assert!(!should_charge(1, 2, false), "单只不冲锋");
+        assert!(should_charge(2, 3, false), "2/3 过半冲锋");
+        assert!(should_charge(2, 2, false));
+        assert!(should_charge(4, 8, false), "恰好过半也冲锋");
+        assert!(!should_charge(3, 8, false));
+        // 滞回：激活后需 ≥60% 保持，低于 60% 取消
+        assert!(should_charge(6, 10, true), "激活后 60% 保持");
+        assert!(should_charge(7, 10, true));
+        assert!(should_charge(8, 10, true));
+        assert!(!should_charge(5, 10, true), "50% 已低于关闭阈值");
+        assert!(!should_charge(4, 10, true));
+        assert!(!should_charge(0, 0, true), "空场即使已激活也关闭");
+        assert!(!should_charge(0, 3, true));
+    }
+
+    /// 角度差归一：跨 ±π 正确折叠
+    #[test]
+    fn angle_diff_wraps_across_pi() {
+        assert!((angle_diff(0.0, 0.0)).abs() < 1e-6);
+        assert!((angle_diff(std::f32::consts::PI, -std::f32::consts::PI)).abs() < 1e-6);
+        assert!((angle_diff(3.5, 0.0) - (3.5 - std::f32::consts::TAU)).abs() < 1e-6);
+        assert!((angle_diff(-3.5, 0.0) - (-3.5 + std::f32::consts::TAU)).abs() < 1e-6);
+        assert!((angle_diff(100.0, 100.0)).abs() < 1e-6, "无界 yaw 同值差为 0");
+    }
+
+    /// 目标方位角约定：yaw=0 看向 -Z；+X 东 → -π/2；+Z 南 → π
+    #[test]
+    fn yaw_to_target_matches_camera_convention() {
+        let y = |tx: f32, tz: f32| yaw_to_target(0.0, 0.0, tx, tz);
+        assert!((y(0.0, -1.0)).abs() < 1e-6, "-Z 方向 yaw=0");
+        assert!((y(1.0, 0.0) - (-std::f32::consts::FRAC_PI_2)).abs() < 1e-6, "+X 东 yaw=-π/2");
+        assert!((y(0.0, 1.0) - std::f32::consts::PI).abs() < 1e-6, "+Z 南 yaw=π");
+        assert!((y(-1.0, 0.0) - std::f32::consts::FRAC_PI_2).abs() < 1e-6, "-X 西 yaw=π/2");
+        // 与 forward(-sin, -cos) 自洽：对准目标时 yaw 应指向该目标
+        let yaw = y(5.0, 3.0);
+        let fwd = (-yaw.sin(), -yaw.cos());
+        let to = (5.0f32, 3.0f32);
+        let len = (to.0 * to.0 + to.1 * to.1).sqrt();
+        assert!(
+            (fwd.0 - to.0 / len).abs() < 1e-4 && (fwd.1 - to.1 / len).abs() < 1e-4,
+            "yaw 对准目标后 forward 应指向目标"
+        );
+    }
+
+    /// 锯齿偏移：范围、对称、确定性
+    #[test]
+    fn zigzag_offset_bounded_and_deterministic() {
+        for t in [0.0f32, 0.37, 12.9] {
+            for id in [0u32, 1, 7] {
+                for amp in [0.0f32, 2.0, 3.0] {
+                    let o = zigzag_offset(t, id, amp);
+                    assert!(o >= -amp - 1e-5 && o <= amp + 1e-5, "偏移应受限: {o}");
+                    assert_eq!(zigzag_offset(t, id, amp), o, "同参数同结果");
+                }
+            }
+        }
+        assert_eq!(zigzag_offset(1.0, 3, 0.0), 0.0, "零幅度恒为 0");
+        assert!(
+            (zigzag_offset(1.0, 0, 2.0) * 2.0 - zigzag_offset(1.0, 0, 4.0)).abs() < 1e-6,
+            "幅度线性缩放"
+        );
+        assert!(
+            (zigzag_offset(0.0, 0, 2.0) + zigzag_offset(std::f32::consts::PI / 2.2, 0, 2.0))
+                .abs()
+                < 1e-5,
+            "半周期反对称（相位 0）"
+        );
+    }
+
+    /// 遮挡掩体：只保留「阻挡格位于 NPC 与玩家之间」的候选
+    #[test]
+    fn cover_shielding_requires_blocked_between() {
+        let mut map = GridMap::new(9, 9);
+        map.block(GridPos::new(4, 4)); // 中央单格阻挡
+        let npc = GridPos::new(6, 4); // NPC 在东侧
+        let player = GridPos::new(2, 4); // 玩家在西侧
+        let shielded = find_cover_shielding(&map, npc, player, 99);
+        assert!(!shielded.is_empty(), "遮挡掩体应有候选");
+        for c in &shielded {
+            assert!(map.is_passable(c.pos));
+            // 存在邻接阻挡格且在 npc→player 半平面
+            let ok = NEIGHBOR_OFFSETS.iter().any(|&(dx, dy)| {
+                let n = GridPos::new(c.pos.x + dx, c.pos.y + dy);
+                if !map.in_bounds(n) || map.is_passable(n) {
+                    return false;
+                }
+                let bx = (n.x - npc.x) as f32;
+                let bz = (n.y - npc.y) as f32;
+                let px = (player.x - npc.x) as f32;
+                let pz = (player.y - npc.y) as f32;
+                bx * px + bz * pz > 0.0
+            });
+            assert!(ok, "非遮挡掩体不应返回: {:?}", c.pos);
+        }
+        // 玩家与 NPC 同格：无遮挡掩体（防御性）
+        assert!(find_cover_shielding(&map, npc, npc, 99).is_empty());
+        // 掩体在阻挡格背后（远离玩家一侧）应被排除：NPC 东侧有另一阻挡格时，
+        // 其西侧邻格对玩家而言是"背后"而非遮挡
+        let mut map2 = GridMap::new(9, 9);
+        map2.block(GridPos::new(7, 4));
+        let npc2 = GridPos::new(6, 4);
+        let player2 = GridPos::new(2, 4);
+        let shielded2 = find_cover_shielding(&map2, npc2, player2, 99);
+        let behind = GridPos::new(8, 4); // 阻挡格 (7,4) 的东侧邻格（远离玩家）
+        assert!(
+            !shielded2.iter().any(|c| c.pos == behind),
+            "阻挡格背后邻格不应算遮挡掩体"
+        );
+        // 撤退排序：openness 升序，同 openness 时 dist 降序（更远者优先）
+        let shielded3 = find_cover_shielding(&map, npc, player, 99);
+        for w in shielded3.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            assert!(
+                a.openness < b.openness
+                    || (a.openness == b.openness && a.dist >= b.dist),
+                "撤退掩体排序必须 (openness 升序, dist 降序): {:?} vs {:?}",
+                a,
+                b
+            );
+        }
+    }
+
+    /// 偷袭目标点：优先选玩家朝向背后一侧；相同时确定性取 +1 侧
+    #[test]
+    fn ambush_goal_prefers_behind_player() {
+        let grid = GridMap::new(11, 11);
+        let player = GridPos::new(5, 5);
+        let npc = GridPos::new(7, 5); // NPC 在玩家东侧 → 侧翼候选点为南北两侧
+        // yaw=0 → 玩家朝 -Z（北），南侧(+1)偏移点位于玩家背后 → 应取该点
+        let goal = ambush_goal(&grid, player, npc, 0.0, 3);
+        assert_eq!(goal, flank_goal(&grid, player, npc, 1, 3), "应取南侧(+1)点");
+        let fwd = (0.0f32, -1.0f32); // 玩家朝向（-Z）
+        let dx = (goal.x - player.x) as f32;
+        let dz = (goal.y - player.y) as f32;
+        let len = (dx * dx + dz * dz).sqrt();
+        assert!(
+            (fwd.0 * dx + fwd.1 * dz) / len < 0.0,
+            "目标点应位于玩家背向半平面"
+        );
+        // 反向：yaw=π → 玩家朝 +Z（南），北侧(-1)点应在背后
+        let goal2 = ambush_goal(&grid, player, npc, std::f32::consts::PI, 3);
+        assert_eq!(goal2, flank_goal(&grid, player, npc, -1, 3), "应取北侧(-1)点");
+        // 确定性：同参数同结果
+        assert_eq!(
+            ambush_goal(&grid, player, npc, 0.0, 3),
+            goal
+        );
+        // 纯垂直平分时（两侧得分相同）确定性取 +1 侧
+        let g0 = ambush_goal(&grid, player, npc, 0.0, 3);
+        assert_eq!(
+            ambush_goal(&grid, player, npc, std::f32::consts::FRAC_PI_2, 3),
+            g0,
+            "两侧平分时确定性取 +1 侧"
+        );
     }
 }
