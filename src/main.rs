@@ -35,10 +35,12 @@ use winit::window::CursorGrabMode;
 /// 跳过该事件并重基准 last_cursor，防止第一人称视角跳变/自转。
 const MAX_LOOK_DELTA_PX: f64 = 512.0;
 
-/// 帧率上限（present 节流）：300 FPS，避免空闲轮询无意义打满 GPU
-const MAX_FPS: u64 = 300;
-/// 单帧预算（纳秒）
-const FRAME_BUDGET: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS);
+/// 帧率上限（present 节流）：0 = 无上限（压测模式，主循环全速跑以暴露渲染瓶颈）。
+/// 设回正数（如 300）即恢复帧率门控。
+const MAX_FPS: u64 = 0;
+/// 单帧预算（纳秒；MAX_FPS=0 时为 0，不做 sleep/spin 节流）
+const FRAME_BUDGET: Duration =
+    Duration::from_nanos(if MAX_FPS > 0 { 1_000_000_000 / MAX_FPS } else { 0 });
 
 /// 游戏应用主管理结构
 struct GameApp {
@@ -801,16 +803,18 @@ impl ApplicationHandler for GameApp {
             return;
         }
 
-        // 帧率上限（present 节流）：低于单帧预算则补齐
-        // thread::sleep 粒度约 1ms，先粗睡到剩 ~1ms，再自旋精确到预算
-        let elapsed = self.last_frame.elapsed();
-        if elapsed < FRAME_BUDGET {
-            let remaining = FRAME_BUDGET - elapsed;
-            if remaining > Duration::from_millis(1) {
-                std::thread::sleep(remaining - Duration::from_millis(1));
-            }
-            while self.last_frame.elapsed() < FRAME_BUDGET {
-                std::hint::spin_loop();
+        // 帧率门控（MAX_FPS=0 时无上限，压测模式不做 sleep/spin）
+        if FRAME_BUDGET > Duration::ZERO {
+            // thread::sleep 粒度约 1ms，先粗睡到剩 ~1ms，再自旋精确到预算
+            let elapsed = self.last_frame.elapsed();
+            if elapsed < FRAME_BUDGET {
+                let remaining = FRAME_BUDGET - elapsed;
+                if remaining > Duration::from_millis(1) {
+                    std::thread::sleep(remaining - Duration::from_millis(1));
+                }
+                while self.last_frame.elapsed() < FRAME_BUDGET {
+                    std::hint::spin_loop();
+                }
             }
         }
 

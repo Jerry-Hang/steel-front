@@ -424,6 +424,8 @@ pub struct Game {
     ai_log_time: f32,
     /// 同步冲锋滞回状态（开启后需 <60% 才取消）
     charge_active: bool,
+    /// NPC 数量缩放（RV3D_NPC_SCALE，默认 1.0；压测多人对战压力场景用）
+    npc_scale: f32,
     /// 上次对玩家造成伤害的时间（攻击态 NPC 每秒扣血）
     last_damage_time: f32,
     /// HUD 状态（每帧喂 fps/血量，渲染前取 quad 列表）
@@ -535,6 +537,13 @@ impl Game {
             npcs,
             ai_log_time: 0.0,
             charge_active: false,
+            npc_scale: {
+                let v = std::env::var("RV3D_NPC_SCALE")
+                    .ok()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(1.0);
+                v.max(0.5)
+            },
             last_damage_time: 0.0,
             hud: HudState::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             frames: 0,
@@ -1278,8 +1287,8 @@ impl Game {
             && self.time - self.wave_started_at >= profile.reinforcement_at.unwrap_or(f32::MAX)
         {
             self.reinforcement_done = true;
-            let slot_base = profile.count;
-            let divisor = profile.count.max(1);
+            let slot_base = (profile.count as f32 * self.npc_scale).round().max(1.0) as u32;
+            let divisor = slot_base.max(1);
             let effective = self.effective_wave(self.wave);
             for k in 0..profile.reinforcement_count {
                 self.spawn_npc_ring(
@@ -1349,7 +1358,8 @@ impl Game {
         // 难度按累计有效波次：跨关不回落（level 2 第 1 波 ≈ 原第 4 波强度）
         let effective = self.effective_wave(n);
         let profile = wave_profile(effective);
-        let count = profile.count as usize;
+        // NPC 数量按 RV3D_NPC_SCALE 缩放（默认 1.0；测试/冒烟不设变量行为不变）
+        let count = (profile.count as f32 * self.npc_scale).round().max(1.0) as usize;
         let speed = profile.speed;
         let hp = profile.hp;
         let attack_range = profile.attack_range;
