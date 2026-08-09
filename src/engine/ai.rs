@@ -597,6 +597,10 @@ pub enum Tactic {
     Retreat,
     /// 站定开火（Attack 态）
     Hold,
+    /// 掩体利用：接近射程边缘时先移动到障碍环带掩体，再从掩体推进开火。
+    /// 由 game.rs 在 Chase 态按距离把 Advance/Suppress 覆盖为 CoverSeek
+    /// （目标选择见 game.rs `pick_attack_cover`），冲锋时不做（冲锋 = 全队直突）。
+    CoverSeek,
 }
 
 /// 战术决策：低血量且未进入射程 → 撤退；否则按角色 + 玩家是否面朝本 NPC。

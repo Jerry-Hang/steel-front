@@ -41,6 +41,8 @@ const WAVE_CLEAR_BONUS: u64 = 25;
 const PLAYER_SPEED: f32 = 6.0;
 /// NPC 就近掩体搜索半径（网格格数）
 const COVER_MAX_DIST: u32 = 10;
+/// 掩体利用触发距离（米）：Chase 态距目标 ≤ 攻击距离 + 该值时先寻障碍环带掩体
+const COVER_SEEK_RANGE: f32 = 20.0;
 /// 玩家准星对准判定角（弧度，≈14°）
 const AIM_ANGLE: f32 = 0.25;
 /// 低血量撤退阈值（hp 占比）
@@ -81,12 +83,15 @@ const WAVES_PER_LEVEL: u32 = 3;
 /// 必须 > NPC 最大攻击距离(16) + 掩体搜索半径(40) = 56：否则攻击态 NPC 会就近跑去掩体，
 /// 不再原地站定（冒烟依赖 `npc: #id stand` 日志瞄准点射）；同时保证玩家出生点附近弹道无阻挡。
 const MAP_RING_INNER: f32 = 58.0;
+/// 程序化障碍环带外半径（米）：第 1 关（冒烟基准）障碍簇最远落点；其余关卡按主题轮换。
+/// 与 MAP_RING_INNER 一起界定"障碍环带"，掩体利用评估（pick_attack_cover）按此过滤。
+const MAP_RING_OUTER: f32 = 130.0;
 /// 障碍簇数量基数：实际簇数 = MAP_CLUSTERS + seed % 5（6..=10）
 const MAP_CLUSTERS: u32 = 6;
 /// 障碍盒高度（米）
 const MAP_BLOCK_HEIGHT: f32 = 2.4;
 
-/// 网络环回演示（仅 RV3D_NET=1 启用）：同进程 Server + Client
+/// 网络环回演示（仅 RV3D_NET=1|demo 启用）：同进程 Server + Client
 struct NetworkDemo {
     server: Server,
     client: Client,
@@ -172,6 +177,16 @@ pub enum ObstacleKind {
     Barrier,
 }
 
+/// 障碍基础血量：按种类区分（墙 150 / 大块 300 / 路障 100）。
+/// M1 步枪单发 25 伤害 → 6/12/4 发击穿；hp 归 0 即摧毁，从碰撞/阻挡/渲染中移除。
+fn obstacle_max_hp(kind: ObstacleKind) -> f32 {
+    match kind {
+        ObstacleKind::Wall => 150.0,
+        ObstacleKind::Block => 300.0,
+        ObstacleKind::Barrier => 100.0,
+    }
+}
+
 /// 程序化地图上的静态障碍盒（AABB：世界坐标中心 + x/z 半尺寸，贴地高度 MAP_BLOCK_HEIGHT）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapObstacle {
@@ -181,12 +196,53 @@ pub struct MapObstacle {
     pub half_d: f32,
     /// 障碍种类（第一关全部为 Wall；主题轮换见 theme_for_level）
     pub kind: ObstacleKind,
+    /// 血量上限（按种类，见 obstacle_max_hp）
+    pub max_hp: f32,
+    /// 当前血量（归 0 → 摧毁：从物理刚体/AI 网格/渲染 marker 中移除）
+    pub hp: f32,
 }
 
 /// 程序化关卡布局：确定性（种子 = 关卡号），障碍全部位于中央安全环带之外
 #[derive(Debug, Clone, Default)]
 pub struct LevelMap {
     pub obstacles: Vec<MapObstacle>,
+}
+
+/// 任务目标：本关（普通波次）/本轮（压力模式）需歼灭的敌人数。
+/// 达成 → 一次性胜利日志 + HUD 横幅；不阻断波次生成与补员逻辑。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MissionObjective {
+    /// 需歼灭的敌人总数（0 = 未启用）
+    pub target: u32,
+    /// 已歼灭数（封顶在 target）
+    pub eliminated: u32,
+    /// 是否已完成（达成时置位，只触发一次横幅/日志）
+    pub done: bool,
+}
+
+impl MissionObjective {
+    /// 新建任务目标
+    pub fn new(target: u32) -> Self {
+        Self {
+            target,
+            eliminated: 0,
+            done: false,
+        }
+    }
+
+    /// 登记 `kills` 名敌人被歼灭；返回本次调用是否首次达成目标
+    pub fn progress(&mut self, kills: u32) -> bool {
+        if self.done {
+            return false;
+        }
+        self.eliminated = (self.eliminated + kills).min(self.target);
+        if self.target > 0 && self.eliminated >= self.target {
+            self.done = true;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// 确定性 LCG（与 audio.rs 同款常数，零第三方依赖）：同一种子恒同布局，可测试
@@ -236,7 +292,7 @@ pub fn theme_for_level(level: u32) -> MapTheme {
     match (level.saturating_sub(1)) % 3 {
         0 => MapTheme {
             ring_inner: MAP_RING_INNER,
-            ring_outer: 130.0,
+            ring_outer: MAP_RING_OUTER,
             clusters_base: MAP_CLUSTERS,
             clusters_var: 5,
             kind: ObstacleKind::Wall,
@@ -324,6 +380,7 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
     let style = kind_style(theme.kind);
     let mut obstacles: Vec<MapObstacle> = Vec::new();
     let tau = std::f32::consts::TAU;
+    let hp = obstacle_max_hp(theme.kind);
     for _ in 0..clusters {
         // 每簇 style 范围内个盒子，沿切线方向并排成墙/块
         let n_boxes = style.min_boxes as usize
@@ -349,6 +406,8 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
                 half_w,
                 half_d,
                 kind: theme.kind,
+                max_hp: hp,
+                hp,
             };
             // 冲突检测 + 抖动重试：先径向推出安全环，再与已有障碍查重叠；
             // 重叠则小幅随机移位（最多 8 次），保证放置后同时满足安全环与非重叠约束
@@ -500,6 +559,8 @@ pub struct Game {
     reinforcement_done: bool,
     /// 上次状态日志时间（1 秒一条 game: wave=...）
     last_status_log: f32,
+    /// 任务目标（本关/本轮歼灭数；达成 → 胜利横幅/日志）
+    objective: MissionObjective,
 }
 
 /// 单帧 AI 步进上下文（全部为共享只读数据，供串行/并行两种 runner 复用）
@@ -513,6 +574,11 @@ struct AiStepCtx<'a> {
     time: f32,
     dt: f32,
     stress: bool,
+    /// 当前关卡障碍环带（theme.ring_inner/ring_outer，掩体利用评估用）
+    ring_inner: f32,
+    ring_outer: f32,
+    /// 当前关卡存活障碍列表（掩体利用评估用；摧毁后的障碍已移除）
+    obstacles: &'a [MapObstacle],
 }
 
 /// 压力模式目标预选：每 NPC 找视野内最近的敌对阵营 NPC（纯读，O(n²)）。
@@ -689,6 +755,7 @@ impl Game {
             score: 0,
             next_npc_id: NPC_COUNT as u32,
             last_status_log: 0.0,
+            objective: MissionObjective::new(0),
         };
         // 初始关卡布局（level 1，种子 = 1）：物理刚体 + AI 网格 + 玩家安全区复位
         game.apply_level(1);
@@ -722,6 +789,7 @@ impl Game {
         self.hud.reserve = self.firearm.reserve();
         self.hud.settings_open = false;
         self.hud.confirm_quit = false;
+        self.hud.victory_banner = None;
         self.hud.cancel_rebind();
         self.score = 0;
         self.wave = 1;
@@ -768,6 +836,14 @@ impl Game {
     fn apply_level(&mut self, level: u32) {
         self.level = level;
         self.map = generate_level_map(level);
+        // 任务目标：普通波次 = 本关 WAVES_PER_LEVEL 波出场总数（含援军）；
+        // 压力模式 = 歼灭一队即本轮胜利（spawn_stress_battle 每轮重置）
+        self.objective = MissionObjective::new(if self.stress {
+            self.stress_sides as u32
+        } else {
+            self.level_objective_target(level)
+        });
+        self.hud.victory_banner = None;
         // 物理世界：清掉上一关障碍，重建为当前关卡障碍盒（贴地 AABB，供玩家碰撞/投射物拦截）
         self.world.bodies.clear();
         self.world.spheres.clear();
@@ -814,6 +890,37 @@ impl Game {
             kind_counts[1],
             kind_counts[2],
             blocked_cells
+        );
+    }
+
+    /// 本关任务目标：WAVES_PER_LEVEL 波出场敌人总数（含援军；count 按
+    /// RV3D_NPC_SCALE 缩放后四舍五入，与 spawn_wave 的出生数量逐波一致）
+    fn level_objective_target(&self, level: u32) -> u32 {
+        let mut total = 0u32;
+        for w in 1..=WAVES_PER_LEVEL {
+            let effective = w + (level.saturating_sub(1)) * WAVES_PER_LEVEL;
+            let profile = wave_profile(effective);
+            let count = (profile.count as f32 * self.npc_scale).round().max(1.0) as u32;
+            total += count + profile.reinforcement_count;
+        }
+        total.max(1)
+    }
+
+    /// 任务目标达成：一次性胜利日志 + HUD 横幅（游戏继续，不阻断波次生成/补员逻辑）
+    fn on_objective_complete(&mut self) {
+        self.hud.victory_banner = Some(if self.stress {
+            "VICTORY — 本轮敌军全灭".to_string()
+        } else {
+            "VICTORY — 本关敌军全灭".to_string()
+        });
+        log::info!(
+            "objective: {} 歼灭全部敌人达成（{} 击杀）→ victory",
+            if self.stress {
+                "压力模式本轮"
+            } else {
+                "普通模式本关"
+            },
+            self.objective.eliminated
         );
     }
 
@@ -1014,6 +1121,7 @@ impl Game {
         self.hud.score = self.score;
         self.hud.wave = self.wave;
         self.hud.countdown = self.wave_timer.max(0.0);
+        self.hud.objective = (self.objective.eliminated, self.objective.target);
         self.hud.screen = if self.hud.settings_open {
             HudScreen::Settings
         } else {
@@ -1303,6 +1411,10 @@ impl Game {
             }
             if self.collide_physics(&p) {
                 hit_count += 1;
+                // 可破坏障碍：命中物理刚体 → 按武器伤害结算障碍 HP，摧毁后移除碰撞/阻挡
+                if let Some(idx) = self.hit_obstacle_index(&p) {
+                    self.damage_obstacle(idx, p.damage);
+                }
                 continue;
             }
             if let Some(idx) = self.hit_npc_index(&p) {
@@ -1320,6 +1432,10 @@ impl Game {
                         self.wave,
                         self.score
                     );
+                    // 任务目标：歼灭数推进（达成 → 胜利横幅/日志，波次推进不受影响）
+                    if self.objective.progress(1) {
+                        self.on_objective_complete();
+                    }
                 }
                 continue;
             }
@@ -1365,6 +1481,55 @@ impl Game {
             }
         }
         false
+    }
+
+    /// 投射物命中的障碍刚体下标（球体/未命中返回 None）。
+    /// 下标与 `map.obstacles`/`world.bodies` 严格对应（apply_level 同序构建、同序移除）。
+    fn hit_obstacle_index(&self, p: &Projectile) -> Option<usize> {
+        let (px, py, pz) = (p.position[0], p.position[1], p.position[2]);
+        self.world.bodies.iter().position(|body| {
+            let aabb = body.aabb();
+            px >= aabb.min.x
+                && px <= aabb.max.x
+                && py >= aabb.min.y
+                && py <= aabb.max.y
+                && pz >= aabb.min.z
+                && pz <= aabb.max.z
+        })
+    }
+
+    /// 障碍受伤结算：扣血至 0 → 摧毁（从物理刚体/AI 网格/渲染 marker 中移除）。
+    /// 渲染侧无需改动：main.rs 每帧按 `map_obstacles()` 生成 marker，摧毁后自动不再绘制。
+    fn damage_obstacle(&mut self, idx: usize, dmg: f32) {
+        let Some(ob) = self.map.obstacles.get_mut(idx) else {
+            return;
+        };
+        ob.hp = (ob.hp - dmg).max(0.0);
+        if ob.hp > 0.0 {
+            return;
+        }
+        let ob = *ob; // Copy：记录位置/尺寸供解除阻挡
+        let kind = ob.kind;
+        // 解除 AI 网格阻挡：NPC 寻路可穿过缺口，掩体点随之消失
+        let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
+        let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
+        for gx in g0.x..=g1.x {
+            for gz in g0.y..=g1.y {
+                let pos = GridPos::new(gx, gz);
+                if self.grid.in_bounds(pos) {
+                    self.grid.clear(pos);
+                }
+            }
+        }
+        log::info!(
+            "obstacle: #{} {:?} destroyed at ({:.1}, {:.1})",
+            idx,
+            kind,
+            ob.x,
+            ob.z
+        );
+        self.world.bodies.remove(idx);
+        self.map.obstacles.remove(idx);
     }
 
     /// 投射物命中的 NPC 下标（命中球：中心在 NPC 头顶，半径 0.8）；未命中返回 None
@@ -1578,6 +1743,9 @@ impl Game {
     /// 角色/速度/血量/攻击距离按第 1 波 profile 确定性分配。清掉旧 NPC（全量重开一轮）。
     fn spawn_stress_battle(&mut self, player: &glam::Vec3) {
         self.npcs.clear();
+        // 新一轮：任务目标重置为本轮歼灭一队（补员/波次逻辑不变）；
+        // 上一轮胜利横幅保留到下一轮（start_run/apply_level 时才清空）
+        self.objective = MissionObjective::new(self.stress_sides as u32);
         let sides = self.stress_sides as u32;
         let profile = wave_profile(self.effective_wave(1));
         for side in 0..2u32 {
@@ -1677,6 +1845,16 @@ impl Game {
         if ctx.charge && npc.role != TacticalRole::Suppressor && tactic != Tactic::Retreat {
             tactic = Tactic::Advance;
         }
+        // 掩体利用：突击/压制手接近射程边缘时先评估障碍环带掩体（先移动到掩体再推进开火）。
+        // 环带内无射程内掩体（如玩家处于中央安全区）时保持原直线推进 → 冒烟站定语义不变；
+        // 只在 Chase 态生效且冲锋时不做（冲锋 = 全队直突）。
+        if state == NpcState::Chase
+            && !ctx.charge
+            && matches!(tactic, Tactic::Advance | Tactic::Suppress)
+            && dist <= npc.attack_range + COVER_SEEK_RANGE
+        {
+            tactic = Tactic::CoverSeek;
+        }
         npc.tactic = tactic;
         // 绕背判定用的"目标朝向"：普通模式 = 玩家视角；压力模式 = 朝向目标 NPC 的方向
         let target_yaw = if ctx.stress && ctx.targets.get(index).copied().flatten().is_some() {
@@ -1685,7 +1863,19 @@ impl Game {
             ctx.player_yaw
         };
         let (bx, bz) = (npc.position[0], npc.position[2]);
-        advance_npc(npc, state, tactic, &target_pos, target_yaw, ctx.grid, ctx.time, ctx.dt);
+        advance_npc(
+            npc,
+            state,
+            tactic,
+            &target_pos,
+            target_yaw,
+            ctx.grid,
+            ctx.ring_inner,
+            ctx.ring_outer,
+            ctx.obstacles,
+            ctx.time,
+            ctx.dt,
+        );
         // 朝向更新：移动时朝移动方向；站定时面向目标（渲染士兵模型用）
         let mdx = npc.position[0] - bx;
         let mdz = npc.position[2] - bz;
@@ -1865,6 +2055,8 @@ impl Game {
         } else {
             Vec::new()
         };
+        // 掩体利用评估用的当前关卡障碍环带（theme 随关卡轮换）
+        let theme = theme_for_level(self.level);
         {
             let ctx = AiStepCtx {
                 player: &player,
@@ -1876,6 +2068,9 @@ impl Game {
                 time,
                 dt,
                 stress: self.stress,
+                ring_inner: theme.ring_inner,
+                ring_outer: theme.ring_outer,
+                obstacles: &self.map.obstacles,
             };
             if self.npcs.len() >= PARALLEL_AI_MIN && self.ai_parallel {
                 // safety: chunks_mut 保证各线程分片不相交；ctx 只含共享只读数据
@@ -1895,7 +2090,7 @@ impl Game {
         if self.time - self.ai_log_time >= 1.0 {
             self.ai_log_time = self.time;
             let mut counts = [0u32; 4];
-            let mut tactics = [0u32; 7];
+            let mut tactics = [0u32; 8];
             for npc in &self.npcs {
                 counts[npc.state_machine.state() as usize] += 1;
                 tactics[npc.tactic as usize] += 1;
@@ -1977,6 +2172,10 @@ impl Game {
         let red = self.npcs.iter().filter(|n| n.team == Team::Red).count();
         let blue = self.npcs.len() - red;
         if self.npcs.len() != before {
+            // 任务目标：本轮歼灭数推进（达成 → 胜利横幅/日志；补员逻辑不受影响）
+            if self.objective.progress((before - self.npcs.len()) as u32) {
+                self.on_objective_complete();
+            }
             log::info!(
                 "battle: 阵亡 {}（红={} 蓝={} 存活）",
                 before - self.npcs.len(),
@@ -2804,6 +3003,9 @@ mod tests {
                 time,
                 dt,
                 stress: true,
+                ring_inner: MAP_RING_INNER,
+                ring_outer: MAP_RING_OUTER,
+                obstacles: &game.map.obstacles,
             };
             let ctx_p = AiStepCtx {
                 player: &player,
@@ -2815,6 +3017,9 @@ mod tests {
                 time,
                 dt,
                 stress: true,
+                ring_inner: MAP_RING_INNER,
+                ring_outer: MAP_RING_OUTER,
+                obstacles: &game.map.obstacles,
             };
             Game::step_ai_serial(&mut npcs_s, &ctx_s);
             Game::step_ai_parallel(&mut npcs_p, &ctx_p);
@@ -2886,6 +3091,207 @@ mod tests {
         let red = game.npcs.iter().filter(|n| n.team == Team::Red).count();
         assert_eq!(red, 4);
     }
+
+    // ---- 新玩法：可破坏障碍 / 掩体利用 / 任务目标 ----
+
+    /// 可破坏障碍：扣血不摧毁 → 保留；血尽 → 从物理刚体/AI 网格/渲染列表中移除
+    #[test]
+    fn obstacles_take_damage_and_destroy() {
+        let mut game = Game::new();
+        assert!(!game.map.obstacles.is_empty());
+        let n = game.map.obstacles.len();
+        assert_eq!(game.world.bodies.len(), n, "刚体与障碍应一一对应");
+        let idx = 0;
+        let ob0 = game.map.obstacles[idx];
+        assert!(ob0.max_hp > 0.0 && ob0.hp == ob0.max_hp, "障碍出生满血");
+        // 一格：扣血不摧毁
+        game.damage_obstacle(idx, 25.0);
+        assert_eq!(game.map.obstacles[idx].hp, ob0.max_hp - 25.0);
+        assert_eq!(game.map.obstacles.len(), n);
+        assert_eq!(game.world.bodies.len(), n);
+        // 摧毁：清空剩余血量 → 列表同步移除
+        game.damage_obstacle(idx, ob0.max_hp);
+        assert_eq!(game.map.obstacles.len(), n - 1, "障碍应从渲染列表移除");
+        assert_eq!(game.world.bodies.len(), n - 1, "物理刚体应同步移除");
+        // 被摧毁障碍覆盖的网格格已解除阻挡（NPC 可穿过缺口）
+        let g0 = world_to_grid(ob0.x - ob0.half_w, ob0.z - ob0.half_d);
+        let g1 = world_to_grid(ob0.x + ob0.half_w, ob0.z + ob0.half_d);
+        let mut any_passable = false;
+        for gx in g0.x..=g1.x {
+            for gz in g0.y..=g1.y {
+                let pos = GridPos::new(gx, gz);
+                if game.grid.in_bounds(pos) && game.grid.is_passable(pos) {
+                    any_passable = true;
+                }
+            }
+        }
+        assert!(any_passable, "摧毁后障碍占格应解除阻挡");
+        // 越界下标安全忽略
+        game.damage_obstacle(usize::MAX, 999.0);
+        assert_eq!(game.map.obstacles.len(), n - 1);
+    }
+
+    /// 掩体利用：环带内、射程内、紧邻存活障碍的遮挡掩体被选中；
+    /// 中央安全区目标无可用掩体 → None（冒烟站定语义）
+    #[test]
+    fn attack_cover_picks_ring_band_shielding_cover() {
+        let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
+        let obstacles = vec![MapObstacle {
+            x: 60.0,
+            z: 0.0,
+            half_w: 3.0,
+            half_d: 3.0,
+            kind: ObstacleKind::Wall,
+            max_hp: 150.0,
+            hp: 150.0,
+        }];
+        for ob in &obstacles {
+            let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
+            let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
+            for gx in g0.x..=g1.x {
+                for gz in g0.y..=g1.y {
+                    let pos = GridPos::new(gx, gz);
+                    if grid.in_bounds(pos) {
+                        grid.block(pos);
+                    }
+                }
+            }
+        }
+        // 目标（被攻击方）在障碍东侧（环带内）；NPC 在障碍西侧追近
+        let target = world_to_grid(66.0, 0.0);
+        let npc = world_to_grid(50.0, 0.0);
+        let cover = pick_attack_cover(
+            &grid,
+            npc,
+            target,
+            12.0,
+            MAP_RING_INNER,
+            MAP_RING_OUTER,
+            COVER_MAX_DIST,
+            &obstacles,
+        );
+        assert!(cover.is_some(), "环带内应有射程内遮挡掩体");
+        let (wx, wz) = grid_to_world(cover.unwrap());
+        let d_origin = (wx * wx + wz * wz).sqrt();
+        assert!(
+            d_origin >= MAP_RING_INNER && d_origin <= MAP_RING_OUTER,
+            "掩体必须在障碍环带内: {:.1}m",
+            d_origin
+        );
+        let (tx, tz) = grid_to_world(target);
+        let d_t = ((wx - tx).powi(2) + (wz - tz).powi(2)).sqrt();
+        assert!(d_t <= 12.0, "掩体必须在攻击距离内: {:.1}m", d_t);
+        // 安全区目标（原点）：环带内无射程内掩体 → None（NPC 保持直线推进/站定）
+        let origin = world_to_grid(0.0, 0.0);
+        let none_cover = pick_attack_cover(
+            &grid,
+            npc,
+            origin,
+            12.0,
+            MAP_RING_INNER,
+            MAP_RING_OUTER,
+            COVER_MAX_DIST,
+            &obstacles,
+        );
+        assert!(none_cover.is_none(), "中央安全区目标应无可用掩体");
+    }
+
+    /// 任务目标：歼灭数推进、达成只触发一次、计数封顶在 target
+    #[test]
+    fn mission_objective_progress_and_completion() {
+        let mut obj = MissionObjective::new(24);
+        assert_eq!((obj.eliminated, obj.target, obj.done), (0, 24, false));
+        assert!(!obj.progress(23), "未达目标不应完成");
+        assert!(obj.progress(1), "第 24 击杀应达成目标");
+        assert!(obj.done);
+        assert!(!obj.progress(1), "达成后不再重复触发");
+        assert_eq!(obj.eliminated, 24, "计数封顶在 target");
+        let mut zero = MissionObjective::new(0);
+        assert!(!zero.progress(1), "target=0 永不达成");
+    }
+
+    /// 任务目标：普通模式本关目标 = 3 波出场总数（含援军）；压力模式 = 歼灭一队
+    #[test]
+    fn objective_targets_per_mode_and_stress_victory() {
+        let game = Game::new();
+        assert!(!game.stress);
+        // 第 1 关：wave1=6 + wave2=8 + wave3=10+援军2 = 26
+        assert_eq!(game.objective.target, 26, "第 1 关任务目标应为 3 波出场总数");
+        assert!(!game.objective.done);
+        assert!(game.hud.victory_banner.is_none());
+        // 压力模式：目标 = 歼灭一队；红方团灭 → 达成 + 横幅，且补员照常开新一轮
+        let mut game = Game::new();
+        game.stress = true;
+        game.stress_sides = 4;
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        game.spawn_stress_battle(&player);
+        assert_eq!(game.objective.target, 4, "压力模式目标 = 歼灭一队");
+        for n in &mut game.npcs {
+            if n.team == Team::Red {
+                n.hp = 0.0;
+            }
+        }
+        game.game_state = GameState::Playing;
+        let round0 = game.stress_round;
+        game.update_stress_respawns(&player);
+        assert_eq!(game.stress_round, round0 + 1, "补员逻辑不受影响");
+        assert!(game.hud.victory_banner.is_some(), "达成后应显示胜利横幅（保留到下一轮）");
+        assert_eq!(game.objective.eliminated, 0, "新一轮目标已重置");
+        assert_eq!(game.objective.target, 4, "新一轮目标 = 歼灭一队");
+    }
+}
+
+/// 攻击态掩体选择：在障碍环带 `[ring_inner, ring_outer]` 内、紧邻存活障碍盒、
+/// 且距目标不超过 `attack_range` 的遮挡掩体点中选最优（封闭性优先、其次离目标远——
+/// 贴近射程边缘的掩体到位即可开火）。
+///
+/// - 掩体候选来自 `find_cover_shielding`（阻挡格挡在 NPC 与目标之间）
+/// - 环带与障碍列表由调用方传入（读 MAP_RING_INNER/MAP_RING_OUTER 与关卡障碍列表；
+///   摧毁后的障碍已从列表移除，其掩体点随之失效）
+/// - 中央安全区内没有障碍 → 返回 None → 调用方保持直线推进/原地站定（冒烟机制不变）
+fn pick_attack_cover(
+    grid: &GridMap,
+    npc: GridPos,
+    target: GridPos,
+    attack_range: f32,
+    ring_inner: f32,
+    ring_outer: f32,
+    max_dist: u32,
+    obstacles: &[MapObstacle],
+) -> Option<GridPos> {
+    let mut best: Option<(u32, u32, GridPos)> = None;
+    for cover in find_cover_shielding(grid, npc, target, max_dist) {
+        let (wx, wz) = grid_to_world(cover.pos);
+        let d_origin = (wx * wx + wz * wz).sqrt();
+        if d_origin < ring_inner || d_origin > ring_outer {
+            continue;
+        }
+        // 掩体必须紧邻存活障碍盒（容差 GRID_CELL*2 覆盖"格中心到盒边"的最坏距离）
+        let near_obstacle = obstacles.iter().any(|o| {
+            (wx - o.x).abs() <= o.half_w + GRID_CELL * 2.0
+                && (wz - o.z).abs() <= o.half_d + GRID_CELL * 2.0
+        });
+        if !near_obstacle {
+            continue;
+        }
+        let (tx, tz) = grid_to_world(target);
+        let dx = wx - tx;
+        let dz = wz - tz;
+        if dx * dx + dz * dz > attack_range * attack_range {
+            continue;
+        }
+        let dist_t = target.manhattan(cover.pos);
+        let better = match best {
+            None => true,
+            Some((bo, bd, _)) => {
+                cover.openness < bo || (cover.openness == bo && dist_t > bd)
+            }
+        };
+        if better {
+            best = Some((cover.openness, dist_t, cover.pos));
+        }
+    }
+    best.map(|(_, _, pos)| pos)
 }
 
 /// 按状态与战术推进单个 NPC：目标选择 → A* 寻路 → 移动（锯齿/躲避）→ 地形高度采样
@@ -2896,6 +3302,9 @@ fn advance_npc(
     target: &glam::Vec3,
     target_yaw: f32,
     grid: &GridMap,
+    ring_inner: f32,
+    ring_outer: f32,
+    obstacles: &[MapObstacle],
     time: f32,
     dt: f32,
 ) {
@@ -2930,6 +3339,23 @@ fn advance_npc(
                         Some(cover) => cover.pos,
                         None => target_g,
                     }
+                }
+                // 掩体利用：障碍环带内选"距目标 ≤ 攻击距离"的遮挡掩体，先到掩体再开火；
+                // 无可用掩体（中央安全区）→ 直线推进，保持站定/站定日志语义
+                Tactic::CoverSeek => {
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let target_g = world_to_grid(target.x, target.z);
+                    pick_attack_cover(
+                        grid,
+                        npc_g,
+                        target_g,
+                        npc.attack_range,
+                        ring_inner,
+                        ring_outer,
+                        COVER_MAX_DIST,
+                        obstacles,
+                    )
+                    .unwrap_or(target_g)
                 }
                 // 低血量撤退：撤向最封闭且较远的遮挡掩体（阻挡格挡在 NPC 与玩家之间）
                 Tactic::Retreat => {

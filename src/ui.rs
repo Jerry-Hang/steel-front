@@ -399,6 +399,10 @@ pub struct HudState {
     pub rebinding: Option<BindingAction>,
     /// 退出确认：ESC 首次按下置位（HUD 提示再按一次退出），任意其它键取消
     pub confirm_quit: bool,
+    /// 任务目标进度（已歼灭/目标；0/0 = 未启用），game.rs 每帧同步
+    pub objective: (u32, u32),
+    /// 胜利横幅（任务目标达成时置位；重开/升关/新一轮时由 game.rs 清除）
+    pub victory_banner: Option<String>,
     /// 累计运行时间（秒，由 `tick(dt)` 累加，驱动开始菜单闪烁）
     pub elapsed: f32,
 }
@@ -439,6 +443,8 @@ impl HudState {
             level: 1,
             rebinding: None,
             confirm_quit: false,
+            objective: (0, 0),
+            victory_banner: None,
             elapsed: 0.0,
         }
     }
@@ -621,6 +627,29 @@ impl HudState {
                 y: top + 58.0,
                 color: Color::CYAN,
                 scale: 1.6,
+            });
+        }
+        // ---- 任务目标进度（顶部，波次/倒计时下方）----
+        if self.objective.1 > 0 {
+            let obj_txt = format!("OBJECTIVE 歼灭敌人 {}/{}", self.objective.0, self.objective.1);
+            let obj_x = center_x - text_width(&obj_txt, 1.2) * 0.5;
+            elems.push(HudElement::Text {
+                text: obj_txt,
+                x: obj_x,
+                y: top + 78.0,
+                color: Color::WHITE,
+                scale: 1.2,
+            });
+        }
+        // ---- 胜利横幅（任务目标达成，居中）----
+        if let Some(banner) = &self.victory_banner {
+            let bw = text_width(banner, 2.4);
+            elems.push(HudElement::Text {
+                text: banner.clone(),
+                x: center_x - bw * 0.5,
+                y: h * 0.35,
+                color: Color::GREEN,
+                scale: 2.4,
             });
         }
         // ---- 准星（屏幕中心）----
