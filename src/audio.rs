@@ -5,6 +5,7 @@
 //! - 播放后端：`AudioSink` trait 抽象，无平台依赖时用 `SilentSink` / `CollectingSink` 测试
 //! - 3D 空间音频：`AudioSource` 带 3D 位置，按声源-听者距离做 `1/(1+k·d)` 衰减
 //! - 音量混音：`MasterVolume` × 分通道音量（Music/Sfx）× 距离衰减，混音时相乘
+//! - 程序化 DSP：`DspSynth` 事件式合成（枪声/爆炸/脚步/环境风），ADSR 包络 + 一阶低通 + 多声部混音
 //!
 //! 混音输出为交错立体声（L/R 成对）。播放时需保证 clip 采样率与后端一致（重采样不在本模块范围）。
 
@@ -624,18 +625,21 @@ impl Mixer {
     }
 }
 
-/// 播放器：Mixer + AudioSink 的组合，每帧 `tick` 渲染并写入后端
+/// 播放器：Mixer + DspSynth + AudioSink 的组合，每帧 `tick` 渲染并写入后端
 #[derive(Debug)]
 pub struct AudioPlayer<S: AudioSink> {
     mixer: Mixer,
+    synth: DspSynth,
     sink: S,
 }
 
-#[allow(dead_code)] // 访问器预留（sink 直读/调试用；mixer_mut 已用）
+#[allow(dead_code)] // 访问器预留（sink 直读/调试用；mixer_mut/synth_mut 已用）
 impl<S: AudioSink> AudioPlayer<S> {
     pub fn new(sink: S) -> Self {
+        let sample_rate = sink.sample_rate();
         Self {
             mixer: Mixer::new(),
+            synth: DspSynth::new(sample_rate),
             sink,
         }
     }
@@ -648,6 +652,14 @@ impl<S: AudioSink> AudioPlayer<S> {
         &mut self.mixer
     }
 
+    pub fn synth(&self) -> &DspSynth {
+        &self.synth
+    }
+
+    pub fn synth_mut(&mut self) -> &mut DspSynth {
+        &mut self.synth
+    }
+
     pub fn sink(&self) -> &S {
         &self.sink
     }
@@ -656,10 +668,363 @@ impl<S: AudioSink> AudioPlayer<S> {
         &mut self.sink
     }
 
-    /// 渲染 `frames` 帧混音样本并写入后端
+    /// 渲染 `frames` 帧混音样本并写入后端（clip 声部 + 程序化 DSP 声部叠加）
     pub fn tick(&mut self, listener: &AudioListener, frames: usize) {
-        let buf = self.mixer.mix_vec(listener, frames);
+        let mut buf = self.mixer.mix_vec(listener, frames);
+        self.synth.render(listener, frames, &mut buf);
         self.sink.write(&buf);
+    }
+}
+
+/// 合成声部种类：决定发生器与音色参数
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynthKind {
+    /// 枪声：噪声突发 + 指数衰减（ADSR）
+    Shot,
+    /// 爆炸：低频轰鸣 + 次声成分
+    Explosion,
+    /// 脚步：短促宽带噪声
+    Footstep,
+}
+
+/// ADSR 包络参数（时间单位秒；sustain 为 0..=1 的保持电平）
+#[derive(Debug, Clone, Copy)]
+pub struct Adsr {
+    /// 起音时长（线性 0→1）
+    pub attack: f32,
+    /// 衰减时长（1 → sustain，指数）
+    pub decay: f32,
+    /// 保持电平（0..=1；0 表示衰减结束后声部直接结束）
+    pub sustain: f32,
+    /// 释音时长（指数落回 0）
+    pub release: f32,
+}
+
+impl Adsr {
+    pub const fn new(attack: f32, decay: f32, sustain: f32, release: f32) -> Self {
+        Self {
+            attack,
+            decay,
+            sustain,
+            release,
+        }
+    }
+}
+
+/// 包络阶段
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvStage {
+    Attack,
+    Decay,
+    Sustain,
+    Release,
+    Done,
+}
+
+/// ADSR 包络运行状态（每声部一份）
+#[derive(Debug, Clone, Copy)]
+struct AdsrEnv {
+    stage: EnvStage,
+    level: f32,
+    elapsed: f32,
+}
+
+impl AdsrEnv {
+    fn new(adsr: Adsr) -> Self {
+        Self {
+            stage: if adsr.attack > 0.0 {
+                EnvStage::Attack
+            } else {
+                EnvStage::Decay
+            },
+            level: 0.0,
+            elapsed: 0.0,
+        }
+    }
+
+    /// 推进 dt 秒并返回当前包络增益（[0,1]；Done 后恒 0）
+    fn advance(&mut self, adsr: &Adsr, dt: f32) -> f32 {
+        if self.stage != EnvStage::Done {
+            self.elapsed += dt;
+            match self.stage {
+                EnvStage::Attack => {
+                    let frac = if adsr.attack > 0.0 {
+                        (self.elapsed / adsr.attack).min(1.0)
+                    } else {
+                        1.0
+                    };
+                    self.level = frac;
+                    if self.elapsed >= adsr.attack {
+                        self.stage = EnvStage::Decay;
+                        self.elapsed = 0.0;
+                    }
+                }
+                EnvStage::Decay => {
+                    let k = if adsr.decay > 0.0 { 1.0 / adsr.decay } else { 0.0 };
+                    self.level =
+                        adsr.sustain + (self.level - adsr.sustain) * (-k * self.elapsed).exp();
+                    if self.elapsed >= adsr.decay {
+                        if adsr.sustain <= 0.0 {
+                            self.stage = EnvStage::Done;
+                            self.level = 0.0;
+                        } else {
+                            self.stage = EnvStage::Sustain;
+                            self.level = adsr.sustain;
+                        }
+                        self.elapsed = 0.0;
+                    }
+                }
+                EnvStage::Sustain => {
+                    self.level = adsr.sustain;
+                }
+                EnvStage::Release => {
+                    let k = if adsr.release > 0.0 { 1.0 / adsr.release } else { 0.0 };
+                    self.level = (self.level * (-k * self.elapsed).exp()).max(0.0);
+                    if self.elapsed >= adsr.release || self.level <= 1e-5 {
+                        self.stage = EnvStage::Done;
+                        self.level = 0.0;
+                    }
+                }
+                EnvStage::Done => {}
+            }
+        }
+        self.level
+    }
+
+    /// 进入释音阶段（仅 Sustain 态可触发；单发音色 sustain=0 衰减结束即 Done，未接线）
+    #[allow(dead_code)] // 释音阶段预留：单发音色不触发，测试覆盖
+    fn release(&mut self) {
+        if self.stage == EnvStage::Sustain {
+            self.stage = EnvStage::Release;
+            self.elapsed = 0.0;
+        }
+    }
+}
+
+/// 一阶低通（one-pole）系数：`a = 1 - exp(-2π·fc/sr)`；sr 或 fc 非正时返回 0（直通）
+fn lowpass_alpha(sample_rate: f32, cutoff: f32) -> f32 {
+    if sample_rate <= 0.0 || cutoff <= 0.0 {
+        return 0.0;
+    }
+    1.0 - (-(std::f32::consts::TAU * cutoff / sample_rate)).exp()
+}
+
+/// 一次性合成声部：确定性发生器 + ADSR 包络 + 一阶低通
+#[derive(Debug)]
+struct SynthVoice {
+    kind: SynthKind,
+    position: Vec3,
+    volume: f32,
+    /// 低通截止频率（Hz）
+    cutoff: f32,
+    adsr: Adsr,
+    /// 已发声时长（秒）
+    time: f32,
+    /// 噪声 LCG 状态（每声部独立种子）
+    rng: u32,
+    /// 一阶低通输出状态
+    lp: f32,
+    env: AdsrEnv,
+}
+
+impl SynthVoice {
+    /// 生成当前原始样本（未包络/未滤波；确定性）
+    fn raw_sample(&mut self) -> f32 {
+        let t = self.time;
+        match self.kind {
+            SynthKind::Shot | SynthKind::Footstep => noise_unit(&mut self.rng),
+            SynthKind::Explosion => {
+                // 低频轰鸣 80→35Hz 下滑 + 次声 24Hz + 宽带噪声（进低通变“闷响”）
+                let p = (t / 0.6).min(1.0);
+                let rumble = (std::f32::consts::TAU * (80.0 - 45.0 * p) * t).sin() * 0.55;
+                let sub = (std::f32::consts::TAU * 24.0 * t).sin() * 0.45;
+                let boom = noise_unit(&mut self.rng) * (1.0 - 0.7 * p);
+                rumble + sub + boom
+            }
+        }
+    }
+}
+
+/// 环境风声部：持续噪声 + 慢速 LFO 调制（截止/增益），确定性
+#[derive(Debug)]
+struct AmbientWind {
+    enabled: bool,
+    position: Vec3,
+    volume: f32,
+    /// LFO 相位（秒）
+    phase: f32,
+    /// 噪声 LCG 状态
+    rng: u32,
+    /// 一阶低通输出状态
+    lp: f32,
+}
+
+impl AmbientWind {
+    fn new() -> Self {
+        Self {
+            enabled: false,
+            position: Vec3::ZERO,
+            volume: 0.0,
+            phase: 0.0,
+            rng: 0xA5A5_5A5A,
+            lp: 0.0,
+        }
+    }
+
+    /// 渲染一帧环境风样本（未钳位；距离衰减按听者位置）
+    fn sample(&mut self, sample_rate: f32, listener: &AudioListener) -> f32 {
+        let t = self.phase;
+        // 0.13Hz 慢速 LFO：低通截止 250→650Hz 往复（风声“呜”感）
+        let lfo = 0.5 + 0.5 * (std::f32::consts::TAU * 0.13 * t).sin();
+        let alpha = lowpass_alpha(sample_rate, 250.0 + 400.0 * lfo);
+        let n = noise_unit(&mut self.rng);
+        self.lp += alpha * (n - self.lp);
+        // 0.07Hz 增益 LFO（相位错开 1.7rad，避免与截止 LFO 同相）
+        let gain_lfo = 1.0 + 0.35 * (std::f32::consts::TAU * 0.07 * t + 1.7).sin();
+        self.phase += 1.0 / sample_rate;
+        let att = distance_attenuation(listener.position.distance(self.position), DEFAULT_ROLLOFF);
+        self.lp * self.volume * gain_lfo * att
+    }
+}
+
+/// 一次性声部上限（防单帧大量事件打满 CPU；满时丢弃最旧声部）
+const MAX_SYNTH_VOICES: usize = 32;
+
+/// 程序化音效 DSP 合成层：事件式触发一次性声部 + 持续环境风声部。
+///
+/// 每帧按采样率推进 ADSR 包络与一阶低通，多声部累加后钳位到 [-1,1]；
+/// 纯 std 确定性实现（LCG 噪声），无外部音频资源。
+#[derive(Debug)]
+pub struct DspSynth {
+    sample_rate: f32,
+    voices: Vec<SynthVoice>,
+    next_id: usize,
+    ambient: AmbientWind,
+}
+
+impl DspSynth {
+    /// 以指定采样率创建合成器（sample_rate 为 0 时回退 44100）
+    pub fn new(sample_rate: u32) -> Self {
+        let sr = if sample_rate == 0 { 44_100 } else { sample_rate };
+        Self {
+            sample_rate: sr as f32,
+            voices: Vec::new(),
+            next_id: 1,
+            ambient: AmbientWind::new(),
+        }
+    }
+
+    /// 枪声：噪声突发 + 指数衰减（~3.2kHz 低通，ADSR 快起长落）
+    pub fn play_shot(&mut self, position: Vec3, volume: f32) -> VoiceId {
+        self.spawn(
+            SynthKind::Shot,
+            position,
+            volume,
+            Adsr::new(0.002, 0.12, 0.0, 0.02),
+            3200.0,
+            0x9E37_79B9,
+        )
+    }
+
+    /// 爆炸：低频轰鸣（80→35Hz 下滑）+ 次声 24Hz + 宽带噪声（~200Hz 低通）
+    pub fn play_explosion(&mut self, position: Vec3, volume: f32) -> VoiceId {
+        self.spawn(
+            SynthKind::Explosion,
+            position,
+            volume,
+            Adsr::new(0.005, 0.8, 0.0, 0.15),
+            200.0,
+            0xC0FF_EE01,
+        )
+    }
+
+    /// 脚步：短促宽带噪声（~850Hz 低通，~60ms 衰减）
+    pub fn play_footstep(&mut self, position: Vec3, volume: f32) -> VoiceId {
+        self.spawn(
+            SynthKind::Footstep,
+            position,
+            volume,
+            Adsr::new(0.001, 0.06, 0.0, 0.01),
+            850.0,
+            0xABCD_EF01,
+        )
+    }
+
+    /// 设置环境风（慢速调制噪声）；`volume` 为 0 时关闭
+    pub fn set_ambient(&mut self, position: Vec3, volume: f32) {
+        let v = volume.clamp(0.0, 1.0);
+        self.ambient.enabled = v > 0.0;
+        self.ambient.position = position;
+        self.ambient.volume = v;
+    }
+
+    /// 当前活跃一次性声部数
+    #[allow(dead_code)] // 仅供测试断言声部生命周期
+    pub fn voice_count(&self) -> usize {
+        self.voices.len()
+    }
+
+    /// 环境风是否开启
+    #[allow(dead_code)] // 仅供测试断言环境风状态
+    pub fn ambient_active(&self) -> bool {
+        self.ambient.enabled
+    }
+
+    /// 渲染 `frames` 帧并累加进 `out`（交错立体声，长度须为 2×frames）；叠加后钳位 [-1,1]
+    pub fn render(&mut self, listener: &AudioListener, frames: usize, out: &mut [f32]) {
+        debug_assert_eq!(out.len(), frames * 2);
+        let dt = 1.0 / self.sample_rate;
+        for f in 0..frames {
+            let mut mono = 0.0f32;
+            if self.ambient.enabled {
+                mono += self.ambient.sample(self.sample_rate, listener);
+            }
+            for v in self.voices.iter_mut() {
+                if v.env.stage == EnvStage::Done {
+                    continue;
+                }
+                let env = v.env.advance(&v.adsr, dt);
+                let raw = v.raw_sample();
+                let alpha = lowpass_alpha(self.sample_rate, v.cutoff);
+                v.lp += alpha * (raw - v.lp);
+                let att = distance_attenuation(listener.position.distance(v.position), DEFAULT_ROLLOFF);
+                mono += v.lp * env * v.volume * att;
+                v.time += dt;
+            }
+            let s = mono.clamp(-1.0, 1.0);
+            out[f * 2] += s;
+            out[f * 2 + 1] += s;
+        }
+        self.voices.retain(|v| v.env.stage != EnvStage::Done);
+    }
+
+    /// 生成一个一次性声部（声部满时丢弃最旧）
+    fn spawn(
+        &mut self,
+        kind: SynthKind,
+        position: Vec3,
+        volume: f32,
+        adsr: Adsr,
+        cutoff: f32,
+        seed: u32,
+    ) -> VoiceId {
+        if self.voices.len() >= MAX_SYNTH_VOICES {
+            self.voices.remove(0);
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.voices.push(SynthVoice {
+            kind,
+            position,
+            volume: volume.clamp(0.0, 1.0),
+            cutoff,
+            adsr,
+            time: 0.0,
+            rng: seed ^ (id as u32).wrapping_mul(0x0100_0193),
+            lp: 0.0,
+            env: AdsrEnv::new(adsr),
+        });
+        VoiceId(id)
     }
 }
 
@@ -1332,5 +1697,216 @@ mod tests {
         for (i, kind) in ALL_SFX_KINDS.iter().enumerate() {
             assert_eq!(bank.kind_index(*kind), i, "kind_index 应与枚举顺序一致");
         }
+    }
+
+    #[test]
+    fn dsp_synth_output_is_finite_and_clamped() {
+        let mut synth = DspSynth::new(48_000);
+        let listener = AudioListener::new(Vec3::ZERO);
+        synth.play_shot(Vec3::ZERO, 1.0);
+        synth.play_explosion(Vec3::ZERO, 1.0);
+        synth.play_footstep(Vec3::ZERO, 1.0);
+        synth.set_ambient(Vec3::ZERO, 0.5);
+        let mut out = vec![0.0; 4096];
+        synth.render(&listener, out.len() / 2, &mut out);
+        for (i, &s) in out.iter().enumerate() {
+            assert!(s.is_finite(), "sample {i} 应为有限值");
+            assert!(s.abs() <= 1.0, "sample {i} = {s} 超出 [-1,1]");
+        }
+        assert!(out.iter().any(|&s| s != 0.0), "应包含非零样本");
+    }
+
+    #[test]
+    fn dsp_synth_shot_decays_to_silence() {
+        let mut synth = DspSynth::new(48_000);
+        let listener = AudioListener::new(Vec3::ZERO);
+        synth.play_shot(Vec3::ZERO, 1.0);
+        let mut out = vec![0.0; 24_000];
+        synth.render(&listener, 12_000, &mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "枪声应有输出");
+        // 指数衰减：头部能量应大于尾部
+        let head: f32 = out[..800].iter().map(|s| s.abs()).sum();
+        let tail: f32 = out[out.len() - 800..].iter().map(|s| s.abs()).sum();
+        assert!(head > tail, "枪声应随时间衰减");
+        assert_eq!(synth.voice_count(), 0, "0.25s 后枪声声部应结束");
+        let mut rest = vec![0.0; 2400];
+        synth.render(&listener, 1200, &mut rest);
+        assert!(rest.iter().all(|&s| s == 0.0), "枪声结束后应静音");
+    }
+
+    #[test]
+    fn dsp_synth_explosion_outlasts_footstep() {
+        let listener = AudioListener::new(Vec3::ZERO);
+        // 脚步：~60ms 衰减，0.1s 后应已结束
+        let mut f = DspSynth::new(48_000);
+        f.play_footstep(Vec3::ZERO, 1.0);
+        let mut buf = vec![0.0; 9600];
+        f.render(&listener, 4800, &mut buf);
+        assert!(buf.iter().any(|&s| s != 0.0), "脚步应有输出");
+        assert_eq!(f.voice_count(), 0, "脚步 0.1s 内应结束");
+        let mut rest = vec![0.0; 9600];
+        f.render(&listener, 4800, &mut rest);
+        assert!(rest.iter().all(|&s| s == 0.0), "脚步结束后应静音");
+        // 爆炸：decay 0.8s，0.2s 时仍活跃且有输出，~0.9s 后结束
+        let mut e = DspSynth::new(48_000);
+        e.play_explosion(Vec3::ZERO, 1.0);
+        let mut buf = vec![0.0; 9600];
+        e.render(&listener, 4800, &mut buf);
+        assert!(buf.iter().any(|&s| s != 0.0), "爆炸应有输出");
+        assert!(e.voice_count() >= 1, "爆炸 decay 0.8s，0.1s 时仍活跃");
+        let mut mid = vec![0.0; 9600];
+        e.render(&listener, 4800, &mut mid);
+        assert!(mid.iter().any(|&s| s != 0.0), "爆炸 0.2s 后仍有轰鸣");
+        for _ in 0..7 {
+            let mut more = vec![0.0; 9600];
+            e.render(&listener, 4800, &mut more);
+        }
+        assert_eq!(e.voice_count(), 0, "爆炸 ~0.9s 后应结束");
+        let mut final_out = vec![0.0; 9600];
+        e.render(&listener, 4800, &mut final_out);
+        assert!(final_out.iter().all(|&s| s == 0.0), "爆炸结束后应静音");
+    }
+
+    #[test]
+    fn dsp_synth_distance_attenuation_matches_formula() {
+        let listener = AudioListener::new(Vec3::ZERO);
+        let att = distance_attenuation(100.0, DEFAULT_ROLLOFF);
+        let mut near = DspSynth::new(48_000);
+        near.play_shot(Vec3::ZERO, 0.5);
+        let mut far = DspSynth::new(48_000);
+        far.play_shot(Vec3::new(100.0, 0.0, 0.0), 0.5);
+        let mut a = vec![0.0; 4800];
+        let mut b = vec![0.0; 4800];
+        near.render(&listener, 2400, &mut a);
+        far.render(&listener, 2400, &mut b);
+        // 两路事件序列相同 → 原始样本一致，仅距离衰减不同（音量 0.5 无钳位干扰）
+        for i in (0..a.len()).step_by(2) {
+            let expected = a[i] * att;
+            assert!(
+                (b[i] - expected).abs() < 1e-5,
+                "frame {}: {} vs {}",
+                i / 2,
+                b[i],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn dsp_synth_mix_clamps_under_loud_polyphony() {
+        let mut synth = DspSynth::new(48_000);
+        let listener = AudioListener::new(Vec3::ZERO);
+        // 8 个同时起爆的爆炸声部（正弦分量同相叠加）必然超 1，验证钳位
+        for _ in 0..8 {
+            synth.play_explosion(Vec3::ZERO, 1.0);
+        }
+        let mut out = vec![0.0; 9600];
+        synth.render(&listener, 4800, &mut out);
+        for (i, &s) in out.iter().enumerate() {
+            assert!(s.is_finite(), "sample {i} 应为有限值");
+            assert!(s.abs() <= 1.0, "sample {i} = {s} 超出 [-1,1]");
+        }
+        assert!(out.iter().any(|&s| s.abs() == 1.0), "多声部叠加应触发钳位");
+    }
+
+    #[test]
+    fn dsp_synth_ambient_wind_toggle() {
+        let mut synth = DspSynth::new(48_000);
+        let listener = AudioListener::new(Vec3::ZERO);
+        assert!(!synth.ambient_active(), "默认无环境风");
+        synth.set_ambient(Vec3::ZERO, 0.0);
+        assert!(!synth.ambient_active(), "volume=0 视为关闭");
+        synth.set_ambient(Vec3::new(0.0, 2.0, 0.0), 0.4);
+        assert!(synth.ambient_active());
+        let mut out = vec![0.0; 4800];
+        synth.render(&listener, 2400, &mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "环境风应有输出");
+        assert!(out.iter().all(|&s| s.is_finite() && s.abs() <= 1.0));
+        synth.set_ambient(Vec3::ZERO, 0.0);
+        let mut silent = vec![0.0; 4800];
+        synth.render(&listener, 2400, &mut silent);
+        assert!(silent.iter().all(|&s| s == 0.0), "关闭环境风后应静音");
+    }
+
+    #[test]
+    fn dsp_synth_deterministic() {
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut a = DspSynth::new(48_000);
+        let mut b = DspSynth::new(48_000);
+        for s in [&mut a, &mut b] {
+            s.play_shot(Vec3::ZERO, 0.8);
+            s.play_explosion(Vec3::new(10.0, 0.0, 0.0), 0.6);
+            s.play_footstep(Vec3::ZERO, 0.5);
+            s.set_ambient(Vec3::ZERO, 0.3);
+        }
+        let mut oa = vec![0.0; 9600];
+        let mut ob = vec![0.0; 9600];
+        a.render(&listener, 4800, &mut oa);
+        b.render(&listener, 4800, &mut ob);
+        assert_eq!(oa, ob, "同一事件序列应逐样本一致");
+    }
+
+    #[test]
+    fn dsp_synth_voice_cap_drops_oldest() {
+        let mut synth = DspSynth::new(48_000);
+        for _ in 0..MAX_SYNTH_VOICES + 4 {
+            synth.play_shot(Vec3::ZERO, 0.5);
+        }
+        assert_eq!(synth.voice_count(), MAX_SYNTH_VOICES, "超限应丢弃最旧声部");
+    }
+
+    #[test]
+    fn dsp_synth_zero_sample_rate_falls_back() {
+        let synth = DspSynth::new(0);
+        assert_eq!(synth.sample_rate, 44_100.0);
+    }
+
+    #[test]
+    fn adsr_envelope_stages() {
+        let adsr = Adsr::new(0.01, 0.1, 0.2, 0.05);
+        let mut env = AdsrEnv::new(adsr);
+        // 起音：半程 ~0.5，满程 ~1.0 后进入衰减
+        let mid = env.advance(&adsr, 0.005);
+        assert!((mid - 0.5).abs() < 1e-3, "attack 半程应 ~0.5");
+        let full = env.advance(&adsr, 0.005);
+        assert!((full - 1.0).abs() < 1e-3, "attack 满程应 ~1.0");
+        // 衰减：decay 满程后进入 Sustain 且电平 ≈ sustain
+        let _ = env.advance(&adsr, 0.1);
+        assert!((env.level - 0.2).abs() < 1e-3, "decay 结束应到 sustain");
+        // 释音：半程衰减中，满程结束
+        env.release();
+        let _ = env.advance(&adsr, 0.025);
+        assert!(env.level < 0.2, "release 半程应衰减");
+        let _ = env.advance(&adsr, 0.025);
+        assert_eq!(env.stage, EnvStage::Done);
+        assert_eq!(env.level, 0.0);
+        // sustain=0 的单发音色：衰减结束直接 Done
+        let one_shot = Adsr::new(0.001, 0.05, 0.0, 0.0);
+        let mut env = AdsrEnv::new(one_shot);
+        let _ = env.advance(&one_shot, 0.001);
+        let _ = env.advance(&one_shot, 0.05);
+        assert_eq!(env.stage, EnvStage::Done, "sustain=0 衰减结束即结束");
+    }
+
+    #[test]
+    fn lowpass_alpha_bounds() {
+        assert_eq!(lowpass_alpha(48_000.0, 0.0), 0.0);
+        assert_eq!(lowpass_alpha(0.0, 1000.0), 0.0);
+        let a = lowpass_alpha(48_000.0, 24_000.0);
+        assert!(a > 0.0 && a < 1.0, "奈奎斯特处系数应在 (0,1)");
+        let lo = lowpass_alpha(48_000.0, 200.0);
+        let hi = lowpass_alpha(48_000.0, 4000.0);
+        assert!(lo < hi, "截止越高系数越大（带宽越宽）");
+    }
+
+    #[test]
+    fn audio_player_tick_renders_synth_into_sink() {
+        let mut player = AudioPlayer::new(CollectingSink::new(44_100, 2));
+        player.synth_mut().play_shot(Vec3::ZERO, 0.5);
+        player.tick(&AudioListener::new(Vec3::ZERO), 128);
+        let got = &player.sink().samples;
+        assert_eq!(got.len(), 256);
+        assert!(got.iter().any(|&s| s != 0.0), "DSP 声部应进入 sink");
+        assert!(got.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
     }
 }

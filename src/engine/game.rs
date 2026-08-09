@@ -419,7 +419,7 @@ pub struct Game {
     move_right: bool,
     /// 脚步声音效限频计时
     footstep_timer: f32,
-    /// 程序化合成音效库（枪声/脚步/命中/换弹/提示/环境）
+    /// 程序化合成音效库（命中/换弹/提示；枪声/脚步/环境风走 DspSynth）
     sfx: SfxBank,
     /// 在场投射物
     projectiles: Vec<Projectile>,
@@ -655,18 +655,13 @@ impl Game {
             level: 1,
             map: LevelMap::default(),
             audio: {
-                let player = AudioPlayer::new(SilentSink::new(48_000, 2));
-                let mut player = player;
+                let mut player = AudioPlayer::new(SilentSink::new(48_000, 2));
                 player.mixer_mut().set_master(0.8);
                 player.mixer_mut().set_channel_volume(Channel::Sfx, 1.0);
-                // 环境音循环（SilentSink：输出被丢弃，但混音/衰减链路真实运行）
-                SfxBank::new(48_000).play(
-                    player.mixer_mut(),
-                    SfxKind::Ambient,
-                    AudioSource::new(glam::Vec3::new(0.0, 2.0, 0.0), 0.4),
-                    Channel::Sfx,
-                    true,
-                );
+                // 环境风：DSP 慢速调制噪声（SilentSink：输出被丢弃，但合成/混音链路真实运行）
+                player
+                    .synth_mut()
+                    .set_ambient(glam::Vec3::new(0.0, 2.0, 0.0), 0.35);
                 player
             },
             net_demo: {
@@ -1096,18 +1091,10 @@ impl Game {
                 self.pending_kick.1 += kick_yaw;
                 self.projectiles.push(projectile);
                 self.shots += 1;
-                let src = AudioSource::new(
-                    glam::Vec3::new(origin[0], origin[1], origin[2]),
-                    1.0,
-                );
-                // 开火音效带确定性音量抖动（0.95..=1.0，按射击计数循环），避免机械重复
+                // 程序化枪声：噪声突发 + 指数衰减，带确定性音量抖动（0.95..=1.0）避免机械重复
                 let shot_scale = 0.95 + 0.05 * ((self.shots % 5) as f32 / 4.0);
-                self.sfx.play_variant(
-                    &mut self.audio.mixer_mut(),
-                    SfxKind::Gunshot,
-                    src,
-                    Channel::Sfx,
-                    false,
+                self.audio.synth_mut().play_shot(
+                    glam::Vec3::new(origin[0], origin[1], origin[2]),
                     shot_scale,
                 );
                 log::info!(
@@ -1279,17 +1266,10 @@ impl Game {
             let moved = (mx * mx + mz * mz).sqrt();
             if moved > 0.01 && self.time - self.footstep_timer >= FOOTSTEP_INTERVAL {
                 self.footstep_timer = self.time;
-                let src = AudioSource::new(self.player_pos(), 0.5);
-                // 脚步声交替强弱（0.8 / 1.0），确定性变化
+                // 程序化脚步：短促宽带噪声，交替强弱（0.8 / 1.0）确定性变化
                 let step_scale = 0.8 + 0.2 * ((self.time * 2.0) as u32 % 2) as f32;
-                self.sfx.play_variant(
-                    &mut self.audio.mixer_mut(),
-                    SfxKind::Footstep,
-                    src,
-                    Channel::Sfx,
-                    false,
-                    step_scale,
-                );
+                let pos = self.player_pos();
+                self.audio.synth_mut().play_footstep(pos, step_scale);
             }
         }
         self.player_body.pos.y = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
@@ -1310,6 +1290,11 @@ impl Game {
         let mut alive = Vec::with_capacity(old.len());
         for p in old {
             if !p.is_alive() {
+                // 弹着点：程序化爆炸（低频轰鸣 + 次声），距离衰减按听者位置
+                self.audio.synth_mut().play_explosion(
+                    glam::Vec3::new(p.position[0], p.position[1], p.position[2]),
+                    0.45,
+                );
                 continue;
             }
             if !allow_kills {
@@ -2244,21 +2229,21 @@ mod tests {
         assert!(u.points[1].position.w >= 1.0, "point light B enabled");
     }
 
-    /// 音频：测试音循环播放，tick 每帧运行且 voice 持续存在
+    /// 音频：环境风合成器常开，tick 每帧渲染（audio_us 链路真实运行）
     #[test]
-    fn audio_mixer_runs_with_voice() {
+    fn audio_synth_ambient_runs_with_tick() {
         let mut game = Game::new();
         assert!(
-            game.audio.mixer().voice_count() >= 1,
-            "test tone should be playing"
+            game.audio.synth().ambient_active(),
+            "ambient wind should be playing"
         );
         let cam = Camera::new();
         for _ in 0..60 {
             game.update(1.0 / 60.0, &cam);
         }
         assert!(
-            game.audio.mixer().voice_count() >= 1,
-            "looping voice should persist"
+            game.audio.synth().ambient_active(),
+            "ambient wind should persist"
         );
     }
 
