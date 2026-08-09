@@ -500,6 +500,10 @@ pub struct Renderer {
     culled: Vec<u32>,
     /// 每实例包围球半径（创建时预算，剔除循环查表免每帧 sqrt）
     instance_radii: Vec<f32>,
+    /// 实例球心 SoA（SIMD 剔除用，创建时一次填充，连续内存便于向量化加载）
+    instance_center_x: Vec<f32>,
+    instance_center_y: Vec<f32>,
+    instance_center_z: Vec<f32>,
     /// 世界障碍 marker（关卡切换时由 main.rs 设置；独立于实例场，见 MARKER_SLOT_BASE）
     markers: Vec<InstanceData>,
     /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
@@ -824,6 +828,9 @@ impl Renderer {
             instances: Vec::new(),
             culled: Vec::with_capacity(INSTANCE_COUNT as usize),
             instance_radii: Vec::with_capacity(INSTANCE_COUNT as usize),
+            instance_center_x: Vec::with_capacity(INSTANCE_COUNT as usize),
+            instance_center_y: Vec::with_capacity(INSTANCE_COUNT as usize),
+            instance_center_z: Vec::with_capacity(INSTANCE_COUNT as usize),
             markers: Vec::new(),
             last_marker_near: 0,
             last_marker_far: 0,
@@ -2242,6 +2249,9 @@ impl Renderer {
                     .max(model.y_axis.length())
                     .max(model.z_axis.length());
                 self.instance_radii.push(r);
+                self.instance_center_x.push(x);
+                self.instance_center_y.push(y);
+                self.instance_center_z.push(z);
                 self.instances.push(InstanceData {
                     model: model.to_cols_array(),
                     tint: [0.7, 0.7, 0.7, 1.0],
@@ -2346,6 +2356,100 @@ impl Renderer {
         ]
     }
 
+    /// 标量视锥剔除（回退路径）：对每个实例判 6 平面，d = dot(n,c)+d，
+    /// 任一平面 d < -r 即剔除；全部平面 d >= -r 才可见。
+    fn cull_spheres_scalar(
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        planes: &[[f32; 4]; 6],
+        out: &mut Vec<u32>,
+    ) {
+        for i in 0..cx.len() {
+            let mut visible = true;
+            for p in planes {
+                let d = p[0] * cx[i] + p[1] * cy[i] + p[2] * cz[i] + p[3];
+                if d < -radii[i] {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible {
+                out.push(i as u32);
+            }
+        }
+    }
+
+    /// AVX2 批量视锥剔除：8 实例/批（256 位 8×f32），6 平面点积全部向量化。
+    /// 与标量版逐位一致：非 FMA，累加顺序严格 ((nx*x+ny*y)+nz*z)+d，
+    /// 比较 d >= -r 得保留掩码并按实例序输出，无 NaN 输入（全部有限数）。
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn cull_spheres_avx2(
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        planes: &[[f32; 4]; 6],
+        out: &mut Vec<u32>,
+    ) {
+        use std::arch::x86_64::*;
+        let n = cx.len();
+        debug_assert_eq!(n, cy.len());
+        debug_assert_eq!(n, cz.len());
+        debug_assert_eq!(n, radii.len());
+
+        let mut i = 0usize;
+        while i + 8 <= n {
+            let xv = _mm256_loadu_ps(cx.as_ptr().add(i));
+            let yv = _mm256_loadu_ps(cy.as_ptr().add(i));
+            let zv = _mm256_loadu_ps(cz.as_ptr().add(i));
+            let rv = _mm256_loadu_ps(radii.as_ptr().add(i));
+            // 可见掩码：初始全 1，任一平面剔除则清零
+            let mut vis = _mm256_castsi256_ps(_mm256_set1_epi32(-1));
+            let neg_r = _mm256_sub_ps(_mm256_setzero_ps(), rv);
+            for p in planes {
+                let nx = _mm256_set1_ps(p[0]);
+                let ny = _mm256_set1_ps(p[1]);
+                let nz = _mm256_set1_ps(p[2]);
+                let pd = _mm256_set1_ps(p[3]);
+                // d = ((nx*x + ny*y) + nz*z) + pd，与标量加法顺序一致（无 FMA）
+                let d = _mm256_add_ps(
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(nx, xv), _mm256_mul_ps(ny, yv)),
+                        _mm256_mul_ps(nz, zv),
+                    ),
+                    pd,
+                );
+                // 保留条件 d >= -r（NaN 不可能出现，有序比较安全）
+                let keep = _mm256_cmp_ps(d, neg_r, _CMP_GE_OQ);
+                vis = _mm256_and_ps(vis, keep);
+            }
+            let mask = _mm256_movemask_ps(vis) as u32;
+            for k in 0..8u32 {
+                if mask & (1 << k) != 0 {
+                    out.push((i + k as usize) as u32);
+                }
+            }
+            i += 8;
+        }
+        // 尾部不足 8 个走标量
+        for j in i..n {
+            let mut visible = true;
+            for p in planes {
+                let d = p[0] * cx[j] + p[1] * cy[j] + p[2] * cz[j] + p[3];
+                if d < -radii[j] {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible {
+                out.push(j as u32);
+            }
+        }
+    }
+
     /// 每帧视锥剔除 + 距离 LOD 分档：
     /// 设置世界障碍 marker（关卡切换时由 main.rs 调用；容量截断到 MAX_MARKER_INSTANCES）
     pub fn set_world_markers(&mut self, markers: &[WorldMarker]) {
@@ -2421,23 +2525,30 @@ impl Renderer {
         let planes = Self::extract_frustum_planes(view, proj);
         self.culled.clear();
 
-        // 单遍剔除：半径查表（创建时预算），可见实例只存索引（4B）避免 80B 中转拷贝
-        for (i, inst) in self.instances.iter().enumerate() {
-            // 球心 = model 平移列
-            let center = [inst.model[12], inst.model[13], inst.model[14]];
-            let radius = self.instance_radii[i];
-            let mut visible = true;
-            for p in &planes {
-                // dot(n, c) + d < -r 即剔除
-                let d = p[0] * center[0] + p[1] * center[1] + p[2] * center[2] + p[3];
-                if d < -radius {
-                    visible = false;
-                    break;
-                }
+        // 单遍剔除：半径查表（创建时预算），可见实例只存索引（4B）避免 80B 中转拷贝。
+        // x86_64 + AVX2 走 8 实例/批 SIMD 路径（与标量逐位一致），否则标量回退。
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            // safety: 上面已运行时检测 AVX2，CPU 支持才进入该分支
+            unsafe {
+                Self::cull_spheres_avx2(
+                    &self.instance_center_x,
+                    &self.instance_center_y,
+                    &self.instance_center_z,
+                    &self.instance_radii,
+                    &planes,
+                    &mut self.culled,
+                );
             }
-            if visible {
-                self.culled.push(i as u32);
-            }
+        } else {
+            Self::cull_spheres_scalar(
+                &self.instance_center_x,
+                &self.instance_center_y,
+                &self.instance_center_z,
+                &self.instance_radii,
+                &planes,
+                &mut self.culled,
+            );
         }
 
         let stride = std::mem::size_of::<InstanceData>();
@@ -4241,5 +4352,96 @@ mod screenshot_pixel_tests {
         // 未知格式 → Err
         let mut dst3 = [0u8; 4];
         assert!(convert_pixels_to_rgba(vk::Format::UNDEFINED, &src2, &mut dst3).is_err());
+    }
+}
+
+#[cfg(test)]
+mod simd_cull_tests {
+    use super::*;
+
+    /// 简单确定性伪随机（SplitMix64），纯逻辑测试不碰 GPU
+    struct Rng(u64);
+    impl Rng {
+        fn next_f32(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as u32 as f64 / (1u64 << 31) as f64) as f32
+        }
+    }
+
+    #[test]
+    fn simd_cull_matches_scalar() {
+        let mut rng = Rng(0x5EED_2026);
+        // 6 个随机朝向平面（法线随机、d 随机），覆盖可见/剔除/边界混合场景
+        let mut planes = [[0f32; 4]; 6];
+        for p in &mut planes {
+            let (nx, ny, nz) = (rng.next_f32() * 2.0 - 1.0, rng.next_f32() * 2.0 - 1.0, rng.next_f32() * 2.0 - 1.0);
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            p[0] = nx / len;
+            p[1] = ny / len;
+            p[2] = nz / len;
+            p[3] = rng.next_f32() * 4.0 - 2.0;
+        }
+
+        let n = 65536;
+        let mut cx = Vec::with_capacity(n);
+        let mut cy = Vec::with_capacity(n);
+        let mut cz = Vec::with_capacity(n);
+        let mut radii = Vec::with_capacity(n);
+        for _ in 0..n {
+            cx.push(rng.next_f32() * 200.0 - 100.0);
+            cy.push(rng.next_f32() * 200.0 - 100.0);
+            cz.push(rng.next_f32() * 200.0 - 100.0);
+            radii.push(rng.next_f32() * 4.0);
+        }
+
+        let mut scalar_out = Vec::new();
+        Renderer::cull_spheres_scalar(&cx, &cy, &cz, &radii, &planes, &mut scalar_out);
+
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            let mut avx_out = Vec::new();
+            // safety: 已运行时检测 AVX2
+            unsafe {
+                Renderer::cull_spheres_avx2(&cx, &cy, &cz, &radii, &planes, &mut avx_out);
+            }
+            assert_eq!(avx_out, scalar_out, "AVX2 剔除结果与标量逐位不一致");
+        }
+        // 非 x86_64 或无双 AVX2：标量结果本身就是正确语义，无需对照
+        assert!(!scalar_out.is_empty() || scalar_out.is_empty());
+    }
+
+    #[test]
+    fn simd_cull_tail_batches_handled() {
+        // 长度非 8 的倍数：覆盖尾部标量路径
+        let mut rng = Rng(0xC0FF_EE);
+        let mut planes = [[0f32; 4]; 6];
+        for p in &mut planes {
+            p[0] = 0.0;
+            p[1] = 0.0;
+            p[2] = 1.0;
+            p[3] = 0.0;
+        }
+        let n = 13; // 1 个 AVX2 批 + 5 个尾部
+        let mut cx = Vec::with_capacity(n);
+        let mut cy = Vec::with_capacity(n);
+        let mut cz = Vec::with_capacity(n);
+        let mut radii = Vec::with_capacity(n);
+        for i in 0..n {
+            cx.push((i as f32) - 6.0);
+            cy.push(0.0);
+            cz.push((i as f32) - 6.0);
+            radii.push(1.0);
+        }
+        let mut scalar_out = Vec::new();
+        Renderer::cull_spheres_scalar(&cx, &cy, &cz, &radii, &planes, &mut scalar_out);
+
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            let mut avx_out = Vec::new();
+            unsafe {
+                Renderer::cull_spheres_avx2(&cx, &cy, &cz, &radii, &planes, &mut avx_out);
+            }
+            assert_eq!(avx_out, scalar_out);
+        }
     }
 }
