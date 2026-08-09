@@ -884,8 +884,10 @@ fn main() {
     log::info!("  二战FPS游戏引擎 - Rust + Vulkan");
     log::info!("========================================");
 
-    // CPU 拓扑检测 + 主线程亲和性绑定（AMD 双簇/Intel 混合；RV3D_CPU_PIN=off 可关）
-    let cpu = engine::cpu::CpuTopology::detect();
+    // CPU 拓扑检测（全局缓存，Game/Renderer 复用同一份）+ 主线程亲和性绑定
+    // （AMD 双簇/Intel 混合；RV3D_CPU_PIN=off 可关）。渲染线程不固定 1-2 核：
+    // 主线程绑的是整簇集合（CCD0/P-core），OS 调度器把渲染工作分给集合内空闲率最高的核。
+    let cpu = engine::cpu::topology();
     cpu.log_summary();
     cpu.pin_main_thread();
 
