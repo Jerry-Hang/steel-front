@@ -55,11 +55,9 @@ const DODGE_HIT_TIME: f32 = 0.5;
 const DODGE_THREAT_TIME: f32 = 0.35;
 /// 两次躲避最小间隔（秒）
 const DODGE_COOLDOWN: f32 = 2.0;
-/// 并行 AI 更新阈值：NPC 数 ≥ 该值走 std::thread::scope 分块并行
+/// 并行 AI 更新阈值：NPC 数 ≥ 该值走亲和线程池分块并行（ai_pool）
 /// （普通波次远小于此，保持单线程串行 → 冒烟行为不变）
 const PARALLEL_AI_MIN: usize = 32;
-/// 并行 AI 分块大小（128 NPC → 8 个 worker）
-const AI_CHUNK: usize = 16;
 /// 压力模式出生环半径（米）：超出障碍环带 58–130m，两军对垒区干净
 const STRESS_SPAWN_RADIUS: f32 = 150.0;
 /// 压力模式视野半径（米）：全场可见（512m 场地），保证 64v64 出生后立即交火
@@ -1730,18 +1728,14 @@ impl Game {
         }
     }
 
-    /// 并行推进全部 NPC：`std::thread::scope` 按 AI_CHUNK 分块，每线程处理不相交分片。
+    /// 并行推进全部 NPC：走 `cpu::ai_pool()` 亲和线程池（AMD 绑 CCD1 / Intel 按策略
+    /// 选 E-core 或 P-core），按段处理不相交分片，调用线程参与首段。
     /// 各 NPC 更新彼此独立（目标/感知/路径均为本帧快照），并行与串行结果逐位一致。
     fn step_ai_parallel(npcs: &mut [Npc], ctx: &AiStepCtx) {
-        let chunk = AI_CHUNK.max(1);
-        std::thread::scope(|s| {
-            for (start, slice) in npcs.chunks_mut(chunk).enumerate() {
-                let start = start * chunk;
-                s.spawn(move || {
-                    for (k, npc) in slice.iter_mut().enumerate() {
-                        Self::step_npc(start + k, npc, ctx);
-                    }
-                });
+        let pool = crate::engine::cpu::ai_pool();
+        pool.par_for_each_mut(npcs, |_, start, slice| {
+            for (k, npc) in slice.iter_mut().enumerate() {
+                Self::step_npc(start + k, npc, ctx);
             }
         });
     }
