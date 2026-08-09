@@ -15,7 +15,7 @@ use super::camera::{Camera, CameraMode};
 use super::ai::{
     ambush_goal, angle_diff, find_cover_points, find_cover_shielding, find_path, flank_goal,
     pick_tactic, role_for, should_charge, wave_profile, yaw_to_target, zigzag_offset, GridMap,
-    GridPos, NpcPerception, NpcState, NpcStateMachine, TacticalRole, Tactic, WaveKind,
+    GridPos, NpcPerception, NpcState, NpcStateMachine, TacticalRole, Tactic, Team, WaveKind,
 };
 use super::physics::{self, Body, CollisionEvent, CollisionListener, PlayerBody, Vec3 as Pv};
 use super::renderer::terrain_height_at;
@@ -55,6 +55,15 @@ const DODGE_HIT_TIME: f32 = 0.5;
 const DODGE_THREAT_TIME: f32 = 0.35;
 /// 两次躲避最小间隔（秒）
 const DODGE_COOLDOWN: f32 = 2.0;
+/// 并行 AI 更新阈值：NPC 数 ≥ 该值走 std::thread::scope 分块并行
+/// （普通波次远小于此，保持单线程串行 → 冒烟行为不变）
+const PARALLEL_AI_MIN: usize = 32;
+/// 并行 AI 分块大小（128 NPC → 8 个 worker）
+const AI_CHUNK: usize = 16;
+/// 压力模式出生环半径（米）：超出障碍环带 58–130m，两军对垒区干净
+const STRESS_SPAWN_RADIUS: f32 = 150.0;
+/// 压力模式视野半径（米）：全场可见（512m 场地），保证 64v64 出生后立即交火
+const STRESS_SIGHT: f32 = 512.0;
 /// 锯齿机动触发距离（米）
 const ZIGZAG_DIST: f32 = 40.0;
 /// 常规锯齿幅度（米）
@@ -132,6 +141,12 @@ pub struct Npc {
     hit_cooldown: f32,
     /// 上一帧血量（受击检测）
     last_hp: f32,
+    /// 阵营（普通波次全为 Red；压力模式红蓝对抗）
+    pub team: Team,
+    /// 朝向角（绕 Y 轴旋转，约定 atan2(dx, dz)，渲染士兵模型用）
+    pub facing: f32,
+    /// 对目标开火累计时间（压力模式 NPC 互射，每满 1 秒结算一次 dps）
+    fire_accum: f32,
 }
 
 /// 世界坐标 → 网格坐标（±256 → 0..128）
@@ -426,6 +441,14 @@ pub struct Game {
     charge_active: bool,
     /// NPC 数量缩放（RV3D_NPC_SCALE，默认 1.0；压测多人对战压力场景用）
     npc_scale: f32,
+    /// 压力模式（RV3D_STRESS_AI）：红蓝各 `stress_sides` 名 NPC 大战场对抗
+    stress: bool,
+    /// 压力模式每边 NPC 数量（默认 64 → 64v64）
+    stress_sides: usize,
+    /// 压力模式对抗轮次（一方团灭补员后 +1）
+    stress_round: u32,
+    /// 并行 AI 更新开关（RV3D_AI_PARALLEL=off 关闭，可串行 A/B 对比）
+    ai_parallel: bool,
     /// 性能探针：本帧各阶段耗时（µs，1Hz 日志输出，定位 CPU 侧瓶颈）
     stage_physics_us: u64,
     stage_ai_us: u64,
@@ -467,6 +490,44 @@ pub struct Game {
     last_status_log: f32,
 }
 
+/// 单帧 AI 步进上下文（全部为共享只读数据，供串行/并行两种 runner 复用）
+struct AiStepCtx<'a> {
+    player: &'a glam::Vec3,
+    player_yaw: f32,
+    charge: bool,
+    under_fire: &'a [bool],
+    targets: &'a [Option<(usize, [f32; 3])>],
+    grid: &'a GridMap,
+    time: f32,
+    dt: f32,
+    stress: bool,
+}
+
+/// 压力模式目标预选：每 NPC 找视野内最近的敌对阵营 NPC（纯读，O(n²)）。
+/// 返回 (目标索引, 目标位置快照)；None = 目标为玩家（兜底）。同距取索引小者，确定性。
+fn pick_stress_targets(npcs: &[Npc], sight: f32) -> Vec<Option<(usize, [f32; 3])>> {
+    let mut out = Vec::with_capacity(npcs.len());
+    for npc in npcs {
+        let mut best: Option<(usize, f32)> = None;
+        for (j, other) in npcs.iter().enumerate() {
+            if other.team == npc.team || other.hp <= 0.0 {
+                continue;
+            }
+            let dx = other.position[0] - npc.position[0];
+            let dz = other.position[2] - npc.position[2];
+            let d2 = dx * dx + dz * dz;
+            if d2 >= sight * sight {
+                continue;
+            }
+            if best.map_or(true, |(_, bd)| d2 < bd) {
+                best = Some((j, d2));
+            }
+        }
+        out.push(best.map(|(j, _)| (j, npcs[j].position)));
+    }
+    out
+}
+
 impl Game {
     /// 创建游戏中枢：初始化物理演示场景
     pub fn new() -> Self {
@@ -506,6 +567,9 @@ impl Game {
                 dodge_timer: 0.0,
                 hit_cooldown: 0.0,
                 last_hp: 100.0,
+                team: Team::Red,
+                facing: 0.0,
+                fire_accum: 0.0,
             });
         }
         let mut game = Self {
@@ -549,6 +613,16 @@ impl Game {
                     .unwrap_or(1.0);
                 v.max(0.5)
             },
+            stress: std::env::var("RV3D_STRESS_AI").is_ok(),
+            stress_sides: std::env::var("RV3D_STRESS_AI")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n >= 4)
+                .unwrap_or(64),
+            stress_round: 0,
+            ai_parallel: std::env::var("RV3D_AI_PARALLEL")
+                .map(|v| v != "off")
+                .unwrap_or(true),
             stage_physics_us: 0,
             stage_ai_us: 0,
             stage_audio_us: 0,
@@ -654,11 +728,16 @@ impl Game {
         self.hits = 0;
         self.total_collisions = 0;
         self.last_damage_time = 0.0;
+        self.stress_round = 0;
         if !self.npcs.is_empty() {
             log::info!("game: purged {} leftover npcs on run start", self.npcs.len());
             self.npcs.clear();
         }
-        self.spawn_wave(1, player);
+        if self.stress {
+            self.spawn_stress_battle(player);
+        } else {
+            self.spawn_wave(1, player);
+        }
         self.game_state = GameState::Playing;
         log::info!("game: run started (wave 1)");
     }
@@ -1438,21 +1517,10 @@ impl Game {
         let tau = std::f32::consts::TAU;
         let angle = slot as f32 * (tau / divisor.max(1) as f32) + wave_n as f32 * 0.37;
         let radius = 40.0 + 40.0 * ((slot * 7 + wave_n * 3) % 5) as f32 / 4.0;
-        let x = (player.x + angle.cos() * radius).clamp(-250.0, 250.0);
-        let z = (player.z + angle.sin() * radius).clamp(-250.0, 250.0);
-        // 出生点避开障碍盒（网格阻挡格）：沿径向向外推，最多 8 步（每步 4m），确定性
-        let mut sx = x;
-        let mut sz = z;
-        for _ in 0..8 {
-            if self.grid.is_passable(world_to_grid(sx, sz)) {
-                break;
-            }
-            let d = (sx * sx + sz * sz).sqrt().max(1.0);
-            sx += sx / d * 4.0;
-            sz += sz / d * 4.0;
-        }
-        let x = sx.clamp(-250.0, 250.0);
-        let z = sz.clamp(-250.0, 250.0);
+        let (x, z) = self.push_out_of_obstacle(
+            (player.x + angle.cos() * radius).clamp(-250.0, 250.0),
+            (player.z + angle.sin() * radius).clamp(-250.0, 250.0),
+        );
         let id = self.next_npc_id as usize;
         self.next_npc_id += 1;
         let y = terrain_height_at(x, z);
@@ -1474,8 +1542,182 @@ impl Game {
             dodge_timer: 0.0,
             hit_cooldown: 0.0,
             last_hp: hp,
+            team: Team::Red,
+            facing: (player.z - z).atan2(player.x - x),
+            fire_accum: 0.0,
         });
         id
+    }
+
+    /// 出生点避开障碍盒（网格阻挡格）：沿径向向外推，最多 8 步（每步 4m），确定性。
+    /// 普通波次与压力模式共用。
+    fn push_out_of_obstacle(&self, x: f32, z: f32) -> (f32, f32) {
+        let mut sx = x;
+        let mut sz = z;
+        for _ in 0..8 {
+            if self.grid.is_passable(world_to_grid(sx, sz)) {
+                break;
+            }
+            let d = (sx * sx + sz * sz).sqrt().max(1.0);
+            sx += sx / d * 4.0;
+            sz += sz / d * 4.0;
+        }
+        (sx.clamp(-250.0, 250.0), sz.clamp(-250.0, 250.0))
+    }
+
+    /// 压力模式开战：红蓝各 `stress_sides` 名 NPC 分两半场环形出生（半径 150m+，避障外推），
+    /// 角色/速度/血量/攻击距离按第 1 波 profile 确定性分配。清掉旧 NPC（全量重开一轮）。
+    fn spawn_stress_battle(&mut self, player: &glam::Vec3) {
+        self.npcs.clear();
+        let sides = self.stress_sides as u32;
+        let profile = wave_profile(self.effective_wave(1));
+        for side in 0..2u32 {
+            let team = if side == 0 { Team::Red } else { Team::Blue };
+            let base_angle = if side == 0 { 0.0 } else { std::f32::consts::PI };
+            for i in 0..sides {
+                // 半场 ±~63° 扇形铺开，半径 150m + 确定性抖动（超出障碍环带 58-130m）
+                let spread = -1.1 + (i as f32 / sides.max(1) as f32) * 2.2;
+                let angle = base_angle + spread;
+                let radius = STRESS_SPAWN_RADIUS + 12.0 * ((i * 7 + side) % 5) as f32;
+                let (x, z) = self.push_out_of_obstacle(
+                    (player.x + angle.cos() * radius).clamp(-250.0, 250.0),
+                    (player.z + angle.sin() * radius).clamp(-250.0, 250.0),
+                );
+                let id = self.next_npc_id as usize;
+                self.next_npc_id += 1;
+                let y = terrain_height_at(x, z);
+                self.npcs.push(Npc {
+                    id,
+                    position: [x, y, z],
+                    speed: profile.speed,
+                    attack_range: profile.attack_range,
+                    home: [x, z],
+                    state_machine: NpcStateMachine::new(),
+                    perception: NpcPerception::default(),
+                    path: Vec::new(),
+                    path_index: 0,
+                    hp: profile.hp,
+                    max_hp: profile.hp,
+                    role: role_for(i, 1, profile.flank_chance),
+                    tactic: Tactic::Advance,
+                    dodge_timer: 0.0,
+                    hit_cooldown: 0.0,
+                    last_hp: profile.hp,
+                    team,
+                    facing: (player.z - z).atan2(player.x - x),
+                    fire_accum: 0.0,
+                });
+            }
+        }
+        log::info!(
+            "battle: 压力模式第 {} 轮开战（红 {} vs 蓝 {}，共 {} 名 NPC，并行 AI={}）",
+            self.stress_round,
+            sides,
+            sides,
+            self.npcs.len(),
+            self.ai_parallel
+        );
+    }
+
+    /// 推进单个 NPC：感知 → 状态机 → 战术决策 → 躲避 → A* 路径 → 移动 → 朝向。
+    /// 与旧版串行循环体逐行为一致（普通波次目标=玩家，行为不变；压力模式目标=敌对 NPC）。
+    fn step_npc(index: usize, npc: &mut Npc, ctx: &AiStepCtx) {
+        // 视野半径：压力模式全场可见（两军立即接火），普通模式保持原值
+        let sight = if ctx.stress { STRESS_SIGHT } else { NPC_SIGHT };
+        // 目标位置：压力模式取预选敌对 NPC（快照位置），普通模式恒为玩家
+        let target_pos = match (ctx.stress, ctx.targets.get(index).copied().flatten()) {
+            (true, Some((_, tp))) => glam::Vec3::new(tp[0], 0.0, tp[2]),
+            _ => *ctx.player,
+        };
+        let dx = npc.position[0] - target_pos.x;
+        let dz = npc.position[2] - target_pos.z;
+        let dist = (dx * dx + dz * dz).sqrt();
+        let yaw_to = yaw_to_target(target_pos.x, target_pos.z, npc.position[0], npc.position[2]);
+        let facing_angle = angle_diff(ctx.player_yaw, yaw_to).abs();
+        let prev = npc.state_machine.state();
+        let took_hit = npc.hp < npc.last_hp - 0.001;
+        let under_fire = ctx.under_fire.get(index).copied().unwrap_or(false);
+        npc.perception = NpcPerception {
+            enemy_visible: dist < sight,
+            enemy_in_range: dist < npc.attack_range,
+            start_patrol: prev == NpcState::Idle,
+            patrol_finished: false,
+            player_aiming: facing_angle < AIM_ANGLE && dist < sight,
+            player_facing: facing_angle < std::f32::consts::FRAC_PI_2,
+            took_hit,
+            low_hp: npc.hp < npc.max_hp * LOW_HP_RATIO,
+            under_fire,
+        };
+        let state = npc.state_machine.update(npc.perception);
+        // 躲避触发：仅移动态（Attack 站定是冒烟瞄准依据）；受击反应更强、冷却更久
+        if state != NpcState::Attack
+            && npc.hit_cooldown <= 0.0
+            && dist < DODGE_TRIGGER_DIST
+            && (took_hit || under_fire)
+        {
+            npc.dodge_timer = if took_hit {
+                DODGE_HIT_TIME
+            } else {
+                DODGE_THREAT_TIME
+            };
+            npc.hit_cooldown = DODGE_COOLDOWN;
+        }
+        npc.last_hp = npc.hp;
+        // 战术决策：低血量撤退 / 角色行为 / 玩家是否面朝（偷袭）；冲锋覆盖为突进
+        let mut tactic = pick_tactic(npc.role, &npc.perception);
+        if ctx.charge && npc.role != TacticalRole::Suppressor && tactic != Tactic::Retreat {
+            tactic = Tactic::Advance;
+        }
+        npc.tactic = tactic;
+        // 绕背判定用的"目标朝向"：普通模式 = 玩家视角；压力模式 = 朝向目标 NPC 的方向
+        let target_yaw = if ctx.stress && ctx.targets.get(index).copied().flatten().is_some() {
+            (npc.position[2] - target_pos.z).atan2(npc.position[0] - target_pos.x)
+        } else {
+            ctx.player_yaw
+        };
+        let (bx, bz) = (npc.position[0], npc.position[2]);
+        advance_npc(npc, state, tactic, &target_pos, target_yaw, ctx.grid, ctx.time, ctx.dt);
+        // 朝向更新：移动时朝移动方向；站定时面向目标（渲染士兵模型用）
+        let mdx = npc.position[0] - bx;
+        let mdz = npc.position[2] - bz;
+        if mdx * mdx + mdz * mdz > 1e-6 {
+            npc.facing = mdz.atan2(mdx);
+        } else {
+            npc.facing = (npc.position[2] - target_pos.z).atan2(npc.position[0] - target_pos.x);
+        }
+        // 攻击态站定：打位置日志，冒烟 harness 读日志后从对跖点瞄准点射
+        if state == NpcState::Attack && prev != NpcState::Attack {
+            log::info!(
+                "npc: #{} stand ({:.1}, {:.1}, {:.1})",
+                npc.id,
+                npc.position[0],
+                npc.position[1],
+                npc.position[2]
+            );
+        }
+    }
+
+    /// 串行推进全部 NPC（普通波次路径；与并行路径逐 NPC 行为一致）
+    fn step_ai_serial(npcs: &mut [Npc], ctx: &AiStepCtx) {
+        for (i, npc) in npcs.iter_mut().enumerate() {
+            Self::step_npc(i, npc, ctx);
+        }
+    }
+
+    /// 并行推进全部 NPC：`std::thread::scope` 按 AI_CHUNK 分块，每线程处理不相交分片。
+    /// 各 NPC 更新彼此独立（目标/感知/路径均为本帧快照），并行与串行结果逐位一致。
+    fn step_ai_parallel(npcs: &mut [Npc], ctx: &AiStepCtx) {
+        let chunk = AI_CHUNK.max(1);
+        std::thread::scope(|s| {
+            for (start, slice) in npcs.chunks_mut(chunk).enumerate() {
+                let start = start * chunk;
+                s.spawn(move || {
+                    for (k, npc) in slice.iter_mut().enumerate() {
+                        Self::step_npc(start + k, npc, ctx);
+                    }
+                });
+            }
+        });
     }
 
     /// 推进 NPC：感知 → 状态机 → 战术决策 → A* 路径 → 移动 → 地形高度
@@ -1527,59 +1769,38 @@ impl Game {
             }
             flags
         };
-        for i in 0..self.npcs.len() {
-            let npc = &mut self.npcs[i];
-            let dx = npc.position[0] - player.x;
-            let dz = npc.position[2] - player.z;
-            let dist = (dx * dx + dz * dz).sqrt();
-            let yaw_to = yaw_to_target(player.x, player.z, npc.position[0], npc.position[2]);
-            let facing_angle = angle_diff(player_yaw, yaw_to).abs();
-            let prev = npc.state_machine.state();
-            let took_hit = npc.hp < npc.last_hp - 0.001;
-            npc.perception = NpcPerception {
-                enemy_visible: dist < NPC_SIGHT,
-                enemy_in_range: dist < npc.attack_range,
-                start_patrol: prev == NpcState::Idle,
-                patrol_finished: false,
-                player_aiming: facing_angle < AIM_ANGLE && dist < NPC_SIGHT,
-                player_facing: facing_angle < std::f32::consts::FRAC_PI_2,
-                took_hit,
-                low_hp: npc.hp < npc.max_hp * LOW_HP_RATIO,
-                under_fire: under_fire[i],
+        // 压力模式：每 NPC 预选最近敌对目标（敌对 NPC 优先、玩家兜底；O(n²) 纯读，串行）
+        let targets: Vec<Option<(usize, [f32; 3])>> = if self.stress {
+            pick_stress_targets(&self.npcs, STRESS_SIGHT)
+        } else {
+            Vec::new()
+        };
+        {
+            let ctx = AiStepCtx {
+                player: &player,
+                player_yaw,
+                charge,
+                under_fire: &under_fire,
+                targets: &targets,
+                grid: &grid,
+                time,
+                dt,
+                stress: self.stress,
             };
-            let state = npc.state_machine.update(npc.perception);
-            // 躲避触发：仅移动态（Attack 站定是冒烟瞄准依据）；受击反应更强、冷却更久
-            if state != NpcState::Attack
-                && npc.hit_cooldown <= 0.0
-                && dist < DODGE_TRIGGER_DIST
-                && (took_hit || under_fire[i])
-            {
-                npc.dodge_timer = if took_hit {
-                    DODGE_HIT_TIME
-                } else {
-                    DODGE_THREAT_TIME
-                };
-                npc.hit_cooldown = DODGE_COOLDOWN;
+            if self.npcs.len() >= PARALLEL_AI_MIN && self.ai_parallel {
+                // safety: chunks_mut 保证各线程分片不相交；ctx 只含共享只读数据
+                Self::step_ai_parallel(&mut self.npcs, &ctx);
+            } else {
+                Self::step_ai_serial(&mut self.npcs, &ctx);
             }
-            npc.last_hp = npc.hp;
-            // 战术决策：低血量撤退 / 角色行为 / 玩家是否面朝（偷袭）；冲锋覆盖为突进
-            let mut tactic = pick_tactic(npc.role, &npc.perception);
-            // 冲锋覆盖为突进，但不剥夺低血量撤退
-            if charge && npc.role != TacticalRole::Suppressor && tactic != Tactic::Retreat {
-                tactic = Tactic::Advance;
-            }
-            npc.tactic = tactic;
-            advance_npc(npc, state, tactic, &player, player_yaw, &grid, time, dt);
-            // 攻击态站定：打位置日志，冒烟 harness 读日志后从对跖点瞄准点射
-            if state == NpcState::Attack && prev != NpcState::Attack {
-                log::info!(
-                    "npc: #{} stand ({:.1}, {:.1}, {:.1})",
-                    npc.id,
-                    npc.position[0],
-                    npc.position[1],
-                    npc.position[2]
-                );
-            }
+        }
+        // 压力模式：攻击态 NPC 对目标 NPC 结算伤害（每满 1 秒 dps；玩家无敌旁观）
+        if self.stress {
+            self.apply_npc_combat(dt, &targets);
+        }
+        // 压力模式：移除阵亡 NPC；任一阵营团灭 → 全量补员开新一轮
+        if self.stress {
+            self.update_stress_respawns(&player);
         }
         if self.time - self.ai_log_time >= 1.0 {
             self.ai_log_time = self.time;
@@ -1602,7 +1823,7 @@ impl Game {
         // 攻击态 NPC 对玩家造成伤害（1 秒一次），驱动 HUD 血条
         // 伤害值取当前有效波次的 dps（Boss 波更高，见 wave_profile）
         let dps = wave_profile(self.effective_wave(self.wave)).dps;
-        if self.time - self.last_damage_time >= 1.0
+        if !self.stress && self.time - self.last_damage_time >= 1.0
             && self.game_state == GameState::Playing
             && self
                 .npcs
@@ -1620,6 +1841,68 @@ impl Game {
                     self.wave
                 );
             }
+        }
+    }
+
+    /// 压力模式 NPC 互射：攻击态且目标在攻击距离内 → 每满 1 秒对目标结算 dps。
+    /// 目标索引在帧内有效（互射结算后统一移除，不在中途删）。友军永远不被伤害。
+    fn apply_npc_combat(&mut self, dt: f32, targets: &[Option<(usize, [f32; 3])>]) {
+        if self.npcs.len() < 2 {
+            return;
+        }
+        let dps = wave_profile(self.effective_wave(self.wave)).dps;
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for (i, npc) in self.npcs.iter().enumerate() {
+            if npc.state_machine.state() != NpcState::Attack {
+                continue;
+            }
+            if let Some(Some((t, _))) = targets.get(i) {
+                if *t >= self.npcs.len() {
+                    continue;
+                }
+                let dx = self.npcs[*t].position[0] - npc.position[0];
+                let dz = self.npcs[*t].position[2] - npc.position[2];
+                if dx * dx + dz * dz <= npc.attack_range * npc.attack_range {
+                    pairs.push((i, *t));
+                }
+            }
+        }
+        for (i, t) in pairs {
+            self.npcs[i].fire_accum += dt;
+            if self.npcs[i].fire_accum >= 1.0 {
+                self.npcs[i].fire_accum = 0.0;
+                self.npcs[t].hp -= dps;
+            }
+        }
+    }
+
+    /// 压力模式减员与补员：移除阵亡 NPC；任一阵营团灭 → 全量补员开新一轮。
+    fn update_stress_respawns(&mut self, player: &glam::Vec3) {
+        // 菜单态不结算（初始 NPC 全为红方，会误判蓝方团灭提前开战）
+        if self.game_state == GameState::StartMenu {
+            return;
+        }
+        let before = self.npcs.len();
+        self.npcs.retain(|n| n.hp > 0.0);
+        let red = self.npcs.iter().filter(|n| n.team == Team::Red).count();
+        let blue = self.npcs.len() - red;
+        if self.npcs.len() != before {
+            log::info!(
+                "battle: 阵亡 {}（红={} 蓝={} 存活）",
+                before - self.npcs.len(),
+                red,
+                blue
+            );
+        }
+        if red == 0 || blue == 0 {
+            self.stress_round += 1;
+            log::info!(
+                "battle: 第 {} 轮结束（红={} 蓝={}），全量补员开新轮",
+                self.stress_round - 1,
+                red,
+                blue
+            );
+            self.spawn_stress_battle(player);
         }
     }
 
@@ -2321,6 +2604,198 @@ mod tests {
         game.toggle_settings();
         assert!(!game.settings_open(), "再 toggle 应关闭");
     }
+
+    // ---- 压力模式（64v64 大战场）----
+
+    /// 测试用 NPC 构造器（全字段确定性初始化）
+    fn npc_at(id: usize, team: Team, pos: [f32; 3]) -> Npc {
+        Npc {
+            id,
+            position: pos,
+            speed: 4.0,
+            attack_range: 12.0,
+            home: [pos[0], pos[2]],
+            state_machine: NpcStateMachine::new(),
+            perception: NpcPerception::default(),
+            path: Vec::new(),
+            path_index: 0,
+            hp: 100.0,
+            max_hp: 100.0,
+            role: TacticalRole::Rusher,
+            tactic: Tactic::Advance,
+            dodge_timer: 0.0,
+            hit_cooldown: 0.0,
+            last_hp: 100.0,
+            team,
+            facing: 0.0,
+            fire_accum: 0.0,
+        }
+    }
+
+    #[test]
+    fn stress_spawn_creates_balanced_two_teams() {
+        let mut game = Game::new();
+        game.stress = true;
+        game.stress_sides = 8;
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        game.spawn_stress_battle(&player);
+        assert_eq!(game.npcs.len(), 16, "8v8 应出生 16 名 NPC");
+        let red = game.npcs.iter().filter(|n| n.team == Team::Red).count();
+        let blue = game.npcs.iter().filter(|n| n.team == Team::Blue).count();
+        assert_eq!(red, 8);
+        assert_eq!(blue, 8);
+        // 红半场 +X、蓝半场 -X，出生点在场内且不在障碍格上
+        for n in &game.npcs {
+            assert!(n.position[0].abs() <= 250.0 && n.position[2].abs() <= 250.0);
+            assert!(
+                game.grid.is_passable(world_to_grid(n.position[0], n.position[2])),
+                "npc #{} 出生点应在可通行格",
+                n.id
+            );
+            if n.team == Team::Red {
+                assert!(n.position[0] > 0.0, "红方应在 +X 半场");
+            } else {
+                assert!(n.position[0] < 0.0, "蓝方应在 -X 半场");
+            }
+        }
+    }
+
+    #[test]
+    fn stress_target_picking_prefers_nearest_enemy() {
+        // 3 红 + 2 蓝；红0 最近敌 = 蓝4（√34 ≈ 5.8 < 蓝3 的 8）
+        let npcs = vec![
+            npc_at(0, Team::Red, [0.0, 0.0, 0.0]),
+            npc_at(1, Team::Red, [10.0, 0.0, 0.0]),
+            npc_at(2, Team::Red, [-100.0, 0.0, -100.0]),
+            npc_at(3, Team::Blue, [8.0, 0.0, 0.0]),
+            npc_at(4, Team::Blue, [5.0, 0.0, 3.0]),
+        ];
+        let targets = pick_stress_targets(&npcs, NPC_SIGHT);
+        assert_eq!(targets[0], Some((4, npcs[4].position)));
+        assert_eq!(targets[1], Some((3, npcs[3].position)), "红1(10,0) 最近敌 = 蓝3(8,0)");
+        assert_eq!(targets[2], None, "视野外无敌人 → 玩家兜底");
+        assert_eq!(targets[3], Some((1, npcs[1].position)), "蓝3 最近敌 = 红1");
+        assert_eq!(targets[4], Some((0, npcs[0].position)), "同距取索引小者");
+    }
+
+    #[test]
+    fn stress_parallel_step_matches_serial() {
+        // 64 NPC（32 红 / 32 蓝），串行与并行逐帧推进 6 帧，状态必须逐位一致
+        let mut npcs_s: Vec<Npc> = Vec::new();
+        let mut npcs_p: Vec<Npc> = Vec::new();
+        for i in 0..64usize {
+            let team = if i < 32 { Team::Red } else { Team::Blue };
+            let x = if i < 32 {
+                80.0 + i as f32 * 3.0
+            } else {
+                -80.0 - (i - 32) as f32 * 3.0
+            };
+            let z = ((i % 8) as f32 - 4.0) * 10.0;
+            npcs_s.push(npc_at(i, team, [x, 0.0, z]));
+            npcs_p.push(npc_at(i, team, [x, 0.0, z]));
+        }
+        let game = Game::new();
+        let grid = game.grid.clone();
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        for frame in 0..6u32 {
+            let dt = 1.0 / 60.0;
+            let time = 1.0 + frame as f32 * dt;
+            let targets_s = pick_stress_targets(&npcs_s, STRESS_SIGHT);
+            let targets_p = pick_stress_targets(&npcs_p, STRESS_SIGHT);
+            let flags_s = vec![false; npcs_s.len()];
+            let flags_p = vec![false; npcs_p.len()];
+            let ctx_s = AiStepCtx {
+                player: &player,
+                player_yaw: 0.0,
+                charge: false,
+                under_fire: &flags_s,
+                targets: &targets_s,
+                grid: &grid,
+                time,
+                dt,
+                stress: true,
+            };
+            let ctx_p = AiStepCtx {
+                player: &player,
+                player_yaw: 0.0,
+                charge: false,
+                under_fire: &flags_p,
+                targets: &targets_p,
+                grid: &grid,
+                time,
+                dt,
+                stress: true,
+            };
+            Game::step_ai_serial(&mut npcs_s, &ctx_s);
+            Game::step_ai_parallel(&mut npcs_p, &ctx_p);
+            for (a, b) in npcs_s.iter().zip(npcs_p.iter()) {
+                assert_eq!(a.position, b.position, "frame {} npc {}", frame, a.id);
+                assert_eq!(a.hp, b.hp);
+                assert_eq!(a.facing, b.facing);
+                assert_eq!(a.tactic, b.tactic);
+                assert_eq!(a.state_machine.state(), b.state_machine.state());
+                assert_eq!(a.path, b.path);
+            }
+        }
+    }
+
+    #[test]
+    fn stress_npc_combat_damages_target_only() {
+        let mut game = Game::new();
+        game.stress = true;
+        let mut a = npc_at(0, Team::Red, [0.0, 0.0, 0.0]);
+        let mut b = npc_at(1, Team::Blue, [6.0, 0.0, 0.0]);
+        // 推进到 Attack 态：Idle → Chase → Attack
+        let p = NpcPerception {
+            enemy_visible: true,
+            enemy_in_range: true,
+            ..NpcPerception::default()
+        };
+        a.state_machine.update(p);
+        a.state_machine.update(p);
+        b.state_machine.update(p);
+        b.state_machine.update(p);
+        assert_eq!(a.state_machine.state(), NpcState::Attack);
+        assert_eq!(b.state_machine.state(), NpcState::Attack);
+        game.npcs = vec![a, b];
+        let targets = vec![
+            Some((1, game.npcs[1].position)),
+            Some((0, game.npcs[0].position)),
+        ];
+        let hp_before = [game.npcs[0].hp, game.npcs[1].hp];
+        let dps = wave_profile(game.effective_wave(1)).dps;
+        game.apply_npc_combat(1.1, &targets);
+        assert!(
+            (game.npcs[0].hp - (hp_before[0] - dps)).abs() < 1e-3,
+            "红 0 应被扣 dps"
+        );
+        assert!(
+            (game.npcs[1].hp - (hp_before[1] - dps)).abs() < 1e-3,
+            "蓝 1 应被扣 dps"
+        );
+    }
+
+    #[test]
+    fn stress_wipe_respawns_full_battle() {
+        let mut game = Game::new();
+        game.stress = true;
+        game.stress_sides = 4;
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        game.spawn_stress_battle(&player);
+        assert_eq!(game.npcs.len(), 8);
+        let round0 = game.stress_round;
+        for n in &mut game.npcs {
+            if n.team == Team::Red {
+                n.hp = 0.0;
+            }
+        }
+        game.game_state = GameState::Playing;
+        game.update_stress_respawns(&player);
+        assert_eq!(game.stress_round, round0 + 1, "团灭应开新一轮");
+        assert_eq!(game.npcs.len(), 8, "全量补员");
+        let red = game.npcs.iter().filter(|n| n.team == Team::Red).count();
+        assert_eq!(red, 4);
+    }
 }
 
 /// 按状态与战术推进单个 NPC：目标选择 → A* 寻路 → 移动（锯齿/躲避）→ 地形高度采样
@@ -2328,8 +2803,8 @@ fn advance_npc(
     npc: &mut Npc,
     state: NpcState,
     tactic: Tactic,
-    player: &glam::Vec3,
-    player_yaw: f32,
+    target: &glam::Vec3,
+    target_yaw: f32,
     grid: &GridMap,
     time: f32,
     dt: f32,
@@ -2339,38 +2814,38 @@ fn advance_npc(
         let goal = match state {
             NpcState::Chase => match tactic {
                 // 突击/压制：直线逼近（压制手到射程边缘即转 Attack 站定）
-                Tactic::Advance | Tactic::Suppress => world_to_grid(player.x, player.z),
+                Tactic::Advance | Tactic::Suppress => world_to_grid(target.x, target.z),
                 // 侧翼包抄：垂直轴向偏移 3 格（12m），id 奇偶定左右形成钳形
                 Tactic::Flank => {
-                    let player_g = world_to_grid(player.x, player.z);
+                    let target_g = world_to_grid(target.x, target.z);
                     let npc_g = world_to_grid(npc.position[0], npc.position[2]);
                     let side = if npc.id % 2 == 0 { 1 } else { -1 };
-                    flank_goal(grid, player_g, npc_g, side, FLANK_OFFSET)
+                    flank_goal(grid, target_g, npc_g, side, FLANK_OFFSET)
                 }
                 // 偷袭绕背：玩家未面朝时绕大圈（20m 偏移）从背后逼近
                 Tactic::Ambush => {
-                    let player_g = world_to_grid(player.x, player.z);
+                    let target_g = world_to_grid(target.x, target.z);
                     let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    ambush_goal(grid, player_g, npc_g, player_yaw, AMBUSH_OFFSET)
+                    ambush_goal(grid, target_g, npc_g, target_yaw, AMBUSH_OFFSET)
                 }
                 // 掩体跃进：逐掩体推进（只选比当前更靠近玩家的掩体）
                 Tactic::CoverAdvance => {
                     let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    let player_g = world_to_grid(player.x, player.z);
-                    let cur = npc_g.manhattan(player_g);
+                    let target_g = world_to_grid(target.x, target.z);
+                    let cur = npc_g.manhattan(target_g);
                     match find_cover_points(grid, npc_g, COVER_MAX_DIST)
                         .into_iter()
                         .find(|c| c.dist < cur)
                     {
                         Some(cover) => cover.pos,
-                        None => player_g,
+                        None => target_g,
                     }
                 }
                 // 低血量撤退：撤向最封闭且较远的遮挡掩体（阻挡格挡在 NPC 与玩家之间）
                 Tactic::Retreat => {
                     let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    let player_g = world_to_grid(player.x, player.z);
-                    find_cover_shielding(grid, npc_g, player_g, COVER_MAX_DIST)
+                    let target_g = world_to_grid(target.x, target.z);
+                    find_cover_shielding(grid, npc_g, target_g, COVER_MAX_DIST)
                         .first()
                         .map(|c| c.pos)
                         .unwrap_or(npc_g)
@@ -2410,10 +2885,10 @@ fn advance_npc(
         return;
     }
 
-    // 受击/火力威胁后侧向弹开（垂直于 玩家→NPC 方向，id 奇偶定左右）
+    // 受击/火力威胁后侧向弹开（垂直于 目标→NPC 方向，id 奇偶定左右）
     if npc.dodge_timer > 0.0 {
-        let dx = npc.position[0] - player.x;
-        let dz = npc.position[2] - player.z;
+        let dx = npc.position[0] - target.x;
+        let dz = npc.position[2] - target.z;
         let d = (dx * dx + dz * dz).sqrt().max(1e-4);
         let side = if npc.id % 2 == 0 { 1.0 } else { -1.0 };
         let step = npc.speed * dt;
@@ -2435,8 +2910,8 @@ fn advance_npc(
         npc.path_index += 1;
     } else if d > 1e-4 {
         // 推进态锯齿机动：垂直前进方向横向摆动（被瞄准/火力威胁时幅度加大）
-        let dxp = npc.position[0] - player.x;
-        let dzp = npc.position[2] - player.z;
+        let dxp = npc.position[0] - target.x;
+        let dzp = npc.position[2] - target.z;
         let dist_p = (dxp * dxp + dzp * dzp).sqrt();
         let (mut mx, mut mz) = (dx / d, dz / d);
         if state == NpcState::Chase && dist_p < ZIGZAG_DIST && tactic != Tactic::Retreat {

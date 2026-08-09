@@ -14,6 +14,24 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+/// 阵营：普通波次模式 NPC 全部为 Red（目标=玩家）；压力模式 64v64 红蓝对抗，
+/// NPC 以敌对阵营 NPC 为优先目标（玩家为兜底目标）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Team {
+    Red,
+    Blue,
+}
+
+impl Team {
+    /// 敌对阵营
+    pub const fn opposite(self) -> Team {
+        match self {
+            Team::Red => Team::Blue,
+            Team::Blue => Team::Red,
+        }
+    }
+}
+
 /// 网格坐标（x 为列，y 为行）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GridPos {
@@ -706,6 +724,13 @@ pub fn ambush_goal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn team_opposite_flips_side() {
+        assert_eq!(Team::Red.opposite(), Team::Blue);
+        assert_eq!(Team::Blue.opposite(), Team::Red);
+        assert_eq!(Team::Red.opposite().opposite(), Team::Red);
+    }
 
     /// 校验路径合法性：端点正确、全程可通行、相邻格四方向相邻
     fn assert_path_valid(map: &GridMap, start: GridPos, goal: GridPos, path: &[GridPos]) {
