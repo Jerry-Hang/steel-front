@@ -516,8 +516,13 @@ pub struct Renderer {
     instance_mapped: Vec<*mut std::ffi::c_void>,
     /// 全量实例（CPU 侧保留，每帧剔除后压缩上传）
     instances: Vec<InstanceData>,
-    /// 剔除后可见实例索引（4B/个，上传时直接从 instances 拷贝 80B）
-    culled: Vec<u32>,
+    /// 剔除结果暂存：并行剔除阶段 A 每段写入可见实例索引（容量 = INSTANCE_COUNT，
+    /// 创建时一次分配，避免每帧堆分配；阶段 B 按前缀和从暂存拷贝上传）
+    culled_scratch: Vec<u32>,
+    /// 并行剔除各段近档计数（阶段 A 统计，join 后做前缀和，供阶段 B 定位写入偏移）
+    seg_near_counts: Vec<std::sync::atomic::AtomicU32>,
+    /// 并行剔除各段远档计数
+    seg_far_counts: Vec<std::sync::atomic::AtomicU32>,
     /// 每实例包围球半径（创建时预算，剔除循环查表免每帧 sqrt）
     instance_radii: Vec<f32>,
     /// 实例球心 SoA（SIMD 剔除用，创建时一次填充，连续内存便于向量化加载）
@@ -866,7 +871,9 @@ impl Renderer {
             instance_buffers_memory: Vec::new(),
             instance_mapped: Vec::new(),
             instances: Vec::new(),
-            culled: Vec::with_capacity(INSTANCE_COUNT as usize),
+            culled_scratch: Vec::new(),
+            seg_near_counts: Vec::new(),
+            seg_far_counts: Vec::new(),
             instance_radii: Vec::with_capacity(INSTANCE_COUNT as usize),
             instance_center_x: Vec::with_capacity(INSTANCE_COUNT as usize),
             instance_center_y: Vec::with_capacity(INSTANCE_COUNT as usize),
@@ -2257,9 +2264,168 @@ impl Renderer {
         Ok(())
     }
 
+    /// 标量地形 LOD morph 高度：y = base + (coarse − base) × blend（回退路径/基准语义）
+    fn morph_heights_scalar(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
+        for i in 0..out.len() {
+            out[i] = base[i] + (coarse[i] - base[i]) * blend;
+        }
+    }
+
+    /// AVX-512 地形 morph：16 顶点/批。运算顺序与标量一致（先 sub 再 mul 再 add，无 FMA），
+    /// IEEE 逐位一致。★ AVX-512 加速说明：Zen4/Zen5（7000/9000 系）双 256 单元合并执行
+    /// 512 位请求；选路走 cpu::avx512_enabled()（Intel 11 代能效差 / 12 代起大小核自动禁用）。
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f")]
+    unsafe fn morph_heights_avx512(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
+        use std::arch::x86_64::*;
+        let b = _mm512_set1_ps(blend);
+        let mut i = 0usize;
+        while i + 16 <= out.len() {
+            let bv = _mm512_loadu_ps(base.as_ptr().add(i));
+            let cv = _mm512_loadu_ps(coarse.as_ptr().add(i));
+            let diff = _mm512_sub_ps(cv, bv);
+            let y = _mm512_add_ps(bv, _mm512_mul_ps(diff, b));
+            _mm512_storeu_ps(out.as_mut_ptr().add(i), y);
+            i += 16;
+        }
+        // 尾部不足 16 个走标量（与 cull 尾部队列策略一致）
+        for j in i..out.len() {
+            out[j] = base[j] + (coarse[j] - base[j]) * blend;
+        }
+    }
+
+    /// AVX2 地形 morph：8 顶点/批（与标量逐位一致，非 FMA）
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn morph_heights_avx2(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
+        use std::arch::x86_64::*;
+        let b = _mm256_set1_ps(blend);
+        let mut i = 0usize;
+        while i + 8 <= out.len() {
+            let bv = _mm256_loadu_ps(base.as_ptr().add(i));
+            let cv = _mm256_loadu_ps(coarse.as_ptr().add(i));
+            let diff = _mm256_sub_ps(cv, bv);
+            let y = _mm256_add_ps(bv, _mm256_mul_ps(diff, b));
+            _mm256_storeu_ps(out.as_mut_ptr().add(i), y);
+            i += 8;
+        }
+        for j in i..out.len() {
+            out[j] = base[j] + (coarse[j] - base[j]) * blend;
+        }
+    }
+
+    /// AVX（非 AVX2，3/4 代酷睿与初代锐龙）地形 morph：8 顶点/批
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx")]
+    unsafe fn morph_heights_avx(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
+        use std::arch::x86_64::*;
+        let b = _mm256_set1_ps(blend);
+        let mut i = 0usize;
+        while i + 8 <= out.len() {
+            let bv = _mm256_loadu_ps(base.as_ptr().add(i));
+            let cv = _mm256_loadu_ps(coarse.as_ptr().add(i));
+            let diff = _mm256_sub_ps(cv, bv);
+            let y = _mm256_add_ps(bv, _mm256_mul_ps(diff, b));
+            _mm256_storeu_ps(out.as_mut_ptr().add(i), y);
+            i += 8;
+        }
+        for j in i..out.len() {
+            out[j] = base[j] + (coarse[j] - base[j]) * blend;
+        }
+    }
+
+    /// SSE4.2 地形 morph：4 顶点/批（2008 年后所有 Intel/AMD 消费级）
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "sse4.2")]
+    unsafe fn morph_heights_sse(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
+        use std::arch::x86_64::*;
+        let b = _mm_set1_ps(blend);
+        let mut i = 0usize;
+        while i + 4 <= out.len() {
+            let bv = _mm_loadu_ps(base.as_ptr().add(i));
+            let cv = _mm_loadu_ps(coarse.as_ptr().add(i));
+            let diff = _mm_sub_ps(cv, bv);
+            let y = _mm_add_ps(bv, _mm_mul_ps(diff, b));
+            _mm_storeu_ps(out.as_mut_ptr().add(i), y);
+            i += 4;
+        }
+        for j in i..out.len() {
+            out[j] = base[j] + (coarse[j] - base[j]) * blend;
+        }
+    }
+
+    /// NEON（AArch64，Apple Silicon/Android/高通 X Elite）地形 morph：4 顶点/批
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn morph_heights_neon(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
+        use std::arch::aarch64::*;
+        let b = vdupq_n_f32(blend);
+        let mut i = 0usize;
+        while i + 4 <= out.len() {
+            let bv = vld1q_f32(base.as_ptr().add(i));
+            let cv = vld1q_f32(coarse.as_ptr().add(i));
+            let diff = vsubq_f32(cv, bv);
+            let y = vaddq_f32(bv, vmulq_f32(diff, b));
+            vst1q_f32(out.as_mut_ptr().add(i), y);
+            i += 4;
+        }
+        for j in i..out.len() {
+            out[j] = base[j] + (coarse[j] - base[j]) * blend;
+        }
+    }
+
+    /// 地形 morph 高度选路（与剔除同策略，见 cull_spheres_dispatch）：
+    /// x86_64：AVX-512(16) > AVX2(8) > AVX(8) > SSE4.2(4) > 标量；aarch64：NEON(4) > 标量。
+    fn morph_heights_dispatch(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::engine::cpu::avx512_enabled() {
+                // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
+                unsafe {
+                    Self::morph_heights_avx512(base, coarse, blend, out);
+                }
+            } else if std::is_x86_feature_detected!("avx2") {
+                // safety: 上面已运行时检测 AVX2
+                unsafe {
+                    Self::morph_heights_avx2(base, coarse, blend, out);
+                }
+            } else if std::is_x86_feature_detected!("avx") {
+                // safety: 上面已运行时检测 AVX
+                unsafe {
+                    Self::morph_heights_avx(base, coarse, blend, out);
+                }
+            } else if std::is_x86_feature_detected!("sse4.2") {
+                // safety: 上面已运行时检测 SSE4.2
+                unsafe {
+                    Self::morph_heights_sse(base, coarse, blend, out);
+                }
+            } else {
+                Self::morph_heights_scalar(base, coarse, blend, out);
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                // safety: NEON 在 AArch64 是基线特性（此处仍运行时确认）
+                unsafe {
+                    Self::morph_heights_neon(base, coarse, blend, out);
+                }
+            } else {
+                Self::morph_heights_scalar(base, coarse, blend, out);
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            Self::morph_heights_scalar(base, coarse, blend, out);
+        }
+    }
+
     /// 每帧按 morph 进度 t 更新当前 LOD 网格顶点高度：
     /// h = 细高度 + t × (下一级曲面插值高度 − 细高度)。t=1 时几何与下一级完全重合，
-    /// 因此切换级别无 popping。仅在过渡带内（0<t<1）执行，整块重传顶点缓冲。
+    /// 因此切换级别无 popping。仅在过渡带内（0<t<1）执行。
+    /// 计算走 SIMD 选路（AVX-512 > AVX2 > AVX > SSE4.2 > NEON > 标量，逐位一致），
+    /// 写回按段并行（scene_pool：AMD CCD0 / Intel P-core，与渲染主线程同簇）。
+    /// 仅写 y 分量 4B/顶点：其余顶点分量上一帧已就位，映射内存常驻无需整块重传。
     fn update_terrain_lod_morph(&mut self, level: TerrainLod, blend: f32) {
         if blend <= 0.0 || blend >= 1.0 {
             return;
@@ -2275,17 +2441,28 @@ impl Renderer {
         let base = &mesh.base_heights;
         let coarse = &mesh.coarse_heights;
         let n = mesh.verts.len();
-        for i in 0..n {
-            mesh.verts[i].pos[1] = base[i] + (coarse[i] - base[i]) * blend;
-        }
-        let bytes = n * std::mem::size_of::<Vertex>();
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                mesh.verts.as_ptr() as *const u8,
-                mesh.vertex_mapped as *mut u8,
-                bytes,
-            );
-        }
+        // 1) SIMD 计算 y 数组（n ≤ 65536 → 最多 256KB，过渡带内才执行）
+        let mut ys = vec![0.0f32; n];
+        Self::morph_heights_dispatch(base, coarse, blend, &mut ys);
+        // 2) 并行写回 verts.pos[1] + 映射内存 y 分量（段间不相交，join 后才返回）
+        let stride = std::mem::size_of::<Vertex>();
+        let mapped = crate::engine::cpu::SendPtr(mesh.vertex_mapped as *mut u8);
+        let pool = crate::engine::cpu::scene_pool();
+        pool.par_for_each_mut(&mut mesh.verts, move |_seg, start, slice| {
+            for (k, v) in slice.iter_mut().enumerate() {
+                let y = ys[start + k];
+                v.pos[1] = y;
+                // SAFETY: mapped 指向 HOST_VISIBLE 顶点缓冲（常驻映射，本帧未写入该区段）；
+                // 各段只写 [ (start+k)*stride+4, +4 ) 的 y 分量，互不相交。
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        &y as *const f32 as *const u8,
+                        mapped.get().add((start + k) * stride + 4),
+                        4,
+                    );
+                }
+            }
+        });
     }
 
     /// 生成 256×256 网格实例；按 frame-in-flight 数量双缓冲
@@ -2321,6 +2498,8 @@ impl Renderer {
                 });
             }
         }
+        // 并行剔除暂存：一次分配整场容量（每段可见索引上限 = 段实例数）
+        self.culled_scratch = vec![0u32; INSTANCE_COUNT as usize];
 
         // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次），
         // 再追加 MAX_MARKER_INSTANCES 个 slot 给世界障碍 marker（见 MARKER_SLOT_BASE），
@@ -2948,9 +3127,16 @@ impl Renderer {
         (near_count, far_count)
     }
 
-    /// 每帧视锥剔除 + 距离 LOD 分档：
-    /// 可见实例按 [近档(d<LOD_DISTANCE)][远档] 连续压缩上传到当前帧 slot，
-    /// 返回 (near, far) 两个档的实例数（近档在前，远档紧跟其后）。
+    /// 每帧视锥剔除 + 距离 LOD 分档（多核并行）：
+    /// 可见实例按 [近档][远档] 连续压缩上传到当前帧 slot，返回 (near, far)。
+    ///
+    /// 并行结构（`cpu::scene_pool()`：AMD 绑首簇 CCD0、Intel 仅 P-core，与渲染主线程
+    /// 同簇，杜绝跨 CCD 访问与 E-core 调度；渲染线程不固定 1-2 核——池与主线程同绑整簇
+    /// 集合，由 OS 调度器把渲染侧工作分给集合内空闲率最高的核）：
+    /// - 阶段 A：按段并行剔除（每段走 SIMD 选路，见 cull_spheres_dispatch），
+    ///   可见全局索引写入 `culled_scratch` 对应段，同时统计各段近/远档计数；
+    /// - 前缀和（串行，段数 ≤ 9，微秒级）：算出每段近/远档在 slot 中的写入起点；
+    /// - 阶段 B：按段并行把 80B 实例拷贝到 slot 压缩偏移（段内近档在前、远档随后）。
     fn cull_and_upload(
         &mut self,
         view: glam::Mat4,
@@ -2958,150 +3144,180 @@ impl Renderer {
         cam_pos: glam::Vec3,
     ) -> (u32, u32) {
         let planes = Self::extract_frustum_planes(view, proj);
-        self.culled.clear();
-
-        // 单遍剔除：半径查表（创建时预算），可见实例只存索引（4B）避免 80B 中转拷贝。
-        // ★ AVX-512 加速已启用（本机 Zen4 实测走 16 实例/批路径，见下方 cull_spheres_avx512）：
-        //   选路统一走 cpu::avx512_enabled()——硬件不支持、RV3D_DISABLE_AVX512=1、
-        //   Intel 11 代（能效差）与 12 代起（大小核）都会自动禁用并回退到下一档。
-        // x86_64 分级选路：AVX-512（16 实例/批）> AVX2（8）> AVX（8）> SSE4.2（4）> 标量，
-        // 各级路径与标量逐位一致（非 FMA 累加顺序相同），老处理器自动回退。
-        #[cfg(target_arch = "x86_64")]
-        {
-            if crate::engine::cpu::avx512_enabled() {
-                // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
-                unsafe {
-                    Self::cull_spheres_avx512(
-                        &self.instance_center_x,
-                        &self.instance_center_y,
-                        &self.instance_center_z,
-                        &self.instance_radii,
-                        &planes,
-                        &mut self.culled,
-                    );
-                }
-            } else if std::is_x86_feature_detected!("avx2") {
-                // safety: 上面已运行时检测 AVX2，CPU 支持才进入该分支
-                unsafe {
-                    Self::cull_spheres_avx2(
-                        &self.instance_center_x,
-                        &self.instance_center_y,
-                        &self.instance_center_z,
-                        &self.instance_radii,
-                        &planes,
-                        &mut self.culled,
-                    );
-                }
-            } else if std::is_x86_feature_detected!("avx") {
-                // safety: 上面已运行时检测 AVX
-                unsafe {
-                    Self::cull_spheres_avx(
-                        &self.instance_center_x,
-                        &self.instance_center_y,
-                        &self.instance_center_z,
-                        &self.instance_radii,
-                        &planes,
-                        &mut self.culled,
-                    );
-                }
-            } else if std::is_x86_feature_detected!("sse4.2") {
-                // safety: 上面已运行时检测 SSE4.2
-                unsafe {
-                    Self::cull_spheres_sse(
-                        &self.instance_center_x,
-                        &self.instance_center_y,
-                        &self.instance_center_z,
-                        &self.instance_radii,
-                        &planes,
-                        &mut self.culled,
-                    );
-                }
-            } else {
-                Self::cull_spheres_scalar(
-                    &self.instance_center_x,
-                    &self.instance_center_y,
-                    &self.instance_center_z,
-                    &self.instance_radii,
-                    &planes,
-                    &mut self.culled,
-                );
-            }
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            // ARM 平台：NEON（Apple Silicon/Android/高通 X Elite）4 实例/批，否则标量
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                // safety: NEON 在 AArch64 是基线特性（此处仍运行时确认）
-                unsafe {
-                    Self::cull_spheres_neon(
-                        &self.instance_center_x,
-                        &self.instance_center_y,
-                        &self.instance_center_z,
-                        &self.instance_radii,
-                        &planes,
-                        &mut self.culled,
-                    );
-                }
-            } else {
-                Self::cull_spheres_scalar(
-                    &self.instance_center_x,
-                    &self.instance_center_y,
-                    &self.instance_center_z,
-                    &self.instance_radii,
-                    &planes,
-                    &mut self.culled,
-                );
-            }
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            Self::cull_spheres_scalar(
-                &self.instance_center_x,
-                &self.instance_center_y,
-                &self.instance_center_z,
-                &self.instance_radii,
-                &planes,
-                &mut self.culled,
-            );
-        }
-
+        let near_sq = quality_params(self.quality).instance_lod_distance;
+        let near_sq = near_sq * near_sq;
         let stride = std::mem::size_of::<InstanceData>();
         let slot = match self.instance_mapped.get(self.current_frame) {
             Some(&p) if !p.is_null() => p as *mut u8,
             _ => return (0, 0),
         };
 
-        // 单遍分档上传：近档写前段、远档紧跟其后（偏移 = near + far），距离²只算一次
-        let near_sq = quality_params(self.quality).instance_lod_distance;
-        let near_sq = near_sq * near_sq;
-        let mut near_count = 0u32;
-        let mut far_count = 0u32;
-        for &idx in &self.culled {
-            let inst = &self.instances[idx as usize];
-            let dx = inst.model[12] - cam_pos.x;
-            let dy = inst.model[13] - cam_pos.y;
-            let dz = inst.model[14] - cam_pos.z;
-            if dx * dx + dy * dy + dz * dz < near_sq {
+        // 池大小（调用线程参与首段 → 并发 = workers+1）；段计数数组按需建一次
+        let pool = crate::engine::cpu::scene_pool();
+        let nw = pool.workers() + 1;
+        if self.seg_near_counts.len() != nw {
+            self.seg_near_counts = (0..nw)
+                .map(|_| std::sync::atomic::AtomicU32::new(0))
+                .collect();
+            self.seg_far_counts = (0..nw)
+                .map(|_| std::sync::atomic::AtomicU32::new(0))
+                .collect();
+        }
+
+        // 拆借引用（同一 self 的多字段并行借用；闭包 move 捕获各自引用）
+        let cx = &self.instance_center_x;
+        let cy = &self.instance_center_y;
+        let cz = &self.instance_center_z;
+        let radii = &self.instance_radii;
+        let instances = &self.instances;
+        let seg_near = &self.seg_near_counts;
+        let seg_far = &self.seg_far_counts;
+        let scratch = &mut self.culled_scratch;
+
+        // ---- 阶段 A：并行剔除 + 近/远分档计数（段内 SIMD 选路，见 cull_spheres_dispatch）----
+        pool.par_for_each_mut(scratch, move |seg, start, seg_slice| {
+            let end = start + seg_slice.len();
+            // 每段局部剔除结果（段实例数为容量上限，可见数通常远小于此）
+            let mut local: Vec<u32> = Vec::with_capacity(seg_slice.len());
+            Self::cull_spheres_dispatch(
+                &cx[start..end],
+                &cy[start..end],
+                &cz[start..end],
+                &radii[start..end],
+                &planes,
+                &mut local,
+            );
+            // 段暂存写入全局索引（段内偏移 + 段起点）
+            for (k, &li) in local.iter().enumerate() {
+                seg_slice[k] = (start + li as usize) as u32;
+            }
+            // 近/远档计数（与串行版同一距离² 判定，结果一致）
+            let mut near = 0u32;
+            let mut far = 0u32;
+            for &gi in &seg_slice[..local.len()] {
+                let inst = &instances[gi as usize];
+                let dx = inst.model[12] - cam_pos.x;
+                let dy = inst.model[13] - cam_pos.y;
+                let dz = inst.model[14] - cam_pos.z;
+                if dx * dx + dy * dy + dz * dz < near_sq {
+                    near += 1;
+                } else {
+                    far += 1;
+                }
+            }
+            seg_near[seg].store(near, std::sync::atomic::Ordering::Relaxed);
+            seg_far[seg].store(far, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        // ---- 前缀和（串行，段数 ≤ 9，微秒级）：每段近/远档写入起点 ----
+        let mut near_prefix = Vec::with_capacity(nw);
+        let mut far_prefix = Vec::with_capacity(nw);
+        let mut near_total = 0u32;
+        let mut far_total = 0u32;
+        for w in 0..nw {
+            near_prefix.push(near_total);
+            near_total += seg_near[w].load(std::sync::atomic::Ordering::Relaxed);
+            far_prefix.push(far_total);
+            far_total += seg_far[w].load(std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // ---- 阶段 B：按段并行压缩上传（近档在前、远档随后；段间偏移由前缀和保证互不相交）----
+        let slot_ptr = crate::engine::cpu::SendPtr(slot);
+        pool.par_for_each_mut(scratch, move |seg, _start, seg_slice| {
+            let count = (seg_near[seg].load(std::sync::atomic::Ordering::Relaxed)
+                + seg_far[seg].load(std::sync::atomic::Ordering::Relaxed))
+                as usize;
+            let near_off = near_prefix[seg] as usize;
+            let far_off = (near_total + far_prefix[seg]) as usize;
+            let base = slot_ptr.get();
+            let mut near_k = 0usize;
+            let mut far_k = 0usize;
+            for &gi in &seg_slice[..count] {
+                let inst = &instances[gi as usize];
+                let dx = inst.model[12] - cam_pos.x;
+                let dy = inst.model[13] - cam_pos.y;
+                let dz = inst.model[14] - cam_pos.z;
+                // SAFETY: base 指向当前帧实例槽（映射内存），偏移由前缀和保证落在槽内
+                let dst = unsafe {
+                    if dx * dx + dy * dy + dz * dz < near_sq {
+                        let d = base.add((near_off + near_k) * stride);
+                        near_k += 1;
+                        d
+                    } else {
+                        let d = base.add((far_off + far_k) * stride);
+                        far_k += 1;
+                        d
+                    }
+                };
+                // SAFETY: 段内近/远档写入游标互不相交；段间偏移由前缀和保证互不相交；
+                // par_for_each_mut join 后才返回，slot 在本次调用内不会再被触碰。
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         inst as *const InstanceData as *const u8,
-                        slot.add((near_count as usize) * stride),
+                        dst,
                         stride,
                     );
                 }
-                near_count += 1;
+            }
+        });
+        (near_total, far_total)
+    }
+
+    /// 按运行时指令集选路执行视锥剔除（各档路径与标量逐位一致，非 FMA）：
+    /// x86_64：AVX-512（16 实例/批）> AVX2（8）> AVX（8）> SSE4.2（4）> 标量；
+    /// aarch64：NEON（4）> 标量；其余平台：标量。
+    /// ★ AVX-512 说明：本机 Zen4（8940HX，双 256 单元合并执行 512 位）实测走
+    ///   16 实例/批路径；选路统一走 cpu::avx512_enabled()——硬件不支持、
+    ///   RV3D_DISABLE_AVX512=1、Intel 11 代（能效差）与 12 代起（大小核）自动禁用回退。
+    fn cull_spheres_dispatch(
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        planes: &[[f32; 4]; 6],
+        out: &mut Vec<u32>,
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::engine::cpu::avx512_enabled() {
+                // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
+                unsafe {
+                    Self::cull_spheres_avx512(cx, cy, cz, radii, planes, out);
+                }
+            } else if std::is_x86_feature_detected!("avx2") {
+                // safety: 上面已运行时检测 AVX2
+                unsafe {
+                    Self::cull_spheres_avx2(cx, cy, cz, radii, planes, out);
+                }
+            } else if std::is_x86_feature_detected!("avx") {
+                // safety: 上面已运行时检测 AVX
+                unsafe {
+                    Self::cull_spheres_avx(cx, cy, cz, radii, planes, out);
+                }
+            } else if std::is_x86_feature_detected!("sse4.2") {
+                // safety: 上面已运行时检测 SSE4.2
+                unsafe {
+                    Self::cull_spheres_sse(cx, cy, cz, radii, planes, out);
+                }
             } else {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        inst as *const InstanceData as *const u8,
-                        slot.add(((near_count as usize) + (far_count as usize)) * stride),
-                        stride,
-                    );
-                }
-                far_count += 1;
+                Self::cull_spheres_scalar(cx, cy, cz, radii, planes, out);
             }
         }
-        (near_count, far_count)
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                // safety: NEON 在 AArch64 是基线特性（此处仍运行时确认）
+                unsafe {
+                    Self::cull_spheres_neon(cx, cy, cz, radii, planes, out);
+                }
+            } else {
+                Self::cull_spheres_scalar(cx, cy, cz, radii, planes, out);
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            Self::cull_spheres_scalar(cx, cy, cz, radii, planes, out);
+        }
     }
 
     /// 提交一次性命令（用于纹理布局转换、数据拷贝等）
@@ -5041,7 +5257,6 @@ mod simd_cull_tests {
     #[test]
     fn simd_cull_tail_batches_handled() {
         // 长度非 8 的倍数：覆盖尾部标量路径
-        let mut rng = Rng(0xC0FF_EE);
         let mut planes = [[0f32; 4]; 6];
         for p in &mut planes {
             p[0] = 0.0;
@@ -5103,6 +5318,73 @@ mod simd_cull_tests {
                 Renderer::cull_spheres_neon(&cx, &cy, &cz, &radii, &planes, &mut neon_out);
             }
             assert_eq!(neon_out, scalar_out, "NEON 剔除结果与标量逐位不一致");
+        }
+    }
+
+    #[test]
+    fn simd_morph_matches_scalar() {
+        // 覆盖各档批量倍数 + 尾部：33（AVX-512 两批+1 尾部）与 65536（整场地形网格）全量对比
+        for n in [33usize, 65536usize] {
+            let mut rng = Rng(0x51AD_0007 ^ n as u64);
+            let mut base = Vec::with_capacity(n);
+            let mut coarse = Vec::with_capacity(n);
+            for _ in 0..n {
+                base.push(rng.next_f32() * 40.0 - 20.0);
+                coarse.push(rng.next_f32() * 40.0 - 20.0);
+            }
+            let blend = rng.next_f32();
+            let mut scalar_out = vec![0.0f32; n];
+            Renderer::morph_heights_scalar(&base, &coarse, blend, &mut scalar_out);
+
+            let mut out = vec![0.0f32; n];
+            #[cfg(target_arch = "x86_64")]
+            if std::is_x86_feature_detected!("avx512f") && crate::engine::cpu::avx512_enabled() {
+                // safety: 已运行时检测 AVX-512 且未被型号过滤
+                unsafe {
+                    Renderer::morph_heights_avx512(&base, &coarse, blend, &mut out);
+                }
+                assert_eq!(out, scalar_out, "AVX-512 morph 与标量逐位不一致 (n={})", n);
+            }
+            out.fill(0.0);
+            #[cfg(target_arch = "x86_64")]
+            if std::is_x86_feature_detected!("avx2") {
+                // safety: 已运行时检测 AVX2
+                unsafe {
+                    Renderer::morph_heights_avx2(&base, &coarse, blend, &mut out);
+                }
+                assert_eq!(out, scalar_out, "AVX2 morph 与标量逐位不一致 (n={})", n);
+            }
+            out.fill(0.0);
+            #[cfg(target_arch = "x86_64")]
+            if std::is_x86_feature_detected!("avx") {
+                // safety: 已运行时检测 AVX
+                unsafe {
+                    Renderer::morph_heights_avx(&base, &coarse, blend, &mut out);
+                }
+                assert_eq!(out, scalar_out, "AVX morph 与标量逐位不一致 (n={})", n);
+            }
+            out.fill(0.0);
+            #[cfg(target_arch = "x86_64")]
+            if std::is_x86_feature_detected!("sse4.2") {
+                // safety: 已运行时检测 SSE4.2
+                unsafe {
+                    Renderer::morph_heights_sse(&base, &coarse, blend, &mut out);
+                }
+                assert_eq!(out, scalar_out, "SSE4.2 morph 与标量逐位不一致 (n={})", n);
+            }
+            out.fill(0.0);
+            #[cfg(target_arch = "aarch64")]
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                // safety: NEON 在 AArch64 是基线特性（此处仍运行时确认）
+                unsafe {
+                    Renderer::morph_heights_neon(&base, &coarse, blend, &mut out);
+                }
+                assert_eq!(out, scalar_out, "NEON morph 与标量逐位不一致 (n={})", n);
+            }
+            // dispatch 选路（当前机器实际启用档位）也必须与标量逐位一致
+            out.fill(0.0);
+            Renderer::morph_heights_dispatch(&base, &coarse, blend, &mut out);
+            assert_eq!(out, scalar_out, "dispatch morph 与标量逐位不一致 (n={})", n);
         }
     }
 }
