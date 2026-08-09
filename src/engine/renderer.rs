@@ -570,6 +570,8 @@ pub struct Renderer {
     texture_image_memory: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
     texture_sampler: vk::Sampler,
+    /// 各向异性过滤是否可用（物理设备支持 samplerAnisotropy 时为 true）
+    texture_anisotropy_enabled: bool,
     // ---- HUD 覆盖层（自包含：独立 pipeline / 独立顶点缓冲，不侵入主 pass）----
     hud_pipeline: vk::Pipeline,
     hud_pipeline_layout: vk::PipelineLayout,
@@ -802,7 +804,10 @@ impl Renderer {
 
         let swapchain_ext_name = c"VK_KHR_swapchain";
         let device_extensions = [swapchain_ext_name.as_ptr()];
-        let physical_device_features = vk::PhysicalDeviceFeatures::default();
+        let supported_features =
+            unsafe { instance.get_physical_device_features(physical_device) };
+        let mut physical_device_features = vk::PhysicalDeviceFeatures::default();
+        physical_device_features.sampler_anisotropy = supported_features.sampler_anisotropy;
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
@@ -910,6 +915,7 @@ impl Renderer {
             texture_image_memory: vk::DeviceMemory::null(),
             texture_image_view: vk::ImageView::null(),
             texture_sampler: vk::Sampler::null(),
+            texture_anisotropy_enabled: physical_device_features.sampler_anisotropy != 0,
             hud_pipeline: vk::Pipeline::null(),
             hud_pipeline_layout: vk::PipelineLayout::null(),
             hud_vertex_buffer: vk::Buffer::null(),
@@ -3639,6 +3645,13 @@ impl Renderer {
         let height = img.height();
         let pixels = img.as_raw().clone();
         let image_size = (width * height * 4) as u64;
+        // mip 链级别数：按长边逐次减半直至 1
+        let mut mip_levels = 1u32;
+        let mut largest = width.max(height);
+        while largest > 1 {
+            largest >>= 1;
+            mip_levels += 1;
+        }
 
         // ---- 1. staging buffer：CPU 写入像素数据 ----
         let buffer_info = vk::BufferCreateInfo::default()
@@ -3698,11 +3711,15 @@ impl Renderer {
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::R8G8B8A8_SRGB)
             .extent(vk::Extent3D { width, height, depth: 1 })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         self.texture_image = unsafe {
@@ -3754,7 +3771,7 @@ impl Renderer {
             let subresource_range = vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .base_mip_level(0)
-                .level_count(1)
+                .level_count(mip_levels)
                 .base_array_layer(0)
                 .layer_count(1);
 
@@ -3804,16 +3821,116 @@ impl Renderer {
                 );
             }
 
-            // TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
-            let barrier_to_read = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
-                .subresource_range(subresource_range)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            // 逐级生成 mip：上一级 TRANSFER_DST → TRANSFER_SRC，再 blit 缩小到本级
+            for mip in 1..mip_levels {
+                let src_w = (width >> (mip - 1)).max(1);
+                let src_h = (height >> (mip - 1)).max(1);
+                let dst_w = (width >> mip).max(1);
+                let dst_h = (height >> mip).max(1);
+
+                let level_range = vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(mip - 1)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1);
+
+                // TRANSFER_DST_OPTIMAL → TRANSFER_SRC_OPTIMAL
+                let barrier_to_blit_src = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(level_range)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+                unsafe {
+                    self.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier_to_blit_src],
+                    );
+                }
+
+                let blit_region = vk::ImageBlit::default()
+                    .src_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(mip - 1)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )
+                    .src_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D { x: src_w as i32, y: src_h as i32, z: 1 },
+                    ])
+                    .dst_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(mip)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D { x: dst_w as i32, y: dst_h as i32, z: 1 },
+                    ]);
+                unsafe {
+                    self.device.cmd_blit_image(
+                        cmd,
+                        image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[blit_region],
+                        vk::Filter::LINEAR,
+                    );
+                }
+            }
+
+            // 全部 mip → SHADER_READ_ONLY_OPTIMAL（基级们 TRANSFER_SRC、末级 TRANSFER_DST）
+            let mut read_barriers = Vec::new();
+            if mip_levels > 1 {
+                let read_src_range = vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(mip_levels - 1)
+                    .base_array_layer(0)
+                    .layer_count(1);
+                read_barriers.push(
+                    vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(read_src_range)
+                        .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ),
+                );
+            }
+            let read_last_range = vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .base_mip_level(mip_levels - 1)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1);
+            read_barriers.push(
+                vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(read_last_range)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ),
+            );
             unsafe {
                 self.device.cmd_pipeline_barrier(
                     cmd,
@@ -3822,7 +3939,7 @@ impl Renderer {
                     vk::DependencyFlags::empty(),
                     &[],
                     &[],
-                    &[barrier_to_read],
+                    &read_barriers,
                 );
             }
         })?;
@@ -3842,7 +3959,7 @@ impl Renderer {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(1),
             );
@@ -3860,12 +3977,19 @@ impl Renderer {
             .address_mode_u(vk::SamplerAddressMode::REPEAT)
             .address_mode_v(vk::SamplerAddressMode::REPEAT)
             .address_mode_w(vk::SamplerAddressMode::REPEAT)
-            .anisotropy_enable(false)
-            .max_anisotropy(1.0)
+            .anisotropy_enable(self.texture_anisotropy_enabled)
+            .max_anisotropy(if self.texture_anisotropy_enabled {
+                self.physical_device_properties
+                    .limits
+                    .max_sampler_anisotropy
+                    .min(16.0)
+            } else {
+                1.0
+            })
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
             .unnormalized_coordinates(false)
             .min_lod(0.0)
-            .max_lod(0.0);
+            .max_lod((mip_levels - 1) as f32);
         self.texture_sampler = unsafe {
             self.device
                 .create_sampler(&sampler_info, None)
@@ -3873,9 +3997,10 @@ impl Renderer {
         };
 
         log::info!(
-            "纹理初始化完成: {}x{}（来自 {}）",
+            "纹理初始化完成: {}x{}（{} mip，来自 {}）",
             width,
             height,
+            mip_levels,
             texture_path
         );
         Ok(())
