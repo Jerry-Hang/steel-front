@@ -73,6 +73,21 @@
 - `.wslconfig` 已配置 `[wsl2] networkingMode=mirrored + dnsTunneling + firewall + autoProxy`，待 `wsl --shutdown` 生效
 - 验收快照：176 tests passed、0 警告、20s 冒烟 ALL-OK（kills=1、VUID=0、fps 214.8–292.7）
 
+### 2026-08-09 快照：64v64 压力模式 + NPC 可视化 + 并行 AI（Wave 5，待推送）
+- 压力模式：`RV3D_STRESS_AI=N`（默认 64）→ 红蓝各 N 名 NPC 半场扇形出生（半径 150m+，
+  避障环 58-130m 外推），`STRESS_SIGHT=512m` 保证两军 300m 接火；StartMenu 态跳过补员判定
+- NPC 互射 `apply_npc_combat`：攻击态每满 1s 对目标结算 dps；团灭补员 `update_stress_respawns`
+- 并行 AI：`step_ai_parallel`（`std::thread::scope` + `chunks_mut(16)`），普通波次仍走串行
+  `step_ai_serial`（行为不变）；有逐位一致性测试
+- NPC 可视化：`renderer::NpcVisual` + `soldier_part_matrices` 7 段积木人（腿/躯干/臂/头/枪），
+  `set_npc_visuals`/`upload_npcs` 上传到实例 buffer `NPC_SLOT_BASE=65601` 之后区域，双段 draw
+- 纯色渲染：shader 新增 `@location(5) flat_flag`（instance_index >= NPC_INSTANCE_BASE=65601 时置 1），
+  fragment 走纯色路径跳过贴图 50% 混合 → 士兵阵营色（红=0.95,0.12,0.08 / 蓝=0.08,0.35,0.98）
+  sRGB 直出约 (249,103,78)/(84,162,253)，与灰地/障碍（纹理混合、冲淡色）显著区分
+- 性能日志新增 `marker=N npc=M` 字段（每帧上传计数，128 NPC 时 npc=896=128×7）
+- 验收：226 tests 全绿、冒烟 ALL-OK（kills=1、VUID=0、fps 202.9–297.2）、
+  128 NPC 压力实测 fps~250、ai_us~500µs、无 panic/VUID
+
 ### 重启后待办（已办结）
 - 网络验证（mirrored+autoProxy）与 Wave 2/3 push 均已完成；后续提交直接 `git push origin master`
 
@@ -98,7 +113,13 @@
 - 光标捕获瞬间 last_cursor 对齐窗口中心 + 512px 跳变守卫，防回中 warp 被当视角位移致自转
 - test.png 四象限调试图导致面劈裂，已换中灰（2026-08-08 修复）
 - 地形已全图拍平 y=0（terrain_height 返回 0.0，terrain_height_at 同源；NPC/实例/网格共用）
-- 实例场/障碍立方体顶点色全部白化（VERTICES/FAR_VERTS），颜色只走 tint；
+- 实例场/障碍立方体顶点色全部白化（VERTICES/FAR_VERTS），颜色只走 tint；- shader `flat_flag`：实例槽位 >= 65601（NPC_SLOT_BASE）时顶点着色器置 1，片元走纯色路径
+  （跳过贴图 50% 混合），保证阵营色可辨；marker/地形仍走纹理混合路径。改槽位常量需同步
+  build.rs `NPC_INSTANCE_BASE` 与 renderer.rs `NPC_SLOT_BASE`（build.rs 每次构建重新生成
+  assets/*.spv，改 WGSL 后必须重新构建，勿手改 .spv）
+- 性能日志 `marker`/`npc` 字段 = 每帧 upload_markers/upload_npcs 的 (near+far) 计数，
+  排查绘制是否发生时先看这两个计数
+
   地形实例 tint=0.7 灰、marker tint=WorldMarker.tint（勿混）
 
 ### 输入/键位与分辨率约定（勿回退）
