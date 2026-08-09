@@ -454,6 +454,20 @@ pub struct Game {
     stage_ai_us: u64,
     stage_audio_us: u64,
     stage_net_us: u64,
+    /// 冲击波/爆炸 SIMD 实测开关（RV3D_EXPLOSION_SIM=1；默认关，不影响主玩法）
+    explosion_sim: bool,
+    /// 冲击波压力场采样点（64×64 覆盖 512m 场地，惰性初始化）
+    shock_points: Vec<[f32; 3]>,
+    /// 指令集加速比基准采样点（256×256=65536，覆盖 512m 场地，惰性初始化）
+    bench_points: Vec<[f32; 3]>,
+    /// 冲击波压力输出（每帧覆盖）
+    shock_out: Vec<f32>,
+    /// 本帧冲击波压力场耗时（µs，simd: 日志用）
+    stage_explosion_us: u64,
+    /// 上次 simd: 加速比日志时间
+    last_explosion_log: f32,
+    /// 当前选路路径名（simd: 日志用）
+    explosion_path: &'static str,
     /// 上次对玩家造成伤害的时间（攻击态 NPC 每秒扣血）
     last_damage_time: f32,
     /// HUD 状态（每帧喂 fps/血量，渲染前取 quad 列表）
@@ -627,6 +641,14 @@ impl Game {
             stage_ai_us: 0,
             stage_audio_us: 0,
             stage_net_us: 0,
+            explosion_sim: std::env::var("RV3D_EXPLOSION_SIM")
+                .is_ok_and(|v| v == "1" || v == "true"),
+            shock_points: Vec::new(),
+            bench_points: Vec::new(),
+            shock_out: Vec::new(),
+            stage_explosion_us: 0,
+            last_explosion_log: 0.0,
+            explosion_path: "scalar",
             last_damage_time: 0.0,
             hud: HudState::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             frames: 0,
@@ -913,6 +935,10 @@ impl Game {
             }
         }
         self.stage_ai_us = t0.elapsed().as_micros() as u64;
+        // 冲击波/爆炸 SIMD 实测（默认关；RV3D_EXPLOSION_SIM=1 时每帧推进压力场并输出加速比）
+        if self.explosion_sim {
+            self.step_explosion_sim();
+        }
         // 状态日志（1 秒一条，冒烟断言 game: wave= 序列用）
         if self.time - self.last_status_log >= 1.0 {
             self.last_status_log = self.time;
@@ -1718,6 +1744,91 @@ impl Game {
                 });
             }
         });
+    }
+
+    /// 冲击波压力场 SIMD 实测（默认关，见 RV3D_EXPLOSION_SIM）：
+    /// 爆心沿确定性圆周轨迹扫掠，64×64=4096 采样点波前每帧推进一次；
+    /// 每秒输出一次指令集加速比基准突发（65536 点 × 32 轮：单帧 4096 点太小，
+    /// 时钟噪声会淹没真实差距；突发取平均才可测出 AVX-512/AVX2 的浮点收益）。
+    fn step_explosion_sim(&mut self) {
+        if self.shock_points.is_empty() {
+            // 64×64 采样网格覆盖 512m 场地（-256..256，与实例场同域）
+            let n = 64usize;
+            let step = 512.0 / n as f32;
+            for iz in 0..n {
+                for ix in 0..n {
+                    let x = (ix as f32 - (n as f32 - 1.0) * 0.5) * step;
+                    let z = (iz as f32 - (n as f32 - 1.0) * 0.5) * step;
+                    self.shock_points.push([x, 1.0, z]);
+                }
+            }
+            self.shock_out = vec![0.0f32; self.shock_points.len()];
+        }
+        if self.bench_points.is_empty() {
+            // 256×256=65536 采样点：与实例场同密度，覆盖 512m 场地
+            let n = 256usize;
+            let step = 512.0 / n as f32;
+            for iz in 0..n {
+                for ix in 0..n {
+                    let x = (ix as f32 - (n as f32 - 1.0) * 0.5) * step;
+                    let z = (iz as f32 - (n as f32 - 1.0) * 0.5) * step;
+                    self.bench_points.push([x, 1.0, z]);
+                }
+            }
+        }
+        // 爆心：确定性圆周扫掠（不依赖玩家输入，基准可复现）
+        let center = [self.time.sin() * 40.0, 1.0, self.time.cos() * 40.0];
+        let t0 = std::time::Instant::now();
+        self.explosion_path = crate::engine::simd::shockwave_pressure(
+            center,
+            60.0,
+            1000.0,
+            &self.shock_points,
+            &mut self.shock_out,
+        );
+        self.stage_explosion_us = t0.elapsed().as_micros() as u64;
+        if self.time - self.last_explosion_log >= 1.0 {
+            self.last_explosion_log = self.time;
+            // 基准突发：65536 点 × 32 轮，选路 vs 标量各跑一遍取平均
+            let rounds = 32u32;
+            let n = self.bench_points.len();
+            let mut simd_out = vec![0.0f32; n];
+            let mut scalar_out = vec![0.0f32; n];
+            let t1 = std::time::Instant::now();
+            for _ in 0..rounds {
+                self.explosion_path = crate::engine::simd::shockwave_pressure(
+                    center,
+                    60.0,
+                    1000.0,
+                    &self.bench_points,
+                    &mut simd_out,
+                );
+            }
+            let simd_us = (t1.elapsed().as_micros() as u64) / rounds as u64;
+            let t2 = std::time::Instant::now();
+            for _ in 0..rounds {
+                crate::engine::simd::shockwave_pressure_scalar(
+                    center,
+                    60.0,
+                    1000.0,
+                    &self.bench_points,
+                    &mut scalar_out,
+                );
+            }
+            let scalar_us = (t2.elapsed().as_micros() as u64) / rounds as u64;
+            let eq = simd_out == scalar_out;
+            let speedup = scalar_us as f64 / simd_us.max(1) as f64;
+            log::info!(
+                "simd: path={} bench_points={} rounds={} simd_us={} scalar_us={} speedup={:.2}x bitwise_eq={}",
+                self.explosion_path,
+                n,
+                rounds,
+                simd_us,
+                scalar_us,
+                speedup,
+                eq
+            );
+        }
     }
 
     /// 推进 NPC：感知 → 状态机 → 战术决策 → A* 路径 → 移动 → 地形高度

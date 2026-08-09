@@ -8,6 +8,7 @@
 //! - `lighting`: 光照与阴影
 //! - `physics`: 物理碰撞系统
 //! - `weapons`: 武器系统
+//! - `simd`: 爆炸/冲击波等特效浮点计算的 SIMD 选路与加速比测量
 //! - `game`: 运行时中枢（模块接线）
 
 pub mod ai;
@@ -18,5 +19,6 @@ pub mod gpu_caps;
 pub mod lighting;
 pub mod physics;
 pub mod renderer;
+pub mod simd;
 pub mod weapons;
 pub mod window;
