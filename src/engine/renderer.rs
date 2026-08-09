@@ -2543,6 +2543,137 @@ impl Renderer {
         }
     }
 
+    /// AVX（非 AVX2，第 3/4 代酷睿与初代锐龙）批量剔除：8 实例/批（256 位 8×f32）。
+    /// 与标量逐位一致（非 FMA 累加顺序相同）；浮点 add/mul/cmp 在 AVX 即已具备，
+    /// 无 AVX2 的 FMA/gather 需求，故可独立成档。
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx")]
+    unsafe fn cull_spheres_avx(
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        planes: &[[f32; 4]; 6],
+        out: &mut Vec<u32>,
+    ) {
+        use std::arch::x86_64::*;
+        let n = cx.len();
+        debug_assert_eq!(n, cy.len());
+        debug_assert_eq!(n, cz.len());
+        debug_assert_eq!(n, radii.len());
+
+        let mut i = 0usize;
+        while i + 8 <= n {
+            let xv = _mm256_loadu_ps(cx.as_ptr().add(i));
+            let yv = _mm256_loadu_ps(cy.as_ptr().add(i));
+            let zv = _mm256_loadu_ps(cz.as_ptr().add(i));
+            let rv = _mm256_loadu_ps(radii.as_ptr().add(i));
+            let mut vis = _mm256_castsi256_ps(_mm256_set1_epi32(-1));
+            let neg_r = _mm256_sub_ps(_mm256_setzero_ps(), rv);
+            for p in planes {
+                let nx = _mm256_set1_ps(p[0]);
+                let ny = _mm256_set1_ps(p[1]);
+                let nz = _mm256_set1_ps(p[2]);
+                let pd = _mm256_set1_ps(p[3]);
+                let d = _mm256_add_ps(
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(nx, xv), _mm256_mul_ps(ny, yv)),
+                        _mm256_mul_ps(nz, zv),
+                    ),
+                    pd,
+                );
+                let keep = _mm256_cmp_ps(d, neg_r, _CMP_GE_OQ);
+                vis = _mm256_and_ps(vis, keep);
+            }
+            let mask = _mm256_movemask_ps(vis) as u32;
+            for k in 0..8u32 {
+                if mask & (1 << k) != 0 {
+                    out.push((i + k as usize) as u32);
+                }
+            }
+            i += 8;
+        }
+        // 尾部不足 8 个走标量
+        for j in i..n {
+            let mut visible = true;
+            for p in planes {
+                let d = p[0] * cx[j] + p[1] * cy[j] + p[2] * cz[j] + p[3];
+                if d < -radii[j] {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible {
+                out.push(j as u32);
+            }
+        }
+    }
+
+    /// SSE4.2（2008 年后所有 Intel/AMD 消费级）批量剔除：4 实例/批（128 位 4×f32）。
+    /// 与标量逐位一致（非 FMA 累加顺序相同）；比标量约 2-3×，覆盖无 AVX 的老平台。
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "sse4.2")]
+    unsafe fn cull_spheres_sse(
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        planes: &[[f32; 4]; 6],
+        out: &mut Vec<u32>,
+    ) {
+        use std::arch::x86_64::*;
+        let n = cx.len();
+        debug_assert_eq!(n, cy.len());
+        debug_assert_eq!(n, cz.len());
+        debug_assert_eq!(n, radii.len());
+
+        let mut i = 0usize;
+        while i + 4 <= n {
+            let xv = _mm_loadu_ps(cx.as_ptr().add(i));
+            let yv = _mm_loadu_ps(cy.as_ptr().add(i));
+            let zv = _mm_loadu_ps(cz.as_ptr().add(i));
+            let rv = _mm_loadu_ps(radii.as_ptr().add(i));
+            let mut vis = _mm_castsi128_ps(_mm_set1_epi32(-1));
+            let neg_r = _mm_sub_ps(_mm_setzero_ps(), rv);
+            for p in planes {
+                let nx = _mm_set1_ps(p[0]);
+                let ny = _mm_set1_ps(p[1]);
+                let nz = _mm_set1_ps(p[2]);
+                let pd = _mm_set1_ps(p[3]);
+                let d = _mm_add_ps(
+                    _mm_add_ps(
+                        _mm_add_ps(_mm_mul_ps(nx, xv), _mm_mul_ps(ny, yv)),
+                        _mm_mul_ps(nz, zv),
+                    ),
+                    pd,
+                );
+                let keep = _mm_cmp_ps(d, neg_r, _CMP_GE_OQ);
+                vis = _mm_and_ps(vis, keep);
+            }
+            let mask = _mm_movemask_ps(vis) as u32;
+            for k in 0..4u32 {
+                if mask & (1 << k) != 0 {
+                    out.push((i + k as usize) as u32);
+                }
+            }
+            i += 4;
+        }
+        // 尾部不足 4 个走标量
+        for j in i..n {
+            let mut visible = true;
+            for p in planes {
+                let d = p[0] * cx[j] + p[1] * cy[j] + p[2] * cz[j] + p[3];
+                if d < -radii[j] {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible {
+                out.push(j as u32);
+            }
+        }
+    }
+
     /// 每帧视锥剔除 + 距离 LOD 分档：
     /// 设置世界障碍 marker（关卡切换时由 main.rs 调用；容量截断到 MAX_MARKER_INSTANCES）
     pub fn set_world_markers(&mut self, markers: &[WorldMarker]) {
@@ -2619,13 +2750,60 @@ impl Renderer {
         self.culled.clear();
 
         // 单遍剔除：半径查表（创建时预算），可见实例只存索引（4B）避免 80B 中转拷贝。
-        // x86_64 选路：AVX-512（16 实例/批）> AVX2（8 实例/批）> 标量回退，
-        // 三条路径与标量逐位一致（非 FMA 累加顺序相同）。
+        // x86_64 分级选路：AVX-512（16 实例/批）> AVX2（8）> AVX（8）> SSE4.2（4）> 标量，
+        // 各级路径与标量逐位一致（非 FMA 累加顺序相同），老处理器自动回退。
         #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("avx512f") {
-            // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
-            unsafe {
-                Self::cull_spheres_avx512(
+        {
+            if std::is_x86_feature_detected!("avx512f") {
+                // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
+                unsafe {
+                    Self::cull_spheres_avx512(
+                        &self.instance_center_x,
+                        &self.instance_center_y,
+                        &self.instance_center_z,
+                        &self.instance_radii,
+                        &planes,
+                        &mut self.culled,
+                    );
+                }
+            } else if std::is_x86_feature_detected!("avx2") {
+                // safety: 上面已运行时检测 AVX2，CPU 支持才进入该分支
+                unsafe {
+                    Self::cull_spheres_avx2(
+                        &self.instance_center_x,
+                        &self.instance_center_y,
+                        &self.instance_center_z,
+                        &self.instance_radii,
+                        &planes,
+                        &mut self.culled,
+                    );
+                }
+            } else if std::is_x86_feature_detected!("avx") {
+                // safety: 上面已运行时检测 AVX
+                unsafe {
+                    Self::cull_spheres_avx(
+                        &self.instance_center_x,
+                        &self.instance_center_y,
+                        &self.instance_center_z,
+                        &self.instance_radii,
+                        &planes,
+                        &mut self.culled,
+                    );
+                }
+            } else if std::is_x86_feature_detected!("sse4.2") {
+                // safety: 上面已运行时检测 SSE4.2
+                unsafe {
+                    Self::cull_spheres_sse(
+                        &self.instance_center_x,
+                        &self.instance_center_y,
+                        &self.instance_center_z,
+                        &self.instance_radii,
+                        &planes,
+                        &mut self.culled,
+                    );
+                }
+            } else {
+                Self::cull_spheres_scalar(
                     &self.instance_center_x,
                     &self.instance_center_y,
                     &self.instance_center_z,
@@ -2634,19 +2812,9 @@ impl Renderer {
                     &mut self.culled,
                 );
             }
-        } else if std::is_x86_feature_detected!("avx2") {
-            // safety: 上面已运行时检测 AVX2，CPU 支持才进入该分支
-            unsafe {
-                Self::cull_spheres_avx2(
-                    &self.instance_center_x,
-                    &self.instance_center_y,
-                    &self.instance_center_z,
-                    &self.instance_radii,
-                    &planes,
-                    &mut self.culled,
-                );
-            }
-        } else {
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
             Self::cull_spheres_scalar(
                 &self.instance_center_x,
                 &self.instance_center_y,
@@ -4539,6 +4707,24 @@ mod simd_cull_tests {
             }
             assert_eq!(avx512_out, scalar_out, "AVX-512 剔除结果与标量逐位不一致");
         }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx") {
+            let mut avx_out = Vec::new();
+            // safety: 已运行时检测 AVX
+            unsafe {
+                Renderer::cull_spheres_avx(&cx, &cy, &cz, &radii, &planes, &mut avx_out);
+            }
+            assert_eq!(avx_out, scalar_out, "AVX 剔除结果与标量逐位不一致");
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("sse4.2") {
+            let mut sse_out = Vec::new();
+            // safety: 已运行时检测 SSE4.2
+            unsafe {
+                Renderer::cull_spheres_sse(&cx, &cy, &cz, &radii, &planes, &mut sse_out);
+            }
+            assert_eq!(sse_out, scalar_out, "SSE4.2 剔除结果与标量逐位不一致");
+        }
         // 非 x86_64 或无双 AVX2：标量结果本身就是正确语义，无需对照
         assert!(!scalar_out.is_empty() || scalar_out.is_empty());
     }
@@ -4583,6 +4769,22 @@ mod simd_cull_tests {
                 Renderer::cull_spheres_avx512(&cx, &cy, &cz, &radii, &planes, &mut avx512_out);
             }
             assert_eq!(avx512_out, scalar_out);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx") {
+            let mut avx_out = Vec::new();
+            unsafe {
+                Renderer::cull_spheres_avx(&cx, &cy, &cz, &radii, &planes, &mut avx_out);
+            }
+            assert_eq!(avx_out, scalar_out);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("sse4.2") {
+            let mut sse_out = Vec::new();
+            unsafe {
+                Renderer::cull_spheres_sse(&cx, &cy, &cz, &radii, &planes, &mut sse_out);
+            }
+            assert_eq!(sse_out, scalar_out);
         }
     }
 }

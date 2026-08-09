@@ -49,8 +49,10 @@
     E-core 组进 secondary（≤8 仅轻任务，>8 可接 AI/地图生成——决策已编码，供未来线程池）
   - AI/地图生成现阶段仍单线程（每帧强耦合玩家状态/协同，跨线程需双缓冲+同步，破坏冒烟确定性），
     未强行线程化；secondary_set 语义已预留
-  - renderer 剔除选路升级：avx512f（16 实例/批，Zen4/Zen5 原生 512 位）> avx2 > 标量，
-    三条路径与标量逐位一致（非 FMA）；`_mm512_*` 在 Rust stable 可用（实测本机 avx512f=true）
+  - renderer 剔除五级选路：avx512f（16 实例/批，Zen4/Zen5 原生 512 位）> avx2（8）>
+    avx（8，3/4 代酷睿与初代锐龙）> sse4.2（4，2008 年后全平台）> 标量，
+    各级路径与标量逐位一致（非 FMA）；`_mm512_*` 在 Rust stable 可用（实测本机 avx512f=true）。
+    非 x86_64 平台走标量兜底（cfg(not) 分支，勿删）
 - `.wslconfig` 已配置 `[wsl2] networkingMode=mirrored + dnsTunneling + firewall + autoProxy`，待 `wsl --shutdown` 生效
 - 验收快照：176 tests passed、0 警告、20s 冒烟 ALL-OK（kills=1、VUID=0、fps 214.8–292.7）
 
