@@ -114,9 +114,16 @@ pub enum HudScreen {
 
 /// 分辨率选项（设置面板 RESOLUTION 行循环切换；索引与 config.rs 持久化的 resolution 对齐）
 /// 含 16:10 档位 1280x800：16:10 显示器首次运行默认用它（见 main.rs 默认分辨率选择）
-pub const RESOLUTIONS: [(u32, u32); 4] = [(1280, 720), (1280, 800), (1600, 900), (1920, 1080)];
+pub const RESOLUTIONS: [(u32, u32); 5] = [
+    (1280, 720),
+    (1280, 800),
+    (1600, 900),
+    (1920, 1080),
+    (2560, 1600),
+];
 /// 分辨率显示名（设置面板/日志用，ASCII 大写，位图字体可用）
-pub const RESOLUTION_LABELS: [&str; 4] = ["1280x720", "1280x800", "1600x900", "1920x1080"];
+pub const RESOLUTION_LABELS: [&str; 5] =
+    ["1280x720", "1280x800", "1600x900", "1920x1080", "2560x1600"];
 /// 画质选项（0=LOW / 1=MEDIUM / 2=HIGH；索引 = config.rs 持久化的 quality）
 pub const QUALITY_LABELS: [&str; 3] = ["LOW", "MEDIUM", "HIGH"];
 
@@ -1913,7 +1920,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_cycles_four_options() {
+    fn resolution_cycles_five_options() {
         let mut hud = HudState::new(1280.0, 720.0);
         assert_eq!(hud.resolution(), (1280, 720));
         hud.cycle_resolution();
@@ -1922,6 +1929,8 @@ mod tests {
         assert_eq!(hud.resolution(), (1600, 900), "1280x800 → 1600x900");
         hud.cycle_resolution();
         assert_eq!(hud.resolution(), (1920, 1080), "1600x900 → 1920x1080");
+        hud.cycle_resolution();
+        assert_eq!(hud.resolution(), (2560, 1600), "1920x1080 → 2560x1600（2.5K 原生）");
         hud.cycle_resolution();
         assert_eq!(hud.resolution(), (1280, 720), "循环应回到首项");
     }
