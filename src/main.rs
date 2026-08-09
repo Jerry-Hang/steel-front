@@ -156,6 +156,23 @@ impl GameApp {
         // 更新游戏逻辑（物理、武器、AI 等）
         self.game.update(delta_time, &self.camera);
 
+        // 基准挂钩：RV3D_BENCH_YAW / RV3D_BENCH_PITCH（度）每帧强制相机朝向，
+        // 供性能基准固定视角用（与 RV3D_NPC_SCALE / RV3D_STRESS_AI 同类的测试环境变量，
+        // 不设置则完全不影响正常游玩）。鼠标/后坐力每帧会被覆盖，基准时无需 bot 拖视角。
+        if let Ok(yaw) = std::env::var("RV3D_BENCH_YAW") {
+            if let Ok(y) = yaw.parse::<f32>() {
+                self.camera.yaw = y.to_radians();
+            }
+        }
+        if let Ok(pitch) = std::env::var("RV3D_BENCH_PITCH") {
+            if let Ok(p) = pitch.parse::<f32>() {
+                self.camera.pitch = p.to_radians().clamp(
+                    -crate::engine::camera::PITCH_LIMIT,
+                    crate::engine::camera::PITCH_LIMIT,
+                );
+            }
+        }
+
         // 第一人称：玩家身体位置 → 相机眼睛（FP 相机不自己移动），并同步灵敏度
         if self.camera.mode == CameraMode::FirstPerson {
             self.camera.set_first_person_eye(self.game.player_eye());
