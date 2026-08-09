@@ -72,6 +72,14 @@
   - `RV3D_DISABLE_AVX512=1` 可强制关闭；renderer 选路注释已标明 AVX-512 使用情况
 - `.wslconfig` 已配置 `[wsl2] networkingMode=mirrored + dnsTunneling + firewall + autoProxy`，待 `wsl --shutdown` 生效
 - 验收快照：176 tests passed、0 警告、20s 冒烟 ALL-OK（kills=1、VUID=0、fps 214.8–292.7）
+- 2026-08-09 全分辨率压力基准（存档 `docs/perf-2560x1600-64v64/`）：
+  - 2560×1600 + RV3D_STRESS_AI=1（64v64/128 NPC）固定视角实测 fps p50≈264，1280×800 对照 ≈260
+    → 分辨率×4 像素帧率持平：瓶颈仍是 dzn present（present_us p50≈1.12ms 占 frame ~61%），
+    GPU util ~27%（vmwp ~25%）、功耗 ~21W、显存 2.16/8.15GB、CPU 平均 ~5% 单核峰值 ~45%、
+    WSL 内存 1.5/12.66GB；64v64 AI 决策 ~700µs/帧（主线程单核，无瓶颈）
+  - 教训：基准必须控制相机（bot 后坐力把 pitch 压到 -89° 会触发低头剔除 bug → visible=0 →
+    fps 虚高，首轮 2560 数据作废重跑）；低头剔除 bug 已现场复现，优先修复
+  - 复现：`BENCH_SECS=45 RES=2560x1600 BOT_CMD=/tmp/look_bot.py bash docs/perf-2560x1600-64v64/bench2560.sh`
 
 ### 2026-08-09 快照：64v64 压力模式 + NPC 可视化 + 并行 AI（Wave 5，待推送）
 - 压力模式：`RV3D_STRESS_AI=N`（默认 64）→ 红蓝各 N 名 NPC 半场扇形出生（半径 150m+，

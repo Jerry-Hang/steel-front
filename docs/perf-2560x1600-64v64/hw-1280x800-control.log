@@ -1,0 +1,11 @@
+[20:16:26] cpu_avg=  2.7% cpu_max= 39.8% wsl_mem=1.46/12.66GB nv_util=5% vram=2082/8151GB temp=55C power=12.57W win_ram=NA
+[20:16:31] cpu_avg=  4.0% cpu_max= 26.5% wsl_mem=1.53/12.66GB nv_util=30% vram=2169/8151GB temp=59C power=26.10W win_ram=NA
+[20:16:36] cpu_avg=  5.0% cpu_max= 38.2% wsl_mem=1.53/12.66GB nv_util=32% vram=2171/8151GB temp=60C power=27.68W win_ram=NA
+[20:16:40] cpu_avg=  4.9% cpu_max= 42.9% wsl_mem=1.53/12.66GB nv_util=30% vram=2171/8151GB temp=61C power=25.32W win_ram=NA
+[20:16:45] cpu_avg=  5.2% cpu_max= 42.8% wsl_mem=1.53/12.66GB nv_util=27% vram=2171/8151GB temp=62C power=21.65W win_ram=NA
+[20:16:50] cpu_avg=  5.3% cpu_max= 44.5% wsl_mem=1.53/12.66GB nv_util=28% vram=2171/8151GB temp=62C power=19.91W win_ram=NA
+[20:16:55] cpu_avg=  5.3% cpu_max= 46.4% wsl_mem=1.53/12.66GB nv_util=27% vram=2171/8151GB temp=63C power=20.21W win_ram=NA
+[20:16:59] cpu_avg=  5.2% cpu_max= 17.5% wsl_mem=1.53/12.66GB nv_util=27% vram=2171/8151GB temp=63C power=23.02W win_ram=NA
+[20:17:04] cpu_avg=  5.2% cpu_max= 44.9% wsl_mem=1.52/12.66GB nv_util=27% vram=2171/8151GB temp=63C power=21.36W win_ram=NA
+[20:17:08] cpu_avg=  4.9% cpu_max= 43.0% wsl_mem=1.53/12.66GB nv_util=26% vram=2171/8151GB temp=63C power=23.94W win_ram=NA
+[20:17:13] cpu_avg=  5.2% cpu_max= 46.8% wsl_mem=1.53/12.66GB nv_util=27% vram=2143/8151GB temp=64C power=20.57W win_ram=NA
