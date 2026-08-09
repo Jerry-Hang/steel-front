@@ -135,8 +135,13 @@
   Space=62/ContextMenu=54/Escape=114），不是 USB HID 码；ui.rs 测试
   `winit_keycode_indices_match_table` 锁死，winit 升级先跑它
 - config.rs `bindings_version=1`：旧版 HID 键码配置整体忽略回退默认键位（勿删迁移逻辑）
-- 鼠标 Y 方向：camera.look() `pitch -= dy*sens`（winit Y 向下）为标准方向，
-  /tmp/probe_mouse.py X11 实测确认、冒烟瞄准按此方向，禁止再翻 pitch
+- 鼠标 Y 方向（2026-08-09 修正为标准方向）：camera.look() `pitch += dy*sens`
+  （winit Y 向下、dy>0=鼠标下移=低头），后坐力 `pitch -= recoil_pitch*dt`（kick 正=枪口上扬）。
+  旧约定 `pitch -= dy*sens` 是反的（拖下看天）——正是"低头剔除 bug"的真正根因：
+  玩家低头时相机在看天空，近档实例场当然全灭（剔除数学本身经实测正确，勿再改回）。
+  冒烟瞄准 dpitch = tgt - cur 按新方向，勿再翻 pitch
+- 分辨率列表 RESOLUTIONS 已含 2560x1600（5 档，ui.rs）；显式配置非预设分辨率会回退首项
+  （旧坑：2560x1600 不在列表 → unwrap_or(0) 回退 1280x720 → "小窗口" + 基准数据全失效）
 - ESC 两段式退出：首次显示提示、再按退出、任意其它键取消（hud.confirm_quit）；
   ESC 在设置面板打开时仍只负责关闭面板
 - 死亡重开：R（Reload 绑定）或 Enter（系统键兜底）；保留键 ESC/TAB/ENTER/F12/Q/E/N 不可重绑
