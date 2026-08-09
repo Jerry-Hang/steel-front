@@ -426,6 +426,11 @@ pub struct Game {
     charge_active: bool,
     /// NPC 数量缩放（RV3D_NPC_SCALE，默认 1.0；压测多人对战压力场景用）
     npc_scale: f32,
+    /// 性能探针：本帧各阶段耗时（µs，1Hz 日志输出，定位 CPU 侧瓶颈）
+    stage_physics_us: u64,
+    stage_ai_us: u64,
+    stage_audio_us: u64,
+    stage_net_us: u64,
     /// 上次对玩家造成伤害的时间（攻击态 NPC 每秒扣血）
     last_damage_time: f32,
     /// HUD 状态（每帧喂 fps/血量，渲染前取 quad 列表）
@@ -544,6 +549,10 @@ impl Game {
                     .unwrap_or(1.0);
                 v.max(0.5)
             },
+            stage_physics_us: 0,
+            stage_ai_us: 0,
+            stage_audio_us: 0,
+            stage_net_us: 0,
             last_damage_time: 0.0,
             hud: HudState::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             frames: 0,
@@ -803,8 +812,11 @@ impl Game {
             self.frames = 0;
             self.fps_window_start = Instant::now();
         }
+        let t0 = std::time::Instant::now();
         self.world.step(dt);
         self.drain_collisions();
+        self.stage_physics_us = t0.elapsed().as_micros() as u64;
+        let t0 = std::time::Instant::now();
         match self.game_state {
             GameState::StartMenu => {
                 // 菜单吸引模式：世界照常运行（NPC 游走/追击），不结算伤害与波次
@@ -821,25 +833,34 @@ impl Game {
                 self.update_projectiles(dt, false);
             }
         }
+        self.stage_ai_us = t0.elapsed().as_micros() as u64;
         // 状态日志（1 秒一条，冒烟断言 game: wave= 序列用）
         if self.time - self.last_status_log >= 1.0 {
             self.last_status_log = self.time;
             let enemy_hp = self.npcs.first().map(|n| n.max_hp).unwrap_or(0.0);
             log::info!(
-                "game: wave={} enemies={} enemy_hp={:.0} hp={:.0}/{:.0} score={}",
+                "game: wave={} enemies={} enemy_hp={:.0} hp={:.0}/{:.0} score={} phys_us={} ai_us={} audio_us={} net_us={}",
                 self.wave,
                 self.npcs.len(),
                 enemy_hp,
                 self.hud.health,
                 self.hud.max_health,
-                self.score
+                self.score,
+                self.stage_physics_us,
+                self.stage_ai_us,
+                self.stage_audio_us,
+                self.stage_net_us
             );
         }
         // 音频：每帧按 dt 渲染样本（SilentSink 丢弃输出，混音/衰减链路真实运行）
+        let t0 = std::time::Instant::now();
         let frames = ((self.audio_sample_rate as f32) * dt) as usize;
         self.audio
             .tick(&AudioListener::new(camera.position()), frames.min(8192));
+        self.stage_audio_us = t0.elapsed().as_micros() as u64;
+        let t0 = std::time::Instant::now();
         self.update_net(camera);
+        self.stage_net_us = t0.elapsed().as_micros() as u64;
     }
 
     /// 网络环回演示：server 收包回环广播，client 发包/收包做远端插值；不参与帧率逻辑

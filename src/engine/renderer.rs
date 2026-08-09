@@ -515,6 +515,13 @@ pub struct Renderer {
     frame_count: u32,
     /// fps 统计时间窗起点
     perf_window_start: Instant,
+    /// 性能探针：本帧各阶段耗时（µs，1Hz 日志输出，定位 CPU/GPU/交换链瓶颈）
+    stage_wait_fence_us: u64,
+    stage_acquire_us: u64,
+    stage_terrain_us: u64,
+    stage_record_us: u64,
+    stage_submit_us: u64,
+    stage_present_us: u64,
     depth_images: Vec<vk::Image>,
     depth_images_memory: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,
@@ -837,6 +844,12 @@ impl Renderer {
             last_perf_log: Instant::now(),
             frame_count: 0,
             perf_window_start: Instant::now(),
+            stage_wait_fence_us: 0,
+            stage_acquire_us: 0,
+            stage_terrain_us: 0,
+            stage_record_us: 0,
+            stage_submit_us: 0,
+            stage_present_us: 0,
             depth_images: Vec::new(),
             depth_images_memory: Vec::new(),
             depth_image_views: Vec::new(),
@@ -898,9 +911,16 @@ impl Renderer {
                 .get_physical_device_surface_present_modes(self.physical_device, self.surface)
                 .map_err(|e| format!("获取呈现模式失败: {}", e))?
         };
+        // 呈现模式可被 RV3D_PRESENT_MODE 覆盖（immediate/mailbox/fifo），
+        // 性能探针对比用；默认 MAILBOX（不锁 vsync）。
+        let preferred = match std::env::var("RV3D_PRESENT_MODE").as_deref() {
+            Ok("immediate") => vk::PresentModeKHR::IMMEDIATE,
+            Ok("fifo") => vk::PresentModeKHR::FIFO,
+            _ => vk::PresentModeKHR::MAILBOX,
+        };
         let present_mode = present_modes
             .iter()
-            .find(|&&m| m == vk::PresentModeKHR::MAILBOX)
+            .find(|&&m| m == preferred)
             .copied()
             .unwrap_or(vk::PresentModeKHR::FIFO);
 
@@ -982,8 +1002,12 @@ impl Renderer {
             .collect();
 
         log::info!(
-            "交换链初始化完成: {}x{}, 格式: {:?}, 图像数: {}",
-            extent.width, extent.height, format.format, image_count
+            "交换链初始化完成: {}x{}, 格式: {:?}, 图像数: {}, present_mode: {:?}",
+            extent.width,
+            extent.height,
+            format.format,
+            image_count,
+            present_mode
         );
         Ok(())
     }
@@ -3539,12 +3563,15 @@ impl Renderer {
     pub fn render(&mut self, view: glam::Mat4, proj: glam::Mat4) -> Result<(), String> {
         let frame_start = Instant::now();
         let fence = self.in_flight_fences[self.current_frame];
+        let t0 = Instant::now();
         unsafe {
             self.device
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .map_err(|e| format!("等待围栏失败: {}", e))?;
         }
+        self.stage_wait_fence_us = t0.elapsed().as_micros() as u64;
 
+        let t0 = Instant::now();
         let (image_index, suboptimal) = unsafe {
             self.swapchain_loader
                 .acquire_next_image(
@@ -3559,6 +3586,7 @@ impl Renderer {
                     _ => format!("获取交换链图像失败: {}", e),
                 })?
         };
+        self.stage_acquire_us = t0.elapsed().as_micros() as u64;
 
         if suboptimal {
             log::warn!("交换链 SUBOPTIMAL，重建...");
@@ -3589,8 +3617,10 @@ impl Renderer {
         let quality = quality_params(self.quality);
         let (terrain_lod, terrain_blend) = terrain_lod_blend_with_params(terrain_dist, quality);
         self.last_terrain_lod_name = terrain_lod.name();
+        let t0 = Instant::now();
         self.update_terrain_lod_morph(terrain_lod, terrain_blend);
         let terrain_lod_index = terrain_lod as usize;
+        self.stage_terrain_us = t0.elapsed().as_micros() as u64;
 
         // ---- 性能日志（1 次/秒）：visible / cull_us / fps ----
         self.frame_count += 1;
@@ -3602,14 +3632,20 @@ impl Renderer {
                 0.0
             };
             log::info!(
-                "visible={}/{} near={} far={} cull_us={} frame_us={} fps={:.1} terrain_lod={} blend={:.3} quality={}",
+                "visible={}/{} near={} far={} fps={:.1} frame_us={} cull_us={} terrain_us={} wait_fence_us={} acquire_us={} record_us={} submit_us={} present_us={} terrain_lod={} blend={:.3} quality={}",
                 near_count + far_count,
                 INSTANCE_COUNT,
                 near_count,
                 far_count,
-                cull_us,
-                self.last_frame_us,
                 fps,
+                self.last_frame_us,
+                cull_us,
+                self.stage_terrain_us,
+                self.stage_wait_fence_us,
+                self.stage_acquire_us,
+                self.stage_record_us,
+                self.stage_submit_us,
+                self.stage_present_us,
                 terrain_lod.name(),
                 terrain_blend,
                 self.quality().label()
@@ -3654,6 +3690,7 @@ impl Renderer {
         }
 
         // 每帧重录 command buffer（instance_count 随剔除结果变化）
+        let t0 = Instant::now();
         self.record_command_buffer(
             self.command_buffers[image_index as usize],
             image_index as usize,
@@ -3661,6 +3698,7 @@ impl Renderer {
             far_count,
             terrain_lod_index,
         )?;
+        self.stage_record_us = t0.elapsed().as_micros() as u64;
 
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -3673,11 +3711,13 @@ impl Renderer {
             .command_buffers(&cmd_buffers)
             .signal_semaphores(&signal_semaphores);
 
+        let t0 = Instant::now();
         unsafe {
             self.device
                 .queue_submit(self.graphics_queue, &[submit_info], fence)
                 .map_err(|e| format!("提交队列失败: {}", e))?;
         }
+        self.stage_submit_us = t0.elapsed().as_micros() as u64;
 
         // ---- 截图：本帧若已请求，在 present 前读回 swapchain 图像并保存 PNG ----
         // （图像内容已确定；render_finished 信号量尚未被 present 消费，主机等待不会死锁）
@@ -3701,10 +3741,12 @@ impl Renderer {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
+        let t0 = Instant::now();
         let present_result = unsafe {
             self.swapchain_loader
                 .queue_present(self.present_queue, &present_info)
         };
+        self.stage_present_us = t0.elapsed().as_micros() as u64;
 
         if let Err(vk::Result::ERROR_OUT_OF_DATE_KHR) = present_result {
             log::warn!("呈现 OUT_OF_DATE，重建交换链...");
