@@ -46,7 +46,7 @@ def look(yaw_target=-0.0, pitch_target=-10.0):
     if not c: return
     deg_px = math.degrees(0.0015)
     dyaw = ((yaw_target - c[0] + 540.0) % 360.0) - 180.0
-    dpitch = c[1] - pitch_target
+    dpitch = pitch_target - c[1]
     dx = int(dyaw / deg_px); dy = int(dpitch / deg_px)
     steps = 5
     dx = max(-400, min(400, dx)) // max(1, steps)

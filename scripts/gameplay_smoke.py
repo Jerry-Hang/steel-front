@@ -106,7 +106,7 @@ def aim(yaw_tgt_deg, pitch_tgt_deg, hold_lmb):
         if not cur:
             time.sleep(1.0); continue
         dyaw = ((yaw_tgt_deg - cur[0] + 540.0) % 360.0) - 180.0
-        dpitch = cur[1] - pitch_tgt_deg          # look(): pitch -= dy*SENS
+        dpitch = pitch_tgt_deg - cur[1]          # look(): pitch += dy*SENS（鼠标下移=低头）
         dx = int(dyaw / DEG_PX)
         dy = int(dpitch / DEG_PX)
         print(f"  aim round: cur=({cur[0]:.1f},{cur[1]:.1f}) tgt=({yaw_tgt_deg:.1f},{pitch_tgt_deg:.1f}) "
@@ -185,7 +185,7 @@ def fire_at(npc):
     cur = cam_now(log_tail())
     if cur:
         dyaw = ((yaw_tgt - cur[0] + 540.0) % 360.0) - 180.0
-        dpitch = cur[1] - pitch_tgt
+        dpitch = pitch_tgt - cur[1]
         if abs(dyaw) > 3.0 or abs(dpitch) > 3.0:
             print(f"  aim drift before fire: dyaw={dyaw:.1f} dpitch={dpitch:.1f}, skip", flush=True)
             return False

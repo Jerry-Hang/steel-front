@@ -16,7 +16,7 @@ const MOUSE_SENSITIVITY: f32 = 0.003;
 /// 滚轮缩放比例（每格，轨道模式）
 const WHEEL_ZOOM_STEP: f32 = 0.15;
 /// 俯仰角限制（防止翻转）
-const PITCH_LIMIT: f32 = 89.0_f32.to_radians();
+pub(crate) const PITCH_LIMIT: f32 = 89.0_f32.to_radians();
 /// 推拉距离范围（轨道模式）
 const MIN_DISTANCE: f32 = 1.5;
 const MAX_DISTANCE: f32 = 500.0;
@@ -158,17 +158,19 @@ impl Camera {
     /// 鼠标左键拖拽轨道旋转（位控，仅轨道模式）
     ///
     /// `delta_x` / `delta_y` 为屏幕像素位移（屏幕 Y 向下），
+    /// 标准方向：鼠标下移（dy>0）→ pitch 增大 → 看向下方（pitch 正 = 低头看地）。
     /// pitch 夹在 [-89°, 89°]。
     pub fn orbit(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw += delta_x * MOUSE_SENSITIVITY;
-        self.pitch = (self.pitch - delta_y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        self.pitch = (self.pitch + delta_y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
     /// 第一人称鼠标视角（供 FPS 主视角）：`delta_x` / `delta_y` 为屏幕像素位移，
+    /// 标准方向：鼠标下移（dy>0）→ pitch 增大 → 看向下方（pitch 正 = 低头看地）。
     /// pitch 夹在 [-89°, 89°]；灵敏度用 `mouse_sens`（默认 0.003）。
     pub fn look(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw += delta_x * self.mouse_sens;
-        self.pitch = (self.pitch - delta_y * self.mouse_sens).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        self.pitch = (self.pitch + delta_y * self.mouse_sens).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
     /// 累计视角后坐力（弧度），update() 的 FirstPerson 分支以指数衰减施加到 yaw/pitch
@@ -346,7 +348,8 @@ impl Camera {
                 // 不做位置移动（玩家移动由游戏侧负责），只做后坐力衰减与 pitch clamp。
                 // 后坐力按角速度积分并指数衰减：残留 = exp(-8*0.35)≈6% < 10%（0.35s 内）。
                 self.yaw += self.recoil_yaw * dt;
-                self.pitch += self.recoil_pitch * dt;
+                // 后坐力方向：kick_pitch 为正 → 枪口上扬（pitch 减小 = 抬头）
+                self.pitch -= self.recoil_pitch * dt;
                 self.recoil_yaw *= decay;
                 self.recoil_pitch *= decay;
                 self.pitch = self.pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
@@ -488,7 +491,7 @@ mod tests {
         let mut cam = Camera::new();
         cam.look(100.0, 50.0);
         assert!((cam.yaw - 100.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
-        assert!((cam.pitch - (-50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6);
+        assert!((cam.pitch - (50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6);
     }
 
     /// look：pitch 夹在 [-89°, 89°]
@@ -496,9 +499,9 @@ mod tests {
     fn look_clamps_pitch() {
         let mut cam = Camera::new();
         cam.look(0.0, 1e6);
-        assert_eq!(cam.pitch, -PITCH_LIMIT);
-        cam.look(0.0, -1e6);
         assert_eq!(cam.pitch, PITCH_LIMIT);
+        cam.look(0.0, -1e6);
+        assert_eq!(cam.pitch, -PITCH_LIMIT);
     }
 
     /// 投影矩阵保持 y-up NDC（Y 轴缩放为正）：Vulkan 的 Y 翻转由 shader
@@ -598,7 +601,7 @@ mod tests {
         cam.orbit(100.0, 50.0);
         assert!((cam.yaw - 100.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
         assert!(
-            (cam.pitch - (26.565_f32.to_radians() - 50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6
+            (cam.pitch - (26.565_f32.to_radians() + 50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6
         );
     }
 
