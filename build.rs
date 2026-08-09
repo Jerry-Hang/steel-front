@@ -21,6 +21,9 @@ struct Instance {
 
 // 地形 draw 使用的保留 identity 实例索引（buffer 最后一个 slot），不参与 LOD 淡出
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
+// NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
+// 槽位 >= 该值的实例走「纯色渲染」路径：不混合贴图，保证红/蓝阵营色清晰可辨。
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -29,6 +32,7 @@ struct VertexOutput {
     @location(2) fade: f32,
     @location(3) world_pos: vec3<f32>,
     @location(4) view_dir: vec3<f32>,
+    @location(5) flat_flag: f32,
 }
 @vertex
 fn vs_main(
@@ -49,6 +53,11 @@ fn vs_main(
     output.view_dir = normalize(cam_pos - world_pos.xyz);
     output.color = color * inst.tint.rgb;
     output.uv = uv;
+    if (instance_index >= NPC_INSTANCE_BASE) {
+        output.flat_flag = 1.0;
+    } else {
+        output.flat_flag = 0.0;
+    }
     if (instance_index == TERRAIN_INSTANCE_INDEX) {
         output.fade = 1.0;
     } else {
@@ -72,6 +81,7 @@ struct VertexOutput {
     @location(2) fade: f32,
     @location(3) world_pos: vec3<f32>,
     @location(4) view_dir: vec3<f32>,
+    @location(5) flat_flag: f32,
 }
 
 @group(0) @binding(1) var texture_sampled: texture_2d<f32>;
@@ -169,6 +179,11 @@ fn evaluate_point(light: PointLight, world_pos: vec3<f32>, normal: vec3<f32>, vi
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (input.fade <= 0.02) {
         discard;
+    }
+    // 士兵等纯色实例（NPC 槽位）：直接输出顶点色 × fade，跳过贴图 50% 混合，
+    // 保证红/蓝阵营色在灰地场景中清晰可辨（marker/地形仍走纹理混合路径）。
+    if (input.flat_flag > 0.5) {
+        return vec4<f32>(input.color * input.fade, 1.0);
     }
     let texel = textureSample(texture_sampled, texture_sampler, input.uv);
     let mixed = mix(input.color, texel.rgb, 0.5) * input.fade;

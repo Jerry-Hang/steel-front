@@ -392,6 +392,10 @@ const MAX_MARKER_INSTANCES: u32 = 64;
 /// slot 65536 是地形 identity（shader 硬编码 TERRAIN_INSTANCE_INDEX=65536 读取，
 /// cull_and_upload 只写 0..visible-1，永不触碰），marker 从 65537 起，互不干扰。
 const MARKER_SLOT_BASE: u32 = INSTANCE_COUNT + 1;
+/// NPC 士兵可视化段数上限（128 NPC × 最多 8 段，7 段/人 + 余量；同时决定实例 buffer 的额外容量）
+const MAX_NPC_INSTANCES: u32 = 1024;
+/// NPC 段在实例 buffer 中的起始 slot：紧接 marker 区之后（见 MARKER_SLOT_BASE）
+const NPC_SLOT_BASE: u32 = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES;
 
 /// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
 #[repr(C)]
@@ -406,6 +410,14 @@ const _: () = assert!(std::mem::size_of::<InstanceData>() == 80);
 /// 由 main.rs 从游戏关卡地图转换而来，经 `set_world_markers` 缓存为实例数据。
 pub struct WorldMarker {
     pub model: glam::Mat4,
+    pub tint: [f32; 4],
+}
+
+/// NPC 士兵可视化输入（位置/朝向 yaw/阵营配色）。
+/// 由 main.rs 从游戏 AI 状态转换而来，经 `set_npc_visuals` 展开为 7 段积木人实例数据。
+pub struct NpcVisual {
+    pub pos: [f32; 3],
+    pub yaw: f32,
     pub tint: [f32; 4],
 }
 
@@ -517,6 +529,11 @@ pub struct Renderer {
     /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
     last_marker_near: u32,
     last_marker_far: u32,
+    /// NPC 士兵段实例（由 set_npc_visuals 构建，见 NPC_SLOT_BASE）
+    npc_parts: Vec<InstanceData>,
+    /// 本帧 NPC 近/远档段计数（record_command_buffer 读取，render 时更新）
+    last_npc_near: u32,
+    last_npc_far: u32,
     /// 性能日志节流（1 次/秒）
     last_perf_log: Instant,
     /// 时间窗内帧计数（fps 统计）
@@ -857,6 +874,9 @@ impl Renderer {
             markers: Vec::new(),
             last_marker_near: 0,
             last_marker_far: 0,
+            npc_parts: Vec::new(),
+            last_npc_near: 0,
+            last_npc_far: 0,
             last_perf_log: Instant::now(),
             frame_count: 0,
             perf_window_start: Instant::now(),
@@ -1432,11 +1452,14 @@ impl Renderer {
             let instance_info = vk::DescriptorBufferInfo::default()
                 .buffer(self.instance_buffers[i])
                 .offset(0)
-                // 范围必须覆盖 marker 区（INSTANCE_COUNT+1+MAX_MARKER_INSTANCES），
-                // 否则 shader 读 marker slot 会触发 VUID 越界校验
+                // 范围必须覆盖 marker 与 NPC 区（INSTANCE_COUNT+1+MAX_MARKER_INSTANCES+MAX_NPC_INSTANCES），
+                // 否则 shader 读 marker/NPC slot 会触发 VUID 越界校验
                 .range(
                     std::mem::size_of::<InstanceData>() as u64
-                        * (INSTANCE_COUNT as u64 + 1 + MAX_MARKER_INSTANCES as u64),
+                        * (INSTANCE_COUNT as u64
+                            + 1
+                            + MAX_MARKER_INSTANCES as u64
+                            + MAX_NPC_INSTANCES as u64),
                 );
             let instance_infos = [instance_info];
             let instance_write = vk::WriteDescriptorSet::default()
@@ -2300,8 +2323,10 @@ impl Renderer {
         }
 
         // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次），
-        // 再追加 MAX_MARKER_INSTANCES 个 slot 给世界障碍 marker（见 MARKER_SLOT_BASE）
-        let buffer_elems = (INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES) as u64;
+        // 再追加 MAX_MARKER_INSTANCES 个 slot 给世界障碍 marker（见 MARKER_SLOT_BASE），
+        // 最后追加 MAX_NPC_INSTANCES 个 slot 给 NPC 士兵段（见 NPC_SLOT_BASE）
+        let buffer_elems =
+            (INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES) as u64;
         let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
         let identity = InstanceData {
             model: glam::Mat4::IDENTITY.to_cols_array(),
@@ -2816,6 +2841,103 @@ impl Renderer {
                         inst as *const InstanceData as *const u8,
                         slot.add(
                             ((MARKER_SLOT_BASE + near_count + far_count) as usize) * stride,
+                        ),
+                        stride,
+                    );
+                }
+                far_count += 1;
+            }
+        }
+        (near_count, far_count)
+    }
+
+    /// 计算一名 NPC 的 7 段积木人实例数据（双腿/躯干/双臂/头/枪），全部同 tint。
+    /// 每段矩阵 = T(pos) * R_y(yaw) * T(局部偏移) * S(尺寸)，
+    /// 模型矩阵右乘（先局部偏移再缩放），y 以地面为 0 起算，单位米；
+    /// 枪局部偏移在 +Z（yaw=0 时枪口朝向 +Z），随 yaw 绕 y 轴旋转。
+    fn soldier_part_matrices(pos: [f32; 3], yaw: f32, tint: [f32; 4]) -> Vec<InstanceData> {
+        // (局部偏移, 尺寸)：腿/臂各有左右两段，枪局部偏移在 +Z（yaw=0 时枪口朝向 +Z）
+        let parts: [([f32; 3], [f32; 3]); 7] = [
+            ([-0.15, 0.45, 0.0], [0.2, 0.85, 0.2]), // 左腿
+            ([0.15, 0.45, 0.0], [0.2, 0.85, 0.2]), // 右腿
+            ([0.0, 1.15, 0.0], [0.55, 0.75, 0.3]), // 躯干
+            ([-0.38, 1.25, 0.05], [0.16, 0.7, 0.16]), // 左臂
+            ([0.38, 1.25, 0.05], [0.16, 0.7, 0.16]), // 右臂
+            ([0.0, 1.72, 0.0], [0.32, 0.32, 0.32]), // 头
+            ([0.0, 1.25, 0.45], [0.15, 0.12, 0.85]), // 枪（+Z 前方）
+        ];
+        let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
+        let rot = glam::Mat4::from_rotation_y(yaw);
+        parts
+            .iter()
+            .map(|(off, size)| {
+                let model = trans
+                    * rot
+                    * glam::Mat4::from_translation(glam::Vec3::from(*off))
+                    * glam::Mat4::from_scale(glam::Vec3::from(*size));
+                InstanceData {
+                    model: model.to_cols_array(),
+                    tint,
+                }
+            })
+            .collect()
+    }
+
+    /// 设置 NPC 士兵可视化（由 main.rs 传入全部 NPC 的位置/朝向/配色；
+    /// 7 段/人展开存入 npc_parts，总段数截断到 MAX_NPC_INSTANCES）
+    pub fn set_npc_visuals(&mut self, visuals: &[NpcVisual]) {
+        self.npc_parts.clear();
+        for v in visuals {
+            for part in Self::soldier_part_matrices(v.pos, v.yaw, v.tint) {
+                if (self.npc_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_parts.push(part);
+                }
+            }
+            if (self.npc_parts.len() as u32) >= MAX_NPC_INSTANCES {
+                break;
+            }
+        }
+    }
+
+    /// 每帧上传 NPC 士兵段到实例 buffer 的 NPC_SLOT_BASE 之后区域，
+    /// 仿照 upload_markers 按距离分近/远档（不剔除，仅距离分档），返回 (近档, 远档) 计数。
+    fn upload_npcs(&mut self, cam_pos: glam::Vec3) -> (u32, u32) {
+        let slot = match self.instance_mapped.get(self.current_frame) {
+            Some(&p) if !p.is_null() => p as *mut u8,
+            _ => return (0, 0),
+        };
+        let stride = std::mem::size_of::<InstanceData>();
+        // 近/远档分界距离随画质预设变化（与 marker/实例场同源）
+        let near_sq = quality_params(self.quality).instance_lod_distance;
+        let near_sq = near_sq * near_sq;
+        let mut near_count = 0u32;
+        // 近档先写（base..base+near-1），远档紧随（base+near..），两遍遍历避免槽位交错
+        for inst in &self.npc_parts {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz < near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((NPC_SLOT_BASE + near_count) as usize) * stride),
+                        stride,
+                    );
+                }
+                near_count += 1;
+            }
+        }
+        let mut far_count = 0u32;
+        for inst in &self.npc_parts {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz >= near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(
+                            ((NPC_SLOT_BASE + near_count + far_count) as usize) * stride,
                         ),
                         stride,
                     );
@@ -3839,6 +3961,60 @@ impl Renderer {
             }
         }
 
+        // ---- NPC 士兵段 draw（复用同一 pipeline 与几何，实例槽从 NPC_SLOT_BASE 起）----
+        if self.last_npc_near > 0 {
+            let npc_vertex_buffers = [self.vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &npc_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    INDICES.len() as u32,
+                    self.last_npc_near,
+                    0,
+                    0,
+                    NPC_SLOT_BASE,
+                );
+            }
+        }
+        if self.last_npc_far > 0 {
+            let npc_vertex_buffers = [self.far_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &npc_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.far_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    FAR_INDICES.len() as u32,
+                    self.last_npc_far,
+                    0,
+                    0,
+                    NPC_SLOT_BASE + self.last_npc_near,
+                );
+            }
+        }
+
         // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
         if self.hud_vertex_count > 0 && self.hud_pipeline != vk::Pipeline::null() {
             let hud_vertex_buffers = [self.hud_vertex_buffer];
@@ -3976,6 +4152,10 @@ impl Renderer {
         let (marker_near, marker_far) = self.upload_markers(cam_pos);
         self.last_marker_near = marker_near;
         self.last_marker_far = marker_far;
+        // ---- NPC 士兵段：独立槽位上传（见 NPC_SLOT_BASE），计数供 draw call 使用 ----
+        let (npc_near, npc_far) = self.upload_npcs(cam_pos);
+        self.last_npc_near = npc_near;
+        self.last_npc_far = npc_far;
         let cull_us = cull_start.elapsed().as_micros() as u64;
         self.last_near_count = near_count;
         self.last_far_count = far_count;
@@ -4000,7 +4180,7 @@ impl Renderer {
                 0.0
             };
             log::info!(
-                "visible={}/{} near={} far={} fps={:.1} frame_us={} cull_us={} terrain_us={} wait_fence_us={} acquire_us={} record_us={} submit_us={} present_us={} terrain_lod={} blend={:.3} quality={}",
+                "visible={}/{} near={} far={} fps={:.1} frame_us={} cull_us={} terrain_us={} wait_fence_us={} acquire_us={} record_us={} submit_us={} present_us={} terrain_lod={} blend={:.3} quality={} marker={} npc={}",
                 near_count + far_count,
                 INSTANCE_COUNT,
                 near_count,
@@ -4016,7 +4196,9 @@ impl Renderer {
                 self.stage_present_us,
                 terrain_lod.name(),
                 terrain_blend,
-                self.quality().label()
+                self.quality().label(),
+                self.last_marker_near + self.last_marker_far,
+                self.last_npc_near + self.last_npc_far
             );
             self.frame_count = 0;
             self.perf_window_start = Instant::now();
@@ -4922,5 +5104,77 @@ mod simd_cull_tests {
             }
             assert_eq!(neon_out, scalar_out, "NEON 剔除结果与标量逐位不一致");
         }
+    }
+}
+
+// ============================================================
+// NPC 士兵可视化单元测试
+// ============================================================
+
+#[cfg(test)]
+mod npc_visual_tests {
+    use super::*;
+
+    /// 读取列主序 model 数组的平移分量（model[12..15]）
+    fn translation(m: &InstanceData) -> [f32; 3] {
+        [m.model[12], m.model[13], m.model[14]]
+    }
+
+    #[test]
+    fn soldier_parts_count_and_tint() {
+        let tint = [0.2, 0.6, 0.9, 1.0];
+        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, tint);
+        assert_eq!(parts.len(), 7);
+        for p in &parts {
+            assert_eq!(p.tint, tint);
+        }
+    }
+
+    #[test]
+    fn soldier_torso_height() {
+        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4]);
+        // 第 3 段 = 躯干，局部偏移 y=1.15，yaw=0 时平移 y 即 1.15
+        let t = translation(&parts[2]);
+        assert!(
+            (t[1] - 1.15).abs() < 1e-3,
+            "躯干 y 应为 1.15，实际 {}",
+            t[1]
+        );
+        assert!(t[0].abs() < 1e-3 && t[2].abs() < 1e-3);
+    }
+
+    #[test]
+    fn soldier_gun_rotates_with_yaw() {
+        let base = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4]);
+        let turned = Renderer::soldier_part_matrices(
+            [0.0, 0.0, 0.0],
+            std::f32::consts::FRAC_PI_2,
+            [1.0; 4],
+        );
+        // 第 7 段 = 枪：yaw=0 时局部偏移 (+0, +1.25, +0.45)，
+        // 转 90° 后绕 y 轴旋转应落到 (+0.45, +1.25, ~0)
+        let g0 = translation(&base[6]);
+        let g90 = translation(&turned[6]);
+        assert!(
+            (g0[2] - 0.45).abs() < 1e-3,
+            "yaw=0 枪应伸向 +Z，z={}",
+            g0[2]
+        );
+        assert!(
+            (g90[0] - 0.45).abs() < 1e-3,
+            "yaw=90° 枪应转到 +X，x={}",
+            g90[0]
+        );
+        assert!(g90[2].abs() < 1e-3, "yaw=90° 枪 z 应归零，z={}", g90[2]);
+    }
+
+    #[test]
+    fn soldier_pos_translation_applies() {
+        let parts = Renderer::soldier_part_matrices([10.0, 2.0, -3.0], 0.0, [1.0; 4]);
+        // 躯干：平移 = pos + 局部偏移 (0, 1.15, 0)
+        let t = translation(&parts[2]);
+        assert!((t[0] - 10.0).abs() < 1e-3, "x={}", t[0]);
+        assert!((t[1] - 3.15).abs() < 1e-3, "y={}", t[1]);
+        assert!((t[2] + 3.0).abs() < 1e-3, "z={}", t[2]);
     }
 }

@@ -25,6 +25,7 @@ use winit::{
 };
 
 use engine::camera::{Camera, CameraMode, KeyState};
+use engine::ai::Team;
 use engine::game::{Game, GameState, ObstacleKind};
 use engine::renderer::{QualityPreset, Renderer};
 use engine::window;
@@ -346,6 +347,23 @@ impl GameApp {
                 })
                 .collect();
             renderer.set_world_markers(&markers);
+            // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
+            // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）
+            let npc_visuals: Vec<engine::renderer::NpcVisual> = self
+                .game
+                .npcs
+                .iter()
+                .map(|n| engine::renderer::NpcVisual {
+                    pos: n.position,
+                    yaw: n.facing,
+                    tint: match n.team {
+                        // 纯色渲染（shader flat_flag 路径）：高饱和阵营色，避免与灰地/障碍混淆
+                        Team::Red => [0.95, 0.12, 0.08, 1.0],
+                        Team::Blue => [0.08, 0.35, 0.98, 1.0],
+                    },
+                })
+                .collect();
+            renderer.set_npc_visuals(&npc_visuals);
 
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
