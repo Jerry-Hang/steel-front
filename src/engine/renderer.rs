@@ -724,6 +724,8 @@ impl Renderer {
                 .to_string()
         };
         log::info!("选择物理设备: {}", device_name);
+        // GPU 硬件能力探测：光追/Tensor Core/DLSS 可用性判定（仅日志，不影响初始化）
+        crate::engine::gpu_caps::log_gpu_hardware_caps(&instance, physical_device, &device_name);
 
         let queue_families =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };

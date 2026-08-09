@@ -53,6 +53,15 @@
     avx（8，3/4 代酷睿与初代锐龙）> sse4.2（4，2008 年后全平台）> 标量，
     各级路径与标量逐位一致（非 FMA）；`_mm512_*` 在 Rust stable 可用（实测本机 avx512f=true）。
     非 x86_64 平台走标量兜底（cfg(not) 分支，勿删）
+- 2026-08-09 GPU 硬件能力探测（src/engine/gpu_caps.rs，启动日志 gpu-caps: 前缀）：
+  - WSLg/dzn（Vulkan-on-D3D12 转译）实测结论：VK_KHR_ray_tracing_pipeline / acceleration_structure /
+    ray_query / deferred_host_operations 全 false（Mesa dzn 未实现 DXR 映射）；VK_KHR_cooperative_matrix /
+    VK_NV_cooperative_matrix false；DLSS 私有扩展（VK_NVX_* / VK_NV_cuda_kernel）全 false；
+    仅 VK_KHR_buffer_device_address / VK_KHR_dynamic_rendering 可用
+  - 【结论】WSL2 的 Vulkan 路径无法调用 RT Core/Tensor Core(协作矩阵)/DLSS → 光追/全景路径追踪
+    需迁移 Windows 原生 Vulkan（NVIDIA 驱动全支持），或走 CUDA 直通（/usr/lib/wsl/lib/libcuda.so
+    实测存在，Tensor Core 可编程访问，可自研超分/降噪，OptiX 同源可用）
+  - 探测含决定性测试：创建启用 RT 扩展的探测 device（当前 RT 扩展缺失故跳过）
 - `.wslconfig` 已配置 `[wsl2] networkingMode=mirrored + dnsTunneling + firewall + autoProxy`，待 `wsl --shutdown` 生效
 - 验收快照：176 tests passed、0 警告、20s 冒烟 ALL-OK（kills=1、VUID=0、fps 214.8–292.7）
 
