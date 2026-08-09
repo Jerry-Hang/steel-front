@@ -24,6 +24,8 @@
 - 2026-08-08 地形/输入修复：地形全图拍平 y=0（`d08cd21`，删 value_noise/flatten_mask/noise_hash，
   保留 smooth_t 供 LOD morph）/ 鼠标灵敏度默认减半 0.003→0.0015 rad/px（`e068b02`）/
   视角改 XInput2 相对增量驱动（`5373a08`，WSLg/Xwayland 下 grab 不可靠，勿回退）
+- 2026-08-09 跨平台：`5bf7c77` feat(perf) AArch64 NEON 剔除路径 + CPU 平台隔离
+  （Apple Silicon/Android 通用，见下方「跨平台/指令集决策」）
 - 2026-08-08 性能压测：帧率无上限（main.rs `MAX_FPS=0`，`FRAME_BUDGET=0` 跳过 sleep/spin 节流，
   设回正数即恢复门控）；NPC 数量缩放 `RV3D_NPC_SCALE`（默认 1.0，`max(0.5)`，波次/援军同乘）；
   renderer 视锥剔除 AVX2 化（SoA 球心 + 8 实例/批 × 256 位，非 FMA 保与标量逐位一致，
@@ -117,6 +119,17 @@
 - 鼠标视角驱动：捕获态优先 DeviceEvent::MouseMotion（XInput2 相对增量，与光标位置无关）；
   WSLg/Xwayland 下 set_cursor_grab(Locked) 返回 Err、Confined 无效，绝对位置+warp 路径
   会产生回声乱转，勿回退到纯 CursorMoved+warp
+
+### 跨平台/指令集决策（2026-08-09，已推送 5bf7c77）
+- 不做原生 Metal 后端：macOS/iOS 走 MoltenVK 零改动；未来 iOS 商业化再评估
+- AArch64 NEON 剔除：`cull_spheres_neon`（4 实例/批，vld1q/vmulq/vaddq/vcgeq，
+  非 FMA 与标量逐位一致），运行时 `is_aarch64_feature_detected!("neon")` 选路；
+  simd_cull_tests 含 aarch64 门控的 NEON 等价断言
+- ash 字符串指针统一 `RawCString` 别名（x86_64=`*const i8`，AArch64=`*const u8`）
+- `sched_setaffinity` 仅 `target_os="linux"` 编译：macOS/Apple Silicon 不手工绑核，
+  线程调度交给系统 QoS；非 x86 无 E-core 概念，全部归 primary 集合
+- aarch64 交叉验证：`cargo check --target aarch64-unknown-linux-gnu`
+  （需 `rustup target add aarch64-unknown-linux-gnu`）
 
 ### 已知问题/待办（2026-08-08 快照）
 - 低头剔除 bug：pitch < 约 -30° 时近档实例场被视锥剔除全灭（日志 visible=near=0），
