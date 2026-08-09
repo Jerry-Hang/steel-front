@@ -11,13 +11,17 @@
 //! 因此双簇推断采用「vCPU 枚举顺序 = 物理枚举顺序」：前半 = 首簇、后半 = 次簇，
 //! 可用环境变量 `RV3D_CPU_PIN` 覆盖精确亲和性掩码（如 `RV3D_CPU_PIN=0-7,16-23`）。
 
-use std::arch::x86_64::__cpuid;
 use std::sync::OnceLock;
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::__cpuid;
 
 /// CPU 厂商（CPUID leaf 0x0 的 12 字节 vendor 串）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuVendor {
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Amd,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Intel,
     Other,
 }
@@ -37,11 +41,14 @@ pub struct CpuTopology {
     pub avx512: bool,
 }
 
-// Linux `sched_setaffinity`（cpu_set_t = 1024 位，x86_64 下 16×u64）
+// Linux `sched_setaffinity`（cpu_set_t = 1024 位，x86_64 下 16×u64）；
+// 仅 Linux 提供该系统调用（macOS/iOS 无，Apple Silicon 构建时线程调度交由系统 QoS）
+#[cfg(target_os = "linux")]
 extern "C" {
     fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cpu_vendor() -> CpuVendor {
     let r = __cpuid(0);
     let mut v = [0u8; 12];
@@ -53,6 +60,12 @@ fn cpu_vendor() -> CpuVendor {
         b"GenuineIntel" => CpuVendor::Intel,
         _ => CpuVendor::Other,
     }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_vendor() -> CpuVendor {
+    // 非 x86_64（如 Apple Silicon AArch64）：无 CPUID，按"未知厂商"处理
+    CpuVendor::Other
 }
 
 /// 全局缓存：AVX-512 是否允许启用（CPUID 支持 + 厂商/型号过滤 + 环境变量覆盖）
@@ -68,6 +81,21 @@ static AVX512_ALLOWED: OnceLock<bool> = OnceLock::new();
 /// - AMD Zen4/Zen5 及 Intel 高性能平台（Ice Lake/Skylake-X 等）→ true。
 pub fn avx512_enabled() -> bool {
     *AVX512_ALLOWED.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            avx512_allowed_x86()
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // 非 x86_64 无 AVX-512
+            false
+        }
+    })
+}
+
+/// x86_64 专用判定：硬件支持 + 环境变量 + Intel 型号过滤
+#[cfg(target_arch = "x86_64")]
+fn avx512_allowed_x86() -> bool {
         if !std::is_x86_feature_detected!("avx512f") {
             return false;
         }
@@ -83,7 +111,6 @@ pub fn avx512_enabled() -> bool {
             }
         }
         true
-    })
 }
 
 /// 从 sysfs `/sys/devices/system/cpu/online` 解析逻辑处理器总数（格式 "0-31" 或 "0,2,4"）
@@ -105,6 +132,7 @@ fn cpu_thread_count() -> usize {
 
 /// 临时把当前线程绑到指定 vCPU，读一个 CPUID leaf，再恢复全集合绑定。
 /// 用于遍历每核的 hybrid core type（Intel leaf 0x1A）。
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 fn probe_per_cpu(leaf: u32) -> Vec<u32> {
     let threads = cpu_thread_count();
     let mut out = Vec::with_capacity(threads);
@@ -166,18 +194,27 @@ impl CpuTopology {
             CpuVendor::Intel => {
                 // leaf 0x1A EAX[31:24] = 0x20 表示 E-core（EAX[15:8] = 核内编号，SMT 去重）；
                 // AMD（leaf 0x1A 返回 0）与虚拟化未透传时 e_cpus 为空。
-                let hybrid = probe_per_cpu(0x1A);
-                let mut seen = std::collections::HashSet::new();
-                for (i, &eax) in hybrid.iter().enumerate() {
-                    if ((eax >> 24) & 0xff) == 0x20 {
-                        seen.insert(i);
+                #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+                {
+                    let hybrid = probe_per_cpu(0x1A);
+                    let mut seen = std::collections::HashSet::new();
+                    for (i, &eax) in hybrid.iter().enumerate() {
+                        if ((eax >> 24) & 0xff) == 0x20 {
+                            seen.insert(i);
+                        }
                     }
+                    let e_cpus = seen;
+                    let p: Vec<usize> = (0..threads).filter(|c| !e_cpus.contains(c)).collect();
+                    let e: Vec<usize> = (0..threads).filter(|c| e_cpus.contains(c)).collect();
+                    let e_count = e.len();
+                    (p, e, e_count)
                 }
-                let e_cpus = seen;
-                let p: Vec<usize> = (0..threads).filter(|c| !e_cpus.contains(c)).collect();
-                let e: Vec<usize> = (0..threads).filter(|c| e_cpus.contains(c)).collect();
-                let e_count = e.len();
-                (p, e, e_count)
+                #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+                {
+                    // 非 x86_64/Linux（Apple Silicon、macOS、ARM 服务器）：
+                    // 无 CPUID leaf 0x1A 与 sched_setaffinity，无 E-core 概念，全部归 primary 集合
+                    ((0..threads).collect(), Vec::new(), 0)
+                }
             }
             CpuVendor::Other => ((0..threads).collect(), Vec::new(), 0),
         };
@@ -187,7 +224,16 @@ impl CpuTopology {
             primary_set,
             secondary_set,
             e_cores,
-            avx2: std::is_x86_feature_detected!("avx2"),
+            avx2: {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    std::is_x86_feature_detected!("avx2")
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    false
+                }
+            },
             avx512: avx512_enabled(),
         }
     }
@@ -207,29 +253,38 @@ impl CpuTopology {
             },
             Err(_) => self.primary_set.clone(),
         };
-        let mut mask = [0u64; 16];
-        for &c in &target {
-            if c < self.threads {
-                mask[c / 64] |= 1u64 << (c % 64);
+        #[cfg(target_os = "linux")]
+        {
+            let mut mask = [0u64; 16];
+            for &c in &target {
+                if c < self.threads {
+                    mask[c / 64] |= 1u64 << (c % 64);
+                }
+            }
+            let ok = unsafe {
+                sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), mask.as_ptr()) == 0
+            };
+            if ok {
+                log::info!(
+                    "cpu: 主线程已绑定 vCPU {:?}（{} 核 {} 线程，{}）",
+                    target,
+                    self.threads / 2,
+                    self.threads,
+                    match self.vendor {
+                        CpuVendor::Amd => "AMD 双簇：主=CCD0，次=CCD1",
+                        CpuVendor::Intel => "Intel 混合：主=P-core，次=E-core",
+                        CpuVendor::Other => "未知厂商",
+                    }
+                );
+            } else {
+                log::warn!("cpu: sched_setaffinity 失败（环境不支持），保持默认调度");
             }
         }
-        let ok = unsafe {
-            sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), mask.as_ptr()) == 0
-        };
-        if ok {
-            log::info!(
-                "cpu: 主线程已绑定 vCPU {:?}（{} 核 {} 线程，{}）",
-                target,
-                self.threads / 2,
-                self.threads,
-                match self.vendor {
-                    CpuVendor::Amd => "AMD 双簇：主=CCD0，次=CCD1",
-                    CpuVendor::Intel => "Intel 混合：主=P-core，次=E-core",
-                    CpuVendor::Other => "未知厂商",
-                }
-            );
-        } else {
-            log::warn!("cpu: sched_setaffinity 失败（环境不支持），保持默认调度");
+        #[cfg(not(target_os = "linux"))]
+        {
+            // 非 Linux（如未来 macOS/iOS Apple Silicon 构建）：无 sched_setaffinity，
+            // 不手工绑核，线程调度交给系统 QoS/调度器
+            log::info!("cpu: 非 Linux 平台，跳过线程手工绑定（交给系统调度）");
         }
         target
     }

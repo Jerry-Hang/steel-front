@@ -16,6 +16,14 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 use super::lighting::{LightUniform, LIGHT_UBO_BINDING};
 
+/// ash 的字符串指针类型跟随平台 c_char：x86_64/Linux 为 `*const i8`，
+/// AArch64（Apple Silicon/Android/高通 X Elite）为 `*const u8`。
+/// 实例/设备扩展名与层名统一走该别名，跨平台无需逐个转型。
+#[cfg(target_arch = "x86_64")]
+type RawCString = *const i8;
+#[cfg(not(target_arch = "x86_64"))]
+type RawCString = *const u8;
+
 // ============================================================
 // 数据类型
 // ============================================================
@@ -612,12 +620,18 @@ impl Renderer {
             ash_window::enumerate_required_extensions(display_handle)
                 .map_err(|e| format!("无法获取窗口所需扩展: {:?}", e))?
         };
-        let mut required_extensions: Vec<*const i8> = window_extensions.to_vec();
-        required_extensions.push(c"VK_EXT_debug_utils".as_ptr());
+        let mut required_extensions: Vec<RawCString> = window_extensions
+            .iter()
+            .map(|&p| p as RawCString)
+            .collect();
+        required_extensions.push(c"VK_EXT_debug_utils".as_ptr() as RawCString);
         let ext_names = required_extensions.as_slice();
 
         let layer_names = [c"VK_LAYER_KHRONOS_validation"];
-        let layers: Vec<*const i8> = layer_names.iter().map(|l| l.as_ptr()).collect();
+        let layers: Vec<RawCString> = layer_names
+            .iter()
+            .map(|l| l.as_ptr() as RawCString)
+            .collect();
 
         let layer_properties = unsafe {
             entry
@@ -2676,6 +2690,79 @@ impl Renderer {
         }
     }
 
+    /// NEON（AArch64，Apple Silicon / Android / 高通 X Elite 通用）批量剔除：
+    /// 4 实例/批（128 位 4×f32）。与标量逐位一致（非 FMA 累加顺序相同）；
+    /// Apple Silicon 的 SIMD 即标准 NEON（AMX 为私有协处理器，SVE 苹果不支持）。
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn cull_spheres_neon(
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        planes: &[[f32; 4]; 6],
+        out: &mut Vec<u32>,
+    ) {
+        use std::arch::aarch64::*;
+        let n = cx.len();
+        debug_assert_eq!(n, cy.len());
+        debug_assert_eq!(n, cz.len());
+        debug_assert_eq!(n, radii.len());
+
+        let mut i = 0usize;
+        while i + 4 <= n {
+            let xv = vld1q_f32(cx.as_ptr().add(i));
+            let yv = vld1q_f32(cy.as_ptr().add(i));
+            let zv = vld1q_f32(cz.as_ptr().add(i));
+            let rv = vld1q_f32(radii.as_ptr().add(i));
+            // 可见掩码：初始全 1（u32 lane），任一平面剔除则清零
+            let mut vis = vdupq_n_u32(0xFFFF_FFFF);
+            let neg_r = vsubq_f32(vdupq_n_f32(0.0), rv);
+            for p in planes {
+                let nx = vdupq_n_f32(p[0]);
+                let ny = vdupq_n_f32(p[1]);
+                let nz = vdupq_n_f32(p[2]);
+                let pd = vdupq_n_f32(p[3]);
+                // d = ((nx*x + ny*y) + nz*z) + pd，与标量加法顺序一致（无 FMA）
+                let d = vaddq_f32(
+                    vaddq_f32(
+                        vaddq_f32(vmulq_f32(nx, xv), vmulq_f32(ny, yv)),
+                        vmulq_f32(nz, zv),
+                    ),
+                    pd,
+                );
+                // 保留条件 d >= -r（NaN 不可能出现）
+                let keep = vcgeq_f32(d, neg_r);
+                vis = vandq_u32(vis, keep);
+            }
+            // 提取 4 位可见掩码（每 lane 全 1/全 0，取最低位）
+            let mask = (vgetq_lane_u32(vis, 0) & 1)
+                | ((vgetq_lane_u32(vis, 1) & 1) << 1)
+                | ((vgetq_lane_u32(vis, 2) & 1) << 2)
+                | ((vgetq_lane_u32(vis, 3) & 1) << 3);
+            for k in 0..4u32 {
+                if mask & (1 << k) != 0 {
+                    out.push((i + k as usize) as u32);
+                }
+            }
+            i += 4;
+        }
+        // 尾部不足 4 个走标量
+        for j in i..n {
+            let mut visible = true;
+            for p in planes {
+                let d = p[0] * cx[j] + p[1] * cy[j] + p[2] * cz[j] + p[3];
+                if d < -radii[j] {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible {
+                out.push(j as u32);
+            }
+        }
+    }
+
     /// 每帧视锥剔除 + 距离 LOD 分档：
     /// 设置世界障碍 marker（关卡切换时由 main.rs 调用；容量截断到 MAX_MARKER_INSTANCES）
     pub fn set_world_markers(&mut self, markers: &[WorldMarker]) {
@@ -2818,7 +2905,33 @@ impl Renderer {
                 );
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            // ARM 平台：NEON（Apple Silicon/Android/高通 X Elite）4 实例/批，否则标量
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                // safety: NEON 在 AArch64 是基线特性（此处仍运行时确认）
+                unsafe {
+                    Self::cull_spheres_neon(
+                        &self.instance_center_x,
+                        &self.instance_center_y,
+                        &self.instance_center_z,
+                        &self.instance_radii,
+                        &planes,
+                        &mut self.culled,
+                    );
+                }
+            } else {
+                Self::cull_spheres_scalar(
+                    &self.instance_center_x,
+                    &self.instance_center_y,
+                    &self.instance_center_z,
+                    &self.instance_radii,
+                    &planes,
+                    &mut self.culled,
+                );
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             Self::cull_spheres_scalar(
                 &self.instance_center_x,
@@ -4730,6 +4843,15 @@ mod simd_cull_tests {
             }
             assert_eq!(sse_out, scalar_out, "SSE4.2 剔除结果与标量逐位不一致");
         }
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            let mut neon_out = Vec::new();
+            // safety: 已运行时检测 NEON（AArch64 基线特性）
+            unsafe {
+                Renderer::cull_spheres_neon(&cx, &cy, &cz, &radii, &planes, &mut neon_out);
+            }
+            assert_eq!(neon_out, scalar_out, "NEON 剔除结果与标量逐位不一致");
+        }
         // 非 x86_64 或无双 AVX2：标量结果本身就是正确语义，无需对照
         assert!(!scalar_out.is_empty() || scalar_out.is_empty());
     }
@@ -4790,6 +4912,15 @@ mod simd_cull_tests {
                 Renderer::cull_spheres_sse(&cx, &cy, &cz, &radii, &planes, &mut sse_out);
             }
             assert_eq!(sse_out, scalar_out);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            let mut neon_out = Vec::new();
+            // safety: 已运行时检测 NEON（AArch64 基线特性）
+            unsafe {
+                Renderer::cull_spheres_neon(&cx, &cy, &cz, &radii, &planes, &mut neon_out);
+            }
+            assert_eq!(neon_out, scalar_out, "NEON 剔除结果与标量逐位不一致");
         }
     }
 }
