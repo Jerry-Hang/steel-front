@@ -49,8 +49,8 @@
   - 主线程亲和绑定 `sched_setaffinity`（FFI，无第三方依赖）：默认绑首簇（CCD0），
     `RV3D_CPU_PIN=off` 关闭、`RV3D_CPU_PIN=0-7,16-23` 精确覆盖；Intel 上主线程绑 P-core 组、
     E-core 组进 secondary（≤8 仅轻任务，>8 可接 AI/地图生成——决策已编码，供未来线程池）
-  - AI/地图生成现阶段仍单线程（每帧强耦合玩家状态/协同，跨线程需双缓冲+同步，破坏冒烟确定性），
-    未强行线程化；secondary_set 语义已预留
+  - AI 并行已落地：`ai_pool` 亲和线程池（AMD 绑 CCD1=secondary_set；Intel E-core≥8 绑 E-core，
+    否则 P-core），`step_ai_parallel` 走 `pool.par_for_each_mut`，逐位一致测试保序
   - renderer 剔除五级选路：avx512f（16 实例/批，Zen4/Zen5 原生 512 位）> avx2（8）>
     avx（8，3/4 代酷睿与初代锐龙）> sse4.2（4，2008 年后全平台）> 标量，
     各级路径与标量逐位一致（非 FMA）；`_mm512_*` 在 Rust stable 可用（实测本机 avx512f=true）。
@@ -95,6 +95,32 @@
 - 性能日志新增 `marker=N npc=M` 字段（每帧上传计数，128 NPC 时 npc=896=128×7）
 - 验收：226 tests 全绿、冒烟 ALL-OK（kills=1、VUID=0、fps 202.9–297.2）、
   128 NPC 压力实测 fps~250、ai_us~500µs、无 panic/VUID
+
+### 2026-08-09 快照：CPU 瓶颈拆分 + 亲和线程池 + SIMD 扩展（已推送）
+- 亲和线程池（cpu.rs，勿回退）：全局拓扑缓存 `cpu::topology()`（Game/Renderer 复用一次探测）；
+  `scene_pool()` 绑首簇（AMD CCD0 / Intel 仅 P-core，杜绝 E-core 与跨 CCD）、
+  `ai_pool()` 绑 AMD CCD1 / Intel E-core≥8 时 E-core；线程数 `RV3D_SCENE_WORKERS`/
+  `RV3D_AI_WORKERS` 覆盖，默认 min(8, 集合大小)。渲染线程不固定 1-2 核——主线程与
+  scene_pool 同绑整簇集合，由 OS 调度器把渲染工作分给集合内空闲率最高的核
+- 池 API：`par_for_each_mut<T>(data, f)`，`f(seg_idx, global_start, seg_slice)`，调用线程参与
+  首段，join 后才返回；作业闭包走裸指针擦除（`SendPtr<T>`），元素/闭包不要求 'static
+- 并行剔除/上传（renderer.rs `cull_and_upload`，勿回退）：两阶段——阶段 A 段并行剔除
+  （SIMD 选路 AVX-512>AVX2>AVX>SSE4.2>NEON>标量，逐位一致）写 `culled_scratch` + 段计数
+  （AtomicU32）；前缀和（串行，段数≤9）；阶段 B 段并行压缩上传（近档在前、远档随后）。
+  冒烟依赖的 visible/near/far 语义不变
+- 地形 morph（`update_terrain_lod_morph`）：SIMD 选路算 y + 段并行写回；只写 y 分量 4B/顶点
+  （其余顶点分量常驻映射，勿整块重传；地形拍平 y=0 约定不变）
+- 爆炸/冲击波 SIMD 实测：`RV3D_EXPLOSION_SIM=1` 每帧推 4096 点波前 + 每秒 65536 点×32 轮
+  加速比日志（`simd: path=avx512 ... speedup=... bitwise_eq=true`）。
+  实测 AVX-512 ≈ 1.0×——AoS `[f32;3]` + gather 是内存/取数瓶颈而非计算瓶颈，勿据此断言
+  AVX-512 无用（视锥剔除 16 实例/批、地形 morph 才是计算密集受益路径）
+- 实测（2560×1600 + 64v64 + RV3D_BENCH_PITCH=-10）：fps p50 42→99（2.36×）、
+  CPU 单核峰值 94%→47%、cycle_us 13620→10155、cull_us 947→590、record_us 929→262、
+  submit_us 486→145、ai_us 1183→267（CCD1 池生效）、wait_fence_us 530→228；
+  1280×800 同条件：fps p50 194→298。剩余大头 present_us p50≈3.0ms（dzn/WSLg 呈现路径，
+  非 CPU 可并行）；GPU util ~30%、功耗 ~24W 不变
+- 验收：229 tests 全绿（新增 morph/冲击波逐位一致单测）、0 警告、冒烟 ALL-OK
+  （kills=1、VUID=0、fps 295–364）
 
 ### 重启后待办（已办结）
 - 网络验证（mirrored+autoProxy）与 Wave 2/3 push 均已完成；后续提交直接 `git push origin master`
@@ -166,7 +192,7 @@
   （需 `rustup target add aarch64-unknown-linux-gnu`）
 
 ### 已知问题/待办（2026-08-08 快照）
-- 低头剔除 bug：pitch < 约 -30° 时近档实例场被视锥剔除全灭（日志 visible=near=0），
-  画面只剩远档+雾；排查 extract_frustum_planes / near plane（与地形拍平无关，既有问题）
+- 低头剔除 bug：已修复（`9c86101` 鼠标 Y 方向标准化 + 后坐力枪口上扬——根因是鼠标反转
+  致 pitch 被 bot 压到 -89°，剔除数学本身正确；勿回退鼠标方向）
 - mipmap 缺失：纹理 mip_levels(1) + sampler mipmap_mode(LINEAR) 无 mip 链，
   地平线远处锯齿闪烁（渲染约定勿回退：加 mip 链需同步放宽 image view/sampler）
