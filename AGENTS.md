@@ -146,7 +146,9 @@
 - F12 截图读回用 in_flight_fences 等待（vkWaitSemaphores 只接受 timeline 信号量，会 VUID + PNG 不落盘）
 - 光标捕获瞬间 last_cursor 对齐窗口中心 + 512px 跳变守卫，防回中 warp 被当视角位移致自转
 - test.png 四象限调试图导致面劈裂，已换中灰（2026-08-08 修复）
-- 地形已全图拍平 y=0（terrain_height 返回 0.0，terrain_height_at 同源；NPC/实例/网格共用）
+- 地形程序化高度（2026-08-09 恢复，勿回退全平）：terrain_height 中央半径 140m
+  （含 60×60 安全区、障碍环带 58–130m、两军接火区）y=0，之外 ≤15m 确定性值噪声丘陵；
+  terrain_height_at 同源，NPC/实例/网格共用；冒烟依赖的站定/接火区仍全平
 - 实例场/障碍立方体顶点色全部白化（VERTICES/FAR_VERTS），颜色只走 tint；- shader `flat_flag`：实例槽位 >= 65601（NPC_SLOT_BASE）时顶点着色器置 1，片元走纯色路径
   （跳过贴图 50% 混合），保证阵营色可辨；marker/地形仍走纹理混合路径。改槽位常量需同步
   build.rs `NPC_INSTANCE_BASE` 与 renderer.rs `NPC_SLOT_BASE`（build.rs 每次构建重新生成

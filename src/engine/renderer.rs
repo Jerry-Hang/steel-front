@@ -137,6 +137,14 @@ const TERRAIN_VERTS: usize = 257;
 const TERRAIN_CELLS: usize = 256;
 const TERRAIN_HALF: f32 = 255.0;
 const TERRAIN_UV_SCALE: f32 = 32.0; // uv 铺 0..16 重复采样
+/// 程序化地形平坦半径（米）：覆盖中央 60×60 安全区、障碍环带 58–130m 与两军接火区
+const TERRAIN_FLAT_RADIUS: f32 = 140.0;
+/// 平坦区外丘陵最大抬升（米，平滑抬升 × 噪声幅值，恒 ≤ 本常量）
+const TERRAIN_HILL_AMPLITUDE: f32 = 15.0;
+/// 丘陵抬升过渡带宽（米）：半径 140 → 320 内 smoothstep 从 0 升到满幅（起点斜率 0）
+const TERRAIN_HILL_RAMP: f32 = 180.0;
+/// 值噪声格距（米）：格距越大丘陵越平缓（低频滚动丘陵，LOD morph 无突兀）
+const TERRAIN_HILL_CELL: f32 = 128.0;
 
 // ---- 地形网格 LOD（3 级密度：高 257² / 中 129² / 低 65² 顶点）----
 /// 各级每边格数（256 / 128 / 64），顶点数 = 格数 + 1，格间距 = 512 / 格数。
@@ -439,17 +447,58 @@ struct TerrainLodMesh {
 }
 
 // ============================================================
-// 地形高度（全图拍平 y=0）
+// 地形高度（程序化丘陵 + 中央平坦作战区）
 // ============================================================
 
-/// Hermite 平滑插值（LOD morph 过渡系数复用）
+/// Hermite 平滑插值（LOD morph 过渡系数 / 地形抬升 / 值噪声插值共用）
 fn smooth_t(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// 地形高度：全图恒定 0（地形顶点与实例 Y 共用同一函数）
-fn terrain_height(_x: f32, _z: f32) -> f32 {
-    0.0
+/// 确定性整数哈希（纯 u32 算术，跨平台逐位一致；值噪声格点采样用）
+fn terrain_hash(ix: i32, iz: i32) -> u32 {
+    let mut h = (ix as u32).wrapping_mul(0x1B873593) ^ (iz as u32).wrapping_mul(0xCC9E2D51);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7FEB352D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846CA68B);
+    h ^= h >> 16;
+    h
+}
+
+/// 格点伪随机高度：[-1, 1)
+fn terrain_lattice_height(ix: i32, iz: i32) -> f32 {
+    (terrain_hash(ix, iz) & 0xFFFF) as f32 / 32768.0 - 1.0
+}
+
+/// 双线性 smoothstep 值噪声（确定性、低频平缓、C1 连续）
+fn terrain_value_noise(x: f32, z: f32, cell: f32) -> f32 {
+    let fx = x / cell;
+    let fz = z / cell;
+    let ix = fx.floor() as i32;
+    let iz = fz.floor() as i32;
+    let tx = smooth_t(fx - ix as f32);
+    let tz = smooth_t(fz - iz as f32);
+    let h00 = terrain_lattice_height(ix, iz);
+    let h10 = terrain_lattice_height(ix + 1, iz);
+    let h01 = terrain_lattice_height(ix, iz + 1);
+    let h11 = terrain_lattice_height(ix + 1, iz + 1);
+    let a = h00 + (h10 - h00) * tx;
+    let b = h01 + (h11 - h01) * tx;
+    a + (b - a) * tz
+}
+
+/// 地形高度：半径 ≤ TERRAIN_FLAT_RADIUS（中央 60×60 安全区、障碍环带 58–130m、
+/// 两军接火区都落在此圆内）恒 y=0；之外按距离 smoothstep 抬升的确定性值噪声丘陵，
+/// 幅值 ≤ TERRAIN_HILL_AMPLITUDE、坡度平缓（LOD morph 无突兀）。
+fn terrain_height(x: f32, z: f32) -> f32 {
+    let flat_r2 = TERRAIN_FLAT_RADIUS * TERRAIN_FLAT_RADIUS;
+    let r2 = x * x + z * z;
+    if r2 <= flat_r2 {
+        return 0.0;
+    }
+    let t = ((r2.sqrt() - TERRAIN_FLAT_RADIUS) / TERRAIN_HILL_RAMP).clamp(0.0, 1.0);
+    smooth_t(t) * TERRAIN_HILL_AMPLITUDE * terrain_value_noise(x, z, TERRAIN_HILL_CELL)
 }
 
 /// 供 CPU 侧（NPC/实例）查询地形高度，与 GPU 地形完全同源
@@ -5137,6 +5186,96 @@ mod terrain_lod_tests {
         let h11 = heights[(cz + 1) * w + cx + 1];
         let interp = terrain_coarse_height(x, z, &heights, low_cells);
         assert!((interp - (h00 + h11) * 0.5).abs() < 1e-5);
+    }
+}
+
+// ============================================================
+// 程序化地形高度单元测试
+// ============================================================
+
+#[cfg(test)]
+mod terrain_height_tests {
+    use super::*;
+
+    #[test]
+    fn terrain_height_deterministic_and_same_source() {
+        // 同参数同输入同输出（单测/回放依赖）；terrain_height_at 与 terrain_height 同源
+        for &(x, z) in &[
+            (0.0, 0.0),
+            (30.0, -30.0),
+            (120.0, 80.0),
+            (150.0, 10.0),
+            (-200.0, 250.0),
+            (255.0, -255.0),
+        ] {
+            assert_eq!(terrain_height(x, z), terrain_height(x, z), "({},{})", x, z);
+            assert_eq!(
+                terrain_height_at(x, z),
+                terrain_height(x, z),
+                "({},{})",
+                x,
+                z
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_flat_within_central_and_ring_zones() {
+        // 中央 60×60（|x|≤30 且 |z|≤30）恒 y=0
+        for &x in &[-30.0, -15.0, 0.0, 15.0, 30.0] {
+            for &z in &[-30.0, 0.0, 30.0] {
+                assert_eq!(terrain_height(x, z), 0.0, "central ({},{})", x, z);
+            }
+        }
+        // 半径 ≤ 140m（覆盖障碍环带 58–130m 与两军接火区）恒 y=0
+        for &(x, z) in &[
+            (0.0, 140.0),
+            (140.0, 0.0),
+            (-140.0, 0.0),
+            (0.0, -140.0),
+            (90.0, 107.0),
+            (-90.0, -107.0),
+        ] {
+            assert_eq!(terrain_height(x, z), 0.0, "ring ({},{})", x, z);
+        }
+    }
+
+    #[test]
+    fn terrain_hills_bounded_varied_and_gentle() {
+        // 全图扫描（间距 2m，与 High LOD 网格同采样）：|高度| ≤ 15m、
+        // 相邻点高度差 ≤ 0.6m（坡度 ≤ ~17°，平缓，LOD morph 不突兀）
+        let mut max_h = 0.0f32;
+        let mut ring_max = 0.0f32;
+        for iz in 0..=255usize {
+            for ix in 0..=255usize {
+                let x = -TERRAIN_HALF + ix as f32 * 2.0;
+                let z = -TERRAIN_HALF + iz as f32 * 2.0;
+                let h = terrain_height(x, z);
+                assert!(
+                    h.abs() <= TERRAIN_HILL_AMPLITUDE + 1e-6,
+                    "|h|={} 超限 at ({},{})",
+                    h,
+                    x,
+                    z
+                );
+                max_h = max_h.max(h.abs());
+                let r = (x * x + z * z).sqrt();
+                if r >= 250.0 {
+                    ring_max = ring_max.max(h.abs());
+                }
+                if ix < 255 {
+                    let dx = terrain_height(x + 2.0, z) - h;
+                    assert!(dx.abs() <= 0.6, "dx={} at ({},{})", dx, x, z);
+                }
+                if iz < 255 {
+                    let dz = terrain_height(x, z + 2.0) - h;
+                    assert!(dz.abs() <= 0.6, "dz={} at ({},{})", dz, x, z);
+                }
+            }
+        }
+        // 外围确实有起伏（防回退成全平）
+        assert!(ring_max > 1.0, "外围丘陵应有起伏，实际 ring_max={}", ring_max);
+        assert!(max_h > 1.0, "全图应有非零地形，实际 max_h={}", max_h);
     }
 }
 
