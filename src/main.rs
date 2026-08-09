@@ -849,6 +849,11 @@ fn main() {
     log::info!("  二战FPS游戏引擎 - Rust + Vulkan");
     log::info!("========================================");
 
+    // CPU 拓扑检测 + 主线程亲和性绑定（AMD 双簇/Intel 混合；RV3D_CPU_PIN=off 可关）
+    let cpu = engine::cpu::CpuTopology::detect();
+    cpu.log_summary();
+    cpu.pin_main_thread();
+
     // 创建事件循环
     let event_loop = match EventLoop::new() {
         Ok(el) => el,

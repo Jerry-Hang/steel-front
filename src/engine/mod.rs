@@ -12,6 +12,7 @@
 
 pub mod ai;
 pub mod camera;
+pub mod cpu;
 pub mod game;
 pub mod lighting;
 pub mod physics;
