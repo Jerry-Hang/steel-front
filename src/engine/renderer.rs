@@ -2752,11 +2752,14 @@ impl Renderer {
         self.culled.clear();
 
         // 单遍剔除：半径查表（创建时预算），可见实例只存索引（4B）避免 80B 中转拷贝。
+        // ★ AVX-512 加速已启用（本机 Zen4 实测走 16 实例/批路径，见下方 cull_spheres_avx512）：
+        //   选路统一走 cpu::avx512_enabled()——硬件不支持、RV3D_DISABLE_AVX512=1、
+        //   Intel 11 代（能效差）与 12 代起（大小核）都会自动禁用并回退到下一档。
         // x86_64 分级选路：AVX-512（16 实例/批）> AVX2（8）> AVX（8）> SSE4.2（4）> 标量，
         // 各级路径与标量逐位一致（非 FMA 累加顺序相同），老处理器自动回退。
         #[cfg(target_arch = "x86_64")]
         {
-            if std::is_x86_feature_detected!("avx512f") {
+            if crate::engine::cpu::avx512_enabled() {
                 // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
                 unsafe {
                     Self::cull_spheres_avx512(

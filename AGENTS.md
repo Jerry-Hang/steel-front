@@ -62,6 +62,12 @@
     需迁移 Windows 原生 Vulkan（NVIDIA 驱动全支持），或走 CUDA 直通（/usr/lib/wsl/lib/libcuda.so
     实测存在，Tensor Core 可编程访问，可自研超分/降噪，OptiX 同源可用）
   - 探测含决定性测试：创建启用 RT 扩展的探测 device（当前 RT 扩展缺失故跳过）
+- 2026-08-09 AVX-512 启用策略（cpu::avx512_enabled()，renderer 选路与日志共用）：
+  - AMD Zen4/Zen5（7000/9000 系）→ 启用（实测本机 avx512=true，走 16 实例/批剔除路径）
+  - Intel 11 代（Rocket Lake 0xA7 / Tiger Lake 0x8C/0x8D）→ 默认关闭（AVX-512 能效/降频差，
+    游戏负收益）；Intel 12 代起（model≥0x97，13/14 代同）→ 防御性关闭（出厂已熔丝禁用，
+    防虚拟化异常透传，E-core 无 AVX-512）
+  - `RV3D_DISABLE_AVX512=1` 可强制关闭；renderer 选路注释已标明 AVX-512 使用情况
 - `.wslconfig` 已配置 `[wsl2] networkingMode=mirrored + dnsTunneling + firewall + autoProxy`，待 `wsl --shutdown` 生效
 - 验收快照：176 tests passed、0 警告、20s 冒烟 ALL-OK（kills=1、VUID=0、fps 214.8–292.7）
 

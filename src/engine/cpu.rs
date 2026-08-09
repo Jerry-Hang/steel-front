@@ -12,6 +12,7 @@
 //! 可用环境变量 `RV3D_CPU_PIN` 覆盖精确亲和性掩码（如 `RV3D_CPU_PIN=0-7,16-23`）。
 
 use std::arch::x86_64::__cpuid;
+use std::sync::OnceLock;
 
 /// CPU 厂商（CPUID leaf 0x0 的 12 字节 vendor 串）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,37 @@ fn cpu_vendor() -> CpuVendor {
         b"GenuineIntel" => CpuVendor::Intel,
         _ => CpuVendor::Other,
     }
+}
+
+/// 全局缓存：AVX-512 是否允许启用（CPUID 支持 + 厂商/型号过滤 + 环境变量覆盖）
+static AVX512_ALLOWED: OnceLock<bool> = OnceLock::new();
+
+/// AVX-512 可用性判定（renderer 选路与日志共用）：
+/// - 硬件不支持（`is_x86_feature_detected`）→ false；
+/// - `RV3D_DISABLE_AVX512=1` 强制关闭 → false；
+/// - Intel 11 代（Rocket Lake 0xA7 / Tiger Lake 0x8C/0x8D）：AVX-512 能效与降频极差，
+///   游戏场景负收益，默认关闭（用户策略）；
+/// - Intel 12 代起（model ≥ Alder Lake 0x97，含 13/14 代）：大小核，E-core 无 AVX-512，
+///   出厂已熔丝禁用（CPUID 通常不报告）；此处防御性过滤，防虚拟化/BIOS 异常透传；
+/// - AMD Zen4/Zen5 及 Intel 高性能平台（Ice Lake/Skylake-X 等）→ true。
+pub fn avx512_enabled() -> bool {
+    *AVX512_ALLOWED.get_or_init(|| {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return false;
+        }
+        if std::env::var("RV3D_DISABLE_AVX512").is_ok_and(|v| v == "1" || v == "true") {
+            return false;
+        }
+        if cpu_vendor() == CpuVendor::Intel {
+            let eax = __cpuid(1).eax;
+            let model = ((eax >> 4) & 0x0f) | ((eax >> 12) & 0xf0);
+            // 11 代 Rocket Lake/Tiger Lake 与 12 代起的所有型号
+            if model == 0xA7 || model == 0x8C || model == 0x8D || model >= 0x97 {
+                return false;
+            }
+        }
+        true
+    })
 }
 
 /// 从 sysfs `/sys/devices/system/cpu/online` 解析逻辑处理器总数（格式 "0-31" 或 "0,2,4"）
@@ -156,7 +188,7 @@ impl CpuTopology {
             secondary_set,
             e_cores,
             avx2: std::is_x86_feature_detected!("avx2"),
-            avx512: std::is_x86_feature_detected!("avx512f"),
+            avx512: avx512_enabled(),
         }
     }
 
