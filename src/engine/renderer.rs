@@ -404,6 +404,11 @@ const MARKER_SLOT_BASE: u32 = INSTANCE_COUNT + 1;
 const MAX_NPC_INSTANCES: u32 = 1024;
 /// NPC 段在实例 buffer 中的起始 slot：紧接 marker 区之后（见 MARKER_SLOT_BASE）
 const NPC_SLOT_BASE: u32 = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES;
+/// 自发光实体上限（爆炸闪光等瞬时特效，并发数远小于此）
+const MAX_EMISSIVE_INSTANCES: u32 = 32;
+/// 自发光实体在实例 buffer 中的起始 slot：紧接 NPC 区之后（见 NPC_SLOT_BASE）。
+/// 必须与 build.rs 的 EMISSIVE_INSTANCE_BASE（NPC_INSTANCE_BASE + 1024）同步。
+const EMISSIVE_SLOT_BASE: u32 = NPC_SLOT_BASE + MAX_NPC_INSTANCES;
 
 /// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
 #[repr(C)]
@@ -587,6 +592,11 @@ pub struct Renderer {
     /// 本帧 NPC 近/远档段计数（record_command_buffer 读取，render 时更新）
     last_npc_near: u32,
     last_npc_far: u32,
+    /// 自发光实体实例（爆炸闪光等，由 set_emissive_markers 构建，见 EMISSIVE_SLOT_BASE）
+    emissive_markers: Vec<InstanceData>,
+    /// 本帧自发光近/远档计数（record_command_buffer 读取，render 时更新）
+    last_emissive_near: u32,
+    last_emissive_far: u32,
     /// 性能日志节流（1 次/秒）
     last_perf_log: Instant,
     /// 时间窗内帧计数（fps 统计）
@@ -936,6 +946,9 @@ impl Renderer {
             npc_parts: Vec::new(),
             last_npc_near: 0,
             last_npc_far: 0,
+            emissive_markers: Vec::new(),
+            last_emissive_near: 0,
+            last_emissive_far: 0,
             last_perf_log: Instant::now(),
             frame_count: 0,
             perf_window_start: Instant::now(),
@@ -1512,14 +1525,16 @@ impl Renderer {
             let instance_info = vk::DescriptorBufferInfo::default()
                 .buffer(self.instance_buffers[i])
                 .offset(0)
-                // 范围必须覆盖 marker 与 NPC 区（INSTANCE_COUNT+1+MAX_MARKER_INSTANCES+MAX_NPC_INSTANCES），
-                // 否则 shader 读 marker/NPC slot 会触发 VUID 越界校验
+                // 范围必须覆盖 marker/NPC/自发光区（INSTANCE_COUNT+1+MAX_MARKER_INSTANCES+
+                // MAX_NPC_INSTANCES+MAX_EMISSIVE_INSTANCES），否则 shader 读对应 slot
+                // 会触发 VUID 越界校验
                 .range(
                     std::mem::size_of::<InstanceData>() as u64
                         * (INSTANCE_COUNT as u64
                             + 1
                             + MAX_MARKER_INSTANCES as u64
-                            + MAX_NPC_INSTANCES as u64),
+                            + MAX_NPC_INSTANCES as u64
+                            + MAX_EMISSIVE_INSTANCES as u64),
                 );
             let instance_infos = [instance_info];
             let instance_write = vk::WriteDescriptorSet::default()
@@ -2556,9 +2571,13 @@ impl Renderer {
 
         // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次），
         // 再追加 MAX_MARKER_INSTANCES 个 slot 给世界障碍 marker（见 MARKER_SLOT_BASE），
-        // 最后追加 MAX_NPC_INSTANCES 个 slot 给 NPC 士兵段（见 NPC_SLOT_BASE）
-        let buffer_elems =
-            (INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES) as u64;
+        // 追加 MAX_NPC_INSTANCES 个 slot 给 NPC 士兵段（见 NPC_SLOT_BASE），
+        // 最后追加 MAX_EMISSIVE_INSTANCES 个 slot 给自发光实体（见 EMISSIVE_SLOT_BASE）
+        let buffer_elems = (INSTANCE_COUNT
+            + 1
+            + MAX_MARKER_INSTANCES
+            + MAX_NPC_INSTANCES
+            + MAX_EMISSIVE_INSTANCES) as u64;
         let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
         let identity = InstanceData {
             model: glam::Mat4::IDENTITY.to_cols_array(),
@@ -3073,6 +3092,65 @@ impl Renderer {
                         inst as *const InstanceData as *const u8,
                         slot.add(
                             ((MARKER_SLOT_BASE + near_count + far_count) as usize) * stride,
+                        ),
+                        stride,
+                    );
+                }
+                far_count += 1;
+            }
+        }
+        (near_count, far_count)
+    }
+
+    /// 设置自发光实体（爆炸闪光等；每帧由 main.rs 传入，容量截断到 MAX_EMISSIVE_INSTANCES）
+    pub fn set_emissive_markers(&mut self, markers: &[WorldMarker]) {
+        self.emissive_markers = markers
+            .iter()
+            .take(MAX_EMISSIVE_INSTANCES as usize)
+            .map(|m| InstanceData {
+                model: m.model.to_cols_array(),
+                tint: m.tint,
+            })
+            .collect();
+    }
+
+    /// 每帧上传自发光实体到实例 buffer 的 EMISSIVE_SLOT_BASE 之后区域，返回 (近档, 远档) 计数。
+    /// 与 marker 同构：量小不剔除，仅按距离分近/远档（shader 侧 flat+fade>1 直出自发光色）。
+    fn upload_emissive(&mut self, cam_pos: glam::Vec3) -> (u32, u32) {
+        let slot = match self.instance_mapped.get(self.current_frame) {
+            Some(&p) if !p.is_null() => p as *mut u8,
+            _ => return (0, 0),
+        };
+        let stride = std::mem::size_of::<InstanceData>();
+        let near_sq = quality_params(self.quality).instance_lod_distance;
+        let near_sq = near_sq * near_sq;
+        let mut near_count = 0u32;
+        for inst in &self.emissive_markers {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz < near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((EMISSIVE_SLOT_BASE + near_count) as usize) * stride),
+                        stride,
+                    );
+                }
+                near_count += 1;
+            }
+        }
+        let mut far_count = 0u32;
+        for inst in &self.emissive_markers {
+            let dx = inst.model[12] - cam_pos.x;
+            let dy = inst.model[13] - cam_pos.y;
+            let dz = inst.model[14] - cam_pos.z;
+            if dx * dx + dy * dy + dz * dz >= near_sq {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(
+                            ((EMISSIVE_SLOT_BASE + near_count + far_count) as usize) * stride,
                         ),
                         stride,
                     );
@@ -4403,6 +4481,61 @@ impl Renderer {
             }
         }
 
+        // ---- 自发光实体 draw（爆炸闪光等；复用同一 pipeline，实例槽从 EMISSIVE_SLOT_BASE 起，
+        //      shader 对槽位 >= EMISSIVE_INSTANCE_BASE 的实例走自发光直出）----
+        if self.last_emissive_near > 0 {
+            let emissive_vertex_buffers = [self.vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &emissive_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    INDICES.len() as u32,
+                    self.last_emissive_near,
+                    0,
+                    0,
+                    EMISSIVE_SLOT_BASE,
+                );
+            }
+        }
+        if self.last_emissive_far > 0 {
+            let emissive_vertex_buffers = [self.far_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &emissive_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.far_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    FAR_INDICES.len() as u32,
+                    self.last_emissive_far,
+                    0,
+                    0,
+                    EMISSIVE_SLOT_BASE + self.last_emissive_near,
+                );
+            }
+        }
+
         // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
         if self.hud_vertex_count > 0 && self.hud_pipeline != vk::Pipeline::null() {
             let hud_vertex_buffers = [self.hud_vertex_buffer];
@@ -4544,6 +4677,10 @@ impl Renderer {
         let (npc_near, npc_far) = self.upload_npcs(cam_pos);
         self.last_npc_near = npc_near;
         self.last_npc_far = npc_far;
+        // ---- 自发光实体（爆炸闪光等）：独立槽位上传（见 EMISSIVE_SLOT_BASE）----
+        let (emissive_near, emissive_far) = self.upload_emissive(cam_pos);
+        self.last_emissive_near = emissive_near;
+        self.last_emissive_far = emissive_far;
         let cull_us = cull_start.elapsed().as_micros() as u64;
         self.last_near_count = near_count;
         self.last_far_count = far_count;
@@ -4585,7 +4722,10 @@ impl Renderer {
                 terrain_lod.name(),
                 terrain_blend,
                 self.quality().label(),
-                self.last_marker_near + self.last_marker_far,
+                self.last_marker_near
+                    + self.last_marker_far
+                    + self.last_emissive_near
+                    + self.last_emissive_far,
                 self.last_npc_near + self.last_npc_far
             );
             self.frame_count = 0;

@@ -178,7 +178,12 @@ impl GameApp {
 
         // 第一人称：玩家身体位置 → 相机眼睛（FP 相机不自己移动），并同步灵敏度
         if self.camera.mode == CameraMode::FirstPerson {
-            self.camera.set_first_person_eye(self.game.player_eye());
+            // 爆炸震屏：本帧抖动偏移叠加到眼睛位置（无震屏时偏移为 0）
+            let mut eye = self.game.player_eye();
+            let (sx, sz) = self.game.camera_shake_offset();
+            eye.x += sx;
+            eye.z += sz;
+            self.camera.set_first_person_eye(eye);
             self.camera.set_mouse_sens(self.game.sensitivity_rads());
         }
 
@@ -372,7 +377,25 @@ impl GameApp {
                     }
                 })
                 .collect();
+            // 爆炸闪光：冲击波球壳随年龄膨胀、颜色转淡；走自发光路径（emissive 槽位，
+            // shader 直出纯色跳过光照/贴图混合），夜间等暗光环境下依然清晰可见
+            let emissive_markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .explosions()
+                .iter()
+                .map(|ex| {
+                let t = (ex.age / ex.lifetime).clamp(0.0, 1.0);
+                let s = ex.radius * (0.35 + 1.65 * t);
+                let h = (2.4 * (1.0 - t)).max(0.3);
+                engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(ex.center[0], 1.2, ex.center[2]))
+                        * glam::Mat4::from_scale(glam::Vec3::new(s, h, s)),
+                    tint: [1.0, 0.55 * (1.0 - t) + 0.2, 0.08, 1.0],
+                }
+                })
+                .collect();
             renderer.set_world_markers(&markers);
+            renderer.set_emissive_markers(&emissive_markers);
             // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
             // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）
             let npc_visuals: Vec<engine::renderer::NpcVisual> = self

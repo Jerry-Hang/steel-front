@@ -40,6 +40,18 @@ const WAVE_INTERMISSION: f32 = 3.0;
 const KILL_SCORE: u64 = 10;
 /// 清波奖励分
 const WAVE_CLEAR_BONUS: u64 = 25;
+/// 爆炸参数：过期投射物/命中障碍触发的 AoE（半径 8m，中心 60 伤害，衰减按冲击波压力）。
+/// M1 单发 25 伤害 → 爆心一发约 2.4 倍伤害，边缘递减；推挤速度见 KNOCKBACK_SPEED。
+const EXPLOSION_RADIUS: f32 = 8.0;
+const EXPLOSION_DAMAGE: f32 = 60.0;
+const EXPLOSION_LIFETIME: f32 = 0.35;
+/// 冲击波击退速度（爆心处，m/s；指数衰减率 -12/s，约 0.25s 内衰减到 5%）
+const KNOCKBACK_SPEED: f32 = 14.0;
+const KNOCKBACK_DECAY: f32 = 12.0;
+/// 玩家震屏：冲击半径（m）与强度（世界位移米数，随剩余时间线性衰减）
+const SHAKE_RADIUS: f32 = 14.0;
+const SHAKE_STRENGTH: f32 = 0.35;
+const SHAKE_DURATION: f32 = 0.3;
 /// 玩家移动速度（米/秒，第一人称 WASD）
 const PLAYER_SPEED: f32 = 6.0;
 /// NPC 就近掩体搜索半径（网格格数）
@@ -153,6 +165,24 @@ pub struct Npc {
     pub facing: f32,
     /// 对目标开火累计时间（压力模式 NPC 互射，每满 1 秒结算一次 dps）
     fire_accum: f32,
+    /// 爆炸冲击波推挤速度（世界坐标 x/z 分量，m/s；advance_npc 每帧指数衰减）
+    pub knockback: [f32; 2],
+}
+
+/// 爆炸实体：冲击波 AoE 伤害 + 径向击退（生成时一次性结算），
+/// 存活期内由 main.rs 生成膨胀淡出的闪光 marker（复用主 pipeline）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Explosion {
+    /// 爆心（世界坐标）
+    pub center: [f32; 3],
+    /// 冲击波半径（米）
+    pub radius: f32,
+    /// 爆心最大伤害（沿冲击波压力衰减）
+    pub max_damage: f32,
+    /// 已存在时间（秒，驱动闪光膨胀淡出）
+    pub age: f32,
+    /// 视觉持续时间（秒，age 达到后实体移除）
+    pub lifetime: f32,
 }
 
 /// 世界坐标 → 网格坐标（±256 → 0..128）
@@ -485,6 +515,12 @@ pub struct Game {
     sfx: SfxBank,
     /// 在场投射物
     projectiles: Vec<Projectile>,
+    /// 在场爆炸实体（AoE 结算后保留短暂生命周期供闪光渲染）
+    pub explosions: Vec<Explosion>,
+    /// 爆炸震屏剩余时间（秒，>0 时相机叠加抖动偏移）
+    shake_timer: f32,
+    /// 爆炸震屏强度（世界位移米数，随剩余时间线性衰减）
+    shake_strength: f32,
     /// 开火冷却剩余时间（秒）
     fire_cooldown: f32,
     /// 发射次数（累计）
@@ -665,6 +701,7 @@ impl Game {
                 team: Team::Red,
                 facing: 0.0,
                 fire_accum: 0.0,
+                knockback: [0.0, 0.0],
             });
         }
         let mut game = Self {
@@ -694,6 +731,9 @@ impl Game {
             footstep_timer: 0.0,
             sfx: SfxBank::new(48_000),
             projectiles: Vec::new(),
+            explosions: Vec::new(),
+            shake_timer: 0.0,
+            shake_strength: 0.0,
             fire_cooldown: 0.0,
             shots: 0,
             hits: 0,
@@ -1059,6 +1099,8 @@ impl Game {
             }
         }
         self.stage_ai_us = t0.elapsed().as_micros() as u64;
+        // 爆炸实体生命周期 + 震屏衰减（生成在 update_projectiles 内，AoE 已即时结算）
+        self.step_explosions(dt);
         // 冲击波/爆炸 SIMD 实测（默认关；RV3D_EXPLOSION_SIM=1 时每帧推进压力场并输出加速比）
         if self.explosion_sim {
             self.step_explosion_sim();
@@ -1581,7 +1623,14 @@ impl Game {
         let mut alive = Vec::with_capacity(old.len());
         for p in old {
             if !p.is_alive() {
-                // 弹着点：程序化爆炸（低频轰鸣 + 次声），距离衰减按听者位置
+                // 弹着点：过期投射物引爆 —— AoE 伤害 + 冲击波击退 + 闪光 marker
+                // （GameOver 冻结玩法：damage=0 只保留视觉与音效，不结算伤害/击退）
+                self.spawn_explosion(
+                    p.position,
+                    EXPLOSION_RADIUS,
+                    if allow_kills { EXPLOSION_DAMAGE } else { 0.0 },
+                    true,
+                );
                 self.audio.synth_mut().play_explosion(
                     glam::Vec3::new(p.position[0], p.position[1], p.position[2]),
                     0.45,
@@ -1594,32 +1643,17 @@ impl Game {
             }
             if self.collide_physics(&p) {
                 hit_count += 1;
-                // 可破坏障碍：命中物理刚体 → 按武器伤害结算障碍 HP，摧毁后移除碰撞/阻挡
+                // 命中障碍：爆炸 AoE（对附近 NPC 造成冲击波伤害 + 闪光，但不推挤，
+                // 保持冒烟"站定瞄准"语义）+ 按武器伤害结算障碍 HP，摧毁后移除碰撞/阻挡
                 if let Some(idx) = self.hit_obstacle_index(&p) {
+                    self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
                     self.damage_obstacle(idx, p.damage);
                 }
                 continue;
             }
             if let Some(idx) = self.hit_npc_index(&p) {
                 hit_count += 1;
-                let dmg = p.damage;
-                let npc = &mut self.npcs[idx];
-                npc.hp -= dmg;
-                if npc.hp <= 0.0 {
-                    let id = npc.id;
-                    self.npcs.remove(idx);
-                    self.score += KILL_SCORE;
-                    log::info!(
-                        "kill: npc #{} eliminated (wave {}) score={}",
-                        id,
-                        self.wave,
-                        self.score
-                    );
-                    // 任务目标：歼灭数推进（达成 → 胜利横幅/日志，波次推进不受影响）
-                    if self.objective.progress(1) {
-                        self.on_objective_complete();
-                    }
-                }
+                self.damage_npc(idx, p.damage);
                 continue;
             }
             alive.push(p);
@@ -1713,6 +1747,108 @@ impl Game {
         );
         self.world.bodies.remove(idx);
         self.map.obstacles.remove(idx);
+    }
+
+    /// NPC 受伤结算：扣血至 0 → 移除 + 计分 + 任务目标推进；返回是否击杀。
+    /// 调用方保证 `idx` 有效；下标移除后不再回移（调用方按逆序遍历或立即退出）。
+    fn damage_npc(&mut self, idx: usize, dmg: f32) -> bool {
+        let npc = &mut self.npcs[idx];
+        npc.hp -= dmg;
+        if npc.hp > 0.0 {
+            return false;
+        }
+        let id = npc.id;
+        self.npcs.remove(idx);
+        self.score += KILL_SCORE;
+        log::info!(
+            "kill: npc #{} eliminated (wave {}) score={}",
+            id,
+            self.wave,
+            self.score
+        );
+        // 任务目标：歼灭数推进（达成 → 胜利横幅/日志，波次推进不受影响）
+        if self.objective.progress(1) {
+            self.on_objective_complete();
+        }
+        true
+    }
+
+    /// 生成爆炸实体：AoE 伤害 + 径向击退（生成时一次性结算，逆序遍历避免下标回移）。
+    /// - 伤害衰减复用 `simd::shockwave_pressure`（所有 NPC 一次批算，指令集选路可测）；
+    /// - `knockback=true` 时对命中 NPC 施加径向推挤（advance_npc 每帧指数衰减）；
+    /// - 玩家在冲击半径内 → 震屏（`camera_shake_offset` 每帧读取）。
+    fn spawn_explosion(&mut self, center: [f32; 3], radius: f32, damage: f32, knockback: bool) {
+        log::info!(
+            "explosion: at ({:.1}, {:.1}, {:.1}) radius={:.0} dmg={:.0} knockback={}",
+            center[0],
+            center[1],
+            center[2],
+            radius,
+            damage,
+            knockback
+        );
+        self.explosions.push(Explosion {
+            center,
+            radius,
+            max_damage: damage,
+            age: 0.0,
+            lifetime: EXPLOSION_LIFETIME,
+        });
+        // 玩家震屏：随距离线性衰减，最近处满强度（与 NPC 是否在场无关）
+        let eye = self.player_eye();
+        let dx = eye.x - center[0];
+        let dz = eye.z - center[2];
+        let dist = (dx * dx + dz * dz).sqrt();
+        if dist < SHAKE_RADIUS {
+            self.shake_timer = SHAKE_DURATION;
+            self.shake_strength = SHAKE_STRENGTH * (1.0 - dist / SHAKE_RADIUS).clamp(0.15, 1.0);
+        }
+        if damage <= 0.0 || self.npcs.is_empty() {
+            return;
+        }
+        let points: Vec<[f32; 3]> = self.npcs.iter().map(|n| n.position).collect();
+        let mut falloff = vec![0.0f32; points.len()];
+        crate::engine::simd::shockwave_pressure(center, radius, 1.0, &points, &mut falloff);
+        let mut i = self.npcs.len();
+        while i > 0 {
+            i -= 1;
+            let f = falloff[i];
+            if f <= 0.0 {
+                continue;
+            }
+            if knockback {
+                let dx = self.npcs[i].position[0] - center[0];
+                let dz = self.npcs[i].position[2] - center[2];
+                let d = (dx * dx + dz * dz).sqrt().max(1e-4);
+                self.npcs[i].knockback[0] += dx / d * KNOCKBACK_SPEED * f;
+                self.npcs[i].knockback[1] += dz / d * KNOCKBACK_SPEED * f;
+            }
+            self.damage_npc(i, damage * f);
+        }
+    }
+
+    /// 推进爆炸实体生命周期（年龄 + 过期移除）与震屏衰减。每帧调用（update 尾部）。
+    fn step_explosions(&mut self, dt: f32) {
+        for ex in self.explosions.iter_mut() {
+            ex.age += dt;
+        }
+        self.explosions.retain(|ex| ex.age < ex.lifetime);
+        self.shake_timer = (self.shake_timer - dt).max(0.0);
+    }
+
+    /// 当前爆炸实体（main.rs 每帧生成膨胀淡出的闪光 marker）
+    pub fn explosions(&self) -> &[Explosion] {
+        &self.explosions
+    }
+
+    /// 本帧爆炸震屏偏移（世界 x/z 抖动，随剩余时间线性衰减）；无震屏时返回 (0, 0)。
+    pub fn camera_shake_offset(&self) -> (f32, f32) {
+        if self.shake_timer <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let s = self.shake_strength * (self.shake_timer / SHAKE_DURATION);
+        let t = self.time;
+        ((t * 47.13).sin() * s, (t * 53.71).cos() * s)
     }
 
     /// 投射物命中的 NPC 下标（命中球：中心在 NPC 头顶，半径 0.8）；未命中返回 None
@@ -1902,6 +2038,7 @@ impl Game {
             team: Team::Red,
             facing: (player.z - z).atan2(player.x - x),
             fire_accum: 0.0,
+            knockback: [0.0, 0.0],
         });
         id
     }
@@ -1966,6 +2103,7 @@ impl Game {
                     team,
                     facing: (player.z - z).atan2(player.x - x),
                     fire_accum: 0.0,
+                    knockback: [0.0, 0.0],
                 });
             }
         }
@@ -3119,6 +3257,113 @@ mod tests {
         assert!(!game.settings_open(), "再 toggle 应关闭");
     }
 
+    // ---- 爆炸/冲击波（AoE 玩法）----
+
+    /// 测试用爆炸：替换 npcs 后引爆，返回爆炸实体引用
+    fn explode_on(npcs: Vec<Npc>, center: [f32; 3], damage: f32, knockback: bool) -> Game {
+        let mut game = Game::new();
+        game.npcs = npcs;
+        game.spawn_explosion(center, EXPLOSION_RADIUS, damage, knockback);
+        game
+    }
+
+    /// AoE 伤害：爆心全伤、随距离衰减、超出半径无损（衰减语义 = shockwave_pressure）
+    #[test]
+    fn explosion_aoe_damage_falloff() {
+        let game = explode_on(
+            vec![
+                npc_at(1, Team::Red, [0.0, 0.0, 0.0]),
+                npc_at(2, Team::Red, [4.0, 0.0, 0.0]),
+                npc_at(3, Team::Red, [20.0, 0.0, 0.0]),
+            ],
+            [0.0, 1.0, 0.0],
+            EXPLOSION_DAMAGE,
+            true,
+        );
+        let hp: Vec<f32> = game.npcs.iter().map(|n| n.hp).collect();
+        assert!(hp[0] < hp[1], "爆心最近者受伤最重");
+        assert!(hp[1] < hp[2], "随距离衰减");
+        assert!((hp[2] - 100.0).abs() < 1e-6, "超出半径不受伤");
+        assert!(hp[0] < 100.0 - 30.0, "近爆心伤害显著");
+        assert!(game.npcs[1].knockback[0] > 0.0, "径向推挤方向向外（+x）");
+        assert_eq!(game.npcs[2].knockback, [0.0, 0.0], "超出半径无推挤");
+    }
+
+    /// 爆炸击杀：hp≤0 移除 + 计分 + 任务推进
+    #[test]
+    fn explosion_kills_and_scores() {
+        let mut npcs = vec![npc_at(7, Team::Red, [0.5, 0.0, 0.0])];
+        npcs[0].hp = 30.0;
+        npcs[0].last_hp = 30.0;
+        let game = explode_on(npcs, [0.0, 1.0, 0.0], EXPLOSION_DAMAGE, true);
+        assert!(game.npcs.is_empty(), "30hp NPC 被爆心击杀");
+        assert_eq!(game.score, KILL_SCORE, "击杀计分");
+        assert_eq!(game.objective.eliminated, 1, "任务目标推进");
+    }
+
+    /// 冲击波推挤：生成时获得径向速度，后续帧按指数衰减并产生位移
+    #[test]
+    fn explosion_knockback_moves_and_decays() {
+        let mut game = explode_on(
+            vec![npc_at(1, Team::Red, [3.0, 0.0, 0.0])],
+            [0.0, 1.0, 0.0],
+            EXPLOSION_DAMAGE,
+            true,
+        );
+        let v0 = game.npcs[0].knockback[0];
+        assert!(v0 > 1.0, "近爆心推挤速度可观");
+        let d0 = game.npcs[0].position[0].abs();
+        // 推挤帧：位移方向向外（+x），速度按指数衰减
+        game.update(0.05, &Camera::new());
+        assert!(
+            game.npcs[0].position[0] > d0 + 0.05,
+            "推挤帧应产生向外位移"
+        );
+        assert!(
+            game.npcs[0].knockback[0] < v0,
+            "速度应衰减"
+        );
+        // 数帧后速度归零（衰减到阈值清 0）
+        for _ in 0..30 {
+            game.update(0.05, &Camera::new());
+        }
+        assert_eq!(game.npcs[0].knockback, [0.0, 0.0], "衰减后归零");
+    }
+
+    /// 爆炸实体生命周期：生成 → 年龄推进 → 超时移除；玩家在冲击半径内触发震屏
+    #[test]
+    fn explosion_visual_lifecycle_and_shake() {
+        let mut game = Game::new();
+        game.spawn_explosion([0.0, 1.0, 0.0], EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
+        assert_eq!(game.explosions().len(), 1, "生成即入列");
+        // 玩家在原点：爆炸半径 8m 内 → 震屏触发
+        assert!(game.shake_timer > 0.0, "近爆应触发震屏");
+        let (sx, sz) = game.camera_shake_offset();
+        assert!(sx != 0.0 || sz != 0.0, "震屏期间偏移非零");
+        game.step_explosions(0.1);
+        assert_eq!(game.explosions().len(), 1, "存活期内保留");
+        assert!((game.explosions()[0].age - 0.1).abs() < 1e-6, "年龄推进");
+        game.step_explosions(0.3);
+        assert!(game.explosions().is_empty(), "超过 lifetime 移除");
+        game.step_explosions(SHAKE_DURATION + 0.1);
+        assert_eq!(game.shake_timer, 0.0, "震屏超时归零");
+        assert_eq!(game.camera_shake_offset(), (0.0, 0.0));
+    }
+
+    /// 冻结玩法（GameOver / damage=0）：爆炸只有视觉，不结算伤害/击退
+    #[test]
+    fn explosion_zero_damage_is_visual_only() {
+        let game = explode_on(
+            vec![npc_at(1, Team::Red, [1.0, 0.0, 0.0])],
+            [0.0, 1.0, 0.0],
+            0.0,
+            true,
+        );
+        assert_eq!(game.npcs[0].hp, 100.0, "damage=0 不扣血");
+        assert_eq!(game.npcs[0].knockback, [0.0, 0.0], "damage=0 不推挤");
+        assert_eq!(game.explosions().len(), 1, "视觉实体仍生成");
+    }
+
     // ---- 压力模式（64v64 大战场）----
 
     /// 测试用 NPC 构造器（全字段确定性初始化）
@@ -3143,6 +3388,7 @@ mod tests {
             team,
             facing: 0.0,
             fire_accum: 0.0,
+            knockback: [0.0, 0.0],
         }
     }
 
@@ -3619,6 +3865,20 @@ fn advance_npc(
     // 躲避冷却/计时无条件递减（含 Attack 态，防冻结窗口；残留计时归零防"幽灵侧移"）
     npc.hit_cooldown = (npc.hit_cooldown - dt).max(0.0);
     npc.dodge_timer = (npc.dodge_timer - dt).max(0.0);
+
+    // 爆炸冲击波推挤：覆盖本帧移动（指数衰减，约 0.25s 内衰减到 5%）
+    if npc.knockback[0] != 0.0 || npc.knockback[1] != 0.0 {
+        npc.position[0] += npc.knockback[0] * dt;
+        npc.position[2] += npc.knockback[1] * dt;
+        let decay = (-KNOCKBACK_DECAY * dt).exp();
+        npc.knockback[0] *= decay;
+        npc.knockback[1] *= decay;
+        if npc.knockback[0].abs() < 0.05 && npc.knockback[1].abs() < 0.05 {
+            npc.knockback = [0.0, 0.0];
+        }
+        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+        return;
+    }
 
     // 攻击态原地站定（冒烟瞄准依据 `npc: #id stand`）
     if state == NpcState::Attack {

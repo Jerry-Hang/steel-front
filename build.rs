@@ -24,6 +24,9 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
 // 槽位 >= 该值的实例走「纯色渲染」路径：不混合贴图，保证红/蓝阵营色清晰可辨。
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
+// 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
+// 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE（NPC_SLOT_BASE + MAX_NPC_INSTANCES）同步。
+const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 1024u;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -58,7 +61,11 @@ fn vs_main(
     } else {
         output.flat_flag = 0.0;
     }
-    if (instance_index == TERRAIN_INSTANCE_INDEX) {
+    if (instance_index >= EMISSIVE_INSTANCE_BASE) {
+        // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
+        output.flat_flag = 1.0;
+        output.fade = 2.0;
+    } else if (instance_index == TERRAIN_INSTANCE_INDEX) {
         output.fade = 1.0;
     } else {
         // 地面平面距离（不随相机高度变化，俯瞰全场时不误淡出）
@@ -179,6 +186,10 @@ fn evaluate_point(light: PointLight, world_pos: vec3<f32>, normal: vec3<f32>, vi
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (input.fade <= 0.02) {
         discard;
+    }
+    // 自发光（爆炸闪光等，顶点阶段 fade=2.0 标记）：直出顶点色 × tint，不受光照影响
+    if (input.fade > 1.0) {
+        return vec4<f32>(input.color, 1.0);
     }
     // 士兵等纯色实例（NPC 槽位）：直接输出顶点色 × fade，跳过贴图 50% 混合，
     // 保证红/蓝阵营色在灰地场景中清晰可辨（marker/地形仍走纹理混合路径）。
