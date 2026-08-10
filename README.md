@@ -1,5 +1,8 @@
 # 钢铁前线 (Steel Front) — 会话交接与进度总结
 
+> ⚠️ 本文档为早期会话交接材料，已被 `AGENTS.md` 与 `docs/HANDOFF-*.md` 取代（2026-08-10）。
+> 新会话请以 AGENTS.md / docs/HANDOFF 为准，本文件仅保留历史信息。
+
 > 本文档是 AI 会话交接材料：记录已完成功能、当前工作状态、待办任务与关键约定。
 > 新会话请先读本文 + `git log --oneline` + `git status`，再接续工作。
 
