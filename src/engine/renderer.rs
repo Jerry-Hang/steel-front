@@ -544,7 +544,6 @@ pub struct Renderer {
     in_flight_fences: Vec<vk::Fence>,
     current_frame: usize,
     max_frames_in_flight: usize,
-    first_frame_done: bool,
     /// 上一帧 render() 总耗时（微秒，性能日志用）
     last_frame_us: u64,
     vertex_buffer: vk::Buffer,
@@ -910,7 +909,6 @@ impl Renderer {
             in_flight_fences: Vec::new(),
             current_frame: 0,
             max_frames_in_flight: 2,
-            first_frame_done: false,
             last_frame_us: 0,
             vertex_buffer: vk::Buffer::null(),
             vertex_buffer_memory: vk::DeviceMemory::null(),
@@ -4695,11 +4693,6 @@ impl Renderer {
         if let Ok(true) = present_result {
             log::warn!("呈现 SUBOPTIMAL，重建交换链...");
             return Err("交换链过期".to_string());
-        }
-
-        if !self.first_frame_done {
-            self.first_frame_done = true;
-            println!("=== RENDERER OK ===");
         }
 
         if let Some(e) = screenshot_err {
