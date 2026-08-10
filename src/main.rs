@@ -937,6 +937,22 @@ fn main() {
     cpu.log_summary();
     cpu.pin_main_thread();
 
+    // WSLg（WSL2 + Wayland/Weston）的指针约束/相对指针协议支持不完整：
+    // 捕获后光标不隐藏、视角不动，且右键拖动会在原生层静默崩溃（无 panic 日志）。
+    // Xwayland 提供完整 XInput2 raw motion（本项目视角输入依赖，见 device_event），
+    // 因此 WSL + Wayland 会话下强制 X11 后端；用户显式设置 WINIT_UNIX_BACKEND 时不覆盖。
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
+        let is_wsl = std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false);
+        if is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+            log::info!(
+                "input: WSLg Wayland 指针支持不完整，强制 X11 后端（Xwayland + XInput2 raw motion）"
+            );
+        }
+    }
+
     // 创建事件循环
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
