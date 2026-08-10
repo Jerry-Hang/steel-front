@@ -122,7 +122,24 @@ const FAR_INDICES: [u32; 12] = [
      4,  5,  6,  4,  6,  7, // ZY 平面 quad
 ];
 
-/// 距离 LOD 阈值：相机到实例中心距离 < 120 用近档立方体，否则远档十字 quad
+/// 地面平铺 quad（4 顶点 / 6 索引）：XZ 平面 y=0、边长 ±1（2×2m，与实例网格间距一致）。
+/// 地面实例专用（近档+远档共用）：几何本身无侧壁，实例矩阵纯平移，彻底消除旧版
+/// 立方体/压扁薄片侧壁带来的"掀盖纸箱铺地"格子感。顶点色白，纹理/颜色混合结果
+/// 与旧立方体顶面一致。
+/// 绕序注意：本管线为 FrontFace::CLOCKWISE + shader Y 翻转，水平地面从上方看必须是
+/// 逆时针（索引 [0,2,1, 0,3,2]）才是正面；立方体顶面用的顺时针在长期被背面剔除，
+/// 这正是旧版"只剩侧壁竖立"的根因。marker/NPC 的垂直面不受影响。
+const GROUND_VERTS: [Vertex; 4] = [
+    Vertex { pos: [-1.0, 0.0,  1.0], color: [1.0, 1.0, 1.0], uv: [0.0, 0.0] },
+    Vertex { pos: [ 1.0, 0.0,  1.0], color: [1.0, 1.0, 1.0], uv: [1.0, 0.0] },
+    Vertex { pos: [ 1.0, 0.0, -1.0], color: [1.0, 1.0, 1.0], uv: [1.0, 1.0] },
+    Vertex { pos: [-1.0, 0.0, -1.0], color: [1.0, 1.0, 1.0], uv: [0.0, 1.0] },
+];
+const GROUND_INDICES: [u32; 6] = [0, 2, 1, 0, 3, 2];
+
+/// 距离 LOD 阈值：相机到实例中心距离 < 120 用近档几何，否则远档几何。
+/// 地面实例近/远档均为平铺 quad（GROUND_VERTS）；marker/NPC/自发光近档用立方体、
+/// 远档用十字双 quad（FAR_VERTS），共用不变。
 const LOD_DISTANCE: f32 = 120.0;
 /// 远档十字 quad 地面距离淡出区间（地平线处自然消失）
 /// FADE_END=900 保证任何可达机位（|x|,|z|<=600）最近场点距离 <=486 < 900，
@@ -137,6 +154,10 @@ const TERRAIN_VERTS: usize = 257;
 const TERRAIN_CELLS: usize = 256;
 const TERRAIN_HALF: f32 = 255.0;
 const TERRAIN_UV_SCALE: f32 = 32.0; // uv 铺 0..16 重复采样
+/// 地形网格渲染下沉量：地面平铺 quad 抬到 +0.05、地形网格整体下沉 0.35，
+/// 两层地面在深度上拉开 0.4m，杜绝远距离深度精度不足导致的 z-fighting 闪烁
+/// （旧版实例场与地形几乎共面，远档顶面被深度测试剔除、只剩侧壁可见）。
+const TERRAIN_RENDER_SINK: f32 = 0.35;
 /// 程序化地形平坦半径（米）：覆盖中央 60×60 安全区、障碍环带 58–130m 与两军接火区
 const TERRAIN_FLAT_RADIUS: f32 = 140.0;
 /// 平坦区外丘陵最大抬升（米，平滑抬升 × 噪声幅值，恒 ≤ 本常量）
@@ -560,6 +581,11 @@ pub struct Renderer {
     far_vertex_buffer_memory: vk::DeviceMemory,
     far_index_buffer: vk::Buffer,
     far_index_buffer_memory: vk::DeviceMemory,
+    /// 地面平铺 quad 几何（近档+远档地面 draw 共用，见 GROUND_VERTS）
+    ground_vertex_buffer: vk::Buffer,
+    ground_vertex_buffer_memory: vk::DeviceMemory,
+    ground_index_buffer: vk::Buffer,
+    ground_index_buffer_memory: vk::DeviceMemory,
     /// 地形 LOD 网格（索引 0/1/2 = 高/中/低密度；顶点缓冲 HOST_VISIBLE 供 morph 每帧更新）
     terrain_lods: Vec<TerrainLodMesh>,
     /// 每帧一份 instance buffer（双缓冲，避免 CPU 写与上一帧 GPU 读竞态）
@@ -928,6 +954,10 @@ impl Renderer {
             far_vertex_buffer_memory: vk::DeviceMemory::null(),
             far_index_buffer: vk::Buffer::null(),
             far_index_buffer_memory: vk::DeviceMemory::null(),
+            ground_vertex_buffer: vk::Buffer::null(),
+            ground_vertex_buffer_memory: vk::DeviceMemory::null(),
+            ground_index_buffer: vk::Buffer::null(),
+            ground_index_buffer_memory: vk::DeviceMemory::null(),
             terrain_lods: Vec::new(),
             instance_buffers: Vec::new(),
             instance_buffers_memory: Vec::new(),
@@ -1714,6 +1744,7 @@ impl Renderer {
         self.create_vertex_buffer()?;
         self.create_index_buffer()?;
         self.create_far_geometry()?;
+        self.create_ground_geometry()?;
         self.create_terrain_lods()?;
         log::info!("图形管线创建完成");
         Ok(())
@@ -2185,6 +2216,55 @@ impl Renderer {
         Ok(())
     }
 
+    /// 创建地面平铺 quad 的顶点/索引缓冲（4 顶点 / 6 索引），近档+远档地面 draw 共用。
+    fn create_ground_geometry(&mut self) -> Result<(), String> {
+        let vert_size = std::mem::size_of_val(&GROUND_VERTS) as u64;
+        let (v_buffer, v_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vert_size)?;
+        self.ground_vertex_buffer = v_buffer;
+        self.ground_vertex_buffer_memory = v_memory;
+
+        let v_ptr = unsafe {
+            self.device
+                .map_memory(v_memory, 0, vert_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射地面顶点缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                GROUND_VERTS.as_ptr() as *const u8,
+                v_ptr as *mut u8,
+                vert_size as usize,
+            );
+            self.device.unmap_memory(v_memory);
+        }
+
+        let idx_size = std::mem::size_of_val(&GROUND_INDICES) as u64;
+        let (i_buffer, i_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, idx_size)?;
+        self.ground_index_buffer = i_buffer;
+        self.ground_index_buffer_memory = i_memory;
+
+        let i_ptr = unsafe {
+            self.device
+                .map_memory(i_memory, 0, idx_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射地面索引缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                GROUND_INDICES.as_ptr() as *const u8,
+                i_ptr as *mut u8,
+                idx_size as usize,
+            );
+            self.device.unmap_memory(i_memory);
+        }
+        log::info!(
+            "地面平铺 quad 几何创建完成: {} 顶点 / {} 索引（无侧壁）",
+            GROUND_VERTS.len(),
+            GROUND_INDICES.len()
+        );
+        Ok(())
+    }
+
     /// 创建 3 级地形 LOD 网格（高 257² / 中 129² / 低 65² 顶点）。
     /// 高度用与实例 Y 完全相同的 terrain_height() 生成；顶点缓冲 HOST_VISIBLE，
     /// 过渡带内每帧 morph 高度后整块重传；索引缓冲一次性上传。
@@ -2221,7 +2301,7 @@ impl Renderer {
                 for ix in 0..w {
                     let x = -TERRAIN_HALF + ix as f32 * cell;
                     let z = -TERRAIN_HALF + iz as f32 * cell;
-                    let y = heights[iz * w + ix];
+                    let y = heights[iz * w + ix] - TERRAIN_RENDER_SINK;
                     base_heights.push(y);
                     verts.push(Vertex {
                         pos: [x, y, z],
@@ -2243,7 +2323,7 @@ impl Renderer {
                         (0..w).map(move |ix| {
                             let x = -TERRAIN_HALF + ix as f32 * cell;
                             let z = -TERRAIN_HALF + iz as f32 * cell;
-                            terrain_coarse_height(x, z, coarse, coarse_cells)
+                            terrain_coarse_height(x, z, coarse, coarse_cells) - TERRAIN_RENDER_SINK
                         })
                     })
                     .collect()
@@ -2542,25 +2622,19 @@ impl Renderer {
         );
 
         // 256×256 网格：间距 2.0、以原点为中心、y=0 平面（场地 512×512）。
-        // 实例 Y 采样地形高度（同一 terrain_height()），底部下沉 0.05 防 z-fighting。
-        // 每个实例是 2×2×2 立方体 VERTICES，经矩阵 Y 轴压扁 0.1 后成为 2×0.2×2 薄片
-        // （顶面约贴地 +0.05）：旧版整块立方体顶面高出地面 0.95，视觉上是一格一格
-        // 凸起的"纸箱盖"铺满地板；压扁后顶面与地形平齐，地面恢复连续平面。
+        // 地面实例用专用平铺 quad 几何（GROUND_VERTS，几何无侧壁），矩阵纯平移，
+        // 高度 = terrain_height + 0.05（略高于地形网格 y=0，避免深度冲突）。
+        // 旧版 2×2×2 立方体（顶面 +0.95）与压扁薄片（侧壁 0.2m）都有可见侧壁，
+        // 视觉上像一格一格"掀盖纸箱"铺地；平铺 quad 无任何竖立面，地面真正连续。
         self.instances = Vec::with_capacity(INSTANCE_COUNT as usize);
-        let flatten = glam::Mat4::from_scale(glam::Vec3::new(1.0, 0.1, 1.0));
         for iz in 0..GRID_SIZE {
             for ix in 0..GRID_SIZE {
                 let x = (ix as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
                 let z = (iz as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
-                let y = terrain_height(x, z) - 0.05;
-                let model =
-                    glam::Mat4::from_translation(glam::Vec3::new(x, y, z)) * flatten;
-                // 半径 = 0.5 * 三轴列长度对角线（压扁薄片对角 ≈ 0.709，比旧立方体
-                // 0.5 略大，覆盖压扁后的薄片轮廓，避免屏幕边缘实例提前被剔）
-                let r = 0.5 * (model.x_axis.length_squared()
-                    + model.y_axis.length_squared()
-                    + model.z_axis.length_squared())
-                    .sqrt();
+                let y = terrain_height(x, z) + 0.05;
+                let model = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
+                // 半径 = 2×2 quad 半对角线 × 0.5 保守系数（≈0.707），预算一次供剔除查表
+                let r = 0.5 * 2.0f32.sqrt();
                 self.instance_radii.push(r);
                 self.instance_center_x.push(x);
                 self.instance_center_y.push(y);
@@ -4322,9 +4396,9 @@ impl Renderer {
             }
         }
 
-        // 近档 draw call：立方体几何，实例区从 0 开始
+        // 近档地面 draw call：平铺 quad 几何（无侧壁），实例区从 0 开始
         if near_count > 0 {
-            let vertex_buffers = [self.vertex_buffer];
+            let vertex_buffers = [self.ground_vertex_buffer];
             let offsets = [0u64];
             unsafe {
                 self.device.cmd_bind_vertex_buffers(
@@ -4335,13 +4409,13 @@ impl Renderer {
                 );
                 self.device.cmd_bind_index_buffer(
                     command_buffer,
-                    self.index_buffer,
+                    self.ground_index_buffer,
                     0,
                     vk::IndexType::UINT32,
                 );
                 self.device.cmd_draw_indexed(
                     command_buffer,
-                    INDICES.len() as u32,
+                    GROUND_INDICES.len() as u32,
                     near_count,
                     0,
                     0,
@@ -4350,9 +4424,9 @@ impl Renderer {
             }
         }
 
-        // 远档 draw call：十字双 quad 几何，实例区偏移 = near_count（[近档][远档] 连续排布）
+        // 远档地面 draw call：同样平铺 quad 几何，实例区偏移 = near_count（[近档][远档] 连续排布）
         if far_count > 0 {
-            let far_vertex_buffers = [self.far_vertex_buffer];
+            let far_vertex_buffers = [self.ground_vertex_buffer];
             let offsets = [0u64];
             unsafe {
                 self.device.cmd_bind_vertex_buffers(
@@ -4363,13 +4437,13 @@ impl Renderer {
                 );
                 self.device.cmd_bind_index_buffer(
                     command_buffer,
-                    self.far_index_buffer,
+                    self.ground_index_buffer,
                     0,
                     vk::IndexType::UINT32,
                 );
                 self.device.cmd_draw_indexed(
                     command_buffer,
-                    FAR_INDICES.len() as u32,
+                    GROUND_INDICES.len() as u32,
                     far_count,
                     0,
                     0,
@@ -5066,6 +5140,18 @@ impl Drop for Renderer {
             }
             if self.far_index_buffer_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.far_index_buffer_memory, None);
+            }
+            if self.ground_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.ground_vertex_buffer, None);
+            }
+            if self.ground_vertex_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.ground_vertex_buffer_memory, None);
+            }
+            if self.ground_index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.ground_index_buffer, None);
+            }
+            if self.ground_index_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.ground_index_buffer_memory, None);
             }
             // 释放地形 LOD 网格（顶点/索引缓冲）
             for mesh in &self.terrain_lods {
