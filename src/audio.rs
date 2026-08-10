@@ -1029,6 +1029,7 @@ impl DspSynth {
 }
 
 /// 游戏音效种类
+#[allow(dead_code)] // 预留：事件式合成已走 DspSynth，旧 SfxKind 仅保留预合成链路（Hit/Reload/UiBlip 在用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfxKind {
     /// 枪声
@@ -1087,6 +1088,7 @@ impl SfxBank {
 
     /// 播放指定音效并叠加音量缩放：`volume_scale` 先 clamp 到 0.0..=1.0，
     /// 再乘到声源音量上（结果同样 clamp 到 0.0..=1.0），复用 `Mixer::play` 链路
+    #[allow(dead_code)] // 预留：旧 SfxBank 链路，事件式合成已走 DspSynth
     pub fn play_variant(
         &self,
         mixer: &mut Mixer,
