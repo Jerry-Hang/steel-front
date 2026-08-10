@@ -29,6 +29,7 @@ use engine::ai::Team;
 use engine::game::{Game, GameState, ObstacleKind};
 use engine::renderer::{QualityPreset, Renderer};
 use engine::window;
+use net::{Client, Server};
 use ui::{BindingAction, KeyBindings, RESOLUTIONS};
 use winit::window::CursorGrabMode;
 
@@ -154,6 +155,8 @@ impl GameApp {
         self.camera.update(&self.key_state, delta_time);
 
         // 更新游戏逻辑（物理、武器、AI 等）
+        // 先把本帧开火意图转发给网络层（客户端模式随 Input 上报服务端）
+        self.game.set_net_fire(self.fire_requested);
         self.game.update(delta_time, &self.camera);
 
         // 基准挂钩：RV3D_BENCH_YAW / RV3D_BENCH_PITCH（度）每帧强制相机朝向，
@@ -192,6 +195,12 @@ impl GameApp {
         let (kick_pitch, kick_yaw) = self.game.drain_kick();
         if kick_pitch != 0.0 || kick_yaw != 0.0 {
             self.camera.add_recoil(kick_pitch, kick_yaw);
+        }
+
+        // 服务器模式：客户端输入视角驱动本机相机（快照权威视角；无客户端输入时保持本地视角）
+        if let Some((yaw, pitch)) = self.game.net_look() {
+            self.camera.yaw = yaw;
+            self.camera.pitch = pitch;
         }
 
         // 相机参数日志（1 秒一条，冒烟断言 yaw/pitch 变化用）
@@ -905,6 +914,41 @@ fn main() {
 
     // 创建并运行游戏应用
     let mut app = GameApp::new();
+
+    // 网络对战模式（默认关闭，不破坏单机）：RV3D_NET=server|client，
+    // RV3D_NET_ADDR=127.0.0.1:<port>（默认 127.0.0.1:27015）。
+    // 服务器：权威模拟 + 每 tick 广播快照；客户端：输入上报 + 快照插值缓冲。
+    // 无头回环集成测试在 net.rs / game.rs（不依赖 Vulkan/winit）；
+    // 渲染远端实体、NAT 穿透、断线重连为后续 TODO。
+    let net_role = std::env::var("RV3D_NET").unwrap_or_default();
+    let net_addr =
+        std::env::var("RV3D_NET_ADDR").unwrap_or_else(|_| "127.0.0.1:27015".to_string());
+    match net_role.as_str() {
+        "server" => match Server::bind(&net_addr) {
+            Ok(server) => {
+                let addr = server
+                    .local_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|_| net_addr.clone());
+                log::info!("net: 服务器模式，监听 {}", addr);
+                app.game.set_net_server(server);
+            }
+            Err(e) => log::error!("net: 服务器绑定 {} 失败: {}", net_addr, e),
+        },
+        "client" => match Client::connect(&net_addr) {
+            Ok(client) => {
+                log::info!("net: 客户端模式，连接 {}", client.server_addr());
+                app.game.set_net_client(client);
+            }
+            Err(e) => log::error!("net: 客户端连接 {} 失败: {}", net_addr, e),
+        },
+        other => {
+            if !other.is_empty() {
+                log::warn!("net: 未知 RV3D_NET 值 {:?}（应为 server|client），忽略", other);
+            }
+        }
+    }
+
     if let Err(e) = event_loop.run_app(&mut app) {
         log::error!("应用运行错误: {:?}", e);
     }

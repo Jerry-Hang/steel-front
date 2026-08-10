@@ -5,11 +5,34 @@
 //! - 玩家位置/旋转序列化：手写字节编码（f32 位置 + f32 旋转），带协议头
 //!   （magic / version / type / length），大端网络字节序
 //! - 远端玩家插值：`lerp_state` 纯函数 + `RemotePlayer` 时间戳插值平滑
-//! - `NetworkMessage` 枚举：Join / Leave / Position / Action，支持序列化往返
+//! - `NetworkMessage` 枚举：Join / Leave / Position / Action / Input / Snapshot，
+//!   支持序列化往返
+//!
+//! # 对战协议（RV3D_NET=server|client）
+//!
+//! 报文格式：`magic(1) + version(1) + type(1) + length(2, BE) + payload`，
+//! 单条数据报 ≤ MAX_DATAGRAM（UDP 载荷上限 65507），全部大端网络字节序。
+//!
+//! - `Join(0x01)`：客户端申请加入（player_id=0）→ 服务端回发分配后的 id 确认
+//! - `Input(0x06)`：客户端每 tick 上报输入/姿态（移动标志 + 开火 + yaw/pitch）
+//! - `Snapshot(0x05)`：服务端每 tick 广播整帧快照（seq + 服务端时间 + 本机玩家 + NPC 列表）
+//! - `Leave(0x02)`：正常退出；`Position(0x03)` / `Action(0x04)` 为早期演示消息，保留兼容
+//!
+//! 序列号与顺序：Input / Snapshot 各自携带单调递增 seq（u32 wrapping）；接收方用
+//! `wrapping_sub` 丢弃乱序与重复（差值 ≥ 2^31 视为过期）。
+//!
+//! 可靠性（UDP 尽力而为，本轮不做复杂可靠传输）：
+//! - 快照/输入不重传——丢包直接跳过，下一帧新数据覆盖（游戏状态本身是自描述的）
+//! - 唯一带重试的报文是 Join 握手：客户端每 0.5s 重发直到确认（`retry_join`）
+//! - 超时判定：客户端 3s 未收到任何数据报视为断线（`snapshot_timeout`）；
+//!   服务端 5s 未收到某客户端数据报则移除其注册（`timeout_clients`）
+//!
+//! 限制与后续 TODO：单数据报不做分片/重组（快照 NPC 上限 MAX_SNAPSHOT_NPCS，超出截断）；
+//! NAT 穿透、断线重连/恢复、真实两机实战场、快照增量压缩、输入预测/回滚均未实现。
 //!
 //! 本模块仅使用 `std`，不引入外部依赖；如将来需要新依赖，在文件头部按
 //! `// DEP: crate = version` 声明。
-//! 尚未接入 main.rs 主循环，整体允许 dead_code 警告。
+//! 网络层由 RV3D_NET env 开关接入 main.rs/game.rs，未启用时整体允许 dead_code 警告。
 
 #![allow(dead_code)]
 
@@ -25,8 +48,16 @@ pub const PROTOCOL_MAGIC: u8 = 0x53;
 pub const PROTOCOL_VERSION: u8 = 0x01;
 /// 头部长度：magic(1) + version(1) + type(1) + length(2, BE)
 pub const HEADER_LEN: usize = 5;
-/// 单条 UDP 数据报读取缓冲上限（UDP 载荷上限为 65507，这里取安全余量）
-pub const MAX_DATAGRAM: usize = 1400;
+/// 单条 UDP 数据报读取缓冲上限：取 UDP 载荷上限 65507（IPv4）。
+/// 快照需承载 64v64 压力模式全部 NPC（128 × 24B ≈ 3KB），1400 的 MTU 余量会截断快照；
+/// 局域网碎片化可接受，本轮不做分片/重组（见模块头部协议注释）。
+pub const MAX_DATAGRAM: usize = 65507;
+/// 单条快照最多携带的实体数：超出截断（保护 length 字段 u16 上限；本轮 128 NPC 远低于此）
+pub const MAX_SNAPSHOT_NPCS: usize = 1024;
+/// 客户端断线判定：超过该时长未收到任何数据报视为超时（UDP 尽力而为，无重传）
+pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
+/// 服务端超时判定：客户端超过该时长无数据报则移除注册（断线重连为后续 TODO）
+pub const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 消息类型标签（协议第 2 字节）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +71,10 @@ pub enum MessageType {
     Position = 0x03,
     /// 玩家动作
     Action = 0x04,
+    /// 服务端 → 客户端：整帧快照（本机玩家 + NPC 列表）
+    Snapshot = 0x05,
+    /// 客户端 → 服务端：本帧输入/姿态
+    Input = 0x06,
 }
 
 impl MessageType {
@@ -50,6 +85,8 @@ impl MessageType {
             0x02 => MessageType::Leave,
             0x03 => MessageType::Position,
             0x04 => MessageType::Action,
+            0x05 => MessageType::Snapshot,
+            0x06 => MessageType::Input,
             _ => return None,
         })
     }
@@ -71,7 +108,39 @@ impl PlayerState {
     }
 }
 
-/// 网络消息：Join / Leave / Position / Action
+/// NPC 快照条目：id + 位置 + 朝向 + 血量（存活 = hp > 0.0；插值只做位置/朝向平滑）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NpcSnapshot {
+    /// 实体 id（服务端 `Npc.id`，与玩家 id 同空间，客户端插值表共用）
+    pub id: u32,
+    /// 世界位置 (x, y, z)
+    pub pos: [f32; 3],
+    /// 朝向角（绕 Y 轴，弧度）
+    pub facing: f32,
+    /// 当前血量
+    pub hp: f32,
+}
+
+/// 客户端输入/姿态（每 tick 随 Input 上报）：移动标志 + 开火 + 视角（弧度）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetInput {
+    /// 前进（W）
+    pub forward: bool,
+    /// 后退（S）
+    pub backward: bool,
+    /// 左移（A）
+    pub left: bool,
+    /// 右移（D）
+    pub right: bool,
+    /// 开火请求（服务端按武器冷却应用）
+    pub fire: bool,
+    /// 偏航角（弧度）
+    pub yaw: f32,
+    /// 俯仰角（弧度）
+    pub pitch: f32,
+}
+
+/// 网络消息：Join / Leave / Position / Action / Snapshot / Input
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetworkMessage {
     /// 玩家加入；`player_id == 0` 表示申请加入，服务端回复分配后的 id
@@ -82,6 +151,17 @@ pub enum NetworkMessage {
     Position { player_id: u32, seq: u32, state: PlayerState },
     /// 玩家动作；action_id 为动作类型，value 为标量参数（数据载荷）
     Action { player_id: u32, action_id: u8, value: f32 },
+    /// 服务端 → 客户端：整帧快照。seq = 快照序号，time = 服务端模拟时间（秒）；
+    /// player_id/player = 服务端本机玩家（客户端可用作权威修正），npcs = 在场 NPC
+    Snapshot {
+        seq: u32,
+        time: f32,
+        player_id: u32,
+        player: PlayerState,
+        npcs: Vec<NpcSnapshot>,
+    },
+    /// 客户端 → 服务端：本帧输入。seq = 客户端输入序号（wrapping），time = 客户端本地时间（秒）
+    Input { seq: u32, time: f32, input: NetInput },
 }
 
 /// 协议解码错误
@@ -210,6 +290,43 @@ impl NetworkMessage {
                 put_f32(&mut p, *value);
                 (MessageType::Action, p)
             }
+            NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
+                // 固定头：seq(4) + time(4) + player_id(4) + player(16) + count(2)
+                let n = npcs.len().min(MAX_SNAPSHOT_NPCS) as u16;
+                let mut p = Vec::with_capacity(4 + 4 + 4 + 16 + 2 + n as usize * 24);
+                put_u32(&mut p, *seq);
+                put_f32(&mut p, *time);
+                put_u32(&mut p, *player_id);
+                for c in player.pos {
+                    put_f32(&mut p, c);
+                }
+                put_f32(&mut p, player.rot);
+                p.extend_from_slice(&n.to_be_bytes());
+                // 每个 NPC：id(4) + pos(12) + facing(4) + hp(4) = 24B
+                for npc in npcs.iter().take(MAX_SNAPSHOT_NPCS) {
+                    put_u32(&mut p, npc.id);
+                    for c in npc.pos {
+                        put_f32(&mut p, c);
+                    }
+                    put_f32(&mut p, npc.facing);
+                    put_f32(&mut p, npc.hp);
+                }
+                (MessageType::Snapshot, p)
+            }
+            NetworkMessage::Input { seq, time, input } => {
+                // seq(4) + time(4) + 5×bool + yaw(4) + pitch(4) = 21B
+                let mut p = Vec::with_capacity(21);
+                put_u32(&mut p, *seq);
+                put_f32(&mut p, *time);
+                p.push(input.forward as u8);
+                p.push(input.backward as u8);
+                p.push(input.left as u8);
+                p.push(input.right as u8);
+                p.push(input.fire as u8);
+                put_f32(&mut p, input.yaw);
+                put_f32(&mut p, input.pitch);
+                (MessageType::Input, p)
+            }
         };
 
         let mut buf = Vec::with_capacity(HEADER_LEN + payload.len());
@@ -275,6 +392,43 @@ impl NetworkMessage {
                     action_id,
                     value,
                 }
+            }
+            MessageType::Snapshot => {
+                let seq = r.u32()?;
+                let time = r.f32()?;
+                let player_id = r.u32()?;
+                let pos = [r.f32()?, r.f32()?, r.f32()?];
+                let rot = r.f32()?;
+                let n = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
+                let mut npcs = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let id = r.u32()?;
+                    let pos = [r.f32()?, r.f32()?, r.f32()?];
+                    let facing = r.f32()?;
+                    let hp = r.f32()?;
+                    npcs.push(NpcSnapshot { id, pos, facing, hp });
+                }
+                NetworkMessage::Snapshot {
+                    seq,
+                    time,
+                    player_id,
+                    player: PlayerState::new(pos, rot),
+                    npcs,
+                }
+            }
+            MessageType::Input => {
+                let seq = r.u32()?;
+                let time = r.f32()?;
+                let input = NetInput {
+                    forward: r.u8()? != 0,
+                    backward: r.u8()? != 0,
+                    left: r.u8()? != 0,
+                    right: r.u8()? != 0,
+                    fire: r.u8()? != 0,
+                    yaw: r.f32()?,
+                    pitch: r.f32()?,
+                };
+                NetworkMessage::Input { seq, time, input }
             }
         };
         r.finish()?;
@@ -380,6 +534,15 @@ impl RemotePlayer {
     }
 }
 
+/// 远端实体（NPC 或远端玩家）：位置/朝向时间戳插值 + 最近血量
+#[derive(Debug, Clone)]
+pub struct RemoteEntity {
+    /// 位置/朝向插值器（player_id = 实体 id）
+    pub state: RemotePlayer,
+    /// 最近血量（存活 = hp > 0.0；血量不做插值）
+    pub hp: f32,
+}
+
 // ---------------------------------------------------------------------------
 // UDP Server / Client
 // ---------------------------------------------------------------------------
@@ -389,6 +552,8 @@ pub struct Server {
     socket: UdpSocket,
     next_player_id: u32,
     clients: HashMap<SocketAddr, u32>,
+    /// 各客户端最近一次收到数据报的时刻（超时判定用，recv 内更新）
+    last_seen: HashMap<SocketAddr, Instant>,
 }
 
 impl Server {
@@ -400,6 +565,7 @@ impl Server {
             socket,
             next_player_id: 1,
             clients: HashMap::new(),
+            last_seen: HashMap::new(),
         })
     }
 
@@ -427,11 +593,31 @@ impl Server {
         self.clients.len()
     }
 
+    /// 移除超过 `timeout` 未收到任何数据报的客户端，返回被移除的玩家 id。
+    /// UDP 尽力而为：超时即丢弃注册（断线重连/恢复为后续 TODO）
+    pub fn timeout_clients(&mut self, timeout: Duration) -> Vec<u32> {
+        let now = Instant::now();
+        let mut removed = Vec::new();
+        self.clients.retain(|addr, id| {
+            let keep = self
+                .last_seen
+                .get(addr)
+                .map_or(true, |t| now.duration_since(*t) <= timeout);
+            if !keep {
+                removed.push(*id);
+            }
+            keep
+        });
+        self.last_seen.retain(|addr, _| self.clients.contains_key(addr));
+        removed
+    }
+
     /// 非阻塞接收：无数据时返回 `Ok(None)`，协议错误映射为 `InvalidData`
-    pub fn recv(&self) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
+    pub fn recv(&mut self) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
         let mut buf = [0u8; MAX_DATAGRAM];
         match self.socket.recv_from(&mut buf) {
             Ok((n, from)) => {
+                self.last_seen.insert(from, Instant::now());
                 let msg = NetworkMessage::decode(&buf[..n])
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 Ok(Some((msg, from)))
@@ -442,7 +628,7 @@ impl Server {
     }
 
     /// 阻塞接收直到超时；超时返回 `Ok(None)`
-    pub fn recv_timeout(&self, timeout: Duration) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
+    pub fn recv_timeout(&mut self, timeout: Duration) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(p) = self.recv()? {
@@ -473,7 +659,7 @@ impl Server {
         Ok(sent)
     }
 
-    /// 处理一条 Join：自动注册该地址，回发分配后的 Join 确认
+    /// 处理一条 Join：自动注册该地址，回发分配后的 Join 确认（内部已 `send_to`，调用方无需再发送）
     pub fn handle_join(&mut self, from: SocketAddr, name: String) -> io::Result<NetworkMessage> {
         let player_id = self.register(from);
         let reply = NetworkMessage::Join { player_id, name };
@@ -482,13 +668,29 @@ impl Server {
     }
 }
 
-/// UDP 客户端：连接服务器，维护自身 id 与远端玩家插值缓冲
+/// UDP 客户端：连接服务器，维护自身 id、远端玩家插值缓冲与快照实体插值表
 pub struct Client {
     socket: UdpSocket,
     server: SocketAddr,
     player_id: Option<u32>,
     remote_players: HashMap<u32, RemotePlayer>,
     clock_start: Instant,
+    /// 最近快照序号（丢弃乱序/重复）
+    snapshot_seq: u32,
+    /// 最近快照的服务端模拟时间（秒）
+    snapshot_time: f32,
+    /// 是否收到过快照
+    has_snapshot: bool,
+    /// 服务端本机玩家状态（客户端可用作权威修正，应用为后续 TODO）
+    own_state: Option<PlayerState>,
+    /// 远端实体插值表（NPC / 玩家共用，key = 实体 id）
+    entities: HashMap<u32, RemoteEntity>,
+    /// 最近收到任何数据报的时刻（超时判定）
+    last_rx: Instant,
+    /// 断线超时阈值
+    timeout: Duration,
+    /// 上次发送 Join 的时刻（握手重试节流）
+    last_join_at: Instant,
 }
 
 impl Client {
@@ -506,6 +708,15 @@ impl Client {
             player_id: None,
             remote_players: HashMap::new(),
             clock_start: Instant::now(),
+            snapshot_seq: 0,
+            snapshot_time: 0.0,
+            has_snapshot: false,
+            own_state: None,
+            entities: HashMap::new(),
+            last_rx: Instant::now(),
+            timeout: CLIENT_TIMEOUT,
+            // 首次 retry_join 立即发送握手包
+            last_join_at: Instant::now() - Duration::from_secs(3600),
         })
     }
 
@@ -549,8 +760,11 @@ impl Client {
         }
     }
 
-    /// 处理一条消息：Join 确认记录自身 id；Position 更新远端玩家插值缓冲
+    /// 处理一条消息：Join 确认记录自身 id；Position 更新远端玩家插值缓冲；
+    /// Snapshot 进入实体插值表并记录本机权威状态；任何消息都刷新 last_rx（断线判定）
     pub fn handle_message(&mut self, msg: NetworkMessage) {
+        self.last_rx = Instant::now();
+        let t = self.now();
         match msg {
             NetworkMessage::Join { player_id, .. } => {
                 if player_id != 0 && self.player_id.is_none() {
@@ -558,12 +772,56 @@ impl Client {
                 }
             }
             NetworkMessage::Position { player_id, state, .. } => {
-                let t = self.now();
                 match self.remote_players.get_mut(&player_id) {
                     Some(rp) => rp.update(state, t),
                     None => {
                         self.remote_players
                             .insert(player_id, RemotePlayer::new(player_id, state, t));
+                    }
+                }
+            }
+            NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
+                // 丢弃乱序/重复快照（seq wrapping 差值 ≥ 2^31 视为过期；相等视为重复）
+                if self.has_snapshot {
+                    let diff = seq.wrapping_sub(self.snapshot_seq);
+                    if diff == 0 || diff >= u32::MAX / 2 {
+                        return;
+                    }
+                }
+                self.has_snapshot = true;
+                self.snapshot_seq = seq;
+                self.snapshot_time = time;
+                // 服务端本机玩家：进插值表（渲染用）+ 权威状态缓存（修正用）
+                self.own_state = Some(player);
+                match self.entities.get_mut(&player_id) {
+                    Some(e) => e.state.update(player, t),
+                    None => {
+                        self.entities.insert(
+                            player_id,
+                            RemoteEntity {
+                                state: RemotePlayer::new(player_id, player, t),
+                                hp: 100.0,
+                            },
+                        );
+                    }
+                }
+                // NPC：位置/朝向进插值表，血量取最新值
+                for npc in npcs {
+                    let nstate = PlayerState::new(npc.pos, npc.facing);
+                    match self.entities.get_mut(&npc.id) {
+                        Some(e) => {
+                            e.state.update(nstate, t);
+                            e.hp = npc.hp;
+                        }
+                        None => {
+                            self.entities.insert(
+                                npc.id,
+                                RemoteEntity {
+                                    state: RemotePlayer::new(npc.id, nstate, t),
+                                    hp: npc.hp,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -579,6 +837,58 @@ impl Client {
     /// 远端玩家插值缓冲（只读）
     pub fn remote_players(&self) -> &HashMap<u32, RemotePlayer> {
         &self.remote_players
+    }
+
+    /// 最近快照序号（0 = 尚未收到快照）
+    pub fn snapshot_seq(&self) -> u32 {
+        self.snapshot_seq
+    }
+
+    /// 最近快照的服务端模拟时间（秒）
+    pub fn snapshot_time(&self) -> f32 {
+        self.snapshot_time
+    }
+
+    /// 服务端本机玩家状态（快照权威值；客户端可用作位置修正，应用为后续 TODO）
+    pub fn own_state(&self) -> Option<PlayerState> {
+        self.own_state
+    }
+
+    /// 远端实体插值表（key = 实体 id；NPC 与玩家共用）
+    pub fn entities(&self) -> &HashMap<u32, RemoteEntity> {
+        &self.entities
+    }
+
+    /// 实体 id 在本地时刻 t 的插值状态（位置平滑，渲染消费为后续 TODO）
+    pub fn entity_state_at(&self, id: u32, t: f64) -> Option<PlayerState> {
+        self.entities.get(&id).map(|e| e.state.state_at(t))
+    }
+
+    /// 超过超时阈值未收到任何数据报（断线基本判定；重连为后续 TODO）
+    pub fn snapshot_timeout(&self) -> bool {
+        self.last_rx.elapsed() > self.timeout
+    }
+
+    /// 已加入且未超时（UDP 尽力而为：超时即视为断线，不做重传）
+    pub fn is_connected(&self) -> bool {
+        self.player_id.is_some() && !self.snapshot_timeout()
+    }
+
+    /// 握手重试：未收到 Join 确认时按 `interval` 间隔重发（UDP 尽力而为下
+    /// 唯一带重试的报文；快照/输入不重传，靠序列号丢弃乱序与重复）。
+    /// 已确认时返回 true。
+    pub fn retry_join(&mut self, name: &str, interval: Duration) -> bool {
+        if self.player_id.is_some() {
+            return true;
+        }
+        if self.last_join_at.elapsed() >= interval {
+            let _ = self.send(&NetworkMessage::Join {
+                player_id: 0,
+                name: name.to_string(),
+            });
+            self.last_join_at = Instant::now();
+        }
+        false
     }
 }
 
@@ -793,7 +1103,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn recv_until(
-        recv: impl Fn() -> io::Result<Option<(NetworkMessage, SocketAddr)>>,
+        mut recv: impl FnMut() -> io::Result<Option<(NetworkMessage, SocketAddr)>>,
         timeout: Duration,
     ) -> (NetworkMessage, SocketAddr) {
         let deadline = Instant::now() + timeout;
@@ -871,7 +1181,7 @@ mod tests {
 
     #[test]
     fn udp_loopback_leave_roundtrip() {
-        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
         let server_addr = server.local_addr().unwrap();
         let client = Client::connect(server_addr).unwrap();
 
@@ -882,5 +1192,171 @@ mod tests {
         client.send(&leave).unwrap();
         let (got, _) = recv_until(|| server.recv(), Duration::from_millis(1000));
         assert_eq!(got, leave);
+    }
+
+    // -----------------------------------------------------------------------
+    // Input / Snapshot 序列化（确定性布局）
+    // -----------------------------------------------------------------------
+
+    fn net_input() -> NetInput {
+        NetInput {
+            forward: true,
+            backward: false,
+            left: true,
+            right: false,
+            fire: true,
+            yaw: 2.0,
+            pitch: -0.5,
+        }
+    }
+
+    #[test]
+    fn input_payload_layout_is_fixed() {
+        let m = NetworkMessage::Input {
+            seq: 0x1122_3344,
+            time: 1.5,
+            input: net_input(),
+        };
+        let bytes = m.encode();
+        // HEADER(5) + seq(4) + time(4) + 5×bool + yaw(4) + pitch(4) = 26
+        assert_eq!(bytes.len(), HEADER_LEN + 21);
+        assert_eq!(bytes[0], PROTOCOL_MAGIC);
+        assert_eq!(bytes[2], MessageType::Input as u8);
+        // seq 大端
+        assert_eq!(&bytes[HEADER_LEN..HEADER_LEN + 4], &[0x11, 0x22, 0x33, 0x44]);
+        // 5 个 bool 标志字节（seq+time 之后）
+        assert_eq!(&bytes[HEADER_LEN + 8..HEADER_LEN + 13], &[1, 0, 1, 0, 1]);
+        let back = NetworkMessage::decode(&bytes).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn snapshot_payload_layout_is_fixed() {
+        let m = NetworkMessage::Snapshot {
+            seq: 7,
+            time: 3.25,
+            player_id: 1,
+            player: state(1.0, 2.0, 3.0, 0.5),
+            npcs: vec![
+                NpcSnapshot { id: 10, pos: [1.0, 0.0, 1.0], facing: 0.25, hp: 100.0 },
+                NpcSnapshot { id: 11, pos: [-2.0, 0.0, 4.0], facing: -1.0, hp: 50.0 },
+            ],
+        };
+        let bytes = m.encode();
+        // HEADER + seq(4) + time(4) + player_id(4) + player(16) + count(2) + 2×24
+        assert_eq!(bytes.len(), HEADER_LEN + 30 + 48);
+        assert_eq!(bytes[2], MessageType::Snapshot as u8);
+        assert_eq!(&bytes[HEADER_LEN + 28..HEADER_LEN + 30], &[0x00, 0x02]);
+        assert_eq!(&bytes[HEADER_LEN + 30..HEADER_LEN + 34], &[0, 0, 0, 10]);
+        let back = NetworkMessage::decode(&bytes).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn snapshot_npcs_capped_at_max() {
+        let npcs = (0..(MAX_SNAPSHOT_NPCS + 50) as u32)
+            .map(|id| NpcSnapshot { id, pos: [0.0; 3], facing: 0.0, hp: 1.0 })
+            .collect::<Vec<_>>();
+        let m = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.0,
+            player_id: 0,
+            player: state(0.0, 0.0, 0.0, 0.0),
+            npcs,
+        };
+        let bytes = m.encode();
+        let decoded = NetworkMessage::decode(&bytes).unwrap();
+        match decoded {
+            NetworkMessage::Snapshot { npcs, .. } => assert_eq!(npcs.len(), MAX_SNAPSHOT_NPCS),
+            _ => unreachable!(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // UDP loopback：握手 → Input 往返 → Snapshot 往返 → 客户端应用快照
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn udp_loopback_handshake_input_snapshot_roundtrip() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let mut client = Client::connect(server_addr).unwrap();
+
+        // 握手：client Join 申请 → server 分配 id 回 ack → client 记录自身 id
+        client
+            .send(&NetworkMessage::Join { player_id: 0, name: "player1".into() })
+            .unwrap();
+        let (req, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        assert_eq!(from, client.local_addr().unwrap());
+        assert_eq!(req, NetworkMessage::Join { player_id: 0, name: "player1".into() });
+        server.handle_join(from, "player1".into()).unwrap();
+        let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        client.handle_message(got);
+        assert_eq!(client.player_id(), Some(1));
+        assert!(client.is_connected());
+
+        // 客户端上报输入 → 服务端收到（确定性往返）
+        let input = net_input();
+        client
+            .send(&NetworkMessage::Input { seq: 1, time: 0.5, input })
+            .unwrap();
+        let (msg, from2) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        assert_eq!(from2, client.local_addr().unwrap());
+        match msg {
+            NetworkMessage::Input { seq, time, input: got } => {
+                assert_eq!(seq, 1);
+                assert_eq!(time, 0.5);
+                assert_eq!(got, input);
+            }
+            other => panic!("expected Input, got {other:?}"),
+        }
+
+        // 服务端广播快照 → 客户端应用：快照元信息 + 实体插值 + 本机权威状态
+        let snapshot = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 1.0,
+            player_id: 1,
+            player: state(5.0, 0.0, 5.0, 0.5),
+            npcs: vec![
+                NpcSnapshot { id: 10, pos: [1.0, 0.0, 1.0], facing: 0.25, hp: 100.0 },
+                NpcSnapshot { id: 11, pos: [2.0, 0.0, 2.0], facing: -0.5, hp: 40.0 },
+            ],
+        };
+        server.send_to(&snapshot, from2).unwrap();
+        let (got2, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        client.handle_message(got2);
+        assert_eq!(client.snapshot_seq(), 1);
+        assert_eq!(client.snapshot_time(), 1.0);
+        assert_eq!(client.own_state(), Some(state(5.0, 0.0, 5.0, 0.5)));
+        assert_eq!(client.entities().len(), 3, "本机玩家 + 2 个 NPC");
+        assert_eq!(
+            client.entity_state_at(10, client.now()),
+            Some(state(1.0, 0.0, 1.0, 0.25))
+        );
+        assert_eq!(client.entities().get(&11).map(|e| e.hp), Some(40.0));
+        assert!(!client.snapshot_timeout());
+
+        // 重复快照（同 seq）被丢弃：序号与实体表不变
+        client.handle_message(snapshot);
+        assert_eq!(client.snapshot_seq(), 1);
+        assert_eq!(client.entities().len(), 3);
+    }
+
+    #[test]
+    fn client_snapshot_timeout_detects_disconnect() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let mut client = Client::connect(server_addr).unwrap();
+        // 缩短超时阈值，避免真实时钟等待，保持测试快速且确定
+        client.timeout = Duration::from_millis(10);
+        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into() });
+        assert!(client.player_id().is_some());
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(client.snapshot_timeout(), "超过阈值无数据报应判定断线");
+        assert!(!client.is_connected());
+        // 任何数据报刷新 last_rx → 恢复连接判定
+        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into() });
+        assert!(!client.snapshot_timeout());
+        assert!(client.is_connected());
     }
 }

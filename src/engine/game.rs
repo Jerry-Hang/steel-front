@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::audio::{AudioListener, AudioPlayer, AudioSource, Channel, SilentSink, SfxBank, SfxKind};
-use crate::net::{Client, NetworkMessage, PlayerState, Server};
+use crate::net::{
+    Client, NetworkMessage, NetInput, NpcSnapshot, PlayerState, Server, CLIENT_TIMEOUT,
+    SERVER_TIMEOUT,
+};
 use super::camera::{Camera, CameraMode};
 use super::ai::{
     ambush_goal, angle_diff, find_cover_points, find_cover_shielding, find_path, flank_goal,
@@ -539,6 +542,20 @@ pub struct Game {
     audio_sample_rate: u32,
     /// 网络环回演示（默认关闭，RV3D_NET=1 启用）
     net_demo: Option<NetworkDemo>,
+    /// 服务器模式（RV3D_NET=server）：权威模拟 + 每 tick 广播快照
+    net_server: Option<Server>,
+    /// 客户端模式（RV3D_NET=client）：每 tick 上报输入 + 快照插值缓冲
+    net_client: Option<Client>,
+    /// 客户端输入序号（每 tick +1，服务端据此去重/排序）
+    net_input_seq: u32,
+    /// 服务端快照序号（每 tick +1）
+    net_snap_seq: u32,
+    /// 客户端模式：main.rs 转发的本帧开火意图（随 Input 上报）
+    net_fire_pending: bool,
+    /// 服务器模式：最近一次客户端输入视角（yaw, pitch），main.rs 应用到相机
+    net_look: Option<(f32, f32)>,
+    /// 网络状态日志限频（1 秒一条）
+    last_net_log: f32,
     /// 游戏主状态（commit a 先提供枚举与查询；e 接入完整状态机）
     game_state: GameState,
     /// 当前波次（Game::new 预置的 8 个 NPC 即第 1 波）
@@ -732,7 +749,7 @@ impl Game {
             },
             net_demo: {
                 let enabled = std::env::var("RV3D_NET")
-                    .map(|v| !v.is_empty())
+                    .map(|v| v == "1" || v == "demo")
                     .unwrap_or(false);
                 if !enabled {
                     None
@@ -749,6 +766,13 @@ impl Game {
                     }
                 }
             },
+            net_server: None,
+            net_client: None,
+            net_input_seq: 0,
+            net_snap_seq: 0,
+            net_fire_pending: false,
+            net_look: None,
+            last_net_log: 0.0,
             game_state: GameState::StartMenu,
             wave: 1,
             wave_timer: 0.0,
@@ -1065,7 +1089,169 @@ impl Game {
         self.stage_audio_us = t0.elapsed().as_micros() as u64;
         let t0 = std::time::Instant::now();
         self.update_net(camera);
+        self.step_net(camera);
         self.stage_net_us = t0.elapsed().as_micros() as u64;
+    }
+
+    /// 服务器模式（RV3D_NET=server）：绑定好的 Server 交给 Game 托管，开始权威模拟 + 快照广播
+    pub fn set_net_server(&mut self, server: Server) {
+        log::info!("net: server mode active");
+        self.net_server = Some(server);
+    }
+
+    /// 客户端模式（RV3D_NET=client）：连上的 Client 交给 Game 托管，开始输入上报 + 快照缓冲
+    pub fn set_net_client(&mut self, client: Client) {
+        log::info!("net: client mode active");
+        self.net_client = Some(client);
+    }
+
+    /// main.rs 转发本帧开火意图（客户端模式随 Input 上报服务端）
+    pub fn set_net_fire(&mut self, fire: bool) {
+        self.net_fire_pending = fire;
+    }
+
+    /// 服务器模式最近一次客户端输入视角（main.rs 应用到相机，快照权威视角）
+    pub fn net_look(&self) -> Option<(f32, f32)> {
+        self.net_look
+    }
+
+    /// 网络对战模式步进（RV3D_NET=server|client；默认关闭，不破坏单机模式）。
+    /// 与旧环回演示（update_net）互斥：演示用 RV3D_NET=1|demo，对战用 server|client。
+    fn step_net(&mut self, camera: &Camera) {
+        self.step_net_server(camera);
+        self.step_net_client(camera);
+        // 1 秒一条状态日志（联调/冒烟断言依据）
+        if self.time - self.last_net_log >= 1.0 {
+            self.last_net_log = self.time;
+            match (&self.net_server, &self.net_client) {
+                (Some(server), _) => {
+                    log::info!(
+                        "net: server clients={} seq={} npcs={}",
+                        server.client_count(),
+                        self.net_snap_seq,
+                        self.npcs.len()
+                    );
+                }
+                (None, Some(client)) => {
+                    log::info!(
+                        "net: client id={:?} seq={} entities={} own={:?} connected={}",
+                        client.player_id(),
+                        client.snapshot_seq(),
+                        client.entities().len(),
+                        client.own_state(),
+                        client.is_connected()
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 服务器模式：收客户端输入应用 + 超时清理 + 每 tick 广播快照
+    fn step_net_server(&mut self, camera: &Camera) {
+        if self.net_server.is_none() {
+            return;
+        }
+        let mut inputs: Vec<NetInput> = Vec::new();
+        {
+            let server = self.net_server.as_mut().unwrap();
+            while let Ok(Some((msg, from))) = server.recv() {
+                match msg {
+                    NetworkMessage::Join { name, .. } => {
+                        let _ = server.handle_join(from, name);
+                    }
+                    NetworkMessage::Input { input, .. } => inputs.push(input),
+                    _ => {}
+                }
+            }
+            // 断线基本处理：超过 SERVER_TIMEOUT 无包的客户端移除注册（重连为后续 TODO）
+            let removed = server.timeout_clients(SERVER_TIMEOUT);
+            if !removed.is_empty() {
+                log::warn!("net: server 移除超时客户端: {:?}", removed);
+            }
+        }
+        // 应用最新一份客户端输入（本轮单客户端为主；多客户端按到达顺序取最后一份）
+        if let Some(input) = inputs.pop() {
+            self.apply_net_input(input);
+        }
+        // 每 tick 广播快照：本机玩家 + 全部 NPC（位置/朝向/血量）
+        self.net_snap_seq = self.net_snap_seq.wrapping_add(1);
+        let cam_pos = camera.position();
+        let player = PlayerState::new([cam_pos.x, cam_pos.y, cam_pos.z], camera.yaw);
+        let npcs = self
+            .npcs
+            .iter()
+            .map(|n| NpcSnapshot {
+                id: n.id as u32,
+                pos: n.position,
+                facing: n.facing,
+                hp: n.hp,
+            })
+            .collect();
+        let snapshot = NetworkMessage::Snapshot {
+            seq: self.net_snap_seq,
+            time: self.time,
+            player_id: 0,
+            player,
+            npcs,
+        };
+        if let Some(server) = self.net_server.as_ref() {
+            let _ = server.broadcast(&snapshot, None);
+        }
+    }
+
+    /// 客户端模式：握手重试 + 每 tick 上报输入/姿态 + 收快照进插值缓冲
+    fn step_net_client(&mut self, camera: &Camera) {
+        let Some(client) = self.net_client.as_mut() else {
+            return;
+        };
+        // 握手：未确认时按 0.5s 重发 Join（UDP 尽力而为下唯一带重试的报文）
+        client.retry_join("steel", std::time::Duration::from_millis(500));
+        // 每 tick 上报本地输入/姿态
+        self.net_input_seq = self.net_input_seq.wrapping_add(1);
+        let input = NetInput {
+            forward: self.move_forward,
+            backward: self.move_backward,
+            left: self.move_left,
+            right: self.move_right,
+            fire: self.net_fire_pending,
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+        };
+        let _ = client.send(&NetworkMessage::Input {
+            seq: self.net_input_seq,
+            time: client.now() as f32,
+            input,
+        });
+        // 收快照：进入实体插值表（位置平滑；渲染消费为后续 TODO，先保证数据缓冲正确）
+        while let Ok(Some((msg, _))) = client.recv() {
+            client.handle_message(msg);
+        }
+        // 断线基本处理：已加入后超过 CLIENT_TIMEOUT 无数据报 → 告警（重连为后续 TODO）
+        if client.player_id().is_some() && client.snapshot_timeout() {
+            log::warn!(
+                "net: client 断线（{}s 无数据），等待重连...",
+                CLIENT_TIMEOUT.as_secs()
+            );
+        }
+    }
+
+    /// 服务端应用客户端输入：移动标志 + 开火（方向 = 输入视角）+ 记录视角供 main.rs 应用
+    fn apply_net_input(&mut self, input: NetInput) {
+        self.move_forward = input.forward;
+        self.move_backward = input.backward;
+        self.move_left = input.left;
+        self.move_right = input.right;
+        self.net_look = Some((input.yaw, input.pitch));
+        if input.fire {
+            let eye = self.player_eye();
+            let dir = glam::Vec3::new(
+                input.pitch.cos() * input.yaw.sin(),
+                input.pitch.sin(),
+                input.pitch.cos() * input.yaw.cos(),
+            );
+            self.fire([eye.x, eye.y, eye.z], [dir.x, dir.y, dir.z]);
+        }
     }
 
     /// 网络环回演示：server 收包回环广播，client 发包/收包做远端插值；不参与帧率逻辑
@@ -1077,9 +1263,7 @@ impl Game {
         while let Ok(Some((msg, from))) = demo.server.recv() {
             match &msg {
                 NetworkMessage::Join { name, .. } => {
-                    if let Ok(ack) = demo.server.handle_join(from, name.clone()) {
-                        let _ = demo.server.send_to(&ack, from);
-                    }
+                    let _ = demo.server.handle_join(from, name.clone());
                 }
                 _ => {
                     let _ = demo.server.broadcast(&msg, None);
@@ -2657,6 +2841,48 @@ mod tests {
             }
         }
         assert!(got_join, "server should receive the Join sent at init");
+    }
+
+    /// 网络对战闭环（RV3D_NET=server|client 的纯逻辑等价物，无 Vulkan/winit）：
+    /// 客户端上报输入 → 服务端应用 → 广播快照 → 客户端插值缓冲
+    #[test]
+    fn net_server_client_loopback_closed_loop() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut server_game = Game::new();
+        let mut client_game = Game::new();
+        server_game.set_net_server(server);
+        client_game.set_net_client(Client::connect(addr).unwrap());
+        client_game.set_movement(true, false, false, false);
+        let camera = Camera::new();
+        // UDP 环回投递可能有毫秒级延迟：多轮推进让 握手 → 输入 → 快照 完整走通
+        for _ in 0..20 {
+            client_game.update(1.0 / 60.0, &camera);
+            server_game.update(1.0 / 60.0, &camera);
+        }
+        // 最后一轮收尾：轮询直到追平服务端最新快照（UDP 环回投递有毫秒级延迟）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        while client_game.net_client.as_ref().unwrap().snapshot_seq()
+            != server_game.net_snap_seq
+            && std::time::Instant::now() < deadline
+        {
+            client_game.update(1.0 / 60.0, &camera);
+        }
+        let client = client_game.net_client.as_ref().unwrap();
+        assert_eq!(client.player_id(), Some(1), "握手应分配 player id 1");
+        assert!(client.snapshot_seq() > 0, "应收到服务端快照");
+        assert!(client.own_state().is_some(), "快照应含本机权威状态");
+        assert!(
+            client.entities().len() >= server_game.npcs.len(),
+            "快照应包含全部 NPC + 服务端本机玩家"
+        );
+        assert!(!client.snapshot_timeout(), "回环测试不应超时");
+        assert!(server_game.move_forward, "服务端应应用客户端输入");
+        assert_eq!(
+            client.snapshot_seq(),
+            server_game.net_snap_seq,
+            "客户端应追平最新快照"
+        );
     }
 
     /// FPS 玩家：WASD 移动改变位置，眼睛高度 1.6m
