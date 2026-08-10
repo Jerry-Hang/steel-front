@@ -196,5 +196,22 @@
 ### 已知问题/待办（2026-08-08 快照）
 - 低头剔除 bug：已修复（`9c86101` 鼠标 Y 方向标准化 + 后坐力枪口上扬——根因是鼠标反转
   致 pitch 被 bot 压到 -89°，剔除数学本身正确；勿回退鼠标方向）
-- mipmap 缺失：纹理 mip_levels(1) + sampler mipmap_mode(LINEAR) 无 mip 链，
-  地平线远处锯齿闪烁（渲染约定勿回退：加 mip 链需同步放宽 image view/sampler）
+- mipmap 缺失：已修复（`f46c629`：纹理 256×256→9 级 mip 链 + 各向异性采样，
+  sampler 设 min/maxLod；后续改纹理尺寸需同步重算 mip_levels）
+
+### 2026-08-09 夜间快照：美术/玩法/联网五线并行（Wave 6，已提交未推送）
+- 并行 6 Agent：mipmap、地形、音频、玩法、联网、光照验证；Vulkan 规划文档主线程写
+- 地形恢复程序化高度（`6b6845f`）：`TERRAIN_FLAT_RADIUS=140` 内恒 y=0（中央安全区/
+  障碍环/接火区不变量不变），140m 外 ≤15m 平缓值噪声丘陵；terrain_height/at 同源
+- 程序化音频（`81fc9b4`）：`DspSynth` 事件式合成（枪声/爆炸/脚步/环境风），零资产零依赖
+- 玩法（`55af294`）：AI `Tactic::CoverSeek` 掩体利用；障碍可击穿（Wall150/Block300/
+  Barrier100）；`MissionObjective` 任务目标 + 胜利横幅
+- 联网（`2255498`）：UDP client/server（`RV3D_NET=server|client` + `RV3D_NET_ADDR`），
+  Input/Snapshot 报文 + 插值 + 超时；NAT/重连/实战场为 TODO
+- 光照结论（`docs/lighting-rendering-verification-2026-08-09.md`）：片元级 Blinn-Phong
+  flat shading（法线=平面法线），乘性染色；法线贴图/PBR/阴影是传统光栅特性 dzn 可跑
+- Windows 原生 Vulkan 规划：`docs/windows-native-vulkan-plan-2026-08-09.md`（阶段 A=swapchain
+  +present 对照 present_us/GPU util，需 Windows 真机）
+- 验收：254 tests 全绿、0 警告；冒烟待跑（下一会话第一项）
+- 教训：`handle_join` 内部已发 ack，调用方勿再 send_to（重复 ack 坑）；UDP 回环测试
+  在沙箱内 bind 会 PermissionDenied，cargo test 必须提权跑
