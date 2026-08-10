@@ -1149,12 +1149,11 @@ impl Game {
 
     /// 服务器模式：收客户端输入应用 + 超时清理 + 每 tick 广播快照
     fn step_net_server(&mut self, camera: &Camera) {
-        if self.net_server.is_none() {
-            return;
-        }
         let mut inputs: Vec<NetInput> = Vec::new();
         {
-            let server = self.net_server.as_mut().unwrap();
+            let Some(server) = self.net_server.as_mut() else {
+                return;
+            };
             while let Ok(Some((msg, from))) = server.recv() {
                 match msg {
                     NetworkMessage::Join { name, .. } => {
