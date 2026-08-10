@@ -20,8 +20,6 @@ log = "0.4"
 env_logger = "0.11"
 # 图片解码（PNG 等本地贴图加载）
 image = "0.25"
-# OGG(Vorbis) 解码（audio 模块集成阶段启用）
-lewton = "0.10"
 
 [build-dependencies]
 # 编译 WGSL 着色器为 SPIR-V（构建时）
