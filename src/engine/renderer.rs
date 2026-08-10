@@ -2543,19 +2543,24 @@ impl Renderer {
 
         // 256×256 网格：间距 2.0、以原点为中心、y=0 平面（场地 512×512）。
         // 实例 Y 采样地形高度（同一 terrain_height()），底部下沉 0.05 防 z-fighting。
+        // 每个实例是 2×2×2 立方体 VERTICES，经矩阵 Y 轴压扁 0.1 后成为 2×0.2×2 薄片
+        // （顶面约贴地 +0.05）：旧版整块立方体顶面高出地面 0.95，视觉上是一格一格
+        // 凸起的"纸箱盖"铺满地板；压扁后顶面与地形平齐，地面恢复连续平面。
         self.instances = Vec::with_capacity(INSTANCE_COUNT as usize);
+        let flatten = glam::Mat4::from_scale(glam::Vec3::new(1.0, 0.1, 1.0));
         for iz in 0..GRID_SIZE {
             for ix in 0..GRID_SIZE {
                 let x = (ix as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
                 let z = (iz as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
                 let y = terrain_height(x, z) - 0.05;
-                let model = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
-                // 半径 = 0.5 * max(三轴列长度)；预算一次供剔除查表（纯平移时恒 0.5）
-                let r = 0.5 * model
-                    .x_axis
-                    .length()
-                    .max(model.y_axis.length())
-                    .max(model.z_axis.length());
+                let model =
+                    glam::Mat4::from_translation(glam::Vec3::new(x, y, z)) * flatten;
+                // 半径 = 0.5 * 三轴列长度对角线（压扁薄片对角 ≈ 0.709，比旧立方体
+                // 0.5 略大，覆盖压扁后的薄片轮廓，避免屏幕边缘实例提前被剔）
+                let r = 0.5 * (model.x_axis.length_squared()
+                    + model.y_axis.length_squared()
+                    + model.z_axis.length_squared())
+                    .sqrt();
                 self.instance_radii.push(r);
                 self.instance_center_x.push(x);
                 self.instance_center_y.push(y);
