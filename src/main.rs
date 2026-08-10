@@ -33,8 +33,12 @@ use net::{Client, Server};
 use ui::{BindingAction, KeyBindings, RESOLUTIONS};
 use winit::window::CursorGrabMode;
 
-/// 单次鼠标位移最大像素：超过视为光标传送伪事件（X 服务端 warp/焦点切换跳变），
-/// 跳过该事件并重基准 last_cursor，防止第一人称视角跳变/自转。
+/// 绝对位置路径（CursorMoved）单次位移最大像素：超过视为光标传送伪事件
+/// （X 服务端 warp/焦点切换跳变），跳过该事件并重基准 last_cursor，
+/// 防止第一人称视角跳变/自转。
+/// 注意：DeviceEvent::MouseMotion（XInput2 raw 增量）不适用此阈值——raw 位移
+/// 单位是设备原始计数，WSLg/Xwayland 下常远超屏幕像素，用绝对像素阈值过滤
+/// 会把真实鼠标移动全部丢弃（视角完全转不动）。
 const MAX_LOOK_DELTA_PX: f64 = 512.0;
 
 /// 帧率上限（present 节流）：0 = 无上限（压测模式，主循环全速跑以暴露渲染瓶颈）。
@@ -515,6 +519,16 @@ impl ApplicationHandler for GameApp {
         if let DeviceEvent::MouseMotion { delta } = event {
             self.mouse_relative_ok = true;
             if self.cursor_captured {
+                // 捕获瞬间回中 warp 的 raw 回声在 recenter 窗口期（150ms）内到达：
+                // 跳过，避免把"捕获前光标到窗口中心的差量"当成视角位移。
+                // 真实鼠标移动不受限制：raw 增量直接驱动视角（不能用绝对像素阈值
+                // 过滤，见 MAX_LOOK_DELTA_PX 注释）。
+                if let Some(until) = self.recenter_pending_until {
+                    if Instant::now() < until {
+                        return;
+                    }
+                    self.recenter_pending_until = None;
+                }
                 let (dx, dy) = (delta.0 as f32, delta.1 as f32);
                 match self.camera.mode {
                     CameraMode::FirstPerson => self.camera.look(dx, dy),
