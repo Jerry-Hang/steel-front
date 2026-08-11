@@ -80,6 +80,13 @@ struct GameApp {
     fire_requested: bool,
     /// 光标是否已捕获（Playing 下鼠标视角）
     cursor_captured: bool,
+    /// 捕获模式是否为系统级 Locked（raw 相对增量驱动视角）；
+    /// false = 回退 Confined/无 grab，走绝对位置路径（WSLg/Xwayland 实测：
+    /// 真实物理鼠标只产生 CursorMoved 绝对位置，不产生 XI_RawMotion raw 事件）
+    cursor_locked: bool,
+    /// 绝对位置路径：是否已收到首个真实指针位置基准（捕获瞬间未知指针位置，
+    /// 首个事件只作基准，避免把"捕获前指针到中心差量"当视角位移）
+    abs_baseline_valid: bool,
     /// 窗口是否聚焦（失焦时释放捕获，防止卡视角）
     focused: bool,
     /// 捕获瞬间回中 warp 的回声吞噬窗口：recenter 后 150ms 内到达的下一个
@@ -130,6 +137,8 @@ impl GameApp {
             last_render_us: 0,
             fire_requested: false,
             cursor_captured: false,
+            cursor_locked: false,
+            abs_baseline_valid: false,
             focused: true,
             recenter_pending_until: None,
             last_cam_log: Instant::now(),
@@ -246,10 +255,15 @@ impl GameApp {
             };
             window.set_cursor_visible(false);
             self.cursor_captured = true;
+            self.cursor_locked = locked;
+            self.abs_baseline_valid = false;
             if !locked {
-                // 捕获瞬间回中隐藏光标（仅此一次 warp，之后不再 warp）：
-                // 视角一律由 XInput2 raw 相对增量驱动，与指针位置无关，
-                // 从根上消除"每帧回中 → 回声 → 反馈环自转"。
+                // WSLg/Xwayland 回退：绝对位置路径。不在捕获瞬间回中——
+                // 指针真实位置未知，等首个 CursorMoved 作基准（abs_baseline_valid）。
+                self.recenter_pending_until = None;
+            } else {
+                // Locked grab 可用：raw 相对增量驱动。捕获瞬间回中隐藏光标，
+                // 150ms 窗口吞掉这次 warp 的 raw 回声（仅此一次 warp）。
                 let size = window.inner_size();
                 let center = winit::dpi::PhysicalPosition::new(
                     size.width as f64 / 2.0,
@@ -268,12 +282,14 @@ impl GameApp {
                 } else {
                     "none"
                 },
-                "relative"
+                if locked { "relative" } else { "absolute" }
             );
         } else if !want && self.cursor_captured {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.cursor_captured = false;
+            self.cursor_locked = false;
+            self.abs_baseline_valid = false;
             self.recenter_pending_until = None;
             self.camera.set_rotation_active(false);
             log::info!("input: cursor released");
@@ -513,7 +529,9 @@ impl ApplicationHandler for GameApp {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            if self.cursor_captured {
+            // raw 相对增量仅在 Locked grab 可用时有效（真实设备级增量）；
+            // WSLg/Xwayland（Locked 失败）真实鼠标不产生 raw 事件，走绝对位置路径。
+            if self.cursor_captured && self.cursor_locked {
                 // 捕获瞬间回中 warp 的 raw 回声在 recenter 窗口期（150ms）内到达：
                 // 跳过，避免把"捕获前光标到窗口中心的差量"当成视角位移。
                 // 真实鼠标移动不受限制：raw 增量直接驱动视角（不能用绝对像素阈值
@@ -766,10 +784,49 @@ impl ApplicationHandler for GameApp {
                     }
                 }
                 if self.cursor_captured {
-                    // 捕获态视角一律由 DeviceEvent::MouseMotion（XInput2 raw 相对增量）
-                    // 驱动，与指针位置无关；绝对位置只更新基准（供非捕获拖拽路径），
-                    // 不驱动视角、不做每帧回中 warp——彻底消除 warp 回声反馈环。
-                    self.last_cursor = (px, py);
+                    if self.cursor_locked {
+                        // Locked grab：raw 相对增量已驱动视角，绝对位置只更新基准
+                        self.last_cursor = (px, py);
+                        return;
+                    }
+                    // WSLg/Xwayland 回退：绝对位置路径。
+                    // 基准 = 真实指针位置（或 warp 成功确认后的窗口中心）——
+                    // 绝不把 last_cursor 假设为 warp 目标（旧 bug：warp 失败仍把
+                    // 基准设成中心，指针距中心偏差被当视角位移 → 灵敏度爆炸/压地）。
+                    if !self.abs_baseline_valid {
+                        self.abs_baseline_valid = true;
+                        self.last_cursor = (px, py);
+                        return;
+                    }
+                    let dx = px - self.last_cursor.0;
+                    let dy = py - self.last_cursor.1;
+                    // 光标传送（服务端跳变）：跳过该事件，只重基准
+                    if dx.abs() <= MAX_LOOK_DELTA_PX && dy.abs() <= MAX_LOOK_DELTA_PX {
+                        match self.camera.mode {
+                            CameraMode::FirstPerson => self.camera.look(dx as f32, dy as f32),
+                            CameraMode::Orbit => self.camera.orbit(dx as f32, dy as f32),
+                            CameraMode::Flight => {
+                                self.camera.set_rotation_active(true);
+                                self.camera.add_rotation_input(dx as f32, dy as f32);
+                            }
+                        }
+                    }
+                    // 回中指针（避免撞窗口边缘停顿）：warp 成功 → 基准=中心；
+                    // 失败 → 基准=当前真实位置（下一事件从真实位置算增量）。
+                    if let Some(window) = &self.window {
+                        let size = window.inner_size();
+                        let center = winit::dpi::PhysicalPosition::new(
+                            size.width as f64 / 2.0,
+                            size.height as f64 / 2.0,
+                        );
+                        if window.set_cursor_position(center).is_ok() {
+                            self.last_cursor = (center.x, center.y);
+                        } else {
+                            self.last_cursor = (px, py);
+                        }
+                    } else {
+                        self.last_cursor = (px, py);
+                    }
                 } else {
                     let (dx, dy) = (px - self.last_cursor.0, py - self.last_cursor.1);
                     // 非捕获态拖拽视角（菜单/设置预览 + 冒烟在无焦点环境下的瞄准路径）：
