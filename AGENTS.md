@@ -64,6 +64,10 @@
     需迁移 Windows 原生 Vulkan（NVIDIA 驱动全支持），或走 CUDA 直通（/usr/lib/wsl/lib/libcuda.so
     实测存在，Tensor Core 可编程访问，可自研超分/降噪，OptiX 同源可用）
   - 探测含决定性测试：创建启用 RT 扩展的探测 device（当前 RT 扩展缺失故跳过）
+- 硬件/API 标准（2026-08-11）：游戏用传统 VERTEX+FRAGMENT 管线（无网格着色器）、
+  实例声明 Vulkan 1.3 但只用 1.0 核心特性 + VK_KHR_swapchain；硬件三档标准见
+  `docs/hardware-requirements-2026-08-11.md`（最低=1.3 驱动 4C8T、推荐=8C16T 中端独显、
+  最高=16C32T + RTX 40/50 系，瓶颈在 dzn 呈现不在 GPU）
 - 2026-08-09 AVX-512 启用策略（cpu::avx512_enabled()，renderer 选路与日志共用）：
   - AMD Zen4/Zen5（7000/9000 系）→ 启用（实测本机 avx512=true，走 16 实例/批剔除路径）
   - Intel 11 代（Rocket Lake 0xA7 / Tiger Lake 0x8C/0x8D）→ 默认关闭（AVX-512 能效/降频差，
