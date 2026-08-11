@@ -51,6 +51,22 @@
   - 验收快照：259 tests 全绿（含 UDP 回环，需提权环境跑）、0 警告、冒烟 ALL-OK。附带修正：仓库中 4 个既有 .spv 为陈旧产物（与 build.rs 输出不一致），已随 feat 刷新。
 - 状态：done
 
+### [2026-08-11] 交接：输入捕获遗留 Bug（转交下一会话）
+
+- 日期：2026-08-11
+- 发起方：当前会话 AI
+- 接收方：下一会话 AI
+- 交接类型：任务交接
+- 交接内容：鼠标捕获在 WSLg/Xwayland 仍未彻底解决，本轮按用户要求不改代码只写交接。
+  详细证据/假设见 `docs/HANDOFF-2026-08-11.md`。要点：① 开局即登记捕获（grab=confined
+  返回 Ok）但 confine 实际不生效，指针漂出窗口 → 无 CursorMoved → 视角冻结；死亡后 R
+  重开指针恰在窗口内 → 事件恢复（Minecraft 式指针=准星，用户可接受但要求隐藏图标）。
+  ② set_cursor_visible(false) 在 Xwayland 不隐藏图标。③ 真实鼠标无 raw 事件（勿用冒烟
+  XTest 反推）；rdev 在 WSL2 不可用（无 /dev/input、/dev/uinput）。④ 修复方向：H1 每帧/
+  每事件 warp 拉指针回窗口并验证 is_ok（可考虑 x11rb 直连 XWarpPointer）；H2 检查
+  focused 依赖；H3 XDefineCursor 空光标隐藏图标。⑤ 用户情绪敏感，改前先确认方向。
+- 状态：in_progress
+
 ## 当前进度快照（2026-08-08，wsl --shutdown 前固化）
 
 ### 已完成（Wave 2/3/4 + 2026-08-08 渲染/输入修复，全部已推送 origin/master）
@@ -268,6 +284,10 @@
   致 pitch 被 bot 压到 -89°，剔除数学本身正确；勿回退鼠标方向）
 - mipmap 缺失：已修复（`f46c629`：纹理 256×256→9 级 mip 链 + 各向异性采样，
   sampler 设 min/maxLod；后续改纹理尺寸需同步重算 mip_levels）
+- 【2026-08-11 新增，下一会话第一项】输入捕获：WSLg 开局捕获无效（confine 实际不生效，
+  指针漂出窗口 → 视角冻结；实测 yaw 55 秒动 0.1°），死亡后 R 重开才变 Minecraft 式
+  （指针=准星）且鼠标图标不消失（set_cursor_visible(false) 无效）。根因/修复假设见
+  `docs/HANDOFF-2026-08-11.md`，勿删
 
 ### 2026-08-09 夜间快照：美术/玩法/联网五线并行（Wave 6，已提交未推送）
 - 并行 6 Agent：mipmap、地形、音频、玩法、联网、光照验证；Vulkan 规划文档主线程写
