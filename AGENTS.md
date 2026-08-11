@@ -188,7 +188,8 @@
 - main.rs render() 禁止再翻转投影（proj.y_axis = -proj.y_axis 曾造成双重翻转 → 画面上下颠倒）
 - 投影用 glam::Mat4::perspective_rh（y-up NDC、深度 [0,1]），camera.projection_matrix() 保持现状
 - F12 截图读回用 in_flight_fences 等待（vkWaitSemaphores 只接受 timeline 信号量，会 VUID + PNG 不落盘）
-- 光标捕获瞬间 last_cursor 对齐窗口中心 + 512px 跳变守卫，防回中 warp 被当视角位移致自转
+- 光标捕获瞬间 last_cursor 对齐窗口中心 + 512px 跳变守卫（仅非捕获拖拽路径用），
+  防回中 warp 被当视角位移致自转
 - test.png 四象限调试图导致面劈裂，已换中灰（2026-08-08 修复）
 - 地形程序化高度（2026-08-09 恢复，勿回退全平）：terrain_height 中央半径 140m
   （含 60×60 安全区、障碍环带 58–130m、两军接火区）y=0，之外 ≤15m 确定性值噪声丘陵；
@@ -232,11 +233,16 @@
   `EventLoop::builder().with_x11()`（EventLoopBuilderExtX11 设 forced_backend）。
   WSL + WAYLAND_DISPLAY 存在时 main.rs 强制 X11（Xwayland）：WSLg Wayland 指针协议
   不完整（捕获失效 + 右键拖动原生层静默崩溃）。用户无环境变量可覆盖，勿回退环境变量方案
-- 鼠标视角驱动（2026-08-11 修订，勿回退）：X11 后端（WSLg/Xwayland）禁用
-  DeviceEvent::MouseMotion raw 路径——Xwayland 的 raw 增量异常放大且捕获限制产生持续反馈，
-  实测 yaw 自转到万级 rad/s（Xvfb 对照：raw 仅 ~2×、绝对路径精确 60px→5.2°）；
-  改走绝对位置 CursorMoved + 每帧回中 + 150ms warp 回声吞噬（512px 跳变守卫）。
-  Wayland 后端保留 raw 路径（libinput 相对增量正常，use_relative_mouse=true）
+- 鼠标视角驱动（2026-08-11 二次修订，勿回退）：捕获态视角**唯一**输入源 =
+  DeviceEvent::MouseMotion（XInput2 XI_RawMotion.raw_values 相对增量，与指针位置无关）。
+  捕获后**零 warp**（不每帧回中）——绝对位置 CursorMoved 在捕获态只更新基准不驱动视角，
+  从根上消除"每帧回中 warp → 回声 → 反馈环自转"。原因：绝对位置+每帧回中方案在真实
+  WSLg 会话上实测"灵敏度爆炸 + 视角被压向地面抬不起头"（warp 失败时仍把
+  last_cursor 重基准到窗口中心，指针距中心偏差被当成视角位移）。
+  细节：捕获瞬间仅一次 set_cursor_position 回中 + 150ms 回声吞噬窗口（吞 warp 回声）；
+  raw 单事件 >1024（MAX_RAW_LOOK_DELTA）视为残留回声跳过；grab 尽力 Locked→Confined→
+  无（raw 驱动不依赖 grab）；非捕获拖拽路径（菜单/设置预览/冒烟瞄准）保留
+  绝对位置 + 512px 守卫。冒烟用 XTestFakeRelativeMotionEvent 注入 raw 事件验证本路径
 - cam 日志 yaw/pitch 单位是"度"（camera 内部弧度，日志换算：60px×0.0015=0.09rad=5.2°；
   look_bot 用 math.degrees(0.0015) 换算 deg_px，勿按弧度解读日志）
 - X11 启动焦点（2026-08-11 实测）：新窗口创建后 Xwayland 焦点舞蹈约 3 秒
