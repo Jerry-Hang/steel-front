@@ -145,7 +145,7 @@ bash scripts/run_gameplay_smoke.sh
 - **文档重构**：README 转为对外项目说明书（本文），AGENTS.md 升级为正式 AI 迭代交接文档（规划开启/结束、AI-AI 交接、绘画素材交接统一留痕）。
 
 ### 正在进行的工程
-- **渲染纵深**：阴影 pass、法线贴图/PBR 等传统光栅特性继续推进；网格着色器路径待 Windows 原生 Vulkan 环境真机验证（WSLg/dzn 不支持 `VK_EXT_mesh_shader`）。
+- **网格着色器真机验证**：可选 mesh 路径已落地，但 WSLg/dzn 不支持 `VK_EXT_mesh_shader`，待 Windows 原生 Vulkan / 支持 mesh 的驱动环境实测。
 
 ### 后续路线
 - **美术资产**：贴图与模型由程序化生成过渡到 AI 生成/人工制作，丰富场景表现。
