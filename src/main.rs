@@ -82,6 +82,11 @@ struct GameApp {
     /// 本会话是否收到过 DeviceEvent::MouseMotion（XInput2 相对增量）。
     /// 收到后视角改由相对事件驱动，绝对位置路径只作基准，避免 warp 回声乱转。
     mouse_relative_ok: bool,
+    /// 视角输入源：true = DeviceEvent::MouseMotion 相对增量（Wayland/libinput）；
+    /// false = 绝对位置 CursorMoved + 每帧回中（X11/Xwayland——Xwayland 的 raw
+    /// motion 增量异常放大且捕获限制产生持续反馈，实测 yaw 自转到万级 rad/s，
+    /// 因此 X11 后端禁用 raw 路径，改用绝对位置 + warp 回声吞噬，见 window_event）。
+    use_relative_mouse: bool,
     /// 窗口是否聚焦（失焦时释放捕获，防止卡视角）
     focused: bool,
     /// 回中 warp 回声事件吞噬窗口：recenter 后短时间内到达的下一个 CursorMoved
@@ -99,7 +104,7 @@ struct GameApp {
 
 impl GameApp {
     /// 创建游戏应用实例
-    fn new() -> Self {
+    fn new(use_relative_mouse: bool) -> Self {
         let mut game = Game::new();
         // 加载持久化配置（键位/音量/灵敏度）；文件缺失回退默认，见 config.rs
         let cfg = config::load();
@@ -133,6 +138,7 @@ impl GameApp {
             cursor_captured: false,
             cursor_locked: false,
             mouse_relative_ok: false,
+            use_relative_mouse,
             focused: true,
             recenter_pending_until: None,
             last_cam_log: Instant::now(),
@@ -264,13 +270,18 @@ impl GameApp {
                 self.recenter_pending_until = Some(Instant::now() + Duration::from_millis(150));
             }
             log::info!(
-                "input: cursor captured (mouse look on, grab={})",
+                "input: cursor captured (mouse look on, grab={}, look={})",
                 if locked {
                     "locked"
                 } else if grabbed {
                     "confined"
                 } else {
                     "none-relative"
+                },
+                if self.use_relative_mouse {
+                    "relative"
+                } else {
+                    "absolute"
                 }
             );
         } else if !want && self.cursor_captured {
@@ -517,6 +528,12 @@ impl ApplicationHandler for GameApp {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
+            // X11/Xwayland：raw motion 增量异常放大且捕获限制产生持续反馈，
+            // 直接驱动视角会自转（实测 yaw 万级 rad/s）；此路径仅 Wayland/libinput 使用，
+            // X11 后端视角改由绝对位置 CursorMoved + 每帧回中驱动（见 window_event）。
+            if !self.use_relative_mouse {
+                return;
+            }
             self.mouse_relative_ok = true;
             if self.cursor_captured {
                 // 捕获瞬间回中 warp 的 raw 回声在 recenter 窗口期（150ms）内到达：
@@ -940,25 +957,40 @@ fn main() {
     // WSLg（WSL2 + Wayland/Weston）的指针约束/相对指针协议支持不完整：
     // 捕获后光标不隐藏、视角不动，且右键拖动会在原生层静默崩溃（无 panic 日志）。
     // Xwayland 提供完整 XInput2 raw motion（本项目视角输入依赖，见 device_event），
-    // 因此 WSL + Wayland 会话下强制 X11 后端；用户显式设置 WINIT_UNIX_BACKEND 时不覆盖。
-    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
+    // 因此 WSL + Wayland 会话下强制 X11 后端。
+    // 注意：winit 0.29+ 已删除 WINIT_UNIX_BACKEND 环境变量（v0.29 changelog），
+    // 必须经 EventLoopBuilderExtX11::with_x11() 设置 forced_backend 才真正生效。
+    #[cfg(target_os = "linux")]
+    let force_x11 = {
         let is_wsl = std::fs::read_to_string("/proc/version")
             .map(|v| v.to_ascii_lowercase().contains("microsoft"))
             .unwrap_or(false);
         if is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
             log::info!(
                 "input: WSLg Wayland 指针支持不完整，强制 X11 后端（Xwayland + XInput2 raw motion）"
             );
+            true
+        } else {
+            false
         }
-    }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let force_x11 = false;
 
-    // 创建事件循环
-    let event_loop = match EventLoop::new() {
-        Ok(el) => el,
-        Err(e) => {
-            log::error!("创建事件循环失败: {:?}", e);
-            return;
+    // 创建事件循环（WSLg 下强制 X11，走 Xwayland + XInput2 raw motion）
+    let event_loop = {
+        let mut builder = EventLoop::builder();
+        #[cfg(target_os = "linux")]
+        if force_x11 {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }
+        match builder.build() {
+            Ok(el) => el,
+            Err(e) => {
+                log::error!("创建事件循环失败: {:?}", e);
+                return;
+            }
         }
     };
 
@@ -966,7 +998,9 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
 
     // 创建并运行游戏应用
-    let mut app = GameApp::new();
+    // X11 后端（WSLg 强制）禁用 raw motion 视角输入（Xwayland 增量异常自转），
+    // 改走绝对位置 + 每帧回中；Wayland/其它平台保持相对增量路径。
+    let mut app = GameApp::new(!force_x11);
 
     // 网络对战模式（默认关闭，不破坏单机）：RV3D_NET=server|client，
     // RV3D_NET_ADDR=127.0.0.1:<port>（默认 127.0.0.1:27015）。
