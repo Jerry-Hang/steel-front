@@ -2,7 +2,7 @@
 
 > 本文档回答三个问题：① 游戏实际使用了哪些 Vulkan API 特性；② 显卡需要支持 Vulkan 哪个版本；③ 是否使用网格着色器。最后给出游玩硬件标准（最低 / 推荐 / 最高三档）。
 >
-> **结论速览：渲染主路径为传统 VERTEX+FRAGMENT 管线（默认/回退）；物理设备支持 `VK_EXT_mesh_shader` 时自动启用网格着色器（MESH+FRAGMENT）渲染实例场，GPU 端逐实例视锥剔除 + 顶点变换，CPU 侧跳过 SIMD 剔除与压缩上传。实例声明 Vulkan 1.3，实际只用 Vulkan 1.0 核心特性 + `VK_KHR_swapchain`（+ 可选 `VK_EXT_mesh_shader`）。显卡门槛：支持 Vulkan 1.3 的驱动（2016 年后桌面独显基本全满足）。**
+> **结论速览：渲染主路径为传统 VERTEX+FRAGMENT 管线（默认/回退）；物理设备支持 `VK_EXT_mesh_shader` 时自动启用网格着色器（MESH+FRAGMENT）渲染实例场，GPU 端逐实例视锥剔除 + 顶点变换，CPU 侧跳过 SIMD 剔除与压缩上传。实例声明 Vulkan 1.3，实际只用 Vulkan 1.0 核心特性 + `VK_KHR_swapchain`（+ 可选 `VK_EXT_mesh_shader`）。测试版最低线按"支持网格着色器"划定：AMD RX 6500 XT（RDNA 2）或 NVIDIA RTX 20 系及以上；不建议使用不支持 mesh shader 的旧显卡游玩测试版，提前适配 VK 新特性为后续全面迁移铺路。**
 
 ## 一、实际使用的 Vulkan 特性
 
@@ -37,7 +37,7 @@
 - 实例创建声明 `apiVersion = 1.3`。按 Vulkan 规范，驱动支持版本低于应用声明版本时 `vkCreateInstance` 可能返回 `VK_ERROR_INCOMPATIBLE_DRIVER`，因此**最低门槛按 Vulkan 1.3 驱动计算**。
 - 实际功能需求只有 Vulkan 1.0 核心 + `VK_KHR_swapchain` + 可选 `samplerAnisotropy`。若未来要兼容更老的驱动，把 `api_version` 降到 1.0/1.1 即可，渲染代码无需任何改动（没有用到 1.1+ 的任何能力）。
 - 本机实测（WSLg/dzn 转译层）：RTX 5060 Laptop 以 "Microsoft Direct3D12 (NVIDIA GeForce RTX 5060 Laptop GPU)" 枚举，报告 47 个设备扩展，`VK_KHR_dynamic_rendering` / `VK_KHR_buffer_device_address` = true，光追 / 网格着色器 / 协作矩阵 = false —— 游戏自动回退传统管线照常运行（1280×800 ≈ 250–430 fps）。
-- **结论：Vulkan 1.3 驱动的 2016 年后桌面独显 / 2019 年后核显均可运行**（NVIDIA GTX 900/1000 系起、AMD RX 400/500 系起、Intel Gen9 起，需新版驱动：NVIDIA 545+ / Mesa 23.2+）。
+- **结论：Vulkan 1.3 驱动即可满足 API 门槛，但测试版最低线建议为支持网格着色器的显卡**（AMD RDNA 2 / RX 6000 系起、NVIDIA Turing / RTX 20 系起、Intel Arc），最低要求 AMD RX 6500 XT 或同级。
 
 ## 三、游玩硬件标准
 
@@ -45,20 +45,20 @@
 
 | 项目 | 要求 |
 |---|---|
-| GPU | 支持 Vulkan 1.3 的独显/核显（约 2016 年后桌面独显、2019 年后核显，需新版驱动） |
-| 显存 | ≥ 2 GB |
-| CPU | 4 核 8 线程（AI 决策可回退串行；剔除有 SSE4.2 路径） |
-| 内存 | 8 GB（游戏进程实测约 1.5 GB） |
+| GPU | AMD RX 6500 XT（RDNA 2 架构，支持 `VK_EXT_mesh_shader`）或同级（NVIDIA RTX 20 系及以上） |
+| 显存 | ≥ 4 GB |
+| CPU | AMD Ryzen 3 3300X（4 核 8 线程；AI 决策可回退串行；剔除有 SSE4.2/AVX2 路径） |
+| 内存 | 8 GB（最低；游戏进程实测约 1.5 GB） |
 | 目标 | 1280×720 @ 30–60 fps，NPC ≤ 24 |
 
 ### 推荐要求（流畅高帧）
 
 | 项目 | 要求 |
 |---|---|
-| GPU | 中端独显：NVIDIA GTX 1660 / RTX 20 系及以上、AMD RX 5000/6000 系及以上、Intel Arc |
+| GPU | 中端独显：NVIDIA RTX 20 系及以上、AMD RX 6000 系及以上（RDNA 2）、Intel Arc |
 | 显存 | ≥ 4 GB |
 | CPU | 8 核 16 线程（AI 亲和线程池 + AVX2/AVX-512 剔除、AMD 双 CCD / Intel P+E 绑核生效） |
-| 内存 | 16 GB |
+| 内存 | 12 GB 或以上（建议 16 GB） |
 | 目标 | 1280×800 / 1920×1080 @ 144+ fps；64v64 压力模式流畅 |
 
 ### 最高要求（当前引擎上限）
@@ -72,6 +72,12 @@
 | 显示 | 2560×1600 @ 240 Hz 及以上 |
 
 > 注：当前引擎瓶颈不在 GPU——2560×1600 + 128 NPC 时 GPU util 仅 ~27–30%，帧时大头是 dzn/WSLg 呈现层（present_us ≈1.1–3 ms）。顶配硬件在 Windows 原生 Vulkan 呈现路径落地前，帧率提升有限（见 `docs/windows-native-vulkan-plan-2026-08-09.md`）。
+
+### 网格着色器迁移与硬件策略（2026-08-11 用户决策）
+
+- **测试版最低线按"支持网格着色器"划定**：AMD RDNA 2（RX 6000 系）起、NVIDIA Turing（RTX 20 系）起、Intel Arc；最低要求 AMD Ryzen 3 3300X + RX 6500 XT，内存最低 8 GB / 推荐 12 GB 或以上。
+- **不建议使用不支持 mesh shader 的显卡游玩本系列测试版本**：让用户群体提前适配支持 VK 图形 API 新特性的显卡，避免后期全面迁移时硬件断层、船大难掉头。
+- **迁移窗口**：中后期（与 DLSS、光线追踪硬件启用同一优先级）；届时全面放弃传统顶点着色器、改用网格着色器渲染。当前 WSL2 开发环境（dzn 不支持 mesh）仍以传统管线为主迭代。
 
 ## 四、实测性能参考（2026-08-09/10，RTX 5060 Laptop + Ryzen 9 8940HX，WSLg/dzn）
 
