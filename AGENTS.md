@@ -38,6 +38,19 @@
 - ② README.md 重构为对外进度说明书｜负责人：Newton｜状态：in_progress
 - ③ AGENTS.md 重构为正式交接文档（本任务）｜负责人：当前会话 AI｜状态：in_progress
 
+### [2026-08-11] 迭代结束记录
+
+- 日期：2026-08-11
+- 发起方：当前会话 AI / Newton（并行）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - ① 网格着色器（VK_EXT_mesh_shader）可选路径：完成。commit `12859a3`。要点：build.rs 用 naga 30 `enable wgpu_mesh_shader` + `@mesh(mesh_out)`（naga 30 语法是 `@mesh(...)` 不是 `@stage(mesh)`，输出变量必须 workgroup 空间；SPIR-V ≥1.4 用 lang_version=(1,4)）；mesh 管线 MESH_EXT+FRAGMENT 复用同一 descriptor set layout + MESH_EXT push constant（base_slot，16B，naga 用 `var<immediate>`）；逐实例 GPU 视锥剔除（Gribb–Hartmann，Vulkan z∈[0,1] 近=r2 远=r3−r2）+ 立方体/远档十字按距离²选几何；地面场静态一次性上传跳过 CPU 剔除；**maxMeshWorkGroupCount[0] 最低保证 65535，地面场 65536 workgroup 必须按查询上限分块下发（已修，字段 mesh_max_wg_x）**；设备创建在扩展可用时才挂 PhysicalDeviceMeshShaderFeaturesEXT，本机 dzn 不可用 → 设备创建与旧代码逐字节一致；传统路径零回归（冒烟 ALL-OK，kills=1 VUID=0 fps 254–325）。遗留：mesh 路径本机无法真机运行，需 Windows 原生 Vulkan / mesh 驱动环境验证。
+  - ② README.md 重构为对外进度说明书：完成。commit `bf95aee`（重构）+ `c686c51`（更新：259 tests、网格着色器可选路径状态）。
+  - ③ AGENTS.md 升级为正式交接文档：完成。commit `0ea4383`。
+  - 验收快照：259 tests 全绿（含 UDP 回环，需提权环境跑）、0 警告、冒烟 ALL-OK。附带修正：仓库中 4 个既有 .spv 为陈旧产物（与 build.rs 输出不一致），已随 feat 刷新。
+- 状态：done
+
 ## 当前进度快照（2026-08-08，wsl --shutdown 前固化）
 
 ### 已完成（Wave 2/3/4 + 2026-08-08 渲染/输入修复，全部已推送 origin/master）
@@ -260,6 +273,6 @@
   flat shading（法线=平面法线），乘性染色；法线贴图/PBR/阴影是传统光栅特性 dzn 可跑
 - Windows 原生 Vulkan 规划：`docs/windows-native-vulkan-plan-2026-08-09.md`（阶段 A=swapchain
   +present 对照 present_us/GPU util，需 Windows 真机）
-- 验收：254 tests 全绿、0 警告；冒烟待跑（下一会话第一项）
+- 验收：259 tests 全绿、0 警告；冒烟待跑（下一会话第一项）
 - 教训：`handle_join` 内部已发 ack，调用方勿再 send_to（重复 ack 坑）；UDP 回环测试
   在沙箱内 bind 会 PermissionDenied，cargo test 必须提权跑
