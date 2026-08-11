@@ -169,6 +169,51 @@ pub struct Npc {
     pub knockback: [f32; 2],
 }
 
+/// AI 分层调度优先级（线程优化第 1 步，2026-08-11）：
+/// Near = 与玩家/敌对目标实时交互或距离近（延迟敏感，走 P 核 / CCD0 簇，每帧步进）；
+/// Far = 距离远且当前无交互（延迟不敏感，走 E 核 / CCD1，可降频）。
+#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AiTier {
+    Near,
+    Far,
+}
+
+/// 分层阈值参数（可配置；接入双池调度时由主循环/配置注入）
+#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AiTierParams {
+    /// 近档半径（米）：到目标距离 ≤ 该值 → Near
+    pub near_radius: f32,
+}
+
+impl Default for AiTierParams {
+    fn default() -> Self {
+        Self { near_radius: 100.0 }
+    }
+}
+
+/// 纯函数：单个 NPC 分层判定。
+/// `dist_sq` 为到目标（玩家或敌对 NPC）的距离平方；`interacting` 表示当前与目标存在
+/// 实时交互（攻击态 / 感知到敌人 / 受击 / 被瞄准等）。交互中一律 Near（每帧步进），
+/// 否则按距离阈值划分。
+#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
+pub fn classify_ai_tier(dist_sq: f32, interacting: bool, params: &AiTierParams) -> AiTier {
+    if interacting || dist_sq <= params.near_radius * params.near_radius {
+        AiTier::Near
+    } else {
+        AiTier::Far
+    }
+}
+
+/// 就地稳定分区：Near 在前、Far 在后，返回 Near 段长度；组内保持原相对顺序。
+/// 各 NPC 独立读写（AiStepCtx 只读），重排不改变步进语义。泛型便于纯逻辑单测。
+#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
+pub fn partition_ai_tiers<T>(items: &mut [T], tier_of: impl Fn(&T) -> AiTier) -> usize {
+    items.sort_by_key(|it| tier_of(it));
+    items.iter().filter(|it| tier_of(it) == AiTier::Near).count()
+}
+
 /// 爆炸实体：冲击波 AoE 伤害 + 径向击退（生成时一次性结算），
 /// 存活期内由 main.rs 生成膨胀淡出的闪光 marker（复用主 pipeline）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2545,6 +2590,85 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_tier_classify_boundaries() {
+        let p = AiTierParams::default();
+        // 交互中即使超远也 Near（每帧步进，不降频）
+        assert_eq!(classify_ai_tier(1.0e9, true, &p), AiTier::Near);
+        // 距离 ≤ 阈值 → Near（含边界相等）
+        assert_eq!(classify_ai_tier(0.0, false, &p), AiTier::Near);
+        assert_eq!(
+            classify_ai_tier(p.near_radius * p.near_radius, false, &p),
+            AiTier::Near
+        );
+        // 超远且不交互 → Far
+        assert_eq!(
+            classify_ai_tier(p.near_radius * p.near_radius + 1.0, false, &p),
+            AiTier::Far
+        );
+    }
+
+    #[test]
+    fn ai_tier_partition_stable_and_split() {
+        // (id, 期望档位) 乱序输入；分区后 Near 段在前、组内相对顺序保持
+        let mut items = vec![
+            (3u32, AiTier::Far),
+            (0, AiTier::Near),
+            (4, AiTier::Far),
+            (1, AiTier::Near),
+            (2, AiTier::Near),
+        ];
+        let near_len = partition_ai_tiers(&mut items, |(_, t)| *t);
+        assert_eq!(near_len, 3);
+        let (near, far) = items.split_at(near_len);
+        assert!(near.iter().all(|(_, t)| *t == AiTier::Near));
+        assert!(far.iter().all(|(_, t)| *t == AiTier::Far));
+        // 稳定分区：Near 原顺序 0,1,2；Far 原顺序 3,4
+        assert_eq!(
+            near.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            far.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
+
+    #[test]
+    fn ai_tier_partition_empty_and_uniform() {
+        let mut empty: Vec<u32> = Vec::new();
+        assert_eq!(partition_ai_tiers(&mut empty, |_| AiTier::Near), 0);
+        let mut all_near = vec![7u32, 8, 9];
+        assert_eq!(partition_ai_tiers(&mut all_near, |_| AiTier::Near), 3);
+        assert_eq!(all_near, vec![7, 8, 9]); // 稳定：全 Near 原序不变
+        let mut all_far = vec![7u32, 8, 9];
+        assert_eq!(partition_ai_tiers(&mut all_far, |_| AiTier::Far), 0);
+        assert_eq!(all_far, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn ai_tier_partition_with_real_npc_tier() {
+        // 真实 Npc：按到玩家距离平方 + 交互标志分层
+        let params = AiTierParams::default();
+        let mut npcs = vec![
+            npc_at(0, Team::Red, [10.0, 0.0, 0.0]),  // 近 → Near
+            npc_at(1, Team::Red, [500.0, 0.0, 0.0]), // 远 → Far
+            npc_at(2, Team::Red, [300.0, 0.0, 0.0]), // 远 → Far
+            npc_at(3, Team::Red, [30.0, 0.0, 0.0]),  // 近 → Near
+        ];
+        let player = [0.0f32, 0.0, 0.0];
+        let near_len = partition_ai_tiers(&mut npcs, |n| {
+            let dx = n.position[0] - player[0];
+            let dz = n.position[2] - player[2];
+            classify_ai_tier(dx * dx + dz * dz, false, &params)
+        });
+        assert_eq!(near_len, 2);
+        assert_eq!(npcs[0].id, 0);
+        assert_eq!(npcs[1].id, 3);
+        assert_eq!(npcs[2].id, 1);
+        assert_eq!(npcs[3].id, 2);
+    }
 
     /// 关卡障碍刚体应贴地落地并静止（程序化地图替代原 3 AABB + 2 球体演示场景）
     #[test]
