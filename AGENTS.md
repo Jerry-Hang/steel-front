@@ -37,7 +37,7 @@
 - ① 渲染主路径迁移网格着色器（VK_EXT_mesh_shader，WGSL mesh 着色器 + GPU 剔除；传统 VERTEX+FRAGMENT 管线保留为回退——WSLg/dzn 不支持 mesh shader，实测 VK_EXT_mesh_shader=false；naga 30 支持 `enable wgpu_mesh_shader` + `@stage(mesh)` 输出变量语法）｜负责人：当前会话 AI｜状态：done（已冻结，仅保留接口/验证功能，见下方 2026-08-11 渲染技术路线决策交接）
 - ② README.md 重构为对外进度说明书｜负责人：Newton｜状态：in_progress
 - ③ AGENTS.md 重构为正式交接文档（本任务）｜负责人：当前会话 AI｜状态：in_progress
-- ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：in_progress（第 1-2 步完成：AI 近/远分组纯函数 + 双池调度——近组走 scene_pool=P 核/CCD0、远组走 ai_pool=CCD1/E 核，Intel 策略改为"有 E-core 即绑 E-core 接远 AI"；263 tests + 冒烟 ALL-OK，日志带 near/far 计数；第 3 步低频重计算挪核待做）
+- ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：in_progress（第 1-3 步完成：AI 近/远分组纯函数 + 双池调度（近组 scene_pool=P 核/CCD0、远组 ai_pool=CCD1/E 核，Intel 有 E-core 即绑 E-core）+ 地图生成换核（`ThreadPool::run_sync` 走 ai_pool）+ 远组降频（`AI_FAR_DECIMATE=4`，压力模式开，无感知/非交互远 NPC 按 id 分帧跳过，交互中恒每帧）；265 tests + 冒烟 ALL-OK；第 4 步压力模式基准验证待做）
 
 ### [2026-08-11] 交接：迭代方向决策（鼠标推迟 / 美术阴影烘焙优先 / 线程分层调度）
 
