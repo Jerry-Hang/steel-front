@@ -1,6 +1,20 @@
-import ctypes, math, time, sys, re
+import ctypes, math, time, sys, re, os
 LOG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/gameplay_smoke.log"
-SENS = 0.003  # rad/px, 与 camera.rs MOUSE_SENSITIVITY 一致
+
+def load_sens():
+    """从 ~/.steel_front.cfg 读真实灵敏度：sensitivity_rads = 0.0005 + s*0.002。
+    与 main.rs 的公式保持一致，防止脚本标定与游戏实际灵敏度失配导致收敛失败。"""
+    try:
+        with open(os.path.expanduser("~/.steel_front.cfg")) as f:
+            for line in f:
+                if line.startswith("sensitivity="):
+                    s = float(line.split("=", 1)[1])
+                    return 0.0005 + s * 0.002
+    except (OSError, ValueError):
+        pass
+    return 0.0015  # 默认灵敏度 0.5
+
+SENS = load_sens()  # rad/px（与 main.rs set_mouse_sens 同源）
 DEG_PX = math.degrees(SENS)
 x11 = ctypes.CDLL("libX11.so.6"); xtst = ctypes.CDLL("libXtst.so.6")
 x11.XOpenDisplay.restype = ctypes.c_void_p
@@ -99,7 +113,7 @@ def cam_now(txt):
     if not m: return None
     return (float(m[-1][0]), float(m[-1][1]))
 def aim(yaw_tgt_deg, pitch_tgt_deg, hold_lmb):
-    for _ in range(6):
+    for _ in range(5):
         warp_to_center(quiet=True)               # 每轮回中：相对位移不累积漂出窗口
         txt = log_tail()
         cur = cam_now(txt)
@@ -111,14 +125,23 @@ def aim(yaw_tgt_deg, pitch_tgt_deg, hold_lmb):
         dy = int(dpitch / DEG_PX)
         print(f"  aim round: cur=({cur[0]:.1f},{cur[1]:.1f}) tgt=({yaw_tgt_deg:.1f},{pitch_tgt_deg:.1f}) "
               f"inject=({dx},{dy})", flush=True)
-        if abs(dx) < 2 and abs(dy) < 2:
+        if abs(dx) <= 8 and abs(dy) <= 8:
             if hold_lmb:
                 xtst.XTestFakeButtonEvent(d, 1, 0, 0); flush()   # 松键：收敛即结束拖拽
             return True
         if hold_lmb:
             xtst.XTestFakeButtonEvent(d, 1, 1, 0); flush()
-        xtst.XTestFakeRelativeMotionEvent(d, max(-400, min(400, dx)), max(-400, min(400, dy)), 0)
-        flush(); time.sleep(1.2)
+        # 分块注入（≤400px/事件）：游戏绝对位置路径有 512px 传送守卫，单次大跳会被
+        # 跳过；游戏每事件后回中指针，分块从窗口中心连续累加，等效一次完整注入。
+        rx, ry = dx, dy
+        while rx != 0 or ry != 0:
+            cx = max(-400, min(400, rx))
+            cy = max(-400, min(400, ry))
+            xtst.XTestFakeRelativeMotionEvent(d, cx, cy, 0)
+            flush(); time.sleep(0.03)
+            rx -= cx
+            ry -= cy
+        flush(); time.sleep(1.0)   # 等 1Hz cam 日志更新当前朝向
     if hold_lmb:
         xtst.XTestFakeButtonEvent(d, 1, 0, 0); flush()   # 松键：拖拽瞄准结束
     return False
