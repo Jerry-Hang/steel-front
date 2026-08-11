@@ -8,7 +8,7 @@ use std::ffi::CStr;
 use std::time::Instant;
 use std::fs::File;
 use ash::{
-    ext::debug_utils::Instance as DebugUtils,
+    ext::{debug_utils::Instance as DebugUtils, mesh_shader::Device as MeshShaderDevice},
     khr::{surface::Instance as Surface, swapchain::Device as Swapchain},
     util, vk, Device, Entry, Instance,
 };
@@ -28,7 +28,7 @@ type RawCString = *const u8;
 // 数据类型
 // ============================================================
 
-/// Camera Uniform 数据（view/proj 两个 4x4 矩阵 + lod_params，144 字节）
+/// Camera Uniform 数据（view/proj 两个 4x4 矩阵 + lod_params + 网格着色器扩展字段，256 字节）
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct CameraUniform {
@@ -38,6 +38,11 @@ struct CameraUniform {
     /// x/w：地形网格 LOD 切换距离（shader 不读这两个分量，仅 CPU 侧语义扩展）
     /// y/z：实例远档十字 quad 地面淡出区间（shader 读取，语义保持不变）
     lod_params: [f32; 4],
+    /// 视锥 6 平面（Gribb–Hartmann，法线朝内、归一化）。仅网格着色器读取；
+    /// 传统顶点着色器声明的 ViewProj 只读前 144 字节，本扩展字段对其透明。
+    planes: [[f32; 4]; 6],
+    /// xyz = 相机世界位置，w = 近档距离²（几何 LOD 切换阈值）。仅网格着色器读取。
+    cam_pos: [f32; 4],
 }
 
 // 光照 Uniform 类型与布局由 lighting 模块统一维护（`lighting::LightUniform`，352 字节）。
@@ -562,6 +567,16 @@ pub struct Renderer {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// 可选网格着色器路径（VK_EXT_mesh_shader）：mesh 管线 + 独立 pipeline layout
+    /// （同一 descriptor set layout + MESH_EXT push constant）。mesh_enabled=false 时
+    /// 保持 null 且完全不参与记录阶段，传统顶点管线行为逐字节不变。
+    mesh_enabled: bool,
+    mesh_shader: Option<MeshShaderDevice>,
+    mesh_pipeline: vk::Pipeline,
+    mesh_pipeline_layout: vk::PipelineLayout,
+    /// 设备 maxMeshWorkGroupCount[0]（VK_EXT_mesh_shader 最低保证 65535）；
+    /// 地面场 65536 个 workgroup 单次下发会超限，绘制按此值分块。
+    mesh_max_wg_x: u32,
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
@@ -696,6 +711,7 @@ impl Renderer {
         renderer.init_depth_resources()?;
         renderer.init_descriptors()?;       // ← 新增
         renderer.init_pipeline()?;
+        renderer.init_mesh_pipeline()?;
         renderer.init_hud()?;
         renderer.init_framebuffers()?;
         renderer.init_texture()?;
@@ -887,16 +903,68 @@ impl Renderer {
             .collect();
 
         let swapchain_ext_name = c"VK_KHR_swapchain";
-        let device_extensions = [swapchain_ext_name.as_ptr()];
+        let mesh_shader_ext_name = c"VK_EXT_mesh_shader";
+        // ---- 可选网格着色器路径：检测 VK_EXT_mesh_shader（仿 gpu_caps.rs 枚举模式）。
+        //      本机 WSLg/dzn 实测扩展缺失 → mesh_enabled=false，设备创建与今天逐字节一致。
+        //      支持时：扩展加入 enabled_extension_names，并把
+        //      PhysicalDeviceMeshShaderFeaturesEXT(mesh_shader=true) 挂到 pNext 链
+        //      （task_shader 不启用：本设计为纯 mesh 阶段，无 task 阶段）。
+        let mesh_shader_available = {
+            let ext_names: Vec<String> = unsafe {
+                instance
+                    .enumerate_device_extension_properties(physical_device)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|e| {
+                        CStr::from_ptr(e.extension_name.as_ptr())
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect()
+            };
+            if ext_names.iter().any(|n| n == "VK_EXT_mesh_shader") {
+                let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+                let mut f2 = vk::PhysicalDeviceFeatures2::default();
+                f2.p_next = &mut mesh_features as *mut _ as *mut std::ffi::c_void;
+                unsafe {
+                    instance.get_physical_device_features2(physical_device, &mut f2);
+                }
+                if mesh_features.mesh_shader == vk::TRUE {
+                    log::info!("VK_EXT_mesh_shader 可用：启用可选网格着色器渲染路径");
+                    true
+                } else {
+                    log::warn!(
+                        "VK_EXT_mesh_shader 扩展存在但 meshShader 特性不可用，回退传统顶点管线"
+                    );
+                    false
+                }
+            } else {
+                log::info!("VK_EXT_mesh_shader 不可用：使用传统顶点渲染路径");
+                false
+            }
+        };
+
+        // 设备创建：mesh 可用时仅追加扩展名与特性结构（其余字段不变）；
+        // 不可用时与旧代码完全一致（enabled_extension_names=[swapchain]，pNext=null）。
+        let mut device_extensions: Vec<RawCString> = vec![swapchain_ext_name.as_ptr()];
+        if mesh_shader_available {
+            device_extensions.push(mesh_shader_ext_name.as_ptr());
+        }
         let supported_features =
             unsafe { instance.get_physical_device_features(physical_device) };
         let mut physical_device_features = vk::PhysicalDeviceFeatures::default();
         physical_device_features.sampler_anisotropy = supported_features.sampler_anisotropy;
 
+        let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extensions)
             .enabled_features(&physical_device_features);
+        let device_create_info = if mesh_shader_available {
+            device_create_info.push_next(&mut mesh_features)
+        } else {
+            device_create_info
+        };
 
         let device = unsafe {
             instance
@@ -913,6 +981,11 @@ impl Renderer {
         };
 
         let swapchain_loader = Swapchain::new(&instance, &device);
+        let mesh_shader_loader = if mesh_shader_available {
+            Some(MeshShaderDevice::new(&instance, &device))
+        } else {
+            None
+        };
 
         Ok(Self {
             _entry: entry,
@@ -937,6 +1010,11 @@ impl Renderer {
             render_pass: vk::RenderPass::null(),
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
+            mesh_enabled: mesh_shader_available,
+            mesh_shader: mesh_shader_loader,
+            mesh_pipeline: vk::Pipeline::null(),
+            mesh_pipeline_layout: vk::PipelineLayout::null(),
+            mesh_max_wg_x: 1,
             framebuffers: Vec::new(),
             command_pool: vk::CommandPool::null(),
             command_buffers: Vec::new(),
@@ -1365,24 +1443,34 @@ impl Renderer {
         let max_frames = self.max_frames_in_flight;
 
         // ---- 1. 创建 Descriptor Set Layout ----
-        // 描述：binding=0, 类型=UNIFORM_BUFFER, 阶段=VERTEX
+        // 描述：binding=0, 类型=UNIFORM_BUFFER, 阶段=VERTEX（mesh 路径额外 +MESH_EXT）
+        let ubo_stage_flags = if self.mesh_enabled {
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::MESH_EXT
+        } else {
+            vk::ShaderStageFlags::VERTEX
+        };
         let ubo_layout_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX);
+            .stage_flags(ubo_stage_flags);
         // 纹理采样（贴图 binding=1，采样器 binding=3，均只在 Fragment 阶段使用）
         let sampled_image_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(1)
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        // 实例 storage buffer（binding=2，Vertex 阶段读取）
+        // 实例 storage buffer（binding=2，Vertex 阶段读取；mesh 路径额外 +MESH_EXT）
+        let storage_stage_flags = if self.mesh_enabled {
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::MESH_EXT
+        } else {
+            vk::ShaderStageFlags::VERTEX
+        };
         let storage_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(2)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX);
+            .stage_flags(storage_stage_flags);
         let sampler_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(3)
             .descriptor_type(vk::DescriptorType::SAMPLER)
@@ -1747,6 +1835,140 @@ impl Renderer {
         self.create_ground_geometry()?;
         self.create_terrain_lods()?;
         log::info!("图形管线创建完成");
+        Ok(())
+    }
+
+    /// 可选网格着色器管线（VK_EXT_mesh_shader）：
+    /// - 阶段 = MESH_EXT + FRAGMENT（片元着色器与主管线同一模块，原样复用）；
+    /// - 无 vertex input state / input assembly state（VK_EXT_mesh_shader 要求二者为 NULL）；
+    /// - rasterization（Back cull + CLOCKWISE）/ depth / blend / viewport 与主管线完全一致；
+    /// - pipeline layout 复用同一 descriptor set layout，仅追加 MESH_EXT push constant
+    ///   （base_slot，16 字节）；传统管线共用同一 descriptor set layout 不受影响。
+    /// mesh_enabled=false（本机 WSLg/dzn）时直接返回，不加载 mesh.spv、不创建任何资源。
+    fn init_mesh_pipeline(&mut self) -> Result<(), String> {
+        if !self.mesh_enabled {
+            return Ok(());
+        }
+        // maxMeshWorkGroupCount[0]：地面场 65536 workgroup 超最低保证 65535，须分块绘制。
+        let mut mesh_props = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
+        let mut p2 = vk::PhysicalDeviceProperties2::default();
+        p2.p_next = &mut mesh_props as *mut _ as *mut std::ffi::c_void;
+        unsafe {
+            self.instance
+                .get_physical_device_properties2(self.physical_device, &mut p2);
+        }
+        self.mesh_max_wg_x = mesh_props.max_mesh_work_group_count[0].max(1);
+        log::info!(
+            "网格着色器 maxMeshWorkGroupCount[0] = {}（地面场 65536 按此分块）",
+            self.mesh_max_wg_x
+        );
+        let mesh_spirv = load_spirv("assets/mesh.spv")?;
+        let fs_spirv = load_spirv("assets/triangle.frag.spv")?;
+        let mesh_module = self.create_shader_module(&mesh_spirv)?;
+        let fs_module = self.create_shader_module(&fs_spirv)?;
+
+        let mesh_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::MESH_EXT)
+            .module(mesh_module)
+            .name(c"mesh_main");
+        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs_module)
+            .name(c"fs_main");
+        let shader_stages = [mesh_stage, fs_stage];
+
+        let viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(self.swapchain_extent.width as f32)
+            .height(self.swapchain_extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D { x: 0, y: 0 })
+            .extent(self.swapchain_extent);
+        let viewports = [viewport];
+        let scissors = [scissor];
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&viewports)
+            .scissors(&scissors);
+
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false);
+
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
+
+        let color_write_mask = vk::ColorComponentFlags::R
+            | vk::ColorComponentFlags::G
+            | vk::ColorComponentFlags::B
+            | vk::ColorComponentFlags::A;
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(color_write_mask)
+            .blend_enable(false);
+        let color_blend_attachments = [color_blend_attachment];
+        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&color_blend_attachments);
+
+        // 同一 descriptor set layout + MESH_EXT push constant（base_slot，16 字节）
+        let set_layouts = [self.descriptor_set_layout];
+        let push_constant = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::MESH_EXT)
+            .offset(0)
+            .size(16);
+        let mesh_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(std::slice::from_ref(&push_constant));
+        self.mesh_pipeline_layout = unsafe {
+            self.device
+                .create_pipeline_layout(&mesh_layout_info, None)
+                .map_err(|e| format!("创建网格管线布局失败: {}", e))?
+        };
+
+        // mesh 管线：pVertexInputState / pInputAssemblyState 必须为 NULL（ash 默认即 null）
+        let pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil)
+            .color_blend_state(&color_blend_state)
+            .layout(self.mesh_pipeline_layout)
+            .render_pass(self.render_pass)
+            .subpass(0);
+
+        self.mesh_pipeline = unsafe {
+            self.device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[pipeline_create_info],
+                    None,
+                )
+                .map_err(|(_, e)| format!("创建网格着色器管线失败: {}", e))?
+                .remove(0)
+        };
+
+        unsafe {
+            self.device.destroy_shader_module(mesh_module, None);
+            self.device.destroy_shader_module(fs_module, None);
+        }
+        log::info!("网格着色器管线创建完成（VK_EXT_mesh_shader）");
         Ok(())
     }
 
@@ -2707,6 +2929,22 @@ impl Renderer {
             }
         }
 
+        if self.mesh_enabled {
+            // mesh 路径：地面实例场完全静态（创建后永不修改），初始化时一次性写入全部
+            // 槽位（0..INSTANCE_COUNT）到每帧 buffer；此后每帧只上传 marker/NPC/自发光
+            // 增量，完全跳过 CPU SIMD 剔除与压缩上传（5.24MB 一次性带宽换每帧 CPU 减负）。
+            let bytes = self.instances.len() * std::mem::size_of::<InstanceData>();
+            for &mapped in &self.instance_mapped {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        self.instances.as_ptr() as *const u8,
+                        mapped as *mut u8,
+                        bytes,
+                    );
+                }
+            }
+        }
+
         log::info!(
             "实例缓冲创建完成: {} 个实例，stride {} 字节，{} 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）",
             INSTANCE_COUNT,
@@ -3140,6 +3378,21 @@ impl Renderer {
             _ => return (0, 0),
         };
         let stride = std::mem::size_of::<InstanceData>();
+        if self.mesh_enabled {
+            // mesh 路径：不做近/远压缩，顺序写槽位（几何由 shader 按距离自选）。
+            // 返回 (count, 0)：计数仍供 draw 范围与性能日志使用。
+            let count = self.markers.len() as u32;
+            for (i, inst) in self.markers.iter().enumerate() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((MARKER_SLOT_BASE + i as u32) as usize) * stride),
+                        stride,
+                    );
+                }
+            }
+            return (count, 0);
+        }
         // 近/远档分界距离随画质预设变化（Medium 与原 LOD_DISTANCE 一致）
         let near_sq = quality_params(self.quality).instance_lod_distance;
         let near_sq = near_sq * near_sq;
@@ -3201,6 +3454,19 @@ impl Renderer {
             _ => return (0, 0),
         };
         let stride = std::mem::size_of::<InstanceData>();
+        if self.mesh_enabled {
+            let count = self.emissive_markers.len() as u32;
+            for (i, inst) in self.emissive_markers.iter().enumerate() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((EMISSIVE_SLOT_BASE + i as u32) as usize) * stride),
+                        stride,
+                    );
+                }
+            }
+            return (count, 0);
+        }
         let near_sq = quality_params(self.quality).instance_lod_distance;
         let near_sq = near_sq * near_sq;
         let mut near_count = 0u32;
@@ -3296,6 +3562,19 @@ impl Renderer {
             _ => return (0, 0),
         };
         let stride = std::mem::size_of::<InstanceData>();
+        if self.mesh_enabled {
+            let count = self.npc_parts.len() as u32;
+            for (i, inst) in self.npc_parts.iter().enumerate() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((NPC_SLOT_BASE + i as u32) as usize) * stride),
+                        stride,
+                    );
+                }
+            }
+            return (count, 0);
+        }
         // 近/远档分界距离随画质预设变化（与 marker/实例场同源）
         let near_sq = quality_params(self.quality).instance_lod_distance;
         let near_sq = near_sq * near_sq;
@@ -4396,6 +4675,49 @@ impl Renderer {
             }
         }
 
+        if self.mesh_enabled {
+            // ---- 网格着色器路径（VK_EXT_mesh_shader）：逐实例 GPU 视锥剔除 + 顶点变换 ----
+            // 地面实例场静态一次性上传（槽位 0..INSTANCE_COUNT）；marker/NPC/自发光每帧
+            // 顺序上传到各自 BASE 槽位（shader 按距离自选立方体 / 远档十字 quad 几何）。
+            let mesh = self
+                .mesh_shader
+                .as_ref()
+                .expect("mesh_enabled=true 但 vkCmdDrawMeshTasksEXT 加载器缺失");
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.mesh_pipeline,
+                );
+                self.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.mesh_pipeline_layout,
+                    0,
+                    &descriptor_sets,
+                    &[],
+                );
+            }
+            self.draw_mesh_range(command_buffer, mesh, 0, INSTANCE_COUNT);
+            self.draw_mesh_range(
+                command_buffer,
+                mesh,
+                MARKER_SLOT_BASE,
+                self.last_marker_near + self.last_marker_far,
+            );
+            self.draw_mesh_range(
+                command_buffer,
+                mesh,
+                NPC_SLOT_BASE,
+                self.last_npc_near + self.last_npc_far,
+            );
+            self.draw_mesh_range(
+                command_buffer,
+                mesh,
+                EMISSIVE_SLOT_BASE,
+                self.last_emissive_near + self.last_emissive_far,
+            );
+        } else {
         // 近档地面 draw call：平铺 quad 几何（无侧壁），实例区从 0 开始
         if near_count > 0 {
             let vertex_buffers = [self.ground_vertex_buffer];
@@ -4614,6 +4936,7 @@ impl Renderer {
                 );
             }
         }
+        }
 
         // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
         if self.hud_vertex_count > 0 && self.hud_pipeline != vk::Pipeline::null() {
@@ -4642,6 +4965,45 @@ impl Renderer {
                 .map_err(|e| format!("结束命令缓冲失败: {}", e))?;
         }
         Ok(())
+    }
+
+    /// mesh 路径单次 draw：写入 base_slot push constant 后调用 vkCmdDrawMeshTasksEXT。
+    /// count=0 直接返回（Vulkan 允许 group_count=0，这里避免无意义调用）。
+    fn draw_mesh_range(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        mesh: &MeshShaderDevice,
+        base_slot: u32,
+        count: u32,
+    ) {
+        if count == 0 {
+            return;
+        }
+        // push constant = (base_slot + chunk_start, 0, 0, 0)：
+        // workgroup_id.x 从 0 起，槽位 = base + wg.x；每次下发不超过 maxMeshWorkGroupCount[0]。
+        let chunk = self.mesh_max_wg_x.max(1);
+        let mut drawn = 0u32;
+        while drawn < count {
+            let n = (count - drawn).min(chunk);
+            let push: [u32; 4] = [base_slot + drawn, 0, 0, 0];
+            let push_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    push.as_ptr() as *const u8,
+                    std::mem::size_of::<[u32; 4]>(),
+                )
+            };
+            unsafe {
+                self.device.cmd_push_constants(
+                    command_buffer,
+                    self.mesh_pipeline_layout,
+                    vk::ShaderStageFlags::MESH_EXT,
+                    0,
+                    push_bytes,
+                );
+                mesh.cmd_draw_mesh_tasks(command_buffer, n, 1, 1);
+            }
+            drawn += n;
+        }
     }
 
     fn init_sync_objects(&mut self) -> Result<(), String> {
@@ -4747,7 +5109,14 @@ impl Renderer {
         // 相机世界位置（view 为刚体变换，其逆矩阵的平移列即相机坐标），每帧只算一次
         let cam_pos = view.inverse().w_axis.truncate();
         let cull_start = Instant::now();
-        let (near_count, far_count) = self.cull_and_upload(view, proj, cam_pos);
+        let (near_count, far_count) = if self.mesh_enabled {
+            // mesh 路径：地面实例场静态一次性上传（见 create_instance_buffer），
+            // 完全跳过 CPU SIMD 剔除/压缩——剔除与顶点变换全部移到 GPU mesh shader。
+            // 性能日志 visible 语义 = 已上传槽位数（INSTANCE_COUNT）。
+            (INSTANCE_COUNT, 0)
+        } else {
+            self.cull_and_upload(view, proj, cam_pos)
+        };
         // ---- 世界障碍 marker：独立槽位上传（见 MARKER_SLOT_BASE），计数供 draw call 使用 ----
         let (marker_near, marker_far) = self.upload_markers(cam_pos);
         self.last_marker_near = marker_near;
@@ -4813,6 +5182,13 @@ impl Renderer {
         }
 
         // ---- 每帧把 view/proj 写进 Uniform Buffer（按 frame-in-flight 多份）----
+        // 扩展字段（planes / cam_pos）仅网格着色器读取；传统顶点着色器只读前 144 字节。
+        let (planes, cam_pos_w) = if self.mesh_enabled {
+            let near_sq = quality_params(self.quality).instance_lod_distance;
+            (Self::extract_frustum_planes(view, proj), near_sq * near_sq)
+        } else {
+            ([[0.0f32; 4]; 6], 0.0)
+        };
         let ubo = CameraUniform {
             view,
             proj,
@@ -4823,6 +5199,8 @@ impl Renderer {
                 FADE_END,
                 quality.terrain_lod_med_end,
             ],
+            planes,
+            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, cam_pos_w],
         };
         if let Some(&ptr) = self.uniform_mapped.get(self.current_frame) {
             unsafe {
@@ -5039,6 +5417,13 @@ impl Drop for Renderer {
             }
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            }
+            // 释放可选网格着色器管线（mesh_enabled=false 时为 null，直接跳过）
+            if self.mesh_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.mesh_pipeline, None);
+            }
+            if self.mesh_pipeline_layout != vk::PipelineLayout::null() {
+                self.device.destroy_pipeline_layout(self.mesh_pipeline_layout, None);
             }
             // 释放 HUD 覆盖层（独立 pipeline / 顶点缓冲）
             if self.hud_pipeline != vk::Pipeline::null() {

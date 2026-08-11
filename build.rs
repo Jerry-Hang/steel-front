@@ -236,6 +236,247 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// 网格着色器（VK_EXT_mesh_shader，可选路径）：
+/// 每个 workgroup 负责一个实例槽位，GPU 端逐实例视锥剔除 + 顶点变换，
+/// 输出与顶点着色器完全一致的 VertexOutput（片元着色器原样复用）。
+/// 仅当物理设备支持 VK_EXT_mesh_shader 时才被启用（WSLg/dzn 实测不支持，
+/// 本机回退传统顶点管线）。SPIR-V 输出要求 >= 1.4（MeshShadingEXT）。
+const MESH_SHADER_WGSL: &str = r#"
+enable wgpu_mesh_shader;
+
+struct MeshCamera {
+    view: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    // lod_params = (lod_dist, fade_start, fade_end, 0)
+    lod_params: vec4<f32>,
+    // 视锥 6 平面（Gribb–Hartmann，法线朝内、归一化；与 renderer.rs CPU 剔除同源）
+    planes: array<vec4<f32>, 6>,
+    // xyz = 相机世界位置，w = 近档距离²（几何 LOD 切换阈值，随画质预设变化）
+    cam_pos: vec4<f32>,
+}
+@group(0) @binding(0) var<uniform> camera: MeshCamera;
+
+struct Instance {
+    model: mat4x4<f32>,
+    tint: vec4<f32>,
+}
+@group(0) @binding(2) var<storage, read> instances: array<Instance>;
+
+// 槽位约定（必须与 renderer.rs 常量同步）：
+// TERRAIN_INSTANCE_INDEX=65536（地形 identity，mesh 路径不绘制该槽）、
+// NPC_INSTANCE_BASE=65536+1+64=65601、EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+1024=66625
+const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
+const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 1024u;
+
+// 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) fade: f32,
+    @location(3) world_pos: vec3<f32>,
+    @location(4) view_dir: vec3<f32>,
+    @location(5) flat_flag: f32,
+}
+
+struct MeshPrimitive {
+    @builtin(triangle_indices) indices: vec3<u32>,
+}
+
+// 最大几何 = 近档立方体（24 顶点 / 12 三角形）
+struct MeshOutput {
+    @builtin(vertex_count) vertex_count: u32,
+    @builtin(primitive_count) primitive_count: u32,
+    @builtin(vertices) vertices: array<VertexOutput, 24>,
+    @builtin(primitives) primitives: array<MeshPrimitive, 12>,
+}
+var<workgroup> mesh_out: MeshOutput;
+
+// 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=65601 / 自发光=66625
+struct MeshPush {
+    base_slot: u32,
+    // 填充到 16 字节（与 renderer.rs push constant range size=16 精确一致）
+    pad: array<u32, 3>,
+}
+// naga 30 用 immediate 地址空间替代 push_constant（SPIR-V 后端映射为 PushConstant 存储类）
+var<immediate> mesh_push: MeshPush;
+
+// ---- 几何表：与 renderer.rs 顶点缓冲数据逐值一致（模型空间）----
+// 地面平铺 quad（GROUND_VERTS + GROUND_INDICES，绕序 [0,2,1,0,3,2]）
+const GROUND_POS: array<vec3<f32>, 4> = array<vec3<f32>, 4>(
+    vec3<f32>(-1.0, 0.0, 1.0),
+    vec3<f32>(1.0, 0.0, 1.0),
+    vec3<f32>(1.0, 0.0, -1.0),
+    vec3<f32>(-1.0, 0.0, -1.0),
+);
+const GROUND_UV: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(1.0, 0.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, 1.0),
+);
+const GROUND_TRI: array<vec3<u32>, 2> = array<vec3<u32>, 2>(
+    vec3<u32>(0u, 2u, 1u),
+    vec3<u32>(0u, 3u, 2u),
+);
+
+// 立方体 24 顶点（VERTICES，每面 UV 铺满 0..1；顶点色白化后 color = tint）
+const CUBE_POS: array<vec3<f32>, 24> = array<vec3<f32>, 24>(
+    vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(1.0, -1.0, 1.0),
+    vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(-1.0, 1.0, 1.0),
+    vec3<f32>(1.0, -1.0, -1.0), vec3<f32>(-1.0, -1.0, -1.0),
+    vec3<f32>(-1.0, 1.0, -1.0), vec3<f32>(1.0, 1.0, -1.0),
+    vec3<f32>(1.0, -1.0, 1.0), vec3<f32>(1.0, -1.0, -1.0),
+    vec3<f32>(1.0, 1.0, -1.0), vec3<f32>(1.0, 1.0, 1.0),
+    vec3<f32>(-1.0, -1.0, -1.0), vec3<f32>(-1.0, -1.0, 1.0),
+    vec3<f32>(-1.0, 1.0, 1.0), vec3<f32>(-1.0, 1.0, -1.0),
+    vec3<f32>(-1.0, 1.0, 1.0), vec3<f32>(1.0, 1.0, 1.0),
+    vec3<f32>(1.0, 1.0, -1.0), vec3<f32>(-1.0, 1.0, -1.0),
+    vec3<f32>(-1.0, -1.0, -1.0), vec3<f32>(1.0, -1.0, -1.0),
+    vec3<f32>(1.0, -1.0, 1.0), vec3<f32>(-1.0, -1.0, 1.0),
+);
+const CUBE_UV: array<vec2<f32>, 24> = array<vec2<f32>, 24>(
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+);
+const CUBE_TRI: array<vec3<u32>, 12> = array<vec3<u32>, 12>(
+    vec3<u32>(0u, 1u, 2u), vec3<u32>(0u, 2u, 3u),
+    vec3<u32>(4u, 5u, 6u), vec3<u32>(4u, 6u, 7u),
+    vec3<u32>(8u, 9u, 10u), vec3<u32>(8u, 10u, 11u),
+    vec3<u32>(12u, 13u, 14u), vec3<u32>(12u, 14u, 15u),
+    vec3<u32>(16u, 17u, 18u), vec3<u32>(16u, 18u, 19u),
+    vec3<u32>(20u, 21u, 22u), vec3<u32>(20u, 22u, 23u),
+);
+
+// 远档十字双 quad（FAR_VERTS + FAR_INDICES）
+const CROSS_POS: array<vec3<f32>, 8> = array<vec3<f32>, 8>(
+    vec3<f32>(-1.0, -1.0, 0.0), vec3<f32>(1.0, -1.0, 0.0),
+    vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(-1.0, 1.0, 0.0),
+    vec3<f32>(0.0, -1.0, 1.0), vec3<f32>(0.0, -1.0, -1.0),
+    vec3<f32>(0.0, 1.0, -1.0), vec3<f32>(0.0, 1.0, 1.0),
+);
+const CROSS_UV: array<vec2<f32>, 8> = array<vec2<f32>, 8>(
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+);
+const CROSS_TRI: array<vec3<u32>, 4> = array<vec3<u32>, 4>(
+    vec3<u32>(0u, 1u, 2u), vec3<u32>(0u, 2u, 3u),
+    vec3<u32>(4u, 5u, 6u), vec3<u32>(4u, 6u, 7u),
+);
+
+fn write_vertex(
+    lid: u32,
+    pos: vec3<f32>,
+    uv: vec2<f32>,
+    inst: Instance,
+    cam: vec3<f32>,
+    fade: f32,
+    flat: f32,
+) {
+    var v: VertexOutput;
+    let wp = inst.model * vec4<f32>(pos, 1.0);
+    v.position = camera.proj * camera.view * wp;
+    // 顶点色已白化：color = 白 × tint（与顶点着色器 color * inst.tint.rgb 一致）
+    v.color = vec3<f32>(1.0) * inst.tint.rgb;
+    v.uv = uv;
+    v.fade = fade;
+    v.world_pos = wp.xyz;
+    // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（与顶点着色器同源）
+    v.view_dir = normalize(cam - wp.xyz);
+    v.flat_flag = flat;
+    mesh_out.vertices[lid] = v;
+}
+
+@mesh(mesh_out)
+@workgroup_size(32)
+fn mesh_main(
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32,
+) {
+    let slot = mesh_push.base_slot + wg_id.x;
+    let inst = instances[slot];
+    let is_ground = slot < TERRAIN_INSTANCE_INDEX;
+    // 包围球半径：地面 quad 半对角线×0.5（与 CPU instance_radii 一致）；
+    // 立方体/远档十字覆盖 ±1 三轴 → sqrt(3)
+    let radius = select(1.7320508, 0.70710678, is_ground);
+    let center = inst.model[3].xyz;
+
+    // GPU 视锥剔除：与 CPU 同源（法线朝内平面，d = dot(n,c)+d，d < -r 剔除）
+    var visible = true;
+    for (var i = 0u; i < 6u; i = i + 1u) {
+        let p = camera.planes[i];
+        if (dot(p.xyz, center) + p.w < -radius) {
+            visible = false;
+            break;
+        }
+    }
+    if (!visible) {
+        if (lid == 0u) {
+            mesh_out.vertex_count = 0u;
+            mesh_out.primitive_count = 0u;
+        }
+        return;
+    }
+
+    let cam = camera.cam_pos.xyz;
+    let delta = center - cam;
+    let dist2 = dot(delta, delta);
+    // 地面平面距离（不随相机高度变化，俯瞰全场时不误淡出）——与顶点着色器一致
+    let hdist = sqrt(delta.x * delta.x + delta.z * delta.z);
+    var fade = 1.0 - smoothstep(camera.lod_params.y, camera.lod_params.z, hdist);
+    var flat = select(0.0, 1.0, slot >= NPC_INSTANCE_BASE);
+    if (slot >= EMISSIVE_INSTANCE_BASE) {
+        // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
+        flat = 1.0;
+        fade = 2.0;
+    }
+
+    if (is_ground) {
+        if (lid < 4u) {
+            write_vertex(lid, GROUND_POS[lid], GROUND_UV[lid], inst, cam, fade, flat);
+        }
+        if (lid < 2u) {
+            mesh_out.primitives[lid].indices = GROUND_TRI[lid];
+        }
+        if (lid == 0u) {
+            mesh_out.vertex_count = 4u;
+            mesh_out.primitive_count = 2u;
+        }
+        return;
+    }
+
+    // 近档立方体 / 远档十字双 quad：与 CPU 近/远分档同一阈值（全 3D 距离²）
+    if (dist2 < camera.cam_pos.w) {
+        if (lid < 24u) {
+            write_vertex(lid, CUBE_POS[lid], CUBE_UV[lid], inst, cam, fade, flat);
+        }
+        if (lid < 12u) {
+            mesh_out.primitives[lid].indices = CUBE_TRI[lid];
+        }
+        if (lid == 0u) {
+            mesh_out.vertex_count = 24u;
+            mesh_out.primitive_count = 12u;
+        }
+    } else {
+        if (lid < 8u) {
+            write_vertex(lid, CROSS_POS[lid], CROSS_UV[lid], inst, cam, fade, flat);
+        }
+        if (lid < 4u) {
+            mesh_out.primitives[lid].indices = CROSS_TRI[lid];
+        }
+        if (lid == 0u) {
+            mesh_out.vertex_count = 8u;
+            mesh_out.primitive_count = 4u;
+        }
+    }
+}
+"#;
+
 fn compile_wgsl(source: &str) -> Vec<u32> {
     let module = naga::front::wgsl::parse_str(source).expect("WGSL 着色器解析失败");
     let info = naga::valid::Validator::new(
@@ -245,6 +486,23 @@ fn compile_wgsl(source: &str) -> Vec<u32> {
     .validate(&module)
     .expect("WGSL 着色器验证失败");
     let options = naga::back::spv::Options::default();
+    naga::back::spv::write_vec(&module, &info, &options, None).expect("SPIR-V 生成失败")
+}
+
+/// 网格着色器编译：SPIR-V 必须 >= 1.4（MeshShadingEXT 能力），
+/// 其余选项（含 ADJUST_COORDINATE_SPACE 的 Y 翻转）与顶点着色器完全一致。
+fn compile_wgsl_mesh(source: &str) -> Vec<u32> {
+    let module = naga::front::wgsl::parse_str(source).expect("WGSL 网格着色器解析失败");
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::default(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("WGSL 网格着色器验证失败");
+    let options = naga::back::spv::Options {
+        lang_version: (1, 4),
+        ..naga::back::spv::Options::default()
+    };
     naga::back::spv::write_vec(&module, &info, &options, None).expect("SPIR-V 生成失败")
 }
 
@@ -284,6 +542,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let vs_spirv = compile_wgsl(VERTEX_SHADER_WGSL);
     let fs_spirv = compile_wgsl(FRAGMENT_SHADER_WGSL);
+    let mesh_spirv = compile_wgsl_mesh(MESH_SHADER_WGSL);
     let hud_vs_spirv = compile_wgsl(HUD_VERTEX_SHADER_WGSL);
     let hud_fs_spirv = compile_wgsl(HUD_FRAGMENT_SHADER_WGSL);
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR 环境变量未设置");
@@ -296,6 +555,9 @@ fn main() {
     output.push_str("/// 片元着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const FS_SPIRV: &[u32] = &{:?};\n", fs_spirv));
+    output.push_str("/// 网格着色器 SPIR-V 字节码\n");
+    output.push_str("#[allow(dead_code)]\n");
+    output.push_str(&format!("pub const MESH_SPIRV: &[u32] = &{:?};\n", mesh_spirv));
     output.push_str("/// HUD 顶点着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const HUD_VS_SPIRV: &[u32] = &{:?};\n\n", hud_vs_spirv));
@@ -314,6 +576,7 @@ fn main() {
     };
     write_spv(&vs_spirv, "triangle.vert.spv");
     write_spv(&fs_spirv, "triangle.frag.spv");
+    write_spv(&mesh_spirv, "mesh.spv");
     write_spv(&hud_vs_spirv, "hud.vert.spv");
     write_spv(&hud_fs_spirv, "hud.frag.spv");
     println!("cargo:info=着色器编译完成");
