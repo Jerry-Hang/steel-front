@@ -1,4 +1,4 @@
-# AGENTS.md — Steel Front 项目记忆
+# AGENTS.md — Steel Front 项目记忆与 AI 交接文档
 
 ## 项目
 二战题材 FPS，Rust + Vulkan（winit 0.30），零第三方游戏依赖，纯 bin crate。
@@ -10,6 +10,33 @@
 - 测试：`cargo test`（纯逻辑，不碰 GPU）；冒烟 `bash scripts/run_gameplay_smoke.sh`（需 X/Vulkan，20s，断言 kills>0）
 - 验收约束：dead-code=0（0 警告）、测试全绿、不新增第三方依赖、commit 规范 `feat(game)/chore/docs`
 - 内存约束：12GB，一次只跑一个 cargo，禁止并行构建
+
+## 迭代规划与交接日志（AI 交接规范）
+
+本文件是**唯一的正式 AI 交接载体**（项目记忆 + 迭代规划 + 交接留痕一体化）。所有 AI 会话（含并行智能体，如 Newton）在本仓库工作，必须遵守以下交接协议：
+
+- **规划开启**：每次迭代/任务规划开始时，必须在本节登记：目标、任务拆解、负责人、状态（in_progress）。
+- **迭代结束**：迭代结束时必须在本节写完成记录：完成项、验收结果（测试数/警告数/冒烟结果）、遗留问题与下一步。
+- **AI 间交接**：AI 与 AI 之间的所有交接必须在此留痕——上下文交接（记忆/结论迁移）、任务交接（接手/移交）、绘画/美术素材交接（素材路径、用途、规格、验收标准），格式：日期、发起方、接收方、交接内容、状态。
+- **git 提交规范不变**：一个功能一个 commit，禁止 mega-commit；提交信息 `feat/chore/docs/fix` + 范围（如 `feat(game)`、`docs(AGENTS.md)`）；git 操作只在 WSL 内跑，禁止 `\\wsl$` + Windows git。
+
+### 交接日志模板（可复制）
+
+```markdown
+### [YYYY-MM-DD] 交接：<一句话主题>
+- 日期：YYYY-MM-DD
+- 发起方：<AI 名称 / 会话标识>
+- 接收方：<AI 名称 / 会话标识>
+- 交接类型：<规划开启 / 迭代结束 / 任务交接 / 美术素材交接>
+- 交接内容：<目标、拆解、关键结论、素材路径与规格、验收标准等>
+- 状态：<in_progress / done / blocked>
+```
+
+### 当前迭代（2026-08-11）
+
+- ① 渲染主路径迁移网格着色器（VK_EXT_mesh_shader，WGSL mesh 着色器 + GPU 剔除；传统 VERTEX+FRAGMENT 管线保留为回退——WSLg/dzn 不支持 mesh shader，实测 VK_EXT_mesh_shader=false；naga 30 支持 `enable wgpu_mesh_shader` + `@stage(mesh)` 输出变量语法）｜负责人：当前会话 AI｜状态：in_progress
+- ② README.md 重构为对外进度说明书｜负责人：Newton｜状态：in_progress
+- ③ AGENTS.md 重构为正式交接文档（本任务）｜负责人：当前会话 AI｜状态：in_progress
 
 ## 当前进度快照（2026-08-08，wsl --shutdown 前固化）
 
