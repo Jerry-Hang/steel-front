@@ -37,7 +37,16 @@
 - ① 渲染主路径迁移网格着色器（VK_EXT_mesh_shader，WGSL mesh 着色器 + GPU 剔除；传统 VERTEX+FRAGMENT 管线保留为回退——WSLg/dzn 不支持 mesh shader，实测 VK_EXT_mesh_shader=false；naga 30 支持 `enable wgpu_mesh_shader` + `@stage(mesh)` 输出变量语法）｜负责人：当前会话 AI｜状态：done（已冻结，仅保留接口/验证功能，见下方 2026-08-11 渲染技术路线决策交接）
 - ② README.md 重构为对外进度说明书｜负责人：Newton｜状态：in_progress
 - ③ AGENTS.md 重构为正式交接文档（本任务）｜负责人：当前会话 AI｜状态：in_progress
-- ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：in_progress（第 1-3 步完成：AI 近/远分组纯函数 + 双池调度（近组 scene_pool=P 核/CCD0、远组 ai_pool=CCD1/E 核，Intel 有 E-core 即绑 E-core）+ 地图生成换核（`ThreadPool::run_sync` 走 ai_pool）+ 远组降频（`AI_FAR_DECIMATE=4`，压力模式开，无感知/非交互远 NPC 按 id 分帧跳过，交互中恒每帧）；265 tests + 冒烟 ALL-OK；第 4 步压力模式基准验证待做）
+- ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：done（第 1-4 步全部完成：分组纯函数 + 双池调度 + 地图生成换核 + 远组降频；265 tests + 冒烟 ALL-OK；基准存档 `docs/perf-ai-tier-2026-08-11/`——128 NPC 压力模式 near~42/far~85（2/3 AI 走 CCD1/E 核）、ai_us p50≈385µs 非瓶颈、fps p50≈274 无回归、降频 A/B 收益≈0（压力模式互射 NPC 全在 Chase/Attack 触发面小，保留为防御性优化）；`RV3D_AI_DECIMATE=off` 可关降频）
+
+### [2026-08-11] 交接：线程分层调度完成（第 1-4 步）
+
+- 日期：2026-08-11
+- 发起方：当前会话 AI（Codex）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：线程优化四步全部落地——① `AiTier`/`classify_ai_tier`/`partition_ai_tiers`（纯函数+单测）；② 双池调度：近组→`scene_pool`（P 核/CCD0）、远组→`ai_pool`（AMD CCD1 / Intel 有 E-core 即绑 E-core），`update_ai` 开头稳定重排、重排后 pick targets/under_fire 保证索引对齐，逐位一致性测试按 id 对齐；③ 地图生成换核 `ThreadPool::run_sync`（join 语义 + spawn 失败降级）+ 远组降频 `AI_FAR_DECIMATE=4`（红线：攻击/感知/受击/被瞄准恒每帧；`RV3D_AI_DECIMATE=off` 关闭）；④ 基准验证见 `docs/perf-ai-tier-2026-08-11/`（分层生效、AI 非瓶颈、压力模式降频收益≈0 属预期）。验收：265 tests、0 警告、冒烟 ALL-OK（kills=1、VUID=0、fps 244-303）。
+- 状态：done
 
 ### [2026-08-11] 交接：迭代方向决策（鼠标推迟 / 美术阴影烘焙优先 / 线程分层调度）
 
