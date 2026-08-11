@@ -153,6 +153,11 @@
   （跳过贴图 50% 混合），保证阵营色可辨；marker/地形仍走纹理混合路径。改槽位常量需同步
   build.rs `NPC_INSTANCE_BASE` 与 renderer.rs `NPC_SLOT_BASE`（build.rs 每次构建重新生成
   assets/*.spv，改 WGSL 后必须重新构建，勿手改 .spv）
+- 地面几何（2026-08-10，`b4558c5`）：管线 CullMode::BACK + FrontFace::CLOCKWISE + shader Y 翻转
+  下，立方体顶面（顺时针绕序）从上方看是背面被剔除——旧"压扁立方体"地板只剩垂直侧壁，
+  呈现纸箱盖/竖板格。地面改用专用平铺 quad（GROUND_VERTS/INDICES，4 顶点 6 索引，
+  绕序 `[0,2,1,0,3,2]` 反向才正面朝上；正向绕序 → 整片地面消失只剩 clear color，是诊断信号）；
+  地面实例矩阵纯平移 y=+0.05（无几何侧壁），地形网格下沉 TERRAIN_RENDER_SINK=0.35 防 z-fighting
 - 性能日志 `marker`/`npc` 字段 = 每帧 upload_markers/upload_npcs 的 (near+far) 计数，
   排查绘制是否发生时先看这两个计数
 
@@ -178,9 +183,21 @@
 - 冒烟 FPS 阈值 120（默认 1280x800 下 dzn 转译驱动约 165-275 FPS，勿回调到 200）
 - 灵敏度映射：`sensitivity_rads() = 0.0005 + hud.sensitivity*0.002`（默认 0.5 → 0.0015 rad/px，
   main.rs 每帧 set_mouse_sens 同步到 camera；勿改回 0.003 起步）
-- 鼠标视角驱动：捕获态优先 DeviceEvent::MouseMotion（XInput2 相对增量，与光标位置无关）；
-  WSLg/Xwayland 下 set_cursor_grab(Locked) 返回 Err、Confined 无效，绝对位置+warp 路径
-  会产生回声乱转，勿回退到纯 CursorMoved+warp
+- 后端强制（2026-08-11，`868d127`）：winit 0.29+ 已删除 WINIT_UNIX_BACKEND 环境变量
+  （v0.29 changelog 明确 removed，设了也不生效），必须用
+  `EventLoop::builder().with_x11()`（EventLoopBuilderExtX11 设 forced_backend）。
+  WSL + WAYLAND_DISPLAY 存在时 main.rs 强制 X11（Xwayland）：WSLg Wayland 指针协议
+  不完整（捕获失效 + 右键拖动原生层静默崩溃）。用户无环境变量可覆盖，勿回退环境变量方案
+- 鼠标视角驱动（2026-08-11 修订，勿回退）：X11 后端（WSLg/Xwayland）禁用
+  DeviceEvent::MouseMotion raw 路径——Xwayland 的 raw 增量异常放大且捕获限制产生持续反馈，
+  实测 yaw 自转到万级 rad/s（Xvfb 对照：raw 仅 ~2×、绝对路径精确 60px→5.2°）；
+  改走绝对位置 CursorMoved + 每帧回中 + 150ms warp 回声吞噬（512px 跳变守卫）。
+  Wayland 后端保留 raw 路径（libinput 相对增量正常，use_relative_mouse=true）
+- cam 日志 yaw/pitch 单位是"度"（camera 内部弧度，日志换算：60px×0.0015=0.09rad=5.2°；
+  look_bot 用 math.degrees(0.0015) 换算 deg_px，勿按弧度解读日志）
+- X11 启动焦点（2026-08-11 实测）：新窗口创建后 Xwayland 焦点舞蹈约 3 秒
+  （Focused 多次翻转、可能停在未聚焦），玩家点一下窗口即聚焦并开始/捕获——
+  标准 X11 行为，捕获后游玩期间焦点稳定（实测 40s 无翻转）
 
 ### 跨平台/指令集决策（2026-08-09，已推送 5bf7c77）
 - 不做原生 Metal 后端：macOS/iOS 走 MoltenVK 零改动；未来 iOS 商业化再评估
