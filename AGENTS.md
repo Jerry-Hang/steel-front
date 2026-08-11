@@ -233,16 +233,19 @@
   `EventLoop::builder().with_x11()`（EventLoopBuilderExtX11 设 forced_backend）。
   WSL + WAYLAND_DISPLAY 存在时 main.rs 强制 X11（Xwayland）：WSLg Wayland 指针协议
   不完整（捕获失效 + 右键拖动原生层静默崩溃）。用户无环境变量可覆盖，勿回退环境变量方案
-- 鼠标视角驱动（2026-08-11 二次修订，勿回退）：捕获态视角**唯一**输入源 =
-  DeviceEvent::MouseMotion（XInput2 XI_RawMotion.raw_values 相对增量，与指针位置无关）。
-  捕获后**零 warp**（不每帧回中）——绝对位置 CursorMoved 在捕获态只更新基准不驱动视角，
-  从根上消除"每帧回中 warp → 回声 → 反馈环自转"。原因：绝对位置+每帧回中方案在真实
-  WSLg 会话上实测"灵敏度爆炸 + 视角被压向地面抬不起头"（warp 失败时仍把
-  last_cursor 重基准到窗口中心，指针距中心偏差被当成视角位移）。
-  细节：捕获瞬间仅一次 set_cursor_position 回中 + 150ms 回声吞噬窗口（吞 warp 回声）；
-  raw 单事件 >1024（MAX_RAW_LOOK_DELTA）视为残留回声跳过；grab 尽力 Locked→Confined→
-  无（raw 驱动不依赖 grab）；非捕获拖拽路径（菜单/设置预览/冒烟瞄准）保留
-  绝对位置 + 512px 守卫。冒烟用 XTestFakeRelativeMotionEvent 注入 raw 事件验证本路径
+- 鼠标视角驱动（2026-08-11 三次修订，勿回退）：**双路径，按 Locked grab 是否成功选路**——
+  - Locked 成功（原生 X11/Wayland）：DeviceEvent::MouseMotion（XInput2 XI_RawMotion
+    raw_values 相对增量）驱动视角，捕获瞬间一次回中 + 150ms 吞回声，raw 单事件
+    >1024（MAX_RAW_LOOK_DELTA）视为残留回声跳过。
+  - Locked 失败（WSLg/Xwayland 实测）：**真实物理鼠标只产生 CursorMoved 绝对位置，
+    不产生 raw 事件**（Xwayland 虚拟指针无 raw 数据；冒烟用 XTestFakeRelativeMotionEvent
+    注入时才有 raw，勿用冒烟结果反推真实鼠标）。绝对位置路径铁律：
+    **基准 = 真实指针位置，warp 成功（set_cursor_position is_ok）才把基准设为窗口中心，
+    失败则保持真实位置**——旧 bug（868d127）无条件把 last_cursor 设为中心，warp 失败时
+    指针距中心偏差被当视角位移 → 灵敏度爆炸/视角压地抬不起头。捕获瞬间不回中，
+    首个 CursorMoved 作基准（abs_baseline_valid）；512px 传送守卫只跳过服务端跳变。
+  - 冒烟瞄准脚本必须从 ~/.steel_front.cfg 读真实灵敏度（0.0005+s*0.002，别写死 0.003）
+    且分块注入（≤400px/事件，游戏 512px 守卫会跳过单次大跳）
 - cam 日志 yaw/pitch 单位是"度"（camera 内部弧度，日志换算：60px×0.0015=0.09rad=5.2°；
   look_bot 用 math.degrees(0.0015) 换算 deg_px，勿按弧度解读日志）
 - X11 启动焦点（2026-08-11 实测）：新窗口创建后 Xwayland 焦点舞蹈约 3 秒
