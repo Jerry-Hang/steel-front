@@ -2,7 +2,7 @@
 
 > 本文档回答三个问题：① 游戏实际使用了哪些 Vulkan API 特性；② 显卡需要支持 Vulkan 哪个版本；③ 是否使用网格着色器。最后给出游玩硬件标准（最低 / 推荐 / 最高三档）。
 >
-> **结论速览：传统 VERTEX+FRAGMENT 渲染管线，不使用网格着色器；实例声明 Vulkan 1.3，实际只用 Vulkan 1.0 核心特性 + `VK_KHR_swapchain`。显卡门槛：支持 Vulkan 1.3 的驱动（2016 年后桌面独显基本全满足）。**
+> **结论速览：渲染主路径为传统 VERTEX+FRAGMENT 管线（默认/回退）；物理设备支持 `VK_EXT_mesh_shader` 时自动启用网格着色器（MESH+FRAGMENT）渲染实例场，GPU 端逐实例视锥剔除 + 顶点变换，CPU 侧跳过 SIMD 剔除与压缩上传。实例声明 Vulkan 1.3，实际只用 Vulkan 1.0 核心特性 + `VK_KHR_swapchain`（+ 可选 `VK_EXT_mesh_shader`）。显卡门槛：支持 Vulkan 1.3 的驱动（2016 年后桌面独显基本全满足）。**
 
 ## 一、实际使用的 Vulkan 特性
 
@@ -14,9 +14,9 @@
 | 实例扩展 | `VK_KHR_surface` + 平台 surface 扩展（`ash_window` 枚举：Xlib / XCB / Wayland / Win32 等） | 窗口呈现必需 |
 | 实例扩展（可选） | `VK_EXT_debug_utils` | 仅验证层可用时启用 |
 | 实例层（可选） | `VK_LAYER_KHRONOS_validation` | 有则启用，无则跳过 |
-| 设备扩展 | `VK_KHR_swapchain` | 唯一必需设备扩展 |
+| 设备扩展 | `VK_KHR_swapchain`（必需）；`VK_EXT_mesh_shader`（可选，支持时启用） | mesh 路径需启用 `PhysicalDeviceMeshShaderFeaturesEXT.meshShader` 特性 |
 | 设备特性 | `samplerAnisotropy`（物理设备支持才启用） | 各向异性过滤，可选 |
-| 渲染管线 | 传统图形管线：`VERTEX` + `FRAGMENT` 两个 shader 阶段 | **非网格着色器** |
+| 渲染管线 | 传统图形管线：`VERTEX` + `FRAGMENT`（默认/回退）；网格着色器管线：`MESH` + `FRAGMENT`（`VK_EXT_mesh_shader` 可用时启用） | mesh 管线无 vertex input，逐实例 GPU 剔除 + 顶点变换，片元着色器与原路径完全一致 |
 | 渲染通道 | 经典 `vk::RenderPass` + `vkCmdBeginRenderPass` | 未用 `VK_KHR_dynamic_rendering` |
 | 纹理 | 1 张 2D 程序化纹理 `R8G8B8A8_SRGB` + 完整 mip 链 + LINEAR 过滤 | 地形 / 地面 / 障碍共用 |
 | 描述符 | 相机 UBO + 灯光 UBO + 纹理采样 + 实例 storage buffer | 全部为 Vulkan 1.0 核心能力 |
@@ -25,17 +25,18 @@
 
 **明确未使用**（`gpu_caps.rs` 只探测、不依赖，未来路线见 `docs/windows-native-vulkan-plan-2026-08-09.md`）：
 
-- 网格着色器：`VK_EXT_mesh_shader` / `VK_NV_mesh_shader` —— 不使用，绘制全部走传统 VERTEX+FRAGMENT
 - 光追：`VK_KHR_ray_tracing_pipeline` / `VK_KHR_acceleration_structure` / `VK_KHR_ray_query` —— 不使用
 - 协作矩阵：`VK_KHR_cooperative_matrix` / `VK_NV_cooperative_matrix` —— 不使用
 - DLSS / 超分私有扩展（`VK_NVX_*` / `VK_NV_cuda_kernel`）—— 不使用
 - 几何 / 细分着色器、渲染路径无 compute 管线（爆炸/冲击波 SIMD 走 CPU）
 
+> 网格着色器为可选路径：`VK_EXT_mesh_shader` 可用时（原生 Vulkan 驱动的 RTX 20 系 / RX 6000 系以后多数支持），实例场走 `vkCmdDrawMeshTasksEXT`，CPU 减负（跳过剔除+压缩）；不可用时自动回退传统 VERTEX+FRAGMENT，渲染结果一致。本机 WSLg/dzn 实测不支持该扩展，故开发机始终走传统路径。
+
 ## 二、显卡 Vulkan 版本要求
 
 - 实例创建声明 `apiVersion = 1.3`。按 Vulkan 规范，驱动支持版本低于应用声明版本时 `vkCreateInstance` 可能返回 `VK_ERROR_INCOMPATIBLE_DRIVER`，因此**最低门槛按 Vulkan 1.3 驱动计算**。
 - 实际功能需求只有 Vulkan 1.0 核心 + `VK_KHR_swapchain` + 可选 `samplerAnisotropy`。若未来要兼容更老的驱动，把 `api_version` 降到 1.0/1.1 即可，渲染代码无需任何改动（没有用到 1.1+ 的任何能力）。
-- 本机实测（WSLg/dzn 转译层）：RTX 5060 Laptop 以 "Microsoft Direct3D12 (NVIDIA GeForce RTX 5060 Laptop GPU)" 枚举，报告 47 个设备扩展，`VK_KHR_dynamic_rendering` / `VK_KHR_buffer_device_address` = true，光追 / 网格着色器 / 协作矩阵 = false —— 游戏照常运行（1280×800 ≈ 250–430 fps）。
+- 本机实测（WSLg/dzn 转译层）：RTX 5060 Laptop 以 "Microsoft Direct3D12 (NVIDIA GeForce RTX 5060 Laptop GPU)" 枚举，报告 47 个设备扩展，`VK_KHR_dynamic_rendering` / `VK_KHR_buffer_device_address` = true，光追 / 网格着色器 / 协作矩阵 = false —— 游戏自动回退传统管线照常运行（1280×800 ≈ 250–430 fps）。
 - **结论：Vulkan 1.3 驱动的 2016 年后桌面独显 / 2019 年后核显均可运行**（NVIDIA GTX 900/1000 系起、AMD RX 400/500 系起、Intel Gen9 起，需新版驱动：NVIDIA 545+ / Mesa 23.2+）。
 
 ## 三、游玩硬件标准
