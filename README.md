@@ -1,121 +1,156 @@
-# 钢铁前线 (Steel Front) — 会话交接与进度总结
+# 钢铁前线 (Steel Front)
 
-> ⚠️ 本文档为早期会话交接材料，已被 `AGENTS.md` 与 `docs/HANDOFF-*.md` 取代（2026-08-10）。
-> 新会话请以 AGENTS.md / docs/HANDOFF 为准，本文件仅保留历史信息。
+二战题材第一人称射击游戏，使用 **Rust + Vulkan**（winit 0.30）从零构建的游戏引擎，**零第三方游戏依赖**——玩法、AI、渲染、音效、联网全部自研，无 Unity/Unreal 式引擎黑盒。
 
-> 本文档是 AI 会话交接材料：记录已完成功能、当前工作状态、待办任务与关键约定。
-> 新会话请先读本文 + `git log --oneline` + `git status`，再接续工作。
+> **项目状态（2026-08-11 快照）**
+>
+> 当前版本：开发快照 v0.6 ｜ 单元测试：254 passed / 0 警告 ｜ 玩法冒烟：ALL-OK（kills=1、VUID=0、无 panic）｜ 渲染管线：传统 VERTEX+FRAGMENT（实例声明 Vulkan 1.3，实际仅用 1.0 核心特性 + `VK_KHR_swapchain`，网格着色器迁移进行中）
 
-## 一、项目概述
+---
 
-二战题材 FPS 游戏引擎，Rust + Vulkan（winit 0.30），零第三方游戏依赖。
-`src/engine/game.rs` 为运行时中枢，main.rs / renderer.rs 只做最小调用。
+## 一、项目简介
 
-## 二、已完成功能（按提交顺序）
+《钢铁前线》是一款以二战战场为背景的 FPS 游戏。项目从空白的 Vulkan 渲染器起步，经过多轮迭代逐步长成包含完整玩法的游戏：第一人称移动与射击、波次式关卡、战术 AI、程序化地图、程序化音效、HUD/菜单 UI、配置持久化，以及面向压力测试的大规模 NPC 对抗模式。
 
-### 阶段 1：模块接线（8 个 commit，master 曾到 37675c1）
-- feat(wiring): physics / weapons / ai / ui / lighting / audio / network
-  - network 仅 `RV3D_NET=1` 启用同进程环回演示，含环回单测
-- chore: annotate reserved dead-code APIs（dead-code 警告 39 → 0，预留 API 均带理由注释）
-- 验收：98 测试全绿；15s 冒烟 VUID=0、fps 248–300、terrain LOD high→medium→low 正常
+工程上，本项目把"游戏性引擎"与"渲染/平台层"分开：`src/engine/game.rs` 是每帧更新中枢（物理、武器、AI、UI、音频、网络编排），`src/engine/renderer.rs` 负责 Vulkan 渲染（实例化场、地形 LOD、HUD 覆盖层），`src/main.rs` 承载 winit 事件循环与输入。性能方面投入了大量 CPU 侧优化（SIMD 剔除、亲和线程池、跨平台指令集选路），在 2560×1600 + 128 NPC 的压力场景下仍能保持流畅帧率，瓶颈实测在 WSLg/dzn 呈现层而非游戏逻辑。
 
-### 阶段 2：gameplay（6 个 commit，a→b→c→e→d→f，到 9fd83d8）
-- a 鼠标视角：光标捕获 + yaw/pitch（ef3ca4a）
-- b 敌人波次：NPC 血量、击杀计分（ee983d5）
-- c 玩家受伤与死亡状态（0f049ce）
-- e 游戏状态机：菜单/游戏中/结算 + R 重开（4aea8ae）
-- d 真实 HUD：血条/弹药/分数/波次/准星/开始与结算画面（4deda87）
-- f 波次递进缩放与清波奖励（9fd83d8）
-- 验收：111 测试全绿、0 警告
+当前渲染主路径为传统 `VERTEX + FRAGMENT` 管线（兼容面最广），**网格着色器（`VK_EXT_mesh_shader`）迁移正在推进中**，传统管线将保留为回退路径。
 
-### 阶段 2.5：20s gameplay 冒烟收口（方案 A，到 3e6a20f）
-- 演示刚体挪到场地角落（距原点 >150m，不再拦截过原点射线）
-- NPC 进 Attack 站定时打位置日志 `npc: #id stand (x,y,z)`
-- 冒烟改为：读站定日志 → 对跖点瞄准 → 点射 6 发；20s 内 kills=1
-- 验收：111 测试全绿、0 警告、冒烟 ALL-OK；scripts/ 迁入仓库并 push
+## 二、已实现功能总览
 
-### 阶段 3：Wave 2 六项功能（本会话，基于 3e6a20f）
-- 真实玩家移动：WASD + PlayerBody 碰撞推回 + 地形贴地，FirstPerson 相机
-- 武器手感：Firearm 弹匣/备弹/换弹进度、后坐力 kick、命中 hit marker 与音效
-- AI 增强：就近掩体 `find_cover_points`、包抄 `should_flank`/`flank_goal`、波次难度曲线 `wave_profile`
-- 音效接入：SfxBank（Gunshot/Footstep/Hit/Reload/UiBlip/Ambient）经 mixer 播放
-- UI polish（部分）：ESC 设置面板（音量/灵敏度 + 键位列表）、HUD 备弹显示、hit marker
-- 验收：160 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK
+### 玩法系统
+- **FPS 移动**：WASD + 玩家刚体碰撞推回 + 地形贴地，第一人称相机（灵敏度可调，支持捕获/绝对位置两种视角驱动路径）。
+- **武器系统**：弹匣/备弹/换弹进度、后坐力 kick、命中反馈 hit marker 与开火音效；弹道无阻时 6 发点射可击倒标准 NPC。
+- **波次与关卡**：每关 3 波、清关重建地图并递进难度；波次进度缩放与清波奖励；每 5 波 Boss 主怪、每 3 波援军增援。
+- **程序化地图**：确定性种子生成，三种主题轮换（墙 / 块 / 栅栏）；中央 60×60 安全区 + 58–130m 障碍环带；障碍物可击穿、可作掩体。
+- **玩家状态与任务**：受伤/死亡/结算/一键重开，任务目标与胜利横幅；补给键补满弹药。
+- **爆炸冲击波**：AoE 伤害 + 径向击退 + 震屏 + 自发光闪光。
 
-## 三、当前工作状态（重要）
+### 战术 AI
+- A* 寻路 + NPC 状态机（巡逻 / 追击 / 攻击 / 掩体）。
+- 战术行为：就近掩体搜索、包抄、协同冲锋、躲避、偷袭绕路、掩护射击。
+- 压力模式下红蓝两军互射、团灭自动补员；AI 决策走亲和线程池并行（AMD 绑 CCD1 / Intel 绑 E-core 或 P-core）。
 
-- Wave 2 六项功能已实施并通过验收（160 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK）。
-- 落地范围（基于 3e6a20f 的新 commit，见 git log）：
-  - `src/engine/game.rs`：FPS 玩家移动（WASD + PlayerBody 碰撞 + 贴地）、Firearm
-    （弹匣 30/备弹 120/换弹 2s/后坐力）、SFX 播放链路、AI 掩体/包抄、波次难度曲线、
-    设置面板与 hit marker 同步、7 个新集成测试
-  - `src/main.rs`：FirstPerson 输入分支（拖拽转视角 + 回中）、WASD 转发、R 换弹、
-    ESC 设置面板、Tab 循环选中项、滚轮调音量/灵敏度、N 补给、后坐力加回相机
-  - `src/ui.rs`：设置面板渲染、HUD 备弹 `AMMO x/y +z`、hit marker、清理已接线注解
-  - `scripts/gameplay_smoke.py`：FPS 拖拽视角瞄准（相对注入 + 回中 + 点射）
-- 未实施（下一阶段）：程序化地图生成/多关卡切换；主菜单美化与键位重绑定。
+### 渲染
+- 传统 Vulkan 图形管线：实例化 65536 实例场、地形 3 级 LOD + LOD morph、HUD 覆盖层；单张程序化纹理 + 完整 mip 链 + 各向异性过滤。
+- 程序化地形：中央 140m 半径接火区拍平（保证战斗公平与弹道无阻），外围 ≤15m 确定性值噪声丘陵。
+- NPC 积木人可视化（7 段身体部件）+ shader `flat_flag` 纯色阵营渲染（红/蓝清晰可辨）。
+- 性能路径：视锥剔除五级 SIMD 选路（AVX-512 > AVX2 > AVX > SSE4.2 > NEON > 标量，逐位一致）、两阶段并行剔除+上传、CPU 拓扑检测与主线程/线程池亲和绑定。
 
-### 阶段 4：Wave 3 六项功能收尾（第 5 项全量 + 第 6 项完成）
-- 程序化地图 `generate_level_map(seed)`（LCG 确定性、零依赖；障碍环带 58–130m，
-  中央安全区保冒烟站定与弹道）+ 多关卡（每关 3 波，清完升关重建地图、
-  难度按累计有效波次递进）+ NPC 出生点避障外推
-- 世界障碍 marker 渲染：复用现有实例 pipeline，独立槽位 65537+ 与 2 个额外 draw call，
-  零 pipeline/shader/swapchain 改动（Vulkan 校验零 VUID）
-- 主菜单美化（装饰条/闪烁 PRESS ANY KEY/版本行）、键位绑定（设置面板 9 项循环，
-  Enter 进入绑定 / 非 ESC 键完成 / ESC 取消，重复键互斥复位）、HUD `LEVEL` 显示
-- 配置持久化 `src/config.rs`：`$HOME/.steel_front.cfg` 保存键位/音量/灵敏度
-  （原子写 + 容错加载，测试环境不写盘）
-- 键盘改键位驱动：移动/换弹/开火/菜单可重绑定；ESC 保留为系统键（关面板/退出）
-- 验收：176 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK
+### 音效
+- 程序化 DSP 合成（枪声 / 爆炸 / 脚步 / 环境风），零音频资产、零额外依赖。
+- 变体音量（开火 0.95–1.0 抖动、脚步 0.8/1.0 交替），统一 mixer 播放链路。
 
-### 阶段 5：Wave 4 六项功能（本会话，7 commits，已 push）
-- 程序化地图主题 `MapTheme`/`theme_for_level`：每 3 关轮换 Wall/Block/Barrier 三种
-  障碍种类与安全环/密度参数（第一关逐位保持冒烟基准 58m 环）；`MapObstacle.kind`
-  驱动渲染侧 marker 配色（墙=红/块=橙/栅栏=蓝灰）
-- 特殊波次：每 5 波 Boss 主怪（高血量/慢速/16m 攻击）+ 每 3 波援军（波中 1.5s 补怪
-  1..=2 只），玩家受伤按 `wave_profile.dps`（Boss 波更高）；`spawn_wave` 同步波次号
-- 难度曲线精调：速度分段爬升（1..=5 / 6..=15 / 15+，封顶 8.0 不回落），端点不变
-- 画质预设 `QualityPreset`（Low/Medium/High，纯 CPU 参数：地形 LOD 阈值 + 实例近/远档
-  分界；Medium = 原行为）+ 设置面板 RESOLUTION/QUALITY 两项（循环切换即时生效）+
-  分辨率/画质持久化到 `~/.steel_front.cfg`（旧配置缺字段回退默认）
-- F12 截图：swapchain 图像读回（TRANSFER_SRC + 双缓冲 staging + 独立 fence）存
-  `/tmp/steel_front_<ts>.png`；读回失败不跳过 present（防图像耗尽卡死）
-- 音效变体 `play_variant(kind, volume_scale)`：开火 0.95..1.0 抖动、脚步 0.8/1.0 交替
-- 验收：203 测试全绿、0 警告、20s gameplay 冒烟 ALL-OK（VUID=0）
+### UI / 输入
+- HUD：血条 / 弹药 / 分数 / 波次 / 关卡 / 准星；主菜单、开始与结算画面。
+- 设置面板：音量 / 灵敏度 / 分辨率 / 画质 / 键位绑定，即时生效并持久化。
+- F12 截图（`/tmp/steel_front_<时间戳>.png`）、ESC 两段式确认退出、死亡后一键重开。
 
-### 冒烟关键机制（勿回退，当前为 FPS 拖拽版）
-1. 玩家在原点不动（FPS 相机），冒烟读 `npc: #id stand` 日志选距原点最近的站定 NPC，
-   按 `(x, y+0.8-EYE, z)` 算 yaw/pitch，按住左键拖拽视角瞄准后点射 6 发；
-2. NPC 攻击态无就近掩体时原地站定（`|C| ≤ 16m` 内，掩体搜索半径 40m）；
-3. 障碍全在 58m 环带外，12–16m 弹道路径无拦截体；点射 6 发 × 25 伤害 ≥ 100 hp。
+### 联网（基础版）
+- UDP client/server（`RV3D_NET=server|client`），输入/快照报文 + 位置插值 + 超时处理；NAT 穿透、断线重连与实战场联机为后续路线。
 
-## 四、待办任务（Next Steps）
+### 配置持久化
+- `~/.steel_front.cfg`：键位 / 音量 / 灵敏度 / 分辨率 / 画质，原子写 + 容错加载；旧版本键位配置自动回退默认（`bindings_version=1`）。
 
-- 本批完成：Wave 2 六项功能（1–4 全量、6 部分）实施并提交。
-- 本批完成：Wave 3（第 5 项程序化地图/多关卡全量、第 6 项主菜单美化/键位绑定完成）已提交。
-- 本批完成：Wave 4（地图主题、Boss/援军波、难度曲线、画质/分辨率设置、F12 截图、
-  音效变体）已提交并 push。
-- 后续候选：真实音频输出后端（当前 SilentSink 静默，需新增依赖）、阴影 pass 启用、
-  真实联机（当前仅环回 demo）、离屏渲染模式（当前仅窗口 present + 截图读回）。
-- 已知抖动：gameplay 冒烟对拖拽瞄准时序敏感，偶发瞄准螺旋导致 20s 内未击杀
-  （非代码回归，重跑即过；后续可加瞄准收敛断言或延长窗口）。
-- 重跑冒烟：`bash scripts/run_gameplay_smoke.sh`（需沙箱外 X/Vulkan 权限）。
+## 三、如何运行与配置
 
-## 五、关键约定与环境备忘
+### 编译与运行
 
-- commit 规范：`feat(game): ...` / `feat(wiring): ...` / `chore:` / `docs:`
-- 每步 `cargo build --release && cargo test` 全绿再继续；不新增第三方依赖
-- 沙箱限制：绑 UDP socket / 连 X socket 需提权运行（沙箱外测试才准）
-- X 注入坑：XTEST 卡键是 server 级，脚本开头先释放键 + pkill 清场
-- HUD 用 5x7 位图字体，仅 ASCII，界面文案全英文
-- 配置持久化在 `$HOME/.steel_front.cfg`（不进仓库目录）；`cargo test` 下不写盘
-- 会话过长会压缩降智，长任务及时开新会话并先读本文件
+```bash
+# Release 编译（Rust stable，需支持 Vulkan 1.3 的驱动）
+cargo build --release
 
-## 六、验收数据快照
+# 运行
+./target/release/steel-front
 
-| 指标 | 数值 |
+# 单元测试（纯逻辑，不触碰 GPU）
+cargo test
+
+# 玩法冒烟测试（需 X11/Vulkan 环境，约 20 秒，断言击杀数 > 0）
+bash scripts/run_gameplay_smoke.sh
+```
+
+### 配置文件
+
+首次运行自动生成 `~/.steel_front.cfg`（不进入仓库目录）。可持久化键位绑定、音量、灵敏度、分辨率与画质预设；配置损坏时自动回退默认值，不会导致启动失败。
+
+### 关键环境变量
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `RV3D_NPC_SCALE` | NPC 数量整体缩放（`max(0.5)`），压测/低配调低用 | `1.0` |
+| `RV3D_STRESS_AI` | 设置即启用压力模式：红蓝各 N 名 NPC 大战场对抗（N≥4） | `64` |
+| `RV3D_PRESENT_MODE` | 交换链呈现模式：`immediate` / `mailbox` / `fifo` | `mailbox` |
+| `RV3D_CPU_PIN` | 主线程 CPU 亲和：`off` 关闭，或如 `0-7,16-23` 精确指定 | 首簇（AMD CCD0 / Intel P-core） |
+| `RV3D_DISABLE_AVX512` | `1` 强制关闭 AVX-512 剔除选路（Intel 11 代起默认按策略关闭） | 按策略自动 |
+| `RV3D_SCENE_WORKERS` / `RV3D_AI_WORKERS` | 场景 / AI 亲和线程池线程数 | `min(8, 集合大小)` |
+| `RV3D_BENCH_YAW` / `RV3D_BENCH_PITCH` | 基准测试固定相机朝向（度），保证对照实验视角一致 | 无 |
+| `RV3D_EXPLOSION_SIM` | `1` 运行爆炸/冲击波 SIMD 压力自测（加速比日志） | `0` |
+| `RV3D_NET` / `RV3D_NET_ADDR` | 联网模式（`server` / `client`）与对端地址 | 无 |
+
+### 键位操作
+
+| 操作 | 键位 |
 |---|---|
-| 测试 | 203 passed, 0 failed |
-| 警告 | 0 |
-| 冒烟（飞行） | VUID=0, fps 228–300 |
-| gameplay 冒烟 | ALL-OK：kills=1、hit_events=4、VUID=0、fps 212–298、无 panic |
+| 移动 | `W` / `S` / `A` / `D` |
+| 开火 | `Space` |
+| 换弹 | `R` |
+| 设置面板 | `ContextMenu`（物理菜单键）；`Tab` 循环选中项，`Enter` 确认 |
+| 音量 / 灵敏度 | 设置面板内鼠标滚轮 |
+| 补给 | `N` |
+| 视角辅助（下蹲 / 起立） | `Q` / `E` |
+| 截图 | `F12`（保存到 `/tmp/steel_front_*.png`） |
+| 关闭面板 / 退出 | `ESC`（首次提示、再按退出；死亡后 `R` 或 `Enter` 重开） |
+
+> 提示：设置面板中键位行支持重绑定（重复键自动互斥）；`ESC` / `Tab` / `Enter` / `F12` / `Q` / `E` / `N` 为保留系统键，不可重绑。WSLg/Xwayland 环境下程序自动强制 X11 后端以获得稳定的鼠标捕获与视角控制。
+
+## 四、硬件要求
+
+游戏实例声明 Vulkan 1.3，实际功能需求仅为 Vulkan 1.0 核心 + `VK_KHR_swapchain`（+ 可选各向异性过滤）。渲染使用传统 `VERTEX + FRAGMENT` 管线，**不使用网格着色器 / 光追 / 协作矩阵 / DLSS**（这些能力仅作运行时探测与日志）。因此门槛很低：**2016 年后桌面独显（NVIDIA GTX 900/1000 系起、AMD RX 400/500 系起）或 2019 年后核显（Intel Gen9 起），配新版驱动（NVIDIA 545+ / Mesa 23.2+）即可运行**。
+
+| 档位 | GPU | 显存 | CPU | 内存 | 目标体验 |
+|---|---|---|---|---|---|
+| **最低** | 支持 Vulkan 1.3 的独显/核显 | ≥ 2 GB | 4 核 8 线程 | 8 GB（进程实测约 1.5 GB） | 1280×720 @ 30–60 fps，NPC ≤ 24 |
+| **推荐** | 中端独显：GTX 1660 / RTX 20 系以上、RX 5000/6000 系以上、Intel Arc | ≥ 4 GB | 8 核 16 线程 | 16 GB | 1280×800 / 1920×1080 @ 144+ fps，64v64 压力模式流畅 |
+| **最高** | RTX 40/50 系或 RX 7000/9000 系 | ≥ 8 GB | 16 核 32 线程 | 32 GB | 2560×1600 @ 240+ Hz |
+
+**实测性能参考**（RTX 5060 Laptop + Ryzen 9 8940HX，WSLg/dzn 转译层）：
+
+- 1280×800 无帧率上限：270–433 fps（6→48 NPC），瓶颈在 dzn/WSLg 呈现层（`present_us ≈ 1.1 ms`，占帧时 55–70%）。
+- 1920×1080：358→111 fps，分辨率提升后 GPU 才开始饱和。
+- 2560×1600 + 64v64（128 NPC）：p50 ≈ 264 fps，GPU 占用 ~27–30%，显存 2.16/8.15 GB，CPU 单核峰值 ~47%。
+- 当前引擎瓶颈不在 GPU 而在 WSL2 的 Vulkan 呈现路径；顶配硬件在 Windows 原生 Vulkan 呈现落地前帧率提升有限（见 `docs/windows-native-vulkan-plan-2026-08-09.md`）。
+
+## 五、版本迭代历史
+
+> 短哈希取自 `git log`，供回溯；完整提交信息见仓库历史。
+
+| 日期 | 里程碑 | 要点 | 短哈希 |
+|---|---|---|---|
+| 2026-08-05 ~ 08-06 | Wave 1 模块接线 | Vulkan 渲染器（实例化 / LOD / 地形 / 相机）、物理 / 武器 / AI / UI / 光照 / 音频 / 网络七大模块接线，dead-code 清零 | `ebd6aa0` → `37675c1` |
+| 2026-08-06 ~ 08-07 | Wave 2 玩法 | 鼠标视角、敌人波次、玩家伤害与死亡、状态机、真实 HUD、波次递进；FPS 移动、武器手感（弹匣/后坐力/换弹）、AI 掩体与包抄、音效接入、20s 玩法冒烟 | `ef3ca4a` → `d5a4240` |
+| 2026-08-07 | Wave 3 配置 | 程序化地图与多关卡、障碍 marker 渲染、主菜单美化、键位绑定、配置持久化（`~/.steel_front.cfg`） | `e593272` → `f7e5f01` |
+| 2026-08-08 | Wave 4 主题/波次/截图画质 | 地图主题轮换、Boss/援军特殊波次、难度曲线精调、画质预设与分辨率设置、F12 截图、音效变体 | `a2d2733` → `18ad6ca` |
+| 2026-08-08 | 渲染与输入修复 | 投影 Y 翻转修复（画面倒立）、F12 截图读回 fence 修复、键码改用 winit KeyCode、地形拍平、灵敏度减半、鼠标方向标准化（修复"低头剔除"根因）、性能压测（无帧率上限 / `RV3D_NPC_SCALE` / AVX2 剔除） | `f3fced7` → `4082bde` |
+| 2026-08-09 | Wave 5 压力模式与并行 AI | 64v64 压力模式（红蓝对攻 + 补员）、并行 AI 线程池、NPC 积木人可视化 + 阵营纯色渲染 | `5c27ecf` → `e4fe4ac` |
+| 2026-08-09 | 性能与跨平台 | CPU 拓扑检测与亲和绑定、亲和线程池、五级 SIMD 剔除选路、AArch64 NEON 路径、AVX-512 启用策略、GPU 硬件能力探测、2560×1600 全压力基准存档 | `8bd7354` → `1b1fba5` |
+| 2026-08-09 ~ 08-10 | Wave 6 玩法/美术/联网 | 纹理 mip 链与各向异性、程序化地形丘陵、程序化 DSP 音效、AI 掩体利用与可击穿障碍、任务目标、UDP 联网基础版、光照渲染验证 | `f46c629` → `106c180` |
+| 2026-08-10 | 输入与地板修复 | 爆炸冲击波玩法、地面专用平铺 quad（根治纸箱盖地板）、winit 0.30 强制 X11 后端、X11 绝对位置视角驱动 | `c57da1a` → `868d127` |
+| 2026-08-11 | 文档重构 + 网格着色器迁移（进行中） | 游玩硬件标准与 Vulkan 特性说明、AGENTS.md 记录输入/地板约定；**渲染主路径迁移 `VK_EXT_mesh_shader` 进行中，传统管线保留为回退** | `6fa6b94` / `8b08998` |
+
+## 六、当前目标与路线图
+
+### 正在进行的工程（2026-08-11）
+- **渲染主路径迁移网格着色器（`VK_EXT_mesh_shader`）**：以 task 级绘制替代实例化顶点路径，传统 `VERTEX+FRAGMENT` 管线保留为自动回退，保证兼容性不降级。
+- **文档重构**：README 转为对外项目说明书（本文），AGENTS.md 沉淀工程记忆与验收约束。
+
+### 后续路线
+- **美术资产**：贴图与模型由程序化生成过渡到 AI 生成/人工制作，丰富场景表现。
+- **音效**：DSP 合成基础上增加环境音乐与更丰富的混音/空间化。
+- **联网**：NAT 穿透、断线重连、多人在线实战场。
+- **Windows 原生 Vulkan**：绕开 WSLg/dzn 呈现瓶颈，解锁 RT Core / Tensor Core（光追、DLSS/超分），分阶段规划见 `docs/windows-native-vulkan-plan-2026-08-09.md`。
+- **渲染纵深**：阴影 pass、法线贴图/PBR 等传统光栅特性（dzn 已可运行，见 `docs/lighting-rendering-verification-2026-08-09.md`）。
+
+---
+
+*钢铁前线 —— 从零构建的二战 FPS 引擎。*
