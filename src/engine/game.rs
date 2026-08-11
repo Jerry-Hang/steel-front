@@ -2509,7 +2509,9 @@ impl Game {
                 dt,
                 stress: self.stress,
                 frame: self.frame_no,
-                decimate_far: self.stress,
+                decimate_far: self.stress
+                    && std::env::var("RV3D_AI_DECIMATE")
+                        .map_or(true, |v| v != "off" && v != "0"),
                 ring_inner: theme.ring_inner,
                 ring_outer: theme.ring_outer,
                 obstacles: &self.map.obstacles,
