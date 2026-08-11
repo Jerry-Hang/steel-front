@@ -34,9 +34,23 @@
 
 ### 当前迭代（2026-08-11）
 
-- ① 渲染主路径迁移网格着色器（VK_EXT_mesh_shader，WGSL mesh 着色器 + GPU 剔除；传统 VERTEX+FRAGMENT 管线保留为回退——WSLg/dzn 不支持 mesh shader，实测 VK_EXT_mesh_shader=false；naga 30 支持 `enable wgpu_mesh_shader` + `@stage(mesh)` 输出变量语法）｜负责人：当前会话 AI｜状态：in_progress
+- ① 渲染主路径迁移网格着色器（VK_EXT_mesh_shader，WGSL mesh 着色器 + GPU 剔除；传统 VERTEX+FRAGMENT 管线保留为回退——WSLg/dzn 不支持 mesh shader，实测 VK_EXT_mesh_shader=false；naga 30 支持 `enable wgpu_mesh_shader` + `@stage(mesh)` 输出变量语法）｜负责人：当前会话 AI｜状态：done（已冻结，仅保留接口/验证功能，见下方 2026-08-11 渲染技术路线决策交接）
 - ② README.md 重构为对外进度说明书｜负责人：Newton｜状态：in_progress
 - ③ AGENTS.md 重构为正式交接文档（本任务）｜负责人：当前会话 AI｜状态：in_progress
+
+### [2026-08-11] 交接：渲染技术路线决策（WSL2 内传统管线主迭代，网格着色器冻结至中后期）
+
+- 日期：2026-08-11
+- 发起方：用户决策 / 当前会话 AI（Codex）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：规划开启
+- 交接内容：
+  - **用户决策（V0.6 起）**：为减轻代码复杂度与 Token 消耗、快速做出成品，WSL2 内继续以传统 VERTEX+FRAGMENT 管线为主迭代并正常升级，在游戏约 90% 功能/工程任务完成前不再启用网格着色器路径。
+  - **网格着色器（VK_EXT_mesh_shader，commit `12859a3`）**：冻结后续迭代，仅保留为接口与验证功能（代码/文档/可选路径均不动）；不为其新增特性、不做双路径渲染验证。
+  - **未来迁移（中后期计划）**：迁移至 DeepCode 平台时全面放弃传统顶点着色器、改用网格着色器进行画面渲染；该任务与 DLSS、光线追踪硬件启用同一优先级。
+  - **依据**：本机 WSLg/dzn 实测 VK_EXT_mesh_shader=false，传统管线是唯一可运行/可冒烟/可调试路径；mesh 路径从未真机运行，冒烟与 259 tests 验收基线全部依赖传统管线。
+  - **执行要求**：传统管线正常迭代升级（不受冻结影响）；后续会话勿为 mesh 路径投入开发与双路径验证。
+- 状态：done
 
 ### [2026-08-11] 迭代结束记录
 
@@ -122,8 +136,10 @@
   - 探测含决定性测试：创建启用 RT 扩展的探测 device（当前 RT 扩展缺失故跳过）
 - 硬件/API 标准（2026-08-11）：游戏用传统 VERTEX+FRAGMENT 管线（无网格着色器）、
   实例声明 Vulkan 1.3 但只用 1.0 核心特性 + VK_KHR_swapchain；硬件三档标准见
-  `docs/hardware-requirements-2026-08-11.md`（最低=1.3 驱动 4C8T、推荐=8C16T 中端独显、
-  最高=16C32T + RTX 40/50 系，瓶颈在 dzn 呈现不在 GPU）
+  `docs/hardware-requirements-2026-08-11.md`（最低=AMD Ryzen 3 3300X + RX 6500 XT
+  （RDNA 2，mesh shader 起点）4C8T、内存最低 8GB / 推荐 12GB+；推荐=8C16T 中端独显、
+  最高=16C32T + RTX 40/50 系，瓶颈在 dzn 呈现不在 GPU）。测试版不建议使用不支持
+  mesh shader 的显卡游玩，提前适配支持 VK 图形 API 新特性的硬件，为后续全面迁移铺路
 - 2026-08-09 AVX-512 启用策略（cpu::avx512_enabled()，renderer 选路与日志共用）：
   - AMD Zen4/Zen5（7000/9000 系）→ 启用（实测本机 avx512=true，走 16 实例/批剔除路径）
   - Intel 11 代（Rocket Lake 0xA7 / Tiger Lake 0x8C/0x8D）→ 默认关闭（AVX-512 能效/降频差，
