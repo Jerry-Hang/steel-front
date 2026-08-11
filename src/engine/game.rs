@@ -172,7 +172,6 @@ pub struct Npc {
 /// AI 分层调度优先级（线程优化第 1 步，2026-08-11）：
 /// Near = 与玩家/敌对目标实时交互或距离近（延迟敏感，走 P 核 / CCD0 簇，每帧步进）；
 /// Far = 距离远且当前无交互（延迟不敏感，走 E 核 / CCD1，可降频）。
-#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AiTier {
     Near,
@@ -180,7 +179,6 @@ pub enum AiTier {
 }
 
 /// 分层阈值参数（可配置；接入双池调度时由主循环/配置注入）
-#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AiTierParams {
     /// 近档半径（米）：到目标距离 ≤ 该值 → Near
@@ -197,7 +195,6 @@ impl Default for AiTierParams {
 /// `dist_sq` 为到目标（玩家或敌对 NPC）的距离平方；`interacting` 表示当前与目标存在
 /// 实时交互（攻击态 / 感知到敌人 / 受击 / 被瞄准等）。交互中一律 Near（每帧步进），
 /// 否则按距离阈值划分。
-#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
 pub fn classify_ai_tier(dist_sq: f32, interacting: bool, params: &AiTierParams) -> AiTier {
     if interacting || dist_sq <= params.near_radius * params.near_radius {
         AiTier::Near
@@ -208,10 +205,33 @@ pub fn classify_ai_tier(dist_sq: f32, interacting: bool, params: &AiTierParams) 
 
 /// 就地稳定分区：Near 在前、Far 在后，返回 Near 段长度；组内保持原相对顺序。
 /// 各 NPC 独立读写（AiStepCtx 只读），重排不改变步进语义。泛型便于纯逻辑单测。
-#[allow(dead_code)] // 第 2 步（双池调度）接入后移除
 pub fn partition_ai_tiers<T>(items: &mut [T], tier_of: impl Fn(&T) -> AiTier) -> usize {
     items.sort_by_key(|it| tier_of(it));
     items.iter().filter(|it| tier_of(it) == AiTier::Near).count()
+}
+
+/// 分层判定：NPC 是否与玩家实时交互。
+/// 普通模式目标恒为玩家（追击/攻击/感知/被瞄准/受击/被子弹威胁均算交互）；
+/// 压力模式远处红蓝互射不算（玩家无敌旁观），仅玩家直接作用（瞄准/命中/子弹威胁）
+/// 才算交互——互射 NPC 归远组（CCD1/E 核），不挤占玩家所在簇。
+fn ai_tier_of(npc: &Npc, player: &glam::Vec3, stress: bool, params: &AiTierParams) -> AiTier {
+    let dx = npc.position[0] - player.x;
+    let dz = npc.position[2] - player.z;
+    let dist_sq = dx * dx + dz * dz;
+    let attacking_player = matches!(
+        npc.state_machine.state(),
+        NpcState::Chase | NpcState::Attack
+    );
+    let interacting = if stress {
+        npc.perception.player_aiming || npc.perception.took_hit || npc.perception.under_fire
+    } else {
+        attacking_player
+            || npc.perception.enemy_visible
+            || npc.perception.player_aiming
+            || npc.perception.took_hit
+            || npc.perception.under_fire
+    };
+    classify_ai_tier(dist_sq, interacting, params)
 }
 
 /// 爆炸实体：冲击波 AoE 伤害 + 径向击退（生成时一次性结算），
@@ -2269,14 +2289,24 @@ impl Game {
         }
     }
 
-    /// 并行推进全部 NPC：走 `cpu::ai_pool()` 亲和线程池（AMD 绑 CCD1 / Intel 按策略
-    /// 选 E-core 或 P-core），按段处理不相交分片，调用线程参与首段。
+    /// 双池并行推进全部 NPC（线程优化第 2 步，2026-08-11）：
+    /// 数组已由 `partition_ai_tiers` 稳定重排为 [Near..., Far...]，`near_len` 为分界。
+    /// - 近组（Near）：延迟敏感 → `cpu::scene_pool()`（AMD CCD0 / Intel 仅 P-core），
+    ///   调用线程参与首段，与主线程同簇通信延迟最低；
+    /// - 远组（Far）：延迟不敏感重计算 → `cpu::ai_pool()`（AMD CCD1 / Intel E-core）。
     /// 各 NPC 更新彼此独立（目标/感知/路径均为本帧快照），并行与串行结果逐位一致。
-    fn step_ai_parallel(npcs: &mut [Npc], ctx: &AiStepCtx) {
-        let pool = crate::engine::cpu::ai_pool();
-        pool.par_for_each_mut(npcs, |_, start, slice| {
+    fn step_ai_parallel(npcs: &mut [Npc], near_len: usize, ctx: &AiStepCtx) {
+        let (near, far) = npcs.split_at_mut(near_len);
+        let near_pool = crate::engine::cpu::scene_pool();
+        near_pool.par_for_each_mut(near, |_, start, slice| {
             for (k, npc) in slice.iter_mut().enumerate() {
                 Self::step_npc(start + k, npc, ctx);
+            }
+        });
+        let far_pool = crate::engine::cpu::ai_pool();
+        far_pool.par_for_each_mut(far, |_, start, slice| {
+            for (k, npc) in slice.iter_mut().enumerate() {
+                Self::step_npc(near_len + start + k, npc, ctx);
             }
         });
     }
@@ -2378,6 +2408,16 @@ impl Game {
         let grid = self.grid.clone();
         let time = self.time;
         let player_yaw = camera.yaw;
+        // 分层调度（2026-08-11）：稳定重排 npcs 为 [Near..., Far...]，
+        // 返回 Near 段长度。Near = 与玩家实时交互/近距离（延迟敏感，走 scene_pool
+        // = P 核/CCD0），Far = 远距离重计算（走 ai_pool = CCD1/E 核）。
+        // 重排后 under_fire / targets 均在当前数组顺序上构建，帧内索引对齐；
+        // 各 NPC 步进彼此独立（AiStepCtx 只读），重排不改变步进语义。
+        let stress = self.stress;
+        let tier_params = AiTierParams::default();
+        let near_len = partition_ai_tiers(&mut self.npcs, |npc| {
+            ai_tier_of(npc, &player, stress, &tier_params)
+        });
         // 同步冲锋判定：本帧开始时 Chase/Attack 数量过半 → 全队突进
         let active = self
             .npcs
@@ -2439,8 +2479,8 @@ impl Game {
                 obstacles: &self.map.obstacles,
             };
             if self.npcs.len() >= PARALLEL_AI_MIN && self.ai_parallel {
-                // safety: chunks_mut 保证各线程分片不相交；ctx 只含共享只读数据
-                Self::step_ai_parallel(&mut self.npcs, &ctx);
+                // safety: 已分层（Near 在前），双池分片互不相交；ctx 只含共享只读数据
+                Self::step_ai_parallel(&mut self.npcs, near_len, &ctx);
             } else {
                 Self::step_ai_serial(&mut self.npcs, &ctx);
             }
@@ -2462,8 +2502,10 @@ impl Game {
                 tactics[npc.tactic as usize] += 1;
             }
             log::info!(
-                "ai: npcs={} idle={} patrol={} chase={} attack={} tactics={:?}",
+                "ai: npcs={} near={} far={} idle={} patrol={} chase={} attack={} tactics={:?}",
                 self.npcs.len(),
+                near_len,
+                self.npcs.len() - near_len,
                 counts[0],
                 counts[1],
                 counts[2],
@@ -3564,7 +3606,10 @@ mod tests {
 
     #[test]
     fn stress_parallel_step_matches_serial() {
-        // 64 NPC（32 红 / 32 蓝），串行与并行逐帧推进 6 帧，状态必须逐位一致
+        // 64 NPC（32 红 / 32 蓝），串行与并行逐帧推进 6 帧，状态必须逐位一致。
+        // 并行路径模拟真实流程：先 `partition_ai_tiers` 分层重排（Near 在前），
+        // 再 pick targets（重排后索引对齐），然后双池 `step_ai_parallel(near_len)`；
+        // 数组顺序因重排而不同，断言按 npc.id 对齐比较。
         let mut npcs_s: Vec<Npc> = Vec::new();
         let mut npcs_p: Vec<Npc> = Vec::new();
         for i in 0..64usize {
@@ -3581,10 +3626,18 @@ mod tests {
         let game = Game::new();
         let grid = game.grid.clone();
         let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        let tier_params = AiTierParams::default();
         for frame in 0..6u32 {
             let dt = 1.0 / 60.0;
             let time = 1.0 + frame as f32 * dt;
             let targets_s = pick_stress_targets(&npcs_s, STRESS_SIGHT);
+            // 并行路径：分层重排 → 重排后 pick（与 update_ai 顺序一致）
+            let near_len = partition_ai_tiers(&mut npcs_p, |n| {
+                let dx = n.position[0] - player.x;
+                let dz = n.position[2] - player.z;
+                classify_ai_tier(dx * dx + dz * dz, false, &tier_params)
+            });
+            assert!(near_len > 0 && near_len < npcs_p.len(), "近/远组都应非空");
             let targets_p = pick_stress_targets(&npcs_p, STRESS_SIGHT);
             let flags_s = vec![false; npcs_s.len()];
             let flags_p = vec![false; npcs_p.len()];
@@ -3617,8 +3670,19 @@ mod tests {
                 obstacles: &game.map.obstacles,
             };
             Game::step_ai_serial(&mut npcs_s, &ctx_s);
-            Game::step_ai_parallel(&mut npcs_p, &ctx_p);
-            for (a, b) in npcs_s.iter().zip(npcs_p.iter()) {
+            Game::step_ai_parallel(&mut npcs_p, near_len, &ctx_p);
+            // 按 id 对齐比较（并行路径数组已重排）
+            let by_id: Vec<(&Npc, &Npc)> = npcs_s
+                .iter()
+                .map(|a| {
+                    let b = npcs_p
+                        .iter()
+                        .find(|b| b.id == a.id)
+                        .expect("并行路径应包含同一 NPC 集合");
+                    (a, b)
+                })
+                .collect();
+            for (a, b) in by_id {
                 assert_eq!(a.position, b.position, "frame {} npc {}", frame, a.id);
                 assert_eq!(a.hp, b.hp);
                 assert_eq!(a.facing, b.facing);

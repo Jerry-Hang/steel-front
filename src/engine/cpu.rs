@@ -4,8 +4,9 @@
 //! - AMD 双 CCD：主线程（游戏逻辑/物理/渲染提交）绑首簇（vCPU 前半 = CCD0，默认频率偏高），
 //!   次簇（后半 = CCD1）专供 AI/地图生成等后台线程（`ai_pool`），杜绝跨 CCD 访问。
 //! - Intel 混合架构：主线程绑 P-core 组；渲染侧场景计算（剔除/上传/地形 morph）只用
-//!   P-core（`scene_pool`，绝不丢到 E-core）；E-core ≤8 只接音频等轻任务，>8 时
-//!   E-core 组承担 AI 判定/部分地图生成（`ai_set` 决策）。
+//!   P-core（`scene_pool`，绝不丢到 E-core）；AI 分层负载（2026-08-11）：近组/与玩家
+//!   交互的 NPC 走 `scene_pool`（P-core），远组/延迟不敏感 AI 走 E-core 组
+//!   （`ai_pool`，有 E-core 即绑定，无论数量；无 E-core 平台回退 P-core）。
 //! - 渲染线程不固定到 1-2 个核：主线程与 `scene_pool` 绑定的是「整簇集合」，
 //!   由 OS 调度器把渲染工作分给集合内空闲率最高的核（多核共同承担线程渲染）。
 //! - AVX-512：Zen4/Zen5（7000/9000 系）原生支持，运行时检测后由 renderer 选路启用。
@@ -199,12 +200,13 @@ impl CpuTopology {
         &self.primary_set
     }
 
-    /// AI/地图生成集合（用户策略）：
+    /// AI/地图生成集合（用户策略，2026-08-11 修正）：
     /// - AMD = 次簇 CCD1（与主线程所在 CCD0 分离，AI 并行不吃主线程带宽）；
-    /// - Intel = E-core ≥8 时交 E-core 组，否则回退 P-core（E-core 少时 AI 太重，
-    ///   P-core 保证 AI 判定延迟，且绝不把渲染侧工作挤到 E-core）。
+    /// - Intel = 有 E-core 即交 E-core 组（无论数量，接"远 AI"分层负载；E-core 少如
+    ///   12600K/13400F/12700K 的 4E 也接远组），近组/交互 AI 走 scene_pool（仅 P-core）；
+    ///   无 E-core（全 P-core 平台）回退 primary_set。
     pub fn ai_set(&self) -> &[usize] {
-        if self.vendor == CpuVendor::Intel && self.e_cores >= 8 {
+        if self.vendor == CpuVendor::Intel && !self.secondary_set.is_empty() {
             &self.secondary_set
         } else if self.vendor == CpuVendor::Amd && !self.secondary_set.is_empty() {
             &self.secondary_set
@@ -540,8 +542,8 @@ pub fn scene_pool() -> &'static ThreadPool {
     })
 }
 
-/// 全局 AI 池（NPC 状态机/A* 等后台判定）：
-/// AMD = 次簇 CCD1；Intel = E-core ≥8 时 E-core 组，否则 P-core。
+/// 全局 AI 池（NPC 状态机/A* 等后台判定，远组/延迟不敏感负载）：
+/// AMD = 次簇 CCD1；Intel = 有 E-core 即 E-core 组（远 AI 分层负载，见 `ai_set`）。
 /// 线程数：`RV3D_AI_WORKERS` 覆盖，默认 min(8, 集合大小)。
 static AI_POOL: OnceLock<ThreadPool> = OnceLock::new();
 
