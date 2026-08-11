@@ -510,6 +510,28 @@ impl ThreadPool {
             std::thread::yield_now();
         }
     }
+
+    /// 在池的亲和核上同步执行单个任务并取回结果（线程优化第 3 步：低频重计算换核，
+    /// 如地图/地形生成，避免占用主线程所在簇）。`f` 被 move 进工作线程执行，返回前
+    /// 已 join（join 语义）。`f` 需 'static（捕获值语义，如地图种子）；spawn 失败降级
+    /// 时回退调用线程执行，不 panic。
+    pub fn run_sync<R: Send + 'static>(&self, f: impl FnOnce() -> R + Send + 'static) -> R {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(f)));
+        let (tx, rx) = std::sync::mpsc::channel::<R>();
+        let job = PoolMsg::Run(Box::new({
+            let slot = std::sync::Arc::clone(&slot);
+            move || {
+                let f = slot.lock().unwrap().take().expect("run_sync 任务只能执行一次");
+                let _ = tx.send(f());
+            }
+        }));
+        if self.senders[0].send(job).is_err() {
+            // 工作线程未存活（spawn 失败降级）：调用线程直接执行
+            let f = slot.lock().unwrap().take().expect("run_sync 任务只能执行一次");
+            return f();
+        }
+        rx.recv().expect("run_sync 执行失败")
+    }
 }
 
 impl Drop for ThreadPool {

@@ -75,6 +75,10 @@ const DODGE_COOLDOWN: f32 = 2.0;
 /// 并行 AI 更新阈值：NPC 数 ≥ 该值走亲和线程池分块并行（ai_pool）
 /// （普通波次远小于此，保持单线程串行 → 冒烟行为不变）
 const PARALLEL_AI_MIN: usize = 32;
+
+/// 远组降频周期（第 3 步）：无感知、非追击/攻击、非受击/被瞄准的远 NPC
+/// 每 `AI_FAR_DECIMATE` 帧步进一次（确定性按 npc.id 分帧），其余帧冻结省 CPU。
+const AI_FAR_DECIMATE: u32 = 4;
 /// 压力模式出生环半径（米）：超出障碍环带 58–130m，两军对垒区干净
 const STRESS_SPAWN_RADIUS: f32 = 150.0;
 /// 压力模式视野半径（米）：全场可见（512m 场地），保证 64v64 出生后立即交火
@@ -232,6 +236,21 @@ fn ai_tier_of(npc: &Npc, player: &glam::Vec3, stress: bool, params: &AiTierParam
             || npc.perception.under_fire
     };
     classify_ai_tier(dist_sq, interacting, params)
+}
+
+/// 远组降频判定（第 3 步）：无感知、非追击/攻击、非受击/被瞄准的远 NPC
+/// 每 `AI_FAR_DECIMATE` 帧步进一次（确定性按 npc.id 分帧，`frame % N == id % N`
+/// 的帧才步进）；交互中 NPC 恒每帧（红线：攻击态/接火必须每帧）。
+fn should_decimate_far(npc: &Npc, frame: u32) -> bool {
+    if npc.perception.enemy_visible
+        || npc.perception.took_hit
+        || npc.perception.under_fire
+        || npc.perception.player_aiming
+        || matches!(npc.state_machine.state(), NpcState::Chase | NpcState::Attack)
+    {
+        return false;
+    }
+    frame % AI_FAR_DECIMATE != (npc.id as u32) % AI_FAR_DECIMATE
 }
 
 /// 爆炸实体：冲击波 AoE 伤害 + 径向击退（生成时一次性结算），
@@ -635,6 +654,8 @@ pub struct Game {
     pub hud: HudState,
     /// fps 统计：时间窗内帧数
     frames: u64,
+    /// 全局帧号（永不回绕清零；远组降频确定性分帧用）
+    frame_no: u32,
     /// fps 统计时间窗起点
     fps_window_start: Instant,
     /// 音频播放器（SilentSink：rodio 未安装，样本被丢弃，但混音/衰减链路真实运行）
@@ -692,6 +713,10 @@ struct AiStepCtx<'a> {
     time: f32,
     dt: f32,
     stress: bool,
+    /// 全局帧号（远组降频按 id 分帧用）
+    frame: u32,
+    /// 远组降频开关（压力模式开启；普通模式关闭保持行为不变）
+    decimate_far: bool,
     /// 当前关卡障碍环带（theme.ring_inner/ring_outer，掩体利用评估用）
     ring_inner: f32,
     ring_outer: f32,
@@ -838,6 +863,7 @@ impl Game {
             last_damage_time: 0.0,
             hud: HudState::new(WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32),
             frames: 0,
+            frame_no: 0,
             fps_window_start: Instant::now(),
             audio_sample_rate: 48_000,
             level: 1,
@@ -964,7 +990,9 @@ impl Game {
     /// 由 new() / start_run() / 升关时调用；同时把玩家拉回原点安全区，防止卡进障碍。
     fn apply_level(&mut self, level: u32) {
         self.level = level;
-        self.map = generate_level_map(level);
+        // 地图生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core），
+        // 生成计算不吃主线程所在簇；join 语义保证返回时地图已就绪。
+        self.map = crate::engine::cpu::ai_pool().run_sync(move || generate_level_map(level));
         // 任务目标：普通波次 = 本关 WAVES_PER_LEVEL 波出场总数（含援军）；
         // 压力模式 = 歼灭一队即本轮胜利（spawn_stress_battle 每轮重置）
         self.objective = MissionObjective::new(if self.stress {
@@ -1115,6 +1143,7 @@ impl Game {
 
     /// 每帧推进所有已接入系统
     pub fn update(&mut self, dt: f32, camera: &Camera) {
+        self.frame_no = self.frame_no.wrapping_add(1);
         self.last_dt = dt;
         self.time += dt;
         self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
@@ -2306,6 +2335,11 @@ impl Game {
         let far_pool = crate::engine::cpu::ai_pool();
         far_pool.par_for_each_mut(far, |_, start, slice| {
             for (k, npc) in slice.iter_mut().enumerate() {
+                // 远组降频（压力模式）：无感知/非交互远 NPC 按 id 分帧跳过，
+                // 交互中（攻击/感知/受击/被瞄准）恒每帧步进。
+                if ctx.decimate_far && should_decimate_far(npc, ctx.frame) {
+                    continue;
+                }
                 Self::step_npc(near_len + start + k, npc, ctx);
             }
         });
@@ -2474,6 +2508,8 @@ impl Game {
                 time,
                 dt,
                 stress: self.stress,
+                frame: self.frame_no,
+                decimate_far: self.stress,
                 ring_inner: theme.ring_inner,
                 ring_outer: theme.ring_outer,
                 obstacles: &self.map.obstacles,
@@ -2710,6 +2746,77 @@ mod tests {
         assert_eq!(npcs[1].id, 3);
         assert_eq!(npcs[2].id, 1);
         assert_eq!(npcs[3].id, 2);
+    }
+
+    #[test]
+    fn far_decimate_skips_idle_npcs_by_frame() {
+        // 远组无感知非攻击 NPC（600m > STRESS_SIGHT=512 → 感知不到任何目标）：
+        // decimate_far=true 时按 id 分帧跳过（id=7 → 7%4=3），
+        // 命中帧步进（位置变化）、跳过帧冻结（位置不变）。
+        let mut npcs = [npc_at(7, Team::Red, [600.0, 0.0, 0.0])];
+        let game = Game::new();
+        let grid = game.grid.clone();
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        let flags = vec![false; 1];
+        let targets = vec![None];
+        for frame in 0..8u32 {
+            let ctx = AiStepCtx {
+                player: &player,
+                player_yaw: 0.0,
+                charge: false,
+                under_fire: &flags,
+                targets: &targets,
+                grid: &grid,
+                time: 1.0 + frame as f32 / 60.0,
+                dt: 1.0 / 60.0,
+                stress: true,
+                frame,
+                decimate_far: true,
+                ring_inner: MAP_RING_INNER,
+                ring_outer: MAP_RING_OUTER,
+                obstacles: &game.map.obstacles,
+            };
+            let idle_before = npcs[0].position;
+            Game::step_ai_parallel(&mut npcs, 0, &ctx); // near_len=0 → 全远组
+            if frame % AI_FAR_DECIMATE == 7 % AI_FAR_DECIMATE {
+                assert_ne!(npcs[0].position, idle_before, "id=7 命中帧应步进（frame {frame}）");
+            } else {
+                assert_eq!(npcs[0].position, idle_before, "id=7 跳过帧应冻结（frame {frame}）");
+            }
+        }
+    }
+
+    #[test]
+    fn should_decimate_far_excludes_interactions() {
+        // 交互中（感知/受击/被火力威胁/被瞄准/攻击态）永不降频；无交互按 id 分帧
+        let mut n = npc_at(7, Team::Red, [300.0, 0.0, 0.0]);
+        n.perception.enemy_visible = true;
+        assert!(!should_decimate_far(&n, 0), "感知敌人不降频");
+        n.perception.enemy_visible = false;
+        n.perception.took_hit = true;
+        assert!(!should_decimate_far(&n, 0), "受击不降频");
+        n.perception.took_hit = false;
+        n.perception.under_fire = true;
+        assert!(!should_decimate_far(&n, 0), "被火力威胁不降频");
+        n.perception.under_fire = false;
+        n.perception.player_aiming = true;
+        assert!(!should_decimate_far(&n, 0), "被玩家瞄准不降频");
+        n.perception.player_aiming = false;
+        // 推进状态机到 Attack（同 stress_npc_combat 的确定性推进）
+        let p = NpcPerception {
+            enemy_visible: true,
+            enemy_in_range: true,
+            ..NpcPerception::default()
+        };
+        n.state_machine.update(p);
+        n.state_machine.update(p);
+        assert_eq!(n.state_machine.state(), NpcState::Attack);
+        assert!(!should_decimate_far(&n, 0), "攻击态不降频");
+        // 无交互：id=7 → 7%4=3；frame 0/2 降频、frame 3 命中
+        n.state_machine = NpcStateMachine::new();
+        assert!(should_decimate_far(&n, 0));
+        assert!(should_decimate_far(&n, 2));
+        assert!(!should_decimate_far(&n, 3));
     }
 
     /// 关卡障碍刚体应贴地落地并静止（程序化地图替代原 3 AABB + 2 球体演示场景）
@@ -3651,6 +3758,8 @@ mod tests {
                 time,
                 dt,
                 stress: true,
+                frame,
+                decimate_far: false,
                 ring_inner: MAP_RING_INNER,
                 ring_outer: MAP_RING_OUTER,
                 obstacles: &game.map.obstacles,
@@ -3665,6 +3774,8 @@ mod tests {
                 time,
                 dt,
                 stress: true,
+                frame,
+                decimate_far: false,
                 ring_inner: MAP_RING_INNER,
                 ring_outer: MAP_RING_OUTER,
                 obstacles: &game.map.obstacles,
