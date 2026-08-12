@@ -113,13 +113,13 @@ bash scripts/run_gameplay_smoke.sh
 
 游戏实例声明 Vulkan 1.3，实际功能需求仅为 Vulkan 1.0 核心 + `VK_KHR_swapchain`（+ 可选各向异性过滤）。渲染默认使用传统 `VERTEX + FRAGMENT` 管线，物理设备支持 `VK_EXT_mesh_shader` 时自动启用可选网格着色器路径（`MESH + FRAGMENT`），不支持时自动回退，两路径渲染结果一致；光追 / 协作矩阵 / DLSS 仅作运行时探测与日志，不使用。因此门槛不高，但**测试版最低线建议为支持网格着色器的显卡**：AMD RX 6500 XT（RDNA 2 架构）或 NVIDIA RTX 20 系及以上（均支持 `VK_EXT_mesh_shader`）。**不建议使用不支持网格着色器的旧显卡游玩本系列测试版本**——项目后续将全面迁移至网格着色器渲染（与 DLSS / 光追同期的中后期计划），提前适配支持 VK 图形 API 新特性的显卡，可避免后期硬件断层（如果想低成本体验，但是又只有旧显卡，强烈推荐Intel Arc A380或Arc全系列显卡。）
 
-| 档位 | GPU | 显存 | CPU | 内存 | 目标体验 |
-|---|---|---|---|---|---|
-| **最低** | AMD RX 6500 XT（RDNA 2，支持 mesh shader）或同级 | ≥ 4 GB | AMD Ryzen 3 3300X（4 核 8 线程） | 8 GB（最低） | 1280×720 @ 30–60 fps，NPC ≤ 24 |
-| **推荐** | 中端独显：RTX 20 系及以上、RX 6000 系及以上（RDNA 2）、Intel Arc | ≥ 4 GB | 8 核 16 线程 | 12 GB 或以上（建议 16 GB） | 1280×800 / 1920×1080 @ 144+ fps，64v64 压力模式流畅 |
-| **最高** | RTX 40/50 系或 RX 7000/9000 系 | ≥ 8 GB | 16 核 32 线程 | 32 GB | 2560×1600 @ 240+ Hz |
+| 档位 | CPU | 显卡 | 内存 | 目标体验 |
+|---|---|---|---|---|
+| **最低（1080P）** | AMD Ryzen 3 3300X（4C8T）或 Intel 11 代 i3 | AMD RX 6500 XT / Intel Arc A380 | 推荐 12 GB，最低 8 GB | 1080P 流畅，NPC ≤ 24 |
+| **推荐（1080P 高画质）** | AMD Ryzen 7 3700X / Intel i9-9900K | Intel Arc A580 / NVIDIA RTX 2060 / AMD RX 6600 | 推荐 16 GB，最低 8 GB | 1080P 高画质流畅，64v64 压力模式可玩 |
+| **2K 高画质 / 4K** | Intel i5-13600K / AMD Ryzen 7 7700X | NVIDIA RTX 2080 SUPER / Intel Arc A770 16 GB / AMD RX 7700 XT | 推荐 24 GB 以上，最低 12 GB | 2K 高画质 / 4K 高帧率 |
 
-> 说明：测试版硬件线按"支持网格着色器"划定（AMD RDNA 2 / RX 6000 系起、NVIDIA Turing / RTX 20 系起、Intel Arc）。内存最低 8 GB、推荐 12 GB 或以上；提前适配支持 VK 图形 API 新特性的显卡，为后续网格着色器全面迁移（与 DLSS / 光追同期）做好准备。
+> 说明：测试版硬件线按"支持网格着色器"划定（AMD RDNA 2 / RX 6000 系起、NVIDIA Turing / RTX 20 系起、Intel Arc）——上面各档显卡均支持 `VK_EXT_mesh_shader`，为后续全面迁移至网格着色器渲染（与 DLSS / 光追同期的中后期计划）提前适配，避免后期硬件断层。内存按档位推荐/最低给出：入门推荐 12 GB、最低 8 GB；2K/4K 档推荐 24 GB 以上、最低 12 GB。
 
 **实测性能参考**（RTX 5060 Laptop + Ryzen 9 8940HX，WSLg/dzn 转译层）：
 
