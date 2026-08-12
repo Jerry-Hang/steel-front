@@ -38,6 +38,35 @@
 - ② README.md 重构为对外进度说明书｜负责人：Newton｜状态：in_progress
 - ③ AGENTS.md 重构为正式交接文档（本任务）｜负责人：当前会话 AI｜状态：in_progress
 - ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：done（第 1-4 步全部完成：分组纯函数 + 双池调度 + 地图生成换核 + 远组降频；265 tests + 冒烟 ALL-OK；基准存档 `docs/perf-ai-tier-2026-08-11/`——128 NPC 压力模式 near~42/far~85（2/3 AI 走 CCD1/E 核）、ai_us p50≈385µs 非瓶颈、fps p50≈274 无回归、降频 A/B 收益≈0（压力模式互射 NPC 全在 Chase/Attack 触发面小，保留为防御性优化）；`RV3D_AI_DECIMATE=off` 可关降频）
+- ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：in_progress（**① 阴影贴图已完成**：depth-only pass + 3×3 PCF，266 tests + 冒烟 ALL-OK，见下方 2026-08-12 交接；剩余：AO/光线遮挡、光照烘焙、程序化贴图"自己画"）
+
+### [2026-08-11] 交接：美术方向规划开启（阴影 / AO / 烘焙 + 程序化贴图）
+
+- 日期：2026-08-11
+- 发起方：用户决策 / 当前会话 AI（Codex）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：规划开启
+- 交接内容：
+  - **用户决策**：联网补齐后置（WSL2 环境兼容性失望，怕再出幺蛾子）；美术方向优先——阴影、光线遮挡（AO）、渲染烘焙；正式贴图/美术资产管线后置，先用程序化生成（CPU 画像素，零依赖）产出可辨识配色（地板/屋顶/坦克/枪械皮肤）。
+  - **技术路径（传统光栅特性，dzn 可跑）**：① 阴影 pass = 第二 render pass 渲深度到 shadow map（D32_SFLOAT，定向光投影），主 pass 片元采样做深度对比/PCF；② AO = SSAO 或烘焙 AO；③ 烘焙 = 程序化地图 lightmap（地图确定性生成，天然适配预烘焙）。
+  - **风险与红线**：renderer 是高风险区（pipeline/shader/swapchain 改动须冒烟验 VUID）；阴影 pass 涉及新 render pass + 多 pass 同步 + descriptor set 扩展，逐块落地并保持传统管线零回归。
+  - **验收**：265 tests 基线 + 冒烟 ALL-OK 不破。
+- 状态：in_progress
+
+### [2026-08-12] 交接：阴影贴图完成（depth-only pass + 3×3 PCF）
+
+- 日期：2026-08-12
+- 发起方：当前会话 AI（Codex）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：迭代结束（美术方向 ⑤-①）
+- 交接内容：
+  - **功能**：定向光 depth-only pass 渲染光空间深度到 2048×2048 D32 阴影图（正交投影 target=地图中心、半宽 250m、near=1 far=500，覆盖障碍环带与接火区），主 pass 片元 3×3 PCF 深度比较 + depth_bias 0.005 / normal_bias 0.02 防 acne；`RV3D_NO_SHADOW=1` 关闭阴影（A/B 验证）。
+  - **四个根因修复（勿回退）**：① identity 槽位写错——`create_instance_buffer` 把地形 identity 矩阵写到槽位 0 而非 `INSTANCE_COUNT`(65536)，槽位 0 每帧被 `cull_and_upload` 覆盖 → 地形矩阵塌缩；② 光方向符号——`ShadowConfig::new` 直接传 `sun.direction`（表面→光源），旧传 `-sun.direction` 使光相机在地下仰视 → 地形整片缺失；③ 阴影 UV 必须 V 镜像 `uv.y = 1-(p.y*0.5+0.5)`（depth-only pass 顶点经 naga ADJUST_COORDINATE_SPACE Y 翻转，不镜像阴影方向整体错位）；④ 深度映射 `frag_depth = clip.z*0.5+0.5`（glam ortho_rh clip.z∈[0,1] 经 viewport 映射到 [0.5,1]，不偏移比较基准错 0.5）。
+  - **采样器铁律**：阴影采样器 `.compare_enable(false)`（手动 PCF 用 `textureSample` 读原始深度再比较；comparison sampler 非 Dref 采样严格验证报 VUID）。
+  - **验证**：A/B（`RV3D_NO_SHADOW=1` 对照，固定视角）62% 像素亮度不同、暗化集中在障碍环/地形丘陵（1.35% 像素暗化 >30，几何稀疏属预期）、方向正确；266 tests（新增 `world_to_shadow_uv_mirrors_v_and_maps_depth` 回归单测）、0 警告、冒烟 ALL-OK（VUID=0、kills=1、fps 137–207）。
+  - **已清理**：临时调试代码全部删除——`debug_readback_shadow`/`RV3D_SHADOW_READBACK`/build.rs DEBUG 可视化块/`RV3D_AUTOSHOT_SECS` 自动截图钩子；shadow image usage 移除 TRANSFER_SRC。
+  - **遗留/下一步**：AO/光线遮挡（SSAO 或烘焙）、光照烘焙（程序化地图 lightmap）、程序化贴图（CPU 画像素，零依赖）。
+- 状态：done
 
 ### [2026-08-11] 交接：线程分层调度完成（第 1-4 步）
 
@@ -265,6 +294,12 @@
   排查绘制是否发生时先看这两个计数
 
   地形实例 tint=0.7 灰、marker tint=WorldMarker.tint（勿混）
+- 阴影贴图（2026-08-12，勿回退）：阴影 UV 必须 V 镜像 `uv.y = 1-(p.y*0.5+0.5)`、
+  深度映射 `frag_depth = clip.z*0.5+0.5`（glam ortho_rh clip.z∈[0,1]）——已固化进
+  lighting.rs `world_to_shadow_uv` + 回归单测；光方向语义 = 表面→光源（`sun.direction`
+  直接传入 `ShadowConfig::new`，勿传负号）；阴影采样器 compare_enable(false) 手动 PCF；
+  `RV3D_NO_SHADOW=1` 可关阴影做 A/B；地形 identity 矩阵必须写到槽位 `INSTANCE_COUNT`
+  （65536），槽位 0 每帧被 cull_and_upload 覆盖
 
 ### 输入/键位与分辨率约定（勿回退）
 - 键码一律用 winit 0.30 KeyCode 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/KeyR=36/
