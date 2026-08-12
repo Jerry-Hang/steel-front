@@ -4,7 +4,7 @@
 
 > **项目状态（2026-08-11 快照）**
 >
-> 当前版本：开发快照 v0.6 ｜ 单元测试：259 passed / 0 警告 ｜ 玩法冒烟：ALL-OK（kills=1、VUID=0、无 panic）｜ 渲染管线：传统 VERTEX+FRAGMENT（默认/回退）+ 可选网格着色器（`VK_EXT_mesh_shader` 可用时自动启用；实例声明 Vulkan 1.3，实际仅用 1.0 核心特性 + `VK_KHR_swapchain`）
+> 当前版本：开发快照 v0.6 ｜ 单元测试：266 passed / 0 警告 ｜ 玩法冒烟：ALL-OK（kills=1、VUID=0、无 panic）｜ 渲染管线：传统 VERTEX+FRAGMENT（默认/回退）+ 可选网格着色器（`VK_EXT_mesh_shader` 可用时自动启用；实例声明 Vulkan 1.3，实际仅用 1.0 核心特性 + `VK_KHR_swapchain`）+ 阴影贴图（depth-only pass + 3×3 PCF）
 
 ---
 
@@ -37,6 +37,7 @@
 - **程序化地形**：257×257 顶点、三级网格密度（256/128/64 格）+ smoothstep LOD morph；中央 140m 半径接火区拍平（战斗公平 + 弹道无阻），外围 ≤15m 确定性值噪声丘陵。
 - **画质三档预设**：低 / 中 / 高分别对应地形 LOD 阈值与实例近档半径（中画质与默认常量一致）。
 - **纹理与覆盖层**：单张程序化纹理 + 完整 mip 链 + 各向异性过滤；独立管线渲染 HUD 覆盖层。
+- **阴影贴图**：定向光 depth-only pass 渲染光空间深度到 2048×2048 D32 阴影图（正交投影覆盖 250m 半宽，含障碍环带与接火区），主 pass 片元 3×3 PCF 深度比较 + bias 缓解 acne；`RV3D_NO_SHADOW=1` 可关阴影做 A/B 验证。
 - **网格着色器可选路径**：`VK_EXT_mesh_shader` 可用时实例场走 `MESH + FRAGMENT`（逐实例 GPU 视锥剔除 + 顶点变换，65536 workgroup 按 `maxMeshWorkGroupCount` 查询上限分块），否则自动回退传统 `VERTEX + FRAGMENT`；片元着色器两路径复用同一模块，渲染结果一致。
 - **性能路径**：视锥剔除五级 SIMD 选路（AVX-512 > AVX2 > AVX > SSE4.2 > NEON > 标量，逐位一致）、两阶段并行剔除 + 上传、CPU 拓扑检测与主线程/线程池亲和绑定。
 
@@ -89,6 +90,7 @@ bash scripts/run_gameplay_smoke.sh
 | `RV3D_SCENE_WORKERS` / `RV3D_AI_WORKERS` | 场景 / AI 亲和线程池线程数 | `min(8, 集合大小)` |
 | `RV3D_BENCH_YAW` / `RV3D_BENCH_PITCH` | 基准测试固定相机朝向（度），保证对照实验视角一致 | 无 |
 | `RV3D_EXPLOSION_SIM` | `1` 运行爆炸/冲击波 SIMD 压力自测（加速比日志） | `0` |
+| `RV3D_NO_SHADOW` | `1` 关闭阴影贴图（仅环境光+点光源），阴影 A/B 验证用 | `0` |
 | `RV3D_NET` / `RV3D_NET_ADDR` | 联网模式（`server` / `client`）与对端地址 | 无 |
 
 ### 键位操作
@@ -142,10 +144,12 @@ bash scripts/run_gameplay_smoke.sh
 | 2026-08-09 ~ 08-10 | Wave 6 玩法/美术/联网 | 纹理 mip 链与各向异性、程序化地形丘陵、程序化 DSP 音效、AI 掩体利用与可击穿障碍、任务目标、UDP 联网基础版、光照渲染验证 | `f46c629` → `106c180` |
 | 2026-08-10 | 输入与地板修复 | 爆炸冲击波玩法、地面专用平铺 quad（根治纸箱盖地板）、winit 0.30 强制 X11 后端、X11 绝对位置视角驱动 | `c57da1a` → `868d127` |
 | 2026-08-11 | 文档重构 + 网格着色器可选路径 | 游玩硬件标准与 Vulkan 特性说明、AGENTS.md 升级为正式 AI 交接文档、README 重构为对外进度说明书；**网格着色器（`VK_EXT_mesh_shader`）可选路径落地：可用时自动启用（GPU 剔除+变换），否则回退传统管线** | `6fa6b94` → `bf95aee` |
+| 2026-08-12 | 阴影贴图 | 定向光 depth-only pass + 2048 阴影图 + 主 pass 3×3 PCF；修复光方向符号 / 阴影 UV V 镜像 / 深度 0.5 偏移 / identity 槽位根因（地形阴影从 99.7% 空白 → 正常）；`RV3D_NO_SHADOW=1` A/B 对照（62% 像素亮度差异，方向正确） | 待提交 |
 
 ## 六、当前目标与路线图
 
-### 已完成（2026-08-11）
+### 已完成（2026-08-12）
+- **阴影贴图**：定向光 depth-only pass 渲染光空间深度（2048×2048 D32），主 pass 片元 3×3 PCF 深度比较 + bias 防 acne；障碍环带 / 地形丘陵 / 标记均落阴影，`RV3D_NO_SHADOW=1` 可 A/B 对照（62% 像素亮度差异、方向正确）；阴影 UV V 镜像与深度 0.5 偏移映射已固化进 `world_to_shadow_uv` 回归单测（266 tests / 0 警告 / 冒烟 ALL-OK）。
 - **网格着色器可选路径**：`VK_EXT_mesh_shader` 可用时实例场走 `vkCmdDrawMeshTasksEXT`（逐实例 GPU 剔除 + 顶点变换，CPU 减负），否则自动回退传统管线；片元着色器两路径完全一致，冒烟确认传统路径零回归（259 tests / 0 警告 / 冒烟 ALL-OK）。
 - **文档重构**：README 转为对外项目说明书（本文），AGENTS.md 升级为正式 AI 迭代交接文档（规划开启/结束、AI-AI 交接、绘画素材交接统一留痕）。
 
