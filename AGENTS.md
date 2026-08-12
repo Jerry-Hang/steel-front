@@ -38,6 +38,7 @@
 - ② README.md 重构为对外进度说明书｜负责人：Newton｜状态：in_progress
 - ③ AGENTS.md 重构为正式交接文档（本任务）｜负责人：当前会话 AI｜状态：in_progress
 - ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：done（第 1-4 步全部完成：分组纯函数 + 双池调度 + 地图生成换核 + 远组降频；265 tests + 冒烟 ALL-OK；基准存档 `docs/perf-ai-tier-2026-08-11/`——128 NPC 压力模式 near~42/far~85（2/3 AI 走 CCD1/E 核）、ai_us p50≈385µs 非瓶颈、fps p50≈274 无回归、降频 A/B 收益≈0（压力模式互射 NPC 全在 Chase/Attack 触发面小，保留为防御性优化）；`RV3D_AI_DECIMATE=off` 可关降频）
+- ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：in_progress（**① 阴影贴图已完成**：depth-only pass + 3×3 PCF，266 tests + 冒烟 ALL-OK，见下方 2026-08-12 交接；剩余：AO/光线遮挡、光照烘焙、程序化贴图"自己画"）
 
 ### [2026-08-11] 交接：美术方向规划开启（阴影 / AO / 烘焙 + 程序化贴图）
@@ -66,6 +67,19 @@
   - **验证**：A/B（`RV3D_NO_SHADOW=1` 对照，固定视角）62% 像素亮度不同、暗化集中在障碍环/地形丘陵（1.35% 像素暗化 >30，几何稀疏属预期）、方向正确；266 tests（新增 `world_to_shadow_uv_mirrors_v_and_maps_depth` 回归单测）、0 警告、冒烟 ALL-OK（VUID=0、kills=1、fps 137–207）。
   - **已清理**：临时调试代码全部删除——`debug_readback_shadow`/`RV3D_SHADOW_READBACK`/build.rs DEBUG 可视化块/`RV3D_AUTOSHOT_SECS` 自动截图钩子；shadow image usage 移除 TRANSFER_SRC。
   - **遗留/下一步**：AO/光线遮挡（SSAO 或烘焙）、光照烘焙（程序化地图 lightmap）、程序化贴图（CPU 画像素，零依赖）。
+- 状态：done
+
+### [2026-08-12] 交接：物理核/超线程分层绑定完成（线程优化第 5 步）
+
+- 日期：2026-08-12
+- 发起方：用户决策 / 当前会话 AI（Codex）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - **用户决策**：高性能线程（主线程/渲染/scene 池）不再绑定超线程，严格绑物理核；物理核对应超线程仅在池线程数超过物理核数时作为溢出辅助。CCX 级分离（主线程一个 CCX、渲染另一个 CCX、3900X/3950X 单独 CCX 供地形/AI）因当前"渲染在主线程"架构 + WSL2 抹平 L3/NUMA，推迟至 Windows 原生 Vulkan（DeepCode）阶段。
+  - **实测结论（勿写死奇偶）**：8940HX 在 WSL2 下 sysfs `thread_siblings_list` 保留真实 SMT 配对（0-1/2-3/…），**偶数 vCPU（0,2,4…）是物理主线程、奇数是超线程**——用户口述"单数=物理"恰相反；正确做法是运行时读 sysfs 每对取最小 vCPU，不可读时回退旧行为。
+  - **实现**：`CpuTopology` 新增 `primary_physical`/`secondary_physical`/`smt_set`；`scene_compute_set()`/`ai_set()`/`pin_main_thread()` 默认返回物理核集合（主线程/scene 池绑 CCD0 物理核 `[0,2,…,14]`、ai 池绑 CCD1 物理核 `[16,18,…,30]`）；`ThreadPool::new` 分层绑定——线程数 ≤ 物理核数全绑物理核，超出部分绑 物理核∪超线程（`RV3D_SCENE_WORKERS`/`RV3D_AI_WORKERS` 调大时触发）。
+  - **验证**：270 tests（新增 4 个 SMT 配对单测）；128 NPC 压力基准 fps p50 215（前 212-216 持平）、ai_us p50 364µs（前 424-640µs，提升 14-43%）、cull_us 486µs（前 505-527µs）、VUID=0；冒烟 ALL-OK（kills=1）。
 - 状态：done
 
 ### [2026-08-11] 交接：线程分层调度完成（第 1-4 步）
@@ -171,8 +185,9 @@
   - 启动时拓扑检测：CPUID vendor + sysfs online + leaf 0x1A hybrid（Intel E-core 统计）；
     WSL2 抹平 L3/NUMA（node 仅 node0、L3 shared_cpu_list 全 0-31），双簇按 vCPU 顺序推断
     （前半=首簇/CCD0，后半=次簇/CCD1），实测 8940HX primary=[0-15] secondary=[16-31]
-  - 主线程亲和绑定 `sched_setaffinity`（FFI，无第三方依赖）：默认绑首簇（CCD0），
-    `RV3D_CPU_PIN=off` 关闭、`RV3D_CPU_PIN=0-7,16-23` 精确覆盖；Intel 上主线程绑 P-core 组、
+  - 主线程亲和绑定 `sched_setaffinity`（FFI，无第三方依赖）：默认绑首簇物理核（CCD0
+    物理主线程，2026-08-12 起弃用超线程，见下方 2026-08-12 交接），`RV3D_CPU_PIN=off`
+    关闭、`RV3D_CPU_PIN=0-7,16-23` 精确覆盖；Intel 上主线程绑 P-core 组、
     E-core 组进 secondary（≤8 仅轻任务，>8 可接 AI/地图生成——决策已编码，供未来线程池）
   - AI 并行已落地：`ai_pool` 亲和线程池（AMD 绑 CCD1=secondary_set；Intel E-core≥8 绑 E-core，
     否则 P-core），`step_ai_parallel` 走 `pool.par_for_each_mut`，逐位一致测试保序
