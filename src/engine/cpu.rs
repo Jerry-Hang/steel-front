@@ -14,6 +14,11 @@
 //! 注意：WSL2 虚拟化会抹平 L3/NUMA 分组（sysfs L3 `shared_cpu_list` 全 0-31、仅 node0），
 //! 因此双簇推断采用「vCPU 枚举顺序 = 物理枚举顺序」：前半 = 首簇、后半 = 次簇，
 //! 可用环境变量 `RV3D_CPU_PIN` 覆盖精确亲和性掩码（如 `RV3D_CPU_PIN=0-7,16-23`）。
+//!
+//! 物理核/超线程识别（2026-08-12，优化点 1）：sysfs `thread_siblings_list` 在 WSL2 下
+//! 保留真实 SMT 配对（实测 8940HX：0-1/2-3/…，偶数 vCPU = 物理主线程），
+//! 高性能线程（主线程/渲染/scene 池）严格绑定物理核集合，超线程仅在池线程数超过
+//! 物理核数时作为溢出辅助（用户策略：延迟敏感任务避开超线程）。
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,6 +45,12 @@ pub struct CpuTopology {
     pub primary_set: Vec<usize>,
     /// 次簇 vCPU 集合（AMD = 后半 CCD1；Intel = E-core 组，≤8 时仅轻任务）
     pub secondary_set: Vec<usize>,
+    /// 首簇内物理核心主线程 vCPU（每个 SMT 对的最小 vCPU；sysfs 不可读时 = primary_set）
+    pub primary_physical: Vec<usize>,
+    /// 次簇内物理核心主线程 vCPU（AMD = CCD1 物理核；Intel E-core 无 SMT 时 = secondary_set）
+    pub secondary_physical: Vec<usize>,
+    /// 全部超线程 vCPU（SMT 对的最大 vCPU；无 SMT/sysfs 不可读时为空）
+    pub smt_set: Vec<usize>,
     /// Intel 能效核数量（CPUID leaf 0x1A hybrid；AMD 恒 0）
     pub e_cores: usize,
     pub avx2: bool,
@@ -192,12 +203,60 @@ fn parse_cpu_list(spec: &str) -> Option<Vec<usize>> {
     Some(cpus)
 }
 
+/// 从 SMT 兄弟列表划分物理主线程与超线程：
+/// 每组 `siblings`（同一物理核心的 vCPU）取编号最小者为物理主线程，其余为超线程。
+/// 单成员组（如 Intel E-core，无 SMT）= 自身即物理核。
+fn split_smt_pairs(siblings: &[Vec<usize>]) -> (Vec<usize>, Vec<usize>) {
+    let mut physical = Vec::new();
+    let mut smt = Vec::new();
+    for group in siblings {
+        if group.is_empty() {
+            continue;
+        }
+        let min = *group.iter().min().expect("非空组必有最小值");
+        physical.push(min);
+        for &c in group {
+            if c != min {
+                smt.push(c);
+            }
+        }
+    }
+    physical.sort_unstable();
+    smt.sort_unstable();
+    (physical, smt)
+}
+
+/// 读 sysfs 收集每个物理核心的 SMT 兄弟组，返回 `Vec<group>`。
+/// 任意 CPU 的 `thread_siblings_list` 不可读时返回 None（调用方回退不区分物理/超线程）。
+fn read_smt_siblings(threads: usize) -> Option<Vec<Vec<usize>>> {
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    for cpu in 0..threads {
+        let path = format!("/sys/devices/system/cpu/cpu{}/topology/thread_siblings_list", cpu);
+        let s = std::fs::read_to_string(&path).ok()?;
+        let members = parse_cpu_list(s.trim())?;
+        // 只保留编号最小者代表该组（同组在后续 CPU 重复出现，去重）
+        let min = *members.iter().min()?;
+        if min == cpu {
+            out.push(members);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 impl CpuTopology {
     /// 场景计算集合（视锥剔除/实例上传/地形 morph 等渲染侧 CPU 工作）：
-    /// AMD = 首簇 CCD0（与渲染主线程同簇，避免跨 CCD 访问）；
-    /// Intel = 仅 P-core（杜绝渲染工作被调度到 E-core）。
+    /// AMD = 首簇 CCD0 物理核（与渲染主线程同簇，避免跨 CCD 访问，且避开超线程）；
+    /// Intel = 仅 P-core 物理核（杜绝渲染工作被调度到 E-core/超线程）。
     pub fn scene_compute_set(&self) -> &[usize] {
-        &self.primary_set
+        if self.primary_physical.is_empty() {
+            &self.primary_set
+        } else {
+            &self.primary_physical
+        }
     }
 
     /// AI/地图生成集合（用户策略，2026-08-11 修正）：
@@ -207,9 +266,14 @@ impl CpuTopology {
     ///   无 E-core（全 P-core 平台）回退 primary_set。
     pub fn ai_set(&self) -> &[usize] {
         if self.vendor == CpuVendor::Intel && !self.secondary_set.is_empty() {
+            // E-core 无超线程，集合即物理核，直接使用
             &self.secondary_set
         } else if self.vendor == CpuVendor::Amd && !self.secondary_set.is_empty() {
-            &self.secondary_set
+            if self.secondary_physical.is_empty() {
+                &self.secondary_set
+            } else {
+                &self.secondary_physical
+            }
         } else {
             &self.primary_set
         }
@@ -253,11 +317,35 @@ impl CpuTopology {
             }
             CpuVendor::Other => ((0..threads).collect(), Vec::new(), 0),
         };
+        // 物理核/超线程识别：sysfs SMT 配对（WSL2 下实测可用）；不可读时回退不区分
+        let (primary_physical, secondary_physical, smt_set) =
+            match read_smt_siblings(threads) {
+                Some(groups) => {
+                    let (physical_all, smt_all) = split_smt_pairs(&groups);
+                    let pp: Vec<usize> = primary_set
+                        .iter()
+                        .filter(|c| physical_all.contains(c))
+                        .copied()
+                        .collect();
+                    let sp: Vec<usize> = secondary_set
+                        .iter()
+                        .filter(|c| physical_all.contains(c))
+                        .copied()
+                        .collect();
+                    let pp = if pp.is_empty() { primary_set.clone() } else { pp };
+                    let sp = if sp.is_empty() { secondary_set.clone() } else { sp };
+                    (pp, sp, smt_all)
+                }
+                None => (primary_set.clone(), secondary_set.clone(), Vec::new()),
+            };
         CpuTopology {
             vendor,
             threads,
             primary_set,
             secondary_set,
+            primary_physical,
+            secondary_physical,
+            smt_set,
             e_cores,
             avx2: {
                 #[cfg(target_arch = "x86_64")]
@@ -286,7 +374,13 @@ impl CpuTopology {
                     self.primary_set.clone()
                 }
             },
-            Err(_) => self.primary_set.clone(),
+            Err(_) => {
+                if self.primary_physical.is_empty() {
+                    self.primary_set.clone()
+                } else {
+                    self.primary_physical.clone()
+                }
+            }
         };
         #[cfg(target_os = "linux")]
         {
@@ -301,7 +395,7 @@ impl CpuTopology {
             };
             if ok {
                 log::info!(
-                    "cpu: 主线程已绑定 vCPU {:?}（{} 核 {} 线程，{}）",
+                    "cpu: 主线程已绑定物理核心 vCPU {:?}（{} 物理核 {} 逻辑线程，{}；SMT {}）",
                     target,
                     self.threads / 2,
                     self.threads,
@@ -309,7 +403,8 @@ impl CpuTopology {
                         CpuVendor::Amd => "AMD 双簇：主=CCD0，次=CCD1",
                         CpuVendor::Intel => "Intel 混合：主=P-core，次=E-core",
                         CpuVendor::Other => "未知厂商",
-                    }
+                    },
+                    self.smt_set.len()
                 );
             } else {
                 log::warn!("cpu: sched_setaffinity 失败（环境不支持），保持默认调度");
@@ -350,7 +445,7 @@ impl CpuTopology {
     /// 启动日志摘要（厂商/簇/E-core/指令集）
     pub fn log_summary(&self) {
         log::info!(
-            "cpu: vendor={:?} threads={} primary={:?} secondary={:?} e_cores={} avx2={} avx512={} scene_set={:?} ai_set={:?}",
+            "cpu: vendor={:?} threads={} primary={:?} secondary={:?} e_cores={} avx2={} avx512={} scene_set={:?} ai_set={:?} physical_primary={:?} physical_secondary={:?} smt={:?}",
             self.vendor,
             self.threads,
             self.primary_set,
@@ -359,7 +454,10 @@ impl CpuTopology {
             self.avx2,
             self.avx512,
             self.scene_compute_set(),
-            self.ai_set()
+            self.ai_set(),
+            self.primary_physical,
+            self.secondary_physical,
+            self.smt_set
         );
     }
 }
@@ -405,10 +503,20 @@ impl ThreadPool {
         let threads = threads.max(1);
         let mut senders = Vec::with_capacity(threads);
         let set_v = set.to_vec();
+        // 超线程辅助（2026-08-12）：池线程数 ≤ 物理核集合大小时全部绑物理核；
+        // 超出部分（如 RV3D_*_WORKERS 调大）绑定 物理核∪超线程 全集，
+        // 由 OS 调度器平衡——物理核满载时超线程承接溢出任务。
+        let topo = topology();
+        let mut overflow_v: Vec<usize> = set.to_vec();
+        for &s in &topo.smt_set {
+            if !overflow_v.contains(&s) {
+                overflow_v.push(s);
+            }
+        }
         for i in 0..threads {
             let (tx, rx) = std::sync::mpsc::channel::<PoolMsg>();
             senders.push(tx);
-            let cpus = set_v.clone();
+            let cpus = if i < set_v.len() { set_v.clone() } else { overflow_v.clone() };
             let tname = format!("{}-{}", name, i);
             std::thread::Builder::new()
                 .name(tname)
@@ -578,4 +686,52 @@ pub fn ai_pool() -> &'static ThreadPool {
         log::info!("cpu: ai_pool 创建（{} 工作线程，绑定 vCPU {:?}）", n, set);
         ThreadPool::new(set, n, "ai")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cpu_list_supports_ranges_and_lists() {
+        assert_eq!(parse_cpu_list("0-7").unwrap(), (0..=7).collect::<Vec<_>>());
+        assert_eq!(parse_cpu_list("0,2,4").unwrap(), vec![0, 2, 4]);
+        assert_eq!(
+            parse_cpu_list("0-3,16-19").unwrap(),
+            vec![0, 1, 2, 3, 16, 17, 18, 19]
+        );
+        assert_eq!(parse_cpu_list("0").unwrap(), vec![0]);
+        assert!(parse_cpu_list("x").is_none());
+        assert!(parse_cpu_list("5-1").is_none());
+    }
+
+    #[test]
+    fn split_smt_pairs_assigns_min_vcpu_as_physical() {
+        // 模拟 8940HX WSL2：SMT 配对 0-1/2-3/…，偶数 vCPU 是物理主线程
+        let groups = vec![
+            vec![0, 1],
+            vec![2, 3],
+            vec![4],      // 无 SMT 的核心（如 Intel E-core）：自身即物理核
+            vec![6, 7],
+        ];
+        let (physical, smt) = split_smt_pairs(&groups);
+        assert_eq!(physical, vec![0, 2, 4, 6]);
+        assert_eq!(smt, vec![1, 3, 7]);
+    }
+
+    #[test]
+    fn split_smt_pairs_handles_empty_and_single() {
+        let (physical, smt) = split_smt_pairs(&[]);
+        assert!(physical.is_empty() && smt.is_empty());
+        let (physical, smt) = split_smt_pairs(&[vec![5], vec![8, 9, 10]]);
+        assert_eq!(physical, vec![5, 8]);
+        assert_eq!(smt, vec![9, 10]);
+    }
+
+    #[test]
+    fn thread_siblings_spec_parses_like_cpu_list() {
+        // thread_siblings_list 常见格式 "0-1" / "0,1"，应能被 parse_cpu_list 解析
+        assert_eq!(parse_cpu_list("0-1").unwrap(), vec![0, 1]);
+        assert_eq!(parse_cpu_list("16-17").unwrap(), vec![16, 17]);
+    }
 }
