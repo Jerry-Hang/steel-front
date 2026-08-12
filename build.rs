@@ -93,6 +93,9 @@ struct VertexOutput {
 
 @group(0) @binding(1) var texture_sampled: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
+// 阴影贴图（2026-08-11）：depth-only pass 渲光空间深度，片元 3x3 PCF 深度比较
+@group(0) @binding(5) var shadow_map: texture_depth_2d;
+@group(0) @binding(6) var shadow_sampler: sampler;
 
 // ---- 光照 Uniform（默认全零 = 光照关闭，保持原混合渲染向后兼容）----
 struct DirectionalLight {
@@ -211,16 +214,31 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         normal = -normal;
     }
 
-    // 阴影因子（方向光）：光空间深度比较 + bias。
-    // 基础实现未接入 shadow map 贴图，占位采样深度 1.0（远平面外 = 无遮挡）。
+    // 阴影因子（方向光）：shadow map 3x3 PCF 深度比较 + bias。
+    // 阴影图由 depth-only pass 渲染：顶点输出经 ADJUST_COORDINATE_SPACE Y 翻转，
+    // 光空间 clip.y → 帧缓冲行 y_img=(1-clip.y)/2*H，采样 V 必须同式镜像
+    // （uv.y=1-(clip.y*0.5+0.5)，否则阴影整体前后颠倒）；glam ortho_rh 的 clip.z∈[0,1]
+    // 经 viewport 映射到深度 [0.5,1]，比较前同样映射 frag_depth = clip.z*0.5+0.5。
     var shadow_factor = 0.0;
     if (light_data.flags.y >= 0.5 && light_data.shadow.bias.z >= 0.5) {
         let sp = light_data.shadow.light_view_proj * vec4<f32>(input.world_pos, 1.0);
-        let shadow_uv = sp.xy * 0.5 + vec2<f32>(0.5, 0.5);
+        let shadow_uv = vec2<f32>(sp.x * 0.5 + 0.5, 1.0 - (sp.y * 0.5 + 0.5));
+        let frag_depth = sp.z * 0.5 + 0.5;
         if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0
             && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0
             && sp.z >= 0.0 && sp.z <= 1.0) {
-            shadow_factor = shadow_test(1.0, sp.z, light_data.shadow.bias.x);
+            let texel = 1.0 / light_data.shadow.config.x;
+            var occluded = 0.0;
+            for (var dy = -1; dy <= 1; dy = dy + 1) {
+                for (var dx = -1; dx <= 1; dx = dx + 1) {
+                    let d = textureSample(shadow_map, shadow_sampler,
+                        shadow_uv + vec2<f32>(f32(dx), f32(dy)) * texel);
+                    if (frag_depth - light_data.shadow.bias.x > d) {
+                        occluded = occluded + 1.0;
+                    }
+                }
+            }
+            shadow_factor = occluded / 9.0;
         }
     }
 
@@ -538,6 +556,36 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// 阴影 depth-only 顶点着色器（2026-08-11）：光空间 view-proj + 实例变换，
+/// 输出裁剪空间位置（shadow pass 渲地形/实例场/障碍/NPC 到 shadow map）。
+const SHADOW_VERTEX_SHADER_WGSL: &str = r#"
+struct ShadowVP {
+    view_proj: mat4x4<f32>,
+}
+@group(0) @binding(0) var<uniform> shadow_vp: ShadowVP;
+
+struct Instance {
+    model: mat4x4<f32>,
+    tint: vec4<f32>,
+}
+@group(0) @binding(2) var<storage, read> instances: array<Instance>;
+
+@vertex
+fn shadow_main(
+    @location(0) position: vec3<f32>,
+    @builtin(instance_index) instance_index: u32,
+) -> @builtin(position) vec4<f32> {
+    let inst = instances[instance_index];
+    return shadow_vp.view_proj * inst.model * vec4<f32>(position, 1.0);
+}
+"#;
+
+/// 阴影 depth-only 片元着色器：无输出（render pass 无颜色附件）
+const SHADOW_FRAGMENT_SHADER_WGSL: &str = r#"
+@fragment
+fn fs_main() {}
+"#;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let vs_spirv = compile_wgsl(VERTEX_SHADER_WGSL);
@@ -545,6 +593,8 @@ fn main() {
     let mesh_spirv = compile_wgsl_mesh(MESH_SHADER_WGSL);
     let hud_vs_spirv = compile_wgsl(HUD_VERTEX_SHADER_WGSL);
     let hud_fs_spirv = compile_wgsl(HUD_FRAGMENT_SHADER_WGSL);
+    let shadow_vs_spirv = compile_wgsl(SHADOW_VERTEX_SHADER_WGSL);
+    let shadow_fs_spirv = compile_wgsl(SHADOW_FRAGMENT_SHADER_WGSL);
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR 环境变量未设置");
     let dest_path = Path::new(&out_dir).join("shaders.rs");
     let mut output = String::new();
@@ -564,6 +614,12 @@ fn main() {
     output.push_str("/// HUD 片元着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const HUD_FS_SPIRV: &[u32] = &{:?};\n", hud_fs_spirv));
+    output.push_str("/// 阴影 depth-only 顶点着色器 SPIR-V 字节码\n");
+    output.push_str("#[allow(dead_code)]\n");
+    output.push_str(&format!("pub const SHADOW_VS_SPIRV: &[u32] = &{:?};\n", shadow_vs_spirv));
+    output.push_str("/// 阴影 depth-only 片元着色器 SPIR-V 字节码\n");
+    output.push_str("#[allow(dead_code)]\n");
+    output.push_str(&format!("pub const SHADOW_FS_SPIRV: &[u32] = &{:?};\n", shadow_fs_spirv));
     fs::write(&dest_path, &output).expect("写入着色器数据失败");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 未设置");
     let assets_dir = Path::new(&manifest_dir).join("assets");
@@ -579,5 +635,7 @@ fn main() {
     write_spv(&mesh_spirv, "mesh.spv");
     write_spv(&hud_vs_spirv, "hud.vert.spv");
     write_spv(&hud_fs_spirv, "hud.frag.spv");
+    write_spv(&shadow_vs_spirv, "shadow.vert.spv");
+    write_spv(&shadow_fs_spirv, "shadow.frag.spv");
     println!("cargo:info=着色器编译完成");
 }

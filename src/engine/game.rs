@@ -1480,7 +1480,7 @@ impl Game {
 
     /// 构建默认光照场景（方向光 + 环境光 + 2 点光；阴影未绑定贴图，保持关闭）
     pub fn light_uniform(&self) -> super::lighting::LightUniform {
-        use super::lighting::{DirectionalLight, LightUniform, PointLight};
+        use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
         let sun = DirectionalLight::new(
             glam::Vec3::new(-0.4, 0.9, -0.3).normalize(),
             glam::Vec3::new(1.0, 0.95, 0.85),
@@ -1496,12 +1496,23 @@ impl Game {
             glam::Vec3::new(0.4, 0.7, 1.0),
             1.0,
         );
+        // 阴影贴图（2026-08-11）：正交光空间以地图中心为 target、半宽 250m，
+        // 覆盖障碍环带（58-130m）与两军接火区；相机无现成引用，取原点近似。
+        // ShadowConfig.light_dir 语义 = 表面→光源方向，与 sun.direction 一致直接传入
+        // （旧实现传 -sun.direction 使光相机在地面下方仰视：阴影图只剩背面剔除后的
+        //   竖面，地面/地形整片缺失，阴影完全失效）。
+        // RV3D_NO_SHADOW=1 关闭阴影（仅环境光+点光源），用于 A/B 验证与阴影 pass 性能对比。
+        let shadow = if std::env::var("RV3D_NO_SHADOW").as_deref() == Ok("1") {
+            None
+        } else {
+            Some(ShadowConfig::new(sun.direction, glam::Vec3::ZERO, 250.0, 1.0, 500.0))
+        };
         LightUniform::build(
             Some(&sun),
             &[point_a, point_b],
             glam::Vec3::new(0.5, 0.55, 0.6),
             0.35,
-            None,
+            shadow.as_ref(),
         )
     }
 

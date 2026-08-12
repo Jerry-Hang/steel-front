@@ -654,6 +654,21 @@ pub struct Renderer {
     depth_images: Vec<vk::Image>,
     depth_images_memory: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,
+    // ---- 阴影贴图（2026-08-11：depth-only pass 渲光空间深度，主 pass 3x3 PCF）----
+    shadow_image: vk::Image,
+    shadow_image_memory: vk::DeviceMemory,
+    shadow_image_view: vk::ImageView,
+    shadow_sampler: vk::Sampler,
+    shadow_render_pass: vk::RenderPass,
+    shadow_framebuffer: vk::Framebuffer,
+    shadow_pipeline_layout: vk::PipelineLayout,
+    shadow_pipeline: vk::Pipeline,
+    /// 阴影 UBO（每帧 slot 一份 64B mat4，避免 in-flight 竞态）
+    shadow_ubo_buffers: Vec<vk::Buffer>,
+    shadow_ubo_memory: Vec<vk::DeviceMemory>,
+    shadow_ubo_mapped: Vec<*mut std::ffi::c_void>,
+    shadow_descriptor_set_layout: vk::DescriptorSetLayout,
+    shadow_descriptor_sets: Vec<vk::DescriptorSet>,
     // ---- 新增：Uniform / Descriptor 相关 ----
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -715,6 +730,8 @@ impl Renderer {
         renderer.init_hud()?;
         renderer.init_framebuffers()?;
         renderer.init_texture()?;
+        renderer.init_shadow_resources()?;
+        renderer.init_shadow_pipeline()?;
         renderer.update_texture_descriptor_sets()?;
         renderer.init_command_buffers()?;
         renderer.init_sync_objects()?;
@@ -1069,6 +1086,19 @@ impl Renderer {
             depth_images: Vec::new(),
             depth_images_memory: Vec::new(),
             depth_image_views: Vec::new(),
+            shadow_image: vk::Image::null(),
+            shadow_image_memory: vk::DeviceMemory::null(),
+            shadow_image_view: vk::ImageView::null(),
+            shadow_sampler: vk::Sampler::null(),
+            shadow_render_pass: vk::RenderPass::null(),
+            shadow_framebuffer: vk::Framebuffer::null(),
+            shadow_pipeline_layout: vk::PipelineLayout::null(),
+            shadow_pipeline: vk::Pipeline::null(),
+            shadow_ubo_buffers: Vec::new(),
+            shadow_ubo_memory: Vec::new(),
+            shadow_ubo_mapped: Vec::new(),
+            shadow_descriptor_set_layout: vk::DescriptorSetLayout::null(),
+            shadow_descriptor_sets: Vec::new(),
             // ---- 新增字段初始值 ----
             descriptor_set_layout: vk::DescriptorSetLayout::null(),
             descriptor_pool: vk::DescriptorPool::null(),
@@ -1482,12 +1512,25 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        // 阴影贴图（binding=5 SAMPLED_IMAGE、binding=6 SAMPLER，均 Fragment 阶段采样）
+        let shadow_map_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(5)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let shadow_sampler_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(6)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let bindings = [
             ubo_layout_binding,
             sampled_image_binding,
             storage_binding,
             sampler_binding,
             light_ubo_binding,
+            shadow_map_binding,
+            shadow_sampler_binding,
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -1582,21 +1625,21 @@ impl Renderer {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count((max_frames * 2) as u32),
+                .descriptor_count((max_frames * 3) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(max_frames as u32),
+                .descriptor_count((max_frames * 2) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(max_frames as u32),
+                .descriptor_count((max_frames * 2) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(max_frames as u32),
+                .descriptor_count((max_frames * 2) as u32),
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
-            .max_sets(max_frames as u32);
+            .max_sets((max_frames * 2) as u32);
 
         self.descriptor_pool = unsafe {
             self.device
@@ -1772,7 +1815,7 @@ impl Renderer {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
+            .depth_test_enable(false)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
             .min_depth_bounds(0.0)
@@ -2919,11 +2962,16 @@ impl Renderer {
             self.instance_buffers.push(buffer);
             self.instance_buffers_memory.push(memory);
             self.instance_mapped.push(mapped);
-            // 写入 identity 实例（地形 draw 读取，永不覆盖）
+            // 写入 identity 实例到槽位 INSTANCE_COUNT（地形 draw 读取，永不覆盖）。
+            // 必须写对槽位偏移：旧实现写到了槽位 0，被 cull_and_upload 每帧覆盖，
+            // 槽位 65536 恒为未初始化内存 → 地形矩阵塌缩到原点（主 pass 被地面
+            // quad 遮住未暴露，阴影 pass 里地形整片消失，阴影图 99.7% 空白）。
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     &identity as *const InstanceData as *const u8,
-                    mapped as *mut u8,
+                    (mapped as *mut u8).add(
+                        INSTANCE_COUNT as usize * std::mem::size_of::<InstanceData>(),
+                    ),
                     std::mem::size_of::<InstanceData>(),
                 );
             }
@@ -4489,7 +4537,349 @@ impl Renderer {
         Ok(())
     }
 
-    /// 把纹理 Image View 和 Sampler 写入每个 DescriptorSet（binding 1 / 2）
+    // ============================================================
+    // 阴影贴图（2026-08-11）：depth-only pass 渲光空间深度，主 pass 3x3 PCF 采样
+    // ============================================================
+    /// 创建阴影贴图资源：2048x2048 D32_SFLOAT（DEPTH_STENCIL_ATTACHMENT | SAMPLED）、
+    /// depth-compare 采样器、depth-only render pass、framebuffer、每帧 shadow UBO、
+    /// shadow descriptor set layout + sets（binding 0 = shadow UBO，binding 2 = 实例 storage）。
+    fn init_shadow_resources(&mut self) -> Result<(), String> {
+        use crate::engine::lighting::SHADOW_MAP_SIZE;
+
+        // ---- 1. 阴影图 Image + 内存 + View ----
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .extent(vk::Extent3D {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let shadow_image = unsafe {
+            self.device
+                .create_image(&image_info, None)
+                .map_err(|e| format!("创建阴影图 Image 失败: {}", e))?
+        };
+        let mem_reqs = unsafe { self.device.get_image_memory_requirements(shadow_image) };
+        let memory_type = self.pick_memory_type(mem_reqs, true)?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(memory_type);
+        let shadow_image_memory = unsafe {
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| format!("分配阴影图 Image 内存失败: {}", e))?
+        };
+        unsafe {
+            self.device
+                .bind_image_memory(shadow_image, shadow_image_memory, 0)
+                .map_err(|e| format!("绑定阴影图 Image 内存失败: {}", e))?;
+        }
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(shadow_image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            );
+        let shadow_image_view = unsafe {
+            self.device
+                .create_image_view(&view_info, None)
+                .map_err(|e| format!("创建阴影图 Image View 失败: {}", e))?
+        };
+        self.shadow_image = shadow_image;
+        self.shadow_image_memory = shadow_image_memory;
+        self.shadow_image_view = shadow_image_view;
+
+        // ---- 2. 阴影采样器（PCF：NEAREST + CLAMP_TO_EDGE）----
+        // 手动 PCF 用 textureSample 读原始深度再比较，必须是普通采样器：
+        // comparison sampler + 非 Dref 采样在严格 Vulkan 验证下会报 VUID。
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .mip_lod_bias(0.0)
+            .anisotropy_enable(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .min_lod(0.0)
+            .max_lod(1.0)
+            .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE)
+            .unnormalized_coordinates(false);
+        self.shadow_sampler = unsafe {
+            self.device
+                .create_sampler(&sampler_info, None)
+                .map_err(|e| format!("创建阴影采样器失败: {}", e))?
+        };
+
+        // ---- 3. depth-only render pass（无颜色附件，clear 1.0，store 供主 pass 采样）----
+        let depth_attachment = vk::AttachmentDescription::default()
+            .format(vk::Format::D32_SFLOAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let depth_attachment_ref = vk::AttachmentReference::default()
+            .attachment(0)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        let subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .depth_stencil_attachment(&depth_attachment_ref);
+        let subpasses = [subpass];
+        let attachments = [depth_attachment];
+        let render_pass_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses);
+        self.shadow_render_pass = unsafe {
+            self.device
+                .create_render_pass(&render_pass_info, None)
+                .map_err(|e| format!("创建阴影渲染流程失败: {}", e))?
+        };
+
+        // ---- 4. framebuffer（单附件：阴影图 view）----
+        let framebuffer_attachments = [self.shadow_image_view];
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(self.shadow_render_pass)
+            .attachments(&framebuffer_attachments)
+            .width(SHADOW_MAP_SIZE)
+            .height(SHADOW_MAP_SIZE)
+            .layers(1);
+        self.shadow_framebuffer = unsafe {
+            self.device
+                .create_framebuffer(&framebuffer_info, None)
+                .map_err(|e| format!("创建阴影帧缓冲失败: {}", e))?
+        };
+
+        // ---- 5. shadow descriptor layout（binding 0 = UBO，binding 2 = 实例 storage）----
+        let ubo_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+        let storage_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(2)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+        let shadow_bindings = [ubo_binding, storage_binding];
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&shadow_bindings);
+        self.shadow_descriptor_set_layout = unsafe {
+            self.device
+                .create_descriptor_set_layout(&layout_info, None)
+                .map_err(|e| format!("创建阴影 Descriptor Set Layout 失败: {}", e))?
+        };
+
+        // ---- 6. shadow UBO（每帧 slot 一份 64B mat4）+ descriptor sets（从主 pool 分配）----
+        let max_frames = self.max_frames_in_flight;
+        for _ in 0..max_frames {
+            let (buffer, memory, mapped) = self.create_uniform_buffer(
+                std::mem::size_of::<glam::Mat4>() as u64,
+            )?;
+            self.shadow_ubo_buffers.push(buffer);
+            self.shadow_ubo_memory.push(memory);
+            self.shadow_ubo_mapped.push(mapped);
+        }
+
+        let layouts: Vec<vk::DescriptorSetLayout> = (0..max_frames)
+            .map(|_| self.shadow_descriptor_set_layout)
+            .collect();
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(self.descriptor_pool)
+            .set_layouts(&layouts);
+        self.shadow_descriptor_sets = unsafe {
+            self.device
+                .allocate_descriptor_sets(&alloc_info)
+                .map_err(|e| format!("分配阴影 Descriptor Sets 失败: {}", e))?
+        };
+
+        let instance_range = std::mem::size_of::<InstanceData>() as u64
+            * (INSTANCE_COUNT as u64
+                + 1
+                + MAX_MARKER_INSTANCES as u64
+                + MAX_NPC_INSTANCES as u64
+                + MAX_EMISSIVE_INSTANCES as u64);
+        for i in 0..max_frames {
+            let ubo_info = vk::DescriptorBufferInfo::default()
+                .buffer(self.shadow_ubo_buffers[i])
+                .offset(0)
+                .range(std::mem::size_of::<glam::Mat4>() as u64);
+            let ubo_infos = [ubo_info];
+            let ubo_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.shadow_descriptor_sets[i])
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&ubo_infos);
+            let instance_info = vk::DescriptorBufferInfo::default()
+                .buffer(self.instance_buffers[i])
+                .offset(0)
+                .range(instance_range);
+            let instance_infos = [instance_info];
+            let instance_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.shadow_descriptor_sets[i])
+                .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&instance_infos);
+            let writes = [ubo_write, instance_write];
+            unsafe {
+                self.device.update_descriptor_sets(&writes, &[]);
+            }
+        }
+
+        log::info!("阴影贴图资源创建完成: {}x{} D32_SFLOAT", SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+        Ok(())
+    }
+
+    /// 阴影 depth-only 管线：与主几何共享顶点/实例布局，无颜色附件；
+    /// depth bias（constant 1.25 / slope 1.75）缓解斜面 shadow acne。
+    fn init_shadow_pipeline(&mut self) -> Result<(), String> {
+        use crate::engine::lighting::SHADOW_MAP_SIZE;
+
+        let vs_spirv = load_spirv("assets/shadow.vert.spv")?;
+        let fs_spirv = load_spirv("assets/shadow.frag.spv")?;
+        let vs_module = self.create_shader_module(&vs_spirv)?;
+        let fs_module = self.create_shader_module(&fs_spirv)?;
+
+        let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs_module)
+            .name(c"shadow_main");
+        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs_module)
+            .name(c"fs_main");
+        let shader_stages = [vs_stage, fs_stage];
+
+        let vertex_binding = vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(std::mem::size_of::<Vertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX);
+        // shadow VS 只读 position（location 0）；实例变换走 storage buffer（binding 2）
+        let vertex_attributes = [vk::VertexInputAttributeDescription::default()
+            .binding(0)
+            .location(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0)];
+        let vertex_bindings = [vertex_binding];
+        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vertex_bindings)
+            .vertex_attribute_descriptions(&vertex_attributes);
+
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        let viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(SHADOW_MAP_SIZE as f32)
+            .height(SHADOW_MAP_SIZE as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D { x: 0, y: 0 })
+            .extent(vk::Extent2D {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+            });
+        let viewports = [viewport];
+        let scissors = [scissor];
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&viewports)
+            .scissors(&scissors);
+
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false);
+
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
+
+        // 无颜色附件：color blend state 留空（Vulkan 对该场景忽略此状态）
+        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&[]);
+
+        let set_layouts = [self.shadow_descriptor_set_layout];
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts);
+        self.shadow_pipeline_layout = unsafe {
+            self.device
+                .create_pipeline_layout(&layout_info, None)
+                .map_err(|e| format!("创建阴影管线布局失败: {}", e))?
+        };
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_state)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil)
+            .color_blend_state(&color_blend_state)
+            .layout(self.shadow_pipeline_layout)
+            .render_pass(self.shadow_render_pass)
+            .subpass(0);
+
+        self.shadow_pipeline = unsafe {
+            self.device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[pipeline_info],
+                    None,
+                )
+                .map_err(|(_, e)| format!("创建阴影管线失败: {}", e))?
+                .remove(0)
+        };
+
+        unsafe {
+            self.device.destroy_shader_module(vs_module, None);
+            self.device.destroy_shader_module(fs_module, None);
+        }
+        log::info!("阴影 depth-only 管线创建完成");
+        Ok(())
+    }
+
+    /// 把纹理 Image View 和 Sampler 写入每个 DescriptorSet（binding 1 / 3），
+    /// 并把阴影贴图 View + depth-compare Sampler 写入 binding 5 / 6。
     fn update_texture_descriptor_sets(&mut self) -> Result<(), String> {
         for i in 0..self.descriptor_sets.len() {
             let image_info = vk::DescriptorImageInfo::default()
@@ -4512,7 +4902,31 @@ impl Renderer {
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .image_info(&image_infos);
 
-            let writes = [sampled_image_write, sampler_write];
+            // 阴影贴图（binding 5 = SAMPLED_IMAGE，binding 6 = SAMPLER；depth-compare 采样）
+            let shadow_image_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(self.shadow_image_view)
+                .sampler(self.shadow_sampler);
+            let shadow_image_infos = [shadow_image_info];
+            let shadow_map_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(5)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&shadow_image_infos);
+            let shadow_sampler_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(6)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&shadow_image_infos);
+
+            let writes = [
+                sampled_image_write,
+                sampler_write,
+                shadow_map_write,
+                shadow_sampler_write,
+            ];
             unsafe {
                 self.device.update_descriptor_sets(&writes, &[]);
             }
@@ -4591,6 +5005,11 @@ impl Renderer {
                 .begin_command_buffer(command_buffer, &begin_info)
                 .map_err(|e| format!("开始命令缓冲失败: {}", e))?;
         }
+
+        // ---- 阴影 pass：depth-only 渲光空间深度，供主 pass 3x3 PCF 采样 ----
+        // （mesh 路径已冻结，shadow 只服务传统 VERTEX 几何；mesh 模式 near=INSTANCE_COUNT
+        //   地面实例静态上传，marker/NPC/自发光照常上传，同一槽位布局可复用）
+        self.record_shadow_pass(command_buffer, near_count, far_count, terrain_lod)?;
 
         let clear_values = [
             vk::ClearValue {
@@ -4967,6 +5386,255 @@ impl Renderer {
         Ok(())
     }
 
+    /// 记录阴影 depth-only pass：布局转换（UNDEFINED → DEPTH_STENCIL_ATTACHMENT_OPTIMAL）
+    /// → 渲几何到 2048x2048 阴影图 →（DEPTH_STENCIL_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL）。
+    /// 绘制几何与主 pass 传统路径一致：地形 + 地面实例场 + marker + NPC + 自发光。
+    fn record_shadow_pass(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        near_count: u32,
+        far_count: u32,
+        terrain_lod: usize,
+    ) -> Result<(), String> {
+        use crate::engine::lighting::SHADOW_MAP_SIZE;
+
+        let subresource = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+
+        // UNDEFINED → DEPTH_STENCIL_ATTACHMENT_OPTIMAL（内容作废，反正 render pass 会 CLEAR）
+        let to_attachment = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.shadow_image)
+            .subresource_range(subresource)
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
+        let to_attachment_barriers = [to_attachment];
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_attachment_barriers,
+            );
+        }
+
+        // ---- shadow render pass：绑 shadow pipeline + shadow descriptor set ----
+        let clear_depth = [vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
+        }];
+        let shadow_pass_info = vk::RenderPassBeginInfo::default()
+            .render_pass(self.shadow_render_pass)
+            .framebuffer(self.shadow_framebuffer)
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D {
+                    width: SHADOW_MAP_SIZE,
+                    height: SHADOW_MAP_SIZE,
+                },
+            })
+            .clear_values(&clear_depth);
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                command_buffer,
+                &shadow_pass_info,
+                vk::SubpassContents::INLINE,
+            );
+            self.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.shadow_pipeline,
+            );
+            let shadow_sets = [self.shadow_descriptor_sets[self.current_frame]];
+            self.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.shadow_pipeline_layout,
+                0,
+                &shadow_sets,
+                &[],
+            );
+        }
+
+        // 地形（保留 identity 实例 = INSTANCE_COUNT，与主 pass 一致）
+        if let Some(mesh) = self.terrain_lods.get(terrain_lod) {
+            let terrain_vertex_buffers = [mesh.vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &terrain_vertex_buffers,
+                    &offsets,
+                );
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    mesh.index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    mesh.index_count,
+                    1,
+                    0,
+                    0,
+                    INSTANCE_COUNT,
+                );
+            }
+        }
+
+        // 地面实例场（近/远档，与主 pass 同一槽位布局）
+        self.draw_shadow_range(
+            command_buffer,
+            self.ground_vertex_buffer,
+            self.ground_index_buffer,
+            GROUND_INDICES.len() as u32,
+            near_count,
+            0,
+        )?;
+        self.draw_shadow_range(
+            command_buffer,
+            self.ground_vertex_buffer,
+            self.ground_index_buffer,
+            GROUND_INDICES.len() as u32,
+            far_count,
+            near_count,
+        )?;
+        // marker
+        self.draw_shadow_range(
+            command_buffer,
+            self.vertex_buffer,
+            self.index_buffer,
+            INDICES.len() as u32,
+            self.last_marker_near,
+            MARKER_SLOT_BASE,
+        )?;
+        self.draw_shadow_range(
+            command_buffer,
+            self.far_vertex_buffer,
+            self.far_index_buffer,
+            FAR_INDICES.len() as u32,
+            self.last_marker_far,
+            MARKER_SLOT_BASE + self.last_marker_near,
+        )?;
+        // NPC
+        self.draw_shadow_range(
+            command_buffer,
+            self.vertex_buffer,
+            self.index_buffer,
+            INDICES.len() as u32,
+            self.last_npc_near,
+            NPC_SLOT_BASE,
+        )?;
+        self.draw_shadow_range(
+            command_buffer,
+            self.far_vertex_buffer,
+            self.far_index_buffer,
+            FAR_INDICES.len() as u32,
+            self.last_npc_far,
+            NPC_SLOT_BASE + self.last_npc_near,
+        )?;
+        // 自发光（爆炸闪光等）
+        self.draw_shadow_range(
+            command_buffer,
+            self.vertex_buffer,
+            self.index_buffer,
+            INDICES.len() as u32,
+            self.last_emissive_near,
+            EMISSIVE_SLOT_BASE,
+        )?;
+        self.draw_shadow_range(
+            command_buffer,
+            self.far_vertex_buffer,
+            self.far_index_buffer,
+            FAR_INDICES.len() as u32,
+            self.last_emissive_far,
+            EMISSIVE_SLOT_BASE + self.last_emissive_near,
+        )?;
+
+        unsafe {
+            self.device.cmd_end_render_pass(command_buffer);
+        }
+
+        // DEPTH_STENCIL_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL（主 pass 采样）
+        let to_read = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.shadow_image)
+            .subresource_range(subresource)
+            .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        let to_read_barriers = [to_read];
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_read_barriers,
+            );
+        }
+        Ok(())
+    }
+
+    /// shadow pass 内的一次实例区 draw（bind 顶点/索引缓冲 + draw_indexed）。
+    fn draw_shadow_range(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        vertex_buffer: vk::Buffer,
+        index_buffer: vk::Buffer,
+        index_count: u32,
+        instance_count: u32,
+        first_instance: u32,
+    ) -> Result<(), String> {
+        if instance_count == 0 {
+            return Ok(());
+        }
+        let vertex_buffers = [vertex_buffer];
+        let offsets = [0u64];
+        unsafe {
+            self.device.cmd_bind_vertex_buffers(
+                command_buffer,
+                0,
+                &vertex_buffers,
+                &offsets,
+            );
+            self.device.cmd_bind_index_buffer(
+                command_buffer,
+                index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            self.device.cmd_draw_indexed(
+                command_buffer,
+                index_count,
+                instance_count,
+                0,
+                0,
+                first_instance,
+            );
+        }
+        Ok(())
+    }
+
     /// mesh 路径单次 draw：写入 base_slot push constant 后调用 vkCmdDrawMeshTasksEXT。
     /// count=0 直接返回（Vulkan 允许 group_count=0，这里避免无意义调用）。
     fn draw_mesh_range(
@@ -5224,6 +5892,18 @@ impl Renderer {
             }
         }
 
+        // ---- 阴影 UBO：写入光空间 view-proj（每帧 slot 独立，避免 in-flight 竞态）----
+        if let Some(&ptr) = self.shadow_ubo_mapped.get(self.current_frame) {
+            let shadow_vp = self.light_data.shadow.light_view_proj;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &shadow_vp as *const _ as *const u8,
+                    ptr as *mut u8,
+                    std::mem::size_of::<glam::Mat4>(),
+                );
+            }
+        }
+
         // 每帧重录 command buffer（instance_count 随剔除结果变化）
         let t0 = Instant::now();
         self.record_command_buffer(
@@ -5476,6 +6156,46 @@ impl Drop for Renderer {
                         self.device.free_memory(mem, None);
                     }
                 }
+            }
+
+            // 释放阴影贴图资源（framebuffer 先于 render pass；descriptor sets 随 pool 释放）
+            if self.shadow_framebuffer != vk::Framebuffer::null() {
+                self.device.destroy_framebuffer(self.shadow_framebuffer, None);
+            }
+            if self.shadow_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.shadow_pipeline, None);
+            }
+            if self.shadow_pipeline_layout != vk::PipelineLayout::null() {
+                self.device.destroy_pipeline_layout(self.shadow_pipeline_layout, None);
+            }
+            if self.shadow_render_pass != vk::RenderPass::null() {
+                self.device.destroy_render_pass(self.shadow_render_pass, None);
+            }
+            if self.shadow_descriptor_set_layout != vk::DescriptorSetLayout::null() {
+                self.device
+                    .destroy_descriptor_set_layout(self.shadow_descriptor_set_layout, None);
+            }
+            for (i, &buffer) in self.shadow_ubo_buffers.iter().enumerate() {
+                if buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(buffer, None);
+                }
+                if let Some(&mem) = self.shadow_ubo_memory.get(i) {
+                    if mem != vk::DeviceMemory::null() {
+                        self.device.free_memory(mem, None);
+                    }
+                }
+            }
+            if self.shadow_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.shadow_sampler, None);
+            }
+            if self.shadow_image_view != vk::ImageView::null() {
+                self.device.destroy_image_view(self.shadow_image_view, None);
+            }
+            if self.shadow_image != vk::Image::null() {
+                self.device.destroy_image(self.shadow_image, None);
+            }
+            if self.shadow_image_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.shadow_image_memory, None);
             }
 
             // 释放图像视图

@@ -95,7 +95,7 @@ pub struct ShadowConfig {
     pub map_size: u32,
     pub depth_bias: f32,
     pub normal_bias: f32,
-    /// 光线传播方向（如正午太阳光为 -Y）
+    /// 表面→光源方向（如正午太阳光为 +Y；实现中视线沿 -light_dir 观察场景）
     pub light_dir: Vec3,
     /// 阴影覆盖区域中心（通常为相机注视点）
     pub target: Vec3,
@@ -106,7 +106,6 @@ pub struct ShadowConfig {
 }
 
 impl ShadowConfig {
-    #[allow(dead_code)] // 构造器预留：阴影 pass 未启用，开启时创建光空间配置
     pub fn new(light_dir: Vec3, target: Vec3, extent: f32, near: f32, far: f32) -> Self {
         Self {
             map_size: SHADOW_MAP_SIZE,
@@ -312,8 +311,8 @@ pub fn point_radiance(
 
 /// 光空间正交 view-proj：世界空间 → 光裁剪空间（RH，深度 0..1）。
 ///
-/// `light_dir` 为光线传播方向；以 `target` 为中心、`extent` 为半宽/半高，
-/// 视线沿光线方向观察场景，把场景中心置于光视锥中段。
+/// `light_dir` 为表面→光源方向；以 `target` 为中心、`extent` 为半宽/半高，
+/// 视线沿 -light_dir 观察场景（光源在场景上方时自然俯视），把场景中心置于光视锥中段。
 pub fn shadow_view_proj(light_dir: Vec3, target: Vec3, extent: f32, near: f32, far: f32) -> Mat4 {
     let fwd = (-light_dir).normalize_or_zero();
     // 光线方向与 Y 平行时退化为用 X 轴做参考上方向，避免零向量叉积
@@ -326,12 +325,14 @@ pub fn shadow_view_proj(light_dir: Vec3, target: Vec3, extent: f32, near: f32, f
     proj * view
 }
 
-/// 把世界坐标投影到光空间：返回 (shadow uv, 光空间深度)
+/// 把世界坐标投影到光空间：返回 (shadow uv, 光空间深度)。
+/// 与片元着色器采样一致：uv.y 镜像（depth-only pass 顶点输出经 ADJUST_COORDINATE_SPACE
+/// Y 翻转），深度映射为 clip.z*0.5+0.5 后返回（glam ortho_rh clip.z ∈ [0,1]）。
 #[allow(dead_code)]
 pub fn world_to_shadow_uv(world_pos: Vec3, shadow_vp: Mat4) -> (Vec2, f32) {
     let p = shadow_vp * world_pos.extend(1.0);
-    let uv = Vec2::new(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5);
-    (uv, p.z)
+    let uv = Vec2::new(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5));
+    (uv, p.z * 0.5 + 0.5)
 }
 
 /// 阴影深度比较（bias 缓解 acne）：`fragment_depth - bias > shadow_depth` 判定为阴影
@@ -456,13 +457,34 @@ mod tests {
         assert!((uv.x - 0.5).abs() < 1e-3);
         assert!((uv.y - 0.5).abs() < 1e-3);
         assert!(depth > 0.0 && depth < 1.0);
-        // 沿光线传播方向（向下）更远处 → 深度单调增大
+        // 沿远离光源方向（向下）更远处 → 深度单调增大
         let far_depth = world_to_shadow_uv(Vec3::new(0.0, -10.0, 0.0), vp).1;
         let near_depth = world_to_shadow_uv(Vec3::new(0.0, 10.0, 0.0), vp).1;
         assert!(far_depth > near_depth);
         // 覆盖范围内 → uv 落在 [0,1]
         let (uv2, _) = world_to_shadow_uv(Vec3::new(30.0, 0.0, 30.0), vp);
         assert!(uv2.x > 0.0 && uv2.x < 1.0 && uv2.y > 0.0 && uv2.y < 1.0);
+    }
+
+    #[test]
+    fn world_to_shadow_uv_mirrors_v_and_maps_depth() {
+        // light_dir=+Y 的光基构造：光空间右轴=+Z 世界、上轴=+X 世界
+        let vp = shadow_view_proj(Vec3::Y, Vec3::ZERO, 50.0, 1.0, 200.0);
+        // 光空间 +X（世界 +Z）→ uv.x > 0.5
+        let (uv_px, _) = world_to_shadow_uv(Vec3::new(0.0, 0.0, 10.0), vp);
+        assert!(uv_px.x > 0.5);
+        // V 镜像铁律：光空间 +Y（世界 +X）→ uv.y < 0.5
+        // （depth-only pass 顶点输出经 ADJUST_COORDINATE_SPACE Y 翻转，
+        //  不镜像则阴影采样方向整体错位）
+        let (uv_py, _) = world_to_shadow_uv(Vec3::new(10.0, 0.0, 0.0), vp);
+        assert!(uv_py.y < 0.5);
+        // 深度映射铁律：glam ortho_rh clip.z ∈ [0,1] → frag_depth = clip.z*0.5+0.5
+        // （场景中心在光视锥中段 → 深度 > 0.5；不偏移比较基准会整体错 0.5）
+        let (_, depth_origin) = world_to_shadow_uv(Vec3::ZERO, vp);
+        assert!(depth_origin > 0.5);
+        // 沿远离光源方向（-Y）更深处 → 深度单调更大
+        let (_, depth_deep) = world_to_shadow_uv(Vec3::new(0.0, -50.0, 0.0), vp);
+        assert!(depth_deep > depth_origin);
     }
 
     #[test]
