@@ -18,6 +18,7 @@ pub mod game;
 pub mod gpu_caps;
 pub mod lighting;
 pub mod physics;
+pub mod procedural;
 pub mod renderer;
 pub mod simd;
 pub mod weapons;

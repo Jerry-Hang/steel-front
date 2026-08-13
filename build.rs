@@ -21,8 +21,11 @@ struct Instance {
 
 // 地形 draw 使用的保留 identity 实例索引（buffer 最后一个 slot），不参与 LOD 淡出
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
+// 世界障碍 marker 起始槽（与 renderer.rs MARKER_SLOT_BASE 一致：65536 identity 之后）。
+// 槽位 >= 该值的实例（marker/NPC/自发光）走「纯色渲染」路径：不混合地面贴图，
+// 保证障碍 tint 色与红/蓝阵营色清晰可辨（避免障碍立面采样到地面材质）。
+const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
-// 槽位 >= 该值的实例走「纯色渲染」路径：不混合贴图，保证红/蓝阵营色清晰可辨。
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
 // 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE（NPC_SLOT_BASE + MAX_NPC_INSTANCES）同步。
@@ -56,7 +59,7 @@ fn vs_main(
     output.view_dir = normalize(cam_pos - world_pos.xyz);
     output.color = color * inst.tint.rgb;
     output.uv = uv;
-    if (instance_index >= NPC_INSTANCE_BASE) {
+    if (instance_index >= MARKER_INSTANCE_BASE) {
         output.flat_flag = 1.0;
     } else {
         output.flat_flag = 0.0;
@@ -199,8 +202,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (input.flat_flag > 0.5) {
         return vec4<f32>(input.color * input.fade, 1.0);
     }
-    let texel = textureSample(texture_sampled, texture_sampler, input.uv);
-    let mixed = mix(input.color, texel.rgb, 0.5) * input.fade;
+    // 世界空间 UV：地面/地形用 world_pos.xz 映射到全图 [0,1]（覆盖 2*256 米），
+    // 与 procedural.rs 烘焙纹理严格对齐（marker/NPC/自发光已走 flat_flag 纯色路径，不采样）。
+    let world_uv = (input.world_pos.xz + vec2<f32>(256.0, 256.0)) / 512.0;
+    let texel = textureSample(texture_sampled, texture_sampler, world_uv);
+    // 地面/地形：纹理占主导（0.75），顶点 tint 色仅轻微着色，保证材质配色可辨识
+    let mixed = mix(input.color, texel.rgb, 0.75) * input.fade;
 
     // 默认关闭：light UBO 全零（flags.x = 0）时保持原「纹理+顶点颜色 50% 混合」渲染
     if (light_data.flags.x < 0.5) {

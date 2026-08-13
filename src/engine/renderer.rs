@@ -4250,15 +4250,24 @@ impl Renderer {
 
     /// 加载 assets/textures/test.png 并创建纹理资源
     fn init_texture(&mut self) -> Result<(), String> {
-        // 从文件加载真实贴图（image crate）。
-        // image crate 行序为自上而下，与 Vulkan 默认 UV 原点一致，无需翻转。
-        let texture_path = "assets/textures/test.png";
-        let img = image::open(texture_path)
-            .map_err(|e| format!("加载纹理图片失败 '{}': {}", texture_path, e))?
-            .to_rgba8();
-        let width = img.width();
-        let height = img.height();
-        let pixels = img.as_raw().clone();
+        // 程序化地面纹理（CPU 画像素 + 烘焙高度场 AO/静态天光，零第三方依赖）。
+        // 世界空间对齐：与 build.rs 片元着色器 world-space UV 一致（见 procedural.rs）。
+        // RV3D_PROC_TEX=0 回退到 assets/textures/test.png（A/B 验证程序化材质效果）。
+        let (width, height, pixels) = if std::env::var("RV3D_PROC_TEX").as_deref() != Ok("0") {
+            let size = super::procedural::GROUND_TEXTURE_SIZE;
+            let height_at = |x: f32, z: f32| terrain_height(x, z);
+            (
+                size,
+                size,
+                super::procedural::generate_default_ground_texture(&height_at),
+            )
+        } else {
+            let texture_path = "assets/textures/test.png";
+            let img = image::open(texture_path)
+                .map_err(|e| format!("加载纹理图片失败 '{}': {}", texture_path, e))?
+                .to_rgba8();
+            (img.width(), img.height(), img.as_raw().clone())
+        };
         let image_size = (width * height * 4) as u64;
         // mip 链级别数：按长边逐次减半直至 1
         let mut mip_levels = 1u32;
@@ -4611,12 +4620,17 @@ impl Renderer {
                 .map_err(|e| format!("创建纹理 Sampler 失败: {}", e))?
         };
 
+        let tex_src = if std::env::var("RV3D_PROC_TEX").as_deref() == Ok("0") {
+            "assets/textures/test.png"
+        } else {
+            "程序化地面材质"
+        };
         log::info!(
-            "纹理初始化完成: {}x{}（{} mip，来自 {}）",
+            "纹理初始化完成: {}x{}（{} mip，来源={}）",
             width,
             height,
             mip_levels,
-            texture_path
+            tex_src
         );
         Ok(())
     }
