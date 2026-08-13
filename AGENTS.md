@@ -41,6 +41,33 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-08-13] 交接：双 Agent 并行完成（美术贴图 + SIMD 负收益修复）
+
+- 日期：2026-08-13
+- 发起方：主会话 AI（DeepCode）+ Agent A（SIMD）/ Agent B（美术）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - **并行模式验证成功**：tmux 双会话 `deepcode -p`（Agent A/B 各司其职，文件边界隔离，cargo build lock 自动串行）。主会话独立验收后分两个 commit 提交。
+  - **① SIMD 负收益修复（commit `f877115`，feat(perf)）**：新增 `transpose_aos3<const N>` 公共标量 load 转置内核，AVX-512(16)/AVX2(8)/AVX(8) 三档共用；删除 `_mm512_i32gather_ps`/`_mm256_i32gather_ps` 索引向量。微基准 65536 点×200 轮：avx512 0.92×→**1.68×**、avx2 0.83×→**1.75×**（Zen4 gather 负收益修复）；运算序列未动、五档 bitwise_eq=true、`RV3D_FORCE_SIMD` 选路不变。
+  - **② 障碍/NPC 程序化皮肤贴图（commit `af3c70c`，feat(render)）**：`procedural.rs` 新增 marker 木板墙（竖板+接缝+木纹+钉痕）与 NPC 四色迷彩军服（双层细胞噪声软边）纯函数 + 8 单测；`build.rs` flat_flag 材质编码扩展 0=地面/1=marker/2=NPC，片元新增 binding 7/8 皮肤纹理采样；`renderer.rs` 新增 6 个皮肤纹理资源 + `create_sampled_image` helper + Drop 清理。**A/B 开关 `RV3D_SKIN_TEX=1` 启用贴图、缺省 0 纯色回退（冒烟基线不变）**；linear→sRGB 编码铁律满足。
+  - **验收（主会话独立复核）**：287 tests（+8）/ 0 失败 / 0 警告；冒烟 ALL-OK（VUID=0、kills=1、fps_min=124.5、panics=0）；RV3D_SKIN_TEX=1 真机 ~190fps、VUID=0、panic=0。
+  - **已推送**：`git push origin master`。
+- 状态：done
+
+### [2026-08-13] 交接：双 Agent 并行开启（美术贴图 + SIMD 负收益修复）
+
+- 日期：2026-08-13
+- 发起方：主会话 AI（DeepCode）
+- 接收方：Agent A（SIMD 修复）/ Agent B（美术贴图）
+- 交接类型：规划开启
+- 交接内容：
+  - **用户指令**：并行处理两个任务，多开 Agent 并行（12GB 内存内尽量多开）。文件边界隔离：Agent A 只改 `src/engine/simd.rs`；Agent B 只改 `src/engine/procedural.rs`/`renderer.rs`/`build.rs`。两者禁止 git 操作与改 AGENTS.md，由主会话统一验证 + commit。
+  - **任务 A（SIMD）**：`shockwave_pressure_avx2/avx512`（simd.rs 216/153 行）gather 负收益（0.82-0.92×），改为与 `_avx`（277 行）相同的无 gather 标量 load 转置策略，预期 1.7×；保持逐位一致 + `RV3D_FORCE_SIMD` 选路不变。
+  - **任务 B（美术）**：障碍物（marker）/士兵（NPC）程序化皮肤贴图，CPU 画像素零依赖可辨识配色；集成走传统管线零回归；R8G8B8A8_SRGB 写入前 linear→sRGB 编码。
+  - **验收**：279 tests 基线 + 新增单测全绿、0 警告、冒烟 ALL-OK（VUID=0）。
+- 状态：in_progress
+
 ### [2026-08-12] 交接：playtest_perf.py 性能测试脚本修复进行中（用户暂停，明日继续）
 
 - 日期：2026-08-12
