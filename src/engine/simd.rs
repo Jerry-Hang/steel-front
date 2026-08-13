@@ -31,6 +31,48 @@ pub fn shockwave_pressure(
     debug_assert_eq!(points.len(), out.len());
     #[cfg(target_arch = "x86_64")]
     {
+        // 基准用强制选路（RV3D_FORCE_SIMD，见 cpu::forced_simd_path）；仍要求硬件支持
+        if let Some(forced) = crate::engine::cpu::forced_simd_path() {
+            let supported = match forced {
+                "avx512" => std::is_x86_feature_detected!("avx512f"),
+                "avx2" => std::is_x86_feature_detected!("avx2"),
+                "avx" => std::is_x86_feature_detected!("avx"),
+                "sse4.2" => std::is_x86_feature_detected!("sse4.2"),
+                "scalar" => true,
+                _ => false,
+            };
+            if supported {
+                match forced {
+                    "avx512" => {
+                        // safety: 上面已确认 avx512f 硬件支持
+                        unsafe {
+                            shockwave_pressure_avx512(center, radius, amplitude, points, out);
+                        }
+                    }
+                    "avx2" => {
+                        // safety: 上面已确认 avx2 硬件支持
+                        unsafe {
+                            shockwave_pressure_avx2(center, radius, amplitude, points, out);
+                        }
+                    }
+                    "avx" => {
+                        // safety: 上面已确认 avx 硬件支持
+                        unsafe {
+                            shockwave_pressure_avx(center, radius, amplitude, points, out);
+                        }
+                    }
+                    "sse4.2" => {
+                        // safety: 上面已确认 sse4.2 硬件支持
+                        unsafe {
+                            shockwave_pressure_sse(center, radius, amplitude, points, out);
+                        }
+                    }
+                    _ => shockwave_pressure_scalar(center, radius, amplitude, points, out),
+                }
+                return forced;
+            }
+            log::warn!("cpu: 强制 {forced} 但硬件不支持，回退自动选路");
+        }
         if crate::engine::cpu::avx512_enabled() {
             // safety: 上面已运行时检测 AVX-512（含 Intel 11/12 代型号过滤）
             unsafe {
@@ -526,5 +568,87 @@ mod simd_shockwave_tests {
         let mut c = vec![0.0f32; 1];
         let _ = shockwave_pressure(center, radius, amplitude, &[[0.0, 0.0, 0.0]], &mut c);
         assert!((c[0] - amplitude).abs() < 1e-3, "中心压力应等于幅度: {}", c[0]);
+    }
+
+    /// 指令级微基准（隔离进程、无渲染并发）：65536 点 × 200 轮，各档 vs 标量。
+    /// 运行：`cargo test --release shockwave_path_microbench -- --nocapture --test-threads=1`
+    #[test]
+    fn shockwave_path_microbench() {
+        let n = 65536usize;
+        let mut rng = Rng(0xBEEF_2026);
+        let points = make_points(&mut rng, n);
+        let center = [12.0, 1.0, -30.0];
+        let radius = 60.0;
+        let amplitude = 1000.0;
+        let mut scalar_out = vec![0.0f32; n];
+        shockwave_pressure_scalar(center, radius, amplitude, &points, &mut scalar_out);
+
+        let mut paths: Vec<(&'static str, Box<dyn Fn(&[[f32; 3]], &mut [f32])>)> = Vec::new();
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx512f") {
+                paths.push((
+                    "avx512",
+                    Box::new(|p: &[[f32; 3]], o: &mut [f32]| unsafe {
+                        shockwave_pressure_avx512(center, radius, amplitude, p, o)
+                    }),
+                ));
+            }
+            if std::is_x86_feature_detected!("avx2") {
+                paths.push((
+                    "avx2",
+                    Box::new(|p: &[[f32; 3]], o: &mut [f32]| unsafe {
+                        shockwave_pressure_avx2(center, radius, amplitude, p, o)
+                    }),
+                ));
+            }
+            if std::is_x86_feature_detected!("avx") {
+                paths.push((
+                    "avx",
+                    Box::new(|p: &[[f32; 3]], o: &mut [f32]| unsafe {
+                        shockwave_pressure_avx(center, radius, amplitude, p, o)
+                    }),
+                ));
+            }
+            if std::is_x86_feature_detected!("sse4.2") {
+                paths.push((
+                    "sse4.2",
+                    Box::new(|p: &[[f32; 3]], o: &mut [f32]| unsafe {
+                        shockwave_pressure_sse(center, radius, amplitude, p, o)
+                    }),
+                ));
+            }
+        }
+        paths.push((
+            "scalar",
+            Box::new(|p: &[[f32; 3]], o: &mut [f32]| {
+                shockwave_pressure_scalar(center, radius, amplitude, p, o)
+            }),
+        ));
+
+        let rounds = 200u32;
+        let mut outs: Vec<Vec<f32>> = paths.iter().map(|_| vec![0.0f32; n]).collect();
+        // 预热一轮，再正式计时（顺序：scalar 在最后，各档先后顺序对结果无影响）
+        for (i, (_, f)) in paths.iter().enumerate() {
+            f(&points, &mut outs[i]);
+        }
+        let mut us: Vec<u64> = vec![0; paths.len()];
+        for (i, (_, f)) in paths.iter().enumerate() {
+            let t0 = std::time::Instant::now();
+            for _ in 0..rounds {
+                f(&points, &mut outs[i]);
+                std::hint::black_box(&outs[i]);
+            }
+            us[i] = t0.elapsed().as_micros() as u64 / rounds as u64;
+        }
+        let scalar_idx = paths.iter().position(|(n, _)| *n == "scalar").unwrap();
+        println!("\n== shockwave SIMD 微基准（{} 点 × {} 轮，release，单线程） ==", n, rounds);
+        println!("{:<8}{:>12}{:>10}{:>10}", "path", "us/round", "speedup", "eq");
+        for (i, (name, _)) in paths.iter().enumerate() {
+            let eq = outs[i] == scalar_out;
+            let speedup = us[scalar_idx] as f64 / us[i].max(1) as f64;
+            println!("{:<8}{:>12}{:>9.2}x{:>10}", name, us[i], speedup, eq);
+        }
+        assert!(us[scalar_idx] > 0, "scalar 计时异常");
     }
 }

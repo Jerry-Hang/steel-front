@@ -2792,6 +2792,48 @@ impl Renderer {
     fn morph_heights_dispatch(base: &[f32], coarse: &[f32], blend: f32, out: &mut [f32]) {
         #[cfg(target_arch = "x86_64")]
         {
+            // 基准用强制选路（RV3D_FORCE_SIMD，见 cpu::forced_simd_path）；仍要求硬件支持
+            if let Some(forced) = crate::engine::cpu::forced_simd_path() {
+                let supported = match forced {
+                    "avx512" => std::is_x86_feature_detected!("avx512f"),
+                    "avx2" => std::is_x86_feature_detected!("avx2"),
+                    "avx" => std::is_x86_feature_detected!("avx"),
+                    "sse4.2" => std::is_x86_feature_detected!("sse4.2"),
+                    "scalar" => true,
+                    _ => false,
+                };
+                if supported {
+                    match forced {
+                        "avx512" => {
+                            // safety: 上面已确认 avx512f 硬件支持
+                            unsafe {
+                                Self::morph_heights_avx512(base, coarse, blend, out);
+                            }
+                        }
+                        "avx2" => {
+                            // safety: 上面已确认 avx2 硬件支持
+                            unsafe {
+                                Self::morph_heights_avx2(base, coarse, blend, out);
+                            }
+                        }
+                        "avx" => {
+                            // safety: 上面已确认 avx 硬件支持
+                            unsafe {
+                                Self::morph_heights_avx(base, coarse, blend, out);
+                            }
+                        }
+                        "sse4.2" => {
+                            // safety: 上面已确认 sse4.2 硬件支持
+                            unsafe {
+                                Self::morph_heights_sse(base, coarse, blend, out);
+                            }
+                        }
+                        _ => Self::morph_heights_scalar(base, coarse, blend, out),
+                    }
+                    return;
+                }
+                log::warn!("cpu: 强制 {forced} 但硬件不支持，回退自动选路");
+            }
             if crate::engine::cpu::avx512_enabled() {
                 // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
                 unsafe {
@@ -3816,6 +3858,48 @@ impl Renderer {
     ) {
         #[cfg(target_arch = "x86_64")]
         {
+            // 基准用强制选路（RV3D_FORCE_SIMD，见 cpu::forced_simd_path）；仍要求硬件支持
+            if let Some(forced) = crate::engine::cpu::forced_simd_path() {
+                let supported = match forced {
+                    "avx512" => std::is_x86_feature_detected!("avx512f"),
+                    "avx2" => std::is_x86_feature_detected!("avx2"),
+                    "avx" => std::is_x86_feature_detected!("avx"),
+                    "sse4.2" => std::is_x86_feature_detected!("sse4.2"),
+                    "scalar" => true,
+                    _ => false,
+                };
+                if supported {
+                    match forced {
+                        "avx512" => {
+                            // safety: 上面已确认 avx512f 硬件支持
+                            unsafe {
+                                Self::cull_spheres_avx512(cx, cy, cz, radii, planes, out);
+                            }
+                        }
+                        "avx2" => {
+                            // safety: 上面已确认 avx2 硬件支持
+                            unsafe {
+                                Self::cull_spheres_avx2(cx, cy, cz, radii, planes, out);
+                            }
+                        }
+                        "avx" => {
+                            // safety: 上面已确认 avx 硬件支持
+                            unsafe {
+                                Self::cull_spheres_avx(cx, cy, cz, radii, planes, out);
+                            }
+                        }
+                        "sse4.2" => {
+                            // safety: 上面已确认 sse4.2 硬件支持
+                            unsafe {
+                                Self::cull_spheres_sse(cx, cy, cz, radii, planes, out);
+                            }
+                        }
+                        _ => Self::cull_spheres_scalar(cx, cy, cz, radii, planes, out),
+                    }
+                    return;
+                }
+                log::warn!("cpu: 强制 {forced} 但硬件不支持，回退自动选路");
+            }
             if crate::engine::cpu::avx512_enabled() {
                 // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
                 unsafe {
@@ -6978,6 +7062,166 @@ mod simd_cull_tests {
             out.fill(0.0);
             Renderer::morph_heights_dispatch(&base, &coarse, blend, &mut out);
             assert_eq!(out, scalar_out, "dispatch morph 与标量逐位不一致 (n={})", n);
+        }
+    }
+
+    /// 指令级微基准（隔离进程、无渲染并发）：65536 实例剔除 + 65536 点 morph，各档 vs 标量。
+    /// 运行：`cargo test --release simd_cull_microbench -- --nocapture --test-threads=1`
+    #[test]
+    fn simd_cull_microbench() {
+        let mut rng = Rng(0xC011_2026);
+        let mut planes = [[0f32; 4]; 6];
+        for p in &mut planes {
+            let (nx, ny, nz) = (
+                rng.next_f32() * 2.0 - 1.0,
+                rng.next_f32() * 2.0 - 1.0,
+                rng.next_f32() * 2.0 - 1.0,
+            );
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            p[0] = nx / len;
+            p[1] = ny / len;
+            p[2] = nz / len;
+            p[3] = rng.next_f32() * 4.0 - 2.0;
+        }
+        let n = 65536usize;
+        let mut cx = Vec::with_capacity(n);
+        let mut cy = Vec::with_capacity(n);
+        let mut cz = Vec::with_capacity(n);
+        let mut radii = Vec::with_capacity(n);
+        for _ in 0..n {
+            cx.push(rng.next_f32() * 200.0 - 100.0);
+            cy.push(rng.next_f32() * 200.0 - 100.0);
+            cz.push(rng.next_f32() * 200.0 - 100.0);
+            radii.push(rng.next_f32() * 4.0);
+        }
+        let mut base = Vec::with_capacity(n);
+        let mut coarse = Vec::with_capacity(n);
+        for _ in 0..n {
+            base.push(rng.next_f32() * 40.0 - 20.0);
+            coarse.push(rng.next_f32() * 40.0 - 20.0);
+        }
+        let blend = 0.5f32;
+
+        let mut cull_paths: Vec<(&'static str, Box<dyn Fn(&mut Vec<u32>)>)> = Vec::new();
+        let mut morph_paths: Vec<(&'static str, Box<dyn Fn(&mut [f32])>)> = Vec::new();
+        macro_rules! add_paths {
+            ($name:expr, $cull:ident, $morph:ident) => {{
+                let (cx, cy, cz, radii, planes, base, coarse) =
+                    (cx.clone(), cy.clone(), cz.clone(), radii.clone(), planes, base.clone(), coarse.clone());
+                cull_paths.push((
+                    $name,
+                    Box::new(move |out: &mut Vec<u32>| {
+                        // safety: 已由调用方按硬件能力注册
+                        unsafe {
+                            Renderer::$cull(&cx, &cy, &cz, &radii, &planes, out);
+                        }
+                    }),
+                ));
+                morph_paths.push((
+                    $name,
+                    Box::new(move |out: &mut [f32]| {
+                        // safety: 已由调用方按硬件能力注册
+                        unsafe {
+                            Renderer::$morph(&base, &coarse, blend, out);
+                        }
+                    }),
+                ));
+            }};
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx512f") {
+                add_paths!("avx512", cull_spheres_avx512, morph_heights_avx512);
+            }
+            if std::is_x86_feature_detected!("avx2") {
+                add_paths!("avx2", cull_spheres_avx2, morph_heights_avx2);
+            }
+            if std::is_x86_feature_detected!("avx") {
+                add_paths!("avx", cull_spheres_avx, morph_heights_avx);
+            }
+            if std::is_x86_feature_detected!("sse4.2") {
+                add_paths!("sse4.2", cull_spheres_sse, morph_heights_sse);
+            }
+        }
+        {
+            let (cx, cy, cz, radii, planes, base, coarse) =
+                (cx.clone(), cy.clone(), cz.clone(), radii.clone(), planes, base.clone(), coarse.clone());
+            cull_paths.push((
+                "scalar",
+                Box::new(move |out: &mut Vec<u32>| {
+                    Renderer::cull_spheres_scalar(&cx, &cy, &cz, &radii, &planes, out);
+                }),
+            ));
+            morph_paths.push((
+                "scalar",
+                Box::new(move |out: &mut [f32]| {
+                    Renderer::morph_heights_scalar(&base, &coarse, blend, out);
+                }),
+            ));
+        }
+
+        let rounds = 200u32;
+        let mut cull_out: Vec<Vec<u32>> = cull_paths.iter().map(|_| Vec::new()).collect();
+        let mut morph_out: Vec<Vec<f32>> = morph_paths.iter().map(|_| vec![0.0f32; n]).collect();
+        let bench = |paths: &[(&'static str, Box<dyn Fn(&mut Vec<u32>)>)],
+                     outs: &mut [Vec<u32>]| -> Vec<u64> {
+            let mut us = vec![0u64; paths.len()];
+            for (i, (_, f)) in paths.iter().enumerate() {
+                f(&mut outs[i]);
+            }
+            for (i, (_, f)) in paths.iter().enumerate() {
+                let t0 = std::time::Instant::now();
+                for _ in 0..rounds {
+                    f(&mut outs[i]);
+                    std::hint::black_box(&outs[i]);
+                }
+                us[i] = t0.elapsed().as_micros() as u64 / rounds as u64;
+            }
+            us
+        };
+        // 剔除基准
+        let cull_us = bench(&cull_paths, &mut cull_out);
+        let scalar_cull = *cull_us.last().unwrap();
+        // morph 基准
+        let mut morph_us = vec![0u64; morph_paths.len()];
+        for (i, (_, f)) in morph_paths.iter().enumerate() {
+            f(&mut morph_out[i]);
+        }
+        for (i, (_, f)) in morph_paths.iter().enumerate() {
+            let t0 = std::time::Instant::now();
+            for _ in 0..rounds {
+                f(&mut morph_out[i]);
+                std::hint::black_box(&morph_out[i]);
+            }
+            morph_us[i] = t0.elapsed().as_micros() as u64 / rounds as u64;
+        }
+        let scalar_morph = *morph_us.last().unwrap();
+        // 逐位一致性（与各自标量对照）
+        for (i, (name, _)) in cull_paths.iter().enumerate() {
+            assert_eq!(&cull_out[i], cull_out.last().unwrap(), "{} 剔除与标量不一致", name);
+        }
+        for (i, (name, _)) in morph_paths.iter().enumerate() {
+            assert_eq!(&morph_out[i], morph_out.last().unwrap(), "{} morph 与标量不一致", name);
+        }
+        println!("\n== cull SIMD 微基准（{} 实例 × {} 轮，release，单线程） ==", n, rounds);
+        println!("{:<8}{:>14}{:>10}", "path", "us/round", "speedup");
+        for (i, (name, _)) in cull_paths.iter().enumerate() {
+            println!(
+                "{:<8}{:>14}{:>9.2}x",
+                name,
+                cull_us[i],
+                scalar_cull as f64 / cull_us[i].max(1) as f64
+            );
+        }
+        println!("\n== morph SIMD 微基准（{} 点 × {} 轮，release，单线程） ==", n, rounds);
+        println!("{:<8}{:>14}{:>10}", "path", "us/round", "speedup");
+        for (i, (name, _)) in morph_paths.iter().enumerate() {
+            println!(
+                "{:<8}{:>14}{:>9.2}x",
+                name,
+                morph_us[i],
+                scalar_morph as f64 / morph_us[i].max(1) as f64
+            );
         }
     }
 }

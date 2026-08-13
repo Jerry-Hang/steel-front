@@ -137,6 +137,33 @@ fn avx512_allowed_x86() -> bool {
         true
 }
 
+/// 基准/调试用强制选路：`RV3D_FORCE_SIMD=avx512|avx2|avx|sse4.2|scalar` 锁定指令集路径，
+/// 供 SIMD 指令级 A/B 对比（shockwave 压力场 / 视锥剔除 / 地形 morph 共用）。
+/// 默认空 = 自动选路；非法值告警一次并回退自动选路；强制档位仍要求硬件支持
+/// （如强制 avx512 但 CPU 无 avx512f 则回退自动，防 SIGILL）。
+pub fn forced_simd_path() -> Option<&'static str> {
+    static WARNED: OnceLock<bool> = OnceLock::new();
+    let Some(v) = std::env::var("RV3D_FORCE_SIMD").ok() else {
+        return None;
+    };
+    let v = v.trim();
+    let known = matches!(v, "avx512" | "avx2" | "avx" | "sse4.2" | "scalar");
+    if !known {
+        WARNED.get_or_init(|| {
+            log::warn!("cpu: RV3D_FORCE_SIMD 值无效（{v}），忽略并回退自动选路");
+            true
+        });
+        return None;
+    }
+    match v {
+        "avx512" => Some("avx512"),
+        "avx2" => Some("avx2"),
+        "avx" => Some("avx"),
+        "sse4.2" => Some("sse4.2"),
+        _ => Some("scalar"),
+    }
+}
+
 /// 从 sysfs `/sys/devices/system/cpu/online` 解析逻辑处理器总数（格式 "0-31" 或 "0,2,4"）
 fn cpu_thread_count() -> usize {
     let Ok(s) = std::fs::read_to_string("/sys/devices/system/cpu/online") else {
