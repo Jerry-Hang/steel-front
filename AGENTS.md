@@ -82,7 +82,18 @@
   - **权威数据（本机 Zen4/8940HX）**：① 视锥剔除 65536 实例：scalar 798µs → avx512 53µs（15.06×）、avx2 49µs（16.29×）、avx 50µs（15.96×）、sse4.2 249µs（3.20×）——**剔除 SIMD 极有效**。② 冲击波压力场 65536 点（AoS `[f32;3]`）：avx **1.67×**（33µs，标量 load 转置、无 gather）、avx512 0.92×、avx2 0.83×、sse4.2 0.82×、scalar 55µs——**gather 型内核负收益**：Zen4 `vpgatherdd` 微码取数淹没向量收益，AVX2/AVX-512 反而慢于标量。③ 地形 morph：全档 6µs、1.00×（内存带宽瓶颈，中性）。
   - **游戏内对照（60s/档，128 NPC 压力，固定视角）**：fps 181–195、cull_us 590–674µs 五档持平——`cull_us` 是"剔除+压缩+GPU 上传"全程，上传 ~500µs/帧占大头，剔除算力（SIMD ~50µs→并行 ~10µs；标量 ~800µs→并行 ~90µs）被掩盖；帧率由 present（dzn ~2ms）主导。`ai_us` 各轮 NPC 存活数随机（8–102）不可比。全部 5 档 bitwise_eq=true、VUID=0、272 tests 全绿。
   - **结论与建议**：剔除 SIMD 是当前最大有效优化（15–16×）；冲击波 gather 内核是负优化，**后续把 `shockwave_pressure_avx2/avx512` 改为与 `_avx` 相同的无 gather 转置策略**（预计 0.85×→1.7×，低风险高收益，建议排期）；完整报告 `docs/perf-simd-tier-2026-08-13.md`。
-  - **用户决策**：Deep Code CLI 已在 WSL2 安装（`@vegamo/deepcode-cli` v0.1.34，npm 前缀改 `~/.npm-global`，配置 `~/.deepcode/settings.json` 模型 deepseek-v4-pro）；API 密钥经全盘排查仅存在于本对话与 `~/.deepcode/settings.json`，无其它落盘/网络泄露。
+  - **用户决策**：Deep Code CLI 已在 WSL2 安装（`@vegamo/deepcode-cli` v0.1.34，npm 前缀改 `~/.npm-global`，配置 `~/.deepcode/settings.json` 模型 deepseek-v4-flash——2026-08-13 从 Pro 切换，见下方「模型切换铁律」交接）；API 密钥经全盘排查仅存在于本对话与 `~/.deepcode/settings.json`，无其它落盘/网络泄露。
+- 状态：done
+
+### [2026-08-13] 交接：DeepCode 主模型切换铁律（一律 Flash，禁用 Pro）
+
+- 日期：2026-08-13
+- 发起方：用户决策 / 当前会话 AI（DeepCode）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：规划开启
+- 交接内容：
+  - **用户决策（铁律，勿回退）**：DeepCode 主模型已从 `deepseek-v4-pro` 切换为 `deepseek-v4-flash`（`~/.deepcode/settings.json` 的 `env.MODEL`），思考强度保持 `reasoningEffort="max"`。**后续所有会话一律使用 Flash，禁止再启用 Pro 模型**（费用承受不起）。
+  - **执行要求**：任何会话/配置变更不得把模型改回 Pro；Agent 分身同样用 V4 Flash + Max（见下方「本地 Agent 工具迁移」交接）。
 - 状态：done
 
 ### [2026-08-13] 交接：本地 Agent 工具迁移（Codex → DeepCode）+ 美术方向（AO/光照烘焙/程序化贴图）开启
