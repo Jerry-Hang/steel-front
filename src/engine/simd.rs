@@ -12,8 +12,10 @@
 //!   - A：爆源幅度；R：冲击波半径；k = 1/R²；d：采样点到爆心距离
 //!   - 单调递减、有限输入下无 NaN/Inf（d ≥ 0 且 A/k/R 有限）
 //!
-//! 采样点以 `[f32; 3]`（AoS，12B 步长）传入：x86 用 gather 按分量取数、
-//! ARM 用 `vld3q_f32` 结构步长加载，与标量逐位一致。
+//! 采样点以 `[f32; 3]`（AoS，12B 步长）传入：x86 用无 gather 的标量 load
+//! 转置内核（`transpose_aos3`）按分量取数后向量化运算（Zen4 实测 vpgatherdd
+//! 微码取数淹没向量收益，仅 0.82–0.92×）；ARM 用 `vld3q_f32` 结构步长加载，
+//! 均与标量逐位一致。
 
 /// 冲击波压力场选路入口：对每个采样点计算压力写入 `out`，返回实际启用的指令集路径名。
 /// x86_64：AVX-512（16 点/批）> AVX2（8）> AVX（8）> SSE4.2（4）> 标量；
@@ -146,8 +148,26 @@ pub fn shockwave_pressure_scalar(
     }
 }
 
-/// AVX-512 冲击波压力：16 点/批。采样点 [f32;3] 步长 12B，gather（索引单位=4B）
-/// 按 x/y/z 分量取数；运算顺序与标量逐位一致（无 FMA；sqrt/div 均 IEEE 正确舍入）。
+/// 无 gather 转置内核：从 AoS `[f32;3]`（12B 步长）连续取 N 个点，按分量转置成
+/// 三个独立数组。纯标量 load（与标量取数逐位一致），供 AVX-512/AVX2/AVX 共用，
+/// 避免 `vpgatherdd` 微码取数淹没向量收益（Zen4 实测 gather 路径仅 0.82–0.92×）。
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn transpose_aos3<const N: usize>(base: *const f32) -> ([f32; N], [f32; N], [f32; N]) {
+    let mut px = [0.0f32; N];
+    let mut py = [0.0f32; N];
+    let mut pz = [0.0f32; N];
+    for k in 0..N {
+        px[k] = *base.add(k * 3);
+        py[k] = *base.add(k * 3 + 1);
+        pz[k] = *base.add(k * 3 + 2);
+    }
+    (px, py, pz)
+}
+
+/// AVX-512 冲击波压力：16 点/批。采样点 [f32;3] 步长 12B，`transpose_aos3`
+/// 无 gather 标量 load 转置取 x/y/z 分量；运算顺序与标量逐位一致
+/// （无 FMA；sqrt/div 均 IEEE 正确舍入）。
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn shockwave_pressure_avx512(
@@ -166,15 +186,12 @@ unsafe fn shockwave_pressure_avx512(
     let kv = _mm512_set1_ps(1.0 / (radius * radius));
     let one = _mm512_set1_ps(1.0);
     let base = points.as_ptr() as *const f32;
-    let ix0 = _mm512_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45);
-    let iy0 = _mm512_add_epi32(ix0, _mm512_set1_epi32(1));
-    let iz0 = _mm512_add_epi32(ix0, _mm512_set1_epi32(2));
     let mut i = 0usize;
     while i + 16 <= points.len() {
-        let p = base.add(i * 3);
-        let px = _mm512_i32gather_ps::<4>(ix0, p);
-        let py = _mm512_i32gather_ps::<4>(iy0, p);
-        let pz = _mm512_i32gather_ps::<4>(iz0, p);
+        let (pxa, pya, pza) = transpose_aos3::<16>(base.add(i * 3));
+        let px = _mm512_loadu_ps(pxa.as_ptr());
+        let py = _mm512_loadu_ps(pya.as_ptr());
+        let pz = _mm512_loadu_ps(pza.as_ptr());
         let dx = _mm512_sub_ps(px, c0);
         let dy = _mm512_sub_ps(py, c1);
         let dz = _mm512_sub_ps(pz, c2);
@@ -210,7 +227,8 @@ unsafe fn shockwave_pressure_avx512(
     }
 }
 
-/// AVX2 冲击波压力：8 点/批（gather 按 [f32;3] 步长取数；与标量逐位一致，无 FMA）
+/// AVX2 冲击波压力：8 点/批（`transpose_aos3` 无 gather 标量 load 转置取数；
+/// 与标量逐位一致，无 FMA）
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn shockwave_pressure_avx2(
@@ -229,15 +247,12 @@ unsafe fn shockwave_pressure_avx2(
     let kv = _mm256_set1_ps(1.0 / (radius * radius));
     let one = _mm256_set1_ps(1.0);
     let base = points.as_ptr() as *const f32;
-    let ix0 = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
-    let iy0 = _mm256_add_epi32(ix0, _mm256_set1_epi32(1));
-    let iz0 = _mm256_add_epi32(ix0, _mm256_set1_epi32(2));
     let mut i = 0usize;
     while i + 8 <= points.len() {
-        let p = base.add(i * 3);
-        let px = _mm256_i32gather_ps::<4>(p, ix0);
-        let py = _mm256_i32gather_ps::<4>(p, iy0);
-        let pz = _mm256_i32gather_ps::<4>(p, iz0);
+        let (pxa, pya, pza) = transpose_aos3::<8>(base.add(i * 3));
+        let px = _mm256_loadu_ps(pxa.as_ptr());
+        let py = _mm256_loadu_ps(pya.as_ptr());
+        let pz = _mm256_loadu_ps(pza.as_ptr());
         let dx = _mm256_sub_ps(px, c0);
         let dy = _mm256_sub_ps(py, c1);
         let dz = _mm256_sub_ps(pz, c2);
@@ -271,7 +286,7 @@ unsafe fn shockwave_pressure_avx2(
 }
 
 /// AVX（非 AVX2，3/4 代酷睿与初代锐龙）冲击波压力：8 点/批。
-/// AVX 无 gather：标量按 [f32;3] 步长取 8 点后再向量化运算（与标量逐位一致）。
+/// AVX 无 gather：`transpose_aos3` 标量按 [f32;3] 步长取 8 点后再向量化运算（与标量逐位一致）。
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 unsafe fn shockwave_pressure_avx(
@@ -292,18 +307,10 @@ unsafe fn shockwave_pressure_avx(
     let base = points.as_ptr() as *const f32;
     let mut i = 0usize;
     while i + 8 <= points.len() {
-        let p = base.add(i * 3);
-        let mut pxv = [0f32; 8];
-        let mut pyv = [0f32; 8];
-        let mut pzv = [0f32; 8];
-        for k in 0..8 {
-            pxv[k] = *p.add(k * 3);
-            pyv[k] = *p.add(k * 3 + 1);
-            pzv[k] = *p.add(k * 3 + 2);
-        }
-        let px = _mm256_loadu_ps(pxv.as_ptr());
-        let py = _mm256_loadu_ps(pyv.as_ptr());
-        let pz = _mm256_loadu_ps(pzv.as_ptr());
+        let (pxa, pya, pza) = transpose_aos3::<8>(base.add(i * 3));
+        let px = _mm256_loadu_ps(pxa.as_ptr());
+        let py = _mm256_loadu_ps(pya.as_ptr());
+        let pz = _mm256_loadu_ps(pza.as_ptr());
         let dx = _mm256_sub_ps(px, c0);
         let dy = _mm256_sub_ps(py, c1);
         let dz = _mm256_sub_ps(pz, c2);
