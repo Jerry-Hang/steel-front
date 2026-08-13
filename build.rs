@@ -22,8 +22,9 @@ struct Instance {
 // 地形 draw 使用的保留 identity 实例索引（buffer 最后一个 slot），不参与 LOD 淡出
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // 世界障碍 marker 起始槽（与 renderer.rs MARKER_SLOT_BASE 一致：65536 identity 之后）。
-// 槽位 >= 该值的实例（marker/NPC/自发光）走「纯色渲染」路径：不混合地面贴图，
-// 保证障碍 tint 色与红/蓝阵营色清晰可辨（避免障碍立面采样到地面材质）。
+// 槽位 >= 该值的实例（marker/NPC/自发光）不采样地面贴图，走「材质编码」路径：
+// flat_flag = 1（marker）/ 2（NPC）由片元着色器决定采样程序化皮肤纹理还是纯色
+// （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
@@ -59,7 +60,13 @@ fn vs_main(
     output.view_dir = normalize(cam_pos - world_pos.xyz);
     output.color = color * inst.tint.rgb;
     output.uv = uv;
-    if (instance_index >= MARKER_INSTANCE_BASE) {
+    // 材质编码（片元着色器按值分路径）：
+    //   0 = 地面/地形（world-space UV 采样地面材质）
+    //   1 = marker 障碍（RV3D_SKIN_TEX=1 采样木板墙皮肤，缺省纯 tint 色）
+    //   2 = NPC 士兵（RV3D_SKIN_TEX=1 采样迷彩军服皮肤，缺省纯阵营色）
+    if (instance_index >= NPC_INSTANCE_BASE) {
+        output.flat_flag = 2.0;
+    } else if (instance_index >= MARKER_INSTANCE_BASE) {
         output.flat_flag = 1.0;
     } else {
         output.flat_flag = 0.0;
@@ -96,6 +103,10 @@ struct VertexOutput {
 
 @group(0) @binding(1) var texture_sampled: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
+// 程序化皮肤纹理（marker/NPC；RV3D_SKIN_TEX=1 时采样，缺省 0 纯色回退。
+// 绑定号必须与 renderer.rs init_descriptors / update_texture_descriptor_sets 同步）
+@group(0) @binding(7) var marker_skin_tex: texture_2d<f32>;
+@group(0) @binding(8) var npc_skin_tex: texture_2d<f32>;
 // 阴影贴图（2026-08-11）：depth-only pass 渲光空间深度，片元 3x3 PCF 深度比较
 @group(0) @binding(5) var shadow_map: texture_depth_2d;
 @group(0) @binding(6) var shadow_sampler: sampler;
@@ -197,9 +208,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (input.fade > 1.0) {
         return vec4<f32>(input.color, 1.0);
     }
-    // 士兵等纯色实例（NPC 槽位）：直接输出顶点色 × fade，跳过贴图 50% 混合，
-    // 保证红/蓝阵营色在灰地场景中清晰可辨（marker/地形仍走纹理混合路径）。
+    // marker/NPC 材质编码路径：flat_flag=1（marker）/ 2（NPC），按顶点 UV 采样
+    // 程序化皮肤纹理（立方体每面 UV 铺满 0..1，与 procedural.rs 皮肤纹理逐面对齐）。
+    // RV3D_SKIN_TEX=1（light_data.flags.z）启用；缺省 0 保持纯色路径（冒烟基线不变）。
     if (input.flat_flag > 0.5) {
+        if (light_data.flags.z >= 0.5) {
+            if (input.flat_flag > 1.5) {
+                // NPC 士兵：迷彩军服纹理 × 阵营 tint（权重 0.65，阵营识别保留）
+                let texel = textureSample(npc_skin_tex, texture_sampler, input.uv);
+                let colored = mix(input.color, texel.rgb, 0.65) * input.fade;
+                return vec4<f32>(colored, 1.0);
+            } else {
+                // marker 障碍：军备木板墙纹理 × 障碍 tint（权重 0.8，材质可辨识）
+                let texel = textureSample(marker_skin_tex, texture_sampler, input.uv);
+                let colored = mix(input.color, texel.rgb, 0.8) * input.fade;
+                return vec4<f32>(colored, 1.0);
+            }
+        }
         return vec4<f32>(input.color * input.fade, 1.0);
     }
     // 世界空间 UV：地面/地形用 world_pos.xz 映射到全图 [0,1]（覆盖 2*256 米），
@@ -289,8 +314,10 @@ struct Instance {
 
 // 槽位约定（必须与 renderer.rs 常量同步）：
 // TERRAIN_INSTANCE_INDEX=65536（地形 identity，mesh 路径不绘制该槽）、
-// NPC_INSTANCE_BASE=65536+1+64=65601、EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+1024=66625
+// MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65536+1+64=65601、
+// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+1024=66625
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
+const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 1024u;
 
@@ -454,11 +481,17 @@ fn mesh_main(
     // 地面平面距离（不随相机高度变化，俯瞰全场时不误淡出）——与顶点着色器一致
     let hdist = sqrt(delta.x * delta.x + delta.z * delta.z);
     var fade = 1.0 - smoothstep(camera.lod_params.y, camera.lod_params.z, hdist);
-    var flat = select(0.0, 1.0, slot >= NPC_INSTANCE_BASE);
+    // 材质编码与顶点着色器一致：0=地面/地形、1=marker、2=NPC
+    // （片元着色器按值决定采样哪张皮肤纹理；RV3D_SKIN_TEX=1 启用，缺省纯色）
+    var flat = 0.0;
     if (slot >= EMISSIVE_INSTANCE_BASE) {
         // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
         flat = 1.0;
         fade = 2.0;
+    } else if (slot >= NPC_INSTANCE_BASE) {
+        flat = 2.0;
+    } else if (slot >= MARKER_INSTANCE_BASE) {
+        flat = 1.0;
     }
 
     if (is_ground) {

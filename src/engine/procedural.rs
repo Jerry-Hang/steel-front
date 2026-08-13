@@ -269,6 +269,148 @@ pub fn generate_default_ground_texture(
 }
 
 // ============================================================
+// 程序化皮肤纹理（marker 障碍 / NPC 士兵）
+// ============================================================
+//
+// 障碍（marker）与士兵（NPC）走实例渲染，几何是立方体/十字双 quad，每个面 UV 铺满
+// [0,1]（见 renderer.rs VERTICES/FAR_VERTS），因此皮肤纹理按「每面一张贴图」设计：
+//   1. **marker 皮肤**：军备木板墙（竖板 + 板间暗接缝 + 横向木纹 + 稀疏钉痕/磨损）；
+//   2. **NPC 皮肤**：四色迷彩军服（卡其底 + 橄榄绿/深棕/近黑斑块，双层细胞噪声软边）。
+// 阵营色/障碍 tint 由片元着色器用顶点色与纹理混色（阵营识别仍保留）。
+// 所有颜色为线性 RGB，写入 R8G8B8A8_SRGB 纹理前必须 linear→sRGB 编码（见模块头铁律）。
+
+/// 皮肤纹理边长。与地面纹理同为 512：共享采样器（texture_sampler）的 max_lod 由
+/// 地面 mip 级数决定，同尺寸保证两套纹理 mip 级数完全一致，采样器参数直接复用。
+pub const SKIN_TEXTURE_SIZE: u32 = 512;
+
+/// 障碍物（marker）皮肤基色：军备木板墙。
+/// `u`/`v` 为面内 UV [0,1]，确定性纯函数。
+fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
+    let planks = 6.0f32;
+    let fu = u * planks;
+    let plank = fu.floor().min(planks - 1.0) as i32;
+    let fu_local = fu - fu.floor().min(planks - 1.0);
+
+    // 板间暗接缝（板边凹槽，u 靠近 0/1 时压暗）
+    let edge = fu_local.min(1.0 - fu_local);
+    let seam = 1.0 - smoothstep(0.015, 0.07, edge);
+
+    // 每块板基色差异（±12%，避免整面均匀死板）
+    let tone = 0.88 + unit_from_hash(hash2(plank, 0, seed.wrapping_add(41))) * 0.24;
+    let base: [f32; 3] = [0.46 * tone, 0.32 * tone, 0.18 * tone];
+
+    // 横向木纹（u 高频、v 低频拉伸）
+    let grain = value_noise(u * 26.0, v * 5.0, 1.0, seed.wrapping_add(42));
+    let mut c = [
+        base[0] * (1.0 + grain * 0.14),
+        base[1] * (1.0 + grain * 0.12),
+        base[2] * (1.0 + grain * 0.10),
+    ];
+
+    // 钉痕/磨损暗斑：0.4 尺度格子确定性散布
+    let cell = 0.4f32;
+    let gx = (u / cell).floor() as i32;
+    let gy = (v / cell).floor() as i32;
+    for dy in 0..2 {
+        for dx in 0..2 {
+            let gxx = gx + dx;
+            let gyy = gy + dy;
+            let h = hash2(gxx, gyy, seed.wrapping_add(43));
+            if unit_from_hash(h) < 0.30 {
+                let cx = gxx as f32 * cell
+                    + cell * 0.5
+                    + lattice(gxx, gyy, seed.wrapping_add(44)) * cell * 0.3;
+                let cy = gyy as f32 * cell
+                    + cell * 0.5
+                    + lattice(gxx, gyy, seed.wrapping_add(45)) * cell * 0.3;
+                let radius = 0.02 + unit_from_hash(hash2(gxx, gyy, seed.wrapping_add(46))) * 0.045;
+                let d = ((u - cx) * (u - cx) + (v - cy) * (v - cy)).sqrt();
+                let m = 1.0 - smoothstep(radius * 0.6, radius, d);
+                let dark: [f32; 3] = [0.10, 0.075, 0.05];
+                c = lerp3(c, dark, m * 0.75);
+            }
+        }
+    }
+
+    // 接缝压暗 + 板内细噪（防色带）
+    let seam_col: [f32; 3] = [0.14, 0.10, 0.06];
+    c = lerp3(c, seam_col, seam * 0.85);
+    let dither = value_noise(u * 96.0, v * 96.0, 1.0, seed.wrapping_add(47)) * 0.05;
+    [c[0] + dither, c[1] + dither, c[2] + dither]
+}
+
+/// 士兵（NPC）皮肤基色：四色迷彩军服。
+/// `u`/`v` 为面内 UV [0,1]，确定性纯函数。
+fn npc_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
+    // 大块斑纹（~3 格）+ 中块（~7 格）叠加，细胞噪声软过渡形成有机迷彩轮廓
+    let big = value_noise(u * 3.0, v * 3.0, 1.0, seed.wrapping_add(51)); // [-1,1)
+    let mid = value_noise(u * 7.0, v * 7.0, 1.0, seed.wrapping_add(52)); // [-1,1)
+    let p = 0.5 + 0.5 * (0.62 * big + 0.38 * mid); // [0,1]
+
+    let khaki: [f32; 3] = [0.56, 0.48, 0.33];
+    let olive: [f32; 3] = [0.34, 0.44, 0.23];
+    let brown: [f32; 3] = [0.30, 0.20, 0.12];
+    let dark: [f32; 3] = [0.17, 0.16, 0.13];
+
+    // 分层分域：低→卡其、中→橄榄绿、高→深棕、顶→近黑（smoothstep 软边）
+    let mut c = khaki;
+    c = lerp3(c, olive, smoothstep(0.38, 0.50, p));
+    c = lerp3(c, brown, smoothstep(0.62, 0.74, p));
+    c = lerp3(c, dark, smoothstep(0.82, 0.92, p));
+
+    // 细噪（防色带）+ 顶部微暗（头盔/肩部阴影感；立方体各面 v=1 均为顶边）
+    let dither = value_noise(u * 96.0, v * 96.0, 1.0, seed.wrapping_add(53)) * 0.045;
+    let top_shade = 1.0 - 0.22 * smoothstep(0.82, 1.0, v);
+    [
+        c[0] * top_shade + dither,
+        c[1] * top_shade + dither,
+        c[2] * top_shade + dither,
+    ]
+}
+
+/// 生成障碍物（marker）皮肤纹理（RGBA8，`size * size * 4` 字节，sRGB 编码）。
+/// 确定性：相同 `size`/`seed` 恒同输出。
+pub fn generate_marker_skin_texture(size: u32, seed: u32) -> Vec<u8> {
+    generate_skin_texture(size, seed, marker_skin)
+}
+
+/// 生成士兵（NPC）皮肤纹理（RGBA8，`size * size * 4` 字节，sRGB 编码）。
+/// 确定性：相同 `size`/`seed` 恒同输出。
+pub fn generate_npc_skin_texture(size: u32, seed: u32) -> Vec<u8> {
+    generate_skin_texture(size, seed, npc_skin)
+}
+
+/// 通用皮肤纹理生成（按面内 UV 逐像素采样基色函数 + sRGB 编码）。
+fn generate_skin_texture(size: u32, seed: u32, f: fn(f32, f32, u32) -> [f32; 3]) -> Vec<u8> {
+    let n = size as usize;
+    let mut out = vec![0u8; n * n * 4];
+    for py in 0..n {
+        let v = (py as f32 + 0.5) / size as f32;
+        for px in 0..n {
+            let u = (px as f32 + 0.5) / size as f32;
+            let c = f(u, v, seed);
+            let idx = (py * n + px) * 4;
+            // 线性 RGB → sRGB 编码（R8G8B8A8_SRGB 硬件采样会 decode 回线性）
+            out[idx] = (linear_to_srgb(c[0]) * 255.0).round() as u8;
+            out[idx + 1] = (linear_to_srgb(c[1]) * 255.0).round() as u8;
+            out[idx + 2] = (linear_to_srgb(c[2]) * 255.0).round() as u8;
+            out[idx + 3] = 255;
+        }
+    }
+    out
+}
+
+/// 默认参数生成（renderer 与测试共用）。
+pub fn generate_default_marker_skin_texture() -> Vec<u8> {
+    generate_marker_skin_texture(SKIN_TEXTURE_SIZE, DEFAULT_SEED)
+}
+
+/// 默认参数生成（renderer 与测试共用）。
+pub fn generate_default_npc_skin_texture() -> Vec<u8> {
+    generate_npc_skin_texture(SKIN_TEXTURE_SIZE, DEFAULT_SEED)
+}
+
+// ============================================================
 // 单元测试
 // ============================================================
 
@@ -348,5 +490,115 @@ mod tests {
             let m = crater_mask(x, x, 7);
             assert!((0.0..=1.0).contains(&m));
         }
+    }
+
+    #[test]
+    fn linear_to_srgb_matches_reference() {
+        assert_eq!((linear_to_srgb(0.0) * 255.0).round() as u32, 0);
+        assert_eq!((linear_to_srgb(1.0) * 255.0).round() as u32, 255);
+        // 0.5 → 1.055*0.5^(1/2.4)-0.055 ≈ 0.73536 → 187.5 → 188（round）
+        assert_eq!((linear_to_srgb(0.5) * 255.0).round() as u32, 188);
+        // 0.001 在线性段：0.001*12.92 = 0.01292 → 3.29 → 3
+        assert_eq!((linear_to_srgb(0.001) * 255.0).round() as u32, 3);
+    }
+
+    #[test]
+    fn marker_skin_texture_is_deterministic_and_sized() {
+        let a = generate_marker_skin_texture(64, 9);
+        let b = generate_marker_skin_texture(64, 9);
+        assert_eq!(a.len(), 64 * 64 * 4);
+        assert_eq!(a, b, "同种子同输入必须逐字节一致");
+        assert!(a.chunks_exact(4).all(|px| px[3] == 255));
+        let c = generate_marker_skin_texture(64, 10);
+        assert_ne!(a, c, "不同种子应产出不同纹理");
+    }
+
+    #[test]
+    fn npc_skin_texture_is_deterministic_and_sized() {
+        let a = generate_npc_skin_texture(64, 9);
+        let b = generate_npc_skin_texture(64, 9);
+        assert_eq!(a.len(), 64 * 64 * 4);
+        assert_eq!(a, b, "同种子同输入必须逐字节一致");
+        assert!(a.chunks_exact(4).all(|px| px[3] == 255));
+        let c = generate_npc_skin_texture(64, 10);
+        assert_ne!(a, c, "不同种子应产出不同纹理");
+    }
+
+    #[test]
+    fn marker_and_npc_skins_differ() {
+        let a = generate_marker_skin_texture(64, 7);
+        let b = generate_npc_skin_texture(64, 7);
+        assert_ne!(a, b, "障碍木板墙与士兵迷彩应产出不同纹理");
+    }
+
+    #[test]
+    fn marker_skin_has_darker_seams_than_plank_interior() {
+        // 板缝列（u=0 是第一块板左缘）平均亮度应明显暗于板内列（u=1/12 板中心）
+        let lum = |c: [f32; 3]| c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
+        let avg = |u_fixed: f32, seed: u32| -> f32 {
+            let mut s = 0.0f32;
+            for i in 0..64 {
+                let v = (i as f32 + 0.5) / 64.0;
+                s += lum(marker_skin(u_fixed, v, seed));
+            }
+            s / 64.0
+        };
+        let seam_avg = avg(0.0, 5);
+        let interior_avg = avg(1.0 / 12.0, 5);
+        assert!(
+            seam_avg < interior_avg,
+            "板缝应暗于板内：seam={seam_avg} interior={interior_avg}"
+        );
+    }
+
+    #[test]
+    fn marker_skin_is_warm_wood_tone() {
+        // 木板墙应以暖棕色为主：平均红 > 绿 > 蓝（字节为 sRGB 编码，单调函数，通道排序一致）
+        let size = 64;
+        let tex = generate_marker_skin_texture(size, 3);
+        let mut sum = [0.0f64; 3];
+        for px in tex.chunks_exact(4) {
+            for (ch, s) in sum.iter_mut().enumerate() {
+                *s += px[ch] as f64;
+            }
+        }
+        let n = (size * size) as f64;
+        let (r, g, b) = (sum[0] / n, sum[1] / n, sum[2] / n);
+        assert!(r > g && g > b, "木板应暖棕（r>g>b），实际 r={r} g={g} b={b}");
+    }
+
+    #[test]
+    fn npc_skin_has_camo_color_variety() {
+        // 迷彩应同时含绿系（橄榄绿）与暖色系（卡其/棕）像素，且有显著明暗对比
+        let size = 128;
+        let tex = generate_npc_skin_texture(size, 7);
+        let (mut green, mut warm) = (0u32, 0u32);
+        let (mut lum_min, mut lum_max) = (f64::MAX, 0.0f64);
+        for px in tex.chunks_exact(4) {
+            let (r, g, b) = (px[0] as f64, px[1] as f64, px[2] as f64);
+            let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            lum_min = lum_min.min(lum);
+            lum_max = lum_max.max(lum);
+            if g > r + 3.0 && g > b {
+                green += 1;
+            }
+            if r > g + 3.0 && r > b {
+                warm += 1;
+            }
+        }
+        let n = (size * size) as f64;
+        assert!(green as f64 > n * 0.1, "绿系像素占比过低：{green}/{}", n as u32);
+        assert!(warm as f64 > n * 0.1, "暖色系像素占比过低：{warm}/{}", n as u32);
+        assert!(lum_max - lum_min > 60.0, "迷彩应有显著明暗对比，实际 {}", lum_max - lum_min);
+    }
+
+    #[test]
+    fn default_skin_textures_have_full_sizes() {
+        let m = generate_default_marker_skin_texture();
+        let n = generate_default_npc_skin_texture();
+        let expect = (SKIN_TEXTURE_SIZE * SKIN_TEXTURE_SIZE * 4) as usize;
+        assert_eq!(m.len(), expect);
+        assert_eq!(n.len(), expect);
+        assert_ne!(m, n);
     }
 }
