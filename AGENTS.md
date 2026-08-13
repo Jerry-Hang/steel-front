@@ -71,6 +71,20 @@
   - **环境变量**：PT_SECS（时长）、PT_SHOT_EVERY（截图间隔）、PT_MAX_DIST、PT_FRESH、PT_REFOCUS、PT_FPS_MIN/PT_FPS_P50、PT_SIDES、PT_WIN_COUNTER；`--attach` / `--no-shadow`。
 - 状态：done
 
+### [2026-08-13] 交接：SIMD 指令级 A/B 实测完成（RV3D_FORCE_SIMD + 隔离微基准）
+
+- 日期：2026-08-13
+- 发起方：当前会话 AI（Codex）
+- 接收方：下一会话 AI
+- 交接类型：迭代结束
+- 交接内容：
+  - **新增**：`RV3D_FORCE_SIMD=avx512|avx2|avx|sse4.2|scalar` 强制锁定 SIMD 档位（三处共用：`simd::shockwave_pressure`、`renderer::cull_spheres_dispatch`、`morph_heights_dispatch`；仍要求硬件支持，非法值告警回退）；新增两个隔离微基准测试（`shockwave_path_microbench` / `simd_cull_microbench`，`cargo test --release <名> -- --nocapture --test-threads=1`，65536 元素 × 200 轮，无渲染并发）。
+  - **权威数据（本机 Zen4/8940HX）**：① 视锥剔除 65536 实例：scalar 798µs → avx512 53µs（15.06×）、avx2 49µs（16.29×）、avx 50µs（15.96×）、sse4.2 249µs（3.20×）——**剔除 SIMD 极有效**。② 冲击波压力场 65536 点（AoS `[f32;3]`）：avx **1.67×**（33µs，标量 load 转置、无 gather）、avx512 0.92×、avx2 0.83×、sse4.2 0.82×、scalar 55µs——**gather 型内核负收益**：Zen4 `vpgatherdd` 微码取数淹没向量收益，AVX2/AVX-512 反而慢于标量。③ 地形 morph：全档 6µs、1.00×（内存带宽瓶颈，中性）。
+  - **游戏内对照（60s/档，128 NPC 压力，固定视角）**：fps 181–195、cull_us 590–674µs 五档持平——`cull_us` 是"剔除+压缩+GPU 上传"全程，上传 ~500µs/帧占大头，剔除算力（SIMD ~50µs→并行 ~10µs；标量 ~800µs→并行 ~90µs）被掩盖；帧率由 present（dzn ~2ms）主导。`ai_us` 各轮 NPC 存活数随机（8–102）不可比。全部 5 档 bitwise_eq=true、VUID=0、272 tests 全绿。
+  - **结论与建议**：剔除 SIMD 是当前最大有效优化（15–16×）；冲击波 gather 内核是负优化，**后续把 `shockwave_pressure_avx2/avx512` 改为与 `_avx` 相同的无 gather 转置策略**（预计 0.85×→1.7×，低风险高收益，建议排期）；完整报告 `docs/perf-simd-tier-2026-08-13.md`。
+  - **用户决策**：Deep Code CLI 已在 WSL2 安装（`@vegamo/deepcode-cli` v0.1.34，npm 前缀改 `~/.npm-global`，配置 `~/.deepcode/settings.json` 模型 deepseek-v4-pro）；API 密钥经全盘排查仅存在于本对话与 `~/.deepcode/settings.json`，无其它落盘/网络泄露。
+- 状态：done
+
 ### [2026-08-11] 交接：美术方向规划开启（阴影 / AO / 烘焙 + 程序化贴图）
 
 - 日期：2026-08-11
