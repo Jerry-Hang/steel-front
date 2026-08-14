@@ -92,6 +92,43 @@ bash scripts/run_gameplay_smoke.sh
 | `RV3D_EXPLOSION_SIM` | `1` 运行爆炸/冲击波 SIMD 压力自测（加速比日志） | `0` |
 | `RV3D_NO_SHADOW` | `1` 关闭阴影贴图（仅环境光+点光源），阴影 A/B 验证用 | `0` |
 | `RV3D_NET` / `RV3D_NET_ADDR` | 联网模式（`server` / `client`）与对端地址 | 无 |
+| `RV3D_MAP` | 启用关卡系统并加载单张地图（如 `assets/maps/street_fight.toml`） | 无（程序化地图） |
+| `RV3D_MAPS` | 启用关卡系统并加载关卡列表（如 `assets/maps/index.toml`，`N` 键按序进入下一关） | 无（程序化地图） |
+
+### 关卡系统（TOML 地图）
+
+游戏默认使用程序化生成地图（不设置任何环境变量时行为与旧版一致，测试/冒烟基线不变）。设置 `RV3D_MAP=<单关 toml>` 或 `RV3D_MAPS=<index.toml 列表>` 后启用关卡系统：障碍物、出生点、目标与胜负规则全部由 TOML 关卡文件描述，物理碰撞 / AI 导航 / 渲染 marker 自动适配，无需改渲染管线。
+
+**关卡文件格式**（示例见 `assets/maps/street_fight.toml`、`assets/maps/open_field.toml`）：
+
+```toml
+[map]
+name = "巷战废墟"                 # 关卡名（HUD/日志显示）
+description = "狭窄街道与残破建筑"  # 关卡说明
+
+spawn_points = [                   # 出生点（team: "blue"/"red"，忽略大小写）
+    { x = -30.0, y = 1.0, z = -40.0, team = "blue" },
+    { x = 30.0, y = 1.0, z = -40.0, team = "red" },
+]
+
+objectives = [                     # 目标（type = "capture" 占领据点）
+    { id = "A", type = "capture", position = { x = 0.0, y = 0.0, z = -15.0 }, radius = 5.0, capture_time = 10.0 },
+]
+
+obstacles = [                      # 障碍（type: wall/block/cover/barrier）
+    { type = "wall", position = { x = -10.0, y = 1.5, z = 0.0 }, size = { x = 1.0, y = 3.0, z = 20.0 } },
+]
+
+[rule]                             # 胜负规则（三选一）
+kind = "capture"                   # capture: 占领 required 个据点获胜
+required = 2
+# kind = "kill"; target = 30       # kill: 击杀 30 名敌人获胜（玩家阵营 Blue）
+# kind = "time"; seconds = 300     # time: 限时 300 秒，到点按据点归属/击杀数判定
+```
+
+**关卡列表**（`assets/maps/index.toml`）按顺序列出地图文件，胜利后按 `N` 进入下一关；最后一关通关即通关画面。**热重载**：游玩中按 `F5` 重新读取当前地图 TOML（开发时改地图即时生效，不重启游戏）。
+
+**胜负流程**：胜利/失败结算画面按 `R` 重开本关、胜利后按 `N` 下一关；死亡（血量归零）按 `R` 重开本关。HUD 顶部中央显示各据点归属颜色（蓝=Blue / 红=Red / 灰=中立）与占领进度条。
 
 ### 键位操作
 
