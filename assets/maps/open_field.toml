@@ -1,0 +1,35 @@
+# 开阔地 — 关卡文件
+# 格式说明见 README「关卡系统」章节
+# 规则：歼灭 30 名敌人获胜（击杀计数）
+
+[map]
+name = "开阔地"
+description = "一望无际的平原，适合远距离对射。歼灭 30 名敌人获胜。"
+
+# 出生点：蓝方（玩家）西侧、红方（敌军）东侧，远离中央
+spawn_points = [
+    { x = -60.0, y = 1.0, z = 0.0, team = "blue" },
+    { x = 60.0, y = 1.0, z = 0.0, team = "red" },
+    { x = 60.0, y = 1.0, z = 20.0, team = "red" },
+]
+
+# 目标：歼灭模式（type = "kill"，target 由 [rule] 指定）
+objectives = [
+    { id = "K", type = "kill", position = { x = 0.0, y = 0.0, z = 0.0 }, radius = 0.0, capture_time = 0.0 },
+]
+
+# 障碍：稀疏的沙袋掩体与残骸（开阔地少量掩体）
+obstacles = [
+    { type = "cover", position = { x = -25.0, y = 0.75, z = -10.0 }, size = { x = 4.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = -20.0, y = 0.75, z = 15.0 }, size = { x = 1.0, y = 1.5, z = 4.0 } },
+    { type = "cover", position = { x = 25.0, y = 0.75, z = 10.0 }, size = { x = 4.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 20.0, y = 0.75, z = -15.0 }, size = { x = 1.0, y = 1.5, z = 4.0 } },
+    { type = "block", position = { x = 0.0, y = 1.5, z = -5.0 }, size = { x = 2.5, y = 3.0, z = 2.5 } },
+    { type = "block", position = { x = 0.0, y = 1.5, z = 8.0 }, size = { x = 2.5, y = 3.0, z = 2.5 } },
+    { type = "block", position = { x = -35.0, y = 1.5, z = 0.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 35.0, y = 1.5, z = 0.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+]
+
+[rule]
+kind = "kill"
+target = 30

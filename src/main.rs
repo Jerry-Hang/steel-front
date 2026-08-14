@@ -591,9 +591,10 @@ impl ApplicationHandler for GameApp {
                     self.game.hud.confirm_quit = false;
                 }
 
-                // 开始菜单：任意键（除 ESC）开始游戏
+                // 开始菜单 / 关卡加载中：任意键（除 ESC）开始游戏
                 if pressed
-                    && self.game.state() == GameState::StartMenu
+                    && (self.game.state() == GameState::StartMenu
+                        || self.game.state() == GameState::LoadingMap)
                     && key_code != KeyCode::Escape
                 {
                     self.game.on_any_key(&self.camera.position());
@@ -654,12 +655,13 @@ impl ApplicationHandler for GameApp {
                         }
                         BindingAction::Reload => {
                             if pressed {
-                                if self.game.state() == GameState::GameOver {
-                                    log::info!("game: 重开一局");
-                                    self.game.request_restart(&self.camera.position());
-                                } else if self.game.state() == GameState::Playing
-                                    && !self.game.settings_open()
+                                let st = self.game.state();
+                                if st == GameState::GameOver
+                                    || matches!(st, GameState::Victory(_) | GameState::Defeat)
                                 {
+                                    log::info!("game: 重开本关");
+                                    self.game.request_restart(&self.camera.position());
+                                } else if st == GameState::Playing && !self.game.settings_open() {
                                     self.game.request_reload();
                                 }
                             }
@@ -711,16 +713,36 @@ impl ApplicationHandler for GameApp {
                                     self.game.begin_rebind();
                                 }
                             }
-                        } else if pressed && self.game.state() == GameState::GameOver {
-                            log::info!("game: Enter 重开一局");
-                            self.game.request_restart(&self.camera.position());
+                        } else if pressed {
+                            let st = self.game.state();
+                            if st == GameState::GameOver
+                                || matches!(st, GameState::Victory(_) | GameState::Defeat)
+                            {
+                                log::info!("game: Enter 重开本关");
+                                self.game.request_restart(&self.camera.position());
+                            }
                         }
                     }
-                    // 设置面板调试补给（N 键补满弹匣）
+                    // 设置面板调试补给（N 键补满弹匣）；胜利结算 N 键进入下一关
                     KeyCode::KeyN => {
                         if pressed && self.game.settings_open() {
                             log::info!("settings: N 键补给弹药");
                             self.game.give_ammo();
+                        } else if pressed && matches!(self.game.state(), GameState::Victory(_)) {
+                            if self.game.advance_level(&self.camera.position()) {
+                                log::info!("game: N 进入下一关");
+                            } else {
+                                log::info!("game: 已通关（最后一关完成）");
+                            }
+                        }
+                    }
+                    // F5：关卡系统热重载（重新读取当前地图 TOML）
+                    KeyCode::F5 => {
+                        if pressed {
+                            match self.game.reload_current_map() {
+                                Ok(()) => log::info!("map: F5 热重载完成"),
+                                Err(e) => log::warn!("map: F5 热重载失败: {}", e),
+                            }
                         }
                     }
                     // F12：截图（任意画面可用，渲染器把当前帧写到 /tmp）
@@ -753,11 +775,12 @@ impl ApplicationHandler for GameApp {
                 match button {
                     MouseButton::Left => {
                         if pressed && !self.game.settings_open() {
-                            // 开始菜单：点击也视为"任意键"开局（键盘焦点不可靠的环境兜底）
-                            if self.game.state() == GameState::StartMenu {
+                            // 开始菜单/加载中：点击也视为"任意键"开局（键盘焦点不可靠的环境兜底）
+                            let st = self.game.state();
+                            if st == GameState::StartMenu || st == GameState::LoadingMap {
                                 self.game.on_any_key(&self.camera.position());
                             }
-                            if self.game.state() == GameState::Playing {
+                            if st == GameState::Playing {
                                 self.fire_requested = true;
                             }
                         }

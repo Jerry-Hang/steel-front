@@ -1,0 +1,41 @@
+# 巷战废墟 — 关卡文件
+# 格式说明见 README「关卡系统」章节
+# 规则：占领两个据点（A 在桥北、B 在废墟南侧）即获胜
+
+[map]
+name = "巷战废墟"
+description = "狭窄街道与残破建筑，适合近距离交火。占领据点 A（北）与 B（南）获胜。"
+
+# 出生点：蓝方（玩家）西侧、红方（敌军）东侧
+spawn_points = [
+    { x = -30.0, y = 1.0, z = -40.0, team = "blue" },
+    { x = -28.0, y = 1.0, z = 38.0, team = "blue" },
+    { x = 30.0, y = 1.0, z = -40.0, team = "red" },
+    { x = 28.0, y = 1.0, z = 38.0, team = "red" },
+]
+
+# 目标：占领两个据点
+objectives = [
+    { id = "A", type = "capture", position = { x = 0.0, y = 0.0, z = -15.0 }, radius = 5.0, capture_time = 10.0 },
+    { id = "B", type = "capture", position = { x = 0.0, y = 0.0, z = 15.0 }, radius = 5.0, capture_time = 10.0 },
+]
+
+# 障碍：巷战街道布局（墙横跨街道形成掩体，箱体做掩体）
+obstacles = [
+    { type = "wall", position = { x = -10.0, y = 1.5, z = -30.0 }, size = { x = 1.0, y = 3.0, z = 20.0 } },
+    { type = "wall", position = { x = 10.0, y = 1.5, z = 30.0 }, size = { x = 1.0, y = 3.0, z = 20.0 } },
+    { type = "wall", position = { x = -20.0, y = 1.5, z = 0.0 }, size = { x = 1.0, y = 3.0, z = 16.0 } },
+    { type = "wall", position = { x = 20.0, y = 1.5, z = 0.0 }, size = { x = 1.0, y = 3.0, z = 16.0 } },
+    { type = "cover", position = { x = 0.0, y = 0.75, z = -45.0 }, size = { x = 6.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 0.0, y = 0.75, z = 45.0 }, size = { x = 6.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = -40.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 6.0 } },
+    { type = "cover", position = { x = 40.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 6.0 } },
+    { type = "block", position = { x = -15.0, y = 1.5, z = -15.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 15.0, y = 1.5, z = 15.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = -15.0, y = 1.5, z = 15.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 15.0, y = 1.5, z = -15.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+]
+
+[rule]
+kind = "capture"
+required = 2

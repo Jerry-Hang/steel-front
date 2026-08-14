@@ -118,15 +118,21 @@ struct NetworkDemo {
     last_log: f32,
 }
 
-/// 游戏主状态机（开始菜单 → 游戏中 → 死亡结算）
+/// 游戏主状态机（开始菜单 → 游戏中 → 死亡/胜利/失败结算）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameState {
     /// 开始菜单：任意键开始
     StartMenu,
+    /// 加载关卡数据（RV3D_MAP/RV3D_MAPS 关卡系统；同步加载，瞬间完成）
+    LoadingMap,
     /// 游戏中：波次战斗
     Playing,
     /// 死亡结算：R 重开
     GameOver,
+    /// 关卡胜利结算（获胜方）：R 重开本关 / N 下一关
+    Victory(crate::engine::ai::Team),
+    /// 关卡失败结算（时间到/规则失败）：R 重开本关
+    Defeat,
 }
 
 /// 单个 NPC：A* 路径 + 状态机 + 世界位置（y 采样地形高度）
@@ -700,6 +706,16 @@ pub struct Game {
     last_status_log: f32,
     /// 任务目标（本关/本轮歼灭数；达成 → 胜利横幅/日志）
     objective: MissionObjective,
+    /// 关卡系统地图管理器（RV3D_MAP/RV3D_MAPS 环境变量启用；None = 程序化地图，默认行为）
+    map_mgr: Option<crate::engine::map::MapManager>,
+    /// 当前地图文件路径（F5 热重载用；关卡系统启用时 Some）
+    map_path: Option<String>,
+    /// 关卡列表（RV3D_MAPS=index.toml 时加载；N 键按序进入下一关）
+    level_list: Vec<String>,
+    /// 当前关卡在 level_list 中的索引（0 起）
+    level_idx: usize,
+    /// 目标系统（占领据点/胜负规则；关卡系统启用时 Some）
+    obj_state: Option<crate::engine::objective::ObjectiveState>,
 }
 
 /// 单帧 AI 步进上下文（全部为共享只读数据，供串行/并行两种 runner 复用）
@@ -911,7 +927,15 @@ impl Game {
             next_npc_id: NPC_COUNT as u32,
             last_status_log: 0.0,
             objective: MissionObjective::new(0),
+            map_mgr: None,
+            map_path: None,
+            level_list: Vec::new(),
+            level_idx: 0,
+            obj_state: None,
         };
+        // 关卡系统初始化：RV3D_MAP=<单关 toml> 或 RV3D_MAPS=<index.toml 关卡列表>
+        // 启用时替换程序化地图；未设置 → None（程序化地图，默认行为零回归）
+        game.init_map_system();
         // 初始关卡布局（level 1，种子 = 1）：物理刚体 + AI 网格 + 玩家安全区复位
         game.apply_level(1);
         game
@@ -922,19 +946,99 @@ impl Game {
         self.game_state
     }
 
+    /// 初始化关卡系统（Game::new 调用一次）：
+    /// - `RV3D_MAP=<assets/maps/xxx.toml>`：加载单张地图（关卡列表为空）
+    /// - `RV3D_MAPS=<assets/maps/index.toml>`：加载关卡列表，进入第一关
+    /// 两者皆未设置 → 保持 None（程序化地图 + StartMenu，默认行为与测试基线零回归）。
+    /// 加载失败仅告警并回退程序化地图（不 panic、不中断启动）。
+    fn init_map_system(&mut self) {
+        let single = std::env::var("RV3D_MAP").ok().filter(|p| !p.is_empty());
+        let index = std::env::var("RV3D_MAPS").ok().filter(|p| !p.is_empty());
+        let (path, list) = if let Some(p) = single {
+            (p, Vec::new())
+        } else if let Some(idx) = index {
+            match crate::engine::map::load_map_list(&idx) {
+                Ok(list) if !list.is_empty() => (list[0].clone(), list),
+                Ok(_) => {
+                    log::warn!("map: 关卡列表 {} 为空，回退程序化地图", idx);
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("map: 关卡列表加载失败 {}: {}，回退程序化地图", idx, e);
+                    return;
+                }
+            }
+        } else {
+            return;
+        };
+        match crate::engine::map::MapManager::load(&path) {
+            Ok(mgr) => {
+                use crate::engine::objective::GameRule;
+                let rule = match mgr.data().rule.kind.as_str() {
+                    "kill" => GameRule::KillCount {
+                        target: mgr.data().rule.target,
+                    },
+                    "time" => GameRule::TimeLimit {
+                        seconds: mgr.data().rule.seconds,
+                    },
+                    _ => GameRule::CapturePoints {
+                        required: mgr.data().rule.required.max(1),
+                    },
+                };
+                let mut pts = Vec::new();
+                for o in mgr
+                    .data()
+                    .objectives
+                    .iter()
+                    .filter(|o| o.kind.eq_ignore_ascii_case("capture"))
+                {
+                    pts.push(crate::engine::objective::CapturePoint::new(
+                        o.id.clone(),
+                        o.x,
+                        o.z,
+                        o.radius,
+                        o.capture_time,
+                    ));
+                }
+                let mut obj_state = crate::engine::objective::ObjectiveState::new(rule);
+                obj_state.points = pts;
+                log::info!(
+                    "map: 关卡系统启用 {}（{} 出生点 / {} 障碍 / {} 目标，规则 {}）",
+                    mgr.data().name,
+                    mgr.data().spawn_points.len(),
+                    mgr.data().obstacles.len(),
+                    mgr.data().objectives.len(),
+                    obj_state.rule.rule_kind()
+                );
+                self.map_mgr = Some(mgr);
+                self.map_path = Some(path);
+                self.level_list = list;
+                self.level_idx = 0;
+                self.obj_state = Some(obj_state);
+                // 加载完成 → LoadingMap 态（按任意键开玩）
+                self.game_state = GameState::LoadingMap;
+            }
+            Err(e) => {
+                log::warn!("map: 关卡加载失败 {}: {}，回退程序化地图", path, e);
+            }
+        }
+    }
+
     /// 开始菜单任意键：进入游戏（开始/重开一局）
     pub fn on_any_key(&mut self, player: &glam::Vec3) {
-        if self.game_state == GameState::StartMenu {
+        if self.game_state == GameState::StartMenu || self.game_state == GameState::LoadingMap {
             self.start_run(player);
         }
     }
 
-    /// 死亡结算界面 R：重开一局
+    /// 死亡/失败结算界面 R：重开一局（重开本关）
     pub fn request_restart(&mut self, player: &glam::Vec3) {
-        if self.game_state != GameState::GameOver {
-            return;
+        match self.game_state {
+            GameState::GameOver | GameState::Victory(_) | GameState::Defeat => {
+                self.start_run(player);
+            }
+            _ => {}
         }
-        self.start_run(player);
     }
 
     /// 开始一局：复位血量/弹药/分数/波次/关卡，重建第 1 关地图，清掉残留 NPC 后生成第 1 波
@@ -954,7 +1058,16 @@ impl Game {
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
-        self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
+        // 关卡系统：玩家出生点用地图 Blue 出生点（未启用时保持原点）
+        if let Some(mgr) = self.map_mgr.as_ref() {
+            if let Some((sx, sy, sz)) = mgr.spawn_point("blue") {
+                self.player_body.pos = Pv::new(sx, sy, sz);
+            } else {
+                self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
+            }
+        } else {
+            self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
+        }
         self.player_body.vel = Pv::ZERO;
         self.move_forward = false;
         self.move_backward = false;
@@ -976,6 +1089,16 @@ impl Game {
         } else {
             self.spawn_wave(1, player);
         }
+        // 关卡系统：重开本关 → 据点进度/击杀/计时归零（rule 保持当前地图的规则）
+        if let Some(obj) = self.obj_state.as_mut() {
+            for pt in obj.points.iter_mut() {
+                pt.progress = 0.0;
+                pt.owner = None;
+            }
+            obj.kills = 0;
+            obj.elapsed = 0.0;
+            obj.won_team = None;
+        }
         self.game_state = GameState::Playing;
         log::info!("game: run started (wave 1)");
     }
@@ -990,9 +1113,30 @@ impl Game {
     /// 由 new() / start_run() / 升关时调用；同时把玩家拉回原点安全区，防止卡进障碍。
     fn apply_level(&mut self, level: u32) {
         self.level = level;
-        // 地图生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core），
-        // 生成计算不吃主线程所在簇；join 语义保证返回时地图已就绪。
-        self.map = crate::engine::cpu::ai_pool().run_sync(move || generate_level_map(level));
+        // 地图来源：关卡系统启用（RV3D_MAP/RV3D_MAPS）→ TOML 障碍；否则程序化生成（默认行为）。
+        // 关卡系统地图已在 init_map_system / advance_level / reload_current_map 加载到 map_mgr。
+        if let Some(mgr) = self.map_mgr.as_ref() {
+            let mut obstacles = Vec::new();
+            for def in mgr.obstacles() {
+                let (kind, x, z, half_w, half_d) =
+                    crate::engine::map::obstacle_to_map_obstacle(def);
+                let max_hp = obstacle_max_hp(kind);
+                obstacles.push(MapObstacle {
+                    x,
+                    z,
+                    half_w,
+                    half_d,
+                    kind,
+                    max_hp,
+                    hp: max_hp,
+                });
+            }
+            self.map = LevelMap { obstacles };
+        } else {
+            // 地图生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core），
+            // 生成计算不吃主线程所在簇；join 语义保证返回时地图已就绪。
+            self.map = crate::engine::cpu::ai_pool().run_sync(move || generate_level_map(level));
+        }
         // 任务目标：普通波次 = 本关 WAVES_PER_LEVEL 波出场总数（含援军）；
         // 压力模式 = 歼灭一队即本轮胜利（spawn_stress_battle 每轮重置）
         self.objective = MissionObjective::new(if self.stress {
@@ -1182,12 +1326,19 @@ impl Game {
                 self.update_projectiles(dt, true);
                 self.update_ai(dt, camera);
             }
+            GameState::LoadingMap => {
+                // 关卡加载为同步操作（init_map_system 已载入），此态仅作状态机过渡
+            }
             GameState::Playing => {
                 self.update_projectiles(dt, true);
                 self.update_ai(dt, camera);
                 self.update_waves(dt, &camera.position());
+                // 关卡系统：每帧推进据点占领 + 胜负判定（未启用时无操作）
+                self.update_objectives(dt, &camera.position());
             }
-            GameState::GameOver => {
+            GameState::GameOver
+            | GameState::Victory(_)
+            | GameState::Defeat => {
                 // 冻结玩法：AI/伤害/波次停止；投射物继续飞行但不再判定命中/击杀
                 self.update_projectiles(dt, false);
             }
@@ -1227,6 +1378,134 @@ impl Game {
         self.update_net(camera);
         self.step_net(camera);
         self.stage_net_us = t0.elapsed().as_micros() as u64;
+    }
+
+    /// 关卡系统每帧推进（仅 Playing 态调用；未启用时直接返回）：
+    /// 1. 据点占领：玩家（Blue 阵营）站在据点内且无 Red NPC 在场 → 进度增长；
+    ///    有敌对 NPC 在场 → 压制衰减；玩家撤离 → 缓慢消散。
+    /// 2. 胜负判定：规则达成 → 切换 GameState::Victory(team) / Defeat（幂等，只触发一次）。
+    /// 3. 限时统计同步给 ObjectiveState。
+    fn update_objectives(&mut self, dt: f32, player: &glam::Vec3) {
+        let Some(obj) = self.obj_state.as_mut() else { return };
+        let player_team = crate::engine::ai::Team::Blue; // 玩家恒为 Blue 阵营
+        for pt in obj.points.iter_mut() {
+            let inside = pt.is_inside(player.x, player.z);
+            let has_enemy = self
+                .npcs
+                .iter()
+                .any(|n| n.team != player_team && pt.is_inside(n.position[0], n.position[2]));
+            let players_inside: Vec<crate::engine::ai::Team> =
+                if inside { vec![player_team] } else { Vec::new() };
+            crate::engine::objective::update_point(pt, dt, &players_inside, has_enemy);
+        }
+        obj.elapsed += dt as f64;
+        match obj.evaluate() {
+            crate::engine::objective::WinState::Victory(team) => {
+                obj.won_team = Some(team);
+                self.game_state = GameState::Victory(team);
+                log::info!("objective: 关卡胜利，获胜方 {:?}", team);
+            }
+            crate::engine::objective::WinState::Defeat => {
+                obj.won_team = Some(player_team.opposite());
+                self.game_state = GameState::Defeat;
+                log::info!("objective: 关卡失败（时间到/据点尽失）");
+            }
+            crate::engine::objective::WinState::None => {}
+        }
+    }
+
+    /// 关卡系统击杀计数：普通波次击杀（damage_npc）调用，KillCount 规则用
+    fn objective_register_kill(&mut self) {
+        if let Some(obj) = self.obj_state.as_mut() {
+            obj.kills = obj.kills.saturating_add(1);
+        }
+    }
+
+    /// 关卡系统热重载（F5）：重新读取当前地图 TOML 并重建物理/AI 网格/据点
+    pub fn reload_current_map(&mut self) -> Result<(), String> {
+        let Some(path) = self.map_path.clone() else {
+            return Ok(()); // 未启用关卡系统：无事可做
+        };
+        {
+            let Some(mgr) = self.map_mgr.as_mut() else {
+                return Ok(());
+            };
+            mgr.reload(&path)?;
+        }
+        // 重建物理/AI 网格（复用 apply_level 的障碍→刚体/网格逻辑）
+        self.apply_level(self.level);
+        // 重建据点（进度归零，规则沿用新地图的 rule）
+        let rule = {
+            let d = self.map_mgr.as_ref().map(|m| &m.data().rule);
+            match d.map(|r| r.kind.as_str()) {
+                Some("kill") => crate::engine::objective::GameRule::KillCount {
+                    target: d.map(|r| r.target).unwrap_or(0),
+                },
+                Some("time") => crate::engine::objective::GameRule::TimeLimit {
+                    seconds: d.map(|r| r.seconds).unwrap_or(0.0),
+                },
+                _ => crate::engine::objective::GameRule::CapturePoints {
+                    required: d.map(|r| r.required.max(1)).unwrap_or(1),
+                },
+            }
+        };
+        let mut obj = crate::engine::objective::ObjectiveState::new(rule);
+        obj.points = self
+            .map_mgr
+            .as_ref()
+            .map(|m| {
+                m.data()
+                    .objectives
+                    .iter()
+                    .filter(|o| o.kind.eq_ignore_ascii_case("capture"))
+                    .map(|o| {
+                        crate::engine::objective::CapturePoint::new(
+                            o.id.clone(),
+                            o.x,
+                            o.z,
+                            o.radius,
+                            o.capture_time,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.obj_state = Some(obj);
+        log::info!("map: 热重载完成（{}）", path);
+        Ok(())
+    }
+
+    /// 关卡系统下一关（胜利结算 N 键）：进入列表下一张地图；已到最后一关 → 返回 false（通关）
+    pub fn advance_level(&mut self, player: &glam::Vec3) -> bool {
+        if self.level_list.is_empty() {
+            return false; // 单关模式（RV3D_MAP）：无下一关
+        }
+        if self.level_idx + 1 >= self.level_list.len() {
+            return false; // 最后一关通关
+        }
+        self.level_idx += 1;
+        let path = self.level_list[self.level_idx].clone();
+        match crate::engine::map::MapManager::load(&path) {
+            Ok(mgr) => {
+                self.map_mgr = Some(mgr);
+                self.map_path = Some(path);
+                self.apply_level(self.level);
+                self.start_run(player);
+                log::info!(
+                    "map: 进入下一关 {}（第 {} 关）",
+                    self.map_mgr
+                        .as_ref()
+                        .map(|m| m.data().name.clone())
+                        .unwrap_or_default(),
+                    self.level_idx + 1
+                );
+                true
+            }
+            Err(e) => {
+                log::warn!("map: 下一关加载失败 {}: {}", path, e);
+                false
+            }
+        }
     }
 
     /// 服务器模式（RV3D_NET=server）：绑定好的 Server 交给 Game 托管，开始权威模拟 + 快照广播
@@ -1441,12 +1720,25 @@ impl Game {
         self.hud.wave = self.wave;
         self.hud.countdown = self.wave_timer.max(0.0);
         self.hud.objective = (self.objective.eliminated, self.objective.target);
+        // 关卡系统：据点状态同步到 HUD（id/归属/进度）
+        self.hud.capture_points = self
+            .obj_state
+            .as_ref()
+            .map(|o| {
+                o.points
+                    .iter()
+                    .map(|p| (p.id.clone(), p.owner, p.progress))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.hud.screen = if self.hud.settings_open {
             HudScreen::Settings
         } else {
             match self.game_state {
                 GameState::StartMenu => HudScreen::Start,
-                GameState::GameOver => HudScreen::GameOver,
+                GameState::LoadingMap => HudScreen::Start,
+                GameState::GameOver | GameState::Defeat => HudScreen::GameOver,
+                GameState::Victory(_) => HudScreen::Game,
                 GameState::Playing => HudScreen::Game,
             }
         };
@@ -1875,6 +2167,8 @@ impl Game {
         if self.objective.progress(1) {
             self.on_objective_complete();
         }
+        // 关卡系统：击杀计数（KillCount 规则用）
+        self.objective_register_kill();
         true
     }
 

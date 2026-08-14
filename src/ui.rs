@@ -401,6 +401,8 @@ pub struct HudState {
     pub confirm_quit: bool,
     /// 任务目标进度（已歼灭/目标；0/0 = 未启用），game.rs 每帧同步
     pub objective: (u32, u32),
+    /// 占领据点状态（id/归属/进度 0..=1），game.rs 每帧同步；空 = 无据点
+    pub capture_points: Vec<(String, Option<crate::engine::ai::Team>, f32)>,
     /// 胜利横幅（任务目标达成时置位；重开/升关/新一轮时由 game.rs 清除）
     pub victory_banner: Option<String>,
     /// 累计运行时间（秒，由 `tick(dt)` 累加，驱动开始菜单闪烁）
@@ -444,6 +446,7 @@ impl HudState {
             rebinding: None,
             confirm_quit: false,
             objective: (0, 0),
+            capture_points: Vec::new(),
             victory_banner: None,
             elapsed: 0.0,
         }
@@ -563,6 +566,53 @@ impl HudState {
                 ),
                 ratio: self.reload_progress.clamp(0.0, 1.0),
             });
+        }
+
+        // ---- 占领据点（顶部中央，波次下方）：归属色 + 进度条 ----
+        if !self.capture_points.is_empty() {
+            let center_x = w * 0.5;
+            let pts = &self.capture_points;
+            let label_w = 70.0;
+            let gap = 16.0;
+            let total_w = pts.len() as f32 * label_w + (pts.len().saturating_sub(1)) as f32 * gap;
+            let start_x = center_x - total_w * 0.5;
+            let y = margin + 42.0;
+            for (i, (id, owner, progress)) in pts.iter().enumerate() {
+                let x = start_x + i as f32 * (label_w + gap);
+                let bar_h = 10.0;
+                let back = Quad::new(
+                    Rect::new(x, y, label_w, bar_h),
+                    Color::new(0.08, 0.08, 0.10, 0.75),
+                );
+                let fill_color = match owner {
+                    Some(crate::engine::ai::Team::Blue) => Color::new(0.08, 0.55, 0.98, 1.0),
+                    Some(crate::engine::ai::Team::Red) => Color::new(0.95, 0.12, 0.08, 1.0),
+                    None => Color::new(0.45, 0.45, 0.45, 1.0),
+                };
+                let fill = Quad::new(
+                    Rect::new(x + 1.0, y + 1.0, label_w - 2.0, bar_h - 2.0),
+                    fill_color,
+                );
+                elems.push(HudElement::Bar {
+                    back,
+                    fill,
+                    ratio: progress.clamp(0.0, 1.0),
+                });
+                let owner_txt = match owner {
+                    Some(crate::engine::ai::Team::Blue) => "BLUE",
+                    Some(crate::engine::ai::Team::Red) => "RED",
+                    None => "NONE",
+                };
+                let id_txt = format!("{}: {}", id, owner_txt);
+                let id_w = text_width(&id_txt, 1.0);
+                elems.push(HudElement::Text {
+                    text: id_txt,
+                    x: x + (label_w - id_w) * 0.5,
+                    y: y + bar_h + 2.0,
+                    color: Color::WHITE,
+                    scale: 1.0,
+                });
+            }
         }
 
         // ---- FPS（左上角）----

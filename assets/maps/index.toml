@@ -1,0 +1,5 @@
+# 关卡列表：游戏启动时按顺序加载，通关后进入下一关
+maps = [
+    "street_fight.toml",
+    "open_field.toml",
+]
