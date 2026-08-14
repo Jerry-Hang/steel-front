@@ -529,7 +529,7 @@ pub fn wave_profile(n: u32) -> WaveProfile {
         speed,
         hp: 100.0 + 20.0 * (nf - 1.0),
         attack_range: 12.0 + ((n / 2).min(4)) as f32,
-        flank_chance: (0.1 + 0.08 * nf).min(0.6),
+        flank_chance: (0.22 + 0.08 * nf).min(0.6),
         kind,
         total_count,
         reinforcement_at,

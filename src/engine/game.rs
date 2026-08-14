@@ -56,6 +56,9 @@ const SHAKE_DURATION: f32 = 0.3;
 const PLAYER_SPEED: f32 = 6.0;
 /// NPC 就近掩体搜索半径（网格格数）
 const COVER_MAX_DIST: u32 = 10;
+/// 压力模式掩体搜索半径（网格格数）：NPC 战场开阔（150m 外出生），
+/// 沿目标方向找遮挡掩体需覆盖障碍环带（58-130m）——40m 不够，放宽到 35 格 = 140m。
+const STRESS_COVER_MAX_DIST: u32 = 35;
 /// 掩体利用触发距离（米）：Chase 态距目标 ≤ 攻击距离 + 该值时先寻障碍环带掩体
 const COVER_SEEK_RANGE: f32 = 20.0;
 /// 玩家准星对准判定角（弧度，≈14°）
@@ -1305,6 +1308,12 @@ impl Game {
         // 命中标记衰减 + 音量同步
         self.hud.tick(dt);
         self.audio.mixer_mut().set_master(self.hud.volume);
+        // 程序化环境音乐：战斗状态开大、菜单/结算调小（1.5s 淡入淡出由 audio 内部插值）
+        let music_target = match self.game_state {
+            GameState::Playing => 1.0,
+            _ => 0.3,
+        };
+        self.audio.set_music_target(music_target);
         // 第一人称玩家移动（WASD + 碰撞）
         if self.game_state == GameState::Playing && camera.mode == CameraMode::FirstPerson {
             self.move_first_person(camera, dt);
@@ -1565,12 +1574,14 @@ impl Game {
                 }
                 (None, Some(client)) => {
                     log::info!(
-                        "net: client id={:?} seq={} entities={} own={:?} connected={}",
+                        "net: client id={:?} seq={} entities={} own={:?} connected={} obj={} rule={}",
                         client.player_id(),
                         client.snapshot_seq(),
                         client.entities().len(),
                         client.own_state(),
-                        client.is_connected()
+                        client.is_connected(),
+                        client.objective_state().len(),
+                        client.objective_rule()
                     );
                 }
                 _ => {}
@@ -1627,6 +1638,29 @@ impl Game {
         };
         if let Some(server) = self.net_server.as_ref() {
             let _ = server.broadcast(&snapshot, None);
+            // 目标状态（据点归属/进度）广播：关卡系统启用时组包（归属码 0=中立/1=Red/2=Blue）。
+            // 未启用关卡系统（obj_state=None）→ 空据点列表广播（客户端据此可知无目标）。
+            if let Some(obj) = self.obj_state.as_ref() {
+                let points = obj
+                    .points
+                    .iter()
+                    .map(|p| {
+                        let owner = match p.owner {
+                            None => 0u8,
+                            Some(crate::engine::ai::Team::Red) => 1,
+                            Some(crate::engine::ai::Team::Blue) => 2,
+                        };
+                        (p.id.clone(), owner, p.progress)
+                    })
+                    .collect();
+                let obj_msg = NetworkMessage::ObjectiveState {
+                    seq: self.net_snap_seq,
+                    time: self.time,
+                    rule_kind: obj.rule.rule_kind().to_string(),
+                    points,
+                };
+                let _ = server.broadcast(&obj_msg, None);
+            }
         }
     }
 
@@ -2606,12 +2640,31 @@ impl Game {
         // 掩体利用：突击/压制手接近射程边缘时先评估障碍环带掩体（先移动到掩体再推进开火）。
         // 环带内无射程内掩体（如玩家处于中央安全区）时保持原直线推进 → 冒烟站定语义不变；
         // 只在 Chase 态生效且冲锋时不做（冲锋 = 全队直突）。
+        // 压力模式（NPC-vs-NPC）：目标在射程内且本 NPC 附近（40m）存在障碍格 → 也进入
+        // 掩体利用（互射战场用障碍环带/关卡掩体，总指挥指令单 #2 阶段二）。
         if state == NpcState::Chase
             && !ctx.charge
             && matches!(tactic, Tactic::Advance | Tactic::Suppress)
-            && dist <= npc.attack_range + COVER_SEEK_RANGE
         {
-            tactic = Tactic::CoverSeek;
+            // 压力模式：目标在射程附近（≤ attack_range + 40m）即进入掩体利用——
+            // advance 沿目标方向找遮挡掩体（NPC 穿越障碍带时自然利用），不要求当前位置附近有障碍。
+            let range = if ctx.stress {
+                npc.attack_range + COVER_SEEK_RANGE * 2.0
+            } else {
+                npc.attack_range + COVER_SEEK_RANGE
+            };
+            if dist <= range {
+                tactic = Tactic::CoverSeek;
+            }
+        }
+        // 压力模式 Attack 态：若 NPC 站定于障碍掩体旁（贴掩体探头射击），战术标记为
+        // CoverSeek——让互射战场中「利用掩体交火」的 NPC 持续可见（供战术分布采样与观察）。
+        // 普通模式行为不变（冒烟依赖 Attack 站定日志与纯 Advance/Suppress 语义）。
+        if ctx.stress && state == NpcState::Attack {
+            let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+            if !crate::engine::ai::find_cover_points(ctx.grid, npc_g, COVER_MAX_DIST).is_empty() {
+                tactic = Tactic::CoverSeek;
+            }
         }
         npc.tactic = tactic;
         let (bx, bz) = (npc.position[0], npc.position[2]);
@@ -2627,6 +2680,7 @@ impl Game {
             ctx.obstacles,
             ctx.time,
             ctx.dt,
+            ctx.stress,
         );
         // 朝向更新：移动时朝移动方向；站定时面向目标（渲染士兵模型用）
         let mdx = npc.position[0] - bx;
@@ -3634,6 +3688,48 @@ mod tests {
         );
     }
 
+    /// 目标状态回环：服务端广播 ObjectiveState → 客户端解析据点归属/进度
+    #[test]
+    fn net_objective_state_loopback_broadcast_consumed() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut server_game = Game::new();
+        let mut client_game = Game::new();
+        server_game.set_net_server(server);
+        client_game.set_net_client(Client::connect(addr).unwrap());
+        // 给服务端注入一个据点（模拟关卡系统启用）：
+        // 用 CapturePoint 直接塞进 obj_state（绕过 RV3D_MAP 加载，纯逻辑回环）
+        let rule = crate::engine::objective::GameRule::CapturePoints { required: 1 };
+        let mut obj = crate::engine::objective::ObjectiveState::new(rule);
+        obj.points.push(crate::engine::objective::CapturePoint::new(
+            "A", 0.0, 0.0, 5.0, 10.0,
+        ));
+        server_game.obj_state = Some(obj);
+        let camera = Camera::new();
+        for _ in 0..20 {
+            client_game.update(1.0 / 60.0, &camera);
+            server_game.update(1.0 / 60.0, &camera);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        while !client_game
+            .net_client
+            .as_ref()
+            .unwrap()
+            .has_objective()
+            && std::time::Instant::now() < deadline
+        {
+            client_game.update(1.0 / 60.0, &camera);
+        }
+        let client = client_game.net_client.as_ref().unwrap();
+        assert!(client.has_objective(), "客户端应收到目标状态");
+        assert_eq!(client.objective_rule(), "capture");
+        let pts = client.objective_state();
+        assert_eq!(pts.len(), 1, "应收到 1 个据点");
+        assert_eq!(pts[0].0, "A");
+        assert_eq!(pts[0].1, 0, "中立据点归属码 = 0");
+        assert_eq!(pts[0].2, 0.0, "中立据点进度 = 0");
+    }
+
     /// FPS 玩家：WASD 移动改变位置，眼睛高度 1.6m
     #[test]
     fn fps_player_moves_with_wasd() {
@@ -4198,6 +4294,87 @@ mod tests {
         );
     }
 
+    /// 阶段二：压力模式 NPC 在障碍附近交火时触发 CoverSeek（掩体利用）。
+    /// 红 NPC 位于障碍旁 20m 处（Chase 态目标在 30m 外）→ 应进入掩体利用；
+    /// 开阔处（无障碍）目标在射程外 → 保持 Advance（不误触发）。
+    #[test]
+    fn stress_cover_seek_triggers_near_obstacle() {
+        let mut game = Game::new();
+        game.stress = true;
+        // 构造一个障碍（墙）：在 (0,0) 位置放一个 MapObstacle → 网格会 block 该格
+        // 用 street_fight 式的墙：x=0,z=0,half_w=5,half_d=0.5 → 格 (0,0) 及邻域 blocked
+        let ob = MapObstacle {
+            x: 0.0,
+            z: 0.0,
+            half_w: 5.0,
+            half_d: 0.5,
+            kind: ObstacleKind::Wall,
+            max_hp: 150.0,
+            hp: 150.0,
+        };
+        game.map.obstacles.push(ob);
+        // 重建网格（把障碍格 block）
+        let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
+        for o in &game.map.obstacles {
+            let g0 = world_to_grid(o.x - o.half_w, o.z - o.half_d);
+            let g1 = world_to_grid(o.x + o.half_w, o.z + o.half_d);
+            for gx in g0.x..=g1.x {
+                for gz in g0.y..=g1.y {
+                    let pos = GridPos::new(gx, gz);
+                    if grid.in_bounds(pos) {
+                        grid.block(pos);
+                    }
+                }
+            }
+        }
+        game.grid = grid;
+        let grid = game.grid.clone();
+
+        // 红 NPC 在障碍旁（-10, 0，距障碍 10m），Chase 态（感知目标但不在射程）
+        let mut red = npc_at(0, Team::Red, [-10.0, 0.0, 0.0]);
+        red.state_machine.update(NpcPerception {
+            enemy_visible: true,
+            enemy_in_range: false,
+            ..NpcPerception::default()
+        }); // Idle → Chase
+        red.role = TacticalRole::Rusher;
+        // 蓝目标在 30m 外（+20,0），Chase 态
+        let mut blue = npc_at(1, Team::Blue, [20.0, 0.0, 0.0]);
+        blue.state_machine.update(NpcPerception {
+            enemy_visible: true,
+            enemy_in_range: false,
+            ..NpcPerception::default()
+        });
+        let npcs = vec![red, blue];
+        let targets = pick_stress_targets(&npcs, STRESS_SIGHT);
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        let flags = vec![false; 2];
+        let ctx = AiStepCtx {
+            player: &player,
+            player_yaw: 0.0,
+            charge: false,
+            under_fire: &flags,
+            targets: &targets,
+            grid: &grid,
+            time: 1.0,
+            dt: 1.0 / 60.0,
+            stress: true,
+            frame: 0,
+            decimate_far: false,
+            ring_inner: MAP_RING_INNER,
+            ring_outer: MAP_RING_OUTER,
+            obstacles: &game.map.obstacles,
+        };
+        let mut npcs = npcs;
+        Game::step_ai_serial(&mut npcs, &ctx);
+        // 红在障碍旁 + Chase + 目标 30m（≤ attack_range 12 + 40）→ 应进入 CoverSeek
+        assert_eq!(
+            npcs[0].tactic,
+            Tactic::CoverSeek,
+            "障碍旁的 NPC 在 Chase 接近目标时应利用掩体（CoverSeek）"
+        );
+    }
+
     #[test]
     fn stress_npc_combat_damages_target_only() {
         let mut game = Game::new();
@@ -4471,6 +4648,7 @@ fn advance_npc(
     obstacles: &[MapObstacle],
     time: f32,
     dt: f32,
+    stress: bool,
 ) {
     // 无路径（或已走完）时按状态 + 战术选择目标
     if npc.path.is_empty() || npc.path_index >= npc.path.len() {
@@ -4505,21 +4683,35 @@ fn advance_npc(
                     }
                 }
                 // 掩体利用：障碍环带内选"距目标 ≤ 攻击距离"的遮挡掩体，先到掩体再开火；
-                // 无可用掩体（中央安全区）→ 直线推进，保持站定/站定日志语义
+                // 无可用掩体（中央安全区）→ 直线推进，保持站定/站定日志语义。
+                // 压力模式（NPC-vs-NPC）：沿目标方向找遮挡掩体（NPC 穿越障碍带时利用），
+                // 就近取第一个；环带过滤不适用（NPC 在环带外）。
                 Tactic::CoverSeek => {
                     let npc_g = world_to_grid(npc.position[0], npc.position[2]);
                     let target_g = world_to_grid(target.x, target.z);
-                    pick_attack_cover(
-                        grid,
-                        npc_g,
-                        target_g,
-                        npc.attack_range,
-                        ring_inner,
-                        ring_outer,
-                        COVER_MAX_DIST,
-                        obstacles,
-                    )
-                    .unwrap_or(target_g)
+                    if stress {
+                        crate::engine::ai::find_cover_shielding(
+                            grid,
+                            npc_g,
+                            target_g,
+                            STRESS_COVER_MAX_DIST,
+                        )
+                        .first()
+                        .map(|c| c.pos)
+                        .unwrap_or(target_g)
+                    } else {
+                        pick_attack_cover(
+                            grid,
+                            npc_g,
+                            target_g,
+                            npc.attack_range,
+                            ring_inner,
+                            ring_outer,
+                            COVER_MAX_DIST,
+                            obstacles,
+                        )
+                        .unwrap_or(target_g)
+                    }
                 }
                 // 低血量撤退：撤向最封闭且较远的遮挡掩体（阻挡格挡在 NPC 与玩家之间）
                 Tactic::Retreat => {
