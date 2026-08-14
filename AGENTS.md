@@ -41,6 +41,40 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-08-14] 交接：总指挥指令单 #3 完成（手感扩充 + 收尾）
+
+- 日期：2026-08-14
+- 发起方：主会话 AI（DeepCode）+ Agent A（weapons.rs 纯逻辑）
+- 接收方：总指挥 / 后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - **阶段一收尾**：① 客户端 HUD 接入 ObjectiveState（hud_quads 联机客户端用 net ObjectiveState 归属码 0/1/2 → Team 驱动据点进度条，无联机零回归）；② 音乐音量接入设置面板（MUSIC 行 = selection 2，Tab 循环 12 项，config.rs music_volume 持久化，game.rs 音乐通道音量同步）。
+  - **阶段二 第二武器 + 手榴弹（commit `fd66467` feat(weapon) 纯逻辑 + `aca127f` feat(weapon) 集成）**：
+    - Thompson SMG：射速 10/s、伤 12、弹匣 30、备弹 120、中距离投射（120m/s）；与 M1（25 伤 3/s）差异化；6 发点射击杀平衡不回归（M1 未动）
+    - WeaponRack 多武器槽：数字键 1/2 或滚轮切换，切枪计时 0.6s（期间禁开火/换弹），HUD 显示武器名 + SWITCHING 提示
+    - 手榴弹：G 键投掷（抛物线 + 上抛分量，引信 1.5-2.5s 确定性伪随机），落地/到期爆炸复用 spawn_explosion（AoE 120 伤/8m 半径/径向击退/震屏/闪光）；默认 2、N 补给补满；HUD GRENADES 计数
+    - **关键修复（勿回退）**：WeaponRack::update 必须同时推进当前武器 Firearm::update（换弹计时），否则换弹永不完成
+    - 真机实测：切枪 M1→Thompson（shot #1 M1 → #2 Thompson）、手榴弹 thrown fuse=1.51s → detonate radius=8 dmg=120 knockback=true、VUID=0、panic=0
+  - **阶段三 新关卡（commit `5e57beb` feat(map)）**：factory_ambush.toml（工厂伏击·kill 40，隔间墙/机器/货箱）+ bridgehead.toml（桥头堡·time 180s 占 2 据点，桥面 barrier/沙袋/哨塔）；index.toml 4 图按序；README 关卡表格。实跑均 12 障碍 VUID=0/panic=0。
+  - **survive 规则：跳过**（评估成本中等需新规则判定 + 波次逻辑，本轮已含 3 规则 + 4 图 + 武器/手榴弹大功能，回执已说明）
+  - **Agent 教训**：Agent B（地图）deepcode -p 卡死 11 分钟无输出（log mtime 不更新、CPU 推理但无文件产出），按红线主会话接管完成；**监控手段：log mtime 超 5min 未更新即接管**
+  - **验收（主会话独立复核）**：352 tests（+13：weapons 13 个）/ 0 失败 / 0 警告；冒烟 ALL-OK（EXIT=0、VUID=0、kills=1、fps 166-252）；武器/手榴弹/新图真机 VUID=0、panic=0。4 commits 已推送。
+  - **遗留/下一步**：① 手榴弹不炸障碍（spawn_explosion 只结算 NPC + 震屏，障碍伤害走投射物直击；如需可加 AoE 障碍结算）；② NPC 不投掷（本轮范围外）；③ 切枪无动画（纯计时器符合要求）；④ survive 规则待后续迭代。
+- 状态：done
+
+### [2026-08-14] 交接：总指挥指令单 #3 开启（手感扩充 + 收尾）
+
+- 日期：2026-08-14
+- 发起方：总指挥（外部模型）/ 主会话 AI（DeepCode）
+- 接收方：Agent A（weapons.rs 多武器/手榴弹纯逻辑）/ Agent B（新关卡 TOML）/ 主会话（阶段一收尾 + 阶段二集成）
+- 交接类型：规划开启
+- 交接内容：
+  - **阶段一（收尾两小项）**：① 客户端 HUD 接入 ObjectiveState（联机客户端用网络数据驱动 HUD 据点进度条，无联机零回归）；② 音乐音量接入设置面板（Music 通道独立音量 + config.rs 持久化 + Tab 循环项）。
+  - **阶段二（第二武器 + 手榴弹，核心）**：Agent A 在 weapons.rs 实现 Thompson SMG（射速 ~10/s、伤 ~12、弹匣 30、备弹 120、中距离散布）+ 手榴弹弹道（抛物线/引信 1.5-2.5s/复用爆炸）+ 多武器槽切换状态机 + 单测各 ≥2；主会话集成 game.rs/main.rs/ui.rs（数字键 1/2 或滚轮切枪、G 投掷、HUD 武器名/弹药/手榴弹数、补给）。
+  - **阶段三（新关卡内容）**：Agent B 新增 2 张 TOML 关卡（工厂伏击 kill + 桥头堡 time）+ 更新 index.toml + README；可选 survive 规则评估后定。
+  - **验收**：≥339 tests、0 警告、冒烟 ALL-OK（爆炸改动后必跑）、切枪/投掷真机 VUID=0、零新依赖、每阶段增量验证。
+- 状态：in_progress
+
 ### [2026-08-14] 交接：总指挥指令单 #2 完成（桥接收尾 + 战术纵深 + 音频氛围）
 
 - 日期：2026-08-14
