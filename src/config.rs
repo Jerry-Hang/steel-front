@@ -12,6 +12,7 @@ use crate::ui::{BindingAction, KeyBindings, QUALITY_LABELS, RESOLUTIONS};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GameConfig {
     pub volume: f32,
+    pub music_volume: f32,
     pub sensitivity: f32,
     pub bindings: KeyBindings,
     /// 分辨率 (宽, 高)，默认 1280x720（与 ui.rs RESOLUTIONS 选项对齐）
@@ -26,6 +27,7 @@ impl Default for GameConfig {
     fn default() -> Self {
         Self {
             volume: 0.8,
+            music_volume: 0.6,
             sensitivity: 0.5,
             bindings: KeyBindings::defaults(),
             resolution: RESOLUTIONS[0],
@@ -69,6 +71,9 @@ fn load_from(path: &Path) -> GameConfig {
         match key.trim() {
             "bindings_version" => bindings_ok = value == "1",
             "volume" => cfg.volume = value.parse::<f32>().unwrap_or(cfg.volume).clamp(0.0, 1.0),
+            "music_volume" => {
+                cfg.music_volume = value.parse::<f32>().unwrap_or(cfg.music_volume).clamp(0.0, 1.0);
+            }
             "sensitivity" => {
                 cfg.sensitivity = value.parse::<f32>().unwrap_or(cfg.sensitivity).clamp(0.0, 1.0);
             }
@@ -146,6 +151,7 @@ fn save_to(path: &Path, cfg: &GameConfig) {
     let mut text = String::with_capacity(256);
     text.push_str("# Steel Front config (auto-generated)\n");
     text.push_str(&format!("volume={:.3}\n", cfg.volume));
+    text.push_str(&format!("music_volume={:.3}\n", cfg.music_volume));
     text.push_str(&format!("sensitivity={:.3}\n", cfg.sensitivity));
     text.push_str(&format!("resolution={}x{}\n", cfg.resolution.0, cfg.resolution.1));
     text.push_str(&format!("quality={}\n", cfg.quality));

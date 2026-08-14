@@ -23,7 +23,7 @@ use super::ai::{
 use super::physics::{self, Body, CollisionEvent, CollisionListener, PlayerBody, Vec3 as Pv};
 use super::renderer::terrain_height_at;
 use super::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
-use super::weapons::{Firearm, Projectile, ProjectileWeapon};
+use super::weapons::{Firearm, Grenade, Projectile, ProjectileWeapon, WeaponRack, GRENADE_FUSE_MAX, GRENADE_FUSE_MIN, GRENADE_SPEED};
 use crate::ui::HudState;
 
 /// AI 网格覆盖范围：128×128 格 × 4m = ±256m（与实例场/地形同域）
@@ -59,6 +59,9 @@ const COVER_MAX_DIST: u32 = 10;
 /// 压力模式掩体搜索半径（网格格数）：NPC 战场开阔（150m 外出生），
 /// 沿目标方向找遮挡掩体需覆盖障碍环带（58-130m）——40m 不够，放宽到 35 格 = 140m。
 const STRESS_COVER_MAX_DIST: u32 = 35;
+/// 手榴弹爆炸半径（米）与 AoE 伤害（近距可秒标准 NPC 100HP）
+const GRENADE_EXPLOSION_RADIUS: f32 = 8.0;
+const GRENADE_EXPLOSION_DAMAGE: f32 = 120.0;
 /// 掩体利用触发距离（米）：Chase 态距目标 ≤ 攻击距离 + 该值时先寻障碍环带掩体
 const COVER_SEEK_RANGE: f32 = 20.0;
 /// 玩家准星对准判定角（弧度，≈14°）
@@ -591,8 +594,14 @@ pub struct Game {
     event_buf: Arc<Mutex<Vec<CollisionEvent>>>,
     /// 上次碰撞日志时间（限频用）
     last_event_log_time: f32,
-    /// 主武器：弹匣 + 换弹 + 后坐力（M1 步枪）
-    firearm: Firearm,
+    /// 武器架：多把弹匣武器 + 切换计时（M1 Rifle + Thompson SMG，数字键 1/2 或滚轮切换）
+    weapons: WeaponRack,
+    /// 手榴弹库存（默认 2，上限 2；G 投掷，补给键补充）
+    grenades: u32,
+    /// 手榴弹上限
+    grenades_max: u32,
+    /// 在场投掷物（抛物线 + 引信计时）
+    grenades_vec: Vec<Grenade>,
     /// 待施加到相机的后坐力（pitch/yaw 弧度，main.rs 每帧 drain 取走）
     pending_kick: (f32, f32),
     /// 第一人称玩家身体（WASD 移动 + 与演示刚体碰撞，y 每帧贴地形）
@@ -825,14 +834,29 @@ impl Game {
             last_event_log_time: 0.0,
             wave_started_at: 0.0,
             reinforcement_done: false,
-            firearm: Firearm::new(
-                ProjectileWeapon::new("M1 Rifle", 25.0, 3.0, 200.0, 60.0, 5.0),
-                30,
-                120,
-                2.0,
-                0.006,
-                0.003,
+            weapons: WeaponRack::new(
+                vec![
+                    (
+                        "M1 Rifle".to_string(),
+                        Firearm::new(
+                            ProjectileWeapon::new("M1 Rifle", 25.0, 3.0, 200.0, 60.0, 5.0),
+                            30,
+                            120,
+                            2.0,
+                            0.006,
+                            0.003,
+                        ),
+                    ),
+                    (
+                        "Thompson SMG".to_string(),
+                        crate::engine::weapons::thompson_smg_firearm(),
+                    ),
+                ],
+                0.6,
             ),
+            grenades: 2,
+            grenades_max: 2,
+            grenades_vec: Vec::new(),
             pending_kick: (0.0, 0.0),
             player_body: PlayerBody::new(Pv::new(0.0, 0.0, 0.0), 0.5, 1.6),
             move_forward: false,
@@ -1050,7 +1074,7 @@ impl Game {
     fn start_run(&mut self, player: &glam::Vec3) {
         self.hud.health = self.hud.max_health;
         self.hud.ammo = self.hud.max_ammo;
-        self.hud.reserve = self.firearm.reserve();
+        self.hud.reserve = self.weapons.active_firearm_ref().reserve();
         self.hud.settings_open = false;
         self.hud.confirm_quit = false;
         self.hud.victory_banner = None;
@@ -1059,7 +1083,7 @@ impl Game {
         self.wave = 1;
         self.wave_timer = 0.0;
         self.fire_cooldown = 0.0;
-        self.firearm.reset();
+        self.weapons.active_firearm().reset();
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
@@ -1263,6 +1287,7 @@ impl Game {
     fn current_config(&self) -> crate::config::GameConfig {
         crate::config::GameConfig {
             volume: self.hud.volume,
+            music_volume: self.hud.music_volume,
             sensitivity: self.hud.sensitivity,
             bindings: self.hud.key_bindings,
             resolution: self.hud.resolution(),
@@ -1296,18 +1321,27 @@ impl Game {
         self.last_dt = dt;
         self.time += dt;
         self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
-        // 武器换弹计时 + HUD 弹药/换弹状态同步
-        self.firearm.update(dt);
-        self.hud.ammo = self.firearm.magazine();
-        self.hud.max_ammo = self.firearm.max_magazine();
-        self.hud.reserve = self.firearm.reserve();
-        self.hud.reloading = self.firearm.is_reloading();
-        self.hud.reload_progress = self.firearm.reload_progress();
+        // 武器架切换计时/换弹计时 + HUD 武器/弹药/换弹状态同步
+        self.weapons.update(dt);
+        self.hud.ammo = self.weapons.active_firearm_ref().magazine();
+        self.hud.max_ammo = self.weapons.active_firearm_ref().max_magazine();
+        self.hud.reserve = self.weapons.active_firearm_ref().reserve();
+        self.hud.reloading = self.weapons.active_firearm_ref().is_reloading();
+        self.hud.reload_progress = self.weapons.active_firearm_ref().reload_progress();
+        self.hud.weapon_name = self.weapons.active_name().to_string();
+        self.hud.switching = self.weapons.is_switching();
+        self.hud.grenades = self.grenades;
+        // 手榴弹推进（抛物线 + 引信）
+        self.update_grenades(dt);
         // 关卡号同步（由关卡推进 / 重开写入，供 HUD 显示）
         self.hud.level = self.level;
         // 命中标记衰减 + 音量同步
         self.hud.tick(dt);
         self.audio.mixer_mut().set_master(self.hud.volume);
+        // 音乐通道独立音量（设置面板 MUSIC 项，0..=1）
+        self.audio
+            .mixer_mut()
+            .set_channel_volume(Channel::Music, self.hud.music_volume);
         // 程序化环境音乐：战斗状态开大、菜单/结算调小（1.5s 淡入淡出由 audio 内部插值）
         let music_target = match self.game_state {
             GameState::Playing => 1.0,
@@ -1770,17 +1804,30 @@ impl Game {
         self.hud.wave = self.wave;
         self.hud.countdown = self.wave_timer.max(0.0);
         self.hud.objective = (self.objective.eliminated, self.objective.target);
-        // 关卡系统：据点状态同步到 HUD（id/归属/进度）
-        self.hud.capture_points = self
-            .obj_state
-            .as_ref()
-            .map(|o| {
-                o.points
-                    .iter()
-                    .map(|p| (p.id.clone(), p.owner, p.progress))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // 关卡系统：据点状态同步到 HUD（id/归属/进度）。
+        // 单机 = 本机 obj_state；联机客户端 = 网络 ObjectiveState 广播（归属码 0=中立/1=Red/2=Blue）。
+        // 无联机且无关卡系统 → 空列表（HUD 不显示进度条，行为零回归）。
+        self.hud.capture_points = if let Some(o) = self.obj_state.as_ref() {
+            o.points
+                .iter()
+                .map(|p| (p.id.clone(), p.owner, p.progress))
+                .collect()
+        } else if let Some(client) = self.net_client.as_ref() {
+            client
+                .objective_state()
+                .iter()
+                .map(|(id, code, progress)| {
+                    let owner = match code {
+                        1 => Some(crate::engine::ai::Team::Red),
+                        2 => Some(crate::engine::ai::Team::Blue),
+                        _ => None,
+                    };
+                    (id.clone(), owner, *progress)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.hud.screen = if self.hud.settings_open {
             HudScreen::Settings
         } else {
@@ -1814,7 +1861,7 @@ impl Game {
             "collisions: {}  hits: {}  ammo: {:.0}%",
             self.total_collisions(),
             self.hits(),
-            self.firearm.ammo_ratio() * 100.0
+            self.weapons.active_firearm_ref().ammo_ratio() * 100.0
         );
         render_text(&line2, 10.0, 62.0, Color::CYAN, 1.3, &mut quads);
         quads
@@ -1863,10 +1910,14 @@ impl Game {
         if self.fire_cooldown > 0.0 {
             return false;
         }
-        match self.firearm.try_fire(origin, direction) {
+        // 切枪计时中禁止开火（纯计时器，无动画）
+        if self.weapons.is_switching() {
+            return false;
+        }
+        match self.weapons.active_firearm().try_fire(origin, direction) {
             Some(projectile) => {
-                self.fire_cooldown = self.firearm.fire_interval();
-                let (kick_pitch, kick_yaw) = self.firearm.current_kick();
+                self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
+                let (kick_pitch, kick_yaw) = self.weapons.active_firearm_ref().current_kick();
                 self.pending_kick.0 += kick_pitch;
                 self.pending_kick.1 += kick_yaw;
                 self.projectiles.push(projectile);
@@ -1878,15 +1929,16 @@ impl Game {
                     shot_scale,
                 );
                 log::info!(
-                    "weapons: shot #{} ({} alive)",
+                    "weapons: shot #{} ({} alive) [{}]",
                     self.shots,
-                    self.projectiles.len()
+                    self.projectiles.len(),
+                    self.weapons.active_name()
                 );
                 true
             }
             None => {
                 // 空弹匣自动换弹（try_fire 内部触发）或换弹中：换弹提示音
-                if self.firearm.is_reloading() {
+                if self.weapons.active_firearm_ref().is_reloading() {
                     let src = AudioSource::new(
                         glam::Vec3::new(origin[0], origin[1], origin[2]),
                         1.0,
@@ -1942,11 +1994,32 @@ impl Game {
         self.move_right = right;
     }
 
-    /// 请求换弹（R 键）；已在换弹/满弹匣/无备弹时无副作用
+    /// 切换武器（数字键 1/2 或滚轮）：切换到指定槽位；切枪计时中忽略重复切换
+    pub fn switch_weapon(&mut self, index: usize) {
+        // 槽位越界防御（WeaponRack::len 暴露武器数量）
+        if index >= self.weapons.len() {
+            return;
+        }
+        self.weapons.switch_to(index);
+    }
+
+    /// 循环切换武器（滚轮向上 = 下一把，向下 = 上一把）
+    pub fn cycle_weapon(&mut self, delta: i32) {
+        if delta > 0 {
+            self.weapons.switch_next();
+        } else if delta < 0 {
+            self.weapons.switch_prev();
+        }
+    }
+
+    /// 请求换弹（R 键）；已在换弹/满弹匣/无备弹/切枪中时无副作用
     pub fn request_reload(&mut self) {
-        let was_reloading = self.firearm.is_reloading();
-        self.firearm.start_reload();
-        if !was_reloading && self.firearm.is_reloading() {
+        if self.weapons.is_switching() {
+            return;
+        }
+        let was_reloading = self.weapons.active_firearm_ref().is_reloading();
+        self.weapons.active_firearm().start_reload();
+        if !was_reloading && self.weapons.active_firearm_ref().is_reloading() {
             let src = AudioSource::new(self.player_eye(), 1.0);
             self.sfx.play(
                 &mut self.audio.mixer_mut(),
@@ -1958,9 +2031,10 @@ impl Game {
         }
     }
 
-    /// 调试补给（设置面板 N 键）：弹匣补满 + 提示音
+    /// 调试补给（设置面板 N 键）：当前武器弹匣补满 + 手榴弹补满 + 提示音
     pub fn give_ammo(&mut self) {
-        self.firearm.reset();
+        self.weapons.active_firearm().reset();
+        self.grenades = self.grenades_max;
         let src = AudioSource::new(self.player_eye(), 1.0);
         self.sfx.play(
             &mut self.audio.mixer_mut(),
@@ -1969,6 +2043,70 @@ impl Game {
             Channel::Sfx,
             false,
         );
+    }
+
+    /// 投掷手榴弹（G 键）：库存 >0 且切枪/换弹中时投掷。方向 = 相机方向 + 上仰角
+    /// （水平方向 + 0.25rad 上抛，保证抛物线落地）；引信 1.5-2.5s 确定性伪随机。
+    pub fn throw_grenade(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
+        if self.grenades == 0 || self.weapons.is_switching() {
+            return false;
+        }
+        self.grenades -= 1;
+        // 上抛：水平方向（归一化）+ 固定上仰分量；Grenade::new 会归一化 dir 再乘 speed
+        let mut dir = glam::Vec3::new(direction[0], direction[1], direction[2]);
+        if dir.length_squared() < 1e-6 {
+            dir = glam::Vec3::Z;
+        }
+        dir.y = 0.0;
+        if dir.length_squared() < 1e-6 {
+            dir = glam::Vec3::Z;
+        }
+        let dir = dir.normalize();
+        let vx = dir.x;
+        let vz = dir.z;
+        let vy = 0.35; // 上抛分量（竖直向上 ≈ 35% 总初速）
+        // 引信：确定性伪随机（随投掷次数变化），落在 1.5-2.5s
+        let fuse = GRENADE_FUSE_MIN
+            + (self.shots.wrapping_mul(13) % 1000) as f32 / 1000.0
+                * (GRENADE_FUSE_MAX - GRENADE_FUSE_MIN);
+        self.grenades_vec.push(Grenade::new(
+            origin,
+            [vx, vy, vz],
+            GRENADE_SPEED,
+            fuse,
+        ));
+        log::info!(
+            "grenade: thrown #{} fuse={:.2}s remaining={}",
+            self.grenades_vec.len(),
+            fuse,
+            self.grenades
+        );
+        true
+    }
+
+    /// 手榴弹每帧推进：抛物线 + 引信；到期 → 爆炸（复用 spawn_explosion：AoE 伤害 +
+    /// 径向击退 + 震屏 + 自发光闪光）。落地（y ≤ 地形高度）也触发爆炸。
+    fn update_grenades(&mut self, dt: f32) {
+        let mut explosions: Vec<[f32; 3]> = Vec::new();
+        for g in &mut self.grenades_vec {
+            g.update(dt);
+            // 落地或引信到期 → 爆炸
+            let ground = terrain_height_at(g.position()[0], g.position()[2]);
+            if g.exploded() || g.position()[1] <= ground + 0.05 {
+                log::info!(
+                    "grenade: detonate fuse_max={:.2}s",
+                    g.fuse_max()
+                );
+                explosions.push(g.position());
+            }
+        }
+        if !explosions.is_empty() {
+            self.grenades_vec.retain(|g| !g.exploded() && g.position()[1] > terrain_height_at(g.position()[0], g.position()[2]) + 0.05);
+            for center in explosions {
+                // 手榴弹 AoE：半径 8m、伤害 120（近距可秒标准 NPC）、径向击退
+                self.spawn_explosion(center, GRENADE_EXPLOSION_RADIUS, GRENADE_EXPLOSION_DAMAGE, true);
+            }
+        }
     }
 
     /// 设置面板开关（ESC 切换）：开/关都播提示音
@@ -2006,8 +2144,10 @@ impl Game {
             self.hud.adjust_volume(delta);
         } else if self.hud.settings_selection == 1 {
             self.hud.adjust_sensitivity(delta);
+        } else if self.hud.settings_selection == 2 {
+            self.hud.adjust_music_volume(delta);
         }
-        // selection >= 2 是键位行，滚轮不做调整（Enter 进入绑定）
+        // selection >= 3 是分辨率/画质/键位行，滚轮不做调整（Enter 进入绑定）
     }
 
     /// 灵敏度（0..=1）→ 相机 rad/px（0.0005..=0.0025，默认 0.5 → 0.0015）
@@ -3802,15 +3942,15 @@ mod tests {
             game.update(1.0 / 60.0, &Camera::new());
         }
         assert!(fired >= 5, "2 秒内应打出至少 5 发: {}", fired);
-        let before = game.firearm.magazine();
+        let before = game.weapons.active_firearm_ref().magazine();
         assert!(before < 30, "弹匣应消耗过");
         game.request_reload();
-        assert!(game.firearm.is_reloading(), "R 应开始换弹");
+        assert!(game.weapons.active_firearm_ref().is_reloading(), "R 应开始换弹");
         for _ in 0..200 {
             game.update(1.0 / 60.0, &Camera::new());
         }
-        assert!(!game.firearm.is_reloading(), "换弹应完成");
-        assert_eq!(game.firearm.magazine(), 30, "换弹后弹匣应补满");
+        assert!(!game.weapons.active_firearm_ref().is_reloading(), "换弹应完成");
+        assert_eq!(game.weapons.active_firearm_ref().magazine(), 30, "换弹后弹匣应补满");
     }
 
     /// 开火产生后坐力，drain 一次后清零

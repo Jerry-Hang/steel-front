@@ -377,6 +377,8 @@ pub struct HudState {
     pub settings_open: bool,
     /// 音量（0..=1，默认 0.8）
     pub volume: f32,
+    /// 音乐音量（0..=1，默认 0.6；独立于总音量，作用于 Mixer 的 Music 通道）
+    pub music_volume: f32,
     /// 鼠标灵敏度（0..=1，默认 0.5）
     pub sensitivity: f32,
     /// 分辨率索引（0..=3，对应 RESOLUTIONS；默认按显示器宽高比取 0=1280x720 或 1=1280x800）
@@ -385,8 +387,14 @@ pub struct HudState {
     pub quality_index: u8,
     /// 键位配置（默认 WASD + R + ESC + SPACE）
     pub key_bindings: KeyBindings,
-    /// 设置面板当前选中项（0=音量 / 1=灵敏度 / 2=分辨率 / 3=画质 / 4..=10=键位，Tab 循环）
+    /// 设置面板当前选中项（0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=键位，Tab 循环）
     pub settings_selection: u8,
+    /// 当前武器名（HUD 弹药行显示，如 "M1 Rifle" / "Thompson SMG"）
+    pub weapon_name: String,
+    /// 是否处于切枪计时（切换期间禁用开火/换弹）
+    pub switching: bool,
+    /// 手榴弹库存（HUD 显示；0..=2，G 投掷、N 补给）
+    pub grenades: u32,
     /// 命中标记剩余显示时间（秒，>0 时准星外圈闪一下）
     pub hit_marker_timer: f32,
     /// 是否正在换弹（由游戏逻辑写入）
@@ -434,11 +442,15 @@ impl HudState {
             screen: HudScreen::Game,
             settings_open: false,
             volume: 0.8,
+            music_volume: 0.6,
             sensitivity: 0.5,
             resolution_index: 0,
             quality_index: 1,
             key_bindings: KeyBindings::defaults(),
             settings_selection: 0,
+            weapon_name: "M1 Rifle".to_string(),
+            switching: false,
+            grenades: 2,
             hit_marker_timer: 0.0,
             reloading: false,
             reload_progress: 0.0,
@@ -534,12 +546,25 @@ impl HudState {
             ratio: self.ammo_ratio(),
         });
         elems.push(HudElement::Text {
-            text: format!("AMMO {}/{} +{}", self.ammo, self.max_ammo, self.reserve),
+            text: format!(
+                "{}  AMMO {}/{} +{}  |  GRENADES {}",
+                self.weapon_name, self.ammo, self.max_ammo, self.reserve, self.grenades
+            ),
             x: ammo_x + 6.0,
             y: h - margin - bar_h + (bar_h - 7.0 * TEXT_SCALE) * 0.5,
             color: Color::WHITE,
             scale: TEXT_SCALE,
         });
+        // 切枪计时提示（切换期间禁止开火/换弹）
+        if self.switching {
+            elems.push(HudElement::Text {
+                text: "SWITCHING...".to_string(),
+                x: ammo_x + 6.0,
+                y: h - margin - bar_h + 26.0,
+                color: Color::YELLOW,
+                scale: 0.8,
+            });
+        }
 
         // ---- 换弹指示（弹药条下方，黄字 + 进度条）----
         if self.reloading {
@@ -979,6 +1004,7 @@ impl HudState {
         let rows = [
             ("VOLUME", self.volume, Color::CYAN),
             ("SENSITIVITY", self.sensitivity, Color::ORANGE),
+            ("MUSIC", self.music_volume, Color::GREEN),
         ];
         for (i, (name, ratio, color)) in rows.iter().enumerate() {
             let y = start_y + i as f32 * row_h;
@@ -1022,7 +1048,7 @@ impl HudState {
             ("QUALITY", QUALITY_LABELS[self.quality_index as usize]),
         ];
         for (i, (name, value)) in display_rows.iter().enumerate() {
-            let row = 2 + i as u8; // 0=音量 1=灵敏度 2=分辨率 3=画质
+            let row = 3 + i as u8; // 0=音量 1=灵敏度 2=音乐 3=分辨率 4=画质
             let y = start_y + row as f32 * row_h;
             let selected = row == self.settings_selection;
             elems.push(HudElement::Text {
@@ -1054,10 +1080,10 @@ impl HudState {
             ("FIRE", self.key_bindings.fire),
             ("MENU", self.key_bindings.menu),
         ];
-        let key_start_y = start_y + 4.0 * row_h + 24.0;
+        let key_start_y = start_y + 5.0 * row_h + 24.0;
         for (i, (name, code)) in keys.iter().enumerate() {
             let y = key_start_y + i as f32 * 18.0;
-            let selected = (4 + i as u8) == self.settings_selection;
+            let selected = (5 + i as u8) == self.settings_selection;
             elems.push(HudElement::Text {
                 text: if selected {
                     format!("> {}", name)
@@ -1122,6 +1148,11 @@ impl HudState {
         self.volume = (self.volume + delta).clamp(0.0, 1.0);
     }
 
+    /// 调整音乐音量（`delta` 为增量，结果 clamp 到 0..=1；独立于总音量）
+    pub fn adjust_music_volume(&mut self, delta: f32) {
+        self.music_volume = (self.music_volume + delta).clamp(0.0, 1.0);
+    }
+
     /// 调整灵敏度（`delta` 为增量，结果 clamp 到 0..=1）
     pub fn adjust_sensitivity(&mut self, delta: f32) {
         self.sensitivity = (self.sensitivity + delta).clamp(0.0, 1.0);
@@ -1179,19 +1210,19 @@ impl HudState {
         self.rebinding = None;
     }
 
-    /// 循环切换设置面板选中项（11 项：0=音量 / 1=灵敏度 / 2=分辨率 / 3=画质 / 4..=10=7 个键位动作，
+    /// 循环切换设置面板选中项（12 项：0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=7 个键位动作，
     /// 顺序与 `BindingAction` 及设置面板键位行一致）
     pub fn cycle_settings_selection(&mut self) {
-        self.settings_selection = (self.settings_selection + 1) % 11;
+        self.settings_selection = (self.settings_selection + 1) % 12;
     }
 
-    /// 当前选中项（0=音量 / 1=灵敏度 / 2=分辨率 / 3=画质 / 4..=10=键位动作）
+    /// 当前选中项（0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=键位动作）
     pub fn settings_selection(&self) -> u8 {
         self.settings_selection
     }
 
-    /// 当前选中项对应的键位动作：`settings_selection` 在 4..=10 时返回
-    /// `4 + i → BindingAction` 第 i 个（与设置面板键位行顺序一致），否则 None
+    /// 当前选中项对应的键位动作：`settings_selection` 在 5..=11 时返回
+    /// `5 + i → BindingAction` 第 i 个（与设置面板键位行顺序一致），否则 None
     ///
     /// 预留：尚未接入 main.rs，由其在设置面板按 ENTER 时决定重绑定哪个动作。
     pub fn selected_action(&self) -> Option<BindingAction> {
@@ -1204,9 +1235,9 @@ impl HudState {
             BindingAction::Fire,
             BindingAction::Menu,
         ];
-        (4..=10)
+        (5..=11)
             .contains(&self.settings_selection)
-            .then(|| ACTIONS[(self.settings_selection - 4) as usize])
+            .then(|| ACTIONS[(self.settings_selection - 5) as usize])
     }
 
     /// 显示命中标记（准星外圈闪一下）
@@ -1465,8 +1496,10 @@ mod tests {
             .collect();
         assert_eq!(bars.len(), 2, "应包含血条和弹药条两个 Bar");
         assert!((bars[1] - 0.25).abs() < 1e-5, "弹药比例应为 10/40 = 0.25");
-        let ammo_text = find_text(&elems, "AMMO").expect("应有 AMMO 文本");
-        assert!(ammo_text.contains("10/40"), "AMMO 文本应含弹药数字");
+        let ammo_text = find_text(&elems, "M1 Rifle").expect("应有武器名+AMMO 文本");
+        assert!(ammo_text.contains("10/40"), "武器弹药文本应含弹药数字");
+        assert!(ammo_text.contains("AMMO"), "应含 AMMO 标记");
+        assert!(ammo_text.contains("GRENADES"), "应含手榴弹计数");
     }
 
     #[test]
@@ -1685,9 +1718,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(bars.len(), 2, "应有音量+灵敏度两个条");
+        assert_eq!(bars.len(), 3, "应有音量+灵敏度+音乐三个条");
         assert!((bars[0] - 0.8).abs() < 1e-5, "音量条应反映默认音量");
         assert!((bars[1] - 0.5).abs() < 1e-5, "灵敏度条应反映默认灵敏度");
+        assert!((bars[2] - 0.6).abs() < 1e-5, "音乐条应反映默认音乐音量");
         // 键位列表含默认键名
         let texts: String = elems
             .iter()
@@ -1891,9 +1925,11 @@ mod tests {
         hud.settings_selection = 1;
         assert_eq!(hud.selected_action(), None, "1=灵敏度，非键位动作");
         hud.settings_selection = 2;
-        assert_eq!(hud.selected_action(), None, "2=分辨率，非键位动作");
+        assert_eq!(hud.selected_action(), None, "2=音乐，非键位动作");
         hud.settings_selection = 3;
-        assert_eq!(hud.selected_action(), None, "3=画质，非键位动作");
+        assert_eq!(hud.selected_action(), None, "3=分辨率，非键位动作");
+        hud.settings_selection = 4;
+        assert_eq!(hud.selected_action(), None, "4=画质，非键位动作");
         let expected = [
             BindingAction::Forward,
             BindingAction::Backward,
@@ -1904,24 +1940,24 @@ mod tests {
             BindingAction::Menu,
         ];
         for (i, action) in expected.iter().enumerate() {
-            hud.settings_selection = 4 + i as u8;
+            hud.settings_selection = 5 + i as u8;
             assert_eq!(
                 hud.selected_action(),
                 Some(*action),
-                "选中 4+{} 应对应 {:?}",
+                "选中 5+{} 应对应 {:?}",
                 i,
                 action
             );
         }
-        hud.settings_selection = 11;
+        hud.settings_selection = 12;
         assert_eq!(hud.selected_action(), None, "越界应返回 None");
     }
 
     #[test]
-    fn cycle_settings_selection_wraps_11_rows() {
+    fn cycle_settings_selection_wraps_12_rows() {
         let mut hud = HudState::new(1280.0, 720.0);
         assert_eq!(hud.settings_selection(), 0);
-        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0] {
+        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0] {
             hud.cycle_settings_selection();
             assert_eq!(hud.settings_selection(), expected);
         }
@@ -1946,7 +1982,7 @@ mod tests {
     fn settings_key_rows_selectable() {
         let mut hud = HudState::new(1280.0, 720.0);
         hud.screen = HudScreen::Settings;
-        hud.settings_selection = 6; // 4+2 → LEFT
+        hud.settings_selection = 7; // 5+2 → LEFT
         let elems = hud.settings_elements();
         assert!(find_text(&elems, "> LEFT").is_some(), "选中键位行应有 '> ' 前缀");
         assert!(
@@ -2030,7 +2066,7 @@ mod tests {
     fn settings_shows_resolution_and_quality_rows() {
         let mut hud = HudState::new(1280.0, 720.0);
         hud.screen = HudScreen::Settings;
-        hud.settings_selection = 2; // RESOLUTION 行
+        hud.settings_selection = 3; // RESOLUTION 行（0=音量 1=灵敏度 2=音乐 3=分辨率 4=画质）
         let elems = hud.settings_elements();
         assert!(
             find_text(&elems, "> RESOLUTION").is_some(),
@@ -2045,7 +2081,7 @@ mod tests {
             "画质行应显示当前值 MEDIUM"
         );
         // 切到 QUALITY 行：高亮跟随，分辨率行前缀消失
-        hud.settings_selection = 3;
+        hud.settings_selection = 4;
         let elems = hud.settings_elements();
         assert!(
             find_text(&elems, "> QUALITY").is_some(),

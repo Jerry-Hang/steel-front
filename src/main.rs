@@ -110,6 +110,7 @@ impl GameApp {
         // 加载持久化配置（键位/音量/灵敏度）；文件缺失回退默认，见 config.rs
         let cfg = config::load();
         game.hud.volume = cfg.volume;
+        game.hud.music_volume = cfg.music_volume;
         game.hud.sensitivity = cfg.sensitivity;
         game.hud.key_bindings = cfg.bindings;
         // 分辨率索引：显式保存过 → 用配置值；首次运行 → 0（resumed() 按显示器宽高比重选）
@@ -727,16 +728,38 @@ impl ApplicationHandler for GameApp {
                     }
                     KeyCode::KeyQ => self.key_state.down = pressed,
                     KeyCode::KeyE => self.key_state.up = pressed,
+                    // 数字键 1/2：切换武器（M1 Rifle / Thompson SMG）
+                    KeyCode::Digit1 => {
+                        if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
+                            self.game.switch_weapon(0);
+                        }
+                    }
+                    KeyCode::Digit2 => {
+                        if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
+                            self.game.switch_weapon(1);
+                        }
+                    }
+                    // G：投掷手榴弹（抛物线 + 引信 1.5-2.5s + 爆炸复用）
+                    KeyCode::KeyG => {
+                        if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
+                            let eye = self.game.player_eye();
+                            let dir = self.camera.forward();
+                            self.game.throw_grenade(
+                                [eye.x, eye.y, eye.z],
+                                [dir.x, dir.y, dir.z],
+                            );
+                        }
+                    }
                     // Enter：设置面板选中分辨率/画质行时循环切换；选中键位行时进入"等待按键绑定"
                     KeyCode::Enter => {
                         if pressed && self.game.settings_open() {
                             match self.game.hud.settings_selection() {
-                                2 => {
+                                3 => {
                                     // RESOLUTION 行：循环切换分辨率并即时应用
                                     self.game.hud.cycle_resolution();
                                     self.apply_resolution();
                                 }
-                                3 => {
+                                4 => {
                                     // QUALITY 行：循环切换画质并即时应用
                                     self.game.hud.cycle_quality();
                                     self.apply_quality();
@@ -932,7 +955,10 @@ impl ApplicationHandler for GameApp {
                     self.game.adjust_settings(scroll * 0.05);
                 } else {
                     match self.camera.mode {
-                        CameraMode::FirstPerson => {}
+                        CameraMode::FirstPerson => {
+                            // 第一人称：滚轮切换武器（上=下一把，下=上一把）
+                            self.game.cycle_weapon(scroll.round() as i32);
+                        }
                         CameraMode::Orbit => self.camera.zoom(scroll),
                         CameraMode::Flight => self.camera.flight_wheel(scroll),
                     }
