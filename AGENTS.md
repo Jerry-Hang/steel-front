@@ -41,6 +41,22 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-08-14] 交接：关卡系统完成（TOML 地图 + 占领/胜负 + 关卡流程）
+
+- 日期：2026-08-14
+- 发起方：主会话 AI（DeepCode）+ Agent A（map.rs）/ Agent B（objective.rs）
+- 接收方：后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - **并行模式**：Agent A 写 `engine/map.rs`（1164 行）、Agent B 写 `engine/objective.rs`（531 行），主会话并行做整合侧（GameState/main.rs/ui.rs/示例地图/README），文件边界隔离零冲突。
+  - **① 地图格式（commit `c8e6af5`，feat(map)）**：手写轻量 TOML 解析器（零第三方依赖，用户确认过铁律）——`[map]` 节/内联表数组/嵌套子表/跨行值/注释/UTF-8/未知键忽略；MapData + SpawnPoint/ObstacleDef/ObjectiveDef/RuleDef；`load_map`/`load_map_list`/`MapManager`（spawn_point 阵营过滤 + 确定性 LCG + reload 热重载）；`obstacle_to_map_obstacle`（wall/block/barrier/cover→ObstacleKind）。20 单测。
+  - **② 目标系统（同 commit）**：`engine/objective.rs`——CapturePoint（归属/进度/半径/耗时）+ `update_point` 纯函数（单人推进/敌对压制/无人衰减/守点维持）；GameRule（CapturePoints/KillCount/TimeLimit）+ `ObjectiveState::evaluate` 每帧判定（幂等）；ObjectiveSnapshot 网络兼容骨架。14 单测。
+  - **③ 整合（commit `1a139c8`，feat(game)）**：GameState 扩展 LoadingMap/Victory(Team)/Defeat（GameOver 保留）；`RV3D_MAP`（单关）/`RV3D_MAPS`（列表）环境变量启用关卡系统，**未设置保持程序化地图零回归（测试/冒烟基线不变）**；apply_level 用 TOML 障碍替换程序化；update_objectives 每帧据点推进 + 胜负判定；击杀注入 KillCount；F5 热重载/N 下一关（最后一关通关）/R 与 Enter 重开本关；HUD 顶部据点进度条（蓝/红/灰）。
+  - **④ 交付（同 commit + `031dfbb` docs）**：`assets/maps/street_fight.toml`（巷战·占领 2 点）+ `open_field.toml`（开阔·歼 30）+ `index.toml` 关卡列表；README 关卡格式说明（环境变量表/TOML 样例/胜负流程）。
+  - **验收（主会话独立复核）**：321 tests（+3 map 新增）/ 0 失败 / 0 警告；冒烟 ALL-OK（EXIT=0、VUID=0、kills=1、fps 248-263）；RV3D_MAP=street_fight/open_field 与 RV3D_MAPS=index 三种模式实跑 VUID=0、panic=0、fps ~250。
+  - **遗留/下一步**：① 压力模式（RV3D_STRESS_AI）与关卡系统互斥未验证（stress 分支不受 map_mgr 影响，理论上可共存但未测）；② 据点占用视觉指示（HUD 已有进度条，世界内无圆圈标记）；③ 网络同步目标状态（ObjectiveSnapshot 骨架已备，未接 net.rs 消息）；④ map.rs/objective.rs 顶部 `#![allow(dead_code)]` 已可移除（主会话已接线）。
+- 状态：done
+
 ### [2026-08-13] 交接：双 Agent 并行完成（美术贴图 + SIMD 负收益修复）
 
 - 日期：2026-08-13
