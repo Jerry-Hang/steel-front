@@ -1,0 +1,48 @@
+# 桥头堡 — 关卡文件
+# 格式说明见 README「关卡系统」章节
+# 规则：限时 180 秒，到点按据点归属判定胜负（占领据点推进进度）
+# 主题：河流桥头堡——狭窄桥面 + 两岸沙袋工事，防守两个据点
+
+[map]
+name = "桥头堡"
+description = "河流两岸桥头堡，桥面狭窄交火激烈。限时 180 秒占领两个据点，到点按归属判定胜负。"
+
+# 出生点：蓝方（玩家）桥北、红方（敌军）桥南，各 2 个
+spawn_points = [
+    { x = -30.0, y = 1.0, z = -55.0, team = "blue" },
+    { x = -10.0, y = 1.0, z = -55.0, team = "blue" },
+    { x = -30.0, y = 1.0, z = 55.0, team = "red" },
+    { x = -10.0, y = 1.0, z = 55.0, team = "red" },
+]
+
+# 目标：占领两个据点（A 桥中央、B 南岸工事）
+objectives = [
+    { id = "A", type = "capture", position = { x = 0.0, y = 0.0, z = 0.0 }, radius = 6.0, capture_time = 8.0 },
+    { id = "B", type = "capture", position = { x = 0.0, y = 0.0, z = 35.0 }, radius = 5.0, capture_time = 10.0 },
+]
+
+# 障碍：桥头堡工事——桥两侧长条矮墙（barrier）形成狭窄桥面，
+# 北岸沙袋（cover）与桥头哨塔（block）做掩体，南岸纵深防御
+obstacles = [
+    # 桥面两侧长条矮墙（barrier）：桥宽约 14m，两侧护栏
+    { type = "barrier", position = { x = -7.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 40.0 } },
+    { type = "barrier", position = { x = 7.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 40.0 } },
+    # 桥北岸沙袋（cover）：防守方掩体
+    { type = "cover", position = { x = -4.0, y = 0.75, z = -40.0 }, size = { x = 5.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 4.0, y = 0.75, z = -40.0 }, size = { x = 5.0, y = 1.5, z = 1.0 } },
+    # 桥南岸纵深沙袋（cover）
+    { type = "cover", position = { x = -4.0, y = 0.75, z = 45.0 }, size = { x = 5.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 4.0, y = 0.75, z = 45.0 }, size = { x = 5.0, y = 1.5, z = 1.0 } },
+    # 桥头哨塔（block）：两端入口处的塔楼掩体
+    { type = "block", position = { x = -14.0, y = 1.5, z = -30.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 14.0, y = 1.5, z = -30.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = -14.0, y = 1.5, z = 30.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 14.0, y = 1.5, z = 30.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    # 桥中段散落残骸（block）：桥面局部掩体
+    { type = "block", position = { x = -3.0, y = 1.5, z = -8.0 }, size = { x = 2.0, y = 3.0, z = 2.0 } },
+    { type = "block", position = { x = 3.0, y = 1.5, z = 8.0 }, size = { x = 2.0, y = 3.0, z = 2.0 } },
+]
+
+[rule]
+kind = "time"
+seconds = 180

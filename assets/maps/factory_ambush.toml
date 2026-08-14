@@ -1,0 +1,47 @@
+# 工厂伏击 — 关卡文件
+# 格式说明见 README「关卡系统」章节
+# 规则：歼灭 40 名敌人获胜（击杀计数）
+# 主题：废弃工厂——机器残骸与传送带墙体构成隔间，货箱做掩体，中近距离交火
+
+[map]
+name = "工厂伏击"
+description = "废弃工厂内机器残骸与隔间墙体交错，中近距离交火。歼灭 40 名敌人获胜。"
+
+# 出生点：蓝方（玩家）西侧车间、红方（敌军）东侧仓库，隔间化分布
+spawn_points = [
+    { x = -55.0, y = 1.0, z = -20.0, team = "blue" },
+    { x = -52.0, y = 1.0, z = 15.0, team = "blue" },
+    { x = 55.0, y = 1.0, z = -20.0, team = "red" },
+    { x = 52.0, y = 1.0, z = 15.0, team = "red" },
+]
+
+# 目标：歼灭模式（type = "kill"，target 由 [rule] 指定）
+objectives = [
+    { id = "K", type = "kill", position = { x = 0.0, y = 0.0, z = 0.0 }, radius = 0.0, capture_time = 0.0 },
+]
+
+# 障碍：厂房隔间布局——横向墙把场地切成三个车间，纵向墙形成通道，
+# 机器/货箱（block）做掩体，矮墙（cover）在通道口
+obstacles = [
+    # 隔间横向墙（把场地分成 西/中/东 三个车间，留缺口）
+    { type = "wall", position = { x = -18.0, y = 1.5, z = 0.0 }, size = { x = 1.0, y = 3.0, z = 30.0 } },
+    { type = "wall", position = { x = 18.0, y = 1.5, z = 0.0 }, size = { x = 1.0, y = 3.0, z = 30.0 } },
+    # 纵向通道墙（连接南北，形成 L 型通道）
+    { type = "wall", position = { x = 0.0, y = 1.5, z = -35.0 }, size = { x = 20.0, y = 3.0, z = 1.0 } },
+    { type = "wall", position = { x = 0.0, y = 1.5, z = 35.0 }, size = { x = 20.0, y = 3.0, z = 1.0 } },
+    # 机器残骸（block）：厂房内大型设备，可做重掩体
+    { type = "block", position = { x = -12.0, y = 1.5, z = -20.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = -12.0, y = 1.5, z = 20.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 12.0, y = 1.5, z = -20.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 12.0, y = 1.5, z = 20.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    # 货箱（block）：通道口的箱子堆
+    { type = "block", position = { x = -30.0, y = 1.5, z = -10.0 }, size = { x = 2.5, y = 3.0, z = 2.5 } },
+    { type = "block", position = { x = 30.0, y = 1.5, z = 10.0 }, size = { x = 2.5, y = 3.0, z = 2.5 } },
+    # 矮墙掩体（cover）：车间内中段掩体
+    { type = "cover", position = { x = -6.0, y = 0.75, z = -12.0 }, size = { x = 4.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 6.0, y = 0.75, z = 12.0 }, size = { x = 4.0, y = 1.5, z = 1.0 } },
+]
+
+[rule]
+kind = "kill"
+target = 40

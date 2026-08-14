@@ -2,4 +2,6 @@
 maps = [
     "street_fight.toml",
     "open_field.toml",
+    "factory_ambush.toml",
+    "bridgehead.toml",
 ]
