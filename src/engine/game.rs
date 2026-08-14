@@ -724,7 +724,8 @@ struct AiStepCtx<'a> {
     player_yaw: f32,
     charge: bool,
     under_fire: &'a [bool],
-    targets: &'a [Option<(usize, [f32; 3])>],
+    /// 压力模式预选目标：(索引, 位置快照, 目标朝向 facing)；None = 目标为玩家
+    targets: &'a [Option<(usize, [f32; 3], f32)>],
     grid: &'a GridMap,
     time: f32,
     dt: f32,
@@ -741,8 +742,9 @@ struct AiStepCtx<'a> {
 }
 
 /// 压力模式目标预选：每 NPC 找视野内最近的敌对阵营 NPC（纯读，O(n²)）。
-/// 返回 (目标索引, 目标位置快照)；None = 目标为玩家（兜底）。同距取索引小者，确定性。
-fn pick_stress_targets(npcs: &[Npc], sight: f32) -> Vec<Option<(usize, [f32; 3])>> {
+/// 返回 (目标索引, 目标位置快照, 目标朝向 facing)；None = 目标为玩家（兜底）。同距取索引小者，确定性。
+/// facing 用于「目标是否面朝本 NPC」判定（总指挥指令单 #1 阶段二：让 NPC-vs-NPC 触发包抄/偷袭）。
+fn pick_stress_targets(npcs: &[Npc], sight: f32) -> Vec<Option<(usize, [f32; 3], f32)>> {
     let mut out = Vec::with_capacity(npcs.len());
     for npc in npcs {
         let mut best: Option<(usize, f32)> = None;
@@ -760,7 +762,7 @@ fn pick_stress_targets(npcs: &[Npc], sight: f32) -> Vec<Option<(usize, [f32; 3])
                 best = Some((j, d2));
             }
         }
-        out.push(best.map(|(j, _)| (j, npcs[j].position)));
+        out.push(best.map(|(j, _)| (j, npcs[j].position, npcs[j].facing)));
     }
     out
 }
@@ -1419,6 +1421,20 @@ impl Game {
         if let Some(obj) = self.obj_state.as_mut() {
             obj.kills = obj.kills.saturating_add(1);
         }
+    }
+
+    /// 关卡系统据点数据（供 main.rs 渲染世界标记）：(id, x, z, 归属, 进度 0..=1)。
+    /// 未启用关卡系统或无据点 → 空列表。
+    pub fn capture_points(&self) -> Vec<(String, f32, f32, Option<crate::engine::ai::Team>, f32)> {
+        self.obj_state
+            .as_ref()
+            .map(|o| {
+                o.points
+                    .iter()
+                    .map(|p| (p.id.clone(), p.x, p.z, p.owner, p.progress))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 关卡系统热重载（F5）：重新读取当前地图 TOML 并重建物理/AI 网格/据点
@@ -2521,9 +2537,9 @@ impl Game {
     fn step_npc(index: usize, npc: &mut Npc, ctx: &AiStepCtx) {
         // 视野半径：压力模式全场可见（两军立即接火），普通模式保持原值
         let sight = if ctx.stress { STRESS_SIGHT } else { NPC_SIGHT };
-        // 目标位置：压力模式取预选敌对 NPC（快照位置），普通模式恒为玩家
+        // 目标位置：压力模式取预选敌对 NPC（快照位置 + 朝向），普通模式恒为玩家
         let target_pos = match (ctx.stress, ctx.targets.get(index).copied().flatten()) {
-            (true, Some((_, tp))) => glam::Vec3::new(tp[0], 0.0, tp[2]),
+            (true, Some((_, tp, _))) => glam::Vec3::new(tp[0], 0.0, tp[2]),
             _ => *ctx.player,
         };
         let dx = npc.position[0] - target_pos.x;
@@ -2531,6 +2547,21 @@ impl Game {
         let dist = (dx * dx + dz * dz).sqrt();
         let yaw_to = yaw_to_target(target_pos.x, target_pos.z, npc.position[0], npc.position[2]);
         let facing_angle = angle_diff(ctx.player_yaw, yaw_to).abs();
+        // 绕背判定用的"目标朝向"：普通模式 = 玩家视角；压力模式 = 朝向目标 NPC 的方向
+        // （facing 坐标系：atan2(dz,dx)，与 npc.facing 同源可比）
+        let target_yaw = if ctx.stress && ctx.targets.get(index).copied().flatten().is_some() {
+            (npc.position[2] - target_pos.z).atan2(npc.position[0] - target_pos.x)
+        } else {
+            ctx.player_yaw
+        };
+        // 「目标是否面朝本 NPC」：普通模式 = 玩家视角（行为不变）；压力模式 = 目标 NPC 的
+        // 朝向 facing 是否大致指向本 NPC（总指挥指令单 #1 阶段二：让 NPC-vs-NPC 触发包抄/偷袭）。
+        // 坐标系：target_yaw = (本NPC.z - 目标.z).atan2(本NPC.x - 目标.x) 即「目标→本NPC」方向，
+        // 与 npc.facing（atan2(dz,dx)）同源可直接比。angle_diff 已处理 ±π 环绕。
+        let target_facing = match (ctx.stress, ctx.targets.get(index).copied().flatten()) {
+            (true, Some((_, _, tf))) => angle_diff(tf, target_yaw).abs() < std::f32::consts::FRAC_PI_2,
+            _ => facing_angle < std::f32::consts::FRAC_PI_2,
+        };
         let prev = npc.state_machine.state();
         let took_hit = npc.hp < npc.last_hp - 0.001;
         let under_fire = ctx.under_fire.get(index).copied().unwrap_or(false);
@@ -2540,7 +2571,7 @@ impl Game {
             start_patrol: prev == NpcState::Idle,
             patrol_finished: false,
             player_aiming: facing_angle < AIM_ANGLE && dist < sight,
-            player_facing: facing_angle < std::f32::consts::FRAC_PI_2,
+            player_facing: target_facing,
             took_hit,
             low_hp: npc.hp < npc.max_hp * LOW_HP_RATIO,
             under_fire,
@@ -2560,9 +2591,16 @@ impl Game {
             npc.hit_cooldown = DODGE_COOLDOWN;
         }
         npc.last_hp = npc.hp;
-        // 战术决策：低血量撤退 / 角色行为 / 玩家是否面朝（偷袭）；冲锋覆盖为突进
+        // 战术决策：低血量撤退 / 角色行为 / 目标是否面朝（偷袭）；冲锋覆盖为突进。
+        // Flanker 的包抄/偷袭战术不被冲锋覆盖（保持侧翼机动，实现互射战场的包抄/偷袭——
+        // 总指挥指令单 #1 阶段二）；其余角色冲锋时全队直突（行为与原设计一致）。
         let mut tactic = pick_tactic(npc.role, &npc.perception);
-        if ctx.charge && npc.role != TacticalRole::Suppressor && tactic != Tactic::Retreat {
+        let is_flank_maneuver = matches!(tactic, Tactic::Flank | Tactic::Ambush);
+        if ctx.charge
+            && npc.role != TacticalRole::Suppressor
+            && tactic != Tactic::Retreat
+            && !is_flank_maneuver
+        {
             tactic = Tactic::Advance;
         }
         // 掩体利用：突击/压制手接近射程边缘时先评估障碍环带掩体（先移动到掩体再推进开火）。
@@ -2576,12 +2614,6 @@ impl Game {
             tactic = Tactic::CoverSeek;
         }
         npc.tactic = tactic;
-        // 绕背判定用的"目标朝向"：普通模式 = 玩家视角；压力模式 = 朝向目标 NPC 的方向
-        let target_yaw = if ctx.stress && ctx.targets.get(index).copied().flatten().is_some() {
-            (npc.position[2] - target_pos.z).atan2(npc.position[0] - target_pos.x)
-        } else {
-            ctx.player_yaw
-        };
         let (bx, bz) = (npc.position[0], npc.position[2]);
         advance_npc(
             npc,
@@ -2795,7 +2827,7 @@ impl Game {
             flags
         };
         // 压力模式：每 NPC 预选最近敌对目标（敌对 NPC 优先、玩家兜底；O(n²) 纯读，串行）
-        let targets: Vec<Option<(usize, [f32; 3])>> = if self.stress {
+        let targets: Vec<Option<(usize, [f32; 3], f32)>> = if self.stress {
             pick_stress_targets(&self.npcs, STRESS_SIGHT)
         } else {
             Vec::new()
@@ -2882,7 +2914,7 @@ impl Game {
 
     /// 压力模式 NPC 互射：攻击态且目标在攻击距离内 → 每满 1 秒对目标结算 dps。
     /// 目标索引在帧内有效（互射结算后统一移除，不在中途删）。友军永远不被伤害。
-    fn apply_npc_combat(&mut self, dt: f32, targets: &[Option<(usize, [f32; 3])>]) {
+    fn apply_npc_combat(&mut self, dt: f32, targets: &[Option<(usize, [f32; 3], f32)>]) {
         if self.npcs.len() < 2 {
             return;
         }
@@ -2892,7 +2924,7 @@ impl Game {
             if npc.state_machine.state() != NpcState::Attack {
                 continue;
             }
-            if let Some(Some((t, _))) = targets.get(i) {
+            if let Some(Some((t, _, _))) = targets.get(i) {
                 if *t >= self.npcs.len() {
                     continue;
                 }
@@ -4011,11 +4043,11 @@ mod tests {
             npc_at(4, Team::Blue, [5.0, 0.0, 3.0]),
         ];
         let targets = pick_stress_targets(&npcs, NPC_SIGHT);
-        assert_eq!(targets[0], Some((4, npcs[4].position)));
-        assert_eq!(targets[1], Some((3, npcs[3].position)), "红1(10,0) 最近敌 = 蓝3(8,0)");
+        assert_eq!(targets[0], Some((4, npcs[4].position, npcs[4].facing)));
+        assert_eq!(targets[1], Some((3, npcs[3].position, npcs[3].facing)), "红1(10,0) 最近敌 = 蓝3(8,0)");
         assert_eq!(targets[2], None, "视野外无敌人 → 玩家兜底");
-        assert_eq!(targets[3], Some((1, npcs[1].position)), "蓝3 最近敌 = 红1");
-        assert_eq!(targets[4], Some((0, npcs[0].position)), "同距取索引小者");
+        assert_eq!(targets[3], Some((1, npcs[1].position, npcs[1].facing)), "蓝3 最近敌 = 红1");
+        assert_eq!(targets[4], Some((0, npcs[0].position, npcs[0].facing)), "同距取索引小者");
     }
 
     #[test]
@@ -4111,6 +4143,61 @@ mod tests {
         }
     }
 
+    /// 阶段二：压力模式「目标 NPC 朝向」驱动 player_facing → Flanker 触发 Flank/Ambush。
+    /// 红 NPC 站在蓝 NPC 正面（蓝 facing 指向红）→ 红应判定「目标面朝我」→ Flank；
+    /// 红 NPC 站在蓝 NPC 背面（蓝 facing 背对红）→ 红应判定「目标背对我」→ Ambush。
+    #[test]
+    fn stress_flanker_tactic_follows_target_facing() {
+        // 蓝 NPC 面朝 +X 方向（facing = atan2(dz,dx)：dz=0,dx>0 → facing=0）
+        let mut blue = npc_at(1, Team::Blue, [0.0, 0.0, 0.0]);
+        blue.facing = 0.0; // 面朝 +X
+        blue.role = TacticalRole::Flanker;
+        // 红 NPC 在蓝的正+X 侧 10m（蓝面朝它 → 目标面朝本 NPC）
+        let mut red_front = npc_at(0, Team::Red, [10.0, 0.0, 0.0]);
+        red_front.role = TacticalRole::Flanker;
+        // 红 NPC 在蓝的 -X 侧 10m（蓝背对它 → 目标背对本 NPC）
+        let mut red_back = npc_at(2, Team::Red, [-10.0, 0.0, 0.0]);
+        red_back.role = TacticalRole::Flanker;
+
+        let game = Game::new();
+        let grid = game.grid.clone();
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        let flags = vec![false; 3];
+
+        let npcs_a = vec![red_front, blue, red_back];
+        let targets_a = pick_stress_targets(&npcs_a, STRESS_SIGHT);
+        let ctx_a = AiStepCtx {
+            player: &player,
+            player_yaw: 0.0,
+            charge: false,
+            under_fire: &flags,
+            targets: &targets_a,
+            grid: &grid,
+            time: 1.0,
+            dt: 1.0 / 60.0,
+            stress: true,
+            frame: 0,
+            decimate_far: false,
+            ring_inner: MAP_RING_INNER,
+            ring_outer: MAP_RING_OUTER,
+            obstacles: &game.map.obstacles,
+        };
+        let mut npcs_a = npcs_a;
+        Game::step_ai_serial(&mut npcs_a, &ctx_a);
+        // 红 0（正面）最近敌 = 蓝 1 且蓝面朝它 → player_facing=true → Flank
+        assert_eq!(
+            npcs_a[0].tactic,
+            Tactic::Flank,
+            "正面站位的红应触发 Flank（目标面朝本 NPC）"
+        );
+        // 红 2（背面）最近敌 = 蓝 1 但蓝背对它 → player_facing=false → Ambush
+        assert_eq!(
+            npcs_a[2].tactic,
+            Tactic::Ambush,
+            "背面站位的红应触发 Ambush（目标背对本 NPC）"
+        );
+    }
+
     #[test]
     fn stress_npc_combat_damages_target_only() {
         let mut game = Game::new();
@@ -4131,8 +4218,8 @@ mod tests {
         assert_eq!(b.state_machine.state(), NpcState::Attack);
         game.npcs = vec![a, b];
         let targets = vec![
-            Some((1, game.npcs[1].position)),
-            Some((0, game.npcs[0].position)),
+            Some((1, game.npcs[1].position, game.npcs[1].facing)),
+            Some((0, game.npcs[0].position, game.npcs[0].facing)),
         ];
         let hp_before = [game.npcs[0].hp, game.npcs[1].hp];
         let dps = wave_profile(game.effective_wave(1)).dps;
