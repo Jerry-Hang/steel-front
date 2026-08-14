@@ -392,6 +392,39 @@ impl GameApp {
                     }
                 })
                 .collect();
+            // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
+            // 每据点 = 细高立柱（归属色）+ 扁平底盘（半径 5.0，半透明归属色）。
+            // 复用 WorldMarker 通道（主 pipeline 实例化），零渲染管线改动。
+            let capture_markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .capture_points()
+                .into_iter()
+                .flat_map(|(id, x, z, owner, _progress)| {
+                    let tint = match owner {
+                        Some(crate::engine::ai::Team::Blue) => [0.08, 0.35, 0.98, 1.0],
+                        Some(crate::engine::ai::Team::Red) => [0.95, 0.12, 0.08, 1.0],
+                        None => [0.45, 0.45, 0.45, 1.0],
+                    };
+                    let base_tint = [tint[0] * 0.6, tint[1] * 0.6, tint[2] * 0.6, 0.6];
+                    let _ = id; // 标记 id 暂不绘制文字（HUD 已有 id 标签）
+                    [
+                        // 立柱（旗杆）
+                        engine::renderer::WorldMarker {
+                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 2.0, z))
+                                * glam::Mat4::from_scale(glam::Vec3::new(0.4, 4.0, 0.4)),
+                            tint,
+                        },
+                        // 地面底盘（占领半径范围，半径 5.0 → scale 10.0）
+                        engine::renderer::WorldMarker {
+                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.08, z))
+                                * glam::Mat4::from_scale(glam::Vec3::new(10.0, 0.15, 10.0)),
+                            tint: base_tint,
+                        },
+                    ]
+                })
+                .collect();
+            let mut markers = markers;
+            markers.extend(capture_markers);
             // 爆炸闪光：冲击波球壳随年龄膨胀、颜色转淡；走自发光路径（emissive 槽位，
             // shader 直出纯色跳过光照/贴图混合），夜间等暗光环境下依然清晰可见
             let emissive_markers: Vec<engine::renderer::WorldMarker> = self
