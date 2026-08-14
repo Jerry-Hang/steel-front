@@ -12,15 +12,10 @@
 //! 解析错误返回带行号的 `Result<_, String>`。
 //!
 //! TOML 障碍是 `position{x,y,z}` + `size{x,y,z}`；映射到物理侧 `MapObstacle`（盒中心 + x/z 半尺寸）
-//! 时用 `position.x/z` + `MAP_BLOCK_HEIGHT` 高度，见 `obstacle_to_map_obstacle`。
-
-#![allow(dead_code)] // 主会话接线（main.rs/game.rs）前公开 API 暂未被非测试代码引用；测试已全量覆盖，接线后可移除
+//! 时用 `position.x/z`，贴地高度由物理侧（game.rs `MAP_BLOCK_HEIGHT` 常量）统一补，见 `obstacle_to_map_obstacle`。
 
 use crate::engine::game::ObstacleKind;
 use std::cell::Cell;
-
-/// 障碍贴地高度（米）：TOML 障碍只给 `position.y`，物理侧统一用该常量（与 game.rs 同值）。
-pub const MAP_BLOCK_HEIGHT: f32 = 2.4;
 
 // ============================================================
 // 数据结构
@@ -91,7 +86,7 @@ pub struct RuleDef {
 enum Value {
     Str(String),
     Num(f64),
-    Bool(bool),
+    Bool,
     Table(Vec<(String, Value)>),
     Array(Vec<Value>),
 }
@@ -299,16 +294,6 @@ impl TomlParser {
         Ok(line[1..line.len() - 1].trim().to_string())
     }
 
-    fn parse_kv(&mut self, ln: usize, line: &str) -> Result<(String, Value), String> {
-        let eq = find_eq(line).ok_or_else(|| err(ln, "键值对缺少 '='"))?;
-        let key = line[..eq].trim();
-        if !is_valid_key(key) {
-            return Err(err(ln, format!("无效键名 \"{}\"", key)));
-        }
-        let value = self.parse_value(ln, line[eq + 1..].trim())?;
-        Ok((key.to_string(), value))
-    }
-
     /// 解析键值对，支持跨行值：值含未闭合 `[`/`{` 时继续吞并后续行直到括号闭合。
     /// 多行内容用空格拼接（对内联数组/表而言换行即空白，语义不变）。
     fn parse_kv_multiline(&mut self, ln: usize, line: &str) -> Result<(String, Value), String> {
@@ -357,8 +342,8 @@ impl TomlParser {
             }
             _ => {
                 match s {
-                    "true" => (Value::Bool(true), s.len()),
-                    "false" => (Value::Bool(false), s.len()),
+                    "true" => (Value::Bool, s.len()),
+                    "false" => (Value::Bool, s.len()),
                     _ => (Value::Num(self.parse_number(ln, s)?), s.len()),
                 }
             }
@@ -727,14 +712,6 @@ fn seed_from_name(name: &str) -> u32 {
 }
 
 impl MapManager {
-    /// 空管理器（未加载任何地图）
-    pub fn new() -> Self {
-        Self {
-            current: MapData::default(),
-            seed: Cell::new(seed_from_name("")),
-        }
-    }
-
     /// 加载地图文件（失败返回带原因的 Err）
     pub fn load(path: &str) -> Result<Self, String> {
         let data = load_map(path)?;
@@ -778,11 +755,6 @@ impl MapManager {
     /// 障碍定义列表（TOML 原文，未映射到物理 MapObstacle）
     pub fn obstacles(&self) -> &[ObstacleDef] {
         &self.current.obstacles
-    }
-
-    /// 目标定义列表
-    pub fn objectives(&self) -> &[ObjectiveDef] {
-        &self.current.objectives
     }
 
     /// 确定性 LCG 单元随机数（与 game.rs 同款常数；本模块独立实现，不跨模块依赖私有函数）
@@ -1077,21 +1049,6 @@ obstacles = [ { type = "wall", position = { x = 1, y = 0, z = 1 }, size = { x = 
         assert_eq!(m.spawn_point("blue").unwrap(), (-5.0, 0.0, -5.0));
         remove_tmp(&p1);
         remove_tmp(&p2);
-    }
-
-    #[test]
-    fn map_manager_new_is_empty() {
-        let m = MapManager::new();
-        assert!(m.data().spawn_points.is_empty());
-        assert!(m.obstacles().is_empty());
-        assert!(m.objectives().is_empty());
-        assert!(m.spawn_point("blue").is_none());
-    }
-
-    #[test]
-    fn map_block_height_constant_locked() {
-        // 主会话接线时以该常量组装物理障碍高度，锁定数值防漂移
-        assert_eq!(MAP_BLOCK_HEIGHT, 2.4);
     }
 
     /// 跨行内联数组：spawn_points/obstacles 换行书写必须能解析（示例地图用多行格式）

@@ -2,10 +2,12 @@
 //!
 //! - `CapturePoint`：据点（id/x/z/半径/占领耗时），`update_point` 纯函数推进归属
 //! - `GameRule` / `ObjectiveState`：规则（占领/击杀/限时）与每帧胜负判定 `evaluate`
-//! - `ObjectiveSnapshot`：纯数据快照（无字节序列化），供主会话后续接网络（net.rs 大端手写字节）时使用
 //!
 //! 本模块独立于 game.rs 的 `MissionObjective`（歼灭数）——两者互不干扰，由主会话统一接线。
 //! 仅依赖 std + log，零第三方依赖。
+//!
+//! 网络同步：目标状态由主会话在 game.rs 直接读取 `ObjectiveState.points`（pub 字段）编码为
+//! net.rs 的 `NetworkMessage::ObjectiveState`（0x07）广播；本模块不提供序列化（见 net.rs）。
 //!
 //! 判定规则细节（勿回退）：
 //! - 占领进度为标量 0.0..=1.0，向「当前推进方」增长；满 1.0 → 归属切换为该方、进度归零
@@ -20,8 +22,6 @@
 //!   否则 Defeat，避免无限僵持）；未到点 → None。
 //! - 幂等：主会话收到 Victory/Defeat 后置位 `won_team`，此后 `evaluate` 恒返回 None，
 //!   保证胜利事件只触发一次。
-
-#![allow(dead_code)] // 独立 API 模块，待主会话接入 game.rs（与 ai.rs 同约定；接入后可移除）
 
 use crate::engine::ai::Team;
 
@@ -151,17 +151,6 @@ impl GameRule {
             GameRule::TimeLimit { .. } => "time",
         }
     }
-
-    /// 主会话解析 TOML rule 后调用；`kind` 未知返回 None。
-    /// 其余参数按规则类型取用（capture→required、kill→target、time→seconds）。
-    pub fn from_toml(kind: &str, required: usize, target: u32, seconds: f64) -> Option<GameRule> {
-        match kind.trim().to_lowercase().as_str() {
-            "capture" => Some(GameRule::CapturePoints { required }),
-            "kill" => Some(GameRule::KillCount { target }),
-            "time" => Some(GameRule::TimeLimit { seconds }),
-            _ => None,
-        }
-    }
 }
 
 /// 每帧胜负判定结果
@@ -257,39 +246,6 @@ impl ObjectiveState {
             }
         }
     }
-
-    /// 纯数据快照（网络兼容骨架）：规则种类 + 各据点 id/owner/progress。
-    /// 无字节序列化，主会话接网络时可自行编码（net.rs 大端手写字节约定）。
-    pub fn snapshot(&self) -> ObjectiveSnapshot {
-        ObjectiveSnapshot {
-            rule_kind: self.rule.rule_kind().to_string(),
-            points: self
-                .points
-                .iter()
-                .map(|p| CapturePointSnapshot {
-                    id: p.id.clone(),
-                    owner: p.owner,
-                    progress: p.progress,
-                })
-                .collect(),
-        }
-    }
-}
-
-/// 目标系统快照（纯数据，可序列化兼容）
-#[derive(Debug, Clone, PartialEq)]
-pub struct ObjectiveSnapshot {
-    pub rule_kind: String,
-    pub points: Vec<CapturePointSnapshot>,
-}
-
-/// 单个据点快照
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapturePointSnapshot {
-    pub id: String,
-    /// 所属阵营：None=中立
-    pub owner: Option<Team>,
-    pub progress: f32,
 }
 
 /// 统计双方占领的据点数，返回 (blue, red)
@@ -490,42 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn rule_kind_and_from_toml() {
+    fn rule_kind_matches() {
         assert_eq!(GameRule::CapturePoints { required: 2 }.rule_kind(), "capture");
         assert_eq!(GameRule::KillCount { target: 5 }.rule_kind(), "kill");
         assert_eq!(GameRule::TimeLimit { seconds: 60.0 }.rule_kind(), "time");
-        assert_eq!(
-            GameRule::from_toml("capture", 2, 0, 0.0),
-            Some(GameRule::CapturePoints { required: 2 })
-        );
-        assert_eq!(
-            GameRule::from_toml("kill", 0, 5, 0.0),
-            Some(GameRule::KillCount { target: 5 })
-        );
-        assert_eq!(
-            GameRule::from_toml("time", 0, 0, 60.0),
-            Some(GameRule::TimeLimit { seconds: 60.0 })
-        );
-        // 未知 kind → None
-        assert_eq!(GameRule::from_toml("bogus", 0, 0, 0.0), None);
-    }
-
-    #[test]
-    fn snapshot_matches_state() {
-        let mut s = ObjectiveState::new(GameRule::CapturePoints { required: 2 });
-        let mut a = CapturePoint::new("A", 0.0, 0.0, 5.0, 10.0);
-        a.owner = Some(Team::Blue);
-        a.progress = 0.5;
-        let b = CapturePoint::new("B", 1.0, 1.0, 5.0, 10.0); // 中立
-        s.points = vec![a, b];
-        let snap = s.snapshot();
-        assert_eq!(snap.rule_kind, "capture");
-        assert_eq!(snap.points.len(), 2);
-        assert_eq!(snap.points[0].id, "A");
-        assert_eq!(snap.points[0].owner, Some(Team::Blue));
-        assert_eq!(snap.points[0].progress, 0.5);
-        assert_eq!(snap.points[1].id, "B");
-        assert_eq!(snap.points[1].owner, None);
-        assert_eq!(snap.points[1].progress, 0.0);
     }
 }
