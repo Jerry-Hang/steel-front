@@ -5,8 +5,8 @@
 //! - 玩家位置/旋转序列化：手写字节编码（f32 位置 + f32 旋转），带协议头
 //!   （magic / version / type / length），大端网络字节序
 //! - 远端玩家插值：`lerp_state` 纯函数 + `RemotePlayer` 时间戳插值平滑
-//! - `NetworkMessage` 枚举：Join / Leave / Position / Action / Input / Snapshot，
-//!   支持序列化往返
+//! - `NetworkMessage` 枚举：Join / Leave / Position / Action / Input / Snapshot /
+//!   ObjectiveState，支持序列化往返
 //!
 //! # 对战协议（RV3D_NET=server|client）
 //!
@@ -16,7 +16,13 @@
 //! - `Join(0x01)`：客户端申请加入（player_id=0）→ 服务端回发分配后的 id 确认
 //! - `Input(0x06)`：客户端每 tick 上报输入/姿态（移动标志 + 开火 + yaw/pitch）
 //! - `Snapshot(0x05)`：服务端每 tick 广播整帧快照（seq + 服务端时间 + 本机玩家 + NPC 列表）
+//! - `ObjectiveState(0x07)`：服务端广播目标状态（据点 id/归属码/进度，seq + 时间 +
+//!   rule_kind + 据点列表）；为多人在线铺路，客户端应用逻辑由上层桥接
 //! - `Leave(0x02)`：正常退出；`Position(0x03)` / `Action(0x04)` 为早期演示消息，保留兼容
+//!
+//! 向后兼容：`decode` 对未知 MessageType 返回 `UnknownMessageType` 错误（见 `NetError`）。
+//! 旧客户端（不认识 0x07）收到 ObjectiveState 时同样走该路径——由调用方按需忽略新消息；
+//! 新客户端收到旧版报文则按各自分支正常解码，故协议版本号无需递增。
 //!
 //! 序列号与顺序：Input / Snapshot 各自携带单调递增 seq（u32 wrapping）；接收方用
 //! `wrapping_sub` 丢弃乱序与重复（差值 ≥ 2^31 视为过期）。
@@ -54,6 +60,9 @@ pub const HEADER_LEN: usize = 5;
 pub const MAX_DATAGRAM: usize = 65507;
 /// 单条快照最多携带的实体数：超出截断（保护 length 字段 u16 上限；本轮 128 NPC 远低于此）
 pub const MAX_SNAPSHOT_NPCS: usize = 1024;
+/// 单条目标状态最多携带的据点数：超出截断（单关据点通常 1-5 个，64 为防御性上限；
+/// 每个据点约 6-261B，64 个最坏约 17KB，远低于 MAX_DATAGRAM）
+pub const MAX_OBJECTIVE_POINTS: usize = 64;
 /// 客户端断线判定：超过该时长未收到任何数据报视为超时（UDP 尽力而为，无重传）
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 /// 服务端超时判定：客户端超过该时长无数据报则移除注册（断线重连为后续 TODO）
@@ -75,6 +84,8 @@ pub enum MessageType {
     Snapshot = 0x05,
     /// 客户端 → 服务端：本帧输入/姿态
     Input = 0x06,
+    /// 服务端 → 客户端：目标状态（据点归属/进度）同步
+    ObjectiveState = 0x07,
 }
 
 impl MessageType {
@@ -87,6 +98,7 @@ impl MessageType {
             0x04 => MessageType::Action,
             0x05 => MessageType::Snapshot,
             0x06 => MessageType::Input,
+            0x07 => MessageType::ObjectiveState,
             _ => return None,
         })
     }
@@ -162,6 +174,17 @@ pub enum NetworkMessage {
     },
     /// 客户端 → 服务端：本帧输入。seq = 客户端输入序号（wrapping），time = 客户端本地时间（秒）
     Input { seq: u32, time: f32, input: NetInput },
+    /// 服务端 → 客户端：目标状态（据点归属/进度）同步。seq = 发送方单调递增序号，
+    /// time = 发送方模拟时间（秒），rule_kind = 关卡规则标识（如 "CapturePoints"），
+    /// points = 各据点 (id, 归属码, 进度)，归属码约定：0=中立/None、1=Red、2=Blue
+    /// （u8 纯数据，避免跨模块依赖 Team 枚举）。
+    /// 注意：本消息仅供多人在线铺路，客户端应用逻辑由上层桥接，本模块只做编解码。
+    ObjectiveState {
+        seq: u32,
+        time: f32,
+        rule_kind: String,
+        points: Vec<(String, u8, f32)>,
+    },
 }
 
 /// 协议解码错误
@@ -177,6 +200,8 @@ pub enum NetError {
     Truncated,
     /// 载荷尾部存在多余字节
     TrailingData,
+    /// 字符串字段（rule_kind / 据点 id）不是合法 UTF-8
+    InvalidUtf8,
     /// 名字不是合法 UTF-8
     InvalidName,
 }
@@ -189,6 +214,7 @@ impl fmt::Display for NetError {
             NetError::UnknownMessageType(t) => write!(f, "unknown message type {t:#x}"),
             NetError::Truncated => write!(f, "truncated datagram or length mismatch"),
             NetError::TrailingData => write!(f, "trailing bytes after payload"),
+            NetError::InvalidUtf8 => write!(f, "string field is not valid UTF-8"),
             NetError::InvalidName => write!(f, "player name is not valid UTF-8"),
         }
     }
@@ -327,6 +353,28 @@ impl NetworkMessage {
                 put_f32(&mut p, input.pitch);
                 (MessageType::Input, p)
             }
+            NetworkMessage::ObjectiveState { seq, time, rule_kind, points } => {
+                // 布局：seq(4) + time(4) + rule_len(1) + rule(≤255) + count(2) +
+                // 每据点 [id_len(1) + id(≤255) + owner(1) + progress(4)]
+                let rule = rule_kind.as_bytes();
+                let rule = &rule[..rule.len().min(255)];
+                let n = points.len().min(MAX_OBJECTIVE_POINTS) as u16;
+                let mut p = Vec::with_capacity(4 + 4 + 1 + rule.len() + 2 + n as usize * 7);
+                put_u32(&mut p, *seq);
+                put_f32(&mut p, *time);
+                p.push(rule.len() as u8);
+                p.extend_from_slice(rule);
+                p.extend_from_slice(&n.to_be_bytes());
+                for (id, owner, progress) in points.iter().take(MAX_OBJECTIVE_POINTS) {
+                    let idb = id.as_bytes();
+                    let idb = &idb[..idb.len().min(255)];
+                    p.push(idb.len() as u8);
+                    p.extend_from_slice(idb);
+                    p.push(*owner);
+                    put_f32(&mut p, *progress);
+                }
+                (MessageType::ObjectiveState, p)
+            }
         };
 
         let mut buf = Vec::with_capacity(HEADER_LEN + payload.len());
@@ -429,6 +477,32 @@ impl NetworkMessage {
                     pitch: r.f32()?,
                 };
                 NetworkMessage::Input { seq, time, input }
+            }
+            MessageType::ObjectiveState => {
+                let seq = r.u32()?;
+                let time = r.f32()?;
+                let rule_len = r.u8()? as usize;
+                let rule_kind = String::from_utf8(r.bytes(rule_len)?.to_vec())
+                    .map_err(|_| NetError::InvalidUtf8)?;
+                // count 为 u16：合法编码上限是 MAX_OBJECTIVE_POINTS（encode 侧截断）；
+                // 恶意/伪造的超大 count 会被后续逐据点边界检查以 Truncated 拒绝，不会 panic。
+                // 初始容量按上限预留，防止攻击者仅凭 2 字节 count 触发大分配。
+                let n = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
+                let mut points = Vec::with_capacity(n.min(MAX_OBJECTIVE_POINTS));
+                for _ in 0..n {
+                    let id_len = r.u8()? as usize;
+                    let id = String::from_utf8(r.bytes(id_len)?.to_vec())
+                        .map_err(|_| NetError::InvalidUtf8)?;
+                    let owner = r.u8()?;
+                    let progress = r.f32()?;
+                    points.push((id, owner, progress));
+                }
+                NetworkMessage::ObjectiveState {
+                    seq,
+                    time,
+                    rule_kind,
+                    points,
+                }
             }
         };
         r.finish()?;
@@ -928,6 +1002,12 @@ mod tests {
                 action_id: 7,
                 value: 2.5,
             },
+            NetworkMessage::ObjectiveState {
+                seq: 5,
+                time: 1.0,
+                rule_kind: "CapturePoints".to_string(),
+                points: vec![("A".to_string(), 0, 0.0), ("B".to_string(), 2, 0.75)],
+            },
         ]
     }
 
@@ -1270,6 +1350,123 @@ mod tests {
             NetworkMessage::Snapshot { npcs, .. } => assert_eq!(npcs.len(), MAX_SNAPSHOT_NPCS),
             _ => unreachable!(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ObjectiveState 序列化（确定性布局 + 防御性解码）
+    // -----------------------------------------------------------------------
+
+    /// ObjectiveState 测试用固定 rule_kind（13 字节 ASCII，便于按偏移断言布局）
+    const RULE_KIND: &str = "CapturePoints";
+
+    fn obj_msg() -> NetworkMessage {
+        NetworkMessage::ObjectiveState {
+            seq: 9,
+            time: 12.5,
+            rule_kind: RULE_KIND.to_string(),
+            points: vec![
+                ("A".to_string(), 0, 0.0),
+                ("B".to_string(), 1, 0.65),
+                ("C".to_string(), 2, 1.0),
+            ],
+        }
+    }
+
+    #[test]
+    fn objective_state_payload_layout_is_fixed() {
+        let m = obj_msg();
+        let bytes = m.encode();
+        assert_eq!(bytes[0], PROTOCOL_MAGIC);
+        assert_eq!(bytes[1], PROTOCOL_VERSION);
+        assert_eq!(bytes[2], MessageType::ObjectiveState as u8);
+        // HEADER + seq(4) + time(4) + rule_len(1) + rule(13) + count(2) + 3×7
+        assert_eq!(bytes.len(), HEADER_LEN + 4 + 4 + 1 + RULE_KIND.len() + 2 + 3 * 7);
+        // rule 长度前缀
+        assert_eq!(bytes[HEADER_LEN + 8], RULE_KIND.len() as u8);
+        // count 大端
+        let count_off = HEADER_LEN + 4 + 4 + 1 + RULE_KIND.len();
+        assert_eq!(&bytes[count_off..count_off + 2], &[0x00, 0x03]);
+        // 第一个据点：id 长度前缀 + owner 码
+        let p0_off = count_off + 2;
+        assert_eq!(bytes[p0_off], 1); // "A" 长度 1
+        assert_eq!(bytes[p0_off + 1], b'A');
+        assert_eq!(bytes[p0_off + 2], 0); // owner=0 中立
+        let back = NetworkMessage::decode(&bytes).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn objective_state_roundtrip_multi_point_chinese_ids() {
+        let m = NetworkMessage::ObjectiveState {
+            seq: u32::MAX - 3,
+            time: -0.25,
+            rule_kind: "KillCount".to_string(),
+            points: vec![
+                ("据点-中央广场".to_string(), 0, 0.0),
+                ("据点-火车站".to_string(), 1, 0.5),
+                ("据点-弹药库".to_string(), 2, 1.0),
+            ],
+        };
+        let back = NetworkMessage::decode(&m.encode()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn objective_state_points_capped_at_max() {
+        let points = (0..(MAX_OBJECTIVE_POINTS + 10) as u32)
+            .map(|i| (format!("point-{i}"), 1u8, 0.5f32))
+            .collect::<Vec<_>>();
+        let m = NetworkMessage::ObjectiveState {
+            seq: 1,
+            time: 0.0,
+            rule_kind: "CapturePoints".to_string(),
+            points,
+        };
+        let bytes = m.encode();
+        let decoded = NetworkMessage::decode(&bytes).unwrap();
+        match decoded {
+            NetworkMessage::ObjectiveState { points, .. } => {
+                assert_eq!(points.len(), MAX_OBJECTIVE_POINTS);
+                assert_eq!(points[0].0, "point-0");
+                assert_eq!(points[0].1, 1);
+                assert_eq!(points[0].2, 0.5);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn objective_state_decode_rejects_truncated_prefixes() {
+        let bytes = obj_msg().encode();
+        // 编码总长恰为 HEADER_LEN + payload_len，任何真实前缀都必被头部长度校验
+        // 或 Reader 边界检查以 Truncated 拒绝，绝不 panic；仅完整报文成功
+        for cut in 0..bytes.len() {
+            assert_eq!(
+                NetworkMessage::decode(&bytes[..cut]),
+                Err(NetError::Truncated),
+                "prefix cut={cut} should be Truncated"
+            );
+        }
+        assert_eq!(NetworkMessage::decode(&bytes), Ok(obj_msg()));
+    }
+
+    #[test]
+    fn objective_state_decode_rejects_oversized_point_count() {
+        // 伪造 count=65535：实际载荷不足，逐据点读取必撞边界 → Truncated，不 panic
+        let mut bytes = obj_msg().encode();
+        let count_off = HEADER_LEN + 4 + 4 + 1 + RULE_KIND.len();
+        bytes[count_off] = 0xFF;
+        bytes[count_off + 1] = 0xFF;
+        assert_eq!(NetworkMessage::decode(&bytes), Err(NetError::Truncated));
+    }
+
+    #[test]
+    fn objective_state_decode_rejects_invalid_utf8() {
+        // rule_kind 首字节改成非法 UTF-8（0xFF）
+        let mut bytes = obj_msg().encode();
+        let rule_off = HEADER_LEN + 4 + 4 + 1;
+        bytes[rule_off] = 0xFF;
+        assert_eq!(NetworkMessage::decode(&bytes), Err(NetError::InvalidUtf8));
     }
 
     // -----------------------------------------------------------------------
