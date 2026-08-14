@@ -6,6 +6,9 @@
 //! - 3D 空间音频：`AudioSource` 带 3D 位置，按声源-听者距离做 `1/(1+k·d)` 衰减
 //! - 音量混音：`MasterVolume` × 分通道音量（Music/Sfx）× 距离衰减，混音时相乘
 //! - 程序化 DSP：`DspSynth` 事件式合成（枪声/爆炸/脚步/环境风），ADSR 包络 + 一阶低通 + 多声部混音
+//! - 程序化环境音乐：`MusicSynth` 确定性合成（低音 pad 铺底 + 行军节奏 + 五声旋律动机，二战氛围），
+//!   混音总线按通道分层（Music/Sfx，`AudioPlayer::tick` 把音乐乘 Music 通道音量）+ 淡入淡出渐变
+//!   （`set_music_target` 设置目标音量，默认 1.5s 线性逼近，供主会话菜单/战斗状态切换时调用）
 //!
 //! 混音输出为交错立体声（L/R 成对）。播放时需保证 clip 采样率与后端一致（重采样不在本模块范围）。
 
@@ -355,8 +358,7 @@ impl AudioSink for CollectingSink {
 /// 分通道类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Channel {
-    /// 音乐
-    #[allow(dead_code)] // Music 通道预留，当前仅用 Sfx
+    /// 音乐（程序化环境音乐走此通道，混音总线按 Music 通道音量分层）
     Music,
     /// 音效
     Sfx,
@@ -671,8 +673,21 @@ impl<S: AudioSink> AudioPlayer<S> {
     /// 渲染 `frames` 帧混音样本并写入后端（clip 声部 + 程序化 DSP 声部叠加）
     pub fn tick(&mut self, listener: &AudioListener, frames: usize) {
         let mut buf = self.mixer.mix_vec(listener, frames);
+        // 混音总线：音乐合成输出乘 Music 通道音量（Sfx 声部由 Mixer 内部按通道分层；淡入淡出在 MusicSynth 内）
+        self.synth
+            .set_music_channel_volume(self.mixer.channel_volume(Channel::Music));
         self.synth.render(listener, frames, &mut buf);
         self.sink.write(&buf);
+    }
+
+    /// 设置环境音乐淡入淡出目标音量（主会话在菜单/战斗状态切换时调用：战斗调大、菜单调小）
+    pub fn set_music_target(&mut self, volume: f32) {
+        self.synth.set_music_target(volume);
+    }
+
+    /// 当前环境音乐淡入淡出增益（0..=1）
+    pub fn music_gain(&self) -> f32 {
+        self.synth.music_gain()
     }
 }
 
@@ -900,6 +915,8 @@ pub struct DspSynth {
     voices: Vec<SynthVoice>,
     next_id: usize,
     ambient: AmbientWind,
+    /// 环境音乐合成器（默认静音，`set_music_target` 淡入淡出控制）
+    music: MusicSynth,
 }
 
 impl DspSynth {
@@ -911,6 +928,7 @@ impl DspSynth {
             voices: Vec::new(),
             next_id: 1,
             ambient: AmbientWind::new(),
+            music: MusicSynth::new(sr),
         }
     }
 
@@ -970,6 +988,21 @@ impl DspSynth {
         self.ambient.enabled
     }
 
+    /// 设置环境音乐淡入淡出目标音量（clamp [0,1]；默认 0 = 静音，主会话状态切换时调大/调小）
+    pub fn set_music_target(&mut self, volume: f32) {
+        self.music.set_target(volume);
+    }
+
+    /// 当前环境音乐淡入淡出增益（0..=1）
+    pub fn music_gain(&self) -> f32 {
+        self.music.level()
+    }
+
+    /// 设置音乐通道音量（混音总线：AudioPlayer 每帧从 Mixer 同步）
+    pub fn set_music_channel_volume(&mut self, volume: f32) {
+        self.music.set_channel_volume(volume);
+    }
+
     /// 渲染 `frames` 帧并累加进 `out`（交错立体声，长度须为 2×frames）；叠加后钳位 [-1,1]
     pub fn render(&mut self, listener: &AudioListener, frames: usize, out: &mut [f32]) {
         debug_assert_eq!(out.len(), frames * 2);
@@ -995,6 +1028,8 @@ impl DspSynth {
             out[f * 2] += s;
             out[f * 2 + 1] += s;
         }
+        // 环境音乐：确定性合成 × 淡入淡出 × 音乐通道音量（默认静音，主会话 set_music_target 控制）
+        self.music.render(frames, out);
         self.voices.retain(|v| v.env.stage != EnvStage::Done);
     }
 
@@ -1025,6 +1060,198 @@ impl DspSynth {
             env: AdsrEnv::new(adsr),
         });
         VoiceId(id)
+    }
+}
+
+// ============================================================================
+// 程序化环境音乐：低音 pad 铺底 + 行军节奏 + 五声旋律动机（二战氛围，纯 std 确定性合成）
+// ============================================================================
+
+/// 行军节奏速度（BPM，4/4 拍）
+const MARCH_BPM: f32 = 112.0;
+
+/// 单拍时长（秒）
+const MARCH_BEAT: f32 = 60.0 / MARCH_BPM;
+
+/// 音乐淡入淡出时长（秒）：主会话状态切换时音量渐变到目标
+const MUSIC_FADE_SECS: f32 = 1.5;
+
+/// 低音 pad 和弦（每小节一个，4 小节循环，频率 Hz）：Am → F → C → G（A 小调进行，二战军乐氛围）
+const PAD_CHORDS: [[f32; 3]; 4] = [
+    [55.0, 82.41, 110.0],  // Am: A1 E2 A2
+    [43.65, 65.41, 87.31], // F:  F1 C2 F2
+    [65.41, 98.0, 130.81], // C:  C2 G2 C3
+    [49.0, 73.42, 98.0],   // G:  G1 D2 G2
+];
+
+/// 旋律动机：A 小调五声音阶（A C D E G，半音偏移 0/3/5/7/10；12 = 高八度 A）。
+/// 16 音符 = 4 小节 × 4 拍，行军式起伏；`st >= 0` 为音高、其余休止。
+const MELODY_MOTIF: [i8; 16] = [0, 0, 3, 5, 7, 7, 5, 3, 5, 5, 7, 10, 12, 10, 7, 5];
+
+/// 淡入淡出插值（纯函数）：`level` 以线性速度向 `target` 逼近，最大步进 `dt / fade_secs`
+/// （0→1 完整过渡恰需 `fade_secs` 秒）；永不越过 target。
+/// `fade_secs <= 0` = 无淡变（直接跳变到 target）；`dt <= 0` = 时间未流逝（保持原值）。
+fn fade_step(level: f32, target: f32, dt: f32, fade_secs: f32) -> f32 {
+    let target = target.clamp(0.0, 1.0);
+    if fade_secs <= 0.0 {
+        return target;
+    }
+    if dt <= 0.0 {
+        return level;
+    }
+    let delta = target - level;
+    let max_step = dt / fade_secs;
+    if delta.abs() <= max_step {
+        return target;
+    }
+    level + delta.signum() * max_step
+}
+
+/// 确定性整数散列 → [-1,1)（无状态；军鼓噪声按绝对样本索引取种，纯函数可测）
+fn hash_noise(seed: u64) -> f32 {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 29;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 32;
+    (x as f32 / u64::MAX as f32) * 2.0 - 1.0
+}
+
+/// 生成某绝对时间点的音乐单声道样本（纯函数：仅由 `time_secs` / `sample_rate` 决定，确定性）。
+///
+/// 三声部叠加（各声部增益之和 ≤ ~0.8，输出天然在 [-1,1] 内）：
+/// - 低音 pad：4 小节和弦循环 + 0.25s 起落包络（小节边界零振幅防爆音）+ 0.13Hz 慢 LFO；
+/// - 行军节奏：底鼓（60→35Hz 下滑正弦）在 1/3 拍、军鼓（散列噪声突发）在 2/4 拍；
+/// - 旋律动机：16 音符五声音阶循环（每拍一音），正弦 + 轻微二次谐波（簧管感）。
+fn music_wave(time_secs: f32, sample_rate: f32) -> f32 {
+    let bar_len = 4.0 * MARCH_BEAT; // 1 小节 4 拍
+    let bar = (time_secs / bar_len).floor();
+    let bar_pos = time_secs - bar * bar_len; // 小节内偏移（0..bar_len）
+    let beat = bar_pos / MARCH_BEAT; // 小节内拍号（0..4）
+    let beat_idx = beat.floor();
+    let t_beat = (beat - beat_idx) * MARCH_BEAT; // 拍内偏移（秒）
+
+    let mut s = 0.0;
+
+    // 低音 pad：4 小节和弦循环，0.25s 起落包络 + 0.13Hz 慢 LFO
+    let chord = PAD_CHORDS[bar.rem_euclid(4.0) as usize];
+    let pad_env = ((bar_pos / 0.25).min(1.0)).min(((bar_len - bar_pos) / 0.25).min(1.0));
+    let lfo = 0.75 + 0.25 * (std::f32::consts::TAU * 0.13 * time_secs + bar * 1.7).sin();
+    for f in chord {
+        s += (std::f32::consts::TAU * f * time_secs).sin() * pad_env * lfo * 0.09;
+    }
+
+    // 行军节奏：底鼓 0/2 拍、军鼓 1/3 拍（鼓点持续 0.2s）
+    if t_beat < 0.2 {
+        match beat_idx as i32 {
+            0 | 2 => {
+                let f = 60.0 - 25.0 * (t_beat / 0.2);
+                s += (std::f32::consts::TAU * f * t_beat).sin() * (-t_beat * 18.0).exp() * 0.25;
+            }
+            1 | 3 => {
+                let idx = (time_secs * sample_rate) as u64;
+                s += hash_noise(idx) * (-t_beat * 30.0).exp() * 0.18;
+            }
+            _ => {}
+        }
+    }
+
+    // 旋律动机：16 音符循环（每拍一音），正弦 + 二次谐波
+    let total_beat = (time_secs / MARCH_BEAT).floor();
+    let note_idx = total_beat.rem_euclid(16.0) as usize;
+    let t_note = time_secs - total_beat * MARCH_BEAT;
+    let st = MELODY_MOTIF[note_idx];
+    if st >= 0 {
+        let f = 110.0 * 2.0f32.powf(st as f32 / 12.0);
+        let env = ((t_note / 0.02).min(1.0)) * (-t_note * 3.5).exp();
+        s += ((std::f32::consts::TAU * f * time_secs).sin()
+            + 0.3 * (std::f32::consts::TAU * 2.0 * f * time_secs).sin())
+            * env
+            * 0.08;
+    }
+
+    s
+}
+
+/// 纯函数：渲染 `frames = out.len()/2` 帧环境音乐并累加到 `out`（交错立体声，与混音输出格式一致）。
+/// 起始相位由绝对时间 `time_secs` 决定 → 同参数必得同输出；每样本先乘 `gain` 再钳位 [-1,1]。
+fn render_music_into(time_secs: f32, sample_rate: f32, gain: f32, out: &mut [f32]) {
+    debug_assert_eq!(out.len() % 2, 0);
+    for (i, pair) in out.chunks_exact_mut(2).enumerate() {
+        let t = time_secs + i as f32 / sample_rate;
+        let s = (music_wave(t, sample_rate) * gain).clamp(-1.0, 1.0);
+        pair[0] += s;
+        pair[1] += s;
+    }
+}
+
+/// 环境音乐合成器：确定性音乐渲染 + 淡入淡出音量渐变。
+///
+/// - 波形由 `music_wave`（纯函数，time_secs 驱动相位）渲染，单声道复制到 L/R；
+/// - `fade_level` 为淡入淡出增益（默认 0 = 静音），每 tick 以 `fade_secs`（默认 1.5s）
+///   线性逼近 `fade_target`（`set_target` 设置，主会话在菜单/战斗状态切换时调用）；
+/// - `channel_volume` 为混音总线 Music 通道音量（AudioPlayer 每帧从 Mixer 同步）。
+#[derive(Debug)]
+pub struct MusicSynth {
+    sample_rate: f32,
+    /// 累计时间相位（秒）：驱动确定性合成，淡入淡出期间持续推进（波形无缝）
+    time_secs: f32,
+    /// 淡入淡出目标音量（0..=1）
+    fade_target: f32,
+    /// 当前淡入淡出音量（0..=1）
+    fade_level: f32,
+    /// 淡入淡出时长（秒）
+    fade_secs: f32,
+    /// 音乐通道音量（混音总线，0..=1）
+    channel_volume: f32,
+}
+
+impl MusicSynth {
+    /// 以指定采样率创建合成器（默认静音：fade_target=0；sample_rate=0 回退 44100）
+    pub fn new(sample_rate: u32) -> Self {
+        let sr = if sample_rate == 0 { 44_100 } else { sample_rate };
+        Self {
+            sample_rate: sr as f32,
+            time_secs: 0.0,
+            fade_target: 0.0,
+            fade_level: 0.0,
+            fade_secs: MUSIC_FADE_SECS,
+            channel_volume: 1.0,
+        }
+    }
+
+    /// 设置淡入淡出目标音量（clamp [0,1]；主会话在菜单/战斗状态切换时调用）
+    pub fn set_target(&mut self, volume: f32) {
+        self.fade_target = volume.clamp(0.0, 1.0);
+    }
+
+    /// 设置音乐通道音量（混音总线：AudioPlayer 每帧从 Mixer 同步）
+    pub fn set_channel_volume(&mut self, volume: f32) {
+        self.channel_volume = volume.clamp(0.0, 1.0);
+    }
+
+    /// 当前淡入淡出增益（0..=1）
+    pub fn level(&self) -> f32 {
+        self.fade_level
+    }
+
+    /// 推进淡入淡出并渲染 `frames` 帧到 `out`（交错立体声，累加进现有缓冲）
+    pub fn render(&mut self, frames: usize, out: &mut [f32]) {
+        debug_assert_eq!(out.len(), frames * 2);
+        if frames == 0 {
+            return;
+        }
+        let dt = 1.0 / self.sample_rate;
+        self.fade_level = fade_step(
+            self.fade_level,
+            self.fade_target,
+            frames as f32 * dt,
+            self.fade_secs,
+        );
+        let gain = self.fade_level * self.channel_volume;
+        if gain > 0.0 {
+            render_music_into(self.time_secs, self.sample_rate, gain, out);
+        }
+        self.time_secs += frames as f32 * dt;
     }
 }
 
@@ -1910,5 +2137,275 @@ mod tests {
         assert_eq!(got.len(), 256);
         assert!(got.iter().any(|&s| s != 0.0), "DSP 声部应进入 sink");
         assert!(got.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+    }
+
+    // ---------- 程序化环境音乐 ----------
+
+    /// 用纯函数路径渲染 `frames` 帧音乐（gain 前置乘），返回交错立体声缓冲
+    fn render_music_buffer(time_secs: f32, sample_rate: u32, frames: usize, gain: f32) -> Vec<f32> {
+        let mut out = vec![0.0; frames * 2];
+        render_music_into(time_secs, sample_rate as f32, gain, &mut out);
+        out
+    }
+
+    #[test]
+    fn music_wave_is_deterministic_pure() {
+        // 同 time_secs → 同输出（纯函数）
+        for t in [0.0f32, 0.5, 1.234, 60.0, 12345.678] {
+            assert_eq!(music_wave(t, 48_000.0), music_wave(t, 48_000.0), "t={t}");
+        }
+        // 相位驱动：连续时间推进输出应变化（非常量）
+        let mut prev = music_wave(0.0, 48_000.0);
+        let mut changed = false;
+        for i in 1..100 {
+            let cur = music_wave(i as f32 * 0.001, 48_000.0);
+            if (cur - prev).abs() > 1e-6 {
+                changed = true;
+                break;
+            }
+            prev = cur;
+        }
+        assert!(changed, "音乐波形应随时间变化");
+        // 缓冲级确定性：同起始 time_secs 两次渲染逐样本一致
+        assert_eq!(
+            render_music_buffer(3.21, 48_000, 2000, 1.0),
+            render_music_buffer(3.21, 48_000, 2000, 1.0)
+        );
+    }
+
+    #[test]
+    fn music_render_output_length_and_stereo_format() {
+        let frames = 137;
+        let out = render_music_buffer(3.21, 48_000, frames, 1.0);
+        assert_eq!(out.len(), frames * 2, "交错立体声：2×frames 样本");
+        for pair in out.chunks_exact(2) {
+            assert_eq!(pair[0], pair[1], "音乐单声道复制到 L/R");
+        }
+    }
+
+    #[test]
+    fn music_render_samples_finite_and_bounded() {
+        let out = render_music_buffer(0.0, 48_000, 4 * 48_000, 1.0); // 4s（约 2 小节）
+        for (i, &s) in out.iter().enumerate() {
+            assert!(s.is_finite(), "sample {i} 应为有限值");
+            assert!(s.abs() <= 1.0, "sample {i} = {s} 超出 [-1,1]");
+        }
+        assert!(out.iter().any(|&s| s != 0.0), "应有非零样本");
+    }
+
+    #[test]
+    fn music_bass_pad_dominates_low_frequency_band() {
+        // 渲染 2 小节（~4.29s）：一阶低通 150Hz 后保留的能量占比应显著（pad/底鼓均低频）
+        let sr = 48_000.0;
+        let frames = (2.0 * 4.0 * MARCH_BEAT * sr) as usize;
+        let out = render_music_buffer(0.0, 48_000, frames, 1.0);
+        let alpha = lowpass_alpha(sr, 150.0);
+        let mut lp = 0.0f32;
+        let mut low_energy = 0.0f32;
+        let mut total_energy = 0.0f32;
+        for &s in out.iter() {
+            lp += alpha * (s - lp);
+            low_energy += lp * lp;
+            total_energy += s * s;
+        }
+        assert!(total_energy > 0.0);
+        let ratio = low_energy / total_energy;
+        assert!(ratio > 0.3, "低频能量占比 {ratio} 过低（pad/底鼓应主导）");
+    }
+
+    #[test]
+    fn music_march_rhythm_makes_energy_pulse() {
+        // 0.1s 窗能量随鼓点起伏：最大/最小窗能量比应显著 > 1
+        let sr = 48_000.0;
+        let frames = (2.0 * 4.0 * MARCH_BEAT * sr) as usize;
+        let out = render_music_buffer(0.0, 48_000, frames, 1.0);
+        let win = (0.1 * sr) as usize;
+        let mut wins = Vec::new();
+        for chunk in out.chunks(win * 2) {
+            let e: f32 = chunk.iter().map(|s| s * s).sum::<f32>() / (chunk.len() as f32);
+            wins.push(e);
+        }
+        let max = wins.iter().cloned().fold(0.0f32, f32::max);
+        let min = wins.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(min > 0.0 && max > 0.0);
+        assert!(max / min > 1.3, "窗能量比 {:.3} 应体现鼓点起伏", max / min);
+    }
+
+    #[test]
+    fn music_fade_step_is_monotonic_and_converges() {
+        // 0 → 1，fade_secs=1.5，dt=0.15 → 10 步恰好到达 target，且单调不减、不越过
+        let mut level = 0.0f32;
+        let mut prev = level;
+        for i in 1..=10 {
+            level = fade_step(level, 1.0, 0.15, 1.5);
+            assert!(level >= prev, "淡入应单调不减");
+            assert!(level <= 1.0, "不得越过 target");
+            if i < 10 {
+                assert!(level < 1.0, "第 {i} 步不应提前到达");
+            }
+            prev = level;
+        }
+        assert!((level - 1.0).abs() < EPS, "10 步后应恰好到达 target");
+        // 淡出方向同样单调且收敛
+        let mut level = 1.0f32;
+        for _ in 0..10 {
+            let next = fade_step(level, 0.0, 0.15, 1.5);
+            assert!(next <= level, "淡出应单调不减音量");
+            level = next;
+        }
+        assert_eq!(level, 0.0, "10 步后淡出完成");
+    }
+
+    #[test]
+    fn music_fade_retargets_mid_fade_and_edge_cases() {
+        // 中途改目标 → 收敛到新目标
+        let mut level = 0.0f32;
+        for _ in 0..6 {
+            level = fade_step(level, 0.8, 0.1, 1.5);
+        }
+        assert!((level - 0.4).abs() < 1e-5, "0.6s 后应到 0.4，实际 {level}");
+        for _ in 0..10 {
+            level = fade_step(level, 0.2, 0.1, 1.5);
+        }
+        assert!((level - 0.2).abs() < 1e-5, "改目标后应收敛到 0.2");
+        // fade_secs=0 → 直接跳变
+        assert_eq!(fade_step(0.3, 0.9, 0.1, 0.0), 0.9);
+        // dt=0 → 不动
+        assert_eq!(fade_step(0.3, 0.9, 0.0, 1.5), 0.3);
+        // target 越界 clamp 到 [0,1]，并按一步逼近（不是直接跳变）
+        let v = fade_step(0.5, 2.0, 0.1, 1.5);
+        assert!(
+            (v - (0.5 + 0.1 / 1.5)).abs() < 1e-5,
+            "clamp 后向 target 一步逼近，实际 {v}"
+        );
+    }
+
+    #[test]
+    fn music_synth_default_silent_then_fades_in() {
+        let mut m = MusicSynth::new(48_000);
+        assert_eq!(m.level(), 0.0);
+        assert_eq!(m.fade_target, 0.0);
+        assert_eq!(m.fade_secs, MUSIC_FADE_SECS);
+        // 默认静音：渲染不产生任何输出（输出保持不变）
+        let mut out = vec![0.5; 8];
+        m.render(4, &mut out);
+        assert_eq!(out, vec![0.5; 8], "静音时不应改动输出");
+        // 设置目标后逐 tick 淡入
+        m.set_target(1.0);
+        let mut out = vec![0.0; 8];
+        m.render(4, &mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "淡入开始后应有输出");
+        assert!(m.level() > 0.0 && m.level() < 1.0, "淡入中：0 < level < 1");
+        // 推进超过淡入时长 → 到达满音量
+        let need = (MUSIC_FADE_SECS * 48_000.0) as usize / 4;
+        for _ in 0..need {
+            m.render(4, &mut out);
+        }
+        assert!((m.level() - 1.0).abs() < 1e-3, "淡入完成后 level 应到 1.0");
+    }
+
+    #[test]
+    fn music_synth_fades_out_to_silence() {
+        let mut m = MusicSynth::new(48_000);
+        m.set_target(1.0);
+        let mut buf = vec![0.0f32; 4800];
+        let need = (MUSIC_FADE_SECS * 48_000.0) as usize / 2400;
+        for _ in 0..need {
+            m.render(2400, &mut buf);
+        }
+        assert!((m.level() - 1.0).abs() < 1e-3, "淡入完成");
+        // 设为 0 → 淡出到静音
+        m.set_target(0.0);
+        let mut scratch = vec![0.0f32; 4800];
+        for _ in 0..need {
+            m.render(2400, &mut scratch);
+        }
+        assert_eq!(m.level(), 0.0, "淡出完成后应静音");
+        let mut final_out = vec![0.0f32; 4800];
+        m.render(2400, &mut final_out);
+        assert!(final_out.iter().all(|&s| s == 0.0), "静音后渲染应全零");
+    }
+
+    #[test]
+    fn audio_player_bus_music_channel_gates_music_only() {
+        // 混音总线：Music 通道音量 = 0 → 音乐不进入输出，且 Sfx 声音不受影响
+        let clip = const_clip(0.5, 8);
+        // 参考：音乐默认静音（target=0）→ 纯 Sfx
+        let mut ref_player = AudioPlayer::new(CollectingSink::new(48_000, 2));
+        ref_player
+            .mixer_mut()
+            .play(clip.clone(), AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
+        ref_player.tick(&AudioListener::new(Vec3::ZERO), 8);
+
+        // 音乐目标满音量 + Music 通道 0 → 输出应与「音乐静音」参考逐样本一致
+        let mut muted = AudioPlayer::new(CollectingSink::new(48_000, 2));
+        muted.set_music_target(1.0);
+        muted.mixer_mut().set_channel_volume(Channel::Music, 0.0);
+        muted
+            .mixer_mut()
+            .play(clip.clone(), AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
+        muted.tick(&AudioListener::new(Vec3::ZERO), 8);
+
+        // 音乐通道 1.0 → 音乐进入输出（与静音参考不同）
+        let mut full = AudioPlayer::new(CollectingSink::new(48_000, 2));
+        full.set_music_target(1.0);
+        full.mixer_mut().set_channel_volume(Channel::Music, 1.0);
+        full
+            .mixer_mut()
+            .play(clip.clone(), AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
+        full.tick(&AudioListener::new(Vec3::ZERO), 8);
+
+        assert_eq!(
+            muted.sink().samples,
+            ref_player.sink().samples,
+            "Music 通道 0 → 与无音乐参考一致"
+        );
+        assert_ne!(
+            full.sink().samples,
+            muted.sink().samples,
+            "Music 通道 1 → 音乐应进入输出"
+        );
+        assert!(full.sink().samples.iter().any(|&s| s != 0.0));
+    }
+
+    #[test]
+    fn audio_player_music_tick_frames_and_silent_sink_no_panic() {
+        // 静默后端 + 音乐淡入：tick 多帧不 panic，增益单调收敛到 target（采样率/帧数正确）
+        let mut player = AudioPlayer::new(SilentSink::new(48_000, 2));
+        player.set_music_target(0.8);
+        let mut prev = player.music_gain();
+        for _ in 0..300 {
+            player.tick(&AudioListener::new(Vec3::ZERO), 256);
+            let cur = player.music_gain();
+            assert!(cur >= prev, "tick 中音乐增益应单调逼近 target");
+            assert!(cur <= 0.8 + 1e-6, "增益不得越过 target");
+            prev = cur;
+        }
+        // 300×256 帧 = 1.6s > 1.5s 淡入时长 → 应已收敛到 0.8
+        assert!((player.music_gain() - 0.8).abs() < 1e-3, "淡入完成应达 target");
+    }
+
+    #[test]
+    fn dsp_synth_music_does_not_break_sfx_chain() {
+        // 默认静音下现有事件合成链路不变（枪声有输出、结束后静音）
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut synth = DspSynth::new(48_000);
+        synth.play_shot(Vec3::ZERO, 1.0);
+        // 枪声 ADSR 约 0.122s：一次渲染 0.175s 播完整个枪声
+        let mut out = vec![0.0; 16_800];
+        synth.render(&listener, 8400, &mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "枪声链路不受音乐影响");
+        assert_eq!(synth.voice_count(), 0, "枪声播完声部应清理");
+        let mut rest = vec![0.0; 4800];
+        synth.render(&listener, 2400, &mut rest);
+        assert!(rest.iter().all(|&s| s == 0.0), "默认音乐静音：结束后输出全零");
+        // 开启音乐：音乐叠加进同一缓冲，且样本仍有界
+        let mut synth2 = DspSynth::new(48_000);
+        synth2.play_shot(Vec3::ZERO, 1.0);
+        synth2.set_music_target(1.0);
+        let mut out2 = vec![0.0; 4800];
+        synth2.render(&listener, 2400, &mut out2);
+        assert!(out2.iter().any(|&s| s != 0.0), "音乐开启后输出应含音乐");
+        assert!(out2.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
     }
 }
