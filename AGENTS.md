@@ -41,6 +41,34 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-08-14] 交接：总指挥指令单 #2 完成（桥接收尾 + 战术纵深 + 音频氛围）
+
+- 日期：2026-08-14
+- 发起方：主会话 AI（DeepCode）+ Agent A（audio.rs 音乐）
+- 接收方：总指挥 / 后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - **阶段一 ObjectiveState 桥接（commit `e840d6b` feat(net) + game.rs 部分随 `f705a28`）**：服务端 step_net_server 每 tick 广播 ObjectiveState(0x07)（归属码 Team↔0/1/2）；客户端 Client 新增 objective 状态字段 + handle_message 消费（乱序/重复丢弃）+ getter；step_net 日志带 obj/rule；回环测试 `net_objective_state_loopback_broadcast_consumed`（服务端广播 → 客户端解析据点归属/进度）；PROTOCOL_VERSION 不变向后兼容。
+  - **阶段二 CoverSeek 互射触发（commit `f705a28` feat(ai)）**：压力模式 Chase 态目标 ≤ attack_range+40m 进 CoverSeek（advance 沿目标方向 `find_cover_shielding` 找遮挡掩体，`STRESS_COVER_MAX_DIST=35` 格覆盖障碍环带）；压力 Attack 态站定于掩体旁 → 标记 CoverSeek 持续可见；普通模式行为零回归（pick_attack_cover + 环带过滤不变）。flank_chance 0.1→0.22（wave1）。新增单测 `stress_cover_seek_triggers_near_obstacle`。**实测（压力 32v32 + street_fight，3 分钟）：突进 62% | 包抄 10% | 偷袭 15% | 撤退 9% | 掩体 4%，智能战术合计 29% ≥ 25%**。
+  - **阶段三 程序化环境音乐（commit `346da6b` feat(audio)）**：Agent A 在 audio.rs 实现 MusicSynth 三声部（低音 pad 和弦循环/112BPM 行军节奏/A 小调五声音阶旋律，纯函数绝对时间驱动确定性）+ 混音总线 Music 通道接入 + 1.5s 淡入淡出（fade_step 纯函数）；game.rs 按 game_state 设 set_music_target（战斗 1.0/菜单 0.3）；12 新单测 audio 48 tests；实跑 VUID=0、panic=0、无爆音。
+  - **验收（主会话独立复核）**：339 tests（+14：net 回环 1 + CoverSeek 1 + audio 12）/ 0 失败 / 0 警告；冒烟 ALL-OK（EXIT=0、VUID=0、kills=1、fps 190-263）；压力模式实测 VUID=0、panic=0。4 commits 已推送。
+  - **修正上轮笔误**：指令单 #1 实为 **5** 个 commit（74a74dd/18f2808/331e3d9/20421f0/9e8ff9b），上轮交接记录误写"4 commits"，此处更正。
+  - **遗留/下一步**：① 客户端 HUD 接入 ObjectiveState（解析已完成，数据接入 UI 后置）；② 音乐音量可调（Music 通道独立音量 API 已备，未接设置面板）；③ 压力模式多轮补员下 CoverSeek 占比 4% 偏低（掩体密度决定），如需更高可加 TOML 关卡掩体；④ Agent 并行教训已记录（>5min 无输出主会话接管）。
+- 状态：done
+
+### [2026-08-14] 交接：总指挥指令单 #2 开启（桥接收尾 + 战术纵深 + 音频氛围）
+
+- 日期：2026-08-14
+- 发起方：总指挥（外部模型）/ 主会话 AI（DeepCode）
+- 接收方：Agent A（audio.rs 程序化音乐）/ 主会话（net 桥接 + CoverSeek 扩展）
+- 交接类型：规划开启
+- 交接内容：
+  - **阶段一（ObjectiveState 桥接）**：服务端每帧用 objective 状态组包（Team↔0/1/2 归属码映射）广播 `NetworkMessage::ObjectiveState(0x07)`；客户端消费解析据点归属/进度（日志 + 状态字段，HUD 接入后置）；单机双进程回环验证；PROTOCOL_VERSION 不变。
+  - **阶段二（CoverSeek 互射触发）**：NPC 目标交火时利用附近障碍（环带/TOML barrier/cover）进入掩体利用状态（贴掩体 + 探头射击）；压力模式出现非零 CoverSeek；调优 flank_chance/Flanker 权重使 包抄+偷袭+掩体 ≥ 25%；普通波次零回归。
+  - **阶段三（程序化环境音乐）**：Agent A 在 audio.rs 实现 DspSynth 音乐合成（pad 低音 + 行军节奏 + 旋律动机，零资产）+ 混音总线（Music/Sfx 分层）+ 菜单/战斗淡入淡出；不破坏现有事件合成链路。
+  - **验收**：≥325 tests、0 警告、冒烟 ALL-OK、零新依赖、每阶段增量验证、AGENTS.md 交接（顺带修正上轮"4 commits"笔误为 5）。
+- 状态：in_progress
+
 ### [2026-08-14] 交接：总指挥指令单 #1 完成（关卡收尾 + AI 战术扩展）
 
 - 日期：2026-08-14
