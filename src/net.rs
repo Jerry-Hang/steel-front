@@ -765,6 +765,14 @@ pub struct Client {
     timeout: Duration,
     /// 上次发送 Join 的时刻（握手重试节流）
     last_join_at: Instant,
+    /// 目标状态（据点归属/进度）：最近收到（id, 归属码 0=中立/1=Red/2=Blue, 进度）
+    objective: Vec<(String, u8, f32)>,
+    /// 目标状态规则种类（如 "capture"）
+    objective_rule: String,
+    /// 最近目标状态序号（丢弃乱序/重复）
+    objective_seq: u32,
+    /// 是否收到过目标状态
+    has_objective: bool,
 }
 
 impl Client {
@@ -791,6 +799,10 @@ impl Client {
             timeout: CLIENT_TIMEOUT,
             // 首次 retry_join 立即发送握手包
             last_join_at: Instant::now() - Duration::from_secs(3600),
+            objective: Vec::new(),
+            objective_rule: String::new(),
+            objective_seq: 0,
+            has_objective: false,
         })
     }
 
@@ -899,6 +911,19 @@ impl Client {
                     }
                 }
             }
+            NetworkMessage::ObjectiveState { seq, rule_kind, points, .. } => {
+                // 目标状态（据点归属/进度）：乱序/重复丢弃（与 Snapshot 同策略）
+                if self.has_objective {
+                    let diff = seq.wrapping_sub(self.objective_seq);
+                    if diff == 0 || diff >= u32::MAX / 2 {
+                        return;
+                    }
+                }
+                self.has_objective = true;
+                self.objective_seq = seq;
+                self.objective_rule = rule_kind;
+                self.objective = points;
+            }
             _ => {}
         }
     }
@@ -926,6 +951,21 @@ impl Client {
     /// 服务端本机玩家状态（快照权威值；客户端可用作位置修正，应用为后续 TODO）
     pub fn own_state(&self) -> Option<PlayerState> {
         self.own_state
+    }
+
+    /// 最近收到的目标状态（据点 id, 归属码 0=中立/1=Red/2=Blue, 进度 0..=1）
+    pub fn objective_state(&self) -> &[(String, u8, f32)] {
+        &self.objective
+    }
+
+    /// 最近目标状态的规则种类（如 "capture"；未收到时为空串）
+    pub fn objective_rule(&self) -> &str {
+        &self.objective_rule
+    }
+
+    /// 是否收到过目标状态
+    pub fn has_objective(&self) -> bool {
+        self.has_objective
     }
 
     /// 远端实体插值表（key = 实体 id；NPC 与玩家共用）
