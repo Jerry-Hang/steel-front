@@ -5,6 +5,9 @@
 //! - `ProjectileWeapon`：投射物武器，发射沿直线运动的 `Projectile`
 //! - `Projectile`：投射物，直线运动 + 生命周期（飞行距离超过射程或存活超过寿命即销毁）
 //! - `Firearm`：弹匣武器状态机，封装弹匣/换弹/后坐力手感，集成时由游戏侧每帧驱动
+//! - `thompson_smg` / `thompson_smg_firearm`：汤姆森冲锋枪工厂（低伤高射速中距压制）
+//! - `WeaponRack`：多武器槽切换状态机，支持循环切换与切换计时
+//! - `Grenade`：手榴弹投掷物（抛物线弹道 + 引信计时，到期爆炸）
 //!
 //! 当前仅使用标准库，无第三方依赖；如将来需要新增依赖，在文件头部按
 //! `// DEP: crate = version` 格式声明。
@@ -407,6 +410,194 @@ impl Firearm {
     }
 }
 
+/// 汤姆森冲锋枪（Thompson SMG）工厂：低伤高射速的中距压制武器
+///
+/// 与 M1 Rifle（25 伤 × 3/s 远距精准）差异化：单发 12 伤 × 10/s（DPS 更高、
+/// 压制力强，但单发停火能力弱）；弹匣/备弹/后坐力由 `thompson_smg_firearm` 封装。
+pub fn thompson_smg() -> ProjectileWeapon {
+    ProjectileWeapon::new(
+        "Thompson SMG",
+        12.0,  // 单发伤害
+        10.0,  // 射速 10 发/秒
+        140.0, // 有效射程（中距离）
+        120.0, // 投射物速度 120 米/秒
+        1.2,   // 投射物寿命 1.2 秒（120×1.2=144m ≥ 射程 140m，射程先耗尽）
+    )
+}
+
+/// 汤姆森冲锋枪弹匣武器：弹匣 30 / 备弹 120，换弹 2.2s，
+/// 后坐力大于 M1（kick_pitch 0.014 / kick_yaw 0.004）以体现中距离散布略大。
+pub fn thompson_smg_firearm() -> Firearm {
+    Firearm::new(
+        thompson_smg(),
+        30,   // 弹匣容量
+        120,  // 备弹
+        2.2,  // 换弹时间（秒）
+        0.02, // 每发上跳后坐力（弧度）
+        0.006, // 每发水平后坐力（弧度）
+    )
+}
+
+/// 多武器槽切换状态机：持有若干 (名称, Firearm) 武器槽，支持循环切换与切换计时。
+///
+/// 集成语义：切换期间（`is_switching` 为 true）游戏侧禁止开火/换弹；
+/// 每帧调用 `update` 推进切换计时。纯计时器，无动画。
+pub struct WeaponRack {
+    /// 武器槽列表（名称, 弹匣武器）
+    weapons: Vec<(String, Firearm)>,
+    /// 当前激活槽索引
+    active: usize,
+    /// 切换剩余时间（秒）
+    switch_timer: f32,
+    /// 单次切换所需时间（秒）
+    switch_time: f32,
+}
+
+impl WeaponRack {
+    /// 创建武器架：初始激活 0 号槽，未在切换中
+    pub fn new(pairs: Vec<(String, Firearm)>, switch_time: f32) -> Self {
+        Self {
+            weapons: pairs,
+            active: 0,
+            switch_timer: 0.0,
+            switch_time: switch_time.max(0.0),
+        }
+    }
+
+    /// 当前激活槽的武器名（空架返回空串）
+    pub fn active_name(&self) -> &str {
+        self.weapons
+            .get(self.active)
+            .map(|(name, _)| name.as_str())
+            .unwrap_or("")
+    }
+
+    /// 当前激活武器的可变引用（开火/换弹/补给）
+    pub fn active_firearm(&mut self) -> &mut Firearm {
+        &mut self.weapons[self.active].1
+    }
+
+    /// 当前激活武器的不可变引用
+    pub fn active_firearm_ref(&self) -> &Firearm {
+        &self.weapons[self.active].1
+    }
+
+    /// 切换到指定槽位：索引有效且非当前才生效，并启动切换计时
+    pub fn switch_to(&mut self, index: usize) {
+        if index < self.weapons.len() && index != self.active {
+            self.active = index;
+            self.switch_timer = self.switch_time;
+        }
+    }
+
+    /// 循环切换到下一个槽位（末尾回到 0）
+    pub fn switch_next(&mut self) {
+        if !self.weapons.is_empty() {
+            self.switch_to((self.active + 1) % self.weapons.len());
+        }
+    }
+
+    /// 循环切换到上一个槽位（开头回到末尾）
+    pub fn switch_prev(&mut self) {
+        if !self.weapons.is_empty() {
+            self.switch_to((self.active + self.weapons.len() - 1) % self.weapons.len());
+        }
+    }
+
+    /// 按时间步长推进切换计时（向 0 收敛；dt<=0 不推进）+ 当前武器的换弹/冷却计时
+    pub fn update(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        self.switch_timer = (self.switch_timer - dt).max(0.0);
+        if let Some((_, firearm)) = self.weapons.get_mut(self.active) {
+            firearm.update(dt);
+        }
+    }
+
+    /// 是否正在切换（切换期间禁止开火/换弹）
+    pub fn is_switching(&self) -> bool {
+        self.switch_timer > 0.0
+    }
+
+    /// 武器槽数量
+    pub fn len(&self) -> usize {
+        self.weapons.len()
+    }
+}
+
+/// 手榴弹初速（米/秒），供主会话投掷时使用
+pub const GRENADE_SPEED: f32 = 18.0;
+/// 引信最短时长（秒）
+pub const GRENADE_FUSE_MIN: f32 = 1.5;
+/// 引信最长时长（秒）
+pub const GRENADE_FUSE_MAX: f32 = 2.5;
+/// 手榴弹重力加速度（米/秒²）
+pub const GRENADE_GRAVITY: f32 = 9.8;
+
+/// 手榴弹投掷物：抛物线弹道 + 引信计时，引信到期即 `exploded`（爆炸效果由游戏侧
+/// `spawn_explosion` 触发）。
+pub struct Grenade {
+    /// 当前位置（x, y, z）
+    pos: [f32; 3],
+    /// 速度向量（米/秒），垂直分量每帧受重力修正
+    vel: [f32; 3],
+    /// 引信剩余时间（秒）
+    fuse: f32,
+    /// 引信总时长（秒），与传入 fuse 一致，供 HUD/进度展示
+    fuse_max: f32,
+    /// 重力加速度（米/秒²）
+    gravity: f32,
+}
+
+impl Grenade {
+    /// 创建手榴弹：`origin` 为出手位置，`dir` 为投掷方向（自动归一化），
+    /// `speed` 为初速，`fuse` 为引信时长（调用方在 1.5~2.5s 区间取值，本模块原样使用）
+    pub fn new(origin: [f32; 3], dir: [f32; 3], speed: f32, fuse: f32) -> Self {
+        let length = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let inv = if length > f32::EPSILON {
+            1.0 / length
+        } else {
+            0.0
+        };
+        let fuse = fuse.max(0.0);
+        Self {
+            pos: origin,
+            vel: [dir[0] * inv * speed, dir[1] * inv * speed, dir[2] * inv * speed],
+            fuse,
+            fuse_max: fuse,
+            gravity: GRENADE_GRAVITY,
+        }
+    }
+
+    /// 按时间步长推进：水平匀速、垂直受重力加速（抛物线），引信同步倒数
+    pub fn update(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        self.pos[0] += self.vel[0] * dt;
+        self.pos[1] += self.vel[1] * dt;
+        self.pos[2] += self.vel[2] * dt;
+        self.vel[1] -= self.gravity * dt;
+        self.fuse -= dt;
+    }
+
+    /// 引信是否已到期（到期即应触发爆炸）
+    pub fn exploded(&self) -> bool {
+        self.fuse <= 0.0
+    }
+
+    /// 当前位置
+    pub fn position(&self) -> [f32; 3] {
+        self.pos
+    }
+
+    /// 初始引信时长（秒，供爆炸结算/日志参考）
+    pub fn fuse_max(&self) -> f32 {
+        self.fuse_max
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,5 +852,258 @@ mod tests {
         gun.update(10.0);
         assert!((gun.reload_progress() - 1.0).abs() < 1e-6);
         assert!((gun.ammo_ratio() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn thompson_smg_params_locked() {
+        let smg = thompson_smg();
+        assert_eq!(smg.name(), "Thompson SMG");
+        assert_eq!(smg.damage(), 12.0);
+        assert_eq!(smg.fire_rate(), 10.0);
+        assert_eq!(smg.range(), 140.0);
+        assert_eq!(smg.projectile_speed(), 120.0);
+        assert_eq!(smg.projectile_lifetime(), 1.2);
+
+        // 低伤高射速差异化锁定：射速 ≥ 8/s、伤害 10~15、中距离射程
+        assert!(smg.fire_rate() >= 8.0);
+        assert!((10.0..=15.0).contains(&smg.damage()));
+        assert!((50.0..=300.0).contains(&smg.range()));
+
+        // 有效射程内投射物可达：120 m/s × 1.2 s = 144 m ≥ 射程 140 m
+        assert!(smg.projectile_speed() * smg.projectile_lifetime() >= smg.range());
+    }
+
+    #[test]
+    fn thompson_smg_firearm_magazine_reserve_and_recoil() {
+        let mut gun = thompson_smg_firearm();
+        assert_eq!(gun.max_magazine(), 30);
+        assert_eq!(gun.magazine(), 30);
+        assert_eq!(gun.reserve(), 120);
+        assert!(gun.can_fire());
+
+        // 后坐力略大于 M1 基线（kick_pitch 0.014 / kick_yaw 0.004）
+        let (pitch, yaw) = gun.current_kick();
+        assert!(pitch > 0.014);
+        assert!(yaw > 0.004);
+
+        // 弹匣 30 发全部可发射
+        let mut shots = 0;
+        while gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_some() {
+            shots += 1;
+        }
+        assert_eq!(shots, 30);
+        assert_eq!(gun.magazine(), 0);
+    }
+
+    fn sample_rack() -> WeaponRack {
+        WeaponRack::new(
+            vec![
+                (
+                    "M1 Rifle".to_string(),
+                    Firearm::new(
+                        ProjectileWeapon::new("M1", 25.0, 3.0, 300.0, 300.0, 2.0),
+                        8,
+                        40,
+                        1.5,
+                        0.014,
+                        0.004,
+                    ),
+                ),
+                ("Thompson SMG".to_string(), thompson_smg_firearm()),
+            ],
+            0.4,
+        )
+    }
+
+    #[test]
+    fn weapon_rack_new_starts_at_zero() {
+        let rack = sample_rack();
+        assert_eq!(rack.len(), 2);
+        assert_eq!(rack.active_name(), "M1 Rifle");
+        assert!(!rack.is_switching());
+        assert_eq!(rack.active_firearm_ref().max_magazine(), 8);
+    }
+
+    #[test]
+    fn weapon_rack_switch_to_valid_and_ignores_invalid() {
+        let mut rack = sample_rack();
+
+        // 有效切换：激活槽改变、进入切换状态
+        rack.switch_to(1);
+        assert_eq!(rack.active_name(), "Thompson SMG");
+        assert!(rack.is_switching());
+        assert_eq!(rack.active_firearm_ref().max_magazine(), 30);
+
+        // 无效索引：忽略，仍指向当前槽
+        rack.switch_to(99);
+        assert_eq!(rack.active_name(), "Thompson SMG");
+
+        // 同索引切换：忽略且不重置计时
+        rack.update(0.2);
+        assert!(rack.is_switching());
+        rack.switch_to(1);
+        rack.update(0.2);
+        assert!(!rack.is_switching());
+    }
+
+    #[test]
+    fn weapon_rack_switch_cycles_next_and_prev() {
+        let mut rack = sample_rack();
+        rack.switch_next(); // 0 → 1
+        assert_eq!(rack.active_name(), "Thompson SMG");
+        rack.switch_next(); // 1 → 0（循环）
+        assert_eq!(rack.active_name(), "M1 Rifle");
+        rack.switch_prev(); // 0 → 1（循环回末尾）
+        assert_eq!(rack.active_name(), "Thompson SMG");
+        rack.switch_prev(); // 1 → 0
+        assert_eq!(rack.active_name(), "M1 Rifle");
+    }
+
+    #[test]
+    fn weapon_rack_update_timer_and_switch_finishes() {
+        let mut rack = WeaponRack::new(
+            vec![
+                ("A".to_string(), thompson_smg_firearm()),
+                (
+                    "B".to_string(),
+                    Firearm::new(
+                        ProjectileWeapon::new("B", 25.0, 3.0, 300.0, 300.0, 2.0),
+                        8,
+                        40,
+                        1.5,
+                        0.014,
+                        0.004,
+                    ),
+                ),
+                ("C".to_string(), thompson_smg_firearm()),
+            ],
+            1.0,
+        );
+        rack.switch_to(2);
+        assert_eq!(rack.active_name(), "C");
+        assert!(rack.is_switching());
+
+        // 切换中途：计时递减、active 保持指向目标槽
+        rack.update(0.25);
+        assert!(rack.is_switching());
+        assert_eq!(rack.active_name(), "C");
+
+        // 计时耗尽：切换完成
+        rack.update(0.75);
+        assert!(!rack.is_switching());
+        assert_eq!(rack.active_name(), "C");
+
+        // dt<=0 不推进计时
+        rack.switch_to(1);
+        rack.update(0.0);
+        assert!(rack.is_switching());
+        rack.update(-1.0);
+        assert!(rack.is_switching());
+    }
+
+    #[test]
+    fn weapon_rack_empty_is_safe_for_switch() {
+        let mut rack = WeaponRack::new(vec![], 0.5);
+        assert_eq!(rack.len(), 0);
+        assert_eq!(rack.active_name(), "");
+        rack.switch_to(0);
+        rack.switch_next();
+        rack.switch_prev();
+        rack.update(0.5);
+        assert!(!rack.is_switching());
+    }
+
+    #[test]
+    fn weapon_rack_active_firearm_mutates_active_slot() {
+        let mut rack = sample_rack();
+        // 可变引用作用于当前槽：打一发，弹匣 8 → 7
+        assert!(rack
+            .active_firearm()
+            .try_fire([0.0; 3], [1.0, 0.0, 0.0])
+            .is_some());
+        assert_eq!(rack.active_firearm_ref().magazine(), 7);
+
+        // 切到 Thompson 后，可变引用操作的是另一把枪（弹匣仍满 30）
+        rack.switch_to(1);
+        assert_eq!(rack.active_firearm_ref().magazine(), 30);
+        rack.active_firearm().start_reload(); // 满弹匣换弹无效
+        assert!(!rack.active_firearm_ref().is_reloading());
+    }
+
+    #[test]
+    fn grenade_constants_locked() {
+        assert_eq!(GRENADE_GRAVITY, 9.8);
+        assert_eq!(GRENADE_FUSE_MIN, 1.5);
+        assert_eq!(GRENADE_FUSE_MAX, 2.5);
+        assert!(GRENADE_SPEED > 0.0);
+        assert!(GRENADE_FUSE_MIN < GRENADE_FUSE_MAX);
+    }
+
+    #[test]
+    fn grenade_parabola_horizontal_and_vertical() {
+        // 水平抛出：水平匀速（x = vx*t），垂直按 0.5*g*t² 下落（小步长离散误差 < 0.01）
+        let mut g = Grenade::new([0.0, 5.0, 0.0], [1.0, 0.0, 0.0], GRENADE_SPEED, 2.0);
+        let dt = 0.001_f32;
+        let steps = 500; // 总时长 0.5s
+        for _ in 0..steps {
+            g.update(dt);
+        }
+        let pos = g.position();
+        let t = dt * steps as f32;
+        assert!((pos[0] - GRENADE_SPEED * t).abs() < 1e-3); // 水平匀速
+        assert_eq!(pos[2], 0.0);
+        let drop = 0.5 * GRENADE_GRAVITY * t * t;
+        assert!((pos[1] - (5.0 - drop)).abs() < 0.01); // 垂直符合 0.5gt²
+        assert!(pos[1] < 5.0); // 确实在下落
+
+        // 上抛：垂直位移 = vy*t - 0.5*g*t²
+        let mut up = Grenade::new([0.0; 3], [0.0, 1.0, 0.0], 20.0, 2.0);
+        for _ in 0..steps {
+            up.update(dt);
+        }
+        let expected_y = 20.0 * t - 0.5 * GRENADE_GRAVITY * t * t;
+        assert!((up.position()[1] - expected_y).abs() < 0.01);
+    }
+
+    #[test]
+    fn grenade_fuse_countdown_and_expiry() {
+        let mut g = Grenade::new([0.0; 3], [1.0, 0.0, 0.0], 10.0, 1.5);
+        assert_eq!(g.fuse_max, 1.5);
+        assert!(!g.exploded());
+
+        g.update(0.5);
+        assert!(!g.exploded()); // 引信未到期
+        assert!((g.fuse - 1.0).abs() < 1e-6); // 剩余 1.0s
+
+        g.update(1.0);
+        assert!(g.exploded()); // 1.5s 到期
+
+        // 到期后继续 update：exploded 保持 true（爆炸由游戏侧处理）
+        g.update(0.1);
+        assert!(g.exploded());
+    }
+
+    #[test]
+    fn grenade_initial_velocity_uses_normalized_dir_times_speed() {
+        // 未归一化方向 (2,0,0)：归一化后初速应为 (speed, 0, 0)
+        let g = Grenade::new([1.0, 2.0, 3.0], [2.0, 0.0, 0.0], 18.0, 2.0);
+        assert_eq!(g.vel, [18.0, 0.0, 0.0]);
+        assert_eq!(g.position(), [1.0, 2.0, 3.0]); // 位置记录起点
+
+        // 斜向 45°：水平/垂直分量 = speed/√2
+        let diag = Grenade::new([0.0; 3], [1.0, 1.0, 0.0], 20.0, 2.0);
+        let c = 20.0 / 2.0_f32.sqrt();
+        assert!((diag.vel[0] - c).abs() < 1e-4);
+        assert!((diag.vel[1] - c).abs() < 1e-4);
+        assert_eq!(diag.vel[2], 0.0);
+    }
+
+    #[test]
+    fn grenade_uses_passed_fuse_value() {
+        // 引信由调用方在 GRENADE_FUSE_MIN/MAX 区间取值，本模块原样使用
+        let g = Grenade::new([0.0; 3], [0.0, 0.0, 1.0], 10.0, GRENADE_FUSE_MAX);
+        assert_eq!(g.fuse, GRENADE_FUSE_MAX);
+        assert_eq!(g.fuse_max, GRENADE_FUSE_MAX);
+        assert!(!g.exploded());
     }
 }
