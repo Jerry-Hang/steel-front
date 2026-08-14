@@ -41,6 +41,34 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-08-14] 交接：总指挥指令单 #1 完成（关卡收尾 + AI 战术扩展）
+
+- 日期：2026-08-14
+- 发起方：主会话 AI（DeepCode）+ Agent A（allow 移除）/ Agent C（ObjectiveState 网络）
+- 接收方：总指挥 / 后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - **阶段一① dead_code 清理（commit `18f2808`，feat(game)）**：移除 map.rs/objective.rs 顶部 `#![allow(dead_code)]`（dead-code=0 硬红线）；删除未用 MAP_BLOCK_HEIGHT/MapManager::new/objectives/parse_kv/Value::Bool 与 ObjectiveSnapshot/CapturePointSnapshot/snapshot()（net.rs 消息为自定纯数据格式，主会话直接读 points 编码）；删 3 个冗余锁定测试。
+  - **阶段一② 据点世界标记（commit `20421f0`，feat(render)）**：game.rs `capture_points()` 访问器 + main.rs 每据点 2 个 WorldMarker（立柱 + 半径 5.0 底盘，归属色蓝/红/灰随帧更新），复用现有通道零渲染管线改动。
+  - **阶段一③ 压力+关卡共存验证**：`RV3D_STRESS_AI=16 + RV3D_MAP=street_fight` 实跑 32 NPC 互射 + 据点 capture 规则共存，VUID=0、panic=0（无冲突）。
+  - **阶段一④ ObjectiveState 消息（commit `331e3d9`，feat(net)）**：`NetworkMessage::ObjectiveState(0x07)`（seq/time/rule_kind/points(id,归属码,进度)），大端手写编解码 + 防御（MAX_OBJECTIVE_POINTS=64、逐字段防越界、超大 count 撞 Truncated、InvalidUtf8）+ 6 单测；向后兼容（旧客户端收 0x07 → 由调用方忽略，PROTOCOL_VERSION 不变）。**桥接留给主会话**：服务端用 objective 状态组包广播（归属码 Team↔0/1/2 映射）。
+  - **阶段二 AI 战术扩展（commit `74a74dd`，feat(ai)）**：`player_facing` 泛化为「任一敌对目标朝向感知」——pick_stress_targets 返回含目标 facing；step_npc 压力模式用 `target_yaw`（facing 坐标系 atan2(dz,dx)）判定目标是否面朝本 NPC；**冲锋覆盖排除 Flanker 的 Flank/Ambush**（is_flank_maneuver），其余角色冲锋仍全队直突。实测 32v32 三分钟：**突进 78% | 包抄 8% | 偷袭 9% | 撤退 6%**（修复前突进 91%/撤退 9%，Flank/Ambush=0）。新增单测 stress_flanker_tactic_follows_target_facing。
+  - **验收（主会话独立复核）**：325 tests / 0 失败 / 0 警告；冒烟 ALL-OK（EXIT=0、VUID=0、kills=1、fps 187-269、panics=0）；压力模式实测 VUID=0、panic=0。4 commits 已推送 origin/master。
+  - **遗留/下一步**：① ObjectiveState 桥接（服务端广播 + 客户端消费，指令单注明"不做完整联机"故本轮未做）；② Agent B（据点标记）在 deepcode -p 下卡死（CPU 0.1% 无输出 12min），已由主会话直接实现——**教训：deepcode -p 并行 Agent 偶发挂起，监控超时应主会话接管**；③ CoverSeek 战术实测占比仍 0（需要掩体+距离条件，压力模式开阔地无掩体，属预期）。
+- 状态：done
+
+### [2026-08-14] 交接：总指挥指令单 #1 开启（关卡收尾 + AI 战术扩展）
+
+- 日期：2026-08-14
+- 发起方：总指挥（外部模型）/ 主会话 AI（DeepCode）
+- 接收方：Agent A（allow 移除）/ Agent B（据点世界标记）/ Agent C（ObjectiveSnapshot 网络）/ 主会话（AI 战术泛化）
+- 交接类型：规划开启
+- 交接内容：
+  - **阶段一（关卡收尾 4 小项）**：① 移除 map.rs/objective.rs 顶部 `#![allow(dead_code)]`（已接线，须 0 警告）；② 据点世界内视觉标记（main.rs WorldMarker 通道，归属色蓝/红/灰 + 进度）；③ 压力模式 + 关卡系统共存验证（RV3D_STRESS_AI + RV3D_MAP 同开，VUID=0 无 panic）；④ ObjectiveSnapshot 接 net.rs（新消息，向后兼容）。
+  - **阶段二（AI 战术扩展）**：`player_facing` 触发条件从「玩家朝向感知」泛化为「任一敌对目标朝向感知」——核心改 game.rs `step_npc`：压力模式用目标 NPC 的 facing 判定「目标是否面朝本 NPC」→ Flank/Ambush 在互射战场触发；普通波次（打玩家）路径不变（facing_angle 仍用 player_yaw）。pick_stress_targets 返回扩展为含目标 facing。
+  - **验收**：≥321 tests 全绿、0 警告、冒烟 ALL-OK、零新依赖、每小项增量验证、AGENTS.md 交接。
+- 状态：in_progress
+
 ### [2026-08-14] 交接：关卡系统完成（TOML 地图 + 占领/胜负 + 关卡流程）
 
 - 日期：2026-08-14
