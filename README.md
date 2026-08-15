@@ -58,6 +58,12 @@
 
 ## 三、如何运行与配置
 
+
+> **Windows 原生构建（2026-08-15 起为正式开发/验证环境）**：
+> 需要 rustc 1.96+ 与 VS 2022/2026 C++ 工具链（MSVC）；冒烟测试走
+> `scripts/run_gameplay_smoke.ps1`（SendInput 注入，Windows 原生版）。
+> Windows 原生驱动下 VK_EXT_mesh_shader / 光追 / DLSS 探测全部可用（WSL2/dzn 不可用）。
+
 ### 编译与运行
 
 ```bash
