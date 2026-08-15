@@ -583,8 +583,8 @@ impl HudState {
             color: Color::CYAN,
             scale: 1.6,
         });
-        // 两个选项：0=退出游戏 1=设置（选中项黄底高亮）
-        let options = ["EXIT GAME", "SETTINGS"];
+        // 两个选项：0=退出游戏 1=设置（选中项黄底高亮；中文走 8x8 点阵）
+        let options = ["退出游戏", "设置"];
         for (i, label) in options.iter().enumerate() {
             let oy = py + 90.0 + i as f32 * 56.0;
             let selected = (i as u8) == self.esc_menu_selection;
@@ -603,7 +603,7 @@ impl HudState {
             });
         }
         // 操作提示
-        let hint = "TAB SWITCH  |  ENTER CONFIRM  |  ESC CLOSE";
+        let hint = "TAB 切换  |  ENTER 确认  |  ESC 关闭";
         elems.push(HudElement::Text {
             text: hint.to_string(),
             x: w * 0.5 - text_width(hint, 0.7) * 0.5,
@@ -1094,7 +1094,7 @@ impl HudState {
             Color::new(0.0, 0.0, 0.0, 0.60),
         )));
         // 标题
-        let title = "SETTINGS";
+        let title = "设置";
         elems.push(HudElement::Text {
             text: title.to_string(),
             x: w * 0.5 - text_width(title, 3.0) * 0.5,
@@ -1125,9 +1125,9 @@ impl HudState {
         let start_y = h * 0.28;
         let left = w * 0.5 - (label_w + bar_w + 16.0) * 0.5;
         let rows = [
-            ("VOLUME", self.volume, Color::CYAN),
-            ("SENSITIVITY", self.sensitivity, Color::ORANGE),
-            ("MUSIC", self.music_volume, Color::GREEN),
+            ("音量", self.volume, Color::CYAN),
+            ("灵敏度", self.sensitivity, Color::ORANGE),
+            ("音乐", self.music_volume, Color::GREEN),
         ];
         for (i, (name, ratio, color)) in rows.iter().enumerate() {
             let y = start_y + i as f32 * row_h;
@@ -1167,8 +1167,8 @@ impl HudState {
         }
         // 分辨率 / 画质行（右侧显示当前值，Enter 循环切换，与键位行同一套高亮交互）
         let display_rows = [
-            ("RESOLUTION", RESOLUTION_LABELS[self.resolution_index as usize]),
-            ("QUALITY", QUALITY_LABELS[self.quality_index as usize]),
+            ("分辨率", RESOLUTION_LABELS[self.resolution_index as usize]),
+            ("画质", QUALITY_LABELS[self.quality_index as usize]),
         ];
         for (i, (name, value)) in display_rows.iter().enumerate() {
             let row = 3 + i as u8; // 0=音量 1=灵敏度 2=音乐 3=分辨率 4=画质
@@ -1195,13 +1195,13 @@ impl HudState {
         }
         // 键位列表（顺序 = BindingAction 枚举顺序，与 selected_action() 索引映射一致）
         let keys = [
-            ("FORWARD", self.key_bindings.move_forward),
-            ("BACKWARD", self.key_bindings.move_backward),
-            ("LEFT", self.key_bindings.move_left),
-            ("RIGHT", self.key_bindings.move_right),
-            ("RELOAD", self.key_bindings.reload),
-            ("FIRE", self.key_bindings.fire),
-            ("MENU", self.key_bindings.menu),
+            ("前进", self.key_bindings.move_forward),
+            ("后退", self.key_bindings.move_backward),
+            ("左移", self.key_bindings.move_left),
+            ("右移", self.key_bindings.move_right),
+            ("换弹", self.key_bindings.reload),
+            ("开火", self.key_bindings.fire),
+            ("菜单", self.key_bindings.menu),
         ];
         let key_start_y = start_y + 5.0 * row_h + 24.0;
         for (i, (name, code)) in keys.iter().enumerate() {
@@ -1231,7 +1231,7 @@ impl HudState {
             });
         }
         // 底部提示
-        let hint = "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: CHANGE";
+        let hint = "ESC 返回  |  TAB 选择  |  滚轮 调整  |  ENTER 切换";
         elems.push(HudElement::Text {
             text: hint.to_string(),
             x: w * 0.5 - text_width(hint, 1.2) * 0.5,
@@ -1539,6 +1539,27 @@ pub fn glyph(ch: char) -> [u8; 5] {
     }
 }
 
+/// 中文字形查询（8x8 点阵，行主序每行 1 字节，bit7=左侧）：
+/// 经 engine::font_cjk（Windows GDI 光栅化，零依赖）按需生成并缓存；
+/// 非 Windows 或字体缺失返回 None → 渲染回退为 `?`（不 panic、不方块）。
+pub fn glyph_cjk(ch: char) -> Option<[u8; 8]> {
+    #[cfg(windows)]
+    {
+        crate::engine::font_cjk::glyph(ch)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ch;
+        None
+    }
+}
+
+/// 是否中文字符（CJK 统一表意文字 + 全角标点）
+pub fn is_cjk(ch: char) -> bool {
+    let cp = ch as u32;
+    (0x4E00..=0x9FFF).contains(&cp) || (0x3000..=0x303F).contains(&cp)
+}
+
 /// 计算字符串的渲染宽度（像素，含字距）
 pub fn text_width(text: &str, scale: f32) -> f32 {
     let chars = text.chars().count();
@@ -1549,24 +1570,55 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
     }
 }
 
-/// 把字符串按 5x7 位图字体展开为小 quad 列表（自绘文本，无外部依赖）。
+/// 把字符串按位图字体展开为小 quad 列表（自绘文本，无外部依赖）。
 ///
-/// 每个置位像素生成一个 `scale x scale` 的 quad；字符之间留 `FONT_SPACING` 像素间距。
+/// ASCII 走内置 5x7 字体；中文（CJK）走 engine::font_cjk 的 8x8 点阵（Windows GDI
+/// 生成，位宽 8 行主序）；字符之间留 `FONT_SPACING` 像素间距。
 pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &mut Vec<Quad>) {
     let mut cx = x;
     for ch in text.chars() {
-        let cols = glyph(ch);
-        for (col, byte) in cols.iter().enumerate() {
-            for row in 0..FONT_ROWS {
-                if (byte >> row) & 1 == 1 {
-                    out.push(Quad::new(
-                        Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
-                        color,
-                    ));
+        if is_cjk(ch) {
+            // 8x8 中文字形：行主序，bit7=左侧，8 列 x 8 行
+            if let Some(rows) = glyph_cjk(ch) {
+                for (row, byte) in rows.iter().enumerate() {
+                    for col in 0..8 {
+                        if (byte >> (7 - col)) & 1 == 1 {
+                            out.push(Quad::new(
+                                Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
+                                color,
+                            ));
+                        }
+                    }
+                }
+            } else {
+                // 字体缺失：回退 '?'（ASCII 路径）
+                let cols = glyph('?');
+                for (col, byte) in cols.iter().enumerate() {
+                    for row in 0..FONT_ROWS {
+                        if (byte >> row) & 1 == 1 {
+                            out.push(Quad::new(
+                                Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
+                                color,
+                            ));
+                        }
+                    }
                 }
             }
+            cx += (8.0 + FONT_SPACING) * scale;
+        } else {
+            let cols = glyph(ch);
+            for (col, byte) in cols.iter().enumerate() {
+                for row in 0..FONT_ROWS {
+                    if (byte >> row) & 1 == 1 {
+                        out.push(Quad::new(
+                            Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
+                            color,
+                        ));
+                    }
+                }
+            }
+            cx += (FONT_COLS as f32 + FONT_SPACING) * scale;
         }
-        cx += (FONT_COLS as f32 + FONT_SPACING) * scale;
     }
 }
 
@@ -1847,7 +1899,7 @@ mod tests {
         let elems = hud.settings_elements();
         assert!(!elems.is_empty(), "设置面板元素不应为空");
         assert!(
-            find_text(&elems, "SETTINGS").is_some(),
+            find_text(&elems, "设置").is_some(),
             "应有 SETTINGS 标题"
         );
         let bars: Vec<f32> = elems
@@ -1879,7 +1931,7 @@ mod tests {
         // layout_elements 在 Settings 画面应走 settings_elements
         let via_layout = hud.layout_elements();
         assert!(
-            find_text(&via_layout, "SETTINGS").is_some(),
+            find_text(&via_layout, "设置").is_some(),
             "Settings 画面应输出设置面板"
         );
     }
@@ -2121,15 +2173,15 @@ mod tests {
     fn settings_key_rows_selectable() {
         let mut hud = HudState::new(1280.0, 720.0);
         hud.screen = HudScreen::Settings;
-        hud.settings_selection = 7; // 5+2 → LEFT
+        hud.settings_selection = 7; // 5+2 → LEFT(左移)
         let elems = hud.settings_elements();
-        assert!(find_text(&elems, "> LEFT").is_some(), "选中键位行应有 '> ' 前缀");
+        assert!(find_text(&elems, "> 左移").is_some(), "选中键位行应有 '> ' 前缀");
         assert!(
-            find_text(&elems, "> FORWARD").is_none(),
+            find_text(&elems, "> 前进").is_none(),
             "未选中键位行不应有前缀"
         );
         let selected_color = elems.iter().find_map(|e| match e {
-            HudElement::Text { text, color, .. } if text == "> LEFT" => Some(*color),
+            HudElement::Text { text, color, .. } if text == "> 左移" => Some(*color),
             _ => None,
         });
         assert_eq!(selected_color, Some(Color::YELLOW), "选中行应高亮为 YELLOW");
@@ -2160,7 +2212,7 @@ mod tests {
         hud.screen = HudScreen::Settings;
         let elems = hud.settings_elements();
         assert!(
-            find_text(&elems, "ESC: BACK / TAB: SELECT / WHEEL: ADJUST / ENTER: CHANGE").is_some(),
+            find_text(&elems, "ESC 返回").is_some(),
             "底部提示应说明调整入口"
         );
     }
@@ -2208,7 +2260,7 @@ mod tests {
         hud.settings_selection = 3; // RESOLUTION 行（0=音量 1=灵敏度 2=音乐 3=分辨率 4=画质）
         let elems = hud.settings_elements();
         assert!(
-            find_text(&elems, "> RESOLUTION").is_some(),
+            find_text(&elems, "> 分辨率").is_some(),
             "选中分辨率行应有 '> ' 前缀"
         );
         assert!(
@@ -2223,11 +2275,11 @@ mod tests {
         hud.settings_selection = 4;
         let elems = hud.settings_elements();
         assert!(
-            find_text(&elems, "> QUALITY").is_some(),
+            find_text(&elems, "> 画质").is_some(),
             "选中画质行应有 '> ' 前缀"
         );
         assert!(
-            find_text(&elems, "> RESOLUTION").is_none(),
+            find_text(&elems, "> 分辨率").is_none(),
             "未选中分辨率行不应有前缀"
         );
     }

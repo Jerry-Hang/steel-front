@@ -13,6 +13,8 @@
 
 pub mod ai;
 pub mod camera;
+#[cfg(windows)]
+pub mod font_cjk;
 pub mod cpu;
 pub mod game;
 pub mod gpu_caps;

@@ -1349,6 +1349,8 @@ fn main() {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // 中文字形按需惰性生成（font_cjk 缓存）；不预填充——GDI 光栅化会阻塞启动首帧
+
     log::info!("========================================");
     log::info!("  钢铁前线 (Steel Front) v{}", env!("CARGO_PKG_VERSION"));
     log::info!("  二战FPS游戏引擎 - Rust + Vulkan");
