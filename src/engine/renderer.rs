@@ -431,7 +431,7 @@ const MAX_NPC_INSTANCES: u32 = 1024;
 /// NPC 段在实例 buffer 中的起始 slot：紧接 marker 区之后（见 MARKER_SLOT_BASE）
 const NPC_SLOT_BASE: u32 = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES;
 /// 自发光实体上限（爆炸闪光等瞬时特效，并发数远小于此）
-const MAX_EMISSIVE_INSTANCES: u32 = 32;
+const MAX_EMISSIVE_INSTANCES: u32 = 64;
 /// 自发光实体在实例 buffer 中的起始 slot：紧接 NPC 区之后（见 NPC_SLOT_BASE）。
 /// 必须与 build.rs 的 EMISSIVE_INSTANCE_BASE（NPC_INSTANCE_BASE + 1024）同步。
 const EMISSIVE_SLOT_BASE: u32 = NPC_SLOT_BASE + MAX_NPC_INSTANCES;

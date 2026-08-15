@@ -107,6 +107,19 @@ struct GameApp {
     last_npc_snapshot: std::collections::HashMap<usize, ([f32; 3], f32, [f32; 4])>,
     /// 倒地尸体：(位置, 朝向, 阵营色, 已存留秒数)；上限 20 具，超过 10 秒消退
     corpses: Vec<([f32; 3], f32, [f32; 4], f32)>,
+    /// 枪口焰/弹壳粒子（0=枪口焰无重力淡出，1=弹壳重力落地）；渲染走 emissive 通道
+    particles: Vec<Particle>,
+}
+
+/// 视觉粒子：枪口焰（无重力，快速淡出）+ 弹壳（重力下落，落地消散）
+struct Particle {
+    pos: [f32; 3],
+    vel: [f32; 3],
+    age: f32,
+    life: f32,
+    size: f32,
+    tint: [f32; 4],
+    kind: u8, // 0=枪口焰 1=弹壳
 }
 
 impl GameApp {
@@ -155,6 +168,7 @@ impl GameApp {
             anim_clock: 0.0,
             last_npc_snapshot: std::collections::HashMap::new(),
             corpses: Vec::new(),
+            particles: Vec::new(),
         }
     }
 
@@ -178,6 +192,25 @@ impl GameApp {
         self.corpses.retain(|c| c.3 < 10.0); // 尸体 10 秒后消退
         while self.corpses.len() > 20 {
             self.corpses.remove(0); // 上限 20 具（NPC 槽位 1024 = 146 人 × 7 段）
+        }
+        // 粒子推进：弹壳重力下落 + 落地停止；超龄移除
+        for p in self.particles.iter_mut() {
+            p.age += delta_time;
+            if p.kind == 1 {
+                p.vel[1] -= 18.0 * delta_time; // 弹壳重力
+                p.pos[0] += p.vel[0] * delta_time;
+                p.pos[1] += p.vel[1] * delta_time;
+                p.pos[2] += p.vel[2] * delta_time;
+                if p.pos[1] <= 0.05 {
+                    p.pos[1] = 0.05;
+                    p.vel = [0.0, 0.0, 0.0];
+                    p.life = p.life.min(0.4); // 落地后最多停留 0.4s
+                }
+            }
+        }
+        self.particles.retain(|p| p.age < p.life);
+        while self.particles.len() > 48 {
+            self.particles.remove(0); // 上限 48 颗粒子
         }
 
         // 更新相机（双模式：轨道/飞行，含惯性速度与边界 clamp）
@@ -222,6 +255,30 @@ impl GameApp {
             let dir = self.camera.forward();
             self.game
                 .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+            // 枪口焰 + 弹壳粒子（枪口 = 眼位下方 0.25m 前 0.5m）
+            let muzzle = [
+                pos.x + dir.x * 0.5,
+                pos.y - 0.25,
+                pos.z + dir.z * 0.5,
+            ];
+            self.particles.push(Particle {
+                pos: muzzle,
+                vel: [0.0, 0.0, 0.0],
+                age: 0.0,
+                life: 0.09,
+                size: 0.18,
+                tint: [1.0, 0.75, 0.25, 1.0], // 橙黄枪口焰
+                kind: 0,
+            });
+            self.particles.push(Particle {
+                pos: muzzle,
+                vel: [dir.z * 1.5 + 0.4, 2.2, -dir.x * 1.5], // 侧向抛出
+                age: 0.0,
+                life: 1.4,
+                size: 0.06,
+                tint: [0.72, 0.55, 0.18, 1.0], // 黄铜弹壳
+                kind: 1,
+            });
             self.fire_requested = false;
         }
 
@@ -446,7 +503,7 @@ impl GameApp {
             markers.extend(capture_markers);
             // 爆炸闪光：冲击波球壳随年龄膨胀、颜色转淡；走自发光路径（emissive 槽位，
             // shader 直出纯色跳过光照/贴图混合），夜间等暗光环境下依然清晰可见
-            let emissive_markers: Vec<engine::renderer::WorldMarker> = self
+            let mut emissive_markers: Vec<engine::renderer::WorldMarker> = self
                 .game
                 .explosions()
                 .iter()
@@ -461,6 +518,21 @@ impl GameApp {
                 }
                 })
                 .collect();
+            // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块
+            for p in &self.particles {
+                let t = (p.age / p.life).clamp(0.0, 1.0);
+                let size = if p.kind == 0 {
+                    p.size * (1.0 - t * 0.7) // 焰：快速收缩
+                } else {
+                    p.size
+                };
+                let fade = 1.0 - t;
+                emissive_markers.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::from(p.pos))
+                        * glam::Mat4::from_scale(glam::Vec3::splat(size)),
+                    tint: [p.tint[0] * fade, p.tint[1] * fade, p.tint[2] * fade, 1.0],
+                });
+            }
             renderer.set_world_markers(&markers);
             renderer.set_emissive_markers(&emissive_markers);
             // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
@@ -518,6 +590,35 @@ impl GameApp {
                 })
                 .collect();
             renderer.set_npc_visuals(&npc_visuals);
+            // NPC 枪口焰/弹壳：攻击态 NPC 限流生成（每帧最多 4 个，按 id 相位轮转避免全爆发）
+            let firing_npcs: Vec<[f32; 3]> = self
+                .game
+                .npcs
+                .iter()
+                .filter(|n| n.state_machine.state() == crate::engine::ai::NpcState::Attack)
+                .filter(|n| (n.id as f32 + self.anim_clock * 6.0) % 4.0 < 1.0)
+                .take(4)
+                .map(|n| {
+                    // 枪口世界位置：facing 为绕 Y 旋转角（0 = +Z），枪口在身前 0.85m、高 1.3m
+                    let (s, c) = n.facing.sin_cos();
+                    [
+                        n.position[0] + s * 0.85,
+                        1.3,
+                        n.position[2] + c * 0.85,
+                    ]
+                })
+                .collect();
+            for muzzle in firing_npcs {
+                self.particles.push(Particle {
+                    pos: muzzle,
+                    vel: [0.0, 0.0, 0.0],
+                    age: 0.0,
+                    life: 0.07,
+                    size: 0.14,
+                    tint: [1.0, 0.7, 0.2, 1.0],
+                    kind: 0,
+                });
+            }
             // 尸体渲染（躺倒姿态，7 段/具；与活体共用 NPC 槽位区）
             let dead_visuals: Vec<engine::renderer::NpcVisual> = self
                 .corpses
