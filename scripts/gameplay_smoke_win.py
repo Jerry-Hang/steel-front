@@ -187,7 +187,9 @@ def aim(hwnd, yaw_tgt_deg, pitch_tgt_deg, hold_lmb):
             continue
         dyaw = ((yaw_tgt_deg - cur[0] + 540.0) % 360.0) - 180.0
         dpitch = pitch_tgt_deg - cur[1]
-        dx = int(dyaw / DEG_PX)
+        # 2026-08-15 游戏鼠标 X 方向修正（右移=右转，yaw -= dx*sens）：
+        # 目标角度差 dyaw 需取反注入（旧方向 dx = dyaw/DEG_PX 会振荡不收敛）
+        dx = -int(dyaw / DEG_PX)
         dy = int(dpitch / DEG_PX)
         print(f"  aim round: cur=({cur[0]:.1f},{cur[1]:.1f}) tgt=({yaw_tgt_deg:.1f},{pitch_tgt_deg:.1f}) inject=({dx},{dy})", flush=True)
         if abs(dx) <= 8 and abs(dy) <= 8:

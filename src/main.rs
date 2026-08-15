@@ -822,21 +822,45 @@ impl ApplicationHandler for GameApp {
                     return;
                 }
 
-                // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭；
-                // 否则两段式确认退出（首次显示提示，再按一次才退出，任意其它键取消）
+                // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭面板；
+                // 否则切换 ESC 毛玻璃菜单（退出游戏 / 设置两个选项）
                 if pressed && key_code == KeyCode::Escape {
                     if self.game.settings_open() {
                         log::info!("ESC 关闭设置面板");
                         self.game.toggle_settings();
-                    } else if self.game.hud.confirm_quit {
-                        log::info!("ESC 再次按下，确认退出");
-                        self.running = false;
-                        event_loop.exit();
+                    } else if self.game.hud.esc_menu_open {
+                        log::info!("ESC 关闭菜单");
+                        self.game.hud.esc_menu_open = false;
                     } else {
-                        log::info!("ESC 按下，再按一次确认退出（任意其它键取消）");
-                        self.game.hud.confirm_quit = true;
+                        log::info!("ESC 打开菜单（退出游戏 / 设置）");
+                        self.game.hud.esc_menu_open = true;
+                        self.game.hud.esc_menu_selection = 0;
                     }
                     return;
+                }
+
+                // ESC 菜单导航：Tab 切换选项（0=退出 1=设置），Enter 确认，其它键关闭菜单
+                if self.game.hud.esc_menu_open {
+                    if pressed && key_code == KeyCode::Tab {
+                        self.game.hud.esc_menu_selection = (self.game.hud.esc_menu_selection + 1) % 2;
+                        log::info!("ESC 菜单选中: {}", if self.game.hud.esc_menu_selection == 0 { "退出游戏" } else { "设置" });
+                        return;
+                    }
+                    if pressed && key_code == KeyCode::Enter {
+                        if self.game.hud.esc_menu_selection == 0 {
+                            log::info!("ESC 菜单：退出游戏");
+                            self.running = false;
+                            event_loop.exit();
+                        } else {
+                            log::info!("ESC 菜单：打开设置");
+                            self.game.hud.esc_menu_open = false;
+                            self.game.toggle_settings();
+                        }
+                        return;
+                    }
+                    if pressed && key_code != KeyCode::Escape {
+                        self.game.hud.esc_menu_open = false;
+                    }
                 }
 
                 // 键位驱动：查当前键码绑定的可重绑定动作（移动/换弹/开火/菜单）

@@ -26,6 +26,14 @@ use super::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
 use super::weapons::{Firearm, Grenade, Projectile, ProjectileWeapon, WeaponRack, GRENADE_FUSE_MAX, GRENADE_FUSE_MIN, GRENADE_SPEED};
 use crate::ui::HudState;
 
+/// 阵营显示名（击杀提示用）
+fn team_name(t: Team) -> &'static str {
+    match t {
+        Team::Red => "RED",
+        Team::Blue => "BLUE",
+    }
+}
+
 /// AI 网格覆盖范围：128×128 格 × 4m = ±256m（与实例场/地形同域）
 const GRID_CELL: f32 = 4.0;
 const GRID_SIZE: usize = 128;
@@ -2488,8 +2496,11 @@ impl Game {
             return false;
         }
         let id = npc.id;
+        let victim_team = npc.team;
         self.npcs.remove(idx);
         self.score += KILL_SCORE;
+        // 击杀提示（右上角 feed）：玩家击杀敌方 NPC
+        self.hud.push_kill(format!("YOU KILLED {} #{}", team_name(victim_team), id));
         log::info!(
             "kill: npc #{} eliminated (wave {}) score={}",
             id,
@@ -3311,6 +3322,8 @@ impl Game {
             self.hud.health = (self.hud.health - dps).max(0.0);
             self.last_damage_time = self.time;
             if self.hud.health <= 0.0 {
+                // 击杀提示：玩家被敌方击杀
+                self.hud.push_kill("YOU WERE KILLED".to_string());
                 // survive 规则：玩家死亡即失败（Defeat 结算）；否则普通 GameOver
                 if self.is_survive_rule() {
                     if let Some(obj) = self.obj_state.as_mut() {
@@ -3361,6 +3374,12 @@ impl Game {
             if self.npcs[i].fire_accum >= 1.0 {
                 self.npcs[i].fire_accum = 0.0;
                 self.npcs[t].hp -= dps;
+                // 击杀提示：NPC 互射击杀（attacker team killed victim team + id）
+                if self.npcs[t].hp <= 0.0 && self.npcs[t].hp > -dps {
+                    let (a, v) = (self.npcs[i].team, self.npcs[t].team);
+                    let vid = self.npcs[t].id;
+                    self.hud.push_kill(format!("{} KILLED {} #{}", team_name(a), team_name(v), vid));
+                }
             }
         }
     }

@@ -417,6 +417,21 @@ pub struct HudState {
     pub victory_banner: Option<String>,
     /// 累计运行时间（秒，由 `tick(dt)` 累加，驱动开始菜单闪烁）
     pub elapsed: f32,
+    /// 击杀提示（右上角 feed，最多保留 4 条；每帧由 `tick_kill_feed(dt)` 老化）
+    pub kill_feed: Vec<KillFeedEntry>,
+    /// ESC 菜单是否打开（毛玻璃菜单：退出游戏 / 设置）
+    pub esc_menu_open: bool,
+    /// ESC 菜单当前选中项（0=退出游戏 1=设置）
+    pub esc_menu_selection: u8,
+}
+
+/// 击杀提示条目（战地风格右上角 feed）
+#[derive(Debug, Clone, PartialEq)]
+pub struct KillFeedEntry {
+    /// 显示文本（如 "YOU KILLED RED #12" / "RED KILLED BLUE" / "YOU WERE KILLED"）
+    pub text: String,
+    /// 已存留秒数（超过 KILL_FEED_DURATION 移除）
+    pub age: f32,
 }
 
 /// 血条文字缩放
@@ -424,6 +439,9 @@ const TEXT_SCALE: f32 = 1.4;
 
 /// 命中标记闪烁时长（秒）
 const HIT_MARKER_DURATION: f32 = 0.15;
+
+/// 击杀提示存留时长（秒）
+const KILL_FEED_DURATION: f32 = 6.0;
 
 impl HudState {
     /// 创建 HUD 状态（默认满血满弹、FPS 0、显示小地图占位）
@@ -464,6 +482,9 @@ impl HudState {
             capture_points: Vec::new(),
             victory_banner: None,
             elapsed: 0.0,
+            kill_feed: Vec::new(),
+            esc_menu_open: false,
+            esc_menu_selection: 0,
         }
     }
 
@@ -487,12 +508,75 @@ impl HudState {
 
     /// 纯布局函数：按当前画面展开为元素列表。
     pub fn layout_elements(&self) -> Vec<HudElement> {
-        match self.screen {
+        let mut elems = match self.screen {
             HudScreen::Game => self.game_elements(),
             HudScreen::Start => self.start_menu_elements(),
             HudScreen::GameOver => self.game_over_elements(),
             HudScreen::Settings => self.settings_elements(),
+        };
+        // ESC 毛玻璃菜单：半透明全屏遮罩 + 两个选项（退出游戏 / 设置），覆盖在任何画面之上
+        if self.esc_menu_open {
+            self.esc_menu_elements(&mut elems);
         }
+        elems
+    }
+
+    /// ESC 毛玻璃菜单：全屏半透明暗色遮罩（毛玻璃观感）+ 居中面板 + 两个选项
+    /// 选中项高亮（Tab 切换 / Enter 确认 / ESC 关闭，由 main.rs 键位处理驱动）
+    fn esc_menu_elements(&self, elems: &mut Vec<HudElement>) {
+        let w = self.screen_w;
+        let h = self.screen_h;
+        // 全屏半透明遮罩（模拟毛玻璃暗化背景）
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(0.0, 0.0, w, h),
+            Color::new(0.02, 0.03, 0.05, 0.55),
+        )));
+        // 居中面板
+        let pw = 380.0;
+        let ph = 240.0;
+        let px = (w - pw) * 0.5;
+        let py = (h - ph) * 0.5;
+        elems.push(HudElement::Quad(Quad::new(
+            Rect::new(px, py, pw, ph),
+            Color::new(0.06, 0.09, 0.12, 0.85),
+        )));
+        // 标题
+        let title = "PAUSED";
+        elems.push(HudElement::Text {
+            text: title.to_string(),
+            x: w * 0.5 - text_width(title, 1.6) * 0.5,
+            y: py + 30.0,
+            color: Color::CYAN,
+            scale: 1.6,
+        });
+        // 两个选项：0=退出游戏 1=设置（选中项黄底高亮）
+        let options = ["EXIT GAME", "SETTINGS"];
+        for (i, label) in options.iter().enumerate() {
+            let oy = py + 90.0 + i as f32 * 56.0;
+            let selected = (i as u8) == self.esc_menu_selection;
+            if selected {
+                elems.push(HudElement::Quad(Quad::new(
+                    Rect::new(px + 60.0, oy - 6.0, pw - 120.0, 34.0),
+                    Color::new(0.35, 0.45, 0.55, 0.65),
+                )));
+            }
+            elems.push(HudElement::Text {
+                text: label.to_string(),
+                x: w * 0.5 - text_width(label, 1.2) * 0.5,
+                y: oy,
+                color: if selected { Color::YELLOW } else { Color::WHITE },
+                scale: 1.2,
+            });
+        }
+        // 操作提示
+        let hint = "TAB SWITCH  |  ENTER CONFIRM  |  ESC CLOSE";
+        elems.push(HudElement::Text {
+            text: hint.to_string(),
+            x: w * 0.5 - text_width(hint, 0.7) * 0.5,
+            y: py + ph - 26.0,
+            color: Color::new(0.6, 0.65, 0.7, 0.9),
+            scale: 0.7,
+        });
     }
 
     /// 游戏画面元素：血条/弹药/FPS/小地图 + 分数/波次/倒计时/准星
@@ -652,17 +736,7 @@ impl HudState {
             scale: 2.0,
         });
 
-        // ---- ESC 退出确认提示（居中偏上，仅在首次 ESC 后显示）----
-        if self.confirm_quit {
-            let quit_txt = "PRESS ESC AGAIN TO QUIT (ANY KEY CANCELS)";
-            elems.push(HudElement::Text {
-                text: quit_txt.to_string(),
-                x: w * 0.5 - text_width(quit_txt, 1.2) * 0.5,
-                y: h * 0.45,
-                color: Color::YELLOW,
-                scale: 1.2,
-            });
-        }
+
 
         // ---- 波次/分数（顶部中央）----
         let center_x = w * 0.5;
@@ -814,6 +888,22 @@ impl HudState {
             )));
         }
 
+        // 击杀提示（右上角 feed，战地风格：最新在上，最多 4 条，6 秒消退）
+        let feed_x = w - 320.0;
+        let mut feed_y = 70.0;
+        for e in &self.kill_feed {
+            let alpha = (1.0 - (e.age / KILL_FEED_DURATION).clamp(0.0, 1.0)).clamp(0.25, 1.0);
+            let color = Color::new(1.0, 0.95, 0.85, alpha);
+            elems.push(HudElement::Text {
+                text: e.text.clone(),
+                x: feed_x - text_width(&e.text, 0.8) * 0.5,
+                y: feed_y,
+                color,
+                scale: 0.8,
+            });
+            feed_y += 16.0;
+        }
+
         elems
     }
 
@@ -947,16 +1037,7 @@ impl HudState {
             color: Color::YELLOW,
             scale: 1.8,
         });
-        if self.confirm_quit {
-            let quit_txt = "PRESS ESC AGAIN TO QUIT";
-            elems.push(HudElement::Text {
-                text: quit_txt.to_string(),
-                x: w * 0.5 - text_width(quit_txt, 1.0) * 0.5,
-                y: h * 0.62 + 34.0,
-                color: Color::YELLOW,
-                scale: 1.0,
-            });
-        }
+
         elems
     }
 
@@ -1257,6 +1338,22 @@ impl HudState {
     pub fn tick(&mut self, dt: f32) {
         self.hit_marker_timer = (self.hit_marker_timer - dt).max(0.0);
         self.elapsed += dt;
+        // 击杀提示老化：超过时长移除（保留最近 4 条）
+        for e in self.kill_feed.iter_mut() {
+            e.age += dt;
+        }
+        self.kill_feed.retain(|e| e.age < KILL_FEED_DURATION);
+        while self.kill_feed.len() > 4 {
+            self.kill_feed.remove(0);
+        }
+    }
+
+    /// 追加击杀提示（最新在上：渲染从顶部向下排，超出 4 条挤掉最旧）
+    pub fn push_kill(&mut self, text: impl Into<String>) {
+        self.kill_feed.insert(0, KillFeedEntry { text: text.into(), age: 0.0 });
+        while self.kill_feed.len() > 4 {
+            self.kill_feed.pop();
+        }
     }
 }
 
