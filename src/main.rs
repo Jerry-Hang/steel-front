@@ -66,6 +66,8 @@ struct GameApp {
     dragging: bool,
     /// 鼠标右键是否按住（飞行模式拖拽转视角）
     right_dragging: bool,
+    /// 开镜瞄准（右键按住；第一人称 FPS：准星收窄 + 枪模居中 + FOV 缩小）
+    ads_active: bool,
     /// 上一帧光标位置（屏幕坐标）
     last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
@@ -152,6 +154,7 @@ impl GameApp {
             key_state: KeyState::new(),
             dragging: false,
             right_dragging: false,
+            ads_active: false,
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             last_cycle_us: 0,
@@ -218,6 +221,17 @@ impl GameApp {
 
         // 更新相机（双模式：轨道/飞行，含惯性速度与边界 clamp）
         self.camera.update(&self.key_state, delta_time);
+        // 开镜瞄准：FOV 平滑过渡（70° 腰射 → 45° 开镜；只在第一人称生效）+ HUD 准星同步
+        let ads_target = if self.ads_active {
+            45.0_f32.to_radians()
+        } else {
+            70.0_f32.to_radians()
+        };
+        let fov_delta = ads_target - self.camera.fov;
+        if fov_delta.abs() > 1e-4 {
+            self.camera.fov += fov_delta * (1.0 - (-10.0 * delta_time).exp());
+        }
+        self.game.hud.ads = self.ads_active && self.camera.mode == CameraMode::FirstPerson;
 
         // 更新游戏逻辑（物理、武器、AI 等）
         // 先把本帧开火意图转发给网络层（客户端模式随 Input 上报服务端）
@@ -379,8 +393,12 @@ impl GameApp {
         let fwd = cam.forward();
         let right = cam.right();
         let up = glam::Vec3::Y;
-        // 枪基准点：眼位前方 0.45、右 0.28、下 0.32（FPS 视角常见位置）
-        let mut base = eye + fwd * 0.45 + right * 0.28 - up * 0.32;
+        // 枪基准点：腰射 = 眼位右下方（FPS 常见）；开镜 = 移到屏幕中心（机瞄对齐）
+        let mut base = if self.ads_active {
+            eye + fwd * 0.35 + right * 0.02 - up * 0.05
+        } else {
+            eye + fwd * 0.45 + right * 0.28 - up * 0.32
+        };
         // 开火后坐：相位脉冲把枪往下/后顶（高频 12Hz 衰减；开火态由武器末次射击时间推断，
         // 简化：anim_clock 相位周期性轻微后坐——射击手感仍由后坐力相机抖动承担）
         if self.game.is_firing() {
@@ -394,29 +412,30 @@ impl GameApp {
         let yaw = cam.yaw;
         let pitch = cam.pitch;
         let rot = glam::Mat4::from_rotation_y(yaw) * glam::Mat4::from_rotation_x(pitch);
-        // 部件：(局部偏移, 尺寸) — M1 步枪：枪托/机匣/护木/枪管/弹匣/握把/准星
-        let parts: [([f32; 3], [f32; 3]); 8] = [
-            ([0.0, -0.02, 0.28], [0.06, 0.10, 0.30]), // 枪托（近身）
-            ([0.0, 0.0, 0.0], [0.06, 0.12, 0.34]), // 机匣
-            ([0.0, 0.0, -0.34], [0.055, 0.08, 0.55]), // 护木/枪管中段
-            ([0.0, 0.0, -0.78], [0.045, 0.06, 0.35]), // 枪管（前伸）
-            ([0.0, -0.13, -0.02], [0.05, 0.16, 0.10]), // 弹匣（下挂）
-            ([0.0, -0.09, 0.16], [0.05, 0.12, 0.06]), // 握把
-            ([0.0, 0.12, -0.05], [0.02, 0.05, 0.02]), // 准星
-            ([0.0, 0.1, 0.12], [0.05, 0.04, 0.06]), // 表尺
+        // 部件：(局部偏移, 尺寸, 材质色) — M1 加兰德：胡桃木枪托/护木 + 磷化钢金属件
+        // 材质配色（PBR 观感近似）：木=暖棕、金属=蓝灰钢、深件=近黑
+        let walnut = [0.42, 0.28, 0.14, 1.0]; // 胡桃木
+        let steel = [0.32, 0.35, 0.38, 1.0]; // 磷化钢
+        let dark = [0.18, 0.18, 0.20, 1.0]; // 深色件
+        let parts: [([f32; 3], [f32; 3], [f32; 4]); 8] = [
+            ([0.0, -0.02, 0.28], [0.07, 0.11, 0.32], walnut), // 枪托（胡桃木）
+            ([0.0, 0.0, 0.0], [0.06, 0.12, 0.34], steel), // 机匣（磷化钢）
+            ([0.0, 0.0, -0.34], [0.055, 0.08, 0.55], walnut), // 护木（胡桃木）
+            ([0.0, 0.0, -0.78], [0.045, 0.06, 0.35], dark), // 枪管（深色钢）
+            ([0.0, -0.13, -0.02], [0.05, 0.16, 0.10], steel), // 弹匣（钢）
+            ([0.0, -0.09, 0.16], [0.05, 0.12, 0.06], dark), // 握把（深色）
+            ([0.0, 0.12, -0.05], [0.02, 0.05, 0.02], dark), // 准星（深色）
+            ([0.0, 0.1, 0.12], [0.05, 0.04, 0.06], steel), // 表尺（钢）
         ];
         let trans = glam::Mat4::from_translation(base);
         parts
             .iter()
-            .map(|(off, size)| {
+            .map(|(off, size, tint)| {
                 let model = trans
                     * rot
                     * glam::Mat4::from_translation(glam::Vec3::from(*off))
                     * glam::Mat4::from_scale(glam::Vec3::from(*size));
-                (
-                    model.to_cols_array(),
-                    [0.25, 0.22, 0.18, 1.0], // 深木色枪身
-                )
+                (model.to_cols_array(), *tint)
             })
             .collect()
     }
@@ -881,10 +900,32 @@ impl ApplicationHandler for GameApp {
         }
 
         // ---- 创建窗口（尺寸取 HUD 当前分辨率：配置显式值或按显示器选定的默认值）----
-        let (w, h) = self.game.hud.resolution();
+        let (mut w, mut h) = self.game.hud.resolution();
+        // 2026-08-15：窗口尺寸 clamp 到主显示器可用区（防止配置分辨率超屏 → 内容只显示左上角）。
+        // 主显示器物理尺寸经 winit monitor.size()（物理像素）；DPI 缩放下逻辑 ≠ 物理，
+        // 但 PhysicalSize 请求按物理像素处理，超屏窗口会被系统裁切。
+        // 2026-08-15：窗口尺寸 clamp 到主显示器物理尺寸（防止超屏 → 内容只显示左上角）。
+        // 请求分辨率（如 2560x1600）等于显示器物理大小时窗口为全屏无边框语义，
+        // 但 Windows 任务栏会遮挡底部——此处仅防止"窗口 > 屏幕"的裁剪型错位。
+        if let Some(monitor) = event_loop.primary_monitor() {
+            let msize = monitor.size();
+            if w > msize.width || h > msize.height {
+                log::warn!(
+                    "窗口尺寸 {}x{} 超过主显示器 {}x{}，自动缩放适配",
+                    w, h, msize.width, msize.height
+                );
+                let scale = (msize.width as f32 / w.max(1) as f32)
+                    .min(msize.height as f32 / h.max(1) as f32);
+                w = (w as f32 * scale).max(320.0) as u32;
+                h = (h as f32 * scale).max(200.0) as u32;
+            }
+        }
+        // 2026-08-15：无边框窗口——请求分辨率等于显示器物理尺寸时窗口恰好铺满屏幕，
+        // 无标题栏/边框挤压（否则窗口比屏幕略大 → DWM 裁剪 → 内容偏左上角）。
         let winit_attr = Window::default_attributes()
             .with_title(window::WINDOW_TITLE)
-            .with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+            .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
+            .with_decorations(false);
 
         let window = match event_loop.create_window(winit_attr) {
             Ok(w) => w,
@@ -896,6 +937,12 @@ impl ApplicationHandler for GameApp {
         };
 
         log::info!("窗口创建成功: {}x{}", w, h);
+        log::info!(
+            "winit inner_size: {}x{} scale_factor={:.2}",
+            window.inner_size().width,
+            window.inner_size().height,
+            window.scale_factor()
+        );
 
         // ---- 初始化 Vulkan 渲染器 ----
         match Renderer::new(&window) {
@@ -1289,8 +1336,16 @@ impl ApplicationHandler for GameApp {
                         self.dragging = pressed && !self.game.settings_open();
                     }
                     MouseButton::Right => {
-                        self.right_dragging = pressed;
-                        self.camera.set_rotation_active(pressed);
+                        // 第一人称：右键 = 开镜瞄准（ADS）；飞行模式保留右键拖拽转视角
+                        if self.camera.mode == CameraMode::FirstPerson
+                            && self.game.state() == GameState::Playing
+                            && !self.game.settings_open()
+                        {
+                            self.ads_active = pressed;
+                        } else {
+                            self.right_dragging = pressed;
+                            self.camera.set_rotation_active(pressed);
+                        }
                     }
                     _ => {}
                 }
@@ -1474,6 +1529,19 @@ impl ApplicationHandler for GameApp {
 fn main() {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // 2026-08-15：显式声明 per-monitor DPI aware——否则 Windows 按系统缩放虚拟化窗口，
+    // 物理 2560x1600 窗口在 144 DPI 显示器上被缩放成 1707x1067 且内容只显示左上角。
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+        }
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        const PER_MONITOR_AWARE_V2: isize = -4;
+        let _ = SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2);
+    }
 
     // 中文字形按需惰性生成（font_cjk 缓存）；不预填充——GDI 光栅化会阻塞启动首帧
 

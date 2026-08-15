@@ -131,7 +131,12 @@ fn load_from(path: &Path) -> GameConfig {
             }
             "bind_fire" => {
                 if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Fire, parse_u32(62));
+                    cfg.bindings.bind(BindingAction::Fire, parse_u32(0));
+                }
+            }
+            "bind_jump" => {
+                if bindings_ok {
+                    cfg.bindings.bind(BindingAction::Jump, parse_u32(62));
                 }
             }
             "bind_menu" => {
@@ -175,6 +180,7 @@ fn save_to(path: &Path, cfg: &GameConfig) {
         ("bind_right", cfg.bindings.code_for(BindingAction::Right)),
         ("bind_reload", cfg.bindings.code_for(BindingAction::Reload)),
         ("bind_fire", cfg.bindings.code_for(BindingAction::Fire)),
+        ("bind_jump", cfg.bindings.code_for(BindingAction::Jump)),
         ("bind_menu", cfg.bindings.code_for(BindingAction::Menu)),
     ];
     for (k, code) in rows {
@@ -261,7 +267,8 @@ mod tests {
         let _ = fs::remove_file(&path);
         assert_eq!(cfg.bindings.code_for(BindingAction::Forward), 38, "T 应生效");
         assert_eq!(cfg.bindings.code_for(BindingAction::Menu), 31, "M 应生效");
-        assert_eq!(cfg.bindings.code_for(BindingAction::Fire), 62, "坏行回退默认 SPACE");
+        assert_eq!(cfg.bindings.code_for(BindingAction::Fire), 0, "坏行回退默认（无键盘开火）");
+        assert_eq!(cfg.bindings.code_for(BindingAction::Jump), 62, "坏行回退默认 SPACE（跳跃）");
     }
 
     /// 分辨率/画质 roundtrip：save 后 load 应还原新字段（临时文件，不碰真实 HOME）

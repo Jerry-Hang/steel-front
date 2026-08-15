@@ -434,6 +434,8 @@ pub struct HudState {
     pub esc_menu_open: bool,
     /// ESC 菜单当前选中项（0=退出游戏 1=设置）
     pub esc_menu_selection: u8,
+    /// 开镜瞄准中（main.rs 每帧同步；准星收窄、枪模居中提示）
+    pub ads: bool,
 }
 
 /// 击杀提示条目（战地风格右上角 feed）
@@ -496,6 +498,7 @@ impl HudState {
             kill_feed: Vec::new(),
             esc_menu_open: false,
             esc_menu_selection: 0,
+            ads: false,
         }
     }
 
@@ -854,21 +857,38 @@ impl HudState {
                 scale: 2.4,
             });
         }
-        // ---- 准星（屏幕中心）----
+        // ---- 准星（屏幕中心）：腰射 = 扩散十字；开镜 = 收窄准星（机瞄精度感）----
         let cx = w * 0.5;
         let cy = h * 0.5;
-        elems.push(HudElement::Quad(Quad::new(
-            Rect::new(cx - 8.0, cy - 1.5, 16.0, 3.0),
-            Color::WHITE,
-        )));
-        elems.push(HudElement::Quad(Quad::new(
-            Rect::new(cx - 1.5, cy - 8.0, 3.0, 16.0),
-            Color::WHITE,
-        )));
-        elems.push(HudElement::Quad(Quad::new(
-            Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0),
-            Color::RED,
-        )));
+        if self.ads {
+            // 开镜：小而精的准星（半长 5px，中心 1px 点）
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - 5.0, cy - 0.8, 10.0, 1.6),
+                Color::WHITE,
+            )));
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - 0.8, cy - 5.0, 1.6, 10.0),
+                Color::WHITE,
+            )));
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - 0.8, cy - 0.8, 1.6, 1.6),
+                Color::RED,
+            )));
+        } else {
+            // 腰射：扩散十字（半长 8px）
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - 8.0, cy - 1.5, 16.0, 3.0),
+                Color::WHITE,
+            )));
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - 1.5, cy - 8.0, 3.0, 16.0),
+                Color::WHITE,
+            )));
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0),
+                Color::RED,
+            )));
+        }
 
         // ---- 命中标记（准星外圈四个短臂，闪一下）----
         if self.hit_marker_timer > 0.0 {
