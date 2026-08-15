@@ -613,6 +613,19 @@ impl GameApp {
     fn render(&mut self) {
         // 第一人称枪模部件（相机姿态）：在借用 renderer 前生成，避免借用冲突
         let gun_parts = self.first_person_gun_parts();
+        // 诊断（每 5 秒一次）：窗口 inner_size vs swapchain extent vs HUD 尺寸
+        if self.anim_clock > 5.0 && (self.anim_clock - 5.0) % 5.0 < 0.05 {
+            if let Some(win) = &self.window {
+                let is = win.inner_size();
+                log::info!(
+                    "size diag: window_inner={}x{} hud={}x{}",
+                    is.width,
+                    is.height,
+                    self.game.hud.screen_w,
+                    self.game.hud.screen_h
+                );
+            }
+        }
         if let Some(renderer) = &mut self.renderer {
             // 投影宽高比取实际窗口尺寸（16:10 等非 16:9 分辨率下不拉伸）
             let aspect = self
@@ -873,6 +886,21 @@ impl GameApp {
             // 第一人称枪模（部件已在 render() 入口预生成，此处上传）
             renderer.set_first_person_gun(&gun_parts);
 
+            // 尺寸保险（2026-08-15）：窗口实际尺寸与交换链不一致时重建——
+            // 覆盖 DPI 缩放/全屏切换等任何导致 swapchain 与窗口错位的场景，
+            // 根治"画面只显示左上角"（1:1 呈现但尺寸不匹配）。
+            let (sw, sh) = renderer.swapchain_size();
+            if let Some(win) = &self.window {
+                let is = win.inner_size();
+                if (is.width != sw || is.height != sh) && is.width > 0 && is.height > 0 {
+                    log::warn!(
+                        "size mismatch: window={}x{} swapchain={}x{} → 重建交换链",
+                        is.width, is.height, sw, sh
+                    );
+                    let _ = renderer.recreate_swapchain();
+                    let _ = self.game.hud.set_screen_size(is.width as f32, is.height as f32);
+                }
+            }
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
                     log::warn!("交换链过期，尝试重建...");

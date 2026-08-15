@@ -1257,6 +1257,15 @@ impl Renderer {
         };
         self.swapchain_format = format.format;
         self.swapchain_extent = extent;
+        // 诊断（2026-08-15）：surface current_extent vs 最终 swapchain extent ——
+        // 若 current_extent 是窗口逻辑尺寸而实际物理尺寸不同，画面会 1:1 错位
+        log::info!(
+            "swapchain diag: current_extent={}x{} final={}x{}",
+            surface_capabilities.current_extent.width,
+            surface_capabilities.current_extent.height,
+            extent.width,
+            extent.height
+        );
 
         self.swapchain_image_views = self
             .swapchain_images
@@ -2275,6 +2284,11 @@ impl Renderer {
                 verts.len() * std::mem::size_of::<HudVertex>(),
             );
         }
+    }
+
+    /// 当前交换链尺寸（main.rs 每帧与窗口尺寸比对，不一致即重建——防 DPI/全屏错位）
+    pub fn swapchain_size(&self) -> (u32, u32) {
+        (self.swapchain_extent.width, self.swapchain_extent.height)
     }
 
     /// 上一帧统计：near/far 可见实例数与地形 LOD 名（供 HUD / 日志）
