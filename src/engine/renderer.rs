@@ -1903,6 +1903,15 @@ impl Renderer {
                 .map_err(|e| format!("创建管线布局失败: {}", e))?
         };
 
+        // 动态 viewport/scissor：resize 后每帧用当前 swapchain_extent 重设，
+        // 避免全屏/窗口变化后画面卡在旧尺寸左上角（2026-08-15 修复）
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+        ];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&dynamic_states);
+
         let pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .vertex_input_state(&vertex_input_state)
@@ -1911,6 +1920,7 @@ impl Renderer {
             .rasterization_state(&rasterizer)
             .multisample_state(&multisampling)
             .depth_stencil_state(&depth_stencil)
+            .dynamic_state(&dynamic_state)
             .color_blend_state(&color_blend_state)
             .layout(self.pipeline_layout)
             .render_pass(self.render_pass)
@@ -2042,6 +2052,9 @@ impl Renderer {
         };
 
         // mesh 管线：pVertexInputState / pInputAssemblyState 必须为 NULL（ash 默认即 null）
+        let mesh_dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let mesh_dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&mesh_dynamic_states);
         let pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .viewport_state(&viewport_state)
@@ -2049,6 +2062,7 @@ impl Renderer {
             .multisample_state(&multisampling)
             .depth_stencil_state(&depth_stencil)
             .color_blend_state(&color_blend_state)
+            .dynamic_state(&mesh_dynamic_state)
             .layout(self.mesh_pipeline_layout)
             .render_pass(self.render_pass)
             .subpass(0);
@@ -2178,6 +2192,9 @@ impl Renderer {
                 .map_err(|e| format!("创建 HUD 管线布局失败: {}", e))?
         };
 
+        let hud_dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let hud_dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&hud_dynamic_states);
         let hud_create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .vertex_input_state(&hud_vertex_input)
@@ -2187,6 +2204,7 @@ impl Renderer {
             .multisample_state(&hud_multisampling)
             .depth_stencil_state(&hud_depth_stencil)
             .color_blend_state(&hud_blend_state)
+            .dynamic_state(&hud_dynamic_state)
             .layout(self.hud_pipeline_layout)
             .render_pass(self.render_pass)
             .subpass(0);
@@ -5754,6 +5772,23 @@ impl Renderer {
                 &render_pass_begin_info,
                 vk::SubpassContents::INLINE,
             );
+        }
+
+        // 动态 viewport/scissor：每帧按当前 swapchain_extent 重设（resize 后自动适配，
+        // 2026-08-15 修复全屏/窗口变化后画面卡左上角）
+        let vp = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(self.swapchain_extent.width as f32)
+            .height(self.swapchain_extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let sc = vk::Rect2D::default()
+            .offset(vk::Offset2D { x: 0, y: 0 })
+            .extent(self.swapchain_extent);
+        unsafe {
+            self.device.cmd_set_viewport(command_buffer, 0, &[vp]);
+            self.device.cmd_set_scissor(command_buffer, 0, &[sc]);
         }
 
         unsafe {
