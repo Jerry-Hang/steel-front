@@ -2113,6 +2113,11 @@ impl Game {
         );
     }
 
+        /// 当前飞行/落地手榴弹位置列表（渲染用：世界内可见手雷实体）
+    pub fn grenade_positions(&self) -> Vec<[f32; 3]> {
+        self.grenades_vec.iter().map(|g| g.position()).collect()
+    }
+
     /// 投掷手榴弹（G 键）：库存 >0 且切枪/换弹中时投掷。方向 = 相机方向 + 上仰角
     /// （水平方向 + 0.25rad 上抛，保证抛物线落地）；引信 1.5-2.5s 确定性伪随机。
     pub fn throw_grenade(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
@@ -2646,17 +2651,31 @@ impl Game {
         ((t * 47.13).sin() * s, (t * 53.71).cos() * s)
     }
 
-    /// 投射物命中的 NPC 下标（命中球：中心在 NPC 头顶，半径 0.8）；未命中返回 None
+    /// 投射物命中的 NPC 下标（segment-sphere 相交：上一帧位置→当前位置连线与命中球求交，
+    /// 命中球中心在 NPC 头顶 +0.8、半径 0.8；高速弹（200m/s 每帧 3.3m）避免隧道效应漏判）
     fn hit_npc_index(&self, p: &Projectile) -> Option<usize> {
-        let (px, py, pz) = (p.position[0], p.position[1], p.position[2]);
+        let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
+        let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);
+        let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
+        let len2 = dx * dx + dy * dy + dz * dz;
+        if len2 < 1e-9 {
+            return None;
+        }
         for (i, npc) in self.npcs.iter().enumerate() {
             let cx = npc.position[0];
             let cy = npc.position[1] + 0.8;
             let cz = npc.position[2];
-            let dx = px - cx;
-            let dy = py - cy;
-            let dz = pz - cz;
-            if dx * dx + dy * dy + dz * dz <= 0.8 * 0.8 {
+            let r = 0.8;
+            // 点到射线最近点参数 t（clamp 到 [0,1] 段内），再算距离²
+            let fx = ax - cx;
+            let fy = ay - cy;
+            let fz = az - cz;
+            let t = -(fx * dx + fy * dy + fz * dz) / len2;
+            let t = t.clamp(0.0, 1.0);
+            let qx = fx + t * dx;
+            let qy = fy + t * dy;
+            let qz = fz + t * dz;
+            if qx * qx + qy * qy + qz * qz <= r * r {
                 return Some(i);
             }
         }

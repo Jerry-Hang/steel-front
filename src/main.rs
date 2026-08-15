@@ -318,7 +318,9 @@ impl GameApp {
         };
         let want = self.focused
             && self.game.state() == GameState::Playing
-            && !self.game.settings_open();
+            && !self.game.settings_open()
+            && !self.game.hud.esc_menu_open;
+        // ESC 菜单/设置面板打开或失焦时释放鼠标（2026-08-15：菜单需鼠标点选）
         if want && !self.cursor_captured {
             // 优先 Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
             // Xwayland 等不支持 Locked 的环境回退 Confined；即使 grab 全不可用，
@@ -531,6 +533,14 @@ impl GameApp {
                     model: glam::Mat4::from_translation(glam::Vec3::from(p.pos))
                         * glam::Mat4::from_scale(glam::Vec3::splat(size)),
                     tint: [p.tint[0] * fade, p.tint[1] * fade, p.tint[2] * fade, 1.0],
+                });
+            }
+            // 手雷可见实体：深橄榄色小方块（飞行/落地均可见，复用 emissive 通道）
+            for gp in self.game.grenade_positions() {
+                emissive_markers.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::from(gp))
+                        * glam::Mat4::from_scale(glam::Vec3::splat(0.16)),
+                    tint: [0.35, 0.4, 0.12, 1.0],
                 });
             }
             renderer.set_world_markers(&markers);
@@ -1015,6 +1025,19 @@ impl ApplicationHandler for GameApp {
                     self.dragging = false;
                     self.right_dragging = false;
                     self.camera.set_rotation_active(false);
+                    // 失焦立即释放鼠标捕获（Win 键呼出菜单栏/Alt-Tab 时窗口失焦，
+                    // 不等待下一帧 sync_cursor——否则鼠标被锁住只能 Alt+F4 强退）
+                    if self.cursor_captured {
+                        if let Some(window) = &self.window {
+                            let _ = window.set_cursor_grab(CursorGrabMode::None);
+                            window.set_cursor_visible(true);
+                        }
+                        self.cursor_captured = false;
+                        self.cursor_locked = false;
+                        self.abs_baseline_valid = false;
+                        self.recenter_pending_until = None;
+                        log::info!("input: cursor released (window unfocused)");
+                    }
                 }
             }
 

@@ -2977,8 +2977,9 @@ impl Renderer {
                 let z = (iz as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
                 let y = terrain_height(x, z) + 0.05;
                 let model = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
-                // 半径 = 2×2 quad 半对角线 × 0.5 保守系数（≈0.707），预算一次供剔除查表
-                let r = 0.5 * 2.0f32.sqrt();
+                // 半径 = 2×2m quad 半对角线 √(1²+1²)=√2≈1.414（2026-08-15 修正：
+                // 旧 0.5×√2=0.707 低估一半 → 屏幕四角边缘实例被激进剔除穿帮）
+                let r = 2.0f32.sqrt();
                 self.instance_radii.push(r);
                 self.instance_center_x.push(x);
                 self.instance_center_y.push(y);

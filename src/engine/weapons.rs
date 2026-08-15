@@ -185,6 +185,8 @@ pub struct Projectile {
     pub damage: f32,
     /// 是否存活（射程/寿命耗尽后为 false）
     alive: bool,
+    /// 上一帧位置（segment 命中检测用；高速弹避免跳过小目标）
+    prev_position: [f32; 3],
 }
 
 impl Projectile {
@@ -210,6 +212,7 @@ impl Projectile {
         let dir = [direction[0] * inv, direction[1] * inv, direction[2] * inv];
         Self {
             position: origin,
+            prev_position: origin,
             velocity: [dir[0] * speed, dir[1] * speed, dir[2] * speed],
             distance_traveled: 0.0,
             age: 0.0,
@@ -223,6 +226,11 @@ impl Projectile {
     /// 是否仍存活（射程/寿命耗尽后返回 false）
     pub fn is_alive(&self) -> bool {
         self.alive
+    }
+
+    /// 上一帧位置（segment 命中检测用：高速弹避免隧道效应跳过目标）
+    pub fn prev_position(&self) -> [f32; 3] {
+        self.prev_position
     }
 
     /// 已飞行距离（米）
@@ -247,6 +255,7 @@ impl Projectile {
         if !self.alive || dt <= 0.0 {
             return;
         }
+        self.prev_position = self.position;
         self.position = [
             self.position[0] + self.velocity[0] * dt,
             self.position[1] + self.velocity[1] * dt,
