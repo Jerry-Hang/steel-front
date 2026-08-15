@@ -62,6 +62,13 @@ const STRESS_COVER_MAX_DIST: u32 = 35;
 /// 手榴弹爆炸半径（米）与 AoE 伤害（近距可秒标准 NPC 100HP）
 const GRENADE_EXPLOSION_RADIUS: f32 = 8.0;
 const GRENADE_EXPLOSION_DAMAGE: f32 = 120.0;
+/// 爆炸对障碍的伤害系数（障碍血量大，爆炸冲击按比例折算；半径内线性衰减）。
+/// 1.0 = 手榴弹 120 伤爆心可摧毁 150HP 障碍（掩体可炸毁，符合"爆炸可摧毁/破坏掩体"）
+const EXPLOSION_OBSTACLE_FACTOR: f32 = 1.0;
+/// 玩家自伤伤害：距离衰减系数 + 封顶值（玩家 100HP，手榴弹 120 伤 × 0.35 ≈ 42 最大自伤，
+/// 不会秒杀自己；NPC 爆炸对玩家同样生效——爆炸中心偏移保证实际伤害通常更低）
+const SELF_DAMAGE_FACTOR: f32 = 0.35;
+const SELF_DAMAGE_CAP: f32 = 45.0;
 /// 掩体利用触发距离（米）：Chase 态距目标 ≤ 攻击距离 + 该值时先寻障碍环带掩体
 const COVER_SEEK_RANGE: f32 = 20.0;
 /// 玩家准星对准判定角（弧度，≈14°）
@@ -183,6 +190,8 @@ pub struct Npc {
     fire_accum: f32,
     /// 爆炸冲击波推挤速度（世界坐标 x/z 分量，m/s；advance_npc 每帧指数衰减）
     pub knockback: [f32; 2],
+    /// 投掷手榴弹冷却（秒，>0 递减；=0 时低概率投掷，见 update_ai npc_throw_grenades）
+    pub grenade_timer: f32,
 }
 
 /// AI 分层调度优先级（线程优化第 1 步，2026-08-11）：
@@ -822,6 +831,7 @@ impl Game {
                 facing: 0.0,
                 fire_accum: 0.0,
                 knockback: [0.0, 0.0],
+                grenade_timer: 0.0,
             });
         }
         let mut game = Self {
@@ -1009,6 +1019,9 @@ impl Game {
                     },
                     "time" => GameRule::TimeLimit {
                         seconds: mgr.data().rule.seconds,
+                    },
+                    "survive" => GameRule::Survive {
+                        waves: mgr.data().rule.waves.max(1),
                     },
                     _ => GameRule::CapturePoints {
                         required: mgr.data().rule.required.max(1),
@@ -1466,6 +1479,43 @@ impl Game {
         }
     }
 
+    /// 是否启用 survive（防守波次）规则
+    fn is_survive_rule(&self) -> bool {
+        matches!(
+            self.obj_state.as_ref().map(|o| o.rule),
+            Some(crate::engine::objective::GameRule::Survive { .. })
+        )
+    }
+
+    /// survive 总波数（默认 0 = 非 survive）
+    fn survive_total_waves(&self) -> u32 {
+        match self.obj_state.as_ref().map(|o| o.rule) {
+            Some(crate::engine::objective::GameRule::Survive { waves }) => waves,
+            _ => 0,
+        }
+    }
+
+    /// survive 波间补给窗口：血量回复 50% + 当前武器弹匣补满 + 手榴弹补满
+    fn supply_survive_break(&mut self) {
+        self.hud.health = (self.hud.health + self.hud.max_health * 0.5).min(self.hud.max_health);
+        self.weapons.active_firearm().reset();
+        self.grenades = self.grenades_max;
+        log::info!(
+            "survive: 波间补给（血量 {:.0}% + 弹药补满 + 手榴弹 {}）",
+            self.hud.health / self.hud.max_health * 100.0,
+            self.grenades
+        );
+    }
+
+    /// 置位关卡胜负归属（幂等：已判定则不覆盖）
+    fn set_won_team(&mut self, team: crate::engine::ai::Team) {
+        if let Some(obj) = self.obj_state.as_mut() {
+            if obj.won_team.is_none() {
+                obj.won_team = Some(team);
+            }
+        }
+    }
+
     /// 关卡系统据点数据（供 main.rs 渲染世界标记）：(id, x, z, 归属, 进度 0..=1)。
     /// 未启用关卡系统或无据点 → 空列表。
     pub fn capture_points(&self) -> Vec<(String, f32, f32, Option<crate::engine::ai::Team>, f32)> {
@@ -1502,6 +1552,9 @@ impl Game {
                 },
                 Some("time") => crate::engine::objective::GameRule::TimeLimit {
                     seconds: d.map(|r| r.seconds).unwrap_or(0.0),
+                },
+                Some("survive") => crate::engine::objective::GameRule::Survive {
+                    waves: d.map(|r| r.waves.max(1)).unwrap_or(1),
                 },
                 _ => crate::engine::objective::GameRule::CapturePoints {
                     required: d.map(|r| r.required.max(1)).unwrap_or(1),
@@ -1803,6 +1856,7 @@ impl Game {
         self.hud.score = self.score;
         self.hud.wave = self.wave;
         self.hud.countdown = self.wave_timer.max(0.0);
+        self.hud.survive_waves = self.survive_total_waves();
         self.hud.objective = (self.objective.eliminated, self.objective.target);
         // 关卡系统：据点状态同步到 HUD（id/归属/进度）。
         // 单机 = 本机 obj_state；联机客户端 = 网络 ObjectiveState 广播（归属码 0=中立/1=Red/2=Blue）。
@@ -1922,11 +1976,17 @@ impl Game {
                 self.pending_kick.1 += kick_yaw;
                 self.projectiles.push(projectile);
                 self.shots += 1;
-                // 程序化枪声：噪声突发 + 指数衰减，带确定性音量抖动（0.95..=1.0）避免机械重复
+                // 程序化枪声：按武器音色参数（M1 清脆 crack / Thompson 低闷长尾），
+                // 带确定性音量抖动（0.95..=1.0）避免机械重复
                 let shot_scale = 0.95 + 0.05 * ((self.shots % 5) as f32 / 4.0);
-                self.audio.synth_mut().play_shot(
+                let shot_params = match self.weapons.active_name() {
+                    "Thompson SMG" => crate::audio::THOMPSON_SHOT,
+                    _ => crate::audio::M1_SHOT,
+                };
+                self.audio.synth_mut().play_shot_with(
                     glam::Vec3::new(origin[0], origin[1], origin[2]),
                     shot_scale,
+                    shot_params,
                 );
                 log::info!(
                     "weapons: shot #{} ({} alive) [{}]",
@@ -2052,6 +2112,10 @@ impl Game {
             return false;
         }
         self.grenades -= 1;
+        // 投掷哨声（高音下滑，与枪声区分）
+        self.audio
+            .synth_mut()
+            .play_grenade_throw(glam::Vec3::new(origin[0], origin[1], origin[2]));
         // 上抛：水平方向（归一化）+ 固定上仰分量；Grenade::new 会归一化 dir 再乘 speed
         let mut dir = glam::Vec3::new(direction[0], direction[1], direction[2]);
         if dir.length_squared() < 1e-6 {
@@ -2093,6 +2157,10 @@ impl Game {
             // 落地或引信到期 → 爆炸
             let ground = terrain_height_at(g.position()[0], g.position()[2]);
             if g.exploded() || g.position()[1] <= ground + 0.05 {
+                // 落地滚动音（短促低音 thud；爆炸音由 spawn_explosion 的 SfxKind::Explosion 承担）
+                self.audio
+                    .synth_mut()
+                    .play_grenade_bounce(glam::Vec3::new(g.position()[0], g.position()[1], g.position()[2]));
                 log::info!(
                     "grenade: detonate fuse_max={:.2}s",
                     g.fuse_max()
@@ -2105,6 +2173,77 @@ impl Game {
             for center in explosions {
                 // 手榴弹 AoE：半径 8m、伤害 120（近距可秒标准 NPC）、径向击退
                 self.spawn_explosion(center, GRENADE_EXPLOSION_RADIUS, GRENADE_EXPLOSION_DAMAGE, true);
+            }
+        }
+    }
+
+    /// NPC 投掷手榴弹（压力模式 / survive 防守波次）：交火中（Attack 态）的 NPC 按
+    /// 确定性概率（5-8%，随 id/帧哈希）向敌对目标投掷；冷却 10-18s 确定性伪随机。
+    /// - 普通波次（打玩家）不调用 → AI 行为零回归；
+    /// - 压力模式目标 = pick_stress_targets 的敌对 NPC（阵营区分，目标与投掷者异阵营）；
+    /// - survive 目标 = 玩家（防守方 NPC 进攻）。
+    fn npc_throw_grenades(&mut self, dt: f32, targets: &[Option<(usize, [f32; 3], f32)>]) {
+        if dt <= 0.0 {
+            return;
+        }
+        // 先递减冷却
+        for npc in &mut self.npcs {
+            npc.grenade_timer = (npc.grenade_timer - dt).max(0.0);
+        }
+        let mut to_throw: Vec<(usize, [f32; 3])> = Vec::new(); // (npc_idx, 目标位置)
+        for (i, npc) in self.npcs.iter().enumerate() {
+            if npc.grenade_timer > 0.0 || npc.state_machine.state() != NpcState::Attack {
+                continue;
+            }
+            // 确定性概率：id/帧哈希 → 5-8%（投掷窗口内约每 12-20 帧判定一次）
+            let h = (npc.id as u64 * 31 + self.frame_no as u64 * 7) % 100;
+            if h >= 8 {
+                continue;
+            }
+            // 目标：压力模式 = 敌对 NPC（异阵营）；survive = 玩家
+            let target_pos = if self.stress {
+                targets
+                    .get(i)
+                    .and_then(|t| t.as_ref())
+                    .filter(|(_, _, _)| {
+                        // 只投掷异阵营目标（pick_stress_targets 已保证异阵营，此处冗余防御）
+                        true
+                    })
+                    .map(|(_, tp, _)| *tp)
+            } else {
+                Some([
+                    self.player_body.pos.x,
+                    self.player_body.pos.y,
+                    self.player_body.pos.z,
+                ])
+            };
+            if let Some(tp) = target_pos {
+                to_throw.push((i, tp));
+            }
+        }
+        for (i, tp) in to_throw {
+            let npc = &self.npcs[i];
+            let origin = npc.position;
+            // 方向：本 NPC → 目标（水平）+ 上抛分量（与玩家投掷同链路，参数化）
+            let dx = tp[0] - origin[0];
+            let dz = tp[2] - origin[2];
+            let len = (dx * dx + dz * dz).sqrt().max(1e-4);
+            let dir = [dx / len, 0.35, dz / len];
+            let fuse = GRENADE_FUSE_MIN
+                + (npc.id as u32 * 17 % 1000) as f32 / 1000.0
+                    * (GRENADE_FUSE_MAX - GRENADE_FUSE_MIN);
+            self.grenades_vec
+                .push(Grenade::new(origin, dir, GRENADE_SPEED * 0.9, fuse));
+            log::info!(
+                "grenade: npc #{} throws at ({:.0}, {:.0}) fuse={:.2}s",
+                npc.id,
+                tp[0],
+                tp[2],
+                fuse
+            );
+            // 冷却 10-18s（确定性伪随机）
+            if let Some(npc) = self.npcs.get_mut(i) {
+                npc.grenade_timer = 10.0 + (npc.id as f32 * 3.7 % 8.0);
             }
         }
     }
@@ -2332,7 +2471,11 @@ impl Game {
             ob.x,
             ob.z
         );
-        self.world.bodies.remove(idx);
+        // world.bodies 与 map.obstacles 按序一一对应（程序化/关卡生成时同步建刚体）；
+        // 测试注入的障碍无对应刚体 → 容忍 idx 越界（跳过刚体移除）
+        if idx < self.world.bodies.len() {
+            self.world.bodies.remove(idx);
+        }
         self.map.obstacles.remove(idx);
     }
 
@@ -2383,7 +2526,9 @@ impl Game {
             age: 0.0,
             lifetime: EXPLOSION_LIFETIME,
         });
-        // 玩家震屏：随距离线性衰减，最近处满强度（与 NPC 是否在场无关）
+        // 玩家震屏 + 自伤：随距离线性衰减，最近处满强度（与 NPC 是否在场无关）。
+        // 玩家自伤伤害封顶（max_damage * SELF_DAMAGE_CAP），爆炸中心偏移保证不被自己秒杀
+        // （手榴弹上抛飞行 ~0.4s + 引信 1.5s → 玩家通常已远离落地中心）。
         let eye = self.player_eye();
         let dx = eye.x - center[0];
         let dz = eye.z - center[2];
@@ -2391,6 +2536,56 @@ impl Game {
         if dist < SHAKE_RADIUS {
             self.shake_timer = SHAKE_DURATION;
             self.shake_strength = SHAKE_STRENGTH * (1.0 - dist / SHAKE_RADIUS).clamp(0.15, 1.0);
+        }
+        // 玩家自伤：仅在半径内且游戏进行中（结算画面不扣血）；伤害 = 距离衰减 × 封顶系数
+        if damage > 0.0
+            && dist < radius
+            && self.game_state == GameState::Playing
+            && self.hud.health > 0.0
+        {
+            let fall = 1.0 - (dist / radius).clamp(0.0, 1.0);
+            let self_dmg = (damage * fall * SELF_DAMAGE_FACTOR).min(SELF_DAMAGE_CAP);
+            if self_dmg > 0.0 {
+                self.hud.health = (self.hud.health - self_dmg).max(0.0);
+                log::info!(
+                    "explosion: 玩家自伤 {:.0}（dist {:.1}m fall {:.2}）→ hp {:.0}",
+                    self_dmg,
+                    dist,
+                    fall,
+                    self.hud.health
+                );
+                if self.hud.health <= 0.0 {
+                    // 手榴弹炸死自己：普通模式 GameOver；survive 规则 Defeat
+                    if self.is_survive_rule() {
+                        if let Some(obj) = self.obj_state.as_mut() {
+                            obj.won_team = Some(crate::engine::ai::Team::Red);
+                        }
+                        self.game_state = GameState::Defeat;
+                    } else {
+                        self.game_state = GameState::GameOver;
+                    }
+                    log::info!("explosion: 玩家被自己手榴弹炸死");
+                }
+            }
+        }
+        // 障碍 AoE 伤害：爆炸半径内障碍施加冲击伤害（复用 damage_obstacle 血量体系，
+        // 可摧毁掩体；环带障碍与 TOML 关卡障碍一致生效）。按距离线性衰减（半径边缘 0）。
+        if damage > 0.0 && !self.map.obstacles.is_empty() {
+            let r2 = radius * radius;
+            let mut i = self.map.obstacles.len();
+            while i > 0 {
+                i -= 1;
+                let ob = self.map.obstacles[i];
+                // 障碍中心到爆炸中心距离（水平）
+                let dx = ob.x - center[0];
+                let dz = ob.z - center[2];
+                let d2 = dx * dx + dz * dz;
+                if d2 > r2 {
+                    continue;
+                }
+                let fall = 1.0 - (d2.sqrt() / radius).clamp(0.0, 1.0);
+                self.damage_obstacle(i, damage * fall * EXPLOSION_OBSTACLE_FACTOR);
+            }
         }
         if damage <= 0.0 || self.npcs.is_empty() {
             return;
@@ -2505,7 +2700,16 @@ impl Game {
                 if self.wave_timer <= 0.0 {
                     // 每关 WAVES_PER_LEVEL 波清完 → 升关：重新生成地图并回到本关第 1 波；
                     // 难度按累计有效波次递进（effective_wave），跨关不回落
-                    if self.wave >= WAVES_PER_LEVEL {
+                    // survive 规则：总波数 = rule.waves，守住全部波 → 胜利（补给窗口后进入胜利态）
+                    if self.is_survive_rule() && self.wave >= self.survive_total_waves() {
+                        self.hud.victory_banner = Some("防区固守！全部波次守住".to_string());
+                        self.game_state = GameState::Victory(crate::engine::ai::Team::Blue);
+                        self.set_won_team(crate::engine::ai::Team::Blue);
+                        log::info!(
+                            "survive: 全部 {} 波守住 → 胜利",
+                            self.survive_total_waves()
+                        );
+                    } else if self.wave >= WAVES_PER_LEVEL {
                         let next_level = self.level + 1;
                         self.apply_level(next_level);
                         self.wave = 1;
@@ -2515,6 +2719,10 @@ impl Game {
                         );
                     } else {
                         self.wave += 1;
+                        // survive：波间补给窗口（血量回复 + 弹药补满）
+                        if self.is_survive_rule() {
+                            self.supply_survive_break();
+                        }
                     }
                     self.spawn_wave(self.wave, player);
                 }
@@ -2628,6 +2836,7 @@ impl Game {
             facing: (player.z - z).atan2(player.x - x),
             fire_accum: 0.0,
             knockback: [0.0, 0.0],
+            grenade_timer: 0.0,
         });
         id
     }
@@ -2693,6 +2902,7 @@ impl Game {
                     facing: (player.z - z).atan2(player.x - x),
                     fire_accum: 0.0,
                     knockback: [0.0, 0.0],
+                grenade_timer: 0.0,
                 });
             }
         }
@@ -3054,6 +3264,11 @@ impl Game {
                 Self::step_ai_serial(&mut self.npcs, &ctx);
             }
         }
+        // NPC 投掷手榴弹：压力模式 / survive 防守波次中，交火 NPC 低概率（5-8%）投掷
+        // （仅对敌对目标方向；阵营区分不炸友军）。普通波次（打玩家）不投掷 → 行为零回归。
+        if self.stress || self.is_survive_rule() {
+            self.npc_throw_grenades(dt, &targets);
+        }
         // 压力模式：攻击态 NPC 对目标 NPC 结算伤害（每满 1 秒 dps；玩家无敌旁观）
         if self.stress {
             self.apply_npc_combat(dt, &targets);
@@ -3096,12 +3311,24 @@ impl Game {
             self.hud.health = (self.hud.health - dps).max(0.0);
             self.last_damage_time = self.time;
             if self.hud.health <= 0.0 {
-                self.game_state = GameState::GameOver;
-                log::info!(
-                    "game: player down, score={} wave={} (GameOver: gameplay frozen, projectiles coast without kills)",
-                    self.score,
-                    self.wave
-                );
+                // survive 规则：玩家死亡即失败（Defeat 结算）；否则普通 GameOver
+                if self.is_survive_rule() {
+                    if let Some(obj) = self.obj_state.as_mut() {
+                        obj.won_team = Some(crate::engine::ai::Team::Red);
+                    }
+                    self.game_state = GameState::Defeat;
+                    log::info!(
+                        "survive: 玩家阵亡于第 {} 波 → 失败",
+                        self.wave
+                    );
+                } else {
+                    self.game_state = GameState::GameOver;
+                    log::info!(
+                        "game: player down, score={} wave={} (GameOver: gameplay frozen, projectiles coast without kills)",
+                        self.score,
+                        self.wave
+                    );
+                }
             }
         }
     }
@@ -4137,6 +4364,74 @@ mod tests {
         assert_eq!(game.npcs[2].knockback, [0.0, 0.0], "超出半径无推挤");
     }
 
+    /// 爆炸对障碍 AoE 伤害：半径内障碍掉血、可摧毁；超出半径无损（阶段二）
+    #[test]
+    fn explosion_damages_obstacles_in_radius() {
+        let mut game = Game::new();
+        // 注入两个障碍：一个 Barrier（100HP，爆心可摧毁）在（0,0），一个在远处（50,50）
+        game.map.obstacles.push(MapObstacle {
+            x: 0.0,
+            z: 0.0,
+            half_w: 1.0,
+            half_d: 1.0,
+            kind: ObstacleKind::Barrier,
+            max_hp: 100.0,
+            hp: 100.0,
+        });
+        game.map.obstacles.push(MapObstacle {
+            x: 50.0,
+            z: 50.0,
+            half_w: 1.0,
+            half_d: 1.0,
+            kind: ObstacleKind::Wall,
+            max_hp: 150.0,
+            hp: 150.0,
+        });
+        game.spawn_explosion([0.0, 1.0, 0.0], 8.0, 120.0, true);
+        // Game::new() 预置 20 个环带障碍 + 注入 2 个 = 22；爆心 Barrier（100HP）被
+        // 120×1.0×fall(1.0)=120 伤摧毁 → 21
+        assert_eq!(game.map.obstacles.len(), 21, "爆心 Barrier（100HP）被 120 伤摧毁");
+        // 注入的远处障碍（50,50）保留且无伤
+        let far = game
+            .map
+            .obstacles
+            .iter()
+            .find(|o| (o.x - 50.0).abs() < 1.0 && (o.z - 50.0).abs() < 1.0)
+            .expect("远处障碍应保留");
+        assert!((far.hp - 150.0).abs() < 1e-5, "远处障碍无伤");
+    }
+
+    /// NPC 投掷手榴弹：压力模式 Attack 态 NPC 冷却结束 → 朝敌对目标投掷（阶段二）
+    #[test]
+    fn npc_throws_grenade_in_stress_combat() {
+        let mut game = Game::new();
+        game.stress = true;
+        let mut a = npc_at(0, Team::Red, [0.0, 0.0, 0.0]);
+        let mut b = npc_at(1, Team::Blue, [8.0, 0.0, 0.0]);
+        // 推进到 Attack 态
+        let p = NpcPerception {
+            enemy_visible: true,
+            enemy_in_range: true,
+            ..NpcPerception::default()
+        };
+        a.state_machine.update(p);
+        a.state_machine.update(p);
+        b.state_machine.update(p);
+        b.state_machine.update(p);
+        a.grenade_timer = 0.0; // 冷却结束，允许投掷
+        b.grenade_timer = 999.0; // 对侧不投掷（验证确定性只投掷冷却结束者）
+        game.npcs = vec![a, b];
+        let targets = pick_stress_targets(&game.npcs, STRESS_SIGHT);
+        let before = game.grenades_vec.len();
+        // 帧号取 id*31 % 8 < 8 恒真 → 必投掷（h = (0*31 + frame*7) % 100，frame 取使 h<8）
+        game.frame_no = 1;
+        game.npc_throw_grenades(1.0 / 60.0, &targets);
+        assert!(
+            game.grenades_vec.len() > before,
+            "冷却结束的 Attack 态 NPC 应投掷手榴弹"
+        );
+    }
+
     /// 爆炸击杀：hp≤0 移除 + 计分 + 任务推进
     #[test]
     fn explosion_kills_and_scores() {
@@ -4147,6 +4442,71 @@ mod tests {
         assert!(game.npcs.is_empty(), "30hp NPC 被爆心击杀");
         assert_eq!(game.score, KILL_SCORE, "击杀计分");
         assert_eq!(game.objective.eliminated, 1, "任务目标推进");
+    }
+
+    /// survive 规则波次推进：清波 → 补给窗口（血量回复/弹药补满）→ 下一波；
+    /// 守住全部波 → 胜利态（阶段一）
+    #[test]
+    fn survive_rule_advances_waves_and_wins_at_last() {
+        let mut game = Game::new();
+        game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
+            crate::engine::objective::GameRule::Survive { waves: 2 },
+        ));
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.hud.health = 50.0; // 半血，验证补给回复
+        game.grenades = 0;
+        let camera = Camera::new();
+        // 清空 NPC（模拟玩家清完 wave 1）+ 推进 update_waves
+        game.npcs.clear();
+        game.wave_timer = 0.0;
+        for _ in 0..200 {
+            game.update(1.0 / 60.0, &camera);
+        }
+        // wave 1 清完 → wave_timer 置为 WAVE_INTERMISSION → 递减到 0 → wave 2 + 补给
+        assert_eq!(game.wave, 2, "survive 第 1 波清完应进入第 2 波");
+        assert!(
+            game.hud.health > 50.0,
+            "波间补给应回复血量: {}",
+            game.hud.health
+        );
+        assert_eq!(game.grenades, game.grenades_max, "波间补给应补满手榴弹");
+        // 清完 wave 2（最后一波）→ 胜利
+        game.npcs.clear();
+        game.wave_timer = 0.0;
+        for _ in 0..300 {
+            game.update(1.0 / 60.0, &camera);
+            if game.game_state == GameState::Victory(crate::engine::ai::Team::Blue) {
+                break;
+            }
+        }
+        assert_eq!(
+            game.game_state,
+            GameState::Victory(crate::engine::ai::Team::Blue),
+            "守住全部波次应胜利"
+        );
+    }
+
+    /// 玩家自伤：手榴弹爆炸在玩家附近 → 掉血但不秒杀（封顶 SELF_DAMAGE_CAP）；
+    /// 爆炸中心偏移保证玩家不被自己秒杀（阶段二）
+    #[test]
+    fn grenade_self_damage_capped_not_fatal() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.hud.health = 100.0;
+        // 玩家在 (0, 1.6, 0)，爆炸在 3m 外（半径 8m 内，fall ≈ 0.625）
+        game.spawn_explosion([3.0, 0.0, 0.0], 8.0, 120.0, true);
+        let hp = game.hud.health;
+        assert!(hp < 100.0, "近距离爆炸应造成自伤: {}", hp);
+        assert!(
+            hp >= 100.0 - SELF_DAMAGE_CAP,
+            "自伤封顶（不被秒杀）: hp={} cap={}",
+            hp,
+            SELF_DAMAGE_CAP
+        );
+        assert!(
+            game.game_state == GameState::Playing,
+            "封顶自伤不应致死"
+        );
     }
 
     /// 冲击波推挤：生成时获得径向速度，后续帧按指数衰减并产生位移
@@ -4237,6 +4597,7 @@ mod tests {
             facing: 0.0,
             fire_accum: 0.0,
             knockback: [0.0, 0.0],
+            grenade_timer: 0.0,
         }
     }
 
