@@ -313,8 +313,8 @@ impl CpuTopology {
         let half = threads / 2;
         let (primary_set, secondary_set, e_cores) = match vendor {
             CpuVendor::Amd => (
-                (0..half).collect(),
-                (half..threads).collect(),
+                (0..half).collect::<Vec<usize>>(),
+                (half..threads).collect::<Vec<usize>>(),
                 0,
             ),
             CpuVendor::Intel => {

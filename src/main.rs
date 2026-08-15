@@ -1061,9 +1061,6 @@ fn main() {
             false
         }
     };
-    #[cfg(not(target_os = "linux"))]
-    let force_x11 = false;
-
     // 创建事件循环（WSLg 下强制 X11，走 Xwayland + XInput2 raw motion）
     let event_loop = {
         let mut builder = EventLoop::builder();
