@@ -166,10 +166,13 @@ impl Camera {
     }
 
     /// 第一人称鼠标视角（供 FPS 主视角）：`delta_x` / `delta_y` 为屏幕像素位移，
-    /// 标准方向：鼠标下移（dy>0）→ pitch 增大 → 看向下方（pitch 正 = 低头看地）。
+    /// 标准方向：鼠标下移（dy>0）→ pitch 增大 → 看向下方（pitch 正 = 低头看地）；
+    /// 鼠标右移（dx>0）→ yaw 减小 → 视角右转（forward.x = -sin(yaw)，yaw 减小 → +X 偏转）。
     /// pitch 夹在 [-89°, 89°]；灵敏度用 `mouse_sens`（默认 0.003）。
+    /// 注：2026-08-15 Windows 原生真机修正——旧 `yaw += dx*sens` 使右移变左转
+    /// （WSL2 输入捕获不可用从未暴露，冒烟闭环正反皆可收敛）。
     pub fn look(&mut self, delta_x: f32, delta_y: f32) {
-        self.yaw += delta_x * self.mouse_sens;
+        self.yaw -= delta_x * self.mouse_sens;
         self.pitch = (self.pitch + delta_y * self.mouse_sens).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
@@ -485,12 +488,13 @@ mod tests {
         assert_eq!(cam.position(), Vec3::new(5.0, 3.0, 1.0));
     }
 
-    /// look：右移 dx 增加 yaw，下移 dy（屏幕 Y 向下）减小 pitch，灵敏度取 mouse_sens
+    /// look：右移 dx 减小 yaw（视角右转），下移 dy（屏幕 Y 向下）增大 pitch（低头），
+    /// 灵敏度取 mouse_sens
     #[test]
     fn look_updates_yaw_pitch() {
         let mut cam = Camera::new();
         cam.look(100.0, 50.0);
-        assert!((cam.yaw - 100.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
+        assert!((cam.yaw + 100.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
         assert!((cam.pitch - (50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6);
     }
 
