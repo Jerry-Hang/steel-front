@@ -231,7 +231,16 @@ impl GameApp {
         if fov_delta.abs() > 1e-4 {
             self.camera.fov += fov_delta * (1.0 - (-10.0 * delta_time).exp());
         }
-        self.game.hud.ads = self.ads_active && self.camera.mode == CameraMode::FirstPerson;
+        // 开镜状态硬化：非 Playing/菜单/设置打开时强制复位（防右键状态卡死 → 准星变小/消失）
+        let ads_valid = self.ads_active
+            && self.camera.mode == CameraMode::FirstPerson
+            && self.game.state() == GameState::Playing
+            && !self.game.settings_open()
+            && !self.game.hud.esc_menu_open;
+        self.game.hud.ads = ads_valid;
+        if !ads_valid {
+            self.ads_active = false;
+        }
 
         // 更新游戏逻辑（物理、武器、AI 等）
         // 先把本帧开火意图转发给网络层（客户端模式随 Input 上报服务端）
@@ -411,9 +420,16 @@ impl GameApp {
         anchor.x += bob;
         // 腰射轻微右倾；开镜扶正（机瞄对齐）
         let tilt = if self.ads_active { 0.0 } else { 0.06 };
+        // 开镜 FOV 补偿：70°→45° 透视放大 1.55x，枪模必须反向缩小保持视觉大小恒定
+        // （否则开镜瞬间枪跳脸、占满屏幕——"棕色背景板"即巨大化的枪身）。
+        // 按当前 fov 动态补偿：scale = tan(70/2) / tan(fov/2)
+        let fov_comp = 70.0_f32.to_radians().tan() * 0.5
+            / (cam.fov * 0.5).tan().max(0.01);
+        let gun_scale = fov_comp.clamp(0.5, 1.0);
         let view_inv = cam.view_matrix().inverse();
         let view_anchor = glam::Mat4::from_translation(anchor);
         let tilt_rot = glam::Mat4::from_rotation_z(tilt);
+        let gun_scale_mat = glam::Mat4::from_scale(glam::Vec3::splat(gun_scale));
         // 部件：(局部偏移, 尺寸, 材质色) — M1 加兰德：胡桃木枪托/护木 + 磷化钢金属件。
         // 2026-08-15 PBR 立体感修正：加厚部件（消除纸片感）+ 高饱和材质对比
         // （暖木 vs 冷钢 vs 深色，面间明暗自然浮现）+ 木质部件双色纹理感。
@@ -438,6 +454,7 @@ impl GameApp {
                 let model = view_inv
                     * view_anchor
                     * tilt_rot
+                    * gun_scale_mat
                     * glam::Mat4::from_translation(glam::Vec3::from(*off))
                     * glam::Mat4::from_scale(glam::Vec3::from(*size));
                 (model.to_cols_array(), *tint)
@@ -1543,18 +1560,9 @@ fn main() {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // 2026-08-15：显式声明 per-monitor DPI aware——否则 Windows 按系统缩放虚拟化窗口，
-    // 物理 2560x1600 窗口在 144 DPI 显示器上被缩放成 1707x1067 且内容只显示左上角。
-    #[cfg(windows)]
-    unsafe {
-        #[link(name = "user32")]
-        extern "system" {
-            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
-        }
-        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-        const PER_MONITOR_AWARE_V2: isize = -4;
-        let _ = SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2);
-    }
+    // DPI awareness 由 winit 0.30 自己管理（默认 per-monitor V2）——手动调用
+    // SetProcessDpiAwarenessContext 会与 winit 内部设置冲突，导致窗口尺寸/缩放错位
+    // （曾出现：swapchain 2560x1600 但窗口实际 1898x1061 → 画面只显示左上角）。
 
     // 中文字形按需惰性生成（font_cjk 缓存）；不预填充——GDI 光栅化会阻塞启动首帧
 

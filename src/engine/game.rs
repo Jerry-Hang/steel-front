@@ -62,10 +62,10 @@ const SHAKE_STRENGTH: f32 = 0.35;
 const SHAKE_DURATION: f32 = 0.3;
 /// 玩家移动速度（米/秒，第一人称 WASD）
 const PLAYER_SPEED: f32 = 6.0;
-/// 跳跃初速（m/s，~1.1m 跳高）
-const JUMP_SPEED: f32 = 4.6;
-/// 重力加速度（m/s²）
-const GRAVITY: f32 = 9.8;
+/// 跳跃初速（m/s，~0.55m 跳高——真实二战士兵跳跃感，2026-08-15 从 4.6 调低去除"月球漫步"）
+const JUMP_SPEED: f32 = 3.3;
+/// 重力加速度（m/s²，19.6 = 2x 真实重力——FPS 手感偏好（下落干脆），配合低跳高）
+const GRAVITY: f32 = 19.6;
 /// NPC 就近掩体搜索半径（网格格数）
 const COVER_MAX_DIST: u32 = 10;
 /// 压力模式掩体搜索半径（网格格数）：NPC 战场开阔（150m 外出生），
@@ -2438,7 +2438,9 @@ impl Game {
         }
         let len = (dx * dx + dz * dz).sqrt();
         if len > 1e-4 {
-            let step = (PLAYER_SPEED * dt).min(0.5);
+            // 空中控制衰减：跳跃中水平移动减半（真实物理——空中无法急转弯）
+            let air_factor = if self.jump_vel != 0.0 { 0.5 } else { 1.0 };
+            let step = (PLAYER_SPEED * air_factor * dt).min(0.5);
             let (mx, mz) = self
                 .player_body
                 .try_move(&self.world, dx / len * step, dz / len * step);
