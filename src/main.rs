@@ -99,6 +99,8 @@ struct GameApp {
     game: Game,
     /// 程序是否正在运行
     running: bool,
+    /// 事件循环代理（菜单点击退出用：请求事件循环退出）
+    event_proxy: Option<winit::event_loop::EventLoopProxy<()>>,
     /// 配置中是否显式保存过分辨率（false = 首次运行，窗口创建时按显示器宽高比选默认）
     resolution_explicit: bool,
     /// NPC 动画时钟（秒，每帧累加 delta_time；驱动步态/后坐相位）
@@ -164,6 +166,7 @@ impl GameApp {
             last_cam_log: Instant::now(),
             game,
             running: true,
+            event_proxy: None,
             resolution_explicit: cfg.resolution_explicit,
             anim_clock: 0.0,
             last_npc_snapshot: std::collections::HashMap::new(),
@@ -309,6 +312,37 @@ impl GameApp {
             );
             self.last_cam_log = Instant::now();
         }
+    }
+
+    /// ESC 菜单鼠标点击命中检测：命中选项矩形则执行对应动作（0=退出 1=设置）。
+    /// 矩形布局必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中，
+    /// 选项 y = py+90 / py+146，宽 pw-120=260 居中，高 34）。返回是否命中任何选项。
+    fn menu_click_hit(&mut self, mx: f32, my: f32) -> bool {
+        let w = self.game.hud.screen_w;
+        let h = self.game.hud.screen_h;
+        let pw = 380.0;
+        let ph = 240.0;
+        let px = (w - pw) * 0.5;
+        let py = (h - ph) * 0.5;
+        let opt_w = pw - 120.0;
+        let opt_x = px + 60.0;
+        for (i, oy) in [py + 90.0, py + 146.0].iter().enumerate() {
+            if mx >= opt_x && mx <= opt_x + opt_w && my >= *oy - 6.0 && my <= *oy + 28.0 {
+                if i == 0 {
+                    log::info!("ESC 菜单：鼠标点击退出游戏");
+                    self.running = false;
+                    if let Some(proxy) = &self.event_proxy {
+                        let _ = proxy.send_event(());
+                    }
+                } else {
+                    log::info!("ESC 菜单：鼠标点击设置");
+                    self.game.hud.esc_menu_open = false;
+                    self.game.toggle_settings();
+                }
+                return true;
+            }
+        }
+        false
     }
 
     /// 按游戏状态同步光标捕获：Playing = 捕获 + 隐藏；否则释放。
@@ -505,19 +539,53 @@ impl GameApp {
             markers.extend(capture_markers);
             // 爆炸闪光：冲击波球壳随年龄膨胀、颜色转淡；走自发光路径（emissive 槽位，
             // shader 直出纯色跳过光照/贴图混合），夜间等暗光环境下依然清晰可见
+            // 爆炸多层视觉（4 层同源演算，立体感：火球核 + 贴地冲击波环 + 火柱 + 烟柱）
             let mut emissive_markers: Vec<engine::renderer::WorldMarker> = self
                 .game
                 .explosions()
                 .iter()
-                .map(|ex| {
+                .flat_map(|ex| {
                 let t = (ex.age / ex.lifetime).clamp(0.0, 1.0);
-                let s = ex.radius * (0.35 + 1.65 * t);
-                let h = (2.4 * (1.0 - t)).max(0.3);
-                engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::new(ex.center[0], 1.2, ex.center[2]))
-                        * glam::Mat4::from_scale(glam::Vec3::new(s, h, s)),
-                    tint: [1.0, 0.55 * (1.0 - t) + 0.2, 0.08, 1.0],
-                }
+                let cx = ex.center[0];
+                let cz = ex.center[2];
+                let r = ex.radius;
+                // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）
+                let fireball_t = (t * 2.8).min(1.0);
+                let fb_s = r * (0.2 + 1.2 * fireball_t);
+                let mut out = vec![engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.2, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::splat(fb_s)),
+                    tint: [
+                        1.0,
+                        0.85 * (1.0 - fireball_t) + 0.2,
+                        0.35 * (1.0 - fireball_t),
+                        1.0,
+                    ],
+                }];
+                // ② 贴地冲击波环：扁立方体沿地面水平扩散 + 高度衰减（冲击波视觉主体）
+                let ring_s = r * (0.4 + 1.6 * t);
+                let ring_h = (1.1 * (1.0 - t)).max(0.15);
+                out.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, ring_h * 0.5, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::new(ring_s, ring_h, ring_s)),
+                    tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, 1.0],
+                });
+                // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），顶部上移
+                let col_h = 2.2 + 2.6 * t;
+                out.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.1 + col_h * 0.5, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::new(r * 0.5, col_h, r * 0.5)),
+                    tint: [1.0, 0.45 * (1.0 - t), 0.05, 1.0],
+                });
+                // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟）
+                let smoke_s = r * (0.5 + 1.4 * t);
+                let smoke_h = 2.0 + 3.0 * t;
+                out.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 0.6 + smoke_h * 0.5, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::new(smoke_s, smoke_h, smoke_s)),
+                    tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, 1.0],
+                });
+                out
                 })
                 .collect();
             // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块
@@ -737,6 +805,13 @@ impl ApplicationHandler for GameApp {
     /// 设备级事件：系统相对鼠标增量（XInput2 raw motion，与光标位置无关）驱动视角。
     /// 捕获态唯一视角输入源：raw 增量是设备原始计数，与指针位置/grab 状态无关，
     /// 不依赖窗口内指针位置，也不产生"每帧回中 warp → 回声"反馈环。
+    /// 用户事件（菜单点击退出用代理发送）：收到即退出事件循环
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
+        log::info!("input: 收到退出事件，退出游戏");
+        self.running = false;
+        event_loop.exit();
+    }
+
     fn device_event(
         &mut self,
         _event_loop: &ActiveEventLoop,
@@ -1048,6 +1123,14 @@ impl ApplicationHandler for GameApp {
                 let pressed = state == ElementState::Pressed;
                 match button {
                     MouseButton::Left => {
+                        // ESC 菜单打开：点击命中选项（退出/设置），不触发开火
+                        if pressed && self.game.hud.esc_menu_open {
+                            let (mx, my) = self.last_cursor;
+                            if self.menu_click_hit(mx as f32, my as f32) {
+                                log::info!("ESC 菜单鼠标点击选项");
+                            }
+                            return;
+                        }
                         if pressed && !self.game.settings_open() {
                             // 开始菜单/加载中：点击也视为"任意键"开局（键盘焦点不可靠的环境兜底）
                             let st = self.game.state();
@@ -1302,6 +1385,8 @@ fn main() {
     // 创建并运行游戏应用：捕获态视角一律由 XInput2 raw 相对增量驱动
     // （与指针位置无关，无 warp 回声环）；绝对位置仅用于非捕获拖拽路径。
     let mut app = GameApp::new();
+    // 菜单点击退出用的事件循环代理（app 创建后设置）
+    app.event_proxy = Some(event_loop.create_proxy());
 
     // 网络对战模式（默认关闭，不破坏单机）：RV3D_NET=server|client，
     // RV3D_NET_ADDR=127.0.0.1:<port>（默认 127.0.0.1:27015）。
