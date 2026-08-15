@@ -691,15 +691,58 @@ impl<S: AudioSink> AudioPlayer<S> {
     }
 }
 
+/// 枪声参数集：决定枪械音色（M1 步枪 vs Thompson 冲锋枪差异化）。
+///
+/// 全部字段为确定性合成参数，映射到声部发生器：
+/// - `pitch`：低频爆鸣（thump）基频 Hz（步枪清脆 crack 偏高，冲锋枪低闷偏低；0 = 纯噪声无爆鸣）
+/// - `thump_gain`：爆鸣分量幅度 0..=1（其余为宽带噪声；0 = 纯噪声音色）
+/// - `noise_scale`：宽带噪声幅度 0..=1（整体响亮度）
+/// - `cutoff`：一阶低通截止 Hz（越低越闷）
+/// - `duration`：声部时长（秒，ADSR 衰减段；越长尾巴越长）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotParams {
+    pub pitch: f32,
+    pub thump_gain: f32,
+    pub noise_scale: f32,
+    pub cutoff: f32,
+    pub duration: f32,
+}
+
+/// M1 加兰德步枪枪声：短促响亮、中低音、清脆 crack。
+///
+/// 与历史 `play_shot` 的合成参数**逐位一致**（纯噪声、cutoff 3200Hz、decay 0.12s），
+/// 保证既有调用链路与全部旧单测零回归。
+pub const M1_SHOT: ShotParams = ShotParams {
+    pitch: 115.0,
+    thump_gain: 0.0,
+    noise_scale: 1.0,
+    cutoff: 3200.0,
+    duration: 0.12,
+};
+
+/// Thompson 冲锋枪枪声：较低音（78Hz 爆鸣）、略长尾巴（0.17s）、更闷（cutoff 2100Hz）。
+/// 噪声幅度降到 0.7、爆鸣 0.45，组合峰值 ~1.15 由渲染钳位兜底，音色闷而厚。
+pub const THOMPSON_SHOT: ShotParams = ShotParams {
+    pitch: 78.0,
+    thump_gain: 0.45,
+    noise_scale: 0.70,
+    cutoff: 2100.0,
+    duration: 0.17,
+};
+
 /// 合成声部种类：决定发生器与音色参数
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SynthKind {
-    /// 枪声：噪声突发 + 指数衰减（ADSR）
+    /// 枪声：噪声突发 + 指数衰减（ADSR；可选低频爆鸣分量由 ShotParams 驱动）
     Shot,
     /// 爆炸：低频轰鸣 + 次声成分
     Explosion,
     /// 脚步：短促宽带噪声
     Footstep,
+    /// 手榴弹投掷哨声：高音正弦下滑（甩出瞬间的哨响）
+    GrenadeWhistle,
+    /// 手榴弹落地滚动：短促低音 thud
+    GrenadeBounce,
 }
 
 /// ADSR 包络参数（时间单位秒；sustain 为 0..=1 的保持电平）
@@ -840,6 +883,12 @@ struct SynthVoice {
     /// 一阶低通输出状态
     lp: f32,
     env: AdsrEnv,
+    /// 低频爆鸣基频（Hz；仅 Shot 用，0 = 无爆鸣）
+    thump_freq: f32,
+    /// 低频爆鸣幅度（0..=1；仅 Shot 用，0 = 纯噪声）
+    thump_gain: f32,
+    /// 宽带噪声幅度（0..=1；仅 Shot 用）
+    noise_scale: f32,
 }
 
 impl SynthVoice {
@@ -847,7 +896,16 @@ impl SynthVoice {
     fn raw_sample(&mut self) -> f32 {
         let t = self.time;
         match self.kind {
-            SynthKind::Shot | SynthKind::Footstep => noise_unit(&mut self.rng),
+            SynthKind::Shot => {
+                let n = noise_unit(&mut self.rng) * self.noise_scale;
+                if self.thump_gain > 0.0 {
+                    // 宽带噪声 + 低频爆鸣（正弦）：步枪 crack 高脆、冲锋枪低闷
+                    n + (std::f32::consts::TAU * self.thump_freq * t).sin() * self.thump_gain
+                } else {
+                    n
+                }
+            }
+            SynthKind::Footstep => noise_unit(&mut self.rng),
             SynthKind::Explosion => {
                 // 低频轰鸣 80→35Hz 下滑 + 次声 24Hz + 宽带噪声（进低通变“闷响”）
                 let p = (t / 0.6).min(1.0);
@@ -855,6 +913,17 @@ impl SynthVoice {
                 let sub = (std::f32::consts::TAU * 24.0 * t).sin() * 0.45;
                 let boom = noise_unit(&mut self.rng) * (1.0 - 0.7 * p);
                 rumble + sub + boom
+            }
+            SynthKind::GrenadeWhistle => {
+                // 投掷哨声：1100→520Hz 高音下滑（0.2s 内），叠加轻微噪声质感
+                let p = (t / 0.2).min(1.0);
+                let freq = 1100.0 - 580.0 * p;
+                (std::f32::consts::TAU * freq * t).sin() * 0.8 + noise_unit(&mut self.rng) * 0.2
+            }
+            SynthKind::GrenadeBounce => {
+                // 落地滚动：60Hz 低音 thud × 快衰减 + 轻微噪声（滚动质感）
+                let thud = (std::f32::consts::TAU * 60.0 * t).sin() * (-t * 30.0).exp();
+                thud * 0.7 + noise_unit(&mut self.rng) * 0.3
             }
         }
     }
@@ -932,15 +1001,59 @@ impl DspSynth {
         }
     }
 
-    /// 枪声：噪声突发 + 指数衰减（~3.2kHz 低通，ADSR 快起长落）
+    /// 枪声：噪声突发 + 指数衰减（默认 M1 加兰德音色，委托 `play_shot_with`）。
+    /// 与历史实现逐位一致（M1_SHOT 参数），既有调用链路零回归。
+    #[allow(dead_code)] // 兼容入口：主会话已切换 play_shot_with 参数化调用，此签名保留供测试/第三方
     pub fn play_shot(&mut self, position: Vec3, volume: f32) -> VoiceId {
-        self.spawn(
+        self.play_shot_with(position, volume, M1_SHOT)
+    }
+
+    /// 参数化枪声：按 `ShotParams` 决定音色（M1_SHOT 清脆 crack / THOMPSON_SHOT 低闷长尾）。
+    /// ADSR：attack 0.002s、decay = params.duration、sustain 0（单发）、短 release。
+    pub fn play_shot_with(&mut self, position: Vec3, volume: f32, params: ShotParams) -> VoiceId {
+        let dur = params.duration.max(0.01);
+        self.spawn_full(
             SynthKind::Shot,
             position,
             volume,
-            Adsr::new(0.002, 0.12, 0.0, 0.02),
-            3200.0,
+            Adsr::new(0.002, dur, 0.0, (dur * 0.15).min(0.05)),
+            params.cutoff,
             0x9E37_79B9,
+            params.pitch,
+            params.thump_gain,
+            params.noise_scale,
+        )
+    }
+
+    /// 手榴弹投掷哨声：高音正弦下滑（1100→520Hz，~0.23s），与枪声明显区分。
+    /// 体积固定 0.7（事件自身响度已编码在合成器内），距离衰减照常。
+    pub fn play_grenade_throw(&mut self, position: Vec3) -> VoiceId {
+        self.spawn_full(
+            SynthKind::GrenadeWhistle,
+            position,
+            0.7,
+            Adsr::new(0.01, 0.2, 0.0, 0.05),
+            4000.0,
+            0x6D17_4A3B,
+            0.0,
+            0.0,
+            1.0,
+        )
+    }
+
+    /// 手榴弹落地滚动：短促低音 thud（60Hz 正弦 × 快衰减 + 噪声，~0.1s），体积固定 0.6
+    #[allow(dead_code)] // 预留：主会话 game.rs 手榴弹落地事件接入（指令单 #4 阶段三，集成由主会话完成）
+    pub fn play_grenade_bounce(&mut self, position: Vec3) -> VoiceId {
+        self.spawn_full(
+            SynthKind::GrenadeBounce,
+            position,
+            0.6,
+            Adsr::new(0.002, 0.1, 0.0, 0.03),
+            700.0,
+            0x2B3C_4D5E,
+            0.0,
+            0.0,
+            1.0,
         )
     }
 
@@ -1033,7 +1146,7 @@ impl DspSynth {
         self.voices.retain(|v| v.env.stage != EnvStage::Done);
     }
 
-    /// 生成一个一次性声部（声部满时丢弃最旧）
+    /// 生成一个一次性声部（声部满时丢弃最旧）；非枪声默认无爆鸣（thump_gain=0、noise_scale=1）
     fn spawn(
         &mut self,
         kind: SynthKind,
@@ -1042,6 +1155,23 @@ impl DspSynth {
         adsr: Adsr,
         cutoff: f32,
         seed: u32,
+    ) -> VoiceId {
+        self.spawn_full(kind, position, volume, adsr, cutoff, seed, 0.0, 0.0, 1.0)
+    }
+
+    /// 生成一个一次性声部（含枪声爆鸣/噪声幅度参数；声部满时丢弃最旧）
+    #[allow(clippy::too_many_arguments)] // 合成器内部参数直通，避免引入中间结构
+    fn spawn_full(
+        &mut self,
+        kind: SynthKind,
+        position: Vec3,
+        volume: f32,
+        adsr: Adsr,
+        cutoff: f32,
+        seed: u32,
+        thump_freq: f32,
+        thump_gain: f32,
+        noise_scale: f32,
     ) -> VoiceId {
         if self.voices.len() >= MAX_SYNTH_VOICES {
             self.voices.remove(0);
@@ -1058,6 +1188,9 @@ impl DspSynth {
             rng: seed ^ (id as u32).wrapping_mul(0x0100_0193),
             lp: 0.0,
             env: AdsrEnv::new(adsr),
+            thump_freq,
+            thump_gain,
+            noise_scale,
         });
         VoiceId(id)
     }
@@ -2407,5 +2540,163 @@ mod tests {
         synth2.render(&listener, 2400, &mut out2);
         assert!(out2.iter().any(|&s| s != 0.0), "音乐开启后输出应含音乐");
         assert!(out2.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+    }
+
+    // ---------- 枪声参数化（M1 / Thompson）与手榴弹投掷/落地音 ----------
+
+    /// 统计缓冲的过零率（近似高频含量；正弦窄带音低、宽带噪声高）
+    fn zero_crossing_count(buf: &[f32]) -> usize {
+        let mut count = 0usize;
+        let mut prev = 0.0f32;
+        for &s in buf {
+            if (prev < 0.0 && s >= 0.0) || (prev >= 0.0 && s < 0.0) {
+                count += 1;
+            }
+            prev = s;
+        }
+        count
+    }
+
+    #[test]
+    fn shot_params_m1_and_thompson_differ() {
+        // M1 与 Thompson 音色参数必须可区分（音高/时长/闷度至少一项不同）
+        assert_ne!(M1_SHOT.pitch, THOMPSON_SHOT.pitch, "音高应不同（M1 高脆 / Thompson 低闷）");
+        assert_ne!(
+            M1_SHOT.duration, THOMPSON_SHOT.duration,
+            "时长应不同（Thompson 尾巴更长）"
+        );
+        assert_ne!(M1_SHOT.cutoff, THOMPSON_SHOT.cutoff, "低通应不同（Thompson 更闷）");
+        assert_ne!(M1_SHOT, THOMPSON_SHOT, "参数集整体应不同");
+        // 参数域合理性：爆鸣/噪声幅度有界、时长为正
+        assert!(M1_SHOT.thump_gain >= 0.0 && M1_SHOT.thump_gain <= 1.0);
+        assert!(THOMPSON_SHOT.thump_gain > 0.0, "Thompson 应有低频爆鸣分量");
+        assert!(M1_SHOT.noise_scale > 0.0 && THOMPSON_SHOT.noise_scale > 0.0);
+    }
+
+    #[test]
+    fn play_shot_delegates_to_m1_params() {
+        // 旧签名 play_shot 委托 M1_SHOT：与 play_shot_with(M1_SHOT) 逐样本一致，输出非全零
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut a = DspSynth::new(48_000);
+        let mut b = DspSynth::new(48_000);
+        a.play_shot(Vec3::ZERO, 0.8);
+        b.play_shot_with(Vec3::ZERO, 0.8, M1_SHOT);
+        let mut oa = vec![0.0; 9600];
+        let mut ob = vec![0.0; 9600];
+        a.render(&listener, 4800, &mut oa);
+        b.render(&listener, 4800, &mut ob);
+        assert_eq!(oa, ob, "play_shot 应委托 M1_SHOT 参数（逐位一致）");
+        assert!(oa.iter().any(|&s| s != 0.0), "M1 枪声输出应非全零");
+    }
+
+    #[test]
+    fn shot_with_params_deterministic() {
+        // 同参数同事件序列 → 逐样本一致
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut a = DspSynth::new(48_000);
+        let mut b = DspSynth::new(48_000);
+        for s in [&mut a, &mut b] {
+            s.play_shot_with(Vec3::ZERO, 0.8, THOMPSON_SHOT);
+        }
+        let mut oa = vec![0.0; 9600];
+        let mut ob = vec![0.0; 9600];
+        a.render(&listener, 4800, &mut oa);
+        b.render(&listener, 4800, &mut ob);
+        assert_eq!(oa, ob, "Thompson 同参数应逐样本一致");
+    }
+
+    #[test]
+    fn thompson_has_longer_tail_than_m1() {
+        // 0.16s 时：M1（duration 0.12 + release ≈ 0.14s 总长）已播完、Thompson（0.17s + release）仍活跃
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut m1 = DspSynth::new(48_000);
+        m1.play_shot_with(Vec3::ZERO, 0.8, M1_SHOT);
+        m1.render(&listener, 4800, &mut vec![0.0; 9600]); // 0.1s
+        m1.render(&listener, 2880, &mut vec![0.0; 5760]); // 0.16s
+        assert_eq!(m1.voice_count(), 0, "M1 0.16s 内应播完");
+        let mut th = DspSynth::new(48_000);
+        th.play_shot_with(Vec3::ZERO, 0.8, THOMPSON_SHOT);
+        th.render(&listener, 4800, &mut vec![0.0; 9600]); // 0.1s
+        th.render(&listener, 2880, &mut vec![0.0; 5760]); // 0.16s
+        assert!(th.voice_count() >= 1, "Thompson 0.16s 时仍活跃（尾巴更长）");
+    }
+
+    #[test]
+    fn grenade_whistle_deterministic_and_bounded() {
+        // 哨声确定性 + 输出有界（|x|≤1 无 NaN/Inf）+ 非全零
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut a = DspSynth::new(48_000);
+        let mut b = DspSynth::new(48_000);
+        a.play_grenade_throw(Vec3::ZERO);
+        b.play_grenade_throw(Vec3::ZERO);
+        let mut oa = vec![0.0; 24_000];
+        let mut ob = vec![0.0; 24_000];
+        a.render(&listener, 12_000, &mut oa);
+        b.render(&listener, 12_000, &mut ob);
+        assert_eq!(oa, ob, "哨声合成应确定性（同参数同输出）");
+        for (i, &s) in oa.iter().enumerate() {
+            assert!(s.is_finite(), "sample {i} 应有限");
+            assert!(s.abs() <= 1.0, "sample {i} = {s} 超出 [-1,1]");
+        }
+        assert!(oa.iter().any(|&s| s != 0.0), "哨声应有输出");
+    }
+
+    #[test]
+    fn grenade_whistle_differs_from_shot() {
+        // 哨声 vs 枪声：样本不同 + 高频含量差异（哨声正弦窄带过零低、枪声宽带噪声过零高）
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut shot = DspSynth::new(48_000);
+        shot.play_shot_with(Vec3::ZERO, 0.8, M1_SHOT);
+        let mut sbuf = vec![0.0; 4800];
+        shot.render(&listener, 2400, &mut sbuf);
+        let mut whis = DspSynth::new(48_000);
+        whis.play_grenade_throw(Vec3::ZERO);
+        let mut wbuf = vec![0.0; 4800];
+        whis.render(&listener, 2400, &mut wbuf);
+        assert_ne!(sbuf, wbuf, "哨声与枪声样本应不同");
+        let shot_zcr = zero_crossing_count(&sbuf);
+        let whis_zcr = zero_crossing_count(&wbuf);
+        assert!(shot_zcr > 300, "枪声宽带噪声过零应较多，实际 {shot_zcr}");
+        assert!(whis_zcr < 500, "哨声正弦窄带过零应较少，实际 {whis_zcr}");
+        assert!(whis_zcr < shot_zcr, "哨声高频含量应低于枪声（{whis_zcr} vs {shot_zcr}）");
+    }
+
+    #[test]
+    fn grenade_bounce_output_and_lifetime() {
+        // 落地 thud：有输出、有界、~0.1s 后结束
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut s = DspSynth::new(48_000);
+        s.play_grenade_bounce(Vec3::ZERO);
+        let mut buf = vec![0.0; 9600];
+        s.render(&listener, 4800, &mut buf);
+        assert!(buf.iter().any(|&x| x != 0.0), "落地音应有输出");
+        assert!(buf.iter().all(|&x| x.is_finite() && x.abs() <= 1.0));
+        assert!(s.voice_count() >= 1, "0.1s 时 thud 仍在衰减尾段");
+        let mut rest = vec![0.0; 9600];
+        s.render(&listener, 4800, &mut rest);
+        assert_eq!(s.voice_count(), 0, "0.2s 后落地音应结束");
+    }
+
+    #[test]
+    fn grenade_whistle_multi_tick_no_panic_and_sample_rate() {
+        // 哨声分块 tick 不 panic；采样率正确；声部生命周期正常
+        let listener = AudioListener::new(Vec3::ZERO);
+        let mut s = DspSynth::new(48_000);
+        assert_eq!(s.sample_rate, 48_000.0);
+        s.play_grenade_throw(Vec3::ZERO);
+        let mut total = vec![0.0f32; 0];
+        for _ in 0..20 {
+            let mut buf = vec![0.0f32; 480];
+            s.render(&listener, 240, &mut buf);
+            total.extend_from_slice(&buf);
+        }
+        assert!(total.iter().any(|&x| x != 0.0), "0.1s 分块渲染应有输出");
+        assert!(total.iter().all(|&x| x.is_finite() && x.abs() <= 1.0));
+        // 哨声 ADSR 约 0.21s：再渲染 0.15s（累计 0.25s）后应已结束
+        for _ in 0..30 {
+            let mut buf = vec![0.0f32; 480];
+            s.render(&listener, 240, &mut buf);
+        }
+        assert_eq!(s.voice_count(), 0, "0.25s 后哨声应结束");
     }
 }

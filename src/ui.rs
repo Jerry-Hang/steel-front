@@ -371,6 +371,8 @@ pub struct HudState {
     pub wave: u32,
     /// 波间倒计时（秒，>0 时顶部显示"下一波"）
     pub countdown: f32,
+    /// survive 总波数（0 = 非 survive 规则；game.rs 每帧同步，HUD 显示 "WAVE x/N"）
+    pub survive_waves: u32,
     /// 当前画面（游戏/菜单/结算）
     pub screen: HudScreen,
     /// 设置面板是否打开（由 `toggle_settings()` 切换，接入主循环后用于拦截游戏输入）
@@ -439,6 +441,7 @@ impl HudState {
             score: 0,
             wave: 1,
             countdown: 0.0,
+            survive_waves: 0,
             screen: HudScreen::Game,
             settings_open: false,
             volume: 0.8,
@@ -664,7 +667,12 @@ impl HudState {
         // ---- 波次/分数（顶部中央）----
         let center_x = w * 0.5;
         let top = margin;
-        let wave_txt = format!("WAVE {}", self.wave);
+        // survive 规则显示 "WAVE x/N"，普通模式 "WAVE x"
+        let wave_txt = if self.survive_waves > 0 {
+            format!("WAVE {}/{}", self.wave, self.survive_waves)
+        } else {
+            format!("WAVE {}", self.wave)
+        };
         let wave_x = center_x - text_width(&wave_txt, 1.8) * 0.5;
         elems.push(HudElement::Text {
             text: wave_txt,
