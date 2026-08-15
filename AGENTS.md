@@ -6,10 +6,25 @@
 - 运行时中枢：`src/engine/game.rs`（每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络）
 - 渲染：`src/engine/renderer.rs`（地形 LOD + 65536 实例场 + HUD 覆盖层；改 pipeline/shader/swapchain 风险高，须先跑冒烟验 VUID）
 - 地形高度纯函数在 renderer.rs（`terrain_height` / `terrain_height_at`），中央 60×60 压平 y=0
-- 配置持久化：`src/config.rs` → `$HOME/.steel_front.cfg`（原子写 + 容错加载，测试不写盘）
-- 测试：`cargo test`（纯逻辑，不碰 GPU）；冒烟 `bash scripts/run_gameplay_smoke.sh`（需 X/Vulkan，20s，断言 kills>0）
+- 配置持久化：`src/config.rs` → `$HOME/.steel_front.cfg`（Windows: `C:\Users\<user>\.steel_front.cfg`；原子写 + 容错加载，测试不写盘）
+- 测试：`cargo test`（纯逻辑，不碰 GPU）
 - 验收约束：dead-code=0（0 警告）、测试全绿、不新增第三方依赖、commit 规范 `feat(game)/chore/docs`
 - 内存约束：12GB，一次只跑一个 cargo，禁止并行构建
+
+## 开发环境（2026-08-15 起：Windows 原生 + DeepSeek Harness）
+
+> **环境铁律（勿回退）**：开发/验证已从 WSL2 迁移至 **Windows 原生**。
+> 历史 WSL2 内容（git 只跑 WSL、X11 冒烟、dzn 转译等）**保留作历史记录，不再适用**。
+
+- **开发主体**：Windows 原生（RTX 5060 Laptop 真机，NVIDIA 驱动 610.88）。总指挥（DeepSeek Harness）直接在本仓库改代码、编译、测试、冒烟、提交（GitHub 令牌 push，仅限本仓库）。
+- **编译**：`cargo build --release`（VS 2026 + rustc 1.96+，Windows 侧已配好）。
+- **测试**：`cargo test --release`（当前基线 364 tests 全绿、0 警告）。
+- **冒烟**：`powershell -ExecutionPolicy Bypass -File scripts/run_gameplay_smoke.ps1`（SendInput 注入 + 日志断言，约 30s，ALL-OK = VUID=0 + kills>=1 + fps>=120）。游戏 stdout → smoke.log、stderr → smoke.log.err（脚本内部合并）。
+- **分辨率**：默认 2560x1600（配置文件 `C:\Users\Jerry-Huang\.steel_front.cfg`，RESOLUTIONS 5 档）。
+- **GPU 能力（原生实测，勿回退）**：VK_EXT_mesh_shader=true（网格着色器路径启用）、光追 RT pipeline/AS/ray_query=true、DLSS VK_NVX=true、present_us 101-373µs（WSL2 dzn 的 1-2ms 瓶颈消失）。
+- **功率说明**：奥创中心手动模式 + 电源最佳性能；GPU 功耗墙已解锁 111.92W（默认 55W）；1280x800 下 42W/300+fps 属正常（负载轻），2560x1600 压力模式 50W+/150-400fps。
+- **已知修正（2026-08-15）**：鼠标水平方向（look() `yaw -= dx*sens`，右移=右转）；冒烟脚本 aim 注入已同步反向。
+- **遗留**：WSL2 时代输入捕获问题（HANDOFF-2026-08-11.md）在原生 win32 下已解决（SendInput 视角注入实测正常）；`docs/perf-*` 等 WSL2 基准保留作历史。
 
 ## 迭代规划与交接日志（AI 交接规范）
 
@@ -18,7 +33,7 @@
 - **规划开启**：每次迭代/任务规划开始时，必须在本节登记：目标、任务拆解、负责人、状态（in_progress）。
 - **迭代结束**：迭代结束时必须在本节写完成记录：完成项、验收结果（测试数/警告数/冒烟结果）、遗留问题与下一步。
 - **AI 间交接**：AI 与 AI 之间的所有交接必须在此留痕——上下文交接（记忆/结论迁移）、任务交接（接手/移交）、绘画/美术素材交接（素材路径、用途、规格、验收标准），格式：日期、发起方、接收方、交接内容、状态。
-- **git 提交规范不变**：一个功能一个 commit，禁止 mega-commit；提交信息 `feat/chore/docs/fix` + 范围（如 `feat(game)`、`docs(AGENTS.md)`）；git 操作只在 WSL 内跑，禁止 `\\wsl$` + Windows git。
+- **git 提交规范不变**：一个功能一个 commit，禁止 mega-commit；提交信息 `feat/chore/docs/fix` + 范围（如 `feat(game)`、`docs(AGENTS.md)`）；git 操作在 Windows 原生跑（总指挥 GitHub 令牌 push，仅限 steel-front 仓库）。
 
 ### 交接日志模板（可复制）
 
@@ -40,6 +55,22 @@
 - ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：done（第 1-4 步全部完成：分组纯函数 + 双池调度 + 地图生成换核 + 远组降频；265 tests + 冒烟 ALL-OK；基准存档 `docs/perf-ai-tier-2026-08-11/`——128 NPC 压力模式 near~42/far~85（2/3 AI 走 CCD1/E 核）、ai_us p50≈385µs 非瓶颈、fps p50≈274 无回归、降频 A/B 收益≈0（压力模式互射 NPC 全在 Chase/Attack 触发面小，保留为防御性优化）；`RV3D_AI_DECIMATE=off` 可关降频）
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
+
+### [2026-08-15] 交接：Windows 原生 UI/呈现迭代（ESC 毛玻璃菜单 + 击杀提示 + 环境适配）
+
+- 日期：2026-08-15
+- 发起方：总指挥（DeepSeek Harness，Windows 原生直接开发）
+- 接收方：后续迭代 AI（下一会话，Windows 原生）
+- 交接类型：迭代结束
+- 交接内容：
+  - ① ESC 毛玻璃菜单（替代两段式退出确认）：ESC 打开半透明毛玻璃菜单（全屏暗色遮罩 + 居中面板 + PAUSED 标题 + 两个选项 EXIT GAME / SETTINGS），Tab 切换选中（高亮黄底）、Enter 确认（退出 / 打开设置）、ESC 关闭、任意其它键关闭；旧 confirm_quit 渲染块已删（字段保留防测试破坏）。
+  - ② 击杀提示（右上角 feed，战地风格）：HudState 新增 kill_feed（最多 4 条、6 秒消退、最新在上）；game.rs 三处钩子——玩家击杀 NPC（YOU KILLED RED #id）、NPC 互杀（RED KILLED BLUE #id，apply_npc_combat 血量归零判定）、NPC 杀玩家（YOU WERE KILLED）；新增 team_name 辅助函数。
+  - ③ 环境适配（AGENTS.md 结构更新，历史保留）：新增「开发环境（2026-08-15 起：Windows 原生 + DeepSeek Harness）」节——编译/测试/冒烟命令、GPU 能力实测（mesh/RT/DLSS/present）、分辨率 2560x1600、功率说明、鼠标方向修正记录；git 规则改为 Windows 原生 push（总指挥令牌）；WSL2 时代内容保留作历史。
+  - ④ 鼠标水平方向修正（commit 6009684，随前轮）：look() 改 yaw -= dx*sens（右移=右转）；冒烟脚本 aim 注入同步反向（否则振荡不收敛）。
+  - ⑤ 分辨率 2560x1600：写入 C:\Users\Jerry-Huang\.steel_front.cfg（用户确认）；压力模式实测 50W+/150-400fps。
+  - 验收：364 tests 全绿 / 0 警告 / 冒烟 ALL-OK（VUID=0、kills=1、fps 246-307）。
+  - 遗留/下一步：① 毛玻璃是真模糊（需 shader 后处理采样主 pass，当前为半透明暗色遮罩近似）；② 击杀提示文本目前英文（位图字体 5x7 无中文）；③ kill feed 未区分击杀者名字（NPC 只有阵营+id）；④ 呈现层续作（第一人称枪模/弹孔贴花）。
+- 状态：done
 
 ### [2026-08-14] 交接：总指挥指令单 #4 完成（防守波次规则 + 爆炸纵深 + 音效差异化）
 
