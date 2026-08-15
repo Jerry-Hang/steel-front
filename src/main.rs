@@ -314,6 +314,113 @@ impl GameApp {
         }
     }
 
+    /// 设置面板鼠标点击：命中某行 → 选中该项（与 Tab 循环一致）；音量/灵敏度条内点击
+    /// 按位置比例直接设值（x 比例 = 值）。布局必须与 ui.rs settings_elements 一致。
+    fn settings_click(&mut self, mx: f32, my: f32) {
+        let s = self.game.hud.ui_scale();
+        let w = self.game.hud.screen_w;
+        let h = self.game.hud.screen_h;
+        let dw = w / s;
+        let dh = h / s;
+        let bar_w = (dw * 0.32).min(320.0);
+        let bar_h = 20.0;
+        let label_w = 160.0;
+        let row_h = 34.0;
+        let start_y = dh * 0.28;
+        let left = dw * 0.5 - (label_w + bar_w + 16.0) * 0.5;
+        let mx_d = mx / s;
+        let my_d = my / s;
+        // 音量/灵敏度/音乐三行：点行选中；点在条上按比例设值
+        for i in 0..3usize {
+            let y = start_y + i as f32 * row_h;
+            if my_d >= y && my_d <= y + bar_h {
+                self.game.hud.settings_selection = i as u8;
+                if mx_d >= left + label_w && mx_d <= left + label_w + bar_w {
+                    let ratio = ((mx_d - (left + label_w)) / bar_w).clamp(0.0, 1.0);
+                    match i {
+                        0 => self.game.hud.volume = ratio,
+                        1 => self.game.hud.sensitivity = ratio,
+                        _ => self.game.hud.music_volume = ratio,
+                    }
+                    log::info!("settings: 鼠标点击设定 行{} = {:.0}%", i, ratio * 100.0);
+                } else {
+                    log::info!("settings: 鼠标选中行 {}", i);
+                }
+                return;
+            }
+        }
+        // 分辨率/画质行：点击选中
+        for i in 0..2usize {
+            let row = 3 + i as u8;
+            let y = start_y + row as f32 * row_h;
+            if my_d >= y && my_d <= y + bar_h {
+                self.game.hud.settings_selection = row;
+                log::info!("settings: 鼠标选中行 {}", row);
+                return;
+            }
+        }
+        // 键位行：点击选中
+        let key_start_y = start_y + 5.0 * row_h + 24.0;
+        for i in 0..7usize {
+            let y = key_start_y + i as f32 * 18.0;
+            if my_d >= y && my_d <= y + 18.0 {
+                self.game.hud.settings_selection = (5 + i) as u8;
+                log::info!("settings: 鼠标选中键位行 {}", 5 + i);
+                return;
+            }
+        }
+    }
+
+    /// 第一人称枪模部件矩阵（M1 步枪外形，积木拼装）：固定在眼位右下方，
+    /// 随相机 yaw/pitch 旋转；开火后坐（anim_clock 相位脉冲）+ 行走轻微晃动。
+    fn first_person_gun_parts(&self) -> Vec<([f32; 16], [f32; 4])> {
+        let cam = &self.camera;
+        let eye = cam.position();
+        let fwd = cam.forward();
+        let right = cam.right();
+        let up = glam::Vec3::Y;
+        // 枪基准点：眼位前方 0.45、右 0.28、下 0.32（FPS 视角常见位置）
+        let mut base = eye + fwd * 0.45 + right * 0.28 - up * 0.32;
+        // 开火后坐：相位脉冲把枪往下/后顶（高频 12Hz 衰减；开火态由武器末次射击时间推断，
+        // 简化：anim_clock 相位周期性轻微后坐——射击手感仍由后坐力相机抖动承担）
+        if self.game.is_firing() {
+            let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
+            base -= up * (0.06 * k) + fwd * (0.05 * k);
+        }
+        // 行走晃动：轻微左右摆动
+        let bob = (self.anim_clock * 10.0).sin() * 0.012;
+        base += right * bob;
+        // 枪朝向 = 相机朝向（pitch/yaw），加少量右倾
+        let yaw = cam.yaw;
+        let pitch = cam.pitch;
+        let rot = glam::Mat4::from_rotation_y(yaw) * glam::Mat4::from_rotation_x(pitch);
+        // 部件：(局部偏移, 尺寸) — M1 步枪：枪托/机匣/护木/枪管/弹匣/握把/准星
+        let parts: [([f32; 3], [f32; 3]); 8] = [
+            ([0.0, -0.02, 0.28], [0.06, 0.10, 0.30]), // 枪托（近身）
+            ([0.0, 0.0, 0.0], [0.06, 0.12, 0.34]), // 机匣
+            ([0.0, 0.0, -0.34], [0.055, 0.08, 0.55]), // 护木/枪管中段
+            ([0.0, 0.0, -0.78], [0.045, 0.06, 0.35]), // 枪管（前伸）
+            ([0.0, -0.13, -0.02], [0.05, 0.16, 0.10]), // 弹匣（下挂）
+            ([0.0, -0.09, 0.16], [0.05, 0.12, 0.06]), // 握把
+            ([0.0, 0.12, -0.05], [0.02, 0.05, 0.02]), // 准星
+            ([0.0, 0.1, 0.12], [0.05, 0.04, 0.06]), // 表尺
+        ];
+        let trans = glam::Mat4::from_translation(base);
+        parts
+            .iter()
+            .map(|(off, size)| {
+                let model = trans
+                    * rot
+                    * glam::Mat4::from_translation(glam::Vec3::from(*off))
+                    * glam::Mat4::from_scale(glam::Vec3::from(*size));
+                (
+                    model.to_cols_array(),
+                    [0.25, 0.22, 0.18, 1.0], // 深木色枪身
+                )
+            })
+            .collect()
+    }
+
     /// ESC 菜单鼠标点击命中检测：命中选项矩形则执行对应动作（0=退出 1=设置）。
     /// 矩形布局必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中，
     /// 选项 y = py+90 / py+146，宽 pw-120=260 居中，高 34）。返回是否命中任何选项。
@@ -463,6 +570,8 @@ impl GameApp {
 
     /// 渲染一帧
     fn render(&mut self) {
+        // 第一人称枪模部件（相机姿态）：在借用 renderer 前生成，避免借用冲突
+        let gun_parts = self.first_person_gun_parts();
         if let Some(renderer) = &mut self.renderer {
             // 投影宽高比取实际窗口尺寸（16:10 等非 16:9 分辨率下不拉伸）
             let aspect = self
@@ -717,6 +826,8 @@ impl GameApp {
                 })
                 .collect();
             renderer.set_dead_bodies(&dead_visuals);
+            // 第一人称枪模（部件已在 render() 入口预生成，此处上传）
+            renderer.set_first_person_gun(&gun_parts);
 
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
@@ -1148,6 +1259,12 @@ impl ApplicationHandler for GameApp {
                             if self.menu_click_hit(mx as f32, my as f32) {
                                 log::info!("ESC 菜单鼠标点击选项");
                             }
+                            return;
+                        }
+                        // 设置面板打开：点击命中行（选择/调节），不触发开火
+                        if pressed && self.game.settings_open() {
+                            let (mx, my) = self.last_cursor;
+                            self.settings_click(mx as f32, my as f32);
                             return;
                         }
                         if pressed && !self.game.settings_open() {

@@ -2036,6 +2036,11 @@ impl Game {
         kick
     }
 
+    /// 是否处于开火后坐期（fire_cooldown > 0 = 刚开火，枪模后坐动画用）
+    pub fn is_firing(&self) -> bool {
+        self.fire_cooldown > 0.0
+    }
+
     /// 玩家脚底位置（世界坐标）
     pub fn player_pos(&self) -> glam::Vec3 {
         glam::Vec3::new(

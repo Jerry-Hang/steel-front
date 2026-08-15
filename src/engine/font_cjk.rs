@@ -87,21 +87,6 @@ pub fn glyph(ch: char) -> Option<[u8; 8]> {
     }
 }
 
-/// 预填充常用字形（启动时调用：把 UI 文本中出现的字符批量光栅化，避免首帧卡顿）
-pub fn prefill(texts: &[&str]) {
-    let chars: std::collections::HashSet<char> = texts
-        .iter()
-        .flat_map(|t| t.chars())
-        .filter(|c| {
-            let cp = *c as u32;
-            (0x4E00..=0x9FFF).contains(&cp) || (0x3000..=0x303F).contains(&cp)
-        })
-        .collect();
-    for ch in chars {
-        let _ = glyph(ch);
-    }
-}
-
 fn rasterize(ch: char) -> Option<[u8; 8]> {
     unsafe {
         let screen_dc = GetDC(std::ptr::null_mut());

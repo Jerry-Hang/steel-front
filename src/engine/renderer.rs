@@ -3842,6 +3842,31 @@ impl Renderer {
         }
     }
 
+    /// 追加第一人称枪模段（相机跟随，屏幕右下；由 main.rs 每帧按相机姿态生成部件矩阵）。
+    /// 与 NPC 共用槽位区尾部（预留 16 段：枪身/枪管/握把/弹匣/瞄具/枪托 等），
+    /// 距离分档时枪模在相机位置恒入 near 档；纯色 tint 渲染。
+    /// 参数为 (model 列主序矩阵, tint) 元组（InstanceData 为私有类型，对外暴露元组）。
+    pub fn set_first_person_gun(&mut self, parts: &[([f32; 16], [f32; 4])]) {
+        // 预留 16 段给枪模：从 npc_parts 尾部已占用数起，最多追加 16 段
+        let base = MAX_NPC_INSTANCES - 16;
+        let mut i = 0usize;
+        for (model, tint) in parts.iter().take(16) {
+            let idx = base + i as u32;
+            let inst = InstanceData {
+                model: *model,
+                tint: *tint,
+            };
+            if self.npc_parts.len() as u32 > idx {
+                self.npc_parts[idx as usize] = inst;
+            } else if self.npc_parts.len() as u32 == idx {
+                self.npc_parts.push(inst);
+            } else {
+                break;
+            }
+            i += 1;
+        }
+    }
+
     /// 每帧上传 NPC 士兵段到实例 buffer 的 NPC_SLOT_BASE 之后区域，
     /// 仿照 upload_markers 按距离分近/远档（不剔除，仅距离分档），返回 (近档, 远档) 计数。
     fn upload_npcs(&mut self, cam_pos: glam::Vec3) -> (u32, u32) {
