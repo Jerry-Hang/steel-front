@@ -3847,23 +3847,26 @@ impl Renderer {
     /// 距离分档时枪模在相机位置恒入 near 档；纯色 tint 渲染。
     /// 参数为 (model 列主序矩阵, tint) 元组（InstanceData 为私有类型，对外暴露元组）。
     pub fn set_first_person_gun(&mut self, parts: &[([f32; 16], [f32; 4])]) {
-        // 预留 16 段给枪模：从 npc_parts 尾部已占用数起，最多追加 16 段
+        // 预留 16 段给枪模：槽位 [MAX_NPC_INSTANCES-16, MAX_NPC_INSTANCES)。
+        // 先把 npc_parts 补齐到 base（占位实例），再写枪模部件——旧逻辑 len<idx 时
+        // break 导致 NPC 少时枪模完全不显示（2026-08-15 修复）。
         let base = MAX_NPC_INSTANCES - 16;
-        let mut i = 0usize;
-        for (model, tint) in parts.iter().take(16) {
-            let idx = base + i as u32;
-            let inst = InstanceData {
+        let zero = InstanceData {
+            model: [0.0; 16],
+            tint: [0.0; 4],
+        };
+        // 补齐到 base + 部件数（先保证长度够，再原位覆盖——旧逻辑 len<idx 时 break
+        // 导致枪模不显示；上一版补齐到 base 后写 idx=base 仍越界，改为补齐到末尾）
+        let need = base as usize + parts.len().min(16);
+        while self.npc_parts.len() < need {
+            self.npc_parts.push(zero);
+        }
+        for (i, (model, tint)) in parts.iter().take(16).enumerate() {
+            let idx = (base as usize) + i;
+            self.npc_parts[idx] = InstanceData {
                 model: *model,
                 tint: *tint,
             };
-            if self.npc_parts.len() as u32 > idx {
-                self.npc_parts[idx as usize] = inst;
-            } else if self.npc_parts.len() as u32 == idx {
-                self.npc_parts.push(inst);
-            } else {
-                break;
-            }
-            i += 1;
         }
     }
 

@@ -142,6 +142,8 @@ pub enum BindingAction {
     Reload,
     /// 开火
     Fire,
+    /// 跳跃
+    Jump,
     /// 菜单/设置
     Menu,
 }
@@ -161,8 +163,10 @@ pub struct KeyBindings {
     pub reload: u32,
     /// 菜单/设置键
     pub menu: u32,
-    /// 开火键
+    /// 开火键（默认 0 = 无键盘开火，用鼠标左键）
     pub fire: u32,
+    /// 跳跃键
+    pub jump: u32,
 }
 
 impl KeyBindings {
@@ -179,7 +183,8 @@ impl KeyBindings {
             move_right: 22,    // KeyD
             reload: 36,        // KeyR
             menu: 54,          // ContextMenu（物理菜单键）
-            fire: 62,          // Space
+            fire: 0,           // 无键盘开火（鼠标左键开火；2026-08-15 Space 改为跳跃）
+            jump: 62,          // Space（跳跃）
         }
     }
 
@@ -191,7 +196,8 @@ impl KeyBindings {
             BindingAction::Left => 19,     // KeyA
             BindingAction::Right => 22,    // KeyD
             BindingAction::Reload => 36,   // KeyR
-            BindingAction::Fire => 62,     // Space
+            BindingAction::Fire => 0,      // 无（鼠标左键开火）
+            BindingAction::Jump => 62,     // Space（跳跃）
             BindingAction::Menu => 54,     // ContextMenu
         }
     }
@@ -205,6 +211,7 @@ impl KeyBindings {
             BindingAction::Right => self.move_right,
             BindingAction::Reload => self.reload,
             BindingAction::Fire => self.fire,
+            BindingAction::Jump => self.jump,
             BindingAction::Menu => self.menu,
         }
     }
@@ -218,6 +225,7 @@ impl KeyBindings {
             BindingAction::Right,
             BindingAction::Reload,
             BindingAction::Fire,
+            BindingAction::Jump,
             BindingAction::Menu,
         ]
         .into_iter()
@@ -233,6 +241,7 @@ impl KeyBindings {
             BindingAction::Right => "RIGHT",
             BindingAction::Reload => "RELOAD",
             BindingAction::Fire => "FIRE",
+            BindingAction::Jump => "JUMP",
             BindingAction::Menu => "MENU",
         }
     }
@@ -249,6 +258,7 @@ impl KeyBindings {
             BindingAction::Right => &mut self.move_right,
             BindingAction::Reload => &mut self.reload,
             BindingAction::Fire => &mut self.fire,
+            BindingAction::Jump => &mut self.jump,
             BindingAction::Menu => &mut self.menu,
         };
         *slot = code;
@@ -271,6 +281,7 @@ impl KeyBindings {
                     BindingAction::Right => self.move_right = Self::default_code(other),
                     BindingAction::Reload => self.reload = Self::default_code(other),
                     BindingAction::Fire => self.fire = Self::default_code(other),
+                    BindingAction::Jump => self.jump = Self::default_code(other),
                     BindingAction::Menu => self.menu = Self::default_code(other),
                 }
             }
@@ -1201,6 +1212,7 @@ impl HudState {
             ("右移", self.key_bindings.move_right),
             ("换弹", self.key_bindings.reload),
             ("开火", self.key_bindings.fire),
+            ("跳跃", self.key_bindings.jump),
             ("菜单", self.key_bindings.menu),
         ];
         let key_start_y = start_y + 5.0 * row_h + 24.0;
@@ -1336,7 +1348,7 @@ impl HudState {
     /// 循环切换设置面板选中项（12 项：0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=7 个键位动作，
     /// 顺序与 `BindingAction` 及设置面板键位行一致）
     pub fn cycle_settings_selection(&mut self) {
-        self.settings_selection = (self.settings_selection + 1) % 12;
+        self.settings_selection = (self.settings_selection + 1) % 13;
     }
 
     /// 当前选中项（0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=键位动作）
@@ -1344,21 +1356,22 @@ impl HudState {
         self.settings_selection
     }
 
-    /// 当前选中项对应的键位动作：`settings_selection` 在 5..=11 时返回
-    /// `5 + i → BindingAction` 第 i 个（与设置面板键位行顺序一致），否则 None
+    /// 当前选中项对应的键位动作：settings_selection 在 5..=12 时返回
+    /// 第 (selection-5) 个动作（与设置面板键位行顺序一致），否则 None
     ///
     /// 预留：尚未接入 main.rs，由其在设置面板按 ENTER 时决定重绑定哪个动作。
     pub fn selected_action(&self) -> Option<BindingAction> {
-        const ACTIONS: [BindingAction; 7] = [
+        const ACTIONS: [BindingAction; 8] = [
             BindingAction::Forward,
             BindingAction::Backward,
             BindingAction::Left,
             BindingAction::Right,
             BindingAction::Reload,
             BindingAction::Fire,
+            BindingAction::Jump,
             BindingAction::Menu,
         ];
-        (5..=11)
+        (5..=12)
             .contains(&self.settings_selection)
             .then(|| ACTIONS[(self.settings_selection - 5) as usize])
     }
@@ -1847,7 +1860,8 @@ mod tests {
         assert_eq!(kb.move_right, 22, "D");
         assert_eq!(kb.reload, 36, "R");
         assert_eq!(kb.menu, 54, "MENU");
-        assert_eq!(kb.fire, 62, "SPACE");
+        assert_eq!(kb.fire, 0, "FIRE 无键盘默认（鼠标左键开火）");
+        assert_eq!(kb.jump, 62, "JUMP=SPACE");
         // label 映射
         assert_eq!(KeyBindings::label(41), "W");
         assert_eq!(KeyBindings::label(37), "S");
@@ -1925,7 +1939,7 @@ mod tests {
         assert!(texts.contains("W"), "键位列表应含 FORWARD 键名 W: {}", texts);
         assert!(
             texts.contains("SPACE"),
-            "键位列表应含 FIRE 键名 SPACE: {}",
+            "键位列表应含 JUMP 键名 SPACE（2026-08-15 起 Space=跳跃，开火=鼠标左键）: {}",
             texts
         );
         // layout_elements 在 Settings 画面应走 settings_elements
@@ -2012,7 +2026,8 @@ mod tests {
         assert_eq!(KeyBindings::default_code(BindingAction::Right), 22);
         assert_eq!(KeyBindings::default_code(BindingAction::Reload), 36);
         assert_eq!(KeyBindings::default_code(BindingAction::Menu), 54);
-        assert_eq!(KeyBindings::default_code(BindingAction::Fire), 62);
+        assert_eq!(KeyBindings::default_code(BindingAction::Fire), 0, "FIRE 无键盘默认");
+        assert_eq!(KeyBindings::default_code(BindingAction::Jump), 62, "JUMP=SPACE");
         assert_eq!(KeyBindings::action_name(BindingAction::Forward), "FORWARD");
         assert_eq!(KeyBindings::action_name(BindingAction::Backward), "BACKWARD");
         assert_eq!(KeyBindings::action_name(BindingAction::Left), "LEFT");
@@ -2025,7 +2040,7 @@ mod tests {
         assert_eq!(kb.code_for(BindingAction::Menu), 54);
         assert_eq!(kb.action_for(41), Some(BindingAction::Forward));
         assert_eq!(kb.action_for(37), Some(BindingAction::Backward));
-        assert_eq!(kb.action_for(62), Some(BindingAction::Fire));
+        assert_eq!(kb.action_for(62), Some(BindingAction::Jump));
         assert_eq!(kb.action_for(54), Some(BindingAction::Menu));
         assert_eq!(kb.action_for(999), None, "未绑定键码应返回 None");
     }
@@ -2042,10 +2057,10 @@ mod tests {
             Some(BindingAction::Forward),
             "冲突键码应按 Forward→Menu 顺序归属默认动作"
         );
-        // 把 FORWARD 绑到 SPACE(62)（当前 FIRE 的键码）→ FIRE 应复位回默认 SPACE
+        // 把 FORWARD 绑到 SPACE(62)（当前 JUMP 的键码）→ JUMP 应复位回默认 SPACE
         kb.bind(BindingAction::Forward, 62);
         assert_eq!(kb.code_for(BindingAction::Forward), 62);
-        assert_eq!(kb.code_for(BindingAction::Fire), 62, "FIRE 应复位回默认 62");
+        assert_eq!(kb.code_for(BindingAction::Jump), 62, "JUMP 应复位回默认 62");
         // 未冲突动作不受影响
         assert_eq!(kb.code_for(BindingAction::Right), 22, "RIGHT 应保持 D");
         assert_eq!(kb.code_for(BindingAction::Reload), 36, "RELOAD 应保持 R");
@@ -2128,6 +2143,7 @@ mod tests {
             BindingAction::Right,
             BindingAction::Reload,
             BindingAction::Fire,
+            BindingAction::Jump,
             BindingAction::Menu,
         ];
         for (i, action) in expected.iter().enumerate() {
@@ -2140,15 +2156,15 @@ mod tests {
                 action
             );
         }
-        hud.settings_selection = 12;
+        hud.settings_selection = 13;
         assert_eq!(hud.selected_action(), None, "越界应返回 None");
     }
 
     #[test]
-    fn cycle_settings_selection_wraps_12_rows() {
+    fn cycle_settings_selection_wraps_13_rows() {
         let mut hud = HudState::new(1280.0, 720.0);
         assert_eq!(hud.settings_selection(), 0);
-        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0] {
+        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0] {
             hud.cycle_settings_selection();
             assert_eq!(hud.settings_selection(), expected);
         }

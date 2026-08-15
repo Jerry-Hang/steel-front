@@ -455,7 +455,10 @@ fn mesh_main(
     let is_ground = slot < TERRAIN_INSTANCE_INDEX;
     // 包围球半径：地面 quad 半对角线×0.5（与 CPU instance_radii 一致）；
     // 立方体/远档十字覆盖 ±1 三轴 → sqrt(3)
-    let radius = select(1.7320508, 0.70710678, is_ground);
+    // 半径与 CPU instance_radii 一致：地面 2x2m quad 半对角线 sqrt(2)≈1.414
+    // （2026-08-15 修正：旧 0.707 低估一半 → 屏幕四角地面被过早剔除穿帮）；
+    // 其余几何 ±1 三轴 → sqrt(3)≈1.732
+    let radius = select(1.7320508, 1.41421356, is_ground);
     let center = inst.model[3].xyz;
 
     // GPU 视锥剔除：与 CPU 同源（法线朝内平面，d = dot(n,c)+d，d < -r 剔除）

@@ -116,7 +116,9 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         SetTextColor(dc, 0x00FF_FFFF);
         let mut gm = std::mem::zeroed::<GlyphMetrics>();
         let mat2 = [0i32, 0, 0, 0, 65536, 0, 0, 65536];
-        let buf: Vec<u8> = vec![0u8; 8 * 8 * 4];
+        // GGO_BITMAP 输出 = 40 字节 BITMAPINFOHEADER + 1bpp 位图行（每行 4 字节对齐）
+        const BMP_HDR: usize = 40;
+        let buf: Vec<u8> = vec![0u8; BMP_HDR + 32 * 32 / 8 + 64]; // 预算 32x32 黑盒
         let size = GetGlyphOutlineW(
             dc,
             ch as u32,
@@ -131,15 +133,16 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         if size == u32::MAX || gm.gmBlackBoxX == 0 || gm.gmBlackBoxY == 0 {
             return None;
         }
-        let row_stride = ((gm.gmBlackBoxX + 31) / 32 * 4) as usize;
+        // 1bpp 行：每行 (黑盒宽 + 31)/32*4 字节；位序 bit7 = 最左像素
+        let row_stride = ((gm.gmBlackBoxX as usize) + 31) / 32 * 4;
         let mut out = [0u8; 8];
         let (bw, bh) = (gm.gmBlackBoxX as usize, gm.gmBlackBoxY as usize);
         for j in 0..8 {
             let sy = if bh <= 8 { j + (8 - bh) / 2 } else { j * bh / 8 };
             for i in 0..8 {
                 let sx = if bw <= 8 { i + (8 - bw) / 2 } else { i * bw / 8 };
-                let src = buf[sy * row_stride + sx];
-                if src > 0x40 {
+                let byte = buf[BMP_HDR + sy * row_stride + sx / 8];
+                if (byte >> (7 - (sx % 8))) & 1 == 1 {
                     out[j] |= 1 << (7 - i);
                 }
             }

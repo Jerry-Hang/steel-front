@@ -603,6 +603,9 @@ impl GameApp {
                         ObstacleKind::Wall => [0.85, 0.25, 0.15, 1.0],
                         ObstacleKind::Block => [0.85, 0.6, 0.15, 1.0],
                         ObstacleKind::Barrier => [0.35, 0.5, 0.8, 1.0],
+                        ObstacleKind::Tree => [0.2, 0.55, 0.15, 1.0],   // 树：绿
+                        ObstacleKind::Building => [0.5, 0.5, 0.52, 1.0], // 建筑：灰
+                        ObstacleKind::Ruin => [0.55, 0.4, 0.25, 1.0],    // 残骸：棕
                     };
                     engine::renderer::WorldMarker {
                         model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, 1.2, ob.z))
@@ -1112,6 +1115,12 @@ impl ApplicationHandler for GameApp {
                         }
                         BindingAction::Fire => {
                             self.fire_requested = pressed && !self.game.settings_open();
+                        }
+                        BindingAction::Jump => {
+                            // Space 跳跃（2026-08-15：开火改鼠标左键，Space 让位给跳跃）
+                            if self.game.state() == GameState::Playing && !self.game.settings_open() {
+                                self.game.jump_requested(pressed);
+                            }
                         }
                         BindingAction::Menu => {
                             if pressed && !self.game.settings_open() {

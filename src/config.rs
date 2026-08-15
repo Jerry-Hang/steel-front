@@ -37,12 +37,22 @@ impl Default for GameConfig {
     }
 }
 
-/// 配置文件路径：`$HOME/.steel_front.cfg`；HOME 不可用时退回当前目录（如无 HOME 的嵌入环境）
+/// 配置文件路径：`$HOME/.steel_front.cfg`；HOME 不可用时退回当前目录（如无 HOME 的嵌入环境）。
+/// Windows 下 cmd/双击启动没有 HOME，回退 USERPROFILE（2026-08-15：BAT 启动分辨率丢
+/// 失的根因——配置文件落到 CWD 找不到，回退默认 1280x800）。
 fn config_path() -> PathBuf {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => PathBuf::from(home).join(".steel_front.cfg"),
-        _ => PathBuf::from(".steel_front.cfg"),
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".steel_front.cfg");
+        }
     }
+    #[cfg(windows)]
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.is_empty() {
+            return PathBuf::from(profile).join(".steel_front.cfg");
+        }
+    }
+    PathBuf::from(".steel_front.cfg")
 }
 
 /// 读取配置；文件缺失/解析失败回退默认值（不报错，游戏始终可启动）

@@ -62,6 +62,10 @@ const SHAKE_STRENGTH: f32 = 0.35;
 const SHAKE_DURATION: f32 = 0.3;
 /// 玩家移动速度（米/秒，第一人称 WASD）
 const PLAYER_SPEED: f32 = 6.0;
+/// 跳跃初速（m/s，~1.1m 跳高）
+const JUMP_SPEED: f32 = 4.6;
+/// 重力加速度（m/s²）
+const GRAVITY: f32 = 9.8;
 /// NPC 就近掩体搜索半径（网格格数）
 const COVER_MAX_DIST: u32 = 10;
 /// 压力模式掩体搜索半径（网格格数）：NPC 战场开阔（150m 外出生），
@@ -321,6 +325,12 @@ pub enum ObstacleKind {
     Block,
     /// 路障：2..=4 个长条薄墙（单簇更长、更稀疏）
     Barrier,
+    /// 树木：场景装饰（安全环外），细长圆柱+树冠方块，可碰撞可击穿
+    Tree,
+    /// 建筑物：场景装饰（安全环外），大尺寸方块，可碰撞高耐久
+    Building,
+    /// 残骸：场景装饰（安全环外），矮小散落方块群
+    Ruin,
 }
 
 /// 障碍基础血量：按种类区分（墙 150 / 大块 300 / 路障 100）。
@@ -330,6 +340,9 @@ fn obstacle_max_hp(kind: ObstacleKind) -> f32 {
         ObstacleKind::Wall => 150.0,
         ObstacleKind::Block => 300.0,
         ObstacleKind::Barrier => 100.0,
+        ObstacleKind::Tree => 60.0,
+        ObstacleKind::Building => 500.0,
+        ObstacleKind::Ruin => 120.0,
     }
 }
 
@@ -502,6 +515,33 @@ fn kind_style(kind: ObstacleKind) -> KindStyle {
             max_d: 0.8,
             gap: 0.5,
         },
+        ObstacleKind::Tree => KindStyle {
+            min_boxes: 1,
+            max_boxes: 1,
+            min_w: 0.35,
+            max_w: 0.5,
+            min_d: 0.35,
+            max_d: 0.5,
+            gap: 1.5,
+        },
+        ObstacleKind::Building => KindStyle {
+            min_boxes: 1,
+            max_boxes: 1,
+            min_w: 6.0,
+            max_w: 9.0,
+            min_d: 5.0,
+            max_d: 7.0,
+            gap: 2.0,
+        },
+        ObstacleKind::Ruin => KindStyle {
+            min_boxes: 2,
+            max_boxes: 4,
+            min_w: 0.8,
+            max_w: 2.0,
+            min_d: 0.6,
+            max_d: 1.5,
+            gap: 0.8,
+        },
     }
 }
 
@@ -581,6 +621,51 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
             }
         }
     }
+
+    // ---- 场景装饰（安全环外）：树木 / 建筑物 / 残骸，丰富战场外观 ----
+    // 装饰放在 ring_outer 之外 20-60m 的环形带，避开战斗区（冒烟站定/弹道不受影响）；
+    // 数量 10-16 个，确定性 LCG 派生；参与碰撞（可击穿，耐久见 obstacle_max_hp）。
+    let deco_kinds = [ObstacleKind::Tree, ObstacleKind::Building, ObstacleKind::Ruin];
+    let deco_count = 10 + (map_lcg_unit(&mut state) * 6.0) as usize;
+    for _ in 0..deco_count {
+        let kind = deco_kinds[((map_lcg_unit(&mut state) * 3.0) as usize) % 3];
+        let style = kind_style(kind);
+        let n_boxes = style.min_boxes as usize
+            + (map_lcg_unit(&mut state) * (style.max_boxes - style.min_boxes + 1) as f32) as usize;
+        let angle = map_lcg_unit(&mut state) * tau;
+        let (dirx, dirz) = (angle.cos(), angle.sin());
+        let half_w = style.min_w + map_lcg_unit(&mut state) * (style.max_w - style.min_w);
+        let half_d = style.min_d + map_lcg_unit(&mut state) * (style.max_d - style.min_d);
+        let dist = theme.ring_outer + 20.0 + map_lcg_unit(&mut state) * 40.0;
+        let cx = dirx * dist;
+        let cz = dirz * dist;
+        let (tx, tz) = (-dirz, dirx);
+        let hp = obstacle_max_hp(kind);
+        for i in 0..n_boxes {
+            let off = (i as f32 - (n_boxes as f32 - 1.0) * 0.5) * (half_w * 2.0 + style.gap);
+            let ob = MapObstacle {
+                x: cx + tx * off,
+                z: cz + tz * off,
+                half_w,
+                half_d,
+                kind,
+                max_hp: hp,
+                hp,
+            };
+            let mut placed = true;
+            for o in &obstacles {
+                if (ob.x - o.x).abs() < ob.half_w + o.half_w
+                    && (ob.z - o.z).abs() < ob.half_d + o.half_d
+                {
+                    placed = false;
+                    break;
+                }
+            }
+            if placed {
+                obstacles.push(ob);
+            }
+        }
+    }
     LevelMap { obstacles }
 }
 
@@ -626,6 +711,10 @@ pub struct Game {
     /// 移动输入标志（main.rs 转发 WASD；仅 Playing + FPS 生效）
     move_forward: bool,
     move_backward: bool,
+    /// 跳跃请求（Space/Jump 绑定按下置位；落地清除）
+    jump_pressed: bool,
+    /// 跳跃垂直速度（m/s，>0 上升；落地归零）
+    jump_vel: f32,
     move_left: bool,
     move_right: bool,
     /// 脚步声音效限频计时
@@ -878,6 +967,8 @@ impl Game {
             pending_kick: (0.0, 0.0),
             player_body: PlayerBody::new(Pv::new(0.0, 0.0, 0.0), 0.5, 1.6),
             move_forward: false,
+            jump_pressed: false,
+            jump_vel: 0.0,
             move_backward: false,
             move_left: false,
             move_right: false,
@@ -1225,21 +1316,27 @@ impl Game {
         self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
         self.player_body.vel = Pv::ZERO;
         // 障碍种类分布统计（供日志/调试；渲染 marker 颜色由 main.rs 按 kind 映射）
-        let mut kind_counts = [0u32; 3];
+        let mut kind_counts = [0u32; 6];
         for ob in &self.map.obstacles {
             kind_counts[match ob.kind {
                 ObstacleKind::Wall => 0,
                 ObstacleKind::Block => 1,
                 ObstacleKind::Barrier => 2,
+                ObstacleKind::Tree => 3,
+                ObstacleKind::Building => 4,
+                ObstacleKind::Ruin => 5,
             }] += 1;
         }
         log::info!(
-            "map: level {} generated: {} obstacle bodies (wall={} block={} barrier={}), {} grid cells blocked",
+            "map: level {} generated: {} obstacle bodies (wall={} block={} barrier={} tree={} building={} ruin={}), {} grid cells blocked",
             level,
             self.map.obstacles.len(),
             kind_counts[0],
             kind_counts[1],
             kind_counts[2],
+            kind_counts[3],
+            kind_counts[4],
+            kind_counts[5],
             blocked_cells
         );
     }
@@ -2313,6 +2410,11 @@ impl Game {
     }
 
     /// 第一人称玩家移动：WASD 相对相机朝向，与演示刚体碰撞推回，y 每帧贴地形
+    /// 玩家跳跃请求（main.rs 按 Jump 绑定置位；落地后清除）
+    pub fn jump_requested(&mut self, jump: bool) {
+        self.jump_pressed = jump;
+    }
+
     fn move_first_person(&mut self, camera: &Camera, dt: f32) {
         let fwd = glam::Vec3::new(camera.forward().x, 0.0, camera.forward().z).normalize_or_zero();
         let right = camera.right();
@@ -2349,8 +2451,29 @@ impl Game {
                 self.audio.synth_mut().play_footstep(pos, step_scale);
             }
         }
-        self.player_body.pos.y = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
-        self.player_body.grounded = true;
+        // 垂直运动：跳跃（Jump 键按下且在地面 → 初速）+ 重力 + 落地贴地
+        let ground = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
+        let on_ground = self.player_body.pos.y <= ground + 0.05 && self.jump_vel <= 0.0;
+        if self.jump_pressed && on_ground {
+            self.jump_vel = JUMP_SPEED;
+            let jpos = self.player_pos();
+            self.audio.synth_mut().play_footstep(jpos, 1.0);
+        }
+        if self.jump_vel != 0.0 {
+            self.jump_vel -= GRAVITY * dt;
+            self.player_body.pos.y += self.jump_vel * dt;
+            if self.player_body.pos.y <= ground {
+                self.player_body.pos.y = ground;
+                self.jump_vel = 0.0;
+            }
+        } else {
+            self.player_body.pos.y = ground;
+        }
+        self.player_body.grounded = self.jump_vel <= 0.0;
+        // 跳跃结束后清除请求（避免长按连续起跳；重置时也清）
+        if on_ground && self.jump_pressed {
+            self.jump_pressed = false;
+        }
     }
 
     /// 投射物推进 + 碰撞检测：物理刚体/球体命中即销毁；NPC 命中扣血，hp≤0 移除并计分。
@@ -3669,9 +3792,16 @@ mod tests {
         let a = generate_level_map(1);
         let b = generate_level_map_with_theme(1, theme_for_level(1));
         assert_eq!(a.obstacles, b.obstacles, "generate_level_map 必须等于主题化生成");
+        // 战斗障碍（安全环带内）全部为 Wall；环外可含场景装饰（树/建筑/残骸）
         assert!(
-            a.obstacles.iter().all(|o| o.kind == ObstacleKind::Wall),
-            "第一关障碍全部为 Wall"
+            a.obstacles
+                .iter()
+                .filter(|o| {
+                    let d = (o.x * o.x + o.z * o.z).sqrt();
+                    d <= t1.ring_outer + 1.0
+                })
+                .all(|o| o.kind == ObstacleKind::Wall),
+            "安全环带内障碍全部为 Wall"
         );
         for ob in &a.obstacles {
             let d = (ob.x * ob.x + ob.z * ob.z).sqrt();
@@ -3705,8 +3835,18 @@ mod tests {
             wall.obstacles,
             generate_level_map_with_theme(1, theme_for_level(1)).obstacles
         );
-        assert!(wall.obstacles.iter().all(|o| o.kind == ObstacleKind::Wall));
-        assert!(block.obstacles.iter().all(|o| o.kind == ObstacleKind::Block));
+        assert!(
+            wall.obstacles
+                .iter()
+                .filter(|o| (o.x * o.x + o.z * o.z).sqrt() <= theme_for_level(1).ring_outer + 1.0)
+                .all(|o| o.kind == ObstacleKind::Wall)
+        );
+        assert!(
+            block.obstacles
+                .iter()
+                .filter(|o| (o.x * o.x + o.z * o.z).sqrt() <= theme_for_level(2).ring_outer + 1.0)
+                .all(|o| o.kind == ObstacleKind::Block)
+        );
     }
 
     /// 升关：每关 WAVES_PER_LEVEL 波清完后 level+1、wave 回 1、地图重新生成、难度按有效波次递进
@@ -4430,10 +4570,15 @@ mod tests {
             max_hp: 150.0,
             hp: 150.0,
         });
+        let before = game.map.obstacles.len();
         game.spawn_explosion([0.0, 1.0, 0.0], 8.0, 120.0, true);
-        // Game::new() 预置 20 个环带障碍 + 注入 2 个 = 22；爆心 Barrier（100HP）被
-        // 120×1.0×fall(1.0)=120 伤摧毁 → 21
-        assert_eq!(game.map.obstacles.len(), 21, "爆心 Barrier（100HP）被 120 伤摧毁");
+        // 爆心 Barrier（100HP）被 120×1.0×fall(1.0)=120 伤摧毁（Game::new 含场景装饰，
+        // 数量随主题变化——只断言爆心障碍被移除）
+        assert_eq!(
+            game.map.obstacles.len(),
+            before - 1,
+            "爆心 Barrier（100HP）被 120 伤摧毁"
+        );
         // 注入的远处障碍（50,50）保留且无伤
         let far = game
             .map
