@@ -2,8 +2,9 @@
 # 用法: powershell -ExecutionPolicy Bypass -File scripts/run_gameplay_smoke.ps1
 $ErrorActionPreference = "Continue"
 Set-Location "$PSScriptRoot\.."
-$EXE = (Join-Path (Get-Location) "target\release\steel-front.exe")
-$LOG = (Join-Path (Get-Location) "smoke.log")
+$ROOT = (Get-Location).Path
+$EXE = (Join-Path $ROOT "target\release\steel-front.exe")
+$LOG = (Join-Path $ROOT "smoke.log")
 $LOGERR = "$LOG.err"
 
 # 清场：杀残留游戏进程
@@ -11,8 +12,9 @@ Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Forc
 Start-Sleep -Seconds 2
 Remove-Item -Force $LOG, $LOGERR -ErrorAction SilentlyContinue
 
-# 启动游戏：stdout -> smoke.log，stderr -> smoke.log.err（env_logger 走 stderr）
-$p = Start-Process -FilePath $EXE -RedirectStandardOutput $LOG -RedirectStandardError $LOGERR -PassThru
+# 启动游戏（-WorkingDirectory 必须显式指定：-File 模式下 Set-Location 不改子进程 cwd，
+# 否则游戏找不到 assets/*.spv 会渲染器初始化失败退出）
+Start-Process -FilePath $EXE -WorkingDirectory $ROOT -RedirectStandardOutput $LOG -RedirectStandardError $LOGERR -PassThru | Out-Null
 Start-Sleep -Seconds 5
 
 # 跑冒烟（SendInput 注入 + 日志断言，脚本内部合并两个日志）
