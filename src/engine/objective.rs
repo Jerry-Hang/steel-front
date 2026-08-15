@@ -140,15 +140,19 @@ pub enum GameRule {
     KillCount { target: u32 },
     /// 限时：到点按据点归属/击杀数判定胜负
     TimeLimit { seconds: f64 },
+    /// 防守波次：玩家守住 `waves` 波 NPC 进攻即胜利（波间有补给窗口）；
+    /// 玩家死亡即失败（由 game.rs 波次循环驱动，evaluate 不直接判定）
+    Survive { waves: u32 },
 }
 
 impl GameRule {
-    /// 规则种类字符串："capture" / "kill" / "time"（供日志与 TOML 校验）
+    /// 规则种类字符串："capture" / "kill" / "time" / "survive"（供日志与 TOML 校验）
     pub fn rule_kind(&self) -> &'static str {
         match self {
             GameRule::CapturePoints { .. } => "capture",
             GameRule::KillCount { .. } => "kill",
             GameRule::TimeLimit { .. } => "time",
+            GameRule::Survive { .. } => "survive",
         }
     }
 }
@@ -244,6 +248,9 @@ impl ObjectiveState {
                     WinState::Defeat
                 }
             }
+            // 防守波次：胜负由 game.rs 波次循环驱动（守住全部波 → Victory；玩家死亡 → Defeat）。
+            // evaluate 不直接判定（纯函数无法感知玩家血量/波次进度）；置位 won_team 后返回 None。
+            GameRule::Survive { .. } => WinState::None,
         }
     }
 }

@@ -4,4 +4,5 @@ maps = [
     "open_field.toml",
     "factory_ambush.toml",
     "bridgehead.toml",
+    "defense_line.toml",
 ]

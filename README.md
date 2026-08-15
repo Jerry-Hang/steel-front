@@ -119,24 +119,26 @@ obstacles = [                      # 障碍（type: wall/block/cover/barrier）
     { type = "wall", position = { x = -10.0, y = 1.5, z = 0.0 }, size = { x = 1.0, y = 3.0, z = 20.0 } },
 ]
 
-[rule]                             # 胜负规则（三选一）
+[rule]                             # 胜负规则（四选一）
 kind = "capture"                   # capture: 占领 required 个据点获胜
 required = 2
 # kind = "kill"; target = 30       # kill: 击杀 30 名敌人获胜（玩家阵营 Blue）
 # kind = "time"; seconds = 300     # time: 限时 300 秒，到点按据点归属/击杀数判定
+# kind = "survive"; waves = 5      # survive: 守住 5 波 NPC 进攻（波间补给窗口），玩家死亡即败
 ```
 
 **关卡列表**（`assets/maps/index.toml`）按顺序列出地图文件，胜利后按 `N` 进入下一关；最后一关通关即通关画面。**热重载**：游玩中按 `F5` 重新读取当前地图 TOML（开发时改地图即时生效，不重启游戏）。
 
-内置 4 张关卡（按通关顺序）：
+内置 5 张关卡（按通关顺序）：
 | 地图 | 规则 | 说明 |
 |---|---|---|
 | `street_fight.toml` 巷战废墟 | capture（占 2 据点） | 狭窄街道与残破建筑，近距离交火 |
 | `open_field.toml` 开阔地 | kill（歼灭 30） | 平原远距离对射，稀疏沙袋掩体 |
 | `factory_ambush.toml` 工厂伏击 | kill（歼灭 40） | 废弃工厂隔间布局，机器残骸/货箱掩体 |
 | `bridgehead.toml` 桥头堡 | time（限时 180s） | 狭窄桥面 + 两岸沙袋工事，防守据点 |
+| `defense_line.toml` 防线 | survive（守 5 波） | 环形工事防守，波间补给，玩家死亡即败 |
 
-**胜负流程**：胜利/失败结算画面按 `R` 重开本关、胜利后按 `N` 下一关；死亡（血量归零）按 `R` 重开本关。HUD 顶部中央显示各据点归属颜色（蓝=Blue / 红=Red / 灰=中立）与占领进度条。
+**胜负流程**：胜利/失败结算画面按 `R` 重开本关、胜利后按 `N` 下一关；死亡（血量归零）按 `R` 重开本关。HUD 顶部中央显示各据点归属颜色（蓝=Blue / 红=Red / 灰=中立）与占领进度条；survive 规则下 HUD 波次显示为 `WAVE x/N`（当前波/总波）。
 
 ### 键位操作
 

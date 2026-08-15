@@ -1,0 +1,48 @@
+# 防线 — 关卡文件
+# 格式说明见 README「关卡系统」章节
+# 规则：survive 防守波次（守住 5 波进攻即胜利，波间补给窗口）
+# 主题：前线防线阵地——玩家在环形工事中防守，NPC 从外围波次进攻
+
+[map]
+name = "防线"
+description = "前线防线阵地，环形工事防守。守住 5 波 NPC 进攻（波间补给窗口），玩家死亡即失败。"
+
+# 出生点：蓝方（玩家）防线中心工事、红方（敌军）外围四个方向（波次递增进攻方向）
+spawn_points = [
+    { x = 0.0, y = 1.0, z = 0.0, team = "blue" },
+    { x = 55.0, y = 1.0, z = 0.0, team = "red" },
+    { x = -55.0, y = 1.0, z = 0.0, team = "red" },
+    { x = 0.0, y = 1.0, z = 55.0, team = "red" },
+    { x = 0.0, y = 1.0, z = -55.0, team = "red" },
+]
+
+# 目标：防守据点（survive 规则下作为"防守点"，玩家需守住中心区域）
+objectives = [
+    { id = "H", type = "capture", position = { x = 0.0, y = 0.0, z = 0.0 }, radius = 12.0, capture_time = 1.0 },
+]
+
+# 障碍：环形防线工事——内圈沙袋（cover）环绕中心，外圈哨塔（block）四角，
+# 通道口矮墙（barrier）引导进攻路径（NPC 从缺口涌入，防守方有掩体）
+obstacles = [
+    # 内圈环形沙袋（cover）：中心工事，四个方向留缺口
+    { type = "cover", position = { x = -8.0, y = 0.75, z = -8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 8.0, y = 0.75, z = -8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = -8.0, y = 0.75, z = 8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 8.0, y = 0.75, z = 8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = -8.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 10.0 } },
+    { type = "cover", position = { x = 8.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 10.0 } },
+    # 外圈哨塔（block）：四角防御塔
+    { type = "block", position = { x = -25.0, y = 1.5, z = -25.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 25.0, y = 1.5, z = -25.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = -25.0, y = 1.5, z = 25.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    { type = "block", position = { x = 25.0, y = 1.5, z = 25.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
+    # 通道口矮墙（barrier）：内圈缺口前的路障（可被爆炸摧毁）
+    { type = "barrier", position = { x = 0.0, y = 0.75, z = -20.0 }, size = { x = 4.0, y = 1.5, z = 1.0 } },
+    { type = "barrier", position = { x = 0.0, y = 0.75, z = 20.0 }, size = { x = 4.0, y = 1.5, z = 1.0 } },
+    { type = "barrier", position = { x = -20.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 4.0 } },
+    { type = "barrier", position = { x = 20.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 4.0 } },
+]
+
+[rule]
+kind = "survive"
+waves = 5

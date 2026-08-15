@@ -75,6 +75,8 @@ pub struct RuleDef {
     pub required: usize,
     pub target: u32,
     pub seconds: f64,
+    /// survive 规则总波数（0 = 未用）
+    pub waves: u32,
 }
 
 // ============================================================
@@ -560,6 +562,7 @@ fn assemble_map(entries: Vec<(String, Value)>, rule_entries: Vec<(String, Value)
         required: rule_usize(&rule_entries, "required").unwrap_or(0),
         target: rule_usize(&rule_entries, "target").unwrap_or(0) as u32,
         seconds: rule_f64(&rule_entries, "seconds").unwrap_or(0.0),
+        waves: rule_usize(&rule_entries, "waves").unwrap_or(0) as u32,
     };
     MapData {
         name: table_str(&entries, "name"),
