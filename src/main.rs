@@ -385,54 +385,56 @@ impl GameApp {
         }
     }
 
-    /// 第一人称枪模部件矩阵（M1 步枪外形，积木拼装）：固定在眼位右下方，
-    /// 随相机 yaw/pitch 旋转；开火后坐（anim_clock 相位脉冲）+ 行走轻微晃动。
+    /// 第一人称枪模部件矩阵（M1 加兰德积木拼装）：**视空间固定**——
+    /// 部件矩阵 = view⁻¹ × T(相机空间锚点) × R(倾斜) × T(部件) × S(尺寸)，
+    /// 枪永远锁在屏幕上随视角/移动跟随准星，不会虚空焊住或穿模。
+    /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
     fn first_person_gun_parts(&self) -> Vec<([f32; 16], [f32; 4])> {
         let cam = &self.camera;
-        let eye = cam.position();
-        let fwd = cam.forward();
-        let right = cam.right();
-        let up = glam::Vec3::Y;
-        // 枪基准点：腰射 = 眼位右下方（FPS 常见）；开镜 = 移到屏幕中心（机瞄对齐）
-        let mut base = if self.ads_active {
-            eye + fwd * 0.35 + right * 0.02 - up * 0.05
+        // 视空间锚点：腰射 = 右下 (0.28, -0.30, -0.50)；开镜 = 屏幕中心 (0, -0.02, -0.42)
+        let mut anchor = if self.ads_active {
+            glam::Vec3::new(0.0, -0.02, -0.42)
         } else {
-            eye + fwd * 0.45 + right * 0.28 - up * 0.32
+            glam::Vec3::new(0.28, -0.30, -0.50)
         };
-        // 开火后坐：相位脉冲把枪往下/后顶（高频 12Hz 衰减；开火态由武器末次射击时间推断，
-        // 简化：anim_clock 相位周期性轻微后坐——射击手感仍由后坐力相机抖动承担）
+        // 开火后坐：相机空间内枪往下/后顶（相位脉冲）
         if self.game.is_firing() {
             let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
-            base -= up * (0.06 * k) + fwd * (0.05 * k);
+            anchor.y -= 0.07 * k;
+            anchor.z += 0.06 * k;
         }
-        // 行走晃动：轻微左右摆动
+        // 行走晃动：相机空间左右摆动
         let bob = (self.anim_clock * 10.0).sin() * 0.012;
-        base += right * bob;
-        // 枪朝向 = 相机朝向（pitch/yaw），加少量右倾
-        let yaw = cam.yaw;
-        let pitch = cam.pitch;
-        let rot = glam::Mat4::from_rotation_y(yaw) * glam::Mat4::from_rotation_x(pitch);
-        // 部件：(局部偏移, 尺寸, 材质色) — M1 加兰德：胡桃木枪托/护木 + 磷化钢金属件
-        // 材质配色（PBR 观感近似）：木=暖棕、金属=蓝灰钢、深件=近黑
-        let walnut = [0.42, 0.28, 0.14, 1.0]; // 胡桃木
-        let steel = [0.32, 0.35, 0.38, 1.0]; // 磷化钢
-        let dark = [0.18, 0.18, 0.20, 1.0]; // 深色件
-        let parts: [([f32; 3], [f32; 3], [f32; 4]); 8] = [
-            ([0.0, -0.02, 0.28], [0.07, 0.11, 0.32], walnut), // 枪托（胡桃木）
-            ([0.0, 0.0, 0.0], [0.06, 0.12, 0.34], steel), // 机匣（磷化钢）
-            ([0.0, 0.0, -0.34], [0.055, 0.08, 0.55], walnut), // 护木（胡桃木）
-            ([0.0, 0.0, -0.78], [0.045, 0.06, 0.35], dark), // 枪管（深色钢）
-            ([0.0, -0.13, -0.02], [0.05, 0.16, 0.10], steel), // 弹匣（钢）
-            ([0.0, -0.09, 0.16], [0.05, 0.12, 0.06], dark), // 握把（深色）
-            ([0.0, 0.12, -0.05], [0.02, 0.05, 0.02], dark), // 准星（深色）
-            ([0.0, 0.1, 0.12], [0.05, 0.04, 0.06], steel), // 表尺（钢）
+        anchor.x += bob;
+        // 腰射轻微右倾；开镜扶正（机瞄对齐）
+        let tilt = if self.ads_active { 0.0 } else { 0.06 };
+        let view_inv = cam.view_matrix().inverse();
+        let view_anchor = glam::Mat4::from_translation(anchor);
+        let tilt_rot = glam::Mat4::from_rotation_z(tilt);
+        // 部件：(局部偏移, 尺寸, 材质色) — M1 加兰德：胡桃木枪托/护木 + 磷化钢金属件。
+        // 2026-08-15 PBR 立体感修正：加厚部件（消除纸片感）+ 高饱和材质对比
+        // （暖木 vs 冷钢 vs 深色，面间明暗自然浮现）+ 木质部件双色纹理感。
+        let walnut = [0.52, 0.34, 0.15, 1.0]; // 胡桃木（更饱和暖棕）
+        let walnut_dark = [0.38, 0.24, 0.10, 1.0]; // 深胡桃木（纹理对比）
+        let steel = [0.42, 0.46, 0.50, 1.0]; // 磷化钢（更亮冷灰）
+        let dark = [0.22, 0.22, 0.24, 1.0]; // 深色件（略提亮防全黑）
+        let parts: [([f32; 3], [f32; 3], [f32; 4]); 9] = [
+            ([0.0, -0.02, 0.28], [0.08, 0.12, 0.34], walnut_dark), // 枪托（深胡桃木）
+            ([0.0, 0.0, 0.0], [0.07, 0.13, 0.36], steel), // 机匣（磷化钢）
+            ([0.0, 0.0, -0.36], [0.065, 0.09, 0.58], walnut), // 护木（胡桃木）
+            ([0.0, 0.0, -0.80], [0.05, 0.07, 0.38], dark), // 枪管（深色钢）
+            ([0.0, -0.14, -0.02], [0.055, 0.17, 0.11], steel), // 弹匣（钢）
+            ([0.0, -0.10, 0.17], [0.055, 0.13, 0.07], dark), // 握把（深色）
+            ([0.0, 0.13, -0.06], [0.025, 0.06, 0.025], dark), // 准星（深色）
+            ([0.0, 0.11, 0.13], [0.06, 0.05, 0.07], steel), // 表尺（钢）
+            ([0.0, -0.02, -0.60], [0.035, 0.05, 0.12], steel), // 枪口制退器（钢，细节）
         ];
-        let trans = glam::Mat4::from_translation(base);
         parts
             .iter()
             .map(|(off, size, tint)| {
-                let model = trans
-                    * rot
+                let model = view_inv
+                    * view_anchor
+                    * tilt_rot
                     * glam::Mat4::from_translation(glam::Vec3::from(*off))
                     * glam::Mat4::from_scale(glam::Vec3::from(*size));
                 (model.to_cols_array(), *tint)
@@ -922,9 +924,17 @@ impl ApplicationHandler for GameApp {
         }
         // 2026-08-15：无边框窗口——请求分辨率等于显示器物理尺寸时窗口恰好铺满屏幕，
         // 无标题栏/边框挤压（否则窗口比屏幕略大 → DWM 裁剪 → 内容偏左上角）。
+        // 2026-08-15：窗口尺寸用 LogicalSize（winit 按 scale_factor 自动转物理）——
+        // 若直接给 PhysicalSize，DPI 缩放下 winit 可能按逻辑解释导致窗口/swapchain 尺寸错位
+        // （表现为画面偏左上角/缩放不正确）。无边框 + 逻辑尺寸 = 显示器比例一致。
+        // 2026-08-15：窗口尺寸用 LogicalSize（winit 按 scale_factor 自动转物理）——
+        // 若直接给 PhysicalSize，DPI 缩放下 winit 可能按逻辑解释导致窗口/swapchain 尺寸错位
+        // （表现为画面偏左上角/缩放不正确）。无边框 + 逻辑尺寸 = 显示器比例一致。
+        // 窗口位置显式 (0,0)：默认位置可能偏移，2560x1600 窗口超出屏幕右下 → 画面偏左上。
         let winit_attr = Window::default_attributes()
             .with_title(window::WINDOW_TITLE)
-            .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
+            .with_inner_size(winit::dpi::LogicalSize::new(w as f64 / 1.5, h as f64 / 1.5))
+            .with_position(winit::dpi::PhysicalPosition::new(0, 0))
             .with_decorations(false);
 
         let window = match event_loop.create_window(winit_attr) {
