@@ -506,7 +506,13 @@ impl HudState {
         }
     }
 
-    /// 纯布局函数：按当前画面展开为元素列表。
+    /// HUD 分辨率缩放系数：以 1280x800 为设计基准，按实际高度等比放大
+    /// （2560x1600 → 2.0，字体/面板/血条等比放大，避免高分辨率下文字过细）
+    pub fn ui_scale(&self) -> f32 {
+        (self.screen_h / 800.0).clamp(1.0, 3.0)
+    }
+
+    /// 纯布局函数：按当前画面展开为元素列表（出口统一按分辨率缩放）。
     pub fn layout_elements(&self) -> Vec<HudElement> {
         let mut elems = match self.screen {
             HudScreen::Game => self.game_elements(),
@@ -517,6 +523,34 @@ impl HudState {
         // ESC 毛玻璃菜单：半透明全屏遮罩 + 两个选项（退出游戏 / 设置），覆盖在任何画面之上
         if self.esc_menu_open {
             self.esc_menu_elements(&mut elems);
+        }
+        // 统一分辨率缩放：坐标/尺寸/字号全部乘 ui_scale（布局按 1280x800 设计）
+        let s = self.ui_scale();
+        for e in elems.iter_mut() {
+            match e {
+                HudElement::Quad(q) => {
+                    q.rect.x *= s;
+                    q.rect.y *= s;
+                    q.rect.w *= s;
+                    q.rect.h *= s;
+                }
+                HudElement::Bar { back, fill, ratio } => {
+                    let _ = ratio;
+                    back.rect.x *= s;
+                    back.rect.y *= s;
+                    back.rect.w *= s;
+                    back.rect.h *= s;
+                    fill.rect.x *= s;
+                    fill.rect.y *= s;
+                    fill.rect.w *= s;
+                    fill.rect.h *= s;
+                }
+                HudElement::Text { x, y, scale, .. } => {
+                    *x *= s;
+                    *y *= s;
+                    *scale *= s;
+                }
+            }
         }
         elems
     }

@@ -318,16 +318,18 @@ impl GameApp {
     /// 矩形布局必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中，
     /// 选项 y = py+90 / py+146，宽 pw-120=260 居中，高 34）。返回是否命中任何选项。
     fn menu_click_hit(&mut self, mx: f32, my: f32) -> bool {
-        let w = self.game.hud.screen_w;
-        let h = self.game.hud.screen_h;
+        // 面板布局按设计基准 1280x800 计算后乘 ui_scale（与 ui.rs 渲染一致）
+        let s = self.game.hud.ui_scale();
+        let dw = self.game.hud.screen_w / s;
+        let dh = self.game.hud.screen_h / s;
         let pw = 380.0;
         let ph = 240.0;
-        let px = (w - pw) * 0.5;
-        let py = (h - ph) * 0.5;
+        let px = (dw - pw) * 0.5;
+        let py = (dh - ph) * 0.5;
         let opt_w = pw - 120.0;
         let opt_x = px + 60.0;
         for (i, oy) in [py + 90.0, py + 146.0].iter().enumerate() {
-            if mx >= opt_x && mx <= opt_x + opt_w && my >= *oy - 6.0 && my <= *oy + 28.0 {
+            if mx >= (opt_x * s) && mx <= ((opt_x + opt_w) * s) && my >= ((*oy - 6.0) * s) && my <= ((*oy + 28.0) * s) {
                 if i == 0 {
                     log::info!("ESC 菜单：鼠标点击退出游戏");
                     self.running = false;
@@ -549,9 +551,10 @@ impl GameApp {
                 let cx = ex.center[0];
                 let cz = ex.center[2];
                 let r = ex.radius;
-                // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）
+                // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）；半透明球形
                 let fireball_t = (t * 2.8).min(1.0);
                 let fb_s = r * (0.2 + 1.2 * fireball_t);
+                let fb_alpha = (0.9 * (1.0 - fireball_t) + 0.15).clamp(0.0, 1.0);
                 let mut out = vec![engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.2, cz))
                         * glam::Mat4::from_scale(glam::Vec3::splat(fb_s)),
@@ -559,31 +562,34 @@ impl GameApp {
                         1.0,
                         0.85 * (1.0 - fireball_t) + 0.2,
                         0.35 * (1.0 - fireball_t),
-                        1.0,
+                        fb_alpha,
                     ],
                 }];
-                // ② 贴地冲击波环：扁立方体沿地面水平扩散 + 高度衰减（冲击波视觉主体）
+                // ② 贴地冲击波环：扁球体（球体几何压扁）沿地面水平扩散 + 高度衰减，半透明
                 let ring_s = r * (0.4 + 1.6 * t);
                 let ring_h = (1.1 * (1.0 - t)).max(0.15);
+                let ring_alpha = (0.75 * (1.0 - t) + 0.1).clamp(0.0, 1.0);
                 out.push(engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, ring_h * 0.5, cz))
                         * glam::Mat4::from_scale(glam::Vec3::new(ring_s, ring_h, ring_s)),
-                    tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, 1.0],
+                    tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, ring_alpha],
                 });
-                // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），顶部上移
+                // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），半透明
                 let col_h = 2.2 + 2.6 * t;
+                let col_alpha = (0.8 * (1.0 - t) + 0.1).clamp(0.0, 1.0);
                 out.push(engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.1 + col_h * 0.5, cz))
                         * glam::Mat4::from_scale(glam::Vec3::new(r * 0.5, col_h, r * 0.5)),
-                    tint: [1.0, 0.45 * (1.0 - t), 0.05, 1.0],
+                    tint: [1.0, 0.45 * (1.0 - t), 0.05, col_alpha],
                 });
-                // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟）
+                // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟），半透明
                 let smoke_s = r * (0.5 + 1.4 * t);
                 let smoke_h = 2.0 + 3.0 * t;
+                let smoke_alpha = (0.6 * (1.0 - t) + 0.08).clamp(0.0, 1.0);
                 out.push(engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, 0.6 + smoke_h * 0.5, cz))
                         * glam::Mat4::from_scale(glam::Vec3::new(smoke_s, smoke_h, smoke_s)),
-                    tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, 1.0],
+                    tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, smoke_alpha],
                 });
                 out
                 })
@@ -920,6 +926,19 @@ impl ApplicationHandler for GameApp {
                         log::info!("ESC 打开菜单（退出游戏 / 设置）");
                         self.game.hud.esc_menu_open = true;
                         self.game.hud.esc_menu_selection = 0;
+                        // 立即释放鼠标捕获（不等下一帧 sync_cursor）：否则用户立刻移动
+                        // 点击时 last_cursor 仍是捕获中心 → 菜单选项命中错位
+                        if self.cursor_captured {
+                            if let Some(window) = &self.window {
+                                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                                window.set_cursor_visible(true);
+                            }
+                            self.cursor_captured = false;
+                            self.cursor_locked = false;
+                            self.abs_baseline_valid = false;
+                            self.recenter_pending_until = None;
+                            log::info!("input: cursor released (ESC menu opened)");
+                        }
                     }
                     return;
                 }

@@ -607,6 +607,12 @@ pub struct Renderer {
     ground_vertex_buffer_memory: vk::DeviceMemory,
     ground_index_buffer: vk::Buffer,
     ground_index_buffer_memory: vk::DeviceMemory,
+    /// UV 球体几何（爆炸球形扩散用；CPU 生成 24×12 段，见 create_sphere_geometry）
+    sphere_vertex_buffer: vk::Buffer,
+    sphere_vertex_buffer_memory: vk::DeviceMemory,
+    sphere_index_buffer: vk::Buffer,
+    sphere_index_buffer_memory: vk::DeviceMemory,
+    sphere_index_count: u32,
     /// 地形 LOD 网格（索引 0/1/2 = 高/中/低密度；顶点缓冲 HOST_VISIBLE 供 morph 每帧更新）
     terrain_lods: Vec<TerrainLodMesh>,
     /// 每帧一份 instance buffer（双缓冲，避免 CPU 写与上一帧 GPU 读竞态）
@@ -1068,6 +1074,11 @@ impl Renderer {
             ground_vertex_buffer_memory: vk::DeviceMemory::null(),
             ground_index_buffer: vk::Buffer::null(),
             ground_index_buffer_memory: vk::DeviceMemory::null(),
+            sphere_vertex_buffer: vk::Buffer::null(),
+            sphere_vertex_buffer_memory: vk::DeviceMemory::null(),
+            sphere_index_buffer: vk::Buffer::null(),
+            sphere_index_buffer_memory: vk::DeviceMemory::null(),
+            sphere_index_count: 0,
             terrain_lods: Vec::new(),
             instance_buffers: Vec::new(),
             instance_buffers_memory: Vec::new(),
@@ -1863,9 +1874,17 @@ impl Renderer {
             | vk::ColorComponentFlags::G
             | vk::ColorComponentFlags::B
             | vk::ColorComponentFlags::A;
+        // 2026-08-15：主 pass 开启 alpha 混合——现有几何 color.a 恒为 1.0（不受影响），
+        // 自发光实体（爆炸等）设 alpha<1 即实现半透明（球形火光/冲击波可透出背景）
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(color_write_mask)
-            .blend_enable(false);
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD);
         let color_blend_attachments = [color_blend_attachment];
         let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
@@ -1913,6 +1932,7 @@ impl Renderer {
         self.create_index_buffer()?;
         self.create_far_geometry()?;
         self.create_ground_geometry()?;
+        self.create_sphere_geometry()?;
         self.create_terrain_lods()?;
         log::info!("图形管线创建完成");
         Ok(())
@@ -2567,6 +2587,68 @@ impl Renderer {
         Ok(())
     }
 
+
+    /// 创建 UV 球体几何（爆炸球形扩散用）：24 经 × 12 纬段，CPU 生成顶点/索引。
+    /// 球面坐标 (u,v) → 单位球 (sinφ·cosθ, cosφ, sinφ·sinθ)，白化颜色走 tint。
+    fn create_sphere_geometry(&mut self) -> Result<(), String> {
+        const SEGS: u32 = 24; // 经线
+        const RINGS: u32 = 12; // 纬线
+        let mut verts: Vec<Vertex> = Vec::with_capacity(((SEGS + 1) * (RINGS + 1)) as usize);
+        for j in 0..=RINGS {
+            let phi = std::f32::consts::PI * j as f32 / RINGS as f32; // 0..π
+            let (sp, cp) = phi.sin_cos();
+            for i in 0..=SEGS {
+                let theta = std::f32::consts::TAU * i as f32 / SEGS as f32;
+                let (st, ct) = theta.sin_cos();
+                verts.push(Vertex {
+                    pos: [sp * ct, cp, sp * st],
+                    color: [1.0, 1.0, 1.0],
+                    uv: [i as f32 / SEGS as f32, 1.0 - j as f32 / RINGS as f32],
+                });
+            }
+        }
+        let mut indices: Vec<u32> = Vec::with_capacity((SEGS * RINGS * 6) as usize);
+        for j in 0..RINGS {
+            for i in 0..SEGS {
+                let a = j * (SEGS + 1) + i;
+                let b = a + 1;
+                let c = a + SEGS + 1;
+                let d = c + 1;
+                indices.extend_from_slice(&[a, c, b, b, c, d]);
+            }
+        }
+        let vert_size = (verts.len() * std::mem::size_of::<Vertex>()) as u64;
+        let (v_buffer, v_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vert_size)?;
+        self.sphere_vertex_buffer = v_buffer;
+        self.sphere_vertex_buffer_memory = v_memory;
+        let v_ptr = unsafe {
+            self.device
+                .map_memory(v_memory, 0, vert_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射球体顶点缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(verts.as_ptr() as *const u8, v_ptr as *mut u8, vert_size as usize);
+            self.device.unmap_memory(v_memory);
+        }
+        let idx_size = (indices.len() * std::mem::size_of::<u32>()) as u64;
+        let (i_buffer, i_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, idx_size)?;
+        self.sphere_index_buffer = i_buffer;
+        self.sphere_index_buffer_memory = i_memory;
+        let i_ptr = unsafe {
+            self.device
+                .map_memory(i_memory, 0, idx_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射球体索引缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(indices.as_ptr() as *const u8, i_ptr as *mut u8, idx_size as usize);
+            self.device.unmap_memory(i_memory);
+        }
+        self.sphere_index_count = indices.len() as u32;
+        log::info!("球体几何创建完成: {} 顶点 / {} 索引（爆炸球形扩散）", verts.len(), indices.len());
+        Ok(())
+    }
     /// 创建 3 级地形 LOD 网格（高 257² / 中 129² / 低 65² 顶点）。
     /// 高度用与实例 Y 完全相同的 terrain_height() 生成；顶点缓冲 HOST_VISIBLE，
     /// 过渡带内每帧 morph 高度后整块重传；索引缓冲一次性上传。
@@ -5907,8 +5989,9 @@ impl Renderer {
 
         // ---- 自发光实体 draw（爆炸闪光等；复用同一 pipeline，实例槽从 EMISSIVE_SLOT_BASE 起，
         //      shader 对槽位 >= EMISSIVE_INSTANCE_BASE 的实例走自发光直出）----
+        // 2026-08-15：改用 UV 球体几何（爆炸球形扩散，不再是一整块立方体）
         if self.last_emissive_near > 0 {
-            let emissive_vertex_buffers = [self.vertex_buffer];
+            let emissive_vertex_buffers = [self.sphere_vertex_buffer];
             let offsets = [0u64];
             unsafe {
                 self.device.cmd_bind_vertex_buffers(
@@ -5919,13 +6002,13 @@ impl Renderer {
                 );
                 self.device.cmd_bind_index_buffer(
                     command_buffer,
-                    self.index_buffer,
+                    self.sphere_index_buffer,
                     0,
                     vk::IndexType::UINT32,
                 );
                 self.device.cmd_draw_indexed(
                     command_buffer,
-                    INDICES.len() as u32,
+                    self.sphere_index_count,
                     self.last_emissive_near,
                     0,
                     0,
