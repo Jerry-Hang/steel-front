@@ -101,6 +101,12 @@ struct GameApp {
     running: bool,
     /// 配置中是否显式保存过分辨率（false = 首次运行，窗口创建时按显示器宽高比选默认）
     resolution_explicit: bool,
+    /// NPC 动画时钟（秒，每帧累加 delta_time；驱动步态/后坐相位）
+    anim_clock: f32,
+    /// 上一帧存活 NPC 快照：id → (位置, 朝向, 阵营色)（尸体跟踪：本帧消失的 id 记入 corpses）
+    last_npc_snapshot: std::collections::HashMap<usize, ([f32; 3], f32, [f32; 4])>,
+    /// 倒地尸体：(位置, 朝向, 阵营色, 已存留秒数)；上限 20 具，超过 10 秒消退
+    corpses: Vec<([f32; 3], f32, [f32; 4], f32)>,
 }
 
 impl GameApp {
@@ -146,6 +152,9 @@ impl GameApp {
             game,
             running: true,
             resolution_explicit: cfg.resolution_explicit,
+            anim_clock: 0.0,
+            last_npc_snapshot: std::collections::HashMap::new(),
+            corpses: Vec::new(),
         }
     }
 
@@ -161,6 +170,15 @@ impl GameApp {
 
         // 确保 delta_time 不会太大（防止卡顿时大跳）
         let delta_time = delta_time.min(0.1);
+        // NPC 动画时钟（步态/后坐相位）与尸体老化
+        self.anim_clock += delta_time;
+        for c in self.corpses.iter_mut() {
+            c.3 += delta_time;
+        }
+        self.corpses.retain(|c| c.3 < 10.0); // 尸体 10 秒后消退
+        while self.corpses.len() > 20 {
+            self.corpses.remove(0); // 上限 20 具（NPC 槽位 1024 = 146 人 × 7 段）
+        }
 
         // 更新相机（双模式：轨道/飞行，含惯性速度与边界 clamp）
         self.camera.update(&self.key_state, delta_time);
@@ -446,22 +464,74 @@ impl GameApp {
             renderer.set_world_markers(&markers);
             renderer.set_emissive_markers(&emissive_markers);
             // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
-            // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）
+            // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）；
+            // 动画字段：移动中摆臂摆腿（步态）、攻击态枪身后坐脉冲
+            let now_ids: std::collections::HashSet<usize> =
+                self.game.npcs.iter().map(|n| n.id).collect();
+            // 尸体跟踪：本帧消失的 NPC id（被击杀移除）→ 从上一帧快照找回位置/朝向/阵营
+            for id in self.last_npc_snapshot.keys() {
+                if !now_ids.contains(id) {
+                    if let Some((pos, yaw, tint)) = self.last_npc_snapshot.get(id) {
+                        self.corpses.push((*pos, *yaw, *tint, 0.0));
+                    }
+                }
+            }
+            // 更新快照（供下一帧 diff）
+            self.last_npc_snapshot = self
+                .game
+                .npcs
+                .iter()
+                .map(|n| {
+                    let tint = match n.team {
+                        Team::Red => [0.95, 0.12, 0.08, 1.0],
+                        Team::Blue => [0.08, 0.35, 0.98, 1.0],
+                    };
+                    (n.id, (n.position, n.facing, tint))
+                })
+                .collect();
             let npc_visuals: Vec<engine::renderer::NpcVisual> = self
                 .game
                 .npcs
                 .iter()
-                .map(|n| engine::renderer::NpcVisual {
-                    pos: n.position,
-                    yaw: n.facing,
-                    tint: match n.team {
-                        // 纯色渲染（shader flat_flag 路径）：高饱和阵营色，避免与灰地/障碍混淆
-                        Team::Red => [0.95, 0.12, 0.08, 1.0],
-                        Team::Blue => [0.08, 0.35, 0.98, 1.0],
-                    },
+                .map(|n| {
+                    let tint = self
+                        .last_npc_snapshot
+                        .get(&n.id)
+                        .map(|(_, _, t)| *t)
+                        .unwrap_or(match n.team {
+                            Team::Red => [0.95, 0.12, 0.08, 1.0],
+                            Team::Blue => [0.08, 0.35, 0.98, 1.0],
+                        });
+                    engine::renderer::NpcVisual {
+                        pos: n.position,
+                        yaw: n.facing,
+                        tint,
+                        phase: self.anim_clock,
+                        moving: n.speed > 0.5
+                            && matches!(
+                                n.state_machine.state(),
+                                crate::engine::ai::NpcState::Patrol
+                                    | crate::engine::ai::NpcState::Chase
+                            ),
+                        firing: n.state_machine.state() == crate::engine::ai::NpcState::Attack,
+                    }
                 })
                 .collect();
             renderer.set_npc_visuals(&npc_visuals);
+            // 尸体渲染（躺倒姿态，7 段/具；与活体共用 NPC 槽位区）
+            let dead_visuals: Vec<engine::renderer::NpcVisual> = self
+                .corpses
+                .iter()
+                .map(|(pos, yaw, tint, _age)| engine::renderer::NpcVisual {
+                    pos: *pos,
+                    yaw: *yaw,
+                    tint: *tint,
+                    phase: 0.0,
+                    moving: false,
+                    firing: false,
+                })
+                .collect();
+            renderer.set_dead_bodies(&dead_visuals);
 
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {

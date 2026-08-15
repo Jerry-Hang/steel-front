@@ -458,6 +458,12 @@ pub struct NpcVisual {
     pub pos: [f32; 3],
     pub yaw: f32,
     pub tint: [f32; 4],
+    /// 动画相位（秒，由 main.rs 累积时钟驱动；行走摆动/开火后坐共用）
+    pub phase: f32,
+    /// 移动中（腿/臂摆动动画）
+    pub moving: bool,
+    /// 攻击开火（枪身/手臂后坐脉冲）
+    pub firing: bool,
 }
 
 /// 单个地形 LOD 网格：静态几何（顶点/索引）+ CPU 侧顶点（供高度 morph 逐帧更新）
@@ -3628,10 +3634,19 @@ impl Renderer {
     }
 
     /// 计算一名 NPC 的 7 段积木人实例数据（双腿/躯干/双臂/头/枪），全部同 tint。
-    /// 每段矩阵 = T(pos) * R_y(yaw) * T(局部偏移) * S(尺寸)，
+    /// 每段矩阵 = T(pos) * R_y(yaw) * R_anim * T(局部偏移) * S(尺寸)，
     /// 模型矩阵右乘（先局部偏移再缩放），y 以地面为 0 起算，单位米；
     /// 枪局部偏移在 +Z（yaw=0 时枪口朝向 +Z），随 yaw 绕 y 轴旋转。
-    fn soldier_part_matrices(pos: [f32; 3], yaw: f32, tint: [f32; 4]) -> Vec<InstanceData> {
+    /// 动画：moving 时双腿/双臂按 phase 正弦对向摆动（走路步态）；
+    /// firing 时枪与双臂沿 -Z 后坐脉冲（高频正弦），躯干微俯。
+    fn soldier_part_matrices(
+        pos: [f32; 3],
+        yaw: f32,
+        tint: [f32; 4],
+        phase: f32,
+        moving: bool,
+        firing: bool,
+    ) -> Vec<InstanceData> {
         // (局部偏移, 尺寸)：腿/臂各有左右两段，枪局部偏移在 +Z（yaw=0 时枪口朝向 +Z）
         let parts: [([f32; 3], [f32; 3]); 7] = [
             ([-0.15, 0.45, 0.0], [0.2, 0.85, 0.2]), // 左腿
@@ -3644,11 +3659,65 @@ impl Renderer {
         ];
         let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
         let rot = glam::Mat4::from_rotation_y(yaw);
+        // 步态：腿/臂绕局部 X 轴摆动（对向），频率 ~2.2Hz 视觉节奏
+        let stride = if moving {
+            (phase * 13.8).sin().clamp(-1.0, 1.0) * 0.55
+        } else {
+            0.0
+        };
+        // 开火后坐：枪沿 -Z 脉冲（~7Hz 快速衰减），躯干/头轻微前俯
+        let (kick, torso_lean) = if firing {
+            let k = ((phase * 44.0).sin().abs()).min(1.0);
+            (0.09 * k, -0.06 * k)
+        } else {
+            (0.0, 0.0)
+        };
+        let mut out = Vec::with_capacity(7);
+        for (i, (off, size)) in parts.iter().enumerate() {
+            let mut anim = glam::Mat4::IDENTITY;
+            match i {
+                0 => anim *= glam::Mat4::from_rotation_x(stride),        // 左腿
+                1 => anim *= glam::Mat4::from_rotation_x(-stride),       // 右腿
+                3 => anim *= glam::Mat4::from_rotation_x(-stride * 0.9), // 左臂（与同侧腿反向）
+                4 => anim *= glam::Mat4::from_rotation_x(stride * 0.9),  // 右臂
+                6 => anim *= glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -kick)), // 枪后坐
+                2 => anim *= glam::Mat4::from_rotation_x(torso_lean),    // 躯干微俯
+                _ => {}
+            }
+            let model = trans
+                * rot
+                * anim
+                * glam::Mat4::from_translation(glam::Vec3::from(*off))
+                * glam::Mat4::from_scale(glam::Vec3::from(*size));
+            out.push(InstanceData {
+                model: model.to_cols_array(),
+                tint,
+            });
+        }
+        out
+    }
+
+    /// 倒地尸体姿态：整体绕 X 轴躺倒（-90° 侧卧）+ 下沉贴地，枪身散落一侧，
+    /// tint 按阵营保留（尸体可辨识）。
+    fn dead_part_matrices(pos: [f32; 3], yaw: f32, tint: [f32; 4]) -> Vec<InstanceData> {
+        let parts: [([f32; 3], [f32; 3]); 7] = [
+            ([-0.15, 0.12, 0.0], [0.2, 0.85, 0.2]),  // 左腿（躺平：y 降低）
+            ([0.15, 0.12, 0.0], [0.2, 0.85, 0.2]),   // 右腿
+            ([0.0, 0.28, 0.0], [0.55, 0.75, 0.3]),   // 躯干
+            ([-0.38, 0.3, 0.05], [0.16, 0.7, 0.16]), // 左臂
+            ([0.38, 0.3, 0.05], [0.16, 0.7, 0.16]),  // 右臂
+            ([0.0, 0.45, 0.0], [0.32, 0.32, 0.32]),  // 头
+            ([0.0, 0.25, 0.5], [0.15, 0.12, 0.85]),  // 枪（身侧散落）
+        ];
+        let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
+        let rot = glam::Mat4::from_rotation_y(yaw);
+        let lie = glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
         parts
             .iter()
             .map(|(off, size)| {
                 let model = trans
                     * rot
+                    * lie
                     * glam::Mat4::from_translation(glam::Vec3::from(*off))
                     * glam::Mat4::from_scale(glam::Vec3::from(*size));
                 InstanceData {
@@ -3659,12 +3728,27 @@ impl Renderer {
             .collect()
     }
 
-    /// 设置 NPC 士兵可视化（由 main.rs 传入全部 NPC 的位置/朝向/配色；
+    /// 设置 NPC 士兵可视化（由 main.rs 传入全部 NPC 的位置/朝向/配色/动画态；
     /// 7 段/人展开存入 npc_parts，总段数截断到 MAX_NPC_INSTANCES）
     pub fn set_npc_visuals(&mut self, visuals: &[NpcVisual]) {
         self.npc_parts.clear();
         for v in visuals {
-            for part in Self::soldier_part_matrices(v.pos, v.yaw, v.tint) {
+            for part in Self::soldier_part_matrices(v.pos, v.yaw, v.tint, v.phase, v.moving, v.firing) {
+                if (self.npc_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_parts.push(part);
+                }
+            }
+            if (self.npc_parts.len() as u32) >= MAX_NPC_INSTANCES {
+                break;
+            }
+        }
+    }
+
+    /// 追加倒地尸体段（由 main.rs 传入位置/朝向/阵营；7 段/具躺倒姿态），
+    /// 与活体 NPC 共用 NPC 槽位区（总段数截断到 MAX_NPC_INSTANCES）
+    pub fn set_dead_bodies(&mut self, bodies: &[NpcVisual]) {
+        for v in bodies {
+            for part in Self::dead_part_matrices(v.pos, v.yaw, v.tint) {
                 if (self.npc_parts.len() as u32) < MAX_NPC_INSTANCES {
                     self.npc_parts.push(part);
                 }
@@ -7705,7 +7789,7 @@ mod npc_visual_tests {
     #[test]
     fn soldier_parts_count_and_tint() {
         let tint = [0.2, 0.6, 0.9, 1.0];
-        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, tint);
+        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, tint, 0.0, false, false);
         assert_eq!(parts.len(), 7);
         for p in &parts {
             assert_eq!(p.tint, tint);
@@ -7714,7 +7798,7 @@ mod npc_visual_tests {
 
     #[test]
     fn soldier_torso_height() {
-        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4]);
+        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4], 0.0, false, false);
         // 第 3 段 = 躯干，局部偏移 y=1.15，yaw=0 时平移 y 即 1.15
         let t = translation(&parts[2]);
         assert!(
@@ -7727,11 +7811,14 @@ mod npc_visual_tests {
 
     #[test]
     fn soldier_gun_rotates_with_yaw() {
-        let base = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4]);
+        let base = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4], 0.0, false, false);
         let turned = Renderer::soldier_part_matrices(
             [0.0, 0.0, 0.0],
             std::f32::consts::FRAC_PI_2,
             [1.0; 4],
+            0.0,
+            false,
+            false,
         );
         // 第 7 段 = 枪：yaw=0 时局部偏移 (+0, +1.25, +0.45)，
         // 转 90° 后绕 y 轴旋转应落到 (+0.45, +1.25, ~0)
@@ -7752,7 +7839,7 @@ mod npc_visual_tests {
 
     #[test]
     fn soldier_pos_translation_applies() {
-        let parts = Renderer::soldier_part_matrices([10.0, 2.0, -3.0], 0.0, [1.0; 4]);
+        let parts = Renderer::soldier_part_matrices([10.0, 2.0, -3.0], 0.0, [1.0; 4], 0.0, false, false);
         // 躯干：平移 = pos + 局部偏移 (0, 1.15, 0)
         let t = translation(&parts[2]);
         assert!((t[0] - 10.0).abs() < 1e-3, "x={}", t[0]);
