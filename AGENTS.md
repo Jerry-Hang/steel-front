@@ -41,6 +41,34 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-08-14] 交接：总指挥指令单 #4 完成（防守波次规则 + 爆炸纵深 + 音效差异化）
+
+- 日期：2026-08-14
+- 发起方：主会话 AI（DeepCode）+ Agent A（audio.rs 枪声参数化）
+- 接收方：总指挥 / 后续迭代 AI（下一会话）
+- 交接类型：迭代结束
+- 交接内容：
+  - **阶段一 survive 规则（commit `224f9c4` feat(map)）**：GameRule 加 `Survive { waves }`（evaluate 返回 None——胜负由 game.rs 波次循环驱动：守住全部波 → Victory、玩家死亡 → Defeat）；RuleDef 加 waves + TOML 解析；波间补给窗口（血量 +50% + 弹药/手榴弹补满）；HUD WAVE x/N；defense_line.toml（环形工事 14 障碍 survive 5 波）入 index；README 四规则 + 5 图。
+  - **阶段二 爆炸纵深（commit `f6aaa19` feat(ai)）**：spawn_explosion 障碍 AoE（EXPLOSION_OBSTACLE_FACTOR=1.0，距离衰减，Barrier 100HP 被手榴弹爆心摧毁；damage_obstacle 容忍 bodies 越界）；NPC 投掷手榴弹（压力/survive 中 Attack 态 NPC 确定性概率 5-8% 朝敌对目标投掷 + 冷却 10-18s，复用玩家 Grenade 链路；普通波次不投掷零回归）；玩家自伤（SELF_DAMAGE_FACTOR=0.35 + CAP=45 封顶不被秒杀，死亡 → GameOver/survive Defeat）。
+  - **阶段三 音效差异化（commit `ec539be` feat(audio)）**：Agent A 实现 ShotParams（M1_SHOT 清脆 115Hz/0.12s vs THOMPSON_SHOT 低闷 78Hz/0.17s/thump）+ play_shot_with（旧 play_shot 委托 M1 零回归）+ play_grenade_throw（哨声 1100→520Hz）+ play_grenade_bounce；主会话 fire() 按武器选参数、投掷播哨声、爆炸前落地音。
+  - **验收（主会话独立复核）**：364 tests（+12：audio 8 + survive 1 + 爆炸障碍 1 + NPC 投掷 1 + 自伤 1）/ 0 失败 / 0 警告；冒烟 ALL-OK（EXIT=0、VUID=0、kills=1——AI/爆炸改动后普通波次零回归）；defense_line 实跑加载 survive VUID=0/panic=0；音频实跑 VUID=0/panic=0。3 commits 已推送。
+  - **实测观测**：压力模式 3 分钟 NPC 投掷 76 次（Attack 态触发）；玩家自伤 3m 处 120 伤 → fall 0.625 × 0.35 = 26.25 伤封顶不死（单测验证）；手榴弹炸障碍单测验证（爆心 Barrier 摧毁/远处无伤）。
+  - **遗留/下一步**：① survive 完整 5 波真机需玩家主动转向击杀（自动脚本无法验证玩法循环，单测已覆盖逻辑）；② NPC 投掷只在压力/survive 启用（普通波次按红线不投掷）；③ 手榴弹弹道落点测试受玩家出生位置影响（功能由单测覆盖）；④ survive 波次强度用 wave_profile（wave 1 = 6 NPC，可调 spawn 数量增强防守压力）。
+- 状态：done
+
+### [2026-08-14] 交接：总指挥指令单 #4 开启（防守波次规则 + 爆炸纵深 + 音效差异化）
+
+- 日期：2026-08-14
+- 发起方：总指挥（外部模型）/ 主会话 AI（DeepCode）
+- 接收方：Agent A（audio.rs 枪声参数化 + 投掷哨声）/ 主会话（survive 规则 + 爆炸纵深）
+- 交接类型：规划开启
+- 交接内容：
+  - **阶段一 survive 防守波次**：GameRule 加 `Survive { waves }` 变体（不破坏 capture/kill/time 语义与单测）；NPC 分 N 波进攻、波间补给窗口（弹药/血量回复）、波次递增（数量/强度）；守住全部即胜、玩家死亡即败；新演示关卡 defense_line.toml（survive 5 波）入 index；HUD 波次信息（当前波/总波 + 间隔倒计时）；README 同步。
+  - **阶段二 爆炸纵深**：spawn_explosion 加爆炸半径内障碍 AoE 伤害（复用 damage_obstacle 血量体系）；NPC 低概率（5-8%）投掷手榴弹（阵营区分不炸友军，复用玩家投掷/爆炸链路参数化）；玩家手榴弹自伤（爆炸中心偏移保证不被秒杀）；普通波次 AI 零回归 + 冒烟必跑。
+  - **阶段三 音效差异化**：Agent A 在 audio.rs 参数化 DspSynth 枪声（M1 与 Thompson 音色/时长/音高不同）+ 手榴弹投掷哨声 + 落地滚动音；单测确定性；不破坏现有音效/音乐链路。
+  - **验收**：≥352 tests、0 警告、冒烟 ALL-OK、三阶段实跑观测、零新依赖、每阶段增量验证。
+- 状态：in_progress
+
 ### [2026-08-14] 交接：总指挥指令单 #3 完成（手感扩充 + 收尾）
 
 - 日期：2026-08-14
