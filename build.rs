@@ -52,7 +52,6 @@ fn vs_main(
     let inst = instances[instance_index];
     let world_pos = inst.model * vec4<f32>(position, 1.0);
     output.position = camera.proj * camera.view * world_pos;
-    output.position.y = -output.position.y; // 显式 Vulkan Y 翻转（naga 多成员输出结构翻转失效）
     output.world_pos = world_pos.xyz;
     // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（刚体变换）
     let t = camera.view[3].xyz;
@@ -434,7 +433,10 @@ fn write_vertex(
     var v: VertexOutput;
     let wp = inst.model * vec4<f32>(pos, 1.0);
     v.position = camera.proj * camera.view * wp;
-    v.position.y = -v.position.y; // 显式 Vulkan Y 翻转（与顶点着色器一致）
+    // 网格路径专用显式 Y 翻转：naga 30 网格写入器对 vertices 数组内
+    // @builtin(position) 的 ADJUST_COORDINATE_SPACE 翻转失效（顶点路径正常），
+    // 不补此句则 mesh 渲染内容（地面场/NPC/枪模）垂直镜像
+    v.position.y = -v.position.y;
     // 顶点色已白化：color = 白 × tint（与顶点着色器 color * inst.tint.rgb 一致）
     v.color = vec3<f32>(1.0) * inst.tint.rgb;
     v.uv = uv;
@@ -621,9 +623,7 @@ fn shadow_main(
     @builtin(instance_index) instance_index: u32,
 ) -> @builtin(position) vec4<f32> {
     let inst = instances[instance_index];
-    var clip_pos = shadow_vp.view_proj * inst.model * vec4<f32>(position, 1.0);
-    clip_pos.y = -clip_pos.y; // 显式 Vulkan Y 翻转（与主 pass 一致）
-    return clip_pos;
+    return shadow_vp.view_proj * inst.model * vec4<f32>(position, 1.0);
 }
 "#;
 
