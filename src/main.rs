@@ -403,9 +403,9 @@ impl GameApp {
         use crate::engine::meshgen::{beveled_box, cylinder, frustum, torus_arc};
         let cam = &self.camera;
         let mut anchor = if self.ads_active {
-            glam::Vec3::new(0.0, -0.06, -0.78)
+            glam::Vec3::new(0.0, -0.08, -0.78)
         } else {
-            glam::Vec3::new(0.28, -0.30, -0.62)
+            glam::Vec3::new(0.34, -0.36, -0.60)
         };
         if self.game.is_firing() {
             let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
@@ -414,18 +414,21 @@ impl GameApp {
         }
         let bob = (self.anim_clock * 10.0).sin() * 0.012;
         anchor.x += bob;
-        let tilt = if self.ads_active { 0.0 } else { 0.06 };
+        let tilt = if self.ads_active { 0.0 } else { 0.02 };
         let gun_scale =
-            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0);
+            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * 0.80;
         let view_inv = cam.view_matrix().inverse();
         let view_anchor = glam::Mat4::from_translation(anchor);
         let tilt_rot = glam::Mat4::from_rotation_z(tilt);
         let gun_scale_mat = glam::Mat4::from_scale(glam::Vec3::splat(gun_scale));
+        // P3：全局枪口略下压（绕 X），持枪更自然
+        let level = glam::Mat4::from_rotation_x(-0.045);
         let part_m = |off: [f32; 3], local: glam::Mat4| {
             view_inv
                 * view_anchor
                 * tilt_rot
                 * gun_scale_mat
+                * level
                 * glam::Mat4::from_translation(glam::Vec3::from(off))
                 * local
         };
