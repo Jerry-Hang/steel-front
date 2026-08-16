@@ -429,6 +429,7 @@ fn write_vertex(
     cam: vec3<f32>,
     fade: f32,
     flat: f32,
+    is_gun: bool,
 ) {
     var v: VertexOutput;
     let wp = inst.model * vec4<f32>(pos, 1.0);
@@ -437,6 +438,11 @@ fn write_vertex(
     // @builtin(position) 的 ADJUST_COORDINATE_SPACE 翻转失效（顶点路径正常），
     // 不补此句则 mesh 渲染内容（地面场/NPC/枪模）垂直镜像
     v.position.y = -v.position.y;
+    // 枪模深度覆盖：第一人称枪槽（NPC 区末 16 槽）强制 z_clip=0（NDC z=0 →
+    // 深度 0.5，恒小于世界几何），杜绝枪管/枪托被近墙/地形"穿模遮住"
+    if (is_gun) {
+        v.position.z = 0.0;
+    }
     // 顶点色已白化：color = 白 × tint（与顶点着色器 color * inst.tint.rgb 一致）
     v.color = vec3<f32>(1.0) * inst.tint.rgb;
     v.uv = uv;
@@ -500,10 +506,13 @@ fn mesh_main(
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
     }
+    // 枪模槽位 = NPC 区末 16 槽（与 renderer.rs set_first_person_gun 的
+    // MAX_NPC_INSTANCES-16 起始一致）：深度覆盖标记
+    let is_gun = slot >= NPC_INSTANCE_BASE + 1024u - 16u;
 
     if (is_ground) {
         if (lid < 4u) {
-            write_vertex(lid, GROUND_POS[lid], GROUND_UV[lid], inst, cam, fade, flat);
+            write_vertex(lid, GROUND_POS[lid], GROUND_UV[lid], inst, cam, fade, flat, false);
         }
         if (lid < 2u) {
             mesh_out.primitives[lid].indices = GROUND_TRI[lid];
@@ -518,7 +527,7 @@ fn mesh_main(
     // 近档立方体 / 远档十字双 quad：与 CPU 近/远分档同一阈值（全 3D 距离²）
     if (dist2 < camera.cam_pos.w) {
         if (lid < 24u) {
-            write_vertex(lid, CUBE_POS[lid], CUBE_UV[lid], inst, cam, fade, flat);
+            write_vertex(lid, CUBE_POS[lid], CUBE_UV[lid], inst, cam, fade, flat, is_gun);
         }
         if (lid < 12u) {
             mesh_out.primitives[lid].indices = CUBE_TRI[lid];
@@ -529,7 +538,7 @@ fn mesh_main(
         }
     } else {
         if (lid < 8u) {
-            write_vertex(lid, CROSS_POS[lid], CROSS_UV[lid], inst, cam, fade, flat);
+            write_vertex(lid, CROSS_POS[lid], CROSS_UV[lid], inst, cam, fade, flat, is_gun);
         }
         if (lid < 4u) {
             mesh_out.primitives[lid].indices = CROSS_TRI[lid];
