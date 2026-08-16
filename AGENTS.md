@@ -1,14 +1,14 @@
-﻿# AGENTS.md — Steel Front 项目记忆与 AI 交接文档
+# AGENTS.md — Steel Front 项目记忆与 AI 交接文档
 
 ## 项目
 二战题材 FPS，Rust + Vulkan（winit 0.30），零第三方游戏依赖，纯 bin crate。
 - 入口：`src/main.rs`（GameApp + winit 事件循环）
 - 运行时中枢：`src/engine/game.rs`（每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络）
-- 渲染：`src/engine/renderer.rs`（地形 LOD + 65536 实例场 + HUD 覆盖层；改 pipeline/shader/swapchain 风险高，须先跑冒烟验 VUID）
+- 渲染：`src/engine/renderer.rs`（地形 LOD + 65536 实例场 + HUD 覆盖层；改 pipeline/shader/swapchain 风险高，须先跑冒烟验 VUID）。**渲染主路径 = `VK_EXT_mesh_shader` 网格着色器（MESH + FRAGMENT）**，传统 VERTEX + FRAGMENT 顶点管线仅作 WSLg/dzn 回退（见下方「渲染技术路线铁律」）
 - 地形高度纯函数在 renderer.rs（`terrain_height` / `terrain_height_at`），中央 60×60 压平 y=0
 - 配置持久化：`src/config.rs` → `$HOME/.steel_front.cfg`（Windows: `C:\Users\<user>\.steel_front.cfg`；原子写 + 容错加载，测试不写盘）
 - 测试：`cargo test`（纯逻辑，不碰 GPU）
-- 验收约束：dead-code=0（0 警告）、测试全绿、不新增第三方依赖、commit 规范 `feat(game)/chore/docs`
+- 验收约束：dead-code=0（0 警告）、测试全绿、不新增第三方依赖、commit 规范 **`feat/fix/docs` 前缀**（`chore` 亦允许；一个功能一个 commit，禁止 mega-commit）
 - 内存约束：12GB，一次只跑一个 cargo，禁止并行构建
 
 ## 开发环境（2026-08-15 起：Windows 原生 + DeepSeek Harness）
@@ -25,6 +25,18 @@
 - **功率说明**：奥创中心手动模式 + 电源最佳性能；GPU 功耗墙已解锁 111.92W（默认 55W）；1280x800 下 42W/300+fps 属正常（负载轻），2560x1600 压力模式 50W+/150-400fps。
 - **已知修正（2026-08-15）**：鼠标水平方向（look() `yaw -= dx*sens`，右移=右转）；冒烟脚本 aim 注入已同步反向。
 - **遗留**：WSL2 时代输入捕获问题（HANDOFF-2026-08-11.md）在原生 win32 下已解决（SendInput 视角注入实测正常）；`docs/perf-*` 等 WSL2 基准保留作历史。
+
+## 渲染技术路线铁律（2026-08-16 更新：顶点管线冻结、网格着色器优先）
+
+> **本决策取代 2026-08-11 的「网格着色器冻结、传统管线主迭代」决策（勿回退）。**
+
+- **主开发路径 = `VK_EXT_mesh_shader` 网格着色器（MESH + FRAGMENT）**：所有新渲染功能、性能优化、视觉迭代一律在 mesh 路径上进行（build.rs `MESH_SHADER_WGSL` + renderer.rs mesh 管线）。mesh 路径在支持扩展的设备上自动启用（Windows 原生 RTX 5060 实测 VK_EXT_mesh_shader=true），无需环境变量干预。
+- **传统顶点着色器管线（VERTEX + FRAGMENT）冻结维护**：仅作 WSLg/dzn 回退（转译层不支持 mesh shader），**不再为顶点路径新增任何功能**；只做必要的兼容性维护，冒烟基线仍要求双路径零回归（VUID=0）。
+- **mesh 路径关键约定（勿回退）**：
+  - naga 30 网格写入器对 `@builtin(vertices)` 数组内 position 的 ADJUST_COORDINATE_SPACE 翻转**失效**，mesh 着色器必须在 WGSL 内显式 `v.position.y = -v.position.y`（build.rs write_vertex，删掉会垂直镜像）。
+  - 槽位常量与 renderer.rs 同步：TERRAIN_INSTANCE_INDEX=65536、MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65601、EMISSIVE_INSTANCE_BASE=66625。
+  - 地面场 65536 workgroup 按 `maxMeshWorkGroupCount[0]` 查询上限分块下发（字段 mesh_max_wg_x）。
+- **环境**：Windows 原生（RTX 5060 Laptop 真机）为唯一开发/验证环境；WSL2 相关内容保留作历史，不再承担开发/验证。
 
 ## 迭代规划与交接日志（AI 交接规范）
 
@@ -55,6 +67,19 @@
 - ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：done（第 1-4 步全部完成：分组纯函数 + 双池调度 + 地图生成换核 + 远组降频；265 tests + 冒烟 ALL-OK；基准存档 `docs/perf-ai-tier-2026-08-11/`——128 NPC 压力模式 near~42/far~85（2/3 AI 走 CCD1/E 核）、ai_us p50≈385µs 非瓶颈、fps p50≈274 无回归、降频 A/B 收益≈0（压力模式互射 NPC 全在 Chase/Attack 触发面小，保留为防御性优化）；`RV3D_AI_DECIMATE=off` 可关降频）
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
+
+### [2026-08-16] 交接：渲染方向转向（顶点冻结 / 网格优先）+ 修复记录 + 文档更新
+
+- 日期：2026-08-16
+- 发起方：总指挥（DeepSeek Harness，Windows 原生直接开发）/ 文档专员
+- 接收方：后续迭代 AI（下一会话，Windows 原生）
+- 交接类型：迭代结束 + 方向决策
+- 交接内容：
+  - ① **渲染技术路线转向（重要，勿回退）**：冻结传统顶点着色器管线维护，全面转向 VK_EXT_mesh_shader 网格着色器开发——mesh 路径（MESH + FRAGMENT）为唯一主开发路径（GPU 视锥剔除 + 实例变换，RTX 5060 真机自动启用）；顶点路径仅作 WSLg/dzn 回退，不再加新功能。取代 2026-08-11「网格着色器冻结」决策（历史记录保留）。
+  - ② **修复记录（详见 README「2026-08-16 修复记录」）**：世界垂直镜像修复（mesh 路径 WGSL 内显式 Y 翻转，build.rs）；HUD 双重缩放修复（1280×800 设计空间布局、出口统一乘 ui_scale）；窗口/交换链尺寸自动校验（不匹配自动重建交换链）；开镜 FOV 补偿（tan 反比枪模缩放）；跳跃物理（JUMP_SPEED=3.3，Space 跳跃）；中文 HUD 字形系统（font_cjk.rs，Windows GDI 8×8 点阵掩码）。
+  - ③ **文档更新**：README.md 全量重写（中文对外说明书：技术特性 / 开发方向 / 构建运行 / RV3D_* 环境变量表 / 测试门槛 / 已知注意事项 / 2026-08-16 修复记录）；AGENTS.md 新增「渲染技术路线铁律」节 + commit 规范改为 feat/fix/docs 前缀。
+  - ④ **RV3D_* 环境变量清单（代码实测 20 个）**：RV3D_PRESENT_MODE / RV3D_PROC_TEX / RV3D_SKIN_TEX / RV3D_NO_SHADOW / RV3D_NPC_SCALE / RV3D_STRESS_AI / RV3D_CPU_PIN / RV3D_DISABLE_AVX512 / RV3D_SCENE_WORKERS / RV3D_AI_WORKERS / RV3D_AI_PARALLEL / RV3D_AI_DECIMATE / RV3D_FORCE_SIMD / RV3D_BENCH_YAW / RV3D_BENCH_PITCH / RV3D_EXPLOSION_SIM / RV3D_NET / RV3D_NET_ADDR / RV3D_MAP / RV3D_MAPS（详见 README 环境变量表）。
+- 状态：done
 
 ### [2026-08-15] 交接：Windows 原生 UI/呈现迭代（ESC 毛玻璃菜单 + 击杀提示 + 环境适配）
 

@@ -420,12 +420,12 @@ impl GameApp {
         anchor.x += bob;
         // 腰射轻微右倾；开镜扶正（机瞄对齐）
         let tilt = if self.ads_active { 0.0 } else { 0.06 };
-        // 开镜 FOV 补偿：70°→45° 透视放大 1.55x，枪模必须反向缩小保持视觉大小恒定
-        // （否则开镜瞬间枪跳脸、占满屏幕——"棕色背景板"即巨大化的枪身）。
-        // 按当前 fov 动态补偿：scale = tan(70/2) / tan(fov/2)
-        let fov_comp = 70.0_f32.to_radians().tan() * 0.5
-            / (cam.fov * 0.5).tan().max(0.01);
-        let gun_scale = fov_comp.clamp(0.5, 1.0);
+        // 开镜 FOV 补偿：70°→45° 透视放大 tan(35°)/tan(22.5°)≈1.69x，枪模必须反向
+        // 缩小保持绝对屏幕大小恒定（否则开镜瞬间枪跳脸、占满屏幕——"棕色背景板"
+        // 即巨大化的枪身）。枪模缩放 = tan(fov/2)/tan(35°)：腰射 70°→1.0、开镜 45°→0.59。
+        // （旧公式 tan(70°)*0.5 误写且方向颠倒，clamp 后恒为 1.0 = 无补偿 = 开镜满屏枪）
+        let gun_scale =
+            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0);
         let view_inv = cam.view_matrix().inverse();
         let view_anchor = glam::Mat4::from_translation(anchor);
         let tilt_rot = glam::Mat4::from_rotation_z(tilt);
