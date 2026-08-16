@@ -4,6 +4,8 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+// ⛔ 传统顶点着色器【已冻结维护】（2026-08-16）：仅作 WSLg/dzn 无 mesh 扩展回退，
+// 不再新增功能。新功能一律走 MESH_SHADER_WGSL 网格着色器路径。
 const VERTEX_SHADER_WGSL: &str = r#"
 struct ViewProj {
     view: mat4x4<f32>,

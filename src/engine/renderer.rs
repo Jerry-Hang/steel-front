@@ -1788,6 +1788,9 @@ impl Renderer {
         Ok(())
     }
 
+    /// ⛔ 传统 VERTEX 管线【已冻结维护】（2026-08-16）：仅 WSLg/dzn 无 VK_EXT_mesh_shader
+    /// 时回退使用（地形 LOD 网格 + 地面实例场）。新渲染功能一律走 mesh 路径
+    /// （init_mesh_pipeline），本管线不再新增功能。
     fn init_pipeline(&mut self) -> Result<(), String> {
         let vs_spirv = load_spirv("assets/triangle.vert.spv")?;
         let fs_spirv = load_spirv("assets/triangle.frag.spv")?;
