@@ -2015,14 +2015,15 @@ impl Game {
             counts[2],
             counts[3]
         );
-        render_text(&line1, 10.0, 44.0, Color::YELLOW, 1.3, &mut quads);
+        let hud_s = self.hud.ui_scale();
+        render_text(&line1, 10.0 * hud_s, 44.0 * hud_s, Color::YELLOW, 1.3 * hud_s, &mut quads);
         let line2 = format!(
             "collisions: {}  hits: {}  ammo: {:.0}%",
             self.total_collisions(),
             self.hits(),
             self.weapons.active_firearm_ref().ammo_ratio() * 100.0
         );
-        render_text(&line2, 10.0, 62.0, Color::CYAN, 1.3, &mut quads);
+        render_text(&line2, 10.0 * hud_s, 62.0 * hud_s, Color::CYAN, 1.3 * hud_s, &mut quads);
         quads
     }
 

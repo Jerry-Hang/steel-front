@@ -572,8 +572,11 @@ impl HudState {
     /// ESC 毛玻璃菜单：全屏半透明暗色遮罩（毛玻璃观感）+ 居中面板 + 两个选项
     /// 选中项高亮（Tab 切换 / Enter 确认 / ESC 关闭，由 main.rs 键位处理驱动）
     fn esc_menu_elements(&self, elems: &mut Vec<HudElement>) {
-        let w = self.screen_w;
-        let h = self.screen_h;
+        // 设计基准 1280x800：坐标先用设计空间计算，layout_elements 出口统一乘 ui_scale
+        // （不能直接用 screen_w/h —— 那样会双重缩放，血条/准星被推出屏幕）
+        let s = self.ui_scale();
+        let w = self.screen_w / s;
+        let h = self.screen_h / s;
         // 全屏半透明遮罩（模拟毛玻璃暗化背景）
         elems.push(HudElement::Quad(Quad::new(
             Rect::new(0.0, 0.0, w, h),
@@ -636,8 +639,11 @@ impl HudState {
     /// - 右上角：小地图占位（半透明底 + 边框 + 中心玩家十字标记）
     fn game_elements(&self) -> Vec<HudElement> {
         let mut elems = Vec::new();
-        let w = self.screen_w;
-        let h = self.screen_h;
+        // 设计基准 1280x800：坐标先用设计空间计算，layout_elements 出口统一乘 ui_scale
+        // （不能直接用 screen_w/h —— 那样会双重缩放，血条/准星被推出屏幕）
+        let s = self.ui_scale();
+        let w = self.screen_w / s;
+        let h = self.screen_h / s;
         let margin = 24.0;
 
         // ---- 血条（左下角）----
@@ -975,8 +981,11 @@ impl HudState {
     /// 开始菜单：暗色遮罩 + 标题装饰条 + 操作提示 + 版本行
     fn start_menu_elements(&self) -> Vec<HudElement> {
         let mut elems = Vec::new();
-        let w = self.screen_w;
-        let h = self.screen_h;
+        // 设计基准 1280x800：坐标先用设计空间计算，layout_elements 出口统一乘 ui_scale
+        // （不能直接用 screen_w/h —— 那样会双重缩放，血条/准星被推出屏幕）
+        let s = self.ui_scale();
+        let w = self.screen_w / s;
+        let h = self.screen_h / s;
         elems.push(HudElement::Quad(Quad::new(
             Rect::new(0.0, 0.0, w, h),
             Color::new(0.0, 0.0, 0.0, 0.72),
@@ -1062,8 +1071,11 @@ impl HudState {
     /// 死亡结算：暗色遮罩 + 分数/波次 + 重开提示
     fn game_over_elements(&self) -> Vec<HudElement> {
         let mut elems = Vec::new();
-        let w = self.screen_w;
-        let h = self.screen_h;
+        // 设计基准 1280x800：坐标先用设计空间计算，layout_elements 出口统一乘 ui_scale
+        // （不能直接用 screen_w/h —— 那样会双重缩放，血条/准星被推出屏幕）
+        let s = self.ui_scale();
+        let w = self.screen_w / s;
+        let h = self.screen_h / s;
         elems.push(HudElement::Quad(Quad::new(
             Rect::new(0.0, 0.0, w, h),
             Color::new(0.08, 0.08, 0.10, 0.72),
@@ -1117,8 +1129,11 @@ impl HudState {
     /// - 底部提示（字体仅 ASCII，意图为：ESC: 返回 / 滚轮: 调整）
     fn settings_elements(&self) -> Vec<HudElement> {
         let mut elems = Vec::new();
-        let w = self.screen_w;
-        let h = self.screen_h;
+        // 设计基准 1280x800：坐标先用设计空间计算，layout_elements 出口统一乘 ui_scale
+        // （不能直接用 screen_w/h —— 那样会双重缩放，血条/准星被推出屏幕）
+        let s = self.ui_scale();
+        let w = self.screen_w / s;
+        let h = self.screen_h / s;
         // 半透明底
         elems.push(HudElement::Quad(Quad::new(
             Rect::new(0.0, 0.0, w, h),
