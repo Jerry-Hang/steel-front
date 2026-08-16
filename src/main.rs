@@ -394,72 +394,108 @@ impl GameApp {
         }
     }
 
-    /// 第一人称枪模部件矩阵（M1 加兰德积木拼装）：**视空间固定**——
-    /// 部件矩阵 = view⁻¹ × T(相机空间锚点) × R(倾斜) × T(部件) × S(尺寸)，
-    /// 枪永远锁在屏幕上随视角/移动跟随准星，不会虚空焊住或穿模。
+    /// 第一人称枪模程序化高模（M1 加兰德，2026-08-16 替代积木拼装）：
+    /// 圆角盒 + 锥形枪管 + 圆柱细节的程序化网格，顶点法线烘焙光照（材质色 ×
+    /// (环境光 + 漫反射×NdotL)）→ 立体明暗。**视空间固定**：部件矩阵 = view⁻¹ ×
+    /// T(相机空间锚点) × R(倾斜) × 缩放 × T(部件) × 局部旋转，枪永远锁在屏幕上。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
-    fn first_person_gun_parts(&self) -> Vec<([f32; 16], [f32; 4])> {
+    fn first_person_gun_mesh(&self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
+        use crate::engine::meshgen::{beveled_box, cylinder, frustum};
         let cam = &self.camera;
-        // 视空间锚点：腰射 = 右下 (0.28, -0.30, -0.62)；开镜 = 屏幕中心 (0, -0.06, -0.78)。
-        // 2026-08-15 修复：枪托部件局部 z=+0.28，若锚点太近（-0.42）枪托会到达
-        // view z≈-0.14，贴近 near=0.1 → 透视放大爆表 → 枪模充满屏幕穿模。
-        // 锚点推到 -0.62/-0.78 后枪托 view z≥-0.34，透视比例正常。
         let mut anchor = if self.ads_active {
             glam::Vec3::new(0.0, -0.06, -0.78)
         } else {
             glam::Vec3::new(0.28, -0.30, -0.62)
         };
-        // 开火后坐：相机空间内枪往下/后顶（相位脉冲）
         if self.game.is_firing() {
             let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
             anchor.y -= 0.07 * k;
             anchor.z += 0.06 * k;
         }
-        // 行走晃动：相机空间左右摆动
         let bob = (self.anim_clock * 10.0).sin() * 0.012;
         anchor.x += bob;
-        // 腰射轻微右倾；开镜扶正（机瞄对齐）
         let tilt = if self.ads_active { 0.0 } else { 0.06 };
-        // 开镜 FOV 补偿：70°→45° 透视放大 tan(35°)/tan(22.5°)≈1.69x，枪模必须反向
-        // 缩小保持绝对屏幕大小恒定（否则开镜瞬间枪跳脸、占满屏幕——"棕色背景板"
-        // 即巨大化的枪身）。枪模缩放 = tan(fov/2)/tan(35°)：腰射 70°→1.0、开镜 45°→0.59。
-        // （旧公式 tan(70°)*0.5 误写且方向颠倒，clamp 后恒为 1.0 = 无补偿 = 开镜满屏枪）
         let gun_scale =
             ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0);
         let view_inv = cam.view_matrix().inverse();
         let view_anchor = glam::Mat4::from_translation(anchor);
         let tilt_rot = glam::Mat4::from_rotation_z(tilt);
         let gun_scale_mat = glam::Mat4::from_scale(glam::Vec3::splat(gun_scale));
-        // 部件：(局部偏移, 尺寸, 材质色) — M1 加兰德：胡桃木枪托/护木 + 磷化钢金属件。
-        // 2026-08-15 PBR 立体感修正：加厚部件（消除纸片感）+ 高饱和材质对比
-        // （暖木 vs 冷钢 vs 深色，面间明暗自然浮现）+ 木质部件双色纹理感。
-        let walnut = [0.52, 0.34, 0.15, 1.0]; // 胡桃木（更饱和暖棕）
-        let walnut_dark = [0.38, 0.24, 0.10, 1.0]; // 深胡桃木（纹理对比）
-        let steel = [0.42, 0.46, 0.50, 1.0]; // 磷化钢（更亮冷灰）
-        let dark = [0.22, 0.22, 0.24, 1.0]; // 深色件（略提亮防全黑）
-        let parts: [([f32; 3], [f32; 3], [f32; 4]); 9] = [
-            ([0.0, -0.02, 0.28], [0.08, 0.12, 0.34], walnut_dark), // 枪托（深胡桃木）
-            ([0.0, 0.0, 0.0], [0.07, 0.13, 0.36], steel), // 机匣（磷化钢）
-            ([0.0, 0.0, -0.36], [0.065, 0.09, 0.58], walnut), // 护木（胡桃木）
-            ([0.0, 0.0, -0.80], [0.05, 0.07, 0.38], dark), // 枪管（深色钢）
-            ([0.0, -0.14, -0.02], [0.055, 0.17, 0.11], steel), // 弹匣（钢）
-            ([0.0, -0.10, 0.17], [0.055, 0.13, 0.07], dark), // 握把（深色）
-            ([0.0, 0.13, -0.06], [0.025, 0.06, 0.025], dark), // 准星（深色）
-            ([0.0, 0.11, 0.13], [0.06, 0.05, 0.07], steel), // 表尺（钢）
-            ([0.0, -0.02, -0.60], [0.035, 0.05, 0.12], steel), // 枪口制退器（钢，细节）
-        ];
-        parts
-            .iter()
-            .map(|(off, size, tint)| {
-                let model = view_inv
-                    * view_anchor
-                    * tilt_rot
-                    * gun_scale_mat
-                    * glam::Mat4::from_translation(glam::Vec3::from(*off))
-                    * glam::Mat4::from_scale(glam::Vec3::from(*size));
-                (model.to_cols_array(), *tint)
-            })
-            .collect()
+        let part_m = |off: [f32; 3], local: glam::Mat4| {
+            view_inv
+                * view_anchor
+                * tilt_rot
+                * gun_scale_mat
+                * glam::Mat4::from_translation(glam::Vec3::from(off))
+                * local
+        };
+        // 材质（与旧积木版一致）：胡桃木 / 深胡桃木 / 磷化钢 / 深色件
+        let walnut = [0.52, 0.34, 0.15];
+        let walnut_dark = [0.38, 0.24, 0.10];
+        let steel = [0.42, 0.46, 0.50];
+        let dark = [0.22, 0.22, 0.24];
+        // 烘焙光照：顶部偏左方向光 + 环境光
+        let light = glam::Vec3::new(-0.4, 0.8, -0.3).normalize();
+        let (ambient, diffuse) = (0.55, 0.5);
+        // 圆柱/锥台默认沿 Y，旋转 -90° 使其沿 -Z（枪口朝前）
+        let rz = glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+        // 枪托（深胡桃木，带肩托斜角）
+        beveled_box(0.055, 0.125, 0.30, 0.035, 3).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, -0.02, 0.30], glam::Mat4::from_rotation_x(-0.12)),
+            walnut_dark, light, ambient, diffuse,
+        );
+        // 机匣（磷化钢圆角盒）
+        beveled_box(0.062, 0.105, 0.26, 0.03, 3).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, 0.0, 0.06], glam::Mat4::IDENTITY),
+            steel, light, ambient, diffuse,
+        );
+        // 护木（胡桃木圆角盒）
+        beveled_box(0.058, 0.088, 0.32, 0.028, 3).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, 0.0, -0.20], glam::Mat4::IDENTITY),
+            walnut, light, ambient, diffuse,
+        );
+        // 枪管（锥形：后粗前细）
+        frustum(0.021, 0.016, 0.44, 14, true).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, 0.0, -0.53], rz),
+            dark, light, ambient, diffuse,
+        );
+        // 枪口制退器（钢圆柱）
+        cylinder(0.026, 0.06, 14).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, 0.0, -0.75], rz),
+            steel, light, ambient, diffuse,
+        );
+        // 弹匣（钢圆角盒，微微前倾）
+        beveled_box(0.052, 0.17, 0.075, 0.02, 2).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, -0.115, 0.00], glam::Mat4::from_rotation_x(0.06)),
+            steel, light, ambient, diffuse,
+        );
+        // 握把（深色锥台，朝后斜）
+        frustum(0.024, 0.032, 0.15, 12, true).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, -0.08, 0.14], rz * glam::Mat4::from_rotation_x(-0.4)),
+            dark, light, ambient, diffuse,
+        );
+        // 准星（深色小件）
+        beveled_box(0.006, 0.024, 0.016, 0.003, 2).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, 0.05, -0.33], glam::Mat4::IDENTITY),
+            dark, light, ambient, diffuse,
+        );
+        // 表尺（钢小件）
+        beveled_box(0.022, 0.032, 0.055, 0.006, 2).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, 0.06, 0.04], glam::Mat4::IDENTITY),
+            steel, light, ambient, diffuse,
+        );
+        (verts, indices)
     }
 
     /// ESC 菜单鼠标点击命中检测：命中选项矩形则执行对应动作（0=退出 1=设置）。
@@ -619,8 +655,8 @@ impl GameApp {
 
     /// 渲染一帧
     fn render(&mut self) {
-        // 第一人称枪模部件（相机姿态）：在借用 renderer 前生成，避免借用冲突
-        let gun_parts = self.first_person_gun_parts();
+        // 第一人称枪模程序化网格（相机姿态）：在借用 renderer 前生成，避免借用冲突
+        let gun_mesh = self.first_person_gun_mesh();
         // 诊断（每 5 秒一次）：窗口 inner_size vs swapchain extent vs HUD 尺寸
         if self.anim_clock > 5.0 && (self.anim_clock - 5.0) % 5.0 < 0.05 {
             if let Some(win) = &self.window {
@@ -891,8 +927,8 @@ impl GameApp {
                 })
                 .collect();
             renderer.set_dead_bodies(&dead_visuals);
-            // 第一人称枪模（部件已在 render() 入口预生成，此处上传）
-            renderer.set_first_person_gun(&gun_parts);
+            // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
+            renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
 
             // 尺寸保险（2026-08-15）：窗口实际尺寸与交换链不一致时重建——
             // 覆盖 DPI 缩放/全屏切换等任何导致 swapchain 与窗口错位的场景，

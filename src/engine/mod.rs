@@ -20,6 +20,7 @@ pub mod game;
 pub mod gpu_caps;
 pub mod lighting;
 pub mod map;
+pub mod meshgen;
 pub mod objective;
 pub mod physics;
 pub mod procedural;

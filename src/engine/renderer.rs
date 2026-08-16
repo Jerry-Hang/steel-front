@@ -715,6 +715,15 @@ pub struct Renderer {
     hud_mapped: *mut std::ffi::c_void,
     hud_vertex_count: u32,
     hud_capacity_quads: u32,
+    // ---- 第一人称枪模专用网格（程序化高模，主管线绘制 = 深度测试关 = 恒可见不穿模）----
+    gun_vertex_buffer: vk::Buffer,
+    gun_vertex_buffer_memory: vk::DeviceMemory,
+    gun_index_buffer: vk::Buffer,
+    gun_index_buffer_memory: vk::DeviceMemory,
+    gun_mapped: *mut std::ffi::c_void,
+    gun_vertex_count: u32,
+    gun_index_count: u32,
+    gun_buffer_capacity_verts: u32,
     /// 上一帧渲染统计（供 HUD / 日志）
     last_near_count: u32,
     last_far_count: u32,
@@ -1154,6 +1163,14 @@ impl Renderer {
             hud_mapped: std::ptr::null_mut(),
             hud_vertex_count: 0,
             hud_capacity_quads: 4096,
+            gun_vertex_buffer: vk::Buffer::null(),
+            gun_vertex_buffer_memory: vk::DeviceMemory::null(),
+            gun_index_buffer: vk::Buffer::null(),
+            gun_index_buffer_memory: vk::DeviceMemory::null(),
+            gun_mapped: std::ptr::null_mut(),
+            gun_vertex_count: 0,
+            gun_index_count: 0,
+            gun_buffer_capacity_verts: 0,
             last_near_count: 0,
             last_far_count: 0,
             last_terrain_lod_name: "high",
@@ -1743,16 +1760,16 @@ impl Renderer {
             let instance_info = vk::DescriptorBufferInfo::default()
                 .buffer(self.instance_buffers[i])
                 .offset(0)
-                // 范围必须覆盖 marker/NPC/自发光区（INSTANCE_COUNT+1+MAX_MARKER_INSTANCES+
-                // MAX_NPC_INSTANCES+MAX_EMISSIVE_INSTANCES），否则 shader 读对应 slot
-                // 会触发 VUID 越界校验
+                // 范围必须覆盖 marker/NPC/自发光区 + 枪模 identity 槽（+1），
+                // 否则 shader 读对应 slot 会触发 VUID 越界校验
                 .range(
                     std::mem::size_of::<InstanceData>() as u64
                         * (INSTANCE_COUNT as u64
                             + 1
                             + MAX_MARKER_INSTANCES as u64
                             + MAX_NPC_INSTANCES as u64
-                            + MAX_EMISSIVE_INSTANCES as u64),
+                            + MAX_EMISSIVE_INSTANCES as u64
+                            + 1),
                 );
             let instance_infos = [instance_info];
             let instance_write = vk::WriteDescriptorSet::default()
@@ -3114,16 +3131,21 @@ impl Renderer {
         // 再追加 MAX_MARKER_INSTANCES 个 slot 给世界障碍 marker（见 MARKER_SLOT_BASE），
         // 追加 MAX_NPC_INSTANCES 个 slot 给 NPC 士兵段（见 NPC_SLOT_BASE），
         // 最后追加 MAX_EMISSIVE_INSTANCES 个 slot 给自发光实体（见 EMISSIVE_SLOT_BASE）
+        // +1 = 枪模专用 identity 槽（GUN_INSTANCE_INDEX，走 flat=1 纯色路径，
+        // 避免枪模被地面纹理 0.75 混合而隐形——2026-08-16）
         let buffer_elems = (INSTANCE_COUNT
             + 1
             + MAX_MARKER_INSTANCES
             + MAX_NPC_INSTANCES
-            + MAX_EMISSIVE_INSTANCES) as u64;
+            + MAX_EMISSIVE_INSTANCES
+            + 1) as u64;
         let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
         let identity = InstanceData {
             model: glam::Mat4::IDENTITY.to_cols_array(),
             tint: [1.0, 1.0, 1.0, 1.0],
         };
+        // 枪模 identity 槽常量（与 build.rs 顶点 shader 同步）
+        const GUN_INSTANCE_INDEX: u32 = INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES + MAX_EMISSIVE_INSTANCES;
 
         // 每帧一份 HOST_VISIBLE | HOST_COHERENT buffer，STORAGE_BUFFER（每帧 CPU 直接写）
         let buffer_info = vk::BufferCreateInfo::default()
@@ -3168,6 +3190,14 @@ impl Renderer {
                     &identity as *const InstanceData as *const u8,
                     (mapped as *mut u8).add(
                         INSTANCE_COUNT as usize * std::mem::size_of::<InstanceData>(),
+                    ),
+                    std::mem::size_of::<InstanceData>(),
+                );
+                // 枪模 identity 槽（GUN_INSTANCE_INDEX）：主管线 flat=1 纯色路径用
+                std::ptr::copy_nonoverlapping(
+                    &identity as *const InstanceData as *const u8,
+                    (mapped as *mut u8).add(
+                        GUN_INSTANCE_INDEX as usize * std::mem::size_of::<InstanceData>(),
                     ),
                     std::mem::size_of::<InstanceData>(),
                 );
@@ -3877,31 +3907,85 @@ impl Renderer {
         }
     }
 
-    /// 追加第一人称枪模段（相机跟随，屏幕右下；由 main.rs 每帧按相机姿态生成部件矩阵）。
-    /// 与 NPC 共用槽位区尾部（预留 16 段：枪身/枪管/握把/弹匣/瞄具/枪托 等），
-    /// 距离分档时枪模在相机位置恒入 near 档；纯色 tint 渲染。
-    /// 参数为 (model 列主序矩阵, tint) 元组（InstanceData 为私有类型，对外暴露元组）。
-    pub fn set_first_person_gun(&mut self, parts: &[([f32; 16], [f32; 4])]) {
-        // 预留 16 段给枪模：槽位 [MAX_NPC_INSTANCES-16, MAX_NPC_INSTANCES)。
-        // 先把 npc_parts 补齐到 base（占位实例），再写枪模部件——旧逻辑 len<idx 时
-        // break 导致 NPC 少时枪模完全不显示（2026-08-15 修复）。
-        let base = MAX_NPC_INSTANCES - 16;
-        let zero = InstanceData {
-            model: [0.0; 16],
-            tint: [0.0; 4],
-        };
-        // 补齐到 base + 部件数（先保证长度够，再原位覆盖——旧逻辑 len<idx 时 break
-        // 导致枪模不显示；上一版补齐到 base 后写 idx=base 仍越界，改为补齐到末尾）
-        let need = base as usize + parts.len().min(16);
-        while self.npc_parts.len() < need {
-            self.npc_parts.push(zero);
+    /// 上传第一人称枪模程序化网格（2026-08-16 高模路线）：顶点已是世界空间
+    /// （main.rs 用 view⁻¹ × 锚点烘焙），颜色已含材质×烘焙光照。
+    /// 用主管线（深度测试关）以 identity 实例（槽 INSTANCE_COUNT）绘制——
+    /// 深度测试关闭 = 枪模恒可见（不再需要 z 覆盖 hack，也不写脏深度）。
+    pub fn set_first_person_gun_mesh(
+        &mut self,
+        verts: &[crate::engine::meshgen::GVertex],
+        indices: &[u32],
+    ) {
+        self.gun_vertex_count = verts.len() as u32;
+        self.gun_index_count = indices.len() as u32;
+        if verts.is_empty() || indices.is_empty() {
+            return;
         }
-        for (i, (model, tint)) in parts.iter().take(16).enumerate() {
-            let idx = (base as usize) + i;
-            self.npc_parts[idx] = InstanceData {
-                model: *model,
-                tint: *tint,
+        // 首次或容量不足：重建 HOST_VISIBLE 缓冲（顶点 32B + 索引 4B）
+        let need_verts = (verts.len() as u32).next_power_of_two().max(1024);
+        if need_verts != self.gun_buffer_capacity_verts
+            || self.gun_mapped.is_null()
+            || self.gun_vertex_buffer == vk::Buffer::null()
+        {
+            if self.gun_vertex_buffer != vk::Buffer::null() {
+                unsafe { self.device.destroy_buffer(self.gun_vertex_buffer, None) };
+            }
+            if self.gun_vertex_buffer_memory != vk::DeviceMemory::null() {
+                unsafe { self.device.free_memory(self.gun_vertex_buffer_memory, None) };
+            }
+            if self.gun_index_buffer != vk::Buffer::null() {
+                unsafe { self.device.destroy_buffer(self.gun_index_buffer, None) };
+            }
+            if self.gun_index_buffer_memory != vk::DeviceMemory::null() {
+                unsafe { self.device.free_memory(self.gun_index_buffer_memory, None) };
+            }
+            let v_size = need_verts as u64 * std::mem::size_of::<Vertex>() as u64;
+            let (vb, vm) = self
+                .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, v_size)
+                .expect("枪模顶点缓冲创建失败");
+            let i_size = need_verts as u64 * 6 * 4; // 索引 ≤ 6×顶点（三角网格）
+            let (ib, im) = self
+                .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, i_size)
+                .expect("枪模索引缓冲创建失败");
+            self.gun_vertex_buffer = vb;
+            self.gun_vertex_buffer_memory = vm;
+            self.gun_index_buffer = ib;
+            self.gun_index_buffer_memory = im;
+            self.gun_mapped = unsafe {
+                self.device
+                    .map_memory(vm, 0, v_size, vk::MemoryMapFlags::empty())
+                    .expect("枪模顶点缓冲映射失败")
             };
+            self.gun_buffer_capacity_verts = need_verts;
+        }
+        // 写入顶点（GVertex → Vertex: pos/color/uv；color 已含烘焙光照）
+        let vptr = self.gun_mapped as *mut Vertex;
+        for (i, v) in verts.iter().enumerate() {
+            unsafe {
+                *vptr.add(i) = Vertex {
+                    pos: v.pos,
+                    color: v.color,
+                    uv: v.uv,
+                };
+            }
+        }
+        // 索引上传（独立映射窗口，用一次性的暂存：直接再 map 索引内存）
+        unsafe {
+            let iptr = self
+                .device
+                .map_memory(
+                    self.gun_index_buffer_memory,
+                    0,
+                    self.gun_index_count as u64 * 4,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .expect("枪模索引缓冲映射失败");
+            std::ptr::copy_nonoverlapping(
+                indices.as_ptr() as *const u8,
+                iptr as *mut u8,
+                self.gun_index_count as usize * 4,
+            );
+            self.device.unmap_memory(self.gun_index_buffer_memory);
         }
     }
 
@@ -6124,6 +6208,45 @@ impl Renderer {
         }
         }
 
+        // ---- 第一人称枪模（程序化高模，2026-08-16）：主管线绘制，identity 实例
+        //      （槽 INSTANCE_COUNT = TERRAIN_INSTANCE_INDEX，inst.model = 单位阵 →
+        //      顶点即世界空间，main.rs 已烘焙 view⁻¹×锚点）。主管线 depth_test=OFF
+        //      → 枪模恒可见（不穿模），也不再需要 z 覆盖 hack。
+        if self.gun_index_count > 0 && self.gun_vertex_count > 0 {
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline,
+                );
+                self.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    0,
+                    &descriptor_sets,
+                    &[],
+                );
+                let gun_vb = [self.gun_vertex_buffer];
+                let gun_off = [0u64];
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &gun_vb, &gun_off);
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.gun_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    self.gun_index_count,
+                    1,
+                    0,
+                    0,
+                    INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES + MAX_EMISSIVE_INSTANCES,
+                );
+            }
+        }
+
         // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
         if self.hud_vertex_count > 0 && self.hud_pipeline != vk::Pipeline::null() {
             let hud_vertex_buffers = [self.hud_vertex_buffer];
@@ -6889,6 +7012,19 @@ impl Drop for Renderer {
             }
             if self.hud_vertex_buffer_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.hud_vertex_buffer_memory, None);
+            }
+            // 释放第一人称枪模缓冲
+            if self.gun_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.gun_vertex_buffer, None);
+            }
+            if self.gun_vertex_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.gun_vertex_buffer_memory, None);
+            }
+            if self.gun_index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.gun_index_buffer, None);
+            }
+            if self.gun_index_buffer_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.gun_index_buffer_memory, None);
             }
             if self.render_pass != vk::RenderPass::null() {
                 self.device.destroy_render_pass(self.render_pass, None);

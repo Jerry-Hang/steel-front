@@ -73,6 +73,12 @@ fn vs_main(
     } else {
         output.flat_flag = 0.0;
     }
+    // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+64+1024+64）：
+    // 走 marker 纯色路径（flat=1），避免被地面纹理 0.75 混合 → 枪模隐形（2026-08-16）
+    if (instance_index == 66689u) {
+        output.flat_flag = 1.0;
+        output.fade = 1.0;
+    }
     if (instance_index >= EMISSIVE_INSTANCE_BASE) {
         // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
         output.flat_flag = 1.0;
