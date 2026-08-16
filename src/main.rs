@@ -400,7 +400,7 @@ impl GameApp {
     /// T(相机空间锚点) × R(倾斜) × 缩放 × T(部件) × 局部旋转，枪永远锁在屏幕上。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
     fn first_person_gun_mesh(&self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
-        use crate::engine::meshgen::{beveled_box, cylinder, frustum};
+        use crate::engine::meshgen::{beveled_box, cylinder, frustum, torus_arc};
         let cam = &self.camera;
         let mut anchor = if self.ads_active {
             glam::Vec3::new(0.0, -0.06, -0.78)
@@ -453,6 +453,12 @@ impl GameApp {
             part_m([0.0, 0.0, 0.06], glam::Mat4::IDENTITY),
             steel, light, ambient, diffuse,
         );
+        // 机匣顶部漏夹槽（P2：细长深色凹口片，模拟 en-bloc 漏夹槽口）
+        beveled_box(0.034, 0.008, 0.15, 0.002, 2).append_transformed(
+            &mut verts, &mut indices,
+            part_m([0.0, 0.060, 0.04], glam::Mat4::IDENTITY),
+            [0.12, 0.10, 0.08], light, ambient, diffuse,
+        );
         // 护木（胡桃木圆角盒）
         beveled_box(0.058, 0.088, 0.32, 0.028, 3).append_transformed(
             &mut verts, &mut indices,
@@ -483,6 +489,13 @@ impl GameApp {
             part_m([0.0, -0.08, 0.14], rz * glam::Mat4::from_rotation_x(-0.4)),
             dark, light, ambient, diffuse,
         );
+        // 扳机护圈（P2：torus 弧段，开口朝上，环轴沿 Z 左右向）
+        torus_arc(0.030, 0.006, std::f32::consts::PI * 4.0 / 3.0, std::f32::consts::PI * 8.0 / 3.0, 16, 8)
+            .append_transformed(
+                &mut verts, &mut indices,
+                part_m([0.0, -0.078, -0.06], glam::Mat4::IDENTITY),
+                steel, light, ambient, diffuse,
+            );
         // 准星（深色小件）
         beveled_box(0.0024, 0.0096, 0.0064, 0.0012, 2).append_transformed(
             &mut verts, &mut indices,

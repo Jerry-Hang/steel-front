@@ -256,6 +256,41 @@ pub fn cylinder(r: f32, height: f32, seg: u32) -> Mesh {
     frustum(r, r, height, seg, true)
 }
 
+/// 圆环弧段（torus arc）：环半径 R、管半径 r，沿环角度 [t0, t1]（弧度），
+/// 环平面为 XY（θ 绕 Z），φ 绕管。用于扳机护圈等环形细节（2026-08-16 P2）。
+#[allow(dead_code)]
+pub fn torus_arc(ring_r: f32, tube_r: f32, t0: f32, t1: f32, seg_ring: u32, seg_tube: u32) -> Mesh {
+    let seg_ring = seg_ring.max(6);
+    let seg_tube = seg_tube.max(6);
+    let mut mesh = Mesh::default();
+    for j in 0..=seg_tube {
+        let phi = std::f32::consts::TAU * j as f32 / seg_tube as f32;
+        let (sp, cp) = phi.sin_cos();
+        for i in 0..=seg_ring {
+            let theta = t0 + (t1 - t0) * i as f32 / seg_ring as f32;
+            let (st, ct) = theta.sin_cos();
+            let n = glam::Vec3::new(cp * ct, cp * st, sp);
+            let pos = glam::Vec3::new((ring_r + tube_r * cp) * ct, (ring_r + tube_r * cp) * st, tube_r * sp);
+            mesh.verts.push(GVertex {
+                pos: pos.to_array(),
+                normal: n.to_array(),
+                uv: [i as f32 / seg_ring as f32, j as f32 / seg_tube as f32],
+                color: [1.0, 1.0, 1.0],
+            });
+        }
+    }
+    for j in 0..seg_tube {
+        for i in 0..seg_ring {
+            let a = j * (seg_ring + 1) + i;
+            let b = a + 1;
+            let c = a + seg_ring + 1;
+            let d = c + 1;
+            mesh.indices.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
+    mesh
+}
+
 /// 单位球体（UV 经纬，法线 = 位置）；预留 NPC 头部等使用
 #[allow(dead_code)]
 pub fn sphere(seg: u32, rings: u32) -> Mesh {
