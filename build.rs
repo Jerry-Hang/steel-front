@@ -54,6 +54,10 @@ fn vs_main(
     let inst = instances[instance_index];
     let world_pos = inst.model * vec4<f32>(position, 1.0);
     output.position = camera.proj * camera.view * world_pos;
+    // 显式 Vulkan Y 翻转：naga 30 的 ADJUST_COORDINATE_SPACE 对多成员输出结构
+    // 是死代码（翻转了副本而非实际输出，SPIR-V 反汇编 + 像素验证确认），
+    // 不加此句则地形等顶点路径内容垂直镜像（2026-08-16）
+    output.position.y = -output.position.y;
     output.world_pos = world_pos.xyz;
     // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（刚体变换）
     let t = camera.view[3].xyz;
@@ -598,6 +602,7 @@ fn vs_main(
 ) -> VertexOutput {
     var output: VertexOutput;
     output.position = vec4<f32>(position, 0.0, 1.0);
+    output.position.y = -output.position.y; // TEST: explicit flip
     output.color = color;
     return output;
 }
@@ -636,7 +641,10 @@ fn shadow_main(
     @builtin(instance_index) instance_index: u32,
 ) -> @builtin(position) vec4<f32> {
     let inst = instances[instance_index];
-    return shadow_vp.view_proj * inst.model * vec4<f32>(position, 1.0);
+    var clip_pos = shadow_vp.view_proj * inst.model * vec4<f32>(position, 1.0);
+    // 显式 Vulkan Y 翻转（与主 pass 一致；片元采样已按此约定镜像 V）
+    clip_pos.y = -clip_pos.y;
+    return clip_pos;
 }
 "#;
 
