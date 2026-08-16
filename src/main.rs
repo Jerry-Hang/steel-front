@@ -1333,7 +1333,7 @@ impl ApplicationHandler for GameApp {
                             }
                         }
                     }
-                    // F12：截图（任意画面可用，渲染器把当前帧写到 /tmp）
+                    // F12：截图（任意画面可用，Windows 写到 ./screenshots/）
                     KeyCode::F12 => {
                         if pressed {
                             self.capture_screenshot();

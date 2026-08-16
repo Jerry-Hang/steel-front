@@ -809,7 +809,7 @@ objectives = [ { id = "flag_a", type = "capture", position = { x = 0, y = 0, z =
 obstacles = [ { type = "wall", position = { x = 5, y = 1, z = 5 }, size = { x = 4, y = 2.4, z = 0.5 } }, { type = "block", position = { x = -5, y = 1, z = -5 }, size = { x = 3, y = 3, z = 3 } }, { type = "cover", position = { x = 0, y = 1, z = -10 }, size = { x = 2, y = 1, z = 1 } } ]
 "#;
 
-    /// 写临时 TOML 文件（/tmp，进程号隔离），返回路径
+    /// 写临时 TOML 文件（系统临时目录，进程号隔离），返回路径
     fn write_tmp(content: &str, tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "steel_front_map_{}_{}.toml",
