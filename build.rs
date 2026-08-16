@@ -602,7 +602,9 @@ fn vs_main(
 ) -> VertexOutput {
     var output: VertexOutput;
     output.position = vec4<f32>(position, 0.0, 1.0);
-    output.position.y = -output.position.y; // TEST: explicit flip
+    // 显式 Vulkan Y 翻转：naga 30 的 ADJUST_COORDINATE_SPACE 是死代码（翻转落在
+    // 副本变量上），不加此句则 HUD 垂直镜像（血条/文字倒置在顶部）
+    output.position.y = -output.position.y;
     output.color = color;
     return output;
 }
