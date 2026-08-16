@@ -460,13 +460,13 @@ impl GameApp {
             walnut, light, ambient, diffuse,
         );
         // 枪管（锥形：后粗前细）
-        frustum(0.021, 0.016, 0.44, 14, true).append_transformed(
+        frustum(0.0125, 0.0105, 0.44, 14, true).append_transformed(
             &mut verts, &mut indices,
             part_m([0.0, 0.0, -0.53], rz),
             dark, light, ambient, diffuse,
         );
         // 枪口制退器（钢圆柱）
-        cylinder(0.026, 0.06, 14).append_transformed(
+        cylinder(0.020, 0.06, 14).append_transformed(
             &mut verts, &mut indices,
             part_m([0.0, 0.0, -0.75], rz),
             steel, light, ambient, diffuse,
@@ -484,7 +484,7 @@ impl GameApp {
             dark, light, ambient, diffuse,
         );
         // 准星（深色小件）
-        beveled_box(0.006, 0.024, 0.016, 0.003, 2).append_transformed(
+        beveled_box(0.0024, 0.0096, 0.0064, 0.0012, 2).append_transformed(
             &mut verts, &mut indices,
             part_m([0.0, 0.05, -0.33], glam::Mat4::IDENTITY),
             dark, light, ambient, diffuse,
