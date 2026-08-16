@@ -509,8 +509,10 @@ fn mesh_main(
         flat = 1.0;
     }
     // 枪模槽位 = NPC 区末 16 槽（与 renderer.rs set_first_person_gun 的
-    // MAX_NPC_INSTANCES-16 起始一致）：深度覆盖标记
-    let is_gun = slot >= NPC_INSTANCE_BASE + 1024u - 16u;
+    // MAX_NPC_INSTANCES-16 起始一致）：深度覆盖标记。
+    // 上界必须 < EMISSIVE_INSTANCE_BASE（自发光 66625+ 不得命中，否则
+    // 爆炸/手雷/粒子被强制画最前——修复越界回归）
+    let is_gun = slot >= NPC_INSTANCE_BASE + 1024u - 16u && slot < EMISSIVE_INSTANCE_BASE;
 
     if (is_ground) {
         if (lid < 4u) {
