@@ -127,48 +127,47 @@ pub fn beveled_box(w: f32, h: f32, d: f32, r: f32, seg: u32) -> Mesh {
             1 => (glam::Vec3::new(a, -hh, b), glam::Vec3::new(a, hh, b)),
             _ => (glam::Vec3::new(a, b, -hd), glam::Vec3::new(a, b, hd)),
         };
-        // 截面平面的两个基向量（从盒子中心指向该边的外侧方向 + 沿轴方向）
-        let outward = match axis {
-            0 => glam::Vec3::new(0.0, a.signum(), b.signum()).normalize_or_zero(),
-            1 => glam::Vec3::new(a.signum(), 0.0, b.signum()).normalize_or_zero(),
-            _ => glam::Vec3::new(a.signum(), b.signum(), 0.0).normalize_or_zero(),
+        // 截面 1/4 圆：法向从相邻面1外法向扫到面2外法向（等距面，与角片无缝衔接）。
+        // 2026-08-16 P0 修复：旧实现用"盒子中心→棱线对角方向"作截面基向量，
+        // v=π/2 端顶点塌到棱线上 → 从表面伸出卷曲飘带面片。
+        let (n1, n2) = match axis {
+            0 => (
+                glam::Vec3::new(0.0, a.signum(), 0.0),
+                glam::Vec3::new(0.0, 0.0, b.signum()),
+            ),
+            1 => (
+                glam::Vec3::new(a.signum(), 0.0, 0.0),
+                glam::Vec3::new(0.0, 0.0, b.signum()),
+            ),
+            _ => (
+                glam::Vec3::new(a.signum(), 0.0, 0.0),
+                glam::Vec3::new(0.0, b.signum(), 0.0),
+            ),
         };
-        let along = match axis {
-            0 => glam::Vec3::X,
-            1 => glam::Vec3::Y,
-            _ => glam::Vec3::Z,
-        };
-        let t2 = along;
         let base = mesh.verts.len() as u32;
         for j in 0..=seg {
             let v = std::f32::consts::FRAC_PI_2 * j as f32 / seg as f32;
             let (sv, cv) = v.sin_cos();
+            let n = (n1 * cv + n2 * sv).normalize();
             for i in 0..=seg {
                 let u = i as f32 / seg as f32;
-                let along_pt = p0.lerp(p1, u);
-                let n = (outward * cv + t2 * sv).normalize_or_zero();
-                // 位置 = 沿轴插值点 + 截面法向偏移（投影到截面平面）
-                let off = match axis {
-                    0 => glam::Vec3::new(0.0, n.y, n.z),
-                    1 => glam::Vec3::new(n.x, 0.0, n.z),
-                    _ => glam::Vec3::new(n.x, n.y, 0.0),
-                };
-                let pos = along_pt + off * r;
+                let pos = p0.lerp(p1, u) + n * r;
                 mesh.verts.push(GVertex {
                     pos: pos.to_array(),
-                    normal: off.normalize_or_zero().to_array(),
+                    normal: n.to_array(),
                     uv: [u, v / std::f32::consts::FRAC_PI_2],
                     color: [1.0, 1.0, 1.0],
                 });
             }
         }
+        // 绕序与角片一致（外侧 CCW）
         for j in 0..seg {
             for i in 0..seg {
                 let a0 = base + j * (seg + 1) + i;
                 let b0 = a0 + 1;
                 let c0 = a0 + seg + 1;
                 let d0 = c0 + 1;
-                mesh.indices.extend_from_slice(&[a0, c0, d0, a0, d0, b0]);
+                mesh.indices.extend_from_slice(&[a0, b0, d0, a0, d0, c0]);
             }
         }
     }
