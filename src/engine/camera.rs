@@ -165,15 +165,14 @@ impl Camera {
         self.pitch = (self.pitch + delta_y * MOUSE_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
-    /// 第一人称鼠标视角（供 FPS 主视角）：`delta_x` / `delta_y` 为屏幕像素位移，
-    /// 标准方向：鼠标下移（dy>0）→ pitch 增大 → 看向下方（pitch 正 = 低头看地）；
-    /// 鼠标右移（dx>0）→ yaw 减小 → 视角右转（forward.x = -sin(yaw)，yaw 减小 → +X 偏转）。
+    /// 第一人称鼠标视角（供 FPS 主视角）：`delta_x` / `delta_y` 为屏幕像素位移。
+    /// 2026-08-16 用户反馈"视角反了（像倒立）"，垂直轴方向取反：
+    /// 鼠标下移（dy>0）→ pitch 减小 → 抬头；鼠标上移 → 低头。
+    /// 水平轴不变：鼠标右移（dx>0）→ yaw 减小 → 视角右转。
     /// pitch 夹在 [-89°, 89°]；灵敏度用 `mouse_sens`（默认 0.003）。
-    /// 注：2026-08-15 Windows 原生真机修正——旧 `yaw += dx*sens` 使右移变左转
-    /// （WSL2 输入捕获不可用从未暴露，冒烟闭环正反皆可收敛）。
     pub fn look(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw -= delta_x * self.mouse_sens;
-        self.pitch = (self.pitch + delta_y * self.mouse_sens).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        self.pitch = (self.pitch - delta_y * self.mouse_sens).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
     /// 累计视角后坐力（弧度），update() 的 FirstPerson 分支以指数衰减施加到 yaw/pitch
@@ -488,24 +487,24 @@ mod tests {
         assert_eq!(cam.position(), Vec3::new(5.0, 3.0, 1.0));
     }
 
-    /// look：右移 dx 减小 yaw（视角右转），下移 dy（屏幕 Y 向下）增大 pitch（低头），
-    /// 灵敏度取 mouse_sens
+    /// look：右移 dx 减小 yaw（视角右转）；垂直轴 2026-08-16 取反——
+    /// 下移 dy（屏幕 Y 向下）减小 pitch（抬头），上移低头。灵敏度取 mouse_sens
     #[test]
     fn look_updates_yaw_pitch() {
         let mut cam = Camera::new();
         cam.look(100.0, 50.0);
         assert!((cam.yaw + 100.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
-        assert!((cam.pitch - (50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6);
+        assert!((cam.pitch + (50.0 * MOUSE_SENSITIVITY)).abs() < 1e-6);
     }
 
-    /// look：pitch 夹在 [-89°, 89°]
+    /// look：pitch 夹在 [-89°, 89°]（垂直轴取反后：dy 大正值 → pitch 压到下限）
     #[test]
     fn look_clamps_pitch() {
         let mut cam = Camera::new();
         cam.look(0.0, 1e6);
-        assert_eq!(cam.pitch, PITCH_LIMIT);
-        cam.look(0.0, -1e6);
         assert_eq!(cam.pitch, -PITCH_LIMIT);
+        cam.look(0.0, -1e6);
+        assert_eq!(cam.pitch, PITCH_LIMIT);
     }
 
     /// 投影矩阵保持 y-up NDC（Y 轴缩放为正）：Vulkan 的 Y 翻转由 shader
