@@ -593,12 +593,20 @@ impl GameApp {
         }
     }
 
-    /// F12 截图：调渲染器把当前帧保存到 /tmp/steel_front_<秒时间戳>.png
+    /// F12 截图：调渲染器把当前帧保存到 <平台截图目录>/steel_front_<秒时间戳>.png
+    /// （Windows = 当前目录 screenshots/，非 Windows 沿用 /tmp 保持 WSL2 行为）
     fn capture_screenshot(&mut self) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        #[cfg(windows)]
+        let path = {
+            let dir = std::path::PathBuf::from("screenshots");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(format!("steel_front_{}.png", ts))
+        };
+        #[cfg(not(windows))]
         let path = std::path::PathBuf::from(format!("/tmp/steel_front_{}.png", ts));
         match self.renderer.as_mut() {
             Some(renderer) => match renderer.capture_screenshot(&path) {
