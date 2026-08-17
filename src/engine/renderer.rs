@@ -57,6 +57,19 @@ struct Vertex {
     uv: [f32; 2],
 }
 
+/// 性能快照（供性能日志系统，2026-08-16）：帧耗时与各渲染阶段耗时（微秒）
+#[derive(Clone, Copy)]
+pub struct PerfSnapshot {
+    pub frame_us: u64,
+    pub cull_us: u64,
+    pub terrain_us: u64,
+    pub wait_fence_us: u64,
+    pub acquire_us: u64,
+    pub record_us: u64,
+    pub submit_us: u64,
+    pub present_us: u64,
+}
+
 /// HUD 覆盖层顶点：屏幕空间 NDC 位置（Y 已翻转）+ RGBA 颜色
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -593,6 +606,9 @@ pub struct Renderer {
     max_frames_in_flight: usize,
     /// 上一帧 render() 总耗时（微秒，性能日志用）
     last_frame_us: u64,
+    last_cull_us: u64,
+    /// 物理设备名称（性能日志头部用）
+    device_name: String,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
@@ -1058,6 +1074,7 @@ impl Renderer {
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
             mesh_enabled: mesh_shader_available,
+            device_name,
             mesh_shader: mesh_shader_loader,
             mesh_pipeline: vk::Pipeline::null(),
             mesh_pipeline_layout: vk::PipelineLayout::null(),
@@ -1071,6 +1088,7 @@ impl Renderer {
             current_frame: 0,
             max_frames_in_flight: 2,
             last_frame_us: 0,
+            last_cull_us: 0,
             vertex_buffer: vk::Buffer::null(),
             vertex_buffer_memory: vk::DeviceMemory::null(),
             index_buffer: vk::Buffer::null(),
@@ -2318,6 +2336,24 @@ impl Renderer {
             self.last_far_count,
             self.last_terrain_lod_name,
         )
+    }
+
+    pub fn perf_snapshot(&self) -> PerfSnapshot {
+        PerfSnapshot {
+            frame_us: self.last_frame_us,
+            cull_us: self.last_cull_us,
+            terrain_us: self.stage_terrain_us,
+            wait_fence_us: self.stage_wait_fence_us,
+            acquire_us: self.stage_acquire_us,
+            record_us: self.stage_record_us,
+            submit_us: self.stage_submit_us,
+            present_us: self.stage_present_us,
+        }
+    }
+
+    /// GPU 设备名（性能日志头部用）
+    pub fn gpu_name(&self) -> String {
+        self.device_name.clone()
     }
 
     /// 更新光照 uniform（每帧渲染前调用；默认全零 = 光照关闭）
@@ -6688,6 +6724,7 @@ impl Renderer {
         self.last_emissive_near = emissive_near;
         self.last_emissive_far = emissive_far;
         let cull_us = cull_start.elapsed().as_micros() as u64;
+        self.last_cull_us = cull_us;
         self.last_near_count = near_count;
         self.last_far_count = far_count;
 

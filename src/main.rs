@@ -11,6 +11,7 @@ mod audio;
 mod net;
 mod ui;
 mod config;
+mod perf_log;
 
 use std::time::{Duration, Instant};
 
@@ -109,10 +110,14 @@ struct GameApp {
     anim_clock: f32,
     /// 上一帧存活 NPC 快照：id → (位置, 朝向, 阵营色)（尸体跟踪：本帧消失的 id 记入 corpses）
     last_npc_snapshot: std::collections::HashMap<usize, ([f32; 3], f32, [f32; 4])>,
+    /// 上一帧 FPS（性能日志用）
+    last_fps: f64,
     /// 倒地尸体：(位置, 朝向, 阵营色, 已存留秒数)；上限 20 具，超过 10 秒消退
     corpses: Vec<([f32; 3], f32, [f32; 4], f32)>,
     /// 枪口焰/弹壳粒子（0=枪口焰无重力淡出，1=弹壳重力落地）；渲染走 emissive 通道
     particles: Vec<Particle>,
+    /// 性能日志（每次启动一份，logs/perf_*.log）
+    perf_log: Option<perf_log::PerfLog>,
 }
 
 /// 视觉粒子：枪口焰（无重力，快速淡出）+ 弹壳（重力下落，落地消散）
@@ -173,8 +178,10 @@ impl GameApp {
             resolution_explicit: cfg.resolution_explicit,
             anim_clock: 0.0,
             last_npc_snapshot: std::collections::HashMap::new(),
+            last_fps: 0.0,
             corpses: Vec::new(),
             particles: Vec::new(),
+            perf_log: None,
         }
     }
 
@@ -190,6 +197,9 @@ impl GameApp {
 
         // 确保 delta_time 不会太大（防止卡顿时大跳）
         let delta_time = delta_time.min(0.1);
+        if delta_time > 1e-6 {
+            self.last_fps = 1.0 / delta_time as f64;
+        }
         // NPC 动画时钟（步态/后坐相位）与尸体老化
         self.anim_clock += delta_time;
         for c in self.corpses.iter_mut() {
@@ -969,6 +979,12 @@ impl GameApp {
                     log::error!("渲染错误: {}", e);
                 }
             }
+            // 性能日志采样（1s 一行）
+            if let Some(pl) = self.perf_log.as_mut() {
+                let snap = renderer.perf_snapshot();
+                let (near, _, _) = renderer.last_stats();
+                pl.frame(self.last_fps, near, &snap);
+            }
         }
     }
 }
@@ -1085,6 +1101,34 @@ impl ApplicationHandler for GameApp {
         // 应用持久化的分辨率与画质（窗口/渲染器就绪后即时生效）
         self.apply_resolution();
         self.apply_quality();
+
+        // ---- 性能日志（每次启动一份 logs/perf_*.log）----
+        let gpu = self
+            .renderer
+            .as_ref()
+            .map(|r| r.gpu_name())
+            .unwrap_or_else(|| "未知".to_string());
+        let topo = crate::engine::cpu::topology();
+        let vendor = match topo.vendor {
+            crate::engine::cpu::CpuVendor::Amd => "AMD",
+            crate::engine::cpu::CpuVendor::Intel => "Intel",
+            crate::engine::cpu::CpuVendor::Other => "Other",
+        };
+        let cpu = format!("{} {}线程", vendor, topo.threads);
+        let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or_default();
+        let header = format!(
+            "版本: {} | 启动: {} | GPU: {} | CPU: {} | 窗口: {}x{}",
+            env!("CARGO_PKG_VERSION"),
+            perf_log::now_human(),
+            gpu,
+            cpu,
+            size.width,
+            size.height
+        );
+        self.perf_log = perf_log::PerfLog::create(&header);
+        if self.perf_log.is_some() {
+            log::info!("性能日志已创建（logs/perf_*.log）");
+        }
     }
 
     /// 设备级事件：系统相对鼠标增量（XInput2 raw motion，与光标位置无关）驱动视角。
@@ -1094,6 +1138,10 @@ impl ApplicationHandler for GameApp {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
         log::info!("input: 收到退出事件，退出游戏");
         self.running = false;
+        if let Some(pl) = self.perf_log.as_mut() {
+            pl.finish();
+            self.perf_log = None;
+        }
         event_loop.exit();
     }
 
