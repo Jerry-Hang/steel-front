@@ -56,12 +56,28 @@ const DEFAULT_PITCH: c_uint = 0;
 
 static CACHE: Mutex<Option<std::collections::HashMap<char, [u8; 8]>>> = Mutex::new(None);
 
+/// CJK/全角字符判定（2026-08-16 扩展：补全角形式 0xFF00-0xFFEF 与扩展区，
+/// 修复中文输入法标点"！（）"等渲染成 '?' 的问题）
+pub fn is_cjk_char(ch: char) -> bool {
+    let cp = ch as u32;
+    (0x2E80..=0x2FDF).contains(&cp) // 部首/康熙部首
+        || (0x3000..=0x303F).contains(&cp) // CJK 标点
+        || (0x3040..=0x30FF).contains(&cp) // 假名（界面兼容）
+        || (0x3100..=0x31FF).contains(&cp) // 注音/笔画
+        || (0x3200..=0x33FF).contains(&cp) // 带圈 CJK/兼容
+        || (0x3400..=0x4DBF).contains(&cp) // 扩展 A
+        || (0x4E00..=0x9FFF).contains(&cp) // 统一表意
+        || (0xF900..=0xFAFF).contains(&cp) // 兼容表意
+        || (0xFE30..=0xFE6F).contains(&cp) // 竖排/小写变体
+        || (0xFF00..=0xFFEF).contains(&cp) // 全角形式（！（）等）
+        || (0x20000..=0x2A6DF).contains(&cp) // 扩展 B
+}
+
 /// 取中文字形（8x8 点阵，行主序每行 1 字节，bit7=左侧）。
 /// 首次访问某字符时经 GDI 光栅化并缓存；失败返回 None。
 pub fn glyph(ch: char) -> Option<[u8; 8]> {
     // 非 CJK 不进缓存（ASCII 走 5x7 内置字体）
-    let cp = ch as u32;
-    if !(0x4E00..=0x9FFF).contains(&cp) && !(0x3000..=0x303F).contains(&cp) {
+    if !is_cjk_char(ch) {
         return None;
     }
     {

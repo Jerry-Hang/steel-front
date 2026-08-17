@@ -1602,10 +1602,17 @@ pub fn glyph_cjk(ch: char) -> Option<[u8; 8]> {
     }
 }
 
-/// 是否中文字符（CJK 统一表意文字 + 全角标点）
+/// 是否中文字符（统一表意/扩展区/全角标点等完整范围，见 font_cjk::is_cjk_char）
 pub fn is_cjk(ch: char) -> bool {
-    let cp = ch as u32;
-    (0x4E00..=0x9FFF).contains(&cp) || (0x3000..=0x303F).contains(&cp)
+    #[cfg(windows)]
+    {
+        crate::engine::font_cjk::is_cjk_char(ch)
+    }
+    #[cfg(not(windows))]
+    {
+        let cp = ch as u32;
+        (0x4E00..=0x9FFF).contains(&cp) || (0x3000..=0x303F).contains(&cp)
+    }
 }
 
 /// 计算字符串的渲染宽度（像素，含字距）
