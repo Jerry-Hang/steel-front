@@ -4147,13 +4147,13 @@ impl Renderer {
         if verts.is_empty() || indices.is_empty() {
             return;
         }
-        // 首次或容量不足：重建 HOST_VISIBLE 缓冲（顶点 32B + 索引 4B）。
-        // 防御：索引容量按实际索引数独立扩容（next_power_of_two），
-        // 杜绝三角网格索引数 > 6×顶点时上传越界导致 GPU 挂起/画面冻结。
-        let need_verts = (verts.len() as u32).next_power_of_two().max(1024);
-        let need_idx = (indices.len() as u32)
-            .next_power_of_two()
-            .max(need_verts * 6);
+        // 枪模缓冲容量：预分配全局最大（35 把枪当前最大 verts=30492 / idx=145992，
+        // next_power_of_two = 32768 / 262144）。切枪（含容量缩小）永不重建缓冲——
+        // 重建会 destroy 正在被 GPU 使用的 buffer → NVIDIA 驱动 device lost（画面卡死，
+        // 2026-08-18 修复：切到小网格武器触发重建导致崩溃）。
+        // 未来新增更大枪模时 max() 自动扩容（首帧重建一次，代价可接受）。
+        let need_verts = 32768u32.max((verts.len() as u32).next_power_of_two());
+        let need_idx = 262_144u32.max((indices.len() as u32).next_power_of_two());
         if need_verts != self.gun_buffer_capacity_verts
             || need_idx != self.gun_buffer_capacity_idx
             || self.gun_mapped.is_null()

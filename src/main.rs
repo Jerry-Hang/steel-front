@@ -126,6 +126,8 @@ struct GameApp {
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
     gun_mesh_cache: Option<(String, crate::engine::guns::GunMesh)>,
+    /// 延迟自动切枪（测试用）：(目标武器号, 触发时刻)
+    switch_weapon_at: Option<(usize, f32)>,
 }
 
 /// 视觉粒子：枪口焰（无重力，快速淡出）+ 弹壳（重力下落，落地消散）
@@ -194,6 +196,7 @@ impl GameApp {
             command_open: false,
             command_buf: String::new(),
             gun_mesh_cache: None,
+            switch_weapon_at: None,
         }
     }
 
@@ -209,6 +212,31 @@ impl GameApp {
             if st == GameState::StartMenu || st == GameState::LoadingMap {
                 log::info!("autostart: RV3D_AUTOSTART=1 自动开始");
                 self.game.on_any_key(&self.camera.position());
+            }
+            // RV3D_SWITCH_WEAPON=n：进入后自动切到 n 号武器（复现切枪崩溃用）；
+            // RV3D_SWITCH_WEAPON_AFTER=秒：延迟切枪（模拟玩一会儿再切）
+            let after = std::env::var("RV3D_SWITCH_WEAPON_AFTER")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok());
+            let (target, switch_at) = match std::env::var("RV3D_SWITCH_WEAPON") {
+                Ok(n) => (n.parse::<usize>().ok(), after.unwrap_or(0.0)),
+                Err(_) => (None, 0.0),
+            };
+            if let Some(n) = target {
+                if switch_at <= 0.0 {
+                    log::info!("autostart: 自动切枪 #{}", n);
+                    self.game.switch_weapon(n.saturating_sub(1));
+                } else {
+                    self.switch_weapon_at = Some((n, self.anim_clock + switch_at));
+                }
+            }
+        }
+        // 延迟自动切枪（测试用）
+        if let Some((n, at)) = self.switch_weapon_at {
+            if self.anim_clock >= at && self.game.state() == GameState::Playing {
+                log::info!("autostart: 延迟切枪 #{}", n);
+                self.game.switch_weapon(n.saturating_sub(1));
+                self.switch_weapon_at = None;
             }
         }
         // 同步光标捕获状态（Playing + 聚焦 = 捕获；菜单/结算/失焦 = 释放）
@@ -496,8 +524,10 @@ impl GameApp {
             }
         };
         let cam = &self.camera;
+        // 开镜锚点：枪模右下偏移，屏幕中心视野干净（准星/三点一线不被枪托遮挡；
+        // 2026-08-18 修复：旧锚点 (0,-0.08,-0.78) 居中，枪托挡视野中心）
         let mut anchor = if self.ads_active {
-            glam::Vec3::new(0.0, -0.08, -0.78)
+            glam::Vec3::new(0.20, -0.26, -0.75)
         } else {
             glam::Vec3::new(0.34, -0.36, -0.60)
         };
@@ -509,8 +539,9 @@ impl GameApp {
         let bob = (self.anim_clock * 10.0).sin() * 0.012;
         anchor.x += bob;
         let tilt = if self.ads_active { 0.0 } else { 0.02 };
+        let base_scale = if self.ads_active { 0.88 } else { 0.98 };
         let gun_scale =
-            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * 0.98;
+            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * base_scale;
         let view_inv = cam.view_matrix().inverse();
         let m = view_inv
             * glam::Mat4::from_translation(anchor)
@@ -916,7 +947,7 @@ impl GameApp {
                 .npcs
                 .iter()
                 .map(|n| {
-                    let tint = self
+                    let base = self
                         .last_npc_snapshot
                         .get(&n.id)
                         .map(|(_, _, t)| *t)
@@ -924,6 +955,19 @@ impl GameApp {
                             Team::Red => [0.95, 0.12, 0.08, 1.0],
                             Team::Blue => [0.08, 0.35, 0.98, 1.0],
                         });
+                    // 受击反馈：命中瞬间闪白（按剩余强度混合白色）
+                    let flash = self.game.npc_flash(n.id);
+                    let tint = if flash > 0.0 {
+                        let k = flash * 0.85;
+                        [
+                            base[0] + (1.0 - base[0]) * k,
+                            base[1] + (1.0 - base[1]) * k,
+                            base[2] + (1.0 - base[2]) * k,
+                            1.0,
+                        ]
+                    } else {
+                        base
+                    };
                     engine::renderer::NpcVisual {
                         pos: n.position,
                         yaw: n.facing,

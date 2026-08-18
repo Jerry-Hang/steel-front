@@ -254,6 +254,50 @@ mod tests {
         assert_eq!(m82.tiers[0], (100.0, 115.0));
     }
 
+    /// 计算 35 把枪的最大网格规模（枪模缓冲预分配用）：返回 (max_verts, max_indices)
+    pub fn gun_mesh_max_sizes() -> (u32, u32) {
+        let mut max_v = 0u32;
+        let mut max_i = 0u32;
+        for spec in ALL_WEAPONS.iter() {
+            if let Some(gm) = crate::engine::guns::gun_mesh_by_key(spec.key) {
+                max_v = max_v.max(gm.verts.len() as u32);
+                max_i = max_i.max(gm.indices.len() as u32);
+            }
+        }
+        (max_v, max_i)
+    }
+
+    /// 打印并校验最大网格规模（枪模缓冲预分配容量依据）
+    #[test]
+    fn gun_mesh_max_sizes_report() {
+        let (mv, mi) = gun_mesh_max_sizes();
+        println!("GUN_MAX: verts={} idx={}", mv, mi);
+        // 逐枪规模（找容量边界问题）
+        for spec in ALL_WEAPONS.iter() {
+            if let Some(gm) = crate::engine::guns::gun_mesh_by_key(spec.key) {
+                println!(
+                    "GUN_SIZE {}: verts={} idx={}",
+                    spec.key,
+                    gm.verts.len(),
+                    gm.indices.len()
+                );
+            }
+        }
+        // 找出最大的一把
+        let mut biggest = "";
+        let mut bv = 0u32;
+        for spec in ALL_WEAPONS.iter() {
+            if let Some(gm) = crate::engine::guns::gun_mesh_by_key(spec.key) {
+                if (gm.verts.len() as u32) > bv {
+                    bv = gm.verts.len() as u32;
+                    biggest = spec.key;
+                }
+            }
+        }
+        println!("GUN_BIGGEST: {} verts={}", biggest, bv);
+        assert!(mv > 0 && mi > 0);
+    }
+
     /// 全部枪模可构建且非空（程序化建模完整性）
     #[test]
     fn all_gun_meshes_buildable() {

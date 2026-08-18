@@ -767,6 +767,8 @@ pub struct Game {
     fire_mode: FireMode,
     /// 连发热量 0..1：连续射击累积，压制枪口上扬；停火后衰减
     auto_heat: f32,
+    /// NPC 受击闪白：id → 剩余秒数（命中瞬间置 0.15，衰减；渲染侧混合白色反馈）
+    npc_hit_flash: std::collections::HashMap<usize, f32>,
     /// 发射次数（累计）
     shots: u64,
     /// 命中次数（累计，供 UI/日志）
@@ -1004,6 +1006,7 @@ impl Game {
             fire_cooldown: 0.0,
             fire_mode: FireMode::Auto,
             auto_heat: 0.0,
+            npc_hit_flash: std::collections::HashMap::new(),
             shots: 0,
             hits: 0,
             grid: GridMap::new(GRID_SIZE, GRID_SIZE),
@@ -1223,6 +1226,7 @@ impl Game {
         self.weapons.reset_all_ammo();
         self.fire_mode = FireMode::Auto;
         self.auto_heat = 0.0;
+        self.npc_hit_flash.clear();
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
@@ -1470,6 +1474,11 @@ impl Game {
         self.weapons.update(dt);
         // 连发热量衰减（停火后枪口上扬恢复）
         self.auto_heat = (self.auto_heat - dt * 0.9).max(0.0);
+        // NPC 受击闪白衰减
+        self.npc_hit_flash.retain(|_, t| {
+            *t -= dt;
+            *t > 0.0
+        });
         self.hud.ammo = self.weapons.active_firearm_ref().magazine();
         self.hud.max_ammo = self.weapons.active_firearm_ref().max_magazine();
         self.hud.reserve = self.weapons.active_firearm_ref().reserve();
@@ -2285,6 +2294,14 @@ impl Game {
             .unwrap_or("hk416")
     }
 
+    /// NPC 受击闪白剩余强度（0..1；0 = 无闪白）。渲染侧按此混合白色 tint。
+    pub fn npc_flash(&self, id: usize) -> f32 {
+        self.npc_hit_flash
+            .get(&id)
+            .map(|t| (t / 0.15).clamp(0.0, 1.0))
+            .unwrap_or(0.0)
+    }
+
     /// 切换武器（数字键/命令窗口/滚轮）：切换到指定槽位；切枪计时中忽略重复切换。
     /// 越界输入优雅回退：记录日志并忽略，不 panic。
     pub fn switch_weapon(&mut self, index: usize) {
@@ -2762,12 +2779,14 @@ impl Game {
     /// NPC 受伤结算：扣血至 0 → 移除 + 计分 + 任务目标推进；返回是否击杀。
     /// 调用方保证 `idx` 有效；下标移除后不再回移（调用方按逆序遍历或立即退出）。
     fn damage_npc(&mut self, idx: usize, dmg: f32) -> bool {
+        let id = self.npcs[idx].id;
+        // 受击反馈：命中瞬间闪白（0.15s 衰减）
+        self.npc_hit_flash.insert(id, 0.15);
         let npc = &mut self.npcs[idx];
         npc.hp -= dmg;
         if npc.hp > 0.0 {
             return false;
         }
-        let id = npc.id;
         let victim_team = npc.team;
         self.npcs.remove(idx);
         self.score += KILL_SCORE;
@@ -2934,9 +2953,11 @@ impl Game {
         }
         for (i, npc) in self.npcs.iter().enumerate() {
             let cx = npc.position[0];
-            let cy = npc.position[1] + 0.8;
+            // 命中球：中心 +0.9m、半径 0.95m → 覆盖 -0.05..1.85m（含头部；
+            // 2026-08-18 修复：旧球 0..1.6m 覆盖不到头（1.63-1.77m）→ 瞄头不命中）
+            let cy = npc.position[1] + 0.9;
             let cz = npc.position[2];
-            let r = 0.8;
+            let r = 0.95;
             // 点到射线最近点参数 t（clamp 到 [0,1] 段内），再算距离²
             let fx = ax - cx;
             let fy = ay - cy;
@@ -4439,6 +4460,59 @@ mod tests {
             90,
             "死亡后备弹应恢复初始 90（AK-12M）"
         );
+    }
+
+    /// 命中判定覆盖：瞄头/瞄身/瞄腿/远距都应命中（hitbox 含整身 0..1.85m），脱靶不命中
+    #[test]
+    fn hitbox_covers_head_body_legs_and_range() {
+        let mut game = Game::new();
+        // 固定 NPC 在原点，清除其它 NPC 干扰
+        game.npcs[0].position = [0.0, 0.0, 0.0];
+        game.npcs.truncate(1);
+        // 水平弹道：从 -40m 射向原点，段内覆盖球心
+        let mk = |h: f32| -> Projectile {
+            Projectile::new([-40.0, h, 0.0], [1.0, 0.0, 0.0], 100.0, 200.0, 3.0, 30.0)
+        };
+        // 瞄头（1.70m）：段 [-40,0] 最近点 = 球心投影，命中且部位为头
+        let mut p = mk(1.70);
+        p.update(0.40);
+        let hit = game.hit_npc_index(&p);
+        assert!(hit.is_some(), "瞄头（1.70m）应命中");
+        if let Some((_, hh)) = hit {
+            assert!(
+                Game::part_multiplier(hh, 0.0) >= 1.5,
+                "头部命中倍率应为 1.5，实际 {}",
+                Game::part_multiplier(hh, 0.0)
+            );
+        }
+        // 瞄身（1.10m）：命中且胸部倍率 1.0
+        let mut p = mk(1.10);
+        p.update(0.40);
+        let hit = game.hit_npc_index(&p);
+        assert!(hit.is_some(), "瞄身（1.10m）应命中");
+        if let Some((_, hh)) = hit {
+            assert_eq!(Game::part_multiplier(hh, 0.0), 1.0);
+        }
+        // 瞄腿（0.30m）：命中且腿部倍率 0.6
+        let mut p = mk(0.30);
+        p.update(0.40);
+        let hit = game.hit_npc_index(&p);
+        assert!(hit.is_some(), "瞄腿（0.30m）应命中");
+        if let Some((_, hh)) = hit {
+            assert_eq!(Game::part_multiplier(hh, 0.0), 0.6);
+        }
+        // 远距离（80m）：段内覆盖球心即命中
+        let mut p = Projectile::new([-80.0, 1.10, 0.0], [1.0, 0.0, 0.0], 100.0, 300.0, 4.0, 30.0);
+        p.update(0.80);
+        assert!(game.hit_npc_index(&p).is_some(), "80m 瞄身应命中");
+        // 脱靶：高度 3.0m 高出 hitbox 顶部（1.85m）
+        let mut p = mk(3.0);
+        p.update(0.40);
+        assert!(game.hit_npc_index(&p).is_none(), "3m 高处脱靶不应命中");
+        // 横向脱靶：x 偏移 3m（球半径 0.95）
+        let mut p = Projectile::new([-40.0, 1.10, 3.0], [1.0, 0.0, 0.0], 100.0, 200.0, 3.0, 30.0);
+        p.update(0.40);
+        assert!(game.hit_npc_index(&p).is_none(), "横向 3m 脱靶不应命中");
     }
 
     /// 切枪稳定性：任意槽位切换后长时间运行不 panic、武器状态一致
