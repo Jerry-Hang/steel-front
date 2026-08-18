@@ -439,7 +439,7 @@ const MAX_MARKER_INSTANCES: u32 = 64;
 /// slot 65536 是地形 identity（shader 硬编码 TERRAIN_INSTANCE_INDEX=65536 读取，
 /// cull_and_upload 只写 0..visible-1，永不触碰），marker 从 65537 起，互不干扰。
 const MARKER_SLOT_BASE: u32 = INSTANCE_COUNT + 1;
-/// NPC 士兵可视化段数上限（128 NPC × 最多 8 段，7 段/人 + 余量；同时决定实例 buffer 的额外容量）
+/// NPC 士兵可视化段数上限（人形 15 段/人，当前 8 NPC 仅用 120 段，余量充足；同时决定实例 buffer 的额外容量）
 const MAX_NPC_INSTANCES: u32 = 1024;
 /// NPC 段在实例 buffer 中的起始 slot：紧接 marker 区之后（见 MARKER_SLOT_BASE）
 const NPC_SLOT_BASE: u32 = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES;
@@ -3817,12 +3817,14 @@ impl Renderer {
         (near_count, far_count)
     }
 
-    /// 计算一名 NPC 的 7 段积木人实例数据（双腿/躯干/双臂/头/枪），全部同 tint。
-    /// 每段矩阵 = T(pos) * R_y(yaw) * R_anim * T(局部偏移) * S(尺寸)，
-    /// 模型矩阵右乘（先局部偏移再缩放），y 以地面为 0 起算，单位米；
+    /// 计算一名 NPC 的 15 段人形士兵实例数据（大腿/小腿/脚/骨盆/胸/颈/头/上臂/前臂/枪）。
+    /// 比例贴近真人：总高约 1.78m，肩宽 ~0.55m，腿/臂分上下两段，行走时髋/膝/肩/肘
+    /// 各自绕枢轴摆动（不再是积木式整体摆动）。全部同 tint。
+    /// 每段矩阵 = T(pos) * R_y(yaw) * T(枢轴) * R_anim * T(段心) * S(尺寸)：
+    /// 动画旋转在枢轴平移之后、段心平移之前，绕枢轴（髋/膝/肩/肘）旋转。
     /// 枪局部偏移在 +Z（yaw=0 时枪口朝向 +Z），随 yaw 绕 y 轴旋转。
-    /// 动画：moving 时双腿/双臂按 phase 正弦对向摆动（走路步态）；
-    /// firing 时枪与双臂沿 -Z 后坐脉冲（高频正弦），躯干微俯。
+    /// 动画：moving 时髋/膝/肩/肘按 phase 正弦对向摆动（走路步态）；
+    /// firing 时枪沿 -Z 后坐脉冲（高频正弦），胸微俯。
     fn soldier_part_matrices(
         pos: [f32; 3],
         yaw: f32,
@@ -3831,47 +3833,62 @@ impl Renderer {
         moving: bool,
         firing: bool,
     ) -> Vec<InstanceData> {
-        // (局部偏移, 尺寸)：腿/臂各有左右两段，枪局部偏移在 +Z（yaw=0 时枪口朝向 +Z）
-        let parts: [([f32; 3], [f32; 3]); 7] = [
-            ([-0.15, 0.45, 0.0], [0.2, 0.85, 0.2]), // 左腿
-            ([0.15, 0.45, 0.0], [0.2, 0.85, 0.2]), // 右腿
-            ([0.0, 1.15, 0.0], [0.55, 0.75, 0.3]), // 躯干
-            ([-0.38, 1.25, 0.05], [0.16, 0.7, 0.16]), // 左臂
-            ([0.38, 1.25, 0.05], [0.16, 0.7, 0.16]), // 右臂
-            ([0.0, 1.72, 0.0], [0.32, 0.32, 0.32]), // 头
-            ([0.0, 1.25, 0.45], [0.15, 0.12, 0.85]), // 枪（+Z 前方）
+        // (枢轴, 尺寸, 段心相对枢轴偏移, 动画类型)
+        // 动画类型：0 无 1 左大腿 2 右大腿 3 左小腿 4 右小腿 5 左上臂 6 右上臂
+        //          7 左前臂 8 右前臂 9 枪(后坐) 10 胸(前俯)
+        let parts: [([f32; 3], [f32; 3], [f32; 3], u8); 15] = [
+            ([-0.105, 0.95, 0.0], [0.14, 0.44, 0.16], [0.0, -0.22, 0.0], 1), // 左大腿（髋）
+            ([0.105, 0.95, 0.0], [0.14, 0.44, 0.16], [0.0, -0.22, 0.0], 2),  // 右大腿（髋）
+            ([-0.105, 0.51, 0.0], [0.115, 0.42, 0.135], [0.0, -0.21, 0.0], 3), // 左小腿（膝）
+            ([0.105, 0.51, 0.0], [0.115, 0.42, 0.135], [0.0, -0.21, 0.0], 4), // 右小腿（膝）
+            ([-0.105, 0.05, 0.0], [0.10, 0.07, 0.26], [0.0, 0.0, 0.02], 0),    // 左脚
+            ([0.105, 0.05, 0.0], [0.10, 0.07, 0.26], [0.0, 0.0, 0.02], 0),     // 右脚
+            ([0.0, 0.98, 0.0], [0.36, 0.26, 0.20], [0.0, -0.12, 0.0], 0),      // 骨盆
+            ([0.0, 1.24, 0.0], [0.46, 0.44, 0.26], [0.0, -0.02, -0.01], 10),   // 胸（含后坐前俯）
+            ([0.0, 1.47, 0.0], [0.09, 0.10, 0.09], [0.0, -0.01, 0.0], 0),      // 颈
+            ([0.0, 1.63, 0.0], [0.24, 0.27, 0.24], [0.0, -0.01, 0.0], 0),      // 头
+            ([-0.27, 1.40, 0.02], [0.12, 0.30, 0.13], [0.0, -0.15, 0.0], 5),   // 左上臂（肩）
+            ([0.27, 1.40, 0.02], [0.12, 0.30, 0.13], [0.0, -0.15, 0.0], 6),    // 右上臂（肩）
+            ([-0.27, 1.10, 0.02], [0.10, 0.28, 0.11], [0.0, -0.14, 0.02], 7),  // 左前臂（肘）
+            ([0.27, 1.10, 0.02], [0.10, 0.28, 0.11], [0.0, -0.14, 0.02], 8),   // 右前臂（肘）
+            ([0.0, 1.14, 0.50], [0.13, 0.10, 0.95], [0.0, 0.0, 0.0], 9),       // 枪（+Z 前方，后坐 -Z）
         ];
         let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
         let rot = glam::Mat4::from_rotation_y(yaw);
-        // 步态：腿/臂绕局部 X 轴摆动（对向），频率 ~2.2Hz 视觉节奏
+        // 步态：髋/膝/肩/肘绕各自枢轴对向摆动，频率 ~2.2Hz 视觉节奏
         let stride = if moving {
             (phase * 13.8).sin().clamp(-1.0, 1.0) * 0.55
         } else {
             0.0
         };
-        // 开火后坐：枪沿 -Z 脉冲（~7Hz 快速衰减），躯干/头轻微前俯
+        // 开火后坐：枪沿 -Z 脉冲（~7Hz 快速衰减），胸轻微前俯
         let (kick, torso_lean) = if firing {
             let k = ((phase * 44.0).sin().abs()).min(1.0);
             (0.09 * k, -0.06 * k)
         } else {
             (0.0, 0.0)
         };
-        let mut out = Vec::with_capacity(7);
-        for (i, (off, size)) in parts.iter().enumerate() {
+        let mut out = Vec::with_capacity(15);
+        for (pivot, size, center, kind) in parts.iter() {
             let mut anim = glam::Mat4::IDENTITY;
-            match i {
-                0 => anim *= glam::Mat4::from_rotation_x(stride),        // 左腿
-                1 => anim *= glam::Mat4::from_rotation_x(-stride),       // 右腿
-                3 => anim *= glam::Mat4::from_rotation_x(-stride * 0.9), // 左臂（与同侧腿反向）
-                4 => anim *= glam::Mat4::from_rotation_x(stride * 0.9),  // 右臂
-                6 => anim *= glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -kick)), // 枪后坐
-                2 => anim *= glam::Mat4::from_rotation_x(torso_lean),    // 躯干微俯
+            match kind {
+                1 => anim *= glam::Mat4::from_rotation_x(stride),        // 左大腿
+                2 => anim *= glam::Mat4::from_rotation_x(-stride),       // 右大腿
+                3 => anim *= glam::Mat4::from_rotation_x(-stride * 0.5), // 左小腿（膝弯反向）
+                4 => anim *= glam::Mat4::from_rotation_x(stride * 0.5),  // 右小腿
+                5 => anim *= glam::Mat4::from_rotation_x(-stride * 0.8), // 左上臂（与同侧腿反向）
+                6 => anim *= glam::Mat4::from_rotation_x(stride * 0.8),  // 右上臂
+                7 => anim *= glam::Mat4::from_rotation_x(-stride * 0.35), // 左前臂（肘弯）
+                8 => anim *= glam::Mat4::from_rotation_x(stride * 0.35), // 右前臂
+                9 => anim *= glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -kick)), // 枪后坐
+                10 => anim *= glam::Mat4::from_rotation_x(torso_lean),   // 胸微俯
                 _ => {}
             }
             let model = trans
                 * rot
+                * glam::Mat4::from_translation(glam::Vec3::from(*pivot))
                 * anim
-                * glam::Mat4::from_translation(glam::Vec3::from(*off))
+                * glam::Mat4::from_translation(glam::Vec3::from(*center))
                 * glam::Mat4::from_scale(glam::Vec3::from(*size));
             out.push(InstanceData {
                 model: model.to_cols_array(),
@@ -3881,39 +3898,57 @@ impl Renderer {
         out
     }
 
-    /// 倒地尸体姿态：整体绕 X 轴躺倒（-90° 侧卧）+ 下沉贴地，枪身散落一侧，
+    /// 倒地尸体姿态：14 段人体绕 X 轴躺倒（-90° 侧卧）贴地摊开，枪横置身侧，
     /// tint 按阵营保留（尸体可辨识）。
     fn dead_part_matrices(pos: [f32; 3], yaw: f32, tint: [f32; 4]) -> Vec<InstanceData> {
-        let parts: [([f32; 3], [f32; 3]); 7] = [
-            ([-0.15, 0.12, 0.0], [0.2, 0.85, 0.2]),  // 左腿（躺平：y 降低）
-            ([0.15, 0.12, 0.0], [0.2, 0.85, 0.2]),   // 右腿
-            ([0.0, 0.28, 0.0], [0.55, 0.75, 0.3]),   // 躯干
-            ([-0.38, 0.3, 0.05], [0.16, 0.7, 0.16]), // 左臂
-            ([0.38, 0.3, 0.05], [0.16, 0.7, 0.16]),  // 右臂
-            ([0.0, 0.45, 0.0], [0.32, 0.32, 0.32]),  // 头
-            ([0.0, 0.25, 0.5], [0.15, 0.12, 0.85]),  // 枪（身侧散落）
+        // (立姿局部偏移, 尺寸)：躺倒时偏移 (x, y_stand*0.3, rest_z)，
+        // 经 lie 旋转后世界位置 = (x, rest_z, -y_stand*0.3)：rest_z 保证部件贴地不埋入。
+        let parts: [([f32; 3], [f32; 3]); 14] = [
+            ([-0.105, 0.285, 0.24], [0.14, 0.44, 0.16]),  // 左大腿
+            ([0.105, 0.285, 0.24], [0.14, 0.44, 0.16]),   // 右大腿
+            ([-0.105, 0.153, 0.23], [0.115, 0.42, 0.135]), // 左小腿
+            ([0.105, 0.153, 0.23], [0.115, 0.42, 0.135]), // 右小腿
+            ([-0.105, 0.015, 0.15], [0.10, 0.07, 0.26]),  // 左脚
+            ([0.105, 0.015, 0.15], [0.10, 0.07, 0.26]),   // 右脚
+            ([0.0, 0.294, 0.15], [0.36, 0.26, 0.20]),     // 骨盆
+            ([0.0, 0.372, 0.24], [0.46, 0.44, 0.26]),     // 胸
+            ([0.0, 0.441, 0.07], [0.09, 0.10, 0.09]),     // 颈
+            ([0.0, 0.489, 0.155], [0.24, 0.27, 0.24]),    // 头
+            ([-0.27, 0.42, 0.17], [0.12, 0.30, 0.13]),    // 左上臂
+            ([0.27, 0.42, 0.17], [0.12, 0.30, 0.13]),     // 右上臂
+            ([-0.27, 0.33, 0.16], [0.10, 0.28, 0.11]),    // 左前臂
+            ([0.27, 0.33, 0.16], [0.10, 0.28, 0.11]),     // 右前臂
         ];
         let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
         let rot = glam::Mat4::from_rotation_y(yaw);
         let lie = glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-        parts
-            .iter()
-            .map(|(off, size)| {
-                let model = trans
-                    * rot
-                    * lie
-                    * glam::Mat4::from_translation(glam::Vec3::from(*off))
-                    * glam::Mat4::from_scale(glam::Vec3::from(*size));
-                InstanceData {
-                    model: model.to_cols_array(),
-                    tint,
-                }
-            })
-            .collect()
+        let mut out = Vec::with_capacity(15);
+        for (off, size) in parts.iter() {
+            let model = trans
+                * rot
+                * lie
+                * glam::Mat4::from_translation(glam::Vec3::from(*off))
+                * glam::Mat4::from_scale(glam::Vec3::from(*size));
+            out.push(InstanceData {
+                model: model.to_cols_array(),
+                tint,
+            });
+        }
+        // 枪横置身侧：绕 Y 转 90° 使枪管沿 +X，贴地平放
+        let gun = trans
+            * rot
+            * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.08, 0.62))
+            * glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
+            * glam::Mat4::from_scale(glam::Vec3::new(0.13, 0.10, 0.95));
+        out.push(InstanceData {
+            model: gun.to_cols_array(),
+            tint,
+        });
+        out
     }
 
     /// 设置 NPC 士兵可视化（由 main.rs 传入全部 NPC 的位置/朝向/配色/动画态；
-    /// 7 段/人展开存入 npc_parts，总段数截断到 MAX_NPC_INSTANCES）
+    /// 15 段/人（尸体 15 段）展开存入 npc_parts，总段数截断到 MAX_NPC_INSTANCES）
     pub fn set_npc_visuals(&mut self, visuals: &[NpcVisual]) {
         self.npc_parts.clear();
         for v in visuals {
@@ -8127,7 +8162,7 @@ mod npc_visual_tests {
     fn soldier_parts_count_and_tint() {
         let tint = [0.2, 0.6, 0.9, 1.0];
         let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, tint, 0.0, false, false);
-        assert_eq!(parts.len(), 7);
+        assert_eq!(parts.len(), 15);
         for p in &parts {
             assert_eq!(p.tint, tint);
         }
@@ -8136,14 +8171,15 @@ mod npc_visual_tests {
     #[test]
     fn soldier_torso_height() {
         let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4], 0.0, false, false);
-        // 第 3 段 = 躯干，局部偏移 y=1.15，yaw=0 时平移 y 即 1.15
-        let t = translation(&parts[2]);
+        // 第 8 段 = 胸（枢轴 y=1.24 + 段心 -0.02），yaw=0 时平移 y = 1.22
+        let t = translation(&parts[7]);
         assert!(
-            (t[1] - 1.15).abs() < 1e-3,
-            "躯干 y 应为 1.15，实际 {}",
+            (t[1] - 1.22).abs() < 1e-3,
+            "胸 y 应为 1.22，实际 {}",
             t[1]
         );
-        assert!(t[0].abs() < 1e-3 && t[2].abs() < 1e-3);
+        assert!(t[0].abs() < 1e-3);
+        assert!((t[2] + 0.01).abs() < 1e-3, "胸 z 应为 -0.01，实际 {}", t[2]);
     }
 
     #[test]
@@ -8157,17 +8193,17 @@ mod npc_visual_tests {
             false,
             false,
         );
-        // 第 7 段 = 枪：yaw=0 时局部偏移 (+0, +1.25, +0.45)，
-        // 转 90° 后绕 y 轴旋转应落到 (+0.45, +1.25, ~0)
-        let g0 = translation(&base[6]);
-        let g90 = translation(&turned[6]);
+        // 第 15 段 = 枪：yaw=0 时局部偏移 (+0, +1.14, +0.50)，
+        // 转 90° 后绕 y 轴旋转应落到 (+0.50, +1.14, ~0)
+        let g0 = translation(&base[14]);
+        let g90 = translation(&turned[14]);
         assert!(
-            (g0[2] - 0.45).abs() < 1e-3,
+            (g0[2] - 0.50).abs() < 1e-3,
             "yaw=0 枪应伸向 +Z，z={}",
             g0[2]
         );
         assert!(
-            (g90[0] - 0.45).abs() < 1e-3,
+            (g90[0] - 0.50).abs() < 1e-3,
             "yaw=90° 枪应转到 +X，x={}",
             g90[0]
         );
@@ -8177,10 +8213,20 @@ mod npc_visual_tests {
     #[test]
     fn soldier_pos_translation_applies() {
         let parts = Renderer::soldier_part_matrices([10.0, 2.0, -3.0], 0.0, [1.0; 4], 0.0, false, false);
-        // 躯干：平移 = pos + 局部偏移 (0, 1.15, 0)
-        let t = translation(&parts[2]);
+        // 胸：平移 = pos + (0, 1.22, -0.01)
+        let t = translation(&parts[7]);
         assert!((t[0] - 10.0).abs() < 1e-3, "x={}", t[0]);
-        assert!((t[1] - 3.15).abs() < 1e-3, "y={}", t[1]);
-        assert!((t[2] + 3.0).abs() < 1e-3, "z={}", t[2]);
+        assert!((t[1] - 3.22).abs() < 1e-3, "y={}", t[1]);
+        assert!((t[2] + 3.01).abs() < 1e-3, "z={}", t[2]);
+    }
+
+    /// 尸体 15 段（14 段人体 + 横置枪），tint 保留
+    #[test]
+    fn dead_body_15_parts_with_tint() {
+        let parts = Renderer::dead_part_matrices([1.0, 0.0, 2.0], 0.0, [0.9, 0.1, 0.1, 1.0]);
+        assert_eq!(parts.len(), 15);
+        for p in &parts {
+            assert_eq!(p.tint, [0.9, 0.1, 0.1, 1.0]);
+        }
     }
 }

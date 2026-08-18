@@ -730,6 +730,42 @@ pub const THOMPSON_SHOT: ShotParams = ShotParams {
     duration: 0.17,
 };
 
+/// 狙击/精确射手枪声：低沉爆鸣、长尾（0.32s）、闷厚（cutoff 2200Hz），强调远距重击感。
+pub const SNIPER_SHOT: ShotParams = ShotParams {
+    pitch: 62.0,
+    thump_gain: 0.55,
+    noise_scale: 0.85,
+    cutoff: 2200.0,
+    duration: 0.32,
+};
+
+/// 霰弹枪声：极低音爆鸣（55Hz）、宽厚噪声、稍长尾（0.30s），近距离震撼感。
+pub const SHOTGUN_SHOT: ShotParams = ShotParams {
+    pitch: 55.0,
+    thump_gain: 0.65,
+    noise_scale: 1.0,
+    cutoff: 1700.0,
+    duration: 0.30,
+};
+
+/// 机枪枪声：中低音、中等长尾（0.22s），持续压制节奏。
+pub const LMG_SHOT: ShotParams = ShotParams {
+    pitch: 88.0,
+    thump_gain: 0.40,
+    noise_scale: 0.85,
+    cutoff: 2300.0,
+    duration: 0.22,
+};
+
+/// 手枪枪声：高频清脆 crack、短促（0.09s），干净利落。
+pub const PISTOL_SHOT: ShotParams = ShotParams {
+    pitch: 150.0,
+    thump_gain: 0.0,
+    noise_scale: 0.85,
+    cutoff: 3600.0,
+    duration: 0.09,
+};
+
 /// 合成声部种类：决定发生器与音色参数
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SynthKind {

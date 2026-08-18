@@ -23,7 +23,8 @@ use super::ai::{
 use super::physics::{self, Body, CollisionEvent, CollisionListener, PlayerBody, Vec3 as Pv};
 use super::renderer::terrain_height_at;
 use super::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
-use super::weapons::{Firearm, Grenade, Projectile, ProjectileWeapon, WeaponRack, GRENADE_FUSE_MAX, GRENADE_FUSE_MIN, GRENADE_SPEED};
+use super::weapon_data::{build_firearm, ALL_WEAPONS};
+use super::weapons::{Grenade, Projectile, WeaponRack, GRENADE_FUSE_MAX, GRENADE_FUSE_MIN, GRENADE_SPEED};
 use crate::ui::HudState;
 
 /// 阵营显示名（击杀提示用）
@@ -942,23 +943,10 @@ impl Game {
             wave_started_at: 0.0,
             reinforcement_done: false,
             weapons: WeaponRack::new(
-                vec![
-                    (
-                        "M1 Rifle".to_string(),
-                        Firearm::new(
-                            ProjectileWeapon::new("M1 Rifle", 25.0, 3.0, 200.0, 60.0, 5.0),
-                            30,
-                            120,
-                            2.0,
-                            0.006,
-                            0.003,
-                        ),
-                    ),
-                    (
-                        "Thompson SMG".to_string(),
-                        crate::engine::weapons::thompson_smg_firearm(),
-                    ),
-                ],
+                ALL_WEAPONS
+                    .iter()
+                    .map(|spec| (spec.name_zh.to_string(), build_firearm(spec)))
+                    .collect(),
                 0.6,
             ),
             grenades: 2,
@@ -2017,13 +2005,25 @@ impl Game {
         );
         let hud_s = self.hud.ui_scale();
         render_text(&line1, 10.0 * hud_s, 44.0 * hud_s, Color::YELLOW, 1.3 * hud_s, &mut quads);
+        // 当前武器规格：口径 + 阵营配色（联合体=红 / 同盟=蓝）
+        let active_spec = ALL_WEAPONS.get(self.weapons.active_index());
+        let (wcolor, caliber_txt) = match active_spec {
+            Some(s) if s.faction == crate::engine::weapon_data::Faction::Union => (
+                Color::new(0.95, 0.45, 0.35, 1.0),
+                s.caliber,
+            ),
+            Some(s) => (Color::new(0.35, 0.65, 0.98, 1.0), s.caliber),
+            None => (Color::CYAN, ""),
+        };
         let line2 = format!(
-            "collisions: {}  hits: {}  ammo: {:.0}%",
-            self.total_collisions(),
+            "{} ({})  ammo: {:.0}%  hits: {}  col: {}",
+            self.weapons.active_name(),
+            caliber_txt,
+            self.weapons.active_firearm_ref().ammo_ratio() * 100.0,
             self.hits(),
-            self.weapons.active_firearm_ref().ammo_ratio() * 100.0
+            self.total_collisions()
         );
-        render_text(&line2, 10.0 * hud_s, 62.0 * hud_s, Color::CYAN, 1.3 * hud_s, &mut quads);
+        render_text(&line2, 10.0 * hud_s, 62.0 * hud_s, wcolor, 1.3 * hud_s, &mut quads);
         quads
     }
 
@@ -2074,6 +2074,9 @@ impl Game {
         if self.weapons.is_switching() {
             return false;
         }
+        let active_spec = ALL_WEAPONS
+            .iter()
+            .find(|s| s.name_zh == self.weapons.active_name());
         match self.weapons.active_firearm().try_fire(origin, direction) {
             Some(projectile) => {
                 self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
@@ -2081,12 +2084,33 @@ impl Game {
                 self.pending_kick.0 += kick_pitch;
                 self.pending_kick.1 += kick_yaw;
                 self.projectiles.push(projectile);
+                // 霰弹：每发 8 弹丸，只消耗 1 发弹药；其余弹丸带确定性锥形散布（±2.8°）
+                if let Some(spec) = active_spec {
+                    if spec.pellets > 1 {
+                        let weapon = self.weapons.active_firearm_ref().weapon_ref();
+                        for k in 1..spec.pellets {
+                            let seed = self.shots * 31 + (k as u64) * 7;
+                            let r1 = ((seed * 2_654_435_761) % 10_000) as f32 / 10_000.0;
+                            let r2 = ((seed * 4_052_877 % 10_000) + 1) as f32 / 10_000.0;
+                            let dir = Self::spread_direction(
+                                direction,
+                                (r1 - 0.5) * 0.098,
+                                (r2 - 0.5) * 0.098,
+                            );
+                            self.projectiles.push(weapon.fire(origin, dir));
+                        }
+                    }
+                }
                 self.shots += 1;
-                // 程序化枪声：按武器音色参数（M1 清脆 crack / Thompson 低闷长尾），
+                // 程序化枪声：按武器类别选音色（步枪/冲锋/狙击/机枪/霰弹/手枪），
                 // 带确定性音量抖动（0.95..=1.0）避免机械重复
                 let shot_scale = 0.95 + 0.05 * ((self.shots % 5) as f32 / 4.0);
-                let shot_params = match self.weapons.active_name() {
-                    "Thompson SMG" => crate::audio::THOMPSON_SHOT,
+                let shot_params = match active_spec.map(|s| s.sound) {
+                    Some(crate::engine::weapon_data::SoundKind::Smg) => crate::audio::THOMPSON_SHOT,
+                    Some(crate::engine::weapon_data::SoundKind::Sniper) => crate::audio::SNIPER_SHOT,
+                    Some(crate::engine::weapon_data::SoundKind::Lmg) => crate::audio::LMG_SHOT,
+                    Some(crate::engine::weapon_data::SoundKind::Shotgun) => crate::audio::SHOTGUN_SHOT,
+                    Some(crate::engine::weapon_data::SoundKind::Pistol) => crate::audio::PISTOL_SHOT,
                     _ => crate::audio::M1_SHOT,
                 };
                 self.audio.synth_mut().play_shot_with(
@@ -2163,6 +2187,14 @@ impl Game {
         self.move_backward = backward;
         self.move_left = left;
         self.move_right = right;
+    }
+
+    /// 当前激活武器键名（weapon_data::WeaponSpec::key，第一人称枪模选择用）
+    pub fn active_weapon_key(&self) -> &'static str {
+        ALL_WEAPONS
+            .get(self.weapons.active_index())
+            .map(|s| s.key)
+            .unwrap_or("hk416")
     }
 
     /// 切换武器（数字键 1/2 或滚轮）：切换到指定槽位；切枪计时中忽略重复切换
@@ -2517,13 +2549,14 @@ impl Game {
                 // 保持冒烟"站定瞄准"语义）+ 按武器伤害结算障碍 HP，摧毁后移除碰撞/阻挡
                 if let Some(idx) = self.hit_obstacle_index(&p) {
                     self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
-                    self.damage_obstacle(idx, p.damage);
+                    self.damage_obstacle(idx, p.damage_at_distance());
                 }
                 continue;
             }
-            if let Some(idx) = self.hit_npc_index(&p) {
+            if let Some((idx, hit_h)) = self.hit_npc_index(&p) {
                 hit_count += 1;
-                self.damage_npc(idx, p.damage);
+                let mult = Self::part_multiplier(hit_h, self.npcs[idx].position[1]);
+                self.damage_npc(idx, p.damage_at_distance() * mult);
                 continue;
             }
             alive.push(p);
@@ -2784,7 +2817,9 @@ impl Game {
 
     /// 投射物命中的 NPC 下标（segment-sphere 相交：上一帧位置→当前位置连线与命中球求交，
     /// 命中球中心在 NPC 头顶 +0.8、半径 0.8；高速弹（200m/s 每帧 3.3m）避免隧道效应漏判）
-    fn hit_npc_index(&self, p: &Projectile) -> Option<usize> {
+    /// 命中检测：返回 (NPC 下标, 命中点相对地面的高度)。
+    /// 高度用于部位倍率判定（头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6，见设计文档）。
+    fn hit_npc_index(&self, p: &Projectile) -> Option<(usize, f32)> {
         let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
         let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);
         let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
@@ -2807,10 +2842,65 @@ impl Game {
             let qy = fy + t * dy;
             let qz = fz + t * dz;
             if qx * qx + qy * qy + qz * qz <= r * r {
-                return Some(i);
+                // 命中点世界高度 = 球心(+0.8) + 最近点相对偏移 qy + NPC 地面 y
+                let hit_height = qy + npc.position[1] + 0.8;
+                return Some((i, hit_height));
             }
         }
         None
+    }
+
+    /// 部位伤害倍率（设计文档：头部 ×1.5、胸部 ×1.0、手臂 ×0.8、腿部 ×0.6）。
+    /// 命中高度 1.45 以上为头、0.95~1.45 胸、0.6~0.95 臂、以下为腿（NPC 身高 ~1.78m）。
+    fn part_multiplier(hit_height: f32, npc_ground_y: f32) -> f32 {
+        let h = hit_height - npc_ground_y;
+        if h >= 1.45 {
+            1.5
+        } else if h >= 0.95 {
+            1.0
+        } else if h >= 0.6 {
+            0.8
+        } else {
+            0.6
+        }
+    }
+
+    /// 在瞄准方向上加锥形散布：dx/dy 为相对方向的偏移角（弧度）。
+    /// 以方向为 Z 轴构建正交基（right/up），返回归一化后的散布方向。
+    fn spread_direction(direction: [f32; 3], dx: f32, dy: f32) -> [f32; 3] {
+        let len = (direction[0] * direction[0]
+            + direction[1] * direction[1]
+            + direction[2] * direction[2])
+            .sqrt()
+            .max(1e-6);
+        let d = [direction[0] / len, direction[1] / len, direction[2] / len];
+        // right = normalize(cross(d, up))，up 退化（垂直射）时退回 +X
+        let up = [0.0f32, 1.0, 0.0];
+        let mut rx = d[1] * up[2] - d[2] * up[1];
+        let mut ry = d[2] * up[0] - d[0] * up[2];
+        let mut rz = d[0] * up[1] - d[1] * up[0];
+        let rl = (rx * rx + ry * ry + rz * rz).sqrt();
+        if rl < 1e-6 {
+            rx = 1.0;
+            ry = 0.0;
+            rz = 0.0;
+        } else {
+            rx /= rl;
+            ry /= rl;
+            rz /= rl;
+        }
+        // up2 = cross(right, d)
+        let ux = ry * d[2] - rz * d[1];
+        let uy = rz * d[0] - rx * d[2];
+        let uz = rx * d[1] - ry * d[0];
+        let mut ox = d[0] + rx * dx + ux * dy;
+        let mut oy = d[1] + ry * dx + uy * dy;
+        let mut oz = d[2] + rz * dx + uz * dy;
+        let ol = (ox * ox + oy * oy + oz * oz).sqrt().max(1e-6);
+        ox /= ol;
+        oy /= ol;
+        oz /= ol;
+        [ox, oy, oz]
     }
 
     /// 波次推进：全部 NPC hp≤0 移除（`npcs` 为空）才算清空；清空后 3 秒倒计时刷下一波。
@@ -3598,6 +3688,44 @@ impl Game {
 mod tests {
     use super::*;
 
+    /// 部位伤害倍率阈值（设计文档：头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6）
+    #[test]
+    fn part_multiplier_zones() {
+        assert_eq!(Game::part_multiplier(1.5, 0.0), 1.5);
+        assert_eq!(Game::part_multiplier(1.45, 0.0), 1.5);
+        assert_eq!(Game::part_multiplier(1.44, 0.0), 1.0);
+        assert_eq!(Game::part_multiplier(0.95, 0.0), 1.0);
+        assert_eq!(Game::part_multiplier(0.94, 0.0), 0.8);
+        assert_eq!(Game::part_multiplier(0.6, 0.0), 0.8);
+        assert_eq!(Game::part_multiplier(0.59, 0.0), 0.6);
+        assert_eq!(Game::part_multiplier(0.1, 0.0), 0.6);
+        // 地面高度偏移：NPC 站山坡上时以 NPC 地面为基准
+        assert_eq!(Game::part_multiplier(2.0, 0.5), 1.5);
+    }
+
+    /// 散布方向：单位长度、轴向零散布保持原方向、非零散布仍归一化
+    #[test]
+    fn spread_direction_normalized() {
+        let d = Game::spread_direction([0.0, 0.0, 1.0], 0.0, 0.0);
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        assert!((l - 1.0).abs() < 1e-5);
+        assert!(d[0].abs() < 1e-4 && d[1].abs() < 1e-4 && (d[2] - 1.0).abs() < 1e-4);
+        // 水平射 + 散布：保持朝向 +Z 为主方向
+        let d2 = Game::spread_direction([0.0, 0.0, 1.0], 0.05, 0.05);
+        let l2 = (d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2]).sqrt();
+        assert!((l2 - 1.0).abs() < 1e-5);
+        assert!(d2[2] > 0.99);
+        // 斜向（俯射 45°）不退化
+        let d3 = Game::spread_direction([0.0, -1.0, 1.0], 0.03, -0.02);
+        let l3 = (d3[0] * d3[0] + d3[1] * d3[1] + d3[2] * d3[2]).sqrt();
+        assert!((l3 - 1.0).abs() < 1e-5);
+        // 垂直向上射（right 基退化路径）
+        let d4 = Game::spread_direction([0.0, 1.0, 0.0], 0.04, 0.04);
+        let l4 = (d4[0] * d4[0] + d4[1] * d4[1] + d4[2] * d4[2]).sqrt();
+        assert!((l4 - 1.0).abs() < 1e-5);
+        assert!(d4[1] > 0.99);
+    }
+
     #[test]
     fn ai_tier_classify_boundaries() {
         let p = AiTierParams::default();
@@ -4115,28 +4243,35 @@ mod tests {
         );
     }
 
-    /// 投射物命中 NPC 扣血（一次命中 25 伤害）
+    /// 投射物命中 NPC 扣血：默认武器 AK-12M 近距 28 伤，从高处垂直下射
+    /// 命中帧段底 1.25m（胸部区 ×1.0）→ 28 伤
     #[test]
     fn projectile_damages_npc() {
         let mut game = Game::new();
         let npc_pos = game.npcs[0].position;
         let hp_before = game.npcs[0].hp;
-        assert!(game.fire([npc_pos[0], npc_pos[1] + 2.0, npc_pos[2]], [0.0, -1.0, 0.0]));
-        for _ in 0..3 {
+        assert!(game.fire(
+            [npc_pos[0], npc_pos[1] + 10.0, npc_pos[2]],
+            [0.0, -1.0, 0.0]
+        ));
+        for _ in 0..10 {
             game.update(1.0 / 60.0, &Camera::new());
         }
-        assert_eq!(game.npcs[0].hp, hp_before - 25.0, "one hit should deal weapon damage");
+        assert_eq!(game.npcs[0].hp, hp_before - 28.0, "chest hit should deal 28");
         assert_eq!(game.npcs.len(), 8, "non-lethal hit keeps the npc");
     }
 
-    /// 击杀：hp≤0 移除 NPC 并计分
+    /// 击杀：hp≤0 移除 NPC 并计分（AK-12M 28 伤 > 20 HP）
     #[test]
     fn projectile_kill_scores_and_removes_npc() {
         let mut game = Game::new();
         game.npcs[0].hp = 20.0;
         let npc_pos = game.npcs[0].position;
-        assert!(game.fire([npc_pos[0], npc_pos[1] + 2.0, npc_pos[2]], [0.0, -1.0, 0.0]));
-        for _ in 0..3 {
+        assert!(game.fire(
+            [npc_pos[0], npc_pos[1] + 10.0, npc_pos[2]],
+            [0.0, -1.0, 0.0]
+        ));
+        for _ in 0..10 {
             game.update(1.0 / 60.0, &Camera::new());
         }
         assert_eq!(game.npcs.len(), 7, "killed npc should be removed");

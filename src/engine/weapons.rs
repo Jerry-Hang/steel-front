@@ -12,6 +12,21 @@
 //! 当前仅使用标准库，无第三方依赖；如将来需要新增依赖，在文件头部按
 //! `// DEP: crate = version` 格式声明。
 
+/// 距离衰减查表：tiers 为 (距离上限米, 该档伤害)，按已飞距离返回档位伤害；
+/// 空表返回基础伤害（兼容旧接口）；超出最后一档按最远档 60% 兜底。
+pub fn tiered_damage(base: f32, tiers: &[(f32, f32)], dist: f32) -> f32 {
+    if tiers.is_empty() {
+        return base;
+    }
+    for (limit, dmg) in tiers {
+        if dist <= *limit {
+            return *dmg;
+        }
+    }
+    let last = tiers.last().map(|(_, d)| *d).unwrap_or(base);
+    (last * 0.6).max(1.0)
+}
+
 /// 武器特征：近战与投射物武器的公共接口
 #[allow(dead_code)] // 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire
 pub trait Weapon {
@@ -100,6 +115,8 @@ pub struct ProjectileWeapon {
     projectile_speed: f32,
     /// 投射物最长存活时间（秒），超出即销毁
     projectile_lifetime: f32,
+    /// 距离衰减档位：(距离上限米, 该档胸部伤害)；空表 = 恒伤害（兼容旧接口）
+    damage_tiers: &'static [(f32, f32)],
 }
 
 impl ProjectileWeapon {
@@ -120,6 +137,29 @@ impl ProjectileWeapon {
             range,
             projectile_speed,
             projectile_lifetime,
+            damage_tiers: &[],
+        }
+    }
+
+    /// 创建带距离衰减档位的投射物武器：tiers 为 (距离上限, 该档伤害) 列表，
+    /// 超出最后一档按最远档 60% 兜底（设计文档：超出有效射程快速衰减）。
+    pub fn new_tiered(
+        name: &'static str,
+        damage: f32,
+        fire_rate: f32,
+        range: f32,
+        projectile_speed: f32,
+        projectile_lifetime: f32,
+        damage_tiers: &'static [(f32, f32)],
+    ) -> Self {
+        Self {
+            name,
+            damage,
+            fire_rate,
+            range,
+            projectile_speed,
+            projectile_lifetime,
+            damage_tiers,
         }
     }
 
@@ -137,13 +177,14 @@ impl ProjectileWeapon {
 
     /// 发射一枚投射物：`origin` 为出膛位置，`direction` 为发射方向（自动归一化）
     pub fn fire(&self, origin: [f32; 3], direction: [f32; 3]) -> Projectile {
-        Projectile::new(
+        Projectile::new_tiered(
             origin,
             direction,
             self.projectile_speed,
             self.range,
             self.projectile_lifetime,
             self.damage,
+            self.damage_tiers,
         )
     }
 }
@@ -181,8 +222,10 @@ pub struct Projectile {
     max_lifetime: f32,
     /// 最大射程（米）
     range: f32,
-    /// 命中伤害
+    /// 命中伤害（基础档；距离衰减查表见 damage_at_distance）
     pub damage: f32,
+    /// 距离衰减档位：(距离上限米, 该档伤害)；空表 = 恒伤害
+    damage_tiers: &'static [(f32, f32)],
     /// 是否存活（射程/寿命耗尽后为 false）
     alive: bool,
     /// 上一帧位置（segment 命中检测用；高速弹避免跳过小目标）
@@ -219,8 +262,29 @@ impl Projectile {
             max_lifetime,
             range,
             damage,
+            damage_tiers: &[],
             alive: true,
         }
+    }
+
+    /// 创建带距离衰减档位的投射物（见 ProjectileWeapon::new_tiered）
+    pub fn new_tiered(
+        origin: [f32; 3],
+        direction: [f32; 3],
+        speed: f32,
+        range: f32,
+        max_lifetime: f32,
+        damage: f32,
+        damage_tiers: &'static [(f32, f32)],
+    ) -> Self {
+        let mut p = Self::new(origin, direction, speed, range, max_lifetime, damage);
+        p.damage_tiers = damage_tiers;
+        p
+    }
+
+    /// 按已飞行距离查表得到应结算伤害（含距离衰减；空表返回基础伤害）
+    pub fn damage_at_distance(&self) -> f32 {
+        tiered_damage(self.damage, self.damage_tiers, self.distance_traveled)
     }
 
     /// 是否仍存活（射程/寿命耗尽后返回 false）
@@ -329,6 +393,11 @@ impl Firearm {
         !self.reloading && self.magazine > 0
     }
 
+    /// 底层投射物武器引用（霰弹复刻弹丸、调试用）
+    pub fn weapon_ref(&self) -> &ProjectileWeapon {
+        &self.weapon
+    }
+
     /// 当前弹匣内弹药
     pub fn magazine(&self) -> u32 {
         self.magazine
@@ -423,6 +492,7 @@ impl Firearm {
 ///
 /// 与 M1 Rifle（25 伤 × 3/s 远距精准）差异化：单发 12 伤 × 10/s（DPS 更高、
 /// 压制力强，但单发停火能力弱）；弹匣/备弹/后坐力由 `thompson_smg_firearm` 封装。
+#[allow(dead_code)] // 历史工厂：保留供测试与诊断使用（现行武器走 weapon_data 数据表）
 pub fn thompson_smg() -> ProjectileWeapon {
     ProjectileWeapon::new(
         "Thompson SMG",
@@ -436,6 +506,7 @@ pub fn thompson_smg() -> ProjectileWeapon {
 
 /// 汤姆森冲锋枪弹匣武器：弹匣 30 / 备弹 120，换弹 2.2s，
 /// 后坐力大于 M1（kick_pitch 0.014 / kick_yaw 0.004）以体现中距离散布略大。
+#[allow(dead_code)] // 历史工厂：保留供测试与诊断使用（现行武器走 weapon_data 数据表）
 pub fn thompson_smg_firearm() -> Firearm {
     Firearm::new(
         thompson_smg(),
@@ -489,6 +560,11 @@ impl WeaponRack {
     /// 当前激活武器的不可变引用
     pub fn active_firearm_ref(&self) -> &Firearm {
         &self.weapons[self.active].1
+    }
+
+    /// 当前激活槽索引（供第一人称枪模按槽位取武器规格）
+    pub fn active_index(&self) -> usize {
+        self.active
     }
 
     /// 切换到指定槽位：索引有效且非当前才生效，并启动切换计时

@@ -118,6 +118,10 @@ struct GameApp {
     particles: Vec<Particle>,
     /// 性能日志（每次启动一份，logs/perf_*.log）
     perf_log: Option<perf_log::PerfLog>,
+    /// 命令输入窗口是否打开（Enter 开关，Minecraft 风格左下角输入框）
+    command_open: bool,
+    /// 命令输入缓冲（当前只接受数字，回车切换武器）
+    command_buf: String,
 }
 
 /// 视觉粒子：枪口焰（无重力，快速淡出）+ 弹壳（重力下落，落地消散）
@@ -182,6 +186,8 @@ impl GameApp {
             corpses: Vec::new(),
             particles: Vec::new(),
             perf_log: None,
+            command_open: false,
+            command_buf: String::new(),
         }
     }
 
@@ -404,13 +410,17 @@ impl GameApp {
         }
     }
 
-    /// 第一人称枪模程序化高模（M1 加兰德，2026-08-16 替代积木拼装）：
-    /// 圆角盒 + 锥形枪管 + 圆柱细节的程序化网格，顶点法线烘焙光照（材质色 ×
-    /// (环境光 + 漫反射×NdotL)）→ 立体明暗。**视空间固定**：部件矩阵 = view⁻¹ ×
-    /// T(相机空间锚点) × R(倾斜) × 缩放 × T(部件) × 局部旋转，枪永远锁在屏幕上。
+
+    /// 第一人称枪模程序化高模：按当前武器键名从 guns 库取 35 把枪的网格，
+    /// 变换到视空间固定位置（view⁻¹ × 锚点 × 倾斜 × 缩放 × 俯角 × 翻转 180°：
+    /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
     fn first_person_gun_mesh(&self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
-        use crate::engine::meshgen::{beveled_box, cylinder, frustum, torus_arc};
+        // 当前武器枪模（键名缺失时回退 HK416）
+        let gun = crate::engine::guns::gun_mesh_by_key(self.game.active_weapon_key())
+            .unwrap_or_else(|| {
+                crate::engine::guns::gun_mesh_by_key("hk416").expect("hk416 枪模缺失")
+            });
         let cam = &self.camera;
         let mut anchor = if self.ads_active {
             glam::Vec3::new(0.0, -0.08, -0.78)
@@ -428,102 +438,14 @@ impl GameApp {
         let gun_scale =
             ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * 0.80;
         let view_inv = cam.view_matrix().inverse();
-        let view_anchor = glam::Mat4::from_translation(anchor);
-        let tilt_rot = glam::Mat4::from_rotation_z(tilt);
-        let gun_scale_mat = glam::Mat4::from_scale(glam::Vec3::splat(gun_scale));
-        // P3：全局枪口略下压（绕 X），持枪更自然
-        let level = glam::Mat4::from_rotation_x(-0.045);
-        let part_m = |off: [f32; 3], local: glam::Mat4| {
-            view_inv
-                * view_anchor
-                * tilt_rot
-                * gun_scale_mat
-                * level
-                * glam::Mat4::from_translation(glam::Vec3::from(off))
-                * local
-        };
-        // 材质（与旧积木版一致）：胡桃木 / 深胡桃木 / 磷化钢 / 深色件
-        let walnut = [0.52, 0.34, 0.15];
-        let walnut_dark = [0.38, 0.24, 0.10];
-        let steel = [0.42, 0.46, 0.50];
-        let dark = [0.22, 0.22, 0.24];
-        // 烘焙光照：顶部偏左方向光 + 环境光
-        let light = glam::Vec3::new(-0.4, 0.8, -0.3).normalize();
-        let (ambient, diffuse) = (0.55, 0.5);
-        // 圆柱/锥台默认沿 Y，旋转 -90° 使其沿 -Z（枪口朝前）
-        let rz = glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-        let mut verts = Vec::new();
-        let mut indices = Vec::new();
-        // 枪托（深胡桃木，带肩托斜角）
-        beveled_box(0.055, 0.125, 0.30, 0.035, 3).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, -0.02, 0.30], glam::Mat4::from_rotation_x(-0.12)),
-            walnut_dark, light, ambient, diffuse,
-        );
-        // 机匣（磷化钢圆角盒）
-        beveled_box(0.062, 0.105, 0.26, 0.03, 3).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, 0.0, 0.06], glam::Mat4::IDENTITY),
-            steel, light, ambient, diffuse,
-        );
-        // 机匣顶部漏夹槽（P2：细长深色凹口片，模拟 en-bloc 漏夹槽口）
-        beveled_box(0.034, 0.008, 0.15, 0.002, 2).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, 0.060, 0.04], glam::Mat4::IDENTITY),
-            [0.12, 0.10, 0.08], light, ambient, diffuse,
-        );
-        // 护木（胡桃木圆角盒）
-        beveled_box(0.058, 0.088, 0.32, 0.028, 3).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, 0.0, -0.20], glam::Mat4::IDENTITY),
-            walnut, light, ambient, diffuse,
-        );
-        // 枪管（锥形：后粗前细）
-        frustum(0.0125, 0.0105, 0.44, 14, true).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, 0.0, -0.53], rz),
-            dark, light, ambient, diffuse,
-        );
-        // 枪口制退器（钢圆柱）
-        cylinder(0.020, 0.06, 14).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, 0.0, -0.75], rz),
-            steel, light, ambient, diffuse,
-        );
-        // 弹匣（钢圆角盒，微微前倾）
-        beveled_box(0.052, 0.17, 0.075, 0.02, 2).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, -0.115, 0.00], glam::Mat4::from_rotation_x(0.06)),
-            steel, light, ambient, diffuse,
-        );
-        // 握把（深色锥台，朝后斜）
-        frustum(0.024, 0.032, 0.15, 12, true).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, -0.08, 0.14], rz * glam::Mat4::from_rotation_x(-0.4)),
-            dark, light, ambient, diffuse,
-        );
-        // 扳机护圈（P2：torus 弧段，开口朝上，环轴沿 Z 左右向）
-        torus_arc(0.030, 0.006, std::f32::consts::PI * 4.0 / 3.0, std::f32::consts::PI * 8.0 / 3.0, 16, 8)
-            .append_transformed(
-                &mut verts, &mut indices,
-                part_m([0.0, -0.078, -0.06], glam::Mat4::IDENTITY),
-                steel, light, ambient, diffuse,
-            );
-        // 准星（深色小件）
-        beveled_box(0.0024, 0.0096, 0.0064, 0.0012, 2).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, 0.05, -0.33], glam::Mat4::IDENTITY),
-            dark, light, ambient, diffuse,
-        );
-        // 表尺（钢小件）
-        beveled_box(0.022, 0.032, 0.055, 0.006, 2).append_transformed(
-            &mut verts, &mut indices,
-            part_m([0.0, 0.06, 0.04], glam::Mat4::IDENTITY),
-            steel, light, ambient, diffuse,
-        );
-        (verts, indices)
+        let m = view_inv
+            * glam::Mat4::from_translation(anchor)
+            * glam::Mat4::from_rotation_z(tilt)
+            * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
+            * glam::Mat4::from_rotation_x(-0.045)
+            * glam::Mat4::from_rotation_y(std::f32::consts::PI);
+        gun.transformed(m)
     }
-
     /// ESC 菜单鼠标点击命中检测：命中选项矩形则执行对应动作（0=退出 1=设置）。
     /// 矩形布局必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中，
     /// 选项 y = py+90 / py+146，宽 pw-120=260 居中，高 34）。返回是否命中任何选项。
@@ -713,7 +635,41 @@ impl GameApp {
 
             // HUD：用上一帧渲染统计生成覆盖层 quad 并上传（首帧统计为 0）
             let (near, far, lod) = renderer.last_stats();
-            let quads = self.game.hud_quads(near, far, lod);
+            let mut quads = self.game.hud_quads(near, far, lod);
+            // 命令输入窗口（Minecraft 风格左下角）：深色半透明底 + 提示符 + 闪烁光标
+            if self.command_open && self.game.state() == GameState::Playing {
+                let s = self.game.hud.ui_scale();
+                let prompt = format!("> {}{}", self.command_buf, {
+                    if (self.anim_clock * 2.0).sin() > 0.0 { '_' } else { ' ' }
+                });
+                let box_x = 10.0 * s;
+                let box_y = (800.0 - 46.0) * s;
+                let box_h = 36.0 * s;
+                let text_scale = 2.0 * s;
+                let text_w = crate::ui::text_width(&prompt, text_scale);
+                let box_w = (text_w + 26.0 * s).max(180.0 * s);
+                quads.push(crate::ui::Quad::new(
+                    crate::ui::Rect::new(box_x, box_y, box_w, box_h),
+                    crate::ui::Color::new(0.06, 0.06, 0.12, 0.72),
+                ));
+                crate::ui::render_text(
+                    &prompt,
+                    box_x + 10.0 * s,
+                    box_y + 8.0 * s,
+                    crate::ui::Color::WHITE,
+                    text_scale,
+                    &mut quads,
+                );
+                // 提示行：武器编号范围说明
+                crate::ui::render_text(
+                    "武器编号 1-35（回车切换，Esc 关闭）",
+                    box_x + 2.0 * s,
+                    box_y - 22.0 * s,
+                    crate::ui::Color::YELLOW,
+                    1.3 * s,
+                    &mut quads,
+                );
+            }
             renderer.set_hud_quads(&quads);
             renderer.set_lights(&self.game.light_uniform());
             // 世界障碍 marker：关卡地图障碍盒 → 红色盒实例（复用主 pipeline，见 renderer.rs MARKER_SLOT_BASE）
@@ -1240,6 +1196,49 @@ impl ApplicationHandler for GameApp {
                     return;
                 }
 
+                // 命令输入窗口（Minecraft 风格）：打开时数字/退格/回车/ESC 专属处理，
+                // 其余按键全部吞掉（移动/开火不响应）
+                if self.command_open && self.game.state() == GameState::Playing {
+                    if pressed {
+                        match key_code {
+                            KeyCode::Digit0 => self.command_buf.push('0'),
+                            KeyCode::Digit1 => self.command_buf.push('1'),
+                            KeyCode::Digit2 => self.command_buf.push('2'),
+                            KeyCode::Digit3 => self.command_buf.push('3'),
+                            KeyCode::Digit4 => self.command_buf.push('4'),
+                            KeyCode::Digit5 => self.command_buf.push('5'),
+                            KeyCode::Digit6 => self.command_buf.push('6'),
+                            KeyCode::Digit7 => self.command_buf.push('7'),
+                            KeyCode::Digit8 => self.command_buf.push('8'),
+                            KeyCode::Digit9 => self.command_buf.push('9'),
+                            KeyCode::Backspace => {
+                                self.command_buf.pop();
+                            }
+                            KeyCode::Enter => {
+                                let n: usize = self.command_buf.parse().unwrap_or(0);
+                                self.command_open = false;
+                                self.command_buf.clear();
+                                if n >= 1 {
+                                    log::info!("command: 切换到武器 #{}", n);
+                                    self.game.switch_weapon(n - 1);
+                                } else {
+                                    log::info!("command: 无效输入");
+                                }
+                            }
+                            KeyCode::Escape => {
+                                self.command_open = false;
+                                self.command_buf.clear();
+                            }
+                            _ => {}
+                        }
+                        // 输入长度上限（35 最大两位，留余量）
+                        if self.command_buf.len() > 4 {
+                            self.command_buf.truncate(4);
+                        }
+                    }
+                    return;
+                }
+
                 // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭面板；
                 // 否则切换 ESC 毛玻璃菜单（退出游戏 / 设置两个选项）
                 if pressed && key_code == KeyCode::Escape {
@@ -1327,7 +1326,8 @@ impl ApplicationHandler for GameApp {
                             }
                         }
                         BindingAction::Fire => {
-                            self.fire_requested = pressed && !self.game.settings_open();
+                            self.fire_requested =
+                                pressed && !self.game.settings_open() && !self.command_open;
                         }
                         BindingAction::Jump => {
                             // Space 跳跃（2026-08-15：开火改鼠标左键，Space 让位给跳跃）
@@ -1401,6 +1401,17 @@ impl ApplicationHandler for GameApp {
                                     self.game.begin_rebind();
                                 }
                             }
+                        } else if pressed
+                            && self.game.state() == GameState::Playing
+                            && !self.game.hud.esc_menu_open
+                        {
+                            log::info!("command: 打开命令窗口");
+                            self.command_open = true;
+                            self.command_buf.clear();
+                            // 防卡键：清移动/开镜状态（窗口打开期间不响应移动/开火）
+                            self.key_state.reset();
+                            self.game.set_movement(false, false, false, false);
+                            self.ads_active = false;
                         } else if pressed {
                             let st = self.game.state();
                             if st == GameState::GameOver
@@ -1495,7 +1506,7 @@ impl ApplicationHandler for GameApp {
                             if st == GameState::StartMenu || st == GameState::LoadingMap {
                                 self.game.on_any_key(&self.camera.position());
                             }
-                            if st == GameState::Playing {
+                            if st == GameState::Playing && !self.command_open {
                                 self.fire_requested = true;
                             }
                         }
@@ -1506,6 +1517,7 @@ impl ApplicationHandler for GameApp {
                         if self.camera.mode == CameraMode::FirstPerson
                             && self.game.state() == GameState::Playing
                             && !self.game.settings_open()
+                            && !self.command_open
                         {
                             self.ads_active = pressed;
                         } else {
