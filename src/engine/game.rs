@@ -2258,6 +2258,7 @@ impl Game {
     }
 
     /// 是否处于开火后坐期（fire_cooldown > 0 = 刚开火，枪模后坐动画用）
+    #[allow(dead_code)] // 历史接口：枪模后坐已改为一次性脉冲（main.rs 用 last_shot_at）
     pub fn is_firing(&self) -> bool {
         self.fire_cooldown > 0.0
     }

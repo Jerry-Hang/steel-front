@@ -71,6 +71,8 @@ struct GameApp {
     ads_active: bool,
     /// 开镜混合度 0..1（腰射→开镜 0.2s 指数平滑；驱动枪模锚点插值）
     ads_blend: f32,
+    /// 最近一次开火时刻（anim_clock；枪模后坐用一次性"上抬→回落"脉冲）
+    last_shot_at: f32,
     /// 上一帧光标位置（屏幕坐标）
     last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
@@ -173,6 +175,7 @@ impl GameApp {
             right_dragging: false,
             ads_active: false,
             ads_blend: 0.0,
+            last_shot_at: -1.0,
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             last_cycle_us: 0,
@@ -378,6 +381,7 @@ impl GameApp {
                         .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
                     if ok {
                         fired = 1;
+                        self.last_shot_at = self.anim_clock;
                     }
                 }
             }
@@ -386,6 +390,9 @@ impl GameApp {
                     fired = self
                         .game
                         .fire_burst([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                    if fired > 0 {
+                        self.last_shot_at = self.anim_clock;
+                    }
                 }
             }
             crate::engine::game::FireMode::Auto => {
@@ -395,6 +402,7 @@ impl GameApp {
                         .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
                     if ok {
                         fired = 1;
+                        self.last_shot_at = self.anim_clock;
                     }
                 }
             }
@@ -561,12 +569,18 @@ impl GameApp {
         let ads_pos = glam::Vec3::new(0.0, -0.08, -0.42);
         let b = self.ads_blend;
         let mut anchor = hip_pos.lerp(ads_pos, b);
-        if self.game.is_firing() {
-            let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
-            anchor.y -= 0.07 * k;
-            anchor.z += 0.06 * k;
+        // 开火后坐：一次性"上抬→回落"脉冲（0.3s 二次衰减），非弹簧式连续正弦。
+        // 2026-08-19 修复：旧 48Hz 正弦在连发/狙击时像弹簧一样频繁抖；
+        // 现在每发只在开火瞬间快速上抬，随后按握枪姿势平滑回落（形成一个点）。
+        let since_shot = self.anim_clock - self.last_shot_at;
+        if since_shot >= 0.0 && since_shot < 0.30 {
+            let t = since_shot / 0.30;
+            let pulse = (1.0 - t) * (1.0 - t);
+            anchor.y -= 0.07 * pulse;
+            anchor.z += 0.05 * pulse;
         }
-        let bob = (self.anim_clock * 10.0).sin() * 0.012;
+        // 行走晃动：腰射轻微摆动；开镜时随 blend 衰减归零（握枪稳定，只有极轻微呼吸感）
+        let bob = (self.anim_clock * 10.0).sin() * 0.012 * (1.0 - self.ads_blend * 0.9);
         anchor.x += bob;
         // 旋转全零（模型已水平校正，无需姿态补偿旋转）——保留 0 便于未来微调贴腮角
         let tilt = 0.0;
