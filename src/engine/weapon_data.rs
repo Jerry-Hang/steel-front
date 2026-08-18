@@ -267,6 +267,63 @@ mod tests {
         (max_v, max_i)
     }
 
+    /// 枪模姿态校验：枪身应沿 +Z 水平（枪口朝前），不得竖直建模（Y 向过长）。
+    /// 第一人称渲染依赖该姿态（局部 y-up 枪口 +Z，翻转后水平指向屏幕外）。
+    #[test]
+    fn gun_meshes_horizontal_orientation() {
+        for spec in ALL_WEAPONS.iter() {
+            let gm = crate::engine::guns::gun_mesh_by_key(spec.key)
+                .unwrap_or_else(|| panic!("{} 无枪模", spec.key));
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for v in &gm.verts {
+                for (i, p) in v.pos.iter().enumerate() {
+                    min[i] = min[i].min(*p);
+                    max[i] = max[i].max(*p);
+                }
+            }
+            let (sx, sy, sz) = (max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+            println!(
+                "GUN_ORIENT {}: sz={:.2} sy={:.2} sx={:.2} {}",
+                spec.key,
+                sz,
+                sy,
+                sx,
+                if sz > sy { "OK" } else { "VERTICAL!" }
+            );
+        }
+        // 断言：任何枪不得竖直
+        for spec in ALL_WEAPONS.iter() {
+            let gm = crate::engine::guns::gun_mesh_by_key(spec.key)
+                .unwrap_or_else(|| panic!("{} 无枪模", spec.key));
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for v in &gm.verts {
+                for (i, p) in v.pos.iter().enumerate() {
+                    min[i] = min[i].min(*p);
+                    max[i] = max[i].max(*p);
+                }
+            }
+            let (sx, sy, sz) = (max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+            // 姿态：长轴沿 Z（允许短武器 ±15%）；尺寸上限防"单位球未缩放"类 bug
+            assert!(
+                sz > sy * 0.85,
+                "{} 姿态异常：枪身沿 Y 竖直（sz={:.2} sy={:.2}）",
+                spec.key,
+                sz,
+                sy
+            );
+            assert!(
+                sx < 1.5 && sy < 1.5 && sz < 2.5,
+                "{} 尺寸异常（疑似未缩放图元）：sx={:.2} sy={:.2} sz={:.2}",
+                spec.key,
+                sx,
+                sy,
+                sz
+            );
+        }
+    }
+
     /// 打印并校验最大网格规模（枪模缓冲预分配容量依据）
     #[test]
     fn gun_mesh_max_sizes_report() {

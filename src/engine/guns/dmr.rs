@@ -41,7 +41,7 @@ pub fn svd12() -> crate::engine::guns::GunMesh {
         // 14 拉机柄杆
         (t(0.0485, 0.120, -0.15) * _ztox(), cylinder(0.008, 0.06, 16), bright),
         // 15 拉机柄球
-        (t(0.079, 0.120, -0.15), sphere(10, 6), deep),
+        (t(0.079, 0.120, -0.15) * Mat4::from_scale(glam::vec3(0.02, 0.02, 0.02)), sphere(10, 6), deep),
         // 16 10发弹匣（略前倾）
         (t(0.0, -0.02, 0.02) * rx(-0.22), beveled_box(0.042, 0.16, 0.10, 0.010, 3), black),
         // 17 握把
@@ -153,7 +153,7 @@ pub fn mk14p() -> crate::engine::guns::GunMesh {
         // 12 拉机柄杆
         (t(0.066, 0.145, -0.02) * _ztox(), cylinder(0.008, 0.06, 16), bright),
         // 13 拉机柄头
-        (t(0.099, 0.145, -0.02), sphere(10, 6), dark),
+        (t(0.099, 0.145, -0.02) * Mat4::from_scale(glam::vec3(0.02, 0.02, 0.02)), sphere(10, 6), dark),
         // 14 20发直弹匣
         (t(0.0, -0.035, 0.04) * rx(0.06), beveled_box(0.052, 0.21, 0.09, 0.010, 3), dark),
         // 15 握把（木）

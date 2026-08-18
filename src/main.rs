@@ -531,14 +531,16 @@ impl GameApp {
             }
         };
         let cam = &self.camera;
-        // ADS 锚点规范（2026-08-18 重写）：
-        // 腰射 = 枪在屏幕右下 (0.30, -0.25, -0.60)，十字准星可见；
-        // 开镜 = 枪平滑移到屏幕正中央 (0, 0.02, -0.60)，机瞄/瞄具对准屏幕中心，
-        //       准星隐藏（用机瞄三点一线），FOV 轻微收窄（55°）。
-        // 两种状态用 ads_blend 指数插值（0.2s），无跳变。
-        let hip_anchor = glam::Vec3::new(0.30, -0.25, -0.60);
-        let ads_anchor = glam::Vec3::new(0.0, 0.02, -0.60);
-        let mut anchor = hip_anchor.lerp(ads_anchor, self.ads_blend);
+        // ADS 双姿态常量（2026-08-18 规范重写：位置 + 旋转 + FOV 全部量化）
+        // 腰射：枪在右下，向左偏转 5°（自然持枪角），FOV 70°，十字准星可见；
+        // 开镜：枪居中贴腮、旋转归零、机瞄对准屏幕中心，FOV 55°，准星隐藏。
+        // 两姿态按 ads_blend（0.2s 指数插值）平滑过渡，无跳变。
+        let hip_pos = glam::Vec3::new(0.25, -0.20, -0.50);
+        let ads_pos = glam::Vec3::new(0.0, -0.05, -0.35);
+        let b = self.ads_blend;
+        let mut anchor = hip_pos.lerp(ads_pos, b);
+        // 偏航：腰射 -5°（绕 Y 向左偏），开镜归零——插值随 blend
+        let hip_yaw = -5.0_f32.to_radians() * (1.0 - b);
         if self.game.is_firing() {
             let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
             anchor.y -= 0.07 * k;
@@ -555,6 +557,7 @@ impl GameApp {
         let m = view_inv
             * glam::Mat4::from_translation(anchor)
             * glam::Mat4::from_rotation_z(tilt)
+            * glam::Mat4::from_rotation_y(hip_yaw)
             * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
             * glam::Mat4::from_rotation_x(-0.045)
             * glam::Mat4::from_rotation_y(std::f32::consts::PI);
