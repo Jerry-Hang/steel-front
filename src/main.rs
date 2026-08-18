@@ -79,8 +79,10 @@ struct GameApp {
     last_update_us: u64,
     /// 上一帧 render（渲染提交）耗时（微秒，性能日志用）
     last_render_us: u64,
-    /// 是否请求开火（Space 按下置位，update 消费）
+    /// 是否请求开火（按住状态，Auto 模式持续开火；抬起复位）
     fire_requested: bool,
+    /// 开火按下瞬间（edge 触发：Semi/Burst3 模式用；update 消费后复位）
+    fire_edge: bool,
     /// 光标是否已捕获（Playing 下鼠标视角）
     cursor_captured: bool,
     /// 捕获模式是否为系统级 Locked（raw 相对增量驱动视角）；
@@ -122,6 +124,8 @@ struct GameApp {
     command_open: bool,
     /// 命令输入缓冲（当前只接受数字，回车切换武器）
     command_buf: String,
+    /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
+    gun_mesh_cache: Option<(String, crate::engine::guns::GunMesh)>,
 }
 
 /// 视觉粒子：枪口焰（无重力，快速淡出）+ 弹壳（重力下落，落地消散）
@@ -170,6 +174,7 @@ impl GameApp {
             last_update_us: 0,
             last_render_us: 0,
             fire_requested: false,
+            fire_edge: false,
             cursor_captured: false,
             cursor_locked: false,
             abs_baseline_valid: false,
@@ -188,6 +193,7 @@ impl GameApp {
             perf_log: None,
             command_open: false,
             command_buf: String::new(),
+            gun_mesh_cache: None,
         }
     }
 
@@ -291,13 +297,43 @@ impl GameApp {
             self.camera.set_mouse_sens(self.game.sensitivity_rads());
         }
 
-        // 开火：从相机位置沿视线发射投射物
-        if self.fire_requested {
-            let pos = self.camera.position();
-            let dir = self.camera.forward();
-            self.game
-                .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
-            // 枪口焰 + 弹壳粒子（枪口 = 眼位下方 0.25m 前 0.5m）
+        // 开火：按开火模式分发（Semi=edge 单发 / Burst3=edge 三连发 / Auto=按住连发）。
+        // 按住状态 fire_requested 保持 true，由武器 fire_cooldown 控制射速。
+        let pos = self.camera.position();
+        let dir = self.camera.forward();
+        let mut fired = 0u32;
+        match self.game.fire_mode() {
+            crate::engine::game::FireMode::Semi => {
+                if self.fire_edge {
+                    let ok = self
+                        .game
+                        .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                    if ok {
+                        fired = 1;
+                    }
+                }
+            }
+            crate::engine::game::FireMode::Burst3 => {
+                if self.fire_edge {
+                    fired = self
+                        .game
+                        .fire_burst([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                }
+            }
+            crate::engine::game::FireMode::Auto => {
+                if self.fire_requested {
+                    let ok = self
+                        .game
+                        .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                    if ok {
+                        fired = 1;
+                    }
+                }
+            }
+        }
+        self.fire_edge = false;
+        // 枪口焰 + 弹壳粒子（每实际发射一发生成一组）
+        for _ in 0..fired {
             let muzzle = [
                 pos.x + dir.x * 0.5,
                 pos.y - 0.25,
@@ -321,7 +357,6 @@ impl GameApp {
                 tint: [0.72, 0.55, 0.18, 1.0], // 黄铜弹壳
                 kind: 1,
             });
-            self.fire_requested = false;
         }
 
         // 武器后坐力：取走本帧开火累计的 kick 施加到相机（指数衰减由 camera.update 处理）
@@ -415,12 +450,39 @@ impl GameApp {
     /// 变换到视空间固定位置（view⁻¹ × 锚点 × 倾斜 × 缩放 × 俯角 × 翻转 180°：
     /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
-    fn first_person_gun_mesh(&self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
-        // 当前武器枪模（键名缺失时回退 HK416）
-        let gun = crate::engine::guns::gun_mesh_by_key(self.game.active_weapon_key())
-            .unwrap_or_else(|| {
-                crate::engine::guns::gun_mesh_by_key("hk416").expect("hk416 枪模缺失")
-            });
+    fn first_person_gun_mesh(&mut self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
+        // 当前武器枪模：按键名取模（构建含光照烘焙，缓存避免每帧重建）。
+        // 优雅回退：无网格 / 构建 panic → 记录日志并回退默认 HK416。
+        let key = self.game.active_weapon_key();
+        let gun = match &self.gun_mesh_cache {
+            Some((k, gm)) if k == key => gm.clone(),
+            _ => {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::engine::guns::gun_mesh_by_key(key)
+                }))
+                .unwrap_or(None);
+                let gm = match built {
+                    Some(gm) => gm,
+                    None => {
+                        log::warn!(
+                            "weapons: 枪模回退——键 '{}' 无可用网格，使用默认 HK416",
+                            key
+                        );
+                        crate::engine::guns::gun_mesh_by_key("hk416").unwrap_or_else(|| {
+                            log::error!("weapons: 默认枪模也缺失，使用空网格（枪模不可见）");
+                            crate::engine::guns::GunMesh {
+                                verts: Vec::new(),
+                                indices: Vec::new(),
+                                display_name: "EMPTY",
+                                length: 0.0,
+                            }
+                        })
+                    }
+                };
+                self.gun_mesh_cache = Some((key.to_string(), gm.clone()));
+                gm
+            }
+        };
         let cam = &self.camera;
         let mut anchor = if self.ads_active {
             glam::Vec3::new(0.0, -0.08, -0.78)
@@ -436,7 +498,7 @@ impl GameApp {
         anchor.x += bob;
         let tilt = if self.ads_active { 0.0 } else { 0.02 };
         let gun_scale =
-            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * 0.80;
+            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * 0.98;
         let view_inv = cam.view_matrix().inverse();
         let m = view_inv
             * glam::Mat4::from_translation(anchor)
@@ -1215,14 +1277,29 @@ impl ApplicationHandler for GameApp {
                                 self.command_buf.pop();
                             }
                             KeyCode::Enter => {
-                                let n: usize = self.command_buf.parse().unwrap_or(0);
+                                let raw = self.command_buf.clone();
+                                let n: usize = match raw.parse() {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        // 优雅回退：非数字输入 → 记录原因并忽略
+                                        log::warn!(
+                                            "command: 输入回退——'{}' 无法解析为数字（{}），忽略",
+                                            raw,
+                                            e
+                                        );
+                                        self.command_open = false;
+                                        self.command_buf.clear();
+                                        return;
+                                    }
+                                };
                                 self.command_open = false;
                                 self.command_buf.clear();
                                 if n >= 1 {
+                                    // 越界由 game.switch_weapon 内回退并记录日志
                                     log::info!("command: 切换到武器 #{}", n);
                                     self.game.switch_weapon(n - 1);
                                 } else {
-                                    log::info!("command: 无效输入");
+                                    log::warn!("command: 输入回退——编号 0 无效，忽略");
                                 }
                             }
                             KeyCode::Escape => {
@@ -1326,8 +1403,16 @@ impl ApplicationHandler for GameApp {
                             }
                         }
                         BindingAction::Fire => {
-                            self.fire_requested =
-                                pressed && !self.game.settings_open() && !self.command_open;
+                            if pressed
+                                && !self.game.settings_open()
+                                && !self.command_open
+                                && self.game.state() == GameState::Playing
+                            {
+                                self.fire_requested = true;
+                                self.fire_edge = true;
+                            } else if !pressed {
+                                self.fire_requested = false;
+                            }
                         }
                         BindingAction::Jump => {
                             // Space 跳跃（2026-08-15：开火改鼠标左键，Space 让位给跳跃）
@@ -1369,6 +1454,19 @@ impl ApplicationHandler for GameApp {
                     KeyCode::Digit2 => {
                         if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
                             self.game.switch_weapon(1);
+                        }
+                    }
+                    // B：切换开火模式（单发 / 三连发 / 连发）
+                    KeyCode::KeyB => {
+                        if pressed
+                            && self.game.state() == GameState::Playing
+                            && !self.game.settings_open()
+                        {
+                            self.game.cycle_fire_mode();
+                            log::info!(
+                                "command: 开火模式 -> {}",
+                                self.game.fire_mode().label()
+                            );
                         }
                     }
                     // G：投掷手榴弹（抛物线 + 引信 1.5-2.5s + 爆炸复用）
@@ -1510,7 +1608,11 @@ impl ApplicationHandler for GameApp {
                             }
                             if st == GameState::Playing && !self.command_open {
                                 self.fire_requested = true;
+                                self.fire_edge = true;
                             }
+                        } else if !pressed {
+                            // 松开左键：停止连发
+                            self.fire_requested = false;
                         }
                         self.dragging = pressed && !self.game.settings_open();
                     }

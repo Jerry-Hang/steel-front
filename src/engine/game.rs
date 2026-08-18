@@ -145,6 +145,37 @@ struct NetworkDemo {
 }
 
 /// 游戏主状态机（开始菜单 → 游戏中 → 死亡/胜利/失败结算）
+/// 开火模式（B 键循环切换）：单发 / 三连发 / 连发
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FireMode {
+    /// 单发：每次按下只打 1 发（狙击/精确射手默认手感）
+    Semi,
+    /// 三连发：每次按下快速连打 3 发
+    Burst3,
+    /// 连发：按住持续以武器射速开火
+    Auto,
+}
+
+impl FireMode {
+    /// 下一个模式（B 键循环）
+    pub fn next(self) -> FireMode {
+        match self {
+            FireMode::Semi => FireMode::Burst3,
+            FireMode::Burst3 => FireMode::Auto,
+            FireMode::Auto => FireMode::Semi,
+        }
+    }
+
+    /// 中文显示名（HUD）
+    pub fn label(self) -> &'static str {
+        match self {
+            FireMode::Semi => "单发",
+            FireMode::Burst3 => "三连发",
+            FireMode::Auto => "连发",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameState {
     /// 开始菜单：任意键开始
@@ -732,6 +763,10 @@ pub struct Game {
     shake_strength: f32,
     /// 开火冷却剩余时间（秒）
     fire_cooldown: f32,
+    /// 开火模式（B 键循环切换）
+    fire_mode: FireMode,
+    /// 连发热量 0..1：连续射击累积，压制枪口上扬；停火后衰减
+    auto_heat: f32,
     /// 发射次数（累计）
     shots: u64,
     /// 命中次数（累计，供 UI/日志）
@@ -967,6 +1002,8 @@ impl Game {
             shake_timer: 0.0,
             shake_strength: 0.0,
             fire_cooldown: 0.0,
+            fire_mode: FireMode::Auto,
+            auto_heat: 0.0,
             shots: 0,
             hits: 0,
             grid: GridMap::new(GRID_SIZE, GRID_SIZE),
@@ -1184,6 +1221,8 @@ impl Game {
         self.wave_timer = 0.0;
         self.fire_cooldown = 0.0;
         self.weapons.reset_all_ammo();
+        self.fire_mode = FireMode::Auto;
+        self.auto_heat = 0.0;
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
@@ -1429,6 +1468,8 @@ impl Game {
         self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
         // 武器架切换计时/换弹计时 + HUD 武器/弹药/换弹状态同步
         self.weapons.update(dt);
+        // 连发热量衰减（停火后枪口上扬恢复）
+        self.auto_heat = (self.auto_heat - dt * 0.9).max(0.0);
         self.hud.ammo = self.weapons.active_firearm_ref().magazine();
         self.hud.max_ammo = self.weapons.active_firearm_ref().max_magazine();
         self.hud.reserve = self.weapons.active_firearm_ref().reserve();
@@ -2016,9 +2057,10 @@ impl Game {
             None => (Color::CYAN, ""),
         };
         let line2 = format!(
-            "{} ({})  ammo: {:.0}%  hits: {}  col: {}",
+            "{} ({}) [{}]  ammo: {:.0}%  hits: {}  col: {}",
             self.weapons.active_name(),
             caliber_txt,
+            self.fire_mode.label(),
             self.weapons.active_firearm_ref().ammo_ratio() * 100.0,
             self.hits(),
             self.total_collisions()
@@ -2066,23 +2108,22 @@ impl Game {
     }
 
     /// 尝试开火（受射速冷却限制）。`origin`/`direction` 来自相机；返回是否真的开火。
-    pub fn fire(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
-        if self.fire_cooldown > 0.0 {
-            return false;
-        }
-        // 切枪计时中禁止开火（纯计时器，无动画）
-        if self.weapons.is_switching() {
-            return false;
-        }
+    /// 内部单发：不做冷却检查，直接扣弹发射并结算后坐（含连发热量压制）/音效/日志。
+    /// 返回是否发射成功。冷却与连发节奏由 fire / fire_burst 控制。
+    fn fire_shot(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
         let active_spec = ALL_WEAPONS
             .iter()
             .find(|s| s.name_zh == self.weapons.active_name());
         match self.weapons.active_firearm().try_fire(origin, direction) {
             Some(projectile) => {
-                self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
+                // 连发热量：连续射击累积（0..1），压制后续枪口上扬——前几发上扬大，
+                // 连发后期上扬趋于稳定（模拟控枪）；停火后 update 中按速率衰减
+                let heat = self.auto_heat;
+                self.auto_heat = (self.auto_heat + 0.22).min(1.0);
+                let recoil_comp = 1.0 - heat * 0.55;
                 let (kick_pitch, kick_yaw) = self.weapons.active_firearm_ref().current_kick();
-                self.pending_kick.0 += kick_pitch;
-                self.pending_kick.1 += kick_yaw;
+                self.pending_kick.0 += kick_pitch * recoil_comp;
+                self.pending_kick.1 += kick_yaw * recoil_comp;
                 self.projectiles.push(projectile);
                 // 霰弹：每发 8 弹丸，只消耗 1 发弹药；其余弹丸带确定性锥形散布（±2.8°）
                 if let Some(spec) = active_spec {
@@ -2146,6 +2187,53 @@ impl Game {
         }
     }
 
+    /// 单发开火（受冷却与切枪计时约束）；返回是否发射
+    pub fn fire(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
+        if self.fire_cooldown > 0.0 {
+            return false;
+        }
+        // 切枪计时中禁止开火（纯计时器，无动画）
+        if self.weapons.is_switching() {
+            return false;
+        }
+        let ok = self.fire_shot(origin, direction);
+        if ok {
+            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
+        }
+        ok
+    }
+
+    /// 三连发（Burst3 模式）：无视冷却快速连打 3 发，之后强制冷却 3×间隔；
+    /// 返回实际发射数（弹匣打空即停）。切枪计时中返回 0。
+    pub fn fire_burst(&mut self, origin: [f32; 3], direction: [f32; 3]) -> u32 {
+        if self.weapons.is_switching() {
+            return 0;
+        }
+        let mut n = 0u32;
+        for _ in 0..3 {
+            if self.fire_shot(origin, direction) {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        if n > 0 {
+            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * 3.0;
+        }
+        n
+    }
+
+    /// 循环切换开火模式（B 键）：单发 → 三连发 → 连发
+    pub fn cycle_fire_mode(&mut self) {
+        self.fire_mode = self.fire_mode.next();
+        log::info!("weapons: 开火模式切换为 {}", self.fire_mode.label());
+    }
+
+    /// 当前开火模式
+    pub fn fire_mode(&self) -> FireMode {
+        self.fire_mode
+    }
+
     /// 累计命中数（供 UI / 日志）
     pub fn hits(&self) -> u64 {
         self.hits
@@ -2197,13 +2285,28 @@ impl Game {
             .unwrap_or("hk416")
     }
 
-    /// 切换武器（数字键 1/2 或滚轮）：切换到指定槽位；切枪计时中忽略重复切换
+    /// 切换武器（数字键/命令窗口/滚轮）：切换到指定槽位；切枪计时中忽略重复切换。
+    /// 越界输入优雅回退：记录日志并忽略，不 panic。
     pub fn switch_weapon(&mut self, index: usize) {
         // 槽位越界防御（WeaponRack::len 暴露武器数量）
         if index >= self.weapons.len() {
+            log::warn!(
+                "weapons: 切枪回退——槽位 {} 越界（共 {} 槽），忽略本次切换",
+                index,
+                self.weapons.len()
+            );
             return;
         }
+        let prev = self.weapons.active_index();
         self.weapons.switch_to(index);
+        if self.weapons.active_index() != prev {
+            log::info!(
+                "weapons: 切枪 {} -> {} ({})",
+                prev,
+                index,
+                self.weapons.active_name()
+            );
+        }
     }
 
     /// 循环切换武器（滚轮向上 = 下一把，向下 = 上一把）
@@ -4336,6 +4439,37 @@ mod tests {
             90,
             "死亡后备弹应恢复初始 90（AK-12M）"
         );
+    }
+
+    /// 切枪稳定性：任意槽位切换后长时间运行不 panic、武器状态一致
+    #[test]
+    fn weapon_switch_stability_all_slots() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let cam = Camera::new();
+        for slot in 0..ALL_WEAPONS.len() {
+            game.switch_weapon(slot);
+            for _ in 0..20 {
+                game.update(1.0 / 60.0, &cam);
+            }
+            assert_eq!(
+                game.weapons.active_index(),
+                slot,
+                "槽位 {} 切换未生效",
+                slot
+            );
+            assert!(
+                !game.weapons.active_name().is_empty(),
+                "槽位 {} 武器名为空",
+                slot
+            );
+        }
+        // 越界切换：优雅忽略，不 panic，当前武器不变
+        let current = game.weapons.active_index();
+        game.switch_weapon(9999);
+        assert_eq!(game.weapons.active_index(), current, "越界切换不应生效");
+        game.switch_weapon(usize::MAX);
+        assert_eq!(game.weapons.active_index(), current, "usize::MAX 切换不应生效");
     }
 
     /// GameOver 冻结：投射物继续飞行但不产生新击杀、不计分

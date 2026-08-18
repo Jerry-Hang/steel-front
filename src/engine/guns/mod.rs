@@ -43,8 +43,10 @@ pub struct GunMesh {
 
 /// 装配助手：把多个局部部件 Mesh 按矩阵合并进 GunMesh，统一烘焙光照。
 pub fn assemble(parts: &[(Mat4, Mesh, [f32; 3])]) -> (Vec<GVertex>, Vec<u32>) {
-    let light = glam::Vec3::new(-0.4, 0.8, -0.3).normalize();
-    let (ambient, diffuse) = (0.55f32, 0.5f32);
+    // 立体感光照：低环境光 + 高漫反射 → 明暗对比强烈，部件轮廓分明
+    // （2026-08-18 立体感优化：ambient 0.55→0.32，diffuse 0.5→0.78）
+    let light = glam::Vec3::new(-0.45, 0.8, -0.3).normalize();
+    let (ambient, diffuse) = (0.32f32, 0.78f32);
     let mut verts: Vec<GVertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     for (m, mesh, tint) in parts {

@@ -439,15 +439,23 @@ const MAX_MARKER_INSTANCES: u32 = 64;
 /// slot 65536 是地形 identity（shader 硬编码 TERRAIN_INSTANCE_INDEX=65536 读取，
 /// cull_and_upload 只写 0..visible-1，永不触碰），marker 从 65537 起，互不干扰。
 const MARKER_SLOT_BASE: u32 = INSTANCE_COUNT + 1;
-/// NPC 士兵可视化段数上限（人形 15 段/人，当前 8 NPC 仅用 120 段，余量充足；同时决定实例 buffer 的额外容量）
+/// NPC 士兵可视化段数上限（每几何区；人形 15 段/人 × 8 NPC = 120 段，余量充足；
+/// 同时决定实例 buffer 的额外容量。三几何区：盒（躯干/脚/枪）、圆柱（四肢）、球（头））
 const MAX_NPC_INSTANCES: u32 = 1024;
-/// NPC 段在实例 buffer 中的起始 slot：紧接 marker 区之后（见 MARKER_SLOT_BASE）
+/// NPC 盒体段区起始 slot：紧接 marker 区之后（见 MARKER_SLOT_BASE）
 const NPC_SLOT_BASE: u32 = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES;
+/// NPC 圆柱段区（四肢）起始 slot
+const NPC_CYL_SLOT_BASE: u32 = NPC_SLOT_BASE + MAX_NPC_INSTANCES;
+/// NPC 球体段区（头）起始 slot
+const NPC_SPH_SLOT_BASE: u32 = NPC_CYL_SLOT_BASE + MAX_NPC_INSTANCES;
 /// 自发光实体上限（爆炸闪光等瞬时特效，并发数远小于此）
 const MAX_EMISSIVE_INSTANCES: u32 = 64;
-/// 自发光实体在实例 buffer 中的起始 slot：紧接 NPC 区之后（见 NPC_SLOT_BASE）。
-/// 必须与 build.rs 的 EMISSIVE_INSTANCE_BASE（NPC_INSTANCE_BASE + 1024）同步。
-const EMISSIVE_SLOT_BASE: u32 = NPC_SLOT_BASE + MAX_NPC_INSTANCES;
+/// 自发光实体在实例 buffer 中的起始 slot：紧接 NPC 区之后（见 NPC_SPH_SLOT_BASE）。
+/// 必须与 build.rs 的 EMISSIVE_INSTANCE_BASE（NPC_INSTANCE_BASE + 3072）同步。
+const EMISSIVE_SLOT_BASE: u32 = NPC_SPH_SLOT_BASE + MAX_NPC_INSTANCES;
+/// 枪模专用 identity 槽（走 flat=1 纯色路径，与 build.rs 顶点 shader 同步）
+const GUN_INSTANCE_INDEX: u32 =
+    INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES * 3 + MAX_EMISSIVE_INSTANCES;
 
 /// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
 #[repr(C)]
@@ -629,6 +637,12 @@ pub struct Renderer {
     sphere_index_buffer: vk::Buffer,
     sphere_index_buffer_memory: vk::DeviceMemory,
     sphere_index_count: u32,
+    /// NPC 人体圆柱几何（四肢用；CPU 生成 24 段含上下盖，见 create_cylinder_geometry）
+    cylinder_vertex_buffer: vk::Buffer,
+    cylinder_vertex_buffer_memory: vk::DeviceMemory,
+    cylinder_index_buffer: vk::Buffer,
+    cylinder_index_buffer_memory: vk::DeviceMemory,
+    cylinder_index_count: u32,
     /// 地形 LOD 网格（索引 0/1/2 = 高/中/低密度；顶点缓冲 HOST_VISIBLE 供 morph 每帧更新）
     terrain_lods: Vec<TerrainLodMesh>,
     /// 每帧一份 instance buffer（双缓冲，避免 CPU 写与上一帧 GPU 读竞态）
@@ -656,11 +670,17 @@ pub struct Renderer {
     /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
     last_marker_near: u32,
     last_marker_far: u32,
-    /// NPC 士兵段实例（由 set_npc_visuals 构建，见 NPC_SLOT_BASE）
-    npc_parts: Vec<InstanceData>,
+    /// NPC 士兵段实例（由 set_npc_visuals 构建，三几何分区：盒/圆柱/球）
+    npc_box_parts: Vec<InstanceData>,
+    npc_cyl_parts: Vec<InstanceData>,
+    npc_sph_parts: Vec<InstanceData>,
     /// 本帧 NPC 近/远档段计数（record_command_buffer 读取，render 时更新）
-    last_npc_near: u32,
-    last_npc_far: u32,
+    last_npc_box_near: u32,
+    last_npc_box_far: u32,
+    last_npc_cyl_near: u32,
+    last_npc_cyl_far: u32,
+    last_npc_sph_near: u32,
+    last_npc_sph_far: u32,
     /// 自发光实体实例（爆炸闪光等，由 set_emissive_markers 构建，见 EMISSIVE_SLOT_BASE）
     emissive_markers: Vec<InstanceData>,
     /// 本帧自发光近/远档计数（record_command_buffer 读取，render 时更新）
@@ -740,6 +760,7 @@ pub struct Renderer {
     gun_vertex_count: u32,
     gun_index_count: u32,
     gun_buffer_capacity_verts: u32,
+    gun_buffer_capacity_idx: u32,
     /// 上一帧渲染统计（供 HUD / 日志）
     last_near_count: u32,
     last_far_count: u32,
@@ -1106,6 +1127,11 @@ impl Renderer {
             sphere_index_buffer: vk::Buffer::null(),
             sphere_index_buffer_memory: vk::DeviceMemory::null(),
             sphere_index_count: 0,
+            cylinder_vertex_buffer: vk::Buffer::null(),
+            cylinder_vertex_buffer_memory: vk::DeviceMemory::null(),
+            cylinder_index_buffer: vk::Buffer::null(),
+            cylinder_index_buffer_memory: vk::DeviceMemory::null(),
+            cylinder_index_count: 0,
             terrain_lods: Vec::new(),
             instance_buffers: Vec::new(),
             instance_buffers_memory: Vec::new(),
@@ -1121,9 +1147,15 @@ impl Renderer {
             markers: Vec::new(),
             last_marker_near: 0,
             last_marker_far: 0,
-            npc_parts: Vec::new(),
-            last_npc_near: 0,
-            last_npc_far: 0,
+            npc_box_parts: Vec::new(),
+        npc_cyl_parts: Vec::new(),
+        npc_sph_parts: Vec::new(),
+            last_npc_box_near: 0,
+            last_npc_box_far: 0,
+            last_npc_cyl_near: 0,
+            last_npc_cyl_far: 0,
+            last_npc_sph_near: 0,
+            last_npc_sph_far: 0,
             emissive_markers: Vec::new(),
             last_emissive_near: 0,
             last_emissive_far: 0,
@@ -1189,6 +1221,7 @@ impl Renderer {
             gun_vertex_count: 0,
             gun_index_count: 0,
             gun_buffer_capacity_verts: 0,
+            gun_buffer_capacity_idx: 0,
             last_near_count: 0,
             last_far_count: 0,
             last_terrain_lod_name: "high",
@@ -1785,7 +1818,7 @@ impl Renderer {
                         * (INSTANCE_COUNT as u64
                             + 1
                             + MAX_MARKER_INSTANCES as u64
-                            + MAX_NPC_INSTANCES as u64
+                            + MAX_NPC_INSTANCES as u64 * 3
                             + MAX_EMISSIVE_INSTANCES as u64
                             + 1),
                 );
@@ -1990,6 +2023,7 @@ impl Renderer {
         self.create_far_geometry()?;
         self.create_ground_geometry()?;
         self.create_sphere_geometry()?;
+        self.create_cylinder_geometry()?;
         self.create_terrain_lods()?;
         log::info!("图形管线创建完成");
         Ok(())
@@ -2737,6 +2771,76 @@ impl Renderer {
         log::info!("球体几何创建完成: {} 顶点 / {} 索引（爆炸球形扩散）", verts.len(), indices.len());
         Ok(())
     }
+
+    /// 创建 NPC 人体圆柱几何（四肢用）：单位圆柱 r=1 h=1 沿 Y，24 段，含上下盖。
+    fn create_cylinder_geometry(&mut self) -> Result<(), String> {
+        const SEGS: u32 = 24;
+        let mut verts: Vec<Vertex> = Vec::with_capacity((SEGS * 2 + 2) as usize);
+        // 侧壁：上下两圈（y = ±0.5）
+        for j in 0..2 {
+            let y = if j == 0 { -0.5 } else { 0.5 };
+            for i in 0..SEGS {
+                let theta = std::f32::consts::TAU * i as f32 / SEGS as f32;
+                let (st, ct) = theta.sin_cos();
+                verts.push(Vertex {
+                    pos: [ct, y, st],
+                    color: [1.0, 1.0, 1.0],
+                    uv: [i as f32 / SEGS as f32, j as f32],
+                });
+            }
+        }
+        // 上下盖中心顶点
+        let top_center = verts.len() as u32;
+        verts.push(Vertex { pos: [0.0, 0.5, 0.0], color: [1.0, 1.0, 1.0], uv: [0.5, 1.0] });
+        let bottom_center = verts.len() as u32;
+        verts.push(Vertex { pos: [0.0, -0.5, 0.0], color: [1.0, 1.0, 1.0], uv: [0.5, 0.0] });
+        let mut indices: Vec<u32> = Vec::with_capacity((SEGS * 6 + SEGS * 6) as usize);
+        for i in 0..SEGS {
+            let a = i;
+            let b = (i + 1) % SEGS;
+            // 侧壁三角形（a=下圈, b=下圈+1, c=上圈... 下圈顶点 0..SEGS，上圈 SEGS..2*SEGS）
+            let t0 = a;
+            let t1 = b;
+            let t2 = SEGS + a;
+            let t3 = SEGS + b;
+            indices.extend_from_slice(&[t0, t2, t1, t1, t2, t3]);
+            // 上盖 fan
+            indices.extend_from_slice(&[top_center, t2, t3]);
+            // 下盖 fan
+            indices.extend_from_slice(&[bottom_center, t1, t0]);
+        }
+        let vert_size = (verts.len() * std::mem::size_of::<Vertex>()) as u64;
+        let (v_buffer, v_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vert_size)?;
+        self.cylinder_vertex_buffer = v_buffer;
+        self.cylinder_vertex_buffer_memory = v_memory;
+        let v_ptr = unsafe {
+            self.device
+                .map_memory(v_memory, 0, vert_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射圆柱顶点缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(verts.as_ptr() as *const u8, v_ptr as *mut u8, vert_size as usize);
+            self.device.unmap_memory(v_memory);
+        }
+        let idx_size = (indices.len() * std::mem::size_of::<u32>()) as u64;
+        let (i_buffer, i_memory) =
+            self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, idx_size)?;
+        self.cylinder_index_buffer = i_buffer;
+        self.cylinder_index_buffer_memory = i_memory;
+        let i_ptr = unsafe {
+            self.device
+                .map_memory(i_memory, 0, idx_size, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("映射圆柱索引缓冲内存失败: {}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(indices.as_ptr() as *const u8, i_ptr as *mut u8, idx_size as usize);
+            self.device.unmap_memory(i_memory);
+        }
+        self.cylinder_index_count = indices.len() as u32;
+        log::info!("圆柱几何创建完成: {} 顶点 / {} 索引（NPC 四肢）", verts.len(), indices.len());
+        Ok(())
+    }
     /// 创建 3 级地形 LOD 网格（高 257² / 中 129² / 低 65² 顶点）。
     /// 高度用与实例 Y 完全相同的 terrain_height() 生成；顶点缓冲 HOST_VISIBLE，
     /// 过渡带内每帧 morph 高度后整块重传；索引缓冲一次性上传。
@@ -3172,7 +3276,7 @@ impl Renderer {
         let buffer_elems = (INSTANCE_COUNT
             + 1
             + MAX_MARKER_INSTANCES
-            + MAX_NPC_INSTANCES
+            + MAX_NPC_INSTANCES * 3
             + MAX_EMISSIVE_INSTANCES
             + 1) as u64;
         let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
@@ -3180,9 +3284,6 @@ impl Renderer {
             model: glam::Mat4::IDENTITY.to_cols_array(),
             tint: [1.0, 1.0, 1.0, 1.0],
         };
-        // 枪模 identity 槽常量（与 build.rs 顶点 shader 同步）
-        const GUN_INSTANCE_INDEX: u32 = INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES + MAX_EMISSIVE_INSTANCES;
-
         // 每帧一份 HOST_VISIBLE | HOST_COHERENT buffer，STORAGE_BUFFER（每帧 CPU 直接写）
         let buffer_info = vk::BufferCreateInfo::default()
             .size(buffer_size)
@@ -3825,6 +3926,8 @@ impl Renderer {
     /// 枪局部偏移在 +Z（yaw=0 时枪口朝向 +Z），随 yaw 绕 y 轴旋转。
     /// 动画：moving 时髋/膝/肩/肘按 phase 正弦对向摆动（走路步态）；
     /// firing 时枪沿 -Z 后坐脉冲（高频正弦），胸微俯。
+    /// 返回 (盒体组, 圆柱组, 球体组) 三段实例：躯干/脚/枪为盒体，
+    /// 四肢为圆柱（半径 = 盒宽/厚的一半），头为球体 —— 真人比例、非方块人。
     fn soldier_part_matrices(
         pos: [f32; 3],
         yaw: f32,
@@ -3832,26 +3935,26 @@ impl Renderer {
         phase: f32,
         moving: bool,
         firing: bool,
-    ) -> Vec<InstanceData> {
-        // (枢轴, 尺寸, 段心相对枢轴偏移, 动画类型)
+    ) -> (Vec<InstanceData>, Vec<InstanceData>, Vec<InstanceData>) {
+        // (枢轴, 缩放, 段心相对枢轴偏移, 动画类型, 几何: 0盒 1圆柱 2球)
         // 动画类型：0 无 1 左大腿 2 右大腿 3 左小腿 4 右小腿 5 左上臂 6 右上臂
         //          7 左前臂 8 右前臂 9 枪(后坐) 10 胸(前俯)
-        let parts: [([f32; 3], [f32; 3], [f32; 3], u8); 15] = [
-            ([-0.105, 0.95, 0.0], [0.14, 0.44, 0.16], [0.0, -0.22, 0.0], 1), // 左大腿（髋）
-            ([0.105, 0.95, 0.0], [0.14, 0.44, 0.16], [0.0, -0.22, 0.0], 2),  // 右大腿（髋）
-            ([-0.105, 0.51, 0.0], [0.115, 0.42, 0.135], [0.0, -0.21, 0.0], 3), // 左小腿（膝）
-            ([0.105, 0.51, 0.0], [0.115, 0.42, 0.135], [0.0, -0.21, 0.0], 4), // 右小腿（膝）
-            ([-0.105, 0.05, 0.0], [0.10, 0.07, 0.26], [0.0, 0.0, 0.02], 0),    // 左脚
-            ([0.105, 0.05, 0.0], [0.10, 0.07, 0.26], [0.0, 0.0, 0.02], 0),     // 右脚
-            ([0.0, 0.98, 0.0], [0.36, 0.26, 0.20], [0.0, -0.12, 0.0], 0),      // 骨盆
-            ([0.0, 1.24, 0.0], [0.46, 0.44, 0.26], [0.0, -0.02, -0.01], 10),   // 胸（含后坐前俯）
-            ([0.0, 1.47, 0.0], [0.09, 0.10, 0.09], [0.0, -0.01, 0.0], 0),      // 颈
-            ([0.0, 1.63, 0.0], [0.24, 0.27, 0.24], [0.0, -0.01, 0.0], 0),      // 头
-            ([-0.27, 1.40, 0.02], [0.12, 0.30, 0.13], [0.0, -0.15, 0.0], 5),   // 左上臂（肩）
-            ([0.27, 1.40, 0.02], [0.12, 0.30, 0.13], [0.0, -0.15, 0.0], 6),    // 右上臂（肩）
-            ([-0.27, 1.10, 0.02], [0.10, 0.28, 0.11], [0.0, -0.14, 0.02], 7),  // 左前臂（肘）
-            ([0.27, 1.10, 0.02], [0.10, 0.28, 0.11], [0.0, -0.14, 0.02], 8),   // 右前臂（肘）
-            ([0.0, 1.14, 0.50], [0.13, 0.10, 0.95], [0.0, 0.0, 0.0], 9),       // 枪（+Z 前方，后坐 -Z）
+        let parts: [([f32; 3], [f32; 3], [f32; 3], u8, u8); 15] = [
+            ([-0.105, 0.95, 0.0], [0.07, 0.44, 0.07], [0.0, -0.22, 0.0], 1, 1), // 左大腿（髋）圆柱
+            ([0.105, 0.95, 0.0], [0.07, 0.44, 0.07], [0.0, -0.22, 0.0], 2, 1),  // 右大腿（髋）圆柱
+            ([-0.105, 0.51, 0.0], [0.0575, 0.42, 0.0575], [0.0, -0.21, 0.0], 3, 1), // 左小腿（膝）圆柱
+            ([0.105, 0.51, 0.0], [0.0575, 0.42, 0.0575], [0.0, -0.21, 0.0], 4, 1), // 右小腿（膝）圆柱
+            ([-0.105, 0.05, 0.0], [0.10, 0.07, 0.26], [0.0, 0.0, 0.02], 0, 0),    // 左脚
+            ([0.105, 0.05, 0.0], [0.10, 0.07, 0.26], [0.0, 0.0, 0.02], 0, 0),     // 右脚
+            ([0.0, 0.98, 0.0], [0.36, 0.26, 0.20], [0.0, -0.12, 0.0], 0, 0),      // 骨盆
+            ([0.0, 1.24, 0.0], [0.46, 0.44, 0.26], [0.0, -0.02, -0.01], 10, 0),   // 胸（含后坐前俯）
+            ([0.0, 1.47, 0.0], [0.09, 0.10, 0.09], [0.0, -0.01, 0.0], 0, 0),      // 颈
+            ([0.0, 1.63, 0.0], [0.24, 0.27, 0.24], [0.0, -0.01, 0.0], 0, 2),      // 头（球体）
+            ([-0.27, 1.40, 0.02], [0.06, 0.30, 0.06], [0.0, -0.15, 0.0], 5, 1),   // 左上臂（肩）圆柱
+            ([0.27, 1.40, 0.02], [0.06, 0.30, 0.06], [0.0, -0.15, 0.0], 6, 1),    // 右上臂（肩）圆柱
+            ([-0.27, 1.10, 0.02], [0.05, 0.28, 0.05], [0.0, -0.14, 0.02], 7, 1),  // 左前臂（肘）圆柱
+            ([0.27, 1.10, 0.02], [0.05, 0.28, 0.05], [0.0, -0.14, 0.02], 8, 1),   // 右前臂（肘）圆柱
+            ([0.0, 1.14, 0.50], [0.13, 0.10, 0.95], [0.0, 0.0, 0.0], 9, 0),       // 枪（+Z 前方，后坐 -Z）
         ];
         let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
         let rot = glam::Mat4::from_rotation_y(yaw);
@@ -3868,8 +3971,10 @@ impl Renderer {
         } else {
             (0.0, 0.0)
         };
-        let mut out = Vec::with_capacity(15);
-        for (pivot, size, center, kind) in parts.iter() {
+        let mut box_out: Vec<InstanceData> = Vec::with_capacity(6);
+        let mut cyl_out: Vec<InstanceData> = Vec::with_capacity(8);
+        let mut sph_out: Vec<InstanceData> = Vec::with_capacity(1);
+        for (pivot, scale, center, kind, geom) in parts.iter() {
             let mut anim = glam::Mat4::IDENTITY;
             match kind {
                 1 => anim *= glam::Mat4::from_rotation_x(stride),        // 左大腿
@@ -3889,50 +3994,66 @@ impl Renderer {
                 * glam::Mat4::from_translation(glam::Vec3::from(*pivot))
                 * anim
                 * glam::Mat4::from_translation(glam::Vec3::from(*center))
-                * glam::Mat4::from_scale(glam::Vec3::from(*size));
-            out.push(InstanceData {
+                * glam::Mat4::from_scale(glam::Vec3::from(*scale));
+            let inst = InstanceData {
                 model: model.to_cols_array(),
                 tint,
-            });
+            };
+            match geom {
+                1 => cyl_out.push(inst),
+                2 => sph_out.push(inst),
+                _ => box_out.push(inst),
+            }
         }
-        out
+        (box_out, cyl_out, sph_out)
     }
 
     /// 倒地尸体姿态：14 段人体绕 X 轴躺倒（-90° 侧卧）贴地摊开，枪横置身侧，
     /// tint 按阵营保留（尸体可辨识）。
-    fn dead_part_matrices(pos: [f32; 3], yaw: f32, tint: [f32; 4]) -> Vec<InstanceData> {
-        // (立姿局部偏移, 尺寸)：躺倒时偏移 (x, y_stand*0.3, rest_z)，
+    fn dead_part_matrices(
+        pos: [f32; 3],
+        yaw: f32,
+        tint: [f32; 4],
+    ) -> (Vec<InstanceData>, Vec<InstanceData>, Vec<InstanceData>) {
+        // (立姿局部偏移, 缩放, 几何: 0盒 1圆柱 2球)：躺倒时偏移 (x, y_stand*0.3, rest_z)，
         // 经 lie 旋转后世界位置 = (x, rest_z, -y_stand*0.3)：rest_z 保证部件贴地不埋入。
-        let parts: [([f32; 3], [f32; 3]); 14] = [
-            ([-0.105, 0.285, 0.24], [0.14, 0.44, 0.16]),  // 左大腿
-            ([0.105, 0.285, 0.24], [0.14, 0.44, 0.16]),   // 右大腿
-            ([-0.105, 0.153, 0.23], [0.115, 0.42, 0.135]), // 左小腿
-            ([0.105, 0.153, 0.23], [0.115, 0.42, 0.135]), // 右小腿
-            ([-0.105, 0.015, 0.15], [0.10, 0.07, 0.26]),  // 左脚
-            ([0.105, 0.015, 0.15], [0.10, 0.07, 0.26]),   // 右脚
-            ([0.0, 0.294, 0.15], [0.36, 0.26, 0.20]),     // 骨盆
-            ([0.0, 0.372, 0.24], [0.46, 0.44, 0.26]),     // 胸
-            ([0.0, 0.441, 0.07], [0.09, 0.10, 0.09]),     // 颈
-            ([0.0, 0.489, 0.155], [0.24, 0.27, 0.24]),    // 头
-            ([-0.27, 0.42, 0.17], [0.12, 0.30, 0.13]),    // 左上臂
-            ([0.27, 0.42, 0.17], [0.12, 0.30, 0.13]),     // 右上臂
-            ([-0.27, 0.33, 0.16], [0.10, 0.28, 0.11]),    // 左前臂
-            ([0.27, 0.33, 0.16], [0.10, 0.28, 0.11]),     // 右前臂
+        let parts: [([f32; 3], [f32; 3], u8); 14] = [
+            ([-0.105, 0.285, 0.24], [0.07, 0.44, 0.07], 1),   // 左大腿（圆柱）
+            ([0.105, 0.285, 0.24], [0.07, 0.44, 0.07], 1),    // 右大腿（圆柱）
+            ([-0.105, 0.153, 0.23], [0.0575, 0.42, 0.0575], 1), // 左小腿（圆柱）
+            ([0.105, 0.153, 0.23], [0.0575, 0.42, 0.0575], 1), // 右小腿（圆柱）
+            ([-0.105, 0.015, 0.15], [0.10, 0.07, 0.26], 0),   // 左脚
+            ([0.105, 0.015, 0.15], [0.10, 0.07, 0.26], 0),    // 右脚
+            ([0.0, 0.294, 0.15], [0.36, 0.26, 0.20], 0),      // 骨盆
+            ([0.0, 0.372, 0.24], [0.46, 0.44, 0.26], 0),      // 胸
+            ([0.0, 0.441, 0.07], [0.09, 0.10, 0.09], 0),      // 颈
+            ([0.0, 0.489, 0.155], [0.24, 0.27, 0.24], 2),     // 头（球体）
+            ([-0.27, 0.42, 0.17], [0.06, 0.30, 0.06], 1),     // 左上臂（圆柱）
+            ([0.27, 0.42, 0.17], [0.06, 0.30, 0.06], 1),      // 右上臂（圆柱）
+            ([-0.27, 0.33, 0.16], [0.05, 0.28, 0.05], 1),     // 左前臂（圆柱）
+            ([0.27, 0.33, 0.16], [0.05, 0.28, 0.05], 1),      // 右前臂（圆柱）
         ];
         let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
         let rot = glam::Mat4::from_rotation_y(yaw);
         let lie = glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-        let mut out = Vec::with_capacity(15);
-        for (off, size) in parts.iter() {
+        let mut box_out: Vec<InstanceData> = Vec::with_capacity(6);
+        let mut cyl_out: Vec<InstanceData> = Vec::with_capacity(8);
+        let mut sph_out: Vec<InstanceData> = Vec::with_capacity(1);
+        for (off, scale, geom) in parts.iter() {
             let model = trans
                 * rot
                 * lie
                 * glam::Mat4::from_translation(glam::Vec3::from(*off))
-                * glam::Mat4::from_scale(glam::Vec3::from(*size));
-            out.push(InstanceData {
+                * glam::Mat4::from_scale(glam::Vec3::from(*scale));
+            let inst = InstanceData {
                 model: model.to_cols_array(),
                 tint,
-            });
+            };
+            match geom {
+                1 => cyl_out.push(inst),
+                2 => sph_out.push(inst),
+                _ => box_out.push(inst),
+            }
         }
         // 枪横置身侧：绕 Y 转 90° 使枪管沿 +X，贴地平放
         let gun = trans
@@ -3940,39 +4061,72 @@ impl Renderer {
             * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.08, 0.62))
             * glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
             * glam::Mat4::from_scale(glam::Vec3::new(0.13, 0.10, 0.95));
-        out.push(InstanceData {
+        box_out.push(InstanceData {
             model: gun.to_cols_array(),
             tint,
         });
-        out
+        (box_out, cyl_out, sph_out)
     }
 
     /// 设置 NPC 士兵可视化（由 main.rs 传入全部 NPC 的位置/朝向/配色/动画态；
     /// 15 段/人（尸体 15 段）展开存入 npc_parts，总段数截断到 MAX_NPC_INSTANCES）
     pub fn set_npc_visuals(&mut self, visuals: &[NpcVisual]) {
-        self.npc_parts.clear();
+        self.npc_box_parts.clear();
+        self.npc_cyl_parts.clear();
+        self.npc_sph_parts.clear();
         for v in visuals {
-            for part in Self::soldier_part_matrices(v.pos, v.yaw, v.tint, v.phase, v.moving, v.firing) {
-                if (self.npc_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_parts.push(part);
+            let (box_parts, cyl_parts, sph_parts) = Self::soldier_part_matrices(
+                v.pos, v.yaw, v.tint, v.phase, v.moving, v.firing,
+            );
+            for part in box_parts {
+                if (self.npc_box_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_box_parts.push(part);
                 }
             }
-            if (self.npc_parts.len() as u32) >= MAX_NPC_INSTANCES {
+            for part in cyl_parts {
+                if (self.npc_cyl_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_cyl_parts.push(part);
+                }
+            }
+            for part in sph_parts {
+                if (self.npc_sph_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_sph_parts.push(part);
+                }
+            }
+            if (self.npc_box_parts.len() as u32) >= MAX_NPC_INSTANCES
+                && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
+                && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
+            {
                 break;
             }
         }
     }
 
-    /// 追加倒地尸体段（由 main.rs 传入位置/朝向/阵营；7 段/具躺倒姿态），
-    /// 与活体 NPC 共用 NPC 槽位区（总段数截断到 MAX_NPC_INSTANCES）
+    /// 追加倒地尸体段（由 main.rs 传入位置/朝向/阵营；15 段/具躺倒姿态），
+    /// 与活体 NPC 共用 NPC 三几何槽位区（各组段数截断到 MAX_NPC_INSTANCES）
     pub fn set_dead_bodies(&mut self, bodies: &[NpcVisual]) {
         for v in bodies {
-            for part in Self::dead_part_matrices(v.pos, v.yaw, v.tint) {
-                if (self.npc_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_parts.push(part);
+            let (box_parts, cyl_parts, sph_parts) =
+                Self::dead_part_matrices(v.pos, v.yaw, v.tint);
+            for part in box_parts {
+                if (self.npc_box_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_box_parts.push(part);
                 }
             }
-            if (self.npc_parts.len() as u32) >= MAX_NPC_INSTANCES {
+            for part in cyl_parts {
+                if (self.npc_cyl_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_cyl_parts.push(part);
+                }
+            }
+            for part in sph_parts {
+                if (self.npc_sph_parts.len() as u32) < MAX_NPC_INSTANCES {
+                    self.npc_sph_parts.push(part);
+                }
+            }
+            if (self.npc_box_parts.len() as u32) >= MAX_NPC_INSTANCES
+                && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
+                && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
+            {
                 break;
             }
         }
@@ -3992,9 +4146,15 @@ impl Renderer {
         if verts.is_empty() || indices.is_empty() {
             return;
         }
-        // 首次或容量不足：重建 HOST_VISIBLE 缓冲（顶点 32B + 索引 4B）
+        // 首次或容量不足：重建 HOST_VISIBLE 缓冲（顶点 32B + 索引 4B）。
+        // 防御：索引容量按实际索引数独立扩容（next_power_of_two），
+        // 杜绝三角网格索引数 > 6×顶点时上传越界导致 GPU 挂起/画面冻结。
         let need_verts = (verts.len() as u32).next_power_of_two().max(1024);
+        let need_idx = (indices.len() as u32)
+            .next_power_of_two()
+            .max(need_verts * 6);
         if need_verts != self.gun_buffer_capacity_verts
+            || need_idx != self.gun_buffer_capacity_idx
             || self.gun_mapped.is_null()
             || self.gun_vertex_buffer == vk::Buffer::null()
         {
@@ -4014,7 +4174,7 @@ impl Renderer {
             let (vb, vm) = self
                 .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, v_size)
                 .expect("枪模顶点缓冲创建失败");
-            let i_size = need_verts as u64 * 6 * 4; // 索引 ≤ 6×顶点（三角网格）
+            let i_size = need_idx as u64 * 4; // 索引容量独立按实际索引数
             let (ib, im) = self
                 .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, i_size)
                 .expect("枪模索引缓冲创建失败");
@@ -4062,15 +4222,20 @@ impl Renderer {
 
     /// 每帧上传 NPC 士兵段到实例 buffer 的 NPC_SLOT_BASE 之后区域，
     /// 仿照 upload_markers 按距离分近/远档（不剔除，仅距离分档），返回 (近档, 远档) 计数。
-    fn upload_npcs(&mut self, cam_pos: glam::Vec3) -> (u32, u32) {
+    /// 上传 NPC 三几何区（盒/圆柱/球），每区按距离分近/远档。
+    /// 返回 ((盒 near,far),(圆柱 near,far),(球 near,far))。
+    fn upload_npcs(
+        &mut self,
+        cam_pos: glam::Vec3,
+    ) -> ((u32, u32), (u32, u32), (u32, u32)) {
         let slot = match self.instance_mapped.get(self.current_frame) {
             Some(&p) if !p.is_null() => p as *mut u8,
-            _ => return (0, 0),
+            _ => return ((0, 0), (0, 0), (0, 0)),
         };
         let stride = std::mem::size_of::<InstanceData>();
         if self.mesh_enabled {
-            let count = self.npc_parts.len() as u32;
-            for (i, inst) in self.npc_parts.iter().enumerate() {
+            // mesh 路径：全量上传（无分档），计数 = 各组长度
+            for (i, inst) in self.npc_box_parts.iter().enumerate() {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         inst as *const InstanceData as *const u8,
@@ -4079,22 +4244,59 @@ impl Renderer {
                     );
                 }
             }
-            return (count, 0);
+            for (i, inst) in self.npc_cyl_parts.iter().enumerate() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((NPC_CYL_SLOT_BASE + i as u32) as usize) * stride),
+                        stride,
+                    );
+                }
+            }
+            for (i, inst) in self.npc_sph_parts.iter().enumerate() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        inst as *const InstanceData as *const u8,
+                        slot.add(((NPC_SPH_SLOT_BASE + i as u32) as usize) * stride),
+                        stride,
+                    );
+                }
+            }
+            return (
+                (self.npc_box_parts.len() as u32, 0),
+                (self.npc_cyl_parts.len() as u32, 0),
+                (self.npc_sph_parts.len() as u32, 0),
+            );
         }
         // 近/远档分界距离随画质预设变化（与 marker/实例场同源）
         let near_sq = quality_params(self.quality).instance_lod_distance;
         let near_sq = near_sq * near_sq;
+        let cam = glam::Vec3::new(cam_pos.x, cam_pos.y, cam_pos.z);
+        let box_zone = Self::upload_zone_rel(&self.npc_box_parts, NPC_SLOT_BASE, near_sq, slot, stride, cam);
+        let cyl_zone = Self::upload_zone_rel(&self.npc_cyl_parts, NPC_CYL_SLOT_BASE, near_sq, slot, stride, cam);
+        let sph_zone = Self::upload_zone_rel(&self.npc_sph_parts, NPC_SPH_SLOT_BASE, near_sq, slot, stride, cam);
+        (box_zone, cyl_zone, sph_zone)
+    }
+
+    /// 相对相机位置的分档上传（模型平移列 - 相机位置）
+    fn upload_zone_rel(
+        parts: &[InstanceData],
+        base: u32,
+        near_sq: f32,
+        slot: *mut u8,
+        stride: usize,
+        cam: glam::Vec3,
+    ) -> (u32, u32) {
         let mut near_count = 0u32;
-        // 近档先写（base..base+near-1），远档紧随（base+near..），两遍遍历避免槽位交错
-        for inst in &self.npc_parts {
-            let dx = inst.model[12] - cam_pos.x;
-            let dy = inst.model[13] - cam_pos.y;
-            let dz = inst.model[14] - cam_pos.z;
+        for inst in parts {
+            let dx = inst.model[12] - cam.x;
+            let dy = inst.model[13] - cam.y;
+            let dz = inst.model[14] - cam.z;
             if dx * dx + dy * dy + dz * dz < near_sq {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         inst as *const InstanceData as *const u8,
-                        slot.add(((NPC_SLOT_BASE + near_count) as usize) * stride),
+                        slot.add(((base + near_count) as usize) * stride),
                         stride,
                     );
                 }
@@ -4102,17 +4304,15 @@ impl Renderer {
             }
         }
         let mut far_count = 0u32;
-        for inst in &self.npc_parts {
-            let dx = inst.model[12] - cam_pos.x;
-            let dy = inst.model[13] - cam_pos.y;
-            let dz = inst.model[14] - cam_pos.z;
+        for inst in parts {
+            let dx = inst.model[12] - cam.x;
+            let dy = inst.model[13] - cam.y;
+            let dz = inst.model[14] - cam.z;
             if dx * dx + dy * dy + dz * dz >= near_sq {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         inst as *const InstanceData as *const u8,
-                        slot.add(
-                            ((NPC_SLOT_BASE + near_count + far_count) as usize) * stride,
-                        ),
+                        slot.add(((base + near_count + far_count) as usize) * stride),
                         stride,
                     );
                 }
@@ -5596,7 +5796,7 @@ impl Renderer {
             * (INSTANCE_COUNT as u64
                 + 1
                 + MAX_MARKER_INSTANCES as u64
-                + MAX_NPC_INSTANCES as u64
+                + MAX_NPC_INSTANCES as u64 * 3
                 + MAX_EMISSIVE_INSTANCES as u64);
         for i in 0..max_frames {
             let ubo_info = vk::DescriptorBufferInfo::default()
@@ -6049,7 +6249,19 @@ impl Renderer {
                 command_buffer,
                 mesh,
                 NPC_SLOT_BASE,
-                self.last_npc_near + self.last_npc_far,
+                self.last_npc_box_near + self.last_npc_box_far,
+            );
+            self.draw_mesh_range(
+                command_buffer,
+                mesh,
+                NPC_CYL_SLOT_BASE,
+                self.last_npc_cyl_near + self.last_npc_cyl_far,
+            );
+            self.draw_mesh_range(
+                command_buffer,
+                mesh,
+                NPC_SPH_SLOT_BASE,
+                self.last_npc_sph_near + self.last_npc_sph_far,
             );
             self.draw_mesh_range(
                 command_buffer,
@@ -6168,17 +6380,14 @@ impl Renderer {
             }
         }
 
-        // ---- NPC 士兵段 draw（复用同一 pipeline 与几何，实例槽从 NPC_SLOT_BASE 起）----
-        if self.last_npc_near > 0 {
+        // ---- NPC 士兵段 draw（人体三几何：盒体躯干/圆柱四肢/球体头，各自独立
+        //      几何与实例槽区；每区按距离分近档（对应几何）+ 远档（十字 quad））----
+        // 盒体区（躯干/脚/枪）
+        if self.last_npc_box_near > 0 {
             let npc_vertex_buffers = [self.vertex_buffer];
             let offsets = [0u64];
             unsafe {
-                self.device.cmd_bind_vertex_buffers(
-                    command_buffer,
-                    0,
-                    &npc_vertex_buffers,
-                    &offsets,
-                );
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &npc_vertex_buffers, &offsets);
                 self.device.cmd_bind_index_buffer(
                     command_buffer,
                     self.index_buffer,
@@ -6188,23 +6397,18 @@ impl Renderer {
                 self.device.cmd_draw_indexed(
                     command_buffer,
                     INDICES.len() as u32,
-                    self.last_npc_near,
+                    self.last_npc_box_near,
                     0,
                     0,
                     NPC_SLOT_BASE,
                 );
             }
         }
-        if self.last_npc_far > 0 {
+        if self.last_npc_box_far > 0 {
             let npc_vertex_buffers = [self.far_vertex_buffer];
             let offsets = [0u64];
             unsafe {
-                self.device.cmd_bind_vertex_buffers(
-                    command_buffer,
-                    0,
-                    &npc_vertex_buffers,
-                    &offsets,
-                );
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &npc_vertex_buffers, &offsets);
                 self.device.cmd_bind_index_buffer(
                     command_buffer,
                     self.far_index_buffer,
@@ -6214,10 +6418,96 @@ impl Renderer {
                 self.device.cmd_draw_indexed(
                     command_buffer,
                     FAR_INDICES.len() as u32,
-                    self.last_npc_far,
+                    self.last_npc_box_far,
                     0,
                     0,
-                    NPC_SLOT_BASE + self.last_npc_near,
+                    NPC_SLOT_BASE + self.last_npc_box_near,
+                );
+            }
+        }
+        // 圆柱区（四肢）
+        if self.last_npc_cyl_near > 0 {
+            let npc_vertex_buffers = [self.cylinder_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &npc_vertex_buffers, &offsets);
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.cylinder_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    self.cylinder_index_count,
+                    self.last_npc_cyl_near,
+                    0,
+                    0,
+                    NPC_CYL_SLOT_BASE,
+                );
+            }
+        }
+        if self.last_npc_cyl_far > 0 {
+            let npc_vertex_buffers = [self.far_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &npc_vertex_buffers, &offsets);
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.far_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    FAR_INDICES.len() as u32,
+                    self.last_npc_cyl_far,
+                    0,
+                    0,
+                    NPC_CYL_SLOT_BASE + self.last_npc_cyl_near,
+                );
+            }
+        }
+        // 球体区（头）
+        if self.last_npc_sph_near > 0 {
+            let npc_vertex_buffers = [self.sphere_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &npc_vertex_buffers, &offsets);
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.sphere_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    self.sphere_index_count,
+                    self.last_npc_sph_near,
+                    0,
+                    0,
+                    NPC_SPH_SLOT_BASE,
+                );
+            }
+        }
+        if self.last_npc_sph_far > 0 {
+            let npc_vertex_buffers = [self.far_vertex_buffer];
+            let offsets = [0u64];
+            unsafe {
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &npc_vertex_buffers, &offsets);
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.far_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    FAR_INDICES.len() as u32,
+                    self.last_npc_sph_far,
+                    0,
+                    0,
+                    NPC_SPH_SLOT_BASE + self.last_npc_sph_near,
                 );
             }
         }
@@ -6313,7 +6603,7 @@ impl Renderer {
                     1,
                     0,
                     0,
-                    INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES + MAX_EMISSIVE_INSTANCES,
+                    GUN_INSTANCE_INDEX,
                 );
             }
         }
@@ -6491,13 +6781,13 @@ impl Renderer {
             self.last_marker_far,
             MARKER_SLOT_BASE + self.last_marker_near,
         )?;
-        // NPC
+        // NPC 盒体区（躯干/脚/枪）
         self.draw_shadow_range(
             command_buffer,
             self.vertex_buffer,
             self.index_buffer,
             INDICES.len() as u32,
-            self.last_npc_near,
+            self.last_npc_box_near,
             NPC_SLOT_BASE,
         )?;
         self.draw_shadow_range(
@@ -6505,8 +6795,42 @@ impl Renderer {
             self.far_vertex_buffer,
             self.far_index_buffer,
             FAR_INDICES.len() as u32,
-            self.last_npc_far,
-            NPC_SLOT_BASE + self.last_npc_near,
+            self.last_npc_box_far,
+            NPC_SLOT_BASE + self.last_npc_box_near,
+        )?;
+        // NPC 圆柱区（四肢；阴影以盒体近似）
+        self.draw_shadow_range(
+            command_buffer,
+            self.vertex_buffer,
+            self.index_buffer,
+            INDICES.len() as u32,
+            self.last_npc_cyl_near,
+            NPC_CYL_SLOT_BASE,
+        )?;
+        self.draw_shadow_range(
+            command_buffer,
+            self.far_vertex_buffer,
+            self.far_index_buffer,
+            FAR_INDICES.len() as u32,
+            self.last_npc_cyl_far,
+            NPC_CYL_SLOT_BASE + self.last_npc_cyl_near,
+        )?;
+        // NPC 球体区（头；阴影以盒体近似）
+        self.draw_shadow_range(
+            command_buffer,
+            self.vertex_buffer,
+            self.index_buffer,
+            INDICES.len() as u32,
+            self.last_npc_sph_near,
+            NPC_SPH_SLOT_BASE,
+        )?;
+        self.draw_shadow_range(
+            command_buffer,
+            self.far_vertex_buffer,
+            self.far_index_buffer,
+            FAR_INDICES.len() as u32,
+            self.last_npc_sph_far,
+            NPC_SPH_SLOT_BASE + self.last_npc_sph_near,
         )?;
         // 自发光（爆炸闪光等）
         self.draw_shadow_range(
@@ -6751,9 +7075,14 @@ impl Renderer {
         self.last_marker_near = marker_near;
         self.last_marker_far = marker_far;
         // ---- NPC 士兵段：独立槽位上传（见 NPC_SLOT_BASE），计数供 draw call 使用 ----
-        let (npc_near, npc_far) = self.upload_npcs(cam_pos);
-        self.last_npc_near = npc_near;
-        self.last_npc_far = npc_far;
+        let ((box_near, box_far), (cyl_near, cyl_far), (sph_near, sph_far)) =
+            self.upload_npcs(cam_pos);
+        self.last_npc_box_near = box_near;
+        self.last_npc_box_far = box_far;
+        self.last_npc_cyl_near = cyl_near;
+        self.last_npc_cyl_far = cyl_far;
+        self.last_npc_sph_near = sph_near;
+        self.last_npc_sph_far = sph_far;
         // ---- 自发光实体（爆炸闪光等）：独立槽位上传（见 EMISSIVE_SLOT_BASE）----
         let (emissive_near, emissive_far) = self.upload_emissive(cam_pos);
         self.last_emissive_near = emissive_near;
@@ -6804,7 +7133,12 @@ impl Renderer {
                     + self.last_marker_far
                     + self.last_emissive_near
                     + self.last_emissive_far,
-                self.last_npc_near + self.last_npc_far
+                self.last_npc_box_near
+                    + self.last_npc_box_far
+                    + self.last_npc_cyl_near
+                    + self.last_npc_cyl_far
+                    + self.last_npc_sph_near
+                    + self.last_npc_sph_far
             );
             self.frame_count = 0;
             self.perf_window_start = Instant::now();
@@ -8158,21 +8492,27 @@ mod npc_visual_tests {
         [m.model[12], m.model[13], m.model[14]]
     }
 
+    /// 三几何分组：盒 6（脚×2/骨盆/胸/颈/枪）+ 圆柱 8（四肢）+ 球 1（头）= 15
     #[test]
     fn soldier_parts_count_and_tint() {
         let tint = [0.2, 0.6, 0.9, 1.0];
-        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, tint, 0.0, false, false);
-        assert_eq!(parts.len(), 15);
-        for p in &parts {
+        let (box_parts, cyl_parts, sph_parts) =
+            Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, tint, 0.0, false, false);
+        assert_eq!(box_parts.len(), 6, "盒体段应为 6");
+        assert_eq!(cyl_parts.len(), 8, "圆柱段应为 8（四肢）");
+        assert_eq!(sph_parts.len(), 1, "球体段应为 1（头）");
+        assert_eq!(box_parts.len() + cyl_parts.len() + sph_parts.len(), 15);
+        for p in box_parts.iter().chain(cyl_parts.iter()).chain(sph_parts.iter()) {
             assert_eq!(p.tint, tint);
         }
     }
 
     #[test]
     fn soldier_torso_height() {
-        let parts = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4], 0.0, false, false);
-        // 第 8 段 = 胸（枢轴 y=1.24 + 段心 -0.02），yaw=0 时平移 y = 1.22
-        let t = translation(&parts[7]);
+        let (box_parts, _, _) =
+            Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4], 0.0, false, false);
+        // 盒体组第 3 段 = 胸（枢轴 y=1.24 + 段心 -0.02），yaw=0 时平移 y = 1.22
+        let t = translation(&box_parts[3]);
         assert!(
             (t[1] - 1.22).abs() < 1e-3,
             "胸 y 应为 1.22，实际 {}",
@@ -8184,8 +8524,9 @@ mod npc_visual_tests {
 
     #[test]
     fn soldier_gun_rotates_with_yaw() {
-        let base = Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4], 0.0, false, false);
-        let turned = Renderer::soldier_part_matrices(
+        let (base, _, _) =
+            Renderer::soldier_part_matrices([0.0, 0.0, 0.0], 0.0, [1.0; 4], 0.0, false, false);
+        let (turned, _, _) = Renderer::soldier_part_matrices(
             [0.0, 0.0, 0.0],
             std::f32::consts::FRAC_PI_2,
             [1.0; 4],
@@ -8193,10 +8534,10 @@ mod npc_visual_tests {
             false,
             false,
         );
-        // 第 15 段 = 枪：yaw=0 时局部偏移 (+0, +1.14, +0.50)，
+        // 盒体组第 6 段 = 枪：yaw=0 时局部偏移 (+0, +1.14, +0.50)，
         // 转 90° 后绕 y 轴旋转应落到 (+0.50, +1.14, ~0)
-        let g0 = translation(&base[14]);
-        let g90 = translation(&turned[14]);
+        let g0 = translation(&base[5]);
+        let g90 = translation(&turned[5]);
         assert!(
             (g0[2] - 0.50).abs() < 1e-3,
             "yaw=0 枪应伸向 +Z，z={}",
@@ -8212,20 +8553,31 @@ mod npc_visual_tests {
 
     #[test]
     fn soldier_pos_translation_applies() {
-        let parts = Renderer::soldier_part_matrices([10.0, 2.0, -3.0], 0.0, [1.0; 4], 0.0, false, false);
+        let (box_parts, _, _) = Renderer::soldier_part_matrices(
+            [10.0, 2.0, -3.0],
+            0.0,
+            [1.0; 4],
+            0.0,
+            false,
+            false,
+        );
         // 胸：平移 = pos + (0, 1.22, -0.01)
-        let t = translation(&parts[7]);
+        let t = translation(&box_parts[3]);
         assert!((t[0] - 10.0).abs() < 1e-3, "x={}", t[0]);
         assert!((t[1] - 3.22).abs() < 1e-3, "y={}", t[1]);
         assert!((t[2] + 3.01).abs() < 1e-3, "z={}", t[2]);
     }
 
-    /// 尸体 15 段（14 段人体 + 横置枪），tint 保留
+    /// 尸体 15 段（14 段人体 + 横置枪），三几何分组，tint 保留
     #[test]
     fn dead_body_15_parts_with_tint() {
-        let parts = Renderer::dead_part_matrices([1.0, 0.0, 2.0], 0.0, [0.9, 0.1, 0.1, 1.0]);
-        assert_eq!(parts.len(), 15);
-        for p in &parts {
+        let (box_parts, cyl_parts, sph_parts) =
+            Renderer::dead_part_matrices([1.0, 0.0, 2.0], 0.0, [0.9, 0.1, 0.1, 1.0]);
+        assert_eq!(box_parts.len(), 6, "尸体盒体段应为 6（含枪）");
+        assert_eq!(cyl_parts.len(), 8, "尸体圆柱段应为 8");
+        assert_eq!(sph_parts.len(), 1, "尸体球体段应为 1");
+        assert_eq!(box_parts.len() + cyl_parts.len() + sph_parts.len(), 15);
+        for p in box_parts.iter().chain(cyl_parts.iter()).chain(sph_parts.iter()) {
             assert_eq!(p.tint, [0.9, 0.1, 0.1, 1.0]);
         }
     }

@@ -31,8 +31,9 @@ const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
-// 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE（NPC_SLOT_BASE + MAX_NPC_INSTANCES）同步。
-const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 1024u;
+// 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×1024：
+// 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
+const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -73,9 +74,9 @@ fn vs_main(
     } else {
         output.flat_flag = 0.0;
     }
-    // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+64+1024+64）：
+    // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+64+3072+64）：
     // 走 marker 纯色路径（flat=1），避免被地面纹理 0.75 混合 → 枪模隐形（2026-08-16）
-    if (instance_index == 66689u) {
+    if (instance_index == 68737u) {
         output.flat_flag = 1.0;
         output.fade = 1.0;
     }
