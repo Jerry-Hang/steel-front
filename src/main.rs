@@ -69,6 +69,8 @@ struct GameApp {
     right_dragging: bool,
     /// 开镜瞄准（右键按住；第一人称 FPS：准星收窄 + 枪模居中 + FOV 缩小）
     ads_active: bool,
+    /// 开镜混合度 0..1（腰射→开镜 0.2s 指数平滑；驱动枪模锚点插值）
+    ads_blend: f32,
     /// 上一帧光标位置（屏幕坐标）
     last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
@@ -170,6 +172,7 @@ impl GameApp {
             dragging: false,
             right_dragging: false,
             ads_active: false,
+            ads_blend: 0.0,
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             last_cycle_us: 0,
@@ -283,9 +286,10 @@ impl GameApp {
 
         // 更新相机（双模式：轨道/飞行，含惯性速度与边界 clamp）
         self.camera.update(&self.key_state, delta_time);
-        // 开镜瞄准：FOV 平滑过渡（70° 腰射 → 45° 开镜；只在第一人称生效）+ HUD 准星同步
+        // 开镜瞄准：FOV 平滑过渡（70° 腰射 → 55° 开镜，步枪 ADS 轻微收窄而非狙击 zoom）
+        // + 锚点混合度（枪模腰射右下 → 开镜居中，0.2s 指数平滑）
         let ads_target = if self.ads_active {
-            45.0_f32.to_radians()
+            55.0_f32.to_radians()
         } else {
             70.0_f32.to_radians()
         };
@@ -293,6 +297,9 @@ impl GameApp {
         if fov_delta.abs() > 1e-4 {
             self.camera.fov += fov_delta * (1.0 - (-10.0 * delta_time).exp());
         }
+        let ads_blend_target = if self.ads_active { 1.0 } else { 0.0 };
+        self.ads_blend +=
+            (ads_blend_target - self.ads_blend) * (1.0 - (-10.0 * delta_time).exp());
         // 开镜状态硬化：非 Playing/菜单/设置打开时强制复位（防右键状态卡死 → 准星变小/消失）
         let ads_valid = self.ads_active
             && self.camera.mode == CameraMode::FirstPerson
@@ -524,13 +531,14 @@ impl GameApp {
             }
         };
         let cam = &self.camera;
-        // 开镜锚点：枪模右下偏移，屏幕中心视野干净（准星/三点一线不被枪托遮挡；
-        // 2026-08-18 修复：旧锚点 (0,-0.08,-0.78) 居中，枪托挡视野中心）
-        let mut anchor = if self.ads_active {
-            glam::Vec3::new(0.20, -0.26, -0.75)
-        } else {
-            glam::Vec3::new(0.34, -0.36, -0.60)
-        };
+        // ADS 锚点规范（2026-08-18 重写）：
+        // 腰射 = 枪在屏幕右下 (0.30, -0.25, -0.60)，十字准星可见；
+        // 开镜 = 枪平滑移到屏幕正中央 (0, 0.02, -0.60)，机瞄/瞄具对准屏幕中心，
+        //       准星隐藏（用机瞄三点一线），FOV 轻微收窄（55°）。
+        // 两种状态用 ads_blend 指数插值（0.2s），无跳变。
+        let hip_anchor = glam::Vec3::new(0.30, -0.25, -0.60);
+        let ads_anchor = glam::Vec3::new(0.0, 0.02, -0.60);
+        let mut anchor = hip_anchor.lerp(ads_anchor, self.ads_blend);
         if self.game.is_firing() {
             let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
             anchor.y -= 0.07 * k;
@@ -538,8 +546,9 @@ impl GameApp {
         }
         let bob = (self.anim_clock * 10.0).sin() * 0.012;
         anchor.x += bob;
-        let tilt = if self.ads_active { 0.0 } else { 0.02 };
-        let base_scale = if self.ads_active { 0.88 } else { 0.98 };
+        // 倾斜：腰射轻微右倾 → 开镜扶正（随 blend 插值）
+        let tilt = 0.02 * (1.0 - self.ads_blend);
+        let base_scale = 0.98 - 0.03 * self.ads_blend;
         let gun_scale =
             ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * base_scale;
         let view_inv = cam.view_matrix().inverse();

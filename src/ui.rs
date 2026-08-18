@@ -863,24 +863,10 @@ impl HudState {
                 scale: 2.4,
             });
         }
-        // ---- 准星（屏幕中心）：腰射 = 扩散十字；开镜 = 收窄准星（机瞄精度感）----
+        // ---- 准星（屏幕中心）：腰射 = 扩散十字；开镜 = 隐藏（用机瞄三点一线）----
         let cx = w * 0.5;
         let cy = h * 0.5;
-        if self.ads {
-            // 开镜：小而精的准星（半长 5px，中心 1px 点）
-            elems.push(HudElement::Quad(Quad::new(
-                Rect::new(cx - 5.0, cy - 0.8, 10.0, 1.6),
-                Color::WHITE,
-            )));
-            elems.push(HudElement::Quad(Quad::new(
-                Rect::new(cx - 0.8, cy - 5.0, 1.6, 10.0),
-                Color::WHITE,
-            )));
-            elems.push(HudElement::Quad(Quad::new(
-                Rect::new(cx - 0.8, cy - 0.8, 1.6, 1.6),
-                Color::RED,
-            )));
-        } else {
+        if !self.ads {
             // 腰射：扩散十字（半长 8px）
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(cx - 8.0, cy - 1.5, 16.0, 3.0),

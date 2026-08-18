@@ -21,13 +21,13 @@ pub fn pp19() -> crate::engine::guns::GunMesh {
         // 机匣盖
         (t(0.0, 0.055, 0.0), beveled_box(0.042, 0.014, 0.19, 0.006, 4), DEEP_BLACK),
         // 螺旋弹筒
-        (t(0.0, -0.055, 0.065) * rz(), cylinder(0.035, 0.20, 20), STEEL_D),
+        (t(0.0, -0.055, 0.065) * rz(), cylinder(0.035, 0.20, 12), STEEL_D),
         // 弹筒前盖
-        (t(0.0, -0.055, 0.166) * rz(), cylinder(0.037, 0.012, 20), DEEP_BLACK),
+        (t(0.0, -0.055, 0.166) * rz(), cylinder(0.037, 0.012, 12), DEEP_BLACK),
         // 螺旋肋条
-        (t(0.0, -0.055, 0.01) * rx(0.3), torus_arc(0.035, 0.0045, 0.0, TAU, 20, 6), DEEP_BLACK),
-        (t(0.0, -0.055, 0.07) * rx(0.6), torus_arc(0.035, 0.0045, 0.0, TAU, 20, 6), DEEP_BLACK),
-        (t(0.0, -0.055, 0.13) * rx(0.9), torus_arc(0.035, 0.0045, 0.0, TAU, 20, 6), DEEP_BLACK),
+        (t(0.0, -0.055, 0.01) * rx(0.3), torus_arc(0.035, 0.0045, 0.0, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, -0.055, 0.07) * rx(0.6), torus_arc(0.035, 0.0045, 0.0, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, -0.055, 0.13) * rx(0.9), torus_arc(0.035, 0.0045, 0.0, TAU, 8, 6), DEEP_BLACK),
         // 短枪管
         (t(0.0, 0.01, 0.185) * rz(), cylinder(0.016, 0.14, 16), STEEL_L),
         // 消焰器
@@ -45,7 +45,7 @@ pub fn pp19() -> crate::engine::guns::GunMesh {
         // 握把
         (t(0.0, -0.062, -0.11) * rx(0.3), beveled_box(0.032, 0.075, 0.05, 0.010, 4), POLY_BLACK),
         // 扳机护圈
-        (t(0.0, -0.025, -0.05), torus_arc(0.03, 0.005, PI, TAU, 16, 6), DEEP_BLACK),
+        (t(0.0, -0.025, -0.05), torus_arc(0.03, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.045, -0.045), beveled_box(0.008, 0.024, 0.006, 0.002, 2), STEEL_D),
         // 折叠托臂 L/R
@@ -69,15 +69,15 @@ pub fn pp9() -> crate::engine::guns::GunMesh {
         // 细长机匣
         (t(0.0, 0.01, -0.05), beveled_box(0.055, 0.06, 0.22, 0.010, 4), POLY_BLACK),
         // 一体消音器
-        (t(0.0, 0.0, 0.24) * rz(), cylinder(0.026, 0.34, 24), DEEP_BLACK),
+        (t(0.0, 0.0, 0.24) * rz(), cylinder(0.026, 0.34, 12), DEEP_BLACK),
         // 消音器前盖
-        (t(0.0, 0.0, 0.405) * rz(), cylinder(0.027, 0.02, 20), DEEP_BLACK),
+        (t(0.0, 0.0, 0.405) * rz(), cylinder(0.027, 0.02, 12), DEEP_BLACK),
         // 钢箍肋条
-        (t(0.0, 0.0, 0.16), torus_arc(0.026, 0.004, 0.0, TAU, 24, 6), STEEL_L),
-        (t(0.0, 0.0, 0.27), torus_arc(0.026, 0.004, 0.0, TAU, 24, 6), STEEL_L),
-        (t(0.0, 0.0, 0.37), torus_arc(0.026, 0.004, 0.0, TAU, 24, 6), STEEL_L),
+        (t(0.0, 0.0, 0.16), torus_arc(0.026, 0.004, 0.0, TAU, 8, 6), STEEL_L),
+        (t(0.0, 0.0, 0.27), torus_arc(0.026, 0.004, 0.0, TAU, 8, 6), STEEL_L),
+        (t(0.0, 0.0, 0.37), torus_arc(0.026, 0.004, 0.0, TAU, 8, 6), STEEL_L),
         // 连接环
-        (t(0.0, 0.0, 0.08) * rz(), cylinder(0.028, 0.018, 20), STEEL_D),
+        (t(0.0, 0.0, 0.08) * rz(), cylinder(0.028, 0.018, 12), STEEL_D),
         // 顶部导轨
         (t(0.0, 0.046, -0.03), beveled_box(0.03, 0.012, 0.16, 0.004, 4), DEEP_BLACK),
         // 护木
@@ -93,7 +93,7 @@ pub fn pp9() -> crate::engine::guns::GunMesh {
         // 握把
         (t(0.0, -0.06, -0.11) * rx(0.25), beveled_box(0.032, 0.075, 0.05, 0.010, 4), POLY_BLACK),
         // 扳机护圈
-        (t(0.0, -0.022, -0.075), torus_arc(0.028, 0.005, PI, TAU, 16, 6), DEEP_BLACK),
+        (t(0.0, -0.022, -0.075), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.04, -0.07), beveled_box(0.008, 0.022, 0.006, 0.002, 2), STEEL_D),
         // 弹匣
@@ -119,15 +119,15 @@ pub fn vss() -> crate::engine::guns::GunMesh {
         // 机匣
         (t(0.0, 0.01, -0.05), beveled_box(0.055, 0.06, 0.22, 0.010, 4), OLIVE),
         // 一体消音器
-        (t(0.0, 0.0, 0.24) * rz(), cylinder(0.024, 0.32, 24), DEEP_BLACK),
+        (t(0.0, 0.0, 0.24) * rz(), cylinder(0.024, 0.32, 12), DEEP_BLACK),
         // 消音器前盖
-        (t(0.0, 0.0, 0.395) * rz(), cylinder(0.025, 0.022, 20), DEEP_BLACK),
+        (t(0.0, 0.0, 0.395) * rz(), cylinder(0.025, 0.022, 12), DEEP_BLACK),
         // 消音器肋条
-        (t(0.0, 0.0, 0.14), torus_arc(0.024, 0.0035, 0.0, TAU, 24, 6), DEEP_BLACK),
-        (t(0.0, 0.0, 0.24), torus_arc(0.024, 0.0035, 0.0, TAU, 24, 6), DEEP_BLACK),
-        (t(0.0, 0.0, 0.34), torus_arc(0.024, 0.0035, 0.0, TAU, 24, 6), DEEP_BLACK),
+        (t(0.0, 0.0, 0.14), torus_arc(0.024, 0.0035, 0.0, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, 0.0, 0.24), torus_arc(0.024, 0.0035, 0.0, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, 0.0, 0.34), torus_arc(0.024, 0.0035, 0.0, TAU, 8, 6), DEEP_BLACK),
         // 连接环
-        (t(0.0, 0.0, 0.075) * rz(), cylinder(0.027, 0.018, 20), STEEL_D),
+        (t(0.0, 0.0, 0.075) * rz(), cylinder(0.027, 0.018, 12), STEEL_D),
         // 护木
         (t(0.0, 0.0, 0.03), beveled_box(0.05, 0.05, 0.10, 0.010, 4), OLIVE),
         // 准星座
@@ -135,7 +135,7 @@ pub fn vss() -> crate::engine::guns::GunMesh {
         // 准星
         (t(0.0, 0.07, 0.32), beveled_box(0.005, 0.02, 0.005, 0.002, 2), STEEL_L),
         // 瞄准镜镜身
-        (t(0.0, 0.085, -0.05) * rz(), cylinder(0.018, 0.15, 20), DEEP_BLACK),
+        (t(0.0, 0.085, -0.05) * rz(), cylinder(0.018, 0.15, 12), DEEP_BLACK),
         // 物镜
         (t(0.0, 0.085, 0.04) * rz(), frustum(0.018, 0.026, 0.03, 16, true), DEEP_BLACK),
         // 目镜
@@ -151,7 +151,7 @@ pub fn vss() -> crate::engine::guns::GunMesh {
         // 木握把
         (t(0.0, -0.055, -0.15) * rx(0.3), beveled_box(0.032, 0.08, 0.05, 0.010, 4), WOOD),
         // 扳机护圈
-        (t(0.0, -0.02, -0.10), torus_arc(0.028, 0.005, PI, TAU, 16, 6), DEEP_BLACK),
+        (t(0.0, -0.02, -0.10), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.038, -0.095), beveled_box(0.008, 0.02, 0.006, 0.002, 2), STEEL_D),
         // 10发弹匣
@@ -172,14 +172,14 @@ pub fn asval() -> crate::engine::guns::GunMesh {
         // 机匣顶盖
         (t(0.0, 0.056, -0.03), beveled_box(0.042, 0.016, 0.17, 0.006, 4), POLY_BLACK),
         // 一体消音器
-        (t(0.0, 0.0, 0.23) * rz(), cylinder(0.024, 0.30, 24), DEEP_BLACK),
+        (t(0.0, 0.0, 0.23) * rz(), cylinder(0.024, 0.30, 12), DEEP_BLACK),
         // 消音器前盖
-        (t(0.0, 0.0, 0.375) * rz(), cylinder(0.025, 0.022, 20), DEEP_BLACK),
+        (t(0.0, 0.0, 0.375) * rz(), cylinder(0.025, 0.022, 12), DEEP_BLACK),
         // 钢箍肋条
-        (t(0.0, 0.0, 0.15), torus_arc(0.024, 0.0035, 0.0, TAU, 24, 6), STEEL_L),
-        (t(0.0, 0.0, 0.28), torus_arc(0.024, 0.0035, 0.0, TAU, 24, 6), STEEL_L),
+        (t(0.0, 0.0, 0.15), torus_arc(0.024, 0.0035, 0.0, TAU, 8, 6), STEEL_L),
+        (t(0.0, 0.0, 0.28), torus_arc(0.024, 0.0035, 0.0, TAU, 8, 6), STEEL_L),
         // 连接环
-        (t(0.0, 0.0, 0.075) * rz(), cylinder(0.027, 0.018, 20), STEEL_D),
+        (t(0.0, 0.0, 0.075) * rz(), cylinder(0.027, 0.018, 12), STEEL_D),
         // 护木（包裹消音器根部）
         (t(0.0, 0.0, 0.10), beveled_box(0.05, 0.05, 0.12, 0.010, 4), POLY_BLACK),
         // 准星座
@@ -204,7 +204,7 @@ pub fn asval() -> crate::engine::guns::GunMesh {
         // 握把
         (t(0.0, -0.058, -0.13) * rx(0.28), beveled_box(0.032, 0.08, 0.05, 0.010, 4), POLY_BLACK),
         // 扳机护圈
-        (t(0.0, -0.02, -0.09), torus_arc(0.028, 0.005, PI, TAU, 16, 6), DEEP_BLACK),
+        (t(0.0, -0.02, -0.09), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.038, -0.085), beveled_box(0.008, 0.02, 0.006, 0.002, 2), STEEL_D),
         // 20发弹匣

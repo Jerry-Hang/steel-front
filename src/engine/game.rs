@@ -2593,7 +2593,9 @@ impl Game {
         if len > 1e-4 {
             // 空中控制衰减：跳跃中水平移动减半（真实物理——空中无法急转弯）
             let air_factor = if self.jump_vel != 0.0 { 0.5 } else { 1.0 };
-            let step = (PLAYER_SPEED * air_factor * dt).min(0.5);
+            // 开镜减速：举枪瞄准移动 -35%（ADS 重量感；hud.ads 由 main.rs 每帧同步）
+            let ads_factor = if self.hud.ads { 0.65 } else { 1.0 };
+            let step = (PLAYER_SPEED * ads_factor * air_factor * dt).min(0.5);
             let (mx, mz) = self
                 .player_body
                 .try_move(&self.world, dx / len * step, dz / len * step);
