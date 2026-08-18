@@ -350,6 +350,8 @@ pub struct Firearm {
     max_magazine: u32,
     /// 备弹（弹匣外）
     reserve: u32,
+    /// 初始备弹（死亡重置弹药时恢复到此值）
+    reserve_max: u32,
     /// 换弹所需时间（秒）
     reload_time: f32,
     /// 换弹剩余时间（秒）
@@ -379,6 +381,7 @@ impl Firearm {
             magazine: max_magazine,
             max_magazine,
             reserve,
+            reserve_max: reserve,
             reload_time,
             reload_timer: 0.0,
             reloading: false,
@@ -421,6 +424,15 @@ impl Firearm {
     /// 重置为满弹匣、非换弹状态（新一局/复活用）
     pub fn reset(&mut self) {
         self.magazine = self.max_magazine;
+        self.reloading = false;
+        self.reload_timer = 0.0;
+        self.shots_fired = 0;
+    }
+
+    /// 重置全部弹药：弹匣补满 + 备弹恢复初始值 + 取消换弹（死亡复活补给用）
+    pub fn reset_ammo(&mut self) {
+        self.magazine = self.max_magazine;
+        self.reserve = self.reserve_max;
         self.reloading = false;
         self.reload_timer = 0.0;
         self.shots_fired = 0;
@@ -603,6 +615,13 @@ impl WeaponRack {
     /// 是否正在切换（切换期间禁止开火/换弹）
     pub fn is_switching(&self) -> bool {
         self.switch_timer > 0.0
+    }
+
+    /// 重置全部槽位弹药：每把枪弹匣补满 + 备弹恢复初始（死亡补给/重开一局用）
+    pub fn reset_all_ammo(&mut self) {
+        for (_, firearm) in self.weapons.iter_mut() {
+            firearm.reset_ammo();
+        }
     }
 
     /// 武器槽数量
@@ -978,6 +997,53 @@ mod tests {
         }
         assert_eq!(shots, 30);
         assert_eq!(gun.magazine(), 0);
+    }
+
+    /// 死亡补给：reset_ammo 弹匣补满 + 备弹恢复初始 + 取消换弹
+    #[test]
+    fn reset_ammo_restores_magazine_and_reserve() {
+        let mut gun = thompson_smg_firearm();
+        // 打光弹匣 30 发 → 自动换弹（备弹 120 → 90 补满弹匣）
+        while gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_some() {}
+        gun.update(5.0);
+        assert_eq!(gun.magazine(), 30);
+        assert_eq!(gun.reserve(), 90);
+        // 再打 5 发
+        for _ in 0..5 {
+            gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        }
+        assert_eq!(gun.magazine(), 25);
+        assert_eq!(gun.reserve(), 90);
+        // 死亡补给：弹匣满 + 备弹恢复 120
+        gun.reset_ammo();
+        assert_eq!(gun.magazine(), 30);
+        assert_eq!(gun.reserve(), 120);
+        assert!(!gun.is_reloading());
+        assert!(gun.can_fire());
+    }
+
+    /// 武器架全量补给：每个槽位弹匣/备弹一并恢复
+    #[test]
+    fn rack_reset_all_ammo_refills_every_slot() {
+        let mut rack = sample_rack();
+        // 0 号槽打 5 发
+        for _ in 0..5 {
+            rack.active_firearm().try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        }
+        assert_eq!(rack.active_firearm_ref().magazine(), 3);
+        // 切到 1 号槽（Thompson 30 发）打 2 发
+        rack.switch_to(1);
+        for _ in 0..2 {
+            rack.active_firearm().try_fire([0.0; 3], [1.0, 0.0, 0.0]);
+        }
+        assert_eq!(rack.active_firearm_ref().magazine(), 28);
+        // 全量补给：两个槽位都恢复满弹匣 + 初始备弹
+        rack.reset_all_ammo();
+        assert_eq!(rack.active_firearm_ref().magazine(), 30);
+        assert_eq!(rack.active_firearm_ref().reserve(), 120);
+        rack.switch_to(0);
+        assert_eq!(rack.active_firearm_ref().magazine(), 8);
+        assert_eq!(rack.active_firearm_ref().reserve(), 40);
     }
 
     fn sample_rack() -> WeaponRack {

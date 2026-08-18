@@ -1183,7 +1183,7 @@ impl Game {
         self.wave = 1;
         self.wave_timer = 0.0;
         self.fire_cooldown = 0.0;
-        self.weapons.active_firearm().reset();
+        self.weapons.reset_all_ammo();
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
@@ -2744,7 +2744,9 @@ impl Game {
                     } else {
                         self.game_state = GameState::GameOver;
                     }
-                    log::info!("explosion: 玩家被自己手榴弹炸死");
+                    // 死亡补给：全部武器弹匣补满 + 备弹恢复初始
+                    self.weapons.reset_all_ammo();
+                    log::info!("explosion: 玩家被自己手榴弹炸死（弹药已重置）");
                 }
             }
         }
@@ -3582,6 +3584,8 @@ impl Game {
                         self.wave
                     );
                 }
+                // 死亡补给：全部武器弹匣补满 + 备弹恢复初始
+                self.weapons.reset_all_ammo();
             }
         }
     }
@@ -4295,6 +4299,43 @@ mod tests {
         }
         assert_eq!(game.state(), GameState::GameOver, "health 0 should end the run");
         assert_eq!(game.hud.health, 0.0);
+    }
+
+    /// 死亡补给：玩家死亡瞬间全部武器弹匣补满 + 备弹恢复初始
+    #[test]
+    fn death_resets_all_ammo() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        // 消耗当前武器（AK-12M 30 发弹匣）10 发（每发后推进冷却）
+        let cam = Camera::new();
+        for _ in 0..10 {
+            game.fire(game.player_eye().to_array(), [0.0, 0.0, 1.0]);
+            for _ in 0..10 {
+                game.update(1.0 / 60.0, &cam);
+            }
+        }
+        assert_eq!(game.weapons.active_firearm_ref().magazine(), 20, "先消耗 10 发");
+        // 把 NPC 放到玩家脚边，打死玩家进入 GameOver
+        game.npcs[0].position = [1.0, 0.0, 1.0];
+        game.hud.health = 6.0;
+        for _ in 0..300 {
+            game.update(1.0 / 60.0, &cam);
+            if game.state() == GameState::GameOver {
+                break;
+            }
+        }
+        assert_eq!(game.state(), GameState::GameOver, "玩家应已阵亡");
+        // 死亡补给生效：当前武器弹匣补满、备弹恢复初始
+        assert_eq!(
+            game.weapons.active_firearm_ref().magazine(),
+            game.weapons.active_firearm_ref().max_magazine(),
+            "死亡后弹匣应补满"
+        );
+        assert_eq!(
+            game.weapons.active_firearm_ref().reserve(),
+            90,
+            "死亡后备弹应恢复初始 90（AK-12M）"
+        );
     }
 
     /// GameOver 冻结：投射物继续飞行但不产生新击杀、不计分

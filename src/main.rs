@@ -1382,9 +1382,10 @@ impl ApplicationHandler for GameApp {
                             );
                         }
                     }
-                    // Enter：设置面板选中分辨率/画质行时循环切换；选中键位行时进入"等待按键绑定"
-                    KeyCode::Enter => {
-                        if pressed && self.game.settings_open() {
+                    // Enter / 斜杠 /：打开命令输入窗口（类 MC：/ 打开、数字切枪、回车执行）。
+                    // 设置面板打开时 Enter 仍走行循环/键位绑定逻辑
+                    KeyCode::Enter | KeyCode::Slash => {
+                        if pressed && self.game.settings_open() && key_code == KeyCode::Enter {
                             match self.game.hud.settings_selection() {
                                 3 => {
                                     // RESOLUTION 行：循环切换分辨率并即时应用
@@ -1405,14 +1406,15 @@ impl ApplicationHandler for GameApp {
                             && self.game.state() == GameState::Playing
                             && !self.game.hud.esc_menu_open
                         {
-                            log::info!("command: 打开命令窗口");
+                            log::info!("command: 打开命令窗口（/）");
                             self.command_open = true;
                             self.command_buf.clear();
                             // 防卡键：清移动/开镜状态（窗口打开期间不响应移动/开火）
                             self.key_state.reset();
                             self.game.set_movement(false, false, false, false);
                             self.ads_active = false;
-                        } else if pressed {
+                        } else if pressed && key_code == KeyCode::Enter {
+                            // Enter 且非 Playing：死亡/胜利结算重开本关
                             let st = self.game.state();
                             if st == GameState::GameOver
                                 || matches!(st, GameState::Victory(_) | GameState::Defeat)
