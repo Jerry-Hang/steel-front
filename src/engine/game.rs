@@ -41,6 +41,8 @@ const GRID_SIZE: usize = 128;
 const GRID_HALF: f32 = GRID_CELL * (GRID_SIZE as f32) * 0.5;
 /// NPC 数量
 const NPC_COUNT: usize = 8;
+/// NPC 命中球心高度（脚上 1.0m；hit_npc_index 的球心与 hit_height 公式共用此值）
+const NPC_HIT_CENTER_Y: f32 = 1.0;
 /// NPC 发现玩家距离（米）
 const NPC_SIGHT: f32 = 60.0;
 /// 波间倒计时（秒）
@@ -2294,6 +2296,15 @@ impl Game {
             .unwrap_or("hk416")
     }
 
+    /// 诊断用：把 npc[0] 放到指定位置并固定（弹道隔离实验，RV3D_DIAG_NPC_FRONT）
+    pub fn diag_place_npc(&mut self, pos: [f32; 3]) {
+        if !self.npcs.is_empty() {
+            self.npcs[0].position = pos;
+            self.npcs[0].speed = 0.0;
+            self.npcs[0].state_machine = NpcStateMachine::new();
+        }
+    }
+
     /// NPC 受击闪白剩余强度（0..1；0 = 无闪白）。渲染侧按此混合白色 tint。
     pub fn npc_flash(&self, id: usize) -> f32 {
         self.npc_hit_flash
@@ -2637,6 +2648,40 @@ impl Game {
     ///
     /// `allow_kills = false`（GameOver 冻结）：投射物照常飞行/到期，但不判定任何命中。
     fn update_projectiles(&mut self, dt: f32, allow_kills: bool) {
+        // 弹道诊断（节流 2s）：投射物数量/首个位置/最近 NPC 距离
+        static LAST_PROJ_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let last = LAST_PROJ_LOG.load(std::sync::atomic::Ordering::Relaxed);
+        if now_ms - last > 2000 {
+            LAST_PROJ_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+            let first = self.projectiles.first().map(|p| {
+                format!(
+                    "pos=({:.0},{:.0},{:.0}) dist={:.0}m",
+                    p.position[0],
+                    p.position[1],
+                    p.position[2],
+                    p.distance_traveled()
+                )
+            });
+            let nearest_npc = self
+                .npcs
+                .iter()
+                .map(|n| {
+                    let dx = n.position[0] - self.player_body.pos.x;
+                    let dz = n.position[2] - self.player_body.pos.z;
+                    (dx * dx + dz * dz).sqrt()
+                })
+                .fold(f32::MAX, f32::min);
+            log::info!(
+                "proj-diag: alive={} first=[{}] nearest_npc={:.0}m",
+                self.projectiles.len(),
+                first.unwrap_or_else(|| "none".to_string()),
+                nearest_npc
+            );
+        }
         for p in self.projectiles.iter_mut() {
             if p.is_alive() {
                 p.update(dt);
@@ -2678,7 +2723,16 @@ impl Game {
             if let Some((idx, hit_h)) = self.hit_npc_index(&p) {
                 hit_count += 1;
                 let mult = Self::part_multiplier(hit_h, self.npcs[idx].position[1]);
-                self.damage_npc(idx, p.damage_at_distance() * mult);
+                let dmg = p.damage_at_distance() * mult;
+                log::info!(
+                    "weapons: 命中 NPC #{} 高度={:.1} 倍率={:.1} 伤害={:.0} 距离={:.0}m",
+                    self.npcs[idx].id,
+                    hit_h - self.npcs[idx].position[1],
+                    mult,
+                    dmg,
+                    p.distance_traveled()
+                );
+                self.damage_npc(idx, dmg);
                 continue;
             }
             alive.push(p);
@@ -2955,11 +3009,13 @@ impl Game {
         }
         for (i, npc) in self.npcs.iter().enumerate() {
             let cx = npc.position[0];
-            // 命中球：中心 +0.9m、半径 0.95m → 覆盖 -0.05..1.85m（含头部；
-            // 2026-08-18 修复：旧球 0..1.6m 覆盖不到头（1.63-1.77m）→ 瞄头不命中）
-            let cy = npc.position[1] + 0.9;
+            // 命中球：中心 +1.0m、半径 1.05m → 覆盖 -0.05..2.05m（含头+余量）。
+            // 2026-08-19 修复：玩家眼位 y≈2.0，水平弹道从旧球顶（1.85m）上方掠过
+            // → 瞄准身体也打不中（头顶掠过 miss）——加大后水平弹道可命中。
+            // 注意：球心高度与下方 hit_height 的 +NPC_HIT_CENTER_Y 必须一致。
+            let cy = npc.position[1] + NPC_HIT_CENTER_Y;
             let cz = npc.position[2];
-            let r = 0.95;
+            let r = 1.05;
             // 点到射线最近点参数 t（clamp 到 [0,1] 段内），再算距离²
             let fx = ax - cx;
             let fy = ay - cy;
@@ -2970,8 +3026,8 @@ impl Game {
             let qy = fy + t * dy;
             let qz = fz + t * dz;
             if qx * qx + qy * qy + qz * qz <= r * r {
-                // 命中点世界高度 = 球心(+0.8) + 最近点相对偏移 qy + NPC 地面 y
-                let hit_height = qy + npc.position[1] + 0.8;
+                // 命中点世界高度 = 球心 + 最近点相对偏移 qy + NPC 地面 y
+                let hit_height = qy + npc.position[1] + NPC_HIT_CENTER_Y;
                 return Some((i, hit_height));
             }
         }
@@ -4462,6 +4518,38 @@ mod tests {
             90,
             "死亡后备弹应恢复初始 90（AK-12M）"
         );
+    }
+
+    /// 精确场景：玩家眼位 y=3 朝 20m 外同地形 NPC 水平射击 → 弹道应穿过命中球
+    #[test]
+    fn hitbox_horizontal_20m_same_terrain() {
+        let mut game = Game::new();
+        game.npcs.truncate(1);
+        let eye_y = 3.0; // 模拟玩家眼位（地形高 1.4 + 眼位 1.6）
+        let ground_y = 1.4;
+        game.npcs[0].position = [0.0, ground_y, -20.0];
+        // 水平弹道：从 (0, eye_y, 0) 朝 -Z
+        let mut p = Projectile::new(
+            [0.0, eye_y, 0.0],
+            [0.0, 0.0, -1.0],
+            75.0,
+            400.0,
+            6.0,
+            28.0,
+        );
+        // 推进到 z=-20 附近（75m/s × 0.267s）
+        p.update(0.267);
+        let hit = game.hit_npc_index(&p);
+        assert!(
+            hit.is_some(),
+            "20m 水平射击应命中：弹道 y={} 球覆盖 {:.1}..{:.1}",
+            p.position[1],
+            ground_y - 0.05,
+            ground_y + 2.05
+        );
+        // 推进穿过（z=-40），仍应命中（segment 覆盖球）
+        p.update(0.267);
+        assert!(game.hit_npc_index(&p).is_some(), "弹道穿过球心段应命中");
     }
 
     /// 命中判定覆盖：瞄头/瞄身/瞄腿/远距都应命中（hitbox 含整身 0..1.85m），脱靶不命中

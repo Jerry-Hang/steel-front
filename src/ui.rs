@@ -863,10 +863,17 @@ impl HudState {
                 scale: 2.4,
             });
         }
-        // ---- 准星（屏幕中心）：腰射 = 扩散十字；开镜 = 隐藏（用机瞄三点一线）----
+        // ---- 准星（屏幕中心）：腰射 = 扩散十字；开镜 = 极小中心瞄准点 ----
+        // 2026-08-19：开镜隐藏十字，但保留 3px 中心红点——弹道=屏幕中心，
+        // 机瞄为视觉参考；若完全无瞄准点，玩家凭机瞄瞄准会与弹道偏差（打不中）。
         let cx = w * 0.5;
         let cy = h * 0.5;
-        if !self.ads {
+        if self.ads {
+            elems.push(HudElement::Quad(Quad::new(
+                Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0),
+                Color::new(1.0, 0.2, 0.2, 0.9),
+            )));
+        } else if !self.ads {
             // 腰射：扩散十字（半长 8px）
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(cx - 8.0, cy - 1.5, 16.0, 3.0),

@@ -242,6 +242,27 @@ impl GameApp {
                 self.switch_weapon_at = None;
             }
         }
+        // RV3D_DIAG_NPC_FRONT=1：把 npc[0] 放到玩家正前方 20m 固定（弹道诊断隔离实验）
+        static DIAG_NPC_FRONT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DIAG_NPC_FRONT.get_or_init(|| {
+            std::env::var("RV3D_DIAG_NPC_FRONT").as_deref() == Ok("1")
+        }) && self.game.state() == GameState::Playing
+        {
+            // 相机 yaw=0 时 forward 方向（与 fire 弹道同源），NPC 放前方 20m
+            let fwd = self.camera.forward();
+            let pos = self.camera.position();
+            let nx = pos.x + fwd.x * 20.0;
+            let nz = pos.z + fwd.z * 20.0;
+            let ny = crate::engine::renderer::terrain_height_at(nx, nz);
+            self.game.diag_place_npc([nx, ny, nz]);
+        }
+        // RV3D_AUTOFIRE=1：自动开火（诊断射击链路：fire 是否发射、弹道是否命中）
+        static AUTO_FIRE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *AUTO_FIRE.get_or_init(|| std::env::var("RV3D_AUTOFIRE").as_deref() == Ok("1"))
+            && self.game.state() == GameState::Playing
+        {
+            self.fire_requested = true;
+        }
         // 同步光标捕获状态（Playing + 聚焦 = 捕获；菜单/结算/失焦 = 释放）
         self.sync_cursor();
 
