@@ -324,11 +324,11 @@ struct Instance {
 // 槽位约定（必须与 renderer.rs 常量同步）：
 // TERRAIN_INSTANCE_INDEX=65536（地形 identity，mesh 路径不绘制该槽）、
 // MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65536+1+64=65601、
-// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+1024=66625
+// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+3072=68673（NPC 三几何区：盒/圆柱/球，各 1024）
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
-const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 1024u;
+const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 
 // 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
 struct VertexOutput {
@@ -511,9 +511,9 @@ fn mesh_main(
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
     }
-    // 枪模槽位 = NPC 区末 16 槽（与 renderer.rs set_first_person_gun 的
-    // MAX_NPC_INSTANCES-16 起始一致）：深度覆盖标记。
-    // 上界必须 < EMISSIVE_INSTANCE_BASE（自发光 66625+ 不得命中，否则
+    // 枪模槽位 = NPC 盒体区末 16 槽（深度覆盖标记；mesh 路径不画枪模，
+    // 此判定仅保护传统 draw 的 GUN 槽语义）。
+    // 上界必须 < EMISSIVE_INSTANCE_BASE（自发光 68673+ 不得命中，否则
     // 爆炸/手雷/粒子被强制画最前——修复越界回归）
     let is_gun = slot >= NPC_INSTANCE_BASE + 1024u - 16u && slot < EMISSIVE_INSTANCE_BASE;
 

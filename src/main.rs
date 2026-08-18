@@ -199,6 +199,18 @@ impl GameApp {
 
     /// 更新逻辑（每帧调用）
     fn update(&mut self) {
+        // RV3D_AUTOSTART=1：测试用自动开始（绕过键盘，进 Playing 复现/冒烟）
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static AUTO_STARTED: AtomicBool = AtomicBool::new(false);
+        if !AUTO_STARTED.swap(true, Ordering::SeqCst)
+            && std::env::var("RV3D_AUTOSTART").as_deref() == Ok("1")
+        {
+            let st = self.game.state();
+            if st == GameState::StartMenu || st == GameState::LoadingMap {
+                log::info!("autostart: RV3D_AUTOSTART=1 自动开始");
+                self.game.on_any_key(&self.camera.position());
+            }
+        }
         // 同步光标捕获状态（Playing + 聚焦 = 捕获；菜单/结算/失焦 = 释放）
         self.sync_cursor();
 

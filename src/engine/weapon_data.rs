@@ -264,6 +264,18 @@ mod tests {
             assert!(!gm.indices.is_empty(), "{} 索引为空", spec.key);
             assert!(!gm.display_name.is_empty(), "{} 缺显示名", spec.key);
             assert!(gm.length > 0.15, "{} 长度异常 {}", spec.key, gm.length);
+            // 索引合法性：任何索引不得越界（越界会在 GPU 端导致 device lost）
+            let vmax = gm.verts.len() as u32;
+            for (i, &idx) in gm.indices.iter().enumerate() {
+                assert!(
+                    idx < vmax,
+                    "{} 索引 #{} = {} 越界（顶点数 {}）",
+                    spec.key,
+                    i,
+                    idx,
+                    vmax
+                );
+            }
         }
     }
 }

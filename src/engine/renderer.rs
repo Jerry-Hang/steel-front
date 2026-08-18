@@ -457,6 +457,7 @@ const EMISSIVE_SLOT_BASE: u32 = NPC_SPH_SLOT_BASE + MAX_NPC_INSTANCES;
 const GUN_INSTANCE_INDEX: u32 =
     INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES * 3 + MAX_EMISSIVE_INSTANCES;
 
+
 /// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -4188,6 +4189,7 @@ impl Renderer {
                     .expect("枪模顶点缓冲映射失败")
             };
             self.gun_buffer_capacity_verts = need_verts;
+            self.gun_buffer_capacity_idx = need_idx;
         }
         // 写入顶点（GVertex → Vertex: pos/color/uv；color 已含烘焙光照）
         let vptr = self.gun_mapped as *mut Vertex;
@@ -6781,7 +6783,7 @@ impl Renderer {
             self.last_marker_far,
             MARKER_SLOT_BASE + self.last_marker_near,
         )?;
-        // NPC 盒体区（躯干/脚/枪）
+        // NPC 盒体区（躯干/脚/枪；阴影以盒体近似）
         self.draw_shadow_range(
             command_buffer,
             self.vertex_buffer,
