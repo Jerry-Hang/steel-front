@@ -531,16 +531,15 @@ impl GameApp {
             }
         };
         let cam = &self.camera;
-        // ADS 双姿态常量（2026-08-18 规范重写：位置 + 旋转 + FOV 全部量化）
-        // 腰射：枪在右下，向左偏转 5°（自然持枪角），FOV 70°，十字准星可见；
-        // 开镜：枪居中贴腮、旋转归零、机瞄对准屏幕中心，FOV 55°，准星隐藏。
-        // 两姿态按 ads_blend（0.2s 指数插值）平滑过渡，无跳变。
-        let hip_pos = glam::Vec3::new(0.25, -0.20, -0.50);
-        let ads_pos = glam::Vec3::new(0.0, -0.05, -0.35);
+        // ADS 姿态（2026-08-18 第三轮规范：模型已水平校正，rotation 全零）：
+        // 腰射：枪在右下 (0.25,-0.20,-0.60)，FOV 70°，十字准星可见；
+        // 开镜：枪居中 (0.0,-0.08,-0.42)，FOV 55°，准星隐藏（机瞄三点一线）。
+        // 缩放大幅调低（0.98→0.5）：枪长 1.2m 在 0.6m 距离下占视野 ~70%，
+        // 解决"怼脸/穿模"（旧值枪张角 100° > FOV 70°，必然怼脸）。
+        let hip_pos = glam::Vec3::new(0.25, -0.20, -0.60);
+        let ads_pos = glam::Vec3::new(0.0, -0.08, -0.42);
         let b = self.ads_blend;
         let mut anchor = hip_pos.lerp(ads_pos, b);
-        // 偏航：腰射 -5°（绕 Y 向左偏），开镜归零——插值随 blend
-        let hip_yaw = -5.0_f32.to_radians() * (1.0 - b);
         if self.game.is_firing() {
             let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
             anchor.y -= 0.07 * k;
@@ -548,16 +547,15 @@ impl GameApp {
         }
         let bob = (self.anim_clock * 10.0).sin() * 0.012;
         anchor.x += bob;
-        // 倾斜：腰射轻微右倾 → 开镜扶正（随 blend 插值）
-        let tilt = 0.02 * (1.0 - self.ads_blend);
-        let base_scale = 0.98 - 0.03 * self.ads_blend;
+        // 旋转全零（模型已水平校正，无需姿态补偿旋转）——保留 0 便于未来微调贴腮角
+        let tilt = 0.0;
+        let base_scale = 0.50 - 0.03 * self.ads_blend;
         let gun_scale =
             ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * base_scale;
         let view_inv = cam.view_matrix().inverse();
         let m = view_inv
             * glam::Mat4::from_translation(anchor)
             * glam::Mat4::from_rotation_z(tilt)
-            * glam::Mat4::from_rotation_y(hip_yaw)
             * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
             * glam::Mat4::from_rotation_x(-0.045)
             * glam::Mat4::from_rotation_y(std::f32::consts::PI);

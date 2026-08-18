@@ -324,6 +324,54 @@ mod tests {
         }
     }
 
+    /// 第一人称视空间范围校验（地基验证）：枪模在腰射/开镜姿态下
+    /// 视空间 z 必须 < 0（不穿相机）且屏幕张角 < FOV（不怼脸）。
+    /// 姿态参数与 main.rs first_person_gun_mesh 保持一致。
+    #[test]
+    fn gun_fp_viewspace_no_clip() {
+        // 姿态（与 main.rs 同步）：(锚点, 缩放)
+        let hip = (glam::Vec3::new(0.25, -0.20, -0.60), 0.50);
+        let ads = (glam::Vec3::new(0.0, -0.08, -0.42), 0.47);
+        for spec in ALL_WEAPONS.iter() {
+            let gm = crate::engine::guns::gun_mesh_by_key(spec.key)
+                .unwrap_or_else(|| panic!("{} 无枪模", spec.key));
+            // 局部包围盒
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for v in &gm.verts {
+                for (i, p) in v.pos.iter().enumerate() {
+                    min[i] = min[i].min(*p);
+                    max[i] = max[i].max(*p);
+                }
+            }
+            for (name, (anchor, scale)) in [("hip", hip), ("ads", ads)] {
+                // 视空间 z = anchor.z - 局部 z * scale（Ry(π) 翻转使 +Z 朝后）
+                let z_front = anchor.z - min[2] * scale; // 枪口端（局部 +Z → 视空间更负）
+                let z_back = anchor.z - max[2] * scale; // 枪尾端（局部 -Z → 视空间更正）
+                let z_near = z_front.min(z_back); // 最远（负方向）
+                let z_far = z_front.max(z_back); // 最近（穿模风险端）
+                assert!(
+                    z_far < -0.05,
+                    "{} {} 穿模：枪尾 z={:.2} 越过相机平面",
+                    spec.key,
+                    name,
+                    z_far
+                );
+                // 张角：枪长在最近距离下的半角
+                let dist = (-z_near).max(0.1);
+                let half_len = (max[2] - min[2]).abs() * scale * 0.5;
+                let ang = half_len.atan2(dist) * 2.0;
+                assert!(
+                    ang < 70.0_f32.to_radians(),
+                    "{} {} 怼脸：枪张角 {:.0}° > FOV 70°",
+                    spec.key,
+                    name,
+                    ang.to_degrees()
+                );
+            }
+        }
+    }
+
     /// 打印并校验最大网格规模（枪模缓冲预分配容量依据）
     #[test]
     fn gun_mesh_max_sizes_report() {
