@@ -765,6 +765,8 @@ pub struct Game {
     shake_strength: f32,
     /// 开火冷却剩余时间（秒）
     fire_cooldown: f32,
+    /// 散布缩放（1.0 = 腰射全散布；main.rs 按 ADS 混合设置，开镜时缩小到 0.3）
+    spread_scale: f32,
     /// 开火模式（B 键循环切换）
     fire_mode: FireMode,
     /// 连发热量 0..1：连续射击累积，压制枪口上扬；停火后衰减
@@ -1010,6 +1012,7 @@ impl Game {
             shake_timer: 0.0,
             shake_strength: 0.0,
             fire_cooldown: 0.0,
+            spread_scale: 1.0,
             fire_mode: FireMode::Auto,
             auto_heat: 0.0,
             npc_hit_flash: std::collections::HashMap::new(),
@@ -2133,7 +2136,20 @@ impl Game {
         let active_spec = ALL_WEAPONS
             .iter()
             .find(|s| s.name_zh == self.weapons.active_name());
-        match self.weapons.active_firearm().try_fire(origin, direction) {
+        // V3.0 散射密度（MOA → 弧度）：半角半径 × spread_scale（开镜缩小散布）。
+        // 均匀矩形扰动 ±half；霰弹全部 8 弹丸共用同一散布锥。
+        let moa_half = active_spec
+            .map(|s| s.spread_moa * 0.000_291_f32 * 0.5 * self.spread_scale)
+            .unwrap_or(0.0);
+        let fire_dir = if moa_half > 0.0 {
+            let seed = self.shots.wrapping_mul(2_654_435_761) + 17;
+            let r1 = ((seed % 10_000) as f32 / 10_000.0) - 0.5;
+            let r2 = (((seed.wrapping_mul(4_052_877)) % 10_000) as f32 / 10_000.0) - 0.5;
+            Self::spread_direction(direction, r1 * 2.0 * moa_half, r2 * 2.0 * moa_half)
+        } else {
+            direction
+        };
+        match self.weapons.active_firearm().try_fire(origin, fire_dir) {
             Some(projectile) => {
                 // 连发热量：连续射击累积（0..1），压制后续枪口上扬——前几发上扬大，
                 // 连发后期上扬趋于稳定（模拟控枪）；停火后 update 中按速率衰减
@@ -2153,9 +2169,9 @@ impl Game {
                             let r1 = ((seed * 2_654_435_761) % 10_000) as f32 / 10_000.0;
                             let r2 = ((seed * 4_052_877 % 10_000) + 1) as f32 / 10_000.0;
                             let dir = Self::spread_direction(
-                                direction,
-                                (r1 - 0.5) * 0.098,
-                                (r2 - 0.5) * 0.098,
+                                fire_dir,
+                                (r1 - 0.5) * 2.0 * moa_half.max(0.000_5),
+                                (r2 - 0.5) * 2.0 * moa_half.max(0.000_5),
                             );
                             self.projectiles.push(weapon.fire(origin, dir));
                         }
@@ -2240,6 +2256,11 @@ impl Game {
             self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * 3.0;
         }
         n
+    }
+
+    /// 设置散布缩放（main.rs 每帧按 ADS 混合更新：1.0 腰射 → 0.3 开镜）
+    pub fn set_spread_scale(&mut self, scale: f32) {
+        self.spread_scale = scale.clamp(0.1, 1.0);
     }
 
     /// 循环切换开火模式（B 键）：单发 → 三连发 → 连发
@@ -2746,7 +2767,8 @@ impl Game {
             }
             if let Some((idx, hit_h)) = self.hit_npc_index(&p) {
                 hit_count += 1;
-                let mult = Self::part_multiplier(hit_h, self.npcs[idx].position[1]);
+                // V3.0：部位倍率按武器分段表 + 已飞距离查表（投射物携带 part_tiers）
+                let mult = p.part_multiplier(hit_h, self.npcs[idx].position[1]);
                 let dmg = p.damage_at_distance() * mult;
                 // 命中火花点（NPC 身体命中位置）+ 伤害飘字值
                 self.hit_points.push([p.position[0], hit_h, p.position[2]]);
@@ -2784,40 +2806,92 @@ impl Game {
         }
     }
 
-    /// 投射物是否命中物理刚体/球体（命中即销毁，不产生击杀）
+    /// 投射物是否命中物理刚体/球体（命中即销毁，不产生击杀）。
+    /// V3.0 高速弹（710m/s → 每帧 11.8m）不能用单点采样（会跳过小掩体/球体），
+    /// 改为上一帧→当前位置的线段与 AABB/球体求交。
     fn collide_physics(&self, p: &Projectile) -> bool {
-        let (px, py, pz) = (p.position[0], p.position[1], p.position[2]);
+        let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
+        let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);
         for body in &self.world.bodies {
             let aabb = body.aabb();
-            if px >= aabb.min.x && px <= aabb.max.x
-                && py >= aabb.min.y && py <= aabb.max.y
-                && pz >= aabb.min.z && pz <= aabb.max.z {
+            if Self::segment_hits_aabb(ax, ay, az, bx, by, bz, &aabb) {
                 return true;
             }
         }
         for s in &self.world.spheres {
-            let dx = px - s.center.x;
-            let dy = py - s.center.y;
-            let dz = pz - s.center.z;
-            if dx * dx + dy * dy + dz * dz <= s.radius * s.radius {
+            if Self::segment_hits_sphere(ax, ay, az, bx, by, bz, s) {
                 return true;
             }
         }
         false
     }
 
+    /// 线段 [A,B] 与 AABB 求交（slab 法，参数 t ∈ [0,1]）
+    fn segment_hits_aabb(
+        ax: f32, ay: f32, az: f32,
+        bx: f32, by: f32, bz: f32,
+        aabb: &crate::engine::physics::Aabb,
+    ) -> bool {
+        let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
+        let mut tmin: f32 = 0.0;
+        let mut tmax: f32 = 1.0;
+        for (d, a, lo, hi) in [
+            (dx, ax, aabb.min.x, aabb.max.x),
+            (dy, ay, aabb.min.y, aabb.max.y),
+            (dz, az, aabb.min.z, aabb.max.z),
+        ] {
+            if d.abs() < 1e-9 {
+                if a < lo || a > hi {
+                    return false;
+                }
+            } else {
+                let t1 = (lo - a) / d;
+                let t2 = (hi - a) / d;
+                let (lo_t, hi_t) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                tmin = tmin.max(lo_t);
+                tmax = tmax.min(hi_t);
+                if tmin > tmax {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// 线段 [A,B] 与球体求交（二次方程判别式，参数 t ∈ [0,1]）
+    fn segment_hits_sphere(
+        ax: f32, ay: f32, az: f32,
+        bx: f32, by: f32, bz: f32,
+        s: &crate::engine::physics::SphereBody,
+    ) -> bool {
+        let (fx, fy, fz) = (ax - s.center.x, ay - s.center.y, az - s.center.z);
+        let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
+        let a = dx * dx + dy * dy + dz * dz;
+        let r2 = s.radius * s.radius;
+        if a < 1e-9 {
+            return fx * fx + fy * fy + fz * fz <= r2;
+        }
+        let b = 2.0 * (fx * dx + fy * dy + fz * dz);
+        let c = fx * fx + fy * fy + fz * fz - r2;
+        let disc = b * b - 4.0 * a * c;
+        if disc < 0.0 {
+            return false;
+        }
+        let sq = disc.sqrt();
+        let t1 = (-b - sq) / (2.0 * a);
+        let t2 = (-b + sq) / (2.0 * a);
+        t2 >= 0.0 && t1 <= 1.0
+    }
+
     /// 投射物命中的障碍刚体下标（球体/未命中返回 None）。
-    /// 下标与 `map.obstacles`/`world.bodies` 严格对应（apply_level 同序构建、同序移除）。
+    /// 下标与 map.obstacles/world.bodies 严格对应（apply_level 同序构建、同序移除）。
+    /// 与 collide_physics 一致使用线段求交（高速弹不穿透掩体）。
     fn hit_obstacle_index(&self, p: &Projectile) -> Option<usize> {
-        let (px, py, pz) = (p.position[0], p.position[1], p.position[2]);
+        let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
+        let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);
         self.world.bodies.iter().position(|body| {
             let aabb = body.aabb();
-            px >= aabb.min.x
-                && px <= aabb.max.x
-                && py >= aabb.min.y
-                && py <= aabb.max.y
-                && pz >= aabb.min.z
-                && pz <= aabb.max.z
+            Self::segment_hits_aabb(ax, ay, az, bx, by, bz, &aabb)
         })
     }
 
@@ -3061,8 +3135,11 @@ impl Game {
         None
     }
 
-    /// 部位伤害倍率（设计文档：头部 ×1.5、胸部 ×1.0、手臂 ×0.8、腿部 ×0.6）。
+    /// 部位伤害倍率（固定阈值回退表：头部 ×1.5、胸部 ×1.0、手臂 ×0.8、腿部 ×0.6）。
     /// 命中高度 1.45 以上为头、0.95~1.45 胸、0.6~0.95 臂、以下为腿（NPC 身高 ~1.78m）。
+    /// V3.0 起生产路径走 Projectile::part_multiplier（按武器分段表）；此表仅供测试与
+    /// 无分段投射物（旧接口）回退参考。
+    #[allow(dead_code)]
     fn part_multiplier(hit_height: f32, npc_ground_y: f32) -> f32 {
         let h = hit_height - npc_ground_y;
         if h >= 1.45 {
@@ -4456,8 +4533,8 @@ mod tests {
         );
     }
 
-    /// 投射物命中 NPC 扣血：默认武器 AK-12M 近距 28 伤，从高处垂直下射
-    /// 命中帧段底 1.25m（胸部区 ×1.0）→ 28 伤
+    /// 投射物命中 NPC 扣血：默认武器 AK-12M 近距 34 伤（V3.0 首档 34），从高处垂直下射
+    /// 命中球心 +1.0m（胸部区 ×1.0）→ 34 伤
     #[test]
     fn projectile_damages_npc() {
         let mut game = Game::new();
@@ -4470,11 +4547,11 @@ mod tests {
         for _ in 0..10 {
             game.update(1.0 / 60.0, &Camera::new());
         }
-        assert_eq!(game.npcs[0].hp, hp_before - 28.0, "chest hit should deal 28");
+        assert_eq!(game.npcs[0].hp, hp_before - 34.0, "chest hit should deal 34 (V3.0)");
         assert_eq!(game.npcs.len(), 8, "non-lethal hit keeps the npc");
     }
 
-    /// 击杀：hp≤0 移除 NPC 并计分（AK-12M 28 伤 > 20 HP）
+    /// 击杀：hp≤0 移除 NPC 并计分（AK-12M 34 伤 > 20 HP）
     #[test]
     fn projectile_kill_scores_and_removes_npc() {
         let mut game = Game::new();

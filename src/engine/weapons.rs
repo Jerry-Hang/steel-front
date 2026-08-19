@@ -117,6 +117,10 @@ pub struct ProjectileWeapon {
     projectile_lifetime: f32,
     /// 距离衰减档位：(距离上限米, 该档胸部伤害)；空表 = 恒伤害（兼容旧接口）
     damage_tiers: &'static [(f32, f32)],
+    /// 子弹下坠重力（米/秒²；0 = 直线弹道，兼容旧接口）
+    gravity: f32,
+    /// 部位倍率距离分段：(距离上限米, 头, 胸, 臂, 腿)；空表 = 固定阈值（1.5/1.0/0.8/0.6）
+    part_tiers: &'static [(f32, f32, f32, f32, f32)],
 }
 
 impl ProjectileWeapon {
@@ -138,6 +142,8 @@ impl ProjectileWeapon {
             projectile_speed,
             projectile_lifetime,
             damage_tiers: &[],
+            gravity: 0.0,
+            part_tiers: &[],
         }
     }
 
@@ -160,6 +166,8 @@ impl ProjectileWeapon {
             projectile_speed,
             projectile_lifetime,
             damage_tiers,
+            gravity: 0.0,
+            part_tiers: &[],
         }
     }
 
@@ -175,6 +183,17 @@ impl ProjectileWeapon {
         self.projectile_lifetime
     }
 
+    /// 设置弹道参数：重力下坠（米/秒²）与部位倍率距离分段（V3.0）
+    pub fn with_ballistics(
+        mut self,
+        gravity: f32,
+        part_tiers: &'static [(f32, f32, f32, f32, f32)],
+    ) -> Self {
+        self.gravity = gravity;
+        self.part_tiers = part_tiers;
+        self
+    }
+
     /// 发射一枚投射物：`origin` 为出膛位置，`direction` 为发射方向（自动归一化）
     pub fn fire(&self, origin: [f32; 3], direction: [f32; 3]) -> Projectile {
         Projectile::new_tiered(
@@ -186,6 +205,7 @@ impl ProjectileWeapon {
             self.damage,
             self.damage_tiers,
         )
+        .with_ballistics(self.gravity, self.part_tiers)
     }
 }
 
@@ -226,6 +246,10 @@ pub struct Projectile {
     pub damage: f32,
     /// 距离衰减档位：(距离上限米, 该档伤害)；空表 = 恒伤害
     damage_tiers: &'static [(f32, f32)],
+    /// 子弹下坠重力（米/秒²；0 = 直线弹道）
+    gravity: f32,
+    /// 部位倍率距离分段：(距离上限米, 头, 胸, 臂, 腿)；空表 = 固定阈值（1.5/1.0/0.8/0.6）
+    part_tiers: &'static [(f32, f32, f32, f32, f32)],
     /// 是否存活（射程/寿命耗尽后为 false）
     alive: bool,
     /// 上一帧位置（segment 命中检测用；高速弹避免跳过小目标）
@@ -263,6 +287,8 @@ impl Projectile {
             range,
             damage,
             damage_tiers: &[],
+            gravity: 0.0,
+            part_tiers: &[],
             alive: true,
         }
     }
@@ -280,6 +306,50 @@ impl Projectile {
         let mut p = Self::new(origin, direction, speed, range, max_lifetime, damage);
         p.damage_tiers = damage_tiers;
         p
+    }
+
+    /// 设置弹道参数：重力下坠（米/秒²）与部位倍率距离分段（V3.0）
+    pub fn with_ballistics(
+        mut self,
+        gravity: f32,
+        part_tiers: &'static [(f32, f32, f32, f32, f32)],
+    ) -> Self {
+        self.gravity = gravity;
+        self.part_tiers = part_tiers;
+        self
+    }
+
+    /// 部位伤害倍率：按已飞行距离查分段表（头/胸/臂/腿，高度阈值与命中球几何一致：
+    /// ≥1.45m 头、≥0.95m 胸、≥0.6m 臂、以下腿）。空表回退固定阈值 1.5/1.0/0.8/0.6。
+    pub fn part_multiplier(&self, hit_height: f32, ground_y: f32) -> f32 {
+        let h = hit_height - ground_y;
+        if self.part_tiers.is_empty() {
+            if h >= 1.45 {
+                1.5
+            } else if h >= 0.95 {
+                1.0
+            } else if h >= 0.6 {
+                0.8
+            } else {
+                0.6
+            }
+        } else {
+            let (_, head, chest, arm, leg) = self
+                .part_tiers
+                .iter()
+                .find(|(limit, ..)| self.distance_traveled <= *limit)
+                .copied()
+                .unwrap_or(*self.part_tiers.last().expect("part_tiers 非空"));
+            if h >= 1.45 {
+                head
+            } else if h >= 0.95 {
+                chest
+            } else if h >= 0.6 {
+                arm
+            } else {
+                leg
+            }
+        }
     }
 
     /// 按已飞行距离查表得到应结算伤害（含距离衰减；空表返回基础伤害）
@@ -320,6 +390,10 @@ impl Projectile {
             return;
         }
         self.prev_position = self.position;
+        if self.gravity > 0.0 {
+            // 子弹下坠（V3.0 文档：统一 9.8 m/s²，半隐式欧拉保持稳定）
+            self.velocity[1] -= self.gravity * dt;
+        }
         self.position = [
             self.position[0] + self.velocity[0] * dt,
             self.position[1] + self.velocity[1] * dt,
@@ -797,6 +871,70 @@ mod tests {
 
         proj.update(0.5); // 存活 1.1 秒，超过寿命 1.0 秒 → 销毁
         assert!(!proj.is_alive());
+    }
+
+    /// V3.0 子弹下坠：重力 > 0 时垂直速度按 g·dt 递减，位置随之弯曲下落
+    #[test]
+    fn projectile_gravity_drops_ballistic() {
+        // 无重力（旧接口）：水平方向直线飞行，y 不变
+        let flat = ProjectileWeapon::new("直线", 20.0, 2.0, 1000.0, 300.0, 4.0);
+        let mut p = flat.fire([0.0, 2.0, 0.0], [0.0, 0.0, 1.0]);
+        p.update(1.0);
+        assert!((p.position[1] - 2.0).abs() < 1e-5, "无重力 y 不变");
+        assert!((p.position[2] - 300.0).abs() < 1e-3, "无重力水平推进");
+
+        // 带重力 9.8：1 秒后下落 ≈4.9m（0.5·g·t²；小步长积分收敛到解析值）
+        let gun = flat.with_ballistics(9.8, &[]);
+        let mut p = gun.fire([0.0, 2.0, 0.0], [0.0, 0.0, 1.0]);
+        for _ in 0..120 {
+            p.update(1.0 / 120.0);
+        }
+        let drop = 2.0 - p.position[1];
+        assert!((drop - 4.9).abs() < 0.05, "1s 下坠应 ≈4.9m，实际 {drop}");
+        // 水平速度不受重力影响
+        assert!((p.position[2] - 300.0).abs() < 1e-3, "重力不改水平速度");
+    }
+
+    /// V3.0 部位倍率：投射物按已飞距离查分段表；空表回退固定阈值
+    #[test]
+    fn projectile_part_multiplier_by_distance() {
+        let tiers: &[(f32, f32, f32, f32, f32)] =
+            &[(30.0, 3.0, 1.0, 0.8, 0.6), (400.0, 1.5, 1.0, 0.8, 0.6), (f32::MAX, 1.0, 1.0, 0.8, 0.6)];
+        let rifle = ProjectileWeapon::new("AK", 34.0, 10.0, 400.0, 710.0, 0.8)
+            .with_ballistics(9.8, tiers);
+        let mut p = rifle.fire([0.0, 1.6, 0.0], [0.0, 0.0, 1.0]);
+        p.update(0.04); // ≈28m（首段内）
+        assert_eq!(p.part_multiplier(1.6, 0.0), 3.0, "0-30m 头 ×3.0");
+        assert_eq!(p.part_multiplier(1.1, 0.0), 1.0, "0-30m 胸 ×1.0");
+        assert_eq!(p.part_multiplier(0.7, 0.0), 0.8, "0-30m 臂 ×0.8");
+        assert_eq!(p.part_multiplier(0.3, 0.0), 0.6, "0-30m 腿 ×0.6");
+        p.update(0.2); // 越过 30m
+        assert_eq!(p.part_multiplier(1.6, 0.0), 1.5, "30m+ 头 ×1.5");
+        p.update(0.6); // 越过 400m（f32::MAX 末档兜底）
+        assert_eq!(p.part_multiplier(1.6, 0.0), 1.0, "400m+ 头 ×1.0");
+
+        // 空表回退固定阈值 1.5/1.0/0.8/0.6
+        let plain = ProjectileWeapon::new("旧", 20.0, 2.0, 500.0, 200.0, 3.0);
+        let mut q = plain.fire([0.0, 1.6, 0.0], [0.0, 0.0, 1.0]);
+        q.update(0.1);
+        assert_eq!(q.part_multiplier(1.6, 0.0), 1.5);
+        assert_eq!(q.part_multiplier(1.1, 0.0), 1.0);
+        assert_eq!(q.part_multiplier(0.7, 0.0), 0.8);
+        assert_eq!(q.part_multiplier(0.3, 0.0), 0.6);
+    }
+
+    /// with_ballistics 链式传递：Firearm 内武器发射的投射物带重力与分段
+    #[test]
+    fn firearm_propagates_ballistics_to_projectiles() {
+        let tiers: &[(f32, f32, f32, f32, f32)] = &[(f32::MAX, 2.0, 1.5, 1.2, 1.0)];
+        let rifle = ProjectileWeapon::new("炮", 60.0, 1.0, 800.0, 500.0, 2.0)
+            .with_ballistics(9.8, tiers);
+        let mut gun = Firearm::new(rifle, 5, 20, 2.0, 0.02, 0.01);
+        let mut proj = gun.try_fire([0.0, 2.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(proj.part_multiplier(2.0, 0.0), 2.0, "分段应随武器传递");
+        proj.update(0.5);
+        assert!(proj.position[1] < 2.0 - 1.2, "重力应生效");
+        assert_eq!(proj.damage_at_distance(), 60.0, "恒档伤害");
     }
 
     #[test]

@@ -341,6 +341,8 @@ impl GameApp {
         // 更新游戏逻辑（物理、武器、AI 等）
         // 先把本帧开火意图转发给网络层（客户端模式随 Input 上报服务端）
         self.game.set_net_fire(self.fire_requested);
+        // V3.0 散射：开镜时散布缩小到 30%（腰射 100%）
+        self.game.set_spread_scale(1.0 - self.ads_blend * 0.7);
         self.game.update(delta_time, &self.camera);
 
         // 基准挂钩：RV3D_BENCH_YAW / RV3D_BENCH_PITCH（度）每帧强制相机朝向，
