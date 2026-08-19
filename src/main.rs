@@ -435,6 +435,24 @@ impl GameApp {
             });
         }
 
+        // 命中火花：本帧命中点在目标处生成小火花粒子（受击反馈增强）
+        for hp in self.game.take_hit_points() {
+            for _ in 0..5 {
+                self.particles.push(Particle {
+                    pos: hp,
+                    vel: [
+                        (hp[0] * 13.7).fract() * 2.0 - 1.0,
+                        ((hp[0] + hp[2]) * 7.3).fract() * 1.4,
+                        (hp[2] * 11.3).fract() * 2.0 - 1.0,
+                    ],
+                    age: 0.0,
+                    life: 0.18,
+                    size: 0.03,
+                    tint: [1.0, 0.85, 0.3, 1.0], // 橙黄火花
+                    kind: 0,
+                });
+            }
+        }
         // 武器后坐力：取走本帧开火累计的 kick 施加到相机（指数衰减由 camera.update 处理）
         let (kick_pitch, kick_yaw) = self.game.drain_kick();
         if kick_pitch != 0.0 || kick_yaw != 0.0 {

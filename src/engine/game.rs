@@ -771,6 +771,8 @@ pub struct Game {
     auto_heat: f32,
     /// NPC 受击闪白：id → 剩余秒数（命中瞬间置 0.15，衰减；渲染侧混合白色反馈）
     npc_hit_flash: std::collections::HashMap<usize, f32>,
+    /// 本帧命中点（世界坐标；main.rs 读取后生成命中火花粒子，每帧清空）
+    hit_points: Vec<[f32; 3]>,
     /// 发射次数（累计）
     shots: u64,
     /// 命中次数（累计，供 UI/日志）
@@ -1009,6 +1011,7 @@ impl Game {
             fire_mode: FireMode::Auto,
             auto_heat: 0.0,
             npc_hit_flash: std::collections::HashMap::new(),
+            hit_points: Vec::new(),
             shots: 0,
             hits: 0,
             grid: GridMap::new(GRID_SIZE, GRID_SIZE),
@@ -1229,6 +1232,7 @@ impl Game {
         self.fire_mode = FireMode::Auto;
         self.auto_heat = 0.0;
         self.npc_hit_flash.clear();
+        self.hit_points.clear();
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
@@ -2306,6 +2310,11 @@ impl Game {
         }
     }
 
+    /// 本帧命中点列表（main.rs 生成命中火花后清空）
+    pub fn take_hit_points(&mut self) -> Vec<[f32; 3]> {
+        std::mem::take(&mut self.hit_points)
+    }
+
     /// NPC 受击闪白剩余强度（0..1；0 = 无闪白）。渲染侧按此混合白色 tint。
     pub fn npc_flash(&self, id: usize) -> f32 {
         self.npc_hit_flash
@@ -2649,39 +2658,44 @@ impl Game {
     ///
     /// `allow_kills = false`（GameOver 冻结）：投射物照常飞行/到期，但不判定任何命中。
     fn update_projectiles(&mut self, dt: f32, allow_kills: bool) {
-        // 弹道诊断（节流 2s）：投射物数量/首个位置/最近 NPC 距离
+        // 弹道诊断（RV3D_PROJ_DIAG=1 时启用，节流 2s）：默认关闭避免生产日志噪音
+        static PROJ_DIAG_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         static LAST_PROJ_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let last = LAST_PROJ_LOG.load(std::sync::atomic::Ordering::Relaxed);
-        if now_ms - last > 2000 {
-            LAST_PROJ_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-            let first = self.projectiles.first().map(|p| {
-                format!(
-                    "pos=({:.0},{:.0},{:.0}) dist={:.0}m",
-                    p.position[0],
-                    p.position[1],
-                    p.position[2],
-                    p.distance_traveled()
-                )
-            });
-            let nearest_npc = self
-                .npcs
-                .iter()
-                .map(|n| {
-                    let dx = n.position[0] - self.player_body.pos.x;
-                    let dz = n.position[2] - self.player_body.pos.z;
-                    (dx * dx + dz * dz).sqrt()
-                })
-                .fold(f32::MAX, f32::min);
-            log::info!(
-                "proj-diag: alive={} first=[{}] nearest_npc={:.0}m",
-                self.projectiles.len(),
-                first.unwrap_or_else(|| "none".to_string()),
-                nearest_npc
-            );
+        if *PROJ_DIAG_ON
+            .get_or_init(|| std::env::var("RV3D_PROJ_DIAG").as_deref() == Ok("1"))
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_PROJ_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_ms - last > 2000 {
+                LAST_PROJ_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                let first = self.projectiles.first().map(|p| {
+                    format!(
+                        "pos=({:.0},{:.0},{:.0}) dist={:.0}m",
+                        p.position[0],
+                        p.position[1],
+                        p.position[2],
+                        p.distance_traveled()
+                    )
+                });
+                let nearest_npc = self
+                    .npcs
+                    .iter()
+                    .map(|n| {
+                        let dx = n.position[0] - self.player_body.pos.x;
+                        let dz = n.position[2] - self.player_body.pos.z;
+                        (dx * dx + dz * dz).sqrt()
+                    })
+                    .fold(f32::MAX, f32::min);
+                log::info!(
+                    "proj-diag: alive={} first=[{}] nearest_npc={:.0}m",
+                    self.projectiles.len(),
+                    first.unwrap_or_else(|| "none".to_string()),
+                    nearest_npc
+                );
+            }
         }
         for p in self.projectiles.iter_mut() {
             if p.is_alive() {
@@ -2725,6 +2739,8 @@ impl Game {
                 hit_count += 1;
                 let mult = Self::part_multiplier(hit_h, self.npcs[idx].position[1]);
                 let dmg = p.damage_at_distance() * mult;
+                // 命中火花点（NPC 身体命中位置）
+                self.hit_points.push([p.position[0], hit_h, p.position[2]]);
                 log::info!(
                     "weapons: 命中 NPC #{} 高度={:.1} 倍率={:.1} 伤害={:.0} 距离={:.0}m",
                     self.npcs[idx].id,
