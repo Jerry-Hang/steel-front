@@ -442,10 +442,11 @@ impl GameApp {
         for dmg in self.game.take_hit_damages() {
             self.hit_damage_popups.push((dmg, 0.6));
         }
-        self.hit_damage_popups.retain(|item| {
-            item.1 -= delta_time;
-            item.1 > 0.0
-        });
+        // 衰减（iter_mut 可修改）→ 过滤（retain 只读判断，闭包参数为 &T）
+        for (_, t) in self.hit_damage_popups.iter_mut() {
+            *t -= delta_time;
+        }
+        self.hit_damage_popups.retain(|item| item.1 > 0.0);
         // 命中火花：本帧命中点在目标处生成小火花粒子（受击反馈增强）
         for hp in self.game.take_hit_points() {
             for _ in 0..5 {
