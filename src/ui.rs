@@ -1680,7 +1680,7 @@ pub fn glyph(ch: char) -> [u8; 5] {
 /// 中文字形查询（8x8 点阵，行主序每行 1 字节，bit7=左侧）：
 /// 经 engine::font_cjk（Windows GDI 光栅化，零依赖）按需生成并缓存；
 /// 非 Windows 或字体缺失返回 None → 渲染回退为 `?`（不 panic、不方块）。
-pub fn glyph_cjk(ch: char) -> Option<[u8; 8]> {
+pub fn glyph_cjk(ch: char) -> Option<[u16; 16]> {
     #[cfg(windows)]
     {
         crate::engine::font_cjk::glyph(ch)
@@ -1705,14 +1705,18 @@ pub fn is_cjk(ch: char) -> bool {
     }
 }
 
-/// 计算字符串的渲染宽度（像素，含字距）
+/// 计算字符串的渲染宽度（像素，含字距）。ASCII 每字 FONT_COLS 列，
+/// CJK 每字 16 列（16x16 字形），混排按字符分别累加。
 pub fn text_width(text: &str, scale: f32) -> f32 {
-    let chars = text.chars().count();
-    if chars == 0 {
-        0.0
-    } else {
-        chars as f32 * (FONT_COLS as f32 + FONT_SPACING) * scale - FONT_SPACING * scale
+    if text.is_empty() {
+        return 0.0;
     }
+    let mut w = 0.0f32;
+    for ch in text.chars() {
+        let cols = if is_cjk(ch) { 16.0 } else { FONT_COLS as f32 };
+        w += (cols + FONT_SPACING) * scale;
+    }
+    w - FONT_SPACING * scale
 }
 
 /// 把字符串按位图字体展开为小 quad 列表（自绘文本，无外部依赖）。
@@ -1723,11 +1727,12 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
     let mut cx = x;
     for ch in text.chars() {
         if is_cjk(ch) {
-            // 8x8 中文字形：行主序，bit7=左侧，8 列 x 8 行
+            // 16x16 中文字形：行主序，bit15=左侧，16 列 x 16 行
+            // （8x8 对复杂汉字笔画糊成方块且内容占不满格子导致压扁，2026-08-20 升级）
             if let Some(rows) = glyph_cjk(ch) {
                 for (row, byte) in rows.iter().enumerate() {
-                    for col in 0..8 {
-                        if (byte >> (7 - col)) & 1 == 1 {
+                    for col in 0..16 {
+                        if (byte >> (15 - col)) & 1 == 1 {
                             out.push(Quad::new(
                                 Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
                                 color,
@@ -1749,7 +1754,7 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
                     }
                 }
             }
-            cx += (8.0 + FONT_SPACING) * scale;
+            cx += (16.0 + FONT_SPACING) * scale;
         } else {
             let cols = glyph(ch);
             for (col, byte) in cols.iter().enumerate() {

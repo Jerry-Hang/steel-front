@@ -78,7 +78,7 @@ const DIB_RGB_COLORS: c_uint = 0;
 /// GetDeviceCaps 索引：垂直 DPI（每逻辑英寸像素数）
 const LOGPIXELSY: c_int = 90;
 
-static CACHE: Mutex<Option<std::collections::HashMap<char, [u8; 8]>>> = Mutex::new(None);
+static CACHE: Mutex<Option<std::collections::HashMap<char, [u16; 16]>>> = Mutex::new(None);
 
 /// CJK/全角字符判定（2026-08-16 扩展：补全角形式 0xFF00-0xFFEF 与扩展区，
 /// 修复中文输入法标点"！（）"等渲染成 '?' 的问题）
@@ -97,9 +97,11 @@ pub fn is_cjk_char(ch: char) -> bool {
         || (0x20000..=0x2A6DF).contains(&cp) // 扩展 B
 }
 
-/// 取中文字形（8x8 点阵，行主序每行 1 字节，bit7=左侧）。
+/// 取中文字形（16x16 点阵，行主序每行 1 字节，bit15=左侧）。
 /// 首次访问某字符时经 GDI 光栅化并缓存；失败返回 None。
-pub fn glyph(ch: char) -> Option<[u8; 8]> {
+/// 16x16 分辨率：8x8 对复杂汉字（设/置/暴）笔画过密会糊成方块且内容占不满
+/// 格子导致视觉压扁（2026-08-20 升级）。
+pub fn glyph(ch: char) -> Option<[u16; 16]> {
     // 非 CJK 不进缓存（ASCII 走 5x7 内置字体）
     if !is_cjk_char(ch) {
         return None;
@@ -135,7 +137,7 @@ pub fn glyph(ch: char) -> Option<[u8; 8]> {
     }
 }
 
-fn rasterize(ch: char) -> Option<[u8; 8]> {
+fn rasterize(ch: char) -> Option<[u16; 16]> {
     // TextOutW → GetDIBits 路径：GDI 文本引擎直接渲染到内存位图再读回，CJK 稳定。
     // DPI 感知（2026-08-19）：游戏进程是 DPI-aware，屏幕兼容 DC 的字体渲染按实际
     // DPI 缩放（150%/200% 屏 -16px 字体实际 24/32px）——固定 16x16 位图会把字形
@@ -217,17 +219,17 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
     }
 }
 
-/// 64x64 位图（字形占前 font_px 行/列）→ 8x8 掩码。
+/// 64x64 位图（字形占前 font_px 行/列）→ 16x16 掩码。
 /// 每输出格按比例取整区间，保证任意 DPI（font_px 16..=64）下字形比例不变。
-fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u8; 8]> {
+fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u16; 16]> {
     let fp = font_px.max(1);
-    let mut out = [0u8; 8];
-    for j in 0..8 {
-        let y0 = j * fp / 8;
-        let y1 = ((j + 1) * fp) / 8;
-        for i in 0..8 {
-            let x0 = i * fp / 8;
-            let x1 = ((i + 1) * fp) / 8;
+    let mut out = [0u16; 16];
+    for j in 0..16 {
+        let y0 = j * fp / 16;
+        let y1 = ((j + 1) * fp) / 16;
+        for i in 0..16 {
+            let x0 = i * fp / 16;
+            let x1 = ((i + 1) * fp) / 16;
             let mut lit = false;
             for y in y0..y1 {
                 for x in x0..x1 {
@@ -240,8 +242,28 @@ fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u8; 8]> {
                 }
             }
             if lit {
-                out[j] |= 1 << (7 - i);
+                out[j] |= 1 << (15 - i);
             }
+        }
+    }
+    // 垂直拉伸：GDI 基线偏移使字形内容只占 11/16 行（顶部 5 行空）→ 渲染后
+    // 字高只有宽的 69%（视觉"扁"）。把内容行映射铺满 16 行，字形方正。
+    let mut top = 16usize;
+    let mut bottom = 0usize;
+    for j in 0..16 {
+        if out[j] != 0 {
+            top = top.min(j);
+            bottom = j;
+        }
+    }
+    if top < bottom {
+        let h = bottom - top + 1;
+        if h < 16 {
+            let mut v = [0u16; 16];
+            for j in 0..16 {
+                v[j] = out[top + j * h / 16];
+            }
+            out = v;
         }
     }
     Some(out)
@@ -258,26 +280,25 @@ mod tests {
         let g = glyph('中');
         assert!(g.is_some(), "中文字形生成失败（GDI 路径）");
         if let Some(rows) = g {
-            // 字形应有多行笔画（不是单竖线/碎点）
+            assert_eq!(rows.len(), 16, "16x16 字形应为 16 行");
             let filled_rows = rows.iter().filter(|b| **b != 0).count();
-            let filled_cols = (0..8)
-                .filter(|i| rows.iter().any(|b| (b >> (7 - i)) & 1 == 1))
+            let filled_cols = (0..16)
+                .filter(|i| rows.iter().any(|b| (b >> (15 - i)) & 1 == 1))
                 .count();
             assert!(
-                filled_rows >= 3 && filled_cols >= 3,
+                filled_rows >= 8 && filled_cols >= 8,
                 "字形过稀疏（rows={} cols={}）：{:?}",
                 filled_rows,
                 filled_cols,
                 rows
             );
-            // 缓存命中路径
             let g2 = glyph('中');
             assert_eq!(g, g2, "缓存应返回相同字形");
         }
     }
 
     /// DPI 一致性：同一字形在 96/150/200% DPI（16/24/32px）采样形状一致，
-    /// 回归"中文字被压扁成横条"问题。
+    /// 回归"中文字被压扁/糊成方块"问题。
     #[test]
     fn glyph_shape_consistent_across_dpi() {
         // 16px 的"中"：上下横 + 中竖 + 中横（简化图样）
@@ -292,7 +313,6 @@ mod tests {
         for x in 2..14 {
             base[7 * 16 + x] = 255;
         }
-        // 最近邻放大（16x16 → size×size）
         fn upscale(src: &[u8], size: usize) -> Vec<u8> {
             let mut d = vec![0u8; size * size];
             for y in 0..size {
@@ -302,7 +322,6 @@ mod tests {
             }
             d
         }
-        // 转 64x64 RGBA 布局（字形放前 size 行）
         fn to32(src: &[u8], size: usize) -> Vec<u8> {
             let mut p = vec![0u8; 64 * 64 * 4];
             for y in 0..size {
@@ -322,9 +341,25 @@ mod tests {
         let g16 = sample_glyph(&s16, 16).unwrap();
         let g24 = sample_glyph(&s24, 24).unwrap();
         let g32 = sample_glyph(&s32, 32).unwrap();
-        assert_eq!(g16, g24, "96dpi 与 150dpi 应一致: {:?} vs {:?}", g16, g24);
-        assert_eq!(g16, g32, "96dpi 与 200dpi 应一致: {:?} vs {:?}", g16, g32);
-        // 形状：顶部与底部都有笔画（不压扁）
-        assert!(g16[0] != 0 && g16[7] != 0, "顶部与底部都应有笔画: {:?}", g16);
+        // 区间取整允许边界行 ±1 像素差异（真实字体 hinting 同理），
+        // 断言结构特征一致而非逐字节相等：
+        // ① 顶部/底部有笔画（不压扁）② 左列有笔画（外框完整）③ 笔画行数接近
+        let filled = |g: &[u16; 16]| g.iter().filter(|b| **b != 0).count();
+        for g in [&g16, &g24, &g32] {
+            assert!(g[0] != 0 && g[15] != 0, "顶部与底部都应有笔画: {:?}", g);
+            assert!(
+                (0..16).any(|r| (g[r] & 0x8000) != 0),
+                "左列应有笔画（外框完整）: {:?}",
+                g
+            );
+        }
+        let rows = [filled(&g16), filled(&g24), filled(&g32)];
+        assert!(
+            rows.iter().max().unwrap() - rows.iter().min().unwrap() <= 2,
+            "不同 DPI 笔画行数应接近: {:?} vs {:?} vs {:?}",
+            g16,
+            g24,
+            g32
+        );
     }
 }
