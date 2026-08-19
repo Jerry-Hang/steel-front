@@ -14,6 +14,7 @@ use std::sync::Mutex;
 extern "C" {
     fn CreateCompatibleDC(hdc: *mut c_void) -> *mut c_void;
     fn DeleteDC(hdc: *mut c_void) -> c_int;
+    fn CreateCompatibleBitmap(hdc: *mut c_void, w: c_int, h: c_int) -> *mut c_void;
     fn CreateFontW(
         cHeight: c_int, cWidth: c_int, cEscapement: c_int, cOrientation: c_int,
         cWeight: c_int, bItalic: c_uint, bUnderline: c_uint, bStrikeOut: c_uint,
@@ -23,11 +24,17 @@ extern "C" {
     fn SelectObject(hdc: *mut c_void, h: *mut c_void) -> *mut c_void;
     fn DeleteObject(h: *mut c_void) -> c_int;
     fn SetBkMode(hdc: *mut c_void, mode: c_int) -> c_int;
+    fn SetBkColor(hdc: *mut c_void, color: u32) -> u32;
     fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
-    fn GetGlyphOutlineW(
-        hdc: *mut c_void, uChar: c_uint, fuFormat: c_uint, lpgm: *mut c_void,
-        cbBuffer: c_uint, lpvBuffer: *mut c_void, lpmat2: *const c_void,
-    ) -> c_uint;
+    fn TextOutW(
+        hdc: *mut c_void, x: c_int, y: c_int, s: *const u16, len: c_int,
+    ) -> c_int;
+    fn FillRect(hdc: *mut c_void, rect: *const c_void, brush: *mut c_void) -> c_int;
+    fn CreateSolidBrush(color: u32) -> *mut c_void;
+    fn GetDIBits(
+        hdc: *mut c_void, hbm: *mut c_void, start: c_uint, lines: c_uint,
+        buf: *mut c_void, bmi: *mut c_void, usage: c_uint,
+    ) -> c_int;
 }
 
 #[link(name = "user32")]
@@ -38,21 +45,35 @@ extern "C" {
 
 #[repr(C)]
 #[allow(non_snake_case)] // Win32 SDK 字段名
-struct GlyphMetrics {
-    gmBlackBoxX: u32,
-    gmBlackBoxY: u32,
-    gmptGlyphOrigin: [i32; 2],
-    gmCellIncX: i16,
-    gmCellIncY: i16,
+struct BitmapInfoHeader {
+    biSize: u32,
+    biWidth: i32,
+    biHeight: i32,
+    biPlanes: u16,
+    biBitCount: u16,
+    biCompression: u32,
+    biSizeImage: u32,
+    biXPelsPerMeter: i32,
+    biYPelsPerMeter: i32,
+    biClrUsed: u32,
+    biClrImportant: u32,
 }
 
-const TRANSPARENT: c_int = 1;
-const GGO_BITMAP: c_uint = 1;
+#[repr(C)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+const OPAQUE: c_int = 2;
 const DEFAULT_CHARSET: c_uint = 1;
 const OUT_TT_ONLY_PRECIS: c_uint = 7;
 const CLIP_DEFAULT_PRECIS: c_uint = 0;
 const ANTIALIASED_QUALITY: c_uint = 4;
 const DEFAULT_PITCH: c_uint = 0;
+const DIB_RGB_COLORS: c_uint = 0;
 
 static CACHE: Mutex<Option<std::collections::HashMap<char, [u8; 8]>>> = Mutex::new(None);
 
@@ -104,6 +125,9 @@ pub fn glyph(ch: char) -> Option<[u8; 8]> {
 }
 
 fn rasterize(ch: char) -> Option<[u8; 8]> {
+    // TextOutW → GetDIBits 路径（2026-08-19 重写）：GetGlyphOutlineW 在部分环境下
+    // 输出的 GGO_BITMAP 内容异常（黑盒 13x15 却只有一根竖线），改用 GDI 文本引擎
+    // 直接渲染到 16x16 内存位图再读回，CJK 渲染稳定可靠。
     unsafe {
         let screen_dc = GetDC(std::ptr::null_mut());
         if screen_dc.is_null() {
@@ -114,6 +138,13 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         if dc.is_null() {
             return None;
         }
+        // 16x16 兼容位图（32bpp）
+        let bmp = CreateCompatibleBitmap(dc, 16, 16);
+        if bmp.is_null() {
+            DeleteDC(dc);
+            return None;
+        }
+        let old_bmp = SelectObject(dc, bmp);
         let face: Vec<u16> = "Microsoft YaHei"
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -124,52 +155,65 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
             DEFAULT_PITCH, face.as_ptr(),
         );
         if font.is_null() {
+            SelectObject(dc, old_bmp);
+            DeleteObject(bmp);
             DeleteDC(dc);
             return None;
         }
         SelectObject(dc, font);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, 0x00FF_FFFF);
-        let mut gm = std::mem::zeroed::<GlyphMetrics>();
-        // MAT2 单位矩阵：4 个 FIXED（各 1×i32 定点 16.16，65536=1.0），
-        // eM11=1 eM12=0 eM21=0 eM22=1 → [65536, 0, 0, 65536]。
-        // 旧写法是 8 个 i32（误按 POINTFX×4），GDI 读到零矩阵 → 恒 GDI_ERROR(1003)
-        // → 所有中文回退 '?'（2026-08-19 修复）。
-        let mat2 = [65536i32, 0, 0, 65536];
-        // GGO_BITMAP 输出 = 40 字节 BITMAPINFOHEADER + 1bpp 位图行（每行 4 字节对齐）
-        const BMP_HDR: usize = 40;
-        let buf: Vec<u8> = vec![0u8; BMP_HDR + 32 * 32 / 8 + 64]; // 预算 32x32 黑盒
-        let size = GetGlyphOutlineW(
+        SetBkMode(dc, OPAQUE);
+        SetBkColor(dc, 0x0000_0000); // 黑底
+        SetTextColor(dc, 0x00FF_FFFF); // 白字
+        // 清背景（FillRect 黑）
+        let brush = CreateSolidBrush(0x0000_0000);
+        let rect = Rect { left: 0, top: 0, right: 16, bottom: 16 };
+        FillRect(dc, &rect as *const Rect as *const c_void, brush);
+        DeleteObject(brush);
+        // 画字符（1 个 UTF-16 单元；中文 BMP 内均为单单元）
+        let mut buf16 = [0u16; 2];
+        let n = ch.encode_utf16(&mut buf16).len();
+        TextOutW(dc, 0, 0, buf16.as_ptr(), n as c_int);
+        // 读回 32bpp（top-down：biHeight 为负，行 0 = 顶部）
+        let mut bmi = std::mem::zeroed::<BitmapInfoHeader>();
+        bmi.biSize = 40;
+        bmi.biWidth = 16;
+        bmi.biHeight = -16;
+        bmi.biPlanes = 1;
+        bmi.biBitCount = 32;
+        let mut px: Vec<u8> = vec![0u8; 16 * 16 * 4];
+        let got = GetDIBits(
             dc,
-            ch as u32,
-            GGO_BITMAP,
-            &mut gm as *mut GlyphMetrics as *mut c_void,
-            buf.len() as u32,
-            buf.as_ptr() as *mut c_void,
-            &mat2 as *const [i32; 4] as *const c_void,
+            bmp,
+            0,
+            16,
+            px.as_mut_ptr() as *mut c_void,
+            &mut bmi as *mut BitmapInfoHeader as *mut c_void,
+            DIB_RGB_COLORS,
         );
+        // 还原并释放
+        SelectObject(dc, old_bmp);
+        DeleteObject(bmp);
         DeleteObject(font);
         DeleteDC(dc);
-        if size == u32::MAX || gm.gmBlackBoxX == 0 || gm.gmBlackBoxY == 0 {
+        if got == 0 {
             return None;
         }
-        // 1bpp 行：每行 (黑盒宽 + 31)/32*4 字节；位序 bit7 = 最左像素。
-        // GGO_BITMAP 位图是自底向上（bottom-up）：内存行 0 = 字形最底行，
-        // 顶部行在 bh-1 —— 采样行序必须翻转，否则字形上下颠倒。
-        let row_stride = ((gm.gmBlackBoxX as usize) + 31) / 32 * 4;
+        // 16x16 → 8x8：每 2x2 块任一亮像素即置 1（笔画保真）
         let mut out = [0u8; 8];
-        let (bw, bh) = (gm.gmBlackBoxX as usize, gm.gmBlackBoxY as usize);
         for j in 0..8 {
-            // j=0 是输出顶部：内存行 = 字形顶部行（bh-1）再按比例下移
-            let sy = if bh <= 8 {
-                (8 - bh) / 2 + (bh - 1 - j)
-            } else {
-                bh - 1 - j * bh / 8
-            };
             for i in 0..8 {
-                let sx = if bw <= 8 { i + (8 - bw) / 2 } else { i * bw / 8 };
-                let byte = buf[BMP_HDR + sy * row_stride + sx / 8];
-                if (byte >> (7 - (sx % 8))) & 1 == 1 {
+                let mut lit = false;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let x = i * 2 + dx;
+                        let y = j * 2 + dy;
+                        let off = (y * 16 + x) * 4;
+                        if px[off] > 128 || px[off + 1] > 128 || px[off + 2] > 128 {
+                            lit = true;
+                        }
+                    }
+                }
+                if lit {
                     out[j] |= 1 << (7 - i);
                 }
             }
@@ -180,7 +224,7 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// GDI 字形生成回归：修复 MAT2 布局（4×FIXED 单位矩阵）后中文不再回退 '?'
+    /// TextOutW 光栅化回归：中文/全角标点字形应生成且内容非空
     #[test]
     fn cjk_glyph_generates() {
         assert!(is_cjk_char('中'), "中 应为 CJK");
@@ -189,10 +233,21 @@ mod tests {
         let g = glyph('中');
         assert!(g.is_some(), "中文字形生成失败（GDI 路径）");
         if let Some(rows) = g {
-            assert!(rows.iter().any(|b| *b != 0), "字形全空");
+            // 字形应有多行笔画（不是单竖线/碎点）
+            let filled_rows = rows.iter().filter(|b| **b != 0).count();
+            let filled_cols = (0..8)
+                .filter(|i| rows.iter().any(|b| (b >> (7 - i)) & 1 == 1))
+                .count();
+            assert!(
+                filled_rows >= 3 && filled_cols >= 3,
+                "字形过稀疏（rows={} cols={}）：{:?}",
+                filled_rows,
+                filled_cols,
+                rows
+            );
+            // 缓存命中路径
+            let g2 = glyph('中');
+            assert_eq!(g, g2, "缓存应返回相同字形");
         }
-        // 缓存命中路径
-        let g2 = glyph('中');
-        assert_eq!(g, g2, "缓存应返回相同字形");
     }
 }
