@@ -119,7 +119,7 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
             .chain(std::iter::once(0))
             .collect();
         let font = CreateFontW(
-            -8, 0, 0, 0, 400, 0, 0, 0,
+            -16, 0, 0, 0, 400, 0, 0, 0,
             DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH, face.as_ptr(),
         );
@@ -131,7 +131,11 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, 0x00FF_FFFF);
         let mut gm = std::mem::zeroed::<GlyphMetrics>();
-        let mat2 = [0i32, 0, 0, 0, 65536, 0, 0, 65536];
+        // MAT2 单位矩阵：4 个 FIXED（各 1×i32 定点 16.16，65536=1.0），
+        // eM11=1 eM12=0 eM21=0 eM22=1 → [65536, 0, 0, 65536]。
+        // 旧写法是 8 个 i32（误按 POINTFX×4），GDI 读到零矩阵 → 恒 GDI_ERROR(1003)
+        // → 所有中文回退 '?'（2026-08-19 修复）。
+        let mat2 = [65536i32, 0, 0, 65536];
         // GGO_BITMAP 输出 = 40 字节 BITMAPINFOHEADER + 1bpp 位图行（每行 4 字节对齐）
         const BMP_HDR: usize = 40;
         let buf: Vec<u8> = vec![0u8; BMP_HDR + 32 * 32 / 8 + 64]; // 预算 32x32 黑盒
@@ -142,19 +146,26 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
             &mut gm as *mut GlyphMetrics as *mut c_void,
             buf.len() as u32,
             buf.as_ptr() as *mut c_void,
-            &mat2 as *const [i32; 8] as *const c_void,
+            &mat2 as *const [i32; 4] as *const c_void,
         );
         DeleteObject(font);
         DeleteDC(dc);
         if size == u32::MAX || gm.gmBlackBoxX == 0 || gm.gmBlackBoxY == 0 {
             return None;
         }
-        // 1bpp 行：每行 (黑盒宽 + 31)/32*4 字节；位序 bit7 = 最左像素
+        // 1bpp 行：每行 (黑盒宽 + 31)/32*4 字节；位序 bit7 = 最左像素。
+        // GGO_BITMAP 位图是自底向上（bottom-up）：内存行 0 = 字形最底行，
+        // 顶部行在 bh-1 —— 采样行序必须翻转，否则字形上下颠倒。
         let row_stride = ((gm.gmBlackBoxX as usize) + 31) / 32 * 4;
         let mut out = [0u8; 8];
         let (bw, bh) = (gm.gmBlackBoxX as usize, gm.gmBlackBoxY as usize);
         for j in 0..8 {
-            let sy = if bh <= 8 { j + (8 - bh) / 2 } else { j * bh / 8 };
+            // j=0 是输出顶部：内存行 = 字形顶部行（bh-1）再按比例下移
+            let sy = if bh <= 8 {
+                (8 - bh) / 2 + (bh - 1 - j)
+            } else {
+                bh - 1 - j * bh / 8
+            };
             for i in 0..8 {
                 let sx = if bw <= 8 { i + (8 - bw) / 2 } else { i * bw / 8 };
                 let byte = buf[BMP_HDR + sy * row_stride + sx / 8];
@@ -164,5 +175,24 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
             }
         }
         Some(out)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// GDI 字形生成回归：修复 MAT2 布局（4×FIXED 单位矩阵）后中文不再回退 '?'
+    #[test]
+    fn cjk_glyph_generates() {
+        assert!(is_cjk_char('中'), "中 应为 CJK");
+        assert!(is_cjk_char('！'), "全角标点应为 CJK");
+        assert!(!is_cjk_char('A'), "ASCII 不应判为 CJK");
+        let g = glyph('中');
+        assert!(g.is_some(), "中文字形生成失败（GDI 路径）");
+        if let Some(rows) = g {
+            assert!(rows.iter().any(|b| *b != 0), "字形全空");
+        }
+        // 缓存命中路径
+        let g2 = glyph('中');
+        assert_eq!(g, g2, "缓存应返回相同字形");
     }
 }

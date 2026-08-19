@@ -661,6 +661,13 @@ pub struct Renderer {
     /// 地面场 65536 个 workgroup 单次下发会超限，绘制按此值分块。
     mesh_max_wg_x: u32,
     framebuffers: Vec<vk::Framebuffer>,
+    /// MSAA 采样数（RV3D_MSAA=1/2/4/8，默认 4；0 或 1 = 关）。主 pass 颜色/深度附件
+    /// 用该采样数渲染，经 resolve 附件输出到交换链图像（几何边缘抗锯齿）。
+    msaa_samples: vk::SampleCountFlags,
+    /// MSAA 颜色附件（每交换链图像一个，samples=msaa_samples；渲染目标，不 STORE）
+    msaa_images: Vec<vk::Image>,
+    msaa_image_memory: Vec<vk::DeviceMemory>,
+    msaa_image_views: Vec<vk::ImageView>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
@@ -846,6 +853,7 @@ impl Renderer {
         renderer.init_render_pass()?;
         renderer.init_command_pool()?;
         renderer.create_instance_buffer()?;
+        renderer.init_msaa_resources()?;
         renderer.init_depth_resources()?;
         renderer.init_descriptors()?;       // ← 新增
         renderer.init_pipeline()?;
@@ -1157,6 +1165,19 @@ impl Renderer {
             mesh_pipeline_layout: vk::PipelineLayout::null(),
             mesh_max_wg_x: 1,
             framebuffers: Vec::new(),
+            // MSAA：RV3D_MSAA=1/2/4/8（默认 4x；0/1 = 关闭）
+            msaa_samples: match std::env::var("RV3D_MSAA") {
+                Ok(v) => match v.trim().parse::<u32>() {
+                    Ok(2) => vk::SampleCountFlags::TYPE_2,
+                    Ok(4) => vk::SampleCountFlags::TYPE_4,
+                    Ok(8) => vk::SampleCountFlags::TYPE_8,
+                    _ => vk::SampleCountFlags::TYPE_1,
+                },
+                Err(_) => vk::SampleCountFlags::TYPE_4,
+            },
+            msaa_images: Vec::new(),
+            msaa_image_memory: Vec::new(),
+            msaa_image_views: Vec::new(),
             command_pool: vk::CommandPool::null(),
             command_buffers: Vec::new(),
             image_available_semaphores: Vec::new(),
@@ -1426,25 +1447,40 @@ impl Renderer {
     }
 
     fn init_render_pass(&mut self) -> Result<(), String> {
+        let msaa = self.msaa_samples;
         let color_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(msaa)
             .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE) // 经 resolve 输出，自身不保留
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
         let color_attachment_ref = vk::AttachmentReference::default()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let color_attachment_refs = [color_attachment_ref];
 
-        // 深度附件（D32_SFLOAT）
+        // 解析附件：MSAA 颜色 → 交换链图像（TYPE_1，最终呈现）
+        let resolve_attachment = vk::AttachmentDescription::default()
+            .format(self.swapchain_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+        let resolve_attachment_ref = vk::AttachmentReference::default()
+            .attachment(1)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+        // 深度附件（D32_SFLOAT，与颜色同采样数）
         let depth_attachment = vk::AttachmentDescription::default()
             .format(vk::Format::D32_SFLOAT)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(msaa)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::DONT_CARE)
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -1452,15 +1488,17 @@ impl Renderer {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         let depth_attachment_ref = vk::AttachmentReference::default()
-            .attachment(1)
+            .attachment(2)
             .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
+        let resolve_attachment_refs = [resolve_attachment_ref];
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_attachment_refs)
+            .resolve_attachments(&resolve_attachment_refs)
             .depth_stencil_attachment(&depth_attachment_ref);
         let subpasses = [subpass];
-        let attachments = [color_attachment, depth_attachment];
+        let attachments = [color_attachment, resolve_attachment, depth_attachment];
 
         let dependency = vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
@@ -1493,6 +1531,77 @@ impl Renderer {
         Ok(())
     }
 
+    /// MSAA 颜色附件（每交换链图像一个，samples=msaa_samples）。
+    /// 主 pass 渲染到该附件，subpass resolve 输出到交换链图像；MSAA 关闭时跳过。
+    fn init_msaa_resources(&mut self) -> Result<(), String> {
+        self.msaa_images.clear();
+        self.msaa_image_memory.clear();
+        self.msaa_image_views.clear();
+        if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
+            return Ok(());
+        }
+        for _ in 0..self.swapchain_images.len() {
+            let image_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(self.swapchain_format)
+                .extent(vk::Extent3D {
+                    width: self.swapchain_extent.width,
+                    height: self.swapchain_extent.height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(self.msaa_samples)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let image = unsafe {
+                self.device
+                    .create_image(&image_info, None)
+                    .map_err(|e| format!("创建 MSAA 颜色 Image 失败: {}", e))?
+            };
+            let mem_reqs = unsafe { self.device.get_image_memory_requirements(image) };
+            let mem_type = self.pick_memory_type(mem_reqs, true)?;
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(mem_reqs.size)
+                .memory_type_index(mem_type);
+            let memory = unsafe {
+                self.device
+                    .allocate_memory(&alloc_info, None)
+                    .map_err(|e| format!("分配 MSAA 颜色内存失败: {}", e))?
+            };
+            unsafe { self.device.bind_image_memory(image, memory, 0) }
+                .map_err(|e| format!("绑定 MSAA 颜色内存失败: {}", e))?;
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(self.swapchain_format)
+                .components(vk::ComponentMapping {
+                    r: vk::ComponentSwizzle::IDENTITY,
+                    g: vk::ComponentSwizzle::IDENTITY,
+                    b: vk::ComponentSwizzle::IDENTITY,
+                    a: vk::ComponentSwizzle::IDENTITY,
+                })
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let view = unsafe {
+                self.device
+                    .create_image_view(&view_info, None)
+                    .map_err(|e| format!("创建 MSAA 颜色 ImageView 失败: {}", e))?
+            };
+            self.msaa_images.push(image);
+            self.msaa_image_memory.push(memory);
+            self.msaa_image_views.push(view);
+        }
+        Ok(())
+    }
+
     /// 为每个交换链图像创建深度缓冲（D32_SFLOAT Image + depth aspect ImageView）
     fn init_depth_resources(&mut self) -> Result<(), String> {
         let depth_format = vk::Format::D32_SFLOAT;
@@ -1511,7 +1620,7 @@ impl Renderer {
                 })
                 .mip_levels(1)
                 .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(self.msaa_samples)
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -1996,7 +2105,7 @@ impl Renderer {
 
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(self.msaa_samples);
 
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(false)
@@ -2151,7 +2260,7 @@ impl Renderer {
 
         let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(self.msaa_samples);
 
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
@@ -2292,7 +2401,7 @@ impl Renderer {
 
         let hud_multisampling = vk::PipelineMultisampleStateCreateInfo::default()
             .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(self.msaa_samples);
 
         let hud_depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(false)
@@ -6103,7 +6212,14 @@ impl Renderer {
             .iter()
             .enumerate()
             .map(|(i, &image_view)| {
-                let attachments = [image_view, self.depth_image_views[i]];
+                // MSAA：attachments = [msaa 颜色, 交换链（resolve 目标）, 深度]；
+                // 关闭时 msaa view 即交换链本身（TYPE_1，无独立附件）
+                let msaa_view = if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
+                    image_view
+                } else {
+                    self.msaa_image_views[i]
+                };
+                let attachments = [msaa_view, image_view, self.depth_image_views[i]];
                 let framebuffer_create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(self.render_pass)
                     .attachments(&attachments)
@@ -6174,10 +6290,18 @@ impl Renderer {
         //   地面实例静态上传，marker/NPC/自发光照常上传，同一槽位布局可复用）
         self.record_shadow_pass(command_buffer, near_count, far_count, terrain_lod)?;
 
+        // clear values 按 attachment 索引寻址：0=MSAA 颜色(CLEAR)、1=resolve(DONT_CARE，
+        // 值被忽略但占位保证索引正确)、2=深度(CLEAR)。旧实现只有 2 个元素 → 深度清除值
+        // 越界读取 → 深度缓冲未清除（垃圾）→ 深度测试随机失败：地面/障碍大面积消失。
         let clear_values = [
             vk::ClearValue {
                 color: vk::ClearColorValue {
                     float32: [0.1, 0.1, 0.15, 1.0],
+                },
+            },
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
                 },
             },
             vk::ClearValue {
@@ -7354,6 +7478,7 @@ impl Renderer {
         self.wait_idle()?;
         self.destroy_swapchain();
         self.init_swapchain()?;
+        self.init_msaa_resources()?;
         self.init_depth_resources()?;
         self.init_framebuffers()?;
         self.recreate_command_buffers()?;
@@ -7410,6 +7535,23 @@ impl Renderer {
         }
         self.depth_images.clear();
         self.depth_images_memory.clear();
+        // MSAA 颜色附件
+        for &view in &self.msaa_image_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        self.msaa_image_views.clear();
+        for (&image, &memory) in self
+            .msaa_images
+            .iter()
+            .zip(self.msaa_image_memory.iter())
+        {
+            unsafe {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+            }
+        }
+        self.msaa_images.clear();
+        self.msaa_image_memory.clear();
         if self.swapchain != vk::SwapchainKHR::null() {
             unsafe {
                 self.swapchain_loader

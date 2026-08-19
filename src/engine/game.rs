@@ -1203,6 +1203,16 @@ impl Game {
                 self.map_path = Some(path);
                 self.level_list = list;
                 self.level_idx = 0;
+                // 据点立柱碰撞体（旗杆 0.4m 宽 × 4m 高）：玩家不可穿过据点标记
+                // （修复"穿越障碍物"——据点此前只渲染 marker、无任何碰撞体）
+                if let Some(obj) = self.obj_state.as_ref() {
+                    for pt in &obj.points {
+                        self.world.bodies.push(Body::new(
+                            Pv::new(pt.x, 2.0, pt.z),
+                            Pv::new(0.2, 2.0, 0.2),
+                        ));
+                    }
+                }
                 self.obj_state = Some(obj_state);
                 // 加载完成 → LoadingMap 态（按任意键开玩）
                 self.game_state = GameState::LoadingMap;
@@ -2868,9 +2878,10 @@ impl Game {
                 continue;
             }
             if self.collide_physics(&p) {
-                hit_count += 1;
                 // 命中障碍：子弹直接消耗（障碍永久存在，枪械不再打爆障碍；
-                // 手榴弹/爆炸物 AoE 仍可摧毁掩体，见爆炸结算）。爆炸弹命中才有 AoE。
+                // 手榴弹/爆炸物 AoE 仍可摧毁掩体，见爆炸结算）。
+                // 不计入 hit_count → 不触发命中提示/音效（打墙没有"命中反馈"）。
+                // 爆炸弹命中才有 AoE。
                 if self.hit_obstacle_index(&p).is_some() && p.explosive() {
                     self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
                 }
@@ -4426,7 +4437,8 @@ mod tests {
         assert_eq!(game.wave, 2);
     }
 
-    /// 开火产生投射物，命中物理刚体后销毁并计数
+    /// 开火产生投射物，命中物理刚体（障碍）后销毁；命中不计入 hits
+    /// （打墙没有命中提示——hit_count 只统计 NPC 命中）
     #[test]
     fn weapon_fire_hits_physics_body() {
         let mut game = Game::new();
@@ -4441,8 +4453,8 @@ mod tests {
         for _ in 0..200 {
             game.update(1.0 / 60.0, &Camera::new());
         }
-        assert!(game.hits() >= 1, "projectile should hit the body");
         assert!(game.projectiles.is_empty(), "hit projectile should be removed");
+        assert_eq!(game.hits(), 0, "障碍命中不计入 hits（无命中提示）");
     }
 
     /// 射速冷却：连续开火被限流
@@ -5158,6 +5170,43 @@ mod tests {
             ob.z + ob.half_d + 0.35,
             z
         );
+    }
+
+    /// 高强度碰撞完整性：随机方向高速游走 2000 帧（含斜穿 AABB 角、贴边滑动），
+    /// 玩家中心到任意障碍 AABB 的距离必须 ≥ 玩家半径 - ε（永不穿入）。
+    /// 回归：据点立柱/任何新增"视觉障碍"都不得缺失碰撞体。
+    #[test]
+    fn player_never_enters_any_obstacle_aabb() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        assert!(!game.world.bodies.is_empty(), "关卡应有障碍刚体");
+        let r = game.player_body.radius();
+        let mut state = 0x9E3779B97F4A7C15u64;
+        for _ in 0..2000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let ang = ((state >> 33) % 62832) as f32 / 10000.0; // 0..2π
+            // 高速移动（0.1m/帧 ≈ 6m/s）
+            game.player_body.pos.x += ang.cos() * 0.1;
+            game.player_body.pos.z += ang.sin() * 0.1;
+            game.player_body.collide_world(&game.world);
+            for body in &game.world.bodies {
+                let a = body.aabb();
+                let cx = game.player_body.pos.x.clamp(a.min.x, a.max.x);
+                let cz = game.player_body.pos.z.clamp(a.min.z, a.max.z);
+                let d2 = (cx - game.player_body.pos.x).powi(2)
+                    + (cz - game.player_body.pos.z).powi(2);
+                assert!(
+                    d2 >= (r - 0.02).powi(2),
+                    "玩家穿入障碍 AABB ({}, {}, {}, {})",
+                    a.min.x,
+                    a.min.z,
+                    a.max.x,
+                    a.max.z
+                );
+            }
+        }
     }
 
     /// 换弹：R 触发后计时完成，弹匣补满
