@@ -123,10 +123,14 @@ pub fn glyph(ch: char) -> Option<[u8; 8]> {
         }
         // 诊断（RV3D_CJK_DIAG=1）：打印实际生成的字形，验证 DPI 路径
         if std::env::var("RV3D_CJK_DIAG").as_deref() == Ok("1") {
-            log::info!("cjk-diag: {} = {:02X?}", ch, bm);
+            log::info!("cjk-diag: '{}' OK rows={:02X?}", ch, bm);
         }
         Some(bm)
     } else {
+        // 诊断：光栅化失败路径（定位 DPI/位图问题）
+        if std::env::var("RV3D_CJK_DIAG").as_deref() == Ok("1") {
+            log::info!("cjk-diag: '{}' RASTERIZE-FAILED", ch);
+        }
         None
     }
 }
@@ -148,9 +152,10 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         if dc.is_null() {
             return None;
         }
-        // 逻辑 16px 字符 → 物理像素（96dpi=16，200% = 32），位图 32x32 容纳
-        let font_px = ((16.0 * dpi as f32 / 96.0).round() as i32).clamp(16, 32);
-        let bmp = CreateCompatibleBitmap(dc, 32, 32);
+        // 逻辑 16px 字符 → 物理像素（96dpi=16，200% = 32，400% = 64），
+        // 位图 64x64 容纳任意 Windows 缩放；采样按实际 font_px 精确取区间
+        let font_px = ((16.0 * dpi as f32 / 96.0).round() as i32).clamp(16, 64);
+        let bmp = CreateCompatibleBitmap(dc, 64, 64);
         if bmp.is_null() {
             DeleteDC(dc);
             return None;
@@ -177,7 +182,7 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         SetTextColor(dc, 0x00FF_FFFF); // 白字
         // 清背景
         let brush = CreateSolidBrush(0x0000_0000);
-        let rect = Rect { left: 0, top: 0, right: 32, bottom: 32 };
+        let rect = Rect { left: 0, top: 0, right: 64, bottom: 64 };
         FillRect(dc, &rect as *const Rect as *const c_void, brush);
         DeleteObject(brush);
         // 画字符（BMP 内单 UTF-16 单元）
@@ -187,16 +192,16 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         // 读回 32bpp（top-down：行 0 = 顶部）
         let mut bmi = std::mem::zeroed::<BitmapInfoHeader>();
         bmi.biSize = 40;
-        bmi.biWidth = 32;
-        bmi.biHeight = -32;
+        bmi.biWidth = 64;
+        bmi.biHeight = -64;
         bmi.biPlanes = 1;
         bmi.biBitCount = 32;
-        let mut px: Vec<u8> = vec![0u8; 32 * 32 * 4];
+        let mut px: Vec<u8> = vec![0u8; 64 * 64 * 4];
         let got = GetDIBits(
             dc,
             bmp,
             0,
-            32,
+            64,
             px.as_mut_ptr() as *mut c_void,
             &mut bmi as *mut BitmapInfoHeader as *mut c_void,
             DIB_RGB_COLORS,
@@ -212,8 +217,8 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
     }
 }
 
-/// 32x32 位图（字形占前 font_px 行/列）→ 8x8 掩码。
-/// 每输出格按比例取整区间，保证任意 DPI（font_px 16..=32）下字形比例不变。
+/// 64x64 位图（字形占前 font_px 行/列）→ 8x8 掩码。
+/// 每输出格按比例取整区间，保证任意 DPI（font_px 16..=64）下字形比例不变。
 fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u8; 8]> {
     let fp = font_px.max(1);
     let mut out = [0u8; 8];
@@ -226,7 +231,7 @@ fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u8; 8]> {
             let mut lit = false;
             for y in y0..y1 {
                 for x in x0..x1 {
-                    let off = (y * 32 + x) * 4;
+                    let off = (y * 64 + x) * 4;
                     if off + 2 < px.len()
                         && (px[off] > 128 || px[off + 1] > 128 || px[off + 2] > 128)
                     {
@@ -297,13 +302,13 @@ mod tests {
             }
             d
         }
-        // 转 32x32 RGBA 布局（字形放前 size 行）
+        // 转 64x64 RGBA 布局（字形放前 size 行）
         fn to32(src: &[u8], size: usize) -> Vec<u8> {
-            let mut p = vec![0u8; 32 * 32 * 4];
+            let mut p = vec![0u8; 64 * 64 * 4];
             for y in 0..size {
                 for x in 0..size {
                     let v = src[y * size + x];
-                    let off = (y * 32 + x) * 4;
+                    let off = (y * 64 + x) * 4;
                     p[off] = v;
                     p[off + 1] = v;
                     p[off + 2] = v;
