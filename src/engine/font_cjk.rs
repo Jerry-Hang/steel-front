@@ -35,6 +35,7 @@ extern "C" {
         hdc: *mut c_void, hbm: *mut c_void, start: c_uint, lines: c_uint,
         buf: *mut c_void, bmi: *mut c_void, usage: c_uint,
     ) -> c_int;
+    fn GetDeviceCaps(hdc: *mut c_void, index: c_int) -> c_int;
 }
 
 #[link(name = "user32")]
@@ -74,6 +75,8 @@ const CLIP_DEFAULT_PRECIS: c_uint = 0;
 const ANTIALIASED_QUALITY: c_uint = 4;
 const DEFAULT_PITCH: c_uint = 0;
 const DIB_RGB_COLORS: c_uint = 0;
+/// GetDeviceCaps 索引：垂直 DPI（每逻辑英寸像素数）
+const LOGPIXELSY: c_int = 90;
 
 static CACHE: Mutex<Option<std::collections::HashMap<char, [u8; 8]>>> = Mutex::new(None);
 
@@ -118,6 +121,10 @@ pub fn glyph(ch: char) -> Option<[u8; 8]> {
                 map.insert(ch, bm);
             }
         }
+        // 诊断（RV3D_CJK_DIAG=1）：打印实际生成的字形，验证 DPI 路径
+        if std::env::var("RV3D_CJK_DIAG").as_deref() == Ok("1") {
+            log::info!("cjk-diag: {} = {:02X?}", ch, bm);
+        }
         Some(bm)
     } else {
         None
@@ -125,21 +132,25 @@ pub fn glyph(ch: char) -> Option<[u8; 8]> {
 }
 
 fn rasterize(ch: char) -> Option<[u8; 8]> {
-    // TextOutW → GetDIBits 路径（2026-08-19 重写）：GetGlyphOutlineW 在部分环境下
-    // 输出的 GGO_BITMAP 内容异常（黑盒 13x15 却只有一根竖线），改用 GDI 文本引擎
-    // 直接渲染到 16x16 内存位图再读回，CJK 渲染稳定可靠。
+    // TextOutW → GetDIBits 路径：GDI 文本引擎直接渲染到内存位图再读回，CJK 稳定。
+    // DPI 感知（2026-08-19）：游戏进程是 DPI-aware，屏幕兼容 DC 的字体渲染按实际
+    // DPI 缩放（150%/200% 屏 -16px 字体实际 24/32px）——固定 16x16 位图会把字形
+    // 裁成"横条"（压扁）。按 GetDeviceCaps 取 DC 实际 DPI 动态计算字体像素，
+    // 位图 32x32 容纳 200% 缩放，再按实际字体像素精确采样到 8x8。
     unsafe {
         let screen_dc = GetDC(std::ptr::null_mut());
         if screen_dc.is_null() {
             return None;
         }
         let dc = CreateCompatibleDC(screen_dc);
+        let dpi = GetDeviceCaps(dc, LOGPIXELSY).max(96);
         ReleaseDC(std::ptr::null_mut(), screen_dc);
         if dc.is_null() {
             return None;
         }
-        // 16x16 兼容位图（32bpp）
-        let bmp = CreateCompatibleBitmap(dc, 16, 16);
+        // 逻辑 16px 字符 → 物理像素（96dpi=16，200% = 32），位图 32x32 容纳
+        let font_px = ((16.0 * dpi as f32 / 96.0).round() as i32).clamp(16, 32);
+        let bmp = CreateCompatibleBitmap(dc, 32, 32);
         if bmp.is_null() {
             DeleteDC(dc);
             return None;
@@ -150,7 +161,7 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
             .chain(std::iter::once(0))
             .collect();
         let font = CreateFontW(
-            -16, 0, 0, 0, 400, 0, 0, 0,
+            -font_px, 0, 0, 0, 400, 0, 0, 0,
             DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH, face.as_ptr(),
         );
@@ -164,33 +175,32 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         SetBkMode(dc, OPAQUE);
         SetBkColor(dc, 0x0000_0000); // 黑底
         SetTextColor(dc, 0x00FF_FFFF); // 白字
-        // 清背景（FillRect 黑）
+        // 清背景
         let brush = CreateSolidBrush(0x0000_0000);
-        let rect = Rect { left: 0, top: 0, right: 16, bottom: 16 };
+        let rect = Rect { left: 0, top: 0, right: 32, bottom: 32 };
         FillRect(dc, &rect as *const Rect as *const c_void, brush);
         DeleteObject(brush);
-        // 画字符（1 个 UTF-16 单元；中文 BMP 内均为单单元）
+        // 画字符（BMP 内单 UTF-16 单元）
         let mut buf16 = [0u16; 2];
         let n = ch.encode_utf16(&mut buf16).len();
         TextOutW(dc, 0, 0, buf16.as_ptr(), n as c_int);
-        // 读回 32bpp（top-down：biHeight 为负，行 0 = 顶部）
+        // 读回 32bpp（top-down：行 0 = 顶部）
         let mut bmi = std::mem::zeroed::<BitmapInfoHeader>();
         bmi.biSize = 40;
-        bmi.biWidth = 16;
-        bmi.biHeight = -16;
+        bmi.biWidth = 32;
+        bmi.biHeight = -32;
         bmi.biPlanes = 1;
         bmi.biBitCount = 32;
-        let mut px: Vec<u8> = vec![0u8; 16 * 16 * 4];
+        let mut px: Vec<u8> = vec![0u8; 32 * 32 * 4];
         let got = GetDIBits(
             dc,
             bmp,
             0,
-            16,
+            32,
             px.as_mut_ptr() as *mut c_void,
             &mut bmi as *mut BitmapInfoHeader as *mut c_void,
             DIB_RGB_COLORS,
         );
-        // 还原并释放
         SelectObject(dc, old_bmp);
         DeleteObject(bmp);
         DeleteObject(font);
@@ -198,28 +208,38 @@ fn rasterize(ch: char) -> Option<[u8; 8]> {
         if got == 0 {
             return None;
         }
-        // 16x16 → 8x8：每 2x2 块任一亮像素即置 1（笔画保真）
-        let mut out = [0u8; 8];
-        for j in 0..8 {
-            for i in 0..8 {
-                let mut lit = false;
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let x = i * 2 + dx;
-                        let y = j * 2 + dy;
-                        let off = (y * 16 + x) * 4;
-                        if px[off] > 128 || px[off + 1] > 128 || px[off + 2] > 128 {
-                            lit = true;
-                        }
+        sample_glyph(&px, font_px as usize)
+    }
+}
+
+/// 32x32 位图（字形占前 font_px 行/列）→ 8x8 掩码。
+/// 每输出格按比例取整区间，保证任意 DPI（font_px 16..=32）下字形比例不变。
+fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u8; 8]> {
+    let fp = font_px.max(1);
+    let mut out = [0u8; 8];
+    for j in 0..8 {
+        let y0 = j * fp / 8;
+        let y1 = ((j + 1) * fp) / 8;
+        for i in 0..8 {
+            let x0 = i * fp / 8;
+            let x1 = ((i + 1) * fp) / 8;
+            let mut lit = false;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let off = (y * 32 + x) * 4;
+                    if off + 2 < px.len()
+                        && (px[off] > 128 || px[off + 1] > 128 || px[off + 2] > 128)
+                    {
+                        lit = true;
                     }
                 }
-                if lit {
-                    out[j] |= 1 << (7 - i);
-                }
+            }
+            if lit {
+                out[j] |= 1 << (7 - i);
             }
         }
-        Some(out)
     }
+    Some(out)
 }
 #[cfg(test)]
 mod tests {
@@ -249,5 +269,57 @@ mod tests {
             let g2 = glyph('中');
             assert_eq!(g, g2, "缓存应返回相同字形");
         }
+    }
+
+    /// DPI 一致性：同一字形在 96/150/200% DPI（16/24/32px）采样形状一致，
+    /// 回归"中文字被压扁成横条"问题。
+    #[test]
+    fn glyph_shape_consistent_across_dpi() {
+        // 16px 的"中"：上下横 + 中竖 + 中横（简化图样）
+        let mut base = [0u8; 256];
+        for x in 0..16 {
+            base[x] = 255;
+            base[15 * 16 + x] = 255;
+        }
+        for y in 0..16 {
+            base[y * 16 + 7] = 255;
+        }
+        for x in 2..14 {
+            base[7 * 16 + x] = 255;
+        }
+        // 最近邻放大（16x16 → size×size）
+        fn upscale(src: &[u8], size: usize) -> Vec<u8> {
+            let mut d = vec![0u8; size * size];
+            for y in 0..size {
+                for x in 0..size {
+                    d[y * size + x] = src[(y * 16 / size) * 16 + (x * 16 / size)];
+                }
+            }
+            d
+        }
+        // 转 32x32 RGBA 布局（字形放前 size 行）
+        fn to32(src: &[u8], size: usize) -> Vec<u8> {
+            let mut p = vec![0u8; 32 * 32 * 4];
+            for y in 0..size {
+                for x in 0..size {
+                    let v = src[y * size + x];
+                    let off = (y * 32 + x) * 4;
+                    p[off] = v;
+                    p[off + 1] = v;
+                    p[off + 2] = v;
+                }
+            }
+            p
+        }
+        let s16 = to32(&base, 16);
+        let s24 = to32(&upscale(&base, 24), 24);
+        let s32 = to32(&upscale(&base, 32), 32);
+        let g16 = sample_glyph(&s16, 16).unwrap();
+        let g24 = sample_glyph(&s24, 24).unwrap();
+        let g32 = sample_glyph(&s32, 32).unwrap();
+        assert_eq!(g16, g24, "96dpi 与 150dpi 应一致: {:?} vs {:?}", g16, g24);
+        assert_eq!(g16, g32, "96dpi 与 200dpi 应一致: {:?} vs {:?}", g16, g32);
+        // 形状：顶部与底部都有笔画（不压扁）
+        assert!(g16[0] != 0 && g16[7] != 0, "顶部与底部都应有笔画: {:?}", g16);
     }
 }
