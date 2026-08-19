@@ -552,10 +552,13 @@ fn kind_style(kind: ObstacleKind) -> KindStyle {
         ObstacleKind::Tree => KindStyle {
             min_boxes: 1,
             max_boxes: 1,
-            min_w: 0.35,
-            max_w: 0.5,
-            min_d: 0.35,
-            max_d: 0.5,
+            // 树干半宽收窄到 0.15..0.28（整宽 0.3..0.56m）：物理刚体与渲染 marker 同源
+            // （同一 half_w/half_d），视觉/碰撞一致收窄 → 玩家可贴近树干（半径 0.5m 外即可绕行），
+            // 不再有“看着细、撞着粗”的路障感。RNG 消耗顺序不变 → 摆放位置不变。
+            min_w: 0.15,
+            max_w: 0.28,
+            min_d: 0.15,
+            max_d: 0.28,
             gap: 1.5,
         },
         ObstacleKind::Building => KindStyle {
@@ -998,7 +1001,8 @@ impl Game {
             grenades_max: 2,
             grenades_vec: Vec::new(),
             pending_kick: (0.0, 0.0),
-            player_body: PlayerBody::new(Pv::new(0.0, 0.0, 0.0), 0.5, 1.6),
+            // 碰撞半径 0.35（真人肩宽 ~0.7m）：0.5 太胖，视觉"离障碍还有距离就卡住"
+        player_body: PlayerBody::new(Pv::new(0.0, 0.0, 0.0), 0.35, 1.6),
             move_forward: false,
             jump_pressed: false,
             jump_vel: 0.0,
@@ -1031,7 +1035,12 @@ impl Game {
                     .unwrap_or(1.0);
                 v.max(0.5)
             },
-            stress: std::env::var("RV3D_STRESS_AI").is_ok(),
+            // 大战场判定：变量存在且值非 "0"/"off" → 大战场；无变量/0/off → 波次模式
+            // （main.rs 未设置时默认注入 "64"；测试环境无变量 → wave 模式，勿反转）
+            stress: !matches!(
+                std::env::var("RV3D_STRESS_AI").as_deref(),
+                Err(_) | Ok("0") | Ok("off")
+            ),
             stress_sides: std::env::var("RV3D_STRESS_AI")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
@@ -1330,7 +1339,10 @@ impl Game {
             self.level_objective_target(level)
         });
         self.hud.victory_banner = None;
-        // 物理世界：清掉上一关障碍，重建为当前关卡障碍盒（贴地 AABB，供玩家碰撞/投射物拦截）
+        // 物理世界：清掉上一关障碍，重建为当前关卡障碍盒（贴地 AABB，供玩家碰撞/投射物拦截）。
+        // 刚体 AABB = (x, 1.2, z) ± (half_w, 1.2, half_d) 与渲染 marker 严格同尺寸
+        // （renderer.rs WorldMarker::for_obstacle：平移 (x,1.2,z) × 缩放 2·half_w/2.4/2·half_d），
+        // 水平足迹逐米一致 —— 玩家被挡距离只由玩家胶囊半径（0.5m）决定（见 physics.rs）。
         self.world.bodies.clear();
         self.world.spheres.clear();
         for ob in &self.map.obstacles {
@@ -2165,7 +2177,7 @@ impl Game {
     /// 尝试开火（受射速冷却限制）。`origin`/`direction` 来自相机；返回是否真的开火。
     /// 内部单发：不做冷却检查，直接扣弹发射并结算后坐（含连发热量压制）/音效/日志。
     /// 返回是否发射成功。冷却与连发节奏由 fire / fire_burst 控制。
-    fn fire_shot(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
+    fn fire_shot(&mut self, origin: [f32; 3], direction: [f32; 3], from_player: bool) -> bool {
         let active_spec = ALL_WEAPONS
             .iter()
             .find(|s| s.name_zh == self.weapons.active_name());
@@ -2183,7 +2195,10 @@ impl Game {
             direction
         };
         match self.weapons.active_firearm().try_fire(origin, fire_dir) {
-            Some(projectile) => {
+            Some(mut projectile) => {
+                if from_player {
+                    projectile = projectile.with_player();
+                }
                 // 连发热量：连续射击累积（0..1），压制后续枪口上扬——前几发上扬大，
                 // 连发后期上扬趋于稳定（模拟控枪）；停火后 update 中按速率衰减
                 let heat = self.auto_heat;
@@ -2206,7 +2221,11 @@ impl Game {
                                 (r1 - 0.5) * 2.0 * moa_half.max(0.000_5),
                                 (r2 - 0.5) * 2.0 * moa_half.max(0.000_5),
                             );
-                            self.projectiles.push(weapon.fire(origin, dir));
+                            let mut sp = weapon.fire(origin, dir);
+                            if from_player {
+                                sp = sp.with_player();
+                            }
+                            self.projectiles.push(sp);
                         }
                     }
                 }
@@ -2255,7 +2274,8 @@ impl Game {
         }
     }
 
-    /// 单发开火（受冷却与切枪计时约束）；返回是否发射
+    /// 单发开火（受冷却与切枪计时约束）；返回是否发射。
+    /// 内部路径（AI/网络/测试）发射的弹不带玩家标记（无友军伤害豁免）。
     pub fn fire(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
         if self.fire_cooldown > 0.0 {
             return false;
@@ -2264,7 +2284,22 @@ impl Game {
         if self.weapons.is_switching() {
             return false;
         }
-        let ok = self.fire_shot(origin, direction);
+        let ok = self.fire_shot(origin, direction, false);
+        if ok {
+            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
+        }
+        ok
+    }
+
+    /// 玩家单发开火（main.rs 调用）：弹带玩家标记，命中友军（同阵营 NPC）穿身而过不造成伤害
+    pub fn fire_player(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
+        if self.fire_cooldown > 0.0 {
+            return false;
+        }
+        if self.weapons.is_switching() {
+            return false;
+        }
+        let ok = self.fire_shot(origin, direction, true);
         if ok {
             self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
         }
@@ -2273,13 +2308,34 @@ impl Game {
 
     /// 三连发（Burst3 模式）：无视冷却快速连打 3 发，之后强制冷却 3×间隔；
     /// 返回实际发射数（弹匣打空即停）。切枪计时中返回 0。
+    /// AI/网络/测试用三连发（不带玩家标记）。玩家入口见 fire_burst_player。
+    #[allow(dead_code)]
     pub fn fire_burst(&mut self, origin: [f32; 3], direction: [f32; 3]) -> u32 {
         if self.weapons.is_switching() {
             return 0;
         }
         let mut n = 0u32;
         for _ in 0..3 {
-            if self.fire_shot(origin, direction) {
+            if self.fire_shot(origin, direction, false) {
+                n += 1;
+            } else {
+                break;
+            }
+        }
+        if n > 0 {
+            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * 3.0;
+        }
+        n
+    }
+
+    /// 玩家三连发（main.rs 调用）：弹带玩家标记（友军豁免）
+    pub fn fire_burst_player(&mut self, origin: [f32; 3], direction: [f32; 3]) -> u32 {
+        if self.weapons.is_switching() {
+            return 0;
+        }
+        let mut n = 0u32;
+        for _ in 0..3 {
+            if self.fire_shot(origin, direction, true) {
                 n += 1;
             } else {
                 break;
@@ -2310,6 +2366,27 @@ impl Game {
     /// 累计命中数（供 UI / 日志）
     pub fn hits(&self) -> u64 {
         self.hits
+    }
+
+    /// NPC 是否被障碍物完全遮挡：玩家眼位 → NPC 的采样点（身体中心 +1.0m 与头部 +1.7m）
+    /// 的线段与任一障碍 AABB 相交。两处都被挡才算完全遮挡；任一处可见（如从矮墙
+    /// 上方露出头/肩）即不遮挡——修复"隔墙透视"同时避免"半身可见却消失"。
+    pub fn npc_occluded(&self, idx: usize) -> bool {
+        let Some(n) = self.npcs.get(idx) else {
+            return false;
+        };
+        let eye = self.player_eye();
+        for h in [NPC_HIT_CENTER_Y, 1.7] {
+            let (ax, ay, az) = (eye.x, eye.y, eye.z);
+            let (bx, by, bz) = (n.position[0], n.position[1] + h, n.position[2]);
+            let blocked = self.world.bodies.iter().any(|body| {
+                Self::segment_hits_aabb(ax, ay, az, bx, by, bz, &body.aabb())
+            });
+            if !blocked {
+                return false;
+            }
+        }
+        true
     }
 
     /// 取走本帧开火累计的后坐力（pitch/yaw 弧度），由 main.rs 施加到相机
@@ -2792,17 +2869,21 @@ impl Game {
             }
             if self.collide_physics(&p) {
                 hit_count += 1;
-                // 命中障碍：普通子弹只结算障碍 HP（摧毁后移除碰撞/阻挡），不爆炸；
-                // 爆炸弹命中时才有 AoE（对附近 NPC 造成冲击波伤害 + 闪光，但不推挤）
-                if let Some(idx) = self.hit_obstacle_index(&p) {
-                    if p.explosive() {
-                        self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
-                    }
-                    self.damage_obstacle(idx, p.damage_at_distance());
+                // 命中障碍：子弹直接消耗（障碍永久存在，枪械不再打爆障碍；
+                // 手榴弹/爆炸物 AoE 仍可摧毁掩体，见爆炸结算）。爆炸弹命中才有 AoE。
+                if self.hit_obstacle_index(&p).is_some() && p.explosive() {
+                    self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
                 }
                 continue;
             }
             if let Some((idx, hit_h)) = self.hit_npc_index(&p) {
+                // 友军伤害关闭：玩家弹命中同阵营 NPC 穿身而过（不造成伤害/火花/命中计数）
+                if p.from_player()
+                    && self.npcs[idx].team == crate::engine::ai::Team::Blue
+                {
+                    alive.push(p);
+                    continue;
+                }
                 hit_count += 1;
                 // V3.0：部位倍率按武器分段表 + 已飞距离查表（投射物携带 part_tiers）
                 let mult = p.part_multiplier(hit_h, self.npcs[idx].position[1]);
@@ -4620,7 +4701,7 @@ mod tests {
         }
         assert!(game.projectiles.is_empty(), "子弹应已过期消失");
         assert_eq!(game.explosions.len(), before, "普通子弹过期不应爆炸");
-        // 朝近处障碍射击：命中只结算障碍 HP，不爆炸
+        // 朝近处障碍射击：命中直接消耗（障碍永久存在），不爆炸
         let mut game2 = Game::new();
         let before2 = game2.explosions.len();
         let ob = game2.map.obstacles[0];
@@ -4633,6 +4714,100 @@ mod tests {
             game2.update(1.0 / 60.0, &Camera::new());
         }
         assert_eq!(game2.explosions.len(), before2, "子弹命中障碍不应爆炸");
+    }
+
+    /// 友军伤害关闭：玩家弹命中蓝方（友军）NPC 穿身而过不造成伤害；
+    /// 对照：玩家弹命中红方（敌人）NPC 正常伤害（证明机制差异来自友军判定）
+    #[test]
+    fn friendly_fire_off_for_player_projectiles() {
+        let mut game = Game::new();
+        // 追加一个蓝方（友军）NPC，复制 npc[0] 的位置（红方敌人对照）
+        let blue_idx = game.npcs.len();
+        let mut b = npc_at(blue_idx, crate::engine::ai::Team::Blue, game.npcs[0].position);
+        b.hp = 100.0;
+        b.max_hp = 100.0;
+        game.npcs.push(b);
+        // 垂直下射（1 帧内命中，NPC 横向移动不影响）
+        let down = |pos: [f32; 3]| ([pos[0], pos[1] + 10.0, pos[2]], [0.0, -1.0, 0.0]);
+        // 1) 玩家弹打蓝方友军：无伤害
+        let (o1, d1) = down(game.npcs[blue_idx].position);
+        assert!(game.fire_player(o1, d1));
+        for _ in 0..5 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert_eq!(
+            game.npcs[blue_idx].hp, 100.0,
+            "玩家弹命中友军不应造成伤害"
+        );
+        // 2) 冷却后玩家弹打红方敌人：正常伤害（对照）
+        for _ in 0..15 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        let (o2, d2) = down(game.npcs[0].position);
+        assert!(game.fire_player(o2, d2));
+        for _ in 0..5 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert!(
+            game.npcs[0].hp < 100.0,
+            "玩家弹命中红方敌人应正常伤害"
+        );
+    }
+
+    /// 枪械不再打爆障碍：子弹命中障碍后障碍 HP 不变、仍保留在列表
+    #[test]
+    fn bullets_do_not_destroy_obstacles() {
+        let mut game = Game::new();
+        let ob = game.map.obstacles[0];
+        let hp_before = ob.hp;
+        let n_before = game.map.obstacles.len();
+        let cx = ob.x;
+        let cz = ob.z;
+        let cy = terrain_height_at(cx, cz) + 1.2;
+        // 从 -X 侧 40m 水平射击障碍
+        assert!(game.fire_player([cx - 40.0, cy, cz], [1.0, 0.0, 0.0]));
+        for _ in 0..30 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert_eq!(game.map.obstacles.len(), n_before, "障碍不应被子弹摧毁");
+        assert_eq!(
+            game.map.obstacles[0].hp, hp_before,
+            "障碍 HP 不应被子弹削减"
+        );
+    }
+
+    /// NPC 遮挡判定：障碍 AABB 在玩家与 NPC 之间 → occluded；移开 NPC → 可见
+    #[test]
+    fn npc_occluded_by_obstacle_between() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.truncate(1);
+        // 玩家在原点，取一个障碍放在玩家与 NPC 之间
+        let ob = game.map.obstacles[0];
+        // 玩家 → 障碍中心 → NPC 在障碍另一侧 30m
+        game.player_body.pos = Pv::new(ob.x - ob.half_w - 40.0, 0.0, ob.z);
+        game.npcs[0].position = [ob.x + ob.half_w + 30.0, 0.0, ob.z];
+        assert!(
+            game.npc_occluded(0),
+            "障碍挡在玩家与 NPC 之间应判定遮挡"
+        );
+        // NPC 移到障碍同一侧 20m（视线无遮挡）→ 可见
+        game.npcs[0].position = [ob.x + ob.half_w + 30.0, 0.0, ob.z + 80.0];
+        assert!(
+            !game.npc_occluded(0),
+            "无遮挡时应可见"
+        );
+        // 越界索引安全
+        assert!(!game.npc_occluded(999));
+        // 双采样验证：近距离贴墙（墙高 MAP_BLOCK_HEIGHT ≥ 1.7m）NPC 在墙正后方
+        // → 身体与头部都被挡，仍判遮挡
+        game.npcs.truncate(1);
+        game.npcs[0].position = [ob.x + ob.half_w + 2.0, 0.0, ob.z];
+        game.player_body.pos = Pv::new(ob.x - ob.half_w - 1.0, 0.0, ob.z);
+        assert!(
+            game.npc_occluded(0),
+            "高墙正后方 NPC 应完全遮挡（双采样均被挡）"
+        );
     }
 
     /// 玩家受伤：攻击态 NPC 每秒扣血，血量为 0 进入 GameOver
@@ -4978,9 +5153,9 @@ mod tests {
         let z = game.player_body.pos.z;
         assert!(z < ob.z + ob.half_d + 5.0, "玩家应朝障碍移动: {}", z);
         assert!(
-            z > ob.z + ob.half_d + 0.3 && z < ob.z + ob.half_d + 0.7,
-            "碰撞应把玩家挡在障碍 +Z 面外约 0.5m (期望 ~{}): {}",
-            ob.z + ob.half_d + 0.5,
+            z > ob.z + ob.half_d + 0.15 && z < ob.z + ob.half_d + 0.55,
+            "碰撞应把玩家挡在障碍 +Z 面外约 0.35m（玩家半径）(期望 ~{}): {}",
+            ob.z + ob.half_d + 0.35,
             z
         );
     }

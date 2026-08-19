@@ -15,6 +15,8 @@ use ash::{
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 use super::lighting::{LightUniform, LIGHT_UBO_BINDING};
+// 障碍 marker 材质/尺寸构建依赖游戏侧障碍定义（仅类型引用，无运行时依赖）
+use crate::engine::game::{MapObstacle, ObstacleKind};
 
 /// ash 的字符串指针类型跟随平台 c_char：x86_64/Linux 为 `*const i8`，
 /// AArch64（Apple Silicon/Android/高通 X Elite）为 `*const u8`。
@@ -472,6 +474,59 @@ const _: () = assert!(std::mem::size_of::<InstanceData>() == 80);
 pub struct WorldMarker {
     pub model: glam::Mat4,
     pub tint: [f32; 4],
+}
+
+impl WorldMarker {
+    /// 从物理障碍盒构建世界 marker：模型 = 平移(x, 1.2, z) × 缩放(2·half_w, 2.4, 2·half_d)。
+    ///
+    /// 与 game.rs apply_level 的物理刚体严格同尺寸：刚体 AABB = (x, 1.2, z) ± (half_w, 1.2, half_d)
+    /// （高 MAP_BLOCK_HEIGHT = 2.4），即渲染盒与碰撞盒水平足迹逐米一致 —— 玩家被挡距离仅由
+    /// 玩家胶囊半径（0.5m）决定，不存在“视觉细/碰撞粗”的 AABB 与 marker 尺寸差。
+    ///
+    /// 材质：按 ObstacleKind 调色板 + 确定性逐障碍微变（terrain_hash 量化格点），
+    /// 墙（砖红）/块（金属灰蓝）/栅栏（木板）/树（树干棕）/建筑（混凝土）/残骸（土棕）
+    /// 各有可辨识材质色；同一种类的相邻盒子明度/色相 ±6% 抖动，形成砖缝/板纹颗粒感。
+    pub fn for_obstacle(ob: &MapObstacle) -> Self {
+        WorldMarker {
+            model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, 1.2, ob.z))
+                * glam::Mat4::from_scale(glam::Vec3::new(
+                    ob.half_w * 2.0,
+                    2.4,
+                    ob.half_d * 2.0,
+                )),
+            tint: obstacle_material_tint(ob.kind, ob.x, ob.z),
+        }
+    }
+}
+
+/// 障碍种类 → 基础材质色（片元 marker 路径直出 tint × fade，无贴图混合）
+fn obstacle_base_color(kind: ObstacleKind) -> [f32; 3] {
+    match kind {
+        ObstacleKind::Wall => [0.66, 0.38, 0.30], // 砖墙红
+        ObstacleKind::Block => [0.46, 0.50, 0.56], // 金属掩体（钢灰蓝）
+        ObstacleKind::Barrier => [0.60, 0.45, 0.28], // 木板路障
+        ObstacleKind::Tree => [0.48, 0.36, 0.22], // 树干棕
+        ObstacleKind::Building => [0.58, 0.58, 0.61], // 混凝土
+        ObstacleKind::Ruin => [0.44, 0.39, 0.33], // 残骸土棕
+    }
+}
+
+/// 障碍 marker 材质 tint：种类基础色 × 确定性逐障碍微变（1/8m 量化格点哈希）。
+/// 同一障碍每帧/每关颜色恒定；三通道各自独立抖动形成材质颗粒感。
+fn obstacle_material_tint(kind: ObstacleKind, x: f32, z: f32) -> [f32; 4] {
+    let base = obstacle_base_color(kind);
+    let qx = (x * 8.0).round() as i32;
+    let qz = (z * 8.0).round() as i32;
+    let unit = |ix: i32, iz: i32| (terrain_hash(ix, iz) & 0xFFFF) as f32 / 65535.0;
+    let jr = 0.94 + 0.12 * unit(qx + 1, qz);
+    let jg = 0.94 + 0.12 * unit(qx, qz + 1);
+    let jb = 0.94 + 0.12 * unit(qx, qz);
+    [
+        (base[0] * jr).clamp(0.0, 1.0),
+        (base[1] * jg).clamp(0.0, 1.0),
+        (base[2] * jb).clamp(0.0, 1.0),
+        1.0,
+    ]
 }
 
 /// NPC 士兵可视化输入（位置/朝向 yaw/阵营配色）。

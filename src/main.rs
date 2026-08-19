@@ -27,7 +27,7 @@ use winit::{
 
 use engine::camera::{Camera, CameraMode, KeyState};
 use engine::ai::Team;
-use engine::game::{Game, GameState, ObstacleKind};
+use engine::game::{Game, GameState};
 use engine::renderer::{QualityPreset, Renderer};
 use engine::window;
 use net::{Client, Server};
@@ -385,7 +385,7 @@ impl GameApp {
                 if self.fire_edge {
                     let ok = self
                         .game
-                        .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                        .fire_player([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
                     if ok {
                         fired = 1;
                         self.last_shot_at = self.anim_clock;
@@ -396,7 +396,7 @@ impl GameApp {
                 if self.fire_edge {
                     fired = self
                         .game
-                        .fire_burst([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                        .fire_burst_player([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
                     if fired > 0 {
                         self.last_shot_at = self.anim_clock;
                     }
@@ -406,7 +406,7 @@ impl GameApp {
                 if self.fire_requested {
                     let ok = self
                         .game
-                        .fire([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                        .fire_player([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
                     if ok {
                         fired = 1;
                         self.last_shot_at = self.anim_clock;
@@ -442,9 +442,20 @@ impl GameApp {
             });
         }
 
-        // 伤害飘字：本帧命中伤害入列（0.6s 衰减淡出）
-        for dmg in self.game.take_hit_damages() {
-            self.hit_damage_popups.push((dmg, 0.6));
+        // 伤害飘字：本帧命中伤害入列（0.6s 衰减淡出）。
+        // 同帧同值合并（霰弹一次开火 8 弹丸命中只显示一条伤害），
+        // 上限 3 条滚动——超出丢最旧，新伤害补进来（不出现"一次命中刷屏"）。
+        {
+            let mut seen = std::collections::HashSet::new();
+            for dmg in self.game.take_hit_damages() {
+                if seen.insert(dmg.to_bits()) {
+                    self.hit_damage_popups.push((dmg, 0.6));
+                }
+            }
+            if self.hit_damage_popups.len() > 3 {
+                let overflow = self.hit_damage_popups.len() - 3;
+                self.hit_damage_popups.drain(0..overflow);
+            }
         }
         // 衰减（iter_mut 可修改）→ 过滤（retain 只读判断，闭包参数为 &T）
         for (_, t) in self.hit_damage_popups.iter_mut() {
@@ -871,31 +882,14 @@ impl GameApp {
             }
             renderer.set_hud_quads(&quads);
             renderer.set_lights(&self.game.light_uniform());
-            // 世界障碍 marker：关卡地图障碍盒 → 红色盒实例（复用主 pipeline，见 renderer.rs MARKER_SLOT_BASE）
+            // 世界障碍 marker：关卡地图障碍盒 → 按种类材质着色的盒实例（复用主 pipeline，
+            // 见 renderer.rs MARKER_SLOT_BASE；模型矩阵/材质色统一由 WorldMarker::for_obstacle 构建，
+            // 与物理刚体 AABB（game.rs apply_level，同 half_w/half_d）严格同尺寸）
             let markers: Vec<engine::renderer::WorldMarker> = self
                 .game
                 .map_obstacles()
                 .iter()
-                .map(|ob| {
-                    // 障碍种类配色：墙=红、块=橙、栅栏=蓝灰（便于区分地图主题）
-                    let tint = match ob.kind {
-                        ObstacleKind::Wall => [0.85, 0.25, 0.15, 1.0],
-                        ObstacleKind::Block => [0.85, 0.6, 0.15, 1.0],
-                        ObstacleKind::Barrier => [0.35, 0.5, 0.8, 1.0],
-                        ObstacleKind::Tree => [0.2, 0.55, 0.15, 1.0],   // 树：绿
-                        ObstacleKind::Building => [0.5, 0.5, 0.52, 1.0], // 建筑：灰
-                        ObstacleKind::Ruin => [0.55, 0.4, 0.25, 1.0],    // 残骸：棕
-                    };
-                    engine::renderer::WorldMarker {
-                        model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, 1.2, ob.z))
-                            * glam::Mat4::from_scale(glam::Vec3::new(
-                                ob.half_w * 2.0,
-                                2.4,
-                                ob.half_d * 2.0,
-                            )),
-                        tint,
-                    }
-                })
+                .map(engine::renderer::WorldMarker::for_obstacle)
                 .collect();
             // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
             // 每据点 = 细高立柱（归属色）+ 扁平底盘（半径 5.0，半透明归属色）。
@@ -1040,7 +1034,10 @@ impl GameApp {
                 .game
                 .npcs
                 .iter()
-                .map(|n| {
+                .enumerate()
+                // 隔墙透视修复：被障碍物完全遮挡的 NPC 不渲染
+                .filter(|(i, _)| !self.game.npc_occluded(*i))
+                .map(|(_, n)| {
                     let base = self
                         .last_npc_snapshot
                         .get(&n.id)
@@ -1083,7 +1080,12 @@ impl GameApp {
                 .game
                 .npcs
                 .iter()
-                .filter(|n| n.state_machine.state() == crate::engine::ai::NpcState::Attack)
+                .enumerate()
+                .filter(|(i, n)| {
+                    !self.game.npc_occluded(*i)
+                        && n.state_machine.state() == crate::engine::ai::NpcState::Attack
+                })
+                .map(|(_, n)| n)
                 .filter(|n| (n.id as f32 + self.anim_clock * 6.0) % 4.0 < 1.0)
                 .take(4)
                 .map(|n| {

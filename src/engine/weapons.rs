@@ -252,6 +252,8 @@ pub struct Projectile {
     part_tiers: &'static [(f32, f32, f32, f32, f32)],
     /// 是否爆炸弹（true = 过期/命中障碍时引爆 AoE；普通子弹不爆炸，静默消失）
     explosive: bool,
+    /// 是否玩家发射（true = 友军伤害关闭：对同阵营 NPC 穿身而过；AI/网络弹为 false）
+    from_player: bool,
     /// 是否存活（射程/寿命耗尽后为 false）
     alive: bool,
     /// 上一帧位置（segment 命中检测用；高速弹避免跳过小目标）
@@ -292,6 +294,7 @@ impl Projectile {
             gravity: 0.0,
             part_tiers: &[],
             explosive: false,
+            from_player: false,
             alive: true,
         }
     }
@@ -332,6 +335,17 @@ impl Projectile {
     /// 是否爆炸弹
     pub fn explosive(&self) -> bool {
         self.explosive
+    }
+
+    /// 标记为玩家发射的弹（友军伤害关闭判定用）
+    pub fn with_player(mut self) -> Self {
+        self.from_player = true;
+        self
+    }
+
+    /// 是否玩家发射
+    pub fn from_player(&self) -> bool {
+        self.from_player
     }
 
     /// 部位伤害倍率：按已飞行距离查分段表（头/胸/臂/腿，高度阈值与命中球几何一致：

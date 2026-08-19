@@ -430,6 +430,66 @@ const CROSS_TRI: array<vec3<u32>, 4> = array<vec3<u32>, 4>(
     vec3<u32>(4u, 5u, 6u), vec3<u32>(4u, 6u, 7u),
 );
 
+// ---- 地形 PBR 细节噪声（确定性、无随机种子：世界坐标纯函数，跨帧/跨象限稳定）----
+// 与 CPU 侧 terrain_hash 同族整数哈希（u32 模算术逐位一致），格点值噪声 C1 连续；
+// 相邻实例共享顶点世界坐标 → 同一 (x,z) 恒得同一值，quad 间无缝无裂缝。
+fn terrain_lattice_hash(ix: i32, iz: i32) -> f32 {
+    var h: u32 = u32(ix) * 0x1B873593u ^ u32(iz) * 0xCC9E2D51u;
+    h = h ^ (h >> 16u);
+    h = h * 0x7FEB352Du;
+    h = h ^ (h >> 15u);
+    h = h * 0x846CA68Bu;
+    h = h ^ (h >> 16u);
+    return f32(h & 0xFFFFu) / 65535.0;
+}
+
+fn terrain_smooth(t: f32) -> f32 {
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/// 双线性 smoothstep 值噪声（确定性、C1 连续，与 CPU terrain_value_noise 同族）
+fn terrain_value_noise(x: f32, z: f32, cell: f32) -> f32 {
+    let fx = x / cell;
+    let fz = z / cell;
+    let ix = i32(floor(fx));
+    let iz = i32(floor(fz));
+    let tx = terrain_smooth(fx - f32(ix));
+    let tz = terrain_smooth(fz - f32(iz));
+    let h00 = terrain_lattice_hash(ix, iz);
+    let h10 = terrain_lattice_hash(ix + 1, iz);
+    let h01 = terrain_lattice_hash(ix, iz + 1);
+    let h11 = terrain_lattice_hash(ix + 1, iz + 1);
+    let a = h00 + (h10 - h00) * tx;
+    let b = h01 + (h11 - h01) * tx;
+    return a + (b - a) * tz;
+}
+
+/// 地形顶点色（草地/沙粒/泥土分域）：大尺度干湿分域（干燥处偏沙黄）叠加
+/// 高频草色斑驳（黄绿 ↔ 深绿交替）与细颗粒明暗抖动（泥土感）。
+/// 片元着色器按 0.75 纹理 + 0.25 顶点色混合，此 tint 在烘焙地面纹理上
+/// 叠加材质变化，光照开/关两条路径均生效。
+fn terrain_tint(x: f32, z: f32) -> vec3<f32> {
+    let biome = terrain_value_noise(x, z, 48.0) * 0.65 + terrain_value_noise(x, z, 24.0) * 0.35;
+    let grass = mix(
+        vec3<f32>(0.13, 0.30, 0.08), // 深绿（阴湿草丛）
+        vec3<f32>(0.42, 0.44, 0.15), // 黄绿（枯草/阳面）
+        terrain_value_noise(x, z, 3.0),
+    );
+    let sand_col = vec3<f32>(0.60, 0.50, 0.28); // 沙黄（干燥处）
+    let col = mix(grass, sand_col, smoothstep(0.45, 0.62, biome));
+    // 细颗粒明暗抖动（泥土斑驳，±14%）
+    return col * (0.86 + 0.28 * terrain_value_noise(x, z, 1.5));
+}
+
+/// 高度扰动（轻微法线扰动）：低频起伏 + 高频颗粒，幅度 ±3cm。
+/// 片元着色器用世界坐标屏幕导数求面法线 → 扰动自动转为 quad 法线倾斜，
+/// 光照下表面呈颗粒/起伏质感而非单一平面。
+fn terrain_bump(x: f32, z: f32) -> f32 {
+    let low = terrain_value_noise(x, z, 7.0);
+    let high = terrain_value_noise(x, z, 1.6);
+    return (low * 0.55 + high * 0.45 - 0.5) * 0.06;
+}
+
 fn write_vertex(
     lid: u32,
     pos: vec3<f32>,
@@ -439,17 +499,29 @@ fn write_vertex(
     fade: f32,
     flat: f32,
     is_gun: bool,
+    terrain: bool,
 ) {
     var v: VertexOutput;
-    let wp = inst.model * vec4<f32>(pos, 1.0);
+    var p = pos;
+    var col = inst.tint.rgb;
+    if (terrain) {
+        // 地形 PBR 细节：仅地面/地形槽应用（marker/NPC/自发光不受影响）。
+        // 高度扰动经片元世界坐标屏幕导数转法线倾斜（光照下颗粒质感）；
+        // 颜色变化表达草地/沙粒/泥土分域（片元 0.75 纹理混合下仍可见）。
+        let wpos = (inst.model * vec4<f32>(pos, 1.0)).xyz;
+        p = pos + vec3<f32>(0.0, terrain_bump(wpos.x, wpos.z), 0.0);
+        col = terrain_tint(wpos.x, wpos.z);
+    }
+    let wp = inst.model * vec4<f32>(p, 1.0);
     v.position = camera.proj * camera.view * wp;
     // 枪模深度覆盖：第一人称枪槽（NPC 区末 16 槽）强制 z_clip=0（NDC z=0 →
     // 深度 0.5，恒小于世界几何），杜绝枪管/枪托被近墙/地形"穿模遮住"
     if (is_gun) {
         v.position.z = 0.0;
     }
-    // 顶点色已白化：color = 白 × tint（与顶点着色器 color * inst.tint.rgb 一致）
-    v.color = vec3<f32>(1.0) * inst.tint.rgb;
+    // 顶点色：地形走程序化 terrain_tint（草地/沙粒/泥土分域）；其余白 × tint
+    // （与顶点着色器 color * inst.tint.rgb 一致）
+    v.color = col;
     v.uv = uv;
     v.fade = fade;
     v.world_pos = wp.xyz;
@@ -519,7 +591,7 @@ fn mesh_main(
 
     if (is_ground) {
         if (lid < 4u) {
-            write_vertex(lid, GROUND_POS[lid], GROUND_UV[lid], inst, cam, fade, flat, false);
+            write_vertex(lid, GROUND_POS[lid], GROUND_UV[lid], inst, cam, fade, flat, false, true);
         }
         if (lid < 2u) {
             mesh_out.primitives[lid].indices = GROUND_TRI[lid];
@@ -534,7 +606,7 @@ fn mesh_main(
     // 近档立方体 / 远档十字双 quad：与 CPU 近/远分档同一阈值（全 3D 距离²）
     if (dist2 < camera.cam_pos.w) {
         if (lid < 24u) {
-            write_vertex(lid, CUBE_POS[lid], CUBE_UV[lid], inst, cam, fade, flat, is_gun);
+            write_vertex(lid, CUBE_POS[lid], CUBE_UV[lid], inst, cam, fade, flat, is_gun, false);
         }
         if (lid < 12u) {
             mesh_out.primitives[lid].indices = CUBE_TRI[lid];
@@ -545,7 +617,7 @@ fn mesh_main(
         }
     } else {
         if (lid < 8u) {
-            write_vertex(lid, CROSS_POS[lid], CROSS_UV[lid], inst, cam, fade, flat, is_gun);
+            write_vertex(lid, CROSS_POS[lid], CROSS_UV[lid], inst, cam, fade, flat, is_gun, false);
         }
         if (lid < 4u) {
             mesh_out.primitives[lid].indices = CROSS_TRI[lid];
