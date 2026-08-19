@@ -1960,6 +1960,11 @@ fn main() {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // 默认大战场模式：红 64 vs 蓝 63+玩家（=64v64）；RV3D_STRESS_AI=0 恢复传统波次模式
+    if std::env::var("RV3D_STRESS_AI").is_err() {
+        std::env::set_var("RV3D_STRESS_AI", "64");
+    }
+
     // DPI awareness 由 winit 0.30 自己管理（默认 per-monitor V2）——手动调用
     // SetProcessDpiAwarenessContext 会与 winit 内部设置冲突，导致窗口尺寸/缩放错位
     // （曾出现：swapchain 2560x1600 但窗口实际 1898x1061 → 画面只显示左上角）。

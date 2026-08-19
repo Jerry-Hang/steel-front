@@ -2737,18 +2737,20 @@ impl Game {
         let mut alive = Vec::with_capacity(old.len());
         for p in old {
             if !p.is_alive() {
-                // 弹着点：过期投射物引爆 —— AoE 伤害 + 冲击波击退 + 闪光 marker
-                // （GameOver 冻结玩法：damage=0 只保留视觉与音效，不结算伤害/击退）
-                self.spawn_explosion(
-                    p.position,
-                    EXPLOSION_RADIUS,
-                    if allow_kills { EXPLOSION_DAMAGE } else { 0.0 },
-                    true,
-                );
-                self.audio.synth_mut().play_explosion(
-                    glam::Vec3::new(p.position[0], p.position[1], p.position[2]),
-                    0.45,
-                );
+                // 弹着点：仅爆炸弹（如未来榴弹武器）过期时引爆 AoE；普通子弹静默消失
+                // （修复：V3.0 高速弹射程尽头"神秘连发爆炸"特效——子弹不是炸弹）
+                if p.explosive() {
+                    self.spawn_explosion(
+                        p.position,
+                        EXPLOSION_RADIUS,
+                        if allow_kills { EXPLOSION_DAMAGE } else { 0.0 },
+                        true,
+                    );
+                    self.audio.synth_mut().play_explosion(
+                        glam::Vec3::new(p.position[0], p.position[1], p.position[2]),
+                        0.45,
+                    );
+                }
                 continue;
             }
             if !allow_kills {
@@ -2757,10 +2759,12 @@ impl Game {
             }
             if self.collide_physics(&p) {
                 hit_count += 1;
-                // 命中障碍：爆炸 AoE（对附近 NPC 造成冲击波伤害 + 闪光，但不推挤，
-                // 保持冒烟"站定瞄准"语义）+ 按武器伤害结算障碍 HP，摧毁后移除碰撞/阻挡
+                // 命中障碍：普通子弹只结算障碍 HP（摧毁后移除碰撞/阻挡），不爆炸；
+                // 爆炸弹命中时才有 AoE（对附近 NPC 造成冲击波伤害 + 闪光，但不推挤）
                 if let Some(idx) = self.hit_obstacle_index(&p) {
-                    self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
+                    if p.explosive() {
+                        self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
+                    }
                     self.damage_obstacle(idx, p.damage_at_distance());
                 }
                 continue;
@@ -3408,7 +3412,9 @@ impl Game {
         for side in 0..2u32 {
             let team = if side == 0 { Team::Red } else { Team::Blue };
             let base_angle = if side == 0 { 0.0 } else { std::f32::consts::PI };
-            for i in 0..sides {
+            // 蓝方少生 1 名：玩家本身就是蓝方士兵（红 64 vs 蓝 63+玩家 = 64v64）
+            let per_side = if side == 0 { sides } else { sides.saturating_sub(1) };
+            for i in 0..per_side {
                 // 半场 ±~63° 扇形铺开，半径 150m + 确定性抖动（超出障碍环带 58-130m）
                 let spread = -1.1 + (i as f32 / sides.max(1) as f32) * 2.2;
                 let angle = base_angle + spread;
@@ -3446,10 +3452,10 @@ impl Game {
             }
         }
         log::info!(
-            "battle: 压力模式第 {} 轮开战（红 {} vs 蓝 {}，共 {} 名 NPC，并行 AI={}）",
+            "battle: 压力模式第 {} 轮开战（红 {} vs 蓝 {}+玩家，共 {} 名 NPC，并行 AI={}）",
             self.stress_round,
             sides,
-            sides,
+            sides.saturating_sub(1),
             self.npcs.len(),
             self.ai_parallel
         );
@@ -4568,6 +4574,34 @@ mod tests {
         assert_eq!(game.score, KILL_SCORE);
     }
 
+    /// 普通子弹过期/撞障碍均不产生爆炸（回归：修复"远处神秘连发爆炸"——
+    /// V3.0 高速弹射程尽头曾触发 spawn_explosion，现在只有 explosive 标记弹才爆炸）
+    #[test]
+    fn bullet_expiry_and_obstacle_no_explosion() {
+        let mut game = Game::new();
+        let before = game.explosions.len();
+        // 朝远处平射：子弹飞出射程后过期消失，不引爆
+        assert!(game.fire([0.0, 2.0, 0.0], [0.0, 0.0, 1.0]));
+        for _ in 0..90 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        assert!(game.projectiles.is_empty(), "子弹应已过期消失");
+        assert_eq!(game.explosions.len(), before, "普通子弹过期不应爆炸");
+        // 朝近处障碍射击：命中只结算障碍 HP，不爆炸
+        let mut game2 = Game::new();
+        let before2 = game2.explosions.len();
+        let ob = game2.map.obstacles[0];
+        let cx = ob.x;
+        let cz = ob.z;
+        let cy = terrain_height_at(cx, cz) + 1.2; // 障碍腰部
+        // 从 -X 侧 40m 水平射向障碍中心（AABB 高 ~1-3m，40m 内散布/下坠 < 2cm）
+        assert!(game2.fire([cx - 40.0, cy, cz], [1.0, 0.0, 0.0]));
+        for _ in 0..30 {
+            game2.update(1.0 / 60.0, &Camera::new());
+        }
+        assert_eq!(game2.explosions.len(), before2, "子弹命中障碍不应爆炸");
+    }
+
     /// 玩家受伤：攻击态 NPC 每秒扣血，血量为 0 进入 GameOver
     #[test]
     fn player_damage_and_gameover() {
@@ -5377,11 +5411,11 @@ mod tests {
         game.stress_sides = 8;
         let player = glam::Vec3::new(0.0, 0.0, 0.0);
         game.spawn_stress_battle(&player);
-        assert_eq!(game.npcs.len(), 16, "8v8 应出生 16 名 NPC");
+        assert_eq!(game.npcs.len(), 15, "8v8 蓝方少生 1（玩家补位）→ 15 名 NPC");
         let red = game.npcs.iter().filter(|n| n.team == Team::Red).count();
         let blue = game.npcs.iter().filter(|n| n.team == Team::Blue).count();
         assert_eq!(red, 8);
-        assert_eq!(blue, 8);
+        assert_eq!(blue, 7);
         // 红半场 +X、蓝半场 -X，出生点在场内且不在障碍格上
         for n in &game.npcs {
             assert!(n.position[0].abs() <= 250.0 && n.position[2].abs() <= 250.0);
@@ -5688,7 +5722,7 @@ mod tests {
         game.stress_sides = 4;
         let player = glam::Vec3::new(0.0, 0.0, 0.0);
         game.spawn_stress_battle(&player);
-        assert_eq!(game.npcs.len(), 8);
+        assert_eq!(game.npcs.len(), 7, "4v4 蓝方少生 1（玩家补位）");
         let round0 = game.stress_round;
         for n in &mut game.npcs {
             if n.team == Team::Red {
@@ -5698,7 +5732,7 @@ mod tests {
         game.game_state = GameState::Playing;
         game.update_stress_respawns(&player);
         assert_eq!(game.stress_round, round0 + 1, "团灭应开新一轮");
-        assert_eq!(game.npcs.len(), 8, "全量补员");
+        assert_eq!(game.npcs.len(), 7, "全量补员（红 4 + 蓝 3）");
         let red = game.npcs.iter().filter(|n| n.team == Team::Red).count();
         assert_eq!(red, 4);
     }

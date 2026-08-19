@@ -250,6 +250,8 @@ pub struct Projectile {
     gravity: f32,
     /// 部位倍率距离分段：(距离上限米, 头, 胸, 臂, 腿)；空表 = 固定阈值（1.5/1.0/0.8/0.6）
     part_tiers: &'static [(f32, f32, f32, f32, f32)],
+    /// 是否爆炸弹（true = 过期/命中障碍时引爆 AoE；普通子弹不爆炸，静默消失）
+    explosive: bool,
     /// 是否存活（射程/寿命耗尽后为 false）
     alive: bool,
     /// 上一帧位置（segment 命中检测用；高速弹避免跳过小目标）
@@ -289,6 +291,7 @@ impl Projectile {
             damage_tiers: &[],
             gravity: 0.0,
             part_tiers: &[],
+            explosive: false,
             alive: true,
         }
     }
@@ -317,6 +320,18 @@ impl Projectile {
         self.gravity = gravity;
         self.part_tiers = part_tiers;
         self
+    }
+
+    /// 标记为爆炸弹：过期/命中障碍时引爆 AoE（供未来爆炸类武器使用；普通子弹不设置）
+    #[allow(dead_code)] // 预留：当前 35 把枪无爆炸弹，榴弹武器接入时启用
+    pub fn with_explosive(mut self) -> Self {
+        self.explosive = true;
+        self
+    }
+
+    /// 是否爆炸弹
+    pub fn explosive(&self) -> bool {
+        self.explosive
     }
 
     /// 部位伤害倍率：按已飞行距离查分段表（头/胸/臂/腿，高度阈值与命中球几何一致：
