@@ -1,0 +1,309 @@
+[2026-08-16T03:09:23Z INFO  steel_front] ========================================
+[2026-08-16T03:09:23Z INFO  steel_front]   钢铁前线 (Steel Front) v0.1.0
+[2026-08-16T03:09:23Z INFO  steel_front]   二战FPS游戏引擎 - Rust + Vulkan
+[2026-08-16T03:09:23Z INFO  steel_front] ========================================
+[2026-08-16T03:09:23Z INFO  steel_front::engine::cpu] cpu: vendor=Amd threads=32 primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] e_cores=0 avx2=true avx512=true scene_set=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] ai_set=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] physical_primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] physical_secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] smt=[]
+[2026-08-16T03:09:23Z INFO  steel_front::engine::cpu] cpu: 非 Linux 平台，跳过线程手工绑定（交给系统调度）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::cpu] cpu: ai_pool 创建（8 工作线程，绑定 vCPU [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::game] map: level 1 generated: 36 obstacle bodies (wall=20 block=0 barrier=0 tree=3 building=6 ruin=7), 203 grid cells blocked
+[2026-08-16T03:09:23Z INFO  steel_front] 窗口创建成功: 2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front] winit inner_size: 2560x1600 scale_factor=1.50
+[2026-08-16T03:09:23Z WARN  steel_front::engine::renderer] 验证层不可用，将不使用
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 选择物理设备: NVIDIA GeForce RTX 5060 Laptop GPU
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: 设备 NVIDIA GeForce RTX 5060 Laptop GPU 硬件能力探测（WSLg/dzn 视角）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: 可用 device 扩展 280 个
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 光追扩展 --
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_pipeline = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_acceleration_structure = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_query = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_deferred_host_operations = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_buffer_device_address = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_position_fetch = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_ray_tracing = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- Tensor Core / 协作矩阵 --
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_cooperative_matrix = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cooperative_matrix = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_compute_shader_derivatives = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- DLSS / NVIDIA 私有 --
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_image_view_handle = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_binary_import = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cuda_kernel = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_external_memory = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 其它新特性 --
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_EXT_mesh_shader = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_shader_object = false
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_dynamic_rendering = true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 特性 ray_tracing_pipeline=true acceleration_structure=true buffer_device_address=true ray_query=true
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 管线属性 shaderGroupHandleSize=32B maxRecursionDepth=31 maxRayDispatchInvocationCount=1073741824
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】光追探测 device 创建成功 → RT Core 路径可用（dzn→DXR）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: CUDA 直通（Tensor Core 可编程访问）=false（libcuda in /usr/lib/wsl/lib）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】Vulkan-DLSS（NVIDIA 私有扩展）=true；可直接接 DLSS SDK
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] VK_EXT_mesh_shader 可用：启用可选网格着色器渲染路径
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 实例缓冲创建完成: 65536 个实例，stride 80 字节，2 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] instances=65536 draw_calls=1
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] Descriptor Set Layout: binding 0 = UBO(view/proj), binding 1 = 贴图, binding 2 = 实例 STORAGE_BUFFER, binding 3 = 采样器
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] Descriptor 初始化完成（2 帧）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 远档 LOD 几何创建完成: 8 顶点 / 12 索引（十字双 quad）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 地面平铺 quad 几何创建完成: 4 顶点 / 6 索引（无侧壁）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 球体几何创建完成: 325 顶点 / 1728 索引（爆炸球形扩散）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 地形 LOD[0] 创建完成: 66049 顶点 / 393216 索引（257×257 网格，间距 2）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 地形 LOD[1] 创建完成: 16641 顶点 / 98304 索引（129×129 网格，间距 4）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 地形 LOD[2] 创建完成: 4225 顶点 / 24576 索引（65×65 网格，间距 8）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 地形 3 级 LOD 全部创建完成（高/中/低）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 图形管线创建完成
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 网格着色器 maxMeshWorkGroupCount[0] = 4194304（地面场 65536 按此分块）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 网格着色器管线创建完成（VK_EXT_mesh_shader）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] HUD 覆盖层初始化完成（独立 pipeline，容量 4096 quads）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 纹理初始化完成: 512x512（10 mip，来源=程序化地面材质）
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 程序化皮肤纹理初始化完成: 512x512（marker=木板墙, npc=迷彩军服, RV3D_SKIN_TEX=off（纯色回退））
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 阴影贴图资源创建完成: 2048x2048 D32_SFLOAT
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 阴影 depth-only 管线创建完成
+[2026-08-16T03:09:23Z INFO  steel_front] Vulkan 渲染器初始化成功
+[2026-08-16T03:09:23Z INFO  steel_front] settings: 分辨率保持 2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front] settings: 应用画质 中画质
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 画质预设已切换: 中画质
+[2026-08-16T03:09:23Z INFO  steel_front] 窗口大小变化: 1898x1061
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-16T03:09:23Z INFO  steel_front] 窗口大小变化: 1920x1117
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-16T03:09:23Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-16T03:09:23Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-16T03:09:23Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-16T03:09:24Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=3353 update_us=13 render_us=3340
+[2026-08-16T03:09:24Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=342.7 frame_us=2251 cull_us=6 terrain_us=0 wait_fence_us=1813 acquire_us=0 record_us=43 submit_us=42 present_us=234 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:24Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=8 attack=0 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:24Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=439 audio_us=7 net_us=0
+[2026-08-16T03:09:25Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2231 update_us=28 render_us=2202
+[2026-08-16T03:09:25Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=405.7 frame_us=2299 cull_us=3 terrain_us=0 wait_fence_us=2266 acquire_us=1 record_us=44 submit_us=49 present_us=193 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:25Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=8 attack=0 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:25Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=2 ai_us=510 audio_us=8 net_us=0
+[2026-08-16T03:09:26Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2736 update_us=12 render_us=2724
+[2026-08-16T03:09:26Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=407.2 frame_us=2970 cull_us=3 terrain_us=0 wait_fence_us=1504 acquire_us=1 record_us=45 submit_us=43 present_us=615 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:26Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=8 attack=0 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:26Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=3 ai_us=510 audio_us=10 net_us=0
+[2026-08-16T03:09:27Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2592 update_us=29 render_us=2562
+[2026-08-16T03:09:27Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=407.3 frame_us=2327 cull_us=2 terrain_us=0 wait_fence_us=1950 acquire_us=1 record_us=34 submit_us=29 present_us=159 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:27Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=8 attack=0 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:27Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=4 ai_us=557 audio_us=13 net_us=0
+[2026-08-16T03:09:28Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2125 update_us=15 render_us=2109
+[2026-08-16T03:09:28Z INFO  steel_front::engine::game] npc: #3 stand (3.4, 0.0, 11.5)
+[2026-08-16T03:09:28Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=408.1 frame_us=2127 cull_us=2 terrain_us=0 wait_fence_us=2393 acquire_us=0 record_us=22 submit_us=20 present_us=109 terrain_lod=high blend=0.000 quality=中画质 marker=56 npc=1017
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=7 attack=1 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:28Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=96 audio_us=8 net_us=0
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:28Z INFO  steel_front::engine::game] npc: #4 stand (4.0, 0.0, -11.3)
+[2026-08-16T03:09:29Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2310 update_us=32 render_us=2278
+[2026-08-16T03:09:29Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=407.9 frame_us=2661 cull_us=3 terrain_us=0 wait_fence_us=1971 acquire_us=1 record_us=35 submit_us=31 present_us=193 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:29Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=6 attack=2 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:29Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=434 audio_us=17 net_us=0
+[2026-08-16T03:09:29Z INFO  steel_front::engine::game] npc: #1 stand (-11.4, 0.0, 3.6)
+[2026-08-16T03:09:30Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2581 update_us=32 render_us=2548
+[2026-08-16T03:09:30Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=390.7 frame_us=2622 cull_us=3 terrain_us=0 wait_fence_us=2000 acquire_us=1 record_us=35 submit_us=25 present_us=186 terrain_lod=high blend=0.000 quality=中画质 marker=63 npc=1017
+[2026-08-16T03:09:30Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=5 attack=3 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:30Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=2 ai_us=485 audio_us=26 net_us=0
+[2026-08-16T03:09:31Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=1820 update_us=15 render_us=1804
+[2026-08-16T03:09:31Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=400.8 frame_us=1834 cull_us=3 terrain_us=0 wait_fence_us=2104 acquire_us=1 record_us=33 submit_us=15 present_us=140 terrain_lod=high blend=0.000 quality=中画质 marker=57 npc=1017
+[2026-08-16T03:09:31Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=5 attack=3 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:31Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=429 audio_us=21 net_us=0
+[2026-08-16T03:09:32Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2398 update_us=32 render_us=2366
+[2026-08-16T03:09:32Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=400.3 frame_us=2377 cull_us=3 terrain_us=0 wait_fence_us=2292 acquire_us=1 record_us=19 submit_us=22 present_us=215 terrain_lod=high blend=0.000 quality=中画质 marker=64 npc=1017
+[2026-08-16T03:09:32Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=5 attack=3 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:32Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=417 audio_us=18 net_us=0
+[2026-08-16T03:09:33Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2705 update_us=11 render_us=2693
+[2026-08-16T03:09:33Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=399.6 frame_us=2842 cull_us=5 terrain_us=0 wait_fence_us=1867 acquire_us=1 record_us=65 submit_us=50 present_us=210 terrain_lod=high blend=0.000 quality=中画质 marker=58 npc=1017
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=5 attack=3 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:33Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=90 audio_us=12 net_us=0
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:34Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2677 update_us=34 render_us=2643
+[2026-08-16T03:09:34Z INFO  steel_front::engine::game] npc: #5 stand (11.8, 0.0, 2.0)
+[2026-08-16T03:09:34Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=400.2 frame_us=2424 cull_us=2 terrain_us=0 wait_fence_us=1943 acquire_us=0 record_us=40 submit_us=40 present_us=192 terrain_lod=high blend=0.000 quality=中画质 marker=63 npc=1017
+[2026-08-16T03:09:34Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=4 attack=4 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:34Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=2 ai_us=500 audio_us=21 net_us=0
+[2026-08-16T03:09:35Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=1953 update_us=18 render_us=1934
+[2026-08-16T03:09:35Z INFO  steel_front::engine::game] npc: #7 stand (11.5, 0.0, 3.4)
+[2026-08-16T03:09:35Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=400.3 frame_us=2224 cull_us=4 terrain_us=0 wait_fence_us=2467 acquire_us=1 record_us=18 submit_us=13 present_us=99 terrain_lod=high blend=0.000 quality=中画质 marker=84 npc=1017
+[2026-08-16T03:09:35Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=3 attack=5 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:35Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=3 ai_us=463 audio_us=27 net_us=0
+[2026-08-16T03:09:36Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=3080 update_us=37 render_us=3042
+[2026-08-16T03:09:36Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=400.0 frame_us=2458 cull_us=2 terrain_us=0 wait_fence_us=2380 acquire_us=0 record_us=39 submit_us=32 present_us=254 terrain_lod=high blend=0.000 quality=中画质 marker=84 npc=1017
+[2026-08-16T03:09:36Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=3 attack=5 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:36Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=2 ai_us=488 audio_us=33 net_us=0
+[2026-08-16T03:09:36Z INFO  steel_front::engine::game] npc: #2 stand (1.9, 0.0, -11.9)
+[2026-08-16T03:09:37Z INFO  steel_front::engine::game] npc: #0 stand (2.9, 0.0, -11.6)
+[2026-08-16T03:09:37Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2326 update_us=40 render_us=2286
+[2026-08-16T03:09:37Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=396.6 frame_us=2077 cull_us=3 terrain_us=0 wait_fence_us=2494 acquire_us=1 record_us=40 submit_us=36 present_us=186 terrain_lod=high blend=0.000 quality=中画质 marker=84 npc=1017
+[2026-08-16T03:09:37Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=1 attack=7 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:37Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=2 ai_us=437 audio_us=15 net_us=1
+[2026-08-16T03:09:38Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2394 update_us=51 render_us=2343
+[2026-08-16T03:09:38Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=400.5 frame_us=3168 cull_us=3 terrain_us=0 wait_fence_us=1544 acquire_us=1 record_us=40 submit_us=32 present_us=633 terrain_lod=high blend=0.000 quality=中画质 marker=84 npc=1017
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=1 attack=7 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:38Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=95 audio_us=24 net_us=0
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:39Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=3122 update_us=32 render_us=3090
+[2026-08-16T03:09:39Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=398.1 frame_us=1857 cull_us=2 terrain_us=0 wait_fence_us=2278 acquire_us=1 record_us=38 submit_us=25 present_us=187 terrain_lod=high blend=0.000 quality=中画质 marker=84 npc=1017
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] ai: npcs=8 near=8 far=0 idle=0 patrol=0 chase=1 attack=7 tactics=[8, 0, 0, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] game: wave=1 enemies=8 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=137 audio_us=18 net_us=0
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] map: level 1 generated: 36 obstacle bodies (wall=20 block=0 barrier=0 tree=3 building=6 ruin=7), 203 grid cells blocked
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] game: purged 8 leftover npcs on run start
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] wave: npc #8 spawn (65.3, 0.0, 25.3)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] wave: npc #9 spawn (6.1, 0.0, 39.5)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] wave: npc #10 spawn (-46.8, 0.0, 37.6)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] wave: npc #11 spawn (-74.6, 0.0, -28.9)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] wave: npc #12 spawn (-7.6, 0.0, -49.4)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] wave: npc #13 spawn (54.6, 0.0, -43.9)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] wave: wave 1 spawned 6 enemies (kind=Normal total=6 speed=4.0 hp=100 effective=1)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] game: run started (wave 1)
+[2026-08-16T03:09:39Z INFO  steel_front] input: cursor captured (mouse look on, grab=locked, look=relative)
+[2026-08-16T03:09:39Z INFO  steel_front::engine::game] physics: 36 events this frame (GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit, GroundHit)
+[2026-08-16T03:09:40Z INFO  steel_front] cam: yaw=0.0 pitch=0.0 dist=3.4 mode=FirstPerson cycle_us=2319 update_us=17 render_us=2302
+[2026-08-16T03:09:40Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=410.7 frame_us=1051 cull_us=6 terrain_us=0 wait_fence_us=2168 acquire_us=1 record_us=17 submit_us=16 present_us=91 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:40Z INFO  steel_front::engine::game] ai: npcs=6 near=6 far=0 idle=0 patrol=3 chase=3 attack=0 tactics=[4, 1, 1, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:40Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=3 ai_us=474 audio_us=16 net_us=0
+[2026-08-16T03:09:41Z INFO  steel_front] cam: yaw=-1.7 pitch=-7.4 dist=3.4 mode=FirstPerson cycle_us=2732 update_us=15 render_us=2717
+[2026-08-16T03:09:41Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=413.0 frame_us=473 cull_us=6 terrain_us=0 wait_fence_us=2105 acquire_us=1 record_us=17 submit_us=18 present_us=161 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:41Z INFO  steel_front::engine::game] ai: npcs=6 near=6 far=0 idle=0 patrol=3 chase=3 attack=0 tactics=[4, 1, 1, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:41Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=502 audio_us=10 net_us=0
+[2026-08-16T03:09:42Z INFO  steel_front] cam: yaw=0.0 pitch=-6.0 dist=3.4 mode=FirstPerson cycle_us=2806 update_us=37 render_us=2768
+[2026-08-16T03:09:42Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=416.7 frame_us=1892 cull_us=8 terrain_us=0 wait_fence_us=1630 acquire_us=0 record_us=41 submit_us=30 present_us=163 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:42Z INFO  steel_front::engine::game] ai: npcs=6 near=6 far=0 idle=0 patrol=3 chase=3 attack=0 tactics=[4, 1, 1, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:42Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=412 audio_us=11 net_us=0
+[2026-08-16T03:09:43Z INFO  steel_front] cam: yaw=-0.3 pitch=-1.6 dist=3.4 mode=FirstPerson cycle_us=2618 update_us=23 render_us=2595
+[2026-08-16T03:09:43Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=423.7 frame_us=1471 cull_us=5 terrain_us=0 wait_fence_us=1631 acquire_us=1 record_us=18 submit_us=15 present_us=113 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front::engine::game] ai: npcs=6 near=6 far=0 idle=0 patrol=3 chase=3 attack=0 tactics=[4, 1, 1, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:43Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=99 audio_us=28 net_us=0
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:44Z INFO  steel_front] cam: yaw=0.7 pitch=-4.4 dist=3.4 mode=FirstPerson cycle_us=2529 update_us=35 render_us=2493
+[2026-08-16T03:09:44Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=424.8 frame_us=1303 cull_us=5 terrain_us=0 wait_fence_us=1705 acquire_us=1 record_us=18 submit_us=15 present_us=111 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:44Z INFO  steel_front::engine::game] ai: npcs=6 near=6 far=0 idle=0 patrol=3 chase=3 attack=0 tactics=[4, 1, 1, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:44Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=401 audio_us=27 net_us=0
+[2026-08-16T03:09:45Z INFO  steel_front] cam: yaw=0.7 pitch=-4.4 dist=3.4 mode=FirstPerson cycle_us=2194 update_us=27 render_us=2167
+[2026-08-16T03:09:45Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=425.2 frame_us=1859 cull_us=6 terrain_us=0 wait_fence_us=2106 acquire_us=1 record_us=18 submit_us=17 present_us=83 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:45Z INFO  steel_front::engine::game] ai: npcs=6 near=6 far=0 idle=0 patrol=3 chase=3 attack=0 tactics=[4, 1, 1, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:45Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=1 ai_us=135 audio_us=11 net_us=0
+[2026-08-16T03:09:46Z INFO  steel_front] cam: yaw=0.7 pitch=-4.4 dist=3.4 mode=FirstPerson cycle_us=2425 update_us=17 render_us=2408
+[2026-08-16T03:09:46Z INFO  steel_front] input: cursor released (window unfocused)
+[2026-08-16T03:09:46Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=419.7 frame_us=860 cull_us=5 terrain_us=0 wait_fence_us=2186 acquire_us=0 record_us=19 submit_us=18 present_us=96 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:46Z INFO  steel_front::engine::game] ai: npcs=6 near=5 far=1 idle=0 patrol=3 chase=3 attack=0 tactics=[3, 1, 1, 0, 0, 0, 0, 1]
+[2026-08-16T03:09:46Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=2 ai_us=458 audio_us=10 net_us=0
+[2026-08-16T03:09:47Z INFO  steel_front] cam: yaw=0.7 pitch=-4.4 dist=3.4 mode=FirstPerson cycle_us=2474 update_us=33 render_us=2440
+[2026-08-16T03:09:47Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=416.4 frame_us=2331 cull_us=7 terrain_us=0 wait_fence_us=1706 acquire_us=1 record_us=29 submit_us=46 present_us=132 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:47Z INFO  steel_front] input: cursor captured (mouse look on, grab=locked, look=relative)
+[2026-08-16T03:09:47Z INFO  steel_front::engine::game] ai: npcs=6 near=5 far=1 idle=0 patrol=3 chase=3 attack=0 tactics=[2, 1, 1, 0, 0, 0, 0, 2]
+[2026-08-16T03:09:47Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=5 ai_us=205 audio_us=8 net_us=0
+[2026-08-16T03:09:48Z INFO  steel_front] cam: yaw=47.5 pitch=-19.5 dist=3.4 mode=FirstPerson cycle_us=2489 update_us=34 render_us=2454
+[2026-08-16T03:09:48Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=409.1 frame_us=1742 cull_us=5 terrain_us=0 wait_fence_us=1982 acquire_us=0 record_us=20 submit_us=17 present_us=125 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:48Z INFO  steel_front] input: cursor released (window unfocused)
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front::engine::game] ai: npcs=6 near=5 far=1 idle=0 patrol=3 chase=3 attack=0 tactics=[2, 1, 1, 0, 0, 0, 0, 2]
+[2026-08-16T03:09:48Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=100/100 score=0 phys_us=2 ai_us=145 audio_us=25 net_us=0
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-16T03:09:49Z INFO  steel_front] cam: yaw=5.3 pitch=-18.6 dist=3.4 mode=FirstPerson cycle_us=2880 update_us=16 render_us=2863
+[2026-08-16T03:09:49Z INFO  steel_front::engine::game] npc: #12 stand (0.9, 0.0, -30.3)
+[2026-08-16T03:09:49Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=409.2 frame_us=2664 cull_us=5 terrain_us=0 wait_fence_us=885 acquire_us=0 record_us=41 submit_us=37 present_us=691 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=1017
+[2026-08-16T03:09:49Z INFO  steel_front::engine::game] ai: npcs=6 near=5 far=1 idle=0 patrol=3 chase=2 attack=1 tactics=[4, 1, 1, 0, 0, 0, 0, 0]
+[2026-08-16T03:09:49Z INFO  steel_front::engine::game] game: wave=1 enemies=6 enemy_hp=100 hp=95/100 score=0 phys_us=2 ai_us=171 audio_us=17 net_us=0
