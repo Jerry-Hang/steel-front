@@ -1,6 +1,8 @@
-/target
-*.bak
-*.bak2
-*.orig
-overnight_*.txt
-__pycache__/
+﻿# 运行产物与诊断文件
+*.bmp
+*.png
+*.log
+*.err
+GAME_DESIGN.txt
+_fontblock.txt
+target/

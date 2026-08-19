@@ -1,6 +1,0 @@
-==== 钢铁前线 性能日志 =====
-版本: 0.1.0 | 启动: 2026-08-18 20:52:35 | GPU: NVIDIA GeForce RTX 5060 Laptop GPU | CPU: AMD 32线程 | 窗口: 2560x1600
-----------------------------------
-时间(s)	fps	frame_us	cull	terrain	wait	acquire	record	submit	present	near
-1.0	838.8	200	1	0	4320	1	58	35	124	65536
-2.0	816.1	200	1	0	4320	1	58	35	124	65536
