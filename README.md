@@ -7,11 +7,11 @@
 
 ---
 
-## 项目状态（2026-08-16）
+## 项目状态（2026-08-19）
 
 | 维度 | 状态 |
 |---|---|
-| 单元测试 | **364 passed / 0 警告**（dead-code=0） |
+| 单元测试 | **384 passed / 0 警告**（dead-code=0） |
 | 玩法冒烟 | ALL-OK（kills≥1、VUID=0、fps≥120） |
 | 渲染主路径 | **VK_EXT_mesh_shader 网格着色器**（RTX 5060 真机启用） |
 | 当前阶段 | **设计文档整理期**（玩法开发暂停，等待设计文档定稿） |
@@ -42,8 +42,8 @@
 | 窗口 | winit 0.30（Windows/Linux） |
 | 数学 | glam 0.29 |
 | 着色器语言 | WGSL，经 **naga 30 在 build.rs 构建期编译**为内联 SPIR-V（assets/*.spv） |
-| 主渲染路径 | **VK_EXT_mesh_shader**：GPU 逐实例视锥剔除 + 顶点变换，65536 实例地面场按 maxMeshWorkGroupCount 分块下发 |
-| 传统顶点管线 | 仅 WSLg/dzn 无 mesh 扩展时回退，**已冻结维护**（不再新增功能） |
+| 主渲染路径 | **VK_EXT_mesh_shader（网格着色器）**：GPU 逐实例视锥剔除 + 顶点变换，65536 实例地面场按 maxMeshWorkGroupCount 分块下发。**全面转向网格着色器，后续迭代不再维护传统顶点着色器路径** |
+| 传统顶点管线 | **已冻结**：不再新增功能、不再修复、**不提供回退**。不支持 VK_EXT_mesh_shader 的显卡下载最新版本无法游玩（最低要求见下方硬件推荐） |
 | HUD | 独立屏幕空间管线（CPU 转 NDC），GDI 中文字形系统（Windows） |
 | 阴影 | 2048×2048 D32 阴影图 + 3×3 PCF |
 
@@ -92,14 +92,16 @@
 
 ## 硬件推荐配置
 
-> 目标：1080p~2K、120Hz+ 大战场体验（随设计文档推进持续校准）
+> 目标：1080p~4K 大战场体验（网格着色器渲染，需支持 VK_EXT_mesh_shader 的显卡）
 
-| 档位 | 处理器 | 显卡 | 内存 | 存储 | 备注 |
-|---|---|---|---|---|---|
-| 最低（均衡 1080p/120Hz） | R7-3700X 同级 | GTX 1070 Ti 同级 | DDR4 16GB | 240GB HDD | 基础游玩 |
-| 推荐（影视级 1080p/120Hz） | i5-12600KF 同级 | RTX 2080 Super 同级 | DDR4 32GB | PCIe3 SSD | 全特效 |
-| 高配（均衡 2K/144Hz） | R9-5900X 同级 | RTX 4070 Super 同级 | DDR5 48GB | PCIe4 SSD | 高分辨率 |
-| 顶配（影视级 4K/180Hz） | i9-14900K 同级 | RTX 4080 Super 同级 | DDR5 96GB | PCIe5 SSD | 最高画质 |
+| 画质档位 | 处理器（Intel/AMD 任一） | 显卡（NVIDIA/Intel/AMD 任一） | 内存 |
+|---|---|---|---|
+| 1080P 最低 | 11 代酷睿 或 3300X | A380 或 RX 6500 XT | 最低 8GB，推荐 12GB |
+| 1080P 高画质 | 9900 或 3700X | RTX 2060 SUPER 或 A580 | 12GB+ |
+| 2K 低画质 | 11700K 或 5700X | RTX 2080 SUPER 或 A770 | 12GB+ |
+| 2K 高画质 | 12600KF 或 5800X | RTX 3060 Ti 或 B580 | 16GB+ |
+| 4K 低画质 | 12700K 或 7700X | RTX 3080 12GB 或 RTX 4070 | 16GB+ |
+| 4K 高画质 | 13700K 或 7900X | RTX 4070 Ti Super 或 RX 9070 GRE | 32GB+ |
 
 **当前开发验证环境**：RTX 5060 Laptop（8GB）+ Ryzen（16 核 32 线程）+ 2560×1600@144Hz，release 构建稳定 330–420 fps（65536 实例场压力场景）。
 
@@ -159,7 +161,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_gameplay_smoke.ps1
 
 ## 测试与质量门槛
 
-- `cargo test`：**364 个单元测试**（武器/物理/AI/地图/渲染/UI/网络），必须全绿
+- `cargo test`：**384 个单元测试**（武器/物理/AI/地图/渲染/UI/网络），必须全绿
 - `cargo build --release`：**0 警告**（dead-code=0 强制）
 - 冒烟：VUID=0 / kills≥1 / fps≥120 / panics=0
 - 提交规范：`feat/` `fix/` `docs/` 前缀，一次提交一个关注点
