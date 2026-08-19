@@ -210,6 +210,20 @@ mod tests {
         }
     }
 
+    /// key 唯一 + 与枪模一一映射（重复 key 会导致切枪串模/覆盖等隐形冲突）
+    #[test]
+    fn weapon_keys_unique_and_mesh_mapped() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for spec in ALL_WEAPONS.iter() {
+            assert!(seen.insert(spec.key), "{} key 重复", spec.key);
+            let gm = crate::engine::guns::gun_mesh_by_key(spec.key)
+                .unwrap_or_else(|| panic!("{} 无对应枪模", spec.key));
+            assert!(!gm.verts.is_empty() && !gm.indices.is_empty(), "{} 枪模为空", spec.key);
+        }
+        assert_eq!(seen.len(), 35);
+    }
+
     /// 阵营分布：联合体 17 把（1-17），同盟 18 把（18-35）
     #[test]
     fn faction_split_17_18() {
