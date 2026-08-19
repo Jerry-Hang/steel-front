@@ -2017,6 +2017,39 @@ impl Game {
         // 关卡系统：据点状态同步到 HUD（id/归属/进度）。
         // 单机 = 本机 obj_state；联机客户端 = 网络 ObjectiveState 广播（归属码 0=中立/1=Red/2=Blue）。
         // 无联机且无关卡系统 → 空列表（HUD 不显示进度条，行为零回归）。
+        // 小地图快照：单位（含阵营）/障碍（含种类与尺寸）/玩家位置（朝向由 main.rs 同步）
+        self.hud.mm_units = self
+            .npcs
+            .iter()
+            .map(|n| {
+                (
+                    n.position[0],
+                    n.position[2],
+                    if n.team == crate::engine::ai::Team::Red { 0 } else { 1 },
+                )
+            })
+            .collect();
+        self.hud.mm_obstacles = self
+            .map
+            .obstacles
+            .iter()
+            .filter(|o| o.hp > 0.0)
+            .map(|o| {
+                let kind = match o.kind {
+                    ObstacleKind::Wall => 0u8,
+                    ObstacleKind::Block => 1,
+                    ObstacleKind::Barrier => 2,
+                    ObstacleKind::Tree => 3,
+                    ObstacleKind::Building => 4,
+                    ObstacleKind::Ruin => 5,
+                };
+                (o.x, o.z, o.half_w, o.half_d, kind)
+            })
+            .collect();
+        {
+            let eye = self.player_eye();
+            self.hud.mm_player = [eye.x, eye.z];
+        }
         self.hud.capture_points = if let Some(o) = self.obj_state.as_ref() {
             o.points
                 .iter()

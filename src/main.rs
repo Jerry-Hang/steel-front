@@ -334,6 +334,8 @@ impl GameApp {
             && !self.game.settings_open()
             && !self.game.hud.esc_menu_open;
         self.game.hud.ads = ads_valid;
+        // 小地图朝向（旋转地图使玩家前方朝上）
+        self.game.hud.mm_yaw = self.camera.yaw;
         if !ads_valid {
             self.ads_active = false;
         }

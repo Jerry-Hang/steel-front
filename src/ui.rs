@@ -436,6 +436,14 @@ pub struct HudState {
     pub esc_menu_selection: u8,
     /// 开镜瞄准中（main.rs 每帧同步；准星收窄、枪模居中提示）
     pub ads: bool,
+    /// 小地图单位快照：(x, z, 阵营 0=红方 1=蓝方)；每帧由 game 同步
+    pub mm_units: Vec<(f32, f32, u8)>,
+    /// 小地图障碍快照：(x, z, half_w, half_d, 种类 0=墙 1=栅栏 2=树 3=建筑 4=废墟)
+    pub mm_obstacles: Vec<(f32, f32, f32, f32, u8)>,
+    /// 小地图玩家世界位置 (x, z)
+    pub mm_player: [f32; 2],
+    /// 玩家朝向（弧度，小地图旋转使"前方朝上"）
+    pub mm_yaw: f32,
 }
 
 /// 击杀提示条目（战地风格右上角 feed）
@@ -499,6 +507,10 @@ impl HudState {
             esc_menu_open: false,
             esc_menu_selection: 0,
             ads: false,
+            mm_units: Vec::new(),
+            mm_obstacles: Vec::new(),
+            mm_player: [0.0, 0.0],
+            mm_yaw: 0.0,
         }
     }
 
@@ -913,43 +925,128 @@ impl HudState {
             )));
         }
 
-        // ---- 小地图占位（右上角）----
+        // ---- 小地图（右上角，玩家朝上旋转；实时显示地形/障碍/红蓝单位）----
         if self.minimap_visible {
-            let size = 180.0;
+            let size = 200.0;
             let mm_x = w - margin - size;
             let mm_y = margin;
             let border = 2.0;
+            // 边框
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(mm_x - border, mm_y - border, size + border * 2.0, border),
-                Color::WHITE,
+                Color::new(0.85, 0.9, 0.95, 0.9),
             )));
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(mm_x - border, mm_y + size, size + border * 2.0, border),
-                Color::WHITE,
+                Color::new(0.85, 0.9, 0.95, 0.9),
             )));
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(mm_x - border, mm_y, border, size),
-                Color::WHITE,
+                Color::new(0.85, 0.9, 0.95, 0.9),
             )));
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(mm_x + size, mm_y, border, size),
-                Color::WHITE,
+                Color::new(0.85, 0.9, 0.95, 0.9),
             )));
+            // 底色（深色半透明）
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(mm_x, mm_y, size, size),
-                Color::new(0.12, 0.16, 0.18, 0.65),
+                Color::new(0.10, 0.14, 0.17, 0.82),
             )));
-            // 中心玩家十字标记（占位）
             let cx = mm_x + size * 0.5;
             let cy = mm_y + size * 0.5;
+            // 旋转投影：世界范围 500m（±250，地图边界）→ size px
+            // 前方（水平）= (-sin yaw, -cos yaw)（yaw=0 朝 -Z），右 = (cos yaw, -sin yaw)
+            // 世界偏移 (dx, dz) → 屏幕偏移 (sx, sy)：前方朝屏幕上方（-y）
+            let world = 500.0;
+            let scale = size / world;
+            let (sin_y, cos_y) = (self.mm_yaw.sin(), self.mm_yaw.cos());
+            let proj = |dx: f32, dz: f32| -> (f32, f32) {
+                (
+                    (dx * cos_y - dz * sin_y) * scale,
+                    (dx * sin_y + dz * cos_y) * scale,
+                )
+            };
+            let inside = |sx: f32, sy: f32| {
+                sx.abs() < size * 0.5 - 4.0 && sy.abs() < size * 0.5 - 4.0
+            };
+            // 地形高度灰度（16×16 网格，31.25m/格）：格中心投影 + 轴对齐方块近似
+            let grid = 16u32;
+            let cell = size / grid as f32;
+            for gi in 0..grid {
+                for gj in 0..grid {
+                    let gx = -250.0 + (gi as f32 + 0.5) * (500.0 / grid as f32);
+                    let gz = -250.0 + (gj as f32 + 0.5) * (500.0 / grid as f32);
+                    let (sx, sy) = proj(gx - self.mm_player[0], gz - self.mm_player[1]);
+                    if !inside(sx, sy) {
+                        continue;
+                    }
+                    let h = crate::engine::renderer::terrain_height_at(gx, gz);
+                    // 高度 -5..35m → 亮度 0.14..0.52（低处深、高处亮）
+                    let k = ((h + 5.0) / 40.0).clamp(0.0, 1.0);
+                    let lum = 0.14 + 0.38 * k;
+                    let gsz = cell + 0.7; // 少量重叠补偿旋转间隙
+                    elems.push(HudElement::Quad(Quad::new(
+                        Rect::new(cx + sx - gsz * 0.5, cy + sy - gsz * 0.5, gsz, gsz),
+                        Color::new(lum, lum * 1.03, lum * 1.08, 0.9),
+                    )));
+                }
+            }
+            // 障碍物：按种类配色的小矩形（中心投影 + 轴对齐近似）
+            let obs_colors: [[f32; 4]; 6] = [
+                [0.72, 0.72, 0.78, 0.95], // 0 墙（灰白）
+                [0.55, 0.50, 0.60, 0.95], // 1 大块（紫灰）
+                [0.62, 0.45, 0.30, 0.95], // 2 栅栏（棕）
+                [0.25, 0.55, 0.25, 0.95], // 3 树（绿）
+                [0.45, 0.48, 0.55, 0.95], // 4 建筑（深灰蓝）
+                [0.60, 0.45, 0.32, 0.95], // 5 废墟（褐）
+            ];
+            for &(ox, oz, hw, hd, kind) in &self.mm_obstacles {
+                let (sx, sy) = proj(ox - self.mm_player[0], oz - self.mm_player[1]);
+                if !inside(sx, sy) {
+                    continue;
+                }
+                let bw = (hw * 2.0 * scale).clamp(3.0, 14.0);
+                let bd = (hd * 2.0 * scale).clamp(3.0, 14.0);
+                let c = obs_colors[(kind as usize).min(5)];
+                elems.push(HudElement::Quad(Quad::new(
+                    Rect::new(cx + sx - bw * 0.5, cy + sy - bd * 0.5, bw, bd),
+                    Color::new(c[0], c[1], c[2], c[3]),
+                )));
+            }
+            // 单位：红方/蓝方小点
+            let unit_colors = [
+                [0.98, 0.16, 0.10, 0.92], // 红方
+                [0.10, 0.42, 0.98, 0.92], // 蓝方
+            ];
+            let dot = 3.6;
+            for &(ux, uz, team) in &self.mm_units {
+                let (sx, sy) = proj(ux - self.mm_player[0], uz - self.mm_player[1]);
+                if !inside(sx, sy) {
+                    continue;
+                }
+                let c = unit_colors[(team as usize).min(1)];
+                elems.push(HudElement::Quad(Quad::new(
+                    Rect::new(cx + sx - dot * 0.5, cy + sy - dot * 0.5, dot, dot),
+                    Color::new(c[0], c[1], c[2], c[3]),
+                )));
+            }
+            // 中心玩家十字 + 比例尺
             elems.push(HudElement::Quad(Quad::new(
-                Rect::new(cx - 10.0, cy - 2.0, 20.0, 4.0),
+                Rect::new(cx - 9.0, cy - 1.6, 18.0, 3.2),
                 Color::CYAN,
             )));
             elems.push(HudElement::Quad(Quad::new(
-                Rect::new(cx - 2.0, cy - 10.0, 4.0, 20.0),
+                Rect::new(cx - 1.6, cy - 9.0, 3.2, 18.0),
                 Color::CYAN,
             )));
+            elems.push(HudElement::Text {
+                text: "500m".to_string(),
+                x: mm_x + 6.0,
+                y: mm_y + size - 15.0,
+                color: Color::new(0.9, 0.95, 1.0, 0.75),
+                scale: 0.7,
+            });
         }
 
         // 击杀提示（右上角 feed，战地风格：最新在上，最多 4 条，6 秒消退）
@@ -1778,6 +1875,105 @@ mod tests {
             )),
             "隐藏小地图后右上角不应有占位 quad"
         );
+    }
+
+    /// 小地图单位投影：玩家朝 -Z（yaw=0）时，正前方 100m 红点在中心上方 40px，
+    /// 正右方 100m 蓝点在中心右方 40px（scale = 200px / 500m = 0.4）
+    #[test]
+    fn minimap_unit_projection() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.mm_player = [0.0, 0.0];
+        hud.mm_yaw = 0.0;
+        hud.mm_units = vec![(0.0, -100.0, 0), (100.0, 0.0, 1), (0.0, 100.0, 0)];
+        let elems = hud.layout_elements();
+        let quads: Vec<Rect> = elems
+            .iter()
+            .filter_map(|e| match e {
+                HudElement::Quad(q) => Some(q.rect),
+                _ => None,
+            })
+            .collect();
+        let center = |r: &Rect| (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        // 前方红点（3.6px 点，中心应在 (1156, 124-40=84)）
+        let front = quads
+            .iter()
+            .find(|r| (center(r).1 - 84.0).abs() < 2.0)
+            .expect("应有正前方红点");
+        assert!((center(front).0 - 1156.0).abs() < 2.0, "前方点 x 应在中心");
+        // 右方蓝点（中心 (1196, 124)）
+        let right = quads
+            .iter()
+            .find(|r| (center(r).0 - 1196.0).abs() < 2.0 && (center(r).1 - 124.0).abs() < 2.0)
+            .expect("应有正右方蓝点");
+        assert_eq!(right.w, 3.6);
+        // 后方红点（中心 (1156, 164)）
+        assert!(
+            quads
+                .iter()
+                .any(|r| (center(r).0 - 1156.0).abs() < 2.0 && (center(r).1 - 164.0).abs() < 2.0),
+            "应有正后方红点"
+        );
+    }
+
+    /// 小地图旋转：玩家转向 90°（yaw=π/2）后，世界正前方（-Z）的单位应出现在屏幕右侧
+    #[test]
+    fn minimap_rotates_with_player_yaw() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.mm_player = [0.0, 0.0];
+        hud.mm_yaw = std::f32::consts::FRAC_PI_2;
+        hud.mm_units = vec![(0.0, -100.0, 0)];
+        let elems = hud.layout_elements();
+        let center = |r: &Rect| (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        let hit = elems.iter().find_map(|e| match e {
+            HudElement::Quad(q) if (q.rect.w - 3.6).abs() < 0.1 => Some(center(&q.rect)),
+            _ => None,
+        });
+        let (x, y) = hit.expect("yaw=90° 后前方单位应仍在图上");
+        assert!((x - 1196.0).abs() < 2.0, "转向 90° 后单位应到屏幕右方，x={}", x);
+        assert!((y - 124.0).abs() < 2.0, "y 应保持中心行，y={}", y);
+    }
+
+    /// 障碍种类全部渲染且投影在图上（按投影位置精确定位，排除地形格/单位点）
+    #[test]
+    fn minimap_obstacles_render_all_kinds() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.mm_player = [0.0, 0.0];
+        hud.mm_yaw = 0.0;
+        hud.mm_obstacles = vec![
+            (50.0, -50.0, 5.0, 5.0, 0), // 墙
+            (-50.0, -50.0, 5.0, 5.0, 1), // 大块
+            (50.0, 50.0, 5.0, 5.0, 2),   // 栅栏
+            (-50.0, 50.0, 5.0, 5.0, 3),  // 树
+            (0.0, -120.0, 6.0, 6.0, 4),  // 建筑
+            (120.0, 0.0, 6.0, 6.0, 5),   // 废墟
+        ];
+        let elems = hud.layout_elements();
+        let quads: Vec<Rect> = elems
+            .iter()
+            .filter_map(|e| match e {
+                HudElement::Quad(q) => Some(q.rect),
+                _ => None,
+            })
+            .collect();
+        let center = |r: &Rect| (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        let find_at = |x: f32, y: f32| {
+            quads.iter().any(|r| {
+                let (cx, cy) = center(r);
+                (cx - x).abs() < 2.0 && (cy - y).abs() < 2.0 && r.w <= 6.0 && r.h <= 6.0
+            })
+        };
+        // 投影（scale=0.4）：(50,-50)→(+20,-20) 屏幕 (1176,104)；(-50,-50)→(1136,104)；
+        // (50,50)→(1176,144)；(-50,50)→(1136,144)；(0,-120)→(1156,76)；(120,0)→(1204,124)
+        for (name, x, y) in [
+            ("墙", 1176.0, 104.0),
+            ("大块", 1136.0, 104.0),
+            ("栅栏", 1176.0, 144.0),
+            ("树", 1136.0, 144.0),
+            ("建筑", 1156.0, 76.0),
+            ("废墟", 1204.0, 124.0),
+        ] {
+            assert!(find_at(x, y), "{} 障碍应投影到 ({}, {})", name, x, y);
+        }
     }
 
     #[test]
