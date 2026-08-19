@@ -1,0 +1,35 @@
+    /// 第一人称枪模程序化高模：按当前武器键名从 guns 库取 35 把枪的网格，
+    /// 变换到视空间固定位置（view⁻¹ × 锚点 × 倾斜 × 缩放 × 俯角 × 翻转 180°：
+    /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
+    /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
+    fn first_person_gun_mesh(&self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
+        // 当前武器枪模（键名缺失时回退 HK416）
+        let gun = crate::engine::guns::gun_mesh_by_key(self.game.active_weapon_key())
+            .unwrap_or_else(|| {
+                crate::engine::guns::gun_mesh_by_key("hk416").expect("hk416 枪模缺失")
+            });
+        let cam = &self.camera;
+        let mut anchor = if self.ads_active {
+            glam::Vec3::new(0.0, -0.08, -0.78)
+        } else {
+            glam::Vec3::new(0.34, -0.36, -0.60)
+        };
+        if self.game.is_firing() {
+            let k = ((self.anim_clock * 48.0).sin().abs()).min(1.0);
+            anchor.y -= 0.07 * k;
+            anchor.z += 0.06 * k;
+        }
+        let bob = (self.anim_clock * 10.0).sin() * 0.012;
+        anchor.x += bob;
+        let tilt = if self.ads_active { 0.0 } else { 0.02 };
+        let gun_scale =
+            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * 0.80;
+        let view_inv = cam.view_matrix().inverse();
+        let m = view_inv
+            * glam::Mat4::from_translation(anchor)
+            * glam::Mat4::from_rotation_z(tilt)
+            * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
+            * glam::Mat4::from_rotation_x(-0.045)
+            * glam::Mat4::from_rotation_y(std::f32::consts::PI);
+        gun.transformed(m)
+    }

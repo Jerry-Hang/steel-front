@@ -773,6 +773,8 @@ pub struct Game {
     npc_hit_flash: std::collections::HashMap<usize, f32>,
     /// 本帧命中点（世界坐标；main.rs 读取后生成命中火花粒子，每帧清空）
     hit_points: Vec<[f32; 3]>,
+    /// 本帧命中伤害值（HUD 伤害飘字；与 hit_points 一一对应，每帧清空）
+    hit_damages: Vec<f32>,
     /// 发射次数（累计）
     shots: u64,
     /// 命中次数（累计，供 UI/日志）
@@ -1012,6 +1014,7 @@ impl Game {
             auto_heat: 0.0,
             npc_hit_flash: std::collections::HashMap::new(),
             hit_points: Vec::new(),
+            hit_damages: Vec::new(),
             shots: 0,
             hits: 0,
             grid: GridMap::new(GRID_SIZE, GRID_SIZE),
@@ -1233,6 +1236,7 @@ impl Game {
         self.auto_heat = 0.0;
         self.npc_hit_flash.clear();
         self.hit_points.clear();
+        self.hit_damages.clear();
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
@@ -2315,6 +2319,11 @@ impl Game {
         std::mem::take(&mut self.hit_points)
     }
 
+    /// 本帧命中伤害值（与命中点一一对应；HUD 伤害飘字）
+    pub fn take_hit_damages(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.hit_damages)
+    }
+
     /// NPC 受击闪白剩余强度（0..1；0 = 无闪白）。渲染侧按此混合白色 tint。
     pub fn npc_flash(&self, id: usize) -> f32 {
         self.npc_hit_flash
@@ -2739,8 +2748,9 @@ impl Game {
                 hit_count += 1;
                 let mult = Self::part_multiplier(hit_h, self.npcs[idx].position[1]);
                 let dmg = p.damage_at_distance() * mult;
-                // 命中火花点（NPC 身体命中位置）
+                // 命中火花点（NPC 身体命中位置）+ 伤害飘字值
                 self.hit_points.push([p.position[0], hit_h, p.position[2]]);
+                self.hit_damages.push(dmg);
                 log::info!(
                     "weapons: 命中 NPC #{} 高度={:.1} 倍率={:.1} 伤害={:.0} 距离={:.0}m",
                     self.npcs[idx].id,

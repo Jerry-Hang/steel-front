@@ -1,0 +1,19 @@
+============================================
+  Steel Front - Launcher
+============================================
+
+  [Controls]
+    / or Enter : command window (type 1-35 to switch weapon)
+    B : fire mode  R : reload  G : grenade  F5 : map hot reload
+    Death automatically refills all ammo
+
+ERROR: Input redirection is not supported, exiting the process immediately.
+[status] code up to date: 1ecbfd9ee686c1becbf327f026f42b05a3b27d18
+
+[sync] syncing release build...
+    Finished `release` profile [optimized] target(s) in 0.21s
+
+[version] 1ecbfd9
+[launch] starting game...
+
+[done] game launched, press any key to close this window...

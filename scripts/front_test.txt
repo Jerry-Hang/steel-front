@@ -1,0 +1,308 @@
+[2026-08-18T23:45:47Z INFO  steel_front] ========================================
+[2026-08-18T23:45:47Z INFO  steel_front]   钢铁前线 (Steel Front) v0.1.0
+[2026-08-18T23:45:47Z INFO  steel_front]   二战FPS游戏引擎 - Rust + Vulkan
+[2026-08-18T23:45:47Z INFO  steel_front] ========================================
+[2026-08-18T23:45:47Z INFO  steel_front::engine::cpu] cpu: vendor=Amd threads=32 primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] e_cores=0 avx2=true avx512=true scene_set=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] ai_set=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] physical_primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] physical_secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] smt=[]
+[2026-08-18T23:45:47Z INFO  steel_front::engine::cpu] cpu: 非 Linux 平台，跳过线程手工绑定（交给系统调度）
+[2026-08-18T23:45:47Z INFO  steel_front::engine::cpu] cpu: ai_pool 创建（8 工作线程，绑定 vCPU [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]）
+[2026-08-18T23:45:47Z INFO  steel_front::engine::game] map: level 1 generated: 36 obstacle bodies (wall=20 block=0 barrier=0 tree=3 building=6 ruin=7), 203 grid cells blocked
+[2026-08-18T23:45:47Z INFO  steel_front] 窗口创建成功: 2560x1600
+[2026-08-18T23:45:47Z INFO  steel_front] winit inner_size: 2560x1600 scale_factor=1.50
+[2026-08-18T23:45:47Z WARN  steel_front::engine::renderer] 验证层不可用，将不使用
+[2026-08-18T23:45:47Z INFO  steel_front::engine::renderer] 选择物理设备: NVIDIA GeForce RTX 5060 Laptop GPU
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: 设备 NVIDIA GeForce RTX 5060 Laptop GPU 硬件能力探测（WSLg/dzn 视角）
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: 可用 device 扩展 280 个
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 光追扩展 --
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_pipeline = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_acceleration_structure = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_query = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_deferred_host_operations = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_buffer_device_address = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_position_fetch = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_ray_tracing = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- Tensor Core / 协作矩阵 --
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_cooperative_matrix = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cooperative_matrix = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_compute_shader_derivatives = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- DLSS / NVIDIA 私有 --
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_image_view_handle = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_binary_import = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cuda_kernel = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_external_memory = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 其它新特性 --
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_EXT_mesh_shader = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_shader_object = false
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_dynamic_rendering = true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 特性 ray_tracing_pipeline=true acceleration_structure=true buffer_device_address=true ray_query=true
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 管线属性 shaderGroupHandleSize=32B maxRecursionDepth=31 maxRayDispatchInvocationCount=1073741824
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】光追探测 device 创建成功 → RT Core 路径可用（dzn→DXR）
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: CUDA 直通（Tensor Core 可编程访问）=false（libcuda in /usr/lib/wsl/lib）
+[2026-08-18T23:45:47Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】Vulkan-DLSS（NVIDIA 私有扩展）=true；可直接接 DLSS SDK
+[2026-08-18T23:45:47Z INFO  steel_front::engine::renderer] VK_EXT_mesh_shader 可用：启用可选网格着色器渲染路径
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 实例缓冲创建完成: 65536 个实例，stride 80 字节，2 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] instances=65536 draw_calls=1
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] Descriptor Set Layout: binding 0 = UBO(view/proj), binding 1 = 贴图, binding 2 = 实例 STORAGE_BUFFER, binding 3 = 采样器
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] Descriptor 初始化完成（2 帧）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 远档 LOD 几何创建完成: 8 顶点 / 12 索引（十字双 quad）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 地面平铺 quad 几何创建完成: 4 顶点 / 6 索引（无侧壁）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 球体几何创建完成: 325 顶点 / 1728 索引（爆炸球形扩散）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 圆柱几何创建完成: 50 顶点 / 288 索引（NPC 四肢）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 地形 LOD[0] 创建完成: 66049 顶点 / 393216 索引（257×257 网格，间距 2）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 地形 LOD[1] 创建完成: 16641 顶点 / 98304 索引（129×129 网格，间距 4）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 地形 LOD[2] 创建完成: 4225 顶点 / 24576 索引（65×65 网格，间距 8）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 地形 3 级 LOD 全部创建完成（高/中/低）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 图形管线创建完成
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 网格着色器 maxMeshWorkGroupCount[0] = 4194304（地面场 65536 按此分块）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 网格着色器管线创建完成（VK_EXT_mesh_shader）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] HUD 覆盖层初始化完成（独立 pipeline，容量 4096 quads）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 纹理初始化完成: 512x512（10 mip，来源=程序化地面材质）
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 程序化皮肤纹理初始化完成: 512x512（marker=木板墙, npc=迷彩军服, RV3D_SKIN_TEX=off（纯色回退））
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 阴影贴图资源创建完成: 2048x2048 D32_SFLOAT
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 阴影 depth-only 管线创建完成
+[2026-08-18T23:45:48Z INFO  steel_front] Vulkan 渲染器初始化成功
+[2026-08-18T23:45:48Z INFO  steel_front] settings: 分辨率保持 2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front] settings: 应用画质 中画质
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 画质预设已切换: 中画质
+[2026-08-18T23:45:48Z INFO  steel_front] 性能日志已创建（logs/perf_*.log）
+[2026-08-18T23:45:48Z INFO  steel_front] 窗口大小变化: 1898x1061
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-18T23:45:48Z INFO  steel_front] 窗口大小变化: 1920x1117
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-18T23:45:48Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-18T23:45:48Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-18T23:45:48Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-18T23:45:48Z INFO  steel_front] autostart: RV3D_AUTOSTART=1 自动开始
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] map: level 1 generated: 36 obstacle bodies (wall=20 block=0 barrier=0 tree=3 building=6 ruin=7), 203 grid cells blocked
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] game: purged 8 leftover npcs on run start
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] wave: npc #8 spawn (65.3, 0.0, 25.3)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] wave: npc #9 spawn (6.1, 0.0, 39.5)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] wave: npc #10 spawn (-46.8, 0.0, 37.6)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] wave: npc #11 spawn (-74.6, 0.0, -28.9)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] wave: npc #12 spawn (-7.6, 0.0, -49.4)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] wave: npc #13 spawn (54.6, 0.0, -43.9)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] wave: wave 1 spawned 6 enemies (kind=Normal total=6 speed=4.0 hp=100 effective=1)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] game: run started (wave 1)
+[2026-08-18T23:45:48Z INFO  steel_front] input: cursor captured (mouse look on, grab=locked, look=relative)
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] proj-diag: alive=0 first=[none] nearest_npc=20m
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #1 (1 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #2 (2 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #3 (3 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 命中 NPC #8 高度=1.5 倍率=1.5 伤害=42 距离=20m
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 1 projectile hit(s), total_hits=1
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #4 (3 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 命中 NPC #8 高度=1.5 倍率=1.5 伤害=42 距离=19m
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 1 projectile hit(s), total_hits=2
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #5 (3 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front] cam: yaw=0.2 pitch=-0.6 dist=3.4 mode=FirstPerson cycle_us=2975 update_us=24 render_us=2951
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 命中 NPC #8 高度=1.6 倍率=1.5 伤害=42 距离=20m
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] kill: npc #8 eliminated (wave 1) score=10
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 1 projectile hit(s), total_hits=3
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #6 (3 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 命中 NPC #9 高度=1.6 倍率=1.5 伤害=42 距离=20m
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 1 projectile hit(s), total_hits=4
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #7 (3 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 命中 NPC #9 高度=1.7 倍率=1.5 伤害=42 距离=20m
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 1 projectile hit(s), total_hits=5
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #8 (3 alive) [AK-12M 风暴]
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 命中 NPC #9 高度=1.7 倍率=1.5 伤害=42 距离=20m
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] kill: npc #9 eliminated (wave 1) score=20
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: 1 projectile hit(s), total_hits=6
+[2026-08-18T23:45:48Z INFO  steel_front::engine::game] weapons: shot #9 (3 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=328.4 frame_us=1090 cull_us=1 terrain_us=0 wait_fence_us=1371 acquire_us=0 record_us=42 submit_us=45 present_us=252 terrain_lod=high blend=0.000 quality=中画质 marker=42 npc=90
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #10 (4 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #11 (5 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=2 chase=2 attack=0 tactics=[2, 1, 0, 0, 0, 0, 0, 1]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=1 ai_us=348 audio_us=11 net_us=0
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #12 (6 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #13 (7 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #14 (8 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #15 (9 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #16 (10 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front] cam: yaw=0.5 pitch=-1.6 dist=3.4 mode=FirstPerson cycle_us=2209 update_us=44 render_us=2164
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #17 (11 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #18 (12 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #19 (13 alive) [AK-12M 风暴]
+[2026-08-18T23:45:49Z INFO  steel_front::engine::game] weapons: shot #20 (14 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=399.2 frame_us=1666 cull_us=2 terrain_us=0 wait_fence_us=1331 acquire_us=1 record_us=25 submit_us=37 present_us=136 terrain_lod=high blend=0.000 quality=中画质 marker=42 npc=90
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #21 (15 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=2 chase=2 attack=0 tactics=[2, 1, 0, 0, 0, 0, 0, 1]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=1 ai_us=452 audio_us=21 net_us=0
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #22 (16 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] proj-diag: alive=16 first=[pos=(-0,3,-108) dist=108m] nearest_npc=20m
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #23 (17 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #24 (18 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #25 (19 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #26 (20 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #27 (21 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front] cam: yaw=0.8 pitch=-2.5 dist=3.4 mode=FirstPerson cycle_us=2510 update_us=20 render_us=2490
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #28 (22 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #29 (23 alive) [AK-12M 风暴]
+[2026-08-18T23:45:50Z INFO  steel_front::engine::game] weapons: shot #30 (24 alive) [AK-12M 风暴]
+[2026-08-18T23:45:51Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=399.7 frame_us=1394 cull_us=1 terrain_us=0 wait_fence_us=513 acquire_us=0 record_us=45 submit_us=37 present_us=226 terrain_lod=high blend=0.000 quality=中画质 marker=41 npc=90
+[2026-08-18T23:45:51Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=2 chase=2 attack=0 tactics=[2, 1, 0, 0, 0, 0, 0, 1]
+[2026-08-18T23:45:51Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=2 ai_us=413 audio_us=64 net_us=0
+[2026-08-18T23:45:51Z INFO  steel_front] cam: yaw=0.9 pitch=-2.9 dist=3.4 mode=FirstPerson cycle_us=2663 update_us=49 render_us=2613
+[2026-08-18T23:45:52Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=401.2 frame_us=1192 cull_us=1 terrain_us=0 wait_fence_us=761 acquire_us=2 record_us=43 submit_us=35 present_us=259 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=90
+[2026-08-18T23:45:52Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=2 chase=2 attack=0 tactics=[2, 1, 0, 0, 0, 0, 0, 1]
+[2026-08-18T23:45:52Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=2 ai_us=426 audio_us=92 net_us=0
+[2026-08-18T23:45:52Z INFO  steel_front::engine::game] proj-diag: alive=24 first=[pos=(-1,5,-258) dist=258m] nearest_npc=20m
+[2026-08-18T23:45:52Z INFO  steel_front] cam: yaw=0.9 pitch=-2.9 dist=3.4 mode=FirstPerson cycle_us=2444 update_us=98 render_us=2345
+[2026-08-18T23:45:53Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=400.8 frame_us=1206 cull_us=1 terrain_us=0 wait_fence_us=1567 acquire_us=2 record_us=21 submit_us=19 present_us=110 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=90
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=2 chase=2 attack=0 tactics=[2, 1, 0, 0, 0, 0, 0, 1]
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=3 ai_us=182 audio_us=37 net_us=0
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #31 (25 alive) [AK-12M 风暴]
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #32 (26 alive) [AK-12M 风暴]
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #33 (27 alive) [AK-12M 风暴]
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #34 (28 alive) [AK-12M 风暴]
+[2026-08-18T23:45:53Z INFO  steel_front] cam: yaw=1.1 pitch=-3.3 dist=3.4 mode=FirstPerson cycle_us=2129 update_us=49 render_us=2079
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #35 (29 alive) [AK-12M 风暴]
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #36 (30 alive) [AK-12M 风暴]
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #37 (31 alive) [AK-12M 风暴]
+[2026-08-18T23:45:53Z INFO  steel_front::engine::game] weapons: shot #38 (32 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=401.0 frame_us=969 cull_us=1 terrain_us=0 wait_fence_us=1198 acquire_us=1 record_us=21 submit_us=17 present_us=140 terrain_lod=high blend=0.000 quality=中画质 marker=42 npc=90
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #39 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-1.6, 6.7, -400.1) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #40 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=2 chase=2 attack=0 tactics=[2, 1, 0, 0, 0, 0, 0, 1]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=1 ai_us=319 audio_us=18 net_us=0
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-1.9, 7.4, -400.1) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] proj-diag: alive=32 first=[pos=(-2,8,-394) dist=394m] nearest_npc=20m
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #41 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-2.1, 8.1, -400.4) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #42 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-2.3, 8.7, -399.9) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #43 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-2.5, 9.3, -399.9) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #44 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-2.7, 9.9, -400.0) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #45 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front] cam: yaw=1.4 pitch=-4.4 dist=3.4 mode=FirstPerson cycle_us=2641 update_us=107 render_us=2533
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-2.9, 10.5, -400.1) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #46 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-3.1, 11.1, -400.0) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #47 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-3.3, 11.7, -399.9) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #48 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] explosion: at (-3.4, 12.3, -400.0) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:54Z INFO  steel_front::engine::game] weapons: shot #49 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-3.6, 12.9, -399.9) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=371.8 frame_us=951 cull_us=2 terrain_us=0 wait_fence_us=1400 acquire_us=2 record_us=26 submit_us=68 present_us=156 terrain_lod=high blend=0.000 quality=中画质 marker=59 npc=90
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #50 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-3.8, 13.5, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=2 chase=2 attack=0 tactics=[2, 1, 0, 0, 0, 0, 0, 1]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=2 ai_us=404 audio_us=56 net_us=0
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #51 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-4.0, 14.1, -400.0) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #52 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-4.2, 14.7, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #53 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-4.4, 15.3, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #54 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-4.6, 15.8, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #55 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-4.8, 16.4, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #56 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front] cam: yaw=1.7 pitch=-5.3 dist=3.4 mode=FirstPerson cycle_us=2740 update_us=107 render_us=2633
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-5.0, 17.0, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #57 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-5.2, 17.6, -399.7) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #58 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-5.3, 18.2, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] weapons: shot #59 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:55Z INFO  steel_front::engine::game] explosion: at (-5.5, 18.8, -399.7) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:56Z INFO  steel_front::engine::game] weapons: shot #60 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:56Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=396.6 frame_us=1627 cull_us=1 terrain_us=0 wait_fence_us=1142 acquire_us=1 record_us=46 submit_us=40 present_us=237 terrain_lod=high blend=0.000 quality=中画质 marker=55 npc=90
+[2026-08-18T23:45:56Z INFO  steel_front::engine::game] explosion: at (-5.7, 19.4, -399.8) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:56Z INFO  steel_front::engine::game] explosion: at (-5.9, 20.0, -399.6) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:56Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=1 chase=3 attack=0 tactics=[3, 1, 0, 0, 0, 0, 0, 0]
+[2026-08-18T23:45:56Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=1 ai_us=408 audio_us=65 net_us=0
+[2026-08-18T23:45:56Z INFO  steel_front::engine::game] proj-diag: alive=31 first=[pos=(-6,20,-396) dist=396m] nearest_npc=20m
+[2026-08-18T23:45:56Z INFO  steel_front::engine::game] explosion: at (-6.1, 20.6, -399.6) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:56Z INFO  steel_front] cam: yaw=1.9 pitch=-5.8 dist=3.4 mode=FirstPerson cycle_us=2565 update_us=79 render_us=2485
+[2026-08-18T23:45:57Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=397.3 frame_us=995 cull_us=1 terrain_us=0 wait_fence_us=596 acquire_us=1 record_us=24 submit_us=20 present_us=181 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=90
+[2026-08-18T23:45:57Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=1 chase=3 attack=0 tactics=[3, 1, 0, 0, 0, 0, 0, 0]
+[2026-08-18T23:45:57Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=2 ai_us=416 audio_us=81 net_us=0
+[2026-08-18T23:45:57Z INFO  steel_front] cam: yaw=1.9 pitch=-5.8 dist=3.4 mode=FirstPerson cycle_us=2686 update_us=51 render_us=2634
+[2026-08-18T23:45:58Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=397.0 frame_us=1169 cull_us=1 terrain_us=0 wait_fence_us=1367 acquire_us=1 record_us=25 submit_us=20 present_us=159 terrain_lod=high blend=0.000 quality=中画质 marker=36 npc=90
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] ai: npcs=4 near=4 far=0 idle=0 patrol=1 chase=3 attack=0 tactics=[3, 1, 0, 0, 0, 0, 0, 0]
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=1 ai_us=115 audio_us=41 net_us=0
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] proj-diag: alive=30 first=[pos=(-6,20,-366) dist=367m] nearest_npc=20m
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] weapons: shot #61 (31 alive) [AK-12M 风暴]
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] weapons: shot #62 (32 alive) [AK-12M 风暴]
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] weapons: shot #63 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] explosion: at (-6.5, 21.7, -399.5) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:58Z INFO  steel_front] cam: yaw=2.0 pitch=-6.1 dist=3.4 mode=FirstPerson cycle_us=2419 update_us=30 render_us=2388
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] weapons: shot #64 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] explosion: at (-6.7, 22.3, -399.5) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] weapons: shot #65 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] explosion: at (-7.0, 23.2, -399.6) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] weapons: shot #66 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] explosion: at (-7.3, 24.1, -399.4) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:58Z INFO  steel_front::engine::game] weapons: shot #67 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] explosion: at (-7.6, 25.1, -399.4) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:59Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=397.5 frame_us=974 cull_us=2 terrain_us=0 wait_fence_us=1208 acquire_us=1 record_us=24 submit_us=20 present_us=145 terrain_lod=high blend=0.000 quality=中画质 marker=58 npc=60
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] weapons: shot #68 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] explosion: at (-7.8, 26.0, -399.2) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] weapons: shot #69 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] ai: npcs=4 near=3 far=1 idle=0 patrol=1 chase=3 attack=0 tactics=[3, 1, 0, 0, 0, 0, 0, 0]
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] game: wave=1 enemies=4 enemy_hp=100 hp=100/100 score=20 phys_us=1 ai_us=88 audio_us=102 net_us=0
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] explosion: at (-8.1, 26.8, -399.2) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] weapons: shot #70 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] explosion: at (-8.3, 27.5, -399.2) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] weapons: shot #71 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] explosion: at (-8.5, 28.2, -399.2) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] weapons: shot #72 (33 alive) [AK-12M 风暴]
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] explosion: at (-8.7, 28.8, -399.0) radius=8 dmg=60 knockback=true
+[2026-08-18T23:45:59Z INFO  steel_front::engine::game] weapons: shot #73 (33 alive) [AK-12M 风暴]

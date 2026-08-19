@@ -73,6 +73,8 @@ struct GameApp {
     ads_blend: f32,
     /// 最近一次开火时刻（anim_clock；枪模后坐用一次性"上抬→回落"脉冲）
     last_shot_at: f32,
+    /// 伤害飘字列表：(伤害, 剩余秒)；命中时 push，0.6s 淡出（塔克夫式受击反馈）
+    hit_damage_popups: Vec<(f32, f32)>,
     /// 上一帧光标位置（屏幕坐标）
     last_cursor: (f64, f64),
     /// 上一帧时间戳（用于 delta_time 计算）
@@ -176,6 +178,7 @@ impl GameApp {
             ads_active: false,
             ads_blend: 0.0,
             last_shot_at: -1.0,
+            hit_damage_popups: Vec::new(),
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             last_cycle_us: 0,
@@ -435,6 +438,14 @@ impl GameApp {
             });
         }
 
+        // 伤害飘字：本帧命中伤害入列（0.6s 衰减淡出）
+        for dmg in self.game.take_hit_damages() {
+            self.hit_damage_popups.push((dmg, 0.6));
+        }
+        self.hit_damage_popups.retain(|item| {
+            item.1 -= delta_time;
+            item.1 > 0.0
+        });
         // 命中火花：本帧命中点在目标处生成小火花粒子（受击反馈增强）
         for hp in self.game.take_hit_points() {
             for _ in 0..5 {
@@ -837,6 +848,21 @@ impl GameApp {
                     1.3 * s,
                     &mut quads,
                 );
+            }
+            // 伤害飘字：准星下方逐条显示（红色，随剩余时间上浮淡出）
+            let s = self.game.hud.ui_scale();
+            let mut popup_y = 120.0 * s;
+            for (dmg, remain) in &self.hit_damage_popups {
+                let alpha = (remain / 0.6).clamp(0.0, 1.0);
+                crate::ui::render_text(
+                    &format!("-{:.0}", dmg),
+                    (self.game.hud.screen_w / s) * 0.5 * s + 12.0 * s,
+                    popup_y,
+                    crate::ui::Color::new(1.0, 0.35 * alpha, 0.25 * alpha, alpha),
+                    1.6 * s,
+                    &mut quads,
+                );
+                popup_y += 20.0 * s;
             }
             renderer.set_hud_quads(&quads);
             renderer.set_lights(&self.game.light_uniform());
