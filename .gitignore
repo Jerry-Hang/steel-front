@@ -1,4 +1,4 @@
-﻿# 运行产物与诊断文件
+# 运行产物与诊断文件
 *.bmp
 *.png
 *.log
@@ -7,3 +7,6 @@ GAME_DESIGN.txt
 _fontblock.txt
 target/
 scripts/retain_smoke.txt
+release_dist/
+launcher/target/
+

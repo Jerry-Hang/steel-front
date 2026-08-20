@@ -1969,6 +1969,23 @@ fn main() {
         std::env::set_var("RV3D_STRESS_AI", "64");
     }
 
+    // 资源路径导向（启动器写入 resource_paths.ini）：记录地图/音效/建模自定义目录
+    if let Ok(text) = std::fs::read_to_string("resource_paths.ini") {
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if !v.is_empty() {
+                    log::info!("res-path: {} -> {}", k, v);
+                    let env_k = k
+                        .trim_end_matches("_path")
+                        .to_uppercase()
+                        .replace('-', "_");
+                    std::env::set_var(format!("STEELFRONT_{}", env_k), v);
+                }
+            }
+        }
+    }
+
     // DPI awareness 由 winit 0.30 自己管理（默认 per-monitor V2）——手动调用
     // SetProcessDpiAwarenessContext 会与 winit 内部设置冲突，导致窗口尺寸/缩放错位
     // （曾出现：swapchain 2560x1600 但窗口实际 1898x1061 → 画面只显示左上角）。
