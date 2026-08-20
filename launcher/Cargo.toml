@@ -1,0 +1,9 @@
+[package]
+name = "steel_front_launcher"
+version = "0.1.0"
+edition = "2021"
+
+# 零第三方依赖：Win32 API 手动 extern 声明（与游戏 font_cjk 同风格）
+
+[profile.release]
+opt-level = 2
