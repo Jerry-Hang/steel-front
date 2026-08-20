@@ -1680,7 +1680,7 @@ pub fn glyph(ch: char) -> [u8; 5] {
 /// 中文字形查询（8x8 点阵，行主序每行 1 字节，bit7=左侧）：
 /// 经 engine::font_cjk（Windows GDI 光栅化，零依赖）按需生成并缓存；
 /// 非 Windows 或字体缺失返回 None → 渲染回退为 `?`（不 panic、不方块）。
-pub fn glyph_cjk(ch: char) -> Option<[u16; 16]> {
+pub fn glyph_cjk(ch: char) -> Option<[u8; 8]> {
     #[cfg(windows)]
     {
         crate::engine::font_cjk::glyph(ch)
@@ -1713,8 +1713,8 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
     }
     let mut w = 0.0f32;
     for ch in text.chars() {
-        // CJK：16 内部分辨率 × 0.5 屏幕缩放 = 8 列（与英文 5 列同量级，宽约 1.6 倍）
-        let cols = if is_cjk(ch) { 8.0 } else { FONT_COLS as f32 };
+        // CJK：16 内部分辨率 × 0.5 = 8 列 + 额外 1 列字距（与 render_text 一致）
+        let cols = if is_cjk(ch) { 9.0 } else { FONT_COLS as f32 };
         w += (cols + FONT_SPACING) * scale;
     }
     w - FONT_SPACING * scale
@@ -1728,19 +1728,19 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
     let mut cx = x;
     for ch in text.chars() {
         if is_cjk(ch) {
-            // 16x16 中文字形（内部分辨率），屏幕尺寸每格 scale*0.5：
-            // 16 格 × 0.5 = 8×scale 宽/高 ≈ 两个 ASCII（5x7）——同一行中英文齐平，
-            // HUD 排版不因汉字变大而撑破（2026-08-20 修复"中文比英文大一倍"）。
+            // 8x8 中文字形（内部 16x16 采样降采样），每格 1×scale 与英文格同尺寸：
+            // 笔画 1 格 = 英文同粗、屏幕字 8 格 ≈ 英文 7 行齐平、像素感一致
+            // （2026-08-20 最终方案：16 格 0.5 倍渲染曾导致笔画细/糊）。
             if let Some(rows) = glyph_cjk(ch) {
                 for (row, byte) in rows.iter().enumerate() {
-                    for col in 0..16 {
-                        if (byte >> (15 - col)) & 1 == 1 {
+                    for col in 0..8 {
+                        if (byte >> (7 - col)) & 1 == 1 {
                             out.push(Quad::new(
                                 Rect::new(
-                                    cx + col as f32 * scale * 0.5,
-                                    y + row as f32 * scale * 0.5,
-                                    scale * 0.5,
-                                    scale * 0.5,
+                                    cx + col as f32 * scale,
+                                    y + row as f32 * scale,
+                                    scale,
+                                    scale,
                                 ),
                                 color,
                             ));
@@ -1761,7 +1761,8 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
                     }
                 }
             }
-            cx += (8.0 + FONT_SPACING) * scale;
+            // 中文字距比英文多 1 逻辑像素：汉字笔画密，同字距会显得粘连
+            cx += (8.0 + FONT_SPACING + 1.0) * scale;
         } else {
             let cols = glyph(ch);
             for (col, byte) in cols.iter().enumerate() {

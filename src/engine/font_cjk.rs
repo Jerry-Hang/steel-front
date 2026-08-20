@@ -78,7 +78,7 @@ const DIB_RGB_COLORS: c_uint = 0;
 /// GetDeviceCaps 索引：垂直 DPI（每逻辑英寸像素数）
 const LOGPIXELSY: c_int = 90;
 
-static CACHE: Mutex<Option<std::collections::HashMap<char, [u16; 16]>>> = Mutex::new(None);
+static CACHE: Mutex<Option<std::collections::HashMap<char, [u8; 8]>>> = Mutex::new(None);
 
 /// CJK/全角字符判定（2026-08-16 扩展：补全角形式 0xFF00-0xFFEF 与扩展区，
 /// 修复中文输入法标点"！（）"等渲染成 '?' 的问题）
@@ -101,7 +101,7 @@ pub fn is_cjk_char(ch: char) -> bool {
 /// 首次访问某字符时经 GDI 光栅化并缓存；失败返回 None。
 /// 16x16 分辨率：8x8 对复杂汉字（设/置/暴）笔画过密会糊成方块且内容占不满
 /// 格子导致视觉压扁（2026-08-20 升级）。
-pub fn glyph(ch: char) -> Option<[u16; 16]> {
+pub fn glyph(ch: char) -> Option<[u8; 8]> {
     // 非 CJK 不进缓存（ASCII 走 5x7 内置字体）
     if !is_cjk_char(ch) {
         return None;
@@ -137,7 +137,7 @@ pub fn glyph(ch: char) -> Option<[u16; 16]> {
     }
 }
 
-fn rasterize(ch: char) -> Option<[u16; 16]> {
+fn rasterize(ch: char) -> Option<[u8; 8]> {
     // TextOutW → GetDIBits 路径：GDI 文本引擎直接渲染到内存位图再读回，CJK 稳定。
     // DPI 感知（2026-08-19）：游戏进程是 DPI-aware，屏幕兼容 DC 的字体渲染按实际
     // DPI 缩放（150%/200% 屏 -16px 字体实际 24/32px）——固定 16x16 位图会把字形
@@ -154,10 +154,11 @@ fn rasterize(ch: char) -> Option<[u16; 16]> {
         if dc.is_null() {
             return None;
         }
-        // 逻辑 24px 字符 → 物理像素（96dpi=24，200% = 48，400% clamp 64）。
-        // 24px 比 16px 笔画更粗（~2px），采样到 16x16 后笔画 2 格 →
-        // 屏幕 2×0.5×scale = 1×scale，与英文 5x7 笔画同粗（消除"贴图感"的细淡笔画）。
-        let font_px = ((24.0 * dpi as f32 / 96.0).round() as i32).clamp(24, 64);
+        // 逻辑 16px 字符 → 物理像素（96dpi=16，200% = 32，400% clamp 64）。
+        // 16px 字体 1:1 采样到 16x16（1px/格）细节最完整——24px 字体 1.5px/格
+        // 采样会把"风"的乂、"暴"的底部混叠成团。笔画加粗交给采样后的
+        // 单向膨胀（1→2 格，屏幕与英文 5x7 同粗），不引入采样混叠。
+        let font_px = ((16.0 * dpi as f32 / 96.0).round() as i32).clamp(16, 64);
         let bmp = CreateCompatibleBitmap(dc, 64, 64);
         if bmp.is_null() {
             DeleteDC(dc);
@@ -220,11 +221,13 @@ fn rasterize(ch: char) -> Option<[u16; 16]> {
     }
 }
 
-/// 64x64 位图（字形占前 font_px 行/列）→ 16x16 掩码。
-/// 每输出格按比例取整区间，保证任意 DPI（font_px 24..=64）下字形比例不变。
-fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u16; 16]> {
+/// 64x64 位图（字形占前 font_px 行/列）→ 8x8 掩码。
+/// 内部：16x16 比例采样（细节完整）→ 垂直拉伸占满 → 2x2 取或降采样 8x8。
+/// 渲染层每格 1×scale（与英文 5x7 格同尺寸）：笔画 1 格 = 英文同粗、
+/// 屏幕字 8 格 ≈ 英文 7 行齐平（2026-08-20 最终方案）。
+fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u8; 8]> {
     let fp = font_px.max(1);
-    let mut out = [0u16; 16];
+    let mut g16 = [0u16; 16];
     for j in 0..16 {
         let y0 = j * fp / 16;
         let y1 = ((j + 1) * fp) / 16;
@@ -243,16 +246,15 @@ fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u16; 16]> {
                 }
             }
             if lit {
-                out[j] |= 1 << (15 - i);
+                g16[j] |= 1 << (15 - i);
             }
         }
     }
-    // 垂直拉伸：GDI 基线偏移使字形内容只占 11/16 行（顶部 5 行空）→ 渲染后
-    // 字高只有宽的 69%（视觉"扁"）。把内容行映射铺满 16 行，字形方正。
+    // 垂直拉伸：GDI 基线偏移使内容偏上（占不满 16 行 → 显示"扁"），映射铺满
     let mut top = 16usize;
     let mut bottom = 0usize;
     for j in 0..16 {
-        if out[j] != 0 {
+        if g16[j] != 0 {
             top = top.min(j);
             bottom = j;
         }
@@ -262,9 +264,27 @@ fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u16; 16]> {
         if h < 16 {
             let mut v = [0u16; 16];
             for j in 0..16 {
-                v[j] = out[top + j * h / 16];
+                v[j] = g16[top + j * h / 16];
             }
-            out = v;
+            g16 = v;
+        }
+    }
+    // 2x2 取或降采样 16x16 → 8x8：笔画（16 格中 2 格）→ 8 格中 1 格，
+    // 渲染每格 1×scale → 屏幕笔画与英文同粗；细节（乂/米字）在 8x8 保留。
+    let mut out = [0u8; 8];
+    for j in 0..8 {
+        for i in 0..8 {
+            let mut lit = false;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    if (g16[j * 2 + dy] >> (15 - (i * 2 + dx))) & 1 == 1 {
+                        lit = true;
+                    }
+                }
+            }
+            if lit {
+                out[j] |= 1 << (7 - i);
+            }
         }
     }
     Some(out)
@@ -281,13 +301,13 @@ mod tests {
         let g = glyph('中');
         assert!(g.is_some(), "中文字形生成失败（GDI 路径）");
         if let Some(rows) = g {
-            assert_eq!(rows.len(), 16, "16x16 字形应为 16 行");
+            assert_eq!(rows.len(), 8, "8x8 字形应为 8 行");
             let filled_rows = rows.iter().filter(|b| **b != 0).count();
-            let filled_cols = (0..16)
-                .filter(|i| rows.iter().any(|b| (b >> (15 - i)) & 1 == 1))
+            let filled_cols = (0..8)
+                .filter(|i| rows.iter().any(|b| (b >> (7 - i)) & 1 == 1))
                 .count();
             assert!(
-                filled_rows >= 8 && filled_cols >= 8,
+                filled_rows >= 6 && filled_cols >= 6,
                 "字形过稀疏（rows={} cols={}）：{:?}",
                 filled_rows,
                 filled_cols,
@@ -345,11 +365,11 @@ mod tests {
         // 区间取整允许边界行 ±1 像素差异（真实字体 hinting 同理），
         // 断言结构特征一致而非逐字节相等：
         // ① 顶部/底部有笔画（不压扁）② 左列有笔画（外框完整）③ 笔画行数接近
-        let filled = |g: &[u16; 16]| g.iter().filter(|b| **b != 0).count();
+        let filled = |g: &[u8; 8]| g.iter().filter(|b| **b != 0).count();
         for g in [&g16, &g24, &g32] {
-            assert!(g[0] != 0 && g[15] != 0, "顶部与底部都应有笔画: {:?}", g);
+            assert!(g[0] != 0 && g[7] != 0, "顶部与底部都应有笔画: {:?}", g);
             assert!(
-                (0..16).any(|r| (g[r] & 0x8000) != 0),
+                (0..8).any(|r| (g[r] & 0x80) != 0),
                 "左列应有笔画（外框完整）: {:?}",
                 g
             );
