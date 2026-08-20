@@ -14,6 +14,7 @@
 pub mod ai;
 pub mod camera;
 #[cfg(windows)]
+pub mod cjk_glyphs;
 pub mod font_cjk;
 pub mod cpu;
 pub mod game;
