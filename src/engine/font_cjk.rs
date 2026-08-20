@@ -154,9 +154,10 @@ fn rasterize(ch: char) -> Option<[u16; 16]> {
         if dc.is_null() {
             return None;
         }
-        // 逻辑 16px 字符 → 物理像素（96dpi=16，200% = 32，400% = 64），
-        // 位图 64x64 容纳任意 Windows 缩放；采样按实际 font_px 精确取区间
-        let font_px = ((16.0 * dpi as f32 / 96.0).round() as i32).clamp(16, 64);
+        // 逻辑 24px 字符 → 物理像素（96dpi=24，200% = 48，400% clamp 64）。
+        // 24px 比 16px 笔画更粗（~2px），采样到 16x16 后笔画 2 格 →
+        // 屏幕 2×0.5×scale = 1×scale，与英文 5x7 笔画同粗（消除"贴图感"的细淡笔画）。
+        let font_px = ((24.0 * dpi as f32 / 96.0).round() as i32).clamp(24, 64);
         let bmp = CreateCompatibleBitmap(dc, 64, 64);
         if bmp.is_null() {
             DeleteDC(dc);
@@ -220,7 +221,7 @@ fn rasterize(ch: char) -> Option<[u16; 16]> {
 }
 
 /// 64x64 位图（字形占前 font_px 行/列）→ 16x16 掩码。
-/// 每输出格按比例取整区间，保证任意 DPI（font_px 16..=64）下字形比例不变。
+/// 每输出格按比例取整区间，保证任意 DPI（font_px 24..=64）下字形比例不变。
 fn sample_glyph(px: &[u8], font_px: usize) -> Option<[u16; 16]> {
     let fp = font_px.max(1);
     let mut out = [0u16; 16];
