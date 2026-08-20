@@ -1713,7 +1713,8 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
     }
     let mut w = 0.0f32;
     for ch in text.chars() {
-        let cols = if is_cjk(ch) { 16.0 } else { FONT_COLS as f32 };
+        // CJK：16 内部分辨率 × 0.5 屏幕缩放 = 8 列（与英文 5 列同量级，宽约 1.6 倍）
+        let cols = if is_cjk(ch) { 8.0 } else { FONT_COLS as f32 };
         w += (cols + FONT_SPACING) * scale;
     }
     w - FONT_SPACING * scale
@@ -1727,14 +1728,20 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
     let mut cx = x;
     for ch in text.chars() {
         if is_cjk(ch) {
-            // 16x16 中文字形：行主序，bit15=左侧，16 列 x 16 行
-            // （8x8 对复杂汉字笔画糊成方块且内容占不满格子导致压扁，2026-08-20 升级）
+            // 16x16 中文字形（内部分辨率），屏幕尺寸每格 scale*0.5：
+            // 16 格 × 0.5 = 8×scale 宽/高 ≈ 两个 ASCII（5x7）——同一行中英文齐平，
+            // HUD 排版不因汉字变大而撑破（2026-08-20 修复"中文比英文大一倍"）。
             if let Some(rows) = glyph_cjk(ch) {
                 for (row, byte) in rows.iter().enumerate() {
                     for col in 0..16 {
                         if (byte >> (15 - col)) & 1 == 1 {
                             out.push(Quad::new(
-                                Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
+                                Rect::new(
+                                    cx + col as f32 * scale * 0.5,
+                                    y + row as f32 * scale * 0.5,
+                                    scale * 0.5,
+                                    scale * 0.5,
+                                ),
                                 color,
                             ));
                         }
@@ -1754,7 +1761,7 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
                     }
                 }
             }
-            cx += (16.0 + FONT_SPACING) * scale;
+            cx += (8.0 + FONT_SPACING) * scale;
         } else {
             let cols = glyph(ch);
             for (col, byte) in cols.iter().enumerate() {
