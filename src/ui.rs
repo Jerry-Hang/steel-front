@@ -1713,8 +1713,8 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
     }
     let mut w = 0.0f32;
     for ch in text.chars() {
-        // CJK：16 内部分辨率 × 0.5 = 8 列 + 额外 1 列字距（与 render_text 一致）
-        let cols = if is_cjk(ch) { 9.0 } else { FONT_COLS as f32 };
+        // CJK：8 格 × 1.12 缩放 + 额外 1 列字距（与 render_text 一致）
+        let cols = if is_cjk(ch) { 8.0 * 1.12 + 1.0 } else { FONT_COLS as f32 };
         w += (cols + FONT_SPACING) * scale;
     }
     w - FONT_SPACING * scale
@@ -1728,19 +1728,21 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
     let mut cx = x;
     for ch in text.chars() {
         if is_cjk(ch) {
-            // 8x8 中文字形（内部 16x16 采样降采样），每格 1×scale 与英文格同尺寸：
-            // 笔画 1 格 = 英文同粗、屏幕字 8 格 ≈ 英文 7 行齐平、像素感一致
-            // （2026-08-20 最终方案：16 格 0.5 倍渲染曾导致笔画细/糊）。
+            // 8x8 预烘焙点阵（Fusion Pixel 8px 手工点阵）。
+            // 微调（2026-08-20）：Fusion 8px 字形内容约占 6.5/8 格，视觉略小于英文，
+            // 渲染 scale ×1.12 补齐尺寸；y 偏移 -0.5×scale 让内容中线与英文对齐。
+            let cs = scale * 1.12;
+            let yoff = y - scale * 0.5;
             if let Some(rows) = glyph_cjk(ch) {
                 for (row, byte) in rows.iter().enumerate() {
                     for col in 0..8 {
                         if (byte >> (7 - col)) & 1 == 1 {
                             out.push(Quad::new(
                                 Rect::new(
-                                    cx + col as f32 * scale,
-                                    y + row as f32 * scale,
-                                    scale,
-                                    scale,
+                                    cx + col as f32 * cs,
+                                    yoff + row as f32 * cs,
+                                    cs,
+                                    cs,
                                 ),
                                 color,
                             ));
@@ -1762,7 +1764,7 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
                 }
             }
             // 中文字距比英文多 1 逻辑像素：汉字笔画密，同字距会显得粘连
-            cx += (8.0 + FONT_SPACING + 1.0) * scale;
+            cx += (8.0 * 1.12 + FONT_SPACING + 1.0) * scale;
         } else {
             let cols = glyph(ch);
             for (col, byte) in cols.iter().enumerate() {
