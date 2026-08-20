@@ -555,10 +555,12 @@ impl HudState {
         for e in elems.iter_mut() {
             match e {
                 HudElement::Quad(q) => {
-                    q.rect.x *= s;
-                    q.rect.y *= s;
-                    q.rect.w *= s;
-                    q.rect.h *= s;
+                    // 像素对齐：round 到整数物理像素——消除亚像素半覆盖灰边
+                    // （像素风字体必须整数对齐才锐利，中英文统一处理）
+                    q.rect.x = (q.rect.x * s).round();
+                    q.rect.y = (q.rect.y * s).round();
+                    q.rect.w = (q.rect.w * s).round().max(1.0);
+                    q.rect.h = (q.rect.h * s).round().max(1.0);
                 }
                 HudElement::Bar { back, fill, ratio } => {
                     let _ = ratio;
@@ -1713,8 +1715,8 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
     }
     let mut w = 0.0f32;
     for ch in text.chars() {
-        // CJK：8 格 × 1.12 缩放 + 额外 1 列字距（与 render_text 一致）
-        let cols = if is_cjk(ch) { 8.0 * 1.12 + 1.0 } else { FONT_COLS as f32 };
+        // CJK：8 格 + 额外 1 列字距（与 render_text 一致）
+        let cols = if is_cjk(ch) { 9.0 } else { FONT_COLS as f32 };
         w += (cols + FONT_SPACING) * scale;
     }
     w - FONT_SPACING * scale
@@ -1728,10 +1730,9 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
     let mut cx = x;
     for ch in text.chars() {
         if is_cjk(ch) {
-            // 8x8 预烘焙点阵（Fusion Pixel 8px 手工点阵）。
-            // 微调（2026-08-20）：Fusion 8px 字形内容约占 6.5/8 格，视觉略小于英文，
-            // 渲染 scale ×1.12 补齐尺寸；y 偏移 -0.5×scale 让内容中线与英文对齐。
-            let cs = scale * 1.12;
+            // 8x8 预烘焙点阵（Fusion Pixel 8px 手工点阵，生成时已垂直拉伸占满 8 行）。
+            // 每格 1×scale 与英文格同尺寸；y 偏移 -0.5×scale 让内容中线与英文对齐
+            // （2026-08-20 微调：撤销 1.12 非整数缩放——非整数格子产生亚像素糊边）。
             let yoff = y - scale * 0.5;
             if let Some(rows) = glyph_cjk(ch) {
                 for (row, byte) in rows.iter().enumerate() {
@@ -1739,10 +1740,10 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
                         if (byte >> (7 - col)) & 1 == 1 {
                             out.push(Quad::new(
                                 Rect::new(
-                                    cx + col as f32 * cs,
-                                    yoff + row as f32 * cs,
-                                    cs,
-                                    cs,
+                                    cx + col as f32 * scale,
+                                    yoff + row as f32 * scale,
+                                    scale,
+                                    scale,
                                 ),
                                 color,
                             ));
@@ -1764,7 +1765,7 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
                 }
             }
             // 中文字距比英文多 1 逻辑像素：汉字笔画密，同字距会显得粘连
-            cx += (8.0 * 1.12 + FONT_SPACING + 1.0) * scale;
+            cx += (8.0 + FONT_SPACING + 1.0) * scale;
         } else {
             let cols = glyph(ch);
             for (col, byte) in cols.iter().enumerate() {
@@ -1909,23 +1910,23 @@ mod tests {
             })
             .collect();
         let center = |r: &Rect| (r.x + r.w * 0.5, r.y + r.h * 0.5);
-        // 前方红点（3.6px 点，中心应在 (1156, 124-40=84)）
+        // 前方红点（像素对齐后 4px 点，中心应在 (1156, 124-40=84)）
         let front = quads
             .iter()
-            .find(|r| (center(r).1 - 84.0).abs() < 2.0)
+            .find(|r| (center(r).1 - 84.0).abs() < 3.0)
             .expect("应有正前方红点");
-        assert!((center(front).0 - 1156.0).abs() < 2.0, "前方点 x 应在中心");
+        assert!((center(front).0 - 1156.0).abs() < 3.0, "前方点 x 应在中心");
         // 右方蓝点（中心 (1196, 124)）
         let right = quads
             .iter()
-            .find(|r| (center(r).0 - 1196.0).abs() < 2.0 && (center(r).1 - 124.0).abs() < 2.0)
+            .find(|r| (center(r).0 - 1196.0).abs() < 3.0 && (center(r).1 - 124.0).abs() < 3.0)
             .expect("应有正右方蓝点");
-        assert_eq!(right.w, 3.6);
+        assert!((right.w - 4.0).abs() < 0.1, "像素对齐后点应为 4px，实际 {}", right.w);
         // 后方红点（中心 (1156, 164)）
         assert!(
             quads
                 .iter()
-                .any(|r| (center(r).0 - 1156.0).abs() < 2.0 && (center(r).1 - 164.0).abs() < 2.0),
+                .any(|r| (center(r).0 - 1156.0).abs() < 3.0 && (center(r).1 - 164.0).abs() < 3.0),
             "应有正后方红点"
         );
     }
@@ -1940,12 +1941,12 @@ mod tests {
         let elems = hud.layout_elements();
         let center = |r: &Rect| (r.x + r.w * 0.5, r.y + r.h * 0.5);
         let hit = elems.iter().find_map(|e| match e {
-            HudElement::Quad(q) if (q.rect.w - 3.6).abs() < 0.1 => Some(center(&q.rect)),
+            HudElement::Quad(q) if (q.rect.w - 4.0).abs() < 0.1 => Some(center(&q.rect)),
             _ => None,
         });
         let (x, y) = hit.expect("yaw=90° 后前方单位应仍在图上");
-        assert!((x - 1196.0).abs() < 2.0, "转向 90° 后单位应到屏幕右方，x={}", x);
-        assert!((y - 124.0).abs() < 2.0, "y 应保持中心行，y={}", y);
+        assert!((x - 1196.0).abs() < 3.0, "转向 90° 后单位应到屏幕右方，x={}", x);
+        assert!((y - 124.0).abs() < 3.0, "y 应保持中心行，y={}", y);
     }
 
     /// 障碍种类全部渲染且投影在图上（按投影位置精确定位，排除地形格/单位点）

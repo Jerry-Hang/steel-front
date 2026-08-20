@@ -18,6 +18,20 @@ for line in data.splitlines():
                 r8 = rows[:8]
                 while len(r8) < 8:
                     r8.append(0)
+                # 内容垂直拉伸占满 8 行：Fusion 8px 字形内容约占 6.5/8 行，
+                # 直接渲染会偏小/基线偏移；映射铺满后与英文 5x7 视觉高度齐平
+                top = 8
+                bottom = -1
+                for j in range(8):
+                    if r8[j] != 0:
+                        top = min(top, j)
+                        bottom = j
+                if top < bottom and (bottom - top + 1) < 8:
+                    h = bottom - top + 1
+                    stretched = [0] * 8
+                    for j in range(8):
+                        stretched[j] = r8[top + j * h // 8]
+                    r8 = stretched
                 chars[enc] = r8
             in_bitmap = False
         else:
