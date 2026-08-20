@@ -1,8 +1,9 @@
-//! 中文字形（预烘焙 8x8 像素点阵，Fusion Pixel Font 8px，SIL OFL 1.1 开源授权）
+//! 中文字形（预烘焙 12x12 像素点阵，SimSun 宋体 12px 硬边位图）
 //!
-//! 2026-08-20 彻底换路线：抛弃 GDI 运行时动态生成（四轮修复证明该路线必然
-//! 产生压扁/肿胀/混叠/糊块问题）。改用开源手工点阵字体——设计师逐像素优化，
-//! 8x8 下"暴/风/设"等复杂字结构完整。查询 O(log n) 二分查找，跨平台无依赖。
+//! 2026-08-20 换用宋体：Fusion Pixel 8px 黑体在 8x8 容量下笔画粗细不均、
+//! 风格非宋体。SimSun 12px（Windows 系统字体，构建时一次性提取为硬边位图，
+//! 运行时纯查表）——12x12 容量笔画均匀、横细竖粗宋体特征、结构正统。
+//! 查询 O(log n) 二分查找，跨平台无依赖。
 
 use crate::engine::cjk_glyphs::CJK_GLYPHS;
 
@@ -22,9 +23,9 @@ pub fn is_cjk_char(ch: char) -> bool {
         || (0x20000..=0x2A6DF).contains(&cp) // 扩展 B
 }
 
-/// 取中文字形（8x8 点阵，行主序每行 1 字节，bit7=左侧）。
+/// 取中文字形（12x12 点阵，行主序每行 u16 低 12 位，bit11=左侧）。
 /// 查表（二分查找）；表外字符返回 None（渲染回退 '?'）。
-pub fn glyph(ch: char) -> Option<[u8; 8]> {
+pub fn glyph(ch: char) -> Option<[u16; 12]> {
     if !is_cjk_char(ch) {
         return None;
     }
@@ -46,12 +47,13 @@ mod tests {
         // 复杂字（历史糊块重灾区）全部可查且笔画充分
         for ch in ['中', '风', '暴', '设', '歼', '灭', '敌', '人', '连', '发'] {
             let rows = glyph(ch).unwrap_or_else(|| panic!("{} 应有点阵", ch));
+            assert_eq!(rows.len(), 12, "12x12 字形应为 12 行");
             let filled_rows = rows.iter().filter(|b| **b != 0).count();
-            let filled_cols = (0..8)
-                .filter(|i| rows.iter().any(|b| (b >> (7 - i)) & 1 == 1))
+            let filled_cols = (0..12)
+                .filter(|i| rows.iter().any(|b| (b >> (11 - i)) & 1 == 1))
                 .count();
             assert!(
-                filled_rows >= 5 && filled_cols >= 5,
+                filled_rows >= 8 && filled_cols >= 8,
                 "{} 字形过稀疏（rows={} cols={}）：{:?}",
                 ch,
                 filled_rows,
