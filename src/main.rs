@@ -128,6 +128,9 @@ struct GameApp {
     perf_log: Option<perf_log::PerfLog>,
     /// 命令输入窗口是否打开（Enter 开关，Minecraft 风格左下角输入框）
     command_open: bool,
+    /// 枪械检视模式（RV3D_INSPECT=武器编号 1-35）：只展示枪模，Orbit 相机拖拽查看
+    inspect_weapon: Option<usize>,
+    inspect_armed: bool,
     /// 命令输入缓冲（当前只接受数字，回车切换武器）
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
@@ -203,6 +206,26 @@ impl GameApp {
             particles: Vec::new(),
             perf_log: None,
             command_open: false,
+            // 检视模式：--inspect=N 或 --inspect N 命令行参数优先，其次 RV3D_INSPECT 环境变量
+            inspect_weapon: {
+                let mut args = std::env::args().skip(1);
+                let mut parsed: Option<usize> = None;
+                while let Some(a) = args.next() {
+                    if let Some(v) = a.strip_prefix("--inspect=") {
+                        parsed = v.parse().ok();
+                    } else if a == "--inspect" {
+                        parsed = args.next().and_then(|v| v.parse().ok());
+                    }
+                }
+                parsed
+                    .or_else(|| {
+                        std::env::var("RV3D_INSPECT")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok())
+                    })
+                    .filter(|&n| (1..=35).contains(&n))
+            },
+            inspect_armed: false,
             command_buf: String::new(),
             gun_mesh_cache: None,
             switch_weapon_at: None,
@@ -211,6 +234,24 @@ impl GameApp {
 
     /// 更新逻辑（每帧调用）
     fn update(&mut self) {
+        // 枪械检视模式：不跑游戏逻辑，仅 Orbit 相机绕枪模（鼠标拖拽旋转/滚轮缩放，
+        // 事件处理已有 orbit 控制）；首次进入设置相机朝向。
+        if self.inspect_weapon.is_some() {
+            self.camera.mode = CameraMode::Orbit;
+            if !self.inspect_armed {
+                self.inspect_armed = true;
+                self.camera.target = glam::Vec3::new(0.0, 1.0, 0.0);
+                self.camera.yaw = 0.6;
+                self.camera.pitch = 0.15;
+                self.camera.distance = 0.9;
+                self.camera.fov = 45.0_f32.to_radians();
+                log::info!(
+                    "inspect: 枪械检视模式（武器 #{}）——拖拽旋转 / 滚轮缩放",
+                    self.inspect_weapon.unwrap()
+                );
+            }
+            return;
+        }
         // RV3D_AUTOSTART=1：测试用自动开始（绕过键盘，进 Playing 复现/冒烟）
         use std::sync::atomic::{AtomicBool, Ordering};
         static AUTO_STARTED: AtomicBool = AtomicBool::new(false);
@@ -572,6 +613,34 @@ impl GameApp {
     /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
     fn first_person_gun_mesh(&mut self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
+        // 检视模式：枪模放世界原点上方（居中），Orbit 相机绕其旋转查看
+        if let Some(n) = self.inspect_weapon {
+            let key = crate::engine::weapon_data::spec_by_number(n)
+                .map(|s| s.key)
+                .unwrap_or("ak12m");
+            if let Some(gm) = crate::engine::guns::gun_mesh_by_key(key) {
+                // 居中：bbox 中心移到 (0, 1.0, 0)
+                let mut c = [0.0f32; 3];
+                for v in &gm.verts {
+                    for (i, p) in v.pos.iter().enumerate() {
+                        c[i] += *p;
+                    }
+                }
+                let nv = gm.verts.len().max(1) as f32;
+                let c = [c[0] / nv, c[1] / nv, c[2] / nv];
+                let verts: Vec<crate::engine::meshgen::GVertex> = gm
+                    .verts
+                    .iter()
+                    .map(|v| crate::engine::meshgen::GVertex {
+                        pos: [v.pos[0] - c[0], v.pos[1] - c[1] + 1.0, v.pos[2] - c[2]],
+                        normal: v.normal,
+                        uv: v.uv,
+                        color: v.color,
+                    })
+                    .collect();
+                return (verts, gm.indices.clone());
+            }
+        }
         // 当前武器枪模：按键名取模（构建含光照烘焙，缓存避免每帧重建）。
         // 优雅回退：无网格 / 构建 panic → 记录日志并回退默认 HK416。
         let key = self.game.active_weapon_key();
@@ -830,7 +899,12 @@ impl GameApp {
 
             // HUD：用上一帧渲染统计生成覆盖层 quad 并上传（首帧统计为 0）
             let (near, far, lod) = renderer.last_stats();
-            let mut quads = self.game.hud_quads(near, far, lod);
+            // 检视模式：无游戏 HUD（纯枪模检视画面）
+            let mut quads = if self.inspect_weapon.is_some() {
+                Vec::new()
+            } else {
+                self.game.hud_quads(near, far, lod)
+            };
             // 命令输入窗口（Minecraft 风格左下角）：深色半透明底 + 提示符 + 闪烁光标
             if self.command_open && self.game.state() == GameState::Playing {
                 let s = self.game.hud.ui_scale();
