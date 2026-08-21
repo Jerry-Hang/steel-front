@@ -29,7 +29,7 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u;
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
 // 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×1024：
 // 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
@@ -76,7 +76,7 @@ fn vs_main(
     }
     // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+64+3072+64）：
     // 走 marker 纯色路径（flat=1），避免被地面纹理 0.75 混合 → 枪模隐形（2026-08-16）
-    if (instance_index == 68737u) {
+    if (instance_index == 69697u) {
         output.flat_flag = 1.0;
         output.fade = 1.0;
     }
@@ -327,7 +327,7 @@ struct Instance {
 // EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+3072=68673（NPC 三几何区：盒/圆柱/球，各 1024）
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 64u;
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u;
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 
 // 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
@@ -604,7 +604,9 @@ fn mesh_main(
     }
 
     // 近档立方体 / 远档十字双 quad：与 CPU 近/远分档同一阈值（全 3D 距离²）
-    if (dist2 < camera.cam_pos.w) {
+    // 障碍 marker 槽恒用立方体（远距十字 quad 俯视是"方块贴图+缝隙"，用户反馈的边界方块感）
+    let is_marker = slot >= MARKER_INSTANCE_BASE && slot < NPC_INSTANCE_BASE;
+    if (is_marker || dist2 < camera.cam_pos.w) {
         if (lid < 24u) {
             write_vertex(lid, CUBE_POS[lid], CUBE_UV[lid], inst, cam, fade, flat, is_gun, false);
         }

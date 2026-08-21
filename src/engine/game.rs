@@ -380,19 +380,53 @@ fn obstacle_max_hp(kind: ObstacleKind) -> f32 {
     }
 }
 
-/// 程序化地图上的静态障碍盒（AABB：世界坐标中心 + x/z 半尺寸，贴地高度 MAP_BLOCK_HEIGHT）
+/// 地图静态障碍盒（AABB：世界坐标中心 (x, y, z) + 半尺寸 half_w/half_h/half_d）。
+/// 贴地障碍 y = half_h；城市建筑/树冠可抬升 y（如树冠 3.4m）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MapObstacle {
     pub x: f32,
     pub z: f32,
     pub half_w: f32,
     pub half_d: f32,
+    /// 盒中心高度（米；贴地障碍 = half_h）
+    pub y: f32,
+    /// 半高（米；贴地障碍默认 1.2 = 原 MAP_BLOCK_HEIGHT/2）
+    pub half_h: f32,
     /// 障碍种类（第一关全部为 Wall；主题轮换见 theme_for_level）
     pub kind: ObstacleKind,
+    /// 材质 tint 覆盖（城市手绘地图用：消防栓红/树冠绿/玻璃蓝等；None = 按种类默认色）
+    pub tint: Option<[f32; 3]>,
     /// 血量上限（按种类，见 obstacle_max_hp）
     pub max_hp: f32,
     /// 当前血量（归 0 → 摧毁：从物理刚体/AI 网格/渲染 marker 中移除）
     pub hp: f32,
+}
+
+impl MapObstacle {
+    /// 贴地障碍构造（y = half_h = 1.2，tint = 种类默认）
+    pub fn new(kind: ObstacleKind, x: f32, z: f32, half_w: f32, half_d: f32) -> Self {
+        let max_hp = obstacle_max_hp(kind);
+        MapObstacle {
+            x,
+            z,
+            half_w,
+            half_d,
+            y: MAP_BLOCK_HEIGHT * 0.5,
+            half_h: MAP_BLOCK_HEIGHT * 0.5,
+            kind,
+            tint: None,
+            max_hp,
+            hp: max_hp,
+        }
+    }
+
+    /// 指定半高/中心高/tint（城市手绘布局用）
+    pub fn shaped(mut self, half_h: f32, y: f32, tint: Option<[f32; 3]>) -> Self {
+        self.half_h = half_h;
+        self.y = y;
+        self.tint = tint;
+        self
+    }
 }
 
 /// 程序化关卡布局：确定性（种子 = 关卡号），障碍全部位于中央安全环带之外
@@ -603,7 +637,6 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
     let style = kind_style(theme.kind);
     let mut obstacles: Vec<MapObstacle> = Vec::new();
     let tau = std::f32::consts::TAU;
-    let hp = obstacle_max_hp(theme.kind);
     for _ in 0..clusters {
         // 每簇 style 范围内个盒子，沿切线方向并排成墙/块
         let n_boxes = style.min_boxes as usize
@@ -623,15 +656,7 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
         let tz = dir.0;
         for i in 0..n_boxes {
             let off = (i as f32 - (n_boxes as f32 - 1.0) * 0.5) * (half_w * 2.0 + gap);
-            let mut ob = MapObstacle {
-                x: cx + tx * off,
-                z: cz + tz * off,
-                half_w,
-                half_d,
-                kind: theme.kind,
-                max_hp: hp,
-                hp,
-            };
+            let mut ob = MapObstacle::new(theme.kind, cx + tx * off, cz + tz * off, half_w, half_d);
             // 冲突检测 + 抖动重试：先径向推出安全环，再与已有障碍查重叠；
             // 重叠则小幅随机移位（最多 8 次），保证放置后同时满足安全环与非重叠约束
             let mut placed = false;
@@ -677,18 +702,9 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
         let cx = dirx * dist;
         let cz = dirz * dist;
         let (tx, tz) = (-dirz, dirx);
-        let hp = obstacle_max_hp(kind);
         for i in 0..n_boxes {
             let off = (i as f32 - (n_boxes as f32 - 1.0) * 0.5) * (half_w * 2.0 + style.gap);
-            let ob = MapObstacle {
-                x: cx + tx * off,
-                z: cz + tz * off,
-                half_w,
-                half_d,
-                kind,
-                max_hp: hp,
-                hp,
-            };
+            let ob = MapObstacle::new(kind, cx + tx * off, cz + tz * off, half_w, half_d);
             let mut placed = true;
             for o in &obstacles {
                 if (ob.x - o.x).abs() < ob.half_w + o.half_w
@@ -1325,21 +1341,31 @@ impl Game {
                 let (kind, x, z, half_w, half_d) =
                     crate::engine::map::obstacle_to_map_obstacle(def);
                 let max_hp = obstacle_max_hp(kind);
+                // TOML 障碍贴地：y = half_h = 1.2（def.y 仅作提示位，实际贴地渲染）
                 obstacles.push(MapObstacle {
                     x,
                     z,
                     half_w,
                     half_d,
+                    y: 1.2,
+                    half_h: 1.2,
                     kind,
+                    tint: None,
                     max_hp,
                     hp: max_hp,
                 });
             }
             self.map = LevelMap { obstacles };
         } else {
-            // 地图生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core），
+            // 地图：默认手绘现代城市（不再随机种子生成；RV3D_PROC_MAP=1 回退程序化生成用于 A/B）
+            // 生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core / 小核），
             // 生成计算不吃主线程所在簇；join 语义保证返回时地图已就绪。
-            self.map = crate::engine::cpu::ai_pool().run_sync(move || generate_level_map(level));
+            if std::env::var("RV3D_PROC_MAP").as_deref() == Ok("1") {
+                self.map =
+                    crate::engine::cpu::ai_pool().run_sync(move || generate_level_map(level));
+            } else {
+                self.map = crate::engine::city::generate_city();
+            }
         }
         // 任务目标：普通波次 = 本关 WAVES_PER_LEVEL 波出场总数（含援军）；
         // 压力模式 = 歼灭一队即本轮胜利（spawn_stress_battle 每轮重置）
@@ -1357,8 +1383,8 @@ impl Game {
         self.world.spheres.clear();
         for ob in &self.map.obstacles {
             self.world.bodies.push(Body::new(
-                Pv::new(ob.x, MAP_BLOCK_HEIGHT * 0.5, ob.z),
-                Pv::new(ob.half_w, MAP_BLOCK_HEIGHT * 0.5, ob.half_d),
+                Pv::new(ob.x, ob.y, ob.z),
+                Pv::new(ob.half_w, ob.half_h, ob.half_d),
             ));
         }
         // AI 网格：障碍盒覆盖的格全部标记阻挡（NPC 寻路绕行 / 掩体点判定共用同一网格）
@@ -5424,24 +5450,8 @@ mod tests {
     fn explosion_damages_obstacles_in_radius() {
         let mut game = Game::new();
         // 注入两个障碍：一个 Barrier（100HP，爆心可摧毁）在（0,0），一个在远处（50,50）
-        game.map.obstacles.push(MapObstacle {
-            x: 0.0,
-            z: 0.0,
-            half_w: 1.0,
-            half_d: 1.0,
-            kind: ObstacleKind::Barrier,
-            max_hp: 100.0,
-            hp: 100.0,
-        });
-        game.map.obstacles.push(MapObstacle {
-            x: 50.0,
-            z: 50.0,
-            half_w: 1.0,
-            half_d: 1.0,
-            kind: ObstacleKind::Wall,
-            max_hp: 150.0,
-            hp: 150.0,
-        });
+        game.map.obstacles.push(MapObstacle::new(ObstacleKind::Barrier, 0.0, 0.0, 1.0, 1.0));
+        game.map.obstacles.push(MapObstacle::new(ObstacleKind::Wall, 50.0, 50.0, 1.0, 1.0));
         let before = game.map.obstacles.len();
         game.spawn_explosion([0.0, 1.0, 0.0], 8.0, 120.0, true);
         // 爆心 Barrier（100HP）被 120×1.0×fall(1.0)=120 伤摧毁（Game::new 含场景装饰，
@@ -5864,15 +5874,7 @@ mod tests {
         game.stress = true;
         // 构造一个障碍（墙）：在 (0,0) 位置放一个 MapObstacle → 网格会 block 该格
         // 用 street_fight 式的墙：x=0,z=0,half_w=5,half_d=0.5 → 格 (0,0) 及邻域 blocked
-        let ob = MapObstacle {
-            x: 0.0,
-            z: 0.0,
-            half_w: 5.0,
-            half_d: 0.5,
-            kind: ObstacleKind::Wall,
-            max_hp: 150.0,
-            hp: 150.0,
-        };
+        let ob = MapObstacle::new(ObstacleKind::Wall, 0.0, 0.0, 5.0, 0.5);
         game.map.obstacles.push(ob);
         // 重建网格（把障碍格 block）
         let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
@@ -6038,15 +6040,7 @@ mod tests {
     #[test]
     fn attack_cover_picks_ring_band_shielding_cover() {
         let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
-        let obstacles = vec![MapObstacle {
-            x: 60.0,
-            z: 0.0,
-            half_w: 3.0,
-            half_d: 3.0,
-            kind: ObstacleKind::Wall,
-            max_hp: 150.0,
-            hp: 150.0,
-        }];
+        let obstacles = vec![MapObstacle::new(ObstacleKind::Wall, 60.0, 0.0, 3.0, 3.0)];
         for ob in &obstacles {
             let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
             let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);

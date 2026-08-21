@@ -179,11 +179,11 @@ const TERRAIN_UV_SCALE: f32 = 32.0; // uv 铺 0..16 重复采样
 /// （旧版实例场与地形几乎共面，远档顶面被深度测试剔除、只剩侧壁可见）。
 const TERRAIN_RENDER_SINK: f32 = 0.35;
 /// 程序化地形平坦半径（米）：覆盖中央 60×60 安全区、障碍环带 58–130m 与两军接火区
-const TERRAIN_FLAT_RADIUS: f32 = 140.0;
+const TERRAIN_FLAT_RADIUS: f32 = 230.0; // 城市占地 ±215 需平地（2026-08-21 城市地图）
 /// 平坦区外丘陵最大抬升（米，平滑抬升 × 噪声幅值，恒 ≤ 本常量）
 const TERRAIN_HILL_AMPLITUDE: f32 = 15.0;
 /// 丘陵抬升过渡带宽（米）：半径 140 → 320 内 smoothstep 从 0 升到满幅（起点斜率 0）
-const TERRAIN_HILL_RAMP: f32 = 180.0;
+const TERRAIN_HILL_RAMP: f32 = 130.0;
 /// 值噪声格距（米）：格距越大丘陵越平缓（低频滚动丘陵，LOD morph 无突兀）
 const TERRAIN_HILL_CELL: f32 = 128.0;
 
@@ -435,7 +435,7 @@ fn terrain_coarse_height(x: f32, z: f32, coarse: &[f32], coarse_cells: usize) ->
 const GRID_SIZE: u32 = 256;
 const INSTANCE_COUNT: u32 = GRID_SIZE * GRID_SIZE;
 /// 世界障碍 marker 上限（程序化地图每关障碍盒数远小于此；同时决定实例 buffer 的额外容量）
-const MAX_MARKER_INSTANCES: u32 = 64;
+const MAX_MARKER_INSTANCES: u32 = 1024;
 /// marker 在实例 buffer 中的起始 slot：跳过 0..=INSTANCE_COUNT。
 ///
 /// slot 65536 是地形 identity（shader 硬编码 TERRAIN_INSTANCE_INDEX=65536 读取，
@@ -488,13 +488,16 @@ impl WorldMarker {
     /// 各有可辨识材质色；同一种类的相邻盒子明度/色相 ±6% 抖动，形成砖缝/板纹颗粒感。
     pub fn for_obstacle(ob: &MapObstacle) -> Self {
         WorldMarker {
-            model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, 1.2, ob.z))
+            model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, ob.y, ob.z))
                 * glam::Mat4::from_scale(glam::Vec3::new(
                     ob.half_w * 2.0,
-                    2.4,
+                    ob.half_h * 2.0,
                     ob.half_d * 2.0,
                 )),
-            tint: obstacle_material_tint(ob.kind, ob.x, ob.z),
+            tint: match ob.tint {
+                Some(c) => [c[0], c[1], c[2], 1.0],
+                None => obstacle_material_tint(ob.kind, ob.x, ob.z),
+            },
         }
     }
 }
@@ -3973,9 +3976,9 @@ impl Renderer {
             }
             return (count, 0);
         }
-        // 近/远档分界距离随画质预设变化（Medium 与原 LOD_DISTANCE 一致）
-        let near_sq = quality_params(self.quality).instance_lod_distance;
-        let near_sq = near_sq * near_sq;
+        // 近/远档分界距离随画质预设变化（Medium 与原 LOD_DISTANCE 一致）。
+        // 障碍 marker 恒走近档立方体：远档十字 quad 俯视呈"方块贴图+缝隙"（用户反馈）。
+        let near_sq = f32::MAX;
         let mut near_count = 0u32;
         // 近档先写（base..base+near-1），远档紧随（base+near..），两遍遍历避免槽位交错
         for inst in &self.markers {
@@ -5383,7 +5386,7 @@ impl Renderer {
             (
                 size,
                 size,
-                super::procedural::generate_default_ground_texture(&height_at),
+                super::procedural::generate_city_ground_texture(size, &height_at),
             )
         } else {
             let texture_path = "assets/textures/test.png";
@@ -6304,7 +6307,8 @@ impl Renderer {
                     float32: if self.void_mode {
                         [1.0, 1.0, 1.0, 1.0] // 检视模式：白色背景，便于对比透视
                     } else {
-                        [0.1, 0.1, 0.15, 1.0]
+                        // 白天天空（线性 RGB → sRGB 约浅蓝）；城市地图配套（2026-08-21）
+                        [0.24, 0.36, 0.60, 1.0]
                     },
                 },
             },

@@ -185,6 +185,12 @@ impl Camera {
         self.fp_pos = pos;
     }
 
+    /// 设置飞行模式位置（调试机位 RV3D_CAM 用）
+    pub fn set_flight_pos(&mut self, pos: Vec3) {
+        self.flight_pos = pos;
+        self.move_vel = Vec3::ZERO;
+    }
+
     /// 设置鼠标灵敏度（弧度/像素，设置面板用；clamp 到 [0.0005, 0.02]）
     pub fn set_mouse_sens(&mut self, sens: f32) {
         self.mouse_sens = sens.clamp(0.0005, 0.02);

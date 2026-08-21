@@ -132,6 +132,8 @@ struct GameApp {
     inspect_weapon: Option<usize>,
     inspect_armed: bool,
     cam_logged: bool,
+    /// RV3D_CAM 调试机位（飞行模式固定位姿；地图/场景检查用）
+    cam_override: Option<(glam::Vec3, f32, f32)>,
     /// 命令输入缓冲（当前只接受数字，回车切换武器）
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
@@ -228,6 +230,23 @@ impl GameApp {
             },
             inspect_armed: false,
             cam_logged: false,
+            cam_override: std::env::var("RV3D_CAM").ok().and_then(|s| {
+                let mut it = s.split(':');
+                let _mode = it.next()?; // 模式标记（fly）
+                let pos = it.next()?.trim();
+                let rot = it.next()?.trim();
+                let p: Vec<f32> = pos.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                let r: Vec<f32> = rot.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                if p.len() == 3 && r.len() == 2 {
+                    Some((
+                        glam::Vec3::new(p[0], p[1], p[2]),
+                        r[0].to_radians(),
+                        r[1].to_radians(),
+                    ))
+                } else {
+                    None
+                }
+            }),
             command_buf: String::new(),
             gun_mesh_cache: None,
             switch_weapon_at: None,
@@ -236,6 +255,17 @@ impl GameApp {
 
     /// 更新逻辑（每帧调用）
     fn update(&mut self) {
+        // RV3D_CAM=fly:x,y,z:yaw_deg,pitch_deg：调试固定机位（地图/场景检查用）
+        if self.cam_override.is_some() {
+            self.camera.mode = CameraMode::Flight;
+            if let Some((p, yaw, pitch)) = self.cam_override {
+                log::info!("cam-override: pos=({:.1},{:.1},{:.1}) yaw={:.1} pitch={:.1}", p.x, p.y, p.z, yaw.to_degrees(), pitch.to_degrees());
+                self.camera.set_flight_pos(p);
+                self.camera.yaw = yaw;
+                self.camera.pitch = pitch;
+            }
+            return;
+        }
         // 枪械检视模式：不跑游戏逻辑，仅 Orbit 相机绕枪模（鼠标拖拽旋转/滚轮缩放，
         // 事件处理已有 orbit 控制）；首次进入设置相机朝向。
         if self.inspect_weapon.is_some() {

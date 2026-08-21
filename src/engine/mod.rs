@@ -13,6 +13,7 @@
 
 pub mod ai;
 pub mod camera;
+pub mod city;
 #[cfg(windows)]
 pub mod cjk_glyphs;
 pub mod font_cjk;

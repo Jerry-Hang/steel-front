@@ -15,8 +15,8 @@
 /// 必须与 `build.rs` 片元着色器里 world-space UV 的分母/偏移保持一致。
 pub const WORLD_HALF: f32 = 256.0;
 
-/// 默认纹理边长（覆盖 512×512 米，约 1 米/texel）。
-pub const GROUND_TEXTURE_SIZE: u32 = 512;
+/// 默认纹理边长（覆盖 512×512 米，约 0.5 米/texel；城市布局细节可辨识）。
+pub const GROUND_TEXTURE_SIZE: u32 = 1024;
 
 /// 太阳方向（表面→光源），与 `game.rs::light_uniform` 的 `sun.direction` 一致。
 const SUN_DIR: [f32; 3] = [-0.4, 0.9, -0.3];
@@ -117,6 +117,7 @@ fn linear_to_srgb(c: f32) -> f32 {
 // ============================================================
 
 /// 弹坑焦土遮罩：24m 格点上确定性散布的圆形焦土斑（模拟炮击/爆炸痕迹）
+#[allow(dead_code)] // 旧程序化纹理 A/B 保留
 fn crater_mask(x: f32, z: f32, seed: u32) -> f32 {
     let cell = 24.0;
     let ix = (x / cell).floor() as i32;
@@ -148,6 +149,7 @@ fn crater_mask(x: f32, z: f32, seed: u32) -> f32 {
 }
 
 /// 地面材质基色（RGB，线性空间近似，写入 sRGB 纹理由硬件解释）
+#[allow(dead_code)] // 旧程序化纹理 A/B 保留
 fn ground_material(x: f32, z: f32, seed: u32) -> [f32; 3] {
     // 大尺度地貌分域（~120m 尺度，地图 512m 内形成约 4 个草地/沙土/石板大区）
     let biome = value_noise(x, z, 120.0, seed.wrapping_add(20)) * 0.7
@@ -231,6 +233,7 @@ fn baked_light(x: f32, z: f32, height_at: &dyn Fn(f32, f32) -> f32) -> f32 {
 ///
 /// `height_at` 为地形高度采样器（renderer 传入 `terrain_height`），用于烘焙 AO 与天光。
 /// 结果确定性：相同 `size`/`seed`/`height_at` 恒同输出。
+#[allow(dead_code)] // 旧程序化纹理 A/B 保留
 pub fn generate_ground_texture(
     size: u32,
     height_at: &dyn Fn(f32, f32) -> f32,
@@ -262,10 +265,106 @@ pub fn generate_ground_texture(
 }
 
 /// 默认参数生成（测试与 renderer 共用）。
+#[allow(dead_code)] // 旧程序化纹理 A/B 保留
 pub fn generate_default_ground_texture(
     height_at: &dyn Fn(f32, f32) -> f32,
 ) -> Vec<u8> {
     generate_ground_texture(GROUND_TEXTURE_SIZE, height_at, DEFAULT_SEED)
+}
+
+/// 城市分区基色（与 city::ground_zone 严格同源；色值线性 RGB）
+fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
+    match zone {
+        2 => {
+            // 沥青：暗灰 + 细噪 + 黄色中线
+            let speck = value_noise(x, z, 0.9, seed.wrapping_add(60)) * 0.14;
+            let mut c = [0.155 + speck, 0.16 + speck, 0.17 + speck];
+            let fx = (x / crate::engine::city::STREET_EVERY).round();
+            let fz = (z / crate::engine::city::STREET_EVERY).round();
+            let dx = (x - fx * crate::engine::city::STREET_EVERY).abs();
+            let dz = (z - fz * crate::engine::city::STREET_EVERY).abs();
+            if dx < 0.3 || dz < 0.3 {
+                c = [0.72, 0.62, 0.14]; // 黄色中线
+            } else if (dx > 4.4 && dx < 4.75) || (dz > 4.4 && dz < 4.75) {
+                c = [0.30, 0.30, 0.31]; // 路缘磨损条
+            }
+            c
+        }
+        3 => {
+            // 人行道：浅灰板 + 2m 分缝
+            let base = [0.46, 0.45, 0.44];
+            let sx = x.rem_euclid(2.0);
+            let sz = z.rem_euclid(2.0);
+            if sx < 0.14 || sz < 0.14 {
+                [0.36, 0.35, 0.35]
+            } else {
+                base
+            }
+        }
+        4 => {
+            // 广场铺装：米灰板 + 4m 分缝
+            let base = [0.52, 0.50, 0.47];
+            let sx = x.rem_euclid(4.0);
+            let sz = z.rem_euclid(4.0);
+            if sx < 0.18 || sz < 0.18 {
+                [0.42, 0.40, 0.38]
+            } else {
+                base
+            }
+        }
+        5 => {
+            // 建筑地基：深混凝土
+            let speck = value_noise(x, z, 1.6, seed.wrapping_add(61)) * 0.08;
+            [0.33 + speck, 0.32 + speck, 0.31 + speck]
+        }
+        1 => {
+            // 沙土
+            let d = value_noise(x, z, 4.0, seed.wrapping_add(62)) * 0.5
+                + value_noise(x, z, 1.2, seed.wrapping_add(63)) * 0.5;
+            let k = 1.0 + d * 0.22;
+            [0.60 * k, 0.48 * k, 0.27 * k]
+        }
+        _ => {
+            // 草地：绿 + 双频抖动 + 斑驳
+            let d = value_noise(x, z, 3.2, seed.wrapping_add(64)) * 0.6
+                + value_noise(x, z, 0.9, seed.wrapping_add(65)) * 0.4;
+            let k = 1.0 + d * 0.24;
+            let patch = value_noise(x, z, 9.0, seed.wrapping_add(66));
+            let mut c = [0.165 * k, 0.38 * k, 0.115 * k];
+            if patch > 0.35 {
+                // 干草斑
+                c = [c[0] * 1.25, c[1] * 1.18, c[2] * 0.85];
+            }
+            c
+        }
+    }
+}
+
+/// 生成城市地面纹理（与 city::generate_city 布局同源）：
+/// 沥青街道（含黄色中线/路缘）、人行道分缝、广场铺装、建筑地基、草地/沙土分域。
+pub fn generate_city_ground_texture(
+    size: u32,
+    height_at: &dyn Fn(f32, f32) -> f32,
+) -> Vec<u8> {
+    let mut out = vec![0u8; (size as usize) * (size as usize) * 4];
+    let scale = 2.0 * WORLD_HALF / size as f32;
+    for py in 0..size {
+        let z = -WORLD_HALF + (py as f32 + 0.5) * scale;
+        for px in 0..size {
+            let x = -WORLD_HALF + (px as f32 + 0.5) * scale;
+            let zone = crate::engine::city::ground_zone(x, z);
+            let mat = city_zone_color(zone, x, z, DEFAULT_SEED);
+            let ao = heightfield_ao(x, z, height_at);
+            let light = baked_light(x, z, height_at);
+            let shade = ao * light;
+            let idx = ((py * size + px) * 4) as usize;
+            out[idx] = (linear_to_srgb(mat[0] * shade) * 255.0).round() as u8;
+            out[idx + 1] = (linear_to_srgb(mat[1] * shade) * 255.0).round() as u8;
+            out[idx + 2] = (linear_to_srgb(mat[2] * shade) * 255.0).round() as u8;
+            out[idx + 3] = 255;
+        }
+    }
+    out
 }
 
 // ============================================================
