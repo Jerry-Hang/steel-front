@@ -3,60 +3,72 @@ use crate::engine::guns::{assemble, GunMesh, rz};
 use glam::Mat4;
 use std::f32::consts::FRAC_PI_2;
 
-// ===== AK-12M 风暴：AK系，厚实长护木，30发弧形弹匣，折叠聚合物托，铁瞄+表尺 =====
+// ===== AK-12M (5.45x39): black polymer, long handguard + rail, curved 30rd mag,
+//       skeleton folding stock. Stations: stock rear -0.542, receiver -0.30..+0.06,
+//       handguard +0.06..+0.21, muzzle brake +0.30..+0.362 (total ~0.90m).
+//       2026-08-19 rebuild: fixed gaps (mag/grip/stock were floating), magazine curve
+//       now sweeps forward like the real AK, stock connects to receiver rear.
 pub fn ak12m() -> crate::engine::guns::GunMesh {
     let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let rx = |a: f32| Mat4::from_rotation_x(a);
     let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
+    let steel = [0.34, 0.36, 0.40];
+    let black = [0.17, 0.18, 0.20];
+    let dark = [0.11, 0.12, 0.13];
+    let magc = [0.13, 0.105, 0.085];
     let parts = vec![
-        // 机匣：厚实长圆角盒（深钢）
-        (t(0.0, 0.0825, -0.02), beveled_box(0.065, 0.075, 0.28, 0.012, 3), [0.30, 0.33, 0.37]),
-        // 机匣顶部导轨（黑聚合）
-        (t(0.0, 0.133, 0.0), beveled_box(0.03, 0.016, 0.24, 0.006, 3), [0.16, 0.17, 0.19]),
-        // 枪管：粗（深钢）
-        (t(0.0, 0.045, 0.27) * rz(), cylinder(0.015, 0.30, 16), [0.30, 0.33, 0.37]),
-        // 护木：厚实长护木，包住枪管（黑聚合）
-        (t(0.0, 0.04, 0.21), beveled_box(0.06, 0.06, 0.24, 0.012, 3), [0.16, 0.17, 0.19]),
-        // 导气管：粗圆柱（深钢）
-        (t(0.0, 0.085, 0.21) * rz(), cylinder(0.012, 0.24, 16), [0.30, 0.33, 0.37]),
-        // 导气箍（深钢）
-        (t(0.0, 0.075, 0.33), beveled_box(0.034, 0.055, 0.04, 0.01, 3), [0.30, 0.33, 0.37]),
-        // 准星（深钢）
-        (t(0.0, 0.0675, 0.385), beveled_box(0.022, 0.045, 0.016, 0.006, 3), [0.30, 0.33, 0.37]),
-        // 表尺（深钢）
-        (t(0.0, 0.152, 0.10), beveled_box(0.026, 0.035, 0.055, 0.008, 3), [0.30, 0.33, 0.37]),
-        // 拉机柄（黑聚合）
-        (rh(0.0525, 0.098, 0.045), cylinder(0.0065, 0.04, 10), [0.16, 0.17, 0.19]),
-        // 抛壳窗盖（深黑）
-        (t(0.0375, 0.09, 0.02), beveled_box(0.055, 0.04, 0.035, 0.005, 3), [0.10, 0.10, 0.12]),
-        // 30发弧形弹匣：上段（深黑）
-        (t(0.0, -0.045, -0.055) * rx(0.08), beveled_box(0.046, 0.13, 0.062, 0.012, 3), [0.10, 0.10, 0.12]),
-        // 30发弧形弹匣：下段错位微倾（深黑）
-        (t(0.0, -0.135, -0.095) * rx(0.22), beveled_box(0.044, 0.11, 0.058, 0.012, 3), [0.10, 0.10, 0.12]),
-        // 弹匣底板（深钢）
-        (t(0.0, -0.195, -0.11) * rx(0.22), beveled_box(0.046, 0.022, 0.062, 0.008, 3), [0.30, 0.33, 0.37]),
-        // 扳机护圈：左立柱（黑聚合）
-        (t(-0.0235, 0.005, -0.085), beveled_box(0.013, 0.08, 0.013, 0.005, 3), [0.16, 0.17, 0.19]),
-        // 扳机护圈：右立柱（黑聚合）
-        (t(0.0235, 0.005, -0.085), beveled_box(0.013, 0.08, 0.013, 0.005, 3), [0.16, 0.17, 0.19]),
-        // 扳机护圈：底梁（黑聚合）
-        (t(0.0, -0.04, -0.085), beveled_box(0.06, 0.014, 0.014, 0.005, 3), [0.16, 0.17, 0.19]),
-        // 扳机（深黑）
-        (t(0.0, -0.022, -0.088) * rx(0.12), beveled_box(0.017, 0.04, 0.01, 0.004, 4), [0.10, 0.10, 0.12]),
-        // 握把：粗斜（黑聚合）
-        (t(0.0, -0.075, -0.118) * rx(0.18), beveled_box(0.046, 0.14, 0.055, 0.014, 3), [0.16, 0.17, 0.19]),
-        // 折叠聚合物托：主托板（黑聚合）
-        (t(0.0, 0.078, -0.33), beveled_box(0.058, 0.115, 0.09, 0.016, 3), [0.16, 0.17, 0.19]),
-        // 折叠托连杆 x2（深钢）
-        (t(-0.021, 0.075, -0.255) * rz(), cylinder(0.008, 0.14, 10), [0.30, 0.33, 0.37]),
-        (t(0.021, 0.075, -0.255) * rz(), cylinder(0.008, 0.14, 10), [0.30, 0.33, 0.37]),
-        // 枪口制退器：粗筒锥台（亮钢）
-        (t(0.0, 0.045, 0.45) * rz(), frustum(0.016, 0.021, 0.06, 16, true), [0.62, 0.65, 0.70]),
+        // receiver (black polymer): z -0.30..+0.06, y 0.04..0.11
+        (t(0.0, 0.075, -0.12), beveled_box(0.064, 0.070, 0.36, 0.014, 3), black),
+        // top rail: runs receiver rear over handguard front
+        (t(0.0, 0.117, -0.035), beveled_box(0.030, 0.014, 0.49, 0.005, 3), dark),
+        // rear trunnion / stock hinge seat
+        (t(0.0, 0.075, -0.30), beveled_box(0.050, 0.050, 0.05, 0.010, 3), steel),
+        // barrel (z 0.06..0.30)
+        (t(0.0, 0.050, 0.18) * rz(), cylinder(0.014, 0.24, 14), steel),
+        // gas tube (fills gap between handguard top and rail)
+        (t(0.0, 0.100, 0.13) * rz(), cylinder(0.011, 0.14, 12), steel),
+        // handguard
+        (t(0.0, 0.050, 0.135), beveled_box(0.060, 0.080, 0.15, 0.012, 3), black),
+        // handguard front collar
+        (t(0.0, 0.050, 0.206), beveled_box(0.062, 0.084, 0.018, 0.007, 3), black),
+        // gas block
+        (t(0.0, 0.060, 0.230), beveled_box(0.036, 0.050, 0.04, 0.008, 3), steel),
+        // front sight post + guard wings
+        (t(0.0, 0.104, 0.228), beveled_box(0.014, 0.034, 0.014, 0.004, 3), dark),
+        (t(-0.017, 0.102, 0.228), beveled_box(0.006, 0.044, 0.012, 0.002, 3), black),
+        (t(0.017, 0.102, 0.228), beveled_box(0.006, 0.044, 0.012, 0.002, 3), black),
+        // rear sight on rail
+        (t(0.0, 0.128, -0.05), beveled_box(0.024, 0.018, 0.030, 0.005, 3), steel),
+        // charging handle (right side)
+        (rh(0.042, 0.085, -0.14), cylinder(0.0055, 0.032, 10), steel),
+        (rh(0.061, 0.085, -0.14), cylinder(0.009, 0.014, 10), black),
+        // ejection port cover (right side)
+        (t(0.034, 0.082, -0.09), beveled_box(0.008, 0.026, 0.050, 0.003, 3), dark),
+        // curved magazine: 3 segments + floor plate (bottom sweeps forward)
+        (t(0.0, 0.018, -0.130) * rx(-0.15), beveled_box(0.042, 0.075, 0.066, 0.012, 3), magc),
+        (t(0.0, -0.037, -0.118) * rx(-0.35), beveled_box(0.040, 0.075, 0.062, 0.012, 3), magc),
+        (t(0.0, -0.092, -0.086) * rx(-0.55), beveled_box(0.038, 0.075, 0.058, 0.012, 3), magc),
+        (t(0.0, -0.124, -0.064) * rx(-0.60), beveled_box(0.042, 0.020, 0.068, 0.006, 3), dark),
+        // trigger guard: front post, rear post, bottom beam
+        (t(0.0, 0.022, -0.160), beveled_box(0.012, 0.050, 0.012, 0.004, 3), black),
+        (t(0.0, 0.022, -0.225), beveled_box(0.012, 0.050, 0.012, 0.004, 3), black),
+        (t(0.0, 0.000, -0.1925), beveled_box(0.050, 0.012, 0.078, 0.004, 3), black),
+        // trigger
+        (t(0.0, 0.024, -0.185) * rx(0.12), beveled_box(0.012, 0.034, 0.012, 0.004, 3), dark),
+        // pistol grip (raked back, attached to receiver bottom)
+        (t(0.0, -0.012, -0.248) * rx(0.22), beveled_box(0.040, 0.125, 0.052, 0.012, 3), black),
+        // stock: hinge, top strut, rear plate, butt pad, lower strut
+        (t(0.0, 0.075, -0.315), beveled_box(0.048, 0.055, 0.050, 0.010, 3), black),
+        (t(0.0, 0.086, -0.415), beveled_box(0.032, 0.030, 0.170, 0.008, 3), black),
+        (t(0.0, 0.073, -0.505), beveled_box(0.034, 0.100, 0.042, 0.008, 3), black),
+        (t(0.0, 0.070, -0.535), beveled_box(0.038, 0.115, 0.020, 0.006, 3), dark),
+        (t(0.0, 0.036, -0.404) * rx(0.066), beveled_box(0.026, 0.020, 0.160, 0.006, 3), black),
+        // muzzle brake (bright steel)
+        (t(0.0, 0.050, 0.331) * rz(), frustum(0.016, 0.019, 0.062, 16, true), [0.22, 0.23, 0.25]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "AK-12M 风暴", length: 0.86 }
+    GunMesh { verts, indices, display_name: "AK-12M 风暴", length: 0.90 }
 }
-
 // ===== AK-104 短剑：紧凑AK，短粗管+消焰器，弧形弹匣，折叠托 =====
 pub fn ak104() -> crate::engine::guns::GunMesh {
     let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));

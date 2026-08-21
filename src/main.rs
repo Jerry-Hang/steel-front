@@ -131,6 +131,7 @@ struct GameApp {
     /// 枪械检视模式（RV3D_INSPECT=武器编号 1-35）：只展示枪模，Orbit 相机拖拽查看
     inspect_weapon: Option<usize>,
     inspect_armed: bool,
+    cam_logged: bool,
     /// 命令输入缓冲（当前只接受数字，回车切换武器）
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
@@ -226,6 +227,7 @@ impl GameApp {
                     .filter(|&n| (1..=35).contains(&n))
             },
             inspect_armed: false,
+            cam_logged: false,
             command_buf: String::new(),
             gun_mesh_cache: None,
             switch_weapon_at: None,
@@ -241,10 +243,34 @@ impl GameApp {
             if !self.inspect_armed {
                 self.inspect_armed = true;
                 self.camera.target = glam::Vec3::new(0.0, 1.0, 0.0);
-                self.camera.yaw = 0.6;
-                self.camera.pitch = 0.15;
-                self.camera.distance = 0.9;
+                self.camera.yaw = std::f32::consts::FRAC_PI_2; // 正侧视：枪口朝左
+                self.camera.pitch = 0.08;
                 self.camera.fov = 45.0_f32.to_radians();
+                // 自动取景：按枪模包围盒对角线设定距离，保证整枪入画
+                self.camera.distance = 1.2;
+                if let Some(n) = self.inspect_weapon {
+                    if let Some(spec) = crate::engine::weapon_data::spec_by_number(n) {
+                        if let Some(gm) = crate::engine::guns::gun_mesh_by_key(spec.key) {
+                            let mut mn = [f32::MAX; 3];
+                            let mut mx = [f32::MIN; 3];
+                            for v in &gm.verts {
+                                for i in 0..3 {
+                                    mn[i] = mn[i].min(v.pos[i]);
+                                    mx[i] = mx[i].max(v.pos[i]);
+                                }
+                            }
+                            let e = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+                            let diag = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+                            self.camera.distance =
+                                ((diag * 0.5) / (self.camera.fov * 0.5).tan()) * 1.18;
+                            log::info!(
+                                "inspect: bbox=[{:.3},{:.3},{:.3}]..[{:.3},{:.3},{:.3}] ext=[{:.3},{:.3},{:.3}] diag={:.3} dist={:.3}",
+                                mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
+                                e[0], e[1], e[2], diag, self.camera.distance
+                            );
+                        }
+                    }
+                }
                 log::info!(
                     "inspect: 枪械检视模式（武器 #{}）——拖拽旋转 / 滚轮缩放",
                     self.inspect_weapon.unwrap()
@@ -619,15 +645,20 @@ impl GameApp {
                 .map(|s| s.key)
                 .unwrap_or("ak12m");
             if let Some(gm) = crate::engine::guns::gun_mesh_by_key(key) {
-                // 居中：bbox 中心移到 (0, 1.0, 0)
-                let mut c = [0.0f32; 3];
+                // 居中：bbox 中心移到 (0, 1.0, 0)（用包围盒中点，顶点均值会偏向部件密集侧）
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
                 for v in &gm.verts {
-                    for (i, p) in v.pos.iter().enumerate() {
-                        c[i] += *p;
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v.pos[i]);
+                        mx[i] = mx[i].max(v.pos[i]);
                     }
                 }
-                let nv = gm.verts.len().max(1) as f32;
-                let c = [c[0] / nv, c[1] / nv, c[2] / nv];
+                let c = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
                 let verts: Vec<crate::engine::meshgen::GVertex> = gm
                     .verts
                     .iter()
@@ -892,10 +923,23 @@ impl GameApp {
                     s.width.max(1) as f32 / s.height.max(1) as f32
                 })
                 .unwrap_or(16.0 / 9.0);
+            if self.inspect_weapon.is_some() && !self.cam_logged {
+                self.cam_logged = true;
+                log::info!(
+                    "inspect cam: pos=({:.3},{:.3},{:.3}) target=({:.3},{:.3},{:.3}) yaw={:.3} pitch={:.3} dist={:.3} fov={:.3} aspect={:.3}",
+                    self.camera.position().x, self.camera.position().y, self.camera.position().z,
+                    self.camera.target.x, self.camera.target.y, self.camera.target.z,
+                    self.camera.yaw, self.camera.pitch, self.camera.distance,
+                    self.camera.fov.to_degrees(), aspect
+                );
+            }
             let view = self.camera.view_matrix();
             // 投影矩阵不翻转 Y：主 shader（triangle.vert.spv）已在 gl_Position.y 上完成
             // Vulkan 翻转，若这里再翻一次会双重翻转导致画面上下颠倒（与 HUD shader 一致）。
             let proj = self.camera.projection_matrix(aspect);
+
+            // 枪械检视模式：虚空环境——只画枪模（renderer 跳过地形/NPC/marker/阴影）
+            renderer.void_mode = self.inspect_weapon.is_some();
 
             // HUD：用上一帧渲染统计生成覆盖层 quad 并上传（首帧统计为 0）
             let (near, far, lod) = renderer.last_stats();

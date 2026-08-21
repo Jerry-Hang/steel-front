@@ -660,6 +660,8 @@ pub struct Renderer {
     /// 设备 maxMeshWorkGroupCount[0]（VK_EXT_mesh_shader 最低保证 65535）；
     /// 地面场 65536 个 workgroup 单次下发会超限，绘制按此值分块。
     mesh_max_wg_x: u32,
+    /// 虚空检视模式（枪械检视）：只画枪模——不画地形/NPC/marker/阴影，背景纯色虚空
+    pub void_mode: bool,
     framebuffers: Vec<vk::Framebuffer>,
     /// MSAA 采样数（RV3D_MSAA=1/2/4/8，默认 4；0 或 1 = 关）。主 pass 颜色/深度附件
     /// 用该采样数渲染，经 resolve 附件输出到交换链图像（几何边缘抗锯齿）。
@@ -1164,6 +1166,7 @@ impl Renderer {
             mesh_pipeline: vk::Pipeline::null(),
             mesh_pipeline_layout: vk::PipelineLayout::null(),
             mesh_max_wg_x: 1,
+            void_mode: false,
             framebuffers: Vec::new(),
             // MSAA：RV3D_MSAA=1/2/4/8（默认 4x；0/1 = 关闭）
             msaa_samples: match std::env::var("RV3D_MSAA") {
@@ -6288,7 +6291,9 @@ impl Renderer {
         // ---- 阴影 pass：depth-only 渲光空间深度，供主 pass 3x3 PCF 采样 ----
         // （mesh 路径已冻结，shadow 只服务传统 VERTEX 几何；mesh 模式 near=INSTANCE_COUNT
         //   地面实例静态上传，marker/NPC/自发光照常上传，同一槽位布局可复用）
-        self.record_shadow_pass(command_buffer, near_count, far_count, terrain_lod)?;
+        if !self.void_mode {
+            self.record_shadow_pass(command_buffer, near_count, far_count, terrain_lod)?;
+        }
 
         // clear values 按 attachment 索引寻址：0=MSAA 颜色(CLEAR)、1=resolve(DONT_CARE，
         // 值被忽略但占位保证索引正确)、2=深度(CLEAR)。旧实现只有 2 个元素 → 深度清除值
@@ -6296,7 +6301,11 @@ impl Renderer {
         let clear_values = [
             vk::ClearValue {
                 color: vk::ClearColorValue {
-                    float32: [0.1, 0.1, 0.15, 1.0],
+                    float32: if self.void_mode {
+                        [0.07, 0.075, 0.085, 1.0]
+                    } else {
+                        [0.1, 0.1, 0.15, 1.0]
+                    },
                 },
             },
             vk::ClearValue {
@@ -6371,6 +6380,8 @@ impl Renderer {
 
         // 地形 draw call（非实例，instance_index = 65536 读保留 identity 实例；
         // 每帧按 LOD 选择绘制 3 级网格之一，mesh.index_count 随密度变化）
+        // 虚空检视模式：不绘制地形（仅枪模）
+        if !self.void_mode {
         if let Some(mesh) = self.terrain_lods.get(terrain_lod) {
             let terrain_vertex_buffers = [mesh.vertex_buffer];
             let offsets = [0u64];
@@ -6397,6 +6408,7 @@ impl Renderer {
                 );
             }
         }
+        }
 
         if self.mesh_enabled {
             // ---- 网格着色器路径（VK_EXT_mesh_shader）：逐实例 GPU 视锥剔除 + 顶点变换 ----
@@ -6421,7 +6433,9 @@ impl Renderer {
                     &[],
                 );
             }
-            self.draw_mesh_range(command_buffer, mesh, 0, INSTANCE_COUNT);
+            if !self.void_mode {
+                self.draw_mesh_range(command_buffer, mesh, 0, INSTANCE_COUNT);
+            }
             self.draw_mesh_range(
                 command_buffer,
                 mesh,
@@ -7245,7 +7259,10 @@ impl Renderer {
         // 相机世界位置（view 为刚体变换，其逆矩阵的平移列即相机坐标），每帧只算一次
         let cam_pos = view.inverse().w_axis.truncate();
         let cull_start = Instant::now();
-        let (near_count, far_count) = if self.mesh_enabled {
+        let (near_count, far_count) = if self.void_mode {
+            // 虚空检视模式：跳过世界几何剔除/上传（仅枪模）
+            (0, 0)
+        } else if self.mesh_enabled {
             // mesh 路径：地面实例场静态一次性上传（见 create_instance_buffer），
             // 完全跳过 CPU SIMD 剔除/压缩——剔除与顶点变换全部移到 GPU mesh shader。
             // 性能日志 visible 语义 = 已上传槽位数（INSTANCE_COUNT）。
@@ -7254,12 +7271,15 @@ impl Renderer {
             self.cull_and_upload(view, proj, cam_pos)
         };
         // ---- 世界障碍 marker：独立槽位上传（见 MARKER_SLOT_BASE），计数供 draw call 使用 ----
-        let (marker_near, marker_far) = self.upload_markers(cam_pos);
+        let (marker_near, marker_far) = if self.void_mode { (0, 0) } else { self.upload_markers(cam_pos) };
         self.last_marker_near = marker_near;
         self.last_marker_far = marker_far;
         // ---- NPC 士兵段：独立槽位上传（见 NPC_SLOT_BASE），计数供 draw call 使用 ----
-        let ((box_near, box_far), (cyl_near, cyl_far), (sph_near, sph_far)) =
-            self.upload_npcs(cam_pos);
+        let ((box_near, box_far), (cyl_near, cyl_far), (sph_near, sph_far)) = if self.void_mode {
+            ((0, 0), (0, 0), (0, 0))
+        } else {
+            self.upload_npcs(cam_pos)
+        };
         self.last_npc_box_near = box_near;
         self.last_npc_box_far = box_far;
         self.last_npc_cyl_near = cyl_near;
@@ -7267,7 +7287,7 @@ impl Renderer {
         self.last_npc_sph_near = sph_near;
         self.last_npc_sph_far = sph_far;
         // ---- 自发光实体（爆炸闪光等）：独立槽位上传（见 EMISSIVE_SLOT_BASE）----
-        let (emissive_near, emissive_far) = self.upload_emissive(cam_pos);
+        let (emissive_near, emissive_far) = if self.void_mode { (0, 0) } else { self.upload_emissive(cam_pos) };
         self.last_emissive_near = emissive_near;
         self.last_emissive_far = emissive_far;
         let cull_us = cull_start.elapsed().as_micros() as u64;
@@ -7281,8 +7301,10 @@ impl Renderer {
         let (terrain_lod, terrain_blend) = terrain_lod_blend_with_params(terrain_dist, quality);
         self.last_terrain_lod_name = terrain_lod.name();
         let t0 = Instant::now();
-        self.update_terrain_lod_morph(terrain_lod, terrain_blend);
-        let terrain_lod_index = terrain_lod as usize;
+        if !self.void_mode {
+            self.update_terrain_lod_morph(terrain_lod, terrain_blend);
+        }
+        let terrain_lod_index = if self.void_mode { 0 } else { terrain_lod as usize };
         self.stage_terrain_us = t0.elapsed().as_micros() as u64;
 
         // ---- 性能日志（1 次/秒）：visible / cull_us / fps ----
