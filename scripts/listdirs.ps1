@@ -1,0 +1,1 @@
+Get-ChildItem 'C:\Users\Jerry-Huang\Desktop' -Directory | ForEach-Object { Write-Host ('DIR: ' + $_.Name + ' | ' + $_.LastWriteTime) }

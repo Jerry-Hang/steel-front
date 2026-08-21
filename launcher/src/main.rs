@@ -27,6 +27,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_COMMAND: u32 = 0x0111;
 const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_CTLCOLORSTATIC: u32 = 0x0138;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const WS_VISIBLE: u32 = 0x10000000;
 const WS_CHILD: u32 = 0x40000000;
@@ -87,6 +88,7 @@ extern "system" {
     fn BeginPaint(h: HWND, ps: *mut PAINTSTRUCT) -> HDC;
     fn EndPaint(h: HWND, ps: *const PAINTSTRUCT) -> i32;
     fn GetWindowRect(h: HWND, rect: *mut RECT) -> i32;
+    fn GetClientRect(h: HWND, rect: *mut RECT) -> i32;
     fn MessageBoxW(h: HWND, text: LPCWSTR, caption: LPCWSTR, ty: u32) -> i32;
     fn LoadImageW(inst: *mut c_void, name: LPCWSTR, ty: u32, w: i32, h: i32, flags: u32) -> *mut c_void;
     fn InvalidateRect(h: HWND, rect: *const c_void, erase: i32) -> i32;
@@ -104,6 +106,7 @@ extern "system" {
     fn CreateSolidBrush(color: u32) -> HBRUSH;
     fn DeleteObject(obj: *mut c_void) -> i32;
     fn FillRect(hdc: HDC, rect: *const RECT, brush: HBRUSH) -> i32;
+    fn SetBkMode(hdc: HDC, mode: i32) -> i32;
 }
 
 #[link(name = "shell32")]
@@ -237,7 +240,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -
             let mut ps = std::mem::zeroed::<PAINTSTRUCT>();
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-            GetWindowRect(hwnd, &mut rc);
+            // 用客户区尺寸（GetWindowRect 含边框，FillRect 会画到边框外）
+            GetClientRect(hwnd, &mut rc);
             let w = rc.right - rc.left;
             let h = rc.bottom - rc.top;
             if let Some(a) = APP.as_mut() {
@@ -249,7 +253,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -
                     SelectObject(mem, old);
                     DeleteDC(mem);
                 } else {
-                    let brush = CreateSolidBrush(0x00223344);
+                    // COLORREF 为 BGR：深蓝 = B=0x44 G=0x33 R=0x22 → 0x00443322
+                    // （旧 0x00223344 是深棕色——背景显示成棕块）
+                    let brush = CreateSolidBrush(0x00443322);
                     let r = RECT { left: 0, top: 0, right: w, bottom: h };
                     FillRect(hdc, &r, brush);
                     DeleteObject(brush);
@@ -259,6 +265,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -
             0
         }
         WM_ERASEBKGND => 1,
+        // STATIC 透明背景：标签不画白底（消除白色大块）——返回 NULL_BRUSH(5)
+        WM_CTLCOLORSTATIC => {
+            SetBkMode(lp as HDC, 1); // TRANSPARENT
+            5 as isize // NULL_BRUSH
+        }
         WM_COMMAND => {
             let id = (wp & 0xFFFF) as i32;
             match id {

@@ -1,0 +1,12 @@
+﻿OK
+**HUD Elements:**
+
+*   **Top Left:** Performance statistics and weapon info: FPS counter (365), LOD settings, entity counts, and the weapon name **"AK-12M é£æ´"** with its ammo status and hit/collision counters.
+*   **Top Center:** Game objective and progress: "WAVE 1", "SCORE 0", "LEVEL 1", and the objective "OBJECTIVE æ­¼ç­æäºº 0/64".
+*   **Top Right:** A square minimap/radar showing blue and red dots (likely allies and enemies) and a central crosshair.
+*   **Bottom Left:** Health bar and value ("HP 100/100") in green.
+*   **Bottom Center/Right:** Weapon status area showing the weapon name "AK-12M é£æ´", ammo count ("AMMO 9/30 +90"), and grenade count ("GRENADES: 2") in orange.
+
+**Regarding the Chinese text at bottom-left (weapon name):**
+
+The Chinese text **"é£æ´"** (meaning "Storm") is **clear**. It is not garbled, distorted, or blurry. It is rendered with a clean, readable font, and the characters are perfectly legible, just like the other HUD text. The objective text "æ­¼ç­æäºº" is also rendered clearly.
