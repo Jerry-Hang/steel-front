@@ -24,19 +24,19 @@ pub fn ak12m() -> crate::engine::guns::GunMesh {
         // rear trunnion / stock hinge seat
         (t(0.0, 0.075, -0.30), beveled_box(0.050, 0.050, 0.05, 0.010, 3), steel),
         // barrel (z 0.06..0.30)
-        (t(0.0, 0.050, 0.18) * rz(), cylinder(0.014, 0.24, 14), steel),
+        (t(0.0, 0.050, 0.17) * rz(), cylinder(0.013, 0.22, 14), [0.24, 0.25, 0.27]),
         // gas tube (fills gap between handguard top and rail)
         (t(0.0, 0.100, 0.13) * rz(), cylinder(0.011, 0.14, 12), steel),
         // handguard
-        (t(0.0, 0.050, 0.135), beveled_box(0.060, 0.080, 0.15, 0.012, 3), black),
+        (t(0.0, 0.060, 0.135), beveled_box(0.060, 0.100, 0.15, 0.012, 3), black),
         // handguard front collar
-        (t(0.0, 0.050, 0.206), beveled_box(0.062, 0.084, 0.018, 0.007, 3), black),
+        (t(0.0, 0.060, 0.206), beveled_box(0.062, 0.104, 0.018, 0.007, 3), black),
         // gas block
-        (t(0.0, 0.060, 0.230), beveled_box(0.036, 0.050, 0.04, 0.008, 3), steel),
+        (t(0.0, 0.058, 0.260), beveled_box(0.036, 0.050, 0.04, 0.008, 3), steel),
         // front sight post + guard wings
-        (t(0.0, 0.104, 0.228), beveled_box(0.014, 0.034, 0.014, 0.004, 3), dark),
-        (t(-0.017, 0.102, 0.228), beveled_box(0.006, 0.044, 0.012, 0.002, 3), black),
-        (t(0.017, 0.102, 0.228), beveled_box(0.006, 0.044, 0.012, 0.002, 3), black),
+        (t(0.0, 0.100, 0.258), beveled_box(0.014, 0.034, 0.014, 0.004, 3), dark),
+        (t(-0.017, 0.098, 0.258), beveled_box(0.006, 0.044, 0.012, 0.002, 3), black),
+        (t(0.017, 0.098, 0.258), beveled_box(0.006, 0.044, 0.012, 0.002, 3), black),
         // rear sight on rail
         (t(0.0, 0.128, -0.05), beveled_box(0.024, 0.018, 0.030, 0.005, 3), steel),
         // charging handle (right side)
@@ -64,7 +64,7 @@ pub fn ak12m() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.070, -0.535), beveled_box(0.038, 0.115, 0.020, 0.006, 3), dark),
         (t(0.0, 0.036, -0.404) * rx(0.066), beveled_box(0.026, 0.020, 0.160, 0.006, 3), black),
         // muzzle brake (bright steel)
-        (t(0.0, 0.050, 0.331) * rz(), frustum(0.016, 0.019, 0.062, 16, true), [0.22, 0.23, 0.25]),
+        (t(0.0, 0.050, 0.331) * rz(), frustum(0.016, 0.019, 0.062, 16, true), [0.20, 0.21, 0.23]),
     ];
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, display_name: "AK-12M 风暴", length: 0.90 }

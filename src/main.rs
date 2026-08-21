@@ -246,8 +246,8 @@ impl GameApp {
                 self.camera.yaw = std::f32::consts::FRAC_PI_2; // 正侧视：枪口朝左
                 self.camera.pitch = 0.08;
                 self.camera.fov = 45.0_f32.to_radians();
-                // 自动取景：按枪模包围盒对角线设定距离，保证整枪入画
-                self.camera.distance = 1.2;
+                // 产品照式取景：远距离 + 长焦（弱透视，近远端大小接近，同真枪照片）
+                self.camera.distance = 2.0;
                 if let Some(n) = self.inspect_weapon {
                     if let Some(spec) = crate::engine::weapon_data::spec_by_number(n) {
                         if let Some(gm) = crate::engine::guns::gun_mesh_by_key(spec.key) {
@@ -261,8 +261,14 @@ impl GameApp {
                             }
                             let e = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
                             let diag = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
-                            self.camera.distance =
-                                ((diag * 0.5) / (self.camera.fov * 0.5).tan()) * 1.18;
+                            // 距离 = 4.5× 对角线：近端/远端大小差 <25%（之前 1.36m 时差达 2 倍，
+                            // 广角微距式变形就是 1-4/1-5 里“这不像枪”的根源）
+                            let dist = (diag * 4.5).max(2.0);
+                            self.camera.distance = dist;
+                            // 长焦 fov：按距离反推，保证整枪入画（1.15 余量）
+                            self.camera.fov = (2.0 * ((diag * 0.5 * 1.15) / dist).atan())
+                                .to_degrees()
+                                .to_radians();
                             log::info!(
                                 "inspect: bbox=[{:.3},{:.3},{:.3}]..[{:.3},{:.3},{:.3}] ext=[{:.3},{:.3},{:.3}] diag={:.3} dist={:.3}",
                                 mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
