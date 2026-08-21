@@ -6302,7 +6302,7 @@ impl Renderer {
             vk::ClearValue {
                 color: vk::ClearColorValue {
                     float32: if self.void_mode {
-                        [0.07, 0.075, 0.085, 1.0]
+                        [1.0, 1.0, 1.0, 1.0] // 检视模式：白色背景，便于对比透视
                     } else {
                         [0.1, 0.1, 0.15, 1.0]
                     },
