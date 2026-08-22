@@ -275,9 +275,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 let texel = textureSample(npc_skin_tex, texture_sampler, input.uv);
                 base = mix(input.color, texel.rgb, 0.65);
             } else {
-                // marker 障碍：军备木板墙纹理 × 障碍 tint（权重 0.8，材质可辨识）
+                // marker 障碍：混凝土墙纹理 × 障碍 tint（权重 0.45：tint 保色相，纹理供表面细节）
                 let texel = textureSample(marker_skin_tex, texture_sampler, input.uv);
-                base = mix(input.color, texel.rgb, 0.8);
+                base = mix(input.color, texel.rgb, 0.45);
             }
         }
         // 障碍/NPC：应用 Blinn-Phong（同地面路径）——消除纯色剪影的纸片感

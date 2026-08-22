@@ -382,59 +382,45 @@ pub fn generate_city_ground_texture(
 /// 地面 mip 级数决定，同尺寸保证两套纹理 mip 级数完全一致，采样器参数直接复用。
 pub const SKIN_TEXTURE_SIZE: u32 = 512;
 
-/// 障碍物（marker）皮肤基色：军备木板墙。
-/// `u`/`v` 为面内 UV [0,1]，确定性纯函数。
+/// 障碍物（marker）皮肤：中性灰混凝土砌块墙。
+/// 浅灰底 + 砌块横排错缝（砂浆缝）+ 骨料噪点 + 水渍/风化暗斑（确定性纯函数）。
+/// 设计（2026-08-22）：纹理只供「表面细节/凹凸感」，颜色由障碍 tint 主导
+/// （shader mix 权重 0.45）→ 墙=混凝土、树=绿色细节、集装箱=彩色细节共用此皮肤。
 fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
-    let planks = 6.0f32;
-    let fu = u * planks;
-    let plank = fu.floor().min(planks - 1.0) as i32;
-    let fu_local = fu - fu.floor().min(planks - 1.0);
+    // 砌块横排错缝：4 行 × 4 列（UV 0..1 内；上行与下行错半块）
+    let rows = 4.0f32;
+    let vv = v * rows;
+    let row = vv.floor().min(rows - 1.0) as i32;
+    let off = if row % 2 == 0 { 0.0 } else { 0.5 };
+    let fu = (u * 4.0 + off).fract();
 
-    // 板间暗接缝（板边凹槽，u 靠近 0/1 时压暗）
-    let edge = fu_local.min(1.0 - fu_local);
-    let seam = 1.0 - smoothstep(0.015, 0.07, edge);
+    // 砂浆缝：块边缘 0.06 宽暗缝（水平缝 + 垂直缝）
+    let u_edge = fu.min(1.0 - fu);
+    let v_fr = vv.fract();
+    let v_edge = v_fr.min(1.0 - v_fr);
+    let seam = 1.0 - smoothstep(0.02, 0.09, u_edge.min(v_edge));
 
-    // 每块板基色差异（±12%，避免整面均匀死板）
-    let tone = 0.88 + unit_from_hash(hash2(plank, 0, seed.wrapping_add(41))) * 0.24;
-    let base: [f32; 3] = [0.46 * tone, 0.32 * tone, 0.18 * tone];
-
-    // 横向木纹（u 高频、v 低频拉伸）
-    let grain = value_noise(u * 26.0, v * 5.0, 1.0, seed.wrapping_add(42));
+    // 每块混凝土明度抖动 + 骨料颗粒（双频噪点）
+    let tone = 0.88 + unit_from_hash(hash2(row, (u * 8.0) as i32, seed.wrapping_add(40))) * 0.24;
+    let grain = value_noise(u * 22.0, v * 22.0, 1.0, seed.wrapping_add(41)) * 0.5
+        + value_noise(u * 90.0, v * 90.0, 1.0, seed.wrapping_add(42)) * 0.5;
+    let base: [f32; 3] = [0.50, 0.50, 0.52];
     let mut c = [
-        base[0] * (1.0 + grain * 0.14),
-        base[1] * (1.0 + grain * 0.12),
-        base[2] * (1.0 + grain * 0.10),
+        base[0] * tone * (1.0 + grain * 0.22),
+        base[1] * tone * (1.0 + grain * 0.20),
+        base[2] * tone * (1.0 + grain * 0.18),
     ];
 
-    // 钉痕/磨损暗斑：0.4 尺度格子确定性散布
-    let cell = 0.4f32;
-    let gx = (u / cell).floor() as i32;
-    let gy = (v / cell).floor() as i32;
-    for dy in 0..2 {
-        for dx in 0..2 {
-            let gxx = gx + dx;
-            let gyy = gy + dy;
-            let h = hash2(gxx, gyy, seed.wrapping_add(43));
-            if unit_from_hash(h) < 0.30 {
-                let cx = gxx as f32 * cell
-                    + cell * 0.5
-                    + lattice(gxx, gyy, seed.wrapping_add(44)) * cell * 0.3;
-                let cy = gyy as f32 * cell
-                    + cell * 0.5
-                    + lattice(gxx, gyy, seed.wrapping_add(45)) * cell * 0.3;
-                let radius = 0.02 + unit_from_hash(hash2(gxx, gyy, seed.wrapping_add(46))) * 0.045;
-                let d = ((u - cx) * (u - cx) + (v - cy) * (v - cy)).sqrt();
-                let m = 1.0 - smoothstep(radius * 0.6, radius, d);
-                let dark: [f32; 3] = [0.10, 0.075, 0.05];
-                c = lerp3(c, dark, m * 0.75);
-            }
-        }
+    // 水渍/风化暗斑（竖向条纹 + 斑点）
+    let stain = value_noise(u * 6.0, v * 14.0, 1.0, seed.wrapping_add(43));
+    if stain > 0.55 {
+        let m = smoothstep(0.55, 0.92, stain) * 0.35;
+        c = lerp3(c, [0.26, 0.27, 0.29], m);
     }
-
-    // 接缝压暗 + 板内细噪（防色带）
-    let seam_col: [f32; 3] = [0.14, 0.10, 0.06];
-    c = lerp3(c, seam_col, seam * 0.85);
-    let dither = value_noise(u * 96.0, v * 96.0, 1.0, seed.wrapping_add(47)) * 0.05;
+    // 砂浆缝压暗
+    c = lerp3(c, [0.28, 0.29, 0.31], seam * 0.7);
+    // 最终细噪（防色带）
+    let dither = value_noise(u * 128.0, v * 128.0, 1.0, seed.wrapping_add(44)) * 0.035;
     [c[0] + dither, c[1] + dither, c[2] + dither]
 }
 

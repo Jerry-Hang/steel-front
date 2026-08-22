@@ -1287,7 +1287,8 @@ impl Renderer {
             skin_npc_image: vk::Image::null(),
             skin_npc_memory: vk::DeviceMemory::null(),
             skin_npc_image_view: vk::ImageView::null(),
-            skin_tex_enabled: std::env::var("RV3D_SKIN_TEX").as_deref() == Ok("1"),
+            // 2026-08-22：默认启用（RV3D_SKIN_TEX=0 关闭纯色回退）——障碍需要表面细节
+            skin_tex_enabled: std::env::var("RV3D_SKIN_TEX").as_deref() != Ok("0"),
             texture_anisotropy_enabled: physical_device_features.sampler_anisotropy != 0,
             hud_pipeline: vk::Pipeline::null(),
             hud_pipeline_layout: vk::PipelineLayout::null(),
