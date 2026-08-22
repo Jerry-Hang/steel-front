@@ -117,8 +117,8 @@ mod win_topology {
     #[repr(C)]
     struct InfoEx {
         relationship: u32,
-        // 48 字节联合体（Cache 48B / Processor 40B；偏移 8 起）
-        data: [u64; 6],
+        // 40 字节联合体（实测 sizeof = 48：缓存/核心关系条目均 48B 步长，2026-08-22 实测）
+        data: [u64; 5],
     }
 
     #[link(name = "kernel32")]

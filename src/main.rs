@@ -257,9 +257,16 @@ impl GameApp {
     fn update(&mut self) {
         // RV3D_CAM=fly:x,y,z:yaw_deg,pitch_deg：调试固定机位（地图/场景检查用）
         if self.cam_override.is_some() {
+            // 仍推进帧时间/HUD FPS（避免调试机位下 HUD 恒 0 显像为“卡死”）
+            let now = Instant::now();
+            let dt = now.duration_since(self.last_frame).as_secs_f32();
+            self.last_frame = now;
+            if dt > 1e-6 {
+                self.last_fps = 1.0 / dt.min(0.1) as f64;
+            }
+            self.anim_clock += dt.min(0.1);
             self.camera.mode = CameraMode::Flight;
             if let Some((p, yaw, pitch)) = self.cam_override {
-                log::info!("cam-override: pos=({:.1},{:.1},{:.1}) yaw={:.1} pitch={:.1}", p.x, p.y, p.z, yaw.to_degrees(), pitch.to_degrees());
                 self.camera.set_flight_pos(p);
                 self.camera.yaw = yaw;
                 self.camera.pitch = pitch;
