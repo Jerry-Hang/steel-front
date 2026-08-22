@@ -112,17 +112,24 @@ fn warehouse(o: &mut Vec<MapObstacle>, cx: f32, cz: f32) {
     }
 }
 
-/// 公园树阵（树干 + 树冠，各 3x3 棵）
+/// 公园树阵（树干 + 三层收窄树冠，各 3x3 棵）
+/// 2026-08-22：单层大冠盒会连成“绿色混凝土墙”观感（2-3 反馈），
+/// 改为三层逐级收窄的倒圆锥式树冠——每棵独立、有序列感，自然区分树与墙。
 fn park(o: &mut Vec<MapObstacle>, cx: f32, cz: f32) {
-    for dx in [-13.0f32, 0.0, 13.0] {
-        for dz in [-13.0f32, 0.0, 13.0] {
+    for (ti, dx) in [-13.0f32, 0.0, 13.0].iter().enumerate() {
+        for (tj, dz) in [-13.0f32, 0.0, 13.0].iter().enumerate() {
             let tx = cx + dx;
             let tz = cz + dz;
+            // 确定性逐树变化（尺寸/高度 ±20%）：打散“等高绿墙”观感（2-3 反馈）
+            let h = ((ti * 7 + tj * 13 + 11) as f32 * 0.618).fract();
+            let k = 0.85 + h * 0.35;
+            let base = 2.5 + h * 0.9; // 冠底高（2.5..3.4m）
             // 树干
-            ob(o, ObstacleKind::Tree, tx, tz, 0.22, 0.22, 1.6, 1.6, Some(TREE_BARK));
-            // 树冠（2 层方块近似）
-            ob(o, ObstacleKind::Tree, tx, tz, 1.8, 1.8, 1.1, 3.3, Some(TREE_LEAF));
-            ob(o, ObstacleKind::Tree, tx, tz, 1.3, 1.3, 0.9, 4.5, Some(TREE_LEAF));
+            ob(o, ObstacleKind::Tree, tx, tz, 0.15, 0.15, base * 0.55, base * 0.55, Some(TREE_BARK));
+            // 三层收窄树冠（底大顶小，逐棵高低错落）
+            ob(o, ObstacleKind::Tree, tx, tz, 1.7 * k, 1.7 * k, 0.8, base + 0.7, Some(TREE_LEAF));
+            ob(o, ObstacleKind::Tree, tx, tz, 1.3 * k, 1.3 * k, 0.7, base + 1.7, Some(TREE_LEAF));
+            ob(o, ObstacleKind::Tree, tx, tz, 0.85 * k, 0.85 * k, 0.6, base + 2.7, Some(TREE_LEAF));
         }
     }
 }
@@ -145,7 +152,8 @@ fn plaza(o: &mut Vec<MapObstacle>, cx: f32, cz: f32, monument: bool) {
     // 花坛（4 角）
     for (dx, dz) in [(-16.0f32, -16.0f32), (16.0, -16.0), (-16.0, 16.0), (16.0, 16.0)] {
         ob(o, ObstacleKind::Building, cx + dx, cz + dz, 1.6, 1.6, 0.5, 0.5, Some(CONCRETE));
-        ob(o, ObstacleKind::Tree, cx + dx, cz + dz, 1.2, 1.2, 0.4, 0.9, Some(TREE_LEAF));
+        ob(o, ObstacleKind::Tree, cx + dx, cz + dz, 0.9, 0.9, 0.35, 0.85, Some(TREE_LEAF));
+        ob(o, ObstacleKind::Tree, cx + dx, cz + dz, 0.6, 0.6, 0.3, 1.35, Some(TREE_LEAF));
     }
     // 长椅
     for (dx, dz) in [(-8.0f32, 0.0f32), (8.0, 0.0), (0.0, -8.0), (0.0, 8.0)] {

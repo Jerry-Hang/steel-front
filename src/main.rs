@@ -1285,7 +1285,16 @@ impl GameApp {
                 .collect();
             renderer.set_dead_bodies(&dead_visuals);
             // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
-            renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+            // 枪模仅在第一人称游玩或检视模式渲染：结算/其它相机态下隐藏
+            // （否则枪模会按锚点漂浮在场景中——2-4 反馈“变成 M1 加兰德”观感）
+            let show_gun = self.inspect_weapon.is_some()
+                || (self.game.state() == GameState::Playing
+                    && self.camera.mode == CameraMode::FirstPerson);
+            if show_gun {
+                renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+            } else {
+                renderer.set_first_person_gun_mesh(&[], &[]);
+            }
 
             // 尺寸保险（2026-08-15）：窗口实际尺寸与交换链不一致时重建——
             // 覆盖 DPI 缩放/全屏切换等任何导致 swapchain 与窗口错位的场景，
