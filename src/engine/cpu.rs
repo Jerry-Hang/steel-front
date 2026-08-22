@@ -55,9 +55,165 @@ pub struct CpuTopology {
     pub e_cores: usize,
     pub avx2: bool,
     pub avx512: bool,
+    /// CCX/L3 缓存组（每组的逻辑处理器集合；Windows 按 L3 缓存精确分组，
+    /// Zen1/Zen2 为 4 核 CCX、Zen3+ 为 8 核 CCD——旧“半半”拆分在早期 Zen 上错误）
+    pub ccx_groups: Vec<Vec<usize>>,
+    /// 每逻辑处理器能效等级（0=P 大核, 1=E 能效核, 2=LE 低功耗核；未知恒 0）
+    pub efficiency: Vec<u8>,
+    /// 低功耗能效核（Intel LE/LP-E；AMD 无 = 空）
+    pub le_set: Vec<usize>,
+    /// 音频等简单低延迟任务集合（LE > E > 第三 CCX > 次簇 > 主簇）
+    pub audio_set: Vec<usize>,
 }
 
 /// 全局拓扑缓存：`topology()` 首次调用检测一次，后续零成本取用（避免 Game/Renderer 重复探测）。
+/// 平台精确拓扑中间结构（Windows 由 GetLogicalProcessorInformationEx 解析）
+struct PlatformTopo {
+    /// 物理核列表：每核 = 该核的逻辑处理器集合（SMT 配对，E-core 单成员）
+    cores: Vec<Vec<usize>>,
+    /// L3 缓存组（CCX）：每组的逻辑处理器集合
+    ccx_groups: Vec<Vec<usize>>,
+    /// 每逻辑处理器能效等级（0=P 1=E 2=LE）
+    efficiency: Vec<u8>,
+}
+
+/// Windows：GetLogicalProcessorInformationEx 解析物理核/CCX(L3)/能效等级。
+/// 零第三方依赖（kernel32 直接 FFI）；失败返回 None 回退旧逻辑。
+#[cfg(target_os = "windows")]
+mod win_topology {
+    use super::PlatformTopo;
+
+    const REL_PROCESSOR_CORE: u32 = 0;
+    const REL_CACHE: u32 = 2;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct GroupAffinity {
+        mask: usize,
+        group: u16,
+        reserved: [u16; 3],
+    }
+
+    #[repr(C)]
+    struct ProcessorRel {
+        flags: u8,
+        efficiency: u8,
+        reserved: [u8; 20],
+        group_count: u16,
+        group_mask: [GroupAffinity; 1],
+    }
+
+    #[repr(C)]
+    struct CacheRel {
+        level: u8,
+        associativity: u8,
+        line_size: u16,
+        cache_size: u32,
+        cache_type: u32,
+        reserved: [u8; 20],
+        group_mask: GroupAffinity,
+    }
+
+    #[repr(C)]
+    struct InfoEx {
+        relationship: u32,
+        // 48 字节联合体（Cache 48B / Processor 40B；偏移 8 起）
+        data: [u64; 6],
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLogicalProcessorInformationEx(
+            relationship: u32,
+            buffer: *mut InfoEx,
+            returned_length: *mut u32,
+        ) -> i32;
+    }
+
+    fn query(rel: u32) -> Option<Vec<u8>> {
+        let mut len: u32 = 0;
+        unsafe {
+            GetLogicalProcessorInformationEx(rel, std::ptr::null_mut(), &mut len);
+        }
+        if len == 0 {
+            return None;
+        }
+        let mut buf: Vec<u8> = vec![0u8; len as usize];
+        let ok = unsafe {
+            GetLogicalProcessorInformationEx(
+                rel,
+                buf.as_mut_ptr() as *mut InfoEx,
+                &mut len,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some(buf)
+    }
+
+    fn mask_members(mask: usize) -> Vec<usize> {
+        let mut v = Vec::new();
+        for b in 0..usize::BITS {
+            if mask & (1usize << b) != 0 {
+                v.push(b as usize);
+            }
+        }
+        v
+    }
+
+    pub fn detect() -> Option<PlatformTopo> {
+        let mut cores: Vec<Vec<usize>> = Vec::new();
+        let mut efficiency: Vec<u8> = Vec::new();
+        let mut ccx: Vec<Vec<usize>> = Vec::new();
+
+        if let Some(buf) = query(REL_PROCESSOR_CORE) {
+            let stride = std::mem::size_of::<InfoEx>();
+            for i in 0..buf.len() / stride {
+                let e = unsafe { &*(buf.as_ptr().add(i * stride) as *const InfoEx) };
+                if e.relationship != REL_PROCESSOR_CORE {
+                    continue;
+                }
+                let pr = unsafe { &*(e.data.as_ptr() as *const ProcessorRel) };
+                if pr.group_count < 1 {
+                    continue;
+                }
+                let members = mask_members(pr.group_mask[0].mask);
+                if !members.is_empty() {
+                    for _ in 0..members.len() {
+                        efficiency.push(pr.efficiency);
+                    }
+                    cores.push(members);
+                }
+            }
+        }
+        if let Some(buf) = query(REL_CACHE) {
+            let stride = std::mem::size_of::<InfoEx>();
+            for i in 0..buf.len() / stride {
+                let e = unsafe { &*(buf.as_ptr().add(i * stride) as *const InfoEx) };
+                if e.relationship != REL_CACHE {
+                    continue;
+                }
+                let cr = unsafe { &*(e.data.as_ptr() as *const CacheRel) };
+                if cr.level == 3 {
+                    let members = mask_members(cr.group_mask.mask);
+                    if !members.is_empty() {
+                        ccx.push(members);
+                    }
+                }
+            }
+        }
+        if cores.is_empty() {
+            return None;
+        }
+        Some(PlatformTopo {
+            cores,
+            ccx_groups: ccx,
+            efficiency,
+        })
+    }
+}
+
 static TOPOLOGY: OnceLock<CpuTopology> = OnceLock::new();
 
 /// 取全局 CPU 拓扑（首次调用触发 `detect()`，幂等）
@@ -70,6 +226,14 @@ pub fn topology() -> &'static CpuTopology {
 #[cfg(target_os = "linux")]
 extern "C" {
     fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
+}
+
+// Windows 线程亲和（Zero-dep：GetCurrentThread/SetThreadAffinityMask 直接 FFI）。
+// 仅 x64 单处理器组（<64 逻辑线程）适用；>64 线程时 mask 截断并告警。
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn GetCurrentThread() -> *mut std::ffi::c_void;
+    fn SetThreadAffinityMask(hThread: *mut std::ffi::c_void, dwThreadAffinityMask: usize) -> usize;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -310,42 +474,113 @@ impl CpuTopology {
     pub fn detect() -> CpuTopology {
         let vendor = cpu_vendor();
         let threads = cpu_thread_count();
-        let half = threads / 2;
-        let (primary_set, secondary_set, e_cores) = match vendor {
-            CpuVendor::Amd => (
-                (0..half).collect::<Vec<usize>>(),
-                (half..threads).collect::<Vec<usize>>(),
-                0,
-            ),
-            CpuVendor::Intel => {
-                // leaf 0x1A EAX[31:24] = 0x20 表示 E-core（EAX[15:8] = 核内编号，SMT 去重）；
-                // AMD（leaf 0x1A 返回 0）与虚拟化未透传时 e_cpus 为空。
-                #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-                {
-                    let hybrid = probe_per_cpu(0x1A);
-                    let mut seen = std::collections::HashSet::new();
-                    for (i, &eax) in hybrid.iter().enumerate() {
-                        if ((eax >> 24) & 0xff) == 0x20 {
-                            seen.insert(i);
+        // 平台精确拓扑：Windows 用 GetLogicalProcessorInformationEx（物理核/CCX/能效等级），
+        // 其它平台 None → 回退旧逻辑（sysfs + CPUID + 半半）。
+        #[cfg(target_os = "windows")]
+        let plat = win_topology::detect();
+        #[cfg(not(target_os = "windows"))]
+        let plat: Option<PlatformTopo> = None;
+
+        let (primary_set, secondary_set, le_set, ccx_groups, efficiency, e_cores) =
+            if let Some(pt) = &plat {
+                if pt.efficiency.iter().any(|&e| e != 0) {
+                    // 混合架构（Intel P/E/LE；AMD Zen4C/5C 被系统标记时同样生效）：
+                    // 按能效等级分组：0=P 主簇（渲染/逻辑），1=E（AI/后台），2=LE（音频/低延迟）
+                    let n = pt.efficiency.len();
+                    let p: Vec<usize> = (0..n).filter(|&c| pt.efficiency[c] == 0).collect();
+                    let e: Vec<usize> = (0..n).filter(|&c| pt.efficiency[c] == 1).collect();
+                    let le: Vec<usize> = (0..n).filter(|&c| pt.efficiency[c] == 2).collect();
+                    // E 核物理数：每物理核（cores 条目）只要有一成员为 E 即计 1
+                    let mut ec = 0usize;
+                    for core in &pt.cores {
+                        if core.iter().any(|&c| c < pt.efficiency.len() && pt.efficiency[c] == 1) {
+                            ec += 1;
                         }
                     }
-                    let e_cpus = seen;
-                    let p: Vec<usize> = (0..threads).filter(|c| !e_cpus.contains(c)).collect();
-                    let e: Vec<usize> = (0..threads).filter(|c| e_cpus.contains(c)).collect();
-                    let e_count = e.len();
-                    (p, e, e_count)
+                    (p, e, le, pt.ccx_groups.clone(), pt.efficiency.clone(), ec)
+                } else if pt.ccx_groups.len() >= 2 {
+                    // AMD 双簇（CCX/L3 分组）：主簇 = 组 0（逻辑/渲染同簇，共享 L3），
+                    // 次簇 = 组 1（AI/地图生成）。Zen1/Zen2 为 4 核 CCX 时精确成立。
+                    (
+                        pt.ccx_groups[0].clone(),
+                        pt.ccx_groups[1].clone(),
+                        Vec::new(),
+                        pt.ccx_groups.clone(),
+                        pt.efficiency.clone(),
+                        0,
+                    )
+                } else {
+                    // 无小核且无 L3 分组：回退半半
+                    let half = threads / 2;
+                    (
+                        (0..half).collect(),
+                        (half..threads).collect(),
+                        Vec::new(),
+                        pt.ccx_groups.clone(),
+                        pt.efficiency.clone(),
+                        0,
+                    )
                 }
-                #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
-                {
-                    // 非 x86_64/Linux（Apple Silicon、macOS、ARM 服务器）：
-                    // 无 CPUID leaf 0x1A 与 sched_setaffinity，无 E-core 概念，全部归 primary 集合
-                    ((0..threads).collect(), Vec::new(), 0)
+            } else {
+                // 旧逻辑（Linux sysfs / 其它平台）——语义不变
+                let (primary_set, secondary_set, e_cores) = match vendor {
+                    CpuVendor::Amd => {
+                        let half = threads / 2;
+                        ((0..half).collect::<Vec<usize>>(), (half..threads).collect::<Vec<usize>>(), 0)
+                    }
+                    CpuVendor::Intel => {
+                        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+                        {
+                            let hybrid = probe_per_cpu(0x1A);
+                            let mut seen = std::collections::HashSet::new();
+                            for (i, &eax) in hybrid.iter().enumerate() {
+                                if ((eax >> 24) & 0xff) == 0x20 {
+                                    seen.insert(i);
+                                }
+                            }
+                            let e_cpus = seen;
+                            let p: Vec<usize> = (0..threads).filter(|c| !e_cpus.contains(c)).collect();
+                            let e: Vec<usize> = (0..threads).filter(|c| e_cpus.contains(c)).collect();
+                            let e_count = e.len();
+                            (p, e, e_count)
+                        }
+                        #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+                        {
+                            ((0..threads).collect(), Vec::new(), 0)
+                        }
+                    }
+                    CpuVendor::Other => ((0..threads).collect(), Vec::new(), 0),
+                };
+                (primary_set, secondary_set, Vec::new(), Vec::new(), Vec::new(), e_cores)
+            };
+        // 物理核/超线程识别：Windows 从核心关系直接获得（SMT 配对 = 每核逻辑集合）；
+        // Linux sysfs；不可读时回退不区分
+        let (primary_physical, secondary_physical, smt_set) = if let Some(pt) = &plat {
+            let mut physical_all = Vec::new();
+            let mut smt_all = Vec::new();
+            for core in &pt.cores {
+                let min = *core.iter().min().unwrap_or(&0);
+                physical_all.push(min);
+                for &c in core {
+                    if c != min {
+                        smt_all.push(c);
+                    }
                 }
             }
-            CpuVendor::Other => ((0..threads).collect(), Vec::new(), 0),
-        };
-        // 物理核/超线程识别：sysfs SMT 配对（WSL2 下实测可用）；不可读时回退不区分
-        let (primary_physical, secondary_physical, smt_set) =
+            let pp: Vec<usize> = primary_set
+                .iter()
+                .filter(|c| physical_all.contains(c))
+                .copied()
+                .collect();
+            let sp: Vec<usize> = secondary_set
+                .iter()
+                .filter(|c| physical_all.contains(c))
+                .copied()
+                .collect();
+            let pp = if pp.is_empty() { primary_set.clone() } else { pp };
+            let sp = if sp.is_empty() { secondary_set.clone() } else { sp };
+            (pp, sp, smt_all)
+        } else {
             match read_smt_siblings(threads) {
                 Some(groups) => {
                     let (physical_all, smt_all) = split_smt_pairs(&groups);
@@ -364,7 +599,20 @@ impl CpuTopology {
                     (pp, sp, smt_all)
                 }
                 None => (primary_set.clone(), secondary_set.clone(), Vec::new()),
-            };
+            }
+        };
+        // 音频集合（简单/低延迟任务）：LE 核 > E 核 > 第三 CCX > 次簇 > 主簇
+        let audio_set = if !le_set.is_empty() {
+            le_set.clone()
+        } else if !secondary_set.is_empty() && vendor == CpuVendor::Intel {
+            secondary_set.clone()
+        } else if ccx_groups.len() >= 3 {
+            ccx_groups[2].clone()
+        } else if !secondary_set.is_empty() {
+            secondary_set.clone()
+        } else {
+            primary_set.clone()
+        };
         CpuTopology {
             vendor,
             threads,
@@ -385,8 +633,13 @@ impl CpuTopology {
                 }
             },
             avx512: avx512_enabled(),
+            ccx_groups,
+            efficiency,
+            le_set,
+            audio_set,
         }
     }
+
 
     /// 把当前线程（主线程）绑定到目标 vCPU 集合。
     /// `RV3D_CPU_PIN=off` 跳过；`RV3D_CPU_PIN=<掩码>` 精确覆盖；默认绑首簇。
@@ -437,11 +690,45 @@ impl CpuTopology {
                 log::warn!("cpu: sched_setaffinity 失败（环境不支持），保持默认调度");
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
         {
-            // 非 Linux（如未来 macOS/iOS Apple Silicon 构建）：无 sched_setaffinity，
+            // 非 Linux/Windows（如未来 macOS/iOS Apple Silicon 构建）：无 sched_setaffinity，
             // 不手工绑核，线程调度交给系统 QoS/调度器
             log::info!("cpu: 非 Linux 平台，跳过线程手工绑定（交给系统调度）");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Windows 线程亲和：GetCurrentThread/SetThreadAffinityMask 直接 FFI。
+            // 仅 x64 单处理器组（<64 逻辑线程）适用；>64 线程时 mask 截断并告警。
+            let mut mask: usize = 0;
+            let mut truncated = false;
+            for &c in &target {
+                if c > 63 {
+                    truncated = true;
+                    continue; // 跳过编号 >63 的 vCPU（超出单 DWORD_PTR 掩码）
+                }
+                mask |= 1usize << c;
+            }
+            if truncated {
+                log::warn!("cpu: Windows 线程亲和掩码截断（检测到 vCPU 编号 >63，仅单处理器组可用）");
+            }
+            let h = unsafe { GetCurrentThread() };
+            let prev = unsafe { SetThreadAffinityMask(h, mask) };
+            if prev == 0 {
+                log::warn!("cpu: SetThreadAffinityMask 失败，保持默认调度");
+            } else {
+                log::info!(
+                    "cpu: 主线程已绑定 vCPU {:?}（{} 逻辑线程，{}；SMT {}）",
+                    target,
+                    self.threads,
+                    match self.vendor {
+                        CpuVendor::Amd => "AMD 双簇：主=CCD0，次=CCD1",
+                        CpuVendor::Intel => "Intel 混合：主=P-core，次=E-core",
+                        CpuVendor::Other => "未知厂商",
+                    },
+                    self.smt_set.len()
+                );
+            }
         }
         target
     }
@@ -462,17 +749,31 @@ impl CpuTopology {
                 sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), mask.as_ptr()) == 0
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
         {
             let _ = set;
             false
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Windows 线程亲和：GetCurrentThread/SetThreadAffinityMask 直接 FFI。
+            let mut mask: usize = 0;
+            for &c in set {
+                if c <= 63 {
+                    mask |= 1usize << c;
+                } else {
+                    log::warn!("cpu: pin_current_thread 跳过 vCPU 编号 >63（{}）", c);
+                }
+            }
+            let h = unsafe { GetCurrentThread() };
+            unsafe { SetThreadAffinityMask(h, mask) != 0 }
         }
     }
 
     /// 启动日志摘要（厂商/簇/E-core/指令集）
     pub fn log_summary(&self) {
         log::info!(
-            "cpu: vendor={:?} threads={} primary={:?} secondary={:?} e_cores={} avx2={} avx512={} scene_set={:?} ai_set={:?} physical_primary={:?} physical_secondary={:?} smt={:?}",
+            "cpu: vendor={:?} threads={} primary={:?} secondary={:?} e_cores={} avx2={} avx512={} scene_set={:?} ai_set={:?} physical_primary={:?} physical_secondary={:?} smt={:?} ccx_groups={:?} efficiency={:?} le_set={:?} audio_set={:?}",
             self.vendor,
             self.threads,
             self.primary_set,
@@ -484,7 +785,11 @@ impl CpuTopology {
             self.ai_set(),
             self.primary_physical,
             self.secondary_physical,
-            self.smt_set
+            self.smt_set,
+            self.ccx_groups,
+            self.efficiency,
+            self.le_set,
+            self.audio_set
         );
     }
 }
