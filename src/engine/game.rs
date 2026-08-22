@@ -2178,7 +2178,7 @@ impl Game {
         let sun = DirectionalLight::new(
             glam::Vec3::new(-0.4, 0.9, -0.3).normalize(),
             glam::Vec3::new(1.0, 0.95, 0.85),
-            1.2,
+            1.5,
         );
         let point_a = PointLight::new(
             glam::Vec3::new(0.0, 6.0, 0.0),
@@ -2196,16 +2196,18 @@ impl Game {
         // （旧实现传 -sun.direction 使光相机在地面下方仰视：阴影图只剩背面剔除后的
         //   竖面，地面/地形整片缺失，阴影完全失效）。
         // RV3D_NO_SHADOW=1 关闭阴影（仅环境光+点光源），用于 A/B 验证与阴影 pass 性能对比。
-        let shadow = if std::env::var("RV3D_NO_SHADOW").as_deref() == Ok("1") {
-            None
-        } else {
+        // 2026-08-22：城市高楼群下阴影图覆盖异常（全图判黑），默认改用环境光+方向光直照
+        // （RV3D_NO_SHADOW=0 强制回阴影贴图路径，用于后续排查）
+        let shadow = if std::env::var("RV3D_NO_SHADOW").as_deref() == Ok("0") {
             Some(ShadowConfig::new(sun.direction, glam::Vec3::ZERO, 250.0, 1.0, 500.0))
+        } else {
+            None
         };
         LightUniform::build(
             Some(&sun),
             &[point_a, point_b],
             glam::Vec3::new(0.5, 0.55, 0.6),
-            0.35,
+            0.5,
             shadow.as_ref(),
         )
     }
