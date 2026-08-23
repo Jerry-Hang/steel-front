@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::audio::{AudioListener, AudioPlayer, AudioSource, Channel, SilentSink, SfxBank, SfxKind};
+use crate::audio::{AudioListener, AudioPlayer, AudioSource, Channel, SfxBank, SfxKind};
 use crate::net::{
     Client, NetworkMessage, NetInput, NpcSnapshot, PlayerState, Server, CLIENT_TIMEOUT,
     SERVER_TIMEOUT,
@@ -814,6 +814,10 @@ pub struct Game {
     stress: bool,
     /// 压力模式每边 NPC 数量（默认 64 → 64v64）
     stress_sides: usize,
+    /// 指挥体系（压力模式）：红蓝各一营（三三制 营连排班，见 ai_command.rs）
+    command: Option<(crate::engine::ai_command::Army, crate::engine::ai_command::Army)>,
+    /// 指挥军情日志节流
+    command_log_at: f32,
     /// 压力模式对抗轮次（一方团灭补员后 +1）
     stress_round: u32,
     /// 并行 AI 更新开关（RV3D_AI_PARALLEL=off 关闭，可串行 A/B 对比）
@@ -847,8 +851,8 @@ pub struct Game {
     frame_no: u32,
     /// fps 统计时间窗起点
     fps_window_start: Instant,
-    /// 音频播放器（SilentSink：rodio 未安装，样本被丢弃，但混音/衰减链路真实运行）
-    audio: AudioPlayer<SilentSink>,
+    /// 音频播放器（Windows waveOut 真实发声；无设备时静默降级，混音链路恒运行）
+    audio: AudioPlayer<crate::audio_out::DefaultSink>,
     /// 音频采样率
     audio_sample_rate: u32,
     /// 网络环回演示（默认关闭，RV3D_NET=1 启用）
@@ -922,6 +926,8 @@ struct AiStepCtx<'a> {
     ring_outer: f32,
     /// 当前关卡存活障碍列表（掩体利用评估用；摧毁后的障碍已移除）
     obstacles: &'a [MapObstacle],
+    /// 班指挥目标点（压力模式：未接敌战士按班目标编队推进；None = 逐人战术照旧）
+    squad_wps: &'a [Option<[f32; 2]>],
 }
 
 /// 压力模式目标预选：每 NPC 找视野内最近的敌对阵营 NPC（纯读，O(n²)）。
@@ -1057,12 +1063,15 @@ impl Game {
                 std::env::var("RV3D_STRESS_AI").as_deref(),
                 Err(_) | Ok("0") | Ok("off")
             ),
+            // 2026-08-22：默认 128v128（用户要求：以海量 NPC 逼近真人联机压力）
             stress_sides: std::env::var("RV3D_STRESS_AI")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n >= 4)
-                .unwrap_or(64),
+                .unwrap_or(128),
             stress_round: 0,
+            command: None,
+            command_log_at: 0.0,
             ai_parallel: std::env::var("RV3D_AI_PARALLEL")
                 .map(|v| v != "off")
                 .unwrap_or(true),
@@ -1087,10 +1096,11 @@ impl Game {
             level: 1,
             map: LevelMap::default(),
             audio: {
-                let mut player = AudioPlayer::new(SilentSink::new(48_000, 2));
-                player.mixer_mut().set_master(0.8);
+                let mut player =
+                    AudioPlayer::new(crate::audio_out::open_default_sink(48_000, 2));
+                player.mixer_mut().set_master(0.9);
                 player.mixer_mut().set_channel_volume(Channel::Sfx, 1.0);
-                // 环境风：DSP 慢速调制噪声（SilentSink：输出被丢弃，但合成/混音链路真实运行）
+                // 环境风：DSP 慢速调制噪声（真实声卡输出）
                 player
                     .synth_mut()
                     .set_ambient(glam::Vec3::new(0.0, 2.0, 0.0), 0.35);
@@ -2663,8 +2673,13 @@ impl Game {
                 continue;
             }
             // 确定性概率：id/帧哈希 → 5-8%（投掷窗口内约每 12-20 帧判定一次）
+            // 班长（指挥体系）投掷倾向更高（15%），其余战士维持 8%
+            let is_leader = self.command.as_ref().map(|cmd| match npc.team {
+                Team::Red => cmd.0.is_leader(npc.id),
+                Team::Blue => cmd.1.is_leader(npc.id),
+            }).unwrap_or(false);
             let h = (npc.id as u64 * 31 + self.frame_no as u64 * 7) % 100;
-            if h >= 8 {
+            if h >= if is_leader { 15 } else { 8 } {
                 continue;
             }
             // 目标：压力模式 = 敌对 NPC（异阵营）；survive = 玩家
@@ -3604,6 +3619,13 @@ impl Game {
                 });
             }
         }
+        let red_ids: Vec<usize> = self.npcs.iter().filter(|n| n.team == Team::Red).map(|n| n.id).collect();
+        let blue_ids: Vec<usize> = self.npcs.iter().filter(|n| n.team == Team::Blue).map(|n| n.id).collect();
+        self.command = Some((
+            crate::engine::ai_command::Army::build(Team::Red, &red_ids),
+            crate::engine::ai_command::Army::build(Team::Blue, &blue_ids),
+        ));
+        log::info!("command: 三三制编成 红营 {} 人 / 蓝营 {} 人", red_ids.len(), blue_ids.len());
         log::info!(
             "battle: 压力模式第 {} 轮开战（红 {} vs 蓝 {}+玩家，共 {} 名 NPC，并行 AI={}）",
             self.stress_round,
@@ -3729,6 +3751,7 @@ impl Game {
             ctx.time,
             ctx.dt,
             ctx.stress,
+            ctx.squad_wps.get(index).copied().flatten(),
         );
         // 朝向更新：移动时朝移动方向；站定时面向目标（渲染士兵模型用）
         let mdx = npc.position[0] - bx;
@@ -3904,6 +3927,26 @@ impl Game {
             .count() as u32;
         let charge = should_charge(active, self.npcs.len() as u32, self.charge_active);
         self.charge_active = charge;
+        // 指挥节拍：0.5s 营司令评估 + 战士班目标点（未接敌编队推进，接敌由逐人战术接管）
+        if self.stress {
+            if let Some(cmd) = self.command.as_mut() {
+                let (rc, bc) = team_centroids(&self.npcs);
+                cmd.0.update(&self.npcs, &grid, dt, 0, bc);
+                cmd.1.update(&self.npcs, &grid, dt, 0, rc);
+                if self.time - self.command_log_at >= 5.0 {
+                    self.command_log_at = self.time;
+                    log::info!("command: 红{} | 蓝{}", cmd.0.summary(), cmd.1.summary());
+                }
+            }
+        }
+        let squad_wps: Vec<Option<[f32; 2]>> = if self.stress {
+            if let Some(cmd) = self.command.as_ref() {
+                self.npcs.iter().map(|n| {
+                    let army = match n.team { Team::Red => &cmd.0, Team::Blue => &cmd.1 };
+                    army.squad_waypoint(n.id, n.position)
+                }).collect()
+            } else { vec![None; self.npcs.len()] }
+        } else { vec![None; self.npcs.len()] };
         // 弹道威胁预扫：存活子弹水平距离 < THREAT_RADIUS 且朝 NPC 方向飞行 → 该 NPC 受火力威胁
         let under_fire = {
             let mut flags = vec![false; self.npcs.len()];
@@ -3954,6 +3997,7 @@ impl Game {
                 ring_inner: theme.ring_inner,
                 ring_outer: theme.ring_outer,
                 obstacles: &self.map.obstacles,
+                squad_wps: &squad_wps,
             };
             if self.npcs.len() >= PARALLEL_AI_MIN && self.ai_parallel {
                 // safety: 已分层（Near 在前），双池分片互不相交；ctx 只含共享只读数据
@@ -4281,6 +4325,7 @@ mod tests {
                 ring_inner: MAP_RING_INNER,
                 ring_outer: MAP_RING_OUTER,
                 obstacles: &game.map.obstacles,
+                squad_wps: &[],
             };
             let idle_before = npcs[0].position;
             Game::step_ai_parallel(&mut npcs, 0, &ctx); // near_len=0 → 全远组
@@ -5929,6 +5974,7 @@ mod tests {
             ring_inner: MAP_RING_INNER,
             ring_outer: MAP_RING_OUTER,
             obstacles: &game.map.obstacles,
+            squad_wps: &[],
         };
         let mut npcs = npcs;
         Game::step_ai_serial(&mut npcs, &ctx);
@@ -6206,13 +6252,26 @@ fn advance_npc(
     time: f32,
     dt: f32,
     stress: bool,
+    squad_wp: Option<[f32; 2]>,
 ) {
     // 无路径（或已走完）时按状态 + 战术选择目标
     if npc.path.is_empty() || npc.path_index >= npc.path.len() {
         let goal = match state {
             NpcState::Chase => match tactic {
                 // 突击/压制：直线逼近（压制手到射程边缘即转 Attack 站定）
-                Tactic::Advance | Tactic::Suppress => world_to_grid(target.x, target.z),
+                // 班目标点：未接敌且有命令时优先向班目标点推进（>15m 时）
+                Tactic::Advance | Tactic::Suppress => {
+                    if let Some(wp) = squad_wp {
+                        let sd2 = (npc.position[0] - wp[0]).powi(2) + (npc.position[2] - wp[1]).powi(2);
+                        if sd2 > 15.0 * 15.0 {
+                            world_to_grid(wp[0], wp[1])
+                        } else {
+                            world_to_grid(target.x, target.z)
+                        }
+                    } else {
+                        world_to_grid(target.x, target.z)
+                    }
+                }
                 // 侧翼包抄：垂直轴向偏移 3 格（12m），id 奇偶定左右形成钳形
                 Tactic::Flank => {
                     let target_g = world_to_grid(target.x, target.z);
@@ -6290,13 +6349,17 @@ fn advance_npc(
                 }
             }
             NpcState::Patrol | NpcState::Idle => {
-                // 确定性巡逻点：随 id 相位与时间缓慢旋转
-                let angle = npc.id as f32 * 2.399 + (time / 8.0).floor() * 0.7;
-                let r = 20.0 + npc.id as f32 * 3.0;
-                world_to_grid(
-                    npc.home[0] + r * angle.cos(),
-                    npc.home[1] + r * angle.sin(),
-                )
+                // 班目标点：有命令时优先按班目标推进；否则确定性巡逻点（随 id 相位与时间缓慢旋转）
+                if let Some(wp) = squad_wp {
+                    world_to_grid(wp[0], wp[1])
+                } else {
+                    let angle = npc.id as f32 * 2.399 + (time / 8.0).floor() * 0.7;
+                    let r = 20.0 + npc.id as f32 * 3.0;
+                    world_to_grid(
+                        npc.home[0] + r * angle.cos(),
+                        npc.home[1] + r * angle.sin(),
+                    )
+                }
             }
         };
         let start = world_to_grid(npc.position[0], npc.position[2]);
@@ -6375,4 +6438,22 @@ fn advance_npc(
         npc.position[2] += mz * step;
     }
     npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+}
+
+/// 红蓝阵营存活 NPC 的平均 x/z（阵营为空 → [0.0, 0.0]；命令行军/军情用）
+fn team_centroids(npcs: &[Npc]) -> ([f32; 2], [f32; 2]) {
+    let mut rc = [0.0f32; 2];
+    let mut bc = [0.0f32; 2];
+    let mut rn = 0usize;
+    let mut bn = 0usize;
+    for n in npcs {
+        match n.team {
+            Team::Red => { rc[0] += n.position[0]; rc[1] += n.position[2]; rn += 1; }
+            Team::Blue => { bc[0] += n.position[0]; bc[1] += n.position[2]; bn += 1; }
+        }
+    }
+    let avg = |c: [f32; 2], n: usize| -> [f32; 2] {
+        if n > 0 { [c[0] / n as f32, c[1] / n as f32] } else { [0.0, 0.0] }
+    };
+    (avg(rc, rn), avg(bc, bn))
 }

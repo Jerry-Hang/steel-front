@@ -443,7 +443,7 @@ const MAX_MARKER_INSTANCES: u32 = 1024;
 const MARKER_SLOT_BASE: u32 = INSTANCE_COUNT + 1;
 /// NPC 士兵可视化段数上限（每几何区；人形 15 段/人 × 8 NPC = 120 段，余量充足；
 /// 同时决定实例 buffer 的额外容量。三几何区：盒（躯干/脚/枪）、圆柱（四肢）、球（头））
-const MAX_NPC_INSTANCES: u32 = 1024;
+const MAX_NPC_INSTANCES: u32 = 2048; // 2026-08-22：128v128 战场（256 人 × 7 段 ≈ 1792）
 /// NPC 盒体段区起始 slot：紧接 marker 区之后（见 MARKER_SLOT_BASE）
 const NPC_SLOT_BASE: u32 = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES;
 /// NPC 圆柱段区（四肢）起始 slot

@@ -297,6 +297,7 @@ pub struct SilentSink {
 }
 
 impl SilentSink {
+    #[allow(dead_code)] // 平台无输出后端时/测试回退用
     pub fn new(sample_rate: u32, channels: u16) -> Self {
         Self {
             sample_rate,

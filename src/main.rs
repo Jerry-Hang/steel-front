@@ -8,6 +8,7 @@
 
 mod engine;
 mod audio;
+mod audio_out;
 mod net;
 mod ui;
 mod config;
@@ -2134,9 +2135,10 @@ fn main() {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // 默认大战场模式：红 64 vs 蓝 63+玩家（=64v64）；RV3D_STRESS_AI=0 恢复传统波次模式
+    // 默认大战场：红 128 vs 蓝 127+玩家（=128v128，2026-08-22 要求海量 NPC 模拟真人压力）；
+    // RV3D_STRESS_AI=N 自定义，=0 恢复传统波次模式
     if std::env::var("RV3D_STRESS_AI").is_err() {
-        std::env::set_var("RV3D_STRESS_AI", "64");
+        std::env::set_var("RV3D_STRESS_AI", "128");
     }
 
     // 资源路径导向（启动器写入 resource_paths.ini）：记录地图/音效/建模自定义目录

@@ -12,6 +12,7 @@
 //! - `game`: 运行时中枢（模块接线）
 
 pub mod ai;
+pub mod ai_command;
 pub mod camera;
 pub mod city;
 #[cfg(windows)]
