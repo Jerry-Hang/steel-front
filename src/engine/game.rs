@@ -816,8 +816,14 @@ pub struct Game {
     stress_sides: usize,
     /// 指挥体系（压力模式）：红蓝各一营（三三制 营连排班，见 ai_command.rs）
     command: Option<(crate::engine::ai_command::Army, crate::engine::ai_command::Army)>,
-    /// LLM 指挥官（RV3D_LLM 启用）：战役级决策覆盖红营（蓝营保持启发式）
+    /// LLM 指挥官（RV3D_LLM 启用）：战役级决策（红/蓝各一独立上下文窗口）
     llm: Option<crate::llm_cmd::LlmCommander>,
+    /// 玩家无敌（数据收集/演示用：RV3D_INVINCIBLE=1 或 RV3D_LLM 启用时自动开）
+    player_invincible: bool,
+    /// 兵力耗尽后的下一轮重置时刻（-1 = 未触发）
+    round_reset_at: f32,
+    /// 本轮获胜方（兵力先耗尽方判负）
+    round_winner: Option<Team>,
     /// 指挥军情日志节流
     command_log_at: f32,
     /// 压力模式对抗轮次（一方团灭补员后 +1）
@@ -1074,6 +1080,17 @@ impl Game {
             stress_round: 0,
             command: None,
             llm: crate::llm_cmd::LlmCommander::from_env(),
+            player_invincible: {
+                let llm_on = std::env::var("RV3D_LLM")
+                    .map(|v| !(v.is_empty() || v == "0" || v == "off"))
+                    .unwrap_or(false);
+                let inv = std::env::var("RV3D_INVINCIBLE")
+                    .map(|v| v == "1" || v == "on" || v == "true")
+                    .unwrap_or(false);
+                inv || llm_on
+            },
+            round_reset_at: -1.0,
+            round_winner: None,
             command_log_at: 0.0,
             ai_parallel: std::env::var("RV3D_AI_PARALLEL")
                 .map(|v| v != "off")
@@ -3176,6 +3193,7 @@ impl Game {
             && dist < radius
             && self.game_state == GameState::Playing
             && self.hud.health > 0.0
+            && !self.player_invincible
         {
             let fall = 1.0 - (dist / radius).clamp(0.0, 1.0);
             let self_dmg = (damage * fall * SELF_DAMAGE_FACTOR).min(SELF_DAMAGE_CAP);
@@ -3934,41 +3952,44 @@ impl Game {
         if self.stress {
             if let Some(cmd) = self.command.as_mut() {
                 let (rc, bc) = team_centroids(&self.npcs);
-                // LLM 指挥官覆盖红营命令（最新有效命令；无/失效 → None 走启发式）
-                let llm_ov: Option<Vec<crate::engine::ai_command::CmdOverride>> = self
-                    .llm
-                    .as_ref()
-                    .and_then(|l| l.take_latest())
-                    .map(|cmds| {
-                        cmds.into_iter()
-                            .map(|c| crate::engine::ai_command::CmdOverride {
-                                order: match c.order {
-                                    crate::llm_cmd::LlmOrder::Assault => {
-                                        crate::engine::ai_command::CompanyOrder::Assault
-                                    }
-                                    crate::llm_cmd::LlmOrder::Hold => {
-                                        crate::engine::ai_command::CompanyOrder::Hold
-                                    }
-                                    crate::llm_cmd::LlmOrder::FlankL => {
-                                        crate::engine::ai_command::CompanyOrder::Flank(1)
-                                    }
-                                    crate::llm_cmd::LlmOrder::FlankR => {
-                                        crate::engine::ai_command::CompanyOrder::Flank(-1)
-                                    }
-                                    crate::llm_cmd::LlmOrder::Regroup => {
-                                        crate::engine::ai_command::CompanyOrder::Regroup
-                                    }
-                                },
-                                x: c.x,
-                                z: c.z,
-                            })
-                            .collect()
-                    });
-                cmd.0.update(&self.npcs, &grid, dt, 0, bc, llm_ov.as_deref());
-                cmd.1.update(&self.npcs, &grid, dt, 0, rc, None);
-                // 态势推送（红营视角 → LLM 决策红营；蓝营保持启发式）
+                // LLM 指挥官：红蓝各一独立上下文窗口互搏（无/失效 → 该侧启发式）
+                let to_ov = |cmds: Vec<crate::llm_cmd::CompanyCmd>| {
+                    cmds.into_iter()
+                        .map(|c| crate::engine::ai_command::CmdOverride {
+                            order: match c.order {
+                                crate::llm_cmd::LlmOrder::Assault => {
+                                    crate::engine::ai_command::CompanyOrder::Assault
+                                }
+                                crate::llm_cmd::LlmOrder::Hold => {
+                                    crate::engine::ai_command::CompanyOrder::Hold
+                                }
+                                crate::llm_cmd::LlmOrder::FlankL => {
+                                    crate::engine::ai_command::CompanyOrder::Flank(1)
+                                }
+                                crate::llm_cmd::LlmOrder::FlankR => {
+                                    crate::engine::ai_command::CompanyOrder::Flank(-1)
+                                }
+                                crate::llm_cmd::LlmOrder::Regroup => {
+                                    crate::engine::ai_command::CompanyOrder::Regroup
+                                }
+                            },
+                            x: c.x,
+                            z: c.z,
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let llm_red: Option<Vec<crate::engine::ai_command::CmdOverride>> =
+                    self.llm.as_ref().and_then(|l| l.take_red()).map(to_ov);
+                let llm_blue: Option<Vec<crate::engine::ai_command::CmdOverride>> =
+                    self.llm.as_ref().and_then(|l| l.take_blue()).map(to_ov);
+                cmd.0.update(&self.npcs, &grid, dt, 0, bc, llm_red.as_deref());
+                cmd.1.update(&self.npcs, &grid, dt, 0, rc, llm_blue.as_deref());
+                // 态势推送（红/蓝各独立上下文）
                 if let Some(l) = &self.llm {
-                    l.push_situation(&build_llm_situation(&cmd.0));
+                    let sr = build_llm_situation(&cmd.0);
+                    let sb = build_llm_situation(&cmd.1);
+                    l.push_red(&sr, cmd.0.companies.len());
+                    l.push_blue(&sb, cmd.1.companies.len());
                 }
                 if self.time - self.command_log_at >= 5.0 {
                     self.command_log_at = self.time;
@@ -4079,7 +4100,8 @@ impl Game {
         // 攻击态 NPC 对玩家造成伤害（1 秒一次），驱动 HUD 血条
         // 伤害值取当前有效波次的 dps（Boss 波更高，见 wave_profile）
         let dps = wave_profile(self.effective_wave(self.wave)).dps;
-        if !self.stress && self.time - self.last_damage_time >= 1.0
+        if !self.stress && !self.player_invincible
+            && self.time - self.last_damage_time >= 1.0
             && self.game_state == GameState::Playing
             && self
                 .npcs
@@ -4176,14 +4198,37 @@ impl Game {
                 blue
             );
         }
-        if red == 0 || blue == 0 {
-            self.stress_round += 1;
+        // 兵力先耗尽方判负（2026-08-23：玩家无敌观战，纯 AI-vs-AI 博弈）
+        if (red == 0 || blue == 0) && self.round_reset_at < 0.0 {
+            let winner = if red == 0 && blue == 0 {
+                None
+            } else if red == 0 {
+                Some(Team::Blue)
+            } else {
+                Some(Team::Red)
+            };
+            self.round_winner = winner;
+            self.round_reset_at = self.time + 10.0;
+            let who = match winner {
+                Some(Team::Red) => "红方",
+                Some(Team::Blue) => "蓝方",
+                None => "平局",
+            };
+            self.hud.victory_banner = Some(format!("{} 获胜（兵力耗尽）— 10 秒后下一轮", who));
             log::info!(
-                "battle: 第 {} 轮结束（红={} 蓝={}），全量补员开新轮",
-                self.stress_round - 1,
+                "battle: 第 {} 轮结束（红={} 蓝={}）→ {} 获胜，10 秒后重置",
+                self.stress_round,
                 red,
-                blue
+                blue,
+                who
             );
+        }
+        // 10 秒后重置：清场重开本轮
+        if self.round_reset_at >= 0.0 && self.time >= self.round_reset_at {
+            self.round_reset_at = -1.0;
+            self.round_winner = None;
+            self.stress_round += 1;
+            log::info!("battle: 第 {} 轮重开（阵亡清场）", self.stress_round);
             self.spawn_stress_battle(player);
         }
     }

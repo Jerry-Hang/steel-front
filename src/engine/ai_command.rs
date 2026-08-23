@@ -239,6 +239,10 @@ impl Army {
         self.tick += dt;
         self.kills = kills;
         self.enemy_centroid = enemy_centroid;
+        // 小规模（<9 人）连未编成：跳过指挥层（逐人战术照常）
+        if self.companies.is_empty() {
+            return;
+        }
         if self.tick < 0.5 {
             return;
         }

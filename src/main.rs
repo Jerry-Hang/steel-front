@@ -9,6 +9,7 @@
 mod engine;
 mod audio;
 mod audio_out;
+mod llm_cmd;
 mod net;
 mod ui;
 mod config;
