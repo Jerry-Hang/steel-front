@@ -53,7 +53,17 @@ fn vs_main(
 ) -> VertexOutput {
     var output: VertexOutput;
     let inst = instances[instance_index];
-    let world_pos = inst.model * vec4<f32>(position, 1.0);
+    // 树冠（绿色 tint 的障碍 marker）顶点揉皱：伪随机扰动局部坐标 → 立方块变有机团块，
+    // 配合片元杂色让树冠呈现体积感（2026-08-23 纸片树修复）
+    var pos = position;
+    if (instance_index >= MARKER_INSTANCE_BASE && instance_index < NPC_INSTANCE_BASE
+        && inst.tint.g > inst.tint.r && inst.tint.g > inst.tint.b * 1.4) {
+        let h = position.x * 12.9898 + position.y * 78.233 + position.z * 37.719
+            + f32(instance_index % 97u) * 0.618;
+        let n = fract(sin(h) * 43758.5453) - 0.5;
+        pos = position + vec3<f32>(n, n * 0.7, n) * 0.38;
+    }
+    let world_pos = inst.model * vec4<f32>(pos, 1.0);
     output.position = camera.proj * camera.view * world_pos;
     output.world_pos = world_pos.xyz;
     // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（刚体变换）
@@ -269,6 +279,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // RV3D_SKIN_TEX=1（light_data.flags.z）启用；缺省 0 保持纯色路径（冒烟基线不变）。
     if (input.flat_flag > 0.5) {
         var base: vec3<f32> = input.color;
+        // 树冠杂色（2026-08-23）：绿色 tint 的障碍，按世界坐标噪声微调颜色 → 团簇感
+        if (input.flat_flag < 1.5 && base.g > base.r && base.g > base.b * 1.4) {
+            let hh = fract(sin(dot(input.world_pos.xz, vec2<f32>(0.137, 0.211))) * 43758.5453);
+            base = base * (0.82 + hh * 0.36);
+        }
         if (light_data.flags.z >= 0.5) {
             if (input.flat_flag > 1.5) {
                 // NPC 士兵：迷彩军服纹理 × 阵营 tint（权重 0.65，阵营识别保留）

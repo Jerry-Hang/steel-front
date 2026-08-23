@@ -1348,9 +1348,10 @@ impl Renderer {
         let preferred = match std::env::var("RV3D_PRESENT_MODE").as_deref() {
             Ok("immediate") => vk::PresentModeKHR::IMMEDIATE,
             Ok("fifo") => vk::PresentModeKHR::FIFO,
-            // 2026-08-23：默认 FIFO（垂直同步）——笔记本混合显卡 + 新驱动下，
-            // MAILBOX 无上限呈现触发低频功率抖动 → VK_ERROR_DEVICE_LOST 反复复现
-            _ => vk::PresentModeKHR::FIFO,
+            // 2026-08-23：默认 IMMEDIATE（配合全局帧率上限 RV3D_FPS 默认 240）——
+            // 独显直连下 FIFO 垂直同步死锁（等不到 vblank 中断）→ 主循环冻结；
+            // MAILBOX 在笔记本混合切换时触发 device lost；IMMEDIATE 最稳。
+            _ => vk::PresentModeKHR::IMMEDIATE,
         };
         let present_mode = present_modes
             .iter()
