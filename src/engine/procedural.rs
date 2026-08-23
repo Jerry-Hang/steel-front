@@ -638,7 +638,8 @@ mod tests {
 
     #[test]
     fn marker_skin_is_warm_wood_tone() {
-        // 木板墙应以暖棕色为主：平均红 > 绿 > 蓝（字节为 sRGB 编码，单调函数，通道排序一致）
+        // 2026-08-23：障碍皮肤由「暖棕木板」改为「中性灰混凝土砌块」
+        // ——校验改为中性灰：r/g/b 相互偏差 < 12%（混凝土无彩度），且整体亮度适中
         let size = 64;
         let tex = generate_marker_skin_texture(size, 3);
         let mut sum = [0.0f64; 3];
@@ -649,7 +650,12 @@ mod tests {
         }
         let n = (size * size) as f64;
         let (r, g, b) = (sum[0] / n, sum[1] / n, sum[2] / n);
-        assert!(r > g && g > b, "木板应暖棕（r>g>b），实际 r={r} g={g} b={b}");
+        let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
+        assert!(
+            (hi - lo) / hi.max(1.0) < 0.12,
+            "混凝土皮肤应中性灰（通道偏差 <12%），实际 r={r:.1} g={g:.1} b={b:.1}"
+        );
+        assert!(hi > 60.0 && hi < 230.0, "混凝土皮肤亮度应适中，实际 max={hi:.1}");
     }
 
     #[test]

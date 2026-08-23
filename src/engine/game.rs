@@ -830,6 +830,9 @@ pub struct Game {
     round_winner: Option<Team>,
     /// 本轮开始时刻（超时判胜用；-1 = 未开战）
     round_started_at: f32,
+    /// 本轮红/蓝累计阵亡（指挥军情 kills 字段）
+    round_kills_red: u32,
+    round_kills_blue: u32,
     /// 指挥军情日志节流
     command_log_at: f32,
     /// 压力模式对抗轮次（一方团灭补员后 +1）
@@ -1104,6 +1107,8 @@ impl Game {
             round_reset_at: -1.0,
             round_winner: None,
             round_started_at: -1.0,
+            round_kills_red: 0,
+            round_kills_blue: 0,
             command_log_at: 0.0,
             ai_parallel: std::env::var("RV3D_AI_PARALLEL")
                 .map(|v| v != "off")
@@ -1266,7 +1271,7 @@ impl Game {
                 // （修复"穿越障碍物"——据点此前只渲染 marker、无任何碰撞体）
                 if let Some(obj) = self.obj_state.as_ref() {
                     for pt in &obj.points {
-                        self.world.bodies.push(Body::new(
+                        self.world.bodies.push(Body::new_static(
                             Pv::new(pt.x, 2.0, pt.z),
                             Pv::new(0.2, 2.0, 0.2),
                         ));
@@ -1425,7 +1430,8 @@ impl Game {
         self.world.bodies.clear();
         self.world.spheres.clear();
         for ob in &self.map.obstacles {
-            self.world.bodies.push(Body::new(
+            // 2026-08-23：地图障碍 = 静态刚体（不沉地/不被撞动）
+            self.world.bodies.push(Body::new_static(
                 Pv::new(ob.x, ob.y, ob.z),
                 Pv::new(ob.half_w, ob.half_h, ob.half_d),
             ));
@@ -4078,8 +4084,8 @@ impl Game {
                     self.llm.as_ref().and_then(|l| l.take_red()).map(to_ov);
                 let llm_blue: Option<Vec<crate::engine::ai_command::CmdOverride>> =
                     self.llm.as_ref().and_then(|l| l.take_blue()).map(to_ov);
-                cmd.0.update(&self.npcs, &grid, dt, 0, bc, llm_red.as_deref());
-                cmd.1.update(&self.npcs, &grid, dt, 0, rc, llm_blue.as_deref());
+                cmd.0.update(&self.npcs, &grid, dt, self.round_kills_red, bc, llm_red.as_deref());
+                cmd.1.update(&self.npcs, &grid, dt, self.round_kills_blue, rc, llm_blue.as_deref());
                 // 态势推送（红/蓝各独立上下文）
                 if let Some(l) = &self.llm {
                     let sr = build_llm_situation(&cmd.0);
@@ -4097,7 +4103,7 @@ impl Game {
             if let Some(cmd) = self.command.as_ref() {
                 self.npcs.iter().map(|n| {
                     let army = match n.team { Team::Red => &cmd.0, Team::Blue => &cmd.1 };
-                    army.squad_waypoint(n.id, n.position)
+                    army.squad_waypoint(n.id)
                 }).collect()
             } else { vec![None; self.npcs.len()] }
         } else { vec![None; self.npcs.len()] };
@@ -4299,6 +4305,15 @@ impl Game {
             return;
         }
         let before = self.npcs.len();
+        // 本轮击杀累计（阵亡者按阵营计数；供指挥军情 kills 字段）
+        for n in &self.npcs {
+            if n.hp <= 0.0 {
+                match n.team {
+                    Team::Red => self.round_kills_red += 1,
+                    Team::Blue => self.round_kills_blue += 1,
+                }
+            }
+        }
         self.npcs.retain(|n| n.hp > 0.0);
         let red = self.npcs.iter().filter(|n| n.team == Team::Red).count();
         let blue = self.npcs.len() - red;
@@ -4352,6 +4367,7 @@ impl Game {
             );
         }
         // 10 秒后重置：清场重开本轮
+        log::info!("dbg-respawn: reset_at={} time={} n={}", self.round_reset_at, self.time, self.npcs.len());
         if self.round_reset_at >= 0.0 && self.time >= self.round_reset_at {
             self.round_reset_at = -1.0;
             self.round_winner = None;
@@ -4377,12 +4393,26 @@ impl Game {
         self.total_collisions += self.collisions.len() as u64;
         if self.time - self.last_event_log_time >= 0.5 {
             self.last_event_log_time = self.time;
-            let kinds: Vec<String> = self
-                .collisions
-                .iter()
-                .map(|e| format!("{:?}", e.kind))
-                .collect();
-            log::info!("physics: {} events this frame ({})", self.collisions.len(), kinds.join(", "));
+            // 直方图（不再全量枚举/格式化，消除逐帧日志刷屏）
+            let (mut ov, mut rs, mut si, mut sr, mut gh) = (0usize, 0usize, 0usize, 0usize, 0usize);
+            for e in &self.collisions {
+                match e.kind {
+                    physics::CollisionKind::AabbOverlap => ov += 1,
+                    physics::CollisionKind::AabbResolved => rs += 1,
+                    physics::CollisionKind::SphereIntersect => si += 1,
+                    physics::CollisionKind::SphereResolved => sr += 1,
+                    physics::CollisionKind::GroundHit => gh += 1,
+                }
+            }
+            log::info!(
+                "physics: {} events (overlap={} resolved={} sphere={} sphere_res={} ground={})",
+                self.collisions.len(),
+                ov,
+                rs,
+                si,
+                sr,
+                gh
+            );
         }
     }
 }
@@ -4536,6 +4566,8 @@ mod tests {
                 ring_outer: MAP_RING_OUTER,
                 obstacles: &game.map.obstacles,
                 squad_wps: &[],
+                spectator: false,
+                fallback_targets: &[],
             };
             let idle_before = npcs[0].position;
             Game::step_ai_parallel(&mut npcs, 0, &ctx); // near_len=0 → 全远组
@@ -4589,10 +4621,22 @@ mod tests {
         for _ in 0..120 {
             game.update(1.0 / 60.0, &Camera::new());
         }
-        for body in &game.world.bodies {
-            assert!(body.grounded, "body should be grounded");
-            let bottom = body.position.y - body.half_extents.y;
-            assert!((bottom - game.world.ground_y).abs() < 0.01, "body should rest on ground");
+        // 2026-08-23：地图障碍已为「静态刚体」——契约：120 帧模拟后位置零漂移
+        // （此前的动态刚体重力化导致树桩沉地 1m / 地基板沉入 4.5m / 墙体被撞动）
+        let spawn: Vec<Pv> = game.world.bodies.iter().map(|b| b.position).collect();
+        for _ in 0..120 {
+            game.update(1.0 / 60.0, &Camera::new());
+        }
+        for (b, s) in game.world.bodies.iter().zip(&spawn) {
+            assert!(b.static_body, "地图障碍应全部为静态刚体");
+            let d = b.position - *s;
+            let dist2 = d.x * d.x + d.y * d.y + d.z * d.z;
+            assert!(
+                dist2 < 1e-7,
+                "静态障碍不应移动：pos={:?} spawn={:?}",
+                b.position,
+                s
+            );
         }
     }
 
@@ -4702,7 +4746,8 @@ mod tests {
         assert_eq!(game.wave, 1, "wave resets to 1 on level up");
         assert!(!game.npcs.is_empty(), "level 2 wave 1 should spawn enemies");
         let l2 = game.map.obstacles.clone();
-        assert_ne!(l1, l2, "level 2 must regenerate the map layout");
+        // 2026-08-23：手绘城市地图跨关卡不变（关卡递进 = 波次强度升阶，不再随机重生成）
+        assert_eq!(l1, l2, "地图跨关卡保持同一张手绘城市（旧随机重生成契约已废弃）");
         // 物理世界与网格同步重建
         assert_eq!(game.world.bodies.len(), l2.len());
     }
@@ -5077,11 +5122,27 @@ mod tests {
         let mut game = Game::new();
         game.on_any_key(&glam::Vec3::ZERO);
         game.npcs.truncate(1);
-        // 玩家在原点，取一个障碍放在玩家与 NPC 之间
-        let ob = game.map.obstacles[0];
+        // 2026-08-23：自建确定性障碍（3m 高窄柱）——地图障碍部署位置随改版漂移，
+        // 高层建筑斜线必挡、低屏障又太矮；自建柱体唯一确定
+        let ob = MapObstacle {
+            x: 0.0,
+            z: 0.0,
+            half_w: 0.5,
+            half_d: 0.5,
+            y: 1.5,
+            half_h: 1.5,
+            kind: ObstacleKind::Block,
+            tint: None,
+            max_hp: 300.0,
+            hp: 300.0,
+        };
+        game.map.obstacles.push(ob);
+        game.world
+            .bodies
+            .push(physics::Body::new_static(Pv::new(0.0, 1.5, 0.0), Pv::new(0.5, 1.5, 0.5)));
         // 玩家 → 障碍中心 → NPC 在障碍另一侧 30m
-        game.player_body.pos = Pv::new(ob.x - ob.half_w - 40.0, 0.0, ob.z);
-        game.npcs[0].position = [ob.x + ob.half_w + 30.0, 0.0, ob.z];
+        game.player_body.pos = Pv::new(-40.0, 0.0, 0.0);
+        game.npcs[0].position = [30.0, 0.0, 0.0];
         assert!(
             game.npc_occluded(0),
             "障碍挡在玩家与 NPC 之间应判定遮挡"
@@ -5337,8 +5398,12 @@ mod tests {
             != server_game.net_snap_seq
             && std::time::Instant::now() < deadline
         {
+            // 2026-08-23：等待期间服务器也必须继续更新（否则不产新快照）
             client_game.update(1.0 / 60.0, &camera);
+            server_game.update(1.0 / 60.0, &camera);
         }
+        // 收尾：客户端再消费一次（服务器已停止生产 → 快照序号追平）
+        client_game.update(1.0 / 60.0, &camera);
         let client = client_game.net_client.as_ref().unwrap();
         assert_eq!(client.player_id(), Some(1), "握手应分配 player id 1");
         assert!(client.snapshot_seq() > 0, "应收到服务端快照");
@@ -5386,7 +5451,9 @@ mod tests {
             .has_objective()
             && std::time::Instant::now() < deadline
         {
+            // 2026-08-23：等待期间服务器也必须继续更新（否则广播停止）
             client_game.update(1.0 / 60.0, &camera);
+            server_game.update(1.0 / 60.0, &camera);
         }
         let client = client_game.net_client.as_ref().unwrap();
         assert!(client.has_objective(), "客户端应收到目标状态");
@@ -6029,6 +6096,9 @@ mod tests {
                 ring_inner: MAP_RING_INNER,
                 ring_outer: MAP_RING_OUTER,
                 obstacles: &game.map.obstacles,
+                squad_wps: &[],
+                spectator: false,
+                fallback_targets: &[],
             };
             let ctx_p = AiStepCtx {
                 player: &player,
@@ -6045,6 +6115,9 @@ mod tests {
                 ring_inner: MAP_RING_INNER,
                 ring_outer: MAP_RING_OUTER,
                 obstacles: &game.map.obstacles,
+                squad_wps: &[],
+                spectator: false,
+                fallback_targets: &[],
             };
             Game::step_ai_serial(&mut npcs_s, &ctx_s);
             Game::step_ai_parallel(&mut npcs_p, near_len, &ctx_p);
@@ -6108,6 +6181,9 @@ mod tests {
             ring_inner: MAP_RING_INNER,
             ring_outer: MAP_RING_OUTER,
             obstacles: &game.map.obstacles,
+            squad_wps: &[],
+            spectator: false,
+            fallback_targets: &[],
         };
         let mut npcs_a = npcs_a;
         Game::step_ai_serial(&mut npcs_a, &ctx_a);
@@ -6188,6 +6264,8 @@ mod tests {
             ring_outer: MAP_RING_OUTER,
             obstacles: &game.map.obstacles,
             squad_wps: &[],
+            spectator: false,
+            fallback_targets: &[],
         };
         let mut npcs = npcs;
         Game::step_ai_serial(&mut npcs, &ctx);
@@ -6250,6 +6328,9 @@ mod tests {
             }
         }
         game.game_state = GameState::Playing;
+        game.update_stress_respawns(&player);
+        // 胜利后 10 秒重置：计时器置 0（非负且已到期）触发第二轮
+        game.round_reset_at = 0.0;
         game.update_stress_respawns(&player);
         assert_eq!(game.stress_round, round0 + 1, "团灭应开新一轮");
         assert_eq!(game.npcs.len(), 7, "全量补员（红 4 + 蓝 3）");
@@ -6390,6 +6471,9 @@ mod tests {
         }
         game.game_state = GameState::Playing;
         let round0 = game.stress_round;
+        game.update_stress_respawns(&player);
+        // 2026-08-23：胜利后 10 秒重置（战场停顿）——计时器置 0（非负且已到期）触发第二轮
+        game.round_reset_at = 0.0;
         game.update_stress_respawns(&player);
         assert_eq!(game.stress_round, round0 + 1, "补员逻辑不受影响");
         assert!(game.hud.victory_banner.is_some(), "达成后应显示胜利横幅（保留到下一轮）");

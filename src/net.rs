@@ -797,8 +797,10 @@ impl Client {
             entities: HashMap::new(),
             last_rx: Instant::now(),
             timeout: CLIENT_TIMEOUT,
-            // 首次 retry_join 立即发送握手包
-            last_join_at: Instant::now() - Duration::from_secs(3600),
+            // 首次 retry_join 立即发送握手包（checked_sub：进程启动不足 1 小时时无下溢）
+            last_join_at: Instant::now()
+                .checked_sub(Duration::from_secs(3600))
+                .unwrap_or_else(Instant::now),
             objective: Vec::new(),
             objective_rule: String::new(),
             objective_seq: 0,

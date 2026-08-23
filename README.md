@@ -43,7 +43,7 @@
 
 | 项目 | 说明 |
 |---|---|
-| API | Vulkan（ash 0.38），实例声明 1.3，实际使用 1.0 核心 + VK_KHR_swapchain |
+| API | **Vulkan 1.3**（ash 0.38：实例与设备均按 1.3 请求/启用，不再有 1.1-era 兼容代码）；设备扩展 VK_KHR_swapchain（必需）+ VK_EXT_mesh_shader（可选主路径）；特性 samplerAnisotropy / meshShader 按可用性启用 |
 | 窗口 | winit 0.30（Windows/Linux） |
 | 数学 | glam 0.29 |
 | 着色器语言 | WGSL，经 **naga 30 在 build.rs 构建期编译**为内联 SPIR-V（assets/*.spv） |
@@ -138,7 +138,36 @@
 | 4K 低画质 | 12700K 或 7700X | RTX 3080 12GB 或 RTX 4070 | 16GB+ |
 | 4K 高画质 | 13700K 或 7900X | RTX 4070 Super 或 RX 9070 GRE | 32GB+ |
 
-**当前开发验证环境**：RTX 5060 Laptop（8GB）+ Ryzen（16 核 32 线程）+ 2560×1600@144Hz，release 构建稳定 330–420 fps（65536 实例场压力场景）。
+**当前开发验证环境**：RTX 5060 Laptop（8GB）+ Ryzen（16 核 32 线程）+ 2560×1600@144Hz；128v128 大战场压力模式 116–240 fps（默认帧率上限 240，LLM 采集模式 90；独显直连下 IMMEDIATE 呈现最稳）。
+
+## Vulkan 特性说明（1.3）
+
+> 引擎按 **Vulkan 1.3** 编写与运行（ash 0.38 全量 1.3 头；实例 `vkApiVersion` 1.3，设备创建按 1.3 请求）。**不再是 1.1-era 的代码**：不包含 1.1 时期的兼容前向路径，管线/同步/内存均按 1.3 语义实现。
+
+### 版本与扩展**
+
+| 项 | 内容 | 必需性 |
+|---|---|---|
+| 核心版本 | Vulkan 1.3（API 版本请求） | 必需 |
+| VK_KHR_swapchain | 呈现/交换链 | 必需 |
+| VK_EXT_mesh_shader | 网格着色器主渲染路径 | 可选（缺失→传统顶点管线回退） |
+| samplerAnisotropy | 各向异性过滤（地面/皮肤纹理） | 可选（设备支持时启用） |
+| 经典 vkRenderPass 管线 | 渲染管线采用经典 renderpass（1.0 核心 API 子集，在 1.3 设备上合法有效）；**后续升级项**：迁移 1.3 核心的 dynamic rendering（VK_KHR_dynamic_rendering 已入 1.3 核心）以采用现代单次渲染通道 | 兼容层 |
+
+### 主渲染路径（网格着色器）
+
+- 65536 实例地面/标记/NPC 实例场：GPU 逐实例视锥剔除 + 顶点变换（VK_EXT_mesh_shader 的 mesh 管线）；
+- 需要支持 `VK_EXT_mesh_shader` + `meshShader` 特性的 GPU（实测 NVIDIA RTX 20 系+ / AMD RX 6000 系+ / Intel Arc）；
+- 缺失该扩展的显卡自动回退到 **冻结维护的传统顶点管线**（同一 1.3 设备上的兼容路径）。
+
+### 兼容矩阵
+
+| GPU | 主路径 | 备注 |
+|---|---|---|
+| NVIDIA RTX 2060+ / RTX 30/40/50 系 | 网格着色器 | 开发验证：RTX 5060 Laptop |
+| AMD RX 6000 系+ | 网格着色器 | — |
+| Intel Arc A 系列 | 网格着色器 | — |
+| 其它无 VK_EXT_mesh_shader 驱动 | 传统顶点管线（回退） | 功能冻结，仅保证可运行 |
 
 ---
 

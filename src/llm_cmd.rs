@@ -177,7 +177,8 @@ impl<'a> P<'a> {
                     b'\\' => '\\',
                     b'/' => '/',
                     b'u' => {
-                        let h = String::from_utf8_lossy(&self.s[self.i..self.i + 4]).to_string();
+                        let rem = self.s.get(self.i..self.i + 4).ok_or("unicode 转义截断")?;
+                        let h = String::from_utf8_lossy(rem).to_string();
                         self.i += 4;
                         let cp = u32::from_str_radix(&h, 16).map_err(|_| "unicode 转义非法")?;
                         char::from_u32(cp).ok_or("unicode 码点非法")?

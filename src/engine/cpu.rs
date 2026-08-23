@@ -130,7 +130,7 @@ mod win_topology {
         ) -> i32;
     }
 
-    fn query(rel: u32) -> Option<Vec<u8>> {
+    fn query(rel: u32) -> Option<Vec<u64>> {
         let mut len: u32 = 0;
         unsafe {
             GetLogicalProcessorInformationEx(rel, std::ptr::null_mut(), &mut len);
@@ -138,12 +138,16 @@ mod win_topology {
         if len == 0 {
             return None;
         }
-        let mut buf: Vec<u8> = vec![0u8; len as usize];
+        // 2026-08-23：Win32 要求缓冲 64 字节对齐——改用 Vec<u64>（16 字节对齐，
+        // 远超 InfoEx 内的 u64 字段要求），避免 Vec<u8> 仅 1 字节对齐的非对齐引用 UB
+        let words = (len as usize + 7) / 8;
+        let mut buf: Vec<u64> = vec![0u64; words];
+        let mut cap = (words * 8) as u32;
         let ok = unsafe {
             GetLogicalProcessorInformationEx(
                 rel,
                 buf.as_mut_ptr() as *mut InfoEx,
-                &mut len,
+                &mut cap,
             )
         };
         if ok == 0 {

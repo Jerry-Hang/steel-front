@@ -256,6 +256,9 @@ pub struct Body {
     pub restitution: f32,
     /// 是否已静止在地面上
     pub grounded: bool,
+    /// 静态刚体（2026-08-23）：地图障碍/地基——不受重力、地面钳位、对撞只推动动态方；
+    /// 此前把障碍当动态刚体导致树桩沉地 1m、地基板沉入 4.5m、NPC 可撞动墙体
+    pub static_body: bool,
 }
 
 impl Body {
@@ -266,6 +269,19 @@ impl Body {
             velocity: Vec3::ZERO,
             restitution: 0.0,
             grounded: false,
+            static_body: false,
+        }
+    }
+
+    /// 静态刚体（地图障碍：不随重力/对撞移动）
+    pub fn new_static(position: Vec3, half_extents: Vec3) -> Self {
+        Self {
+            position,
+            half_extents,
+            velocity: Vec3::ZERO,
+            restitution: 0.0,
+            grounded: true,
+            static_body: true,
         }
     }
 
@@ -488,6 +504,9 @@ impl World {
         let n = self.bodies.len();
         for i in 0..n {
             let body = &mut self.bodies[i];
+            if body.static_body {
+                continue;
+            }
             if !body.grounded {
                 body.velocity.y -= self.gravity * dt;
             }
@@ -575,9 +594,20 @@ impl World {
                     0.0,
                 ));
                 if let Some((normal, penetration)) = aabb_separation(&aabbs[i], &aabbs[j]) {
-                    let half = penetration * 0.5;
-                    self.bodies[i].position += normal * half;
-                    self.bodies[j].position -= normal * half;
+                    let (si, sj) = (self.bodies[i].static_body, self.bodies[j].static_body);
+                    // 2026-08-23 静态刚体：静态-静态不解析；静态-动态只推动态方（障碍不被撞动）
+                    if si && sj {
+                        continue;
+                    }
+                    if si {
+                        self.bodies[j].position -= normal * penetration;
+                    } else if sj {
+                        self.bodies[i].position += normal * penetration;
+                    } else {
+                        let half = penetration * 0.5;
+                        self.bodies[i].position += normal * half;
+                        self.bodies[j].position -= normal * half;
+                    }
                     self.emit(CollisionEvent::new(
                         CollisionKind::AabbResolved,
                         Some(i),

@@ -59,14 +59,6 @@ pub enum BattleSituation {
     Regroup,
 }
 
-/// 班目标点 + 班内阵型槽（班长居中，战士侧后楔形）
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub struct SquadOrder {
-    pub objective: [f32; 2],
-    pub order: CompanyOrder,
-}
-
 pub struct Squad {
     pub id: usize,
     pub members: Vec<usize>,
@@ -98,7 +90,8 @@ pub struct Company {
     pub members: Vec<usize>,
     pub leader: Option<usize>,
     #[allow(dead_code)]
-    pub squads: Vec<usize>,
+    /// 所属排序号（排 id 列表；内容一直是排 id，2026-08-23 由 squads 更名避免歧义）
+    pub platoon_ids: Vec<usize>,
     pub objective: [f32; 2],
     pub order: CompanyOrder,
     pub report: CompanyReport,
@@ -178,7 +171,7 @@ impl Army {
                         id: c_id,
                         members: cm.clone(),
                         leader: cm.last().copied(),
-                        squads: (platoons.len() - 3..platoons.len()).collect(),
+                        platoon_ids: (platoons.len() - 3..platoons.len()).collect(),
                         objective: [0.0, 0.0],
                         order: CompanyOrder::Assault,
                         report: CompanyReport {
@@ -206,10 +199,6 @@ impl Army {
 
     /// 该 NPC 所在班
     #[allow(dead_code)]
-    pub fn squad_of(&self, npc_id: usize) -> Option<usize> {
-        self.soldier_slot.get(&npc_id).map(|(s, _)| *s)
-    }
-
     /// 该 NPC 是否班长
     pub fn is_leader(&self, npc_id: usize) -> bool {
         self.soldier_slot
@@ -220,12 +209,6 @@ impl Army {
 
     /// 全营存活数
     #[allow(dead_code)]
-    pub fn strength(&self, npcs: &[crate::engine::game::Npc], side: Team) -> f32 {
-        npcs.iter()
-            .filter(|n| n.team == side)
-            .count() as f32
-    }
-
     /// 指挥节拍：每 0.5s 重新评估军情并下发命令（由 game.rs 在 update_ai 内调用）
     pub fn update(
         &mut self,
@@ -387,7 +370,7 @@ impl Army {
     }
 
     /// 战士的排位目标点（未接敌时编队推进用；接敌后由 game.rs 既有战术接管）
-    pub fn squad_waypoint(&self, npc_id: usize, npc_pos: [f32; 3]) -> Option<[f32; 2]> {
+    pub fn squad_waypoint(&self, npc_id: usize) -> Option<[f32; 2]> {
         let (squad_id, slot) = self.soldier_slot.get(&npc_id)?;
         let squad = &self.squads.get(*squad_id)?;
         if matches!(squad.order, CompanyOrder::Regroup) {
@@ -396,7 +379,6 @@ impl Army {
         let off = FORMATION_OFFSETS[*slot % FORMATION_OFFSETS.len()];
         // 以班目标点为锚，班内槽位偏移（不旋转——大战场上可接受并保持确定）
         let mut wp = [squad.objective[0] + off[0], squad.objective[1] + off[1]];
-        let _ = npc_pos;
         wp[0] = wp[0].clamp(-270.0, 270.0);
         wp[1] = wp[1].clamp(-270.0, 270.0);
         Some(wp)

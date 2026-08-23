@@ -81,8 +81,11 @@ mod win {
             return;
         }
         let ctx = unsafe { &*(dw_user as *const CallbackCtx) };
+        // dw1 = 完成的 WAVEHDR 指针（非缓冲索引！）：从 hdr.dw_user 取回真实索引
+        // （2026-08-23 修复：此前直接 push dw1 → 首块播完（~85ms）即索引越界 panic）
+        let idx = unsafe { (*(dw1 as *const WaveHdr)).dw_user };
         if let Ok(mut free) = ctx.free.lock() {
-            free.push(dw1);
+            free.push(idx);
         }
     }
 
