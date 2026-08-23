@@ -29,11 +29,11 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 2048u;
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 3072u;
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
 // 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×1024：
 // 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
-const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
+const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -76,7 +76,7 @@ fn vs_main(
     }
     // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+64+3072+64）：
     // flat=3 = baked 顶点光照直出路径（2026-08-22：marker 改走实时光照后，枪模保持烘焙）
-    if (instance_index == 73793u) {
+    if (instance_index == 77889u) {
         output.flat_flag = 3.0;
         output.fade = 1.0;
     }
@@ -330,8 +330,8 @@ struct Instance {
 // EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+3072=68673（NPC 三几何区：盒/圆柱/球，各 1024）
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 2048u;
-const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 3072u;
+const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
 
 // 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
 struct VertexOutput {

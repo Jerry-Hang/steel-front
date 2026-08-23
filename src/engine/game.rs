@@ -816,6 +816,8 @@ pub struct Game {
     stress_sides: usize,
     /// 指挥体系（压力模式）：红蓝各一营（三三制 营连排班，见 ai_command.rs）
     command: Option<(crate::engine::ai_command::Army, crate::engine::ai_command::Army)>,
+    /// LLM 指挥官（RV3D_LLM 启用）：战役级决策覆盖红营（蓝营保持启发式）
+    llm: Option<crate::llm_cmd::LlmCommander>,
     /// 指挥军情日志节流
     command_log_at: f32,
     /// 压力模式对抗轮次（一方团灭补员后 +1）
@@ -1071,6 +1073,7 @@ impl Game {
                 .unwrap_or(128),
             stress_round: 0,
             command: None,
+            llm: crate::llm_cmd::LlmCommander::from_env(),
             command_log_at: 0.0,
             ai_parallel: std::env::var("RV3D_AI_PARALLEL")
                 .map(|v| v != "off")
@@ -3931,8 +3934,42 @@ impl Game {
         if self.stress {
             if let Some(cmd) = self.command.as_mut() {
                 let (rc, bc) = team_centroids(&self.npcs);
-                cmd.0.update(&self.npcs, &grid, dt, 0, bc);
-                cmd.1.update(&self.npcs, &grid, dt, 0, rc);
+                // LLM 指挥官覆盖红营命令（最新有效命令；无/失效 → None 走启发式）
+                let llm_ov: Option<Vec<crate::engine::ai_command::CmdOverride>> = self
+                    .llm
+                    .as_ref()
+                    .and_then(|l| l.take_latest())
+                    .map(|cmds| {
+                        cmds.into_iter()
+                            .map(|c| crate::engine::ai_command::CmdOverride {
+                                order: match c.order {
+                                    crate::llm_cmd::LlmOrder::Assault => {
+                                        crate::engine::ai_command::CompanyOrder::Assault
+                                    }
+                                    crate::llm_cmd::LlmOrder::Hold => {
+                                        crate::engine::ai_command::CompanyOrder::Hold
+                                    }
+                                    crate::llm_cmd::LlmOrder::FlankL => {
+                                        crate::engine::ai_command::CompanyOrder::Flank(1)
+                                    }
+                                    crate::llm_cmd::LlmOrder::FlankR => {
+                                        crate::engine::ai_command::CompanyOrder::Flank(-1)
+                                    }
+                                    crate::llm_cmd::LlmOrder::Regroup => {
+                                        crate::engine::ai_command::CompanyOrder::Regroup
+                                    }
+                                },
+                                x: c.x,
+                                z: c.z,
+                            })
+                            .collect()
+                    });
+                cmd.0.update(&self.npcs, &grid, dt, 0, bc, llm_ov.as_deref());
+                cmd.1.update(&self.npcs, &grid, dt, 0, rc, None);
+                // 态势推送（红营视角 → LLM 决策红营；蓝营保持启发式）
+                if let Some(l) = &self.llm {
+                    l.push_situation(&build_llm_situation(&cmd.0));
+                }
                 if self.time - self.command_log_at >= 5.0 {
                     self.command_log_at = self.time;
                     log::info!("command: 红{} | 蓝{}", cmd.0.summary(), cmd.1.summary());
@@ -6441,6 +6478,36 @@ fn advance_npc(
 }
 
 /// 红蓝阵营存活 NPC 的平均 x/z（阵营为空 → [0.0, 0.0]；命令行军/军情用）
+/// 生成红营态势 JSON（LLM 指挥官输入；严格字段：兵力/重心/接敌/当前命令）
+fn build_llm_situation(a: &crate::engine::ai_command::Army) -> String {
+    let side = match a.side {
+        Team::Red => "red",
+        Team::Blue => "blue",
+    };
+    let mut s = format!(
+        "{{\"battle\":\"128v128\",\"side\":\"{side}\",\"map_half\":270,\"enemy\":{{\"x\":{:.0},\"z\":{:.0}}},\"companies\":[",
+        a.enemy_centroid[0], a.enemy_centroid[1]
+    );
+    for (i, c) in a.companies.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let cur = match c.order {
+            crate::engine::ai_command::CompanyOrder::Assault => "Assault",
+            crate::engine::ai_command::CompanyOrder::Hold => "Hold",
+            crate::engine::ai_command::CompanyOrder::Flank(1) => "FlankL",
+            crate::engine::ai_command::CompanyOrder::Flank(_) => "FlankR",
+            crate::engine::ai_command::CompanyOrder::Regroup => "Regroup",
+        };
+        s.push_str(&format!(
+            "{{\"id\":{i},\"strength\":{:.0},\"x\":{:.0},\"z\":{:.0},\"contact\":{},\"current\":\"{cur}\"}}",
+            c.report.strength, c.report.centroid[0], c.report.centroid[1], c.report.contact
+        ));
+    }
+    s.push_str("]}");
+    s
+}
+
 fn team_centroids(npcs: &[Npc]) -> ([f32; 2], [f32; 2]) {
     let mut rc = [0.0f32; 2];
     let mut bc = [0.0f32; 2];

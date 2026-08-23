@@ -85,6 +85,14 @@ pub struct Platoon {
     pub objective: [f32; 2],
 }
 
+/// 外部（LLM 指挥官）下发的连长命令覆盖：任务 + 目标点
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CmdOverride {
+    pub order: CompanyOrder,
+    pub x: f32,
+    pub z: f32,
+}
+
 pub struct Company {
     pub id: usize,
     pub members: Vec<usize>,
@@ -107,7 +115,7 @@ pub struct Army {
     tick: f32,
     situation: BattleSituation,
     /// 敌营重心（由 game.rs 每 tick 写入，供司令参考）
-    enemy_centroid: [f32; 2],
+    pub enemy_centroid: [f32; 2],
 }
 
 /// 班内阵型槽（相对班目标点的偏移，楔形：班长居中前，双战士后侧）
@@ -226,6 +234,7 @@ impl Army {
         dt: f32,
         kills: u32,
         enemy_centroid: [f32; 2],
+        llm: Option<&[CmdOverride]>,
     ) {
         self.tick += dt;
         self.kills = kills;
@@ -298,8 +307,22 @@ impl Army {
             (my_c[1] + self.enemy_centroid[1]) * 0.5,
         ];
         // 3) 逐连下发：命令 + 目标点（侧翼命令取垂直方向偏移）
+        //    LLM 指挥官覆盖：数量匹配时直接采用外部命令（目标点越界由 llm_cmd 校验过）
         let company_count = self.companies.len();
+        let llm_ok = llm.map(|o| o.len() == company_count).unwrap_or(false);
         for (ci, c) in self.companies.iter_mut().enumerate() {
+            if llm_ok {
+                let o = &llm.unwrap()[ci];
+                c.order = o.order;
+                c.objective = [o.x.clamp(-280.0, 280.0), o.z.clamp(-280.0, 280.0)];
+                c.report = company_reports.get(ci).copied().unwrap_or(CompanyReport {
+                    strength: 0.0,
+                    centroid: [0.0, 0.0],
+                    contact: false,
+                    kills: 0,
+                });
+                continue;
+            }
             let order = match self.situation {
                 BattleSituation::Offense => CompanyOrder::Assault,
                 BattleSituation::Defend => CompanyOrder::Hold,
