@@ -83,6 +83,8 @@ struct GameApp {
     last_frame: Instant,
     /// 上一帧 update+render 总耗时（微秒，性能日志用）
     last_cycle_us: u64,
+    /// 采集模式帧率上限（0 = 不限；LLM 模式 90）
+    llm_cap_fps: f32,
     /// 上一帧 update（逻辑）耗时（微秒，性能日志用）
     last_update_us: u64,
     /// 上一帧 render（渲染提交）耗时（微秒，性能日志用）
@@ -190,6 +192,14 @@ impl GameApp {
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             last_cycle_us: 0,
+            llm_cap_fps: if std::env::var("RV3D_LLM")
+                .map(|v| !(v.is_empty() || v == "0" || v == "off"))
+                .unwrap_or(false)
+            {
+                90.0
+            } else {
+                0.0
+            },
             last_update_us: 0,
             last_render_us: 0,
             fire_requested: false,
@@ -2128,6 +2138,15 @@ impl ApplicationHandler for GameApp {
         self.last_render_us = render_start.elapsed().as_micros() as u64;
         self.last_update_us = update_us;
         self.last_cycle_us = cycle_start.elapsed().as_micros() as u64;
+        // 采集模式帧率上限（RV3D_LLM=1 时 90FPS 封顶）：大幅降低 GPU 负载，
+        // 避免与 llama-server 长时间同卡共存导致 VK_ERROR_DEVICE_LOST（2026-08-23）
+        if self.llm_cap_fps > 0.0 {
+            let used = cycle_start.elapsed().as_secs_f32();
+            let target = 1.0 / self.llm_cap_fps;
+            if used < target {
+                std::thread::sleep(std::time::Duration::from_secs_f32(target - used));
+            }
+        }
     }
 }
 

@@ -824,6 +824,8 @@ pub struct Game {
     round_reset_at: f32,
     /// 本轮获胜方（兵力先耗尽方判负）
     round_winner: Option<Team>,
+    /// 本轮开始时刻（超时判胜用；-1 = 未开战）
+    round_started_at: f32,
     /// 指挥军情日志节流
     command_log_at: f32,
     /// 压力模式对抗轮次（一方团灭补员后 +1）
@@ -936,6 +938,9 @@ struct AiStepCtx<'a> {
     obstacles: &'a [MapObstacle],
     /// 班指挥目标点（压力模式：未接敌战士按班目标编队推进；None = 逐人战术照旧）
     squad_wps: &'a [Option<[f32; 2]>],
+    /// 观战模式（玩家无敌）：NPC 无可见敌人时的兜底目标 = 敌方重心（不再锁玩家造成火力浪费）
+    spectator: bool,
+    fallback_targets: &'a [[f32; 3]],
 }
 
 /// 压力模式目标预选：每 NPC 找视野内最近的敌对阵营 NPC（纯读，O(n²)）。
@@ -1091,6 +1096,7 @@ impl Game {
             },
             round_reset_at: -1.0,
             round_winner: None,
+            round_started_at: -1.0,
             command_log_at: 0.0,
             ai_parallel: std::env::var("RV3D_AI_PARALLEL")
                 .map(|v| v != "off")
@@ -3647,6 +3653,7 @@ impl Game {
             crate::engine::ai_command::Army::build(Team::Blue, &blue_ids),
         ));
         log::info!("command: 三三制编成 红营 {} 人 / 蓝营 {} 人", red_ids.len(), blue_ids.len());
+        self.round_started_at = self.time;
         log::info!(
             "battle: 压力模式第 {} 轮开战（红 {} vs 蓝 {}+玩家，共 {} 名 NPC，并行 AI={}）",
             self.stress_round,
@@ -3665,6 +3672,10 @@ impl Game {
         // 目标位置：压力模式取预选敌对 NPC（快照位置 + 朝向），普通模式恒为玩家
         let target_pos = match (ctx.stress, ctx.targets.get(index).copied().flatten()) {
             (true, Some((_, tp, _))) => glam::Vec3::new(tp[0], 0.0, tp[2]),
+            (true, None) if ctx.spectator => {
+                let f = ctx.fallback_targets.get(index).copied().unwrap_or([0.0, 0.0, 0.0]);
+                glam::Vec3::new(f[0], 0.0, f[2])
+            }
             _ => *ctx.player,
         };
         let dx = npc.position[0] - target_pos.x;
@@ -3692,7 +3703,8 @@ impl Game {
         let under_fire = ctx.under_fire.get(index).copied().unwrap_or(false);
         npc.perception = NpcPerception {
             enemy_visible: dist < sight,
-            enemy_in_range: dist < npc.attack_range,
+            // 压力模式攻击距离放宽 x2.5（约 30m）：同速互追刷步机的残局收敛（2026-08-23）
+            enemy_in_range: dist < npc.attack_range * if ctx.stress { 2.5 } else { 1.0 },
             start_patrol: prev == NpcState::Idle,
             patrol_finished: false,
             player_aiming: facing_angle < AIM_ANGLE && dist < sight,
@@ -3931,6 +3943,19 @@ impl Game {
         // 重排后 under_fire / targets 均在当前数组顺序上构建，帧内索引对齐；
         // 各 NPC 步进彼此独立（AiStepCtx 只读），重排不改变步进语义。
         let stress = self.stress;
+        // 观战模式（玩家无敌）：NPC 目标兜底 = 敌方重心（红/蓝互搏，火力不浪费在无敌玩家上）
+        let (rc, bc) = team_centroids(&self.npcs);
+        let fallback_targets: Vec<[f32; 3]> = if self.player_invincible {
+            self.npcs
+                .iter()
+                .map(|n| match n.team {
+                    Team::Red => [bc[0], 0.0, bc[1]],
+                    Team::Blue => [rc[0], 0.0, rc[1]],
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let tier_params = AiTierParams::default();
         let near_len = partition_ai_tiers(&mut self.npcs, |npc| {
             ai_tier_of(npc, &player, stress, &tier_params)
@@ -4056,6 +4081,8 @@ impl Game {
                 ring_outer: theme.ring_outer,
                 obstacles: &self.map.obstacles,
                 squad_wps: &squad_wps,
+                spectator: self.player_invincible,
+                fallback_targets: &fallback_targets,
             };
             if self.npcs.len() >= PARALLEL_AI_MIN && self.ai_parallel {
                 // safety: 已分层（Near 在前），双池分片互不相交；ctx 只含共享只读数据
@@ -4086,7 +4113,7 @@ impl Game {
                 tactics[npc.tactic as usize] += 1;
             }
             log::info!(
-                "ai: npcs={} near={} far={} idle={} patrol={} chase={} attack={} tactics={:?}",
+                "ai: npcs={} near={} far={} idle={} patrol={} chase={} attack={} tactics={:?} red={} blue={} ra={} ba={} rc=({:.0},{:.0}) bc=({:.0},{:.0})",
                 self.npcs.len(),
                 near_len,
                 self.npcs.len() - near_len,
@@ -4094,7 +4121,19 @@ impl Game {
                 counts[1],
                 counts[2],
                 counts[3],
-                tactics
+                tactics,
+                self.npcs.iter().filter(|n| n.team == Team::Red).count(),
+                self.npcs.iter().filter(|n| n.team == Team::Blue).count(),
+                self.npcs
+                    .iter()
+                    .filter(|n| n.team == Team::Red && n.state_machine.state() == NpcState::Attack)
+                    .count(),
+                self.npcs
+                    .iter()
+                    .filter(|n| n.team == Team::Blue && n.state_machine.state() == NpcState::Attack)
+                    .count(),
+                bc[0], bc[1],
+                rc[0], rc[1],
             );
         }
         // 攻击态 NPC 对玩家造成伤害（1 秒一次），驱动 HUD 血条
@@ -4196,6 +4235,18 @@ impl Game {
                 before - self.npcs.len(),
                 red,
                 blue
+            );
+        }
+        // 回合超时上限（2026-08-23：城市地图下残局易僵持刷步，300s 按存活多者判胜）
+        if red > 0 && blue > 0 && self.round_started_at >= 0.0 && self.time - self.round_started_at > 300.0 {
+            let winner = if red >= blue { Some(Team::Red) } else { Some(Team::Blue) };
+            let who = if winner == Some(Team::Red) { "红方" } else { "蓝方" };
+            self.round_reset_at = self.time + 10.0;
+            self.round_winner = winner;
+            self.hud.victory_banner = Some(format!("{} 获胜（回合超时 存活 {}:{}）— 10 秒后下一轮", who, red, blue));
+            log::info!(
+                "battle: 第 {} 轮超时（红={} 蓝={}）→ {} 获胜，10 秒后重置",
+                self.stress_round, red, blue, who
             );
         }
         // 兵力先耗尽方判负（2026-08-23：玩家无敌观战，纯 AI-vs-AI 博弈）

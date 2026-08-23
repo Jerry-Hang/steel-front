@@ -487,14 +487,22 @@ impl LlmCommander {
             .name("llm-commander".into())
             .spawn(move || {
                 let mut next_run = Instant::now() + Duration::from_millis((interval * 1000.0) as u64);
+                let mut cycle = 0u32;
                 while !sh2.stopped.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(250));
                     if Instant::now() < next_run {
                         continue;
                     }
                     next_run = Instant::now() + Duration::from_millis((interval * 1000.0) as u64);
-                    decide_side(&sh2.red, "red", &url);
-                    decide_side(&sh2.blue, "blue", &url);
+                    // 交替顺序：消除服务器缓存/预热对先手侧的系统性偏好（红/蓝对称服务）
+                    if cycle % 2 == 0 {
+                        decide_side(&sh2.red, "red", &url);
+                        decide_side(&sh2.blue, "blue", &url);
+                    } else {
+                        decide_side(&sh2.blue, "blue", &url);
+                        decide_side(&sh2.red, "red", &url);
+                    }
+                    cycle = cycle.wrapping_add(1);
                 }
             })
             .ok();
