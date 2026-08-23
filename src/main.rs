@@ -192,13 +192,17 @@ impl GameApp {
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             last_cycle_us: 0,
-            llm_cap_fps: if std::env::var("RV3D_LLM")
-                .map(|v| !(v.is_empty() || v == "0" || v == "off"))
-                .unwrap_or(false)
-            {
-                90.0
-            } else {
-                0.0
+            llm_cap_fps: {
+                // 全局帧率上限（2026-08-23 防 GPU 驻停留态 device lost）：
+                // RV3D_FPS 覆盖；默认 240；LLM 采集模式 90（留 GPU 余量）
+                let llm_on = std::env::var("RV3D_LLM")
+                    .map(|v| !(v.is_empty() || v == "0" || v == "off"))
+                    .unwrap_or(false);
+                let cap = std::env::var("RV3D_FPS")
+                    .ok()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(if llm_on { 90.0 } else { 240.0 });
+                cap.max(20.0)
             },
             last_update_us: 0,
             last_render_us: 0,

@@ -214,6 +214,10 @@ pub struct Npc {
     pub path: Vec<GridPos>,
     /// 路径游标
     path_index: usize,
+    /// 寻路全空时直行机动（残局卡死修复）；目标世界坐标
+    pub direct_goal: bool,
+    pub direct_x: f32,
+    pub direct_z: f32,
     /// 当前血量
     pub hp: f32,
     /// 血量上限（出生时设定，随波次递进）
@@ -1001,6 +1005,9 @@ impl Game {
                 perception: NpcPerception::default(),
                 path: Vec::new(),
                 path_index: 0,
+                direct_goal: false,
+                direct_x: 0.0,
+                direct_z: 0.0,
                 hp: 100.0,
                 max_hp: 100.0,
                 role: TacticalRole::Rusher,
@@ -3563,6 +3570,9 @@ impl Game {
             perception: NpcPerception::default(),
             path: Vec::new(),
             path_index: 0,
+            direct_goal: false,
+            direct_x: 0.0,
+            direct_z: 0.0,
             hp,
             max_hp: hp,
             role,
@@ -3631,6 +3641,9 @@ impl Game {
                     perception: NpcPerception::default(),
                     path: Vec::new(),
                     path_index: 0,
+                direct_goal: false,
+                direct_x: 0.0,
+                direct_z: 0.0,
                     hp: profile.hp,
                     max_hp: profile.hp,
                     role: role_for(i, 1, profile.flank_chance),
@@ -3803,6 +3816,64 @@ impl Game {
                 npc.position[1],
                 npc.position[2]
             );
+        }
+    }
+
+    /// NPC 相互推离（空间哈希；1.6m 内斥力，位置微调，不影响路径规划下一帧重算）
+    fn apply_npc_separation(npcs: &mut [Npc]) {
+        if npcs.len() < 2 {
+            return;
+        }
+        // 空间哈希：cell = 4m；键 = (gx, gy)
+        let cell = 4.0f32;
+        let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> =
+            std::collections::HashMap::with_capacity(npcs.len() / 2 + 1);
+        for (i, n) in npcs.iter().enumerate() {
+            let key = ((n.position[0] / cell).floor() as i32, (n.position[2] / cell).floor() as i32);
+            grid.entry(key).or_default().push(i);
+        }
+        let min_d = 1.6f32;
+        let mut pushes = vec![[0.0f32, 0.0]; npcs.len()];
+        for (_, bucket) in grid.iter() {
+            for &i in bucket {
+                let (xi, zi) = (npcs[i].position[0], npcs[i].position[2]);
+                // 邻域 3x3 cell
+                let (cx, cy) = ((xi / cell).floor() as i32, (zi / cell).floor() as i32);
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let key = (cx + dx, cy + dy);
+                        if let Some(other) = grid.get(&key) {
+                            for &j in other {
+                                if j <= i {
+                                    continue;
+                                }
+                                let dxp = npcs[j].position[0] - xi;
+                                let dzp = npcs[j].position[2] - zi;
+                                let d2 = dxp * dxp + dzp * dzp;
+                                if d2 >= min_d * min_d {
+                                    continue;
+                                }
+                                let d = d2.sqrt().max(1e-3);
+                                let push = (min_d - d) * 0.5;
+                                let ux = dxp / d;
+                                let uz = dzp / d;
+                                pushes[i][0] -= ux * push;
+                                pushes[i][1] -= uz * push;
+                                pushes[j][0] += ux * push;
+                                pushes[j][1] += uz * push;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (i, n) in npcs.iter_mut().enumerate() {
+            let (px, pz) = (pushes[i][0], pushes[i][1]);
+            if px != 0.0 || pz != 0.0 {
+                n.position[0] += px;
+                n.position[2] += pz;
+                n.position[1] = terrain_height_at(n.position[0], n.position[2]);
+            }
         }
     }
 
@@ -4090,6 +4161,9 @@ impl Game {
             } else {
                 Self::step_ai_serial(&mut self.npcs, &ctx);
             }
+            // 分离力（2026-08-23 三三制防重叠）：空间哈希 4m 单元，1.6m 内施加推离，
+            // 消除阵型/搜索点的人叠人（楔形队形+残局集结处生效）
+            Self::apply_npc_separation(&mut self.npcs);
         }
         // NPC 投掷手榴弹：压力模式 / survive 防守波次中，交火 NPC 低概率（5-8%）投掷
         // （仅对敌对目标方向；阵营区分不炸友军）。普通波次（打玩家）不投掷 → 行为零回归。
@@ -4195,7 +4269,10 @@ impl Game {
                 }
                 let dx = self.npcs[*t].position[0] - npc.position[0];
                 let dz = self.npcs[*t].position[2] - npc.position[2];
-                if dx * dx + dz * dz <= npc.attack_range * npc.attack_range {
+                // 伤害距离与感知对齐（2026-08-23：压力模式 2.5 倍攻击距离，
+                // 否则全员感知 30m 内站定但无法开火 → 僵持观望）
+                let rng = npc.attack_range * if self.stress { 2.5 } else { 1.0 };
+                if dx * dx + dz * dz <= rng * rng {
                     pairs.push((i, *t));
                 }
             }
@@ -5836,6 +5913,9 @@ mod tests {
             perception: NpcPerception::default(),
             path: Vec::new(),
             path_index: 0,
+            direct_goal: false,
+            direct_x: 0.0,
+            direct_z: 0.0,
             hp: 100.0,
             max_hp: 100.0,
             role: TacticalRole::Rusher,
@@ -6496,8 +6576,52 @@ fn advance_npc(
             }
         };
         let start = world_to_grid(npc.position[0], npc.position[2]);
-        npc.path = find_path(grid, start, goal).unwrap_or_default();
+        // 寻路兜底（2026-08-23 残局卡死修复）：目标不可达时先找最近可行格，
+        // 仍无路径则直行进逼（可能蹭障碍但绝不原地踏步），保证任何局面都在动。
+        let mut path = find_path(grid, start, goal);
+        if path.is_none() {
+            // 螺旋扫描目标周边（半径 8 格）找可行的最近格
+            let mut best: Option<(i32, i64, crate::engine::ai::GridPos)> = None;
+            for r in 1..=8 {
+                let mut found = false;
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let dx = dx as i32;
+                        let dy = dy as i32;
+                        if dx.abs() != r && dy.abs() != r {
+                            continue;
+                        }
+                        let gp = crate::engine::ai::GridPos {
+                            x: goal.x + dx,
+                            y: goal.y + dy,
+                        };
+                        if !grid.is_passable(gp) {
+                            continue;
+                        }
+                        let d = (dx * dx + dy * dy) as i64;
+                        if best.as_ref().map_or(true, |(_, bd, _)| d < *bd) {
+                            best = Some((r, d, gp));
+                        }
+                        found = true;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            if let Some((_, _, gp)) = best {
+                path = find_path(grid, start, gp);
+            }
+        }
+        npc.path = path.clone().unwrap_or_default();
         npc.path_index = 0;
+        // 直行机动：路径全空（含兜底失败）→ 朝世界坐标目标直线移动，绝不原地踏步
+        npc.direct_goal = path.is_none();
+        if npc.direct_goal {
+            let (wx, wz) = grid_to_world(goal);
+            npc.direct_x = wx;
+            npc.direct_z = wz;
+        }
     }
 
     // 躲避冷却/计时无条件递减（含 Attack 态，防冻结窗口；残留计时归零防"幽灵侧移"）
@@ -6539,6 +6663,8 @@ fn advance_npc(
 
     let (tx, tz) = if npc.path_index < npc.path.len() {
         grid_to_world(npc.path[npc.path_index])
+    } else if npc.direct_goal {
+        (npc.direct_x, npc.direct_z)
     } else {
         (npc.position[0], npc.position[2])
     };
