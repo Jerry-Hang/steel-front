@@ -22,6 +22,7 @@ pub const CITY_WALL: f32 = 215.0;
 // ---- 常用材质色（线性 RGB）----
 const CONCRETE: [f32; 3] = [0.58, 0.57, 0.55];
 const CONCRETE_LIGHT: [f32; 3] = [0.64, 0.63, 0.60];
+const CONCRETE_DARK: [f32; 3] = [0.42, 0.41, 0.40];
 const GLASS_BLUE: [f32; 3] = [0.16, 0.22, 0.30];
 const METAL_GRAY: [f32; 3] = [0.42, 0.45, 0.50];
 const DARK: [f32; 3] = [0.22, 0.23, 0.26];
@@ -261,6 +262,13 @@ fn perimeter(o: &mut Vec<MapObstacle>) {
                     1 => ob(o, ObstacleKind::Building, t, w, hw, 0.6, 1.1, 1.1, Some(CONCRETE)),
                     2 => ob(o, ObstacleKind::Building, -w, t, 0.6, hw, 1.1, 1.1, Some(CONCRETE)),
                     _ => ob(o, ObstacleKind::Building, w, t, 0.6, hw, 1.1, 1.1, Some(CONCRETE)),
+                }
+                // 2026-08-24 压顶（深色顶条 + 微凸出）：切割围墙顶部平直轮廓，去纸片感
+                match side {
+                    0 => ob(o, ObstacleKind::Block, t, -w, hw, 0.72, 0.10, 2.30, Some(CONCRETE_DARK)),
+                    1 => ob(o, ObstacleKind::Block, t, w, hw, 0.72, 0.10, 2.30, Some(CONCRETE_DARK)),
+                    2 => ob(o, ObstacleKind::Block, -w, t, 0.72, hw, 0.10, 2.30, Some(CONCRETE_DARK)),
+                    _ => ob(o, ObstacleKind::Block, w, t, 0.72, hw, 0.10, 2.30, Some(CONCRETE_DARK)),
                 }
             }
         }
