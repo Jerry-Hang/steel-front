@@ -18,6 +18,9 @@
 use std::fmt;
 use std::sync::Arc;
 
+/// 采样率兜底（3 处合成器共用；2026-08-24 常量统一）
+const DEFAULT_RATE: u32 = 44_100;
+
 use glam::Vec3;
 
 /// 默认距离衰减系数 k（每单位距离，`1/(1+k·d)`）
@@ -1028,7 +1031,7 @@ pub struct DspSynth {
 impl DspSynth {
     /// 以指定采样率创建合成器（sample_rate 为 0 时回退 44100）
     pub fn new(sample_rate: u32) -> Self {
-        let sr = if sample_rate == 0 { 44_100 } else { sample_rate };
+        let sr = if sample_rate == 0 { DEFAULT_RATE } else { sample_rate };
         Self {
             sample_rate: sr as f32,
             voices: Vec::new(),
@@ -1378,7 +1381,7 @@ pub struct MusicSynth {
 impl MusicSynth {
     /// 以指定采样率创建合成器（默认静音：fade_target=0；sample_rate=0 回退 44100）
     pub fn new(sample_rate: u32) -> Self {
-        let sr = if sample_rate == 0 { 44_100 } else { sample_rate };
+        let sr = if sample_rate == 0 { DEFAULT_RATE } else { sample_rate };
         Self {
             sample_rate: sr as f32,
             time_secs: 0.0,
@@ -1453,7 +1456,7 @@ pub struct SfxBank {
 impl SfxBank {
     /// 以指定采样率确定性合成 6 种音效（sample_rate 为 0 时回退 44100）
     pub fn new(sample_rate: u32) -> Self {
-        let sr = if sample_rate == 0 { 44_100 } else { sample_rate };
+        let sr = if sample_rate == 0 { DEFAULT_RATE } else { sample_rate };
         Self {
             clips: [
                 synth_gunshot(sr),

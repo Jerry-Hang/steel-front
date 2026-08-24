@@ -29,7 +29,7 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 3072u;
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u; // marker 区 = MAX_MARKER_INSTANCES(1024)，与 renderer.rs 对齐（2026-08-24 C2 修正：曾误写 3072 导致前 2048 个 NPC 盒体被当 marker）
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
 // 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×1024：
 // 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
@@ -86,7 +86,7 @@ fn vs_main(
     }
     // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+64+3072+64）：
     // flat=3 = baked 顶点光照直出路径（2026-08-22：marker 改走实时光照后，枪模保持烘焙）
-    if (instance_index == 77889u) {
+    if (instance_index == 75841u) {
         output.flat_flag = 3.0;
         output.fade = 1.0;
     }
@@ -122,6 +122,8 @@ struct VertexOutput {
 
 @group(0) @binding(1) var texture_sampled: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
+// 高光贡献系数（2026-08-24：避免 evaluate_directional/point 两处魔法数字重复）
+const SPEC_CONTRIB: f32 = 0.4;
 // 程序化皮肤纹理（marker/NPC；RV3D_SKIN_TEX=1 时采样，缺省 0 纯色回退。
 // 绑定号必须与 renderer.rs init_descriptors / update_texture_descriptor_sets 同步）
 @group(0) @binding(7) var marker_skin_tex: texture_2d<f32>;
@@ -184,14 +186,6 @@ fn point_attenuation(dist: f32, constant: f32, linear: f32, quadratic: f32) -> f
     return min(1.0, 1.0 / denom);
 }
 
-/// 阴影深度比较：1.0 = 阴影，0.0 = 照亮（bias 缓解 acne）
-fn shadow_test(shadow_depth: f32, fragment_depth: f32, bias: f32) -> f32 {
-    if (fragment_depth - bias > shadow_depth) {
-        return 1.0;
-    }
-    return 0.0;
-}
-
 fn evaluate_directional(light: DirectionalLight, normal: vec3<f32>, view_dir: vec3<f32>, shininess: f32) -> vec3<f32> {
     if (light.direction.w < 0.5) {
         return vec3<f32>(0.0);
@@ -199,7 +193,7 @@ fn evaluate_directional(light: DirectionalLight, normal: vec3<f32>, view_dir: ve
     let light_dir = normalize(light.direction.xyz);
     let diffuse = bp_diffuse(normal, light_dir);
     let spec = bp_specular(normal, light_dir, view_dir, shininess);
-    return light.color_intensity.xyz * light.color_intensity.w * (diffuse + 0.4 * spec);
+    return light.color_intensity.xyz * light.color_intensity.w * (diffuse + SPEC_CONTRIB * spec);
 }
 
 fn evaluate_point(light: PointLight, world_pos: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, shininess: f32) -> vec3<f32> {
@@ -215,7 +209,7 @@ fn evaluate_point(light: PointLight, world_pos: vec3<f32>, normal: vec3<f32>, vi
     let diffuse = bp_diffuse(normal, light_dir);
     let spec = bp_specular(normal, light_dir, view_dir, shininess);
     let atten = point_attenuation(dist, light.attenuation.x, light.attenuation.y, light.attenuation.z);
-    return light.color_intensity.xyz * light.color_intensity.w * atten * (diffuse + 0.4 * spec);
+    return light.color_intensity.xyz * light.color_intensity.w * atten * (diffuse + SPEC_CONTRIB * spec);
 }
 
 // 光照应用（地面与 marker/NPC 共用，2026-08-22）：屏幕导数法线 + 3x3 PCF 阴影 + 方向/点光。
@@ -341,11 +335,11 @@ struct Instance {
 
 // 槽位约定（必须与 renderer.rs 常量同步）：
 // TERRAIN_INSTANCE_INDEX=65536（地形 identity，mesh 路径不绘制该槽）、
-// MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65536+1+64=65601、
-// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+3072=68673（NPC 三几何区：盒/圆柱/球，各 1024）
+// MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65537+1024=66561、
+// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+9216=75777（NPC 三几何区：盒/圆柱/球，各 3072）
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 3072u;
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u; // marker 区 = MAX_MARKER_INSTANCES(1024)，与 renderer.rs 对齐（2026-08-24 C2 修正：曾误写 3072 导致前 2048 个 NPC 盒体被当 marker）
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
 
 // 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
@@ -372,7 +366,7 @@ struct MeshOutput {
 }
 var<workgroup> mesh_out: MeshOutput;
 
-// 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=65601 / 自发光=66625
+// 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=66561 / 自发光=75777 / 枪=75841
 struct MeshPush {
     base_slot: u32,
     // 填充到 16 字节（与 renderer.rs push constant range size=16 精确一致）

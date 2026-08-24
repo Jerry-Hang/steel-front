@@ -1,13 +1,10 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t, rx, rh};
 use glam::Mat4;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 // ===== RPK-16 桦木：轻机枪，AK式厚实机匣（0.07宽），加长粗管，45发扁圆柱弹鼓，厚实桦木护木 + 折叠托 =====
 pub fn rpk16() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 机匣：AK式厚实长圆角盒，0.07宽（深钢）
         (t(0.0, 0.085, -0.02), beveled_box(0.070, 0.080, 0.30, 0.014, 3), [0.30, 0.33, 0.37]),
@@ -60,9 +57,6 @@ pub fn rpk16() -> crate::engine::guns::GunMesh {
 
 // ===== PKM 钢线：通用机枪，右侧弹链盒（0.07×0.16×0.05），粗管+亮钢环，枪口助推器，前端两脚架，桦木托 =====
 pub fn pkm() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 机匣：厚实长圆角盒，0.07宽（深钢）
         (t(0.0, 0.085, -0.03), beveled_box(0.070, 0.085, 0.34, 0.012, 3), [0.30, 0.33, 0.37]),
@@ -114,9 +108,6 @@ pub fn pkm() -> crate::engine::guns::GunMesh {
 
 // ===== PKP 佩切涅格：通用机枪，重管+散热套筒（粗0.03套细0.02），提把，右侧弹链盒，两脚架，聚合物托 =====
 pub fn pkp() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 机匣：厚实长圆角盒，0.07宽（深钢）
         (t(0.0, 0.085, -0.03), beveled_box(0.070, 0.085, 0.34, 0.012, 3), [0.30, 0.33, 0.37]),

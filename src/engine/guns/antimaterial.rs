@@ -1,11 +1,10 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t};
 use glam::Mat4;
 
 /// OSV-96 削岩：反器材狙击，12.7x108，无托布局（弹匣在握把后方），
 /// 粗长枪管(r0.028×0.70) + 大型多槽制退器(0.05半径×0.10长)，粗壮机匣(0.08宽)，两脚架。
 pub fn osv96() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let parts = vec![
         // 粗长枪管（亮钢，r=0.028 长 0.70，z 0.00..0.70）
         (t(0.0, 0.0, 0.35) * rz(), cylinder(0.028, 0.70, 16), [0.62, 0.65, 0.70]),
@@ -59,7 +58,6 @@ pub fn osv96() -> crate::engine::guns::GunMesh {
 /// M82A1：反器材，.50 BMG，大型多槽制退器，粗壮机匣(0.08宽)，
 /// 带缓冲管的可调枪托 + 厚底板，10 发弹匣，两脚架。
 pub fn m82a1() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let parts = vec![
         // 粗长枪管（亮钢，r=0.028 长 0.62，z 0.12..0.74）
         (t(0.0, 0.0, 0.43) * rz(), cylinder(0.028, 0.62, 16), [0.62, 0.65, 0.70]),

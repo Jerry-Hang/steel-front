@@ -1,13 +1,10 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t, rx, rh};
 use glam::Mat4;
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::TAU;
 
 // ===== Saiga-12 圆木：半自动霰弹枪，AK系厚实机匣，粗管，管式弹仓（枪管下方醒目），厚实圆木护木+枪托 =====
 pub fn saiga12() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 粗枪管：r=0.02 长 0.52（亮钢）
         (t(0.0, 0.045, 0.25) * rz(), cylinder(0.020, 0.52, 12), [0.62, 0.65, 0.70]),
@@ -60,9 +57,6 @@ pub fn saiga12() -> crate::engine::guns::GunMesh {
 
 // ===== M1014 破门：半自动霰弹枪，粗管+破门制退器，管式弹仓，聚合物护木/机匣，粗伸缩托 =====
 pub fn m1014() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 粗枪管：r=0.02 长 0.48（亮钢）
         (t(0.0, 0.045, 0.23) * rz(), cylinder(0.020, 0.48, 12), [0.62, 0.65, 0.70]),
@@ -113,9 +107,6 @@ pub fn m1014() -> crate::engine::guns::GunMesh {
 
 // ===== AA-12 风暴：全自动霰弹枪，粗管+隔热罩，重型枪身，厚盒式弹匣，提把，重托 =====
 pub fn aa12() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 粗枪管：r=0.021 长 0.48（深钢）
         (t(0.0, 0.045, 0.24) * rz(), cylinder(0.021, 0.48, 12), [0.30, 0.33, 0.37]),

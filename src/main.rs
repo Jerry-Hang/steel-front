@@ -51,6 +51,18 @@ const MAX_RAW_LOOK_DELTA: f64 = 1024.0;
 /// 帧率上限（present 节流）：0 = 无上限（压测模式，主循环全速跑以暴露渲染瓶颈）。
 /// 设回正数（如 300）即恢复帧率门控。
 const MAX_FPS: u64 = 0;
+
+/// 环境变量真值解析（"1"/"true"/"on" = 真；其余为假）
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "TRUE" | "ON" | "True"))
+        .unwrap_or(false)
+}
+
+/// 环境变量浮点读取（解析失败返回 None）
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name).ok().and_then(|s| s.parse::<f32>().ok())
+}
 /// 单帧预算（纳秒；MAX_FPS=0 时为 0，不做 sleep/spin 节流）
 const FRAME_BUDGET: Duration =
     Duration::from_nanos(if MAX_FPS > 0 { 1_000_000_000 / MAX_FPS } else { 0 });
@@ -198,10 +210,7 @@ impl GameApp {
                 let llm_on = std::env::var("RV3D_LLM")
                     .map(|v| !(v.is_empty() || v == "0" || v == "off"))
                     .unwrap_or(false);
-                let cap = std::env::var("RV3D_FPS")
-                    .ok()
-                    .and_then(|s| s.parse::<f32>().ok())
-                    .unwrap_or(if llm_on { 90.0 } else { 240.0 });
+                let cap = env_f32("RV3D_FPS").unwrap_or(if llm_on { 90.0 } else { 240.0 });
                 cap.max(20.0)
             },
             last_update_us: 0,
@@ -341,7 +350,7 @@ impl GameApp {
         use std::sync::atomic::{AtomicBool, Ordering};
         static AUTO_STARTED: AtomicBool = AtomicBool::new(false);
         if !AUTO_STARTED.swap(true, Ordering::SeqCst)
-            && std::env::var("RV3D_AUTOSTART").as_deref() == Ok("1")
+            && env_truthy("RV3D_AUTOSTART")
         {
             let st = self.game.state();
             if st == GameState::StartMenu || st == GameState::LoadingMap {
@@ -350,9 +359,7 @@ impl GameApp {
             }
             // RV3D_SWITCH_WEAPON=n：进入后自动切到 n 号武器（复现切枪崩溃用）；
             // RV3D_SWITCH_WEAPON_AFTER=秒：延迟切枪（模拟玩一会儿再切）
-            let after = std::env::var("RV3D_SWITCH_WEAPON_AFTER")
-                .ok()
-                .and_then(|s| s.parse::<f32>().ok());
+            let after = env_f32("RV3D_SWITCH_WEAPON_AFTER");
             let (target, switch_at) = match std::env::var("RV3D_SWITCH_WEAPON") {
                 Ok(n) => (n.parse::<usize>().ok(), after.unwrap_or(0.0)),
                 Err(_) => (None, 0.0),
@@ -377,7 +384,7 @@ impl GameApp {
         // RV3D_DIAG_NPC_FRONT=1：把 npc[0] 放到玩家正前方 20m 固定（弹道诊断隔离实验）
         static DIAG_NPC_FRONT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *DIAG_NPC_FRONT.get_or_init(|| {
-            std::env::var("RV3D_DIAG_NPC_FRONT").as_deref() == Ok("1")
+            env_truthy("RV3D_DIAG_NPC_FRONT")
         }) && self.game.state() == GameState::Playing
         {
             // 相机 yaw=0 时 forward 方向（与 fire 弹道同源），NPC 放前方 20m
@@ -390,7 +397,7 @@ impl GameApp {
         }
         // RV3D_AUTOFIRE=1：自动开火（诊断射击链路：fire 是否发射、弹道是否命中）
         static AUTO_FIRE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *AUTO_FIRE.get_or_init(|| std::env::var("RV3D_AUTOFIRE").as_deref() == Ok("1"))
+        if *AUTO_FIRE.get_or_init(|| env_truthy("RV3D_AUTOFIRE"))
             && self.game.state() == GameState::Playing
         {
             self.fire_requested = true;

@@ -231,6 +231,20 @@ fn put_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 
+/// 非阻塞收包（Server/Client 共用）：无数据 Ok(None)，协议错误映射 InvalidData
+fn recv_msg(socket: &std::net::UdpSocket) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
+    let mut buf = [0u8; MAX_DATAGRAM];
+    match socket.recv_from(&mut buf) {
+        Ok((n, from)) => {
+            let msg = NetworkMessage::decode(&buf[..n])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Some((msg, from)))
+        }
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 fn put_f32(buf: &mut Vec<u8>, v: f32) {
     buf.extend_from_slice(&v.to_bits().to_be_bytes());
 }
@@ -688,17 +702,12 @@ impl Server {
 
     /// 非阻塞接收：无数据时返回 `Ok(None)`，协议错误映射为 `InvalidData`
     pub fn recv(&mut self) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
-        let mut buf = [0u8; MAX_DATAGRAM];
-        match self.socket.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                self.last_seen.insert(from, Instant::now());
-                let msg = NetworkMessage::decode(&buf[..n])
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                Ok(Some((msg, from)))
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e),
-        }
+        let (msg, from) = match recv_msg(&self.socket)? {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        self.last_seen.insert(from, Instant::now());
+        Ok(Some((msg, from)))
     }
 
     /// 阻塞接收直到超时；超时返回 `Ok(None)`
@@ -836,16 +845,7 @@ impl Client {
 
     /// 非阻塞接收：无数据时返回 `Ok(None)`
     pub fn recv(&self) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
-        let mut buf = [0u8; MAX_DATAGRAM];
-        match self.socket.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                let msg = NetworkMessage::decode(&buf[..n])
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                Ok(Some((msg, from)))
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e),
-        }
+        recv_msg(&self.socket)
     }
 
     /// 处理一条消息：Join 确认记录自身 id；Position 更新远端玩家插值缓冲；

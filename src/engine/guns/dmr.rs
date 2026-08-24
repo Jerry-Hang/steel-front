@@ -1,10 +1,8 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t, rx};
 use glam::Mat4;
 
 pub fn svd12() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let _ztox = || Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2);
     let bright: [f32; 3] = [0.62, 0.65, 0.70];
     let dark: [f32; 3] = [0.30, 0.33, 0.37];
@@ -60,8 +58,6 @@ pub fn svd12() -> crate::engine::guns::GunMesh {
 }
 
 pub fn m110a1() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let _ztox = || Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2);
     let bright: [f32; 3] = [0.62, 0.65, 0.70];
     let dark: [f32; 3] = [0.30, 0.33, 0.37];
@@ -119,8 +115,6 @@ pub fn m110a1() -> crate::engine::guns::GunMesh {
 }
 
 pub fn mk14p() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let _ztox = || Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2);
     let bright: [f32; 3] = [0.62, 0.65, 0.70];
     let dark: [f32; 3] = [0.30, 0.33, 0.37];

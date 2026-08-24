@@ -45,6 +45,17 @@ struct SideCtx {
     history: Mutex<Vec<(String, String)>>, // (态势, 决策) 最近 4 轮
 }
 
+impl SideCtx {
+    fn new() -> Self {
+        Self {
+            situation: Mutex::new(String::new()),
+            n_companies: Mutex::new(3),
+            latest: Mutex::new(None),
+            history: Mutex::new(Vec::new()),
+        }
+    }
+}
+
 struct Shared {
     red: SideCtx,
     blue: SideCtx,
@@ -280,17 +291,19 @@ fn http_post_json(url: &str, body: &str, timeout: Duration) -> Result<String, St
     Ok(text[body_start.min(text.len())..].to_string())
 }
 
+const DEFAULT_PATH: &str = "/v1/chat/completions";
+
 fn parse_url(url: &str) -> Result<(String, u16, String), String> {
     let rest = url.trim_start_matches("http://").trim_start_matches("https://");
     let (hp, path) = match rest.find('/') {
         Some(i) => (&rest[..i], rest[i..].to_string()),
-        None => (rest, "/v1/chat/completions".to_string()),
+        None => (rest, DEFAULT_PATH.to_string()),
     };
     let (host, port) = match hp.rsplit_once(':') {
         Some((h, p)) => (h.to_string(), p.parse::<u16>().map_err(|e| format!("端口非法: {e}"))?),
         None => (hp.to_string(), 80),
     };
-    let path = if path.is_empty() { "/v1/chat/completions".to_string() } else { path };
+    let path = if path.is_empty() { DEFAULT_PATH.to_string() } else { path };
     Ok((host, port, path))
 }
 
@@ -469,18 +482,8 @@ impl LlmCommander {
         log::info!("llmcmd: LLM 指挥官启动 url={url} interval={interval}s（红蓝独立上下文）");
         let _ = std::fs::create_dir_all("data");
         let sh = Arc::new(Shared {
-            red: SideCtx {
-                situation: Mutex::new(String::new()),
-                n_companies: Mutex::new(3),
-                latest: Mutex::new(None),
-                history: Mutex::new(Vec::new()),
-            },
-            blue: SideCtx {
-                situation: Mutex::new(String::new()),
-                n_companies: Mutex::new(3),
-                latest: Mutex::new(None),
-                history: Mutex::new(Vec::new()),
-            },
+            red: SideCtx::new(),
+            blue: SideCtx::new(),
             stopped: AtomicBool::new(false),
         });
         let sh2 = Arc::clone(&sh);

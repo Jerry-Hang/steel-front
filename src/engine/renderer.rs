@@ -1440,10 +1440,10 @@ impl Renderer {
                 unsafe {
                     self.device
                         .create_image_view(&view_create_info, None)
-                        .expect("创建图像视图失败")
+                        .map_err(|e| format!("创建图像视图失败: {e}"))
                 }
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         log::info!(
             "交换链初始化完成: {}x{}, 格式: {:?}, 图像数: {}, present_mode: {:?}",
@@ -4583,14 +4583,15 @@ impl Renderer {
         });
 
         // ---- 前缀和（串行，段数 ≤ 9，微秒级）：每段近/远档写入起点 ----
-        let mut near_prefix = Vec::with_capacity(nw);
-        let mut far_prefix = Vec::with_capacity(nw);
+        let mut near_prefix = [0u32; 64];
+        let mut far_prefix = [0u32; 64];
+        debug_assert!(nw <= 64, "并行段数超栈数组上限");
         let mut near_total = 0u32;
         let mut far_total = 0u32;
         for w in 0..nw {
-            near_prefix.push(near_total);
+            near_prefix[w] = near_total;
             near_total += seg_near[w].load(std::sync::atomic::Ordering::Relaxed);
-            far_prefix.push(far_total);
+            far_prefix[w] = far_total;
             far_total += seg_far[w].load(std::sync::atomic::Ordering::Relaxed);
         }
 
@@ -6239,10 +6240,10 @@ impl Renderer {
                 unsafe {
                     self.device
                         .create_framebuffer(&framebuffer_create_info, None)
-                        .expect("创建帧缓冲失败")
+                        .map_err(|e| format!("创建帧缓冲失败: {e}"))
                 }
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
 

@@ -1,10 +1,8 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t, rx};
 use glam::Mat4;
 
 pub fn m249() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let parts = vec![
         // 枪管（厚实，r=0.018）
         (t(0.0, 0.045, 0.36) * rz(), cylinder(0.018, 0.52, 12), [0.30, 0.33, 0.37]),
@@ -56,8 +54,6 @@ pub fn m249() -> crate::engine::guns::GunMesh {
 }
 
 pub fn m240l() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let parts = vec![
         // 细长枪管（r=0.017）
         (t(0.0, 0.04, 0.40) * rz(), cylinder(0.017, 0.60, 12), [0.30, 0.33, 0.37]),

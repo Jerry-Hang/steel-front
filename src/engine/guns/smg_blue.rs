@@ -1,12 +1,10 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t, rx};
 use glam::Mat4;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 /// MPX 燕鸥：冲锋枪，AR 式厚实机匣、方形短护木、直弹匣、伸缩托。
 pub fn mpx() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let ry = |a: f32| Mat4::from_rotation_y(a);
     let parts = vec![
         // 枪管（亮钢）
@@ -53,8 +51,6 @@ pub fn mpx() -> crate::engine::guns::GunMesh {
 
 /// MP5SD 雨燕：微声冲锋枪，粗一体消音器（r0.024 长 0.30）、厚实机匣、手枪握把、固定厚托。
 pub fn mp5sd() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let ry = |a: f32| Mat4::from_rotation_y(a);
     let parts = vec![
         // 枪管（亮钢，藏于消音器内）
@@ -100,8 +96,6 @@ pub fn mp5sd() -> crate::engine::guns::GunMesh {
 
 /// P90：无托 PDW，流线粗枪身、顶部扁平弹匣、一体粗握把。
 pub fn p90() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let ry = |a: f32| Mat4::from_rotation_y(a);
     let parts = vec![
         // 流线粗枪身（黑聚合，无托整体）
@@ -146,8 +140,6 @@ pub fn p90() -> crate::engine::guns::GunMesh {
 
 /// MP7：紧凑 PDW，短粗枪身、粗枪管、折叠托。
 pub fn mp7() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let ry = |a: f32| Mat4::from_rotation_y(a);
     let parts = vec![
         // 粗枪管（亮钢）

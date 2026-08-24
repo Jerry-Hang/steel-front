@@ -1,9 +1,8 @@
 use crate::engine::meshgen::{beveled_box, cylinder};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t};
 use glam::Mat4;
 
 pub fn hk416() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let steel = [0.62, 0.65, 0.70];
     let dark = [0.30, 0.33, 0.37];
     let poly = [0.16, 0.17, 0.19];
@@ -51,7 +50,6 @@ pub fn hk416() -> crate::engine::guns::GunMesh {
 }
 
 pub fn mk18() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let steel = [0.62, 0.65, 0.70];
     let dark = [0.30, 0.33, 0.37];
     let poly = [0.16, 0.17, 0.19];

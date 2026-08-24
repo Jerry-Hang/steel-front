@@ -1,7 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum};
-use crate::engine::guns::{assemble, GunMesh, rz};
-use glam::Mat4;
-use std::f32::consts::FRAC_PI_2;
+use crate::engine::guns::{assemble, GunMesh, rz, t, rx, rh};
 
 // ===== AK-12M (5.45x39): black polymer, long handguard + rail, curved 30rd mag,
 //       skeleton folding stock. Stations: stock rear -0.542, receiver -0.30..+0.06,
@@ -9,9 +7,6 @@ use std::f32::consts::FRAC_PI_2;
 //       2026-08-19 rebuild: fixed gaps (mag/grip/stock were floating), magazine curve
 //       now sweeps forward like the real AK, stock connects to receiver rear.
 pub fn ak12m() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let steel = [0.34, 0.36, 0.40];
     let black = [0.17, 0.18, 0.20];
     let dark = [0.11, 0.12, 0.13];
@@ -82,9 +77,6 @@ pub fn ak12m() -> crate::engine::guns::GunMesh {
 }
 // ===== AK-104 短剑：紧凑AK，短粗管+消焰器，弧形弹匣，折叠托 =====
 pub fn ak104() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 机匣：厚实长圆角盒（深钢）
         (t(0.0, 0.0825, -0.03), beveled_box(0.065, 0.075, 0.26, 0.012, 3), [0.30, 0.33, 0.37]),
@@ -136,9 +128,6 @@ pub fn ak104() -> crate::engine::guns::GunMesh {
 
 // ===== ASh-12 破城锤：重型突击，粗短枪管+大型枪口制退器，20发短弹匣，粗壮枪身 =====
 pub fn ash12() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
-    let rh = |x: f32, y: f32, z: f32| t(x, y, z) * Mat4::from_rotation_z(-FRAC_PI_2);
     let parts = vec![
         // 机匣：加宽粗壮（深钢）
         (t(0.0, 0.085, -0.03), beveled_box(0.075, 0.08, 0.30, 0.014, 3), [0.30, 0.33, 0.37]),

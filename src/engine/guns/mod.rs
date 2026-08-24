@@ -58,6 +58,22 @@ pub fn assemble(parts: &[(Mat4, Mesh, [f32; 3])]) -> (Vec<GVertex>, Vec<u32>) {
 /// 圆柱沿 +Z 摆放的旋转（meshgen 圆柱沿 Y，需要绕 X -90°）
 pub fn rz() -> Mat4 { glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2) }
 
+/// 部件平移（各枪函数此前各自重复闭包 ~70 行；2026-08-24 收编共享）
+pub fn t(x: f32, y: f32, z: f32) -> Mat4 {
+    Mat4::from_translation(glam::vec3(x, y, z))
+}
+
+/// 绕 X 轴旋转（部件局部姿态）
+pub fn rx(a: f32) -> Mat4 {
+    Mat4::from_rotation_x(a)
+}
+
+/// 圆柱件（平移 + 绕 X -90° 使轴向 +Z）
+pub fn rh(x: f32, y: f32, z: f32) -> Mat4 {
+    t(x, y, z) * rz()
+}
+
+
 impl GunMesh {
     /// 应用 4x4 变换（第一人称视空间锚定用）：位置/法线随矩阵变换，烘焙颜色保留。
     /// 返回 (顶点, 索引)，可直接上传渲染。

@@ -1,10 +1,9 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t};
 use glam::Mat4;
 
 /// MP-443 乌鸦：9×19 双动手枪，厚实套筒 + 塑料粗握把
 pub fn mp443() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let tz = |x: f32, y: f32, z: f32| t(x, y, z) * rz();
     let rx = |x: f32, y: f32, z: f32, a: f32| t(x, y, z) * Mat4::from_rotation_x(a);
 
@@ -37,7 +36,6 @@ pub fn mp443() -> crate::engine::guns::GunMesh {
 
 /// RSh-12 撞锤：12.7×55 左轮，大转轮 + 制退器 + 木握把片
 pub fn rsh12() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let tz = |x: f32, y: f32, z: f32| t(x, y, z) * rz();
     let rx = |x: f32, y: f32, z: f32, a: f32| t(x, y, z) * Mat4::from_rotation_x(a);
 
@@ -70,7 +68,6 @@ pub fn rsh12() -> crate::engine::guns::GunMesh {
 
 /// M18 信标：9×19 紧凑手枪，沙色聚合物握把 + 亮钢套筒
 pub fn m18() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let tz = |x: f32, y: f32, z: f32| t(x, y, z) * rz();
     let rx = |x: f32, y: f32, z: f32, a: f32| t(x, y, z) * Mat4::from_rotation_x(a);
 
@@ -102,7 +99,6 @@ pub fn m18() -> crate::engine::guns::GunMesh {
 
 /// Mk23 海豹：.45 重型手枪，带螺纹枪管 + 皮卡汀尼导轨
 pub fn mk23() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let tz = |x: f32, y: f32, z: f32| t(x, y, z) * rz();
     let rx = |x: f32, y: f32, z: f32, a: f32| t(x, y, z) * Mat4::from_rotation_x(a);
 

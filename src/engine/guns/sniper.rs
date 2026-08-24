@@ -1,5 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz};
+use crate::engine::guns::{assemble, GunMesh, rz, t};
 use glam::Mat4;
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -12,7 +12,6 @@ const OLIVE: [f32; 3] = [0.28, 0.35, 0.22];
 const SAND: [f32; 3] = [0.48, 0.39, 0.26];
 
 pub fn sv98() -> GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let parts = vec![
         (t(0.0, 0.045, 0.345) * rz(), cylinder(0.020, 0.55, 12), DARK),
         (t(0.0, 0.045, 0.670) * rz(), frustum(0.034, 0.030, 0.10, 12, true), DARK),
@@ -41,7 +40,6 @@ pub fn sv98() -> GunMesh {
 }
 
 pub fn m2010() -> GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let parts = vec![
         (t(0.0, 0.045, 0.355) * rz(), cylinder(0.020, 0.55, 12), BRIGHT),
         (t(0.0, 0.045, 0.685) * rz(), frustum(0.036, 0.028, 0.11, 12, true), DARK),
@@ -71,7 +69,6 @@ pub fn m2010() -> GunMesh {
 }
 
 pub fn mrad() -> GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
     let parts = vec![
         (t(0.0, 0.045, 0.360) * rz(), cylinder(0.020, 0.56, 12), BRIGHT),
         (t(0.0, 0.045, 0.690) * rz(), frustum(0.037, 0.029, 0.10, 12, true), DARK),

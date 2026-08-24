@@ -257,15 +257,8 @@ impl ObjectiveState {
 
 /// 统计双方占领的据点数，返回 (blue, red)
 fn count_owned(points: &[CapturePoint]) -> (usize, usize) {
-    let mut blue = 0usize;
-    let mut red = 0usize;
-    for p in points {
-        match p.owner {
-            Some(Team::Blue) => blue += 1,
-            Some(Team::Red) => red += 1,
-            None => {}
-        }
-    }
+    let blue = points.iter().filter(|p| p.owner == Some(Team::Blue)).count();
+    let red = points.iter().filter(|p| p.owner == Some(Team::Red)).count();
     (blue, red)
 }
 

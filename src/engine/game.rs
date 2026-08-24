@@ -4011,7 +4011,8 @@ impl Game {
     /// - 偷袭绕路：包抄手在玩家未面朝时绕大圈逼近，被发现转侧翼
     fn update_ai(&mut self, dt: f32, camera: &Camera) {
         let player = camera.position();
-        let grid = self.grid.clone();
+        // 2026-08-24：借用代替克隆（16KB/帧网格拷贝消除；与 self.npcs/map 字段级借用拆分共存）
+        let grid = &self.grid;
         let time = self.time;
         let player_yaw = camera.yaw;
         // 分层调度（2026-08-11）：稳定重排 npcs 为 [Near..., Far...]，
@@ -4053,7 +4054,7 @@ impl Game {
         // 指挥节拍：0.5s 营司令评估 + 战士班目标点（未接敌编队推进，接敌由逐人战术接管）
         if self.stress {
             if let Some(cmd) = self.command.as_mut() {
-                let (rc, bc) = team_centroids(&self.npcs);
+                // rc/bc 复用 update_ai 顶部已算的敌我重心（不再重复 O(n) 扫描）
                 // LLM 指挥官：红蓝各一独立上下文窗口互搏（无/失效 → 该侧启发式）
                 let to_ov = |cmds: Vec<crate::llm_cmd::CompanyCmd>| {
                     cmds.into_iter()

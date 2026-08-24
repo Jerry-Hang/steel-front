@@ -1,6 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, torus_arc};
-use crate::engine::guns::{assemble, rz};
-use glam::Mat4;
+use crate::engine::guns::{assemble, rz, t, rx};
 use std::f32::consts::PI;
 
 const STEEL_L: [f32; 3] = [0.62, 0.65, 0.70];
@@ -13,8 +12,6 @@ const SAND: [f32; 3] = [0.48, 0.39, 0.26];
 const TAU: f32 = 2.0 * PI;
 
 pub fn pp19() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let parts = vec![
         // 机匣
         (t(0.0, 0.01, 0.0), beveled_box(0.055, 0.06, 0.22, 0.010, 4), POLY_BLACK),
@@ -63,8 +60,6 @@ pub fn pp19() -> crate::engine::guns::GunMesh {
 }
 
 pub fn pp9() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let parts = vec![
         // 细长机匣
         (t(0.0, 0.01, -0.05), beveled_box(0.055, 0.06, 0.22, 0.010, 4), POLY_BLACK),
@@ -113,8 +108,6 @@ pub fn pp9() -> crate::engine::guns::GunMesh {
 }
 
 pub fn vss() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let parts = vec![
         // 机匣
         (t(0.0, 0.01, -0.05), beveled_box(0.055, 0.06, 0.22, 0.010, 4), OLIVE),
@@ -164,8 +157,6 @@ pub fn vss() -> crate::engine::guns::GunMesh {
 }
 
 pub fn asval() -> crate::engine::guns::GunMesh {
-    let t = |x: f32, y: f32, z: f32| Mat4::from_translation(glam::vec3(x, y, z));
-    let rx = |a: f32| Mat4::from_rotation_x(a);
     let parts = vec![
         // 机匣
         (t(0.0, 0.01, -0.05), beveled_box(0.055, 0.06, 0.22, 0.010, 4), OLIVE),

@@ -17,13 +17,11 @@
 use crate::engine::ai::{GridMap, Team};
 
 /// 连队军情报告（自下而上汇总：营司令据此决策）
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CompanyReport {
     pub strength: f32,
     pub centroid: [f32; 2],
     pub contact: bool,
-    #[allow(dead_code)]
-    pub kills: u32,
 }
 
 /// 连队任务
@@ -178,7 +176,6 @@ impl Army {
                             strength: 0.0,
                             centroid: [0.0, 0.0],
                             contact: false,
-                            kills: 0,
                         },
                     });
                 }
@@ -186,11 +183,11 @@ impl Army {
         }
         Army {
             side,
+            kills: 0,
             companies,
             platoons,
             squads,
             soldier_slot,
-            kills: 0,
             tick: 0.0,
             situation: BattleSituation::Offense,
             enemy_centroid: [0.0, 0.0],
@@ -261,7 +258,6 @@ impl Army {
                 strength: n as f32,
                 centroid,
                 contact,
-                kills: 0,
             });
         }
 
@@ -306,7 +302,6 @@ impl Army {
                     strength: 0.0,
                     centroid: [0.0, 0.0],
                     contact: false,
-                    kills: 0,
                 });
                 continue;
             }
@@ -353,7 +348,6 @@ impl Army {
                 strength: 0.0,
                 centroid: [0.0, 0.0],
                 contact: false,
-                kills: 0,
             });
         }
         // 4) 逐排 → 逐班：目标点 = 连目标点 + 班槽位偏移；刷新每个 soldier 的队列目标
