@@ -395,6 +395,28 @@ const GROUND_TRI: array<vec3<u32>, 2> = array<vec3<u32>, 2>(
 );
 
 // 立方体 24 顶点（VERTICES，每面 UV 铺满 0..1；顶点色白化后 color = tint）
+// 二十面体（12 顶点/20 三角，单位球近似）：树冠（绿色 tint marker）与
+// 自发光（爆炸等）用——摆脱「立方体树冠/方块冲击波」的纸片观感（2026-08-25）
+const ICO_POS: array<vec3<f32>, 12> = array<vec3<f32>, 12>(
+    vec3<f32>(0.0, 1.0, 0.618), vec3<f32>(0.0, 1.0, -0.618),
+    vec3<f32>(0.0, -1.0, 0.618), vec3<f32>(0.0, -1.0, -0.618),
+    vec3<f32>(1.0, 0.618, 0.0), vec3<f32>(-1.0, 0.618, 0.0),
+    vec3<f32>(1.0, -0.618, 0.0), vec3<f32>(-1.0, -0.618, 0.0),
+    vec3<f32>(0.618, 0.0, 1.0), vec3<f32>(-0.618, 0.0, 1.0),
+    vec3<f32>(0.618, 0.0, -1.0), vec3<f32>(-0.618, 0.0, -1.0),
+);
+const ICO_TRI: array<vec3<u32>, 20> = array<vec3<u32>, 20>(
+    vec3<u32>(0, 4, 1), vec3<u32>(0, 9, 4), vec3<u32>(9, 5, 4), vec3<u32>(4, 5, 8),
+    vec3<u32>(4, 8, 1), vec3<u32>(8, 10, 1), vec3<u32>(8, 3, 10), vec3<u32>(5, 3, 8),
+    vec3<u32>(5, 2, 3), vec3<u32>(2, 7, 3), vec3<u32>(7, 10, 3), vec3<u32>(7, 6, 10),
+    vec3<u32>(7, 11, 6), vec3<u32>(11, 0, 6), vec3<u32>(0, 1, 6), vec3<u32>(6, 1, 10),
+    vec3<u32>(9, 0, 11), vec3<u32>(9, 11, 2), vec3<u32>(9, 2, 5), vec3<u32>(7, 2, 11),
+);
+// 树冠识别：绿色 tint（g 显著大于 r/b）
+fn is_foliage(tint: vec4<f32>) -> bool {
+    return tint.g > tint.r && tint.g > tint.b * 1.4;
+}
+
 const CUBE_POS: array<vec3<f32>, 24> = array<vec3<f32>, 24>(
     vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(1.0, -1.0, 1.0),
     vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(-1.0, 1.0, 1.0),
@@ -618,7 +640,20 @@ fn mesh_main(
     // 近档立方体 / 远档十字双 quad：与 CPU 近/远分档同一阈值（全 3D 距离²）
     // 障碍 marker 槽恒用立方体（远距十字 quad 俯视是"方块贴图+缝隙"，用户反馈的边界方块感）
     let is_marker = slot >= MARKER_INSTANCE_BASE && slot < NPC_INSTANCE_BASE;
-    if (is_marker || dist2 < camera.cam_pos.w) {
+    // 树冠（绿色 marker）/ 自发光（爆炸光球）→ 二十面体（立体球状，告别纸帽子/方块冲击波）
+    let is_foliage_or_glow = is_foliage(inst.tint) || slot >= EMISSIVE_INSTANCE_BASE;
+    if (is_foliage_or_glow) {
+        if (lid < 12u) {
+            write_vertex(lid, ICO_POS[lid] * 0.9, vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
+        }
+        if (lid < 20u) {
+            mesh_out.primitives[lid].indices = ICO_TRI[lid];
+        }
+        if (lid == 0u) {
+            mesh_out.vertex_count = 12u;
+            mesh_out.primitive_count = 20u;
+        }
+    } else if (is_marker || dist2 < camera.cam_pos.w) {
         if (lid < 24u) {
             write_vertex(lid, CUBE_POS[lid], CUBE_UV[lid], inst, cam, fade, flat, is_gun, false);
         }

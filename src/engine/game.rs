@@ -6953,8 +6953,43 @@ fn advance_npc(
         let step = npc.speed * dt;
         npc.position[0] += mx * step;
         npc.position[2] += mz * step;
+        // 2026-08-25 穿墙修复：移动后对存活的静态障碍 AABB 推开（直行/路径均在障碍外滑行）
+        let (px, pz) = resolve_circle_obstacles(obstacles, npc.position[0], npc.position[2], 0.45);
+        npc.position[0] = px;
+        npc.position[2] = pz;
     }
     npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+}
+
+/// 圆（半径 r）对存活障碍 AABB 的水平推开（NPC 移动后防穿墙；MapObstacle 版）
+fn resolve_circle_obstacles(obs: &[MapObstacle], x: f32, z: f32, r: f32) -> (f32, f32) {
+    let mut ox = x;
+    let mut oz = z;
+    for ob in obs {
+        let (hx, hz) = (ob.half_w, ob.half_d);
+        let cx = (ox - ob.x).clamp(-hx, hx);
+        let cz = (oz - ob.z).clamp(-hz, hz);
+        let dx = ox - (ob.x + cx);
+        let dz = oz - (ob.z + cz);
+        let d2 = dx * dx + dz * dz;
+        if d2 < r * r {
+            if d2 > 1e-6 {
+                let d = d2.sqrt();
+                let push = r - d;
+                ox += dx / d * push;
+                oz += dz / d * push;
+            } else {
+                let px = hx + r - (ox - ob.x).abs();
+                let pz = hz + r - (oz - ob.z).abs();
+                if px < pz {
+                    ox += if ox > ob.x { px } else { -px };
+                } else {
+                    oz += if oz > ob.z { pz } else { -pz };
+                }
+            }
+        }
+    }
+    (ox, oz)
 }
 
 /// 网络远端玩家快照 id 基址（与 NPC id 空间隔离：100000+）
