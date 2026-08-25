@@ -2105,12 +2105,13 @@ impl Game {
         while let Ok(Some((msg, _))) = client.recv() {
             client.handle_message(msg);
         }
-        // 断线基本处理：已加入后超过 CLIENT_TIMEOUT 无数据报 → 告警（重连为后续 TODO）
+        // 断线自动重连（2026-08-25）：超过 CLIENT_TIMEOUT 无数据 → 重置握手态，retry_join 续发
         if client.player_id().is_some() && client.snapshot_timeout() {
             log::warn!(
-                "net: client 断线（{}s 无数据），等待重连...",
+                "net: client 断线（{}s 无数据），自动重连中...",
                 CLIENT_TIMEOUT.as_secs()
             );
+            client.reset_connection();
         }
     }
 

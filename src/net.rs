@@ -1007,6 +1007,15 @@ impl Client {
     /// 握手重试：未收到 Join 确认时按 `interval` 间隔重发（UDP 尽力而为下
     /// 唯一带重试的报文；快照/输入不重传，靠序列号丢弃乱序与重复）。
     /// 已确认时返回 true。
+    /// 断线重置（2026-08-25 重连支持）：清除已注册 id/实体/超时状态，
+    /// 使下一次 retry_join 重新握手（服务器端也会重新注册为新 id）
+    pub fn reset_connection(&mut self) {
+        self.player_id = None;
+        self.entities.clear();
+        self.has_snapshot = false;
+        self.last_join_at = Instant::now() - Duration::from_secs(3600);
+    }
+
     pub fn retry_join(&mut self, name: &str, interval: Duration) -> bool {
         if self.player_id.is_some() {
             return true;
