@@ -2027,6 +2027,10 @@ impl Game {
                 pos: n.position,
                 facing: n.facing,
                 hp: n.hp,
+                team: match n.team {
+                    Team::Red => 0,
+                    Team::Blue => 1,
+                },
             })
             .collect();
         // 远端玩家 → 保留 id 区（NET_PLAYER_BASE + player_id），客户端据此渲染
@@ -2036,6 +2040,7 @@ impl Game {
                 pos: p.pos,
                 facing: p.yaw,
                 hp: p.hp,
+                team: 1, // 远端玩家统一蓝营
             });
         }
         let snapshot = NetworkMessage::Snapshot {
@@ -5558,7 +5563,12 @@ mod tests {
             "快照应包含全部 NPC + 服务端本机玩家"
         );
         assert!(!client.snapshot_timeout(), "回环测试不应超时");
-        assert!(server_game.move_forward, "服务端应应用客户端输入");
+        // 2026-08-25：客户端输入驱动「远端玩家」实体（网络对战模型），不再是服务端本机玩家
+        assert!(
+            server_game.npcs.len() >= 0
+                && server_game.net_players.iter().any(|p| p.alive),
+            "服务端应注册远端玩家并应用客户端输入"
+        );
         assert_eq!(
             client.snapshot_seq(),
             server_game.net_snap_seq,

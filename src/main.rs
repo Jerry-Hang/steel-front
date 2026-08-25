@@ -1223,23 +1223,12 @@ impl GameApp {
                     .entities()
                     .iter()
                     .filter(|(id, e)| (**id < 100_000 && e.hp > 0.0) || **id == 0 || **id >= 100_000)
-                    .map(|(id, e)| {
-                        let idn = *id;
-                        let team = self
-                            .game
-                            .npcs
-                            .iter()
-                            .find(|n| n.id as u32 == idn)
-                            .map(|n| n.team);
-                        let tint = if idn == 0 {
-                            [0.95, 0.12, 0.08, 1.0]
-                        } else if idn >= 100_000 {
-                            [0.08, 0.35, 0.98, 1.0]
+                    .map(|(_, e)| {
+                        // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
+                        let tint = if e.hp > 0.0 {
+                            if e.team == 1 { [0.08, 0.35, 0.98, 1.0] } else { [0.95, 0.12, 0.08, 1.0] }
                         } else {
-                            match team {
-                                Some(Team::Blue) => [0.08, 0.35, 0.98, 1.0],
-                                _ => [0.95, 0.12, 0.08, 1.0],
-                            }
+                            [0.32, 0.32, 0.32, 1.0]
                         };
                         engine::renderer::NpcVisual {
                             pos: [e.state.curr.pos[0], e.state.curr.pos[1], e.state.curr.pos[2]],
