@@ -755,6 +755,8 @@ pub struct NetPlayer {
     pub last_rx: f32,
     /// 开火节流（连发间隔）
     pub fire_accum: f32,
+    /// 最近开火时刻（快照 firing 指示）
+    pub last_fire: f32,
 }
 
 /// 游戏运行时状态（随接线进度逐步扩展）
@@ -1991,6 +1993,7 @@ impl Game {
                     alive: true,
                     last_rx: self.time,
                     fire_accum: 0.0,
+                    last_fire: 0.0,
                 });
                 log::info!("net: server 远端玩家 #{id} 加入 @({:.0},{:.0})", spawn[0], spawn[1]);
             }
@@ -2031,6 +2034,7 @@ impl Game {
                     Team::Red => 0,
                     Team::Blue => 1,
                 },
+                firing: if n.state_machine.state() == NpcState::Attack { 1 } else { 0 },
             })
             .collect();
         // 远端玩家 → 保留 id 区（NET_PLAYER_BASE + player_id），客户端据此渲染
@@ -2041,6 +2045,7 @@ impl Game {
                 facing: p.yaw,
                 hp: p.hp,
                 team: 1, // 远端玩家统一蓝营
+                firing: if self.time - p.last_fire < 0.2 { 1 } else { 0 },
             });
         }
         let snapshot = NetworkMessage::Snapshot {
@@ -2105,6 +2110,18 @@ impl Game {
         while let Ok(Some((msg, _))) = client.recv() {
             client.handle_message(msg);
         }
+        // 自身上行权威校正（2026-08-25）：服务器端本远端实体位置与本地超 3m → 硬对齐（防漂移）
+        if let Some(own) = client.player_id() {
+            if let Some(st) = client.entity_state_at(NET_PLAYER_BASE + own, client.now()) {
+                let dx = st.pos[0] - self.player_body.pos.x;
+                let dz = st.pos[2] - self.player_body.pos.z;
+                if dx * dx + dz * dz > 9.0 {
+                    self.player_body.pos.x = st.pos[0];
+                    self.player_body.pos.z = st.pos[2];
+                    log::debug!("net: client 行正（位置校正 {:.1},{:.1}）", st.pos[0], st.pos[2]);
+                }
+            }
+        }
         // 断线自动重连（2026-08-25）：超过 CLIENT_TIMEOUT 无数据 → 重置握手态，retry_join 续发
         if client.player_id().is_some() && client.snapshot_timeout() {
             log::warn!(
@@ -2166,6 +2183,7 @@ impl Game {
                 input.pitch.cos() * input.yaw.cos(),
             );
             self.fire([eye[0], eye[1], eye[2]], [dir.x, dir.y, dir.z]);
+            self.net_players[pi].last_fire = self.time;
         }
     }
 

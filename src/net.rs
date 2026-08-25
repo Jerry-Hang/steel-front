@@ -133,6 +133,8 @@ pub struct NpcSnapshot {
     pub hp: f32,
     /// 阵营（0=Red 1=Blue；客户端渲染直接权威使用，2026-08-25）
     pub team: u8,
+    /// 开火指示（1=本帧/最近 0.2s 内开火；客户端枪口焰联动）
+    pub firing: u8,
 }
 
 /// 客户端输入/姿态（每 tick 随 Input 上报）：移动标志 + 开火 + 视角（弧度）
@@ -353,6 +355,7 @@ impl NetworkMessage {
                     put_f32(&mut p, npc.facing);
                     put_f32(&mut p, npc.hp);
                     p.push(npc.team);
+                    p.push(npc.firing);
                 }
                 (MessageType::Snapshot, p)
             }
@@ -472,7 +475,8 @@ impl NetworkMessage {
                     let facing = r.f32()?;
                     let hp = r.f32()?;
                     let team = r.u8()?;
-                    npcs.push(NpcSnapshot { id, pos, facing, hp, team });
+                    let firing = r.u8()?;
+                    npcs.push(NpcSnapshot { id, pos, facing, hp, team, firing });
                 }
                 NetworkMessage::Snapshot {
                     seq,
@@ -635,6 +639,8 @@ pub struct RemoteEntity {
     pub hp: f32,
     /// 阵营（0=Red 1=Blue；来自 NpcSnapshot，渲染权威使用）
     pub team: u8,
+    /// 开火指示（最近 0.2s 内开火；渲染枪口焰联动）
+    pub firing: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +907,7 @@ impl Client {
                                 state: RemotePlayer::new(player_id, player, t),
                                 hp: 100.0,
                                 team: 0, // 服务器玩家默认红营（远端蓝营见 NPC 行）
+                                firing: false,
                             },
                         );
                     }
@@ -913,6 +920,7 @@ impl Client {
                             e.state.update(nstate, t);
                             e.hp = npc.hp;
                             e.team = npc.team;
+                            e.firing = npc.firing == 1;
                         }
                         None => {
                             self.entities.insert(
@@ -921,6 +929,7 @@ impl Client {
                                     state: RemotePlayer::new(npc.id, nstate, t),
                                     hp: npc.hp,
                                     team: npc.team,
+                                    firing: npc.firing == 1,
                                 },
                             );
                         }
@@ -1383,13 +1392,13 @@ mod tests {
             player_id: 1,
             player: state(1.0, 2.0, 3.0, 0.5),
             npcs: vec![
-                NpcSnapshot { id: 10, pos: [1.0, 0.0, 1.0], facing: 0.25, hp: 100.0, team: 0 },
-                NpcSnapshot { id: 11, pos: [-2.0, 0.0, 4.0], facing: -1.0, hp: 50.0, team: 0 },
+                NpcSnapshot { id: 10, pos: [1.0, 0.0, 1.0], facing: 0.25, hp: 100.0, team: 0 , firing: 0 },
+                NpcSnapshot { id: 11, pos: [-2.0, 0.0, 4.0], facing: -1.0, hp: 50.0, team: 0 , firing: 0 },
             ],
         };
         let bytes = m.encode();
-        // HEADER + seq(4) + time(4) + player_id(4) + player(16) + count(2) + 2×25（含 team 字节）
-        assert_eq!(bytes.len(), HEADER_LEN + 30 + 50);
+        // HEADER + seq(4) + time(4) + player_id(4) + player(16) + count(2) + 2×26（team+firing）
+        assert_eq!(bytes.len(), HEADER_LEN + 30 + 52);
         assert_eq!(bytes[2], MessageType::Snapshot as u8);
         assert_eq!(&bytes[HEADER_LEN + 28..HEADER_LEN + 30], &[0x00, 0x02]);
         assert_eq!(&bytes[HEADER_LEN + 30..HEADER_LEN + 34], &[0, 0, 0, 10]);
@@ -1400,7 +1409,7 @@ mod tests {
     #[test]
     fn snapshot_npcs_capped_at_max() {
         let npcs = (0..(MAX_SNAPSHOT_NPCS + 50) as u32)
-            .map(|id| NpcSnapshot { id, pos: [0.0; 3], facing: 0.0, hp: 1.0, team: 0 })
+            .map(|id| NpcSnapshot { id, pos: [0.0; 3], facing: 0.0, hp: 1.0, team: 0 , firing: 0 })
             .collect::<Vec<_>>();
         let m = NetworkMessage::Snapshot {
             seq: 1,
@@ -1580,8 +1589,8 @@ mod tests {
             player_id: 1,
             player: state(5.0, 0.0, 5.0, 0.5),
             npcs: vec![
-                NpcSnapshot { id: 10, pos: [1.0, 0.0, 1.0], facing: 0.25, hp: 100.0, team: 0 },
-                NpcSnapshot { id: 11, pos: [2.0, 0.0, 2.0], facing: -0.5, hp: 40.0, team: 0 },
+                NpcSnapshot { id: 10, pos: [1.0, 0.0, 1.0], facing: 0.25, hp: 100.0, team: 0 , firing: 0 },
+                NpcSnapshot { id: 11, pos: [2.0, 0.0, 2.0], facing: -0.5, hp: 40.0, team: 0 , firing: 0 },
             ],
         };
         server.send_to(&snapshot, from2).unwrap();

@@ -1236,7 +1236,7 @@ impl GameApp {
                             tint,
                             phase: self.anim_clock,
                             moving: true,
-                            firing: false,
+                            firing: e.firing,
                         }
                     })
                     .collect()
