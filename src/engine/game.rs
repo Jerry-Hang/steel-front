@@ -737,6 +737,26 @@ impl CollisionListener for EventBuffer {
     }
 }
 
+/// 网络远端玩家（服务器权威：位置/朝向/血量由服务器模拟并广播）
+#[derive(Debug, Clone, Copy)]
+pub struct NetPlayer {
+    /// 客户端分配的 player id（Join-ack）
+    pub id: u32,
+    /// 世界位置
+    pub pos: [f32; 3],
+    /// 朝向（yaw/pitch）
+    pub yaw: f32,
+    pub pitch: f32,
+    /// 血量（0 = 阵亡，服务器复活后回满）
+    pub hp: f32,
+    /// 是否存活
+    pub alive: bool,
+    /// 最近一次收到输入的时间（断线/超时判定）
+    pub last_rx: f32,
+    /// 开火节流（连发间隔）
+    pub fire_accum: f32,
+}
+
 /// 游戏运行时状态（随接线进度逐步扩展）
 pub struct Game {
     /// 物理世界：重力积分、地面响应、刚体间碰撞
@@ -875,9 +895,11 @@ pub struct Game {
     /// 网络环回演示（默认关闭，RV3D_NET=1 启用）
     net_demo: Option<NetworkDemo>,
     /// 服务器模式（RV3D_NET=server）：权威模拟 + 每 tick 广播快照
-    net_server: Option<Server>,
+    pub net_server: Option<Server>,
+    /// 网络远端玩家（服务器权威模拟；客户端模式时为空，远端实体由快照消费）
+    net_players: Vec<NetPlayer>,
     /// 客户端模式（RV3D_NET=client）：每 tick 上报输入 + 快照插值缓冲
-    net_client: Option<Client>,
+    pub net_client: Option<Client>,
     /// 客户端输入序号（每 tick +1，服务端据此去重/排序）
     net_input_seq: u32,
     /// 服务端快照序号（每 tick +1）
@@ -1165,6 +1187,7 @@ impl Game {
             },
             net_server: None,
             net_client: None,
+            net_players: Vec::new(),
             net_input_seq: 0,
             net_snap_seq: 0,
             net_fire_pending: false,
@@ -1929,9 +1952,10 @@ impl Game {
         }
     }
 
-    /// 服务器模式：收客户端输入应用 + 超时清理 + 每 tick 广播快照
+    /// 服务器模式：收客户端输入应用（远端玩家）+ 超时清理 + 每 tick 广播快照
     fn step_net_server(&mut self, camera: &Camera) {
-        let mut inputs: Vec<NetInput> = Vec::new();
+        let mut inputs: Vec<(std::net::SocketAddr, NetInput)> = Vec::new();
+        let mut joined: Vec<u32> = Vec::new();
         {
             let Some(server) = self.net_server.as_mut() else {
                 return;
@@ -1940,8 +1964,11 @@ impl Game {
                 match msg {
                     NetworkMessage::Join { name, .. } => {
                         let _ = server.handle_join(from, name);
+                        if let Some(id) = server.player_id_of(from) {
+                            joined.push(id);
+                        }
                     }
-                    NetworkMessage::Input { input, .. } => inputs.push(input),
+                    NetworkMessage::Input { input, .. } => inputs.push((from, input)),
                     _ => {}
                 }
             }
@@ -1951,15 +1978,48 @@ impl Game {
                 log::warn!("net: server 移除超时客户端: {:?}", removed);
             }
         }
-        // 应用最新一份客户端输入（本轮单客户端为主；多客户端按到达顺序取最后一份）
-        if let Some(input) = inputs.pop() {
-            self.apply_net_input(input);
+        // Join 注册（借用解耦后执行）：服务器权威远端玩家实体（主机=红营视角，远端=蓝营）
+        let spawn = self.net_spawn_point();
+        for id in joined {
+            if !self.net_players.iter().any(|p| p.id == id) {
+                self.net_players.push(NetPlayer {
+                    id,
+                    pos: [spawn[0], 0.0, spawn[1]],
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    hp: 100.0,
+                    alive: true,
+                    last_rx: self.time,
+                    fire_accum: 0.0,
+                });
+                log::info!("net: server 远端玩家 #{id} 加入 @({:.0},{:.0})", spawn[0], spawn[1]);
+            }
         }
-        // 每 tick 广播快照：本机玩家 + 全部 NPC（位置/朝向/血量）
+        // 各远端玩家应用最新输入（移动 + 开火，服务器权威）
+        for (from, input) in inputs {
+            if let Some(id) = self.net_server.as_ref().and_then(|s| s.player_id_of(from)) {
+                self.apply_net_player_input(id, input);
+            }
+        }
+        // 远端玩家：死亡复活 + 位置贴地
+        let spawn = self.net_spawn_point();
+        for p in &mut self.net_players {
+            if !p.alive && self.time - p.last_rx >= 4.0 {
+                p.pos = [spawn[0], 0.0, spawn[1]];
+                p.hp = 100.0;
+                p.alive = true;
+                p.last_rx = self.time;
+                log::info!("net: server 远端玩家 #{} 复活 @({:.0},{:.0})", p.id, spawn[0], spawn[1]);
+            }
+            if p.alive {
+                p.pos[1] = terrain_height_at(p.pos[0], p.pos[2]) + 1.6;
+            }
+        }
+        // 每 tick 广播快照：本机玩家 + 全部 NPC + 远端玩家（同一 id 空间，远端用保留基址）
         self.net_snap_seq = self.net_snap_seq.wrapping_add(1);
         let cam_pos = camera.position();
         let player = PlayerState::new([cam_pos.x, cam_pos.y, cam_pos.z], camera.yaw);
-        let npcs = self
+        let mut npcs: Vec<NpcSnapshot> = self
             .npcs
             .iter()
             .map(|n| NpcSnapshot {
@@ -1969,6 +2029,15 @@ impl Game {
                 hp: n.hp,
             })
             .collect();
+        // 远端玩家 → 保留 id 区（NET_PLAYER_BASE + player_id），客户端据此渲染
+        for p in &self.net_players {
+            npcs.push(NpcSnapshot {
+                id: NET_PLAYER_BASE + p.id,
+                pos: p.pos,
+                facing: p.yaw,
+                hp: p.hp,
+            });
+        }
         let snapshot = NetworkMessage::Snapshot {
             seq: self.net_snap_seq,
             time: self.time,
@@ -2041,21 +2110,62 @@ impl Game {
     }
 
     /// 服务端应用客户端输入：移动标志 + 开火（方向 = 输入视角）+ 记录视角供 main.rs 应用
-    fn apply_net_input(&mut self, input: NetInput) {
-        self.move_forward = input.forward;
-        self.move_backward = input.backward;
-        self.move_left = input.left;
-        self.move_right = input.right;
-        self.net_look = Some((input.yaw, input.pitch));
-        if input.fire {
-            let eye = self.player_eye();
+    /// 远端玩家输入应用（服务器权威：移动该玩家 + 从该玩家眼睛开火）
+    fn apply_net_player_input(&mut self, id: u32, input: NetInput) {
+        let Some(idx) = self.net_players.iter().position(|p| p.id == id) else {
+            return;
+        };
+        let (pi, dt, alive) = (idx, self.last_dt, self.net_players[idx].alive);
+        if !alive {
+            return;
+        }
+        // 移动：以 yaw 为前向（服务器统一步长，与本地玩家手感一致）
+        let p = &mut self.net_players[pi];
+        let speed = 4.6 * dt;
+        let mut dx = 0.0f32;
+        let mut dz = 0.0f32;
+        let (sy, cy) = (input.yaw.sin(), input.yaw.cos());
+        if input.forward {
+            dx += sy * speed;
+            dz += cy * speed;
+        }
+        if input.backward {
+            dx -= sy * speed;
+            dz -= cy * speed;
+        }
+        if input.left {
+            dx += cy * speed;
+            dz -= sy * speed;
+        }
+        if input.right {
+            dx -= cy * speed;
+            dz += sy * speed;
+        }
+        let nx = p.pos[0] + dx;
+        let nz = p.pos[2] + dz;
+        // 静态障碍 AABB 水平推开（盒体数少，线性扫描可接受）
+        let (rx, rz) = resolve_circle_static(&self.world.bodies, nx, nz, 0.45);
+        p.pos = [rx, 0.0, rz];
+        p.yaw = input.yaw;
+        p.pitch = input.pitch;
+        p.last_rx = self.time;
+        // 开火（服务器权威弹道：命中 NPC/友方实体走 self.fire 链路）
+        p.fire_accum += dt;
+        if input.fire && p.fire_accum >= 0.12 {
+            p.fire_accum = 0.0;
+            let eye = [p.pos[0], p.pos[1] + 1.2, p.pos[2]];
             let dir = glam::Vec3::new(
                 input.pitch.cos() * input.yaw.sin(),
                 input.pitch.sin(),
                 input.pitch.cos() * input.yaw.cos(),
             );
-            self.fire([eye.x, eye.y, eye.z], [dir.x, dir.y, dir.z]);
+            self.fire([eye[0], eye[1], eye[2]], [dir.x, dir.y, dir.z]);
         }
+    }
+
+    /// 远端玩家出生点（蓝营侧固定点：主机=红营出生区对面）
+    fn net_spawn_point(&self) -> [f32; 2] {
+        [-110.0, 60.0]
     }
 
     /// 网络环回演示：server 收包回环广播，client 发包/收包做远端插值；不参与帧率逻辑
@@ -2994,6 +3104,15 @@ impl Game {
                 );
                 self.damage_npc(idx, dmg);
                 continue;
+            }
+            // 玩家弹 vs 网络远端玩家（服务器权威命中：杀远端玩家）
+            if p.from_player() && self.net_players.iter().any(|q| q.alive) {
+                let hit = self.hit_net_player(&p);
+                if hit {
+                    hit_count += 1;
+                    self.hud.show_hit_marker();
+                    continue;
+                }
             }
             alive.push(p);
         }
@@ -4376,6 +4495,31 @@ impl Game {
             log::info!("battle: 第 {} 轮重开（阵亡清场）", self.stress_round);
             self.spawn_stress_battle(player);
         }
+    }
+
+    /// 玩家弹 vs 网络远端玩家命中（胶囊近似：水平 0.5m + 高度 1.8m）
+    fn hit_net_player(&mut self, p: &Projectile) -> bool {
+        let (px, pz, ph) = (p.position[0], p.position[2], p.position[1]);
+        for q in self.net_players.iter_mut() {
+            if !q.alive {
+                continue;
+            }
+            let dx = px - q.pos[0];
+            let dz = pz - q.pos[2];
+            let dy = ph - (q.pos[1] - 1.6); // 脚底高
+            if dx * dx + dz * dz <= 0.25 && dy >= 0.0 && dy <= 1.8 {
+                let dmg = p.damage_at_distance();
+                q.hp -= dmg;
+                if q.hp <= 0.0 {
+                    q.alive = false;
+                    q.last_rx = self.time;
+                    self.hud.push_kill(format!("YOU KILLED NET PLAYER #{}", q.id));
+                    log::info!("net: server 远端玩家 #{} 被击杀\n", q.id);
+                }
+                return true;
+            }
+        }
+        false
     }
 
     /// 累计碰撞事件数（供 UI / 日志）
@@ -6782,6 +6926,46 @@ fn advance_npc(
         npc.position[2] += mz * step;
     }
     npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+}
+
+/// 网络远端玩家快照 id 基址（与 NPC id 空间隔离：100000+）
+const NET_PLAYER_BASE: u32 = 100_000;
+
+/// 圆（半径 r）对静态障碍 AABB 的水平推开：返回 (x, z)（AABB 为 (cx±half_w, cz±half_d)）
+fn resolve_circle_static(
+    bodies: &[physics::Body],
+    x: f32,
+    z: f32,
+    r: f32,
+) -> (f32, f32) {
+    let mut ox = x;
+    let mut oz = z;
+    for b in bodies {
+        let (hx, hz) = (b.half_extents.x, b.half_extents.z);
+        let cx = (ox - b.position.x).clamp(-hx, hx);
+        let cz = (oz - b.position.z).clamp(-hz, hz);
+        let dx = ox - (b.position.x + cx);
+        let dz = oz - (b.position.z + cz);
+        let d2 = dx * dx + dz * dz;
+        if d2 < r * r {
+            if d2 > 1e-6 {
+                let d = d2.sqrt();
+                let push = r - d;
+                ox += dx / d * push;
+                oz += dz / d * push;
+            } else {
+                // 圆心在盒内：沿最小穿透轴推出
+                let px = hx + r - (ox - b.position.x).abs();
+                let pz = hz + r - (oz - b.position.z).abs();
+                if px < pz {
+                    ox += if ox > b.position.x { px } else { -px };
+                } else {
+                    oz += if oz > b.position.z { pz } else { -pz };
+                }
+            }
+        }
+    }
+    (ox, oz)
 }
 
 /// 红蓝阵营存活 NPC 的平均 x/z（阵营为空 → [0.0, 0.0]；命令行军/军情用）

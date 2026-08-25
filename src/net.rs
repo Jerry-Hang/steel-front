@@ -662,6 +662,11 @@ impl Server {
         self.socket.local_addr()
     }
 
+    /// 查询某地址的 player id（Join 注册后有效；未注册返回 None）
+    pub fn player_id_of(&self, addr: SocketAddr) -> Option<u32> {
+        self.clients.get(&addr).copied()
+    }
+
     /// 注册客户端地址并分配玩家 id；已注册则返回原 id
     pub fn register(&mut self, addr: SocketAddr) -> u32 {
         *self.clients.entry(addr).or_insert_with(|| {
