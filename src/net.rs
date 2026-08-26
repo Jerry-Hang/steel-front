@@ -244,6 +244,53 @@ fn put_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 
+/// 中继注册：通知接入点本机地址（接入点记录其观测到的公网地址）
+/// 返回注册 OK 与否（尽力而为；不做失败重试——客户端可稍后 WHO 检索）
+pub fn rdv_register(rdv: &str, name: &str) -> io::Result<()> {
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    let raddr: SocketAddr = rdv
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("中继地址解析失败: {e}")))?;
+    sock.send_to(format!("REG {name}").as_bytes(), raddr)?;
+    Ok(())
+}
+
+/// 中继解析：向接入点查询主机地址（公网观测地址；NAT 打洞第一步）
+/// 超时 5s；回复 ADDR <name> <addr> 或 NONE
+pub fn rdv_resolve(rdv: &str, name: &str) -> io::Result<SocketAddr> {
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let raddr: SocketAddr = rdv
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("中继地址解析失败: {e}")))?;
+    sock.send_to(format!("WHO {name}").as_bytes(), raddr)?;
+    let mut buf = [0u8; 512];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match sock.recv_from(&mut buf) {
+            Ok((n, _)) => {
+                let line = String::from_utf8_lossy(&buf[..n]);
+                let mut it = line.split_whitespace();
+                if it.next() == Some("ADDR") {
+                    if let (Some(nm), Some(addr)) = (it.next(), it.next()) {
+                        if nm == name {
+                            if let Ok(a) = addr.parse() {
+                                // 打洞：向目标地址发送一次探测（打开 NAT 映射）
+                                let _ = sock.send_to(b"PING", a);
+                                return Ok(a);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // 超时继续/wouldblock
+            }
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::TimedOut, format!("中继查询 {name} 超时")))
+}
+
 /// 非阻塞收包（Server/Client 共用）：无数据 Ok(None)，协议错误映射 InvalidData
 fn recv_msg(socket: &std::net::UdpSocket) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
     let mut buf = [0u8; MAX_DATAGRAM];
@@ -702,6 +749,15 @@ impl Server {
     /// 查询某地址的 player id（Join 注册后有效；未注册返回 None）
     pub fn player_id_of(&self, addr: SocketAddr) -> Option<u32> {
         self.clients.get(&addr).copied()
+    }
+
+    /// 向中继注册房间（用真实监听套接字发送：源 IP=中继观测、端口=配置端口显式声明）
+    pub fn rdv_register(&self, rdv: &str, name: &str, port: u16) -> io::Result<()> {
+        let raddr: SocketAddr = rdv
+            .parse()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("中继地址解析失败: {e}")))?;
+        self.socket.send_to(format!("REG {name} {port}").as_bytes(), raddr)?;
+        Ok(())
     }
 
     /// 注册客户端地址并分配玩家 id；已注册则返回原 id

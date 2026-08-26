@@ -1288,7 +1288,7 @@ impl GameApp {
             };
             renderer.set_npc_visuals(&npc_visuals);
             // NPC 枪口焰/弹壳：攻击态 NPC 限流生成（每帧最多 4 个，按 id 相位轮转避免全爆发）
-            let firing_npcs: Vec<[f32; 3]> = self
+            let mut firing_npcs: Vec<[f32; 3]> = self
                 .game
                 .npcs
                 .iter()
@@ -1310,6 +1310,19 @@ impl GameApp {
                     ]
                 })
                 .collect();
+            // 网络远端实体开火 → 同链路枪口焰（你看到对面玩家开枪的火光）
+            if let Some(client) = self.game.net_client.as_ref() {
+                for (_, e) in client.entities().iter() {
+                    if e.firing && e.hp > 0.0 {
+                        let (s, c) = e.state.curr.rot.sin_cos();
+                        firing_npcs.push([
+                            e.state.curr.pos[0] + s * 0.85,
+                            e.state.curr.pos[1] + 0.15,
+                            e.state.curr.pos[2] + c * 0.85,
+                        ]);
+                    }
+                }
+            }
             for muzzle in firing_npcs {
                 self.particles.push(Particle {
                     pos: muzzle,
@@ -2289,6 +2302,10 @@ fn main() {
     let net_role = std::env::var("RV3D_NET").unwrap_or_default();
     let net_addr =
         std::env::var("RV3D_NET_ADDR").unwrap_or_else(|_| "127.0.0.1:27015".to_string());
+    // NAT 中继（RV3D_NET_RDV=<host:port> + RV3D_NET_NAME=房间名）：
+    // 服务器向中继注册；客户端查询房间名→公网地址直连（NAT 打洞第一步）
+    let net_rdv = std::env::var("RV3D_NET_RDV").ok();
+    let net_name = std::env::var("RV3D_NET_NAME").unwrap_or_else(|_| "steel".to_string());
     match net_role.as_str() {
         "server" => match Server::bind(&net_addr) {
             Ok(server) => {
@@ -2297,16 +2314,42 @@ fn main() {
                     .map(|a| a.to_string())
                     .unwrap_or_else(|_| net_addr.clone());
                 log::info!("net: 服务器模式，监听 {}", addr);
+                if let Some(rdv) = &net_rdv {
+                    let port = net_addr
+                        .rsplit(':')
+                        .next()
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .unwrap_or(27015);
+                    let _ = server.rdv_register(rdv, &net_name, port);
+                    log::info!("net: 已向中继 {rdv} 注册房间 {net_name}（端口 {port}，等待玩家查询）");
+                }
                 app.game.set_net_server(server);
             }
             Err(e) => log::error!("net: 服务器绑定 {} 失败: {}", net_addr, e),
         },
-        "client" => match Client::connect(&net_addr) {
-            Ok(client) => {
-                log::info!("net: 客户端模式，连接 {}", client.server_addr());
-                app.game.set_net_client(client);
+        "client" => {
+            // 中继解析：通过房间名拿到主机公网地址（打洞探测已在 rdv_resolve 内发出）
+            let target = if let Some(rdv) = &net_rdv {
+                match crate::net::rdv_resolve(rdv, &net_name) {
+                    Ok(a) => {
+                        log::info!("net: 中继解析房间 {net_name} → {}", a);
+                        a.to_string()
+                    }
+                    Err(e) => {
+                        log::error!("net: 中继解析 {net_name} 失败: {e}（改用直连地址）");
+                        net_addr.clone()
+                    }
+                }
+            } else {
+                net_addr.clone()
+            };
+            match Client::connect(&target) {
+                Ok(client) => {
+                    log::info!("net: 客户端模式，连接 {}", client.server_addr());
+                    app.game.set_net_client(client);
+                }
+                Err(e) => log::error!("net: 客户端连接 {} 失败: {}", target, e),
             }
-            Err(e) => log::error!("net: 客户端连接 {} 失败: {}", net_addr, e),
         },
         other => {
             if !other.is_empty() {
