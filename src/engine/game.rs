@@ -1594,6 +1594,7 @@ impl Game {
             .send(&NetworkMessage::Join {
                 player_id: 0,
                 name: "local".into(),
+                version: crate::net::SESSION_VERSION,
             })
             .map_err(|e| format!("发送 Join 失败: {}", e))?;
         Ok(NetworkDemo {
@@ -1969,8 +1970,8 @@ impl Game {
             };
             while let Ok(Some((msg, from))) = server.recv() {
                 match msg {
-                    NetworkMessage::Join { name, .. } => {
-                        let _ = server.handle_join(from, name);
+                    NetworkMessage::Join { name, version, .. } => {
+                        let _ = server.handle_join(from, name, version);
                         if let Some(id) = server.player_id_of(from) {
                             joined.push(id);
                         }
@@ -2206,7 +2207,7 @@ impl Game {
         while let Ok(Some((msg, from))) = demo.server.recv() {
             match &msg {
                 NetworkMessage::Join { name, .. } => {
-                    let _ = demo.server.handle_join(from, name.clone());
+                    let _ = demo.server.handle_join(from, name.clone(), crate::net::SESSION_VERSION);
                 }
                 _ => {
                     let _ = demo.server.broadcast(&msg, None);
@@ -5590,7 +5591,7 @@ mod tests {
             if let Ok(Some((msg, from))) = demo.server.recv() {
                 if let NetworkMessage::Join { player_id, .. } = &msg {
                     got_join = *player_id == 0;
-                    assert!(demo.server.handle_join(from, "local".into()).is_ok());
+                    assert!(demo.server.handle_join(from, "local".into(), crate::net::SESSION_VERSION).is_ok());
                 }
             }
             if !got_join {

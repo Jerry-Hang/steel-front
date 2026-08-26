@@ -54,6 +54,9 @@ pub const PROTOCOL_MAGIC: u8 = 0x53;
 pub const PROTOCOL_VERSION: u8 = 0x01;
 /// 头部长度：magic(1) + version(1) + type(1) + length(2, BE)
 pub const HEADER_LEN: usize = 5;
+/// 协议版本（wire 布局变更时必须递增：v2 = 快照行含 team/firing）
+/// 服务器拒绝不匹配版本的 Join（客户端收到 Refuse 停止重试）
+pub const SESSION_VERSION: u16 = 2;
 /// 单条 UDP 数据报读取缓冲上限：取 UDP 载荷上限 65507（IPv4）。
 /// 快照需承载 64v64 压力模式全部 NPC（128 × 24B ≈ 3KB），1400 的 MTU 余量会截断快照；
 /// 局域网碎片化可接受，本轮不做分片/重组（见模块头部协议注释）。
@@ -86,6 +89,8 @@ pub enum MessageType {
     Input = 0x06,
     /// 服务端 → 客户端：目标状态（据点归属/进度）同步
     ObjectiveState = 0x07,
+    /// 服务端 → 客户端：拒绝加入（协议版本不匹配等；reason 文本）
+    Refuse = 0x08,
 }
 
 impl MessageType {
@@ -99,6 +104,7 @@ impl MessageType {
             0x05 => MessageType::Snapshot,
             0x06 => MessageType::Input,
             0x07 => MessageType::ObjectiveState,
+            0x08 => MessageType::Refuse,
             _ => return None,
         })
     }
@@ -159,8 +165,11 @@ pub struct NetInput {
 /// 网络消息：Join / Leave / Position / Action / Snapshot / Input
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetworkMessage {
-    /// 玩家加入；`player_id == 0` 表示申请加入，服务端回复分配后的 id
-    Join { player_id: u32, name: String },
+    /// 玩家加入；`player_id == 0` 表示申请加入，服务端回复分配后的 id；
+    /// version = 协议版本（不匹配 → 服务端回 Refuse）
+    Join { player_id: u32, name: String, version: u16 },
+    /// 服务端拒绝（协议不匹配等；reason 供客户端显示）
+    Refuse { reason: String },
     /// 玩家离开；reason：0=正常退出，1=超时，2=被踢
     Leave { player_id: u32, reason: u8 },
     /// 玩家状态同步；seq 为发送方单调递增序号
@@ -302,13 +311,22 @@ impl NetworkMessage {
     /// 编码为带协议头的数据报字节（大端）
     pub fn encode(&self) -> Vec<u8> {
         let (ty, payload) = match self {
-            NetworkMessage::Join { player_id, name } => {
+            NetworkMessage::Refuse { reason } => {
+                let rb = reason.as_bytes();
+                let n = rb.len().min(255);
+                let mut p = Vec::with_capacity(5 + n);
+                p.push(n as u8);
+                p.extend_from_slice(&rb[..n]);
+                (MessageType::Refuse, p)
+            }
+            NetworkMessage::Join { player_id, name, version } => {
                 let name = name.as_bytes();
                 let n = name.len().min(255);
-                let mut p = Vec::with_capacity(5 + n);
+                let mut p = Vec::with_capacity(5 + n + 2);
                 put_u32(&mut p, *player_id);
                 p.push(n as u8);
                 p.extend_from_slice(&name[..n]);
+                p.extend_from_slice(&version.to_be_bytes());
                 (MessageType::Join, p)
             }
             NetworkMessage::Leave { player_id, reason } => {
@@ -433,7 +451,14 @@ impl NetworkMessage {
                 let name_len = r.u8()? as usize;
                 let name = String::from_utf8(r.bytes(name_len)?.to_vec())
                     .map_err(|_| NetError::InvalidName)?;
-                NetworkMessage::Join { player_id, name }
+                let version = u16::from_be_bytes([r.u8()?, r.u8()?]);
+                NetworkMessage::Join { player_id, name, version }
+            }
+            MessageType::Refuse => {
+                let len = r.u8()? as usize;
+                let reason = String::from_utf8(r.bytes(len)?.to_vec())
+                    .map_err(|_| NetError::InvalidUtf8)?;
+                NetworkMessage::Refuse { reason }
             }
             MessageType::Leave => {
                 let player_id = r.u32()?;
@@ -759,10 +784,18 @@ impl Server {
         Ok(sent)
     }
 
-    /// 处理一条 Join：自动注册该地址，回发分配后的 Join 确认（内部已 `send_to`，调用方无需再发送）
-    pub fn handle_join(&mut self, from: SocketAddr, name: String) -> io::Result<NetworkMessage> {
+    /// 处理一条 Join：自动注册该地址，回发分配后的 Join 确认（内部已 `send_to`，调用方无需再发送）。
+    /// 协议版本不匹配 → 回 Refuse（不注册客户端，阻止旧版本客户端误连）
+    pub fn handle_join(&mut self, from: SocketAddr, name: String, version: u16) -> io::Result<NetworkMessage> {
+        if version != SESSION_VERSION {
+            let refuse = NetworkMessage::Refuse {
+                reason: format!("协议版本不匹配（客户端 {version}，服务器 {SESSION_VERSION}）"),
+            };
+            self.send_to(&refuse, from)?;
+            return Ok(refuse);
+        }
         let player_id = self.register(from);
-        let reply = NetworkMessage::Join { player_id, name };
+        let reply = NetworkMessage::Join { player_id, name, version };
         self.send_to(&reply, from)?;
         Ok(reply)
     }
@@ -773,6 +806,8 @@ pub struct Client {
     socket: UdpSocket,
     server: SocketAddr,
     player_id: Option<u32>,
+    /// 服务器拒绝原因（协议版本不匹配等；Some = 停止重试）
+    refused_reason: Option<String>,
     remote_players: HashMap<u32, RemotePlayer>,
     clock_start: Instant,
     /// 最近快照序号（丢弃乱序/重复）
@@ -819,6 +854,7 @@ impl Client {
             snapshot_seq: 0,
             snapshot_time: 0.0,
             has_snapshot: false,
+            refused_reason: None,
             own_state: None,
             entities: HashMap::new(),
             last_rx: Instant::now(),
@@ -1033,6 +1069,7 @@ impl Client {
             let _ = self.send(&NetworkMessage::Join {
                 player_id: 0,
                 name: name.to_string(),
+                version: SESSION_VERSION,
             });
             self.last_join_at = Instant::now();
         }
@@ -1057,10 +1094,12 @@ mod tests {
             NetworkMessage::Join {
                 player_id: 0,
                 name: String::new(),
+                version: SESSION_VERSION,
             },
             NetworkMessage::Join {
                 player_id: 42,
                 name: "alice".to_string(),
+                version: SESSION_VERSION,
             },
             NetworkMessage::Leave {
                 player_id: 7,
@@ -1099,6 +1138,7 @@ mod tests {
         let m = NetworkMessage::Join {
             player_id: 1,
             name: "玩家".repeat(40), // 240 字节（≤ 255），应完整往返
+            version: SESSION_VERSION,
         };
         let decoded = NetworkMessage::decode(&m.encode()).unwrap();
         assert_eq!(decoded, m);
@@ -1107,12 +1147,13 @@ mod tests {
     #[test]
     fn join_name_truncated_to_255_bytes() {
         let m = NetworkMessage::Join {
-            player_id: 1,
-            name: "a".repeat(300),
-        };
+                player_id: 1,
+                name: "a".repeat(300),
+                version: SESSION_VERSION,
+            };
         let bytes = m.encode();
-        // 头部 + player_id(4) + 长度(1) + 名字(截断到 255)
-        assert_eq!(bytes.len(), HEADER_LEN + 4 + 1 + 255);
+        // 头部 + player_id(4) + 长度(1) + 名字(截断到 255) + version(2)
+        assert_eq!(bytes.len(), HEADER_LEN + 4 + 1 + 255 + 2);
         match NetworkMessage::decode(&bytes).unwrap() {
             NetworkMessage::Join { name, .. } => assert_eq!(name.len(), 255),
             _ => unreachable!(),
@@ -1280,21 +1321,23 @@ mod tests {
 
         // client -> server：Join 申请
         let join_req = NetworkMessage::Join {
-            player_id: 0,
-            name: "alice".to_string(),
-        };
+                player_id: 0,
+                name: "alice".to_string(),
+                version: SESSION_VERSION,
+            };
         client.send(&join_req).unwrap();
         let (got, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
         assert_eq!(from, client.local_addr().unwrap());
         assert_eq!(got, join_req);
 
         // server：注册 + 回发 Join 确认
-        let reply = server.handle_join(from, "alice".to_string()).unwrap();
+        let reply = server.handle_join(from, "alice".to_string(), SESSION_VERSION).unwrap();
         assert_eq!(
             reply,
             NetworkMessage::Join {
                 player_id: 1,
-                name: "alice".to_string()
+                name: "alice".to_string(),
+                version: SESSION_VERSION
             }
         );
         assert_eq!(server.client_count(), 1);
@@ -1555,12 +1598,12 @@ mod tests {
 
         // 握手：client Join 申请 → server 分配 id 回 ack → client 记录自身 id
         client
-            .send(&NetworkMessage::Join { player_id: 0, name: "player1".into() })
+            .send(&NetworkMessage::Join { player_id: 0, name: "player1".into(), version: SESSION_VERSION })
             .unwrap();
         let (req, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
         assert_eq!(from, client.local_addr().unwrap());
-        assert_eq!(req, NetworkMessage::Join { player_id: 0, name: "player1".into() });
-        server.handle_join(from, "player1".into()).unwrap();
+        assert_eq!(req, NetworkMessage::Join { player_id: 0, name: "player1".into(), version: SESSION_VERSION });
+        server.handle_join(from, "player1".into(), SESSION_VERSION).unwrap();
         let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
         client.handle_message(got);
         assert_eq!(client.player_id(), Some(1));
@@ -1620,13 +1663,13 @@ mod tests {
         let mut client = Client::connect(server_addr).unwrap();
         // 缩短超时阈值，避免真实时钟等待，保持测试快速且确定
         client.timeout = Duration::from_millis(10);
-        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into() });
+        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into(), version: SESSION_VERSION });
         assert!(client.player_id().is_some());
         std::thread::sleep(Duration::from_millis(30));
         assert!(client.snapshot_timeout(), "超过阈值无数据报应判定断线");
         assert!(!client.is_connected());
         // 任何数据报刷新 last_rx → 恢复连接判定
-        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into() });
+        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into(), version: SESSION_VERSION });
         assert!(!client.snapshot_timeout());
         assert!(client.is_connected());
     }
