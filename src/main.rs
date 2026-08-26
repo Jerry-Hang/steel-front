@@ -154,6 +154,8 @@ struct GameApp {
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
     gun_mesh_cache: Option<(String, crate::engine::guns::GunMesh)>,
+    /// 导入的 GLB 枪模（assets/guns/*.glb → 烘焙顶点；无则回退程序化枪模）
+    gun_glb: Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)>,
     /// 延迟自动切枪（测试用）：(目标武器号, 触发时刻)
     switch_weapon_at: Option<(usize, f32)>,
 }
@@ -274,6 +276,7 @@ impl GameApp {
             }),
             command_buf: String::new(),
             gun_mesh_cache: None,
+            gun_glb: Self::load_gun_glb(),
             switch_weapon_at: None,
         }
     }
@@ -704,7 +707,127 @@ impl GameApp {
     /// 变换到视空间固定位置（view⁻¹ × 锚点 × 倾斜 × 缩放 × 俯角 × 翻转 180°：
     /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
+    /// 导入枪模：assets/guns/ak12.glb（用户提供的外部模型）→ 烘焙顶点（同程序化光照）
+    fn load_gun_glb() -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
+        let path = "assets/guns/ak12.glb";
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::info!("assets: 未发现 {path}（{e}），使用程序化枪模");
+                return None;
+            }
+        };
+        match crate::engine::assets::parse_glb(&bytes) {
+            Ok(mesh) => {
+                if mesh.verts.is_empty() {
+                    log::warn!("assets: {path} 为空网格，回退程序化枪模");
+                    return None;
+                }
+                // 归一化：Sketchfab 原始刻度（本例长轴 Y 约 85 单位）→ 0.94m 真实枪长；
+                // 包围盒数据中心到原点；长轴（最大跨度）对齐 +Z（游戏枪模前向）；Y-up 校正
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &mesh.verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v[i]);
+                        mx[i] = mx[i].max(v[i]);
+                    }
+                }
+                let ext = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+                let long = ext[0].max(ext[1]).max(ext[2]);
+                let scale = 0.94 / long.max(1e-4);
+                // 长轴对齐 +Z：若长轴为 Y（Sketchfab Z-up 导出），绕 X -90°（+Y→+Z）
+                let align = if ext[1] >= ext[0] && ext[1] >= ext[2] {
+                    glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                } else if ext[0] >= ext[1] && ext[0] >= ext[2] {
+                    glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                } else {
+                    glam::Mat4::IDENTITY
+                };
+                let center = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                // 相机空间摆放（渲染器 identity 实例槽：顶点即最终相机空间坐标）：
+                // 模型中心 → (0.25, -0.20, -0.60)（右下腰射位）；绕 Y 180° 让枪管朝 -Z（准星方向）
+                let fp_transform = glam::Mat4::from_translation(glam::Vec3::new(0.25, -0.20, -0.60))
+                    * glam::Mat4::from_rotation_y(std::f32::consts::PI);
+                let light = glam::Vec3::new(-0.45, 0.8, -0.3).normalize();
+                // Sketchfab 纯黑基色（~0.057）→ 提亮 3.2 倍到可见金属灰（保留明暗对比）
+                let base = [
+                    (mesh.base_color[0] * 3.2).clamp(0.12, 1.0),
+                    (mesh.base_color[1] * 3.2).clamp(0.12, 1.0),
+                    (mesh.base_color[2] * 3.2).clamp(0.12, 1.0),
+                ];
+                let verts: Vec<crate::engine::meshgen::GVertex> = mesh
+                    .verts
+                    .iter()
+                    .map(|v| {
+                        let mut p = glam::Vec3::new(v[0] - center[0], v[1] - center[1], v[2] - center[2]) * scale;
+                        let mut n = glam::Vec3::from_slice(&v[3..6]);
+                        p = align.transform_point3(p);
+                        n = align.transform_vector3(n).normalize_or_zero();
+                        p = fp_transform.transform_point3(p);
+                        n = fp_transform.transform_vector3(n);
+                        let ndl = n.dot(light).max(0.0);
+                        let shade = 0.32 + 0.78 * ndl;
+                        let c = [
+                            (base[0] * shade).min(1.0),
+                            (base[1] * shade).min(1.0),
+                            (base[2] * shade).min(1.0),
+                        ];
+                        crate::engine::meshgen::GVertex {
+                            pos: [p.x, p.y, p.z],
+                            normal: [n.x, n.y, n.z],
+                            uv: [v[6], v[7]],
+                            color: c,
+                        }
+                    })
+                    .collect();
+                log::info!(
+                    "assets: 导入枪模 {path}（{} 顶点 / {} 索引）",
+                    verts.len(),
+                    mesh.indices.len()
+                );
+                Some((verts, mesh.indices))
+            }
+            Err(e) => {
+                log::warn!("assets: {path} 解析失败: {e}；回退程序化枪模");
+                None
+            }
+        }
+    }
+
     fn first_person_gun_mesh(&mut self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
+        // 导入枪模优先（检视与第一人称共用：检视时居中，第一人称保持导入姿态）
+        if let Some((verts, indices)) = self.gun_glb.clone() {
+            if self.inspect_weapon.is_some() {
+                // 居中到 (0, 1.0, 0)
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v.pos[i]);
+                        mx[i] = mx[i].max(v.pos[i]);
+                    }
+                }
+                let c = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                let moved: Vec<crate::engine::meshgen::GVertex> = verts
+                    .iter()
+                    .map(|v| crate::engine::meshgen::GVertex {
+                        pos: [v.pos[0] - c[0], v.pos[1] - c[1] + 1.0, v.pos[2] - c[2]],
+                        ..*v
+                    })
+                    .collect();
+                return (moved, indices);
+            }
+            return (verts, indices);
+        }
         // 检视模式：枪模放世界原点上方（居中），Orbit 相机绕其旋转查看
         if let Some(n) = self.inspect_weapon {
             let key = crate::engine::weapon_data::spec_by_number(n)

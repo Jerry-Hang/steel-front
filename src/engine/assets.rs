@@ -139,42 +139,71 @@ pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
     } else {
         &[]
     };
-    // 取第一个 mesh 的 primitives[0]（静态静态模型简化：多基元后续合并/多材质后续扩展）
-    let prim = json
+    // 遍历全部 mesh 的 primitives（多材质合并：一个 GLB = 一个 ImportedMesh）
+    let meshes = json
         .get("meshes")
         .and_then(|m| m.as_arr())
-        .and_then(|m| m.first())
-        .and_then(|m| m.get("primitives"))
-        .and_then(|p| p.as_arr())
-        .and_then(|p| p.first())
-        .ok_or("GLB 无 mesh/primitives".to_string())?;
-    let base_color = match prim.get("material").and_then(|m| m.as_f64()) {
-        Some(mi) => json
-            .get("materials")
-            .and_then(|m| m.as_arr())
-            .and_then(|m| m.get(mi as usize))
-            .and_then(|m| m.get("pbrMetallicRoughness"))
-            .and_then(|m| m.get("baseColorFactor"))
-            .and_then(|m| m.as_arr())
-            .map(|c| [c[0].as_f64().unwrap_or(0.7) as f32, c[1].as_f64().unwrap_or(0.7) as f32, c[2].as_f64().unwrap_or(0.7) as f32])
-            .unwrap_or([0.7, 0.7, 0.7]),
-        None => [0.7, 0.7, 0.7],
-    };
-    // accessor 读取（float32 / u32 indices，无 stride 简化——绝大多数导出器默认密集布局）
-    fn read_acc(json: &crate::llm_cmd::Json, bin: &[u8], idx: usize, comps: usize, ty: u8) -> Result<Vec<f32>, String> {
+        .ok_or("GLB 无 mesh".to_string())?;
+    let mut out = ImportedMesh::empty();
+    let mut vert_offset = 0u32;
+    for m in meshes {
+        let prims = m
+            .get("primitives")
+            .and_then(|p| p.as_arr())
+            .ok_or("primitive 缺失".to_string())?;
+        for prim in prims {
+            let base_color = match prim.get("material").and_then(|v| v.as_f64()) {
+                Some(mi) => json
+                    .get("materials")
+                    .and_then(|v| v.as_arr())
+                    .and_then(|v| v.get(mi as usize))
+                    .and_then(|v| v.get("pbrMetallicRoughness"))
+                    .and_then(|v| v.get("baseColorFactor"))
+                    .and_then(|v| v.as_arr())
+                    .map(|c| [c[0].as_f64().unwrap_or(0.7) as f32, c[1].as_f64().unwrap_or(0.7) as f32, c[2].as_f64().unwrap_or(0.7) as f32])
+                    .unwrap_or([0.7, 0.7, 0.7]),
+                None => [0.7, 0.7, 0.7],
+            };
+            append_prim(&json, bin, prim, base_color, &mut out, &mut vert_offset)?;
+        }
+    }
+    Ok(out)
+}
+
+/// 追加单个 primitive（accessor 密集布局；顶点色=材质 baseColor；顶点/索引偏移拼接）
+fn append_prim(
+    json: &crate::llm_cmd::Json,
+    bin: &[u8],
+    prim: &crate::llm_cmd::Json,
+    base_color: [f32; 3],
+    out: &mut ImportedMesh,
+    vert_offset: &mut u32,
+) -> Result<(), String> {
+    let _ = prim.get("material");
+    // accessor 读取（componentType 感知：5126=f32 顶点/法线/UV，5125=u32 索引，5123=u16 索引；
+    // 无 byteStride 简化——绝大多数导出器默认密集布局）
+    fn read_acc(json: &crate::llm_cmd::Json, bin: &[u8], idx: usize, comps: usize, _ty: u8) -> Result<Vec<f32>, String> {
         let acc = json.get("accessors").and_then(|a| a.as_arr()).and_then(|a| a.get(idx)).ok_or("accessor 缺失")?;
         let count = acc.get("count").and_then(|c| c.as_f64()).unwrap_or(0.0) as usize;
+        let ctype = acc.get("componentType").and_then(|c| c.as_f64()).unwrap_or(5126.0) as u32;
         let bv = acc.get("bufferView").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
         let off = json.get("bufferViews").and_then(|b| b.as_arr()).and_then(|b| b.get(bv))
             .and_then(|b| b.get("byteOffset")).and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
+        let step = match ctype {
+            5125 => 4, // u32
+            5123 => 2, // u16
+            _ => 4,    // f32
+        };
         let mut out = Vec::with_capacity(count * comps);
         for i in 0..count * comps {
-            let b = off + i * if ty == 2 { 4 } else { 4 };
-            if b + 4 > bin.len() {
+            let b = off + i * step;
+            if b + step > bin.len() {
                 return Err("GLB accessor 越界".into());
             }
-            let v = if ty == 2 {
-                f32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]])
+            let v = if ctype == 5125 {
+                u32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]]) as f32
+            } else if ctype == 5123 {
+                u16::from_le_bytes([bin[b], bin[b + 1]]) as f32
             } else {
                 f32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]])
             };
@@ -182,17 +211,22 @@ pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
         }
         Ok(out)
     }
-    let pos = read_acc(&json, bin, prim.get("attributes").and_then(|a| a.get("POSITION")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
-    let nrm = read_acc(&json, bin, prim.get("attributes").and_then(|a| a.get("NORMAL")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
-    let uv = read_acc(&json, bin, prim.get("attributes").and_then(|a| a.get("TEXCOORD_0")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 2, 2)?;
-    let ind = read_acc(&json, bin, prim.get("indices").and_then(|i| i.as_f64()).unwrap_or(0.0) as usize, 1, 2)?;
-    let mut verts = Vec::with_capacity(pos.len() / 3);
+    let pos = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("POSITION")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
+    let nrm = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("NORMAL")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
+    let uv = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("TEXCOORD_0")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 2, 2)?;
+    let ind = read_acc(json, bin, prim.get("indices").and_then(|i| i.as_f64()).unwrap_or(0.0) as usize, 1, 2)?;
+    let base = *vert_offset;
     for i in 0..pos.len() / 3 {
         let n = if i * 3 + 2 < nrm.len() { [nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]] } else { [0.0, 1.0, 0.0] };
         let t = if i * 2 + 1 < uv.len() { [uv[i * 2], uv[i * 2 + 1]] } else { [0.0, 0.0] };
-        verts.push([pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2], n[0], n[1], n[2], t[0], t[1]]);
+        out.verts.push([pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2], n[0], n[1], n[2], t[0], t[1]]);
     }
-    Ok(ImportedMesh { verts, indices: ind.iter().map(|v| *v as u32).collect(), base_color })
+    for v in &ind {
+        out.indices.push((*v as u32) + base);
+    }
+    out.base_color = base_color;
+    *vert_offset += (pos.len() / 3) as u32;
+    Ok(())
 }
 
 
@@ -213,6 +247,17 @@ mod tests {
         assert_eq!(m.verts.len(), 3);
         assert_eq!(m.indices, vec![0, 1, 2]);
     }
+    #[test]
+    fn glb_parses_real_ak12() {
+        let p = "assets/guns/ak12.glb";
+        if std::path::Path::new(p).exists() {
+            let bytes = std::fs::read(p).unwrap();
+            let m = parse_glb(&bytes).unwrap();
+            assert!(m.verts.len() > 1000, "AK12 顶点应上千，实际 {}", m.verts.len());
+            assert!(m.indices.len() >= m.verts.len());
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn png_decode_rgba() {
