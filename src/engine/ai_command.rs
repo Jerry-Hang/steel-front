@@ -340,9 +340,18 @@ impl Army {
                 CompanyOrder::Regroup | CompanyOrder::Hold => -1.0,
                 _ => 1.0,
             };
+            // 战位铺开（2026-08-26 防排队站一排）：正面连也沿垂直方向横向散开——
+            // 连索引依序 -55/0/+55 米（左中右战位），侧翼连再外推；三连目标线不再汇成一条线
+            let spread = if company_count >= 3 {
+                (ci as f32 - (company_count as f32 - 1.0) / 2.0) * 55.0
+            } else {
+                0.0
+            };
             c.objective = [
-                (mid[0] - en[0] / el * keep * back).max(-280.0).min(280.0) + px * flank_off,
-                (mid[1] - en[1] / el * keep * back).max(-280.0).min(280.0) + pz * flank_off,
+                (mid[0] - en[0] / el * keep * back).max(-280.0).min(280.0) + px * flank_off
+                    + px * spread,
+                (mid[1] - en[1] / el * keep * back).max(-280.0).min(280.0) + pz * flank_off
+                    + pz * spread,
             ];
             c.report = company_reports.get(ci).copied().unwrap_or(CompanyReport {
                 strength: 0.0,

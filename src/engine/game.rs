@@ -218,6 +218,10 @@ pub struct Npc {
     pub direct_goal: bool,
     pub direct_x: f32,
     pub direct_z: f32,
+    /// 攻击态站定时长（火-机动交替打：站打几秒→换位）
+    pub attack_timer: f32,
+    /// 换位目标（Some=正在机动换位；到位后清空回到站打）
+    pub reposition: Option<[f32; 2]>,
     /// 当前血量
     pub hp: f32,
     /// 血量上限（出生时设定，随波次递进）
@@ -1035,7 +1039,8 @@ impl Game {
                 direct_goal: false,
                 direct_x: 0.0,
                 direct_z: 0.0,
-                hp: 100.0,
+                attack_timer: 0.0,
+                reposition: None,                hp: 100.0,
                 max_hp: 100.0,
                 role: TacticalRole::Rusher,
                 tactic: Tactic::Advance,
@@ -3722,7 +3727,8 @@ impl Game {
             direct_goal: false,
             direct_x: 0.0,
             direct_z: 0.0,
-            hp,
+                attack_timer: 0.0,
+                reposition: None,            hp,
             max_hp: hp,
             role,
             tactic: Tactic::Advance,
@@ -3793,7 +3799,8 @@ impl Game {
                 direct_goal: false,
                 direct_x: 0.0,
                 direct_z: 0.0,
-                    hp: profile.hp,
+                attack_timer: 0.0,
+                reposition: None,                    hp: profile.hp,
                     max_hp: profile.hp,
                     role: role_for(i, 1, profile.flank_chance),
                     tactic: Tactic::Advance,
@@ -3876,6 +3883,55 @@ impl Game {
             under_fire,
         };
         let state = npc.state_machine.update(npc.perception);
+        // 火-机动交替打（2026-08-26）：攻击态站打数秒 → 换下一个掩体/侧移点（再站打）
+        if state == NpcState::Attack {
+            npc.attack_timer += ctx.dt;
+            if npc.reposition.is_none() {
+                // 站打阈值：3.4s 后开始换位；换位冷却由 timer 重置管理
+                if npc.attack_timer > 3.4 {
+                    // 优先换到掩体点（周围障碍环带内遮挡点）；无掩体则沿垂直方向侧移 9m
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let goal = crate::engine::ai::find_cover_points(ctx.grid, npc_g, COVER_MAX_DIST)
+                        .into_iter()
+                        .filter(|c| {
+                            let (gx, gz) = grid_to_world(c.pos);
+                            let dx = gx - npc.position[0];
+                            let dz = gz - npc.position[2];
+                            dx * dx + dz * dz > 9.0
+                        })
+                        .min_by_key(|c| c.dist)
+                        .map(|c| {
+                            let (gx, gz) = grid_to_world(c.pos);
+                            [gx, gz]
+                        });
+                    let goal = goal.unwrap_or_else(|| {
+                        // 无掩体：垂直目标方向侧移（id 奇偶定左右，制造交替推进感）
+                        let dx = target_pos.x - npc.position[0];
+                        let dz = target_pos.z - npc.position[2];
+                        let dl = (dx * dx + dz * dz).sqrt().max(1.0);
+                        let side = if npc.id % 2 == 0 { 1.0 } else { -1.0 };
+                        [
+                            npc.position[0] - dz / dl * 9.0 * side,
+                            npc.position[2] + dx / dl * 9.0 * side,
+                        ]
+                    });
+                    npc.reposition = Some(goal);
+                }
+            } else {
+                // 已在换位中：到位（<2m）或换位超时（5s）→ 回站打并重置计时
+                let [gx, gz] = npc.reposition.unwrap();
+                let dx = gx - npc.position[0];
+                let dz = gz - npc.position[2];
+                if dx * dx + dz * dz < 4.0 || npc.attack_timer > 8.4 {
+                    npc.reposition = None;
+                    npc.attack_timer = 0.0;
+                }
+            }
+        } else {
+            // 非攻击态：清换位/计时（保持其它状态机行为）
+            npc.attack_timer = 0.0;
+            npc.reposition = None;
+        }
         // 躲避触发：仅移动态（Attack 站定是冒烟瞄准依据）；受击反应更强、冷却更久
         if state != NpcState::Attack
             && npc.hit_cooldown <= 0.0
@@ -6157,7 +6213,8 @@ mod tests {
             direct_goal: false,
             direct_x: 0.0,
             direct_z: 0.0,
-            hp: 100.0,
+                attack_timer: 0.0,
+                reposition: None,            hp: 100.0,
             max_hp: 100.0,
             role: TacticalRole::Rusher,
             tactic: Tactic::Advance,
@@ -6727,7 +6784,11 @@ fn advance_npc(
 ) {
     // 无路径（或已走完）时按状态 + 战术选择目标
     if npc.path.is_empty() || npc.path_index >= npc.path.len() {
-        let goal = match state {
+        // 火-机动换位：换位目标优先（任何状态，一经设定即向换位点移动）
+        let goal = if let Some(rp) = npc.reposition {
+            world_to_grid(rp[0], rp[1])
+        } else {
+            match state {
             NpcState::Chase => match tactic {
                 // 突击/压制：直线逼近（压制手到射程边缘即转 Attack 站定）
                 // 班目标点：未接敌且有命令时优先向班目标点推进（>15m 时）
@@ -6832,6 +6893,7 @@ fn advance_npc(
                     )
                 }
             }
+        }
         };
         let start = world_to_grid(npc.position[0], npc.position[2]);
         // 寻路兜底（2026-08-23 残局卡死修复）：目标不可达时先找最近可行格，
@@ -6900,8 +6962,8 @@ fn advance_npc(
         return;
     }
 
-    // 攻击态原地站定（冒烟瞄准依据 `npc: #id stand`）
-    if state == NpcState::Attack {
+    // 攻击态原地站定（冒烟瞄准依据 `npc: #id stand`）；火-机动换位中不站定（连续移动）
+    if state == NpcState::Attack && npc.reposition.is_none() {
         npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
         return;
     }
