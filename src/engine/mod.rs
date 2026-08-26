@@ -13,6 +13,7 @@
 
 pub mod ai;
 pub mod ai_command;
+pub mod assets;
 pub mod camera;
 pub mod city;
 #[cfg(windows)]

@@ -113,7 +113,7 @@ struct P<'a> {
     i: usize,
 }
 
-fn parse_json_fn(s: &str) -> Result<Json, String> {
+pub fn parse_json_fn(s: &str) -> Result<Json, String> {
     let mut p = P { s: s.as_bytes(), i: 0 };
     let v = p.value()?;
     p.ws();
