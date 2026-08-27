@@ -215,17 +215,38 @@ fn append_prim(
     let pos = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("POSITION")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
     let nrm = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("NORMAL")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
     let uv = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("TEXCOORD_0")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 2, 2)?;
+    // 顶点色（Blender 烘焙 COLOR_0，通常 VEC3；有则优先于材质基色）
+    let col = prim.get("attributes").and_then(|a| a.get("COLOR_0")).and_then(|p| p.as_f64());
+    let colv = if let Some(ci) = col {
+        // 按 accessor 的 type 分量数读取（VEC3=3 / VEC4=4）
+        let ty = json
+            .get("accessors")
+            .and_then(|a| a.as_arr())
+            .and_then(|a| a.get(ci as usize))
+            .and_then(|a| a.get("type"))
+            .and_then(|t| t.as_str())
+            .map(|s| if s == "VEC4" { 4 } else { 3 })
+            .unwrap_or(3);
+        read_acc(json, bin, ci as usize, ty, 2).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let ind = read_acc(json, bin, prim.get("indices").and_then(|i| i.as_f64()).unwrap_or(0.0) as usize, 1, 2)?;
     let base = *vert_offset;
     for i in 0..pos.len() / 3 {
         let n = if i * 3 + 2 < nrm.len() { [nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]] } else { [0.0, 1.0, 0.0] };
         let t = if i * 2 + 1 < uv.len() { [uv[i * 2], uv[i * 2 + 1]] } else { [0.0, 0.0] };
-        // 逐顶点材质色（多材质模型还原部件颜色差异）
+        // 逐顶点颜色：COLOR_0 烘焙色优先，其次材质基色
+        let c = if (i + 1) * 4 <= colv.len() {
+            [colv[i * 4], colv[i * 4 + 1], colv[i * 4 + 2]]
+        } else {
+            base_color
+        };
         out.verts.push([
             pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2],
             n[0], n[1], n[2],
             t[0], t[1],
-            base_color[0], base_color[1], base_color[2],
+            c[0], c[1], c[2],
         ]);
     }
     for v in &ind {

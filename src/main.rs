@@ -707,9 +707,14 @@ impl GameApp {
     /// 变换到视空间固定位置（view⁻¹ × 锚点 × 倾斜 × 缩放 × 俯角 × 翻转 180°：
     /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
-    /// 导入枪模：assets/guns/ak12.glb（用户提供的外部模型）→ 烘焙顶点（同程序化光照）
+    /// 导入枪模：优先 assets/guns/ak12_baked.glb（Blender 顶点色烘焙版），
+    /// 其次 ak12.glb（原始 Sketchfab）→ 烘焙顶点（同程序化光照）
     fn load_gun_glb() -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
-        let path = "assets/guns/ak12.glb";
+        let path = if std::path::Path::new("assets/guns/ak12_baked.glb").exists() {
+            "assets/guns/ak12_baked.glb"
+        } else {
+            "assets/guns/ak12.glb"
+        };
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -767,14 +772,24 @@ impl GameApp {
                         p = align.transform_point3(p);
                         n = align.transform_vector3(n).normalize_or_zero();
                         let ndl = n.dot(light).max(0.0);
-                        let shade = 0.30 + 0.92 * ndl;
-                        // 逐顶点材质色（GLB 多材质保留）；基色 ~0.05 提亮 ×4.2（模型原本深金属灰）
+                        // 烘焙版：顶点色已含基色+AO（直接使用，只加微光对比）；
+                        // 原始版：材质基色 ×5.5 × 光照
                         let raw = [v[8], v[9], v[10]];
-                        let c = [
-                            (raw[0] * 4.2 * shade).min(1.0),
-                            (raw[1] * 4.2 * shade).min(1.0),
-                            (raw[2] * 4.2 * shade).min(1.0),
-                        ];
+                        let c = if path.ends_with("baked") {
+                            let shade = 0.74 + 0.20 * ndl;
+                            [
+                                (raw[0] * shade).min(1.0),
+                                (raw[1] * shade).min(1.0),
+                                (raw[2] * shade).min(1.0),
+                            ]
+                        } else {
+                            let shade = 0.30 + 0.92 * ndl;
+                            [
+                                (raw[0] * 5.5 * shade).min(1.0),
+                                (raw[1] * 5.5 * shade).min(1.0),
+                                (raw[2] * 5.5 * shade).min(1.0),
+                            ]
+                        };
                         crate::engine::meshgen::GVertex {
                             pos: [p.x, p.y, p.z],
                             normal: [n.x, n.y, n.z],
