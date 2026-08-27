@@ -776,7 +776,8 @@ impl GameApp {
                         // 原始版：材质基色 ×5.5 × 光照
                         let raw = [v[8], v[9], v[10]];
                         let c = if path.ends_with("baked") {
-                            let shade = 0.74 + 0.20 * ndl;
+                            // 烘焙色已含 AO（模型本色 0.08-0.11 纯黑金属）：直出微光（0.55+0.25×ndl）
+                            let shade = 0.55 + 0.25 * ndl;
                             [
                                 (raw[0] * shade).min(1.0),
                                 (raw[1] * shade).min(1.0),
@@ -799,9 +800,10 @@ impl GameApp {
                     })
                     .collect();
                 log::info!(
-                    "assets: 导入枪模 {path}（{} 顶点 / {} 索引）",
+                    "assets: 导入枪模 {path}（{} 顶点 / {} 索引，首色 {:?}）",
                     verts.len(),
-                    mesh.indices.len()
+                    mesh.indices.len(),
+                    verts.first().map(|v| v.color)
                 );
                 Some((verts, mesh.indices))
             }

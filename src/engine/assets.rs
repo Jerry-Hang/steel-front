@@ -277,6 +277,23 @@ mod tests {
     }
     #[test]
     fn glb_parses_real_ak12() {
+        let p = "assets/guns/ak12_baked.glb";
+        if std::path::Path::new(p).exists() {
+            let bytes = std::fs::read(p).unwrap();
+            let m = parse_glb(&bytes).unwrap();
+            assert!(m.verts.len() > 1000);
+            // 顶点色应为烘焙的深色（0.05-0.35），不是白色
+            let c0 = &m.verts[0][8..11];
+            assert!(
+                c0[0] < 0.5 && c0[1] < 0.5 && c0[2] < 0.5,
+                "烘焙顶点色应深色，实际 {:?}",
+                c0
+            );
+        }
+    }
+
+    #[test]
+    fn glb_parses_real_ak12_orig() {
         let p = "assets/guns/ak12.glb";
         if std::path::Path::new(p).exists() {
             let bytes = std::fs::read(p).unwrap();
