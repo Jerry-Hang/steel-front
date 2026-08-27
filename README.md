@@ -1,323 +1,203 @@
-# 钢铁前线 (Steel Front)
+# 钢铁前线 · Steel Front
 
-> 架空历史 · 2020 年代 · 大规模战场 FPS
-> Rust + Vulkan 自研引擎（ash / winit / glam），零第三方游戏依赖
-
-**一句话**：从零构建的现代大战场射击游戏引擎与玩法原型——程序化渲染、程序化建模、程序化音效、程序化地图，无 Unity/Unreal 黑盒，无外部资产（音频直接用 winmm `waveOut` 原生 FFI 发声，无 rodio）。
+> 架空历史 · 2020 年代 · 大规模战场 FPS  |  Rust + Vulkan 自研引擎（ash / winit / glam），零第三方游戏依赖
 
 ---
 
-## 项目状态（2026-08-22）
+## 🌐 语言 Language
+
+**📖 中文（当前）** · [English](#steel-front-english)
+
+---
+
+## 一句话
+
+从零构建的现代大战场射击游戏引擎与玩法原型：程序化渲染、程序化建模、程序化音效、程序化地图；同时支持**外部资产导入**（glTF GLB 模型 + Windows 原生贴图解码），用户可用 Blender 制作模型直接接入。无 Unity/Unreal 黑盒。
+
+---
+
+## 项目状态（2026-08-28 快照）
 
 | 维度 | 状态 |
 |---|---|
-| 单元测试 | **cargo test 全绿**（src 内 399 个 #[test]，dead-code=0） |
-| 玩法冒烟 | ALL-OK（kills≥1、VUID=0、fps≥120、panics=0） |
-| 渲染主路径 | **VK_EXT_mesh_shader 网格着色器**（RTX 5060 真机启用），无该扩展的显卡回退传统顶点管线 |
-| 武器系统 | **35 把现代枪械已实现**（V3.0 数据表：初速/子弹下坠/散射MOA/距离衰减/部位倍率分段/开火模式/ADS），AK-12M 已重建 |
-| 大战场 | 默认 **红 128 vs 蓝 127+玩家（128v128，256 人）**；RV3D_STRESS_AI=0 恢复波次模式 |
-| 地图 | **手工绘制现代城市**（55m 街区网格）：写字楼/仓库/公园/商铺/哨卡/停车场/消防栓/路灯/围墙，替代随机种子生成 |
-| 音频 | **waveOut 真实输出**（无设备时静默降级，混音/合成链路恒运行） |
-| CPU 调度 | Windows 拓扑检测 + 亲和绑核（CCX/能效核分簇，逻辑/渲染同簇，AI/后台分簇） |
-| 当前阶段 | **玩法迭代期**（射击手感/受击反馈/命中系统持续打磨中） |
-| 设计文档 | [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt)（35 把枪全参数权威数据源） |
+| 单元测试 | `cargo test` 全绿（404 个 #[test]，dead-code=0） |
+| 渲染主路径 | **VK_EXT_mesh_shader 网格着色器**（RTX 5060 真机启用），无扩展显卡回退传统顶点管线 |
+| 武器系统 | 35 把现代枪械（V3.0 数据表：初速/下坠/散射/衰减/部位倍率/开火模式/ADS）；**AK-12M 可由外部 GLB 模型替代**（用户自备模型即插即用） |
+| 大战场 | 默认红 128 vs 蓝 127+玩家（256 人）；`RV3D_STRESS_AI=0` 恢复波次模式 |
+| 地图 | 手工绘制现代城市（55m 街区网格）：写字楼/仓库/公园/商铺/哨卡/停车场/围墙 |
+| 联机 | **局域网/同机双人可玩**：服务器权威 + 快照插值 + 断线重连 + 协议版本握手 + **NAT 中继**（rdv.exe 房间名直连） |
+| 外部资产 | **OBJ/glTF GLB 导入管线 + Windows GDI+ 贴图解码**；Blender 无头脚本化处理（修姿态/烘 AO/导出），AK-12 GLB（63283 顶点）已实装 |
+| 音频 | winmm waveOut 原生 FFI 发声（无设备静默降级） |
+| AI | 三三制指挥体系 + 火-机动交替 + 连级战位铺开 + LLM 战时指挥官（llama.cpp 零依赖接入） |
+| 当前阶段 | 玩法迭代期 + 外部资产管线接入期 |
+| 设计文档 | [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt) |
 
 ---
 
-## 转型说明（重要）
+## 当前进度（2026-08-28）
 
-项目原为二战题材，现已决定**转型为架空历史 2020s 现代大战场**。原因：
+### 已完成（近两周主线）
 
-1. **竞争力**：二战大战场与头部产品（战地系列）正面竞争无优势；
-2. **武器平衡**：二战枪械 TTK 长、栓动主导、平衡空间窄，现代口径矩阵（5.56/7.62×39/7.62×51/9×19）有成熟平衡模板；
-3. **载具体验**：二战空战各打各的、轰炸机超模、坦克国别差距离谱，现代轻型载具与支援型空袭（空袭呼叫/无人机）体验更好且平衡可控；
-4. **开发时机**：当前进入美术/建模阶段，此时转型成本最低（引擎/AI/地图生成全部与题材无关，仅武器数据与主题资产需更换）。
+**外部资产导入管线（用户决策：取消全程序化限制）**
+- 零依赖：OBJ 解析器（v/vt/vn/f 三角化）、glTF GLB 解析器（多 mesh 合并、componentType 感知 accessor、COLOR_0 顶点色、材质基色）、Windows GDI+ PNG/JPEG 解码（BitmapData 布局正确、BGRA→RGBA）
+- 自动归一化：包围盒居中 + 长轴对齐 + 0.94m 级缩放适配枪械；共享 fp_gun_matrix（view_inv × anchor × 缩放）实现第一人称跟随
+- **Blender 无头控制**（`blender --background --python 脚本.py`）：导入→材质/AO 烘焙（vertex_color_dirt）→节点净化→导出 GLB；渲染-视觉自检闭环（渲染 PNG → 看图 → 改脚本）
+- **AK-12 模型实装**（Sketchfab，63283 顶点）：第一/三人称显示 + 开火（Score 460/击杀 46/128 实测），AO 细节（导轨/通风槽/防滑纹）全枪可见
+- 已知进行项：枪模最终颜色校准（渲染布局/着色器微调，数据全程验证正确——见 HANDOFF-2026-08-28）
 
-**转型范围**：武器库数据、枪械程序化网格、地图主题元素、NPC 外观 → 换为现代版本；引擎/渲染/网络/程序化管线不变。
+**联机完整化**
+- 会话协议版本握手（Join 携带 SESSION_VERSION，不匹配 → Refuse，客户端停重试）
+- NAT 中继 `rdv.exe`（REG 房间名：端口 / WHO → 声明端口直连 + 打洞）；服务器/客户端 `RV3D_NET_RDV`+`RV3D_NET_NAME` 全链路实测
+- 快照 `firing` 指示 → 客户端枪口焰同步；`联机主机.bat` / `联机加入.bat` 双击即用
 
----
+**AI 战斗深化**
+- 火-机动交替（攻击站打 3.4s → 掩体点/垂直侧移 9m 换位循环）；连级目标横向铺开（-55/0/+55m）；NPC 移动出障碍推开（穿墙修复）
 
-## 技术架构
+**美术立体化**
+- 树冠二十面体（去纸帽子）、爆炸/自发光球状化（去方块冲击波）、围墙深色压顶、NPC 实时 Blinn-Phong 光照
 
-### 图形 API 与着色器
+**渲染与稳定性**
+- Vulkan 1.3（mesh shader 主路径 + 传统回退）；IMMEDIATE 呈现 + 帧率上限（MUX 独显直连最稳）；自发光槽位区间修复（枪槽不再误判）
 
-| 项目 | 说明 |
-|---|---|
-| API | **Vulkan 1.3**（ash 0.38：实例与设备均按 1.3 请求/启用，不再有 1.1-era 兼容代码）；设备扩展 VK_KHR_swapchain（必需）+ VK_EXT_mesh_shader（可选主路径）；特性 samplerAnisotropy / meshShader 按可用性启用 |
-| 窗口 | winit 0.30（Windows/Linux） |
-| 数学 | glam 0.29 |
-| 着色器语言 | WGSL，经 **naga 30 在 build.rs 构建期编译**为内联 SPIR-V（assets/*.spv） |
-| 主渲染路径 | **VK_EXT_mesh_shader（网格着色器）**：GPU 逐实例视锥剔除 + 顶点变换，65536 实例地面场按 maxMeshWorkGroupCount 分块下发。新渲染功能一律走 mesh 路径 |
-| 传统顶点管线 | **已冻结维护（仅回退）**：无 VK_EXT_mesh_shader 的显卡（WSLg/dzn 等）自动回退使用，不再新增功能/不再修复 |
-| HUD | 独立屏幕空间管线（CPU 转 NDC），GDI 中文字形系统（Windows） |
-| 阴影 | 2048×2048 D32 阴影图 + 3×3 PCF（**默认关闭**，待高楼城市全覆盖修复后另开） |
-
-### 程序化生成（零外部资产）
-
-- **建模**：meshgen.rs 程序化网格引擎——圆角盒（beveled box）/ 锥台 / 圆柱 / 球 / 圆环弧段，法线烘焙光照；枪械等模型由数学函数生成
-- **纹理**：CPU 画像素——地面材质（城市分区 1024 纹理 + 烘焙 AO）、混凝土砌块表面纹理、皮肤纹理
-- **地形**：257×257 顶点、三级 LOD + smoothstep morph、确定性值噪声
-- **音效**：程序化 DSP 合成（枪声/爆炸/脚步/环境）
-- **地图**：**手工绘制现代城市布局**（街区/建筑/遮挡/装饰），RV3D_PROC_MAP=1 可回退程序化生成用于 A/B
-
-### 游戏性
-
-- 第一人称移动/跳跃/射击/开镜（ADS FOV 补偿）/手雷/切枪
-- 波次防守 + 关卡递进 + Boss/援军波
-- 战术 AI：A* 寻路、状态机（巡逻/追击/攻击/掩体）、包抄/偷袭/协同，压力模式两军对抗
-- **人形 AI 指挥体系**：三三制（营连排班）+ 逐级军情汇报 + AI 司令按前线态势下进攻/防御/侧翼/重组命令
-- HUD：血条/弹药/准星/命中标记/击杀提示/小地图/ESC 菜单/设置面板（键位/分辨率/灵敏度/音量/画质）
-- 联机基础：UDP client/server、快照同步（规划中扩展）
+### 进行中 / 待办
+- 枪模最终颜色校准（布局修复已完成，着色器 fade 细节收官）
+- 场景道具路径（assets/props.toml + 世界空间网格管线）；PBR 贴图采样（金属度/环境反射）
+- GLB 嵌入贴图（images/bufferView）→ 贴图采样；多材质节点矩阵解析
 
 ---
 
-## 当前进度（2026-08-27 快照）
+## 快速开始
 
-**已完成（新增 2026-08-26 ~ 08-27 深夜）**
-- **外部资产导入管线（用户决策：取消全程序化限制）**：零依赖 OBJ 解析器 + glTF GLB 解析器（多 mesh 合并、componentType 感知 accessor（u32/u16 索引修复）、节点/材质基色）+ Windows GDI+ PNG/JPEG 解码（BitmapData 真实布局修复、负 stride、BGRA→RGBA）；自动归一化（包围盒居中/0.94m 长轴/朝向对齐）+ 复用装配烘焙光照 + 材质提亮；**AK-12 Sketchfab 模型（63283 顶点）导入成功，检视模式完整显示**（assets/guns/ak12.glb）
-- **AI 战斗深化**：火-机动交替打（攻击站打 3.4s → 掩体点/垂直侧移 9m 换位循环）；连级目标横向铺开（三连 -55/0/+55m，否定排队站一排）
-- **联机完整化**：会话协议版本握手 + Refuse（防老版本误连）；NAT 中继（rdv.exe：REG name port / WHO → 声明端口直连 + PUNCH 打洞，全链路实测）；快照 firing 指示 → 客户端枪口焰同步；联机主机/加入 .bat 启动器
+```powershell
+# 单机（波次模式）
+$env:RV3D_AUTOSTART = '1'
+cargo run --release
 
-**已完成（2026-08-23 ~ 08-25）**
-- **LLM 战时指挥官**：零依赖接入 llama.cpp llama-server（手写 JSON/HTTP），红/蓝各独立上下文窗口互搏，态势→命令严格校验 + 启发式回退；决策数据落盘 data/llm_decisions.jsonl（阶段 B 数据集管线）
-- **AI 行为基座修复**：寻路失败兜底（最近可行格+直行机动）、攻击/伤害距离对齐（消除残局僵持观望）、三三制品字形阵型 + 空间哈希分离力、军团级目标铺开（进行中）；NPC 移动出障碍推开（穿墙修复）
-- **真实联机 MVP**：UDP 服务器权威 + 客户端输入上传/快照插值，远端玩家实体（移动/开火/复活/被击杀），快照带阵营/开火指示，断线自动重连；局域网/同机双人可玩（NAT 穿透为下一步）
-- **美术高模化第一轮**：AK-12M 实心聚合物托重建（去骨架感）、围墙深色压顶、树冠二十面体立体化（去纸帽子）、爆炸/自发光球状化（去方块冲击波）
-- **渲染与稳定性**：Vulkan 1.3（mesh shader 主路径 + 传统回退）、IMMEDIATE 呈现 + 帧率上限（MUX 独显直连下最稳）、着色器槽位常量修正（NPC/枪模/爆炸材质错位修复）、GPU device-lost 排查与环境基线
-- **代码审查轮**：全库 6 原则审查并落地（复用/去重/死代码清理/FFI 对齐/错误路径统一），测试 399→全绿
-- **C 盘优化**：迁移 22GB+ 至 D（媒体报道/文档/微信大文件/桌面项目），缓存清理 8GB+，pagefile 迁 D（重启生效）
+# 128v128 大战场
+$env:RV3D_STRESS_AI = '1'           # 默认注入 128 对敌
 
-**已完成（2026-08-19 ~ 08-22）**
-- **手绘现代城市地图**：55m 街区网格手工绘制（写字楼/仓库/公园/商铺/哨卡/停车场残骸/消防栓/路灯/围墙），替代随机种子生成；建筑为真正高楼（含半高/中心高/材质 tint），城市地面纹理 1024 + 蓝天清屏
-- **障碍物立体化**：障碍物/NPC 实时 Blinn-Phong 光照（告别「纸片剪影」），混凝土砌块表面纹理（墙体 6 面立体），公园树冠按棵大小/高度错落
-- **枪械检视模式**：白色虚空背景 --inspect=N / RV3D_INSPECT，围绕枪模 Orbit 相机拖拽/缩放；长焦产品级取景（修复极端透视畸变）、补护木导轨缝隙、紧凑深色枪口组件；AK-12M 重建
-- **真实音频输出**：audio_out.rs 用 winmm waveOut 原生 FFI 环形缓冲发声，替换 SilentSink 占位
-- **CPU 拓扑与亲和绑定**：Windows GetLogicalProcessorInformationEx 解析物理核/CCX(L3)/能效等级，SetThreadAffinityMask 亲和绑核（逻辑/渲染同 CCX、AI/后台分簇、音频/低延迟走能效核）
-- **人形 AI 指挥体系**：三三制（营→连→排→班→战士），逐级军情汇报，AI 司令按前线推进度/兵力/伤亡每 0.5s 下进攻/防御/侧翼/重组命令，班长投掷压制指挥权加成
-- **128v128 大战场压力模式**：默认红 128 vs 蓝 127+玩家（256 人），以海量 NPC 逼近真人联机压力；NPC 实例容量扩容至 2048 段/几何区
+# 双人联机（同机/局域网）
+# 主机：
+$env:RV3D_NET = 'server'; $env:RV3D_NET_ADDR = '0.0.0.0:27015'; start target\release\steel-front.exe
+# 加入方（同机：127.0.0.1；局域网：主机 IP）
+$env:RV3D_NET = 'client'; $env:RV3D_NET_ADDR = '主机IP:27015'; start target\release\steel-front.exe
 
-**进行中**
-- 阴影图默认关闭（待高楼城市全覆盖修复）；设计文档整理期（弹药/护甲/爆头/手雷体系，见 GAME_DESIGN.txt）
-- UI 美化与中文字形完善；性能日志增强（每次启动打包存档）
+# 中继联机（异地）：先跑 rdv.exe，主机/加入方再设 RV3D_NET_RDV + RV3D_NET_NAME
 
-**规划**
-- 护甲/体力/爆头机制落地；地图主题现代化（集装箱/路障/废弃车辆）
-- 载具与支援系统（轻载具/空袭/无人机，远期）
+# 枪械检视（查看导入模型）
+$env:RV3D_INSPECT = '1'
+```
 
----
-
-## 操作说明
-
-### 键位
-
-| 按键 | 功能 |
-|---|---|
-| W / A / S / D | 前后左右移动 |
-| 鼠标左键 | 射击（Playing）；非第一人称窗口拖拽旋转 |
-| 鼠标右键 | 开镜（ADS，第一人称）；飞行模式拖拽转视角 |
-| Tab | 相机循环（Orbit → Flight → FirstPerson）；设置面板循环选中项 |
-| 数字键 1/2 或 / 命令窗口 | 切换武器 |
-| G | 投掷手榴弹 |
-| R | 换弹 |
-| Enter | 死亡/胜利/失败结算后重开本关 |
-| ESC | 打开/关闭菜单 |
-| Q / E | 升降（飞行/轨道模式） |
-| B | 切换开火模式（单发/三连发/连发） |
-| N | 补给弹药（设置面板）/ 胜利后进入下一关 |
-| F5 | 关卡 TOML 热重载 |
-
-### 启动参数与环境变量
-
-- --inspect=N 或 RV3D_INSPECT=N：进入 N 号武器检视模式（白色虚空背景，拖拽旋转/滚轮缩放）
-- RV3D_STRESS_AI=N：大战场两侧 NPC 规模（默认 128 = 128v128，≥4 生效；0/off 恢复传统波次模式）
-- RV3D_AUTOSTART=1：测试用自动开局（绕过菜单直接进 Playing，复现/冒烟）
-- RV3D_CAM=fly:x,y,z:yaw,pitch：调试固定机位（飞行模式，地图/场景检查用）
-- RV3D_SKIN_TEX：障碍/NPC 皮肤纹理（默认开启，0 关闭回退纯色）
-- RV3D_NO_SHADOW=1：关闭阴影
-- RV3D_CPU_PIN：覆盖精确亲和性掩码（如 0-7,16-23；off 关闭绑核）
-- 其余见下方 [配置](#配置) 表。
+### 外部资产接入（简版）
+1. 模型放入 `assets/guns/`（或 props 目录），GLB/OBJ 均可；
+2. 想修姿态/烘 AO：我可用 Blender 无头脚本一键处理（见 `scripts/blender_bake.py`）；
+3. 游戏启动自动加载（优先 `*_baked.glb`，缺失回退原始 + 程序化枪模）。
 
 ---
 
 ## 硬件推荐配置
 
-> 目标：1080p~4K 大战场体验（网格着色器渲染，需支持 VK_EXT_mesh_shader 的显卡）
-
 | 档位 | 处理器 | 显卡（Vulkan 1.3 驱动） | 内存 | 说明 |
 |---|---|---|---|---|
-| 1080P 最低可玩 | 6 核（i5-10400 / R5 3600 级） | RX 6500 XT / A380 级 | 8GB | 传统顶点管线回退；波次模式流畅，128v128 压力模式掉帧 |
-| 1080P 主流 | 8 核（i5-12400F / R5 5600 级） | RTX 2060 SUPER / RX 6600 级 | 16GB | 网格着色器主路径；128v128 顺畅（并行 AI 分池需 8 线程以上） |
-| 2K 高画质 | 8 核+（i7-12700K / R7 5800X 级） | RTX 3060 Ti / RX 6800 级 | 16GB+ | 全部特效 + 128v128 大战场 |
+| 1080P 最低可玩 | 6 核（i5-10400 / R5 3600 级） | RX 6500 XT / A380 级 | 8GB | 传统顶点管线回退；波次流畅，128v128 掉帧 |
+| 1080P 主流 | 8 核（i5-12400F / R5 5600 级） | RTX 2060 SUPER / RX 6600 级 | 16GB | 网格着色器主路径；128v128 顺畅（AI 分池需 8 线程+） |
+| 2K 高画质 | 8 核+（i7-12700K / R7 5800X 级） | RTX 3060 Ti / RX 6800 级 | 16GB+ | 全部特效 + 128v128 |
 | 4K 高画质 | 多核（i7-13700K / R9 7900X 级） | RTX 4070 及以上 | 32GB | 建议独显直连（IMMEDIATE 呈现最稳） |
 
-**当前开发验证环境**：RTX 5060 Laptop（8GB）+ Ryzen（16 核 32 线程）+ 2560×1600@144Hz；128v128 大战场压力模式 116–240 fps（默认帧率上限 240，LLM 采集模式 90；独显直连下 IMMEDIATE 呈现最稳）。
+> **CPU 是硬门槛**：128v128 + 并行 AI（scene_pool/ai_pool 双线程池）+ 物理/音频合成——核心数比单核频率更重要（线程按 CCX/能效核自动绑定）。
+> **开发验证环境**：RTX 5060 Laptop（8GB）+ Ryzen 16C/32T + 2560×1600@144Hz；128v128 压力模式 116–240 fps（LLM 采集模式 90）。
 
-> **CPU 是硬门槛**：128v128 + 并行 AI（scene_pool/ai_pool 双线程池）+ 物理/音频合成，6 核会紧张、8 核（16 线程）体验最佳——核心数比单核频率更重要（线程按 CCX/能效核自动绑定）。
+---
+
+## 操作说明
+
+| 按键 | 功能 |
+|---|---|
+| W/A/S/D | 移动 |
+| 鼠标左键 | 射击（Playing）；非第一人称窗口拖拽旋转 |
+| 鼠标右键 | 开镜（ADS） |
+| Tab | 相机循环（Orbit→Flight→FirstPerson） |
+| 1/2 或 /命令窗口 | 切换武器 |
+| G | 手榴弹 |
+| R | 换弹 |
+| Enter | 结算后重开 |
+| ESC | 菜单 |
+| Q/E | 升降（飞行/轨道） |
+| B | 开火模式（单发/三连/连发） |
+| N | 补给 / 下一关 |
+| F5 | 关卡 TOML 热重载 |
+
+---
+
+## 联机说明
+
+- **RV3D_NET**：`server`（主机）/ `client`（加入），默认不启用；
+- **RV3D_NET_ADDR**：默认 `127.0.0.1:27015`；局域网用主机 IP（客户端）；主机可用 `0.0.0.0:27015` 监听全部网卡；
+- **RV3D_NET_RDV + RV3D_NET_NAME**（可选，异地）：先跑 `rdv.exe <bind>`，主机/加入方用同一房间名即可互连（自动打洞+地址发现）；
+- `release_dist\game\` 内有 `联机主机.bat` / `联机加入.bat` 双击即用。
+
+---
 
 ## Vulkan 特性说明（1.3）
 
-> 引擎按 **Vulkan 1.3** 编写与运行（ash 0.38 全量 1.3 头；实例 `vkApiVersion` 1.3，设备创建按 1.3 请求）。**不再是 1.1-era 的代码**：不包含 1.1 时期的兼容前向路径，管线/同步/内存均按 1.3 语义实现。
-
-### 版本与扩展**
-
-| 项 | 内容 | 必需性 |
-|---|---|---|
-| 核心版本 | Vulkan 1.3（API 版本请求） | 必需 |
-| VK_KHR_swapchain | 呈现/交换链 | 必需 |
-| VK_EXT_mesh_shader | 网格着色器主渲染路径 | 可选（缺失→传统顶点管线回退） |
-| samplerAnisotropy | 各向异性过滤（地面/皮肤纹理） | 可选（设备支持时启用） |
-| 经典 vkRenderPass 管线 | 渲染管线采用经典 renderpass（1.0 核心 API 子集，在 1.3 设备上合法有效）；**后续升级项**：迁移 1.3 核心的 dynamic rendering（VK_KHR_dynamic_rendering 已入 1.3 核心）以采用现代单次渲染通道 | 兼容层 |
-
-### 主渲染路径（网格着色器）
-
-- 65536 实例地面/标记/NPC 实例场：GPU 逐实例视锥剔除 + 顶点变换（VK_EXT_mesh_shader 的 mesh 管线）；
-- 需要支持 `VK_EXT_mesh_shader` + `meshShader` 特性的 GPU（实测 NVIDIA RTX 20 系+ / AMD RX 6000 系+ / Intel Arc）；
-- 缺失该扩展的显卡自动回退到 **冻结维护的传统顶点管线**（同一 1.3 设备上的兼容路径）。
-
-### 兼容矩阵
-
-| GPU | 主路径 | 备注 |
-|---|---|---|
-| NVIDIA RTX 2060+ / RTX 30/40/50 系 | 网格着色器 | 开发验证：RTX 5060 Laptop |
-| AMD RX 6000 系+ | 网格着色器 | — |
-| Intel Arc A 系列 | 网格着色器 | — |
-| 其它无 VK_EXT_mesh_shader 驱动 | 传统顶点管线（回退） | 功能冻结，仅保证可运行 |
+- 按 **Vulkan 1.3** 编写与运行（ash 0.38 全量 1.3 头；实例/设备 1.3）；
+- **VK_EXT_mesh_shader** 主路径（GPU 逐实例剔除 + 顶点生成），无扩展回退传统顶点管线；
+- 经典 vkRenderPass（1.0 核心子集，1.3 设备上合法）；后续升级：dynamic rendering（VK_KHR_dynamic_rendering 已入 1.3 核心）；
+- 特性全表见 `docs/` 下验证文档。
 
 ---
 
-## 构建与运行
+## 文档索引
 
-### 前置
+- [交接日志（AI 会话）](./docs/HANDOFF-2026-08-28.md) —— 面向下一个 AI 接手；
+- [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt)；
+- 渲染/光照/性能验证：`docs/` 目录（experiment-*/perf-*/HANDOFF-*）。
 
-- Rust 工具链（stable，MSRV 以 Cargo.toml 为准）
-- Windows 10/11 或 Linux（WSLg 可运行但性能受限）
+---
 
-### 构建
+# Steel Front — English
 
-```bash
-cargo build --release
+<a id="steel-front-english"></a>
+
+**Alternate-history 2020s large-scale battlefield FPS** · self-built engine (ash / winit / glam), zero third-party game dependencies. Procedural rendering / modeling / audio / map, **plus external asset import** (glTF GLB models + Windows-native texture decode — Blender-made assets plug right in).
+
+## Status (2026-08-28)
+
+- **Tests**: `cargo test` all green (404 tests, dead-code=0).
+- **Rendering**: VK_EXT_mesh_shader main path (verified on RTX 5060); classic pipeline fallback.
+- **Weapons**: 35 modern firearms (V3.0 data table); AK-12M replaceable with an external GLB model.
+- **Battlefield**: 128v128 stress mode (RV3D_STRESS_AI=1) or wave mode.
+- **Multiplayer**: LAN/same-machine 2-player — server-authoritative snapshots, reconnect, protocol version handshake, **NAT rendezvous** (`rdv.exe` room-name direct connect).
+- **External assets**: OBJ/glTF import + GDI+ PNG/JPEG decode; Blender headless pipeline (fix pose / bake AO / export); AK-12 GLB (63,283 verts) in-game.
+- **AI**: 3×3 command hierarchy + fire-and-maneuver + company objective spread + optional LLM commander (llama.cpp, zero-dep).
+
+## Quick Start
+
+```powershell
+$env:RV3D_AUTOSTART = '1'      # skip menu
+cargo run --release            # wave mode
+$env:RV3D_STRESS_AI = '1'      # 128v128 pressure mode
+$env:RV3D_INSPECT = '1'        # weapon inspect (view imported models)
 ```
 
-### 运行
+## Networking
 
-- Windows：直接运行 target/release/steel-front.exe，或使用仓库内启动器（先杀残留进程 → 自动拉取更新 → 构建 → 启动）
-- Linux：cargo run --release
-- **发布包**：release_dist/（SteelFrontLauncher.exe + game/，含桌面快捷方式），由 scripts/make_release.ps1 生成
+- `RV3D_NET=server|client`, `RV3D_NET_ADDR=host:port` (default `127.0.0.1:27015`);
+- Optional rendezvous: run `rdv.exe <bind>`, set `RV3D_NET_RDV` + shared `RV3D_NET_NAME` for cross-network play.
 
-### 冒烟测试
+## Hardware
 
-```bash
-powershell -ExecutionPolicy Bypass -File scripts/run_gameplay_smoke.ps1
-```
+- 1080p entry: 6-core CPU + RX 6500 XT/A380-class GPU (classic pipeline fallback).
+- 1080p main: 8-core + RTX 2060 SUPER/RX 6600-class (mesh-shader path; ≥8 threads for parallel AI).
+- 4K: 8+ cores / RTX 4070+ / 32GB — recommend dGPU-direct (IMMEDIATE present most stable).
+- **CPU is the hard gate** for 128v128: core count > single-core speed (threads pinned to CCX/efficiency clusters).
 
-验收门槛：VUID=0、kills≥1、fps≥120、panics=0。
+## Asset Import (brief)
 
----
-
-## 配置
-
-配置文件：~/.steel_front.cfg（分辨率/键位/音量/灵敏度/画质，设置面板内即时生效并持久化）
-
-环境变量（RV3D_* 前缀，共 20 个，按需查阅代码）：
-
-| 变量 | 作用 |
-|---|---|
-| RV3D_PRESENT_MODE | immediate / mailbox / fifo 呈现模式 |
-| RV3D_PROC_TEX | 0=回退 test.png（程序化纹理 A/B） |
-| RV3D_PROC_MAP | 1=回退程序化地图生成（城市手绘布局 A/B） |
-| RV3D_SKIN_TEX | 0=关闭障碍/NPC 皮肤纹理（默认开启） |
-| RV3D_NO_SHADOW | 1=关闭阴影 |
-| RV3D_NPC_SCALE | NPC 数量缩放 |
-| RV3D_STRESS_AI | 压力模式 AI 规模（默认 128 = 128v128，0/off=波次） |
-| RV3D_FORCE_SIMD | 强制 SIMD 选路（avx512/avx2/avx/sse4.2/scalar） |
-| RV3D_CPU_PIN / RV3D_SCENE_WORKERS / RV3D_AI_WORKERS | 线程调度/亲和绑核 |
-| RV3D_AI_PARALLEL / RV3D_AI_DECIMATE | AI 并行/降频开关 |
-| RV3D_BENCH_YAW / RV3D_BENCH_PITCH | 基准相机角 |
-| RV3D_EXPLOSION_SIM | 爆炸模拟 |
-| RV3D_NET / RV3D_NET_ADDR | 联机（server/client + 地址） |
-| RV3D_MAP / RV3D_MAPS | 关卡系统 TOML |
-| RV3D_INSPECT | 枪械检视模式（武器编号 1-35） |
-| RV3D_AUTOSTART / RV3D_SWITCH_WEAPON / RV3D_SWITCH_WEAPON_AFTER | 测试自动开局/延迟切枪 |
-| RV3D_CAM | 调试固定机位（fly:x,y,z:yaw,pitch） |
+1. Drop model into `assets/guns/` (GLB/OBJ);
+2. Optional Blender headless pass (`scripts/blender_bake.py`) to normalize pose / bake AO;
+3. Game auto-loads (prefers `*_baked.glb`, falls back to raw or procedural).
 
 ---
 
-## 测试与质量门槛
-
-- cargo test：**399 个单元测试**（武器/物理/AI/地图/渲染/UI/网络），必须全绿
-- cargo build --release：**0 警告**（dead-code=0 强制）
-- 冒烟：VUID=0 / kills≥1 / fps≥120 / panics=0
-- 提交规范：feat/ fix/ docs/ 前缀，一次提交一个关注点
-
----
-
-## 技术要点
-
-- **程序化几何与纹理**（meshgen / procedural）：图元组装建模 + CPU 烘焙光照/分区纹理，零外部资产
-- **网格着色器路径**（VK_EXT_mesh_shader + 传统回退）：GPU 逐实例剔除/变换为主路径，无扩展显卡自动回退冻结的顶点管线
-- **地形 LOD**：三级 LOD + smoothstep morph + 确定值噪声，远距降密度
-- **方向光/点光/阴影**：DirectionalLight（方向/颜色/强度）+ PointLight（衰减）+ 2048 D32 阴影图 3×3 PCF（默认关）
-- **音频程序化合成**：DSP 事件式合成（枪声/爆炸/脚步/环境），ADSR + 低通 + 多声部混音；waveOut 后端发声
-- **CPU 拓扑与线程亲和**：Windows 物理核/CCX(L3)/能效等级检测 + SetThreadAffinityMask 绑核
-- **AI 分层调度**（scene_pool / ai_pool）：近组/交互 AI 走 scene_pool（P 核/CCD0），远组/后台走 ai_pool（E 核/CCD1）
-
----
-
-## 目录结构
-
-```
-src/
-├── main.rs            # winit 事件循环 / 输入 / 渲染编排 / 检视模式
-├── ui.rs              # HUD/菜单/设置/中文字形渲染（GDI）
-├── audio.rs           # 程序化音频合成/混音（AudioSink 抽象）
-├── audio_out.rs       # Windows waveOut 原生 FFI 真实发声后端
-├── config.rs          # 配置持久化
-├── net.rs             # UDP client/server 快照同步
-└── engine/
-    ├── renderer.rs    # Vulkan 渲染（实例场/LOD/HUD/阴影/mesh+传统路径）
-    ├── meshgen.rs     # 程序化网格生成（圆角盒/锥台/球/环）
-    ├── game.rs        # 游戏逻辑中枢（物理/武器/AI/波次/压力模式）
-    ├── weapons.rs     # 武器框架（Firearm/ProjectileWeapon/WeaponRack）
-    ├── weapon_data.rs # 35 把枪 V3.0 数据表（ALL_WEAPONS）
-    ├── guns/          # 各枪程序化建模纯函数
-    ├── ai.rs          # 战术 AI（A*/状态机/协同）
-    ├── ai_command.rs  # 连排班指挥体系（三三制/军情汇报/司令决策）
-    ├── camera.rs      # 三模式相机（第一人称/轨道/飞行）
-    ├── physics.rs     # 玩家/刚体物理
-    ├── map.rs         # 地图生成/TOML 关卡
-    ├── city.rs        # 手工绘制现代城市布局
-    ├── procedural.rs  # 程序化纹理烘焙（城市地面/皮肤）
-    ├── cpu.rs         # CPU 拓扑检测与线程亲和（Windows FFI）
-    ├── lighting.rs    # 方向光/点光/阴影 Uniform
-    ├── font_cjk.rs    # Windows GDI 中文字形光栅化
-    ├── simd.rs        # SIMD 选路与加速比
-    ├── gpu_caps.rs    # 显卡能力枚举
-    └── ...            # objective/window/cjk_glyphs 等
-launcher/              # 零依赖 Win32 GUI 启动器（更新/快捷方式/壁纸）
-build.rs               # WGSL → SPIR-V 构建期编译（naga 30）
-assets/                # 生成的 SPIR-V 与回退贴图、地图 TOML
-scripts/               # 冒烟/发布/调试脚本
-GAME_DESIGN.txt        # 玩法设计文档（唯一设计依据）
-```
-
----
-
-## 已知注意事项
-
-- **naga 30 的 ADJUST_COORDINATE_SPACE 对多成员输出结构/网格写入器为死代码**：顶点/HUD/阴影路径的 Y 翻转行为以 build.rs 中 WGSL 显式处理为准（详见 build.rs 注释）
-- **阴影图默认关闭**：待高层建筑城市全覆盖阴影修复后再开（当前关 shadows 以保帧率/正确性）
-- **12GB RAM 内存限制**：开发环境一次只运行一个 cargo 进程
-- **验证层**：release 构建无 Vulkan 验证层（性能），调试用 debug 构建
-- **中文界面**：中文字形依赖 Windows GDI（font_cjk.rs）；非 Windows 平台回退 ASCII
-- **工作区未提交内容**：audio_out.rs、ai_command.rs、128v128 默认值与 NPC 容量扩容目前仍在工作区（未 commit），交付前请确认
-
----
-
-## 路线图
-
-- [ ] 设计文档定稿（弹药/护甲/爆头/爆炸/手雷/载具/兵种）
-- [ ] 批1 战斗核心：护甲系统 + 爆头判定 + 受击减速/体力
-- [ ] 批2 武器矩阵：口径参数框架 + 后续现代武器
-- [ ] 批3 爆炸与手雷：三段衰减 + 进攻/防御型 + 破片/高爆
-- [ ] 批4 细节：破片反弹、穿甲穿墙、地图主题现代化
-- [ ] 批5 载具/兵种（文档补充后）
+*更多细节（中文）见上文。*
