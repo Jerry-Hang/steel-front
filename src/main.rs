@@ -735,10 +735,14 @@ impl GameApp {
                 }
                 let ext = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
                 let long = ext[0].max(ext[1]).max(ext[2]);
-                let scale = 0.94 / long.max(1e-4);
-                // 长轴对齐 +Z：若长轴为 Y（Sketchfab Z-up 导出），绕 X -90°（+Y→+Z）
+                // 枪模 m 矩阵含 0.5 缩放 → 模型长 1.35m 折算视觉 ~0.68m（AK-12 实枪比例）
+                let scale = 1.35 / long.max(1e-4);
+                // 长轴对齐：Sketchfab Z-up 导出（长轴=Y 85、高=Z 21、宽=X 7，枪竖立）
+                // 绕 X -90°：长轴→-Z、枪顶→+Y；再绕 Y 180° 预旋转（配合 fp_gun_matrix 的
+                // rotY(180°) 双重取负 → 最终枪口朝 -Z（屏幕深处），枪顶朝上
                 let align = if ext[1] >= ext[0] && ext[1] >= ext[2] {
-                    glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                    glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                        * glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
                 } else if ext[0] >= ext[1] && ext[0] >= ext[2] {
                     glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
                 } else {
@@ -749,10 +753,8 @@ impl GameApp {
                     (mn[1] + mx[1]) * 0.5,
                     (mn[2] + mx[2]) * 0.5,
                 ];
-                // 相机空间摆放（渲染器 identity 实例槽：顶点即最终相机空间坐标）：
-                // 模型中心 → (0.25, -0.20, -0.60)（右下腰射位）；绕 Y 180° 让枪管朝 -Z（准星方向）
-                let fp_transform = glam::Mat4::from_translation(glam::Vec3::new(0.25, -0.20, -0.60))
-                    * glam::Mat4::from_rotation_y(std::f32::consts::PI);
+                // 注意：不在此处做任何相机空间变换——FP 帧内与程序化枪共用 fp_gun_matrix
+                // （view_inv × anchor × scale；世界空间 + 每帧跟随相机）
                 let light = glam::Vec3::new(-0.45, 0.8, -0.3).normalize();
                 // Sketchfab 纯黑基色（~0.057）→ 提亮 3.2 倍到可见金属灰（保留明暗对比）
                 let base = [
@@ -768,8 +770,6 @@ impl GameApp {
                         let mut n = glam::Vec3::from_slice(&v[3..6]);
                         p = align.transform_point3(p);
                         n = align.transform_vector3(n).normalize_or_zero();
-                        p = fp_transform.transform_point3(p);
-                        n = fp_transform.transform_vector3(n);
                         let ndl = n.dot(light).max(0.0);
                         let shade = 0.32 + 0.78 * ndl;
                         let c = [
@@ -826,7 +826,23 @@ impl GameApp {
                     .collect();
                 return (moved, indices);
             }
-            return (verts, indices);
+            // 第一人称：与程序化枪共用 fp_gun_matrix（世界空间 + 每帧跟随相机）
+            let m = self.fp_gun_matrix();
+            let moved: Vec<crate::engine::meshgen::GVertex> = verts
+                .iter()
+                .map(|v| crate::engine::meshgen::GVertex {
+                    pos: {
+                        let p = m.transform_point3(glam::Vec3::from(v.pos));
+                        [p.x, p.y, p.z]
+                    },
+                    normal: {
+                        let n = m.transform_vector3(glam::Vec3::from(v.normal));
+                        [n.x, n.y, n.z]
+                    },
+                    ..*v
+                })
+                .collect();
+            return (moved, indices);
         }
         // 检视模式：枪模放世界原点上方（居中），Orbit 相机绕其旋转查看
         if let Some(n) = self.inspect_weapon {
@@ -899,13 +915,16 @@ impl GameApp {
         // 开镜：枪居中 (0.0,-0.08,-0.42)，FOV 55°，准星隐藏（机瞄三点一线）。
         // 缩放大幅调低（0.98→0.5）：枪长 1.2m 在 0.6m 距离下占视野 ~70%，
         // 解决"怼脸/穿模"（旧值枪张角 100° > FOV 70°，必然怼脸）。
+        let m = self.fp_gun_matrix();
+        gun.transformed(m)
+    }
+    /// 第一人称枪的世界空间矩阵（程序化/导入枪模共用）：view_inv × anchor × scale。
+    /// 开火后坐脉冲 + 行走晃动 + ADS 插值 + FOV 缩放（2026-08-27 抽离共享）
+    fn fp_gun_matrix(&self) -> glam::Mat4 {
+        let cam = &self.camera;
         let hip_pos = glam::Vec3::new(0.25, -0.20, -0.60);
         let ads_pos = glam::Vec3::new(0.0, -0.08, -0.42);
-        let b = self.ads_blend;
-        let mut anchor = hip_pos.lerp(ads_pos, b);
-        // 开火后坐：一次性"上抬→回落"脉冲（0.3s 二次衰减），非弹簧式连续正弦。
-        // 2026-08-19 修复：旧 48Hz 正弦在连发/狙击时像弹簧一样频繁抖；
-        // 现在每发只在开火瞬间快速上抬，随后按握枪姿势平滑回落（形成一个点）。
+        let mut anchor = hip_pos.lerp(ads_pos, self.ads_blend);
         let since_shot = self.anim_clock - self.last_shot_at;
         if since_shot >= 0.0 && since_shot < 0.30 {
             let t = since_shot / 0.30;
@@ -913,23 +932,20 @@ impl GameApp {
             anchor.y -= 0.07 * pulse;
             anchor.z += 0.05 * pulse;
         }
-        // 行走晃动：腰射轻微摆动；开镜时随 blend 衰减归零（握枪稳定，只有极轻微呼吸感）
         let bob = (self.anim_clock * 10.0).sin() * 0.012 * (1.0 - self.ads_blend * 0.9);
         anchor.x += bob;
-        // 旋转全零（模型已水平校正，无需姿态补偿旋转）——保留 0 便于未来微调贴腮角
-        let tilt = 0.0;
         let base_scale = 0.50 - 0.03 * self.ads_blend;
         let gun_scale =
             ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * base_scale;
         let view_inv = cam.view_matrix().inverse();
-        let m = view_inv
+        view_inv
             * glam::Mat4::from_translation(anchor)
-            * glam::Mat4::from_rotation_z(tilt)
+            * glam::Mat4::from_rotation_z(0.0)
             * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
             * glam::Mat4::from_rotation_x(-0.045)
-            * glam::Mat4::from_rotation_y(std::f32::consts::PI);
-        gun.transformed(m)
+            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
     }
+
     /// ESC 菜单鼠标点击命中检测：命中选项矩形则执行对应动作（0=退出 1=设置）。
     /// 矩形布局必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中，
     /// 选项 y = py+90 / py+146，宽 pw-120=260 居中，高 34）。返回是否命中任何选项。
