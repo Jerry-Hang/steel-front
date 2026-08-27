@@ -212,7 +212,8 @@ impl GameApp {
                 let llm_on = std::env::var("RV3D_LLM")
                     .map(|v| !(v.is_empty() || v == "0" || v == "off"))
                     .unwrap_or(false);
-                let cap = env_f32("RV3D_FPS").unwrap_or(if llm_on { 90.0 } else { 240.0 });
+                // 2026-08-28 实测：128v128 无上限 311fps @99% GPU；默认 300（LLM 120）
+                let cap = env_f32("RV3D_FPS").unwrap_or(if llm_on { 120.0 } else { 300.0 });
                 cap.max(20.0)
             },
             last_update_us: 0,
