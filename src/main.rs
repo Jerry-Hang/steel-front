@@ -741,7 +741,9 @@ impl GameApp {
                 // 绕 X -90°：长轴→-Z、枪顶→+Y；再绕 Y 180° 预旋转（配合 fp_gun_matrix 的
                 // rotY(180°) 双重取负 → 最终枪口朝 -Z（屏幕深处），枪顶朝上
                 let align = if ext[1] >= ext[0] && ext[1] >= ext[2] {
-                    glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                    // 长轴=Y（Sketchfab Z-up 竖立枪）：-90°X 立正 + 180°Z 滚转（枪顶朝上、弹匣朝下）
+                    glam::Mat4::from_rotation_z(std::f32::consts::PI)
+                        * glam::Mat4::from_rotation_y(std::f32::consts::PI)
                         * glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
                 } else if ext[0] >= ext[1] && ext[0] >= ext[2] {
                     glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
@@ -756,12 +758,6 @@ impl GameApp {
                 // 注意：不在此处做任何相机空间变换——FP 帧内与程序化枪共用 fp_gun_matrix
                 // （view_inv × anchor × scale；世界空间 + 每帧跟随相机）
                 let light = glam::Vec3::new(-0.45, 0.8, -0.3).normalize();
-                // Sketchfab 纯黑基色（~0.057）→ 提亮 3.2 倍到可见金属灰（保留明暗对比）
-                let base = [
-                    (mesh.base_color[0] * 3.2).clamp(0.12, 1.0),
-                    (mesh.base_color[1] * 3.2).clamp(0.12, 1.0),
-                    (mesh.base_color[2] * 3.2).clamp(0.12, 1.0),
-                ];
                 let verts: Vec<crate::engine::meshgen::GVertex> = mesh
                     .verts
                     .iter()
@@ -771,11 +767,13 @@ impl GameApp {
                         p = align.transform_point3(p);
                         n = align.transform_vector3(n).normalize_or_zero();
                         let ndl = n.dot(light).max(0.0);
-                        let shade = 0.32 + 0.78 * ndl;
+                        let shade = 0.30 + 0.92 * ndl;
+                        // 逐顶点材质色（GLB 多材质保留）；基色 ~0.05 提亮 ×4.2（模型原本深金属灰）
+                        let raw = [v[8], v[9], v[10]];
                         let c = [
-                            (base[0] * shade).min(1.0),
-                            (base[1] * shade).min(1.0),
-                            (base[2] * shade).min(1.0),
+                            (raw[0] * 4.2 * shade).min(1.0),
+                            (raw[1] * 4.2 * shade).min(1.0),
+                            (raw[2] * 4.2 * shade).min(1.0),
                         ];
                         crate::engine::meshgen::GVertex {
                             pos: [p.x, p.y, p.z],

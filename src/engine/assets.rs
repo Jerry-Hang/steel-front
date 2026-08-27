@@ -8,9 +8,10 @@ use glam::{Mat4, Vec3};
 /// 导入网格（位置/法线/UV/顶点色，逐面平台化单位数据）
 #[derive(Debug, Clone)]
 pub struct ImportedMesh {
-    pub verts: Vec<[f32; 8]>, // pos(3) normal(3) uv(2)
+    /// 每顶点：pos(3) + normal(3) + uv(2) + 材质基色(3)（2026-08-27：多材质模型逐顶点保留）
+    pub verts: Vec<[f32; 11]>, // pos(3) normal(3) uv(2) color(3)
     pub indices: Vec<u32>,
-    /// 材质基色（GLB baseColorFactor 或 OBJ 默认灰）
+    /// 默认材质基色（OBJ 模型用）
     pub base_color: [f32; 3],
 }
 
@@ -25,7 +26,7 @@ pub fn parse_obj(text: &str) -> Result<ImportedMesh, String> {
     let mut pos: Vec<[f32; 3]> = Vec::new();
     let mut uv: Vec<[f32; 2]> = Vec::new();
     let mut nrm: Vec<[f32; 3]> = Vec::new();
-    let mut verts: Vec<[f32; 8]> = Vec::new();
+    let mut verts: Vec<[f32; 11]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
     let mut remap: std::collections::HashMap<(i32, i32, i32), u32> = std::collections::HashMap::new();
@@ -35,7 +36,7 @@ pub fn parse_obj(text: &str) -> Result<ImportedMesh, String> {
         uv: &[[f32; 2]],
         nrm: &[[f32; 3]],
         fields: &[&str],
-        verts: &mut Vec<[f32; 8]>,
+        verts: &mut Vec<[f32; 11]>,
         indices: &mut Vec<u32>,
     ) -> Result<(), String> {
         let mut corner: Vec<u32> = Vec::new();
@@ -64,7 +65,7 @@ pub fn parse_obj(text: &str) -> Result<ImportedMesh, String> {
                 } else {
                     [0.0, 1.0, 0.0]
                 };
-                verts.push([p[0], p[1], p[2], n[0], n[1], n[2], t[0], t[1]]);
+                verts.push([p[0], p[1], p[2], n[0], n[1], n[2], t[0], t[1], 0.7, 0.7, 0.7]);
                 (verts.len() - 1) as u32
             });
             corner.push(idx);
@@ -219,7 +220,13 @@ fn append_prim(
     for i in 0..pos.len() / 3 {
         let n = if i * 3 + 2 < nrm.len() { [nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]] } else { [0.0, 1.0, 0.0] };
         let t = if i * 2 + 1 < uv.len() { [uv[i * 2], uv[i * 2 + 1]] } else { [0.0, 0.0] };
-        out.verts.push([pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2], n[0], n[1], n[2], t[0], t[1]]);
+        // 逐顶点材质色（多材质模型还原部件颜色差异）
+        out.verts.push([
+            pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2],
+            n[0], n[1], n[2],
+            t[0], t[1],
+            base_color[0], base_color[1], base_color[2],
+        ]);
     }
     for v in &ind {
         out.indices.push((*v as u32) + base);
