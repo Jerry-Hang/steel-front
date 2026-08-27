@@ -90,7 +90,9 @@ fn vs_main(
         output.flat_flag = 3.0;
         output.fade = 1.0;
     }
-    if (instance_index >= EMISSIVE_INSTANCE_BASE) {
+    // 自发光区间（EMISSIVE_BASE .. +64）；枪槽（+64 后一槽）在此区间之外（2026-08-27 修复：
+    // 原 >= 使枪槽被当作自发光 → flag=1+fade=2 → 走光照路径被太阳光×7.7 刷成纯白）
+    if (instance_index >= EMISSIVE_INSTANCE_BASE && instance_index < EMISSIVE_INSTANCE_BASE + 64u) {
         // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
         output.flat_flag = 1.0;
         output.fade = 2.0;
@@ -608,7 +610,7 @@ fn mesh_main(
     // 材质编码与顶点着色器一致：0=地面/地形、1=marker、2=NPC
     // （片元着色器按值决定采样哪张皮肤纹理；RV3D_SKIN_TEX=1 启用，缺省纯色）
     var flat = 0.0;
-    if (slot >= EMISSIVE_INSTANCE_BASE) {
+    if (slot >= EMISSIVE_INSTANCE_BASE && slot < EMISSIVE_INSTANCE_BASE + 64u) {
         // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
         flat = 1.0;
         fade = 2.0;
@@ -641,7 +643,7 @@ fn mesh_main(
     // 障碍 marker 槽恒用立方体（远距十字 quad 俯视是"方块贴图+缝隙"，用户反馈的边界方块感）
     let is_marker = slot >= MARKER_INSTANCE_BASE && slot < NPC_INSTANCE_BASE;
     // 树冠（绿色 marker）/ 自发光（爆炸光球）→ 二十面体（立体球状，告别纸帽子/方块冲击波）
-    let is_foliage_or_glow = is_foliage(inst.tint) || slot >= EMISSIVE_INSTANCE_BASE;
+    let is_foliage_or_glow = is_foliage(inst.tint) || (slot >= EMISSIVE_INSTANCE_BASE && slot < EMISSIVE_INSTANCE_BASE + 64u);
     if (is_foliage_or_glow) {
         if (lid < 12u) {
             write_vertex(lid, ICO_POS[lid] * 0.9, vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);

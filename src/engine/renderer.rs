@@ -4367,6 +4367,9 @@ impl Renderer {
             self.gun_buffer_capacity_verts = need_verts;
             self.gun_buffer_capacity_idx = need_idx;
         }
+        if let Some(first) = verts.first() {
+            log::info!("gun: 写入顶点首色 {:?}", first.color);
+        }
         // 写入顶点（GVertex → Vertex: pos/color/uv；color 已含烘焙光照）
         let vptr = self.gun_mapped as *mut Vertex;
         for (i, v) in verts.iter().enumerate() {
