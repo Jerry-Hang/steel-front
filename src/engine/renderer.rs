@@ -55,8 +55,8 @@ struct CameraUniform {
 #[repr(C)]
 struct Vertex {
     pos: [f32; 3],
-    color: [f32; 3],
     uv: [f32; 2],
+    color: [f32; 3],
 }
 
 /// 性能快照（供性能日志系统，2026-08-16）：帧耗时与各渲染阶段耗时（微秒）
@@ -4376,8 +4376,8 @@ impl Renderer {
             unsafe {
                 *vptr.add(i) = Vertex {
                     pos: v.pos,
-                    color: v.color,
                     uv: v.uv,
+                    color: v.color,
                 };
             }
         }
