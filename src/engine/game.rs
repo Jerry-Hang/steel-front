@@ -2387,10 +2387,12 @@ impl Game {
         // RV3D_NO_SHADOW=1 关闭阴影（仅环境光+点光源），用于 A/B 验证与阴影 pass 性能对比。
         // 2026-08-22：城市高楼群下阴影图覆盖异常（全图判黑），默认改用环境光+方向光直照
         // （RV3D_NO_SHADOW=0 强制回阴影贴图路径，用于后续排查）
-        let shadow = if std::env::var("RV3D_NO_SHADOW").as_deref() == Ok("0") {
-            Some(ShadowConfig::new(sun.direction, glam::Vec3::ZERO, 250.0, 1.0, 500.0))
-        } else {
+        // 2026-08-28：用户机器全高实测——默认开阴影（RV3D_NO_SHADOW=1 显式关闭）；
+        // 阴影覆盖范围加大以适配城市高楼群（扩展 250→400 米，远平面 500→800）
+        let shadow = if std::env::var("RV3D_NO_SHADOW").as_deref() == Ok("1") {
             None
+        } else {
+            Some(ShadowConfig::new(sun.direction, glam::Vec3::ZERO, 400.0, 1.0, 800.0))
         };
         LightUniform::build(
             Some(&sun),

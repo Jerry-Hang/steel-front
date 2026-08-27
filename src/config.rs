@@ -32,7 +32,7 @@ impl Default for GameConfig {
             bindings: KeyBindings::defaults(),
             resolution: RESOLUTIONS[0],
             resolution_explicit: false,
-            quality: 1, // MEDIUM
+            quality: 2, // HIGH（2026-08-28：用户机器全高实测 —— RTX 5060L + Zen4）
         }
     }
 }
