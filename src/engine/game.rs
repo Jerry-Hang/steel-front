@@ -1872,6 +1872,11 @@ impl Game {
     }
 
     /// 关卡系统下一关（胜利结算 N 键）：进入列表下一张地图；已到最后一关 → 返回 false（通关）
+    /// 玩家水平速度（持枪摆动/动画驱动用）
+    pub fn player_speed(&self) -> f32 {
+        (self.player_body.vel.x * self.player_body.vel.x + self.player_body.vel.z * self.player_body.vel.z).sqrt()
+    }
+
     pub fn advance_level(&mut self, player: &glam::Vec3) -> bool {
         if self.level_list.is_empty() {
             return false; // 单关模式（RV3D_MAP）：无下一关
