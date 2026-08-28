@@ -159,8 +159,8 @@ struct GameApp {
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
     gun_mesh_cache: Option<(String, crate::engine::guns::GunMesh)>,
-    /// 导入的 GLB 枪模（assets/guns/*.glb → 烘焙顶点；无则回退程序化枪模）
-    gun_glb: Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)>,
+    /// 导入的 GLB 枪模缓存（按武器 key：assets/guns/{key}.glb → 顶点；无则该武器回退程序化枪模）
+    gun_glbs: std::collections::HashMap<String, Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)>>,
     /// 延迟自动切枪（测试用）：(目标武器号, 触发时刻)
     switch_weapon_at: Option<(usize, f32)>,
 }
@@ -282,7 +282,7 @@ impl GameApp {
             }),
             command_buf: String::new(),
             gun_mesh_cache: None,
-            gun_glb: Self::load_gun_glb(),
+            gun_glbs: std::collections::HashMap::new(),
             switch_weapon_at: None,
         }
     }
@@ -713,11 +713,15 @@ impl GameApp {
     /// 变换到视空间固定位置（view⁻¹ × 锚点 × 倾斜 × 缩放 × 俯角 × 翻转 180°：
     /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
-    /// 导入枪模：优先 assets/guns/ak12_baked.glb（Blender 顶点色烘焙版），
-    /// 其次 ak12.glb（原始 Sketchfab）→ 烘焙顶点（同程序化光照）
-    fn load_gun_glb() -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
-        // 2026-08-28 终局：使用原始模型材质本色（baseColorFactor 0.057/0.076 中性黑）
-        let path = "assets/guns/ak12.glb";
+    /// 导入枪模（按武器 key 自动寻找 assets/guns/{key}.glb；不存在回退 ak12.glb）
+    /// 2026-08-28 终局：使用原始模型材质本色（baseColorFactor 直出 × 忠实现光）
+    fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
+        let path = if std::path::Path::new(&format!("assets/guns/{key}.glb")).exists() {
+            format!("assets/guns/{key}.glb")
+        } else {
+            "assets/guns/ak12.glb".to_string()
+        };
+        let path: &str = &path;
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -807,8 +811,11 @@ impl GameApp {
     }
 
     fn first_person_gun_mesh(&mut self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
-        // 导入枪模优先（检视与第一人称共用：检视时居中，第一人称保持导入姿态）
-        if let Some((verts, indices)) = self.gun_glb.clone() {
+        // 导入枪模优先（按当前武器 key 缓存；检视与第一人称共用）
+        let gkey = self.game.active_weapon_key().to_string();
+        let load = |k: &String| Self::load_gun_glb(k);
+        let entry = self.gun_glbs.entry(gkey.clone()).or_insert_with(|| load(&gkey));
+        if let Some((verts, indices)) = entry.clone() {
             if self.inspect_weapon.is_some() {
                 // 居中到 (0, 1.0, 0)
                 let mut mn = [f32::MAX; 3];
