@@ -782,17 +782,17 @@ impl GameApp {
                         // 原始版：材质基色 ×5.5 × 光照
                         let raw = [v[8], v[9], v[10]];
                         let c = if path.ends_with("baked") {
-                            // 烘焙色已含 AO（模型本色 0.08-0.11 纯黑金属）：直出微光
-                            let shade = 0.55 + 0.25 * ndl;
+                            // 烘焙色已含 AO（模型本色 0.08-0.11 纯黑金属）：直出微光（2026-08-28 色调修正）
+                            let shade = 0.35 + 0.20 * ndl;
                             [
                                 (raw[0] * shade).min(1.0),
                                 (raw[1] * shade).min(1.0),
                                 (raw[2] * shade).min(1.0),
                             ]
                         } else {
-                            let shade = 0.30 + 0.92 * ndl;
+                            let shade = 0.30 + 0.20 * ndl;
                             [
-                                (raw[0] * 5.5 * shade).min(1.0),
+                                (raw[0] * 0.15 * shade).min(1.0),
                                 (raw[1] * 5.5 * shade).min(1.0),
                                 (raw[2] * 5.5 * shade).min(1.0),
                             ]
