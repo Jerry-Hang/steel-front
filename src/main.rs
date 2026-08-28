@@ -716,11 +716,8 @@ impl GameApp {
     /// 导入枪模：优先 assets/guns/ak12_baked.glb（Blender 顶点色烘焙版），
     /// 其次 ak12.glb（原始 Sketchfab）→ 烘焙顶点（同程序化光照）
     fn load_gun_glb() -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
-        let path = if std::path::Path::new("assets/guns/ak12_baked.glb").exists() {
-            "assets/guns/ak12_baked.glb"
-        } else {
-            "assets/guns/ak12.glb"
-        };
+        // 2026-08-28 终局：使用原始模型材质本色（baseColorFactor 0.057/0.076 中性黑）
+        let path = "assets/guns/ak12.glb";
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -777,26 +774,15 @@ impl GameApp {
                         let mut n = glam::Vec3::from_slice(&v[3..6]);
                         p = align.transform_point3(p);
                         n = align.transform_vector3(n).normalize_or_zero();
+                        // 终局（2026-08-28）：模型材质本色直出——baseColor × 忠实现光（×1.0，无提亮/压暗）
                         let ndl = n.dot(light).max(0.0);
-                        // 烘焙版：顶点色已含基色+AO（直接使用，只加微光对比）；
-                        // 原始版：材质基色 ×5.5 × 光照
                         let raw = [v[8], v[9], v[10]];
-                        let c = if path.ends_with("baked") {
-                            // 烘焙色已含 AO（模型本色 0.08-0.11 纯黑金属）：直出微光（2026-08-28 色调修正）
-                            let shade = 0.35 + 0.20 * ndl;
-                            [
-                                (raw[0] * shade).min(1.0),
-                                (raw[1] * shade).min(1.0),
-                                (raw[2] * shade).min(1.0),
-                            ]
-                        } else {
-                            let shade = 0.30 + 0.20 * ndl;
-                            [
-                                (raw[0] * 0.15 * shade).min(1.0),
-                                (raw[1] * 5.5 * shade).min(1.0),
-                                (raw[2] * 5.5 * shade).min(1.0),
-                            ]
-                        };
+                        let shade = 0.85 + 0.30 * ndl;
+                        let c = [
+                            (raw[0] * shade).min(1.0),
+                            (raw[1] * shade).min(1.0),
+                            (raw[2] * shade).min(1.0),
+                        ];
                         crate::engine::meshgen::GVertex {
                             pos: [p.x, p.y, p.z],
                             normal: [n.x, n.y, n.z],
