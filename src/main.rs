@@ -1131,7 +1131,9 @@ impl GameApp {
             let show = self.inspect_weapon.is_some()
                 || (self.game.state() == GameState::Playing
                     && self.camera.mode == CameraMode::FirstPerson);
-            if show { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY }
+            // 检视模式：顶点已居中到世界坐标，需用单位矩阵
+            if self.inspect_weapon.is_some() { glam::Mat4::IDENTITY }
+            else if show { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY }
         };
 
         if let Some(renderer) = &mut self.renderer {
