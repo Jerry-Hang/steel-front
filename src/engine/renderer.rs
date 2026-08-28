@@ -55,8 +55,8 @@ struct CameraUniform {
 #[repr(C)]
 struct Vertex {
     pos: [f32; 3],
-    uv: [f32; 2],
     color: [f32; 3],
+    uv: [f32; 2],
 }
 
 /// 性能快照（供性能日志系统，2026-08-16）：帧耗时与各渲染阶段耗时（微秒）
@@ -2035,8 +2035,10 @@ impl Renderer {
     /// 时回退使用（地形 LOD 网格 + 地面实例场）。新渲染功能一律走 mesh 路径
     /// （init_mesh_pipeline），本管线不再新增功能。
     fn init_pipeline(&mut self) -> Result<(), String> {
-        let vs_spirv = load_spirv("assets/triangle.vert.spv")?;
-        let fs_spirv = load_spirv("assets/triangle.frag.spv")?;
+        // 2026-08-28 终极修正：使用 build.rs 内嵌 SPIR-V（OUT_DIR/shaders.rs 常量），
+        // 不再加载外置 assets/triangle.*.spv（两者曾长期不同步：外置为旧版，color 通道被 UV 顶替）
+        let vs_spirv = crate::shaders::VS_SPIRV.to_vec();
+        let fs_spirv = crate::shaders::FS_SPIRV.to_vec();
         let vs_module = self.create_shader_module(&vs_spirv)?;
         let fs_module = self.create_shader_module(&fs_spirv)?;
 
@@ -2079,6 +2081,13 @@ impl Renderer {
                 .offset(std::mem::offset_of!(Vertex, uv) as u32),
         ];
 
+        log::info!(
+            "gun-attr: stride={} pos@{} color@{} uv@{}",
+            std::mem::size_of::<Vertex>(),
+            std::mem::offset_of!(Vertex, pos),
+            std::mem::offset_of!(Vertex, color),
+            std::mem::offset_of!(Vertex, uv)
+        );
         let vertex_bindings = [vertex_binding];
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_bindings)
@@ -4367,19 +4376,30 @@ impl Renderer {
             self.gun_buffer_capacity_verts = need_verts;
             self.gun_buffer_capacity_idx = need_idx;
         }
-        if let Some(first) = verts.first() {
-            log::info!("gun: 写入顶点首色 {:?}", first.color);
-        }
+
         // 写入顶点（GVertex → Vertex: pos/color/uv；color 已含烘焙光照）
         let vptr = self.gun_mapped as *mut Vertex;
         for (i, v) in verts.iter().enumerate() {
             unsafe {
                 *vptr.add(i) = Vertex {
                     pos: v.pos,
-                    uv: v.uv,
                     color: v.color,
+                    uv: v.uv,
                 };
             }
+        }
+        // 2026-08-28 终极可见性修复：unmap → remap（host-coherent 亦可能被驱动缓存延迟可见）
+        unsafe {
+            self.device.unmap_memory(self.gun_vertex_buffer_memory);
+            self.gun_mapped = self
+                .device
+                .map_memory(
+                    self.gun_vertex_buffer_memory,
+                    0,
+                    self.gun_buffer_capacity_verts as u64 * std::mem::size_of::<Vertex>() as u64,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .expect("枪模顶点缓冲重映射失败")
         }
         // 索引上传（独立映射窗口，用一次性的暂存：直接再 map 索引内存）
         unsafe {

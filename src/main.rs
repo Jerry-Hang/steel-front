@@ -6,6 +6,11 @@
 //! 3. 事件循环处理输入
 //! 4. 每帧更新相机并渲染
 
+/// 构建期内嵌着色器（build.rs 生成 OUT_DIR/shaders.rs）
+pub mod shaders {
+    include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
+}
+
 mod engine;
 mod audio;
 mod audio_out;
