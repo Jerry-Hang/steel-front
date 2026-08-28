@@ -313,6 +313,6 @@ mod tests {
             RESOLUTIONS[0],
             "旧格式缺 resolution 行应回退默认"
         );
-        assert_eq!(cfg.quality, 1, "旧格式缺 quality 行应回退默认");
+        assert_eq!(cfg.quality, 2, "旧格式缺 quality 行应回退默认（默认 HIGH）");
     }
 }
