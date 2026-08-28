@@ -833,23 +833,9 @@ impl GameApp {
                     .collect();
                 return (moved, indices);
             }
-            // 第一人称：与程序化枪共用 fp_gun_matrix（世界空间 + 每帧跟随相机）
-            let m = self.fp_gun_matrix();
-            let moved: Vec<crate::engine::meshgen::GVertex> = verts
-                .iter()
-                .map(|v| crate::engine::meshgen::GVertex {
-                    pos: {
-                        let p = m.transform_point3(glam::Vec3::from(v.pos));
-                        [p.x, p.y, p.z]
-                    },
-                    normal: {
-                        let n = m.transform_vector3(glam::Vec3::from(v.normal));
-                        [n.x, n.y, n.z]
-                    },
-                    ..*v
-                })
-                .collect();
-            return (moved, indices);
+            // 第一人称：顶点已在加载时静态化到「视空间基座」，每帧仅由实例矩阵驱动
+            // （2026-08-28 残影修复：消除每帧 3MB CPU 重变换）
+            return (verts, indices);
         }
         // 检视模式：枪模放世界原点上方（居中），Orbit 相机绕其旋转查看
         if let Some(n) = self.inspect_weapon {
@@ -1093,6 +1079,7 @@ impl GameApp {
             _ => QualityPreset::High,
         };
         log::info!("settings: 应用画质 {}", preset.label());
+        // 2026-08-28：枪实例矩阵预计算（进入 renderer 借用前——防借用冲突 + 每帧一次）
         if let Some(renderer) = &mut self.renderer {
             renderer.set_quality(preset);
         }
@@ -1139,6 +1126,14 @@ impl GameApp {
                 );
             }
         }
+        // 2026-08-28：枪实例矩阵预计算（进入 renderer 借用前）
+        let fp_gun_pre = {
+            let show = self.inspect_weapon.is_some()
+                || (self.game.state() == GameState::Playing
+                    && self.camera.mode == CameraMode::FirstPerson);
+            if show { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY }
+        };
+
         if let Some(renderer) = &mut self.renderer {
             // 投影宽高比取实际窗口尺寸（16:10 等非 16:9 分辨率下不拉伸）
             let aspect = self
@@ -1516,8 +1511,10 @@ impl GameApp {
                     && self.camera.mode == CameraMode::FirstPerson);
             if show_gun {
                 renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+                renderer.set_first_person_gun_model(fp_gun_pre);
             } else {
                 renderer.set_first_person_gun_mesh(&[], &[]);
+                renderer.set_first_person_gun_model(fp_gun_pre);
             }
 
             // 尺寸保险（2026-08-15）：窗口实际尺寸与交换链不一致时重建——
