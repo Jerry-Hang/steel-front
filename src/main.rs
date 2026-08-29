@@ -1682,7 +1682,16 @@ impl ApplicationHandler for GameApp {
                 }
                 // 2026-08-29：路径追踪全景开关（设置面板 pt_enable；默认开）
             let mut renderer = renderer;
-            renderer.pt_live_enabled = crate::config::load().pt_enable;
+            if crate::config::load().pt_enable {
+                if let Err(e) = renderer.init_pt_resident(512) {
+                    log::info!("PT-RESIDENT init: {e}");
+                }
+            }
+            let mut pt_on = crate::config::load().pt_enable;
+            if let Ok(v) = std::env::var("RV3D_PT_LIVE") {
+                if v == "1" { pt_on = true; }
+            }
+            renderer.pt_live_enabled = pt_on;
             log::info!("RT: 路径追踪全景 = {}", if renderer.pt_live_enabled { "开启" } else { "关闭" });
             self.renderer = Some(renderer);
             }

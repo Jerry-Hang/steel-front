@@ -837,6 +837,17 @@ pub struct Renderer {
     light_data: LightUniform,
     /// 当前画质预设（默认 Medium = 现有行为；纯 CPU 侧参数）
     quality: QualityPreset,
+    /// 常驻 PT 资源（首帧构建一次复用；2026-08-29 修复每帧重建+泄漏！）
+    pt_resident: Option<Box<crate::engine::ray_tracer::PtAssets>>,
+    pt_img: vk::Image,
+    pt_img_mem: vk::DeviceMemory,
+    pt_view: vk::ImageView,
+    pt_pipeline: vk::Pipeline,
+    pt_layout: vk::PipelineLayout,
+    pt_setl: vk::DescriptorSetLayout,
+    pt_pool: vk::DescriptorPool,
+    pt_dset: vk::DescriptorSet,
+    pt_module: vk::ShaderModule,
     /// 路径追踪实时渲染开关（config.pt_enable；present 前 PT 帧上屏）
     pub pt_live_enabled: bool,
     /// 截图请求路径（Some 表示本帧渲染完成后读回 swapchain 图像并写 PNG）
@@ -1345,7 +1356,17 @@ impl Renderer {
             last_terrain_lod_name: "high",
             light_data: LightUniform::default(),
             quality: QualityPreset::DEFAULT,
-            pt_live_enabled: false, // 路径追踪实时（config 设置后置 true）
+            pt_live_enabled: false,
+            pt_resident: None,
+            pt_img: vk::Image::null(),
+            pt_img_mem: vk::DeviceMemory::null(),
+            pt_view: vk::ImageView::null(),
+            pt_pipeline: vk::Pipeline::null(),
+            pt_layout: vk::PipelineLayout::null(),
+            pt_setl: vk::DescriptorSetLayout::null(),
+            pt_pool: vk::DescriptorPool::null(),
+            pt_dset: vk::DescriptorSet::null(),
+            pt_module: vk::ShaderModule::null(),
             screenshot_request: None,
             screenshot_buffers: Vec::new(),
             screenshot_buffers_memory: Vec::new(),
@@ -4478,12 +4499,12 @@ impl Renderer {
     }
 
     /// 构建路径追踪加速结构：盒体场景 → BLAS + TLAS（2026-08-29 阶段2）
-    /// PT 实时 v2：构建+记录到独立 cb，返回 cb（真正提交并入主 submit；无 wait——性能关键）
-    pub fn pt_live_frame2(
-        &mut self,
-        swapchain_img: vk::Image,
-        size: u32,
-    ) -> Result<vk::CommandBuffer, String> {
+    /// PT 实时 v2（2026-08-29 常驻化）：首帧构建 AS/管线/图像，后帧只 dispatch+blit
+    /// 启动时构建 PT 常驻资源（2026-08-29：与 run_pt_view 同时空——已验证可跑！）
+    pub fn init_pt_resident(&mut self, size: u32) -> Result<(), String> {
+        if self.pt_resident.is_some() {
+            return Ok(());
+        }
         let boxes = vec![
             crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [40.0, 0.5, 40.0], material: 0 },
             crate::engine::ray_tracer::PtBox { center: [0.0, 0.6, -3.0], half: [1.2, 1.2, 1.2], material: 1 },
@@ -4494,22 +4515,21 @@ impl Renderer {
         ];
         let assets = self.build_pt_as(&boxes)?;
         let vs_module = self.create_shader_module(&crate::shaders::PT_FRAME_SPV.to_vec()).map_err(|e| format!("PT m: {e}"))?;
-        // 复用 pt_live_frame 的管线构建——简化为内联（与 pt_live_frame 相同但结尾返回 cb）
         let as_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
         let img_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(1).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
         let set_bindings = [as_layout, img_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
-        let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
-        let pipe_layouts = [set_layout_handle];
+        let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
+        let pipe_layouts = [sl];
         let pc_ranges: [vk::PushConstantRange; 0] = [];
         let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
-        let pipe_layout = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }.map_err(|e| format!("PT pl: {e}"))?;
+        let pl = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }.map_err(|e| format!("PT pl: {e}"))?;
         let stage_info = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(vs_module).name(c"main");
-        let compute_info = vk::ComputePipelineCreateInfo::default().stage(stage_info).layout(pipe_layout);
+        let compute_info = vk::ComputePipelineCreateInfo::default().stage(stage_info).layout(pl);
         let pipelines = unsafe { self.device.create_compute_pipelines(vk::PipelineCache::null(), &[compute_info], None).map_err(|e| format!("PT pipe {:?}", e.1))? };
-        let compute_pipeline = pipelines[0];
+        let pipeline = pipelines[0];
         let img_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D).format(vk::Format::R8G8B8A8_UNORM)
             .extent(vk::Extent3D { width: size, height: size, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
@@ -4522,7 +4542,7 @@ impl Renderer {
         let img_mem = unsafe { self.device.allocate_memory(&img_alloc, None) }.map_err(|e| format!("PT im: {e}"))?;
         unsafe { self.device.bind_image_memory(image, img_mem, 0) }.map_err(|e| format!("PT ib: {e}"))?;
         let img_view_info = vk::ImageViewCreateInfo::default()
-            .image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::B8G8R8A8_SRGB)
+            .image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::R8G8B8A8_UNORM)
             .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
         let view = unsafe { self.device.create_image_view(&img_view_info, None) }.map_err(|e| format!("PT iv: {e}"))?;
         let pool_sizes = [
@@ -4530,9 +4550,9 @@ impl Renderer {
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
-        let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
-        let dset_layouts = [set_layout_handle];
-        let dset_alloc = vk::DescriptorSetAllocateInfo::default().descriptor_pool(dpool).set_layouts(&dset_layouts);
+        let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
+        let dset_layouts = [sl];
+        let dset_alloc = vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&dset_layouts);
         let dset = unsafe { self.device.allocate_descriptor_sets(&dset_alloc) }.map_err(|e| format!("PT ds: {e}"))?[0];
         let accel_write = vk::WriteDescriptorSetAccelerationStructureKHR {
             s_type: vk::StructureType::WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
@@ -4559,31 +4579,161 @@ impl Renderer {
             },
         ];
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        // AS 一次性构建 + 等待（与 run_pt_view 同款——已验证路径！）
         let alloc = vk::CommandBufferAllocateInfo::default().command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
         let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("PT cb: {e}"))?[0];
         unsafe {
             self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
-            self.record_pt_build(cb, &assets, boxes.len()).map_err(|e| format!("PT rb: {e}"))?;
-            let accel_bar = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
-                .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
-            self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[accel_bar], &[], &[]);
+            self.record_pt_build(cb, &assets, boxes.len())?;
+            self.device.end_command_buffer(cb);
+            let cbs = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT sc: {e}"))?;
+            self.device.queue_wait_idle(self.graphics_queue).map_err(|e| format!("PT sw: {e}"))?;
+            self.device.free_command_buffers(self.command_pool, &[cb]);
+        }
+        self.pt_resident = Some(Box::new(assets));
+        self.pt_img = image;
+        self.pt_img_mem = img_mem;
+        self.pt_view = view;
+        self.pt_pipeline = pipeline;
+        self.pt_layout = pl;
+        self.pt_setl = sl;
+        self.pt_pool = pool;
+        self.pt_dset = dset;
+        self.pt_module = vs_module;
+        Ok(())
+    }
+
+    pub fn pt_live_frame2(
+        &mut self,
+        swapchain_img: vk::Image,
+        size: u32,
+    ) -> Result<vk::CommandBuffer, String> {
+        // 首帧常驻构建
+        if self.pt_resident.is_none() {
+            let boxes = vec![
+                crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [40.0, 0.5, 40.0], material: 0 },
+                crate::engine::ray_tracer::PtBox { center: [0.0, 0.6, -3.0], half: [1.2, 1.2, 1.2], material: 1 },
+                crate::engine::ray_tracer::PtBox { center: [-6.0, 1.0, 2.0], half: [1.0, 1.0, 1.0], material: 2 },
+                crate::engine::ray_tracer::PtBox { center: [6.0, 0.8, 3.0], half: [1.0, 0.8, 1.0], material: 3 },
+                crate::engine::ray_tracer::PtBox { center: [2.0, 0.6, -8.0], half: [0.8, 0.6, 0.8], material: 1 },
+                crate::engine::ray_tracer::PtBox { center: [-3.0, 0.7, -7.0], half: [0.9, 0.7, 0.9], material: 2 },
+            ];
+            let assets = self.build_pt_as(&boxes)?;
+            let vs_module = self.create_shader_module(&crate::shaders::PT_FRAME_SPV.to_vec()).map_err(|e| format!("PT m: {e}"))?;
+            let as_layout = vk::DescriptorSetLayoutBinding::default()
+                .binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+            let img_layout = vk::DescriptorSetLayoutBinding::default()
+                .binding(1).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+            let set_bindings = [as_layout, img_layout];
+            let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
+            let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
+            let pipe_layouts = [sl];
+            let pc_ranges: [vk::PushConstantRange; 0] = [];
+            let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
+            let pl = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }.map_err(|e| format!("PT pl: {e}"))?;
+            let stage_info = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(vs_module).name(c"main");
+            let compute_info = vk::ComputePipelineCreateInfo::default().stage(stage_info).layout(pl);
+            let pipelines = unsafe { self.device.create_compute_pipelines(vk::PipelineCache::null(), &[compute_info], None).map_err(|e| format!("PT pipe {:?}", e.1))? };
+            let pipeline = pipelines[0];
+            let img_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
+                .extent(vk::Extent3D { width: size, height: size, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
+                .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
+            let image = unsafe { self.device.create_image(&img_info, None) }.map_err(|e| format!("PT i: {e}"))?;
+            let img_reqs = unsafe { self.device.get_image_memory_requirements(image) };
+            let img_type = self.pick_memory_type(img_reqs, true).map_err(|e| format!("PT mt: {e}"))?;
+            let img_alloc = vk::MemoryAllocateInfo::default().allocation_size(img_reqs.size).memory_type_index(img_type);
+            let img_mem = unsafe { self.device.allocate_memory(&img_alloc, None) }.map_err(|e| format!("PT im: {e}"))?;
+            unsafe { self.device.bind_image_memory(image, img_mem, 0) }.map_err(|e| format!("PT ib: {e}"))?;
+            let img_view_info = vk::ImageViewCreateInfo::default()
+                .image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
+                .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+            let view = unsafe { self.device.create_image_view(&img_view_info, None) }.map_err(|e| format!("PT iv: {e}"))?;
+            let pool_sizes = [
+                vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
+                vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+            ];
+            let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
+            let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
+            let dset_layouts = [sl];
+            let dset_alloc = vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&dset_layouts);
+            let dset = unsafe { self.device.allocate_descriptor_sets(&dset_alloc) }.map_err(|e| format!("PT ds: {e}"))?[0];
+            let accel_write = vk::WriteDescriptorSetAccelerationStructureKHR {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                p_next: std::ptr::null(), acceleration_structure_count: 1,
+                p_acceleration_structures: std::slice::from_ref(&assets.tlas).as_ptr(),
+                _marker: std::marker::PhantomData,
+            };
+            let img_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL };
+            let writes = [
+                vk::WriteDescriptorSet {
+                    s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                    p_next: &accel_write as *const _ as *const std::ffi::c_void,
+                    dst_set: dset, dst_binding: 0, dst_array_element: 0, descriptor_count: 1,
+                    descriptor_type: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                    p_image_info: std::ptr::null(), p_buffer_info: std::ptr::null(),
+                    p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+                },
+                vk::WriteDescriptorSet {
+                    s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                    dst_set: dset, dst_binding: 1, dst_array_element: 0, descriptor_count: 1,
+                    descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                    p_image_info: std::slice::from_ref(&img_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                    p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+                },
+            ];
+            unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+            self.pt_resident = Some(Box::new(assets));
+            self.pt_img = image;
+            self.pt_img_mem = img_mem;
+            self.pt_view = view;
+            self.pt_pipeline = pipeline;
+            self.pt_layout = pl;
+            self.pt_setl = sl;
+            self.pt_pool = pool;
+            self.pt_dset = dset;
+            self.pt_module = vs_module;
+            // 首次：命令一次性记录构建（后续帧复用 AS）
+            let alloc = vk::CommandBufferAllocateInfo::default().command_pool(self.command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+            let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("PT cb: {e}"))?[0];
+            unsafe {
+                self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+                self.record_pt_build(cb, self.pt_resident.as_ref().unwrap(), 6)?;
+                self.device.end_command_buffer(cb);
+                let cbs = [cb];
+                let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+                self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT sc: {e}"))?;
+                self.device.queue_wait_idle(self.graphics_queue).map_err(|e| format!("PT sw: {e}"))?;
+                self.device.free_command_buffers(self.command_pool, &[cb]);
+            }
+        }
+        // 每帧：dispatch + blit（复用常驻）
+        let assets = self.pt_resident.as_ref().unwrap();
+        let alloc = vk::CommandBufferAllocateInfo::default().command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+        let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("PT cb: {e}"))?[0];
+        unsafe {
+            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
             let img_bar = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::NONE).dst_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::GENERAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
+                .image(self.pt_img)
                 .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
             self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[img_bar]);
-            self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, compute_pipeline);
-            self.device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[dset], &[]);
+            self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pt_pipeline);
+            self.device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, self.pt_layout, 0, &[self.pt_dset], &[]);
             self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
             let blit_bar = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE).dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                 .old_layout(vk::ImageLayout::GENERAL).new_layout(vk::ImageLayout::GENERAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
+                .image(self.pt_img)
                 .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
             self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[blit_bar]);
             let sw_bar = vk::ImageMemoryBarrier::default()
@@ -4598,7 +4748,7 @@ impl Renderer {
                 .src_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: size as i32, y: size as i32, z: 1 }])
                 .dst_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
                 .dst_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: 2560, y: 1600, z: 1 }]);
-            self.device.cmd_blit_image(cb, image, vk::ImageLayout::GENERAL, swapchain_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST);
+            self.device.cmd_blit_image(cb, self.pt_img, vk::ImageLayout::GENERAL, swapchain_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST);
             let sw_back = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::MEMORY_READ)
                 .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
@@ -4772,6 +4922,46 @@ impl Renderer {
             ext.destroy_acceleration_structure(assets.blas, None);
         }
         Ok(())
+    }
+
+    /// 显存清理：销毁 PT 常驻资源（退出时调用——定时清理纪律！）
+    pub fn destroy_pt_resident(&mut self) {
+        if self.pt_resident.is_none() {
+            return;
+        }
+        unsafe {
+            if self.pt_pipeline != vk::Pipeline::null() { self.device.destroy_pipeline(self.pt_pipeline, None); }
+            if self.pt_layout != vk::PipelineLayout::null() { self.device.destroy_pipeline_layout(self.pt_layout, None); }
+            if self.pt_setl != vk::DescriptorSetLayout::null() { self.device.destroy_descriptor_set_layout(self.pt_setl, None); }
+            if self.pt_pool != vk::DescriptorPool::null() { self.device.destroy_descriptor_pool(self.pt_pool, None); }
+            if self.pt_module != vk::ShaderModule::null() { self.device.destroy_shader_module(self.pt_module, None); }
+            if self.pt_view != vk::ImageView::null() { self.device.destroy_image_view(self.pt_view, None); }
+            if self.pt_img != vk::Image::null() { self.device.destroy_image(self.pt_img, None); }
+            if self.pt_img_mem != vk::DeviceMemory::null() { self.device.free_memory(self.pt_img_mem, None); }
+            if let Some(assets) = self.pt_resident.take() {
+                let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
+                ext.destroy_acceleration_structure(assets.tlas, None);
+                ext.destroy_acceleration_structure(assets.blas, None);
+                self.device.destroy_buffer(assets.verts_buf, None);
+                self.device.free_memory(assets.verts_mem, None);
+                self.device.destroy_buffer(assets.idx_buf, None);
+                self.device.free_memory(assets.idx_mem, None);
+                self.device.destroy_buffer(assets.inst_buf, None);
+                self.device.free_memory(assets.inst_mem, None);
+                self.device.destroy_buffer(assets.tlas_buf, None);
+                self.device.free_memory(assets.tlas_mem, None);
+                self.device.destroy_buffer(assets.blas_buf, None);
+                self.device.free_memory(assets.blas_mem, None);
+            }
+        }
+        self.pt_pipeline = vk::Pipeline::null();
+        self.pt_layout = vk::PipelineLayout::null();
+        self.pt_setl = vk::DescriptorSetLayout::null();
+        self.pt_pool = vk::DescriptorPool::null();
+        self.pt_module = vk::ShaderModule::null();
+        self.pt_view = vk::ImageView::null();
+        self.pt_img = vk::Image::null();
+        self.pt_img_mem = vk::DeviceMemory::null();
     }
 
     pub fn build_pt_as(
@@ -7810,6 +8000,56 @@ impl Renderer {
             }
         }
 
+        // ===== 2026-08-29 路径追踪全景：全部记录进主命令缓冲（零第二提交/围栏冲突；常驻零分配）=====
+        if self.pt_live_enabled && self.pt_resident.is_some() {
+            let sw_img = self.swapchain_images[image_index as usize];
+            let size = 512u32;
+            unsafe {
+                // PT 图像 -> GENERAL（丢弃上一帧内容）
+                let pt_bar = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::NONE).dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(self.pt_img)
+                    .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[pt_bar]);
+                self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_pipeline);
+                self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_layout, 0, &[self.pt_dset], &[]);
+                self.device.cmd_dispatch(command_buffer, (size + 7) / 8, (size + 7) / 8, 1);
+                // PT 写完成 -> Transfer 读
+                let pt_bar2 = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE).dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::GENERAL).new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(self.pt_img)
+                    .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[pt_bar2]);
+                // swapchain -> TRANSFER_DST
+                let sw_bar = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::NONE).dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(sw_img)
+                    .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[sw_bar]);
+                // blit PT -> swapchain
+                let blit = vk::ImageBlit::default()
+                    .src_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                    .src_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: size as i32, y: size as i32, z: 1 }])
+                    .dst_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                    .dst_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: 2560, y: 1600, z: 1 }]);
+                self.device.cmd_blit_image(command_buffer, self.pt_img, vk::ImageLayout::GENERAL, sw_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST);
+                // swapchain -> PRESENT_SRC
+                let sw_back = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::MEMORY_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL).new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(sw_img)
+                    .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[sw_back]);
+            }
+        }
+
         unsafe {
             self.device.cmd_end_render_pass(command_buffer);
             self.device
@@ -8406,23 +8646,10 @@ impl Renderer {
         )?;
         self.stage_record_us = t0.elapsed().as_micros() as u64;
 
-        // 2026-08-29 路径追踪全景：PT 渲染（独立 cb 先记录并入同一 submit——在主帧前执行）
-        let mut pt_cb_opt: Option<vk::CommandBuffer> = None;
-        if self.pt_live_enabled {
-            if let Some(&sw_img) = self.swapchain_images.get(image_index as usize) {
-                match self.pt_live_frame2(sw_img, 512) {
-                    Ok(cb) => pt_cb_opt = Some(cb),
-                    Err(e) => log::info!("PT-LIVE: {}", e),
-                }
-            }
-        }
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let signal_semaphores = [self.render_finished_semaphores[self.current_frame]];
-        let mut cmd_buffers = vec![self.command_buffers[image_index as usize]];
-        if let Some(pc) = pt_cb_opt.take() {
-            cmd_buffers.push(pc); // 场景先渲染，PT 后 blit 覆盖（present 前）
-        }
+        let cmd_buffers = [self.command_buffers[image_index as usize]];
 
         let submit_info = vk::SubmitInfo::default()
             .wait_semaphores(&wait_semaphores)
