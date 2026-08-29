@@ -773,15 +773,6 @@ fn fs_main() {}
 "#;
 
 // 【临时探针】naga 对 WGSL ray-query 支持
-const RQ_PROBE: &str = r#"
-enable ray_query;
-@compute @workgroup_size(8, 8)
-fn rq(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let q = rayQueryInitializeEXT(
-        vec4<u32>(0u, 0u, 0u, 0u), 0u, 0u,
-        vec3<f32>(0.0), 0.001, vec3<f32>(0.0, 1.0, 0.0), 1000.0);
-}
-"#;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
