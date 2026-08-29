@@ -1103,8 +1103,10 @@ impl Renderer {
         if mesh_shader_available {
             device_extensions.push(mesh_shader_ext_name.as_ptr());
             // 2026-08-29 路径追踪基准：启用光线追踪核心扩展（ray_query 计算侧；AS 构建）
+            device_extensions.push(c"VK_KHR_buffer_device_address".as_ptr());
             device_extensions.push(c"VK_KHR_acceleration_structure".as_ptr());
             device_extensions.push(c"VK_KHR_ray_query".as_ptr());
+            device_extensions.push(c"VK_KHR_ray_tracing_pipeline".as_ptr());
         }
         let supported_features =
             unsafe { instance.get_physical_device_features(physical_device) };
@@ -2670,9 +2672,16 @@ impl Renderer {
         };
         let mem_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
         let memory_type = self.pick_memory_type(mem_requirements, false)?;
+        let mut alloc_flags = vk::MemoryAllocateFlagsInfo::default();
+        alloc_flags.flags = if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
+            vk::MemoryAllocateFlags::DEVICE_ADDRESS
+        } else {
+            vk::MemoryAllocateFlags::empty()
+        };
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
-            .memory_type_index(memory_type);
+            .memory_type_index(memory_type)
+            .push_next(&mut alloc_flags);
         let memory = unsafe {
             self.device
                 .allocate_memory(&alloc_info, None)
@@ -2708,9 +2717,16 @@ impl Renderer {
         };
         let staging_reqs = unsafe { self.device.get_buffer_memory_requirements(staging_buffer) };
         let staging_type = self.pick_memory_type(staging_reqs, false)?;
+        let mut st_flags = vk::MemoryAllocateFlagsInfo::default();
+        st_flags.flags = if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
+            vk::MemoryAllocateFlags::DEVICE_ADDRESS
+        } else {
+            vk::MemoryAllocateFlags::empty()
+        };
         let staging_alloc = vk::MemoryAllocateInfo::default()
             .allocation_size(staging_reqs.size)
-            .memory_type_index(staging_type);
+            .memory_type_index(staging_type)
+            .push_next(&mut st_flags);
         let staging_memory = unsafe {
             self.device
                 .allocate_memory(&staging_alloc, None)
@@ -2740,9 +2756,16 @@ impl Renderer {
         };
         let mem_reqs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
         let memory_type = self.pick_memory_type(mem_reqs, true)?;
+        let mut fin_flags = vk::MemoryAllocateFlagsInfo::default();
+        fin_flags.flags = if (usage | vk::BufferUsageFlags::TRANSFER_DST).contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
+            vk::MemoryAllocateFlags::DEVICE_ADDRESS
+        } else {
+            vk::MemoryAllocateFlags::empty()
+        };
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_reqs.size)
-            .memory_type_index(memory_type);
+            .memory_type_index(memory_type)
+            .push_next(&mut fin_flags);
         let memory = unsafe {
             self.device
                 .allocate_memory(&alloc_info, None)

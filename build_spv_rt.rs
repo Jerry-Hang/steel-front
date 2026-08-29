@@ -1,150 +1,143 @@
-//! RT 求交吞吐基准的 SPIR-V 手工汇编器（naga 无 WGSL ray-query → 直接二进制）
-//! 算法：每调用一条光线（原点=0，方向=gid 系数化）→ 初始化 ray-query → 全遍历（proceed 循环）
-//! → 命中写 1 到 hits[gid.x]（无原子：CPU 读回求和 = 命中数）。
-//! 输出：RT_BENCH_SPV 常量（给渲染器 compute 管线直接用）。
+//! RT 求交吞吐基准 SPIR-V 手工汇编器（干净版：确定性 ID + 全部官方修正）
+//! 修正：composite=44, init=4473, proceed=4477, gettype=4479, convert=4447;
+//! gid BuiltIn=28; 入口名 LE; 存储类; 循环 latch; 块收尾分支; bound; caps(Shader/RayQueryKHR/RayTracingKHR)
 
 pub fn rt_bench_spv() -> Vec<u32> {
-    let mut w: Vec<u32> = Vec::new();
-    let mut id = 0u32;
-    let mut nid = |id: &mut u32| { *id += 1; *id };
-    let mut emit = |w: &mut Vec<u32>, op: u32, ops: &[u32]| {
+    let mut w: Vec<u32> = vec![];
+    let mut defs: Vec<(u32, Vec<u32>)> = vec![];
+    let mut i = 0u32;
+    let mut newid = |i: &mut u32| { *i += 1; *i };
+    let t_void = newid(&mut i);
+    let t_fn = newid(&mut i);
+    let t_bool = newid(&mut i);
+    let t_u32 = newid(&mut i);
+    let t_f32 = newid(&mut i);
+    let t_u64 = newid(&mut i);
+    let t_v3u = newid(&mut i);
+    let t_v3f = newid(&mut i);
+    let t_accel = newid(&mut i);
+    let t_p_sb_u64 = newid(&mut i);
+    let t_p_sb_u32 = newid(&mut i);
+    let t_p_in_v3u = newid(&mut i);
+    let t_rq = newid(&mut i);
+    let t_p_f_rq = newid(&mut i);
+    let t_rarr_u32 = newid(&mut i);
+    let t_rarr_u64 = newid(&mut i);
+    let t_struct_hits = newid(&mut i);
+    let t_struct_addr = newid(&mut i);
+    let c0 = newid(&mut i);
+    let c255 = newid(&mut i);
+    let c0f = newid(&mut i);
+    let c001f = newid(&mut i);
+    let c1000f = newid(&mut i);
+    let c1 = newid(&mut i);
+    let vzero = newid(&mut i);
+    let g_tlas = newid(&mut i);
+    let g_hits = newid(&mut i);
+    let g_gid = newid(&mut i);
+    let f_main = newid(&mut i);
+    let l_entry = newid(&mut i);
+    let l_loop = newid(&mut i);
+    let l_latch = newid(&mut i);
+    let l_merge = newid(&mut i);
+    let l_hit = newid(&mut i);
+    let l_skip = newid(&mut i);
+    let rq = newid(&mut i);
+    let gv = newid(&mut i);
+    let gx = newid(&mut i);
+    let gy = newid(&mut i);
+    let fx = newid(&mut i);
+    let fy = newid(&mut i);
+    let dir = newid(&mut i);
+    let tl_addr = newid(&mut i);
+    let tl = newid(&mut i);
+    let cont = newid(&mut i);
+    let ityp = newid(&mut i);
+    let ishit = newid(&mut i);
+    let hit_ptr = newid(&mut i);
+    defs.push((17, vec![1]));
+    defs.push((17, vec![4472]));
+    defs.push((17, vec![4479]));
+    defs.push((14, vec![0, 1]));
+    defs.push((15, vec![5, f_main, 0x6e69_616d, g_gid]));
+    defs.push((16, vec![f_main, 17, 64, 1, 1]));
+    defs.push((71, vec![g_tlas, 34, 0]));
+    defs.push((71, vec![g_tlas, 33, 0]));
+    defs.push((71, vec![g_hits, 34, 0]));
+    defs.push((71, vec![g_hits, 33, 1]));
+    defs.push((71, vec![g_gid, 11, 28]));
+    defs.push((19, vec![t_void]));
+    defs.push((33, vec![t_fn, t_void]));
+    defs.push((20, vec![t_bool]));
+    defs.push((21, vec![t_u32, 32, 0]));
+    defs.push((22, vec![t_f32, 32]));
+    defs.push((21, vec![t_u64, 64, 0]));
+    defs.push((23, vec![t_v3u, t_u32, 3]));
+    defs.push((23, vec![t_v3f, t_f32, 3]));
+    defs.push((5341, vec![t_accel]));
+    defs.push((70, vec![t_rarr_u64, t_u64]));
+    defs.push((70, vec![t_rarr_u32, t_u32]));
+    defs.push((30, vec![t_struct_addr, t_rarr_u64]));
+    defs.push((30, vec![t_struct_hits, t_rarr_u32]));
+    defs.push((72, vec![t_struct_addr, 0, 35, 0]));
+    defs.push((72, vec![t_struct_hits, 0, 35, 0]));
+    defs.push((72, vec![t_struct_addr, 0, 6, 8]));
+    defs.push((72, vec![t_struct_hits, 0, 6, 4]));
+    defs.push((71, vec![t_struct_addr, 2]));
+    defs.push((71, vec![t_struct_hits, 2]));
+    defs.push((32, vec![t_p_sb_u64, 12, t_struct_addr]));
+    defs.push((32, vec![t_p_sb_u32, 12, t_struct_hits]));
+    defs.push((32, vec![t_p_in_v3u, 1, t_v3u]));
+    defs.push((4472, vec![t_rq]));
+    defs.push((32, vec![t_p_f_rq, 7, t_rq]));
+    defs.push((43, vec![c0, t_u32, 0]));
+    defs.push((43, vec![c255, t_u32, 255]));
+    defs.push((43, vec![c0f, t_f32, 0]));
+    defs.push((43, vec![c001f, t_f32, 0x3a83126f]));
+    defs.push((43, vec![c1000f, t_f32, 0x447a0000]));
+    defs.push((43, vec![c1, t_u32, 1]));
+    defs.push((44, vec![vzero, t_v3f, c0f, c0f, c0f]));
+    defs.push((59, vec![g_tlas, t_p_sb_u64, 12]));
+    defs.push((59, vec![g_hits, t_p_sb_u32, 12]));
+    defs.push((59, vec![g_gid, t_p_in_v3u, 1]));
+    defs.push((54, vec![f_main, t_void, 0, t_fn]));
+    defs.push((248, vec![l_entry]));
+    defs.push((59, vec![rq, t_p_f_rq, 7]));
+    defs.push((61, vec![gv, t_v3u, g_gid]));
+    defs.push((186, vec![gx, t_u32, gv, 0]));
+    defs.push((186, vec![gy, t_u32, gv, 1]));
+    defs.push((111, vec![fx, t_f32, gx]));
+    defs.push((111, vec![fy, t_f32, gy]));
+    defs.push((80, vec![dir, t_v3f, fx, fy, c001f]));
+    defs.push((61, vec![tl_addr, t_u64, g_tlas]));
+    defs.push((4447, vec![tl, t_accel, tl_addr]));
+    defs.push((4473, vec![rq, tl, c0, c255, vzero, c001f, dir, c1000f]));
+    defs.push((249, vec![l_loop]));
+    defs.push((248, vec![l_loop]));
+    defs.push((246, vec![l_merge, l_latch, 0]));
+    defs.push((4477, vec![t_bool, cont, rq]));
+    defs.push((250, vec![cont, l_latch, l_merge]));
+    defs.push((248, vec![l_latch]));
+    defs.push((249, vec![l_loop]));
+    defs.push((248, vec![l_merge]));
+    defs.push((4479, vec![t_u32, ityp, rq, c0]));
+    defs.push((171, vec![ishit, t_bool, ityp, c0]));
+    defs.push((250, vec![ishit, l_hit, l_skip]));
+    defs.push((248, vec![l_hit]));
+    defs.push((65, vec![hit_ptr, t_p_sb_u32, g_hits, c0, gx]));
+    defs.push((62, vec![hit_ptr, c1]));
+    defs.push((249, vec![l_skip]));
+    defs.push((248, vec![l_skip]));
+    defs.push((253, vec![]));
+    defs.push((56, vec![]));
+    w.push(0x0723_0203u32);
+    w.push(0x0001_0600u32);
+    w.push(0u32);
+    w.push(i + 1);
+    w.push(0u32);
+    for (op, ops) in &defs {
         w.push(((1 + ops.len()) as u32) << 16 | op);
         w.extend_from_slice(ops);
-    };
-    let mut i = 0u32; // 全程唯一 id 计数器（按定义顺序分配）
-    // ---- 头部 ----
-    w.extend_from_slice(&[0x0723_0203u32, 0x0001_0600u32, 0u32, 0u32, 0u32]);
-    // ---- Capabilities ----
-    emit(&mut w, 17, &[1]);      // Shader
-    emit(&mut w, 17, &[4472]);   // RayQueryKHR
-    emit(&mut w, 17, &[5340]);   // AccelerationStructureKHR
-    emit(&mut w, 17, &[4479]);   // RayTracingKHR
-    emit(&mut w, 14, &[0, 1]);   // MemoryModel Logical GLSL450
-
-    // ---- 预先分配所有 id（定义在下面按序发射）----
-    // 类型
-    let t_void = nid(&mut i);
-    let t_fn = nid(&mut i);
-    let t_bool = nid(&mut i);
-    let t_u32 = nid(&mut i);
-    let t_f32 = nid(&mut i);
-    let t_v3u = nid(&mut i);
-    let t_v3f = nid(&mut i);
-    let t_accel = nid(&mut i);
-    let t_u64 = nid(&mut i);
-    let t_p_acc = nid(&mut i);
-    let t_p_u32 = nid(&mut i);
-    let t_p_v3u = nid(&mut i);
-    let t_rq = nid(&mut i);
-    let t_p_rq = nid(&mut i);
-    // 常量
-    let c0 = nid(&mut i);
-    let c255 = nid(&mut i);
-    let c0f = nid(&mut i);
-    let c001f = nid(&mut i);
-    let c1000f = nid(&mut i);
-    let c_smallf = nid(&mut i); // 0.001（方向缩放）
-    let vzero = nid(&mut i);
-    // 全局变量
-    let g_tlas = nid(&mut i);
-    let g_hits = nid(&mut i);
-    let g_gid = nid(&mut i);
-    // 函数
-    let f_main = nid(&mut i);
-    // 函数内部
-    let lbl_entry = nid(&mut i);
-    let rq = nid(&mut i);
-    let gv = nid(&mut i);
-    let gx = nid(&mut i);
-    let gy = nid(&mut i);
-    let fx = nid(&mut i);
-    let fy = nid(&mut i);
-    let dir = nid(&mut i);
-    let tlas_l = nid(&mut i);
-    let tlas_c = nid(&mut i);
-    let loop_h = nid(&mut i);
-    let cont = nid(&mut i);
-    let merge = nid(&mut i);
-    let latch = nid(&mut i);
-    let ityp = nid(&mut i);
-    let ishit = nid(&mut i);
-    let l_hit = nid(&mut i);
-    let l_skip = nid(&mut i);
-    let p_hit = nid(&mut i);
-    let one = nid(&mut i);
-
-    // ---- 入口点 + 执行模式 + 装饰（在类型前，符合布局）----
-    emit(&mut w, 15, &[5, f_main, 0x6d61_696eu32, g_gid]); // OpEntryPoint GLCompute %f_main "main" %g_gid
-    emit(&mut w, 16, &[f_main, 17, 64, 1, 1]);            // LocalSize 64 1 1
-    emit(&mut w, 71, &[g_tlas, 34, 0]);                    // DescriptorSet 0
-    emit(&mut w, 71, &[g_tlas, 33, 0]);                    // Binding 0
-    emit(&mut w, 71, &[g_hits, 34, 0]);                    // DescriptorSet 0
-    emit(&mut w, 71, &[g_hits, 33, 1]);                    // Binding 1
-    emit(&mut w, 71, &[g_gid, 11, 5]);                     // BuiltIn GlobalInvocationId
-
-    // ---- 类型 ----
-    emit(&mut w, 19, &[t_void]);
-    emit(&mut w, 33, &[t_fn, t_void]);
-    emit(&mut w, 20, &[t_bool]);
-    emit(&mut w, 21, &[t_u32, 32, 0]);
-    emit(&mut w, 22, &[t_f32, 32]);
-    emit(&mut w, 21, &[t_u64, 64, 0]);
-    emit(&mut w, 23, &[t_v3u, t_u32, 3]);
-    emit(&mut w, 23, &[t_v3f, t_f32, 3]);
-    emit(&mut w, 5341, &[t_accel]);
-    emit(&mut w, 32, &[t_p_acc, 12, t_u64]);
-    emit(&mut w, 32, &[t_p_u32, 12, t_u32]);
-    emit(&mut w, 32, &[t_p_v3u, 1, t_v3u]);
-    emit(&mut w, 4472, &[t_rq]);
-    emit(&mut w, 32, &[t_p_rq, 7, t_rq]);
-    // ---- 常量 ----
-    emit(&mut w, 43, &[c0, t_u32, 0]);
-    emit(&mut w, 43, &[c255, t_u32, 255]);
-    emit(&mut w, 43, &[c0f, t_f32, 0]);
-    emit(&mut w, 43, &[c001f, t_f32, 0x3a83126f]);
-    emit(&mut w, 43, &[c1000f, t_f32, 0x447a0000]);
-    // 方向 z 分量直接用 0.001（c_smallf 与 c001f 复用）
-    let c_smallf = c001f;
-    emit(&mut w, 44, &[vzero, t_v3f, c0f, c0f, c0f]);
-    emit(&mut w, 43, &[one, t_u32, 1]);
-    // ---- 全局变量 ----
-    emit(&mut w, 59, &[g_tlas, t_p_acc, 0]);
-    emit(&mut w, 59, &[g_hits, t_p_u32, 12]);
-    emit(&mut w, 59, &[g_gid, t_p_v3u, 1]);
-
-    // ---- 函数 main ----
-    emit(&mut w, 54, &[f_main, t_void, 0, t_fn]);
-    emit(&mut w, 248, &[lbl_entry]);
-    emit(&mut w, 59, &[rq, t_p_rq, 7]);
-    emit(&mut w, 61, &[gv, t_v3u, g_gid]);
-    emit(&mut w, 186, &[gx, t_u32, gv, 0]);
-    emit(&mut w, 186, &[gy, t_u32, gv, 1]);
-    emit(&mut w, 111, &[fx, t_f32, gx]);
-    emit(&mut w, 111, &[fy, t_f32, gy]);
-    emit(&mut w, 80, &[dir, t_v3f, fx, fy, c001f]);
-    emit(&mut w, 61, &[tlas_l, t_u64, g_tlas]);
-    emit(&mut w, 4447, &[tlas_c, t_accel, tlas_l]);
-    emit(&mut w, 4473, &[rq, tlas_c, c0, c255, vzero, c001f, dir, c1000f]);
-    emit(&mut w, 249, &[loop_h]);
-    emit(&mut w, 248, &[loop_h]);
-    emit(&mut w, 246, &[merge, latch, 0]);
-    emit(&mut w, 4477, &[t_bool, cont, rq]);
-    emit(&mut w, 250, &[cont, latch, merge]);
-    emit(&mut w, 248, &[latch]);
-    emit(&mut w, 249, &[loop_h]);
-    emit(&mut w, 248, &[merge]);
-    emit(&mut w, 4479, &[t_u32, ityp, rq, c0]);
-    emit(&mut w, 171, &[ishit, t_bool, ityp, c0]);
-    emit(&mut w, 250, &[ishit, l_hit, l_skip]);
-    emit(&mut w, 248, &[l_hit]);
-    emit(&mut w, 65, &[p_hit, t_p_u32, g_hits, gx]);
-    emit(&mut w, 62, &[p_hit, one]);
-    emit(&mut w, 249, &[l_skip]);
-    emit(&mut w, 248, &[l_skip]);
-    emit(&mut w, 253, &[]);
-    emit(&mut w, 56, &[]);
-
-    // 头部 word 数 + id 数
-    w[3] = 44; // bound = 最大 ID(43) + 1
+    }
     w
 }
