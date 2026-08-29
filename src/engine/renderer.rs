@@ -4617,7 +4617,7 @@ impl Renderer {
             .map_err(|e| format!("RT_BENCH module: {e}"))?;
         let set_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
         let hits_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(1)
@@ -4662,7 +4662,7 @@ impl Renderer {
         }
         // 4) 描述符集（accel + hits）
         let dset_pool_info = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
             .descriptor_count(1);
         let dset_pool_info2 = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
@@ -4679,35 +4679,23 @@ impl Renderer {
             .set_layouts(&dset_layouts);
         let dset = unsafe { self.device.allocate_descriptor_sets(&dset_alloc) }
             .map_err(|e| format!("RT dset: {e}"))?[0];
-        // 加速结构地址缓冲（规范路径：地址→OpConvertUToAccelerationStructureKHR）
-        let tlas_addr = unsafe {
-            let a = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
-            let info = vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(assets.tlas);
-            a.get_acceleration_structure_device_address(&info)
-        };
-        let (addr_buf, addr_mem) = self
-            .create_host_buffer(vk::BufferUsageFlags::STORAGE_BUFFER, 8)
-            .map_err(|e| format!("addr buf: {e}"))?;
-        unsafe {
-            let m = self.device.map_memory(addr_mem, 0, 8, vk::MemoryMapFlags::empty()).map_err(|e| format!("addr map: {e}"))?;
-            std::ptr::copy_nonoverlapping(&tlas_addr as *const u64 as *const u8, m as *mut u8, 8);
-            self.device.unmap_memory(addr_mem);
-        }
-        let addr_info = vk::DescriptorBufferInfo {
-            buffer: addr_buf,
-            offset: 0,
-            range: 8,
+        let accel_write = vk::WriteDescriptorSetAccelerationStructureKHR {
+            s_type: vk::StructureType::WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            p_next: std::ptr::null(),
+            acceleration_structure_count: 1,
+            p_acceleration_structures: std::slice::from_ref(&assets.tlas).as_ptr(),
+            _marker: std::marker::PhantomData,
         };
         let write0 = vk::WriteDescriptorSet {
             s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
-            p_next: std::ptr::null(),
+            p_next: &accel_write as *const _ as *const std::ffi::c_void,
             dst_set: dset,
             dst_binding: 0,
             dst_array_element: 0,
             descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_type: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
             p_image_info: std::ptr::null(),
-            p_buffer_info: std::slice::from_ref(&addr_info).as_ptr(),
+            p_buffer_info: std::ptr::null(),
             p_texel_buffer_view: std::ptr::null(),
             _marker: std::marker::PhantomData,
         };
@@ -4732,6 +4720,7 @@ impl Renderer {
         unsafe { self.device.update_descriptor_sets(&[write0, write1], &[]) };
         // 5) 一次性构建命令（AS 构建）
         let alloc = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         // 使用帧命令池外的一个独立分配
@@ -4741,7 +4730,7 @@ impl Renderer {
         unsafe {
             let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             self.device.begin_command_buffer(cb, &begin_info);
-            self.record_pt_build(cb, &assets)?;
+            self.record_pt_build(cb, &assets, boxes.len())?;
             self.device.end_command_buffer(cb);
         }
         let cbs = [cb];
@@ -4797,6 +4786,7 @@ impl Renderer {
         &self,
         cmd: vk::CommandBuffer,
         assets: &crate::engine::ray_tracer::PtAssets,
+        box_count: usize,
     ) -> Result<(), String> {
         let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
         // 简化：scratch 用一次顶点缓冲映射（bench 一次性）
@@ -4828,7 +4818,7 @@ impl Renderer {
         b_geom.dst_acceleration_structure = assets.blas;
         b_geom.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_addr };
         b_geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
-        let range_b = vk::AccelerationStructureBuildRangeInfoKHR { primitive_count: 36, primitive_offset: 0, first_vertex: 0, transform_offset: 0 };
+        let range_b = vk::AccelerationStructureBuildRangeInfoKHR { primitive_count: (box_count * 12) as u32, primitive_offset: 0, first_vertex: 0, transform_offset: 0 };
         // TLAS
         let mut t_geom = vk::AccelerationStructureBuildGeometryInfoKHR::default();
         t_geom.ty = vk::AccelerationStructureTypeKHR::TOP_LEVEL;
@@ -4836,8 +4826,8 @@ impl Renderer {
         t_geom.geometry_count = 1;
         let mut inst_geo_data = vk::AccelerationStructureGeometryInstancesDataKHR::default();
         inst_geo_data.array_of_pointers = vk::FALSE;
-        // 重新从调用方获取实例地址——暂用 0（正确实现随后补）——此处先构建 BLAS
-        inst_geo_data.data = vk::DeviceOrHostAddressConstKHR { device_address: 0 };
+        let inst_addr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.inst_buf); self.device.get_buffer_device_address(&i) };
+        inst_geo_data.data = vk::DeviceOrHostAddressConstKHR { device_address: inst_addr };
         let mut t_geo = vk::AccelerationStructureGeometryKHR::default();
         t_geo.geometry_type = vk::GeometryTypeKHR::INSTANCES;
         t_geo.geometry = vk::AccelerationStructureGeometryDataKHR { instances: inst_geo_data };
