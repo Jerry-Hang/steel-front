@@ -21,6 +21,10 @@ pub struct GameConfig {
     pub resolution_explicit: bool,
     /// 画质索引（0=LOW / 1=MEDIUM / 2=HIGH，与 ui.rs QUALITY_LABELS 对齐），默认 MEDIUM
     pub quality: u32,
+    /// 路径追踪全景渲染（2026-08-29：默认开启——整帧 RT core 路径追踪）
+    pub pt_enable: bool,
+    /// 光线追踪增量（阴影/反射射线；pt_enable 的补充开关）
+    pub rt_enable: bool,
 }
 
 impl Default for GameConfig {
@@ -33,6 +37,8 @@ impl Default for GameConfig {
             resolution: RESOLUTIONS[0],
             resolution_explicit: false,
             quality: 2, // HIGH（2026-08-28：用户机器全高实测 —— RTX 5060L + Zen4）
+            pt_enable: true, // 2026-08-29：默认全程路径追踪（RTX 5060 RT core）+ 设置可关
+            rt_enable: true,
         }
     }
 }

@@ -43,7 +43,7 @@
      %float_2 = OpConstant %float 2
      %float_8 = OpConstant %float 8
      %float_64 = OpConstant %float 64
-     %float_16 = OpConstant %float 16
+     %float_16 = OpConstant %float 128
    %float_1000 = OpConstant %float 1000
      %float_001 = OpConstant %float 0.001
     %float_1_5 = OpConstant %float 1.5

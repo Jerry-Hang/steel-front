@@ -1680,7 +1680,11 @@ impl ApplicationHandler for GameApp {
                         Err(e) => log::error!("PT-VIEW 失败: {e}"),
                     }
                 }
-                self.renderer = Some(renderer);
+                // 2026-08-29：路径追踪全景开关（设置面板 pt_enable；默认开）
+            let mut renderer = renderer;
+            renderer.pt_live_enabled = crate::config::load().pt_enable;
+            log::info!("RT: 路径追踪全景 = {}", if renderer.pt_live_enabled { "开启" } else { "关闭" });
+            self.renderer = Some(renderer);
             }
             Err(e) => {
                 log::error!("渲染器初始化失败: {}", e);

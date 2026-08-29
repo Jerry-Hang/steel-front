@@ -1581,6 +1581,8 @@ impl Game {
             bindings: self.hud.key_bindings,
             resolution: self.hud.resolution(),
             resolution_explicit: true, // 保存时总是写 resolution 行，加载后视为显式选择
+            pt_enable: self.hud.pt_enable,
+            rt_enable: self.hud.rt_enable,
             quality: self.hud.quality_index as u32,
         }
     }
