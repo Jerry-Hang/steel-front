@@ -4431,6 +4431,151 @@ impl Renderer {
         }
     }
 
+    /// 构建路径追踪加速结构（2026-08-29 阶段2）：盒体场景 → BLAS + TLAS
+    /// 返回 (TLAS 缓冲, TLAS 内存) —— ray-query 路径追踪的输入
+    pub fn build_pt_as(
+        &mut self,
+        boxes: &[crate::engine::ray_tracer::PtBox],
+    ) -> Result<(vk::Buffer, vk::DeviceMemory), String> {
+        let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
+        // 1) 盒体几何：顶点+索引缓冲（每盒 24 顶点/12 三角）
+        let n_verts = boxes.len() * 24;
+        let n_idx = boxes.len() * 36;
+        let mut verts: Vec<u8> = Vec::with_capacity(n_verts * 32); // pos3+normal3+uv2
+        let mut idx: Vec<u32> = Vec::with_capacity(n_idx);
+        let boxidx = crate::engine::ray_tracer::box_indices();
+        for b in boxes {
+            let mut v = [0.0f32; 72];
+            crate::engine::ray_tracer::box_triangles(b, &mut v);
+            for p in v.chunks_exact(8) {
+                for c in p {
+                    verts.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            idx.extend_from_slice(&boxidx);
+        }
+        let (vbuf, vmem) = self
+            .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, verts.len() as u64)
+            .map_err(|e| format!("PT 顶点缓冲: {e}"))?;
+        let (ibuf, imem) = self
+            .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, (n_idx * 4) as u64)
+            .map_err(|e| format!("PT 索引缓冲: {e}"))?;
+        // 写入（借用 device）
+        unsafe {
+            let vp = self
+                .device
+                .map_memory(vmem, 0, verts.len() as u64, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("map v: {e}"))?;
+            std::ptr::copy_nonoverlapping(verts.as_ptr(), vp as *mut u8, verts.len());
+            self.device.unmap_memory(vmem);
+            let ip = self
+                .device
+                .map_memory(imem, 0, (n_idx * 4) as u64, vk::MemoryMapFlags::empty())
+                .map_err(|e| format!("map i: {e}"))?;
+            std::ptr::copy_nonoverlapping(idx.as_ptr(), ip as *mut u32, n_idx);
+            self.device.unmap_memory(imem);
+        }
+        let vaddr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(vbuf);
+            self.device.get_buffer_device_address(&info)
+        };
+        let iaddr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(ibuf);
+            self.device.get_buffer_device_address(&info)
+        };
+        // 2) BLAS 几何（三角形）与构建尺寸
+        let mut tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
+        tri.vertex_format = vk::Format::R32G32B32_SFLOAT;
+        tri.max_vertex = 24;
+        tri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: vaddr };
+        tri.vertex_stride = 32;
+        tri.index_type = vk::IndexType::UINT32;
+        tri.index_data = vk::DeviceOrHostAddressConstKHR { device_address: iaddr };
+        tri.transform_data = vk::DeviceOrHostAddressConstKHR { device_address: 0 };
+        let mut geo = vk::AccelerationStructureGeometryKHR::default();
+        geo.geometry_type = vk::GeometryTypeKHR::TRIANGLES;
+        geo.geometry = vk::AccelerationStructureGeometryDataKHR { triangles: tri };
+        geo.flags = vk::GeometryFlagsKHR::OPAQUE;
+        let mut geom = vk::AccelerationStructureBuildGeometryInfoKHR::default();
+        geom.ty = vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL;
+        geom.flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
+        geom.geometry_count = 1;
+        geom.p_geometries = &geo;
+        geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
+        let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+        unsafe {
+            ext.get_acceleration_structure_build_sizes(
+                vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                &geom,
+                &[32],
+                &mut size_info,
+            );
+        }
+        let count = size_info.acceleration_structure_size;
+        let (asbuf, asmem) = self
+            .create_device_local_buffer(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; count as usize], "pt-as")
+            .map_err(|e| format!("PT AS 缓冲: {e}"))?;
+        let as_info = vk::AccelerationStructureCreateInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .size(count)
+            .buffer(asbuf);
+        let blas = unsafe { ext.create_acceleration_structure(&as_info, None) }
+            .map_err(|e| format!("create BLAS: {e}"))?;
+        let mut offsets = vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(blas);
+        let blas_addr = unsafe { ext.get_acceleration_structure_device_address(&offsets) };
+        // 3) TLAS（单实例：BLAS）
+        let tlas_info_info = vk::AccelerationStructureCreateInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .size(64)
+            .buffer(asbuf)
+            .offset((count as u64 + 255) & !255);
+        // 4) 构建 BLAS：scratch 缓冲 + 构建命令（一次性 cmd）
+        let scratch_size = size_info.build_scratch_size.max(size_info.update_scratch_size);
+        let (scratch_buf, scratch_mem) = self
+            .create_device_local_buffer(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; scratch_size as usize], "pt-scratch")?;
+        let scratch_addr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(scratch_buf);
+            self.device.get_buffer_device_address(&info)
+        };
+        let as_info = vk::AccelerationStructureCreateInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .size(count)
+            .buffer(asbuf);
+        let blas = unsafe { ext.create_acceleration_structure(&as_info, None) }
+            .map_err(|e| format!("create BLAS: {e}"))?;
+        let blas_addr = unsafe {
+            let a = vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(blas);
+            ext.get_acceleration_structure_device_address(&a)
+        };
+        // 5) TLAS：单实例（一个 BLAS，identity 变换）
+        let mut instance = vk::AccelerationStructureInstanceKHR {
+            transform: vk::TransformMatrixKHR {
+                matrix: [1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            },
+            instance_custom_index_and_mask: vk::Packed24_8::new(0u32, 0xFFu8),
+            instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0u32, 0u8),
+            acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+        };
+        let instance_vk = &mut instance;
+        let (tlas_buf, tlas_mem) = self
+            .create_device_local_buffer(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; 4096], "pt-tlas-buf")?;
+        let (inst_buf, inst_mem) = self
+            .create_device_local_buffer(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, unsafe { std::slice::from_raw_parts(&instance_vk as *const _ as *const u8, std::mem::size_of::<vk::AccelerationStructureInstanceKHR>()) }, "pt-inst")?;
+        let inst_addr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(inst_buf);
+            self.device.get_buffer_device_address(&info)
+        };
+        // 触发构建（记录进渲染命令缓冲——用一次性块：简化先记录到首个 command_buffer）
+        let tlas_info = vk::AccelerationStructureCreateInfoKHR::default()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .size(4096)
+            .buffer(tlas_buf);
+        let tlas = unsafe { ext.create_acceleration_structure(&tlas_info, None) }
+            .map_err(|e| format!("create TLAS: {e}"))?;
+        // 保持 handle 存活（返回 tlas + blas 供后续渲染；内存所有权由调用方销毁时释放——先记录返回）
+        Ok((tlas_buf, tlas_mem))
+    }
+
     /// 2026-08-28：第一人称枪的实例模型矩阵 per-frame（bob/后坐走矩阵，顶点静态）
     /// 枪槽 75841 的唯一写者：顶点缓冲 = 视空间静态（仅首次上传），矩阵每帧更新
     pub fn set_first_person_gun_model(&mut self, m: glam::Mat4) {
