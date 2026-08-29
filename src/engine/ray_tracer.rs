@@ -17,7 +17,7 @@ pub struct PtBox {
 }
 
 /// 盒体三角化：AABB → 24 顶点（12 三角），供 BLAS 三角形几何
-pub fn box_triangles(b: &PtBox, out_verts: &mut [f32; 72]) {
+pub fn box_triangles(b: &PtBox, out_verts: &mut [f32; 192]) {
     let (cx, cy, cz) = (b.center[0], b.center[1], b.center[2]);
     let (hx, hy, hz) = (b.half[0], b.half[1], b.half[2]);
     let mut i = 0;
@@ -77,3 +77,19 @@ pub const PT_SUN_COLOR: [f32; 3] = [1.0, 0.95, 0.85];
 pub const PT_SUN_INTENSITY: f32 = 1.5;
 pub const PT_AMBIENT_COLOR: [f32; 3] = [0.5, 0.55, 0.6];
 pub const PT_AMBIENT_INTENSITY: f32 = 0.5;
+
+/// 路径追踪 GPU 资源集（构建/记录/销毁）
+pub struct PtAssets {
+    pub tlas: ash::vk::AccelerationStructureKHR,
+    pub blas: ash::vk::AccelerationStructureKHR,
+    pub tlas_buf: ash::vk::Buffer,
+    pub tlas_mem: ash::vk::DeviceMemory,
+    pub blas_buf: ash::vk::Buffer,
+    pub blas_mem: ash::vk::DeviceMemory,
+    pub verts_buf: ash::vk::Buffer,
+    pub verts_mem: ash::vk::DeviceMemory,
+    pub idx_buf: ash::vk::Buffer,
+    pub idx_mem: ash::vk::DeviceMemory,
+    pub inst_buf: ash::vk::Buffer,
+    pub inst_mem: ash::vk::DeviceMemory,
+}

@@ -23,4 +23,4 @@ image = "0.25"
 
 [build-dependencies]
 # 编译 WGSL 着色器为 SPIR-V（构建时）
-naga = { version = "30", features = ["wgsl-in", "spv-out"] }
+naga = { version = "30", features = ["wgsl-in", "spv-out", "spv-in"] }
