@@ -4485,7 +4485,7 @@ impl Renderer {
         let mut verts: Vec<u8> = Vec::with_capacity(n_verts * 32);
         let mut idx: Vec<u32> = Vec::with_capacity(n_idx);
         let boxidx = crate::engine::ray_tracer::box_indices();
-        for b in boxes {
+        for (k, b) in boxes.iter().enumerate() {
             let mut v = [0.0f32; 192];
             crate::engine::ray_tracer::box_triangles(b, &mut v);
             for p in v.chunks_exact(8) {
@@ -4493,7 +4493,11 @@ impl Renderer {
                     verts.extend_from_slice(&c.to_le_bytes());
                 }
             }
-            idx.extend_from_slice(&boxidx);
+            // 2026-08-29 修复：每盒索引用 base-vertex 偏移（k*24），否则所有盒都引用盒 0 顶点！
+            let base = (k as u32) * 24;
+            for &i in boxidx.iter() {
+                idx.push(i + base);
+            }
         }
         let (vbuf, vmem) = self
             .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, verts.len() as u64)
@@ -4513,7 +4517,7 @@ impl Renderer {
         let iaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(ibuf); self.device.get_buffer_device_address(&i) };
         let mut tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
         tri.vertex_format = vk::Format::R32G32B32_SFLOAT;
-        tri.max_vertex = 24;
+        tri.max_vertex = (boxes.len() * 24 - 1) as u32;
         tri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: vaddr };
         tri.vertex_stride = 32;
         tri.index_type = vk::IndexType::UINT32;
@@ -4549,7 +4553,7 @@ impl Renderer {
         // TLAS（单实例 identity）
         let mut instance = vk::AccelerationStructureInstanceKHR {
             transform: vk::TransformMatrixKHR { matrix: [1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] },
-            instance_custom_index_and_mask: vk::Packed24_8::new(0u32, 0xFFu8),
+            instance_custom_index_and_mask: vk::Packed24_8::new(0xFFu32, 0xFFu8),
             instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0u32, 0u8),
             acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
         };
@@ -4726,6 +4730,10 @@ impl Renderer {
                 .image(image)
                 .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
             self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[img_bar]);
+            let accel_bar = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
+                .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
+            self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[accel_bar], &[], &[]);
             self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, compute_pipeline);
             self.device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[dset], &[]);
             self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
@@ -4753,6 +4761,7 @@ impl Renderer {
             let cbs = [cb];
             let submit = vk::SubmitInfo::default().command_buffers(&cbs);
             self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT submit: {e}"))?;
+            // 2026-08-29 修复：AS 构建必须在 dispatch 前完成（wait 保障 TLAS 可见）
             self.device.queue_wait_idle(self.graphics_queue).map_err(|e| format!("PT wait: {e}"))?;
             // 读回 + PNG
             let m = self.device.map_memory(read_mem, 0, (size * size * 4) as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("PT map: {e}"))?;
@@ -5008,7 +5017,7 @@ impl Renderer {
         let iaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.idx_buf); self.device.get_buffer_device_address(&i) };
         let mut tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
         tri.vertex_format = vk::Format::R32G32B32_SFLOAT;
-        tri.max_vertex = 24;
+        tri.max_vertex = (box_count * 24 - 1) as u32;
         tri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: vaddr };
         tri.vertex_stride = 32;
         tri.index_type = vk::IndexType::UINT32;

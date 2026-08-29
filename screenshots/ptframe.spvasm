@@ -108,7 +108,7 @@
     %orig = OpCompositeConstruct %v3f %float_0 %float_1_5 %float_0
         OpStore %d %nd
     %tlasv = OpLoad %14 %tlas
-        OpRayQueryInitializeKHR %q %tlasv %uint_0 %uint_255 %orig %float_001 %nd %float_1000
+        OpRayQueryInitializeKHR %q %tlasv %uint_0 %uint_255 %orig %float_001 %vdown %float_1000
         OpBranch %l2
       %l2 = OpLabel
         OpLoopMerge %lm %lc None
