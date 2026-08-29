@@ -1,0 +1,116 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos; 0
+; Bound: 200
+; Schema: 0
+               OpCapability Shader
+               OpCapability RayQueryKHR
+               OpCapability RayTracingKHR
+               OpExtension "SPV_KHR_ray_query"
+               OpExtension "SPV_KHR_ray_tracing"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 8 8 1
+               OpDecorate %tlas DescriptorSet 0
+               OpDecorate %tlas Binding 0
+               OpDecorate %outImg DescriptorSet 0
+               OpDecorate %outImg Binding 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+       %void = OpTypeVoid
+         %3 = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+       %i32 = OpTypeInt 64 1
+      %v3f = OpTypeVector %float 3
+      %v4f = OpTypeVector %float 4
+     %v3u = OpTypeVector %uint 3
+     %v2i = OpTypeVector %i32 2
+         %13 = OpTypeRayQueryKHR
+         %14 = OpTypeAccelerationStructureKHR
+         %15 = OpTypePointer UniformConstant %14
+      %img = OpTypeImage %float 2 0 0 0 0 21
+         %17 = OpTypePointer UniformConstant %img
+         %18 = OpTypePointer Function %13
+         %19 = OpTypePointer Input %v3u
+         %20 = OpTypePointer Function %v3f
+         %21 = OpTypePointer Function %v4f
+         %22 = OpTypePointer Function %i32
+     %float_0 = OpConstant %float 0
+   %float_0_5 = OpConstant %float 0.5
+     %float_1 = OpConstant %float 1
+     %float_2 = OpConstant %float 2
+     %float_8 = OpConstant %float 8
+     %float_64 = OpConstant %float 64
+     %float_16 = OpConstant %float 16
+   %float_1000 = OpConstant %float 1000
+     %float_001 = OpConstant %float 0.001
+    %float_1_5 = OpConstant %float 1.5
+   %float_0_57 = OpConstant %float 0.57
+   %float_0_62 = OpConstant %float 0.62
+   %float_0_25 = OpConstant %float 0.25
+      %float_3 = OpConstant %float 3
+%float_0_6 = OpConstant %float 0.6
+        %uint_0 = OpConstant %uint 0
+        %uint_255 = OpConstant %uint 255
+        %i32_0 = OpConstant %i32 0
+     %v3zero = OpConstantComposite %v3f %float_0 %float_0 %float_0
+     %v2zer = OpConstantComposite %v2i %i32_0 %i32_0
+      %v4one = OpConstantComposite %v4f %float_1 %float_1 %float_1 %float_1
+      %v4sky = OpConstantComposite %v4f %float_0_6 %float_0_6 %float_0_6 %float_1
+      %tlas = OpVariable %15 UniformConstant
+     %outImg = OpVariable %17 UniformConstant
+      %gid = OpVariable %19 Input
+      %main = OpFunction %void None %3
+      %lbl = OpLabel
+       %q = OpVariable %18 Function
+      %d = OpVariable %20 Function
+     %c = OpVariable %21 Function
+     %ix = OpVariable %22 Function
+     %iy = OpVariable %22 Function
+    %g1 = OpLoad %v3u %gid
+    %gx = OpCompositeExtract %uint %g1 0
+    %gy = OpCompositeExtract %uint %g1 1
+    %gxf = OpConvertUToF %float %gx
+    %gyf = OpConvertUToF %float %gy
+     %a1 = OpFAdd %float %gxf %float_0_5
+     %a2 = OpFAdd %float %gyf %float_0_5
+     %a3 = OpFDiv %float %a1 %float_16
+     %a4 = OpFDiv %float %a2 %float_16
+     %a5 = OpFSub %float %a3 %float_1
+     %a6 = OpFSub %float %float_1 %a4
+     %p1 = OpCompositeConstruct %v3f %a5 %a6 %float_1
+     %nd = OpNormalize %v3f %p1
+    %orig = OpCompositeConstruct %v3f %float_0 %float_1_5 %float_0
+        OpStore %d %nd
+    %tlasv = OpLoad %14 %tlas
+        OpRayQueryInitializeKHR %q %tlasv %uint_0 %uint_255 %orig %float_001 %nd %float_1000
+      %l1 = OpLabel
+      %l2 = OpLabel
+        OpLoopMerge %lm %lc None
+        OpBranch %l3
+      %l3 = OpLabel
+     %ct = OpRayQueryProceedKHR %bool %q
+        OpBranchConditional %ct %lc %lm
+      %lc = OpLabel
+        OpBranch %l2
+      %lm = OpLabel
+     %ty = OpRayQueryGetIntersectionTypeKHR %uint %q %uint_0
+     %is = OpINotEqual %bool %ty %uint_0
+        OpSelectionMerge %m2 None
+        OpBranchConditional %is %h1 %h2
+      %h1 = OpLabel
+        OpStore %c %v4one
+        OpBranch %m2
+      %h2 = OpLabel
+        OpStore %c %v4sky
+        OpBranch %m2
+      %m2 = OpLabel
+    %imv = OpLoad %img %outImg
+    %x32 = OpConvertUToS %i32 %gx
+    %y32 = OpConvertUToS %i32 %gy
+    %co = OpCompositeConstruct %v2i %x32 %y32
+     %cv = OpLoad %v4f %c
+        OpImageWrite %imv %co %cv
+        OpReturn
+        OpFunctionEnd

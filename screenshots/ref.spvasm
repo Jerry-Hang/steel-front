@@ -1,0 +1,25 @@
+; SPIR-V
+; Version: 1.6
+; Generator: Khronos; 0
+; Bound: 50
+; Schema: 0
+               OpCapability Shader
+               OpCapability RayQueryKHR
+               OpCapability RayTracingKHR
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %30 "main"
+               OpExecutionMode %30 LocalSize 64 1 1
+               OpDecorate %27 DescriptorSet 0
+               OpDecorate %27 Binding 0
+               OpDecorate %28 DescriptorSet 0
+               OpDecorate %28 Binding 1
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+       %void = OpTypeVoid
+          %2 = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+      %ulong = OpTypeInt 64 0
+     %v3uint = OpTypeVector %uint 3
+    %v3float = OpTypeVector %float 3
+          %9 = OpTypeAccelerationStructureKHR

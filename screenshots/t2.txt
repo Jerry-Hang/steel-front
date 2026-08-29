@@ -1,0 +1,57 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:129
++ ... em.Text.UTF8Encoding]::new($false); cargo test --release 2>&1 | Out-F ...
++                                         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0277]: `?` couldn't convert the error to `std::io::Error`
+   --> src\net.rs:251:40
+    |
+249 | pub fn rdv_register(rdv: &str, name: &str) -> io::Result<()> {
+    |                                               -------------- expected `std::io::Error` because of this
+250 |     let sock = UdpSocket::bind("0.0.0.0:0")?;
+251 |     let raddr: SocketAddr = rdv.parse()?;
+    |                                 -------^ the trait `From<AddrParseError>` is not implemented for `std::io::Error`
+    |                                 |
+    |                                 this can't be annotated with `?` because it has type `Result<_, AddrParseError>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `std::io::Error` implements trait `From<T>`:
+              From<ErrorKind>
+              From<IntoInnerError<W>>
+              From<NulError>
+              From<TryReserveError>
+              From<anstyle_wincon::windows::inner::IoError>
+              From<bitstream_io::CheckedError>
+              From<bitstream_io::read::VariableWidthOverflow>
+              From<bitstream_io::write::Overflowed>
+            and 5 others
+
+error[E0277]: `?` couldn't convert the error to `std::io::Error`
+   --> src\net.rs:261:40
+    |
+258 | pub fn rdv_resolve(rdv: &str, name: &str) -> io::Result<SocketAddr> {
+    |                                              ---------------------- expected `std::io::Error` because of this
+...
+261 |     let raddr: SocketAddr = rdv.parse()?;
+    |                                 -------^ the trait `From<AddrParseError>` is not implemented for `std::io::Error`
+    |                                 |
+    |                                 this can't be annotated with `?` because it has type `Result<_, AddrParseError>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `std::io::Error` implements trait `From<T>`:
+              From<ErrorKind>
+              From<IntoInnerError<W>>
+              From<NulError>
+              From<TryReserveError>
+              From<anstyle_wincon::windows::inner::IoError>
+              From<bitstream_io::CheckedError>
+              From<bitstream_io::read::VariableWidthOverflow>
+              From<bitstream_io::write::Overflowed>
+            and 5 others
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `steel-front` (bin "steel-front" test) due to 2 previous errors

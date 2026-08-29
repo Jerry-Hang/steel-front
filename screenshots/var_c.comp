@@ -1,0 +1,12 @@
+#version 460
+#extension GL_EXT_ray_query : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, std430) buffer Hits { uint hits[]; };
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+void main() {
+  rayQueryEXT q;
+  rayQueryInitializeEXT(q, tlas, gl_RayFlagsNoneEXT, 0xFF, vec3(0.0), 0.001, vec3(0.002), 1000.0);
+  while (rayQueryProceedEXT(q)) {}
+  uint t = rayQueryGetIntersectionTypeEXT(q, 0u);
+  hits[gl_GlobalInvocationID.x] = t;
+}

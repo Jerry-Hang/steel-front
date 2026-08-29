@@ -1,0 +1,64 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:317
++ ... rce -ErrorAction SilentlyContinue; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find value `fp_transform` in this scope
+   --> src\main.rs:769:29
+    |
+769 |                         p = fp_transform.transform_point3(p);
+    |                             ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `fp_transform` in this scope
+   --> src\main.rs:770:29
+    |
+770 |                         n = fp_transform.transform_vector3(n);
+    |                             ^^^^^^^^^^^^ not found in this scope
+
+warning: unused imports: `Mat4` and `Vec3`
+ --> src\engine\assets.rs:6:12
+  |
+6 | use glam::{Mat4, Vec3};
+  |            ^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary trailing semicolon
+  --> src\engine\assets.rs:79:6
+   |
+79 |     };
+   |      ^ help: remove this semicolon
+   |
+   = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s3`
+   --> src\engine\assets.rs:320:17
+    |
+320 |             let s3 = GdipGetImageWidth(img, &mut w);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s3`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s4`
+   --> src\engine\assets.rs:321:17
+    |
+321 |             let s4 = GdipGetImageHeight(img, &mut h);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s4`
+
+warning: unused variable: `row0`
+   --> src\engine\assets.rs:350:17
+    |
+350 |             let row0 = std::slice::from_raw_parts(locked.data, (w as usize).min(8) * 4);
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_row0`
+
+warning: unused variable: `cam`
+   --> src\main.rs:910:13
+    |
+910 |         let cam = &self.camera;
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_cam`
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `steel-front` (bin "steel-front") generated 6 warnings
+error: could not compile `steel-front` (bin "steel-front") due to 2 previous errors; 6 warnings emitted

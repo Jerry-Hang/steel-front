@@ -1,0 +1,182 @@
+[2026-08-26T23:44:57Z INFO  steel_front] ========================================
+[2026-08-26T23:44:57Z INFO  steel_front]   钢铁前线 (Steel Front) v0.1.0
+[2026-08-26T23:44:57Z INFO  steel_front]   二战FPS游戏引擎 - Rust + Vulkan
+[2026-08-26T23:44:57Z INFO  steel_front] ========================================
+[2026-08-26T23:44:57Z INFO  steel_front::engine::cpu] cpu: vendor=Amd threads=32 primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] e_cores=0 avx2=true avx512=true scene_set=[0] ai_set=[16] physical_primary=[0] physical_secondary=[16] smt=[1, 17] ccx_groups=[] efficiency=[0, 0, 0, 0] le_set=[] audio_set=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+[2026-08-26T23:44:57Z INFO  steel_front::engine::cpu] cpu: 主线程已绑定 vCPU [0]（32 逻辑线程，AMD 双簇：主=CCD0，次=CCD1；SMT 2）
+[2026-08-26T23:44:57Z INFO  steel_front::audio_out] audio: waveOut 打开成功 48000Hz/2ch（4 块 x 2048 帧缓冲）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::game] map: level 1 generated: 547 obstacle bodies (wall=0 block=196 barrier=16 tree=176 building=119 ruin=40), 3012 grid cells blocked
+[2026-08-26T23:44:57Z INFO  steel_front] assets: 导入枪模 assets/guns/ak12.glb（63283 顶点 / 70479 索引）
+[2026-08-26T23:44:57Z INFO  steel_front] 窗口创建成功: 2560x1600
+[2026-08-26T23:44:57Z INFO  steel_front] winit inner_size: 2560x1600 scale_factor=1.50
+[2026-08-26T23:44:57Z WARN  steel_front::engine::renderer] 验证层不可用，将不使用
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 选择物理设备: NVIDIA GeForce RTX 5060 Laptop GPU
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: 设备 NVIDIA GeForce RTX 5060 Laptop GPU 硬件能力探测（WSLg/dzn 视角）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: 可用 device 扩展 280 个
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 光追扩展 --
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_pipeline = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_acceleration_structure = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_query = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_deferred_host_operations = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_buffer_device_address = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_position_fetch = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_ray_tracing = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- Tensor Core / 协作矩阵 --
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_cooperative_matrix = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cooperative_matrix = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_compute_shader_derivatives = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- DLSS / NVIDIA 私有 --
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_image_view_handle = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_binary_import = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cuda_kernel = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_external_memory = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 其它新特性 --
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_EXT_mesh_shader = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_shader_object = false
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_dynamic_rendering = true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 特性 ray_tracing_pipeline=true acceleration_structure=true buffer_device_address=true ray_query=true
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 管线属性 shaderGroupHandleSize=32B maxRecursionDepth=31 maxRayDispatchInvocationCount=1073741824
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】光追探测 device 创建成功 → RT Core 路径可用（dzn→DXR）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: CUDA 直通（Tensor Core 可编程访问）=false（libcuda in /usr/lib/wsl/lib）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】Vulkan-DLSS（NVIDIA 私有扩展）=true；可直接接 DLSS SDK
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] VK_EXT_mesh_shader 可用：启用可选网格着色器渲染路径
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 实例缓冲创建完成: 65536 个实例，stride 80 字节，2 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] instances=65536 draw_calls=1
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] Descriptor Set Layout: binding 0 = UBO(view/proj), binding 1 = 贴图, binding 2 = 实例 STORAGE_BUFFER, binding 3 = 采样器
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] Descriptor 初始化完成（2 帧）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 远档 LOD 几何创建完成: 8 顶点 / 12 索引（十字双 quad）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 地面平铺 quad 几何创建完成: 4 顶点 / 6 索引（无侧壁）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 球体几何创建完成: 325 顶点 / 1728 索引（爆炸球形扩散）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 圆柱几何创建完成: 50 顶点 / 288 索引（NPC 四肢）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 地形 LOD[0] 创建完成: 66049 顶点 / 393216 索引（257×257 网格，间距 2）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 地形 LOD[1] 创建完成: 16641 顶点 / 98304 索引（129×129 网格，间距 4）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 地形 LOD[2] 创建完成: 4225 顶点 / 24576 索引（65×65 网格，间距 8）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 地形 3 级 LOD 全部创建完成（高/中/低）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 图形管线创建完成
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 网格着色器 maxMeshWorkGroupCount[0] = 4194304（地面场 65536 按此分块）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] 网格着色器管线创建完成（VK_EXT_mesh_shader）
+[2026-08-26T23:44:57Z INFO  steel_front::engine::renderer] HUD 覆盖层初始化完成（独立 pipeline，容量 4096 quads）
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 纹理初始化完成: 1024x1024（11 mip，来源=程序化地面材质）
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 程序化皮肤纹理初始化完成: 512x512（marker=木板墙, npc=迷彩军服, RV3D_SKIN_TEX=on）
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 阴影贴图资源创建完成: 2048x2048 D32_SFLOAT
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 阴影 depth-only 管线创建完成
+[2026-08-26T23:44:58Z INFO  steel_front] Vulkan 渲染器初始化成功
+[2026-08-26T23:44:58Z INFO  steel_front] settings: 分辨率保持 2560x1600
+[2026-08-26T23:44:58Z INFO  steel_front] settings: 应用画质 中画质
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 画质预设已切换: 中画质
+[2026-08-26T23:44:58Z INFO  steel_front] 性能日志已创建（logs/perf_*.log）
+[2026-08-26T23:44:58Z INFO  steel_front] 窗口大小变化: 1898x1061
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-26T23:44:58Z INFO  steel_front] 窗口大小变化: 1920x1117
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-26T23:44:58Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-26T23:44:58Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-26T23:44:58Z INFO  steel_front] inspect: bbox=[-0.037,-0.161,-0.549]..[0.076,0.162,0.370] ext=[0.113,0.323,0.919] diag=0.981 dist=4.415
+[2026-08-26T23:44:58Z INFO  steel_front] inspect: 枪械检视模式（武器 #1）——拖拽旋转 / 滚轮缩放
+[2026-08-26T23:44:58Z INFO  steel_front] inspect cam: pos=(4.401,1.353,-0.000) target=(0.000,1.000,0.000) yaw=1.571 pitch=0.080 dist=4.415 fov=14.563 aspect=1.600
+[2026-08-26T23:44:58Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=152.8 frame_us=153 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=20 present_us=113 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:44:59Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.4 frame_us=166 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=20 present_us=125 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:00Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.0 frame_us=164 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=25 present_us=119 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:01Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.3 frame_us=158 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=117 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:02Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.4 frame_us=307 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=17 submit_us=27 present_us=258 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:03Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.7 frame_us=165 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=124 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:04Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.3 frame_us=156 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=19 present_us=116 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:05Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.3 frame_us=166 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=20 present_us=126 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:06Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.3 frame_us=163 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=21 present_us=121 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:07Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.9 frame_us=158 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=17 submit_us=18 present_us=118 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:08Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.0 frame_us=160 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=22 present_us=118 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:09Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.1 frame_us=169 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=21 present_us=128 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:10Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.4 frame_us=183 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=20 present_us=143 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:11Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=197.6 frame_us=230 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=21 submit_us=30 present_us=174 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:12Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=176.4 frame_us=234 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=20 submit_us=27 present_us=181 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:13Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=211.3 frame_us=165 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=123 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:14Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.7 frame_us=282 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=19 present_us=242 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:15Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.7 frame_us=167 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=21 present_us=125 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:16Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.9 frame_us=480 cull_us=0 terrain_us=0 wait_fence_us=6 acquire_us=6 record_us=43 submit_us=39 present_us=386 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:17Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.0 frame_us=149 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=108 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:18Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.3 frame_us=162 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=22 present_us=120 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:19Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.4 frame_us=151 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=22 present_us=109 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:20Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.6 frame_us=157 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=19 submit_us=18 present_us=115 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:21Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.3 frame_us=232 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=25 submit_us=32 present_us=168 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:22Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.9 frame_us=446 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=37 submit_us=49 present_us=350 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:23Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.9 frame_us=247 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=0 record_us=29 submit_us=33 present_us=179 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:24Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.9 frame_us=150 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=108 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:25Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.6 frame_us=159 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=0 record_us=19 submit_us=21 present_us=114 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:26Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=178.5 frame_us=245 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=0 record_us=17 submit_us=20 present_us=203 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:27Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.7 frame_us=145 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=19 present_us=105 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:28Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=220.1 frame_us=150 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=22 present_us=108 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:29Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.1 frame_us=415 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=21 submit_us=26 present_us=362 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:30Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.6 frame_us=270 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=32 submit_us=34 present_us=196 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:31Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.5 frame_us=240 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=28 submit_us=29 present_us=169 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:32Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.2 frame_us=156 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=18 submit_us=20 present_us=113 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:33Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=182.6 frame_us=274 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=1 record_us=26 submit_us=25 present_us=217 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:34Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=209.4 frame_us=148 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=21 present_us=107 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:35Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.1 frame_us=148 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=22 present_us=106 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:37Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.0 frame_us=242 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=32 submit_us=31 present_us=171 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:38Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=188.0 frame_us=231 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=23 submit_us=34 present_us=168 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:39Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=194.6 frame_us=261 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=17 submit_us=20 present_us=218 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:40Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.9 frame_us=463 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=17 submit_us=71 present_us=370 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:41Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=215.6 frame_us=227 cull_us=0 terrain_us=0 wait_fence_us=5 acquire_us=1 record_us=29 submit_us=28 present_us=163 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:42Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=210.8 frame_us=336 cull_us=0 terrain_us=0 wait_fence_us=4 acquire_us=1 record_us=30 submit_us=31 present_us=267 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:43Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=196.6 frame_us=285 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=27 present_us=238 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:44Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.3 frame_us=149 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=19 present_us=110 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:45Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.0 frame_us=153 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=19 present_us=113 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:46Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.8 frame_us=249 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=1 record_us=29 submit_us=29 present_us=185 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:47Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.3 frame_us=340 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=40 submit_us=30 present_us=262 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:48Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.2 frame_us=157 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=22 present_us=115 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:49Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.9 frame_us=260 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=0 record_us=29 submit_us=32 present_us=192 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:50Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=215.5 frame_us=235 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=1 record_us=30 submit_us=28 present_us=170 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:51Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=215.1 frame_us=477 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=32 submit_us=29 present_us=406 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:52Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=205.0 frame_us=174 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=18 submit_us=23 present_us=128 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:53Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.1 frame_us=150 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=20 present_us=110 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:54Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=214.5 frame_us=155 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=113 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:55Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.3 frame_us=162 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=22 present_us=119 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:56Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=214.5 frame_us=162 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=17 submit_us=21 present_us=119 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:57Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=211.0 frame_us=332 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=1 record_us=20 submit_us=20 present_us=287 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:58Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=205.5 frame_us=175 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=20 present_us=134 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:45:59Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.9 frame_us=273 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=22 present_us=231 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:00Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.0 frame_us=200 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=23 present_us=156 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:01Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=214.9 frame_us=306 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=25 submit_us=27 present_us=248 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:02Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=211.8 frame_us=281 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=33 submit_us=30 present_us=212 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:03Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.8 frame_us=254 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=23 present_us=210 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:04Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.0 frame_us=241 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=24 present_us=196 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:05Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=213.4 frame_us=231 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=25 submit_us=26 present_us=174 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:06Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=214.1 frame_us=154 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=112 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:07Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=215.5 frame_us=258 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=0 record_us=28 submit_us=30 present_us=195 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:08Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=198.7 frame_us=213 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=28 submit_us=30 present_us=149 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:09Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=189.4 frame_us=463 cull_us=0 terrain_us=0 wait_fence_us=6 acquire_us=3 record_us=47 submit_us=45 present_us=358 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:10Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.9 frame_us=216 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=175 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:11Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.6 frame_us=159 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=21 present_us=117 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:12Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=208.7 frame_us=167 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=19 submit_us=24 present_us=119 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:13Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=207.3 frame_us=232 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=17 submit_us=20 present_us=190 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:14Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.2 frame_us=191 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=22 submit_us=25 present_us=139 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:15Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.7 frame_us=412 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=53 submit_us=48 present_us=302 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:16Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.6 frame_us=300 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=18 present_us=262 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:17Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.1 frame_us=237 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=19 submit_us=30 present_us=182 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:18Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.2 frame_us=231 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=29 submit_us=35 present_us=162 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:19Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.3 frame_us=267 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=0 record_us=56 submit_us=24 present_us=181 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:20Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.8 frame_us=257 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=16 submit_us=24 present_us=211 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:21Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.1 frame_us=201 cull_us=0 terrain_us=0 wait_fence_us=4 acquire_us=1 record_us=20 submit_us=21 present_us=155 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:22Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.3 frame_us=162 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=18 submit_us=22 present_us=116 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:23Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=218.9 frame_us=226 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=24 submit_us=24 present_us=173 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:24Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.1 frame_us=341 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=39 submit_us=33 present_us=260 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:25Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.1 frame_us=313 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=28 submit_us=30 present_us=248 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:26Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.8 frame_us=239 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=28 submit_us=30 present_us=175 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:27Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=219.4 frame_us=336 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=0 record_us=40 submit_us=42 present_us=245 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:28Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=216.5 frame_us=303 cull_us=0 terrain_us=0 wait_fence_us=3 acquire_us=1 record_us=24 submit_us=29 present_us=244 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:29Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.8 frame_us=147 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=15 submit_us=22 present_us=105 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:30Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.2 frame_us=156 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=0 record_us=18 submit_us=22 present_us=112 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0
+[2026-08-26T23:46:31Z INFO  steel_front::engine::renderer] visible=0/65536 near=0 far=0 fps=217.9 frame_us=191 cull_us=0 terrain_us=0 wait_fence_us=2 acquire_us=1 record_us=20 submit_us=25 present_us=141 terrain_lod=high blend=0.000 quality=中画质 marker=0 npc=0

@@ -1,0 +1,154 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:317
++ ... rce -ErrorAction SilentlyContinue; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused imports: `Mat4` and `Vec3`
+ --> src\engine\assets.rs:6:12
+  |
+6 | use glam::{Mat4, Vec3};
+  |            ^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary trailing semicolon
+  --> src\engine\assets.rs:80:6
+   |
+80 |     };
+   |      ^ help: remove this semicolon
+   |
+   = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s3`
+   --> src\engine\assets.rs:365:17
+    |
+365 |             let s3 = GdipGetImageWidth(img, &mut w);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s3`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s4`
+   --> src\engine\assets.rs:366:17
+    |
+366 |             let s4 = GdipGetImageHeight(img, &mut h);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s4`
+
+warning: unused variable: `row0`
+   --> src\engine\assets.rs:395:17
+    |
+395 |             let row0 = std::slice::from_raw_parts(locked.data, (w as usize).min(8) * 4);
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_row0`
+
+warning: unused variable: `cam`
+   --> src\main.rs:927:13
+    |
+927 |         let cam = &self.camera;
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_cam`
+
+warning: function `parse_obj` is never used
+  --> src\engine\assets.rs:25:8
+   |
+25 | pub fn parse_obj(text: &str) -> Result<ImportedMesh, String> {
+   |        ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: type alias `GpStatus` is never used
+   --> src\engine\assets.rs:329:10
+    |
+329 |     type GpStatus = i32;
+    |          ^^^^^^^^
+
+warning: struct `Startup` is never constructed
+   --> src\engine\assets.rs:331:12
+    |
+331 |     struct Startup { ver: u32, cb: *mut c_void, bg: i32, codecs: i32 }
+    |            ^^^^^^^
+
+warning: static `TOKEN` is never used
+   --> src\engine\assets.rs:344:16
+    |
+344 |     static mut TOKEN: usize = 0;
+    |                ^^^^^
+
+warning: function `startup` is never used
+   --> src\engine\assets.rs:345:8
+    |
+345 |     fn startup() {
+    |        ^^^^^^^
+
+warning: function `load_rgba` is never used
+   --> src\engine\assets.rs:355:12
+    |
+355 |     pub fn load_rgba(path: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    |            ^^^^^^^^^
+
+warning: function `GdiplusStartup` is never used
+   --> src\engine\assets.rs:334:12
+    |
+334 |         fn GdiplusStartup(t: *mut usize, i: *const Startup, o: *mut c_void) -> GpStatus;
+    |            ^^^^^^^^^^^^^^
+
+warning: function `GdipLoadImageFromFile` is never used
+   --> src\engine\assets.rs:335:12
+    |
+335 |         fn GdipLoadImageFromFile(f: *const u16, img: *mut *mut c_void) -> GpStatus;
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `GdipGetImageWidth` is never used
+   --> src\engine\assets.rs:336:12
+    |
+336 |         fn GdipGetImageWidth(img: *mut c_void, w: *mut u32) -> GpStatus;
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `GdipGetImageHeight` is never used
+   --> src\engine\assets.rs:337:12
+    |
+337 |         fn GdipGetImageHeight(img: *mut c_void, h: *mut u32) -> GpStatus;
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `GdipBitmapLockBits` is never used
+   --> src\engine\assets.rs:338:12
+    |
+338 |         fn GdipBitmapLockBits(bmp: *mut c_void, rect: *mut c_void, flags: u32, fmt: u32, locked: *mut c_void) -> 
+GpStatus;
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `GdipBitmapUnlockBits` is never used
+   --> src\engine\assets.rs:339:12
+    |
+339 |         fn GdipBitmapUnlockBits(bmp: *mut c_void, locked: *mut c_void) -> GpStatus;
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `GdipDisposeImage` is never used
+   --> src\engine\assets.rs:340:12
+    |
+340 |         fn GdipDisposeImage(img: *mut c_void) -> GpStatus;
+    |            ^^^^^^^^^^^^^^^^
+
+warning: function `GdiplusShutdown` is never used
+   --> src\engine\assets.rs:341:12
+    |
+341 |         fn GdiplusShutdown(t: usize);
+    |            ^^^^^^^^^^^^^^^
+
+warning: creating a mutable reference to mutable static
+   --> src\engine\assets.rs:349:32
+    |
+349 |                 GdiplusStartup(&mut TOKEN, &i, std::ptr::null_mut());
+    |                                ^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the st
+atic is used or if any other reference is created for the static while the mutable reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+help: use `&raw mut` instead to create a raw pointer
+    |
+349 |                 GdiplusStartup(&raw mut TOKEN, &i, std::ptr::null_mut());
+    |                                 +++
+
+warning: `steel-front` (bin "steel-front") generated 21 warnings (run `cargo fix --bin "steel-front" -p steel-front` to
+ apply 5 suggestions)
+    Finished `release` profile [optimized] target(s) in 16.41s

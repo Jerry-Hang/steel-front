@@ -1,0 +1,47 @@
+[2026-08-29T01:27:40Z INFO  steel_front] ========================================
+[2026-08-29T01:27:40Z INFO  steel_front]   钢铁前线 (Steel Front) v0.1.0
+[2026-08-29T01:27:40Z INFO  steel_front]   二战FPS游戏引擎 - Rust + Vulkan
+[2026-08-29T01:27:40Z INFO  steel_front] ========================================
+[2026-08-29T01:27:40Z INFO  steel_front::engine::cpu] cpu: vendor=Amd threads=32 primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] e_cores=0 avx2=true avx512=true scene_set=[0] ai_set=[16] physical_primary=[0] physical_secondary=[16] smt=[1, 17] ccx_groups=[] efficiency=[0, 0, 0, 0] le_set=[] audio_set=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+[2026-08-29T01:27:40Z INFO  steel_front::engine::cpu] cpu: 主线程已绑定 vCPU [0]（32 逻辑线程，AMD 双簇：主=CCD0，次=CCD1；SMT 2）
+[2026-08-29T01:27:40Z INFO  steel_front::audio_out] audio: waveOut 打开成功 48000Hz/2ch（4 块 x 2048 帧缓冲）
+[2026-08-29T01:27:40Z INFO  steel_front::engine::game] map: level 1 generated: 547 obstacle bodies (wall=0 block=196 barrier=16 tree=176 building=119 ruin=40), 3012 grid cells blocked
+[2026-08-29T01:27:40Z INFO  steel_front] 窗口创建成功: 2560x1600
+[2026-08-29T01:27:40Z INFO  steel_front] winit inner_size: 2560x1600 scale_factor=1.50
+[2026-08-29T01:27:40Z WARN  steel_front::engine::renderer] 验证层不可用，将不使用
+[2026-08-29T01:27:40Z INFO  steel_front::engine::renderer] 选择物理设备: NVIDIA GeForce RTX 5060 Laptop GPU
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: 设备 NVIDIA GeForce RTX 5060 Laptop GPU 硬件能力探测（WSLg/dzn 视角）
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: 可用 device 扩展 280 个
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 光追扩展 --
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_pipeline = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_acceleration_structure = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_query = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_deferred_host_operations = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_buffer_device_address = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_position_fetch = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_ray_tracing = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- Tensor Core / 协作矩阵 --
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_cooperative_matrix = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cooperative_matrix = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_compute_shader_derivatives = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- DLSS / NVIDIA 私有 --
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_image_view_handle = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_binary_import = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cuda_kernel = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_external_memory = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 其它新特性 --
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_EXT_mesh_shader = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_shader_object = false
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_dynamic_rendering = true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 特性 ray_tracing_pipeline=true acceleration_structure=true buffer_device_address=true ray_query=true
+[2026-08-29T01:27:40Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 管线属性 shaderGroupHandleSize=32B maxRecursionDepth=31 maxRayDispatchInvocationCount=1073741824
+[2026-08-29T01:27:41Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】光追探测 device 创建成功 → RT Core 路径可用（dzn→DXR）
+[2026-08-29T01:27:41Z INFO  steel_front::engine::gpu_caps] gpu-caps: CUDA 直通（Tensor Core 可编程访问）=false（libcuda in /usr/lib/wsl/lib）
+[2026-08-29T01:27:41Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】Vulkan-DLSS（NVIDIA 私有扩展）=true；可直接接 DLSS SDK
+[2026-08-29T01:27:41Z INFO  steel_front::engine::renderer] VK_EXT_mesh_shader 可用：启用可选网格着色器渲染路径
+[2026-08-29T01:27:41Z ERROR steel_front] 渲染器初始化失败: 创建逻辑设备失败: Extension specified does not exist
+[2026-08-29T01:27:41Z INFO  steel_front] 窗口大小变化: 1898x1061
+[2026-08-29T01:27:41Z INFO  steel_front] 窗口大小变化: 1920x1117
+[2026-08-29T01:27:41Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-29T01:27:41Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-29T01:27:41Z INFO  steel_front] 程序正常退出

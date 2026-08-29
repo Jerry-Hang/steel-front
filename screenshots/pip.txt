@@ -1,0 +1,11 @@
+﻿python : ERROR: Could not find a version that satisfies the requirement spirv-tools (from versions: none)
+At line:1 char:129
++ ... ncoding]::new($false); python -m pip install spirv-tools 2>&1 | Out-F ...
++                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: Could no...versions: none):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ERROR: No matching distribution found for spirv-tools
+
+[notice] A new release of pip is available: 24.0 -> 26.2.1
+[notice] To update, run: python.exe -m pip install --upgrade pip

@@ -1,0 +1,90 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:369
++ ... bject -Last 1; cargo test --release glb_parses_real_ak12 2>&1 | Out-F ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused imports: `Mat4` and `Vec3`
+ --> src\engine\assets.rs:6:12
+  |
+6 | use glam::{Mat4, Vec3};
+  |            ^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary trailing semicolon
+  --> src\engine\assets.rs:79:6
+   |
+79 |     };
+   |      ^ help: remove this semicolon
+   |
+   = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s3`
+   --> src\engine\assets.rs:320:17
+    |
+320 |             let s3 = GdipGetImageWidth(img, &mut w);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s3`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s4`
+   --> src\engine\assets.rs:321:17
+    |
+321 |             let s4 = GdipGetImageHeight(img, &mut h);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s4`
+
+warning: unused variable: `row0`
+   --> src\engine\assets.rs:350:17
+    |
+350 |             let row0 = std::slice::from_raw_parts(locked.data, (w as usize).min(8) * 4);
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_row0`
+
+warning: function `GdiplusShutdown` is never used
+   --> src\engine\assets.rs:296:12
+    |
+296 |         fn GdiplusShutdown(t: usize);
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> src\engine\assets.rs:304:32
+    |
+304 |                 GdiplusStartup(&mut TOKEN, &i, std::ptr::null_mut());
+    |                                ^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the st
+atic is used or if any other reference is created for the static while the mutable reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+help: use `&raw mut` instead to create a raw pointer
+    |
+304 |                 GdiplusStartup(&raw mut TOKEN, &i, std::ptr::null_mut());
+    |                                 +++
+
+warning: comparison is useless due to type limits
+    --> src\engine\game.rs:5644:13
+     |
+5644 |             server_game.npcs.len() >= 0
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_comparisons)]` on by default
+
+warning: `steel-front` (bin "steel-front" test) generated 8 warnings (run `cargo fix --bin "steel-front" -p steel-front
+ --tests` to apply 4 suggestions)
+    Finished `release` profile [optimized] target(s) in 8.87s
+     Running unittests src\bin\rdv.rs (target\release\deps\rdv-4ae68c868ed19f53.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\release\deps\steel_front-b67e979483208ded.exe)
+
+running 1 test
+test engine::assets::tests::glb_parses_real_ak12 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 402 filtered out; finished in 0.00s
+

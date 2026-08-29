@@ -1,0 +1,376 @@
+[2026-08-22T13:22:27Z INFO  steel_front] ========================================
+[2026-08-22T13:22:27Z INFO  steel_front]   钢铁前线 (Steel Front) v0.1.0
+[2026-08-22T13:22:27Z INFO  steel_front]   二战FPS游戏引擎 - Rust + Vulkan
+[2026-08-22T13:22:27Z INFO  steel_front] ========================================
+[2026-08-22T13:22:27Z INFO  steel_front::engine::cpu] cpu: vendor=Amd threads=32 primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] e_cores=0 avx2=true avx512=true scene_set=[0, 2, 4, 6, 8, 10, 12, 14] ai_set=[16, 18, 20, 22, 24, 26, 28, 30] physical_primary=[0, 2, 4, 6, 8, 10, 12, 14] physical_secondary=[16, 18, 20, 22, 24, 26, 28, 30] smt=[1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31] ccx_groups=[] efficiency=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] le_set=[] audio_set=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+[2026-08-22T13:22:27Z INFO  steel_front::engine::cpu] cpu: 主线程已绑定 vCPU [0, 2, 4, 6, 8, 10, 12, 14]（32 逻辑线程，AMD 双簇：主=CCD0，次=CCD1；SMT 16）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::game] map: level 1 generated: 471 obstacle bodies (wall=0 block=172 barrier=16 tree=124 building=119 ruin=40), 2532 grid cells blocked
+[2026-08-22T13:22:27Z INFO  steel_front] 窗口创建成功: 2560x1600
+[2026-08-22T13:22:27Z INFO  steel_front] winit inner_size: 2560x1600 scale_factor=1.50
+[2026-08-22T13:22:27Z WARN  steel_front::engine::renderer] 验证层不可用，将不使用
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 选择物理设备: NVIDIA GeForce RTX 5060 Laptop GPU
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: 设备 NVIDIA GeForce RTX 5060 Laptop GPU 硬件能力探测（WSLg/dzn 视角）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: 可用 device 扩展 280 个
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 光追扩展 --
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_pipeline = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_acceleration_structure = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_query = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_deferred_host_operations = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_buffer_device_address = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_position_fetch = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_ray_tracing = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- Tensor Core / 协作矩阵 --
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_cooperative_matrix = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cooperative_matrix = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_compute_shader_derivatives = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- DLSS / NVIDIA 私有 --
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_image_view_handle = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_binary_import = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cuda_kernel = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_external_memory = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 其它新特性 --
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_EXT_mesh_shader = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_shader_object = false
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_dynamic_rendering = true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 特性 ray_tracing_pipeline=true acceleration_structure=true buffer_device_address=true ray_query=true
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 管线属性 shaderGroupHandleSize=32B maxRecursionDepth=31 maxRayDispatchInvocationCount=1073741824
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】光追探测 device 创建成功 → RT Core 路径可用（dzn→DXR）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: CUDA 直通（Tensor Core 可编程访问）=false（libcuda in /usr/lib/wsl/lib）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】Vulkan-DLSS（NVIDIA 私有扩展）=true；可直接接 DLSS SDK
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] VK_EXT_mesh_shader 可用：启用可选网格着色器渲染路径
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 实例缓冲创建完成: 65536 个实例，stride 80 字节，2 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] instances=65536 draw_calls=1
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] Descriptor Set Layout: binding 0 = UBO(view/proj), binding 1 = 贴图, binding 2 = 实例 STORAGE_BUFFER, binding 3 = 采样器
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] Descriptor 初始化完成（2 帧）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 远档 LOD 几何创建完成: 8 顶点 / 12 索引（十字双 quad）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 地面平铺 quad 几何创建完成: 4 顶点 / 6 索引（无侧壁）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 球体几何创建完成: 325 顶点 / 1728 索引（爆炸球形扩散）
+[2026-08-22T13:22:27Z INFO  steel_front::engine::renderer] 圆柱几何创建完成: 50 顶点 / 288 索引（NPC 四肢）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 地形 LOD[0] 创建完成: 66049 顶点 / 393216 索引（257×257 网格，间距 2）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 地形 LOD[1] 创建完成: 16641 顶点 / 98304 索引（129×129 网格，间距 4）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 地形 LOD[2] 创建完成: 4225 顶点 / 24576 索引（65×65 网格，间距 8）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 地形 3 级 LOD 全部创建完成（高/中/低）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 图形管线创建完成
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 网格着色器 maxMeshWorkGroupCount[0] = 4194304（地面场 65536 按此分块）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 网格着色器管线创建完成（VK_EXT_mesh_shader）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] HUD 覆盖层初始化完成（独立 pipeline，容量 4096 quads）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 纹理初始化完成: 1024x1024（11 mip，来源=程序化地面材质）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 程序化皮肤纹理初始化完成: 512x512（marker=木板墙, npc=迷彩军服, RV3D_SKIN_TEX=on）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 阴影贴图资源创建完成: 2048x2048 D32_SFLOAT
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 阴影 depth-only 管线创建完成
+[2026-08-22T13:22:28Z INFO  steel_front] Vulkan 渲染器初始化成功
+[2026-08-22T13:22:28Z INFO  steel_front] settings: 分辨率保持 2560x1600
+[2026-08-22T13:22:28Z INFO  steel_front] settings: 应用画质 中画质
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 画质预设已切换: 中画质
+[2026-08-22T13:22:28Z INFO  steel_front] 性能日志已创建（logs/perf_*.log）
+[2026-08-22T13:22:28Z INFO  steel_front] 窗口大小变化: 1898x1061
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-22T13:22:28Z INFO  steel_front] 窗口大小变化: 1920x1117
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-22T13:22:28Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-22T13:22:28Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: MAILBOX
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-08-22T13:22:28Z INFO  steel_front::engine::cpu] cpu: scene_pool 创建（8 工作线程，绑定 vCPU [0, 2, 4, 6, 8, 10, 12, 14]）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::game] map: level 1 generated: 471 obstacle bodies (wall=0 block=172 barrier=16 tree=124 building=119 ruin=40), 2532 grid cells blocked
+[2026-08-22T13:22:28Z INFO  steel_front::engine::game] game: purged 8 leftover npcs on run start
+[2026-08-22T13:22:28Z INFO  steel_front::engine::game] battle: 压力模式第 0 轮开战（红 4 vs 蓝 3+玩家，共 7 名 NPC，并行 AI=true）
+[2026-08-22T13:22:28Z INFO  steel_front::engine::game] game: run started (wave 1)
+[2026-08-22T13:22:28Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=236.0 frame_us=2972 cull_us=2 terrain_us=301 wait_fence_us=2011 acquire_us=0 record_us=22 submit_us=20 present_us=157 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:29Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=336.5 frame_us=2653 cull_us=3 terrain_us=346 wait_fence_us=1536 acquire_us=2 record_us=73 submit_us=75 present_us=380 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:30Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=347.1 frame_us=2290 cull_us=6 terrain_us=257 wait_fence_us=2224 acquire_us=0 record_us=41 submit_us=55 present_us=136 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:31Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=346.2 frame_us=2727 cull_us=2 terrain_us=304 wait_fence_us=1996 acquire_us=1 record_us=31 submit_us=33 present_us=155 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:32Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=343.7 frame_us=2356 cull_us=2 terrain_us=292 wait_fence_us=2380 acquire_us=1 record_us=30 submit_us=20 present_us=149 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:33Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=342.2 frame_us=2897 cull_us=2 terrain_us=329 wait_fence_us=1311 acquire_us=1 record_us=66 submit_us=40 present_us=257 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:34Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=329.8 frame_us=2744 cull_us=2 terrain_us=323 wait_fence_us=1929 acquire_us=0 record_us=42 submit_us=52 present_us=203 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:35Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=341.2 frame_us=2328 cull_us=2 terrain_us=285 wait_fence_us=2192 acquire_us=0 record_us=32 submit_us=21 present_us=193 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:36Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=341.9 frame_us=2296 cull_us=2 terrain_us=285 wait_fence_us=2287 acquire_us=0 record_us=28 submit_us=19 present_us=153 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:37Z INFO  steel_front] command: 打开命令窗口（/）
+[2026-08-22T13:22:37Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=339.6 frame_us=2671 cull_us=2 terrain_us=316 wait_fence_us=1774 acquire_us=1 record_us=44 submit_us=45 present_us=233 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:38Z INFO  steel_front] command: 切换到武器 #2
+[2026-08-22T13:22:38Z INFO  steel_front::engine::game] weapons: 切枪 0 -> 1 (AK-104 短剑)
+[2026-08-22T13:22:38Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=340.3 frame_us=2414 cull_us=2 terrain_us=270 wait_fence_us=1915 acquire_us=0 record_us=41 submit_us=52 present_us=160 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:39Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=344.0 frame_us=2469 cull_us=1 terrain_us=266 wait_fence_us=2116 acquire_us=0 record_us=41 submit_us=49 present_us=216 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:40Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=343.6 frame_us=2343 cull_us=2 terrain_us=296 wait_fence_us=2316 acquire_us=1 record_us=44 submit_us=20 present_us=223 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:41Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=338.2 frame_us=2598 cull_us=1 terrain_us=242 wait_fence_us=1881 acquire_us=0 record_us=39 submit_us=26 present_us=222 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:42Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=339.6 frame_us=2563 cull_us=7 terrain_us=358 wait_fence_us=2079 acquire_us=1 record_us=50 submit_us=51 present_us=265 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:43Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=341.3 frame_us=2498 cull_us=2 terrain_us=314 wait_fence_us=1648 acquire_us=0 record_us=51 submit_us=57 present_us=260 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:44Z INFO  steel_front] command: 打开命令窗口（/）
+[2026-08-22T13:22:44Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=344.8 frame_us=2780 cull_us=1 terrain_us=259 wait_fence_us=1790 acquire_us=0 record_us=41 submit_us=26 present_us=243 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:45Z INFO  steel_front] command: 切换到武器 #3
+[2026-08-22T13:22:45Z INFO  steel_front::engine::game] weapons: 切枪 1 -> 2 (PP-19-01 勇士)
+[2026-08-22T13:22:45Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=344.2 frame_us=2383 cull_us=2 terrain_us=288 wait_fence_us=2153 acquire_us=0 record_us=39 submit_us=24 present_us=205 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:47Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=339.1 frame_us=3137 cull_us=2 terrain_us=310 wait_fence_us=1675 acquire_us=1 record_us=44 submit_us=69 present_us=411 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:48Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=338.1 frame_us=3216 cull_us=2 terrain_us=334 wait_fence_us=1581 acquire_us=1 record_us=46 submit_us=46 present_us=409 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:48Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:49Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=329.7 frame_us=2765 cull_us=2 terrain_us=294 wait_fence_us=2101 acquire_us=1 record_us=91 submit_us=45 present_us=453 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:50Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=328.2 frame_us=2817 cull_us=2 terrain_us=301 wait_fence_us=2062 acquire_us=0 record_us=53 submit_us=66 present_us=150 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:51Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=330.2 frame_us=2714 cull_us=2 terrain_us=291 wait_fence_us=2170 acquire_us=0 record_us=35 submit_us=74 present_us=240 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:52Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=327.4 frame_us=2729 cull_us=3 terrain_us=303 wait_fence_us=1699 acquire_us=1 record_us=81 submit_us=54 present_us=257 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:53Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=319.8 frame_us=2878 cull_us=6 terrain_us=359 wait_fence_us=2018 acquire_us=2 record_us=114 submit_us=46 present_us=235 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:53Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:54Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=315.8 frame_us=2616 cull_us=3 terrain_us=340 wait_fence_us=2583 acquire_us=1 record_us=61 submit_us=49 present_us=220 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:55Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=314.2 frame_us=3671 cull_us=2 terrain_us=364 wait_fence_us=1352 acquire_us=1 record_us=177 submit_us=106 present_us=487 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:56Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=318.6 frame_us=2764 cull_us=1 terrain_us=298 wait_fence_us=1844 acquire_us=1 record_us=52 submit_us=66 present_us=405 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:57Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=314.5 frame_us=2562 cull_us=2 terrain_us=311 wait_fence_us=2025 acquire_us=0 record_us=98 submit_us=55 present_us=285 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:58Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=312.7 frame_us=2372 cull_us=7 terrain_us=673 wait_fence_us=1255 acquire_us=2 record_us=110 submit_us=109 present_us=645 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:58Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:22:59Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=311.6 frame_us=2744 cull_us=4 terrain_us=346 wait_fence_us=2435 acquire_us=0 record_us=122 submit_us=54 present_us=355 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:00Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=308.0 frame_us=2874 cull_us=2 terrain_us=333 wait_fence_us=2107 acquire_us=1 record_us=74 submit_us=65 present_us=317 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:01Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=313.3 frame_us=2791 cull_us=2 terrain_us=306 wait_fence_us=1690 acquire_us=0 record_us=56 submit_us=48 present_us=273 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:02Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=317.0 frame_us=3066 cull_us=3 terrain_us=332 wait_fence_us=1553 acquire_us=1 record_us=88 submit_us=70 present_us=424 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:03Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=316.3 frame_us=2927 cull_us=2 terrain_us=285 wait_fence_us=1914 acquire_us=0 record_us=66 submit_us=52 present_us=183 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:03Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:04Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=312.1 frame_us=3256 cull_us=6 terrain_us=358 wait_fence_us=1410 acquire_us=1 record_us=123 submit_us=99 present_us=677 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:05Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=319.3 frame_us=1832 cull_us=4 terrain_us=464 wait_fence_us=1735 acquire_us=1 record_us=98 submit_us=75 present_us=368 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:06Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=314.5 frame_us=2708 cull_us=3 terrain_us=321 wait_fence_us=1781 acquire_us=1 record_us=71 submit_us=51 present_us=435 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:07Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=316.0 frame_us=2795 cull_us=6 terrain_us=415 wait_fence_us=1912 acquire_us=1 record_us=92 submit_us=59 present_us=451 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:08Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=309.2 frame_us=3156 cull_us=7 terrain_us=351 wait_fence_us=1309 acquire_us=1 record_us=109 submit_us=84 present_us=708 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:08Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:09Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=306.2 frame_us=2499 cull_us=3 terrain_us=445 wait_fence_us=1948 acquire_us=1 record_us=74 submit_us=52 present_us=482 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:10Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=307.3 frame_us=2894 cull_us=4 terrain_us=330 wait_fence_us=1719 acquire_us=1 record_us=112 submit_us=64 present_us=279 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:11Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=309.0 frame_us=2645 cull_us=4 terrain_us=327 wait_fence_us=1999 acquire_us=1 record_us=51 submit_us=60 present_us=301 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:12Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=308.8 frame_us=1820 cull_us=4 terrain_us=407 wait_fence_us=1443 acquire_us=1 record_us=102 submit_us=60 present_us=351 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:13Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=308.7 frame_us=2954 cull_us=5 terrain_us=431 wait_fence_us=1890 acquire_us=0 record_us=65 submit_us=55 present_us=284 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:13Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:14Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=315.1 frame_us=3045 cull_us=2 terrain_us=314 wait_fence_us=2177 acquire_us=0 record_us=46 submit_us=61 present_us=228 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:15Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=316.3 frame_us=2396 cull_us=2 terrain_us=317 wait_fence_us=2678 acquire_us=1 record_us=67 submit_us=40 present_us=223 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:16Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=321.2 frame_us=3199 cull_us=3 terrain_us=341 wait_fence_us=1767 acquire_us=0 record_us=70 submit_us=53 present_us=224 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:17Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=330.4 frame_us=2924 cull_us=2 terrain_us=330 wait_fence_us=2303 acquire_us=1 record_us=53 submit_us=74 present_us=219 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:18Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=327.0 frame_us=2549 cull_us=2 terrain_us=303 wait_fence_us=2382 acquire_us=0 record_us=79 submit_us=49 present_us=319 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:18Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:19Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=326.6 frame_us=2937 cull_us=1 terrain_us=256 wait_fence_us=1874 acquire_us=0 record_us=49 submit_us=65 present_us=153 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:20Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=330.1 frame_us=2539 cull_us=7 terrain_us=319 wait_fence_us=2409 acquire_us=1 record_us=58 submit_us=72 present_us=206 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:21Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=330.4 frame_us=2731 cull_us=2 terrain_us=329 wait_fence_us=1974 acquire_us=1 record_us=80 submit_us=47 present_us=408 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:22Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=330.1 frame_us=3214 cull_us=1 terrain_us=302 wait_fence_us=1908 acquire_us=0 record_us=52 submit_us=78 present_us=220 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:23Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=329.9 frame_us=2674 cull_us=1 terrain_us=271 wait_fence_us=1934 acquire_us=0 record_us=77 submit_us=56 present_us=248 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:23Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:24Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=328.8 frame_us=2799 cull_us=2 terrain_us=287 wait_fence_us=2057 acquire_us=0 record_us=106 submit_us=53 present_us=324 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:25Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=319.5 frame_us=2911 cull_us=3 terrain_us=308 wait_fence_us=1620 acquire_us=1 record_us=76 submit_us=54 present_us=266 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:26Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=310.7 frame_us=2502 cull_us=4 terrain_us=442 wait_fence_us=2227 acquire_us=1 record_us=71 submit_us=63 present_us=277 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:27Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=315.3 frame_us=1680 cull_us=6 terrain_us=595 wait_fence_us=12 acquire_us=3 record_us=169 submit_us=277 present_us=601 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:28Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=327.3 frame_us=2041 cull_us=3 terrain_us=379 wait_fence_us=1615 acquire_us=1 record_us=93 submit_us=68 present_us=355 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:28Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:29Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=312.8 frame_us=2984 cull_us=5 terrain_us=356 wait_fence_us=1600 acquire_us=1 record_us=81 submit_us=65 present_us=604 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:30Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=312.9 frame_us=2803 cull_us=4 terrain_us=345 wait_fence_us=1801 acquire_us=1 record_us=124 submit_us=107 present_us=469 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:31Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=283.5 frame_us=2977 cull_us=6 terrain_us=406 wait_fence_us=1319 acquire_us=1 record_us=104 submit_us=83 present_us=523 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:32Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=313.2 frame_us=2357 cull_us=5 terrain_us=379 wait_fence_us=2397 acquire_us=1 record_us=42 submit_us=51 present_us=326 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:33Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=310.9 frame_us=3509 cull_us=4 terrain_us=342 wait_fence_us=1728 acquire_us=1 record_us=90 submit_us=37 present_us=353 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:33Z INFO  steel_front] size diag: window_inner=2560x1600 hud=2560x1600
+[2026-08-22T13:23:34Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=308.5 frame_us=1521 cull_us=4 terrain_us=299 wait_fence_us=1841 acquire_us=1 record_us=47 submit_us=51 present_us=326 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:35Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=327.4 frame_us=2793 cull_us=7 terrain_us=330 wait_fence_us=2067 acquire_us=1 record_us=47 submit_us=32 present_us=246 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180
+[2026-08-22T13:23:36Z INFO  steel_front::engine::renderer] visible=65536/65536 near=65536 far=0 fps=330.2 frame_us=2802 cull_us=2 terrain_us=357 wait_fence_us=1818 acquire_us=1 record_us=69 submit_us=37 present_us=237 terrain_lod=high blend=0.216 quality=中画质 marker=471 npc=180

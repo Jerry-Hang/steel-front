@@ -1,0 +1,25 @@
+﻿19:54:50 | INFO: Data are loaded, start creating Blender stuff
+19:54:50 | INFO: Blender create Mesh node Object_0
+19:54:50 | INFO: Blender create Mesh node Object_1
+19:54:50 | INFO: glTF import finished in 0.11s
+blender.exe : D:\Rust\steel-front\scripts\blender_demo.py:12: DeprecationWarning: 'Material.use_nodes' is expected to b
+e removed in Blender 6.0
+At line:1 char:129
++ ... ew($false); & 'D:\3D_Work\blender\blender-5.2.1-windows-x64\blender.e ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (D:\Rust\steel-f... in Blender 6.0:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  if not mat.use_nodes:
+D:\Rust\steel-front\scripts\blender_demo.py:41: DeprecationWarning: 'World.use_nodes' is expected to be removed in Blen
+der 6.0
+  world.use_nodes = True
+Traceback (most recent call last):
+  File "D:\Rust\steel-front\scripts\blender_demo.py", line 47, in <module>
+    scene.render.engine = 'BLENDER_EEVEE_NEXT'
+    ^^^^^^^^^^^^^^^^^^^
+TypeError: bpy_struct: item.attr = val: enum "BLENDER_EEVEE_NEXT" not found in ('BLENDER_EEVEE', 'BLENDER_WORKBENCH', '
+CYCLES')
+Blender 5.2.1 LTS (hash 9e2066aef7ef built 2026-08-25 02:38:20)
+
+Blender quit

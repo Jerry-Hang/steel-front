@@ -1,0 +1,515 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:212
++ ... ntlyContinue | Stop-Process -Force; cargo test --release 2>&1 | Out-F ...
++                                         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused imports: `Mat4` and `Vec3`
+ --> src\engine\assets.rs:6:12
+  |
+6 | use glam::{Mat4, Vec3};
+  |            ^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary trailing semicolon
+  --> src\engine\assets.rs:80:6
+   |
+80 |     };
+   |      ^ help: remove this semicolon
+   |
+   = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s3`
+   --> src\engine\assets.rs:376:17
+    |
+376 |             let s3 = GdipGetImageWidth(img, &mut w);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s3`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s4`
+   --> src\engine\assets.rs:377:17
+    |
+377 |             let s4 = GdipGetImageHeight(img, &mut h);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s4`
+
+warning: unused variable: `row0`
+   --> src\engine\assets.rs:406:17
+    |
+406 |             let row0 = std::slice::from_raw_parts(locked.data, (w as usize).min(8) * 4);
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_row0`
+
+warning: unused variable: `cam`
+   --> src\main.rs:905:13
+    |
+905 |         let cam = &self.camera;
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_cam`
+
+warning: function `GdiplusShutdown` is never used
+   --> src\engine\assets.rs:352:12
+    |
+352 |         fn GdiplusShutdown(t: usize);
+    |            ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: creating a mutable reference to mutable static
+   --> src\engine\assets.rs:360:32
+    |
+360 |                 GdiplusStartup(&mut TOKEN, &i, std::ptr::null_mut());
+    |                                ^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the st
+atic is used or if any other reference is created for the static while the mutable reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+help: use `&raw mut` instead to create a raw pointer
+    |
+360 |                 GdiplusStartup(&raw mut TOKEN, &i, std::ptr::null_mut());
+    |                                 +++
+
+warning: comparison is useless due to type limits
+    --> src\engine\game.rs:5651:13
+     |
+5651 |             server_game.npcs.len() >= 0
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_comparisons)]` on by default
+
+warning: `steel-front` (bin "steel-front" test) generated 9 warnings (run `cargo fix --bin "steel-front" -p steel-front
+ --tests` to apply 5 suggestions)
+    Finished `release` profile [optimized] target(s) in 11.19s
+     Running unittests src\bin\rdv.rs (target\release\deps\rdv-4ae68c868ed19f53.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\release\deps\steel_front-b67e979483208ded.exe)
+
+running 405 tests
+test audio::tests::adsr_envelope_stages ... ok
+test audio::tests::audio_player_tick_renders_synth_into_sink ... ok
+test audio::tests::audio_player_bus_music_channel_gates_music_only ... ok
+test audio::tests::attenuation_is_monotonic_decreasing ... ok
+test audio::tests::mixer_channel_volume_is_per_channel ... ok
+test audio::tests::dsp_synth_distance_attenuation_matches_formula ... ok
+test audio::tests::mixer_multiplies_master_and_channel_volume ... ok
+test audio::tests::attenuation_near_is_one_far_decays ... ok
+test audio::tests::grenade_whistle_differs_from_shot ... ok
+test audio::tests::dsp_synth_voice_cap_drops_oldest ... ok
+test audio::tests::dsp_synth_zero_sample_rate_falls_back ... ok
+test audio::tests::dsp_synth_output_is_finite_and_clamped ... ok
+test audio::tests::grenade_bounce_output_and_lifetime ... ok
+test audio::tests::lowpass_alpha_bounds ... ok
+test audio::tests::dsp_synth_ambient_wind_toggle ... ok
+test audio::tests::mixer_mixes_two_sources_and_respects_distance ... ok
+test audio::tests::mixer_stops_and_cleans_finished_voices ... ok
+test audio::tests::music_fade_retargets_mid_fade_and_edge_cases ... ok
+test audio::tests::music_fade_step_is_monotonic_and_converges ... ok
+test audio::tests::grenade_whistle_multi_tick_no_panic_and_sample_rate ... ok
+test audio::tests::music_render_output_length_and_stereo_format ... ok
+test audio::tests::grenade_whistle_deterministic_and_bounded ... ok
+test audio::tests::mixer_looping_wraps_cursor ... ok
+test audio::tests::dsp_synth_music_does_not_break_sfx_chain ... ok
+test audio::tests::dsp_synth_shot_decays_to_silence ... ok
+test audio::tests::dsp_synth_mix_clamps_under_loud_polyphony ... ok
+test audio::tests::dsp_synth_explosion_outlasts_footstep ... ok
+test audio::tests::dsp_synth_deterministic ... ok
+test audio::tests::music_wave_is_deterministic_pure ... ok
+test audio::tests::play_shot_delegates_to_m1_params ... ok
+test audio::tests::shot_params_m1_and_thompson_differ ... ok
+test audio::tests::sink_receives_mixed_samples ... ok
+test audio::tests::volume_controls_clamp ... ok
+test audio::tests::wav_parses_pcm16_mono ... ok
+test audio::tests::shot_with_params_deterministic ... ok
+test audio::tests::wav_parses_pcm24_and_float32 ... ok
+test audio::tests::thompson_has_longer_tail_than_m1 ... ok
+test audio::tests::wav_parses_pcm8_stereo ... ok
+test audio::tests::wav_rejects_invalid_inputs ... ok
+test audio::tests::wav_skips_unknown_chunks_and_alignment_padding ... ok
+test audio::tests::sfx_bank_clips_have_nonzero_samples ... ok
+test audio::tests::sfx_bank_new_has_all_kinds_with_frames ... ok
+test audio::tests::sfx_bank_play_adds_one_voice ... ok
+test audio::tests::sfx_bank_play_variant_scale_one_matches_play ... ok
+test audio::tests::sfx_bank_kind_index_maps_in_order ... ok
+test engine::ai::tests::ambush_goal_prefers_behind_player ... ok
+test engine::ai::tests::astar_blocked_or_out_of_bounds_endpoints ... ok
+test audio::tests::sfx_bank_play_variant_scales_output_amplitude ... ok
+test engine::ai::tests::angle_diff_wraps_across_pi ... ok
+test engine::ai::tests::astar_around_block ... ok
+test audio::tests::sfx_bank_play_variant_volume_scale_bounds ... ok
+test engine::ai::tests::astar_around_obstacle_wall ... ok
+test audio::tests::sfx_bank_ambient_looping_never_ends ... ok
+test engine::ai::tests::astar_same_start_and_goal ... ok
+test engine::ai::tests::astar_no_path_when_goal_surrounded ... ok
+test engine::ai::tests::grid_map_helpers ... ok
+test audio::tests::sfx_bank_play_variant_silent_sink_no_panic ... ok
+test engine::ai::tests::cover_shielding_requires_blocked_between ... ok
+test engine::ai::tests::astar_straight_line ... ok
+test engine::ai::tests::flank_goal_vertical_offset_and_clamp ... ok
+test engine::ai::tests::charge_thresholds ... ok
+test engine::ai::tests::role_for_deterministic_and_wave_gates ... ok
+test engine::ai::tests::boss_wave_profile_params ... ok
+test audio::tests::audio_player_music_tick_frames_and_silent_sink_no_panic ... ok
+test engine::ai::tests::cover_points_near_blocked_cluster ... ok
+test engine::ai::tests::reinforcement_wave_params ... ok
+test engine::ai::tests::pick_tactic_respects_hp_role_and_facing ... ok
+test audio::tests::music_synth_default_silent_then_fades_in ... ok
+test engine::ai::tests::state_machine_keeps_state_on_no_trigger ... ok
+test engine::ai::tests::state_machine_direct_transitions ... ok
+test engine::ai::tests::state_machine_full_cycle ... ok
+test engine::ai::tests::should_flank_deterministic_and_boundaries ... ok
+test engine::ai::tests::cover_points_dist_and_openness ... ok
+test engine::ai::tests::wave_kind_classification ... ok
+test engine::ai::tests::team_opposite_flips_side ... ok
+test engine::ai::tests::wave_profile_monotonic ... ok
+test engine::ai::tests::wave_profile_thresholds_locked ... ok
+test engine::ai::tests::yaw_to_target_matches_camera_convention ... ok
+test engine::ai::tests::zigzag_offset_bounded_and_deterministic ... ok
+test engine::assets::tests::obj_parse_cube ... ok
+test config::tests::load_tolerates_missing_and_garbage ... ok
+test engine::assets::tests::obj_parse_tri ... ok
+test config::tests::display_fields_roundtrip ... ok
+test engine::camera::tests::add_recoil_decays_within_035s ... ok
+test engine::camera::tests::first_person_default_pose ... ok
+test engine::camera::tests::flight_moves_and_toggle_preserves_pose ... ok
+test audio::tests::sfx_bank_synthesis_is_deterministic ... ok
+test engine::camera::tests::look_clamps_pitch ... ok
+test engine::camera::tests::first_person_view_matrix ... ok
+test config::tests::load_tolerates_old_format_without_display_fields ... FAILED
+test engine::camera::tests::look_updates_yaw_pitch ... ok
+test engine::camera::tests::orbit_pose_and_rotation_unchanged ... ok
+test engine::camera::tests::projection_keeps_y_up_for_shader_flip ... ok
+test engine::camera::tests::recoil_pitch_is_clamped ... ok
+test engine::camera::tests::set_first_person_eye_updates_position ... ok
+test engine::camera::tests::toggle_mode_cycles_three_ways ... ok
+test engine::cpu::tests::parse_cpu_list_supports_ranges_and_lists ... ok
+test engine::cpu::tests::split_smt_pairs_assigns_min_vcpu_as_physical ... ok
+test engine::cpu::tests::split_smt_pairs_handles_empty_and_single ... ok
+test engine::cpu::tests::thread_siblings_spec_parses_like_cpu_list ... ok
+test engine::game::tests::ai_tier_classify_boundaries ... ok
+test engine::game::tests::ai_tier_partition_empty_and_uniform ... ok
+test engine::game::tests::ai_tier_partition_with_real_npc_tier ... ok
+test engine::game::tests::ai_tier_partition_stable_and_split ... ok
+test engine::game::tests::attack_cover_picks_ring_band_shielding_cover ... ok
+test audio::tests::music_synth_fades_out_to_silence ... ok
+test engine::font_cjk::tests::cjk_glyph_generates ... ok
+test audio::tests::music_march_rhythm_makes_energy_pulse ... ok
+test audio::tests::music_render_samples_finite_and_bounded ... ok
+test audio::tests::music_bass_pad_dominates_low_frequency_band ... ok
+test engine::assets::tests::glb_parses_real_ak12_orig ... ok
+test config::tests::bindings_version_1_loads_codes ... ok
+test engine::assets::tests::glb_baked_color_and_index ... ok
+test engine::assets::tests::glb_parses_real_ak12 ... ok
+test config::tests::save_then_load_roundtrip ... ok
+test engine::game::tests::grid_conversion_roundtrip ... ok
+test engine::game::tests::map_generation_is_deterministic_and_safe ... ok
+test engine::assets::tests::png_decode_rgba ... ok
+test engine::game::tests::map_theme_level1_preserves_smoke_ring ... ok
+test engine::game::tests::map_themes_rotate_and_differ ... ok
+test engine::game::tests::mission_objective_progress_and_completion ... ok
+test engine::game::tests::net_loopback_demo_join_roundtrip ... ok
+test engine::game::tests::hitbox_horizontal_20m_same_terrain ... ok
+test engine::game::tests::far_decimate_skips_idle_npcs_by_frame ... ok
+test engine::game::tests::hitbox_covers_head_body_legs_and_range ... ok
+test engine::game::tests::game_state_starts_in_menu ... ok
+test engine::game::tests::explosion_kills_and_scores ... ok
+test engine::game::tests::hud_menu_and_gameover_screens ... ok
+test engine::game::tests::part_multiplier_zones ... ok
+test engine::game::tests::grenade_self_damage_capped_not_fatal ... ok
+test engine::game::tests::explosion_zero_damage_is_visual_only ... ok
+test engine::game::tests::explosion_visual_lifecycle_and_shake ... ok
+test engine::game::tests::boss_wave_spawns_slow_tanky_elite ... ok
+test engine::game::tests::hud_game_screen_has_score_wave_crosshair ... ok
+test engine::game::tests::fire_applies_recoil_kick ... ok
+test engine::game::tests::light_uniform_enabled ... ok
+test engine::game::tests::should_decimate_far_excludes_interactions ... ok
+test engine::game::tests::gameover_restart_resets_run ... ok
+test engine::game::tests::explosion_aoe_damage_falloff ... ok
+test engine::game::tests::spread_direction_normalized ... ok
+test engine::game::tests::hud_quads_produce_overlay ... ok
+test engine::game::tests::explosion_damages_obstacles_in_radius ... ok
+test engine::game::tests::npc_throws_grenade_in_stress_combat ... ok
+test engine::game::tests::spawn_wave_purges_leftovers ... ok
+test engine::game::tests::stress_flanker_tactic_follows_target_facing ... ok
+test engine::game::tests::player_never_enters_any_obstacle_aabb ... ok
+test engine::game::tests::stress_target_picking_prefers_nearest_enemy ... ok
+test engine::game::tests::obstacles_take_damage_and_destroy ... ok
+test engine::game::tests::npc_occluded_by_obstacle_between ... ok
+test engine::game::tests::stress_cover_seek_triggers_near_obstacle ... ok
+test engine::game::tests::settings_panel_toggle_and_adjust ... ok
+test engine::game::tests::start_menu_any_key_begins_run ... ok
+test engine::game::tests::firearm_reload_cycle_via_game ... ok
+test engine::game::tests::death_resets_all_ammo ... ok
+test engine::game::tests::level_advances_after_waves_per_level ... ok
+test engine::game::tests::fps_player_collides_with_map_obstacle ... ok
+test engine::lighting::tests::attenuation_falls_off_with_distance ... ok
+test engine::lighting::tests::build_packs_directional_points_and_shadow ... ok
+test engine::lighting::tests::build_with_no_lights_stays_disabled ... ok
+test engine::lighting::tests::diffuse_clamps_and_peaks ... ok
+test engine::lighting::tests::directional_light_faces_surface ... ok
+test engine::lighting::tests::light_uniform_default_is_disabled ... ok
+test engine::lighting::tests::light_uniform_layout_matches_wgsl ... ok
+test engine::lighting::tests::point_light_attenuation_and_range ... ok
+test engine::lighting::tests::shadow_bias_comparison ... ok
+test engine::lighting::tests::shadow_view_proj_maps_target_to_uv_center ... ok
+test engine::lighting::tests::specular_peaks_when_half_vector_aligns_with_normal ... ok
+test engine::lighting::tests::world_to_shadow_uv_mirrors_v_and_maps_depth ... ok
+test engine::map::tests::hash_inside_string_not_comment ... ok
+test engine::game::tests::gameover_freezes_kills ... ok
+test engine::game::tests::audio_synth_ambient_runs_with_tick ... ok
+test engine::map::tests::load_map_from_temp_file ... ok
+test engine::map::tests::multiline_array_values_parse ... ok
+test engine::map::tests::obstacle_kind_mapping ... ok
+test engine::map::tests::parse_error_missing_bracket_line_number ... ok
+test engine::map::tests::parse_error_missing_quote_line_number ... ok
+test engine::map::tests::parse_full_map_fields ... ok
+test engine::map::tests::parse_numbers_negative_decimal ... ok
+test engine::map::tests::parse_objective_nested_position ... ok
+test engine::map::tests::parse_obstacle_nested_position_size ... ok
+test engine::map::tests::parse_spawn_point_details ... ok
+test engine::map::tests::map_list_index_parses ... ok
+test engine::map::tests::rule_section_parses ... ok
+test engine::game::tests::level_does_not_advance_before_last_wave ... ok
+test engine::map::tests::spawn_point_empty_team_matches_any ... ok
+test engine::map::tests::reload_changes_data ... ok
+test engine::map::tests::unknown_keys_and_sections_ignored ... ok
+test engine::objective::tests::evaluate_capture_required_reached_and_tie ... ok
+test engine::objective::tests::evaluate_capture_unreachable_required_uses_majority ... ok
+test engine::objective::tests::evaluate_idempotent_after_won_team_set ... ok
+test engine::map::tests::spawn_point_team_filter_and_deterministic ... ok
+test engine::objective::tests::evaluate_kill_count ... ok
+test engine::objective::tests::evaluate_time_limit ... ok
+test engine::objective::tests::point_new_sets_fields_and_is_inside ... ok
+test engine::objective::tests::rule_kind_matches ... ok
+test engine::objective::tests::update_point_contested_decays_faster_than_empty ... ok
+test engine::objective::tests::update_point_decays_when_empty_or_contested ... ok
+test engine::objective::tests::update_point_opponent_flips_owned_point ... ok
+test engine::objective::tests::update_point_owner_present_holds ... ok
+test engine::objective::tests::update_point_progress_grows_toward_single_faction ... ok
+test engine::objective::tests::update_point_switches_owner_at_full ... ok
+test engine::physics::tests::aabb_overlap ... ok
+test engine::physics::tests::aabb_resolve_none_when_separated ... ok
+test engine::physics::tests::aabb_resolve_separates_on_minimal_axis ... ok
+test engine::physics::tests::aabb_separate ... ok
+test engine::physics::tests::collision_event_callback ... ok
+test engine::physics::tests::gravity_fall_and_ground_rest ... ok
+test engine::physics::tests::ground_bounce_with_restitution ... ok
+test engine::physics::tests::player_body_new_and_getters ... ok
+test engine::game::tests::bullets_do_not_destroy_obstacles ... ok
+test engine::physics::tests::player_collide_world_reports_push ... ok
+test engine::physics::tests::player_collides_uses_expanded_aabb ... ok
+test engine::physics::tests::player_diagonal_move_keeps_free_axis ... ok
+test engine::physics::tests::player_free_move_when_far_from_bodies ... ok
+test engine::physics::tests::player_pushed_out_of_aabb ... ok
+test engine::physics::tests::player_pushed_out_of_stacked_aabbs ... ok
+test engine::physics::tests::player_y_untouched_by_collision ... ok
+test engine::physics::tests::sphere_intersect ... ok
+test engine::procedural::tests::baked_light_faces_sun_side_brighter ... ok
+test engine::physics::tests::sphere_resolve ... ok
+test engine::procedural::tests::concave_ground_is_darker_than_flat ... ok
+test engine::procedural::tests::baked_light_in_unit_range ... ok
+test engine::procedural::tests::crater_mask_is_localized ... ok
+test engine::procedural::tests::flat_ground_has_no_ao_occlusion ... ok
+test engine::procedural::tests::linear_to_srgb_matches_reference ... ok
+test engine::procedural::tests::different_seed_differs ... ok
+test engine::procedural::tests::generate_is_deterministic_and_sized ... ok
+test engine::procedural::tests::marker_skin_has_darker_seams_than_plank_interior ... ok
+test engine::procedural::tests::marker_and_npc_skins_differ ... ok
+test engine::procedural::tests::marker_skin_is_warm_wood_tone ... ok
+test engine::game::tests::ai_npcs_stand_on_terrain_and_leave_idle ... ok
+test engine::renderer::npc_visual_tests::dead_body_15_parts_with_tint ... ok
+test engine::procedural::tests::marker_skin_texture_is_deterministic_and_sized ... ok
+test engine::renderer::npc_visual_tests::soldier_gun_rotates_with_yaw ... ok
+test engine::renderer::npc_visual_tests::soldier_parts_count_and_tint ... ok
+test engine::procedural::tests::npc_skin_has_camo_color_variety ... ok
+test engine::procedural::tests::npc_skin_texture_is_deterministic_and_sized ... ok
+test engine::renderer::npc_visual_tests::soldier_pos_translation_applies ... ok
+test engine::renderer::npc_visual_tests::soldier_torso_height ... ok
+test engine::renderer::quality_preset_tests::quality_low_medium_high_ordering ... ok
+test engine::renderer::quality_preset_tests::quality_medium_matches_existing_constants ... ok
+test engine::renderer::quality_preset_tests::quality_preset_default_and_label ... ok
+test engine::renderer::quality_preset_tests::terrain_lod_switch_uses_quality_params ... ok
+test engine::renderer::screenshot_pixel_tests::convert_bgra_pixels_to_rgba ... ok
+test engine::renderer::screenshot_pixel_tests::convert_pixels_rejects_bad_length_or_format ... ok
+test engine::renderer::screenshot_pixel_tests::convert_rgba_pixels_passthrough ... ok
+test engine::renderer::screenshot_pixel_tests::pixel_order_supported_formats ... ok
+test engine::renderer::simd_cull_tests::simd_cull_tail_batches_handled ... ok
+test engine::renderer::terrain_height_tests::terrain_flat_within_central_and_ring_zones ... ok
+test engine::renderer::terrain_height_tests::terrain_height_deterministic_and_same_source ... ok
+test engine::renderer::simd_cull_tests::simd_morph_matches_scalar ... ok
+test engine::game::tests::fps_player_moves_with_wasd ... ok
+test engine::renderer::terrain_lod_tests::terrain_coarse_height_interpolates_coarse_surface ... ok
+test engine::renderer::terrain_height_tests::terrain_hills_bounded_varied_and_gentle ... ok
+test engine::renderer::simd_cull_tests::simd_cull_matches_scalar ... ok
+test engine::renderer::terrain_lod_tests::terrain_lod_blend_morphs_between_levels ... ok
+test engine::renderer::terrain_lod_tests::terrain_lod_density_table ... ok
+test engine::renderer::terrain_lod_tests::terrain_lod_level_selection_by_distance ... ok
+test engine::simd::simd_shockwave_tests::shockwave_all_paths_match_scalar ... ok
+test engine::simd::simd_shockwave_tests::shockwave_physical_properties ... ok
+test engine::weapon_data::tests::all_35_weapons_present ... ok
+test engine::weapon_data::tests::build_firearm_matches_spec ... ok
+test engine::weapon_data::tests::damage_tiers_monotonic ... ok
+test engine::weapon_data::tests::faction_split_17_18 ... ok
+test engine::game::tests::friendly_fire_off_for_player_projectiles ... ok
+test engine::weapon_data::tests::kills_to_kill_formula_v3 ... ok
+test engine::weapon_data::tests::part_multiplier_lookup_v3 ... ok
+test engine::weapon_data::tests::part_tiers_valid ... ok
+test engine::weapon_data::tests::shotguns_have_8_pellets ... ok
+test engine::weapon_data::tests::spot_check_doc_values ... ok
+test engine::weapon_data::tests::tiered_damage_lookup ... ok
+test engine::map::tests::load_map_validation_errors ... ok
+test engine::weapons::tests::firearm_ammo_ratio_and_reload_progress_bounds ... ok
+test engine::weapons::tests::firearm_current_kick_deterministic_and_bounded ... ok
+test engine::weapons::tests::firearm_empty_magazine_auto_reloads_and_cannot_fire ... ok
+test engine::weapons::tests::firearm_fire_interval_forwards_to_weapon ... ok
+test engine::weapons::tests::firearm_full_magazine_fires_and_consumes ... ok
+test engine::weapons::tests::firearm_propagates_ballistics_to_projectiles ... ok
+test engine::weapons::tests::firearm_reload_advances_and_refills_from_reserve ... ok
+test engine::weapons::tests::firearm_reload_refills_only_remaining_reserve ... ok
+test engine::weapons::tests::grenade_constants_locked ... ok
+test engine::weapons::tests::grenade_fuse_countdown_and_expiry ... ok
+test engine::weapons::tests::grenade_initial_velocity_uses_normalized_dir_times_speed ... ok
+test engine::weapons::tests::grenade_parabola_horizontal_and_vertical ... ok
+test engine::weapons::tests::grenade_uses_passed_fuse_value ... ok
+test engine::weapons::tests::melee_weapon_trait_behavior ... ok
+test engine::weapons::tests::projectile_destroyed_when_lifetime_exceeded ... ok
+test engine::weapons::tests::projectile_destroyed_when_range_exceeded ... ok
+test engine::weapons::tests::projectile_gravity_drops_ballistic ... ok
+test engine::weapons::tests::projectile_part_multiplier_by_distance ... ok
+test engine::weapons::tests::projectile_update_advances_in_straight_line ... ok
+test engine::weapons::tests::projectile_update_normalizes_direction ... ok
+test engine::weapons::tests::projectile_weapon_trait_behavior ... ok
+test engine::weapons::tests::rack_reset_all_ammo_refills_every_slot ... ok
+test engine::weapons::tests::reset_ammo_restores_magazine_and_reserve ... ok
+test engine::weapons::tests::thompson_smg_firearm_magazine_reserve_and_recoil ... ok
+test engine::weapons::tests::thompson_smg_params_locked ... ok
+test engine::weapons::tests::weapon_rack_active_firearm_mutates_active_slot ... ok
+test engine::weapons::tests::weapon_rack_empty_is_safe_for_switch ... ok
+test engine::weapons::tests::weapon_rack_new_starts_at_zero ... ok
+test engine::weapons::tests::weapon_rack_switch_cycles_next_and_prev ... ok
+test engine::weapons::tests::weapon_rack_switch_to_valid_and_ignores_invalid ... ok
+test engine::weapons::tests::weapon_rack_update_timer_and_switch_finishes ... ok
+test engine::procedural::tests::default_skin_textures_have_full_sizes ... ok
+test net::tests::decode_rejects_bad_magic ... ok
+test net::tests::decode_rejects_bad_version ... ok
+test net::tests::decode_rejects_invalid_name_utf8 ... ok
+test net::tests::decode_rejects_trailing_data ... ok
+test net::tests::decode_rejects_truncated ... ok
+test net::tests::decode_rejects_unknown_type ... ok
+test net::tests::input_payload_layout_is_fixed ... ok
+test net::tests::interpolate_stale_or_equal_timestamps ... ok
+test net::tests::interpolate_time_advance ... ok
+test engine::weapon_data::tests::gun_meshes_horizontal_orientation ... ok
+test engine::weapon_data::tests::gun_fp_viewspace_no_clip ... ok
+test net::tests::join_name_truncated_to_255_bytes ... ok
+test net::tests::lerp_clamps_out_of_range ... ok
+test net::tests::lerp_endpoints ... ok
+test engine::weapon_data::tests::gun_mesh_max_sizes_report ... ok
+test net::tests::lerp_midpoint ... ok
+test net::tests::lerp_rotation_takes_shortest_arc ... ok
+test engine::weapon_data::tests::weapon_keys_unique_and_mesh_mapped ... ok
+test net::tests::objective_state_decode_rejects_invalid_utf8 ... ok
+test net::tests::objective_state_decode_rejects_oversized_point_count ... ok
+test net::tests::objective_state_decode_rejects_truncated_prefixes ... ok
+test net::tests::objective_state_payload_layout_is_fixed ... ok
+test net::tests::objective_state_points_capped_at_max ... ok
+test net::tests::position_payload_layout_is_fixed ... ok
+test net::tests::remote_player_update_and_query ... ok
+test net::tests::objective_state_roundtrip_multi_point_chinese_ids ... ok
+test net::tests::roundtrip_all_variants ... ok
+test net::tests::roundtrip_unicode_name ... ok
+test net::tests::snapshot_npcs_capped_at_max ... ok
+test net::tests::snapshot_payload_layout_is_fixed ... ok
+test ui::tests::adjust_volume_sensitivity_clamps ... ok
+test ui::tests::bar_element_expands_to_two_quads ... ok
+test net::tests::udp_loopback_join_position_action ... ok
+test net::tests::udp_loopback_handshake_input_snapshot_roundtrip ... ok
+test net::tests::udp_loopback_leave_roundtrip ... ok
+test ui::tests::bind_is_mutually_exclusive_with_default_reset ... ok
+test ui::tests::binding_action_codes_names_and_lookup ... ok
+test ui::tests::cycle_settings_selection_wraps_13_rows ... ok
+test ui::tests::font_table_covers_printable_ascii ... ok
+test ui::tests::game_hud_shows_level ... ok
+test ui::tests::glyph_falls_back_to_question_mark ... ok
+test ui::tests::handle_event_never_consumes_input ... ok
+test ui::tests::health_color_thresholds ... ok
+test ui::tests::hit_marker_shows_and_decays ... ok
+test ui::tests::key_bindings_defaults_and_labels ... ok
+test ui::tests::layout_ammo_bar_and_text ... ok
+test ui::tests::layout_has_fps_text ... ok
+test ui::tests::layout_health_bar_ratio ... ok
+test ui::tests::layout_health_ratio_clamped ... ok
+test ui::tests::layout_minimap_placeholder ... ok
+test ui::tests::layout_outputs_positive_quads ... ok
+test ui::tests::level_defaults_to_one ... ok
+test ui::tests::minimap_obstacles_render_all_kinds ... ok
+test ui::tests::minimap_rotates_with_player_yaw ... ok
+test ui::tests::minimap_unit_projection ... ok
+test ui::tests::quality_cycles_three_options ... ok
+test ui::tests::rebind_begin_complete_cancel_flow ... ok
+test ui::tests::reloading_indicator_shown ... ok
+test ui::tests::render_text_a_produces_glyph_pixels ... ok
+test ui::tests::render_text_advances_cursor_per_char ... ok
+test ui::tests::render_text_empty_has_no_quads ... ok
+test ui::tests::render_text_space_is_blank ... ok
+test ui::tests::resolution_cycles_five_options ... ok
+test ui::tests::selected_action_maps_settings_selection ... ok
+test ui::tests::settings_defaults_resolution_and_quality ... ok
+test ui::tests::settings_hint_lists_rebind_controls ... ok
+test ui::tests::settings_key_rows_selectable ... ok
+test ui::tests::settings_shows_rebind_prompt ... ok
+test ui::tests::settings_shows_resolution_and_quality_rows ... ok
+test ui::tests::settings_toggle_and_elements ... ok
+test ui::tests::start_menu_has_controls_hint ... ok
+test ui::tests::text_width_matches_char_advance ... ok
+test ui::tests::winit_keycode_indices_match_table ... ok
+test ui::tests::start_menu_hint_blinks_by_elapsed ... ok
+test engine::simd::simd_shockwave_tests::shockwave_path_microbench ... ok
+test engine::game::tests::map_obstacles_ground_and_settle ... ok
+test engine::game::tests::explosion_knockback_moves_and_decays ... ok
+test net::tests::client_snapshot_timeout_detects_disconnect ... ok
+test engine::game::tests::player_damage_and_gameover ... ok
+test engine::game::tests::projectile_damages_npc ... ok
+test engine::game::tests::special_waves_keep_clear_and_progress ... ok
+test engine::game::tests::projectile_kill_scores_and_removes_npc ... ok
+test engine::game::tests::reinforcement_wave_spawns_mid_wave ... ok
+test engine::game::tests::projectile_hit_shows_hit_marker ... ok
+test engine::game::tests::stress_npc_combat_damages_target_only ... ok
+test engine::game::tests::stress_spawn_creates_balanced_two_teams ... ok
+test engine::game::tests::net_objective_state_loopback_broadcast_consumed ... ok
+test engine::game::tests::stress_parallel_step_matches_serial ... ok
+test engine::game::tests::stress_wipe_respawns_full_battle ... ok
+test engine::game::tests::wave_profile_drives_spawn ... ok
+test engine::game::tests::objective_targets_per_mode_and_stress_victory ... ok
+test engine::game::tests::survive_rule_advances_waves_and_wins_at_last ... ok
+test engine::renderer::simd_cull_tests::simd_cull_microbench ... ok
+test engine::game::tests::wave_clear_awards_bonus ... ok
+test engine::game::tests::weapon_fire_rate_limits_shots ... ok
+test engine::game::tests::wave_spawns_after_clear ... ok
+test engine::game::tests::weapon_fire_hits_physics_body ... ok
+test engine::game::tests::bullet_expiry_and_obstacle_no_explosion ... ok
+test engine::game::tests::wave_scales_count_speed_hp ... ok
+test engine::game::tests::weapon_switch_stability_all_slots ... ok
+test engine::game::tests::net_server_client_loopback_closed_loop ... ok
+
+failures:
+
+---- config::tests::load_tolerates_old_format_without_display_fields stdout ----
+
+thread 'config::tests::load_tolerates_old_format_without_display_fields' (33272) panicked at src\config.rs:316:9:
+assertion `left == right` failed: 旧格式缺 quality 行应回退默认
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    config::tests::load_tolerates_old_format_without_display_fields
+
+test result: FAILED. 404 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.11s
+
+error: test failed, to rerun pass `--bin steel-front`

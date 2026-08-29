@@ -1,0 +1,110 @@
+﻿cargo : warning: unused imports: `Mat4` and `Vec3`
+At line:1 char:129
++ ... ew($false); cargo test --release --bin steel-front assets 2>&1 | Out- ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused...at4` and `Vec3`:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ --> src\engine\assets.rs:6:12
+  |
+6 | use glam::{Mat4, Vec3};
+  |            ^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary trailing semicolon
+  --> src\engine\assets.rs:79:6
+   |
+79 |     };
+   |      ^ help: remove this semicolon
+   |
+   = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s3`
+   --> src\engine\assets.rs:275:17
+    |
+275 |             let s3 = GdipGetImageWidth(img, &mut w);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s3`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s4`
+   --> src\engine\assets.rs:276:17
+    |
+276 |             let s4 = GdipGetImageHeight(img, &mut h);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s4`
+
+warning: unused variable: `row0`
+   --> src\engine\assets.rs:305:17
+    |
+305 |             let row0 = std::slice::from_raw_parts(locked.data, (w as usize).min(8) * 4);
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_row0`
+
+warning: field `base_color` is never read
+  --> src\engine\assets.rs:14:9
+   |
+10 | pub struct ImportedMesh {
+   |            ------------ field in this struct
+...
+14 |     pub base_color: [f32; 3],
+   |         ^^^^^^^^^^
+   |
+   = note: `ImportedMesh` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored dur
+ing dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `empty` is never used
+  --> src\engine\assets.rs:18:12
+   |
+17 | impl ImportedMesh {
+   | ----------------- associated function in this implementation
+18 |     pub fn empty() -> Self {
+   |            ^^^^^
+
+warning: function `parse_glb` is never used
+   --> src\engine\assets.rs:128:8
+    |
+128 | pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
+    |        ^^^^^^^^^
+
+warning: function `GdiplusShutdown` is never used
+   --> src\engine\assets.rs:251:12
+    |
+251 |         fn GdiplusShutdown(t: usize);
+    |            ^^^^^^^^^^^^^^^
+
+warning: creating a mutable reference to mutable static
+   --> src\engine\assets.rs:259:32
+    |
+259 |                 GdiplusStartup(&mut TOKEN, &i, std::ptr::null_mut());
+    |                                ^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the st
+atic is used or if any other reference is created for the static while the mutable reference lives
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/static-mut-references.html>
+    = note: `#[warn(static_mut_refs)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+help: use `&raw mut` instead to create a raw pointer
+    |
+259 |                 GdiplusStartup(&raw mut TOKEN, &i, std::ptr::null_mut());
+    |                                 +++
+
+warning: comparison is useless due to type limits
+    --> src\engine\game.rs:5644:13
+     |
+5644 |             server_game.npcs.len() >= 0
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_comparisons)]` on by default
+
+warning: `steel-front` (bin "steel-front" test) generated 11 warnings (run `cargo fix --bin "steel-front" -p steel-fron
+t --tests` to apply 4 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.17s
+     Running unittests src\main.rs (target\release\deps\steel_front-b67e979483208ded.exe)
+
+running 3 tests
+test engine::assets::tests::obj_parse_cube ... ok
+test engine::assets::tests::obj_parse_tri ... ok
+test engine::assets::tests::png_decode_rgba ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 399 filtered out; finished in 0.04s
+

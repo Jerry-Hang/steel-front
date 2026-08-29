@@ -1,0 +1,48 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:337
++ ... rce -ErrorAction SilentlyContinue; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0308]: mismatched types
+  --> build_spv_rt.rs:86:20
+   |
+86 |     defs.push((15, spv_str("main".as_bytes()).len() == 0, f_main, 0)); // 占位（下一行真实）
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Vec<u32>`, found `bool`
+   |
+   = note: expected struct `Vec<u32>`
+                found type `bool`
+
+error[E0308]: mismatched types
+    --> build_spv_rt.rs:86:15
+     |
+  86 |     defs.push((15, spv_str("main".as_bytes()).len() == 0, f_main, 0)); // 占位（下一行真实）
+     |          ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected a tuple with 2 elements, found one
+ with 4 elements
+     |          |
+     |          arguments to this method are incorrect
+     |
+     = note: expected tuple `(u32, Vec<u32>)`
+                found tuple `(u32, Vec<u32>, u32, {integer})`
+note: method defined here
+    --> C:\Users\Jerry-Huang\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\ve
+c\mod.rs:1003:12
+     |
+1003 |     pub fn push(&mut self, value: T) {
+     |            ^^^^
+
+warning: variable does not need to be mutable
+   --> build.rs:805:11
+    |
+805 |     { let mut bb = spv_rt_bench::rt_bench_spv(); let mut by = Vec::with_capacity(bb.len()*4); for w in &bb { by.e
+xtend_from_slice(&...
+    |           ----^^
+    |           |
+    |           help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `steel-front` (build script) generated 1 warning
+error: could not compile `steel-front` (build script) due to 2 previous errors; 1 warning emitted

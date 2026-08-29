@@ -1,0 +1,77 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:181
++ ... ct -Last 1; cargo test --release --bin steel-front assets 2>&1 | Out- ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused imports: `Mat4` and `Vec3`
+ --> src\engine\assets.rs:6:12
+  |
+6 | use glam::{Mat4, Vec3};
+  |            ^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary trailing semicolon
+  --> src\engine\assets.rs:80:6
+   |
+80 |     };
+   |      ^ help: remove this semicolon
+   |
+   = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+   --> src\engine\assets.rs:123:23
+    |
+123 |     Ok(ImportedMesh { verts, indices, base_color: [0.7, 0.7, 0.7] })
+    |                       ^^^^^ expected an array with a size of 11, found one with a size of 8
+    |
+    = note: expected struct `Vec<[f32; 11]>`
+               found struct `Vec<[f32; 8]>`
+
+error[E0308]: mismatched types
+    --> src\engine\assets.rs:68:28
+     |
+  68 |                 verts.push([p[0], p[1], p[2], n[0], n[1], n[2], t[0], t[1], 0.7, 0.7, 0.7]);
+     |                       ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected an array wit
+h a size of 8, found one with a size of 11
+     |                       |
+     |                       arguments to this method are incorrect
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\ve
+c\mod.rs:1003:12
+     |
+1003 |     pub fn push(&mut self, value: T) {
+     |            ^^^^
+
+warning: unused variable: `s3`
+   --> src\engine\assets.rs:327:17
+    |
+327 |             let s3 = GdipGetImageWidth(img, &mut w);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s3`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s4`
+   --> src\engine\assets.rs:328:17
+    |
+328 |             let s4 = GdipGetImageHeight(img, &mut h);
+    |                 ^^ help: if this is intentional, prefix it with an underscore: `_s4`
+
+warning: unused variable: `row0`
+   --> src\engine\assets.rs:357:17
+    |
+357 |             let row0 = std::slice::from_raw_parts(locked.data, (w as usize).min(8) * 4);
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_row0`
+
+warning: unused variable: `cam`
+   --> src\main.rs:910:13
+    |
+910 |         let cam = &self.camera;
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_cam`
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `steel-front` (bin "steel-front" test) generated 6 warnings
+error: could not compile `steel-front` (bin "steel-front" test) due to 2 previous errors; 6 warnings emitted
