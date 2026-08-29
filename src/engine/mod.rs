@@ -29,6 +29,7 @@ pub mod meshgen;
 pub mod objective;
 pub mod physics;
 pub mod procedural;
+pub mod ray_tracer;
 pub mod renderer;
 pub mod simd;
 pub mod weapons;
