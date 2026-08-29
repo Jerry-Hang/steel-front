@@ -18,6 +18,7 @@ pub fn rt_bench_spv() -> Vec<u32> {
     emit(&mut w, 17, &[1]);      // Shader
     emit(&mut w, 17, &[4472]);   // RayQueryKHR
     emit(&mut w, 17, &[5340]);   // AccelerationStructureKHR
+    emit(&mut w, 17, &[4479]);   // RayTracingKHR
     emit(&mut w, 14, &[0, 1]);   // MemoryModel Logical GLSL450
 
     // ---- 预先分配所有 id（定义在下面按序发射）----
@@ -30,6 +31,7 @@ pub fn rt_bench_spv() -> Vec<u32> {
     let t_v3u = nid(&mut i);
     let t_v3f = nid(&mut i);
     let t_accel = nid(&mut i);
+    let t_u64 = nid(&mut i);
     let t_p_acc = nid(&mut i);
     let t_p_u32 = nid(&mut i);
     let t_p_v3u = nid(&mut i);
@@ -59,6 +61,7 @@ pub fn rt_bench_spv() -> Vec<u32> {
     let fy = nid(&mut i);
     let dir = nid(&mut i);
     let tlas_l = nid(&mut i);
+    let tlas_c = nid(&mut i);
     let loop_h = nid(&mut i);
     let cont = nid(&mut i);
     let merge = nid(&mut i);
@@ -85,10 +88,11 @@ pub fn rt_bench_spv() -> Vec<u32> {
     emit(&mut w, 20, &[t_bool]);
     emit(&mut w, 21, &[t_u32, 32, 0]);
     emit(&mut w, 22, &[t_f32, 32]);
+    emit(&mut w, 21, &[t_u64, 64, 0]);
     emit(&mut w, 23, &[t_v3u, t_u32, 3]);
     emit(&mut w, 23, &[t_v3f, t_f32, 3]);
     emit(&mut w, 5341, &[t_accel]);
-    emit(&mut w, 32, &[t_p_acc, 0, t_accel]);
+    emit(&mut w, 32, &[t_p_acc, 12, t_u64]);
     emit(&mut w, 32, &[t_p_u32, 12, t_u32]);
     emit(&mut w, 32, &[t_p_v3u, 1, t_v3u]);
     emit(&mut w, 4472, &[t_rq]);
@@ -101,38 +105,41 @@ pub fn rt_bench_spv() -> Vec<u32> {
     emit(&mut w, 43, &[c1000f, t_f32, 0x447a0000]);
     // 方向 z 分量直接用 0.001（c_smallf 与 c001f 复用）
     let c_smallf = c001f;
-    emit(&mut w, 46, &[vzero, t_v3f, c0f, c0f, c0f]);
+    emit(&mut w, 44, &[vzero, t_v3f, c0f, c0f, c0f]);
     emit(&mut w, 43, &[one, t_u32, 1]);
     // ---- 全局变量 ----
-    emit(&mut w, 59, &[g_tlas, t_p_acc]);
-    emit(&mut w, 59, &[g_hits, t_p_u32]);
-    emit(&mut w, 59, &[g_gid, t_p_v3u]);
+    emit(&mut w, 59, &[g_tlas, t_p_acc, 0]);
+    emit(&mut w, 59, &[g_hits, t_p_u32, 12]);
+    emit(&mut w, 59, &[g_gid, t_p_v3u, 1]);
 
     // ---- 函数 main ----
     emit(&mut w, 54, &[f_main, t_void, 0, t_fn]);
     emit(&mut w, 248, &[lbl_entry]);
-    emit(&mut w, 59, &[rq, t_p_rq]);
+    emit(&mut w, 59, &[rq, t_p_rq, 7]);
     emit(&mut w, 61, &[gv, t_v3u, g_gid]);
     emit(&mut w, 186, &[gx, t_u32, gv, 0]);
     emit(&mut w, 186, &[gy, t_u32, gv, 1]);
     emit(&mut w, 111, &[fx, t_f32, gx]);
     emit(&mut w, 111, &[fy, t_f32, gy]);
     emit(&mut w, 80, &[dir, t_v3f, fx, fy, c001f]);
-    emit(&mut w, 61, &[tlas_l, t_accel, g_tlas]);
-    emit(&mut w, 4473, &[rq, tlas_l, c0, c255, vzero, c001f, dir, c1000f]);
+    emit(&mut w, 61, &[tlas_l, t_u64, g_tlas]);
+    emit(&mut w, 4447, &[tlas_c, t_accel, tlas_l]);
+    emit(&mut w, 4473, &[rq, tlas_c, c0, c255, vzero, c001f, dir, c1000f]);
+    emit(&mut w, 249, &[loop_h]);
     emit(&mut w, 248, &[loop_h]);
     emit(&mut w, 246, &[merge, latch, 0]);
-    emit(&mut w, 4477, &[cont, t_bool, rq]);
+    emit(&mut w, 4477, &[t_bool, cont, rq]);
     emit(&mut w, 250, &[cont, latch, merge]);
     emit(&mut w, 248, &[latch]);
     emit(&mut w, 249, &[loop_h]);
     emit(&mut w, 248, &[merge]);
-    emit(&mut w, 4479, &[ityp, t_u32, rq, c0]);
+    emit(&mut w, 4479, &[t_u32, ityp, rq, c0]);
     emit(&mut w, 171, &[ishit, t_bool, ityp, c0]);
     emit(&mut w, 250, &[ishit, l_hit, l_skip]);
     emit(&mut w, 248, &[l_hit]);
     emit(&mut w, 65, &[p_hit, t_p_u32, g_hits, gx]);
     emit(&mut w, 62, &[p_hit, one]);
+    emit(&mut w, 249, &[l_skip]);
     emit(&mut w, 248, &[l_skip]);
     emit(&mut w, 253, &[]);
     emit(&mut w, 56, &[]);

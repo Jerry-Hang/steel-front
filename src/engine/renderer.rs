@@ -1112,6 +1112,14 @@ impl Renderer {
         physical_device_features.sampler_anisotropy = supported_features.sampler_anisotropy;
 
         let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
+        // 2026-08-29：RT 特性链（rayQuery + accelerationStructure features——扩展启用 ≠ 特性启用！）
+        let mut rq_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+        rq_features.ray_query = vk::TRUE;
+        let mut as_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+        as_features.acceleration_structure = vk::TRUE;
+        let mut bda_features = vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR::default();
+        bda_features.buffer_device_address = vk::TRUE;
+        // 链到 mesh 特性（若无 mesh 则直接挂在 device_create_info.pNext）
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extensions)
@@ -1121,6 +1129,11 @@ impl Renderer {
         } else {
             device_create_info
         };
+        // RT 特性链（Ext 启用 ≠ Feature 启用；rayQuery/accelStructure 必须显式 true）
+        let device_create_info = device_create_info
+            .push_next(&mut as_features)
+            .push_next(&mut bda_features)
+            .push_next(&mut rq_features);
 
         {
             let mut names = Vec::new();
@@ -4580,7 +4593,7 @@ impl Renderer {
             .map_err(|e| format!("RT_BENCH module: {e}"))?;
         let set_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
-            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
         let hits_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(1)
@@ -4625,7 +4638,7 @@ impl Renderer {
         }
         // 4) 描述符集（accel + hits）
         let dset_pool_info = vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1);
         let dset_pool_info2 = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
@@ -4642,23 +4655,35 @@ impl Renderer {
             .set_layouts(&dset_layouts);
         let dset = unsafe { self.device.allocate_descriptor_sets(&dset_alloc) }
             .map_err(|e| format!("RT dset: {e}"))?[0];
-        let accel_write = vk::WriteDescriptorSetAccelerationStructureKHR {
-            s_type: vk::StructureType::WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
-            p_next: std::ptr::null(),
-            acceleration_structure_count: 1,
-            p_acceleration_structures: std::slice::from_ref(&assets.tlas).as_ptr(),
-            _marker: std::marker::PhantomData,
+        // 加速结构地址缓冲（规范路径：地址→OpConvertUToAccelerationStructureKHR）
+        let tlas_addr = unsafe {
+            let a = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
+            let info = vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(assets.tlas);
+            a.get_acceleration_structure_device_address(&info)
+        };
+        let (addr_buf, addr_mem) = self
+            .create_host_buffer(vk::BufferUsageFlags::STORAGE_BUFFER, 8)
+            .map_err(|e| format!("addr buf: {e}"))?;
+        unsafe {
+            let m = self.device.map_memory(addr_mem, 0, 8, vk::MemoryMapFlags::empty()).map_err(|e| format!("addr map: {e}"))?;
+            std::ptr::copy_nonoverlapping(&tlas_addr as *const u64 as *const u8, m as *mut u8, 8);
+            self.device.unmap_memory(addr_mem);
+        }
+        let addr_info = vk::DescriptorBufferInfo {
+            buffer: addr_buf,
+            offset: 0,
+            range: 8,
         };
         let write0 = vk::WriteDescriptorSet {
             s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
-            p_next: &accel_write as *const _ as *const std::ffi::c_void,
+            p_next: std::ptr::null(),
             dst_set: dset,
             dst_binding: 0,
             dst_array_element: 0,
             descriptor_count: 1,
-            descriptor_type: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
             p_image_info: std::ptr::null(),
-            p_buffer_info: std::ptr::null(),
+            p_buffer_info: std::slice::from_ref(&addr_info).as_ptr(),
             p_texel_buffer_view: std::ptr::null(),
             _marker: std::marker::PhantomData,
         };

@@ -1,0 +1,20 @@
+# -*- coding: utf-8 -*-
+import io
+s = io.open('src/main.rs', encoding='utf-8').read()
+s = s.replace("""            // 2026-08-28：枪顶点已静态化，bob/后坐/相机跟随全走实例矩阵（借 renderer 前预计算）
+            let fp_gun_m = if show_gun { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY };
+            if show_gun {
+                renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+                renderer.set_first_person_gun_model(fp_gun_m);
+            } else {
+                renderer.set_first_person_gun_mesh(&[], &[]);
+                renderer.set_first_person_gun_model(fp_gun_m);
+            }""", """            if show_gun {
+                renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+                renderer.set_first_person_gun_model(fp_gun_pre);
+            } else {
+                renderer.set_first_person_gun_mesh(&[], &[]);
+                renderer.set_first_person_gun_model(fp_gun_pre);
+            }""")
+io.open('src/main.rs', 'w', encoding='utf-8', newline='').write(s)
+print('use pre')
