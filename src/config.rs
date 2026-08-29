@@ -37,7 +37,7 @@ impl Default for GameConfig {
             resolution: RESOLUTIONS[0],
             resolution_explicit: false,
             quality: 2, // HIGH（2026-08-28：用户机器全高实测 —— RTX 5060L + Zen4）
-            pt_enable: false, // 2026-08-29 默认关（保稳定）；RV3D_PT_LIVE=1 环境变量可随时开全景 PT；重启后驱动恢复即可爽玩！
+            pt_enable: true, // 2026-08-29 全景路径追踪默认开启（铁绝不超显存：全常驻 <2MB！）
             rt_enable: true,
         }
     }

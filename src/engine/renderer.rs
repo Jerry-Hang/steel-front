@@ -4506,12 +4506,10 @@ impl Renderer {
             return Ok(());
         }
         let boxes = vec![
-            crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [40.0, 0.5, 40.0], material: 0 },
-            crate::engine::ray_tracer::PtBox { center: [0.0, 0.6, -3.0], half: [1.2, 1.2, 1.2], material: 1 },
-            crate::engine::ray_tracer::PtBox { center: [-6.0, 1.0, 2.0], half: [1.0, 1.0, 1.0], material: 2 },
-            crate::engine::ray_tracer::PtBox { center: [6.0, 0.8, 3.0], half: [1.0, 0.8, 1.0], material: 3 },
-            crate::engine::ray_tracer::PtBox { center: [2.0, 0.6, -8.0], half: [0.8, 0.6, 0.8], material: 1 },
-            crate::engine::ray_tracer::PtBox { center: [-3.0, 0.7, -7.0], half: [0.9, 0.7, 0.9], material: 2 },
+            crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [50.0, 0.5, 50.0], material: 0 },
+            crate::engine::ray_tracer::PtBox { center: [1.0, 1.0, 0.0], half: [2.0, 2.0, 1.0], material: 1 },
+            crate::engine::ray_tracer::PtBox { center: [-4.0, 1.5, -2.0], half: [1.5, 1.5, 1.5], material: 2 },
+            crate::engine::ray_tracer::PtBox { center: [0.5, 1.0, 5.0], half: [0.8, 0.8, 0.8], material: 3 },
         ];
         let assets = self.build_pt_as(&boxes)?;
         let vs_module = self.create_shader_module(&crate::shaders::PT_FRAME_SPV.to_vec()).map_err(|e| format!("PT m: {e}"))?;
@@ -4772,12 +4770,10 @@ impl Renderer {
         // 每帧重建成本高——首次构建后常驻（用 self 字段！简单起见先每帧全建——50G rays/s 预算下 AS+管线新建 ~1ms）
         // TODO: 常驻化（字段缓存）——先验证管线！
         let boxes = vec![
-            crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [40.0, 0.5, 40.0], material: 0 },
-            crate::engine::ray_tracer::PtBox { center: [0.0, 0.6, -3.0], half: [1.2, 1.2, 1.2], material: 1 },
-            crate::engine::ray_tracer::PtBox { center: [-6.0, 1.0, 2.0], half: [1.0, 1.0, 1.0], material: 2 },
-            crate::engine::ray_tracer::PtBox { center: [6.0, 0.8, 3.0], half: [1.0, 0.8, 1.0], material: 3 },
-            crate::engine::ray_tracer::PtBox { center: [2.0, 0.6, -8.0], half: [0.8, 0.6, 0.8], material: 1 },
-            crate::engine::ray_tracer::PtBox { center: [-3.0, 0.7, -7.0], half: [0.9, 0.7, 0.9], material: 2 },
+            crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [50.0, 0.5, 50.0], material: 0 },
+            crate::engine::ray_tracer::PtBox { center: [1.0, 1.0, 0.0], half: [2.0, 2.0, 1.0], material: 1 },
+            crate::engine::ray_tracer::PtBox { center: [-4.0, 1.5, -2.0], half: [1.5, 1.5, 1.5], material: 2 },
+            crate::engine::ray_tracer::PtBox { center: [0.5, 1.0, 5.0], half: [0.8, 0.8, 0.8], material: 3 },
         ];
         let assets = self.build_pt_as(&boxes)?;
         let vs_module = self
@@ -8000,6 +7996,10 @@ impl Renderer {
             }
         }
 
+        unsafe {
+            self.device.cmd_end_render_pass(command_buffer);
+        }
+
         // ===== 2026-08-29 路径追踪全景：全部记录进主命令缓冲（零第二提交/围栏冲突；常驻零分配）=====
         if self.pt_live_enabled && self.pt_resident.is_some() {
             let sw_img = self.swapchain_images[image_index as usize];
@@ -8051,7 +8051,6 @@ impl Renderer {
         }
 
         unsafe {
-            self.device.cmd_end_render_pass(command_buffer);
             self.device
                 .end_command_buffer(command_buffer)
                 .map_err(|e| format!("结束命令缓冲失败: {}", e))?;
