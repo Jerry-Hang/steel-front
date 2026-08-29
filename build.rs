@@ -802,6 +802,19 @@ fn main() {
     output.push_str("/// RT 求交基准 SPIR-V（手工汇编；naga 不支持 WGSL ray-query）\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const RT_BENCH_SPV: &[u32] = &{:?};\n\n", spv_rt_bench::rt_bench_spv()));
+    // PT 帧着色器（手工 asm，已通过 spirv-val）
+    {
+        let bytes = std::fs::read(Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("screenshots").join("ptframe.spv")).ok();
+        if let Some(bb) = bytes {
+            let mut wv = Vec::with_capacity(bb.len() / 4);
+            for i in 0..bb.len() / 4 {
+                wv.push(u32::from_le_bytes([bb[i*4], bb[i*4+1], bb[i*4+2], bb[i*4+3]]));
+            }
+            output.push_str("/// PT 帧 SPIR-V\n");
+            output.push_str("#[allow(dead_code)]\n");
+            output.push_str(&format!("pub const PT_FRAME_SPV: &[u32] = &{:?};\n\n", wv));
+        }
+    }
     { let mut bb = spv_rt_bench::rt_bench_spv(); let mut by = Vec::with_capacity(bb.len()*4); for w in &bb { by.extend_from_slice(&w.to_le_bytes()); } let _ = std::fs::write(Path::new(&out_dir).join("rt_bench.spv"), &by); }
     { let bb = spv_rt_bench::rt_bench_spv();
       let mut loader = rspirv::dr::Loader::new();

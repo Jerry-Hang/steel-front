@@ -4496,10 +4496,10 @@ impl Renderer {
             idx.extend_from_slice(&boxidx);
         }
         let (vbuf, vmem) = self
-            .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, verts.len() as u64)
+            .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, verts.len() as u64)
             .map_err(|e| format!("PT 顶点缓冲: {e}"))?;
         let (ibuf, imem) = self
-            .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, (n_idx * 4) as u64)
+            .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, (n_idx * 4) as u64)
             .map_err(|e| format!("PT 索引缓冲: {e}"))?;
         unsafe {
             let vp = self.device.map_memory(vmem, 0, verts.len() as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map v: {e}"))?;
@@ -4531,7 +4531,7 @@ impl Renderer {
         geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
         let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
-            ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &[32], &mut size_info);
+            ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &[(boxes.len() * 12) as u32], &mut size_info);
         }
         let count = size_info.acceleration_structure_size;
         let (asbuf, asmem) = self
@@ -4555,7 +4555,7 @@ impl Renderer {
         };
         let inst_bytes: &[u8] = unsafe { std::slice::from_raw_parts(&instance as *const _ as *const u8, std::mem::size_of::<vk::AccelerationStructureInstanceKHR>()) };
         let (inst_buf, inst_mem) = self
-            .create_device_local_buffer(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, inst_bytes, "pt-inst")?;
+            .create_device_local_buffer(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, inst_bytes, "pt-inst")?;
         let inst_addr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(inst_buf); self.device.get_buffer_device_address(&i) };
 
         // TLAS 几何（实例）
@@ -4599,6 +4599,210 @@ impl Renderer {
             inst_buf: inst_buf,
             inst_mem: inst_mem,
         })
+    }
+
+    /// PT 参考帧渲染（2026-08-29 里程碑1/2）：相机射线 + 命中着色 + 图像输出 → PNG
+    pub fn run_pt_view(
+        &mut self,
+        boxes: &[crate::engine::ray_tracer::PtBox],
+        size: u32,
+    ) -> Result<(), String> {
+        let assets = self.build_pt_as(boxes)?;
+        let vs_module = self
+            .create_shader_module(&crate::shaders::PT_FRAME_SPV.to_vec())
+            .map_err(|e| format!("PT_FRAME module: {e}"))?;
+        let as_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let img_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout];
+        let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
+        let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }
+            .map_err(|e| format!("PT set: {e}"))?;
+        let pipe_layouts = [set_layout_handle];
+        let pc_ranges: [vk::PushConstantRange; 0] = [];
+        let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
+        let pipe_layout = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }
+            .map_err(|e| format!("PT layout: {e}"))?;
+        let stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE).module(vs_module).name(c"main");
+        let compute_info = vk::ComputePipelineCreateInfo::default().stage(stage_info).layout(pipe_layout);
+        let pipelines = unsafe {
+            self.device.create_compute_pipelines(vk::PipelineCache::null(), &[compute_info], None)
+                .map_err(|e| format!("PT pipe: {:?}", e.1))?
+        };
+        let compute_pipeline = pipelines[0];
+        // 输出存储图像（rgba8, size×size）
+        let img_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .extent(vk::Extent3D { width: size, height: size, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { self.device.create_image(&img_info, None) }
+            .map_err(|e| format!("PT img: {e}"))?;
+        let img_reqs = unsafe { self.device.get_image_memory_requirements(image) };
+        let img_type = self.pick_memory_type(img_reqs, true)?;
+        let img_alloc = vk::MemoryAllocateInfo::default().allocation_size(img_reqs.size).memory_type_index(img_type);
+        let img_mem = unsafe { self.device.allocate_memory(&img_alloc, None) }
+            .map_err(|e| format!("PT img mem: {e}"))?;
+        unsafe { self.device.bind_image_memory(image, img_mem, 0) }
+            .map_err(|e| format!("PT img bind: {e}"))?;
+        let img_view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+        let view = unsafe { self.device.create_image_view(&img_view_info, None) }
+            .map_err(|e| format!("PT view: {e}"))?;
+        // 描述符
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+        ];
+        let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
+        let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }
+            .map_err(|e| format!("PT pool: {e}"))?;
+        let dset_layouts = [set_layout_handle];
+        let dset_alloc = vk::DescriptorSetAllocateInfo::default().descriptor_pool(dpool).set_layouts(&dset_layouts);
+        let dset = unsafe { self.device.allocate_descriptor_sets(&dset_alloc) }
+            .map_err(|e| format!("PT dset: {e}"))?[0];
+        let accel_write = vk::WriteDescriptorSetAccelerationStructureKHR {
+            s_type: vk::StructureType::WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            p_next: std::ptr::null(),
+            acceleration_structure_count: 1,
+            p_acceleration_structures: std::slice::from_ref(&assets.tlas).as_ptr(),
+            _marker: std::marker::PhantomData,
+        };
+        let img_info_desc = vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view: view,
+            image_layout: vk::ImageLayout::GENERAL,
+        };
+        let writes = [
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: &accel_write as *const _ as *const std::ffi::c_void,
+                dst_set: dset, dst_binding: 0, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                p_image_info: std::ptr::null(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 1, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                p_image_info: std::slice::from_ref(&img_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+        ];
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        // 命令：AS 构建 + dispatch + 拷贝回读
+        let alloc = vk::CommandBufferAllocateInfo::default().command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+        let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("PT cb: {e}"))?[0];
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            self.device.begin_command_buffer(cb, &begin_info);
+            self.record_pt_build(cb, &assets, boxes.len())?;
+            let img_bar = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+            self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[img_bar]);
+            self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, compute_pipeline);
+            self.device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[dset], &[]);
+            self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
+            // 回读缓冲
+            let (read_buf, read_mem) = self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, (size * size * 4) as u64)?;
+            let img_bar2 = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+            self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[img_bar2]);
+            let cpy_regions = [vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D { width: size, height: size, depth: 1 })];
+            self.device.cmd_copy_image_to_buffer(cb, image, vk::ImageLayout::GENERAL, read_buf, &cpy_regions);
+            self.device.end_command_buffer(cb);
+            let cbs = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT submit: {e}"))?;
+            self.device.queue_wait_idle(self.graphics_queue).map_err(|e| format!("PT wait: {e}"))?;
+            // 读回 + PNG
+            let m = self.device.map_memory(read_mem, 0, (size * size * 4) as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("PT map: {e}"))?;
+            let mut px: Vec<u8> = std::slice::from_raw_parts(m as *const u8, (size * size * 4) as usize).to_vec();
+            self.device.unmap_memory(read_mem);
+            log::info!("PT-VIEW px: [{},{},{}] [{},{},{}] [{},{},{}]", px[0], px[1], px[2], px[64*4], px[64*4+1], px[64*4+2], px[10*64*4+20*4], px[10*64*4+20*4+1], px[10*64*4+20*4+2]);
+            // BMP 落盘（24bit，程序化写出，无依赖）
+            {
+                let row = size * 3;
+                let pad = (4 - row % 4) % 4;
+                let data_len = (row + pad) as usize * size as usize;
+                let file_len = 54 + data_len;
+                let mut bmp = Vec::with_capacity(file_len);
+                bmp.extend_from_slice(b"BM");
+                bmp.extend_from_slice(&(file_len as u32).to_le_bytes());
+                bmp.extend_from_slice(&[0u8; 4]);
+                bmp.extend_from_slice(&(54u32).to_le_bytes());
+                bmp.extend_from_slice(&(40u32).to_le_bytes());
+                bmp.extend_from_slice(&(size as i32).to_le_bytes());
+                bmp.extend_from_slice(&(size as i32).to_le_bytes());
+                bmp.push(1); bmp.push(24); bmp.push(0); bmp.push(0);
+                bmp.extend_from_slice(&[0u8; 24]);
+                for y in (0..size).rev() {
+                    for x in 0..size {
+                        let i = ((y * size + x) * 4) as usize;
+                        bmp.push(px[i]);
+                        bmp.push(px[i + 1]);
+                        bmp.push(px[i + 2]);
+                    }
+                    for _ in 0..pad { bmp.push(0); }
+                }
+                std::fs::write("screenshots/pt_ref.bmp", &bmp).map_err(|e| format!("PT bmp: {e}"))?;
+            }
+        }
+        // 清理
+        unsafe {
+            self.device.destroy_pipeline(compute_pipeline, None);
+            self.device.destroy_pipeline_layout(pipe_layout, None);
+            self.device.destroy_descriptor_set_layout(set_layout_handle, None);
+            self.device.destroy_descriptor_pool(dpool, None);
+            self.device.destroy_shader_module(vs_module, None);
+            self.device.free_command_buffers(self.command_pool, &[cb]);
+            self.device.destroy_image_view(view, None);
+            self.device.destroy_image(image, None);
+            self.device.free_memory(img_mem, None);
+            let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
+            ext.destroy_acceleration_structure(assets.tlas, None);
+            ext.destroy_acceleration_structure(assets.blas, None);
+        }
+        Ok(())
     }
 
     /// RT 核心 纯求交吞吐基准（2026-08-29）：RT_BENCH_SPV 全遍历 × iterations

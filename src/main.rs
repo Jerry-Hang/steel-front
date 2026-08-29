@@ -1667,6 +1667,19 @@ impl ApplicationHandler for GameApp {
                         Err(e) => log::error!("RT-BENCH 失败: {e}"),
                     }
                 }
+                // PT 参考帧（RV3D_PT_VIEW=1）
+                if std::env::var("RV3D_PT_VIEW").as_deref() == Ok("1") {
+                    let boxes = vec![
+                        crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [8.0, 0.5, 8.0], material: 0 },
+                        crate::engine::ray_tracer::PtBox { center: [0.0, 0.5, -2.0], half: [0.8, 0.8, 0.8], material: 1 },
+                        crate::engine::ray_tracer::PtBox { center: [-2.5, 0.7, 1.0], half: [0.5, 0.7, 0.5], material: 2 },
+                        crate::engine::ray_tracer::PtBox { center: [2.5, 0.5, 1.5], half: [0.6, 0.4, 0.6], material: 3 },
+                    ];
+                    match renderer.run_pt_view(&boxes, 64) {
+                        Ok(()) => log::info!("PT-VIEW: 参考帧已输出 screenshots/pt_ref.bmp (64x64)"),
+                        Err(e) => log::error!("PT-VIEW 失败: {e}"),
+                    }
+                }
                 self.renderer = Some(renderer);
             }
             Err(e) => {

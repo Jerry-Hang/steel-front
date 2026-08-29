@@ -1,0 +1,194 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos; 0
+; Bound: 200
+; Schema: 0
+               OpCapability Shader
+               OpCapability RayQueryKHR
+               OpExtension "SPV_KHR_ray_query"
+    %std450 = OpExtInstImport "GLSL.std.450"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 8 8 1
+               OpDecorate %tlas DescriptorSet 0
+               OpDecorate %tlas Binding 0
+               OpDecorate %outImg DescriptorSet 0
+               OpDecorate %outImg Binding 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+       %void = OpTypeVoid
+         %3 = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+       %i32 = OpTypeInt 32 1
+      %v3f = OpTypeVector %float 3
+     %v3b = OpTypeVector %bool 3
+      %v4f = OpTypeVector %float 4
+     %v3u = OpTypeVector %uint 3
+     %v2i = OpTypeVector %i32 2
+         %13 = OpTypeRayQueryKHR
+         %14 = OpTypeAccelerationStructureKHR
+         %15 = OpTypePointer UniformConstant %14
+      %img = OpTypeImage %float 2D 0 0 0 2 Rgba8
+         %17 = OpTypePointer UniformConstant %img
+         %18 = OpTypePointer Function %13
+         %19 = OpTypePointer Input %v3u
+         %20 = OpTypePointer Function %v3f
+         %21 = OpTypePointer Function %v4f
+         %22 = OpTypePointer Function %i32
+     %float_0 = OpConstant %float 0
+   %float_0_5 = OpConstant %float 0.5
+     %float_1 = OpConstant %float 1
+     %float_2 = OpConstant %float 2
+     %float_8 = OpConstant %float 8
+     %float_64 = OpConstant %float 64
+     %float_16 = OpConstant %float 16
+   %float_1000 = OpConstant %float 1000
+     %float_001 = OpConstant %float 0.001
+    %float_1_5 = OpConstant %float 1.5
+   %float_0_57 = OpConstant %float 0.57
+   %float_0_62 = OpConstant %float 0.62
+   %float_0_25 = OpConstant %float 0.25
+      %float_3 = OpConstant %float 3
+%float_0_6 = OpConstant %float 0.6
+        %uint_0 = OpConstant %uint 0
+        %uint_255 = OpConstant %uint 255
+        %uint_1 = OpConstant %uint 1
+        %uint_2 = OpConstant %uint 2
+        %uint_3 = OpConstant %uint 3
+        %uint_4 = OpConstant %uint 4
+   %float_n1 = OpConstant %float -1
+    %float_0_01 = OpConstant %float 0.01
+   %float_0_15 = OpConstant %float 0.15
+   %float_0_3 = OpConstant %float 0.3
+   %float_0_45 = OpConstant %float 0.45
+  %float_0_65 = OpConstant %float 0.65
+     %vnx = OpConstantComposite %v3f %float_1 %float_0 %float_0
+     %vpx = OpConstantComposite %v3f %float_0 %float_1 %float_0
+     %vny = OpConstantComposite %v3f %float_0 %float_0 %float_1
+     %vpy = OpConstantComposite %v3f %float_1 %float_1 %float_0
+     %vnz = OpConstantComposite %v3f %float_0_15 %float_0_15 %float_1
+     %vsun = OpConstantComposite %v3f %float_0_45 %float_0_6 %float_0_3
+     %vamb = OpConstantComposite %v3f %float_0_3 %float_0_3 %float_0_3
+     %v1 = OpConstantComposite %v3f %float_1 %float_1 %float_1
+     %vdown = OpConstantComposite %v3f %float_0 %float_n1 %float_0
+        %i32_0 = OpConstant %i32 0
+     %v3zero = OpConstantComposite %v3f %float_0 %float_0 %float_0
+     %v2zer = OpConstantComposite %v2i %i32_0 %i32_0
+      %v4one = OpConstantComposite %v4f %float_1 %float_1 %float_1 %float_1
+      %v4sky = OpConstantComposite %v4f %float_0_6 %float_0_6 %float_0_6 %float_1
+      %v4red = OpConstantComposite %v4f %float_1 %float_0 %float_0 %float_1
+      %tlas = OpVariable %15 UniformConstant
+     %outImg = OpVariable %17 UniformConstant
+      %gid = OpVariable %19 Input
+      %main = OpFunction %void None %3
+      %lbl = OpLabel
+       %q = OpVariable %18 Function
+      %d = OpVariable %20 Function
+     %c = OpVariable %21 Function
+     %ix = OpVariable %22 Function
+     %iy = OpVariable %22 Function
+      %sq = OpVariable %18 Function
+     %hpp = OpVariable %20 Function
+     %nrm = OpVariable %20 Function
+    %g1 = OpLoad %v3u %gid
+    %gx = OpCompositeExtract %uint %g1 0
+    %gy = OpCompositeExtract %uint %g1 1
+    %gxf = OpConvertUToF %float %gx
+    %gyf = OpConvertUToF %float %gy
+     %a1 = OpFAdd %float %gxf %float_0_5
+     %a2 = OpFAdd %float %gyf %float_0_5
+     %a3 = OpFDiv %float %a1 %float_16
+     %a4 = OpFDiv %float %a2 %float_16
+     %a5 = OpFSub %float %a3 %float_1
+     %a6 = OpFSub %float %float_1 %a4
+     %p1 = OpCompositeConstruct %v3f %a5 %a6 %float_1
+     %nd = OpExtInst %v3f %std450 Normalize %p1
+    %orig = OpCompositeConstruct %v3f %float_0 %float_1_5 %float_0
+        OpStore %d %nd
+    %tlasv = OpLoad %14 %tlas
+        OpRayQueryInitializeKHR %q %tlasv %uint_0 %uint_255 %orig %float_001 %nd %float_1000
+        OpBranch %l2
+      %l2 = OpLabel
+        OpLoopMerge %lm %lc None
+        OpBranch %l3
+      %l3 = OpLabel
+     %ct = OpRayQueryProceedKHR %bool %q
+        OpBranchConditional %ct %lc %lm
+      %lc = OpLabel
+        OpBranch %l2
+      %lm = OpLabel
+     %ty = OpRayQueryGetIntersectionTypeKHR %uint %q %uint_0
+     %is = OpINotEqual %bool %ty %uint_0
+        OpSelectionMerge %m2 None
+        OpBranchConditional %is %h1 %h2
+      %h1 = OpLabel
+        %ht = OpRayQueryGetIntersectionTKHR %float %q %uint_0
+        %pf = OpRayQueryGetIntersectionPrimitiveIndexKHR %uint %q %uint_0
+        %face = OpUDiv %uint %pf %uint_2
+        %f0 = OpIEqual %bool %face %uint_0
+        %f1 = OpIEqual %bool %face %uint_1
+        %f2 = OpIEqual %bool %face %uint_2
+        %f3 = OpIEqual %bool %face %uint_3
+        %f4 = OpIEqual %bool %face %uint_4
+      %b4 = OpCompositeConstruct %v3b %f4 %f4 %f4
+      %b3 = OpCompositeConstruct %v3b %f3 %f3 %f3
+      %b2 = OpCompositeConstruct %v3b %f2 %f2 %f2
+      %b1 = OpCompositeConstruct %v3b %f1 %f1 %f1
+      %b0 = OpCompositeConstruct %v3b %f0 %f0 %f0
+      %sel0 = OpSelect %v3f %b4 %vnz %v1
+      %sel1 = OpSelect %v3f %b3 %vpy %sel0
+      %sel2 = OpSelect %v3f %b2 %vny %sel1
+      %sel3 = OpSelect %v3f %b1 %vpx %sel2
+      %nrmv2 = OpSelect %v3f %b0 %vnx %sel3
+        OpStore %nrm %nrmv2
+        %dvec = OpLoad %v3f %d
+        %hpx = OpVectorTimesScalar %v3f %dvec %ht
+        %oxoxx = OpFAdd %v3f %orig %hpx
+        OpStore %hpp %oxoxx
+        %oc = OpLoad %v3f %hpp
+        %nc = OpLoad %v3f %nrm
+        %odd = OpVectorTimesScalar %v3f %nc %float_0_01
+        %sorig = OpFAdd %v3f %oc %odd
+        %tlasv2 = OpLoad %14 %tlas
+        OpRayQueryInitializeKHR %sq %tlasv2 %uint_0 %uint_255 %sorig %float_001 %vsun %float_1000
+        OpBranch %sl1
+      %sl1 = OpLabel
+        OpLoopMerge %slm %slc None
+        OpBranch %sl2
+      %sl2 = OpLabel
+        %sct = OpRayQueryProceedKHR %bool %sq
+        OpBranchConditional %sct %slc %slm
+      %slc = OpLabel
+        OpBranch %sl1
+      %slm = OpLabel
+        %sty = OpRayQueryGetIntersectionTypeKHR %uint %sq %uint_0
+      %stis = OpINotEqual %bool %sty %uint_0
+      %vis = OpSelect %float %stis %float_0_15 %float_1
+        %dls = OpDot %float %nc %vsun
+      %ndl = OpExtInst %float %std450 NMax %dls %float_0
+      %sunl = OpVectorTimesScalar %v3f %vsun %ndl
+      %sunv = OpVectorTimesScalar %v3f %sunl %vis
+      %facecol = OpSelect %v3f %b0 %vnx %sel3
+      %fin = OpVectorTimesScalar %v3f %facecol %float_0_6
+      %total = OpFAdd %v3f %vamb %sunv
+      %cfin = OpFMul %v3f %fin %total
+        %cf4 = OpCompositeExtract %float %cfin 0
+        %cg4 = OpCompositeExtract %float %cfin 1
+        %cb4 = OpCompositeExtract %float %cfin 2
+      %cfin4 = OpCompositeConstruct %v4f %cf4 %cg4 %cb4 %float_1
+        OpStore %c %cfin4
+        OpBranch %m2
+      %h2 = OpLabel
+        OpStore %c %v4sky
+        OpBranch %m2
+      %m2 = OpLabel
+    %imv = OpLoad %img %outImg
+    %x32 = OpBitcast %i32 %gx
+    %y32 = OpBitcast %i32 %gy
+    %co = OpCompositeConstruct %v2i %x32 %y32
+     %cv = OpLoad %v4f %c
+        OpImageWrite %imv %co %cv
+        OpReturn
+        OpFunctionEnd
