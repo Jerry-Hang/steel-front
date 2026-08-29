@@ -32,7 +32,7 @@
          %15 = OpTypePointer UniformConstant %14
       %img = OpTypeImage %float 2D 0 0 0 2 Rgba8
          %17 = OpTypePointer UniformConstant %img
-         %18 = OpTypePointer Function %13
+         %18 = OpTypePointer Private %13
          %19 = OpTypePointer Input %v3u
          %20 = OpTypePointer Function %v3f
          %21 = OpTypePointer Function %v4f
@@ -81,15 +81,15 @@
       %v4red = OpConstantComposite %v4f %float_1 %float_0 %float_0 %float_1
       %tlas = OpVariable %15 UniformConstant
      %outImg = OpVariable %17 UniformConstant
-      %gid = OpVariable %19 Input
+          %q = OpVariable %18 Private
+         %sq = OpVariable %18 Private
+          %gid = OpVariable %19 Input
       %main = OpFunction %void None %3
       %lbl = OpLabel
-       %q = OpVariable %18 Function
       %d = OpVariable %20 Function
      %c = OpVariable %21 Function
      %ix = OpVariable %22 Function
      %iy = OpVariable %22 Function
-      %sq = OpVariable %18 Function
      %hpp = OpVariable %20 Function
      %nrm = OpVariable %20 Function
     %g1 = OpLoad %v3u %gid
@@ -178,7 +178,7 @@
         %cg4 = OpCompositeExtract %float %cfin 1
         %cb4 = OpCompositeExtract %float %cfin 2
       %cfin4 = OpCompositeConstruct %v4f %cf4 %cg4 %cb4 %float_1
-        OpStore %c %cfin4
+        OpStore %c %v4red
         OpBranch %m2
       %h2 = OpLabel
         OpStore %c %v4sky

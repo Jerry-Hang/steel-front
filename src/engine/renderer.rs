@@ -5023,6 +5023,7 @@ impl Renderer {
             ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &[(boxes.len() * 12) as u32], &mut size_info);
         }
         let count = size_info.acceleration_structure_size;
+        log::info!("PT-BLAS: size={} scratch_build={} scratch_update={} prims={}", count, size_info.build_scratch_size, size_info.update_scratch_size, boxes.len()*12);
         let (asbuf, asmem) = self
             .create_device_local_buffer(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; count as usize], "pt-blas")?;
         let as_info = vk::AccelerationStructureCreateInfoKHR::default()
@@ -5044,7 +5045,20 @@ impl Renderer {
         };
         let inst_bytes: &[u8] = unsafe { std::slice::from_raw_parts(&instance as *const _ as *const u8, std::mem::size_of::<vk::AccelerationStructureInstanceKHR>()) };
         let (inst_buf, inst_mem) = self
-            .create_device_local_buffer(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, inst_bytes, "pt-inst")?;
+            .create_host_buffer(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, inst_bytes.len() as u64)
+            .map_err(|e| format!("PT 实例缓冲: {e}"))?;
+        unsafe {
+            let ip = self.device.map_memory(inst_mem, 0, inst_bytes.len() as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map inst: {e}"))?;
+            std::ptr::copy_nonoverlapping(inst_bytes.as_ptr(), ip as *mut u8, inst_bytes.len());
+            // 读回验证（GPU 侧视角 = 同一内存）
+            let back: &[u8] = std::slice::from_raw_parts(ip as *const u8, inst_bytes.len());
+            log::info!("PT-INST bytes: {:02x?}", &back[..std::cmp::min(64, back.len())]);
+            log::info!("PT-INST mask/addr: mask=0x{:x} sbt=0x{:x} addr=0x{:x}",
+                u32::from_le_bytes([back[48], back[49], back[50], back[51]]),
+                u32::from_le_bytes([back[52], back[53], back[54], back[55]]),
+                u64::from_le_bytes([back[56], back[57], back[58], back[59], back[60], back[61], back[62], back[63]]));
+            self.device.unmap_memory(inst_mem);
+        }
         let inst_addr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(inst_buf); self.device.get_buffer_device_address(&i) };
 
         // TLAS 几何（实例）
@@ -5065,6 +5079,7 @@ impl Renderer {
             ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &tgeom, &[1], &mut tsize);
         }
         let tcount = tsize.acceleration_structure_size;
+        log::info!("PT-TLAS: size={} scratch_build={} scratch_update={}", tcount, tsize.build_scratch_size, tsize.update_scratch_size);
         let (tbuf, tmem) = self
             .create_device_local_buffer(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; tcount as usize], "pt-tlas")?;
         let tinfo = vk::AccelerationStructureCreateInfoKHR::default()
@@ -8816,6 +8831,9 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+
+            // 2026-08-29 显存纪律：PT 常驻资源（AS/管线/图像）显式销毁——退出后驱动立刻回收！
+            self.destroy_pt_resident();
 
             // 释放截图读回资源（staging buffer + fence）
             self.destroy_screenshot_resources();
