@@ -1104,6 +1104,7 @@ impl Renderer {
             device_extensions.push(mesh_shader_ext_name.as_ptr());
             // 2026-08-29 路径追踪基准：启用光线追踪核心扩展（ray_query 计算侧；AS 构建）
             device_extensions.push(c"VK_KHR_buffer_device_address".as_ptr());
+            device_extensions.push(c"VK_KHR_deferred_host_operations".as_ptr());
             device_extensions.push(c"VK_KHR_acceleration_structure".as_ptr());
             device_extensions.push(c"VK_KHR_ray_query".as_ptr());
             device_extensions.push(c"VK_KHR_ray_tracing_pipeline".as_ptr());
