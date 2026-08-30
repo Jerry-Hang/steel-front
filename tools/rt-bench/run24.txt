@@ -1,0 +1,4 @@
+﻿============ RT 鍏夌嚎杩借釜绠楀姏娴嬭瘯鍙?v0.2 ============
+GPU: NVIDIA GeForce RTX 5060 Laptop GPU
+妯℃嫙: 4194304 灏勭嚎 x 200 杩唬 x 5 杞?(姣忚疆閲嶅缓AS+娓呴浂hits+璇诲洖楠岃瘉)
+RT 娴嬭瘯澶辫触: map: ERROR_MEMORY_MAP_FAILED

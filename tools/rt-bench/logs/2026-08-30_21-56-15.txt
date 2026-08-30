@@ -1,0 +1,13 @@
+RT 鍏夌嚎杩借釜绠楀姏娴嬭瘯鏃ュ織
+GPU: NVIDIA GeForce RTX 5060 Laptop GPU
+鏃堕棿: 2026-08-30_21-56-15
+
+閰嶇疆: 4194304 灏勭嚎 x 200 杩唬 x 5 杞甛n宄板€? 33606.2 Mrays/s
+涓綅: 32407.8 Mrays/s
+鎬诲懡涓? 20480
+璇勫垎: 3360618
+Round1: 31167.8 Mrays/s
+Round2: 31275.1 Mrays/s
+Round3: 32407.8 Mrays/s
+Round4: 32478.9 Mrays/s
+Round5: 33606.2 Mrays/s

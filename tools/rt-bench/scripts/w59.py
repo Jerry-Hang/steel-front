@@ -1,36 +1,39 @@
-﻿use ash::vk;
+# -*- coding: utf-8 -*-
+import io
+content = '''
+use ash::vk;
 
 mod rt_impl;
 use rt_impl::rt_test;
 
 fn main() {
-    println!("============ RT 鍏夌嚎杩借釜绠楀姏娴嬭瘯鍙?v0.2 ============");
+    println!("============ RT 光线追踪算力测试台 v0.2 ============");
     let args: Vec<String> = std::env::args().collect();
     let rays: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1 << 22);
     let iters: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
     let rounds: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
 
-    let entry = unsafe { ash::Entry::load() }.expect("Vulkan 鍔犺浇澶辫触");
-    let inst = create_instance(&entry).expect("Instance 鍒涘缓澶辫触");
-    let (phys, props) = pick_gpu(&inst).expect("鏈壘鍒?RT 鏄惧崱");
+    let entry = unsafe { ash::Entry::load() }.expect("Vulkan 加载失败");
+    let inst = create_instance(&entry).expect("Instance 创建失败");
+    let (phys, props) = pick_gpu(&inst).expect("未找到 RT 显卡");
     let name = unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy().to_string();
     println!("GPU: {}", name);
-    let (device, queue) = create_device(&inst, phys).expect("璁惧鍒涘缓澶辫触");
-    println!("妯℃嫙: {} 灏勭嚎 x {} 杩唬 x {} 杞?(姣忚疆閲嶅缓AS+娓呴浂hits+璇诲洖楠岃瘉)", rays, iters, rounds);
+    let (device, queue) = create_device(&inst, phys).expect("设备创建失败");
+    println!("模拟: {} 射线 x {} 迭代 x {} 轮 (每轮重建AS+清零hits+读回验证)\\n", rays, iters, rounds);
 
     match rt_test(&device, &queue, &inst, phys, rays, iters, rounds) {
         Ok(r) => {
-            println!("");
-            println!("========= 缁撴灉 =========");
-            println!("宄板€? {:.1} Mrays/s ({:.2} G rays/s)", r.best_mrays, r.best_mrays / 1000.0);
-            println!("涓綅: {:.1} Mrays/s", r.median_mrays);
-            println!("鎬诲懡涓? {} (灏勭嚎閬嶅巻鐪熷疄鍙戠敓)", r.total_hits);
-            println!("璇勫垎: {}", (r.best_mrays * 100.0) as u64);
+            println!("\\n========= 结果 =========");
+            println!("峰值: {:.1} Mrays/s ({:.2} G rays/s)", r.best_mrays, r.best_mrays / 1000.0);
+            println!("中位: {:.1} Mrays/s", r.median_mrays);
+            println!("总命中: {} (射线遍历真实发生)", r.total_hits);
+            println!("评分: {}", (r.best_mrays * 100.0) as u64);
             write_log(&name, rays, iters, rounds, &r);
         }
-        Err(e) => println!("RT 娴嬭瘯澶辫触: {e}"),
+        Err(e) => println!("RT 测试失败: {e}"),
     }
 }
+
 fn create_instance(entry: &ash::Entry) -> Result<ash::Instance, String> {
     unsafe {
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
@@ -51,6 +54,7 @@ fn pick_gpu(entry: &ash::Instance) -> Option<(vk::PhysicalDevice, vk::PhysicalDe
     }
     None
 }
+
 fn create_device(entry: &ash::Instance, phys: vk::PhysicalDevice) -> Result<(ash::Device, vk::Queue), String> {
     unsafe {
         let sys_exts: Vec<String> = entry.enumerate_device_extension_properties(phys).map(|v| v.iter().map(|e| {
@@ -88,22 +92,23 @@ fn create_device(entry: &ash::Instance, phys: vk::PhysicalDevice) -> Result<(ash
             .enabled_extension_names(&ext_ptrs)
             .enabled_features(&feats);
         info.p_next = &mut rq_f as *mut _ as *mut std::ffi::c_void;
-        let dev = entry.create_device(phys, &info, None).map_err(|e| format!("鍒涘缓璁惧: {:?}", e))?;
+        let dev = entry.create_device(phys, &info, None).map_err(|e| format!("创建设备: {:?}", e))?;
         let queue = dev.get_device_queue(0, 0);
         Ok((dev, queue))
     }
 }
+
 fn write_log(gpu: &str, rays: u32, iters: u32, rounds: u32, r: &rt_impl::RtResult) {
     let now = local_now();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("logs");
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join(format!("{}.txt", now));
-    let mut s = format!("RT 鍏夌嚎杩借釜绠楀姏娴嬭瘯鏃ュ織\nGPU: {}\n鏃堕棿: {}\n\n閰嶇疆: {} 灏勭嚎 x {} 杩唬 x {} 杞甛n宄板€? {:.1} Mrays/s\n涓綅: {:.1} Mrays/s\n鎬诲懡涓? {}\n璇勫垎: {}\n", gpu, now, rays, iters, rounds, r.best_mrays, r.median_mrays, r.total_hits, (r.best_mrays * 100.0) as u64);
+    let mut s = format!("RT 光线追踪算力测试日志\\nGPU: {}\\n时间: {}\\n\\n配置: {} 射线 x {} 迭代 x {} 轮\\n峰值: {:.1} Mrays/s\\n中位: {:.1} Mrays/s\\n总命中: {}\\n评分: {}\\n", gpu, now, rays, iters, rounds, r.best_mrays, r.median_mrays, r.total_hits, (r.best_mrays * 100.0) as u64);
     for (i, v) in r.rounds_mrays.iter().enumerate() {
-        s.push_str(&format!("Round{}: {:.1} Mrays/s\n", i + 1, v));
+        s.push_str(&format!("第{}轮: {:.1} Mrays/s\\n", i + 1, v));
     }
     let _ = std::fs::write(&file, s);
-    println!("鏃ュ織宸蹭繚瀛? {}", file.display());
+    println!("\\n日志已保存: {}", file.display());
 }
 
 fn local_now() -> String {
@@ -128,3 +133,6 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
+'''
+io.open(r'src\\main.rs', 'w', encoding='utf-8', newline='\\n').write(content)
+print('main written', len(content))

@@ -1,0 +1,83 @@
+﻿cargo :    Compiling rt-bench v0.1.0 (D:\Rust\steel-front\tools\rt-bench)
+At line:1 char:129
++ ... m.Text.UTF8Encoding]::new($false); cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling rt...tools\rt-bench):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: invalid format string: unmatched `}` found
+   --> src\main.rs:103:32
+    |
+103 |         s.push_str(&format!("绗瑊}杞? {:.1} Mrays/s\n", i + 1, v));
+    |                                  ^ unmatched `}` in format string
+    |
+    = note: if you intended to print `}`, you can escape it using `}}`
+
+warning: unreachable statement
+   --> src\rt_impl.rs:311:9
+    |
+309 |         return Ok(RtResult { best_mrays: best, median_mrays, total_hits, rounds_mrays });
+    |         -------------------------------------------------------------------------------- any code following this 
+expression is unreachable
+310 |
+311 |         for b in [vbuf, ibuf, asbuf, tbuf, sbuf, hbuf, ibuf2] { dev.destroy_buffer(b, None); }
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statem
+ent
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+   --> src\rt_impl.rs:321:12
+    |
+321 |         Ok(best)
+    |         -- ^^^^ expected `RtResult`, found `f64`
+    |         |
+    |         arguments to this enum variant are incorrect
+    |
+help: the type constructed contains `f64` due to the type of the argument passed
+   --> src\rt_impl.rs:321:9
+    |
+321 |         Ok(best)
+    |         ^^^----^
+    |            |
+    |            this argument influences the type of `Ok`
+note: tuple variant defined here
+   --> C:\Users\Jerry-Huang\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\resu
+lt.rs:561:5
+    |
+561 |     Ok(#[stable(feature = "rust1", since = "1.0.0")] T),
+    |     ^^
+
+warning: unnecessary `unsafe` block
+  --> src\main.rs:47:25
+   |
+43 |     unsafe {
+   |     ------ because it's nested under this `unsafe` block
+...
+47 |                 let n = unsafe { std::ffi::CStr::from_ptr(e.extension_name.as_ptr()) }.to_string_lossy();
+   |                         ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src\main.rs:57:21
+   |
+55 |     unsafe {
+   |     ------ because it's nested under this `unsafe` block
+56 |         let sys_exts: Vec<String> = entry.enumerate_device_extension_properties(phys).map(|v| v.iter().map(|e| {
+57 |             let c = unsafe { std::ffi::CStr::from_ptr(e.extension_name.as_ptr()) };
+   |                     ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+  --> src\main.rs:85:13
+   |
+85 |         let mut feats = vk::PhysicalDeviceFeatures::default();
+   |             ----^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `rt-bench` (bin "rt-bench") generated 4 warnings
+error: could not compile `rt-bench` (bin "rt-bench") due to 2 previous errors; 4 warnings emitted
