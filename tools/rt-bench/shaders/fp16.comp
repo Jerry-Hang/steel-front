@@ -4,8 +4,10 @@ layout(local_size_x = 256) in;
 layout(std430, binding = 0) buffer OutB { uint o[]; };
 void main() {
     uint g = gl_GlobalInvocationID.x;
-    float16_t acc = float16_t(float(g) * 0.001 + 0.5);
-    for (uint i = 0; i < 4096; i++) {
+    float16_t acc = float16_t(uintBitsToFloat(o[g]) * 0.001 + 0.5);
+    uint n = 4096u + (o[g] & 7u);
+    for (uint i = 0; i < n; i++) {
+        if ((i & 64u) == 0u) { atomicAdd(o[g], 1u); }
         acc = acc * float16_t(0.9999) + float16_t(0.0001);
     }
     o[g] = uint(acc) & 0xFFFFu;

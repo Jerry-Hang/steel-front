@@ -1,5 +1,9 @@
 use ash::vk;
 use std::time::Instant;
+
+static mut WARN: String = String::new();
+fn log_stop(msg: &str) { unsafe { WARN = msg.to_string(); } }
+fn take_warn() -> String { unsafe { std::mem::take(&mut WARN) } }
 mod rt_impl;
 use rt_impl::rt_test;
 
@@ -136,6 +140,14 @@ fn fp_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, inst:
         let size = items as u64 * 4;
         let buf = create_buffer(dev, phys, size, vk::BufferUsageFlags::STORAGE_BUFFER)?;
         let mem = alloc_mem(dev, inst, phys, buf, 0)?;
+        // 随机初值 → 防循环常量折叠（结果必须依赖输入！）
+        if let Ok(p) = dev.map_memory(mem, 0, size, vk::MemoryMapFlags::empty()) {
+            let mut seed = 0x9E3779B9u32;
+            let n = size as usize / 4;
+            let arr = std::slice::from_raw_parts_mut(p as *mut u32, n);
+            for v in arr.iter_mut() { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); *v = seed; }
+            dev.unmap_memory(mem);
+        }
         dev.bind_buffer_memory(buf, mem, 0).map_err(|e| format!("bind: {:?}", e))?;
 
         // descriptor
@@ -177,6 +189,14 @@ fn fp_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, inst:
             let gops = ops / dt / 1e9;
             if gops < best { best = gops; }
             if gops > worst { worst = gops; }
+            // 输出校验：验证计算真实发生（防折叠被驱离）
+            if let Ok(p) = dev.map_memory(mem, 0, size, vk::MemoryMapFlags::empty()) {
+                let arr = std::slice::from_raw_parts(p as *const u32, (size / 4) as usize);
+                let mut sum = 0u64;
+                for v in arr.iter().take(1024) { sum = sum.wrapping_add(*v as u64); }
+                dev.unmap_memory(mem);
+                if sum == 0 { best = 0.0; log_stop("FP 输出全零（计算未发生）"); }
+            }
         }
         // 清理
         for b in [buf] { dev.destroy_buffer(b, None); }
@@ -202,7 +222,7 @@ fn alloc_mem(dev: &ash::Device, inst: &ash::Instance, phys: vk::PhysicalDevice, 
         let mprops = inst.get_physical_device_memory_properties(phys);
         let mut idx = 0u32;
         for (i, t) in mprops.memory_types.iter().enumerate() {
-            if req.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) {
+            if req.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT) {
                 idx = i as u32; break;
             }
         }
