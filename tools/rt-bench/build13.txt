@@ -1,0 +1,44 @@
+﻿cargo :    Compiling rt-bench v0.1.0 (D:\Rust\steel-front\tools\rt-bench)
+At line:1 char:152
++ ... ew($false); python scripts\w13.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling rt...tools\rt-bench):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: unexpected closing delimiter: `)`
+   --> src\rt_impl.rs:101:48
+    |
+ 60 | ...t_test(dev: &ash::Device, queue: &vk::Queue, instance: &ash::Instance, mem_props: vk::PhysicalDeviceMemoryProp
+erties) -> Result<f64, String> {
+    |                                                                                                                  
+                               - the nearest open delimiter
+ 61 | ...fe {
+    |       - the nearest open delimiter
+...
+ 80 | ...let vbuf = dev.create_buffer(&vk::BufferCreateInfo::default().size(verts.len() as u64).usage(vk::BufferUsageFl
+ags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_
+INPUT_READ_ONLY_KHR).sharing_mode(vk::SharingMode::EXCLUSIVE), None).map_err(|e| format!("{e:?}"))).map_err(|e| format!
+("{e:?}"))?;
+    |                                                                                                                  
+                                                                                                                       
+                                                                                                  - missing open `(` fo
+r this delimiter
+ 81 | ...let ibuf = dev.create_buffer(&vk::BufferCreateInfo::default().size(idxs.len() as u64 * 4).usage(vk::BufferUsag
+eFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferU
+sageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR).sharing_mode(vk::SharingMode::EXCLUSIVE), None).map_err(|e
+| format!("{e:?}"))).ma...
+    |                                                                                                                  
+                                                                                                                       
+                                                                                                                       
+                   - missing open `(` for this delimiter
+ 82 | ...// buffer 内存（含 DEVICE_ADDRESS flag）
+ 83 | ...let mem_alloc = |buf: vk::Buffer| -> Result<(vk::DeviceMemory, u64), String> {
+    |                                                                                 - the nearest open delimiter
+...
+100 | ...    let mem = dev.allocate_memory(&ai, None).map_err(|e| format!("{e:?}"))).map_err(|e| format!("{e:?}"))?;
+    |                                                                              - missing open `(` for this delimite
+r
+101 | ...    dev.bind_buffer_memory(buf, mem, 0)).map_err(|e| format!("{e:?}"))?;
+    |                                           ^ unexpected closing delimiter
+
+error: could not compile `rt-bench` (bin "rt-bench") due to 1 previous error

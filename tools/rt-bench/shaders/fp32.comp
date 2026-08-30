@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer OutB { uint o[]; };
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    float acc = float(g) * 0.001 + 0.5;
+    for (uint i = 0; i < 4096; i++) {
+        acc = fma(acc, 0.9999, 0.0001);
+    }
+    o[g] = floatBitsToUint(acc);
+}

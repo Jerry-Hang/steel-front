@@ -1,0 +1,90 @@
+﻿cargo :    Compiling rt-bench v0.1.0 (D:\Rust\steel-front\tools\rt-bench)
+At line:1 char:152
++ ... ew($false); python scripts\w28.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling rt...tools\rt-bench):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0425]: cannot find value `phys` in this scope
+   --> src\main.rs:187:65
+    |
+187 |         let mprops = inst.get_physical_device_memory_properties(phys);
+    |                                                                 ^^^^ not found in this scope
+
+error[E0308]: mismatched types
+   --> src\main.rs:231:9
+    |
+231 |     (y, m, d)
+    |         ^ expected `i64`, found `u64`
+    |
+help: you can convert a `u64` to an `i64` and panic if the converted value doesn't fit
+    |
+231 |     (y, m.try_into().unwrap(), d)
+    |          ++++++++++++++++++++
+
+error[E0308]: mismatched types
+   --> src\main.rs:231:12
+    |
+231 |     (y, m, d)
+    |            ^ expected `i64`, found `u64`
+    |
+help: you can convert a `u64` to an `i64` and panic if the converted value doesn't fit
+    |
+231 |     (y, m, d.try_into().unwrap())
+    |             ++++++++++++++++++++
+
+warning: unused variable: `ai`
+  --> src\rt_impl.rs:92:17
+   |
+92 |             let ai = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(idx);
+   |                 ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `inst_mem`
+   --> src\rt_impl.rs:164:24
+    |
+164 |         let (inst_buf, inst_mem) = {
+    |                        ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inst_mem`
+
+warning: unnecessary `unsafe` block
+  --> src\main.rs:68:25
+   |
+63 |     unsafe {
+   |     ------ because it's nested under this `unsafe` block
+...
+68 |                 let n = unsafe { std::ffi::CStr::from_ptr(e.extension_name.as_ptr()) }.to_string_lossy();
+   |                         ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+error[E0716]: temporary value dropped while borrowed
+   --> src\main.rs:105:32
+    |
+105 |             .enabled_features(&vk::PhysicalDeviceFeatures::default());
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ - temporary value is freed at the end of thi
+s statement
+    |                                |
+    |                                creates a temporary value which is freed while still in use
+106 |         info.p_next = &mut rq_f as *mut _ as *mut std::ffi::c_void;
+    |         ---------------------------------------------------------- borrow later used here
+    |
+    = note: consider using a `let` binding to create a longer lived value
+
+warning: unused variable: `i`
+   --> src\main.rs:151:17
+    |
+151 |             for i in 0..iters {
+    |                 ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `phys`
+   --> src\main.rs:179:37
+    |
+179 | fn create_buffer(dev: &ash::Device, phys: vk::PhysicalDevice, size: u64, usage: vk::BufferUsageFlags) -> Result<v
+k::Buffer, String> {
+    |                                     ^^^^ help: if this is intentional, prefix it with an underscore: `_phys`
+
+Some errors have detailed explanations: E0308, E0425, E0716.
+For more information about an error, try `rustc --explain E0308`.
+warning: `rt-bench` (bin "rt-bench") generated 5 warnings
+error: could not compile `rt-bench` (bin "rt-bench") due to 4 previous errors; 5 warnings emitted

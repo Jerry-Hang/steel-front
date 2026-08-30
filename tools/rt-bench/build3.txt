@@ -1,0 +1,1243 @@
+﻿cargo :    Compiling rt-bench v0.1.0 (D:\Rust\steel-front\tools\rt-bench)
+At line:1 char:151
++ ... new($false); python scripts\w3.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling rt...tools\rt-bench):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0433]: cannot find type `Instant` in this scope
+   --> src\rt_impl.rs:291:22
+    |
+291 |             let t0 = Instant::now();
+    |                      ^^^^^^^ use of undeclared type `Instant`
+    |
+help: consider importing one of these structs
+    |
+  3 + use crate::Instant;
+    |
+  3 + use std::time::Instant;
+    |
+
+error[E0425]: cannot find function `rt_test` in this scope
+   --> src\main.rs:41:18
+    |
+ 41 |     let rt_val = rt_test(&device, &queue, phys, &entry).unwrap_or(0.0);
+    |                  ^^^^^^^
+...
+100 | fn fp_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, spv: &[u8], items: u32) -> Result<f64,
+ String> {
+    | -----------------------------------------------------------------------------------------------------------------
+-------- similarly named function `fp_test` defined here
+    |
+note: function `crate::rt_impl::rt_test` exists but is inaccessible
+   --> src\rt_impl.rs:59:1
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^ not accessible
+help: a function with a similar name exists
+    |
+ 41 -     let rt_val = rt_test(&device, &queue, phys, &entry).unwrap_or(0.0);
+ 41 +     let rt_val = fp_test(&device, &queue, phys, &entry).unwrap_or(0.0);
+    |
+
+error[E0277]: `?` couldn't convert the error to `String`
+  --> src\rt_impl.rs:79:306
+   |
+59 | ...::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+   |                                                                                   ------------------- expected `St
+ring` because of this
+...
+79 | ...ev.create_buffer(&vk::BufferCreateInfo::default(...aring_mode(vk::SharingMode::EXCLUSIVE), None)?;
+   |       ---------------------------------------------...---------------------------------------------^ the trait `Fr
+om<ash::vk::Result>` is not implemented for `String`
+   |       |
+   |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+   |
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = help: `String` implements trait `From<T>`:
+             From<&String>
+             From<&mut str>
+             From<&str>
+             From<Box<str>>
+             From<Cow<'_, str>>
+             From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+  --> src\rt_impl.rs:80:346
+   |
+59 | ...::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+   |                                                                                   ------------------- expected `St
+ring` because of this
+...
+80 | ...ev.create_buffer(&vk::BufferCreateInfo::default(...aring_mode(vk::SharingMode::EXCLUSIVE), None)?;
+   |       ---------------------------------------------...---------------------------------------------^ the trait `Fr
+om<ash::vk::Result>` is not implemented for `String`
+   |       |
+   |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+   |
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = help: `String` implements trait `From<T>`:
+             From<&String>
+             From<&mut str>
+             From<&str>
+             From<Box<str>>
+             From<Cow<'_, str>>
+             From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+  --> src\rt_impl.rs:84:30
+   |
+84 |             let mprops = dev.get_physical_device_memory_properties(phys);
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0063]: missing field `_marker` in initializer of `MemoryAllocateInfo<'_>`
+  --> src\rt_impl.rs:93:22
+   |
+93 |             let ai = vk::MemoryAllocateInfo {
+   |                      ^^^^^^^^^^^^^^^^^^^^^^ missing `_marker`
+
+error[E0277]: `?` couldn't convert the error to `String`
+  --> src\rt_impl.rs:98:53
+   |
+98 |             let mem = dev.allocate_memory(&ai, None)?;
+   |                           --------------------------^ the trait `From<ash::vk::Result>` is not implemented for `St
+ring`
+   |                           |
+   |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+   |
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = help: `String` implements trait `From<T>`:
+             From<&String>
+             From<&mut str>
+             From<&str>
+             From<Box<str>>
+             From<Cow<'_, str>>
+             From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+  --> src\rt_impl.rs:99:48
+   |
+99 |             dev.bind_buffer_memory(buf, mem, 0)?;
+   |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+   |                 |
+   |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+   |
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = help: `String` implements trait `From<T>`:
+             From<&String>
+             From<&mut str>
+             From<&str>
+             From<Box<str>>
+             From<Cow<'_, str>>
+             From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:104:90
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+104 |         let vp = dev.map_memory(vmem, 0, verts.len() as u64, vk::MemoryMapFlags::empty())?;
+    |                      --------------------------------------------------------------------^ the trait `From<ash::v
+k::Result>` is not implemented for `String`
+    |                      |
+    |                      this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:107:93
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+107 |         let ip = dev.map_memory(imem, 0, idxs.len() as u64 * 4, vk::MemoryMapFlags::empty())?;
+    |                      -----------------------------------------------------------------------^ the trait `From<ash
+::vk::Result>` is not implemented for `String`
+    |                      |
+    |                      this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no associated function or constant named `default` found for struct `ash::Instance` in the current scope
+   --> src\rt_impl.rs:130:86
+    |
+130 |         let vk_asext = ash::khr::acceleration_structure::Device::new(&ash::Instance::default(), dev);
+    |                                                                                      ^^^^^^^ associated function 
+or constant not found in `ash::Instance`
+    |
+note: if you're trying to build a new `ash::Instance` consider using one of the following associated functions:
+      ash::Instance::load
+      ash::Instance::load_with
+      ash::Instance::from_parts_1_3
+   --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\instance.rs:23:
+5
+    |
+ 23 |       pub unsafe fn load(static_fn: &crate::StaticFn, instance: vk::Instance) -> Self {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 30 | /     pub unsafe fn load_with(
+ 31 | |         mut load_fn: impl FnMut(&ffi::CStr) -> *const ffi::c_void,
+ 32 | |         instance: vk::Instance,
+ 33 | |     ) -> Self {
+    | |_____________^
+...
+ 43 | /     pub fn from_parts_1_3(
+ 44 | |         handle: vk::Instance,
+ 45 | |         instance_fn_1_0: crate::InstanceFnV1_0,
+ 46 | |         instance_fn_1_1: crate::InstanceFnV1_1,
+ 47 | |         instance_fn_1_3: crate::InstanceFnV1_3,
+ 48 | |     ) -> Self {
+    | |_____________^
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:139:243
+    |
+ 59 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+139 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(count).usage(vk::BufferUsageFlags::ACCELERATION_STRUCTU
+RE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------^ the trai
+t `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:141:30
+    |
+141 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:147:53
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+147 |             let mem = dev.allocate_memory(&ai, None)?;
+    |                           --------------------------^ the trait `From<ash::vk::Result>` is not implemented for `S
+tring`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:148:48
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+148 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:152:74
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+152 |         let blas = vk_asext.create_acceleration_structure(&as_info, None)?;
+    |                             ---------------------------------------------^ the trait `From<ash::vk::Result>` is n
+ot implemented for `String`
+    |                             |
+    |                             this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:163:275
+    |
+ 59 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+163 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(inst_bytes.len() as u64).usage(vk::BufferUsageFlags::SH
+ADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR).sharing_mode(vk::SharingM
+ode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
+----------------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:165:30
+    |
+165 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:170:131
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+170 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:171:48
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+171 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:172:97
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+172 |             let p = dev.map_memory(mem, 0, inst_bytes.len() as u64, vk::MemoryMapFlags::empty())?;
+    |                         ------------------------------------------------------------------------^ the trait `From
+<ash::vk::Result>` is not implemented for `String`
+    |                         |
+    |                         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:194:244
+    |
+ 59 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+194 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(tcount).usage(vk::BufferUsageFlags::ACCELERATION_STRUCT
+URE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------^ the tra
+it `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:196:30
+    |
+196 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:201:131
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+201 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:202:48
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+202 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:206:72
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+206 |         let tlas = vk_asext.create_acceleration_structure(&tinfo, None)?;
+    |                             -------------------------------------------^ the trait `From<ash::vk::Result>` is not
+ implemented for `String`
+    |                             |
+    |                             this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:210:230
+    |
+ 59 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+210 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(scratch_size).usage(vk::BufferUsageFlags::STORAGE_BUFFE
+R | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------^ the trait `From<ash::
+vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:212:30
+    |
+212 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:217:131
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+217 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:218:48
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+218 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:225:193
+    |
+ 59 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+225 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(hits_items as u64 * 4).usage(vk::BufferUsageFlags::STOR
+AGE_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `
+String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:227:30
+    |
+227 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:232:131
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+232 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:233:48
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+233 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:239:168
+    |
+ 59 | ...Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                 ------------------- expected `Str
+ing` because of this
+...
+239 | ...ev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(std::slice::from_raw_parts(spv.as_ptr() as
+ *const u32, spv.len() / 4)), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-----------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:242:139
+    |
+ 59 | ...ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                      ------------------- expected
+ `String` because of this
+...
+242 | ... dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&[as_layout, hit_layo
+ut]), None)?;
+    |         ---------------------------------------------------------------------------------------------------------
+-----------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |         |
+    |         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:243:112
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+243 |         let pl = dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&[dsl]), None)?;
+    |                      ------------------------------------------------------------------------------------------^ 
+the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                      |
+    |                      this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:249:18
+    |
+ 59 |   fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, 
+String> {
+    |                                                                                                      ------------
+------- expected `String` because of this
+...
+246 |           let pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&
+[
+    |  ________________________-
+247 | |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_cou
+nt(1),
+248 | |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+249 | |         ]), None)?;
+    | |                 -^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    | |_________________|
+    |                   this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\rt_impl.rs:250:22
+     |
+ 250 | ... dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[d
+sl]), None)?[0];
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                
+      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:1546
+:19
+     |
+1546 |     pub unsafe fn allocate_descriptor_sets(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 250 -         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl]), None)?[0];
+ 250 +         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl]))?[0];
+     |
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:250:137
+    |
+ 59 | ...&ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                       ------------------- expecte
+d `String` because of this
+...
+250 | ... dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[ds
+l]), None)?[0];
+    |         ---------------------------------------------------------------------------------------------------------
+----------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |         |
+    |         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `p_next` found for struct `WriteDescriptorSet<'a>` in the current scope
+   --> src\rt_impl.rs:259:138
+    |
+259 | ...pe(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).p_next(&accel_write as *const _ as *const std::ffi::c_void)
+,
+    |                                                       ^^^^^^ field, not a method
+    |
+help: remove the arguments
+    |
+259 -             vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::ACCE
+LERATION_STRUCTURE_KHR).p_next(&accel_write as *const _ as *const std::ffi::c_void),
+259 +             vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::ACCE
+LERATION_STRUCTURE_KHR).p_next,
+    |
+help: there is a method `push_next` with a similar name
+    |
+259 |             vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::ACCE
+LERATION_STRUCTURE_KHR).push_next(&accel_write as *const _ as *const std::ffi::c_void),
+    |                                                                                                                  
+                         +++
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:262:111
+    |
+ 59 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+262 |         let cpool = dev.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(0), None)?;
+    |                         --------------------------------------------------------------------------------------^ t
+he trait `From<ash::vk::Result>` is not implemented for `String`
+    |                         |
+    |                         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\rt_impl.rs:263:23
+     |
+ 263 | ... dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).command_buffer_co
+unt(1), None)?[0];
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                
+        ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2541
+:19
+     |
+2541 |     pub unsafe fn allocate_command_buffers(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 263 -         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).com
+mand_buffer_count(1), None)?[0];
+ 263 +         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).com
+mand_buffer_count(1))?[0];
+     |
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:263:140
+    |
+ 59 | ...h::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                    ------------------- expected `
+String` because of this
+...
+263 | ...ev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).command_buffer_count
+(1), None)?[0];
+    |       -----------------------------------------------------------------------------------------------------------
+----------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> src\rt_impl.rs:275:17
+     |
+ 275 | ...ev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TI
+ME_SUBMIT), None)?;
+     |       ^^^^^^^^^^^^^^^^^^^^                                                                                      
+            ---- unexpected argument #3 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2413
+:19
+     |
+2413 |     pub unsafe fn begin_command_buffer(
+     |                   ^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 275 -             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFla
+gs::ONE_TIME_SUBMIT), None)?;
+ 275 +             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFla
+gs::ONE_TIME_SUBMIT))?;
+     |
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:275:140
+    |
+ 59 | ...v: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                          ------------------- expe
+cted `String` because of this
+...
+275 | ...ev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIM
+E_SUBMIT), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\rt_impl.rs:295:17
+     |
+ 295 |             dev.end_command_buffer(cmd, None);
+     |                 ^^^^^^^^^^^^^^^^^^      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2423
+:19
+     |
+2423 |     pub unsafe fn end_command_buffer(&self, command_buffer: vk::CommandBuffer) -> VkResult<()> {
+     |                   ^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 295 -             dev.end_command_buffer(cmd, None);
+ 295 +             dev.end_command_buffer(cmd);
+     |
+
+error[E0599]: no method named `enumerate_physical_devices` found for reference `&ash::Entry` in the current scope
+  --> src\main.rs:53:24
+   |
+53 |         for p in entry.enumerate_physical_devices().ok()? {
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Entry`
+
+error[E0599]: no method named `get_physical_device_properties` found for reference `&ash::Entry` in the current scope
+  --> src\main.rs:54:31
+   |
+54 |             let props = entry.get_physical_device_properties(p);
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Entry`
+
+error[E0599]: no method named `enumerate_device_extension_properties` found for reference `&ash::Entry` in the current 
+scope
+  --> src\main.rs:55:60
+   |
+55 |             let exts: Vec<vk::ExtensionProperties> = entry.enumerate_device_extension_properties(p).unwrap_or_defa
+ult();
+   |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `enumerate_instance_extension_properties` with a similar name
+   |
+55 -             let exts: Vec<vk::ExtensionProperties> = entry.enumerate_device_extension_properties(p).unwrap_or_defa
+ult();
+55 +             let exts: Vec<vk::ExtensionProperties> = entry.enumerate_instance_extension_properties(p).unwrap_or_de
+fault();
+   |
+
+error[E0308]: mismatched types
+  --> src\main.rs:77:26
+   |
+77 |         rq_f.ray_query = true;
+   |         --------------   ^^^^ expected `u32`, found `bool`
+   |         |
+   |         expected due to the type of this binding
+
+error[E0308]: mismatched types
+  --> src\main.rs:79:39
+   |
+79 |         as_f.acceleration_structure = true;
+   |         ---------------------------   ^^^^ expected `u32`, found `bool`
+   |         |
+   |         expected due to the type of this binding
+
+error[E0308]: mismatched types
+  --> src\main.rs:81:38
+   |
+81 |         bd_f.buffer_device_address = true;
+   |         --------------------------   ^^^^ expected `u32`, found `bool`
+   |         |
+   |         expected due to the type of this binding
+
+error[E0308]: mismatched types
+  --> src\main.rs:82:23
+   |
+82 |         as_f.p_next = &mut bd_f as *mut _ as *mut vk::BaseOutStructure;
+   |         -----------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*mut c_void`, found `*mut BaseOut
+Structure<'_>`
+   |         |
+   |         expected due to the type of this binding
+   |
+   = note: expected raw pointer `*mut c_void`
+              found raw pointer `*mut BaseOutStructure<'_>`
+
+error[E0308]: mismatched types
+  --> src\main.rs:83:23
+   |
+83 |         rq_f.p_next = &mut as_f as *mut _ as *mut vk::BaseOutStructure;
+   |         -----------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*mut c_void`, found `*mut BaseOut
+Structure<'_>`
+   |         |
+   |         expected due to the type of this binding
+   |
+   = note: expected raw pointer `*mut c_void`
+              found raw pointer `*mut BaseOutStructure<'_>`
+
+error[E0599]: no method named `queue_count` found for struct `DeviceQueueCreateInfo<'a>` in the current scope
+  --> src\main.rs:86:14
+   |
+84 |           let queues = [vk::DeviceQueueCreateInfo::default()
+   |  _______________________-
+85 | |             .queue_family_index(0)
+86 | |             .queue_count(1)
+   | |             -^^^^^^^^^^^--- help: remove the arguments
+   | |             ||
+   | |_____________|field, not a method
+   |
+
+error[E0308]: mismatched types
+    --> src\main.rs:90:38
+     |
+  90 |             .enabled_extension_names(&ext_ptrs)
+     |              ----------------------- ^^^^^^^^^ expected `&[*const i8]`, found `&Vec<*const u8>`
+     |              |
+     |              arguments to this method are incorrect
+     |
+     = note: expected reference `&[*const i8]`
+                found reference `&Vec<*const u8>`
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\vk\definitions
+.rs:1368:12
+     |
+1368 |     pub fn enabled_extension_names(mut self, enabled_extension_names: &'a [*const c_char]) -> Self {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> src\main.rs:92:23
+   |
+92 |         info.p_next = &mut rq_f as *mut _ as *mut vk::BaseOutStructure;
+   |         -----------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const c_void`, found `*mut BaseO
+utStructure<'_>`
+   |         |
+   |         expected due to the type of this binding
+   |
+   = note: expected raw pointer `*const c_void`
+              found raw pointer `*mut BaseOutStructure<'_>`
+
+error[E0599]: no method named `create_device` found for reference `&ash::Entry` in the current scope
+  --> src\main.rs:93:25
+   |
+93 |         let dev = entry.create_device(phys, &info, None).map_err(|e| format!("创建设备: {:?}", e))?;
+   |                         ^^^^^^^^^^^^^ method not found in `&ash::Entry`
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\main.rs:122:22
+     |
+ 122 | ... dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[d
+sl]), None).map_er...
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                
+      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:1546
+:19
+     |
+1546 |     pub unsafe fn allocate_descriptor_sets(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 122 -         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl]), None).map_err(|e| format!("ds: {:?}", e))?[0];
+ 122 +         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl])).map_err(|e| format!("ds: {:?}", e))?[0];
+     |
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\main.rs:128:23
+     |
+ 128 | ...ev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).level(vk::CommandBu
+fferLevel::PRIMARY).command_buffer_count(1), None).m...
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                  
+                                             ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2541
+:19
+     |
+2541 |     pub unsafe fn allocate_command_buffers(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 128 -         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).lev
+el(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1), None).map_err(|e| format!("cb: {:?}", e))?[0];
+ 128 +         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).lev
+el(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)).map_err(|e| format!("cb: {:?}", e))?[0];
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> src\main.rs:136:17
+     |
+ 136 |             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default(), None).map_err(|e| format!("beg
+in: {:?}", e))?;
+     |                 ^^^^^^^^^^^^^^^^^^^^                                              ---- unexpected argument #3 of
+ type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2413
+:19
+     |
+2413 |     pub unsafe fn begin_command_buffer(
+     |                   ^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 136 -             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default(), None).map_err(|e| format!("beg
+in: {:?}", e))?;
+ 136 +             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).map_err(|e| format!("begin: {:
+?}", e))?;
+     |
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\main.rs:142:17
+     |
+ 142 |             dev.end_command_buffer(cmd, None);
+     |                 ^^^^^^^^^^^^^^^^^^      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2423
+:19
+     |
+2423 |     pub unsafe fn end_command_buffer(&self, command_buffer: vk::CommandBuffer) -> VkResult<()> {
+     |                   ^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 142 -             dev.end_command_buffer(cmd, None);
+ 142 +             dev.end_command_buffer(cmd);
+     |
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\main.rs:172:26
+    |
+172 |         let mprops = dev.get_physical_device_memory_properties(phys);
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0308]: mismatched types
+   --> src\main.rs:216:9
+    |
+216 |     (y, m, d)
+    |         ^ expected `i64`, found `u64`
+    |
+help: you can convert a `u64` to an `i64` and panic if the converted value doesn't fit
+    |
+216 |     (y, m.try_into().unwrap(), d)
+    |          ++++++++++++++++++++
+
+error[E0308]: mismatched types
+   --> src\main.rs:216:12
+    |
+216 |     (y, m, d)
+    |            ^ expected `i64`, found `u64`
+    |
+help: you can convert a `u64` to an `i64` and panic if the converted value doesn't fit
+    |
+216 |     (y, m, d.try_into().unwrap())
+    |             ++++++++++++++++++++
+
+warning: unused variable: `phys`
+   --> src\main.rs:165:37
+    |
+165 | fn create_buffer(dev: &ash::Device, phys: vk::PhysicalDevice, size: u64, usage: vk::BufferUsageFlags) -> Result<v
+k::Buffer, String> {
+    |                                     ^^^^ help: if this is intentional, prefix it with an underscore: `_phys`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0061, E0063, E0277, E0308, E0425, E0433, E0599.
+For more information about an error, try `rustc --explain E0061`.
+warning: `rt-bench` (bin "rt-bench") generated 1 warning
+error: could not compile `rt-bench` (bin "rt-bench") due to 66 previous errors; 1 warning emitted

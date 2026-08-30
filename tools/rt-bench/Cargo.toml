@@ -1,0 +1,10 @@
+[package]
+name = "rt-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ash = "0.38"
+glam = "0.29"
+
+[build-dependencies]

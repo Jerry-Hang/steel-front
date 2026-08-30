@@ -1,0 +1,20 @@
+﻿cargo :    Compiling rt-bench v0.1.0 (D:\Rust\steel-front\tools\rt-bench)
+At line:1 char:151
++ ... new($false); python scripts\w9.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling rt...tools\rt-bench):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: mismatched closing delimiter: `}`
+   --> src\rt_impl.rs:108:32
+    |
+ 61 |     unsafe {
+    |            - closing delimiter possibly meant for this
+...
+108 |         let ip = dev.map_memory(imem, 0, idxs.len() as u64 * 4, vk::MemoryMapFlags::empty()?;
+    |                                ^ unclosed delimiter
+...
+314 |     }
+    |     ^ mismatched closing delimiter
+
+error: could not compile `rt-bench` (bin "rt-bench") due to 1 previous error

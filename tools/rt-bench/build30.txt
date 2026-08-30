@@ -1,0 +1,67 @@
+﻿cargo :    Compiling rt-bench v0.1.0 (D:\Rust\steel-front\tools\rt-bench)
+At line:1 char:152
++ ... ew($false); python scripts\w30.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling rt...tools\rt-bench):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: unused variable: `ai`
+  --> src\rt_impl.rs:92:17
+   |
+92 |             let ai = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(idx);
+   |                 ^^ help: if this is intentional, prefix it with an underscore: `_ai`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `inst_mem`
+   --> src\rt_impl.rs:164:24
+    |
+164 |         let (inst_buf, inst_mem) = {
+    |                        ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inst_mem`
+
+warning: unnecessary `unsafe` block
+  --> src\main.rs:68:25
+   |
+63 |     unsafe {
+   |     ------ because it's nested under this `unsafe` block
+...
+68 |                 let n = unsafe { std::ffi::CStr::from_ptr(e.extension_name.as_ptr()) }.to_string_lossy();
+   |                         ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+error[E0716]: temporary value dropped while borrowed
+   --> src\main.rs:106:32
+    |
+106 |             .enabled_features(&vk::PhysicalDeviceFeatures::default());
+    |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ - temporary value is freed at the end of thi
+s statement
+    |                                |
+    |                                creates a temporary value which is freed while still in use
+107 |         info.p_next = &mut rq_f as *mut _ as *mut std::ffi::c_void;
+    |         ---------------------------------------------------------- borrow later used here
+    |
+    = note: consider using a `let` binding to create a longer lived value
+
+warning: unused variable: `prio`
+  --> src\main.rs:78:9
+   |
+78 |     let prio = [1.0f32];
+   |         ^^^^ help: if this is intentional, prefix it with an underscore: `_prio`
+
+warning: unused variable: `i`
+   --> src\main.rs:158:17
+    |
+158 |             for i in 0..iters {
+    |                 ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `phys`
+   --> src\main.rs:186:37
+    |
+186 | fn create_buffer(dev: &ash::Device, phys: vk::PhysicalDevice, size: u64, usage: vk::BufferUsageFlags) -> Result<v
+k::Buffer, String> {
+    |                                     ^^^^ help: if this is intentional, prefix it with an underscore: `_phys`
+
+For more information about this error, try `rustc --explain E0716`.
+warning: `rt-bench` (bin "rt-bench") generated 6 warnings
+error: could not compile `rt-bench` (bin "rt-bench") due to 1 previous error; 6 warnings emitted

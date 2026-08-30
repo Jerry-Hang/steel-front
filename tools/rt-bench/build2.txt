@@ -1,0 +1,2449 @@
+﻿cargo :    Compiling ash v0.38.0+1.3.281
+At line:1 char:151
++ ... new($false); python scripts\w2.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ash v0.38.0+1.3.281:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling rt-bench v0.1.0 (D:\Rust\steel-front\tools\rt-bench)
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:55:22
+   |
+55 |     unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(buf); dev.get_buffer_device_address(&i) }
+   |                      ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:78:39
+   |
+78 | ...   let vbuf = dev.create_buffer(&vk::BufferCreateInfo::default().size(verts.len() as u64).usage(vk::BufferUsage
+Flags::STORAGE_BUF...
+   |                                     ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:78:102
+   |
+78 | ...fault().size(verts.len() as u64).usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVI
+CE_ADDRESS | vk::B...
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:78:141
+   |
+78 | ...vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCE
+LERATION_STRUCTURE...
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:78:187
+   |
+78 | ...ferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR).
+sharing_mode(vk::S...
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:78:272
+   |
+78 | ...UILD_INPUT_READ_ONLY_KHR).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:79:39
+   |
+79 | ...   let ibuf = dev.create_buffer(&vk::BufferCreateInfo::default().size(idxs.len() as u64 * 4).usage(vk::BufferUs
+ageFlags::INDEX_BU...
+   |                                     ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:79:105
+   |
+79 | ...lt().size(idxs.len() as u64 * 4).usage(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFE
+R | vk::BufferUsag...
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:79:142
+   |
+79 | ...e(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVI
+CE_ADDRESS | vk::B...
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:79:181
+   |
+79 | ...vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCE
+LERATION_STRUCTURE...
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:79:227
+   |
+79 | ...ferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR).
+sharing_mode(vk::S...
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:79:312
+   |
+79 | ...UILD_INPUT_READ_ONLY_KHR).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:86:86
+   |
+86 | ...   if req.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE |
+ vk::MemoryPropert...
+   |                                                                            ^^ use of unresolved module or unlinked
+ crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:86:126
+   |
+86 | ...k::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT) {
+   |                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:90:22
+   |
+90 |             let ai = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(idx);
+   |                      ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:93:25
+   |
+93 |                 s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+   |                         ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:94:26
+   |
+94 | ...   p_next: &vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS) as *const _ a
+s *const std::ffi:...
+   |                ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:94:71
+   |
+94 | ...   p_next: &vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS) as *const _ a
+s *const std::ffi:...
+   |                                                             ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:103:62
+    |
+103 |         let vp = dev.map_memory(vmem, 0, verts.len() as u64, vk::MemoryMapFlags::empty())?;
+    |                                                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:106:65
+    |
+106 |         let ip = dev.map_memory(imem, 0, idxs.len() as u64 * 4, vk::MemoryMapFlags::empty())?;
+    |                                                                 ^^ use of unresolved module or unlinked crate `vk
+`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:112:23
+    |
+112 |         let mut tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
+    |                       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:113:29
+    |
+113 |         tri.vertex_format = vk::Format::R32G32B32_SFLOAT;
+    |                             ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:117:26
+    |
+117 |         tri.index_type = vk::IndexType::UINT32;
+    |                          ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:120:23
+    |
+120 |         let mut geo = vk::AccelerationStructureGeometryKHR::default();
+    |                       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:121:29
+    |
+121 |         geo.geometry_type = vk::GeometryTypeKHR::TRIANGLES;
+    |                             ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:123:24
+    |
+123 |         let mut geom = vk::AccelerationStructureBuildGeometryInfoKHR::default();
+    |                        ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:124:19
+    |
+124 |         geom.ty = vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL;
+    |                   ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:125:22
+    |
+125 |         geom.flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
+    |                      ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:128:21
+    |
+128 |         geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
+    |                     ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:131:29
+    |
+131 |         let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
+    |                             ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:132:57
+    |
+132 | ...   vk_asext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &[(bo
+xes.len() * 12) as...
+    |                                                       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:135:58
+    |
+135 |             let req = dev.get_buffer_memory_requirements(vk::Buffer::null());
+    |                                                          ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:138:42
+    |
+138 | ...   let buf = dev.create_buffer(&vk::BufferCreateInfo::default().size(count).usage(vk::BufferUsageFlags::ACCELE
+RATION_STRUCTURE_S...
+    |                                    ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:138:92
+    |
+138 | ...reateInfo::default().size(count).usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUs
+ageFlags::SHADER_D...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:138:151
+    |
+138 | ...::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMo
+de::EXCLUSIVE), No...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:138:209
+    |
+138 | ...s::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:143:84
+    |
+143 | ...   if r.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) {
+ idx = i as u32; b...
+    |                                                                          ^^ use of unresolved module or unlinked 
+crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:145:22
+    |
+145 |             let ai = vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_index(idx);
+    |                      ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:150:23
+    |
+150 | ...   let as_info = vk::AccelerationStructureCreateInfoKHR::default().ty(vk::AccelerationStructureTypeKHR::BOTTOM
+_LEVEL).size(count...
+    |                     ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:150:76
+    |
+150 | ...   let as_info = vk::AccelerationStructureCreateInfoKHR::default().ty(vk::AccelerationStructureTypeKHR::BOTTOM
+_LEVEL).size(count...
+    |                                                                          ^^ use of unresolved module or unlinked 
+crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:152:35
+    |
+152 | ...   let blas_addr = { let a = vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(b
+las); vk_asext.get...
+    |                                 ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:156:45
+    |
+156 |             instance_custom_index_and_mask: vk::Packed24_8::new(0xFFu32, 0xFFu8),
+    |                                             ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:157:68
+    |
+157 |             instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0, 0),
+    |                                                                    ^^ use of unresolved module or unlinked crate 
+`vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:162:42
+    |
+162 | ...   let buf = dev.create_buffer(&vk::BufferCreateInfo::default().size(inst_bytes.len() as u64).usage(vk::Buffer
+UsageFlags::SHADER...
+    |                                    ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:162:110
+    |
+162 | ...().size(inst_bytes.len() as u64).usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACC
+ELERATION_STRUCTUR...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:162:156
+    |
+162 | ...ferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR)
+.sharing_mode(vk::...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:162:241
+    |
+162 | ...UILD_INPUT_READ_ONLY_KHR).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:167:84
+    |
+167 | ...   if r.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE | 
+vk::MemoryProperty...
+    |                                                                          ^^ use of unresolved module or unlinked 
+crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:167:124
+    |
+167 | ...k::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT) { idx = i as u32; break; }
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:169:44
+    |
+169 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                                            ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:171:69
+    |
+171 |             let p = dev.map_memory(mem, 0, inst_bytes.len() as u64, vk::MemoryMapFlags::empty())?;
+    |                                                                     ^^ use of unresolved module or unlinked crate
+ `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:177:24
+    |
+177 |         let mut tgeo = vk::AccelerationStructureGeometryKHR::default();
+    |                        ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:178:30
+    |
+178 |         tgeo.geometry_type = vk::GeometryTypeKHR::INSTANCES;
+    |                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:179:33
+    |
+179 |         let mut inst_geo_data = vk::AccelerationStructureGeometryInstancesDataKHR::default();
+    |                                 ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:183:25
+    |
+183 |         let mut tgeom = vk::AccelerationStructureBuildGeometryInfoKHR::default();
+    |                         ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:184:20
+    |
+184 |         tgeom.ty = vk::AccelerationStructureTypeKHR::TOP_LEVEL;
+    |                    ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:185:23
+    |
+185 |         tgeom.flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
+    |                       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:188:22
+    |
+188 |         tgeom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
+    |                      ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:189:25
+    |
+189 |         let mut tsize = vk::AccelerationStructureBuildSizesInfoKHR::default();
+    |                         ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:190:57
+    |
+190 |         vk_asext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &tgeom, &[
+1], &mut tsize);
+    |                                                         ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:193:42
+    |
+193 | ...   let buf = dev.create_buffer(&vk::BufferCreateInfo::default().size(tcount).usage(vk::BufferUsageFlags::ACCEL
+ERATION_STRUCTURE_...
+    |                                    ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:193:93
+    |
+193 | ...eateInfo::default().size(tcount).usage(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUs
+ageFlags::SHADER_D...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:193:152
+    |
+193 | ...::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMo
+de::EXCLUSIVE), No...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:193:210
+    |
+193 | ...s::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:198:84
+    |
+198 | ...   if r.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) {
+ idx = i as u32; b...
+    |                                                                          ^^ use of unresolved module or unlinked 
+crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:200:44
+    |
+200 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                                            ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:204:21
+    |
+204 | ...   let tinfo = vk::AccelerationStructureCreateInfoKHR::default().ty(vk::AccelerationStructureTypeKHR::TOP_LEVE
+L).size(tcount).bu...
+    |                   ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:204:74
+    |
+204 | ...   let tinfo = vk::AccelerationStructureCreateInfoKHR::default().ty(vk::AccelerationStructureTypeKHR::TOP_LEVE
+L).size(tcount).bu...
+    |                                                                        ^^ use of unresolved module or unlinked cr
+ate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:209:42
+    |
+209 | ...   let buf = dev.create_buffer(&vk::BufferCreateInfo::default().size(scratch_size).usage(vk::BufferUsageFlags:
+:STORAGE_BUFFER | ...
+    |                                    ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:209:99
+    |
+209 | ...fo::default().size(scratch_size).usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEV
+ICE_ADDRESS).shari...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:209:138
+    |
+209 | ...vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMo
+de::EXCLUSIVE), No...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:209:196
+    |
+209 | ...s::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:214:84
+    |
+214 | ...   if r.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) {
+ idx = i as u32; b...
+    |                                                                          ^^ use of unresolved module or unlinked 
+crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:216:44
+    |
+216 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                                            ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:224:42
+    |
+224 | ...   let buf = dev.create_buffer(&vk::BufferCreateInfo::default().size(hits_items as u64 * 4).usage(vk::BufferUs
+ageFlags::STORAGE_...
+    |                                    ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:224:108
+    |
+224 | ...lt().size(hits_items as u64 * 4).usage(vk::BufferUsageFlags::STORAGE_BUFFER).sharing_mode(vk::SharingMode::EXC
+LUSIVE), None)?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:224:159
+    |
+224 | ...ageFlags::STORAGE_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:229:84
+    |
+229 | ...   if r.memory_type_bits & (1 << i) != 0 && t.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) {
+ idx = i as u32; b...
+    |                                                                          ^^ use of unresolved module or unlinked 
+crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:231:44
+    |
+231 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                                            ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:238:48
+    |
+238 | ...   let module = dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(std::slice::from_raw_part
+s(spv.as_ptr() as ...
+    |                                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:239:25
+    |
+239 | ...   let as_layout = vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::AC
+CELERATION_STRUCTU...
+    |                       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:239:94
+    |
+239 | ...::default().binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1).sta
+ge_flags(vk::Shade...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:239:174
+    |
+239 | ...E_KHR).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:240:26
+    |
+240 | ...   let hit_layout = vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_type(vk::DescriptorType::S
+TORAGE_BUFFER).des...
+    |                        ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:240:95
+    |
+240 | ...::default().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk:
+:ShaderStageFlags:...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:240:163
+    |
+240 | ...UFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:241:53
+    |
+241 | ...   let dsl = dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&[as_layo
+ut, hit_layout]), ...
+    |                                                   ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:242:46
+    |
+242 |         let pl = dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&[dsl]), None)?;
+    |                                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:243:21
+    |
+243 |         let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(modu
+le).name(c"main");
+    |                     ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:243:72
+    |
+243 |         let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(modu
+le).name(c"main");
+    |                                                                        ^^ use of unresolved module or unlinked cr
+ate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:244:49
+    |
+244 | ...   let pipe = dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default
+().stage(stage).la...
+    |                                               ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:244:78
+    |
+244 | ...   let pipe = dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default
+().stage(stage).la...
+    |                                                                            ^^ use of unresolved module or unlinke
+d crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:245:48
+    |
+245 |         let pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&[
+    |                                                ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:246:13
+    |
+246 |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count
+(1),
+    |             ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:246:50
+    |
+246 |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count
+(1),
+    |                                                  ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:247:13
+    |
+247 |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+    |             ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:247:50
+    |
+247 |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+    |                                                  ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:249:48
+    |
+249 | ...   let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_l
+ayouts(&[dsl]), No...
+    |                                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:251:21
+    |
+251 |             s_type: vk::StructureType::WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+    |                     ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:258:13
+    |
+258 | ...   vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::ACCELERATI
+ON_STRUCTURE_KHR)....
+    |       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:258:90
+    |
+258 | ...set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).p_next(&accel_write as 
+*const _ as *const...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:259:13
+    |
+259 | ...   vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(1).descriptor_type(vk::DescriptorType::STORAGE_BU
+FFER).buffer_info(...
+    |       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:259:90
+    |
+259 | ...set(ds).dst_binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&[hbi]),
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:261:46
+    |
+261 |         let cpool = dev.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(0), None)?;
+    |                                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:262:49
+    |
+262 | ...   let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).comman
+d_buffer_count(1),...
+    |                                               ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:274:44
+    |
+274 | ...   dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE
+_TIME_SUBMIT), Non...
+    |                                      ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:274:88
+    |
+274 | ...ommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT), None)?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:286:29
+    |
+286 | ...   let accel_bar = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_
+KHR).dst_access_ma...
+    |                       ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:286:74
+    |
+286 | ...   let accel_bar = vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_
+KHR).dst_access_ma...
+    |                                                                    ^^ use of unresolved module or unlinked crate 
+`vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:286:141
+    |
+286 | ...N_STRUCTURE_WRITE_KHR).dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:287:43
+    |
+287 | ...   dev.cmd_pipeline_barrier(cmd, vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR, vk::PipelineStageFl
+ags::COMPUTE_SHADE...
+    |                                     ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:287:101
+    |
+287 | ...ags::ACCELERATION_STRUCTURE_BUILD_KHR, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &
+[accel_bar], &[], ...
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:287:141
+    |
+287 | ...k::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[accel_bar], &[], &[]);
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:288:40
+    |
+288 |             dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipe);
+    |                                        ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:289:47
+    |
+289 |             dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, pl, 0, &[ds], &[]);
+    |                                               ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:295:40
+    |
+295 | ...   dev.queue_submit(*queue, &[vk::SubmitInfo::default().command_buffers(&[cmd])], vk::Fence::null()).map_err(|
+e| format!("RT sub...
+    |                                  ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:295:92
+    |
+295 | ...o::default().command_buffers(&[cmd])], vk::Fence::null()).map_err(|e| format!("RT submit: {:?}", e))?;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:303:67
+    |
+303 |         for m in [vmem, imem, asmem, tmem, smem, hbo.1] { if m != vk::DeviceMemory::null() { dev.free_memory(m, N
+one); } }
+    |                                                                   ^^ use of unresolved module or unlinked crate `
+vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find type `Instant` in this scope
+   --> src\rt_impl.rs:290:22
+    |
+290 |             let t0 = Instant::now();
+    |                      ^^^^^^^ use of undeclared type `Instant`
+    |
+help: consider importing one of these structs
+    |
+  4 + use crate::Instant;
+    |
+  4 + use std::time::Instant;
+    |
+
+error[E0425]: cannot find function `rt_test` in this scope
+   --> src\main.rs:41:18
+    |
+ 41 |     let rt_val = rt_test(&device, &queue, phys, &entry).unwrap_or(0.0);
+    |                  ^^^^^^^
+...
+100 | fn fp_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, spv: &[u8], items: u32) -> Result<f64,
+ String> {
+    | -----------------------------------------------------------------------------------------------------------------
+-------- similarly named function `fp_test` defined here
+    |
+note: function `crate::rt_impl::rt_test` exists but is inaccessible
+   --> src\rt_impl.rs:58:1
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^ not accessible
+help: a function with a similar name exists
+    |
+ 41 -     let rt_val = rt_test(&device, &queue, phys, &entry).unwrap_or(0.0);
+ 41 +     let rt_val = fp_test(&device, &queue, phys, &entry).unwrap_or(0.0);
+    |
+
+error[E0277]: `?` couldn't convert the error to `String`
+  --> src\rt_impl.rs:78:306
+   |
+58 | ...::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+   |                                                                                   ------------------- expected `St
+ring` because of this
+...
+78 | ...ev.create_buffer(&vk::BufferCreateInfo::default(...aring_mode(vk::SharingMode::EXCLUSIVE), None)?;
+   |       ---------------------------------------------...---------------------------------------------^ the trait `Fr
+om<ash::vk::Result>` is not implemented for `String`
+   |       |
+   |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+   |
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = help: `String` implements trait `From<T>`:
+             From<&String>
+             From<&mut str>
+             From<&str>
+             From<Box<str>>
+             From<Cow<'_, str>>
+             From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+  --> src\rt_impl.rs:79:346
+   |
+58 | ...::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+   |                                                                                   ------------------- expected `St
+ring` because of this
+...
+79 | ...ev.create_buffer(&vk::BufferCreateInfo::default(...aring_mode(vk::SharingMode::EXCLUSIVE), None)?;
+   |       ---------------------------------------------...---------------------------------------------^ the trait `Fr
+om<ash::vk::Result>` is not implemented for `String`
+   |       |
+   |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+   |
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = help: `String` implements trait `From<T>`:
+             From<&String>
+             From<&mut str>
+             From<&str>
+             From<Box<str>>
+             From<Cow<'_, str>>
+             From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+  --> src\rt_impl.rs:83:30
+   |
+83 |             let mprops = dev.get_physical_device_memory_properties(phys);
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:103:90
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+103 |         let vp = dev.map_memory(vmem, 0, verts.len() as u64, vk::MemoryMapFlags::empty())?;
+    |                      --------------------------------------------------------------------^ the trait `From<ash::v
+k::Result>` is not implemented for `String`
+    |                      |
+    |                      this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:106:93
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+106 |         let ip = dev.map_memory(imem, 0, idxs.len() as u64 * 4, vk::MemoryMapFlags::empty())?;
+    |                      -----------------------------------------------------------------------^ the trait `From<ash
+::vk::Result>` is not implemented for `String`
+    |                      |
+    |                      this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no associated function or constant named `default` found for struct `ash::Instance` in the current scope
+   --> src\rt_impl.rs:129:86
+    |
+129 |         let vk_asext = ash::khr::acceleration_structure::Device::new(&ash::Instance::default(), dev);
+    |                                                                                      ^^^^^^^ associated function 
+or constant not found in `ash::Instance`
+    |
+note: if you're trying to build a new `ash::Instance` consider using one of the following associated functions:
+      ash::Instance::load
+      ash::Instance::load_with
+      ash::Instance::from_parts_1_3
+   --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\instance.rs:23:
+5
+    |
+ 23 |       pub unsafe fn load(static_fn: &crate::StaticFn, instance: vk::Instance) -> Self {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 30 | /     pub unsafe fn load_with(
+ 31 | |         mut load_fn: impl FnMut(&ffi::CStr) -> *const ffi::c_void,
+ 32 | |         instance: vk::Instance,
+ 33 | |     ) -> Self {
+    | |_____________^
+...
+ 43 | /     pub fn from_parts_1_3(
+ 44 | |         handle: vk::Instance,
+ 45 | |         instance_fn_1_0: crate::InstanceFnV1_0,
+ 46 | |         instance_fn_1_1: crate::InstanceFnV1_1,
+ 47 | |         instance_fn_1_3: crate::InstanceFnV1_3,
+ 48 | |     ) -> Self {
+    | |_____________^
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:138:243
+    |
+ 58 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+138 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(count).usage(vk::BufferUsageFlags::ACCELERATION_STRUCTU
+RE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------^ the trai
+t `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:140:30
+    |
+140 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:146:53
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+146 |             let mem = dev.allocate_memory(&ai, None)?;
+    |                           --------------------------^ the trait `From<ash::vk::Result>` is not implemented for `S
+tring`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:147:48
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+147 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:151:74
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+151 |         let blas = vk_asext.create_acceleration_structure(&as_info, None)?;
+    |                             ---------------------------------------------^ the trait `From<ash::vk::Result>` is n
+ot implemented for `String`
+    |                             |
+    |                             this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:162:275
+    |
+ 58 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+162 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(inst_bytes.len() as u64).usage(vk::BufferUsageFlags::SH
+ADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR).sharing_mode(vk::SharingM
+ode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------
+----------------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:164:30
+    |
+164 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:169:131
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+169 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:170:48
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+170 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:171:97
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+171 |             let p = dev.map_memory(mem, 0, inst_bytes.len() as u64, vk::MemoryMapFlags::empty())?;
+    |                         ------------------------------------------------------------------------^ the trait `From
+<ash::vk::Result>` is not implemented for `String`
+    |                         |
+    |                         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:180:43
+    |
+180 |         inst_geo_data.array_of_pointers = vk::FALSE;
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:193:244
+    |
+ 58 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+193 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(tcount).usage(vk::BufferUsageFlags::ACCELERATION_STRUCT
+URE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------^ the tra
+it `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:195:30
+    |
+195 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:200:131
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+200 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:201:48
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+201 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:205:72
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+205 |         let tlas = vk_asext.create_acceleration_structure(&tinfo, None)?;
+    |                             -------------------------------------------^ the trait `From<ash::vk::Result>` is not
+ implemented for `String`
+    |                             |
+    |                             this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:209:230
+    |
+ 58 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+209 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(scratch_size).usage(vk::BufferUsageFlags::STORAGE_BUFFE
+R | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------^ the trait `From<ash::
+vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:211:30
+    |
+211 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:216:131
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+216 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:217:48
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+217 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:224:193
+    |
+ 58 | ...evice, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                ------------------- expected `Stri
+ng` because of this
+...
+224 | ...ev.create_buffer(&vk::BufferCreateInfo::default().size(hits_items as u64 * 4).usage(vk::BufferUsageFlags::STOR
+AGE_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `
+String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\rt_impl.rs:226:30
+    |
+226 |             let mprops = dev.get_physical_device_memory_properties(phys);
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:231:131
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+231 |             let mem = dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_
+index(idx), None)?;
+    |                           ---------------------------------------------------------------------------------------
+-----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                           |
+    |                           this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:232:48
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+232 |             dev.bind_buffer_memory(buf, mem, 0)?;
+    |                 -------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String
+`
+    |                 |
+    |                 this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:238:168
+    |
+ 58 | ...Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                 ------------------- expected `Str
+ing` because of this
+...
+238 | ...ev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(std::slice::from_raw_parts(spv.as_ptr() as
+ *const u32, spv.len() / 4)), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+-----------------------------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:241:139
+    |
+ 58 | ...ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                      ------------------- expected
+ `String` because of this
+...
+241 | ... dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&[as_layout, hit_layo
+ut]), None)?;
+    |         ---------------------------------------------------------------------------------------------------------
+-----------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |         |
+    |         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:242:112
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+242 |         let pl = dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&[dsl]), None)?;
+    |                      ------------------------------------------------------------------------------------------^ 
+the trait `From<ash::vk::Result>` is not implemented for `String`
+    |                      |
+    |                      this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:248:18
+    |
+ 58 |   fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, 
+String> {
+    |                                                                                                      ------------
+------- expected `String` because of this
+...
+245 |           let pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&
+[
+    |  ________________________-
+246 | |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_cou
+nt(1),
+247 | |             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+248 | |         ]), None)?;
+    | |                 -^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    | |_________________|
+    |                   this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\rt_impl.rs:249:22
+     |
+ 249 | ... dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[d
+sl]), None)?[0];
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                
+      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:1546
+:19
+     |
+1546 |     pub unsafe fn allocate_descriptor_sets(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 249 -         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl]), None)?[0];
+ 249 +         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl]))?[0];
+     |
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:249:137
+    |
+ 58 | ...&ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                       ------------------- expecte
+d `String` because of this
+...
+249 | ... dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[ds
+l]), None)?[0];
+    |         ---------------------------------------------------------------------------------------------------------
+----------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |         |
+    |         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:256:79
+    |
+256 |         let hbi = vk::DescriptorBufferInfo { buffer: hbo.0, offset: 0, range: vk::WHOLE_SIZE };
+    |                                                                               ^^ use of unresolved module or unli
+nked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:261:111
+    |
+ 58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, St
+ring> {
+    |                                                                                                    --------------
+----- expected `String` because of this
+...
+261 |         let cpool = dev.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(0), None)?;
+    |                         --------------------------------------------------------------------------------------^ t
+he trait `From<ash::vk::Result>` is not implemented for `String`
+    |                         |
+    |                         this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\rt_impl.rs:262:23
+     |
+ 262 | ... dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).command_buffer_co
+unt(1), None)?[0];
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                
+        ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2541
+:19
+     |
+2541 |     pub unsafe fn allocate_command_buffers(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 262 -         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).com
+mand_buffer_count(1), None)?[0];
+ 262 +         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).com
+mand_buffer_count(1))?[0];
+     |
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:262:140
+    |
+ 58 | ...h::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                    ------------------- expected `
+String` because of this
+...
+262 | ...ev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).command_buffer_count
+(1), None)?[0];
+    |       -----------------------------------------------------------------------------------------------------------
+----------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> src\rt_impl.rs:274:17
+     |
+ 274 | ...ev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TI
+ME_SUBMIT), None)?;
+     |       ^^^^^^^^^^^^^^^^^^^^                                                                                      
+            ---- unexpected argument #3 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2413
+:19
+     |
+2413 |     pub unsafe fn begin_command_buffer(
+     |                   ^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 274 -             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFla
+gs::ONE_TIME_SUBMIT), None)?;
+ 274 +             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFla
+gs::ONE_TIME_SUBMIT))?;
+     |
+
+error[E0277]: `?` couldn't convert the error to `String`
+   --> src\rt_impl.rs:274:140
+    |
+ 58 | ...v: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, String> {
+    |                                                                                          ------------------- expe
+cted `String` because of this
+...
+274 | ...ev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIM
+E_SUBMIT), None)?;
+    |       -----------------------------------------------------------------------------------------------------------
+----------------^ the trait `From<ash::vk::Result>` is not implemented for `String`
+    |       |
+    |       this can't be annotated with `?` because it has type `Result<_, ash::vk::Result>`
+    |
+    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trai
+t
+    = help: `String` implements trait `From<T>`:
+              From<&String>
+              From<&mut str>
+              From<&str>
+              From<Box<str>>
+              From<Cow<'_, str>>
+              From<char>
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\rt_impl.rs:294:17
+     |
+ 294 |             dev.end_command_buffer(cmd, None);
+     |                 ^^^^^^^^^^^^^^^^^^      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2423
+:19
+     |
+2423 |     pub unsafe fn end_command_buffer(&self, command_buffer: vk::CommandBuffer) -> VkResult<()> {
+     |                   ^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 294 -             dev.end_command_buffer(cmd, None);
+ 294 +             dev.end_command_buffer(cmd);
+     |
+
+error[E0599]: no method named `enumerate_physical_devices` found for reference `&ash::Entry` in the current scope
+  --> src\main.rs:53:24
+   |
+53 |         for p in entry.enumerate_physical_devices().ok()? {
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Entry`
+
+error[E0599]: no method named `get_physical_device_properties` found for reference `&ash::Entry` in the current scope
+  --> src\main.rs:54:31
+   |
+54 |             let props = entry.get_physical_device_properties(p);
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Entry`
+
+error[E0599]: no method named `enumerate_device_extension_properties` found for reference `&ash::Entry` in the current 
+scope
+  --> src\main.rs:55:60
+   |
+55 |             let exts: Vec<vk::ExtensionProperties> = entry.enumerate_device_extension_properties(p).unwrap_or_defa
+ult();
+   |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `enumerate_instance_extension_properties` with a similar name
+   |
+55 -             let exts: Vec<vk::ExtensionProperties> = entry.enumerate_device_extension_properties(p).unwrap_or_defa
+ult();
+55 +             let exts: Vec<vk::ExtensionProperties> = entry.enumerate_instance_extension_properties(p).unwrap_or_de
+fault();
+   |
+
+error[E0308]: mismatched types
+  --> src\main.rs:77:26
+   |
+77 |         rq_f.ray_query = true;
+   |         --------------   ^^^^ expected `u32`, found `bool`
+   |         |
+   |         expected due to the type of this binding
+
+error[E0308]: mismatched types
+  --> src\main.rs:79:39
+   |
+79 |         as_f.acceleration_structure = true;
+   |         ---------------------------   ^^^^ expected `u32`, found `bool`
+   |         |
+   |         expected due to the type of this binding
+
+error[E0308]: mismatched types
+  --> src\main.rs:81:38
+   |
+81 |         bd_f.buffer_device_address = true;
+   |         --------------------------   ^^^^ expected `u32`, found `bool`
+   |         |
+   |         expected due to the type of this binding
+
+error[E0308]: mismatched types
+  --> src\main.rs:82:23
+   |
+82 |         as_f.p_next = &mut bd_f as *mut _ as *mut vk::BaseOutStructure;
+   |         -----------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*mut c_void`, found `*mut BaseOut
+Structure<'_>`
+   |         |
+   |         expected due to the type of this binding
+   |
+   = note: expected raw pointer `*mut c_void`
+              found raw pointer `*mut BaseOutStructure<'_>`
+
+error[E0308]: mismatched types
+  --> src\main.rs:83:23
+   |
+83 |         rq_f.p_next = &mut as_f as *mut _ as *mut vk::BaseOutStructure;
+   |         -----------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*mut c_void`, found `*mut BaseOut
+Structure<'_>`
+   |         |
+   |         expected due to the type of this binding
+   |
+   = note: expected raw pointer `*mut c_void`
+              found raw pointer `*mut BaseOutStructure<'_>`
+
+error[E0599]: no method named `queue_count` found for struct `DeviceQueueCreateInfo<'a>` in the current scope
+  --> src\main.rs:86:14
+   |
+84 |           let queues = [vk::DeviceQueueCreateInfo::default()
+   |  _______________________-
+85 | |             .queue_family_index(0)
+86 | |             .queue_count(1)
+   | |             -^^^^^^^^^^^--- help: remove the arguments
+   | |             ||
+   | |_____________|field, not a method
+   |
+
+error[E0308]: mismatched types
+    --> src\main.rs:90:38
+     |
+  90 |             .enabled_extension_names(&ext_ptrs)
+     |              ----------------------- ^^^^^^^^^ expected `&[*const i8]`, found `&Vec<*const u8>`
+     |              |
+     |              arguments to this method are incorrect
+     |
+     = note: expected reference `&[*const i8]`
+                found reference `&Vec<*const u8>`
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\vk\definitions
+.rs:1368:12
+     |
+1368 |     pub fn enabled_extension_names(mut self, enabled_extension_names: &'a [*const c_char]) -> Self {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> src\main.rs:92:23
+   |
+92 |         info.p_next = &mut rq_f as *mut _ as *mut vk::BaseOutStructure;
+   |         -----------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const c_void`, found `*mut BaseO
+utStructure<'_>`
+   |         |
+   |         expected due to the type of this binding
+   |
+   = note: expected raw pointer `*const c_void`
+              found raw pointer `*mut BaseOutStructure<'_>`
+
+error[E0599]: no method named `create_device` found for reference `&ash::Entry` in the current scope
+  --> src\main.rs:93:25
+   |
+93 |         let dev = entry.create_device(phys, &info, None).map_err(|e| format!("创建设备: {:?}", e))?;
+   |                         ^^^^^^^^^^^^^ method not found in `&ash::Entry`
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\main.rs:122:22
+     |
+ 122 | ... dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&[d
+sl]), None).map_er...
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                
+      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:1546
+:19
+     |
+1546 |     pub unsafe fn allocate_descriptor_sets(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 122 -         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl]), None).map_err(|e| format!("ds: {:?}", e))?[0];
+ 122 +         let ds = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).se
+t_layouts(&[dsl])).map_err(|e| format!("ds: {:?}", e))?[0];
+     |
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\main.rs:128:23
+     |
+ 128 | ...ev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).level(vk::CommandBu
+fferLevel::PRIMARY).command_buffer_count(1), None).m...
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^                                                                                  
+                                             ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2541
+:19
+     |
+2541 |     pub unsafe fn allocate_command_buffers(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 128 -         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).lev
+el(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1), None).map_err(|e| format!("cb: {:?}", e))?[0];
+ 128 +         let cmd = dev.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(cpool).lev
+el(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)).map_err(|e| format!("cb: {:?}", e))?[0];
+     |
+
+error[E0061]: this method takes 2 arguments but 3 arguments were supplied
+    --> src\main.rs:136:17
+     |
+ 136 |             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default(), None).map_err(|e| format!("beg
+in: {:?}", e))?;
+     |                 ^^^^^^^^^^^^^^^^^^^^                                              ---- unexpected argument #3 of
+ type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2413
+:19
+     |
+2413 |     pub unsafe fn begin_command_buffer(
+     |                   ^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 136 -             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default(), None).map_err(|e| format!("beg
+in: {:?}", e))?;
+ 136 +             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).map_err(|e| format!("begin: {:
+?}", e))?;
+     |
+
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+    --> src\main.rs:142:17
+     |
+ 142 |             dev.end_command_buffer(cmd, None);
+     |                 ^^^^^^^^^^^^^^^^^^      ---- unexpected argument #2 of type `Option<_>`
+     |
+note: method defined here
+    --> C:\Users\Jerry-Huang\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ash-0.38.0+1.3.281\src\device.rs:2423
+:19
+     |
+2423 |     pub unsafe fn end_command_buffer(&self, command_buffer: vk::CommandBuffer) -> VkResult<()> {
+     |                   ^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+     |
+ 142 -             dev.end_command_buffer(cmd, None);
+ 142 +             dev.end_command_buffer(cmd);
+     |
+
+error[E0599]: no method named `get_physical_device_memory_properties` found for reference `&ash::Device` in the current
+ scope
+   --> src\main.rs:172:26
+    |
+172 |         let mprops = dev.get_physical_device_memory_properties(phys);
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ash::Device`
+
+error[E0308]: mismatched types
+   --> src\main.rs:216:9
+    |
+216 |     (y, m, d)
+    |         ^ expected `i64`, found `u64`
+    |
+help: you can convert a `u64` to an `i64` and panic if the converted value doesn't fit
+    |
+216 |     (y, m.try_into().unwrap(), d)
+    |          ++++++++++++++++++++
+
+error[E0308]: mismatched types
+   --> src\main.rs:216:12
+    |
+216 |     (y, m, d)
+    |            ^ expected `i64`, found `u64`
+    |
+help: you can convert a `u64` to an `i64` and panic if the converted value doesn't fit
+    |
+216 |     (y, m, d.try_into().unwrap())
+    |             ++++++++++++++++++++
+
+warning: unused variable: `phys`
+   --> src\main.rs:165:37
+    |
+165 | fn create_buffer(dev: &ash::Device, phys: vk::PhysicalDevice, size: u64, usage: vk::BufferUsageFlags) -> Result<v
+k::Buffer, String> {
+    |                                     ^^^^ help: if this is intentional, prefix it with an underscore: `_phys`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:54:44
+   |
+54 | fn buf_device_addr(dev: &ash::Device, buf: vk::Buffer) -> vk::DeviceAddress {
+   |                                            ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:54:59
+   |
+54 | fn buf_device_addr(dev: &ash::Device, buf: vk::Buffer) -> vk::DeviceAddress {
+   |                                                           ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:58:39
+   |
+58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, Str
+ing> {
+   |                                       ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:58:56
+   |
+58 | fn rt_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, _entry: &ash::Entry) -> Result<f64, Str
+ing> {
+   |                                                        ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:81:31
+   |
+81 |         let mem_alloc = |buf: vk::Buffer| -> Result<(vk::DeviceMemory, u64), String> {
+   |                               ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:81:54
+   |
+81 |         let mem_alloc = |buf: vk::Buffer| -> Result<(vk::DeviceMemory, u64), String> {
+   |                                                      ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+  --> src\rt_impl.rs:92:22
+   |
+92 |             let ai = vk::MemoryAllocateInfo {
+   |                      ^^ use of unresolved module or unlinked crate `vk`
+   |
+   = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:115:27
+    |
+115 |         tri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: vaddr };
+    |                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:118:26
+    |
+118 |         tri.index_data = vk::DeviceOrHostAddressConstKHR { device_address: iaddr };
+    |                          ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:119:30
+    |
+119 |         tri.transform_data = vk::DeviceOrHostAddressConstKHR { device_address: 0 };
+    |                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:122:24
+    |
+122 |         geo.geometry = vk::AccelerationStructureGeometryDataKHR { triangles: tri };
+    |                        ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:154:24
+    |
+154 |         let instance = vk::AccelerationStructureInstanceKHR {
+    |                        ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:155:24
+    |
+155 |             transform: vk::TransformMatrixKHR { matrix: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0
+.0] },
+    |                        ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:158:47
+    |
+158 |             acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
+    |                                               ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:160:116
+    |
+160 | ...st _ as *const u8, std::mem::size_of::<vk::AccelerationStructureInstanceKHR>());
+    |                                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:283:31
+    |
+283 |             tg.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_addr };
+    |                               ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:181:30
+    |
+181 |         inst_geo_data.data = vk::DeviceOrHostAddressConstKHR { device_address: inst_addr };
+    |                              ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:182:25
+    |
+182 |         tgeo.geometry = vk::AccelerationStructureGeometryDataKHR { instances: inst_geo_data };
+    |                         ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:250:27
+    |
+250 |         let accel_write = vk::WriteDescriptorSetAccelerationStructureKHR {
+    |                           ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:256:19
+    |
+256 |         let hbi = vk::DescriptorBufferInfo { buffer: hbo.0, offset: 0, range: vk::WHOLE_SIZE };
+    |                   ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:278:31
+    |
+278 |             bg.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_addr };
+    |                               ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:265:22
+    |
+265 | ...   let blocks: [vk::AccelerationStructureBuildRangeInfoKHR; 1] = [vk::AccelerationStructureBuildRangeInfoKHR {
+ primitive_count: ...
+    |                    ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:265:72
+    |
+265 | ...   let blocks: [vk::AccelerationStructureBuildRangeInfoKHR; 1] = [vk::AccelerationStructureBuildRangeInfoKHR {
+ primitive_count: ...
+    |                                                                      ^^ use of unresolved module or unlinked crat
+e `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:266:26
+    |
+266 |         let blk_refs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&blocks];
+    |                          ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:267:23
+    |
+267 | ...   let tblocks: [vk::AccelerationStructureBuildRangeInfoKHR; 1] = [vk::AccelerationStructureBuildRangeInfoKHR 
+{ primitive_count:...
+    |                     ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:267:73
+    |
+267 | ...   let tblocks: [vk::AccelerationStructureBuildRangeInfoKHR; 1] = [vk::AccelerationStructureBuildRangeInfoKHR 
+{ primitive_count:...
+    |                                                                       ^^ use of unresolved module or unlinked cra
+te `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `vk` in this scope
+   --> src\rt_impl.rs:268:28
+    |
+268 |         let blk_refs_t: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&tblocks];
+    |                            ^^ use of unresolved module or unlinked crate `vk`
+    |
+    = help: if you wanted to use a crate named `vk`, use `cargo add vk` to add it to your `Cargo.toml`
+
+Some errors have detailed explanations: E0061, E0277, E0308, E0425, E0433, E0599.
+For more information about an error, try `rustc --explain E0061`.
+warning: `rt-bench` (bin "rt-bench") generated 1 warning
+error: could not compile `rt-bench` (bin "rt-bench") due to 209 previous errors; 1 warning emitted
