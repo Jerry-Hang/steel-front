@@ -1,0 +1,27 @@
+﻿============ RT 算力测试台 v0.1 ============
+GPU: NVIDIA GeForce RTX 5060 Laptop GPU
+设备就绪，开始测试...
+
+    [轮] dt=0.233ms gops=1178721.7G ops=274877.907M
+    [轮] dt=0.084ms gops=3252993.0G ops=274877.907M
+    [轮] dt=0.082ms gops=3364478.7G ops=274877.907M
+  FP32 : 589360.9 GFMA/s = 1178.72 TFLOPS (2x) (标准单精度 FMA)
+    [轮] dt=0.192ms gops=1432401.8G ops=274877.907M
+    [轮] dt=0.097ms gops=2825055.6G ops=274877.907M
+    [轮] dt=0.097ms gops=2842584.4G ops=274877.907M
+  FP16 : 716200.9 GFMA/s = 1432.40 TFLOPS (2x) (半精度(真FP16))
+    [轮] dt=0.152ms gops=1802478.1G ops=274877.907M
+    [轮] dt=0.094ms gops=2927347.3G ops=274877.907M
+    [轮] dt=0.110ms gops=2492093.4G ops=274877.907M
+  FP8  : 901239.0 GFMA/s = 1802.48 TFLOPS (2x) (8-bit 打包(模拟))
+    [轮] dt=0.152ms gops=1806030.9G ops=274877.907M
+    [轮] dt=0.093ms gops=2946172.6G ops=274877.907M
+    [轮] dt=0.083ms gops=3331853.4G ops=274877.907M
+  FP4  : 903015.5 GFMA/s = 1806.03 TFLOPS (2x) (4-bit 打包(模拟))
+
+[RT] 持续射线回溯压测（跑满整卡功耗，递归进行）...
+  RT  : 84114.9 Mrays/s (84.1 G rays/s, 纯compute 无验证层)
+
+========= 总分: 630374741 =========
+
+日志已保存: D:\Rust\steel-front\tools\rt-bench\logs\2026-08-30_21-46-15.txt

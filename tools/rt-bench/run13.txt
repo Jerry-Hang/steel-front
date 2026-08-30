@@ -1,0 +1,15 @@
+﻿============ RT 算力测试台 v0.1 ============
+GPU: NVIDIA GeForce RTX 5060 Laptop GPU
+设备就绪，开始测试...
+
+  FP32 : 380717.3 GFMA/s = 761.43 TFLOPS (2x) (标准单精度 FMA)
+  FP16 : 451656.1 GFMA/s = 903.31 TFLOPS (2x) (半精度(真FP16))
+  FP8  : 526384.3 GFMA/s = 1052.77 TFLOPS (2x) (8-bit 打包(模拟))
+  FP4  : 301137.1 GFMA/s = 602.27 TFLOPS (2x) (4-bit 打包(模拟))
+
+[RT] 持续射线回溯压测（跑满整卡功耗，递归进行）...
+  RT  : 90980.8 Mrays/s (91.0 G rays/s, 纯compute 无验证层)
+
+========= 总分: 341077043 =========
+
+日志已保存: D:\Rust\steel-front\tools\rt-bench\logs\2026-08-30_21-44-30.txt

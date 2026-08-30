@@ -1,0 +1,31 @@
+﻿============ RT 算力测试台 v0.1 ============
+GPU: NVIDIA GeForce RTX 5060 Laptop GPU
+设备就绪，开始测试...
+
+    [轮] dt=0.255ms gops=269911.5G ops=68719.477M
+    [轮] dt=0.110ms gops=623023.4G ops=68719.477M
+    [轮] dt=0.091ms gops=751032.5G ops=68719.477M
+    [轮] dt=0.091ms gops=751854.2G ops=68719.477M
+  FP32 : 134955.8 GFMA/s（FMA指令率） ≈ 269.91 TFLOPS(2x口径) (标准单精度 FMA)
+    [轮] dt=0.169ms gops=406383.7G ops=68719.477M
+    [轮] dt=0.089ms gops=772997.5G ops=68719.477M
+    [轮] dt=0.091ms gops=751854.2G ops=68719.477M
+    [轮] dt=0.085ms gops=804677.7G ops=68719.477M
+  FP16 : 203191.8 GFMA/s（FMA指令率） ≈ 406.38 TFLOPS(2x口径) (半精度(真FP16))
+    [轮] dt=0.220ms gops=312930.2G ops=68719.477M
+    [轮] dt=0.087ms gops=788067.4G ops=68719.477M
+    [轮] dt=1.370ms gops=50178.5G ops=68719.477M
+    [轮] dt=0.094ms gops=729506.1G ops=68719.477M
+  FP8  : 25089.3 GFMA/s（FMA指令率） ≈ 50.18 TFLOPS(2x口径) (8-bit 打包(模拟))
+    [轮] dt=0.139ms gops=495454.1G ops=68719.477M
+    [轮] dt=0.087ms gops=789879.0G ops=68719.477M
+    [轮] dt=0.084ms gops=815177.7G ops=68719.477M
+    [轮] dt=0.103ms gops=665886.4G ops=68719.477M
+  FP4  : 247727.0 GFMA/s（FMA指令率） ≈ 495.45 TFLOPS(2x口径) (4-bit 打包(模拟))
+
+[RT] 持续射线回溯压测（跑满整卡功耗，递归进行）...
+  RT  : 91044.9 Mrays/s (91.0 G rays/s, 纯compute 无验证层)
+
+========= 总分: 131297270 =========
+
+日志已保存: D:\Rust\steel-front\tools\rt-bench\logs\2026-08-30_21-47-12.txt

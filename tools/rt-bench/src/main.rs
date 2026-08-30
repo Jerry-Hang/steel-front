@@ -37,7 +37,7 @@ fn main() {
     for (i, (name_, spv, unit, explain)) in fps.iter().enumerate() {
         if !want_fp[i] { continue; }
         match fp_test(&device, &queue, phys, &inst, spv, 1 << 18) {
-            Ok(v) => { results.push((name_.to_string(), unit.to_string(), v)); println!("  {} : {:.2} {} ({})", name_, v, unit, explain); }
+            Ok(v) => { results.push((name_.to_string(), unit.to_string(), v)); println!("  {} : {:.1} GFMA/s ≈ {:.2} TFLOPS(2x) [编译优化敏感·仅供参考] ({})", name_, v / 2.0, v / 2000.0, explain); }
             Err(e) => println!("  {} : 失败 ({})", name_, e),
         }
     }
@@ -46,7 +46,7 @@ fn main() {
     println!("\n[RT] 持续射线回溯压测（跑满整卡功耗，递归进行）...");
     let rt_val = rt_test(&device, &queue, &inst, phys).unwrap_or(0.0);
     results.push(("RT ".to_string(), "Mrays/s".to_string(), rt_val));
-    println!("  RT  : {:.1} Mrays/s (1M射线 x 200次迭代)", rt_val);
+    println!("  RT  : {:.1} Mrays/s ({:.1} G rays/s, 纯compute 无验证层)", rt_val, rt_val / 1000.0);
 
     let score = (results.iter().map(|r| r.2).sum::<f64>() * 100.0) as u64;
     println!("\n========= 总分: {} =========", score);
@@ -173,7 +173,7 @@ fn fp_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, inst:
         let iters = 32u32; // 重复计数取均
         let mut best = f64::MAX;
         let mut worst = 0.0f64;
-        for _ in 0..4 {
+        for (round, _) in (0..4).enumerate() {
             dev.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).map_err(|e| format!("begin: {:?}", e))?;
             for i in 0..iters {
                 dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipe);
@@ -182,11 +182,14 @@ fn fp_test(dev: &ash::Device, queue: &vk::Queue, phys: vk::PhysicalDevice, inst:
             }
             dev.end_command_buffer(cmd);
             let t0 = Instant::now();
-            dev.queue_submit(*queue, &[vk::SubmitInfo::default().command_buffers(&[cmd])], vk::Fence::null()).map_err(|e| format!("submit: {:?}", e))?;
-            dev.queue_wait_idle(*queue).map_err(|e| format!("wait: {:?}", e))?;
+            let fence = dev.create_fence(&vk::FenceCreateInfo::default(), None).map_err(|e| format!("fence: {:?}", e))?;
+            dev.queue_submit(*queue, &[vk::SubmitInfo::default().command_buffers(&[cmd])], fence).map_err(|e| format!("submit: {:?}", e))?;
+            dev.wait_for_fences(&[fence], true, u64::MAX).map_err(|e| format!("wait: {:?}", e))?;
+            dev.destroy_fence(fence, None);
             let dt = t0.elapsed().as_secs_f64();
             let ops = items as f64 * 4096.0 * 2.0 * iters as f64; // FMA=2 ops
             let gops = ops / dt / 1e9;
+            println!("    [轮] dt={:.3}ms gops={:.1}G ops={:.3}M", dt * 1000.0, gops, ops / 1e6);
             if gops < best { best = gops; }
             if gops > worst { worst = gops; }
             // 输出校验：验证计算真实发生（防折叠被驱离）
