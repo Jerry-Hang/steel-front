@@ -282,9 +282,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         if (light_data.flags.z >= 0.5) {
             if (input.flat_flag > 1.5) {
-                // NPC 士兵：迷彩军服纹理 × 阵营 tint（权重 0.65，阵营识别保留）
+                // NPC 士兵：迷彩军服纹理 × 阵营 tint（去饱和纹素保留色相，全保纹理细节）
                 let texel = textureSample(npc_skin_tex, texture_sampler, input.uv);
-                base = mix(input.color, texel.rgb, 0.65);
+                let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
+                base = input.color * (0.55 + 0.9 * luma);
             } else {
                 // marker 障碍：混凝土墙纹理 × 障碍 tint（权重 0.45：tint 保色相，纹理供表面细节）
                 let texel = textureSample(marker_skin_tex, texture_sampler, input.uv);

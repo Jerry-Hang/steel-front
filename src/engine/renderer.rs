@@ -928,14 +928,15 @@ impl Renderer {
                 .enumerate_instance_layer_properties()
                 .map_err(|e| format!("无法枚举实例层属性: {}", e))?
         };
-        let has_validation = layer_properties.iter().any(|prop| {
-            let name = unsafe { CStr::from_ptr(prop.layer_name.as_ptr()) };
-            name.to_bytes_with_nul() == b"VK_LAYER_KHRONOS_validation\0"
-        });
+        let has_validation = std::env::var("RV3D_VALIDATION").map(|v| v == "1").unwrap_or(false)
+            && layer_properties.iter().any(|prop| {
+                let name = unsafe { CStr::from_ptr(prop.layer_name.as_ptr()) };
+                name.to_bytes_with_nul() == b"VK_LAYER_KHRONOS_validation\0"
+            });
         if has_validation {
-            log::info!("验证层可用，已启用");
+            log::info!("RV3D_VALIDATION=1 且验证层可用，已启用");
         } else {
-            log::warn!("验证层不可用，将不使用");
+            log::warn!("RV3D_VALIDATION 未设置或验证层不可用，将不使用验证层（驱动宽松行为）");
         }
 
         let instance_create_info = vk::InstanceCreateInfo::default()

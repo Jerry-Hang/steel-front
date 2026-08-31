@@ -1688,8 +1688,10 @@ impl ApplicationHandler for GameApp {
                 }
             }
             let mut pt_on = crate::config::load().pt_enable;
+            // RV3D_PT_LIVE: 0=强制关 1=强制开 未设=跟随配置
             if let Ok(v) = std::env::var("RV3D_PT_LIVE") {
                 if v == "1" { pt_on = true; }
+                else if v == "0" { pt_on = false; }
             }
             renderer.pt_live_enabled = pt_on;
             log::info!("RT: 路径追踪全景 = {}", if renderer.pt_live_enabled { "开启" } else { "关闭" });
