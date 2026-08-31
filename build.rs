@@ -30,6 +30,9 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u; // marker 区 = MAX_MARKER_INSTANCES(1024)，与 renderer.rs 对齐（2026-08-24 C2 修正：曾误写 3072 导致前 2048 个 NPC 盒体被当 marker）
+// NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
+const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
+const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
 // 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×1024：
 // 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
@@ -363,6 +366,9 @@ struct Instance {
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u; // marker 区 = MAX_MARKER_INSTANCES(1024)，与 renderer.rs 对齐（2026-08-24 C2 修正：曾误写 3072 导致前 2048 个 NPC 盒体被当 marker）
+// NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
+const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
+const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
 
 // 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
@@ -380,12 +386,13 @@ struct MeshPrimitive {
     @builtin(triangle_indices) indices: vec3<u32>,
 }
 
-// 最大几何 = 近档立方体（24 顶点 / 12 三角形）
+// 最大几何 = NPC 四肢圆柱（50 顶点 / 96 三角形；含立方体 24/12、二十面体 12/20——
+// 旧 12 图元上限曾使二十面体 20 三角的 12..19 写入越界被钳位，随本扩容一并根治）
 struct MeshOutput {
     @builtin(vertex_count) vertex_count: u32,
     @builtin(primitive_count) primitive_count: u32,
-    @builtin(vertices) vertices: array<VertexOutput, 24>,
-    @builtin(primitives) primitives: array<MeshPrimitive, 12>,
+    @builtin(vertices) vertices: array<VertexOutput, 50>,
+    @builtin(primitives) primitives: array<MeshPrimitive, 96>,
 }
 var<workgroup> mesh_out: MeshOutput;
 
@@ -589,7 +596,7 @@ fn write_vertex(
 }
 
 @mesh(mesh_out)
-@workgroup_size(32)
+@workgroup_size(96)
 fn mesh_main(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_index) lid: u32,
@@ -640,11 +647,10 @@ fn mesh_main(
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
     }
-    // 枪模槽位 = NPC 盒体区末 16 槽（深度覆盖标记；mesh 路径不画枪模，
-    // 此判定仅保护传统 draw 的 GUN 槽语义）。
-    // 上界必须 < EMISSIVE_INSTANCE_BASE（自发光 68673+ 不得命中，否则
-    // 爆炸/手雷/粒子被强制画最前——修复越界回归）
-    let is_gun = slot >= NPC_INSTANCE_BASE + 1024u - 16u && slot < EMISSIVE_INSTANCE_BASE;
+    // 枪模槽位 = GUN_INSTANCE_INDEX（75841；旧式 NPC_INSTANCE_BASE+1024-16 是 1024 时代
+    // 残留，范围 67569..75777 把 NPC 圆柱/球体段全部误判为枪 → 四肢/头被 z=0 深度覆盖，
+    // 「鬼魂/穿模」观感的另一来源；mesh 路径不画枪模，此判定仅保护传统 draw 的 GUN 槽语义）。
+    let is_gun = slot == 75841u;
 
     if (is_ground) {
         if (lid < 4u) {
@@ -663,9 +669,56 @@ fn mesh_main(
     // 近档立方体 / 远档十字双 quad：与 CPU 近/远分档同一阈值（全 3D 距离²）
     // 障碍 marker 槽恒用立方体（远距十字 quad 俯视是"方块贴图+缝隙"，用户反馈的边界方块感）
     let is_marker = slot >= MARKER_INSTANCE_BASE && slot < NPC_INSTANCE_BASE;
+    // NPC 四肢（圆柱）/ 头部（二十面体球）优先判定（2026-08-31 D6：方块人恢复圆柱四肢/球形头）
+    let is_npc_cyl = slot >= NPC_CYL_BASE && slot < NPC_SPH_BASE;
+    let is_npc_sph = slot >= NPC_SPH_BASE && slot < EMISSIVE_INSTANCE_BASE;
     // 树冠（绿色 marker）/ 自发光（爆炸光球）→ 二十面体（立体球状，告别纸帽子/方块冲击波）
     let is_foliage_or_glow = is_foliage(inst.tint) || (slot >= EMISSIVE_INSTANCE_BASE && slot < EMISSIVE_INSTANCE_BASE + 64u);
-    if (is_foliage_or_glow) {
+    if (is_npc_cyl) {
+        // 四肢：程序化单位圆柱（r=1、y∈[-0.5,0.5]、Y 轴、24 段含盖；
+        // 与 CPU create_cylinder_geometry 同单位空间，实例矩阵按此构建）。
+        // 顶点布局：底圈 lid 0..23（y=-0.5）、顶圈 lid 24..47（y=+0.5）、顶盖中心 48、底盖中心 49。
+        if (lid < 48u) {
+            let i = lid % 24u;
+            let theta = f32(i) * 0.2617993877991494; // TAU/24
+            let y = select(-0.5, 0.5, lid >= 24u);
+            write_vertex(lid, vec3<f32>(cos(theta), y, sin(theta)), vec2<f32>(f32(i) * 0.041666666667, y + 0.5), inst, cam, fade, flat, is_gun, false);
+        } else if (lid < 50u) {
+            let y = select(-0.5, 0.5, lid == 48u);
+            write_vertex(lid, vec3<f32>(0.0, y, 0.0), vec2<f32>(0.5, y + 0.5), inst, cam, fade, flat, is_gun, false);
+        }
+        // 图元 96：侧面 48（每段 2 三角）+ 顶盖 24 + 底盖 24；绕序模型空间外侧 CCW（同 CUBE 约定）
+        if (lid < 48u) {
+            let i = lid / 2u;
+            if ((lid & 1u) == 0u) {
+                mesh_out.primitives[lid].indices = vec3<u32>(i, i + 24u, (i + 1u) % 24u);
+            } else {
+                mesh_out.primitives[lid].indices = vec3<u32>(i + 24u, ((i + 1u) % 24u) + 24u, (i + 1u) % 24u);
+            }
+        } else if (lid < 72u) {
+            let i = lid - 48u;
+            mesh_out.primitives[lid].indices = vec3<u32>(48u, ((i + 1u) % 24u) + 24u, i + 24u);
+        } else if (lid < 96u) {
+            let i = lid - 72u;
+            mesh_out.primitives[lid].indices = vec3<u32>(49u, i, (i + 1u) % 24u);
+        }
+        if (lid == 0u) {
+            mesh_out.vertex_count = 50u;
+            mesh_out.primitive_count = 96u;
+        }
+    } else if (is_npc_sph) {
+        // 头部：二十面体归一化到半径 1（与 CPU 球体同单位空间）
+        if (lid < 12u) {
+            write_vertex(lid, normalize(ICO_POS[lid]), vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
+        }
+        if (lid < 20u) {
+            mesh_out.primitives[lid].indices = ICO_TRI[lid];
+        }
+        if (lid == 0u) {
+            mesh_out.vertex_count = 12u;
+            mesh_out.primitive_count = 20u;
+        }
+    } else if (is_foliage_or_glow) {
         if (lid < 12u) {
             write_vertex(lid, ICO_POS[lid] * 0.9, vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
         }
