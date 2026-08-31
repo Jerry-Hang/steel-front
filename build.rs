@@ -227,28 +227,43 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
         normal = -normal;
     }
     var shadow_factor = 0.0;
+    var debug_outside = true;
+    var d_avg = 0.0;
+    var frag_depth = 0.0;
     if (light_data.flags.y >= 0.5 && light_data.shadow.bias.z >= 0.5) {
         let sp = light_data.shadow.light_view_proj * vec4<f32>(input.world_pos, 1.0);
         let shadow_uv = vec2<f32>(sp.x * 0.5 + 0.5, 1.0 - (sp.y * 0.5 + 0.5));
-        let frag_depth = sp.z * 0.5 + 0.5;
+        // glam ortho_rh（本版本）产出 [0,1] 深度，与 GPU 写入的阴影图同基准，
+        // 禁止再乘 0.5+0.5（OpenGL [-1,1] 旧映射，二重偏移 +0.25 曾致全场误判阴影）。
+        frag_depth = sp.z;
         if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0
             && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0
             && sp.z >= 0.0 && sp.z <= 1.0) {
+            debug_outside = false;
             let texel = 1.0 / light_data.shadow.config.x;
             var occluded = 0.0;
+            var dsum = 0.0;
             for (var dy = -1; dy <= 1; dy = dy + 1) {
                 for (var dx = -1; dx <= 1; dx = dx + 1) {
                     let d = textureSample(shadow_map, shadow_sampler,
                         shadow_uv + vec2<f32>(f32(dx), f32(dy)) * texel);
+                    dsum = dsum + d;
                     if (frag_depth - light_data.shadow.bias.x > d) {
                         occluded = occluded + 1.0;
                     }
                 }
             }
+            d_avg = dsum / 9.0;
             shadow_factor = occluded / 9.0;
         }
     }
     let shininess = 32.0;
+    if light_data.shadow.config.y >= 0.5 {
+        if (debug_outside) {
+            return vec3<f32>(0.0, 0.0, 1.0);
+        }
+        return vec3<f32>(frag_depth, d_avg, 0.0);
+    }
     var radiance = light_data.ambient.rgb * light_data.ambient.w;
     radiance = radiance + evaluate_directional(light_data.directional, normal, view_dir, shininess) * (1.0 - shadow_factor);
     for (var i = 0u; i < 4u; i = i + 1u) {

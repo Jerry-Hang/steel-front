@@ -327,12 +327,13 @@ pub fn shadow_view_proj(light_dir: Vec3, target: Vec3, extent: f32, near: f32, f
 
 /// 把世界坐标投影到光空间：返回 (shadow uv, 光空间深度)。
 /// 与片元着色器采样一致：uv.y 镜像（depth-only pass 顶点输出经 ADJUST_COORDINATE_SPACE
-/// Y 翻转），深度映射为 clip.z*0.5+0.5 后返回（glam ortho_rh clip.z ∈ [0,1]）。
+/// Y 翻转）；深度为 clip.z 原值直传（glam ortho_rh 本版本产出 [0,1] 深度，与 GPU
+/// 阴影图写入同基准；旧 *0.5+0.5 二重映射致 +0.25 偏移全场误判阴影，已根治）。
 #[allow(dead_code)]
 pub fn world_to_shadow_uv(world_pos: Vec3, shadow_vp: Mat4) -> (Vec2, f32) {
     let p = shadow_vp * world_pos.extend(1.0);
     let uv = Vec2::new(p.x * 0.5 + 0.5, 1.0 - (p.y * 0.5 + 0.5));
-    (uv, p.z * 0.5 + 0.5)
+    (uv, p.z)
 }
 
 /// 阴影深度比较（bias 缓解 acne）：`fragment_depth - bias > shadow_depth` 判定为阴影
@@ -478,10 +479,13 @@ mod tests {
         //  不镜像则阴影采样方向整体错位）
         let (uv_py, _) = world_to_shadow_uv(Vec3::new(10.0, 0.0, 0.0), vp);
         assert!(uv_py.y < 0.5);
-        // 深度映射铁律：glam ortho_rh clip.z ∈ [0,1] → frag_depth = clip.z*0.5+0.5
-        // （场景中心在光视锥中段 → 深度 > 0.5；不偏移比较基准会整体错 0.5）
+        // 深度映射铁律（2026-08-31 修正）：glam ortho_rh 本版本产出 [0,1] 深度，
+        // frag_depth = clip.z 原值（禁止 *0.5+0.5 二重映射，旧映射整体偏移 +0.25
+        // 致全场误判阴影）；场景中心在光视锥中段 → 深度 ≈0.5 邻域且在 (0,1) 内
         let (_, depth_origin) = world_to_shadow_uv(Vec3::ZERO, vp);
-        assert!(depth_origin > 0.5);
+        assert!(depth_origin > 0.0 && depth_origin < 1.0);
+        // 本测试配置（near=1, far=200，中心距光 100m）：深度 ≈0.4975 ∈ (0.4, 0.6)
+        assert!(depth_origin > 0.4 && depth_origin < 0.6);
         // 沿远离光源方向（-Y）更深处 → 深度单调更大
         let (_, depth_deep) = world_to_shadow_uv(Vec3::new(0.0, -50.0, 0.0), vp);
         assert!(depth_deep > depth_origin);

@@ -2634,6 +2634,20 @@ impl Renderer {
     /// 更新光照 uniform（每帧渲染前调用；默认全零 = 光照关闭）
     pub fn set_lights(&mut self, lights: &LightUniform) {
         self.light_data = *lights;
+        // RV3D_DEBUG_SHADOW=1：片元直出 shadow_factor 灰度（阴影诊断）
+        if std::env::var("RV3D_DEBUG_SHADOW").as_deref() == Ok("1") {
+            self.light_data.shadow.config.y = 1.0;
+            // D3诊断：仅打印一次实际传入GPU的light_view_proj矩阵（列主序16元素）
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let m = self.light_data.shadow.light_view_proj.to_cols_array();
+                log::info!(
+                    "D3 light_view_proj (col-major): [{:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}, {:.6}]",
+                    m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                    m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]
+                );
+            }
+        }
     }
 
     fn create_shader_module(&self, spirv: &[u32]) -> Result<vk::ShaderModule, String> {
