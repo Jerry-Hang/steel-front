@@ -442,6 +442,46 @@ const ICO_TRI: array<vec3<u32>, 20> = array<vec3<u32>, 20>(
     vec3<u32>(7, 11, 6), vec3<u32>(11, 0, 6), vec3<u32>(0, 1, 6), vec3<u32>(6, 1, 10),
     vec3<u32>(9, 0, 11), vec3<u32>(9, 11, 2), vec3<u32>(9, 2, 5), vec3<u32>(7, 2, 11),
 );
+// SPH：一级细分二十面体（42 顶点/80 三角，单位半径）——自发光爆炸火球圆润化（D5，
+// 确定性脚本预生成，勿手改数值）；ICO 保留给树冠（12v/20t 足够小尺度）
+const SPH_POS: array<vec3<f32>, 42> = array<vec3<f32>, 42>(
+    vec3<f32>(0.0000, 0.8507, 0.5257), vec3<f32>(0.0000, 0.8507, -0.5257), vec3<f32>(0.0000, -0.8507, 0.5257),
+    vec3<f32>(0.0000, -0.8507, -0.5257), vec3<f32>(0.8507, 0.5257, 0.0000), vec3<f32>(-0.8507, 0.5257, 0.0000),
+    vec3<f32>(0.8507, -0.5257, 0.0000), vec3<f32>(-0.8507, -0.5257, 0.0000), vec3<f32>(0.5257, 0.0000, 0.8507),
+    vec3<f32>(-0.5257, 0.0000, 0.8507), vec3<f32>(0.5257, 0.0000, -0.8507), vec3<f32>(-0.5257, 0.0000, -0.8507),
+    vec3<f32>(0.5000, 0.8090, 0.3090), vec3<f32>(0.5000, 0.8090, -0.3090), vec3<f32>(0.0000, 1.0000, 0.0000),
+    vec3<f32>(-0.3090, 0.5000, 0.8090), vec3<f32>(0.3090, 0.5000, 0.8090), vec3<f32>(-0.8090, 0.3090, 0.5000),
+    vec3<f32>(0.0000, 1.0000, 0.0000), vec3<f32>(-0.3090, 0.5000, 0.8090), vec3<f32>(0.8090, 0.3090, 0.5000),
+    vec3<f32>(0.5000, 0.8090, 0.3090), vec3<f32>(1.0000, 0.0000, 0.0000), vec3<f32>(0.3090, 0.5000, -0.8090),
+    vec3<f32>(0.5000, -0.8090, 0.3090), vec3<f32>(0.3090, -0.5000, -0.8090), vec3<f32>(-0.8090, -0.3090, -0.5000),
+    vec3<f32>(-0.8090, -0.3090, 0.5000), vec3<f32>(0.0000, -1.0000, 0.0000), vec3<f32>(-0.5000, -0.8090, 0.3090),
+    vec3<f32>(-0.5000, -0.8090, -0.3090), vec3<f32>(-0.3090, -0.5000, -0.8090), vec3<f32>(0.0000, -1.0000, 0.0000),
+    vec3<f32>(0.8090, -0.3090, -0.5000), vec3<f32>(-0.8090, -0.3090, -0.5000), vec3<f32>(0.3090, -0.5000, -0.8090),
+    vec3<f32>(-0.5000, 0.8090, -0.3090), vec3<f32>(0.8090, 0.3090, 0.5000), vec3<f32>(0.8090, 0.3090, -0.5000),
+    vec3<f32>(-1.0000, 0.0000, 0.0000), vec3<f32>(-0.5000, -0.8090, -0.3090), vec3<f32>(-0.3090, -0.5000, 0.8090),
+);
+const SPH_TRI: array<vec3<u32>, 80> = array<vec3<u32>, 80>(
+    vec3<u32>(0u, 12u, 14u), vec3<u32>(4u, 13u, 12u), vec3<u32>(1u, 14u, 13u), vec3<u32>(12u, 13u, 14u),
+    vec3<u32>(0u, 15u, 12u), vec3<u32>(9u, 16u, 15u), vec3<u32>(4u, 12u, 16u), vec3<u32>(15u, 16u, 12u),
+    vec3<u32>(9u, 17u, 16u), vec3<u32>(5u, 18u, 17u), vec3<u32>(4u, 16u, 18u), vec3<u32>(17u, 18u, 16u),
+    vec3<u32>(4u, 18u, 20u), vec3<u32>(5u, 19u, 18u), vec3<u32>(8u, 20u, 19u), vec3<u32>(18u, 19u, 20u),
+    vec3<u32>(4u, 20u, 13u), vec3<u32>(8u, 21u, 20u), vec3<u32>(1u, 13u, 21u), vec3<u32>(20u, 21u, 13u),
+    vec3<u32>(8u, 22u, 21u), vec3<u32>(10u, 23u, 22u), vec3<u32>(1u, 21u, 23u), vec3<u32>(22u, 23u, 21u),
+    vec3<u32>(8u, 24u, 22u), vec3<u32>(3u, 25u, 24u), vec3<u32>(10u, 22u, 25u), vec3<u32>(24u, 25u, 22u),
+    vec3<u32>(5u, 26u, 19u), vec3<u32>(3u, 24u, 26u), vec3<u32>(8u, 19u, 24u), vec3<u32>(26u, 24u, 19u),
+    vec3<u32>(5u, 27u, 26u), vec3<u32>(2u, 28u, 27u), vec3<u32>(3u, 26u, 28u), vec3<u32>(27u, 28u, 26u),
+    vec3<u32>(2u, 29u, 28u), vec3<u32>(7u, 30u, 29u), vec3<u32>(3u, 28u, 30u), vec3<u32>(29u, 30u, 28u),
+    vec3<u32>(7u, 31u, 30u), vec3<u32>(10u, 25u, 31u), vec3<u32>(3u, 30u, 25u), vec3<u32>(31u, 25u, 30u),
+    vec3<u32>(7u, 32u, 31u), vec3<u32>(6u, 33u, 32u), vec3<u32>(10u, 31u, 33u), vec3<u32>(32u, 33u, 31u),
+    vec3<u32>(7u, 34u, 32u), vec3<u32>(11u, 35u, 34u), vec3<u32>(6u, 32u, 35u), vec3<u32>(34u, 35u, 32u),
+    vec3<u32>(11u, 36u, 35u), vec3<u32>(0u, 37u, 36u), vec3<u32>(6u, 35u, 37u), vec3<u32>(36u, 37u, 35u),
+    vec3<u32>(0u, 14u, 37u), vec3<u32>(1u, 38u, 14u), vec3<u32>(6u, 37u, 38u), vec3<u32>(14u, 38u, 37u),
+    vec3<u32>(6u, 38u, 33u), vec3<u32>(1u, 23u, 38u), vec3<u32>(10u, 33u, 23u), vec3<u32>(38u, 23u, 33u),
+    vec3<u32>(9u, 15u, 39u), vec3<u32>(0u, 36u, 15u), vec3<u32>(11u, 39u, 36u), vec3<u32>(15u, 36u, 39u),
+    vec3<u32>(9u, 39u, 41u), vec3<u32>(11u, 40u, 39u), vec3<u32>(2u, 41u, 40u), vec3<u32>(39u, 40u, 41u),
+    vec3<u32>(9u, 41u, 17u), vec3<u32>(2u, 27u, 41u), vec3<u32>(5u, 17u, 27u), vec3<u32>(41u, 27u, 17u),
+    vec3<u32>(7u, 29u, 34u), vec3<u32>(2u, 40u, 29u), vec3<u32>(11u, 34u, 40u), vec3<u32>(29u, 40u, 34u),
+);
 // 树冠识别：绿色 tint（g 显著大于 r/b）
 fn is_foliage(tint: vec4<f32>) -> bool {
     return tint.g > tint.r && tint.g > tint.b * 1.4;
@@ -672,8 +712,9 @@ fn mesh_main(
     // NPC 四肢（圆柱）/ 头部（二十面体球）优先判定（2026-08-31 D6：方块人恢复圆柱四肢/球形头）
     let is_npc_cyl = slot >= NPC_CYL_BASE && slot < NPC_SPH_BASE;
     let is_npc_sph = slot >= NPC_SPH_BASE && slot < EMISSIVE_INSTANCE_BASE;
-    // 树冠（绿色 marker）/ 自发光（爆炸光球）→ 二十面体（立体球状，告别纸帽子/方块冲击波）
-    let is_foliage_or_glow = is_foliage(inst.tint) || (slot >= EMISSIVE_INSTANCE_BASE && slot < EMISSIVE_INSTANCE_BASE + 64u);
+    // 树冠（绿色 marker）→ 二十面体；自发光（爆炸光球）→ SPH 细分球（D5）
+    let is_glow = slot >= EMISSIVE_INSTANCE_BASE && slot < EMISSIVE_INSTANCE_BASE + 64u;
+    let is_tree = is_foliage(inst.tint);
     if (is_npc_cyl) {
         // 四肢：程序化单位圆柱（r=1、y∈[-0.5,0.5]、Y 轴、24 段含盖；
         // 与 CPU create_cylinder_geometry 同单位空间，实例矩阵按此构建）。
@@ -718,7 +759,19 @@ fn mesh_main(
             mesh_out.vertex_count = 12u;
             mesh_out.primitive_count = 20u;
         }
-    } else if (is_foliage_or_glow) {
+    } else if (is_glow) {
+        // D5：自发光爆炸用 SPH 一级细分二十面体（42v/80t）保圆润，消除 ICO 大三角面尖刺观感
+        if (lid < 42u) {
+            write_vertex(lid, SPH_POS[lid], vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
+        }
+        if (lid < 80u) {
+            mesh_out.primitives[lid].indices = SPH_TRI[lid];
+        }
+        if (lid == 0u) {
+            mesh_out.vertex_count = 42u;
+            mesh_out.primitive_count = 80u;
+        }
+    } else if (is_tree) {
         if (lid < 12u) {
             write_vertex(lid, ICO_POS[lid] * 0.9, vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
         }
