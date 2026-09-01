@@ -360,14 +360,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             // 混凝土围墙/矮裙房同样是中性灰，没有这道下限会在墙上画出一条通长深色窗带。
             if (vert > 0.5 && neutral > 0.01 && input.world_pos.y > 3.0) {
                 let fl = fract(input.world_pos.y * (1.0 / 3.0));
-                let wy = smoothstep(0.18, 0.26, fl) * (1.0 - smoothstep(0.64, 0.72, fl));
+                // 窗高收到层高约 26%（原 0.18~0.72 ≈ 1.6m/3m 占 46%，配上重暗化，
+                // 整面楼读成深色百叶而不是玻璃窗）
+                let wy = smoothstep(0.37, 0.42, fl) * (1.0 - smoothstep(0.58, 0.63, fl));
                 // 竖梃每 2m 一根，避免窗带读成连续黑条；取水平主轴作为横向坐标
                 let hx = select(input.world_pos.z, input.world_pos.x, abs(fnrm.x) > abs(fnrm.z));
                 let tp = fract(hx * 0.5);
-                let mull = min(1.0, step(0.88, tp) + step(tp, 0.06));
+                // 边缘一律 smoothstep，不用 step：二值边缘在掠射角一个像素内跳变，
+                // 就是 2026-09-01 放大图里那种箭羽/锯齿状走样
+                let mull = min(1.0, smoothstep(0.86, 0.90, tp) + (1.0 - smoothstep(0.06, 0.10, tp)));
                 let win = wy * (1.0 - 0.7 * mull);
+                // 暗化降到 0.22（原 0.5）：玻璃带应比混凝土立面暗一档，而不是变成黑洞
                 // 远距随 D12 的 detail 一起收敛：世界坐标高频信号不收敛就会变成新的走样源
-                base = base * mix(1.0, 1.0 - 0.5 * win, detail * vert * neutral);
+                base = base * mix(1.0, 1.0 - 0.22 * win, detail * vert * neutral);
             }
         }
         // 轮廓分离（D12）：掠射角提亮，让士兵从背景里"读得出来"。
