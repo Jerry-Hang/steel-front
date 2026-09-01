@@ -344,6 +344,32 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 }
             }
         }
+        // D11：窗带改由片元着色表达（原为每层叠一个独立薄盒）。薄盒在掠射角下自身前后面
+        // 落到同一批像素 → 立面出现 V 形锯齿深度干涉，且外挑读作悬挑鳍片；把条带改薄是反方向。
+        // 这里零新增几何、零深度风险：建筑都坐落 y≈0、层高约 3m，故世界 Y 天然对齐楼层。
+        // 分类一律用 input.color（常量），不用已被皮肤纹理改写的 base。
+        // 只给"中性混凝土立面"加窗：用通道极差判定，天然排除砖墙(红)、木掩体(棕)、
+        // 树冠(绿)等强色相 tint —— 否则围墙上会长出窗户。玻璃判据(b>r*1.4)沿用 D2 不动。
+        if (input.flat_flag < 1.5 && input.color.b <= input.color.r * 1.4) {
+            let cmax = max(input.color.r, max(input.color.g, input.color.b));
+            let cmin = min(input.color.r, min(input.color.g, input.color.b));
+            let neutral = 1.0 - smoothstep(0.06, 0.14, cmax - cmin);
+            let fnrm = normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos)));
+            let vert = 1.0 - abs(fnrm.y);
+            // 只给立面加窗，屋面/地面（法线近竖直）不加；且窗带只从 3m（二层）以上开始——
+            // 混凝土围墙/矮裙房同样是中性灰，没有这道下限会在墙上画出一条通长深色窗带。
+            if (vert > 0.5 && neutral > 0.01 && input.world_pos.y > 3.0) {
+                let fl = fract(input.world_pos.y * (1.0 / 3.0));
+                let wy = smoothstep(0.18, 0.26, fl) * (1.0 - smoothstep(0.64, 0.72, fl));
+                // 竖梃每 2m 一根，避免窗带读成连续黑条；取水平主轴作为横向坐标
+                let hx = select(input.world_pos.z, input.world_pos.x, abs(fnrm.x) > abs(fnrm.z));
+                let tp = fract(hx * 0.5);
+                let mull = min(1.0, step(0.88, tp) + step(tp, 0.06));
+                let win = wy * (1.0 - 0.7 * mull);
+                // 远距随 D12 的 detail 一起收敛：世界坐标高频信号不收敛就会变成新的走样源
+                base = base * mix(1.0, 1.0 - 0.5 * win, detail * vert * neutral);
+            }
+        }
         // 轮廓分离（D12）：掠射角提亮，让士兵从背景里"读得出来"。
         // 只乘一个亮度标量、不改 RGB 分量比例 → 阵营色相与饱和度保持 D1 验收结论有效。
         if (input.flat_flag > 1.5) {

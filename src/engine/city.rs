@@ -58,7 +58,7 @@ fn ob(
     o.push(MapObstacle::new(kind, x, z, hw, hd).shaped(hh, y, tint));
 }
 
-/// 在 (cx,cz) 放置一座现代写字楼（裙楼 + 塔楼 + 屋顶机房 + 玻璃幕墙横带）
+/// 在 (cx,cz) 放置一座现代写字楼（裙楼 + 塔楼 + 屋顶机房；窗带由片元着色，见 build.rs D11）
 fn office_tower(o: &mut Vec<MapObstacle>, cx: f32, cz: f32) {
     // 裙楼（3 层高，覆盖街区大半）
     ob(o, ObstacleKind::Building, cx, cz, 15.0, 15.0, 3.0, 3.0, Some(CONCRETE_LIGHT));
@@ -66,31 +66,12 @@ fn office_tower(o: &mut Vec<MapObstacle>, cx: f32, cz: f32) {
     ob(o, ObstacleKind::Building, cx, cz, 8.0, 8.0, 12.0, 15.0, Some(CONCRETE));
     // 屋顶机房
     ob(o, ObstacleKind::Building, cx, cz, 3.0, 3.0, 1.5, 28.5, Some(METAL_GRAY));
-    // 玻璃幕墙横带（塔楼四面上中下三层）
-    // 2026-09-01 D11：旧值中心 ±8.12 / 半厚 0.12 → 外表面距立面 24cm、且半宽 8.1 超出塔楼
-    // 8.0 的角点，从街对面看是一排排悬挑"鳍片"，并投下与主体错位的阴影。
-    // 现内缩到仅 4cm 出挑（与 facade 不共面 → 无 z-fighting），半宽收到 7.4 不再压过角点，
-    // 条带读作立面内的窗带；塔楼轮廓（8.0 半宽）与颜色判据（GLASS_BLUE 的 b>r*1.4）均未动。
-    for fy in [7.0f32, 13.0, 19.0] {
-        for (dx, dz, hw, hd) in [
-            (0.0f32, 7.94f32, 7.4f32, 0.10f32),
-            (0.0, -7.94, 7.4, 0.10),
-            (7.94, 0.0, 0.10, 7.4),
-            (-7.94, 0.0, 0.10, 7.4),
-        ] {
-            ob(
-                o,
-                ObstacleKind::Block,
-                cx + dx,
-                cz + dz,
-                hw,
-                hd,
-                0.55,
-                fy,
-                Some(GLASS_BLUE),
-            );
-        }
-    }
+    // 窗带不再叠独立薄盒几何（2026-09-01 D11 正解）。原实现每层一个 0.2m 薄盒：掠射角下
+    // 薄盒自身前后面落到同一批像素 → 立面出现 V 形锯齿深度干涉，且外挑读作悬挑鳍片；
+    // 上一轮把条带内缩/改薄（24cm→4cm、0.12→0.10）方向是反的，放大验收仍然不合格。
+    // 现由 build.rs 片元按世界高度调制窗带（建筑坐落 y≈0、层高约 3m → 世界 Y 天然对齐
+    // 楼层），零新增几何、零深度风险，并随 D12 的 detail 一起远距收敛。
+    // 副作用（正向）：每座塔楼少 12 个障碍实例，PT 侧 512 盒上限压力同步下降。
 }
 
 /// 仓库 + 天窗 + 集装箱堆场
@@ -145,9 +126,11 @@ fn shops(o: &mut Vec<MapObstacle>, cx: f32, cz: f32) {
         let bx = cx + (i as f32 - 1.0) * 14.0;
         let tint = if i == 1 { CONCRETE } else { CONCRETE_LIGHT };
         ob(o, ObstacleKind::Building, bx, cz, 6.2, 4.5, 6.0, 6.0, Some(tint));
-        // 店面玻璃带（临街面）：同 D11 处理——旧 4.62/0.12 出挑 24cm 且内表面与立面
-        // （cz+4.5）共面，现内缩为 4cm 出挑、内侧埋进墙体
-        ob(o, ObstacleKind::Block, bx, cz + 4.44, 5.8, 0.10, 0.9, 1.5, Some(GLASS_BLUE));
+        // 店面玻璃带（临街面）保留为几何体：齐人高的实体橱窗，着色器窗带替代不了，
+        // 且它是 D2 玻璃判据（b>r*1.4 跳过混凝土纹理）在商铺上的可见载体。
+        // 按 D11 根因修正厚度：半厚 0.10→0.30 且把背面埋进墙体（外表面仍 4cm 出挑、
+        // 内表面落到墙内 56cm）——掠射角 V 形锯齿源自薄盒前后面屏幕重合，埋掉背面即无竞争。
+        ob(o, ObstacleKind::Block, bx, cz + 4.24, 5.8, 0.30, 0.9, 1.5, Some(GLASS_BLUE));
         // 屋顶水箱
         ob(o, ObstacleKind::Block, bx, cz, 1.0, 1.0, 0.7, 12.5, Some(METAL_GRAY));
     }
