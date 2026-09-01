@@ -68,6 +68,25 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-09-01] 交接：PT 降噪——spp 时域累积（线性 HDR 均值）
+
+- 日期：2026-09-01
+- 发起方：Qwen Code
+- 接收方：后续迭代 AI
+- 交接类型：迭代结束
+- 交接内容：
+  - **做法**：新增 binding 3 累积图像（`R32G32B32A32_SFLOAT`，rgb=Σ线性样本、a=已累积帧数）。片元流程改为「采样 → 乘曝光 → **累加进 acc** → 用 `acc.rgb/acc.a` 运行均值做 ACES + linear→sRGB → 写 OutImg」。色调映射只作用在均值上（先各自 tonemap 再平均会压平高光，且在 gamma 域相加不物理）。
+  - **关键前提（勿回退）**：采样种子**必须含帧索引**。旧实现种子只由 `gid` 决定 → 逐帧图案完全静止 → 累积等于原地踏步、永不收敛。现 `lambertianBounce(n, pxSeed, frameSeed*64+b)`，`frameSeed` 来自 push constants 的 `f.x`。
+  - **push constants 扩到 6×vec4 = 96B**（新增 `f = (frameIndex, resetFlag, sppTarget, unused)`）；`PtParams::pack(res, frame, reset, spp_target)` 与 GLSL `PC{a..f}` 必须同步，两处 `.size(96)` 也要同步——任一不改就是静默错相机/错累积。
+  - **复位三条路**：① 取景指纹变化（`PtParams::signature()`：cam/fwd/sunDir/sunColor 量化 ~1mm + fov/曝光/弹跳）→ 清累积重开，否则不同视角样本混成拖影；② `pt_set_scene_markers` 重建 BLAS → 复位；③ `destroy_pt_resident` → 复位。
+  - **图像布局纪律（易错点）**：累积图像只在创建时做一次 `UNDEFINED→GENERAL` 转换，逐帧 barrier 用 `GENERAL→GENERAL`；主图像每帧整体重写所以允许 `UNDEFINED` 丢弃。**若对累积图用 `old_layout=UNDEFINED` 等于告诉驱动内容可丢 = 累积白做**，且这种 bug 不报 VUID、只表现为"降噪没效果"。
+  - **累积状态用 `Cell`**：上屏代码在 `record_command_buffer(&self)` 内，改 `&mut self` 会波及整条渲染调用链，故 `pt_frame`/`pt_reset`/`pt_view_sig` 取 `std::cell::Cell`。
+  - **达标即停派发**：`pt_frame >= pt_spp_target` 时整个 dispatch 跳过（画面保持、GPU 归零），实测 fps 从累积期回到 **184.9**；`RV3D_PT_SPP` 覆盖目标（实时默认 256，`run_pt_view` 默认 64）。
+  - **参考帧同步升级**：`RV3D_PT_VIEW` 现在**一条命令缓冲内派发 spp 次**（相邻 dispatch 加 compute→compute 自依赖 barrier），输出收敛图而非 1 spp 噪声图，可直接当烘焙真值。
+  - **验收（实测）**：`cargo build --release` 警告 **46（bin）+1（build script），0 新增**；`RV3D_PT_SPP=128` 参考帧 256²——颗粒噪点目视消失、地面平滑渐变、盒体立面干净、**接触阴影带软半影**；`RV3D_PT_SPP=512` 实机 2560×1600——`PT-RESIDENT: 512x512 spp 目标 512`、`PT-SCENE: 盒 512 个`、无 panic/无 device lost、收敛后 **fps 184.9**。（`cargo test` 与冒烟本波未重跑——改动全在 PT 通道内，主路径仅新增 `Cell` 读写。）
+  - **遗留队列**：① 删死代码 `pt_live_frame`/`pt_live_frame2`（仍是 2-binding 旧描述符，误接必崩）；② 512 盒上限静默截断（实测 marker=547）；③ 曝光/弹跳/spp 进 config.rs 与设置面板（现曝光 0.2 硬编于 main.rs）；④ 天空/环境项仍硬编在 GLSL，`PT_SUN_AMBIENT` 无消费者；⑤ PT 与光栅同屏叠加（现整体替换）；⑥ 移动相机时每次都全量重开累积——可改「按像素重投影复用」或运动自适应 spp；⑦ 冒烟/测试本波未重跑，下位接手先补一次。
+- 状态：done
+
 ### [2026-08-31] 交接：PT 路径追踪命中根治（rayQuery committed 参数）+ 着色器改 glslang 编译 + 场景同源
 
 - 日期：2026-08-31

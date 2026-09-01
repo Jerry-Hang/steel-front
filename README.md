@@ -29,7 +29,7 @@
 | 外部资产 | **OBJ/glTF GLB 导入管线 + Windows GDI+ 贴图解码**；Blender 无头脚本化处理（修姿态/烘 AO/导出），AK-12 GLB（63283 顶点）已实装 |
 | 音频 | winmm waveOut 原生 FFI 发声（无设备静默降级） |
 | AI | 三三制指挥体系 + 火-机动交替 + 连级战位铺开 + LLM 战时指挥官（llama.cpp 零依赖接入） |
-| 路径追踪 | **已打通并接入真实战场**：`VK_KHR_ray_query` 全景 PT（NEE 太阳阴影射线 + 漫反射弹跳），场景盒体与光栅化 `WorldMarker` 同源、材质同色，可作光照烘焙真值；着色器由 glslang 编译（`assets/rt/pt_panorama.glsl`），严格 `spirv-val` 通过。当前 1 spp 有颗粒噪声，默认关闭（`RV3D_PT_LIVE=0`） |
+| 路径追踪 | **已打通并接入真实战场**：`VK_KHR_ray_query` 全景 PT（NEE 太阳阴影射线 + 漫反射弹跳 + **spp 时域累积降噪**），场景盒体与光栅化 `WorldMarker` 同源、材质同色，收敛后可作光照烘焙真值；着色器由 glslang 编译（`assets/rt/pt_panorama.glsl`），严格 `spirv-val` 通过。属调试/参照视图（整体替换画面），默认 `RV3D_PT_LIVE=0` |
 | 当前阶段 | 玩法迭代期 + 外部资产管线接入期 + RT 参照期 |
 | 设计文档 | [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt) |
 
@@ -169,7 +169,9 @@ $env:RV3D_PT_BENCH = '1'; cargo run --release
 
 - `RV3D_PT_LIVE`：`0`=强制关 / `1`=强制开 / 未设=跟随 `config.pt_enable`；
 - 着色器源码 `assets/rt/pt_panorama.glsl`，改动后跑 `powershell -ExecutionPolicy Bypass -File scripts/compile_pt.ps1`（glslang 编译 + 严格 spirv-val），再 `cargo build`；
-- 已知现状：1 spp 有颗粒噪声（降噪为下一步），盒体上限 512（超出静默截断），PT 画面当前整体替换而非叠加。
+- `RV3D_PT_SPP`：累积样本数上限（实时默认 256，参考帧默认 64）；**达标后自动停止 PT 派发**，帧率回到无 PT 水平。
+- 降噪方式 = 时域累积：RGBA32F 缓冲累加线性 HDR 样本，对运行均值做 ACES + sRGB；相机/光照/场景任一变化都会自动清空重开（取景指纹判定）。
+- 已知现状：盒体上限 512（超出静默截断，实测 marker=547）；PT 画面整体替换而非叠加光栅；移动视角时全量重开累积（未做重投影复用）。
 
 ---
 
