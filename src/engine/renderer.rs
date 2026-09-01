@@ -848,6 +848,16 @@ pub struct Renderer {
     pt_pool: vk::DescriptorPool,
     pt_dset: vk::DescriptorSet,
     pt_module: vk::ShaderModule,
+    /// 时域累积图像（RGBA32F：rgb=Σ线性样本，a=已累积 spp）
+    pt_acc: vk::Image,
+    pt_acc_mem: vk::DeviceMemory,
+    pt_acc_view: vk::ImageView,
+    /// 已累积帧数 / 目标 spp / 下一帧是否清空重开 / 上次取景指纹
+    /// （Cell：累积状态在 `record_command_buffer(&self)` 里推进，改签名会波及整条渲染链）
+    pt_frame: std::cell::Cell<u32>,
+    pt_spp_target: u32,
+    pt_reset: std::cell::Cell<bool>,
+    pt_view_sig: std::cell::Cell<u64>,
     /// 路径追踪实时渲染开关（config.pt_enable；present 前 PT 帧上屏）
     pub pt_live_enabled: bool,
     /// PT 取景参数（每帧 set_pt_params 注入：相机 + 太阳 + 曝光）
@@ -1413,6 +1423,13 @@ impl Renderer {
             pt_pool: vk::DescriptorPool::null(),
             pt_dset: vk::DescriptorSet::null(),
             pt_module: vk::ShaderModule::null(),
+            pt_acc: vk::Image::null(),
+            pt_acc_mem: vk::DeviceMemory::null(),
+            pt_acc_view: vk::ImageView::null(),
+            pt_frame: std::cell::Cell::new(0),
+            pt_spp_target: 256,
+            pt_reset: std::cell::Cell::new(true),
+            pt_view_sig: std::cell::Cell::new(0),
             screenshot_request: None,
             screenshot_buffers: Vec::new(),
             screenshot_buffers_memory: Vec::new(),
@@ -4579,15 +4596,17 @@ impl Renderer {
             .binding(1).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
         let mat_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(2).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout];
+        let acc_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(3).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
         let pipe_layouts = [sl];
-        // push constants：5×vec4 = 80B（pt_panorama.glsl 的 PC 块）
+        // push constants：6×vec4 = 96B（pt_panorama.glsl 的 PC 块 a..f）
         let pc_ranges = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(80)];
+            .size(96)];
         let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
         let pl = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }.map_err(|e| format!("PT pl: {e}"))?;
         let stage_info = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(vs_module).name(c"main");
@@ -4609,9 +4628,26 @@ impl Renderer {
             .image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
             .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
         let view = unsafe { self.device.create_image_view(&img_view_info, None) }.map_err(|e| format!("PT iv: {e}"))?;
+        // 时域累积图像：RGBA32F（rgb=Σ线性样本，a=已累积 spp）。必须 STORAGE 且常驻，
+        // 每帧只累加不丢弃 => 布局转换只在创建时做一次，逐帧 barrier 用 GENERAL->GENERAL。
+        let acc_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D).format(vk::Format::R32G32B32A32_SFLOAT)
+            .extent(vk::Extent3D { width: size, height: size, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
+            .usage(vk::ImageUsageFlags::STORAGE)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
+        let acc_image = unsafe { self.device.create_image(&acc_info, None) }.map_err(|e| format!("PT acc: {e}"))?;
+        let acc_reqs = unsafe { self.device.get_image_memory_requirements(acc_image) };
+        let acc_type = self.pick_memory_type(acc_reqs, true).map_err(|e| format!("PT acc mt: {e}"))?;
+        let acc_alloc = vk::MemoryAllocateInfo::default().allocation_size(acc_reqs.size).memory_type_index(acc_type);
+        let acc_mem = unsafe { self.device.allocate_memory(&acc_alloc, None) }.map_err(|e| format!("PT acc mem: {e}"))?;
+        unsafe { self.device.bind_image_memory(acc_image, acc_mem, 0) }.map_err(|e| format!("PT acc bind: {e}"))?;
+        let acc_view_info = vk::ImageViewCreateInfo::default()
+            .image(acc_image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::R32G32B32A32_SFLOAT)
+            .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+        let acc_view = unsafe { self.device.create_image_view(&acc_view_info, None) }.map_err(|e| format!("PT acc view: {e}"))?;
         let pool_sizes = [
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
@@ -4626,6 +4662,7 @@ impl Renderer {
             _marker: std::marker::PhantomData,
         };
         let img_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL };
+        let acc_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: acc_view, image_layout: vk::ImageLayout::GENERAL };
         let mat_buf_info = vk::DescriptorBufferInfo {
             buffer: assets.mat_buf,
             offset: 0,
@@ -4654,6 +4691,13 @@ impl Renderer {
                 p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&mat_buf_info).as_ptr(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 3, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                p_image_info: std::slice::from_ref(&acc_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
         ];
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         // AS 一次性构建 + 等待（与 run_pt_view 同款——已验证路径！）
@@ -4662,6 +4706,16 @@ impl Renderer {
         let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("PT cb: {e}"))?[0];
         unsafe {
             self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+            // 累积图像只做一次 UNDEFINED->GENERAL：之后每帧 barrier 必须是 GENERAL->GENERAL，
+            // old_layout 用 UNDEFINED 等于告诉驱动"内容可丢弃" = 累积白做
+            let acc_bar = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(acc_image)
+                .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+            self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[acc_bar]);
             self.record_pt_build(cb, &assets, boxes.len())?;
             self.device.end_command_buffer(cb);
             let cbs = [cb];
@@ -4680,6 +4734,19 @@ impl Renderer {
         self.pt_pool = pool;
         self.pt_dset = dset;
         self.pt_module = vs_module;
+        self.pt_acc = acc_image;
+        self.pt_acc_mem = acc_mem;
+        self.pt_acc_view = acc_view;
+        // RV3D_PT_SPP 覆盖累积目标（默认 256；调参/快速预览可设小值）
+        self.pt_spp_target = std::env::var("RV3D_PT_SPP")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| (1..=4096).contains(v))
+            .unwrap_or(256);
+        self.pt_frame.set(0);
+        self.pt_reset.set(true);
+        self.pt_view_sig.set(0);
+        log::info!("PT-RESIDENT: {}x{} spp 目标 {}（时域累积）", size, size, self.pt_spp_target);
         Ok(())
     }
 
@@ -4732,7 +4799,7 @@ impl Renderer {
             let view = unsafe { self.device.create_image_view(&img_view_info, None) }.map_err(|e| format!("PT iv: {e}"))?;
             let pool_sizes = [
                 vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
-                vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+                vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             ];
             let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
             let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
@@ -4892,7 +4959,7 @@ impl Renderer {
         let view = unsafe { self.device.create_image_view(&img_view_info, None) }.map_err(|e| format!("PT view: {e}"))?;
         let pool_sizes = [
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT pool: {e}"))?;
@@ -5013,6 +5080,9 @@ impl Renderer {
             if self.pt_view != vk::ImageView::null() { self.device.destroy_image_view(self.pt_view, None); }
             if self.pt_img != vk::Image::null() { self.device.destroy_image(self.pt_img, None); }
             if self.pt_img_mem != vk::DeviceMemory::null() { self.device.free_memory(self.pt_img_mem, None); }
+            if self.pt_acc_view != vk::ImageView::null() { self.device.destroy_image_view(self.pt_acc_view, None); }
+            if self.pt_acc != vk::Image::null() { self.device.destroy_image(self.pt_acc, None); }
+            if self.pt_acc_mem != vk::DeviceMemory::null() { self.device.free_memory(self.pt_acc_mem, None); }
             if let Some(assets) = self.pt_resident.take() {
                 let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
                 ext.destroy_acceleration_structure(assets.tlas, None);
@@ -5038,6 +5108,12 @@ impl Renderer {
         self.pt_setl = vk::DescriptorSetLayout::null();
         self.pt_pool = vk::DescriptorPool::null();
         self.pt_module = vk::ShaderModule::null();
+        self.pt_acc = vk::Image::null();
+        self.pt_acc_mem = vk::DeviceMemory::null();
+        self.pt_acc_view = vk::ImageView::null();
+        self.pt_frame.set(0);
+        self.pt_reset.set(true);
+        self.pt_view_sig.set(0);
         self.pt_view = vk::ImageView::null();
         self.pt_img = vk::Image::null();
         self.pt_img_mem = vk::DeviceMemory::null();
@@ -5281,6 +5357,9 @@ impl Renderer {
         self.pt_resident = Some(assets);
         res?;
         self.pt_box_count = n;
+        // 场景换了，旧累积全部作废
+        self.pt_frame.set(0);
+        self.pt_reset.set(true);
         log::info!("PT-SCENE: 盒 {} 个（WorldMarker 同源）", n);
         Ok(())
     }
@@ -5342,7 +5421,12 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout];
+        let acc_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(3)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }
             .map_err(|e| format!("PT set: {e}"))?;
@@ -5350,7 +5434,7 @@ impl Renderer {
         let pc_ranges = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(80)];
+            .size(96)];
         let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
         let pipe_layout = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }
             .map_err(|e| format!("PT layout: {e}"))?;
@@ -5389,10 +5473,33 @@ impl Renderer {
             .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
         let view = unsafe { self.device.create_image_view(&img_view_info, None) }
             .map_err(|e| format!("PT view: {e}"))?;
+        // 累积图像（RGBA32F）：参考帧一次派发多帧 spp，输出收敛结果而非 1 spp 噪声图
+        let acc_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .extent(vk::Extent3D { width: size, height: size, depth: 1 })
+            .mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
+            .usage(vk::ImageUsageFlags::STORAGE)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let acc_image = unsafe { self.device.create_image(&acc_info, None) }
+            .map_err(|e| format!("PT acc: {e}"))?;
+        let acc_reqs = unsafe { self.device.get_image_memory_requirements(acc_image) };
+        let acc_type = self.pick_memory_type(acc_reqs, true)?;
+        let acc_alloc = vk::MemoryAllocateInfo::default().allocation_size(acc_reqs.size).memory_type_index(acc_type);
+        let acc_mem = unsafe { self.device.allocate_memory(&acc_alloc, None) }
+            .map_err(|e| format!("PT acc mem: {e}"))?;
+        unsafe { self.device.bind_image_memory(acc_image, acc_mem, 0) }
+            .map_err(|e| format!("PT acc bind: {e}"))?;
+        let acc_view_info = vk::ImageViewCreateInfo::default()
+            .image(acc_image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::R32G32B32A32_SFLOAT)
+            .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+        let acc_view = unsafe { self.device.create_image_view(&acc_view_info, None) }
+            .map_err(|e| format!("PT acc view: {e}"))?;
         // 描述符
         let pool_sizes = [
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
@@ -5412,6 +5519,11 @@ impl Renderer {
         let img_info_desc = vk::DescriptorImageInfo {
             sampler: vk::Sampler::null(),
             image_view: view,
+            image_layout: vk::ImageLayout::GENERAL,
+        };
+        let acc_info_desc = vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view: acc_view,
             image_layout: vk::ImageLayout::GENERAL,
         };
         let mat_buf_info = vk::DescriptorBufferInfo {
@@ -5444,6 +5556,14 @@ impl Renderer {
                 p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&mat_buf_info).as_ptr(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 3, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                p_image_info: std::slice::from_ref(&acc_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
         ];
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         // 命令：AS 构建 + dispatch + 拷贝回读
@@ -5470,9 +5590,36 @@ impl Renderer {
             self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[accel_bar], &[], &[]);
             self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, compute_pipeline);
             self.device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[dset], &[]);
-            let pc = self.pt_params.pack(size);
-            self.device.cmd_push_constants(cb, pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, bytemuck_bytes(&pc));
-            self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
+            // 累积图像进 GENERAL（一次性；old_layout 用 UNDEFINED 只在首帧合法）
+            let acc_bar0 = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(acc_image)
+                .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+            self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[acc_bar0]);
+            // 一次派发多帧：帧索引逐帧推进 => 采样去相关 => 输出收敛参考帧而非 1 spp 噪声图
+            let spp = std::env::var("RV3D_PT_SPP")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|v| (1..=4096).contains(v))
+                .unwrap_or(64u32);
+            let self_dep = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            for i in 0..spp {
+                let pc = self.pt_params.pack(size, i, i == 0, spp);
+                self.device.cmd_push_constants(cb, pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, bytemuck_bytes(&pc));
+                self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
+                if i + 1 < spp {
+                    // 相邻 dispatch 读写同一累积像素，必须 compute->compute 自依赖 barrier
+                    self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[self_dep], &[], &[]);
+                }
+            }
+            log::info!("PT-VIEW: spp={}", spp);
             // 回读缓冲
             let (read_buf, read_mem) = self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, (size * size * 4) as u64)?;
             let img_bar2 = vk::ImageMemoryBarrier::default()
@@ -5543,6 +5690,9 @@ impl Renderer {
             self.device.destroy_image_view(view, None);
             self.device.destroy_image(image, None);
             self.device.free_memory(img_mem, None);
+            self.device.destroy_image_view(acc_view, None);
+            self.device.destroy_image(acc_image, None);
+            self.device.free_memory(acc_mem, None);
             let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
             ext.destroy_acceleration_structure(assets.tlas, None);
             ext.destroy_acceleration_structure(assets.blas, None);
@@ -8267,25 +8417,49 @@ impl Renderer {
             let sw_img = self.swapchain_images[image_index as usize];
             let size = 512u32;
             unsafe {
-                // PT 图像 -> GENERAL（丢弃上一帧内容）
-                let pt_bar = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::NONE).dst_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::GENERAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(self.pt_img)
-                    .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
-                self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[pt_bar]);
-                self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_pipeline);
-                self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_layout, 0, &[self.pt_dset], &[]);
-                let pc = self.pt_params.pack(size);
-                self.device.cmd_push_constants(
-                    command_buffer,
-                    self.pt_layout,
-                    vk::ShaderStageFlags::COMPUTE,
-                    0,
-                    bytemuck_bytes(&pc),
-                );
-                self.device.cmd_dispatch(command_buffer, (size + 7) / 8, (size + 7) / 8, 1);
+                // 取景/光照变化 => 清空重开累积（不同视角样本混在一起会拖影）
+                let sig = self.pt_params.signature();
+                if sig != self.pt_view_sig.get() {
+                    self.pt_view_sig.set(sig);
+                    self.pt_reset.set(true);
+                    self.pt_frame.set(0);
+                }
+                let accumulating = self.pt_frame.get() < self.pt_spp_target;
+                if accumulating {
+                    // 主图像每帧整体重写 => 允许 UNDEFINED 丢弃；累积图像必须 GENERAL->GENERAL 保内容
+                    let pt_bar = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::NONE).dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .old_layout(vk::ImageLayout::UNDEFINED).new_layout(vk::ImageLayout::GENERAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(self.pt_img)
+                        .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                    let acc_bar = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                        .old_layout(vk::ImageLayout::GENERAL).new_layout(vk::ImageLayout::GENERAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(self.pt_acc)
+                        .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                    self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[pt_bar, acc_bar]);
+                    self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_pipeline);
+                    self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_layout, 0, &[self.pt_dset], &[]);
+                    let pc = self.pt_params.pack(
+                        size,
+                        self.pt_frame.get(),
+                        self.pt_reset.get(),
+                        self.pt_spp_target,
+                    );
+                    self.pt_reset.set(false);
+                    self.device.cmd_push_constants(
+                        command_buffer,
+                        self.pt_layout,
+                        vk::ShaderStageFlags::COMPUTE,
+                        0,
+                        bytemuck_bytes(&pc),
+                    );
+                    self.device.cmd_dispatch(command_buffer, (size + 7) / 8, (size + 7) / 8, 1);
+                    self.pt_frame.set(self.pt_frame.get() + 1);
+                }
                 // PT 写完成 -> Transfer 读
                 let pt_bar2 = vk::ImageMemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE).dst_access_mask(vk::AccessFlags::TRANSFER_READ)

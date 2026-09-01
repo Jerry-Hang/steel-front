@@ -11,8 +11,10 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT TLAS;
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D OutImg;
 // 每盒材质：albedo.rgb + 光泽度（与游戏 WorldMarker 同色，PT 才能当烘焙参照）
 layout(set = 0, binding = 2, std430) readonly buffer Mats { vec4 boxMats[]; };
+// 时域累积缓冲（线性 HDR 累加：rgb=Σ样本，a=已累积 spp）。逐像素单写者，无需原子。
+layout(set = 0, binding = 3, rgba32f) uniform image2D AccImg;
 
-// 5 x vec4 = 80B，Rust 侧 [[f32;4];5] 逐字段对齐，无填充歧义
+// 6 x vec4 = 96B，Rust 侧 [[f32;4];6] 逐字段对齐，无填充歧义
 // 相机直接传 forward 向量（不传 yaw/pitch）=> 与 engine/camera.rs 的基底严格同源，无前后手风险
 layout(push_constant) uniform PC {
     vec4 a; // (resX, resY, tanHalfFov, bounces)
@@ -20,6 +22,7 @@ layout(push_constant) uniform PC {
     vec4 c; // fwd.xyz      = camera.forward()
     vec4 d; // sunDir.xyz   表面->太阳
     vec4 e; // sunColor.rgb, exposure
+    vec4 f; // (frameIndex, resetFlag, sppTarget, unused)
 } pc;
 
 const vec3 SKY_ZENITH  = vec3(0.28, 0.42, 0.66);
@@ -74,14 +77,15 @@ vec3 cosSample(vec2 e) {
     return vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r * r)));
 }
 
-vec3 lambertianBounce(vec3 n, float seed) {
-    uint s = floatBitsToUint(seed);
-    vec2 e = vec2(hash11(s ^ 0x9E3779B9u), hash11((s ^ 0x85EBCA6Bu) + 13u));
+// 余弦加权漫反射方向；种子 = 像素索引 × 帧索引（帧间必须去相关，否则时域累积不会收敛）
+vec3 lambertianBounce(vec3 n, uint px, uint t) {
+    uint s = (px * 0x9E3779B1u) ^ (t * 0x85EBCA6Du);
+    vec2 e = vec2(hash11(s), hash11(s ^ 0x27D4EB2Du));
     vec3 up = abs(n.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-    vec3 t = normalize(cross(up, n));
-    vec3 bt = cross(n, t);
+    vec3 tx = normalize(cross(up, n));
+    vec3 bt = cross(n, tx);
     vec3 d = cosSample(e);
-    return normalize(t * d.x + bt * d.y + n * d.z);
+    return normalize(tx * d.x + bt * d.y + n * d.z);
 }
 
 // 材质来自 binding 2 的每盒 SSBO（与游戏 WorldMarker 同色），越界返回中性灰
@@ -108,7 +112,8 @@ void main() {
     vec3 sunDir = normalize(pc.d.xyz);
     vec3 lum = vec3(0.0);
     vec3 throughput = vec3(1.0);
-    float seed = float(gid.y * 4096 + gid.x);
+    uint pxSeed = uint(gid.y) * 2048u + uint(gid.x);
+    uint frameSeed = uint(pc.f.x);
 
     for (uint b = 0u; b < bounces; b++) {
         if (!traceRay(ro, rd, 500.0)) { lum += throughput * skyColor(rd); break; }
@@ -120,16 +125,24 @@ void main() {
 
         throughput *= alb;
         ro = hitPos + hitNrm * 0.002;
-        rd = lambertianBounce(hitNrm, seed + float(b) * 7.13);
+        rd = lambertianBounce(hitNrm, pxSeed, frameSeed * 64u + b);
         if (max(throughput.r, max(throughput.g, throughput.b)) < 0.01) break;
         if (b + 1u == bounces && !traceRay(ro, rd, 500.0))
             lum += throughput * skyColor(rd) * 0.5;
     }
 
+    // 时域累积：线性 HDR 求和，a 通道记已累积样本数；色调映射只作用于运行均值
+    // （否则每帧各自 ACES+sRGB 再平均会把高光压平、gamma 域相加也不物理）
     lum *= pc.e.w;
-    lum = clamp((lum * (2.51 * lum + 0.03)) / (lum * (2.43 * lum + 0.59) + 0.14), 0.0, 1.0);
-    lum = mix(lum * 12.92,
-              1.055 * pow(max(lum, vec3(1e-4)), vec3(1.0 / 2.4)) - 0.055,
-              step(vec3(0.0031308), lum));
-    imageStore(OutImg, gid, vec4(lum, 1.0));
+    vec4 acc = imageLoad(AccImg, gid);
+    if (pc.f.y > 0.5) { acc = vec4(0.0); }
+    acc = vec4(acc.rgb + lum, acc.a + 1.0);
+    imageStore(AccImg, gid, acc);
+
+    vec3 outc = acc.rgb / max(acc.a, 1.0);
+    outc = clamp((outc * (2.51 * outc + 0.03)) / (outc * (2.43 * outc + 0.59) + 0.14), 0.0, 1.0);
+    outc = mix(outc * 12.92,
+               1.055 * pow(max(outc, vec3(1e-4)), vec3(1.0 / 2.4)) - 0.055,
+               step(vec3(0.0031308), outc));
+    imageStore(OutImg, gid, vec4(outc, 1.0));
 }

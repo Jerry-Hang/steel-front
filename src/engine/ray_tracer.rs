@@ -93,8 +93,8 @@ pub struct PtParams {
 }
 
 impl PtParams {
-    /// 打包：必须与 assets/rt/pt_panorama.glsl 的 `PC { vec4 a,b,c,d,e }` 逐字段一致
-    pub fn pack(&self, res: u32) -> [[f32; 4]; 5] {
+    /// 打包：必须与 assets/rt/pt_panorama.glsl 的 `PC { vec4 a,b,c,d,e,f }` 逐字段一致
+    pub fn pack(&self, res: u32, frame: u32, reset: bool, spp_target: u32) -> [[f32; 4]; 6] {
         let tan = if self.tan_half_fov > 1e-4 {
             self.tan_half_fov
         } else {
@@ -109,7 +109,42 @@ impl PtParams {
             [f.x, f.y, f.z, 0.0],
             [s.x, s.y, s.z, 0.0],
             [self.sun_color.x, self.sun_color.y, self.sun_color.z, exp],
+            [
+                frame as f32,
+                if reset { 1.0 } else { 0.0 },
+                spp_target.max(1) as f32,
+                0.0,
+            ],
         ]
+    }
+
+    /// 取景指纹（量化到 ~1cm / 0.001 弧度）：相机或光照变了就必须清累积重开，
+    /// 否则不同视角的样本会被平均成拖影。
+    pub fn signature(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        {
+            let mut mix = |v: u64| {
+                h ^= v;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            };
+            for c in self
+                .cam
+                .to_array()
+                .iter()
+                .chain(self.fwd.to_array().iter())
+                .chain(self.sun_dir.to_array().iter())
+                .chain(self.sun_color.to_array().iter())
+            {
+                mix((*c * 1000.0) as i64 as u64);
+            }
+            mix((self.yaw_signature()) as u64);
+        }
+        h
+    }
+
+    fn yaw_signature(&self) -> i64 {
+        ((self.tan_half_fov as f64 * 1e6) as i64) ^ ((self.exposure as f64 * 1e6) as i64)
+            ^ (self.bounces as i64)
     }
 }
 
