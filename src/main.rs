@@ -2057,13 +2057,13 @@ impl ApplicationHandler for GameApp {
                 // 2026-08-29：路径追踪全景开关（设置面板 pt_enable；默认开）
             let mut renderer = renderer;
             if crate::config::load().pt_enable {
-                // RV3D_PT_SIZE：实时 PT 渲染分辨率（默认 512；调高可验证 RT 通路真在算，
+                // RV3D_PT_SIZE：实时 PT 渲染分辨率（默认 1024；调高可验证 RT 通路真在算，
                 // 也可为光照烘焙取更高分辨率参照帧）
                 let pt_size = std::env::var("RV3D_PT_SIZE")
                     .ok()
                     .and_then(|v| v.parse::<u32>().ok())
                     .filter(|v| (128..=2048).contains(v) && v % 8 == 0)
-                    .unwrap_or(512u32);
+                    .unwrap_or(1024u32);
                 if let Err(e) = renderer.init_pt_resident(pt_size) {
                     log::info!("PT-RESIDENT init: {e}");
                 }
