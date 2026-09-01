@@ -273,77 +273,101 @@ pub fn generate_default_ground_texture(
 }
 
 /// 城市分区基色（与 city::ground_zone 严格同源；色值线性 RGB）
+///
+/// ## 为什么这次大改配色
+/// 实测整帧平均饱和度只有 **0.068**（正常户外场景 0.15+），亮度均值 0.705，
+/// 地面占画面约 50% 却几乎是一张平涂的浅米色。原因有两层：
+/// 1. 铺装类分区（人行道/广场/地基）基色定在 0.46~0.52 线性，再乘上
+///    "迎光面 tone≈0.87" 与 sRGB 编码，落到屏幕上就是 0.76 的近白；
+/// 2. 同一分区内**没有任何逐块变化**，于是一整块广场就是一个颜色，
+///    眼睛读不到尺度、也读不到"这是铺出来的地"。
+/// 所以这次同时做三件事：把铺装基色压到 0.20~0.32、给每块砖/每段路缘
+/// 一个确定性的逐格明度抖动、并把草地/沙土往更有色相的方向拉。
+/// 大面积铺装的"细节"由逐格抖动承担，不再靠几何薄片（那是纸片的来源）。
 fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
     match zone {
         2 => {
-            // 沥青：暗灰 + 细噪 + 黄色中线
-            let speck = value_noise(x, z, 0.9, seed.wrapping_add(60)) * 0.14;
-            let mut c = [0.155 + speck, 0.16 + speck, 0.17 + speck];
+            // 沥青：暗灰 + 细噪 + 磨损车辙 + 黄色断续中线
+            let speck = value_noise(x, z, 0.9, seed.wrapping_add(60)) * 0.10;
+            // 车辙：两条长期被轮胎压亮的带，给空旷的路面一个方向感
             let fx = (x / crate::engine::city::STREET_EVERY).round();
             let fz = (z / crate::engine::city::STREET_EVERY).round();
             let dx = (x - fx * crate::engine::city::STREET_EVERY).abs();
             let dz = (z - fz * crate::engine::city::STREET_EVERY).abs();
+            let along = if dx < dz { x } else { z };
+            let across = if dx < dz { dz } else { dx };
+            let rut = 1.0 - smoothstep(0.35, 1.6, (across - 2.4).abs());
+            let mut c = [0.115 + speck, 0.120 + speck, 0.128 + speck];
+            c = lerp3(c, [0.150, 0.152, 0.158], rut * 0.55);
             // 中线：三处必须一起改，只改一处都无效（上一轮只加宽+压饱和，
             // 2026-09-01 实机复验仍读成"从枪口铺到地平线的发光跑道"）。
-            // ① 宽度 ≥1 纹素：旧 0.6m 在世界空间 UV 下亚纹素，线性过滤+MIP 会把它
-            //    抹开放大成高亮带；
-            // ② 必须断续：连续线沿视线一路延伸到地平线，透视下占据极大屏幕角，
-            //    饱和度再低也会成为画面主轴 —— 真实道路本就是 3m 漆段 + 3m 空段；
-            // ③ 对比压到约沥青的 1.5 倍（旧值约 2 倍，近摄抢整个画面）。
-            let along = if dx < dz { x } else { z };
+            // ① 宽度 ≥1 纹素；② 必须断续（3m 漆 + 3m 空）；③ 对比压到沥青约 1.5 倍。
             let g = along * (1.0 / 6.0);
             let dashed = (g - g.floor()) < 0.5;
             if (dx < 0.5 || dz < 0.5) && dashed {
-                c = [0.26, 0.245, 0.175]; // 磨损黄色中线（断续）
+                c = [0.230, 0.210, 0.145]; // 磨损黄色中线（断续）
             } else if (dx > 4.4 && dx < 4.75) || (dz > 4.4 && dz < 4.75) {
-                c = [0.30, 0.30, 0.31]; // 路缘磨损条
+                c = [0.215, 0.215, 0.220]; // 路缘磨损条
             }
             c
         }
         3 => {
-            // 人行道：浅灰板 + 2m 分缝
-            let base = [0.46, 0.45, 0.44];
-            let sx = x.rem_euclid(2.0);
-            let sz = z.rem_euclid(2.0);
-            if sx < 0.14 || sz < 0.14 {
-                [0.36, 0.35, 0.35]
+            // 人行道：4m 方砖，逐块明度抖动 + 砂浆缝。
+            // ⚠ 地面纹理是 512² 覆盖 512m = **1 纹素/米**，所以砖格周期与缝宽都必须
+            // 落在纹素网格上：2m 砖 + 0.1m 缝 = 缝只有 0.1 个纹素，必然混叠消失
+            // （D7 同一条教训）。改成 4m 砖 + 0.6m 缝，缝≈1 纹素，近看是网格、
+            // 远看自动平均成色调变化，不会闪。
+            let bx = (x * 0.25).floor() as i32;
+            let bz = (z * 0.25).floor() as i32;
+            let tone = 0.86 + unit_from_hash(hash2(bx, bz, seed.wrapping_add(70))) * 0.30;
+            let sx = x.rem_euclid(4.0);
+            let sz = z.rem_euclid(4.0);
+            let base = [0.255 * tone, 0.248 * tone, 0.238 * tone];
+            if sx < 0.6 || sz < 0.6 {
+                [0.170, 0.165, 0.158]
             } else {
                 base
             }
         }
         4 => {
-            // 广场铺装：米灰板 + 4m 分缝
-            let base = [0.52, 0.50, 0.47];
-            let sx = x.rem_euclid(4.0);
-            let sz = z.rem_euclid(4.0);
-            if sx < 0.18 || sz < 0.18 {
-                [0.42, 0.40, 0.38]
+            // 广场铺装：8m 大板，暖砂岩色相 + 逐板抖动 + 分缝（同上，缝必须 ≥1 纹素）
+            let bx = (x * 0.125).floor() as i32;
+            let bz = (z * 0.125).floor() as i32;
+            let tone = 0.88 + unit_from_hash(hash2(bx, bz, seed.wrapping_add(71))) * 0.26;
+            let sx = x.rem_euclid(8.0);
+            let sz = z.rem_euclid(8.0);
+            let base = [0.290 * tone, 0.258 * tone, 0.208 * tone];
+            if sx < 0.7 || sz < 0.7 {
+                [0.195, 0.174, 0.143]
             } else {
                 base
             }
         }
         5 => {
-            // 建筑地基：深混凝土
-            let speck = value_noise(x, z, 1.6, seed.wrapping_add(61)) * 0.08;
-            [0.33 + speck, 0.32 + speck, 0.31 + speck]
+            // 建筑地基/院落铺装：冷灰混凝土地坪，双频斑驳
+            let speck = value_noise(x, z, 1.6, seed.wrapping_add(61)) * 0.055;
+            let blot = value_noise(x, z, 6.5, seed.wrapping_add(72));
+            let k = 0.90 + blot * 0.22;
+            [0.185 * k + speck, 0.182 * k + speck, 0.176 * k + speck]
         }
         1 => {
-            // 沙土
+            // 沙土：拉出黄褐色的色相，不再接近灰
             let d = value_noise(x, z, 4.0, seed.wrapping_add(62)) * 0.5
                 + value_noise(x, z, 1.2, seed.wrapping_add(63)) * 0.5;
-            let k = 1.0 + d * 0.22;
-            [0.60 * k, 0.48 * k, 0.27 * k]
+            let k = 0.86 + d * 0.30;
+            [0.360 * k, 0.278 * k, 0.152 * k]
         }
         _ => {
-            // 草地：绿 + 双频抖动 + 斑驳
+            // 草地：更深、更有饱和度的绿 + 双频抖动 + 干草斑
             let d = value_noise(x, z, 3.2, seed.wrapping_add(64)) * 0.6
                 + value_noise(x, z, 0.9, seed.wrapping_add(65)) * 0.4;
-            let k = 1.0 + d * 0.24;
+            let k = 0.86 + d * 0.32;
             let patch = value_noise(x, z, 9.0, seed.wrapping_add(66));
-            let mut c = [0.165 * k, 0.38 * k, 0.115 * k];
+            let mut c = [0.088 * k, 0.225 * k, 0.062 * k];
             if patch > 0.35 {
-                // 干草斑
-                c = [c[0] * 1.25, c[1] * 1.18, c[2] * 0.85];
+                // 干草斑（暖黄，与绿形成色相对比）
+                let m = smoothstep(0.35, 0.85, patch);
+                c = lerp3(c, [0.230, 0.205, 0.095], m * 0.55);
             }
             c
         }
