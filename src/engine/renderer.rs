@@ -435,7 +435,7 @@ fn terrain_coarse_height(x: f32, z: f32, coarse: &[f32], coarse_cells: usize) ->
 const GRID_SIZE: u32 = 256;
 const INSTANCE_COUNT: u32 = GRID_SIZE * GRID_SIZE;
 /// 世界障碍 marker 上限（程序化地图每关障碍盒数远小于此；同时决定实例 buffer 的额外容量）
-const MAX_MARKER_INSTANCES: u32 = 1024;
+const MAX_MARKER_INSTANCES: u32 = 4096;
 /// marker 在实例 buffer 中的起始 slot：跳过 0..=INSTANCE_COUNT。
 ///
 /// slot 65536 是地形 identity（shader 硬编码 TERRAIN_INSTANCE_INDEX=65536 读取，
@@ -494,9 +494,15 @@ impl WorldMarker {
                     ob.half_h * 2.0,
                     ob.half_d * 2.0,
                 )),
-            tint: match ob.tint {
-                Some(c) => [c[0], c[1], c[2], 1.0],
-                None => obstacle_material_tint(ob.kind, ob.x, ob.z),
+            tint: {
+                let mut t = match ob.tint {
+                    Some(c) => [c[0], c[1], c[2], 1.0],
+                    None => obstacle_material_tint(ob.kind, ob.x, ob.z),
+                };
+                // tint.w 是几何形状标签（见 engine::geom）。Legacy 标签 = 1.0，
+                // 与旧代码写死的 1.0 逐位相同，所以未迁移的障碍画面不变。
+                t[3] = ob.shape.tag();
+                t
             },
         }
     }
@@ -9280,6 +9286,48 @@ unsafe extern "system" fn vulkan_debug_callback(
         }
     }
     vk::FALSE
+}
+
+// ============================================================
+// 实例槽位布局单元测试
+// ============================================================
+
+#[cfg(test)]
+mod instance_slot_layout_tests {
+    use super::*;
+
+    /// 槽位布局钉死测试。
+    ///
+    /// `build.rs` 的两段 WGSL（顶点/网格着色器）里，枪模槽是**字面量** `78913u`，
+    /// 而它由 `MAX_MARKER_INSTANCES` 推导。历史上这里已经因为"改了容量忘了改字面量"
+    /// 出过两次真 bug（枪槽区间覆盖 NPC 圆柱/球体段 → 四肢和头被 z=0 深度覆盖，
+    /// 表现为"鬼魂穿模"）。字面量没法被 Rust 类型系统检查，所以用测试兜住：
+    /// 改任何一档容量都必须同时改 build.rs 的两处字面量，否则本测试失败。
+    #[test]
+    fn gun_slot_layout_is_pinned() {
+        assert_eq!(MARKER_SLOT_BASE, 65537, "marker 区起点 = 地形 identity 之后一槽");
+        assert_eq!(NPC_SLOT_BASE, 65537 + 4096);
+        assert_eq!(NPC_CYL_SLOT_BASE, 69633 + 3072);
+        assert_eq!(NPC_SPH_SLOT_BASE, 69633 + 6144);
+        assert_eq!(EMISSIVE_SLOT_BASE, 69633 + 9216);
+        assert_eq!(
+            GUN_INSTANCE_INDEX, 78913,
+            "枪槽变了：必须同步改 build.rs 里两处 `== 78913u` 字面量"
+        );
+        // 枪槽必须紧贴自发光区之后、且落在自发光区间之外，否则会被当成自发光刷白。
+        assert_eq!(GUN_INSTANCE_INDEX, EMISSIVE_SLOT_BASE + MAX_EMISSIVE_INSTANCES);
+        assert!(
+            GUN_INSTANCE_INDEX >= EMISSIVE_SLOT_BASE + 64,
+            "枪槽落进自发光区间会被判成 emissive（历史 bug）"
+        );
+    }
+
+    /// marker 区不得越界侵占 NPC 区（曾因 1024/3072 写错导致前 2048 个 NPC 盒体被当 marker）。
+    #[test]
+    fn marker_band_does_not_bleed_into_npc_band() {
+        assert_eq!(NPC_SLOT_BASE - MARKER_SLOT_BASE, MAX_MARKER_INSTANCES);
+        assert_eq!(EMISSIVE_SLOT_BASE - NPC_SLOT_BASE, MAX_NPC_INSTANCES * 3);
+    }
 }
 
 // ============================================================

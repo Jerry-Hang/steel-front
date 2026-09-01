@@ -21,6 +21,7 @@ use super::ai::{
     GridPos, NpcPerception, NpcState, NpcStateMachine, TacticalRole, Tactic, Team, WaveKind,
 };
 use super::physics::{self, Body, CollisionEvent, CollisionListener, PlayerBody, Vec3 as Pv};
+use super::geom::Shape;
 use super::renderer::terrain_height_at;
 use super::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
 use super::weapon_data::{build_firearm, ALL_WEAPONS};
@@ -408,6 +409,9 @@ pub struct MapObstacle {
     pub max_hp: f32,
     /// 当前血量（归 0 → 摧毁：从物理刚体/AI 网格/渲染 marker 中移除）
     pub hp: f32,
+    /// 几何形状（渲染模板 + 碰撞足迹）。默认 [`Shape::Legacy`] = 旧行为（立方体，
+    /// 绿色 tint 兜底成二十面体），所以既有构造点零改动即保持原画面。
+    pub shape: Shape,
 }
 
 impl MapObstacle {
@@ -425,6 +429,7 @@ impl MapObstacle {
             tint: None,
             max_hp,
             hp: max_hp,
+            shape: Shape::Legacy,
         }
     }
 
@@ -433,6 +438,12 @@ impl MapObstacle {
         self.half_h = half_h;
         self.y = y;
         self.tint = tint;
+        self
+    }
+
+    /// 指定几何形状。碰撞足迹随形状收缩（见 [`Shape::inscribed_radius_factor`]）。
+    pub fn geom(mut self, shape: Shape) -> Self {
+        self.shape = shape;
         self
     }
 }
@@ -1431,6 +1442,7 @@ impl Game {
                     tint: None,
                     max_hp,
                     hp: max_hp,
+                    shape: Shape::Legacy,
                 });
             }
             self.map = LevelMap { obstacles };
@@ -2369,12 +2381,18 @@ impl Game {
     }
 
     /// 构建默认光照场景（方向光 + 环境光 + 2 点光；阴影未绑定贴图，保持关闭）
+    ///
+    /// 强度配平（2026-09-01 建模重构第 1 批）：旧值 sun=1.5 / ambient=0.5×(0.5,0.55,0.6)
+    /// 使任何 NdotL>0.5 的面全部撞上 `min(radiance,1)` 截顶，明暗比只有 4:1 且高光端全糊。
+    /// 片元改用不截顶的指数压缩后，这里把太阳降到 1.15、环境降到 0.30，让
+    /// [背光 0.20, 迎光 0.87] 整个区间都落在曲线未饱和的部分——同样的 4:1 对比，
+    /// 但朝向梯度不再被抹平。改这两个数必须同时看 build.rs::apply_lighting 的曲线。
     pub fn light_uniform(&self) -> super::lighting::LightUniform {
         use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
         let sun = DirectionalLight::new(
             glam::Vec3::new(-0.4, 0.9, -0.3).normalize(),
             glam::Vec3::new(1.0, 0.95, 0.85),
-            1.5,
+            1.15,
         );
         let point_a = PointLight::new(
             glam::Vec3::new(0.0, 6.0, 0.0),
@@ -2405,7 +2423,7 @@ impl Game {
             Some(&sun),
             &[point_a, point_b],
             glam::Vec3::new(0.5, 0.55, 0.6),
-            0.5,
+            0.30,
             shadow.as_ref(),
         )
     }
@@ -5370,6 +5388,7 @@ mod tests {
             tint: None,
             max_hp: 300.0,
             hp: 300.0,
+            shape: Shape::Legacy,
         };
         game.map.obstacles.push(ob);
         game.world
