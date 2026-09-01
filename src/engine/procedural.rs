@@ -283,8 +283,11 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
             let fz = (z / crate::engine::city::STREET_EVERY).round();
             let dx = (x - fx * crate::engine::city::STREET_EVERY).abs();
             let dz = (z - fz * crate::engine::city::STREET_EVERY).abs();
-            if dx < 0.3 || dz < 0.3 {
-                c = [0.72, 0.62, 0.14]; // 黄色中线
+            if dx < 0.55 || dz < 0.55 {
+                // 中线：必须宽到可被纹素解析（旧 0.6m 在世界空间 UV 下不足 1 纹素，
+                // 线性过滤 + MIP 会把亚纹素高亮色抹开放大成一条"发光黄带"），
+                // 且用磨损低饱和黄而非纯交通黄，避免近摄时抢过整个画面。
+                c = [0.34, 0.31, 0.19]; // 黄色中线（磨损）
             } else if (dx > 4.4 && dx < 4.75) || (dz > 4.4 && dz < 4.75) {
                 c = [0.30, 0.30, 0.31]; // 路缘磨损条
             }
