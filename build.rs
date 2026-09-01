@@ -96,9 +96,15 @@ fn vs_main(
     // 自发光区间（EMISSIVE_BASE .. +64）；枪槽（+64 后一槽）在此区间之外（2026-08-27 修复：
     // 原 >= 使枪槽被当作自发光 → flag=1+fade=2 → 走光照路径被太阳光×7.7 刷成纯白）
     if (instance_index >= EMISSIVE_INSTANCE_BASE && instance_index < EMISSIVE_INSTANCE_BASE + 64u) {
-        // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
+        // 自发光实体：fade > 1 作为 emissive 信号（片元跳过光照/贴图混合，走体积光晕分支）。
+        // fade 的取值进一步编码「火 / 烟」两种响应，编码来源是实例 tint.w
+        // （0 = 火，>= 0.5 = 烟）；粒子种类由 main.rs 决定，片元以 3.0 为分界。
         output.flat_flag = 1.0;
-        output.fade = 2.0;
+        if (inst.tint.w >= 0.5) {
+            output.fade = 3.5; // 烟
+        } else {
+            output.fade = 2.0; // 火
+        }
     } else if (instance_index == TERRAIN_INSTANCE_INDEX) {
         output.fade = 1.0;
     } else {
@@ -280,9 +286,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (input.fade <= 0.02) {
         discard;
     }
-    // 自发光（爆炸闪光等，顶点阶段 fade=2.0 标记）：直出顶点色 × tint，不受光照影响
+    // 自发光（爆炸/枪口焰/烟雾粒子；顶点阶段用 fade 编码种类）。
+    // 旧实现直出纯色 → 均匀缩放的球壳在屏幕上就是一张平面着色的多边形纸片（D8）。
+    // 这里不引入 alpha 混合（主 pass 是全不透明管线），纯靠视相关径向衰减把亮度压向
+    // 轮廓来伪造体积光晕：ndv = |N·V| 在球心≈1、轮廓≈0。
     if (input.fade > 1.0) {
-        return vec4<f32>(input.color, 1.0);
+        let edir = normalize(input.view_dir);
+        let enorm = normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos)));
+        let ndv = abs(dot(enorm, edir));
+        if (input.fade > 3.0) {
+            // 烟：暗灰、中心略亮、边缘缓衰减，并吃一点环境光，避免变成纯黑洞
+            let amb = light_data.ambient.rgb * light_data.ambient.w;
+            return vec4<f32>(input.color * (0.40 + 0.60 * ndv) + amb * 0.35, 1.0);
+        }
+        // 火：中心过曝白热 + 向外快速衰减成 tint 本色边缘 → 有核有晕，不再是一张饼
+        let core = pow(ndv, 2.2);
+        let hot = pow(ndv, 7.0);
+        return vec4<f32>(input.color * (0.22 + 1.55 * core) + vec3<f32>(1.0) * hot * 0.55, 1.0);
     }
     // 枪模（flat=3）：顶点色已含烘焙光照，直出（不再被实时光照二次处理）
     if (input.flat_flag > 2.5) {
@@ -293,27 +313,43 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // RV3D_SKIN_TEX=1（light_data.flags.z）启用；缺省 0 保持纯色路径（冒烟基线不变）。
     if (input.flat_flag > 0.5) {
         var base: vec3<f32> = input.color;
-        // 树冠杂色（2026-08-23）：绿色 tint 的障碍，按世界坐标噪声微调颜色 → 团簇感
+        // D12：皮肤/墙面/树冠杂色都是高频信号，远距时一个像素盖住多个细节单元，
+        // MIP 平均后仍残留 salt-and-pepper 闪点（士兵"蓝底白斑平板"、建筑立面满屏麻点）。
+        // 用 fwidth(uv) 直接量出单像素覆盖的纹理面积（marker/NPC 的 uv 每面铺满 0..1，
+        // 故其导数即屏幕足迹的倒数），越迷你越把细节权重收回 tint 均值。
+        // detail=1（近）→ 与旧式逐位一致；detail=0（远）→ 近似纯色，闪点消失。
+        let foot = max(abs(fwidth(input.uv).x), abs(fwidth(input.uv).y));
+        let detail = 1.0 - smoothstep(0.015, 0.22, foot);
+        // 树冠杂色（2026-08-23）：绿色 tint 的障碍，按世界坐标噪声微调颜色 → 团簇感。
+        // 该噪声是世界坐标哈希（无 MIP 可平均），远距必然逐像素乱闪 → 同样按 detail 收敛。
         if (input.flat_flag < 1.5 && base.g > base.r && base.g > base.b * 1.4) {
             let hh = fract(sin(dot(input.world_pos.xz, vec2<f32>(0.137, 0.211))) * 43758.5453);
-            base = base * (0.82 + hh * 0.36);
+            base = base * mix(1.0, 0.82 + hh * 0.36, detail);
         }
         if (light_data.flags.z >= 0.5) {
             if (input.flat_flag > 1.5) {
-                // NPC 士兵：迷彩军服纹理 × 阵营 tint（去饱和纹素保留色相，全保纹理细节）
+                // NPC 士兵：迷彩军服纹理 × 阵营 tint（去饱和纹素保留色相）
                 let texel = textureSample(npc_skin_tex, texture_sampler, input.uv);
                 let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
-                base = input.color * (0.55 + 0.9 * luma);
+                // 近处幅度 0.55+0.90·luma 与 D1 验收式逐位一致（勿回退），远处收到 0.55+0.12·luma
+                base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
             } else {
-                // marker 障碍：混凝土墙纹理 × 障碍 tint（权重 0.45：tint 保色相，纹理供表面细节）
+                // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
                 // 玻璃类 tint（蓝灰系：b 显著大于 r）跳过纹理，保持干净透亮
                 if (input.color.b > input.color.r * 1.4) {
                     base = input.color;
                 } else {
                     let texel = textureSample(marker_skin_tex, texture_sampler, input.uv);
-                    base = mix(input.color, texel.rgb, 0.45);
+                    base = mix(input.color, texel.rgb, 0.45 * (0.25 + 0.75 * detail));
                 }
             }
+        }
+        // 轮廓分离（D12）：掠射角提亮，让士兵从背景里"读得出来"。
+        // 只乘一个亮度标量、不改 RGB 分量比例 → 阵营色相与饱和度保持 D1 验收结论有效。
+        if (input.flat_flag > 1.5) {
+            let ndv = abs(dot(normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos))),
+                              normalize(input.view_dir)));
+            base = base * (1.0 + 0.45 * pow(1.0 - ndv, 3.0));
         }
         // 障碍/NPC：应用 Blinn-Phong（同地面路径）——消除纯色剪影的纸片感
         let lit = apply_lighting(input, base);
@@ -679,9 +715,14 @@ fn mesh_main(
     // （片元着色器按值决定采样哪张皮肤纹理；RV3D_SKIN_TEX=1 启用，缺省纯色）
     var flat = 0.0;
     if (slot >= EMISSIVE_INSTANCE_BASE && slot < EMISSIVE_INSTANCE_BASE + 64u) {
-        // 自发光实体：fade > 1 作为 emissive 信号（片元直出颜色，跳过光照/贴图混合）
+        // 自发光实体：fade > 1 作为 emissive 信号（片元跳过光照/贴图混合，走体积光晕分支）。
+        // tint.w 编码种类（0 = 火，>= 0.5 = 烟），与顶点着色器路径完全一致。
         flat = 1.0;
-        fade = 2.0;
+        if (inst.tint.w >= 0.5) {
+            fade = 3.5; // 烟
+        } else {
+            fade = 2.0; // 火
+        }
     } else if (slot >= NPC_INSTANCE_BASE) {
         flat = 2.0;
     } else if (slot >= MARKER_INSTANCE_BASE) {

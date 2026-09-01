@@ -1287,7 +1287,6 @@ impl GameApp {
                 // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）；半透明球形
                 let fireball_t = (t * 2.8).min(1.0);
                 let fb_s = r * (0.2 + 1.2 * fireball_t);
-                let fb_alpha = (0.9 * (1.0 - fireball_t) + 0.15).clamp(0.0, 1.0);
                 let mut out = vec![engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.2, cz))
                         * glam::Mat4::from_scale(glam::Vec3::splat(fb_s)),
@@ -1295,53 +1294,79 @@ impl GameApp {
                         1.0,
                         0.85 * (1.0 - fireball_t) + 0.2,
                         0.35 * (1.0 - fireball_t),
-                        fb_alpha,
+                        0.0, // tint.w = 火（build.rs 体积光晕分支选择器）
                     ],
                 }];
                 // ② 贴地冲击波环：扁球体（球体几何压扁）沿地面水平扩散 + 高度衰减，半透明
                 let ring_s = r * (0.4 + 1.6 * t);
                 let ring_h = (1.1 * (1.0 - t)).max(0.15);
-                let ring_alpha = (0.75 * (1.0 - t) + 0.1).clamp(0.0, 1.0);
                 out.push(engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, ring_h * 0.5, cz))
                         * glam::Mat4::from_scale(glam::Vec3::new(ring_s, ring_h, ring_s)),
-                    tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, ring_alpha],
+                    tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, 0.0], // 火
                 });
                 // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），半透明
                 let col_h = 2.2 + 2.6 * t;
-                let col_alpha = (0.8 * (1.0 - t) + 0.1).clamp(0.0, 1.0);
                 out.push(engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.1 + col_h * 0.5, cz))
                         * glam::Mat4::from_scale(glam::Vec3::new(r * 0.5, col_h, r * 0.5)),
-                    tint: [1.0, 0.45 * (1.0 - t), 0.05, col_alpha],
+                    tint: [1.0, 0.45 * (1.0 - t), 0.05, 0.0], // 火
                 });
                 // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟），半透明
                 let smoke_s = r * (0.5 + 1.4 * t);
                 let smoke_h = 2.0 + 3.0 * t;
-                let smoke_alpha = (0.6 * (1.0 - t) + 0.08).clamp(0.0, 1.0);
                 out.push(engine::renderer::WorldMarker {
                     model: glam::Mat4::from_translation(glam::Vec3::new(cx, 0.6 + smoke_h * 0.5, cz))
                         * glam::Mat4::from_scale(glam::Vec3::new(smoke_s, smoke_h, smoke_s)),
-                    tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, smoke_alpha],
+                    tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, 1.0], // 烟
                 });
                 out
                 })
                 .collect();
-            // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块
-            for p in &self.particles {
-                let t = (p.age / p.life).clamp(0.0, 1.0);
-                let size = if p.kind == 0 {
-                    p.size * (1.0 - t * 0.7) // 焰：快速收缩
-                } else {
-                    p.size
-                };
-                let fade = 1.0 - t;
-                emissive_markers.push(engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::from(p.pos))
-                        * glam::Mat4::from_scale(glam::Vec3::splat(size)),
-                    tint: [p.tint[0] * fade, p.tint[1] * fade, p.tint[2] * fade, 1.0],
-                });
-            }
+            // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块。
+            // 自发光槽位只有 64 个（与 build.rs 的 EMISSIVE_INSTANCE_BASE + 64 严格同步）：
+            // 128v128 压力下上百个 NPC 同时开火，按插入顺序截断会让「远处/将熄的焰」占坑、
+            // 「近处的新焰」被丢弃 —— 玩家面前因此悬浮着几团本不该存在的琥珀色圆盘（D8）。
+            // 策略：爆炸特效保底，剩余槽位按相机距离由近及远分配。
+            const MAX_EMISSIVE: usize = 64;
+            let eye = self.camera.position();
+            // 预留：爆炸特效已入列的 + 紧随其后要画的手雷（数量很小），剩下的才给粒子
+            let reserved = emissive_markers.len() + self.game.grenade_positions().len();
+            let mut cand: Vec<(f32, engine::renderer::WorldMarker)> = self
+                .particles
+                .iter()
+                .map(|p| {
+                    let t = (p.age / p.life).clamp(0.0, 1.0);
+                    let size = if p.kind == 0 {
+                        p.size * (1.0 - t * 0.7) // 焰：快速收缩
+                    } else {
+                        p.size
+                    };
+                    let fade = 1.0 - t;
+                    let d = (p.pos[0] - eye.x).powi(2)
+                        + (p.pos[1] - eye.y).powi(2)
+                        + (p.pos[2] - eye.z).powi(2);
+                    (
+                        d,
+                        engine::renderer::WorldMarker {
+                            model: glam::Mat4::from_translation(glam::Vec3::from(p.pos))
+                                * glam::Mat4::from_scale(glam::Vec3::splat(size)),
+                            tint: [
+                        p.tint[0] * fade,
+                        p.tint[1] * fade,
+                        p.tint[2] * fade,
+                        if p.kind == 0 { 0.0 } else { 1.0 }, // 焰=火，壳=固体
+                    ],
+                        },
+                    )
+                })
+                .collect();
+            cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+            emissive_markers.extend(
+                cand.into_iter()
+                    .take(MAX_EMISSIVE.saturating_sub(reserved))
+                    .map(|(_, m)| m),
+            );
             // 手雷可见实体：深橄榄色小方块（飞行/落地均可见，复用 emissive 通道）
             for gp in self.game.grenade_positions() {
                 emissive_markers.push(engine::renderer::WorldMarker {
