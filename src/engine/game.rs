@@ -452,6 +452,27 @@ impl MapObstacle {
 #[derive(Debug, Clone, Default)]
 pub struct LevelMap {
     pub obstacles: Vec<MapObstacle>,
+    /// **纯装饰几何**：只进渲染 marker 与路径追踪，不进刚体表、不进 AI 导航网格、
+    /// 不可摧毁、不是掩体点。
+    ///
+    /// 为什么不复用 `obstacles` 加个 `collide: bool`：`hit_obstacle_index` 返回
+    /// `world.bodies` 的下标，`damage_obstacle` 直接把它当 `map.obstacles` 的下标用
+    /// （两表按下标一一对应、摧毁时同步 remove）。任何让两表错长的过滤都会把伤害
+    /// 结算打到另一栋楼上——而且是静默打错，测试也测不出来。装饰件本来就和
+    /// "障碍"是两种东西，分成两张表比在每个遍历点补 if 更不容易漏。
+    ///
+    /// 真建模必须这么做：一栋楼拆成结构体 + 挑檐 + 窗带 + 壁柱 + 女儿墙 + 屋顶设备
+    /// 就有十几个部件，全部塞进物理会让弹道×障碍与玩家×障碍成本随部件数线性上涨，
+    /// 而且屋顶空调机会在街面留下一圈隐形墙。
+    pub decor: Vec<MapObstacle>,
+}
+
+impl LevelMap {
+    /// 渲染/路径追踪视角：参与绘制的一切几何（障碍 + 装饰）。
+    /// 顺序固定为 obstacles 在前、decor 在后，两条路径共用同一索引基准。
+    pub fn render_geometry(&self) -> impl Iterator<Item = &MapObstacle> {
+        self.obstacles.iter().chain(self.decor.iter())
+    }
 }
 
 /// 任务目标：本关（普通波次）/本轮（压力模式）需歼灭的敌人数。
@@ -738,7 +759,7 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
             }
         }
     }
-    LevelMap { obstacles }
+    LevelMap { obstacles, decor: Vec::new() }
 }
 
 /// 碰撞事件缓冲：监听者写入，Game 每帧 drain 取走
@@ -987,6 +1008,81 @@ struct AiStepCtx<'a> {
     /// 观战模式（玩家无敌）：NPC 无可见敌人时的兜底目标 = 敌方重心（不再锁玩家造成火力浪费）
     spectator: bool,
     fallback_targets: &'a [[f32; 3]],
+    /// 每 NPC 的"目标是否被几何体挡住"。`true` = 挡住。
+    ///
+    /// 这是"隔墙掉血"的正解。此前 `enemy_visible = dist < sight` **只看距离、零视线检测**，
+    /// 所以一堵楼墙完全不影响 AI：NPC 隔着整栋建筑持续对你输出，而你既看不到他、
+    /// 也躲不掉——用户报的"穿墙/透视"里最严重的一条其实是这个逻辑洞，不是几何。
+    /// 空 slice = 无数据（保持旧行为），供单测与未接线路径使用。
+    target_occluded: &'a [bool],
+}
+
+/// step_npc 解析"本 NPC 这一帧的目标位置"的唯一规则。
+/// 遮挡预计算必须与决策走同一条分支，否则会出现"按玩家算遮挡、按 NPC 行动"的错位。
+fn resolve_ai_target(
+    index: usize,
+    stress: bool,
+    spectator: bool,
+    targets: &[Option<(usize, [f32; 3], f32)>],
+    fallback_targets: &[[f32; 3]],
+    player: &glam::Vec3,
+) -> glam::Vec3 {
+    match (stress, targets.get(index).copied().flatten()) {
+        (true, Some((_, tp, _))) => glam::Vec3::new(tp[0], 0.0, tp[2]),
+        (true, None) if spectator => {
+            let f = fallback_targets.get(index).copied().unwrap_or([0.0, 0.0, 0.0]);
+            glam::Vec3::new(f[0], 0.0, f[2])
+        }
+        _ => *player,
+    }
+}
+
+/// 逐 NPC 计算"目标是否被障碍挡住"。
+///
+/// 采样规则与渲染剔除 [`Game::npc_occluded`] 严格一致：躯干中心与头/肩两条线段**全部**
+/// 被挡才算挡住——低掩体后露出上半身的士兵仍然可见，避免"我能看到他却打不到我"这种
+/// 新的不一致。
+///
+/// 成本：每 NPC 2 条线段，先用线段 XY 包围盒粗筛再跑 slab 测试。全城障碍约 1100 件时，
+/// 粗筛把每次查询压到几十个候选盒，远好于对 `world.bodies` 做全量线性扫描。
+fn target_occlusion(
+    npcs: &[Npc],
+    bodies: &[Body],
+    stress: bool,
+    spectator: bool,
+    targets: &[Option<(usize, [f32; 3], f32)>],
+    fallback_targets: &[[f32; 3]],
+    player: &glam::Vec3,
+) -> Vec<bool> {
+    let samples = [NPC_HIT_CENTER_Y, 1.7];
+    npcs.iter().enumerate()
+        .map(|(index, npc)| {
+            let t = resolve_ai_target(index, stress, spectator, targets, fallback_targets, player);
+            let (ax, ay, az) = (npc.position[0], npc.position[1] + 1.4, npc.position[2]);
+            // 线段包围盒粗筛（x/z/y 三轴都裁一遍，把候选盒压到几十个）
+            let (minx, maxx) = (ax.min(t.x), ax.max(t.x));
+            let (minz, maxz) = (az.min(t.z), az.max(t.z));
+            let mut all_blocked = true;
+            for h in samples {
+                let ty = t.y + h;
+                let (tmin, tmax) = (ay.min(ty), ay.max(ty));
+                let blocked = bodies.iter().any(|body| {
+                    let a = body.aabb();
+                    if a.max.x < minx || a.min.x > maxx || a.max.z < minz || a.min.z > maxz
+                        || a.max.y < tmin || a.min.y > tmax
+                    {
+                        return false;
+                    }
+                    Game::segment_hits_aabb(ax, ay, az, t.x, ty, t.z, &a)
+                });
+                if !blocked {
+                    all_blocked = false;
+                    break;
+                }
+            }
+            all_blocked
+        })
+        .collect()
 }
 
 /// 压力模式目标预选：每 NPC 找视野内最近的敌对阵营 NPC（纯读，O(n²)）。
@@ -1445,7 +1541,7 @@ impl Game {
                     shape: Shape::Legacy,
                 });
             }
-            self.map = LevelMap { obstacles };
+            self.map = LevelMap { obstacles, decor: Vec::new() };
         } else {
             // 地图：默认手绘现代城市（不再随机种子生成；RV3D_PROC_MAP=1 回退程序化生成用于 A/B）
             // 生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core / 小核），
@@ -1473,6 +1569,11 @@ impl Game {
         self.world.spheres.clear();
         for ob in &self.map.obstacles {
             // 2026-08-23：地图障碍 = 静态刚体（不沉地/不被撞动）
+            // 注意：这里**不能**按条件跳过元素。`hit_obstacle_index` 返回的是
+            // world.bodies 下标，而 `damage_obstacle` 拿它当 map.obstacles 下标用
+            // （两表按下标严格一一对应并在摧毁时同步 remove）。装饰件走
+            // LevelMap::decor 独立表，不要在这里加 filter —— 那会让伤害结算打到
+            // 错误的障碍上。
             self.world.bodies.push(Body::new_static(
                 Pv::new(ob.x, ob.y, ob.z),
                 Pv::new(ob.half_w, ob.half_h, ob.half_d),
@@ -1555,9 +1656,15 @@ impl Game {
         );
     }
 
-    /// 当前关卡障碍列表（main.rs 每帧转成渲染 marker 用）
+    /// 当前关卡障碍列表（物理/掩体/摧毁结算的唯一真相；main.rs 也用它生成 marker）
     pub fn map_obstacles(&self) -> &[MapObstacle] {
         &self.map.obstacles
+    }
+
+    /// 渲染与路径追踪应绘制的全部几何 = 障碍 + 装饰件（见 [`LevelMap::decor`]）。
+    /// 顺序恒为 obstacles 在前、decor 在后，所以 marker 下标与刚体下标在前 N 个一致。
+    pub fn render_geometry(&self) -> impl Iterator<Item = &MapObstacle> {
+        self.map.render_geometry()
     }
 
     /// 设置面板：进入"等待按键绑定"（Enter 触发，绑定当前选中的键位动作）
@@ -3866,15 +3973,15 @@ impl Game {
     fn step_npc(index: usize, npc: &mut Npc, ctx: &AiStepCtx) {
         // 视野半径：压力模式全场可见（两军立即接火），普通模式保持原值
         let sight = if ctx.stress { STRESS_SIGHT } else { NPC_SIGHT };
-        // 目标位置：压力模式取预选敌对 NPC（快照位置 + 朝向），普通模式恒为玩家
-        let target_pos = match (ctx.stress, ctx.targets.get(index).copied().flatten()) {
-            (true, Some((_, tp, _))) => glam::Vec3::new(tp[0], 0.0, tp[2]),
-            (true, None) if ctx.spectator => {
-                let f = ctx.fallback_targets.get(index).copied().unwrap_or([0.0, 0.0, 0.0]);
-                glam::Vec3::new(f[0], 0.0, f[2])
-            }
-            _ => *ctx.player,
-        };
+        // 目标位置：与遮挡预计算共用 resolve_ai_target，杜绝"按 A 算遮挡、按 B 决策"
+        let target_pos = resolve_ai_target(
+            index,
+            ctx.stress,
+            ctx.spectator,
+            ctx.targets,
+            ctx.fallback_targets,
+            ctx.player,
+        );
         let dx = npc.position[0] - target_pos.x;
         let dz = npc.position[2] - target_pos.z;
         let dist = (dx * dx + dz * dz).sqrt();
@@ -3898,13 +4005,16 @@ impl Game {
         let prev = npc.state_machine.state();
         let took_hit = npc.hp < npc.last_hp - 0.001;
         let under_fire = ctx.under_fire.get(index).copied().unwrap_or(false);
+        // 目标被几何体挡住 = 不可见。缺数据（空 slice）时按"未挡住"处理，保持旧行为。
+        let occluded = ctx.target_occluded.get(index).copied().unwrap_or(false);
+        let can_see_target = dist < sight && !occluded;
         npc.perception = NpcPerception {
-            enemy_visible: dist < sight,
+            enemy_visible: can_see_target,
             // 压力模式攻击距离放宽 x2.5（约 30m）：同速互追刷步机的残局收敛（2026-08-23）
             enemy_in_range: dist < npc.attack_range * if ctx.stress { 2.5 } else { 1.0 },
             start_patrol: prev == NpcState::Idle,
             patrol_finished: false,
-            player_aiming: facing_angle < AIM_ANGLE && dist < sight,
+            player_aiming: facing_angle < AIM_ANGLE && can_see_target,
             player_facing: target_facing,
             took_hit,
             low_hp: npc.hp < npc.max_hp * LOW_HP_RATIO,
@@ -4367,6 +4477,18 @@ impl Game {
         };
         // 掩体利用评估用的当前关卡障碍环带（theme 随关卡轮换）
         let theme = theme_for_level(self.level);
+        // 视线遮挡预计算：必须在 ctx 之前算完（返回 owned Vec），否则会与
+        // step_ai_* 对 self.npcs 的可变借用冲突。resolve_ai_target 在 stress=false 时
+        // 忽略 targets、spectator=false 时忽略 fallback_targets，所以一条调用通吃三种模式。
+        let target_occluded: Vec<bool> = target_occlusion(
+            &self.npcs,
+            &self.world.bodies,
+            self.stress,
+            self.player_invincible,
+            &targets,
+            &fallback_targets,
+            &player,
+        );
         {
             let ctx = AiStepCtx {
                 player: &player,
@@ -4388,6 +4510,7 @@ impl Game {
                 squad_wps: &squad_wps,
                 spectator: self.player_invincible,
                 fallback_targets: &fallback_targets,
+                target_occluded: &target_occluded,
             };
             if self.npcs.len() >= PARALLEL_AI_MIN && self.ai_parallel {
                 // safety: 已分层（Near 在前），双池分片互不相交；ctx 只含共享只读数据
@@ -4821,6 +4944,7 @@ mod tests {
                 squad_wps: &[],
                 spectator: false,
                 fallback_targets: &[],
+                target_occluded: &[],
             };
             let idle_before = npcs[0].position;
             Game::step_ai_parallel(&mut npcs, 0, &ctx); // near_len=0 → 全远组
@@ -5417,6 +5541,46 @@ mod tests {
         assert!(
             game.npc_occluded(0),
             "高墙正后方 NPC 应完全遮挡（双采样均被挡）"
+        );
+    }
+
+    /// AI 视线遮挡预计算：这是"隔墙掉血"的正解回归测试。
+    ///
+    /// 此前 `enemy_visible = dist < sight` 完全不看几何，NPC 能隔着整栋楼持续输出。
+    /// 本测试锁三件事：① 高墙挡住 → occluded；② 无遮挡 → 不 occluded；
+    /// ③ 齐腰掩体只挡躯干采样、头/肩采样通 → **不** occluded（与渲染剔除
+    ///    `npc_occluded` 的双采样规则保持一致，避免出现"我看得见他却打不到我"）。
+    #[test]
+    fn ai_target_occlusion_respects_geometry() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.truncate(1);
+        let player = glam::Vec3::new(-40.0, 0.0, 0.0);
+        game.player_body.pos = Pv::new(-40.0, 0.0, 0.0);
+        game.npcs[0].position = [30.0, 0.0, 0.0];
+
+        let run = |g: &Game| -> bool {
+            target_occlusion(&g.npcs, &g.world.bodies, false, false, &[], &[], &player)[0]
+        };
+
+        // ② 先测无障碍：必须可见（空场地）
+        game.world.bodies.clear();
+        assert!(!run(&game), "无几何遮挡时目标必须可见");
+
+        // ① 3m 高墙横在中间 → 躯干与头部两条采样全被挡 → 遮挡
+        game.world
+            .bodies
+            .push(physics::Body::new_static(Pv::new(0.0, 1.5, 0.0), Pv::new(0.5, 1.5, 0.5)));
+        assert!(run(&game), "3m 高墙挡在 NPC 与目标之间必须判遮挡");
+
+        // ③ 齐腰掩体（顶面 1.1m）：躯干采样被挡，头/肩 1.7m 采样通 → 不判遮挡
+        game.world.bodies.clear();
+        game.world
+            .bodies
+            .push(physics::Body::new_static(Pv::new(0.0, 0.55, 0.0), Pv::new(0.5, 0.55, 0.5)));
+        assert!(
+            !run(&game),
+            "齐腰掩体后露出上半身，按双采样规则必须仍算可见（与 npc_occluded 一致）"
         );
     }
 
@@ -6359,6 +6523,7 @@ mod tests {
                 squad_wps: &[],
                 spectator: false,
                 fallback_targets: &[],
+                target_occluded: &[],
             };
             let ctx_p = AiStepCtx {
                 player: &player,
@@ -6378,6 +6543,7 @@ mod tests {
                 squad_wps: &[],
                 spectator: false,
                 fallback_targets: &[],
+                target_occluded: &[],
             };
             Game::step_ai_serial(&mut npcs_s, &ctx_s);
             Game::step_ai_parallel(&mut npcs_p, near_len, &ctx_p);
@@ -6444,6 +6610,7 @@ mod tests {
             squad_wps: &[],
             spectator: false,
             fallback_targets: &[],
+            target_occluded: &[],
         };
         let mut npcs_a = npcs_a;
         Game::step_ai_serial(&mut npcs_a, &ctx_a);
@@ -6526,6 +6693,7 @@ mod tests {
             squad_wps: &[],
             spectator: false,
             fallback_targets: &[],
+            target_occluded: &[],
         };
         let mut npcs = npcs;
         Game::step_ai_serial(&mut npcs, &ctx);
