@@ -429,30 +429,39 @@ fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
 
 /// 士兵（NPC）皮肤基色：四色迷彩军服。
 /// `u`/`v` 为面内 UV [0,1]，确定性纯函数。
+///
+/// 低频可 mipmap 设计（远距离走样根治）：
+/// - 斑块结构只用低频格点（主斑 3 格 / 副斑 5 格），斑块内部近似平坦、边界 smoothstep
+///   软过渡，因此任意 2x2 / 4x4 盒式降采样后色相配比与明暗层次基本不变；
+/// - 微起伏用 24 格低频 weave（约 21 纹素/格 @512），**取代逐纹素随机**——旧实现 96 格
+///   细噪在 512 纹理上只有 ~5 纹素/格，进入 mip 链后会先于斑块被平均掉，导致各 mip 层
+///   的色相占比漂移，小面积采样（40m 外士兵只有几十像素）时表现为花纹闪烁与"亮斑"；
+/// - 四色拉开的是**色相**差而非仅明度差：乘阵营 tint 后花纹仍具可辨识度，否则远距离
+///   士兵退化成"纯色平板 + 明暗斑块"。
 fn npc_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
-    // 大块斑纹（~3 格）+ 中块（~7 格）叠加，细胞噪声软过渡形成有机迷彩轮廓
     let big = value_noise(u * 3.0, v * 3.0, 1.0, seed.wrapping_add(51)); // [-1,1)
-    let mid = value_noise(u * 7.0, v * 7.0, 1.0, seed.wrapping_add(52)); // [-1,1)
-    let p = 0.5 + 0.5 * (0.62 * big + 0.38 * mid); // [0,1]
+    let mid = value_noise(u * 5.0, v * 5.0, 1.0, seed.wrapping_add(52)); // [-1,1)
+    let p = 0.5 + 0.5 * (0.66 * big + 0.34 * mid); // [0,1]
 
-    let khaki: [f32; 3] = [0.56, 0.48, 0.33];
-    let olive: [f32; 3] = [0.34, 0.44, 0.23];
-    let brown: [f32; 3] = [0.30, 0.20, 0.12];
-    let dark: [f32; 3] = [0.17, 0.16, 0.13];
+    let khaki: [f32; 3] = [0.58, 0.47, 0.26]; // 暖黄棕
+    let olive: [f32; 3] = [0.28, 0.45, 0.17]; // 橄榄绿
+    let brown: [f32; 3] = [0.36, 0.20, 0.10]; // 红棕
+    let dark: [f32; 3] = [0.15, 0.15, 0.12]; // 近黑（明度锚点）
 
     // 分层分域：低→卡其、中→橄榄绿、高→深棕、顶→近黑（smoothstep 软边）
     let mut c = khaki;
-    c = lerp3(c, olive, smoothstep(0.38, 0.50, p));
-    c = lerp3(c, brown, smoothstep(0.62, 0.74, p));
-    c = lerp3(c, dark, smoothstep(0.82, 0.92, p));
+    c = lerp3(c, olive, smoothstep(0.36, 0.50, p));
+    c = lerp3(c, brown, smoothstep(0.60, 0.74, p));
+    c = lerp3(c, dark, smoothstep(0.84, 0.94, p));
 
-    // 细噪（防色带）+ 顶部微暗（头盔/肩部阴影感；立方体各面 v=1 均为顶边）
-    let dither = value_noise(u * 96.0, v * 96.0, 1.0, seed.wrapping_add(53)) * 0.045;
+    // 布纹低频起伏（防色带，但不得引入逐纹素随机）+ 顶部微暗
+    // （头盔/肩部阴影感；立方体各面 v=1 均为顶边）
+    let weave = value_noise(u * 24.0, v * 24.0, 1.0, seed.wrapping_add(53)) * 0.03;
     let top_shade = 1.0 - 0.22 * smoothstep(0.82, 1.0, v);
     [
-        c[0] * top_shade + dither,
-        c[1] * top_shade + dither,
-        c[2] * top_shade + dither,
+        c[0] * top_shade + weave,
+        c[1] * top_shade + weave,
+        c[2] * top_shade + weave,
     ]
 }
 
@@ -684,6 +693,103 @@ mod tests {
         assert!(green as f64 > n * 0.1, "绿系像素占比过低：{green}/{}", n as u32);
         assert!(warm as f64 > n * 0.1, "暖色系像素占比过低：{warm}/{}", n as u32);
         assert!(lum_max - lum_min > 60.0, "迷彩应有显著明暗对比，实际 {}", lum_max - lum_min);
+    }
+
+    /// NPC 皮肤必须可安全 mipmap：斑块为低频结构、内部近似平坦，故任意盒式降采样后
+    /// 仍保留可辨识配色与明暗层次；且不得存在孤立亮/暗纹素（salt-and-pepper 特征）。
+    /// 断言全部基于确定性像素统计，不写盘、不碰 GPU。
+    #[test]
+    fn npc_skin_survives_box_downsampling_without_spikes() {
+        let size = 128usize;
+        let tex = generate_npc_skin_texture(size as u32, 7);
+        let lum_at = |x: usize, y: usize| -> f64 {
+            let i = (y * size + x) * 4;
+            0.2126 * tex[i] as f64 + 0.7152 * tex[i + 1] as f64 + 0.0722 * tex[i + 2] as f64
+        };
+        let classify = |r: f64, g: f64, b: f64| -> (bool, bool) {
+            (g > r + 3.0 && g > b, r > g + 3.0 && r > b)
+        };
+
+        let mut lums = Vec::with_capacity(size * size);
+        let mut green = 0usize;
+        let mut warm = 0usize;
+        for y in 0..size {
+            for x in 0..size {
+                let i = (y * size + x) * 4;
+                let (r, g, b) = (tex[i] as f64, tex[i + 1] as f64, tex[i + 2] as f64);
+                lums.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                let (is_g, is_w) = classify(r, g, b);
+                green += is_g as usize;
+                warm += is_w as usize;
+            }
+        }
+        let n = size * size;
+        let full_min = lums.iter().cloned().fold(f64::INFINITY, f64::min);
+        let full_max = lums.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let full_range = full_max - full_min;
+        assert!(full_range > 60.0, "迷彩明暗范围不足：{full_range:.1}");
+
+        // 1) 无孤立尖峰：与四邻（环形取模）差异都超过 20% 全图对比度的纹素必须为 0
+        let spikes = (0..size).fold(0usize, |acc, y| {
+            acc + (0..size).filter(|&x| {
+                let c = lum_at(x, y);
+                let nb = [
+                    lum_at((x + 1) % size, y),
+                    lum_at((x + size - 1) % size, y),
+                    lum_at(x, (y + 1) % size),
+                    lum_at(x, (y + size - 1) % size),
+                ];
+                let thr = full_range * 0.2;
+                nb.iter().all(|&v| (c - v).abs() > thr)
+            })
+            .count()
+        });
+        assert_eq!(spikes, 0, "存在 {spikes} 个孤立亮/暗纹素（缩小采样会闪烁）");
+
+        // 2) 2x2 与 4x4 盒式降采样后仍保留可辨识配色与明暗层次
+        for f in [2usize, 4usize] {
+            let m = size / f;
+            let (mut dmin, mut dmax) = (f64::INFINITY, f64::NEG_INFINITY);
+            let (mut dgreen, mut dwarm) = (0usize, 0usize);
+            for dy in 0..m {
+                for dx in 0..m {
+                    let mut s = [0.0f64; 3];
+                    for oy in 0..f {
+                        for ox in 0..f {
+                            let i = ((dy * f + oy) * size + dx * f + ox) * 4;
+                            s[0] += tex[i] as f64;
+                            s[1] += tex[i + 1] as f64;
+                            s[2] += tex[i + 2] as f64;
+                        }
+                    }
+                    let cnt = (f * f) as f64;
+                    let (r, g, b) = (s[0] / cnt, s[1] / cnt, s[2] / cnt);
+                    dmin = dmin.min(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                    dmax = dmax.max(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                    let (is_g, is_w) = classify(r, g, b);
+                    dgreen += is_g as usize;
+                    dwarm += is_w as usize;
+                }
+            }
+            let dn = m * m;
+            assert!(
+                dgreen * 10 > dn,
+                "{f}x{f} 降采样后绿系占比过低：{dgreen}/{dn}"
+            );
+            assert!(
+                dwarm * 10 > dn,
+                "{f}x{f} 降采样后暖色系占比过低：{dwarm}/{dn}"
+            );
+            assert!(
+                dmax - dmin > full_range * 0.5,
+                "{f}x{f} 降采样后明暗层次丢失：{:.1} vs 原图 {:.1}",
+                dmax - dmin,
+                full_range
+            );
+        }
+
+        // 3) 降采样不改变色相配比（各色系占比漂移 < 10 个百分点）
+        assert!(green * 100 < n * 90 && warm * 100 < n * 90, "单一色系统治整张纹理");
     }
 
     #[test]
