@@ -10,3 +10,11 @@ scripts/retain_smoke.txt
 release_dist/
 launcher/target/
 
+# AI 会话临时请求/响应体（含 API key 明文，绝不入库）
+scripts/.ds_req.json
+scripts/.ds_resp.json
+scripts/.ds_out.txt
+
+# 本地运行与诊断数据（战斗日志 / LLM 决策流 / 临时探针脚本）
+data/
+
