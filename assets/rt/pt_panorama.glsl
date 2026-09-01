@@ -110,25 +110,34 @@ void main() {
 
     uint bounces = uint(max(pc.a.w, 1.0));
     vec3 sunDir = normalize(pc.d.xyz);
-    vec3 lum = vec3(0.0);
-    vec3 throughput = vec3(1.0);
     uint pxSeed = uint(gid.y) * 2048u + uint(gid.x);
     uint frameSeed = uint(pc.f.x);
 
-    for (uint b = 0u; b < bounces; b++) {
-        if (!traceRay(ro, rd, 500.0)) { lum += throughput * skyColor(rd); break; }
-        vec3 alb = albedoOf(hitPrim / 12u);
-
-        float ndl = max(dot(hitNrm, sunDir), 0.0);
-        if (ndl > 0.0 && !traceRay(hitPos + hitNrm * 0.002, sunDir, 499.0))
-            lum += throughput * alb * pc.e.rgb * ndl * 2.2;
-
-        throughput *= alb;
-        ro = hitPos + hitNrm * 0.002;
-        rd = lambertianBounce(hitNrm, pxSeed, frameSeed * 64u + b);
-        if (max(throughput.r, max(throughput.g, throughput.b)) < 0.01) break;
-        if (b + 1u == bounces && !traceRay(ro, rd, 500.0))
-            lum += throughput * skyColor(rd) * 0.5;
+    // 2026-09-01：每帧多 spp 采样（吃满功耗 + 大幅降噪/减拖影）
+    const uint SPP = 4u;
+    vec3 lum = vec3(0.0);
+    for (uint s = 0u; s < SPP; s++) {
+        // 每个样本独立抖动（像素内偏移 + 每样本种子），避免重复纹理
+        vec3 rs = rd + rgt * (((hash11(pxSeed ^ (frameSeed * 7u) ^ (s * 0x9E3779B1u)) - 0.5) * 2.0) * tan / pc.a.x)
+                      + up * (((hash11(pxSeed ^ (frameSeed * 13u) ^ (s * 0x85EBCA6Du)) - 0.5) * 2.0) * tan / pc.a.y);
+        vec3 rq = ro;
+        vec3 tq = vec3(1.0);
+        vec3 lq = vec3(0.0);
+        uint seed = pxSeed ^ (frameSeed * 0x27D4EB2Fu) ^ (s * 0x165667B1u);
+        for (uint b = 0u; b < bounces; b++) {
+            if (!traceRay(rq, rs, 500.0)) { lq += tq * skyColor(rs); break; }
+            vec3 alb = albedoOf(hitPrim / 12u);
+            float ndl = max(dot(hitNrm, sunDir), 0.0);
+            if (ndl > 0.0 && !traceRay(hitPos + hitNrm * 0.002, sunDir, 499.0))
+                lq += tq * alb * pc.e.rgb * ndl * 2.2;
+            tq *= alb;
+            rq = hitPos + hitNrm * 0.002;
+            rs = lambertianBounce(hitNrm, pxSeed, seed * 64u + b);
+            if (max(tq.r, max(tq.g, tq.b)) < 0.01) break;
+            if (b + 1u == bounces && !traceRay(rq, rs, 500.0))
+                lq += tq * skyColor(rs) * 0.5;
+        }
+        lum += lq;
     }
 
     // 时域累积：线性 HDR 求和，a 通道记已累积样本数；色调映射只作用于运行均值

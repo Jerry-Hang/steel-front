@@ -2059,12 +2059,12 @@ impl ApplicationHandler for GameApp {
             if crate::config::load().pt_enable {
                 // RV3D_PT_SIZE：实时 PT 渲染分辨率（默认 1024；调高可验证 RT 通路真在算，
                 // 也可为光照烘焙取更高分辨率参照帧）
-                let pt_size = std::env::var("RV3D_PT_SIZE")
-                    .ok()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .filter(|v| (128..=2048).contains(v) && v % 8 == 0)
-                    .unwrap_or(1024u32);
-                if let Err(e) = renderer.init_pt_resident(pt_size) {
+                // 原生分辨率：默认=交换链尺寸 (w,h)；RV3D_PT_SIZE 单值覆盖（等比 min 边）
+                let (def_w, def_h) = renderer.frame_size();
+                let pt_w = std::env::var("RV3D_PT_SIZE").ok().and_then(|v| v.parse::<u32>().ok())
+                    .filter(|v| (128..=4096).contains(v) && v % 8 == 0).unwrap_or(def_w.max(64) & !7);
+                let pt_h = def_h.max(64) & !7;
+                if let Err(e) = renderer.init_pt_resident(pt_w, pt_h) {
                     log::info!("PT-RESIDENT init: {e}");
                 }
             }

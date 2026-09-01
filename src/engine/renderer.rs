@@ -866,7 +866,7 @@ pub struct Renderer {
     pt_view_sig: std::cell::Cell<u64>,
     /// 实时 PT 渲染分辨率（init_pt_resident 决定，上屏块必须用同一个值，
     /// 否则 dispatch 与图像尺寸不一致 = 越界写/半屏黑）
-    pub pt_size: u32,
+    pub pt_size: (u32, u32),
     /// 路径追踪实时渲染开关（config.pt_enable；present 前 PT 帧上屏）
     pub pt_live_enabled: bool,
     /// PT 取景参数（每帧 set_pt_params 注入：相机 + 太阳 + 曝光）
@@ -1439,7 +1439,7 @@ impl Renderer {
             pt_spp_target: 256,
             pt_reset: std::cell::Cell::new(true),
             pt_view_sig: std::cell::Cell::new(0),
-            pt_size: 512,
+            pt_size: (64, 64),
             screenshot_request: None,
             screenshot_buffers: Vec::new(),
             screenshot_buffers_memory: Vec::new(),
@@ -4585,10 +4585,15 @@ impl Renderer {
         }
     }
 
+    /// 当前交换链尺寸 (宽, 高)——PT 原生分辨率取它
+    pub fn frame_size(&self) -> (u32, u32) {
+        (self.swapchain_extent.width, self.swapchain_extent.height)
+    }
+
     /// 构建路径追踪加速结构：盒体场景 → BLAS + TLAS（2026-08-29 阶段2）
     /// PT 实时 v2（2026-08-29 常驻化）：首帧构建 AS/管线/图像，后帧只 dispatch+blit
     /// 启动时构建 PT 常驻资源（2026-08-29：与 run_pt_view 同时空——已验证可跑！）
-    pub fn init_pt_resident(&mut self, size: u32) -> Result<(), String> {
+    pub fn init_pt_resident(&mut self, w: u32, h: u32) -> Result<(), String> {
         if self.pt_resident.is_some() {
             return Ok(());
         }
@@ -4625,7 +4630,7 @@ impl Renderer {
         let pipeline = pipelines[0];
         let img_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
-            .extent(vk::Extent3D { width: size, height: size, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
+            .extent(vk::Extent3D { width: w, height: h, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
             .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&img_info, None) }.map_err(|e| format!("PT i: {e}"))?;
@@ -4642,7 +4647,7 @@ impl Renderer {
         // 每帧只累加不丢弃 => 布局转换只在创建时做一次，逐帧 barrier 用 GENERAL->GENERAL。
         let acc_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D).format(vk::Format::R32G32B32A32_SFLOAT)
-            .extent(vk::Extent3D { width: size, height: size, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
+            .extent(vk::Extent3D { width: w, height: h, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
             .usage(vk::ImageUsageFlags::STORAGE)
             .sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
         let acc_image = unsafe { self.device.create_image(&acc_info, None) }.map_err(|e| format!("PT acc: {e}"))?;
@@ -4747,7 +4752,7 @@ impl Renderer {
         self.pt_acc = acc_image;
         self.pt_acc_mem = acc_mem;
         self.pt_acc_view = acc_view;
-        self.pt_size = size;
+        self.pt_size = (w, h);
         // RV3D_PT_SPP 覆盖累积目标（默认 256；调参/快速预览可设小值）
         self.pt_spp_target = std::env::var("RV3D_PT_SPP")
             .ok()
@@ -4757,7 +4762,7 @@ impl Renderer {
         self.pt_frame.set(0);
         self.pt_reset.set(true);
         self.pt_view_sig.set(0);
-        log::info!("PT-RESIDENT: {}x{} spp 目标 {}（时域累积）", size, size, self.pt_spp_target);
+        log::info!("PT-RESIDENT: {}x{} spp 目标 {}（时域累积）", w, h, self.pt_spp_target);
         Ok(())
     }
 
@@ -5305,7 +5310,7 @@ impl Renderer {
                 .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
             for i in 0..spp {
-                let pc = self.pt_params.pack(size, i, i == 0, spp);
+                let pc = self.pt_params.pack(size, size, i, i == 0, spp);
                 self.device.cmd_push_constants(cb, pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, bytemuck_bytes(&pc));
                 self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
                 if i + 1 < spp {
@@ -8110,7 +8115,7 @@ impl Renderer {
         if self.pt_live_enabled && self.pt_resident.is_some() {
             let sw_img = self.swapchain_images[image_index as usize];
             // 与 init_pt_resident 创建的图像同尺寸（硬编码会与新分辨率错配）
-            let size = self.pt_size;
+            let (pw, ph) = self.pt_size;
             unsafe {
                 // 取景/光照变化 => 清空重开累积（不同视角样本混在一起会拖影）
                 let sig = self.pt_params.signature();
@@ -8139,7 +8144,7 @@ impl Renderer {
                     self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_pipeline);
                     self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_layout, 0, &[self.pt_dset], &[]);
                     let pc = self.pt_params.pack(
-                        size,
+                        pw, ph,
                         self.pt_frame.get(),
                         self.pt_reset.get(),
                         self.pt_spp_target,
@@ -8152,7 +8157,7 @@ impl Renderer {
                         0,
                         bytemuck_bytes(&pc),
                     );
-                    self.device.cmd_dispatch(command_buffer, (size + 7) / 8, (size + 7) / 8, 1);
+                    self.device.cmd_dispatch(command_buffer, (pw + 7) / 8, (ph + 7) / 8, 1);
                     self.pt_frame.set(self.pt_frame.get() + 1);
                 }
                 // PT 写完成 -> Transfer 读
@@ -8174,7 +8179,7 @@ impl Renderer {
                 // blit PT -> swapchain
                 let blit = vk::ImageBlit::default()
                     .src_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
-                    .src_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: size as i32, y: size as i32, z: 1 }])
+                    .src_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: pw as i32, y: ph as i32, z: 1 }])
                     .dst_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
                     .dst_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: 2560, y: 1600, z: 1 }]);
                 self.device.cmd_blit_image(command_buffer, self.pt_img, vk::ImageLayout::GENERAL, sw_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST);
