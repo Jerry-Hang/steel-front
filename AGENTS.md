@@ -68,6 +68,25 @@
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-08-31] 交接：PT 路径追踪命中根治（rayQuery committed 参数）+ 着色器改 glslang 编译 + 场景同源
+
+- 日期：2026-08-31
+- 发起方：Qwen Code（接手 Kimi K3 会话，其因余额中断于 PT 取证最后一步）
+- 接收方：后续迭代 AI
+- 交接类型：迭代结束
+- 交接内容：
+  - **根因（两天悬案结案）**：`rayQueryGetIntersectionTypeEXT(q, 0)` 第二参数是 **`committed`**，传 `0/false` 查的是**候选（Candidate）**记录；`rayQueryProceedEXT` 循环结束后候选记录已被清空 → 恒返回 `NoIntersection` → 全图无命中。反汇编对照：旧 `screenshots/ptframe.spv` = `OpRayQueryGetIntersectionTypeKHR %uint %70 %uint_0`（Candidate），新模块 = `%int_1`（Committed）。源证据 `screenshots/pt_frame.comp:22,38`。AS 内存、64B 实例布局、scratch、barrier、绕序、描述符绑定当时逐层证明正确——**方向完全对，只是问错了记录**。
+  - **次因**：旧 `ptframe.spv` 是取证探针版——所有像素射线被硬编码为 `origin (0,1.5,0)` / `direction %63=(0,-1,0)`，逐像素算出的方向 `%91` 被 `OpStore %73` 存下后从未使用。
+  - **⚠ 假信心陷阱（务必留痕）**：`tools/rt-bench` 反汇编核对显示其模块是**逐线程无条件 `OpStore 1`**，全程未查询任何 intersection type —— 故 commit `d0290e3` 所称「hit-readback verification」并不构成命中证据，33.6 G rays/s 只是遍历吞吐。**RT 通路此前从未被证明命中过**；唯一的命中真值是本波 `pt_panorama.glsl`（`committed=true` + `GetIntersectionType==Triangle`）渲染出的带接触阴影的参考帧。以后要声称"RT 已验证"，必须给出命中着色图像证据，不能只给 rays/s。
+  - **根治**：弃手工拼装 SPIR-V（含约 190 个一次性补丁脚本路径），PT 着色器改为 `assets/rt/pt_panorama.glsl` 经 **glslangValidator** 编译为 `assets/rt/pt_panorama.spv`，`spirv-val --target-env vulkan1.3` 严格通过；`build.rs` 从该 .spv 嵌入 `PT_FRAME_SPV`，GLSL 比 SPV 新时发 `cargo:warning`；新增 `scripts/compile_pt.ps1`（编译 + 校验）。
+  - **场景同源**：新增 `Renderer::pt_set_scene_markers(&[WorldMarker])`——PT 盒体直接取光栅化同一批 marker 矩阵（平移=中心、缩放列长/2=半宽、tint=反照率），盒 0 为地面；坐标量化 1m 的 FNV 指纹判定，只有集合真变才重写几何 + 重建 BLAS。`PtAssets` 顶点/索引/材质缓冲一次按 `PT_MAX_BOXES=512` 分配（TLAS 恒单实例：全部盒合进同一 BLAS，实例数与场景规模无关）。着色器接口：binding 0=TLAS / 1=storage image(rgba8) / 2=每盒材质 SSBO；push constants 5×vec4=80B（相机**直接传 `camera.forward()`**，不重推 yaw/pitch 公式）。
+  - **连带修掉两个真 bug**：① `record_pt_build` 旧实现每次调用新建 2MB scratch 且从不释放 = 显存泄漏源（对应 08-30「16GB leak storm」），现 scratch 归 `PtAssets` 所有、BLAS 用前段 / TLAS 用后段，并在两次构建之间加 `ACCELERATION_STRUCTURE_BUILD` barrier（旧实现同地址连用且无执行依赖）；② **BLAS 尺寸必须按容量上限而非当前盒数**——首次实时试跑塞 512 盒进按 4 盒算的 5376B BLAS → 越界写 → device lost。
+  - **法线教训（勿回退）**：盒面法线用「来射方向主轴」近似在浅角度下会把地面法线错判成 ±Z → `ndl<0` → 地面全黑。改用 `ray_tracer::box_triangles/box_indices` 的不变量 `(primitive % 12) / 2` = 面号查表，零额外绑定且精确。
+  - **验收（实测）**：`cargo test --release` **405 全绿**；`cargo build --release` 警告 **46（bin）+ 1（build script）**，较接手时存量 49 条**减少 3 条**（材质常量转活跃），**0 新增**；`RV3D_PT_VIEW=1` → `screenshots/pt_ref.bmp`（256²，非天空像素 61.8%），图含天空渐变 / 地平线 / 三材质盒体 / **盒体接触阴影**；`RV3D_PT_LIVE=1 RV3D_AUTOSTART=1` → `PT-SCENE: 盒 512 个`、无 device lost、无 panic，2560×1600 **fps 181–182**（与 PT 关闭基线 180–190 持平）。
+  - **遗留队列（下一步）**：① **降噪**——当前 1 spp + 哈希余弦采样，颗粒明显；加 spp 累积或蓝噪声/去噪，PT 作烘焙参照必须先收敛；② **删死代码** `renderer.rs` 的 `pt_live_frame` / `pt_live_frame2`（无调用点，且其描述符布局缺 binding 2 / 材质 SSBO，误接必崩；顺带清掉其贡献的 unused 与「unused Result」告警）；③ 512 盒上限截断（实测 marker=547 > 512，需提容量或按视锥裁剪）；④ `PT_SUN_AMBIENT` 仍无消费者，天空/环境项硬编码在 GLSL，接进 `light_uniform` 语义才算完整同源；⑤ 曝光/太阳强度进 config.rs 持久化；⑥ 冒烟脚本 `scripts/run_gameplay_smoke.ps1` **本次未跑**（PT 默认关，主路径仅 `pt_params` 赋值 + 提前返回，且 405 测试 + 实跑 181fps 无 VUID/panic 已覆盖）——下位接 RT 前先补跑一次。
+  - **BAT**：`C:\Users\Jerry-Huang\Desktop\SteelFront.bat` touch 列表从只 `src -Recurse *.rs` 扩到含 `build.rs` / `build_spv_rt.rs`（只改着色器或构建脚本时 cargo 静默不重编 = 「启动旧版本」的另一半原因）。
+- 状态：done
+
 ### [2026-08-31] 交接：D6 方块人根治 + D5 爆炸圆润化 + 三个 mesh 潜伏 bug
 
 - 日期：2026-08-31
@@ -104,6 +123,7 @@
 - 交接类型：迭代结束（巡检第一波）
 - 交接内容：
   - **灰屏插曲（非代码回归）**：RT 会话的 PT 全景（config.rs `pt_enable` 默认 true，且 parser 未读 cfg 的 pt_enable 键）把半成品 PT 输出（仅天空）铺满 swapchain → 全灰。已加 `RV3D_PT_LIVE=0` 强制关通道（main.rs，0=关/1=开/未设=跟随配置）。**巡检/游玩请带 RV3D_PT_LIVE=0，直到 PT 命中修复**。
+    > 【2026-08-31 更正】PT 命中已根治（根因 = rayQuery getter 的 `committed` 参数，见本文件同日「PT 路径追踪命中根治」条目）。上述"直到 PT 命中修复"的规避前提已消失，保留仅作历史记录；当前默认关闭的理由改为「PT 帧整体替换光栅画面 + 1 spp 噪声大」，属调试/烘焙参照视图而非玩法渲染。
   - **验证层门控**：Vulkan SDK 1.4.357 安装后验证层「可用即启用」→ 严格 spirv-val 拒 mesh 着色器（Workgroup Offset 布局）→ 灰屏。已改 `RV3D_VALIDATION=1` 才启用（renderer.rs）。**遗留**：mesh 着色器布局未过严格 spirv-val，RT 调试需开验证层前应先修。
   - **D1 修复（已验收）**：NPC 士兵苍白大理石「冰雕」、阵营色不可辨 → 根因=片元 NPC 分支 mix(tint, 卡其迷彩, 0.65) 稀释色相。修复=去饱和纹素亮度调制 `base = input.color * (0.55 + 0.9*luma)`（build.rs 片元 NPC 分支，双路径共用）。A/B 截图验收：红/蓝饱和可辨且迷彩细节保留。
   - **测试隔离**：tests/rayquery_probe.rs（RT 会话未提交 WIP，引用 naga 导致 test 目标编译失败）已改后缀 .bak 隔离，恢复 405 绿。

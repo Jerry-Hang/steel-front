@@ -16,11 +16,11 @@
 
 ---
 
-## 项目状态（2026-08-28 快照）
+## 项目状态（2026-08-31 快照）
 
 | 维度 | 状态 |
 |---|---|
-| 单元测试 | `cargo test` 全绿（404 个 #[test]，dead-code=0） |
+| 单元测试 | `cargo test --release` 全绿（405 个 #[test]）；存量警告 46 条待专项清理 |
 | 渲染主路径 | **VK_EXT_mesh_shader 网格着色器**（RTX 5060 真机启用），无扩展显卡回退传统顶点管线 |
 | 武器系统 | 35 把现代枪械（V3.0 数据表：初速/下坠/散射/衰减/部位倍率/开火模式/ADS）；**AK-12M 可由外部 GLB 模型替代**（用户自备模型即插即用） |
 | 大战场 | 默认红 128 vs 蓝 127+玩家（256 人）；`RV3D_STRESS_AI=0` 恢复波次模式 |
@@ -29,7 +29,8 @@
 | 外部资产 | **OBJ/glTF GLB 导入管线 + Windows GDI+ 贴图解码**；Blender 无头脚本化处理（修姿态/烘 AO/导出），AK-12 GLB（63283 顶点）已实装 |
 | 音频 | winmm waveOut 原生 FFI 发声（无设备静默降级） |
 | AI | 三三制指挥体系 + 火-机动交替 + 连级战位铺开 + LLM 战时指挥官（llama.cpp 零依赖接入） |
-| 当前阶段 | 玩法迭代期 + 外部资产管线接入期 |
+| 路径追踪 | **已打通并接入真实战场**：`VK_KHR_ray_query` 全景 PT（NEE 太阳阴影射线 + 漫反射弹跳），场景盒体与光栅化 `WorldMarker` 同源、材质同色，可作光照烘焙真值；着色器由 glslang 编译（`assets/rt/pt_panorama.glsl`），严格 `spirv-val` 通过。当前 1 spp 有颗粒噪声，默认关闭（`RV3D_PT_LIVE=0`） |
+| 当前阶段 | 玩法迭代期 + 外部资产管线接入期 + RT 参照期 |
 | 设计文档 | [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt) |
 
 ---
@@ -149,9 +150,26 @@ $env:RV3D_INSPECT = '1'
 
 ## 文档索引
 
-- [交接日志（AI 会话）](./docs/HANDOFF-2026-08-28.md) —— 面向下一个 AI 接手；
+- [交接日志（AI 会话）](./docs/HANDOFF-2026-08-28.md) —— 面向下一个 AI 接手；**最新迭代留痕以 [AGENTS.md](./AGENTS.md) 为准**；
 - [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt)；
 - 渲染/光照/性能验证：`docs/` 目录（experiment-*/perf-*/HANDOFF-*）。
+
+## 路径追踪（RT 参照视图）
+
+```powershell
+# 单次参考帧 -> screenshots/pt_ref.bmp（自带取景，验证命中/材质/接触阴影）
+$env:RV3D_PT_VIEW = '1'; cargo run --release
+
+# 游戏内实时 PT 全景（512² 上屏，会替换光栅画面，属调试/烘焙参照视图）
+$env:RV3D_AUTOSTART = '1'; $env:RV3D_PT_LIVE = '1'; cargo run --release
+
+# RT core 求交吞吐基准
+$env:RV3D_PT_BENCH = '1'; cargo run --release
+```
+
+- `RV3D_PT_LIVE`：`0`=强制关 / `1`=强制开 / 未设=跟随 `config.pt_enable`；
+- 着色器源码 `assets/rt/pt_panorama.glsl`，改动后跑 `powershell -ExecutionPolicy Bypass -File scripts/compile_pt.ps1`（glslang 编译 + 严格 spirv-val），再 `cargo build`；
+- 已知现状：1 spp 有颗粒噪声（降噪为下一步），盒体上限 512（超出静默截断），PT 画面当前整体替换而非叠加。
 
 ---
 
