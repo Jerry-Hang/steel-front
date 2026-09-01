@@ -67,12 +67,16 @@ fn office_tower(o: &mut Vec<MapObstacle>, cx: f32, cz: f32) {
     // 屋顶机房
     ob(o, ObstacleKind::Building, cx, cz, 3.0, 3.0, 1.5, 28.5, Some(METAL_GRAY));
     // 玻璃幕墙横带（塔楼四面上中下三层）
+    // 2026-09-01 D11：旧值中心 ±8.12 / 半厚 0.12 → 外表面距立面 24cm、且半宽 8.1 超出塔楼
+    // 8.0 的角点，从街对面看是一排排悬挑"鳍片"，并投下与主体错位的阴影。
+    // 现内缩到仅 4cm 出挑（与 facade 不共面 → 无 z-fighting），半宽收到 7.4 不再压过角点，
+    // 条带读作立面内的窗带；塔楼轮廓（8.0 半宽）与颜色判据（GLASS_BLUE 的 b>r*1.4）均未动。
     for fy in [7.0f32, 13.0, 19.0] {
         for (dx, dz, hw, hd) in [
-            (0.0f32, 8.12f32, 8.1f32, 0.12f32),
-            (0.0, -8.12, 8.1, 0.12),
-            (8.12, 0.0, 0.12, 8.1),
-            (-8.12, 0.0, 0.12, 8.1),
+            (0.0f32, 7.94f32, 7.4f32, 0.10f32),
+            (0.0, -7.94, 7.4, 0.10),
+            (7.94, 0.0, 0.10, 7.4),
+            (-7.94, 0.0, 0.10, 7.4),
         ] {
             ob(
                 o,
@@ -141,8 +145,9 @@ fn shops(o: &mut Vec<MapObstacle>, cx: f32, cz: f32) {
         let bx = cx + (i as f32 - 1.0) * 14.0;
         let tint = if i == 1 { CONCRETE } else { CONCRETE_LIGHT };
         ob(o, ObstacleKind::Building, bx, cz, 6.2, 4.5, 6.0, 6.0, Some(tint));
-        // 店面玻璃带（临街面）
-        ob(o, ObstacleKind::Block, bx, cz + 4.62, 5.8, 0.12, 0.9, 1.5, Some(GLASS_BLUE));
+        // 店面玻璃带（临街面）：同 D11 处理——旧 4.62/0.12 出挑 24cm 且内表面与立面
+        // （cz+4.5）共面，现内缩为 4cm 出挑、内侧埋进墙体
+        ob(o, ObstacleKind::Block, bx, cz + 4.44, 5.8, 0.10, 0.9, 1.5, Some(GLASS_BLUE));
         // 屋顶水箱
         ob(o, ObstacleKind::Block, bx, cz, 1.0, 1.0, 0.7, 12.5, Some(METAL_GRAY));
     }
