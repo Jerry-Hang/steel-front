@@ -114,7 +114,7 @@ void main() {
     uint frameSeed = uint(pc.f.x);
 
     // 2026-09-01：每帧多 spp 采样（吃满功耗 + 大幅降噪/减拖影）
-    const uint SPP = 4u;
+    const uint SPP = 8u;
     vec3 lum = vec3(0.0);
     for (uint s = 0u; s < SPP; s++) {
         // 每个样本独立抖动（像素内偏移 + 每样本种子），避免重复纹理
@@ -145,7 +145,11 @@ void main() {
     lum *= pc.e.w;
     vec4 acc = imageLoad(AccImg, gid);
     if (pc.f.y > 0.5) { acc = vec4(0.0); }
-    acc = vec4(acc.rgb + lum, acc.a + 1.0);
+    // 2026-09-01 移动去噪：指数滑动窗口（记忆 64 帧，alpha=4spp/64）——移动时旧视角平滑衰减，
+    // 不硬重置 => 无"重影+噪点"二相，静止时收敛干净（约 1 秒等效 256 spp）
+    float a = min(acc.a + 4.0, 64.0);
+    float alpha = 1.0 / a;
+    acc = vec4(mix(acc.rgb, lum, alpha), a);
     imageStore(AccImg, gid, acc);
 
     vec3 outc = acc.rgb / max(acc.a, 1.0);

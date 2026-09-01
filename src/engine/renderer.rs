@@ -867,6 +867,7 @@ pub struct Renderer {
     /// 实时 PT 渲染分辨率（init_pt_resident 决定，上屏块必须用同一个值，
     /// 否则 dispatch 与图像尺寸不一致 = 越界写/半屏黑）
     pub pt_size: (u32, u32),
+
     /// 路径追踪实时渲染开关（config.pt_enable；present 前 PT 帧上屏）
     pub pt_live_enabled: bool,
     /// PT 取景参数（每帧 set_pt_params 注入：相机 + 太阳 + 曝光）
@@ -1440,6 +1441,7 @@ impl Renderer {
             pt_reset: std::cell::Cell::new(true),
             pt_view_sig: std::cell::Cell::new(0),
             pt_size: (64, 64),
+
             screenshot_request: None,
             screenshot_buffers: Vec::new(),
             screenshot_buffers_memory: Vec::new(),
@@ -8119,6 +8121,7 @@ impl Renderer {
             unsafe {
                 // 取景/光照变化 => 清空重开累积（不同视角样本混在一起会拖影）
                 let sig = self.pt_params.signature();
+                // 2026-09-01：sig 已量化 0.5m 位移——只有大于该步幅才重置（指数平均吸收细微移动）
                 if sig != self.pt_view_sig.get() {
                     self.pt_view_sig.set(sig);
                     self.pt_reset.set(true);
