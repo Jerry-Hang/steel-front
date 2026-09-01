@@ -118,8 +118,9 @@ impl PtParams {
         ]
     }
 
-    /// 取景指纹（量化到 ~1cm / 0.001 弧度）：相机或光照变了就必须清累积重开，
-    /// 否则不同视角的样本会被平均成拖影。
+    /// 取景指纹：相机或光照变了才清累积重开，否则不同视角样本会混成拖影。
+    /// 量化粒度必须**粗于站立时的呼吸/后坐抖动**——旧实现统一按 1mm 量化，
+    /// 实机每帧位置都在变 => 每帧复位 => 累积永远停在 1 spp（画面始终满屏噪点）。
     pub fn signature(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         {
@@ -127,23 +128,28 @@ impl PtParams {
                 h ^= v;
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             };
+            // 位置 ~0.5m（盖住 bob/震屏），朝向 ~3°，光照/曝光基本静态
+            for (i, c) in self.cam.to_array().iter().enumerate() {
+                mix(((c * 2.0) as i64 as u64) << (i * 3));
+            }
+            for (i, c) in self.fwd.to_array().iter().enumerate() {
+                mix(((c * 20.0) as i64 as u64) << (i * 3));
+            }
             for c in self
-                .cam
+                .sun_dir
                 .to_array()
                 .iter()
-                .chain(self.fwd.to_array().iter())
-                .chain(self.sun_dir.to_array().iter())
                 .chain(self.sun_color.to_array().iter())
             {
-                mix((*c * 1000.0) as i64 as u64);
+                mix((*c * 100.0) as i64 as u64);
             }
-            mix((self.yaw_signature()) as u64);
+            mix(self.view_signature_bits() as u64);
         }
         h
     }
 
-    fn yaw_signature(&self) -> i64 {
-        ((self.tan_half_fov as f64 * 1e6) as i64) ^ ((self.exposure as f64 * 1e6) as i64)
+    fn view_signature_bits(&self) -> i64 {
+        ((self.tan_half_fov as f64 * 1e3) as i64) ^ ((self.exposure as f64 * 1e2) as i64)
             ^ (self.bounces as i64)
     }
 }
