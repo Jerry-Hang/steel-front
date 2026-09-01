@@ -546,6 +546,70 @@ pub fn generate_default_npc_skin_texture() -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// 诊断用：把城市地面烘焙纹理原样写成 PNG 并打印逐分区平均色。
+    ///
+    /// 存在的理由：连续两轮"改地面配色"实测零效果（同机位截图地面恒为 #C3C0BA），
+    /// 说明我对"玩家脚下那块面由谁上色"的模型是错的。继续改代码就是在猜，
+    /// 所以先把纹理本体 dump 出来看它到底长什么样、分区对不对得上。
+    ///
+    /// 输出 `screenshots/ground_texture_dump.png`（1024² 覆盖 512m，2 纹素/米）。
+    /// 字节值已是 `linear_to_srgb` 编码后的显示值，可直接与截图颜色对比。
+    #[test]
+    fn dump_city_ground_texture_and_report_zones() {
+        let size = GROUND_TEXTURE_SIZE;
+        let px = generate_city_ground_texture(size, &flat_height);
+        assert_eq!(px.len(), (size as usize) * (size as usize) * 4);
+
+        let mut sums = [[0f64; 3]; 6];
+        let mut cnt = [0u32; 6];
+        let scale = 2.0 * WORLD_HALF / size as f32;
+        for py in 0..size {
+            let z = -WORLD_HALF + (py as f32 + 0.5) * scale;
+            for pxx in 0..size {
+                let x = -WORLD_HALF + (pxx as f32 + 0.5) * scale;
+                let zone = crate::engine::city::ground_zone(x, z) as usize;
+                let i = ((py * size + pxx) * 4) as usize;
+                if zone < 6 {
+                    sums[zone][0] += px[i] as f64;
+                    sums[zone][1] += px[i + 1] as f64;
+                    sums[zone][2] += px[i + 2] as f64;
+                    cnt[zone] += 1;
+                }
+            }
+        }
+        let names = ["grass", "sand", "asphalt", "sidewalk", "plaza", "foundation"];
+        println!("GROUND TEX DUMP {}x{} ({} m/texel)", size, size, 1.0 / 2.0);
+        for (zi, n) in names.iter().enumerate() {
+            if cnt[zi] == 0 {
+                println!("  zone {} {:<11} UNUSED", zi, n);
+                continue;
+            }
+            let c = cnt[zi] as f64;
+            println!(
+                "  zone {} {:<11} n={:<8} mean=#{:02X}{:02X}{:02X}",
+                zi,
+                n,
+                cnt[zi],
+                (sums[zi][0] / c).round() as u32,
+                (sums[zi][1] / c).round() as u32,
+                (sums[zi][2] / c).round() as u32,
+            );
+        }
+        // 出生点附近到底是什么分区
+        for (x, z) in [(0.0f32, 0.0f32), (0.0, -20.0), (30.0, 30.0), (-27.5, -27.5), (0.0, 100.0)] {
+            println!("  ground_zone({:>7.1},{:>7.1}) = {}", x, z, crate::engine::city::ground_zone(x, z));
+        }
+
+        let out = std::path::Path::new("screenshots/ground_texture_dump.png");
+        if let Some(dir) = out.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let img = image::RgbaImage::from_raw(size, size, px.clone())
+            .expect("rgba buffer size mismatch");
+        img.save(out).expect("write ground_texture_dump.png");
+        println!("  wrote {}", out.display());
+    }
+
     /// 全平地形（用于验证平坦区 AO=1、天光恒定）
     fn flat_height(_x: f32, _z: f32) -> f32 {
         0.0
