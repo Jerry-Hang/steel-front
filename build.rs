@@ -29,7 +29,7 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 4096u; // marker 区 = MAX_MARKER_INSTANCES(4096)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市——旧 5×5 街区只有 43 个盒子，因为每栋楼只能占 1 个实例；改 4 处常量见 AGENTS.md）
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 8192u; // marker 区 = MAX_MARKER_INSTANCES(8192)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市；实测 CPU 剔除 4034 个 marker 只花 20µs，所以容量不是瓶颈，再翻一档到 8192。改容量必须同步改本行两处副本 + renderer.rs + 枪槽字面量，见 gun_slot_layout_is_pinned）
 // NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
 const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
@@ -89,11 +89,11 @@ fn vs_main(
     } else {
         output.flat_flag = 0.0;
     }
-    // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+4096+3072*3+64 = 78913）：
+    // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+8192+3072*3+64 = 83009）：
     // flat=3 = baked 顶点光照直出路径（2026-08-22：marker 改走实时光照后，枪模保持烘焙）。
     // ⚠ 这个字面量随 MAX_MARKER_INSTANCES 变化，改容量必须同步改这里两处 + renderer.rs
     //   的 gun_slot_layout_is_pinned 测试会兜住漏改。
-    if (instance_index == 78913u) {
+    if (instance_index == 83009u) {
         output.flat_flag = 3.0;
         output.fade = 1.0;
     }
@@ -219,10 +219,15 @@ fn vnoise2(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d2, u.x), u.y);
 }
 
-// 沿主平面的双频风化斑驳，幅度 ±7%，40m 起衰减、150m 归零。
-// 必须随距离收敛：世界坐标高频信号没有 MIP 可平均，远距一个像素盖住多个噪声单元，
-// 会退化成 D12 已经处理过的那种逐像素盐椒闪点（同一条教训，别再犯一次）。
-fn weather_stain(world_pos: vec3<f32>, nrm: vec3<f32>, d: f32) -> f32 {
+// 沿主平面的双频风化斑驳，幅度 ±7%。
+//
+// **收敛量必须用屏幕足迹 fwidth(world_pos)（米/像素），不能用视距。**
+// 第一版我按视距 40..150m 衰减，实机截图里地面和墙面上全是白点麻点——掠射角下
+// 同一个 40m 距离对应的像素可以覆盖 0.05m 也可以覆盖 3m，用距离当闸门必然放行
+// 亚像素细节，混叠成 salt-and-pepper。这正是本项目 D12 已经记过的坑，我自己又踩了一遍。
+// 细频在一个像素盖过 0.22m 时退场，粗频到 1.0m 才退场，两者都走光时返回 1.0（纯平涂，
+// 但至少不闪）。除以权重和是为了只剩一个倍频时幅度不缩水。
+fn weather_stain(world_pos: vec3<f32>, nrm: vec3<f32>) -> f32 {
     let an = abs(nrm);
     var p = world_pos.xz;
     if (an.x > an.y && an.x > an.z) {
@@ -230,10 +235,18 @@ fn weather_stain(world_pos: vec3<f32>, nrm: vec3<f32>, d: f32) -> f32 {
     } else if (an.z > an.x && an.z > an.y) {
         p = world_pos.xy;
     }
-    let fine = vnoise2(p * 1.7);
-    let coarse = vnoise2(p * 0.31);
-    let k = 1.0 - smoothstep(40.0, 150.0, d);
-    return 1.0 + (fine * 0.5 + coarse * 0.5 - 0.5) * 0.14 * k;
+    let px = max(
+        max(abs(fwidth(world_pos.x)), abs(fwidth(world_pos.y))),
+        max(abs(fwidth(world_pos.y)), abs(fwidth(world_pos.z))),
+    );
+    let fine_k = 1.0 - smoothstep(0.05, 0.22, px);
+    let coarse_k = 1.0 - smoothstep(0.25, 1.0, px);
+    let w = fine_k + coarse_k;
+    if (w <= 0.001) {
+        return 1.0;
+    }
+    let n = (vnoise2(p * 1.7) * fine_k + vnoise2(p * 0.31) * coarse_k) / w;
+    return 1.0 + (n - 0.5) * 0.14;
 }
 
 /// Blinn-Phong 漫反射：max(dot(n, l), 0)
@@ -346,7 +359,7 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     // 同一个 1.0（水平屋顶与 30° 斜面完全同色），大面朝向梯度被抹平成一片"塑料"。
     // 改指数压缩：单调、永不截顶，越亮压缩越狠但顺序不变，朝向差异得以保留。
     let tone = vec3<f32>(1.0) - exp(-radiance * 1.55);
-    return color * tone * weather_stain(input.world_pos, normal, length(input.view_dir));
+    return color * tone * weather_stain(input.world_pos, normal);
 }
 
 @fragment
@@ -498,11 +511,11 @@ struct Instance {
 
 // 槽位约定（必须与 renderer.rs 常量同步）：
 // TERRAIN_INSTANCE_INDEX=65536（地形 identity，mesh 路径不绘制该槽）、
-// MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65537+4096=69633、
-// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+9216=78849（NPC 三几何区：盒/圆柱/球，各 3072）
+// MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65537+8192=73729、
+// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+9216=82945（NPC 三几何区：盒/圆柱/球，各 3072）
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 4096u; // marker 区 = MAX_MARKER_INSTANCES(4096)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市——旧 5×5 街区只有 43 个盒子，因为每栋楼只能占 1 个实例；改 4 处常量见 AGENTS.md）
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 8192u; // marker 区 = MAX_MARKER_INSTANCES(8192)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市；实测 CPU 剔除 4034 个 marker 只花 20µs，所以容量不是瓶颈，再翻一档到 8192。改容量必须同步改本行两处副本 + renderer.rs + 枪槽字面量，见 gun_slot_layout_is_pinned）
 // NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
 const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
@@ -533,7 +546,7 @@ struct MeshOutput {
 }
 var<workgroup> mesh_out: MeshOutput;
 
-// 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=69633 / 自发光=78849 / 枪=78913
+// 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=73729 / 自发光=82945 / 枪=83009
 struct MeshPush {
     base_slot: u32,
     // 填充到 16 字节（与 renderer.rs push constant range size=16 精确一致）
@@ -830,10 +843,10 @@ fn mesh_main(
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
     }
-    // 枪模槽位 = GUN_INSTANCE_INDEX（78913；旧式 NPC_INSTANCE_BASE+1024-16 是 1024 时代
+    // 枪模槽位 = GUN_INSTANCE_INDEX（83009；旧式 NPC_INSTANCE_BASE+1024-16 是 1024 时代
     // 残留，范围 67569..75777 把 NPC 圆柱/球体段全部误判为枪 → 四肢/头被 z=0 深度覆盖，
     // 「鬼魂/穿模」观感的另一来源；mesh 路径不画枪模，此判定仅保护传统 draw 的 GUN 槽语义）。
-    let is_gun = slot == 78913u;
+    let is_gun = slot == 83009u;
 
     if (is_ground) {
         if (lid < 4u) {

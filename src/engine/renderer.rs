@@ -435,7 +435,7 @@ fn terrain_coarse_height(x: f32, z: f32, coarse: &[f32], coarse_cells: usize) ->
 const GRID_SIZE: u32 = 256;
 const INSTANCE_COUNT: u32 = GRID_SIZE * GRID_SIZE;
 /// 世界障碍 marker 上限（程序化地图每关障碍盒数远小于此；同时决定实例 buffer 的额外容量）
-const MAX_MARKER_INSTANCES: u32 = 4096;
+const MAX_MARKER_INSTANCES: u32 = 8192;
 /// marker 在实例 buffer 中的起始 slot：跳过 0..=INSTANCE_COUNT。
 ///
 /// slot 65536 是地形 identity（shader 硬编码 TERRAIN_INSTANCE_INDEX=65536 读取，
@@ -9306,13 +9306,13 @@ mod instance_slot_layout_tests {
     #[test]
     fn gun_slot_layout_is_pinned() {
         assert_eq!(MARKER_SLOT_BASE, 65537, "marker 区起点 = 地形 identity 之后一槽");
-        assert_eq!(NPC_SLOT_BASE, 65537 + 4096);
-        assert_eq!(NPC_CYL_SLOT_BASE, 69633 + 3072);
-        assert_eq!(NPC_SPH_SLOT_BASE, 69633 + 6144);
-        assert_eq!(EMISSIVE_SLOT_BASE, 69633 + 9216);
+        assert_eq!(NPC_SLOT_BASE, 65537 + 8192);
+        assert_eq!(NPC_CYL_SLOT_BASE, 73729 + 3072);
+        assert_eq!(NPC_SPH_SLOT_BASE, 73729 + 6144);
+        assert_eq!(EMISSIVE_SLOT_BASE, 73729 + 9216);
         assert_eq!(
-            GUN_INSTANCE_INDEX, 78913,
-            "枪槽变了：必须同步改 build.rs 里两处 `== 78913u` 字面量"
+            GUN_INSTANCE_INDEX, 83009,
+            "枪槽变了：必须同步改 build.rs 里两处 `== 83009u` 字面量"
         );
         // 枪槽必须紧贴自发光区之后、且落在自发光区间之外，否则会被当成自发光刷白。
         assert_eq!(GUN_INSTANCE_INDEX, EMISSIVE_SLOT_BASE + MAX_EMISSIVE_INSTANCES);
