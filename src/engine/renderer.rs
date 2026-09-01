@@ -858,6 +858,9 @@ pub struct Renderer {
     pt_spp_target: u32,
     pt_reset: std::cell::Cell<bool>,
     pt_view_sig: std::cell::Cell<u64>,
+    /// 实时 PT 渲染分辨率（init_pt_resident 决定，上屏块必须用同一个值，
+    /// 否则 dispatch 与图像尺寸不一致 = 越界写/半屏黑）
+    pub pt_size: u32,
     /// 路径追踪实时渲染开关（config.pt_enable；present 前 PT 帧上屏）
     pub pt_live_enabled: bool,
     /// PT 取景参数（每帧 set_pt_params 注入：相机 + 太阳 + 曝光）
@@ -1430,6 +1433,7 @@ impl Renderer {
             pt_spp_target: 256,
             pt_reset: std::cell::Cell::new(true),
             pt_view_sig: std::cell::Cell::new(0),
+            pt_size: 512,
             screenshot_request: None,
             screenshot_buffers: Vec::new(),
             screenshot_buffers_memory: Vec::new(),
@@ -4737,6 +4741,7 @@ impl Renderer {
         self.pt_acc = acc_image;
         self.pt_acc_mem = acc_mem;
         self.pt_acc_view = acc_view;
+        self.pt_size = size;
         // RV3D_PT_SPP 覆盖累积目标（默认 256；调参/快速预览可设小值）
         self.pt_spp_target = std::env::var("RV3D_PT_SPP")
             .ok()
@@ -8415,7 +8420,8 @@ impl Renderer {
         // ===== 2026-08-29 路径追踪全景：全部记录进主命令缓冲（零第二提交/围栏冲突；常驻零分配）=====
         if self.pt_live_enabled && self.pt_resident.is_some() {
             let sw_img = self.swapchain_images[image_index as usize];
-            let size = 512u32;
+            // 与 init_pt_resident 创建的图像同尺寸（硬编码会与新分辨率错配）
+            let size = self.pt_size;
             unsafe {
                 // 取景/光照变化 => 清空重开累积（不同视角样本混在一起会拖影）
                 let sig = self.pt_params.signature();
