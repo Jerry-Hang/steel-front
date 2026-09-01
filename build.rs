@@ -29,7 +29,7 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
 // NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u; // marker 区 = MAX_MARKER_INSTANCES(1024)，与 renderer.rs 对齐（2026-08-24 C2 修正：曾误写 3072 导致前 2048 个 NPC 盒体被当 marker）
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 4096u; // marker 区 = MAX_MARKER_INSTANCES(4096)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市——旧 5×5 街区只有 43 个盒子，因为每栋楼只能占 1 个实例；改 4 处常量见 AGENTS.md）
 // NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
 const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
@@ -72,8 +72,10 @@ fn vs_main(
     // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（刚体变换）
     let t = camera.view[3].xyz;
     let cam_pos = -(camera.view[0].xyz * t.x + camera.view[1].xyz * t.y + camera.view[2].xyz * t.z);
-    // 片元光照使用：表面 → 相机方向
-    output.view_dir = normalize(cam_pos - world_pos.xyz);
+    // 片元光照使用：表面 → 相机方向。**故意不归一化**：cam 为常量、world_pos 为世界线性量，
+    // 透视校正插值对线性量精确，片元 length() 即真实视距，省掉一个插值属性（雾需要它）。
+    // 所有消费端本来就各自 normalize()，语义不变（mesh 路径 write_vertex 同步改）。
+    output.view_dir = cam_pos - world_pos.xyz;
     output.color = color * inst.tint.rgb;
     output.uv = uv;
     // 材质编码（片元着色器按值分路径）：
@@ -87,9 +89,11 @@ fn vs_main(
     } else {
         output.flat_flag = 0.0;
     }
-    // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+64+3072+64）：
-    // flat=3 = baked 顶点光照直出路径（2026-08-22：marker 改走实时光照后，枪模保持烘焙）
-    if (instance_index == 75841u) {
+    // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+4096+3072*3+64 = 78913）：
+    // flat=3 = baked 顶点光照直出路径（2026-08-22：marker 改走实时光照后，枪模保持烘焙）。
+    // ⚠ 这个字面量随 MAX_MARKER_INSTANCES 变化，改容量必须同步改这里两处 + renderer.rs
+    //   的 gun_slot_layout_is_pinned 测试会兜住漏改。
+    if (instance_index == 78913u) {
         output.flat_flag = 3.0;
         output.fade = 1.0;
     }
@@ -176,6 +180,61 @@ struct LightUniform {
     shadow: ShadowInfo,
 }
 @group(0) @binding(4) var<uniform> light_data: LightUniform;
+
+// ---- 大气 / 色调 / 表面风化（2026-09-01 建模重构第 1 批）----
+// 视距直接由未归一化的 view_dir 还原（见 vs_main / write_vertex 注释）。
+fn view_distance(input: VertexOutput) -> f32 {
+    return length(input.view_dir);
+}
+
+// 地平线雾色必须与 swapchain clear color 逐分量相同（renderer.rs 的
+// record_command_buffer clear_values[0]，当前 [0.24, 0.36, 0.60]），否则远处几何
+// 与天空之间出现一条硬边。改其中一处必须同步改另一处。
+const FOG_TINT: vec3<f32> = vec3<f32>(0.24, 0.36, 0.60);
+
+// 雾：70m 起、630m 满，上限 0.92 而非 1.0 —— 完全抹平会让最远处的楼群整体消失，
+// 保留 8% 反差不只是好看，也是让玩家仍能读出天际线轮廓。
+fn fog_amount(d: f32) -> f32 {
+    let t = clamp((d - 70.0) / 560.0, 0.0, 1.0);
+    return t * t * 0.92;
+}
+
+// 世界坐标格点哈希 → 值噪声。频率锚定在"米"上，与物体尺寸、与逐面 0..1 UV 都无关，
+// 所以 24m 大立面和 0.3m 木箱得到相同的纹素密度。旧的逐面 0..1 UV 是"纸片感"的
+// 主要来源之一：同一张皮肤图被拉伸到 80 倍尺度差的不同面上。
+fn hash12(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(127.1, 311.7));
+    q = q + dot(q, q.yx + 33.33);
+    return fract((q.x + q.y) * q.x);
+}
+
+fn vnoise2(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash12(i);
+    let b = hash12(i + vec2<f32>(1.0, 0.0));
+    let c = hash12(i + vec2<f32>(0.0, 1.0));
+    let d2 = hash12(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d2, u.x), u.y);
+}
+
+// 沿主平面的双频风化斑驳，幅度 ±7%，40m 起衰减、150m 归零。
+// 必须随距离收敛：世界坐标高频信号没有 MIP 可平均，远距一个像素盖住多个噪声单元，
+// 会退化成 D12 已经处理过的那种逐像素盐椒闪点（同一条教训，别再犯一次）。
+fn weather_stain(world_pos: vec3<f32>, nrm: vec3<f32>, d: f32) -> f32 {
+    let an = abs(nrm);
+    var p = world_pos.xz;
+    if (an.x > an.y && an.x > an.z) {
+        p = world_pos.zy;
+    } else if (an.z > an.x && an.z > an.y) {
+        p = world_pos.xy;
+    }
+    let fine = vnoise2(p * 1.7);
+    let coarse = vnoise2(p * 0.31);
+    let k = 1.0 - smoothstep(40.0, 150.0, d);
+    return 1.0 + (fine * 0.5 + coarse * 0.5 - 0.5) * 0.14 * k;
+}
 
 /// Blinn-Phong 漫反射：max(dot(n, l), 0)
 fn bp_diffuse(normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
@@ -273,12 +332,21 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
         }
         return vec3<f32>(frag_depth, d_avg, 0.0);
     }
-    var radiance = light_data.ambient.rgb * light_data.ambient.w;
+    // 半球环境光：上方取天光（冷、满量），下方取地面反弹（暖、约 0.4 倍）。
+    // 原来是单一常数环境项 → 檐下、凹角、物体底面与开阔面一样亮，所有东西像贴
+    // 在背景上、没有"坐"在地上。分半球后接触面自然压暗，体积感立刻出来。
+    let up = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    var radiance = light_data.ambient.rgb * light_data.ambient.w
+        * mix(vec3<f32>(0.55, 0.47, 0.38), vec3<f32>(1.0, 1.02, 1.10), up);
     radiance = radiance + evaluate_directional(light_data.directional, normal, view_dir, shininess) * (1.0 - shadow_factor);
     for (var i = 0u; i < 4u; i = i + 1u) {
         radiance = radiance + evaluate_point(light_data.points[i], input.world_pos, normal, view_dir, shininess);
     }
-    return color * min(radiance, vec3<f32>(1.0));
+    // 原实现 min(radiance, 1) 硬截顶：太阳强度 1.5 时所有 NdotL > 0.5 的面全部饱和成
+    // 同一个 1.0（水平屋顶与 30° 斜面完全同色），大面朝向梯度被抹平成一片"塑料"。
+    // 改指数压缩：单调、永不截顶，越亮压缩越狠但顺序不变，朝向差异得以保留。
+    let tone = vec3<f32>(1.0) - exp(-radiance * 1.55);
+    return color * tone * weather_stain(input.world_pos, normal, length(input.view_dir));
 }
 
 @fragment
@@ -384,7 +452,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         // 障碍/NPC：应用 Blinn-Phong（同地面路径）——消除纯色剪影的纸片感
         let lit = apply_lighting(input, base);
-        return vec4<f32>(lit * input.fade, 1.0);
+        let fg = fog_amount(view_distance(input));
+        return vec4<f32>(mix(lit, FOG_TINT, fg) * input.fade, 1.0);
     }
     // 世界空间 UV：地面/地形用 world_pos.xz 映射到全图 [0,1]（覆盖 2*256 米），
     // 与 procedural.rs 烘焙纹理严格对齐（marker/NPC/自发光已走 flat_flag 纯色路径，不采样）。
@@ -396,7 +465,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(mixed * input.fade, 1.0);
     }
     let lit = apply_lighting(input, mixed);
-    return vec4<f32>(lit * input.fade, 1.0);
+    let fg2 = fog_amount(view_distance(input));
+    return vec4<f32>(mix(lit, FOG_TINT, fg2) * input.fade, 1.0);
 }
 "#;
 
@@ -428,11 +498,11 @@ struct Instance {
 
 // 槽位约定（必须与 renderer.rs 常量同步）：
 // TERRAIN_INSTANCE_INDEX=65536（地形 identity，mesh 路径不绘制该槽）、
-// MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65537+1024=66561、
-// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+9216=75777（NPC 三几何区：盒/圆柱/球，各 3072）
+// MARKER_INSTANCE_BASE=65537、NPC_INSTANCE_BASE=65537+4096=69633、
+// EMISSIVE_INSTANCE_BASE=NPC_INSTANCE_BASE+9216=78849（NPC 三几何区：盒/圆柱/球，各 3072）
 const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
-const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 1024u; // marker 区 = MAX_MARKER_INSTANCES(1024)，与 renderer.rs 对齐（2026-08-24 C2 修正：曾误写 3072 导致前 2048 个 NPC 盒体被当 marker）
+const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 4096u; // marker 区 = MAX_MARKER_INSTANCES(4096)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市——旧 5×5 街区只有 43 个盒子，因为每栋楼只能占 1 个实例；改 4 处常量见 AGENTS.md）
 // NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
 const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
@@ -463,7 +533,7 @@ struct MeshOutput {
 }
 var<workgroup> mesh_out: MeshOutput;
 
-// 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=66561 / 自发光=75777 / 枪=75841
+// 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=69633 / 自发光=78849 / 枪=78913
 struct MeshPush {
     base_slot: u32,
     // 填充到 16 字节（与 renderer.rs push constant range size=16 精确一致）
@@ -697,7 +767,8 @@ fn write_vertex(
     v.fade = fade;
     v.world_pos = wp.xyz;
     // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（与顶点着色器同源）
-    v.view_dir = normalize(cam - wp.xyz);
+    // 与 vs_main 同步：不归一化，片元用 length() 取真实视距驱动雾。
+    v.view_dir = cam - wp.xyz;
     v.flat_flag = flat;
     mesh_out.vertices[lid] = v;
 }
@@ -759,10 +830,10 @@ fn mesh_main(
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
     }
-    // 枪模槽位 = GUN_INSTANCE_INDEX（75841；旧式 NPC_INSTANCE_BASE+1024-16 是 1024 时代
+    // 枪模槽位 = GUN_INSTANCE_INDEX（78913；旧式 NPC_INSTANCE_BASE+1024-16 是 1024 时代
     // 残留，范围 67569..75777 把 NPC 圆柱/球体段全部误判为枪 → 四肢/头被 z=0 深度覆盖，
     // 「鬼魂/穿模」观感的另一来源；mesh 路径不画枪模，此判定仅保护传统 draw 的 GUN 槽语义）。
-    let is_gun = slot == 75841u;
+    let is_gun = slot == 78913u;
 
     if (is_ground) {
         if (lid < 4u) {
@@ -786,8 +857,20 @@ fn mesh_main(
     let is_npc_sph = slot >= NPC_SPH_BASE && slot < EMISSIVE_INSTANCE_BASE;
     // 树冠（绿色 marker）→ 二十面体；自发光（爆炸光球）→ SPH 细分球（D5）
     let is_glow = slot >= EMISSIVE_INSTANCE_BASE && slot < EMISSIVE_INSTANCE_BASE + 64u;
-    let is_tree = is_foliage(inst.tint);
-    if (is_npc_cyl) {
+    // ---- 形状标签分派（2026-09-01 建模重构；标签语义见 src/engine/geom.rs）----
+    // 此前 marker 的形状是从 tint 颜色**猜**的（is_foliage：绿色→二十面体，其余→立方体），
+    // 等于"想要圆的就不能有颜色"，所以整座 5×5 街区只能画 43 个盒子。现在形状是数据：
+    // 写在 tint.w（marker 带此前恒为 1.0，且片元只用 tint.rgb，是现成的空闲位）。
+    // 只有 marker 带读标签——NPC/自发光带的形状与 flat_flag 材质模式都由槽位决定。
+    let shape_tag = inst.tint.w;
+    let m_cyl = is_marker && shape_tag > 1.5 && shape_tag < 2.5;
+    let m_ico = is_marker && shape_tag > 2.5 && shape_tag < 3.5;
+    let m_sph = is_marker && shape_tag > 3.5 && shape_tag < 4.5;
+    // 过渡兜底：只有"未打标签"（Shape::Legacy = 1.0）的绿色 marker 才沿用旧的颜色嗅探，
+    // 这样 main.rs 里手写 tint=[r,g,b,1.0] 的掩体/植被画面逐位不变；显式 Shape::Box(0.0)
+    // 不受影响。等所有构造点都显式打标后可删掉这一行。
+    let is_tree = is_foliage(inst.tint) && shape_tag > 0.5 && shape_tag < 1.5;
+    if (is_npc_cyl || m_cyl) {
         // 四肢：程序化单位圆柱（r=1、y∈[-0.5,0.5]、Y 轴、24 段含盖；
         // 与 CPU create_cylinder_geometry 同单位空间，实例矩阵按此构建）。
         // 顶点布局：底圈 lid 0..23（y=-0.5）、顶圈 lid 24..47（y=+0.5）、顶盖中心 48、底盖中心 49。
@@ -819,7 +902,7 @@ fn mesh_main(
             mesh_out.vertex_count = 50u;
             mesh_out.primitive_count = 96u;
         }
-    } else if (is_npc_sph) {
+    } else if (is_npc_sph || m_ico) {
         // 头部：二十面体归一化到半径 1（与 CPU 球体同单位空间）
         if (lid < 12u) {
             write_vertex(lid, normalize(ICO_POS[lid]), vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
@@ -831,7 +914,7 @@ fn mesh_main(
             mesh_out.vertex_count = 12u;
             mesh_out.primitive_count = 20u;
         }
-    } else if (is_glow) {
+    } else if (is_glow || m_sph) {
         // D5：自发光爆炸用 SPH 一级细分二十面体（42v/80t）保圆润，消除 ICO 大三角面尖刺观感
         if (lid < 42u) {
             write_vertex(lid, SPH_POS[lid], vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
