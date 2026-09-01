@@ -77,6 +77,12 @@ pub fn rh(x: f32, y: f32, z: f32) -> Mat4 {
 impl GunMesh {
     /// 应用 4x4 变换（第一人称视空间锚定用）：位置/法线随矩阵变换，烘焙颜色保留。
     /// 返回 (顶点, 索引)，可直接上传渲染。
+    ///
+    /// 2026-09-01 起第一人称不再用它：main.rs 改为返回局部坐标 + 由实例 model 矩阵
+    /// 施加一次变换（旧写法把同一矩阵既烘进顶点又当实例矩阵，等于 M·M·p，含
+    /// view_inv 的矩阵平方后不被抵消 → 枪整支飞离画面）。保留给第三人称/掉落枪械
+    /// 等"把网格摆进世界"的用法。
+    #[allow(dead_code)] // 当前无调用方：为上面的世界摆放用途预留
     pub fn transformed(&self, m: Mat4) -> (Vec<GVertex>, Vec<u32>) {
         let n = glam::Mat3::from_mat4(m);
         let verts = self

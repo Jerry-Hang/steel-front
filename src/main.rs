@@ -72,6 +72,252 @@ fn env_f32(name: &str) -> Option<f32> {
 const FRAME_BUDGET: Duration =
     Duration::from_nanos(if MAX_FPS > 0 { 1_000_000_000 / MAX_FPS } else { 0 });
 
+// ============================================================
+// 第一人称枪摆动（viewmodel sway）参数 —— 2026-09-01 平滑化重写
+// ============================================================
+/// 步态相位推进速率（弧度 / 米水平行程）。取值是从"视觉频率"反推的，不是真实步幅：
+/// 本作玩家水平速度只有两档——6.0 m/s（game.rs:68 PLAYER_SPEED）与开镜
+/// 3.9 m/s（game.rs move_first_person 的 ads_factor 0.65）。1.047 rad/m × 6.0 m/s
+/// = 6.28 rad/s = **侧向 1.0 Hz / 上下 2.0 Hz**，这是"人在跑"的观感上限。
+/// 若按真实步幅（1.2 m 一周期）会得到 5 Hz 上下 + 2.5 Hz 左右的高频抖，
+/// 正是玩家报的"高频小幅度摆动"。
+/// 旧实现是 `sin(anim_clock*7.5)`：频率与速度无关（固定 1.2 Hz），停下仍继续晃，
+/// 通断瞬间相位随机 → 每次开关都是一次位置跳变。改按行程推进后，停止即冻结相位，
+/// 包络再平滑收到 0，起步从同一相位平滑起振。
+const GUN_GAIT_PHASE_PER_M: f32 = 1.047;
+/// 相位推进的角速度上限（弧度/秒）。8.0 → 侧向 ≤1.27 Hz、上下 ≤2.54 Hz。
+/// 有了这道上限，即使日后加入冲刺/载具把速度推到 20 m/s 以上，摆频也不会
+/// 爬进"读成振动"的区间（>3 Hz）；当前最高速度 6 m/s 只用到 6.28 rad/s，不触发。
+const GUN_GAIT_MAX_RATE: f32 = 8.0;
+/// 侧向摆幅上限（视空间米，饱和时）。0.010 m 在腰射锚距 0.60 m、垂直 FOV 70°
+/// 下的屏幕位移 = 0.010/(0.60×tan35°) = 2.4% 半屏高 → 1080p 约 ±13 px（峰峰 26 px），
+/// 与旧实现的 0.009 同量级——玩家抱怨的是"高频"，不是"大幅度"，故幅值保持原档；
+/// 再大就开始读成"枪在飘"而不是"人在走"。
+const GUN_SWAY_SIDE_M: f32 = 0.010;
+/// 上下摆幅（米）：落地冲击约为侧向的 80%（人体质心垂向位移 ~5 cm、侧向 ~4 cm
+/// 的比例），取 0.008 → 1080p 约 ±10 px。
+const GUN_SWAY_BOB_M: f32 = 0.008;
+/// 前后摆幅（米）：枪随手臂前后拖拽。取侧向的一半（0.005）——沿视轴方向的位移
+/// 只改变成像大小，同样的米数在视觉上比侧向更抢眼，故幅值必须更小。
+const GUN_SWAY_FORE_M: f32 = 0.005;
+/// 侧向"惯性滞后"偏移（米）：与侧移速度同幅反号（向右跨步时枪相对身体留在后面），
+/// 这是 strafe 时唯一有重量感的线索。取侧向摆幅的 40%（0.004）——它可与步态侧摆
+/// 同相叠加，最坏合计 0.014 m（约 ±18 px），仍贴近旧实现意图中的 0.009 m 档；
+/// 再大就会盖过步态本身，左右跨步看着像"枪在横扫"。
+const GUN_SWAY_LEAN_M: f32 = 0.004;
+/// 速度→摆幅的 smoothstep 区间下界（m/s）：0.5 m/s 以下视为静止。
+/// 旧实现是 `speed > 0.6` 的**布尔**判据，速度在阈值附近逐帧来回穿越时
+/// 摆动偏移在"满幅"和"0"之间硬跳（跳变频率 = 帧率）→ 高频小振幅抖动 + 残影。
+const GUN_SWAY_SPEED_LO: f32 = 0.5;
+/// 速度→摆幅的 smoothstep 区间上界（m/s）：取 game.rs PLAYER_SPEED = 6.0，
+/// 即本作最高水平速度才饱和——摆幅因此严格有上界，且在开镜移速 3.9 m/s 时
+/// 自然落到 smoothstep=0.67 包络（叠加按轴 ADS 因子后侧向只剩 0.67×0.12≈8%）。
+/// 旧实现的幅值虽恒定但通断无界，起步瞬间从 0 跳到满幅。
+const GUN_SWAY_SPEED_HI: f32 = 6.0;
+/// 速度低通的时间常数（秒）。0.06 s ≈ 165 fps 下的 10 帧：足以抹掉逐帧位移噪声
+/// （玩家本作是**瞬时无惯性**位移——game.rs move_first_person 直接按 dt 改 pos，
+/// 所以按键的那一帧速度就从 0 跳到 6 m/s，低通是唯一的连续化手段），
+/// 又远小于一次落脚间隔（6 m/s 下 ≈0.5 s），不会让人感到"枪跟不上脚"。
+/// 超过 0.15 s 开始出现脱节感。
+const GUN_SWAY_SMOOTH_TAU: f32 = 0.06;
+/// 后坐冲量衰减时间常数（秒）。0.075 s → 单发在 0.2 s 内衰到 7%（视觉上一次
+/// 干脆的"上抬→回落"）；连发按 0.1 s 间隔时包络回不到 0，自然叠成持续抬升。
+/// 旧实现用 `(1-t)²` 抛物线 + 0.30 s 硬截止，且阻尼系数在 0.25 s 整点从 0.15
+/// 阶跃到 1.0 —— 两处都是位置不连续。
+const GUN_RECOIL_TAU: f32 = 0.075;
+/// 开火瞬间的摆动阻尼（连续量，随 kick 指数回升到 1.0）：0.45 = 枪在后坐的一瞬
+/// 摆幅降到 45%。旧实现是 0.15 → 1.0 的阶跃。
+const GUN_SWAY_FIRE_DAMP: f32 = 0.45;
+/// ADS（开镜）各轴的摆幅保留比例：侧向 12% / 上下 25% / 前后 15%。
+/// 机瞄贴腮时身体运动仍会传到手上传感器上，但必须显著小于腰射。
+const GUN_SWAY_ADS_SIDE: f32 = 0.12;
+const GUN_SWAY_ADS_BOB: f32 = 0.25;
+const GUN_SWAY_ADS_FORE: f32 = 0.15;
+/// 腰射锚距（米）：与 `fp_gun_matrix` 的 hip_pos.z 同值，改一处必须改两处。
+/// 它同时是「屏幕等幅」归一化的分母之一——视空间平移在屏幕上的位移
+/// ∝ offset / (锚距 × tan(fov/2))，故开镜（锚距 0.42 m、fov 55°）会把同样的
+/// offset 视觉放大 (0.60/0.42)×(tan35/tan27.5) = 1.43×1.35 ≈ **1.92 倍**。
+/// 不补这个几何增益，就出现"越是开镜精确瞄准、左右移动时枪甩得越凶"。
+const GUN_HIP_DEPTH_M: f32 = 0.60;
+/// tan(腰射半视角) —— FOV 70° 的一半 35° 的正切（tan 35° = 0.7002075）。
+/// 与 GUN_HIP_DEPTH_M 一起构成屏幕等幅基准；`gun_scale` 与摆动偏移共用
+/// 同一个 `fov_gain`，保证"模型缩放"和"摆动平移"两条通道对 FOV 的补偿完全一致
+/// （旧实现只有缩放补了 tan(fov/2)，平移没补——两条通道不一致就是 bug #2）。
+const GUN_HIP_HALF_TAN: f32 = 0.700_208;
+
+/// 第一人称枪摆动状态。
+///
+/// 全部量在 `update()` 内按 delta_time 积分（`fp_gun_matrix()` 只读），原因是
+/// 旧实现在矩阵函数里就地用两个逐帧不连续的输入：
+/// ① `game.player_speed() > 0.6` 硬开关（原始瞬时速度，无任何平滑）；
+/// ② `sin(anim_clock * 7.5)` —— 相位参数随会话时长**无上界累积**，f32 尾数
+///    24 bit，anim_clock 到 ~2.4 h 后 `相位 × 7.5` 的 ulp 已与每帧相位增量同量级，
+///    sin 输出被量化 → 越玩越抖；且相位按时间而非行程推进，与帧率互相拍频。
+/// ③ `fire_damp` 0.15→1.0 阶跃。
+/// 新实现：相位按行程累积并恒定回绕到 [0, 2π)（参数有界 → 精度不衰减）；
+/// 速度经与帧率无关的指数低通（`x += (t-x)*(1-exp(-dt/τ))`）；幅值用 smoothstep
+/// 连续起落；后坐用连续指数包络。三者都满足"任意帧率下平滑且有界"。
+struct GunSway {
+    /// 上一帧玩家脚底世界坐标（用真实位移求速度，见 `update()` 里的说明）；
+    /// None = 尚未播种（启动首帧、瞬移/重生之后），此时不按位移伪造速度
+    prev_pos: Option<glam::Vec3>,
+    /// 平滑后的水平速度模长（m/s）→ 只驱动幅值包络
+    speed: f32,
+    /// 平滑后的侧向速度分量（+ = 向右），→ 驱动侧向"惯性滞后"偏移
+    strafe: f32,
+    /// 平滑后的前向速度分量（+ = 前进），→ 驱动前后拖拽偏移
+    fore: f32,
+    /// 步态相位（弧度，恒定回绕到 [0, 2π)）
+    stride: f32,
+    /// 后坐冲量包络 [0,1]：开火帧置 1，其后按 exp(-dt/τ) 连续衰减
+    kick: f32,
+    /// 摆动总增益（RV3D_GUN_SWAY 覆盖，缺省 1.0；=0 可完全关闭摆动做 A/B 判定）
+    gain: f32,
+}
+
+impl GunSway {
+    fn new() -> Self {
+        Self {
+            prev_pos: None,
+            speed: 0.0,
+            strafe: 0.0,
+            fore: 0.0,
+            stride: 0.0,
+            kick: 0.0,
+            // 诊断门（与项目其它 RV3D_* 一致）：RV3D_GUN_SWAY=0 关闭全部枪摆动
+            gain: env_f32("RV3D_GUN_SWAY").unwrap_or(1.0).clamp(0.0, 3.0),
+        }
+    }
+
+    /// 下一帧不按位移伪造速度（重生/传送/切模式后用；`tick()` 会自动重新播种）
+    #[allow(dead_code)] // 预留：game.rs 侧提供显式传送事件时调用（当前由 2 m 瞬移保护兜底）
+    fn reset_motion(&mut self) {
+        self.speed = 0.0;
+        self.strafe = 0.0;
+        self.fore = 0.0;
+        self.prev_pos = None;
+    }
+
+    /// 每帧积分：`now_pos` 为玩家本帧脚底世界坐标，`right`/`fwd` 为相机基向量，
+    /// `fired` 为本帧是否击发，`dt` 为本次 update 的帧时间（秒）。
+    fn tick(
+        &mut self,
+        dt: f32,
+        now_pos: glam::Vec3,
+        right: glam::Vec3,
+        fwd: glam::Vec3,
+        fired: bool,
+    ) {
+        // 位移按水平面处理（y 是地形跟随，不属于步态）
+        let moved = self
+            .prev_pos
+            .map(|p| now_pos - p)
+            .unwrap_or(glam::Vec3::ZERO);
+        self.prev_pos = Some(now_pos);
+        let dxz = glam::Vec3::new(moved.x, 0.0, moved.z);
+        let dist = dxz.length();
+        // 瞬移保护：单帧 >2 m 只可能来自重生/传送/热重载（玩家最快 ~5 m/s，
+        // 6 ms 帧内 ≤3 cm）。当作不连续事件：速度归零，不吃这一帧的假速度。
+        if dist > 2.0 {
+            self.speed = 0.0;
+            self.strafe = 0.0;
+            self.fore = 0.0;
+        } else {
+            // 与帧率无关的指数低通：a = 1 - exp(-dt/τ)，30 fps 与 165 fps 下
+            // 同一段行程得到同一条速度曲线（旧实现直接取原始逐帧速度）
+            let a = 1.0 - (-dt / GUN_SWAY_SMOOTH_TAU).exp();
+            let inv = 1.0 / dt.max(1e-4);
+            self.speed += (dist * inv - self.speed) * a;
+            // 投影到相机水平基向量（分量式，避免构造 Vec3 的额外开销）
+            let v_strafe = (dxz.x * right.x + dxz.z * right.z) * inv;
+            let v_fore = (dxz.x * fwd.x + dxz.z * fwd.z) * inv;
+            self.strafe += (v_strafe - self.strafe) * a;
+            self.fore += (v_fore - self.fore) * a;
+            // 相位按**行程**推进，随后回绕：sin/cos 的参数恒在 [0, 2π)，
+            // 不会因长时间游玩而精度衰减；单帧推进量再受角速度上限约束，
+            // 于是摆频在任何速度/帧率组合下都有硬上界
+            let dphase = (dist * GUN_GAIT_PHASE_PER_M).min(dt * GUN_GAIT_MAX_RATE);
+            self.stride = (self.stride + dphase) % std::f32::consts::TAU;
+        }
+        // 后坐包络：击发帧置 1（连发不叠加超过 1，保证幅值有上界），随后连续指数衰减
+        if fired {
+            self.kick = 1.0;
+        }
+        self.kick *= (-dt / GUN_RECOIL_TAU).exp();
+        if self.kick < 1e-4 {
+            self.kick = 0.0; // 收敛到精确 0，省掉之后每帧的无穷次微小乘法
+        }
+    }
+}
+
+// ============================================================
+// 导入 GLB 枪模的顶点色烘焙（flat=3 直出通道）—— 2026-09-01 修"纯黑剪影"
+// ============================================================
+/// 参考反照率（线性空间）。0.24 的取值依据：本项目的 swapchain 首选
+/// `B8G8R8A8_SRGB`（renderer.rs pick_format），而枪模走 build.rs 片元着色器的
+/// `flat_flag > 2.5` 分支——顶点色**直出、不经曝光/色调映射/雾**，只被硬件做一次
+/// linear→sRGB 编码。0.24 × 满光照 1.45 ≈ 0.35 线性 → 屏显 sRGB ≈ 0.62（受光面，
+/// 读作亮钢）；0.24 × 环境下限 0.20 ≈ 0.048 线性 → 屏显 sRGB ≈ 0.24（背光面，
+/// 读作暗钢但不纯黑）。明暗比 7:1 是"能看出是金属"的最低要求，纯黑剪影时是 1:0.06。
+const GUN_REF_ALBEDO: f32 = 0.24;
+/// 亮度阈值（Rec.709 luma）：低于此值判定"资产没有可用基色"。
+/// 现存的 assets/guns/ak12.glb（所有武器 key 的公共回退）两个材质的
+/// baseColorFactor 实测为 0.0573 / 0.0768，且**无 COLOR_0 属性、无 baseColorTexture**
+/// ——Sketchfab 抠件的典型产物：颜色本在贴图里，导出时贴图被丢弃、只留下近乎纯黑的
+/// 调色因子。而 engine/assets.rs 的 GLB 解析器不读贴图 → 顶点色 = 0.057 →
+/// 0.057×(0.85..1.15) = 0.049..0.066，光照梯度被基色乘掉后只剩 ±0.017，
+/// 屏显即"无明暗的纯黑卡片"。0.18 定在"正常深灰武器漆(0.25+)与坏资产(0.08)"之间。
+const GUN_DARK_LUMA: f32 = 0.18;
+/// 环境光下限（朝下的面）：0.20 = 地面反弹，保留暗部形状而不落到 0
+const GUN_AMB_MIN: f32 = 0.20;
+/// 环境光上限（朝上的面）：0.42 = 天穹漫反射。上下比 2.1:1 提供"哪面朝上"的读感
+const GUN_AMB_MAX: f32 = 0.42;
+/// 主光漫反射增益：与环境项相加后总区间 [0.20, 1.47]（旧实现 [0.85,1.15]，
+/// 只有 1.35:1 的压缩动态范围，是"看不出明暗"的第二个原因）
+const GUN_DIFF_GAIN: f32 = 1.05;
+/// 高光 Phong 指数：26 → 亮带半角约 12°。金属件（机匣/枪管）需要一条窄而亮的
+/// 高光才能读出曲率；聚合物/木质件拿不到高光仍保持哑光
+const GUN_SPEC_POWER: f32 = 26.0;
+/// 高光增益（金属 F0 近似）：0.55 而非 1.0，避免直出通道下高光过曝成白块
+const GUN_SPEC_GAIN: f32 = 0.55;
+/// 主光方向（**烘焙局部系**：枪口 +Z、枪顶 +Y，见 load_gun_glb 的 align）。
+/// 与 `guns::assemble()` 用同一条光线，保证程序化枪模与导入枪模明暗方向一致。
+/// viewmodel 在局部系里相对屏幕固定，所以在局部系烘光 = 屏幕上固定方向来光。
+const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
+
+/// 把「材质基色 + 局部法线」烘成 flat=3 直出用的顶点色。
+///
+/// 三段式（全部只用 n·常量，无逐帧量 → 结果对同一资产确定不变）：
+/// ① 半兰伯特平方漫反射：`(0.5·N·L+0.5)²`。直接 `max(N·L,0)` 会把背光面全压成 0，
+///    而枪身有一半的面法线背离主光；平方后的半兰伯特在 N·L=0 处仍有 0.25 且斜率
+///    连续，明暗过渡不带"腰线"。
+/// ② 天穹环境：按 `n.y` 线性插值 [GUN_AMB_MIN, GUN_AMB_MAX]，让朝上的面亮、
+///    朝下的面暗（旧实现的 0.85 常数底噪正是把梯度抹平的东西）。
+/// ③ 金属高光：`(N·H)^26`，H 为"主光 + 镜头方向"的半角向量。镜头方向在烘焙局部系
+///    里是常量 -Z（fp_gun_matrix 的 rotY(π) 把局部 +Z 转到屏幕深处），所以可以烘。
+fn fp_gun_bake_color(n: glam::Vec3, raw: [f32; 3], albedo_boost: f32) -> [f32; 3] {
+    let key = GUN_KEY_DIR.normalize();
+    // 局部系里指向镜头的方向恒定（viewmodel 钉在屏幕上），故高光可烘焙
+    let half = (key + glam::Vec3::new(0.0, 0.0, -1.0)).normalize();
+    let ndl = n.dot(key);
+    let wrap = 0.5 * ndl + 0.5;
+    let diff = wrap * wrap;
+    let sky = (0.5 + 0.5 * n.y).clamp(0.0, 1.0);
+    let amb = GUN_AMB_MIN + (GUN_AMB_MAX - GUN_AMB_MIN) * sky;
+    let spec = n.dot(half).max(0.0).powf(GUN_SPEC_POWER) * GUN_SPEC_GAIN;
+    let shade = amb + GUN_DIFF_GAIN * diff + spec;
+    let a = [
+        raw[0] * albedo_boost,
+        raw[1] * albedo_boost,
+        raw[2] * albedo_boost,
+    ];
+    [
+        (a[0] * shade).clamp(0.0, 1.0),
+        (a[1] * shade).clamp(0.0, 1.0),
+        (a[2] * shade).clamp(0.0, 1.0),
+    ]
+}
+
 /// 游戏应用主管理结构
 struct GameApp {
     /// winit 窗口
@@ -90,8 +336,14 @@ struct GameApp {
     ads_active: bool,
     /// 开镜混合度 0..1（腰射→开镜 0.2s 指数平滑；驱动枪模锚点插值）
     ads_blend: f32,
-    /// 最近一次开火时刻（anim_clock；枪模后坐用一次性"上抬→回落"脉冲）
+    /// 最近一次开火时刻（anim_clock）。2026-09-01 起枪模后坐改由 `gun_sway.kick`
+    /// 的连续指数包络驱动（旧写法直接按此值算 `(1-t)²` 抛物线 + 0.30 s 硬截止，
+    /// 连发时每个周期都有位置阶跃）。本字段现在只被写入，留作击发时刻的观测点
+    #[allow(dead_code)] // 只写不读：留给后坐/射速诊断挂点，删掉会连带三处写入语义丢失
     last_shot_at: f32,
+    /// 第一人称枪摆动状态（步态相位 + 低通速度 + 后坐包络），每帧在 `update()`
+    /// 里按 delta_time 积分，`fp_gun_matrix()` 只读 → 摆动与帧率无关且逐帧连续
+    gun_sway: GunSway,
     /// 伤害飘字列表：(伤害, 剩余秒)；命中时 push，0.6s 淡出（塔克夫式受击反馈）
     hit_damage_popups: Vec<(f32, f32)>,
     /// 上一帧光标位置（屏幕坐标）
@@ -207,6 +459,7 @@ impl GameApp {
             ads_active: false,
             ads_blend: 0.0,
             last_shot_at: -1.0,
+            gun_sway: GunSway::new(),
             hit_damage_popups: Vec::new(),
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -634,6 +887,26 @@ impl GameApp {
             self.camera.pitch = pitch;
         }
 
+        // 第一人称枪摆动状态积分（2026-09-01）。
+        // 速度取自**玩家脚底的实际位移 / dt**，不用 `game.player_speed()`：后者读
+        // PlayerBody.vel，而玩家移动走的是 `PlayerBody::try_move()`（直接改 pos，
+        // 从不写 vel）→ vel 恒为 0 → 旧摆动分支实际上一次都没执行过。这里改成
+        // 自带估计后，摆动不再依赖那个通道（game.rs/physics.rs 的 vel 修复另行提出）。
+        {
+            let p = self.game.player_pos();
+            // dt 下限 1e-4 s：卡帧后 delta_time 被 clamp 到 0.1，正常帧约 6 ms；
+            // 只有 0（同一时刻重复调用）会越过硬下限，此时按静止处理
+            let dt = delta_time.max(1e-4);
+            // 前向取**水平投影后归一化**：与 game.rs move_first_person 计算位移用的
+            // 同一个基向量一致（俯仰时 forward 含 y 分量，直接点乘水平位移会低估前向
+            // 速度，抬头/低头时前向摆动会莫名变小）。pitch 被 clamp 在 ±89°，
+            // 水平分量最小 cos(89°)=0.0175，归一化不会退化。
+            let f = self.camera.forward();
+            let fwd = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+            let right = self.camera.right();
+            self.gun_sway.tick(dt, p, right, fwd, fired > 0);
+        }
+
         // 相机参数日志（1 秒一条，冒烟断言 yaw/pitch 变化用）
         if self.last_cam_log.elapsed().as_secs_f32() >= 1.0 {
             let (yaw, pitch, dist) = self.camera.orbit_params();
@@ -769,7 +1042,22 @@ impl GameApp {
                 ];
                 // 注意：不在此处做任何相机空间变换——FP 帧内与程序化枪共用 fp_gun_matrix
                 // （view_inv × anchor × scale；世界空间 + 每帧跟随相机）
-                let light = glam::Vec3::new(-0.45, 0.8, -0.3).normalize();
+                // 基色可用性判定：先看整份网格最亮的顶点有多亮。GLB 解析器
+                // （engine/assets.rs）不读 baseColorTexture，只把 baseColorFactor 摊到
+                // 顶点色上，所以"贴图丢了只剩暗调色因子"的资产会给出近乎纯黑的基色
+                // （ak12.glb 实测 0.057/0.077）。此时按**全局最大值**归一到参考反照率：
+                // 保留各材质之间的相对明暗差（0.057 与 0.077 差 34%，归一后仍差 34%），
+                // 只是把它们整体抬到可分辨的亮度；正常资产（luma ≥ 0.18）不改变倍率。
+                let mut luma_max = 0.0f32;
+                for v in &mesh.verts {
+                    let l = 0.2126 * v[8] + 0.7152 * v[9] + 0.0722 * v[10];
+                    luma_max = luma_max.max(l);
+                }
+                let albedo_boost = if luma_max > 1e-5 && luma_max < GUN_DARK_LUMA {
+                    GUN_REF_ALBEDO / luma_max
+                } else {
+                    1.0
+                };
                 let verts: Vec<crate::engine::meshgen::GVertex> = mesh
                     .verts
                     .iter()
@@ -778,15 +1066,7 @@ impl GameApp {
                         let mut n = glam::Vec3::from_slice(&v[3..6]);
                         p = align.transform_point3(p);
                         n = align.transform_vector3(n).normalize_or_zero();
-                        // 终局（2026-08-28）：模型材质本色直出——baseColor × 忠实现光（×1.0，无提亮/压暗）
-                        let ndl = n.dot(light).max(0.0);
-                        let raw = [v[8], v[9], v[10]];
-                        let shade = 0.85 + 0.30 * ndl;
-                        let c = [
-                            (raw[0] * shade).min(1.0),
-                            (raw[1] * shade).min(1.0),
-                            (raw[2] * shade).min(1.0),
-                        ];
+                        let c = fp_gun_bake_color(n, [v[8], v[9], v[10]], albedo_boost);
                         crate::engine::meshgen::GVertex {
                             pos: [p.x, p.y, p.z],
                             normal: [n.x, n.y, n.z],
@@ -796,9 +1076,11 @@ impl GameApp {
                     })
                     .collect();
                 log::info!(
-                    "assets: 导入枪模 {path}（{} 顶点 / {} 索引，首色 {:?}）",
+                    "assets: 导入枪模 {path}（{} 顶点 / {} 索引，基色亮度 {:.3} → 反照率增益 ×{:.2}，首色 {:?}）",
                     verts.len(),
                     mesh.indices.len(),
+                    luma_max,
+                    albedo_boost,
                     verts.first().map(|v| v.color)
                 );
                 Some((verts, mesh.indices))
@@ -909,48 +1191,82 @@ impl GameApp {
                 gm
             }
         };
-        let cam = &self.camera;
-        // ADS 姿态（2026-08-18 第三轮规范：模型已水平校正，rotation 全零）：
-        // 腰射：枪在右下 (0.25,-0.20,-0.60)，FOV 70°，十字准星可见；
-        // 开镜：枪居中 (0.0,-0.08,-0.42)，FOV 55°，准星隐藏（机瞄三点一线）。
-        // 缩放大幅调低（0.98→0.5）：枪长 1.2m 在 0.6m 距离下占视野 ~70%，
-        // 解决"怼脸/穿模"（旧值枪张角 100° > FOV 70°，必然怼脸）。
-        let m = self.fp_gun_matrix();
-        gun.transformed(m)
+        // 程序化枪：返回**局部坐标**顶点，与导入 GLB 分支同一约定——矩阵只在
+        // `render()` 里作为实例 model（fp_gun_pre）施加一次。
+        // 2026-09-01 修复：这里曾先 `gun.transformed(fp_gun_matrix())` 把
+        // view_inv×anchor×scale 烘进顶点，而调用方又把同一个矩阵当作实例 model 再乘
+        // 一次 → 实际变换是 M·M·p。M 含 view_inv，M·M 里的第二个 view_inv 不会被 view
+        // 抵消，枪会被再平移一次相机位置（城区坐标 ±215 m）→ 整支枪飞出画面/
+        // 贴脸乱甩。该分支只在 GLB 缺失时命中（例如 release_dist/game/assets/guns
+        // 未随包发布），所以平时看不见，一旦命中就是彻底坏掉。
+        (gun.verts.clone(), gun.indices.clone())
     }
     /// 第一人称枪的世界空间矩阵（程序化/导入枪模共用）：view_inv × anchor × scale。
-    /// 开火后坐脉冲 + 行走晃动 + ADS 插值 + FOV 缩放（2026-08-27 抽离共享）
+    /// 开火后坐 + 行走摆动 + ADS 插值 + FOV 缩放（2026-08-27 抽离共享；
+    /// 2026-09-01 摆动/后坐全部改由 `gun_sway` 的连续状态量驱动，见该结构注释）
     fn fp_gun_matrix(&self) -> glam::Mat4 {
         let cam = &self.camera;
         let hip_pos = glam::Vec3::new(0.25, -0.20, -0.60);
         let ads_pos = glam::Vec3::new(0.0, -0.08, -0.42);
-        let mut anchor = hip_pos.lerp(ads_pos, self.ads_blend);
-        let since_shot = self.anim_clock - self.last_shot_at;
-        if since_shot >= 0.0 && since_shot < 0.30 {
-            let t = since_shot / 0.30;
-            let pulse = (1.0 - t) * (1.0 - t);
-            anchor.y -= 0.07 * pulse;
-            anchor.z += 0.05 * pulse;
+        let anchor_base = hip_pos.lerp(ads_pos, self.ads_blend);
+        // 屏幕等幅归一化（2026-09-01，修 ADS 摆幅过大）：anchor 是**视空间**平移，
+        // 它在屏幕上的位移 = offset / (锚距 × tan(fov/2))。开镜时锚距 0.60→0.42、
+        // fov 70°→55°，两个因素叠起来把同样的 offset 视觉放大 1.92 倍；
+        // `gun_scale` 下面已经做了 tan(fov/2) 补偿，平移量必须用同一套基准补偿，
+        // 否则"模型不放大、摆动放大"→ 越是精确瞄准枪甩得越凶。
+        let depth_gain = (-anchor_base.z) / GUN_HIP_DEPTH_M;
+        let fov_gain = (cam.fov * 0.5).tan() / GUN_HIP_HALF_TAN;
+        // 横向/垂向偏移的等幅因子；前后偏移只改变成像比例，用 depth_gain
+        let screen_gain = depth_gain * fov_gain;
+        let mut anchor = anchor_base;
+        // ① 后坐：连续指数包络（击发帧置 1 后按 τ=75 ms 衰减）。
+        //    旧实现用 (1-t)² 抛物线 + 0.30 s 硬截止：连发（10 发/秒）时每 0.1 s
+        //    重新从 0.44 跳到 1.0，回落末端还有一次速度不连续 → 抖 + 残影。
+        //    同样要走屏幕等幅补偿：0.07 m 的下蹲在开镜锚距 0.42 m + FOV 55° 下
+        //    占半屏高 32%，而腰射只占 17% —— 不补偿时"开镜连发"就是玩家描述的
+        //    "开镜射击下左右移动甩得特别大"里幅度最大的那个分量。
+        //    视轴方向的前顶只改变成像比例，补偿因子是 depth（不含 tan(fov/2)）。
+        let kick = self.gun_sway.kick;
+        if kick > 0.0 {
+            anchor.y -= 0.07 * kick * screen_gain;
+            anchor.z += 0.05 * kick * depth_gain;
         }
-        // 持枪摆动（2026-08-28 修复残影/大幅高频晃动）：
-        // ① 仅移动时摆动（站立/原地不晃——消除残影来源）；
-        // ② 双相摆动：左右 x（7.5Hz 小幅）+ 上下 y（0.8 相位偏移升降）；
-        // ③ 开镜（ads_blend→1）与开火后 0.25s 内阻尼到 ~15%（射击/瞄准时轻微）。
-        let speed = self.game.player_speed();
-        let moving = speed > 0.6;
-        let since_shot = self.anim_clock - self.last_shot_at;
-        let fire_damp = if since_shot >= 0.0 && since_shot < 0.25 { 0.15 } else { 1.0 };
-        let damp = (1.0 - self.ads_blend * 0.985) * fire_damp;
-        let amp = 0.009 * (1.0 - self.ads_blend * 0.9);
-        if moving {
-            let bob_x = (self.anim_clock * 7.5).sin() * amp;
-            let bob_y = (self.anim_clock * 7.5 * 0.5 + 0.8).sin() * amp * 0.9;
-            anchor.x += bob_x * damp;
-            anchor.y += bob_y * damp;
+        // ② 行走摆动。幅值 = smoothstep(速度) × 开火阻尼 × 诊断增益；三个因子全部
+        //    连续，且 speed 已在 update() 里做过与帧率无关的低通，所以不存在
+        //    "逐帧通断"的阶跃（那是旧实现高频残影的直接来源）。
+        //    ADS 的按轴抑制放在下面各分量里，避免这里再乘一次造成双重衰减。
+        let env = {
+            let t = ((self.gun_sway.speed - GUN_SWAY_SPEED_LO)
+                / (GUN_SWAY_SPEED_HI - GUN_SWAY_SPEED_LO))
+                .clamp(0.0, 1.0);
+            let smooth = t * t * (3.0 - 2.0 * t); // Hermite smoothstep：起止斜率为 0
+            let fire_damp = 1.0 - (1.0 - GUN_SWAY_FIRE_DAMP) * kick;
+            smooth * fire_damp * self.gun_sway.gain
+        };
+        if env > 1e-6 {
+            let ads = self.ads_blend;
+            let st = self.gun_sway.stride;
+            let two = st * 2.0;
+            // 侧向：1× 步频（一个完整步态周期回到原位一次）
+            let sway = st.sin() * GUN_SWAY_SIDE_M * (1.0 - (1.0 - GUN_SWAY_ADS_SIDE) * ads);
+            // 上下：2× 步频（每个落脚一次冲击），用 -cos 让 phase=0（刚落地）为最低点
+            let bob = -two.cos() * GUN_SWAY_BOB_M * (1.0 - (1.0 - GUN_SWAY_ADS_BOB) * ads);
+            // 前后：2× 步频、与落地错位 1/4 周期（手臂随步伐前后牵动）
+            let fore = (two + std::f32::consts::FRAC_PI_2).sin()
+                * GUN_SWAY_FORE_M
+                * (1.0 - (1.0 - GUN_SWAY_ADS_FORE) * ads);
+            // 侧向"惯性滞后"：与侧移速度反号、按饱和速度归一，最大 0.004 m
+            let lean = -(self.gun_sway.strafe / GUN_SWAY_SPEED_HI).clamp(-1.0, 1.0)
+                * GUN_SWAY_LEAN_M
+                * (1.0 - (1.0 - GUN_SWAY_ADS_SIDE) * ads);
+            anchor.x += (sway + lean) * screen_gain * env;
+            anchor.y += bob * screen_gain * env;
+            anchor.z += fore * depth_gain * env;
         }
         let base_scale = 0.50 - 0.03 * self.ads_blend;
-        let gun_scale =
-            ((cam.fov * 0.5).tan() / 35.0_f32.to_radians().tan()).clamp(0.5, 1.0) * base_scale;
+        // 模型缩放与摆动偏移共用同一个 fov 补偿量（fov_gain），保证两条通道
+        // 在腰射/开镜之间视觉一致（旧实现只有这里补了 fov，摆动没补）
+        let gun_scale = fov_gain.clamp(0.5, 1.0) * base_scale;
         let view_inv = cam.view_matrix().inverse();
         view_inv
             * glam::Mat4::from_translation(anchor)
@@ -1230,13 +1546,14 @@ impl GameApp {
             }
             renderer.set_hud_quads(&quads);
             renderer.set_lights(&self.game.light_uniform());
-            // 世界障碍 marker：关卡地图障碍盒 → 按种类材质着色的盒实例（复用主 pipeline，
-            // 见 renderer.rs MARKER_SLOT_BASE；模型矩阵/材质色统一由 WorldMarker::for_obstacle 构建，
-            // 与物理刚体 AABB（game.rs apply_level，同 half_w/half_d）严格同尺寸）
+            // 世界障碍 marker：关卡地图几何 → 按种类材质着色的实例（复用主 pipeline，
+            // 见 renderer.rs MARKER_SLOT_BASE；模型矩阵/材质色统一由 WorldMarker::for_obstacle
+            // 构建，与物理刚体 AABB（game.rs apply_level，同 half_w/half_d）严格同尺寸）。
+            // 用 render_geometry() 而不是 map_obstacles()：后者只含会挡人的障碍，前者还包含
+            // 挑檐/窗带/壁柱/屋顶设备这类纯装饰件（game.rs LevelMap::decor）。
             let markers: Vec<engine::renderer::WorldMarker> = self
                 .game
-                .map_obstacles()
-                .iter()
+                .render_geometry()
                 .map(engine::renderer::WorldMarker::for_obstacle)
                 .collect();
             // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
@@ -2636,5 +2953,135 @@ fn main() {
     }
 
     log::info!("程序正常退出");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 以恒定速度直行 `secs` 秒，返回积分后的摆动状态。
+    /// `dt` 故意可传入不同帧率，用于断言"同一行程得到同一状态"。
+    /// 进循环前先 tick 一次播种 `prev_pos`，否则两种帧率会各少吃一步的行程。
+    fn walk(dt: f32, secs: f32, speed: f32) -> GunSway {
+        let mut s = GunSway::new();
+        let right = glam::Vec3::X;
+        let fwd = glam::Vec3::NEG_Z;
+        let mut pos = glam::Vec3::ZERO;
+        s.tick(dt, pos, right, fwd, false);
+        let step = speed * dt;
+        for _ in 0..(secs / dt) as usize {
+            pos += fwd * step;
+            s.tick(dt, pos, right, fwd, false);
+        }
+        s
+    }
+
+    /// 帧率无关性：以 6 m/s 直行 0.5 秒，165 fps 与 30 fps 必须得到同样的相位和包络
+    /// （旧实现用 `anim_clock * 7.5` 累积时间相位 + 逐帧原始速度，两者都与帧率耦合）。
+    /// 0.5 s 让总相位落在 π 附近——刻意避开 2π 回绕点，否则比较的是回绕后的余数。
+    #[test]
+    fn gun_sway_is_framerate_independent() {
+        let fast = walk(1.0 / 165.0, 0.5, 6.0);
+        let slow = walk(1.0 / 30.0, 0.5, 6.0);
+        assert!(
+            (fast.stride - slow.stride).abs() < 0.05,
+            "同样行程后相位应一致：{} vs {}",
+            fast.stride,
+            slow.stride
+        );
+        assert!(
+            (fast.speed - slow.speed).abs() < 0.25,
+            "低通后的速度应基本与帧率无关：{} vs {}",
+            fast.speed,
+            slow.speed
+        );
+    }
+
+    /// 有界性 + 相位回绕：长时间运行后相位仍在 [0, 2π)、速度不过冲、包络 ≤1
+    #[test]
+    fn gun_sway_stays_bounded_and_wrapped() {
+        let s = walk(1.0 / 165.0, 600.0, 6.0);
+        assert!(s.stride >= 0.0 && s.stride < std::f32::consts::TAU);
+        assert!(
+            s.speed <= 6.0 + 1e-3,
+            "指数低通是单调逼近，不应过冲：{}",
+            s.speed
+        );
+        assert!(s.kick <= 1.0);
+    }
+
+    /// 瞬移/重生保护：单帧几十米的位移不得被当成巨型速度（旧实现没有这层保护，
+    /// 而且 `player_speed()` 恒为 0，两种错法都会让摆动不可信）
+    #[test]
+    fn gun_sway_ignores_teleport() {
+        let mut s = walk(1.0 / 165.0, 0.5, 6.0);
+        assert!(s.speed > 5.0, "前置条件：应先积分出满幅速度");
+        s.tick(
+            1.0 / 165.0,
+            glam::Vec3::new(0.0, 0.0, -50.0),
+            glam::Vec3::X,
+            glam::Vec3::NEG_Z,
+            false,
+        );
+        assert!(s.speed < 1e-3, "传送帧速度应归零，实际 {}", s.speed);
+    }
+
+    /// 后坐包络连续：击发后逐帧单调下降，单帧变化量 ≤8%
+    /// （旧实现在 0.25 s 整点把阻尼从 0.15 阶跃到 1.0，单帧变化 0.85 = 位置跳变）
+    #[test]
+    fn gun_recoil_kick_decays_continuously() {
+        let mut s = GunSway::new();
+        let dt = 1.0 / 165.0;
+        s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, true);
+        assert!(s.kick > 0.9, "击发帧应接近满幅后坐");
+        let mut prev = s.kick;
+        for _ in 0..60 {
+            s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false);
+            assert!(s.kick <= prev, "包络不得回升：{} > {}", s.kick, prev);
+            assert!(
+                prev - s.kick < 0.08,
+                "单帧后坐变化量应连续，实际 {}",
+                prev - s.kick
+            );
+            prev = s.kick;
+        }
+        assert!(s.kick < 0.01, "0.36 s 后应基本归零，实际 {}", s.kick);
+    }
+
+    /// 枪模顶点色：坏资产（baseColorFactor 0.057）经反照率补偿后必须给出
+    /// 可用的明暗区间，而不是旧公式的 0.049..0.066（梯度 ±0.017 = 纯黑剪影）
+    #[test]
+    fn gun_bake_color_keeps_a_readable_gradient() {
+        let boost = GUN_REF_ALBEDO / 0.0768; // ak12.glb 实测最亮材质
+        let raw = [0.0573, 0.0573, 0.0573];
+        let dirs = [
+            glam::Vec3::new(-0.45, 0.80, -0.30), // 迎光面（= 主光方向）
+            glam::Vec3::Y,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::X,
+            glam::Vec3::NEG_X,
+            glam::Vec3::NEG_Z, // 朝向镜头的侧面
+            glam::Vec3::Z,     // 枪口方向
+        ];
+        let mut lo = f32::MAX;
+        let mut hi = 0.0;
+        for d in dirs {
+            let n = d.normalize();
+            let c = fp_gun_bake_color(n, raw, boost);
+            for ch in c {
+                assert!(ch.is_finite() && (0.0..=1.0).contains(&ch), "{:?} → {:?}", n, c);
+                lo = lo.min(ch);
+                hi = hi.max(ch);
+            }
+        }
+        assert!(lo > 0.03, "最暗面不应是纯黑，实际 {}", lo);
+        assert!(hi < 0.99, "最亮面不得削顶，实际 {}", hi);
+        assert!(
+            hi / lo >= 4.0,
+            "明暗比过小说明仍是平面剪影：{:.4} / {:.4}",
+            hi,
+            lo
+        );
+    }
 }
  

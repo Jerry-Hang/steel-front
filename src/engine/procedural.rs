@@ -299,45 +299,54 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
             let rut = 1.0 - smoothstep(0.35, 1.6, (across - 2.4).abs());
             let mut c = [0.115 + speck, 0.120 + speck, 0.128 + speck];
             c = lerp3(c, [0.150, 0.152, 0.158], rut * 0.55);
-            // 中线：三处必须一起改，只改一处都无效（上一轮只加宽+压饱和，
-            // 2026-09-01 实机复验仍读成"从枪口铺到地平线的发光跑道"）。
-            // ① 宽度 ≥1 纹素；② 必须断续（3m 漆 + 3m 空）；③ 对比压到沥青约 1.5 倍。
+            // 中线：三处必须一起改，只改一处都无效。
+            // ① **宽度必须 ≥4 纹素**。地面是 1024² 覆盖 512m = 2 纹素/米；旧值半宽
+            //    0.5m（全宽 1m = 2 纹素）看似够，但它是"亮线夹在暗路面里"，mip 一平均
+            //    亮度就摊到整条路上。实机截图里那根从准星直插地平线的黄绿发光竖带就是这么
+            //    来的 —— D7 的"发光跑道"其实从未消失，只是从"画太亮"变成了"纹素太细被糊成光带"。
+            //    现在半宽 1.2m = 全宽 2.4m ≈ 5 纹素，到 mip2 仍能保住一条线形。
+            // ② **对比必须压到 1.4 倍以内**，这是上一条没解决的结构问题：只要"亮线/暗底"
+            //    的亮度比够大，mip 平均后亮线的能量必然守恒地摊进周围若干米，形成一条
+            //    沿视线延伸到地平线的高亮带 —— 加宽只会让它更亮，降饱和也救不了亮度。
+            //    旧值 0.230 对沥青 0.115 是 2.0 倍，现在 0.175 对 0.120 约 1.45 倍，
+            //    近看仍能读出是道路标记，远看不再自发光。
+            // ③ 必须断续（3m 漆 + 3m 空）：连续线沿视线一路延伸到地平线，透视下占据极大屏幕角。
             let g = along * (1.0 / 6.0);
             let dashed = (g - g.floor()) < 0.5;
-            if (dx < 0.5 || dz < 0.5) && dashed {
-                c = [0.230, 0.210, 0.145]; // 磨损黄色中线（断续）
-            } else if (dx > 4.4 && dx < 4.75) || (dz > 4.4 && dz < 4.75) {
-                c = [0.215, 0.215, 0.220]; // 路缘磨损条
+            if (dx < 1.2 || dz < 1.2) && dashed {
+                c = [0.175, 0.162, 0.118]; // 磨损黄色中线（断续、低对比）
+            } else if (dx > 4.1 && dx < 4.9) || (dz > 4.1 && dz < 4.9) {
+                c = [0.185, 0.185, 0.190]; // 路缘磨损条（同样压对比）
             }
             c
         }
         3 => {
             // 人行道：4m 方砖，逐块明度抖动 + 砂浆缝。
-            // ⚠ 地面纹理是 512² 覆盖 512m = **1 纹素/米**，所以砖格周期与缝宽都必须
-            // 落在纹素网格上：2m 砖 + 0.1m 缝 = 缝只有 0.1 个纹素，必然混叠消失
-            // （D7 同一条教训）。改成 4m 砖 + 0.6m 缝，缝≈1 纹素，近看是网格、
-            // 远看自动平均成色调变化，不会闪。
+            // ⚠ **缝宽必须 ≥2 纹素**（本纹理 2 纹素/米 → 至少 1.0m）。第一版写 0.10m、
+            // 第二版写 0.6m，实机截图里方砖格线**完全看不见** —— 低于 2 纹素的特征违反
+            // 奈奎斯特，各向异性也救不回来（它只能保住方向性细节，不能凭空造出采样不到
+            // 的信息）。这不是过滤参数问题，是内容比纹理本身还细。
             let bx = (x * 0.25).floor() as i32;
             let bz = (z * 0.25).floor() as i32;
             let tone = 0.86 + unit_from_hash(hash2(bx, bz, seed.wrapping_add(70))) * 0.30;
             let sx = x.rem_euclid(4.0);
             let sz = z.rem_euclid(4.0);
             let base = [0.255 * tone, 0.248 * tone, 0.238 * tone];
-            if sx < 0.6 || sz < 0.6 {
+            if sx < 1.0 || sz < 1.0 {
                 [0.170, 0.165, 0.158]
             } else {
                 base
             }
         }
         4 => {
-            // 广场铺装：8m 大板，暖砂岩色相 + 逐板抖动 + 分缝（同上，缝必须 ≥1 纹素）
+            // 广场铺装：8m 大板，暖砂岩色相 + 逐板抖动 + 分缝（同上，缝 ≥2 纹素）
             let bx = (x * 0.125).floor() as i32;
             let bz = (z * 0.125).floor() as i32;
             let tone = 0.88 + unit_from_hash(hash2(bx, bz, seed.wrapping_add(71))) * 0.26;
             let sx = x.rem_euclid(8.0);
             let sz = z.rem_euclid(8.0);
             let base = [0.290 * tone, 0.258 * tone, 0.208 * tone];
-            if sx < 0.7 || sz < 0.7 {
+            if sx < 1.2 || sz < 1.2 {
                 [0.195, 0.174, 0.143]
             } else {
                 base
@@ -399,6 +408,86 @@ pub fn generate_city_ground_texture(
         }
     }
     out
+}
+
+/// 地面微细节 tile 边长（像素）。512 与皮肤纹理同尺寸，共用 mip 级数算法。
+pub const GROUND_DETAIL_SIZE: u32 = 512;
+
+/// 一个细节 tile 覆盖的世界边长（米）。512px / 2m = **256 纹素/米**，
+/// 而宏观地面纹理只有 2 纹素/米 —— 差 128 倍，这正是"地面近看像糊上去的"的量级。
+pub const GROUND_DETAIL_METRES: f32 = 2.0;
+
+/// 周期性格点哈希：格坐标按 `period` 取模后再哈希，**保证 tile 无缝**。
+///
+/// 必须取模。直接对 `ix` 哈希的话，tile 左右边缘落在不同格点上，平铺处会出现一条
+/// 明显的接缝亮线——而细节层是按 2m 高频重复的，接缝会铺满整个地面，比现在更糟。
+fn periodic_grid_hash(ix: i32, iy: i32, period: i32, seed: u32) -> f32 {
+    let wx = ix.rem_euclid(period);
+    let wy = iy.rem_euclid(period);
+    unit_from_hash(hash2(wx, wy, seed))
+}
+
+/// 双线性插值的周期性值噪声（无缝）。
+fn periodic_noise(x: f32, y: f32, cells: f32, seed: u32) -> f32 {
+    let p = cells as i32;
+    let fx = x * cells;
+    let fy = y * cells;
+    let ix = fx.floor() as i32;
+    let iy = fy.floor() as i32;
+    let tx = fx - fx.floor();
+    let ty = fy - fy.floor();
+    let sx = tx * tx * (3.0 - 2.0 * tx);
+    let sy = ty * ty * (3.0 - 2.0 * ty);
+    let a = periodic_grid_hash(ix, iy, p, seed);
+    let b = periodic_grid_hash(ix + 1, iy, p, seed);
+    let c = periodic_grid_hash(ix, iy + 1, p, seed);
+    let d = periodic_grid_hash(ix + 1, iy + 1, p, seed);
+    (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sy
+}
+
+/// 生成地面微细节纹理（RGBA8，线性，中性均值 1.0 以便乘法混合）。
+///
+/// ## 为什么需要它
+/// 2026-09-01 实测确认：宏观地面纹理**已经正确绑定并采样**（屏幕上能看到街道网格、
+/// 人行道带、道路中线，与 `generate_city_ground_texture` 的 dump 一一对应），
+/// 各向异性过滤也已开启（`renderer.rs:1399`，16x）。地面仍然糊，根因是
+/// **纹素密度**：1024² 覆盖 512m = 2 纹素/米，4m 方砖只有 8 纹素，退到 20m 外
+/// 一个像素就要盖好几米，只能跳高 mip 把砖缝平均掉。提高宏观分辨率是 4 倍代价换
+/// 4 倍密度且启动烘焙要几十秒；平铺细节层是常数代价换 128 倍密度。
+///
+/// ## 三个倍频
+/// 骨料(高频) + 斑驳(中频) + 裂纹(低频带方向性)，合成一个"什么材质都能压一层"的
+/// 通用颗粒。存的是**亮度调制**（均值 1.0），片元里乘到基色上，所以不需要知道分区。
+/// 无缝性由 `periodic_noise` 保证，可任意 REPEAT。
+pub fn generate_ground_detail_texture(size: u32, seed: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (size as usize) * (size as usize) * 4];
+    for py in 0..size {
+        let v = (py as f32 + 0.5) / size as f32;
+        for px in 0..size {
+            let u = (px as f32 + 0.5) / size as f32;
+            // 倍频必须是 tile 边长的整数倍，否则取模后格点也对不上
+            let grit = periodic_noise(u, v, 64.0, seed);
+            let blot = periodic_noise(u, v, 16.0, seed.wrapping_add(1));
+            let crack = periodic_noise(u, v, 8.0, seed.wrapping_add(2));
+            // 裂纹：窄带，用 1-|2n-1| 的幂次压细
+            let crack_line = (1.0 - (crack * 2.0 - 1.0).abs()).powf(6.0);
+            let mut lum = 0.86 + grit * 0.20 + blot * 0.14 - crack_line * 0.22;
+            // 归一到均值≈1.0，避免整层细节把地面系统性压暗或提亮
+            lum *= 1.02;
+            let byte = (lum.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let idx = ((py * size + px) * 4) as usize;
+            out[idx] = byte;
+            out[idx + 1] = byte;
+            out[idx + 2] = byte;
+            out[idx + 3] = 255;
+        }
+    }
+    out
+}
+
+/// 缺省种子的地面细节纹理。
+pub fn generate_default_ground_detail_texture() -> Vec<u8> {
+    generate_ground_detail_texture(GROUND_DETAIL_SIZE, DEFAULT_SEED)
 }
 
 // ============================================================

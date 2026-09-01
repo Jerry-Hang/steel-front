@@ -18,6 +18,14 @@ fn main() {
     let (device, queue) = create_device(&inst, phys).expect("璁惧鍒涘缓澶辫触");
     println!("妯℃嫙: {} 灏勭嚎 x {} 杩唬 x {} 杞?(姣忚疆閲嶅缓AS+娓呴浂hits+璇诲洖楠岃瘉)", rays, iters, rounds);
 
+    if args.iter().any(|a| a == "--vram") {
+        println!("== RT Memory Capacity Probe ==");
+        match rt_impl::vram_probe(&device, &inst, phys) {
+            Ok(()) => println!("probe done"),
+            Err(e) => println!("probe fail: {e}"),
+        }
+        return;
+    }
     match rt_test(&device, &queue, &inst, phys, rays, iters, rounds) {
         Ok(r) => {
             println!("");

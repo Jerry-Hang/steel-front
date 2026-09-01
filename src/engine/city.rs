@@ -207,16 +207,25 @@ impl City {
         self.push(Part::new(kind, x, z, w, d, UNDER_GROUND, h, tint));
     }
 
-    /// 一圈矩形环（女儿墙/台缘/围墙）：4 条边各自成体，转角互相重叠。
-    /// 重叠无害，缺角才致命。
+    /// 一圈矩形环（女儿墙/台缘）。4 条边各自成体，转角互相重叠——重叠无害，缺角才致命。
+    ///
+    /// **短边必须容得下两条厚边**：侧边长度取 `min(w,d) - 2*thick`，一旦 `thick` 接近
+    /// 短边就会算出**负尺寸**，负缩放的盒子会翻面，背面剔除后渲染成两个朝下的尖漏斗
+    /// （2026-09-01 实机截图里广场正中那个"信封状悬浮平板"就是这么来的——仓库卷帘门框
+    /// `rim(..., 4.4, 0.40, 0.40, ...)` 算出 `0.40 - 0.80 = -0.40`）。
+    /// 现在短于 2 个厚度的方向直接不生成侧边，并由 `no_degenerate_geometry` 测试兜底。
     fn rim(&mut self, x: f32, z: f32, w: f32, d: f32, thick: f32, base: f32, top: f32, tint: [f32; 3]) {
         let hw = w * 0.5;
         let hd = d * 0.5;
         let t = thick.max(MIN_AXIS);
         self.deco(Part::new(ObstacleKind::Building, x, z - hd + t * 0.5, w, t, base, top, tint));
         self.deco(Part::new(ObstacleKind::Building, x, z + hd - t * 0.5, w, t, base, top, tint));
-        self.deco(Part::new(ObstacleKind::Building, x - hw + t * 0.5, z, t, d - 2.0 * t, base, top, tint));
-        self.deco(Part::new(ObstacleKind::Building, x + hw - t * 0.5, z, t, d - 2.0 * t, base, top, tint));
+        // 侧边沿 z 走，可用长度是 d 扣掉上下两条边；扣完放不下就不生成
+        let side = d - 2.0 * t;
+        if side >= MIN_AXIS {
+            self.deco(Part::new(ObstacleKind::Building, x - hw + t * 0.5, z, t, side, base, top, tint));
+            self.deco(Part::new(ObstacleKind::Building, x + hw - t * 0.5, z, t, side, base, top, tint));
+        }
     }
 
     fn finish(self) -> LevelMap {
@@ -584,8 +593,8 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
     for (dx, dz) in [(-13.0f32, -13.0), (13.0, -13.0), (-13.0, 13.0), (13.0, 13.0)] {
         let (ax, az) = (cx + dx, cz + dz);
         c.push(Part::new(ObstacleKind::Building, ax, az, 4.0, 4.0, UNDER_GROUND, 0.62, GRANITE));
-        c.deco(Part::new(ObstacleKind::Tree, ax, az, 3.4, 3.4, 0.55, 1.95, TREE_LEAF_2).ico());
-        c.deco(Part::new(ObstacleKind::Tree, ax - 0.9, az + 0.6, 1.5, 1.5, 1.4, 2.7, TREE_LEAF_3).ico());
+        c.deco(Part::new(ObstacleKind::Tree, ax, az, 3.4, 3.4, 0.55, 1.95, TREE_LEAF_2).sph());
+        c.deco(Part::new(ObstacleKind::Tree, ax - 0.9, az + 0.6, 1.5, 1.5, 1.4, 2.7, TREE_LEAF_3).sph());
     }
 
     // 长椅：座面 + 靠背 + 四条腿（旧版是一块悬空的板）
@@ -655,63 +664,78 @@ fn park(c: &mut City, cx: f32, cz: f32) {
     }
 }
 
-/// 一棵有体积的树。树冠**不再压成 1.6m 的饼**——旧版三层扁二十面体叠起来读作
-/// "绿色混凝土板"，是"纸片树"投诉的直接来源。
+/// 一棵有体积的树。
+///
+/// ## 两次误诊，都记下来免得再犯
+/// 实机截图里树是"一簇彼此分离的扁平绿片"。我先归因给**顶点抖动撕裂**——错的：
+/// `build.rs:59` 那段 foliage 揉皱在 `vs_main`（传统顶点管线）里，而本机日志明确跑
+/// mesh 路径，mesh 路径的 `m_ico`/`m_sph`/`is_tree` 分支直接取 `ICO_POS`/`SPH_POS`，
+/// **没有任何逐顶点位移**。接着想靠"12 顶点换 42 顶点"解决，也只对了一半。
+///
+/// 真因是**我自己叠出来的**：一棵树放了 3 个半径不同、圆心互相错开 0.4~0.5m 的
+/// 多面体，而本引擎法线来自屏幕导数 → **每个三角面纯平着色**。三个凸多面体互相
+/// 穿插 + 硬明暗切面，读起来就是一堆散乱碎玻璃。网格本身一直是水密的。
+///
+/// ## 现在的做法
+/// 1. **两个冠而不是三个**，且**同心**（只允许很小的偏心），避免穿插产生的碎片轮廓；
+/// 2. 一律 [`Shape::Sphere`]（42 顶点 / 80 三角），面数够多，平着色下也接近圆润；
+/// 3. 冠高与冠宽接近等轴（不再压成饼），下缘落在树干顶附近，遮住"冠与干的接缝"。
 fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
     let k = mixf(i, j, 0.85, 1.25);
     let trunk_h = mixf(i + 5, j, 3.0, 4.4);
+    // 树干：圆柱，底部略粗（两段叠出锥形感）
     c.push(Part::new(ObstacleKind::Tree, x, z, 0.52 * k, 0.52 * k, UNDER_GROUND, trunk_h * 0.55, TREE_BARK).cyl());
-    c.push(Part::new(ObstacleKind::Tree, x, z, 0.38 * k, 0.38 * k, trunk_h * 0.5, trunk_h, TREE_BARK).cyl());
+    c.push(Part::new(ObstacleKind::Tree, x, z, 0.38 * k, 0.38 * k, trunk_h * 0.5, trunk_h + 0.6, TREE_BARK).cyl());
     let leaf = [TREE_LEAF, TREE_LEAF_2, TREE_LEAF_3][(i + j).rem_euclid(3) as usize];
-    c.deco(Part::new(ObstacleKind::Tree, x, z, 3.9 * k, 3.9 * k, trunk_h - 0.9, trunk_h + 2.5 * k, leaf).ico());
+    // 主冠：同心、接近等轴，把树干顶端口罩住
+    let r = 2.15 * k;
     c.deco(
         Part::new(
             ObstacleKind::Tree,
-            x + 0.5 * k,
-            z - 0.4 * k,
-            2.9 * k,
-            2.9 * k,
-            trunk_h + 1.3,
-            trunk_h + 3.7 * k,
+            x,
+            z,
+            r * 2.0,
+            r * 2.0,
+            trunk_h - 0.35,
+            trunk_h - 0.35 + r * 2.05,
             leaf,
         )
-        .ico(),
+        .sph(),
     );
+    // 副冠：小幅度偏心（0.22k 以内，不再互相穿插出尖角），抬高形成树形层次
+    let r2 = 1.35 * k;
     c.deco(
         Part::new(
             ObstacleKind::Tree,
-            x - 0.45 * k,
-            z + 0.5 * k,
-            2.2 * k,
-            2.2 * k,
-            trunk_h + 2.4,
-            trunk_h + 4.4 * k,
-            TREE_LEAF_2,
+            x + 0.20 * k,
+            z - 0.16 * k,
+            r2 * 2.0,
+            r2 * 2.0,
+            trunk_h + r * 1.05,
+            trunk_h + r * 1.05 + r2 * 2.0,
+            leaf,
         )
-        .ico(),
+        .sph(),
     );
 }
 
-/// 灌木：两三团有高度的二十面体。
+/// 灌木：两团同心、不互相穿插的细分球。
 fn bush(c: &mut City, x: f32, z: f32, seed: i32) {
-    for k in 0..3i32 {
-        let ox = mixf(seed, k, -1.1, 1.1);
-        let oz = mixf(k, seed, -1.1, 1.1);
-        let r = mixf(seed + k, seed, 0.9, 1.5);
-        c.deco(
-            Part::new(
-                ObstacleKind::Tree,
-                x + ox,
-                z + oz,
-                r * 2.0,
-                r * 2.0,
-                UNDER_GROUND,
-                r * 1.45,
-                [TREE_LEAF, TREE_LEAF_2, TREE_LEAF_3][k as usize % 3],
-            )
-            .ico(),
-        );
-    }
+    let r = mixf(seed, 1, 0.95, 1.45);
+    c.deco(Part::new(ObstacleKind::Tree, x, z, r * 2.0, r * 2.0, UNDER_GROUND, r * 1.55, TREE_LEAF_2).sph());
+    c.deco(
+        Part::new(
+            ObstacleKind::Tree,
+            x + r * 0.22,
+            z - r * 0.18,
+            r * 1.3,
+            r * 1.3,
+            UNDER_GROUND,
+            r * 1.95,
+            TREE_LEAF_3,
+        )
+        .sph(),
+    );
 }
 
 /// 哨卡/检查站：错缝堆叠的沙袋墙、HESCO 桶、帐篷、车辆残骸、拒马。
@@ -723,7 +747,7 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
             let px = cx + (k as f32 - 2.0) * 1.35 + (row % 2) as f32 * 0.6;
             let py = row as f32 * 0.36;
             c.push(
-                Part::new(ObstacleKind::Barrier, px, cz - 7.0, 1.45, 0.70, on_ground(py), py + 0.48, SANDBAG).ico(),
+                Part::new(ObstacleKind::Barrier, px, cz - 7.0, 1.45, 0.70, on_ground(py), py + 0.48, SANDBAG).sph(),
             );
         }
     }
@@ -731,7 +755,7 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     for k in 0..4i32 {
         let bx = cx + (k as f32 - 1.5) * 4.2;
         c.push(Part::new(ObstacleKind::Block, bx, cz + 7.0, 2.0, 2.0, UNDER_GROUND, 1.5, SANDBAG).cyl());
-        c.deco(Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 1.7, 1.7, 1.5, 1.95, CONCRETE_DARK).ico());
+        c.deco(Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 1.7, 1.7, 1.5, 1.95, CONCRETE_DARK).sph());
     }
     // 帐篷：4 级递减近似双坡面
     let (tx, tz) = (cx - 12.0, cz);
@@ -794,7 +818,7 @@ fn lamp_post(c: &mut City, x: f32, z: f32) {
     c.push(Part::new(ObstacleKind::Block, x, z, 0.34, 0.34, UNDER_GROUND, 2.4, DARK).cyl());
     c.push(Part::new(ObstacleKind::Block, x, z, 0.22, 0.22, 2.4, 6.6, DARK).cyl());
     c.push(Part::new(ObstacleKind::Block, x, z, 1.5, 0.24, 6.6, 6.85, DARK));
-    c.deco(Part::new(ObstacleKind::Block, x + 0.62, z, 0.85, 0.5, 6.32, 6.62, LAMP_GLOW).ico());
+    c.deco(Part::new(ObstacleKind::Block, x + 0.62, z, 0.85, 0.5, 6.32, 6.62, LAMP_GLOW).sph());
     c.deco(Part::new(ObstacleKind::Block, x, z, 0.72, 0.72, UNDER_GROUND, 0.34, GRANITE).cyl());
 }
 
@@ -924,7 +948,7 @@ fn block_edges(c: &mut City, cx: f32, cz: f32) {
                 2 => (cx - s * 0.5 + 2.2, cz + kk * 12.0),
                 _ => (cx + s * 0.5 - 2.2, cz + kk * 12.0),
             };
-            c.deco(Part::new(ObstacleKind::Tree, tx, tz, 1.7, 1.7, UNDER_GROUND, 1.30, TREE_LEAF_3).ico());
+            c.deco(Part::new(ObstacleKind::Tree, tx, tz, 1.7, 1.7, UNDER_GROUND, 1.30, TREE_LEAF_3).sph());
         }
     }
 }
@@ -1262,6 +1286,76 @@ mod city_layout_tests {
         }
     }
 
+    /// 不许存在任何退化尺寸：任一轴向 ≤ 0 或过薄都会产生翻面/漏斗状垃圾几何。
+    ///
+    /// 直接动因：`rim()` 曾用 `d - 2*thick` 算侧边长度，仓库卷帘门框传 `d=0.40,
+    /// thick=0.40` 得到 **-0.40**，负缩放的盒子翻面后被背面剔除掉近正面，
+    /// 于是实机画面里广场正中浮着一块"四个尖角朝下的信封"。这种错误光看代码看不出来，
+    /// 但一条断言就能永久钉死。
+    #[test]
+    fn no_degenerate_geometry() {
+        let m = generate_city();
+        for (i, o) in m.render_geometry().enumerate() {
+            for (axis, v) in [("w", o.half_w * 2.0), ("d", o.half_d * 2.0), ("h", o.half_h * 2.0)] {
+                assert!(
+                    v > 0.05,
+                    "#{} 的 {} 轴尺寸为 {:.3}m（退化/翻面风险）：@({:.1},{:.1}) y={:.2} {:?}",
+                    i,
+                    axis,
+                    v,
+                    o.x,
+                    o.z,
+                    o.y,
+                    o.kind
+                );
+            }
+        }
+    }
+
+    /// 悬空的几何件必须"挂在"别的件上：水平方向重叠，且底面落在对方竖直跨度内
+    /// （被包住）或正落在对方顶面上（被托住）。
+    ///
+    /// 与 `solid_obstacles_reach_the_ground` 互补：那条查结构件堆叠链是否通到地面，
+    /// 这条查薄板类件是否被放到既不在地上也不在楼上的尴尬高度。
+    ///
+    /// ⚠ 这条断言写错过两次，两次都是**断言本身错**、不是场景错，记下来别再改回去：
+    ///   1. 第一版只允许"底面 ≈ 结构件顶面"（±0.35m），于是把**嵌在墙体内的窗带**
+    ///      （底面 1.67m、核心跨 -0.05..28m）误判成悬空——窗带是被核心包住而非压顶。
+    ///   2. 第二版只拿结构件当支撑，于是把**花坛第二层灌木**（底面 1.4m）判成悬空，
+    ///      而它本来就是叠在第一层灌木上的。装饰件之间的堆叠是合法的，
+    ///      所以支撑源必须取全部几何（结构 + 装饰），并排除自己。
+    #[test]
+    fn decor_is_either_buried_or_attached() {
+        let m = generate_city();
+        let all: Vec<&MapObstacle> = m.render_geometry().collect();
+        for o in m.render_geometry() {
+            let bottom = o.y - o.half_h;
+            if bottom <= 0.0 || bottom >= 3.0 {
+                continue;
+            }
+            let attached = all.iter().any(|s| {
+                if std::ptr::eq(*s, o) {
+                    return false;
+                }
+                let overlaps_xz = (s.x - o.x).abs() <= s.half_w + o.half_w
+                    && (s.z - o.z).abs() <= s.half_d + o.half_d;
+                let s_bottom = s.y - s.half_h;
+                let s_top = s.y + s.half_h;
+                let enclosed = bottom > s_bottom && bottom < s_top;
+                let rests = (s_top - bottom).abs() < 0.35;
+                overlaps_xz && (enclosed || rests)
+            });
+            assert!(
+                attached,
+                "几何件悬空在 y={:.2}：水平方向没有包住它或托住它的其它件 @({:.1},{:.1}) {:?}",
+                bottom,
+                o.x,
+                o.z,
+                o.kind
+            );
+        }
+    }
+
     /// 不许出现"整块地台板"：水平跨度大、却只抬起一点点的大平板。
     ///
     /// 这条是 `no_paper_thin_geometry` 的**补漏**。前者豁免了"底面埋进地下"的件
@@ -1314,22 +1408,24 @@ mod city_layout_tests {
         }
     }
 
-    /// 形状标签必须真的用上了：城市里应同时存在立方、圆柱与二十面体。
+    /// 形状标签必须真的用上了：城市里应同时存在立方、圆柱与细分球。
     /// 这条断言的意义是防止有人把 `geom()` 调用又删回盒子。
+    /// 2026-09-01：树冠/沙袋从 `Ico` 全量改成了 `Sphere`（12 顶点二十面体平着色
+    /// 远看像碎玻璃），所以这里统计的是 Sphere 而不是 Ico。
     #[test]
     fn city_uses_more_than_boxes() {
         let m = generate_city();
         let mut cyl = 0;
-        let mut ico = 0;
+        let mut sph = 0;
         for ob in m.render_geometry() {
             match ob.shape {
                 Shape::Cylinder => cyl += 1,
-                Shape::Ico => ico += 1,
+                Shape::Sphere => sph += 1,
                 _ => {}
             }
         }
         assert!(cyl > 100, "圆柱件只有 {}：灯杆/树干/桶又退回盒子了", cyl);
-        assert!(ico > 100, "二十面体件只有 {}：树冠/沙袋又退回盒子了", ico);
+        assert!(sph > 100, "细分球件只有 {}：树冠/沙袋又退回二十面体或盒子了", sph);
     }
 
     /// 相邻表面之间必须有可辨识的台阶，否则掠射角下两面落到同一批像素。

@@ -117,12 +117,23 @@ pub fn rt_test(
     rounds: u32,
 ) -> Result<RtResult, String> {
     unsafe {
-        let boxes = [
+        let small = [
             ([0.0f32, -0.5, 0.0], [50.0f32, 0.5, 50.0]),
             ([1.0f32, 1.0, 0.0], [2.0f32, 2.0, 1.0]),
             ([-4.0f32, 1.5, -2.0], [1.5f32, 1.5, 1.5]),
             ([0.5f32, 1.0, 5.0], [0.8f32, 0.8, 0.8]),
         ];
+        let mut boxes: Vec<([f32; 3], [f32; 3])> = small.to_vec();
+        // 大场景：1024 伪随机盒（深 BVH + 多次命中 = 真实游戏型负载！）
+        let mut seed = 0x12345678u32;
+        let mut rnd = || { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); (seed >> 8) as f32 / 16777216.0 };
+        for _ in 0..1000 {
+            let cx = (rnd() - 0.5) * 60.0;
+            let cy = rnd() * 12.0;
+            let cz = (rnd() - 0.5) * 60.0;
+            let h = 0.4 + rnd() * 2.0;
+            boxes.push(([cx, cy, cz], [h, h, h]));
+        }
         let mut verts: Vec<u8> = Vec::new();
         let mut idxs: Vec<u32> = Vec::new();
         let boxidx = box_indices();
@@ -319,5 +330,80 @@ pub fn rt_test(
         dev.destroy_shader_module(module, None);
         dev.destroy_command_pool(cpool, None);
         Ok(RtResult { best_mrays: best, median_mrays: best, total_hits: 0, rounds_mrays: vec![best] })
+    }
+}
+
+// ---------- RT 显存容量探测（分配到失败！） ----------
+pub fn vram_probe(dev: &ash::Device, instance: &ash::Instance, phys: vk::PhysicalDevice) -> Result<(), String> {
+    unsafe {
+        let mprops = instance.get_physical_device_memory_properties(phys);
+        let total: u64 = mprops.memory_heaps.iter().filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL)).map(|h| h.size).sum();
+        println!("显存总量 (DEVICE_LOCAL): {:.2} GB", total as f64 / 1e9);
+        // 类型索引
+        let mut dev_idx = 0u32;
+        for (i, t) in mprops.memory_types.iter().enumerate() {
+            if t.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL) { dev_idx = i as u32; break; }
+        }
+        // ① 纯缓冲区最大可分配（倍增法！）
+        let mut cur = 1u64 << 20; // 1MB 起步
+        let mut last_ok = 0u64;
+        let mut bufs: Vec<vk::Buffer> = Vec::new();
+        let mut mems: Vec<vk::DeviceMemory> = Vec::new();
+        loop {
+            let b = dev.create_buffer(&vk::BufferCreateInfo::default().size(cur).usage(vk::BufferUsageFlags::STORAGE_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE), None);
+            match b {
+                Ok(buf) => {
+                    let r = dev.get_buffer_memory_requirements(buf);
+                    let ai = vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_index(dev_idx);
+                    match dev.allocate_memory(&ai, None) {
+                        Ok(mem) => {
+                            let _ = dev.bind_buffer_memory(buf, mem, 0);
+                            bufs.push(buf); mems.push(mem);
+                            last_ok = cur;
+                            cur = cur.saturating_mul(2);
+                            if cur > (1u64 << 33) { break; } // 8GB 封顶
+                        }
+                        Err(_) => { dev.destroy_buffer(buf, None); break; }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        println!("最大连续单块缓冲: {:.2} GB ({:.0} MiB)", last_ok as f64 / 1e9, last_ok as f64 / 1048576.0);
+        // 多块合计（4MB 小片直到失败 = 实际可用总量！）
+        let mut sum_all = last_ok;
+        loop {
+            let b = dev.create_buffer(&vk::BufferCreateInfo::default().size(4u64 << 20).usage(vk::BufferUsageFlags::STORAGE_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE), None);
+            match b {
+                Ok(buf) => {
+                    let r = dev.get_buffer_memory_requirements(buf);
+                    let ai = vk::MemoryAllocateInfo::default().allocation_size(r.size).memory_type_index(dev_idx);
+                    match dev.allocate_memory(&ai, None) {
+                        Ok(mem) => { let _ = dev.bind_buffer_memory(buf, mem, 0); bufs.push(buf); mems.push(mem); sum_all += r.size; }
+                        Err(_) => { dev.destroy_buffer(buf, None); break; }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        println!("多块合计可分配: {:.2} GB（实际可用显存）", sum_all as f64 / 1e9);
+        println!("  -> 射线命中计数 (4B/ray): {:.2} 亿射线", sum_all as f64 / 4.0 / 1e8);
+        println!("  -> 顶点数据 (32B/vert): {:.2} 亿顶点", sum_all as f64 / 32.0 / 1e8);
+        println!("  -> TLAS 实例 (64B/inst): {:.0} 万实例", sum_all as f64 / 64.0 / 10000.0);
+        println!("  -> 射线命中计数器 (4B/ray): {:.2} 亿射线", last_ok as f64 / 4.0 / 1e8);
+        println!("  -> 顶点数据 (pos+normal+uv 32B/vert): {:.1} 亿顶点", last_ok as f64 / 32.0 / 1e8);
+        // ② AS 几何容量（每盒 AS 存储 ~1344B 估算来自 4盒=5376B；hits 规模测）
+        let per_box_as = 5376u64 / 4;
+        let as_box_cap = last_ok / per_box_as;
+        println!("  -> 加速结构几何容量 (BLAS 存储, ~{:.0} B/盒): ~{:.0} 万盒 = ~{:.1} 亿三角", per_box_as as f64, as_box_cap as f64 / 10000.0, as_box_cap as f64 * 12.0 / 1e8);
+        println!("  -> TLAS 实例容量 (64B/实例): {:.0} 万实例", last_ok as f64 / 64.0 / 10000.0);
+        // ③ 每帧建议（参考：24 位深 BVH 中每射线 ~100B 工作集）
+        let per_ray_budget = 100.0f64;
+        println!("  -> 每帧射线预算 (100B/射线工作集): {:.1} 亿射线/帧", last_ok as f64 / per_ray_budget / 1e8);
+        println!("  -> 1080p 全屏 1 bounce: ~200 万射线 => 可缓存 {:.0} 帧", last_ok as f64 / (2073600.0 * 100.0));
+        // 清理
+        for b in bufs { dev.destroy_buffer(b, None); }
+        for m in mems { dev.free_memory(m, None); }
+        Ok(())
     }
 }

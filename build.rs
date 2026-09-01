@@ -143,6 +143,21 @@ const SPEC_CONTRIB: f32 = 0.4;
 // 绑定号必须与 renderer.rs init_descriptors / update_texture_descriptor_sets 同步）
 @group(0) @binding(7) var marker_skin_tex: texture_2d<f32>;
 @group(0) @binding(8) var npc_skin_tex: texture_2d<f32>;
+// 地面微细节层（procedural.rs::generate_default_ground_detail_texture，2m 一 tile）。
+// 绑定号 9 是本 set layout 里的第一个空位（0..8 已被 camera/主纹理/instances/sampler/
+// light UBO/shadow map/shadow sampler/两张皮肤占用）；采样器复用 binding 3 的
+// texture_sampler（REPEAT + LINEAR/LINEAR mip + max_lod=mip_levels-1，正好够用）。
+@group(0) @binding(9) var ground_detail_tex: texture_2d<f32>;
+// 与 procedural.rs 的 GROUND_DETAIL_METRES / GROUND_DETAIL_SIZE 严格同步（改了必须两边改）
+const GROUND_DETAIL_METRES: f32 = 2.0;
+// 一个纹素的米数 = 2.0 / 256
+const GROUND_DETAIL_TEXEL_M: f32 = 0.0078125;
+// 纹素 → 亮度调制的增益。约定 **纹素 r = 调制值 / 2**（调制 1.0 → 128），这样
+// 0..2 的调制能完整落进 8bit 而不被 clamp 掉上限（直接存 mod 的话凡是 >1 的
+// 提亮部分全被削成 255，均值会掉到 1 以下，地面整体只会变暗不会变亮）。
+// ⚠ 该纹理必须以 **UNORM（线性）view** 创建，不能沿用现有 SRGB 的那个 helper：
+//   128 经 sRGB 解码是 0.214，乘 2 得 0.43 → 全场地面暗一半。
+const GROUND_DETAIL_GAIN: f32 = 2.0;
 // 阴影贴图（2026-08-11）：depth-only pass 渲光空间深度，片元 3x3 PCF 深度比较
 @group(0) @binding(5) var shadow_map: texture_depth_2d;
 @group(0) @binding(6) var shadow_sampler: sampler;
@@ -202,21 +217,58 @@ fn fog_amount(d: f32) -> f32 {
 // 世界坐标格点哈希 → 值噪声。频率锚定在"米"上，与物体尺寸、与逐面 0..1 UV 都无关，
 // 所以 24m 大立面和 0.3m 木箱得到相同的纹素密度。旧的逐面 0..1 UV 是"纸片感"的
 // 主要来源之一：同一张皮肤图被拉伸到 80 倍尺度差的不同面上。
-fn hash12(p: vec2<f32>) -> f32 {
-    var q = fract(p * vec2<f32>(127.1, 311.7));
-    q = q + dot(q, q.yx + 33.33);
-    return fract((q.x + q.y) * q.x);
+//
+// ⚠ 必须是 u32 **位混淆**（与 mesh 路径 terrain_lattice_hash 同族）。旧实现是
+// "乘常数取小数"：fract(127.1*i) = fract(0.1*i) 只跟 i 的个位数走 → 整数格点上以
+// 10 为周期重复。fp32 复现（tools 外的一次性脚本）实测 i=0..29 只有 21 个不同值，
+// 且 i 为 10 的倍数时两个分量同时归零 → 哈希恒等于 0.0。
+// 后果不是"噪点不够好看"而是**画出具体的线**：细频格距 1/1.7=0.59m，周期 10 格
+// = 5.9m，于是地面与立面上每隔 5.9m 就有一条被压暗 ~3.5% 的通长直格线，外加一批
+// 恒零格点连成的暗斑。玩家报"整个画面大量线条"，其中一条就是这个（世界锚定、
+// 与地面烘焙纹理无关，只在着色器里）。
+fn lattice_hash(ix: i32, iz: i32) -> f32 {
+    var h: u32 = u32(ix) * 0x1B873593u ^ u32(iz) * 0xCC9E2D51u;
+    h = h ^ (h >> 16u);
+    h = h * 0x7FEB352Du;
+    h = h ^ (h >> 15u);
+    h = h * 0x846CA68Bu;
+    h = h ^ (h >> 16u);
+    return f32(h & 0xFFFFu) / 65535.0;
 }
 
 fn vnoise2(p: vec2<f32>) -> f32 {
-    let i = floor(p);
+    let i = vec2<i32>(floor(p));
     let f = fract(p);
     let u = f * f * (3.0 - 2.0 * f);
-    let a = hash12(i);
-    let b = hash12(i + vec2<f32>(1.0, 0.0));
-    let c = hash12(i + vec2<f32>(0.0, 1.0));
-    let d2 = hash12(i + vec2<f32>(1.0, 1.0));
+    let a = lattice_hash(i.x, i.y);
+    let b = lattice_hash(i.x + 1, i.y);
+    let c = lattice_hash(i.x, i.y + 1);
+    let d2 = lattice_hash(i.x + 1, i.y + 1);
     return mix(mix(a, b, u.x), mix(c, d2, u.x), u.y);
+}
+
+// 世界坐标各轴的屏幕足迹（米/像素，绝对值）。凡"按米定义频率"的着色项（风化斑驳、
+// 窗带、玻璃分格、阴影核宽度）都必须用它来收敛或做盒式平均。
+//
+// ⚠ 不要用 fwidth(uv) 代替：marker/NPC 的 uv 是**逐面铺满 0..1** 的，同一个 foot
+// 数值对 1m 木箱和对 30m 大楼意味着相差 30 倍的世界尺度。D11 窗带正是拿 uv 域的
+// detail 去收敛一个世界域信号，结果大立面上要到一个像素盖 6.6m 才开始收，中间整段
+// 都在亚像素采样 → 相机一移动就满楼爬莫尔线（缺陷单"移动时大量线条"的第二条）。
+// fwidth 必须在一致控制流里取，所以这里无条件调用，调用方丢掉不用的分量。
+fn world_derivatives(world_pos: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(abs(fwidth(world_pos.x)),
+                     abs(fwidth(world_pos.y)),
+                     abs(fwidth(world_pos.z)));
+}
+
+// 把"世界坐标里的 0/1 条带"在一个像素上**严格盒式平均**：返回条带 [lo,hi]（相位域内）
+// 覆盖该像素的比例 ∈ [0,1]。phase = 像素中心相位，half = 一个像素在该相位域里的半宽。
+// 为什么不是"把 smoothstep 边缘加宽"：那只是让边缘变软，像素盖满一整层时条带内部仍然
+// 顶到 1.0，会把"26% 玻璃 + 74% 混凝土"整面画成纯玻璃 —— 越远越黑，等于自己再造一次黑洞。
+fn band_coverage(phase: f32, half: f32, lo: f32, hi: f32) -> f32 {
+    let a0 = phase - half;
+    let a1 = phase + half;
+    return clamp((min(hi, a1) - max(lo, a0)) / max(a1 - a0, 1e-5), 0.0, 1.0);
 }
 
 // 沿主平面的双频风化斑驳，幅度 ±7%。
@@ -227,18 +279,20 @@ fn vnoise2(p: vec2<f32>) -> f32 {
 // 亚像素细节，混叠成 salt-and-pepper。这正是本项目 D12 已经记过的坑，我自己又踩了一遍。
 // 细频在一个像素盖过 0.22m 时退场，粗频到 1.0m 才退场，两者都走光时返回 1.0（纯平涂，
 // 但至少不闪）。除以权重和是为了只剩一个倍频时幅度不缩水。
-fn weather_stain(world_pos: vec3<f32>, nrm: vec3<f32>) -> f32 {
+//
+// 足迹取**该主平面内两轴**的最大值（旧实现取三轴全局最大）：30m 高的墙只要竖直方向
+// 跨 0.3m/像素，就会把与横向分辨率无关的细频整体关掉，楼脚一片平涂、楼腰突然有细节。
+fn weather_stain(world_pos: vec3<f32>, nrm: vec3<f32>, deriv: vec3<f32>) -> f32 {
     let an = abs(nrm);
     var p = world_pos.xz;
+    var px = max(deriv.x, deriv.z);
     if (an.x > an.y && an.x > an.z) {
         p = world_pos.zy;
+        px = max(deriv.y, deriv.z);
     } else if (an.z > an.x && an.z > an.y) {
         p = world_pos.xy;
+        px = max(deriv.x, deriv.y);
     }
-    let px = max(
-        max(abs(fwidth(world_pos.x)), abs(fwidth(world_pos.y))),
-        max(abs(fwidth(world_pos.y)), abs(fwidth(world_pos.z))),
-    );
     let fine_k = 1.0 - smoothstep(0.05, 0.22, px);
     let coarse_k = 1.0 - smoothstep(0.25, 1.0, px);
     let w = fine_k + coarse_k;
@@ -307,12 +361,48 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     if (dot(normal, view_dir) < 0.0) {
         normal = -normal;
     }
+    let deriv = world_derivatives(input.world_pos);
     var shadow_factor = 0.0;
     var debug_outside = true;
     var d_avg = 0.0;
     var frag_depth = 0.0;
     if (light_data.flags.y >= 0.5 && light_data.shadow.bias.z >= 0.5) {
-        let sp = light_data.shadow.light_view_proj * vec4<f32>(input.world_pos, 1.0);
+        // ---- 光空间帧尺度：从 light_view_proj 反解，零新增 uniform / 零新 pass ----
+        // 正交光矩阵的 3x3 块 = diag(1/extent, 1/extent, 1/(near-far)) · 光相机单位基向量，
+        // 因此**每一行的长度就是该轴的投影缩放**（基向量单位长，与旋转无关）。
+        // 一次性脚本复现 glam 0.29.3 look_to_rh + orthographic_rh 逐位核对过：
+        //   |行0| = 1/400 → extent = 400m；|行2| = 1/799 → 深度 1.0 = 799m（正交→线性）；
+        //   -normalize(行2) = (-0.3885, 0.8742, -0.2914) = game.rs 的 sun.direction（指向太阳）；
+        //   米/texel = 2*400/2048 = 0.390625。
+        let lvp = light_data.shadow.light_view_proj;
+        let row_x = vec3<f32>(lvp[0].x, lvp[1].x, lvp[2].x);
+        let row_z = vec3<f32>(lvp[0].z, lvp[1].z, lvp[2].z);
+        let extent_m = 1.0 / max(length(row_x), 1e-6);
+        let depth_m = 1.0 / max(length(row_z), 1e-6);
+        let map = max(light_data.shadow.config.x, 256.0);
+        let texel = 1.0 / map;
+        let m_per_texel = 2.0 * extent_m / map;
+        let to_light = -normalize(row_z);
+        // ---- bias：从"沿光轴 4 米"改成"texel 与斜率自适应的法线偏移" ----
+        // 旧实现只有一个常量深度 bias = shadow.bias.x = 0.005，而本项目光空间深度是
+        // **线性**的（正交，1.0 = far-near = 799m）→ 0.005 等价于沿光轴 4.0 米。
+        // 受光面到遮挡物的光轴间距每离开墙根 1m 只涨 0.486m（= |L 的水平分量|），于是：
+        //   · 高度 < 3.5m 的物体（木箱/油桶/沙袋/汽车/灯杆/整条窗带）对地面的间距
+        //     不足 4m → **一个阴影都不剩**；
+        //   · 9m 高的楼影全长 5.0m，靠楼根 1.9m 内被吃掉 → 影子整体脱离楼体漂在地上；
+        //   · 0.30/0.44/0.62m 的立面进深台阶（窗带/层线/壁柱）不可能自阴影 → 楼体零层次。
+        // 这三条合起来就是玩家原话："阴影像刻意贴在地面上的一张贴图" + "楼像纸片/不 3D"。
+        // 新做法：① 采样点沿法线外推 push_m = (1.25 + 0.9·斜率)·texel，斜率封顶 1.6
+        // （acne 只出现在掠光方向，按斜率给才不用一刀切压暗全场；不封顶的话背光面
+        //  斜率→∞，横推 2m 反而把墙根的影子从地面上抹掉）；② 只留 0.12m 常量深度
+        // bias 兜浮点余量；③ **bias.x 的语义改为"米"**并 clamp 到 ≤0.5m：现值 0.005
+        // 旧语义是 4m、新语义是 5mm≈无，所以不改 Rust 侧数值就能立刻拿到正确行为
+        // （要回退请改 lighting.rs::DEFAULT_SHADOW_DEPTH_BIAS，别再指望 shader 兼容旧量纲）。
+        let ndotl = clamp(dot(normal, to_light), 0.0, 1.0);
+        let slope = min(sqrt(max(0.0, 1.0 - ndotl * ndotl)) / max(ndotl, 0.25), 1.6);
+        let push_m = light_data.shadow.bias.y + m_per_texel * (1.25 + 0.9 * slope);
+        let bias_d = (min(light_data.shadow.bias.x, 0.5) + 0.12) / depth_m;
+        let sp = lvp * vec4<f32>(input.world_pos + normal * push_m, 1.0);
         let shadow_uv = vec2<f32>(sp.x * 0.5 + 0.5, 1.0 - (sp.y * 0.5 + 0.5));
         // glam ortho_rh（本版本）产出 [0,1] 深度，与 GPU 写入的阴影图同基准，
         // 禁止再乘 0.5+0.5（OpenGL [-1,1] 旧映射，二重偏移 +0.25 曾致全场误判阴影）。
@@ -321,17 +411,33 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0
             && sp.z >= 0.0 && sp.z <= 1.0) {
             debug_outside = false;
-            let texel = 1.0 / light_data.shadow.config.x;
+            // 核**对齐到 texel 中心**：不 snap 时核的相位随像素在世界里滑，同一个像素的
+            // 9 次比较结果在 0/1 间随机翻 → 阴影边界每隔 0.39m 爬一条线，相机一动整片
+            // 影子轮廓是"活的"（缺陷单"移动时大量线条"的第三条）。snap 后核相对 texel
+            // 网格相位恒定，边界改由下面的分数深度测试连续过渡。
+            let base_uv = (floor(shadow_uv * map) + vec2<f32>(0.5)) * texel;
+            // 中心一次采样估"遮挡物→受光面"的光轴距离 → 接触处硬、远处半影张开。
+            // 0.06 是把太阳张角放大约 6 倍的美术值（真实 0.53°→0.009，会硬得像刀切）。
+            // 再按下限 = 一个像素覆盖的 shadow texel 数加宽：像素盖得下多个 texel 时，
+            // 任何小于足迹的核都会重新量化成台阶（等价于必须按 mip 模糊）。
+            let d_c = textureSample(shadow_map, shadow_sampler, base_uv);
+            let gap_m = max(0.0, frag_depth - bias_d - d_c) * depth_m;
+            let foot_m = max(deriv.x, max(deriv.y, deriv.z));
+            let pen_m = clamp(0.06 * gap_m, 0.45, 4.0) + foot_m;
+            // 核半径（uv 单位）：半影米数 → texel 数 → uv，钳在 [1.5, 5] texel
+            let step_uv = clamp(pen_m / m_per_texel, 1.5, 5.0) * texel;
+            // 深度方向的软过渡宽度：至少一个 texel，否则 NEAREST 读数的台阶又是硬跳变
+            let w_d = max(pen_m, m_per_texel) / depth_m;
             var occluded = 0.0;
             var dsum = 0.0;
             for (var dy = -1; dy <= 1; dy = dy + 1) {
                 for (var dx = -1; dx <= 1; dx = dx + 1) {
                     let d = textureSample(shadow_map, shadow_sampler,
-                        shadow_uv + vec2<f32>(f32(dx), f32(dy)) * texel);
+                        base_uv + vec2<f32>(f32(dx), f32(dy)) * step_uv);
                     dsum = dsum + d;
-                    if (frag_depth - light_data.shadow.bias.x > d) {
-                        occluded = occluded + 1.0;
-                    }
+                    // 分数测试（percentage-closer filtering）代替 if/>+1.0：
+                    // 把"9 个 0/1 计票"变成连续量，影子里侧到外侧是渐变而不是 9 档跳变
+                    occluded = occluded + smoothstep(0.0, w_d, frag_depth - bias_d - d);
                 }
             }
             d_avg = dsum / 9.0;
@@ -348,9 +454,14 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     // 半球环境光：上方取天光（冷、满量），下方取地面反弹（暖、约 0.4 倍）。
     // 原来是单一常数环境项 → 檐下、凹角、物体底面与开阔面一样亮，所有东西像贴
     // 在背景上、没有"坐"在地上。分半球后接触面自然压暗，体积感立刻出来。
+    //
+    // 阴影必须**同时吃掉一部分天光**（sky_occ）：旧实现影子只乘方向光，阴影区的环境
+    // 项与开阔地完全等亮 → 影子边缘一过就是一片均匀灰、没有厚度，这也是"贴图像"的一半。
+    // 地面反弹不受头顶遮挡影响，所以只压天光那一支。
     let up = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    let sky_occ = 1.0 - 0.35 * shadow_factor;
     var radiance = light_data.ambient.rgb * light_data.ambient.w
-        * mix(vec3<f32>(0.55, 0.47, 0.38), vec3<f32>(1.0, 1.02, 1.10), up);
+        * mix(vec3<f32>(0.55, 0.47, 0.38), vec3<f32>(1.0, 1.02, 1.10) * sky_occ, up);
     radiance = radiance + evaluate_directional(light_data.directional, normal, view_dir, shininess) * (1.0 - shadow_factor);
     for (var i = 0u; i < 4u; i = i + 1u) {
         radiance = radiance + evaluate_point(light_data.points[i], input.world_pos, normal, view_dir, shininess);
@@ -359,7 +470,72 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     // 同一个 1.0（水平屋顶与 30° 斜面完全同色），大面朝向梯度被抹平成一片"塑料"。
     // 改指数压缩：单调、永不截顶，越亮压缩越狠但顺序不变，朝向差异得以保留。
     let tone = vec3<f32>(1.0) - exp(-radiance * 1.55);
-    return color * tone * weather_stain(input.world_pos, normal);
+    return color * tone * weather_stain(input.world_pos, normal, deriv);
+}
+
+// ============================================================
+// 立面图案（世界坐标定义 + 严格盒式平均；只在 marker 分支调用）
+// ============================================================
+// ⚠ FLOOR_H 必须等于 city.rs 的 FLOOR_H（3.15m）。层带/层线/壁柱/女儿墙全按它排布，
+// 着色器里的"层相位"若与它不同步，暗带就会画在**看得见的**混凝土裙墙和层线上，而不是
+// 画在已被真实窗带盒遮住的玻璃位置 → 整栋楼被切成一道亮一道黑的空框架。
+// （旧值用 3.0m 周期：每层错 0.15m，20 层累积 3m ≈ 一整层，正好把暗带推到混凝土上。）
+const FLOOR_H: f32 = 3.15;
+// 幕墙分格宽度（米）：16m 宽的楼 ≈ 11 格；金属竖梃 0.055*2*1.45 ≈ 16cm
+const GLASS_PANE_W: f32 = 1.45;
+// city.rs::building 的窗带在本层里的标高区间（band_base = fy+0.62，band_top = fy+2.73）
+const BAND_LO: f32 = 0.62;
+const BAND_HI: f32 = 2.73;
+
+// 沿墙横向的世界坐标 u + 该轴的米/像素足迹（两者必须同源，否则竖梃周期与收敛量不匹配）
+fn facade_u(nrm: vec3<f32>, world_pos: vec3<f32>, deriv: vec3<f32>) -> vec2<f32> {
+    // 法线主轴是 X → 该面由 (y,z) 张成 → 横向是 z；主轴是 Z → 横向是 x。
+    // ⚠ 旧 D11 恰好选反（对 |n.x|>|n.z| 的面取 world_pos.x，而该面上 x 是**常数**）
+    // → 竖梃项在每面墙上都退化成同一个常数 → 一根竖梃都画不出来，窗带读成通长的
+    // 近黑横条（缺陷单第 1 条最直接的成因；它只影响带竖梃的那一项，所以一直没被查到这里）。
+    let x_face = abs(nrm.x) > abs(nrm.z);
+    return vec2<f32>(select(world_pos.x, world_pos.z, x_face),
+                     select(deriv.x, deriv.z, x_face));
+}
+
+// 玻璃幕墙底色调制：逐层上亮下暗 + 金属竖梃 + 逐格随机（"这格卷帘放下了/那格开着灯"）。
+// 均值刻意压在 ≈0.95：玻璃必须仍比混凝土墙暗一档，只是不再是一片死平的黑。
+fn glass_shade(nrm: vec3<f32>, world_pos: vec3<f32>, deriv: vec3<f32>) -> f32 {
+    let axes = facade_u(nrm, world_pos, deriv);
+    let u = axes.x;
+    let du = axes.y;
+    // ① 逐层上亮下暗：同层玻璃顶部反射天顶、下沿望进室内深处。与真实窗带同锁相位，
+    //    所以带体内（本层的 BAND_LO~BAND_HI）正好走完 1.28→0.74 这一趟渐变。
+    let ph = fract(world_pos.y * (1.0 / FLOOR_H));
+    let grad = mix(1.28, 0.74, smoothstep(BAND_LO / FLOOR_H, BAND_HI / FLOOR_H, ph));
+    // ② 竖梃：金属框比玻璃亮，把"一整条玻璃"切成一格一格（没有它，窗带就是悬挑黑鳍片）。
+    //    相位 +0.5 让梃落在 [0,1) 内部——否则盒式平均会在 fract 的接缝处算错。
+    let pu = fract(u * (1.0 / GLASS_PANE_W) + 0.5);
+    let half_u = clamp(du * (0.5 / GLASS_PANE_W), 1e-4, 0.5);
+    let mull = band_coverage(pu, half_u, 0.5 - 0.055, 0.5 + 0.055);
+    // ③ 逐格随机：格号 = (开间, 层)。这是**世界哈希**，一个像素盖不满一格时必须收敛，
+    //    否则就是移动时的闪点。（旧实现用 fract(sin(dot(world_pos.xz))) 逐像素随机，
+    //    且收敛量取自 fwidth(uv)——而 ICO/SPH 模板的所有顶点 uv 恒为 (0,0)，
+    //    fwidth=0 → detail 恒等于 1 → 树冠噪声在**任何距离**都是满幅，见 fs_main 的
+    //    is_canopy 分支（那条已改成世界值噪声 + 按米收敛）。）
+    let near = 1.0 - smoothstep(0.10, 0.45, max(du, deriv.y));
+    let pane_i = i32(floor(u * (1.0 / GLASS_PANE_W)));
+    let floor_i = i32(floor(world_pos.y * (1.0 / FLOOR_H)));
+    let rooms = mix(1.0, 0.62 + 0.50 * lattice_hash(pane_i, floor_i), near);
+    return grad * rooms * (1.0 + 0.55 * mull);
+}
+
+// 中性混凝土立面上"窗洞"的暗化量 ∈ [0,1]。半宽上限 0.5 = 一整层：取到时结果恰好等于
+// 一个完整周期的平均覆盖率，于是远处自然收敛到真实灰底而不是越远越黑（盒式平均自带）。
+fn window_dark(nrm: vec3<f32>, world_pos: vec3<f32>, deriv: vec3<f32>) -> f32 {
+    let axes = facade_u(nrm, world_pos, deriv);
+    let half_y = clamp(deriv.y * (0.5 / FLOOR_H), 1e-4, 0.5);
+    let ph = fract(world_pos.y * (1.0 / FLOOR_H));
+    let win = band_coverage(ph, half_y, BAND_LO / FLOOR_H, BAND_HI / FLOOR_H);
+    let pu = fract(axes.x * 0.5 + 0.5);
+    let half_u = clamp(axes.y * 0.25, 1e-4, 0.5);
+    let mull = band_coverage(pu, half_u, 0.5 - 0.07, 0.5 + 0.07);
+    return win * (1.0 - 0.7 * mull);
 }
 
 @fragment
@@ -394,86 +570,160 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // RV3D_SKIN_TEX=1（light_data.flags.z）启用；缺省 0 保持纯色路径（冒烟基线不变）。
     if (input.flat_flag > 0.5) {
         var base: vec3<f32> = input.color;
-        // D12：皮肤/墙面/树冠杂色都是高频信号，远距时一个像素盖住多个细节单元，
-        // MIP 平均后仍残留 salt-and-pepper 闪点（士兵"蓝底白斑平板"、建筑立面满屏麻点）。
-        // 用 fwidth(uv) 直接量出单像素覆盖的纹理面积（marker/NPC 的 uv 每面铺满 0..1，
-        // 故其导数即屏幕足迹的倒数），越迷你越把细节权重收回 tint 均值。
-        // detail=1（近）→ 与旧式逐位一致；detail=0（远）→ 近似纯色，闪点消失。
+        // 世界足迹 + 面法线在这里**统一算一次**：原来 D11、NPC 轮廓分离各自
+        // normalize(cross(dpdx,dpdy)) 一遍，且都在 if 分支里取导数（分支在面的边界上
+        // 非一致控制流，fwidth 属未定义），统一提到分支外既省钱也更稳。
+        let deriv = world_derivatives(input.world_pos);
+        let dmax = max(deriv.x, max(deriv.y, deriv.z));
+        let vdir = normalize(input.view_dir);
+        let cr = cross(dpdx(input.world_pos), dpdy(input.world_pos));
+        var fnrm = normalize(cr);
+        if (dot(fnrm, vdir) < 0.0) {
+            fnrm = -fnrm;
+        }
+        // 退化法线判据：|cross| / |足迹|² ≈ 两条屏幕导数向量的夹角正弦。
+        // 三角形轮廓/亚像素面上它趋 0 → 法线是纯噪声。玻璃的菲涅耳项若不加这道闸，
+        // ndv 会随机取到 0 → fres=1 → **每栋楼的轮廓长出一圈亮边**（自己引入的走样）。
+        let valid_nrm = smoothstep(0.03, 0.22, length(cr) / max(dmax * dmax, 1e-6));
+        // D12：皮肤/迷彩是**逐面 0..1 UV** 域的信号，所以它的收敛量必须用 fwidth(uv)
+        // （一个像素盖过面的 1.5% 就该收）。⚠ 这个 detail 不能拿去收敛任何"按米定义"
+        // 的信号（窗带/玻璃分格/树冠斑驳）：面的物理尺寸从 0.3m 木箱到 30m 大楼差 100 倍，
+        // 同一个 detail 值意味着差 100 倍的世界频率——那条纪律现在由 world_derivatives 承担。
         let foot = max(abs(fwidth(input.uv).x), abs(fwidth(input.uv).y));
         let detail = 1.0 - smoothstep(0.015, 0.22, foot);
-        // 树冠杂色（2026-08-23）：绿色 tint 的障碍，按世界坐标噪声微调颜色 → 团簇感。
-        // 该噪声是世界坐标哈希（无 MIP 可平均），远距必然逐像素乱闪 → 同样按 detail 收敛。
-        if (input.flat_flag < 1.5 && base.g > base.r && base.g > base.b * 1.4) {
-            let hh = fract(sin(dot(input.world_pos.xz, vec2<f32>(0.137, 0.211))) * 43758.5453);
-            base = base * mix(1.0, 0.82 + hh * 0.36, detail);
+        // 玻璃判据（b > r*1.4）沿用 D2 不动；但必须提到皮肤分支**之外**：
+        // 旧代码写在 if (flags.z >= 0.5) 里面，RV3D_SKIN_TEX=0 时这条路径整体不成立。
+        let is_glass = input.flat_flag < 1.5 && input.color.b > input.color.r * 1.4;
+        let is_canopy = input.flat_flag < 1.5
+            && base.g > base.r && base.g > base.b * 1.4;
+        // 树冠杂色（2026-08-23 纸片树修复的第二次修正）：旧实现是**逐像素**随机
+        // fract(sin(dot(world_pos.xz))*43758) 且按 uv 域的 detail 收敛——而 mesh 路径
+        // ICO/SPH 模板所有顶点 uv 恒为 (0,0) → fwidth(uv)=0 → detail 恒为 1 →
+        // 满幅逐像素白噪覆盖整个树冠，站远看就是"一簇彼此分离的、闪着噪点的扁平多边形"，
+        // 相机一移动噪点整体沸腾（缺陷单"移动时大量线条"的第四条来源）。
+        // 改成：① 世界坐标**值噪声**（连续、可平均，格距 ~1.1m = 一团叶子的大小）；
+        //      ② 按米/像素足迹收敛，一个像素盖过 0.25m 就退场。
+        if (is_canopy) {
+            let lump = 1.0 - smoothstep(0.06, 0.25, dmax);
+            let v = vnoise2(input.world_pos.xz * 0.9);
+            base = base * mix(1.0, 0.80 + 0.40 * v, lump);
         }
-        if (light_data.flags.z >= 0.5) {
-            if (input.flat_flag > 1.5) {
-                // NPC 士兵：迷彩军服纹理 × 阵营 tint（去饱和纹素保留色相）
-                let texel = textureSample(npc_skin_tex, texture_sampler, input.uv);
-                let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
-                // 近处幅度 0.55+0.90·luma 与 D1 验收式逐位一致（勿回退），远处收到 0.55+0.12·luma
-                base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
-            } else {
-                // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
-                // 玻璃类 tint（蓝灰系：b 显著大于 r）跳过纹理，保持干净透亮
-                if (input.color.b > input.color.r * 1.4) {
-                    base = input.color;
-                } else {
-                    let texel = textureSample(marker_skin_tex, texture_sampler, input.uv);
-                    base = mix(input.color, texel.rgb, 0.45 * (0.25 + 0.75 * detail));
-                }
-            }
+        if (light_data.flags.z >= 0.5 && input.flat_flag > 1.5) {
+            // NPC 士兵：迷彩军服纹理 × 阵营 tint（去饱和纹素保留色相）
+            let texel = textureSample(npc_skin_tex, texture_sampler, input.uv);
+            let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
+            // 近处幅度 0.55+0.90·luma 与 D1 验收式逐位一致（勿回退），远处收到 0.55+0.12·luma
+            base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
+        } else if (light_data.flags.z >= 0.5 && !is_glass) {
+            // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
+            base = mix(input.color,
+                       textureSample(marker_skin_tex, texture_sampler, input.uv).rgb,
+                       0.45 * (0.25 + 0.75 * detail));
         }
-        // D11：窗带改由片元着色表达（原为每层叠一个独立薄盒）。薄盒在掠射角下自身前后面
-        // 落到同一批像素 → 立面出现 V 形锯齿深度干涉，且外挑读作悬挑鳍片；把条带改薄是反方向。
-        // 这里零新增几何、零深度风险：建筑都坐落 y≈0、层高约 3m，故世界 Y 天然对齐楼层。
-        // 分类一律用 input.color（常量），不用已被皮肤纹理改写的 base。
-        // 只给"中性混凝土立面"加窗：用通道极差判定，天然排除砖墙(红)、木掩体(棕)、
-        // 树冠(绿)等强色相 tint —— 否则围墙上会长出窗户。玻璃判据(b>r*1.4)沿用 D2 不动。
-        if (input.flat_flag < 1.5 && input.color.b <= input.color.r * 1.4) {
+        // 玻璃底面：逐层渐变 + 分格 + 逐格随机（见 glass_shade）。
+        // 只给**近竖直**的面画"层/格"图案：天窗、占领底盘这类横放的蓝面没有楼层可言，
+        // 让它们保持纯色 tint + 下面的天空反射（屋顶玻璃本来就该泛天光）。
+        if (is_glass) {
+            let gfac = smoothstep(0.35, 0.75, 1.0 - abs(fnrm.y));
+            base = base * mix(1.0, glass_shade(fnrm, input.world_pos, deriv), gfac);
+        }
+        // D11（第二次修正）：窗带由片元画在**中性混凝土立面**上，零新增几何、零深度风险。
+        // 分类一律用 input.color（逐实例常量），不用被皮肤纹理改写过的 base。
+        // 通道极差判据天然排除砖墙(红)/木掩体(棕)/树冠(绿)——否则围墙上会长出窗户。
+        if (input.flat_flag < 1.5 && !is_glass) {
             let cmax = max(input.color.r, max(input.color.g, input.color.b));
             let cmin = min(input.color.r, min(input.color.g, input.color.b));
             let neutral = 1.0 - smoothstep(0.06, 0.14, cmax - cmin);
-            let fnrm = normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos)));
             let vert = 1.0 - abs(fnrm.y);
-            // 只给立面加窗，屋面/地面（法线近竖直）不加；且窗带只从 3m（二层）以上开始——
-            // 混凝土围墙/矮裙房同样是中性灰，没有这道下限会在墙上画出一条通长深色窗带。
+            // 窗带只从 3m（二层）以上开始：混凝土围墙/矮裙房同样是中性灰，
+            // 没有这道下限会在墙上画出一条通长深色窗带。
             if (vert > 0.5 && neutral > 0.01 && input.world_pos.y > 3.0) {
-                let fl = fract(input.world_pos.y * (1.0 / 3.0));
-                // 窗高收到层高约 26%（原 0.18~0.72 ≈ 1.6m/3m 占 46%，配上重暗化，
-                // 整面楼读成深色百叶而不是玻璃窗）
-                let wy = smoothstep(0.37, 0.42, fl) * (1.0 - smoothstep(0.58, 0.63, fl));
-                // 竖梃每 2m 一根，避免窗带读成连续黑条；取水平主轴作为横向坐标
-                let hx = select(input.world_pos.z, input.world_pos.x, abs(fnrm.x) > abs(fnrm.z));
-                let tp = fract(hx * 0.5);
-                // 边缘一律 smoothstep，不用 step：二值边缘在掠射角一个像素内跳变，
-                // 就是 2026-09-01 放大图里那种箭羽/锯齿状走样
-                let mull = min(1.0, smoothstep(0.86, 0.90, tp) + (1.0 - smoothstep(0.06, 0.10, tp)));
-                let win = wy * (1.0 - 0.7 * mull);
-                // 暗化降到 0.22（原 0.5）：玻璃带应比混凝土立面暗一档，而不是变成黑洞
-                // 远距随 D12 的 detail 一起收敛：世界坐标高频信号不收敛就会变成新的走样源
-                base = base * mix(1.0, 1.0 - 0.22 * win, detail * vert * neutral);
+                // 暗化 0.22：玻璃带应比混凝土立面暗一档，而不是变成黑洞。
+                // 收敛由 window_dark 的盒式平均负责（严格守恒覆盖率），不再挂 detail。
+                base = base * mix(1.0, 1.0 - 0.22 * window_dark(fnrm, input.world_pos, deriv),
+                                  vert * neutral);
             }
         }
         // 轮廓分离（D12）：掠射角提亮，让士兵从背景里"读得出来"。
         // 只乘一个亮度标量、不改 RGB 分量比例 → 阵营色相与饱和度保持 D1 验收结论有效。
         if (input.flat_flag > 1.5) {
-            let ndv = abs(dot(normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos))),
-                              normalize(input.view_dir)));
-            base = base * (1.0 + 0.45 * pow(1.0 - ndv, 3.0));
+            base = base * (1.0 + 0.45 * pow(1.0 - abs(dot(fnrm, vdir)), 3.0));
         }
         // 障碍/NPC：应用 Blinn-Phong（同地面路径）——消除纯色剪影的纸片感
         let lit = apply_lighting(input, base);
+        var shaded = lit;
+        if (is_glass && light_data.flags.x >= 0.5) {
+            // ---- 玻璃反射通路（缺陷单第 1 条的另一半）----
+            // 旧实现只做了"玻璃跳过皮肤纹理、直出 tint"→ 一整面死平的近黑，
+            // 玩家原话"建筑物里面的墙壁就像一片纸""能看穿"。真实玻璃的可辨识度不是
+            // "暗"，而是：掠射角泛出天空（菲涅耳）、镜面方向有一道太阳 glint。
+            // 这里给玻璃加一条独立的反射通路，**而不是把它提亮成灰墙**。
+            let ndv = clamp(dot(fnrm, vdir), 0.0, 1.0);
+            let fres = (0.04 + 0.96 * pow(1.0 - ndv, 5.0)) * valid_nrm;
+            let rr = reflect(-vdir, fnrm);
+            let up_t = clamp(rr.y * 0.5 + 0.5, 0.0, 1.0);
+            // 反射向天 → 取天空色（与 FOG_TINT 同源，远处"楼—天"交界才连续）；
+            // 反射向地 → 取暖而暗的地面反弹（楼脚下沿最暗，正是玻璃的样子）。
+            let sky_col = mix(vec3<f32>(0.26, 0.23, 0.20),
+                              FOG_TINT * vec3<f32>(1.30, 1.26, 1.12), up_t);
+            // 影子里的天空反射要压一档（头顶被遮 → 看到的天空立体角变小）。
+            // 用"光照结果 / 底色"反推该像素的照明水平，省掉第二次阴影采样、
+            // 也不需要给 apply_lighting 加输出参数。
+            let illum = min(1.0, dot(lit, vec3<f32>(0.3333))
+                          / max(dot(base, vec3<f32>(0.3333)), 1e-3));
+            var sheen = fres * sky_col * mix(0.30, 1.0, illum) * (0.30 + 0.70 * up_t);
+            if (light_data.directional.direction.w >= 0.5) {
+                // 太阳 glint：幂 140 → 一条很窄的高光带，随相机移动在楼面上滑过。
+                // 这是"认出那是玻璃"最便宜也最强的一条线索，且它只出现在镜面角上，
+                // 不会把整面楼提亮。
+                sheen = sheen + pow(max(dot(rr, normalize(light_data.directional.direction.xyz)), 0.0), 140.0)
+                      * light_data.directional.color_intensity.rgb
+                      * light_data.directional.color_intensity.w * 0.5;
+            }
+            shaded = lit + sheen;
+        }
         let fg = fog_amount(view_distance(input));
-        return vec4<f32>(mix(lit, FOG_TINT, fg) * input.fade, 1.0);
+        return vec4<f32>(mix(shaded, FOG_TINT, fg) * input.fade, 1.0);
     }
     // 世界空间 UV：地面/地形用 world_pos.xz 映射到全图 [0,1]（覆盖 2*256 米），
     // 与 procedural.rs 烘焙纹理严格对齐（marker/NPC/自发光已走 flat_flag 纯色路径，不采样）。
     let world_uv = (input.world_pos.xz + vec2<f32>(256.0, 256.0)) / 512.0;
     let texel = textureSample(texture_sampled, texture_sampler, world_uv);
-    // 地面/地形：纹理占主导（0.75） + Blinn-Phong（默认关闭时保持旧混合渲染）
-    let mixed = mix(input.color, texel.rgb, 0.75);
+    // 地面/地形：**烘焙纹理是唯一的颜色来源**，顶点色只做乘法性明暗调制。
+    //
+    // 旧式 `mix(input.color, texel.rgb, 0.75)` 是**加法**混合，它给每个像素抬了一个
+    // 与内容无关的底：沥青纹素线性 0.11、人行道方砖 0.25（原图对比 2.3:1），代进
+    // 0.25 权重的底（传统路径 input.color = 地面实例 tint 0.7 灰，mesh 路径 =
+    // terrain_tint 的草/沙绿，亮度 0.15~0.55）→
+    //   沥青 0.25·0.7 + 0.75·0.11 = 0.2575；方砖 0.25·0.7 + 0.75·0.25 = 0.3625
+    //   → 对比塌到 1.41:1，而且整层地面被抬亮 2~3 倍（"惨白"）。
+    // 更本质的两条：① mip 过滤只可能把暗部**平均**掉，不可能让最暗的东西比最亮的
+    // 东西还亮，所以这不是纹理过滤问题；② mesh 路径抬上来的那 25% 是 terrain_tint 的
+    // **草绿**——它与烘焙图里的城市分区色是两个互不相关的噪声场，所以玩家看到的街面
+    // 绿雾与 city_zone_color 写的沥青/方砖毫无关系，改基色当然"几乎看不出效果"。
+    // 乘法调制保留地形 LOD 的顶点色约定（mesh 路径 terrain_tint 的草地/沙粒分域仍
+    // 参与明暗，只是不再染色、不再抬底），同时把原始对比完整送进光照。
+    let gtone = dot(input.color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    var mixed = texel.rgb * mix(0.85, 1.15, clamp(gtone, 0.0, 1.0));
+    // ---- 地面微细节层（procedural.rs::generate_default_ground_detail_texture）----
+    // 烘焙地面纹理锚定在"512² 覆盖 512m"上 → 一个纹素 = 1 米，街面上任何厘米级质感
+    // 都不存在，近看就是一张平涂灰纸（"二维化的一个面"在地面上的那半条表现）。
+    // 细节图按 GROUND_DETAIL_METRES 平铺 → 7.8mm/纹素，两个数量级的差距。
+    // ⚠ 闸门必须用**米/像素**，不能用视距（本项目已踩过一次：视距闸门在掠射角下
+    // 混叠成满屏白点）。每像素盖到 0.25m（=32 纹素）时完全退出。
+    let gderiv = world_derivatives(input.world_pos);
+    let gpx = max(gderiv.x, gderiv.z);
+    let gdetail = 1.0 - smoothstep(0.06, 0.25, gpx);
+    if (gdetail > 0.001) {
+        // 显式 LOD：一个像素盖多少个纹素就取第几级 mip。
+        // 为什么不用隐式 textureSample：它在非一致控制流（这个 if）里取屏幕导数属于
+        // 未定义行为，而且这里本就是按米算出来的，没必要绕一圈导数。
+        let lvl = log2(max(gpx / GROUND_DETAIL_TEXEL_M, 1.0));
+        let g = textureSampleLevel(ground_detail_tex, texture_sampler,
+                                   input.world_pos.xz / GROUND_DETAIL_METRES, lvl).r;
+        // 纹素编码约定：r = 亮度调制 / 2（调制 1.0 → 128）。见 GROUND_DETAIL_GAIN 注释。
+        mixed = mixed * mix(1.0, g * GROUND_DETAIL_GAIN, gdetail);
+    }
     if (light_data.flags.x < 0.5) {
         return vec4<f32>(mixed * input.fade, 1.0);
     }
