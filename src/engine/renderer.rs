@@ -824,6 +824,8 @@ pub struct Renderer {
     hud_vertex_buffer_memory: vk::DeviceMemory,
     hud_mapped: *mut std::ffi::c_void,
     hud_vertex_count: u32,
+    hud_render_pass: vk::RenderPass,
+    hud_framebuffers: Vec<vk::Framebuffer>,
     hud_capacity_quads: u32,
     // ---- 第一人称枪模专用网格（程序化高模，主管线绘制 = 深度测试关 = 恒可见不穿模）----
     gun_vertex_buffer: vk::Buffer,
@@ -867,6 +869,8 @@ pub struct Renderer {
     /// 实时 PT 渲染分辨率（init_pt_resident 决定，上屏块必须用同一个值，
     /// 否则 dispatch 与图像尺寸不一致 = 越界写/半屏黑）
     pub pt_size: (u32, u32),
+    pub pt_move_base_cam: std::cell::Cell<[f32; 3]>,
+    pub pt_move_base_fwd: std::cell::Cell<[f32; 3]>,
 
     /// 路径追踪实时渲染开关（config.pt_enable；present 前 PT 帧上屏）
     pub pt_live_enabled: bool,
@@ -940,6 +944,7 @@ impl Renderer {
         renderer.init_mesh_pipeline()?;
         renderer.init_hud()?;
         renderer.init_framebuffers()?;
+        renderer.init_hud_overlay()?;
         renderer.init_texture()?;
         renderer.init_shadow_resources()?;
         renderer.init_shadow_pipeline()?;
@@ -1404,6 +1409,8 @@ impl Renderer {
             hud_vertex_buffer_memory: vk::DeviceMemory::null(),
             hud_mapped: std::ptr::null_mut(),
             hud_vertex_count: 0,
+            hud_render_pass: vk::RenderPass::null(),
+            hud_framebuffers: Vec::new(),
             hud_capacity_quads: 4096,
             gun_vertex_buffer: vk::Buffer::null(),
             gun_vertex_buffer_memory: vk::DeviceMemory::null(),
@@ -1441,6 +1448,8 @@ impl Renderer {
             pt_reset: std::cell::Cell::new(true),
             pt_view_sig: std::cell::Cell::new(0),
             pt_size: (64, 64),
+            pt_move_base_cam: std::cell::Cell::new([0.0; 3]),
+            pt_move_base_fwd: std::cell::Cell::new([0.0; 3]),
 
             screenshot_request: None,
             screenshot_buffers: Vec::new(),
@@ -5312,7 +5321,7 @@ impl Renderer {
                 .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
             for i in 0..spp {
-                let pc = self.pt_params.pack(size, size, i, i == 0, spp);
+                let pc = self.pt_params.pack(size, size, i, i == 0, spp, 0.0);
                 self.device.cmd_push_constants(cb, pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, bytemuck_bytes(&pc));
                 self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
                 if i + 1 < spp {
@@ -7492,6 +7501,44 @@ impl Renderer {
         Ok(())
     }
 
+    /// PT 覆盖后重绘 HUD 的 overlay pass（load=LOAD 保留 PT 画面！2026-09-01）
+    pub fn init_hud_overlay(&mut self) -> Result<(), String> {
+        unsafe {
+            let color_attachment = vk::AttachmentDescription::default()
+                .format(self.swapchain_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+            let color_refs = [vk::AttachmentReference::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+            let subpass = vk::SubpassDescription::default()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&color_refs);
+            let attachments = [color_attachment];
+            let subpasses = [subpass];
+            let rp_info = vk::RenderPassCreateInfo::default()
+                .attachments(&attachments)
+                .subpasses(&subpasses);
+            self.hud_render_pass = self.device.create_render_pass(&rp_info, None)
+                .map_err(|e| format!("hud rp: {e}"))?;
+            self.hud_framebuffers = self.swapchain_image_views.iter().map(|&iv| {
+                let fbi = vk::FramebufferCreateInfo::default()
+                    .render_pass(self.hud_render_pass)
+                    .attachments(std::slice::from_ref(&iv))
+                    .width(self.swapchain_extent.width)
+                    .height(self.swapchain_extent.height)
+                    .layers(1);
+                self.device.create_framebuffer(&fbi, None).map_err(|e| format!("hud fb: {e}"))
+            }).collect::<Result<Vec<_>, _>>()?;
+        }
+        Ok(())
+    }
+
     fn init_framebuffers(&mut self) -> Result<(), String> {
         self.framebuffers = self
             .swapchain_image_views
@@ -8151,6 +8198,19 @@ impl Renderer {
                         self.pt_frame.get(),
                         self.pt_reset.get(),
                         self.pt_spp_target,
+                        // 运动量：相机位移与朝向变化速度 → 0..1（移动/跳跃 → 高 spp + 短时域）
+                        {
+                            let c0 = self.pt_move_base_cam.get();
+                            let f0 = self.pt_move_base_fwd.get();
+                            let c1 = self.pt_params.cam.to_array();
+                            let f1 = self.pt_params.fwd.to_array();
+                            let mut d = 0.0f32;
+                            for k in 0..3 { let dc = c1[k] - c0[k]; d += dc * dc; let df = f1[k] - f0[k]; d += df * df * 36.0; }
+                            d = d.sqrt();
+                            self.pt_move_base_cam.set(c1);
+                            self.pt_move_base_fwd.set(f1);
+                            (d * 20.0).min(1.0)
+                        }
                     );
                     self.pt_reset.set(false);
                     self.device.cmd_push_constants(
@@ -8194,6 +8254,34 @@ impl Renderer {
                     .image(sw_img)
                     .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
                 self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[sw_back]);
+                // 2026-09-01：HUD/UI 重绘在 PT 之上（load=LOAD 保留 PT 画面！）
+                if self.hud_render_pass != vk::RenderPass::null() && self.hud_vertex_count > 0 {
+                    let hud_bar = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::MEMORY_READ).dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                        .old_layout(vk::ImageLayout::PRESENT_SRC_KHR).new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(sw_img)
+                        .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                    self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::DependencyFlags::empty(), &[], &[], &[hud_bar]);
+                    self.device.cmd_begin_render_pass(command_buffer, &vk::RenderPassBeginInfo::default()
+                        .render_pass(self.hud_render_pass)
+                        .framebuffer(self.hud_framebuffers[image_index as usize])
+                        .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.swapchain_extent }),
+                        vk::SubpassContents::INLINE);
+                    self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.hud_pipeline);
+                    let vb = [self.hud_vertex_buffer];
+                    let offs = [0u64];
+                    self.device.cmd_bind_vertex_buffers(command_buffer, 0, &vb, &offs);
+                    self.device.cmd_draw(command_buffer, self.hud_vertex_count, 1, 0, 0);
+                    self.device.cmd_end_render_pass(command_buffer);
+                    let hud_back = vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE).dst_access_mask(vk::AccessFlags::MEMORY_READ)
+                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(sw_img)
+                        .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+                    self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[hud_back]);
+                }
             }
         }
 

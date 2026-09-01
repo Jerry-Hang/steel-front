@@ -113,8 +113,9 @@ void main() {
     uint pxSeed = uint(gid.y) * 2048u + uint(gid.x);
     uint frameSeed = uint(pc.f.x);
 
-    // 2026-09-01：每帧多 spp 采样（吃满功耗 + 大幅降噪/减拖影）
-    const uint SPP = 8u;
+    // 2026-09-01v2：运动自适应 spp！移动/跳跃 => 瞬时多采样（短时域窗口），静止 => 长时域累积
+    float move = clamp(pc.f.w, 0.0, 1.0);
+    uint SPP = uint(round(mix(16.0, 64.0, move)));
     vec3 lum = vec3(0.0);
     for (uint s = 0u; s < SPP; s++) {
         // 每个样本独立抖动（像素内偏移 + 每样本种子），避免重复纹理
@@ -128,8 +129,15 @@ void main() {
             if (!traceRay(rq, rs, 500.0)) { lq += tq * skyColor(rs); break; }
             vec3 alb = albedoOf(hitPrim / 12u);
             float ndl = max(dot(hitNrm, sunDir), 0.0);
-            if (ndl > 0.0 && !traceRay(hitPos + hitNrm * 0.002, sunDir, 499.0))
-                lq += tq * alb * pc.e.rgb * ndl * 2.2;
+            // 2026-09-01v3：偏移 0.02 防阴影内棱线（acne）；太阳盘 jitter 2 点 = 软边 + 更准
+            if (ndl > 0.0) {
+                vec3 sh_o = hitPos + hitNrm * 0.02;
+                vec3 sd1 = normalize(sunDir + rgt * 0.0012 + up * 0.0012);
+                vec3 sd2 = normalize(sunDir - rgt * 0.0012 - up * 0.0012);
+                float lit1 = traceRay(sh_o, sd1, 499.0) ? 0.0 : 1.0;
+                float lit2 = traceRay(sh_o, sd2, 499.0) ? 0.0 : 1.0;
+                lq += tq * alb * pc.e.rgb * ndl * (lit1 + lit2) * 1.1;
+            }
             tq *= alb;
             rq = hitPos + hitNrm * 0.002;
             rs = lambertianBounce(hitNrm, pxSeed, seed * 64u + b);
@@ -145,9 +153,10 @@ void main() {
     lum *= pc.e.w;
     vec4 acc = imageLoad(AccImg, gid);
     if (pc.f.y > 0.5) { acc = vec4(0.0); }
-    // 2026-09-01 移动去噪：指数滑动窗口（记忆 64 帧，alpha=4spp/64）——移动时旧视角平滑衰减，
-    // 不硬重置 => 无"重影+噪点"二相，静止时收敛干净（约 1 秒等效 256 spp）
-    float a = min(acc.a + 4.0, 64.0);
+    // 运动自适应时域窗口：运动大 => 窗口短（10 帧，快速丢弃旧视角=去拖影）+ spp 高（瞬时降噪）；
+    // 静止 => 窗口长（64 帧，时域收割=干净）
+    float win = mix(64.0f, 1.0f, move);
+    float a = min(acc.a + float(SPP), win);
     float alpha = 1.0 / a;
     acc = vec4(mix(acc.rgb, lum, alpha), a);
     imageStore(AccImg, gid, acc);

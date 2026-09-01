@@ -94,7 +94,7 @@ pub struct PtParams {
 
 impl PtParams {
     /// 打包：必须与 assets/rt/pt_panorama.glsl 的 `PC { vec4 a,b,c,d,e,f }` 逐字段一致
-    pub fn pack(&self, w: u32, h: u32, frame: u32, reset: bool, spp_target: u32) -> [[f32; 4]; 6] {
+    pub fn pack(&self, w: u32, h: u32, frame: u32, reset: bool, spp_target: u32, move_amount: f32) -> [[f32; 4]; 6] {
         let tan = if self.tan_half_fov > 1e-4 {
             self.tan_half_fov
         } else {
@@ -113,7 +113,7 @@ impl PtParams {
                 frame as f32,
                 if reset { 1.0 } else { 0.0 },
                 spp_target.max(1) as f32,
-                0.0,
+                move_amount.clamp(0.0, 1.0),
             ],
         ]
     }

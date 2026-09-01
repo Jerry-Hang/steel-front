@@ -1895,7 +1895,7 @@ impl GameApp {
                 cam: self.camera.position(),
                 fwd: self.camera.forward(),
                 tan_half_fov: (self.camera.fov * 0.5).tan(),
-                bounces: 4,
+                bounces: 6,
                 sun_dir: lu.directional.direction.truncate(),
                 sun_color: lu.directional.color_intensity.truncate()
                     * lu.directional.color_intensity.w,
@@ -2044,7 +2044,7 @@ impl ApplicationHandler for GameApp {
                         cam: glam::Vec3::new(0.0, 1.7, 6.5),
                         fwd: glam::Vec3::new(0.0, -0.18, -0.98),
                         tan_half_fov: (60f32.to_radians() * 0.5).tan(),
-                        bounces: 4,
+                        bounces: 6,
                         sun_dir: crate::engine::ray_tracer::PT_SUN_DIR.into(),
                         sun_color: glam::Vec3::splat(1.0) * crate::engine::ray_tracer::PT_SUN_INTENSITY,
                         exposure: 0.5,
