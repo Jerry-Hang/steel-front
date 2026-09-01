@@ -78,6 +78,45 @@ pub const PT_SUN_INTENSITY: f32 = 1.5;
 pub const PT_AMBIENT_COLOR: [f32; 3] = [0.5, 0.55, 0.6];
 pub const PT_AMBIENT_INTENSITY: f32 = 0.5;
 
+/// PT 取景参数（每帧由 main.rs 注入，打包为 5×vec4 push constants）
+#[derive(Clone, Copy, Default)]
+pub struct PtParams {
+    pub cam: glam::Vec3,
+    /// 相机前向（直接取 camera.forward()，与光栅化同源，不重推 yaw/pitch 公式）
+    pub fwd: glam::Vec3,
+    pub tan_half_fov: f32,
+    pub bounces: u32,
+    /// 表面→太阳（与 DirectionalLight::direction 同语义）
+    pub sun_dir: glam::Vec3,
+    pub sun_color: glam::Vec3,
+    pub exposure: f32,
+}
+
+impl PtParams {
+    /// 打包：必须与 assets/rt/pt_panorama.glsl 的 `PC { vec4 a,b,c,d,e }` 逐字段一致
+    pub fn pack(&self, res: u32) -> [[f32; 4]; 5] {
+        let tan = if self.tan_half_fov > 1e-4 {
+            self.tan_half_fov
+        } else {
+            (60.0f32.to_radians() * 0.5).tan()
+        };
+        let s = self.sun_dir.normalize_or_zero();
+        let f = if self.fwd.length_squared() > 1e-6 { self.fwd } else { glam::Vec3::NEG_Z };
+        let exp = if self.exposure > 1e-4 { self.exposure } else { 0.4 };
+        [
+            [res as f32, res as f32, tan, self.bounces.clamp(1, 8) as f32],
+            [self.cam.x, self.cam.y, self.cam.z, 0.0],
+            [f.x, f.y, f.z, 0.0],
+            [s.x, s.y, s.z, 0.0],
+            [self.sun_color.x, self.sun_color.y, self.sun_color.z, exp],
+        ]
+    }
+}
+
+/// 场景盒上限：BLAS 顶点/索引/材质缓冲按此容量一次性分配，换场景只重写内容 +
+/// 重建 BLAS（TLAS 恒为单实例——所有盒合入同一 BLAS，故实例数与场景无关）。
+pub const PT_MAX_BOXES: usize = 512;
+
 /// 路径追踪 GPU 资源集（构建/记录/销毁）
 pub struct PtAssets {
     pub tlas: ash::vk::AccelerationStructureKHR,
@@ -92,4 +131,12 @@ pub struct PtAssets {
     pub idx_mem: ash::vk::DeviceMemory,
     pub inst_buf: ash::vk::Buffer,
     pub inst_mem: ash::vk::DeviceMemory,
+    /// 每盒材质 UBO（vec4 = albedo.rgb + 光泽度），容量 PT_MAX_BOXES
+    pub mat_buf: ash::vk::Buffer,
+    pub mat_mem: ash::vk::DeviceMemory,
+    /// AS 构建 scratch（自有且常驻，取代旧实现每次 record 新建 2MB 不释放的泄漏）
+    pub scratch_buf: ash::vk::Buffer,
+    pub scratch_mem: ash::vk::DeviceMemory,
+    /// BLAS scratch 字节数（TLAS 用后半段，避免两次构建共享同一地址的资源冲突）
+    pub scratch_blas: u64,
 }

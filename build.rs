@@ -929,15 +929,31 @@ fn main() {
     output.push_str("/// RT 求交基准 SPIR-V（手工汇编；naga 不支持 WGSL ray-query）\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const RT_BENCH_SPV: &[u32] = &{:?};\n\n", spv_rt_bench::rt_bench_spv()));
-    // PT 帧着色器（手工 asm，已通过 spirv-val）
+    // PT 帧着色器：assets/rt/pt_panorama.glsl --glslang--> .spv（2026-08-31 弃手工拼装 SPIR-V）
     {
-        let bytes = std::fs::read(Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("screenshots").join("ptframe.spv")).ok();
+        let dir = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets").join("rt");
+        let spv_path = dir.join("pt_panorama.spv");
+        let glsl_path = dir.join("pt_panorama.glsl");
+        println!("cargo:rerun-if-changed=assets/rt/pt_panorama.spv");
+        println!("cargo:rerun-if-changed=assets/rt/pt_panorama.glsl");
+        let stale = match (std::fs::metadata(&glsl_path), std::fs::metadata(&spv_path)) {
+            (Ok(g), Ok(s)) => {
+                let gm = g.modified().ok();
+                let sm = s.modified().ok();
+                matches!((gm, sm), (Some(g), Some(s)) if g > s)
+            }
+            _ => false,
+        };
+        if stale {
+            println!("cargo:warning=PT GLSL 比 SPV 新，请跑 scripts/compile_pt.ps1 重新编译 pt_panorama.spv");
+        }
+        let bytes = std::fs::read(&spv_path).ok();
         if let Some(bb) = bytes {
             let mut wv = Vec::with_capacity(bb.len() / 4);
             for i in 0..bb.len() / 4 {
                 wv.push(u32::from_le_bytes([bb[i*4], bb[i*4+1], bb[i*4+2], bb[i*4+3]]));
             }
-            output.push_str("/// PT 帧 SPIR-V\n");
+            output.push_str("/// PT 帧 SPIR-V（glslang 编译 assets/rt/pt_panorama.glsl，严格 spirv-val 通过）\n");
             output.push_str("#[allow(dead_code)]\n");
             output.push_str(&format!("pub const PT_FRAME_SPV: &[u32] = &{:?};\n\n", wv));
         }

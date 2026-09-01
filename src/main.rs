@@ -1541,6 +1541,22 @@ impl GameApp {
                     let _ = self.game.hud.set_screen_size(is.width as f32, is.height as f32);
                 }
             }
+            // PT 取景：与光栅化同一相机、同一太阳方向（路径追踪要当烘焙参照，参数必须同源）
+            let lu = self.game.light_uniform();
+            renderer.set_pt_params(crate::engine::ray_tracer::PtParams {
+                cam: self.camera.position(),
+                fwd: self.camera.forward(),
+                tan_half_fov: (self.camera.fov * 0.5).tan(),
+                bounces: 4,
+                sun_dir: lu.directional.direction.truncate(),
+                sun_color: lu.directional.color_intensity.truncate()
+                    * lu.directional.color_intensity.w,
+                exposure: 0.2,
+            });
+            // PT 场景 = 光栅化同一批 WorldMarker（盒集合变化时才重建 BLAS，指纹判定在渲染器内）
+            if let Err(e) = renderer.pt_set_scene_markers(&markers) {
+                log::warn!("PT-SCENE 失败: {e}");
+            }
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
                     log::warn!("交换链过期，尝试重建...");
@@ -1675,8 +1691,18 @@ impl ApplicationHandler for GameApp {
                         crate::engine::ray_tracer::PtBox { center: [-2.5, 0.7, 1.0], half: [0.5, 0.7, 0.5], material: 2 },
                         crate::engine::ray_tracer::PtBox { center: [2.5, 0.5, 1.5], half: [0.6, 0.4, 0.6], material: 3 },
                     ];
-                    match renderer.run_pt_view(&boxes, 64) {
-                        Ok(()) => log::info!("PT-VIEW: 参考帧已输出 screenshots/pt_ref.bmp (64x64)"),
+                    // 取景：相机在 +Z 侧看向原点，与上面的玩具盒场景（地面 8m 见方）对得上
+                    renderer.set_pt_params(crate::engine::ray_tracer::PtParams {
+                        cam: glam::Vec3::new(0.0, 1.7, 6.5),
+                        fwd: glam::Vec3::new(0.0, -0.18, -0.98),
+                        tan_half_fov: (60f32.to_radians() * 0.5).tan(),
+                        bounces: 4,
+                        sun_dir: crate::engine::ray_tracer::PT_SUN_DIR.into(),
+                        sun_color: glam::Vec3::splat(1.0) * crate::engine::ray_tracer::PT_SUN_INTENSITY,
+                        exposure: 0.5,
+                    });
+                    match renderer.run_pt_view(&boxes, 256) {
+                        Ok(()) => log::info!("PT-VIEW: 参考帧已输出 screenshots/pt_ref.bmp (256x256)"),
                         Err(e) => log::error!("PT-VIEW 失败: {e}"),
                     }
                 }

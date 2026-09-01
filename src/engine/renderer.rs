@@ -850,6 +850,12 @@ pub struct Renderer {
     pt_module: vk::ShaderModule,
     /// 路径追踪实时渲染开关（config.pt_enable；present 前 PT 帧上屏）
     pub pt_live_enabled: bool,
+    /// PT 取景参数（每帧 set_pt_params 注入：相机 + 太阳 + 曝光）
+    pt_params: crate::engine::ray_tracer::PtParams,
+    /// 当前 BLAS 内容对应的盒数（= pt_fill_geom 写入的盒数量）
+    pt_box_count: usize,
+    /// 场景指纹（WorldMarker 集合变化时重建 BLAS，避免逐帧重建）
+    pt_scene_sig: u64,
     /// 截图请求路径（Some 表示本帧渲染完成后读回 swapchain 图像并写 PNG）
     screenshot_request: Option<std::path::PathBuf>,
     /// 截图读回 staging buffer（按 max_frames_in_flight 双缓冲，惰性创建）
@@ -862,6 +868,42 @@ pub struct Renderer {
 fn load_spirv(path: &str) -> Result<Vec<u32>, String> {
     let mut file = File::open(path).map_err(|e| format!("打开着色器文件失败 '{}': {}", path, e))?;
     util::read_spv(&mut file).map_err(|e| format!("读取 SPIR-V 文件失败 '{}': {}", path, e))
+}
+
+/// POD → &[u8]（push constants 上传，零外部依赖）
+#[inline]
+fn bytemuck_bytes<T: Sized>(v: &T) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>()) }
+}
+
+/// PtBox.material → 反照率（与 WorldMarker 障碍调色板同源，PT 才可当烘焙参照）
+fn pt_albedo_of(b: &crate::engine::ray_tracer::PtBox) -> [f32; 3] {
+    let k = match b.material {
+        1 => ObstacleKind::Building,
+        2 => ObstacleKind::Block,
+        3 => ObstacleKind::Tree,
+        _ => return [0.34, 0.32, 0.29],
+    };
+    obstacle_base_color(k)
+}
+
+/// 场景指纹（坐标量化到 1m）：只有盒集合真的变了才重建 BLAS，避免逐帧重建
+fn pt_scene_sig(boxes: &[crate::engine::ray_tracer::PtBox]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    {
+        let mut mix = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        mix(boxes.len() as u64);
+        for b in boxes {
+            for c in b.center.iter().chain(b.half.iter()) {
+                mix(*c as i32 as u32 as u64);
+            }
+            mix(b.material as u64);
+        }
+    }
+    h
 }
 
 impl Renderer {
@@ -1359,6 +1401,9 @@ impl Renderer {
             quality: QualityPreset::DEFAULT,
             pt_live_enabled: false,
             pt_resident: None,
+            pt_params: crate::engine::ray_tracer::PtParams::default(),
+            pt_box_count: 0,
+            pt_scene_sig: 0,
             pt_img: vk::Image::null(),
             pt_img_mem: vk::DeviceMemory::null(),
             pt_view: vk::ImageView::null(),
@@ -4532,11 +4577,17 @@ impl Renderer {
             .binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
         let img_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(1).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout];
+        let mat_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(2).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
         let pipe_layouts = [sl];
-        let pc_ranges: [vk::PushConstantRange; 0] = [];
+        // push constants：5×vec4 = 80B（pt_panorama.glsl 的 PC 块）
+        let pc_ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(80)];
         let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
         let pl = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }.map_err(|e| format!("PT pl: {e}"))?;
         let stage_info = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(vs_module).name(c"main");
@@ -4544,7 +4595,7 @@ impl Renderer {
         let pipelines = unsafe { self.device.create_compute_pipelines(vk::PipelineCache::null(), &[compute_info], None).map_err(|e| format!("PT pipe {:?}", e.1))? };
         let pipeline = pipelines[0];
         let img_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D).format(vk::Format::R8G8B8A8_UNORM)
+            .image_type(vk::ImageType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
             .extent(vk::Extent3D { width: size, height: size, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
             .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
@@ -4555,12 +4606,13 @@ impl Renderer {
         let img_mem = unsafe { self.device.allocate_memory(&img_alloc, None) }.map_err(|e| format!("PT im: {e}"))?;
         unsafe { self.device.bind_image_memory(image, img_mem, 0) }.map_err(|e| format!("PT ib: {e}"))?;
         let img_view_info = vk::ImageViewCreateInfo::default()
-            .image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::R8G8B8A8_UNORM)
+            .image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
             .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
         let view = unsafe { self.device.create_image_view(&img_view_info, None) }.map_err(|e| format!("PT iv: {e}"))?;
         let pool_sizes = [
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
@@ -4574,6 +4626,11 @@ impl Renderer {
             _marker: std::marker::PhantomData,
         };
         let img_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL };
+        let mat_buf_info = vk::DescriptorBufferInfo {
+            buffer: assets.mat_buf,
+            offset: 0,
+            range: (crate::engine::ray_tracer::PT_MAX_BOXES * 16) as u64,
+        };
         let writes = [
             vk::WriteDescriptorSet {
                 s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
@@ -4588,6 +4645,13 @@ impl Renderer {
                 dst_set: dset, dst_binding: 1, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
                 p_image_info: std::slice::from_ref(&img_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 2, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&mat_buf_info).as_ptr(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];
@@ -4959,6 +5023,10 @@ impl Renderer {
                 self.device.free_memory(assets.idx_mem, None);
                 self.device.destroy_buffer(assets.inst_buf, None);
                 self.device.free_memory(assets.inst_mem, None);
+                self.device.destroy_buffer(assets.mat_buf, None);
+                self.device.free_memory(assets.mat_mem, None);
+                self.device.destroy_buffer(assets.scratch_buf, None);
+                self.device.free_memory(assets.scratch_mem, None);
                 self.device.destroy_buffer(assets.tlas_buf, None);
                 self.device.free_memory(assets.tlas_mem, None);
                 self.device.destroy_buffer(assets.blas_buf, None);
@@ -4979,45 +5047,48 @@ impl Renderer {
         &mut self,
         boxes: &[crate::engine::ray_tracer::PtBox],
     ) -> Result<crate::engine::ray_tracer::PtAssets, String> {
+        use crate::engine::ray_tracer::PT_MAX_BOXES;
         let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
-        let n_verts = boxes.len() * 24;
-        let n_idx = boxes.len() * 36;
-        let mut verts: Vec<u8> = Vec::with_capacity(n_verts * 32);
-        let mut idx: Vec<u32> = Vec::with_capacity(n_idx);
-        let boxidx = crate::engine::ray_tracer::box_indices();
-        for (k, b) in boxes.iter().enumerate() {
-            let mut v = [0.0f32; 192];
-            crate::engine::ray_tracer::box_triangles(b, &mut v);
-            for p in v.chunks_exact(8) {
-                for c in p {
-                    verts.extend_from_slice(&c.to_le_bytes());
-                }
-            }
-            // 2026-08-29 修复：每盒索引用 base-vertex 偏移（k*24），否则所有盒都引用盒 0 顶点！
-            let base = (k as u32) * 24;
-            for &i in boxidx.iter() {
-                idx.push(i + base);
-            }
-        }
+        let n = boxes.len().min(PT_MAX_BOXES);
+        // 顶点/索引/材质缓冲一次性按 PT_MAX_BOXES 分配（换场景只重写内容，句柄不动）
+        let vb_len = PT_MAX_BOXES * 24 * 32;
+        let ib_len = PT_MAX_BOXES * 36 * 4;
+        let mb_len = PT_MAX_BOXES * 16;
         let (vbuf, vmem) = self
-            .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, verts.len() as u64)
+            .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, vb_len as u64)
             .map_err(|e| format!("PT 顶点缓冲: {e}"))?;
         let (ibuf, imem) = self
-            .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, (n_idx * 4) as u64)
+            .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR, ib_len as u64)
             .map_err(|e| format!("PT 索引缓冲: {e}"))?;
-        unsafe {
-            let vp = self.device.map_memory(vmem, 0, verts.len() as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map v: {e}"))?;
-            std::ptr::copy_nonoverlapping(verts.as_ptr(), vp as *mut u8, verts.len());
-            self.device.unmap_memory(vmem);
-            let ip = self.device.map_memory(imem, 0, (n_idx * 4) as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map i: {e}"))?;
-            std::ptr::copy_nonoverlapping(idx.as_ptr(), ip as *mut u32, n_idx);
-            self.device.unmap_memory(imem);
-        }
-        let vaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(vbuf); self.device.get_buffer_device_address(&i) };
-        let iaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(ibuf); self.device.get_buffer_device_address(&i) };
+        let (mbuf, mmem) = self
+            .create_host_buffer(vk::BufferUsageFlags::STORAGE_BUFFER, mb_len as u64)
+            .map_err(|e| format!("PT 材质缓冲: {e}"))?;
+        let albedos: Vec<[f32; 3]> = boxes.iter().take(n).map(|b| pt_albedo_of(b)).collect();
+        let mut assets = crate::engine::ray_tracer::PtAssets {
+            tlas: vk::AccelerationStructureKHR::null(),
+            blas: vk::AccelerationStructureKHR::null(),
+            tlas_buf: vk::Buffer::null(),
+            tlas_mem: vk::DeviceMemory::null(),
+            blas_buf: vk::Buffer::null(),
+            blas_mem: vk::DeviceMemory::null(),
+            verts_buf: vbuf,
+            verts_mem: vmem,
+            idx_buf: ibuf,
+            idx_mem: imem,
+            inst_buf: vk::Buffer::null(),
+            inst_mem: vk::DeviceMemory::null(),
+            mat_buf: mbuf,
+            mat_mem: mmem,
+            scratch_buf: vk::Buffer::null(),
+            scratch_mem: vk::DeviceMemory::null(),
+            scratch_blas: 0,
+        };
+        self.pt_fill_geom(&mut assets, &boxes[..n], &albedos)?;
+        let vaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.verts_buf); self.device.get_buffer_device_address(&i) };
+        let iaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.idx_buf); self.device.get_buffer_device_address(&i) };
         let mut tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
         tri.vertex_format = vk::Format::R32G32B32_SFLOAT;
-        tri.max_vertex = (boxes.len() * 24 - 1) as u32;
+        tri.max_vertex = (PT_MAX_BOXES * 24 - 1) as u32;
         tri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: vaddr };
         tri.vertex_stride = 32;
         tri.index_type = vk::IndexType::UINT32;
@@ -5035,10 +5106,12 @@ impl Renderer {
         geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
         let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
-            ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &[(boxes.len() * 12) as u32], &mut size_info);
+            // 尺寸按 PT_MAX_BOXES 容量算（不是当前盒数）：换场景只重建 BLAS，
+            // 若按初始 4 盒分配，塞进 512 盒会越界写 AS 缓冲 -> device lost
+            ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &[(PT_MAX_BOXES * 12) as u32], &mut size_info);
         }
         let count = size_info.acceleration_structure_size;
-        log::info!("PT-BLAS: size={} scratch_build={} scratch_update={} prims={}", count, size_info.build_scratch_size, size_info.update_scratch_size, boxes.len()*12);
+        log::info!("PT-BLAS: size={} scratch_build={} prims={}", count, size_info.build_scratch_size, n * 12);
         let (asbuf, asmem) = self
             .create_device_local_buffer(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; count as usize], "pt-blas")?;
         let as_info = vk::AccelerationStructureCreateInfoKHR::default()
@@ -5051,10 +5124,10 @@ impl Renderer {
             let a = vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(blas);
             ext.get_acceleration_structure_device_address(&a)
         };
-        // TLAS（单实例 identity）
-        let mut instance = vk::AccelerationStructureInstanceKHR {
+        // TLAS（单实例 identity：整场盒体合并在一个 BLAS 内，实例数与场景规模无关）
+        let instance = vk::AccelerationStructureInstanceKHR {
             transform: vk::TransformMatrixKHR { matrix: [1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] },
-            instance_custom_index_and_mask: vk::Packed24_8::new(0xFFu32, 0xFFu8),
+            instance_custom_index_and_mask: vk::Packed24_8::new(0u32, 0xFFu8),
             instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(0u32, 0u8),
             acceleration_structure_reference: vk::AccelerationStructureReferenceKHR { device_handle: blas_addr },
         };
@@ -5065,13 +5138,6 @@ impl Renderer {
         unsafe {
             let ip = self.device.map_memory(inst_mem, 0, inst_bytes.len() as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map inst: {e}"))?;
             std::ptr::copy_nonoverlapping(inst_bytes.as_ptr(), ip as *mut u8, inst_bytes.len());
-            // 读回验证（GPU 侧视角 = 同一内存）
-            let back: &[u8] = std::slice::from_raw_parts(ip as *const u8, inst_bytes.len());
-            log::info!("PT-INST bytes: {:02x?}", &back[..std::cmp::min(64, back.len())]);
-            log::info!("PT-INST mask/addr: mask=0x{:x} sbt=0x{:x} addr=0x{:x}",
-                u32::from_le_bytes([back[48], back[49], back[50], back[51]]),
-                u32::from_le_bytes([back[52], back[53], back[54], back[55]]),
-                u64::from_le_bytes([back[56], back[57], back[58], back[59], back[60], back[61], back[62], back[63]]));
             self.device.unmap_memory(inst_mem);
         }
         let inst_addr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(inst_buf); self.device.get_buffer_device_address(&i) };
@@ -5094,7 +5160,7 @@ impl Renderer {
             ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &tgeom, &[1], &mut tsize);
         }
         let tcount = tsize.acceleration_structure_size;
-        log::info!("PT-TLAS: size={} scratch_build={} scratch_update={}", tcount, tsize.build_scratch_size, tsize.update_scratch_size);
+        log::info!("PT-TLAS: size={} scratch_build={}", tcount, tsize.build_scratch_size);
         let (tbuf, tmem) = self
             .create_device_local_buffer(vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; tcount as usize], "pt-tlas")?;
         let tinfo = vk::AccelerationStructureCreateInfoKHR::default()
@@ -5103,21 +5169,152 @@ impl Renderer {
             .buffer(tbuf);
         let tlas = unsafe { ext.create_acceleration_structure(&tinfo, None) }
             .map_err(|e| format!("create TLAS: {e}"))?;
-        let _ = instance;
-        Ok(crate::engine::ray_tracer::PtAssets {
-            tlas,
-            blas,
-            tlas_buf: tbuf,
-            tlas_mem: tmem,
-            blas_buf: asbuf,
-            blas_mem: asmem,
-            verts_buf: vbuf,
-            verts_mem: vmem,
-            idx_buf: ibuf,
-            idx_mem: imem,
-            inst_buf: inst_buf,
-            inst_mem: inst_mem,
-        })
+        // scratch 自有常驻：BLAS 用前段、TLAS 用后段（同地址连用两次构建 = 资源冲突）
+        let align = 256u64;
+        let b_scr = (size_info.build_scratch_size.max(align) + align - 1) & !(align - 1);
+        let t_scr = (tsize.build_scratch_size.max(align) + align - 1) & !(align - 1);
+        let (sbuf, smem) = self
+            .create_device_local_buffer(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; (b_scr + t_scr) as usize], "pt-scratch")?;
+        assets.tlas = tlas;
+        assets.blas = blas;
+        assets.tlas_buf = tbuf;
+        assets.tlas_mem = tmem;
+        assets.blas_buf = asbuf;
+        assets.blas_mem = asmem;
+        assets.inst_buf = inst_buf;
+        assets.inst_mem = inst_mem;
+        assets.scratch_buf = sbuf;
+        assets.scratch_mem = smem;
+        assets.scratch_blas = b_scr;
+        self.pt_box_count = n;
+        Ok(assets)
+    }
+
+    /// 把盒体几何/索引/材质写进已分配的容量缓冲（句柄不变，换场景只重写内容）
+    fn pt_fill_geom(
+        &self,
+        assets: &crate::engine::ray_tracer::PtAssets,
+        boxes: &[crate::engine::ray_tracer::PtBox],
+        albedos: &[[f32; 3]],
+    ) -> Result<(), String> {
+        use crate::engine::ray_tracer::PT_MAX_BOXES;
+        let boxidx = crate::engine::ray_tracer::box_indices();
+        let mut verts = vec![0f32; PT_MAX_BOXES * 24 * 8];
+        let mut idx = vec![0u32; PT_MAX_BOXES * 36];
+        let mut mats = vec![0f32; PT_MAX_BOXES * 4];
+        for (k, b) in boxes.iter().enumerate().take(PT_MAX_BOXES) {
+            let mut v = [0.0f32; 192];
+            crate::engine::ray_tracer::box_triangles(b, &mut v);
+            verts[k * 192..k * 192 + 192].copy_from_slice(&v);
+            let base = (k as u32) * 24;
+            // 每盒索引加 base-vertex 偏移（否则所有盒都引用盒 0 顶点）
+            for (j, &i) in boxidx.iter().enumerate() {
+                idx[k * 36 + j] = i + base;
+            }
+            let a = albedos.get(k).copied().unwrap_or([0.5; 3]);
+            mats[k * 4] = a[0];
+            mats[k * 4 + 1] = a[1];
+            mats[k * 4 + 2] = a[2];
+            mats[k * 4 + 3] = 0.0;
+        }
+        unsafe {
+            let vb = verts.len() * 4;
+            let p = self.device.map_memory(assets.verts_mem, 0, vb as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map v: {e}"))?;
+            std::ptr::copy_nonoverlapping(verts.as_ptr() as *const u8, p as *mut u8, vb);
+            self.device.unmap_memory(assets.verts_mem);
+            let ib = idx.len() * 4;
+            let p = self.device.map_memory(assets.idx_mem, 0, ib as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map i: {e}"))?;
+            std::ptr::copy_nonoverlapping(idx.as_ptr() as *const u8, p as *mut u8, ib);
+            self.device.unmap_memory(assets.idx_mem);
+            let mb = mats.len() * 4;
+            let p = self.device.map_memory(assets.mat_mem, 0, mb as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("map m: {e}"))?;
+            std::ptr::copy_nonoverlapping(mats.as_ptr() as *const u8, p as *mut u8, mb);
+            self.device.unmap_memory(assets.mat_mem);
+        }
+        Ok(())
+    }
+
+    /// PT 场景热替换：重写 BLAS 内容并重建加速结构（关卡加载/据点变色时一次）。
+    /// 与光栅化共用同一批 WorldMarker 矩阵 => PT 与画面几何逐米一致。
+    pub fn pt_set_scene_markers(&mut self, markers: &[WorldMarker]) -> Result<(), String> {
+        use crate::engine::ray_tracer::PT_MAX_BOXES;
+        if self.pt_resident.is_none() || !self.pt_live_enabled {
+            return Ok(());
+        }
+        let mut boxes: Vec<crate::engine::ray_tracer::PtBox> =
+            Vec::with_capacity(markers.len() + 1);
+        let mut albedos: Vec<[f32; 3]> = Vec::with_capacity(markers.len() + 1);
+        // 盒 0 = 地面大盒（游戏地形中央压平，PT 用平面盒近似，烘焙参照足够）
+        boxes.push(crate::engine::ray_tracer::PtBox {
+            center: [0.0, -1.0, 0.0],
+            half: [400.0, 1.0, 400.0],
+            material: 0,
+        });
+        albedos.push([0.34, 0.32, 0.29]);
+        for m in markers.iter().take(PT_MAX_BOXES - 1) {
+            let c = m.model.w_axis;
+            let hx = m.model.x_axis.length() * 0.5;
+            let hy = m.model.y_axis.length() * 0.5;
+            let hz = m.model.z_axis.length() * 0.5;
+            if !(hx > 0.01 && hy > 0.01 && hz > 0.01) {
+                continue;
+            }
+            boxes.push(crate::engine::ray_tracer::PtBox {
+                center: [c.x, c.y, c.z],
+                half: [hx, hy, hz],
+                material: 1,
+            });
+            albedos.push([m.tint[0], m.tint[1], m.tint[2]]);
+        }
+        let sig = pt_scene_sig(&boxes);
+        if sig == self.pt_scene_sig {
+            return Ok(());
+        }
+        self.pt_scene_sig = sig;
+        let n = boxes.len();
+        // 取出 assets（避免 &mut self.pt_resident 与随后的 &self 方法调用冲突）
+        let assets = match self.pt_resident.take() {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+        let res = self.pt_scene_rebuild(&assets, &boxes, &albedos, n);
+        self.pt_resident = Some(assets);
+        res?;
+        self.pt_box_count = n;
+        log::info!("PT-SCENE: 盒 {} 个（WorldMarker 同源）", n);
+        Ok(())
+    }
+
+    /// 重写几何 + 重建加速结构（一次性提交并等队列空闲——关卡加载级别的一次性开销）
+    fn pt_scene_rebuild(
+        &self,
+        assets: &crate::engine::ray_tracer::PtAssets,
+        boxes: &[crate::engine::ray_tracer::PtBox],
+        albedos: &[[f32; 3]],
+        n: usize,
+    ) -> Result<(), String> {
+        self.pt_fill_geom(assets, boxes, albedos)?;
+        unsafe {
+            let alloc = vk::CommandBufferAllocateInfo::default().command_pool(self.command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+            let cb = self.device.allocate_command_buffers(&alloc).map_err(|e| format!("PT cb: {e}"))?[0];
+            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+            self.record_pt_build(cb, assets, n)?;
+            self.device.end_command_buffer(cb);
+            let cbs = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT scene submit: {e}"))?;
+            // 必须排空**整设备**在飞工作：上一帧的 PT dispatch 仍在读同一批 TLAS/顶点缓冲，
+            // 只等 graphics queue 不够（重写正在被读的 AS 输入 = device lost / TDR）
+            self.device.device_wait_idle().map_err(|e| format!("PT scene wait: {e}"))?;
+            self.device.free_command_buffers(self.command_pool, &[cb]);
+        }
+        Ok(())
+    }
+
+    /// 每帧取景参数（相机 + 太阳 + 曝光）
+    pub fn set_pt_params(&mut self, p: crate::engine::ray_tracer::PtParams) {
+        self.pt_params = p;
     }
 
     /// PT 参考帧渲染（2026-08-29 里程碑1/2）：相机射线 + 命中着色 + 图像输出 → PNG
@@ -5140,12 +5337,20 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout];
+        let mat_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(2)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }
             .map_err(|e| format!("PT set: {e}"))?;
         let pipe_layouts = [set_layout_handle];
-        let pc_ranges: [vk::PushConstantRange; 0] = [];
+        let pc_ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(80)];
         let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
         let pipe_layout = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }
             .map_err(|e| format!("PT layout: {e}"))?;
@@ -5188,6 +5393,7 @@ impl Renderer {
         let pool_sizes = [
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1),
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }
@@ -5208,6 +5414,11 @@ impl Renderer {
             image_view: view,
             image_layout: vk::ImageLayout::GENERAL,
         };
+        let mat_buf_info = vk::DescriptorBufferInfo {
+            buffer: assets.mat_buf,
+            offset: 0,
+            range: (crate::engine::ray_tracer::PT_MAX_BOXES * 16) as u64,
+        };
         let writes = [
             vk::WriteDescriptorSet {
                 s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
@@ -5223,6 +5434,14 @@ impl Renderer {
                 dst_set: dset, dst_binding: 1, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
                 p_image_info: std::slice::from_ref(&img_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 2, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&mat_buf_info).as_ptr(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];
@@ -5251,6 +5470,8 @@ impl Renderer {
             self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[accel_bar], &[], &[]);
             self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, compute_pipeline);
             self.device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[dset], &[]);
+            let pc = self.pt_params.pack(size);
+            self.device.cmd_push_constants(cb, pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, bytemuck_bytes(&pc));
             self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
             // 回读缓冲
             let (read_buf, read_mem) = self.create_host_buffer(vk::BufferUsageFlags::TRANSFER_DST, (size * size * 4) as u64)?;
@@ -5517,11 +5738,9 @@ impl Renderer {
         box_count: usize,
     ) -> Result<(), String> {
         let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
-        // 简化：scratch 用一次顶点缓冲映射（bench 一次性）
-        let scratch_size = 0x200000u64;
-        let (sbuf, smem) = self
-            .create_device_local_buffer(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, &vec![0u8; scratch_size as usize], "pt-scratch")?;
-        let scratch_addr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(sbuf); self.device.get_buffer_device_address(&i) };
+        // scratch 归 PtAssets 所有（旧实现每次 record 都新建 2MB 且从不释放 = 显存泄漏源）；
+        // BLAS 用前段、TLAS 用后段，两次构建不再共享同一地址。
+        let scratch_base = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.scratch_buf); self.device.get_buffer_device_address(&i) };
         // BLAS 构建（重建）
         let mut b_geom = vk::AccelerationStructureBuildGeometryInfoKHR::default();
         b_geom.ty = vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL;
@@ -5532,7 +5751,7 @@ impl Renderer {
         let iaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.idx_buf); self.device.get_buffer_device_address(&i) };
         let mut tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
         tri.vertex_format = vk::Format::R32G32B32_SFLOAT;
-        tri.max_vertex = (box_count * 24 - 1) as u32;
+        tri.max_vertex = (crate::engine::ray_tracer::PT_MAX_BOXES * 24 - 1) as u32;
         tri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: vaddr };
         tri.vertex_stride = 32;
         tri.index_type = vk::IndexType::UINT32;
@@ -5544,7 +5763,7 @@ impl Renderer {
         b_geo.flags = vk::GeometryFlagsKHR::OPAQUE;
         b_geom.p_geometries = &b_geo;
         b_geom.dst_acceleration_structure = assets.blas;
-        b_geom.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_addr };
+        b_geom.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_base };
         b_geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
         let range_b = vk::AccelerationStructureBuildRangeInfoKHR { primitive_count: (box_count * 12) as u32, primitive_offset: 0, first_vertex: 0, transform_offset: 0 };
         // TLAS
@@ -5561,13 +5780,26 @@ impl Renderer {
         t_geo.geometry = vk::AccelerationStructureGeometryDataKHR { instances: inst_geo_data };
         t_geom.p_geometries = &t_geo;
         t_geom.dst_acceleration_structure = assets.tlas;
-        t_geom.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_addr };
+        t_geom.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_base + assets.scratch_blas };
         t_geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
         let range_t = vk::AccelerationStructureBuildRangeInfoKHR { primitive_count: 1, primitive_offset: 0, first_vertex: 0, transform_offset: 0 };
         unsafe {
-            let rb: [vk::AccelerationStructureBuildRangeInfoKHR; 4] = [range_b; 4];
-            let rbs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&rb[..1]];
+            let rb: [vk::AccelerationStructureBuildRangeInfoKHR; 1] = [range_b];
+            let rbs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&rb];
             ext.cmd_build_acceleration_structures(cmd, &[b_geom], &rbs);
+            // BLAS 写完 -> TLAS 读几何/引用其结果，两次构建之间必须有执行依赖
+            let bb = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
+                .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR | vk::AccessFlags::SHADER_READ);
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+                vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+                vk::DependencyFlags::empty(),
+                &[bb],
+                &[],
+                &[],
+            );
             let rt: [vk::AccelerationStructureBuildRangeInfoKHR; 1] = [range_t];
             let rts: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&rt];
             ext.cmd_build_acceleration_structures(cmd, &[t_geom], &rts);
@@ -8045,6 +8277,14 @@ impl Renderer {
                 self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[pt_bar]);
                 self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_pipeline);
                 self.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::COMPUTE, self.pt_layout, 0, &[self.pt_dset], &[]);
+                let pc = self.pt_params.pack(size);
+                self.device.cmd_push_constants(
+                    command_buffer,
+                    self.pt_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    bytemuck_bytes(&pc),
+                );
                 self.device.cmd_dispatch(command_buffer, (size + 7) / 8, (size + 7) / 8, 1);
                 // PT 写完成 -> Transfer 读
                 let pt_bar2 = vk::ImageMemoryBarrier::default()
