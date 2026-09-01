@@ -1252,7 +1252,8 @@ impl GameApp {
                         Some(crate::engine::ai::Team::Red) => [0.95, 0.12, 0.08, 1.0],
                         None => [0.45, 0.45, 0.45, 1.0],
                     };
-                    let base_tint = [tint[0] * 0.6, tint[1] * 0.6, tint[2] * 0.6, 0.6];
+                    // 底盘配色：三通道等比缩放 → 色相/饱和度不变，归属色语义（蓝/红/灰）保持
+                    let base_tint = [tint[0] * 0.8, tint[1] * 0.8, tint[2] * 0.8, 0.6];
                     let _ = id; // 标记 id 暂不绘制文字（HUD 已有 id 标签）
                     [
                         // 立柱（旗杆）
@@ -1261,10 +1262,15 @@ impl GameApp {
                                 * glam::Mat4::from_scale(glam::Vec3::new(0.4, 4.0, 0.4)),
                             tint,
                         },
-                        // 地面底盘（占领半径范围，半径 5.0 → scale 10.0）
+                        // 地面底盘（占领半径范围，半径 5.0 → scale 10.0）。
+                        // D10 根因：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，而地面实例
+                        // 平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；玩家视线 ~1.7m 看
+                        // 一层 10cm 的板几乎完全侧向（edge-on）→ 投影不足一像素 → 底盘"消失"，
+                        // 据点读起来只剩两根电线杆。改为 0.5m 厚的低台（底面埋进地里 5cm 避免
+                        // 与地形之间留缝），顶面离地 ~40cm，任何视角都能读出"这是一块领地"。
                         engine::renderer::WorldMarker {
-                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.08, z))
-                                * glam::Mat4::from_scale(glam::Vec3::new(10.0, 0.15, 10.0)),
+                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.20, z))
+                                * glam::Mat4::from_scale(glam::Vec3::new(10.0, 0.5, 10.0)),
                             tint: base_tint,
                         },
                     ]
