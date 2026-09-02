@@ -37,7 +37,7 @@ impl Default for GameConfig {
             resolution: RESOLUTIONS[0],
             resolution_explicit: false,
             quality: 2, // HIGH（2026-08-28：用户机器全高实测 —— RTX 5060L + Zen4）
-            pt_enable: true, // 2026-08-29 全景路径追踪默认开启（铁绝不超显存：全常驻 <2MB！）
+            pt_enable: false, // 2026-09-02 临时关闭（PT 路径干净驱动下 0xC0000005 待深挖；光栅=稳定可玩！）
             rt_enable: true,
         }
     }
