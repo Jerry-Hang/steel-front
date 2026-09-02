@@ -1,0 +1,46 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:153
++ ... w($false); cd D:\Rust\steel-front; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+error[E0425]: cannot find value `PT_FRAME_SPV` in module `crate::shaders`
+    --> src\engine\renderer.rs:4618:68
+     |
+4618 |         let vs_module = self.create_shader_module(&crate::shaders::PT_FRAME_SPV.to_vec()).map_err(|e| format!("P
+T m: {e}"))?;
+     |                                                                    ^^^^^^^^^^^^ not found in `crate::shaders`
+
+error[E0425]: cannot find value `PT_FRAME_SPV` in module `crate::shaders`
+    --> src\engine\renderer.rs:5117:52
+     |
+5117 |             .create_shader_module(&crate::shaders::PT_FRAME_SPV.to_vec())
+     |                                                    ^^^^^^^^^^^^ not found in `crate::shaders`
+
+warning: value assigned to `i` is never read
+  --> src\engine\ray_tracer.rs:29:13
+   |
+29 |             i += 8;
+   |             ^^^^^^
+...
+56 |     v!(cx - hx, cy + hy, cz + hz, 0.0, 0.0, 1.0, 1.0, 0.0);
+   |     ------------------------------------------------------ in this macro invocation
+   |
+   = help: maybe it is overwritten before being read?
+   = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+   = note: this warning originates in the macro `v` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `begin`
+    --> src\engine\renderer.rs:5537:13
+     |
+5537 |         let begin = vk::CommandBufferBeginInfo::default()
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_begin`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `steel-front` (bin "steel-front") generated 2 warnings
+warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+error: could not compile `steel-front` (bin "steel-front") due to 2 previous errors; 2 warnings emitted

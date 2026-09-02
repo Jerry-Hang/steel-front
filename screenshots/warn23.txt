@@ -1,0 +1,9 @@
+﻿cargo : warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+At line:1 char:163
++ ...  python scripts\fileallow.py 2>&1; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: steel-...T_SPV_STRUCT_OK:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+    Finished `release` profile [optimized] target(s) in 17.60s

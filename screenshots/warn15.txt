@@ -1,0 +1,225 @@
+﻿cargo : warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+At line:1 char:154
++ ... ($false); python scripts\dangl.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: steel-...T_SPV_STRUCT_OK:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+warning: unnecessary trailing semicolon
+  --> src\engine\assets.rs:79:6
+   |
+79 |     };
+   |      ^ help: remove this semicolon
+   |
+   = note: `#[warn(redundant_semicolons)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `parse_obj` is never used
+  --> src\engine\assets.rs:24:8
+   |
+24 | pub fn parse_obj(text: &str) -> Result<ImportedMesh, String> {
+   |        ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `RELIEF_STEP` is never used
+  --> src\engine\city.rs:45:7
+   |
+45 | const RELIEF_STEP: f32 = 0.14;
+   |       ^^^^^^^^^^^
+
+warning: method `ico` is never used
+   --> src\engine\city.rs:164:8
+    |
+144 | impl Part {
+    | --------- method in this implementation
+...
+164 |     fn ico(self) -> Self {
+    |        ^^^
+
+warning: method `slab` is never used
+   --> src\engine\city.rs:206:8
+    |
+188 | impl City {
+    | --------- method in this implementation
+...
+206 |     fn slab(&mut self, kind: ObstacleKind, x: f32, z: f32, w: f32, d: f32, h: f32, tint: [f32; 3]) {
+    |        ^^^^
+
+warning: function `parking_lot` is never used
+   --> src\engine\city.rs:795:4
+    |
+795 | fn parking_lot(c: &mut City, cx: f32, cz: f32) {
+    |    ^^^^^^^^^^^
+
+warning: methods `map_obstacles` and `player_speed` are never used
+    --> src\engine\game.rs:1660:12
+     |
+1114 | impl Game {
+     | --------- methods in this implementation
+...
+1660 |     pub fn map_obstacles(&self) -> &[MapObstacle] {
+     |            ^^^^^^^^^^^^^
+...
+1997 |     pub fn player_speed(&self) -> f32 {
+     |            ^^^^^^^^^^^^
+
+warning: variants `Box` and `Ico` are never constructed
+  --> src\engine\geom.rs:27:5
+   |
+25 | pub enum Shape {
+   |          ----- variants in this enum
+26 |     /// 立方体（24 顶点 / 12 三角，逐面 0..1 UV）。
+27 |     Box,
+   |     ^^^
+...
+32 |     Ico,
+   |     ^^^
+   |
+   = note: `Shape` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dea
+d code analysis
+
+warning: associated items `from_tag` and `inscribed_radius_factor` are never used
+  --> src\engine\geom.rs:62:18
+   |
+39 | impl Shape {
+   | ---------- associated items in this implementation
+...
+62 |     pub const fn from_tag(v: f32) -> Shape {
+   |                  ^^^^^^^^
+...
+81 |     pub const fn inscribed_radius_factor(self) -> f32 {
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GROUND_DETAIL_SIZE` is never used
+   --> src\engine\procedural.rs:414:11
+    |
+414 | pub const GROUND_DETAIL_SIZE: u32 = 512;
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: constant `GROUND_DETAIL_METRES` is never used
+   --> src\engine\procedural.rs:418:11
+    |
+418 | pub const GROUND_DETAIL_METRES: f32 = 2.0;
+    |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `periodic_grid_hash` is never used
+   --> src\engine\procedural.rs:424:4
+    |
+424 | fn periodic_grid_hash(ix: i32, iy: i32, period: i32, seed: u32) -> f32 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `periodic_noise` is never used
+   --> src\engine\procedural.rs:431:4
+    |
+431 | fn periodic_noise(x: f32, y: f32, cells: f32, seed: u32) -> f32 {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `generate_ground_detail_texture` is never used
+   --> src\engine\procedural.rs:462:8
+    |
+462 | pub fn generate_ground_detail_texture(size: u32, seed: u32) -> Vec<u8> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `generate_default_ground_detail_texture` is never used
+   --> src\engine\procedural.rs:489:8
+    |
+489 | pub fn generate_default_ground_detail_texture() -> Vec<u8> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PT_SUN_COLOR` is never used
+  --> src\engine\ray_tracer.rs:78:11
+   |
+78 | pub const PT_SUN_COLOR: [f32; 3] = [1.0, 0.95, 0.85];
+   |           ^^^^^^^^^^^^
+
+warning: constant `PT_AMBIENT_COLOR` is never used
+  --> src\engine\ray_tracer.rs:80:11
+   |
+80 | pub const PT_AMBIENT_COLOR: [f32; 3] = [0.5, 0.55, 0.6];
+   |           ^^^^^^^^^^^^^^^^
+
+warning: constant `PT_AMBIENT_INTENSITY` is never used
+  --> src\engine\ray_tracer.rs:81:11
+   |
+81 | pub const PT_AMBIENT_INTENSITY: f32 = 0.5;
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `frame_size` is never used
+    --> src\engine\renderer.rs:4600:12
+     |
+ 933 | impl Renderer {
+     | ------------- method in this implementation
+...
+4600 |     pub fn frame_size(&self) -> (u32, u32) {
+     |            ^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+    --> src\engine\renderer.rs:4734:13
+     |
+4734 | ...   self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFl
+ags::ONE_TIME_SUBMIT));
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+4734 |             let _ = self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::Comman
+dBufferUsageFlags::ONE_TIME_SUBMIT));
+     |             +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> src\engine\renderer.rs:5090:13
+     |
+5090 | ...   self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFl
+ags::ONE_TIME_SUBMIT));
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+5090 |             let _ = self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::Comman
+dBufferUsageFlags::ONE_TIME_SUBMIT));
+     |             +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> src\engine\renderer.rs:5285:13
+     |
+5285 |             self.device.begin_command_buffer(cb, &begin_info);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+5285 |             let _ = self.device.begin_command_buffer(cb, &begin_info);
+     |             +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> src\engine\renderer.rs:5541:13
+     |
+5541 |             self.device.begin_command_buffer(cb, &begin_info);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+5541 |             let _ = self.device.begin_command_buffer(cb, &begin_info);
+     |             +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> src\engine\renderer.rs:5554:13
+     |
+5554 |             self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default());
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+5554 |             let _ = self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default());
+     |             +++++++
+
+warning: `steel-front` (bin "steel-front") generated 24 warnings
+    Finished `release` profile [optimized] target(s) in 16.92s

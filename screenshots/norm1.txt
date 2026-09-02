@@ -1,0 +1,93 @@
+[2026-09-02T11:47:30Z INFO  steel_front] ========================================
+[2026-09-02T11:47:30Z INFO  steel_front]   钢铁前线 (Steel Front) v0.1.0
+[2026-09-02T11:47:30Z INFO  steel_front]   二战FPS游戏引擎 - Rust + Vulkan
+[2026-09-02T11:47:30Z INFO  steel_front] ========================================
+[2026-09-02T11:47:30Z INFO  steel_front::engine::cpu] cpu: vendor=Amd threads=32 primary=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] secondary=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31] e_cores=0 avx2=true avx512=true scene_set=[0] ai_set=[16] physical_primary=[0] physical_secondary=[16] smt=[1, 17] ccx_groups=[] efficiency=[0, 0, 0, 0] le_set=[] audio_set=[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+[2026-09-02T11:47:30Z INFO  steel_front::engine::cpu] cpu: 主线程已绑定 vCPU [0]（32 逻辑线程，AMD 双簇：主=CCD0，次=CCD1；SMT 2）
+[2026-09-02T11:47:30Z INFO  steel_front::audio_out] audio: waveOut 打开成功 48000Hz/2ch（4 块 x 2048 帧缓冲）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::game] map: level 1 generated: 1197 obstacle bodies (wall=0 block=587 barrier=168 tree=168 building=258 ruin=16), 4419 grid cells blocked
+[2026-09-02T11:47:30Z INFO  steel_front] 窗口创建成功: 2560x1600
+[2026-09-02T11:47:30Z INFO  steel_front] winit inner_size: 2560x1600 scale_factor=1.50
+[2026-09-02T11:47:30Z WARN  steel_front::engine::renderer] RV3D_VALIDATION 未设置或验证层不可用，将不使用验证层（驱动宽松行为）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 选择物理设备: NVIDIA GeForce RTX 5060 Laptop GPU
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: 设备 NVIDIA GeForce RTX 5060 Laptop GPU 硬件能力探测（WSLg/dzn 视角）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: 可用 device 扩展 280 个
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 光追扩展 --
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_pipeline = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_acceleration_structure = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_query = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_deferred_host_operations = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_buffer_device_address = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_ray_tracing_position_fetch = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_ray_tracing = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- Tensor Core / 协作矩阵 --
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_cooperative_matrix = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cooperative_matrix = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_compute_shader_derivatives = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- DLSS / NVIDIA 私有 --
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_image_view_handle = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NVX_binary_import = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_cuda_kernel = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_NV_external_memory = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: -- 其它新特性 --
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_EXT_mesh_shader = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_shader_object = false
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps:   VK_KHR_dynamic_rendering = true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 特性 ray_tracing_pipeline=true acceleration_structure=true buffer_device_address=true ray_query=true
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: RT 管线属性 shaderGroupHandleSize=32B maxRecursionDepth=31 maxRayDispatchInvocationCount=1073741824
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】光追探测 device 创建成功 → RT Core 路径可用（dzn→DXR）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: CUDA 直通（Tensor Core 可编程访问）=false（libcuda in /usr/lib/wsl/lib）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::gpu_caps] gpu-caps: 【结论】Vulkan-DLSS（NVIDIA 私有扩展）=true；可直接接 DLSS SDK
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] VK_EXT_mesh_shader 可用：启用可选网格着色器渲染路径
+[2026-09-02T11:47:30Z WARN  steel_front::engine::renderer] device-create: 请求=["VK_KHR_swapchain", "VK_EXT_mesh_shader", "VK_KHR_buffer_device_address", "VK_KHR_deferred_host_operations", "VK_KHR_acceleration_structure", "VK_KHR_ray_query", "VK_KHR_ray_tracing_pipeline"] 缺失=[]
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 实例缓冲创建完成: 65536 个实例，stride 80 字节，2 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] instances=65536 draw_calls=1
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] Descriptor Set Layout: binding 0 = UBO(view/proj), binding 1 = 贴图, binding 2 = 实例 STORAGE_BUFFER, binding 3 = 采样器
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] Descriptor 初始化完成（2 帧）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] gun-attr: stride=32 pos@0 color@12 uv@24
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 远档 LOD 几何创建完成: 8 顶点 / 12 索引（十字双 quad）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 地面平铺 quad 几何创建完成: 4 顶点 / 6 索引（无侧壁）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 球体几何创建完成: 325 顶点 / 1728 索引（爆炸球形扩散）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 圆柱几何创建完成: 50 顶点 / 288 索引（NPC 四肢）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 地形 LOD[0] 创建完成: 66049 顶点 / 393216 索引（257×257 网格，间距 2）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 地形 LOD[1] 创建完成: 16641 顶点 / 98304 索引（129×129 网格，间距 4）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 地形 LOD[2] 创建完成: 4225 顶点 / 24576 索引（65×65 网格，间距 8）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 地形 3 级 LOD 全部创建完成（高/中/低）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 图形管线创建完成
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 网格着色器 maxMeshWorkGroupCount[0] = 4194304（地面场 65536 按此分块）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 网格着色器管线创建完成（VK_EXT_mesh_shader）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] HUD 覆盖层初始化完成（独立 pipeline，容量 4096 quads）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 纹理初始化完成: 1024x1024（11 mip，来源=程序化地面材质）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 程序化皮肤纹理初始化完成: 512x512（marker=木板墙, npc=迷彩军服, RV3D_SKIN_TEX=on）
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 阴影贴图资源创建完成: 2048x2048 D32_SFLOAT
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 阴影 depth-only 管线创建完成
+[2026-09-02T11:47:30Z INFO  steel_front] Vulkan 渲染器初始化成功
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] PT-BLAS: size=383616 scratch_build=90496 prims=48
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] PT-TLAS: size=2048 scratch_build=1920
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] PT-RESIDENT: 2560x1600 spp 目标 256（时域累积）
+[2026-09-02T11:47:30Z INFO  steel_front] RT: 路径追踪全景 = 开启
+[2026-09-02T11:47:30Z INFO  steel_front] settings: 分辨率保持 2560x1600
+[2026-09-02T11:47:30Z INFO  steel_front] settings: 应用画质 中画质
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 画质预设已切换: 中画质
+[2026-09-02T11:47:30Z INFO  steel_front] 性能日志已创建（logs/perf_*.log）
+[2026-09-02T11:47:30Z INFO  steel_front] 窗口大小变化: 1898x1061
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-09-02T11:47:30Z INFO  steel_front] 窗口大小变化: 1920x1117
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-09-02T11:47:30Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-09-02T11:47:31Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-09-02T11:47:31Z INFO  steel_front] 窗口大小变化: 2560x1600
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] swapchain diag: current_extent=2560x1600 final=2560x1600
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] 交换链初始化完成: 2560x1600, 格式: B8G8R8A8_SRGB, 图像数: 3, present_mode: IMMEDIATE
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] 深度缓冲创建完成: 3 张 2560x1600 D32_SFLOAT
+[2026-09-02T11:47:31Z INFO  steel_front] assets: 导入枪模 assets/guns/ak12.glb（63283 顶点 / 70479 索引，基色亮度 0.077 → 反照率增益 ×3.12，首色 Some([0.08579212, 0.08579212, 0.08579212])）
+[2026-09-02T11:47:31Z INFO  steel_front::engine::renderer] PT-SCENE: 盒 512 个（WorldMarker 同源）

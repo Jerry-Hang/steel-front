@@ -1,0 +1,16 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:157
++ ... alse); python scripts\compcopy.py; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+error: expected item after attributes
+   --> src\engine\assets.rs:334:1
+    |
+334 | #[cfg(windows)]
+    | ^^^^^^^^^^^^^^^
+
+warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+error: could not compile `steel-front` (bin "steel-front") due to 1 previous error

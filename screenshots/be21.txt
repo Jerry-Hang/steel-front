@@ -1,0 +1,22 @@
+﻿cargo : warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+At line:1 char:153
++ ... w($false); cd D:\Rust\steel-front; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: steel-...T_SPV_STRUCT_OK:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+error: unexpected closing delimiter: `}`
+    --> src\main.rs:2799:1
+     |
+2016 |         match Renderer::new(&window) {
+     |                                      - this delimiter might not be properly closed...
+...
+2086 |             }
+     |             - ...as it matches this but it has different indentation
+...
+2799 | }
+     | ^ unexpected closing delimiter
+
+warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+error: could not compile `steel-front` (bin "steel-front") due to 1 previous error

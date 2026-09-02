@@ -1,0 +1,60 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:243
++ ... attern 'warning: value assigned' ; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error: unknown character escape: `V`
+    --> build.rs:1367:31
+     |
+1367 |             let glslang = "C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                               ^ unknown character escape
+     |
+     = help: for more information, visit <https://doc.rust-lang.org/reference/tokens.html#literals>
+help: if you meant to write a literal backslash (perhaps escaping in a regular expression), consider a raw string liter
+al
+     |
+1367 |             let glslang = r"C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                           +
+
+error: unknown character escape: `1`
+    --> build.rs:1367:41
+     |
+1367 |             let glslang = "C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                                         ^ unknown character escape
+     |
+     = help: for more information, visit <https://doc.rust-lang.org/reference/tokens.html#literals>
+help: if you meant to write a literal backslash (perhaps escaping in a regular expression), consider a raw string liter
+al
+     |
+1367 |             let glslang = r"C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                           +
+
+error: unknown character escape: `B`
+    --> build.rs:1367:51
+     |
+1367 |             let glslang = "C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                                                   ^ unknown character escape
+     |
+     = help: for more information, visit <https://doc.rust-lang.org/reference/tokens.html#literals>
+help: if you meant to write a literal backslash (perhaps escaping in a regular expression), consider a raw string liter
+al
+     |
+1367 |             let glslang = r"C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                           +
+
+error: unknown character escape: `g`
+    --> build.rs:1367:55
+     |
+1367 |             let glslang = "C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                                                       ^ unknown character escape
+     |
+     = help: for more information, visit <https://doc.rust-lang.org/reference/tokens.html#literals>
+help: if you meant to write a literal backslash (perhaps escaping in a regular expression), consider a raw string liter
+al
+     |
+1367 |             let glslang = r"C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe";
+     |                           +
+
+error: could not compile `steel-front` (build script) due to 4 previous errors

@@ -1,0 +1,9 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:395
++ ... rce -ErrorAction SilentlyContinue; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+    Finished `release` profile [optimized] target(s) in 18.17s

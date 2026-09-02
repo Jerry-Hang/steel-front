@@ -1,0 +1,24 @@
+﻿cargo : warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+At line:1 char:153
++ ... w($false); cd D:\Rust\steel-front; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: steel-...T_SPV_STRUCT_OK:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+error: expected `;`, found `#`
+   --> src\engine\city.rs:163:36
+    |
+163 |         self.shape(Shape::Cylinder)
+    |                                    ^ help: add `;` here
+164 | #[allow(dead_code)] // 规划特性保留：二十面体生成器（备用）
+    | - unexpected token
+
+error: expected statement after outer attribute
+   --> src\engine\city.rs:164:1
+    |
+164 | #[allow(dead_code)] // 规划特性保留：二十面体生成器（备用）
+    | ^^^^^^^^^^^^^^^^^^^
+
+warning: steel-front@0.1.0: RT_SPV_STRUCT_OK
+error: could not compile `steel-front` (bin "steel-front") due to 2 previous errors

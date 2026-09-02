@@ -1,0 +1,13 @@
+﻿cargo :    Compiling steel-front v0.1.0 (D:\Rust\steel-front)
+At line:1 char:234
++ ... rce -ErrorAction SilentlyContinue; cargo build --release 2>&1 | Out-F ...
++                                        ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling st...st\steel-front):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+error[E0601]: `main` function not found in crate `build_script_build`
+  |
+  = note: consider adding a `main` function to `build.rs`
+
+For more information about this error, try `rustc --explain E0601`.
+error: could not compile `steel-front` (build script) due to 1 previous error
