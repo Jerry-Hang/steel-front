@@ -1276,7 +1276,7 @@ impl Renderer {
             render_pass: vk::RenderPass::null(),
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
-            mesh_enabled: mesh_shader_available,
+            mesh_enabled: false, // 2026-09-02: mesh shader 路径地面全黑 bug（A/B 实锤）；传统 vertex 路径优（画面细节+地面正常），222fps 持平
             device_name,
             mesh_shader: mesh_shader_loader,
             mesh_pipeline: vk::Pipeline::null(),

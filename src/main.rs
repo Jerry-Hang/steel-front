@@ -3066,14 +3066,14 @@ mod tests {
             glam::Vec3::Z,     // 枪口方向
         ];
         let mut lo = f32::MAX;
-        let mut hi = 0.0;
+        let mut hi: f32 = 0.0;
         for d in dirs {
             let n = d.normalize();
             let c = fp_gun_bake_color(n, raw, boost);
             for ch in c {
                 assert!(ch.is_finite() && (0.0..=1.0).contains(&ch), "{:?} → {:?}", n, c);
                 lo = lo.min(ch);
-                hi = hi.max(ch);
+                hi = hi.max(ch as f32);
             }
         }
         assert!(lo > 0.03, "最暗面不应是纯黑，实际 {}", lo);

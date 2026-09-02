@@ -2499,7 +2499,7 @@ impl Game {
         let sun = DirectionalLight::new(
             glam::Vec3::new(-0.4, 0.9, -0.3).normalize(),
             glam::Vec3::new(1.0, 0.95, 0.85),
-            1.15,
+            1.35,
         );
         let point_a = PointLight::new(
             glam::Vec3::new(0.0, 6.0, 0.0),
@@ -2530,7 +2530,7 @@ impl Game {
             Some(&sun),
             &[point_a, point_b],
             glam::Vec3::new(0.5, 0.55, 0.6),
-            0.30,
+            0.55,
             shadow.as_ref(),
         )
     }
