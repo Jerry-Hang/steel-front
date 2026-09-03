@@ -181,19 +181,29 @@ fn append_prim(
     vert_offset: &mut u32,
 ) -> Result<(), String> {
     let _ = prim.get("material");
-    // accessor 读取（componentType 感知：5126=f32 顶点/法线/UV，5125=u32 索引，5123=u16 索引；
-    // 无 byteStride 简化——绝大多数导出器默认密集布局）
-    fn read_acc(json: &crate::llm_cmd::Json, bin: &[u8], idx: usize, comps: usize, _ty: u8) -> Result<Vec<f32>, String> {
+    // accessor 读取（componentType 感知；无 byteStride 简化——绝大多数导出器默认密集布局）
+    // 整型分量必须按 glTF 的 `normalized` 标志换算：Blender 5.x 导出的 COLOR_0 就是
+    // VEC4 + UNSIGNED_SHORT + normalized，直接取原值会得到 0..65535 当 albedo 用。
+    fn read_acc(json: &crate::llm_cmd::Json, bin: &[u8], idx: usize, comps: usize) -> Result<Vec<f32>, String> {
         let acc = json.get("accessors").and_then(|a| a.as_arr()).and_then(|a| a.get(idx)).ok_or("accessor 缺失")?;
         let count = acc.get("count").and_then(|c| c.as_f64()).unwrap_or(0.0) as usize;
         let ctype = acc.get("componentType").and_then(|c| c.as_f64()).unwrap_or(5126.0) as u32;
+        let norm = acc.get("normalized").and_then(|b| b.as_bool()).unwrap_or(false);
         let bv = acc.get("bufferView").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
         let off = json.get("bufferViews").and_then(|b| b.as_arr()).and_then(|b| b.get(bv))
             .and_then(|b| b.get("byteOffset")).and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
-        let step = match ctype {
-            5125 => 4, // u32
-            5123 => 2, // u16
-            _ => 4,    // f32
+        // accessor 自己还能再偏一段：多个 accessor 挤在同一个 bufferView 里时，这是唯一的区分手段。
+        // 以前不读它——ak12.glb 正是因此把 mesh0 的 NORMAL 读成了 POSITION、把 mesh1 读成了
+        // mesh0 前 988 个顶点的副本。几何全错，却一句错误信息都没有。
+        let off = off + acc.get("byteOffset").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
+        // (bytes per component, divisor applied only when the spec says the value is normalized)
+        let (step, div): (usize, f32) = match ctype {
+            5120 => (1, if norm { 127.0 } else { 1.0 }),   // BYTE
+            5121 => (1, if norm { 255.0 } else { 1.0 }),   // UNSIGNED_BYTE
+            5122 => (2, if norm { 32767.0 } else { 1.0 }), // SHORT
+            5123 => (2, if norm { 65535.0 } else { 1.0 }), // UNSIGNED_SHORT
+            5125 => (4, 1.0),                              // UNSIGNED_INT (indices)
+            _ => (4, 1.0),                                 // FLOAT
         };
         let mut out = Vec::with_capacity(count * comps);
         for i in 0..count * comps {
@@ -201,24 +211,36 @@ fn append_prim(
             if b + step > bin.len() {
                 return Err("GLB accessor 越界".into());
             }
-            let v = if ctype == 5125 {
-                u32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]]) as f32
-            } else if ctype == 5123 {
-                u16::from_le_bytes([bin[b], bin[b + 1]]) as f32
-            } else {
-                f32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]])
+            let v = match ctype {
+                5125 => u32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]]) as f32,
+                5123 => u16::from_le_bytes([bin[b], bin[b + 1]]) as f32,
+                5122 => i16::from_le_bytes([bin[b], bin[b + 1]]) as f32,
+                5121 => bin[b] as f32,
+                5120 => bin[b] as i8 as f32,
+                _ => f32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]]),
             };
-            out.push(v);
+            out.push(v / div);
         }
         Ok(out)
     }
-    let pos = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("POSITION")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
-    let nrm = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("NORMAL")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 3, 2)?;
-    let uv = read_acc(json, bin, prim.get("attributes").and_then(|a| a.get("TEXCOORD_0")).and_then(|p| p.as_f64()).unwrap_or(0.0) as usize, 2, 2)?;
-    // 顶点色（Blender 烘焙 COLOR_0，通常 VEC3；有则优先于材质基色）
+    // 属性缺失时**必须返回空**，不能退回 accessor 0：旧写法 `unwrap_or(0.0)` 会把
+    // accessor 0（通常是 POSITION）当成缺失的法线/UV/索引来读，于是"没有 UV 的网格"
+    // 拿到的是"位置当 UV"，几何与着色全错却零报错。下游已按长度做了兜底
+    // （法线缺 → (0,1,0)，UV 缺 → (0,0)），空向量才是安全值。
+    let attr = |name: &str, comps: usize| -> Vec<f32> {
+        match prim.get("attributes").and_then(|a| a.get(name)).and_then(|p| p.as_f64()) {
+            Some(i) => read_acc(json, bin, i as usize, comps).unwrap_or_default(),
+            None => Vec::new(),
+        }
+    };
+    let pos = attr("POSITION", 3);
+    let nrm = attr("NORMAL", 3);
+    let uv = attr("TEXCOORD_0", 2);
+    // 顶点色（Blender 烘焙 COLOR_0；有则优先于材质基色）。分量数按 accessor 的 type 取，
+    // 后面也必须按同一个数寻址——写死 4 会让 VEC3 颜色逐顶点错位，越界后静默退回基色。
     let col = prim.get("attributes").and_then(|a| a.get("COLOR_0")).and_then(|p| p.as_f64());
+    let mut col_stride = 0usize;
     let colv = if let Some(ci) = col {
-        // 按 accessor 的 type 分量数读取（VEC3=3 / VEC4=4）
         let ty = json
             .get("accessors")
             .and_then(|a| a.as_arr())
@@ -227,18 +249,26 @@ fn append_prim(
             .and_then(|t| t.as_str())
             .map(|s| if s == "VEC4" { 4 } else { 3 })
             .unwrap_or(3);
-        read_acc(json, bin, ci as usize, ty, 2).unwrap_or_default()
+        col_stride = ty;
+        read_acc(json, bin, ci as usize, ty).unwrap_or_default()
     } else {
         Vec::new()
     };
-    let ind = read_acc(json, bin, prim.get("indices").and_then(|i| i.as_f64()).unwrap_or(0.0) as usize, 1, 2)?;
+    if pos.is_empty() {
+        return Err("GLB primitive 缺少 POSITION".into());
+    }
+    // 无索引图元（glTF 允许）按顺序生成索引，而不是去读 accessor 0
+    let ind = match prim.get("indices").and_then(|i| i.as_f64()) {
+        Some(i) => read_acc(json, bin, i as usize, 1)?,
+        None => (0..pos.len() / 3).map(|i| i as f32).collect(),
+    };
     let base = *vert_offset;
     for i in 0..pos.len() / 3 {
         let n = if i * 3 + 2 < nrm.len() { [nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]] } else { [0.0, 1.0, 0.0] };
         let t = if i * 2 + 1 < uv.len() { [uv[i * 2], uv[i * 2 + 1]] } else { [0.0, 0.0] };
         // 逐顶点颜色：COLOR_0 烘焙色优先，其次材质基色
-        let c = if (i + 1) * 4 <= colv.len() {
-            [colv[i * 4], colv[i * 4 + 1], colv[i * 4 + 2]]
+        let c = if col_stride >= 3 && (i + 1) * col_stride <= colv.len() {
+            [colv[i * col_stride], colv[i * col_stride + 1], colv[i * col_stride + 2]]
         } else {
             base_color
         };
@@ -312,6 +342,238 @@ mod tests {
             assert!(m.verts.len() > 1000, "AK12 顶点应上千，实际 {}", m.verts.len());
             assert!(m.indices.len() >= m.verts.len());
         }
+    }
+
+    /// 拼一个最小合法 GLB（JSON chunk + BIN chunk），供解析器做无磁盘依赖的回归测试
+    fn build_glb(json: &str, bin: &[u8]) -> Vec<u8> {
+        let mut jb = json.as_bytes().to_vec();
+        while jb.len() % 4 != 0 {
+            jb.push(b' ');
+        }
+        let mut bb = bin.to_vec();
+        while bb.len() % 4 != 0 {
+            bb.push(0);
+        }
+        let total = 12 + 8 + jb.len() + 8 + bb.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&[0x67, 0x6C, 0x54, 0x46]); // "glTF"
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(jb.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
+        out.extend_from_slice(&jb);
+        out.extend_from_slice(&(bb.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x004E4942u32.to_le_bytes()); // "BIN\0"
+        out.extend_from_slice(&bb);
+        out
+    }
+
+    /// 3 顶点三角形，POSITION/NORMAL/UV 固定，只有 COLOR_0 的 type 与 componentType 变
+    fn glb_bin(colour: &[u8]) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        for v in [[0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for f in v {
+                b.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        for _ in 0..3 {
+            for f in [0f32, 0.0, 1.0] {
+                b.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        for _ in 0..3 {
+            for f in [0.25f32, 0.75] {
+                b.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        b.extend_from_slice(colour);
+        for i in 0..3u32 {
+            b.extend_from_slice(&i.to_le_bytes());
+        }
+        b
+    }
+
+    fn glb_json(colour_accessor: &str, colour_off: usize, colour_len: usize,
+                idx_off: usize) -> String {
+        // 单行：仓库自带的极简 JSON 解析器对结构位置上的换行不宽容，测试夹具没必要踩这个
+        format!(
+            "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\
+            \"nodes\":[{{\"mesh\":0}}],\"meshes\":[{{\"primitives\":[{{\"attributes\":\
+            {{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2,\"COLOR_0\":3}},\"indices\":4}}]}}],\
+            \"accessors\":[{{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}},\
+            {{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}},\
+            {{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC2\"}},\
+            {colour_accessor},\
+            {{\"bufferView\":4,\"componentType\":5125,\"count\":3,\"type\":\"SCALAR\"}}],\
+            \"bufferViews\":[{{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36,\"target\":34962}},\
+            {{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36,\"target\":34962}},\
+            {{\"buffer\":0,\"byteOffset\":72,\"byteLength\":24,\"target\":34962}},\
+            {{\"buffer\":0,\"byteOffset\":{colour_off},\"byteLength\":{colour_len},\"target\":34962}},\
+            {{\"buffer\":0,\"byteOffset\":{idx_off},\"byteLength\":12,\"target\":34963}}]}}"
+        )
+    }
+
+    /// Blender 5.x 导出的 COLOR_0 是 VEC4 + UNSIGNED_SHORT + normalized：必须除以 65535，
+    /// 否则 albedo 拿到 0..65535 的原值。
+    #[test]
+    fn glb_color_u16_normalized_is_scaled() {
+        let mut col = Vec::new();
+        for c in [[4u16, 2u16, 1u16, 3u16], [8, 4, 2, 1], [16, 8, 4, 2]] {
+            for v in c {
+                col.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let json = glb_json(
+            r#"{"bufferView":3,"componentType":5123,"count":3,"type":"VEC4","normalized":true}"#,
+            96, 24, 120,
+        );
+        let m = parse_glb(&build_glb(&json, &glb_bin(&col))).unwrap();
+        assert_eq!(m.verts.len(), 3);
+        let want = [[4u32, 2, 1], [8, 4, 2], [16, 8, 4]];
+        for (vi, v) in m.verts.iter().enumerate() {
+            for k in 0..3 {
+                let got = v[8 + k];
+                let exp = want[vi][k] as f32 / 65535.0;
+                assert!((got - exp).abs() < 1e-4,
+                    "顶点 {vi} 通道 {k} 应归一化为 {exp}，实际 {got}");
+            }
+        }
+    }
+
+    /// VEC3 颜色必须按 stride 3 寻址：旧实现写死 4，第三个顶点会越界并静默退回材质基色。
+    #[test]
+    fn glb_color_vec3_addresses_by_three() {
+        let mut col = Vec::new();
+        for c in [[0.5f32, 0.25, 0.125], [0.75, 0.5, 0.25], [1.0, 0.0625, 0.5]] {
+            for v in c {
+                col.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let json = glb_json(
+            r#"{"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"}"#,
+            96, 36, 132,
+        );
+        let m = parse_glb(&build_glb(&json, &glb_bin(&col))).unwrap();
+        let last = &m.verts[2][8..11];
+        assert!((last[0] - 1.0).abs() < 1e-6 && (last[1] - 0.0625).abs() < 1e-6
+                && (last[2] - 0.5).abs() < 1e-6,
+            "VEC3 第三个顶点色应按 stride 3 读到，实际 {last:?}");
+    }
+
+    /// 真实资产回归：Blender headless 导出的整套 props 必须能被本解析器吃下，且
+    /// 顶点色落在 0..=1（u16 归一化没生效时会直接溢出到几万）、原点在底面（y 不为负太多）。
+    #[test]
+    fn glb_prop_kit_loads_with_valid_range() {
+        let dir = std::path::Path::new("assets/props");
+        if !dir.is_dir() {
+            return; // 资产未生成时不失败（与仓库既有 glb_* 测试一致的容错风格）
+        }
+        let mut checked = 0usize;
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("glb"))
+            .collect();
+        entries.sort();
+        for path in entries {
+            let bytes = std::fs::read(&path).unwrap();
+            let m = parse_glb(&bytes)
+                .unwrap_or_else(|e| panic!("{} 解析失败: {e}", path.display()));
+            assert!(m.verts.len() > 24, "{} 顶点过少 {}", path.display(), m.verts.len());
+            assert_eq!(m.indices.len() % 3, 0, "{} 索引不是三角形", path.display());
+            let max_idx = *m.indices.iter().max().unwrap_or(&0);
+            assert!(max_idx < m.verts.len() as u32,
+                "{} 索引越界 {max_idx} >= {}", path.display(), m.verts.len());
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            let mut clo = f32::MAX;
+            let mut chi = f32::MIN;
+            for v in &m.verts {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(v[k]);
+                    hi[k] = hi[k].max(v[k]);
+                }
+                for k in 0..3 {
+                    clo = clo.min(v[8 + k]);
+                    chi = chi.max(v[8 + k]);
+                }
+            }
+            assert!(clo >= 0.0 && chi <= 1.001,
+                "{} 顶点色超出 0..=1（[{clo}, {chi}]）——normalized 分量没换算",
+                path.display());
+            assert!(chi > clo, "{} 顶点色全同值，COLOR_0 可能根本没读到", path.display());
+            assert!(lo[1] > -1.0,
+                "{} 原点不在底面（min.y={}）", path.display(), lo[1]);
+            assert!(hi[1] < 40.0,
+                "{} 高度异常（max.y={}），单位应为米", path.display(), hi[1]);
+            checked += 1;
+        }
+        assert!(checked > 0, "assets/props 下没有 GLB");
+    }
+
+    /// 多个 accessor 挤在同一个 bufferView 里时，必须按 `accessor.byteOffset` 分开读。
+    /// ak12.glb 的 NORMAL 之所以被读成 POSITION，就是这个字段根本没被读。
+    #[test]
+    fn glb_honours_accessor_byte_offset_within_shared_buffer_view() {
+        // 一个 bufferView 装下 POSITION(36B) + NORMAL(36B)
+        let mut bin: Vec<u8> = Vec::new();
+        for v in [[0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for f in v {
+                bin.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        for _ in 0..3 {
+            for f in [0f32, 0.0, 1.0] {
+                bin.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        for _ in 0..3 {
+            for f in [0.25f32, 0.75] {
+                bin.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        for i in 0..3u32 {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":
+{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3}]}],
+"accessors":[
+{"bufferView":0,"byteOffset":0,"componentType":5126,"count":3,"type":"VEC3"},
+{"bufferView":0,"byteOffset":36,"componentType":5126,"count":3,"type":"VEC3"},
+{"bufferView":0,"byteOffset":72,"componentType":5126,"count":3,"type":"VEC2"},
+{"bufferView":0,"byteOffset":96,"componentType":5125,"count":3,"type":"SCALAR"}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":108,"target":34962}]}"#;
+        let m = parse_glb(&build_glb(json, &bin)).unwrap();
+        assert_eq!(m.verts.len(), 3);
+        // pos[0] = (0,0,0)，nrm[0] 必须是 (0,0,1) 而不是位置副本
+        assert_eq!(&m.verts[0][..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(&m.verts[0][3..6], &[0.0, 0.0, 1.0], "NORMAL 被读成了 POSITION");
+        assert_eq!(&m.verts[2][3..6], &[0.0, 0.0, 1.0]);
+        assert_eq!(&m.verts[0][6..8], &[0.25, 0.75], "UV 偏移没算对");
+    }
+
+    /// 缺 NORMAL / TEXCOORD_0 / indices 时不得别名到 accessor 0（那会把位置当法线）。
+    #[test]
+    fn glb_missing_attributes_do_not_alias_accessor_zero() {
+        let mut bin: Vec<u8> = Vec::new();
+        for v in [[1f32, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]] {
+            for f in v {
+                bin.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962}]}"#;
+        let m = parse_glb(&build_glb(json, &bin)).unwrap();
+        assert_eq!(m.verts.len(), 3);
+        // 法线缺失 → 安全默认 (0,1,0)，绝不能是位置 (1,2,3)
+        assert_eq!(&m.verts[0][3..6], &[0.0, 1.0, 0.0], "缺 NORMAL 时别名到了 accessor 0");
+        assert_eq!(&m.verts[0][6..8], &[0.0, 0.0], "缺 UV 时别名到了 accessor 0");
+        // 无索引图元应按顺序生成索引，而不是把位置当索引读
+        assert_eq!(m.indices, vec![0, 1, 2], "缺 indices 时应生成顺序索引");
     }
 
     #[cfg(windows)]
