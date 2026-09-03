@@ -1,7 +1,8 @@
 # AGENTS.md — Steel Front 项目记忆与 AI 交接文档
 
 ## 项目
-二战题材 FPS，Rust + Vulkan（winit 0.30），零第三方游戏依赖，纯 bin crate。
+**21 世纪架空世界观的大战场 FPS**（⚠ 2026-09-03 用户更正：本文件与 README 旧版长期误写为「二战题材」，据此建模/选材会全错——装备已是现代系，HUD 默认武器即 **AK-12 风暴 7.62×39mm**，2018 年列装）。美术基调按「近代复古城市 / 当代欧洲小镇」走，不是战壕与 1940 年代道具。
+Rust + Vulkan（winit 0.30），零第三方游戏依赖，纯 bin crate。
 - 入口：`src/main.rs`（GameApp + winit 事件循环）
 - 运行时中枢：`src/engine/game.rs`（每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络）
 - 渲染：`src/engine/renderer.rs`（地形 LOD + 65536 实例场 + HUD 覆盖层；改 pipeline/shader/swapchain 风险高，须先跑冒烟验 VUID）。**渲染主路径 = `VK_EXT_mesh_shader` 网格着色器（MESH + FRAGMENT）**，传统 VERTEX + FRAGMENT 顶点管线仅作 WSLg/dzn 回退（见下方「渲染技术路线铁律」）
@@ -67,6 +68,86 @@
 - ④ 线程分层调度优化（AMD 双 CCD / Intel P+E 分层负载）｜负责人：当前会话 AI｜状态：done（第 1-4 步全部完成：分组纯函数 + 双池调度 + 地图生成换核 + 远组降频；265 tests + 冒烟 ALL-OK；基准存档 `docs/perf-ai-tier-2026-08-11/`——128 NPC 压力模式 near~42/far~85（2/3 AI 走 CCD1/E 核）、ai_us p50≈385µs 非瓶颈、fps p50≈274 无回归、降频 A/B 收益≈0（压力模式互射 NPC 全在 Chase/Attack 触发面小，保留为防御性优化）；`RV3D_AI_DECIMATE=off` 可关降频）
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
+
+### [2026-09-03 收工] 交接：地面黑洞已修（实机截图确认）+ GLB 资产管线建成但未接线 + 三条新线索
+
+- 日期：2026-09-03
+- 发起方：Qwen Code（主 Agent）+ 分身 A（`renderer.rs`/`procedural.rs`）+ 分身 B（`build.rs`）
+- 接收方：明天接手的会话
+- 交接类型：迭代结束（含三条必须优先读的线索）
+- 验收：**`cargo test --release` 457 全绿 / 0 failed**；`cargo build --release` 通过（bin 53 警告，其中约 6 条是 `props.rs` 未被渲染消费的 dead code，接线后自动消失）；**实机截图 `screenshots/groundfix_a.png` 亲验：黑地消失、沥青裂纹与近处细节层可见、FPS 186→256、`marker=4255→3039`（不可见碰撞核被过滤）、`visible=18386/65536` 不变**；`scripts/cap_safe.ps1` 跑完确认无残留进程、光标释放。
+
+  - **① 地面纯黑已根治（本会话最大成果）。** 根因见上一条目的的详细论证：`build.rs` 片元引用的 `@group(0) @binding(9) ground_detail_tex` 从未进过描述符集布局 → 未绑定采样恒 0 → 乘性黑。修法：`renderer.rs` 新增 `GROUND_DETAIL_BINDING=9` + `ground_detail_image/memory/image_view` 三字段，以 **`R8G8B8A8_UNORM`（线性，非 SRGB）** 创建并绑定，描述符池 `SAMPLED_IMAGE` 由 `max_frames*4` 提到 `*5`；`procedural.rs` 纹素改为**半值编码**（`lum*0.5`，调制 1.0→128）以匹配着色器的 `*GROUND_DETAIL_GAIN(2.0)`，并把 `GROUND_DETAIL_SIZE` 512→**256** 使 `2.0/256` 与 `build.rs` 的 `GROUND_DETAIL_TEXEL_M=0.0078125` 严格相等。
+    - **两侧都加了防呆**：`build.rs` 用 `light_data.flags.w >= 0.5` 门控（`flags.w` 此前**零写入方**，已核实），并在 `g<=0` 时退回 ×1；`renderer.rs` 只在 `ground_detail_image_view != null` 时置 `flags.w=1.0`。**改其中一侧必须同时看另一侧**，否则细节层静默失效（表现为"地面变糊"而不是报错）。
+    - 新增 2 条测试把约定钉死：`ground_detail_texture_is_seamless_and_never_zero`（纹素不得接近 0，否则就是乘性黑洞）、`ground_detail_texel_size_matches_shader_constant`（跨文件常量一致性）。
+  - **② ⚠ 未修、已定位、优先级最高：主管线没有深度测试。** `renderer.rs:2323`（`init_pipeline`）是 `depth_test_enable(false)`，而 mesh 管线 `:2478` 是 `true`。也就是说**当前唯一在跑的 legacy 路径完全没有深度遮挡**，楼与楼只靠绘制顺序、互相穿透。这极可能是"建模一塌糊涂"的另一半原因——我此前把它全归给 D11 几何，不够。
+    - 我试过改成 `true` 并**已 revert**（未验证不提交）。**不能直接开**：枪模正是依赖"主管线 depth_test=OFF"才恒可见（见 `record_command_buffer` 枪模段注释），开了之后贴墙会被裁掉。
+    - 正确修法：**先给枪模单独一条 `depth_test=false` 的管线**（复制 `init_pipeline`，只改 depth state），再把主管线开成 `true`，然后**截图验收**。顺带修好之后，GLB 道具的遮挡关系才会正确，否则道具之间也无法互相遮挡。
+  - **③ GLB 道具：数据层全部完成，但渲染器还没接线——所以现在画面上看不到任何 GLB。** 已完成并测试：`props.rs`（`PropSet` 目录扫描加载、`PropPlacement`、旋转 AABB 精确碰撞闭式解、`merge()` CPU 位姿烘焙）13 条测试；`city.rs` 已把 **建筑 / 树 / 路灯 / 残骸车 / 沙袋墙 / HESCO / 集装箱（含堆叠）** 换成 GLB 摆放，资产缺失时自动退回原程序化盒（`City::prop` 返回 `bool`）；`LevelMap` 新增第三张表 `props`（**不动 obstacles/decor 的下标对应关系**——那是注释里警告过的静默错伤来源）；碰撞核标 `Shape::None` 由 `main.rs` 组装 marker 时过滤，避免与 GLB 表面共面 z-fight（`invisible_cores_must_be_covered_by_a_prop` 测试守住"不可见核必须有网格盖住"，防止留下无形墙）。
+    - 接渲染的**关键设计（省掉一整套实例槽位）**：位姿已在 CPU 烘进顶点，所以 GPU 只要一个 identity 矩阵 → 新增 **`PROP_INSTANCE_INDEX = GUN_INSTANCE_INDEX + 1`（83010）** 单槽即可，`buffer_elems` 已由 `+1` 改 `+2`。不必为道具开一整段实例区，也不必改 mesh 着色器。
+    - 还差的（明天做）：① 道具顶点/索引 buffer（**固定容量一次分配**，绝不要照抄枪模的 `next_power_of_two` 按需重建——那处注释记录过 destroy 在飞 buffer 触发 NVIDIA device-lost）；② 一条 **`depth_test=true` 的绘制**（等 ② 号线索修好，或单独建管线）；③ 在 `record_command_buffer` 里 marker 段之后、枪模段之前 draw；④ `main.rs` 把 `game.map().props` 喂给 `props::merge`（`ground` 参数传 `terrain_height_at`）再上传；⑤ 阴影 pass 要不要画道具（不画则道具没有投影）。
+    - **`Shape::Authored`（`tint.w = 6.0`）→ `flat_flag = 1.25` 已经铺好**：`build.rs` 片元据此跳过**四条**程序化表面效果——`window_dark`（按 `FLOOR_H=3.15` 画窗带）、`glass_shade`+菲涅耳、`is_canopy` 值噪声、**marker 混凝土皮肤**（它假设每面 0..1 UV，而 GLB 是世界投影 UV，会把墙纹任意铺开）。不接这条，GLB 建筑会被再画一层错位窗带 = 换个形式重演 D11。
+    - ⚠ 遗留的常量分叉：`FLOOR_H` 在 `city.rs:38` 与 `build.rs:483` 都是 **3.15**，而我 Blender 侧建筑楼层是 **3.4**、`panel_block` 是 2.9。因为 authored 已跳过程序化窗带，暂时不会画错，但**碰撞核高度用 3.15 算、网格用 3.4 建**，两者不一致。建议明天把 `gen_props.py` 的层高统一成 3.15 后重导出（一次 `blender --background --python`）。
+  - **④ 意外收获：枪模画质变好了。** 原因是 `ak12_baked.glb` 的 `COLOR_0` 是 **VEC3**，而旧加载器按 stride **4** 寻址 → 顶点色逐点错位、越界后静默退回材质基色（旧测试只断言 `verts[0]` 所以一直没发现）。修好后枪模拿到了正确的烘焙顶点色。**这说明仓库里既有 GLB 资产此前一直在被错误解析。**
+    - 顺带修的另外三个加载器 bug：`normalized` 完全不换算（u16 色会以 0..65535 当 albedo）、**`accessor.byteOffset` 不读**（`ak12.glb` 的 `NORMAL` 其实一直被读成 `POSITION`、第二个 mesh 被读成第一个 mesh 前 988 顶点的副本）、缺失的 `NORMAL`/`TEXCOORD_0`/`indices` 会**别名到 accessor 0**（没有 UV 的网格会拿到"位置当 UV"）。各配一条无磁盘依赖的合成 GLB 回归测试。
+    - ⚠ 仍**未修**：`bufferViews[].byteStride` 依然被忽略（交错布局的 GLB 会读错）。我的导出器是一 accessor 一 bufferView（密集），暂不受影响。
+  - **⑤ 教训（务必记住）**：直指 binding 9 这个 bug 的 `dead_code` 警告，被 `scripts/allowall.py` / `allowv3.py` / `allowv4.py` 三个脚本**主动 `#[allow(dead_code)]` 压掉了**（注释写"规划特性保留"）。**以后看到"规划中"的 dead code，必须同时回答"那它为什么没被接线"**，而不是加 allow 了事。建议明天把这三条注入规则删掉。
+  - 另外顺手修掉的既有缺陷：围墙段端柱压顶出挑 0.125 < `RELIEF_STEP`0.14、中央隔离带压顶同样 0.125（都是被我把 `relief_steps_are_not_coplanar` 从"抽查一栋楼"泛化成"遍历全部实体"后翻出来的）；`gun_sway_is_framerate_independent` 的帧数用 f32 除法截断（`0.5/(1/30)` = 14.999999 → 14 帧，导致两种帧率模拟的根本不是同一段时长）；`gun_sway_stays_bounded_and_wrapped` 在 600 s 后坐标累加到 3.6e3 m 引发浮点抵消噪声（约 7e-3 m/s），已拆成"长时验有界 + 短时验不过冲"两条；`dbg-respawn` 每帧刷屏的调试日志删除。
+  - 题材更正：**本作是 21 世纪架空大战场，不是二战**（文件头已改）。证据：默认武器 AK-12 是 2018 年列装。据此选材/建模。
+- 状态：done（地面黑洞修复 + 资产管线 + 数据层接线完成；渲染接线与深度测试留给下一波）
+- 明天开工顺序建议：② 深度测试（先给枪模独立管线）→ ③ 道具绘制接线 → 截图逐项验收 D7/D10/D11/D12 → 删 allow(dead_code) 注入脚本 → PT 崩溃另起一轮排查。
+
+### [2026-09-03] 交接：PT 崩溃实锤复现（**Cargo.lock 假设被证伪**）+ 建模路线改用 Blender + 鼠标安全协议
+
+- 日期：2026-09-03
+- 发起方：Qwen Code（Windows 原生会话）
+- 接收方：后续迭代 AI
+- 交接类型：规划开启 + 一条重要否定结论 + 路线决策
+- 交接内容：
+
+  - **⚠ 最重要（先读这条）：HANDOFF-2026-09-02 给的"PT 崩溃第一步试 Cargo.lock"是错的，已用证据推翻，别再照它做。**
+    - `git log --all -- Cargo.lock` 全历史只有 5 次改动，最后一次是 `28d833c`（9-01 20:38）；而正常跑起来的 PT 构建（`2436583`/`c6fedd1`/`bc9598b`/`35a49c6`）全在它**之后**且没再改过 lock。
+    - `git diff 28d833c HEAD -- Cargo.lock` 空、`git diff 35a49c6 -- Cargo.lock` 空、`git diff 35a49c6 -- Cargo.toml` 空 → **不存在"另一个版本的 lock"可恢复**，依赖版本从未与能跑版本不一致。
+    - `git diff 35a49c6 HEAD -- src build.rs` = **4 文件 6 增 6 删**，全是：`pt_enable` 开关、光照两个标量、`mesh_enabled: false`、`mod tests` 里的类型标注。`assets/rt/pt_panorama.spv` **不在差量里** → PT 的 SPIR-V 与安全基线逐字节相同。
+    - 时间线否证因果：崩溃在 `94a2699`（"restore 35a clean"，代码已还原成 35a）时就已存在，`pt_enable=false`(20:10) 与 `mesh_enabled=false`(20:54) 都是崩溃**之后**的止血，不是原因。
+    - **本轮实测复现**：把 `src/config.rs` 的 `pt_enable` 改回 true → `cargo build --release` → 启动，日志末行 = `PT-SCENE: 盒 512 个（WorldMarker 同源）`，进程随即异常退出。**源码与 93fps 能跑版本逐字节相同仍复现，重启无效**——这是硬结论，交接文档第四节那条"嫌疑"到此结案。
+    - 下一步该查的方向（本轮未做）：崩溃点在 `pt_set_scene_markers` **返回之后**（该日志行在函数末尾），即每帧 PT 派发 / 主命令缓冲 / blit 到 swapchain 阶段；候选是 AS 构建的显存与尺寸、每帧 dispatch 与 scene rebuild 的读写竞争、push constant 布局。判据用 Windows 事件日志的出错模块区分驱动侧(`nvoglv64.dll`)与应用侧。
+    - 现状：`pt_enable` 已改回 **false**（true 会让游戏一启动就崩，无法做任何截图验收）。**任何人接手先确认这一点**，否则会把"崩溃"误当成"我改坏了"。
+
+  - **`config.rs` 的 parser 至今不读 `pt_enable`/`rt_enable`**（grep 只命中结构体字段与 `Default`），所以 `~/.steel_front.cfg` 里写 `pt_enable=true` 无效，`RV3D_PT_LIVE=1` 也**开不了 PT**——因为 `main.rs:2057` 是 `if config.pt_enable { init_pt_resident() }`，resident 资源没建，`pt_live_enabled` 这个布尔只是空开关。**这条是 2026-08-31 就记过的老 bug，仍未修**，排查 PT 时不要浪费时间在环境变量上。
+
+  - **⭐ 路线决策（用户 2026-09-03 指令，取代"一切程序化生成"）：建模改用 Blender 出资产。**
+    - 原话要点：「别再程序化生成一切了，直接去用 blender」「当前建模已经被上一任的 DeepSeek 搞成一塌糊涂」「具体的建模和空间定位还需要靠你自己用多模态能力进行截图识别」。
+    - 本机 Blender：**`D:\3D_Work\blender\blender-5.2.1-windows-x64\blender.exe`**（5.2.1 LTS 绿色版，注册表无卸载项；自带 Python 3.13）。系统另有 `python 3.11.9`。
+    - **一律走 headless `--background --python`**，不要自动化 Blender 的 GUI——那会抢焦点/鼠标，直接违反下面的安全协议。
+    - 已落地：`tools/blender/gen_props.py`（资产套件生成器 + `--preview` 顶点色预览渲染，`--only a,b` 子集、`--out <dir>`）、`tools/glb_probe.py`（GLB 属性布局探针）、产物在 `assets/props/*.glb`（**24 件**）。
+    - 套件构成：老城系 `building_block/tall/wide/corner/shed`（同一参数化生成器的 5 个变体，按长宽比就近选用来避免街道克隆）、`tree_oak`、`wall_brick`、`sandbag_wall`、`rubble_pile`、`crate_wood`、`barrel_metal`；现代战场系 `container_20ft/navy/green`、`barrier_jersey`、`barrier_hesco`、`fence_chainlink`、`fence_wire`、`utility_pole`、`street_lamp`、`car_wreck`、`panel_block`（5 层预制板公寓楼）；据点 `capture_point` + `capture_flag`（**旗面单独一件 GLB**，好让引擎按阵营染色/替换而不动静态底盘）。
+    - 重跑命令：`"D:\3D_Work\blender\blender-5.2.1-windows-x64\blender.exe" --background --python tools\blender\gen_props.py`（导出全部 GLB）；加 `-- --preview screenshots/kit.png` 出顶点色预览图（两个 3/4 视角 + 正交俯视 + 小件特写）。
+    - **建模约定（勿改）**：1 单位 = 1 米；原点在底面中心（z=0，其余 z≥0），Blender 内 +Z 上，导出用 `export_yup=True` 转成 glTF 的 Y-up；单 mesh / 单 primitive / 节点不带变换。
+    - **导出器实测约束（Blender 5.2）**：`export_vertex_color` 是 **ENUM**（`MATERIAL/ACTIVE/NAME/NONE`）不是 bool，要用 `"NAME"` + `export_vertex_color_name="Col"`；产出的 `COLOR_0` 是 **VEC4 + u16 归一化**，而引擎顶点格式是 `stride=32 pos@0 color@12 uv@24`（color 是 **3×f32**）→ **格式不匹配，接引擎时必须解决**（改引擎兼容 u16/VEC4，或后处理 GLB）。另外那 32 字节里**没有 normal 槽位**，引擎是靠屏幕空间导数算法线，导出的 NORMAL 会被忽略——**因此绕序必须正确**，反了的面会直接黑掉而不是报错。
+    - 已修的两个真实几何 bug（记录以免被改回去）：① `facade()` 里 `half` 同时被当作"沿墙展开半长"和"垂直偏移"，导致侧墙内缩 1.5m 露出内部壳；② `prism()` 第三个面只给了 3 个顶点却调 `add_quad`。
+    - 顺带确认的渲染现状（截图实测）：玩家脚下只剩一条板条路、两侧是**纯黑空洞**；树是"光杆顶一个球"；建筑立面是悬浮横板。
+    - **⚠ 但"黑色 = 没有三角形覆盖"这个结论是错的，HANDOFF-2026-09-02 第四节第 1 条据此开的药方全部无效。** 真正根因（本会话两个独立 agent 各自收敛到同一处，交叉验证成立）：
+      `build.rs:150` 声明了 `@group(0) @binding(9) var ground_detail_tex`，而 `renderer.rs:1963-1972` 的描述符集布局**只声明到 binding 0–8**，`update_texture_descriptor_sets`（`renderer.rs:7424-7501`）只写 1/3/5/6/7/8。**binding 9 从未声明、从未写入** → 采样未绑定描述符恒返回 0 → 地面分支 `mixed = mixed * mix(1.0, g * GROUND_DETAIL_GAIN, gdetail)` 把近处地面**乘成纯黑**。
+      - 黑色呈以相机为中心的块状/走廊状，因为 `gdetail = 1 - smoothstep(0.06, 0.25, gpx)` 是按"米/像素"算的衰减系数，等值线被近处几何遮挡后正好读作矩形。
+      - 这一条同时解释了 **mesh 路径地面全黑**：两条管线**共用同一个片元着色器**（mesh 管线在 `renderer.rs:2381` 从磁盘读 `assets/triangle.frag.spv`），只是 mesh 路径的 `terrain_tint` 让 `gtone`/`gpx` 不同、`gdetail` 饱和面积更大。所以那不是两个 bug，是一个。
+      - 也解释了 9-02 的"三重排除"为什么全过：关阴影无效（乘法在光照之前）、纹理 dump 完美（纹理本身没问题，是被乘零）、光照开关看起来一样（乘法在 `build.rs:725`，早于 `727` 的分叉）。
+      - **最讽刺的一点**：`generate_ground_detail_texture` 一直是 dead code，cargo 反复警告；而 `scripts/allowall.py` / `allowv3.py` / `allowv4.py` 这三个脚本的存在目的**就是给它们贴 `#[allow(dead_code)]`**（注释写"规划特性保留"）。**直指这个 bug 的警告被自己写脚本压掉了。** 教训：`dead_code` 警告指向"规划中"的字段/函数时，必须同时回答"那它为什么没被绑定/接线"，而不是加 allow 了事。
+      - 修法两条，任选：给 `renderer.rs:1963` 加 binding 9 并在 `update_texture_descriptor_sets` 写入（**图像必须是 UNORM 线性 view，不能走 SRGB helper**——128 经 sRGB 解码是 0.214，乘 2 得 0.43，全场地面会暗一半）；或者删掉 `build.rs:146-160` 与 `build.rs:708-726`。
+    - 另一条与建模直接相关的既有事实：**法线永远上不了 GPU**。顶点格式是 pos+color+uv 32 字节（`renderer.rs:57-61`），着色法线全部由屏幕空间导数重建（`build.rs:580`）→ **只能纯平着色**。平滑着色的 Blender 几何会看起来全是棱面；AO/烘焙光照必须进**顶点色**。这也意味着**绕序错了的面会直接黑掉而不报错**。
+    - 还有：`ak12.glb` 的 `NORMAL` 其实一直被读成 `POSITION`、第二个 mesh 被读成第一个 mesh 前 988 个顶点的副本——因为 `read_acc` 不读 `accessor.byteOffset`。本会话已修（连同 `normalized`、VEC3 stride、缺失属性别名 accessor 0 一起），见 `assets.rs` 的 4 条新回归测试。
+
+  - **⚠ 鼠标安全协议（用户明确要求，违反会让用户无法操作电脑）**：进入玩法后引擎**自己抓取光标**（日志 `input: cursor captured (mouse look on, grab=locked, look=relative)`），**不需要用户点击**。抓取期间用户鼠标被锁。
+    - 因此**每次启动必须用 `scripts/cap_safe.ps1`**：`try/finally` 里无条件 `taskkill`，跑完确认无残留进程；按键用 **`PostMessage` 投给游戏窗口句柄**，不用 `SendInput`、不用 `SetForegroundWindow`（后者会把键打到当时聚焦的任意窗口并抢走用户焦点）；截图沿用 `PrintWindow`（`shot.ps1`/`cap_safe.ps1`），不前置窗口。
+    - 用法：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3`（`-Keys 9` = Tab 切 Orbit/Flight）。**注意：`-File` 方式传 `-Keys 9,9` 会被 cmd 合并成单个 "9,9" 而发出错误键，多键请用 `-Command "& '...' -Keys 9,9"`。**
+    - 手动控制流（用户口述，验收时按它理解）：启动后**需点一下游戏窗口**鼠标才被捕获 → **按 R 正式进入操控**；死亡进 UI 后**再按一次 R 复活**。`RV3D_AUTOSTART=1` 可跳过菜单直接进玩法用于脚本采图。
+
+  - **本轮实测基线数据**（`cap_safe.ps1` 采得，光栅路径）：fps 186.5–187.5、`visible=18386/65536 near=3114 far=15272`、`marker=4255`、`npc=420`、`present_us≈112-136`、`record_us≈32`。另：日志里 `dbg-respawn: reset_at=-1` **每帧刷屏**（约 5ms 一条），像调试遗留，待清理。
+
+  - **渲染路线裁定（用户选择"坚持铁律"）**：`VK_EXT_mesh_shader` 仍是终态主路径，`mesh_enabled: false` 是**临时止血、不是终态**；mesh 地面全黑属必须根治的缺陷。本轮顺序为「先恢复可玩 → 建 Blender 资产管线 → 重建建模 → 回头根治 mesh 地面」，mesh 修复排在资产管线之后。
+
+- 状态：in_progress
+- 下一步（按序）：① 读引擎 GLB 加载器实际能力，决定 `COLOR_0` 用引擎兼容还是后处理 GLB；② 引擎侧接入 GLB 世界道具（实例化 + 正确世界定位）；③ 用 `building_block`/`tree_oak` 替换 `city.rs` 里最混乱的程序化楼与树；④ 修地面大面积无覆盖；⑤ 多模态截图逐项复验 D7/D10/D11/D12；⑥ 回头根治 mesh 地面全黑并恢复铁律。
 
 ### [2026-09-01] 交接：并行第二波 → D10 已改但视觉未确认、**D11 判定未修复且上一轮改错了发射源**、D7 二次修复
 
