@@ -25,6 +25,7 @@
 
 use crate::engine::game::{LevelMap, MapObstacle, ObstacleKind};
 use crate::engine::geom::Shape;
+use crate::engine::props::{PropPlacement, PropSet};
 
 /// 街道网格间距（米）：主街中心线位于 k*STREET_EVERY（k=-3..3）
 pub const STREET_EVERY: f32 = 55.0;
@@ -167,6 +168,11 @@ impl Part {
     fn sph(self) -> Self {
         self.shape(Shape::Sphere)
     }
+    /// 只碰撞、不绘制。给 GLB 道具的结构碰撞核用——盒子留在表里供物理/AI/伤害按下标
+    /// 使用，但 `main.rs` 组装 marker 时会跳过它，避免与 GLB 表面共面 z-fighting。
+    fn invisible(self) -> Self {
+        self.shape(Shape::None)
+    }
 
     fn to_obstacle(&self) -> MapObstacle {
         MapObstacle::new(self.kind, self.x, self.z, self.w * 0.5, self.d * 0.5)
@@ -183,11 +189,24 @@ impl Part {
 struct City {
     solid: Vec<MapObstacle>,
     decor: Vec<MapObstacle>,
+    /// GLB 道具摆放。见 `LevelMap::props` 的说明——它换掉的是 decor 里那批薄盒。
+    props: Vec<PropPlacement>,
+    /// 已加载的道具网格集。放在构造器里而不是逐层透传，是为了让二十多个生成函数
+    /// 的签名保持原样——它们只需要 `&mut City`。
+    set: PropSet,
+    /// 已按名解析出的网格下标缓存，避免每摆一件就重扫一遍表。
+    mesh_cache: std::collections::HashMap<&'static str, usize>,
 }
 
 impl City {
     fn new() -> Self {
-        City { solid: Vec::new(), decor: Vec::new() }
+        City {
+            solid: Vec::new(),
+            decor: Vec::new(),
+            props: Vec::new(),
+            set: PropSet::default(),
+            mesh_cache: std::collections::HashMap::new(),
+        }
     }
 
     /// 会挡人/挡子弹/挡寻路的几何。
@@ -228,8 +247,83 @@ impl City {
         }
     }
 
+    /// 按名解析网格下标（带缓存）。解析不到返回 None，调用方退回程序化盒。
+    fn mesh_ix(&mut self, name: &'static str) -> Option<usize> {
+        if let Some(&i) = self.mesh_cache.get(name) {
+            return Some(i);
+        }
+        let i = self.set.index_of(name)?;
+        self.mesh_cache.insert(name, i);
+        Some(i)
+    }
+
+    /// 摆一件 GLB 道具。资产没加载到就返回 false，调用方据此退回程序化盒——
+    /// 缺资产的后果必须是"画面旧一点"，不能是"城里没有楼"。
+    fn prop(&mut self, name: &'static str, x: f32, z: f32, yaw: f32, scale: f32) -> bool {
+        let Some(mesh) = self.mesh_ix(name) else { return false };
+        self.props.push(PropPlacement::new(mesh, x, z, yaw, scale, false));
+        true
+    }
+
+    /// 同 [`Self::prop`]，但带抬升量（堆叠件用）。
+    fn prop_y(&mut self, name: &'static str, x: f32, y: f32, z: f32, yaw: f32, scale: f32) -> bool {
+        let Some(mesh) = self.mesh_ix(name) else { return false };
+        self.props.push(PropPlacement::at(mesh, x, y, z, yaw, scale, false));
+        true
+    }
+
+    /// 道具套件里有没有这件网格（生成函数用它决定走 GLB 还是退回程序化盒）。
+    fn has_prop(&self, name: &str) -> bool {
+        self.set.index_of(name).is_some()
+    }
+
+    /// 按目标 footprint 与层数，挑长宽比最接近的建筑变体，返回（名字，等比缩放）。
+    ///
+    /// 只用等比缩放：非等比会把窗洞拉成平行四边形，比"楼不够准"更刺眼。
+    /// 缩放取 `max` 而不是 `min`，保证 GLB 始终**不小于**碰撞盒——宁可让玩家撞在一面
+    /// 看得见的墙上，也不要被一面无形的墙挡住（后者会被当成寻路 bug 报上来）。
+    fn pick_building(&self, w: f32, d: f32, floors: u32) -> Option<(&'static str, f32)> {
+        let cands: &[&'static str] = match floors {
+            0 | 1 => &["building_shed"],
+            2 => &["building_block", "building_wide", "building_corner"],
+            3 => &["building_tall", "building_wide"],
+            _ => &["panel_block", "building_tall"],
+        };
+        let target = (w / d.max(0.01)).ln();
+        let mut best: Option<(f32, &'static str, f32)> = None;
+        for name in cands {
+            let i = self.set.index_of(name)?;
+            let (hx, hz) = self.set.get(i)?.half_footprint();
+            let (gw, gd) = (hx * 2.0, hz * 2.0);
+            if gw < 0.5 || gd < 0.5 {
+                continue;
+            }
+            let cost = ((gw / gd).ln() - target).abs();
+            let scale = (w / gw).max(d / gd);
+            if best.is_none() || best.unwrap().0 > cost {
+                best = Some((cost, name, scale));
+            }
+        }
+        best.map(|(_, n, s)| (n, s))
+    }
+
+    /// 店面应朝最近的那条街。GLB 正面在引擎里是 -Z（Blender 的 +Y 经 export_yup 转过来），
+    /// 绕 +Y 转 θ 后正面方向为 (-sinθ, 0, -cosθ)，据此反解四个朝向。
+    fn face_nearest_street(cx: f32, cz: f32) -> f32 {
+        let fx = (cx / STREET_EVERY).round() * STREET_EVERY;
+        let fz = (cz / STREET_EVERY).round() * STREET_EVERY;
+        if (cx - fx).abs() <= (cz - fz).abs() {
+            // 街在 ±X 侧（街线沿 z 延伸）
+            if cx - fx >= 0.0 { core::f32::consts::FRAC_PI_2 } else { -core::f32::consts::FRAC_PI_2 }
+        } else if cz - fz >= 0.0 {
+            core::f32::consts::PI
+        } else {
+            0.0
+        }
+    }
+
     fn finish(self) -> LevelMap {
-        LevelMap { obstacles: self.solid, decor: self.decor }
+        LevelMap { obstacles: self.solid, decor: self.decor, props: self.props }
     }
 }
 
@@ -279,6 +373,20 @@ fn building(
 ) {
     let h = FLOOR_H * floors as f32;
     let plinth_h = 1.05;
+
+    // GLB 路线：立面细节（窗洞、窗台、角石、檐口、屋顶、店面）全部来自建模资产，
+    // 下面那批薄盒一条都不再生成。碰撞核留在表里（物理/AI/伤害按下标依赖它），但标成
+    // 不可见，否则它的侧面会和 GLB 外墙共面打 z-fighting——那正是缺陷 D11 的成因。
+    if let Some((name, scale)) = c.pick_building(w, d, floors) {
+        let yaw = City::face_nearest_street(cx, cz);
+        if c.prop(name, cx, cz, yaw, scale) {
+            c.push(
+                Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall)
+                    .invisible(),
+            );
+            return;
+        }
+    }
 
     // 结构核心：唯一的挡人盒，从地面到屋顶。
     c.push(Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall));
@@ -531,13 +639,35 @@ fn warehouse(c: &mut City, cx: f32, cz: f32, seed_i: i32, seed_j: i32) {
     c.push(Part::new(ObstacleKind::Building, cx, face + 2.0, w - 4.0, 3.2, UNDER_GROUND, 1.15, CONCRETE));
     c.deco(Part::new(ObstacleKind::Building, cx, face + 3.75, w - 4.0, 0.40, 1.15, 1.42, CONCRETE_DARK));
 
-    // 集装箱堆场：箱体 + 门端面 + 顶部加强筋
+    // 集装箱堆场：GLB 的 ISO 箱体（6.058 × 2.438 × 2.591）自带波纹、门端锁杆、
+    // 八角角件与顶部加强筋，正好替掉原来"箱体 + 门端面 + 顶筋"三件套。
     let colors = [CONTAINER_RUST, CONTAINER_BLUE, CONTAINER_GREEN];
+    const CONTAINER_PROPS: [&'static str; 3] =
+        ["container_20ft", "container_navy", "container_green"];
     for i in 0..3i32 {
         for j in 0..2i32 {
             let bx = cx + w * 0.5 + 6.5 + i as f32 * 6.6;
             let bz = cz - d * 0.4 + j as f32 * 6.6;
             let col = colors[(i + j) as usize % 3];
+            if c.prop(CONTAINER_PROPS[(i + j) as usize % 3], bx, bz, 0.0, 1.0) {
+                c.push(
+                    Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, UNDER_GROUND, 2.6, col)
+                        .invisible(),
+                );
+                if i == 1 && j == 0 {
+                    // 第二层：抬一个箱高（2.85）叠在同一列上
+                    c.prop_y(
+                        CONTAINER_PROPS[(i + j + 1) as usize % 3],
+                        bx,
+                        2.85,
+                        bz,
+                        0.0,
+                        1.0,
+                    );
+                    c.push(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.85, 5.45, col).invisible());
+                }
+                continue;
+            }
             c.push(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, UNDER_GROUND, 2.6, col));
             c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 0.15, 2.45, DARK));
             c.deco(Part::new(ObstacleKind::Block, bx, bz, 6.2, 2.6, 2.6, 2.85, CONCRETE_DARK));
@@ -683,6 +813,14 @@ fn park(c: &mut City, cx: f32, cz: f32) {
 fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
     let k = mixf(i, j, 0.85, 1.25);
     let trunk_h = mixf(i + 5, j, 3.0, 4.4);
+    if c.prop("tree_oak", x, z, mixf(i, j + 3, 0.0, std::f32::consts::TAU), k) {
+        // 只留一根细碰撞柱，且必须**严格细于网格树干**（tree_oak 底部半径 0.34m），
+        // 否则方盒会从圆干里戳出来——那是比"碎玻璃冠"更难看的穿帮。
+        // 半宽 0.15 < 0.34·k（k≥0.85 → 0.29），留了一倍余量。
+        c.push(Part::new(ObstacleKind::Tree, x, z, 0.30, 0.30, UNDER_GROUND, trunk_h, TREE_BARK).cyl());
+        return;
+    }
+    // 回退：没有资产时维持原来的两冠同心方案（见上面的误诊记录，别再叠第三个冠）
     // 树干：圆柱，底部略粗（两段叠出锥形感）
     c.push(Part::new(ObstacleKind::Tree, x, z, 0.52 * k, 0.52 * k, UNDER_GROUND, trunk_h * 0.55, TREE_BARK).cyl());
     c.push(Part::new(ObstacleKind::Tree, x, z, 0.38 * k, 0.38 * k, trunk_h * 0.5, trunk_h + 0.6, TREE_BARK).cyl());
@@ -740,20 +878,34 @@ fn bush(c: &mut City, x: f32, z: f32, seed: i32) {
 
 /// 哨卡/检查站：错缝堆叠的沙袋墙、HESCO 桶、帐篷、车辆残骸、拒马。
 fn checkpoint(c: &mut City, cx: f32, cz: f32) {
-    // 沙袋护墙：三层错缝，每袋一个扁二十面体（旧版是一整块板）。
-    // 5 列而不是 7 列：12 个混合街区 × 每袋 1 件，预算敏感。
-    for row in 0..3i32 {
-        for k in 0..5i32 {
-            let px = cx + (k as f32 - 2.0) * 1.35 + (row % 2) as f32 * 0.6;
-            let py = row as f32 * 0.36;
-            c.push(
-                Part::new(ObstacleKind::Barrier, px, cz - 7.0, 1.45, 0.70, on_ground(py), py + 0.48, SANDBAG).sph(),
-            );
+    // 沙袋护墙：优先一整件 GLB（3.3 × 0.75 × 0.72）。旧版逐袋一个扁二十面体，
+    // 15 件里每件的碰撞/弹道/渲染成本都要付一遍，而街面上它们本来就糊成一堵墙。
+    if c.prop("sandbag_wall", cx, cz - 7.0, 0.0, 1.0) {
+        c.push(
+            Part::new(ObstacleKind::Barrier, cx, cz - 7.0, 3.3, 0.75, UNDER_GROUND, 0.72, SANDBAG)
+                .invisible(),
+        );
+    } else {
+        for row in 0..3i32 {
+            for k in 0..5i32 {
+                let px = cx + (k as f32 - 2.0) * 1.35 + (row % 2) as f32 * 0.6;
+                let py = row as f32 * 0.36;
+                c.push(
+                    Part::new(ObstacleKind::Barrier, px, cz - 7.0, 1.45, 0.70, on_ground(py), py + 0.48, SANDBAG).sph(),
+                );
+            }
         }
     }
-    // HESCO 防爆桶
+    // HESCO 防爆桶：一件 GLB = 网箱 +  liner + 顶部土脊，替掉原来的柱+盖两件套
     for k in 0..4i32 {
         let bx = cx + (k as f32 - 1.5) * 4.2;
+        if c.prop("barrier_hesco", bx, cz + 7.0, 0.0, 1.0) {
+            c.push(
+                Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 2.0, 1.1, UNDER_GROUND, 1.05, SANDBAG)
+                    .invisible(),
+            );
+            continue;
+        }
         c.push(Part::new(ObstacleKind::Block, bx, cz + 7.0, 2.0, 2.0, UNDER_GROUND, 1.5, SANDBAG).cyl());
         c.deco(Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 1.7, 1.7, 1.5, 1.95, CONCRETE_DARK).sph());
     }
@@ -781,8 +933,14 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     }
 }
 
-/// 一辆报废车：车壳 + 驾驶室 + 挡风玻璃 + 四个轮子（圆柱）。
+/// 一辆报废车：优先用 GLB（真轿车侧影），没有资产时退回盒子堆。
 fn wreck_car(c: &mut City, x: f32, z: f32, tint: [f32; 3]) {
+    if c.prop("car_wreck", x, z, mixf(x as i32, z as i32, 0.0, std::f32::consts::TAU), 1.0) {
+        // 碰撞体沿用原来的车壳尺寸：网格含一扇敞开的车门（4.7 × 2.72），
+        // 所以 4.4 × 2.1 的核必然埋在车身里，不会戳出轮廓。
+        c.push(Part::new(ObstacleKind::Ruin, x, z, 4.4, 2.1, UNDER_GROUND, 1.55, tint).invisible());
+        return;
+    }
     c.push(Part::new(ObstacleKind::Ruin, x, z, 4.4, 2.1, UNDER_GROUND, 1.3, tint));
     c.push(Part::new(ObstacleKind::Ruin, x - 0.4, z, 2.0, 1.95, 1.3, 2.15, WRECK_GLASS));
     c.deco(Part::new(ObstacleKind::Ruin, x + 1.9, z, 0.5, 1.9, 0.35, 1.05, GLASS_DARK));
@@ -813,8 +971,14 @@ fn parking_lot(c: &mut City, cx: f32, cz: f32) {
     }
 }
 
-/// 路灯：两段锥形灯杆（圆柱）+ 横臂 + 灯头 + 底座。
+/// 路灯：优先用 GLB（锥形杆 + 弯臂 + 灯头），没有资产时退回圆柱堆。
 fn lamp_post(c: &mut City, x: f32, z: f32) {
+    if c.prop("street_lamp", x, z, mixf(x as i32, z as i32, 0.0, std::f32::consts::TAU), 1.0) {
+        // 碰撞只给一根埋在杆身里的细柱：street_lamp 杆底半径 0.13、往上收，
+        // 半宽 0.10 恒小于它，所以盒子不会从圆杆里戳出来（戳出来比"灯杆是方的"更糟）。
+        c.push(Part::new(ObstacleKind::Block, x, z, 0.20, 0.20, UNDER_GROUND, 4.6, DARK).cyl().invisible());
+        return;
+    }
     c.push(Part::new(ObstacleKind::Block, x, z, 0.34, 0.34, UNDER_GROUND, 2.4, DARK).cyl());
     c.push(Part::new(ObstacleKind::Block, x, z, 0.22, 0.22, 2.4, 6.6, DARK).cyl());
     c.push(Part::new(ObstacleKind::Block, x, z, 1.5, 0.24, 6.6, 6.85, DARK));
@@ -987,7 +1151,9 @@ fn street_furniture(c: &mut City) {
     ] {
         let (w, d) = if x.abs() > 0.1 { (6.0, 0.9) } else { (0.9, 6.0) };
         c.push(Part::new(ObstacleKind::Building, x, z, w, d, UNDER_GROUND, 0.95, CONCRETE));
-        c.deco(Part::new(ObstacleKind::Building, x, z, w + 0.25, d + 0.25, 0.95, 1.20, CONCRETE_DARK));
+        // 出挑取 +0.30（半宽多 0.15 = RELIEF_STEP）；原来的 +0.25 只多出 0.125，
+        // 掠射角下墩身肩面会与压顶落到同一批像素上。与围墙压顶同一套数值。
+        c.deco(Part::new(ObstacleKind::Building, x, z, w + 0.30, d + 0.30, 0.95, 1.20, CONCRETE_DARK));
         for s in [-1.0f32, 0.0, 1.0] {
             let (px, pz) = if x.abs() > 0.1 { (x + s * 2.2, z) } else { (x, z + s * 2.2) };
             c.push(Part::new(ObstacleKind::Block, px, pz, 0.22, 0.22, 1.20, 1.90, FLAG_POLE).cyl());
@@ -1034,7 +1200,9 @@ fn perimeter(c: &mut City) {
                 for s in [-1.0f32, 1.0] {
                     let (lx, lz) = if side < 2 { (x + s * half_len, z) } else { (x, z + s * half_len) };
                     c.push(Part::new(ObstacleKind::Building, lx, lz, 1.9, 1.9, UNDER_GROUND, 2.95, GRANITE));
-                    c.deco(Part::new(ObstacleKind::Block, lx, lz, 2.15, 2.15, 2.95, 3.16, CONCRETE_DARK));
+                    // 压顶半宽必须比柱身多出 RELIEF_STEP（0.14）：0.95+0.14=1.09 → 边长 2.18，
+                    // 原来写 2.15 只多出 0.125，掠射角下柱肩与压顶会落到同一批像素上。
+                    c.deco(Part::new(ObstacleKind::Block, lx, lz, 2.20, 2.20, 2.95, 3.16, CONCRETE_DARK));
                 }
             }
         }
@@ -1054,6 +1222,18 @@ fn perimeter(c: &mut City) {
 /// 手工城市地图（默认关卡；完整布局见模块头注释）
 pub fn generate_city() -> LevelMap {
     let mut c = City::new();
+    // 道具套件在生成入口装载一次，之后由各生成函数通过 `City::prop` 取用。
+    // 读不到目录只意味着退回纯程序化外观，不是错误——所以这里只记一条 info。
+    c.set = match PropSet::load_dir("assets/props") {
+        Ok(s) => {
+            log::info!("props: 载入 {} 件 GLB 道具网格", s.len());
+            s
+        }
+        Err(e) => {
+            log::info!("props: 未载入（{e}），城市回退纯程序化几何");
+            PropSet::default()
+        }
+    };
     perimeter(&mut c);
     for i in 0..6 {
         for j in 0..6 {
@@ -1429,28 +1609,81 @@ mod city_layout_tests {
     }
 
     /// 相邻表面之间必须有可辨识的台阶，否则掠射角下两面落到同一批像素。
+    ///
+    /// 2026-09-03 起泛化为遍历全部实体：原来只抽查 bc(1) 一栋楼，而那条断言的前提是
+    /// "这栋楼的进深由凸出的盒子提供"。GLB 路线上线后立面进深来自网格，抽查点必然失效，
+    /// 逐条核对反而能继续守住剩下那批纯盒子几何（广场、仓库、据点、街具）。
+    ///
+    /// **只在竖直区间相接或重叠时才比较水平出挑**：共面风险来自两面在空间上真的贴在一起。
+    /// 纪念碑的金属顶帽(11.2~11.62)比下面第二层台身(5.6~8.8)只多出 0.1m，但两者隔着
+    /// 一整段碑身，永远不会互相遮挡——第一版泛化漏了这个条件，把它误报成了违规。
     #[test]
     fn relief_steps_are_not_coplanar() {
         let m = generate_city();
-        // 抽查一号楼：核心、窗带、层线三者的半宽必须严格递增且差 ≥ RELIEF_STEP
-        let core = m
+        let mut checked = 0usize;
+        for core in m
             .obstacles
             .iter()
-            .find(|o| (o.x - bc(1)).abs() < 0.1 && (o.z - bc(1)).abs() < 0.1)
-            .expect("O 街区主塔核心缺失");
-        let bands: Vec<&MapObstacle> = m
-            .decor
-            .iter()
-            .filter(|o| (o.x - core.x).abs() < 0.1 && (o.z - core.z).abs() < 0.1 && o.half_w > core.half_w)
-            .collect();
-        assert!(!bands.is_empty(), "主塔没有任何凸出核心的立面构件，仍然是个纸盒");
-        for b in &bands {
-            assert!(
-                b.half_w - core.half_w >= RELIEF_STEP - 1e-3,
-                "立面构件只凸出 {:.3}m，小于最小台阶 {:.2}m",
-                b.half_w - core.half_w,
-                RELIEF_STEP
-            );
+            .filter(|o| o.shape != Shape::None && o.kind == ObstacleKind::Building)
+        {
+            let c0 = core.y - core.half_h;
+            let c1 = core.y + core.half_h;
+            for b in m.decor.iter().filter(|o| {
+                if (o.x - core.x).abs() >= 0.1 || (o.z - core.z).abs() >= 0.1 {
+                    return false;
+                }
+                if o.half_w <= core.half_w {
+                    return false;
+                }
+                let b0 = o.y - o.half_h;
+                let b1 = o.y + o.half_h;
+                // 相接（含 5cm 容差）或重叠
+                b0 < c1 + 0.05 && b1 > c0 - 0.05
+            }) {
+                assert!(
+                    b.half_w - core.half_w >= RELIEF_STEP - 1e-3,
+                    "{:?} 处的立面构件只凸出核心 {:.3}m，小于最小台阶 {:.2}m",
+                    (core.x, core.z),
+                    b.half_w - core.half_w,
+                    RELIEF_STEP
+                );
+                checked += 1;
+            }
         }
+        assert!(checked > 0, "一个凸出核心的立面构件都没查到：装饰表可能被清空了");
+    }
+
+    /// GLB 路线的对偶不变式：盒子可以隐形，但**必须**有网格盖住它。
+    /// 否则玩家会撞上一面什么都看不见的墙——比纸盒楼严重得多。
+    #[test]
+    fn invisible_cores_must_be_covered_by_a_prop() {
+        let m = generate_city();
+        let set = match crate::engine::props::PropSet::load_dir("assets/props") {
+            Ok(s) => s,
+            // 资产没生成时城市走的是纯盒子回退路径，本条不适用
+            Err(_) => return,
+        };
+        let mut covered = 0usize;
+        for core in m.obstacles.iter().filter(|o| o.shape == Shape::None) {
+            let mut hit = false;
+            for p in &m.props {
+                let Some((hw, hd)) = p.rotated_footprint(&set) else { continue };
+                if (p.x - core.x).abs() <= hw + 0.5 && (p.z - core.z).abs() <= hd + 0.5 {
+                    hit = true;
+                    break;
+                }
+            }
+            assert!(
+                hit,
+                "({:.1}, {:.1}) 的碰撞核不可见，但没有任何 GLB 道具盖住它——这会是一面无形墙",
+                core.x,
+                core.z
+            );
+            covered += 1;
+        }
+        assert!(
+            covered > 0,
+            "没有任何隐形碰撞核：建筑 GLB 路线可能根本没生效，检查 generate_city 的资产装载"
+        );
     }
 }
