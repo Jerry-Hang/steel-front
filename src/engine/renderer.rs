@@ -167,6 +167,14 @@ const LOD_DISTANCE: f32 = 120.0;
 const FADE_START: f32 = 400.0;
 const FADE_END: f32 = 900.0;
 
+/// 地面微细节层在主 descriptor set 里的绑定号。
+/// **必须与 build.rs `FRAGMENT_SHADER_WGSL` 的 `@group(0) @binding(9) ground_detail_tex`
+/// 同步**（0..8 已被 camera UBO / 地面烘焙图 / 实例 storage / 采样器 / 光照 UBO /
+/// 阴影图 / 阴影采样器 / marker 皮肤 / NPC 皮肤占用）。
+/// 该绑定是**硬依赖**：片元无条件采样它，缺绑定不会报错，只会让采样恒 0 把
+/// 相机周边的地面乘成纯黑（见 `Renderer::ground_detail_image` 注释）。
+const GROUND_DETAIL_BINDING: u32 = 9;
+
 // ============================================================
 // 地形常量（世界 512×512，与实例场同域）
 // ============================================================
@@ -458,6 +466,13 @@ const EMISSIVE_SLOT_BASE: u32 = NPC_SPH_SLOT_BASE + MAX_NPC_INSTANCES;
 /// 枪模专用 identity 槽（走 flat=1 纯色路径，与 build.rs 顶点 shader 同步）
 const GUN_INSTANCE_INDEX: u32 =
     INSTANCE_COUNT + 1 + MAX_MARKER_INSTANCES + MAX_NPC_INSTANCES * 3 + MAX_EMISSIVE_INSTANCES;
+/// GLB 道具合并网格专用 identity 槽。
+///
+/// 道具的位姿在 CPU 上就烘进顶点（`props::merge`），所以 GPU 侧只需要一个 identity 矩阵，
+/// 和地形/枪模同一个套路——**不必为道具新增一整段实例区**，只多占一个槽位。
+/// 该槽的 `tint.w = Shape::Authored.tag()`(=6.0) 是给 shader 看的，`tint.rgb = 1` 让
+/// 片元直出顶点色（`input.color = vertexColor × tint.rgb`）。
+const PROP_INSTANCE_INDEX: u32 = GUN_INSTANCE_INDEX + 1;
 
 
 /// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
@@ -813,6 +828,24 @@ pub struct Renderer {
     skin_npc_image: vk::Image,
     skin_npc_memory: vk::DeviceMemory,
     skin_npc_image_view: vk::ImageView,
+    /// 地面微细节 tile 纹理（build.rs 片元 `@group(0) @binding(9) ground_detail_tex`）。
+    ///
+    /// ⚠ **这张图必须存在并被绑定**，否则就是 2026-09-03「大面积黑地」的确证根因：
+    /// 片元着色器无条件静态引用 binding 9，而 descriptor set layout 历史上只到 binding 8，
+    /// 于是该描述符槽从未创建 → 驱动给空描述符 → 采样恒返回 0 →
+    /// `mixed *= mix(1.0, g * GROUND_DETAIL_GAIN, gdetail)` 变成 `mixed *= (1 - gdetail)`。
+    /// `gdetail = 1 - smoothstep(0.06, 0.25, 米每像素)` 在相机周边（地面俯角 > ~5°，
+    /// 实测半径 ~20-30m 一圈）恒等于 1 → **地面被乘成纯黑 (0,0,0)**；越远 gdetail→0
+    /// 才逐渐恢复正常，所以黑区边界是一条恒定俯角的水平线并带一段平滑灰阶过渡。
+    /// 这条路径与光照/阴影无关（`light_data.flags.x < 0.5` 的早退分支同样乘 `mixed`），
+    /// 也与实例覆盖无关；marker/NPC/枪模在到达这段代码前就 return，所以楼和树照常。
+    /// 注意 swapchain clear color 是 (0.24,0.36,0.60) 浅蓝，**黑色绝不可能是"露出清屏色"**。
+    ///
+    /// 必须以 UNORM（线性）view 创建：纹素存的是「亮度调制 / 2」（见 procedural.rs
+    /// `generate_ground_detail_texture`），走 SRGB view 会把 128 解成 0.214 → 全场暗一半。
+    ground_detail_image: vk::Image,
+    ground_detail_memory: vk::DeviceMemory,
+    ground_detail_image_view: vk::ImageView,
     /// RV3D_SKIN_TEX=1 启用 marker/NPC 皮肤纹理（缺省 0 = 保持纯色路径，冒烟基线不变）
     skin_tex_enabled: bool,
     /// 各向异性过滤是否可用（物理设备支持 samplerAnisotropy 时为 true）
@@ -1400,6 +1433,9 @@ impl Renderer {
             skin_npc_image: vk::Image::null(),
             skin_npc_memory: vk::DeviceMemory::null(),
             skin_npc_image_view: vk::ImageView::null(),
+            ground_detail_image: vk::Image::null(),
+            ground_detail_memory: vk::DeviceMemory::null(),
+            ground_detail_image_view: vk::ImageView::null(),
             // 2026-08-22：默认启用（RV3D_SKIN_TEX=0 关闭纯色回退）——障碍需要表面细节
             skin_tex_enabled: std::env::var("RV3D_SKIN_TEX").as_deref() != Ok("0"),
             texture_anisotropy_enabled: physical_device_features.sampler_anisotropy != 0,
@@ -1960,6 +1996,14 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        // 地面微细节层（binding=9；build.rs 片元 `ground_detail_tex`，**无条件采样**，
+        // 不受 RV3D_SKIN_TEX 门控）。漏掉这个绑定 = 采样恒 0 = 相机周边地面纯黑，
+        // 详见字段 `ground_detail_image` 的注释。
+        let ground_detail_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(GROUND_DETAIL_BINDING)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let bindings = [
             ubo_layout_binding,
             sampled_image_binding,
@@ -1970,6 +2014,7 @@ impl Renderer {
             shadow_sampler_binding,
             marker_skin_binding,
             npc_skin_binding,
+            ground_detail_binding,
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -2068,7 +2113,8 @@ impl Renderer {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
                 // binding 1 地面贴图 + binding 5 阴影图 + binding 7/8 marker/NPC 皮肤纹理
-                .descriptor_count((max_frames * 4) as u32),
+                // + binding 9 地面微细节层（缺一个 = 该 set 分配失败 → 启动即报错）
+                .descriptor_count((max_frames * 5) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count((max_frames * 2) as u32),
@@ -2267,6 +2313,13 @@ impl Renderer {
             .rasterization_samples(self.msaa_samples);
 
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            // ⚠ 2026-09-03 已定位但**故意未改**：主管线关着深度测试，而 mesh 管线
+            // （`init_mesh_pipeline` 的 depth_stencil）是开的。也就是说当前唯一在跑的
+            // legacy 路径**没有深度遮挡**，楼与楼只靠绘制顺序，互相穿透。
+            // 不敢直接改 true：枪模正是依赖"主管线 depth_test=OFF"才恒可见
+            // （见 `record_command_buffer` 枪模段注释），开了测试后贴墙会被裁掉。
+            // 正确修法是给枪模单独一条 depth_test=false 的管线，再打开主管线；
+            // 已记入 AGENTS.md 待办。改完必须截图验收。
             .depth_test_enable(false)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
@@ -3632,12 +3685,13 @@ impl Renderer {
         // 最后追加 MAX_EMISSIVE_INSTANCES 个 slot 给自发光实体（见 EMISSIVE_SLOT_BASE）
         // +1 = 枪模专用 identity 槽（GUN_INSTANCE_INDEX，走 flat=1 纯色路径，
         // 避免枪模被地面纹理 0.75 混合而隐形——2026-08-16）
+        // +1 = GLB 道具合并网格的 identity 槽（PROP_INSTANCE_INDEX，2026-09-03）
         let buffer_elems = (INSTANCE_COUNT
             + 1
             + MAX_MARKER_INSTANCES
             + MAX_NPC_INSTANCES * 3
             + MAX_EMISSIVE_INSTANCES
-            + 1) as u64;
+            + 2) as u64;
         let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
         let identity = InstanceData {
             model: glam::Mat4::IDENTITY.to_cols_array(),
@@ -3694,6 +3748,20 @@ impl Renderer {
                     &identity as *const InstanceData as *const u8,
                     (mapped as *mut u8).add(
                         GUN_INSTANCE_INDEX as usize * std::mem::size_of::<InstanceData>(),
+                    ),
+                    std::mem::size_of::<InstanceData>(),
+                );
+                // 道具 identity 槽（PROP_INSTANCE_INDEX）：identity 矩阵 + Authored 标签。
+                // tint.rgb 必须全 1，否则片元的 `input.color = vertexColor × tint.rgb`
+                // 会把烘焙好的顶点色整体染色。
+                let authored = InstanceData {
+                    model: glam::Mat4::IDENTITY.to_cols_array(),
+                    tint: [1.0, 1.0, 1.0, crate::engine::geom::Shape::Authored.tag()],
+                };
+                std::ptr::copy_nonoverlapping(
+                    &authored as *const InstanceData as *const u8,
+                    (mapped as *mut u8).add(
+                        PROP_INSTANCE_INDEX as usize * std::mem::size_of::<InstanceData>(),
                     ),
                     std::mem::size_of::<InstanceData>(),
                 );
@@ -6327,15 +6395,20 @@ impl Renderer {
         Ok(())
     }
 
-    /// 创建一张带完整 mip 链的 R8G8B8A8_SRGB 采样纹理：
+    /// 创建一张带完整 mip 链的采样纹理：
     /// staging buffer → Image（SAMPLED|TRANSFER_DST|TRANSFER_SRC）→ 逐级 blit 生成 mip →
-    /// ImageView。地面纹理之外的附加贴图（marker/NPC 程序化皮肤纹理）共用此路径，
-    /// 采样器复用主纹理的 texture_sampler（尺寸同 512，mip 级数一致）。
+    /// ImageView。地面纹理之外的附加贴图（marker/NPC 程序化皮肤纹理、地面微细节 tile）
+    /// 共用此路径，采样器复用主纹理的 texture_sampler（尺寸同规格，mip 级数一致）。
+    ///
+    /// `format` 决定 view 的色彩空间：皮肤图传 `R8G8B8A8_SRGB`（存的是显示编码色），
+    /// 地面细节层必须传 `R8G8B8A8_UNORM`——它存的是**线性亮度调制**（纹素 = 调制/2），
+    /// 用 SRGB view 会把 128 解码成 0.214，乘 2 后得 0.43 → 全场地面暗一半。
     fn create_sampled_image(
         &self,
         pixels: &[u8],
         width: u32,
         height: u32,
+        format: vk::Format,
     ) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView), String> {
         let image_size = (width * height * 4) as u64;
         // mip 链级别数：按长边逐次减半直至 1
@@ -6402,7 +6475,7 @@ impl Renderer {
         // ---- 2. Vulkan Image（SAMPLED | TRANSFER_DST | TRANSFER_SRC）----
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_SRGB)
+            .format(format)
             .extent(vk::Extent3D { width, height, depth: 1 })
             .mip_levels(mip_levels)
             .array_layers(1)
@@ -6646,7 +6719,7 @@ impl Renderer {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_SRGB)
+            .format(format)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -7057,6 +7130,7 @@ impl Renderer {
             &super::procedural::generate_default_marker_skin_texture(),
             skin_size,
             skin_size,
+            vk::Format::R8G8B8A8_SRGB,
         )?;
         self.skin_marker_image = img;
         self.skin_marker_memory = mem;
@@ -7065,6 +7139,7 @@ impl Renderer {
             &super::procedural::generate_default_npc_skin_texture(),
             skin_size,
             skin_size,
+            vk::Format::R8G8B8A8_SRGB,
         )?;
         self.skin_npc_image = img;
         self.skin_npc_memory = mem;
@@ -7074,6 +7149,32 @@ impl Renderer {
             skin_size,
             skin_size,
             if self.skin_tex_enabled { "on" } else { "off（纯色回退）" }
+        );
+
+        // ---- 地面微细节层（binding 9；build.rs 片元 `ground_detail_tex`）----
+        // ⚠ 恒创建、恒绑定，**不受任何环境变量门控**：片元是无条件采样它的，缺这个
+        // 描述符不会报错、只会让驱动回吐 0，于是 `mixed *= mix(1.0, 0*2, gdetail)`
+        // 把相机周边整圈地面乘成纯黑（2026-09-03 大面积黑地根因）。
+        // 格式必须是 UNORM（线性）：纹素存的是「亮度调制 / 2」而不是显示编码颜色。
+        // 采样器复用 texture_sampler（binding 3）：REPEAT + LINEAR/LINEAR-mip，
+        // 正是平铺细节层要的（build.rs 用 textureSampleLevel 显式选 mip）。
+        let detail_size = super::procedural::GROUND_DETAIL_SIZE;
+        let (img, mem, view) = self.create_sampled_image(
+            &super::procedural::generate_default_ground_detail_texture(),
+            detail_size,
+            detail_size,
+            vk::Format::R8G8B8A8_UNORM,
+        )?;
+        self.ground_detail_image = img;
+        self.ground_detail_memory = mem;
+        self.ground_detail_image_view = view;
+        log::info!(
+            "地面微细节层初始化完成: {}x{} 覆盖 {}m（{} 纹素/米，UNORM 线性，绑定 binding {}）",
+            detail_size,
+            detail_size,
+            super::procedural::GROUND_DETAIL_METRES,
+            detail_size as f32 / super::procedural::GROUND_DETAIL_METRES,
+            GROUND_DETAIL_BINDING
         );
         Ok(())
     }
@@ -7485,6 +7586,20 @@ impl Renderer {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&npc_skin_infos);
+            // 地面微细节层（binding 9）：**必须写**，片元无条件采样它。
+            // 采样器字段对 SAMPLED_IMAGE 写入无意义（真正的采样器走 binding 3 那条
+            // SAMPLER 写入），与其它贴图保持一致填 texture_sampler。
+            let ground_detail_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(self.ground_detail_image_view)
+                .sampler(self.texture_sampler);
+            let ground_detail_infos = [ground_detail_info];
+            let ground_detail_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(GROUND_DETAIL_BINDING)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&ground_detail_infos);
 
             let writes = [
                 sampled_image_write,
@@ -7493,6 +7608,7 @@ impl Renderer {
                 shadow_sampler_write,
                 marker_skin_write,
                 npc_skin_write,
+                ground_detail_write,
             ];
             unsafe {
                 self.device.update_descriptor_sets(&writes, &[]);
@@ -8847,6 +8963,14 @@ impl Renderer {
         if self.skin_tex_enabled {
             light_ubo.flags.z = 1.0;
         }
+        // flags.w：通知片元"地面微细节层（binding 9）真的存在，可以采样"。
+        // 这个门是 build.rs 侧后加的防御：在它之前，binding 9 从未进过描述符集布局，
+        // 未绑定描述符采样恒返回 0，而地面分支是乘性的（`mixed *= mix(1.0, g*2, gdetail)`），
+        // 于是相机周边近处整圈地面被乘成纯黑。以图像句柄非空为条件是必要的——万一
+        // init_texture 建图失败，这里保持 0，着色器就退回"没有细节层"而不是回到黑地。
+        if self.ground_detail_image_view != vk::ImageView::null() {
+            light_ubo.flags.w = 1.0;
+        }
         if let Some(&ptr) = self.light_uniform_mapped.get(self.current_frame) {
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -9296,7 +9420,7 @@ impl Drop for Renderer {
             if self.texture_image_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.texture_image_memory, None);
             }
-            // 释放 marker/NPC 程序化皮肤纹理
+            // 释放 marker/NPC 程序化皮肤纹理 + 地面微细节层
             for (img, mem, view) in [
                 (
                     self.skin_marker_image,
@@ -9307,6 +9431,11 @@ impl Drop for Renderer {
                     self.skin_npc_image,
                     self.skin_npc_memory,
                     self.skin_npc_image_view,
+                ),
+                (
+                    self.ground_detail_image,
+                    self.ground_detail_memory,
+                    self.ground_detail_image_view,
                 ),
             ] {
                 if view != vk::ImageView::null() {

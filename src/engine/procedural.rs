@@ -410,11 +410,17 @@ pub fn generate_city_ground_texture(
     out
 }
 
-/// 地面微细节 tile 边长（像素）。512 与皮肤纹理同尺寸，共用 mip 级数算法。
-pub const GROUND_DETAIL_SIZE: u32 = 512;
+/// 地面微细节 tile 边长（像素）。
+///
+/// ⚠ **必须与 build.rs 片元着色器的 `GROUND_DETAIL_TEXEL_M` 同步**：那个常量是
+/// `GROUND_DETAIL_METRES / GROUND_DETAIL_SIZE = 2.0 / 256 = 0.0078125`，片元用它算
+/// 显式 mip（`lvl = log2(米每像素 / GROUND_DETAIL_TEXEL_M)`）。历史上这里是 512 而
+/// 着色器仍按 256 写死 → 每个距离都多取一级 mip，细节层整体糊一档（不报 VUID、
+/// 不进日志，只有看图能发现）。要提到 512 就同时把 build.rs 改成 0.00390625。
+pub const GROUND_DETAIL_SIZE: u32 = 256;
 
-/// 一个细节 tile 覆盖的世界边长（米）。512px / 2m = **256 纹素/米**，
-/// 而宏观地面纹理只有 2 纹素/米 —— 差 128 倍，这正是"地面近看像糊上去的"的量级。
+/// 一个细节 tile 覆盖的世界边长（米）。256px / 2m = **128 纹素/米**，
+/// 而宏观地面纹理只有 2 纹素/米 —— 差 64 倍，这正是"地面近看像糊上去的"的量级。
 pub const GROUND_DETAIL_METRES: f32 = 2.0;
 
 /// 周期性格点哈希：格坐标按 `period` 取模后再哈希，**保证 tile 无缝**。
@@ -447,13 +453,27 @@ fn periodic_noise(x: f32, y: f32, cells: f32, seed: u32) -> f32 {
 
 /// 生成地面微细节纹理（RGBA8，线性，中性均值 1.0 以便乘法混合）。
 ///
+/// ## ⚠ 存储约定：纹素 r = 亮度调制 / 2（调制 1.0 → 128）
+/// `build.rs` 片元按 `mixed *= mix(1.0, g * GROUND_DETAIL_GAIN, gdetail)` 消费这张图，
+/// 而 `GROUND_DETAIL_GAIN = 2.0` —— 着色器会把纹素**乘 2** 还原成调制值，所以这里必须
+/// 存 `lum * 0.5`。历史上直接存 `lum`（均值 1.0 → 纹素 ≈255），一旦真被绑定采样，
+/// 全场地面就会被乘 ~2 倍并大面积过曝裁顶。
+/// 之所以采"半值"编码而不是直接存调制值：8bit 只能表示 0..1，存原值时凡 >1 的提亮
+/// 部分全被削成 255，均值反而掉到 1 以下，地面只会变暗不会变亮。
+///
+/// 另一条硬约束：这张图必须以 **UNORM（线性）view** 创建并绑定到 `@group(0) @binding(9)`，
+/// 不能沿用现成的 SRGB helper——128 经 sRGB 解码是 0.214，乘 2 得 0.43 → 全场地面暗一半。
+/// 而"根本没创建、根本没绑定"更糟：驱动给空描述符，采样恒 0 → `mix(1.0, 0.0, gdetail)`
+/// 把相机周边整圈地面乘成**纯黑**（2026-09-03 大面积黑地的实锤根因，
+/// 见 renderer.rs 的 `ground_detail_image` 字段注释）。
+///
 /// ## 为什么需要它
 /// 2026-09-01 实测确认：宏观地面纹理**已经正确绑定并采样**（屏幕上能看到街道网格、
 /// 人行道带、道路中线，与 `generate_city_ground_texture` 的 dump 一一对应），
 /// 各向异性过滤也已开启（`renderer.rs:1399`，16x）。地面仍然糊，根因是
 /// **纹素密度**：1024² 覆盖 512m = 2 纹素/米，4m 方砖只有 8 纹素，退到 20m 外
 /// 一个像素就要盖好几米，只能跳高 mip 把砖缝平均掉。提高宏观分辨率是 4 倍代价换
-/// 4 倍密度且启动烘焙要几十秒；平铺细节层是常数代价换 128 倍密度。
+/// 4 倍密度且启动烘焙要几十秒；平铺细节层是常数代价换 64 倍密度。
 ///
 /// ## 三个倍频
 /// 骨料(高频) + 斑驳(中频) + 裂纹(低频带方向性)，合成一个"什么材质都能压一层"的
@@ -474,7 +494,10 @@ pub fn generate_ground_detail_texture(size: u32, seed: u32) -> Vec<u8> {
             let mut lum = 0.86 + grit * 0.20 + blot * 0.14 - crack_line * 0.22;
             // 归一到均值≈1.0，避免整层细节把地面系统性压暗或提亮
             lum *= 1.02;
-            let byte = (lum.clamp(0.0, 1.0) * 255.0).round() as u8;
+            // 半值编码（见函数头）：纹素 = 调制 / 2，调制 1.0 → 128。
+            // 调制域 ≈[0.65, 1.22] → 纹素域 ≈[0.33, 0.61]，离 0 与 1 都有大余量：
+            // 既不裁顶，也永不取到 0（纹素为 0 就等于把地面乘成纯黑）。
+            let byte = ((lum * 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
             let idx = ((py * size + px) * 4) as usize;
             out[idx] = byte;
             out[idx + 1] = byte;
@@ -984,5 +1007,75 @@ mod tests {
         assert_eq!(m.len(), expect);
         assert_eq!(n.len(), expect);
         assert_ne!(m, n);
+    }
+
+    /// 地面细节层：尺寸/确定性，以及**两条会让地面变黑或过曝的编码约定**。
+    ///
+    /// 着色器（build.rs 片元）按 `mixed *= mix(1.0, r * 2.0, gdetail)` 消费这张图，
+    /// 所以 r 的域直接决定地面亮度：均值得落在 128（调制 1.0）附近，且**任何纹素都不
+    /// 能接近 0**——纹素 0 = 把该像素的地面乘成纯黑。历史上这张图从未被绑定（采样恒 0）
+    /// 造成大面积黑地；这张测试把"存在且非零"固化下来，防止再被改回乘性黑洞。
+    #[test]
+    fn ground_detail_texture_is_seamless_and_never_zero() {
+        let size = GROUND_DETAIL_SIZE;
+        let tex = generate_ground_detail_texture(size, DEFAULT_SEED);
+        assert_eq!(tex.len(), (size * size * 4) as usize);
+        // 确定性
+        assert_eq!(tex, generate_ground_detail_texture(size, DEFAULT_SEED));
+        // 灰度图（r=g=b），alpha 不透明
+        for px in tex.chunks_exact(4) {
+            assert_eq!(px[0], px[1]);
+            assert_eq!(px[1], px[2]);
+            assert_eq!(px[3], 255);
+        }
+        let mean = tex.iter().step_by(4).map(|&v| v as u64).sum::<u64>()
+            / (size as u64 * size as u64);
+        // 半值编码：均值调制 ≈1.0 → 均值纹素 ≈128（放宽到 100..160 容许裂纹窄带压暗）
+        assert!(
+            (100..=160).contains(&mean),
+            "细节层均值 {mean} 偏离半值编码约定（调制 1.0 → 128），地面会整体偏暗或过曝"
+        );
+        let minv = *tex.iter().step_by(4).min().unwrap() as usize;
+        let maxv = *tex.iter().step_by(4).max().unwrap() as usize;
+        // 纹素 0 = 乘性黑洞；纹素 255 且被 *2 裁顶 = 过曝。两者都不可出现。
+        assert!(minv > 40, "细节层出现近零纹素 {minv}：会把地面乘成纯黑");
+        assert!(maxv < 200, "细节层纹素上限 {maxv} 过高：乘 2 后会裁顶过曝");
+        // 有实际细节（不是平涂）
+        assert!(maxv - minv > 20, "细节层太平（{minv}..{maxv}），等于没加细节");
+        // 无缝：左右/上下边缘一列的均值必须接近（平铺接缝会铺满整个地面）
+        let col_mean = |x: u32| -> u64 {
+            (0..size).map(|y| tex[((y * size + x) * 4) as usize] as u64).sum::<u64>()
+                / size as u64
+        };
+        let edge = (col_mean(0) as i64 - col_mean(size - 1) as i64).abs();
+        let center = (col_mean(size / 2) as i64 - col_mean(size / 2 + 1) as i64).abs();
+        assert!(
+            edge <= center.max(1) + 12,
+            "细节层左右边缘差 {edge} 远大于内部相邻列差 {center}：平铺会有接缝"
+        );
+    }
+
+    /// 细节层的纹素密度必须与 build.rs 的 `GROUND_DETAIL_TEXEL_M` 一致：
+    /// 那个常量写死为 `2.0 / 256`，片元据此选显式 mip。不同步 = 每个距离都错一级 mip。
+    #[test]
+    fn ground_detail_texel_size_matches_shader_constant() {
+        const SHADER_TEXEL_M: f32 = 0.0078125; // build.rs: GROUND_DETAIL_TEXEL_M
+        let size = GROUND_DETAIL_SIZE;
+        let metres = GROUND_DETAIL_METRES;
+        let texel = metres / size as f32;
+        assert!(
+            (texel - SHADER_TEXEL_M).abs() < 1e-9,
+            "procedural.rs 的 {metres}/{size} = {texel} 与 build.rs \
+             GROUND_DETAIL_TEXEL_M = {SHADER_TEXEL_M} 不一致：改一边必须改另一边，\
+             否则地面细节层的 mip 选择整体偏移一档"
+        );
+        // 倍频（64/16/8）必须整除边长，否则 periodic_noise 取模后格点接不上
+        for cells in [64.0f32, 16.0, 8.0] {
+            assert_eq!(
+                size as f32 % cells,
+                0.0,
+                "细节层倍频 {cells} 不整除边长 {size}：tile 平铺会有接缝"
+            );
+        }
     }
 }
