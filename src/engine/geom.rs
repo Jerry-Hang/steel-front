@@ -32,6 +32,20 @@ pub enum Shape {
     Ico,
     /// 一级细分二十面体（42 顶点 / 80 三角，半径 1）。近处需要圆润的球体。
     Sphere,
+    /// **只碰撞、不绘制**。用途只有一个：GLB 道具的结构碰撞核——它必须留在障碍表里
+    /// （物理刚体、AI 视线、伤害结算都按下标对应），但画出来会和 GLB 表面共面打 z-fighting。
+    /// 由 `main.rs` 组装 marker 时过滤掉，所以 GPU 侧永远看不到这个标签，两条渲染管线都不用改。
+    None,
+    /// **外部建模的网格**（Blender → GLB）。片元据此跳过全部"给纯 tint 盒子补细节"的
+    /// 程序化表面效果：窗带、玻璃分格+菲涅耳、树冠值噪声、以及按"每面 0..1 UV"采样的
+    /// marker 混凝土皮肤。
+    ///
+    /// 为什么必须有它：那四条效果只按 `flat_flag` 与顶点色的**通道比例**分类，不看几何来源。
+    /// 本项目混凝土灰立面 `channelSpread < 0.14` 会被判成"中性"→ 片元按 `FLOOR_H = 3.15`
+    /// 再画一层窗带；而 GLB 楼层是 3.4 m，于是每层错位 0.25 m、越往上漂得越多，
+    /// 直接画在建模好的窗台与壁柱上——等于换个形式重演缺陷 D11。
+    /// 皮肤纹理那条更致命：它假设 UV 是逐面 0..1，而 GLB 是世界投影 UV，会把墙纹任意铺开。
+    Authored,
     /// 未迁移的旧构造点：等价于 [`Shape::Box`]，但保留 tint 颜色嗅探兜底。
     Legacy,
 }
@@ -43,6 +57,10 @@ impl Shape {
     pub const TAG_CYLINDER: f32 = 2.0;
     pub const TAG_ICO: f32 = 3.0;
     pub const TAG_SPHERE: f32 = 4.0;
+    /// 只碰撞不绘制。5.0 是 tint.w 历史上从未出现过的取值（旧数据只有 1.0 与显式 0/2/3/4）。
+    pub const TAG_NONE: f32 = 5.0;
+    /// 外部建模网格。片元看到它就不做任何程序化立面加工。
+    pub const TAG_AUTHORED: f32 = 6.0;
     /// 历史默认值。GPU 侧按立方体处理，但额外允许旧的绿色→二十面体兜底。
     pub const TAG_LEGACY: f32 = 1.0;
 
@@ -53,6 +71,8 @@ impl Shape {
             Shape::Cylinder => Shape::TAG_CYLINDER,
             Shape::Ico => Shape::TAG_ICO,
             Shape::Sphere => Shape::TAG_SPHERE,
+            Shape::None => Shape::TAG_NONE,
+            Shape::Authored => Shape::TAG_AUTHORED,
             Shape::Legacy => Shape::TAG_LEGACY,
         }
     }
@@ -60,7 +80,7 @@ impl Shape {
     /// 标签值 → 形状。未知/越界值一律退回 [`Shape::Legacy`]，让 GPU 侧的兜底分支
     /// 去处理，而不是在这里发明新语义。
     pub const fn from_tag(v: f32) -> Shape {
-        // f32 精确比较：标签只由 tag() 写入，取值是 0/1/2/3/4 这些可精确表示的小整数。
+        // f32 精确比较：标签只由 tag() 写入，取值是 0/1/2/3/4/5 这些可精确表示的小整数。
         if v == Shape::TAG_BOX {
             Shape::Box
         } else if v == Shape::TAG_CYLINDER {
@@ -69,6 +89,10 @@ impl Shape {
             Shape::Ico
         } else if v == Shape::TAG_SPHERE {
             Shape::Sphere
+        } else if v == Shape::TAG_NONE {
+            Shape::None
+        } else if v == Shape::TAG_AUTHORED {
+            Shape::Authored
         } else {
             Shape::Legacy
         }
@@ -81,7 +105,8 @@ impl Shape {
     pub const fn inscribed_radius_factor(self) -> f32 {
         match self {
             Shape::Cylinder | Shape::Sphere | Shape::Ico => core::f32::consts::FRAC_1_SQRT_2,
-            Shape::Box | Shape::Legacy => 1.0,
+            // None / Authored 的足迹就是它的碰撞盒本身（GLB 的旋转 AABB），不内切
+            Shape::Box | Shape::None | Shape::Authored | Shape::Legacy => 1.0,
         }
     }
 }
@@ -105,6 +130,8 @@ mod tests {
             Shape::Cylinder,
             Shape::Ico,
             Shape::Sphere,
+            Shape::None,
+            Shape::Authored,
             Shape::Legacy,
         ] {
             assert_eq!(Shape::from_tag(s.tag()), s, "tag round-trip broke for {:?}", s);
@@ -114,9 +141,31 @@ mod tests {
     #[test]
     fn unknown_shape_tag_falls_back_to_legacy() {
         // 越界/浮点垃圾值不得变成"隐形的新形状"，必须退回旧行为。
-        for v in [-1.0, 5.0, 1.5, 2.71828] {
+        // 5.0 / 6.0 不在此列：2026-09-03 起它们分别是 None（只碰撞不绘制）与
+        // Authored（外部建模，跳过程序化立面）的合法标签。
+        for v in [-1.0, 7.0, 1.5, 2.71828, 4.5] {
             assert_eq!(Shape::from_tag(v), Shape::Legacy, "tag {} must be Legacy", v);
         }
+    }
+
+    #[test]
+    fn gpu_side_thresholds_leave_room_for_none_and_authored() {
+        // 片元/顶点着色器用 flat_flag 的**区间**分路径（>2.5 枪、>1.5 NPC、>0.5 皮肤、
+        // <1.5 marker/立面加工）。Authored 走 flat_flag = 1.25，必须落在
+        // "(0.5, 1.5) 之内、且不等于任何既有阈值"，否则会被 NPC 轮廓光或枪模直出抢走。
+        let authored_flat = 1.25f32;
+        assert!(authored_flat > 0.5 && authored_flat < 1.5);
+        assert!((authored_flat - 1.0).abs() > 0.05, "不能与 marker 的 1.0 重合");
+        assert_eq!(Shape::from_tag(Shape::TAG_AUTHORED), Shape::Authored);
+        assert_eq!(Shape::from_tag(Shape::TAG_NONE), Shape::None);
+    }
+
+    #[test]
+    fn none_shape_tag_does_not_collide_with_legacy_data() {
+        // 旧构造点普遍写 tint[3] = 1.0；None 必须是**新**值，绝不能被历史数据误触发。
+        assert_ne!(Shape::TAG_NONE, Shape::TAG_LEGACY);
+        assert_eq!(Shape::from_tag(1.0), Shape::Legacy);
+        assert_eq!(Shape::from_tag(Shape::TAG_NONE), Shape::None);
     }
 
     #[test]
