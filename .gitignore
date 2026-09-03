@@ -9,6 +9,8 @@ target/
 scripts/retain_smoke.txt
 release_dist/
 launcher/target/
+# 会话构建/测试日志（重定向产物，非工程数据）
+logs/
 
 # AI 会话临时请求/响应体（含 API key 明文，绝不入库）
 scripts/.ds_req.json
