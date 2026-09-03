@@ -37,7 +37,7 @@ impl Default for GameConfig {
             resolution: RESOLUTIONS[0],
             resolution_explicit: false,
             quality: 2, // HIGH（2026-08-28：用户机器全高实测 —— RTX 5060L + Zen4）
-            pt_enable: false, // 2026-09-02 临时关闭（PT 路径干净驱动下 0xC0000005 待深挖；光栅=稳定可玩！）
+            pt_enable: false, // 2026-09-03 复现确认：源码与 35a 基线逐字节相同仍 0xC0000005（Cargo.lock 假设已证伪）；关=可玩，建模验收走光栅
             rt_enable: true,
         }
     }
