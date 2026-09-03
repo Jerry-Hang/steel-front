@@ -89,6 +89,17 @@ fn vs_main(
     } else {
         output.flat_flag = 0.0;
     }
+    // 外部建模网格（geom.rs Shape::Authored，tint.w = 6.0）→ flat_flag = 1.25。
+    // 片元用这个**专属区间**（1.1, 1.4）识别"这是 Blender 建模的资产，别再给它做任何
+    // 程序化立面加工"：窗带、玻璃分格+菲涅耳、树冠噪声、按每面 0..1 UV 采样的混凝土皮肤。
+    // 取 1.25 而不是 1.0 是因为片元里 1.0 与 marker 完全同形、无法再区分；而 1.25 既落在
+    // (0.5, 1.5) 的 marker 侧（不会误入 NPC 轮廓光或枪模直出），又与 1.0 有足够间隙。
+    // 必须放在枪槽判断**之前**，让 83009 的 flat=3.0 始终能覆盖它。
+    var authored_mesh = false;
+    if (inst.tint.w > 5.5 && inst.tint.w < 6.5) {
+        output.flat_flag = 1.25;
+        authored_mesh = true;
+    }
     // 枪模专用 identity 槽（renderer.rs GUN_INSTANCE_INDEX = 65536+1+8192+3072*3+64 = 83009）：
     // flat=3 = baked 顶点光照直出路径（2026-08-22：marker 改走实时光照后，枪模保持烘焙）。
     // ⚠ 这个字面量随 MAX_MARKER_INSTANCES 变化，改容量必须同步改这里两处 + renderer.rs
@@ -118,6 +129,12 @@ fn vs_main(
         let dz = center.z - cam_pos.z;
         let dist = sqrt(dx * dx + dz * dz);
         output.fade = 1.0 - smoothstep(camera.lod_params.y, camera.lod_params.z, dist);
+    }
+    // 道具合并网格走 identity 实例矩阵，`inst.model[3].xyz` 恒为原点 → 上面那条会按
+    // "离世界原点多远"来淡出整片道具，相机走到地图边缘时全城一起变透明。和地形/枪模
+    // 一样，必须强制不淡出；距离相关的衰减本来就由雾负责。
+    if (authored_mesh) {
+        output.fade = 1.0;
     }
     return output;
 }
@@ -591,10 +608,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // 同一个 detail 值意味着差 100 倍的世界频率——那条纪律现在由 world_derivatives 承担。
         let foot = max(abs(fwidth(input.uv).x), abs(fwidth(input.uv).y));
         let detail = 1.0 - smoothstep(0.015, 0.22, foot);
+        // 外部建模网格（vs_main 给 flat_flag = 1.25）：下面四条"给纯 tint 盒子补细节"的
+        // 程序化效果一律跳过，只保留 base = 顶点色 → 光照 → 阴影 → 雾。
+        // 不跳过的后果是实打实的：窗带按 FLOOR_H=3.15 画在 3.4m 楼层的 GLB 立面上、
+        // 每层错位 0.25m 越往上漂越多；混凝土皮肤按"每面 0..1 UV"采样，而 GLB 是世界
+        // 投影 UV，会把墙纹任意铺开。
+        let authored = input.flat_flag > 1.1 && input.flat_flag < 1.4;
         // 玻璃判据（b > r*1.4）沿用 D2 不动；但必须提到皮肤分支**之外**：
         // 旧代码写在 if (flags.z >= 0.5) 里面，RV3D_SKIN_TEX=0 时这条路径整体不成立。
-        let is_glass = input.flat_flag < 1.5 && input.color.b > input.color.r * 1.4;
-        let is_canopy = input.flat_flag < 1.5
+        let is_glass = !authored && input.flat_flag < 1.5 && input.color.b > input.color.r * 1.4;
+        let is_canopy = !authored
+            && input.flat_flag < 1.5
             && base.g > base.r && base.g > base.b * 1.4;
         // 树冠杂色（2026-08-23 纸片树修复的第二次修正）：旧实现是**逐像素**随机
         // fract(sin(dot(world_pos.xz))*43758) 且按 uv 域的 detail 收敛——而 mesh 路径
@@ -614,7 +638,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
             // 近处幅度 0.55+0.90·luma 与 D1 验收式逐位一致（勿回退），远处收到 0.55+0.12·luma
             base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
-        } else if (light_data.flags.z >= 0.5 && !is_glass) {
+        } else if (light_data.flags.z >= 0.5 && !is_glass && !authored) {
             // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
             base = mix(input.color,
                        textureSample(marker_skin_tex, texture_sampler, input.uv).rgb,
@@ -630,7 +654,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // D11（第二次修正）：窗带由片元画在**中性混凝土立面**上，零新增几何、零深度风险。
         // 分类一律用 input.color（逐实例常量），不用被皮肤纹理改写过的 base。
         // 通道极差判据天然排除砖墙(红)/木掩体(棕)/树冠(绿)——否则围墙上会长出窗户。
-        if (input.flat_flag < 1.5 && !is_glass) {
+        if (!authored && input.flat_flag < 1.5 && !is_glass) {
             let cmax = max(input.color.r, max(input.color.g, input.color.b));
             let cmin = min(input.color.r, min(input.color.g, input.color.b));
             let neutral = 1.0 - smoothstep(0.06, 0.14, cmax - cmin);
@@ -714,7 +738,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let gderiv = world_derivatives(input.world_pos);
     let gpx = max(gderiv.x, gderiv.z);
     let gdetail = 1.0 - smoothstep(0.06, 0.25, gpx);
-    if (gdetail > 0.001) {
+    // ⚠ 本层由 light_data.flags.w 显式开关，默认关（2026-09-03 定位的"地面全黑/街区黑块"
+    // 根因）。binding 9（ground_detail_tex）是本文件里唯一"片元声明了、管线却可能没绑定"
+    // 的槽位：set layout 缺项或任一帧描述符漏写 → 驱动给空描述符 → 采样恒 0 → 本层乘法
+    // 把 albedo **乘成 0**。gpx < 0.06 米/像素（相机周边整圈地面 = 全部街面/广场）时
+    // gdetail=1 → 纯黑；远处掠射 gpx > 0.25 → gdetail=0 → 画面正常，所以症状是"近处一圈
+    // 黑、远处正常"，看着像"没画、露出 clear color"，其实是画了再乘 0。这条乘法位于地面/
+    // 地形分支（flat_flag <= 0.5 才走到）→ marker/NPC/自发光完全不受影响；且与光照、阴影、
+    // 纹理内容无关 —— 精确复现交接文档那三条"三重排除"（NO_SHADOW=1 仍黑 / 光照开关同黑 /
+    // 纹理 dump 完美）以及"改城市分区基色无 measurable 效果"（乘 0 之后改什么都没区别）。
+    // mesh 与传统两条路径**共用本片元**（mesh 管线加载 assets/triangle.frag.spv）⇒ 同病；
+    // 两路径的 gdetail 逐像素相同（gpx 只取 world_pos 的 x/z 屏幕导数，terrain_bump 只动
+    // y），mesh 侧唯一的额外变暗是 write_vertex 用 terrain_tint 顶掉实例 tint
+    // （gtone 0.7 → ≈0.25 ⇒ mixed 系数 1.05 → 0.93，约 12%），不足以解释"全黑"。
+    // 接线方（renderer.rs）必须：binding 9 进 set layout + 每帧写描述符 + UNORM(线性)view
+    // + ≥6 级 mip，**并把 light_data.flags.w 置 1.0**；缺任何一条本层就不参与，
+    // 地面保持无细节层的正常画面（fail-closed，绝不再变黑）。
+    if (gdetail > 0.001 && light_data.flags.w >= 0.5) {
         // 显式 LOD：一个像素盖多少个纹素就取第几级 mip。
         // 为什么不用隐式 textureSample：它在非一致控制流（这个 if）里取屏幕导数属于
         // 未定义行为，而且这里本就是按米算出来的，没必要绕一圈导数。
@@ -722,7 +762,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let g = textureSampleLevel(ground_detail_tex, texture_sampler,
                                    input.world_pos.xz / GROUND_DETAIL_METRES, lvl).r;
         // 纹素编码约定：r = 亮度调制 / 2（调制 1.0 → 128）。见 GROUND_DETAIL_GAIN 注释。
-        mixed = mixed * mix(1.0, g * GROUND_DETAIL_GAIN, gdetail);
+        // 二级兜底（flag 已开但图本身有问题时）：clamp 到 [0.5,2.0] 且把 g<=0 判为"该层
+        // 不参与"。真实纹素域 ≈[0.33,0.61]（procedural.rs::generate_ground_detail_texture
+        // 注释"永不取到 0"）⇒ 调制域 ≈[0.66,1.22] 整个落在带内，对正确接线逐位无影响。
+        var gmod = clamp(g * GROUND_DETAIL_GAIN, 0.5, 2.0);
+        if (g <= 0.0) {
+            gmod = 1.0;
+        }
+        mixed = mixed * mix(1.0, gmod, gdetail);
     }
     if (light_data.flags.x < 0.5) {
         return vec4<f32>(mixed * input.fade, 1.0);
