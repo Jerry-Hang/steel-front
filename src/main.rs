@@ -1551,9 +1551,14 @@ impl GameApp {
             // 构建，与物理刚体 AABB（game.rs apply_level，同 half_w/half_d）严格同尺寸）。
             // 用 render_geometry() 而不是 map_obstacles()：后者只含会挡人的障碍，前者还包含
             // 挑檐/窗带/壁柱/屋顶设备这类纯装饰件（game.rs LevelMap::decor）。
+            // 但要跳过 [`engine::geom::Shape::None`]：那是 GLB 道具的碰撞核，只参与物理与
+            // 布局不变式检查，画出来会和 GLB 表面共面 z-fighting（正是 city.rs 零共面纪律
+            // 禁止的那类穿帮）。过滤放在这里而不是 render_geometry() 内部，因为 city.rs 的
+            // 布局测试需要遍历到每一个盒子。
             let markers: Vec<engine::renderer::WorldMarker> = self
                 .game
                 .render_geometry()
+                .filter(|o| o.shape != engine::geom::Shape::None)
                 .map(engine::renderer::WorldMarker::for_obstacle)
                 .collect();
             // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
@@ -2964,6 +2969,10 @@ mod tests {
     /// 以恒定速度直行 `secs` 秒，返回积分后的摆动状态。
     /// `dt` 故意可传入不同帧率，用于断言"同一行程得到同一状态"。
     /// 进循环前先 tick 一次播种 `prev_pos`，否则两种帧率会各少吃一步的行程。
+    ///
+    /// 帧数必须**四舍五入**：`(0.5f32 / (1.0f32 / 30.0)) as usize` 截断成 14 而不是 15
+    /// （f32 里 1/30 的倒数乘回来是 14.999999），于是两种帧率模拟的根本不是同一段时长，
+    /// 这条测试就从"验证帧率无关"变成了"验证两个不同时长相等"，必然红。
     fn walk(dt: f32, secs: f32, speed: f32) -> GunSway {
         let mut s = GunSway::new();
         let right = glam::Vec3::X;
@@ -2971,7 +2980,7 @@ mod tests {
         let mut pos = glam::Vec3::ZERO;
         s.tick(dt, pos, right, fwd, false);
         let step = speed * dt;
-        for _ in 0..(secs / dt) as usize {
+        for _ in 0..(secs / dt).round() as usize {
             pos += fwd * step;
             s.tick(dt, pos, right, fwd, false);
         }
@@ -2999,17 +3008,35 @@ mod tests {
         );
     }
 
-    /// 有界性 + 相位回绕：长时间运行后相位仍在 [0, 2π)、速度不过冲、包络 ≤1
+    /// 有界性 + 相位回绕：长时间运行后相位仍在 [0, 2π)、速度不发散、包络 ≤1。
+    ///
+    /// 这里**不**用紧容差查"不过冲"：600 s × 6 m/s 把坐标累加到 3.6e3 m，
+    /// `now_pos - prev_pos` 在该量级下每帧带约一个 ulp（≈2.4e-4）的舍入误差，
+    /// 再除以 dt=1/165 s 放大成约 7e-3 m/s 的**输入噪声**。低通本身单调逼近、不会过冲，
+    /// 超的是这个噪声。紧的那条断言在下面的 `gun_sway_low_pass_does_not_overshoot`。
     #[test]
     fn gun_sway_stays_bounded_and_wrapped() {
         let s = walk(1.0 / 165.0, 600.0, 6.0);
         assert!(s.stride >= 0.0 && s.stride < std::f32::consts::TAU);
         assert!(
-            s.speed <= 6.0 + 1e-3,
-            "指数低通是单调逼近，不应过冲：{}",
+            s.speed <= 6.05,
+            "长时间运行后速度发散，说明低通或相位累加失去了有界性：{}",
             s.speed
         );
         assert!(s.kick <= 1.0);
+    }
+
+    /// 不过冲（紧容差）：短时运行下坐标只有十几米，浮点噪声比容差小三个数量级，
+    /// 因此这条能真正守住"指数低通单调逼近、绝不越过输入值"。
+    #[test]
+    fn gun_sway_low_pass_does_not_overshoot() {
+        let s = walk(1.0 / 165.0, 3.0, 6.0);
+        assert!(
+            s.speed <= 6.0 + 1e-4,
+            "指数低通是单调逼近，不应过冲：{}",
+            s.speed
+        );
+        assert!(s.speed > 5.99, "3 秒后应已收敛到满幅，实际 {}", s.speed);
     }
 
     /// 瞬移/重生保护：单帧几十米的位移不得被当成巨型速度（旧实现没有这层保护，

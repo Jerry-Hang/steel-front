@@ -465,6 +465,17 @@ pub struct LevelMap {
     /// 就有十几个部件，全部塞进物理会让弹道×障碍与玩家×障碍成本随部件数线性上涨，
     /// 而且屋顶空调机会在街面留下一圈隐形墙。
     pub decor: Vec<MapObstacle>,
+    /// **GLB 世界道具摆放**（2026-09-03）：由 `engine::props::PropSet` 的网格下标 +
+    /// 位姿描述，渲染走独立绘制路径，不进 `obstacles`/`decor` 两张盒表。
+    ///
+    /// 为什么单开一张表而不是给 `MapObstacle` 加个 mesh 字段：障碍表的下标被
+    /// `world.bodies` 和伤害结算按位置复用（见 `decor` 字段的说明），任何让两表
+    /// 错长的改动都会把伤害静默打到另一栋楼上。道具是另一种东西，就给它自己的表。
+    ///
+    /// 为什么这里的件几乎都是装饰：GLB 换掉的正是 `decor` 里那批"挑檐/窗带/壁柱/
+    /// 屋顶设备"薄盒——它们在街对面读作一排悬挑板（缺陷 D11）。结构盒留在
+    /// `obstacles` 里继续负责碰撞与耐久，所以画面重建完，物理一行没动。
+    pub props: Vec<crate::engine::props::PropPlacement>,
 }
 
 impl LevelMap {
@@ -759,7 +770,7 @@ pub fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> LevelMap {
             }
         }
     }
-    LevelMap { obstacles, decor: Vec::new() }
+    LevelMap { obstacles, decor: Vec::new(), props: Vec::new() }
 }
 
 /// 碰撞事件缓冲：监听者写入，Game 每帧 drain 取走
@@ -1541,7 +1552,7 @@ impl Game {
                     shape: Shape::Legacy,
                 });
             }
-            self.map = LevelMap { obstacles, decor: Vec::new() };
+            self.map = LevelMap { obstacles, decor: Vec::new(), props: Vec::new() };
         } else {
             // 地图：默认手绘现代城市（不再随机种子生成；RV3D_PROC_MAP=1 回退程序化生成用于 A/B）
             // 生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core / 小核），
@@ -4731,7 +4742,6 @@ impl Game {
             );
         }
         // 10 秒后重置：清场重开本轮
-        log::info!("dbg-respawn: reset_at={} time={} n={}", self.round_reset_at, self.time, self.npcs.len());
         if self.round_reset_at >= 0.0 && self.time >= self.round_reset_at {
             self.round_reset_at = -1.0;
             self.round_winner = None;
