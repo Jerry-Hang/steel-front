@@ -1252,6 +1252,29 @@ pub fn generate_city() -> LevelMap {
         }
     }
     street_furniture(&mut c);
+    // 摆放分类统计（长期保留）：哪类资产命中了、哪类其实一个都没摆上，直接看这行就知道。
+    // 之前排查"建筑仍是悬浮板"时只能靠猜，因为日志只给了总数。
+    if !c.props.is_empty() {
+        let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+        for pl in &c.props {
+            if let Some(m) = c.set.get(pl.mesh) {
+                *counts.entry(m.name.as_str()).or_insert(0) += 1;
+            }
+        }
+        let mut pairs: Vec<(&&str, &usize)> = counts.iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(a.1));
+        log::info!(
+            "props: 摆放 {} 处 —— {}",
+            c.props.len(),
+            pairs
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    } else {
+        log::info!("props: 摆放 0 处（全部几何仍为程序化盒）");
+    }
     c.finish()
 }
 
