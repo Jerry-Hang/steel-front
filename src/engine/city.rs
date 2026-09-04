@@ -524,6 +524,23 @@ fn row_houses(
     bays: u32,
 ) {
     let h = FLOOR_H * floors as f32 + 0.6;
+
+    // GLB 路线：下面那圈 `w+0.60 / d+0.60` 的通长玻璃窗带就是缺陷 D11「悬浮横板」的
+    // 真正产地——它比结构核心还大一圈、绕楼四面一整圈、凸出 0.30m，从街对面看就是
+    // 一排穿楼而过的挑板。住宅/商铺街区全部走这里，所以这一处不接 GLB，全城建筑就
+    // 仍然是一堆平板（实测 220 处摆放里建筑只有 12 处，因为 building() 仅 3 个调用点）。
+    // 碰撞核保留但设为不可见：物理/弹道/AI 视线一行不动。
+    if let Some((name, scale)) = c.pick_building(w, d, floors) {
+        let yaw = City::face_nearest_street(cx, cz);
+        if c.prop(name, cx, cz, yaw, scale) {
+            c.push(
+                Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall)
+                    .invisible(),
+            );
+            return;
+        }
+    }
+
     c.push(Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall));
     c.deco(Part::new(ObstacleKind::Building, cx, cz, w + 0.5, d + 0.5, UNDER_GROUND, 0.80, pal.base));
 
