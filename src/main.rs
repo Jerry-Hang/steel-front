@@ -413,6 +413,11 @@ struct GameApp {
     gun_mesh_cache: Option<(String, crate::engine::guns::GunMesh)>,
     /// 导入的 GLB 枪模缓存（按武器 key：assets/guns/{key}.glb → 顶点；无则该武器回退程序化枪模）
     gun_glbs: std::collections::HashMap<String, Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)>>,
+    /// GLB 道具网格套件（懒加载一次；None = 还没尝试加载）。摆放列表在 LevelMap::props 上，
+    /// 但那份列表只存下标，网格本体归这里——重载地图不必重新解析 24 个 GLB。
+    prop_set: Option<engine::props::PropSet>,
+    /// 上次上传道具几何时的地图代号；哨兵值保证首帧一定上传一次。
+    prop_map_gen: u64,
     /// 延迟自动切枪（测试用）：(目标武器号, 触发时刻)
     switch_weapon_at: Option<(usize, f32)>,
 }
@@ -536,6 +541,9 @@ impl GameApp {
             command_buf: String::new(),
             gun_mesh_cache: None,
             gun_glbs: std::collections::HashMap::new(),
+            prop_set: None,
+            // 哨兵：保证第一帧就上传一次道具几何
+            prop_map_gen: u64::MAX,
             switch_weapon_at: None,
         }
     }
@@ -1705,6 +1713,31 @@ impl GameApp {
             }
             renderer.set_world_markers(&markers);
             renderer.set_emissive_markers(&emissive_markers);
+            // ---- GLB 道具几何上传 ----
+            // 套件懒加载一次（重载地图不必重新解析 24 个 GLB）；几何只在**地图代号变化**
+            // 时重传：一次合并是百万级顶点的 CPU 拷贝，绝不能进每帧路径。
+            // 读不到 assets/props 只意味着城市退回纯程序化外观，不是错误。
+            if self.prop_set.is_none() {
+                self.prop_set = Some(match engine::props::PropSet::load_dir("assets/props") {
+                    Ok(s) => {
+                        log::info!("props: 渲染侧载入 {} 件网格", s.len());
+                        s
+                    }
+                    Err(e) => {
+                        log::info!("props: 渲染侧未载入（{e}），不绘制道具");
+                        Default::default()
+                    }
+                });
+            }
+            let map_gen = self.game.map_generation();
+            if map_gen != self.prop_map_gen {
+                self.prop_map_gen = map_gen;
+                if let Some(set) = self.prop_set.as_ref() {
+                    if !set.is_empty() {
+                        renderer.set_props(set, self.game.prop_placements());
+                    }
+                }
+            }
             // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
             // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）；
             // 动画字段：移动中摆臂摆腿（步态）、攻击态枪身后坐脉冲

@@ -473,6 +473,17 @@ const GUN_INSTANCE_INDEX: u32 =
 /// 该槽的 `tint.w = Shape::Authored.tag()`(=6.0) 是给 shader 看的，`tint.rgb = 1` 让
 /// 片元直出顶点色（`input.color = vertexColor × tint.rgb`）。
 const PROP_INSTANCE_INDEX: u32 = GUN_INSTANCE_INDEX + 1;
+/// 实例 storage buffer 的总元素数。**唯一权威定义**——历史上它是三份互相抄写的副本
+/// （`buffer_elems` + 主管线 descriptor `.range()` + 阴影 pass descriptor `.range()`），
+/// 加一个槽位只要漏改任一份，shader 就会对那一槽越界读 storage buffer：驱动不会报错，
+/// 只会返回全零，于是 `inst.model` 变成零矩阵、所有顶点塌到一点、几何**完全不显示**且
+/// 没有任何日志或 VUID 提示（2026-09-04 加道具槽时正好踩中，靠"红屏探针 + 换槽对照"才定位）。
+/// 现在由最高槽位反推，结构上不可能再漏。
+const INSTANCE_BUFFER_ELEMS: u64 = PROP_INSTANCE_INDEX as u64 + 1;
+const _: () = assert!(
+    INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTANCE_BUFFER_ELEMS > 0,
+    "实例 buffer 必须覆盖所有已知槽位"
+);
 
 
 /// 实例数据（model 4x4 + tint vec4，std430 步长 80 字节）
@@ -878,6 +889,18 @@ pub struct Renderer {
     gun_index_count: u32,
     gun_buffer_capacity_verts: u32,
     gun_buffer_capacity_idx: u32,
+    /// GLB 道具合并网格（`engine::props::merge` 在 CPU 上烘好位姿的静态几何）。
+    /// 全部道具共用一次 draw call：位姿已进顶点，所以只需要 `PROP_INSTANCE_INDEX`
+    /// 这一个 identity 实例，不必为道具新开一整段实例区。
+    prop_vertex_buffer: vk::Buffer,
+    prop_vertex_memory: vk::DeviceMemory,
+    prop_index_buffer: vk::Buffer,
+    prop_index_memory: vk::DeviceMemory,
+    prop_mapped: *mut std::ffi::c_void,
+    prop_vertex_count: u32,
+    prop_index_count: u32,
+    prop_capacity_verts: u32,
+    prop_capacity_idx: u32,
     /// 上一帧渲染统计（供 HUD / 日志）
     last_near_count: u32,
     last_far_count: u32,
@@ -1466,6 +1489,15 @@ impl Renderer {
             gun_index_count: 0,
             gun_buffer_capacity_verts: 0,
             gun_buffer_capacity_idx: 0,
+            prop_vertex_buffer: vk::Buffer::null(),
+            prop_vertex_memory: vk::DeviceMemory::null(),
+            prop_index_buffer: vk::Buffer::null(),
+            prop_index_memory: vk::DeviceMemory::null(),
+            prop_mapped: std::ptr::null_mut(),
+            prop_vertex_count: 0,
+            prop_index_count: 0,
+            prop_capacity_verts: 0,
+            prop_capacity_idx: 0,
             last_near_count: 0,
             last_far_count: 0,
             last_terrain_lod_name: "high",
@@ -2181,17 +2213,9 @@ impl Renderer {
             let instance_info = vk::DescriptorBufferInfo::default()
                 .buffer(self.instance_buffers[i])
                 .offset(0)
-                // 范围必须覆盖 marker/NPC/自发光区 + 枪模 identity 槽（+1），
-                // 否则 shader 读对应 slot 会触发 VUID 越界校验
-                .range(
-                    std::mem::size_of::<InstanceData>() as u64
-                        * (INSTANCE_COUNT as u64
-                            + 1
-                            + MAX_MARKER_INSTANCES as u64
-                            + MAX_NPC_INSTANCES as u64 * 3
-                            + MAX_EMISSIVE_INSTANCES as u64
-                            + 1),
-                );
+                // 范围必须覆盖到最高槽位（道具 identity 槽），否则 shader 读该 slot 会
+                // 越界——驱动不报错，只返回全零，几何会静默消失。见 INSTANCE_BUFFER_ELEMS。
+                .range(std::mem::size_of::<InstanceData>() as u64 * INSTANCE_BUFFER_ELEMS);
             let instance_infos = [instance_info];
             let instance_write = vk::WriteDescriptorSet::default()
                 .dst_set(self.descriptor_sets[i])
@@ -3720,18 +3744,10 @@ impl Renderer {
         self.culled_scratch = vec![0u32; INSTANCE_COUNT as usize];
 
         // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次），
-        // 再追加 MAX_MARKER_INSTANCES 个 slot 给世界障碍 marker（见 MARKER_SLOT_BASE），
-        // 追加 MAX_NPC_INSTANCES 个 slot 给 NPC 士兵段（见 NPC_SLOT_BASE），
-        // 最后追加 MAX_EMISSIVE_INSTANCES 个 slot 给自发光实体（见 EMISSIVE_SLOT_BASE）
-        // +1 = 枪模专用 identity 槽（GUN_INSTANCE_INDEX，走 flat=1 纯色路径，
-        // 避免枪模被地面纹理 0.75 混合而隐形——2026-08-16）
-        // +1 = GLB 道具合并网格的 identity 槽（PROP_INSTANCE_INDEX，2026-09-03）
-        let buffer_elems = (INSTANCE_COUNT
-            + 1
-            + MAX_MARKER_INSTANCES
-            + MAX_NPC_INSTANCES * 3
-            + MAX_EMISSIVE_INSTANCES
-            + 2) as u64;
+        // 元素数由 INSTANCE_BUFFER_ELEMS 单一定义（= 最高槽位 + 1），不再在此抄写副本：
+        // 历史上这里是三份互不同步的硬编码，漏改任一份都会让 shader 越界读到全零矩阵、
+        // 几何静默消失（无日志、无 VUID）。详见该常量的注释。
+        let buffer_elems = INSTANCE_BUFFER_ELEMS;
         let buffer_size = buffer_elems * std::mem::size_of::<InstanceData>() as u64;
         let identity = InstanceData {
             model: glam::Mat4::IDENTITY.to_cols_array(),
@@ -4702,6 +4718,158 @@ impl Renderer {
             );
             self.device.unmap_memory(self.gun_index_buffer_memory);
         }
+    }
+
+    /// 上传 GLB 道具：把摆放列表在 CPU 上烘成一份静态几何，再传上 GPU。
+    ///
+    /// 只在**地图重载**时调用（`main.rs` 用 `Game::map_generation()` 判定），不要每帧调：
+    /// 一次合并是百万级顶点的拷贝。
+    ///
+    /// 缓冲**只增不减**，且扩容前无条件 `device_wait_idle()`。这两条都是照着枪模的
+    /// 事故写的：2026-08-18 那次"切到小网格武器触发重建"直接 destroy 了正在被 GPU 使用
+    /// 的 buffer，NVIDIA 驱动 device lost、画面卡死。地图重载发生在帧与帧之间、不在命令
+    /// 缓冲记录期间，所以这里的等待是安全的；缩小容量同样走这条路，因此必须等。
+    pub fn set_props(
+        &mut self,
+        set: &crate::engine::props::PropSet,
+        placements: &[crate::engine::props::PropPlacement],
+    ) {
+        let merged = crate::engine::props::merge(set, placements, |x, z| terrain_height_at(x, z));
+        self.prop_vertex_count = 0;
+        self.prop_index_count = 0;
+        if merged.is_empty() || merged.indices.is_empty() {
+            log::info!("props: 无摆放几何（套件 {} 件 / 摆放 {} 处）", set.len(), placements.len());
+            return;
+        }
+        let need_v = merged.verts.len() as u32;
+        let need_i = merged.indices.len() as u32;
+        let mapped_ok = self.prop_mapped != std::ptr::null_mut()
+            && self.prop_vertex_buffer != vk::Buffer::null();
+        if !mapped_ok || need_v > self.prop_capacity_verts || need_i > self.prop_capacity_idx {
+            unsafe {
+                let _ = self.device.device_wait_idle();
+            }
+            if self.prop_mapped != std::ptr::null_mut() {
+                unsafe { self.device.unmap_memory(self.prop_vertex_memory) };
+                self.prop_mapped = std::ptr::null_mut();
+            }
+            for (buf, mem) in [
+                (self.prop_vertex_buffer, self.prop_vertex_memory),
+                (self.prop_index_buffer, self.prop_index_memory),
+            ] {
+                if buf != vk::Buffer::null() {
+                    unsafe { self.device.destroy_buffer(buf, None) };
+                }
+                if mem != vk::DeviceMemory::null() {
+                    unsafe { self.device.free_memory(mem, None) };
+                }
+            }
+            // 2 的幂向上取整：地图尺寸只会小幅波动，避免每次重载都重建
+            let cap_v = need_v.next_power_of_two().max(65_536);
+            let cap_i = need_i.next_power_of_two().max(65_536);
+            let (vb, vm) = match self
+                .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER,
+                                    cap_v as u64 * std::mem::size_of::<Vertex>() as u64)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("props: 顶点缓冲创建失败，跳过道具绘制: {e}");
+                    return;
+                }
+            };
+            let (ib, im) = match self
+                .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, cap_i as u64 * 4)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("props: 索引缓冲创建失败，跳过道具绘制: {e}");
+                    return;
+                }
+            };
+            self.prop_vertex_buffer = vb;
+            self.prop_vertex_memory = vm;
+            self.prop_index_buffer = ib;
+            self.prop_index_memory = im;
+            self.prop_mapped = match unsafe {
+                self.device.map_memory(vm, 0,
+                    cap_v as u64 * std::mem::size_of::<Vertex>() as u64,
+                    vk::MemoryMapFlags::empty())
+            } {
+                Ok(p) => p,
+                Err(e) => {
+                    log::error!("props: 顶点缓冲映射失败，跳过道具绘制: {e}");
+                    return;
+                }
+            };
+            self.prop_capacity_verts = cap_v;
+            self.prop_capacity_idx = cap_i;
+            log::info!(
+                "props: 缓冲扩容 顶点 {}/{} 索引 {}/{}（{:.1} MB）",
+                need_v, cap_v, need_i, cap_i,
+                (cap_v as u64 * std::mem::size_of::<Vertex>() as u64
+                    + cap_i as u64 * 4) as f64 / 1048576.0
+            );
+        }
+
+        // [f32;11]（pos/normal/uv/color）→ Vertex（pos/color/uv）。
+        // normal 与枪模一样在上传时丢弃：本引擎的着色法线由屏幕空间导数重建，
+        // 顶点格式里没有它的槽位。因此**绕序必须正确**，反面的面会直接黑掉而不报错。
+        let vptr = self.prop_mapped as *mut Vertex;
+        for (i, v) in merged.verts.iter().enumerate() {
+            unsafe {
+                *vptr.add(i) = Vertex {
+                    pos: [v[0], v[1], v[2]],
+                    color: [v[8], v[9], v[10]],
+                    uv: [v[6], v[7]],
+                };
+            }
+        }
+        // 与枪模同样的 unmap→remap：host-coherent 内存也可能被驱动延迟可见
+        let v_bytes =
+            self.prop_capacity_verts as u64 * std::mem::size_of::<Vertex>() as u64;
+        unsafe {
+            self.device.unmap_memory(self.prop_vertex_memory);
+            match self
+                .device
+                .map_memory(self.prop_vertex_memory, 0, v_bytes, vk::MemoryMapFlags::empty())
+            {
+                Ok(p) => self.prop_mapped = p,
+                Err(e) => {
+                    log::error!("props: 顶点缓冲重映射失败，跳过道具绘制: {e}");
+                    self.prop_mapped = std::ptr::null_mut();
+                    return;
+                }
+            }
+        }
+        unsafe {
+            match self.device.map_memory(
+                self.prop_index_memory,
+                0,
+                need_i as u64 * 4,
+                vk::MemoryMapFlags::empty(),
+            ) {
+                Ok(iptr) => {
+                    std::ptr::copy_nonoverlapping(
+                        merged.indices.as_ptr() as *const u8,
+                        iptr as *mut u8,
+                        need_i as usize * 4,
+                    );
+                    self.device.unmap_memory(self.prop_index_memory);
+                }
+                Err(e) => {
+                    log::error!("props: 索引缓冲映射失败，跳过道具绘制: {e}");
+                    return;
+                }
+            }
+        }
+        self.prop_vertex_count = need_v;
+        self.prop_index_count = need_i;
+        log::info!(
+            "props: 上传完成 顶点 {} / 三角 {} / 摆放 {} 处，包围盒 x∈[{:.1},{:.1}] y∈[{:.1},{:.1}] z∈[{:.1},{:.1}]",
+            need_v, need_i / 3, placements.len(),
+            merged.min[0], merged.max[0], merged.min[1], merged.max[1],
+            merged.min[2], merged.max[2]
+        );
     }
 
     /// 当前交换链尺寸 (宽, 高)——PT 原生分辨率取它
@@ -7396,12 +7564,10 @@ impl Renderer {
                 .map_err(|e| format!("分配阴影 Descriptor Sets 失败: {}", e))?
         };
 
-        let instance_range = std::mem::size_of::<InstanceData>() as u64
-            * (INSTANCE_COUNT as u64
-                + 1
-                + MAX_MARKER_INSTANCES as u64
-                + MAX_NPC_INSTANCES as u64 * 3
-                + MAX_EMISSIVE_INSTANCES as u64);
+        // 阴影 pass 的实例范围同样用唯一定义。注意：这里此前连枪模槽（+1）都没覆盖，
+        // 只是从没有 shader 在阴影里读那些槽所以没暴露；统一后一并修正。
+        let instance_range =
+            std::mem::size_of::<InstanceData>() as u64 * INSTANCE_BUFFER_ELEMS;
         for i in 0..max_frames {
             let ubo_info = vk::DescriptorBufferInfo::default()
                 .buffer(self.shadow_ubo_buffers[i])
@@ -8251,6 +8417,45 @@ impl Renderer {
                 );
             }
         }
+        }
+
+        // ---- GLB 道具合并网格：一次 draw call 画完整城道具。
+        //      走主管线（**已开深度测试**），所以道具之间、道具与地形之间遮挡正确。
+        //      identity 实例取 PROP_INSTANCE_INDEX：位姿已在 CPU 烘进顶点，GPU 侧不需要
+        //      逐实例矩阵；该槽 tint.w=Shape::Authored.tag() 让片元跳过程序化立面加工。
+        if self.prop_index_count > 0 && self.prop_vertex_count > 0 {
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline,
+                );
+                self.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    0,
+                    &descriptor_sets,
+                    &[],
+                );
+                let pvb = [self.prop_vertex_buffer];
+                let poff = [0u64];
+                self.device.cmd_bind_vertex_buffers(command_buffer, 0, &pvb, &poff);
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.prop_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                self.device.cmd_draw_indexed(
+                    command_buffer,
+                    self.prop_index_count,
+                    1,
+                    0,
+                    0,
+                    PROP_INSTANCE_INDEX,
+                );
+            }
         }
 
         // ---- 第一人称枪模（程序化高模，2026-08-16）：identity 实例（GUN_INSTANCE_INDEX
@@ -9284,6 +9489,23 @@ impl Drop for Renderer {
             }
             if self.gun_index_buffer_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.gun_index_buffer_memory, None);
+            }
+            // 道具合并网格缓冲（先解映射再释放内存，顺序不能反）
+            if self.prop_mapped != std::ptr::null_mut() {
+                self.device.unmap_memory(self.prop_vertex_memory);
+                self.prop_mapped = std::ptr::null_mut();
+            }
+            if self.prop_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.prop_vertex_buffer, None);
+            }
+            if self.prop_vertex_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.prop_vertex_memory, None);
+            }
+            if self.prop_index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.prop_index_buffer, None);
+            }
+            if self.prop_index_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.prop_index_memory, None);
             }
             if self.render_pass != vk::RenderPass::null() {
                 self.device.destroy_render_pass(self.render_pass, None);

@@ -965,6 +965,9 @@ pub struct Game {
     wave: u32,
     /// 当前关卡（1 起；每关 WAVES_PER_LEVEL 波，清完升关并重新生成地图）
     level: u32,
+    /// 地图代号：每次 `apply_level` 自增。渲染层用它判断"地图换了，道具几何要重传"，
+    /// 避免每帧重做一次百万级顶点的 CPU 合并（`Renderer::set_props` 的调用条件）。
+    map_generation: u64,
     /// 当前关卡的程序化布局（种子 = level，供物理刚体 / AI 网格 / 渲染 marker 使用）
     map: LevelMap,
     /// 波间倒计时（清空后 3 秒刷下一波）
@@ -1279,6 +1282,7 @@ impl Game {
             fps_window_start: Instant::now(),
             audio_sample_rate: 48_000,
             level: 1,
+            map_generation: 0,
             map: LevelMap::default(),
             audio: {
                 let mut player =
@@ -1529,6 +1533,7 @@ impl Game {
     /// 由 new() / start_run() / 升关时调用；同时把玩家拉回原点安全区，防止卡进障碍。
     fn apply_level(&mut self, level: u32) {
         self.level = level;
+        self.map_generation += 1;
         // 地图来源：关卡系统启用（RV3D_MAP/RV3D_MAPS）→ TOML 障碍；否则程序化生成（默认行为）。
         // 关卡系统地图已在 init_map_system / advance_level / reload_current_map 加载到 map_mgr。
         if let Some(mgr) = self.map_mgr.as_ref() {
@@ -1670,6 +1675,16 @@ impl Game {
     /// 当前关卡障碍列表（物理/掩体/摧毁结算的唯一真相；main.rs 也用它生成 marker）
     pub fn map_obstacles(&self) -> &[MapObstacle] {
         &self.map.obstacles
+    }
+
+    /// 地图代号。渲染层据此判断道具几何是否需要重传（见 `Renderer::set_props`）。
+    pub fn map_generation(&self) -> u64 {
+        self.map_generation
+    }
+
+    /// 本关的 GLB 道具摆放列表（见 [`LevelMap::props`]）。
+    pub fn prop_placements(&self) -> &[crate::engine::props::PropPlacement] {
+        &self.map.props
     }
 
     /// 渲染与路径追踪应绘制的全部几何 = 障碍 + 装饰件（见 [`LevelMap::decor`]）。
