@@ -226,7 +226,8 @@ pub fn merge(
         let base = out.verts.len() as u32;
         for v in &mesh.verts {
             // 绕 +Y 旋转：(x, z) → (x·cosθ + z·sinθ, -x·sinθ + z·cosθ)。
-            // 纯旋转 + 等比缩放 + 平移的行列式为正，三角形绕序保持不变。
+            // 这个**顶点变换本身**是纯旋转+等比缩放+平移，行列式为正，不改变绕序；
+            // 下面对索引另有一次刻意交换，那是为了适配引擎的 CLOCKWISE 约定，与此无关。
             let vx = v[0] * p.scale;
             let vy = v[1] * p.scale;
             let vz = v[2] * p.scale;
@@ -254,7 +255,20 @@ pub fn merge(
             }
             out.verts.push(baked);
         }
-        for i in &mesh.indices {
+        for tri in mesh.indices.chunks_exact(3) {
+            // **绕序交换**：外部建模的三角形在这里统一翻一次面。
+            // 依据是实机对照实验而非推理：主管线是 `cull BACK + front_face CLOCKWISE`，
+            // GLB 道具在开剔除时**一个像素都不出现**（截图差分 0.14/255、36 格 0 显著变化），
+            // 把 cull 改成 NONE 后所有立面立刻正确显示 —— 说明它的面被整体判成了背面。
+            // 引擎自己的程序化网格在 `meshgen.rs` 生成时就按该约定做过索引交换，
+            // `parse_glb` 没有；枪模之所以正常，是因为 main.rs 给它的轴修正里恰好带一次翻转。
+            // 交换放在这里而不是上传处或着色器里，因为这正是"外部内容进入引擎绕序约定"的边界。
+            out.indices.push(tri[0] + base);
+            out.indices.push(tri[2] + base);
+            out.indices.push(tri[1] + base);
+        }
+        // 长度不是 3 的倍数的尾部（理论上不该出现）原样搬走：宁可留错也不静默丢三角形
+        for i in mesh.indices.chunks_exact(3).remainder() {
             out.indices.push(*i + base);
         }
     }
@@ -398,7 +412,8 @@ mod tests {
         let p = PropPlacement::new(0, 0.0, 0.0, 0.0, 1.0, false);
         let g = merge(&set, &[p], |_, _| 0.0);
         assert_eq!(g.verts.len(), 3);
-        assert_eq!(g.indices, vec![0, 1, 2]);
+        // 顶点位置逐位相同，但索引被刻意换了一次面（适配引擎 CLOCKWISE 约定）
+        assert_eq!(g.indices, vec![0, 2, 1], "merge 必须交换三角形第二、三个索引");
         for (a, b) in g.verts.iter().zip(set.meshes[0].verts.iter()) {
             assert_eq!(a, b, "零位姿下烘焙结果必须与源网格逐位相同");
         }
@@ -446,8 +461,10 @@ mod tests {
         let g = merge(&set, &ps, |_, _| 0.0);
         assert_eq!(g.verts.len(), 9);
         assert_eq!(g.indices.len(), 9);
-        assert_eq!(&g.indices[3..6], &[3, 4, 5], "第二件的索引应重基到 3");
-        assert_eq!(&g.indices[6..9], &[6, 7, 8], "第三件的索引应重基到 6");
+        // 每件源索引 (0,1,2) 重基后再换面 → (b, b+2, b+1)
+        assert_eq!(&g.indices[0..3], &[0, 2, 1], "第一件应重基到 0 并换面");
+        assert_eq!(&g.indices[3..6], &[3, 5, 4], "第二件应重基到 3 并换面");
+        assert_eq!(&g.indices[6..9], &[6, 8, 7], "第三件应重基到 6 并换面");
         assert!(g.indices.iter().all(|&i| (i as usize) < g.verts.len()));
     }
 
