@@ -674,6 +674,14 @@ pub struct Renderer {
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// 第一人称枪模专用管线：与 `pipeline` 完全同源（同 shader 模块、同 layout、同
+    /// render pass），**只有 depth 状态不同**——本管线 `depth_test=OFF` 且不写深度。
+    ///
+    /// 为什么要单独一条：主管线历史上把 `depth_test_enable` 设成 false，整个世界几何
+    /// 因此没有遮挡（楼穿楼）。主管线改成 true 之后，枪模会被它前面的墙裁掉——而
+    /// 第一人称武器必须恒可见。所以把"不测深度"这个需求**收束到只服务枪模的一条管线上**，
+    /// 而不是让整个世界陪着它放弃遮挡。
+    gun_pipeline: vk::Pipeline,
     /// 可选网格着色器路径（VK_EXT_mesh_shader）：mesh 管线 + 独立 pipeline layout
     /// （同一 descriptor set layout + MESH_EXT push constant）。mesh_enabled=false 时
     /// 保持 null 且完全不参与记录阶段，传统顶点管线行为逐字节不变。
@@ -1309,6 +1317,7 @@ impl Renderer {
             render_pass: vk::RenderPass::null(),
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
+            gun_pipeline: vk::Pipeline::null(),
             mesh_enabled: false, // 2026-09-02: mesh shader 路径地面全黑 bug（A/B 实锤）；传统 vertex 路径优（画面细节+地面正常），222fps 持平
             device_name,
             mesh_shader: mesh_shader_loader,
@@ -2313,15 +2322,23 @@ impl Renderer {
             .rasterization_samples(self.msaa_samples);
 
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            // ⚠ 2026-09-03 已定位但**故意未改**：主管线关着深度测试，而 mesh 管线
-            // （`init_mesh_pipeline` 的 depth_stencil）是开的。也就是说当前唯一在跑的
-            // legacy 路径**没有深度遮挡**，楼与楼只靠绘制顺序，互相穿透。
-            // 不敢直接改 true：枪模正是依赖"主管线 depth_test=OFF"才恒可见
-            // （见 `record_command_buffer` 枪模段注释），开了测试后贴墙会被裁掉。
-            // 正确修法是给枪模单独一条 depth_test=false 的管线，再打开主管线；
-            // 已记入 AGENTS.md 待办。改完必须截图验收。
-            .depth_test_enable(false)
+            // 2026-09-04：主管线**打开深度测试**。此前它是 false，意味着当前唯一在跑的
+            // legacy 路径完全没有深度遮挡，楼与楼只按绘制顺序互相穿透（mesh 管线一直是
+            // 开的，所以这个差异只有在两条管线对比时才看得出来）。
+            // 枪模对"不测深度"的依赖已拆到下面的 `gun_depth_stencil`，因此这里可以安全打开。
+            // 保持 LESS_OR_EQUAL：项目里有大量刻意共面/零厚度的装饰件，用 LESS 会让它们
+            // 被自己先前写入的深度挡住而闪烁。
+            .depth_test_enable(true)
             .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
+
+        // 枪模专用管线：不测深度、**也不写深度**。不写是必要的——否则枪模会把自身深度
+        // 留在缓冲里，之后与它重叠的 HUD/粒子反而会被一把枪挡住。
+        let gun_depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(false)
+            .depth_write_enable(false)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
@@ -2387,6 +2404,29 @@ impl Renderer {
             self.device
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
                 .map_err(|(_, e)| format!("创建图形管线失败: {}", e))?
+                .remove(0)
+        };
+
+        // 枪模管线：除 depth 状态外与主管线逐字段相同。必须在销毁 shader module **之前**
+        // 创建——create_graphics_pipelines 是同步的，模块在返回后即可释放。
+        let gun_pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_state)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .depth_stencil_state(&gun_depth_stencil)
+            .dynamic_state(&dynamic_state)
+            .color_blend_state(&color_blend_state)
+            .layout(self.pipeline_layout)
+            .render_pass(self.render_pass)
+            .subpass(0);
+
+        self.gun_pipeline = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[gun_pipeline_create_info], None)
+                .map_err(|(_, e)| format!("创建枪模管线失败: {}", e))?
                 .remove(0)
         };
 
@@ -8213,16 +8253,17 @@ impl Renderer {
         }
         }
 
-        // ---- 第一人称枪模（程序化高模，2026-08-16）：主管线绘制，identity 实例
-        //      （槽 INSTANCE_COUNT = TERRAIN_INSTANCE_INDEX，inst.model = 单位阵 →
-        //      顶点即世界空间，main.rs 已烘焙 view⁻¹×锚点）。主管线 depth_test=OFF
-        //      → 枪模恒可见（不穿模），也不再需要 z 覆盖 hack。
+        // ---- 第一人称枪模（程序化高模，2026-08-16）：identity 实例（GUN_INSTANCE_INDEX
+        //      → inst.model = 单位阵，顶点即世界空间，main.rs 已烘焙 view⁻¹×锚点）。
+        //      走 `gun_pipeline`（depth_test=OFF 且不写深度）→ 枪模恒可见、也不会挡住 HUD。
+        //      2026-09-04：主管线开了深度测试，枪模若继续共用会被它前面的墙裁掉，
+        //      所以这里必须切到独立管线，而不是继续靠主管线的宽松 depth 状态。
         if self.gun_index_count > 0 && self.gun_vertex_count > 0 {
             unsafe {
                 self.device.cmd_bind_pipeline(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    self.pipeline,
+                    self.gun_pipeline,
                 );
                 self.device.cmd_bind_descriptor_sets(
                     command_buffer,
@@ -9204,6 +9245,9 @@ impl Drop for Renderer {
             // 释放管线
             if self.pipeline != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.pipeline, None);
+            }
+            if self.gun_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.gun_pipeline, None);
             }
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device.destroy_pipeline_layout(self.pipeline_layout, None);
