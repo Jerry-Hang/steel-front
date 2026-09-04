@@ -1,0 +1,1882 @@
+[
+ {
+  "src": "as_val.glb",
+  "out_name": "as_val.glb",
+  "ok": true,
+  "notes": [
+   "cleared 6 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 25296v/20420t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5123v/10246t",
+   "attempt 2 exported 14234v/8631t over the 12000v/24000t cap (export splits seamed verts), re-targeting 3887v/7774t"
+  ],
+  "src_verts": 32411,
+  "src_tris": 31225,
+  "src_objs": 60,
+  "joined": "60 obj -> 32411v/31225poly, 6 slots, 2 uv layers",
+  "clean": "loose=0 welded=16273 (32411v/31225f -> 16138v/31208f)",
+  "budget_before": [
+   16138,
+   31208,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 6
+   },
+   "luma_min": 0.0,
+   "luma_max": 0.679,
+   "luma_mean": 0.1242,
+   "distinct_colours_sampled": 236,
+   "unhit_verts": 1016,
+   "notes": [
+    "slot 0 image: texture",
+    "slot 1 image: texture",
+    "slot 2 image: texture",
+    "slot 3 image: texture",
+    "slot 4 image: texture",
+    "slot 5 image: texture"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   9.91154,
+   0.56431,
+   2.13063
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +0.98/+0.09, tip-thinness; parts named barrel/etc touch neither end)",
+  "src_up": "Y+ (blender Z+, spine tails 1.7311 below / 0.3995 above, conf 4.33)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\as_val.glb",
+  "decimate": "passes: 0.7442->3475v/6422t",
+  "decimate_ratio": 0.74425,
+  "scale_applied": 0.999883,
+  "budget_after": [
+   3475,
+   6420,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=11.20 (tip-thinness)",
+  "up_check": "blender Z+ uconf=3.36",
+  "final_verts_blender": 3475,
+  "final_tris_blender": 6420,
+  "extents_gltf_XYZ": [
+   0.05638,
+   0.21427,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.46,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11173,
+   "tris": 6420,
+   "idx": 19260,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.0564,
+    0.2143,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.028,
+    -0.107,
+    -0.5,
+    0.028,
+    0.107,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 277,
+   "color_type": "VEC4",
+   "luma_min": 0.0,
+   "luma_max": 0.6172,
+   "luma_mean": 0.1208,
+   "color_over_1": 0,
+   "distinct": 94,
+   "uv_range": [
+    -0.464,
+    0.0,
+    29.993,
+    1.0
+   ]
+  },
+  "shot": "gun_ext_as_val_side.png,gun_ext_as_val_threequarter.png"
+ },
+ {
+  "src": "ash_12.7__assault_rifle_shak_12.glb",
+  "out_name": "ash_12.7__assault_rifle_shak_12.glb",
+  "ok": true,
+  "notes": [
+   "cleared 1 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 15886v/15905t over the 12000v/24000t cap (export splits seamed verts), re-targeting 8158v/16316t",
+   "attempt 2 exported 15886v/15905t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5546v/11092t"
+  ],
+  "src_verts": 16641,
+  "src_tris": 15905,
+  "src_objs": 1,
+  "joined": "1 obj -> 16641v/15905poly, 1 slots, 5 uv layers",
+  "clean": "loose=0 welded=8581 (16641v/15905f -> 8060v/15905f)",
+  "budget_before": [
+   8060,
+   15905,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 1
+   },
+   "luma_min": 0.0265,
+   "luma_max": 0.8576,
+   "luma_mean": 0.1863,
+   "distinct_colours_sampled": 174,
+   "unhit_verts": 2341,
+   "notes": [
+    "slot 0 image: texture"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   0.63728,
+   8.51611,
+   2.55355
+  ],
+  "src_barrel": "Z+ (blender Y-, thinness ends +1.40/+0.57, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 1.5428 below / 1.0108 above, conf 1.53)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\ash_12.7__assault_rifle_shak_12.glb",
+  "decimate": "passes: 0.6055->4916v/9629t",
+  "decimate_ratio": 0.60552,
+  "scale_applied": 0.999992,
+  "budget_after": [
+   4916,
+   9629,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=2.45 (tip-thinness)",
+  "up_check": "blender Z+ uconf=1.53",
+  "final_verts_blender": 4916,
+  "final_tris_blender": 9629,
+  "extents_gltf_XYZ": [
+   0.07483,
+   0.29983,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.5,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11548,
+   "tris": 9629,
+   "idx": 28887,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.0748,
+    0.2998,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.037,
+    -0.15,
+    -0.5,
+    0.037,
+    0.15,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 149,
+   "color_type": "VEC4",
+   "luma_min": 0.0269,
+   "luma_max": 0.8576,
+   "luma_mean": 0.2004,
+   "color_over_1": 0,
+   "distinct": 73,
+   "uv_range": [
+    0.001,
+    0.001,
+    0.999,
+    0.995
+   ]
+  },
+  "shot": "gun_ext_ash_12.7__assault_rifle_shak_12_side.png,gun_ext_ash_12.7__assault_rifle_shak_12_threequarter.png"
+ },
+ {
+  "src": "komrad_12_saiga_12.glb",
+  "out_name": "komrad_12_saiga_12.glb",
+  "ok": true,
+  "notes": [
+   "cleared 8 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 19891v/21997t over the 12000v/24000t cap (export splits seamed verts), re-targeting 6515v/13031t",
+   "attempt 2 exported 12554v/10900t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5604v/11210t"
+  ],
+  "src_verts": 20202,
+  "src_tris": 21997,
+  "src_objs": 11,
+  "joined": "11 obj -> 20202v/21997poly, 8 slots, 1 uv layers",
+  "clean": "loose=0 welded=8633 (20202v/21997f -> 11569v/21997f)",
+  "budget_before": [
+   11569,
+   21997,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 8
+   },
+   "luma_min": 0.0,
+   "luma_max": 0.4793,
+   "luma_mean": 0.1223,
+   "distinct_colours_sampled": 64,
+   "unhit_verts": 2865,
+   "notes": [
+    "slot 0 image: texture",
+    "slot 1 image: texture",
+    "slot 2 image: texture",
+    "slot 3 image: texture",
+    "slot 4 image: texture",
+    "slot 5 image: texture",
+    "slot 6 image: texture",
+    "slot 7 image: texture"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   345.03857,
+   39.40948,
+   112.73296
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +74.84/+28.98, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 82.2011 below / 30.5318 above, conf 2.69)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\komrad_12_saiga_12.glb",
+  "decimate": "passes: 0.8406->4966v/9162t",
+  "decimate_ratio": 0.84055,
+  "scale_applied": 1.00008,
+  "budget_after": [
+   4966,
+   9162,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=2.58 (tip-thinness)",
+  "up_check": "blender Z+ uconf=4.33",
+  "final_verts_blender": 4966,
+  "final_tris_blender": 9162,
+  "extents_gltf_XYZ": [
+   0.11434,
+   0.32642,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.49,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11527,
+   "tris": 9162,
+   "idx": 27486,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1143,
+    0.3264,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.057,
+    -0.163,
+    -0.5,
+    0.057,
+    0.163,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 249,
+   "color_type": "VEC4",
+   "luma_min": 0.004,
+   "luma_max": 0.4341,
+   "luma_mean": 0.1157,
+   "color_over_1": 0,
+   "distinct": 36,
+   "uv_range": [
+    0.0,
+    0.0,
+    1.0,
+    1.0
+   ]
+  },
+  "shot": "gun_ext_komrad_12_saiga_12_side.png,gun_ext_komrad_12_saiga_12_threequarter.png"
+ },
+ {
+  "src": "low-poly_mp-443_grach.glb",
+  "out_name": "low-poly_mp-443_grach.glb",
+  "ok": true,
+  "notes": [
+   "dropped 1 stray object(s) [material-less]: Icosphere",
+   "deleted un-joined material-less object Icosphere (42 verts)",
+   "cleared 10 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y"
+  ],
+  "src_verts": 10656,
+  "src_tris": 3948,
+  "src_objs": 11,
+  "joined": "10 obj -> 10614v/3868poly, 10 slots, 1 uv layers",
+  "clean": "loose=0 welded=8541 (10614v/3868f -> 2073v/3868f)",
+  "budget_before": [
+   2073,
+   3868,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "const": 10
+   },
+   "luma_min": 0.0078,
+   "luma_max": 0.5993,
+   "luma_mean": 0.1151,
+   "distinct_colours_sampled": 9,
+   "unhit_verts": 486,
+   "notes": [
+    "slot 0 const: baseColorFactor (baseColorFactor from file)",
+    "slot 1 const: baseColorFactor (baseColorFactor from file)",
+    "slot 2 const: baseColorFactor (baseColorFactor from file)",
+    "slot 3 const: baseColorFactor (baseColorFactor from file)",
+    "slot 4 const: baseColorFactor (baseColorFactor from file)",
+    "slot 5 const: baseColorFactor (baseColorFactor from file)",
+    "slot 6 const: baseColorFactor (baseColorFactor from file)",
+    "slot 7 const: baseColorFactor (baseColorFactor from file)",
+    "slot 8 const: baseColorFactor (baseColorFactor from file)",
+    "slot 9 const: baseColorFactor (baseColorFactor from file)"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   437.5264,
+   75.83655,
+   315.87744
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +290.93/+81.19, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 256.6504 below / 59.2270 above, conf 4.33)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low-poly_mp-443_grach.glb",
+  "decimate": "under budget already (2073v/3868t)",
+  "decimate_ratio": 1.0,
+  "scale_applied": 0.002286,
+  "budget_after": [
+   2073,
+   3868,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=3.58 (tip-thinness)",
+  "up_check": "blender Z+ uconf=4.33",
+  "final_verts_blender": 2073,
+  "final_tris_blender": 3868,
+  "extents_gltf_XYZ": [
+   0.17333,
+   0.72196,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.28,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 6661,
+   "tris": 3868,
+   "idx": 11604,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1733,
+    0.722,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 1,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.087,
+    -0.361,
+    -0.5,
+    0.087,
+    0.361,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 125,
+   "color_type": "VEC4",
+   "luma_min": 0.008,
+   "luma_max": 0.5981,
+   "luma_mean": 0.1097,
+   "color_over_1": 0,
+   "distinct": 8,
+   "uv_range": [
+    -0.0,
+    -0.0,
+    1.0,
+    1.099
+   ]
+  },
+  "shot": "gun_ext_low-poly_mp-443_grach_side.png,gun_ext_low-poly_mp-443_grach_threequarter.png"
+ },
+ {
+  "src": "low-poly_osv-96.glb",
+  "out_name": "low-poly_osv-96.glb",
+  "ok": true,
+  "notes": [
+   "POSSIBLE DUPLICATED ASSEMBLY: Object_23/Object_35 (2658/2651 verts) - the merged mesh's length and up axes are then meaningless; check the screenshot and delete the extra copy",
+   "dropped 1 stray object(s) [material-less]: Icosphere",
+   "deleted un-joined material-less object Icosphere (42 verts)",
+   "source has NO UVs: TEXCOORD_0 written as a planar fallback",
+   "cleared 16 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y"
+  ],
+  "src_verts": 18290,
+  "src_tris": 6801,
+  "src_objs": 17,
+  "dup_warn": true,
+  "joined": "16 obj -> 18248v/6721poly, 16 slots, 0 uv layers",
+  "clean": "loose=0 welded=14699 (18248v/6721f -> 3549v/6717f)",
+  "budget_before": [
+   3549,
+   6717,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "const": 16
+   },
+   "luma_min": 0.0159,
+   "luma_max": 0.8,
+   "luma_mean": 0.1646,
+   "distinct_colours_sampled": 13,
+   "unhit_verts": 759,
+   "notes": [
+    "slot 0 const: baseColorFactor (baseColorFactor from file)",
+    "slot 1 const: baseColorFactor (baseColorFactor from file)",
+    "slot 2 const: baseColorFactor (baseColorFactor from file)",
+    "slot 3 const: baseColorFactor (baseColorFactor from file)",
+    "slot 4 const: baseColorFactor (baseColorFactor from file)",
+    "slot 5 const: baseColorFactor (baseColorFactor from file)",
+    "slot 6 const: baseColorFactor (baseColorFactor from file)",
+    "slot 7 const: baseColorFactor (baseColorFactor from file)",
+    "slot 8 const: baseColorFactor (baseColorFactor from file)",
+    "slot 9 const: baseColorFactor (baseColorFactor from file)",
+    "slot 10 const: baseColorFactor (baseColorFactor from file)",
+    "slot 11 const: baseColorFactor (baseColorFactor from file)",
+    "slot 12 const: baseColorFactor (baseColorFactor from file)",
+    "slot 13 const: baseColorFactor (baseColorFactor from file)",
+    "slot 14 const: baseColorFactor (baseColorFactor from file)",
+    "slot 15 const: baseColorFactor (baseColorFactor from file)"
+   ],
+   "uv_layer": "NONE"
+  },
+  "src_extents_blender": [
+   964.79272,
+   60.21423,
+   145.41006
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +77.12/+22.04, tip-thinness)",
+  "src_up": "Y- (blender Z-, spine tails 69.6757 below / 75.7344 above, conf 1.09)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low-poly_osv-96.glb",
+  "decimate": "under budget already (3549v/6717t)",
+  "decimate_ratio": 1.0,
+  "scale_applied": 0.001036,
+  "budget_after": [
+   3549,
+   6717,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=3.50 (tip-thinness)",
+  "up_check": "blender Z+ uconf=1.09",
+  "final_verts_blender": 3549,
+  "final_tris_blender": 6717,
+  "extents_gltf_XYZ": [
+   0.06241,
+   0.15072,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.46,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11127,
+   "tris": 6717,
+   "idx": 20151,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.0624,
+    0.1507,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 1,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.031,
+    -0.075,
+    -0.5,
+    0.031,
+    0.075,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 117,
+   "color_type": "VEC4",
+   "luma_min": 0.016,
+   "luma_max": 0.7991,
+   "luma_mean": 0.17,
+   "color_over_1": 0,
+   "distinct": 8,
+   "uv_range": [
+    -239.762,
+    -42.113,
+    242.635,
+    30.111
+   ]
+  },
+  "shot": "gun_ext_low-poly_osv-96_side.png,gun_ext_low-poly_osv-96_threequarter.png"
+ },
+ {
+  "src": "low-poly_rpk-16.glb",
+  "out_name": "low-poly_rpk-16.glb",
+  "ok": true,
+  "notes": [
+   "cleared 7 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 28226v/13253t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4591v/9183t",
+   "attempt 2 exported 21891v/7910t over the 12000v/24000t cap (export splits seamed verts), re-targeting 2264v/4530t"
+  ],
+  "src_verts": 37246,
+  "src_tris": 13253,
+  "src_objs": 34,
+  "joined": "34 obj -> 37246v/13253poly, 7 slots, 1 uv layers",
+  "clean": "loose=0 welded=30478 (37246v/13253f -> 6768v/13253f)",
+  "budget_before": [
+   6768,
+   13253,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "const": 7
+   },
+   "luma_min": 0.0036,
+   "luma_max": 0.7106,
+   "luma_mean": 0.1271,
+   "distinct_colours_sampled": 9,
+   "unhit_verts": 1655,
+   "notes": [
+    "slot 0 const: baseColorFactor (baseColorFactor from file)",
+    "slot 1 const: baseColorFactor (baseColorFactor from file)",
+    "slot 2 const: baseColorFactor (baseColorFactor from file)",
+    "slot 3 const: baseColorFactor (baseColorFactor from file)",
+    "slot 4 const: baseColorFactor (baseColorFactor from file)",
+    "slot 5 const: baseColorFactor (baseColorFactor from file)",
+    "slot 6 const: baseColorFactor (baseColorFactor from file)"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   0.84193,
+   0.16751,
+   0.46293
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +0.13/+0.02, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 0.4340 below / 0.0289 above, conf 15.0)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low-poly_rpk-16.glb",
+  "decimate": "passes: 0.4896->2032v/3873t; loose left=10",
+  "decimate_ratio": 0.48963,
+  "scale_applied": 0.999996,
+  "budget_after": [
+   2032,
+   3864,
+   10
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=5.99 (tip-thinness)",
+  "up_check": "blender Z+ uconf=15.00",
+  "final_verts_blender": 2042,
+  "final_tris_blender": 3864,
+  "extents_gltf_XYZ": [
+   0.19886,
+   0.55001,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.46,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11540,
+   "tris": 3864,
+   "idx": 11592,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1989,
+    0.55,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.099,
+    -0.275,
+    -0.5,
+    0.099,
+    0.275,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 298,
+   "color_type": "VEC4",
+   "luma_min": 0.0037,
+   "luma_max": 0.3515,
+   "luma_mean": 0.1097,
+   "color_over_1": 0,
+   "distinct": 23,
+   "uv_range": [
+    -0.024,
+    -0.021,
+    31.411,
+    1.0
+   ]
+  },
+  "shot": "gun_ext_low-poly_rpk-16_side.png,gun_ext_low-poly_rpk-16_threequarter.png"
+ },
+ {
+  "src": "low_poly_ak104.glb",
+  "out_name": "low_poly_ak104.glb",
+  "ok": true,
+  "notes": [
+   "cleared 13 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 17250v/13313t over the 12000v/24000t cap (export splits seamed verts), re-targeting 7513v/15026t",
+   "attempt 2 exported 17250v/13313t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4703v/9407t",
+   "attempt 3 exported 12687v/8062t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4003v/8007t"
+  ],
+  "src_verts": 25958,
+  "src_tris": 13354,
+  "src_objs": 34,
+  "joined": "34 obj -> 25958v/13354poly, 13 slots, 1 uv layers",
+  "clean": "loose=0 welded=19125 (25958v/13354f -> 6833v/13313f)",
+  "budget_before": [
+   6833,
+   13313,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "const": 13
+   },
+   "luma_min": 0.055,
+   "luma_max": 0.35,
+   "luma_mean": 0.1047,
+   "distinct_colours_sampled": 7,
+   "unhit_verts": 949,
+   "notes": [
+    "slot 0 const: baseColorFactor (baseColorFactor from file)",
+    "slot 1 const: baseColorFactor (baseColorFactor from file)",
+    "slot 2 const: baseColorFactor (baseColorFactor from file)",
+    "slot 3 const: baseColorFactor (baseColorFactor from file)",
+    "slot 4 const: baseColorFactor (baseColorFactor from file)",
+    "slot 5 const: baseColorFactor (baseColorFactor from file)",
+    "slot 6 const: baseColorFactor (baseColorFactor from file)",
+    "slot 7 const: baseColorFactor (baseColorFactor from file)",
+    "slot 8 const: baseColorFactor (baseColorFactor from file)",
+    "slot 9 const: baseColorFactor (baseColorFactor from file)",
+    "slot 10 const: baseColorFactor (baseColorFactor from file)",
+    "slot 11 const: baseColorFactor (baseColorFactor from file)",
+    "slot 12 const: baseColorFactor (baseColorFactor from file)"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   4.39362,
+   0.33418,
+   1.3189
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +0.45/+0.14, tip-thinness; parts named barrel/etc touch neither end)",
+  "src_up": "Y+ (blender Z+, spine tails 1.0167 below / 0.3022 above, conf 3.36)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low_poly_ak104.glb",
+  "decimate": "passes: 0.8446->3543v/6808t",
+  "decimate_ratio": 0.84456,
+  "scale_applied": 1.0,
+  "budget_after": [
+   3543,
+   6808,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=3.27 (tip-thinness)",
+  "up_check": "blender Z+ uconf=3.36",
+  "final_verts_blender": 3543,
+  "final_tris_blender": 6808,
+  "extents_gltf_XYZ": [
+   0.07606,
+   0.30018,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.49,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11726,
+   "tris": 6808,
+   "idx": 20424,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.0761,
+    0.3002,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 4,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.038,
+    -0.15,
+    -0.5,
+    0.038,
+    0.15,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 241,
+   "color_type": "VEC4",
+   "luma_min": 0.0545,
+   "luma_max": 0.3515,
+   "luma_mean": 0.1185,
+   "color_over_1": 0,
+   "distinct": 15,
+   "uv_range": [
+    -0.0,
+    -0.0,
+    1.0,
+    1.0
+   ]
+  },
+  "shot": "gun_ext_low_poly_ak104_side.png,gun_ext_low_poly_ak104_threequarter.png"
+ },
+ {
+  "src": "pkm.glb",
+  "out_name": "pkm.glb",
+  "ok": true,
+  "notes": [
+   "cleared 1 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 21350v/16822t over the 12000v/24000t cap (export splits seamed verts), re-targeting 6070v/12140t",
+   "attempt 2 exported 14731v/9573t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4450v/8900t"
+  ],
+  "src_verts": 21494,
+  "src_tris": 16822,
+  "src_objs": 1,
+  "joined": "1 obj -> 21494v/16822poly, 1 slots, 3 uv layers",
+  "clean": "loose=0 welded=12108 (21494v/16822f -> 9386v/16822f)",
+  "budget_before": [
+   9386,
+   16822,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 1
+   },
+   "luma_min": 0.0003,
+   "luma_max": 0.35,
+   "luma_mean": 0.115,
+   "distinct_colours_sampled": 88,
+   "unhit_verts": 2352,
+   "notes": [
+    "slot 0 image: texture"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   283.61743,
+   1101.12634,
+   371.93082
+  ],
+  "src_barrel": "Z- (blender Y+, thinness ends +34.19/+118.19, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 224.7082 below / 147.2226 above, conf 1.53)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pkm.glb",
+  "decimate": "passes: 0.7052->4078v/6750t",
+  "decimate_ratio": 0.7052,
+  "scale_applied": 1.000095,
+  "budget_after": [
+   4078,
+   6750,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=3.94 (tip-thinness)",
+  "up_check": "blender Z+ uconf=1.53",
+  "final_verts_blender": 4078,
+  "final_tris_blender": 6750,
+  "extents_gltf_XYZ": [
+   0.25757,
+   0.33753,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.46,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11147,
+   "tris": 6750,
+   "idx": 20250,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.2576,
+    0.3375,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.129,
+    -0.169,
+    -0.5,
+    0.129,
+    0.169,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 264,
+   "color_type": "VEC4",
+   "luma_min": 0.0003,
+   "luma_max": 0.3515,
+   "luma_mean": 0.0984,
+   "color_over_1": 0,
+   "distinct": 66,
+   "uv_range": [
+    0.003,
+    0.004,
+    0.998,
+    1.0
+   ]
+  },
+  "shot": "gun_ext_pkm_side.png,gun_ext_pkm_threequarter.png"
+ },
+ {
+  "src": "pkp.glb",
+  "out_name": "pkp.glb",
+  "ok": true,
+  "notes": [
+   "cleared 29 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 30566v/20788t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4240v/8480t",
+   "attempt 2 exported 15371v/7303t over the 12000v/24000t cap (export splits seamed verts), re-targeting 2979v/5958t"
+  ],
+  "src_verts": 93366,
+  "src_tris": 88072,
+  "src_objs": 86,
+  "joined": "86 obj -> 93366v/88072poly, 29 slots, 2 uv layers",
+  "clean": "loose=0 welded=48635 (93366v/88072f -> 44731v/88064f)",
+  "budget_before": [
+   44731,
+   88064,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "const": 29
+   },
+   "luma_min": 0.0,
+   "luma_max": 0.4775,
+   "luma_mean": 0.1858,
+   "distinct_colours_sampled": 18,
+   "unhit_verts": 10711,
+   "notes": [
+    "slot 0 const: baseColorFactor (baseColorFactor from file)",
+    "slot 1 const: baseColorFactor (baseColorFactor from file)",
+    "slot 2 const: baseColorFactor (baseColorFactor from file)",
+    "slot 3 const: baseColorFactor (baseColorFactor from file)",
+    "slot 4 const: baseColorFactor (baseColorFactor from file)",
+    "slot 5 const: baseColorFactor (baseColorFactor from file)",
+    "slot 6 const: baseColorFactor (baseColorFactor from file)",
+    "slot 7 const: baseColorFactor (baseColorFactor from file)",
+    "slot 8 const: baseColorFactor (baseColorFactor from file)",
+    "slot 9 const: baseColorFactor (baseColorFactor from file)",
+    "slot 10 const: baseColorFactor (baseColorFactor from file)",
+    "slot 11 const: baseColorFactor (baseColorFactor from file)",
+    "slot 12 const: baseColorFactor (baseColorFactor from file)",
+    "slot 13 const: baseColorFactor (baseColorFactor from file)",
+    "slot 14 const: baseColorFactor (baseColorFactor from file)",
+    "slot 15 const: baseColorFactor (baseColorFactor from file)",
+    "slot 16 const: baseColorFactor (baseColorFactor from file)",
+    "slot 17 const: baseColorFactor (baseColorFactor from file)",
+    "slot 18 const: baseColorFactor (baseColorFactor from file)",
+    "slot 19 const: baseColorFactor (baseColorFactor from file)",
+    "slot 20 const: baseColorFactor (baseColorFactor from file)",
+    "slot 21 const: baseColorFactor (baseColorFactor from file)",
+    "slot 22 const: baseColorFactor (baseColorFactor from file)",
+    "slot 23 const: baseColorFactor (baseColorFactor from file)",
+    "slot 24 const: baseColorFactor (baseColorFactor from file)",
+    "slot 25 const: baseColorFactor (baseColorFactor from file)",
+    "slot 26 const: baseColorFactor (baseColorFactor from file)",
+    "slot 27 const: baseColorFactor (baseColorFactor from file)",
+    "slot 28 const: baseColorFactor (baseColorFactor from file)"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   2.93455,
+   16.93665,
+   5.9875
+  ],
+  "src_barrel": "Z- (blender Y+, thinness ends +0.63/+1.74, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 4.1164 below / 1.8711 above, conf 2.2)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pkp.glb",
+  "decimate": "passes: 0.6877->2649v/5021t; loose left=16",
+  "decimate_ratio": 0.6877,
+  "scale_applied": 1.000131,
+  "budget_after": [
+   2649,
+   5002,
+   16
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=2.72 (tip-thinness)",
+  "up_check": "blender Z+ uconf=1.82",
+  "final_verts_blender": 2665,
+  "final_tris_blender": 5002,
+  "extents_gltf_XYZ": [
+   0.17271,
+   0.35469,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.45,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 10947,
+   "tris": 5002,
+   "idx": 15006,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1727,
+    0.3547,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.086,
+    -0.177,
+    -0.5,
+    0.086,
+    0.177,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 276,
+   "color_type": "VEC4",
+   "luma_min": 0.0,
+   "luma_max": 0.4763,
+   "luma_mean": 0.1031,
+   "color_over_1": 0,
+   "distinct": 37,
+   "uv_range": [
+    -0.013,
+    -0.004,
+    1.003,
+    1.0
+   ]
+  },
+  "shot": "gun_ext_pkp_side.png,gun_ext_pkp_threequarter.png"
+ },
+ {
+  "src": "pp-19-01_vityaz.glb",
+  "out_name": "pp-19-01_vityaz.glb",
+  "ok": true,
+  "notes": [
+   "cleared 9 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 30777v/20511t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4210v/8421t",
+   "attempt 2 exported 15198v/6995t over the 12000v/24000t cap (export splits seamed verts), re-targeting 2991v/5984t"
+  ],
+  "src_verts": 69704,
+  "src_tris": 61560,
+  "src_objs": 17,
+  "joined": "17 obj -> 69704v/61560poly, 9 slots, 3 uv layers",
+  "clean": "loose=0 welded=38058 (69704v/61560f -> 31646v/61470f)",
+  "budget_before": [
+   31646,
+   61470,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 9
+   },
+   "luma_min": 0.0,
+   "luma_max": 0.6028,
+   "luma_mean": 0.2171,
+   "distinct_colours_sampled": 135,
+   "unhit_verts": 5513,
+   "notes": [
+    "slot 0 image: texture",
+    "slot 1 image: texture",
+    "slot 2 image: texture",
+    "slot 3 image: texture",
+    "slot 4 image: texture",
+    "slot 5 image: texture",
+    "slot 6 image: texture",
+    "slot 7 image: texture",
+    "slot 8 image: texture"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   16.17582,
+   148.13571,
+   77.592
+  ],
+  "src_barrel": "Z- (blender Y+, thinness ends +18.27/+24.87, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 59.8105 below / 17.7815 above, conf 3.36)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pp-19-01_vityaz.glb",
+  "decimate": "passes: 0.6822->2696v/4772t; loose left=31",
+  "decimate_ratio": 0.68224,
+  "scale_applied": 1.000031,
+  "budget_after": [
+   2696,
+   4771,
+   31
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=1.40 (tip-thinness)",
+  "up_check": "blender Z+ uconf=3.36",
+  "final_verts_blender": 2727,
+  "final_tris_blender": 4771,
+  "extents_gltf_XYZ": [
+   0.10741,
+   0.52232,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.44,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 10725,
+   "tris": 4771,
+   "idx": 14313,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1074,
+    0.5223,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.054,
+    -0.261,
+    -0.5,
+    0.054,
+    0.261,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 294,
+   "color_type": "VEC4",
+   "luma_min": 0.0,
+   "luma_max": 0.6028,
+   "luma_mean": 0.1393,
+   "color_over_1": 0,
+   "distinct": 79,
+   "uv_range": [
+    0.0,
+    -0.0,
+    1.0,
+    1.0
+   ]
+  },
+  "shot": "gun_ext_pp-19-01_vityaz_side.png,gun_ext_pp-19-01_vityaz_threequarter.png"
+ },
+ {
+  "src": "pp-19_bizon.glb",
+  "out_name": "pp-19_bizon.glb",
+  "ok": true,
+  "notes": [
+   "cleared 5 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y"
+  ],
+  "src_verts": 19123,
+  "src_tris": 11195,
+  "src_objs": 5,
+  "joined": "5 obj -> 19123v/11195poly, 5 slots, 1 uv layers",
+  "clean": "loose=0 welded=12946 (19123v/11195f -> 6177v/11195f)",
+  "budget_before": [
+   6177,
+   11195,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 5
+   },
+   "luma_min": 0.0,
+   "luma_max": 0.35,
+   "luma_mean": 0.0435,
+   "distinct_colours_sampled": 66,
+   "unhit_verts": 538,
+   "notes": [
+    "slot 0 image: texture",
+    "slot 1 image: texture",
+    "slot 2 image: texture",
+    "slot 3 image: texture",
+    "slot 4 image: texture"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   13.7694,
+   1.70909,
+   4.8906
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +1.91/+1.30, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 3.7698 below / 1.1208 above, conf 3.36)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pp-19_bizon.glb",
+  "decimate": "under budget already (6177v/11195t)",
+  "decimate_ratio": 1.0,
+  "scale_applied": 0.072625,
+  "budget_after": [
+   6177,
+   11195,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=1.47 (tip-thinness)",
+  "up_check": "blender Z+ uconf=3.36",
+  "final_verts_blender": 6177,
+  "final_tris_blender": 11195,
+  "extents_gltf_XYZ": [
+   0.12412,
+   0.35518,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.51,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11685,
+   "tris": 11195,
+   "idx": 33585,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1241,
+    0.3552,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 1,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.062,
+    -0.178,
+    -0.5,
+    0.062,
+    0.178,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 272,
+   "color_type": "VEC4",
+   "luma_min": 0.0,
+   "luma_max": 0.3515,
+   "luma_mean": 0.0425,
+   "color_over_1": 0,
+   "distinct": 23,
+   "uv_range": [
+    0.001,
+    0.001,
+    0.998,
+    0.998
+   ]
+  },
+  "shot": "gun_ext_pp-19_bizon_side.png,gun_ext_pp-19_bizon_threequarter.png"
+ },
+ {
+  "src": "sv98.glb",
+  "out_name": "sv98.glb",
+  "ok": true,
+  "notes": [
+   "material 4: vertex colour '' missing/mis-sized -> baseColorFactor",
+   "material 5: vertex colour '' missing/mis-sized -> baseColorFactor",
+   "cleared 20 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 34507v/20411t over the 12000v/24000t cap (export splits seamed verts), re-targeting 3755v/7511t",
+   "attempt 2 exported 13687v/6315t over the 12000v/24000t cap (export splits seamed verts), re-targeting 2962v/5926t"
+  ],
+  "src_verts": 68879,
+  "src_tris": 64643,
+  "src_objs": 30,
+  "joined": "30 obj -> 68879v/64643poly, 20 slots, 6 uv layers",
+  "clean": "loose=0 welded=35461 (68879v/64643f -> 33418v/64597f)",
+  "budget_before": [
+   33418,
+   64597,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 15,
+    "vcol": 2,
+    "const": 3
+   },
+   "luma_min": 0.0,
+   "luma_max": 1.0,
+   "luma_mean": 0.0922,
+   "distinct_colours_sampled": 197,
+   "unhit_verts": 2054,
+   "notes": [
+    "slot 0 image: texture",
+    "slot 1 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 2 image: approx: texture behind MIX,TEX_IMAGE,VERTEX_COLOR",
+    "slot 3 image: approx: texture behind MIX,TEX_IMAGE",
+    "material 4: vertex colour '' missing/mis-sized -> baseColorFactor",
+    "slot 4 vcol: vertex colour node",
+    "material 5: vertex colour '' missing/mis-sized -> baseColorFactor",
+    "slot 5 vcol: vertex colour node",
+    "slot 6 const: baseColorFactor (baseColorFactor from file)",
+    "slot 7 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 8 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 9 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 10 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 11 const: baseColorFactor (baseColorFactor from file)",
+    "slot 12 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 13 const: baseColorFactor (baseColorFactor from file)",
+    "slot 14 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 15 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 16 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 17 image: approx: texture behind MIX,TEX_IMAGE",
+    "slot 18 image: approx: texture behind MIX,TEX_IMAGE,VERTEX_COLOR",
+    "slot 19 image: approx: texture behind MIX,TEX_IMAGE"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   0.12857,
+   1.1465,
+   0.24554
+  ],
+  "src_barrel": "Z- (blender Y+, thinness ends +0.06/+0.15, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 0.1484 below / 0.0972 above, conf 1.53)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\sv98.glb",
+  "decimate": "passes: 0.7778->2624v/4911t; loose left=43",
+  "decimate_ratio": 0.77785,
+  "scale_applied": 1.0,
+  "budget_after": [
+   2624,
+   4906,
+   43
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=2.49 (tip-thinness)",
+  "up_check": "blender Z+ uconf=1.29",
+  "final_verts_blender": 2667,
+  "final_tris_blender": 4906,
+  "extents_gltf_XYZ": [
+   0.11389,
+   0.21313,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.44,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 10676,
+   "tris": 4906,
+   "idx": 14718,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1139,
+    0.2131,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.057,
+    -0.107,
+    -0.5,
+    0.057,
+    0.107,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 292,
+   "color_type": "VEC4",
+   "luma_min": 0.0,
+   "luma_max": 1.0,
+   "luma_mean": 0.095,
+   "color_over_1": 0,
+   "distinct": 94,
+   "uv_range": [
+    -0.0,
+    -0.0,
+    2.998,
+    0.998
+   ]
+  },
+  "shot": "gun_ext_sv98_side.png,gun_ext_sv98_threequarter.png"
+ },
+ {
+  "src": "svd_63_-_dragunov.glb",
+  "out_name": "svd_63_-_dragunov.glb",
+  "ok": true,
+  "notes": [
+   "POSSIBLE DUPLICATED ASSEMBLY: Dragunov 2_Unwrapped_0/Dragunov_Unwrapped_0 (24337/24379 verts) - the merged mesh's length and up axes are then meaningless; check the screenshot and delete the extra copy",
+   "dropped 1 stray object(s) [material-less + flat backdrop]: Floor_Floor_0",
+   "cleared 3 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 26166v/20354t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4952v/9905t",
+   "attempt 2 exported 13166v/8067t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4062v/8125t"
+  ],
+  "src_verts": 67561,
+  "src_tris": 81128,
+  "src_objs": 13,
+  "backdrops": [
+   "Floor_Floor_0 ext=[0.0, 1.702, 1.702] v=4"
+  ],
+  "dup_warn": true,
+  "joined": "12 obj -> 67557v/81126poly, 3 slots, 1 uv layers",
+  "clean": "loose=0 welded=25473 (67557v/81126f -> 42084v/81118f)",
+  "budget_before": [
+   42084,
+   81118,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 2,
+    "const": 1
+   },
+   "luma_min": 0.0,
+   "luma_max": 0.4793,
+   "luma_mean": 0.1233,
+   "distinct_colours_sampled": 226,
+   "unhit_verts": 1166,
+   "notes": [
+    "slot 0 image: texture",
+    "slot 1 image: texture",
+    "slot 2 const: baseColorFactor (baseColorFactor from file)"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   1.4166,
+   0.58386,
+   0.25853
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +0.44/+0.35, tip-thinness)",
+  "src_up": "Z- (blender Y+, spine tails 0.5474 below / 0.0365 above, conf 15.0)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\svd_63_-_dragunov.glb",
+  "decimate": "passes: 0.7722->3666v/6228t; loose left=14",
+  "decimate_ratio": 0.77221,
+  "scale_applied": 1.0,
+  "budget_after": [
+   3666,
+   6214,
+   14
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=1.16 (tip-thinness)",
+  "up_check": "blender Z+ uconf=15.00",
+  "final_verts_blender": 3680,
+  "final_tris_blender": 6214,
+  "extents_gltf_XYZ": [
+   0.18245,
+   0.41255,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.44,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 10545,
+   "tris": 6214,
+   "idx": 18642,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.1825,
+    0.4126,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.091,
+    -0.206,
+    -0.5,
+    0.091,
+    0.206,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 298,
+   "color_type": "VEC4",
+   "luma_min": 0.0006,
+   "luma_max": 0.4125,
+   "luma_mean": 0.1294,
+   "color_over_1": 0,
+   "distinct": 84,
+   "uv_range": [
+    0.0,
+    0.001,
+    2.0,
+    0.999
+   ]
+  },
+  "shot": "gun_ext_svd_63_-_dragunov_side.png,gun_ext_svd_63_-_dragunov_threequarter.png"
+ },
+ {
+  "src": "vss_vintorez.glb",
+  "out_name": "vss_vintorez.glb",
+  "ok": true,
+  "notes": [
+   "cleared 1 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
+   "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
+   "attempt 1 exported 17743v/18019t over the 12000v/24000t cap (export splits seamed verts), re-targeting 7304v/14608t",
+   "attempt 2 exported 13701v/12395t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5757v/11514t"
+  ],
+  "src_verts": 16964,
+  "src_tris": 18019,
+  "src_objs": 2,
+  "joined": "2 obj -> 16964v/18019poly, 1 slots, 1 uv layers",
+  "clean": "loose=0 welded=7621 (16964v/18019f -> 9343v/18019f)",
+  "budget_before": [
+   9343,
+   18019,
+   0
+  ],
+  "colour": {
+   "kinds": {
+    "image": 1
+   },
+   "luma_min": 0.0,
+   "luma_max": 0.35,
+   "luma_mean": 0.1245,
+   "distinct_colours_sampled": 90,
+   "unhit_verts": 2750,
+   "notes": [
+    "slot 0 image: texture"
+   ],
+   "uv_layer": "UVMap"
+  },
+  "src_extents_blender": [
+   8.17441,
+   0.50182,
+   1.43511
+  ],
+  "src_barrel": "X- (blender X-, thinness ends +1.02/+0.47, tip-thinness)",
+  "src_up": "Y+ (blender Z+, spine tails 1.3454 below / 0.0897 above, conf 15.0)",
+  "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\vss_vintorez.glb",
+  "decimate": "passes: 0.7799->5108v/9666t",
+  "decimate_ratio": 0.77989,
+  "scale_applied": 1.000064,
+  "budget_after": [
+   5108,
+   9666,
+   0
+  ],
+  "barrel": "Z+",
+  "up": "Y+",
+  "barrel_check": "blender Y- conf=2.19 (tip-thinness)",
+  "up_check": "blender Z+ uconf=15.00",
+  "final_verts_blender": 5108,
+  "final_tris_blender": 9666,
+  "extents_gltf_XYZ": [
+   0.06145,
+   0.17558,
+   1.0
+  ],
+  "not_canonical": false,
+  "glb": {
+   "sizeMB": 0.51,
+   "mesh": 1,
+   "prims": 1,
+   "node": 1,
+   "verts": 11949,
+   "tris": 9666,
+   "idx": 28998,
+   "attrs": [
+    "COLOR_0",
+    "NORMAL",
+    "POSITION",
+    "TEXCOORD_0"
+   ],
+   "stride": false,
+   "xform": false,
+   "tex": 0,
+   "img": 0,
+   "mat": 0,
+   "ext": [
+    0.0615,
+    0.1756,
+    1.0
+   ],
+   "color_type": "VEC4",
+   "color_ctype": 5123,
+   "color_norm": true,
+   "ext_used": []
+  },
+  "export_attempts": 3,
+  "verify": {
+   "pos_nan": 0,
+   "pos_range": [
+    -0.031,
+    -0.088,
+    -0.5,
+    0.031,
+    0.088,
+    0.5
+   ],
+   "off_centre": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "normal_len_min": 1.0,
+   "normal_len_max": 1.0,
+   "normal_distinct": 247,
+   "color_type": "VEC4",
+   "luma_min": 0.0,
+   "luma_max": 0.3515,
+   "luma_mean": 0.1083,
+   "color_over_1": 0,
+   "distinct": 63,
+   "uv_range": [
+    0.001,
+    0.001,
+    1.997,
+    0.997
+   ]
+  },
+  "shot": "gun_ext_vss_vintorez_side.png,gun_ext_vss_vintorez_threequarter.png"
+ }
+]
