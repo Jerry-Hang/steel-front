@@ -480,6 +480,11 @@ const PROP_INSTANCE_INDEX: u32 = GUN_INSTANCE_INDEX + 1;
 /// 没有任何日志或 VUID 提示（2026-09-04 加道具槽时正好踩中，靠"红屏探针 + 换槽对照"才定位）。
 /// 现在由最高槽位反推，结构上不可能再漏。
 const INSTANCE_BUFFER_ELEMS: u64 = PROP_INSTANCE_INDEX as u64 + 1;
+/// 道具分桶边长（米）。全城约 ±175m ⇒ 约 9×9 格。
+/// 取 40m 是实测折中：桶再小则 draw call 数上升（每桶一次 cmd_draw_indexed 与
+/// 其绑定开销），再大则一桶里必然跨视锥边界、剔除变粗。改这一个数就能调，
+/// 不影响正确性（包围球按桶内顶点真实范围算）。
+const PROP_BIN_CELL_M: f32 = 40.0;
 const _: () = assert!(
     INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTANCE_BUFFER_ELEMS > 0,
     "实例 buffer 必须覆盖所有已知槽位"
@@ -901,6 +906,12 @@ pub struct Renderer {
     prop_index_count: u32,
     prop_capacity_verts: u32,
     prop_capacity_idx: u32,
+    /// 道具的空间分桶（每桶一段连续索引 + 包围球）。见 `engine::props::merge_binned`。
+    /// 桶共用同一个 VBO/IBO，剔除只决定发不发某一段索引，不需要重传顶点。
+    prop_bins: Vec<crate::engine::props::PropBin>,
+    /// 本帧视锥 6 平面（法线朝外）。由 `render()` 在写 CameraUniform 的同一处填，
+    /// 那时 `record_command_buffer()` 还没被调用，所以道具分桶剔除拿到的一定是本帧的。
+    frame_frustum: [[f32; 4]; 6],
     /// 上一帧渲染统计（供 HUD / 日志）
     last_near_count: u32,
     last_far_count: u32,
@@ -1507,6 +1518,8 @@ impl Renderer {
             prop_index_count: 0,
             prop_capacity_verts: 0,
             prop_capacity_idx: 0,
+            prop_bins: Vec::new(),
+            frame_frustum: [[0.0f32; 4]; 6],
             last_near_count: 0,
             last_far_count: 0,
             last_terrain_lod_name: "high",
@@ -4743,10 +4756,14 @@ impl Renderer {
         set: &crate::engine::props::PropSet,
         placements: &[crate::engine::props::PropPlacement],
     ) {
-        let merged = crate::engine::props::merge(set, placements, |x, z| terrain_height_at(x, z));
+        let merged =
+            crate::engine::props::merge_binned(set, placements, PROP_BIN_CELL_M, |x, z| {
+                terrain_height_at(x, z)
+            });
         self.prop_vertex_count = 0;
         self.prop_index_count = 0;
-        if merged.is_empty() || merged.indices.is_empty() {
+        self.prop_bins.clear();
+        if merged.verts.is_empty() || merged.indices.is_empty() {
             log::info!("props: 无摆放几何（套件 {} 件 / 摆放 {} 处）", set.len(), placements.len());
             return;
         }
@@ -4880,9 +4897,11 @@ impl Renderer {
         }
         self.prop_vertex_count = need_v;
         self.prop_index_count = need_i;
+        // 桶数量级只有几十，clone 成本可忽略；存下来供 record_command_buffer 逐桶剔除
+        self.prop_bins = merged.bins.clone();
         log::info!(
-            "props: 上传完成 顶点 {} / 三角 {} / 摆放 {} 处，包围盒 x∈[{:.1},{:.1}] y∈[{:.1},{:.1}] z∈[{:.1},{:.1}]",
-            need_v, need_i / 3, placements.len(),
+            "props: 上传完成 顶点 {} / 三角 {} / 摆放 {} 处 / 分桶 {} 个（cell={}m），包围盒 x∈[{:.1},{:.1}] y∈[{:.1},{:.1}] z∈[{:.1},{:.1}]",
+            need_v, need_i / 3, placements.len(), self.prop_bins.len(), PROP_BIN_CELL_M,
             merged.min[0], merged.max[0], merged.min[1], merged.max[1],
             merged.min[2], merged.max[2]
         );
@@ -8435,11 +8454,12 @@ impl Renderer {
         }
         }
 
-        // ---- GLB 道具合并网格：一次 draw call 画完整城道具。
+        // ---- GLB 道具：按空间分桶逐桶视锥剔除后绘制。
         //      走主管线（**已开深度测试**），所以道具之间、道具与地形之间遮挡正确。
         //      identity 实例取 PROP_INSTANCE_INDEX：位姿已在 CPU 烘进顶点，GPU 侧不需要
         //      逐实例矩阵；该槽 tint.w=Shape::Authored.tag() 让片元跳过程序化立面加工。
-        if self.prop_index_count > 0 && self.prop_vertex_count > 0 {
+        //      分桶动机与实测收益见 `engine::props::merge_binned`（道具曾占整帧约 40%）。
+        if self.prop_index_count > 0 && self.prop_vertex_count > 0 && !self.prop_bins.is_empty() {
             unsafe {
                 self.device.cmd_bind_pipeline(
                     command_buffer,
@@ -8463,14 +8483,23 @@ impl Renderer {
                     0,
                     vk::IndexType::UINT32,
                 );
-                self.device.cmd_draw_indexed(
-                    command_buffer,
-                    self.prop_index_count,
-                    1,
-                    0,
-                    0,
-                    PROP_INSTANCE_INDEX,
-                );
+                // 逐桶球-视锥测试，只发可见桶的那段索引。所有桶共用同一份 VBO/IBO 与
+                // 同一个 identity 实例，所以这里只换 firstIndex/indexCount，
+                // 不需要任何重新绑定或重传。
+                // margin 2m：桶边界上的建筑不该在转视角时逐帧抖动进出。
+                for bin in &self.prop_bins {
+                    if !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0) {
+                        continue;
+                    }
+                    self.device.cmd_draw_indexed(
+                        command_buffer,
+                        bin.index_count,
+                        1,
+                        bin.first_index,
+                        0,
+                        PROP_INSTANCE_INDEX,
+                    );
+                }
             }
         }
 
@@ -9195,6 +9224,11 @@ impl Renderer {
         } else {
             ([[0.0f32; 4]; 6], 0.0)
         };
+        // 道具分桶剔除用的平面：**必须与 mesh 路径无关地存下来**。
+        // 上面那个三元只在 mesh 路径算平面，而道具走的是传统顶点管线、在 mesh_enabled
+        // 为 false 时也要能剔除；全零平面会让 bin_visible 恒真（退化为不剔除，安全但无效），
+        // 所以这里无条件算一次。extract_frustum_planes 是纯算术，成本可忽略。
+        self.frame_frustum = Self::extract_frustum_planes(view, proj);
         let ubo = CameraUniform {
             view,
             proj,
