@@ -1124,8 +1124,45 @@ impl GameApp {
         // 导入枪模优先（按当前武器 key 缓存；检视与第一人称共用）
         let gkey = self.game.active_weapon_key().to_string();
         let load = |k: &String| Self::load_gun_glb(k);
-        let entry = self.gun_glbs.entry(gkey.clone()).or_insert_with(|| load(&gkey));
-        if let Some((verts, indices)) = entry.clone() {
+        // 只在某把枪**首次**入缓存时打一次几何探针，避免每帧刷屏。
+        // 用途：把"枪到底朝屏幕深处还是朝右"从肉眼判断变成一个数——把枪身局部包围盒
+        // 的顶点经真实 fp_gun_matrix 变到世界后，分别投影到相机前向与相机右向，
+        // 跨度大的那个才是枪身实际躺着的方向。肉眼已三次给出互相矛盾的结论。
+        let first_load = !self.gun_glbs.contains_key(&gkey);
+        // 先 clone 出来结束对 self.gun_glbs 的可变借用，否则下面没法再 &self 取矩阵/相机
+        let loaded = self
+            .gun_glbs
+            .entry(gkey.clone())
+            .or_insert_with(|| load(&gkey))
+            .clone();
+        if first_load {
+            if let Some((verts, _)) = &loaded {
+                if verts.len() > 8 {
+                    let m = self.fp_gun_matrix();
+                    let axes = [("前向", self.camera.forward()), ("右向", self.camera.right())];
+                    let mut spans = [0.0f32; 2];
+                    for (ai, (_, axis)) in axes.iter().enumerate() {
+                        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                        for v in verts.iter() {
+                            let w = m.transform_point3(glam::Vec3::from_slice(&v.pos));
+                            let d = w.dot(*axis);
+                            lo = lo.min(d);
+                            hi = hi.max(d);
+                        }
+                        spans[ai] = hi - lo;
+                    }
+                    log::info!(
+                        "gun-orient: {gkey} 世界跨度 前向={:.3}m 右向={:.3}m → {}",
+                        spans[0],
+                        spans[1],
+                        if spans[0] >= spans[1] { "沿视线（正确）" } else { "横向（朝向错误）" }
+                    );
+                }
+            }
+        }
+        // 下面统一用已取出的 `loaded`，不再持有对 self.gun_glbs 的借用
+        // （函数体后面还要读 self.inspect_weapon / self.ads_blend 等字段）。
+        if let Some((verts, indices)) = loaded {
             if self.inspect_weapon.is_some() {
                 // 居中到 (0, 1.0, 0)
                 let mut mn = [f32::MAX; 3];
