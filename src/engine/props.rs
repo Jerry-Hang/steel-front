@@ -275,6 +275,136 @@ pub fn merge(
     out
 }
 
+/// 一个空间桶：合并几何里连续的一段索引，加一个用于视锥测试的包围球。
+///
+/// 索引重基到**全局合并顶点空间**，所以所有桶共用同一个 VBO/IBO——剔除只决定发不发
+/// 这一段索引，不需要重新上传任何顶点数据。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropBin {
+    pub first_index: u32,
+    pub index_count: u32,
+    pub center: [f32; 3],
+    pub radius: f32,
+}
+
+/// 分桶后的合并几何。
+#[derive(Debug, Default, Clone)]
+pub struct BinnedGeometry {
+    pub verts: Vec<[f32; 11]>,
+    pub indices: Vec<u32>,
+    pub bins: Vec<PropBin>,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+/// 按格点分桶的合并，为"逐桶视锥剔除"准备数据。
+///
+/// 为什么要它：`RV3D_NO_PROPS` 的 A/B 实测显示 80 万顶点 / 36 万三角一次全量提交
+/// 吃掉约 40% 帧时间（fps 187 → 112），而 `cull_us` 只有 10µs、`wait_fence_us` 高达
+/// 5.9ms —— 是 GPU 受限。唯一解法是**少提交三角形**，即分桶后只画视锥内那几桶。
+///
+/// `cell` 是权衡旋钮：桶大则 draw call 少但剔除粗，桶小反之。全城约 ±175m，取 40m
+/// 得到约 9×9 格。
+///
+/// 分桶键用**摆放点**而非逐顶点：一件道具可能跨格，跨格道具整体归入摆放点所在桶即可
+/// （包围球覆盖其真实范围），这样每件只进一个桶、索引保持连续。
+pub fn merge_binned(
+    set: &PropSet,
+    placements: &[PropPlacement],
+    cell: f32,
+    ground: impl Fn(f32, f32) -> f32,
+) -> BinnedGeometry {
+    let mut out = BinnedGeometry::default();
+    if cell <= 0.0 || placements.is_empty() {
+        return out;
+    }
+    // BTreeMap 保证桶的遍历顺序确定：同一输入必须产出同一份几何，否则每次重载地图
+    // 二进制都在变，缓存与截图对比都会失效。
+    let mut groups: std::collections::BTreeMap<(i64, i64), Vec<usize>> = Default::default();
+    for (i, p) in placements.iter().enumerate() {
+        if set.get(p.mesh).is_none() {
+            continue; // 下标越界：跳过而不是 panic，缺资产只该让画面少一件东西
+        }
+        groups
+            .entry(((p.x / cell).floor() as i64, (p.z / cell).floor() as i64))
+            .or_default()
+            .push(i);
+    }
+
+    for (_key, members) in &groups {
+        let first_index = out.indices.len() as u32;
+        let mut bin_min = [f32::MAX; 3];
+        let mut bin_max = [f32::MIN; 3];
+        for &mi in members {
+            let p = placements[mi];
+            let mesh = match set.get(p.mesh) {
+                Some(m) => m,
+                None => continue,
+            };
+            let base = out.verts.len() as u32;
+            let (sy, cy) = (p.yaw.sin(), p.yaw.cos());
+            let gy = ground(p.x, p.z) + p.y;
+            for v in &mesh.verts {
+                // 绕 +Y 旋转：(x, z) → (x·cosθ + z·sinθ, -x·sinθ + z·cosθ)
+                let vx = v[0] * p.scale;
+                let vy = v[1] * p.scale;
+                let vz = v[2] * p.scale;
+                let px = p.x + vx * cy + vz * sy;
+                let pz = p.z - vx * sy + vz * cy;
+                let py = gy + vy;
+                let nx = v[3] * cy + v[5] * sy;
+                let nz = -v[3] * sy + v[5] * cy;
+                let baked = [px, py, pz, nx, v[4], nz, v[6], v[7], v[8], v[9], v[10]];
+                for k in 0..3 {
+                    bin_min[k] = bin_min[k].min(baked[k]);
+                    bin_max[k] = bin_max[k].max(baked[k]);
+                    out.min[k] = out.min[k].min(baked[k]);
+                    out.max[k] = out.max[k].max(baked[k]);
+                }
+                out.verts.push(baked);
+            }
+            // 与 merge() 同一条绕序约定：外部建模进来要换一次面
+            for tri in mesh.indices.chunks_exact(3) {
+                out.indices.push(tri[0] + base);
+                out.indices.push(tri[2] + base);
+                out.indices.push(tri[1] + base);
+            }
+            for i in mesh.indices.chunks_exact(3).remainder() {
+                out.indices.push(*i + base);
+            }
+        }
+        let count = out.indices.len() as u32 - first_index;
+        if count == 0 {
+            continue;
+        }
+        let center = [
+            (bin_min[0] + bin_max[0]) * 0.5,
+            (bin_min[1] + bin_max[1]) * 0.5,
+            (bin_min[2] + bin_max[2]) * 0.5,
+        ];
+        let radius = bin_max
+            .iter()
+            .zip(bin_min.iter())
+            .map(|(a, b)| (a - b) * 0.5)
+            .fold(0.0f32, |acc, c| acc + c * c)
+            .sqrt();
+        out.bins.push(PropBin { first_index, index_count: count, center, radius });
+    }
+    out
+}
+
+/// 桶是否可能在视锥内（球-平面测试）。
+///
+/// 平面法线朝外（与 `renderer.rs::extract_frustum_planes` 同约定），故中心到某平面的
+/// 有符号距离小于 `-(radius + margin)` 时整桶在该平面背面，可安全跳过。`margin` 留
+/// 余量，避免桶在边界上逐帧抖动导致剔除集合不稳定。
+pub fn bin_visible(bin: &PropBin, planes: &[[f32; 4]; 6], margin: f32) -> bool {
+    planes.iter().all(|pl| {
+        let d = pl[0] * bin.center[0] + pl[1] * bin.center[1] + pl[2] * bin.center[2] + pl[3];
+        d + bin.radius + margin >= 0.0
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +412,102 @@ mod tests {
 
     fn kit() -> Option<PropSet> {
         PropSet::load_dir("assets/props").ok()
+    }
+
+    /// 造一个只含单格三角形的小套件，位置可控，便于精确核对分桶。
+    fn one_tri_set() -> PropSet {
+        PropSet {
+            meshes: vec![PropMesh {
+                name: "tri".into(),
+                verts: vec![
+                    [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+                    [0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+                    [0.0, 3.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+                ],
+                indices: vec![0, 1, 2],
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 3.0, 2.0],
+            }],
+        }
+    }
+
+    #[test]
+    fn merge_binned_covers_every_index_exactly_once() {
+        let set = one_tri_set();
+        let ps: Vec<PropPlacement> = (0..7)
+            .map(|i| PropPlacement::new(0, i as f32 * 55.0 - 110.0, 0.0, 0.0, 1.0, false))
+            .collect();
+        let g = merge_binned(&set, &ps, 40.0, |_, _| 0.0);
+        assert!(!g.bins.is_empty());
+        // 桶的索引区间必须首尾相接、无缝无叠，且总长等于合并索引总数
+        let mut expect_start = 0u32;
+        for b in &g.bins {
+            assert_eq!(b.first_index, expect_start, "桶不连续，会漏画或重画");
+            expect_start += b.index_count;
+        }
+        assert_eq!(expect_start as usize, g.indices.len());
+        assert!(g.indices.iter().all(|&i| (i as usize) < g.verts.len()));
+    }
+
+    #[test]
+    fn merge_binned_totals_match_ungrouped_merge() {
+        let set = one_tri_set();
+        let ps: Vec<PropPlacement> = (0..6)
+            .map(|i| PropPlacement::new(0, i as f32 * 37.0 - 90.0, 0.0, 0.4, 1.5, false))
+            .collect();
+        let flat = merge(&set, &ps, |x, _| x * 0.01);
+        let binned = merge_binned(&set, &ps, 40.0, |x, _| x * 0.01);
+        assert_eq!(binned.verts.len(), flat.verts.len(), "分桶不该改变顶点总数");
+        assert_eq!(binned.indices.len(), flat.indices.len());
+        // 只比总数与合法性，**不比索引数值**：两种合并的顶点排布顺序不同（一种按摆放
+        // 顺序、一种按桶），重基后的索引值本来就不可比。
+        assert!(binned.indices.iter().all(|&i| (i as usize) < binned.verts.len()));
+        assert_eq!(binned.min, flat.min);
+        assert_eq!(binned.max, flat.max);
+    }
+
+    #[test]
+    fn merge_binned_is_deterministic() {
+        let Some(set) = kit() else { return };
+        let ps: Vec<PropPlacement> = (0..set.len())
+            .map(|i| PropPlacement::new(i, (i as f32 - 7.0) * 41.0, 0.0, i as f32, 1.0, false))
+            .collect();
+        let a = merge_binned(&set, &ps, 40.0, |_, _| 0.0);
+        let b = merge_binned(&set, &ps, 40.0, |_, _| 0.0);
+        assert_eq!(a.bins, b.bins, "同一输入必须产出同一分桶，否则每次重载几何都在变");
+        assert_eq!(a.verts.len(), b.verts.len());
+    }
+
+    #[test]
+    fn merge_binned_skips_unknown_mesh_without_panicking() {
+        let set = one_tri_set();
+        let mut ps = vec![PropPlacement::new(0, 0.0, 0.0, 0.0, 1.0, false)];
+        ps.push(PropPlacement::new(9999, 10.0, 0.0, 0.0, 1.0, false)); // 不存在的下标
+        let g = merge_binned(&set, &ps, 40.0, |_, _| 0.0);
+        assert_eq!(g.verts.len(), 3, "越界下标应被跳过而不是拖垮整批");
+        assert_eq!(g.bins.len(), 1);
+    }
+
+    #[test]
+    fn bin_visible_rejects_a_bin_outside_a_simple_frustum() {
+        // 构造一个只看 +X 方向的退化视锥：左平面法线朝 -X，位于 x=0
+        let mut planes = [[0.0f32; 4]; 6];
+        planes[0] = [-1.0, 0.0, 0.0, 0.0]; // 法线朝外(-X)，d = -x
+        let bin_at = |x: f32, r: f32| PropBin {
+            first_index: 0,
+            index_count: 3,
+            center: [x, 0.0, 0.0],
+            radius: r,
+        };
+        // x=+50、半径 2 的桶在左平面背面：d = -50，-50 + 2 = -48 < 0 → 不可见
+        assert!(!bin_visible(&bin_at(50.0, 2.0), &planes, 0.0));
+        // x=-50 → d = +50，在正面 → 可见
+        assert!(bin_visible(&bin_at(-50.0, 2.0), &planes, 0.0));
+        // 正好压在平面上、半径覆盖过去 → 可见
+        assert!(bin_visible(&bin_at(1.0, 2.0), &planes, 0.0));
+        // margin 会把边界外 1m 的桶也救回来（防逐帧抖动）
+        assert!(!bin_visible(&bin_at(5.0, 2.0), &planes, 0.0));
+        assert!(bin_visible(&bin_at(5.0, 2.0), &planes, 4.0));
     }
 
     #[test]
