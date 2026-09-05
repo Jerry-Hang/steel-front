@@ -69,6 +69,32 @@ Rust + Vulkan（winit 0.30），零第三方游戏依赖，纯 bin crate。
 - ⑥ 物理核/超线程分层绑定（线程优化第 5 步）｜负责人：当前会话 AI｜状态：done（sysfs SMT 配对识别 + 高性能线程绑物理核 + 超线程溢出辅助；270 tests + 128 NPC 基准 fps 持平 + ai_us 提升 + 冒烟 ALL-OK，见下方 2026-08-12 交接）
 - ⑤ 美术方向（阴影 / 光线遮挡 / 渲染烘焙 + 程序化贴图）｜负责人：当前会话 AI｜状态：done（① 阴影贴图 + ② 烘焙 AO + ③ 光照烘焙 + ④ 程序化地面贴图全部完成，见下方 2026-08-12 / 2026-08-13 交接；剩余：障碍物/士兵皮肤程序化贴图）
 
+### [2026-09-05] 交接：**网格着色器主路径已恢复并实机验证**（铁律回归）+ 枪朝向未决缺陷
+
+- 日期：2026-09-05
+- 发起方：Qwen Code
+- 接收方：下一轮会话
+- 交接类型：规划开启 + 一条未决缺陷（含**已证伪的假设**，别重走）
+- 验收：**`cargo test --release` 457 全绿（mesh 路径下）**；实机截图 `screenshots/mesh1_a.png` / `nosway_a.png`；无 device-lost、无 VUID 报错、`cap_safe.ps1` 确认无残留进程。
+
+  - **⭐ 渲染路径已切回 mesh，铁律恢复成立。** `renderer.rs:1344` 由硬编码 `mesh_enabled: false` 改回 **`mesh_enabled: mesh_shader_available`**（按能力探测，缺扩展时仍自动落回顶点路径）。
+    - **依据**：当初禁用它的唯一理由是「mesh 路径地面全黑」，而该现象根因已查明是 `binding 9` 未绑定 → 采样恒 0 → 乘性黑，**且两条管线共用同一个片元着色器**（`init_mesh_pipeline` 从磁盘读 `assets/triangle.frag.spv`）。所以那从来不是 mesh 着色器的缺陷，是被误记。binding 9 修好后**实测 mesh 路径地面完全正常**，直接证实了这个判断。
+    - **mesh 路径画质优于顶点路径**：整排砖结构两层楼（hips 屋顶/烟囱/真窗洞/角石）、树冠体积、地面裂纹细节全部正确，无黑地。
+    - ⚠ **代价是 fps 112–113（顶点路径约 165）**。原因明确：mesh 路径把 65536 个地面 workgroup **静态全量上传、不做 CPU 视锥剔除**（日志 `entities: 65536/65536` 印证）。属既有设计取舍、非本次引入的回归，但要找回帧率必须给地面场加 GPU 侧剔除或分块。
+    - **顶点管线自此冻结**（用户 2026-09-05 明确指令）：只作为缺 `VK_EXT_mesh_shader`（WSLg / dzn）的兼容回退，**不接受功能开发、不做双份维护、新特性一律只写 mesh 路径**。
+    - ⚠ **对下一轮的直接影响**：09-04 加的 `Shape::Authored → flat_flag=1.25` 门控**只写在 `VERTEX_SHADER_WGSL` 里**，mesh 着色器有独立的 flat 计算路径。道具走 `self.pipeline`（传统管线，mesh 开启时依然创建），所以道具绘制不受影响、已实测正常；但**若将来把道具并入 mesh 批次，必须先在 `MESH_SHADER_WGSL` 里补 authored 分支**，否则 GLB 立面上会长出错位窗带（D11 重演）。
+  - **枪械资产已安装到引擎可读位置**：`tools/install_guns.py` 把 `assets/guns_ext/` 按**武器 key** 复制到 `assets/guns/<key>.glb`，13 件安装、1 件明确跳过（`svd_63` 源文件是含两把重叠枪身的产品宣传图，需人工删一把；目标 key `svd12`）。映射里固化了两条领域知识：**PP-9 是 Bizon 的原设计代号**（故 `pp-19_bizon→pp9`、`pp-19-01_vityaz→pp19`，极易装反）；**osv-96 的 `dup_warn` 用几何证据推翻**（其 pos_range 中 X±0.031 仅为 Z 的 6%，若真有两把 90° 布置的枪身则 X 应与 Z 同量级，故那是镜像部件对而非重复装配）。
+  - **⚠ 未决缺陷（下一轮优先）：规范化枪模资产在游戏里呈横向（枪口朝屏幕右），不是朝屏幕深处。**
+    - 现象：`asval` / `pkm` 两张截图都清楚看到枪身长轴沿屏幕 X；棚拍图 `screenshots/gun_ext_pkm_threequarter.png` 证明**模型本身完整正确**，问题在引擎侧变换链。
+    - 已可观测：`gun-glb: asval ← assets/guns/asval.glb 顶点=11173 索引=19260 跨度=(0.06,0.21,1.00) align=IDENTITY luma_max=0.617 albedo_boost=1.00`（`load_gun_glb` 新增，按 key 缓存故不刷屏）。
+    - **已证伪的假设，不要重走**：① ~~腰射右倾放大~~ —— `RV3D_GUN_SWAY=0` 关掉全部摆动后**仍然横向**，A/B 直接否掉；② ~~局部前向其实是 +X~~ —— 试过把 IDENTITY 分支换成 `rotY(π/2)`，画面**更横**，方向不对，该 TEMP 改动已回退、未提交。
+    - **矛盾点即缺环**：手算 `fp_gun_matrix = view_inv · T(anchor) · scale · rotX(-0.045) · rotY(π)`，局部 +Z 经 rotY(π) → 视空间 -Z → 相机前方；而 `Y-long` 分支（rotZ(π)·rotY(π)·rotX(-π/2)）合成后把 glTF +Y 映到局部 +Z、`IDENTITY` 把 glTF +Z 映到局部 +Z——**两条分支结果应当一致**，可实际 ak12.glb（Y-long）正确、规范化资产（IDENTITY）横向。说明我对该函数的理解不完整。
+    - **下一步该做的**：**完整读 `fp_gun_matrix` 全函数**（我只读了尾部约 18 行，`anchor` 的计算、`fov_gain`、以及 1284 行之前是否还有旋转都未看），而不是继续猜图；并考虑把「相机前向 · 枪口端世界坐标」的点积打进日志，用算术判定。
+    - ⚠ 修复必须同时保住 `assets/guns/ak12.glb`（走 Y-long、当前外观正确）——它是 35 把武器里 22 把的回退外观。
+  - 另：`Tab`（VK 9）在玩法态不切视角，环绕取证别依赖它（09-04 已记，仍有效）。
+- 状态：in_progress（mesh 主路径已恢复并验证；枪朝向待专项排查）
+- 下一轮顺序：① 读完 `fp_gun_matrix` 定位枪朝向缺环 → ② 剩余街区生成器（`office_block`/`shop_block`/`mixed_block`/`warehouse`）接 GLB → ③ 地面场 GPU 侧剔除找回 fps → ④ 「玩家可能站进 GLB 楼体」的尺寸取舍校准 → ⑤ 删 `allow(dead_code)` 注入脚本 → ⑥ PT 崩溃另起一轮。
+
 ### [2026-09-04 收工] 交接：GLB 道具**已真正上屏** + 深度遮挡修复 + 一个差点耗死我的静默越界读
 
 - 日期：2026-09-04
