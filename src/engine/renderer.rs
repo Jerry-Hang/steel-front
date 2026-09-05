@@ -1341,7 +1341,16 @@ impl Renderer {
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
             gun_pipeline: vk::Pipeline::null(),
-            mesh_enabled: false, // 2026-09-02: mesh shader 路径地面全黑 bug（A/B 实锤）；传统 vertex 路径优（画面细节+地面正常），222fps 持平
+            // 2026-09-05：**恢复网格着色器为唯一主渲染路径**（AGENTS.md 渲染技术路线铁律）。
+            // 此前它是硬编码 false，起因是 2026-09-02 的「mesh 路径地面全黑」A/B 结论；但根因
+            // 已查明是 `binding 9` 未绑定导致的乘零，而两条管线**共用同一个片元着色器**
+            // （mesh 管线在 init_mesh_pipeline 里从磁盘读 assets/triangle.frag.spv），所以那
+            // 从来不是 mesh 着色器的 bug，而是被误记到它头上的一个 FS 侧缺陷。binding 9 已修，
+            // 止血补丁在此摘除。
+            // ⚠ 顶点管线（init_pipeline / VERTEX_SHADER_WGSL）自此**冻结**：只作为缺
+            //   VK_EXT_mesh_shader 时（WSLg / dzn）的兼容回退存在，不再接受功能开发，也不与
+            //   mesh 路径做双份维护——新特性一律只写 mesh 路径。
+            mesh_enabled: mesh_shader_available,
             device_name,
             mesh_shader: mesh_shader_loader,
             mesh_pipeline: vk::Pipeline::null(),
