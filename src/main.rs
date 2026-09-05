@@ -1033,15 +1033,21 @@ impl GameApp {
                 // 长轴对齐：Sketchfab Z-up 导出（长轴=Y 85、高=Z 21、宽=X 7，枪竖立）
                 // 绕 X -90°：长轴→-Z、枪顶→+Y；再绕 Y 180° 预旋转（配合 fp_gun_matrix 的
                 // rotY(180°) 双重取负 → 最终枪口朝 -Z（屏幕深处），枪顶朝上
-                let align = if ext[1] >= ext[0] && ext[1] >= ext[2] {
+                let (align, align_name) = if ext[1] >= ext[0] && ext[1] >= ext[2] {
                     // 长轴=Y（Sketchfab Z-up 竖立枪）：-90°X 立正 + 180°Z 滚转（枪顶朝上、弹匣朝下）
-                    glam::Mat4::from_rotation_z(std::f32::consts::PI)
-                        * glam::Mat4::from_rotation_y(std::f32::consts::PI)
-                        * glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                    (
+                        glam::Mat4::from_rotation_z(std::f32::consts::PI)
+                            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                            * glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                        "Y-long",
+                    )
                 } else if ext[0] >= ext[1] && ext[0] >= ext[2] {
-                    glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                    (glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2), "X-long")
                 } else {
-                    glam::Mat4::IDENTITY
+                    // 长轴已在 Z = 资产已是规范化朝向（枪口 +Z）。由 fp_gun_matrix 的
+                    // rotY(π) 把局部 +Z 转到视空间 -Z，再经 view_inv 即相机前方 —— 与
+                    // `gun_mesh_by_key` 文档约定的「局部枪口朝 +Z」一致，故不需任何旋转。
+                    (glam::Mat4::IDENTITY, "IDENTITY")
                 };
                 let center = [
                     (mn[0] + mx[0]) * 0.5,
@@ -1066,6 +1072,20 @@ impl GameApp {
                 } else {
                     1.0
                 };
+                // 每个武器 key 只加载一次（结果按 key 缓存），所以这行日志不会刷屏。
+                // 它把两个"错了只会表现为枪看起来怪、不会报错"的决定摊开给人看：
+                // ① align 走了哪条分支——assets/guns 里由 tools/install_guns.py 安装的
+                //    资产是**规范化过的**（枪口 +Z、上 +Y、最长边 1.0），必然走 IDENTITY；
+                //    若哪天它走了别的分支，说明有资产没经过预处理就进来了，朝向是猜的。
+                // ② albedo_boost 是否为 1.0——不为 1 说明该资产基色过黑、走了亮度归一。
+                log::info!(
+                    "gun-glb: {key} ← {path} 顶点={} 索引={} 跨度=({:.2},{:.2},{:.2}) \
+                     align={align_name} luma_max={:.3} albedo_boost={:.2}",
+                    mesh.verts.len(),
+                    mesh.indices.len(),
+                    ext[0], ext[1], ext[2],
+                    luma_max, albedo_boost
+                );
                 let verts: Vec<crate::engine::meshgen::GVertex> = mesh
                     .verts
                     .iter()
