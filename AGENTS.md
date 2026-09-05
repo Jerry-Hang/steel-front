@@ -95,8 +95,15 @@ Rust + Vulkan（winit 0.30），零第三方游戏依赖，纯 bin crate。
       我这次在得出错误结论之前，已经用肉眼否掉过两个本来正确的假设（`align=IDENTITY` 数学上一直是对的）。
     - 结论：**13 把规范化枪模已正确安装并渲染，`align=IDENTITY` 分支保持不变**。探针保留为长期诊断。
   - 另：`Tab`（VK 9）在玩法态不切视角，环绕取证别依赖它（09-04 已记，仍有效）。
-- 状态：done（mesh 主路径恢复并验证；13 把枪模正确安装；枪朝向疑点已用算术结案为"非缺陷"）
-- 下一轮顺序：① 剩余街区生成器（`office_block`/`shop_block`/`mixed_block`/`warehouse`）接 GLB → ② 地面场 GPU 侧剔除找回 fps（mesh 路径 112 vs 顶点 165）→ ③ 「玩家可能站进 GLB 楼体」的尺寸取舍校准 → ④ 删 `allow(dead_code)` 注入脚本 → ⑤ PT 崩溃另起一轮 → ⑥ `svd_63` 人工删掉重叠枪身后装为 `svd12`。
+- 状态：done（mesh 主路径恢复并验证；13 把枪模正确安装；枪朝向疑点已结案为"非缺陷"；道具帧成本已量化）
+- **下一轮最高优先：道具空间分桶 + 视锥剔除**（收益已量化、设计已定，可直接执行）
+    - **成本已测清**（`RV3D_NO_PROPS=1` 同机位 A/B，mesh 路径 2560×1600 中画质）：有道具 fps 110–112 / 无道具 fps **185–187** → 道具占整帧约 **40%**（3.4ms GPU）。`cull_us` 仅 7–14µs、`wait_fence_us` 高达 5.9ms ⇒ **GPU 受限，不是 CPU**，所以必须减少提交的三角形；优化 CPU 侧合并是错的对象。
+    - 当前几何量：**808,459 顶点 / 366,040 三角 / 288 处摆放**，一次 draw call 全量提交、零剔除。
+    - **设计**：① `props.rs` 加 `merge_binned(set, placements, cell, ground)`，按 `floor(x/cell), floor(z/cell)` 分桶（`cell` 取 40m 上下：桶少则 draw call 少、桶多则剔除精度低；全城 ±175m ⇒ 约 9×9 格），每桶产出 `PropBin { first_index, index_count, center, radius }`，索引仍重基到合并后的全局顶点空间以便共用一个 IBO/VBO。② `renderer.rs` 存 `prop_bins: Vec<PropBin>` 与 `frame_frustum: [[f32;4];6]`，绘制处逐桶做**球-平面**测试，只对可见桶发 `cmd_draw_indexed`。
+    - ⚠ **跨函数状态是这一步唯一的难点**：视锥平面在 `render()` 里由 `Self::extract_frustum_planes(view, proj)`（约 `renderer.rs:9192`）算出，而道具 draw 在 `record_command_buffer()` 内，**两者不在同一函数**。落地时必须确认 UBO 写入发生在命令缓冲记录之前，否则取到的是上一帧平面（表现为快速转视角时边缘桶漏剔或多剔一帧）。
+    - 验收：`RV3D_NO_PROPS` 保留作对照基线；要求 fps 明显向 185 靠拢，且截图对比无几何缺失。
+- 其余待办：① 「玩家可能站进 GLB 楼体」的尺寸取舍校准（`scale=max` 的已知代价）② 删 `scripts/allowall.py`/`allowv3.py`/`allowv4.py` 里的 `dead_code` 压制规则 ③ PT 0xC0000005 另起一轮 ④ `svd_63` 人工删掉重叠枪身后装为 `svd12`。
+- **已结案、不要重做**：「剩余街区生成器接 GLB」**实际已完成**——实测分布 `building_tall=52 / panel_block=17 / building_wide=7 / building_block=4`（共 80 处建筑），因为 `shop_block` 走 `row_houses`、`residential_block`/`mixed_block` 走 `perimeter_ring`→`row_houses`、`office_block` 走 `building()`，09-04 的两处转换已覆盖整条链。`warehouse` 是单个混凝土大箱配真下沉天窗与凹进卷帘门，仓库本就该是箱子，**不需要接 GLB**。
 
 ### [2026-09-04 收工] 交接：GLB 道具**已真正上屏** + 深度遮挡修复 + 一个差点耗死我的静默越界读
 
