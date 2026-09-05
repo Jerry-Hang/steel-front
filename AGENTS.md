@@ -95,13 +95,13 @@ Rust + Vulkan（winit 0.30），零第三方游戏依赖，纯 bin crate。
       我这次在得出错误结论之前，已经用肉眼否掉过两个本来正确的假设（`align=IDENTITY` 数学上一直是对的）。
     - 结论：**13 把规范化枪模已正确安装并渲染，`align=IDENTITY` 分支保持不变**。探针保留为长期诊断。
   - 另：`Tab`（VK 9）在玩法态不切视角，环绕取证别依赖它（09-04 已记，仍有效）。
-- 状态：done（mesh 主路径恢复并验证；13 把枪模正确安装；枪朝向疑点已结案为"非缺陷"；道具帧成本已量化）
-- **下一轮最高优先：道具空间分桶 + 视锥剔除**（收益已量化、设计已定，可直接执行）
-    - **成本已测清**（`RV3D_NO_PROPS=1` 同机位 A/B，mesh 路径 2560×1600 中画质）：有道具 fps 110–112 / 无道具 fps **185–187** → 道具占整帧约 **40%**（3.4ms GPU）。`cull_us` 仅 7–14µs、`wait_fence_us` 高达 5.9ms ⇒ **GPU 受限，不是 CPU**，所以必须减少提交的三角形；优化 CPU 侧合并是错的对象。
-    - 当前几何量：**808,459 顶点 / 366,040 三角 / 288 处摆放**，一次 draw call 全量提交、零剔除。
-    - **设计**：① `props.rs` 加 `merge_binned(set, placements, cell, ground)`，按 `floor(x/cell), floor(z/cell)` 分桶（`cell` 取 40m 上下：桶少则 draw call 少、桶多则剔除精度低；全城 ±175m ⇒ 约 9×9 格），每桶产出 `PropBin { first_index, index_count, center, radius }`，索引仍重基到合并后的全局顶点空间以便共用一个 IBO/VBO。② `renderer.rs` 存 `prop_bins: Vec<PropBin>` 与 `frame_frustum: [[f32;4];6]`，绘制处逐桶做**球-平面**测试，只对可见桶发 `cmd_draw_indexed`。
-    - ⚠ **跨函数状态是这一步唯一的难点**：视锥平面在 `render()` 里由 `Self::extract_frustum_planes(view, proj)`（约 `renderer.rs:9192`）算出，而道具 draw 在 `record_command_buffer()` 内，**两者不在同一函数**。落地时必须确认 UBO 写入发生在命令缓冲记录之前，否则取到的是上一帧平面（表现为快速转视角时边缘桶漏剔或多剔一帧）。
-    - 验收：`RV3D_NO_PROPS` 保留作对照基线；要求 fps 明显向 185 靠拢，且截图对比无几何缺失。
+- ✅ **道具分桶剔除已接线完成（09-05 当日）**：`set_props` 改用 `merge_binned(cell=40m)` 存 `prop_bins`；`record_command_buffer` 绑定一次后逐桶做球-视锥测试（margin 2m 防抖动），只发可见桶的 `cmd_draw_indexed`。`frame_frustum` 在 `render()` 里**无条件**算一次——原来那个 `if mesh_enabled` 三元在 mesh 关闭时给全零平面，会让 `bin_visible` 恒真等于不剔除。**实测 fps 112 → 152**，`tools/shot_diff.ps1` 逐像素差分证明未丢失任何可见几何；462 测试全绿。
+- ✅ **LICENSE 已落地**：内容依版权所有者提供的《代码协议.txt》原文写入（AGPL-3.0 + 附加商业条款：开源永久免费 / 闭源季度营收 < 1000 万元自动免费 / ≥ 须书面商业授权）。**未改写法律条款**，只补了一节"第三方素材授权范围"——`assets/guns*` 里下载的枪械带各自来源许可，不能被本仓库的 AGPL 覆盖，引入前须逐个确认可再分发/商用。
+  - ⚠ **待作者填写**：LICENSE 第三节联系方式的邮箱在原稿里是占位符 `[你的联系邮箱]`，我保留为显眼的 `TODO-请填入联系邮箱` 而**没有编造**，需作者补上。
+- ✅ **README 已更新**（223 → 365 行，按要求不删内容）：进度快照改到 09-05、测试数 406→462、fps 与剔除数据、GLB 道具与枪械管线、新增「渲染与画面里程碑」「诊断开关」「许可」「着色约束」「验证纪律」五节，中英双语同步。其中「验证纪律」把本会话两次自我纠错写进文档：binding 9 的 `dead_code` 警告曾被脚本压掉、以及"枪朝向"其实是读图错误。
+- 状态：done（mesh 主路径恢复并验证；道具剔除接线完成；13 把枪模安装；LICENSE 与 README 更新）
+- 下一轮顺序：① PT 0xC0000005 专项排查（最高优先，当前停用）② 地面场 GPU 侧剔除（mesh 路径剩余帧率天花板）③ 「玩家站进 GLB 楼体」尺寸校准 ④ 删 `merge()` 死代码并把它 5 个测试改用超大 cell ⑤ 删 `scripts/allowall.py`/`allowv3.py`/`allowv4.py` 的 `dead_code` 压制规则 ⑥ `svd_63` 人工清理后装为 `svd12`。
+- （上一轮列的"分桶剔除"已于本日完成，其测量与设计保留作背景）成本实测：有道具 fps 110–112 / 无道具 fps 185–187 → 道具占整帧约 40%（3.4ms GPU）；`cull_us` 仅 7–14µs、`wait_fence_us` 高达 5.9ms ⇒ **GPU 受限，不是 CPU**，所以必须减少提交的三角形，优化 CPU 侧合并是错的对象。分桶参数 `PROP_BIN_CELL_M=40`，桶数与几何量见启动日志 `props: 上传完成 … 分桶 N 个`。
 - 其余待办：① 「玩家可能站进 GLB 楼体」的尺寸取舍校准（`scale=max` 的已知代价）② 删 `scripts/allowall.py`/`allowv3.py`/`allowv4.py` 里的 `dead_code` 压制规则 ③ PT 0xC0000005 另起一轮 ④ `svd_63` 人工删掉重叠枪身后装为 `svd12`。
 - **已结案、不要重做**：「剩余街区生成器接 GLB」**实际已完成**——实测分布 `building_tall=52 / panel_block=17 / building_wide=7 / building_block=4`（共 80 处建筑），因为 `shop_block` 走 `row_houses`、`residential_block`/`mixed_block` 走 `perimeter_ring`→`row_houses`、`office_block` 走 `building()`，09-04 的两处转换已覆盖整条链。`warehouse` 是单个混凝土大箱配真下沉天窗与凹进卷帘门，仓库本就该是箱子，**不需要接 GLB**。
 
