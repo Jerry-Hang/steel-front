@@ -4750,6 +4750,13 @@ impl Renderer {
             log::info!("props: 无摆放几何（套件 {} 件 / 摆放 {} 处）", set.len(), placements.len());
             return;
         }
+        // RV3D_NO_PROPS=1：完全跳过道具上传（于是 draw 因 index_count==0 自然不发）。
+        // 这是性能 A/B 的诊断门，与 RV3D_NO_SHADOW / RV3D_NO_GROUND_TEX 同一套惯例——
+        // 优化前先量清"这个东西到底值多少帧"，否则很可能在优化错的对象。
+        if std::env::var("RV3D_NO_PROPS").as_deref() == Ok("1") {
+            log::info!("props: RV3D_NO_PROPS=1，跳过上传（合并结果 {} 顶点未提交）", merged.verts.len());
+            return;
+        }
         let need_v = merged.verts.len() as u32;
         let need_i = merged.indices.len() as u32;
         let mapped_ok = self.prop_mapped != std::ptr::null_mut()
