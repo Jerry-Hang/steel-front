@@ -1139,23 +1139,25 @@ impl GameApp {
             if let Some((verts, _)) = &loaded {
                 if verts.len() > 8 {
                     let m = self.fp_gun_matrix();
-                    let axes = [("前向", self.camera.forward()), ("右向", self.camera.right())];
-                    let mut spans = [0.0f32; 2];
-                    for (ai, (_, axis)) in axes.iter().enumerate() {
-                        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-                        for v in verts.iter() {
-                            let w = m.transform_point3(glam::Vec3::from_slice(&v.pos));
-                            let d = w.dot(*axis);
-                            lo = lo.min(d);
-                            hi = hi.max(d);
+                    // 输出**世界空间 AABB 各轴跨度**而不是"沿相机轴的投影长度"：
+                    // 后者要正确解释相机基向量的约定，我上一轮就是被这种间接量误导过。
+                    // 世界 AABB 无法误读——枪指入屏幕则 z 跨度大，横躺则 x 跨度大。
+                    let mut lo = [f32::MAX; 3];
+                    let mut hi = [f32::MIN; 3];
+                    for v in verts.iter() {
+                        let w = m.transform_point3(glam::Vec3::from_slice(&v.pos));
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(w[k]);
+                            hi[k] = hi[k].max(w[k]);
                         }
-                        spans[ai] = hi - lo;
                     }
+                    let f = self.camera.forward();
+                    let r = self.camera.right();
                     log::info!(
-                        "gun-orient: {gkey} 世界跨度 前向={:.3}m 右向={:.3}m → {}",
-                        spans[0],
-                        spans[1],
-                        if spans[0] >= spans[1] { "沿视线（正确）" } else { "横向（朝向错误）" }
+                        "gun-orient: {gkey} 世界AABB跨度 x={:.3} y={:.3} z={:.3} \
+                         | 相机forward=({:.2},{:.2},{:.2}) right=({:.2},{:.2},{:.2})",
+                        hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2],
+                        f.x, f.y, f.z, r.x, r.y, r.z
                     );
                 }
             }
