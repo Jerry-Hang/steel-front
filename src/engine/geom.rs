@@ -21,15 +21,20 @@
 //! （槽位带同时决定 `flat_flag` 材质模式，两者不冲突）。
 
 /// marker 实例的几何模板选择。
+///
+/// ⚠ 这是**与 GPU 共享的线格式**，不是普通的内部枚举：取值写在 `InstanceData.tint.w`
+/// 里，`build.rs` 的两条顶点路径按**区间**（1.5~2.5 圆柱、3.5~4.5 球…）解码它。
+/// 因此删变体可以，**改剩下变体的数值不行**。
+///
+/// 2026-09-08 清理：删掉 `Box`（tag 0.0）与 `Ico`（tag 3.0）两个变体——CPU 侧从来没有
+/// 任何构造点会产出它们（盒子走 [`Shape::Legacy`]，圆树冠走 [`Shape::Sphere`]，
+/// 二十面体被一级细分的 Sphere 取代）。这两个 tag 值就此作废，着色器里对应的分支变成
+/// 永不命中的兜底，保留不动（顶点管线已冻结，只为兼容性存在）。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Shape {
-    /// 立方体（24 顶点 / 12 三角，逐面 0..1 UV）。
-    Box,
     /// 竖直单位圆柱（r=1、y∈[-0.5,0.5]、24 段含上下盖；50 顶点 / 96 三角）。
     /// 实例矩阵的 xz 缩放 = 半径，y 缩放 = 半高。
     Cylinder,
-    /// 二十面体（12 顶点 / 20 三角，归一化到半径 1）。树冠、沙袋堆、圆顶。
-    Ico,
     /// 一级细分二十面体（42 顶点 / 80 三角，半径 1）。近处需要圆润的球体。
     Sphere,
     /// **只碰撞、不绘制**。用途只有一个：GLB 道具的结构碰撞核——它必须留在障碍表里
@@ -46,30 +51,26 @@ pub enum Shape {
     /// 直接画在建模好的窗台与壁柱上——等于换个形式重演缺陷 D11。
     /// 皮肤纹理那条更致命：它假设 UV 是逐面 0..1，而 GLB 是世界投影 UV，会把墙纹任意铺开。
     Authored,
-    /// 未迁移的旧构造点：等价于 [`Shape::Box`]，但保留 tint 颜色嗅探兜底。
+    /// 未迁移的旧构造点：画成立方体，但保留 tint 颜色嗅探兜底（绿色→树冠）。
     Legacy,
 }
 
 impl Shape {
-    /// 立方体。0.0 而非 1.0：1.0 要留给 [`Shape::Legacy`]，那是历史数据里
-    /// 已经写死的值（`WorldMarker` 字面量普遍写 `tint: [r, g, b, 1.0]`）。
-    pub const TAG_BOX: f32 = 0.0;
     pub const TAG_CYLINDER: f32 = 2.0;
-    pub const TAG_ICO: f32 = 3.0;
     pub const TAG_SPHERE: f32 = 4.0;
-    /// 只碰撞不绘制。5.0 是 tint.w 历史上从未出现过的取值（旧数据只有 1.0 与显式 0/2/3/4）。
+    /// 只碰撞不绘制。5.0 是 tint.w 历史上从未出现过的取值（旧数据只有 1.0 与显式 2/4）。
     pub const TAG_NONE: f32 = 5.0;
     /// 外部建模网格。片元看到它就不做任何程序化立面加工。
     pub const TAG_AUTHORED: f32 = 6.0;
     /// 历史默认值。GPU 侧按立方体处理，但额外允许旧的绿色→二十面体兜底。
+    /// 立方体的 tag 取 1.0 而不是 0.0：0.0 在 tint.w 上曾是"未初始化"的观感，
+    /// 而 1.0 是 `WorldMarker` 字面量里已经写死的那批（`tint: [r, g, b, 1.0]`）。
     pub const TAG_LEGACY: f32 = 1.0;
 
     /// 写入 `InstanceData.tint.w` 的标签值。
     pub const fn tag(self) -> f32 {
         match self {
-            Shape::Box => Shape::TAG_BOX,
             Shape::Cylinder => Shape::TAG_CYLINDER,
-            Shape::Ico => Shape::TAG_ICO,
             Shape::Sphere => Shape::TAG_SPHERE,
             Shape::None => Shape::TAG_NONE,
             Shape::Authored => Shape::TAG_AUTHORED,
@@ -79,14 +80,14 @@ impl Shape {
 
     /// 标签值 → 形状。未知/越界值一律退回 [`Shape::Legacy`]，让 GPU 侧的兜底分支
     /// 去处理，而不是在这里发明新语义。
+    ///
+    /// `#[cfg(test)]`：CPU 侧从不反读 tint.w（`renderer.rs` 只写不读），所以这个解码器
+    /// 唯一的作用是配合 [`Shape::tag`] 钉住线格式，防止有人改数值把 GPU 分支错位。
+    #[cfg(test)]
     pub const fn from_tag(v: f32) -> Shape {
-        // f32 精确比较：标签只由 tag() 写入，取值是 0/1/2/3/4/5 这些可精确表示的小整数。
-        if v == Shape::TAG_BOX {
-            Shape::Box
-        } else if v == Shape::TAG_CYLINDER {
+        // f32 精确比较：标签只由 tag() 写入，取值是 1/2/4/5/6 这些可精确表示的小整数。
+        if v == Shape::TAG_CYLINDER {
             Shape::Cylinder
-        } else if v == Shape::TAG_ICO {
-            Shape::Ico
         } else if v == Shape::TAG_SPHERE {
             Shape::Sphere
         } else if v == Shape::TAG_NONE {
@@ -100,13 +101,17 @@ impl Shape {
 
     /// 该形状的**水平足迹**是否内切于它的 AABB。
     ///
-    /// 用途是碰撞：圆柱/球在 AABB 的四个角上是"看得见但不该挡住"的空隙，把
-    /// 胶囊半径按 √2 折算成内切半径，玩家才能贴到柱子边上而不被隐形方块弹开。
+    /// ⚠ **目前没有任何生产代码调用它** —— 也就是说这条几何学结论还没有接到碰撞系统上：
+    /// 圆柱/球形障碍的碰撞体仍是它的 AABB，四个角上"看得见但不该挡住"的空隙仍然会把玩家
+    /// 弹开。`game.rs` 里 `geom()` 的注释以前声称"碰撞足迹随形状收缩"，那是**不成立的**，
+    /// 已按现状改正。要真的实现收缩，接缝在 `MapObstacle` → 物理刚体半径那一步，
+    /// 属于会改变手感的改动，需要实机验证后再做。
+    #[cfg(test)]
     pub const fn inscribed_radius_factor(self) -> f32 {
         match self {
-            Shape::Cylinder | Shape::Sphere | Shape::Ico => core::f32::consts::FRAC_1_SQRT_2,
+            Shape::Cylinder | Shape::Sphere => core::f32::consts::FRAC_1_SQRT_2,
             // None / Authored 的足迹就是它的碰撞盒本身（GLB 的旋转 AABB），不内切
-            Shape::Box | Shape::None | Shape::Authored | Shape::Legacy => 1.0,
+            Shape::None | Shape::Authored | Shape::Legacy => 1.0,
         }
     }
 }
@@ -126,9 +131,7 @@ mod tests {
     #[test]
     fn shape_tags_round_trip() {
         for s in [
-            Shape::Box,
             Shape::Cylinder,
-            Shape::Ico,
             Shape::Sphere,
             Shape::None,
             Shape::Authored,
@@ -143,7 +146,11 @@ mod tests {
         // 越界/浮点垃圾值不得变成"隐形的新形状"，必须退回旧行为。
         // 5.0 / 6.0 不在此列：2026-09-03 起它们分别是 None（只碰撞不绘制）与
         // Authored（外部建模，跳过程序化立面）的合法标签。
-        for v in [-1.0, 7.0, 1.5, 2.71828, 4.5] {
+        //
+        // 0.0 与 3.0 是 2026-09-08 作废的 Box / Ico 标签。这里把它们当垃圾值钉住：
+        // 若有人重新分配这两个 tag，本测试会失败，逼他去看 build.rs 里仍然存在的
+        // m_cyl/m_ico 区间分支，而不是神不知鬼不觉地复用出第三种语义。
+        for v in [-1.0, 7.0, 1.5, core::f32::consts::PI, 4.5, 0.0, 3.0] {
             assert_eq!(Shape::from_tag(v), Shape::Legacy, "tag {} must be Legacy", v);
         }
     }
@@ -178,8 +185,11 @@ mod tests {
 
     #[test]
     fn round_shapes_inscribe_their_aabb() {
-        assert_eq!(Shape::Box.inscribed_radius_factor(), 1.0);
+        assert_eq!(Shape::Legacy.inscribed_radius_factor(), 1.0);
         assert!(Shape::Cylinder.inscribed_radius_factor() < 1.0);
         assert!(Shape::Sphere.inscribed_radius_factor() > 0.7);
+        // GLB 的碰撞核与外部建模件不得被内切收缩——它们的盒子就是它本身的足迹。
+        assert_eq!(Shape::None.inscribed_radius_factor(), 1.0);
+        assert_eq!(Shape::Authored.inscribed_radius_factor(), 1.0);
     }
 }

@@ -4907,11 +4907,6 @@ impl Renderer {
         );
     }
 
-    /// 当前交换链尺寸 (宽, 高)——PT 原生分辨率取它
-    pub fn frame_size(&self) -> (u32, u32) {
-        (self.swapchain_extent.width, self.swapchain_extent.height)
-    }
-
     /// 构建路径追踪加速结构：盒体场景 → BLAS + TLAS（2026-08-29 阶段2）
     /// PT 实时 v2（2026-08-29 常驻化）：首帧构建 AS/管线/图像，后帧只 dispatch+blit
     /// 启动时构建 PT 常驻资源（2026-08-29：与 run_pt_view 同时空——已验证可跑！）
@@ -5042,7 +5037,8 @@ impl Renderer {
             .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
         let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("PT cb: {e}"))?[0];
         unsafe {
-            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+                .map_err(|e| format!("PT cb begin: {e}"))?;
             // 累积图像只做一次 UNDEFINED->GENERAL：之后每帧 barrier 必须是 GENERAL->GENERAL，
             // old_layout 用 UNDEFINED 等于告诉驱动"内容可丢弃" = 累积白做
             let acc_bar = vk::ImageMemoryBarrier::default()
@@ -5054,7 +5050,7 @@ impl Renderer {
                 .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
             self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[acc_bar]);
             self.record_pt_build(cb, &assets, boxes.len())?;
-            self.device.end_command_buffer(cb);
+            self.device.end_command_buffer(cb).map_err(|e| format!("PT cb end: {e}"))?;
             let cbs = [cb];
             let submit = vk::SubmitInfo::default().command_buffers(&cbs);
             self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT sc: {e}"))?;
@@ -5398,9 +5394,10 @@ impl Renderer {
             let alloc = vk::CommandBufferAllocateInfo::default().command_pool(self.command_pool)
                 .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
             let cb = self.device.allocate_command_buffers(&alloc).map_err(|e| format!("PT cb: {e}"))?[0];
-            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+                .map_err(|e| format!("PT cb begin: {e}"))?;
             self.record_pt_build(cb, assets, n)?;
-            self.device.end_command_buffer(cb);
+            self.device.end_command_buffer(cb).map_err(|e| format!("PT cb end: {e}"))?;
             let cbs = [cb];
             let submit = vk::SubmitInfo::default().command_buffers(&cbs);
             self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT scene submit: {e}"))?;
@@ -5593,7 +5590,7 @@ impl Renderer {
         let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("PT cb: {e}"))?[0];
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
-            self.device.begin_command_buffer(cb, &begin_info);
+            self.device.begin_command_buffer(cb, &begin_info).map_err(|e| format!("PT cb begin: {e}"))?;
             self.record_pt_build(cb, &assets, boxes.len())?;
             let img_bar = vk::ImageMemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::NONE)
@@ -5661,7 +5658,7 @@ impl Renderer {
                 .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                 .image_extent(vk::Extent3D { width: size, height: size, depth: 1 })];
             self.device.cmd_copy_image_to_buffer(cb, image, vk::ImageLayout::GENERAL, read_buf, &cpy_regions);
-            self.device.end_command_buffer(cb);
+            self.device.end_command_buffer(cb).map_err(|e| format!("PT cb end: {e}"))?;
             let cbs = [cb];
             let submit = vk::SubmitInfo::default().command_buffers(&cbs);
             self.device.queue_submit(self.graphics_queue, &[submit], vk::Fence::null()).map_err(|e| format!("PT submit: {e}"))?;
@@ -5669,7 +5666,7 @@ impl Renderer {
             self.device.queue_wait_idle(self.graphics_queue).map_err(|e| format!("PT wait: {e}"))?;
             // 读回 + PNG
             let m = self.device.map_memory(read_mem, 0, (size * size * 4) as u64, vk::MemoryMapFlags::empty()).map_err(|e| format!("PT map: {e}"))?;
-            let mut px: Vec<u8> = std::slice::from_raw_parts(m as *const u8, (size * size * 4) as usize).to_vec();
+            let px: Vec<u8> = std::slice::from_raw_parts(m as *const u8, (size * size * 4) as usize).to_vec();
             self.device.unmap_memory(read_mem);
             log::info!("PT-VIEW px: [{},{},{}] [{},{},{}] [{},{},{}]", px[0], px[1], px[2], px[64*4], px[64*4+1], px[64*4+2], px[10*64*4+20*4], px[10*64*4+20*4+1], px[10*64*4+20*4+2]);
             // BMP 落盘（24bit，程序化写出，无依赖）
@@ -5845,13 +5842,11 @@ impl Renderer {
             .command_buffer_count(1);
         // 使用帧命令池外的一个独立分配
         let cb = unsafe { self.device.allocate_command_buffers(&alloc) }.map_err(|e| format!("pt cb: {e}"))?[0];
-        let begin = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
             let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            self.device.begin_command_buffer(cb, &begin_info);
+            self.device.begin_command_buffer(cb, &begin_info).map_err(|e| format!("pt cb begin: {e}"))?;
             self.record_pt_build(cb, &assets, boxes.len())?;
-            self.device.end_command_buffer(cb);
+            self.device.end_command_buffer(cb).map_err(|e| format!("pt cb end: {e}"))?;
         }
         let cbs = [cb];
         let submit = vk::SubmitInfo::default().command_buffers(&cbs);
@@ -5862,13 +5857,13 @@ impl Renderer {
         let t0 = std::time::Instant::now();
         unsafe {
             self.device.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("pt reset: {e}"))?;
-            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default());
+            self.device.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default()).map_err(|e| format!("pt bench begin: {e}"))?;
             self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, compute_pipeline);
             self.device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[dset], &[]);
             for _ in 0..iterations {
                 self.device.cmd_dispatch(cb, (n as u32 + 63) / 64, 1, 1);
             }
-            self.device.end_command_buffer(cb);
+            self.device.end_command_buffer(cb).map_err(|e| format!("pt bench end: {e}"))?;
             let cbs2 = [cb];
             let submit2 = vk::SubmitInfo::default().command_buffers(&cbs2);
             self.device.queue_submit(self.graphics_queue, &[submit2], vk::Fence::null()).map_err(|e| format!("pt bench submit: {e}"))?;

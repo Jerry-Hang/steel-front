@@ -43,6 +43,13 @@ pub const BLOCK_EDGE: f32 = STREET_EVERY - 2.0 * (ROAD_HALF + SIDEWALK);
 pub const KERB_EDGE: f32 = BLOCK_EDGE + 2.0 * SIDEWALK;
 
 /// 相邻两层表面之间的最小台阶（米）。小于这个值，掠射角下两面会落到同一批像素上。
+///
+/// ⚠ `#[cfg(test)]`：生产代码里每个立面构件的出挑量是**各自写死的字面量**（压顶 +0.30、
+/// 柱帽 2.18…），并不由这个常量推导。它唯一的作用是给 `relief_steps_are_not_coplanar`
+/// 当判据——那条测试会遍历全图，检查任意两层凸出量之差 ≥ 本值。
+/// 也就是说：**改这里的数字不会改变画面，只会改变测试宽严**；真正的几何在那些字面量里，
+/// 新增构件时必须自己保证出挑量满足这条不变量。
+#[cfg(test)]
 const RELIEF_STEP: f32 = 0.14;
 /// 贴墙件的背面埋入墙内的深度（米）——保证背面永远在实体里，不与墙面共面。
 const INSET_BURIED: f32 = 0.20;
@@ -162,9 +169,6 @@ impl Part {
     fn cyl(self) -> Self {
         self.shape(Shape::Cylinder)
     }
-    fn ico(self) -> Self {
-        self.shape(Shape::Ico)
-    }
     fn sph(self) -> Self {
         self.shape(Shape::Sphere)
     }
@@ -221,11 +225,6 @@ impl City {
         self
     }
 
-    /// 一个从地面立到 `h` 的盒子（默认结构件）。
-    fn slab(&mut self, kind: ObstacleKind, x: f32, z: f32, w: f32, d: f32, h: f32, tint: [f32; 3]) {
-        self.push(Part::new(kind, x, z, w, d, UNDER_GROUND, h, tint));
-    }
-
     /// 一圈矩形环（女儿墙/台缘）。4 条边各自成体，转角互相重叠——重叠无害，缺角才致命。
     ///
     /// **短边必须容得下两条厚边**：侧边长度取 `min(w,d) - 2*thick`，一旦 `thick` 接近
@@ -270,11 +269,6 @@ impl City {
         let Some(mesh) = self.mesh_ix(name) else { return false };
         self.props.push(PropPlacement::at(mesh, x, y, z, yaw, scale, false));
         true
-    }
-
-    /// 道具套件里有没有这件网格（生成函数用它决定走 GLB 还是退回程序化盒）。
-    fn has_prop(&self, name: &str) -> bool {
-        self.set.index_of(name).is_some()
     }
 
     /// 按目标 footprint 与层数，挑长宽比最接近的建筑变体，返回（名字，等比缩放）。
@@ -963,28 +957,6 @@ fn wreck_car(c: &mut City, x: f32, z: f32, tint: [f32; 3]) {
     c.deco(Part::new(ObstacleKind::Ruin, x + 1.9, z, 0.5, 1.9, 0.35, 1.05, GLASS_DARK));
     for (ox, oz) in [(-1.45f32, -1.05), (1.45, -1.05), (-1.45, 1.05), (1.45, 1.05)] {
         c.deco(Part::new(ObstacleKind::Ruin, x + ox, z + oz, 0.78, 0.32, UNDER_GROUND, 0.78, DARK).cyl());
-    }
-}
-
-/// 停车场：残骸车阵 + 车位缘石带 + 灯杆。
-fn parking_lot(c: &mut City, cx: f32, cz: f32) {
-    let tints = [WRECK_TAN, [0.30, 0.32, 0.36], [0.36, 0.30, 0.24], [0.26, 0.30, 0.28]];
-    for (idx, t) in tints.iter().enumerate() {
-        let (dx, dz) = match idx {
-            0 => (-9.0, -7.0),
-            1 => (-2.0, -7.0),
-            2 => (5.0, 5.0),
-            _ => (12.0, 5.0),
-        };
-        wreck_car(c, cx + dx, cz + dz, *t);
-    }
-    // 车位分隔：凸出地面的缘石带（旧版是与地面共面的贴皮，掠射角整片消失）
-    for k in 0..4i32 {
-        let z = cz - 9.0 + k as f32 * 6.0;
-        c.deco(Part::new(ObstacleKind::Building, cx, z, 26.0, 0.24, UNDER_GROUND, 0.18, CONCRETE_LIGHT));
-    }
-    for dx in [-11.0f32, 11.0] {
-        lamp_post(c, cx + dx, cz);
     }
 }
 

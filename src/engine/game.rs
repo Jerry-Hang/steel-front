@@ -409,8 +409,11 @@ pub struct MapObstacle {
     pub max_hp: f32,
     /// 当前血量（归 0 → 摧毁：从物理刚体/AI 网格/渲染 marker 中移除）
     pub hp: f32,
-    /// 几何形状（渲染模板 + 碰撞足迹）。默认 [`Shape::Legacy`] = 旧行为（立方体，
+    /// 几何形状（**只管渲染模板**）。默认 [`Shape::Legacy`] = 旧行为（立方体，
     /// 绿色 tint 兜底成二十面体），所以既有构造点零改动即保持原画面。
+    ///
+    /// ⚠ 不参与碰撞：碰撞体始终是这条障碍的 AABB，与 shape 无关。
+    /// 详见 `Shape::inscribed_radius_factor` 上那段"尚未接线"的说明。
     pub shape: Shape,
 }
 
@@ -441,7 +444,7 @@ impl MapObstacle {
         self
     }
 
-    /// 指定几何形状。碰撞足迹随形状收缩（见 [`Shape::inscribed_radius_factor`]）。
+    /// 指定几何形状（只改渲染模板；碰撞仍是 AABB，见 [`MapObstacle::shape`] 的说明）。
     pub fn geom(mut self, shape: Shape) -> Self {
         self.shape = shape;
         self
@@ -1672,11 +1675,6 @@ impl Game {
         );
     }
 
-    /// 当前关卡障碍列表（物理/掩体/摧毁结算的唯一真相；main.rs 也用它生成 marker）
-    pub fn map_obstacles(&self) -> &[MapObstacle] {
-        &self.map.obstacles
-    }
-
     /// 地图代号。渲染层据此判断道具几何是否需要重传（见 `Renderer::set_props`）。
     pub fn map_generation(&self) -> u64 {
         self.map_generation
@@ -2019,11 +2017,9 @@ impl Game {
     }
 
     /// 关卡系统下一关（胜利结算 N 键）：进入列表下一张地图；已到最后一关 → 返回 false（通关）
-    /// 玩家水平速度（持枪摆动/动画驱动用）
-    pub fn player_speed(&self) -> f32 {
-        (self.player_body.vel.x * self.player_body.vel.x + self.player_body.vel.z * self.player_body.vel.z).sqrt()
-    }
-
+    ///
+    /// 2026-09-08：删掉夹在这里的 `player_speed()`——它是一次误插入（把本注释和函数体
+    /// 隔开了），且无人调用：持枪摆动取的是玩家脚底实际位移 / dt，见 `main.rs` 那条说明。
     pub fn advance_level(&mut self, player: &glam::Vec3) -> bool {
         if self.level_list.is_empty() {
             return false; // 单关模式（RV3D_MAP）：无下一关
@@ -5870,9 +5866,9 @@ mod tests {
         );
         assert!(!client.snapshot_timeout(), "回环测试不应超时");
         // 2026-08-25：客户端输入驱动「远端玩家」实体（网络对战模型），不再是服务端本机玩家
+        // （原来这里还挂着 `npcs.len() >= 0`：usize 恒非负，是个永真的空断言，删掉）
         assert!(
-            server_game.npcs.len() >= 0
-                && server_game.net_players.iter().any(|p| p.alive),
+            server_game.net_players.iter().any(|p| p.alive),
             "服务端应注册远端玩家并应用客户端输入"
         );
         assert_eq!(

@@ -54,6 +54,9 @@ pub fn box_triangles(b: &PtBox, out_verts: &mut [f32; 192]) {
     v!(cx + hx, cy - hy, cz + hz, 0.0, 0.0, 1.0, 0.0, 1.0);
     v!(cx + hx, cy + hy, cz + hz, 0.0, 0.0, 1.0, 1.0, 1.0);
     v!(cx - hx, cy + hy, cz + hz, 0.0, 0.0, 1.0, 1.0, 0.0);
+    // 6 面 × 4 顶点 × 8 分量，必须刚好填满 out_verts：谁改了面数或顶点步长，
+    // 这里会先炸，而不是把半截几何送进 BLAS。
+    debug_assert_eq!(i, out_verts.len());
 }
 
 /// 盒体三角形索引（12 三角 / 四边形对角化）
@@ -72,11 +75,14 @@ pub fn box_indices() -> [u32; 36] {
 }
 
 /// PT 基准参数（与游戏光照同语义，便于对比）
+///
+/// 2026-09-08：删掉 `PT_SUN_COLOR` / `PT_AMBIENT_COLOR` / `PT_AMBIENT_INTENSITY`。
+/// 它们是 2026-09-01 光照配平**之前**的旧值（见 `game.rs` 那条配平注释），既没人读，
+/// 又会诱导后来的人拿过期数字去"对齐"PT 与光栅化。PT 的 sun 颜色实际取
+/// `Vec3::splat(1.0) * PT_SUN_INTENSITY`（`main.rs`），与光栅化的 directional 色不同源，
+/// 这是 PT 恢复时要一并校准的点。
 pub const PT_SUN_DIR: [f32; 3] = [-0.4, 0.9, -0.3];
-pub const PT_SUN_COLOR: [f32; 3] = [1.0, 0.95, 0.85];
 pub const PT_SUN_INTENSITY: f32 = 1.5;
-pub const PT_AMBIENT_COLOR: [f32; 3] = [0.5, 0.55, 0.6];
-pub const PT_AMBIENT_INTENSITY: f32 = 0.5;
 
 /// PT 取景参数（每帧由 main.rs 注入，打包为 5×vec4 push constants）
 #[derive(Clone, Copy, Default)]

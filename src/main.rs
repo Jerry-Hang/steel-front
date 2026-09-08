@@ -68,9 +68,16 @@ fn env_truthy(name: &str) -> bool {
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|s| s.parse::<f32>().ok())
 }
-/// 单帧预算（纳秒；MAX_FPS=0 时为 0，不做 sleep/spin 节流）
-const FRAME_BUDGET: Duration =
-    Duration::from_nanos(if MAX_FPS > 0 { 1_000_000_000 / MAX_FPS } else { 0 });
+/// 单帧预算（纳秒；`MAX_FPS = 0` 表示不设上限，预算为 0，不做 sleep/spin 节流）。
+///
+/// 写成 `match` 而不是 `if MAX_FPS > 0`：后者在 `MAX_FPS` 当前取值 0 下，比较的
+/// 真分支永远不可达（clippy 以 deny 级报 `unnecessary_sanity_check`），而这里
+/// "0 = 无上限"是**约定**、不是运行时输入，用模式匹配把它摊开更直白，
+/// 也仍然挡住 `1_000_000_000 / 0`。改 `MAX_FPS` 为非 0 时两个分支都照旧工作。
+const FRAME_BUDGET: Duration = match MAX_FPS {
+    0 => Duration::ZERO,
+    fps => Duration::from_nanos(1_000_000_000 / fps),
+};
 
 // ============================================================
 // 第一人称枪摆动（viewmodel sway）参数 —— 2026-09-01 平滑化重写

@@ -52,17 +52,22 @@ impl PropMesh {
         mesh
     }
 
-    /// 底面中心到几何中心的偏移（米，竖直方向）。贴地摆放时用得上。
-    pub fn height(&self) -> f32 {
-        self.max[1] - self.min[1]
-    }
-
     /// 未旋转时的水平半足迹 (half_x, half_z)。
     pub fn half_footprint(&self) -> (f32, f32) {
         (
             (self.max[0] - self.min[0]) * 0.5,
             (self.max[2] - self.min[2]) * 0.5,
         )
+    }
+
+    /// 网格竖直总高（米，未缩放）。
+    ///
+    /// `#[cfg(test)]`：生产几何不读它（烘焙直接用逐顶点 y）。它守着的是
+    /// `prop_meshes_follow_the_meter_and_base_origin_rules`——资产要是没按米制建模、
+    /// 或原点不在底面，靠这条测试而不是靠肉眼看截图发现。
+    #[cfg(test)]
+    pub fn height(&self) -> f32 {
+        self.max[1] - self.min[1]
     }
 }
 
@@ -132,6 +137,11 @@ pub struct PropPlacement {
     /// 等比缩放（1.0 = 建模时的真实米制尺寸）
     pub scale: f32,
     /// 是否进刚体表/导航网格。false = 只画不挡（装饰件），沿用 city.rs 的结构/装饰分表纪律。
+    ///
+    /// ⚠ **目前是个空转字段**：`city.rs` 的 `prop()` / `prop_y()` 一律传 `false`，
+    /// 而且没有任何读取方。GLB 建筑的碰撞不走它——建筑另外压了一个
+    /// `Shape::None` 的隐形盒核（见 `city.rs::building`）。2026-09-08 删掉了与此配套
+    /// 却从未接上的 `is_solid_prop()` 及其测试；真要按件分刚体时，接缝在这里。
     pub solid: bool,
 }
 
@@ -146,6 +156,12 @@ impl PropPlacement {
     }
 
     /// 旋转后的精确轴对齐足迹半尺寸。闭式解，非保守放大。
+    ///
+    /// `#[cfg(test)]`：生产路径不读它——建筑的隐形碰撞核是按**目标** footprint
+    /// （`city.rs::pick_building` 的 w/d）建的，不是按网格实际 AABB 建的。它现在是
+    /// `invisible_cores_must_be_covered_by_a_prop` 那条测试的判据：拿实际旋转足迹去
+    /// 核对每个碰撞核有没有被 GLB 真正盖住，防的就是"一面看不见的墙"。
+    #[cfg(test)]
     pub fn rotated_footprint(&self, set: &PropSet) -> Option<(f32, f32)> {
         let m = set.get(self.mesh)?;
         let (hx, hz) = m.half_footprint();
@@ -155,6 +171,12 @@ impl PropPlacement {
     }
 
     /// 该道具的 AABB 参数：(x, z, half_w, half_d, y_center, half_h)。
+    ///
+    /// `#[cfg(test)]`：同 [`Self::rotated_footprint`]，是"旋转后的盒子到底多大"这件事的
+    /// 唯一一份闭式实现，被 `footprint_*` 那三条测试当被测对象本身用
+    /// （0° 不交换轴、90° 必须交换、45° 必须是精确旋转 AABB 而非保守放大）。
+    /// 生产路径的碰撞核来自 `city.rs` 的目标尺寸，不经过这里。
+    #[cfg(test)]
     pub fn aabb(&self, set: &PropSet) -> Option<(f32, f32, f32, f32, f32, f32)> {
         let m = set.get(self.mesh)?;
         let (hw, hd) = self.rotated_footprint(set)?;
@@ -164,115 +186,6 @@ impl PropPlacement {
         let base = self.y + m.min[1] * self.scale;
         Some((self.x, self.z, hw, hd, base + half_h, half_h))
     }
-}
-
-/// 哪些道具应当阻挡子弹与 AI 视线。建筑/大树是硬障碍；小件按玩法需要可摧毁。
-/// 集中一处，避免每个调用点各自判断一遍。
-pub fn is_solid_prop(name: &str) -> bool {
-    !(name.starts_with("rubble") || name.starts_with("bush") || name.starts_with("capture_flag"))
-}
-
-/// 全部摆放烘焙成**一份**静态网格的结果。
-#[derive(Debug, Default, Clone)]
-pub struct MergedGeometry {
-    /// 与 `assets::ImportedMesh::verts` 同布局：pos(3) normal(3) uv(2) color(3)
-    pub verts: Vec<[f32; 11]>,
-    pub indices: Vec<u32>,
-    pub min: [f32; 3],
-    pub max: [f32; 3],
-}
-
-impl MergedGeometry {
-    pub fn is_empty(&self) -> bool {
-        self.verts.is_empty()
-    }
-}
-
-/// 把摆放列表烘成一份静态几何。
-///
-/// ## 为什么在 CPU 上烘死，而不是走实例化
-/// 实例化要新增一套实例 buffer、描述符集与管线分支；而道具总量只有几十万三角，
-/// 一张静态 VBO + 一次 draw call 就能画完，复用现成的 pos/color/uv 管线即可。
-/// 代价是失去逐实例视锥剔除——按当前体量不值得为它多养一条管线。
-/// 若日后要恢复剔除，改的就是这个函数，接缝在这里。
-///
-/// ## 地形跟随
-/// 位姿只在**摆放点**采样一次地高，不对顶点逐点抬升：逐点采样会把建筑的山墙
-/// 和窗台剪成斜面，比"四脚略有悬空"难看得多。中央 60×60 本来就压平到 y=0，
-/// 绝大多数楼与树因此完全贴地。
-pub fn merge(
-    set: &PropSet,
-    placements: &[PropPlacement],
-    ground: impl Fn(f32, f32) -> f32,
-) -> MergedGeometry {
-    let mut out = MergedGeometry::default();
-    let total_v: usize = placements
-        .iter()
-        .filter_map(|p| set.get(p.mesh))
-        .map(|m| m.verts.len())
-        .sum();
-    let total_i: usize = placements
-        .iter()
-        .filter_map(|p| set.get(p.mesh))
-        .map(|m| m.indices.len())
-        .sum();
-    out.verts.reserve(total_v);
-    out.indices.reserve(total_i);
-    let mut first = true;
-    for p in placements {
-        let Some(mesh) = set.get(p.mesh) else { continue };
-        let (sy, cy) = (p.yaw.sin(), p.yaw.cos());
-        let gy = ground(p.x, p.z) + p.y;
-        let base = out.verts.len() as u32;
-        for v in &mesh.verts {
-            // 绕 +Y 旋转：(x, z) → (x·cosθ + z·sinθ, -x·sinθ + z·cosθ)。
-            // 这个**顶点变换本身**是纯旋转+等比缩放+平移，行列式为正，不改变绕序；
-            // 下面对索引另有一次刻意交换，那是为了适配引擎的 CLOCKWISE 约定，与此无关。
-            let vx = v[0] * p.scale;
-            let vy = v[1] * p.scale;
-            let vz = v[2] * p.scale;
-            let px = p.x + vx * cy + vz * sy;
-            let pz = p.z - vx * sy + vz * cy;
-            let py = gy + vy;
-            let nx = v[3] * cy + v[5] * sy;
-            let nz = -v[3] * sy + v[5] * cy;
-            let baked = [
-                px, py, pz,
-                nx, v[4], nz,
-                v[6], v[7],
-                v[8], v[9], v[10],
-            ];
-            if first {
-                out.min = [px, py, pz];
-                out.max = [px, py, pz];
-                first = false;
-            } else {
-                for k in 0..3 {
-                    let c = baked[k];
-                    out.min[k] = out.min[k].min(c);
-                    out.max[k] = out.max[k].max(c);
-                }
-            }
-            out.verts.push(baked);
-        }
-        for tri in mesh.indices.chunks_exact(3) {
-            // **绕序交换**：外部建模的三角形在这里统一翻一次面。
-            // 依据是实机对照实验而非推理：主管线是 `cull BACK + front_face CLOCKWISE`，
-            // GLB 道具在开剔除时**一个像素都不出现**（截图差分 0.14/255、36 格 0 显著变化），
-            // 把 cull 改成 NONE 后所有立面立刻正确显示 —— 说明它的面被整体判成了背面。
-            // 引擎自己的程序化网格在 `meshgen.rs` 生成时就按该约定做过索引交换，
-            // `parse_glb` 没有；枪模之所以正常，是因为 main.rs 给它的轴修正里恰好带一次翻转。
-            // 交换放在这里而不是上传处或着色器里，因为这正是"外部内容进入引擎绕序约定"的边界。
-            out.indices.push(tri[0] + base);
-            out.indices.push(tri[2] + base);
-            out.indices.push(tri[1] + base);
-        }
-        // 长度不是 3 的倍数的尾部（理论上不该出现）原样搬走：宁可留错也不静默丢三角形
-        for i in mesh.indices.chunks_exact(3).remainder() {
-            out.indices.push(*i + base);
-        }
-    }
-    out
 }
 
 /// 一个空间桶：合并几何里连续的一段索引，加一个用于视锥测试的包围球。
@@ -297,9 +210,21 @@ pub struct BinnedGeometry {
     pub max: [f32; 3],
 }
 
-/// 按格点分桶的合并，为"逐桶视锥剔除"准备数据。
+/// 按格点分桶的合并，为"逐桶视锥剔除"准备数据。**这是道具进 GPU 的唯一几何路径**
+/// （2026-09-08：不分桶的 `merge()` 已删——它没有一条理由是独有的，留着只是多一份
+/// 要同步第二遍的绕序/顶点变换代码）。
 ///
-/// 为什么要它：`RV3D_NO_PROPS` 的 A/B 实测显示 80 万顶点 / 36 万三角一次全量提交
+/// ## 为什么在 CPU 上烘死，而不是走实例化
+/// 实例化要新增一套实例 buffer、描述符集与管线分支；而道具总量只有几十万三角，
+/// 一张静态 VBO + 一次 draw call 就能画完，复用现成的 pos/color/uv 管线即可。
+///
+/// ## 地形跟随
+/// 位姿只在**摆放点**采样一次地高，不对顶点逐点抬升：逐点采样会把建筑的山墙
+/// 和窗台剪成斜面，比"四脚略有悬空"难看得多。中央 60×60 本来就压平到 y=0，
+/// 绝大多数楼与树因此完全贴地。
+///
+/// ## 为什么要分桶
+/// `RV3D_NO_PROPS` 的 A/B 实测显示 80 万顶点 / 36 万三角一次全量提交
 /// 吃掉约 40% 帧时间（fps 187 → 112），而 `cull_us` 只有 10µs、`wait_fence_us` 高达
 /// 5.9ms —— 是 GPU 受限。唯一解法是**少提交三角形**，即分桶后只画视锥内那几桶。
 ///
@@ -408,6 +333,11 @@ pub fn bin_visible(bin: &PropBin, planes: &[[f32; 4]; 6], margin: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 让 `merge_binned` 退化成"不分桶"的桶宽：任何有限坐标除以 ∞ 都是 0，
+    /// 于是全部摆放落进同一个桶键、按摆放序追加。用它就能在没有独立 `merge()`
+    /// 实现的前提下，单独验到绕序交换 / 顶点变换 / 地高+抬升这些与分桶无关的性质。
+    const SINGLE_BIN: f32 = f32::INFINITY;
     use std::f32::consts::FRAC_PI_2;
 
     fn kit() -> Option<PropSet> {
@@ -449,21 +379,30 @@ mod tests {
         assert!(g.indices.iter().all(|&i| (i as usize) < g.verts.len()));
     }
 
+    /// 分桶只该改变"这份索引怎么切成几段提交"，不该改变任何一个顶点或索引的数值。
+    /// 2026-09-08：原来这里比的是 `merge()`（不分桶的第二份实现）——那份代码删了，
+    /// 现在拿两个 cell 互比。**注意只比总数/包围盒/合法性，不比数值序列**：
+    /// 多桶按桶键（BTreeMap 序）排顶点，单桶按摆放序排，两者顺序本来就不可比。
     #[test]
-    fn merge_binned_totals_match_ungrouped_merge() {
+    fn binning_changes_segmentation_not_geometry() {
         let set = one_tri_set();
         let ps: Vec<PropPlacement> = (0..6)
             .map(|i| PropPlacement::new(0, i as f32 * 37.0 - 90.0, 0.0, 0.4, 1.5, false))
             .collect();
-        let flat = merge(&set, &ps, |x, _| x * 0.01);
-        let binned = merge_binned(&set, &ps, 40.0, |x, _| x * 0.01);
-        assert_eq!(binned.verts.len(), flat.verts.len(), "分桶不该改变顶点总数");
-        assert_eq!(binned.indices.len(), flat.indices.len());
-        // 只比总数与合法性，**不比索引数值**：两种合并的顶点排布顺序不同（一种按摆放
-        // 顺序、一种按桶），重基后的索引值本来就不可比。
-        assert!(binned.indices.iter().all(|&i| (i as usize) < binned.verts.len()));
-        assert_eq!(binned.min, flat.min);
-        assert_eq!(binned.max, flat.max);
+        let one = merge_binned(&set, &ps, SINGLE_BIN, |x, _| x * 0.01);
+        let many = merge_binned(&set, &ps, 40.0, |x, _| x * 0.01);
+        assert_eq!(one.verts.len(), many.verts.len(), "分桶不该改变顶点总数");
+        assert_eq!(one.indices.len(), many.indices.len(), "分桶不该改变索引总数");
+        assert_eq!(one.min, many.min);
+        assert_eq!(one.max, many.max);
+        assert!(many.indices.iter().all(|&i| (i as usize) < many.verts.len()));
+        assert_eq!(one.bins.len(), 1, "∞ 桶宽应退化成单桶");
+        assert!(many.bins.len() > 1, "40m 桶宽应切出多桶，否则这条测试什么都没比");
+        // 每桶的索引段拼起来必须正好是整份索引，无缝无叠
+        for g in [&one, &many] {
+            let cover: u32 = g.bins.iter().map(|b| b.index_count).sum();
+            assert_eq!(cover as usize, g.indices.len(), "桶覆盖的索引数不等于总索引数");
+        }
     }
 
     #[test]
@@ -605,15 +544,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn solidity_classification_is_stable_and_excludes_debris() {
-        assert!(is_solid_prop("building_block"));
-        assert!(is_solid_prop("container_20ft"));
-        assert!(is_solid_prop("wall_brick"));
-        assert!(!is_solid_prop("rubble_pile"), "瓦砾不该挡视线");
-        assert!(!is_solid_prop("capture_flag"), "旗面是纯装饰");
-    }
-
     /// 手工造一个只有 3 个顶点的网格，绕序与索引都已知，用来精确核对烘焙结果。
     fn tri_set() -> PropSet {
         let verts = vec![
@@ -633,10 +563,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_at_identity_reproduces_source_vertices() {
+    fn single_bin_at_identity_reproduces_source_vertices() {
         let set = tri_set();
         let p = PropPlacement::new(0, 0.0, 0.0, 0.0, 1.0, false);
-        let g = merge(&set, &[p], |_, _| 0.0);
+        let g = merge_binned(&set, &[p], SINGLE_BIN, |_, _| 0.0);
         assert_eq!(g.verts.len(), 3);
         // 顶点位置逐位相同，但索引被刻意换了一次面（适配引擎 CLOCKWISE 约定）
         assert_eq!(g.indices, vec![0, 2, 1], "merge 必须交换三角形第二、三个索引");
@@ -646,10 +576,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_rotates_positions_and_normals_about_y() {
+    fn single_bin_rotates_positions_and_normals_about_y() {
         let set = tri_set();
         let p = PropPlacement::new(0, 0.0, 0.0, FRAC_PI_2, 1.0, false);
-        let g = merge(&set, &[p], |_, _| 0.0);
+        let g = merge_binned(&set, &[p], SINGLE_BIN, |_, _| 0.0);
         // 源 (1,0,0) 绕 +Y 转 90° → (0,0,-1)
         let v = &g.verts[0];
         assert!(v[0].abs() < 1e-5, "x 应为 0，实际 {}", v[0]);
@@ -663,10 +593,10 @@ mod tests {
     }
 
     #[test]
-    fn merge_applies_ground_then_placement_lift() {
+    fn single_bin_applies_ground_then_placement_lift() {
         let set = tri_set();
         let p = PropPlacement::at(0, 5.0, 1.5, 7.0, 0.0, 1.0, false);
-        let g = merge(&set, &[p], |x, z| {
+        let g = merge_binned(&set, &[p], SINGLE_BIN, |x, z| {
             assert!((x - 5.0).abs() < 1e-5 && (z - 7.0).abs() < 1e-5, "地高应在摆放点采样");
             2.25
         });
@@ -677,14 +607,14 @@ mod tests {
     }
 
     #[test]
-    fn merge_rebases_indices_and_keeps_them_in_range() {
+    fn single_bin_rebases_indices_and_keeps_them_in_range() {
         let set = tri_set();
         let ps = vec![
             PropPlacement::new(0, 0.0, 0.0, 0.0, 1.0, false),
             PropPlacement::new(0, 10.0, 0.0, 0.0, 1.0, false),
             PropPlacement::new(0, 20.0, 0.0, 0.0, 1.0, false),
         ];
-        let g = merge(&set, &ps, |_, _| 0.0);
+        let g = merge_binned(&set, &ps, SINGLE_BIN, |_, _| 0.0);
         assert_eq!(g.verts.len(), 9);
         assert_eq!(g.indices.len(), 9);
         // 每件源索引 (0,1,2) 重基后再换面 → (b, b+2, b+1)
@@ -695,13 +625,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_of_real_kit_is_bounded_and_non_empty() {
+    fn single_bin_of_real_kit_is_bounded_and_non_empty() {
         let Some(set) = kit() else { return };
         let ps: Vec<PropPlacement> = (0..set.len())
             .map(|i| PropPlacement::new(i, i as f32 * 30.0, 0.0, 0.3, 1.0, false))
             .collect();
-        let g = merge(&set, &ps, |_, _| 0.0);
-        assert!(!g.is_empty());
+        let g = merge_binned(&set, &ps, SINGLE_BIN, |_, _| 0.0);
+        assert!(!g.verts.is_empty());
         assert_eq!(g.verts.len(), set.meshes.iter().map(|m| m.verts.len()).sum::<usize>());
         assert_eq!(g.indices.len(), set.meshes.iter().map(|m| m.indices.len()).sum::<usize>());
         assert!(g.indices.iter().all(|&i| (i as usize) < g.verts.len()));

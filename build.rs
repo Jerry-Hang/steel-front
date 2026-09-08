@@ -1423,12 +1423,15 @@ fn main() {
             output.push_str(&format!("pub const PT_FRAME_SPV: &[u32] = &{:?};\n\n", wv));
         }
     }
-    { let mut bb = spv_rt_bench::rt_bench_spv(); let mut by = Vec::with_capacity(bb.len()*4); for w in &bb { by.extend_from_slice(&w.to_le_bytes()); } let _ = std::fs::write(Path::new(&out_dir).join("rt_bench.spv"), &by); }
+    { let bb = spv_rt_bench::rt_bench_spv(); let mut by = Vec::with_capacity(bb.len()*4); for w in &bb { by.extend_from_slice(&w.to_le_bytes()); } let _ = std::fs::write(Path::new(&out_dir).join("rt_bench.spv"), &by); }
+    // 手写 SPIR-V 的结构自检（naga 不支持 ray-query，只能手拼，所以这里替它把门）。
+    // 2026-09-08：失败从 `cargo:warning=` 改成**编译期硬失败**——一条滚过去的 warning
+    // 挡不住坏字节码进设备，真实后果是运行时 device lost；而成功时那条
+    // `RT_SPV_STRUCT_OK` 又让每次构建都多一行假 warning。
     { let bb = spv_rt_bench::rt_bench_spv();
       let mut loader = rspirv::dr::Loader::new();
-      match rspirv::binary::parse_words(&bb, &mut loader) {
-        Ok(_) => println!("cargo:warning=RT_SPV_STRUCT_OK"),
-        Err(e) => println!("cargo:warning=RT_SPV_STRUCT_ERR: {}", e),
+      if let Err(e) = rspirv::binary::parse_words(&bb, &mut loader) {
+          panic!("rt_bench SPIR-V 结构非法（手写汇编被改坏了）: {e}");
       }
     }
     output.push_str("/// HUD 顶点着色器 SPIR-V 字节码\n");
