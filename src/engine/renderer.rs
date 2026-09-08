@@ -5688,9 +5688,10 @@ impl Renderer {
                 for y in (0..size).rev() {
                     for x in 0..size {
                         let i = ((y * size + x) * 4) as usize;
-                        bmp.push(px[i]);
-                        bmp.push(px[i + 1]);
-                        bmp.push(px[i + 2]);
+                        // 逐像素 3 次 push 会被 clippy::same_item_push 误判成"重复推同一个
+                        // 项"，而且这里本来就是"搬一段连续字节"，写成切片拷贝更贴原意。
+                        // 字节序与顺序保持完全不变（BMP 那 3 个字节仍是 px 的前三分量）。
+                        bmp.extend_from_slice(&px[i..i + 3]);
                     }
                     for _ in 0..pad { bmp.push(0); }
                 }
@@ -9839,7 +9840,12 @@ mod instance_slot_layout_tests {
     /// 出过两次真 bug（枪槽区间覆盖 NPC 圆柱/球体段 → 四肢和头被 z=0 深度覆盖，
     /// 表现为"鬼魂穿模"）。字面量没法被 Rust 类型系统检查，所以用测试兜住：
     /// 改任何一档容量都必须同时改 build.rs 的两处字面量，否则本测试失败。
+    ///
+    /// `#[allow(clippy::assertions_on_constants)]`：本条测试**全部内容**就是断言常量之间
+    /// 的关系，这正是它的价值所在。clippy 那条 lint 针对的是 `assert!(true)` 这类笔误，
+    /// 套不到故意钉死布局的回归护栏上——删掉才是丢保护。
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn gun_slot_layout_is_pinned() {
         assert_eq!(MARKER_SLOT_BASE, 65537, "marker 区起点 = 地形 identity 之后一槽");
         assert_eq!(NPC_SLOT_BASE, 65537 + 8192);

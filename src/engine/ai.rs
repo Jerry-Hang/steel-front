@@ -1092,12 +1092,10 @@ mod tests {
         assert_eq!(wave_profile(2).attack_range, 13.0);
         assert_eq!(wave_profile(8).attack_range, 16.0);
         assert_eq!(wave_profile(9).attack_range, 16.0);
-        // 与 game.rs spawn_wave 早期波次一致
-        assert_eq!(wave_profile(1).count, (4 + 2 * 1).min(24));
-        assert_eq!(
-            wave_profile(1).speed,
-            (4.0f32 * (1.0 + 0.06 * (1.0f32 - 1.0))).min(8.0)
-        );
+        // 与 game.rs spawn_wave 早期波次一致。写死期望值，不把生产公式重抄一遍——
+        // 抄过来的话，公式被改坏时测试会跟着一起改，等于什么都没测到。
+        assert_eq!(wave_profile(1).count, 6, "第 1 波 4+2·1=6 人");
+        assert_eq!(wave_profile(1).speed, 4.0, "第 1 波是速度曲线基准点");
     }
 
     #[test]
@@ -1184,8 +1182,14 @@ mod tests {
         assert_eq!(wave_profile(1).dps, 5.0);
         assert_eq!(wave_profile(3).dps, 5.0);
         assert_eq!(wave_profile(5).dps, 12.0, "Boss 波 dps 更高");
-        // 常规波主曲线保持原样（供集成回归）
-        assert_eq!(wave_profile(4).count, (4 + 2 * 4).min(24));
+        // 常规波主曲线保持原样（供集成回归）。
+        // 2026-09-08：这里原来写的是 `(4 + 2 * 4).min(24)`——把生产公式在测试里重抄一遍，
+        // 而且 4+2·4=12 恒小于 24，`.min(24)` 那个分支一次都没被验证过（clippy 以
+        // const_comparisons 报"因此无效"）。改成写死期望值，并补下面三条真正顶到上限的。
+        assert_eq!(wave_profile(4).count, 12, "第 4 波 4+2·4=12 人");
+        assert_eq!(wave_profile(10).count, 24, "第 10 波 4+2·10=24，正好触顶");
+        assert_eq!(wave_profile(11).count, 24, "第 11 波算出 26，必须被截到 24");
+        assert_eq!(wave_profile(30).count, 24, "再往后也不许超编");
         assert_eq!(wave_profile(4).hp, 100.0 + 20.0 * 3.0);
     }
 

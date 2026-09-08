@@ -1348,7 +1348,11 @@ mod tests {
         assert!(!rack.active_firearm_ref().is_reloading());
     }
 
+    /// 手雷常量钉死（含"引信下限必须小于上限"这条关系，写反了会立刻炸在这里）。
+    /// `#[allow(clippy::assertions_on_constants)]`：整条测试就是断言常量，这是有意的回归护栏，
+    /// 不是 `assert!(true)` 那种笔误。
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn grenade_constants_locked() {
         assert_eq!(GRENADE_GRAVITY, 9.8);
         assert_eq!(GRENADE_FUSE_MIN, 1.5);

@@ -2597,7 +2597,12 @@ mod tests {
         count
     }
 
+    /// `#[allow(clippy::assertions_on_constants)]`：末尾三条"参数域合理性"断言是在常量
+    /// 之间做比较，clippy 因此报"恒真/恒假"。它们是**故意**的取值域护栏（爆鸣增益必须
+    /// 落在 0..=1、时长必须为正），改坏任一参数就会在这里失败；真正的可区分性检查在上面
+    /// 那几条 `assert_ne!`，那些不是常量断言。
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn shot_params_m1_and_thompson_differ() {
         // M1 与 Thompson 音色参数必须可区分（音高/时长/闷度至少一项不同）
         assert_ne!(M1_SHOT.pitch, THOMPSON_SHOT.pitch, "音高应不同（M1 高脆 / Thompson 低闷）");

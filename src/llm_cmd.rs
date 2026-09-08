@@ -411,7 +411,10 @@ fn decide_side(side: &SideCtx, name: &str, url: &str) {
     let body = format!(
         "{{\"model\":\"local\",\"temperature\":0.4,\"max_tokens\":600,\"no_think\":true,\"messages\":[{msgs}]}}"
     );
-    let note_or_decision = match http_post_json(url, &body, Duration::from_secs(150)) {
+    // 原来写成 `let note_or_decision = match {...}` 再在函数末尾 `let _ = note_or_decision;`
+    // 丢弃——这个 match 两个分支都返回 ()，绑定纯属多余（clippy::let_unit_value），
+    // 名字还暗示有个没用完的"笔记/决策"返回值，读起来像漏了逻辑。直接当语句执行。
+    match http_post_json(url, &body, Duration::from_secs(150)) {
         Ok(resp) => {
             let content = parse_json_fn(&resp)
                 .ok()
@@ -464,8 +467,7 @@ fn decide_side(side: &SideCtx, name: &str, url: &str) {
             log::warn!("llmcmd[{name}]: HTTP 失败: {e}");
             log_decision(name, &situation, "", false, &format!("http:{e}"));
         }
-    };
-    let _ = note_or_decision;
+    }
 }
 
 impl LlmCommander {

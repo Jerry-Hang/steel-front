@@ -110,45 +110,29 @@ fn load_from(path: &Path) -> GameConfig {
             }
             // 键码 = winit 0.30 KeyCode 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/
             // KeyR=36/Space=62/ContextMenu=54），见 ui.rs KeyBindings::defaults
-            "bind_forward" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Forward, parse_u32(41));
-                }
+            "bind_forward" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Forward, parse_u32(41));
             }
-            "bind_backward" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Backward, parse_u32(37));
-                }
+            "bind_backward" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Backward, parse_u32(37));
             }
-            "bind_left" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Left, parse_u32(19));
-                }
+            "bind_left" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Left, parse_u32(19));
             }
-            "bind_right" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Right, parse_u32(22));
-                }
+            "bind_right" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Right, parse_u32(22));
             }
-            "bind_reload" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Reload, parse_u32(36));
-                }
+            "bind_reload" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Reload, parse_u32(36));
             }
-            "bind_fire" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Fire, parse_u32(0));
-                }
+            "bind_fire" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Fire, parse_u32(0));
             }
-            "bind_jump" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Jump, parse_u32(62));
-                }
+            "bind_jump" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Jump, parse_u32(62));
             }
-            "bind_menu" => {
-                if bindings_ok {
-                    cfg.bindings.bind(BindingAction::Menu, parse_u32(54));
-                }
+            "bind_menu" if bindings_ok => {
+                cfg.bindings.bind(BindingAction::Menu, parse_u32(54));
             }
             _ => {}
         }

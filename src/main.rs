@@ -577,7 +577,9 @@ impl GameApp {
         }
         // 枪械检视模式：不跑游戏逻辑，仅 Orbit 相机绕枪模（鼠标拖拽旋转/滚轮缩放，
         // 事件处理已有 orbit 控制）；首次进入设置相机朝向。
-        if self.inspect_weapon.is_some() {
+        // 用 `if let` 绑住槽位号，替掉原来"外层 is_some() + 日志里 unwrap()"的写法：
+        // 那对组合靠两处代码之间的距离保证不 panic，改一处就可能漏另一处。
+        if let Some(inspect_w) = self.inspect_weapon {
             self.camera.mode = CameraMode::Orbit;
             if !self.inspect_armed {
                 self.inspect_armed = true;
@@ -618,7 +620,7 @@ impl GameApp {
                 }
                 log::info!(
                     "inspect: 枪械检视模式（武器 #{}）——拖拽旋转 / 滚轮缩放",
-                    self.inspect_weapon.unwrap()
+                    inspect_w
                 );
             }
             return;
@@ -1832,13 +1834,19 @@ impl GameApp {
                 .collect();
             // 客户端联机模式：显示服务器世界（快照实体：位置/朝向/血量来自服务器权威），
             // 阵营色借用本地同 id NPC 的归属（同一确定性地图/波次，id 对齐）
+            //
+            // 进画面的规则：id 段 >=100_000 是远端玩家、id==0 是本机玩家槽，两者无条件进；
+            // 剩下的都是本地 NPC（id < 100_000），只有活着才进。
+            // 原来写成 `(id<100k && hp>0) || id==0 || id>=100k`：`id==0` 已被 `id<100k`
+            // 覆盖，而 `id>=100k` 恰好是 `id<100k` 的反面，吸收律化简后那段 id 判据是多余的
+            // （clippy::nonminimal_bool 报的就是这个）。化简式逐档等价。
             let net_mode = self.game.net_client.is_some();
             let npc_visuals: Vec<engine::renderer::NpcVisual> = if net_mode {
                 let client = self.game.net_client.as_ref().unwrap();
                 client
                     .entities()
                     .iter()
-                    .filter(|(id, e)| (**id < 100_000 && e.hp > 0.0) || **id == 0 || **id >= 100_000)
+                    .filter(|(id, e)| **id >= 100_000 || **id == 0 || e.hp > 0.0)
                     .map(|(_, e)| {
                         // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
                         let tint = if e.hp > 0.0 {

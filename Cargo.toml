@@ -1,7 +1,7 @@
 [package]
 name = "steel-front"
 version = "0.1.0"
-description = "钢铁前线 (Steel Front) - 二战FPS游戏引擎"
+description = "钢铁前线 (Steel Front) - 21 世纪架空世界观大战场 FPS 引擎"
 edition = "2021"
 
 [dependencies]
@@ -25,3 +25,27 @@ image = "0.25"
 # 编译 WGSL 着色器为 SPIR-V（构建时）
 naga = { version = "30", features = ["wgsl-in", "spv-out", "spv-in"] }
 rspirv = "0.11"
+
+# ---------------------------------------------------------------------------
+# 2026-09-08：项目第一次系统性跑 clippy（此前没有 CI、没有 lint 配置，从没跑过）。
+# 存量 120+ 条几乎全是风格类（field_reassign_with_default、needless_borrow、
+# manual_is_multiple_of、doc_lazy_continuation、type_complexity、manual_div_ceil、
+# unnecessary_cast …）。逐条改写在一部手调过的 Vulkan 渲染器上是纯 churn，且改完
+# 没有回归网兜着；所以这里定**明确策略**，而不是往源码里撒 #[allow] 把问题藏起来：
+#
+#   correctness / suspicious → deny：真 bug 一律拦在编译期。首轮已按此清掉两条
+#     deny 级 error（main.rs 的 MAX_FPS>0 恒假比较、geom.rs 的 e 近似值字面量），
+#     以及 same_item_push / nonminimal_bool / let_unit_value / collapsible_match /
+#     items_after_test_module 这些**可能藏真问题**的，全部人工核对后改掉了。
+#   style / complexity / perf  → allow：想清理时临时
+#     `cargo clippy -- -W clippy::style` 分批做，不作为常态门禁。
+#
+# `unused` 组（cargo 那 51 条警告的来源）保持默认的 warn，不动——它刚被清零，
+# 再堆回来要能看见。
+# ---------------------------------------------------------------------------
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+perf = { level = "allow", priority = -1 }

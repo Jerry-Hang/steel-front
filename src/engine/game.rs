@@ -4827,6 +4827,436 @@ impl Game {
     }
 }
 
+
+/// 攻击态掩体选择：在障碍环带 `[ring_inner, ring_outer]` 内、紧邻存活障碍盒、
+/// 且距目标不超过 `attack_range` 的遮挡掩体点中选最优（封闭性优先、其次离目标远——
+/// 贴近射程边缘的掩体到位即可开火）。
+///
+/// - 掩体候选来自 `find_cover_shielding`（阻挡格挡在 NPC 与目标之间）
+/// - 环带与障碍列表由调用方传入（读 MAP_RING_INNER/MAP_RING_OUTER 与关卡障碍列表；
+///   摧毁后的障碍已从列表移除，其掩体点随之失效）
+/// - 中央安全区内没有障碍 → 返回 None → 调用方保持直线推进/原地站定（冒烟机制不变）
+fn pick_attack_cover(
+    grid: &GridMap,
+    npc: GridPos,
+    target: GridPos,
+    attack_range: f32,
+    ring_inner: f32,
+    ring_outer: f32,
+    max_dist: u32,
+    obstacles: &[MapObstacle],
+) -> Option<GridPos> {
+    let mut best: Option<(u32, u32, GridPos)> = None;
+    for cover in find_cover_shielding(grid, npc, target, max_dist) {
+        let (wx, wz) = grid_to_world(cover.pos);
+        let d_origin = (wx * wx + wz * wz).sqrt();
+        if d_origin < ring_inner || d_origin > ring_outer {
+            continue;
+        }
+        // 掩体必须紧邻存活障碍盒（容差 GRID_CELL*2 覆盖"格中心到盒边"的最坏距离）
+        let near_obstacle = obstacles.iter().any(|o| {
+            (wx - o.x).abs() <= o.half_w + GRID_CELL * 2.0
+                && (wz - o.z).abs() <= o.half_d + GRID_CELL * 2.0
+        });
+        if !near_obstacle {
+            continue;
+        }
+        let (tx, tz) = grid_to_world(target);
+        let dx = wx - tx;
+        let dz = wz - tz;
+        if dx * dx + dz * dz > attack_range * attack_range {
+            continue;
+        }
+        let dist_t = target.manhattan(cover.pos);
+        let better = match best {
+            None => true,
+            Some((bo, bd, _)) => {
+                cover.openness < bo || (cover.openness == bo && dist_t > bd)
+            }
+        };
+        if better {
+            best = Some((cover.openness, dist_t, cover.pos));
+        }
+    }
+    best.map(|(_, _, pos)| pos)
+}
+
+/// 按状态与战术推进单个 NPC：目标选择 → A* 寻路 → 移动（锯齿/躲避）→ 地形高度采样
+fn advance_npc(
+    npc: &mut Npc,
+    state: NpcState,
+    tactic: Tactic,
+    target: &glam::Vec3,
+    target_yaw: f32,
+    grid: &GridMap,
+    ring_inner: f32,
+    ring_outer: f32,
+    obstacles: &[MapObstacle],
+    time: f32,
+    dt: f32,
+    stress: bool,
+    squad_wp: Option<[f32; 2]>,
+) {
+    // 无路径（或已走完）时按状态 + 战术选择目标
+    if npc.path.is_empty() || npc.path_index >= npc.path.len() {
+        // 火-机动换位：换位目标优先（任何状态，一经设定即向换位点移动）
+        let goal = if let Some(rp) = npc.reposition {
+            world_to_grid(rp[0], rp[1])
+        } else {
+            match state {
+            NpcState::Chase => match tactic {
+                // 突击/压制：直线逼近（压制手到射程边缘即转 Attack 站定）
+                // 班目标点：未接敌且有命令时优先向班目标点推进（>15m 时）
+                Tactic::Advance | Tactic::Suppress => {
+                    if let Some(wp) = squad_wp {
+                        let sd2 = (npc.position[0] - wp[0]).powi(2) + (npc.position[2] - wp[1]).powi(2);
+                        if sd2 > 15.0 * 15.0 {
+                            world_to_grid(wp[0], wp[1])
+                        } else {
+                            world_to_grid(target.x, target.z)
+                        }
+                    } else {
+                        world_to_grid(target.x, target.z)
+                    }
+                }
+                // 侧翼包抄：垂直轴向偏移 3 格（12m），id 奇偶定左右形成钳形
+                Tactic::Flank => {
+                    let target_g = world_to_grid(target.x, target.z);
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let side = if npc.id % 2 == 0 { 1 } else { -1 };
+                    flank_goal(grid, target_g, npc_g, side, FLANK_OFFSET)
+                }
+                // 偷袭绕背：玩家未面朝时绕大圈（20m 偏移）从背后逼近
+                Tactic::Ambush => {
+                    let target_g = world_to_grid(target.x, target.z);
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    ambush_goal(grid, target_g, npc_g, target_yaw, AMBUSH_OFFSET)
+                }
+                // 掩体跃进：逐掩体推进（只选比当前更靠近玩家的掩体）
+                Tactic::CoverAdvance => {
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let target_g = world_to_grid(target.x, target.z);
+                    let cur = npc_g.manhattan(target_g);
+                    match find_cover_points(grid, npc_g, COVER_MAX_DIST)
+                        .into_iter()
+                        .find(|c| c.dist < cur)
+                    {
+                        Some(cover) => cover.pos,
+                        None => target_g,
+                    }
+                }
+                // 掩体利用：障碍环带内选"距目标 ≤ 攻击距离"的遮挡掩体，先到掩体再开火；
+                // 无可用掩体（中央安全区）→ 直线推进，保持站定/站定日志语义。
+                // 压力模式（NPC-vs-NPC）：沿目标方向找遮挡掩体（NPC 穿越障碍带时利用），
+                // 就近取第一个；环带过滤不适用（NPC 在环带外）。
+                Tactic::CoverSeek => {
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let target_g = world_to_grid(target.x, target.z);
+                    if stress {
+                        crate::engine::ai::find_cover_shielding(
+                            grid,
+                            npc_g,
+                            target_g,
+                            STRESS_COVER_MAX_DIST,
+                        )
+                        .first()
+                        .map(|c| c.pos)
+                        .unwrap_or(target_g)
+                    } else {
+                        pick_attack_cover(
+                            grid,
+                            npc_g,
+                            target_g,
+                            npc.attack_range,
+                            ring_inner,
+                            ring_outer,
+                            COVER_MAX_DIST,
+                            obstacles,
+                        )
+                        .unwrap_or(target_g)
+                    }
+                }
+                // 低血量撤退：撤向最封闭且较远的遮挡掩体（阻挡格挡在 NPC 与玩家之间）
+                Tactic::Retreat => {
+                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                    let target_g = world_to_grid(target.x, target.z);
+                    find_cover_shielding(grid, npc_g, target_g, COVER_MAX_DIST)
+                        .first()
+                        .map(|c| c.pos)
+                        .unwrap_or(npc_g)
+                }
+                Tactic::Hold => world_to_grid(npc.position[0], npc.position[2]),
+            },
+            NpcState::Attack => {
+                // 就近掩体站定（贴障碍簇）；无掩体原地（保持攻击站定日志供冒烟瞄准）
+                let npc_g = world_to_grid(npc.position[0], npc.position[2]);
+                match find_cover_points(grid, npc_g, COVER_MAX_DIST).first() {
+                    Some(cover) => cover.pos,
+                    None => npc_g,
+                }
+            }
+            NpcState::Patrol | NpcState::Idle => {
+                // 班目标点：有命令时优先按班目标推进；否则确定性巡逻点（随 id 相位与时间缓慢旋转）
+                if let Some(wp) = squad_wp {
+                    world_to_grid(wp[0], wp[1])
+                } else {
+                    let angle = npc.id as f32 * 2.399 + (time / 8.0).floor() * 0.7;
+                    let r = 20.0 + npc.id as f32 * 3.0;
+                    world_to_grid(
+                        npc.home[0] + r * angle.cos(),
+                        npc.home[1] + r * angle.sin(),
+                    )
+                }
+            }
+        }
+        };
+        let start = world_to_grid(npc.position[0], npc.position[2]);
+        // 寻路兜底（2026-08-23 残局卡死修复）：目标不可达时先找最近可行格，
+        // 仍无路径则直行进逼（可能蹭障碍但绝不原地踏步），保证任何局面都在动。
+        let mut path = find_path(grid, start, goal);
+        if path.is_none() {
+            // 螺旋扫描目标周边（半径 8 格）找可行的最近格
+            let mut best: Option<(i32, i64, crate::engine::ai::GridPos)> = None;
+            for r in 1..=8 {
+                let mut found = false;
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let dx = dx as i32;
+                        let dy = dy as i32;
+                        if dx.abs() != r && dy.abs() != r {
+                            continue;
+                        }
+                        let gp = crate::engine::ai::GridPos {
+                            x: goal.x + dx,
+                            y: goal.y + dy,
+                        };
+                        if !grid.is_passable(gp) {
+                            continue;
+                        }
+                        let d = (dx * dx + dy * dy) as i64;
+                        if best.as_ref().map_or(true, |(_, bd, _)| d < *bd) {
+                            best = Some((r, d, gp));
+                        }
+                        found = true;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            if let Some((_, _, gp)) = best {
+                path = find_path(grid, start, gp);
+            }
+        }
+        npc.path = path.clone().unwrap_or_default();
+        npc.path_index = 0;
+        // 直行机动：路径全空（含兜底失败）→ 朝世界坐标目标直线移动，绝不原地踏步
+        npc.direct_goal = path.is_none();
+        if npc.direct_goal {
+            let (wx, wz) = grid_to_world(goal);
+            npc.direct_x = wx;
+            npc.direct_z = wz;
+        }
+    }
+
+    // 躲避冷却/计时无条件递减（含 Attack 态，防冻结窗口；残留计时归零防"幽灵侧移"）
+    npc.hit_cooldown = (npc.hit_cooldown - dt).max(0.0);
+    npc.dodge_timer = (npc.dodge_timer - dt).max(0.0);
+
+    // 爆炸冲击波推挤：覆盖本帧移动（指数衰减，约 0.25s 内衰减到 5%）
+    if npc.knockback[0] != 0.0 || npc.knockback[1] != 0.0 {
+        npc.position[0] += npc.knockback[0] * dt;
+        npc.position[2] += npc.knockback[1] * dt;
+        let decay = (-KNOCKBACK_DECAY * dt).exp();
+        npc.knockback[0] *= decay;
+        npc.knockback[1] *= decay;
+        if npc.knockback[0].abs() < 0.05 && npc.knockback[1].abs() < 0.05 {
+            npc.knockback = [0.0, 0.0];
+        }
+        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+        return;
+    }
+
+    // 攻击态原地站定（冒烟瞄准依据 `npc: #id stand`）；火-机动换位中不站定（连续移动）
+    if state == NpcState::Attack && npc.reposition.is_none() {
+        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+        return;
+    }
+
+    // 受击/火力威胁后侧向弹开（垂直于 目标→NPC 方向，id 奇偶定左右）
+    if npc.dodge_timer > 0.0 {
+        let dx = npc.position[0] - target.x;
+        let dz = npc.position[2] - target.z;
+        let d = (dx * dx + dz * dz).sqrt().max(1e-4);
+        let side = if npc.id % 2 == 0 { 1.0 } else { -1.0 };
+        let step = npc.speed * dt;
+        npc.position[0] += -dz / d * side * step;
+        npc.position[2] += dx / d * side * step;
+        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+        return;
+    }
+
+    let (tx, tz) = if npc.path_index < npc.path.len() {
+        grid_to_world(npc.path[npc.path_index])
+    } else if npc.direct_goal {
+        (npc.direct_x, npc.direct_z)
+    } else {
+        (npc.position[0], npc.position[2])
+    };
+    let dx = tx - npc.position[0];
+    let dz = tz - npc.position[2];
+    let d = (dx * dx + dz * dz).sqrt();
+    if d < 1.0 {
+        npc.path_index += 1;
+    } else if d > 1e-4 {
+        // 推进态锯齿机动：垂直前进方向横向摆动（被瞄准/火力威胁时幅度加大）
+        let dxp = npc.position[0] - target.x;
+        let dzp = npc.position[2] - target.z;
+        let dist_p = (dxp * dxp + dzp * dzp).sqrt();
+        let (mut mx, mut mz) = (dx / d, dz / d);
+        if state == NpcState::Chase && dist_p < ZIGZAG_DIST && tactic != Tactic::Retreat {
+            let amp = if npc.perception.under_fire || npc.perception.player_aiming {
+                ZIGZAG_AMP_HIGH
+            } else {
+                ZIGZAG_AMP
+            };
+            let off = zigzag_offset(time, npc.id as u32, amp);
+            mx += -dz / d * off;
+            mz += dx / d * off;
+            let mlen = (mx * mx + mz * mz).sqrt().max(1e-4);
+            mx /= mlen;
+            mz /= mlen;
+        }
+        let step = npc.speed * dt;
+        npc.position[0] += mx * step;
+        npc.position[2] += mz * step;
+        // 2026-08-25 穿墙修复：移动后对存活的静态障碍 AABB 推开（直行/路径均在障碍外滑行）
+        let (px, pz) = resolve_circle_obstacles(obstacles, npc.position[0], npc.position[2], 0.45);
+        npc.position[0] = px;
+        npc.position[2] = pz;
+    }
+    npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+}
+
+/// 圆（半径 r）对存活障碍 AABB 的水平推开（NPC 移动后防穿墙；MapObstacle 版）
+fn resolve_circle_obstacles(obs: &[MapObstacle], x: f32, z: f32, r: f32) -> (f32, f32) {
+    let mut ox = x;
+    let mut oz = z;
+    for ob in obs {
+        let (hx, hz) = (ob.half_w, ob.half_d);
+        let cx = (ox - ob.x).clamp(-hx, hx);
+        let cz = (oz - ob.z).clamp(-hz, hz);
+        let dx = ox - (ob.x + cx);
+        let dz = oz - (ob.z + cz);
+        let d2 = dx * dx + dz * dz;
+        if d2 < r * r {
+            if d2 > 1e-6 {
+                let d = d2.sqrt();
+                let push = r - d;
+                ox += dx / d * push;
+                oz += dz / d * push;
+            } else {
+                let px = hx + r - (ox - ob.x).abs();
+                let pz = hz + r - (oz - ob.z).abs();
+                if px < pz {
+                    ox += if ox > ob.x { px } else { -px };
+                } else {
+                    oz += if oz > ob.z { pz } else { -pz };
+                }
+            }
+        }
+    }
+    (ox, oz)
+}
+
+/// 网络远端玩家快照 id 基址（与 NPC id 空间隔离：100000+）
+const NET_PLAYER_BASE: u32 = 100_000;
+
+/// 圆（半径 r）对静态障碍 AABB 的水平推开：返回 (x, z)（AABB 为 (cx±half_w, cz±half_d)）
+fn resolve_circle_static(
+    bodies: &[physics::Body],
+    x: f32,
+    z: f32,
+    r: f32,
+) -> (f32, f32) {
+    let mut ox = x;
+    let mut oz = z;
+    for b in bodies {
+        let (hx, hz) = (b.half_extents.x, b.half_extents.z);
+        let cx = (ox - b.position.x).clamp(-hx, hx);
+        let cz = (oz - b.position.z).clamp(-hz, hz);
+        let dx = ox - (b.position.x + cx);
+        let dz = oz - (b.position.z + cz);
+        let d2 = dx * dx + dz * dz;
+        if d2 < r * r {
+            if d2 > 1e-6 {
+                let d = d2.sqrt();
+                let push = r - d;
+                ox += dx / d * push;
+                oz += dz / d * push;
+            } else {
+                // 圆心在盒内：沿最小穿透轴推出
+                let px = hx + r - (ox - b.position.x).abs();
+                let pz = hz + r - (oz - b.position.z).abs();
+                if px < pz {
+                    ox += if ox > b.position.x { px } else { -px };
+                } else {
+                    oz += if oz > b.position.z { pz } else { -pz };
+                }
+            }
+        }
+    }
+    (ox, oz)
+}
+
+/// 红蓝阵营存活 NPC 的平均 x/z（阵营为空 → [0.0, 0.0]；命令行军/军情用）
+/// 生成红营态势 JSON（LLM 指挥官输入；严格字段：兵力/重心/接敌/当前命令）
+fn build_llm_situation(a: &crate::engine::ai_command::Army) -> String {
+    let side = match a.side {
+        Team::Red => "red",
+        Team::Blue => "blue",
+    };
+    let mut s = format!(
+        "{{\"battle\":\"128v128\",\"side\":\"{side}\",\"map_half\":270,\"enemy\":{{\"x\":{:.0},\"z\":{:.0}}},\"companies\":[",
+        a.enemy_centroid[0], a.enemy_centroid[1]
+    );
+    for (i, c) in a.companies.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let cur = match c.order {
+            crate::engine::ai_command::CompanyOrder::Assault => "Assault",
+            crate::engine::ai_command::CompanyOrder::Hold => "Hold",
+            crate::engine::ai_command::CompanyOrder::Flank(1) => "FlankL",
+            crate::engine::ai_command::CompanyOrder::Flank(_) => "FlankR",
+            crate::engine::ai_command::CompanyOrder::Regroup => "Regroup",
+        };
+        s.push_str(&format!(
+            "{{\"id\":{i},\"strength\":{:.0},\"x\":{:.0},\"z\":{:.0},\"contact\":{},\"current\":\"{cur}\"}}",
+            c.report.strength, c.report.centroid[0], c.report.centroid[1], c.report.contact
+        ));
+    }
+    s.push_str("]}");
+    s
+}
+
+fn team_centroids(npcs: &[Npc]) -> ([f32; 2], [f32; 2]) {
+    let mut rc = [0.0f32; 2];
+    let mut bc = [0.0f32; 2];
+    let mut rn = 0usize;
+    let mut bn = 0usize;
+    for n in npcs {
+        match n.team {
+            Team::Red => { rc[0] += n.position[0]; rc[1] += n.position[2]; rn += 1; }
+            Team::Blue => { bc[0] += n.position[0]; bc[1] += n.position[2]; bn += 1; }
+        }
+    }
+    let avg = |c: [f32; 2], n: usize| -> [f32; 2] {
+        if n > 0 { [c[0] / n as f32, c[1] / n as f32] } else { [0.0, 0.0] }
+    };
+    (avg(rc, rn), avg(bc, bn))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5325,7 +5755,7 @@ mod tests {
         assert_eq!(game.wave, 1);
         assert_eq!(game.score, 0);
         assert_eq!(game.hud.health, game.hud.max_health);
-        assert_eq!(game.npcs.len(), (4 + 2 * 1).min(24), "wave 1 spawns 6");
+        assert_eq!(game.npcs.len(), 6, "wave 1 spawns 4+2·1=6");
     }
 
     /// 死亡结算 R 重开：状态复位并重新生成第 1 波
@@ -5360,7 +5790,7 @@ mod tests {
         }
         assert_eq!(game.wave, 2, "next wave should spawn after countdown");
         assert!(!game.npcs.is_empty(), "wave 2 should spawn enemies");
-        assert_eq!(game.npcs.len(), (4 + 2 * 2).min(24));
+        assert_eq!(game.npcs.len(), 8, "wave 2 spawns 4+2·2=8");
     }
 
     /// 波次递进：下一波数量/速度/血量都高于上一波
@@ -5397,7 +5827,7 @@ mod tests {
         game.on_any_key(&glam::Vec3::ZERO);
         let old_ids: Vec<usize> = game.npcs.iter().map(|n| n.id).collect();
         game.spawn_wave(3, &glam::Vec3::ZERO);
-        assert_eq!(game.npcs.len(), (4 + 2 * 3).min(24), "wave 3 count");
+        assert_eq!(game.npcs.len(), 10, "wave 3 spawns 4+2·3=10");
         assert!(
             game.npcs.iter().all(|n| !old_ids.contains(&n.id)),
             "all old-wave npcs must be purged before the new wave"
@@ -5814,11 +6244,12 @@ mod tests {
         // UDP 环回投递可能有毫秒级延迟：带超时轮询（与 net.rs recv_until 同款模式），避免偶发失败
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
         while !got_join && std::time::Instant::now() < deadline {
-            if let Ok(Some((msg, from))) = demo.server.recv() {
-                if let NetworkMessage::Join { player_id, .. } = &msg {
-                    got_join = *player_id == 0;
-                    assert!(demo.server.handle_join(from, "local".into(), crate::net::SESSION_VERSION).is_ok());
-                }
+            // 内层 `if let NetworkMessage::Join` 折进同一条模式：非 Join 的消息原本也是
+            // 直接落空忽略，两种写法行为一致（clippy::collapsible_match）。
+            // 注意折叠后 `player_id` 是按值绑定（原来配 `&msg` 是 `&u32` 才需要解引用）。
+            if let Ok(Some((NetworkMessage::Join { player_id, .. }, from))) = demo.server.recv() {
+                got_join = player_id == 0;
+                assert!(demo.server.handle_join(from, "local".into(), crate::net::SESSION_VERSION).is_ok());
             }
             if !got_join {
                 std::thread::sleep(std::time::Duration::from_millis(2));
@@ -6942,433 +7373,4 @@ mod tests {
         assert_eq!(game.objective.eliminated, 0, "新一轮目标已重置");
         assert_eq!(game.objective.target, 4, "新一轮目标 = 歼灭一队");
     }
-}
-
-/// 攻击态掩体选择：在障碍环带 `[ring_inner, ring_outer]` 内、紧邻存活障碍盒、
-/// 且距目标不超过 `attack_range` 的遮挡掩体点中选最优（封闭性优先、其次离目标远——
-/// 贴近射程边缘的掩体到位即可开火）。
-///
-/// - 掩体候选来自 `find_cover_shielding`（阻挡格挡在 NPC 与目标之间）
-/// - 环带与障碍列表由调用方传入（读 MAP_RING_INNER/MAP_RING_OUTER 与关卡障碍列表；
-///   摧毁后的障碍已从列表移除，其掩体点随之失效）
-/// - 中央安全区内没有障碍 → 返回 None → 调用方保持直线推进/原地站定（冒烟机制不变）
-fn pick_attack_cover(
-    grid: &GridMap,
-    npc: GridPos,
-    target: GridPos,
-    attack_range: f32,
-    ring_inner: f32,
-    ring_outer: f32,
-    max_dist: u32,
-    obstacles: &[MapObstacle],
-) -> Option<GridPos> {
-    let mut best: Option<(u32, u32, GridPos)> = None;
-    for cover in find_cover_shielding(grid, npc, target, max_dist) {
-        let (wx, wz) = grid_to_world(cover.pos);
-        let d_origin = (wx * wx + wz * wz).sqrt();
-        if d_origin < ring_inner || d_origin > ring_outer {
-            continue;
-        }
-        // 掩体必须紧邻存活障碍盒（容差 GRID_CELL*2 覆盖"格中心到盒边"的最坏距离）
-        let near_obstacle = obstacles.iter().any(|o| {
-            (wx - o.x).abs() <= o.half_w + GRID_CELL * 2.0
-                && (wz - o.z).abs() <= o.half_d + GRID_CELL * 2.0
-        });
-        if !near_obstacle {
-            continue;
-        }
-        let (tx, tz) = grid_to_world(target);
-        let dx = wx - tx;
-        let dz = wz - tz;
-        if dx * dx + dz * dz > attack_range * attack_range {
-            continue;
-        }
-        let dist_t = target.manhattan(cover.pos);
-        let better = match best {
-            None => true,
-            Some((bo, bd, _)) => {
-                cover.openness < bo || (cover.openness == bo && dist_t > bd)
-            }
-        };
-        if better {
-            best = Some((cover.openness, dist_t, cover.pos));
-        }
-    }
-    best.map(|(_, _, pos)| pos)
-}
-
-/// 按状态与战术推进单个 NPC：目标选择 → A* 寻路 → 移动（锯齿/躲避）→ 地形高度采样
-fn advance_npc(
-    npc: &mut Npc,
-    state: NpcState,
-    tactic: Tactic,
-    target: &glam::Vec3,
-    target_yaw: f32,
-    grid: &GridMap,
-    ring_inner: f32,
-    ring_outer: f32,
-    obstacles: &[MapObstacle],
-    time: f32,
-    dt: f32,
-    stress: bool,
-    squad_wp: Option<[f32; 2]>,
-) {
-    // 无路径（或已走完）时按状态 + 战术选择目标
-    if npc.path.is_empty() || npc.path_index >= npc.path.len() {
-        // 火-机动换位：换位目标优先（任何状态，一经设定即向换位点移动）
-        let goal = if let Some(rp) = npc.reposition {
-            world_to_grid(rp[0], rp[1])
-        } else {
-            match state {
-            NpcState::Chase => match tactic {
-                // 突击/压制：直线逼近（压制手到射程边缘即转 Attack 站定）
-                // 班目标点：未接敌且有命令时优先向班目标点推进（>15m 时）
-                Tactic::Advance | Tactic::Suppress => {
-                    if let Some(wp) = squad_wp {
-                        let sd2 = (npc.position[0] - wp[0]).powi(2) + (npc.position[2] - wp[1]).powi(2);
-                        if sd2 > 15.0 * 15.0 {
-                            world_to_grid(wp[0], wp[1])
-                        } else {
-                            world_to_grid(target.x, target.z)
-                        }
-                    } else {
-                        world_to_grid(target.x, target.z)
-                    }
-                }
-                // 侧翼包抄：垂直轴向偏移 3 格（12m），id 奇偶定左右形成钳形
-                Tactic::Flank => {
-                    let target_g = world_to_grid(target.x, target.z);
-                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    let side = if npc.id % 2 == 0 { 1 } else { -1 };
-                    flank_goal(grid, target_g, npc_g, side, FLANK_OFFSET)
-                }
-                // 偷袭绕背：玩家未面朝时绕大圈（20m 偏移）从背后逼近
-                Tactic::Ambush => {
-                    let target_g = world_to_grid(target.x, target.z);
-                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    ambush_goal(grid, target_g, npc_g, target_yaw, AMBUSH_OFFSET)
-                }
-                // 掩体跃进：逐掩体推进（只选比当前更靠近玩家的掩体）
-                Tactic::CoverAdvance => {
-                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    let target_g = world_to_grid(target.x, target.z);
-                    let cur = npc_g.manhattan(target_g);
-                    match find_cover_points(grid, npc_g, COVER_MAX_DIST)
-                        .into_iter()
-                        .find(|c| c.dist < cur)
-                    {
-                        Some(cover) => cover.pos,
-                        None => target_g,
-                    }
-                }
-                // 掩体利用：障碍环带内选"距目标 ≤ 攻击距离"的遮挡掩体，先到掩体再开火；
-                // 无可用掩体（中央安全区）→ 直线推进，保持站定/站定日志语义。
-                // 压力模式（NPC-vs-NPC）：沿目标方向找遮挡掩体（NPC 穿越障碍带时利用），
-                // 就近取第一个；环带过滤不适用（NPC 在环带外）。
-                Tactic::CoverSeek => {
-                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    let target_g = world_to_grid(target.x, target.z);
-                    if stress {
-                        crate::engine::ai::find_cover_shielding(
-                            grid,
-                            npc_g,
-                            target_g,
-                            STRESS_COVER_MAX_DIST,
-                        )
-                        .first()
-                        .map(|c| c.pos)
-                        .unwrap_or(target_g)
-                    } else {
-                        pick_attack_cover(
-                            grid,
-                            npc_g,
-                            target_g,
-                            npc.attack_range,
-                            ring_inner,
-                            ring_outer,
-                            COVER_MAX_DIST,
-                            obstacles,
-                        )
-                        .unwrap_or(target_g)
-                    }
-                }
-                // 低血量撤退：撤向最封闭且较远的遮挡掩体（阻挡格挡在 NPC 与玩家之间）
-                Tactic::Retreat => {
-                    let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                    let target_g = world_to_grid(target.x, target.z);
-                    find_cover_shielding(grid, npc_g, target_g, COVER_MAX_DIST)
-                        .first()
-                        .map(|c| c.pos)
-                        .unwrap_or(npc_g)
-                }
-                Tactic::Hold => world_to_grid(npc.position[0], npc.position[2]),
-            },
-            NpcState::Attack => {
-                // 就近掩体站定（贴障碍簇）；无掩体原地（保持攻击站定日志供冒烟瞄准）
-                let npc_g = world_to_grid(npc.position[0], npc.position[2]);
-                match find_cover_points(grid, npc_g, COVER_MAX_DIST).first() {
-                    Some(cover) => cover.pos,
-                    None => npc_g,
-                }
-            }
-            NpcState::Patrol | NpcState::Idle => {
-                // 班目标点：有命令时优先按班目标推进；否则确定性巡逻点（随 id 相位与时间缓慢旋转）
-                if let Some(wp) = squad_wp {
-                    world_to_grid(wp[0], wp[1])
-                } else {
-                    let angle = npc.id as f32 * 2.399 + (time / 8.0).floor() * 0.7;
-                    let r = 20.0 + npc.id as f32 * 3.0;
-                    world_to_grid(
-                        npc.home[0] + r * angle.cos(),
-                        npc.home[1] + r * angle.sin(),
-                    )
-                }
-            }
-        }
-        };
-        let start = world_to_grid(npc.position[0], npc.position[2]);
-        // 寻路兜底（2026-08-23 残局卡死修复）：目标不可达时先找最近可行格，
-        // 仍无路径则直行进逼（可能蹭障碍但绝不原地踏步），保证任何局面都在动。
-        let mut path = find_path(grid, start, goal);
-        if path.is_none() {
-            // 螺旋扫描目标周边（半径 8 格）找可行的最近格
-            let mut best: Option<(i32, i64, crate::engine::ai::GridPos)> = None;
-            for r in 1..=8 {
-                let mut found = false;
-                for dy in -r..=r {
-                    for dx in -r..=r {
-                        let dx = dx as i32;
-                        let dy = dy as i32;
-                        if dx.abs() != r && dy.abs() != r {
-                            continue;
-                        }
-                        let gp = crate::engine::ai::GridPos {
-                            x: goal.x + dx,
-                            y: goal.y + dy,
-                        };
-                        if !grid.is_passable(gp) {
-                            continue;
-                        }
-                        let d = (dx * dx + dy * dy) as i64;
-                        if best.as_ref().map_or(true, |(_, bd, _)| d < *bd) {
-                            best = Some((r, d, gp));
-                        }
-                        found = true;
-                    }
-                }
-                if found {
-                    break;
-                }
-            }
-            if let Some((_, _, gp)) = best {
-                path = find_path(grid, start, gp);
-            }
-        }
-        npc.path = path.clone().unwrap_or_default();
-        npc.path_index = 0;
-        // 直行机动：路径全空（含兜底失败）→ 朝世界坐标目标直线移动，绝不原地踏步
-        npc.direct_goal = path.is_none();
-        if npc.direct_goal {
-            let (wx, wz) = grid_to_world(goal);
-            npc.direct_x = wx;
-            npc.direct_z = wz;
-        }
-    }
-
-    // 躲避冷却/计时无条件递减（含 Attack 态，防冻结窗口；残留计时归零防"幽灵侧移"）
-    npc.hit_cooldown = (npc.hit_cooldown - dt).max(0.0);
-    npc.dodge_timer = (npc.dodge_timer - dt).max(0.0);
-
-    // 爆炸冲击波推挤：覆盖本帧移动（指数衰减，约 0.25s 内衰减到 5%）
-    if npc.knockback[0] != 0.0 || npc.knockback[1] != 0.0 {
-        npc.position[0] += npc.knockback[0] * dt;
-        npc.position[2] += npc.knockback[1] * dt;
-        let decay = (-KNOCKBACK_DECAY * dt).exp();
-        npc.knockback[0] *= decay;
-        npc.knockback[1] *= decay;
-        if npc.knockback[0].abs() < 0.05 && npc.knockback[1].abs() < 0.05 {
-            npc.knockback = [0.0, 0.0];
-        }
-        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
-        return;
-    }
-
-    // 攻击态原地站定（冒烟瞄准依据 `npc: #id stand`）；火-机动换位中不站定（连续移动）
-    if state == NpcState::Attack && npc.reposition.is_none() {
-        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
-        return;
-    }
-
-    // 受击/火力威胁后侧向弹开（垂直于 目标→NPC 方向，id 奇偶定左右）
-    if npc.dodge_timer > 0.0 {
-        let dx = npc.position[0] - target.x;
-        let dz = npc.position[2] - target.z;
-        let d = (dx * dx + dz * dz).sqrt().max(1e-4);
-        let side = if npc.id % 2 == 0 { 1.0 } else { -1.0 };
-        let step = npc.speed * dt;
-        npc.position[0] += -dz / d * side * step;
-        npc.position[2] += dx / d * side * step;
-        npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
-        return;
-    }
-
-    let (tx, tz) = if npc.path_index < npc.path.len() {
-        grid_to_world(npc.path[npc.path_index])
-    } else if npc.direct_goal {
-        (npc.direct_x, npc.direct_z)
-    } else {
-        (npc.position[0], npc.position[2])
-    };
-    let dx = tx - npc.position[0];
-    let dz = tz - npc.position[2];
-    let d = (dx * dx + dz * dz).sqrt();
-    if d < 1.0 {
-        npc.path_index += 1;
-    } else if d > 1e-4 {
-        // 推进态锯齿机动：垂直前进方向横向摆动（被瞄准/火力威胁时幅度加大）
-        let dxp = npc.position[0] - target.x;
-        let dzp = npc.position[2] - target.z;
-        let dist_p = (dxp * dxp + dzp * dzp).sqrt();
-        let (mut mx, mut mz) = (dx / d, dz / d);
-        if state == NpcState::Chase && dist_p < ZIGZAG_DIST && tactic != Tactic::Retreat {
-            let amp = if npc.perception.under_fire || npc.perception.player_aiming {
-                ZIGZAG_AMP_HIGH
-            } else {
-                ZIGZAG_AMP
-            };
-            let off = zigzag_offset(time, npc.id as u32, amp);
-            mx += -dz / d * off;
-            mz += dx / d * off;
-            let mlen = (mx * mx + mz * mz).sqrt().max(1e-4);
-            mx /= mlen;
-            mz /= mlen;
-        }
-        let step = npc.speed * dt;
-        npc.position[0] += mx * step;
-        npc.position[2] += mz * step;
-        // 2026-08-25 穿墙修复：移动后对存活的静态障碍 AABB 推开（直行/路径均在障碍外滑行）
-        let (px, pz) = resolve_circle_obstacles(obstacles, npc.position[0], npc.position[2], 0.45);
-        npc.position[0] = px;
-        npc.position[2] = pz;
-    }
-    npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
-}
-
-/// 圆（半径 r）对存活障碍 AABB 的水平推开（NPC 移动后防穿墙；MapObstacle 版）
-fn resolve_circle_obstacles(obs: &[MapObstacle], x: f32, z: f32, r: f32) -> (f32, f32) {
-    let mut ox = x;
-    let mut oz = z;
-    for ob in obs {
-        let (hx, hz) = (ob.half_w, ob.half_d);
-        let cx = (ox - ob.x).clamp(-hx, hx);
-        let cz = (oz - ob.z).clamp(-hz, hz);
-        let dx = ox - (ob.x + cx);
-        let dz = oz - (ob.z + cz);
-        let d2 = dx * dx + dz * dz;
-        if d2 < r * r {
-            if d2 > 1e-6 {
-                let d = d2.sqrt();
-                let push = r - d;
-                ox += dx / d * push;
-                oz += dz / d * push;
-            } else {
-                let px = hx + r - (ox - ob.x).abs();
-                let pz = hz + r - (oz - ob.z).abs();
-                if px < pz {
-                    ox += if ox > ob.x { px } else { -px };
-                } else {
-                    oz += if oz > ob.z { pz } else { -pz };
-                }
-            }
-        }
-    }
-    (ox, oz)
-}
-
-/// 网络远端玩家快照 id 基址（与 NPC id 空间隔离：100000+）
-const NET_PLAYER_BASE: u32 = 100_000;
-
-/// 圆（半径 r）对静态障碍 AABB 的水平推开：返回 (x, z)（AABB 为 (cx±half_w, cz±half_d)）
-fn resolve_circle_static(
-    bodies: &[physics::Body],
-    x: f32,
-    z: f32,
-    r: f32,
-) -> (f32, f32) {
-    let mut ox = x;
-    let mut oz = z;
-    for b in bodies {
-        let (hx, hz) = (b.half_extents.x, b.half_extents.z);
-        let cx = (ox - b.position.x).clamp(-hx, hx);
-        let cz = (oz - b.position.z).clamp(-hz, hz);
-        let dx = ox - (b.position.x + cx);
-        let dz = oz - (b.position.z + cz);
-        let d2 = dx * dx + dz * dz;
-        if d2 < r * r {
-            if d2 > 1e-6 {
-                let d = d2.sqrt();
-                let push = r - d;
-                ox += dx / d * push;
-                oz += dz / d * push;
-            } else {
-                // 圆心在盒内：沿最小穿透轴推出
-                let px = hx + r - (ox - b.position.x).abs();
-                let pz = hz + r - (oz - b.position.z).abs();
-                if px < pz {
-                    ox += if ox > b.position.x { px } else { -px };
-                } else {
-                    oz += if oz > b.position.z { pz } else { -pz };
-                }
-            }
-        }
-    }
-    (ox, oz)
-}
-
-/// 红蓝阵营存活 NPC 的平均 x/z（阵营为空 → [0.0, 0.0]；命令行军/军情用）
-/// 生成红营态势 JSON（LLM 指挥官输入；严格字段：兵力/重心/接敌/当前命令）
-fn build_llm_situation(a: &crate::engine::ai_command::Army) -> String {
-    let side = match a.side {
-        Team::Red => "red",
-        Team::Blue => "blue",
-    };
-    let mut s = format!(
-        "{{\"battle\":\"128v128\",\"side\":\"{side}\",\"map_half\":270,\"enemy\":{{\"x\":{:.0},\"z\":{:.0}}},\"companies\":[",
-        a.enemy_centroid[0], a.enemy_centroid[1]
-    );
-    for (i, c) in a.companies.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        let cur = match c.order {
-            crate::engine::ai_command::CompanyOrder::Assault => "Assault",
-            crate::engine::ai_command::CompanyOrder::Hold => "Hold",
-            crate::engine::ai_command::CompanyOrder::Flank(1) => "FlankL",
-            crate::engine::ai_command::CompanyOrder::Flank(_) => "FlankR",
-            crate::engine::ai_command::CompanyOrder::Regroup => "Regroup",
-        };
-        s.push_str(&format!(
-            "{{\"id\":{i},\"strength\":{:.0},\"x\":{:.0},\"z\":{:.0},\"contact\":{},\"current\":\"{cur}\"}}",
-            c.report.strength, c.report.centroid[0], c.report.centroid[1], c.report.contact
-        ));
-    }
-    s.push_str("]}");
-    s
-}
-
-fn team_centroids(npcs: &[Npc]) -> ([f32; 2], [f32; 2]) {
-    let mut rc = [0.0f32; 2];
-    let mut bc = [0.0f32; 2];
-    let mut rn = 0usize;
-    let mut bn = 0usize;
-    for n in npcs {
-        match n.team {
-            Team::Red => { rc[0] += n.position[0]; rc[1] += n.position[2]; rn += 1; }
-            Team::Blue => { bc[0] += n.position[0]; bc[1] += n.position[2]; bn += 1; }
-        }
-    }
-    let avg = |c: [f32; 2], n: usize| -> [f32; 2] {
-        if n > 0 { [c[0] / n as f32, c[1] / n as f32] } else { [0.0, 0.0] }
-    };
-    (avg(rc, rn), avg(bc, bn))
 }
