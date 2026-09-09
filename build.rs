@@ -1453,6 +1453,19 @@ fn main() {
     let write_spv = |spirv: &[u32], name: &str| {
         let bytes: Vec<u8> = spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
         let spv_path = assets_dir.join(name);
+        // 只在内容真的变了时才写盘。
+        //
+        // 这 7 个 .spv 是**被版本库跟踪的构建产物**：运行时 `renderer.rs` 直接从磁盘读
+        // `assets/triangle.frag.spv`（mesh 与传统两条管线共用它），所以它们必须留在库里、
+        // 不能 gitignore。但原来每次构建都无条件 `fs::write`，会白白推进 7 个 mtime——
+        // git 按内容比较不会假 dirty，可任何 watch 这些文件的东西（编辑器热重载、
+        // 增量脚本、将来给它们加 `rerun-if-changed` 的话连 cargo 自己）都会被无谓触发。
+        //
+        // ⚠ 注意这条**不解决**"仓库里提交的 .spv 与当前 WGSL 不一致"的问题：那种情况下
+        // 内容确实不同，照样会写、照样显示为 modified——而那正是应有的行为。
+        if std::fs::read(&spv_path).map(|old| old == bytes).unwrap_or(false) {
+            return;
+        }
         fs::write(&spv_path, &bytes).unwrap_or_else(|e| panic!("写入 {} 失败: {}", name, e));
         println!("cargo:info=写入 SPIR-V 文件: {:?} ({} 字节)", spv_path, bytes.len());
     };
