@@ -6,8 +6,8 @@
   "notes": [
    "cleared 6 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
    "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
-   "attempt 1 exported 25296v/20420t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5123v/10246t",
-   "attempt 2 exported 14234v/8631t over the 12000v/24000t cap (export splits seamed verts), re-targeting 3887v/7774t"
+   "attempt 1 exported 25300v/20420t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5122v/10245t",
+   "attempt 2 exported 14196v/8628t over the 12000v/24000t cap (export splits seamed verts), re-targeting 3896v/7794t"
   ],
   "src_verts": 32411,
   "src_tris": 31225,
@@ -43,37 +43,37 @@
    0.56431,
    2.13063
   ],
-  "src_barrel": "X- (blender X-, thinness ends +0.98/+0.09, tip-thinness; parts named barrel/etc touch neither end)",
+  "src_barrel": "X+ (blender X+, thinness ends +0.09/+0.98, tip-thinness; parts named barrel/etc touch neither end)",
   "src_up": "Y+ (blender Z+, spine tails 1.7311 below / 0.3995 above, conf 4.33)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\as_val.glb",
-  "decimate": "passes: 0.7442->3475v/6422t",
-  "decimate_ratio": 0.74425,
-  "scale_applied": 0.999883,
+  "decimate": "passes: 0.7461->3482v/6436t",
+  "decimate_ratio": 0.74613,
+  "scale_applied": 1.00046,
   "budget_after": [
-   3475,
-   6420,
+   3482,
+   6434,
    0
   ],
   "barrel": "Z+",
   "up": "Y+",
-  "barrel_check": "blender Y- conf=11.20 (tip-thinness)",
+  "barrel_check": "blender Y- conf=11.14 (tip-thinness)",
   "up_check": "blender Z+ uconf=3.36",
-  "final_verts_blender": 3475,
-  "final_tris_blender": 6420,
+  "final_verts_blender": 3482,
+  "final_tris_blender": 6434,
   "extents_gltf_XYZ": [
-   0.05638,
-   0.21427,
+   0.05637,
+   0.2144,
    1.0
   ],
   "not_canonical": false,
   "glb": {
-   "sizeMB": 0.46,
+   "sizeMB": 0.47,
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 11173,
-   "tris": 6420,
-   "idx": 19260,
+   "verts": 11220,
+   "tris": 6434,
+   "idx": 19302,
    "attrs": [
     "COLOR_0",
     "NORMAL",
@@ -87,7 +87,7 @@
    "mat": 0,
    "ext": [
     0.0564,
-    0.2143,
+    0.2144,
     1.0
    ],
    "color_type": "VEC4",
@@ -117,17 +117,16 @@
    "color_type": "VEC4",
    "luma_min": 0.0,
    "luma_max": 0.6172,
-   "luma_mean": 0.1208,
+   "luma_mean": 0.1214,
    "color_over_1": 0,
-   "distinct": 94,
+   "distinct": 88,
    "uv_range": [
     -0.464,
     0.0,
     29.993,
     1.0
    ]
-  },
-  "shot": "gun_ext_as_val_side.png,gun_ext_as_val_threequarter.png"
+  }
  },
  {
   "src": "ash_12.7__assault_rifle_shak_12.glb",
@@ -168,7 +167,7 @@
    8.51611,
    2.55355
   ],
-  "src_barrel": "Z+ (blender Y-, thinness ends +1.40/+0.57, tip-thinness)",
+  "src_barrel": "Z- (blender Y+, thinness ends +0.57/+1.40, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 1.5428 below / 1.0108 above, conf 1.53)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\ash_12.7__assault_rifle_shak_12.glb",
   "decimate": "passes: 0.6055->4916v/9629t",
@@ -238,7 +237,7 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 149,
+   "normal_distinct": 146,
    "color_type": "VEC4",
    "luma_min": 0.0269,
    "luma_max": 0.8576,
@@ -251,8 +250,7 @@
     0.999,
     0.995
    ]
-  },
-  "shot": "gun_ext_ash_12.7__assault_rifle_shak_12_side.png,gun_ext_ash_12.7__assault_rifle_shak_12_threequarter.png"
+  }
  },
  {
   "src": "komrad_12_saiga_12.glb",
@@ -261,8 +259,8 @@
   "notes": [
    "cleared 8 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
    "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
-   "attempt 1 exported 19891v/21997t over the 12000v/24000t cap (export splits seamed verts), re-targeting 6515v/13031t",
-   "attempt 2 exported 12554v/10900t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5604v/11210t"
+   "attempt 1 exported 19895v/21997t over the 12000v/24000t cap (export splits seamed verts), re-targeting 6514v/13028t",
+   "attempt 2 exported 12556v/10899t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5602v/11205t"
   ],
   "src_verts": 20202,
   "src_tris": 21997,
@@ -300,25 +298,25 @@
    39.40948,
    112.73296
   ],
-  "src_barrel": "X- (blender X-, thinness ends +74.84/+28.98, tip-thinness)",
+  "src_barrel": "X+ (blender X+, thinness ends +28.98/+74.84, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 82.2011 below / 30.5318 above, conf 2.69)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\komrad_12_saiga_12.glb",
-  "decimate": "passes: 0.8406->4966v/9162t",
-  "decimate_ratio": 0.84055,
-  "scale_applied": 1.00008,
+  "decimate": "passes: 0.8403->4963v/9156t",
+  "decimate_ratio": 0.84025,
+  "scale_applied": 1.00007,
   "budget_after": [
-   4966,
-   9162,
+   4963,
+   9156,
    0
   ],
   "barrel": "Z+",
   "up": "Y+",
   "barrel_check": "blender Y- conf=2.58 (tip-thinness)",
   "up_check": "blender Z+ uconf=4.33",
-  "final_verts_blender": 4966,
-  "final_tris_blender": 9162,
+  "final_verts_blender": 4963,
+  "final_tris_blender": 9156,
   "extents_gltf_XYZ": [
-   0.11434,
+   0.11433,
    0.32642,
    1.0
   ],
@@ -328,9 +326,9 @@
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 11527,
-   "tris": 9162,
-   "idx": 27486,
+   "verts": 11530,
+   "tris": 9156,
+   "idx": 27468,
    "attrs": [
     "COLOR_0",
     "NORMAL",
@@ -370,29 +368,28 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 249,
+   "normal_distinct": 239,
    "color_type": "VEC4",
    "luma_min": 0.004,
    "luma_max": 0.4341,
    "luma_mean": 0.1157,
    "color_over_1": 0,
-   "distinct": 36,
+   "distinct": 33,
    "uv_range": [
     0.0,
     0.0,
     1.0,
     1.0
    ]
-  },
-  "shot": "gun_ext_komrad_12_saiga_12_side.png,gun_ext_komrad_12_saiga_12_threequarter.png"
+  }
  },
  {
   "src": "low-poly_mp-443_grach.glb",
   "out_name": "low-poly_mp-443_grach.glb",
   "ok": true,
   "notes": [
-   "dropped 1 stray object(s) [material-less]: Icosphere",
-   "deleted un-joined material-less object Icosphere (42 verts)",
+   "dropped 1 stray object(s) [material-less]: 棱角球",
+   "deleted un-joined material-less object 棱角球 (42 verts)",
    "cleared 10 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
    "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y"
   ],
@@ -434,7 +431,7 @@
    75.83655,
    315.87744
   ],
-  "src_barrel": "X- (blender X-, thinness ends +290.93/+81.19, tip-thinness)",
+  "src_barrel": "X+ (blender X+, thinness ends +81.19/+290.93, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 256.6504 below / 59.2270 above, conf 4.33)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low-poly_mp-443_grach.glb",
   "decimate": "under budget already (2073v/3868t)",
@@ -462,7 +459,7 @@
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 6661,
+   "verts": 6650,
    "tris": 3868,
    "idx": 11604,
    "attrs": [
@@ -504,11 +501,11 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 125,
+   "normal_distinct": 120,
    "color_type": "VEC4",
    "luma_min": 0.008,
    "luma_max": 0.5981,
-   "luma_mean": 0.1097,
+   "luma_mean": 0.11,
    "color_over_1": 0,
    "distinct": 8,
    "uv_range": [
@@ -517,8 +514,7 @@
     1.0,
     1.099
    ]
-  },
-  "shot": "gun_ext_low-poly_mp-443_grach_side.png,gun_ext_low-poly_mp-443_grach_threequarter.png"
+  }
  },
  {
   "src": "low-poly_osv-96.glb",
@@ -526,8 +522,8 @@
   "ok": true,
   "notes": [
    "POSSIBLE DUPLICATED ASSEMBLY: Object_23/Object_35 (2658/2651 verts) - the merged mesh's length and up axes are then meaningless; check the screenshot and delete the extra copy",
-   "dropped 1 stray object(s) [material-less]: Icosphere",
-   "deleted un-joined material-less object Icosphere (42 verts)",
+   "dropped 1 stray object(s) [material-less]: 棱角球",
+   "deleted un-joined material-less object 棱角球 (42 verts)",
    "source has NO UVs: TEXCOORD_0 written as a planar fallback",
    "cleared 16 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
    "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y"
@@ -577,7 +573,7 @@
    60.21423,
    145.41006
   ],
-  "src_barrel": "X- (blender X-, thinness ends +77.12/+22.04, tip-thinness)",
+  "src_barrel": "X+ (blender X+, thinness ends +22.04/+77.12, tip-thinness)",
   "src_up": "Y- (blender Z-, spine tails 69.6757 below / 75.7344 above, conf 1.09)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low-poly_osv-96.glb",
   "decimate": "under budget already (3549v/6717t)",
@@ -605,7 +601,7 @@
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 11127,
+   "verts": 11122,
    "tris": 6717,
    "idx": 20151,
    "attrs": [
@@ -647,11 +643,11 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 117,
+   "normal_distinct": 132,
    "color_type": "VEC4",
    "luma_min": 0.016,
    "luma_max": 0.7991,
-   "luma_mean": 0.17,
+   "luma_mean": 0.1699,
    "color_over_1": 0,
    "distinct": 8,
    "uv_range": [
@@ -660,8 +656,7 @@
     242.635,
     30.111
    ]
-  },
-  "shot": "gun_ext_low-poly_osv-96_side.png,gun_ext_low-poly_osv-96_threequarter.png"
+  }
  },
  {
   "src": "low-poly_rpk-16.glb",
@@ -670,8 +665,8 @@
   "notes": [
    "cleared 7 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
    "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
-   "attempt 1 exported 28226v/13253t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4591v/9183t",
-   "attempt 2 exported 21891v/7910t over the 12000v/24000t cap (export splits seamed verts), re-targeting 2264v/4530t"
+   "attempt 1 exported 28219v/13253t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4592v/9185t",
+   "attempt 2 exported 21895v/7912t over the 12000v/24000t cap (export splits seamed verts), re-targeting 2265v/4530t"
   ],
   "src_verts": 37246,
   "src_tris": 13253,
@@ -708,11 +703,11 @@
    0.16751,
    0.46293
   ],
-  "src_barrel": "X- (blender X-, thinness ends +0.13/+0.02, tip-thinness)",
+  "src_barrel": "X+ (blender X+, thinness ends +0.02/+0.13, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 0.4340 below / 0.0289 above, conf 15.0)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low-poly_rpk-16.glb",
-  "decimate": "passes: 0.4896->2032v/3873t; loose left=10",
-  "decimate_ratio": 0.48963,
+  "decimate": "passes: 0.4897->2032v/3873t; loose left=10",
+  "decimate_ratio": 0.48973,
   "scale_applied": 0.999996,
   "budget_after": [
    2032,
@@ -727,7 +722,7 @@
   "final_tris_blender": 3864,
   "extents_gltf_XYZ": [
    0.19886,
-   0.55001,
+   0.55,
    1.0
   ],
   "not_canonical": false,
@@ -736,7 +731,7 @@
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 11540,
+   "verts": 11539,
    "tris": 3864,
    "idx": 11592,
    "attrs": [
@@ -778,21 +773,20 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 298,
+   "normal_distinct": 299,
    "color_type": "VEC4",
    "luma_min": 0.0037,
    "luma_max": 0.3515,
-   "luma_mean": 0.1097,
+   "luma_mean": 0.1096,
    "color_over_1": 0,
-   "distinct": 23,
+   "distinct": 24,
    "uv_range": [
     -0.024,
     -0.021,
     31.411,
     1.0
    ]
-  },
-  "shot": "gun_ext_low-poly_rpk-16_side.png,gun_ext_low-poly_rpk-16_threequarter.png"
+  }
  },
  {
   "src": "low_poly_ak104.glb",
@@ -801,9 +795,9 @@
   "notes": [
    "cleared 13 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
    "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
-   "attempt 1 exported 17250v/13313t over the 12000v/24000t cap (export splits seamed verts), re-targeting 7513v/15026t",
-   "attempt 2 exported 17250v/13313t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4703v/9407t",
-   "attempt 3 exported 12687v/8062t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4003v/8007t"
+   "attempt 1 exported 17288v/13313t over the 12000v/24000t cap (export splits seamed verts), re-targeting 7496v/14993t",
+   "attempt 2 exported 17288v/13313t over the 12000v/24000t cap (export splits seamed verts), re-targeting 4682v/9366t",
+   "attempt 3 exported 12673v/8026t over the 12000v/24000t cap (export splits seamed verts), re-targeting 3990v/7981t"
   ],
   "src_verts": 25958,
   "src_tris": 13354,
@@ -846,23 +840,23 @@
    0.33418,
    1.3189
   ],
-  "src_barrel": "X- (blender X-, thinness ends +0.45/+0.14, tip-thinness; parts named barrel/etc touch neither end)",
+  "src_barrel": "X+ (blender X+, thinness ends +0.14/+0.45, tip-thinness; parts named barrel/etc touch neither end)",
   "src_up": "Y+ (blender Z+, spine tails 1.0167 below / 0.3022 above, conf 3.36)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\low_poly_ak104.glb",
-  "decimate": "passes: 0.8446->3543v/6808t",
-  "decimate_ratio": 0.84456,
+  "decimate": "passes: 0.8455->3531v/6784t",
+  "decimate_ratio": 0.84546,
   "scale_applied": 1.0,
   "budget_after": [
-   3543,
-   6808,
+   3531,
+   6784,
    0
   ],
   "barrel": "Z+",
   "up": "Y+",
   "barrel_check": "blender Y- conf=3.27 (tip-thinness)",
   "up_check": "blender Z+ uconf=3.36",
-  "final_verts_blender": 3543,
-  "final_tris_blender": 6808,
+  "final_verts_blender": 3531,
+  "final_tris_blender": 6784,
   "extents_gltf_XYZ": [
    0.07606,
    0.30018,
@@ -874,9 +868,9 @@
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 11726,
-   "tris": 6808,
-   "idx": 20424,
+   "verts": 11705,
+   "tris": 6784,
+   "idx": 20352,
    "attrs": [
     "COLOR_0",
     "NORMAL",
@@ -916,21 +910,20 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 241,
+   "normal_distinct": 246,
    "color_type": "VEC4",
    "luma_min": 0.0545,
    "luma_max": 0.3515,
-   "luma_mean": 0.1185,
+   "luma_mean": 0.1187,
    "color_over_1": 0,
-   "distinct": 15,
+   "distinct": 19,
    "uv_range": [
     -0.0,
     -0.0,
     1.0,
     1.0
    ]
-  },
-  "shot": "gun_ext_low_poly_ak104_side.png,gun_ext_low_poly_ak104_threequarter.png"
+  }
  },
  {
   "src": "pkm.glb",
@@ -971,7 +964,7 @@
    1101.12634,
    371.93082
   ],
-  "src_barrel": "Z- (blender Y+, thinness ends +34.19/+118.19, tip-thinness)",
+  "src_barrel": "Z+ (blender Y-, thinness ends +118.19/+34.19, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 224.7082 below / 147.2226 above, conf 1.53)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pkm.glb",
   "decimate": "passes: 0.7052->4078v/6750t",
@@ -1054,8 +1047,7 @@
     0.998,
     1.0
    ]
-  },
-  "shot": "gun_ext_pkm_side.png,gun_ext_pkm_threequarter.png"
+  }
  },
  {
   "src": "pkp.glb",
@@ -1124,7 +1116,7 @@
    16.93665,
    5.9875
   ],
-  "src_barrel": "Z- (blender Y+, thinness ends +0.63/+1.74, tip-thinness)",
+  "src_barrel": "Z+ (blender Y-, thinness ends +1.74/+0.63, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 4.1164 below / 1.8711 above, conf 2.2)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pkp.glb",
   "decimate": "passes: 0.6877->2649v/5021t; loose left=16",
@@ -1194,7 +1186,7 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 276,
+   "normal_distinct": 279,
    "color_type": "VEC4",
    "luma_min": 0.0,
    "luma_max": 0.4763,
@@ -1207,8 +1199,7 @@
     1.003,
     1.0
    ]
-  },
-  "shot": "gun_ext_pkp_side.png,gun_ext_pkp_threequarter.png"
+  }
  },
  {
   "src": "pp-19-01_vityaz.glb",
@@ -1257,7 +1248,7 @@
    148.13571,
    77.592
   ],
-  "src_barrel": "Z- (blender Y+, thinness ends +18.27/+24.87, tip-thinness)",
+  "src_barrel": "Z+ (blender Y-, thinness ends +24.87/+18.27, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 59.8105 below / 17.7815 above, conf 3.36)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pp-19-01_vityaz.glb",
   "decimate": "passes: 0.6822->2696v/4772t; loose left=31",
@@ -1327,7 +1318,7 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 294,
+   "normal_distinct": 297,
    "color_type": "VEC4",
    "luma_min": 0.0,
    "luma_max": 0.6028,
@@ -1340,8 +1331,7 @@
     1.0,
     1.0
    ]
-  },
-  "shot": "gun_ext_pp-19-01_vityaz_side.png,gun_ext_pp-19-01_vityaz_threequarter.png"
+  }
  },
  {
   "src": "pp-19_bizon.glb",
@@ -1384,7 +1374,7 @@
    1.70909,
    4.8906
   ],
-  "src_barrel": "X- (blender X-, thinness ends +1.91/+1.30, tip-thinness)",
+  "src_barrel": "X+ (blender X+, thinness ends +1.30/+1.91, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 3.7698 below / 1.1208 above, conf 3.36)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\pp-19_bizon.glb",
   "decimate": "under budget already (6177v/11195t)",
@@ -1412,7 +1402,7 @@
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 11685,
+   "verts": 11690,
    "tris": 11195,
    "idx": 33585,
    "attrs": [
@@ -1454,21 +1444,20 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 272,
+   "normal_distinct": 270,
    "color_type": "VEC4",
    "luma_min": 0.0,
    "luma_max": 0.3515,
    "luma_mean": 0.0425,
    "color_over_1": 0,
-   "distinct": 23,
+   "distinct": 18,
    "uv_range": [
     0.001,
     0.001,
     0.998,
     0.998
    ]
-  },
-  "shot": "gun_ext_pp-19_bizon_side.png,gun_ext_pp-19_bizon_threequarter.png"
+  }
  },
  {
   "src": "sv98.glb",
@@ -1534,7 +1523,7 @@
    1.1465,
    0.24554
   ],
-  "src_barrel": "Z- (blender Y+, thinness ends +0.06/+0.15, tip-thinness)",
+  "src_barrel": "Z+ (blender Y-, thinness ends +0.15/+0.06, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 0.1484 below / 0.0972 above, conf 1.53)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\sv98.glb",
   "decimate": "passes: 0.7778->2624v/4911t; loose left=43",
@@ -1604,7 +1593,7 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 292,
+   "normal_distinct": 295,
    "color_type": "VEC4",
    "luma_min": 0.0,
    "luma_max": 1.0,
@@ -1617,8 +1606,7 @@
     2.998,
     0.998
    ]
-  },
-  "shot": "gun_ext_sv98_side.png,gun_ext_sv98_threequarter.png"
+  }
  },
  {
   "src": "svd_63_-_dragunov.glb",
@@ -1668,7 +1656,7 @@
    0.58386,
    0.25853
   ],
-  "src_barrel": "X- (blender X-, thinness ends +0.44/+0.35, tip-thinness)",
+  "src_barrel": "X+ (blender X+, thinness ends +0.35/+0.44, tip-thinness)",
   "src_up": "Z- (blender Y+, spine tails 0.5474 below / 0.0365 above, conf 15.0)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\svd_63_-_dragunov.glb",
   "decimate": "passes: 0.7722->3666v/6228t; loose left=14",
@@ -1738,7 +1726,7 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 298,
+   "normal_distinct": 299,
    "color_type": "VEC4",
    "luma_min": 0.0006,
    "luma_max": 0.4125,
@@ -1751,8 +1739,7 @@
     2.0,
     0.999
    ]
-  },
-  "shot": "gun_ext_svd_63_-_dragunov_side.png,gun_ext_svd_63_-_dragunov_threequarter.png"
+  }
  },
  {
   "src": "vss_vintorez.glb",
@@ -1761,8 +1748,8 @@
   "notes": [
    "cleared 1 material slot(s): the exporter splits primitives by slot even with export_materials=NONE",
    "baked canonical rotation: muzzle -> glTF +Z, up -> glTF +Y",
-   "attempt 1 exported 17743v/18019t over the 12000v/24000t cap (export splits seamed verts), re-targeting 7304v/14608t",
-   "attempt 2 exported 13701v/12395t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5757v/11514t"
+   "attempt 1 exported 17765v/18019t over the 12000v/24000t cap (export splits seamed verts), re-targeting 7295v/14590t",
+   "attempt 2 exported 13645v/12380t over the 12000v/24000t cap (export splits seamed verts), re-targeting 5773v/11547t"
   ],
   "src_verts": 16964,
   "src_tris": 18019,
@@ -1793,23 +1780,23 @@
    0.50182,
    1.43511
   ],
-  "src_barrel": "X- (blender X-, thinness ends +1.02/+0.47, tip-thinness)",
+  "src_barrel": "X+ (blender X+, thinness ends +0.47/+1.02, tip-thinness)",
   "src_up": "Y+ (blender Z+, spine tails 1.3454 below / 0.0897 above, conf 15.0)",
   "out": "D:\\Rust\\steel-front\\assets\\guns_ext\\vss_vintorez.glb",
-  "decimate": "passes: 0.7799->5108v/9666t",
-  "decimate_ratio": 0.77989,
-  "scale_applied": 1.000064,
+  "decimate": "passes: 0.7830->5121v/9692t",
+  "decimate_ratio": 0.78302,
+  "scale_applied": 1.000067,
   "budget_after": [
-   5108,
-   9666,
+   5121,
+   9692,
    0
   ],
   "barrel": "Z+",
   "up": "Y+",
   "barrel_check": "blender Y- conf=2.19 (tip-thinness)",
   "up_check": "blender Z+ uconf=15.00",
-  "final_verts_blender": 5108,
-  "final_tris_blender": 9666,
+  "final_verts_blender": 5121,
+  "final_tris_blender": 9692,
   "extents_gltf_XYZ": [
    0.06145,
    0.17558,
@@ -1821,9 +1808,9 @@
    "mesh": 1,
    "prims": 1,
    "node": 1,
-   "verts": 11949,
-   "tris": 9666,
-   "idx": 28998,
+   "verts": 11999,
+   "tris": 9692,
+   "idx": 29076,
    "attrs": [
     "COLOR_0",
     "NORMAL",
@@ -1863,20 +1850,19 @@
    ],
    "normal_len_min": 1.0,
    "normal_len_max": 1.0,
-   "normal_distinct": 247,
+   "normal_distinct": 248,
    "color_type": "VEC4",
    "luma_min": 0.0,
    "luma_max": 0.3515,
    "luma_mean": 0.1083,
    "color_over_1": 0,
-   "distinct": 63,
+   "distinct": 60,
    "uv_range": [
     0.001,
     0.001,
     1.997,
     0.997
    ]
-  },
-  "shot": "gun_ext_vss_vintorez_side.png,gun_ext_vss_vintorez_threequarter.png"
+  }
  }
 ]

@@ -552,7 +552,15 @@ def detect_axes(me, hints=()):
     span = max(float(ext[L]), 1e-9)
     ends, radii = {}, {}
     for sign in (1, -1):
-        d_along = (co[:, L] - mn[L]) if sign > 0 else (mx[L] - co[:, L])
+        # sign 指"哪一端"，就必须量哪一端：+1 = 最大端，所以取到 mx 的距离；
+        # -1 = 最小端，取到 mn 的距离。
+        #
+        # ⚠ 这里原来是反的（`sign > 0` 写的是 `co - mn`，量的是离**最小端**的距离，
+        # 于是 ends[+1] 实际是 −端的横截面）。后果是 ends[1] <= ends[-1] 恒等价于
+        # "把粗的那端当枪口"，msign 对**每一件**模型都选反——而 up 走的是另一套
+        # spine/tail 计算，没受影响，所以画面表现为"枪是正立的，但枪口朝后"。
+        # 复检又调用同一个函数，错得完全一致，于是 14/14 全报 OK。
+        d_along = (mx[L] - co[:, L]) if sign > 0 else (co[:, L] - mn[L])
         keep = d_along <= span * 0.07
         if int(keep.sum()) < 8:
             keep = d_along <= span * 0.2
