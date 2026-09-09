@@ -1009,11 +1009,26 @@ fn shop_block(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
         let floors = 2 + (pi + j as i32 + k as i32).rem_euclid(3) as u32;
         row_houses(c, bx, cz, 12.0, 9.5, floors, pal, 3);
     }
-    c.deco(Part::new(ObstacleKind::Building, cx, cz + 6.4, 44.0, 2.6, 3.6, 3.95, GRANITE));
+    // 骑楼雨棚。原来是一条 `44.0 × 2.6 × 0.35`（y 3.6→3.95）的薄板，问题有两层：
+    //   1. **它没挂到自己该挂的墙上**：三排楼（`row_houses`，d=9.5，中心 cz）的外墙面在
+    //      cz+4.75，而棚的内沿在 cz+5.1 —— 中间空着 0.35m，棚是浮在墙外的。
+    //   2. **0.35m 厚 / 44m 长**：平着色下顶面与底面各是一个均匀色块，边缘没有任何收头，
+    //      剪影就是一张飘在街上的纸。这正是用户说的"白色顶棚"。
+    // 现在：内沿 cz+4.2（**埋进立面 0.55m**，与墙身实体相接、不留缝）、外沿 cz+7.9
+    // （超出柱心 0.5m，柱子落在棚的 footprint 内），厚度 0.35 → 0.6；长度收到 41.0，
+    // 与三排楼的外轮廓（cx±20.5）严格齐平，不再两头各飘出 1.5m。
+    c.deco(Part::new(ObstacleKind::Building, cx, cz + 6.05, 41.0, 3.7, 3.5, 4.1, GRANITE));
+    // 檐板：沿外缘立起一道高出棚顶 0.32m 的收头，把"板"的剪影变成"屋顶边"。
+    // 0.26 > MIN_AXIS(0.20)，不会被 no_degenerate_geometry 判成退化件。
+    c.deco(Part::new(ObstacleKind::Building, cx, cz + 7.72, 41.0, 0.26, 3.5, 4.42, CONCRETE_DARK));
     for k in 0..5i32 {
         let px = cx + (k as f32 - 2.0) * 10.5;
         let col = if k % 2 == 0 { CONCRETE_DARK } else { GRANITE };
-        c.push(Part::new(ObstacleKind::Block, px, cz + 7.4, 0.4, 0.4, UNDER_GROUND, 3.6, col).cyl());
+        // 柱顶与牛腿都**伸进棚身 0.12m**（到 3.62，棚底在 3.5）：若正好停在 3.5，
+        // 柱顶面与棚底面共面，平着色下会是一条会闪的缝；伸进去就变成内部交叠。
+        c.push(Part::new(ObstacleKind::Block, px, cz + 7.4, 0.4, 0.4, UNDER_GROUND, 3.62, col).cyl());
+        // 柱头牛腿：让"柱承棚"的传力路径看得见，否则柱与棚之间只有一根细颈。
+        c.deco(Part::new(ObstacleKind::Block, px, cz + 7.4, 0.72, 0.72, 3.30, 3.62, GRANITE).cyl());
     }
     for dx in [-14.0f32, 14.0] {
         lamp_post(c, cx + dx, cz + 9.5);
