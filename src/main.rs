@@ -573,6 +573,12 @@ impl GameApp {
                 self.camera.yaw = yaw;
                 self.camera.pitch = pitch;
             }
+            // HUD 那行大号青色 FPS 由 `game.update()` 里的滑动窗口算出（game.rs
+            // `self.hud.fps = frames / window_secs`），而本分支直接 return、不跑玩法帧，
+            // 于是 hud.fps 永远停在初值 0 —— 表现成"游戏 0 帧"，而同一帧 HUD 上
+            // `VULKAN: 150 FPS`（渲染器自己的计数）和 logs 里的 fps=146~152 都是正常的。
+            // 调试机位下用刚量到的 last_fps 直接补上，别让取证截图显示一个假 0。
+            self.game.hud.fps = self.last_fps as f32;
             return;
         }
         // 枪械检视模式：不跑游戏逻辑，仅 Orbit 相机绕枪模（鼠标拖拽旋转/滚轮缩放，
