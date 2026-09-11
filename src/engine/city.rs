@@ -1177,8 +1177,16 @@ fn street_furniture(c: &mut City) {
 
 /// 边界围墙：墙身 + 压顶 + 立柱 + 4 座大门。
 ///
-/// 旧版每段半宽 26m、段间距 55m → 段之间留 3m 豁口，玩家能直接走出地图。
-/// 现在段宽 = 间距，彻底闭合；大门处只留 12m 缺口，两侧用半段补齐。
+/// 三段历史，每条都由 `city_layout_tests` 钉死，别再回退：
+/// - 旧版每段半宽 26m、段间距 55m → 段之间留 3m 豁口，玩家能直接走出地图。
+///   改成"段宽 = 间距"后段与段首尾相接。
+/// - **但 7 段 × 55 = 385m 铺不满 430m 的墙线**：四角各差 22.5m，照样能走出去。
+///   段间"没有豁口"不等于环"闭合"——旧测试只查前者，所以一路绿灯。
+///   现在首末两段的外沿直接铺到 ±CITY_WALL（见 `lo`/`hi`），转角两面墙互相咬合。
+/// - 大门分支把 `(seg - gate) * 0.5` 当成**半宽**传给了 `pw`，于是每片墙身实宽 43m、
+///   两片在中央重叠 9.5m → **四个大门全被墙填死**，门柱整根埋在墙里，只有旗杆和
+///   灯头从墙头伸出来（实机截图 `gate_b2_b.png` 可见墙从两塔中间穿过）。
+///   现在按"洞宽 gate、两侧各 (hi-lo-gate)/2"算。
 fn perimeter(c: &mut City) {
     let w = CITY_WALL;
     let seg = STREET_EVERY;
@@ -1187,22 +1195,36 @@ fn perimeter(c: &mut City) {
         for k in -3i32..=3 {
             let t = k as f32 * seg;
             let is_gate = t.abs() < 0.5;
-            let pieces: &[(f32, f32)] = if is_gate {
-                &[(t - (seg + gate) * 0.25, (seg - gate) * 0.5), (t + (seg + gate) * 0.25, (seg - gate) * 0.5)]
+            let lo = if k == -3 { -w } else { t - seg * 0.5 };
+            let hi = if k == 3 { w } else { t + seg * 0.5 };
+            // 每片墙身 = (中心, 半宽)。
+            let pieces: Vec<(f32, f32)> = if is_gate {
+                let g = gate * 0.5;
+                vec![((lo - g) * 0.5, (-g - lo) * 0.5), ((hi + g) * 0.5, (hi - g) * 0.5)]
             } else {
-                &[(t, seg * 0.5)]
+                vec![((lo + hi) * 0.5, (hi - lo) * 0.5)]
             };
             for (tc, half_len) in pieces {
                 let (x, z, pw, pd) = match side {
-                    0 => (*tc, -w, *half_len * 2.0, 1.3),
-                    1 => (*tc, w, *half_len * 2.0, 1.3),
-                    2 => (-w, *tc, 1.3, *half_len * 2.0),
-                    _ => (w, *tc, 1.3, *half_len * 2.0),
+                    0 => (tc, -w, half_len * 2.0, 1.3),
+                    1 => (tc, w, half_len * 2.0, 1.3),
+                    2 => (-w, tc, 1.3, half_len * 2.0),
+                    _ => (w, tc, 1.3, half_len * 2.0),
                 };
                 c.push(Part::new(ObstacleKind::Building, x, z, pw, pd, UNDER_GROUND, 2.35, CONCRETE));
                 c.deco(Part::new(ObstacleKind::Block, x, z, pw + 0.3, pd + 0.3, 2.35, 2.55, CONCRETE_DARK));
                 for s in [-1.0f32, 1.0] {
-                    let (lx, lz) = if side < 2 { (x + s * half_len, z) } else { (x, z + s * half_len) };
+                    let e = tc + s * half_len;
+                    // 门垛位置由下面的门柱（2.4m 方、4.4m 高）负责：这里的 1.9m 方柱
+                    // 会整根被门柱体积吞掉，白占两个实例。
+                    if is_gate && (e.abs() - gate * 0.5).abs() < 0.5 {
+                        continue;
+                    }
+                    // 角点只留一根：side 0/1 的端柱已经落在四个角上，side 2/3 的是重复体。
+                    if side >= 2 && (e.abs() - w).abs() < 0.5 {
+                        continue;
+                    }
+                    let (lx, lz) = if side < 2 { (e, z) } else { (x, e) };
                     c.push(Part::new(ObstacleKind::Building, lx, lz, 1.9, 1.9, UNDER_GROUND, 2.95, GRANITE));
                     // 压顶半宽必须比柱身多出 RELIEF_STEP（0.14）：0.95+0.14=1.09 → 边长 2.18，
                     // 原来写 2.15 只多出 0.125，掠射角下柱肩与压顶会落到同一批像素上。
@@ -1453,30 +1475,72 @@ mod city_layout_tests {
         }
     }
 
-    /// 围墙必须闭合：任意相邻段之间不得有 >0.5m 的豁口（大门除外，大门是有意留的）。
+    /// 围墙必须闭合：(1) 相邻段之间不得有 >0.5m 的豁口（大门除外）；
+    /// (2) **四面墙都要真正铺到 ±CITY_WALL**，四角必须接上。
+    ///
+    /// 第 (2) 条是 09-11 补的。原来只查"相邻段之间"，而 7 段 × 55m = 385m 铺在 430m
+    /// 的墙线上，四角各留 22.5m 缺口——段与段之间确实一道豁口都没有，测试一路绿灯，
+    /// 玩家却能从任何一个角直接走出城市。**"没有豁口"和"闭合"是两件事。**
+    /// 顺带把只测北墙扩成四面都测（`side 0/1` 沿 x 铺、`2/3` 沿 z 铺）。
     #[test]
     fn perimeter_has_no_unintended_gaps() {
         let m = generate_city();
         let w = CITY_WALL;
-        let mut spans: Vec<(f32, f32)> = m
-            .obstacles
-            .iter()
-            .filter(|o| (o.z + w).abs() < 3.0 && o.half_w > 5.0)
-            .map(|o| (o.x - o.half_w, o.x + o.half_w))
-            .collect();
-        assert!(!spans.is_empty(), "北墙一段都没有");
-        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut cover = spans[0].1;
-        for s in &spans[1..] {
-            let gap = s.0 - cover;
-            // 只允许中央大门一处豁口，且不超过 12m
+        for side in 0..4usize {
+            let along_x = side < 2;
+            let line = if side % 2 == 0 { -w } else { w };
+            let mut spans: Vec<(f32, f32)> = m
+                .obstacles
+                .iter()
+                .filter(|o| {
+                    let cross = if along_x { o.z } else { o.x };
+                    let run_half = if along_x { o.half_w } else { o.half_d };
+                    (cross - line).abs() < 3.0 && run_half > 5.0
+                })
+                .map(|o| {
+                    let (run, run_half) = if along_x { (o.x, o.half_w) } else { (o.z, o.half_d) };
+                    (run - run_half, run + run_half)
+                })
+                .collect();
+            assert!(!spans.is_empty(), "side {side} 一段墙都没有");
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
             assert!(
-                gap <= 0.5 || (gap <= 12.5 && s.0.abs() < 8.0),
-                "围墙出现 {:.2}m 意外豁口（x≈{:.1}）",
-                gap.max(0.0),
-                s.0
+                spans[0].0 <= -w + 0.5 && spans.last().unwrap().1 >= w - 0.5,
+                "side {side} 只铺到 [{:.1}, {:.1}]，四角各差 {:.1}m",
+                spans[0].0,
+                spans.last().unwrap().1,
+                w - spans.last().unwrap().1.max(spans[0].0.abs())
             );
-            cover = cover.max(s.1);
+            let mut cover = spans[0].1;
+            for s in &spans[1..] {
+                let gap = s.0 - cover;
+                // 只允许中央大门一处豁口，且不超过 12m
+                assert!(
+                    gap <= 0.5 || (gap <= 12.5 && s.0.abs() < 8.0),
+                    "围墙 side {side} 出现 {:.2}m 意外豁口（t≈{:.1}）",
+                    gap.max(0.0),
+                    s.0
+                );
+                cover = cover.max(s.1);
+            }
+        }
+    }
+
+    /// 四座大门必须真的能过。
+    ///
+    /// 直接动因：`perimeter` 的大门分支把 `(seg - gate) * 0.5` 当成**半宽**用，
+    /// 于是每片墙身宽 43m、两片在中央重叠 9.5m —— 12m 门洞根本不存在，四个大门
+    /// 全被墙填死，门柱整根埋在墙里，只有旗杆从墙头伸出来。
+    #[test]
+    fn gates_are_passable() {
+        let m = generate_city();
+        let w = CITY_WALL;
+        for (gx, gz) in [(0.0f32, -w), (0.0, w), (-w, 0.0), (w, 0.0)] {
+            let blocked = m
+                .obstacles
+                .iter()
+                .any(|o| (o.x - gx).abs() <= o.half_w && (o.z - gz).abs() <= o.half_d);
+            assert!(!blocked, "大门 ({gx:.0},{gz:.0}) 被墙体堵死");
         }
     }
 
