@@ -1097,7 +1097,7 @@ fn mixed_block(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
 /// 桌板），只是薄一点所以没那么刺眼。大面积铺装一律交给地面纹理（zone 3 人行道），
 /// 几何只保留**又长又窄**的路缘石：45m×0.55m×0.16m 的条带读作"街沿"，
 /// 而 45m×45m×0.14m 的板读作"漂浮桌面"。差别在长宽比，不在厚度。
-fn block_edges(c: &mut City, cx: f32, cz: f32) {
+fn block_edges(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
     let s = KERB_EDGE;
     let k = 0.55;
     for (dx, dz, w, d) in [
@@ -1108,6 +1108,13 @@ fn block_edges(c: &mut City, cx: f32, cz: f32) {
     ] {
         c.deco(Part::new(ObstacleKind::Building, cx + dx, cz + dz, w, d, UNDER_GROUND, 0.16, CURB_STONE));
     }
+    // 四角树池。
+    //
+    // ⚠ 这里原来直接摆了一颗 `1.7m 球、底面 -0.05、顶 1.30` 的叶子——**没有树干**。
+    // 平着色下那就是一块压在人行道上的绿色巨石（实机截图 `green_oak_b.png` 左下），
+    // 和"树"没有任何共同点。改成调用 [`tree`]：有干有冠，资产在时走 `tree_oak` GLB。
+    // 位置不变（贴着路缘石内侧 2.2m），正是街树该有的地方。
+    let (pi, pj) = (i as i32, j as i32);
     for kk in [-1.0f32, 1.0] {
         for side in 0..4i32 {
             let (tx, tz) = match side {
@@ -1116,7 +1123,7 @@ fn block_edges(c: &mut City, cx: f32, cz: f32) {
                 2 => (cx - s * 0.5 + 2.2, cz + kk * 12.0),
                 _ => (cx + s * 0.5 - 2.2, cz + kk * 12.0),
             };
-            c.deco(Part::new(ObstacleKind::Tree, tx, tz, 1.7, 1.7, UNDER_GROUND, 1.30, TREE_LEAF_3).sph());
+            tree(c, tx, tz, pi * 2 + side, pj * 2 + (kk > 0.0) as i32);
         }
     }
 }
@@ -1154,10 +1161,18 @@ fn street_furniture(c: &mut City) {
         (0.0, -69.0),
     ] {
         let (w, d) = if x.abs() > 0.1 { (6.0, 0.9) } else { (0.9, 6.0) };
-        c.push(Part::new(ObstacleKind::Building, x, z, w, d, UNDER_GROUND, 0.95, CONCRETE));
-        // 出挑取 +0.30（半宽多 0.15 = RELIEF_STEP）；原来的 +0.25 只多出 0.125，
-        // 掠射角下墩身肩面会与压顶落到同一批像素上。与围墙压顶同一套数值。
-        c.deco(Part::new(ObstacleKind::Building, x, z, w + 0.30, d + 0.30, 0.95, 1.20, CONCRETE_DARK));
+        // 泽西护栏剖面：下宽上窄的**收分** + 顶带 + 反光柱。
+        //
+        // ⚠ 原来只有两层，而且**压顶比墩身宽 0.30m**（0.9 → 1.2）——真护栏是反过来的
+        // （底宽顶窄）。那道出挑的浅盘朝上、又是全画面唯一的大水平面，定向光下被打成
+        // 最亮的一块；从出生点沿路看过去就是一张浮在沥青上的白纸
+        // （实机截图 `green_spawn2_b.png` 正中，09-09/09-10 两轮把它叫作"白色交叉薄壁"）。
+        // 现在上身每侧收 0.19、顶带只比上身出挑 0.15（= RELIEF_STEP，掠射角不共面），
+        // 受光顶面从 7.6m² 降到 4.9m²，且轮廓读作"上窄的实体墙"而不是"桌板"。
+        let (wu, du) = (w - 0.38, d - 0.38);
+        c.push(Part::new(ObstacleKind::Building, x, z, w, d, UNDER_GROUND, 0.55, CONCRETE));
+        c.push(Part::new(ObstacleKind::Building, x, z, wu, du, 0.55, 1.05, CONCRETE));
+        c.deco(Part::new(ObstacleKind::Building, x, z, wu + 0.30, du + 0.30, 1.05, 1.20, CONCRETE_DARK));
         for s in [-1.0f32, 0.0, 1.0] {
             let (px, pz) = if x.abs() > 0.1 { (x + s * 2.2, z) } else { (x, z + s * 2.2) };
             c.push(Part::new(ObstacleKind::Block, px, pz, 0.22, 0.22, 1.20, 1.90, FLAG_POLE).cyl());
@@ -1265,7 +1280,7 @@ pub fn generate_city() -> LevelMap {
         for j in 0..6 {
             let cx = bc(i);
             let cz = bc(j);
-            block_edges(&mut c, cx, cz);
+            block_edges(&mut c, cx, cz, i, j);
             match block_role(i, j) {
                 'P' => plaza(&mut c, cx, cz, i == 2 && j == 2),
                 'O' => office_block(&mut c, cx, cz, i, j),
