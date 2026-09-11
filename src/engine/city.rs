@@ -731,11 +731,17 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
     }
 
     // 花坛：石框 + 真灌木
-    for (dx, dz) in [(-13.0f32, -13.0), (13.0, -13.0), (-13.0, 13.0), (13.0, 13.0)] {
+    for (n, (dx, dz)) in [(-13.0f32, -13.0), (13.0, -13.0), (-13.0, 13.0), (13.0, 13.0)]
+        .into_iter()
+        .enumerate()
+    {
         let (ax, az) = (cx + dx, cz + dz);
         c.push(Part::new(ObstacleKind::Building, ax, az, 4.0, 4.0, UNDER_GROUND, 0.62, GRANITE));
-        c.deco(Part::new(ObstacleKind::Tree, ax, az, 3.4, 3.4, 0.55, 1.95, TREE_LEAF_2).sph());
-        c.deco(Part::new(ObstacleKind::Tree, ax - 0.9, az + 0.6, 1.5, 1.5, 1.4, 2.7, TREE_LEAF_3).sph());
+        // 灌木一律走 [`bush`]：两团不互相穿插的球，宽高比 ≈0.77。
+        // 这里原来手搓了一颗 **3.4m 宽、只有 1.4m 高**的扁球（宽高比 0.41）外加一颗偏心副球，
+        // 平着色下读作一块压在石框上的绿色巨石——和 `block_edges` 那批"没有树干的树"
+        // 是同一个错误（把球压扁当灌木，结果只像石头）。
+        bush(c, ax, az, n as i32 + 1);
     }
 
     // 长椅：座面 + 靠背 + 四条腿（旧版是一块悬空的板）
