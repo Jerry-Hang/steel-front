@@ -1453,6 +1453,22 @@ fn main() {
     let write_spv = |spirv: &[u32], name: &str| {
         let bytes: Vec<u8> = spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
         let spv_path = assets_dir.join(name);
+        // **dev 构建不得覆盖被跟踪的 release 着色器。**
+        //
+        // 实测（2026-09-11）：`cargo clippy --all-targets` 一次就把 7 个被跟踪的
+        // `assets/*.spv` 全部改脏，`mesh.spv` 27572 -> 29432 字节、MD5 全变；
+        // 而 `cargo build --release` 产出的是与 HEAD 逐字节相同的那一份。
+        // 也就是说 **naga 的输出随构建 profile 而变**（debug 版多出的正是调试类信息），
+        // 于是"跑一次测试/clippy 就污染工作区"——上面那条"内容相同就不写"的守卫
+        // 对这种情况无效，因为内容**确实**不同。
+        //
+        // SPIR-V 的正确性与 Rust 的 profile 无关（release 编出来的字节码在 dev 二进制里
+        // 一样能加载），所以 dev 构建下**只要文件已存在就不写**。
+        // 不存在时（新鲜克隆 + 只跑 dev 构建）仍然写，保证游戏能加载着色器。
+        let is_dev_build = env::var("DEBUG").map(|v| v != "false").unwrap_or(false);
+        if is_dev_build && spv_path.exists() {
+            return;
+        }
         // 只在内容真的变了时才写盘。
         //
         // 这 7 个 .spv 是**被版本库跟踪的构建产物**：运行时 `renderer.rs` 直接从磁盘读
