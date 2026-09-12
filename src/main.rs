@@ -672,10 +672,11 @@ impl GameApp {
                             // 不另写一套判据。差 > 1m 即假设成立。
                             let th = crate::engine::renderer::terrain_height(bx, bz);
                             log::info!(
-                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) 地形高={th:.1} 地形-NPC={:.1} 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0})",
+                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) hp={:.0} state={:?} 地形高={th:.1} 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0})",
                                 n.id,
                                 n.position[0], n.position[1], n.position[2],
-                                th - n.position[1],
+                                n.hp,
+                                n.state_machine.state(),
                                 bx + dx, n.position[1] + 1.6, bz + dz
                             );
                         }
