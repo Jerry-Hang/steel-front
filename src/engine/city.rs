@@ -1182,10 +1182,19 @@ fn street_furniture(c: &mut City) {
         // （实机截图 `green_spawn2_b.png` 正中，09-09/09-10 两轮把它叫作"白色交叉薄壁"）。
         // 现在上身每侧收 0.19、顶带只比上身出挑 0.15（= RELIEF_STEP，掠射角不共面），
         // 受光顶面从 7.6m² 降到 4.9m²，且轮廓读作"上窄的实体墙"而不是"桌板"。
+        // 🔴 2026-09-12 第⑥条再修：**顶带仍然比上身宽 0.30m**，而上一条注释自己写着
+        // 「真护栏是反过来的（底宽顶窄）」—— 原则写了、代码没照做（与铁律 C 那条
+        // "规则写了不执行等于没写"是同一个形态）。
+        //
+        // 那道出挑 0.15m/侧 的浅盘朝上，是**全画面唯一的大水平面**，定向光下被打成最亮的一块；
+        // 从出生点看过去仍是"白纸"（`RV3D_DUMP_NEAR=20` 取证：±14m 处三件一组，
+        // 顶带 5.92x0.82x**0.15** 高=[1.05..1.20]）。
+        // 现在让顶带**比上身再收 0.30**（wu-0.30），受光顶面 4.9m² → 4.0m²，
+        // 且轮廓真正读作"上窄的实体护栏"。**这是那句注释一直想做但没做完的事。**
         let (wu, du) = (w - 0.38, d - 0.38);
         c.push(Part::new(ObstacleKind::Building, x, z, w, d, UNDER_GROUND, 0.55, CONCRETE));
         c.push(Part::new(ObstacleKind::Building, x, z, wu, du, 0.55, 1.05, CONCRETE));
-        c.deco(Part::new(ObstacleKind::Building, x, z, wu + 0.30, du + 0.30, 1.05, 1.20, CONCRETE_DARK));
+        c.deco(Part::new(ObstacleKind::Building, x, z, wu - 0.30, du - 0.30, 1.05, 1.20, CONCRETE_DARK));
         for s in [-1.0f32, 0.0, 1.0] {
             let (px, pz) = if x.abs() > 0.1 { (x + s * 2.2, z) } else { (x, z + s * 2.2) };
             c.push(Part::new(ObstacleKind::Block, px, pz, 0.22, 0.22, 1.20, 1.90, FLAG_POLE).cyl());

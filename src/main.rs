@@ -1834,6 +1834,36 @@ impl GameApp {
             // 布局不变式检查，画出来会和 GLB 表面共面 z-fighting（正是 city.rs 零共面纪律
             // 禁止的那类穿帮）。过滤放在这里而不是 render_geometry() 内部，因为 city.rs 的
             // 布局测试需要遍历到每一个盒子。
+            // 🔴 `RV3D_DUMP_NEAR=<米>`：把**相机附近**的 marker 逐件打印出来（序号/种类/位置/尺寸/形状）。
+            //
+            // 存在理由（2026-09-12 第 83 轮）：为画面正中一组薄板，我连试五个假设
+            // （柱廊檐梁 / 退化几何 / 长椅 / 喷泉池缘 / 路缘石）**全部落空** ——
+            // 因为每次都是"整类地改"（染色/搬走/压暗一整类），而**一类里有几百个实例**，
+            // 这种做法**只能否证、不能定位**。
+            //
+            // ⇒ 这条日志把"几何是什么"变成可读的数字，而不是靠像素颜色反推
+            //    （marker 的 tint 会经光照与程序化皮肤，读回来的颜色不可靠）。
+            //    **量在程序里就直接打出来** —— 这是第 76 轮已经验证过的方法。
+            if let Ok(s) = std::env::var("RV3D_DUMP_NEAR") {
+                if let Ok(r) = s.parse::<f32>() {
+                    let c = self.camera.position();
+                    for (i, o) in self.game.render_geometry().enumerate() {
+                        if o.shape == engine::geom::Shape::None {
+                            continue;
+                        }
+                        let d = glam::Vec3::new(o.x - c.x, o.y - c.y, o.z - c.z).length();
+                        if d <= r {
+                            log::info!(
+                                "near#{i} d={d:.1} {:?} @({:.1},{:.1},{:.1}) 尺寸={:.2}x{:.2}x{:.2} 高=[{:.2}..{:.2}] shape={:?}",
+                                o.kind, o.x, o.y, o.z,
+                                o.half_w * 2.0, o.half_d * 2.0, o.half_h * 2.0,
+                                o.y - o.half_h, o.y + o.half_h,
+                                o.shape
+                            );
+                        }
+                    }
+                }
+            }
             let markers: Vec<engine::renderer::WorldMarker> = self
                 .game
                 .render_geometry()
