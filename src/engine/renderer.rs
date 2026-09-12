@@ -8538,12 +8538,14 @@ impl Renderer {
                 // margin 2m：桶边界上的建筑不该在转视角时逐帧抖动进出。
                 let mut drawn_bins = 0u32;
                 let mut drawn_tris = 0u32;
+                let mut drawn_vert_span = 0u64;
                 for bin in &self.prop_bins {
                     if !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0) {
                         continue;
                     }
                     drawn_bins += 1;
                     drawn_tris += bin.index_count / 3;
+                    drawn_vert_span += (bin.max_vertex - bin.min_vertex + 1) as u64;
                     self.device.cmd_draw_indexed(
                         command_buffer,
                         bin.index_count,
@@ -8570,8 +8572,9 @@ impl Renderer {
                             .max()
                             .unwrap_or(0);
                         log::info!(
-                            "propdraw: 桶 {drawn_bins}/{} 可见；提交三角形 {drawn_tris}；单桶最大 {max_bin}",
-                            self.prop_bins.len()
+                            "propdraw: 桶 {drawn_bins}/{} 可见；提交三角形 {drawn_tris}；单桶最大 {max_bin}；顶点区间合计 {drawn_vert_span}（顶点总数 {}）",
+                            self.prop_bins.len(),
+                            self.prop_vertex_count
                         );
                     }
                 }

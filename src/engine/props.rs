@@ -198,6 +198,15 @@ pub struct PropBin {
     pub index_count: u32,
     pub center: [f32; 3],
     pub radius: f32,
+    /// 本桶索引里出现的**最小顶点下标**（第 42 轮加入）
+    pub min_vertex: u32,
+    /// 本桶索引里出现的**最大顶点下标**（第 42 轮加入）
+    ///
+    /// 用途：`max_vertex - min_vertex + 1` 是该桶 draw call **可能触碰的顶点区间**。
+    /// 若这个区间接近整份顶点缓冲的长度，说明桶在**索引空间**连续、但在**顶点空间**是散的 ——
+    /// 每个桶的 draw 都要扫过几乎全部顶点，这正是"24.3 万三角形却要 3.7ms"的候选机制
+    /// （见 docs/PROGRESS.md 第 41 轮）。
+    pub max_vertex: u32,
 }
 
 /// 分桶后的合并几何。
@@ -352,7 +361,18 @@ pub fn merge_binned(
             .map(|(a, b)| (a - b) * 0.5)
             .fold(0.0f32, |acc, c| acc + c * c)
             .sqrt();
-        out.bins.push(PropBin { first_index, index_count: count, center, radius });
+        // 本桶索引实际触及的顶点区间（第 42 轮）：用来量化"桶在顶点空间是否局部"。
+        let slice = &out.indices[first_index as usize..(first_index + count) as usize];
+        let min_vertex = slice.iter().copied().min().unwrap_or(0);
+        let max_vertex = slice.iter().copied().max().unwrap_or(0);
+        out.bins.push(PropBin {
+            first_index,
+            index_count: count,
+            center,
+            radius,
+            min_vertex,
+            max_vertex,
+        });
     }
     out
 }
@@ -506,6 +526,8 @@ mod tests {
             index_count: 3,
             center: [x, 0.0, 0.0],
             radius: r,
+            min_vertex: 0,
+            max_vertex: 2,
         };
         // x=+50、半径 2 的桶在左平面背面：d = -50，-50 + 2 = -48 < 0 → 不可见
         assert!(!bin_visible(&bin_at(50.0, 2.0), &planes, 0.0));
