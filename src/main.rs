@@ -1081,12 +1081,16 @@ impl GameApp {
         // 相机参数日志（1 秒一条，冒烟断言 yaw/pitch 变化用）
         if self.last_cam_log.elapsed().as_secs_f32() >= 1.0 {
             let (yaw, pitch, dist) = self.camera.orbit_params();
+            // `spread` = 腰射准星扩散（第⑤条）。打在这里是为了**能脱离截图做验收** ——
+            // 像素测量会被"两次运行场景不同 / 蹲下相机高度不同"混杂（第 65、76 轮实测），
+            // 而这个值是确定的：站立 0.30 / 蹲 0.18 / 趴 0.10（+冲刺 +开火）。
             log::info!(
-                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} cycle_us={} update_us={} render_us={}",
+                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} spread={:.2} cycle_us={} update_us={} render_us={}",
                 yaw.to_degrees(),
                 pitch.to_degrees(),
                 dist,
                 self.camera.mode,
+                self.game.crosshair_spread(),
                 self.last_cycle_us,
                 self.last_update_us,
                 self.last_render_us
