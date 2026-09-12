@@ -4203,6 +4203,22 @@ impl Game {
                 });
             }
         }
+        // 临时埋点（RV3D_NPC_POS=1）：打出前 3 个 NPC 的**实际**世界坐标，用于把调试机位
+        // 摆到人跟前取近景。之所以要打而不能手算：出生点是 `player + (cos,sin)*radius`，
+        // 再经 `push_out_of_obstacle` 推离障碍并 clamp 到 ±250 —— 手算过一次，错了三轮。
+        // 取景验完即删（教训 20）。
+        if std::env::var("RV3D_NPC_POS").as_deref() == Ok("1") {
+            for n in self.npcs.iter().take(3) {
+                log::info!(
+                    "npcpos: #{} team={:?} ({:.1}, {:.1}, {:.1})",
+                    n.id,
+                    n.team,
+                    n.position[0],
+                    n.position[1],
+                    n.position[2]
+                );
+            }
+        }
         let red_ids: Vec<usize> = self.npcs.iter().filter(|n| n.team == Team::Red).map(|n| n.id).collect();
         let blue_ids: Vec<usize> = self.npcs.iter().filter(|n| n.team == Team::Blue).map(|n| n.id).collect();
         self.command = Some((
