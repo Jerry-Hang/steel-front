@@ -1887,6 +1887,7 @@ impl Game {
         self.hud.weapon_name = self.weapons.active_name().to_string();
         self.hud.switching = self.weapons.is_switching();
         self.hud.grenades = self.grenades;
+        self.hud.crosshair_spread = self.crosshair_spread();
         self.hud.medkits = self.medkits;
         self.hud.heal_progress = self.heal_progress();
         // 打药推进（计时归零那一帧一次性回血）
@@ -2917,6 +2918,26 @@ impl Game {
     ///
     /// 故意做成"读的时候派生"而不是"切枪时重置一个字段"：后者需要一个切枪钩子，
     /// 一旦漏挂就会留下"拿着栓动狙击却还开着连发"的状态 —— 那正是两套状态源。
+    /// 腰射准星扩散量 0..=1（HUD 按它缩放十字）。
+    ///
+    /// 2026-09-12 第⑤条：**这是本仓第一次给玩家"散布反馈"** ——
+    /// 在此之前准星是固定 8px 半长，玩家读不出自己当前的散布状态，
+    /// 而移动/姿态/连发恰恰是散布的三个主要来源。
+    /// 三个输入量全都已经存在（`stance` / `sprinting()` / `fire_cooldown`），
+    /// 所以这里不新增状态，只做一次纯函数式的合成。
+    pub fn crosshair_spread(&self) -> f32 {
+        // 站姿基准 0.30；蹲/趴收拢（更稳），冲刺张开（最不稳）
+        let stance = match self.stance {
+            Stance::Standing => 0.30,
+            Stance::Crouching => 0.18,
+            Stance::Prone => 0.10,
+        };
+        let sprint = if self.sprinting() { 0.25 } else { 0.0 };
+        // 开火后坐期：fire_cooldown 是剩余秒数，按它线性张开，封顶 0.45
+        let fire = (self.fire_cooldown * 3.0).clamp(0.0, 0.45);
+        (stance + sprint + fire).clamp(0.08, 1.0)
+    }
+
     pub fn fire_mode(&self) -> FireMode {
         let modes = self.supported_fire_modes();
         if modes.contains(&self.fire_mode) {
@@ -6678,6 +6699,46 @@ mod tests {
         game.hud.health = 10.0;
         game.use_medkit();
         assert_eq!(game.heal_timer, 0.0, "没药时不该进入打药状态");
+    }
+
+    #[test]
+    fn crosshair_spread_orders_by_stance_and_sprint() {
+        // 第⑤条：准星扩散是玩家读散布的唯一途径，四个关系必须成立。
+        let mut game = Game::new();
+        game.stance = Stance::Standing;
+        game.set_sprint(false);
+        game.fire_cooldown = 0.0;
+        let stand = game.crosshair_spread();
+
+        game.stance = Stance::Crouching;
+        let crouch = game.crosshair_spread();
+        game.stance = Stance::Prone;
+        let prone = game.crosshair_spread();
+
+        assert!(crouch < stand, "蹲下应比站立收拢：{crouch} vs {stand}");
+        assert!(prone < crouch, "趴下应比蹲下更收拢：{prone} vs {crouch}");
+
+        // 冲刺张开
+        game.stance = Stance::Standing;
+        game.set_sprint(true);
+        let sprint = game.crosshair_spread();
+        assert!(sprint > stand, "冲刺应比站立张开：{sprint} vs {stand}");
+
+        // 开火后坐期张开
+        game.set_sprint(false);
+        game.fire_cooldown = 0.15;
+        let firing = game.crosshair_spread();
+        assert!(firing > stand, "开火期应比静立张开：{firing} vs {stand}");
+
+        // 恒在合法区间内（HUD 直接拿它乘像素，越界会画出畸形十字）
+        for s in [Stance::Standing, Stance::Crouching, Stance::Prone] {
+            for cd in [0.0f32, 0.05, 0.5, 3.0] {
+                game.stance = s;
+                game.fire_cooldown = cd;
+                let v = game.crosshair_spread();
+                assert!((0.08..=1.0).contains(&v), "越界: stance={s:?} cd={cd} -> {v}");
+            }
+        }
     }
 
     #[test]

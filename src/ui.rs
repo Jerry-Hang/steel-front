@@ -412,6 +412,9 @@ pub struct HudState {
     pub switching: bool,
     /// 手榴弹库存（HUD 显示；0..=2，G 投掷、N 补给）
     pub grenades: u32,
+    /// 腰射准星扩散量 0..=1（2026-09-12 第⑤条）：由 `GameState::crosshair_spread()` 每帧写入。
+    /// 站起来/冲刺/连发时变大，蹲下/趴下时收拢 —— 让玩家能读出自己的散布状态。
+    pub crosshair_spread: f32,
     /// 医疗包库存（HUD 显示；X 键使用）
     pub medkits: u32,
     /// 打药进度 0..=1（>0 时 HUD 提示正在打药）
@@ -503,6 +506,7 @@ impl HudState {
             weapon_name: "M1 Rifle".to_string(),
             switching: false,
             grenades: 2,
+            crosshair_spread: 0.3,
             medkits: 2,
             heal_progress: 0.0,
             hit_marker_timer: 0.0,
@@ -910,20 +914,17 @@ impl HudState {
                 Color::new(1.0, 0.2, 0.2, 0.9),
             )));
         } else {
-            // 腰射：扩散十字（半长 8px）
-            // 2026-09-12：原写作 `else if !self.ads` —— 进了 else 就必然 `!self.ads`，
-            // 那个条件是**恒真**的，读起来却像还有第三种状态。已简化为 `else`。
-            //
-            // ⚠️ 待做（第⑤条：开镜打磨）：这里的十字是**固定 8px 半长**，不随移动/开火扩散。
-            // 真实 FPS 的腰射准星会随 spread 张开，是最直接的"手感反馈"来源。
-            // 需要 `GameState` 暴露一个 spread 值（可由移动速度/姿态/连发累积算出），
-            // 再在这里按它缩放 half —— 涉及 game.rs + ui.rs 两侧，单独立项做。
+            // 腰射：扩散十字。**半长随 spread 张开**（2026-09-12 第⑤条）——
+            // 原来固定 8px，玩家读不出移动/姿态/连发带来的散布变化。
+            // 0.08（趴下最稳）→ 10.4px，1.0（冲刺+连发）→ 24.0px。
+            let half = 8.0 * (0.6 + self.crosshair_spread * 1.4);
+            let half_minor = half * 0.1875; // 短边固定为长边的 3/16（= 原 3px / 16px）
             elems.push(HudElement::Quad(Quad::new(
-                Rect::new(cx - 8.0, cy - 1.5, 16.0, 3.0),
+                Rect::new(cx - half, cy - half_minor * 0.5, half * 2.0, half_minor),
                 Color::WHITE,
             )));
             elems.push(HudElement::Quad(Quad::new(
-                Rect::new(cx - 1.5, cy - 8.0, 3.0, 16.0),
+                Rect::new(cx - half_minor * 0.5, cy - half, half_minor, half * 2.0),
                 Color::WHITE,
             )));
             elems.push(HudElement::Quad(Quad::new(
