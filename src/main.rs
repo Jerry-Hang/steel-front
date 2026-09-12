@@ -852,11 +852,14 @@ impl GameApp {
                     }
                 }
             }
-            crate::engine::game::FireMode::Burst3 => {
+            crate::engine::game::FireMode::Burst2 | crate::engine::game::FireMode::Burst3 => {
                 if self.fire_edge {
-                    fired = self
-                        .game
-                        .fire_burst_player([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                    // 发数由档位决定（双发=2 / 三连发=3），共用同一条连打路径
+                    fired = self.game.fire_burst_player(
+                        [pos.x, pos.y, pos.z],
+                        [dir.x, dir.y, dir.z],
+                        self.game.fire_mode().burst_rounds(),
+                    );
                     if fired > 0 {
                         self.last_shot_at = self.anim_clock;
                     }

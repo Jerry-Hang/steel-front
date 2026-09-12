@@ -150,6 +150,27 @@ stance: Prone     eye=0.42m
 反例出在 cap_safe 自己身上。`pm_play.ps1` / `gameplay_smoke_pm.py` 一直是正确参照实现。
 
 **这一修同时解锁了后续所有游戏内验证**（打药、开火模式、人物建模、烘焙都要靠它）。
+### 功能：开火模式补"双发"（2026-09-12 第 5 轮）+ 一个自造的隐患
+
+**已实现并引擎内验证**：
+- `FireMode` 由「单发/三连发/连发」补成 **「单发/双发/三连发/连发」**（用户点名缺"双发"）。
+- 新增 `FireMode::burst_rounds()`（1/2/3/1）—— **双发与三连发共用同一条连打路径**
+  （`fire_burst` / `fire_burst_player` 现在收 `rounds` 参数），不再各写一份循环。
+- 冷却按实际发数：`fire_interval() * rounds`，改档位不会漏改冷却。
+- 验收：`cargo test --release` **466 passed / 0 failed / 0 警告**，新增
+  `fire_mode_cycle_covers_semi_double_triple_auto`（闭环 + 无重复 + 发数映射 + 显示名唯一）。
+- 引擎内实测（`cap_safe -Keys @(66,66,66)` = VK_B ×3）：
+  `开火模式切换为 单发 / 双发 / 三连发` —— **逐档生效，双发在循环里**。
+
+**⚠️ 我自己制造并修掉的一个隐患（必须记住）**：
+上一轮我往 `cap_safe.ps1` 的 `param()` 里加了**中文注释**，而该文件原本是**纯 ASCII**。
+Windows PowerShell 5.1 按 ANSI 读无 BOM 的 .ps1，那些字节把**下一行**
+`[int[]]$Keys = @(),` 吞进了注释 —— **`-Keys` 从此恒为空**，症状是"脚本跑完了、
+`POST VK` 一行都没有"。改回 ASCII 后立刻恢复。
+**这与教训 7 是同一条**：新写的 .ps1 必须纯 ASCII。
+**遗留**：`cap_safe.ps1` 里还有 **191 个非 ASCII 字符**（第 4 轮我加的 Post-Key /
+FindWindowW 注释），当前不影响解析（语法 0 错），但同类事故只是时间问题 ——
+**下轮第一件事就是把它们全改成 ASCII**。
 ## 功能：姿态系统 + 冲刺（2026-09-12，第③条的第一部分）
 
 **已实现**：`Stance`（站立/下蹲/卧倒，`game.rs`）+ 冲刺。

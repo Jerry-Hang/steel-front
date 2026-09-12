@@ -183,11 +183,14 @@ struct NetworkDemo {
 }
 
 /// 游戏主状态机（开始菜单 → 游戏中 → 死亡/胜利/失败结算）
-/// 开火模式（B 键循环切换）：单发 / 三连发 / 连发
+/// 开火模式（B 键循环切换）：单发 / 双发 / 三连发 / 连发
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FireMode {
     /// 单发：每次按下只打 1 发（狙击/精确射手默认手感）
     Semi,
+    /// 双发：每次按下快速连打 2 发。比三连发省弹、比单发火力密度高，
+    /// 是"点射武器"的常见档位。
+    Burst2,
     /// 三连发：每次按下快速连打 3 发
     Burst3,
     /// 连发：按住持续以武器射速开火
@@ -195,10 +198,21 @@ pub enum FireMode {
 }
 
 impl FireMode {
+    /// 每次按下要连打的发数。双发与三连发**共用同一条连打路径**（`fire_burst*`），
+    /// 所以档位只在这里描述一次，别在开火代码里再写死 2 或 3。
+    pub fn burst_rounds(self) -> u32 {
+        match self {
+            FireMode::Semi | FireMode::Auto => 1,
+            FireMode::Burst2 => 2,
+            FireMode::Burst3 => 3,
+        }
+    }
+
     /// 下一个模式（B 键循环）
     pub fn next(self) -> FireMode {
         match self {
-            FireMode::Semi => FireMode::Burst3,
+            FireMode::Semi => FireMode::Burst2,
+            FireMode::Burst2 => FireMode::Burst3,
             FireMode::Burst3 => FireMode::Auto,
             FireMode::Auto => FireMode::Semi,
         }
@@ -208,6 +222,7 @@ impl FireMode {
     pub fn label(self) -> &'static str {
         match self {
             FireMode::Semi => "单发",
+            FireMode::Burst2 => "双发",
             FireMode::Burst3 => "三连发",
             FireMode::Auto => "连发",
         }
@@ -2733,13 +2748,15 @@ impl Game {
     /// 三连发（Burst3 模式）：无视冷却快速连打 3 发，之后强制冷却 3×间隔；
     /// 返回实际发射数（弹匣打空即停）。切枪计时中返回 0。
     /// AI/网络/测试用三连发（不带玩家标记）。玩家入口见 fire_burst_player。
+    /// `rounds` 由调用方给（`FireMode::burst_rounds()`）—— 双发与三连发共用这一条路径。
     #[allow(dead_code)]
-    pub fn fire_burst(&mut self, origin: [f32; 3], direction: [f32; 3]) -> u32 {
+    pub fn fire_burst(&mut self, origin: [f32; 3], direction: [f32; 3], rounds: u32) -> u32 {
         if self.weapons.is_switching() {
             return 0;
         }
         let mut n = 0u32;
-        for _ in 0..3 {
+        let rounds = rounds.max(1);
+        for _ in 0..rounds {
             if self.fire_shot(origin, direction, false) {
                 n += 1;
             } else {
@@ -2747,18 +2764,19 @@ impl Game {
             }
         }
         if n > 0 {
-            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * 3.0;
+            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * rounds as f32;
         }
         n
     }
 
     /// 玩家三连发（main.rs 调用）：弹带玩家标记（友军豁免）
-    pub fn fire_burst_player(&mut self, origin: [f32; 3], direction: [f32; 3]) -> u32 {
+    pub fn fire_burst_player(&mut self, origin: [f32; 3], direction: [f32; 3], rounds: u32) -> u32 {
         if self.weapons.is_switching() {
             return 0;
         }
         let mut n = 0u32;
-        for _ in 0..3 {
+        let rounds = rounds.max(1);
+        for _ in 0..rounds {
             if self.fire_shot(origin, direction, true) {
                 n += 1;
             } else {
@@ -2766,7 +2784,7 @@ impl Game {
             }
         }
         if n > 0 {
-            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * 3.0;
+            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * rounds as f32;
         }
         n
     }
@@ -6367,6 +6385,31 @@ mod tests {
         assert!(game.sprinting(), "恢复站立后应重新冲刺");
         game.set_sprint(false);
         assert!(!game.sprinting(), "松开 Shift 必须停止冲刺");
+    }
+
+    #[test]
+    fn fire_mode_cycle_covers_semi_double_triple_auto() {
+        // 四档必须闭环且互不重复 —— 漏一档会让 B 键循环静默跳过某个模式
+        let mut seen = Vec::new();
+        let mut m = FireMode::Semi;
+        for _ in 0..4 {
+            assert!(!seen.contains(&m), "循环里出现重复档位: {m:?}");
+            seen.push(m);
+            m = m.next();
+        }
+        assert_eq!(m, FireMode::Semi, "循环必须回到起点");
+        assert!(seen.contains(&FireMode::Burst2), "双发必须在循环里");
+        // 发数映射：单发/连发按单发走，双发 2，三连发 3
+        assert_eq!(FireMode::Semi.burst_rounds(), 1);
+        assert_eq!(FireMode::Burst2.burst_rounds(), 2);
+        assert_eq!(FireMode::Burst3.burst_rounds(), 3);
+        assert_eq!(FireMode::Auto.burst_rounds(), 1);
+        // 显示名互不相同（HUD 靠它区分档位）
+        let labels: Vec<&str> = seen.iter().map(|m| m.label()).collect();
+        let mut uniq = labels.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), labels.len(), "档位显示名重复: {labels:?}");
     }
 
     #[test]

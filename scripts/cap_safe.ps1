@@ -2,10 +2,14 @@ param(
     [int]$WarmupSec = 10,
     [int]$HoldSec = 4,
     [string]$Tag = "cap",
-    # ⚠ -Keys 收的是 **Windows 虚拟键码（VK）**，不是 winit 的 KeyCode 枚举序号。
-    # 两套毫无关系：winit 的 KeyR=36，而 Windows 的 VK_R=82(0x52)，36 在 Windows 里是 VK_HOME。
-    # 2026-09-12 之前混用过，症状是"POST VK 打印了、游戏零响应"。
-    # 常用：R=82 C=67 Z=90 W=87 A=65 S=83 D=68 Space=32 Tab=9 Escape=27 Shift=16。
+    # ASCII ONLY in this file -- Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI,
+    # and non-ASCII bytes here silently swallowed the next line (2026-09-12: a Chinese
+    # comment above this line ate `[int[]]$Keys = @(),` so -Keys was always empty).
+    #
+    # -Keys takes WINDOWS VIRTUAL-KEY CODES, not winit KeyCode enum indices.
+    # winit KeyR=36 but Windows VK_R=82(0x52); 36 is VK_HOME. Z=90, C=67, B=66,
+    # W=87 A=65 S=83 D=68 Space=32 Tab=9 Esc=27 Shift=16.
+    # lParam bit16-23 carries the scancode (MapVirtualKey) -- winit needs it.
     [int[]]$Keys = @(),
     [int]$AfterKeysSec = 3,
     [switch]$Stress
