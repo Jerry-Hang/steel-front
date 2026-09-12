@@ -4452,6 +4452,28 @@ impl Renderer {
         // 圆柱 scale = (半径, 高, 半径)；盒 scale = (宽, 高, 厚)。
         // 段数预算：255 人 × 每组 3072 ⇒ **每组每人最多 12 段**。本表 = 9 盒 + 8 圆柱
         // （2295 / 2040，分别占 75% / 66%），都留了余量。加段之前先复核这个预算。
+        // ── 持枪姿态角（2026-09-12 第④条修）：负角 = 肢体向 +Z（面朝方向）抬起。
+        //
+        // 旧版两条手臂只有走路摆动（kind 5~8 绕 X 随 `stride` 摆），而枪固定在身前
+        // `(x=+0.16, z=+0.36, y=1.18)` ⇒ **枪悬在胸前、手臂垂在身侧，两者永不相交**。
+        // 实机放大图（`screenshots/soldier_zoom.png`）里读作"左肩伸出一根悬空的横条"、
+        // 且"看不见手臂" —— 这是用户说的"神人样子"的主要来源。
+        //
+        // 改成持枪后**手臂不再随步伐摆动**：真人端枪行进时本来就不摆臂，比摆动更真。
+        // 只改姿态角、**不加段数**，实例预算（9 盒 + 8 圆柱）不变。
+        const HOLD_R_UPPER: f32 = -1.00; // 右上臂前抬 ~57°
+        const HOLD_R_FORE: f32 = -0.85;  // 右前臂再前抬 ~49° ⇒ 手到握把高度
+        const HOLD_L_UPPER: f32 = -1.15; // 左上臂前抬 ~66°（托护木，比右手更前）
+        const HOLD_L_FORE: f32 = -0.70;  // 左前臂 ~40°
+        // 段尾的 f32 = **逐段明暗系数**（2026-09-12 第④条修）。
+        //
+        // 引擎对 NPC 走 `flat_flag=2` 纯色路径，`tint` **就是**外观色，顶点色是白化的。
+        // 因此 17 段共用一个 tint ⇒ 整个人是一个**均匀饱和色块**，
+        // 平着色下没有任何结构可读（实机放大图上就是一团橙色塑料）——
+        // 这是"神人样子"的第二大来源（第一大是枪悬空，已修）。
+        //
+        // 真人身上的装备本来就有明显的**明度层次**：盔最暗、背心次之、作训服中、靴最暗。
+        // 这里给每段一个亮度系数，**不加段数、不加 draw call**（还是同一批实例）。
         let parts: [([f32; 3], [f32; 3], [f32; 3], u8, u8); 17] = [
             // ── 四肢：保持圆柱（转动最自然），但**加粗到真人尺寸**。旧值大腿 φ0.13 /
             //    小腿 φ0.10 / 前臂 φ0.084 —— 比真人细一倍，远看只剩躯干那根柱子，
@@ -4481,6 +4503,21 @@ impl Renderer {
             ([0.16, 1.18, 0.36], [0.07, 0.10, 0.62], [0.0, 0.0, 0.0], 9, 0),      // 枪身
             ([0.16, 1.14, -0.04], [0.06, 0.13, 0.24], [0.0, 0.0, 0.0], 9, 0),     // 枪托
         ];
+        // 逐段明暗系数（顺序严格对应上面的 17 段）：盔最暗、靴最暗、枪近黑、背心最亮。
+        // 真人装备本来就有明显明度层次，平着色下这是**唯一**能读出结构的手段。
+        let shade: [f32; 17] = [
+            0.72, 0.72, // 左/右大腿
+            0.66, 0.66, // 左/右小腿
+            0.42, 0.42, // 左/右脚（靴，最暗）
+            0.80, // 骨盆
+            0.95, // 胸廓
+            1.00, // 防弹背心（装备主体，最亮）
+            0.70, // 头
+            0.55, // 头盔壳（比脸暗）
+            0.78, 0.78, // 左/右上臂
+            0.74, 0.74, // 左/右前臂
+            0.30, 0.30, // 枪身/枪托（近黑）
+        ];
         let trans = glam::Mat4::from_translation(glam::Vec3::from(pos));
         let rot = glam::Mat4::from_rotation_y(yaw);
         // 步态：髋/膝/肩/肘绕各自枢轴对向摆动，频率 ~2.2Hz 视觉节奏
@@ -4499,17 +4536,17 @@ impl Renderer {
         let mut box_out: Vec<InstanceData> = Vec::with_capacity(6);
         let mut cyl_out: Vec<InstanceData> = Vec::with_capacity(8);
         let mut sph_out: Vec<InstanceData> = Vec::with_capacity(1);
-        for (pivot, scale, center, kind, geom) in parts.iter() {
+        for (i, (pivot, scale, center, kind, geom)) in parts.iter().enumerate() {
             let mut anim = glam::Mat4::IDENTITY;
             match kind {
                 1 => anim *= glam::Mat4::from_rotation_x(stride),        // 左大腿
                 2 => anim *= glam::Mat4::from_rotation_x(-stride),       // 右大腿
                 3 => anim *= glam::Mat4::from_rotation_x(-stride * 0.5), // 左小腿（膝弯反向）
                 4 => anim *= glam::Mat4::from_rotation_x(stride * 0.5),  // 右小腿
-                5 => anim *= glam::Mat4::from_rotation_x(-stride * 0.8), // 左上臂（与同侧腿反向）
-                6 => anim *= glam::Mat4::from_rotation_x(stride * 0.8),  // 右上臂
-                7 => anim *= glam::Mat4::from_rotation_x(-stride * 0.35), // 左前臂（肘弯）
-                8 => anim *= glam::Mat4::from_rotation_x(stride * 0.35), // 右前臂
+                5 => anim *= glam::Mat4::from_rotation_x(HOLD_L_UPPER), // 左上臂：持枪（托护木）
+                6 => anim *= glam::Mat4::from_rotation_x(HOLD_R_UPPER), // 右上臂：持枪（握把）
+                7 => anim *= glam::Mat4::from_rotation_x(HOLD_L_FORE),  // 左前臂
+                8 => anim *= glam::Mat4::from_rotation_x(HOLD_R_FORE),  // 右前臂
                 9 => anim *= glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -kick)), // 枪后坐
                 10 => anim *= glam::Mat4::from_rotation_x(torso_lean),   // 胸微俯
                 _ => {}
@@ -4522,7 +4559,8 @@ impl Renderer {
                 * glam::Mat4::from_scale(glam::Vec3::from(*scale));
             let inst = InstanceData {
                 model: model.to_cols_array(),
-                tint,
+                // 逐段明暗：NPC 走纯色路径，`tint` 就是外观色；乘上本段系数即得装备层次。
+                tint: [tint[0] * shade[i], tint[1] * shade[i], tint[2] * shade[i], tint[3]],
             };
             match geom {
                 1 => cyl_out.push(inst),
@@ -10815,9 +10853,41 @@ mod npc_visual_tests {
             "圆柱段超预算：{} × {NPC_HEADS} > {MAX_NPC_INSTANCES}",
             cyl_parts.len()
         );
+        // 逐段明暗（2026-09-12 第④条）：`tint` 不再是同一个值，而是**队色 × 本段系数**。
+        // 旧断言是"所有段 tint == 队色"，它锁定的正是"整个人是一块均匀饱和色"那个缺陷
+        // （实机放大图上就是一团橙色塑料）。改成锁四条不变量：
+        //   ① alpha 不变；② 各通道不越界（∈ [0, 队色]）；
+        //   ③ 色相比例不变（只许等比缩放，否则阵营色语义会漂移）；
+        //   ④ 至少一段保持**完整队色**（远距离认阵营），且确实存在层次（不能全等）。
+        let mut saw_full = false;
+        let mut saw_variation = false;
         for p in box_parts.iter().chain(cyl_parts.iter()).chain(sph_parts.iter()) {
-            assert_eq!(p.tint, tint);
+            assert_eq!(p.tint[3], tint[3], "段色 alpha 必须保持队色");
+            for c in 0..3 {
+                assert!(
+                    p.tint[c] >= 0.0 && p.tint[c] <= tint[c] + 1e-6,
+                    "段色越界：{:?} vs 队色 {:?}",
+                    p.tint,
+                    tint
+                );
+                // 比例不变：以通道 0 交叉相乘，避免除零
+                let lhs = p.tint[c] * tint[0];
+                let rhs = tint[c] * p.tint[0];
+                assert!(
+                    (lhs - rhs).abs() < 1e-5,
+                    "段色改变了色相比例：{:?} vs 队色 {:?}",
+                    p.tint,
+                    tint
+                );
+            }
+            if (p.tint[0] - tint[0]).abs() < 1e-6 {
+                saw_full = true;
+            } else {
+                saw_variation = true;
+            }
         }
+        assert!(saw_full, "至少要有一段用完整队色，否则远距离认不出阵营");
+        assert!(saw_variation, "逐段明暗必须有层次：全部相等就回到了'一块塑料'");
     }
 
     #[test]
