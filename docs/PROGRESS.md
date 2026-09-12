@@ -1,5 +1,40 @@
 # PROGRESS.md — Steel Front 进度 / 日志 / 交接历史
 
+## ❌ LLM 通道不是尖峰源 —— 而且测试时它根本不存在（2026-09-12 第 48 轮）
+
+读 `llm_cmd.rs`：
+
+```rust
+// start() 内：
+let handle = std::thread::Builder::new()
+    .spawn(move || { loop { … std::thread::sleep(Duration::from_millis(250)); } });
+// from_env() 内：
+let url = match std::env::var("RV3D_LLM") { … Err(_) => return None };
+```
+
+**两条事实（第 8 个被否掉的假设）**：
+
+1. **HTTP 在自己线程上**：`take_red()` / `take_blue()` 只是从 `Mutex<Option<Vec<CompanyCmd>>>` 取值，
+   主线程**不做任何网络调用**。
+2. **`RV3D_LLM` 未设置时 `from_env()` 直接返回 `None`** ⇒
+   **我至今所有性能测试运行里，`self.llm` 都是 `None`，那次 HTTP 尖峰根本不存在。**
+
+### 于是尖峰只剩一个候选
+
+`ai_us` 中位 1178 / 最大 10677 的形态，在排除了"逐 NPC 步进"（并行≈串行）、
+"每帧固定 O(n)"（三处合计 2µs）、"LLM 网络"（根本不存在）之后，
+**只剩营连指挥节拍的启发式评估**（`if self.stress { if let Some(cmd) = self.command.as_mut() { … } }`，
+注释：0.5s 营司令评估 + 战士班目标点）。
+
+### 下一步判据（一次定案）
+
+给那段加计时，并**同帧打印"本节拍是否触发"**：
+- 触发帧的耗时与 `ai_us` 尖峰一一对应 ⇒ 定案；
+- 不对应 ⇒ 往 `step_ai_*` 内部的 `under_fire` / `targets` 构建找。
+
+**注意**：这一段是**玩法核心**（营级战术决策），不能为了帧数直接砍掉。
+若确认是它，正确的做法是**摊平**（把营级评估摊到多帧、或降频）而不是删除。
+
 ## ❌ 三处 O(n) 每帧工作合计仅 **2µs** —— 但露出"尖峰"线索（2026-09-12 第 47 轮）
 
 给 `update_ai` 顶部三处加计时（`RV3D_AI_PROF=1`）：
