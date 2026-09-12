@@ -370,6 +370,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
   + `run_llm_battle.ps1`。实测 150s / 7 轮，**14 条命令全部被游戏采纳**：
   未接触时全员钳形包抄、接敌后转 Assault 压到 55m、强度掉到 3 的连自动 Regroup 撤出。
   条令参数在 `data/llm_doctrine.json`（每轮重读），态势与决策落盘 `data/llm_server.jsonl`。
+  🔴 **但"通道打通" ≠ "条令可调优"**：2026-09-12 四次对照 run 实测**条令效应低于噪声**
+  （详见未结案清单顶部）。`data/llm_doctrine.json` 已改成**对称中性基线**（两侧同参数），
+  待阵营不对称查清后再做 A/B。**别再用单次 run 比较条令。**
 - **冒烟闸门 = 绿**：`scripts/run_smoke_pm.ps1`（PostMessage 版）实测 `ALL-OK`——
   闭环瞄准命中、54 发点射击毙一名敌人、`VUID=0 panics=0 fps=95.5`。
   **旧的 `run_gameplay_smoke.ps1`（SendInput）在本机结构性跑不通，别再用它判断回归。**
@@ -384,6 +387,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 ## 🔴 未结案清单
 
 > 按"值不值得下一轮动手"排序。每条给出当前最优线索（lead），**没有 lead 的不要瞎猜。**
+
+### ⭐ 本轮新增 · 最高优先级：红蓝阵营不对称（四条 run 一致）
+
+压力模式下**红方系统性压制蓝方**，与条令、也与指挥通道无关。四次 190s 对撞，蓝方净耗
+**101 / 102 / 102 / 103**（第四条 **`RV3D_LLM` 完全关掉、纯游戏 AI**），红方 34 / 52 / 56 / 76。
+蓝方恒定被打到 ~95% 伤亡（127 → 6~24），红方保留 40–58%。
+
+- 出生几何**按构造是对称的**：红 `base_angle=0`（+X 半场）/ 蓝 `π`（−X 半场），
+  半径抖动 `((i*7+side)%5)` 只是把 5 档换个次序，两边均值都是 174m。
+- 嫌疑因此落在 **+X/−X 半场 × 程序化城市（非镜像对称）× `push_out_of_obstacle`**，
+  或**玩家**（无敌、恒 `Team::Blue`、站在原点）对蓝方路径/索敌的影响。
+- **lead（一次 run 就能定案）**：把 `spawn_stress_battle` 的 `base_angle` 两侧对调重跑 ——
+  优势**跟着半场走 = 地图几何**；**跟着队伍走 = 单位/AI 行为**。
+- 相关 lead：`ai_command.rs` 与军情 JSON 里的 `击杀` 字段实际是**该营自身阵亡数**
+  （`round_kills_red/blue` 按阵亡者阵营计数），名字却叫"击杀"。若 `llm_commander.py`
+  把它当"我方战果"读，信号是**反的** —— 调参前先核对这一条。
 
 1. **`PrintWindow` 对非前台窗口返回冻结帧** — 2026-09-12 定案：注入 1200px（=170.3° 转向，
    游戏日志为证）之后，前后两张截图的**世界层残差 0.03、最佳 x-shift = 0**，即画面完全没变。
@@ -496,6 +515,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
   **LLM 战术指挥通道打通**（`llm_commander.py` + `run_llm_battle.ps1`，
   实测 150s / 7 轮 14 条命令全部被采纳）。`screenshots/` 的 405 张取证图退出 git、
   文件保留在磁盘。详见【当前状态】。
+- **追加（同日）**：修压力模式任务目标口径 —— `objective.progress()` 原收
+  `(before - self.npcs.len())` = **双方合计**阵亡，而 `target = stress_sides` 是**单方**兵力，
+  于是全场 255 人只死到 128（约一半）就刷"本轮敌军全灭"横幅，横幅是**假的**。
+  改成只计敌军（Red）阵亡；普通模式全部 NPC 都属 Red，两种口径等价。
+  **同时查明红蓝阵营不对称**（四条 run 一致，见未结案清单顶部），条令 A/B 结论作废。
 
 ### [2026-09-11] ① 围墙/隔离带结案为"端视跨深度透视误读"，非缺面
 - 起点是"中央隔离带的盒子缺 +Y 顶面"，在同一张 45° 斜透视裁剪上翻了 **10 次**、两次"结案"都靠无效对照
@@ -652,6 +676,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     导致 `*.bmp` 与 `logs/` 规则实际未生效，正准备重写整个文件。用 `read` 工具一看：
     **文件完好，中文与换行都在**，乱码只是 PowerShell 按 ANSI 读 UTF-8 的显示问题。
     这与教训 8 是同一个坑的两面：**`Get-Content` 的输出不能当作文件内容的证据。**
+24. **单次 A/B 说明不了任何事：必须做「互换对照 + 无处理对照」。**
+    2026-09-12 条令实验，第一次 run 得出"压上占优"，做完互换对照后**结论直接反转**；
+    再加两侧同条令的镜像 run、以及关掉整个指挥通道的对照 run，才看清**赢家恒为红方、
+    与处理无关**。三次对照的成本远低于照着假结论继续调参。
+    **判据：先确认对照组本身没有一边倒，再去看处理组之间的差。**
 
 ---
 
