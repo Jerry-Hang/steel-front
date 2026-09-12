@@ -645,7 +645,7 @@ fn terrain_value_noise(x: f32, z: f32, cell: f32) -> f32 {
 /// 地形高度：半径 ≤ TERRAIN_FLAT_RADIUS（中央 60×60 安全区、障碍环带 58–130m、
 /// 两军接火区都落在此圆内）恒 y=0；之外按距离 smoothstep 抬升的确定性值噪声丘陵，
 /// 幅值 ≤ TERRAIN_HILL_AMPLITUDE、坡度平缓（LOD morph 无突兀）。
-fn terrain_height(x: f32, z: f32) -> f32 {
+pub fn terrain_height(x: f32, z: f32) -> f32 {
     let flat_r2 = TERRAIN_FLAT_RADIUS * TERRAIN_FLAT_RADIUS;
     let r2 = x * x + z * z;
     if r2 <= flat_r2 {

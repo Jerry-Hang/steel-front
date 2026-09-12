@@ -667,10 +667,15 @@ impl GameApp {
                         self.camera.yaw = yaw.to_radians();
                         self.camera.pitch = 10.0_f32.to_radians();
                         if std::env::var("RV3D_NPC_POS").is_ok() {
+                            // 假设验证（第 21 轮）：NPC 的 y 恒为 0，而该处地形可能高于 0
+                            // ⇒ 士兵被地形埋掉。用**与地形渲染同一个** `terrain_height`，
+                            // 不另写一套判据。差 > 1m 即假设成立。
+                            let th = crate::engine::renderer::terrain_height(bx, bz);
                             log::info!(
-                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0}) yaw={yaw:.0}",
+                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) 地形高={th:.1} 地形-NPC={:.1} 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0})",
                                 n.id,
                                 n.position[0], n.position[1], n.position[2],
+                                th - n.position[1],
                                 bx + dx, n.position[1] + 1.6, bz + dz
                             );
                         }
