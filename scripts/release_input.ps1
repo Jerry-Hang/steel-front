@@ -96,7 +96,30 @@ if ($fixed -gt 1) { for ($i = 1; $i -lt $fixed; $i++) { [RlsInput]::ShowCursor($
 $visible1 = Get-CursorVisible
 
 # -- 4. verdict: every item verified, none inferred -----------------------------
-$alive = @(Get-Process -Name steel-front -ErrorAction SilentlyContinue).Count
+# 进程退出与窗口销毁是**异步**的：调用方（如 cap_safe.ps1 的 finally）刚 kill 完就
+# 立刻调本脚本时，steel-front 可能还在收尾、ClipCursor 也尚未随窗口销毁而失效，
+# 于是单次判定会误报 FAILED。2026-09-12 实测踩到过一次，而同一条命令紧接着再跑一次
+# 就是 OK —— 安全网的**假警报和漏报一样有害**，它会让人以后不再当回事。
+# 这里给 1.5 秒收敛窗口：每轮都重试解除限制，只在**始终**不满足时才判负。
+$alive = 0
+$clipAfter = $null
+$visible1 = $false
+for ($try = 0; $try -lt 7; $try++) {
+    if ($try -gt 0) { Start-Sleep -Milliseconds 250 }
+    $alive = @(Get-Process -Name steel-front -ErrorAction SilentlyContinue).Count
+    if ($alive -gt 0) {
+        Get-Process -Name steel-front -ErrorAction SilentlyContinue | ForEach-Object {
+            $killed += "pid $($_.Id)"
+            try { $_.Kill(); $_.WaitForExit(2000) | Out-Null } catch {}
+        }
+        $killNote = $killed -join ', '
+    }
+    [RlsInput]::ClipCursor([IntPtr]::Zero) | Out-Null
+    $clipAfter = Get-ClipState
+    $visible1 = Get-CursorVisible
+    $clipOk = ($null -ne $clipAfter) -and (-not $clipAfter.Confined)
+    if (($alive -eq 0) -and $clipOk -and ($visible1 -eq $true)) { break }
+}
 $clipOk = ($null -ne $clipAfter) -and (-not $clipAfter.Confined)
 $ok = ($alive -eq 0) -and $clipOk -and ($visible1 -eq $true)
 
