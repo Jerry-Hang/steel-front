@@ -4203,9 +4203,11 @@ impl Game {
                 });
             }
         }
-        // 临时埋点（RV3D_NPC_POS=1）：打出前 3 个 NPC 的**实际**世界坐标，用于把调试机位
-        // 摆到人跟前取近景。之所以要打而不能手算：出生点是 `player + (cos,sin)*radius`，
-        // 再经 `push_out_of_obstacle` 推离障碍并 clamp 到 ±250 —— 手算过一次，错了三轮。
+        // 临时埋点（RV3D_NPC_POS=1）：前 3 个 NPC 的实际坐标（摆调试机位用）+
+        // **出生后仍卡在不可通行格上的红/蓝计数**。
+        // 后者是 `push_out_of_obstacle` 的失败计数：它 8 步推不出去时会**静默返回原样的坏点**，
+        // 而它的判据是导航网格 `is_passable` —— 与建筑视觉体/碰撞盒不是同一套几何。
+        // 红方 base_angle=0(+X)、蓝方 π(−X)，城市非镜像对称 ⇒ 两侧落点可能系统性不同。
         // 取景验完即删（教训 20）。
         if std::env::var("RV3D_NPC_POS").as_deref() == Ok("1") {
             for n in self.npcs.iter().take(3) {
@@ -4218,6 +4220,24 @@ impl Game {
                     n.position[2]
                 );
             }
+            let (mut bad_r, mut bad_b) = (0u32, 0u32);
+            for n in &self.npcs {
+                if !self
+                    .grid
+                    .is_passable(world_to_grid(n.position[0], n.position[2]))
+                {
+                    match n.team {
+                        Team::Red => bad_r += 1,
+                        Team::Blue => bad_b += 1,
+                    }
+                }
+            }
+            log::info!(
+                "npcpos: 出生仍卡在不可通行格 红={} 蓝={} / 共 {}",
+                bad_r,
+                bad_b,
+                self.npcs.len()
+            );
         }
         let red_ids: Vec<usize> = self.npcs.iter().filter(|n| n.team == Team::Red).map(|n| n.id).collect();
         let blue_ids: Vec<usize> = self.npcs.iter().filter(|n| n.team == Team::Blue).map(|n| n.id).collect();
