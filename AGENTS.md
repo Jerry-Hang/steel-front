@@ -390,7 +390,11 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
-- **验收口径**：冒烟 ALL-OK = `VUID=0` + `kills>=1` + `fps>=120` + `panics=0`（**阈值勿回调到 200**）。
+- **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py` 的判据是
+  **`vuid == 0 and panics == 0 and killed >= 1`** —— **没有 fps 门槛**（`fps=` 只是打印出来看的）。
+  🔴 本文件旧版把 `fps>=120` 写进这条口径，那是**旧的 SendInput 版 `gameplay_smoke.py`**
+  （第 257 行 `min(fps) >= 120.0`）的规则，而本文件同时又写着"别用旧脚本判断回归"
+  —— 2026-09-12 核对源码后更正。**别把两个脚本的口径混在一起。**
   `playtest_perf.py` 是**时长制**：跑满 `PT_SECS`（默认 600s）即完成，击杀是附带指标、不设门槛、不判 FAIL。
 - 微基准：`cargo test --release <名> -- --nocapture --test-threads=1`
   （`shockwave_path_microbench` / `simd_cull_microbench`）；
