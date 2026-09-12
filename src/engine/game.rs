@@ -4692,10 +4692,15 @@ impl Game {
         }
         let before = self.npcs.len();
         // 本轮击杀累计（阵亡者按阵营计数；供指挥军情 kills 字段）
+        // enemy_dead = 敌军（Red）本帧阵亡数，单独累计供任务目标推进
+        let mut enemy_dead = 0u32;
         for n in &self.npcs {
             if n.hp <= 0.0 {
                 match n.team {
-                    Team::Red => self.round_kills_red += 1,
+                    Team::Red => {
+                        self.round_kills_red += 1;
+                        enemy_dead += 1;
+                    }
                     Team::Blue => self.round_kills_blue += 1,
                 }
             }
@@ -4705,7 +4710,11 @@ impl Game {
         let blue = self.npcs.len() - red;
         if self.npcs.len() != before {
             // 任务目标：本轮歼灭数推进（达成 → 胜利横幅/日志；补员逻辑不受影响）
-            if self.objective.progress((before - self.npcs.len()) as u32) {
+            // 🔴 只计敌军阵亡。旧写法用 (before - self.npcs.len()) = **双方合计**阵亡，
+            // 压力模式下 target=128 是**单方**兵力、全场 255 人，于是双方合计死到 128
+            // （全场才死一半）就刷"本轮敌军全灭"横幅 —— 横幅是假的。普通模式全部 NPC
+            // 都属 Red，两种口径等价，所以这个改动只修正压力模式。
+            if self.objective.progress(enemy_dead) {
                 self.on_objective_complete();
             }
             log::info!(
