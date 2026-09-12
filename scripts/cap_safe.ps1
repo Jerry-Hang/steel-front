@@ -69,14 +69,16 @@ function Screenshot([IntPtr]$h, [string]$out) {
 }
 
 function Post-Key([IntPtr]$h, [int]$vk) {
-    # lParam 的 bit16-23 必须是**扫描码**：winit 的 Windows 后端正是靠它把 WM_KEYDOWN
-    # 解析成 KeyCode 的。2026-09-12 之前这里只发 `1 | bit30`（无扫描码），于是 winit 拿不到
-    # 键位、事件被丢弃 —— cap_safe 的 -Keys 从来没有生效过，而同期 pm_play /
-    # gameplay_smoke_pm.py 的 `lp = 1 | (scan << 16)` 一直是对的。别再退回不带扫描码的写法。
+    # lParam bits 16-23 MUST carry the SCANCODE: winit's Windows backend resolves a
+    # WM_KEYDOWN into a KeyCode from it. Before 2026-09-12 this only sent `1 | bit30`
+    # (no scancode), so winit could not resolve the key and dropped the event.
+    # cap_safe's -Keys had therefore never worked, while pm_play /
+    # gameplay_smoke_pm.py used `lp = 1 | (scan << 16)` all along.
+    # Do not regress to the scancode-less form.
     $scan = [int64][W32S]::MapVirtualKey([uint32]$vk, 0)   # MAPVK_VK_TO_VSC
     $base = [int64](1 -bor ($scan -shl 16))
     $downL = [IntPtr]$base
-    $upL = [IntPtr]([int64]($base -bor [int64]0xC0000000))  # bit31 前次状态 + bit30 转换
+    $upL = [IntPtr]([int64]($base -bor [int64]0xC0000000))  # bit31 prior state + bit30 transition
     [W32S]::PostMessage($h, $WM_KEYDOWN, [IntPtr]$vk, $downL) | Out-Null
     Start-Sleep -Milliseconds 80
     [W32S]::PostMessage($h, $WM_KEYUP,   [IntPtr]$vk, $upL)   | Out-Null
@@ -105,12 +107,14 @@ try {
         $exitNote = "PROCESS EXITED EARLY (exit code $($proc.ExitCode))"
         Write-Host "!! $exitNote"
     } else {
-        # 按**窗口标题**找 HWND，不要用 Process.MainWindowHandle：
-        # 2026-09-12 实测后者对 winit 程序拿到的不是接收输入的那个窗口 —— cap_safe 的
-        # -Keys 因此从来没生效过（投了 VK 36/R 换弹，游戏零响应；而同一个按键走
-        # pm_play / gameplay_smoke_pm 的 FindWindowW 路径就能确定性改变游戏状态）。
-        # 必须轮询 + 先把 $h 归一化成 [IntPtr]::Zero：返回 null 时 `-eq Zero` 是假的，
-        # 会一路把 null 传进 Screenshot 报"cannot convert null to IntPtr"。
+        # Find the HWND by WINDOW TITLE, never via Process.MainWindowHandle: for a
+        # winit app the latter is not the window that receives input, which is why
+        # cap_safe's -Keys never worked (VK 36 was posted, the game stayed silent,
+        # while the same key through pm_play / gameplay_smoke_pm's FindWindowW path
+        # changed game state deterministically).
+        # Poll, and normalise $h to [IntPtr]::Zero first: when the call returns null
+        # the `-eq Zero` test is false and null reaches Screenshot, which then throws
+        # "cannot convert null to IntPtr".
         $h = [IntPtr]::Zero
         for ($i = 0; $i -lt 40; $i++) {
             $h = [W32S]::FindWindowW([IntPtr]::Zero, "Steel Front - Vulkan")
