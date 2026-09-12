@@ -8,6 +8,9 @@ _fontblock.txt
 target/
 scripts/retain_smoke.txt
 release_dist/
+# scripts/package_release.ps1 的产物（含 exe + assets + zip，约 10MB）。
+# 打包产物一律不入库 —— 需要分发时现跑脚本重建。
+dist/
 launcher/target/
 # 会话构建/测试日志（重定向产物，非工程数据）
 logs/
