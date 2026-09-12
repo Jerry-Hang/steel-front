@@ -4132,20 +4132,44 @@ impl Game {
         id
     }
 
-    /// 出生点避开障碍盒（网格阻挡格）：沿径向向外推，最多 8 步（每步 4m），确定性。
-    /// 普通波次与压力模式共用。
+    /// 出生点避开障碍：从给定点出发做**确定性扩环搜索**，返回最近的可站立点。
+    ///
+    /// 🔴 2026-09-12 重写。原实现有三个缺陷，实测 **6/255（红5 蓝1）** 个单位出生后仍卡在
+    /// 不可通行格上：
+    /// ① 外推方向是**离世界原点**（`sx += sx/d*4`），与障碍无关 —— 位于原点西北/东南侧的
+    ///    单位会被推得更远，完全可能推进另一栋楼；
+    /// ② 只走 8 步，走完仍不可通行就**静默返回坏点**，既无兜底也无计数；
+    /// ③ 因此这个故障从上线起就没有任何人看见过。
+    ///
+    /// 现在改为「环 r 上均匀取 8r 个采样、由近及远、方向顺序固定」⇒ 结果**确定**
+    /// （同一输入必得同一输出，冒烟与截图对比才不会失效）；扫完仍失败则打 `warn` 并原样返回。
+    /// 判据仍是导航网格 `is_passable`（它与单位能否移动是同一条口径）；
+    /// 「建筑视觉体大于碰撞盒」是另一件事，见 AGENTS.md 未结案 4。
     fn push_out_of_obstacle(&self, x: f32, z: f32) -> (f32, f32) {
-        let mut sx = x;
-        let mut sz = z;
-        for _ in 0..8 {
-            if self.grid.is_passable(world_to_grid(sx, sz)) {
-                break;
-            }
-            let d = (sx * sx + sz * sz).sqrt().max(1.0);
-            sx += sx / d * 4.0;
-            sz += sz / d * 4.0;
+        const CELL: f32 = 4.0;
+        const MAX_RING: i32 = 8;
+        if !self.blocked_at(x, z) {
+            return (x.clamp(-250.0, 250.0), z.clamp(-250.0, 250.0));
         }
-        (sx.clamp(-250.0, 250.0), sz.clamp(-250.0, 250.0))
+        for r in 1..=MAX_RING {
+            let rf = r as f32;
+            let samples = 8 * r;
+            for k in 0..samples {
+                let a = std::f32::consts::TAU * (k as f32) / (samples as f32);
+                let px = x + a.cos() * rf * CELL;
+                let pz = z + a.sin() * rf * CELL;
+                if !self.blocked_at(px, pz) {
+                    return (px.clamp(-250.0, 250.0), pz.clamp(-250.0, 250.0));
+                }
+            }
+        }
+        log::warn!("spawn: ({x:.0}, {z:.0}) 扩环 {MAX_RING} 层仍找不到可站立点，原样返回");
+        (x.clamp(-250.0, 250.0), z.clamp(-250.0, 250.0))
+    }
+
+    /// 该点是否不可站立（导航网格判据，与单位移动同一条口径）
+    fn blocked_at(&self, x: f32, z: f32) -> bool {
+        !self.grid.is_passable(world_to_grid(x, z))
     }
 
     /// 压力模式开战：红蓝各 `stress_sides` 名 NPC 分两半场环形出生（半径 150m+，避障外推），
