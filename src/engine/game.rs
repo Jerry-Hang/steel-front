@@ -4829,6 +4829,9 @@ impl Game {
             }
             flags
         };
+        // ⚠️ 上一轮 `t_occ` 插错了位置（落在 `target_occlusion` 之后），导致"威胁预扫"
+        // 这个标签把下面三段都算了进去。现在按真实区间拆成三个计时点。
+        let t_pick0 = std::time::Instant::now();
         // 压力模式：每 NPC 预选最近敌对目标（敌对 NPC 优先、玩家兜底；O(n²) 纯读，串行）
         let targets: Vec<Option<(usize, [f32; 3], f32)>> = if self.stress {
             pick_stress_targets(&self.npcs, STRESS_SIGHT)
@@ -4840,6 +4843,7 @@ impl Game {
         // 视线遮挡预计算：必须在 ctx 之前算完（返回 owned Vec），否则会与
         // step_ai_* 对 self.npcs 的可变借用冲突。resolve_ai_target 在 stress=false 时
         // 忽略 targets、spectator=false 时忽略 fallback_targets，所以一条调用通吃三种模式。
+        let t_pick = std::time::Instant::now();
         let target_occluded: Vec<bool> = target_occlusion(
             &self.npcs,
             &self.world.bodies,
@@ -4857,11 +4861,12 @@ impl Game {
                 && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
             {
                 log::info!(
-                    "aiprof2: 班目标点={}us 威胁预扫={}us 目标选择+遮挡={}us 三段合计={}us（子弹 {} 个 / NPC {} 个）",
+                    "aiprof2: 班目标点={}us 威胁预扫={}us 目标选择={}us 视线遮挡={}us 四段合计={}us（子弹 {} / NPC {}）",
                     t_uf.duration_since(t_pre).as_micros(),
-                    t_occ.duration_since(t_uf).as_micros(),
-                    std::time::Instant::now().duration_since(t_occ).as_micros(),
-                    std::time::Instant::now().duration_since(t_pre).as_micros(),
+                    t_pick0.duration_since(t_uf).as_micros(),
+                    t_pick.duration_since(t_pick0).as_micros(),
+                    t_occ.duration_since(t_pick).as_micros(),
+                    t_occ.duration_since(t_pre).as_micros(),
                     self.projectiles.iter().filter(|p| p.is_alive()).count(),
                     self.npcs.len()
                 );
