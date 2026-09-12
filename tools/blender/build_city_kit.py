@@ -424,11 +424,19 @@ def building(name, w, d, floors, bay_long, bay_short, target_h, seed=1,
              z_top, z_top + COPING_H, C["concrete_l"], top_ao=1.10)
 
     # roof clutter must stay UNDER the coping: on a 10.4 m three-storey block the
-    # height budget leaves only ~0.3 m, so it is vent stacks, not a stair bulkhead
+    # height budget leaves only ~0.4 m, and on building_shed (parapet 0.19) there is
+    # barely any, so the stack height is derived from what is actually left. A fixed
+    # 0.28 m stack overshot the shed's contract by 0.12 m.
+    stack_max = z_top + COPING_H - 0.02
     for (vx, vy, vr) in ((-hw * 0.5, hd * 0.36, 0.26),
                          (-hw * 0.2, hd * 0.42, 0.19),
                          (hw * 0.30, -hd * 0.40, 0.22)):
-        box(p, (vx, vy, wall_top + 0.12 + 0.14), (vr * 2.0, vr * 2.0, 0.28), C["metal"])
+        base = wall_top + 0.12
+        hh = stack_max - base
+        if hh < 0.12:
+            continue
+        hh = min(0.28, hh)
+        box(p, (vx, vy, base + hh * 0.5), (vr * 2.0, vr * 2.0, hh), C["metal"])
 
     if damaged:
         # a shelled corner: coping knocked off one end, darker exposed fabric
