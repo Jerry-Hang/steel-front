@@ -537,7 +537,11 @@ impl WorldMarker {
                 // **读代码猜类别已被证明无效（本会话第 4 次）**，所以改用这一招：
                 // 关掉这个开关就是正常画面，打开则一眼看出那片薄板属于哪一类，
                 // 再回 `city.rs` 找**那一个**调用点，不必再猜。
-                if std::env::var("RV3D_DEBUG_KIND").is_ok() {
+                // ⚠ 环境变量**只解析一次**。本函数每帧被调用 1700+ 次（`marker=1709`）——
+                //    原先每次都 `std::env::var(...)`（带锁 + 扫环境表），**开关关着也照调**，
+                //    130fps 下约 22 万次/秒，是纯浪费（2026-09-12 第 93 轮修）。
+                static DEBUG_KIND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *DEBUG_KIND.get_or_init(|| std::env::var("RV3D_DEBUG_KIND").is_ok()) {
                     let c = match ob.kind {
                         ObstacleKind::Wall => [1.0, 0.0, 0.0],      // 红
                         ObstacleKind::Block => [0.0, 1.0, 0.0],     // 绿
