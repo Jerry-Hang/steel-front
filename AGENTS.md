@@ -329,8 +329,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 ```powershell
 cargo build --release
 cargo test --release
-# 游戏冒烟（约 30s；SendInput 注入 —— 见铁律 C，此路径在本机已确认失效，属未结案项）
-powershell -ExecutionPolicy Bypass -File scripts\run_gameplay_smoke.ps1
+# 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK：命中 + 击杀 + VUID=0）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
+# 旧的 run_gameplay_smoke.ps1 走 SendInput，在本机结构性跑不通（见铁律 C），别用它判断回归
 # 截图取证（finally 里 taskkill + 硬超时）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
 # 多键必须走 -Command，-File 会把 9,9 合并成一个 "9,9"
@@ -363,10 +364,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
   线程分层调度与物理核绑定、SIMD 剔除、PT 路径追踪（默认关）、
   `RV3D_LLM` 战术指挥通道、CJK 点阵字体、ESC 菜单 + kill feed。
 - **47 个环境变量开关**（`RV3D_*`）——清单见 `rg -o 'RV3D_[A-Z_]+' src | sort -u`。
-- **仓库卫生（2026-09-12 记录，未处理）**：`scripts/` 有 **349 个被跟踪文件**，
-  其中绝大多数是一次性诊断脚本（`asfix1-10`、`probe_dl1-9`、`fix_*`、`rsz2*` …）；
-  仓库根目录另有 80+ 个散落的 `.log/.png/.bmp`（多数已被 `.gitignore` 覆盖，其中 2 个仍被跟踪）。
-  `.gitignore` 自身的**注释是乱码**（`杩愯浜х墿` = "运行产物" 的错编码），功能无影响但应当修。
+- **冒烟闸门 = 绿**：`scripts/run_smoke_pm.ps1`（PostMessage 版）实测 `ALL-OK`——
+  闭环瞄准命中、54 发点射击毙一名敌人、`VUID=0 panics=0 fps=95.5`。
+  **旧的 `run_gameplay_smoke.ps1`（SendInput）在本机结构性跑不通，别再用它判断回归。**
+- **仓库卫生（2026-09-12 已清理）**：`scripts/` 从 **353 → 56 个跟踪文件**（删了 297 个一次性
+  诊断/补丁脚本，判定依据见 commit `e46956d`）；磁盘上另清理了约 617 MB 残留
+  （156 MB 未压缩 .bmp、727 个旧运行日志、477 张未跟踪旧截图）。
+  仍有 42 个拿不准的脚本留在库里待确认，另有 405 张已跟踪截图（324 MB）是否继续留在
+  git 里待定。`.gitignore` 的**注释是乱码**（`杩愯浜х墿` = "运行产物" 的错编码），功能无影响但应当修。
 
 ---
 
@@ -374,56 +379,52 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 
 > 按"值不值得下一轮动手"排序。每条给出当前最优线索（lead），**没有 lead 的不要瞎猜。**
 
-1. **冒烟闸门是红的（kills=0）** — 2026-09-12 复现：28 次 `cam: yaw=` 读数**全为 0.0**，
-   注入未生效，与代码回归无关。**lead**：`gameplay_smoke_win.py` 走 `SendInput`，
-   而本机 `SendInput` 送不到游戏（见铁律 C）。**改走 `PostMessage` 即可**——
-   无焦点视角注入配方已标定到 0.3% 误差（铁律 C），照抄 `scripts/pm_play.ps1` 的四条即可。
-2. **`PrintWindow` 对非前台窗口返回冻结帧** — 2026-09-12 定案：注入 1200px（=170.3° 转向，
+1. **`PrintWindow` 对非前台窗口返回冻结帧** — 2026-09-12 定案：注入 1200px（=170.3° 转向，
    游戏日志为证）之后，前后两张截图的**世界层残差 0.03、最佳 x-shift = 0**，即画面完全没变。
    同期 `cycle_us` 从 10000 掉到 1000、`render_us` 7000→400（`wait_fence_us` 消失，垂直同步不再
    阻塞）——窗口不是前台时 DWM 似乎不再为它合成新表面。
    **结论：截图的"没变化"不能用来判断输入没生效；以游戏自己的日志为准。**
    **lead**：要截图取证就把窗口置前再截（`cap_safe.ps1` 那条路），否则别用截图当判据。
-3. **PT 崩溃 `0xC0000005`** — `pt_enable=false` 现状；设 true 一启动即崩，无法截图验收。
+2. **PT 崩溃 `0xC0000005`** — `pt_enable=false` 现状；设 true 一启动即崩，无法截图验收。
    **lead**：崩点在 `pt_set_scene_markers` 返回之后（每帧 PT 派发 / 主命令缓冲 / blit 到 swapchain）；
    候选 = AS 显存与尺寸、dispatch 与 scene rebuild 读写竞争、push constant 布局。
    判据：用 Windows 事件日志的出错模块区分驱动侧（`nvoglv64.dll`）与应用侧。
-4. **`config.rs` 不读 `pt_enable` / `rt_enable`** → 配置文件与 `RV3D_PT_LIVE=1` 都开不了 PT。
+3. **`config.rs` 不读 `pt_enable` / `rt_enable`** → 配置文件与 `RV3D_PT_LIVE=1` 都开不了 PT。
    **lead**：`main.rs` 的 `if config.pt_enable { init_pt_resident() }` 分支，resident 从未建。
-5. **玩家可能站在 GLB 楼体内部** — `scale = max(w/gw, d/gd)` 的取舍导致视觉体大于碰撞盒。
+4. **玩家可能站在 GLB 楼体内部** — `scale = max(w/gw, d/gd)` 的取舍导致视觉体大于碰撞盒。
    **lead**：水平取 max、竖直单独处理，或给建筑留面朝街道的退距；需一次实测校准。
-6. **`FLOOR_H` 常量分叉** — `city.rs` / `build.rs` = 3.15，Blender 侧建筑 3.4、`panel_block` 2.9
+5. **`FLOOR_H` 常量分叉** — `city.rs` / `build.rs` = 3.15，Blender 侧建筑 3.4、`panel_block` 2.9
    （碰撞核按 3.15、网格按 3.4）。**lead**：把 `gen_props.py` 层高统一成 3.15 后重导出。
-7. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
+6. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
    `install_guns.py` 仍 SKIP。需人工删掉重叠枪身后装为 `svd12`。
-8. **D12 士兵远距离读作蓝色平板**，近距四肢体积感未验证。**lead**：`RV3D_NPC_SCALE=3.5`
+7. **D12 士兵远距离读作蓝色平板**，近距四肢体积感未验证。**lead**：`RV3D_NPC_SCALE=3.5`
    未能放大到可判读（仍在 100m 外）；试近距离特写，或给四肢加最小屏幕空间粗细。
-9. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
-10. **mesh 着色器布局未过严格 `spirv-val`**（Workgroup Offset 布局）。
+8. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
+9. **mesh 着色器布局未过严格 `spirv-val`**（Workgroup Offset 布局）。
     **lead**：开 `RV3D_VALIDATION=1` 做 RT 调试前应先修。
-11. **PT 512 盒上限静默截断**（实测 `marker=547 > PT_MAX_BOXES=512`）。
+10. **PT 512 盒上限静默截断**（实测 `marker=547 > PT_MAX_BOXES=512`）。
     **lead**：提容量或按视锥裁剪。相关：`PT_SUN_AMBIENT` 无消费者、天空/环境项硬编在 GLSL；
     曝光 0.2 硬编在 `main.rs`，曝光/弹跳/spp 都未进 `config.rs` 与设置面板。
-12. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
+11. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
-13. **`MAX_RIGID_BODIES=640` vs `MAX_AI=768`** 溢出静默丢弃（release 下 `debug_assert` 被优化掉）。
-14. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
+12. **`MAX_RIGID_BODIES=640` vs `MAX_AI=768`** 溢出静默丢弃（release 下 `debug_assert` 被优化掉）。
+13. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
     快照的**位置修正应用**与**实体插值渲染消费**均未接线）。
-15. **道具是否进阴影 pass 未确认**（不画则道具没有投影）—— 提出后未见结案，也未见再提。
-16. **阴影 `normal_bias` 已在 uniform 但未使用** —— 需要更干净的阴影边界时做坡度 bias。
-17. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（引用 naga 导致 test 目标编译失败）——
+14. **道具是否进阴影 pass 未确认**（不画则道具没有投影）—— 提出后未见结案，也未见再提。
+15. **阴影 `normal_bias` 已在 uniform 但未使用** —— 需要更干净的阴影边界时做坡度 bias。
+16. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（引用 naga 导致 test 目标编译失败）——
     待清理或正式入库。
-18. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响；
+17. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响；
     手榴弹 AoE 不结算障碍；切枪无动画（纯计时器）。
-19. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
+18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。
-20. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
+19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
     kill feed 仅英文（5×7 位图字体无中文）、不分击杀者名字；第一人称枪模动画 / 弹孔贴花未做。
-21. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
-22. **GLB 加载器忽略 `bufferViews[].byteStride`**（交错布局会读错）。
+20. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
+21. **GLB 加载器忽略 `bufferViews[].byteStride`**（交错布局会读错）。
     **lead**：现导出器是一 accessor 一 bufferView（密集），暂不受影响。
-23. **仓库卫生**：见上节（349 个 scripts 文件、根目录散落日志、`.gitignore` 注释乱码）。
+22. **仓库卫生**：见上节（349 个 scripts 文件、根目录散落日志、`.gitignore` 注释乱码）。
 
 ---
 
@@ -479,7 +480,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
   1200px（3×400）实测 **-170.30°**，模型预测 **-170.79°**。查明四个叠加的静默失效原因
   （teleport 守卫 / `recenter_pending_until` 150ms 窗口 / `dragging` 被 `CursorLeft` 清掉 /
   winit 位置去重），并定案 `PrintWindow` 对非前台窗口返回冻结帧。
-- 遗留：冒烟闸门改走 PostMessage（未结案 1）；截图的限制见未结案 2。
+- **追加（同日）**：**冒烟闸门由红转绿** —— `scripts/run_smoke_pm.ps1`（PostMessage 版）
+  实测 `ALL-OK`：闭环瞄准命中（含 169 度、1239px 大转角），54 发点射击毙一名敌人，
+  `VUID=0 panics=0 fps=95.5`，玩家随后在交火中阵亡。**未结案 1 结案。**
+- **追加（同日）**：仓库卫生 —— `scripts/` **353 → 56 个跟踪文件**（删 297 个，判定依据见
+  commit `e46956d`：48 个补丁脚本的替换目标已全部从 src 消失、手工 SPIR-V 时代工具链、
+  WSL2 专用脚本、一次性下载/挂机脚本）；磁盘另清理约 **617 MB** 残留。仍有 42 个脚本与
+  405 张已跟踪截图（324 MB）待用户定夺。
 - 本文件同时重写：200KB → 本版，删除了 WSL2 全量内容、5 处逐字重复的方法论段落、
   以及"错误版铁律与更正版并存"的段落（阴影深度映射、mesh 冻结决策、SendInput 断言）。
 
@@ -626,6 +633,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     （去重、累加、光标驱动……全落空），加一行 `log::info!` 打出游戏实收的 `px/py/last/dragging`
     之后，四个真实原因（teleport 守卫 / recenter 窗口 / dragging 被 CursorLeft 清掉 / 位置去重）
     在同一份日志里一次全暴露。**临时埋点验完就删**，不要把诊断代码留在库里。
+21. **跨进程读窗口尺寸前必须 `SetProcessDPIAware()`。** 本机 DPI 缩放 1.5x，未声明 DPI 感知的
+    进程拿到的是**虚拟化后**的尺寸：`GetClientRect` 报 1706x1066 而真实是 2560x1600。
+    PostMessage 的坐标是客户端坐标，"中心 + 增量"于是整体偏了 1.5 倍，视角全错且不报任何错。
+    同一个脚本里 PowerShell 版调了、Python 版没调，所以只有 Python 那条路出错。
+22. **几何/坐标换算的前提假设，要么在注释里写明，要么加断言。** 瞄准用的是"NPC 世界坐标 =
+    玩家相对坐标"，这只在**玩家站在出生点**时成立。开场随手按了 1.5 秒 W 就悄悄打破了它——
+    38 发点射、aim 每一轮都报"已收敛"、命中零。**闭合回路收敛不等于打中了正确的东西。**
 
 ---
 
