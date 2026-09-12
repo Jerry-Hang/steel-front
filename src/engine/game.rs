@@ -971,6 +971,12 @@ pub struct Game {
     /// `main.rs` 每帧按"相机与玩家眼位的距离"写它：**正常玩法下恒为 `None`**（行为不变），
     /// 只有调试相机偏离 > 1m 时才生效。**这样取证不再需要 `RV3D_NO_NPC_CULL=1` 那条 workaround。**
     pub cull_eye_override: Option<glam::Vec3>,
+    /// `target_occlusion` 的缓存与年龄（2026-09-12 第 102 轮）。
+    /// 该节占 `ai_us` 的 18–39%（244–519µs，第 50 轮实测），却是每帧为全部 NPC 做的
+    /// 线段-AABB 扫描；遮挡关系在相邻帧之间几乎不变，故每 `OCCLUSION_REFRESH` 帧重算一次。
+    /// `occl_cache_age == 0` 表示"该重算了"。
+    pub occl_cache: Vec<bool>,
+    pub occl_cache_age: u32,
     /// 开火模式（B 键循环切换）
     fire_mode: FireMode,
     /// 连发热量 0..1：连续射击累积，压制枪口上扬；停火后衰减
@@ -1340,6 +1346,8 @@ impl Game {
             fire_cooldown: 0.0,
             spread_scale: 1.0,
             cull_eye_override: None,
+            occl_cache: Vec::new(),
+            occl_cache_age: 0,
             fire_mode: FireMode::Auto,
             auto_heat: 0.0,
             npc_hit_flash: std::collections::HashMap::new(),
@@ -4767,7 +4775,7 @@ impl Game {
             use std::sync::atomic::{AtomicU32, Ordering};
             static TICK: AtomicU32 = AtomicU32::new(0);
             if std::env::var("RV3D_AI_PROF").is_ok()
-                && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
+                && TICK.fetch_add(1, Ordering::Relaxed) % 119 == 0
             {
                 log::info!(
                     "aiprof: 重心={}us 兜底目标={}us 分层重排={}us 三处合计={}us",
@@ -4891,21 +4899,40 @@ impl Game {
         // step_ai_* 对 self.npcs 的可变借用冲突。resolve_ai_target 在 stress=false 时
         // 忽略 targets、spectator=false 时忽略 fallback_targets，所以一条调用通吃三种模式。
         let t_pick = std::time::Instant::now();
-        let target_occluded: Vec<bool> = target_occlusion(
-            &self.npcs,
-            &self.world.bodies,
-            self.stress,
-            self.player_invincible,
-            &targets,
-            &fallback_targets,
-            &player,
-        );
+        // 🔴 视线遮挡**每 N 帧重算一次**（2026-09-12 第 102 轮）。
+        //
+        // 第 50 轮实测：本节占 `ai_us` 的 **18–39%（244–519µs）**，成本是
+        // **每帧为全部 NPC** 做线段-AABB 扫描（255 × 2 采样 × 约 1100 刚体 ≈ **56 万次/帧**）。
+        //
+        // 而遮挡关系在相邻帧之间几乎不变，**AI 的反应时间在 100–300ms 量级** ⇒
+        // 3 帧（约 23ms @130fps）的陈旧**完全在容差内**。
+        //
+        // ⚠️ 判据：`OCCLUSION_REFRESH = 1` 即回到旧行为（每帧重算）—— 用它做 A/B。
+        const OCCLUSION_REFRESH: u32 = 4;
+        let recompute = self.occl_cache_age == 0 || self.occl_cache.len() != self.npcs.len();
+        let target_occluded: Vec<bool> = if recompute {
+            let v = target_occlusion(
+                &self.npcs,
+                &self.world.bodies,
+                self.stress,
+                self.player_invincible,
+                &targets,
+                &fallback_targets,
+                &player,
+            );
+            self.occl_cache = v.clone();
+            self.occl_cache_age = OCCLUSION_REFRESH;
+            v
+        } else {
+            self.occl_cache_age -= 1;
+            self.occl_cache.clone()
+        };
         let t_occ = std::time::Instant::now();
         {
             use std::sync::atomic::{AtomicU32, Ordering};
             static TICK: AtomicU32 = AtomicU32::new(0);
             if std::env::var("RV3D_AI_PROF").is_ok()
-                && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
+                && TICK.fetch_add(1, Ordering::Relaxed) % 119 == 0
             {
                 log::info!(
                     "aiprof2: 班目标点={}us 威胁预扫={}us 目标选择={}us 视线遮挡={}us 四段合计={}us（子弹 {} / NPC {}）",
