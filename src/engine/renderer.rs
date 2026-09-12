@@ -9212,7 +9212,17 @@ impl Renderer {
             self.cull_and_upload(view, proj, cam_pos)
         };
         // ---- 世界障碍 marker：独立槽位上传（见 MARKER_SLOT_BASE），计数供 draw call 使用 ----
-        let (marker_near, marker_far) = if self.void_mode { (0, 0) } else { self.upload_markers(cam_pos) };
+        // RV3D_NO_MARKERS=1：A/B 用 —— 跳过**障碍标记实例**（`marker=` 那个计数）。
+        // 与 `RV3D_NO_TERRAIN_FIELD` / `RV3D_NO_PROPS` 同类的对照开关：
+        // 第 37 轮量出道具 3.2ms + 地形场 0.87ms 只占 9.44ms 帧的 43%，
+        // 剩下的未知要靠逐个开关消掉，而不是靠猜。
+        let (marker_near, marker_far) = if self.void_mode
+            || std::env::var("RV3D_NO_MARKERS").is_ok()
+        {
+            (0, 0)
+        } else {
+            self.upload_markers(cam_pos)
+        };
         self.last_marker_near = marker_near;
         self.last_marker_far = marker_far;
         // ---- NPC 士兵段：独立槽位上传（见 NPC_SLOT_BASE），计数供 draw call 使用 ----
