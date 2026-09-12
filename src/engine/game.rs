@@ -4907,8 +4907,13 @@ impl Game {
         // 而遮挡关系在相邻帧之间几乎不变，**AI 的反应时间在 100–300ms 量级** ⇒
         // 3 帧（约 23ms @130fps）的陈旧**完全在容差内**。
         //
-        // ⚠️ 判据：`OCCLUSION_REFRESH = 1` 即回到旧行为（每帧重算）—— 用它做 A/B。
-        const OCCLUSION_REFRESH: u32 = 4;
+        // ⚠️ A/B 开关（第 103 轮加）：`RV3D_OCCL_REFRESH=1` 回到"每帧重算"的旧行为。
+        // 每次 `update_ai` 只读一次环境变量（**每帧 1 次，不是每实例**，见教训 32）⇒ 不必 OnceLock。默认 4。
+        let occlusion_refresh: u32 = std::env::var("RV3D_OCCL_REFRESH")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(4);
         let recompute = self.occl_cache_age == 0 || self.occl_cache.len() != self.npcs.len();
         let target_occluded: Vec<bool> = if recompute {
             let v = target_occlusion(
@@ -4921,7 +4926,7 @@ impl Game {
                 &player,
             );
             self.occl_cache = v.clone();
-            self.occl_cache_age = OCCLUSION_REFRESH;
+            self.occl_cache_age = occlusion_refresh;
             v
         } else {
             self.occl_cache_age -= 1;
