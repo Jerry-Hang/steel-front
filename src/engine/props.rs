@@ -210,6 +210,31 @@ pub struct BinnedGeometry {
     pub max: [f32; 3],
 }
 
+/// 每个摆放的确定性色调抖动。
+///
+/// 分桶合并会把**同一个网格的所有摆放烘成完全相同的顶点色**，于是同型号的楼在街边排成
+/// 一列时就是彻底的"克隆军团"——旧生成器的注释自己警告过这一点，但靠调参数解决不了：
+/// 缺的不是更多型号，而是**同一型号内部的差异**。
+///
+/// 这里按摆放位置与网格下标算一个纯函数色调（亮度 ±12%、冷暖 ±4%）：不改网格、不加
+/// draw call、不动剔除，也不破坏 `merge_binned_is_deterministic`——同一个摆放永远得到
+/// 同一个值。位置先量化到 0.25m 再散列，避免相邻的楼落进两个不同色号。
+fn placement_tint(p: &PropPlacement) -> [f32; 3] {
+    let qx = (p.x * 4.0).round() as i64 as u64;
+    let qz = (p.z * 4.0).round() as i64 as u64;
+    let mut h = qx.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ qz.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (p.mesh as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    let a = (h & 0xFFFF) as f32 / 65535.0;
+    let b = ((h >> 16) & 0xFFFF) as f32 / 65535.0;
+    let k = 0.88 + 0.24 * a; // [0.88, 1.12]
+    let warm = (b - 0.5) * 0.08;
+    [k * (1.0 + warm), k, k * (1.0 - warm)]
+}
+
 /// 按格点分桶的合并，为"逐桶视锥剔除"准备数据。**这是道具进 GPU 的唯一几何路径**
 /// （2026-09-08：不分桶的 `merge()` 已删——它没有一条理由是独有的，留着只是多一份
 /// 要同步第二遍的绕序/顶点变换代码）。
@@ -269,6 +294,8 @@ pub fn merge_binned(
             let base = out.verts.len() as u32;
             let (sy, cy) = (p.yaw.sin(), p.yaw.cos());
             let gy = ground(p.x, p.z) + p.y;
+            // 同型号内部的差异：见 placement_tint
+            let tint = placement_tint(&p);
             for v in &mesh.verts {
                 // 绕 +Y 旋转：(x, z) → (x·cosθ + z·sinθ, -x·sinθ + z·cosθ)
                 let vx = v[0] * p.scale;
@@ -279,7 +306,19 @@ pub fn merge_binned(
                 let py = gy + vy;
                 let nx = v[3] * cy + v[5] * sy;
                 let nz = -v[3] * sy + v[5] * cy;
-                let baked = [px, py, pz, nx, v[4], nz, v[6], v[7], v[8], v[9], v[10]];
+                let baked = [
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    v[4],
+                    nz,
+                    (v[6] * tint[0]).min(1.0),
+                    (v[7] * tint[1]).min(1.0),
+                    (v[8] * tint[2]).min(1.0),
+                    v[9],
+                    v[10],
+                ];
                 for k in 0..3 {
                     bin_min[k] = bin_min[k].min(baked[k]);
                     bin_max[k] = bin_max[k].max(baked[k]);
@@ -403,6 +442,36 @@ mod tests {
             let cover: u32 = g.bins.iter().map(|b| b.index_count).sum();
             assert_eq!(cover as usize, g.indices.len(), "桶覆盖的索引数不等于总索引数");
         }
+    }
+
+    #[test]
+    fn placement_tint_is_deterministic_and_varies_by_position() {
+        let base = PropPlacement {
+            mesh: 3,
+            x: 12.0,
+            y: 0.0,
+            z: -40.0,
+            yaw: 0.0,
+            scale: 1.0,
+            solid: false,
+        };
+        assert_eq!(placement_tint(&base), placement_tint(&base), "同一摆放必须得到同一色调");
+
+        let mut moved = base;
+        moved.x = 61.0;
+        let (t1, t2) = (placement_tint(&base), placement_tint(&moved));
+        assert_ne!(t1, t2, "不同位置必须得到不同色调，否则克隆军团照旧");
+        for t in [t1, t2] {
+            for c in t {
+                assert!(c > 0.70 && c < 1.30, "色调必须落在温和区间，实际 {c}");
+            }
+        }
+
+        // 位置先量化到 0.25m：同一格内的微小挪动应当给出同一色号，免得相邻的楼
+        // 落进两个不同色阶而显得是随机噪点
+        let mut nudged = base;
+        nudged.x += 0.05;
+        assert_eq!(placement_tint(&base), placement_tint(&nudged));
     }
 
     #[test]
@@ -571,7 +640,21 @@ mod tests {
         // 顶点位置逐位相同，但索引被刻意换了一次面（适配引擎 CLOCKWISE 约定）
         assert_eq!(g.indices, vec![0, 2, 1], "merge 必须交换三角形第二、三个索引");
         for (a, b) in g.verts.iter().zip(set.meshes[0].verts.iter()) {
-            assert_eq!(a, b, "零位姿下烘焙结果必须与源网格逐位相同");
+            // 位置/法线/UV 仍然逐位相同。颜色是**唯一**被有意调制的通道：
+            // placement_tint 给同型号的每个摆放一点色调差异（治"克隆军团"），
+            // 所以这里按"源色 × 该摆放的色调"精确比对，而不是放松成范围断言。
+            let geom_a = [a[0], a[1], a[2], a[3], a[4], a[5], a[9], a[10]];
+            let geom_b = [b[0], b[1], b[2], b[3], b[4], b[5], b[9], b[10]];
+            assert_eq!(geom_a, geom_b, "零位姿下位置/法线/UV 必须与源网格逐位相同");
+            let tint = placement_tint(&p);
+            for k in 0..3 {
+                let want = (b[6 + k] * tint[k]).min(1.0);
+                assert!(
+                    (a[6 + k] - want).abs() < 1e-6,
+                    "颜色必须恰为源色 × placement_tint（通道 {k}：得 {} 期望 {want}）",
+                    a[6 + k]
+                );
+            }
         }
     }
 
