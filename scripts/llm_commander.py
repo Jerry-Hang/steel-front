@@ -55,15 +55,35 @@ DEFAULT_DOCTRINE = {
 }
 
 
-def load_doctrine(path):
+def load_doctrine(path, side=None):
+    """条令文件可以整体是一份参数，也可以按 side 分侧给（A/B 对战用）。
+
+    分侧形态：
+        {"red": {...}, "blue": {...}, "default": {...}}
+    整体形态（旧写法，仍然支持）：
+        {"contact_push": 55, ...}
+    红蓝两侧走的是同一个端点，若两侧用同一套参数就是镜像对战、分不出高下；
+    要比条令优劣必须让两侧跑不同参数，所以这里按 side 取。
+    """
     d = dict(DEFAULT_DOCTRINE)
     try:
         with open(path, encoding="utf-8") as f:
-            d.update(json.load(f))
+            raw = json.load(f)
     except FileNotFoundError:
-        pass
+        return d
     except Exception as e:
         print("doctrine load failed: %s (using defaults)" % e, flush=True)
+        return d
+    if not isinstance(raw, dict):
+        return d
+    # 分侧形态：至少有一个键是 red/blue/default
+    if any(k in raw for k in ("red", "blue", "default")):
+        for key in ("default", side):
+            blk = raw.get(key)
+            if isinstance(blk, dict):
+                d.update(blk)
+    else:
+        d.update(raw)
     return d
 
 
@@ -168,7 +188,6 @@ class Handler(BaseHTTPRequestHandler):
                 situation_txt = msg.get("content") or ""
                 break
 
-        doc = load_doctrine(self.doctrine_path)
         try:
             situation = json.loads(situation_txt)
         except Exception as e:
@@ -176,9 +195,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"choices": [{"message": {"content": "{}"}}]})
             return
 
+        side = situation.get("side", "?")
+        doc = load_doctrine(self.doctrine_path, side)
         cmds, notes = decide(situation, doc)
         content = json.dumps({"companies": cmds}, ensure_ascii=False)
-        side = situation.get("side", "?")
         print("[%s] %s | %s" % (time.strftime("%H:%M:%S"), side, " ".join(notes)), flush=True)
 
         # 落盘：态势 + 决策 + 条令，供复盘（每行一条 JSON）
@@ -206,7 +226,8 @@ def main():
     Handler.doctrine_path = a.doctrine
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     print("commander listening on 127.0.0.1:%d  log=%s  doctrine=%s" % (a.port, a.log, a.doctrine), flush=True)
-    print("doctrine now: %s" % json.dumps(load_doctrine(a.doctrine), ensure_ascii=False), flush=True)
+    for s in ("red", "blue"):
+        print("doctrine[%s]: %s" % (s, json.dumps(load_doctrine(a.doctrine, s), ensure_ascii=False)), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
