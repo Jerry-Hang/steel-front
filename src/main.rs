@@ -1984,13 +1984,22 @@ impl GameApp {
                     })
                     .collect()
             } else {
+                // RV3D_NO_NPC_CULL=1：跳过"玩家看不到就不画"的剔除。
+                //
+                // 该剔除**以玩家眼位为准**（`npc_occluded` 内部用 `player_eye()`，不是相机），
+                // 这在玩法上是**正确**的：玩家隔着楼不该看见人。但**调试相机不是玩家** ——
+                // 用 `RV3D_NPC_CAM` 把相机摆到 160m 外某个 NPC 跟前时，目标仍会被
+                // "玩家视角"的判定剔掉。实测玩家站在原点时，255 人只有 **16 人**上屏
+                //（`npcvis: 收到 16 个 NPC`，段数 144+128=272），这正是取景一路扑空的真因。
+                // 关掉剔除后调试机位才看得到目标。
+                let cull = std::env::var("RV3D_NO_NPC_CULL").is_err();
                 self
                 .game
                 .npcs
                 .iter()
                 .enumerate()
                 // 隔墙透视修复：被障碍物完全遮挡的 NPC 不渲染
-                .filter(|(i, _)| !self.game.npc_occluded(*i))
+                .filter(|(i, _)| !cull || !self.game.npc_occluded(*i))
                 .map(|(_, n)| {
                     let base = self
                         .last_npc_snapshot
