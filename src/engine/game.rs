@@ -961,6 +961,16 @@ pub struct Game {
     fire_cooldown: f32,
     /// 散布缩放（1.0 = 腰射全散布；main.rs 按 ADS 混合设置，开镜时缩小到 0.3）
     spread_scale: f32,
+    /// 剔除用的眼位覆盖（2026-09-12 第④条修）。
+    ///
+    /// `npc_occluded` 原本硬取 `player_eye()`。正常玩法里相机**就是**玩家眼位 ⇒ 正确；
+    /// 但 `RV3D_CAM` / `RV3D_NPC_CAM` 把调试相机移离玩家时，玩家仍在原点 ⇒
+    /// **相机眼前的人被判为"从玩家位置看不到"而全部剔除**。
+    /// 实测：关剔除前 `npc=288`（≈16 人），开后 `npc=4590`（255 人 × 18 段）。
+    ///
+    /// `main.rs` 每帧按"相机与玩家眼位的距离"写它：**正常玩法下恒为 `None`**（行为不变），
+    /// 只有调试相机偏离 > 1m 时才生效。**这样取证不再需要 `RV3D_NO_NPC_CULL=1` 那条 workaround。**
+    pub cull_eye_override: Option<glam::Vec3>,
     /// 开火模式（B 键循环切换）
     fire_mode: FireMode,
     /// 连发热量 0..1：连续射击累积，压制枪口上扬；停火后衰减
@@ -1329,6 +1339,7 @@ impl Game {
             shake_strength: 0.0,
             fire_cooldown: 0.0,
             spread_scale: 1.0,
+            cull_eye_override: None,
             fire_mode: FireMode::Auto,
             auto_heat: 0.0,
             npc_hit_flash: std::collections::HashMap::new(),
@@ -2964,7 +2975,7 @@ impl Game {
         let Some(n) = self.npcs.get(idx) else {
             return false;
         };
-        let eye = self.player_eye();
+        let eye = self.cull_eye_override.unwrap_or_else(|| self.player_eye());
         for h in [NPC_HIT_CENTER_Y, 1.7] {
             let (ax, ay, az) = (eye.x, eye.y, eye.z);
             let (bx, by, bz) = (n.position[0], n.position[1] + h, n.position[2]);

@@ -753,6 +753,11 @@ impl GameApp {
             // `VULKAN: 150 FPS`（渲染器自己的计数）和 logs 里的 fps=146~152 都是正常的。
             // 调试机位下用刚量到的 last_fps 直接补上，别让取证截图显示一个假 0。
             self.game.hud.fps = self.last_fps as f32;
+            // 🔴 剔除眼位必须在这里设（2026-09-12 第④条修）：**本分支下面立刻 return**，
+            // 放在常规更新路径里的赋值根本跑不到（第一次就栽在这，实测 npc 仍是 288）。
+            // `npc_occluded` 原本硬取 `player_eye()`；调试相机移离玩家后，
+            // "相机眼前的人"会被按"从玩家位置看不到"整片剔掉。
+            self.game.cull_eye_override = Some(self.camera.position());
             return;
         }
         // 枪械检视模式：不跑游戏逻辑，仅 Orbit 相机绕枪模（鼠标拖拽旋转/滚轮缩放，
@@ -926,6 +931,18 @@ impl GameApp {
             && !self.game.settings_open()
             && !self.game.hud.esc_menu_open;
         self.game.hud.ads = ads_valid;
+        // 🔴 剔除眼位（2026-09-12 第④条修）：`npc_occluded` 原本硬取 `player_eye()`。
+        // 正常玩法相机就在玩家眼位 ⇒ 下面的距离判定为 0 ⇒ **恒为 None，行为完全不变**。
+        // 只有 `RV3D_CAM` / `RV3D_NPC_CAM` 把相机移离玩家时（> 1m）才改用相机 ——
+        // 否则"相机眼前的人"会被按"从玩家位置看不到"整片剔掉
+        // （实测关剔除前 npc=288 ≈16 人，开后 4590 = 255 人 × 18 段）。
+        let cam_pos = self.camera.position();
+        let eye_pos = self.game.player_eye();
+        self.game.cull_eye_override = if cam_pos.distance(eye_pos) > 1.0 {
+            Some(cam_pos)
+        } else {
+            None
+        };
         // 小地图朝向（旋转地图使玩家前方朝上）
         self.game.hud.mm_yaw = self.camera.yaw;
         if !ads_valid {
