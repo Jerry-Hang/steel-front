@@ -4692,7 +4692,13 @@ impl Game {
         // 各 NPC 步进彼此独立（AiStepCtx 只读），重排不改变步进语义。
         let stress = self.stress;
         // 观战模式（玩家无敌）：NPC 目标兜底 = 敌方重心（红/蓝互搏，火力不浪费在无敌玩家上）
+        // 计时埋点（RV3D_AI_PROF=1，第 47 轮）：`update_ai` 顶部三处**每帧固定 O(n) 工作**。
+        // 动机：第 46 轮实测"并行池 vs 串行"在 255 NPC 下**完全无法区分**
+        // （ai_us 1460 vs 1391、fps 132.8 vs 132.7）—— 若开销在逐 NPC 步进上，
+        // 并行应当明显更快。既然没有，说明 ai_us 被与"是否并行"无关的每帧工作主导。
+        let t_a = std::time::Instant::now();
         let (rc, bc) = team_centroids(&self.npcs);
+        let t_b = std::time::Instant::now();
         let fallback_targets: Vec<[f32; 3]> = if self.player_invincible {
             self.npcs
                 .iter()
@@ -4704,10 +4710,27 @@ impl Game {
         } else {
             Vec::new()
         };
+        let t_c = std::time::Instant::now();
         let tier_params = AiTierParams::default();
         let near_len = partition_ai_tiers(&mut self.npcs, |npc| {
             ai_tier_of(npc, &player, stress, &tier_params)
         });
+        let t_d = std::time::Instant::now();
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static TICK: AtomicU32 = AtomicU32::new(0);
+            if std::env::var("RV3D_AI_PROF").is_ok()
+                && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
+            {
+                log::info!(
+                    "aiprof: 重心={}us 兜底目标={}us 分层重排={}us 三处合计={}us",
+                    t_b.duration_since(t_a).as_micros(),
+                    t_c.duration_since(t_b).as_micros(),
+                    t_d.duration_since(t_c).as_micros(),
+                    t_d.duration_since(t_a).as_micros()
+                );
+            }
+        }
         // 同步冲锋判定：本帧开始时 Chase/Attack 数量过半 → 全队突进
         let active = self
             .npcs
