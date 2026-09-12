@@ -637,13 +637,32 @@ impl GameApp {
                 }
                 match self.game.npcs.get(i) {
                     Some(n) => {
-                        self.camera.set_flight_pos(glam::Vec3::new(
-                            n.position[0],
-                            n.position[1] + 1.6,
-                            n.position[2] + 4.0,
-                        ));
-                        self.camera.yaw = 0.0; // forward = -Z ⇒ 正对 4m 外的 NPC
+                        // **由程序挑一个不被墙挡的方向**：四个正交方向各 4m 做可站立判定，
+                        // 取第一个通过的。手算方向失败过 13 次，而判据本来就在引擎里
+                        // （`GameState::standable`，与单位能否移动同一条口径）。
+                        // 偏移量与 yaw 的对应：forward = (-sin, 0, -cos) ⇒ 相机在 +Z 看 -Z 时 yaw=0。
+                        const DIRS: [(f32, f32, f32); 4] = [
+                            (0.0, 4.0, 0.0),
+                            (0.0, -4.0, 180.0),
+                            (4.0, 0.0, 90.0),
+                            (-4.0, 0.0, -90.0),
+                        ];
+                        let (bx, bz) = (n.position[0], n.position[2]);
+                        let (dx, dz, yaw) = DIRS
+                            .iter()
+                            .copied()
+                            .find(|(dx, dz, _)| self.game.standable(bx + dx, bz + dz))
+                            .unwrap_or((0.0, 4.0, 0.0));
+                        self.camera
+                            .set_flight_pos(glam::Vec3::new(bx + dx, n.position[1] + 1.6, bz + dz));
+                        self.camera.yaw = yaw.to_radians();
                         self.camera.pitch = 10.0_f32.to_radians();
+                        if std::env::var("RV3D_NPC_POS").is_ok() {
+                            log::info!(
+                                "npc_cam: 目标 #{} 在 ({bx:.1}, {bz:.1})，选用方向 offset=({dx:.0}, {dz:.0}) yaw={yaw:.0}",
+                                n.id
+                            );
+                        }
                     }
                     // 找不到**必须**打日志。本轮的核心教训就是"静默失败"：相机没生效、
                     // NPC 不存在、pitch 反了，三者都只有画面能看出来，而画面又要靠它们

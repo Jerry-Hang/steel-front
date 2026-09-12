@@ -4172,6 +4172,12 @@ impl Game {
         !self.grid.is_passable(world_to_grid(x, z))
     }
 
+    /// 该点是否可站立。调试机位用它挑一个**不被墙挡**的观察方向 ——
+    /// 手算方向失败过 13 次，判据本来就该由程序用（见 docs/PROGRESS.md）。
+    pub fn standable(&self, x: f32, z: f32) -> bool {
+        !self.blocked_at(x, z)
+    }
+
     /// 压力模式开战：红蓝各 `stress_sides` 名 NPC 分两半场环形出生（半径 150m+，避障外推），
     /// 角色/速度/血量/攻击距离按第 1 波 profile 确定性分配。清掉旧 NPC（全量重开一轮）。
     fn spawn_stress_battle(&mut self, player: &glam::Vec3) {
