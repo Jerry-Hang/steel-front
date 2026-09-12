@@ -760,7 +760,14 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
             c.deco(Part::new(ObstacleKind::Block, px, pz, 0.9, 0.9, UNDER_GROUND, 0.34, GRANITE).cyl());
             c.deco(Part::new(ObstacleKind::Block, px, pz, 0.92, 0.92, 4.6, 4.95, GRANITE).cyl());
         }
-        c.deco(Part::new(ObstacleKind::Building, cx, cz + side * 12.5, 25.0, 1.5, 4.95, 5.55, CONCRETE));
+        // 通长檐梁配色（2026-09-12 第 67 轮改）：原为 CONCRETE [0.56,0.55,0.53]。
+        // 这根梁是 25m 长 x 1.5m 深 x **0.6m 高**的极扁比例，架在 4.95~5.55m 高处 ——
+        // 从玩家视平线看过去就是**一条横贯画面的薄亮带**，在纯平着色（无法线槽位）下
+        // 没有任何细节去打破它，是广场区域里最刺眼的一处（定位过程见 docs/PROGRESS.md
+        // 第 60~66 轮：最亮像素聚类把目标定在屏幕 x1280-1600 / y960-1280）。
+        // ⚠️ 第 63 轮曾误改**立柱**（立柱确实不该用全场最亮的 PLASTER_CREAM，但那只占
+        // 1.2% 像素、不是刺眼源）。这里才是对的改动对象。压暗到 CONCRETE_DARK 让它退到背景。
+        c.deco(Part::new(ObstacleKind::Building, cx, cz + side * 12.5, 25.0, 1.5, 4.95, 5.55, CONCRETE_DARK));
     }
     if !monument {
         // 喷泉水池（非纪念碑块）：石缘 + 内凹水面，给广场一个视觉中心
