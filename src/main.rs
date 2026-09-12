@@ -53,6 +53,42 @@ const MAX_LOOK_DELTA_PX: f64 = 512.0;
 /// 也会产生 raw motion），跳过防止反馈环自转。
 const MAX_RAW_LOOK_DELTA: f64 = 1024.0;
 
+/// 本平台是否会投递 `DeviceEvent::MouseMotion`（raw 相对增量）。
+///
+/// 这不是可选优化，而是捕获态**唯一**的相对视角来源：`window_event` 的
+/// `CursorMoved` 分支在 `cursor_locked` 时直接 `return`（"raw 增量已驱动视角，
+/// 绝对位置只更新基准"），而 `device_event` 的 `MouseMotion` 分支只在
+/// `cursor_locked` 时生效 —— 两条路径互斥且各自是对方的唯一出口。
+/// 于是 `Locked` 一旦成功，绝对位置路径就被关掉；若该平台又从不投递
+/// `MouseMotion`，视角就完全无输入，且编译期与运行期都不报错。
+///
+/// winit 0.30 的 Windows 后端只构造 `DeviceEvent::Added` / `Removed`
+/// （`platform_impl/windows/` 下没有 `MouseMotion` 的构造点），该事件目前
+/// 只由 X11 / Wayland / macOS / web 后端发出。引入本分支的 `5373a08` 正是为
+/// XInput2（X11）写的；2026-08-15 迁到 Windows 原生后该前提不再成立，
+/// 但这里没跟着改，于是在 Windows 上 `Locked` 成功 = 视角失效。
+#[cfg(target_os = "windows")]
+const RAW_MOUSE_MOTION: bool = false;
+#[cfg(not(target_os = "windows"))]
+const RAW_MOUSE_MOTION: bool = true;
+
+/// 捕获方式决策：返回 `(cursor_locked, grabbed)`。
+///
+/// `Locked` 只在 raw 相对增量真会到达时才有意义（见 [`RAW_MOUSE_MOTION`]），
+/// 否则退到 `Confined` + 绝对位置路径（该路径靠 `CursorMoved` 里的回中维持，
+/// 详见 `window_event`）。抽成纯函数是为了让"raw 不可用的平台连试都不试
+/// `Locked`"这条不变量能被单测钉住 —— 选错的后果是视角静默失效。
+fn cursor_grab_plan(
+    raw_motion: bool,
+    locked_ok: impl FnOnce() -> bool,
+    confined_ok: impl FnOnce() -> bool,
+) -> (bool, bool) {
+    if raw_motion && locked_ok() {
+        return (true, true);
+    }
+    (false, confined_ok())
+}
+
 /// 帧率上限（present 节流）：0 = 无上限（压测模式，主循环全速跑以暴露渲染瓶颈）。
 /// 设回正数（如 300）即恢复帧率门控。
 const MAX_FPS: u64 = 0;
@@ -1402,15 +1438,14 @@ impl GameApp {
             && !self.game.hud.esc_menu_open;
         // ESC 菜单/设置面板打开或失焦时释放鼠标（2026-08-15：菜单需鼠标点选）
         if want && !self.cursor_captured {
-            // 优先 Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
-            // Xwayland 等不支持 Locked 的环境回退 Confined；即使 grab 全不可用，
-            // 只要 DeviceEvent::MouseMotion 到达（XInput2 raw motion），视角仍由相对增量驱动。
-            let locked = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
-            let grabbed = if locked {
-                true
-            } else {
-                window.set_cursor_grab(CursorGrabMode::Confined).is_ok()
-            };
+            // Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
+            // 仅在 raw 相对增量真会到达的平台才用它（见 RAW_MOUSE_MOTION）：
+            // 其余平台退 Confined + 绝对位置路径（Xwayland 与本机 Windows 同路）。
+            let (locked, grabbed) = cursor_grab_plan(
+                RAW_MOUSE_MOTION,
+                || window.set_cursor_grab(CursorGrabMode::Locked).is_ok(),
+                || window.set_cursor_grab(CursorGrabMode::Confined).is_ok(),
+            );
             window.set_cursor_visible(false);
             self.cursor_captured = true;
             self.cursor_locked = locked;
@@ -3078,6 +3113,48 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// raw 不可用的平台（本机 Windows）**连试都不许试** `Locked`。
+    /// 闭包写成 panic 而不是返回 false，是为了把"没被调用"也钉住 ——
+    /// 若哪天有人把 `raw_motion &&` 去掉，这条测试会立刻炸，而不是静默退化成
+    /// "试了 Locked 拿到 Ok，于是 cursor_locked = true，视角从此无输入"。
+    #[test]
+    fn grab_plan_never_tries_locked_without_raw_motion() {
+        let (locked, grabbed) = cursor_grab_plan(
+            false,
+            || panic!("raw 不可用的平台不得尝试 Locked"),
+            || true,
+        );
+        assert!(!locked, "raw 不可用时 cursor_locked 必须为 false");
+        assert!(grabbed, "应退到 Confined 并报告已抓住");
+
+        let (locked, grabbed) = cursor_grab_plan(
+            false,
+            || panic!("raw 不可用的平台不得尝试 Locked"),
+            || false,
+        );
+        assert!(!locked);
+        assert!(!grabbed, "Confined 也失败时应如实报告未抓住");
+    }
+
+    /// raw 可用（X11/Wayland/macOS）时保持既有优先级：Locked → Confined。
+    #[test]
+    fn grab_plan_prefers_locked_where_raw_motion_exists() {
+        assert_eq!(cursor_grab_plan(true, || true, || false), (true, true));
+        assert_eq!(cursor_grab_plan(true, || false, || true), (false, true));
+        assert_eq!(cursor_grab_plan(true, || false, || false), (false, false));
+    }
+
+    /// Windows 上 RAW_MOUSE_MOTION 必须是 false：winit 的 Windows 后端不构造
+    /// DeviceEvent::MouseMotion，为真会让 capture 走进无输入的死路。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_backend_has_no_raw_mouse_motion() {
+        assert!(
+            !RAW_MOUSE_MOTION,
+            "winit 的 Windows 后端只发 Added/Removed；这里若为真，锁定即等于视角失效"
+        );
+    }
 
     /// 以恒定速度直行 `secs` 秒，返回积分后的摆动状态。
     /// `dt` 故意可传入不同帧率，用于断言"同一行程得到同一状态"。
