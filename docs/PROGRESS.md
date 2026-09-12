@@ -1,5 +1,39 @@
 # PROGRESS.md — Steel Front 进度 / 日志 / 交接历史
 
+## 🔍 白色牌坊：排除一个来源，锁定两类候选（2026-09-12 第 56 轮）
+
+### 已排除
+
+- **`checkpoint()`（哨卡）**：用的是 `SANDBAG` / `CONCRETE_DARK` / `TENT_CAMO` / `WRECK_TAN` /
+  `METAL_RUST` —— **没有白色**，形状也不符；
+- **`city.rs` 的全部配色常量**：列全 30 条，**最亮的是 `PLASTER_CREAM` 0.70 与 `FLAG_POLE` 0.70**
+  —— **根本不存在白色常量**。
+
+**⇒ 那组纯白几何不是 `city.rs` 生成的城市几何。** 候选因此只剩两类：
+
+| 候选 | 机制 | 判据 |
+|---|---|---|
+| **A. 某个 GLB 道具** | `Shape::Authored`（`flat_flag=1.25`）。铁律 D：外观**全部**来自顶点色 —— **导出时没写顶点色就会默认成白** | 消失 ⇒ A |
+| **B. 障碍 marker 实例** | `marker=1709` 个实例，用 `WorldMarker.tint` 着色；某个 marker 的 tint 缺失/为白即为白方块 | 仍在 ⇒ B |
+
+### 判据（一次 run，开关已存在）
+
+`RV3D_NO_PROPS=1` 会**移除全部 GLB 道具**（第 34 轮已用它做过对照）：
+
+```
+cap_safe -Tag whitecheck -WarmupSec 12      # 基线
+RV3D_NO_PROPS=1 cap_safe -Tag whitecheck2   # 关道具
+```
+
+对着两张 `_b` 截图里**同一位置**看那组白色结构：
+- **消失** ⇒ **A**：去 `tools/blender/survey_props.py` 的清单里逐件查"顶点色是否为空"，
+  或写一个探针直接读 GLB 的 `COLOR_0` 是否存在/是否全 1；
+- **仍在** ⇒ **B**：查 `WorldMarker.tint` 的取值来源（很可能有一类 marker 没设 tint）。
+
+**⚠️ 注意**：若为 A，则**这不是"几行着色"的事** —— 要回到 Blender 给那件资产补顶点色并重新导出，
+按第 9 轮的 `build_city_kit.py` 流程走（预览渲图 → 确认 → 覆盖 `assets/props/`）。
+**我上一轮估计的"几行改动"过于乐观，先按这条更正。**
+
 ## 👁 第⑥条视觉审计：树已修好，但**正中那组纯白"牌坊"成了新头号问题**（2026-09-12 第 55 轮）
 
 取证图：`screenshots/propstat_a.png`（默认出生点机位，commit `9cc825a` 的 exe）。
