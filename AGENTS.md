@@ -390,11 +390,9 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
-- **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py` 的判据是
-  **`vuid == 0 and panics == 0 and killed >= 1`** —— **没有 fps 门槛**（`fps=` 只是打印出来看的）。
-  🔴 本文件旧版把 `fps>=120` 写进这条口径，那是**旧的 SendInput 版 `gameplay_smoke.py`**
-  （第 257 行 `min(fps) >= 120.0`）的规则，而本文件同时又写着"别用旧脚本判断回归"
-  —— 2026-09-12 核对源码后更正。**别把两个脚本的口径混在一起。**
+- **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py`，判据 = **`vuid==0 and panics==0 and killed>=1`**，
+  **无 fps 门槛**（`fps=` 只用于打印）。旧版误把 `fps>=120` 写进这里 —— 那是**旧 SendInput 版
+  `gameplay_smoke.py`** 的规则，而本文件又写着"别用旧脚本"。**两个脚本的口径别混。**
   `playtest_perf.py` 是**时长制**：跑满 `PT_SECS`（默认 600s）即完成，击杀是附带指标、不设门槛、不判 FAIL。
 - 微基准：`cargo test --release <名> -- --nocapture --test-threads=1`
   （`shockwave_path_microbench` / `simd_cull_microbench`）；
@@ -465,9 +463,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
    **lead**：`main.rs` 的 `if config.pt_enable { init_pt_resident() }` 分支，resident 从未建。
 4. **玩家可能站在 GLB 楼体内部** — `scale = max(w/gw, d/gd)` 的取舍导致视觉体大于碰撞盒。
    **lead**：水平取 max、竖直单独处理，或给建筑留面朝街道的退距；需一次实测校准。
-5. ~~**`FLOOR_H` 常量分叉**~~ **已结案（2026-09-12）**：6 个建筑模块全部改成
-   「上层 **3.15**（= 引擎 `FLOOR_H`）+ 底层**反解** 3.56 + 女儿墙 + 压顶 = 精确总高」，
-   实测 6/6 命中契约高度。硬编 3.4 的旧 `gen_props.py::asset_building` 已不再使用。
+5. ~~**`FLOOR_H` 常量分叉**~~ **已结案（2026-09-12）**：6 个建筑模块「上层 3.15（= `FLOOR_H`）+ 底层反解 + 女儿墙 + 压顶 = 精确总高」，实测 6/6 命中。旧硬编 3.4 的 `asset_building` 已弃用。
 6. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
    `install_guns.py` 仍 SKIP。需人工删掉重叠枪身后装为 `svd12`。
 7. **D12 士兵远距离读作蓝色平板**，近距四肢体积感未验证。**lead**：`RV3D_NPC_SCALE=3.5`
