@@ -4592,6 +4592,26 @@ impl Renderer {
     /// 设置 NPC 士兵可视化（由 main.rs 传入全部 NPC 的位置/朝向/配色/动画态；
     /// 15 段/人（尸体 15 段）展开存入 npc_parts，总段数截断到 MAX_NPC_INSTANCES）
     pub fn set_npc_visuals(&mut self, visuals: &[NpcVisual]) {
+        // 临时埋点（RV3D_NPC_POS=1）：每 120 次调用打一次。放在 `clear()` **之前**，
+        // 于是 `self.npc_*_parts` 里还是**上一次循环的最终结果** —— 不必去找函数尾部，
+        // 也不会被 clear 掉。目的是回答"NPC 到底有没有被交给渲染器"（第 18 轮的结论：
+        // 机位几何已经证明是对的，人却不在画面里 ⇒ 该问题不在取景侧）。
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static TICK: AtomicU32 = AtomicU32::new(0);
+            if std::env::var("RV3D_NPC_POS").as_deref() == Ok("1")
+                && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
+            {
+                log::info!(
+                    "npcvis: 收到 {} 个 NPC；上一帧段数 盒={} 柱={} 球={}（各组上限 {}）",
+                    visuals.len(),
+                    self.npc_box_parts.len(),
+                    self.npc_cyl_parts.len(),
+                    self.npc_sph_parts.len(),
+                    MAX_NPC_INSTANCES
+                );
+            }
+        }
         self.npc_box_parts.clear();
         self.npc_cyl_parts.clear();
         self.npc_sph_parts.clear();
