@@ -8536,24 +8536,43 @@ impl Renderer {
                 // 同一个 identity 实例，所以这里只换 firstIndex/indexCount，
                 // 不需要任何重新绑定或重传。
                 // margin 2m：桶边界上的建筑不该在转视角时逐帧抖动进出。
+                // RV3D_ONE_PROP_DRAW=1：A/B（第 43 轮）—— 不分桶，整份索引一次画完。
+                // 用来二选一：**1 个 draw 也慢 ⇒ 顶点/片元着色本身贵**；
+                // **1 个 draw 快很多 ⇒ 逐 draw 的 state 开销贵**（28 次切换）。
+                // 前提：顶点数/三角形数/draw call 数/填充率四个维度都已排除对不上这 3.7ms。
+                let one_draw = std::env::var("RV3D_ONE_PROP_DRAW").is_ok();
                 let mut drawn_bins = 0u32;
                 let mut drawn_tris = 0u32;
                 let mut drawn_vert_span = 0u64;
-                for bin in &self.prop_bins {
-                    if !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0) {
-                        continue;
-                    }
-                    drawn_bins += 1;
-                    drawn_tris += bin.index_count / 3;
-                    drawn_vert_span += (bin.max_vertex - bin.min_vertex + 1) as u64;
+                if one_draw {
                     self.device.cmd_draw_indexed(
                         command_buffer,
-                        bin.index_count,
+                        self.prop_index_count,
                         1,
-                        bin.first_index,
+                        0,
                         0,
                         PROP_INSTANCE_INDEX,
                     );
+                    drawn_bins = 1;
+                    drawn_tris = self.prop_index_count / 3;
+                    drawn_vert_span = self.prop_vertex_count as u64;
+                } else {
+                    for bin in &self.prop_bins {
+                        if !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0) {
+                            continue;
+                        }
+                        drawn_bins += 1;
+                        drawn_tris += bin.index_count / 3;
+                        drawn_vert_span += (bin.max_vertex - bin.min_vertex + 1) as u64;
+                        self.device.cmd_draw_indexed(
+                            command_buffer,
+                            bin.index_count,
+                            1,
+                            bin.first_index,
+                            0,
+                            PROP_INSTANCE_INDEX,
+                        );
+                    }
                 }
                 // 第②条判据（RV3D_PROP_STATS=1）：每帧实际提交了多少桶/三角形。
                 // 存在的理由：道具是已知最大单项（关掉道具 fps 68.8→184.7），
