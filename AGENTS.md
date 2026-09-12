@@ -17,7 +17,8 @@
 
 **21 世纪架空世界观的大战场 FPS**（⚠ 本文件与 README 旧版曾长期误写为「二战题材」——
 据此建模/选材会全错。装备是现代系，HUD 默认武器 **AK-12 风暴 7.62×39mm**，2018 年列装）。
-美术基调按「近代复古城市 / 当代欧洲小镇」走，不是战壕与 1940 年代道具。
+美术基调按 **2020s 当代东欧/中东战乱城镇**走（用户 2026-09-12 定：混凝土板楼 + 抹灰老城 +
+破损，冷灰色调），不是战壕与 1940 年代道具，也**不是**本文件旧版写的"近代复古城市"。
 
 Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 `ash` 0.38 / `ash-window` 0.13 / `winit` 0.30(rwh_06) / `glam` 0.29 / `raw-window-handle` 0.6 /
@@ -64,7 +65,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 > WSL2 相关材料**全部作废、已从本文件删除**（详见文末存档指针）。
 
 - **机器**：RTX 5060 Laptop（NVIDIA 驱动 610.88）+ AMD 8940HX，内存 12GB。
-- **编译**：`cargo build --release`。**测试**：`cargo test --release`（当前基线 **462 passed / 0 failed / 0 警告**）。
+- **编译**：`cargo build --release`。**测试**：`cargo test --release`（当前基线 **463 passed / 0 failed / 0 警告**）。
   UDP 回环测试在沙箱内 bind 会 PermissionDenied → 需提权跑。
 - **GPU 能力（原生实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
   DLSS VK_NVX=true、`present_us 101–373µs`。
@@ -285,6 +286,42 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - `SteelFront.bat` 的 touch 列表**必须含 `build.rs` 与 `build_spv_rt.rs`**
   （只改着色器/构建脚本时 cargo 会静默不重编 = 启动旧版本）。
 
+### ⭐ 设计化建模链路（2026-09-12 建立，取代 `gen_props.py::asset_building`）
+
+> 旧路线把建筑写成"参数拼箱子"（开间数 / 窗间墙宽 / 窗台高），结果是一栋 14m 宽的面
+> 只开 **4 个 2.75×1.6m 的洞** —— 那是店面橱窗的比例；而且没有勒脚、没有外挑窗台、
+> 没有女儿墙压顶、没有入口、没有阳台、没有屋顶杂物，每个面一个平色。
+> **参数生不出品味，设计过的模块可以。** 现有 6 个建筑模块由
+> `tools/blender/build_city_kit.py` 生成，是"照着真实板楼/抹灰楼的比例写死"的，不是尺寸区间。
+
+```powershell
+# 1) 尺寸普查：24 件资产的占地/高度/底面 —— **尺寸契约的唯一来源**
+blender.exe --background --python tools/blender/survey_props.py -- assets/props "*.glb"
+# 2) 生成（可只给名字）：输出到临时目录，确认后才覆盖 assets/props/
+blender.exe --background --python tools/blender/build_city_kit.py -- <out_dir> [name...]
+# 3) 预览渲图：4 视图 → PNG，**我必须用眼睛看过再入库**
+blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_prefix> [n]
+```
+
+- **引擎只给了三条视觉杠杆，别指望第四条**：没有法线槽位（法线由屏幕空间导数重建
+  ⇒ **纯平着色**），所以**细节只能是真几何**；AO/明暗**必须烘进顶点色**；道具
+  `export_materials="NONE"`，外观**全部**来自顶点色。
+- **尺寸契约是硬的**：`city.rs` 按**占地**摆放，`building_block` 只有 4 处但
+  `building_tall` 有 **52 处**。资产越出契约轮廓就会插进邻居 —— 第一版模块的**外挑阳台
+  让进深从 10.9 涨到 13.6**，入口雨篷再 +1.0、台阶再 +0.62。**外挑一律改内凹**（凹阳台
+  loggia 既是东欧板楼的真做法，又完全不占轮廓）。允许的小外挑上限 = **0.06m/侧**（勒脚/窗台）。
+- **层高反解**：总高固定，`上层 = 3.15`（**等于引擎 `FLOOR_H`**），**底层吸收余量**
+  （现值 3.56）。硬编 3.4 就是 `FLOOR_H` 分叉的来源，**别再写死**。
+- **绕序交给叉积判定**：`add_quad_n()` 收"意图法线"，算叉积、反了就翻。引擎侧反的面
+  **直接黑掉且不报错**，靠手推绕序是一类静默事故。
+- ⚠ **预览图只对"几何与比例"可信，对"最终颜色"不可信**：预览走 Blender 自己的光照 +
+  AgX 视图变换，同一份顶点色在引擎里明显更暗。**颜色判断必须在引擎里做**（`RV3D_CAM` 固定机位取证）。
+- **顶点预算**：`props: 缓冲扩容 顶点 N/2097152` ⇒ **硬容量 2^21 = 2,097,152**。
+  当前 24 件 / **576 处**摆放烘成 **146 万顶点（72MB）**，已在 70%。加细节前先看这个数。
+- **确定性**：`hash(str)` 每个进程都变（PYTHONHASHSEED），生成器里用 `zlib.crc32`。
+- 同型号建筑的"克隆军团"由 **`props.rs::placement_tint`** 治（逐摆放确定性色调 ±12%），
+  不是靠堆更多型号。
+
 ---
 
 ## 铁律 E — 平台 / 指令集 / 线程
@@ -356,7 +393,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 
 ## 当前状态（2026-09-12 核实）
 
-- **测试基线**：`cargo test --release` → **462 passed / 0 failed / 0 警告**。
+- **测试基线**：`cargo test --release` → **463 passed / 0 failed / 0 警告**。
 - **游戏可运行**：`RV3D_AUTOSTART=1 RV3D_STRESS_AI=0` 起波次模式，稳态 fps ~130（2560x1600、"中画质"）。
 - **已实现的主要系统**：mesh 着色器主路径 + 地形 LOD + 65536 实例场、阴影贴图 + 烘焙 AO + 天光 +
   程序化地面/皮肤贴图、GLB 道具（24 件，合并成 1 次 draw call + 40m 分桶剔除）、
@@ -376,6 +413,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 - **冒烟闸门 = 绿**：`scripts/run_smoke_pm.ps1`（PostMessage 版）实测 `ALL-OK`——
   闭环瞄准命中、54 发点射击毙一名敌人、`VUID=0 panics=0 fps=95.5`。
   **旧的 `run_gameplay_smoke.ps1`（SendInput）在本机结构性跑不通，别再用它判断回归。**
+- **建筑已换成设计化套件（2026-09-12）**：6 个模块由 `tools/blender/build_city_kit.py`
+  生成并**已装入 `assets/props/`**，实测引擎内加载正常（无崩溃/无黑面）。
+  摆放分布：`tree_oak=372 building_tall=52 street_lamp=48 barrier_hesco=32 panel_block=17
+  container_* =28 car_wreck=8 sandbag_wall=8 building_wide=7 building_block=4`
+  （`building_corner` / `building_shed` **未被 city.rs 摆放**）。
+  烘成 **146 万顶点 / 60.9 万三角 / 576 处摆放 / 74 桶**，fps ~95–135。
 - **仓库卫生（2026-09-12 已清理，用户逐组确认）**：`scripts/` 从 **353 → 45 个跟踪文件**
   （两轮共删 312 个：第一轮 297 个一次性诊断/补丁脚本，判定依据见 commit `e46956d`；
   第二轮 15 个经用户确认，见 `90803f0`）。磁盘另清理约 **617 MB** 残留。
@@ -418,8 +461,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
    **lead**：`main.rs` 的 `if config.pt_enable { init_pt_resident() }` 分支，resident 从未建。
 4. **玩家可能站在 GLB 楼体内部** — `scale = max(w/gw, d/gd)` 的取舍导致视觉体大于碰撞盒。
    **lead**：水平取 max、竖直单独处理，或给建筑留面朝街道的退距；需一次实测校准。
-5. **`FLOOR_H` 常量分叉** — `city.rs` / `build.rs` = 3.15，Blender 侧建筑 3.4、`panel_block` 2.9
-   （碰撞核按 3.15、网格按 3.4）。**lead**：把 `gen_props.py` 层高统一成 3.15 后重导出。
+5. ~~**`FLOOR_H` 常量分叉**~~ **已结案（2026-09-12）**：6 个建筑模块全部改成
+   「上层 **3.15**（= 引擎 `FLOOR_H`）+ 底层**反解** 3.56 + 女儿墙 + 压顶 = 精确总高」，
+   实测 6/6 命中契约高度。硬编 3.4 的旧 `gen_props.py::asset_building` 已不再使用。
 6. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
    `install_guns.py` 仍 SKIP。需人工删掉重叠枪身后装为 `svd12`。
 7. **D12 士兵远距离读作蓝色平板**，近距四肢体积感未验证。**lead**：`RV3D_NPC_SCALE=3.5`
@@ -484,6 +528,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 
 > 09-04 之前的条目只保留"结论 + 关键数字 + 仍有效的教训"。
 > 更早的 WSL2 时代记录已整体删除（存档指针见文末）。
+
+### [2026-09-12] 交接：设计化建模链路 + 6 个建筑模块落地（用户定的方向转向）
+- 发起方：DeepSeek Harness｜接收方：下一会话｜类型：迭代结束
+- 验收：`cargo test --release` **463 passed / 0 failed / 0 警告**；
+  commits `33c9746` / `0a756fe` / `e85eaf5` / `9b703db`；引擎内 `cap_safe` 取证无崩溃。
+- **用户判断（我同意，且有证据）**："程序化生成一切还是太困难，生成出来的是一坨狗屎"。
+  渲染不是瓶颈：旧 `asset_building()` **确实做了真窗洞**，但 14m 宽的面只开 4 个
+  **2.75×1.6m** 的洞（店面橱窗比例），且**建筑词汇全缺**——无勒脚/窗台/窗楣/女儿墙压顶/
+  入口/阳台/屋顶杂物。**参数生不出品味。**
+- **建立 headless 设计链路**（`survey_props.py` 量契约 → `build_city_kit.py` 生成 →
+  `preview_glb.py` 渲 4 视图 → **我用眼睛审图** → 再入库）。这条链路第一次跑就抓出 4 个
+  真错误，全部靠**契约数字**而非观感：高度 +2.12、进深 +2.70（外挑阳台）、雨篷 +1.0、
+  台阶 +0.62。**外挑一律改内凹**（凹阳台 loggia）。
+- **`FLOOR_H` 分叉结案**：改为「上层 3.15（= 引擎）+ 底层反解 3.56 + 女儿墙 + 压顶 =
+  精确总高」，6/6 命中契约。
+- **新增 `props.rs::placement_tint`**：逐摆放确定性色调 ±12%，治同型号建筑的"克隆军团"
+  （同网格的所有摆放原本烘成完全相同的顶点色）。不破坏 `merge_binned_is_deterministic`；
+  `single_bin_at_identity_reproduces_source_vertices` 改为"位置/法线/UV 逐位相同 +
+  颜色恰为源色 × 色调"的**更严格**断言，而不是放松它。
+- **安全网修复**：`release_input.ps1` 单次判定会误报 `RELEASE FAILED`（进程退出与窗口销毁
+  是异步的），改为 1.5 秒收敛重试。**假警报和漏报一样有害。**
+- 遗留与下一步：① 树的低多边形面团球现在是全场最弱元素，与新楼打架；
+  ② `placement_tint` 的 ±12% 偏保守，城市尺度上仍偏统一；
+  ③ `building_corner` / `building_shed` 未被摆放，做了也用不上；
+  ④ 街具（路灯/护栏/集装箱）仍是旧的程序化件；⑤ 顶点预算已用 70%（146 万 / 209 万）。
+- 状态：in_progress
 
 ### [2026-09-12] 交接：输入链路的三个真 bug + 文档重写
 - 发起方：DeepSeek Harness｜接收方：下一会话｜类型：迭代结束
@@ -681,6 +751,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     再加两侧同条令的镜像 run、以及关掉整个指挥通道的对照 run，才看清**赢家恒为红方、
     与处理无关**。三次对照的成本远低于照着假结论继续调参。
     **判据：先确认对照组本身没有一边倒，再去看处理组之间的差。**
+25. **"做完了"要有可判定的数字标准，否则会停在"看起来好多了"。**
+    2026-09-12 换建筑模块，真正抓住错误的全是**契约数字**而不是观感：高度 12.510 vs
+    契约 10.390（+2.12）、进深 13.625 vs 10.925（+2.70）。眼睛在预览图上完全看不出
+    "这栋楼会插进邻居"。**动手前先把契约量出来（`survey_props.py`），每次产出都比一遍。**
+26. **安全网的假警报和漏报一样有害。** `release_input.ps1` 在进程刚被 kill、
+   窗口尚未销毁时单次判定，会误报 `RELEASE FAILED`——而**同一条命令紧接着再跑就是 OK**。
+    一个会喊狼来了的安全脚本，会训练人以后不再当回事。**判定要允许收敛窗口（重试），
+    不能只查一次。**
 
 ---
 
