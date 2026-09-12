@@ -45,13 +45,13 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `ui.rs` | 2592 | HUD / 菜单 / 设置 / 键位表 |
 | `engine/city.rs` | 1802 | 程序化城市生成 |
 | `net.rs` | 1733 | UDP 联机（协议魔数 'S'） |
-| `engine/ai.rs` / `weapons.rs` / `map.rs` / `procedural.rs` / `cpu.rs` / `physics.rs` | 1436 / 1432 / 1125 / 1082 / 1074 / 951 | AI 分层与战术 / 武器系统 / TOML 关卡 / 程序化贴图 / CPU 拓扑与亲和 / 物理 |
+| `engine/ai.rs` / `weapons.rs` / `map.rs` / `procedural.rs` / `cpu.rs` / `physics.rs` | 1436 / 1432 / 1125 / 1082 / 1074 / 951 | AI 分层与战术 / 武器系统 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / CPU 拓扑与亲和 / 物理 |
 | `llm_cmd.rs` | 550 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
 其余：`config.rs`（`$HOME/.steel_front.cfg`，原子写 + 容错加载，测试不写盘）、
 `engine/objective.rs`（据点/胜负）、`engine/ai_command.rs`、`engine/ray_tracer.rs`（PT）、
-`engine/lighting.rs`（烘焙 AO + 天光 + 阴影）、`engine/assets.rs`、`engine/props.rs`（GLB）、
-`engine/meshgen.rs`、`engine/gpu_caps.rs`、`perf_log.rs`。
+**`engine/lighting.rs`（纯运行时：方向光 / 点光源 / 阴影矩阵 / 镜面参数 —— **不含烘焙**）**、
+`engine/assets.rs`、`engine/props.rs`（GLB）、`engine/meshgen.rs`、`engine/gpu_caps.rs`、`perf_log.rs`。
 
 - 地形高度纯函数在 `renderer.rs`（`terrain_height` / `terrain_height_at`），**中央 60×60 压平 y=0**。
 - `GameState`：`StartMenu` / `LoadingMap` / `Playing` / `GameOver` / `Victory(Team)` / `Defeat`。
