@@ -671,13 +671,41 @@ impl GameApp {
                             // ⇒ 士兵被地形埋掉。用**与地形渲染同一个** `terrain_height`，
                             // 不另写一套判据。差 > 1m 即假设成立。
                             let th = crate::engine::renderer::terrain_height(bx, bz);
+                            // 一致性对照（第 24 轮）：在**同一组采样点**上各跑一次
+                            // `standable`（导航网格）与 `point_in_body`（建筑刚体 AABB）。
+                            // 两者不一致 ⇒ 导航网格缺建筑，也就是未结案 4 的根因，
+                            // 同时解释了"六个采样点全 standable 却仍看不到人"。
+                            let (mut n_nav, mut n_body, mut n_mismatch) = (0u32, 0u32, 0u32);
+                            for k in 1..=6 {
+                                let f = k as f32 / 7.0;
+                                let (px, pz) = (bx + dx * f, bz + dz * f);
+                                let nav = self.game.standable(px, pz);
+                                let body = self.game.point_in_body(px, 1.0, pz);
+                                if nav {
+                                    n_nav += 1;
+                                }
+                                if body {
+                                    n_body += 1;
+                                }
+                                if nav && body {
+                                    n_mismatch += 1;
+                                }
+                            }
+                            // 最后一道未验证环节：把**相机自己的读数**打出来。
+                            // 前面所有推理都建立在"机位就是 (bx+dx, +1.6, bz+dz)"这个假设上，
+                            // 而它是本轮唯一还没被验证过的东西（pitch 符号、NPC 是否生成、
+                            // 是否被埋、是否尸体、是否有墙 —— 都已逐个否掉）。
+                            let cp = self.camera.position();
+                            let cf = self.camera.forward();
                             log::info!(
-                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) hp={:.0} state={:?} 地形高={th:.1} 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0})",
+                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) hp={:.0} state={:?} 地形高={th:.1} 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0}) | 采样6点: 导航可走={n_nav} 建筑体内={n_body} 两者矛盾={n_mismatch} | 相机读数=({:.1},{:.1},{:.1}) 朝向=({:.2},{:.2},{:.2})",
                                 n.id,
                                 n.position[0], n.position[1], n.position[2],
                                 n.hp,
                                 n.state_machine.state(),
-                                bx + dx, n.position[1] + 1.6, bz + dz
+                                bx + dx, n.position[1] + 1.6, bz + dz,
+                                cp.x, cp.y, cp.z,
+                                cf.x, cf.y, cf.z
                             );
                         }
                     }

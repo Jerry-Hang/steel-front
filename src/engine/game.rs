@@ -4178,6 +4178,20 @@ impl Game {
         !self.blocked_at(x, z)
     }
 
+    /// 调试用：该点是否落在**静态刚体（建筑/障碍）**的 AABB 内。
+    ///
+    /// 用的是**与 `npc_occluded` 完全同一套** `segment_hits_aabb`（退化成一个 ±0.01m 的
+    /// 极短线段），不另写一套包含判定 —— 本仓最贵的 bug 就是"同一个量两套来源"。
+    ///
+    /// 存在的理由：`standable` 走导航网格，建筑走刚体 AABB，**两者不是同一套几何**。
+    /// 这个查询用来量化两者的差异（未结案 4 的根因），也是第 24 轮取景问题的判据。
+    pub fn point_in_body(&self, x: f32, y: f32, z: f32) -> bool {
+        self.world
+            .bodies
+            .iter()
+            .any(|body| Self::segment_hits_aabb(x - 0.01, y, z, x + 0.01, y, z, &body.aabb()))
+    }
+
     /// 压力模式开战：红蓝各 `stress_sides` 名 NPC 分两半场环形出生（半径 150m+，避障外推），
     /// 角色/速度/血量/攻击距离按第 1 波 profile 确定性分配。清掉旧 NPC（全量重开一轮）。
     fn spawn_stress_battle(&mut self, player: &glam::Vec3) {
