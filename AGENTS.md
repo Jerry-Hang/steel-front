@@ -490,9 +490,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 - **追加（同日）**：**冒烟闸门由红转绿** —— `scripts/run_smoke_pm.ps1`（PostMessage 版）
   实测 `ALL-OK`：闭环瞄准命中（含 169 度、1239px 大转角），54 发点射击毙一名敌人，
   `VUID=0 panics=0 fps=95.5`，玩家随后在交火中阵亡。**未结案 1 结案。**
-- **追加（同日）**：仓库卫生 —— `scripts/` **353 → 56 个跟踪文件**（删 297 个，判定依据见
-  commit `e46956d`：48 个补丁脚本的替换目标已全部从 src 消失、手工 SPIR-V 时代工具链、
-- **追加（同日）**：第二轮清理（用户逐组确认删 15 个脚本 + 删 play_cap.ps1）与
+- **追加（同日）**：仓库卫生 —— `scripts/` **353 → 45 个跟踪文件**（两轮共删 312 个）。
+  第一轮 297 个的判定依据见 commit `e46956d`（48 个补丁脚本的替换目标已全部从 src 消失、
+  手工 SPIR-V 时代工具链、WSL2 专用脚本、一次性下载/挂机脚本）；第二轮 15 个经用户确认。
   **LLM 战术指挥通道打通**（`llm_commander.py` + `run_llm_battle.ps1`，
   实测 150s / 7 轮 14 条命令全部被采纳）。`screenshots/` 的 405 张取证图退出 git、
   文件保留在磁盘。详见【当前状态】。
