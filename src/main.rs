@@ -707,6 +707,35 @@ impl GameApp {
                                 cp.x, cp.y, cp.z,
                                 cf.x, cf.y, cf.z
                             );
+                            // 🔴 2026-09-12 第④条补：**离相机最近的 3 个 NPC**。
+                            // 理由：`npc=` 与 `机位=` 两条读数各自都对（#8 在 x=65.0，
+                            // 机位在 x=61.0，朝向 +X），但实机截图里 4m 正前方**没有士兵**，
+                            // 画面里那个人在 ~19m 外。两者不能同时成立 ⇒
+                            // 直接问"相机附近到底有没有人"，而不是继续推坐标。
+                            let mut near: Vec<(f32, usize)> = self
+                                .game
+                                .npcs
+                                .iter()
+                                .enumerate()
+                                .map(|(k, q)| {
+                                    let d = glam::Vec3::new(
+                                        q.position[0] - cp.x,
+                                        q.position[1] - cp.y,
+                                        q.position[2] - cp.z,
+                                    )
+                                    .length();
+                                    (d, k)
+                                })
+                                .collect();
+                            near.sort_by(|a, b| {
+                                a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let s: Vec<String> = near
+                                .iter()
+                                .take(3)
+                                .map(|(d, k)| format!("#{k} d={d:.1}m"))
+                                .collect();
+                            log::info!("npc_cam: 距相机最近 3 人 = {}", s.join(" / "));
                         }
                     }
                     // 找不到**必须**打日志。本轮的核心教训就是"静默失败"：相机没生效、
