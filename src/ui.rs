@@ -909,8 +909,15 @@ impl HudState {
                 Rect::new(cx - 1.5, cy - 1.5, 3.0, 3.0),
                 Color::new(1.0, 0.2, 0.2, 0.9),
             )));
-        } else if !self.ads {
+        } else {
             // 腰射：扩散十字（半长 8px）
+            // 2026-09-12：原写作 `else if !self.ads` —— 进了 else 就必然 `!self.ads`，
+            // 那个条件是**恒真**的，读起来却像还有第三种状态。已简化为 `else`。
+            //
+            // ⚠️ 待做（第⑤条：开镜打磨）：这里的十字是**固定 8px 半长**，不随移动/开火扩散。
+            // 真实 FPS 的腰射准星会随 spread 张开，是最直接的"手感反馈"来源。
+            // 需要 `GameState` 暴露一个 spread 值（可由移动速度/姿态/连发累积算出），
+            // 再在这里按它缩放 half —— 涉及 game.rs + ui.rs 两侧，单独立项做。
             elems.push(HudElement::Quad(Quad::new(
                 Rect::new(cx - 8.0, cy - 1.5, 16.0, 3.0),
                 Color::WHITE,
