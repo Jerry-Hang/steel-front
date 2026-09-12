@@ -648,10 +648,19 @@ impl GameApp {
                             (-4.0, 0.0, -90.0),
                         ];
                         let (bx, bz) = (n.position[0], n.position[2]);
+                        // 判据从"一个点"升级为"**一条线**"：沿 相机→NPC 线段均匀取 6 个采样点，
+                        // 全部可站立才接受该方向。只测相机那一格是不够的 —— 墙可以横在相机与
+                        // NPC 之间，相机站得再合法也看不见人（第 17 轮定位到的缺口）。
+                        let los_clear = |ox: f32, oz: f32| -> bool {
+                            (1..=6).all(|k| {
+                                let f = k as f32 / 7.0;
+                                self.game.standable(bx + ox * f, bz + oz * f)
+                            })
+                        };
                         let (dx, dz, yaw) = DIRS
                             .iter()
                             .copied()
-                            .find(|(dx, dz, _)| self.game.standable(bx + dx, bz + dz))
+                            .find(|(dx, dz, _)| los_clear(*dx, *dz))
                             .unwrap_or((0.0, 4.0, 0.0));
                         self.camera
                             .set_flight_pos(glam::Vec3::new(bx + dx, n.position[1] + 1.6, bz + dz));
@@ -659,8 +668,10 @@ impl GameApp {
                         self.camera.pitch = 10.0_f32.to_radians();
                         if std::env::var("RV3D_NPC_POS").is_ok() {
                             log::info!(
-                                "npc_cam: 目标 #{} 在 ({bx:.1}, {bz:.1})，选用方向 offset=({dx:.0}, {dz:.0}) yaw={yaw:.0}",
-                                n.id
+                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0}) yaw={yaw:.0}",
+                                n.id,
+                                n.position[0], n.position[1], n.position[2],
+                                bx + dx, n.position[1] + 1.6, bz + dz
                             );
                         }
                     }
