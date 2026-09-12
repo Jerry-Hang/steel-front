@@ -488,7 +488,16 @@ const INSTANCE_BUFFER_ELEMS: u64 = PROP_INSTANCE_INDEX as u64 + 1;
 /// 因为它没剔除、多画了 2.7 倍顶点。**draw call 数不是瓶颈。**
 /// 而第 43 轮同时证明成本与**绘制的顶点数近似成正比**（2.69× 顶点 → 2.14× 时间）。
 /// ⇒ 该优化的是"每帧画多少顶点"，切细桶正是为此；draw call 上升是安全的代价。
-const PROP_BIN_CELL_M: f32 = 20.0;
+// 🔴 2026-09-12 第 104 轮：20.0 → **10.0**。
+//
+// 第 103 轮的同场 A/B 定案：**AI 侧 CPU 优化不再涨帧**（省 196µs `ai_us`，fps 纹丝不动）——
+// 因为同期 `wait_fence_us` 3000~4000 = **CPU 在等 GPU**。⇒ 第②条只剩 GPU 侧，而**道具是最大分项
+// （3.20ms / 34%）**，成本随**画的顶点数**走（第 44 轮实测：2.69x 顶点 → 2.14x 时间）。
+//
+// 分桶更细 ⇒ 每帧可见桶覆盖的顶点更少 ⇒ 直接减 GPU 顶点吞吐。**绘制调用数不是瓶颈**
+// （第 44 轮实测：单桶全画反而更慢，82.6 fps）⇒ 细分安全。
+// 第 44 轮 40→20 的已验证收益：三角形 −14%、顶点跨度 −15%、`wait_fence_us` 4164→2、fps 126.7→131.7。
+const PROP_BIN_CELL_M: f32 = 10.0;
 const _: () = assert!(
     INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTANCE_BUFFER_ELEMS > 0,
     "实例 buffer 必须覆盖所有已知槽位"
