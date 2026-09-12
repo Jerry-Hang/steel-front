@@ -39,6 +39,40 @@
 ---
 
 
+
+## ✅ 确认：地面 AO 烘焙的调用链完整（2026-09-12 第 98 轮）
+
+第 96/97 轮我据 `procedural.rs` 的**模块注释**判定"⑦ 的烘焙已有一半"。本轮**从调用链验证**它确实接到了屏幕上：
+
+```
+renderer.rs:7128   let size = super::procedural::GROUND_TEXTURE_SIZE;
+renderer.rs:7133   procedural::generate_city_ground_texture(size, &height_at)
+                                              ^^^^^^^^^^ 地形高度采样器 = AO 烘焙的输入
+renderer.rs:7543   procedural::GROUND_DETAIL_SIZE / generate_default_ground_detail_texture()  // 细节层
+renderer.rs:7510   generate_default_marker_skin_texture()   // marker 混凝土皮肤
+renderer.rs:7521   generate_default_npc_skin_texture()      // NPC 皮肤
+```
+
+**⇒ 链路完整**：`height_at`（`terrain_height`）→ `generate_city_ground_texture` 烘焙
+AO/静态天光（高度场凹度遮蔽）→ 上传为地面纹理 → 片元按 world-space UV 采样。
+
+**⇒ 第 97 轮写进入口摘要的"⑦ 烘焙已有一半"现在是从调用链验证过的结论，不只是从注释推断。**
+
+### 顺带记录的产出清单（`procedural.rs` 共 9 个 `pub fn`）
+
+| 函数 | 用途 | 消费者 |
+|---|---|---|
+| `generate_city_ground_texture` | **含烘焙 AO/天光的地面纹理** | `renderer.rs:7133` ✅ |
+| `generate_ground_texture` / `_default_` | 通用/回退地面 | via above |
+| `generate_ground_detail_texture` / `_default_` | **地面细节层**（`GROUND_DETAIL_SIZE=256`，纹素级） | `renderer.rs:7545` ✅ |
+| `generate_marker_skin_texture` / `_default_` | marker 混凝土皮肤 | `renderer.rs:7512` ✅ |
+| `generate_npc_skin_texture` / `_default_` | NPC 皮肤（`RV3D_SKIN_TEX` 门控） | `renderer.rs:7521` ✅ |
+
+**⇒ 9 个公开函数全部有消费者，没有"造好没接线"的。**
+
+**⚠️ 这条否定的价值**：本会话已多次遇到"造好但没接线"（如 `pt_enable` 的 resident 从未建、
+`maxMeshWorkGroupCount` 的分块）。**这次专门查了，结论是干净的** —— 不必再查。
+
 ## ✅ 热路径 `env::var` 全项目审计：**只有第 93 轮修掉的那一个是每实例调用**（2026-09-12 第 94 轮）
 
 把第 93 轮的发现一般化 —— **全项目 44 处 `env::var`，逐个按"调用频率"分类**：
