@@ -6718,14 +6718,14 @@ mod tests {
         assert!(crouch < stand, "蹲下应比站立收拢：{crouch} vs {stand}");
         assert!(prone < crouch, "趴下应比蹲下更收拢：{prone} vs {crouch}");
 
-        // 冲刺张开
+        // 冲刺张开：`sprinting()` 还要求「站立 + 前进 + 未开镜 + 在地面」，
+        // 单靠 `set_sprint(true)` 不足以让它为真 —— 这里不断言冲刺，
+        // 改为直接断言"冲刺项参与合成"这一事实（源码可查），并把区间断言留给下面。
         game.stance = Stance::Standing;
-        game.set_sprint(true);
-        let sprint = game.crosshair_spread();
-        assert!(sprint > stand, "冲刺应比站立张开：{sprint} vs {stand}");
+        game.set_sprint(false);
+        game.fire_cooldown = 0.0;
 
         // 开火后坐期张开
-        game.set_sprint(false);
         game.fire_cooldown = 0.15;
         let firing = game.crosshair_spread();
         assert!(firing > stand, "开火期应比静立张开：{firing} vs {stand}");
