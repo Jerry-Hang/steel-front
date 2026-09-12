@@ -2935,7 +2935,12 @@ impl Game {
         let sprint = if self.sprinting() { 0.25 } else { 0.0 };
         // 开火后坐期：fire_cooldown 是剩余秒数，按它线性张开，封顶 0.45
         let fire = (self.fire_cooldown * 3.0).clamp(0.0, 0.45);
-        (stance + sprint + fire).clamp(0.08, 1.0)
+        let base = (stance + sprint + fire).clamp(0.08, 1.0);
+        // 🔴 2026-09-12 第⑤条补：**必须乘 `spread_scale`**。
+        // `main.rs` 每帧按开镜混合度写它（`1.0 - ads_blend*0.7`，即开镜后弹道收拢 70%），
+        // 而 `fire_dir` 的散射半角也乘了它。初版忘了这一项 ⇒
+        // **玩家开镜后弹道已经收拢，准星却纹丝不动** —— 准星与实际散布不一致。
+        (base * self.spread_scale).clamp(0.08, 1.0)
     }
 
     pub fn fire_mode(&self) -> FireMode {
@@ -6739,6 +6744,17 @@ mod tests {
                 assert!((0.08..=1.0).contains(&v), "越界: stance={s:?} cd={cd} -> {v}");
             }
         }
+
+        // 开镜必须让准星跟着收拢：`spread_scale` 由 main.rs 按开镜混合度写入。
+        // 初版漏了这一项 ⇒ 开镜后弹道收拢 70% 而准星不动（准星与实际散布不一致）。
+        game.stance = Stance::Standing;
+        game.fire_cooldown = 0.0;
+        game.set_spread_scale(1.0);
+        let hip = game.crosshair_spread();
+        game.set_spread_scale(0.3); // = 1.0 - ads_blend(1.0) * 0.7，即完全开镜
+        let ads = game.crosshair_spread();
+        assert!(ads < hip, "开镜应收拢准星：{ads} vs 腰射 {hip}");
+        game.set_spread_scale(1.0);
     }
 
     #[test]
