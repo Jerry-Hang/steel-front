@@ -24,7 +24,7 @@ $ErrorActionPreference = "Continue"
 $repo = "D:\Rust\steel-front"
 $exe  = Join-Path $repo "target\release\steel-front.exe"
 $LOG  = Join-Path $repo "logs\$Tag.log"
-$LOGERR = "$LOG.log.err"
+$LOGERR = "$LOG.err"
 $beat = "$env:TEMP\sf_play.beat"
 
 # Adopted-order marker: U+547D U+4EE4 U+5DF2 U+91C7 U+7EB3  (ming ling yi cai na)
@@ -76,6 +76,49 @@ finally {
 Write-Host ""
 Write-Host "=== commander server log (last 12) ==="
 Get-Content $srvLog -Tail 12 -ErrorAction SilentlyContinue
+Write-Host ""
+Write-Host "=== battle result (last command line) ==="
+# The game logs one line per command tick:
+#   command: <red camp>[situation X kills N] company... | <blue camp>[situation X kills N] ...
+#
+# !! The field logged as "kills" is NOT kills inflicted. game.rs accumulates it as
+# !! round_kills_red / round_kills_blue counting the FALLEN BY TEAM -- the source
+# !! comment there literally calls them "red/blue cumulative deaths this round" --
+# !! so it is each camp's OWN death toll. The side with the BIGGER "kills" number is
+# !! the side that LOST more men. Never rank the two sides by this field; an earlier
+# !! version of this block did exactly that and printed the winner INVERTED.
+#
+# Outcome metric = total company strength (qiang du). It starts equal on both sides
+# (108 = 3 x 36) and only ever declines as that side takes losses, so higher = winning.
+# The Chinese markers are built from code points so this file stays ASCII.
+$KILLS = -join [char[]](0x51FB, 0x6740)          # ji sha -- own deaths, see note above
+$STR   = [char]0x5F3A + [char]0x5EA6             # qiang du
+$last = Select-String -Path $LOGERR -Pattern 'command: ' -ErrorAction SilentlyContinue |
+        Select-Object -Last 1
+if ($last) {
+    $m = [regex]::Matches($last.Line, "${KILLS}(\d+)")
+    # strengths come in the red-company block then the blue-company block; the log
+    # line separates the two camps with ' | '
+    $parts = $last.Line -split '\|'
+    $redS = 0; $blueS = 0
+    if ($parts.Count -ge 2) {
+        foreach ($x in [regex]::Matches($parts[0], "${STR}(\d+)")) { $redS += [int]$x.Groups[1].Value }
+        foreach ($x in [regex]::Matches($parts[1], "${STR}(\d+)")) { $blueS += [int]$x.Groups[1].Value }
+    }
+    $redK = 0; $blueK = 0
+    if ($m.Count -ge 2) {
+        $redK = [int]$m[0].Groups[1].Value
+        $blueK = [int]$m[1].Groups[1].Value
+    }
+    Write-Host ("  RED  strength={0,-4} own_dead={1}" -f $redS, $redK)
+    Write-Host ("  BLUE strength={0,-4} own_dead={1}" -f $blueS, $blueK)
+    if ($redS -gt $blueS) { $w = "RED (higher strength = fewer losses)" }
+    elseif ($blueS -gt $redS) { $w = "BLUE (higher strength = fewer losses)" }
+    else { $w = "DRAW" }
+    Write-Host ("  => winner: {0}" -f $w)
+} else {
+    Write-Host "  (no command line found in $LOGERR)"
+}
 Write-Host ""
 Write-Host "=== game: llmcmd lines ==="
 Select-String -Path $LOGERR -Pattern 'llmcmd' -ErrorAction SilentlyContinue |
