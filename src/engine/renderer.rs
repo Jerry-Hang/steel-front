@@ -9233,6 +9233,17 @@ impl Renderer {
         self.last_emissive_far = emissive_far;
         let cull_us = cull_start.elapsed().as_micros() as u64;
         self.last_cull_us = cull_us;
+        // RV3D_NO_TERRAIN_FIELD=1：A/B 用 —— 跳过**地形实例场**（近档 + 远档）的绘制。
+        //
+        // 目的（第 37 轮）：日志里 `visible=65536/65536 near=65536 far=0` 说明
+        // 65,536 个地形实例**每帧全部进管线、一个都没被剔除**。与其继续猜 near/far
+        // 的语义，不如直接量它值多少毫秒 —— 清零这两个计数即跳过对应 draw call。
+        // 与 `RV3D_NO_PROPS` / `RV3D_NO_SHADOW` 同类的对照开关。
+        let (near_count, far_count) = if std::env::var("RV3D_NO_TERRAIN_FIELD").is_ok() {
+            (0, 0)
+        } else {
+            (near_count, far_count)
+        };
         self.last_near_count = near_count;
         self.last_far_count = far_count;
 
