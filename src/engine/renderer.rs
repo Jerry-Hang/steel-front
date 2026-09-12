@@ -10762,6 +10762,60 @@ mod npc_visual_tests {
         assert!((t[2] + 0.01).abs() < 1e-3, "胸廓 z 应为 -0.01，实际 {}", t[2]);
     }
 
+    /// 身体计划的**退化缩放守卫**：逐段检查实例矩阵三个基向量的长度。
+    ///
+    /// 存在的理由（2026-09-12 第 28 轮）：把游戏截图放大 3× 后发现士兵渲染成
+    /// "一堆杂乱红方块 + 几条细长红色尖刺"。细到近乎 1px 的几何只可能来自**某一轴
+    /// 缩放接近 0**。这条测试直接在矩阵上量，不必看图猜、也不必起游戏。
+    ///
+    /// `model` 列主序：列 i 占 `4i..4i+3`，所以三个基向量长度 = 三条轴的缩放。
+    #[test]
+    fn soldier_parts_have_no_degenerate_scale() {
+        let (boxes, cyls, sphs) =
+            Renderer::soldier_part_matrices([0.0; 3], 0.0, [1.0; 4], 0.0, false, false);
+        let axis_len = |m: &[f32; 16], col: usize| -> f32 {
+            let o = col * 4;
+            (m[o] * m[o] + m[o + 1] * m[o + 1] + m[o + 2] * m[o + 2]).sqrt()
+        };
+        let mut bad: Vec<String> = Vec::new();
+        for (i, p) in boxes.iter().enumerate() {
+            let (sx, sy, sz) = (
+                axis_len(&p.model, 0),
+                axis_len(&p.model, 1),
+                axis_len(&p.model, 2),
+            );
+            println!(
+                "盒[{i}] scale=({sx:.3},{sy:.3},{sz:.3}) t=({:.2},{:.2},{:.2})",
+                p.model[12], p.model[13], p.model[14]
+            );
+            if sx < 0.01 || sy < 0.01 || sz < 0.01 {
+                bad.push(format!("盒[{i}]=({sx:.4},{sy:.4},{sz:.4})"));
+            }
+        }
+        for (i, p) in cyls.iter().enumerate() {
+            let (sx, sy, sz) = (
+                axis_len(&p.model, 0),
+                axis_len(&p.model, 1),
+                axis_len(&p.model, 2),
+            );
+            println!(
+                "柱[{i}] scale=({sx:.3},{sy:.3},{sz:.3}) t=({:.2},{:.2},{:.2})",
+                p.model[12], p.model[13], p.model[14]
+            );
+            if sx < 0.01 || sy < 0.01 || sz < 0.01 {
+                bad.push(format!("柱[{i}]=({sx:.4},{sy:.4},{sz:.4})"));
+            }
+        }
+        for p in sphs.iter() {
+            let _ = p;
+        }
+        assert!(
+            bad.is_empty(),
+            "存在退化缩放（某轴 ≈ 0，渲染出来就是尖刺）：{}",
+            bad.join(", ")
+        );
+    }
+
     #[test]
     fn soldier_gun_rotates_with_yaw() {
         let (base, _, _) =
