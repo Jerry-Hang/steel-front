@@ -42,6 +42,12 @@ New-Item -ItemType Directory -Force -Path $shotDir, $logs | Out-Null
 $logOut = Join-Path $logs "$Tag.log"
 $logErr = Join-Path $logs "$Tag.log.err"
 
+# Heartbeat for scripts/play_watchdog.ps1: a game process with a stale heartbeat means
+# the pwsh driving it died, and the watchdog then kills + releases. Any injected input
+# refreshes it, so a healthy run can never be mistaken for an abandoned one.
+$beat = "$env:TEMP\sf_play.beat"
+function Beat { Set-Content -Path $beat -Value (Get-Date -Format o) -ErrorAction SilentlyContinue }
+
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;
@@ -52,6 +58,9 @@ public class Pm {
   public static extern IntPtr FindWindowW(IntPtr cls, string title);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -106,18 +115,42 @@ function Pack-XY([int]$x, [int]$y) {
 }
 
 function Post-Move([IntPtr]$h, [int]$x, [int]$y) {
+    Beat
     return [Pm]::PostMessageW($h, [Pm]::WM_MOUSEMOVE, [IntPtr][Pm]::MK_LBUTTON, (Pack-XY $x $y))
 }
 
 function Post-LButton([IntPtr]$h, [bool]$down, [int]$x, [int]$y) {
+    Beat
     if ($down) { return [Pm]::PostMessageW($h, [Pm]::WM_LBUTTONDOWN, [IntPtr][Pm]::MK_LBUTTON, (Pack-XY $x $y)) }
     return [Pm]::PostMessageW($h, [Pm]::WM_LBUTTONUP, [IntPtr]0, (Pack-XY $x $y))
+}
+
+# Move the REAL cursor to a client-relative point.
+#
+# Posting WM_MOUSEMOVE alone does not work reliably here: the first one makes winit
+# treat the pointer as entering the window (get_pointer_move_kind -> Enter), which
+# calls TrackMouseEvent. The real cursor is not over the window (another app is in
+# front), so Windows posts WM_MOUSELEAVE right away -> CursorLeft -> the game clears
+# `dragging` and the look path goes dead until the next Enter, which consumes another
+# move. Net effect measured 2026-09-12: N posted steps always turned the camera by
+# exactly ONE step.
+#
+# TRYING THAT INSTEAD DID NOT WORK (measured 2026-09-12): driving the real cursor with
+# SetCursorPos produced ZERO CursorMoved events in the game log -- posting WM_LBUTTONDOWN
+# does not appear to make winit call SetCapture here, and the real moves went to whichever
+# window is in front. Kept only as a record so nobody re-tries it blind.
+function Set-ClientCursor([IntPtr]$h, [int]$x, [int]$y) {
+    $p = New-Object Pm+POINT
+    $p.X = $x; $p.Y = $y
+    [Pm]::ClientToScreen($h, [ref]$p) | Out-Null
+    return [Pm]::SetCursorPos($p.X, $p.Y)
 }
 
 # lParam carries the scan code in bits 16-23 because that is what winit turns
 # into PhysicalKey::Code. Bits 30/31 mark the previous-state and transition flags
 # on key up.
 function Post-Key([IntPtr]$h, [int]$vk, [int]$scan, [bool]$up) {
+    Beat
     $lp = [int64](1 -bor ($scan -shl 16))
     if ($up) { $lp = $lp -bor (1 -shl 30) -bor (1 -shl 31) }
     $msg = if ($up) { [Pm]::WM_KEYUP } else { [Pm]::WM_KEYDOWN }
@@ -146,7 +179,7 @@ try {
     Start-Process -FilePath $exe -WorkingDirectory $repo -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $logOut -RedirectStandardError $logErr | Out-Null
     Write-Host "launched; HARD CAP ${HardSec}s from now"
-    Start-Sleep -Seconds $WarmupSec
+    for ($w = 0; $w -lt $WarmupSec; $w++) { Beat; Start-Sleep -Seconds 1 }
     if ((Get-Date) - $started -gt [TimeSpan]::FromSeconds($HardSec)) { throw "hard cap hit during warmup" }
 
     $h = [IntPtr]::Zero
@@ -193,41 +226,58 @@ try {
     Write-Host "look: LMB down, prime, then ${TurnPx}px right in <=400px steps, LMB up"
     Post-LButton $h $true $cx $cy | Out-Null
     Start-Sleep -Milliseconds 150
+    Post-LButton $h $true $cx $cy | Out-Null
     Post-Move $h $cx $cy | Out-Null
     Start-Sleep -Milliseconds 250
     $camP = Read-Cam
     $yawP = if ($camP) { $camP.Yaw } else { [double]::NaN }
     Write-Host ("  primer applied; baseline yaw={0}" -f $yawP)
 
-    # winit dedups WM_MOUSEMOVE by position (event_loop.rs:1692,
-    # `cursor_moved = last_position != Some(position)`), so consecutive steps MUST
-    # post distinct coordinates or they are silently dropped. Because the drag path
-    # rebases last_cursor to the window centre after every event, posting
-    # (centre + cumulative) yields a look delta of exactly `step` each time.
-    # The cumulative offset has to stay inside the client rect, which caps a single
-    # sweep at about half the client width.
-    $maxOff = [int]($cw / 2) - 8
-    $want = [Math]::Min($TurnPx, $maxOff)
-    if ($want -ne $TurnPx) { Write-Host ("  (turn clamped to {0}px so the posted position stays inside the client rect)" -f $want) }
-    $off = 0
-    $rx = $want
-    while ($rx -ne 0) {
-        $st = [Math]::Max(-400, [Math]::Min(400, $rx))
-        $off += $st
-        Post-Move $h ($cx + $off) $cy | Out-Null
-        Start-Sleep -Milliseconds 60
-        $rx -= $st
+    # Each step posts the SAME offset from the centre -- NOT an accumulating one.
+    #
+    # After every drag-path event the game warps the pointer to the window centre and
+    # sets last_cursor to that centre, so the delta the game actually sees is
+    # (posted - centre), always. An accumulating offset made step 2 arrive as 800px,
+    # which exceeds MAX_LOOK_DELTA_PX (512) and got discarded as a teleport -- which
+    # is exactly why a 1200px request and a 400px request both turned the camera by
+    # one step. Measured 2026-09-12: 400px -> 56.6 deg, predicted 400*0.002484 rad
+    # = 56.93 deg (the `cam:` log prints DEGREES).
+    #
+    # The 1px alternation only defeats winit's position dedup
+    # (`cursor_moved = last_position != Some(position)`); it costs 1px per step.
+    #
+    # Every step also RE-ASSERTS the button immediately before its move, posted back
+    # to back so nothing can land between them. Why: the first posted WM_MOUSEMOVE
+    # makes winit treat the pointer as entering the window, which calls
+    # TrackMouseEvent. The REAL cursor is not over the window (another app is in
+    # front), so Windows posts WM_MOUSELEAVE immediately -> winit emits CursorLeft ->
+    # main.rs clears `dragging` ("cursor left the window, stop dragging"). Later
+    # moves still arrive and are still delivered, but the look is skipped because
+    # `dragging` is false. Verified with a temporary input-dbg patch: 4 events
+    # received at exactly the posted coordinates, all with drag=false after the first.
+    $step = 400
+    $n = [Math]::Max(1, [int][Math]::Round($TurnPx / [double]$step))
+    $totalPx = $n * $step
+    Write-Host ("  look: {0} step(s) of {1}px = {2}px total" -f $n, $step, $totalPx)
+    for ($i = 0; $i -lt $n; $i++) {
+        $j = $i % 2
+        Post-LButton $h $true ($cx + $step + $j) $cy | Out-Null
+        Post-Move $h ($cx + $step + $j) $cy | Out-Null
+        # 300ms > the 150ms recenter window: at 90ms every other step landed inside
+        # `recenter_pending_until` and was swallowed (last_cursor := px; return).
+        Start-Sleep -Milliseconds 300
     }
     Start-Sleep -Milliseconds 200
-    Post-LButton $h $false ($cx + $off) $cy | Out-Null
+    Post-LButton $h $false ($cx + $step) $cy | Out-Null
     Start-Sleep -Milliseconds 1400
     $cam1 = Read-Cam
     $yaw1 = if ($cam1) { $cam1.Yaw } else { [double]::NaN }
     $dYaw = $yaw1 - $yawP
-    # yaw -= dx * mouse_sens, mouse_sens = 0.0005 + sensitivity*0.002 (game.rs::sensitivity_rads)
+    # yaw -= dx * mouse_sens, mouse_sens = 0.0005 + sensitivity*0.002 (game.rs::sensitivity_rads);
+    # the `cam:` log is in DEGREES, so convert before comparing.
     $sens = 0.0005 + 0.992 * 0.002
-    $expect = -1.0 * $want * $sens
-    Write-Host ("cam after look: yaw={0}  (measured delta {1:+0.00;-0.00;0.00}, expected {2:+0.00;-0.00;0.00} rad)" -f $yaw1, $dYaw, $expect)
+    $expect = -1.0 * $totalPx * $sens * 180.0 / [Math]::PI
+    Write-Host ("cam after look: yaw={0}  (measured {1:+0.0;-0.0;0.0} deg, expected {2:+0.0;-0.0;0.0} deg)" -f $yaw1, $dYaw, $expect)
 
     # --- walk forward -----------------------------------------------------
     Write-Host "walk forward ${WalkMs}ms (W)"

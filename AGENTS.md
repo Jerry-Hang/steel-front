@@ -214,9 +214,30 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - **非捕获态有拖拽转视角路径**（`dragging` 由左键按下置位），源码注释称之为"冒烟在无焦点环境下的
   瞄准路径"。该路径每个事件后把真实光标 warp 回窗口中心并把 `last_cursor` 设为该中心。
 - `MAX_LOOK_DELTA_PX = 512`（绝对位置单次位移上限，超过视为光标传送，跳过并重基准）；
-  `MAX_RAW_LOOK_DELTA = 1024`（raw 单事件上限）。**注入必须分块 ≤400px/事件**，否则被守卫丢弃。
-- **winit 按位置去重 `WM_MOUSEMOVE`**（`cursor_moved = last_position != Some(position)`）：
-  用 `PostMessage` 推进视角时，**连续两次必须投不同坐标**，否则第 2 次起被静默丢弃。
+  `MAX_RAW_LOOK_DELTA = 1024`（raw 单事件上限）。
+
+### ⭐ 无焦点视角注入配方（2026-09-12 实测标定，误差 0.3%）
+
+`scripts/pm_play.ps1` 已实现下面四条，**照抄即可，别再重推**。缺任何一条都会静默失效：
+
+1. **必须用 `PostMessage`，不能用 `SendInput`**（理由见上）。
+2. **每一步前重新按下左键**（`WM_LBUTTONDOWN`），然后**紧接着**投移动，两条消息背靠背。
+   原因：post 的第一次移动会让 winit 判定指针"进入窗口"并调 `TrackMouseEvent`；而真实光标
+   并不在窗口上，于是 Windows 立刻投递 `WM_MOUSELEAVE` → winit 发 `CursorLeft` →
+   `main.rs` 把 `dragging` 置回 false。**移动照样到达、照样被日志记录，但视角被跳过。**
+3. **每一步投的偏移都必须是"窗口中心 + step"，不能累加**。拖拽路径每个事件后把 `last_cursor`
+   重设回中心，所以游戏看到的增量恒为 `posted - centre`；累加会让第 2 步变成 800px，
+   **超过 `MAX_LOOK_DELTA_PX=512` 被当传送丢弃**（这正是"请求 1200px 与 400px 都只转一步"的原因）。
+   步长取 400，**连续两次坐标要差 1px**，否则被 winit 的位置去重丢掉
+   （`cursor_moved = last_position != Some(position)`）。
+4. **步间隔必须 > 150ms（用 300ms）**。捕获路径会给 `recenter_pending_until` 设一个 150ms 窗口，
+   落在窗口内的 `CursorMoved` 会被吞掉（只更新基准、不转视角）。90ms 间隔时每隔一步就被吞一次。
+
+- **实测标定**：1200px（3×400）→ 实测 **-170.30°**，模型预测 **-170.79°**，误差 0.3%。
+  模型 = `yaw -= dx * (0.0005 + sensitivity*0.002)`（`game.rs::sensitivity_rads`），
+  且 **`cam:` 日志的 yaw/pitch 单位是度**（内部弧度），换算别忘 `*180/PI`。
+- **`SetCursorPos` 驱动真实光标走不通**（2026-09-12 实测）：那样做游戏收到 **0 个**
+  `CursorMoved`。posting `WM_LBUTTONDOWN` 并不会让 winit 调 `SetCapture`，真实移动都给了前面那个窗口。
 
 ### 键位与方向
 - **键码一律用 winit 0.30 `KeyCode` 枚举序号**（KeyW=41 / KeyS=37 / KeyA=19 / KeyD=22 /
@@ -314,6 +335,14 @@ powershell -ExecutionPolicy Bypass -File scripts\run_gameplay_smoke.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
 # 多键必须走 -Command，-File 会把 9,9 合并成一个 "9,9"
 powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
+# 无焦点接管一局（PostMessage 注入：不抢前台、不抓光标、不锁指针）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm_play.ps1 -Tag demo1 -TurnPx 1200 -WalkMs 1500
+# 输入路由诊断（报游戏线程焦点，并把同一按键用 SendInput / PostMessage 各投一次）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\input_probe.ps1
+# 输入归还校验（杀进程 + 解除 ClipCursor + 复核后给 OK/FAIL）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
+# 心跳看门狗：**常驻**后台即可，不要每次运行临时 arm 一个（见教训 19）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
 ```
 
 ⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
@@ -348,58 +377,53 @@ powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
 1. **冒烟闸门是红的（kills=0）** — 2026-09-12 复现：28 次 `cam: yaw=` 读数**全为 0.0**，
    注入未生效，与代码回归无关。**lead**：`gameplay_smoke_win.py` 走 `SendInput`，
    而本机 `SendInput` 送不到游戏（见铁律 C）。**改走 `PostMessage` 即可**——
-   2026-09-12 已实测 `PostMessage` 键盘注入能改变游戏状态（`weapons: 切枪 0 -> 1`）。
-2. **`PostMessage` 视角注入幅度未标定** — 键盘已确定性可用；视角能改（`yaw 0→0.4`、
-   `pitch 0→-1.2`）但幅度不随投递距离线性变化（1200px 与 400px 同得 0.4）。
-   **lead**：拖拽路径只认非捕获态；`last_cursor` 的基准被游戏自己的回中 warp 反复改写，
-   且真实光标事件会混入。已排除 winit 位置去重（已改为累加坐标，无改善）。
-   **下一步**：先用 `SetCursorPos` 驱动真实光标 + `PostMessage` 置 `dragging`，
-   对比"投递坐标"与"游戏实收增量"。
-3. **`PrintWindow` 截图不反映相机旋转** — `yaw` 变了 0.4 rad 而世界画面逐像素几乎不变
-   （残差 0.04，最佳 x-shift = 0），但同一次截图里枪模确实换成了 AK-104（说明帧是活的）。
-   **lead**：非前台/被遮挡的窗口 DWM 可能不合成新表面；此时 `cycle_us` 从 10000 掉到 1000、
-   `render_us` 从 7000 掉到 400（`wait_fence_us` 消失 → 垂直同步不再阻塞，循环跑到 1000fps）。
-   **未验证**是截图管线还是渲染本身的问题。
-4. **PT 崩溃 `0xC0000005`** — `pt_enable=false` 现状；设 true 一启动即崩，无法截图验收。
+   无焦点视角注入配方已标定到 0.3% 误差（铁律 C），照抄 `scripts/pm_play.ps1` 的四条即可。
+2. **`PrintWindow` 对非前台窗口返回冻结帧** — 2026-09-12 定案：注入 1200px（=170.3° 转向，
+   游戏日志为证）之后，前后两张截图的**世界层残差 0.03、最佳 x-shift = 0**，即画面完全没变。
+   同期 `cycle_us` 从 10000 掉到 1000、`render_us` 7000→400（`wait_fence_us` 消失，垂直同步不再
+   阻塞）——窗口不是前台时 DWM 似乎不再为它合成新表面。
+   **结论：截图的"没变化"不能用来判断输入没生效；以游戏自己的日志为准。**
+   **lead**：要截图取证就把窗口置前再截（`cap_safe.ps1` 那条路），否则别用截图当判据。
+3. **PT 崩溃 `0xC0000005`** — `pt_enable=false` 现状；设 true 一启动即崩，无法截图验收。
    **lead**：崩点在 `pt_set_scene_markers` 返回之后（每帧 PT 派发 / 主命令缓冲 / blit 到 swapchain）；
    候选 = AS 显存与尺寸、dispatch 与 scene rebuild 读写竞争、push constant 布局。
    判据：用 Windows 事件日志的出错模块区分驱动侧（`nvoglv64.dll`）与应用侧。
-5. **`config.rs` 不读 `pt_enable` / `rt_enable`** → 配置文件与 `RV3D_PT_LIVE=1` 都开不了 PT。
+4. **`config.rs` 不读 `pt_enable` / `rt_enable`** → 配置文件与 `RV3D_PT_LIVE=1` 都开不了 PT。
    **lead**：`main.rs` 的 `if config.pt_enable { init_pt_resident() }` 分支，resident 从未建。
-6. **玩家可能站在 GLB 楼体内部** — `scale = max(w/gw, d/gd)` 的取舍导致视觉体大于碰撞盒。
+5. **玩家可能站在 GLB 楼体内部** — `scale = max(w/gw, d/gd)` 的取舍导致视觉体大于碰撞盒。
    **lead**：水平取 max、竖直单独处理，或给建筑留面朝街道的退距；需一次实测校准。
-7. **`FLOOR_H` 常量分叉** — `city.rs` / `build.rs` = 3.15，Blender 侧建筑 3.4、`panel_block` 2.9
+6. **`FLOOR_H` 常量分叉** — `city.rs` / `build.rs` = 3.15，Blender 侧建筑 3.4、`panel_block` 2.9
    （碰撞核按 3.15、网格按 3.4）。**lead**：把 `gen_props.py` 层高统一成 3.15 后重导出。
-8. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
+7. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
    `install_guns.py` 仍 SKIP。需人工删掉重叠枪身后装为 `svd12`。
-9. **D12 士兵远距离读作蓝色平板**，近距四肢体积感未验证。**lead**：`RV3D_NPC_SCALE=3.5`
+8. **D12 士兵远距离读作蓝色平板**，近距四肢体积感未验证。**lead**：`RV3D_NPC_SCALE=3.5`
    未能放大到可判读（仍在 100m 外）；试近距离特写，或给四肢加最小屏幕空间粗细。
-10. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
-11. **mesh 着色器布局未过严格 `spirv-val`**（Workgroup Offset 布局）。
+9. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
+10. **mesh 着色器布局未过严格 `spirv-val`**（Workgroup Offset 布局）。
     **lead**：开 `RV3D_VALIDATION=1` 做 RT 调试前应先修。
-12. **PT 512 盒上限静默截断**（实测 `marker=547 > PT_MAX_BOXES=512`）。
+11. **PT 512 盒上限静默截断**（实测 `marker=547 > PT_MAX_BOXES=512`）。
     **lead**：提容量或按视锥裁剪。相关：`PT_SUN_AMBIENT` 无消费者、天空/环境项硬编在 GLSL；
     曝光 0.2 硬编在 `main.rs`，曝光/弹跳/spp 都未进 `config.rs` 与设置面板。
-13. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
+12. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
-14. **`MAX_RIGID_BODIES=640` vs `MAX_AI=768`** 溢出静默丢弃（release 下 `debug_assert` 被优化掉）。
-15. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
+13. **`MAX_RIGID_BODIES=640` vs `MAX_AI=768`** 溢出静默丢弃（release 下 `debug_assert` 被优化掉）。
+14. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
     快照的**位置修正应用**与**实体插值渲染消费**均未接线）。
-16. **道具是否进阴影 pass 未确认**（不画则道具没有投影）—— 提出后未见结案，也未见再提。
-17. **阴影 `normal_bias` 已在 uniform 但未使用** —— 需要更干净的阴影边界时做坡度 bias。
-18. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（引用 naga 导致 test 目标编译失败）——
+15. **道具是否进阴影 pass 未确认**（不画则道具没有投影）—— 提出后未见结案，也未见再提。
+16. **阴影 `normal_bias` 已在 uniform 但未使用** —— 需要更干净的阴影边界时做坡度 bias。
+17. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（引用 naga 导致 test 目标编译失败）——
     待清理或正式入库。
-19. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响；
+18. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响；
     手榴弹 AoE 不结算障碍；切枪无动画（纯计时器）。
-20. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
+19. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。
-21. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
+20. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
     kill feed 仅英文（5×7 位图字体无中文）、不分击杀者名字；第一人称枪模动画 / 弹孔贴花未做。
-22. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
-23. **GLB 加载器忽略 `bufferViews[].byteStride`**（交错布局会读错）。
+21. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
+22. **GLB 加载器忽略 `bufferViews[].byteStride`**（交错布局会读错）。
     **lead**：现导出器是一 accessor 一 bufferView（密集），暂不受影响。
-24. **仓库卫生**：见上节（349 个 scripts 文件、根目录散落日志、`.gitignore` 注释乱码）。
+23. **仓库卫生**：见上节（349 个 scripts 文件、根目录散落日志、`.gitignore` 注释乱码）。
 
 ---
 
@@ -451,7 +475,11 @@ powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
   3. **本机 `SendInput` 送不到游戏，`PostMessage` 可以**（实测：6/6 被系统接受但游戏零响应；
      前台窗口是浏览器）。`PostMessage` 键盘注入能确定性改变游戏状态。**这与用户 09-03 的
      原始指示一致，是我没先读文档。**
-- 遗留：视角注入幅度未标定、`PrintWindow` 不反映旋转（见【未结案清单】1–3）。
+- **追加（同日）**：**无焦点视角注入已标定到 0.3% 误差**（配方见铁律 C）——
+  1200px（3×400）实测 **-170.30°**，模型预测 **-170.79°**。查明四个叠加的静默失效原因
+  （teleport 守卫 / `recenter_pending_until` 150ms 窗口 / `dragging` 被 `CursorLeft` 清掉 /
+  winit 位置去重），并定案 `PrintWindow` 对非前台窗口返回冻结帧。
+- 遗留：冒烟闸门改走 PostMessage（未结案 1）；截图的限制见未结案 2。
 - 本文件同时重写：200KB → 本版，删除了 WSL2 全量内容、5 处逐字重复的方法论段落、
   以及"错误版铁律与更正版并存"的段落（阴影深度映射、mesh 冻结决策、SendInput 断言）。
 
@@ -590,6 +618,14 @@ powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
     而"投影跨度""截图观感"都能被误读。
 18. **"键没生效"这类结论要先排除自己**：`cmd.exe` 传数组 `-File ... -Keys 82,50` 会被并成 `8250`，
     必须 `-Command "& script.ps1 -Keys @(82,50)"`。
+19. **看门狗不要按"启动后睡 N 秒"来 arm。** 2026-09-12 这个错误犯了两次：早先某次运行留下的看门狗
+    在新一次运行中途到期，把游戏杀了，现象伪装成"窗口没出现"，白查了两轮。
+    **正确做法 = 心跳式**（`scripts/play_watchdog.ps1`）：只在"游戏进程活着 **且** 心跳文件过期"时才动手，
+    于是常驻也不会误杀正常会话。被守护的脚本负责在每次投递输入时刷新心跳。
+20. **一件事卡住两轮以上，就该去改代码加埋点，而不是继续推理。** 视角注入的幅度问题连推了四轮
+    （去重、累加、光标驱动……全落空），加一行 `log::info!` 打出游戏实收的 `px/py/last/dragging`
+    之后，四个真实原因（teleport 守卫 / recenter 窗口 / dragging 被 CursorLeft 清掉 / 位置去重）
+    在同一份日志里一次全暴露。**临时埋点验完就删**，不要把诊断代码留在库里。
 
 ---
 
