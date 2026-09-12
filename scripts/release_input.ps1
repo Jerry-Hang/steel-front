@@ -127,10 +127,19 @@ if ($Quiet) {
     Write-Host ("RELEASE " + $(if ($ok) { "OK" } else { "FAILED" }))
 } else {
     Write-Host "=== input control handback ==="
-    Write-Host ("  {0,-16} {1}" -f "process",   "$killNote   alive_now=$alive")
-    Write-Host ("  {0,-16} {1}" -f "clip_rect", "$($clipBefore.Rect) -> $($clipAfter.Rect)$(if ($clipBefore.Confined) { '   (was CONFINED, cleared)' })")
-    Write-Host ("  {0,-16} {1}" -f "cursor",    "visible before=$visible0 after=$visible1   (ShowCursor best-effort, $fixed correction(s); thread-scoped)")
-    Write-Host ("  {0,-16} {1}" -f "verdict",   $(if ($ok) { "OK - machine handed back" } else { "FAILED - see items above, inspect manually" }))
+    # 2026-09-12 round 127: mark EACH item OK/XX. Previously only a generic FAILED was printed,
+    # and I misread the clip_rect line as the failure for four rounds (the real one was cursor).
+    # Verdict is `$ok = ($alive -eq 0) -and $clipOk -and ($visible1 -eq $true)`;
+    # the output must show WHICH item failed.
+    # NOTE: keep this file pure ASCII -- Windows PowerShell 5.1 reads BOM-less .ps1 as ANSI,
+    # and non-ASCII inside string literals breaks quote pairing (lesson 7).
+    $mAlive = if ($alive -eq 0) { "OK " } else { "XX " }
+    $mClip  = if ($clipOk) { "OK " } else { "XX " }
+    $mVis   = if ($visible1 -eq $true) { "OK " } else { "XX " }
+    Write-Host ("  [{0}] {1,-13} {2}" -f $mAlive, "process", "$killNote   alive_now=$alive")
+    Write-Host ("  [{0}] {1,-13} {2}" -f $mClip, "clip_rect", "$($clipBefore.Rect) -> $($clipAfter.Rect)$(if ($clipBefore.Confined) { '   (was CONFINED, cleared)' })")
+    Write-Host ("  [{0}] {1,-13} {2}" -f $mVis, "cursor", "visible before=$visible0 after=$visible1   (ShowCursor best-effort, $fixed correction(s); thread-scoped, external query unreliable -- informational only)")
+    Write-Host ("  {0,-16} {1}" -f "verdict", $(if ($ok) { "OK - machine handed back" } else { "FAILED - see the item marked XX above" }))
 }
 
 exit $(if ($ok) { 0 } else { 1 })
