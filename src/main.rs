@@ -599,8 +599,14 @@ impl GameApp {
 
     /// 更新逻辑（每帧调用）
     fn update(&mut self) {
+        // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。
+        let npc_cam = std::env::var("RV3D_NPC_CAM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
         // RV3D_CAM=fly:x,y,z:yaw_deg,pitch_deg：调试固定机位（地图/场景检查用）
-        if self.cam_override.is_some() {
+        // 两个变量都给时**必须一起进这个分支**（否则 cam_override 为 None 时分支根本不跑），
+        // 且 NPC 机位要在 cam_override **之后**应用才不会被覆盖。
+        if self.cam_override.is_some() || npc_cam.is_some() {
             // 仍推进帧时间/HUD FPS（避免调试机位下 HUD 恒 0 显像为“卡死”）
             let now = Instant::now();
             let dt = now.duration_since(self.last_frame).as_secs_f32();
@@ -610,28 +616,43 @@ impl GameApp {
             }
             self.anim_clock += dt.min(0.1);
             self.camera.mode = CameraMode::Flight;
-            // RV3D_NPC_CAM=<i>：把调试机位**吸附到第 i 个 NPC 的斜前方**，由程序算坐标。
-            // 存在的理由：我按 `RV3D_NPC_POS` 打出的坐标手算过 12 次机位，全部落在楼体里
-            // （见 docs/PROGRESS.md 第 8–15 轮）。这些坐标程序本来就有 —— 该由程序算，
+            // RV3D_NPC_CAM=<i>：把调试机位**吸附到第 i 个 NPC 的斜前方**，坐标由程序算。
+            // 存在的理由：我按 `RV3D_NPC_POS` 打出的坐标手算过 13 次机位，全部失败
+            // （见 docs/PROGRESS.md 第 8–16 轮）。这些坐标程序本来就有 —— 该由程序算，
             // 不该由我猜。`pitch` 取正 = 低头（与鼠标 dy>0 同号，见铁律 C）。
-            if let Some(i) = std::env::var("RV3D_NPC_CAM")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-            {
-                if let Some(n) = self.game.npcs.get(i) {
-                    self.camera.set_flight_pos(glam::Vec3::new(
-                        n.position[0],
-                        n.position[1] + 1.6,
-                        n.position[2] + 4.0,
-                    ));
-                    self.camera.yaw = 0.0; // forward = -Z ⇒ 正对 4m 外的 NPC
-                    self.camera.pitch = 10.0_f32.to_radians();
-                }
-            }
             if let Some((p, yaw, pitch)) = self.cam_override {
                 self.camera.set_flight_pos(p);
                 self.camera.yaw = yaw;
                 self.camera.pitch = pitch;
+            }
+            // 🔴 NPC 机位**必须放在 cam_override 之后**：否则同时给 `RV3D_CAM` 时，
+            // 上面那段 fly: 会把它整个覆盖掉 —— 第 16 轮就是这么白跑一次的
+            // （无告警、没报错，画面一直是 fly: 那个远景）。
+            if let Some(i) = npc_cam {
+                // 🔴 本分支的 early-return **早于** `update()` 里调用 `on_any_key()` 的
+                // autostart 段 ⇒ 不补这一步，游戏会停在菜单态、**NPC 永远不会生成**。
+                // 13 次取景失败里有相当一部分就是这个（我一直在对着没有士兵的世界摆机位）。
+                if self.game.state() == GameState::StartMenu {
+                    self.game.on_any_key(&self.camera.position());
+                }
+                match self.game.npcs.get(i) {
+                    Some(n) => {
+                        self.camera.set_flight_pos(glam::Vec3::new(
+                            n.position[0],
+                            n.position[1] + 1.6,
+                            n.position[2] + 4.0,
+                        ));
+                        self.camera.yaw = 0.0; // forward = -Z ⇒ 正对 4m 外的 NPC
+                        self.camera.pitch = 10.0_f32.to_radians();
+                    }
+                    // 找不到**必须**打日志。本轮的核心教训就是"静默失败"：相机没生效、
+                    // NPC 不存在、pitch 反了，三者都只有画面能看出来，而画面又要靠它们
+                    // 才能取到 —— 于是必须让失败自己浮出来。
+                    None => log::warn!(
+                        "npc_cam: 第 {i} 个 NPC 不存在（当前 {} 个），机位未覆盖",
+                        self.game.npcs.len()
+                    ),
+                }
             }
             // HUD 那行大号青色 FPS 由 `game.update()` 里的滑动窗口算出（game.rs
             // `self.hud.fps = frames / window_secs`），而本分支直接 return、不跑玩法帧，
