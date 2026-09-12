@@ -10,13 +10,18 @@
 #
 # How it decides
 # --------------
-# A running player (pm_play.ps1) touches $Beat every couple of seconds. The watchdog
-# only acts when BOTH hold:
-#   * a steel-front process exists, and
-#   * the heartbeat is missing or older than $StaleSec
-# i.e. a game is up but nobody is driving it any more -- the pwsh that owned it died,
-# hung, or was killed. Then it kills the game and runs release_input.ps1, which
-# VERIFIES the handback rather than assuming it.
+# A running player (pm_play.ps1) creates $Beat and refreshes it on every injected input.
+# The watchdog only acts when ALL THREE hold:
+#   * a steel-front process exists,
+#   * a heartbeat file EXISTS (i.e. a harness run claimed that game), and
+#   * it is older than $StaleSec
+# i.e. a harness-driven game is up but nobody is driving it any more -- the pwsh that
+# owned it died, hung, or was killed. Then it kills the game and runs release_input.ps1,
+# which VERIFIES the handback rather than assuming it.
+#
+# The "file must exist" clause is load-bearing: without it the watchdog would also kill
+# a game the USER started by hand, ~$StaleSec after it launched. It did exactly that
+# shape of bug once already (see AGENTS.md lesson 19) -- do not relax this.
 #
 # Run it once per session as a background job; it is safe to leave running.
 param(
@@ -32,15 +37,17 @@ while ($true) {
     $g = Get-Process -Name steel-front -ErrorAction SilentlyContinue
     if (-not $g) { continue }
 
-    $fresh = $false
-    if (Test-Path $Beat) {
-        $age = (Get-Date) - (Get-Item $Beat).LastWriteTime
-        if ($age.TotalSeconds -lt $StaleSec) { $fresh = $true }
-    }
-    if ($fresh) { continue }
+    # The heartbeat file is BOTH "a harness run claimed this game" and "that run is
+    # still alive". Requiring it to exist is what keeps the watchdog from touching a
+    # game the USER started by hand: no harness run, no beat file, no interference.
+    # (An earlier revision only checked staleness, which would have killed a manually
+    # launched game ~30s in. Fixed 2026-09-12 before it could do that.)
+    if (-not (Test-Path $Beat)) { continue }
+    $age = (Get-Date) - (Get-Item $Beat).LastWriteTime
+    if ($age.TotalSeconds -lt $StaleSec) { continue }
 
-    Write-Host ("watchdog FIRING at {0}: game pid(s) {1} alive but heartbeat stale -> kill + release" -f `
-        (Get-Date -Format HH:mm:ss), (($g | ForEach-Object { $_.Id }) -join ','))
+    Write-Host ("watchdog FIRING at {0}: game pid(s) {1} alive but heartbeat stale {2:N0}s -> kill + release" -f `
+        (Get-Date -Format HH:mm:ss), (($g | ForEach-Object { $_.Id }) -join ','), $age.TotalSeconds)
     Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 400
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo "scripts\release_input.ps1")

@@ -318,6 +318,9 @@ catch {
 }
 finally {
     Kill-Game
+    # Release the claim: with no beat file present the watchdog will not touch a game
+    # that someone starts by hand later.
+    Remove-Item $beat -ErrorAction SilentlyContinue
     Remove-Item Env:RV3D_AUTOSTART -ErrorAction SilentlyContinue
     Remove-Item Env:RV3D_STRESS_AI -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 400
