@@ -21,18 +21,20 @@ setlocal
 cd /d "%~dp0"
 
 echo [steel-front] touching build inputs...
-if exist build.rs         copy /b build.rs         +,, >nul 2>&1
-if exist build_spv_rt.rs  copy /b build_spv_rt.rs  +,, >nul 2>&1
+REM ---------------------------------------------------------------------------
+REM Touching is done with PowerShell, NOT with cmd's `copy /b FILE +,,` trick.
+REM That trick is a trap: with a quoted path it does NOT merely update the
+REM timestamp -- cmd resolves the destination from the source basename in the
+REM CURRENT directory, so `copy /b "assets\x.spv" +,,` silently CREATES a stray
+REM copy `x.spv` in the repo root. (Measured 2026-09-12: 7 junk files.)
+REM The lines below only set LastWriteTime and never write file contents.
+REM ---------------------------------------------------------------------------
+if exist build.rs         powershell -NoProfile -Command "(Get-Item 'build.rs').LastWriteTime = Get-Date" >nul 2>&1
+if exist build_spv_rt.rs  powershell -NoProfile -Command "(Get-Item 'build_spv_rt.rs').LastWriteTime = Get-Date" >nul 2>&1
 
-REM Any .spv under assets/ is read from disk AT RUNTIME by the engine.
-REM If they changed, the build must re-run so the embedded copy stays in sync.
-REM
-REM NOTE: this must be a per-file loop. `copy /b assets\*.spv +,,` is WRONG --
-REM with a wildcard, copy treats the extra names as additional SOURCES and tries
-REM to write, which can clobber the shader files. One file per iteration only.
-if exist assets\*.spv (
-    for %%F in (assets\*.spv) do copy /b "%%F" +,, >nul 2>&1
-)
+REM assets\*.spv are read from disk AT RUNTIME by the engine, so they do NOT
+REM need touching for correctness. AGENTS.md only mandates the two files above.
+REM They are listed here for visibility, deliberately NOT touched.
 
 echo [steel-front] building (release)...
 cargo build --release
