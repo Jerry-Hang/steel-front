@@ -530,6 +530,32 @@ impl WorldMarker {
                     ob.half_d * 2.0,
                 )),
             tint: {
+                // 🔴 `RV3D_DEBUG_KIND=1`：按 `ObstacleKind` 给六种纯色，**让几何自报家门**。
+                //
+                // 存在理由（2026-09-12）：为画面正中一组薄板连猜三个假设 ——
+                // 柱廊檐梁 / 退化几何 / 广场长椅 —— **全部落空**，而二分只查出"它是 marker"。
+                // **读代码猜类别已被证明无效（本会话第 4 次）**，所以改用这一招：
+                // 关掉这个开关就是正常画面，打开则一眼看出那片薄板属于哪一类，
+                // 再回 `city.rs` 找**那一个**调用点，不必再猜。
+                if std::env::var("RV3D_DEBUG_KIND").is_ok() {
+                    let c = match ob.kind {
+                        ObstacleKind::Wall => [1.0, 0.0, 0.0],      // 红
+                        ObstacleKind::Block => [0.0, 1.0, 0.0],     // 绿
+                        ObstacleKind::Barrier => [0.0, 0.0, 1.0],   // 蓝
+                        ObstacleKind::Tree => [1.0, 1.0, 0.0],      // 黄
+                        ObstacleKind::Building => [1.0, 0.0, 1.0],  // 品红
+                        ObstacleKind::Ruin => [0.0, 1.0, 1.0],      // 青
+                    };
+                    return WorldMarker {
+                        model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, ob.y, ob.z))
+                            * glam::Mat4::from_scale(glam::Vec3::new(
+                                ob.half_w * 2.0,
+                                ob.half_h * 2.0,
+                                ob.half_d * 2.0,
+                            )),
+                        tint: [c[0], c[1], c[2], ob.shape.tag()],
+                    };
+                }
                 let mut t = match ob.tint {
                     Some(c) => [c[0], c[1], c[2], 1.0],
                     None => obstacle_material_tint(ob.kind, ob.x, ob.z),

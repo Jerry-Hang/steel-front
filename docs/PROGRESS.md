@@ -39,6 +39,58 @@
 ---
 
 
+# ✅ 第⑥条薄板定案：**`ObstacleKind::Building`**（2026-09-12 第 82 轮）
+
+## 新诊断工具：按障碍种类着色
+
+新增 `RV3D_DEBUG_KIND=1`（`renderer.rs::WorldMarker::for_obstacle`）：
+打开后每种 `ObstacleKind` 给一种纯色 —— **让几何自己报出属于哪一类**，不必再读代码猜。
+
+| 色 | 种类 |
+|---|---|
+| 红 | `Wall` |
+| 绿 | `Block` |
+| 蓝 | `Barrier` |
+| 黄 | `Tree` |
+| **品红** | **`Building`** |
+| 青 | `Ruin` |
+
+**关掉即恢复原画面（默认无影响）。**
+
+## 一次命中
+
+`screenshots/center_kind.png`：**画面正中那组薄板全是品红色 ⇒ `ObstacleKind::Building`。**
+
+**顺带纠正两处我先前认错的**：
+- 准星后面那根灰柱 = **绿 = `Block`**；
+- 两侧那些被我当作"岩石"的黄色体 = **黄 = `Tree`**。
+
+## 为什么这一招值得留下
+
+为这片薄板，我连猜三个假设（**柱廊檐梁 / 退化几何 / 广场长椅**）**全部落空**，
+而二分只查出"它是 marker"。**读代码猜类别，在本会话已被证明无效 4 次。**
+`RV3D_DEBUG_KIND` 一次 run 就把范围从"某处城市几何"缩到
+**"`city.rs` 里 `ObstacleKind::Building` 的调用点"**。
+
+**⇒ 这条值得进 `AGENTS.md`：定位"某片城市几何是什么"时，先按 kind 着色，不要先读代码。**
+
+## 下一步（判据已明确）
+
+在 `plaza()` 及其邻居里列 `ObstacleKind::Building` 的调用，逐个数参数找**形态是"薄板/槽"**的那一个。
+已知候选（`plaza()` 内）：
+
+```rust
+c.deco(Part::new(Building, cx, cz + side*12.5, 25.0, 1.5, 4.95, 5.55, CONCRETE_DARK)); // 檐梁 25x1.5m @5m
+c.push(Part::new(Building, cx, cz, 9.0, 9.0, UNDER_GROUND, 0.62, GRANITE));            // 喷泉池缘 9x9x0.62（仅 !monument）
+```
+
+**但要先回答一个几何问题**：画面里的品红是**一个"阶梯槽"**（水平面 + 竖直面 + 又一水平面），
+而上面两个候选**都不是这个形状** ⇒ **很可能来自 `plaza()` 之外的调用**
+（记得 `plaza()` 只对 `block_role=='P'` 的 4 个街区生成，而出生点可能不止看到一处）。
+
+**用同一招继续二分**：`RV3D_NO_PROPS=1` + `RV3D_DEBUG_KIND=1` 同时开，排除 GLB 干扰后再看形状。
+
+
 ## ❌ 第⑥条薄板：我的第三个假设（长椅）也错了，改动已回退（2026-09-12 第 82 轮）
 
 ### 做了什么
