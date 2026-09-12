@@ -4610,6 +4610,25 @@ impl Renderer {
                     self.npc_sph_parts.len(),
                     MAX_NPC_INSTANCES
                 );
+                // 判据（第 25 轮）：把**前 3 段盒体段实例矩阵的平移分量**打出来，与
+                // `visuals[0].pos + 设计偏移` 比对。设计值（见 `soldier_part_matrices`）：
+                // 段0/1 = 左右脚，中心 = pos + (∓0.09, +0.05, +0.02)。
+                //   相等 ⇒ 矩阵组装正确，问题在槽位/绘制侧；
+                //   不等 ⇒ 矩阵组装错了，`soldier_part_matrices` 的输出没落在 pos 上。
+                if let Some(v0) = visuals.first() {
+                    for (k, part) in self.npc_box_parts.iter().take(3).enumerate() {
+                        log::info!(
+                            "npcvis: v0.pos=({:.1},{:.1},{:.1}) 盒段[{k}] 平移=({:.2},{:.2},{:.2}) 期望x={:.2}",
+                            v0.pos[0],
+                            v0.pos[1],
+                            v0.pos[2],
+                            part.model[12],
+                            part.model[13],
+                            part.model[14],
+                            v0.pos[0] - 0.09
+                        );
+                    }
+                }
             }
         }
         self.npc_box_parts.clear();
