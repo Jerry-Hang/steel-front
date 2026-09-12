@@ -412,6 +412,10 @@ pub struct HudState {
     pub switching: bool,
     /// 手榴弹库存（HUD 显示；0..=2，G 投掷、N 补给）
     pub grenades: u32,
+    /// 医疗包库存（HUD 显示；X 键使用）
+    pub medkits: u32,
+    /// 打药进度 0..=1（>0 时 HUD 提示正在打药）
+    pub heal_progress: f32,
     /// 命中标记剩余显示时间（秒，>0 时准星外圈闪一下）
     pub hit_marker_timer: f32,
     /// 是否正在换弹（由游戏逻辑写入）
@@ -499,6 +503,8 @@ impl HudState {
             weapon_name: "M1 Rifle".to_string(),
             switching: false,
             grenades: 2,
+            medkits: 2,
+            heal_progress: 0.0,
             hit_marker_timer: 0.0,
             reloading: false,
             reload_progress: 0.0,
@@ -708,8 +714,18 @@ impl HudState {
         });
         elems.push(HudElement::Text {
             text: format!(
-                "{}  AMMO {}/{} +{}  |  GRENADES {}",
-                self.weapon_name, self.ammo, self.max_ammo, self.reserve, self.grenades
+                "{}  AMMO {}/{} +{}  |  GRENADES {}  |  MEDKITS {}{}",
+                self.weapon_name,
+                self.ammo,
+                self.max_ammo,
+                self.reserve,
+                self.grenades,
+                self.medkits,
+                if self.heal_progress > 0.0 {
+                    format!("  HEALING {:.0}%", self.heal_progress * 100.0)
+                } else {
+                    String::new()
+                }
             ),
             x: ammo_x + 6.0,
             y: h - margin - bar_h + (bar_h - 7.0 * TEXT_SCALE) * 0.5,

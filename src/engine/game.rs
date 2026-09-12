@@ -72,6 +72,11 @@ const JUMP_SPEED: f32 = 3.3;
 /// 冲刺速度倍率。只在「站立 + 前进 + 未开镜 + 在地面」时生效，条件见 `GameState::sprinting`。
 const SPRINT_MUL: f32 = 1.65;
 
+/// 一次打药耗时（秒）：期间不能重复使用，HUD 显示进度。
+const HEAL_TIME: f32 = 2.5;
+/// 一次打药回复的生命值（战术射击的常见量级：约半管血）
+const HEAL_AMOUNT: f32 = 45.0;
+
 /// 玩家姿态（站 / 蹲 / 卧）。
 ///
 /// **速度与视高只能从这里派生**，不许在别处再写一遍倍率：本仓历史上最贵的一类 bug 就是
@@ -916,6 +921,11 @@ pub struct Game {
     grenades: u32,
     /// 手榴弹上限
     grenades_max: u32,
+    /// 医疗包库存（X 键使用；默认 2，上限 2）
+    medkits: u32,
+    medkits_max: u32,
+    /// 打药剩余时间（秒）。>0 表示正在打药；归零那一帧一次性回血。
+    heal_timer: f32,
     /// 在场投掷物（抛物线 + 引信计时）
     grenades_vec: Vec<Grenade>,
     /// 待施加到相机的后坐力（pitch/yaw 弧度，main.rs 每帧 drain 取走）
@@ -1286,6 +1296,9 @@ impl Game {
             ),
             grenades: 2,
             grenades_max: 2,
+            medkits: 2,
+            medkits_max: 2,
+            heal_timer: 0.0,
             grenades_vec: Vec::new(),
             pending_kick: (0.0, 0.0),
             // 碰撞半径 0.35（真人肩宽 ~0.7m）：0.5 太胖，视觉"离障碍还有距离就卡住"
@@ -1864,6 +1877,10 @@ impl Game {
         self.hud.weapon_name = self.weapons.active_name().to_string();
         self.hud.switching = self.weapons.is_switching();
         self.hud.grenades = self.grenades;
+        self.hud.medkits = self.medkits;
+        self.hud.heal_progress = self.heal_progress();
+        // 打药推进（计时归零那一帧一次性回血）
+        self.update_heal(dt);
         // 手榴弹推进（抛物线 + 引信）
         self.update_grenades(dt);
         // 关卡号同步（由关卡推进 / 重开写入，供 HUD 显示）
@@ -2020,6 +2037,8 @@ impl Game {
         self.hud.health = (self.hud.health + self.hud.max_health * 0.5).min(self.hud.max_health);
         self.weapons.active_firearm().reset();
         self.grenades = self.grenades_max;
+        self.medkits = self.medkits_max;
+        self.heal_timer = 0.0;
         log::info!(
             "survive: 波间补给（血量 {:.0}% + 弹药补满 + 手榴弹 {}）",
             self.hud.health / self.hud.max_health * 100.0,
@@ -2830,6 +2849,46 @@ impl Game {
     }
 
     /// 循环切换开火模式（B 键）：单发 → 三连发 → 连发
+    /// X 键：开始打药。满血 / 没药 / 已在打药时**不消耗**（避免误按白扔一个包）。
+    pub fn use_medkit(&mut self) {
+        // 生命值放在 HudState（`hud.health` / `hud.max_health`），这是玩家血量的唯一来源 ——
+        // 不要再往 Game 上加一个 hp 字段，那就是两套状态源。
+        if self.heal_timer > 0.0 || self.medkits == 0 || self.hud.health >= self.hud.max_health {
+            return;
+        }
+        self.medkits -= 1;
+        self.heal_timer = HEAL_TIME;
+        log::info!(
+            "heal: 开始打药（剩余 {} 个，当前 hp={:.0}）",
+            self.medkits,
+            self.hud.health
+        );
+    }
+
+    /// 打药进度 0..=1（未打药为 0；HUD 用它画进度）
+    pub fn heal_progress(&self) -> f32 {
+        if self.heal_timer <= 0.0 {
+            0.0
+        } else {
+            (1.0 - self.heal_timer / HEAL_TIME).clamp(0.0, 1.0)
+        }
+    }
+
+    /// 打药推进：计时归零**那一帧**一次性回血。
+    /// 不做逐帧回血 —— 那样 HUD 没有明确的"完成"时刻，测试也不好断言。
+    fn update_heal(&mut self, dt: f32) {
+        if self.heal_timer <= 0.0 {
+            return;
+        }
+        self.heal_timer -= dt;
+        if self.heal_timer <= 0.0 {
+            self.heal_timer = 0.0;
+            let before = self.hud.health;
+            self.hud.health = (before + HEAL_AMOUNT).min(self.hud.max_health);
+            log::info!("heal: 完成 hp {:.0} -> {:.0}", before, self.hud.health);
+        }
+    }
+
     pub fn cycle_fire_mode(&mut self) {
         let modes = self.supported_fire_modes();
         self.fire_mode = next_supported_fire_mode(self.fire_mode(), modes);
@@ -3051,6 +3110,8 @@ impl Game {
     pub fn give_ammo(&mut self) {
         self.weapons.active_firearm().reset();
         self.grenades = self.grenades_max;
+        self.medkits = self.medkits_max;
+        self.heal_timer = 0.0;
         let src = AudioSource::new(self.player_eye(), 1.0);
         self.sfx.play(
             &mut self.audio.mixer_mut(),
@@ -6437,6 +6498,46 @@ mod tests {
         assert!(game.sprinting(), "恢复站立后应重新冲刺");
         game.set_sprint(false);
         assert!(!game.sprinting(), "松开 Shift 必须停止冲刺");
+    }
+
+    #[test]
+    fn medkit_heals_once_and_refuses_when_wasted() {
+        let mut game = Game::new();
+        assert_eq!(game.medkits, 2, "默认应有两个医疗包");
+        // 满血按 X 不消耗（避免误按白扔一个包）
+        game.use_medkit();
+        assert_eq!(game.medkits, 2, "满血不该消耗医疗包");
+        assert_eq!(game.heal_progress(), 0.0, "满血不该进入打药状态");
+
+        // 掉血后打药：立刻扣 1 个，进度开始涨，未完成前不回血
+        game.hud.health = 30.0;
+        game.use_medkit();
+        assert_eq!(game.medkits, 1);
+        game.update_heal(HEAL_TIME * 0.5);
+        let p = game.heal_progress();
+        assert!(p > 0.4 && p < 0.6, "进度应过半，实际 {p}");
+        assert_eq!(game.hud.health, 30.0, "未完成前不该回血");
+
+        // 打药期间再按 X 不消耗
+        game.use_medkit();
+        assert_eq!(game.medkits, 1, "打药中不该再消耗");
+
+        // 推进到结束：一次性回血
+        game.update_heal(HEAL_TIME);
+        assert_eq!(game.hud.health, 75.0, "30 + 45 = 75");
+        assert_eq!(game.heal_progress(), 0.0, "完成后进度归零");
+
+        // 封顶：不会超过 max_health
+        game.hud.health = 90.0;
+        game.use_medkit();
+        game.update_heal(HEAL_TIME);
+        assert_eq!(game.hud.health, game.hud.max_health, "回血必须封顶");
+
+        // 没药时按 X 无效果
+        game.medkits = 0;
+        game.hud.health = 10.0;
+        game.use_medkit();
+        assert_eq!(game.heal_timer, 0.0, "没药时不该进入打药状态");
     }
 
     #[test]

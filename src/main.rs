@@ -2519,6 +2519,8 @@ impl ApplicationHandler for GameApp {
                     KeyCode::ShiftLeft | KeyCode::ShiftRight => self.game.set_sprint(pressed),
                     KeyCode::KeyC if pressed => self.game.toggle_crouch(),
                     KeyCode::KeyZ if pressed => self.game.toggle_prone(),
+                    // X = 打药（WX 里 X 的 VK 是 88）
+                    KeyCode::KeyX if pressed => self.game.use_medkit(),
                     _ => {}
                 }
 

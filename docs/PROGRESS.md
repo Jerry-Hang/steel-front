@@ -150,6 +150,33 @@ stance: Prone     eye=0.42m
 反例出在 cap_safe 自己身上。`pm_play.ps1` / `gameplay_smoke_pm.py` 一直是正确参照实现。
 
 **这一修同时解锁了后续所有游戏内验证**（打药、开火模式、人物建模、烘焙都要靠它）。
+### 功能：X 打药（2026-09-12 第 7 轮）—— 第③条全部结案
+
+- `medkits` / `medkits_max`（默认 2）+ `heal_timer`；`HEAL_TIME = 2.5s`、`HEAL_AMOUNT = 45`。
+- **计时归零那一帧一次性回血**，不做逐帧回血 —— 后者 HUD 没有明确的"完成"时刻，也不好断言。
+- **满血 / 没药 / 已在打药时按 X 不消耗**（避免误按白扔一个包）。
+- HUD 信息栏追加 `MEDKITS n`，打药中再追加 `HEALING xx%`。
+- 键位：`X`（VK 88），接在 main.rs 的姿态/冲刺那一组固定键里。
+- 验收：`cargo test --release` **469 passed / 0 failed / 0 警告**，新增
+  `medkit_heals_once_and_refuses_when_wasted`（覆盖满血误按 / 打药中重复按 / 回血封顶 / 没药四个边界）。
+- 引擎内验证：注入 VK_X ×2，**满血时零 heal 日志**（符合设计）；截图确认 HUD 显示 `MEDKITS 2`。
+
+**修过程中的一个坑**：玩家血量**不在 `Game` 上**，而在 `HudState`（`self.hud.health` /
+`self.hud.max_health`）。我一开始往 `Game` 上加 `hp` 字段，编译立刻报
+`no field hp on type &mut game::Game` —— 这正是"两套状态源"的诱因，已改为直接读写
+`hud.health`，并把我多加的 `PLAYER_MAX_HP` 常量删掉（上限以 `hud.max_health` 为准）。
+
+### ✅ 第③条结案
+
+| 项 | 状态 |
+|---|---|
+| Shift+W 奔跑 / C 下蹲 / Z 趴下 | 引擎内验证 |
+| X 打药 | 引擎内验证（HUD 截图） |
+| 开火档位：单发 / **双发** / 三连发 / 连发 | 引擎内验证 |
+| 逐武器档位差异（按射速派生） | 引擎内验证 + 单测 |
+
+**剩余小尾巴**（不值当单开一轮，可与后续合并）：姿态/档位/打药都走 main.rs 的固定键，
+**还没并入 `BindingAction` 可重绑定表**；HUD 只有打药进度，没有姿态与档位提示。
 ### 功能：逐武器开火档位（2026-09-12 第 6 轮）—— 第③条开火模式部分结案
 
 用户要的是"**不同武器**有的支持单发、有的双发、有的三连发"，上一轮只做了全局四档。
