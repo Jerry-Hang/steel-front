@@ -4793,6 +4793,9 @@ impl Game {
                 }
             }
         }
+        // 计时：以下三段都在**并行分派之前**、每帧做超线性扫描，
+        // 正是"并行≈串行 + 中位 1178/最大 10677 尖峰"的形态（第 49 轮）。
+        let t_pre = std::time::Instant::now();
         let squad_wps: Vec<Option<[f32; 2]>> = if self.stress {
             if let Some(cmd) = self.command.as_ref() {
                 self.npcs.iter().map(|n| {
@@ -4802,6 +4805,7 @@ impl Game {
             } else { vec![None; self.npcs.len()] }
         } else { vec![None; self.npcs.len()] };
         // 弹道威胁预扫：存活子弹水平距离 < THREAT_RADIUS 且朝 NPC 方向飞行 → 该 NPC 受火力威胁
+        let t_uf = std::time::Instant::now();
         let under_fire = {
             let mut flags = vec![false; self.npcs.len()];
             for p in &self.projectiles {
@@ -4845,6 +4849,24 @@ impl Game {
             &fallback_targets,
             &player,
         );
+        let t_occ = std::time::Instant::now();
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static TICK: AtomicU32 = AtomicU32::new(0);
+            if std::env::var("RV3D_AI_PROF").is_ok()
+                && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
+            {
+                log::info!(
+                    "aiprof2: 班目标点={}us 威胁预扫={}us 目标选择+遮挡={}us 三段合计={}us（子弹 {} 个 / NPC {} 个）",
+                    t_uf.duration_since(t_pre).as_micros(),
+                    t_occ.duration_since(t_uf).as_micros(),
+                    std::time::Instant::now().duration_since(t_occ).as_micros(),
+                    std::time::Instant::now().duration_since(t_pre).as_micros(),
+                    self.projectiles.iter().filter(|p| p.is_alive()).count(),
+                    self.npcs.len()
+                );
+            }
+        }
         {
             let ctx = AiStepCtx {
                 player: &player,
