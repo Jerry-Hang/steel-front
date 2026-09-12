@@ -8536,10 +8536,14 @@ impl Renderer {
                 // 同一个 identity 实例，所以这里只换 firstIndex/indexCount，
                 // 不需要任何重新绑定或重传。
                 // margin 2m：桶边界上的建筑不该在转视角时逐帧抖动进出。
+                let mut drawn_bins = 0u32;
+                let mut drawn_tris = 0u32;
                 for bin in &self.prop_bins {
                     if !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0) {
                         continue;
                     }
+                    drawn_bins += 1;
+                    drawn_tris += bin.index_count / 3;
                     self.device.cmd_draw_indexed(
                         command_buffer,
                         bin.index_count,
@@ -8548,6 +8552,28 @@ impl Renderer {
                         0,
                         PROP_INSTANCE_INDEX,
                     );
+                }
+                // 第②条判据（RV3D_PROP_STATS=1）：每帧实际提交了多少桶/三角形。
+                // 存在的理由：道具是已知最大单项（关掉道具 fps 68.8→184.7），
+                // 但机制一直靠猜。先回答"到底提交了多少"，再看是**剔除粒度**问题
+                // （提交量远超屏幕能分辨的量）还是**逐 draw call 开销**（量不大但时间高）。
+                {
+                    use std::sync::atomic::{AtomicU32, Ordering};
+                    static TICK: AtomicU32 = AtomicU32::new(0);
+                    if std::env::var("RV3D_PROP_STATS").is_ok()
+                        && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
+                    {
+                        let max_bin = self
+                            .prop_bins
+                            .iter()
+                            .map(|b| b.index_count / 3)
+                            .max()
+                            .unwrap_or(0);
+                        log::info!(
+                            "propdraw: 桶 {drawn_bins}/{} 可见；提交三角形 {drawn_tris}；单桶最大 {max_bin}",
+                            self.prop_bins.len()
+                        );
+                    }
                 }
             }
         }
