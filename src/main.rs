@@ -610,6 +610,24 @@ impl GameApp {
             }
             self.anim_clock += dt.min(0.1);
             self.camera.mode = CameraMode::Flight;
+            // RV3D_NPC_CAM=<i>：把调试机位**吸附到第 i 个 NPC 的斜前方**，由程序算坐标。
+            // 存在的理由：我按 `RV3D_NPC_POS` 打出的坐标手算过 12 次机位，全部落在楼体里
+            // （见 docs/PROGRESS.md 第 8–15 轮）。这些坐标程序本来就有 —— 该由程序算，
+            // 不该由我猜。`pitch` 取正 = 低头（与鼠标 dy>0 同号，见铁律 C）。
+            if let Some(i) = std::env::var("RV3D_NPC_CAM")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                if let Some(n) = self.game.npcs.get(i) {
+                    self.camera.set_flight_pos(glam::Vec3::new(
+                        n.position[0],
+                        n.position[1] + 1.6,
+                        n.position[2] + 4.0,
+                    ));
+                    self.camera.yaw = 0.0; // forward = -Z ⇒ 正对 4m 外的 NPC
+                    self.camera.pitch = 10.0_f32.to_radians();
+                }
+            }
             if let Some((p, yaw, pitch)) = self.cam_override {
                 self.camera.set_flight_pos(p);
                 self.camera.yaw = yaw;
