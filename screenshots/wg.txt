@@ -1,3 +1,0 @@
-﻿名称      ID                       版本   源
--------------------------------------------------
-RenderDoc BaldurKarlsson.RenderDoc 1.45.0 winget
