@@ -595,6 +595,63 @@ AO/静态天光（高度场凹度遮蔽）→ 上传为地面纹理 → 片元�
 **⚠️ 这条否定的价值**：本会话已多次遇到"造好但没接线"（如 `pt_enable` 的 resident 从未建、
 `maxMeshWorkGroupCount` 的分块）。**这次专门查了，结论是干净的** —— 不必再查。
 
+## 🔧 `release_input.ps1` 逐项标 OK/XX（2026-09-12 第 127 轮）
+
+### 改动
+
+```diff
+- Write-Host ("  {0,-16} {1}" -f "verdict", ... "FAILED - see items above, inspect manually")
++ $mAlive / $mClip / $mVis 三个标记
++ Write-Host ("  [{0}] {1,-13} {2}" -f $mAlive, "process",   ...)
++ Write-Host ("  [{0}] {1,-13} {2}" -f $mClip,  "clip_rect", ...)
++ Write-Host ("  [{0}] {1,-13} {2}" -f $mVis,   "cursor",    ...)
++ verdict: "FAILED - see the item marked XX above"
+```
+
+### 效果（实测）
+
+```
+[OK ] process       (no leftover process)   alive_now=0
+[OK ] clip_rect     0,0-1707,1067 -> 0,0-1707,1067
+[XX ] cursor        visible before=False after=False ...
+verdict          FAILED - see the item marked XX above
+```
+
+**⇒ 一眼看出失败项是 `cursor`，另两项 OK。**
+
+**而它解决的正是一个真实代价**：第 121~126 轮我**连读四次都把 `clip_rect` 那行当成失败项**，
+而真正的失败项是 `cursor`。**笼统的 `FAILED` 会让人误读；逐项标记不会。**
+**这与"让几何自报家门"（83 轮）、"让腿部自报 `scale` 语义"（119 轮）是同一条规律。**
+
+### ⚠️ 途中我把脚本弄坏了 —— 教训 7 的精确版
+
+改这段时我把中文写进了**双引号字符串字面量**里，**脚本立刻语法错误、完全跑不起来**：
+
+```
+The string is missing the terminator: "
+```
+
+**原因**：Windows PowerShell 5.1 读**无 BOM** 的 `.ps1` 按 **ANSI** 解码 ⇒
+字符串里的非 ASCII 变成乱码 ⇒ **引号配对被破坏**。
+
+**⇒ 顺带把教训 7 精确化了**（原先只写"新写的 .ps1 尽量纯 ASCII"）：
+
+```
+非 ASCII 在【注释】里是安全的 —— 实测本文件 432 个非 ASCII 字节全在注释里，脚本一直正常。
+出事的是它在【字符串字面量】里。
+⇒ 改 .ps1 时：注释可以写中文；**字符串一律纯 ASCII**。
+```
+
+**⚠️ 这个脚本守着用户的鼠标安全，我弄坏它之后立刻改回并实测恢复。** 已提交 `701dc65`。
+
+### 仍未做（第 126 轮记的第二条）
+
+**`$visible1` 这一项**仍是判负项，但它**测不准**（`ShowCursor` 线程作用域，外部查询不可靠）
+⇒ 于是脚本会**持续报 `RELEASE FAILED`**。
+**⇒ 建议下次把它降级为参考项**（或仅在进程存活期间作判负依据）——
+**但不要删**，它守的是 2026-09-03 那次鼠标死锁的真实诉求。
+
+
 ## 🔍 `RELEASE FAILED` 定位：**失败项是「光标可见性」，不是剪裁矩形**（2026-09-12 第 126 轮）
 
 今晚 `release_input.ps1` 报了四次 `RELEASE FAILED`。前几轮我只报告未查明，**而且读错了失败项**。
