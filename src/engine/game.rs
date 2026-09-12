@@ -1171,6 +1171,16 @@ fn target_occlusion(
     player: &glam::Vec3,
 ) -> Vec<bool> {
     let samples = [NPC_HIT_CENTER_Y, 1.7];
+    // 成本结构（第 50 轮实测本节占 `ai_us` 的 18–39%，即 240–520µs）：
+    // 对**每一个 NPC × 2 个采样**都遍历**全部 bodies**（约 1100 件）——
+    // 255 × 2 × 1100 ≈ **56 万次迭代/帧**。注释里说的"把候选盒压到几十个"
+    // 是**粗筛之后**的收益，**粗筛本身仍是 O(bodies)**。
+    //
+    // 🔴 第 52 轮试过并把 body AABB 摊平成一维数组（想省掉 `aabb()` 构造与间接寻址）——
+    // **实测无收益**（238µs vs 基线 252µs，在噪声内），却每帧多一次 1100 元素分配。
+    // **已回退**：成本不在访问方式，而在**迭代次数本身**。
+    // ⇒ 真正的修法是**算法级**的：给 bodies 建粗相位空间索引，把每 NPC 的候选盒
+    //    从"全部 1100 件"降到"视野段覆盖的几个格子"，而不是继续在常数因子上抠。
     npcs.iter().enumerate()
         .map(|(index, npc)| {
             let t = resolve_ai_target(index, stress, spectator, targets, fallback_targets, player);
