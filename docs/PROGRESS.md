@@ -1,0 +1,248 @@
+# PROGRESS.md — Steel Front 进度 / 日志 / 交接历史
+
+> 本文件是 **AGENTS.md 的配套卷**。AGENTS.md 只放仍然生效的约束与注意事项（铁律 / 未结案 /
+> 教训 / 验收红线），**所有带时间线的进度信息都在这里**。
+>
+> 规则：新条目**追加在最上方**（最新在前），旧条目**压缩**而不是原样堆着；
+> 被推翻的结论**直接删掉**，不要保留"错误 + 更正"两段。
+
+---
+
+## 当前状态（2026-09-12 核实）
+
+- **测试基线**：`cargo test --release` → **463 passed / 0 failed / 0 警告**。
+- **游戏可运行**：`RV3D_AUTOSTART=1 RV3D_STRESS_AI=0` 起波次模式，稳态 fps ~130（2560x1600、"中画质"）。
+- **已实现的主要系统**：mesh 着色器主路径 + 地形 LOD + 65536 实例场、阴影贴图 + 烘焙 AO + 天光 +
+  程序化地面/皮肤贴图、GLB 道具（24 件，合并成 1 次 draw call + 40m 分桶剔除）、
+  35 把武器（`ALL_WEAPONS: [WeaponSpec; 35]`）、手榴弹、波次/关卡/据点胜负、
+  6 张 TOML 关卡、AI 分层 + 战术（突进/包抄/偷袭/撤退/掩体）、
+  压力模式（`RV3D_STRESS_AI=N` 红蓝大战场）、UDP 联机（协议 0x07）、
+  线程分层调度与物理核绑定、SIMD 剔除、PT 路径追踪（默认关）、
+  `RV3D_LLM` 战术指挥通道、CJK 点阵字体、ESC 菜单 + kill feed。
+- **47 个环境变量开关**（`RV3D_*`）——清单见 `rg -o 'RV3D_[A-Z_]+' src | sort -u`。
+- **LLM 战术指挥通道 = 打通**：`scripts/llm_commander.py`（OpenAI 兼容端点）
+  + `run_llm_battle.ps1`。实测 150s / 7 轮，**14 条命令全部被游戏采纳**：
+  未接触时全员钳形包抄、接敌后转 Assault 压到 55m、强度掉到 3 的连自动 Regroup 撤出。
+  条令参数在 `data/llm_doctrine.json`（每轮重读），态势与决策落盘 `data/llm_server.jsonl`。
+  🔴 **但"通道打通" ≠ "条令可调优"**：2026-09-12 四次对照 run 实测**条令效应低于噪声**
+  （详见未结案清单顶部）。`data/llm_doctrine.json` 已改成**对称中性基线**（两侧同参数），
+  待阵营不对称查清后再做 A/B。**别再用单次 run 比较条令。**
+- **冒烟闸门 = 绿**：`scripts/run_smoke_pm.ps1`（PostMessage 版）实测 `ALL-OK`——
+  闭环瞄准命中、54 发点射击毙一名敌人、`VUID=0 panics=0 fps=95.5`。
+  **旧的 `run_gameplay_smoke.ps1`（SendInput）在本机结构性跑不通，别再用它判断回归。**
+- **建筑已换成设计化套件（2026-09-12）**：6 个模块由 `tools/blender/build_city_kit.py`
+  生成并**已装入 `assets/props/`**，实测引擎内加载正常（无崩溃/无黑面）。
+  摆放分布：`tree_oak=372 building_tall=52 street_lamp=48 barrier_hesco=32 panel_block=17
+  container_* =28 car_wreck=8 sandbag_wall=8 building_wide=7 building_block=4`
+  （`building_corner` / `building_shed` **未被 city.rs 摆放**）。
+  烘成 **146 万顶点 / 60.9 万三角 / 576 处摆放 / 74 桶**，fps ~95–135。
+- **仓库卫生（2026-09-12 已清理，用户逐组确认）**：`scripts/` 从 **353 → 45 个跟踪文件**
+  （两轮共删 312 个：第一轮 297 个一次性诊断/补丁脚本，判定依据见 commit `e46956d`；
+  第二轮 15 个经用户确认，见 `90803f0`）。磁盘另清理约 **617 MB** 残留。
+  `screenshots/` 的 **405 张取证图（324 MB）已退出 git、文件保留在磁盘**（432 个 / 378 MB）。
+  详见 .gitignore 里的说明；要提交某张证据图用 `git add -f`。
+
+---
+
+## 交接规范
+
+本文件是**唯一的正式 AI 交接载体**（项目记忆 + 迭代规划 + 交接留痕一体化）。
+所有 AI 会话（含并行分身）在本仓库工作必须遵守：
+
+- **规划开启**：登记目标、任务拆解、负责人、状态（`in_progress`）。
+- **迭代结束**：写完成记录 + **验收结果**（测试数 / 警告数 / 冒烟结果）+ 遗留问题与下一步。
+- **AI 间交接**：上下文交接、任务交接、美术素材交接（素材路径、用途、规格、验收标准）都要留痕。
+- ⚠ **写之前先读**：确认你要记的结论与文件里已有的约束**不冲突**。
+  本文件历史上最贵的两次事故都是"新结论与旧约束并存、且没有删掉旧的那条"。
+- 新条目**追加在最上方**（最新的在最前），旧条目**压缩**而不是原样堆着。
+
+### 模板（可复制）
+
+```markdown
+### [YYYY-MM-DD] 交接：<一句话主题>
+- 发起方 / 接收方：
+- 交接类型：<规划开启 / 迭代结束 / 任务交接 / 美术素材交接>
+- 验收：<cargo test 结果 / 警告数 / 冒烟结果 / 提交 hash>
+- 结论：<只写仍然成立的结论；被推翻的写"推翻了 X"，不要留 X 的正文>
+- 遗留与下一步：
+- 状态：<in_progress / done / blocked>
+```
+
+---
+
+## 迭代历史（压缩）
+
+> 09-04 之前的条目只保留"结论 + 关键数字 + 仍有效的教训"。
+> 更早的 WSL2 时代记录已整体删除（存档指针见文末）。
+
+### [2026-09-12] 交接：设计化建模链路 + 6 个建筑模块落地（用户定的方向转向）
+- 发起方：DeepSeek Harness｜接收方：下一会话｜类型：迭代结束
+- 验收：`cargo test --release` **463 passed / 0 failed / 0 警告**；
+  commits `33c9746` / `0a756fe` / `e85eaf5` / `9b703db`；引擎内 `cap_safe` 取证无崩溃。
+- **用户判断（我同意，且有证据）**："程序化生成一切还是太困难，生成出来的是一坨狗屎"。
+  渲染不是瓶颈：旧 `asset_building()` **确实做了真窗洞**，但 14m 宽的面只开 4 个
+  **2.75×1.6m** 的洞（店面橱窗比例），且**建筑词汇全缺**——无勒脚/窗台/窗楣/女儿墙压顶/
+  入口/阳台/屋顶杂物。**参数生不出品味。**
+- **建立 headless 设计链路**（`survey_props.py` 量契约 → `build_city_kit.py` 生成 →
+  `preview_glb.py` 渲 4 视图 → **我用眼睛审图** → 再入库）。这条链路第一次跑就抓出 4 个
+  真错误，全部靠**契约数字**而非观感：高度 +2.12、进深 +2.70（外挑阳台）、雨篷 +1.0、
+  台阶 +0.62。**外挑一律改内凹**（凹阳台 loggia）。
+- **`FLOOR_H` 分叉结案**：改为「上层 3.15（= 引擎）+ 底层反解 3.56 + 女儿墙 + 压顶 =
+  精确总高」，6/6 命中契约。
+- **新增 `props.rs::placement_tint`**：逐摆放确定性色调 ±12%，治同型号建筑的"克隆军团"
+  （同网格的所有摆放原本烘成完全相同的顶点色）。不破坏 `merge_binned_is_deterministic`；
+  `single_bin_at_identity_reproduces_source_vertices` 改为"位置/法线/UV 逐位相同 +
+  颜色恰为源色 × 色调"的**更严格**断言，而不是放松它。
+- **安全网修复**：`release_input.ps1` 单次判定会误报 `RELEASE FAILED`（进程退出与窗口销毁
+  是异步的），改为 1.5 秒收敛重试。**假警报和漏报一样有害。**
+- 遗留与下一步：① 树的低多边形面团球现在是全场最弱元素，与新楼打架；
+  ② `placement_tint` 的 ±12% 偏保守，城市尺度上仍偏统一；
+  ③ `building_corner` / `building_shed` 未被摆放，做了也用不上；
+  ④ 街具（路灯/护栏/集装箱）仍是旧的程序化件；⑤ 顶点预算已用 70%（146 万 / 209 万）。
+- 状态：in_progress
+
+### [2026-09-12] 交接：输入链路的三个真 bug + 文档重写
+- 发起方：DeepSeek Harness｜接收方：下一会话｜类型：迭代结束
+- 验收：`cargo test --release` **462 passed / 0 failed / 0 警告**；
+  commits `2bfd767`（Bug A）、`49d994f`（Bug B），均已 push。
+- **结论（三条，全部有实测证据）**：
+  1. **Windows 上 `Locked` 抓取 = 视角失效**。捕获态两条视角路径互斥且互为唯一出口，
+     而 winit 的 Windows 后端**从不发 `DeviceEvent::MouseMotion`**（只发 Added/Removed）。
+     引入该分支的 `5373a08` 是为 XInput2（X11）写的，2026-08-15 迁 Windows 后前提失效。
+     修法 = 平台常量 `RAW_MOUSE_MOTION` + 纯函数 `cursor_grab_plan`（3 条单测钉住
+     "raw 不可用的平台连试都不试 Locked"）。实测日志 `grab=locked, look=relative`
+     → **`grab=confined, look=absolute`**。
+  2. **`focused` 初值 `true` = 非前台也抢光标**（`main.rs` 第 1 帧 `want` 就成立）。
+     winit 只在 `WM_SETFOCUS` 时才发 `Focused(true)`，被别的程序占前台时两边的焦点事件都收不到。
+     **这就是 2026-09-03"鼠标死锁"的根因。** 修法 = 初值改 `false`。
+  3. **本机 `SendInput` 送不到游戏，`PostMessage` 可以**（实测：6/6 被系统接受但游戏零响应；
+     前台窗口是浏览器）。`PostMessage` 键盘注入能确定性改变游戏状态。**这与用户 09-03 的
+     原始指示一致，是我没先读文档。**
+- **追加（同日）**：**无焦点视角注入已标定到 0.3% 误差**（配方见铁律 C）——
+  1200px（3×400）实测 **-170.30°**，模型预测 **-170.79°**。查明四个叠加的静默失效原因
+  （teleport 守卫 / `recenter_pending_until` 150ms 窗口 / `dragging` 被 `CursorLeft` 清掉 /
+  winit 位置去重），并定案 `PrintWindow` 对非前台窗口返回冻结帧。
+- **追加（同日）**：**冒烟闸门由红转绿** —— `scripts/run_smoke_pm.ps1`（PostMessage 版）
+  实测 `ALL-OK`：闭环瞄准命中（含 169 度、1239px 大转角），54 发点射击毙一名敌人，
+  `VUID=0 panics=0 fps=95.5`，玩家随后在交火中阵亡。**未结案 1 结案。**
+- **追加（同日）**：仓库卫生 —— `scripts/` **353 → 45 个跟踪文件**（两轮共删 312 个）。
+  第一轮 297 个的判定依据见 commit `e46956d`（48 个补丁脚本的替换目标已全部从 src 消失、
+  手工 SPIR-V 时代工具链、WSL2 专用脚本、一次性下载/挂机脚本）；第二轮 15 个经用户确认。
+  **LLM 战术指挥通道打通**（`llm_commander.py` + `run_llm_battle.ps1`，
+  实测 150s / 7 轮 14 条命令全部被采纳）。`screenshots/` 的 405 张取证图退出 git、
+  文件保留在磁盘。详见【当前状态】。
+- **追加（同日）**：修压力模式任务目标口径 —— `objective.progress()` 原收
+  `(before - self.npcs.len())` = **双方合计**阵亡，而 `target = stress_sides` 是**单方**兵力，
+  于是全场 255 人只死到 128（约一半）就刷"本轮敌军全灭"横幅，横幅是**假的**。
+  改成只计敌军（Red）阵亡；普通模式全部 NPC 都属 Red，两种口径等价。
+  **同时查明红蓝阵营不对称**（四条 run 一致，见未结案清单顶部），条令 A/B 结论作废。
+
+### [2026-09-11] ① 围墙/隔离带结案为"端视跨深度透视误读"，非缺面
+- 起点是"中央隔离带的盒子缺 +Y 顶面"，在同一张 45° 斜透视裁剪上翻了 **10 次**、两次"结案"都靠无效对照
+  （低于墙顶的机位、GLB 道具的楼顶）。**真正一票定案的是换一张正侧对机位**：侧视时高度与进深不互相冒充，
+  画面里是一道落地实心灰墙 + 深色压顶，无悬空无开口。
+- 仍成立的真错误（已修 `d51afab`）：`street_furniture` 把压顶做成**比墩身宽 0.30m**，而真泽西护栏是底宽顶窄
+  → 改成三段收分（下 1.00 / 上 0.62 / 顶带 0.82，总高 1.20 不变）。
+- 同轮：② 边界围墙两处算术错（`1de7ffd`，四角各差 22.5m 可直接走出城市 + 四个大门被墙填死）；
+  ③ 街树没有树干（四角树池摆了颗 1.7m 叶子球，改走 `tree()`）；④ 广场花坛同类错误（3.4m 宽扁球，改走 `bush()`）；
+  ⑥ 调试机位下 HUD 大号 FPS 恒 0（`65bb2f2`）。
+- 验收：459 passed / 0 警告；commits `1de7ffd`/`d51afab`/`501b579` 已 push。
+
+### [2026-09-10] 白墙查明为中央隔离带；② 已修；⑨ 的结论被推翻；**冒烟闸门变红**
+- 09-09 会话被中断留下的：`src/main.rs` 有未提交的 HUD 修复、`engine/city.rs` mtime 变过但内容与 HEAD 相同、
+  `scripts/_paper_dump.rs` 从未编译运行过、根目录 `main.rs` 是过期副本 —— 已全部处置（② 提交为 `65bb2f2`，
+  37 个诊断残留已删）。
+- **09-09 记的"⑤ 两套武器状态源不同步"是假的**：那些帧是在 `RV3D_CAM` 下拍的，而 `main.rs::update()`
+  的 cam_override 分支**直接 return、不跑 `game.update()`**，HUD 停在默认值。**判 ⑤ 类问题必须不带 `RV3D_CAM`。**
+- ⑨ `.spv` 那条整体作废：`fcea68e` **不是修好了它、而是制造了它**（把构建真正产出的字节换成了另一次构建的字节）。
+  naga 生成是**确定性**的（实测两次 MD5 相同）；真原因是库里提交的是过期字节。
+  已提交 `50abf26` 把构建真正产出的那组入库。
+- 🔴 冒烟 FAIL（`VUID=0 panics=0` 但 `kills=0`、`fps_min<120`），当时归因于压力模式无敌旁观；
+  **2026-09-12 查明另有更直接的原因：SendInput 注入根本没到游戏**（见未结案 1）。
+- 验收：458 passed / 0 警告。
+
+### [2026-09-09] 枪口朝向根治：`detect_axes` 把两端量反了
+- 真根因一行：`d_along = (co[:, L] - mn[L]) if sign > 0 else (mx[L] - co[:, L])` **反了**，
+  于是 `ends[+1]` 是 −端、`msign` 恒等于把**粗的那端当枪口**。`up` 走另一套计算不受影响
+  → 现象正是"枪正立、枪口朝后 180°"。
+- 复检调用同一个函数、错得完全一致 → 14/14 全报 `ok=True`，**报告从头到尾在说谎**，这是它能活过一整轮验证的原因。
+- 前三次都判错是因为都在**猜**"画面左右对应哪个轴"。本轮写了 66 行标定程序
+  `tools/blender/camera_handedness.py`（红块放 +Y、蓝块放 −Y，用同一台侧视相机渲一张）实测定案。
+  **凡遇"画面哪边是哪个轴"，先跑这个脚本，别推。**
+- 09-05 计划的"逐枪显式覆盖表"作废：**一个符号错误就该修一个符号**。
+- 验收：13 把枪重生成 + 逐枪截图确认枪口朝前；引擎内 `weapons: 切枪 0 -> 1` + `align=IDENTITY` 三级验证闭合。
+
+### [2026-09-08] 警告/报错清零
+- `cargo build --all-targets` **0 warning**（原 51）、`cargo clippy` **0 warning 0 error**（原 149）。
+- 逐条判定而非压制：**4 个真实缺陷**（renderer 10 处命令缓冲 `Result` 被静默丢弃；`assets.rs` GDI+
+  的 `static mut TOKEN` UB 隐患；`npcs.len() >= 0` 永真空断言；`player_speed()` 被误插进文档注释与函数体之间）。
+- 删除死代码：手写 OBJ 解析器、GDI+ 图片解码、`merge()`、`parking_lot` 等，净 **−296 行**。
+- `Cargo.toml` 新增 `[lints.clippy]`：`correctness`/`suspicious` 保持 **deny**，
+  `style`/`complexity`/`perf` 降 allow（理由写在注释里），`unused` 组保持 warn。
+- 三处"如实记录而非掩盖"：`Shape::inscribed_radius_factor` **从未接进碰撞系统**（圆柱/球形障碍的碰撞体仍是 AABB）；
+  `PropPlacement::solid` 是空转字段；`Shape::Box`/`Ico` 两个 CPU 从不产出的线格式变体已删。
+
+### [2026-09-05] mesh 主路径恢复 + 铁律回归
+- `renderer.rs` 由硬编码 `mesh_enabled: false` 改回 **`mesh_enabled = mesh_shader_available`**。
+  当初禁用它的唯一理由是"mesh 路径地面全黑"，而该现象根因是 **binding 9 未绑定** → 采样恒 0 → 乘性黑，
+  且两条管线**共用同一个片元着色器** —— 那从来不是 mesh 的缺陷。binding 9 修好后 mesh 路径地面完全正常。
+- 代价：fps 112–113（顶点路径约 165），原因是地面 65536 workgroup 静态全量上传、不做 CPU 视锥剔除。
+- **顶点管线自此冻结**（用户明确指令）。
+- 道具分桶剔除接线完成：`merge_binned(cell=40m)` + 逐桶球-视锥测试，
+  `frame_frustum` **无条件**算一次（原来那个 `if mesh_enabled` 三元在 mesh 关闭时给全零平面、
+  会让 `bin_visible` 恒真等于不剔除）。实测 **fps 112 → 152**。
+
+### [2026-09-04] GLB 道具真正上屏 + 深度遮挡
+- `props::merge` 烘 220 处位姿 → 430,576 顶点 / 177,192 三角 / **1 次 `cmd_draw_indexed`**。
+- `INSTANCE_BUFFER_ELEMS = PROP_INSTANCE_INDEX + 1` + 编译期 assert 收口三处副本 ——
+  此前 `instances[83010]` 越界读**静默返回全零**导致几何消失（本类 bug 的典型样本）。
+- 主管线 `depth_test_enable` false→true + 新 `gun_pipeline`；fps 246→268。
+- 验收：457 passed。
+
+### [2026-09-03] 地面黑洞根治 + 建模路线改 Blender + 鼠标安全协议确立
+- 黑洞根因：**binding 9 `ground_detail_tex` 从未进描述符布局**（只声明到 0–8）→ 采样恒 0 → 乘性黑。
+  这一条同时解释了"mesh 路径地面全黑"。
+- 修法：`GROUND_DETAIL_BINDING=9` + `R8G8B8A8_UNORM`（线性非 SRGB）+ 池 `max_frames*4→*5`
+  + 纹素 `lum*0.5` + `GROUND_DETAIL_SIZE 512→256`。实机 FPS 186→256。
+- PT 崩溃实锤复现（`Cargo.lock` 假设被证伪：全史仅 5 次改动）；
+  建模改用 Blender headless + `assets/props/*.glb` 24 件。
+- **⭐ 鼠标安全协议确立**（用户明确要求）：**不用 `SendInput`、不用 `SetForegroundWindow`，
+  按键用 `PostMessage` 投窗口句柄**。2026-09-12 实测证实其正确。
+
+### [2026-08-16] 渲染方向转向：mesh 为唯一主路径、顶点管线冻结
+- 取代 08-11 的相反决策。同时修：世界垂直镜像（WGSL 内显式 Y 翻转）、HUD 双重缩放
+  （1280×800 设计空间 + `ui_scale`）、交换链尺寸自动校验、开镜 FOV 补偿（tan 反比）、
+  `JUMP_SPEED=3.3`、`font_cjk.rs`（GDI 8×8 点阵）。
+
+### [2026-08-15] Windows 原生迁移完成 + UI/呈现迭代
+- `4504f89 fix(win)` 跨平台编译修复；实测 mesh/RT/DLSS 全 true、`present_us 101–373µs`。
+- 冒烟移植到 Windows（`gameplay_smoke_win.py` + `run_gameplay_smoke.ps1`）。
+- ESC 毛玻璃菜单（替代两段式退出）、kill feed（≤4 条 / 6s 消退 / 最新在上）。
+- 鼠标水平方向修正（`6009684`）。验收 364 tests / 0 警告 / ALL-OK。
+
+### [2026-08-12 ~ 08-14] 关卡系统 / 联机 / 波次规则 / 音频 / 美术
+- 关卡系统：手写零依赖 TOML（`map.rs` / `objective.rs`），`RV3D_MAP`/`RV3D_MAPS`，5 张图。
+- 联机：UDP `RV3D_NET`/`RV3D_NET_ADDR`，`ObjectiveState(0x07)` 广播 + 消费。教训：
+  `handle_join` 内部已发 ack，**调用方勿再 `send_to`**。
+- 波次：`Survive{waves}` + `defense_line.toml`；手榴弹（G 键、引信 1.5–2.5s、AoE 120 伤/8m）；
+  切枪 0.6s；自伤 `0.35` + CAP=45。教训：`WeaponRack::update` **必须同时推进当前武器 `Firegun::update`**。
+- 美术：阴影贴图（2048² D32、半宽 250m、3×3 PCF）→ 烘焙 AO → 光照烘焙 → 程序化地面/皮肤贴图。
+- 线程：AI 分层调度（`AiTier` + 双池 + 远组降频 `AI_FAR_DECIMATE=4`）、
+  物理核/超线程分层绑定（须运行时读 sysfs，**不可写死 SMT 奇偶**）。
+- SIMD A/B 实测：剔除 65536 实例 scalar 798µs → avx2 49µs（16.3×）；但**冲击波的 gather 是负收益**
+  （avx512 0.92×、avx2 0.83×，已改回）。
+- 验收：364 / 352 / 339 / 325 / 321 / 287 / 279 / 272 / 270 / 266 tests，均 0 警告。
+
+---
+
+## 历史存档指针（不在本文件内，需要时再读）
+
+| 文件 | 内容 | 状态 |
+|---|---|---|
+| `docs/HANDOFF-2026-08-09/10/11.md`、`docs/HANDOFF-2026-08-22/25/27/28.md`、`HANDOFF-2026-09-02.md` | 早期逐轮交接 | 历史 |
+| `docs/windows-native-vulkan-plan-2026-08-09.md` | WSL2→Windows 迁移方案 | **已执行** |
+| `docs/perf-2560x1600-64v64/`、`docs/perf-ai-tier-2026-08-11/`、`docs/perf-simd-tier-2026-08-13.md` | 性能基准存档 | 历史（注意 dzn 口径已失效） |
+| `docs/hardware-requirements-2026-08-11.md` | 硬件门槛 | 有效 |
+| `docs/lighting-rendering-verification-2026-08-09.md` | 光照/渲染验证 | 部分有效 |
+| `docs/大战场枪械设计V3.0.txt`、`GAME_DESIGN.txt` | 设计文档 | 参考（后者在 `.gitignore` 内） |
+| `README.md` | 对外进度说明书 | 需与实际进度同步 |
