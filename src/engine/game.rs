@@ -68,6 +68,41 @@ const SHAKE_DURATION: f32 = 0.3;
 const PLAYER_SPEED: f32 = 6.0;
 /// 跳跃初速（m/s，~0.55m 跳高——真实二战士兵跳跃感，2026-08-15 从 4.6 调低去除"月球漫步"）
 const JUMP_SPEED: f32 = 3.3;
+
+/// 冲刺速度倍率。只在「站立 + 前进 + 未开镜 + 在地面」时生效，条件见 `GameState::sprinting`。
+const SPRINT_MUL: f32 = 1.65;
+
+/// 玩家姿态（站 / 蹲 / 卧）。
+///
+/// **速度与视高只能从这里派生**，不许在别处再写一遍倍率：本仓历史上最贵的一类 bug 就是
+/// 「同一个量有两套状态源」（见教训清单第 1 条）。要调数值就改这里的方法，一处生效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stance {
+    #[default]
+    Standing,
+    Crouching,
+    Prone,
+}
+
+impl Stance {
+    /// 水平移动速度倍率（相对站立）
+    pub fn speed_mul(self) -> f32 {
+        match self {
+            Stance::Standing => 1.0,
+            Stance::Crouching => 0.45,
+            Stance::Prone => 0.18,
+        }
+    }
+
+    /// 相机视高（米，相对脚底）。站立值与物理体默认一致（1.6）。
+    pub fn eye_height(self) -> f32 {
+        match self {
+            Stance::Standing => 1.60,
+            Stance::Crouching => 1.02,
+            Stance::Prone => 0.42,
+        }
+    }
+}
 /// 重力加速度（m/s²，19.6 = 2x 真实重力——FPS 手感偏好（下落干脆），配合低跳高）
 const GRAVITY: f32 = 19.6;
 /// NPC 就近掩体搜索半径（网格格数）
@@ -842,6 +877,10 @@ pub struct Game {
     move_backward: bool,
     /// 跳跃请求（Space/Jump 绑定按下置位；落地清除）
     jump_pressed: bool,
+    /// 玩家姿态。速度与视高的**唯一来源**，见 `Stance`。
+    stance: Stance,
+    /// 冲刺键（Shift）当前是否按住。是否真的在冲刺由 `sprinting()` 判定。
+    sprint_held: bool,
     /// 跳跃垂直速度（m/s，>0 上升；落地归零）
     jump_vel: f32,
     move_left: bool,
@@ -1203,6 +1242,8 @@ impl Game {
         player_body: PlayerBody::new(Pv::new(0.0, 0.0, 0.0), 0.35, 1.6),
             move_forward: false,
             jump_pressed: false,
+            stance: Stance::Standing,
+            sprint_held: false,
             jump_vel: 0.0,
             move_backward: false,
             move_left: false,
@@ -2798,12 +2839,50 @@ impl Game {
     pub fn player_eye(&self) -> glam::Vec3 {
         glam::Vec3::new(
             self.player_body.pos.x,
-            self.player_body.pos.y + self.player_body.eye_height,
+            self.player_body.pos.y + self.stance.eye_height(),
             self.player_body.pos.z,
         )
     }
 
     /// 转发 WASD 按键状态（FPS 玩家移动；仅 Playing + 第一人称生效）
+    /// C 键：站立 ↔ 下蹲（卧倒时按下先回到站立）。日志落在姿态真正变化时。
+    pub fn toggle_crouch(&mut self) {
+        let next = if self.stance == Stance::Crouching {
+            Stance::Standing
+        } else {
+            Stance::Crouching
+        };
+        self.stance = next;
+        log::info!("stance: {:?} eye={:.2}m", next, next.eye_height());
+    }
+
+    /// Z 键：站立 ↔ 卧倒（下蹲时按下直接转卧倒）。
+    pub fn toggle_prone(&mut self) {
+        let next = if self.stance == Stance::Prone {
+            Stance::Standing
+        } else {
+            Stance::Prone
+        };
+        self.stance = next;
+        log::info!("stance: {:?} eye={:.2}m", next, next.eye_height());
+    }
+
+    /// 冲刺键（Shift）按住状态
+    pub fn set_sprint(&mut self, on: bool) {
+        self.sprint_held = on;
+    }
+
+    /// 此刻是否真的在冲刺：按住 Shift **且** 正在前进、非后退、站立、未开镜、在地面。
+    /// HUD/视场角可以据此变化；速度倍率在 `move_first_person` 里消费。
+    pub fn sprinting(&self) -> bool {
+        self.sprint_held
+            && self.move_forward
+            && !self.move_backward
+            && self.stance == Stance::Standing
+            && !self.hud.ads
+            && self.jump_vel == 0.0
+    }
+
     pub fn set_movement(&mut self, forward: bool, backward: bool, left: bool, right: bool) {
         self.move_forward = forward;
         self.move_backward = backward;
@@ -3144,7 +3223,14 @@ impl Game {
             let air_factor = if self.jump_vel != 0.0 { 0.5 } else { 1.0 };
             // 开镜减速：举枪瞄准移动 -35%（ADS 重量感；hud.ads 由 main.rs 每帧同步）
             let ads_factor = if self.hud.ads { 0.65 } else { 1.0 };
-            let step = (PLAYER_SPEED * ads_factor * air_factor * dt).min(0.5);
+            let sprint_mul = if self.sprinting() { SPRINT_MUL } else { 1.0 };
+            let step = (PLAYER_SPEED
+                * self.stance.speed_mul()
+                * sprint_mul
+                * ads_factor
+                * air_factor
+                * dt)
+                .min(0.5);
             let (mx, mz) = self
                 .player_body
                 .try_move(&self.world, dx / len * step, dz / len * step);
@@ -3160,7 +3246,8 @@ impl Game {
         // 垂直运动：跳跃（Jump 键按下且在地面 → 初速）+ 重力 + 落地贴地
         let ground = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
         let on_ground = self.player_body.pos.y <= ground + 0.05 && self.jump_vel <= 0.0;
-        if self.jump_pressed && on_ground {
+        // 卧倒不能起跳（蹲姿可以）
+        if self.jump_pressed && on_ground && self.stance != Stance::Prone {
             self.jump_vel = JUMP_SPEED;
             let jpos = self.player_pos();
             self.audio.synth_mut().play_footstep(jpos, 1.0);
@@ -6230,6 +6317,58 @@ mod tests {
     }
 
     /// GameOver 冻结：投射物继续飞行但不产生新击杀、不计分
+    #[test]
+    fn stance_scales_speed_and_eye_height_monotonically() {
+        let mut game = Game::new();
+        assert_eq!(game.stance, Stance::Standing, "默认必须是站立");
+        // 站立视高与物理体默认一致（1.6）——两处不一致就是"两套状态源"
+        assert!((Stance::Standing.eye_height() - 1.60).abs() < 1e-6);
+        // 速度与视高都必须单调：站 > 蹲 > 卧。反了会让蹲比站快、或相机穿出头顶。
+        assert!(Stance::Standing.speed_mul() > Stance::Crouching.speed_mul());
+        assert!(Stance::Crouching.speed_mul() > Stance::Prone.speed_mul());
+        assert!(Stance::Standing.eye_height() > Stance::Crouching.eye_height());
+        assert!(Stance::Crouching.eye_height() > Stance::Prone.eye_height());
+        // C 在站立/下蹲间来回，Z 在站立/卧倒间来回
+        game.toggle_crouch();
+        assert_eq!(game.stance, Stance::Crouching);
+        game.toggle_crouch();
+        assert_eq!(game.stance, Stance::Standing);
+        game.toggle_prone();
+        assert_eq!(game.stance, Stance::Prone);
+        game.toggle_prone();
+        assert_eq!(game.stance, Stance::Standing);
+        // 从下蹲按 Z 直接转卧倒（而不是先回站立）
+        game.toggle_crouch();
+        game.toggle_prone();
+        assert_eq!(game.stance, Stance::Prone);
+    }
+
+    #[test]
+    fn sprint_requires_forward_standing_and_hipfire() {
+        let mut game = Game::new();
+        game.move_forward = true;
+        game.set_sprint(true);
+        assert!(game.sprinting(), "站立 + 前进 + 按住 Shift 应当冲刺");
+        // 后退不冲刺
+        game.move_backward = true;
+        assert!(!game.sprinting(), "后退不该冲刺");
+        game.move_backward = false;
+        // 开镜不冲刺
+        game.hud.ads = true;
+        assert!(!game.sprinting(), "开镜不该冲刺");
+        game.hud.ads = false;
+        // 蹲 / 卧不冲刺
+        game.toggle_crouch();
+        assert!(!game.sprinting(), "下蹲不该冲刺");
+        game.toggle_prone();
+        assert!(!game.sprinting(), "卧倒不该冲刺");
+        // 回到站立后，还要松开 Shift 才停
+        game.toggle_prone();
+        assert!(game.sprinting(), "恢复站立后应重新冲刺");
+        game.set_sprint(false);
+        assert!(!game.sprinting(), "松开 Shift 必须停止冲刺");
+    }
+
     #[test]
     fn gameover_freezes_kills() {
         let mut game = Game::new();

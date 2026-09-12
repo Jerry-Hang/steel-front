@@ -28,6 +28,8 @@ public class W32S {
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr wp, IntPtr lp);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindWindowW")]
+  public static extern IntPtr FindWindowW(IntPtr cls, string title);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 "@
@@ -88,13 +90,22 @@ try {
         $exitNote = "PROCESS EXITED EARLY (exit code $($proc.ExitCode))"
         Write-Host "!! $exitNote"
     } else {
-        $p = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-        if (-not $p) {
+        # 按**窗口标题**找 HWND，不要用 Process.MainWindowHandle：
+        # 2026-09-12 实测后者对 winit 程序拿到的不是接收输入的那个窗口 —— cap_safe 的
+        # -Keys 因此从来没生效过（投了 VK 36/R 换弹，游戏零响应；而同一个按键走
+        # pm_play / gameplay_smoke_pm 的 FindWindowW 路径就能确定性改变游戏状态）。
+        # 必须轮询 + 先把 $h 归一化成 [IntPtr]::Zero：返回 null 时 `-eq Zero` 是假的，
+        # 会一路把 null 传进 Screenshot 报"cannot convert null to IntPtr"。
+        $h = [IntPtr]::Zero
+        for ($i = 0; $i -lt 40; $i++) {
+            $h = [W32S]::FindWindowW([IntPtr]::Zero, "Steel Front - Vulkan")
+            if ($h -ne [IntPtr]::Zero) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        if ($h -eq [IntPtr]::Zero) {
             $exitNote = "NO WINDOW HANDLE YET"
             Write-Host "!! $exitNote"
         } else {
-            $h = $p.MainWindowHandle
             Screenshot $h (Join-Path $shots "$Tag`_a.png")
 
             foreach ($vk in $Keys) {

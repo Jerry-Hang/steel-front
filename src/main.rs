@@ -2507,6 +2507,18 @@ impl ApplicationHandler for GameApp {
                     }
                 }
 
+                // 姿态与冲刺（2026-09-12）。这三个键**暂未并入 `BindingAction` 可重绑定表**：
+                // 并入要同步 ui.rs 的枚举 + 默认表 + getter/label/slot 四处 match + 键表测试，
+                // 先按固定键把功能落地；重绑定与 HUD 提示见 docs/PROGRESS.md 待办。
+                // Shift 是按住类（冲刺条件是"按住 + 前进 + 站立 + 未开镜 + 在地面"），
+                // C/Z 是按下即切换（松开不改变姿态）。
+                match key_code {
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight => self.game.set_sprint(pressed),
+                    KeyCode::KeyC if pressed => self.game.toggle_crouch(),
+                    KeyCode::KeyZ if pressed => self.game.toggle_prone(),
+                    _ => {}
+                }
+
                 // 键位驱动：查当前键码绑定的可重绑定动作（移动/换弹/开火/菜单）
                 if let Some(action) = self.game.hud.key_bindings.action_for(key_code as u32) {
                     match action {

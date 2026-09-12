@@ -125,6 +125,32 @@
 
 **教训（已并入教训清单候选）**：`RV3D_CAM` 的 yaw 方向**必须先标定再用来做对照实验**。
 我拿它做了三轮 A/B，其中一轮方向反了，直接产出一个写进文档的错结论。
+## 功能：姿态系统 + 冲刺（2026-09-12，第③条的第一部分）
+
+**已实现**：`Stance`（站立/下蹲/卧倒，`game.rs`）+ 冲刺。
+- 速度与视高**只从 `Stance` 派生**（`speed_mul` / `eye_height`），一处生效 —— 避免"两量套状态源"。
+- 倍率：站 1.0 / 蹲 0.45 / 卧 0.18；视高 1.60 / 1.02 / 0.42 m；冲刺 ×1.65。
+- 冲刺条件（`GameState::sprinting`）：按住 Shift **且** 前进、非后退、站立、未开镜、在地面。
+- 卧倒不能起跳（蹲可以）。
+- 按键：`Shift`（按住）/ `C`（站立↔下蹲）/ `Z`（站立↔卧倒），在 `main.rs` 直接处理。
+  ⚠ **暂未并入 `BindingAction` 可重绑定表** —— 并入要同步 ui.rs 的枚举 + 默认表 +
+  getter/label/slot 四处 match + 键表测试，留作后续。
+- 验收：`cargo test --release` **465 passed / 0 failed / 0 警告**，新增
+  `stance_scales_speed_and_eye_height_monotonically` / `sprint_requires_forward_standing_and_hipfire`。
+
+### ⚠️ 未完成：游戏内验证被工具链挡住
+
+**功能已单测通过，但还没在游戏里亲眼验证。** 过程与finding：
+1. 用 `cap_safe.ps1 -Keys @(36,21,44)` 注入 R/C/Z —— **零响应**，连换弹（确定会写日志）都没有。
+2. 查明 `cap_safe.ps1` 用的是 `Process.MainWindowHandle`，**对 winit 程序拿到的不是接收输入的
+   那个窗口** ⇒ **它的 `-Keys` 从来没生效过**。已改为 `FindWindowW(None, "Steel Front - Vulkan")`
+   + 40×250ms 轮询（抄 `pm_play.ps1` 的已验证写法）。修好后确实投到了正确窗口
+   （日志打出 `POST VK 36/21/44`）。
+3. **但游戏仍然零响应**，同时 `foreground is game window: False`。
+   **当前最佳线索**：**winit 可能在窗口非前台时根本不发 `WindowEvent::KeyboardInput`** ——
+   若成立，则铁律 C 里"PostMessage 不依赖前台"这条只在窗口恰好是前台时被验证过，
+   表述需要收窄。**未定论**，下一步判据：让 `run_smoke_pm.ps1` 打印它启动时窗口是否前台；
+   若它成功时窗口都是前台，则 `cap_safe` 也必须先把窗口置前再投键。
 ## 🔴 性能排查（2026-09-12，第一条硬证据）
 
 **用户假设"显卡利用率上不去"不成立 —— 实测 GPU 是满载的。** 用 `scripts/perf_probe.ps1`
