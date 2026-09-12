@@ -332,6 +332,8 @@ cargo test --release
 # 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK：命中 + 击杀 + VUID=0）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
 # 旧的 run_gameplay_smoke.ps1 走 SendInput，在本机结构性跑不通（见铁律 C），别用它判断回归
+# LLM 战术指挥通道会战（红蓝 128v128，由服务端下命令；实测 14 条命令全被采纳）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
 # 截图取证（finally 里 taskkill + 硬超时）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
 # 多键必须走 -Command，-File 会把 9,9 合并成一个 "9,9"
@@ -347,9 +349,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 ```
 
 ⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
-⚠ `scripts/play_cap.ps1` **不在版本库里、内容不安全**（`SetCursorPos + mouse_event` 拿焦点后
-不做真正的释放），**不要用**；要截图用 `cap_safe.ps1`。
-
+⚠ `scripts/play_cap.ps1` 已于 2026-09-12 删除（它用 SetCursorPos + mouse_event 拿到焦点后
+不做真正的释放，正是用户 2026-09-03 报告的鼠标死锁那一类行为；已由 cap_safe.ps1 + pm_play.ps1
++ release_input.ps1 取代）。
 ---
 
 ## 当前状态（2026-09-12 核实）
@@ -364,14 +366,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
   线程分层调度与物理核绑定、SIMD 剔除、PT 路径追踪（默认关）、
   `RV3D_LLM` 战术指挥通道、CJK 点阵字体、ESC 菜单 + kill feed。
 - **47 个环境变量开关**（`RV3D_*`）——清单见 `rg -o 'RV3D_[A-Z_]+' src | sort -u`。
+- **LLM 战术指挥通道 = 打通**：`scripts/llm_commander.py`（OpenAI 兼容端点）
+  + `run_llm_battle.ps1`。实测 150s / 7 轮，**14 条命令全部被游戏采纳**：
+  未接触时全员钳形包抄、接敌后转 Assault 压到 55m、强度掉到 3 的连自动 Regroup 撤出。
+  条令参数在 `data/llm_doctrine.json`（每轮重读），态势与决策落盘 `data/llm_server.jsonl`。
 - **冒烟闸门 = 绿**：`scripts/run_smoke_pm.ps1`（PostMessage 版）实测 `ALL-OK`——
   闭环瞄准命中、54 发点射击毙一名敌人、`VUID=0 panics=0 fps=95.5`。
   **旧的 `run_gameplay_smoke.ps1`（SendInput）在本机结构性跑不通，别再用它判断回归。**
-- **仓库卫生（2026-09-12 已清理）**：`scripts/` 从 **353 → 56 个跟踪文件**（删了 297 个一次性
-  诊断/补丁脚本，判定依据见 commit `e46956d`）；磁盘上另清理了约 617 MB 残留
-  （156 MB 未压缩 .bmp、727 个旧运行日志、477 张未跟踪旧截图）。
-  仍有 42 个拿不准的脚本留在库里待确认，另有 405 张已跟踪截图（324 MB）是否继续留在
-  git 里待定。`.gitignore` 的**注释是乱码**（`杩愯浜х墿` = "运行产物" 的错编码），功能无影响但应当修。
+- **仓库卫生（2026-09-12 已清理，用户逐组确认）**：`scripts/` 从 **353 → 45 个跟踪文件**
+  （两轮共删 312 个：第一轮 297 个一次性诊断/补丁脚本，判定依据见 commit `e46956d`；
+  第二轮 15 个经用户确认，见 `90803f0`）。磁盘另清理约 **617 MB** 残留。
+  `screenshots/` 的 **405 张取证图（324 MB）已退出 git、文件保留在磁盘**（432 个 / 378 MB）。
+  详见 .gitignore 里的说明；要提交某张证据图用 `git add -f`。
 
 ---
 
@@ -424,7 +430,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 20. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
 21. **GLB 加载器忽略 `bufferViews[].byteStride`**（交错布局会读错）。
     **lead**：现导出器是一 accessor 一 bufferView（密集），暂不受影响。
-22. **仓库卫生**：见上节（349 个 scripts 文件、根目录散落日志、`.gitignore` 注释乱码）。
+22. **`data/` 里的历史残留** — 约 55 个文件（旧日志、一次性 .py 探针、.spv.asm 反汇编）。
+    已被 .gitignore 覆盖、不在仓库里，只是占磁盘。lead：确认没有还在用的（其中有 `key.py`）后清理。
 
 ---
 
@@ -485,10 +492,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
   `VUID=0 panics=0 fps=95.5`，玩家随后在交火中阵亡。**未结案 1 结案。**
 - **追加（同日）**：仓库卫生 —— `scripts/` **353 → 56 个跟踪文件**（删 297 个，判定依据见
   commit `e46956d`：48 个补丁脚本的替换目标已全部从 src 消失、手工 SPIR-V 时代工具链、
-  WSL2 专用脚本、一次性下载/挂机脚本）；磁盘另清理约 **617 MB** 残留。仍有 42 个脚本与
-  405 张已跟踪截图（324 MB）待用户定夺。
-- 本文件同时重写：200KB → 本版，删除了 WSL2 全量内容、5 处逐字重复的方法论段落、
-  以及"错误版铁律与更正版并存"的段落（阴影深度映射、mesh 冻结决策、SendInput 断言）。
+- **追加（同日）**：第二轮清理（用户逐组确认删 15 个脚本 + 删 play_cap.ps1）与
+  **LLM 战术指挥通道打通**（`llm_commander.py` + `run_llm_battle.ps1`，
+  实测 150s / 7 轮 14 条命令全部被采纳）。`screenshots/` 的 405 张取证图退出 git、
+  文件保留在磁盘。详见【当前状态】。
 
 ### [2026-09-11] ① 围墙/隔离带结案为"端视跨深度透视误读"，非缺面
 - 起点是"中央隔离带的盒子缺 +Y 顶面"，在同一张 45° 斜透视裁剪上翻了 **10 次**、两次"结案"都靠无效对照
@@ -640,6 +647,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 22. **几何/坐标换算的前提假设，要么在注释里写明，要么加断言。** 瞄准用的是"NPC 世界坐标 =
     玩家相对坐标"，这只在**玩家站在出生点**时成立。开场随手按了 1.5 秒 W 就悄悄打破了它——
     38 发点射、aim 每一轮都报"已收敛"、命中零。**闭合回路收敛不等于打中了正确的东西。**
+23. **怀疑某个配置文件/规则没生效时，先用能正确解码的工具复核，再动手"修"。**
+    2026-09-12 我据 `Get-Content` 的输出判定 `.gitignore` 的注释是乱码、并且把换行吃掉了、
+    导致 `*.bmp` 与 `logs/` 规则实际未生效，正准备重写整个文件。用 `read` 工具一看：
+    **文件完好，中文与换行都在**，乱码只是 PowerShell 按 ANSI 读 UTF-8 的显示问题。
+    这与教训 8 是同一个坑的两面：**`Get-Content` 的输出不能当作文件内容的证据。**
 
 ---
 
