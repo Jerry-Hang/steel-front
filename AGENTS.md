@@ -78,7 +78,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 > WSL2 相关材料**全部作废、已从本文件删除**（详见文末存档指针）。
 
 - **机器**：RTX 5060 Laptop（NVIDIA 驱动 610.88）+ AMD 8940HX，内存 12GB。
-- **编译**：`cargo build --release`。**测试**：`cargo test --release`（当前基线 **463 passed / 0 failed / 0 警告**）。
+- **编译**：`cargo build --release`。**测试**：`cargo test --release`（当前基线 **465 passed / 0 failed / 0 警告**）。
   UDP 回环测试在沙箱内 bind 会 PermissionDenied → 需提权跑。
 - **GPU 能力（原生实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
   DLSS VK_NVX=true、`present_us 101–373µs`。
@@ -275,6 +275,19 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   靠后续"关掉道具帧率涨 2.7 倍"才发现方向不对。
   **判据：做方向类对照前，先用一个已知会在视野里/不在视野里的物体验一次朝向**，
   别相信"yaw=90 应该是往右"这种直觉。pitch 的符号（正=抬头）同理先验再用。
+- 🔴 **注入脚本里的键码有两套，混用会「发出去了但游戏零响应」**（2026-09-12 付过代价，
+  查了三轮才找到）：
+  - **winit `KeyCode` 枚举序号**（含 `KeyW=41`）—— 只在**游戏源码/配置**里用。
+  - **Windows 虚拟键码 VK** —— 只有它才该进 `PostMessage(WM_KEYDOWN)` 的 `wParam`。
+    常用：`R=82(0x52) C=67 Z=90 W=87 A=65 S=83 D=68 Space=32 Tab=9 Esc=27 Shift=16`。
+  - 反例：把 winit 的 `KeyR=36` 当 VK 发出去，游戏收到的是 **`VK_HOME`**；`44` 是 `VK_SNAPSHOT`
+    （PrintScreen）。`-Keys 9` 之所以"看起来能用"，纯粹因为 **9 在两套里恰好都是 Tab**。
+  - `lParam` 的 **bit16-23 必须是扫描码**（`MapVirtualKey(vk, 0)`），winit 靠它解析键位。
+- 🔴 **`cap_safe.ps1` 的两个历史 bug 已修（2026-09-12）**，别再退回：
+  ① 窗口句柄不能用 `Process.MainWindowHandle`（对 winit 程序拿到的不是接收输入的那个窗口）
+  → 用 `FindWindowW(None, "Steel Front - Vulkan")` + 40×250ms 轮询；
+  ② `-Keys` 必须收 **VK 码** + `lParam` 带扫描码。
+  **`pm_play.ps1` / `gameplay_smoke_pm.py` 一直是正确的参照实现**（实测无前台也能送达）。
 
 ### 分辨率
 `RESOLUTIONS` 5 档含 2560x1600；显式配置非预设分辨率会回退首项（旧坑 2560x1600→1280x720）；

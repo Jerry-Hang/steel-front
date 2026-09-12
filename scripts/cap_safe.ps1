@@ -2,6 +2,10 @@ param(
     [int]$WarmupSec = 10,
     [int]$HoldSec = 4,
     [string]$Tag = "cap",
+    # ⚠ -Keys 收的是 **Windows 虚拟键码（VK）**，不是 winit 的 KeyCode 枚举序号。
+    # 两套毫无关系：winit 的 KeyR=36，而 Windows 的 VK_R=82(0x52)，36 在 Windows 里是 VK_HOME。
+    # 2026-09-12 之前混用过，症状是"POST VK 打印了、游戏零响应"。
+    # 常用：R=82 C=67 Z=90 W=87 A=65 S=83 D=68 Space=32 Tab=9 Escape=27 Shift=16。
     [int[]]$Keys = @(),
     [int]$AfterKeysSec = 3,
     [switch]$Stress
@@ -30,6 +34,7 @@ public class W32S {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindWindowW")]
   public static extern IntPtr FindWindowW(IntPtr cls, string title);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 "@
@@ -60,8 +65,14 @@ function Screenshot([IntPtr]$h, [string]$out) {
 }
 
 function Post-Key([IntPtr]$h, [int]$vk) {
-    $downL = [IntPtr](1 -bor 0x40000000)   # bit30 transition set => key was previously up
-    $upL   = [IntPtr](1 -bor 0xC0000000)   # bit31 previous state + bit30 transition
+    # lParam 的 bit16-23 必须是**扫描码**：winit 的 Windows 后端正是靠它把 WM_KEYDOWN
+    # 解析成 KeyCode 的。2026-09-12 之前这里只发 `1 | bit30`（无扫描码），于是 winit 拿不到
+    # 键位、事件被丢弃 —— cap_safe 的 -Keys 从来没有生效过，而同期 pm_play /
+    # gameplay_smoke_pm.py 的 `lp = 1 | (scan << 16)` 一直是对的。别再退回不带扫描码的写法。
+    $scan = [int64][W32S]::MapVirtualKey([uint32]$vk, 0)   # MAPVK_VK_TO_VSC
+    $base = [int64](1 -bor ($scan -shl 16))
+    $downL = [IntPtr]$base
+    $upL = [IntPtr]([int64]($base -bor [int64]0xC0000000))  # bit31 前次状态 + bit30 转换
     [W32S]::PostMessage($h, $WM_KEYDOWN, [IntPtr]$vk, $downL) | Out-Null
     Start-Sleep -Milliseconds 80
     [W32S]::PostMessage($h, $WM_KEYUP,   [IntPtr]$vk, $upL)   | Out-Null

@@ -125,6 +125,31 @@
 
 **教训（已并入教训清单候选）**：`RV3D_CAM` 的 yaw 方向**必须先标定再用来做对照实验**。
 我拿它做了三轮 A/B，其中一轮方向反了，直接产出一个写进文档的错结论。
+### ✅ 姿态功能已在引擎内验证（2026-09-12，第 4 轮）
+
+上一轮卡在"键发出去了游戏零响应"。**根因是两个叠加的 harness bug**，都在 `cap_safe.ps1`：
+
+1. **窗口句柄取错**：用 `Process.MainWindowHandle`（对 winit 程序拿到的不是接收输入的那个窗口）
+   → 改为 `FindWindowW(None, "Steel Front - Vulkan")` + 40×250ms 轮询。
+2. **键码空间搞错（真凶）**：把 **winit 的 `KeyCode` 枚举序号**当成 `WM_KEYDOWN` 的 `wParam`
+   发了出去。`wParam` 要的是 **Windows 虚拟键码 VK**：
+   - `KeyR` 在 winit 里是 36，但 **Windows 的 `VK_R` 是 82(0x52)**；36 在 Windows 里是 `VK_HOME`。
+   - `44`（winit 的 KeyZ）在 Windows 里是 **`VK_SNAPSHOT`（PrintScreen）**。
+   - AGENTS.md 里记的 `-Keys 9` 之所以"像能用"，纯粹因为 **9 在两套里恰好都是 Tab**。
+3. 附带：`lParam` 的 **bit16-23 必须是扫描码**（`MapVirtualKey(vk,0)`），winit 靠它解析键位。
+
+**验证结果**（`cap_safe -Keys @(82,67,90)` = VK_R / VK_C / VK_Z）：
+```
+stance: Crouching eye=1.02m
+stance: Prone     eye=0.42m
+```
+**C 键 → 下蹲（视高 1.02m），Z 键 → 卧倒（视高 0.42m），与设计完全一致。第③条的姿态部分结案。**
+
+**顺带**：冒烟闸门当时也是绿的（`RESULT: ALL-OK`，`score 0 -> 10`），并且它自己打印
+"no foreground" —— 证明 **PostMessage 确实不依赖前台**，铁律 C 那条表述是对的，
+反例出在 cap_safe 自己身上。`pm_play.ps1` / `gameplay_smoke_pm.py` 一直是正确参照实现。
+
+**这一修同时解锁了后续所有游戏内验证**（打药、开火模式、人物建模、烘焙都要靠它）。
 ## 功能：姿态系统 + 冲刺（2026-09-12，第③条的第一部分）
 
 **已实现**：`Stance`（站立/下蹲/卧倒，`game.rs`）+ 冲刺。
