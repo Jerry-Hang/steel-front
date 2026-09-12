@@ -1845,9 +1845,15 @@ impl GameApp {
             //    （marker 的 tint 会经光照与程序化皮肤，读回来的颜色不可靠）。
             //    **量在程序里就直接打出来** —— 这是第 76 轮已经验证过的方法。
             if let Ok(s) = std::env::var("RV3D_DUMP_NEAR") {
-                if let Ok(r) = s.parse::<f32>() {
-                    let c = self.camera.position();
-                    for (i, o) in self.game.render_geometry().enumerate() {
+                // ⚠ 只在**第一次**打印。这段在渲染路径里、每帧都会跑到 ——
+                //    不加守卫就是几十行/秒刷屏，把真正要看的日志冲掉（第 92 轮修）。
+                //    几何在关卡加载后是静态的，一次就够；要看别的机位就重跑一局。
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static DUMPED: AtomicBool = AtomicBool::new(false);
+                if !DUMPED.swap(true, Ordering::Relaxed) {
+                    if let Ok(r) = s.parse::<f32>() {
+                        let c = self.camera.position();
+                        for (i, o) in self.game.render_geometry().enumerate() {
                         if o.shape == engine::geom::Shape::None {
                             continue;
                         }
@@ -1860,6 +1866,7 @@ impl GameApp {
                                 o.y - o.half_h, o.y + o.half_h,
                                 o.shape
                             );
+                        }
                         }
                     }
                 }
