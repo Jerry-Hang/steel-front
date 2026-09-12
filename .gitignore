@@ -24,3 +24,7 @@ scripts/.ds_out.txt
 # 本地运行与诊断数据（战斗日志 / LLM 决策流 / 临时探针脚本）
 data/
 
+# Python 字节码缓存
+__pycache__/
+*.pyc
+
