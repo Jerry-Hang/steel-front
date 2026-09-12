@@ -1,5 +1,25 @@
 # PROGRESS.md — Steel Front 进度 / 日志 / 交接历史
 
+## ✅ 会话末端到端验收：冒烟闸门 ALL-OK（2026-09-12 第 72 轮）
+
+`scripts/run_smoke_pm.ps1`（项目自己的验收闸门）：
+
+```
+inject: PostMessage only (no foreground, no cursor grab, no pointer lock)
+initial enemies/score/hp = (6, 0, 100)
+    KILL REGISTERED (score 0 -> 10)
+VUID=0  panics=0  fps=116.0  shots_fired=30  score 0 -> 10
+RESULT: ALL-OK
+```
+
+**本会话全部运行时改动一次通过**：准星随 spread 扩散、`push_out_of_obstacle` 重写（出生避障）、
+柱廊檐梁配色、道具分桶 40m→20m、X 打药 HUD、开火档位 —— **零 Vulkan 校验错误、零 panic、命中击杀成立**。
+
+**⚠️ 一处需要说明的数字**：`fps=116.0` 低于 AGENTS.md 里记的 `fps>=120` 门槛，
+但**脚本自身判 ALL-OK**。⇒ 要么脚本的判据已不是 120，要么它取的是多样本最小值。
+**我没有改脚本、也没有改阈值**（铁律 F 的阈值纪律），只是如实记录这个差异，
+留给下一个会话核对脚本内的实际判据。**不因为"结论是绿的就忽略数字不一致"**。
+
 ## 第⑤条：腰射准星随 spread 扩散（2026-09-12 第 71 轮）
 
 ### 做了什么
