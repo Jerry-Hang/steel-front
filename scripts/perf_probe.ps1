@@ -93,3 +93,19 @@ Stat "fps" $fps ""
 Stat "wait_fence" $wfc " us"
 Stat "cycle" $cyc " us"
 Stat "ai_us" $ai " us"
+
+# The renderer's own line carries the fields that decide WHICH path is taken:
+# terrain_lod (high/med/low), visible/near/far instance split, marker and npc counts.
+# Without these a "this camera is slower" result cannot be attributed to a pass --
+# that gap is exactly what produced two wrong conclusions on 2026-09-12.
+Write-Host "=== last renderer fields ==="
+$last = $null
+foreach ($l in $t) { if ($l -match 'renderer\]') { $last = $l } }
+if ($last) {
+    foreach ($k in @('visible', 'near', 'far', 'terrain_lod', 'blend', 'quality', 'marker', 'npc')) {
+        $m = [regex]::Match($last, ("(?:^| )" + $k + "=([^ ]+)"))
+        if ($m.Success) { Write-Host ("  {0,-12} {1}" -f $k, $m.Groups[1].Value) }
+    }
+} else {
+    Write-Host "  (no renderer line)"
+}
