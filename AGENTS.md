@@ -78,7 +78,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 > WSL2 相关材料**全部作废、已从本文件删除**（详见文末存档指针）。
 
 - **机器**：RTX 5060 Laptop（NVIDIA 驱动 610.88）+ AMD 8940HX，内存 12GB。
-- **编译**：`cargo build --release`。**测试**：`cargo test --release`（当前基线 **465 passed / 0 failed / 0 警告**）。
+- **编译**：`cargo build --release`。**测试**：`cargo test --release`（**0 警告**是硬红线；具体 passed 数见 `docs/PROGRESS.md`）。
   UDP 回环测试在沙箱内 bind 会 PermissionDenied → 需提权跑。
 - **GPU 能力（原生实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
   DLSS VK_NVX=true、`present_us 101–373µs`。

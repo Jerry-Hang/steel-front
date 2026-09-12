@@ -229,6 +229,41 @@ impl FireMode {
     }
 }
 
+/// 由**射速**派生出这把武器支持的档位表。用户要求"不同武器支持不同档位"，
+/// 但**不逐武器手写 35 份表** —— 手写表就是 35 个将来会分叉的地方，而本仓最贵的
+/// 一类 bug 正是"同一个量有两套来源"。派生规则的阈值取自真实连发扳机的分布：
+///
+/// - `rpm < 200`：栓动狙击 / 泵动霰弹 —— **只有单发**，这类枪没有点射档
+/// - `200 ≤ rpm < 550`：半自动步枪 / 精确射手 —— 单发 + 双发 + 三连发
+/// - `rpm ≥ 550`：突击步枪 / 冲锋枪 —— 四档全给
+pub fn fire_modes_for(rpm: f32) -> &'static [FireMode] {
+    const SEMI: &[FireMode] = &[FireMode::Semi];
+    const BURST: &[FireMode] = &[FireMode::Semi, FireMode::Burst2, FireMode::Burst3];
+    const FULL: &[FireMode] = &[FireMode::Semi, FireMode::Burst2, FireMode::Burst3, FireMode::Auto];
+    // 用 `!(rpm >= 200.0)` 而不是 `rpm < 200.0`，这样 NaN 落进最保守的"只有单发"
+    if !(rpm >= 200.0) {
+        SEMI
+    } else if rpm < 550.0 {
+        BURST
+    } else {
+        FULL
+    }
+}
+
+/// 在**支持的档位集合**里取下一个，跳过不支持的。抽成纯函数是为了能直接测
+/// "栓动狙击按 B 键不会切到连发"—— 否则得先构造一把特定武器才能覆盖到。
+/// 一圈都找不到就原样返回（支持集合为空或只有当前档时不该崩也不该乱跳）。
+pub fn next_supported_fire_mode(current: FireMode, supported: &[FireMode]) -> FireMode {
+    let mut m = current;
+    for _ in 0..4 {
+        m = m.next();
+        if supported.contains(&m) {
+            return m;
+        }
+    }
+    current
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameState {
     /// 开始菜单：任意键开始
@@ -2796,13 +2831,30 @@ impl Game {
 
     /// 循环切换开火模式（B 键）：单发 → 三连发 → 连发
     pub fn cycle_fire_mode(&mut self) {
-        self.fire_mode = self.fire_mode.next();
-        log::info!("weapons: 开火模式切换为 {}", self.fire_mode.label());
+        let modes = self.supported_fire_modes();
+        self.fire_mode = next_supported_fire_mode(self.fire_mode(), modes);
+        log::info!("weapons: 开火模式切换为 {}", self.fire_mode().label());
     }
 
     /// 当前开火模式
+    /// 当前武器支持的档位表（由射速派生，见 `fire_modes_for`）
+    pub fn supported_fire_modes(&self) -> &'static [FireMode] {
+        let interval = self.weapons.active_firearm_ref().fire_interval();
+        let rpm = if interval > 0.0 { 60.0 / interval } else { 0.0 };
+        fire_modes_for(rpm)
+    }
+
+    /// 当前**生效**档位：始终夹进本武器支持的集合里。
+    ///
+    /// 故意做成"读的时候派生"而不是"切枪时重置一个字段"：后者需要一个切枪钩子，
+    /// 一旦漏挂就会留下"拿着栓动狙击却还开着连发"的状态 —— 那正是两套状态源。
     pub fn fire_mode(&self) -> FireMode {
-        self.fire_mode
+        let modes = self.supported_fire_modes();
+        if modes.contains(&self.fire_mode) {
+            self.fire_mode
+        } else {
+            modes[0]
+        }
     }
 
     /// 累计命中数（供 UI / 日志）
@@ -6385,6 +6437,48 @@ mod tests {
         assert!(game.sprinting(), "恢复站立后应重新冲刺");
         game.set_sprint(false);
         assert!(!game.sprinting(), "松开 Shift 必须停止冲刺");
+    }
+
+    #[test]
+    fn fire_mode_cycle_skips_unsupported_modes() {
+        // 栓动狙击只有单发：按 B 必须原地不动，绝不能切到连发
+        let semi_only = fire_modes_for(45.0);
+        assert_eq!(
+            next_supported_fire_mode(FireMode::Semi, semi_only),
+            FireMode::Semi,
+            "只有单发的武器按 B 不该离开单发"
+        );
+        // 半自动：单发 → 双发 → 三连发 → 回到单发，全自动被跳过
+        let semi_burst = fire_modes_for(400.0);
+        let a = next_supported_fire_mode(FireMode::Semi, semi_burst);
+        assert_eq!(a, FireMode::Burst2);
+        let b = next_supported_fire_mode(a, semi_burst);
+        assert_eq!(b, FireMode::Burst3);
+        let c = next_supported_fire_mode(b, semi_burst);
+        assert_eq!(c, FireMode::Semi, "半自动绕一圈必须回到单发，跳过连发");
+        // 全自动：四档按顺序全走一遍
+        let full = fire_modes_for(700.0);
+        assert_eq!(next_supported_fire_mode(FireMode::Burst3, full), FireMode::Auto);
+        assert_eq!(next_supported_fire_mode(FireMode::Auto, full), FireMode::Semi);
+    }
+
+    #[test]
+    fn fire_modes_are_derived_per_weapon_class() {
+        // 栓动狙击 / 泵动霰弹：只有单发，绝不给点射或连发
+        for rpm in [0.0f32, 45.0, 120.0, 199.0] {
+            let m = fire_modes_for(rpm);
+            assert_eq!(m.len(), 1, "rpm={rpm} 应只有一档");
+            assert_eq!(m[0], FireMode::Semi, "rpm={rpm} 应是单发");
+        }
+        // 半自动：单发 + 双发 + 三连发，但没有全自动
+        let mid = fire_modes_for(400.0);
+        assert!(mid.contains(&FireMode::Burst2), "半自动要有双发");
+        assert!(mid.contains(&FireMode::Burst3), "半自动要有三连发");
+        assert!(!mid.contains(&FireMode::Auto), "半自动不该给全自动");
+        // 全自动武器：四档全给
+        assert_eq!(fire_modes_for(700.0).len(), 4, "全自动应给满四档");
+        // NaN 必须落进最保守的一档（若写成 `rpm < 200.0` 则 NaN 会一路穿到 FULL）
+        assert_eq!(fire_modes_for(f32::NAN).len(), 1, "NaN 必须落最保守档");
     }
 
     #[test]
