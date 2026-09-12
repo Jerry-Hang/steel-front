@@ -529,7 +529,13 @@ impl GameApp {
             cursor_captured: false,
             cursor_locked: false,
             abs_baseline_valid: false,
-            focused: true,
+            // 必须从 false 起步，由 WindowEvent::Focused 驱动。
+            // 写成 true 会让 sync_cursor 的 `want` 从第 1 帧就成立：
+            // winit 只在收到 WM_SETFOCUS 时才发 Focused(true)，所以窗口若是被
+            // 别的程序占着前台（启动瞬间很常见），本进程根本收不到该事件、
+            // 也不会收到 Focused(false) —— 于是游戏在"自认为有焦点"的状态下
+            // ClipCursor 把指针钉成 1×1，用户看到的就是整台机器像死机。
+            focused: false,
             recenter_pending_until: None,
             last_cam_log: Instant::now(),
             game,
