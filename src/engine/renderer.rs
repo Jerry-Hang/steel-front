@@ -481,10 +481,14 @@ const PROP_INSTANCE_INDEX: u32 = GUN_INSTANCE_INDEX + 1;
 /// 现在由最高槽位反推，结构上不可能再漏。
 const INSTANCE_BUFFER_ELEMS: u64 = PROP_INSTANCE_INDEX as u64 + 1;
 /// 道具分桶边长（米）。全城约 ±175m ⇒ 约 9×9 格。
-/// 取 40m 是实测折中：桶再小则 draw call 数上升（每桶一次 cmd_draw_indexed 与
-/// 其绑定开销），再大则一桶里必然跨视锥边界、剔除变粗。改这一个数就能调，
-/// 不影响正确性（包围球按桶内顶点真实范围算）。
-const PROP_BIN_CELL_M: f32 = 40.0;
+/// 🔴 2026-09-12 第 44 轮：由 40m 改为 20m。**原注释的理由已被实测推翻** ——
+/// 「桶再小则 draw call 数上升（每桶一次 cmd_draw_indexed 与其绑定开销）」
+/// 这条经 `RV3D_ONE_PROP_DRAW` 对照否定：把 28 个可见桶合并成 **1 个** draw
+/// 反而**更慢**（126.7 → 82.6 fps，wait_fence 4164 → 9006µs），
+/// 因为它没剔除、多画了 2.7 倍顶点。**draw call 数不是瓶颈。**
+/// 而第 43 轮同时证明成本与**绘制的顶点数近似成正比**（2.69× 顶点 → 2.14× 时间）。
+/// ⇒ 该优化的是"每帧画多少顶点"，切细桶正是为此；draw call 上升是安全的代价。
+const PROP_BIN_CELL_M: f32 = 20.0;
 const _: () = assert!(
     INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTANCE_BUFFER_ELEMS > 0,
     "实例 buffer 必须覆盖所有已知槽位"
