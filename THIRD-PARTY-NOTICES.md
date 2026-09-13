@@ -220,6 +220,19 @@ build at all, while one under **CC BY-SA** would impose a share-alike
 obligation on the artwork that is distinct from — and additional to — the
 AGPL-3.0 covering the code.
 
+### Working document
+
+**[`docs/WEAPON-LICENCE-AUDIT.md`](docs/WEAPON-LICENCE-AUDIT.md)** is the
+worksheet for resolving this: all 14 source slugs, the slug→key mapping, the
+licence decision table, the three leads found so far, and the two traps that
+make a naive pass produce *fake* verification.
+
+**The short version of the trap:** these files kept their Sketchfab slugs, so
+they are findable — but a slug does **not** identify the asset. Searching
+`pp-19-01_vityaz` returns models by two different authors under different
+licences. Recording either without disambiguating produces a licence record that
+looks verified and is not.
+
 ### Required action before redistribution
 
 For **each** file in `assets/guns/` and `assets/guns_ext/`:

@@ -236,6 +236,7 @@ GAME_DESIGN.txt        # 玩法设计文档（唯一设计依据）
 | [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt) | 35 把枪的完整数据表与设计依据 | 改武器数值或新增枪械时 |
 | [LICENSE](./LICENSE) | 许可与商业授权条款 | 再分发或商用前 |
 | [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) | 第三方依赖与素材的逐项来源核实、再分发清单、两项已知风险 | **再分发本仓库或其构建产物之前必读** |
+| [docs/WEAPON-LICENCE-AUDIT.md](./docs/WEAPON-LICENCE-AUDIT.md) | 枪械模型的逐项许可核对工作表（14 个来源 slug / 判定表 / 已知线索 / 两个陷阱） | 清理第三方素材授权时 |
 | `docs/experiment-*` | 渲染、光照、性能的验证记录与实测数据 | 怀疑某个"已知结论"是否仍然成立时 |
 | `docs/perf-*` | 帧率与瓶颈基准存档 | 做性能优化前后对比 |
 | `docs/HANDOFF-*` | 历史交接快照 | 追溯某个决定是在哪一轮做出的 |
