@@ -117,7 +117,15 @@ mod win_topology {
     #[repr(C)]
     struct InfoEx {
         relationship: u32,
-        // 40 字节联合体（实测 sizeof = 48：缓存/核心关系条目均 48B 步长，2026-08-22 实测）
+        /// 🔴🔴 **`SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX` 是变长条目** ——
+        /// 每条自带 `Size`，**必须按它前进**，不能用一个固定跨度扫。
+        /// 原结构体缺了这个字段（`relationship` 后直接接联合体），于是遍历时
+        /// 每步都落在错位数据上：本机 16 条里只有 6 条"看起来匹配"、4 条 mask 为空，
+        /// **最终只解出 2 个物理核** ⇒ `physical_primary=[0]`
+        /// ⇒ `ai_pool`/`scene_pool` 各只建 1 个工作线程 ⇒ 整局只有 2 个逻辑核在跑
+        /// （任务管理器可见，GPU 因此被单线程 CPU 饿住）。见 [`detect`]。
+        size: u32,
+        // 联合体（核心/缓存关系），按 8 字节对齐
         data: [u64; 5],
     }
 
@@ -166,46 +174,66 @@ mod win_topology {
         v
     }
 
+    /// 按 `Size` 遍历变长条目。`f(relationship, 条目数据指针)`。
+    ///
+    /// 🔴 2026-09-13：**不能用固定跨度**。`GetLogicalProcessorInformationEx` 返回的是
+    /// 一串**变长**的 `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX`，每条首部含
+    /// `Relationship` 与 `Size`；缓存关系的条目比核心关系长。原实现用
+    /// `size_of::<InfoEx>()`（48）当固定跨度扫，**条目一多就整体错位**
+    /// ⇒ 本机只解析出 2 个物理核（应为 8）⇒ 线程池各只建 1 个 worker。
+    fn walk(buf: &[u64], mut f: impl FnMut(u32, *const u8, u32)) {
+        let bytes = buf.len() * std::mem::size_of::<u64>();
+        let base = buf.as_ptr() as *const u8;
+        let mut off = 0usize;
+        // 头部至少要有 relationship(4) + size(4) + 指针推进所需
+        while off + 8 <= bytes {
+            let e = unsafe { &*(base.add(off) as *const InfoEx) };
+            let sz = e.size as usize;
+            if sz < 8 || off + sz > bytes {
+                break; // 越界/畸形：停止而不是继续读垃圾
+            }
+            f(e.relationship, unsafe { base.add(off) }, e.size);
+            off += sz;
+        }
+    }
+
     pub fn detect() -> Option<PlatformTopo> {
         let mut cores: Vec<Vec<usize>> = Vec::new();
         let mut efficiency: Vec<u8> = Vec::new();
         let mut ccx: Vec<Vec<usize>> = Vec::new();
 
         if let Some(buf) = query(REL_PROCESSOR_CORE) {
-            let stride = std::mem::size_of::<InfoEx>();
-            for i in 0..buf.len() / stride {
-                let e = unsafe { &*(buf.as_ptr().add(i * stride) as *const InfoEx) };
-                if e.relationship != REL_PROCESSOR_CORE {
-                    continue;
+            walk(&buf, |rel, p, _sz| {
+                if rel != REL_PROCESSOR_CORE {
+                    return;
                 }
-                let pr = unsafe { &*(e.data.as_ptr() as *const ProcessorRel) };
+                let pr = unsafe { &*(p.add(8) as *const ProcessorRel) };
                 if pr.group_count < 1 {
-                    continue;
+                    return;
                 }
                 let members = mask_members(pr.group_mask[0].mask);
-                if !members.is_empty() {
-                    for _ in 0..members.len() {
-                        efficiency.push(pr.efficiency);
-                    }
-                    cores.push(members);
+                if members.is_empty() {
+                    return;
                 }
-            }
+                for _ in 0..members.len() {
+                    efficiency.push(pr.efficiency);
+                }
+                cores.push(members);
+            });
         }
         if let Some(buf) = query(REL_CACHE) {
-            let stride = std::mem::size_of::<InfoEx>();
-            for i in 0..buf.len() / stride {
-                let e = unsafe { &*(buf.as_ptr().add(i * stride) as *const InfoEx) };
-                if e.relationship != REL_CACHE {
-                    continue;
+            walk(&buf, |rel, p, _sz| {
+                if rel != REL_CACHE {
+                    return;
                 }
-                let cr = unsafe { &*(e.data.as_ptr() as *const CacheRel) };
+                let cr = unsafe { &*(p.add(8) as *const CacheRel) };
                 if cr.level == 3 {
                     let members = mask_members(cr.group_mask.mask);
                     if !members.is_empty() {
                         ccx.push(members);
                     }
                 }
-            }
+            });
         }
         if cores.is_empty() {
             return None;
@@ -1016,7 +1044,30 @@ static AI_POOL: OnceLock<ThreadPool> = OnceLock::new();
 pub fn ai_pool() -> &'static ThreadPool {
     AI_POOL.get_or_init(|| {
         let topo = topology();
-        let set = topo.ai_set();
+        // 🔴 2026-09-13：`RV3D_AI_CPUS` 允许**显式指定 AI 池绑定的 vCPU 列表**
+        // （`RV3D_AI_WORKERS` 只能改线程数，改不了"绑哪几个核"）。
+        //
+        // 存在的理由：用户要验证"能不能把 AI 大胆扔到能效核上"。
+        // 做法是**模拟 Intel 的 E-core 数量** —— 把 AI 池依次绑到 1C2T / 2C4T /
+        // 3C6T / 4C8T，看帧率是否随之变化：
+        //   * 从 1C2T 起帧率就**不再提高** ⇒ AI 根本不需要那么多核，
+        //     当前"整个 CCD1 给 AI"属于过量配置，可以收窄；
+        //   * 帧率随核数**显著上升** ⇒ AI 确实吃满，分配是对的。
+        // 例：`RV3D_AI_CPUS=0,1`（1 物理核 2 线程）。
+        let set: Vec<usize> = match std::env::var("RV3D_AI_CPUS") {
+            Ok(v) if !v.trim().is_empty() => match parse_cpu_list(v.trim()) {
+                Some(list) if !list.is_empty() => {
+                    log::info!("cpu: ai_pool 被 RV3D_AI_CPUS 覆盖为 {:?}", list);
+                    list
+                }
+                _ => {
+                    log::warn!("cpu: RV3D_AI_CPUS=\"{v}\" 解析失败，回退默认集合");
+                    topo.ai_set().to_vec()
+                }
+            },
+            _ => topo.ai_set().to_vec(),
+        };
+        let set = set.as_slice();
         let default = set.len().min(8).max(1);
         let n = env_workers("RV3D_AI_WORKERS", default);
         log::info!("cpu: ai_pool 创建（{} 工作线程，绑定 vCPU {:?}）", n, set);
