@@ -33,7 +33,52 @@ struct MeshOutput {
 **⇒ 每个 workgroup（=一个实例）最多 50 顶点 / 96 图元，而士兵是 1082 / 540 ——
 结构上装不下。**（Vulkan 规范只保证 256/256，即使提到上限也装不下 540 三角形。）
 
-**唯一可行的路**：**道具路径** —— 它的顶点是 CPU 侧烘好位姿的，没有这个上限。
+### ✅ 解法（2026-09-13 晚找到）—— **枪模就是现成的模板，不要走 mesh 路径**
+
+**枪模证明了另一条路可行**（`renderer.rs:8735-8766`）：
+
+```rust
+if self.gun_index_count > 0 && self.gun_vertex_count > 0 {
+    cmd_bind_pipeline(..., self.gun_pipeline);          // 传统 VERTEX 管线
+    cmd_bind_descriptor_sets(..., self.pipeline_layout, ...);
+    cmd_bind_vertex_buffers(0, &[self.gun_vertex_buffer], &[0]);
+    cmd_bind_index_buffer(self.gun_index_buffer, 0, UINT32);
+    cmd_draw_indexed(self.gun_index_count, /*实例数*/ 1, 0, 0, GUN_INSTANCE_INDEX);
+}
+```
+
+**⇒ 枪 = "任意 GLB 网格 + 从实例缓冲取模型矩阵"，走传统管线，而且这在 mesh 着色器
+可用的机器上照跑（先例已存在）。**
+
+**⇒ `cmd_draw_indexed` 的**实例数**是自由参数 ⇒ 士兵不需要每实例一个 workgroup：**
+
+1. 把 `assets/soldier/soldier.glb` 上传一次到**独立的顶点/索引缓冲**。
+   ⚠️ **按常量容量一次分配**（照 `props` 那条纪律），**不要 `next_power_of_two` 重建**
+   —— destroy 在飞 buffer 会 NVIDIA device lost。
+2. 在实例缓冲里开**一段新槽位**（例 `SOLDIER_INSTANCE_BASE`，接在 `PROP_INSTANCE_INDEX`
+   之后）。**必须同步 `INSTANCE_BUFFER_ELEMS` 与那个编译期 `const _: () = assert!(...)`**
+   —— 铁律 B 的"静默越界读"就是三处副本不同步。
+3. 每帧为最近的 N 个 NPC 写 N 个实例矩阵（根变换 = 位置 + yaw，可复用
+   `soldier_part_matrices` 里已有的量）。
+4. `cmd_draw_indexed(soldier_index_count, N, 0, 0, SOLDIER_INSTANCE_BASE)`。
+
+**管线**：复制 `gun_pipeline` 的创建代码，但改成 **`depth_test = ON` + 写深度**
+（枪那条是 OFF，因为它要恒在 HUD 之上；世界里的士兵必须被墙挡住）。
+
+**为什么这不算违反铁律 A**：铁律 A 说"传统管线冻结、不新增功能"，意图是**别把开发摊到
+两条路上**。而这里 mesh 路径**结构上做不到**（50 顶点上限），且**枪模已经在这条传统
+管线上跑了很久** —— 是既有先例的延伸，不是新开一条路。
+**仍建议动手前先在 AGENTS.md 的铁律 A 里补一句豁免与理由**，免得下次被当违规回退。
+
+**必守纪律**：改前跑冒烟确认基线 `VUID=0`；改后跑 `scripts/run_smoke_pm.ps1`；
+**0 警告是硬红线**；**做不完就 `git checkout --` 回退，别留半成品**；
+`renderer.rs` 上万行**只许精确 edit，禁止整文件重写**（铁律 F）。
+
+### 曾经试过的道具路径（已被上面这条取代，保留作为背景）
+
+**道具路径**：它的顶点是 CPU 侧烘好位姿的，没有 50 顶点上限 —— 但**全 255 人每帧重写
+是 27 万顶点，不可行**，只能画最近的 N 个，且需要改 `upload_props` 的容量与索引映射。
+上面那条"实例化 GLB"更干净。
 
 ### 我试到哪一步、为什么停
 
