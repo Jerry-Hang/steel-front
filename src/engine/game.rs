@@ -4332,9 +4332,17 @@ impl Game {
         self.objective = MissionObjective::new(self.stress_sides as u32);
         let sides = self.stress_sides as u32;
         let profile = wave_profile(self.effective_wave(1));
+        // 🔬 **互换对照开关**（2026-09-13 加，用于未结案第一条"红蓝阵营不对称"）
+        //
+        // 压力模式下**红方恒胜**（四次 190s 对撞，蓝方净耗 101/102/102/103，红方 34/52/56/76），
+        // 而出生几何按构造是对称的。判据写在未结案清单里：
+        //   **把两侧半场对调 —— 赢家跟着半场走 = 地图几何；跟着队伍走 = 单位/AI 行为。**
+        // `RV3D_SWAP_SIDES=1` 只交换两个半场，不动队伍/人数/角色/任何其它参数，
+        // 所以它是干净的**单变量**对照。默认关闭 ⇒ 生产行为逐字节不变。
+        let swap_sides = std::env::var("RV3D_SWAP_SIDES").as_deref() == Ok("1");
         for side in 0..2u32 {
             let team = if side == 0 { Team::Red } else { Team::Blue };
-            let base_angle = if side == 0 { 0.0 } else { std::f32::consts::PI };
+            let base_angle = if (side == 0) != swap_sides { 0.0 } else { std::f32::consts::PI };
             // 蓝方少生 1 名：玩家本身就是蓝方士兵（红 64 vs 蓝 63+玩家 = 64v64）
             let per_side = if side == 0 { sides } else { sides.saturating_sub(1) };
             for i in 0..per_side {
