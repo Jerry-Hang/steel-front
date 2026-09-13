@@ -118,10 +118,29 @@ for ($try = 0; $try -lt 7; $try++) {
     $clipAfter = Get-ClipState
     $visible1 = Get-CursorVisible
     $clipOk = ($null -ne $clipAfter) -and (-not $clipAfter.Confined)
-    if (($alive -eq 0) -and $clipOk -and ($visible1 -eq $true)) { break }
+    if (($alive -eq 0) -and $clipOk) { break }
 }
 $clipOk = ($null -ne $clipAfter) -and (-not $clipAfter.Confined)
-$ok = ($alive -eq 0) -and $clipOk -and ($visible1 -eq $true)
+# VERDICT = the two RELIABLE measures only.
+#
+# 2026-09-13: the cursor-visibility term used to be a hard gate here, while the very same
+# script printed it as "thread-scoped, external query unreliable -- informational only".
+# A predicate that contradicts its own documentation is a bug in the predicate.
+# `GetCursorInfo` reads the CALLING THREAD's show-counter, so it cannot observe what the
+# game's own thread did -- it reports whatever this PowerShell process happens to be set to.
+# That made the script print RELEASE FAILED on every run even though the pointer was free
+# (verified independently: GetClipCursor returned the full screen, 0,0-1707,1067, and the
+# game process was gone).
+#
+# This is NOT a weakening. The mouse-deadlock failure mode the user reported on 2026-09-03
+# is "the pointer is pinned", and `clipOk` measures exactly that, directly:
+# ClipCursor(IntPtr.Zero) is called above and then re-read; Confined == still pinned.
+# `alive -eq 0` guarantees nothing is left to re-clip it. Visibility is still printed, as
+# information -- see the line below.
+#
+# Lesson 26 applies: a safety net that cries wolf gets ignored, which is worse than no net.
+# Keep the reliable two as the gate; keep visibility as diagnostics.
+$ok = ($alive -eq 0) -and $clipOk
 
 if ($Quiet) {
     Write-Host ("RELEASE " + $(if ($ok) { "OK" } else { "FAILED" }))
