@@ -62,8 +62,17 @@ if self.gun_index_count > 0 && self.gun_vertex_count > 0 {
    `soldier_part_matrices` 里已有的量）。
 4. `cmd_draw_indexed(soldier_index_count, N, 0, 0, SOLDIER_INSTANCE_BASE)`。
 
-**管线**：复制 `gun_pipeline` 的创建代码，但改成 **`depth_test = ON` + 写深度**
-（枪那条是 OFF，因为它要恒在 HUD 之上；世界里的士兵必须被墙挡住）。
+**管线**：**不需要新建任何一个。**
+
+`init_pipeline()` 与 `init_mesh_pipeline()` 在 `Renderer::new` 里**都是无条件调用**的
+（`renderer.rs:1068-1069`），所以：
+
+* `self.pipeline` **永远存在**，它就是**传统 VERTEX 管线**（`vs_main`/`fs_main`），
+  **`depth_test` 是开的** —— 正是士兵需要的那条；
+* 而且**道具已经在用它做 `cmd_draw_indexed`**（`prop_bins` 那段），先例就在旁边。
+
+⇒ 士兵只要"上传网格 + 每帧写实例 + 一次 `cmd_draw_indexed`"，**连管线创建代码都不用抄**。
+（原先我记的是"复制 `gun_pipeline` 改成 depth_test=ON" —— 那是多余的一步。）
 
 **为什么这不算违反铁律 A**：铁律 A 说"传统管线冻结、不新增功能"，意图是**别把开发摊到
 两条路上**。而这里 mesh 路径**结构上做不到**（50 顶点上限），且**枪模已经在这条传统
