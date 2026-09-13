@@ -557,4 +557,8 @@ def main():
         print("KIT %-18s expected_height=%.3f actual_top=%.3f" % (name, h, max(zs)))
 
 
-main()
+# 2026-09-13: guard added so this module can be IMPORTED for its helpers
+# (Part / box / add_quad_n / exposure_ao / export_glb) by tools/blender/build_soldier.py.
+# Running the file directly is unchanged: __name__ == "__main__" there.
+if __name__ == "__main__":
+    main()
