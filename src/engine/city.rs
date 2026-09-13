@@ -274,8 +274,14 @@ impl City {
     /// 按目标 footprint 与层数，挑长宽比最接近的建筑变体，返回（名字，等比缩放）。
     ///
     /// 只用等比缩放：非等比会把窗洞拉成平行四边形，比"楼不够准"更刺眼。
-    /// 缩放取 `max` 而不是 `min`，保证 GLB 始终**不小于**碰撞盒——宁可让玩家撞在一面
-    /// 看得见的墙上，也不要被一面无形的墙挡住（后者会被当成寻路 bug 报上来）。
+    ///
+    /// 🔴🔴 2026-09-13 修：缩放由 `max` 改为 **`min`**。
+    /// 原注释的理由是"保证 GLB 始终不小于碰撞盒——宁可让玩家撞在一面看得见的墙上"，
+    /// 但 `max` 的实际后果是：按较大的方向贴合 ⇒ **另一方向必然溢出 footprint**
+    /// ⇒ 相邻楼**互相穿插**。全城 52 处 `building_tall` 全中招，玩家看到的就是
+    /// 一堆窗格以不同角度叠在一起（用户 2026-09-13 报的"透视错误/建模问题"）。
+    /// 而建筑模型本身在 Blender 里渲出来是规整窗格 —— 问题一直在摆放，不在模型。
+    /// **"无形的墙"那个顾虑改由调用方把碰撞盒设成真实视觉尺寸来消掉**（见 `building_at`）。
     fn pick_building(&self, w: f32, d: f32, floors: u32) -> Option<(&'static str, f32)> {
         let cands: &[&'static str] = match floors {
             0 | 1 => &["building_shed"],
@@ -293,7 +299,7 @@ impl City {
                 continue;
             }
             let cost = ((gw / gd).ln() - target).abs();
-            let scale = (w / gw).max(d / gd);
+            let scale = (w / gw).min(d / gd);
             if best.is_none() || best.unwrap().0 > cost {
                 best = Some((cost, name, scale));
             }
@@ -374,8 +380,30 @@ fn building(
     if let Some((name, scale)) = c.pick_building(w, d, floors) {
         let yaw = City::face_nearest_street(cx, cz);
         if c.prop(name, cx, cz, yaw, scale) {
+            // 🔴🔴 2026-09-13 修（用户"建筑透视错误/一堆建模问题"的根因）：
+            //
+            // ① `pick_building` 原来取 `scale = max(w/gw, d/gd)` —— 按**较大**的那个方向
+            //    贴合 footprint，于是**另一个方向必然溢出**。全城 52 处 `building_tall`
+            //    每栋都插进邻居里，玩家看到的就是"多栋楼的立面互相穿插"，
+            //    一堆窗格以不同角度/深度叠在一起 —— 用户截图里的"乱窗"就是它，
+            //    而**建筑模型本身在 Blender 里渲出来是规整的 4 列 × 5 行窗格**（我核对过）。
+            // ② 原注释担心改成 min 会出现"无形的墙"：碰撞盒用的是 footprint `(w, d)`，
+            //    而 GLB 缩小后视觉体小于它。**但这个顾虑可以直接消掉** —— 把碰撞盒
+            //    改成**真实视觉尺寸**即可，两边同时成立。
+            //
+            // 视觉尺寸 = 资产 footprint × scale；楼绕 +Y 转了 yaw（只取 0 / ±90° / 180°），
+            // ±90° 时 x/z 两个方向互换。
+            let (vw, vd) = match c.set.index_of(name).and_then(|i| c.set.get(i)) {
+                Some(m) => m.half_footprint(),
+                None => (w * 0.5, d * 0.5),
+            };
+            let (vw, vd) = (vw * 2.0 * scale, vd * 2.0 * scale);
+            let quarter = (yaw.abs() - core::f32::consts::FRAC_PI_2).abs() < 0.01;
+            let (bw, bd) = if quarter { (vd, vw) } else { (vw, vd) };
+            // 兜底：绝不比 1m 还小（极端的资产/格子比例下会让碰撞退化）
+            let (bw, bd) = (bw.max(1.0), bd.max(1.0));
             c.push(
-                Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall)
+                Part::new(ObstacleKind::Building, cx, cz, bw, bd, UNDER_GROUND, h, pal.wall)
                     .invisible(),
             );
             return;
