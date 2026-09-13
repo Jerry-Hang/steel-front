@@ -101,8 +101,16 @@ if /i "%MODE%"=="diag" (
     set "RV3D_PROP_STATS=1"
 )
 
-echo [steel-front] launching...
+if not exist "logs" mkdir "logs"
+REM Capture stderr to a file. Without this the game's own log (log::info!/ERROR) goes
+REM to a console that closes with the window, so a play-test leaves NO evidence --
+REM exactly what happened on 2026-09-13 when the mouse capture and a freeze had to be
+REM diagnosed blind. `cam:` lines (yaw/pitch/focus/cap/lock/drag) land here.
+set "PLAYLOG=logs\play_latest.log.err"
+if exist "%PLAYLOG%" del "%PLAYLOG%" >nul 2>&1
+
+echo [steel-front] launching...  (log: %PLAYLOG%)
 REM Pass through any extra arguments, e.g.  SteelFront.bat play --help
-start "" "%EXE%" %*
+start "steel-front" cmd /c ""%EXE%" %* 2> "%PLAYLOG%""
 
 endlocal
