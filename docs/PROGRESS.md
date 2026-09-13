@@ -5372,8 +5372,8 @@ NPC 就生成在楼体里**。这与未结案 4「玩家可能站在 GLB 楼体�
 
 | 文件 | 内容 |
 |---|---|
-| `tools/blender/build_soldier.py` | 生成器（复用 `build_city_kit.py` 的 `Part`/`add_quad_n`/`exposure_ao`/`export_glb`） |
-| `assets/soldier/soldier.glb` | **45 KB，1032 顶点 / 516 三角形，1.84 m 高**（含枪的包围盒深 0.94） |
+| `tools/blender/build_soldier.py` | 生成器（复用 `build_city_kit.py` 的 `Part`/`add_quad_n`/`exposure_ao`/`export_glb`）。**四轮预览迭代**：v1 头盔像小帽+手臂被背心埋住 → v2 手臂外移 → v3 发现 AO 基准错(像两套军服)+加护目镜 → v4 头/盔改棱柱 |
+| `assets/soldier/soldier.glb` | **约 45 KB，1080 顶点 / 540 三角形，1.84 m 高**（含枪的包围盒深 0.94）。**头与盔是六棱柱**（盒子做的颅骨在 3-5m 最像机械），盔有喇叭形帽檐 |
 
 **预览已用眼睛看过**（铁律 D 要求）：`build/_soldier/soldier_{0..3}_*.png`
 （四视图；**该目录已 gitignore**）。

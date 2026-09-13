@@ -196,8 +196,8 @@ def main() -> int:
     # helmet rather than a cap floating above it (first preview showed exactly that).
     # helmet: a shallow hex prism flaring outward at the bottom edge (like a real shell)
     limb(p, (0.0, 0.008, 1.760), (0.0, 0.008, 1.840), 0.132, 0.108, HELMET, seg=6)
-    # brim
-    sbox(p, (0.0, 0.125, 1.744), (0.225, 0.095, 0.045), HELMET, ao_top=0.88)
+    # (no separate brim box: the flared helmet prism above already gives a brim, and a
+    #  separate box projected past the back of the skull in the preview.)
 
     # ------------------------------------------------------------ arms (carry pose)
     # Right hand on the pistol grip, left hand under the handguard -- which is what a
