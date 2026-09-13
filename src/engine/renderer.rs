@@ -9719,7 +9719,30 @@ impl Renderer {
         self.last_npc_sph_near = sph_near;
         self.last_npc_sph_far = sph_far;
         // 🪖 士兵 GLB 实例上传（在 NPC 实例同一批里做完，避免多开一次遍历）
-        let _ = self.upload_soldiers();
+        //
+        // 🔴 2026-09-13：**顺便打一个无歧义的计数**（`RV3D_SOLDIER_STATS=1` 才开，默认静默）。
+        //
+        // 存在的理由：我今晚**两次**用没验证过的指标下结论 —— 一次是单次 A/B（方差比效应大），
+        // 一次是把 HUD 的 `npc: I{} P{} C{} A{}` 读成 `npc={}`（读丢了 `I`，那其实是
+        // Idle 人数，与渲染毫无关系）。两次都是"先有结论、再找一个看起来支持它的数字"。
+        //
+        // ⇒ 这个计数**没有歧义**：左边是真正提交的 GLB 士兵实例数，右边是箱体实例数。
+        //   GLB 生效时右边应当是 **0**（活体每人 1 个实例、尸体也是 1 个），
+        //   所以"右边不为 0"就是回退路径被走到的**直接证据**，不必再靠别的字段推断。
+        let soldiers = self.upload_soldiers();
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static TICK: AtomicU32 = AtomicU32::new(0);
+            if std::env::var("RV3D_SOLDIER_STATS").is_ok()
+                && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
+            {
+                log::info!(
+                    "soldier-stats: GLB 实例 {} / 箱体 {}（活体+尸体；GLB 生效时箱体应为 0）",
+                    soldiers,
+                    self.last_npc_box_near + self.last_npc_box_far
+                );
+            }
+        }
         // ---- 自发光实体（爆炸闪光等）：独立槽位上传（见 EMISSIVE_SLOT_BASE）----
         let (emissive_near, emissive_far) = if self.void_mode { (0, 0) } else { self.upload_emissive(cam_pos) };
         self.last_emissive_near = emissive_near;
