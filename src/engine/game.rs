@@ -4340,6 +4340,8 @@ impl Game {
         // `RV3D_SWAP_SIDES=1` 只交换两个半场，不动队伍/人数/角色/任何其它参数，
         // 所以它是干净的**单变量**对照。默认关闭 ⇒ 生产行为逐字节不变。
         let swap_sides = std::env::var("RV3D_SWAP_SIDES").as_deref() == Ok("1");
+        // 见下方 `facing` 的注释：出生时朝向"对面半场"而不是朝向玩家
+        let face_enemy = std::env::var("RV3D_FACE_ENEMY").as_deref() == Ok("1");
         for side in 0..2u32 {
             let team = if side == 0 { Team::Red } else { Team::Blue };
             let base_angle = if (side == 0) != swap_sides { 0.0 } else { std::f32::consts::PI };
@@ -4379,7 +4381,22 @@ impl Game {
                     hit_cooldown: 0.0,
                     last_hp: profile.hp,
                     team,
-                    facing: (player.z - z).atan2(player.x - x),
+                    // 🔬 2026-09-13：**出生朝向**。
+                    //
+                    // 原写法是 `(player.z - z).atan2(player.x - x)` —— **所有 NPC 都朝向玩家**。
+                    // 而玩家恒为 `Team::Blue`、站在原点，于是：
+                    //   * 红方 NPC 朝向的是一个**敌人** ⇒ 方向正确；
+                    //   * 蓝方 NPC 朝向的是一个**友军** ⇒ **开局就在看错方向**。
+                    // 这正是"赢家跟着队伍走、不跟着半场走"（`RV3D_SWAP_SIDES` 对照实测）的
+                    // 一个候选解释：若 `facing` 参与感知/推进，蓝方等于让了先手。
+                    //
+                    // `RV3D_FACE_ENEMY=1` 把朝向改成**指向对面半场**（真正的敌人方向），
+                    // 作为单变量对照。默认关 ⇒ 生产行为不变。
+                    facing: if face_enemy {
+                        if base_angle == 0.0 { std::f32::consts::PI } else { 0.0 }
+                    } else {
+                        (player.z - z).atan2(player.x - x)
+                    },
                     fire_accum: 0.0,
                     knockback: [0.0, 0.0],
                 grenade_timer: 0.0,
