@@ -17,23 +17,50 @@
 
 ## 待做：接入
 
-**卡在哪**：`props.rs` 在**加载时把变换烘进顶点**（`merge_binned`），
-且 `PROP_INSTANCE_INDEX` 是**单实例槽位** ⇒ **道具不能动态实例化**。
-而 NPC 位置**每帧都变** ⇒ 255 人 × 1082 顶点 = 27 万顶点/帧重写，**不可行**。
+**卡在哪（2026-09-13 已动手查实，不是推测）**：`renderer.rs` 的实例场走 mesh 着色器，
+而 `build.rs::MeshOutput` 是：
 
-**所以要动的是实例化路径本身。** 上手前必须先读清这三处（**它们必须同源**，铁律 B 的"静默越界读"）：
+```wgsl
+struct MeshOutput {
+    @builtin(vertex_count) vertex_count: u32,
+    @builtin(primitive_count) primitive_count: u32,
+    @builtin(vertices) vertices: array<VertexOutput, 50>,     // 每 workgroup 最多 50 顶点
+    @builtin(primitives) primitives: array<MeshPrimitive, 96>, // 最多 96 图元
+}
+```
+注释写明上限来自"NPC 四肢圆柱 50 顶点 / 96 三角形"。
 
-1. `renderer.rs` 的槽位常量：`NPC_SLOT_BASE` / `NPC_CYL_SLOT_BASE` / `NPC_SPH_SLOT_BASE`
-2. `build.rs` 的 `NPC_INSTANCE_BASE`
-3. **mesh 着色器里"每个实例生成什么几何"那段** —— 这是我还没读的关键处
+**⇒ 每个 workgroup（=一个实例）最多 50 顶点 / 96 图元，而士兵是 1082 / 540 ——
+结构上装不下。**（Vulkan 规范只保证 256/256，即使提到上限也装不下 540 三角形。）
 
-**推荐的落地形态**：**近距用 GLB、远距保留 18 段箱体**（最省，且一个距离阈值就能回退）。
+**唯一可行的路**：**道具路径** —— 它的顶点是 CPU 侧烘好位姿的，没有这个上限。
 
-**必守纪律**：
-- **改前先跑冒烟**确认基线 `VUID=0`；
-- 改后**必须**跑 `scripts/run_smoke_pm.ps1`（判据 `vuid==0 and panics==0 and killed>=1`）；
-- **双模式验证**：第一人称 + `RV3D_INSPECT=1`；
-- 绕序错了会**静默全黑**，不要靠手推绕序。
+### 我试到哪一步、为什么停
+
+已经写过并**已回退**（保持 0 警告红线）：
+- `MAX_DYNAMIC_SOLDIERS = 24` / `SOLDIER_VERTS_EACH = 1200` / `SOLDIER_INDICES_EACH = 1800` 三个常量；
+- `soldier_mesh` / `soldier_dyn_first_vert` / `soldier_dyn_first_index` / `soldier_dyn_count` 字段；
+- `frame_cam_pos`（由 `render()` 里 `view.inverse().w_axis.truncate()` 填）；
+- `set_soldier_mesh()` 与 `write_dynamic_soldiers()` 的完整实现。
+
+**剩下的（约 5 处协同改动，必须一次做完才有意义）**：
+1. `prop_index_mapped: *mut u32` —— 索引缓冲也要持久映射（现在只映射了顶点）；
+2. `soldier_dyn_index_span: u32` 字段；
+3. `upload_props` 里把容量改成 `need + MAX_DYNAMIC_SOLDIERS × 每件上限`，并把
+   `soldier_dyn_first_vert/index` 设成静态部分的末尾；
+4. 在 `set_npc_visuals` 末尾调用 `write_dynamic_soldiers(visuals)`；
+5. 在道具桶循环之后加**一次** `cmd_draw_indexed(soldier_dyn_index_span, 1, soldier_dyn_first_index, 0, PROP_INSTANCE_INDEX)`。
+
+**⚠️ 最容易踩的一处**：`Vertex` 的字段映射是
+`pos=[v0,v1,v2] / color=[v8,v9,v10] / uv=[v6,v7]`（`PropMesh.verts` 是 `[pos, normal, uv, color]`，
+**不是** `[pos, normal, color, uv]`）。`upload_props` 里就是这么读的。
+
+**⚠️ 顶点变换请复用 `merge_binned`，不要手写** —— 它已实现缩放/绕 Y 旋转/落地面/**绕序反转**，
+手写一份必然走样，而绕序错了的面在本引擎里**直接黑掉且不报错**。
+
+**必守纪律**：改前先跑冒烟确认基线 `VUID=0`；改后跑 `scripts/run_smoke_pm.ps1`；
+`0 警告` 是硬红线（半成品留下的 unused 会直接破线）；**做不完就 `git checkout --` 回退，别留半成品**。
+
 
 ## 今晚已经付过代价的三条（别重犯）
 
