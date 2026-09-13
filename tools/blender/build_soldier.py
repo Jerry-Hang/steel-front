@@ -186,11 +186,15 @@ def main() -> int:
     limb(p, (0.0, 0.0, 1.510), (0.0, 0.0, 1.600), 0.056, 0.056, SKIN, seg=6)
     # head 0.17 x 0.21 x 0.23 -- 13% of body height, the real proportion
     sbox(p, (0.0, 0.005, 1.665), (0.170, 0.210, 0.230), SKIN, ao_top=0.84)
+    # goggles: a dark band across the eyes. Without it the face is a featureless pale
+    # block and the model has NO FRONT -- the same complaint the 18-box table already
+    # records ("face brighter than helmet => the head has no facing").
+    sbox(p, (0.0, 0.104, 1.716), (0.150, 0.032, 0.044), ARMOUR, ao_top=0.55)
     # helmet shell 0.255 x 0.285 x 0.145 -- pulled DOWN over the skull so it reads as a
     # helmet rather than a cap floating above it (first preview showed exactly that).
-    sbox(p, (0.0, 0.005, 1.765), (0.255, 0.285, 0.145), HELMET, ao_top=1.0)
+    sbox(p, (0.0, 0.008, 1.772), (0.250, 0.270, 0.120), HELMET, ao_top=1.0)
     # brim
-    sbox(p, (0.0, 0.125, 1.735), (0.230, 0.095, 0.048), HELMET, ao_top=0.88)
+    sbox(p, (0.0, 0.125, 1.744), (0.225, 0.095, 0.045), HELMET, ao_top=0.88)
 
     # ------------------------------------------------------------ arms (carry pose)
     # Right hand on the pistol grip, left hand under the handguard -- which is what a
