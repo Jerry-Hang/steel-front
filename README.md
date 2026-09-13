@@ -235,6 +235,7 @@ GAME_DESIGN.txt        # 玩法设计文档（唯一设计依据）
 | [AGENTS.md](./AGENTS.md) | AI 交接日志与迭代留痕（本项目唯一的正式交接载体） | 接手开发前必读；每次迭代结束必须追加 |
 | [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt) | 35 把枪的完整数据表与设计依据 | 改武器数值或新增枪械时 |
 | [LICENSE](./LICENSE) | 许可与商业授权条款 | 再分发或商用前 |
+| [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) | 第三方依赖与素材的逐项来源核实、再分发清单、两项已知风险 | **再分发本仓库或其构建产物之前必读** |
 | `docs/experiment-*` | 渲染、光照、性能的验证记录与实测数据 | 怀疑某个"已知结论"是否仍然成立时 |
 | `docs/perf-*` | 帧率与瓶颈基准存档 | 做性能优化前后对比 |
 | `docs/HANDOFF-*` | 历史交接快照 | 追溯某个决定是在哪一轮做出的 |
@@ -323,65 +324,43 @@ powershell -ExecutionPolicy Bypass -File scripts\publish.ps1
 
 ---
 
-## 许可证
+## 许可证 / Licence
 
-本项目采用 **AGPL-3.0 + 附加商业使用条款**。完整条款见 [LICENSE](./LICENSE)。
+本项目采用 **AGPL-3.0 + 附加商业使用条款**。
 
-```
-Copyright (c) 2026 黄少杰
+**权威条款只有两份文件，本 README 不复制其内容**（历史上这里曾同时存在中英文两份副本，与 `LICENSE` 三方漂移 —— 故全部收敛）：
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+| 文件 | 内容 | 什么时候必须读 |
+|---|---|---|
+| [`LICENSE`](./LICENSE) | AGPL-3.0 基础授权 + 附加商业条款（季度营收 1000 万元分界）+ 联系方式 | 再分发、商用、或闭源使用前 |
+| [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) | 第三方依赖与素材的**逐项来源核实**、再分发清单、以及两项已知风险 | **再分发本仓库或其构建产物之前必读** |
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
+一句话概括：**开源使用永远免费；闭源使用在季度总营收低于人民币 1000 万元时自动免费；达到或超过则需书面商业授权。**
 
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/agpl-3.0.html>.
-```
+⚠️ **再分发前请注意两项已知风险**（详见 `THIRD-PARTY-NOTICES.md`）：
 
-### 附加商业使用条款
-
-以下条款是对上述 AGPL-3.0 许可的补充，旨在明确商业使用场景下的授权条件。
-
-**1. 开源使用（永远免费）**
-只要您在使用本软件或其衍生作品时，**完全遵守 AGPL-3.0 协议**（即保持源代码公开，并且所有修改也以 AGPL-3.0 发布），则无论您的商业规模或收入多少，您都**无需支付任何授权费用**。
-
-**2. 闭源使用豁免（小规模免费）**
-如果您选择**不遵守 AGPL-3.0 的开源要求**（即进行闭源分发或提供闭源的网络服务），但您（或您所代表的实体）的**最近一个完整季度的总营业收入**低于**人民币 1000 万元**（或等值外币），则您**自动获得闭源使用的免费授权**，无需支付任何费用，也无需另行联系。
-
-**3. 闭源使用收费（大规模需购买）**
-如果您选择闭源使用，且您（或您所代表的实体）的**最近一个完整季度的总营业收入**达到或超过**人民币 1000 万元**，则您**必须联系版权所有者**并获得单独的书面商业授权许可，否则您的使用行为将被视为侵权，并需承担相应法律责任。
-
-**4. 重要定义与说明**
-- "总营业收入"指您（或您的法律实体）在最近一个完整季度内从所有业务活动中获取的总收入，不限于本软件的直接使用收益。
-- 如果您同时运营多个项目或产品，营业收入应合并计算。
-- 本附加条款不构成对 AGPL-3.0 的修改，而是对使用本软件施加的额外授权条件。如有任何冲突，以本附加条款为准，但仅限涉及商业授权部分。
-
-### 商业授权联系方式
-
-如需咨询商业闭源授权或获得书面许可，请联系：
-
-- 邮箱：**huangshaojie925@gmail.com**
-
-### 关于第三方素材的授权范围
-
-上述许可仅覆盖本仓库中由版权所有者持有的原创代码与文档。`assets/guns/` 与 `assets/guns_ext/` 中由第三方站点下载的枪械模型**不适用本许可**，其使用受各自来源条款约束；引入前须逐个确认其许可证是否允许再分发与商用。`assets/props/` 由本项目 headless Blender 脚本原创生成，适用上述许可。
+1. `src/engine/cjk_glyphs.rs` 的中文点阵提取自 Windows 系统字体 **SimSun（专有字体，禁止再分发）**。
+   **此项未解决前，本仓库不宜视为可干净再分发。**
+2. `assets/guns/` 与 `assets/guns_ext/` 的枪械模型来自第三方站点，**逐个许可证尚未核实**；
+   其中若含 CC BY-NC 一类条款，则不可用于商业构建。
 
 ---
----
 
-# Steel Front — English
+This project is licensed under **AGPL-3.0 with additional commercial terms**.
 
-**Alternate-history 2020s large-scale battlefield FPS** ｜ Self-built Rust + Vulkan engine (ash / winit / glam) ｜ Zero third-party game-engine dependencies
+The authoritative text lives in exactly two files — [`LICENSE`](./LICENSE) and
+[`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) — and is deliberately not
+duplicated here, because this README previously carried both a Chinese and an
+English copy that drifted out of sync with `LICENSE`.
 
-**[中文](#钢铁前线--steel-front)** · **English**
+**In one line:** open-source use is always free; closed-source use is
+automatically free below CNY 10,000,000 of quarterly revenue, and requires a
+written commercial license at or above it.
 
----
+⚠️ **Two known issues to read before redistributing** (details in the notices):
+the CJK glyph bitmaps are derived from the proprietary **SimSun** font, and the
+licenses of the weapon models in `assets/guns*/` have not been verified
+individually.
 
 ## Major Feature Milestones
 
@@ -701,51 +680,3 @@ Output lands in `release_dist/` with the launcher, the game binary and the multi
 
 ---
 
-## Licence
-
-This project is licensed under **AGPL-3.0 with additional commercial use terms**. Full text in [LICENSE](./LICENSE).
-
-```
-Copyright (c) 2026 Huang Shaojie
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/agpl-3.0.html>.
-```
-
-### Additional Commercial Use Terms
-
-These terms supplement the AGPL-3.0 licence above, to make the grant conditions in commercial scenarios explicit.
-
-**1. Open-source use (free forever)**
-Provided you **fully comply with AGPL-3.0** when using this software or its derivatives (i.e. keep the source public and release all modifications under AGPL-3.0 as well), you **owe no licence fee regardless of commercial scale or revenue**.
-
-**2. Closed-source exemption (small scale, free)**
-If you choose **not to comply with AGPL-3.0's open-source requirement** (i.e. you distribute in closed source or offer a closed-source network service), but you (or the entity you represent) had **total operating revenue below CNY 10,000,000** (or the equivalent in foreign currency) in your **most recent complete quarter**, then you **automatically receive a free closed-source use licence** — no payment and no need to get in touch.
-
-**3. Closed-source licensing (large scale, paid)**
-If you use this software in closed source and your (or your entity's) total operating revenue in the most recent complete quarter **reaches or exceeds CNY 10,000,000**, you **must contact the copyright holder** and obtain a separate written commercial licence; otherwise your use constitutes infringement and carries the corresponding legal liability.
-
-**4. Definitions and clarifications**
-- "Total operating revenue" means all income your (or your legal entity's) business activities generated in the most recent complete quarter, not limited to revenue derived directly from this software.
-- If you operate multiple projects or products, revenue is aggregated.
-- These additional terms do not modify AGPL-3.0; they are extra grant conditions on the use of this software. Where they conflict, these terms prevail — limited to the commercial authorisation portion.
-
-### Commercial Licence Contact
-
-To enquire about a closed-source commercial licence or to obtain written permission:
-
-- Email: **huangshaojie925@gmail.com**
-
-### Scope Regarding Third-Party Assets
-
-The licence above covers only original code and documentation held by the copyright holder in this repository. Weapon models in `assets/guns/` and `assets/guns_ext/` downloaded from third-party sites are **not covered** and remain bound by their own source terms; each must be individually confirmed to permit redistribution and commercial use before it is introduced. `assets/props/` is generated originally by this project's headless Blender scripts and is covered by the licence above.
