@@ -4918,32 +4918,63 @@ impl Renderer {
         }
     }
 
-    /// 追加倒地尸体段（由 main.rs 传入位置/朝向/阵营；15 段/具躺倒姿态），
-    /// 与活体 NPC 共用 NPC 三几何槽位区（各组段数截断到 MAX_NPC_INSTANCES）
+    /// 追加倒地尸体（由 main.rs 传入位置/朝向/阵营）。
+    ///
+    /// 🪖 2026-09-13：**GLB 生效时改用同一套实例化**（原来走 15 段躺倒姿态）。
+    /// 一具尸体 = 一个实例，矩阵把 `soldier.glb` 放倒：绕 X 转 −90°，
+    /// **绕原点（脚底）转** ⇒ 脚留在 `pos`、身体沿 +Z 平躺、**自然贴地**
+    /// （GLB 的 y∈[0,1.84] 转到 z∈[0,1.84]，正好躺在地上）。
+    /// 再抬 0.12m，免得半个身子陷进路面。
+    ///
+    /// 与活体共用 `soldier_parts` / 同一段实例区 ⇒ 一次 draw 里全画完。
     pub fn set_dead_bodies(&mut self, bodies: &[NpcVisual]) {
+        let soldier_on = self.soldier_vertex_count > 0;
         for v in bodies {
-            let (box_parts, cyl_parts, sph_parts) =
-                Self::dead_part_matrices(v.pos, v.yaw, v.tint);
-            for part in box_parts {
-                if (self.npc_box_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_box_parts.push(part);
-                }
+            if soldier_on && (self.soldier_parts.len() as u32) < MAX_SOLDIER_INSTANCES {
+                let rot = glam::Quat::from_rotation_y(v.yaw)
+                    * glam::Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2);
+                let m = glam::Mat4::from_scale_rotation_translation(
+                    glam::Vec3::ONE,
+                    rot,
+                    glam::Vec3::new(v.pos[0], v.pos[1] + 0.12, v.pos[2]),
+                );
+                // 阵营色沿用与活体同一套（含 Authored 标记）
+                let t = v.tint;
+                const TEAM_MIX: f32 = 0.35;
+                self.soldier_parts.push(InstanceData {
+                    model: m.to_cols_array(),
+                    tint: [
+                        1.0 - (1.0 - t[0]) * TEAM_MIX,
+                        1.0 - (1.0 - t[1]) * TEAM_MIX,
+                        1.0 - (1.0 - t[2]) * TEAM_MIX,
+                        6.0,
+                    ],
+                });
             }
-            for part in cyl_parts {
-                if (self.npc_cyl_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_cyl_parts.push(part);
+            if !soldier_on {
+                let (box_parts, cyl_parts, sph_parts) =
+                    Self::dead_part_matrices(v.pos, v.yaw, v.tint);
+                for part in box_parts {
+                    if (self.npc_box_parts.len() as u32) < MAX_NPC_INSTANCES {
+                        self.npc_box_parts.push(part);
+                    }
                 }
-            }
-            for part in sph_parts {
-                if (self.npc_sph_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_sph_parts.push(part);
+                for part in cyl_parts {
+                    if (self.npc_cyl_parts.len() as u32) < MAX_NPC_INSTANCES {
+                        self.npc_cyl_parts.push(part);
+                    }
                 }
-            }
-            if (self.npc_box_parts.len() as u32) >= MAX_NPC_INSTANCES
-                && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
-                && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
-            {
-                break;
+                for part in sph_parts {
+                    if (self.npc_sph_parts.len() as u32) < MAX_NPC_INSTANCES {
+                        self.npc_sph_parts.push(part);
+                    }
+                }
+                if (self.npc_box_parts.len() as u32) >= MAX_NPC_INSTANCES
+                    && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
+                    && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
+                {
+                    break;
+                }
             }
         }
     }
