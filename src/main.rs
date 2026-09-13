@@ -1746,21 +1746,32 @@ impl GameApp {
                 || window.set_cursor_grab(CursorGrabMode::Locked).is_ok(),
                 || window.set_cursor_grab(CursorGrabMode::Confined).is_ok(),
             );
-            // 🔴 2026-09-13 修：**只有真抓住了才隐藏光标、才算 captured**。
-            // 原先是无条件 `set_cursor_visible(false)` + `cursor_captured = true`，
-            // 于是当 Locked/Confined **两者都失败**时（grabbed=false），游戏会
-            // **把光标藏起来却没有抓住** —— 用户看到的正是"鼠标没了、又转不了视角"
-            // （2026-09-13 实机报告）。抓取失败时保持原样、可见：
-            if grabbed || locked {
+            // 🔴🔴🔴 2026-09-13 定案（用户"鼠标完全转不了视角"的真正根因）：
+            // **在绝对位置路径上绝不能隐藏光标。**
+            //
+            // winit 0.30 的 Windows 后端（`window_state.rs` 的 `refresh_os_cursor`）这么写：
+            //     if locked        { 钉在窗口中心 1x1 }
+            //     else if HIDDEN   { 钉在窗口中心 1x1 }   ← ← ← 就是这条
+            //     else             { 限制在 client_rect 内 }
+            // 注释说这是为了"防止隐藏的光标去激活任务栏"。对**真相对鼠标**的游戏合理，
+            // 但我们的 Windows 路径是 **Confined + 绝对位置**（见 `RAW_MOUSE_MOTION`）——
+            // 视角完全靠 `CursorMoved` 的 `dx` 算出来。**光标被钉在一个像素上，
+            // `dx` 恒为 0，视角自然纹丝不动**，而键盘与左右键照常工作。
+            //
+            // 实测证据（2026-09-13，在用户真实会话的进程还活着时量的）：
+            //   `GetClipCursor` = 853,533 - 854,534   ⇒ **1×1 像素**
+            //   我自己的诊断里 `mouse=15` 但 `at=(1280,800)` **五条采样完全相同**（没动过）
+            //
+            // ⇒ 只在**真 Locked**（相对鼠标，`DeviceEvent::MouseMotion` 驱动视角）时才隐藏光标。
+            // 绝对路径保持可见 ⇒ winit 走 `Some(client_rect)` ⇒ 光标能在窗口内自由移动
+            // ⇒ `CursorMoved` 有真实增量 ⇒ 配合回中逻辑，视角恢复正常。
+            // 代价：屏幕上会看到一个箭头。**能玩 > 好看**，而且这是 Windows 上唯一可行的组合。
+            if locked {
                 window.set_cursor_visible(false);
-                self.cursor_captured = true;
             } else {
-                // 抓不住就让玩家用"按住左键拖拽转视角"的路径（该路径不需要抓取），
-                // 并且**别把光标藏起来**，否则界面上没有任何反馈。
                 window.set_cursor_visible(true);
-                self.cursor_captured = false;
-                log::warn!("input: 光标抓取失败（Locked/Confined 都不可用）—— 退回拖拽转视角，光标保持可见");
             }
+            self.cursor_captured = grabbed || locked;
             self.cursor_locked = locked;
             self.abs_baseline_valid = false;
             if !locked {
