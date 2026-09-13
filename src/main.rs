@@ -1130,13 +1130,27 @@ impl GameApp {
             // `spread` = 腰射准星扩散（第⑤条）。打在这里是为了**能脱离截图做验收** ——
             // 像素测量会被"两次运行场景不同 / 蹲下相机高度不同"混杂（第 65、76 轮实测），
             // 而这个值是确定的：站立 0.30 / 蹲 0.18 / 趴 0.10（+冲刺 +开火）。
+            // 🔴 2026-09-13：加上**输入状态**（用户实测"鼠标抓不住、只有左右键能用"）。
+            // 原先这行没有这几项，导致我只能靠推理猜是哪一环挂了 —— 按教训 20，
+            // 卡住就去加埋点：这一行现在能直接区分
+            //   ① focused=false ⇒ 窗口没拿到焦点 ⇒ 根本不抓（want 的第一个条件）
+            //   ② captured=false ⇒ 抓取调用失败
+            //   ③ locked=true  ⇒ 走了 Locked（Windows 上等于视角失效）
+            //   ④ dragging     ⇒ 未捕获时的拖拽转视角路径有没有被置位
             log::info!(
-                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} spread={:.2} cycle_us={} update_us={} render_us={}",
+                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} spread={:.2} \
+                 focus={} cap={} lock={} drag={} rdrag={} absbase={} cycle_us={} update_us={} render_us={}",
                 yaw.to_degrees(),
                 pitch.to_degrees(),
                 dist,
                 self.camera.mode,
                 self.game.crosshair_spread(),
+                self.focused,
+                self.cursor_captured,
+                self.cursor_locked,
+                self.dragging,
+                self.right_dragging,
+                self.abs_baseline_valid,
                 self.last_cycle_us,
                 self.last_update_us,
                 self.last_render_us
