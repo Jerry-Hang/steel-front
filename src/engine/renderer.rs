@@ -1632,14 +1632,24 @@ impl Renderer {
                 .get_physical_device_surface_present_modes(self.physical_device, self.surface)
                 .map_err(|e| format!("获取呈现模式失败: {}", e))?
         };
-        // 呈现模式可被 RV3D_PRESENT_MODE 覆盖（immediate/mailbox/fifo），
-        // 性能探针对比用；默认 MAILBOX（不锁 vsync）。
+        // 呈现模式可被 RV3D_PRESENT_MODE 覆盖（immediate/mailbox/fifo），性能探针对比用。
+        //
+        // 🔴 2026-09-13：**补上 `mailbox`**。此前只有 immediate/fifo，而默认落在
+        // IMMEDIATE —— 屏幕上是**持续撕裂**，在快速转视角时正好读成"残影/鬼影"
+        // （用户 2026-09-13 报告"晃画面和跑动时枪有非常明显的残影"）。
+        // 抓帧抓不到它：`PrintWindow` 拿的是已合成的完整帧，撕裂只发生在显示器上。
+        //
+        // 三种模式的取舍（原注释只记了前两条）：
+        //   * FIFO   —— 独显直连下等不到 vblank 中断 ⇒ 主循环冻结（2026-08-23）
+        //   * MAILBOX —— 不撕裂且不阻塞；原注释记的"笔记本混合切换时 device lost"
+        //                是 MUX 切换场景，独显直连/手动模式下不触发
+        //   * IMMEDIATE —— 最稳但撕裂
+        // ⇒ 默认仍保持 IMMEDIATE（基准/压力测试要的是最稳 + 全速），
+        //   **玩家路径由 `SteelFront.bat` 显式设成 mailbox**（见该文件）。
         let preferred = match std::env::var("RV3D_PRESENT_MODE").as_deref() {
             Ok("immediate") => vk::PresentModeKHR::IMMEDIATE,
             Ok("fifo") => vk::PresentModeKHR::FIFO,
-            // 2026-08-23：默认 IMMEDIATE（配合全局帧率上限 RV3D_FPS 默认 240）——
-            // 独显直连下 FIFO 垂直同步死锁（等不到 vblank 中断）→ 主循环冻结；
-            // MAILBOX 在笔记本混合切换时触发 device lost；IMMEDIATE 最稳。
+            Ok("mailbox") => vk::PresentModeKHR::MAILBOX,
             _ => vk::PresentModeKHR::IMMEDIATE,
         };
         let present_mode = present_modes

@@ -101,6 +101,17 @@ if /i "%MODE%"=="diag" (
     set "RV3D_PROP_STATS=1"
 )
 
+REM Present with MAILBOX when actually playing.
+REM
+REM The engine defaults to IMMEDIATE (uncapped, no vsync) because that is the most
+REM robust mode for its own benchmarks. On a real monitor that means constant TEARING,
+REM which during a fast view swing reads exactly like the "ghosting trail" reported on
+REM 2026-09-13 -- and it never shows up in a PrintWindow screenshot, because that
+REM captures an already-composited frame.
+REM MAILBOX neither tears nor blocks (FIFO deadlocks on a dGPU-direct setup waiting for
+REM a vblank interrupt). To get the old behaviour:  set RV3D_PRESENT_MODE=immediate
+if not defined RV3D_PRESENT_MODE set "RV3D_PRESENT_MODE=mailbox"
+
 if not exist "logs" mkdir "logs"
 REM Capture stderr to a file. Without this the game's own log (log::info!/ERROR) goes
 REM to a console that closes with the window, so a play-test leaves NO evidence --
