@@ -2395,20 +2395,7 @@ impl GameApp {
                 })
                 .collect()
             };
-            // 🪖 士兵 GLB（2026-09-13）：**必须在这里上传，不能放到 `set_dead_bodies` 之后**。
-            //
-            // `set_npc_visuals` / `set_dead_bodies` 都靠 `soldier_vertex_count > 0` 判断
-            // 该走 GLB 还是回退 18 段箱体。原先我把上传放在了 `set_dead_bodies` **之后**，
-            // 于是**每一帧的尸体都读到 0、全部退回箱体路径**（实测 `npc: 1255`
-            // = 约 84 具尸体 × 15 段 —— 而活体早已是每 NPC 1 个实例）。
-            // **顺序错了，判断就永远是错的。**
-            //
-            // ⚠️ 顶点**不做任何归一化**：`soldier.glb` 是按铁律 D 的约定导出的
-            // （1 单位 = 1 米、原点在底面中心、`export_yup=True`），本来就是引擎要的尺度与朝向；
-            // 枪模那套"缩放到 0.94m + 居中 + 长轴对齐 +Z"是针对 Sketchfab 抠件的，**不要照抄**。
-            if let Some((sv, si)) = Self::load_soldier_glb() {
-                renderer.set_soldier_mesh(&sv, &si);
-            }
+            // （士兵 GLB 的上传已移到 `Renderer::new` 之后，见那里的注释：
             renderer.set_npc_visuals(&npc_visuals);
             // NPC 枪口焰/弹壳：攻击态 NPC 限流生成（每帧最多 4 个，按 id 相位轮转避免全爆发）
             let mut firing_npcs: Vec<[f32; 3]> = self
@@ -2645,6 +2632,24 @@ impl ApplicationHandler for GameApp {
         match Renderer::new(&window) {
             Ok(mut renderer) => {
                 log::info!("Vulkan 渲染器初始化成功");
+                // 🪖 士兵 GLB（2026-09-13）：**在这里上传，只做一次**。
+                //
+                // 🔴 为什么不放在每帧的 `render()` 里（我放错过两次）：
+                // 那个调用点在 `MainWindow::render()` 的某个状态分支内，**并不是每帧都执行** ——
+                // 用 `RV3D_NPC_CAM` 起调试机位时就走不到，于是 `soldier_vertex_count` 恒为 0，
+                // 而 `set_npc_visuals` / `set_dead_bodies` 都靠它判断走 GLB 还是回退箱体
+                // ⇒ **整个画面悄悄退回 18 段箱体**（实测 HUD `npc:` 从 17 跳回 1255），
+                // 而且不报任何错。**放在这里就结构上不可能被跳过。**
+                //
+                // 与枪模同源的做法：启动时上传一次，之后 `set_soldier_mesh` 的幂等守卫保证
+                // 再调用也无害（它现在只会在 `soldier_vertex_count == 0` 时才真的分配）。
+                //
+                // ⚠️ 顶点**不做任何归一化**：`soldier.glb` 是按铁律 D 的约定导出的
+                // （1 单位 = 1 米、原点在底面中心、`export_yup=True`），本来就是引擎要的尺度与朝向；
+                // 枪模那套"缩放到 0.94m + 居中 + 长轴对齐 +Z"是针对 Sketchfab 抠件的，**不要照抄**。
+                if let Some((sv, si)) = Self::load_soldier_glb() {
+                    renderer.set_soldier_mesh(&sv, &si);
+                }
                 // ---- RT core 纯求交吞吐基准（RV3D_PT_BENCH=1）----
                 if std::env::var("RV3D_PT_BENCH").as_deref() == Ok("1") {
                     let boxes = vec![
