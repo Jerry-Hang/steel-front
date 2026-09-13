@@ -72,6 +72,80 @@ const RAW_MOUSE_MOTION: bool = false;
 #[cfg(not(target_os = "windows"))]
 const RAW_MOUSE_MOTION: bool = true;
 
+/// 🔴🔴 2026-09-13：**直接问操作系统**"我们的进程是不是前台"。
+///
+/// 为什么前面两条路都不行（用户实测"键盘能用、鼠标完全转不了视角"，两次修复都无效）：
+///
+/// 1. **`WindowEvent::Focused` 不够**：它只在收到 `WM_SETFOCUS` 时发出。而
+///    **窗口在创建时就已经有焦点**是启动的常见情形 —— 此时 Windows **不会再发一次
+///    `WM_SETFOCUS`** ⇒ winit 永远不发 `Focused(true)` ⇒ `self.focused` 停在初值
+///    `false` ⇒ `want` 恒假 ⇒ **光标永不抓取**。键盘与左右键不经过 `want`，所以照常工作。
+///
+/// 2. **`Window::has_focus()` 也不行** —— winit 0.30 的文档自己写着
+///    "This queries the same state information as WindowEvent::Focused"，
+///    Windows 实现是 `window_state.has_active_focus()`，读的**就是同一个内部标志**。
+///    事件不来，它同样是 false。**2026-09-13 我第一版修复正是栽在这里。**
+///
+/// **判据用"前台窗口属于本进程"而不是"HWND 相等"**：本工程的 winit 程序有多个窗口
+/// （AGENTS.md 记录过 `Process.MainWindowHandle` 拿到的**不是**接收输入的那个），
+/// 拿 HWND 做相等比较会漏判。比进程 ID 与窗口身份无关，稳得多。
+#[cfg(target_os = "windows")]
+fn window_is_foreground(_window: &winit::window::Window) -> Option<bool> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> *mut core::ffi::c_void;
+        fn GetWindowThreadProcessId(hwnd: *mut core::ffi::c_void, pid: *mut u32) -> u32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() {
+        last_fg_pid().store(0, std::sync::atomic::Ordering::Relaxed);
+        return Some(false); // 没有任何前台窗口（极少见）：按未聚焦处理
+    }
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+    last_fg_pid().store(pid, std::sync::atomic::Ordering::Relaxed);
+    if pid == 0 {
+        return None; // 查询失败：让调用方回退
+    }
+    Some(pid == unsafe { GetCurrentProcessId() })
+}
+
+/// 最近一次查询到的**前台窗口所属进程 ID**。只用于日志：
+/// 用户报告"鼠标转不了视角"时，`cam:` 行里的 `fgpid=` 与 `mypid=` 一比就知道
+/// 是"窗口真没在前台"还是"判据本身错了"（2026-09-13 连续两次误判的教训）。
+#[cfg(target_os = "windows")]
+fn last_fg_pid() -> &'static std::sync::atomic::AtomicU32 {
+    static V: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    &V
+}
+#[cfg(not(target_os = "windows"))]
+fn last_fg_pid() -> &'static std::sync::atomic::AtomicU32 {
+    static V: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    &V
+}
+
+#[cfg(target_os = "windows")]
+fn my_pid() -> u32 {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+    unsafe { GetCurrentProcessId() }
+}
+#[cfg(not(target_os = "windows"))]
+fn my_pid() -> u32 {
+    std::process::id()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn window_is_foreground(_window: &winit::window::Window) -> Option<bool> {
+    None
+}
+
 /// 捕获方式决策：返回 `(cursor_locked, grabbed)`。
 ///
 /// `Locked` 只在 raw 相对增量真会到达时才有意义（见 [`RAW_MOUSE_MOTION`]），
@@ -1150,6 +1224,7 @@ impl GameApp {
             log::info!(
                 "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} spread={:.2} \
                  focus={} cap={} lock={} drag={} rdrag={} absbase={} \
+                 fgpid={} mypid={} \
                  mouse={} eaten={} tp={} at=({:.0},{:.0}) cyc={} upd={} ren={}",
                 yaw.to_degrees(),
                 pitch.to_degrees(),
@@ -1162,6 +1237,8 @@ impl GameApp {
                 self.dragging,
                 self.right_dragging,
                 self.abs_baseline_valid,
+                last_fg_pid().load(std::sync::atomic::Ordering::Relaxed),
+                my_pid(),
                 self.cursor_evt_count,
                 self.cursor_evt_eaten,
                 self.cursor_evt_teleport,
@@ -1631,7 +1708,8 @@ impl GameApp {
         // 但代价就是这一条：**只信事件就永远抓不住**。
         // ⇒ 直接问操作系统（`Window::has_focus()`），事件只作快速路径。
         let actually_focused = match &self.window {
-            Some(w) => w.has_focus(),
+            // 优先直接问系统（见 window_is_foreground 的注释：事件与 has_focus() 都不可靠）
+            Some(w) => window_is_foreground(w).unwrap_or_else(|| w.has_focus()),
             None => return,
         };
         self.focused = actually_focused;
