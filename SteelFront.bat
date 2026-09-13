@@ -1,13 +1,18 @@
 @echo off
 REM ============================================================================
-REM  Steel Front launcher / build-and-run
+REM  Steel Front launcher  (build + run, and friends)
 REM ============================================================================
 REM  ASCII ONLY. Windows cmd reads .bat in the OEM codepage; non-ASCII bytes in
-REM  echo strings can corrupt the parser and the console output. Keep it ASCII.
+REM  echo strings can corrupt the parser. Keep this file ASCII.
 REM
-REM  Why this file exists:
-REM  AGENTS.md has referenced "SteelFront.bat" for a long time, but the file was
-REM  never in the repository -- the reference was stale. This is the real one.
+REM  Usage:
+REM    SteelFront.bat              build, then launch (the normal path)
+REM    SteelFront.bat play         same as no argument
+REM    SteelFront.bat fast         launch WITHOUT rebuilding (use the current exe)
+REM    SteelFront.bat smoke        run the PostMessage smoke gate, do not launch
+REM    SteelFront.bat package      build + assemble dist\steel-front-<tag>.zip
+REM    SteelFront.bat diag         launch with the diagnostics switches on
+REM    SteelFront.bat --anything   build, then launch passing the args through
 REM
 REM  The touch list below is the important part. cargo decides whether to rebuild
 REM  from file mtimes; when ONLY a shader / build script changes, the .rs sources
@@ -20,21 +25,50 @@ REM ============================================================================
 setlocal
 cd /d "%~dp0"
 
+set "MODE=%~1"
+if "%MODE%"=="" set "MODE=play"
+
+REM ---- smoke / package are their own scripts; hand over early ----------------
+if /i "%MODE%"=="smoke" (
+    echo [steel-front] running the smoke gate ^(PostMessage injection^)...
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
+    set "RC=%ERRORLEVEL%"
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1 -Quiet
+    endlocal & exit /b %RC%
+)
+
+if /i "%MODE%"=="package" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package_release.ps1
+    set "RC=%ERRORLEVEL%"
+    endlocal & exit /b %RC%
+)
+
+REM ---- a stale instance is the #1 cause of "the window never came up" -------
+tasklist /fi "imagename eq steel-front.exe" 2>nul | find /i "steel-front.exe" >nul
+if not errorlevel 1 (
+    echo [steel-front] an old instance is running - closing it first.
+    taskkill /f /im steel-front.exe >nul 2>&1
+    REM give the window time to go away before we might grab the cursor again
+    ping -n 2 127.0.0.1 >nul
+)
+
+set "EXE=target\release\steel-front.exe"
+
+if /i "%MODE%"=="fast" goto launch
+
 echo [steel-front] touching build inputs...
 REM ---------------------------------------------------------------------------
-REM Touching is done with PowerShell, NOT with cmd's `copy /b FILE +,,` trick.
-REM That trick is a trap: with a quoted path it does NOT merely update the
-REM timestamp -- cmd resolves the destination from the source basename in the
-REM CURRENT directory, so `copy /b "assets\x.spv" +,,` silently CREATES a stray
-REM copy `x.spv` in the repo root. (Measured 2026-09-12: 7 junk files.)
-REM The lines below only set LastWriteTime and never write file contents.
+REM Touching uses PowerShell, NOT cmd's `copy /b FILE +,,` trick. That trick is
+REM a trap: with a quoted path cmd resolves the destination from the source
+REM basename in the CURRENT directory, so `copy /b "assets\x.spv" +,,` silently
+REM CREATES a stray copy `x.spv` in the repo root. (Measured 2026-09-12: 7 junk
+REM files.) The lines below only set LastWriteTime and never write contents.
 REM ---------------------------------------------------------------------------
 if exist build.rs         powershell -NoProfile -Command "(Get-Item 'build.rs').LastWriteTime = Get-Date" >nul 2>&1
 if exist build_spv_rt.rs  powershell -NoProfile -Command "(Get-Item 'build_spv_rt.rs').LastWriteTime = Get-Date" >nul 2>&1
 
-REM assets\*.spv are read from disk AT RUNTIME by the engine, so they do NOT
-REM need touching for correctness. AGENTS.md only mandates the two files above.
-REM They are listed here for visibility, deliberately NOT touched.
+REM assets\*.spv are read from disk AT RUNTIME by the engine, so they do NOT need
+REM touching for correctness. AGENTS.md only mandates the two files above.
 
 echo [steel-front] building (release)...
 cargo build --release
@@ -45,15 +79,30 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "EXE=target\release\steel-front.exe"
+:launch
 if not exist "%EXE%" (
-    echo [steel-front] ERROR: %EXE% not found after a successful build.
+    echo [steel-front] ERROR: %EXE% not found.
+    echo             Run  SteelFront.bat  without "fast" to build it first.
     endlocal
     exit /b 1
 )
 
+REM ---- tell the user exactly which binary they are about to run -------------
+for %%F in ("%EXE%") do echo [steel-front] exe: %%~tF  %%~zF bytes
+
+REM ---- missing assets would otherwise look like a mysterious empty world ----
+if not exist "assets\props"    echo [steel-front] WARN: assets\props missing - city will be procedural only.
+if not exist "assets\maps"     echo [steel-front] WARN: assets\maps missing - no TOML levels.
+if not exist "assets\soldier\soldier.glb" echo [steel-front] note: no soldier.glb - NPCs use the 18-box path.
+
+if /i "%MODE%"=="diag" (
+    echo [steel-front] diagnostics on: RV3D_AI_PROF=1 RV3D_PROP_STATS=1
+    set "RV3D_AI_PROF=1"
+    set "RV3D_PROP_STATS=1"
+)
+
 echo [steel-front] launching...
-REM Pass through any extra arguments, e.g.  SteelFront.bat --help
+REM Pass through any extra arguments, e.g.  SteelFront.bat play --help
 start "" "%EXE%" %*
 
 endlocal
