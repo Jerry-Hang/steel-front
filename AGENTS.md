@@ -507,19 +507,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
    判据：用 Windows 事件日志的出错模块区分驱动侧（`nvoglv64.dll`）与应用侧。
 3. **`config.rs` 不读 `pt_enable` / `rt_enable`** → 配置文件与 `RV3D_PT_LIVE=1` 都开不了 PT。
    **lead**：`main.rs` 的 `if config.pt_enable { init_pt_resident() }` 分支，resident 从未建。
-4. **玩家可能站在 GLB 楼体内部** — `scale = max(w/gw, d/gd)` 的取舍导致视觉体大于碰撞盒。
-   **lead**：水平取 max、竖直单独处理，或给建筑留面朝街道的退距；需一次实测校准。
+4. ~~**玩家可能站在 GLB 楼体内部**~~ **已结案（2026-09-13）**：根因是 `pick_building`
+   用 `scale = max(w/gw, d/gd)` ⇒ 另一个方向**必然溢出 footprint**（52 处 `building_tall`
+   互相穿插），以及碰撞盒用 footprint `(w,d)` 而视觉体是缩放后的 GLB。现改为
+   **`min`**（楼放得进格子）+ **碰撞盒取真实视觉尺寸**（`half_footprint × scale`，
+   ±90° 时 x/z 互换）⇒ 既不穿插、也没有"无形的墙"。详见"建筑摆放（2026-09-13）"。
 5. ~~**`FLOOR_H` 常量分叉**~~ **已结案（2026-09-12）**：6 个建筑模块「上层 3.15（= `FLOOR_H`）+ 底层反解 + 女儿墙 + 压顶 = 精确总高」，实测 6/6 命中。旧硬编 3.4 的 `asset_building` 已弃用。
 6. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
    `install_guns.py` 仍 SKIP。需人工删掉重叠枪身后装为 `svd12`。
-7. **D12 士兵近距观感（用户说"神人样子"）** — 2026-09-12 **根因已定案**（见铁律 C 的
-   `RV3D_NO_NPC_CULL`）：第 55~79 轮查错方向，是因为**相机眼前的士兵被玩家中心剔除掉了**，
-   不是模型/遮挡/取景。**保留四处**（`renderer.rs::soldier_part_matrices`）：持枪姿态
-   （枪原悬在身前、手臂垂在身侧，两者永不相交）/ 逐段明暗（原 18 段共用一个 tint ⇒ 一块纯色）/
-   背心与头**重叠 0.13m**（头 43% 埋在背心里）/ 脸比盔亮（**反了**，头因此没有正面）；另加背包段（盒 10/12）。
-   **仍未解决**：本质仍是**箱体与圆柱的堆叠**，近看读作机械构造而非人 ⇒
-   **再调数字收效有限，需要一次真正的建模**（Blender 士兵 GLB，按铁律 D 链路；会动 NPC 实例系统）。
-   基线图 `screenshots/soldier_zoom6.png`。
+7. ~~**D12 士兵近距观感（用户说"神人样子"）**~~ **已结案（2026-09-13）**。
+   18 段箱体已由 `assets/soldier/soldier.glb`（1082 顶点 / 540 三角形、真人比例、
+   烘天光遮蔽、头/盔用六棱柱）取代，**走实例化**：网格上传一次 +
+   `cmd_draw_indexed(索引数, 实例数 N, 0, 0, SOLDIER_INSTANCE_BASE)`，用 `self.pipeline`
+   （传统 VERTEX、depth 开），**不需要新建管线**。**每 NPC 实例数 18 → 1**
+   （压力模式 fps 111 → 155）。步态用实例矩阵做（起伏 ±4cm + 前后倾 ±3° + 开火后坐），
+   尸体用同一条路（绕原点转 −90° 平躺）。阵营色 = 取向白靠拢 35% 的队色 ×
+   `tint.w = 6.0`（Authored 标记，不接这条会整身涂成一队色）。
+   **`soldier_part_matrices` / `dead_part_matrices` 保留**为 GLB 缺失时的回退与远距 LOD 备选。
+   全过程与三个踩过的坑见 `docs/HANDOFF-soldier.md`。
+   **仍缺**：真正的骨骼动画（现在是整体起伏）、两套队色顶点变体（现在是 tint 乘色）。
 8. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
 9. **mesh 着色器布局未过严格 `spirv-val`**（Workgroup Offset 布局）。
     **lead**：开 `RV3D_VALIDATION=1` 做 RT 调试前应先修。
