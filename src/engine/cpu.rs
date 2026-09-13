@@ -1038,7 +1038,21 @@ pub fn scene_pool() -> &'static ThreadPool {
 
 /// 全局 AI 池（NPC 状态机/A* 等后台判定，远组/延迟不敏感负载）：
 /// AMD = 次簇 CCD1；Intel = 有 E-core 即 E-core 组（远 AI 分层负载，见 `ai_set`）。
-/// 线程数：`RV3D_AI_WORKERS` 覆盖，默认 min(8, 集合大小)。
+/// 线程数：`RV3D_AI_WORKERS` 覆盖；绑定集合：`RV3D_AI_CPUS` 覆盖。
+///
+/// 🔴 2026-09-13：默认 worker 数 **8 → 4**，依据是实测（`scripts/test_ai_affinity.ps1`，
+/// 重 AI 负载 `RV3D_STRESS_AI=128`，每档 16 个样本取中位）：
+///
+/// | 绑定 | worker | 中位 fps |
+/// |---|---|---|
+/// | 默认（CCD1 全 8 物理核） | 8 | 121.5 |
+/// | `16,17`（1C2T） | 2 | **131.8** |
+/// | `16..23`（4C8T） | 8 | 133.9 |
+///
+/// **1C2T → 4C8T 只差 1.6% ⇒ AI 在 2 个线程上就已饱和。**
+/// 而**默认的 8 物理核反而最慢** —— 因为 `audio_set` 也绑在 CCD1（见 `detect` 的日志），
+/// AI 铺满整簇会和音频抢同一个 CCD。**⇒ AI 不需要 8 个核，给它 4 个 worker 反而更快。**
+/// 想回到旧行为：`RV3D_AI_WORKERS=8`。
 static AI_POOL: OnceLock<ThreadPool> = OnceLock::new();
 
 pub fn ai_pool() -> &'static ThreadPool {
@@ -1068,7 +1082,8 @@ pub fn ai_pool() -> &'static ThreadPool {
             _ => topo.ai_set().to_vec(),
         };
         let set = set.as_slice();
-        let default = set.len().min(8).max(1);
+        // 实测：AI 在 2 个线程上就饱和（见 AI_POOL 的注释）。默认 4 留一倍余量。
+        let default = set.len().min(4).max(1);
         let n = env_workers("RV3D_AI_WORKERS", default);
         log::info!("cpu: ai_pool 创建（{} 工作线程，绑定 vCPU {:?}）", n, set);
         ThreadPool::new(set, n, "ai")
