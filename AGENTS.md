@@ -162,6 +162,14 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式；
   检视模式实例矩阵用 `Mat4::IDENTITY`。
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
+- 🔴 **⚠️ 有两个同名的 `npc`，别混**（2026-09-13 我把它们混了，据此写下一个错误结论）：
+  - **HUD 左上那行的 `npc: I{} P{} C{} A{}`**（`game.rs:2640`）—— 是 NPC 的**状态人数**
+    （Idle / Patrol / Chase / Attack），**与渲染、与箱体实例数毫无关系**。
+    ⚠️ 那个 `I` 前缀很容易看漏：`npc: I1255 P0 C0 A0` 是"**1255 个 Idle**"，
+    不是"npc=1255"。`RV3D_NPC_CAM` 下 AI 不步进 ⇒ 全员 Idle ⇒ 这个数会很大。
+  - **perf 日志里的 `npc=`**（`renderer.rs:8604` = `last_npc_box_near + last_npc_box_far`）——
+    这才是**箱体实例数**，用于判断"活体/尸体走的是 GLB 还是回退箱体"。
+  **判据要挑对字段**；拿 HUD 那个数当实例数会得出完全错误的结论。
   **排查"某物到底有没有被画"先看这两个计数**，再看图。
 
 **玩家碰撞契约（2026-09-13 变更，勿退回旧写法）**
