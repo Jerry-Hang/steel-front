@@ -2395,6 +2395,20 @@ impl GameApp {
                 })
                 .collect()
             };
+            // 🪖 士兵 GLB（2026-09-13）：**必须在这里上传，不能放到 `set_dead_bodies` 之后**。
+            //
+            // `set_npc_visuals` / `set_dead_bodies` 都靠 `soldier_vertex_count > 0` 判断
+            // 该走 GLB 还是回退 18 段箱体。原先我把上传放在了 `set_dead_bodies` **之后**，
+            // 于是**每一帧的尸体都读到 0、全部退回箱体路径**（实测 `npc: 1255`
+            // = 约 84 具尸体 × 15 段 —— 而活体早已是每 NPC 1 个实例）。
+            // **顺序错了，判断就永远是错的。**
+            //
+            // ⚠️ 顶点**不做任何归一化**：`soldier.glb` 是按铁律 D 的约定导出的
+            // （1 单位 = 1 米、原点在底面中心、`export_yup=True`），本来就是引擎要的尺度与朝向；
+            // 枪模那套"缩放到 0.94m + 居中 + 长轴对齐 +Z"是针对 Sketchfab 抠件的，**不要照抄**。
+            if let Some((sv, si)) = Self::load_soldier_glb() {
+                renderer.set_soldier_mesh(&sv, &si);
+            }
             renderer.set_npc_visuals(&npc_visuals);
             // NPC 枪口焰/弹壳：攻击态 NPC 限流生成（每帧最多 4 个，按 id 相位轮转避免全爆发）
             let mut firing_npcs: Vec<[f32; 3]> = self
@@ -2457,15 +2471,7 @@ impl GameApp {
                 })
                 .collect();
             renderer.set_dead_bodies(&dead_visuals);
-            // 🪖 士兵 GLB（2026-09-13）：启动时上传一次。与枪模不同，它**与游戏状态无关**
-            // （NPC 一直在世界里），所以不放在 `show_gun` 分支里。
-            //
-            // ⚠️ 顶点**不做任何归一化**：`soldier.glb` 是按铁律 D 的约定导出的
-            // （1 单位 = 1 米、原点在底面中心、`export_yup=True`），本来就是引擎要的尺度与朝向；
-            // 枪模那套"缩放到 0.94m + 居中 + 长轴对齐 +Z"是针对 Sketchfab 抠件的，**不要照抄**。
-            if let Some((sv, si)) = Self::load_soldier_glb() {
-                renderer.set_soldier_mesh(&sv, &si);
-            }
+
             // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
             // 枪模仅在第一人称游玩或检视模式渲染：结算/其它相机态下隐藏
             // （否则枪模会按锚点漂浮在场景中——2-4 反馈“变成 M1 加兰德”观感）
