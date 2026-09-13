@@ -1622,8 +1622,21 @@ impl GameApp {
                 || window.set_cursor_grab(CursorGrabMode::Locked).is_ok(),
                 || window.set_cursor_grab(CursorGrabMode::Confined).is_ok(),
             );
-            window.set_cursor_visible(false);
-            self.cursor_captured = true;
+            // 🔴 2026-09-13 修：**只有真抓住了才隐藏光标、才算 captured**。
+            // 原先是无条件 `set_cursor_visible(false)` + `cursor_captured = true`，
+            // 于是当 Locked/Confined **两者都失败**时（grabbed=false），游戏会
+            // **把光标藏起来却没有抓住** —— 用户看到的正是"鼠标没了、又转不了视角"
+            // （2026-09-13 实机报告）。抓取失败时保持原样、可见：
+            if grabbed || locked {
+                window.set_cursor_visible(false);
+                self.cursor_captured = true;
+            } else {
+                // 抓不住就让玩家用"按住左键拖拽转视角"的路径（该路径不需要抓取），
+                // 并且**别把光标藏起来**，否则界面上没有任何反馈。
+                window.set_cursor_visible(true);
+                self.cursor_captured = false;
+                log::warn!("input: 光标抓取失败（Locked/Confined 都不可用）—— 退回拖拽转视角，光标保持可见");
+            }
             self.cursor_locked = locked;
             self.abs_baseline_valid = false;
             if !locked {
