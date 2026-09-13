@@ -371,6 +371,12 @@ struct GameApp {
     camera: Camera,
     /// 键盘按键状态
     key_state: KeyState,
+    /// 🔴 2026-09-13 诊断：`CursorMoved` 到达/被吞/被判跳变 的计数，
+    /// 用于区分"鼠标事件没到"与"到了但被守卫丢掉"（见 `cam:` 日志行）。
+    cursor_evt_count: u64,
+    cursor_evt_eaten: u64,
+    cursor_evt_teleport: u64,
+    cursor_evt_last: (f64, f64),
     /// 鼠标左键是否按住（拖拽轨道旋转）
     dragging: bool,
     /// 鼠标右键是否按住（飞行模式拖拽转视角）
@@ -502,6 +508,10 @@ impl GameApp {
             renderer: None,
             camera: Camera::new(),
             key_state: KeyState::new(),
+            cursor_evt_count: 0,
+            cursor_evt_eaten: 0,
+            cursor_evt_teleport: 0,
+            cursor_evt_last: (0.0, 0.0),
             dragging: false,
             right_dragging: false,
             ads_active: false,
@@ -1139,7 +1149,8 @@ impl GameApp {
             //   ④ dragging     ⇒ 未捕获时的拖拽转视角路径有没有被置位
             log::info!(
                 "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} spread={:.2} \
-                 focus={} cap={} lock={} drag={} rdrag={} absbase={} cycle_us={} update_us={} render_us={}",
+                 focus={} cap={} lock={} drag={} rdrag={} absbase={} \
+                 mouse={} eaten={} tp={} at=({:.0},{:.0}) cyc={} upd={} ren={}",
                 yaw.to_degrees(),
                 pitch.to_degrees(),
                 dist,
@@ -1151,6 +1162,11 @@ impl GameApp {
                 self.dragging,
                 self.right_dragging,
                 self.abs_baseline_valid,
+                self.cursor_evt_count,
+                self.cursor_evt_eaten,
+                self.cursor_evt_teleport,
+                self.cursor_evt_last.0,
+                self.cursor_evt_last.1,
                 self.last_cycle_us,
                 self.last_update_us,
                 self.last_render_us
@@ -1605,6 +1621,20 @@ impl GameApp {
 
     /// 按游戏状态同步光标捕获：Playing = 捕获 + 隐藏；否则释放。
     fn sync_cursor(&mut self) {
+        // 🔴🔴 2026-09-13 修（用户实测"鼠标完全转不了视角"的根因）：
+        // **焦点不能只靠 `WindowEvent::Focused` 事件**。
+        // 窗口在**创建时就已获得焦点**是启动的常见情形，此时 Windows **不会再发
+        // 一次 `WM_SETFOCUS`** ⇒ winit 不发 `Focused(true)` ⇒ `self.focused` 永远停在
+        // 初值 `false` ⇒ `want` 永远为假 ⇒ **光标永不抓取、视角永不响应鼠标**，
+        // 而键盘与左右键照常工作（它们不经过 `want`）—— 正是用户描述的现象。
+        // 2026-09-12 把初值从 `true` 改成 `false` 修掉了"没焦点却自认为有焦点"，
+        // 但代价就是这一条：**只信事件就永远抓不住**。
+        // ⇒ 直接问操作系统（`Window::has_focus()`），事件只作快速路径。
+        let actually_focused = match &self.window {
+            Some(w) => w.has_focus(),
+            None => return,
+        };
+        self.focused = actually_focused;
         let Some(window) = &self.window else {
             return;
         };
@@ -3016,12 +3046,20 @@ impl ApplicationHandler for GameApp {
             // 鼠标移动（绝对位置）：非捕获态拖拽旋转；捕获态只重基准不驱动视角
             WindowEvent::CursorMoved { position, .. } => {
                 let (px, py) = (position.x, position.y);
+                // 🔴 2026-09-13 诊断计数：回答"鼠标移动事件到底有没有到"。
+                // 用户实测"鼠标完全转不了视角"时，必须先分清是
+                //   ① 事件根本没来（winit/窗口/焦点层）
+                //   ② 事件来了但被某条守卫丢掉（recenter / teleport / dragging=false）
+                // 这两个原因的修法完全不同，靠推理分不开（教训 20）。
+                self.cursor_evt_count = self.cursor_evt_count.wrapping_add(1);
+                self.cursor_evt_last = (px, py);
                 // warp 回声事件吞噬窗口：recenter 后短时间内的下一个 CursorMoved
                 // 只是回中回声，把它作为新基准并跳过，防止回声环把落点偏移当视角位移
                 if let Some(until) = self.recenter_pending_until {
                     self.recenter_pending_until = None;
                     if Instant::now() < until {
                         self.last_cursor = (px, py);
+                        self.cursor_evt_eaten = self.cursor_evt_eaten.wrapping_add(1);
                         return;
                     }
                 }
@@ -3076,6 +3114,9 @@ impl ApplicationHandler for GameApp {
                     // 跳变（warp/传送）事件不转视角，只重基准
                     let teleported = (px - self.last_cursor.0).abs() > MAX_LOOK_DELTA_PX
                         || (py - self.last_cursor.1).abs() > MAX_LOOK_DELTA_PX;
+                    if teleported {
+                        self.cursor_evt_teleport = self.cursor_evt_teleport.wrapping_add(1);
+                    }
                     if self.dragging && !teleported {
                         match self.camera.mode {
                             CameraMode::Orbit => self.camera.orbit(dx as f32, dy as f32),
@@ -3097,10 +3138,22 @@ impl ApplicationHandler for GameApp {
                                 size.width as f64 / 2.0,
                                 size.height as f64 / 2.0,
                             );
-                            let _ = window.set_cursor_position(center);
-                            self.last_cursor = (center.x, center.y);
-                            self.recenter_pending_until =
-                                Some(Instant::now() + Duration::from_millis(150));
+                            // 🔴 2026-09-13 修：**必须看返回值**。原写法
+                            // `let _ = set_cursor_position(center); last_cursor = center;`
+                            // 无条件把基准设成中心 —— 而窗口没焦点时这个 warp 会失败，
+                            // 真实指针并不在中心，于是下一个事件算出的 dx 是一个大跳变，
+                            // 被 MAX_LOOK_DELTA_PX 当"光标传送"**全部丢弃** ⇒
+                            // 表现就是"按住左键拖拽也转不了视角"（用户 2026-09-13 实测）。
+                            // 捕获态那条路早已修过同一个 bug（见上面 3036 行的注释），
+                            // 这条漏了。
+                            if window.set_cursor_position(center).is_ok() {
+                                self.last_cursor = (center.x, center.y);
+                                self.recenter_pending_until =
+                                    Some(Instant::now() + Duration::from_millis(150));
+                            } else {
+                                // warp 失败：基准留在真实位置，下一事件才能算出正确增量
+                                self.last_cursor = (px, py);
+                            }
                         }
                     } else {
                         self.last_cursor = (px, py);
