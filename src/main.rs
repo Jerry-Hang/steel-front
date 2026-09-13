@@ -6,6 +6,22 @@
 //! 3. 事件循环处理输入
 //! 4. 每帧更新相机并渲染
 
+// 🔴🔴 2026-09-13：**release 构建不创建控制台窗口**。
+//
+// 病根：Rust 的 bin 默认是 **console 子系统**，所以双击 exe 时 Windows 会**先创建一个
+// 控制台窗口并让它成为前台**，游戏窗口随后才创建。实测枚举本进程的窗口可见：
+//     class='Window Class'        title='Steel Front - Vulkan'   ← 游戏窗口
+//     class='ConsoleWindowClass'  title='...steel-front.exe'     ← 控制台，可见
+// 两个同属一个进程的顶层窗口互相争前台。而 `sync_cursor` 要求
+// "本进程是前台进程" 才抓光标（见 `window_is_foreground`）—— 于是**光标永不抓取**，
+// 表现就是"键盘与左右键有反应、鼠标完全转不了视角"（用户 2026-09-13 反复报告）。
+//
+// 改成 windows 子系统后根本不存在控制台 ⇒ 没有可争的前台 ⇒ 抓取成立。
+// **调试构建保留控制台**（`debug_assertions` 时保留），否则 `cargo run` 时看不到日志。
+// 发布版的日志走 stderr 重定向：用 `SteelFront.bat` 启动会落到
+// `logs/play_latest.log.err`。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 /// 构建期内嵌着色器（build.rs 生成 OUT_DIR/shaders.rs）
 pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
