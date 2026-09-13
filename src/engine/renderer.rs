@@ -4809,10 +4809,29 @@ impl Renderer {
             // 🪖 士兵 GLB：每个 NPC **一个实例**（根变换 = 位置 + yaw），而不是 18 段。
             // 只有在网格上传成功时才建 —— 否则白算一遍再被 `upload_soldiers` 丢掉。
             if soldier_on && (self.soldier_parts.len() as u32) < MAX_SOLDIER_INSTANCES {
+                // 🚶 **步态**（2026-09-13）：GLB 是静态网格，所以用**实例矩阵**补回动作 ——
+                // 不接这一段，士兵会僵直地"滑行"，那是我换掉 18 段箱体时引入的倒退
+                // （箱体路径原来靠逐段矩阵摆腿）。
+                //
+                // 只做两件最显眼的事，不值得为此上骨骼：
+                //   * **上下起伏**：一步一次，±4cm。人走路时质心确实在上下动，
+                //     幅度取小 —— 大了会读成"跳"而不是"走"。
+                //   * **前后倾**：与起伏同相，约 ±3°。给"迈步"一个方向感。
+                // 相位用 `v.phase`（main.rs 累积时钟，`moving` 为假时冻结），
+                // 所以站住的士兵是静止的，不会原地抖。
+                //
+                // 开火时再加一次**向后的短促后坐**（枪口冲击把人往后推），
+                // 同样用 `phase` 取脉冲，避免引入新的状态量。
+                let gait = if v.moving { (v.phase * 2.0).sin() } else { 0.0 };
+                let bob = gait * 0.04;
+                let lean = gait * 0.05;
+                let kick = if v.firing { (v.phase * 18.0).sin().max(0.0) * 0.05 } else { 0.0 };
+                let rot = glam::Quat::from_rotation_y(v.yaw)
+                    * glam::Quat::from_rotation_x(lean - kick);
                 let m = glam::Mat4::from_scale_rotation_translation(
                     glam::Vec3::ONE,
-                    glam::Quat::from_rotation_y(v.yaw),
-                    glam::Vec3::new(v.pos[0], v.pos[1], v.pos[2]),
+                    rot,
+                    glam::Vec3::new(v.pos[0], v.pos[1] + bob, v.pos[2]),
                 );
                 // 🔴🔴 2026-09-13 定案（第一版整身饱和红的真正原因）：
                 //
