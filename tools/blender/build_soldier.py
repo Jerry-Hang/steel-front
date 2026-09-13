@@ -185,14 +185,17 @@ def main() -> int:
     # ------------------------------------------------------------ head + helmet
     limb(p, (0.0, 0.0, 1.510), (0.0, 0.0, 1.600), 0.056, 0.056, SKIN, seg=6)
     # head 0.17 x 0.21 x 0.23 -- 13% of body height, the real proportion
-    sbox(p, (0.0, 0.005, 1.665), (0.170, 0.210, 0.230), SKIN, ao_top=0.84)
+    # head: a tapered hexagonal prism, not a box -- a box skull is the single most
+    # "machine-like" read at 3-5 m, and `limb()` already gives us a hex profile for free.
+    limb(p, (0.0, 0.005, 1.552), (0.0, 0.005, 1.782), 0.074, 0.082, SKIN, seg=6, mid=0.35)
     # goggles: a dark band across the eyes. Without it the face is a featureless pale
     # block and the model has NO FRONT -- the same complaint the 18-box table already
     # records ("face brighter than helmet => the head has no facing").
     sbox(p, (0.0, 0.104, 1.716), (0.150, 0.032, 0.044), ARMOUR, ao_top=0.55)
     # helmet shell 0.255 x 0.285 x 0.145 -- pulled DOWN over the skull so it reads as a
     # helmet rather than a cap floating above it (first preview showed exactly that).
-    sbox(p, (0.0, 0.008, 1.772), (0.250, 0.270, 0.120), HELMET, ao_top=1.0)
+    # helmet: a shallow hex prism flaring outward at the bottom edge (like a real shell)
+    limb(p, (0.0, 0.008, 1.760), (0.0, 0.008, 1.840), 0.132, 0.108, HELMET, seg=6)
     # brim
     sbox(p, (0.0, 0.125, 1.744), (0.225, 0.095, 0.045), HELMET, ao_top=0.88)
 
