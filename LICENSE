@@ -141,7 +141,7 @@ redistributing.**
 | `assets/rt/**` — project-authored PT shaders | Copyright holder | **Yes** |
 | `assets/*.spv` — produced at build time from in-repo WGSL | Copyright holder | **Yes** |
 | `assets/guns/**`, `assets/guns_ext/**` — third-party models | **Their respective authors** | **No — see NOTICE** |
-| `src/engine/cjk_glyphs.rs` — glyph bitmaps | ⚠️ **Derived from a system font; see NOTICE** | **No — see NOTICE** |
+| `src/engine/cjk_glyphs.rs` — glyph bitmaps | **Noto Sans SC (SIL OFL 1.1)**, a permissive font license | **Yes** — OFL text in `assets/fonts/` |
 | Rust dependencies (10 crates) | Their respective authors | **No — see NOTICE** |
 
 ### 4.2 A note on the gun models
@@ -159,10 +159,15 @@ about each one, including which entries are still unverified.
 
 ### 4.3 A note on the font-derived glyph data
 
-`src/engine/cjk_glyphs.rs` contains bitmap glyphs extracted from a Microsoft
-Windows system font. **This is flagged as the highest-risk item in the
-repository and is explained in full in `THIRD-PARTY-NOTICES.md` §3.** If you
-intend to redistribute this project, read that section first.
+`src/engine/cjk_glyphs.rs` contains bitmap glyphs extracted from **Noto Sans SC**,
+which is distributed under the **SIL Open Font License 1.1** — a permissive
+license that permits redistribution and places no copyleft obligation on the
+software embedding it. The full OFL text ships in `assets/fonts/`.
+
+**This was not always the case.** Until 2026-09-14 the glyphs were derived from
+Windows' **SimSun**, a proprietary font whose license prohibits redistribution,
+which made the repository unsafe to redistribute. `THIRD-PARTY-NOTICES.md` §3
+records the change and the tool that now makes the extraction reproducible.
 
 ---
 

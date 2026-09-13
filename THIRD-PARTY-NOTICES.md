@@ -142,14 +142,52 @@ holder, not for a maintainer.**
 Whichever route is taken, the extraction process should be **committed as a
 script under `tools/`** so the provenance stays auditable.
 
-### Status
+### Status: ✅ **RESOLVED on 2026-09-14**
 
-- **Owner of the issue:** copyright holder.
-- **Blocking redistribution?** Yes — treat the repository as *not* cleanly
-  redistributable until this is resolved.
-- **Does it affect the AGPL grant in `LICENSE`?** No. The AGPL grant covers the
-  copyright holder's own code. It cannot grant rights the copyright holder does
-  not hold, so the glyph data is carved out of the grant and flagged here.
+The table was re-extracted from **Noto Sans SC** (SIL Open Font License 1.1)
+and trimmed to the code points the source actually uses. The full OFL text is
+in [`assets/fonts/OFL-NotoSansCJK.txt`](assets/fonts/OFL-NotoSansCJK.txt).
+
+| | Before | After |
+|---|---|---|
+| Source font | SimSun (proprietary) | **Noto Sans SC (SIL OFL 1.1)** |
+| Entries in table | 21,486 | **1,580** |
+| File size | 2,256,253 B | **167,181 B** (−92.6%) |
+| Generator in repo | **none** | `tools/extract_cjk_glyphs.py` |
+| Redistribution blocked | **yes** | **no** |
+
+**Why the trim, and how the required set is derived.** A scan of `src/**/*.rs`
+(excluding the generated table) finds **1,580** distinct CJK code points in use,
+against 21,486 shipped entries — so 19,906 glyphs were **dead weight that no code
+referenced**. `tools/extract_cjk_glyphs.py --scan` regenerates that list
+(`tools/cjk_used_codepoints.txt`), and the extractor refuses to write a table
+that would not cover it.
+
+**The contract is now enforced by a test.** `font_cjk::tests::cjk_glyph_generates`
+used to assert `CJK_GLYPHS.len() > 20000` — a condition satisfiable by padding
+the table with glyphs nothing uses, which is exactly how the dead weight
+survived. It now asserts that the table covers every code point in
+`cjk_used_codepoints.txt` **and contains nothing else**.
+
+**Regenerating.** If a future change introduces characters outside the current
+set, `cargo test` fails with the exact missing characters. The fix is:
+
+```powershell
+python tools/extract_cjk_glyphs.py --scan                                # refresh the used set
+python tools/extract_cjk_glyphs.py --font <path-to-OFL-font>             # re-extract
+```
+
+**A note on the extraction parameters.** The first attempt produced glyphs that
+sat 3–4 rows low with their bottom clipped, because PIL's *default* text anchor
+is `"la"` (left-**ascender**) and a CJK glyph's em box extends **above** the
+ascender. The extractor now passes `anchor="lt"` explicitly. If you point it at
+a different face and the glyphs look vertically wrong, that is the first thing to
+check — `tools/_calib_cjk.py` sweeps size/anchor/offset and reports the density
+each combination achieves.
+
+**Still worth doing (not required for redistribution):** the OFL requires that
+derivative works not use the Reserved Font Name. Nothing here is named "Noto",
+so no action is needed, but the attribution above must stay in place.
 
 ---
 
