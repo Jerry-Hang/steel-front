@@ -110,6 +110,14 @@ impl Stance {
 }
 /// 重力加速度（m/s²，19.6 = 2x 真实重力——FPS 手感偏好（下落干脆），配合低跳高）
 const GRAVITY: f32 = 19.6;
+
+/// 🔴 2026-09-13：**冲刺跳惯性的空中衰减率**（每秒的比例）。
+/// 起跳时带走的水平速度按 `(1 - AIR_DRAG*dt)` 逐帧衰减，落地清零。
+/// 取 0.6 的依据：`JUMP_SPEED = 3.3`、`GRAVITY = 19.6` ⇒ 滞空 ≈ `2*3.3/19.6 ≈ 0.34s`，
+/// 衰减到 `(1-0.6*0.34) ≈ 80%` —— 冲刺（6.0×1.65 = 9.9 m/s）能多飞约 2.6m，
+/// 足够跃过一条人行道或矮墙，又不会变成"滑翔"。
+const AIR_DRAG: f32 = 0.6;
+
 /// NPC 就近掩体搜索半径（网格格数）
 const COVER_MAX_DIST: u32 = 10;
 /// 压力模式掩体搜索半径（网格格数）：NPC 战场开阔（150m 外出生），
@@ -943,6 +951,11 @@ pub struct Game {
     sprint_held: bool,
     /// 跳跃垂直速度（m/s，>0 上升；落地归零）
     jump_vel: f32,
+    /// 🔴 2026-09-13：**起跳时带走的水平速度**（冲刺跳的惯性）。
+    /// 起跳瞬间由当时的有效速度写入，空中按 `AIR_DRAG` 衰减着继续推进
+    /// （叠加在削弱后的空中控制之上），落地清零。
+    /// 用户要求："在奔跑的时候，跳的时候会有向前的力，会直接跟过去一样越过去"。
+    jump_hvel: glam::Vec3,
     move_left: bool,
     move_right: bool,
     /// 脚步声音效限频计时
@@ -1334,6 +1347,7 @@ impl Game {
             stance: Stance::Standing,
             sprint_held: false,
             jump_vel: 0.0,
+            jump_hvel: glam::Vec3::ZERO,
             move_backward: false,
             move_left: false,
             move_right: false,
@@ -3404,6 +3418,16 @@ impl Game {
             dz -= right.z;
         }
         let len = (dx * dx + dz * dz).sqrt();
+        // 🔴 2026-09-13：**冲刺起跳保留水平动量**（用户要求："在奔跑的时候，跳的时候会有
+        // 向前的力，会直接跟过去一样越过去"）。
+        //
+        // 原实现是纯"位置式"移动：每帧只按 `速度 × dt` 沿**当前输入方向**挪一下，
+        // 不保存任何水平速度。于是起跳那一瞬间水平速度就没了 —— 而且空中还要再乘
+        // `air_factor = 0.5`，结果是"原地直上直下"，冲刺跳跃完全过不去障碍。
+        //
+        // 现在：起跳瞬间把**当时的有效水平速度**存进 `jump_hvel`，空中把它按 `AIR_DRAG`
+        // 衰减着继续推进（叠加在削弱后的空中控制之上），落地清零。
+        // 这样冲刺跳能靠惯性跃过缺口，普通走跳几乎看不出来（速度本来就小）。
         if len > 1e-4 {
             // 空中控制衰减：跳跃中水平移动减半（真实物理——空中无法急转弯）
             let air_factor = if self.jump_vel != 0.0 { 0.5 } else { 1.0 };
@@ -3417,9 +3441,11 @@ impl Game {
                 * air_factor
                 * dt)
                 .min(0.5);
+            // 惯性位移：与输入方向无关，纯粹把起跳时带走的速度延续下去
+            let (ix, iz) = (self.jump_hvel.x * dt, self.jump_hvel.z * dt);
             let (mx, mz) = self
                 .player_body
-                .try_move(&self.world, dx / len * step, dz / len * step);
+                .try_move(&self.world, dx / len * step + ix, dz / len * step + iz);
             let moved = (mx * mx + mz * mz).sqrt();
             if moved > 0.01 && self.time - self.footstep_timer >= FOOTSTEP_INTERVAL {
                 self.footstep_timer = self.time;
@@ -3428,6 +3454,16 @@ impl Game {
                 let pos = self.player_pos();
                 self.audio.synth_mut().play_footstep(pos, step_scale);
             }
+        } else if self.jump_hvel.length_squared() > 1e-6 {
+            // 无输入但空中有惯性：仍然往前滑（松手也越得过去）
+            let (ix, iz) = (self.jump_hvel.x * dt, self.jump_hvel.z * dt);
+            let _ = self.player_body.try_move(&self.world, ix, iz);
+        }
+        // 惯性衰减（空中每帧），落地时由下面的贴地分支清零
+        if self.jump_vel != 0.0 {
+            let k = (1.0 - AIR_DRAG * dt).max(0.0);
+            self.jump_hvel.x *= k;
+            self.jump_hvel.z *= k;
         }
         // 垂直运动：跳跃（Jump 键按下且在地面 → 初速）+ 重力 + 落地贴地
         let ground = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
@@ -3435,6 +3471,16 @@ impl Game {
         // 卧倒不能起跳（蹲姿可以）
         if self.jump_pressed && on_ground && self.stance != Stance::Prone {
             self.jump_vel = JUMP_SPEED;
+            // 🔴 起飞瞬间把**当前有效水平速度**带进惯性（见上面 jump_hvel 的注释）。
+            // 输入方向归一化：斜着冲刺不会比直着冲刺飞得更远。
+            if len > 1e-4 {
+                let sprint_mul = if self.sprinting() { SPRINT_MUL } else { 1.0 };
+                let ads_factor = if self.hud.ads { 0.65 } else { 1.0 };
+                let v = PLAYER_SPEED * self.stance.speed_mul() * sprint_mul * ads_factor;
+                self.jump_hvel = glam::Vec3::new(dx / len * v, 0.0, dz / len * v);
+            } else {
+                self.jump_hvel = glam::Vec3::ZERO; // 原地起跳：没有惯性
+            }
             let jpos = self.player_pos();
             self.audio.synth_mut().play_footstep(jpos, 1.0);
         }
@@ -3444,9 +3490,11 @@ impl Game {
             if self.player_body.pos.y <= ground {
                 self.player_body.pos.y = ground;
                 self.jump_vel = 0.0;
+                self.jump_hvel = glam::Vec3::ZERO; // 落地：惯性结束
             }
         } else {
             self.player_body.pos.y = ground;
+            self.jump_hvel = glam::Vec3::ZERO;
         }
         self.player_body.grounded = self.jump_vel <= 0.0;
         // 跳跃结束后清除请求（避免长按连续起跳；重置时也清）
