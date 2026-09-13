@@ -164,6 +164,37 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
   **排查"某物到底有没有被画"先看这两个计数**，再看图。
 
+**玩家碰撞契约（2026-09-13 变更，勿退回旧写法）**
+- 🔴 `PlayerBody::push_out_of_aabb` **现在带 Y 判据**：只有玩家的垂直区间
+  `[pos.y, pos.y + eye_height]` 与 `Aabb` 的 `[min.y, max.y]` **相交**时才推挤。
+  - 旧契约（**已废弃**）："墙的 y 范围不包含玩家 y，**但水平碰撞仍应生效**" ——
+    即不管多高只要 XZ 落进盒子就被水平推开。**那条契约的直接后果是永远站不到任何
+    东西上面**（楼顶/集装箱/掩体顶），而且与"垂直方向只贴地形高度、没有顶面支撑"
+    合起来，正是用户报的"嵌进地板 / 穿进墙里"。
+  - **曾经有 5 条测试把旧契约写死**（`player_y_untouched_by_collision` 的注释甚至
+    明写"但水平碰撞仍应生效"）—— 改动时它们会红，那是**预期的**，要改测试而不是改回代码。
+- 🔴 **站立面 = `max(terrain_height_at(x,z), PlayerBody::support_height(world, PLAYER_STEP_UP))`**。
+  `support_height` 取所有**水平范围内（按 radius 外扩）且顶面不高于 `pos.y + step_up`**
+  的盒子的顶面最大值；没有任何盒子时返回 `f32::NEG_INFINITY`。
+  **这两条必须成对存在**：只加 Y 判据而不取支撑，玩家会直接穿进盒子里掉下去。
+- `PLAYER_STEP_UP = 0.45` m：路缘/台阶能迈上去，护栏(1.5m)/集装箱(2.6m)必须跳。
+
+**呈现模式（2026-09-13）**
+- `RV3D_PRESENT_MODE` 支持 `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**。
+- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**，快速转视角时正好读成"残影/鬼影"
+  （用户 2026-09-13 报告枪有"非常明显的残影"）。**`PrintWindow` 抓不到它** ——
+  它抓的是已合成的完整帧，撕裂只发生在显示器上。**别再用静态截图去证伪"残影"。**
+- **玩家路径由 `SteelFront.bat` 设 `RV3D_PRESENT_MODE=mailbox`**（不撕裂、也不像 FIFO
+  那样在独显直连下等不到 vblank 而死锁）。引擎默认保持 IMMEDIATE 是为了基准最稳。
+
+**建筑摆放（2026-09-13）**
+- `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。
+  用 `max` 会按较大方向贴合、另一个方向**必然溢出 footprint** ⇒ 相邻楼互相穿插，
+  玩家看到"一堆窗格以不同角度叠在一起"（用户截图的"乱窗/透视错误"）。
+  **建筑模型本身没问题** —— `preview_glb.py` 渲出来是规整窗格；问题一直在摆放。
+- 原注释担心的"无形的墙"由调用方把**碰撞盒设成真实视觉尺寸**来消掉
+  （`building_at` 里按 `half_footprint × scale` 算，±90° 时 x/z 互换）。
+
 **路径追踪（PT，默认关）**
 - 默认关的最新理由 = "整帧替换光栅画面 + 1 spp 噪声大"，属调试/烘焙参照视图，**不是"命中没修"**。
   `RV3D_PT_LIVE=0` 强制关。
