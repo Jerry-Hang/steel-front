@@ -61,6 +61,40 @@ mod tests {
                 rows
             );
         }
-        assert!(CJK_GLYPHS.len() > 20000, "表应覆盖完整简体字集");
+        // 🔴 2026-09-14：这条断言原本是 `CJK_GLYPHS.len() > 20000`，理由是"表应覆盖
+        // 完整简体字集"。**那句话把 92.6% 的死数据写成了要求** —— 实测源码只用到
+        // 1580 个 CJK 码点，而旧表有 21486 条，其中 19906 条没有任何引用。
+        // 一条能被"多塞两万字"满足的断言，守不住任何东西（教训 14 的形态）。
+        //
+        // 真正该守的契约只有一个：**表必须覆盖源码用到的每一个码点**，
+        // 否则 HUD 会渲染成空白。清单由 `tools/extract_cjk_glyphs.py --scan` 生成，
+        // 那是唯一知道"哪些字被用到"的地方，所以直接把它编进来比对。
+        let used: Vec<char> = include_str!("../../tools/cjk_used_codepoints.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| u32::from_str_radix(l.trim(), 16).ok())
+            .filter_map(char::from_u32)
+            .collect();
+        assert!(
+            used.len() > 500,
+            "用到码点清单只有 {} 条，像是没生成成功",
+            used.len()
+        );
+        let missing: Vec<char> = used
+            .iter()
+            .copied()
+            .filter(|ch| glyph(*ch).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "字模表缺 {} 个源码用到的字，HUD 会渲染成空白：{}",
+            missing.len(),
+            missing.iter().take(40).collect::<String>()
+        );
+        assert_eq!(
+            CJK_GLYPHS.len(),
+            used.len(),
+            "字模表应当**不含**源码用不到的字（旧版多带了 19906 个死条目）"
+        );
     }
 }
