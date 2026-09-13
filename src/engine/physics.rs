@@ -371,6 +371,20 @@ impl PlayerBody {
     /// 推挤方向为 圆心→最近点（水平投影重合时取最小穿透轴，参考 `aabb_separation` 风格）。
     /// 发生推挤时返回穿透深度，否则返回 None。只改 pos.x/z，不碰 pos.y。
     fn push_out_of_aabb(&mut self, aabb: &Aabb) -> Option<f32> {
+        // 🔴🔴 2026-09-13：**加 Y 判据**。此前这里只看水平距离，`Aabb` 的 min/max.y
+        // 完全没参与 —— 于是"不管你在多高，只要 XZ 落进盒子就被水平推开"：
+        //   * 你永远没法站到任何东西上面（楼顶/集装箱/掩体顶）
+        //   * 而垂直方向只有"贴地形高度"，没有任何顶面支撑
+        // 两者合起来就是用户报的"嵌到地板里面/穿进墙里"那一类症状。
+        //
+        // 现在：只有玩家的**垂直区间**与盒子相交时才推挤。
+        // 站在盒子上方（脚底 ≥ 盒子顶面）时不再被推开 —— 顶面支撑由
+        // `support_height` 提供（见那里的注释）。
+        let feet = self.pos.y;
+        let head = self.pos.y + self.eye_height;
+        if head <= aabb.min.y || feet >= aabb.max.y {
+            return None; // 垂直方向无交集：完全在盒子上方或下方
+        }
         let cx = self.pos.x;
         let cz = self.pos.z;
         let closest_x = cx.clamp(aabb.min.x, aabb.max.x);
@@ -436,6 +450,34 @@ impl PlayerBody {
         self.pos.z += dz;
         self.collide_world(world);
         (self.pos.x - old_x, self.pos.z - old_z)
+    }
+
+    /// 🔴 2026-09-13：**顶面支撑高度** —— 玩家脚下能站住的最高平面。
+    ///
+    /// 与 `push_out_of_aabb` 配套：那里加了 Y 判据后，站在盒子上方就不再被推开，
+    /// 于是必须有东西接住玩家，否则会直接穿进盒子里掉下去。
+    ///
+    /// 规则：取所有**水平范围内、且顶面不高于 `pos.y + STEP_UP`** 的盒子的顶面最大值。
+    /// - 水平范围按 `radius` 外扩，与推挤判据同源（脚站在边缘也算站住）
+    /// - `STEP_UP` 是抬脚上限：路缘/台阶能上，1.5m 的护栏不能——必须跳
+    /// - 没有任何盒子时为 `f32::NEG_INFINITY`，由调用方与地形高度取 max
+    pub fn support_height(&self, world: &World, step_up: f32) -> f32 {
+        let mut best = f32::NEG_INFINITY;
+        let limit = self.pos.y + step_up;
+        for body in &world.bodies {
+            let a = body.aabb();
+            if a.max.y > limit || a.max.y <= best {
+                continue;
+            }
+            if self.pos.x > a.min.x - self.radius
+                && self.pos.x < a.max.x + self.radius
+                && self.pos.z > a.min.z - self.radius
+                && self.pos.z < a.max.z + self.radius
+            {
+                best = a.max.y;
+            }
+        }
+        best
     }
 
     /// 是否与任一刚体的 AABB（水平扩展 radius 后）重叠
@@ -851,7 +893,7 @@ mod tests {
         world
             .bodies
             .push(Body::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0)));
-        let mut player = PlayerBody::new(Vec3::new(-0.5, 5.0, 0.0), 0.4, 1.6);
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 0.0, 0.0), 0.4, 1.6);
         let moved = player.try_move(&world, 0.4, 0.0);
         assert!(!player.collides(&world), "被推挤后不应穿透墙体");
         assert!(moved.0 < 0.4, "撞墙后 X 位移应被截断");
@@ -870,7 +912,7 @@ mod tests {
         world
             .bodies
             .push(Body::new(Vec3::new(0.0, 0.0, 2.5), Vec3::new(2.0, 2.0, 0.5)));
-        let mut player = PlayerBody::new(Vec3::new(0.0, 5.0, 0.0), 0.4, 1.6);
+        let mut player = PlayerBody::new(Vec3::new(0.0, 0.0, 0.0), 0.4, 1.6);
         let (mx, mz) = player.try_move(&world, 0.5, 2.5);
         assert!(mx > 0.49, "斜向移动时 X 方向不应被阻挡");
         assert!(mz < 2.5, "斜向移动时 Z 方向应被墙阻挡");
@@ -894,7 +936,7 @@ mod tests {
         world
             .bodies
             .push(Body::new(Vec3::new(0.75, 0.0, 0.0), Vec3::new(0.75, 2.0, 0.3)));
-        let mut player = PlayerBody::new(Vec3::new(-0.5, 5.0, 0.0), 0.4, 1.6);
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 0.0, 0.0), 0.4, 1.6);
         let (mx, _) = player.try_move(&world, 0.8, 0.0);
         assert!(!player.collides(&world), "多个 AABB 叠放时也应被推出，不穿透");
         assert!(mx < 0.8, "X 位移应被截断");
@@ -908,14 +950,76 @@ mod tests {
     #[test]
     fn player_y_untouched_by_collision() {
         let mut world = World::new();
-        // 墙的 y 范围 [−2, 2] 不包含玩家 y，但水平碰撞仍应生效
+        // 墙的 y 范围 [-2, 2]，玩家脚底 0.0 ⇒ 垂直区间相交 ⇒ 水平推挤生效
         world
             .bodies
             .push(Body::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0)));
-        let mut player = PlayerBody::new(Vec3::new(-0.5, 7.25, 0.0), 0.4, 1.6);
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 0.0, 0.0), 0.4, 1.6);
         player.try_move(&world, 0.8, 0.0);
         assert!(!player.collides(&world), "推挤后不应穿透墙体");
-        assert_eq!(player.pos.y, 7.25, "碰撞推挤不应改动 y（y 由地形高度决定）");
+        assert_eq!(player.pos.y, 0.0, "碰撞推挤不应改动 y（y 由地形高度决定）");
+    }
+
+    /// 🔴 2026-09-13 新增：**碰撞现在是 Y 感知的**。
+    ///
+    /// 旧契约（本条测试的前身曾明确断言）："墙的 y 范围不包含玩家 y，
+    /// **但水平碰撞仍应生效**" —— 也就是不管你在多高，只要 XZ 落进盒子就被水平推开。
+    /// 那条契约的直接后果是**永远站不到任何东西上面**，而且与"垂直方向只贴地形高度、
+    /// 没有顶面支撑"合起来，就是用户报的"嵌进地板/穿进墙里"。
+    /// 现改为：垂直区间不相交就不推挤，顶面支撑交给 `support_height`。
+    #[test]
+    fn player_above_a_box_is_not_pushed_and_can_stand_on_it() {
+        let mut world = World::new();
+        // 一个箱子：x ∈ [0,2]，z ∈ [-1,1]，**顶面 y = 1.0**
+        world
+            .bodies
+            .push(Body::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)));
+
+        // 站在箱子上方（脚底 1.0 = 顶面）：不应被水平推开
+        let mut above = PlayerBody::new(Vec3::new(1.0, 1.0, 0.0), 0.4, 1.6);
+        let moved = above.try_move(&world, 0.3, 0.0);
+        assert!(
+            (moved.0 - 0.3).abs() < 1e-4,
+            "站在箱子顶上时水平移动不应被截断，实际位移 {}",
+            moved.0
+        );
+
+        // 而 `support_height` 应当把箱顶报成可站立面
+        let support = above.support_height(&world, 0.45);
+        assert!(
+            (support - 1.0).abs() < 1e-4,
+            "箱子顶面应被报为支撑面，实际 {}",
+            support
+        );
+
+        // 站在箱子**旁边**且垂直区间相交：仍应被推开（墙还是墙）
+        let mut beside = PlayerBody::new(Vec3::new(-0.5, 0.0, 0.0), 0.4, 1.6);
+        let moved_b = beside.try_move(&world, 0.8, 0.0);
+        assert!(
+            moved_b.0 < 0.8,
+            "垂直区间相交时仍应被挡住，实际位移 {}",
+            moved_b.0
+        );
+    }
+
+    /// `support_height` 的抬脚上限：高过 `step_up` 的面不能被当作支撑，
+    /// 否则玩家会"贴"着 1.5m 护栏一路走上去。
+    #[test]
+    fn support_height_respects_step_up() {
+        let mut world = World::new();
+        // 顶面 y = 2.0 的高台
+        world
+            .bodies
+            .push(Body::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 1.0)));
+        let low = PlayerBody::new(Vec3::new(0.0, 0.0, 0.0), 0.4, 1.6);
+        assert!(
+            low.support_height(&world, 0.45).is_infinite()
+                && low.support_height(&world, 0.45) < 0.0,
+            "2.0m 的高台不该在 0.45m 抬脚上限内成为支撑面"
+        );
+        // 已经站到上面时就该是支撑面
+        let high = PlayerBody::new(Vec3::new(0.0, 2.0, 0.0), 0.4, 1.6);
+        assert!((high.support_height(&world, 0.45) - 2.0).abs() < 1e-4);
     }
 
     #[test]
@@ -941,7 +1045,7 @@ mod tests {
         world
             .bodies
             .push(Body::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0)));
-        let mut player = PlayerBody::new(Vec3::new(-0.5, 5.0, 0.0), 0.4, 1.6);
+        let mut player = PlayerBody::new(Vec3::new(-0.5, 0.0, 0.0), 0.4, 1.6);
         player.pos.x += 0.3; // 进入重叠：距墙面 0.2 < radius
         assert!(player.collide_world(&world), "发生推挤时应返回 true");
         assert!(!player.collides(&world), "推挤后不应再重叠");

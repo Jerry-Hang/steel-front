@@ -118,6 +118,13 @@ const GRAVITY: f32 = 19.6;
 /// 足够跃过一条人行道或矮墙，又不会变成"滑翔"。
 const AIR_DRAG: f32 = 0.6;
 
+/// 🔴 2026-09-13：**抬脚上限（米）** —— 走到多高的障碍前可以直接迈上去。
+/// 路缘 ~0.15、台阶 ~0.18、护栏 ~1.5、集装箱 ~2.6。
+/// 取 0.45：路缘与台阶能上，护栏与集装箱必须跳 —— 这正是"跳"该有的意义。
+/// 配合 `PlayerBody::support_height`（顶面支撑）与 `push_out_of_aabb` 的 Y 判据，
+/// 玩家第一次能真的站到东西上面。
+const PLAYER_STEP_UP: f32 = 0.45;
+
 /// NPC 就近掩体搜索半径（网格格数）
 const COVER_MAX_DIST: u32 = 10;
 /// 压力模式掩体搜索半径（网格格数）：NPC 战场开阔（150m 外出生），
@@ -3466,7 +3473,14 @@ impl Game {
             self.jump_hvel.z *= k;
         }
         // 垂直运动：跳跃（Jump 键按下且在地面 → 初速）+ 重力 + 落地贴地
-        let ground = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
+        //
+        // 🔴 2026-09-13：站立面 = **地形高度 与 障碍物顶面 的较大者**。
+        // 配套改动在 `physics.rs`：`push_out_of_aabb` 现在带 Y 判据（站在盒子上方不再被
+        // 水平推开），所以必须有东西接住玩家 —— 否则会直接穿进盒子里掉下去。
+        // 这条接线同时给了"能站到集装箱/掩体/矮墙上"这个此前完全不存在的能力。
+        let terrain = terrain_height_at(self.player_body.pos.x, self.player_body.pos.z);
+        let support = self.player_body.support_height(&self.world, PLAYER_STEP_UP);
+        let ground = terrain.max(support);
         let on_ground = self.player_body.pos.y <= ground + 0.05 && self.jump_vel <= 0.0;
         // 卧倒不能起跳（蹲姿可以）
         if self.jump_pressed && on_ground && self.stance != Stance::Prone {
