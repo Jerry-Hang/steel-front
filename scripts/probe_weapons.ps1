@@ -127,18 +127,18 @@ Write-Host "  shot 0 (start)"
 $n = 1
 foreach ($vk in @(0x31, 0x32, 0x33, 0x34)) {
     [WPN]::Key($h, [uint32]$vk)
-    Start-Sleep -Milliseconds 900
+    Start-Sleep -Milliseconds 1600
     [void](Save-Shot $h (Join-Path $repo ("screenshots\wpn_" + $n + "_key" + $n + ".png")))
     Write-Host ("  shot " + $n + " (key " + $n + ")")
     $n++
 }
 
 # Mouse wheel: one notch up, one notch down.
-[WPN]::Wheel($h, 120); Start-Sleep -Milliseconds 900
+[WPN]::Wheel($h, 120); Start-Sleep -Milliseconds 1600
 [void](Save-Shot $h (Join-Path $repo ("screenshots\wpn_" + $n + "_wheelup.png")))
 Write-Host ("  shot " + $n + " (wheel up)")
 $n++
-[WPN]::Wheel($h, -120); Start-Sleep -Milliseconds 900
+[WPN]::Wheel($h, -120); Start-Sleep -Milliseconds 1600
 [void](Save-Shot $h (Join-Path $repo ("screenshots\wpn_" + $n + "_wheeldown.png")))
 Write-Host ("  shot " + $n + " (wheel down)")
 

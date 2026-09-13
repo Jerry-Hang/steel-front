@@ -2996,15 +2996,44 @@ impl ApplicationHandler for GameApp {
                     }
                     KeyCode::KeyQ => self.key_state.down = pressed,
                     KeyCode::KeyE => self.key_state.up = pressed,
-                    // 数字键 1/2：切换武器（M1 Rifle / Thompson SMG）
-                    KeyCode::Digit1 => {
-                        if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
-                            self.game.switch_weapon(0);
-                        }
-                    }
-                    KeyCode::Digit2 => {
-                        if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
-                            self.game.switch_weapon(1);
+                    // 数字键 1..9：切换到对应武器槽位（0..8）。
+                    //
+                    // 🔴🔴 2026-09-13 修：原先**只有 `Digit1` / `Digit2` 两个分支**，
+                    // 而它们的注释还停留在「M1 Rifle / Thompson SMG」—— 那是**二战时代的
+                    // 遗留**（本作早已是现代装备，武器表也远不止两把）。这段代码从未随
+                    // 武器表增长而更新，于是：
+                    //   * 按 3/4/5/… **完全没有分支**，什么都不发生
+                    //   * 按 1/2 也只能到前两个槽位
+                    // 用户 2026-09-13 实测「输入数字用指令切枪的时候，枪的模型没有变化」，
+                    // 我用 `scripts/probe_weapons.ps1` 复现：按 1 后画面与基准**逐像素相同**
+                    // （`tools/diff_gun_region.py` 报 0.00% 差异）。
+                    //
+                    // 槽位越界由 `WeaponSystem::switch_weapon` 自己忽略，这里不必再判。
+                    KeyCode::Digit1
+                    | KeyCode::Digit2
+                    | KeyCode::Digit3
+                    | KeyCode::Digit4
+                    | KeyCode::Digit5
+                    | KeyCode::Digit6
+                    | KeyCode::Digit7
+                    | KeyCode::Digit8
+                    | KeyCode::Digit9 => {
+                        if pressed
+                            && self.game.state() == GameState::Playing
+                            && !self.game.settings_open()
+                        {
+                            let slot = match key_code {
+                                KeyCode::Digit1 => 0,
+                                KeyCode::Digit2 => 1,
+                                KeyCode::Digit3 => 2,
+                                KeyCode::Digit4 => 3,
+                                KeyCode::Digit5 => 4,
+                                KeyCode::Digit6 => 5,
+                                KeyCode::Digit7 => 6,
+                                KeyCode::Digit8 => 7,
+                                _ => 8,
+                            };
+                            self.game.switch_weapon(slot);
                         }
                     }
                     // B：切换开火模式（单发 / 三连发 / 连发）
