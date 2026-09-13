@@ -497,7 +497,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 20. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
 21. **GLB 加载器忽略 `bufferViews[].byteStride`**（交错布局会读错）。
     **lead**：现导出器是一 accessor 一 bufferView（密集），暂不受影响。
-22. **`data/` 里的历史残留** — 约 55 个文件（旧日志、一次性 .py 探针、.spv.asm 反汇编）。
+22. ~~**`data/` 里的历史残留**~~ **已清理（2026-09-13）**：62 个文件 → **只留 3 个被代码引用的**（`llm_decisions.jsonl` / `llm_server.jsonl` / `llm_doctrine.json`），回收 19.5 MB。同批清理：`screenshots/` 300→25 个（456 MB，只留文档引用的基线）、`logs/` 646→20 个（43 MB）、`dist/`（79 MB，可再生产物）。**共回收约 600 MB。** 原描述：约 55 个文件（旧日志、一次性 .py 探针、.spv.asm 反汇编）。
     已被 .gitignore 覆盖、不在仓库里，只是占磁盘。lead：确认没有还在用的（其中有 `key.py`）后清理。
 
 ---
