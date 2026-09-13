@@ -467,6 +467,9 @@ struct GameApp {
     cursor_evt_eaten: u64,
     cursor_evt_teleport: u64,
     cursor_evt_last: (f64, f64),
+    /// 1x1 全透明光标（见 `resumed` 里的注释）。捕获时用它：屏幕上不显示箭头，
+    /// 同时让 winit 认为光标"未隐藏"，从而把指针限制在窗口内而不是钉成 1x1。
+    blank_cursor: Option<winit::window::CustomCursor>,
     /// 鼠标左键是否按住（拖拽轨道旋转）
     dragging: bool,
     /// 鼠标右键是否按住（飞行模式拖拽转视角）
@@ -602,6 +605,7 @@ impl GameApp {
             cursor_evt_eaten: 0,
             cursor_evt_teleport: 0,
             cursor_evt_last: (0.0, 0.0),
+            blank_cursor: None,
             dragging: false,
             right_dragging: false,
             ads_active: false,
@@ -1763,13 +1767,28 @@ impl GameApp {
             //   我自己的诊断里 `mouse=15` 但 `at=(1280,800)` **五条采样完全相同**（没动过）
             //
             // ⇒ 只在**真 Locked**（相对鼠标，`DeviceEvent::MouseMotion` 驱动视角）时才隐藏光标。
-            // 绝对路径保持可见 ⇒ winit 走 `Some(client_rect)` ⇒ 光标能在窗口内自由移动
-            // ⇒ `CursorMoved` 有真实增量 ⇒ 配合回中逻辑，视角恢复正常。
-            // 代价：屏幕上会看到一个箭头。**能玩 > 好看**，而且这是 Windows 上唯一可行的组合。
+            // 绝对路径**不能隐藏**（否则 winit 把指针钉成 1×1），但又不能给玩家看一个箭头 ——
+            // 用户 2026-09-13 反馈"鼠标图标一直浮在中心"。
+            //
+            // ⇒ 第三解：**设一个 1×1 全透明的自定义光标**。
+            // winit 只检查自己的 `CursorFlags::HIDDEN` 标志，**从不看光标图像本身**，
+            // 所以"未隐藏 + 图像透明"同时满足两边的要求：
+            //   * winit 侧 ⇒ 走 `Some(client_rect)`，光标能在窗口内自由移动（视角能转）
+            //   * 玩家侧 ⇒ 屏幕上什么都看不见
+            // 释放时用 `CursorIcon::Default` 恢复系统箭头（菜单里要用）。
             if locked {
                 window.set_cursor_visible(false);
             } else {
-                window.set_cursor_visible(true);
+                // 用启动时造好的那个 1x1 全透明光标（见 `resumed` 里的注释）。
+                // 它必须由事件循环创建，所以在这里只做 `set_cursor`。
+                match self.blank_cursor.clone() {
+                    Some(c) => {
+                        window.set_cursor_visible(true);
+                        window.set_cursor(c);
+                    }
+                    // 造不出来（驱动拒绝 1×1）就退回可见箭头 —— 能玩优先
+                    None => window.set_cursor_visible(true),
+                }
             }
             self.cursor_captured = grabbed || locked;
             self.cursor_locked = locked;
@@ -2528,6 +2547,23 @@ impl ApplicationHandler for GameApp {
         };
 
         log::info!("窗口创建成功: {}x{}", w, h);
+
+        // 🔴 2026-09-13：造一个 **1×1 全透明光标**，捕获时用它。
+        // 为什么需要它（两个约束互相冲突，这是唯一的交集）：
+        //   * winit 若认为光标"已隐藏"（`CursorFlags::HIDDEN`），在 Confined 模式下会把指针
+        //     **钉在窗口中心 1×1**（`window_state.rs::refresh_os_cursor`）⇒ 我们靠
+        //     `CursorMoved` 增量算视角，`dx` 恒 0 ⇒ **视角纹丝不动**（用户实测）。
+        //   * 但把光标设成可见，屏幕上就**一直浮着一个箭头**（用户 2026-09-13 反馈）。
+        // ⇒ winit **只看自己的标志位，从不看光标图像**。所以"不隐藏 + 图像全透明"两边都满足。
+        // `CustomCursor` 必须由事件循环创建（`create_custom_cursor`），所以在这里做一次。
+        self.blank_cursor =
+            match winit::window::CustomCursor::from_rgba(vec![0u8, 0, 0, 0], 1, 1, 0, 0) {
+            Ok(src) => Some(event_loop.create_custom_cursor(src)),
+            Err(e) => {
+                log::warn!("无法创建透明光标（{e:?}），捕获时会显示系统箭头");
+                None
+            }
+        };
         log::info!(
             "winit inner_size: {}x{} scale_factor={:.2}",
             window.inner_size().width,
