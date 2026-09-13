@@ -5366,3 +5366,65 @@ NPC 就生成在楼体里**。这与未结案 4「玩家可能站在 GLB 楼体�
 | `docs/lighting-rendering-verification-2026-08-09.md` | 光照/渲染验证 | 部分有效 |
 | `docs/大战场枪械设计V3.0.txt`、`GAME_DESIGN.txt` | 设计文档 | 参考（后者在 `.gitignore` 内） |
 | `README.md` | 对外进度说明书 | 需与实际进度同步 |
+# 🪖 士兵真建模：已产出 GLB，**接入未做**（2026-09-13 上午）
+
+## 已交付
+
+| 文件 | 内容 |
+|---|---|
+| `tools/blender/build_soldier.py` | 生成器（复用 `build_city_kit.py` 的 `Part`/`add_quad_n`/`exposure_ao`/`export_glb`） |
+| `assets/soldier/soldier.glb` | **45 KB，1032 顶点 / 516 三角形，1.84 m 高**（含枪的包围盒深 0.94） |
+
+**预览已用眼睛看过**（铁律 D 要求）：`build/_soldier/soldier_{0..3}_*.png`
+（四视图；**该目录已 gitignore**）。
+
+### 它比 18 段箱体好在哪
+
+- **真人比例**：高 1.79 m、头 0.23 m（占 13%）、肩 0.44 m、脚长 0.26 m、**枪 0.94 m（AK-12 全枪长）**；
+- **有脸**（肤色块）、**有盔**（盖住颅顶）、**有靴**（朝前）、**双手在枪上**（右手握把、左手托护木）；
+- **烘了天光遮蔽**：`exposure_ao(z, 1.79)` —— **基准是身高而不是建筑层高 3.15**。
+  ⚠️ 第一版误用了 `box()`（它硬编 `exposure_ao(z, 3.15)`），导致**裤腿比上衣亮、像两套军服**；
+  改成局部 `sbox()` 统一基准后才对。**⇒ 给"人"做 AO，基准要用人的身高。**
+- **1 个实例槽位/人**（箱体路径要 18 个）。
+
+### 途中修的既有问题
+
+`tools/blender/build_city_kit.py` 末尾是**裸的 `main()`（无 `__name__` 守卫）** ⇒ 无法被 import。
+已改为 `if __name__ == "__main__": main()` —— **直接运行行为完全不变**。
+
+## ⚠️ 接入为什么没做（下个会话从这里接手）
+
+**`props.rs` 的合并在加载时把变换烘进顶点**（`merge_binned`，按 20/10m 分桶、每桶一次 draw call）。
+**⇒ 道具不是动态实例化的**：每个摆放都有自己的顶点。
+
+而 NPC 位置**每帧都在变** ⇒ 想让 255 个士兵用上这个 GLB，只有两条路：
+
+| 方案 | 代价 |
+|---|---|
+| (a) 每帧把 255 × 1032 顶点重写进道具 buffer | **约 26 万顶点/帧的 CPU 写入** —— 会立刻吃掉现在的 CPU 余量，**不可行** |
+| (b) **给实例化路径加"按顶点区间画一个已合并的网格"** | 要动实例 buffer 布局 + mesh 着色器 ⇒ **铁律 A/B 里风险最高的一类**（绕序/槽位错了是静默失效） |
+
+**⇒ 建议走 (b)，并且按既有纪律做**：
+1. 先读 `renderer.rs` 的实例槽位分配（`NPC_SLOT_BASE` / `NPC_CYL_SLOT_BASE` / `PROP_INSTANCE_INDEX`）
+   与 `build.rs` 的 `NPC_INSTANCE_BASE` —— **三处必须同源**（铁律 B 里那条"静默越界读"）；
+2. **先跑冒烟确认基线 VUID=0**，再动；
+3. **改完必须双模式验证**（第一人称 + `RV3D_INSPECT=1`）；
+4. **保留 18 段路径作为远距 LOD**（近距用 GLB、远距用箱体）—— **这是最省的组合**，
+   也让改动可回退（一个距离阈值就能切回去）。
+
+## 已知可改进处（不影响可用）
+
+- **头盔仍略像"方帽"**：`0.255 x 0.285 x 0.145` 可以再压扁并加一点前倾；
+- **手臂在正面仍偏细**（半径 0.062/0.050）—— 真人上臂约 0.10 直径，可加粗；
+- 目前**没有面部特征**（只有肤色块）；加一个护目镜条就会有"朝向"。
+
+## 复现命令
+
+```powershell
+$bl = "D:\3D_Work\blender\blender-5.2.1-windows-x64\blender.exe"
+& $bl --background --python tools/blender/build_soldier.py -- "D:/Rust/steel-front/build/_soldier" soldier
+& $bl --background --python tools/blender/preview_glb.py -- "D:/Rust/steel-front/build/_soldier/soldier.glb" "D:/Rust/steel-front/build/_soldier/soldier" 4
+```
+**⚠️ 路径必须用绝对路径或正斜杠** —— 相对路径会被 Blender 解析到它自己的工作目录（实测写到了 `C:\build\`）。
+
+
