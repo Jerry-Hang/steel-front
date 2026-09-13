@@ -4814,11 +4814,28 @@ impl Renderer {
                     glam::Quat::from_rotation_y(v.yaw),
                     glam::Vec3::new(v.pos[0], v.pos[1], v.pos[2]),
                 );
+                // 🔴🔴 2026-09-13 定案（第一版整身饱和红的真正原因）：
+                //
+                // 士兵实例槽 `SOLDIER_INSTANCE_BASE`(83011) **≥ `NPC_SLOT_BASE`**，
+                // 于是顶点着色器把它归进 NPC 那条**纯色路径**（`flat_flag = 2`）——
+                // 那条路上 **`tint` 就是外观色本身，顶点色是被白化掉的**
+                // （见 AGENTS.md 铁律 B：18 段箱体的顶点色全部白化）。
+                // 所以第一版照抄 `v.tint` 的结果是"一整块饱和的红"，军服细节全丢；
+                // 我随后改成"与白色混三成"也只减轻了饱和度，**因为问题不是强度而是语义**。
+                //
+                // 道具（槽位 83010，同样落在那段范围里）却渲染正常 —— **靠的是 `tint.w`**：
+                // `Shape::Authored` 用 `tint.w = 6.0` 作标记 ⇒ 片元判 `authored`
+                // ⇒ 跳过四条程序化表面效果、`tint.rgb` 只作乘数 ⇒ 外观回到顶点色。
+                //
+                // ⇒ 士兵照打同一个标记，于是它就和道具一样**用 `soldier.glb` 里烘焙的
+                // 军服/护甲/皮肤色**渲染。`tint.rgb = 1` 表示"顶点色原样输出"。
+                //
+                // ⚠️ 代价：**红蓝阵营眼下没有颜色区分**（GLB 只有一套橄榄绿军服）。
+                // 要区分就得在 Blender 里出两套顶点色变体（蓝/红臂章或迷彩），
+                // 那是资产侧的事，不是这里调 tint 能解决的 —— 调了只会把模型涂成一块色。
                 self.soldier_parts.push(InstanceData {
                     model: m.to_cols_array(),
-                    // tint 沿用 NPC 那一套（阵营色）。GLB 自带烘焙的军服色，
-                    // 与阵营色相乘后仍是可辨识的队伍色，同时保留了布料的明暗。
-                    tint: v.tint,
+                    tint: [1.0, 1.0, 1.0, 6.0],
                 });
             }
             let (box_parts, cyl_parts, sph_parts) = Self::soldier_part_matrices(
