@@ -31,3 +31,5 @@ data/
 __pycache__/
 *.pyc
 
+# 生成器的临时输出目录（Blender 产物先落这里，确认后才入库）
+build/
