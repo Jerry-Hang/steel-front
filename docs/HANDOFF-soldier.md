@@ -48,7 +48,10 @@ struct MeshOutput {
 2. `soldier_dyn_index_span: u32` 字段；
 3. `upload_props` 里把容量改成 `need + MAX_DYNAMIC_SOLDIERS × 每件上限`，并把
    `soldier_dyn_first_vert/index` 设成静态部分的末尾；
-4. 在 `set_npc_visuals` 末尾调用 `write_dynamic_soldiers(visuals)`；
+4. 在 `set_npc_visuals` 末尾调用 `write_dynamic_soldiers(visuals)`
+   **⚠️ 别放错函数**：`soldier_part_matrices` 紧挨着它，但那个函数**没有 `visuals` 参数**
+   （它只算 18 段的矩阵）。插错位置会直接报 `cannot find value visuals in this scope` ——
+   **我 2026-09-13 就这么错过一次。**；
 5. 在道具桶循环之后加**一次** `cmd_draw_indexed(soldier_dyn_index_span, 1, soldier_dyn_first_index, 0, PROP_INSTANCE_INDEX)`。
 
 **⚠️ 最容易踩的一处**：`Vertex` 的字段映射是
