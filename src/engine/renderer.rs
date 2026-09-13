@@ -4838,29 +4838,42 @@ impl Renderer {
                     tint: [1.0, 1.0, 1.0, 6.0],
                 });
             }
-            let (box_parts, cyl_parts, sph_parts) = Self::soldier_part_matrices(
-                v.pos, v.yaw, v.tint, v.phase, v.moving, v.firing,
-            );
-            for part in box_parts {
-                if (self.npc_box_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_box_parts.push(part);
+            // 🔴🔴 2026-09-13 定案：**GLB 生效时不再生成 18 段箱体**。
+            //
+            // 此前两条路**同时在画**，玩家看到的是"GLB 士兵叠在箱体堆上"：
+            // 形状大体是对的（所以前几轮我没看出来），但同一个身上有两种颜色。
+            // 是**品红探针**把它逼出来的 —— 把 tint 临时改成 `[1,0,1,6]` 后
+            // **四肢变品红、躯干仍是红的** ⇒ 红的那部分根本不是我的 draw。
+            //
+            // 这同时把每个 NPC 的实例数从 **18 降到 1**。
+            //
+            // ⚠️ `soldier_part_matrices` **不删** —— 它是 `soldier.glb` 缺失/上传失败时的
+            // 回退路径（`soldier_on == false`），也是将来做"远距 LOD 用箱体"的现成备选。
+            if !soldier_on {
+                let (box_parts, cyl_parts, sph_parts) = Self::soldier_part_matrices(
+                    v.pos, v.yaw, v.tint, v.phase, v.moving, v.firing,
+                );
+                for part in box_parts {
+                    if (self.npc_box_parts.len() as u32) < MAX_NPC_INSTANCES {
+                        self.npc_box_parts.push(part);
+                    }
                 }
-            }
-            for part in cyl_parts {
-                if (self.npc_cyl_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_cyl_parts.push(part);
+                for part in cyl_parts {
+                    if (self.npc_cyl_parts.len() as u32) < MAX_NPC_INSTANCES {
+                        self.npc_cyl_parts.push(part);
+                    }
                 }
-            }
-            for part in sph_parts {
-                if (self.npc_sph_parts.len() as u32) < MAX_NPC_INSTANCES {
-                    self.npc_sph_parts.push(part);
+                for part in sph_parts {
+                    if (self.npc_sph_parts.len() as u32) < MAX_NPC_INSTANCES {
+                        self.npc_sph_parts.push(part);
+                    }
                 }
-            }
-            if (self.npc_box_parts.len() as u32) >= MAX_NPC_INSTANCES
-                && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
-                && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
-            {
-                break;
+                if (self.npc_box_parts.len() as u32) >= MAX_NPC_INSTANCES
+                    && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
+                    && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
+                {
+                    break;
+                }
             }
         }
     }
