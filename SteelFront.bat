@@ -111,6 +111,16 @@ if exist "%PLAYLOG%" del "%PLAYLOG%" >nul 2>&1
 
 echo [steel-front] launching...  (log: %PLAYLOG%)
 REM Pass through any extra arguments, e.g.  SteelFront.bat play --help
-start "steel-front" cmd /c ""%EXE%" %* 2> "%PLAYLOG%""
+REM
+REM `/b` matters: `start "" cmd /c "..."` opens a NEW CONSOLE that takes the
+REM foreground, so the game window never receives Focused(true) -- and
+REM `main.rs::sync_cursor` requires `self.focused`, so the cursor would never be
+REM grabbed and mouse-look would be dead with no error anywhere. That is exactly
+REM the 2026-09-13 report. `/b` starts the child in THIS console (no new window,
+REM no focus theft) while still allowing the stderr redirect.
+REM
+REM If mouse-look is ever dead again: click once on the game window. The engine
+REM grabs the cursor only while it has focus (see AGENTS.md, Iron Rule C).
+start "" /b cmd /c ""%EXE%" %* 2> "%PLAYLOG%""
 
 endlocal

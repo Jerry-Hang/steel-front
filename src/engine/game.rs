@@ -3735,21 +3735,35 @@ impl Game {
         }
         let victim_team = npc.team;
         self.npcs.remove(idx);
-        self.score += KILL_SCORE;
-        // 击杀提示（右上角 feed）：玩家击杀敌方 NPC
+        // 🔴 2026-09-13 修：**只有击杀敌方才算战果**。
+        // 原先这三处对**任何**击杀都生效（`score += KILL_SCORE`、`objective.progress(1)`、
+        // `objective_register_kill()`），于是**打死队友也推进"歼灭敌人"**。
+        // 用户 2026-09-13 实机截图就是这条：右上角 feed 里明明有 `YOU KILLED BLUE #174`
+        // （自己人），HUD 却已经 `歼灭敌人 128/128` 并弹出 `VICTORY`，
+        // 而小地图上红方还剩一大片 —— 计数把友军伤亡算成了战果。
+        let is_enemy = victim_team != crate::engine::ai::Team::Blue;
+        if is_enemy {
+            self.score += KILL_SCORE;
+        }
+        // 击杀提示（右上角 feed）：敌我**都**提示 —— 打死自己人是需要立刻看见的事故
         self.hud.push_kill(format!("YOU KILLED {} #{}", team_name(victim_team), id));
         log::info!(
-            "kill: npc #{} eliminated (wave {}) score={}",
+            "kill: npc #{} eliminated (wave {}) team={:?} enemy={} score={}",
             id,
             self.wave,
+            victim_team,
+            is_enemy,
             self.score
         );
         // 任务目标：歼灭数推进（达成 → 胜利横幅/日志，波次推进不受影响）
-        if self.objective.progress(1) {
-            self.on_objective_complete();
+        // ⚠️ 仅敌方：友军伤亡若也计入，一轮会在敌人尚存时提前"胜利"
+        if is_enemy {
+            if self.objective.progress(1) {
+                self.on_objective_complete();
+            }
+            // 关卡系统：击杀计数（KillCount 规则用）
+            self.objective_register_kill();
         }
-        // 关卡系统：击杀计数（KillCount 规则用）
-        self.objective_register_kill();
         true
     }
 
