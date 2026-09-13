@@ -1336,6 +1336,61 @@ impl GameApp {
     /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
     /// 导入枪模（按武器 key 自动寻找 assets/guns/{key}.glb；不存在回退 ak12.glb）
     /// 2026-08-28 终局：使用原始模型材质本色（baseColorFactor 直出 × 忠实现光）
+    /// 🪖 加载士兵 GLB（2026-09-13）。路径固定为 `assets/soldier/soldier.glb`。
+    ///
+    /// **刻意不做任何归一化**：`soldier.glb` 是按铁律 D 的约定生成的
+    /// （1 单位 = 1 米、原点在底面中心、`export_yup=True`、单 mesh 无变换），
+    /// 本来就是引擎要的尺度与朝向。枪模那套"缩放到 0.94m + 几何居中 + 长轴对齐 +Z"
+    /// 是针对 Sketchfab 抠件的，**不要照抄到这里**。
+    ///
+    /// 返回 `None` 时（文件缺失/解析失败）渲染器保持 `soldier_vertex_count == 0`，
+    /// 于是 NPC **继续用原来的 18 段箱体** —— 与改动前逐字节一致，不会退化。
+    fn load_soldier_glb() -> Option<(Vec<[f32; 11]>, Vec<u32>)> {
+        // 🔴🔴 2026-09-13：**必须缓存**。调用点在每帧的渲染准备段里，而这个是
+        // "读盘 + 解析 GLB" —— 实测 12 秒内被调用 **1277 次**（每次 45KB 读盘 + 全量解析）。
+        // 士兵网格只在启动时用一次，缓存后每帧只是取一个 `&`。
+        // `OnceLock` 是 std 的，不引入依赖（本项目硬约束：不新增第三方依赖）。
+        static CACHE: std::sync::OnceLock<Option<(Vec<[f32; 11]>, Vec<u32>)>> =
+            std::sync::OnceLock::new();
+        if let Some(cached) = CACHE.get() {
+            // 只有 `Some` 需要克隆一次给调用方；`None` 直接返回。
+            // 克隆发生在每帧，但 1082 个顶点 × 44 字节 ≈ 47KB —— 比读盘+解析便宜两个量级。
+            return cached.clone();
+        }
+        let loaded = Self::load_soldier_glb_uncached();
+        let _ = CACHE.set(loaded.clone());
+        loaded
+    }
+
+    fn load_soldier_glb_uncached() -> Option<(Vec<[f32; 11]>, Vec<u32>)> {
+        const PATH: &str = "assets/soldier/soldier.glb";
+        let bytes = match std::fs::read(PATH) {
+            Ok(b) => b,
+            Err(e) => {
+                log::info!("soldier: 未发现 {PATH}（{e}），NPC 继续用 18 段箱体");
+                return None;
+            }
+        };
+        match crate::engine::assets::parse_glb(&bytes) {
+            Ok(mesh) => {
+                if mesh.verts.is_empty() || mesh.indices.is_empty() {
+                    log::warn!("soldier: {PATH} 为空网格，NPC 继续用 18 段箱体");
+                    return None;
+                }
+                log::info!(
+                    "soldier: 载入 {PATH}（{} 顶点 / {} 索引，原始尺度与朝向，未归一化）",
+                    mesh.verts.len(),
+                    mesh.indices.len()
+                );
+                Some((mesh.verts, mesh.indices))
+            }
+            Err(e) => {
+                log::warn!("soldier: {PATH} 解析失败（{e}），NPC 继续用 18 段箱体");
+                None
+            }
+        }
+    }
+
     fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
         let path = if std::path::Path::new(&format!("assets/guns/{key}.glb")).exists() {
             format!("assets/guns/{key}.glb")
@@ -2402,6 +2457,15 @@ impl GameApp {
                 })
                 .collect();
             renderer.set_dead_bodies(&dead_visuals);
+            // 🪖 士兵 GLB（2026-09-13）：启动时上传一次。与枪模不同，它**与游戏状态无关**
+            // （NPC 一直在世界里），所以不放在 `show_gun` 分支里。
+            //
+            // ⚠️ 顶点**不做任何归一化**：`soldier.glb` 是按铁律 D 的约定导出的
+            // （1 单位 = 1 米、原点在底面中心、`export_yup=True`），本来就是引擎要的尺度与朝向；
+            // 枪模那套"缩放到 0.94m + 居中 + 长轴对齐 +Z"是针对 Sketchfab 抠件的，**不要照抄**。
+            if let Some((sv, si)) = Self::load_soldier_glb() {
+                renderer.set_soldier_mesh(&sv, &si);
+            }
             // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
             // 枪模仅在第一人称游玩或检视模式渲染：结算/其它相机态下隐藏
             // （否则枪模会按锚点漂浮在场景中——2-4 反馈“变成 M1 加兰德”观感）

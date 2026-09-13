@@ -473,13 +473,34 @@ const GUN_INSTANCE_INDEX: u32 =
 /// 该槽的 `tint.w = Shape::Authored.tag()`(=6.0) 是给 shader 看的，`tint.rgb = 1` 让
 /// 片元直出顶点色（`input.color = vertexColor × tint.rgb`）。
 const PROP_INSTANCE_INDEX: u32 = GUN_INSTANCE_INDEX + 1;
+/// 🪖 **士兵 GLB 的实例区起点**（2026-09-13）。
+///
+/// 与道具那个"单个 identity 槽"不同：士兵的位姿**每帧都在变**（人要走动），
+/// 不能把变换烘进顶点，所以**必须真的开一段实例区**，每个 NPC 占一个槽。
+///
+/// **为什么走实例化而不是照抄 NPC 的 18 段**：mesh 着色器每个 workgroup（=一个实例）
+/// 最多输出 50 顶点 / 96 图元（`build.rs::MeshOutput`），而 `soldier.glb` 是
+/// 1082 顶点 / 540 三角形 —— **结构上装不下**。而 `cmd_draw_indexed` 的**实例数是自由
+/// 参数**，可以在传统顶点管线上一次画 N 个：网格上传一次，实例矩阵每帧写 N 个。
+/// 这正是枪模已经在走的路（`self.gun_pipeline` + `cmd_draw_indexed`），
+/// 而 `self.pipeline`（传统 VERTEX、`depth_test` 开）**在 mesh 可用时同样被无条件创建**，
+/// 道具也早就在用它 —— 所以这里不需要新增任何管线。
+const SOLDIER_INSTANCE_BASE: u32 = PROP_INSTANCE_INDEX + 1;
+/// 士兵实例槽容量。取 `MAX_AI`(768) 的上限：压力模式红蓝各 128，加上普通波次也够。
+/// **超出的 NPC 直接不画真网格**（退回 18 段箱体），不是静默越界 —— 见 `write_soldier_instances`。
+const MAX_SOLDIER_INSTANCES: u32 = 768;
+/// 士兵网格的顶点/索引预留容量（`soldier.glb` 实测 1082 顶点 / 540 索引，留 4 倍余量）。
+/// ⚠️ 换更细的士兵模型要同步放大，否则 `set_soldier_mesh` 会拒绝上传并打 error。
+const SOLDIER_MESH_VERTS: u32 = 4096;
+const SOLDIER_MESH_INDICES: u32 = 8192;
 /// 实例 storage buffer 的总元素数。**唯一权威定义**——历史上它是三份互相抄写的副本
 /// （`buffer_elems` + 主管线 descriptor `.range()` + 阴影 pass descriptor `.range()`），
 /// 加一个槽位只要漏改任一份，shader 就会对那一槽越界读 storage buffer：驱动不会报错，
 /// 只会返回全零，于是 `inst.model` 变成零矩阵、所有顶点塌到一点、几何**完全不显示**且
 /// 没有任何日志或 VUID 提示（2026-09-04 加道具槽时正好踩中，靠"红屏探针 + 换槽对照"才定位）。
 /// 现在由最高槽位反推，结构上不可能再漏。
-const INSTANCE_BUFFER_ELEMS: u64 = PROP_INSTANCE_INDEX as u64 + 1;
+const INSTANCE_BUFFER_ELEMS: u64 =
+    SOLDIER_INSTANCE_BASE as u64 + MAX_SOLDIER_INSTANCES as u64;
 /// 道具分桶边长（米）。全城约 ±175m ⇒ 约 9×9 格。
 /// 🔴 2026-09-12 第 44 轮：由 40m 改为 20m。**原注释的理由已被实测推翻** ——
 /// 「桶再小则 draw call 数上升（每桶一次 cmd_draw_indexed 与其绑定开销）」
@@ -944,6 +965,19 @@ pub struct Renderer {
     gun_index_count: u32,
     gun_buffer_capacity_verts: u32,
     gun_buffer_capacity_idx: u32,
+    // ---- 🪖 士兵 GLB 网格（2026-09-13）：走 `self.pipeline`（传统 VERTEX、depth 开）+ 实例化 ----
+    /// 与枪模不同，**按常量容量一次分配、永不重建**：士兵网格只在启动时上传一次，
+    /// 不存在切枪那种"容量忽大忽小"的场景，而重建会 destroy 在飞 buffer → device lost。
+    soldier_vertex_buffer: vk::Buffer,
+    soldier_vertex_buffer_memory: vk::DeviceMemory,
+    soldier_index_buffer: vk::Buffer,
+    soldier_index_buffer_memory: vk::DeviceMemory,
+    soldier_vertex_count: u32,
+    soldier_index_count: u32,
+    /// 本帧要画的士兵实例（每 NPC 一个槽）。`set_npc_visuals` 填，上传后清零。
+    soldier_parts: Vec<InstanceData>,
+    /// 本帧实际写入的实例数（= `soldier_parts.len().min(MAX_SOLDIER_INSTANCES)`）
+    soldier_drawn: u32,
     /// GLB 道具合并网格（`engine::props::merge` 在 CPU 上烘好位姿的静态几何）。
     /// 全部道具共用一次 draw call：位姿已进顶点，所以只需要 `PROP_INSTANCE_INDEX`
     /// 这一个 identity 实例，不必为道具新开一整段实例区。
@@ -1559,6 +1593,14 @@ impl Renderer {
             gun_index_count: 0,
             gun_buffer_capacity_verts: 0,
             gun_buffer_capacity_idx: 0,
+            soldier_vertex_buffer: vk::Buffer::null(),
+            soldier_vertex_buffer_memory: vk::DeviceMemory::null(),
+            soldier_index_buffer: vk::Buffer::null(),
+            soldier_index_buffer_memory: vk::DeviceMemory::null(),
+            soldier_vertex_count: 0,
+            soldier_index_count: 0,
+            soldier_parts: Vec::new(),
+            soldier_drawn: 0,
             prop_vertex_buffer: vk::Buffer::null(),
             prop_vertex_memory: vk::DeviceMemory::null(),
             prop_index_buffer: vk::Buffer::null(),
@@ -4761,7 +4803,24 @@ impl Renderer {
         self.npc_box_parts.clear();
         self.npc_cyl_parts.clear();
         self.npc_sph_parts.clear();
+        self.soldier_parts.clear();
+        let soldier_on = self.soldier_vertex_count > 0;
         for v in visuals {
+            // 🪖 士兵 GLB：每个 NPC **一个实例**（根变换 = 位置 + yaw），而不是 18 段。
+            // 只有在网格上传成功时才建 —— 否则白算一遍再被 `upload_soldiers` 丢掉。
+            if soldier_on && (self.soldier_parts.len() as u32) < MAX_SOLDIER_INSTANCES {
+                let m = glam::Mat4::from_scale_rotation_translation(
+                    glam::Vec3::ONE,
+                    glam::Quat::from_rotation_y(v.yaw),
+                    glam::Vec3::new(v.pos[0], v.pos[1], v.pos[2]),
+                );
+                self.soldier_parts.push(InstanceData {
+                    model: m.to_cols_array(),
+                    // tint 沿用 NPC 那一套（阵营色）。GLB 自带烘焙的军服色，
+                    // 与阵营色相乘后仍是可辨识的队伍色，同时保留了布料的明暗。
+                    tint: v.tint,
+                });
+            }
             let (box_parts, cyl_parts, sph_parts) = Self::soldier_part_matrices(
                 v.pos, v.yaw, v.tint, v.phase, v.moving, v.firing,
             );
@@ -6167,6 +6226,137 @@ impl Renderer {
             let model = m.to_cols_array();
             std::ptr::copy_nonoverlapping(model.as_ptr(), p as *mut f32, 16);
         }
+    }
+
+    /// 🪖 **上传士兵 GLB 网格**（2026-09-13）。只调用一次（启动时）。
+    ///
+    /// **与枪模的两处关键差别**：
+    /// 1. **按常量容量一次分配、永不重建**（照 `props` 那条纪律）。士兵网格不存在切枪那种
+    ///    "容量忽大忽小"的场景，而重建会 destroy 在飞 buffer → NVIDIA device lost。
+    /// 2. 顶点来源是 GLB 的 `[f32; 11]`（`pos(3) normal(3) uv(2) color(3)`，见 `assets.rs`），
+    ///    这里按 `pos=[0..3] / uv=[6,7] / color=[8..11]` 取 —— **与 `upload_props` 完全同一套
+    ///    映射**（本引擎顶点格式 `stride=32, pos/color/uv`，没有法线槽位，法线由屏幕空间
+    ///    导数重建，所以 GLB 的法线直接丢弃）。
+    pub fn set_soldier_mesh(&mut self, verts: &[[f32; 11]], indices: &[u32]) {
+        // 🔴🔴 2026-09-13：**幂等守卫**。调用方在每帧的渲染准备段里调用本函数，
+        // 而它每次都会 `create_host_buffer` 出一套新的 GPU 缓冲 ⇒ **每帧泄漏一份显存**，
+        // 几分钟就 OOM / device lost。实测日志里同一个 "士兵 GLB 已上传" 一段内出现 3+ 次。
+        // 士兵网格与武器不同：它**只在启动时上传一次**，之后永不改变，所以直接早退即可。
+        if self.soldier_vertex_count > 0 {
+            return;
+        }
+        if verts.is_empty() || indices.is_empty() {
+            log::info!("soldier: 未提供网格，NPC 继续用 18 段箱体");
+            return;
+        }
+        if verts.len() > SOLDIER_MESH_VERTS as usize || indices.len() > SOLDIER_MESH_INDICES as usize {
+            log::error!(
+                "soldier: 网格超出预留容量（{} > {} 顶点 / {} > {} 索引）—— 必须同步放大 \
+                 SOLDIER_MESH_VERTS/SOLDIER_MESH_INDICES，否则写越界（host buffer 不报 VUID）",
+                verts.len(), SOLDIER_MESH_VERTS, indices.len(), SOLDIER_MESH_INDICES
+            );
+            return;
+        }
+        let v_size = SOLDIER_MESH_VERTS as u64 * std::mem::size_of::<Vertex>() as u64;
+        let i_size = SOLDIER_MESH_INDICES as u64 * 4;
+        let (vb, vm) = match self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, v_size) {
+            Ok(x) => x,
+            Err(e) => {
+                log::error!("soldier: 顶点缓冲创建失败，退回 18 段箱体: {e}");
+                return;
+            }
+        };
+        let (ib, im) = match self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, i_size) {
+            Ok(x) => x,
+            Err(e) => {
+                log::error!("soldier: 索引缓冲创建失败，退回 18 段箱体: {e}");
+                return;
+            }
+        };
+        let mapped = match unsafe {
+            self.device
+                .map_memory(vm, 0, v_size, vk::MemoryMapFlags::empty())
+        } {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("soldier: 顶点缓冲映射失败，退回 18 段箱体: {e}");
+                return;
+            }
+        };
+        let vptr = mapped as *mut Vertex;
+        for (i, v) in verts.iter().enumerate() {
+            unsafe {
+                *vptr.add(i) = Vertex {
+                    pos: [v[0], v[1], v[2]],
+                    color: [v[8], v[9], v[10]],
+                    uv: [v[6], v[7]],
+                };
+            }
+        }
+        // 索引也要 host-visible：单独 map 索引缓冲
+        if let Ok(ip) = unsafe { self.device.map_memory(im, 0, i_size, vk::MemoryMapFlags::empty()) }
+        {
+            let iptr = ip as *mut u32;
+            for (i, idx) in indices.iter().enumerate() {
+                unsafe { *iptr.add(i) = *idx };
+            }
+            unsafe { self.device.unmap_memory(im) };
+        }
+        // 与枪模/道具同样的 unmap→remap：host-coherent 内存也可能被驱动延迟可见。
+        // 顶点只上传这一次，所以重映射后**不留指针**（枪模留是因为它要反复重写）。
+        unsafe {
+            self.device.unmap_memory(vm);
+            if let Err(e) = self
+                .device
+                .map_memory(vm, 0, v_size, vk::MemoryMapFlags::empty())
+            {
+                log::error!("soldier: 顶点缓冲重映射失败，退回 18 段箱体: {e}");
+                return;
+            }
+            self.device.unmap_memory(vm);
+        }
+        self.soldier_vertex_buffer = vb;
+        self.soldier_vertex_buffer_memory = vm;
+        self.soldier_index_buffer = ib;
+        self.soldier_index_buffer_memory = im;
+        self.soldier_vertex_count = verts.len() as u32;
+        self.soldier_index_count = indices.len() as u32;
+        log::info!(
+            "soldier: 士兵 GLB 已上传（{} 顶点 / {} 索引，实例区起点 {}，容量 {}）",
+            self.soldier_vertex_count,
+            self.soldier_index_count,
+            SOLDIER_INSTANCE_BASE,
+            MAX_SOLDIER_INSTANCES
+        );
+    }
+
+    /// 每帧把 `soldier_parts` 写进实例缓冲的士兵区。返回实际写入数。
+    ///
+    /// **超出容量的部分直接不写**（并由调用方计数），**绝不越界** ——
+    /// 越界写实例 storage buffer 的后果是驱动静默返回全零、几何塌成一点（铁律 B）。
+    fn upload_soldiers(&mut self) -> u32 {
+        self.soldier_drawn = 0;
+        if self.soldier_vertex_count == 0 || self.soldier_parts.is_empty() {
+            return 0;
+        }
+        let slot = match self.instance_mapped.get(self.current_frame) {
+            Some(&p) if !p.is_null() => p as *mut u8,
+            _ => return 0,
+        };
+        let stride = std::mem::size_of::<InstanceData>();
+        let n = self.soldier_parts.len().min(MAX_SOLDIER_INSTANCES as usize);
+        for (i, inst) in self.soldier_parts.iter().take(n).enumerate() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    inst as *const InstanceData as *const u8,
+                    slot.add((SOLDIER_INSTANCE_BASE as usize + i) * stride),
+                    stride,
+                );
+            }
+        }
+        self.soldier_drawn = n as u32;
+        self.soldier_parts.clear();
+        self.soldier_drawn
     }
 
     /// 每帧上传 NPC 士兵段到实例 buffer 的 NPC_SLOT_BASE 之后区域，
@@ -8701,6 +8891,47 @@ impl Renderer {
                         );
                     }
                 }
+                // 🪖 士兵 GLB（2026-09-13）：**一次 draw 画完所有实例**。
+                //
+                // 与道具/箱体的关键差别：这里是**真正的实例化** —— 网格上传一次，
+                // 每个 NPC 只占一个实例矩阵。`cmd_draw_indexed` 的实例数（第 2 个参数）
+                // 就是为这个准备的，枪模已经在用同一条路（只是它固定传 1）。
+                //
+                // 管线用 `self.pipeline`：它就是传统 VERTEX 管线（`vs_main`/`fs_main`），
+                // `depth_test` 是开的 —— 世界里的士兵必须被墙挡住（枪那条是 OFF，
+                // 因为它要恒在 HUD 之上）。这个管线在 mesh 可用时同样被无条件创建，
+                // 道具/地面也一直在用它。
+                //
+                // ⚠️ `soldier_drawn` 由 `upload_soldiers` 写；为 0 时整段跳过，
+                // 于是"没上传网格"时行为与改动前**逐字节一致**（NPC 仍只有 18 段箱体）。
+                if self.soldier_drawn > 0
+                    && self.soldier_index_count > 0
+                    && self.soldier_vertex_buffer != vk::Buffer::null()
+                {
+                    self.device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.pipeline,
+                    );
+                    let svb = [self.soldier_vertex_buffer];
+                    let soff = [0u64];
+                    self.device
+                        .cmd_bind_vertex_buffers(command_buffer, 0, &svb, &soff);
+                    self.device.cmd_bind_index_buffer(
+                        command_buffer,
+                        self.soldier_index_buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    self.device.cmd_draw_indexed(
+                        command_buffer,
+                        self.soldier_index_count,
+                        self.soldier_drawn,
+                        0,
+                        0,
+                        SOLDIER_INSTANCE_BASE,
+                    );
+                }
                 // 第②条判据（RV3D_PROP_STATS=1）：每帧实际提交了多少桶/三角形。
                 // 存在的理由：道具是已知最大单项（关掉道具 fps 68.8→184.7），
                 // 但机制一直靠猜。先回答"到底提交了多少"，再看是**剔除粒度**问题
@@ -9386,6 +9617,8 @@ impl Renderer {
         self.last_npc_cyl_far = cyl_far;
         self.last_npc_sph_near = sph_near;
         self.last_npc_sph_far = sph_far;
+        // 🪖 士兵 GLB 实例上传（在 NPC 实例同一批里做完，避免多开一次遍历）
+        let _ = self.upload_soldiers();
         // ---- 自发光实体（爆炸闪光等）：独立槽位上传（见 EMISSIVE_SLOT_BASE）----
         let (emissive_near, emissive_far) = if self.void_mode { (0, 0) } else { self.upload_emissive(cam_pos) };
         self.last_emissive_near = emissive_near;
@@ -9745,6 +9978,13 @@ impl Drop for Renderer {
             // 释放管线
             if self.pipeline != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.pipeline, None);
+            }
+            for (b, m) in [
+                (self.soldier_vertex_buffer, self.soldier_vertex_buffer_memory),
+                (self.soldier_index_buffer, self.soldier_index_buffer_memory),
+            ] {
+                if b != vk::Buffer::null() { self.device.destroy_buffer(b, None); }
+                if m != vk::DeviceMemory::null() { self.device.free_memory(m, None); }
             }
             if self.gun_pipeline != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.gun_pipeline, None);
