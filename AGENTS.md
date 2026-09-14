@@ -37,16 +37,16 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `engine/cjk_glyphs.rs` | 21490 | 生成的中文点阵字模，**勿手改** |
-| `engine/renderer.rs` | 10767 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
-| `engine/game.rs` | 7377 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
-| `main.rs` | 3313 | GameApp + winit 事件循环 + 输入/光标捕获 |
-| `audio.rs` | 2748 | 合成音效与音乐（`audio_out.rs` 是 waveOut 输出层） |
-| `ui.rs` | 2592 | HUD / 菜单 / 设置 / 键位表 |
-| `engine/city.rs` | 1802 | 程序化城市生成 |
-| `net.rs` | 1733 | UDP 联机（协议魔数 'S'） |
-| `engine/ai.rs` / `weapons.rs` / `map.rs` / `procedural.rs` / `cpu.rs` / `physics.rs` | 1436 / 1432 / 1125 / 1082 / 1074 / 951 | AI 分层与战术 / 武器系统 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / CPU 拓扑与亲和 / 物理 |
-| `llm_cmd.rs` | 550 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
+| `engine/renderer.rs` | 11605 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
+| `engine/game.rs` | 8123 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
+| `main.rs` | 3853 | GameApp + winit 事件循环 + 输入/光标捕获 |
+| `audio.rs` | 2747 | 合成音效与音乐（`audio_out.rs` 是 waveOut 输出层） |
+| `ui.rs` | 2615 | HUD / 菜单 / 设置 / 键位表 |
+| `engine/city.rs` | 2004 | 程序化城市生成 |
+| `net.rs` | 1732 | UDP 联机（协议魔数 'S'） |
+| `engine/cjk_glyphs.rs` | **1609** | 生成的中文点阵字模，**勿手改**。⚠️ 2026-09-14 由 **21490 行 / 2.26 MB 裁到 1609 行 / 163 KB**（换 Noto Sans SC + 只留源码真正用到的 1580 个码点，−92.6%）⇒ **看到旧记录写"21490 行"是过期的** |
+| `engine/ai.rs` / `weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1435 / 1431 / 1139 / 1124 / 1096 / 1054 | AI 分层与战术 / 武器系统 / CPU 拓扑与亲和 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
+| `llm_cmd.rs` | 549 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
 其余：`config.rs`（`$HOME/.steel_front.cfg`，原子写 + 容错加载，测试不写盘）、
 `engine/objective.rs`（据点/胜负）、`engine/ai_command.rs`、`engine/ray_tracer.rs`（PT）、
