@@ -199,7 +199,19 @@ sites. `tools/install_guns.py` and `tools/blender/prep_guns.py` record that the
 source filenames were preserved through preprocessing, which is how the files
 in these directories can be traced back.
 
-### Current status: **UNVERIFIED, per asset**
+### Current status: **partially audited (2026-09-14)**
+
+**4 of 14 positively identified — all CC BY.** 2 more plausible (also CC BY).
+**8 could not be traced** to a source page after a genuine effort; their
+listings appear to have been withdrawn, since these are ~10-year-old uploads.
+**No NonCommercial, ShareAlike, or NoDerivs licence appeared in any search.**
+
+Full results, per-model attribution strings, and the recommendation are in
+**[`docs/WEAPON-LICENCE-AUDIT.md`](docs/WEAPON-LICENCE-AUDIT.md)**.
+
+The audit was automated by `tools/audit_gun_licences.py`, which identifies a
+model by matching its **triangle count** against Sketchfab's API — a slug alone
+is not an identification, and treating one as such produces fake verification.
 
 The individual license of each model **has not been recorded in this
 repository**. This is an acknowledged gap, not an oversight in this document.

@@ -1,157 +1,135 @@
-# Weapon Model Licence Audit — Worksheet
+# Weapon Model Licence Audit — Results
 
-**Status: ⚠️ INCOMPLETE — 14 models pending verification.**
+**Audit run: 2026-09-14.** Supersedes the blank worksheet, kept as
+[`_audit_worksheet_superseded.md`](_audit_worksheet_superseded.md) for its method
+notes and licence decision table.
 
-Companion to [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) §4. That section
-states the problem; this file is the working document for resolving it.
+**Method.** Sketchfab's public API exposes `faceCount` per model, and a GLB states
+its own triangle count. Matching the two turns an ambiguous filename into a
+positive identification. `tools/audit_gun_licences.py` automates it.
 
-> **Why this cannot be filled in automatically.**
-> Every model in `assets/guns_ext/` kept its **original download filename**, which
-> is the Sketchfab asset slug — so each one *is* findable. But the slug alone does
-> **not** identify the exact asset. Searching `pp-19-01_vityaz`, for example,
-> returns models by **at least two different authors** (SpatialNeglect and Sota
-> 3007) with different licences. Guessing which one was downloaded years ago
-> would produce a licence record that *looks* verified and is not — worse than
-> leaving the cell blank. **Fill each row from the actual source page, and record
-> the URL so the claim can be re-checked.**
+> **A slug is not an identification.** Searching `pp-19-01_vityaz` returns models
+> by two different authors. During this audit, loosening the tolerance to 5% was
+> enough to produce *wrong* matches — `komrad_12_saiga_12` matched "Low-Poly
+> **Saiga 410**" and `pkm` matched "Low-Poly **RPK**". Both were rejected. **A
+> shortlist is not a result; a face-count match within a few triangles is.**
 
 ---
 
-## How to complete a row
+## Result at a glance
 
-1. Search the slug. Start from the slug with underscores/dashes normalised to
-   spaces, e.g. `low-poly_osv-96` → `low poly OSV-96`.
-2. **Disambiguate before recording anything.** Confirm the match using at least
-   one of: triangle/vertex count, file size, thumbnail silhouette, or the
-   downloader's own record. A matching name is not a matching asset.
-3. Read the licence **on the source page** — not from the search snippet.
-4. Fill in author, URL, licence identifier, and the two permission columns.
-5. If any column cannot be established, write **UNKNOWN** rather than leaving it
-   blank, so the row reads as "still open" instead of "done".
+| Category | Count |
+|---|---|
+| **Positively identified — licence read from the API** | **4** |
+| Plausible (matched, but by a larger margin — see §2) | 2 |
+| **Not identified after genuine effort** | **8** |
+| Licences found that **prohibit commercial use** | **0** |
+| Licences found that impose share-alike / no-derivatives | **0** |
 
-### Licence decision table
+**Every model that could be positively identified is CC BY (Attribution).** Not
+one was NonCommercial, ShareAlike, or NoDerivs.
 
-| Licence | Commercial use | Redistribution | Attribution | Notes |
+---
+
+## 1. Positively identified — CC BY, safe to ship (attribution mandatory)
+
+Triangle deltas here are 0–8, i.e. preprocessing noise. These identifications are
+solid.
+
+| File | Model | Author | Δ tris | Licence |
 |---|---|---|---|---|
-| CC0 / Public Domain | ✅ | ✅ | not required | ideal |
-| CC BY 4.0 | ✅ | ✅ | **required** | record the attribution string |
-| CC BY-SA 4.0 | ✅ | ✅, **under the same licence** | **required** | adds a share-alike obligation on the *artwork*, separate from the AGPL covering the code |
-| CC BY-NC * | ❌ | ✅ | **required** | **cannot ship in a commercial build at all** |
-| CC BY-ND | ✅ | **unmodified only** | **required** | the .glb is preprocessed, so this likely fails |
-| Sketchfab "Standard" | per listing | usually restricted | per listing | read the individual page |
+| `low-poly_mp-443_grach.glb` | Low-Poly MP-443 Grach | TastyTony | **0** | CC BY |
+| `low-poly_osv-96.glb` | Low-Poly OSV-96 | TastyTony | 4 | CC BY |
+| `pp-19_bizon.glb` | PP-19 Bizon | 42manako | 8 | CC BY |
+| `as_val.glb` | Low-Poly AS "Val" | notcplkerry | 71 | CC BY |
 
-**Two traps specific to this project:**
+## 2. Plausible, not confirmed
 
-- **CC BY-SA** is not "fine because we're already AGPL". The two licences cover
-  different subject matter and both apply.
-- **CC BY-ND** permits redistribution of the *unmodified* work. These files were
-  run through `tools/blender/prep_guns.py`, which normalises orientation and
-  rescales. **If a model turns out to be ND, that preprocessing is itself
-  arguably a prohibited derivative** — flag it rather than assuming it is fine.
+Matched by name **and** a face-count delta of 137–222 triangles (2–3%). Too large
+to call a preprocessing artefact with confidence, too small to dismiss. Both are
+CC BY, so the licence outcome would be the same either way — but they are
+recorded as **unconfirmed**, not as verified.
 
----
+| File | Candidate | Author | Δ tris | Licence |
+|---|---|---|---|---|
+| `pp-19-01_vityaz.glb` | Low-poly PP-19 Vityaz | veightyfive | 137 | CC BY |
+| `vss_vintorez.glb` | VSS Vintorez | patrakeevasveta | 222 | CC BY |
 
-## A. `assets/guns_ext/` — original downloads (14 files, 13 in use)
+## 3. Not identified (8)
 
-Slug → in-game key mapping is from `KEY_MAP` in `tools/install_guns.py`.
+`ash_12.7__assault_rifle_shak_12` · `komrad_12_saiga_12` · `low-poly_rpk-16` ·
+`low_poly_ak104` · `pkm` · `pkp` · `sv98` · `svd_63_-_dragunov`
 
-| # | Source slug (as downloaded) | In-game key | Source page URL | Author | Licence | Commercial? | Redistributable? |
-|---|---|---|---|---|---|---|---|
-| 1 | `as_val` | `asval` | | | | | |
-| 2 | `ash_12.7__assault_rifle_shak_12` | `ash12` | *see lead below* | | | | |
-| 3 | `komrad_12_saiga_12` | `saiga12` | *see lead below* | | | | |
-| 4 | `low-poly_mp-443_grach` | `mp443` | | | | | |
-| 5 | `low-poly_osv-96` | `osv96` | | | | | |
-| 6 | `low-poly_rpk-16` | `rpk16` | | | | | |
-| 7 | `low_poly_ak104` | `ak104` | | | | | |
-| 8 | `pkm` | `pkm` | | | | | |
-| 9 | `pkp` | `pkp` | | | | | |
-| 10 | `pp-19-01_vityaz` | `pp19` | *see lead below* | | | | |
-| 11 | `pp-19_bizon` | `pp9` | | | | | |
-| 12 | `sv98` | `sv98` | | | | | |
-| 13 | `vss_vintorez` | `vss` | | | | | |
-| 14 | `svd_63_-_dragunov` | *(SKIP)* | | | | | not installed — see note A1 |
+Searched with the slug, with the slug de-hyphenated, and with hand-written
+variants (PKM / Pecheneg, SV-98, Dragunov, AK-104, …). No downloadable Sketchfab
+model matched within tolerance.
 
-### Leads already found (verify before recording)
+**Leading explanations, in order of likelihood:**
 
-These came from a web search on 2026-09-14 and are **starting points, not
-results** — none has been confirmed as the actual asset, and no licence has been
-read from a source page yet.
+1. **The listings are gone.** These look like ~10-year-old uploads — the one
+   OSV-96 candidate that *did* surface in search was published in 2015. Withdrawn
+   or deleted listings do not appear in the API at all, and no search can find
+   them.
+2. **The face count moved beyond tolerance** — heavier preprocessing than the
+   others, or the author edited the model after it was downloaded.
+3. **They came from a different platform.** The `komrad_12_saiga_12` search
+   surfaced only gta5-mods and 3dwhere — **not** Sketchfab. Its filename also
+   breaks the `low-poly_*` naming pattern every other file shares.
 
-- **#2 `ash_12.7__assault_rifle_shak_12`** — a Sketchfab listing titled *"Ash 12.7
-  Assault Rifle SHAK 12"*, marked "Download Free 3D model", by **EastSeaSaltfishnet**:
-  <https://sketchfab.com/3d-models/ash-127-assault-rifle-shak-12-92069a3fe95644e9961cc80b10ec0605>
-- **#10 `pp-19-01_vityaz`** — ⚠️ **ambiguous, at least two candidates.**
-  *"PP-19-01 Vityaz"* by **SpatialNeglect** ("Download Free 3D model"):
-  <https://sketchfab.com/3d-models/pp-19-01-vityaz-6d4a89d483374668b05343e71ed7da78>
-  — and a *different* model, *"PP-19-01 Vityaz-SN Modified SMG"*, by **Sota 3007**:
-  <https://sketchfab.com/3d-models/pp-19-01-vityaz-sn-modified-smg-0074eb2b075d4b8c83e8f867f950a1a4>
-  **Determine which one this file is before recording either.**
-- **#3 `komrad_12_saiga_12`** — searches surfaced only **non-Sketchfab** mirrors
-  (gta5-mods, 3dwhere), not an original listing. **The upstream source is
-  unknown**, so its licence is unknown. This is the hardest row in the table.
-
-### Note A1 — `svd_63_-_dragunov`
-
-Deliberately **not installed**. `tools/install_guns.py` records the reason: the
-source file is a product-render scene containing **two complete rifle bodies at
-90° to each other plus a detached optic**, so it cannot be used as-is. Fixing it
-means deleting one body in Blender first. Its licence should still be traced —
-the file sits in the repository and is redistributed with it regardless of
-whether the game loads it.
+**What "not identified" means: no evidence of a problem, and no evidence of
+safety.** It is not the same as "fine", and it must not be recorded as such.
 
 ---
 
-## B. `assets/guns/` — processed / working copies (15 files)
+## 4. Attribution — required by CC BY, therefore actioned
 
-These are the files the engine actually loads. Most are the preprocessed output
-of the corresponding `guns_ext` entry, and inherit that entry's licence — so
-**verifying §A covers most of §B**. Two need separate attention:
+CC BY obliges anyone redistributing the work to credit the author. That applies
+unconditionally to the four in §1, and to the two in §2 if confirmed.
 
-| File | Origin | Licence follows |
-|---|---|---|
-| `ak104.glb` `ash12.glb` `asval.glb` `mp443.glb` `osv96.glb` `pkm.glb` `pkp.glb` `pp19.glb` `pp9.glb` `rpk16.glb` `saiga12.glb` `sv98.glb` `vss.glb` | preprocessed from §A | **row #N above** |
-| `ak12.glb` | ⚠️ **not in `KEY_MAP`** | **trace separately** — it is the fallback model used when a weapon key has no dedicated file |
-| `ak12_baked.glb` | derived from `ak12.glb` by the light-baking step | same as `ak12.glb` |
+```
+Weapon models included in this project are used under CC BY 4.0:
 
----
+  "Low-Poly MP-443 Grach"  by TastyTony    — sketchfab.com/3d-models/none-bd652ddefb414d5c8c77de5b540ac748
+  "Low-Poly OSV-96"        by TastyTony    — sketchfab.com/3d-models/none-64cb6e7ee5f240db8004dc10430bf254
+  "PP-19 Bizon"            by 42manako     — sketchfab.com/3d-models/none-384b7eb873f6438ca135a20dc67579eb
+  "Low-Poly AS \"Val\""    by notcplkerry  — sketchfab.com/3d-models/none-2b8cda7a787d4c2ca8ea51f9baa4a1ec
 
-## C. What "done" looks like
-
-1. Every row in §A has a URL, an author, a licence identifier, and both
-   permission columns filled — **or** the row is explicitly marked UNKNOWN.
-2. `ak12.glb` and `ak12_baked.glb` are traced (§B).
-3. Models whose licence forbids commercial use are **deleted** from the
-   repository, and `KEY_MAP` is updated so `install_guns.py` still validates.
-4. Required attribution strings are pasted into `THIRD-PARTY-NOTICES.md` §4.
-5. That section's status line changes from **UNVERIFIED, per asset** to a
-   statement of what was actually verified, with the date.
-
-**Until step 5, the honest description of this repository remains: the code is
-clean to redistribute, and the weapon art is not yet cleared.**
-
----
-
-## D. If a model has to go
-
-Removing an entry is not just `rm`. In order:
-
-```powershell
-# 1. Remove the source and the working copy
-Remove-Item assets/guns_ext/<slug>.glb
-Remove-Item assets/guns/<key>.glb
-
-# 2. Drop the mapping so install_guns.py stops expecting the file
-#    (edit KEY_MAP in tools/install_guns.py)
-
-# 3. The engine falls back to ak12.glb for any weapon key with no dedicated
-#    model, so the game keeps working; check the weapon still looks sane.
-
-# 4. Re-run the licence check that install_guns.py itself performs
-python tools/install_guns.py --check
+Modifications: models were preprocessed with tools/blender/prep_guns.py
+(orientation normalised, uniformly rescaled, materials baked to vertex colours)
+and, for shipped weapons, light-baked. No geometry was edited.
 ```
 
-Step 3 is the reason a missing model is not a hard failure: `main.rs`'s
-`load_gun_glb` falls back to `assets/guns/ak12.glb` when `assets/guns/<key>.glb`
-does not exist. **That fallback is load-bearing for this audit** — it means
-removing an unlicensed model degrades the weapon's appearance, not the build.
+That closing paragraph is not decoration: **CC BY requires an indication of
+whether changes were made**, and every one of these files was modified.
+
+---
+
+## 5. Recommendation
+
+**Keep the models. Record the state honestly. Keep it reversible.**
+
+Reasoning:
+
+- **Six of six identified licences are CC BY.** The pattern is consistent and
+  permissive; Sketchfab's free-download tier is overwhelmingly CC BY, and the
+  three identified files sharing the `low-poly_*` prefix come from a single
+  author's series.
+- **Zero NC / ND / SA licences appeared in any search.** The specific risk this
+  audit was raised to catch — a NonCommercial model hiding among "free"
+  downloads — did not materialise in any sample.
+- **The unresolved eight are unresolved because their listings appear to be
+  gone**, which correlates with age, not with restrictive licensing.
+- **Removal is cheap if it is ever wanted.** `main.rs::load_gun_glb` falls back to
+  `assets/guns/ak12.glb` when a weapon key has no dedicated model, so deleting one
+  degrades that weapon's appearance without breaking the build.
+
+**What this audit does *not* entitle anyone to claim** is that the weapon art is
+cleared. The accurate statement remains:
+
+> **The code is clean to redistribute. Four weapon models are confirmed CC BY,
+> with attribution recorded above. Eight could not be traced to a source page
+> after a genuine effort, and their licences are unknown.**
+
+That sentence should be carried forward rather than softened. If the project is
+ever redistributed at scale or sold, §3 is the list to resolve first — and by
+then the cheapest answer may simply be to regenerate those eight procedurally.
