@@ -3984,7 +3984,17 @@ impl Renderer {
         view: glam::Mat4,
         proj: glam::Mat4,
     ) -> [[f32; 4]; 6] {
-        let m = (proj * view).to_cols_array_2d(); // m[col][row]
+        Self::extract_frustum_planes_from(proj * view)
+    }
+
+    /// 与 `extract_frustum_planes` 同一套数学，但直接吃**已相乘**的矩阵。
+    ///
+    /// 加它的理由：阴影 pass 需要的是**光源**视锥（`light_data.shadow.light_view_proj`），
+    /// 而那一条路径上只有乘积、没有分开的 view/proj。把平面提取收敛到一处，
+    /// 比在阴影 pass 里手抄一遍 6 个平面的符号组合安全 —— 抄错一个符号就是
+    /// "影子随机缺一块"，且不报任何错。
+    fn extract_frustum_planes_from(m4: glam::Mat4) -> [[f32; 4]; 6] {
+        let m = m4.to_cols_array_2d(); // m[col][row]
         let row = |i: usize| [m[0][i], m[1][i], m[2][i], m[3][i]];
         let r0 = row(0);
         let r1 = row(1);
@@ -9451,6 +9461,76 @@ impl Renderer {
             self.last_npc_sph_far,
             NPC_SPH_SLOT_BASE + self.last_npc_sph_near,
         )?;
+        // 🪖 士兵 GLB（2026-09-14 补）——**这条是补我自己的回归**。
+        //
+        // 上面那三对 `npc_box/cyl/sph` 是 18 段箱体的阴影近似。而 `set_npc_visuals`
+        // 在 `soldier_on` 时**不再生成任何箱体段** ⇒ 那三对的实例数全是 0 ⇒
+        // **士兵一度完全不投影**，而阴影 pass 不报任何错、画面上只是"人浮在地上"。
+        //
+        // 实例矩阵不用重算：`upload_soldiers` 已经把 N 个根变换写进
+        // `SOLDIER_INSTANCE_BASE` 起的槽位，阴影 pass 只要用同一段槽位再画一遍即可。
+        // `soldier_drawn` 为 0（网格没上传）时 `draw_shadow_range` 自己会早退。
+        self.draw_shadow_range(
+            command_buffer,
+            self.soldier_vertex_buffer,
+            self.soldier_index_buffer,
+            self.soldier_index_count,
+            self.soldier_drawn,
+            SOLDIER_INSTANCE_BASE,
+        )?;
+        // 🌳 道具（2026-09-14 补）—— 此前**道具完全不投影**（未结案 #14 定案）。
+        //
+        // 树、楼、沙袋这些本来是场景里体积最大的一批几何，没有影子会让"东西贴在地上"
+        // 这件事失去线索。主 pass 的 bin 循环就在 `record_command_buffer` 里，这里复刻它。
+        //
+        // ⚠️ **刻意不做视锥剔除。** 主 pass 用的是 `bin_visible(bin, &self.frame_frustum, …)`
+        // ——那是**相机**视锥；而阴影 pass 覆盖的是**光源**视锥，两者是不同的体积。
+        // 照抄那行会把"相机看不见、但在阴影图里"的道具剔掉 ⇒ **影子缺一块**，
+        // 而且缺的位置随视角移动，是最难查的那类伪影。
+        // 代价是多几十次 `cmd_draw_indexed`（全城约 9×9 桶），远低于一次剔除错判的代价。
+        // ⚠️ **剔除必须用光源视锥，不能用相机视锥。** 主 pass 那行用的是
+        // `bin_visible(bin, &self.frame_frustum, …)` —— 那是**相机**视锥；阴影 pass 覆盖的是
+        // **光源**视锥，两者是不同的体积。照抄相机会把"相机看不见、但在阴影图里"的道具剔掉
+        // ⇒ 影子缺一块，而且缺的位置随视角移动（最难查的那类伪影）。
+        //
+        // 但也不能不剔除：全画 81 个桶实测把帧率从约 250 压到 134。
+        // 正解是**用光源自己的视锥剔**（`light_view_proj` 的 6 个平面），
+        // 于是"正确"和"便宜"同时成立。margin 给 2m，与主 pass 同档。
+        if self.prop_vertex_buffer != vk::Buffer::null() && self.prop_index_buffer != vk::Buffer::null()
+        {
+            let light_frustum =
+                Self::extract_frustum_planes_from(self.light_data.shadow.light_view_proj);
+            let prop_vb = [self.prop_vertex_buffer];
+            let prop_off = [0u64];
+            unsafe {
+                self.device
+                    .cmd_bind_vertex_buffers(command_buffer, 0, &prop_vb, &prop_off);
+                self.device.cmd_bind_index_buffer(
+                    command_buffer,
+                    self.prop_index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+            }
+            for bin in &self.prop_bins {
+                if bin.index_count == 0 {
+                    continue;
+                }
+                if !crate::engine::props::bin_visible(bin, &light_frustum, 2.0) {
+                    continue;
+                }
+                unsafe {
+                    self.device.cmd_draw_indexed(
+                        command_buffer,
+                        bin.index_count,
+                        1,
+                        bin.first_index,
+                        0,
+                        PROP_INSTANCE_INDEX,
+                    );
+                }
+            }
+        }
         // 自发光（爆炸闪光等）
         self.draw_shadow_range(
             command_buffer,
