@@ -978,6 +978,16 @@ pub struct Renderer {
     soldier_parts: Vec<InstanceData>,
     /// 本帧实际写入的实例数（= `soldier_parts.len().min(MAX_SOLDIER_INSTANCES)`）
     soldier_drawn: u32,
+    /// NPC 段数触顶告警的**一次性闩**（2026-09-14）。
+    ///
+    /// 为什么需要它：`set_npc_visuals` / `set_dead_bodies` 里三处
+    /// `if len < MAX_NPC_INSTANCES { push }` 在超容时**静默丢弃** —— 不崩、不报 VUID、
+    /// 画面上只是"少了几个兵"，与未结案 #12 描述的是同一类失败模式。
+    /// 容量本身够用（3072 vs 实测峰值 2220），所以这个闩**正常情况下永不置位**；
+    /// 一旦置位，排查的人就能立刻知道"少人"是因为触顶，
+    /// 而不必去怀疑剔除矩阵 / 模型 / 取景（那三样我今晚都白查过）。
+    /// 用闩而不是每次都记：这段每帧都跑，刷屏会把真正有用的行淹掉。
+    npc_cap_warned: bool,
     /// GLB 道具合并网格（`engine::props::merge` 在 CPU 上烘好位姿的静态几何）。
     /// 全部道具共用一次 draw call：位姿已进顶点，所以只需要 `PROP_INSTANCE_INDEX`
     /// 这一个 identity 实例，不必为道具新开一整段实例区。
@@ -1600,6 +1610,7 @@ impl Renderer {
             soldier_vertex_count: 0,
             soldier_index_count: 0,
             soldier_parts: Vec::new(),
+            npc_cap_warned: false,
             soldier_drawn: 0,
             prop_vertex_buffer: vk::Buffer::null(),
             prop_vertex_memory: vk::DeviceMemory::null(),
@@ -4770,6 +4781,32 @@ impl Renderer {
 
     /// 设置 NPC 士兵可视化（由 main.rs 传入全部 NPC 的位置/朝向/配色/动画态；
     /// 15 段/人（尸体 15 段）展开存入 npc_parts，总段数截断到 MAX_NPC_INSTANCES）
+    /// NPC 段数触顶时的**一次性**告警（2026-09-14）。
+    ///
+    /// 背景：`set_npc_visuals` / `set_dead_bodies` 里各有一处
+    /// `if len < MAX_NPC_INSTANCES { push }`，超容时**静默丢弃** ——
+    /// 不崩、不报 VUID，画面上只是"少了几个兵"。这就是未结案 #12 那一类失败模式
+    /// （"溢出静默丢弃"），而它正是最难查的：没有任何东西告诉你人少了。
+    ///
+    /// 容量本身够用（`MAX_NPC_INSTANCES = 3072`，128v128 + 尸体实测峰值 2220），
+    /// 所以这条**正常情况下永不触发**。它存在的意义是：一旦触发，
+    /// 排查的人能立刻定位到"触顶"，而不必去怀疑剔除矩阵 / 模型 / 取景。
+    ///
+    /// 用闩而不是每次都记：这两个函数每帧都跑，每帧刷日志会把真正有用的行淹掉。
+    fn warn_npc_cap_once(&mut self) {
+        if self.npc_cap_warned {
+            return;
+        }
+        self.npc_cap_warned = true;
+        log::warn!(
+            "npc: 段数触顶 MAX_NPC_INSTANCES={} (box={} cyl={} sph={}) => 超出部分被静默丢弃，场景里会少人",
+            MAX_NPC_INSTANCES,
+            self.npc_box_parts.len(),
+            self.npc_cyl_parts.len(),
+            self.npc_sph_parts.len()
+        );
+    }
+
     pub fn set_npc_visuals(&mut self, visuals: &[NpcVisual]) {
         // 临时埋点（RV3D_NPC_POS=1）：每 120 次调用打一次。放在 `clear()` **之前**，
         // 于是 `self.npc_*_parts` 里还是**上一次循环的最终结果** —— 不必去找函数尾部，
@@ -4922,6 +4959,7 @@ impl Renderer {
                     && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
                     && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
                 {
+                    self.warn_npc_cap_once();
                     break;
                 }
             }
@@ -4983,6 +5021,7 @@ impl Renderer {
                     && (self.npc_cyl_parts.len() as u32) >= MAX_NPC_INSTANCES
                     && (self.npc_sph_parts.len() as u32) >= MAX_NPC_INSTANCES
                 {
+                    self.warn_npc_cap_once();
                     break;
                 }
             }

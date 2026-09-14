@@ -598,7 +598,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 11. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
-12. **`MAX_RIGID_BODIES=640` vs `MAX_AI=768`** 溢出静默丢弃（release 下 `debug_assert` 被优化掉）。
+12. ~~**`MAX_RIGID_BODIES=640` vs `MAX_AI=768`** 溢出静默丢弃~~ **已结案（2026-09-14）——两个常量都已不存在**：
+    `rg 'MAX_RIGID_BODIES' src/` 与 `rg 'MAX_AI' src/` 都是空；`physics.rs` 的刚体表
+    现在是 **`pub bodies: Vec<Body>`**（动态增长、无固定上限）⇒ **这个溢出结构上不可能发生**。
+    「静默丢弃」这个**模式**仍值得防。仓里现存同形态的一处是
+    `set_npc_visuals` / `set_dead_bodies` 的 `if len < MAX_NPC_INSTANCES { push }`：
+    超容时**不崩不报**，画面上只是"少了几个兵"。
+    **已补一次性告警**（`Renderer::warn_npc_cap_once` + `npc_cap_warned` 闩）——
+    容量 3072 vs 实测峰值 2220（余量 28%），**正常情况下永不触发**；
+    压力模式烟测实测 **0 次误报**。它的意义是让"少人"**可诊断**，
+    而不必再去怀疑剔除矩阵 / 模型 / 取景（那三样今晚都白查过）。
 13. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
     快照的**位置修正应用**与**实体插值渲染消费**均未接线）。
 14. ~~**道具是否进阴影 pass 未确认**~~ **已结案（2026-09-14）**：**确实没进** —— 道具从未接到
