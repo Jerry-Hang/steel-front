@@ -605,20 +605,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 8. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
 9. **mesh 着色器布局未过严格 `spirv-val`**（Workgroup Offset 布局）。
     **lead**：开 `RV3D_VALIDATION=1` 做 RT 调试前应先修。
-10. **PT 盒数上限静默截断**（实测 `marker=547 > PT_MAX_BOXES=512`，即每次丢 35 个）。
-    🔴 **2026-09-14：截断已从"静默"改成"一次性告警"**（`Renderer::pt_box_cap_warned` 闩，
-    与 #12 的 `warn_npc_cap_once` 同一形态）。用闩是因为这个函数在**场景重建**时调用，
-    而重建由相机位移触发（`signature()` 量化 ~0.5m）⇒ 移动时一秒能重建好几次，
-    不加闩会刷屏、把 PT 真正有用的行淹掉。
-    **⇒ 剩下的是"怎么办"，两条路**：提高 `PT_MAX_BOXES`（`ray_tracer.rs:165`，
-    现值 512）—— 代价是 **BLAS 按容量分配**（`renderer.rs:5593` 用 `PT_MAX_BOXES * 12`
-    算尺寸），显存同比上涨；或 **CPU 侧按视锥裁剪**后再传进来（更省显存，但要动调用方）。
-    ⚠️ **2026-09-14 核验**：本条原来还写着"`PT_SUN_AMBIENT` 无消费者"，
-    但 `rg 'PT_SUN_AMBIENT' src/ assets/ build.rs` **全为空** ⇒ 那个符号早已不存在，
-    那半句是过期的。**仍成立的部分**：曝光确实硬编（`main.rs:2501` = 0.2、`:2684` = 0.5，
-    而 `config.rs` 的 `GameConfig` 只有 volume/music_volume/sensitivity/bindings/
-    resolution/resolution_explicit/quality/pt_enable/rt_enable —— **没有曝光与 spp**）；
-    天空/环境项也仍硬编在 GLSL 里。
+10. ~~**PT 512 盒上限静默截断**~~ **已结案（2026-09-14）：512 → 1024，并补了一次性告警**。
+    实测 `marker=547 > 512` ⇒ 每次丢 35 个盒子，而 PT 是低 spp 噪点图、**肉眼看不出来**。
+    **代价实算**（按 `renderer.rs` 的分配公式）：512 ≈ **0.92 MB**、1024 ≈ **1.84 MB**
+    ⇒ **多不到 1 MB**，余量 87%；PT 默认关，对正常路径内存零影响。
+    **为什么不用"CPU 侧视锥裁剪"**：PT 的累积要求**同一场景盒子集合稳定**
+    （只有 `signature()` 变了才重建），按视锥裁剪会让集合随视角抖动、**反而破坏累积**。
+    ⚠️ 同时补了 `Renderer::pt_box_cap_warned` 闩（超容时告警一次，不刷屏）——
+    因为**加了容量也可能再被撑爆**，届时必须能看见。
+    **过期部分**：本条原写的"`PT_SUN_AMBIENT` 无消费者"已核验为过期（全仓 0 处引用）。
+    **仍成立**：曝光硬编（`main.rs:2501`=0.2、`:2684`=0.5，`GameConfig` 里没有曝光与 spp），
+    天空/环境项仍硬编在 GLSL。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
