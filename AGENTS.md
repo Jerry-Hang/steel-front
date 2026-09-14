@@ -634,30 +634,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     而不必再去怀疑剔除矩阵 / 模型 / 取景（那三样今晚都白查过）。
 13. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
     快照的**位置修正应用**与**实体插值渲染消费**均未接线）。
-14. ~~**道具是否进阴影 pass 未确认**~~ **已结案（2026-09-14）**：**确实没进** —— 道具从未接到
-    阴影路径（阴影 pass 只画地形/地面实例场/marker/NPC 三段/自发光）。**而且士兵也没进**：
-    那三对 `npc_box/cyl/sph` 是 18 段箱体的阴影近似，而箱体路径被 `soldier_on` 关掉后
-    实例数归零 ⇒ 士兵一度**毫无影子**，且不报任何错（画面上只是"人浮在地上"）。
-    两处都已补进 `record_shadow_pass`。
-    🔴 **剔除必须用光源视锥**：主 pass 那行 `bin_visible(bin, &self.frame_frustum, …)` 用的是
-    **相机**视锥，照抄会把"相机看不见、但在阴影图里"的道具剔掉 ⇒ 影子随视角缺块。
-    现由 `extract_frustum_planes_from(light_view_proj)` 提供光源视锥。
-    **代价实测（同配置只切 `RV3D_NO_SHADOW`）：192.7 vs 193.6 fps ⇒ 0.5%，基本免费。**
-    ⚠️ 我曾拿"250 → 134"当作代价证据 —— **那两次运行配置不同**（一次没开压力 AI），
-    结论无效。**切阴影开关的那次 A/B 才是判据**（教训 24/27 的又一次现场）。
-15. ~~**阴影 `normal_bias` 已在 uniform 但未使用**~~ **已结案（2026-09-14）——它一直在用**。
-    链条完整：`lighting.rs:113` 写入 `ShadowConfig` → `:234` 打进 uniform
-    `bias = Vec4(depth_bias, normal_bias, 1, 0)` → `:534` 有测试锁着 →
-    **`build.rs:420` 消费它**：`push_m = bias.y + m_per_texel * (1.25 + 0.9*slope)`，
-    再 `world_pos + normal * push_m` 沿法线外推。
-    **⇒ 条目里要求的"坡度 bias"就是那个 `0.9*slope` 项，需求也已满足。**
-    顺手按铁律 F 清了三处**陈旧**的 `#[allow(dead_code)]`（`SHADOW_MAP_SIZE` /
-    `DEFAULT_SHADOW_DEPTH_BIAS` / `DEFAULT_SHADOW_NORMAL_BIAS` —— 三者都在**非测试**代码里
-    被引用，压制纯属多余），并**删除**了 `SHADOW_MAP_FORMAT`（全仓只有它自己的定义这一处引用，
-    是 `vk::Format::D32_SFLOAT` 的手抄副本，渲染器用的是 ash 枚举）。
-    ⚠️ **`lighting.rs` 里其余的 `#[allow(dead_code)]`（`DEFAULT_SHININESS` / `SPECULAR_STRENGTH` /
-    `blinn_phong_*` / `point_attenuation` / `*_radiance`）必须保留** —— 它们只有
-    `#[cfg(test)]` 的用处，而 `dead_code` 在非测试构建里不计测试引用，删了会破 0 警告红线。
+14. ~~**道具是否进阴影 pass 未确认**~~ **已结案（2026-09-14）：确实没进，两处都已补**。
+    道具从未接到阴影路径；**士兵也没进** —— 那三对 `npc_box/cyl/sph` 是 18 段箱体的
+    阴影近似，而箱体路径被 `soldier_on` 关掉后实例数归零 ⇒ **士兵一度毫无影子且不报错**。
+    🔴 **剔除必须用光源视锥**（主 pass 那行用相机视锥，照抄会让影子随视角缺块）。
+    **代价（同配置只切 `RV3D_NO_SHADOW`）：192.7 vs 193.6 fps ⇒ 0.5%。**
+15. ~~**阴影 `normal_bias` 未使用**~~ **已结案（2026-09-14）：一直在用**。
+    链条：`lighting.rs:113` → `:234` 打进 uniform → `:534` 有测试锁着 →
+    **`build.rs:420` 消费它**（`push_m = bias.y + m_per_texel*(1.25 + 0.9*slope)`）。
+    顺手清了三处**陈旧**的 `#[allow(dead_code)]`（`SHADOW_MAP_SIZE` / `DEFAULT_SHADOW_*`）。
+    ⚠️ 其余 `#[allow]` **必须保留** —— 只有 `cfg(test)` 用处，删了破 0 警告红线。
 16. ~~**`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**~~ **已结案（2026-09-14）——文件已不存在**：
     `tests/` 目录为空，`tests/rayquery_probe.rs.bak` 也不存在，`Cargo.toml` 里没有 `[[test]]`。
     条目描述的状态早已被清理，只是没人回来划掉它。
