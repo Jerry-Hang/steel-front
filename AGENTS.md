@@ -475,6 +475,14 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   `new`(1513 次) / `get`(133) / `update`(148) 全报成陈旧** —— 名字匹配分不清
   "**这个**符号被用了"与"**同名**的东西到处都是"（教训 27 的又一现场，脚本已弃用）。
   当天靠人工+编译器确认的真陈旧只有 `lighting.rs` 的三个常量（见未结案 #15）。
+- 🔴 **未结案条目会过期，而"过期的待办"和"错的结论"一样有害**（2026-09-14 一晚连中四条）：
+  当晚我依次处理 #12 / #15 / #16 和铁律 F 里那条 `allow*.py` 待办，**四条全部指向不存在的东西** ——
+  `MAX_RIGID_BODIES` / `MAX_AI` 两个常量已删、`normal_bias` 早就在用、
+  `tests/rayquery_probe.rs.bak` 不存在、`scripts/allow*.py` 也不存在。
+  代价是我为每条都白查了一轮（其中 #15 还让我一度以为发现了 28 处 dead code）。
+  **⇒ 判据：动某条未结案之前，先用 `rg` 确认它引用的符号/文件**还在**。**
+  **⇒ 反过来：结案一条时，必须把条目本身改掉或删掉** —— 本文件的约定是"被推翻的直接删掉"，
+  但"已解决的"如果只是不再提，下一个人还会照着旧条目去找。
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
@@ -634,8 +642,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     ⚠️ **`lighting.rs` 里其余的 `#[allow(dead_code)]`（`DEFAULT_SHININESS` / `SPECULAR_STRENGTH` /
     `blinn_phong_*` / `point_attenuation` / `*_radiance`）必须保留** —— 它们只有
     `#[cfg(test)]` 的用处，而 `dead_code` 在非测试构建里不计测试引用，删了会破 0 警告红线。
-16. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（引用 naga 导致 test 目标编译失败）——
-    待清理或正式入库。
+16. ~~**`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**~~ **已结案（2026-09-14）——文件已不存在**：
+    `tests/` 目录为空，`tests/rayquery_probe.rs.bak` 也不存在，`Cargo.toml` 里没有 `[[test]]`。
+    条目描述的状态早已被清理，只是没人回来划掉它。
 17. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响；
     手榴弹 AoE 不结算障碍；切枪无动画（纯计时器）。
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
