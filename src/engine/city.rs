@@ -1897,4 +1897,108 @@ mod city_layout_tests {
             "城市没有任何障碍：generate_city 可能没跑到"
         );
     }
+
+    /// 测量之二：**出生环在两半场被挡的比例**。
+    ///
+    /// 上一问（`dump_half_map_asymmetry`）证明了两半场的掩体**总量** 0.999 对称，
+    /// 所以 8 轮/臂测出的"−X 半场占优"不能由掩体多少解释。剩下的候选是**出生点本身**：
+    /// `spawn_stress_battle` 的出生环以玩家（原点）为心、半径 `STRESS_SPAWN_RADIUS`(150m)
+    /// 铺开 ±1.1 rad，再经 `push_out_of_obstacle` 螺旋外扩找可站立点。
+    /// **如果这个环在某一侧更容易落在障碍里，那一侧的出生点就会被推得更远**，
+    /// 两队实际接敌距离/地形随之不同。
+    ///
+    /// 这里复刻 `apply_level` 建网格的那段（全部是 pub API），然后按 `spawn_stress_battle`
+    /// 的公式采样两侧各 `sides` 个点，统计被挡比例与推开位移。
+    #[test]
+    fn dump_spawn_ring_blocking() {
+        use crate::engine::ai::{GridMap, GridPos};
+        use crate::engine::game::world_to_grid;
+
+        let map = generate_city();
+        const GRID_N: usize = 128; // == game.rs::GRID_SIZE（私有，测试里按同值复刻）
+        let mut grid = GridMap::new(GRID_N, GRID_N);
+        for ob in &map.obstacles {
+            let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
+            let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
+            for gx in g0.x..=g1.x {
+                for gz in g0.y..=g1.y {
+                    let pos = GridPos::new(gx, gz);
+                    if grid.in_bounds(pos) {
+                        grid.block(pos);
+                    }
+                }
+            }
+        }
+        let blocked = |x: f32, z: f32| !grid.is_passable(world_to_grid(x, z));
+
+        // 与 spawn_stress_battle 同一套公式（player 在原点）
+        const SIDES: u32 = 128;
+        const RADIUS: f32 = 150.0;
+        const CELL: f32 = 4.0;
+        let push = |x: f32, z: f32| -> Option<(f32, f32)> {
+            if !blocked(x, z) {
+                return Some((x, z));
+            }
+            for r in 1..=8i32 {
+                let rf = r as f32;
+                let samples = 8 * r;
+                for k in 0..samples {
+                    let a = std::f32::consts::TAU * (k as f32) / (samples as f32);
+                    let (px, pz) = (x + a.cos() * rf * CELL, z + a.sin() * rf * CELL);
+                    if !blocked(px, pz) {
+                        return Some((px, pz));
+                    }
+                }
+            }
+            None // 该点在 8 环内找不到落脚处
+        };
+
+        let mut stats = [(0u32, 0u32, 0f32, 0f32, 0u32); 2]; // (总数, 被挡, 位移和, 最大位移, 无解)
+        for side in 0..2u32 {
+            let base_angle = if side == 0 { 0.0f32 } else { std::f32::consts::PI };
+            let per_side = if side == 0 { SIDES } else { SIDES - 1 };
+            for i in 0..per_side {
+                let spread = -1.1 + (i as f32 / SIDES as f32) * 2.2;
+                let angle = base_angle + spread;
+                let radius = RADIUS + 12.0 * ((i * 7 + side) % 5) as f32;
+                let (x, z) = (angle.cos() * radius, angle.sin() * radius);
+                stats[side as usize].0 += 1;
+                if blocked(x, z) {
+                    stats[side as usize].1 += 1;
+                }
+                match push(x, z) {
+                    Some((px, pz)) => {
+                        let d = ((px - x).powi(2) + (pz - z).powi(2)).sqrt();
+                        stats[side as usize].2 += d;
+                        stats[side as usize].3 = stats[side as usize].3.max(d);
+                    }
+                    None => stats[side as usize].4 += 1,
+                }
+            }
+        }
+
+        let names = ["+X (红出生)", "-X (蓝出生)"];
+        eprintln!("=== 出生环被挡统计（半径 150m ± 抖动）===");
+        for (i, (total, blk, sum, max, fail)) in stats.iter().enumerate() {
+            eprintln!(
+                "  {:<14} 采样 {:>3}  被挡 {:>3} ({:>5.1}%)  平均推开 {:>5.2} m  最大 {:>5.2} m  无解 {}",
+                names[i],
+                total,
+                blk,
+                100.0 * *blk as f32 / (*total).max(1) as f32,
+                sum / (*total).max(1) as f32,
+                max,
+                fail
+            );
+        }
+        let r0 = stats[0].1 as f32 / stats[0].0.max(1) as f32;
+        let r1 = stats[1].1 as f32 / stats[1].0.max(1) as f32;
+        let ratio = r0.min(r1) / r0.max(r1).max(1e-6);
+        eprintln!(
+            "  ⇒ 两侧被挡比例之比 = {:.3}{}",
+            ratio,
+            if ratio < 0.8 { "  ← 明显不对称" } else { "  （大致对称）" }
+        );
+        assert!(stats[0].0 > 0 && stats[1].0 > 0, "没有采样到出生点");
+    }
 }
