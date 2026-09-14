@@ -217,8 +217,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - PT 着色器改 `assets/rt/pt_panorama.glsl` → glslangValidator → `.spv`，
   `spirv-val --target-env vulkan1.3` 严格通过；用 `scripts/compile_pt.ps1`（勿手工拼装 SPIR-V）。
 - PT 盒面法线用不变量 `(primitive % 12) / 2` 查表（"来射方向主轴"近似会把地面法线判成 ±Z → 地面全黑）。
-- PT 资产：`PT_MAX_BOXES=512` 一次分配；**BLAS 尺寸必须按容量上限而非当前盒数**
-  （按 4 盒算 5376B 塞 512 盒 → 越界写 device lost）；scratch 归 `PtAssets` 所有；两次构建之间加 barrier。
+- PT 资产：`PT_MAX_BOXES=1024`（**2026-09-14 由 512 提高**，见未结案 #10）一次分配；
+  **BLAS 尺寸必须按容量上限而非当前盒数**（按 4 盒算 5376B 塞满容量 → 越界写 device lost）；
+  scratch 归 `PtAssets` 所有；两次构建之间加 barrier。
 
 ---
 
