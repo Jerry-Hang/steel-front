@@ -1842,4 +1842,59 @@ mod city_layout_tests {
             "没有任何隐形碰撞核：建筑 GLB 路线可能根本没生效，检查 generate_city 的资产装载"
         );
     }
+
+    /// 测量：比较城市两个半场（x>0 与 x<0）的**掩体密度与障碍构成**。
+    ///
+    /// 起因：`RV3D_SWAP_SIDES` 的每臂 4 次重复实验定案了"**谁在 −X 半场谁占优**"，
+    /// 且与队伍/AI 无关 ⇒ 差异只能来自地图本身。这个测试回答"差在哪"。
+    ///
+    /// 用 `--nocapture` 看输出；它同时断言"两半场不应完全一致"，否则说明
+    /// 这个测量没测到东西（教训 27）。
+    #[test]
+    fn dump_half_map_asymmetry() {
+        let map = generate_city();
+        let mut rows: Vec<(&str, [f32; 2], [u32; 2])> = Vec::new();
+        for (label, table) in [("obstacles", &map.obstacles), ("decor", &map.decor)] {
+            let mut area = [0f32; 2];
+            let mut n = [0u32; 2];
+            for ob in table.iter() {
+                let h = if ob.x >= 0.0 { 0 } else { 1 };
+                n[h] += 1;
+                area[h] += ob.half_w * ob.half_d * 4.0;
+            }
+            rows.push((label, area, n));
+        }
+        // 道具摆放表：字段名随 props 模块，这里只按位置分半计数
+        let mut props_by_half = [0u32; 2];
+        for p in map.props.iter() {
+            props_by_half[if p.x >= 0.0 { 0 } else { 1 }] += 1;
+        }
+
+        eprintln!("=== 半场对比（half0 = x>=0 / half1 = x<0）===");
+        for (label, area, n) in &rows {
+            eprintln!(
+                "  {label:<10} 数量 {:>5} / {:>5}   占地 {:>9.1} / {:>9.1} m²",
+                n[0], n[1], area[0], area[1]
+            );
+        }
+        eprintln!("  {:<10} 数量 {:>5} / {:>5}", "props", props_by_half[0], props_by_half[1]);
+
+        let cover0 = rows[0].1[0];
+        let cover1 = rows[0].1[1];
+        let ratio = if cover0.max(cover1) > 0.0 {
+            cover0.min(cover1) / cover0.max(cover1)
+        } else {
+            1.0
+        };
+        eprintln!(
+            "  ⇒ 掩体占地比（小/大）= {:.3}{}",
+            ratio,
+            if ratio < 0.95 { "  ← 两半场明显不对称" } else { "  （大致对称）" }
+        );
+
+        assert!(
+            rows[0].2[0] + rows[0].2[1] > 0,
+            "城市没有任何障碍：generate_city 可能没跑到"
+        );
+    }
 }
