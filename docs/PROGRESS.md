@@ -500,7 +500,11 @@ assets\props\panel_block.glb
    `exposure_ao()` 顶点色烘焙），**目标是砍到 1,500~2,500 顶点**，视觉不变。
    **⇒ 单这一件就可能从 1,563,020 里省下 10% 以上。**
 
-**明细已存 `logs/survey_props.txt`（未入库）。**
+**明细原本存在 `logs/survey_props.txt`（未入库）。**
+⚠️ **2026-09-14 补注**：那份 `logs/survey_props.txt` **已在 2026-09-13 的存储清理中删除**
+（`logs/` 646 → 20 个文件，回收 43 MB；只保留仍被引用的基线）。**要复现只需重跑一次普查**：
+`blender --background --python tools/blender/survey_props.py -- assets/props "*.glb"`
+（它同时是尺寸契约的唯一来源，见 AGENTS.md 铁律 D）。
 
 ## 🛑 道具分桶 10m 是拐点：5m 试过并**按预先声明的判据退回**（2026-09-12 第 105 轮）
 
@@ -5270,7 +5274,7 @@ NPC 就生成在楼体里**。这与未结案 4「玩家可能站在 GLB 楼体�
 
 ### [2026-09-10] 白墙查明为中央隔离带；② 已修；⑨ 的结论被推翻；**冒烟闸门变红**
 - 09-09 会话被中断留下的：`src/main.rs` 有未提交的 HUD 修复、`engine/city.rs` mtime 变过但内容与 HEAD 相同、
-  `scripts/_paper_dump.rs` 从未编译运行过、根目录 `main.rs` 是过期副本 —— 已全部处置（② 提交为 `65bb2f2`，
+  `scripts/_paper_dump.rs`（**文件已删，此处是历史记录**）从未编译运行过、根目录 `main.rs` 是过期副本 —— 已全部处置（② 提交为 `65bb2f2`，
   37 个诊断残留已删）。
 - **09-09 记的"⑤ 两套武器状态源不同步"是假的**：那些帧是在 `RV3D_CAM` 下拍的，而 `main.rs::update()`
   的 cam_override 分支**直接 return、不跑 `game.update()`**，HUD 停在默认值。**判 ⑤ 类问题必须不带 `RV3D_CAM`。**
