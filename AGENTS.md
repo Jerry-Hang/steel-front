@@ -576,8 +576,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
    **lead**：崩点在 `pt_set_scene_markers` 返回之后（每帧 PT 派发 / 主命令缓冲 / blit 到 swapchain）；
    候选 = AS 显存与尺寸、dispatch 与 scene rebuild 读写竞争、push constant 布局。
    判据：用 Windows 事件日志的出错模块区分驱动侧（`nvoglv64.dll`）与应用侧。
-3. **`config.rs` 不读 `pt_enable` / `rt_enable`** → 配置文件与 `RV3D_PT_LIVE=1` 都开不了 PT。
-   **lead**：`main.rs` 的 `if config.pt_enable { init_pt_resident() }` 分支，resident 从未建。
+3. ~~**`config.rs` 不读 `pt_enable` / `rt_enable`**~~ **已结案（2026-09-14）——接线早已完成**：
+    `config.rs:25/27` 有这两个字段；`main.rs:2693` 读 `crate::config::load().pt_enable`、
+    `:2703` 据此调 `init_pt_resident(pt_w, pt_h)`、`:2707` 再取一次作为 `pt_on`、
+    `:2709` 尊重 `RV3D_PT_LIVE`、`:2713` 写 `renderer.pt_live_enabled`。
+    **⇒ "配置文件与环境变量都开不了 PT"这个描述与现状相反。**
+    真正挡住 PT 的只剩 **#2 的 `0xC0000005`**（`config.rs:40` 的默认值注释也写着
+    "关=可玩" ⇒ 开起来仍然崩）。
 4. ~~**玩家可能站在 GLB 楼体内部**~~ **已结案（2026-09-13）**：根因是 `pick_building`
    用 `scale = max(w/gw, d/gd)` ⇒ 另一个方向**必然溢出 footprint**（52 处 `building_tall`
    互相穿插），以及碰撞盒用 footprint `(w,d)` 而视觉体是缩放后的 GLB。现改为
@@ -601,8 +606,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 9. **mesh 着色器布局未过严格 `spirv-val`**（Workgroup Offset 布局）。
     **lead**：开 `RV3D_VALIDATION=1` 做 RT 调试前应先修。
 10. **PT 512 盒上限静默截断**（实测 `marker=547 > PT_MAX_BOXES=512`）。
-    **lead**：提容量或按视锥裁剪。相关：`PT_SUN_AMBIENT` 无消费者、天空/环境项硬编在 GLSL；
-    曝光 0.2 硬编在 `main.rs`，曝光/弹跳/spp 都未进 `config.rs` 与设置面板。
+    **lead**：提容量或按视锥裁剪。
+    ⚠️ **2026-09-14 核验**：本条原来还写着"`PT_SUN_AMBIENT` 无消费者"，
+    但 `rg 'PT_SUN_AMBIENT' src/ assets/ build.rs` **全为空** ⇒ 那个符号早已不存在，
+    那半句是过期的。**仍成立的部分**：曝光确实硬编（`main.rs:2501` = 0.2、`:2684` = 0.5，
+    而 `config.rs` 的 `GameConfig` 只有 volume/music_volume/sensitivity/bindings/
+    resolution/resolution_explicit/quality/pt_enable/rt_enable —— **没有曝光与 spp**）。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
