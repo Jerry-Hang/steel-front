@@ -568,7 +568,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 12. **`MAX_RIGID_BODIES=640` vs `MAX_AI=768`** 溢出静默丢弃（release 下 `debug_assert` 被优化掉）。
 13. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
     快照的**位置修正应用**与**实体插值渲染消费**均未接线）。
-14. **道具是否进阴影 pass 未确认**（不画则道具没有投影）—— 提出后未见结案，也未见再提。
+14. ~~**道具是否进阴影 pass 未确认**~~ **已结案（2026-09-14）**：**确实没进** —— 道具从未接到
+    阴影路径（阴影 pass 只画地形/地面实例场/marker/NPC 三段/自发光）。**而且士兵也没进**：
+    那三对 `npc_box/cyl/sph` 是 18 段箱体的阴影近似，而箱体路径被 `soldier_on` 关掉后
+    实例数归零 ⇒ 士兵一度**毫无影子**，且不报任何错（画面上只是"人浮在地上"）。
+    两处都已补进 `record_shadow_pass`。
+    🔴 **剔除必须用光源视锥**：主 pass 那行 `bin_visible(bin, &self.frame_frustum, …)` 用的是
+    **相机**视锥，照抄会把"相机看不见、但在阴影图里"的道具剔掉 ⇒ 影子随视角缺块。
+    现由 `extract_frustum_planes_from(light_view_proj)` 提供光源视锥。
+    **代价实测（同配置只切 `RV3D_NO_SHADOW`）：192.7 vs 193.6 fps ⇒ 0.5%，基本免费。**
+    ⚠️ 我曾拿"250 → 134"当作代价证据 —— **那两次运行配置不同**（一次没开压力 AI），
+    结论无效。**切阴影开关的那次 A/B 才是判据**（教训 24/27 的又一次现场）。
 15. **阴影 `normal_bias` 已在 uniform 但未使用** —— 需要更干净的阴影边界时做坡度 bias。
 16. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（引用 naga 导致 test 目标编译失败）——
     待清理或正式入库。
