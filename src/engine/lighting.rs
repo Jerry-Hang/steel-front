@@ -23,16 +23,20 @@ pub const LIGHT_UBO_BINDING: u32 = 4;
 pub const LIGHT_UBO_SIZE: usize = 352;
 
 /// Shadow map 默认尺寸（基础实现：2048×2048）
-#[allow(dead_code)] // 阴影/光照参考常量：GPU 光照已在 WGSL 实现，Rust 侧为测试与对照保留（见模块头注释）
+///
+/// 🔴 2026-09-14：`#[allow(dead_code)]` **已删** —— 它压制的是一个**活着**的常量
+/// （`ShadowConfig::new` 与 `ShadowUniform::pack` 都在用，实测 17 处引用）。
+/// 按铁律 F："看到'规划中'的 dead code，必须回答'那它为什么没被接线'，
+/// **不许加 `#[allow]` 了事**" —— 而这几个 `allow` 连"没接线"这个前提都不成立，
+/// 是纯粹的陈旧压制，只会掩盖真正新出现的 dead code。
 pub const SHADOW_MAP_SIZE: u32 = 2048;
-/// Shadow map 深度格式（对应 Vulkan `VK_FORMAT_D32_SFLOAT` = 126）
-#[allow(dead_code)]
-pub const SHADOW_MAP_FORMAT: u32 = 126;
+// 2026-09-14 **删除** `SHADOW_MAP_FORMAT: u32 = 126`：
+// 它唯一一次出现就是它自己的定义（全仓仅 1 处引用），是 `vk::Format::D32_SFLOAT`
+// 的手抄副本 —— 渲染器直接用 ash 枚举，这个数字常量既没有消费者、也可能与 ash 分叉。
+// 留一个"注释说它对应什么"的常量，比删掉它更危险。
 /// 默认阴影深度 bias（缓解 shadow acne）
-#[allow(dead_code)]
 pub const DEFAULT_SHADOW_DEPTH_BIAS: f32 = 0.005;
-/// 默认阴影法线 bias
-#[allow(dead_code)]
+/// 默认阴影法线 bias（沿法线外推的基数，WGSL `light_data.shadow.bias.y`）
 pub const DEFAULT_SHADOW_NORMAL_BIAS: f32 = 0.02;
 /// 默认高光指数（与 WGSL 一致）
 #[allow(dead_code)]

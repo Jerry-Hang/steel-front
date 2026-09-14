@@ -446,7 +446,18 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   非必要不反复读同一文件；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat` 或限定文件。
   ⚠ 本 shell 里 `Get-Content` 数行数不准（实测 2826 vs 实际 3229），**行号以 `read` 工具为准**。
 - **看到"规划中"的 dead code，必须回答"那它为什么没被接线"，不许加 `#[allow]` 了事。**
-  → 待办：删 `scripts/allowall.py` / `allowv3.py` / `allowv4.py` 的 `dead_code` 压制规则。
+  **2026-09-14 现状**：那条"删 `scripts/allow*.py`"的旧待办**已作废** —— 三个脚本**早就不存在**
+  （`Get-ChildItem scripts -Filter 'allow*.py'` 为空，全仓只有本文件提过它们）。
+  我为此白找了一轮 ⇒ **陈旧待办会让人去找不存在的东西。**
+  现在的实际状态：**全仓 `#[allow(dead_code)]` 共 109 处**，集中在 `audio.rs`(38) /
+  `weapons.rs`(15) / `lighting.rs`(11) / `build.rs`(9) / `renderer.rs`(8)。
+  **绝大多数是有注释的"预留接口"**（"OGG 解码接口预留"、"MeleeWeapon 未接线"等），
+  属诚实预留，不是藏问题。
+  🔴 **要清陈旧压制，判据只能是编译器，不能是文本匹配**：删掉 `#[allow]` 后若仍 0 警告
+  即为陈旧。**2026-09-14 我写过一个按"符号名出现次数"判定的脚本，它把
+  `new`(1513 次) / `get`(133) / `update`(148) 全报成陈旧** —— 名字匹配分不清
+  "**这个**符号被用了"与"**同名**的东西到处都是"（教训 27 的又一现场，脚本已弃用）。
+  当天靠人工+编译器确认的真陈旧只有 `lighting.rs` 的三个常量（见未结案 #15）。
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
@@ -576,7 +587,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     **代价实测（同配置只切 `RV3D_NO_SHADOW`）：192.7 vs 193.6 fps ⇒ 0.5%，基本免费。**
     ⚠️ 我曾拿"250 → 134"当作代价证据 —— **那两次运行配置不同**（一次没开压力 AI），
     结论无效。**切阴影开关的那次 A/B 才是判据**（教训 24/27 的又一次现场）。
-15. **阴影 `normal_bias` 已在 uniform 但未使用** —— 需要更干净的阴影边界时做坡度 bias。
+15. ~~**阴影 `normal_bias` 已在 uniform 但未使用**~~ **已结案（2026-09-14）——它一直在用**。
+    链条完整：`lighting.rs:113` 写入 `ShadowConfig` → `:234` 打进 uniform
+    `bias = Vec4(depth_bias, normal_bias, 1, 0)` → `:534` 有测试锁着 →
+    **`build.rs:420` 消费它**：`push_m = bias.y + m_per_texel * (1.25 + 0.9*slope)`，
+    再 `world_pos + normal * push_m` 沿法线外推。
+    **⇒ 条目里要求的"坡度 bias"就是那个 `0.9*slope` 项，需求也已满足。**
+    顺手按铁律 F 清了三处**陈旧**的 `#[allow(dead_code)]`（`SHADOW_MAP_SIZE` /
+    `DEFAULT_SHADOW_DEPTH_BIAS` / `DEFAULT_SHADOW_NORMAL_BIAS` —— 三者都在**非测试**代码里
+    被引用，压制纯属多余），并**删除**了 `SHADOW_MAP_FORMAT`（全仓只有它自己的定义这一处引用，
+    是 `vk::Format::D32_SFLOAT` 的手抄副本，渲染器用的是 ash 枚举）。
+    ⚠️ **`lighting.rs` 里其余的 `#[allow(dead_code)]`（`DEFAULT_SHININESS` / `SPECULAR_STRENGTH` /
+    `blinn_phong_*` / `point_attenuation` / `*_radiance`）必须保留** —— 它们只有
+    `#[cfg(test)]` 的用处，而 `dead_code` 在非测试构建里不计测试引用，删了会破 0 警告红线。
 16. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（引用 naga 导致 test 目标编译失败）——
     待清理或正式入库。
 17. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响；
