@@ -988,6 +988,14 @@ pub struct Renderer {
     /// 而不必去怀疑剔除矩阵 / 模型 / 取景（那三样我今晚都白查过）。
     /// 用闩而不是每次都记：这段每帧都跑，刷屏会把真正有用的行淹掉。
     npc_cap_warned: bool,
+    /// PT 盒数触顶告警的一次性闩（2026-09-14）。
+    ///
+    /// 理由同 `npc_cap_warned`：`ray_tracer::PT_MAX_BOXES` 超限时那一行 `.min()`
+    /// **静默丢弃**，而 PT 是低 spp 的噪点图 —— **少几个盒子肉眼根本看不出来**
+    /// （未结案 #10 实测 `marker=547 > 512`，即每次丢 35 个）。
+    /// PT 本来就被当作"调试/烘焙参照视图"，所以更没人会去数盒子。
+    /// 用闩是因为它由 `signature()` 量化（~0.5m）触发场景重建，移动相机时一秒能重建好几次。
+    pt_box_cap_warned: bool,
     /// GLB 道具合并网格（`engine::props::merge` 在 CPU 上烘好位姿的静态几何）。
     /// 全部道具共用一次 draw call：位姿已进顶点，所以只需要 `PROP_INSTANCE_INDEX`
     /// 这一个 identity 实例，不必为道具新开一整段实例区。
@@ -1611,6 +1619,7 @@ impl Renderer {
             soldier_index_count: 0,
             soldier_parts: Vec::new(),
             npc_cap_warned: false,
+            pt_box_cap_warned: false,
             soldier_drawn: 0,
             prop_vertex_buffer: vk::Buffer::null(),
             prop_vertex_memory: vk::DeviceMemory::null(),
@@ -5532,6 +5541,25 @@ impl Renderer {
         use crate::engine::ray_tracer::PT_MAX_BOXES;
         let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
         let n = boxes.len().min(PT_MAX_BOXES);
+        // 🔴 2026-09-14：**把静默截断变成可诊断的一次告警**（与 `warn_npc_cap_once` 同一形态）。
+        //
+        // 上面那行 `.min()` 超出容量时什么都不说 —— 后果是"PT 画面里少了几栋楼"。
+        // 而 PT 是低 spp 的噪点图，**少几个盒子肉眼根本看不出来**：
+        // 未结案 #10 记的实测值就是 `marker=547 > PT_MAX_BOXES=512`，每次丢 35 个。
+        //
+        // 用闩而不是每次都记：这个函数在**场景重建**时调用，而重建由相机位移触发
+        // （`signature()` 量化到 ~0.5m），移动时一秒能重建好几次 ⇒ 会刷屏，
+        // 把 PT 那些真正有用的行淹掉（教训 26 的反面：噪声会训练人忽略日志）。
+        if boxes.len() > PT_MAX_BOXES && !self.pt_box_cap_warned {
+            self.pt_box_cap_warned = true;
+            log::warn!(
+                "PT: 盒数 {} 超过 PT_MAX_BOXES={} => 超出部分被静默丢弃，PT 画面里会少几何。\
+                 两条出路：提高该常量（BLAS 按容量分配 ⇒ 显存同比上涨），\
+                 或在 CPU 侧按视锥裁剪后再传进来。",
+                boxes.len(),
+                PT_MAX_BOXES
+            );
+        }
         // 顶点/索引/材质缓冲一次性按 PT_MAX_BOXES 分配（换场景只重写内容，句柄不动）
         let vb_len = PT_MAX_BOXES * 24 * 32;
         let ib_len = PT_MAX_BOXES * 36 * 4;
