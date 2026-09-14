@@ -445,6 +445,23 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   非必要不反汇编（要看 .spv 时 `spirv-dis` 输出到临时文件再 grep）；
   非必要不反复读同一文件；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat` 或限定文件。
   ⚠ 本 shell 里 `Get-Content` 数行数不准（实测 2826 vs 实际 3229），**行号以 `read` 工具为准**。
+- 🔴 **`cargo check` 不能替代 0 警告闸门**（2026-09-14 实测，我差点被它骗过去）：
+  当晚我用 `cargo check --release` 验证一处改动，它报出 **28 条 `never used` 警告**，
+  而**同一次 `git checkout` 之后的 `cargo build --release` 是 0 警告**。
+  `check` 与 `build` 的 fingerprint 不同，**`check` 会重放它自己缓存下来的旧诊断** ——
+  于是文件已经恢复干净了，它还在报改动期间的旧账。
+  **判据：`0 警告` 只能用 `cargo build --release`（或 `cargo test --release`）验。**
+  ⚠️ 实验占着 exe 时 `build` 会卡在**链接**（`failed to remove …exe`），
+  但**编译与警告在此之前就已产出** ⇒ 看警告仍然有效，别把那个 error 当成编译失败。
+- 🔴 **`> file` 重定向会写成 UTF-16**（2026-09-14 我因此误判"文件内容不同"）：
+  `git show HEAD:src/audio.rs > build\x.rs` 得到 **184852 B**，而真实是 102552 B。
+  要取 HEAD 版本做字节比对，用 `git checkout-index` / `git cat-file` 写二进制，
+  或用 `git diff` / `git status` 判断，**不要用 PowerShell 的 `>`**（教训 7 的另一面）。
+- 🔴 **脚本里取备份必须取"未改动的"那一份**（2026-09-14 我写坏了一个清理脚本）：
+  那个脚本按 `Copy-Item $path $backup` 取备份，而它跑了两次 ——
+  **第二次取的备份已经是第一次剥过的版本** ⇒ 失败回滚时把坏文件写了回去。
+  取备份要么从 `git show HEAD:`，要么在脚本开头就判断"若备份已存在则复用它"，
+  并且**回滚用 `git checkout --`**（教训 30）。
 - **看到"规划中"的 dead code，必须回答"那它为什么没被接线"，不许加 `#[allow]` 了事。**
   **2026-09-14 现状**：那条"删 `scripts/allow*.py`"的旧待办**已作废** —— 三个脚本**早就不存在**
   （`Get-ChildItem scripts -Filter 'allow*.py'` 为空，全仓只有本文件提过它们）。
