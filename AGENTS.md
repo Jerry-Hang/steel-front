@@ -44,7 +44,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `ui.rs` | 2615 | HUD / 菜单 / 设置 / 键位表 |
 | `engine/city.rs` | 2004 | 程序化城市生成 |
 | `net.rs` | 1732 | UDP 联机（协议魔数 'S'） |
-| `engine/cjk_glyphs.rs` | **1609** | 生成的中文点阵字模，**勿手改**。⚠️ 2026-09-14 由 **21490 行 / 2.26 MB 裁到 1609 行 / 163 KB**（换 Noto Sans SC + 只留源码真正用到的 1580 个码点，−92.6%）⇒ **看到旧记录写"21490 行"是过期的** |
+| `engine/cjk_glyphs.rs` | **1635** | 生成的中文点阵字模，**勿手改**。⚠️ 2026-09-14 由 **21490 行 / 2.26 MB 裁到 165 KB**（换 Noto Sans SC + 只留源码真正用到的 1591 个码点，−92.7%）⇒ **看到旧记录写"21490 行"是过期的**。🔴 **清单 `tools/cjk_used_codepoints.txt` 会过期**（新加中文却没重跑 `--scan`），已有测试 `source_cjk_codepoints_all_have_glyphs` 独立重扫 `src/` 兜底；它红了 = 有人加了中文没重扫，命令 `python tools/extract_cjk_glyphs.py --scan` |
 | `engine/ai.rs` / `weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1435 / 1431 / 1139 / 1124 / 1096 / 1054 | AI 分层与战术 / 武器系统 / CPU 拓扑与亲和 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
 | `llm_cmd.rs` | 549 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
@@ -667,7 +667,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
-    kill feed 仅英文（5×7 位图字体无中文）、不分击杀者名字；第一人称枪模动画 / 弹孔贴花未做。
+    ~~kill feed 仅英文~~ **已于 2026-09-14 中文化**（换 Noto Sans SC 后中文点阵齐了，
+    一并把 `team_name` 改成"红方"/"蓝方"）；**仍缺**：不分击杀者名字（只有击杀数 + 目标编号）；
+    第一人称枪模动画 / 弹孔贴花未做。
 20. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
 21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：改为正确支持交错布局**。
     这是 `accessor.byteOffset` 那个 bug 的**上一层**（那条注释里写着 ak12.glb 的 NORMAL
