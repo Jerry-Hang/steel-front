@@ -23,10 +23,10 @@
 
 ## 项目
 
-**21 世纪架空世界观的大战场 FPS**（⚠ 本文件与 README 旧版曾长期误写为「二战题材」——
+**21 世纪架空世界观的大战场 FPS**（⚠ 本文件与 README 旧版曾长期误写为「二战题材」，
 据此建模/选材会全错。装备是现代系，HUD 默认武器 **AK-12 风暴 7.62×39mm**，2018 年列装）。
-美术基调按 **2020s 当代东欧/中东战乱城镇**走（用户 2026-09-12 定：混凝土板楼 + 抹灰老城 +
-破损，冷灰色调），不是战壕与 1940 年代道具，也**不是**本文件旧版写的"近代复古城市"。
+美术基调按 **2020s 当代东欧/中东战乱城镇**走（混凝土板楼 + 抹灰老城 + 破损，冷灰色调），
+不是战壕与 1940 年代道具，也**不是**旧版写的"近代复古城市"。
 
 Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 `ash` 0.38 / `ash-window` 0.13 / `winit` 0.30(rwh_06) / `glam` 0.29 / `raw-window-handle` 0.6 /
@@ -60,17 +60,16 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 ### 验收约束（硬红线）
 
-`cargo test --release` 全绿、**0 警告**（dead-code=0）、不新增第三方依赖、
+`cargo test --release` 全绿、**0 警告**（dead-code=0）、**不新增第三方依赖**、
 commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AGENTS.md)`）、
-**一个功能一个 commit，禁止 mega-commit**。
-**内存 12GB：一次只跑一个 cargo，禁止并行构建。**
+**一个功能一个 commit，禁止 mega-commit**。**内存 12GB：一次只跑一个 cargo，禁止并行构建。**
 
 ---
 
 ## 开发环境
 
 > **环境铁律（勿回退）**：开发/验证 = **Windows 原生**。2026-08-15 起从 WSL2 迁出，
-> WSL2 相关材料**全部作废、已从本文件删除**（详见文末存档指针）。
+> WSL2 相关材料**全部作废**。
 
 - **机器**：RTX 5060 Laptop（NVIDIA 驱动 610.88）+ AMD 8940HX，内存 12GB。
 - **编译**：`cargo build --release`。**测试**：`cargo test --release`（**0 警告**是硬红线；具体 passed 数见 `docs/PROGRESS.md`）。
@@ -92,16 +91,16 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - **主开发路径 = `VK_EXT_mesh_shader`（MESH + FRAGMENT）**。所有新渲染功能、性能优化、视觉迭代
   一律在 mesh 路径上做（`build.rs` 的 `MESH_SHADER_WGSL` + `renderer.rs` mesh 管线）。
   支持扩展的设备上自动启用，无需环境变量。
-- **传统 VERTEX + FRAGMENT 管线冻结维护**：只作缺扩展时的兼容回退，**不再新增任何功能**，
-  只做必要维护；冒烟基线仍要求双路径 VUID=0。
+- **传统 VERTEX + FRAGMENT 管线冻结维护**：只作缺扩展时的兼容回退，**不再新增任何功能**；
+  冒烟基线仍要求双路径 VUID=0。
 - **mesh 路径约定（勿回退）**：
   - naga 30 网格写入器对 `@builtin(vertices)` 数组内 position 的 `ADJUST_COORDINATE_SPACE`
     翻转**失效** → mesh 着色器必须在 WGSL 内显式 `v.position.y = -v.position.y`
     （`build.rs`，删掉会垂直镜像）。
   - `maxMeshWorkGroupCount[0]` 最低保证 65535 ⇒ 地面场 65536 workgroup 必须按查询上限分块下发
     （字段 `mesh_max_wg_x`）。
-- **`assets/*.spv` 是运行时从磁盘读的着色器**，不是可随便换的产物。改 WGSL 后必须重新构建，
-  **勿手改 .spv**。看到它们变 dirty：先怀疑库里的是不是过期。
+- **`assets/*.spv` 是运行时从磁盘读的着色器**。改 WGSL 后必须重新构建，**勿手改 .spv**；
+  看到它们变 dirty：先怀疑库里的是不是过期。
 
 ---
 
@@ -125,15 +124,17 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 **顶点格式与着色**
 - `stride=32`，`pos@0 color@12 uv@24`，**没有法线槽位**：法线全部由屏幕空间导数重建
   → 只能纯平着色；AO / 烘焙光照**必须进顶点色**；**绕序反了的面直接黑掉且不报错**。
-- 实例场与障碍立方体顶点色**全部白化**，颜色只走 tint。地形实例 tint=0.7 灰、
+- 实例场与障碍立方体顶点色**全部白化**，颜色只走 tint；地形实例 tint=0.7 灰、
   marker tint=`WorldMarker.tint`（勿混）。
 - `flat_flag`：槽位 ≥ 65601（`NPC_SLOT_BASE`）顶点着色器置 1，片元走纯色路径跳过贴图 50% 混合。
   改槽位常量须同步 `build.rs::NPC_INSTANCE_BASE` 与 `renderer.rs::NPC_SLOT_BASE`。
 - `Shape::Authored`（`tint.w = 6.0`）→ `flat_flag = 1.25`，跳过四条程序化表面效果
   （`window_dark` / `glass_shade`+菲涅尔 / `is_canopy` 值噪声 / marker 混凝土皮肤）。
   **不接这条，GLB 立面会被再画一层错位窗带（D11 重演）**。
-- 皮肤贴图 `RV3D_SKIN_TEX=1` 启用，缺省 0 纯色回退（冒烟基线不变）；
-  `flat_flag` 材质编码 0=地面 / 1=marker / 2=NPC，binding 7/8。
+- **调试/材质开关**：`RV3D_PROC_TEX=0` 关程序化贴图（见铁律 D）、`RV3D_NO_SHADOW=1` 关阴影、
+  `RV3D_DEBUG_SHADOW=1` 看 R=frag_depth / G=阴影图深度均值（见上）、`RV3D_SKIN_TEX=1` 开皮肤贴图
+  （缺省 0 纯色回退，冒烟基线不变）、`RV3D_INSPECT=1` 检视模式（实例矩阵用 `Mat4::IDENTITY`）。
+  `flat_flag` 材质编码 **0=地面 / 1=marker / 2=NPC**（binding 7/8）。
 
 **地面**
 - 专用平铺 quad（`GROUND_VERTS/INDICES`，4 顶点 6 索引）：绕序必须 `[0,2,1,0,3,2]` 反向才正面朝上；
@@ -150,7 +151,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 主管线 `depth_test_enable=true`；**枪模用独立 `gun_pipeline`**（`depth_test=OFF` **且不写深度**，
   否则会挡 HUD/粒子）。
 - GLB 绕序与引擎约定相反，已在 `props::merge` 统一换面。外部建模的顶点变换（纯旋转+等比缩放+平移）
-  本身不改绕序，索引交换是刻意的事。
+  本身不改绕序，索引交换是**刻意**的。
 - **实例 buffer 元素数只允许 `INSTANCE_BUFFER_ELEMS = PROP_INSTANCE_INDEX + 1` 单一定义
   + 编译期 `const _: () = assert!(...)`**。三处（建 buffer、主管线 `descriptor.range()`、
   阴影 pass `descriptor.range()`）必须同源 —— 不同步 = **静默越界读**（驱动不崩不报 VUID、
@@ -159,11 +160,11 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （destroy 在飞 buffer → NVIDIA device-lost）。`PROP_INSTANCE_INDEX = GUN_INSTANCE_INDEX + 1`（83010）单槽。
 - 道具要剔除 → 在**合并阶段按街区分桶**、每桶一次 draw call，不动实例系统
   （已落地 `merge_binned(cell=40m)`，实测 fps 112→152）。
-- 验证层 `RV3D_VALIDATION=1`（默认关）。🔴 **2026-09-15 起它才真的能跑** —— 以前会因为 mesh.spv
-  过不了严格 spirv-val 而**灰屏**（未结案 #9 的副作用）。**它是本仓最强的排障工具**：开起来第一轮就
-  抓出两条一直存在、此前完全看不见的 VUID（见 #23）。**改 pipeline / swapchain / 同步 / 描述符前先开它跑一轮。**
-- 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式；
-  检视模式实例矩阵用 `Mat4::IDENTITY`。
+- 验证层 `RV3D_VALIDATION=1`（默认关）—— 以前开它会因 mesh.spv 过不了严格 spirv-val 而**灰屏**
+  （未结案 #9 的副作用），🔴 **2026-09-15 修掉根因后它才真的能跑**。**它是本仓最强的排障工具**：
+  开起来第一轮就抓出两条一直存在、此前完全看不见的 VUID（见 #23）。
+  **改 pipeline / swapchain / 同步 / 描述符前先开它跑一轮。**
+- 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式。
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
 - 🔴 **⚠️ 有两个同名的 `npc`，别混**（据此写下的错误结论已撤回）：
   - **HUD 左上那行的 `npc: I{} P{} C{} A{}`**（`game.rs:2640`）—— 是 NPC 的**状态人数**
@@ -190,17 +191,15 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 **呈现模式（2026-09-13）**
 - `RV3D_PRESENT_MODE` 支持 `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**。
-- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**，快速转视角时正好读成"残影/鬼影"
-  （用户 2026-09-13 报告枪有"非常明显的残影"）。**`PrintWindow` 抓不到它** ——
-  它抓的是已合成的完整帧，撕裂只发生在显示器上。**别再用静态截图去证伪"残影"。**
+- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（快速转视角时读成"残影/鬼影"）。**`PrintWindow`
+  抓不到它** —— 它抓的是已合成的完整帧，撕裂只发生在显示器上。**别再用静态截图去证伪"残影"。**
 - **玩家路径由 `SteelFront.bat` 设 `RV3D_PRESENT_MODE=mailbox`**（不撕裂、也不像 FIFO
-  那样在独显直连下等不到 vblank 而死锁）。引擎默认保持 IMMEDIATE 是为了基准最稳。
+  那样在独显直连下等不到 vblank 而死锁）。引擎默认 IMMEDIATE 是为了基准最稳。
 
 **建筑摆放（2026-09-13）**
-- `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。
-  用 `max` 会按较大方向贴合、另一个方向**必然溢出 footprint** ⇒ 相邻楼互相穿插，
-  玩家看到"一堆窗格以不同角度叠在一起"（用户截图的"乱窗/透视错误"）。
-  **建筑模型本身没问题** —— `preview_glb.py` 渲出来是规整窗格；问题一直在摆放。
+- `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。用 `max` 会按较大方向
+  贴合、另一个方向**必然溢出 footprint** ⇒ 相邻楼互相穿插（用户截图的"乱窗/透视错误"）。
+  **建筑模型本身没问题**，问题一直在摆放。
 - 原注释担心的"无形的墙"由调用方把**碰撞盒设成真实视觉尺寸**来消掉
   （`building_at` 里按 `half_footprint × scale` 算，±90° 时 x/z 互换）。
 
@@ -263,7 +262,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - `MAX_LOOK_DELTA_PX = 512`（绝对位置单次位移上限，超过视为光标传送，跳过并重基准）；
   `MAX_RAW_LOOK_DELTA = 1024`（raw 单事件上限）。
 
-### ⭐ 无焦点视角注入配方（2026-09-12 实测标定，误差 0.3%）
+### ⭐ 无焦点视角注入配方（实测标定，误差 0.3%）
 
 `scripts/pm_play.ps1` 已实现下面四条，**照抄即可，别再重推**。缺任何一条都会静默失效：
 
@@ -329,8 +328,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   最长边 = 1.0。`main.rs` 的 `scale = 1.35/longest` 因此恒等于 1.35。最长轴朝向启发式对全部
   14 件落 `IDENTITY` —— **绝不能反过来依赖它"修正"朝向**。
 - 枪械色彩空间：`Image.pixels` 返回**原始 sRGB 编码值**（脚本自己做 sRGB→linear）；
-  `baseColorFactor` 已是线性直接用；贴图 socket 的 0.8 默认值**刻意忽略**
-  （乘上去每把贴图枪暗 20%）。
+  `baseColorFactor` 已是线性直接用；贴图 socket 的 0.8 默认值**刻意忽略**。
 - 枪模 buffer 上限很松（顶点峰值 11949/32768 = 36%、索引峰值 33585/262144 = 13%）
   → **不要动它、不要加扩容逻辑**（device-lost 老雷）。
 - 程序化贴图（勿回退）：写 `R8G8B8A8_SRGB` 前必须 linear→sRGB 编码；材质分域用**世界尺度**
@@ -373,7 +371,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   ⇒ **改法**：`tools/blender/weld_props.py`（按 pos+color 去重、UV 设常量、**`export_normals=False`**）。
   **`export_normals` 是总开关**：开着它时焊到 458 顶点、落盘又变回 2264（导出器按面拆分），只降 6.6%。
   **收益（同机位实测）**：顶点 1563020→509616、显存 72→24 MB、每帧提交 476100→153363、
-  **中位帧率 132.1→156.6（+18.6%）**，**三角形一个没少、画面无退化**。
+  **中位帧率 +18.6%**，**三角形一个没少、画面无退化**。
   **本仓是顶点瓶颈**（像素少 4 倍只 +12%；一次画完反而 −38%）⇒ 顶点数就是帧率，这是最高杠杆的一处。
 - **确定性**：`hash(str)` 每个进程都变（PYTHONHASHSEED），生成器里用 `zlib.crc32`。
 - 同型号建筑的"克隆军团"由 **`props.rs::placement_tint`** 治（逐摆放确定性色调 ±12%），
@@ -443,7 +441,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   `playtest_perf.py` 是**时长制**：跑满 `PT_SECS`（默认 600s）即完成，击杀是附带指标、不设门槛、不判 FAIL。
 - 微基准：`cargo test --release <名> -- --nocapture --test-threads=1`
   （`shockwave_path_microbench` / `simd_cull_microbench`）；
-  `RV3D_FORCE_SIMD=avx512|avx2|avx|sse4.2|scalar`（仍要求硬件支持，非法值告警回退）。
+  `RV3D_FORCE_SIMD=avx512|avx2|avx|sse4.2|scalar`（硬件不支持时告警回退）。
 - `cargo clippy --fix` 在本仓**不可用**（build.rs 代码生成缓存行为，反复提示却不改字节），别再试。
 
 ### 常用命令
@@ -476,9 +474,9 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 ```
 
 ⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
-⚠ `scripts/play_cap.ps1` 已于 2026-09-12 删除（它用 SetCursorPos + mouse_event 拿到焦点后
-不做真正的释放，正是用户 2026-09-03 报告的鼠标死锁那一类行为；已由 cap_safe.ps1 + pm_play.ps1
-+ release_input.ps1 取代）。
+⚠ `scripts/play_cap.ps1` 已于 2026-09-12 删除（它用 SetCursorPos + mouse_event 拿到焦点后不做真正的
+释放，正是用户 2026-09-03 报告的鼠标死锁那一类行为；已由 cap_safe.ps1 + pm_play.ps1 +
+release_input.ps1 取代）。
 ---
 
 ## 🔴 未结案清单
