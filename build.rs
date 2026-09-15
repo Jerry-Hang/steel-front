@@ -1140,6 +1140,17 @@ fn mesh_main(
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
     }
+    // 外部建模网格（geom.rs Shape::Authored，tint.w = 6.0）→ flat = 1.25，
+    // 与顶点路径 vs_main 的第 99 行**同源**。
+    //
+    // 🔴 这里曾经漏掉：mesh 路径不实现 authored ⇒ marker 槽里的 Authored 实例会掉进
+    // marker 皮肤路径，被画上一层窗带/混凝土细节。实测症状（2026-09-15）：
+    // 弹孔方片看起来是"一块贴上去的小面板"而不是一个孔。
+    // 限定在 marker 槽内，避免影响 NPC / 自发光 / 枪槽（它们各有自己的 flat 语义）。
+    if (slot >= MARKER_INSTANCE_BASE && slot < NPC_INSTANCE_BASE
+        && inst.tint.w > 5.5 && inst.tint.w < 6.5) {
+        flat = 1.25;
+    }
     // 枪模槽位 = GUN_INSTANCE_INDEX（83009；旧式 NPC_INSTANCE_BASE+1024-16 是 1024 时代
     // 残留，范围 67569..75777 把 NPC 圆柱/球体段全部误判为枪 → 四肢/头被 z=0 深度覆盖，
     // 「鬼魂/穿模」观感的另一来源；mesh 路径不画枪模，此判定仅保护传统 draw 的 GUN 槽语义）。

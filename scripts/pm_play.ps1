@@ -218,6 +218,17 @@ try {
     Write-Host ("keyboard Digit2 (PostMessage): weapon-switch log {0} -> {1}" -f $sw0, $sw1)
 
     # --- look via the uncaptured drag path --------------------------------
+    # -TurnPx 0 = do NOT touch the pointer at all. The primer below turns the camera
+    # by an ARBITRARY amount (its first delta is computed against a stale last_cursor),
+    # so a zero-turn run has to skip the primer too -- that is what makes two runs
+    # frame-identical (spawn yaw exactly 0), which screenshot A/B work needs.
+    if ($TurnPx -eq 0) {
+        Write-Host "look: skipped (-TurnPx 0) -- camera stays at the spawn yaw for a reproducible frame"
+        $yawP = 0.0
+        $yaw1 = 0.0
+        $dYaw = 0.0
+        $expect = 0.0
+    } else {
     # The drag path computes its first delta against a STALE last_cursor (whatever
     # the last real CursorMoved left there), and only then warps the pointer to the
     # window centre and rebases last_cursor to that centre. So the first posted
@@ -278,6 +289,7 @@ try {
     $sens = 0.0005 + 0.992 * 0.002
     $expect = -1.0 * $totalPx * $sens * 180.0 / [Math]::PI
     Write-Host ("cam after look: yaw={0}  (measured {1:+0.0;-0.0;0.0} deg, expected {2:+0.0;-0.0;0.0} deg)" -f $yaw1, $dYaw, $expect)
+    }
 
     # --- walk forward -----------------------------------------------------
     Write-Host "walk forward ${WalkMs}ms (W)"
@@ -303,13 +315,13 @@ try {
     $mouseOk = ($dYaw -eq $dYaw) -and ([Math]::Abs($dYaw) -gt 0.5)
     $calib = ($dYaw -eq $dYaw) -and ([Math]::Abs($dYaw - $expect) -lt [Math]::Abs($expect) * 0.25)
     $keysOk = ($sw1 -gt $sw0)
-    $mTxt = if ($mouseOk) { "OK" } else { "FAIL" }
+    $mTxt = if ($TurnPx -eq 0) { "SKIP" } elseif ($mouseOk) { "OK" } else { "FAIL" }
     $kTxt = if ($keysOk) { "OK" } else { "FAIL" }
     Write-Host ""
     Write-Host "=== channel evidence ==="
     Write-Host ("  keyboard (weapon switch) : {0}   log {1} -> {2}" -f $kTxt, $sw0, $sw1)
     Write-Host ("  look     (cam yaw)       : {0}   yaw {1} -> {2}  (delta {3:+0.00;-0.00;0.00}, expected {4:+0.00;-0.00;0.00})" -f $mTxt, $yawP, $yaw1, $dYaw, $expect)
-    Write-Host ("  look calibration         : {0}  (within +/-25% of the predicted turn)" -f $(if ($calib) { "MATCHES" } else { "OFF" }))
+    Write-Host ("  look calibration         : {0}  (within +/-25% of the predicted turn)" -f $(if ($TurnPx -eq 0) { "SKIPPED" } elseif ($calib) { "MATCHES" } else { "OFF" }))
     $note = "keys=$kTxt look=$mTxt calib=$calib"
 }
 catch {
