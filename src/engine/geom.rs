@@ -99,6 +99,41 @@ impl Shape {
         }
     }
 
+    /// 该形状的**可见半尺寸**相对于碰撞 AABB 半尺寸的倍率（按轴：0=x / 1=y / 2=z）。
+    ///
+    /// ## 为什么需要它（2026-09-15 实测）
+    ///
+    /// marker 的实例缩放写的是 `2*half`（`WorldMarker::for_obstacle`），而模板几何是
+    /// **±1 的立方体**（`renderer.rs::VERTICES` / `build.rs::CUBE_POS`）与
+    /// **单位圆柱**（r=1、y∈[−0.5, 0.5]，NPC 四肢共用同一模板）。两者相乘 ⇒
+    /// **可见尺寸是碰撞盒的 2 倍**；圆柱竖直方向（模板已经是 ±0.5）恰好是 1 倍。
+    ///
+    /// 实测判据（不是读代码推的）：玩家站在 (0,1.6,−10.65)、近处的那根
+    /// `Block @(0,1.5,−11.8) 尺寸=0.22×0.22×0.70 shape=Cylinder` 在画面上的
+    /// **宽/高比 = 0.61**；半径 0.22（2×）预测 0.44/0.70 = 0.63 ✓，半径 0.11（1×）
+    /// 预测 0.31 ✗。
+    ///
+    /// 消费者：**弹孔贴面**（`game.rs::first_obstacle_hit`）—— 贴在碰撞面上会被
+    /// 可见几何整片盖住（不报错、只是"打了枪墙上没有孔"）。改 marker 缩放或模板时，
+    /// 这里与 `for_obstacle` 必须一起改。
+    ///
+    /// `Shape::None` 是**只碰撞不绘制**的 GLB 碰撞核：可见面就是 GLB 模型本身，
+    /// 与它的 AABB 重合 ⇒ 1.0（贴弹孔就贴在这个面上）。
+    pub const fn visual_half_gain(self, axis: usize) -> f32 {
+        match self {
+            Shape::None => 1.0,
+            // 单位圆柱的 y 已是 ±0.5（高度与 AABB 一致），半径是 1（比 AABB 大一倍）
+            Shape::Cylinder => {
+                if axis == 1 {
+                    1.0
+                } else {
+                    2.0
+                }
+            }
+            Shape::Sphere | Shape::Authored | Shape::Legacy => 2.0,
+        }
+    }
+
     /// 该形状的**水平足迹**是否内切于它的 AABB。
     ///
     /// ⚠ **目前没有任何生产代码调用它** —— 也就是说这条几何学结论还没有接到碰撞系统上：
@@ -181,6 +216,24 @@ mod tests {
         // 若这个断言失败，说明有构造点开始自己写 tint.w，需要逐个复核而不是改常量。
         assert_eq!(Shape::TAG_LEGACY, 1.0);
         assert_eq!(Shape::default().tag(), 1.0);
+    }
+
+    /// 可见半尺寸倍率：立方体/球 2×，圆柱水平 2×、竖直 1×，GLB 碰撞核 1×。
+    ///
+    /// 这条锁的是**弹孔贴面**赖以成立的判据 —— 数值错了弹孔就会整片埋进可见几何里
+    /// （不报错，只是"墙上没有弹孔"）。
+    #[test]
+    fn visual_half_gain_matches_the_rendered_templates() {
+        for axis in 0..3 {
+            assert_eq!(Shape::Legacy.visual_half_gain(axis), 2.0);
+            assert_eq!(Shape::Sphere.visual_half_gain(axis), 2.0);
+            // GLB 碰撞核不绘制：可见面就是模型本身的 AABB
+            assert_eq!(Shape::None.visual_half_gain(axis), 1.0);
+        }
+        // 单位圆柱：半径 1（2×）、高度已是 ±0.5（1×）
+        assert_eq!(Shape::Cylinder.visual_half_gain(0), 2.0);
+        assert_eq!(Shape::Cylinder.visual_half_gain(1), 1.0);
+        assert_eq!(Shape::Cylinder.visual_half_gain(2), 2.0);
     }
 
     #[test]

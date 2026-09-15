@@ -290,6 +290,16 @@ const GUN_SWITCH_DROP_M: f32 = 0.18;
 const GUN_SWITCH_PITCH_RAD: f32 = 0.21; // ≈12°
 const GUN_SWITCH_ROLL_RAD: f32 = 0.10; // ≈6°
 
+/// 弹孔方片的边长（米）。`WorldMarker` 的缩放 = **全长**（marker 模板是 ±1 的单位盒，
+/// 见 `geom::Shape::visual_half_gain`），所以 0.08 就是 8cm 见方的一块。
+/// 再小：10m 外不足一个像素（等于没画）；再大：读起来像贴纸而不是弹孔。
+const DECAL_SIZE_M: f32 = 0.08;
+/// 弹孔厚度（米）。方片**埋进墙里一半、露出约 1cm**：共面贴片会与墙面打 z-fighting，
+/// 而整个浮在表面又会被看出是一块"贴上去的板"（侧壁在掠射角下可见）。
+const DECAL_THICK_M: f32 = 0.016;
+/// 方片中心沿法线的外移量（米）：正值 = 更凸出。取厚度的 1/4 ⇒ 露出 1.2cm、埋进 0.4cm。
+const DECAL_LIFT_M: f32 = DECAL_THICK_M * 0.25;
+
 /// 第一人称枪摆动状态。
 ///
 /// 全部量在 `update()` 内按 delta_time 积分（`fp_gun_matrix()` 只读），原因是
@@ -2279,7 +2289,39 @@ impl GameApp {
                     tint: [0.35, 0.4, 0.12, 1.0],
                 });
             }
+            // 弹孔：子弹打在障碍表面的着弹标记（`game.rs::impact_marks`）。
+            // 单独一批、只追加进光栅 marker 列表 —— 不喂 PT 场景（弹孔每枪都变，
+            // 会让 BLAS 指纹每帧重建，也白占 PT 盒容量）。方片的局部 +Z 用
+            // `ImpactMark::basis()` 摆到表面法线上，**右手基**是硬要求（否则正面绕序反掉）。
+            let decal_markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .impact_marks()
+                .iter()
+                .map(|m| {
+                    let (t, u, n) = m.basis();
+                    let half = DECAL_SIZE_M * 0.5 * m.size_envelope();
+                    engine::renderer::WorldMarker {
+                        model: glam::Mat4::from_cols(
+                            (glam::Vec3::from(t) * half).extend(0.0),
+                            (glam::Vec3::from(u) * half).extend(0.0),
+                            (glam::Vec3::from(n) * (DECAL_THICK_M * 0.5)).extend(0.0),
+                            glam::Vec4::new(
+                                m.pos[0] + m.normal[0] * DECAL_LIFT_M,
+                                m.pos[1] + m.normal[1] * DECAL_LIFT_M,
+                                m.pos[2] + m.normal[2] * DECAL_LIFT_M,
+                                1.0,
+                            ),
+                        ),
+                        // `Shape::Authored`（tint.w = 6.0）在这里是**故意**用的：
+                        // 它让片元跳过"给纯 tint 盒子补细节"的四条程序化效果（窗带/玻璃分格/
+                        // 树冠噪声/混凝土皮肤）。弹孔要的就是一块**纯色暗方片** ——
+                        // 走 marker 皮肤路径会给它采样一层墙纹，看起来像贴了一块小面板。
+                        tint: [0.035, 0.030, 0.026, engine::geom::Shape::TAG_AUTHORED],
+                    }
+                })
+                .collect();
             renderer.set_world_markers(&markers);
+            renderer.append_markers(&decal_markers);
             renderer.set_emissive_markers(&emissive_markers);
             // ---- GLB 道具几何上传 ----
             // 套件懒加载一次（重载地图不必重新解析 24 个 GLB）；几何只在**地图代号变化**

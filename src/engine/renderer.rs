@@ -4446,6 +4446,20 @@ impl Renderer {
             .collect();
     }
 
+    /// 追加一批世界 marker（弹孔等每帧变化的实例），容量仍截断到 `MAX_MARKER_INSTANCES`。
+    ///
+    /// 与 `set_world_markers` 分开的理由是 **PT 场景不吃这一批**：弹孔每次开枪都变，
+    /// 混进 `pt_set_scene_markers` 会让 BLAS 指纹每帧判"场景变了"而重建，
+    /// 还会白占 PT 盒容量（`PT_MAX_BOXES`）。
+    pub fn append_markers(&mut self, extra: &[WorldMarker]) {
+        let room = (MAX_MARKER_INSTANCES as usize).saturating_sub(self.markers.len());
+        self.markers
+            .extend(extra.iter().take(room).map(|m| InstanceData {
+                model: m.model.to_cols_array(),
+                tint: m.tint,
+            }));
+    }
+
     /// 每帧上传世界障碍 marker 到实例 buffer 的 MARKER_SLOT_BASE 之后区域
     /// （跳过 65536 identity slot，见 MARKER_SLOT_BASE 注释），返回 (近档, 远档) 计数。
     /// marker 量小（≤64），不做视锥剔除，仅按距离分近/远档。

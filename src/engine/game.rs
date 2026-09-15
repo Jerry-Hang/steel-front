@@ -922,6 +922,62 @@ pub struct NetPlayer {
     pub last_fire: f32,
 }
 
+/// 弹着标记（子弹打在障碍表面留下的弹孔）的数量上限。
+///
+/// 环形缓冲：满了丢最旧的一条。弹孔池大小固定，不随游玩时长增长，
+/// 也不会因为打多了就把实例槽位占满。
+pub const IMPACT_MARK_MAX: usize = 192;
+/// 弹着标记存活时长（秒）。
+pub const IMPACT_MARK_LIFE: f32 = 30.0;
+/// 生命末尾的收缩时长（秒）：最后这段里尺寸线性收到 0，避免"啪"地消失。
+pub const IMPACT_MARK_FADE: f32 = 3.0;
+
+/// 子弹在障碍表面留下的弹着标记（弹孔）。
+///
+/// 位置与法线来自**线段与刚体 AABB 的入口交点**，与子弹碰撞用的是同一份 slab 求交
+/// （`Game::segment_aabb_entry`）。不能拿子弹当前位置当弹孔：高速弹一帧飞十几米，
+/// 那个位置已经在墙**里面**了。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImpactMark {
+    /// 弹孔中心（落在障碍表面）
+    pub pos: [f32; 3],
+    /// 表面法线（单位向量；AABB 面法线，轴向）
+    pub normal: [f32; 3],
+    /// 已存活时间（秒）
+    pub age: f32,
+}
+
+impl ImpactMark {
+    /// 尺寸包络 0..1：正常为 1，生命最后 [`IMPACT_MARK_FADE`] 秒线性收缩到 0。
+    pub fn size_envelope(&self) -> f32 {
+        ((IMPACT_MARK_LIFE - self.age) / IMPACT_MARK_FADE).clamp(0.0, 1.0)
+    }
+
+    /// 局部 +Z 对齐 `normal` 的**右手**正交基 `(tangent, up, normal)`。
+    ///
+    /// 右手（行列式 +1）是硬要求：弹孔是个方片，基一旦左手化就是正面绕序反掉 ——
+    /// **整片黑掉且不报错**（见 AGENTS 铁律 B）。参考轴取与法线最不平行的坐标轴，
+    /// 保证叉积不退化。
+    pub fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        let n = glam::Vec3::from(self.normal);
+        let n = if n.length_squared() > 1e-12 {
+            n.normalize()
+        } else {
+            glam::Vec3::Z
+        };
+        let a = if n.x.abs() <= n.y.abs() && n.x.abs() <= n.z.abs() {
+            glam::Vec3::X
+        } else if n.y.abs() <= n.z.abs() {
+            glam::Vec3::Y
+        } else {
+            glam::Vec3::Z
+        };
+        let t = a.cross(n).normalize();
+        let u = n.cross(t);
+        (t.into(), u.into(), n.into())
+    }
+}
+
 /// 游戏运行时状态（随接线进度逐步扩展）
 pub struct Game {
     /// 物理世界：重力积分、地面响应、刚体间碰撞
@@ -1018,6 +1074,9 @@ pub struct Game {
     npc_hit_flash: std::collections::HashMap<usize, f32>,
     /// 本帧命中点（世界坐标；main.rs 读取后生成命中火花粒子，每帧清空）
     hit_points: Vec<[f32; 3]>,
+    /// 弹着标记（弹孔）：子弹打在障碍表面留下的痕迹，`main.rs` 每帧转成 WorldMarker 绘制。
+    /// 只在障碍上留痕（树冠/道具那类球体不留），上限 [`IMPACT_MARK_MAX`]。
+    impact_marks: Vec<ImpactMark>,
     /// 本帧命中伤害值（HUD 伤害飘字；与 hit_points 一一对应，每帧清空）
     hit_damages: Vec<f32>,
     /// 发射次数（累计）
@@ -1431,6 +1490,7 @@ impl Game {
             auto_heat: 0.0,
             npc_hit_flash: std::collections::HashMap::new(),
             hit_points: Vec::new(),
+            impact_marks: Vec::new(),
             hit_damages: Vec::new(),
             shots: 0,
             hits: 0,
@@ -1690,6 +1750,7 @@ impl Game {
         self.npc_hit_flash.clear();
         self.hit_points.clear();
         self.hit_damages.clear();
+        self.impact_marks.clear();
         self.pending_kick = (0.0, 0.0);
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
@@ -3180,6 +3241,29 @@ impl Game {
         std::mem::take(&mut self.hit_damages)
     }
 
+    /// 弹着标记（弹孔）当前集合；`main.rs` 每帧读它生成渲染实例。
+    pub fn impact_marks(&self) -> &[ImpactMark] {
+        &self.impact_marks
+    }
+
+    /// 追加一枚弹着标记（`RV3D_NO_DECALS=1` 整体关闭，供同机位 A/B 当对照组）。
+    fn push_impact_mark(&mut self, pos: [f32; 3], normal: [f32; 3]) {
+        // 环境变量只解析一次：本函数虽然只在命中的那几帧被调用，
+        // 但 `env::var` 带锁 + 扫环境表，没有必要每次付（与 WorldMarker::for_obstacle 同一处理）。
+        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DISABLED.get_or_init(|| std::env::var("RV3D_NO_DECALS").is_ok()) {
+            return;
+        }
+        if self.impact_marks.len() >= IMPACT_MARK_MAX {
+            self.impact_marks.remove(0);
+        }
+        self.impact_marks.push(ImpactMark {
+            pos,
+            normal,
+            age: 0.0,
+        });
+    }
+
     /// NPC 受击闪白剩余强度（0..1；0 = 无闪白）。渲染侧按此混合白色 tint。
     pub fn npc_flash(&self, id: usize) -> f32 {
         self.npc_hit_flash
@@ -3632,6 +3716,11 @@ impl Game {
                 p.update(dt);
             }
         }
+        // 弹着标记老化：先老化再生成（本帧刚打的孔从 age=0 开始）
+        for m in self.impact_marks.iter_mut() {
+            m.age += dt;
+        }
+        self.impact_marks.retain(|m| m.age < IMPACT_MARK_LIFE);
         let mut hit_count = 0u32;
         let old = std::mem::take(&mut self.projectiles);
         let mut alive = Vec::with_capacity(old.len());
@@ -3662,6 +3751,10 @@ impl Game {
                 // 手榴弹/爆炸物 AoE 仍可摧毁掩体，见爆炸结算）。
                 // 不计入 hit_count → 不触发命中提示/音效（打墙没有"命中反馈"）。
                 // 爆炸弹命中才有 AoE。
+                // 弹着标记（弹孔）：只在**障碍刚体**上留痕 —— 球体（树冠一类）与打空的子弹不留。
+                if let Some((_, point, normal)) = self.first_obstacle_hit(&p) {
+                    self.push_impact_mark(point, normal);
+                }
                 if self.hit_obstacle_index(&p).is_some() && p.explosive() {
                     self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
                 }
@@ -3744,36 +3837,115 @@ impl Game {
         false
     }
 
+    /// 线段 [A,B] 与 AABB 求交，返回**入口参数 t ∈ [0,1] 与入口面所在轴**（0=x / 1=y / 2=z）。
+    ///
+    /// 只有这一份 slab 求交代码：`segment_hits_aabb` 是它的 `is_some()` 包装。
+    /// 弹孔要的是"打中了没有"**和**"打在哪一面上"，两件事分开实现一定会漂移。
+    fn segment_aabb_entry(
+        ax: f32, ay: f32, az: f32,
+        bx: f32, by: f32, bz: f32,
+        aabb: &crate::engine::physics::Aabb,
+    ) -> Option<(f32, usize)> {
+        let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
+        let mut tmin: f32 = 0.0;
+        let mut tmax: f32 = 1.0;
+        let mut axis = 0usize;
+        for (i, (d, a, lo, hi)) in [
+            (dx, ax, aabb.min.x, aabb.max.x),
+            (dy, ay, aabb.min.y, aabb.max.y),
+            (dz, az, aabb.min.z, aabb.max.z),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if d.abs() < 1e-9 {
+                if a < lo || a > hi {
+                    return None;
+                }
+            } else {
+                let t1 = (lo - a) / d;
+                let t2 = (hi - a) / d;
+                let (lo_t, hi_t) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                if lo_t > tmin {
+                    tmin = lo_t;
+                    axis = i;
+                }
+                tmax = tmax.min(hi_t);
+                if tmin > tmax {
+                    return None;
+                }
+            }
+        }
+        Some((tmin, axis))
+    }
+
     /// 线段 [A,B] 与 AABB 求交（slab 法，参数 t ∈ [0,1]）
     fn segment_hits_aabb(
         ax: f32, ay: f32, az: f32,
         bx: f32, by: f32, bz: f32,
         aabb: &crate::engine::physics::Aabb,
     ) -> bool {
-        let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
-        let mut tmin: f32 = 0.0;
-        let mut tmax: f32 = 1.0;
-        for (d, a, lo, hi) in [
-            (dx, ax, aabb.min.x, aabb.max.x),
-            (dy, ay, aabb.min.y, aabb.max.y),
-            (dz, az, aabb.min.z, aabb.max.z),
-        ] {
-            if d.abs() < 1e-9 {
-                if a < lo || a > hi {
-                    return false;
-                }
-            } else {
-                let t1 = (lo - a) / d;
-                let t2 = (hi - a) / d;
-                let (lo_t, hi_t) = if t1 < t2 { (t1, t2) } else { (t2, t1) };
-                tmin = tmin.max(lo_t);
-                tmax = tmax.min(hi_t);
-                if tmin > tmax {
-                    return false;
-                }
+        Self::segment_aabb_entry(ax, ay, az, bx, by, bz, aabb).is_some()
+    }
+
+    /// 线段命中的**第一个**障碍刚体 → (下标, 弹着点, 表面法线)。
+    ///
+    /// 扫描顺序与 `hit_obstacle_index` 一致（同序 `world.bodies`），两者用同一份求交，
+    /// 所以"子弹被谁挡下"与"弹孔画在哪堵墙"永不会给出不同答案。法线取**入口面**的轴向。
+    ///
+    /// 🔴 弹着点被抬到**可见表面**上，而不是碰撞 AABB 面：`WorldMarker` 的实例缩放写的是
+    /// `2*half`，而模板几何是 ±1 的单位立方体/单位圆柱 ⇒ **可见尺寸是碰撞盒的 2 倍**
+    /// （逐轴判据见 `geom::Shape::visual_half_gain`，那里有实测数据）。
+    /// 贴在碰撞面上会被可见几何整片盖住 —— 不崩不报，只是"打了枪墙上没有孔"
+    /// （2026-09-15 实测：弹孔一直没出现，根因就是这个 2 倍）。
+    fn first_obstacle_hit(&self, p: &Projectile) -> Option<(usize, [f32; 3], [f32; 3])> {
+        let a = p.prev_position();
+        let b = p.position;
+        // 🔴 取**参数 t 最小**的那个，不能取"列表里第一个命中的"：
+        // `world.bodies` 的顺序是建关顺序，不是距离顺序 —— 列表里的远处障碍完全可能排在
+        // 近处障碍前面。取错了不会报错，只是弹孔贴在一块**被前面那根柱子挡住**的面上，
+        // 表现成"打了枪墙上没有孔"（2026-09-15 实测踩到，找了整整一轮）。
+        let mut best: Option<(f32, usize, [f32; 3], [f32; 3])> = None;
+        for (i, body) in self.world.bodies.iter().enumerate() {
+            let aabb = body.aabb();
+            let Some((t, axis)) =
+                Self::segment_aabb_entry(a[0], a[1], a[2], b[0], b[1], b[2], &aabb)
+            else {
+                continue;
+            };
+            // t == 0：线段起点已经在盒内，**没有入口面**，也就没有可贴的表面。
+            // 硬算会拿"起点 + 任意轴"当弹孔 —— 效果是一块悬在半空的暗方块。
+            if t <= 0.0 {
+                continue;
             }
+            if best.is_some_and(|(bt, ..)| bt <= t) {
+                continue;
+            }
+            let lo = [aabb.min.x, aabb.min.y, aabb.min.z];
+            let hi = [aabb.max.x, aabb.max.y, aabb.max.z];
+            let mut point = [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ];
+            // 来射方向沿该轴为正 ⇒ 从负侧面进入 ⇒ 法线朝负方向（背向子弹来向）
+            let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]][axis];
+            let mut normal = [0.0f32; 3];
+            normal[axis] = if d > 0.0 { -1.0 } else { 1.0 };
+            // 抬到可见面：沿法线轴把交点从 AABB 面推到 gain 倍的可见面上；
+            // 另外两轴保持命中点（弹孔不会横向漂移）。
+            let gain = self
+                .map
+                .obstacles
+                .get(i)
+                .map(|ob| ob.shape.visual_half_gain(axis))
+                .unwrap_or(1.0);
+            let centre = (lo[axis] + hi[axis]) * 0.5;
+            let half = (hi[axis] - lo[axis]) * 0.5;
+            point[axis] = centre + normal[axis] * gain * half;
+            best = Some((t, i, point, normal));
         }
-        true
+        best.map(|(_, i, point, normal)| (i, point, normal))
     }
 
     /// 线段 [A,B] 与球体求交（二次方程判别式，参数 t ∈ [0,1]）
@@ -8404,5 +8576,221 @@ mod tests {
         assert!(game.hud.victory_banner.is_some(), "达成后应显示胜利横幅（保留到下一轮）");
         assert_eq!(game.objective.eliminated, 0, "新一轮目标已重置");
         assert_eq!(game.objective.target, 4, "新一轮目标 = 歼灭一队");
+    }
+
+    /// 弹孔：必须落在**障碍表面**上，法线取入口面的轴向（不是子弹的当前位置）。
+    ///
+    /// 存在理由：高速弹一帧能飞十几米（710 m/s × 1/60 s = 11.8m），拿 `p.position` 当弹孔
+    /// 位置会得到墙**里面**的一个点 —— 画出来整片弹孔都不见了，而且不报任何错。
+    #[test]
+    fn impact_mark_lands_on_the_entered_face() {
+        let mut game = Game::new();
+        game.npcs.clear();
+        game.world.bodies.clear();
+        game.world.spheres.clear();
+        // 一堵墙：中心 (0, 1.2, -10)，半尺寸 4 × 1.2 × 0.5 ⇒ 碰撞近面 z = -9.5
+        // ⚠ `world.bodies[i]` 与 `map.obstacles[i]` 必须**同序同尺寸**（引擎的不变式）：
+        // 弹着点要按障碍的 `shape` 抬到**可见面**（见 geom::Shape::visual_half_gain），
+        // 只建刚体不建障碍表，就会拿到别的障碍的倍率。
+        let aabb = Body::new_static(Pv::new(0.0, 1.2, -10.0), Pv::new(4.0, 1.2, 0.5));
+        let wall = MapObstacle {
+            x: 0.0,
+            z: -10.0,
+            half_w: 4.0,
+            half_d: 0.5,
+            y: 1.2,
+            half_h: 1.2,
+            kind: ObstacleKind::Wall,
+            tint: None,
+            max_hp: 100.0,
+            hp: 100.0,
+            shape: Shape::Legacy,
+        };
+        game.map.obstacles = vec![wall];
+        game.world.bodies.push(aabb);
+        // 从原点朝 -Z 打，一帧 10m（终点 z=-10 已在墙里）
+        // ⚠ 交给 `update_projectiles` 自己推进：它内部先 `p.update(dt)` 再判命中，
+        // 这里再手工推一次就会变成"上一帧已在墙里"的退化段（t=0）。
+        let mk = || Projectile::new([0.0, 1.2, 0.0], [0.0, 0.0, -1.0], 600.0, 400.0, 6.0, 28.0);
+        let mut probe = mk();
+        probe.update(1.0 / 60.0);
+        assert!(game.collide_physics(&probe), "该弹道必须被墙挡下");
+        game.projectiles.push(mk());
+        game.update_projectiles(1.0 / 60.0, true);
+
+        let marks = game.impact_marks();
+        assert_eq!(marks.len(), 1, "命中障碍应留下 1 个弹孔，实际 {}", marks.len());
+        let m = marks[0];
+        assert!(
+            (m.pos[2] + 9.0).abs() < 0.01,
+            "弹孔应贴在**可见面** z=-9.0（Legacy marker 的可见尺寸是碰撞盒的 2 倍；\
+             碰撞面在 z=-9.5，贴那儿会被可见几何盖住），实际 z={}",
+            m.pos[2]
+        );
+        assert!(
+            m.pos[0].abs() < 0.01 && (m.pos[1] - 1.2).abs() < 0.01,
+            "弹孔应落在弹道上，实际 ({}, {})",
+            m.pos[0],
+            m.pos[1]
+        );
+        assert_eq!(m.normal, [0.0, 0.0, 1.0], "迎面法线应为 +Z（背向子弹来向）");
+        assert_eq!(m.age, 0.0, "本帧刚打出的弹孔年龄应从 0 开始");
+    }
+
+    /// 弹孔只留在障碍刚体上：打中球体（树冠一类）与打空都不留痕。
+    #[test]
+    fn impact_marks_are_only_left_on_obstacles() {
+        let mut game = Game::new();
+        game.npcs.clear();
+        game.world.bodies.clear();
+        game.world.spheres.clear();
+        // 只有球体，没有任何 AABB 刚体
+        game.world.spheres
+            .push(physics::SphereBody::new(Pv::new(0.0, 1.2, -10.0), 2.0));
+        let mk = |dir: [f32; 3]| {
+            Projectile::new([0.0, 1.2, 0.0], dir, 600.0, 400.0, 6.0, 28.0)
+        };
+        let mut p = mk([0.0, 0.0, -1.0]);
+        p.update(1.0 / 60.0);
+        assert!(game.collide_physics(&p), "该弹道必须被球体挡下");
+        assert!(
+            game.first_obstacle_hit(&p).is_none(),
+            "球体不是障碍刚体，不得给出弹着点"
+        );
+        game.projectiles.push(mk([0.0, 0.0, -1.0]));
+        game.update_projectiles(1.0 / 60.0, true);
+        assert!(game.impact_marks().is_empty(), "球体上不留弹孔");
+
+        // 打空：没有命中任何东西的子弹不留痕
+        let q = mk([0.0, 0.0, 1.0]);
+        assert!(!game.collide_physics(&q), "朝反方向应打空");
+        game.projectiles.push(q);
+        game.update_projectiles(1.0 / 60.0, true);
+        assert!(game.impact_marks().is_empty(), "打空的子弹不留弹孔");
+
+        // 起点已在盒内（贴脸开枪被墙包住）：没有入口面 ⇒ 不留痕，
+        // 免得画出一块悬在半空的暗方块。
+        game.world.spheres.clear();
+        game.world.bodies.push(Body::new_static(
+            Pv::new(0.0, 1.2, -10.0),
+            Pv::new(4.0, 1.2, 0.5),
+        ));
+        game.projectiles
+            .push(Projectile::new([0.0, 1.2, -10.0], [0.0, 0.0, -1.0], 600.0, 400.0, 6.0, 28.0));
+        game.update_projectiles(1.0 / 60.0, true);
+        assert!(
+            game.impact_marks().is_empty(),
+            "线段起点已在障碍内部时不得生成弹孔"
+        );
+    }
+
+    /// 弹孔池是环形缓冲（上限固定），并且按寿命过期。
+    #[test]
+    fn impact_marks_ring_buffer_and_expiry() {
+        let mut game = Game::new();
+        let wall = |game: &mut Game| {
+            game.world.bodies.clear();
+            game.world.spheres.clear();
+            game.world.bodies.push(Body::new_static(
+                Pv::new(0.0, 1.2, -10.0),
+                Pv::new(4.0, 1.2, 0.5),
+            ));
+            game.projectiles.push(Projectile::new(
+                [0.0, 1.2, 0.0],
+                [0.0, 0.0, -1.0],
+                600.0,
+                400.0,
+                6.0,
+                28.0,
+            ));
+            game.update_projectiles(1.0 / 60.0, true);
+        };
+        for _ in 0..(IMPACT_MARK_MAX + 7) {
+            wall(&mut game);
+        }
+        assert_eq!(
+            game.impact_marks().len(),
+            IMPACT_MARK_MAX,
+            "弹孔数必须封顶在 IMPACT_MARK_MAX，不能随射击次数增长"
+        );
+        // 老化：走到寿命末尾时包络收缩到 0，超过寿命即被清掉
+        for m in game.impact_marks.iter_mut() {
+            m.age = IMPACT_MARK_LIFE - IMPACT_MARK_FADE * 0.5;
+        }
+        let half = game.impact_marks()[0].size_envelope();
+        assert!(
+            (half - 0.5).abs() < 1e-5,
+            "寿命末尾半程应变到一半，实际 {half}"
+        );
+        for m in game.impact_marks.iter_mut() {
+            m.age = IMPACT_MARK_LIFE + 1.0;
+        }
+        game.update_projectiles(1.0 / 60.0, true);
+        assert!(game.impact_marks().is_empty(), "超过寿命的弹孔必须清掉");
+    }
+
+    /// 弹孔的朝向基必须是**右手**正交基（行列式 +1）：左手化就是正面绕序反掉 —— 整片黑且不报错。
+    #[test]
+    fn impact_mark_basis_is_right_handed_for_every_face() {
+        for normal in [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ] {
+            let m = ImpactMark {
+                pos: [0.0; 3],
+                normal,
+                age: 0.0,
+            };
+            let (t, u, n) = m.basis();
+            let (t, u, n) = (
+                glam::Vec3::from(t),
+                glam::Vec3::from(u),
+                glam::Vec3::from(n),
+            );
+            for v in [t, u, n] {
+                assert!(
+                    (v.length() - 1.0).abs() < 1e-5,
+                    "基向量必须是单位向量 {v:?}"
+                );
+            }
+            assert!(t.dot(n).abs() < 1e-5 && u.dot(n).abs() < 1e-5, "基必须与法线正交");
+            assert!(
+                (t.cross(u) - n).length() < 1e-5,
+                "必须是右手基（t × u = n），法线 {normal:?}"
+            );
+            assert!((n - glam::Vec3::from(normal)).length() < 1e-5, "法线方向不得被翻转");
+        }
+    }
+
+    /// `segment_hits_aabb` 与 `segment_aabb_entry` 必须永远给出同一个答案
+    /// （弹孔用的是后者，命中判定用的是前者 —— 一旦漂移就是"子弹被挡下但弹孔画在别处"）。
+    #[test]
+    fn segment_entry_agrees_with_hits_test() {
+        let aabb = crate::engine::physics::Aabb::new(
+            Pv::new(-1.0, 0.0, -1.0),
+            Pv::new(1.0, 2.0, 1.0),
+        );
+        let cases: [([f32; 3], [f32; 3]); 8] = [
+            ([0.0, 1.0, -5.0], [0.0, 1.0, 5.0]),   // 迎面穿过
+            ([0.0, 1.0, 5.0], [0.0, 1.0, -5.0]),   // 反向穿过
+            ([0.0, 1.0, -5.0], [0.0, 1.0, -3.0]),  // 停在盒前
+            ([0.0, 3.0, -5.0], [0.0, 3.0, 5.0]),   // 从顶上掠过
+            ([0.0, 1.0, 0.0], [0.5, 1.0, 0.5]),    // 起点已在盒内
+            ([-1.0, 1.0, -1.0], [1.0, 1.0, 1.0]),  // 对角穿过
+            ([2.0, 1.0, -5.0], [2.0, 1.0, 5.0]),   // 侧面经过盒外
+            ([0.0, 1.0, -1.0], [0.0, 1.0, 1.0]),   // 起点在面上
+        ];
+        for (a, b) in cases {
+            let hits = Game::segment_hits_aabb(a[0], a[1], a[2], b[0], b[1], b[2], &aabb);
+            let entry = Game::segment_aabb_entry(a[0], a[1], a[2], b[0], b[1], b[2], &aabb);
+            assert_eq!(hits, entry.is_some(), "两者对 {a:?} -> {b:?} 判断不一致");
+            if let Some((t, _)) = entry {
+                assert!((0.0..=1.0).contains(&t), "入口参数必须落在 [0,1]，实际 {t}");
+            }
+        }
     }
 }
