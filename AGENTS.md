@@ -590,8 +590,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     ⚠️ **但仍有一条真约束**：`cap_safe.ps1` **不调 `SetForegroundWindow`**（遵守鼠标安全协议），
     所以"截图能抓到活画面"依赖 flag 2。**若将来有人把那个 2 改成 0，症状会立刻回来** ——
     这条就是那个 flag 的存在理由。
-   之后前后两张截图**残差 0.03、x-shift=0** ⇒ **截图的"没变化"不能用来判断输入没生效，以游戏日志为准。**
-   **lead**：要截图取证就把窗口置前（`cap_safe.ps1` 那条路）。
 2. **PT 崩溃 `0xC0000005`** — `pt_enable=false` 现状；设 true 一启动即崩，无法截图验收。
    **lead**：崩点在 `pt_set_scene_markers` 返回之后（每帧 PT 派发 / 主命令缓冲 / blit 到 swapchain）；
    候选 = AS 显存与尺寸、dispatch 与 scene rebuild 读写竞争、push constant 布局。
