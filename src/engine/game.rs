@@ -28,11 +28,19 @@ use super::weapon_data::{build_firearm, ALL_WEAPONS};
 use super::weapons::{Grenade, Projectile, WeaponRack, GRENADE_FUSE_MAX, GRENADE_FUSE_MIN, GRENADE_SPEED};
 use crate::ui::HudState;
 
-/// 阵营显示名（击杀提示用）
+/// 阵营显示名（**只给 kill feed 用**，2026-09-15 中文化）
+///
+/// 改前是 `"RED"` / `"BLUE"`。全仓只有 `push_kill` 的两处调用在用它
+/// （**不在日志、不在网络协议里** —— 这一点在改之前用 `rg 'team_name\('` 确认过），
+/// 所以这里的字符串只影响玩家看到的那一行。
+///
+/// **为什么中文化是低风险的**：`ui.rs::render_text` 早就有 CJK 分支
+/// （`is_cjk(ch)` → `engine::font_cjk` 的 12×12 点阵），而 HUD 的
+/// `"OBJECTIVE 歼灭敌人 {}/{}"` 一直就是这么渲染的 ⇒ **路径是通的，缺的只是字符串**。
 fn team_name(t: Team) -> &'static str {
     match t {
-        Team::Red => "RED",
-        Team::Blue => "BLUE",
+        Team::Red => "红方",
+        Team::Blue => "蓝方",
     }
 }
 
@@ -3808,7 +3816,7 @@ impl Game {
             self.score += KILL_SCORE;
         }
         // 击杀提示（右上角 feed）：敌我**都**提示 —— 打死自己人是需要立刻看见的事故
-        self.hud.push_kill(format!("YOU KILLED {} #{}", team_name(victim_team), id));
+        self.hud.push_kill(format!("击杀 {} #{}", team_name(victim_team), id));
         log::info!(
             "kill: npc #{} eliminated (wave {}) team={:?} enemy={} score={}",
             id,
@@ -5146,7 +5154,7 @@ impl Game {
             self.last_damage_time = self.time;
             if self.hud.health <= 0.0 {
                 // 击杀提示：玩家被敌方击杀
-                self.hud.push_kill("YOU WERE KILLED".to_string());
+                self.hud.push_kill("你被击杀了".to_string());
                 // survive 规则：玩家死亡即失败（Defeat 结算）；否则普通 GameOver
                 if self.is_survive_rule() {
                     if let Some(obj) = self.obj_state.as_mut() {
@@ -5206,7 +5214,7 @@ impl Game {
                 if self.npcs[t].hp <= 0.0 && self.npcs[t].hp > -dps {
                     let (a, v) = (self.npcs[i].team, self.npcs[t].team);
                     let vid = self.npcs[t].id;
-                    self.hud.push_kill(format!("{} KILLED {} #{}", team_name(a), team_name(v), vid));
+                    self.hud.push_kill(format!("{} 击杀 {} #{}", team_name(a), team_name(v), vid));
                 }
             }
         }
@@ -5315,7 +5323,7 @@ impl Game {
                 if q.hp <= 0.0 {
                     q.alive = false;
                     q.last_rx = self.time;
-                    self.hud.push_kill(format!("YOU KILLED NET PLAYER #{}", q.id));
+                    self.hud.push_kill(format!("击杀联机玩家 #{}", q.id));
                     log::info!("net: server 远端玩家 #{} 被击杀\n", q.id);
                 }
                 return true;

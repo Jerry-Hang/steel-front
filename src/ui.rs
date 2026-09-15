@@ -460,7 +460,10 @@ pub struct HudState {
 /// 击杀提示条目（战地风格右上角 feed）
 #[derive(Debug, Clone, PartialEq)]
 pub struct KillFeedEntry {
-    /// 显示文本（如 "YOU KILLED RED #12" / "RED KILLED BLUE" / "YOU WERE KILLED"）
+    /// 显示文本（2026-09-15 起为中文，如 `"击杀 蓝方 #12"` / `"红方 击杀 蓝方 #7"` / `"你被击杀了"`）
+    ///
+    /// 中文能直接渲染是因为 `render_text` 有 CJK 分支（见本文件 `is_cjk` 那一段），
+    /// 而不是因为这里改了什么 —— 这条以前是英文，纯粹是 `game.rs` 那边写死了英文串。
     pub text: String,
     /// 已存留秒数（超过 KILL_FEED_DURATION 移除）
     pub age: f32,
@@ -1760,7 +1763,13 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
     let mut cx = x;
     for ch in text.chars() {
         if is_cjk(ch) {
-            // 12x12 宋体点阵（SimSun 12px 硬边，构建时提取，生成时已垂直拉伸占满）。
+            // 12x12 点阵（**字体已于 2026-09-14 由 SimSun 换成 Noto Sans SC / SIL OFL 1.1** ——
+            // 换的理由是授权：SimSun 是专有字体、禁止再分发，而本仓要能对外分发 + 卖商业授权。
+            // 现在字模由 `tools/extract_cjk_glyphs.py --font <路径>` 重新生成，
+            // 表本身在 `engine/cjk_glyphs.rs`，**只含源码真正用到的码点**
+            // （21,486 条 → 1,580 条，2.26 MB → 163 KB，−92.6%）。
+            // 那条"覆盖完整简体字集"的旧断言已删 —— 它才是死数据的来源，
+            // 现在由 `font_cjk.rs` 断言"覆盖全部用到的码点且不多余"。
             // 每格 cs = scale×0.714（物理 ≈2px 整数格，round 对齐后 12 格 = 24px，
             // 比英文 21px 大 14%——汉字正常比例）；yoff 中线对齐。
             let cs = scale * 0.714;
