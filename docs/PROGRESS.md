@@ -5,11 +5,11 @@
 > **本文件 166 KB / 2918 行，不要通读。** 先读这一节，再按关键词往下搜。
 >
 > ### 当前基线
-> `cargo test --release` **484 passed / 0 failed / 0 警告**（2026-09-15）；
+> `cargo test --release` **485 passed / 0 failed / 0 警告**（2026-09-15）；
 > 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**）。
-> `AGENTS.md` **64,341 B（62.8 KB）** —— ⚠️ 已超 <48KB 目标，距 **65,536 B 硬上限只剩 1.2 KB**。
-> 最新迭代（2026-09-15）：**未结案 #9 结案**（mesh 着色器过严格 `spirv-val`）+ `scripts/png_diff.py`，
-> 详见本文件顶部的迭代记录。
+> `AGENTS.md` **65,421 B（63.9 KB）** —— ⚠️ 已超 <48KB 目标，距 **65,536 B 硬上限只剩 115 B**。
+> 最新迭代（2026-09-15）：**未结案 #2 结案 —— PT 史上首次真正出图**（`screenshots/pt_live_b.png`）
+> 与**未结案 #3 重开并真修**（再往前是 **#9 结案**：mesh 着色器过严格 `spirv-val`），详见本文件顶部的迭代记录。
 >
 > ### 大改造 9 条的账
 >
@@ -41,6 +41,69 @@
 ---
 
 
+
+
+# ✅ 未结案 #2 结案 —— PT 史上首次真正出图；#3 原结案被推翻并真修（2026-09-15）
+
+## 前提：验证层当天上午才第一次能跑
+
+- 当天上午修掉 mesh 着色器的 SPIR-V 布局问题（未结案 #9）之后，`RV3D_VALIDATION=1` **第一次真的可用**
+  —— 此前它必然**灰屏**（它的失败曾被当成"已知限制"写进文档，见教训 36）。
+- 于是"把 PT 打开"第一次产生了**指名道姓的验证层报文**，两个互相独立的真 bug 因此一次全暴露。
+
+## Bug A：交换链 `image_usage` 缺 `VK_IMAGE_USAGE_TRANSFER_DST_BIT`
+
+- PT 通路要把 `pt_img` **blit 进交换链图像**（先 barrier 到 `TRANSFER_DST_OPTIMAL`，再 `vkCmdBlitImage`），
+  而 `image_usage` 里没有 `TRANSFER_DST`。
+- 验证层：`VUID-vkCmdBlitImage-dstImage-00224` 与 `VUID-VkImageMemoryBarrier-oldLayout-01213`。
+- 修法：加上 `TRANSFER_DST`（先查 `surface_capabilities.supported_usage_flags`，不支持则告警）。
+
+## Bug B（真正的崩溃源）：`hud_framebuffers` 指向已销毁的 ImageView
+
+- `hud_framebuffers` 只在 `init_hud_overlay()` 里建一次，取自当时的 `swapchain_image_views`；
+  而 `destroy_swapchain()` 会销毁这些 image view，`recreate_swapchain()` **从不重建 HUD framebuffer**。
+- **启动阶段光是 resize 事件就有 5 次交换链重建** ⇒ 它们指向的全是已销毁的 `VkImageView`。
+- **它唯一的消费者恰恰是 PT 通路**（光栅通路画的是 `self.framebuffers`，那个是重建的）⇒
+  症状精确地是「**光栅一切正常、一开 PT 就崩**」，而崩溃原因**与 PT 代码毫无关系**。
+- 验证层：`vkCmdBeginRenderPass(): pCreateInfo->pAttachments[0] VkImageView ... is invalid` 与
+  `VUID-VkRenderPassBeginInfo-framebuffer-parameter`。
+- 修法：抽出 `recreate_hud_framebuffers()`（先销毁旧的、再按当前 views 重建），
+  由 `recreate_swapchain()` 在 `init_swapchain()` 之后调用；`destroy_swapchain()` 与 `Drop` 也销毁它。
+
+## 验收（**PT 打开状态下**）
+
+- 跑到 `PT-BLAS` / `PT-TLAS` / `PT-RESIDENT (2560x1600, spp target 256)` / `PT-SCENE (1024 boxes)`，
+  **渲出一张一眼就是路径追踪的图，约 75 fps，HUD 正确合成在上面** ⇒ `screenshots/pt_live_b.png`。
+- **两族 VUID 全部消失**；`scripts/run_smoke_pm.ps1` 在 **PT 打开**下报 `RESULT: ALL-OK`
+  （VUID=0、panics=0、kill 已登记、fps 76.5）。
+- `cargo build --release` **0 警告**、`cargo test --release` **485 passed / 0 failed**。
+
+## ⚠️ 遗留（不致命，PT 能出图）：布局记账还不干净
+
+验证层还剩 3 条：`VUID-VkImageMemoryBarrier-oldLayout-01197`、
+`VUID-vkCmdBeginRenderPass-initialLayout-00900`（HUD 的 render pass 声明 `initialLayout=PRESENT_SRC_KHR`，
+而实际布局不是它）、`VUID-vkCmdDraw-renderPass-02684`（绑定的管线与当前 render pass 不兼容）。
+
+## 未结案 #3 重开：原结案只查了"字段存在"，没查接线
+
+- **原结案是错的**：当时只核对字段存在（`config.rs:25/27`）与 `main.rs` 在读它，**没看 parse 分支**。
+- 真相：`load_from` 的 match **没有 `pt_enable` / `rt_enable` 两个 arm**，`save_to` **也从不写这两个键**
+  ⇒ 两字段**只可能等于编译进去的默认值**，**配置文件与设置面板根本开不了 PT**
+  （这也是 #2 那条"设 true 一启动即崩"无法从正常路径复现的原因）。
+- 修法：补两个 arm + `parse_bool`（接受 `1/0` 与 `true/false`，**非法值保持默认、不 panic**）；
+  `save_to` 现在两个键都写。
+- 测试：新增 `pt_and_rt_enable_are_read_from_file`；并**加强**原有 `save_then_load_roundtrip` ——
+  它原先对这两个字段**既不写也不读**，两边都取默认值，`assert_eq!` 照样通过，**正好把 bug 藏住**。
+- **守卫验证过会红**：临时删掉 `load_from` 的两个 arm ⇒ **两条测试同时 FAIL**。
+- 🔴 **教训**：**往返测试只对"非默认值"有区分度**；**"字段存在"≠"接线完成"——
+  结案前要走完整条 写 → 读 → 用 的链路。**
+
+## 📄 文档维护：`AGENTS.md` 压缩 + 教训 36
+
+- 把几条已结案的未结案条目压成一行，以留在 **65,536 B 硬上限**之内（超限会**静默截断**注入视图）。
+- 新增**教训 36**：「**「工具跑不起来」本身就是一条要修的缺陷**」——
+  验证层因灰屏被写进文档当"已知限制"，此后**几周没人开过它**；
+  根因修掉的当天第一次开起来，**立刻**报出两条一直存在的 VUID。
 
 
 # ✅ 未结案 #9 结案：mesh 着色器通过严格 `spirv-val`（2026-09-15）
