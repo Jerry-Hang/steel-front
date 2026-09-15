@@ -44,7 +44,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `ui.rs` | 2615 | HUD / 菜单 / 设置 / 键位表 |
 | `engine/city.rs` | 2004 | 程序化城市生成 |
 | `net.rs` | 1732 | UDP 联机（协议魔数 'S'） |
-| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。⚠️ 2026-09-14 由 **21490 行 / 2.26 MB 裁到 166 KB**（换 Noto Sans SC + 只留源码真正用到的 1595 个码点，−92.7%）⇒ **看到旧记录写"21490 行"是过期的**。🔴 **清单 `tools/cjk_used_codepoints.txt` 会过期**（新加中文却没重跑 `--scan`），已有测试 `source_cjk_codepoints_all_have_glyphs` 独立重扫 `src/` 兜底；它红了 = 有人加了中文没重扫，命令 `python tools/extract_cjk_glyphs.py --scan` |
+| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。⚠️ 2026-09-14 由 **21490 行 / 2.26 MB 裁到 166 KB**（换 Noto Sans SC + 只留源码真正用到的 1595 个码点，−92.7%）⇒ **看到旧记录写"21490 行"是过期的**。🔴 **清单 `tools/cjk_used_codepoints.txt` 会过期**（新加中文却没重跑 `--scan`），已有测试 `source_cjk_codepoints_all_have_glyphs` 独立重扫 `src/` 兜底；它红了 = 有人加了中文没重扫，命令 `python tools/extract_cjk_glyphs.py --scan`。🔴 **源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法逐字节重建**：`--scan` 之后若没有那个字体，**改写文案用已有的字**，别拿别的字体顶替 —— 2026-09-15 实测系统 `NotoSansSC-VF.ttf` 会把**每一个**字形都改掉，且变量字体更细（`灭` 只剩 7 行），直接红 `cjk_glyph_generates` |
 | `engine/ai.rs` / `weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1435 / 1431 / 1139 / 1124 / 1096 / 1054 | AI 分层与战术 / 武器系统 / CPU 拓扑与亲和 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
 | `llm_cmd.rs` | 549 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
@@ -529,6 +529,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
 # 性能尺子（Windows 原生；压力模式跑 N 秒，读 logs/perf_*.log 出统计，退出时交还机器）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
+# 画面差分（第一道筛子）：同机位 A/B 的差异像素占比 + **差异包围盒**
+# —— 没有包围盒，几百个差异像素既可能是"引擎坏了"也可能是"HUD 上的 FPS 数字变了"
+python scripts\png_diff.py screenshots\a.png screenshots\b.png
 ```
 
 ⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
@@ -587,16 +590,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 3
    `soldier_part_matrices` 留作 GLB 缺失时的回退。详见 `docs/HANDOFF-soldier.md`。
    **仍缺**：骨骼动画（现为整体起伏）、两套队色顶点变体。
 8. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
-9. **mesh 着色器过不了严格 `spirv-val`**（根因已定位，2026-09-14 本轮放弃修）。
-    判据：`spirv-val --target-env vulkan1.3 assets/mesh.spv` 非 0（8 个 .spv 里只有它红）——
-    `[VUID-StandaloneSpirv-None-10684] Workgroup ... explicit layout from the Offset decoration`。
-    根因 = **naga-30.0.0 `src/back/spv/writer.rs:3597`** 的 `decorate_struct_member` **无条件**写
-    `Offset`，不分存储类；网格输出被它落成 `Workgroup` 变量 `%_struct_21`。
-    `Offset` 在 SPIR-V ≤1.3 允许、**1.4 起对非 Block 类型禁止**，而 mesh 必须用 1.4；
-    已排除 `global_needs_wrapper`（对 Workgroup 直接 `return false`）与 `WriterFlags`（无开关）。
-    **下一个人从这里开始**：剥 `Offset` 语义上安全（WGSL 无布局控制），但**只能剥 Workgroup 可达类型** ——
-    `_struct_300/303/308` 带 `Block`、`_struct_9/10/24` 是 Uniform/StorageBuffer，动了就是缓冲布局错位。
-    🔴 **别用 PowerShell 打印 cargo warning 调试 build.rs**（会被归并/缓存，同一 exe 报出"0 条/1 条"）。
+9. ~~**mesh 着色器过不了严格 `spirv-val`**~~ **已结案（2026-09-15）**：根因是
+    **naga-30.0.0 `src/back/spv/writer.rs:3597`** 的 `decorate_struct_member` **无条件**写 `Offset`，
+    而 `Offset` / `ArrayStride` 在 SPIR-V ≤1.3 允许、**1.4 起对非 Block 类型禁止**，mesh 又必须用 1.4
+    （`global_needs_wrapper` 与 `WriterFlags` 都**没有**开关，已排除）。
+    现由 **`build.rs::strip_workgroup_explicit_layout`** 在写出前去掉 ——
+    🔴 **只去掉 Workgroup 可达类型**（从 `OpVariable`(Workgroup) 出发做类型闭包）；
+    带 `Block` 的 `_struct_300/303/308` 动一个字节就是缓冲错位。**理由**：Workgroup 内存主机侧永不碰，
+    着色器只按成员索引访问，偏移由驱动自算 ⇒ 去掉显式布局**语义无损**。
+    **7 个 `.spv` 现在全部 `spirv-val --target-env vulkan1.3` exit 0**；两条测试锁住两个方向
+    （`mesh_spirv_has_no_workgroup_explicit_layout` / `block_types_keep_their_offsets`，都验证过会红）。
+    **同机位 A/B**（`RV3D_CAM=fly:0,140,80:0,50`）：差异 **279 像素 / 4,096,000（0.007%）**，
+    包围盒恰是 HUD 的 FPS 数字；同二进制连跑两次的噪声底 **251 像素、同一包围盒** ⇒ **3D 画面逐像素一致**。
+    🔴 **别用 PowerShell 打印 cargo warning 调试 build.rs**：warning 会被归并/缓存，同一个 exe
+    报出"0 条/1 条"两种结果，据此做出过三个错误推断；请往文件里写日志。
 10. ~~**PT 512 盒上限静默截断**~~ **已结案（2026-09-14）：512 → 1024 + 一次性告警**。
     实测 `marker=547 > 512` ⇒ 每次丢 35 个盒子，而 PT 是低 spp 噪点图、**肉眼看不出来**；
     代价仅 **0.92 MB → 1.84 MB**（余量 87%）。⚠️ 另补 `Renderer::pt_box_cap_warned` 闩（超容告警一次不刷屏）。
