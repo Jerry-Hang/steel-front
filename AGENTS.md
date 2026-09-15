@@ -549,35 +549,39 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 ### 红蓝阵营不对称：**20 轮/臂后判定为噪声主导，效应未获确证**（2026-09-14 结案）
 
 `scripts/ab_reps.ps1 -Reps 20`（40 局 × 120 s），`blue margin = 红损 − 蓝损`（正 = 蓝优）：
-
-| 臂 | n | 均值 | 极差 |
-|---|---|---|---|
-| baseline（红 +X / 蓝 −X） | 20 | **+12.8** | 29 |
-| swapped（红 −X / 蓝 +X） | 20 | **−10.3** | **54**（−35..+19） |
-
-**三层读法（别只取第一层）**：① 两臂均值分居零两侧且与 8 轮那次（+16.5 / −6.3）同向
-⇒ 可能真有个 ~20 点的位置倾向；② 但臂内极差均值 41.5 **大于臂间差 23.1**；
-③ ⇒ **任何"单次对撞谁赢"都不构成证据**（教训 24 / 27 的形态）。
+baseline（红 +X / 蓝 −X）均值 **+12.8**、极差 29；swapped（红 −X / 蓝 +X）均值 **−10.3**、极差 **54**。
+**三层读法**：① 两臂均值分居零两侧且与 8 轮那次（+16.5 / −6.3）同向 ⇒ 可能真有个 ~20 点的位置倾向；
+② 但臂内极差均值 41.5 **大于臂间差 23.1**；③ ⇒ **任何"单次对撞谁赢"都不构成证据**（教训 24/27）。
 **"红方恒胜"与"−X 半场占优"两个说法都撤回。**
-
-四条静态测量**全部对称**（这一半的否证扎实，每条都有可复现测试）：掩体占地 **0.999**、
-出生环被挡 **39.1% / 39.4%**、角度均值最大差 **0.6°**、平均出生半径**两侧同为 174.00 m**。
-⇒ 可划掉：掩体分布 / 出生点可站立性 / 出生几何配对 / 角色分配。
-⇒ **若还要继续，先解决"测不准"**（每局方差 ~±30 点，这个量级找成因是给噪声编故事）：
-把每局拉到 190 s 以上，或先确认 AI 时序到底确不确定。
+四条静态测量**全部对称**（每条都有可复现测试）：掩体占地 **0.999**、出生环被挡 **39.1% / 39.4%**、
+角度均值最大差 **0.6°**、平均出生半径**两侧同为 174.00 m** ⇒ 可划掉：掩体分布 / 出生点可站立性 /
+出生几何配对 / 角色分配。**若还要继续，先解决"测不准"**（每局方差 ~±30 点）：把每局拉到 190 s 以上。
 
 - 相关：军情 JSON 的 `击杀` 字段实际是**该营自身阵亡数**（`round_kills_*` 按阵亡者阵营计数）。
   若 `llm_commander.py` 当"我方战果"读则**信号是反的** —— 调参前先核对。
 1. ~~**`PrintWindow` 对非前台窗口返回冻结帧**~~ **已结案（2026-09-14）：症状不复现**。
     `cap_safe.ps1` 用 `PrintWindow(h, dc, **2**)` = **`PW_RENDERFULLCONTENT`**，Vulkan 窗口靠它才抓得到活画面。
     ⚠️ **别把那个 2 改成 0**（改回去症状立刻回来）；复测判据 = 同刻两张图差异像素 **1.36%**（冻结会是 0.00%）。
-2. **PT 崩溃 `0xC0000005`** — `pt_enable=false` 现状；设 true 一启动即崩，无法截图验收。
-   **lead**：崩点在 `pt_set_scene_markers` 返回之后（每帧 PT 派发 / 主命令缓冲 / blit 到 swapchain）；
-   候选 = AS 显存与尺寸、dispatch 与 scene rebuild 读写竞争、push constant 布局。
-   判据：用 Windows 事件日志的出错模块区分驱动侧（`nvoglv64.dll`）与应用侧。
-3. ~~**`config.rs` 不读 `pt_enable` / `rt_enable`**~~ **已结案（2026-09-14）——接线早已完成**
-    （`config.rs:25/27` 有这两个字段；`main.rs:2693–2713` 读配置并尊重 `RV3D_PT_LIVE`）。
-    **挡住 PT 的只剩 #2 的 `0xC0000005`。**
+2. ~~**PT 崩溃 `0xC0000005`**~~ **已结案（2026-09-15）—— PT 首次真正出图**（`screenshots/pt_live_b.png`）。
+   两个独立的真 bug，**都只有验证层跑起来才看得见**（它此前一直灰屏，见 #9）：
+   ① 交换链 `image_usage` 缺 **`TRANSFER_DST`** —— PT 要把 `pt_img` blit 进交换链图像
+   （`VUID-vkCmdBlitImage-dstImage-00224` / `VkImageMemoryBarrier-oldLayout-01213`）；
+   ② **`hud_framebuffers` 悬空**：它只在 `init_hud_overlay()` 建一次，而 `destroy_swapchain()`
+   会销毁它依赖的 `swapchain_image_views`（启动阶段 resize 就有 **5 次**重建）、
+   `recreate_swapchain()` 又不补 ⇒ 指向已销毁的 ImageView。
+   **而它唯一的消费者是 PT 通路**（光栅走 `self.framebuffers`）⇒ 症状正是
+   "**光栅一切正常、一开 PT 就崩**"，崩因与 PT 代码毫无关系。
+   修法：usage 加 `TRANSFER_DST`（先查 `supported_usage_flags`）+ 抽出
+   `recreate_hud_framebuffers()`（`recreate_swapchain` 里调、`destroy_swapchain`/`Drop` 里销毁）。
+   PT 打开状态下冒烟 `ALL-OK`。**遗留**（不致命，PT 能出图）：PT 通路布局记账还不干净，验证层剩 3 条 ——
+   `VkImageMemoryBarrier-oldLayout-01197` / `vkCmdBeginRenderPass-initialLayout-00900` /
+   `vkCmdDraw-renderPass-02684`（绑定的管线与当前 render pass 不兼容）。
+3. ~~**`config.rs` 不读 `pt_enable` / `rt_enable`**~~ **原结案是错的，2026-09-15 重开并真修**：
+   当时只看"字段存在（`config.rs:25/27`）+ `main.rs` 在读"就判结案，**没看 parse 分支** ——
+   真相是 `load_from` 没有这两个 arm、`save_to` 也不写 ⇒ 两字段只能是源码默认值，
+   **配置文件/设置面板根本开不了 PT**（于是 #2 那条"设 true 一启动即崩"也无法从正常路径复现）。
+   现补上读写 + `parse_bool`（`1/0`/`true/false`，非法值保持默认）。
+   🔴 **教训：结案要看完整条链路（写→读→用）；"字段存在"≠"接线完成"。**
 4. ~~**玩家可能站在 GLB 楼体内部**~~ **已结案（2026-09-13）**：`pick_building` 的 `max` → **`min`**（详见铁律 B「建筑摆放」）。
 5. ~~**`FLOOR_H` 常量分叉**~~ **已结案（2026-09-12）**：6 个模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6 命中。
 6. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
@@ -627,12 +631,11 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
     ~~kill feed 仅英文~~ **已中文化**；~~不分击杀者名字~~ **已结案（2026-09-15）**：现加 `DamageSource`
     （只留 `Player`/`Blast`）+ 三处调用点共用 `kill_line`。第一人称枪模动画 / 弹孔贴花仍欠。
-20. **DLSS 立项评估未做**。~~`playtest_perf.py` 未做 Windows 移植~~ **已结案（2026-09-15）** ——
-    它**不是没移植，是搬不过来**（X11/XImage/`pgrep`/`/proc` 全是 Linux 的，重写=新写）。
-    改用 **`scripts/perf_run.ps1`**：引擎本就每秒往 `logs/perf_*.log` 写 fps + 各阶段耗时（`perf_log.rs`），
-    所以只需"启动 → 等待 → 读日志 → 统计"，**不注入输入、不抓屏**；支持 `-NoShadow`/`-Cam`/`-Stress` 对照。
+20. **DLSS 立项评估未做**。~~`playtest_perf.py` 未做 Windows 移植~~ **已结案（2026-09-15）—— 它不是没移植，是搬不过来**
+    （X11/XImage/`pgrep`/`/proc` 全是 Linux 的，重写=新写），改用 **`scripts/perf_run.ps1`**：引擎本就每秒往
+    `logs/perf_*.log` 写 fps + 各阶段耗时，所以只需"启动 → 等待 → 读日志 → 统计"，**不注入输入、不抓屏**。
     🔴 **实测噪声底**：同一二进制连跑两次（25s）中位 fps **69.7 / 71.8（差 2.8%）** ⇒ 单次 A/B 证明不了
-    任何 < ~5% 的差异（教训 24/35）。见铁律 F「常用命令」。
+    任何 < ~5% 的差异（教训 24/35）。
 21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：已支持交错布局**。
     交错缓冲读错时每个数**都是合法浮点数**：不崩、不报错、几何静静变乱麻。修法 =
     `elem_stride = byteStride.unwrap_or(step * comps)` ⇒ 密集布局**逐位不变**。
@@ -642,20 +645,17 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
     （`llm_decisions.jsonl` / `llm_server.jsonl` / `llm_doctrine.json`）；同批 `screenshots/` 300→25、
     `logs/` 646→20、`dist/` 删除。**共回收约 600 MB。**
 23. **`VUID-VkSwapchainCreateInfoKHR-flags-parameter` 与输入矛盾，按「层侧误报」挂着**（2026-09-15）。
-    报文：`pCreateInfo->flags has VkSwapchainCreateFlagBitsKHR values
-    (VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR) that requires VK_KHR_swapchain_mutable_format`。
-    **三条否证**：① 全仓 `create_swapchain` 只有一个调用点，从不设 `flags`；② 实测把它打进日志是**空的**
-    （`swapchain diag: ... flags= min_images=3 usage=TRANSFER_SRC | COLOR_ATTACHMENT`）；
-    ③ ash 的 `SwapchainCreateInfoKHR` 是 `#[repr(C)]` 且字段顺序与 C 头一致。
-    5 次创建 = 5 条报文（1:1），**每次的 flags 都证明是 0**。
-    **下一步（若还要查）**：这更像 1.4.357 层 与 1.3.281 头文件的版本错位，不是本仓代码问题；
-    要证伪就把 `flags` 临时设成一个未定义位，看报文是否改口。**在上述三条被推翻之前不要再改代码去"修"它。**
+    报文说 `flags` 带 `MUTABLE_FORMAT` 却没启用 `VK_KHR_swapchain_mutable_format`。**三条否证**：
+    ① 全仓只有一个 `create_swapchain` 调用点、从不设 `flags`；② 实测把 flags 打进日志是**空的**；
+    ③ ash 的 `SwapchainCreateInfoKHR` 是 `#[repr(C)]` 且字段顺序与 C 头一致。5 次创建 = 5 条报文（1:1）。
+    **下一步**：更像 1.4.357 层与 1.3.281 头文件的版本错位。要证伪就把 `flags` 临时设成未定义位看报文是否改口；
+    **在上述三条被推翻前不要再改代码"修"它。**
 
 ---
 
 ## 教训清单（跨迭代去重合并）
 
-> 35 条，每条都真的付过代价。**只留可执行的判据**，案例细节见 `docs/PROGRESS.md`。
+> 36 条，每条都真的付过代价。**只留可执行的判据**，案例细节见 `docs/PROGRESS.md`。
 
 1. **新结论与旧约束冲突时，必须删掉旧的那条。** 本文件曾同时存在"错误版 + 更正版"的同一铁律，每条矛盾都直接导致过一轮错误工作。
 2. **先读文档，再动手。** 曾花大半天重新发现用户三天前就写在文档里的结论。
