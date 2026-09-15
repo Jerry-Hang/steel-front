@@ -158,7 +158,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （destroy 在飞 buffer → NVIDIA device-lost）。`PROP_INSTANCE_INDEX = GUN_INSTANCE_INDEX + 1`（83010）单槽。
 - 道具要剔除 → 在**合并阶段按街区分桶**、每桶一次 draw call，不动实例系统
   （已落地 `merge_binned(cell=40m)`，实测 fps 112→152）。
-- 验证层只在 **`RV3D_VALIDATION=1`** 时启用（默认关；否则严格 spirv-val 拒 mesh 布局 → 灰屏）。
+- 验证层 `RV3D_VALIDATION=1`（默认关）。🔴 **2026-09-15 起它才真的能跑** —— 以前会因为 mesh.spv
+  过不了严格 spirv-val 而**灰屏**（未结案 #9 的副作用）。**它是本仓最强的排障工具**：开起来第一轮就
+  抓出两条一直存在、此前完全看不见的 VUID（见 #23）。**改 pipeline / swapchain / 同步 / 描述符前先开它跑一轮。**
 - 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式；
   检视模式实例矩阵用 `Mat4::IDENTITY`。
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
@@ -580,30 +582,22 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 5. ~~**`FLOOR_H` 常量分叉**~~ **已结案（2026-09-12）**：6 个模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6 命中。
 6. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
    `install_guns.py` 仍 SKIP。需人工删掉重叠枪身后装为 `svd12`。
-7. ~~**D12 士兵近距观感（用户说"神人样子"）**~~ **已结案（2026-09-13）**。
-   18 段箱体已由 `assets/soldier/soldier.glb`（1082 顶点 / 540 三角形、真人比例、
-   烘天光遮蔽、头/盔六棱柱）取代，**走实例化**：
-   `cmd_draw_indexed(索引数, N, 0, 0, SOLDIER_INSTANCE_BASE)` 用 `self.pipeline`
-   （传统 VERTEX、depth 开），**不需新建管线**；每 NPC 实例数 18 → 1（压力模式 fps 111 → 155）。
-   步态/尸体都用实例矩阵做（起伏 ±4cm、前后倾 ±3°、开火后坐；尸体绕原点转 −90° 平躺）。
-   阵营色 = 队色 × `tint.w = 6.0`（Authored 标记，不接这条会整身涂成一队色）。
-   `soldier_part_matrices` 留作 GLB 缺失时的回退。详见 `docs/HANDOFF-soldier.md`。
-   **仍缺**：骨骼动画（现为整体起伏）、两套队色顶点变体。
+7. ~~**D12 士兵近距观感（用户说"神人样子"）**~~ **已结案（2026-09-13）**：18 段箱体改由
+   `assets/soldier/soldier.glb`（1082 顶点 / 540 三角形）**实例化**绘制 ——
+   `cmd_draw_indexed(索引数, N, 0, 0, SOLDIER_INSTANCE_BASE)` 用 `self.pipeline`，**不需新建管线**；
+   每 NPC 实例数 18 → 1（压力模式 fps 111 → 155）。阵营色 = 队色 × `tint.w = 6.0`（Authored 标记，
+   不接这条会整身涂成一队色）。**仍缺**：骨骼动画（现为整体起伏）、两套队色顶点变体。详见 `docs/HANDOFF-soldier.md`。
 8. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
 9. ~~**mesh 着色器过不了严格 `spirv-val`**~~ **已结案（2026-09-15）**：根因是
     **naga-30.0.0 `src/back/spv/writer.rs:3597`** 的 `decorate_struct_member` **无条件**写 `Offset`，
-    而 `Offset` / `ArrayStride` 在 SPIR-V ≤1.3 允许、**1.4 起对非 Block 类型禁止**，mesh 又必须用 1.4
-    （`global_needs_wrapper` 与 `WriterFlags` 都**没有**开关，已排除）。
+    而 `Offset` / `ArrayStride` 在 SPIR-V ≤1.3 允许、**1.4 起对非 Block 类型禁止**，mesh 又必须用 1.4。
     现由 **`build.rs::strip_workgroup_explicit_layout`** 在写出前去掉 ——
     🔴 **只去掉 Workgroup 可达类型**（从 `OpVariable`(Workgroup) 出发做类型闭包）；
     带 `Block` 的 `_struct_300/303/308` 动一个字节就是缓冲错位。**理由**：Workgroup 内存主机侧永不碰，
     着色器只按成员索引访问，偏移由驱动自算 ⇒ 去掉显式布局**语义无损**。
-    **7 个 `.spv` 现在全部 `spirv-val --target-env vulkan1.3` exit 0**；两条测试锁住两个方向
-    （`mesh_spirv_has_no_workgroup_explicit_layout` / `block_types_keep_their_offsets`，都验证过会红）。
-    **同机位 A/B**（`RV3D_CAM=fly:0,140,80:0,50`）：差异 **279 像素 / 4,096,000（0.007%）**，
-    包围盒恰是 HUD 的 FPS 数字；同二进制连跑两次的噪声底 **251 像素、同一包围盒** ⇒ **3D 画面逐像素一致**。
-    🔴 **别用 PowerShell 打印 cargo warning 调试 build.rs**：warning 会被归并/缓存，同一个 exe
-    报出"0 条/1 条"两种结果，据此做出过三个错误推断；请往文件里写日志。
+    **7 个 `.spv` 现在全部 exit 0**；两条测试锁住两个方向（`mesh_spirv_has_no_workgroup_explicit_layout` /
+    `block_types_keep_their_offsets`，都验证过会红）。同机位 A/B 与同二进制对照均为
+    **同一 HUD 文字包围盒内的 ~250–280 像素** ⇒ 3D 画面逐像素一致。
 10. ~~**PT 512 盒上限静默截断**~~ **已结案（2026-09-14）：512 → 1024 + 一次性告警**。
     实测 `marker=547 > 512` ⇒ 每次丢 35 个盒子，而 PT 是低 spp 噪点图、**肉眼看不出来**；
     代价仅 **0.92 MB → 1.84 MB**（余量 87%）。⚠️ 另补 `Renderer::pt_box_cap_warned` 闩（超容告警一次不刷屏）。
@@ -611,22 +605,16 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
 12. ~~**`MAX_RIGID_BODIES` vs `MAX_AI`** 溢出静默丢弃~~ **已结案（2026-09-14）——两个常量都已不存在**
-    （`rg` 两处皆空；`physics.rs` 刚体表已是 `pub bodies: Vec<Body>`，动态增长 ⇒ 结构上不可能溢出）。
-    「静默丢弃」这个**模式**仍值得防：`set_npc_visuals` / `set_dead_bodies` 的
-    `if len < MAX_NPC_INSTANCES { push }` 超容时**不崩不报**，画面上只是"少了几个兵"。
-    **已补一次性告警**（`Renderer::warn_npc_cap_once`）—— 容量 3072 vs 峰值 2220（余量 28%），
-    压力模式烟测 **0 次误报**。它的意义是让"少人"**可诊断**，不必再去怀疑剔除矩阵/模型/取景。
+    （`physics.rs` 刚体表已是 `pub bodies: Vec<Body>`，动态增长 ⇒ 结构上不可能溢出）。
+    「静默丢弃」这个**模式**仍值得防：`set_npc_visuals` / `set_dead_bodies` 超容时**不崩不报**，
+    只是"少了几个兵"。**已补一次性告警**（`Renderer::warn_npc_cap_once`，容量 3072 vs 峰值 2220）。
 13. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
     快照的**位置修正应用**与**实体插值渲染消费**均未接线）。
-14. ~~**道具是否进阴影 pass 未确认**~~ **已结案（2026-09-14）：确实没进，两处都已补**。
-    道具从未接到阴影路径；**士兵也没进**（那三对 `npc_box/cyl/sph` 是 18 段箱体的阴影近似，
-    箱体路径被 `soldier_on` 关掉后实例数归零 ⇒ **士兵一度毫无影子且不报错**）。
+14. ~~**道具是否进阴影 pass 未确认**~~ **已结案（2026-09-14）：确实没进，两处都已补**（道具 + 士兵）。
     🔴 **剔除必须用光源视锥**（主 pass 那行用相机视锥，照抄会让影子随视角缺块）。
     **代价（只切 `RV3D_NO_SHADOW`）：192.7 vs 193.6 fps ⇒ 0.5%。**
-15. ~~**阴影 `normal_bias` 未使用**~~ **已结案（2026-09-14）：一直在用**（`build.rs:420`
-    消费它：`push_m = bias.y + m_per_texel*(1.25 + 0.9*slope)`）。顺手清了三处**陈旧**的
-    `#[allow(dead_code)]`（`SHADOW_MAP_SIZE` / `DEFAULT_SHADOW_*`）。
-    ⚠️ 其余 `#[allow]` **必须保留** —— 只有 `cfg(test)` 用处，删了破 0 警告红线。
+15. ~~**阴影 `normal_bias` 未使用**~~ **已结案（2026-09-14）：一直在用**（`build.rs:420` 消费它）。
+    顺手清了三处**陈旧**的 `#[allow(dead_code)]`。⚠️ 其余 `#[allow]` **必须保留**（只有 `cfg(test)` 用处）。
 16. ~~**`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**~~ **已结案（2026-09-14）——文件已不存在**（条目描述的状态早被清理，只是没人回来划掉它）。
 17. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响。
     ~~手榴弹 AoE 不结算障碍~~ **已结案（2026-09-15）**：`obstacle_blocks_blast` 只挡"爆心→目标之间"
@@ -637,25 +625,31 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
-    ~~kill feed 仅英文~~ **已中文化（2026-09-14）**；~~不分击杀者名字~~ **已结案（2026-09-15）** ——
-    缺口在**结算层**：`damage_npc(idx, dmg)` 不带来源，feed 想写"你击杀了…"也没信息。现加
-    `DamageSource`（只留 `Player`/`Blast`）+ 三处调用点共用 `kill_line`；爆炸单独成句（一发 AoE 结算多人）。
-    第一人称枪模动画 / 弹孔贴花仍欠。
+    ~~kill feed 仅英文~~ **已中文化**；~~不分击杀者名字~~ **已结案（2026-09-15）**：现加 `DamageSource`
+    （只留 `Player`/`Blast`）+ 三处调用点共用 `kill_line`。第一人称枪模动画 / 弹孔贴花仍欠。
 20. **DLSS 立项评估未做**。~~`playtest_perf.py` 未做 Windows 移植~~ **已结案（2026-09-15）** ——
     它**不是没移植，是搬不过来**（X11/XImage/`pgrep`/`/proc` 全是 Linux 的，重写=新写）。
     改用 **`scripts/perf_run.ps1`**：引擎本就每秒往 `logs/perf_*.log` 写 fps + 各阶段耗时（`perf_log.rs`），
     所以只需"启动 → 等待 → 读日志 → 统计"，**不注入输入、不抓屏**；支持 `-NoShadow`/`-Cam`/`-Stress` 对照。
     🔴 **实测噪声底**：同一二进制连跑两次（25s）中位 fps **69.7 / 71.8（差 2.8%）** ⇒ 单次 A/B 证明不了
     任何 < ~5% 的差异（教训 24/35）。见铁律 F「常用命令」。
-21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：改为正确支持交错布局**。
-    这是 `accessor.byteOffset` 那个 bug 的**上一层**；交错缓冲读错时每个数**都是合法浮点数**：
-    不崩、不报错、几何静静变乱麻。**修法**：`elem_stride = byteStride.unwrap_or(step * comps)`，
-    寻址 `off + (i/comps)*elem_stride + (i%comps)*step` ⇒ 密集布局时**逐位不变**。
-    🔴 **补了测试 `glb_honours_buffer_view_byte_stride`，并验证过它能抓到旧行为**（临时关掉 stride 支持
-    ⇒ 该测试**确实 FAILED**"顶点 1 位置错"）。**⇒ "先用必然能测出差异的已知变化验一次工具"同样适用于测试本身。**
+21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：已支持交错布局**。
+    交错缓冲读错时每个数**都是合法浮点数**：不崩、不报错、几何静静变乱麻。修法 =
+    `elem_stride = byteStride.unwrap_or(step * comps)` ⇒ 密集布局**逐位不变**。
+    🔴 补了测试 `glb_honours_buffer_view_byte_stride` 并**验证过它会红**（临时关掉 stride 支持 ⇒ FAILED）。
+    **⇒ "先用必然能测出差异的已知变化验一次工具"同样适用于测试本身。**
 22. ~~**`data/` 里的历史残留**~~ **已清理（2026-09-13）**：62 文件 → **只留 3 个被代码引用的**
     （`llm_decisions.jsonl` / `llm_server.jsonl` / `llm_doctrine.json`）；同批 `screenshots/` 300→25、
     `logs/` 646→20、`dist/` 删除。**共回收约 600 MB。**
+23. **`VUID-VkSwapchainCreateInfoKHR-flags-parameter` 与输入矛盾，按「层侧误报」挂着**（2026-09-15）。
+    报文：`pCreateInfo->flags has VkSwapchainCreateFlagBitsKHR values
+    (VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR) that requires VK_KHR_swapchain_mutable_format`。
+    **三条否证**：① 全仓 `create_swapchain` 只有一个调用点，从不设 `flags`；② 实测把它打进日志是**空的**
+    （`swapchain diag: ... flags= min_images=3 usage=TRANSFER_SRC | COLOR_ATTACHMENT`）；
+    ③ ash 的 `SwapchainCreateInfoKHR` 是 `#[repr(C)]` 且字段顺序与 C 头一致。
+    5 次创建 = 5 条报文（1:1），**每次的 flags 都证明是 0**。
+    **下一步（若还要查）**：这更像 1.4.357 层 与 1.3.281 头文件的版本错位，不是本仓代码问题；
+    要证伪就把 `flags` 临时设成一个未定义位，看报文是否改口。**在上述三条被推翻之前不要再改代码去"修"它。**
 
 ---
 
@@ -702,3 +696,9 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 33. **🔴 论及资产是否"合理"之前，先走完证据链：名字 → `glb_probe.py` 尺寸 → 生成器规格表。** 曾在同一对象上连错三轮，每轮只补一个证据源、结论就翻一次。
 34. **🔴 参数语义要读注释，不要靠"同一套网格"外推。** 曾在一张尺寸表上栽三轮，而答案一直写在表头注释里、我只读了一半。**另一面：那三轮的实机截图看起来都变好了 —— 但改善来自别的因素。⇒ 观感改善只能证明"改动有效果"，不能证明"数值变对了"。**
 35. **🔴 同一份代码跑两次也有 ~3% 的差异。** 2026-09-15 用 `perf_run.ps1` 连测两次（同二进制、同场景、各 25s），中位 fps **69.7 / 71.8**。⇒ **小于 ~5% 的帧率差必须多轮重复才能开口**；单次 A/B 只能证伪"巨大回归"，不能证明"变快了"（教训 24 的量化版）。
+36. **🔴 「工具跑不起来」本身就是一条要修的缺陷，不是环境噪声。** 验证层因为 mesh.spv 的布局被拒而**灰屏**，
+    于是它被写进文档当"已知限制"、此后再没人开过 —— **期间所有渲染改动都没有验证层兜底**。
+    2026-09-15 把那条根因修掉的当天第一次开起来，**立刻**报出两条一直存在的 VUID
+    （重复 signal 的 render-finished 信号量 / swapchain flags）。
+    **⇒ 判据：任何"这个工具在我们这儿用不了"的结论，都要当场问一句"根因是什么、值不值得修"；
+    修好之后的第一个动作就是把它重跑一遍。** 半瞎着改渲染，代价会在别处以更难查的形态还回来。

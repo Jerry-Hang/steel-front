@@ -5,9 +5,11 @@
 > **本文件 166 KB / 2918 行，不要通读。** 先读这一节，再按关键词往下搜。
 >
 > ### 当前基线
-> `cargo test --release` **471 passed / 0 failed / 0 警告**；
+> `cargo test --release` **484 passed / 0 failed / 0 警告**（2026-09-15）；
 > 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**）。
-> `AGENTS.md` 47.9 KB（在 <48KB 目标内）。
+> `AGENTS.md` **64,341 B（62.8 KB）** —— ⚠️ 已超 <48KB 目标，距 **65,536 B 硬上限只剩 1.2 KB**。
+> 最新迭代（2026-09-15）：**未结案 #9 结案**（mesh 着色器过严格 `spirv-val`）+ `scripts/png_diff.py`，
+> 详见本文件顶部的迭代记录。
 >
 > ### 大改造 9 条的账
 >
@@ -39,6 +41,67 @@
 ---
 
 
+
+
+# ✅ 未结案 #9 结案：mesh 着色器通过严格 `spirv-val`（2026-09-15）
+
+## 症状与根因
+
+- 症状：`spirv-val --target-env vulkan1.3 assets/mesh.spv` 非零退出 ——
+  `[VUID-StandaloneSpirv-None-10684] the Workgroup storage class has a explicit layout from the Offset decoration`。
+  **7 个被跟踪的 `assets/*.spv` 里只有它一个失败。**
+- 根因（在 naga 里，不在我们的 WGSL 里）：**naga-30.0.0 `src/back/spv/writer.rs:3597`** 的
+  `decorate_struct_member` **无条件**写 `Offset`，不看 storage class。而 `Offset` / `ArrayStride`
+  在 SPIR-V ≤1.3 合法、**1.4 起对非 `Block` 类型禁止**，mesh（`MeshShadingEXT`）又**必须**用 1.4。
+  `global_needs_wrapper` 与全部 `WriterFlags` 都查过，**没有任何开关可以关掉它**。
+
+## 修法 `build.rs::strip_workgroup_explicit_layout(&mut Vec<u32>)`
+
+- 由 `compile_wgsl_mesh` 调用：先**只从 storage class = Workgroup 的 `OpVariable`** 出发算类型可达闭包，
+  再删掉目标类型落在闭包里的 `OpMemberDecorate … Offset` / `OpDecorate … ArrayStride`
+  （连同 `MatrixStride` / `RowMajor` / `ColMajor`）；**构建期自检重扫输出，还有残留就 `panic!`**。
+- 🔴 **带 `Block` 的类型（`_struct_300/303/308` = Uniform / StorageBuffer / PushConstant）一个字节都不许动** ——
+  那是主机侧写入的缓冲布局，动了就是**静默错位**。
+- **为什么它语义无损**：Workgroup 内存主机侧永不触碰，着色器只按 `OpAccessChain` 的成员索引访问、
+  偏移由驱动自算 ⇒ **任何内部自洽的布局都等价**。
+
+## 测量 / 回归 / A/B / 验收
+
+- **7 个 `.spv` 现在全部 `spirv-val --target-env vulkan1.3` exit 0**（`mesh.spv` 在 `vulkan1.4`
+  与默认 target 下也过）；`assets/mesh.spv` **27572 → 27300 B**（删掉 17 条装饰指令）。
+- 两条测试（`src/engine/renderer.rs` 模块 `workgroup_layout_tests`）**锁住两个方向**：
+  `mesh_spirv_has_no_workgroup_explicit_layout`（不许有）+ 反向的
+  `block_types_keep_their_offsets`（`Block` 类型必须**保留**偏移）。**两条都验证过会真的红**：
+  临时去掉 `strip_workgroup_explicit_layout` 的调用后，`spirv-val` 重新失败、第一条测试 **FAILED**。
+- 同机位 A/B（`RV3D_CAM=fly:0,140,80:0,50`、`RV3D_NO_NPC_CULL=1`，同一场景）：
+  baseline vs stripped 差 **279 像素 / 4,096,000（0.007%）**，包围盒 (168,52)-(458,143)；
+  **对照 = 同一 stripped 二进制连跑两次差 251 像素、同一包围盒 (168,48)-(458,135)**
+  ⇒ **3D 画面逐像素一致，残余差异就是 HUD 上跳动的 FPS 数字。**
+- 验收：`scripts/run_smoke_pm.ps1` → **ALL-OK**（VUID=0 panics=0、kill 已登记、score 0 → 10、fps 71.4）；
+  `cargo build --release` **0 警告**、`cargo test --release` **484 passed / 0 failed**（原 482，+2 条新测试）。
+
+## 🔧 附带产出：`scripts/png_diff.py`（整幅差分 + **差异包围盒**）
+
+- 打印尺寸、差异像素数/占比、差异像素上的平均通道差，以及**新增的差异包围盒**。
+- 包围盒是**被证明决定性之后**才加的：没有它，几百个差异像素既可能是"引擎坏了"，
+  也可能是"HUD 上的 FPS 数字变了"。用法 = `scripts/cap_safe.ps1` 取图 + 固定 `RV3D_CAM`；
+  已写进 `AGENTS.md` 的**常用命令**。
+
+## ⚠️ 附带记录（**有意不修**）：CJK 字模表**无法逐字节重建**
+
+- `src/engine/cjk_glyphs.rs` 头部记的源字体 `noto-sc-subset.otf` **不在仓库里** ⇒ 这张表没法重建。
+- 本次在两处新代码注释里加了汉字（**剥 U+5265、宿 U+5BBF**），守卫测试
+  `engine::font_cjk::tests::source_cjk_codepoints_all_have_glyphs` **如实转红**。
+- 用系统 `C:\Windows\Fonts\NotoSansSC-VF.ttf`（**变量字体**）重跑 ⇒ **1596 行字形全被改写**，
+  并被 `cjk_glyph_generates` 拦下：**"灭 字形过稀疏（rows=7 cols=9）"**（变量字体默认实例更细）。
+- **两次重写全部回退**，改法 = 把注释**改写为只用表里已有的字** ⇒ 重扫回到 **1595 个码点 /
+  0 缺失 / 0 冗余**。结论已记进 `tools/extract_cjk_glyphs.py` 的 docstring 与 `AGENTS.md` 模块地图：
+  **加中文若没有原始子集字体，就改写文案用已有的字** —— **不要拿别的字体顶替，也不要放松密度断言**。
+
+## 📄 文档维护：`AGENTS.md` 压缩
+
+- **66440 B → 63302 B**（后续增补后又到 **64341 B**）：**15 条已结案的未结案条目压成一行结论**，
+  以留在 **65,536 B 硬上限**之内（超限会**静默截断**注入视图）。⚠️ 现距上限只剩 **1.2 KB**。
 
 
 # ⚡ 第②条实质优化：`target_occlusion` 每 4 帧重算一次（2026-09-12 第 102 轮）
