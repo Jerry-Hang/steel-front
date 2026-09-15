@@ -661,7 +661,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
     kill feed 仅英文（5×7 位图字体无中文）、不分击杀者名字；第一人称枪模动画 / 弹孔贴花未做。
 20. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
-21. **GLB 加载器忽略 `bufferViews[].byteStride`**（交错布局会读错）。
+21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：改为正确支持交错布局**。
+    这是 `accessor.byteOffset` 那个 bug 的**上一层**（那条注释里写着 ak12.glb 的 NORMAL
+    被读成 POSITION、"几何全错却一句错误信息都没有"）—— `byteOffset` 修好后，
+    **交错缓冲**仍会读错，而读出来的每个数**都是合法浮点数**：不崩、不报错、几何静静变乱麻。
+    `tools/glb_survey.py` 早就会报"byteStride(交错缓冲,会读错几何)"，但那是离线工具。
+    **修法**：`elem_stride = byteStride.unwrap_or(step * comps)`，寻址改成
+    `off + (i/comps)*elem_stride + (i%comps)*step` ⇒ **密集布局时逐位不变**（现有资产行为不受影响）。
+    🔴 **并补了测试 `glb_honours_buffer_view_byte_stride`，且验证过它能抓到旧行为**：
+    临时把 stride 支持关掉后该测试**确实 FAILED**（"顶点 1 位置错"），恢复后 476 passed。
+    **⇒ 这条判据（"先用一个必然能测出差异的已知变化验一次工具"）同样适用于测试本身。**
     **lead**：现导出器是一 accessor 一 bufferView（密集），暂不受影响。
 22. ~~**`data/` 里的历史残留**~~ **已清理（2026-09-13）**：62 个文件 → **只留 3 个被代码引用的**（`llm_decisions.jsonl` / `llm_server.jsonl` / `llm_doctrine.json`），回收 19.5 MB。同批清理：`screenshots/` 300→25 个（456 MB，只留文档引用的基线）、`logs/` 646→20 个（43 MB）、`dist/`（79 MB，可再生产物）。**共回收约 600 MB。**
 

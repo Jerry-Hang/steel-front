@@ -81,7 +81,7 @@ fn append_prim(
     vert_offset: &mut u32,
 ) -> Result<(), String> {
     let _ = prim.get("material");
-    // accessor 读取（componentType 感知；无 byteStride 简化——绝大多数导出器默认密集布局）
+    // accessor 读取（componentType 感知 + **byteStride 感知**）
     // 整型分量必须按 glTF 的 `normalized` 标志换算：Blender 5.x 导出的 COLOR_0 就是
     // VEC4 + UNSIGNED_SHORT + normalized，直接取原值会得到 0..65535 当 albedo 用。
     fn read_acc(json: &crate::llm_cmd::Json, bin: &[u8], idx: usize, comps: usize) -> Result<Vec<f32>, String> {
@@ -90,12 +90,30 @@ fn append_prim(
         let ctype = acc.get("componentType").and_then(|c| c.as_f64()).unwrap_or(5126.0) as u32;
         let norm = acc.get("normalized").and_then(|b| b.as_bool()).unwrap_or(false);
         let bv = acc.get("bufferView").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
-        let off = json.get("bufferViews").and_then(|b| b.as_arr()).and_then(|b| b.get(bv))
+        let bview = json.get("bufferViews").and_then(|b| b.as_arr()).and_then(|b| b.get(bv));
+        let off = bview
             .and_then(|b| b.get("byteOffset")).and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
         // accessor 自己还能再偏一段：多个 accessor 挤在同一个 bufferView 里时，这是唯一的区分手段。
         // 以前不读它——ak12.glb 正是因此把 mesh0 的 NORMAL 读成了 POSITION、把 mesh1 读成了
         // mesh0 前 988 个顶点的副本。几何全错，却一句错误信息都没有。
         let off = off + acc.get("byteOffset").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
+        // 🔴 **`bufferViews[].byteStride`（2026-09-14 补，未结案 #21）** —— 与上面那段注释
+        // 是**同一个 bug 的上一层**：`byteOffset` 修好之后，**交错缓冲**仍然会读错。
+        //
+        // 上面那个循环 `let b = off + i * step;` 走的是**密集**假设：每两个分量紧挨着。
+        // 而 glTF 允许一个 bufferView 里把 POSITION/NORMAL/UV **交错**排布
+        // （`byteStride` 就是"一个顶点占多少字节"），此时分量间距不是 `step` 而是
+        // `stride`，且每个顶点还要按 `comps` 歇一段。**两种排布读出来的都是"合法浮点数"**
+        // ⇒ 不崩、不报错、几何静静变成一团乱麻（`tools/glb_survey.py` 早就会报
+        // "byteStride(交错缓冲,会读错几何)"，但那是离线工具，运行时没人拦）。
+        //
+        // 修法是**正确支持**而不是拒绝：`byteStride` 只在 bufferView 上出现，
+        // 语义是"相邻两个**元素**（顶点）之间的字节数"；元素内部的分量仍按 `step` 连续。
+        let stride = bview
+            .and_then(|b| b.get("byteStride"))
+            .and_then(|b| b.as_f64())
+            .map(|v| v as usize)
+            .filter(|&v| v > 0);
         // (bytes per component, divisor applied only when the spec says the value is normalized)
         let (step, div): (usize, f32) = match ctype {
             5120 => (1, if norm { 127.0 } else { 1.0 }),   // BYTE
@@ -106,8 +124,12 @@ fn append_prim(
             _ => (4, 1.0),                                 // FLOAT
         };
         let mut out = Vec::with_capacity(count * comps);
+        // 交错时：元素间距 = `stride`，元素内分量间距 = `step`。
+        // 密集时 `stride` 为 None ⇒ 退化成原来那句 `off + i * step`（逐位不变，
+        // 所以**现有全部资产的行为不受影响**，这一点有测试锁着）。
+        let elem_stride = stride.unwrap_or(step * comps);
         for i in 0..count * comps {
-            let b = off + i * step;
+            let b = off + (i / comps) * elem_stride + (i % comps) * step;
             if b + step > bin.len() {
                 return Err("GLB accessor 越界".into());
             }
@@ -460,6 +482,47 @@ mod tests {
         assert_eq!(&m.verts[0][6..8], &[0.0, 0.0], "缺 UV 时别名到了 accessor 0");
         // 无索引图元应按顺序生成索引，而不是把位置当索引读
         assert_eq!(m.indices, vec![0, 1, 2], "缺 indices 时应生成顺序索引");
+    }
+
+    /// 交错缓冲（`bufferViews[].byteStride`）必须按 stride 跳顶点，不能按分量紧挨着读。
+    ///
+    /// 这是上一条测试的**上一层**：`accessor.byteOffset` 修好之后，"一个 bufferView 里
+    /// POSITION/NORMAL/UV 交错排布"仍然会被读错，而且**读出来的每个数都是合法浮点数** ——
+    /// 不崩、不报错、几何静静变成乱麻（`tools/glb_survey.py` 早就会报这件事，但它是离线工具）。
+    ///
+    /// 造法：一个顶点占 32 字节 = pos(12) + nrm(12) + uv(8)，三个顶点交错排布。
+    #[test]
+    fn glb_honours_buffer_view_byte_stride() {
+        // 逐顶点交错：pos.xyz | nrm.xyz | uv.xy
+        let verts: [[f32; 8]; 3] = [
+            [0.0, 0.0, 0.0, /**/ 0.0, 0.0, 1.0, /**/ 0.25, 0.75],
+            [1.0, 0.0, 0.0, /**/ 0.0, 1.0, 0.0, /**/ 0.50, 0.50],
+            [0.0, 1.0, 0.0, /**/ 1.0, 0.0, 0.0, /**/ 0.10, 0.20],
+        ];
+        let mut bin: Vec<u8> = Vec::new();
+        for v in verts {
+            for f in v {
+                bin.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":
+{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}}]}],
+"accessors":[
+{"bufferView":0,"byteOffset":0,"componentType":5126,"count":3,"type":"VEC3"},
+{"bufferView":0,"byteOffset":12,"componentType":5126,"count":3,"type":"VEC3"},
+{"bufferView":0,"byteOffset":24,"componentType":5126,"count":3,"type":"VEC2"}],
+"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":96,"byteStride":32,"target":34962}]}"#;
+        let m = parse_glb(&build_glb(json, &bin)).unwrap();
+        assert_eq!(m.verts.len(), 3);
+        // 逐顶点核对：位置/法线/UV 三者都要来自**同一个顶点**，而不是被 stride 串位
+        for (i, want) in verts.iter().enumerate() {
+            assert_eq!(&m.verts[i][..3], &want[0..3], "顶点 {i} 位置错");
+            assert_eq!(&m.verts[i][3..6], &want[3..6], "顶点 {i} 法线错（stride 没生效？）");
+            assert_eq!(&m.verts[i][6..8], &want[6..8], "顶点 {i} UV 错（stride 没生效？）");
+        }
+        // 若无 stride 支持，第 1 个顶点的法线会读到 pos[2] 附近的值而不是 (0,0,1)
+        assert_ne!(&m.verts[0][3..6], &m.verts[1][..3], "法线读成了下一个顶点的位置");
     }
 
 }
