@@ -6,10 +6,14 @@
 >
 > ### 当前基线
 > `cargo test --release` **492 passed / 0 failed / 0 警告**（2026-09-15）；
-> 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**）。
-> `AGENTS.md` **62,264 B（60.8 KB）** —— 仍超 <48KB 目标，但**距 65,536 B 硬上限还有余量**
+> 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**）；
+> `RV3D_VALIDATION=1` 跑一整轮只剩 #23 那条层侧误报（5 次交换链创建 = 5 条报文）。
+> `AGENTS.md` **59,771 B（58.4 KB）** —— 仍超 <48KB 目标，但**距 65,536 B 硬上限有 5.7 KB 余量**
 > （2026-09-15 三件事同一轮落地：**切枪 device lost 修复** / **弹孔（弹着标记）** / **mesh 路径 Authored 编码补齐**，
-> 并顺带发现"障碍 marker 可见尺寸 = 碰撞盒 2 倍"这条未结案；详见本文件顶部的迭代记录）。
+> 并顺带发现"障碍 marker 可见尺寸 = 碰撞盒 2 倍"这条未结案；同一轮把 AGENTS.md 从 65,435 B 连续压到 59,771 B，
+> 结构自检：铁律 A–F / 未结案 / 37 条教训齐全）。详见本文件顶部的迭代记录。
+> 🔴 **`scripts/scheduler.log` 已停止跟踪**（`*.log` 本来就在 `.gitignore` 里，只是这个文件早年入库了）——
+> 会话自动化脚本 `send_work.ps1` / `dsh_scheduler.ps1` 会持续追加它，此前每轮结束都会让工作树变脏。
 > 最新迭代（2026-09-15 续二）：**弹孔 + 切枪 device lost** 见顶部；再往前是
 > **PT 通路的验证层问题全部清零**（存储图像格式 UB + overlay pass 三处）、
 > **#2 结案 —— PT 史上首次真正出图**、**#3 重开并真修**、**#9 结案**（mesh 着色器过严格 `spirv-val`）。
