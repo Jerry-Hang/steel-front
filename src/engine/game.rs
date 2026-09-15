@@ -981,6 +981,11 @@ pub struct Game {
     projectiles: Vec<Projectile>,
     /// 在场爆炸实体（AoE 结算后保留短暂生命周期供闪光渲染）
     pub explosions: Vec<Explosion>,
+    /// 🔴 **当前正在结算的爆炸中心**（2026-09-15）：`spawn_explosion` 进入时写入，
+    /// 供 `damage_npc` 拼"爆炸（x,z）击杀了…"那一行 —— 爆炸没有单一击杀者
+    /// （一发 AoE 同时结算多个目标），报"某某杀的"会是编的，所以只报爆点位置。
+    /// 只在 AoE 结算期间有意义；不在结算期间的值是上一次的残留，不参与任何判定。
+    last_blast_center: [f32; 3],
     /// 爆炸震屏剩余时间（秒，>0 时相机叠加抖动偏移）
     shake_timer: f32,
     /// 爆炸震屏强度（世界位移米数，随剩余时间线性衰减）
@@ -1281,6 +1286,50 @@ fn pick_stress_targets(npcs: &[Npc], sight: f32) -> Vec<Option<(usize, [f32; 3],
     out
 }
 
+/// 🔴 **伤害来源**（2026-09-15）——kill feed 此前只报"谁死了"，从不报"谁杀的"。
+///
+/// 缺口不在渲染层而在**结算层**：`damage_npc(idx, dmg)` 根本不携带来源，
+/// 所以 feed 只能写成"击杀 蓝方 #174"。全仓生产代码只有 2 处调它
+/// （玩家弹命中 / 爆炸 AoE），改造面很小，于是显式加参数而不是用
+/// "记住上一发是谁打的"这类隐式状态（那种写法会在多来源同帧交错时静默归错人）。
+///
+/// ⚠ **只列真正会走到这里的来源**：NPC 互射与联机击杀走的是各自的路径
+/// （`apply_npc_combat` / 网络命中），它们本来就手上有击杀者，直接用 `kill_line` 拼。
+/// 为"接上变体"而把枚举塞进那些路径，只会多出永不构造的变体（本仓 0 警告是红线）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DamageSource {
+    /// 玩家（第一人称射击）
+    Player,
+    /// 无归属：爆炸/冲击波 —— 同一发 AoE 会同时结算多个目标，
+    /// 报"某个人杀的"会是编的。爆炸单独成句（见 `blast_kill_line`）。
+    Blast,
+}
+
+/// feed 文本里"击杀者"的两种形态（拼装只在 `kill_line` 一处，避免三处格式漂移）。
+/// ⚠ **没有"无归属"这一档** —— 爆炸走 `blast_kill_line` 自己成句，
+/// 不经过这里（加了就会是个永不构造的变体）。
+enum KillerLabel {
+    /// 玩家自己
+    You,
+    /// 有名字/编号的主体（如"红方 #12"）
+    Named(String),
+}
+
+/// feed 里一行"某人击杀某人"的文本（`cause` 是武器/爆炸说明，可空）。
+/// **三处调用点（`damage_npc` / NPC 互射 / 联机）共用它** ——
+/// 免得三处各写一遍格式、越改越不一致（此前正是三处各写一遍）。
+fn kill_line(killer: KillerLabel, victim: &str, cause: &str) -> String {
+    match killer {
+        KillerLabel::You => format!("你击杀了{victim}{cause}"),
+        KillerLabel::Named(name) => format!("{name} 击杀了{victim}{cause}"),
+    }
+}
+
+/// 爆炸击杀单独成句：**不冒充有击杀者**。
+fn blast_kill_line(center: [f32; 3], victim: &str) -> String {
+    format!("爆炸（{:.0},{:.0}）击杀了{victim}", center[0], center[2])
+}
+
 impl Game {
     /// 创建游戏中枢：初始化物理演示场景
     pub fn new() -> Self {
@@ -1370,6 +1419,7 @@ impl Game {
             sfx: SfxBank::new(48_000),
             projectiles: Vec::new(),
             explosions: Vec::new(),
+            last_blast_center: [0.0; 3],
             shake_timer: 0.0,
             shake_strength: 0.0,
             fire_cooldown: 0.0,
@@ -3631,7 +3681,7 @@ impl Game {
                     dmg,
                     p.distance_traveled()
                 );
-                self.damage_npc(idx, dmg);
+                self.damage_npc(idx, dmg, DamageSource::Player);
                 continue;
             }
             // 玩家弹 vs 网络远端玩家（服务器权威命中：杀远端玩家）
@@ -3794,7 +3844,7 @@ impl Game {
 
     /// NPC 受伤结算：扣血至 0 → 移除 + 计分 + 任务目标推进；返回是否击杀。
     /// 调用方保证 `idx` 有效；下标移除后不再回移（调用方按逆序遍历或立即退出）。
-    fn damage_npc(&mut self, idx: usize, dmg: f32) -> bool {
+    fn damage_npc(&mut self, idx: usize, dmg: f32, source: DamageSource) -> bool {
         let id = self.npcs[idx].id;
         // 受击反馈：命中瞬间闪白（0.15s 衰减）
         self.npc_hit_flash.insert(id, 0.15);
@@ -3815,8 +3865,14 @@ impl Game {
         if is_enemy {
             self.score += KILL_SCORE;
         }
-        // 击杀提示（右上角 feed）：敌我**都**提示 —— 打死自己人是需要立刻看见的事故
-        self.hud.push_kill(format!("击杀 {} #{}", team_name(victim_team), id));
+        // 击杀提示（右上角 feed）：敌我**都**提示 —— 打死自己人是需要立刻看见的事故。
+        // 🔴 2026-09-15：现在**带上击杀者**（此前只报死者，玩家看不出是谁干的）。
+        let victim = format!("{} #{id}", team_name(victim_team));
+        let line = match source {
+            DamageSource::Player => kill_line(KillerLabel::You, &victim, ""),
+            DamageSource::Blast => blast_kill_line(self.last_blast_center, &victim),
+        };
+        self.hud.push_kill(line);
         log::info!(
             "kill: npc #{} eliminated (wave {}) team={:?} enemy={} score={}",
             id,
@@ -3908,6 +3964,8 @@ impl Game {
             age: 0.0,
             lifetime: EXPLOSION_LIFETIME,
         });
+        // 供本次 AoE 结算期间拼击杀文本用（爆炸无单一击杀者，见字段注释）
+        self.last_blast_center = center;
         // 玩家震屏 + 自伤：随距离线性衰减，最近处满强度（与 NPC 是否在场无关）。
         // 玩家自伤伤害封顶（max_damage * SELF_DAMAGE_CAP），爆炸中心偏移保证不被自己秒杀
         // （手榴弹上抛飞行 ~0.4s + 引信 1.5s → 玩家通常已远离落地中心）。
@@ -4005,7 +4063,7 @@ impl Game {
             if self.obstacle_blocks_blast(center, npc_point) {
                 continue; // 击退已施加（冲击波推开掩体后的人），伤害不给
             }
-            self.damage_npc(i, damage * f);
+            self.damage_npc(i, damage * f, DamageSource::Blast);
         }
     }
 
@@ -5273,11 +5331,13 @@ impl Game {
             if self.npcs[i].fire_accum >= 1.0 {
                 self.npcs[i].fire_accum = 0.0;
                 self.npcs[t].hp -= dps;
-                // 击杀提示：NPC 互射击杀（attacker team killed victim team + id）
+                // 击杀提示：NPC 互射击杀（击杀者阵营 + id，与玩家击杀同一套拼装）
                 if self.npcs[t].hp <= 0.0 && self.npcs[t].hp > -dps {
-                    let (a, v) = (self.npcs[i].team, self.npcs[t].team);
+                    let (aid, a, v) = (self.npcs[i].id, self.npcs[i].team, self.npcs[t].team);
                     let vid = self.npcs[t].id;
-                    self.hud.push_kill(format!("{} 击杀 {} #{}", team_name(a), team_name(v), vid));
+                    let killer = KillerLabel::Named(format!("{} #{aid}", team_name(a)));
+                    let victim = format!("{} #{vid}", team_name(v));
+                    self.hud.push_kill(kill_line(killer, &victim, ""));
                 }
             }
         }
@@ -7451,6 +7511,57 @@ mod tests {
         game.npcs = npcs;
         game.spawn_explosion(center, EXPLOSION_RADIUS, damage, knockback);
         game
+    }
+
+    /// 🔴 **kill feed 开始报"谁杀的"**（2026-09-15）。
+    ///
+    /// 此前三处调用点各写各的格式，且**只有 NPC 互射那一处带击杀者** ——
+    /// 玩家自己打死人时 feed 是"击杀 蓝方 #174"，看不出是谁干的。
+    ///
+    /// 这条测试直接把**文本契约**锁住（feed 全文此前没有任何测试覆盖）：
+    /// 玩家击杀要出现"你击杀了"，爆炸要出现"爆炸（…）击杀了"且**不能冒充**有击杀者。
+    #[test]
+    fn kill_feed_names_the_killer() {
+        let mut game = Game::new();
+        game.npcs = vec![npc_at(7, Team::Blue, [0.0, 0.0, 0.0])];
+        game.damage_npc(0, 999.0, DamageSource::Player);
+        let line = game.hud.kill_feed.first().expect("feed 应有一条").text.clone();
+        assert!(
+            line.contains("你击杀了") && line.contains("蓝方 #7"),
+            "玩家击杀应报出击杀者与死者，实测：{line}"
+        );
+
+        // 爆炸：同一发 AoE 可能同时结算多人 ⇒ **不冒充**单一击杀者，只报爆点
+        let mut blast = Game::new();
+        blast.npcs = vec![npc_at(9, Team::Red, [0.0, 0.0, 0.0])];
+        blast.spawn_explosion([3.0, 1.0, -4.0], EXPLOSION_RADIUS, 999.0, false);
+        let line = blast.hud.kill_feed.first().expect("feed 应有一条").text.clone();
+        assert!(
+            line.contains("爆炸（3,-4）击杀了") && line.contains("红方 #9"),
+            "爆炸击杀应报爆点坐标且不编造击杀者，实测：{line}"
+        );
+        assert!(
+            !line.contains("你击杀"),
+            "爆炸不是玩家的击杀，不该写成玩家杀的，实测：{line}"
+        );
+    }
+
+    /// NPC 受伤结算：扣血至 0 → 移除 + 计分 + 任务目标推进；返回是否击杀（阶段二）
+    /// 爆炸/冲击波（AoE 玩法）—— 见 `explosion_*` 系列
+    #[test]
+    fn damage_npc_reports_kill_and_removes() {
+        let mut game = Game::new();
+        game.npcs = vec![npc_at(3, Team::Blue, [0.0, 0.0, 0.0])];
+        assert!(
+            game.damage_npc(0, 40.0, DamageSource::Player) == false,
+            "未致死应返回 false"
+        );
+        assert_eq!(game.npcs.len(), 1, "未致死不应移除");
+        assert!(
+            game.damage_npc(0, 999.0, DamageSource::Player),
+            "致死应返回 true"
+        );
+        assert_eq!(game.npcs.len(), 0, "致死应移除");
     }
 
     /// AoE 伤害：爆心全伤、随距离衰减、超出半径无损（衰减语义 = shockwave_pressure）
