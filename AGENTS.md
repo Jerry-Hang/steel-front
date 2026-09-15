@@ -420,16 +420,11 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - **并行分身**：文件集两两不相交；**分身禁止 cargo**（12GB 只允许一个）**与 git**；
   `renderer.rs` 上万行**禁止整文件重写**，只许精确 edit；跨文件接口由主 Agent 定义；
   开工前先把在飞改动 commit 成干净基线。
-- **上下文节约**：非必要不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）；
-  非必要不反汇编（要看 .spv 时 `spirv-dis` 输出到临时文件再 grep）；
-  非必要不反复读同一文件；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat` 或限定文件。
-  ⚠ 本 shell 里 `Get-Content` 数行数不准（实测 2826 vs 实际 3229），**行号以 `read` 工具为准**。
+- **上下文节约**：非必要不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）、不反汇编（要看 .spv 时 `spirv-dis` 到临时文件再 grep）、不反复读同一文件；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat` 或限定文件。⚠ 本 shell 里 `Get-Content` 数行数不准，**行号以 `read` 工具为准**（教训 8）。
 - 🔴 **`cargo check` 不能替代 0 警告闸门**：`check` 与 `build` 的 fingerprint 不同，
   **`check` 会重放它自己缓存下来的旧诊断** —— 实测 `cargo check --release` 报 28 条 `never used`，
   而同一次 `git checkout` 之后 `cargo build --release` 是 0 警告。
-  **判据：`0 警告` 只能用 `cargo build --release`（或 `cargo test --release`）验。**
-  ⚠️ 实验占着 exe 时 `build` 会卡在**链接**（`failed to remove …exe`），
-  但**编译与警告在此之前就已产出** ⇒ 看警告仍然有效，别把那个 error 当成编译失败。
+  **判据：`0 警告` 只能用 `cargo build --release`（或 `cargo test --release`）验。** ⚠️ 实验占着 exe 时 `build` 会卡在**链接**（`failed to remove …exe`），但**编译与警告在此之前就已产出** ⇒ 看警告仍然有效。
 - 🔴 **`> file` 重定向会写成 UTF-16**（实测 102552 B 的真实文件写成 184852 B）：
   要取 HEAD 版本做字节比对，用 `git checkout-index` / `git cat-file` 写二进制，或用
   `git diff` / `git status` 判断，**不要用 PowerShell 的 `>`**（教训 7 的另一面）。
@@ -608,7 +603,7 @@ baseline（红 +X / 蓝 −X）均值 **+12.8**、极差 29；swapped（红 −X
 29. **"看着不对劲"的东西，先换视角看清它是什么，再去读代码找它**（曾连读五轮代码猜类别、五次全错）。**读代码是"知道名字之后"做的事。**
 30. **改回源码要用编辑器工具或 `git checkout --`**，不要过 PowerShell 字符串（会留残差，教训 7 的延伸）。⚠️ **本 shell 的 `ReadAllText` 按 GBK 解码**（65918 B 的文件只读出 38703 字符）⇒ 针对中文的替换**全部静默打不中**，按"读到的行号"删除会**删掉别处的行**。**⇒ 中文文档的编辑一律走编辑工具**；非要用 shell，先验 `(ReadAllText).Length -eq (Get-Item).Length`。
 31. **🔴 遇到视觉缺陷，`rg` 代码注释是第一动作**（本仓的方式是「改掉 + 在注释里留事后分析」，用**现象的词**搜注释常直接命中历史）。
-32. **"整类地改"只能否证、不能定位**：定位画面里某片几何要靠 `RV3D_DEBUG_KIND=1`（按类染色）+ `RV3D_DUMP_NEAR=<米>`（逐件打印）。**⚠️ 半径要给够**（太小给出误导性的空结果）。
+32. **"整类地改"只能否证、不能定位**（工具与半径判据见教训 17）。
 33. **🔴 论及资产是否"合理"之前，先走完证据链：名字 → `glb_probe.py` 尺寸 → 生成器规格表**（连错三轮的根因都是每轮只补一个证据源）。
 34. **🔴 参数语义要读注释，不要靠"同一套网格"外推。另一面：观感改善只能证明"改动有效果"，不能证明"数值变对了"**（那三轮截图都在变好，但改善来自别的因素）。
 35. **🔴 同一份代码跑两次也有 ~3% 的差异**（`perf_run.ps1` 连测两次同一二进制，中位 fps **69.7 / 71.8**）⇒ **小于 ~5% 的帧率差必须多轮重复才能开口**；单次 A/B 只能证伪"巨大回归"，不能证明"变快了"（教训 24 的量化版）。
