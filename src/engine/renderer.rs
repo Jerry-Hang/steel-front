@@ -1776,11 +1776,14 @@ impl Renderer {
         // 诊断（2026-08-15）：surface current_extent vs 最终 swapchain extent ——
         // 若 current_extent 是窗口逻辑尺寸而实际物理尺寸不同，画面会 1:1 错位
         log::info!(
-            "swapchain diag: current_extent={}x{} final={}x{}",
+            "swapchain diag: current_extent={}x{} final={}x{} flags={:?} min_images={} usage={:?}",
             surface_capabilities.current_extent.width,
             surface_capabilities.current_extent.height,
             extent.width,
-            extent.height
+            extent.height,
+            swapchain_create_info.flags,
+            swapchain_create_info.min_image_count,
+            swapchain_create_info.image_usage
         );
 
         self.swapchain_image_views = self
@@ -9730,13 +9733,10 @@ impl Renderer {
         let fence_create_info =
             vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
+        // image-available 与 fence **按在飞帧**分配：围栏在每帧开头就被等到，
+        // 所以轮到同一个槽位时，上一次等待它的 submit 必然已经完成 ⇒ 复用合法。
         for _ in 0..self.max_frames_in_flight {
             let image_available = unsafe {
-                self.device
-                    .create_semaphore(&semaphore_create_info, None)
-                    .map_err(|e| format!("创建信号量失败: {}", e))?
-            };
-            let render_finished = unsafe {
                 self.device
                     .create_semaphore(&semaphore_create_info, None)
                     .map_err(|e| format!("创建信号量失败: {}", e))?
@@ -9747,9 +9747,61 @@ impl Renderer {
                     .map_err(|e| format!("创建围栏失败: {}", e))?
             };
             self.image_available_semaphores.push(image_available);
-            self.render_finished_semaphores.push(render_finished);
             self.in_flight_fences.push(fence);
         }
+        // render-finished **按交换链图像**分配（理由见该函数文档）
+        self.resize_render_finished_semaphores()?;
+        Ok(())
+    }
+
+    /// 按**当前交换链图像数**重排 render-finished 信号量。
+    ///
+    /// ## 为什么不能按「在飞帧」分配（2026-09-15 由验证层抓出）
+    ///
+    /// 原来是 `render_finished_semaphores[current_frame]`（在飞帧 = 2），而交换链有 **3** 张图像。
+    /// 打开验证层（`RV3D_VALIDATION=1`，本轮 mesh.spv 修好后才第一次真跑起来）立刻报：
+    ///
+    /// ```text
+    /// vkQueueSubmit(): pSubmits[0].pSignalSemaphores[0] (VkSemaphore 0x910000000091) is being
+    /// signaled by VkQueue ..., but it may still be in use by VkSwapchainKHR ...
+    /// Most recently acquired image indices: [0], 1, 2.
+    /// (Brackets mark the last use of VkSemaphore ... in a presentation operation.)
+    /// VUID-vkQueueSubmit-pSignalSemaphores-00067
+    /// ```
+    ///
+    /// 方括号标出那个信号量最后是被**图像 0** 的 present 用掉的 ——
+    /// `vkQueuePresentKHR` **不保证**在 `vkQueueSubmit` 返回时就已经消费掉等待的信号量，
+    /// 于是在飞帧轮回到同一槽位时会**重复 signal 一个仍被 present 持有的二值信号量**。
+    ///
+    /// 改成「每张交换链图像一个」之后契约才成立：`vkAcquireNextImageKHR` 返回图像 i
+    /// **本身就保证**图像 i 不再被使用（那次 present 已执行完并释放它），
+    /// 所以此刻重新 signal `render_finished[i]` 是合法的。
+    ///
+    /// ⚠ 调用前必须保证**设备已空闲**（`recreate_swapchain` 开头就 `wait_idle()`）：
+    /// 销毁可能仍在被 pending present 等待的信号量同样是未定义行为。
+    fn resize_render_finished_semaphores(&mut self) -> Result<(), String> {
+        let want = self.swapchain_images.len();
+        if self.render_finished_semaphores.len() == want {
+            // 图像数没变：`recreate_swapchain` 已经 `wait_idle()`，旧信号量必然已无主，直接复用
+            return Ok(());
+        }
+        let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+        for semaphore in std::mem::take(&mut self.render_finished_semaphores) {
+            unsafe { self.device.destroy_semaphore(semaphore, None) };
+        }
+        for _ in 0..want {
+            let semaphore = unsafe {
+                self.device
+                    .create_semaphore(&semaphore_create_info, None)
+                    .map_err(|e| format!("创建 render-finished 信号量失败: {}", e))?
+            };
+            self.render_finished_semaphores.push(semaphore);
+        }
+        log::info!(
+            "render-finished 信号量重排为 {} 个（= 交换链图像数，不再跟在飞帧数 {} 走）",
+            self.render_finished_semaphores.len(),
+            self.max_frames_in_flight
+        );
         Ok(())
     }
 
@@ -10051,7 +10103,20 @@ impl Renderer {
 
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let signal_semaphores = [self.render_finished_semaphores[self.current_frame]];
+        // ⚠ **按下标 `image_index` 取，不是 `current_frame`** —— 理由见
+        // `resize_render_finished_semaphores` 的文档（VUID-vkQueueSubmit-pSignalSemaphores-00067）。
+        let render_finished = *self
+            .render_finished_semaphores
+            .get(image_index as usize)
+            .ok_or_else(|| {
+                format!(
+                    "render-finished 信号量缺失：image_index={}，共 {} 个（应等于交换链图像数 {}）",
+                    image_index,
+                    self.render_finished_semaphores.len(),
+                    self.swapchain_images.len()
+                )
+            })?;
+        let signal_semaphores = [render_finished];
         let cmd_buffers = [self.command_buffers[image_index as usize]];
 
         let submit_info = vk::SubmitInfo::default()
@@ -10128,6 +10193,9 @@ impl Renderer {
         self.wait_idle()?;
         self.destroy_swapchain();
         self.init_swapchain()?;
+        // 交换链图像数可能变了 ⇒ render-finished 信号量的个数必须跟着变
+        // （此处设备已空闲，销毁/重建都安全）
+        self.resize_render_finished_semaphores()?;
         self.init_msaa_resources()?;
         self.init_depth_resources()?;
         self.init_framebuffers()?;
