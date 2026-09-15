@@ -3841,6 +3841,56 @@ impl Game {
     /// - 伤害衰减复用 `simd::shockwave_pressure`（所有 NPC 一次批算，指令集选路可测）；
     /// - `knockback=true` 时对命中 NPC 施加径向推挤（advance_npc 每帧指数衰减）；
     /// - 玩家在冲击半径内 → 震屏（`camera_shake_offset` 每帧读取）。
+    /// 🔴 **爆炸冲击波是否被障碍挡住**（2026-09-15 补：此前 AoE 只看距离，`ob` 后面的目标
+    /// 与开阔地一样吃满伤害 —— 隔着掩体炸不死人，因为掩体不存在）。
+    ///
+    /// 判据取自**爆心几何**，不是"障碍在不在半径内"：
+    /// - 只考虑**爆心到目标之间**的障碍 ⇒ 目标背后的掩体不替它挡（那是背向的，挡不住冲击波）；
+    /// - **包含爆心或目标的障碍一律跳过** —— 手榴弹贴在掩体上炸时，爆心在障碍 AABB 内部，
+    ///   而那一格障碍自己就是被炸的对象，不能反过来把爆心"堵死"（全图只有一格、
+    ///   其余全被挡住是最坏的结果）；目标站在障碍里同理（那是生成/推挤的异常态，
+    ///   由距离衰减负责，不该让 blast 判成"被自己挡住"）。
+    ///
+    /// 与 `npc_occluded` 同一套 `segment_hits_aabb`（同一份几何代码，避免两套求交漂移），
+    /// 差别只在**扫描的是 `map.obstacles` 而不是 `world.bodies`**：前者是玩法障碍
+    /// （有血量、可摧毁），后者是物理刚体，而 AoE 伤害结算的正是前者。
+    fn obstacle_blocks_blast(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        self.map
+            .obstacles
+            .iter()
+            .any(|ob| Self::blast_sample_blocked(from, to, ob))
+    }
+
+    /// 单个障碍的判定（拆出来是为了能直测"包含端点就跳过"这条规则）
+    fn blast_sample_blocked(from: [f32; 3], to: [f32; 3], ob: &MapObstacle) -> bool {
+        let aabb = Self::obstacle_aabb(ob);
+        // 端点落在盒内 ⇒ 这一格不是"隔在中间"，不构成遮挡
+        if Self::aabb_contains_point(&aabb, from) || Self::aabb_contains_point(&aabb, to) {
+            return false;
+        }
+        Self::segment_hits_aabb(
+            from[0], from[1], from[2], to[0], to[1], to[2], &aabb,
+        )
+    }
+
+    /// 障碍的碰撞 AABB（碰撞体始终是 AABB、与 `shape` 无关 —— 见 `MapObstacle::shape` 注释）
+    fn obstacle_aabb(ob: &MapObstacle) -> crate::engine::physics::Aabb {
+        use crate::engine::physics::Vec3;
+        crate::engine::physics::Aabb {
+            min: Vec3::new(ob.x - ob.half_w, ob.y - ob.half_h, ob.z - ob.half_d),
+            max: Vec3::new(ob.x + ob.half_w, ob.y + ob.half_h, ob.z + ob.half_d),
+        }
+    }
+
+    fn aabb_contains_point(a: &crate::engine::physics::Aabb, p: [f32; 3]) -> bool {
+        p[0] >= a.min.x
+            && p[0] <= a.max.x
+            && p[1] >= a.min.y
+            && p[1] <= a.max.y
+            && p[2] >= a.min.z
+            && p[2] <= a.max.z
+    }
+
     fn spawn_explosion(&mut self, center: [f32; 3], radius: f32, damage: f32, knockback: bool) {
         log::info!(
             "explosion: at ({:.1}, {:.1}, {:.1}) radius={:.0} dmg={:.0} knockback={}",
@@ -3869,12 +3919,15 @@ impl Game {
             self.shake_timer = SHAKE_DURATION;
             self.shake_strength = SHAKE_STRENGTH * (1.0 - dist / SHAKE_RADIUS).clamp(0.15, 1.0);
         }
-        // 玩家自伤：仅在半径内且游戏进行中（结算画面不扣血）；伤害 = 距离衰减 × 封顶系数
+        // 玩家自伤：仅在半径内、游戏进行中、且**爆心与玩家之间没有障碍**；伤害 = 距离衰减 × 封顶系数
+        // （挡在掩体后面就吃不到 —— 否则"躲起来"对爆炸无效）
+        let player_point = [eye.x, eye.y, eye.z];
         if damage > 0.0
             && dist < radius
             && self.game_state == GameState::Playing
             && self.hud.health > 0.0
             && !self.player_invincible
+            && !self.obstacle_blocks_blast(center, player_point)
         {
             let fall = 1.0 - (dist / radius).clamp(0.0, 1.0);
             let self_dmg = (damage * fall * SELF_DAMAGE_FACTOR).min(SELF_DAMAGE_CAP);
@@ -3941,6 +3994,16 @@ impl Game {
                 let d = (dx * dx + dz * dz).sqrt().max(1e-4);
                 self.npcs[i].knockback[0] += dx / d * KNOCKBACK_SPEED * f;
                 self.npcs[i].knockback[1] += dz / d * KNOCKBACK_SPEED * f;
+            }
+            // 🔴 冲击波要绕开障碍：隔着掩体的 NPC 不该吃这一发（此前只看压力衰减、
+            // 完全不管中间有没有墙 —— 掩体对爆炸等于不存在）。
+            let npc_point = [
+                self.npcs[i].position[0],
+                self.npcs[i].position[1] + NPC_HIT_CENTER_Y,
+                self.npcs[i].position[2],
+            ];
+            if self.obstacle_blocks_blast(center, npc_point) {
+                continue; // 击退已施加（冲击波推开掩体后的人），伤害不给
             }
             self.damage_npc(i, damage * f);
         }
@@ -7436,6 +7499,100 @@ mod tests {
             .find(|o| (o.x - 50.0).abs() < 1.0 && (o.z - 50.0).abs() < 1.0)
             .expect("远处障碍应保留");
         assert!((far.hp - 150.0).abs() < 1e-5, "远处障碍无伤");
+    }
+
+    /// 🔴 **冲击波被障碍挡住：掩体后面的人不该吃满伤害**（2026-09-15）。
+    ///
+    /// 此前 `spawn_explosion` 的 AoE 只有"半径内 + 距离衰减"，**没有任何视线判定** ——
+    /// 掩体对爆炸等于不存在，"躲在墙后"对爆炸完全无效。
+    ///
+    /// 这里用**三格对照**把"挡住"和"算错"分开（判据不是"受伤变少"，而是几何本身）：
+    /// - A 垂直挡在爆心与 NPC 之间 → NPC **一点伤害都不该吃**（仍 100HP）；
+    /// - B 与爆心-NPC 连线**平行**（旁边那堵墙）→ 人**照吃** —— 这条是防过度修正的：
+    ///   若把判据写成"爆心到 NPC 的扫掠体与障碍相交"，平行墙会把本不存在的遮挡算进来；
+    /// - C 同一位置不放障碍 → 对照组，证明 A 的 100HP 是"被挡住"而不是"本来就不掉血"。
+    ///
+    /// ⚠ 三条都从 `Game::new()` 起手并**清空自带障碍**：默认场景含场景装饰，
+    /// 不清的话"某个装饰正好挡在中间"会让这三条悄悄失真。
+    #[test]
+    fn explosion_blast_is_blocked_by_cover() {
+        let npc = || npc_at(1, Team::Red, [6.0, 0.0, 0.0]);
+        let hp_of = |game: &Game| game.npcs[0].hp;
+
+        // C：对照组（无障碍）—— 6m 处应当受伤
+        let mut open = Game::new();
+        open.map.obstacles.clear();
+        open.npcs = vec![npc()];
+        open.spawn_explosion([0.0, 1.0, 0.0], EXPLOSION_RADIUS, EXPLOSION_DAMAGE, true);
+        assert!(
+            hp_of(&open) < 100.0,
+            "对照组：开阔地 6m 处的 NPC 应当受伤（实测 {}）",
+            hp_of(&open)
+        );
+
+        // A：垂直障碍挡在中间 —— 爆心 x=0 → NPC x=6，墙放 x=3
+        let mut blocked = Game::new();
+        blocked.map.obstacles.clear();
+        blocked
+            .map
+            .obstacles
+            .push(MapObstacle::new(ObstacleKind::Wall, 3.0, 0.0, 0.5, 0.5));
+        blocked.npcs = vec![npc()];
+        blocked.spawn_explosion([0.0, 1.0, 0.0], EXPLOSION_RADIUS, EXPLOSION_DAMAGE, true);
+        assert_eq!(
+            hp_of(&blocked),
+            100.0,
+            "掩体后面的人不该吃伤害（实测 {}）",
+            hp_of(&blocked)
+        );
+
+        // B：平行墙（不挡路）—— 人照吃；这条专门防"扫掠体"式的过度修正
+        let mut parallel = Game::new();
+        parallel.map.obstacles.clear();
+        parallel
+            .map
+            .obstacles
+            .push(MapObstacle::new(ObstacleKind::Wall, 3.0, 4.0, 0.35, 0.35));
+        parallel.npcs = vec![npc()];
+        parallel.spawn_explosion([0.0, 1.0, 0.0], EXPLOSION_RADIUS, EXPLOSION_DAMAGE, true);
+        assert!(
+            hp_of(&parallel) < 100.0,
+            "旁边的墙不该替人挡冲击波（实测 {}）",
+            hp_of(&parallel)
+        );
+    }
+
+    /// 爆心落在障碍内部（手榴弹贴着掩体炸）时**不能把自己堵死**：
+    /// 那一格障碍自己就是被炸对象，不该把爆心判成"被遮挡"。
+    ///
+    /// ⚠ 用 `GRENADE_EXPLOSION_DAMAGE`(120) 而不是 `EXPLOSION_DAMAGE`(60)：
+    /// 前者是手榴弹的真实伤害，120 > Barrier(100HP) 才能验证"贴脸炸掉掩体"。
+    #[test]
+    fn explosion_inside_obstacle_still_kills_through() {
+        let mut game = Game::new();
+        game.map.obstacles.clear();
+        // 爆心就在这格障碍里（half_h = 1.2 ⇒ y∈[0,2.4]，爆心 y=1.0 在内）
+        game.map
+            .obstacles
+            .push(MapObstacle::new(ObstacleKind::Barrier, 0.0, 0.0, 1.0, 1.0));
+        // NPC 在 3m 外、路径**不经过**这格障碍（z 方向）
+        game.npcs = vec![npc_at(1, Team::Red, [0.0, 0.0, 3.0])];
+        game.spawn_explosion(
+            [0.0, 1.0, 0.0],
+            EXPLOSION_RADIUS,
+            GRENADE_EXPLOSION_DAMAGE,
+            true,
+        );
+        assert!(
+            game.npcs[0].hp < 100.0,
+            "贴脸炸掩体时，旁边的人仍应受伤（实测 {}）",
+            game.npcs[0].hp
+        );
+        assert_eq!(
+            game.map.obstacles.len(),
+            0,
+            "被炸的那格障碍自己应被摧毁（120 伤 > Barrier 的 100HP）"
+        );
     }
 
     /// NPC 投掷手榴弹：压力模式 Attack 态 NPC 冷却结束 → 朝敌对目标投掷（阶段二）
