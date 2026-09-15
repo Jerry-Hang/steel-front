@@ -7,9 +7,11 @@
 > ### 当前基线
 > `cargo test --release` **485 passed / 0 failed / 0 警告**（2026-09-15）；
 > 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**）。
-> `AGENTS.md` **65,421 B（63.9 KB）** —— ⚠️ 已超 <48KB 目标，距 **65,536 B 硬上限只剩 115 B**。
-> 最新迭代（2026-09-15）：**未结案 #2 结案 —— PT 史上首次真正出图**（`screenshots/pt_live_b.png`）
-> 与**未结案 #3 重开并真修**（再往前是 **#9 结案**：mesh 着色器过严格 `spirv-val`），详见本文件顶部的迭代记录。
+> `AGENTS.md` **58,251 B（56.9 KB）** —— 仍超 <48KB 目标，但**距 65,536 B 硬上限有 ~7.3 KB 余量**
+> （2026-09-15 做过一次结构性瘦身：已结案条目压成结论行，判据留在铁律与教训里）。
+> 最新迭代（2026-09-15 续）：**PT 通路的验证层问题全部清零**（存储图像格式 UB + overlay pass 三处），
+> 跑满一整轮 PT 只剩 #23 那条层侧误报；再往前是 **#2 结案 —— PT 史上首次真正出图**（`screenshots/pt_live_b.png`）、
+> **#3 重开并真修**、**#9 结案**（mesh 着色器过严格 `spirv-val`），详见本文件顶部的迭代记录。
 >
 > ### 大改造 9 条的账
 >
@@ -41,6 +43,77 @@
 ---
 
 
+
+
+# ✅ PT 通路的验证层问题全部清零（存储图像格式 UB + overlay pass 三处）（2026-09-15 续）
+
+## 1. 最有价值的一条：存储图像格式不匹配 ⇒ **整张图写入未定义值**
+
+- `pt_img` 建的是 **`B8G8R8A8_UNORM`**，而 `assets/rt/pt_panorama.glsl` 声明的是
+  `layout(set = 0, binding = 1, rgba8) uniform writeonly image2D OutImg;`（= **`R8G8B8A8_UNORM`**）。
+- 验证层原文（节选）：*"… OpTypeImage … Format operand **Rgba8** (VK_FORMAT_R8G8B8A8_UNORM) which
+  doesn't match the VkImageView format (VK_FORMAT_B8G8R8A8_UNORM). Any loads or stores with the
+  variable will produce **undefined values to the whole image** (not just the texel being accessed).
+  While the formats are **compatible**, Storage Images must **exactly match**."*
+- ⇒ **PT 一直在往图里写未定义值**：不崩、不报错、没有症状，只是画面**略灰略脏** ——
+  与**教训 15（越界读静默）**完全同一类 UB。
+- 修法：**让图像跟着着色器走** —— `pt_img` 与它的 view **双双改成 `R8G8B8A8_UNORM`**。blit 到
+  `B8G8R8A8_SRGB` 交换链**通道仍然正确**：两者同属一个格式兼容类，R/B 的 swizzle 由 blit 承担。
+- 顺手补了**建图前的显式检查**（`vkGetPhysicalDeviceFormatProperties(...).optimal_tiling_features.STORAGE_IMAGE`
+  —— 该能力对具体格式是**可选**的）：不支持就返回 `Err`，而不是静默建出一张不能当存储图像用的图。
+
+## 2. PT → HUD overlay 通路上还有三个真 bug
+
+三个都是**验证层在 PT 真的跑起来之后**才报出来的（此前 PT 必然灰屏/崩溃，谁也看不见）：
+
+- **`VUID-vkCmdBeginRenderPass-initialLayout-00900`**：overlay 的 render pass 声明
+  `initialLayout = PRESENT_SRC_KHR`，而调用方在 begin **之前已把它转到 `COLOR_ATTACHMENT_OPTIMAL`**。
+  修法：`initialLayout` 改成 **`COLOR_ATTACHMENT_OPTIMAL`**（对齐那条 barrier），
+  `finalLayout` **保持 `PRESENT_SRC_KHR`**。
+- **`VUID-vkCmdDraw-renderPass-02684`**：overlay pass **复用了主 pass 的 `hud_pipeline`** —— 那条管线
+  是给 **MSAA 4x + 带深度附件**的主 render pass 建的，overlay 是 **1 采样、无深度**。验证层证据：
+  `pAttachments[0].samples (1_BIT) != (4_BIT)`、`pDepthStencilAttachment ... VK_ATTACHMENT_UNUSED
+  while the second is 2`、`dependencyCount 0 != 1`。修法：**新增专用 `hud_overlay_pipeline`**（同着色器 /
+  同顶点格式 / 同混合状态，**1 采样、无深度、`render_pass = hud_render_pass`**），**复用
+  `hud_pipeline_layout`**；主通路的 `hud_pipeline` 没动。
+- **`VUID-VkImageMemoryBarrier-oldLayout-01197`**：overlay render pass 之后又发了一条
+  `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` 的 barrier，**而 `finalLayout` 已把图像停在
+  `PRESENT_SRC_KHR`** ⇒ `oldLayout` 是错的。修法：**删掉这条 barrier**（转换由 render pass 完成）。
+
+## 3. 结果：`RV3D_VALIDATION=1` 跑满一整轮 PT，只剩一条层侧误报
+
+- **唯一剩下的报文是 `VUID-VkSwapchainCreateInfoKHR-flags-parameter`（5 行 = 5 次交换链创建）** ——
+  即**未结案 #23** 那条"与自己的输入自相矛盾"的**层侧误报**，不是引擎的问题。
+- ⇒ **PT 通路本轮之后没有任何已知验证层欠账**（#2 遗留的 `oldLayout-01197` / `initialLayout-00900` /
+  `renderPass-02684` 三条已全部消掉），三条证据如下。
+
+## 4. 验收（三条互相独立的证据）
+
+- **PT 出图 + HUD 完整**：`screenshots/pt_clean_cap_b.png` —— 路径追踪画面之上 **FPS / LOD / 目标 /
+  小地图 / 血量 / 武器 HUD 全部正常合成** ⇒ **换管线 + 删 barrier 没打坏 overlay**（本轮唯一有
+  "画面回归"风险的改动）。
+- **光栅不受影响**：同机位 A/B（`RV3D_CAM=fly:0,140,80:0,50` + `RV3D_NO_NPC_CULL=1`）差
+  **439 / 4,096,000 px（0.011%）**，**包围盒 (144,48)-(458,143) = HUD 的 fps/实体文字块**，与既有噪声底
+  （**251–311 px、同一包围盒**）同一量级 ⇒ 3D 画面逐像素一致。
+- `cargo build --release` **0 警告**；`cargo test --release` **485 passed / 0 failed**；
+  `scripts/run_smoke_pm.ps1`（光栅、PT 关）→ **`RESULT: ALL-OK`**。
+
+## 5. ⚠️ 一笔反复出现的税：CJK 字形守卫**今天第三次**响
+
+- `font_cjk::tests::source_cjk_codepoints_all_have_glyphs` 又红：新注释用了 **怕（U+6015）**，
+  **不在点阵表里**；而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重新生成**。修法＝**改写措辞**、
+  只用表里已有的字；`--scan` 复核：**1595 码点 / 0 缺失 / 0 死重**。
+- **规则：往 `src/` 加中文散文，先做好"要改措辞"的心理准备** —— 不是测试太严，而是"表无法重建"的
+  必然代价（见 `AGENTS.md` 模块地图的 🔴）。
+
+## 6. 📄 文档：铁律 B 的 PT 段 + `AGENTS.md` 逼近硬上限
+
+- (1)(2) 里**仍然生效**的规则已写进 `AGENTS.md` **铁律 B 的 PT 段**：存储图像格式必须与 GLSL 声明
+  **逐位相等**（"兼容"不算数 + 建图前查 `STORAGE_IMAGE`）、PT 要 blit ⇒ `image_usage` 必须含
+  `TRANSFER_DST`、overlay **必须用独立管线**且 `initialLayout = COLOR_ATTACHMENT_OPTIMAL`、
+  **别补收尾 barrier**。
+- 为留在 **65,536 B 硬上限**内，同轮把几条**已结案**的未结案条目压成一行；随后又做了一次**结构性瘦身**：
+  `AGENTS.md` **65,435 → 58,251 B**（余量从 ~101 B 恢复到 ~7.3 KB），铁律 / 未结案 / 教训三类内容一条没删。
 
 
 # ✅ 未结案 #2 结案 —— PT 史上首次真正出图；#3 原结案被推翻并真修（2026-09-15）
