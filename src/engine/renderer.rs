@@ -1744,6 +1744,29 @@ impl Renderer {
             vk::SharingMode::EXCLUSIVE
         };
 
+        // COLOR_ATTACHMENT | TRANSFER_SRC：截图读回需要把 swapchain 图像作为
+        // TRANSFER 源拷贝到 staging buffer（vkCmdCopyImageToBuffer 的 VUID 要求）。
+        //
+        // 🔴 **TRANSFER_DST（2026-09-15 补，未结案 #2 的直接证据）**：PT 实时通路把
+        // `pt_img` blit 到 swapchain 图像（见本文件 PT present 段：先 barrier 到
+        // `TRANSFER_DST_OPTIMAL`，再 `cmd_blit_image`），**那一步要求目标图像带 TRANSFER_DST**。
+        // 缺它时开启验证层（`RV3D_VALIDATION=1`）当场报两条：
+        //   * `VUID-vkCmdBlitImage-dstImage-00224`（dstImage 缺 TRANSFER_DST）
+        //   * `VUID-VkImageMemoryBarrier-oldLayout-01213`（barrier 到 TRANSFER_DST_OPTIMAL）
+        // 这正是"设 `pt_enable=true` 一启动就 `0xC0000005`"的来源：**非法用法驱动不报错，
+        // 崩在别处**。PT 之前一直开不起来，所以这条从来没被验证层看见过。
+        let mut swapchain_usage =
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+        if surface_capabilities
+            .supported_usage_flags
+            .contains(vk::ImageUsageFlags::TRANSFER_DST)
+        {
+            swapchain_usage |= vk::ImageUsageFlags::TRANSFER_DST;
+        } else {
+            log::warn!(
+                "surface 不支持 TRANSFER_DST：PT 实时通路无法 blit 到交换链（PT 打开时画面会异常）"
+            );
+        }
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(self.surface)
             .min_image_count(image_count)
@@ -1751,9 +1774,7 @@ impl Renderer {
             .image_color_space(format.color_space)
             .image_extent(extent)
             .image_array_layers(1)
-            // COLOR_ATTACHMENT | TRANSFER_SRC：截图读回需要把 swapchain 图像作为
-            // TRANSFER 源拷贝到 staging buffer（vkCmdCopyImageToBuffer 的 VUID 要求）。
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+            .image_usage(swapchain_usage)
             .image_sharing_mode(sharing_mode)
             .queue_family_indices(&queue_family_indices)
             .pre_transform(surface_capabilities.current_transform)
@@ -8430,16 +8451,46 @@ impl Renderer {
                 .subpasses(&subpasses);
             self.hud_render_pass = self.device.create_render_pass(&rp_info, None)
                 .map_err(|e| format!("hud rp: {e}"))?;
-            self.hud_framebuffers = self.swapchain_image_views.iter().map(|&iv| {
+        }
+        self.recreate_hud_framebuffers()
+    }
+
+    /// 按**当前** `swapchain_image_views` 重建 HUD overlay 的 framebuffer。
+    ///
+    /// 🔴 **这就是未结案 #2「PT 一启动即 0xC0000005」的根因（2026-09-15 由验证层抓出）**：
+    /// `hud_framebuffers` 原本只在 `init_hud_overlay`（启动时一次）里创建，而
+    /// `destroy_swapchain` 会**销毁它依赖的 `swapchain_image_views`** 却不重建它们。
+    /// 启动阶段就有 **5 次** swapchain 重建（resize 事件），所以这组 framebuffer 从很早就
+    /// 指向**已销毁的 ImageView**；而它唯一的消费者是 **PT 通路**（PT 画完再叠 HUD），
+    /// 光栅路径走 `self.framebuffers`（那次是重建过的）——
+    /// ⇒ 症状正好是"**光栅一切正常、一开 PT 就崩**"，而且崩因与 PT 本身毫无关系。
+    ///
+    /// 验证层原话：
+    /// ```text
+    /// vkCmdBeginRenderPass(): pCreateInfo->pAttachments[0] VkImageView 0x70000000007 is invalid.
+    /// VUID-VkRenderPassBeginInfo-framebuffer-parameter
+    /// ```
+    fn recreate_hud_framebuffers(&mut self) -> Result<(), String> {
+        if self.hud_render_pass == vk::RenderPass::null() {
+            return Ok(()); // HUD overlay 未启用（无 HUD 管线），无需 framebuffer
+        }
+        for &framebuffer in &self.hud_framebuffers {
+            unsafe { self.device.destroy_framebuffer(framebuffer, None) };
+        }
+        self.hud_framebuffers = self
+            .swapchain_image_views
+            .iter()
+            .map(|&iv| {
                 let fbi = vk::FramebufferCreateInfo::default()
                     .render_pass(self.hud_render_pass)
                     .attachments(std::slice::from_ref(&iv))
                     .width(self.swapchain_extent.width)
                     .height(self.swapchain_extent.height)
                     .layers(1);
-                self.device.create_framebuffer(&fbi, None).map_err(|e| format!("hud fb: {e}"))
-            }).collect::<Result<Vec<_>, _>>()?;
-        }
+                unsafe { self.device.create_framebuffer(&fbi, None) }
+                    .map_err(|e| format!("hud fb: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
 
@@ -10196,6 +10247,10 @@ impl Renderer {
         // 交换链图像数可能变了 ⇒ render-finished 信号量的个数必须跟着变
         // （此处设备已空闲，销毁/重建都安全）
         self.resize_render_finished_semaphores()?;
+        // 🔴 HUD overlay 的 framebuffer 绑的是**交换链 ImageView**，必须跟着重建 ——
+        // 漏掉这一步就是未结案 #2：PT 通路随后用一组指向已销毁 ImageView 的 framebuffer
+        // （见 `recreate_hud_framebuffers` 的文档）
+        self.recreate_hud_framebuffers()?;
         self.init_msaa_resources()?;
         self.init_depth_resources()?;
         self.init_framebuffers()?;
@@ -10228,6 +10283,12 @@ impl Renderer {
     }
 
     fn destroy_swapchain(&mut self) {
+        // HUD overlay 的 framebuffer 引用 `swapchain_image_views`，**必须先于它们销毁**
+        // （2026-09-15 补：此前这里漏了它，于是每次重建都留下一组悬空句柄）
+        for &framebuffer in &self.hud_framebuffers {
+            unsafe { self.device.destroy_framebuffer(framebuffer, None) };
+        }
+        self.hud_framebuffers.clear();
         for &framebuffer in &self.framebuffers {
             unsafe { self.device.destroy_framebuffer(framebuffer, None) };
         }
@@ -10311,6 +10372,10 @@ impl Drop for Renderer {
 
             // 释放帧缓冲
             for &framebuffer in &self.framebuffers {
+                self.device.destroy_framebuffer(framebuffer, None);
+            }
+            // HUD overlay 的 framebuffer（只被 PT 通路消费，见 recreate_hud_framebuffers）
+            for &framebuffer in &self.hud_framebuffers {
                 self.device.destroy_framebuffer(framebuffer, None);
             }
 
