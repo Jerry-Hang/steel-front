@@ -44,7 +44,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `ui.rs` | 2615 | HUD / 菜单 / 设置 / 键位表 |
 | `engine/city.rs` | 2004 | 程序化城市生成 |
 | `net.rs` | 1732 | UDP 联机（协议魔数 'S'） |
-| `engine/cjk_glyphs.rs` | **1635** | 生成的中文点阵字模，**勿手改**。⚠️ 2026-09-14 由 **21490 行 / 2.26 MB 裁到 165 KB**（换 Noto Sans SC + 只留源码真正用到的 1591 个码点，−92.7%）⇒ **看到旧记录写"21490 行"是过期的**。🔴 **清单 `tools/cjk_used_codepoints.txt` 会过期**（新加中文却没重跑 `--scan`），已有测试 `source_cjk_codepoints_all_have_glyphs` 独立重扫 `src/` 兜底；它红了 = 有人加了中文没重扫，命令 `python tools/extract_cjk_glyphs.py --scan` |
+| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。⚠️ 2026-09-14 由 **21490 行 / 2.26 MB 裁到 166 KB**（换 Noto Sans SC + 只留源码真正用到的 1595 个码点，−92.7%）⇒ **看到旧记录写"21490 行"是过期的**。🔴 **清单 `tools/cjk_used_codepoints.txt` 会过期**（新加中文却没重跑 `--scan`），已有测试 `source_cjk_codepoints_all_have_glyphs` 独立重扫 `src/` 兜底；它红了 = 有人加了中文没重扫，命令 `python tools/extract_cjk_glyphs.py --scan` |
 | `engine/ai.rs` / `weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1435 / 1431 / 1139 / 1124 / 1096 / 1054 | AI 分层与战术 / 武器系统 / CPU 拓扑与亲和 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
 | `llm_cmd.rs` | 549 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
@@ -646,11 +646,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     顺手清了三处**陈旧**的 `#[allow(dead_code)]`（`SHADOW_MAP_SIZE` / `DEFAULT_SHADOW_*`）。
     ⚠️ 其余 `#[allow]` **必须保留** —— 只有 `cfg(test)` 用处，删了破 0 警告红线。
 16. ~~**`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**~~ **已结案（2026-09-14）——文件已不存在**：`tests/` 为空、无 `.bak`、`Cargo.toml` 无 `[[test]]`。条目描述的状态早被清理，只是没人回来划掉它。
-17. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响；
+17. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响。
     ~~手榴弹 AoE 不结算障碍~~ **已结案（2026-09-15）**：加 `obstacle_blocks_blast`
     （只挡"爆心→目标之间"的障碍；含爆心/目标的障碍跳过，否则贴脸炸会把自己堵死），
-    NPC 伤害与玩家自伤都过它；击退仍施加。测试三格对照（垂直挡/平行不误伤/无遮挡对照），
-    **验证过会红**（关掉判定后掩体后面的人实测掉到 90.9）。切枪无动画（纯计时器）仍欠。
+    NPC 伤害与玩家自伤都过它；击退仍施加。测试三格对照（垂直挡/平行不误伤/无遮挡对照）。
+    ~~切枪无动画~~ **已结案（2026-09-15）**：`WeaponRack::switch_progress()` 给出 0→1 归一化
+    进度（分母是私有的 `switch_time`，不让渲染层猜），枪模用 `sin(π·t)` 包络做下坠 0.18 m +
+    前倾 12° + 侧转 6°（**两端为 0 ⇒ 起止速度连续**，避免本仓枪模历史上的抖动/残影成因）。
+    两条都**验证过测试会红**。
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
