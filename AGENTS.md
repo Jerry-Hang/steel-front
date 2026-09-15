@@ -527,6 +527,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\input_probe.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
 # 心跳看门狗：**常驻**后台即可，不要每次运行临时 arm 一个（见教训 19）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
+# 性能尺子（Windows 原生；压力模式跑 N 秒，读 logs/perf_*.log 出统计，退出时交还机器）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
 ```
 
 ⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
@@ -616,10 +618,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     报出"0 条/1 条"两种结果，我据此做出过三个错误推断（本轮主要时间坑）；请往文件里写日志。
 10. ~~**PT 512 盒上限静默截断**~~ **已结案（2026-09-14）：512 → 1024，并补了一次性告警**。
     实测 `marker=547 > 512` ⇒ 每次丢 35 个盒子，而 PT 是低 spp 噪点图、**肉眼看不出来**。
-    **代价实算**（按 `renderer.rs` 的分配公式）：512 ≈ **0.92 MB**、1024 ≈ **1.84 MB**
-    ⇒ **多不到 1 MB**，余量 87%；PT 默认关，对正常路径内存零影响。
-    **为什么不用"CPU 侧视锥裁剪"**：PT 的累积要求**同一场景盒子集合稳定**，按视锥裁剪会让集合
-    随视角抖动、反而破坏累积。⚠️ 同时补了 `Renderer::pt_box_cap_warned` 闩（超容告警一次不刷屏）。
+    **代价实算**：512 ≈ **0.92 MB**、1024 ≈ **1.84 MB** ⇒ **多不到 1 MB**，余量 87%。
+    ⚠️ 另补 `Renderer::pt_box_cap_warned` 闩（超容告警一次不刷屏）—— 加了容量也可能再被撑爆。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
@@ -662,7 +662,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
     现加 `DamageSource`（只留 `Player`/`Blast` 两个真会走到的来源）+ 三处调用点共用 `kill_line`
     拼装；爆炸单独成句（一发 AoE 结算多人，报"某个人杀的"是编的）。
     第一人称枪模动画 / 弹孔贴花仍欠。
-20. **`playtest_perf.py` 未做 Windows 移植**；**DLSS 立项评估未做**。
+20. **DLSS 立项评估未做**。~~`playtest_perf.py` 未做 Windows 移植~~ **已结案（2026-09-15）** ——
+    它**不是没移植，是搬不过来**（X11 输入/XImage 抓屏/`pgrep`/`/proc` 全是 Linux 的，重写=新写）。
+    改用仓里已验证的 Windows 构件写了 **`scripts/perf_run.ps1`**：引擎本来就每秒往
+    `logs/perf_*.log` 写 fps + 各阶段耗时（`perf_log.rs`），所以只需"启动 → 等待 → 读日志 → 统计"，
+    **不注入输入、不抓屏**；默认压力模式，支持 `-NoShadow`/`-Cam`/`-Stress` 对照，退出时交还机器。
+    🔴 **实测噪声底**：同一二进制连跑两次（25s）中位 fps **69.7 / 71.8（差 2.8%）** ⇒
+    **单次 A/B 证明不了任何 < ~5% 的差异**（教训 24）。
 21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：改为正确支持交错布局**。
     这是 `accessor.byteOffset` 那个 bug 的**上一层**（那条注释里写着 ak12.glb 的 NORMAL
     被读成 POSITION、"几何全错却一句错误信息都没有"）—— `byteOffset` 修好后，
