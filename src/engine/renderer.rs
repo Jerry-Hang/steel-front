@@ -5079,18 +5079,28 @@ impl Renderer {
         if verts.is_empty() || indices.is_empty() {
             return;
         }
-        // 枪模缓冲容量：预分配全局最大（35 把枪当前最大 verts=30492 / idx=145992，
-        // next_power_of_two = 32768 / 262144）。切枪（含容量缩小）永不重建缓冲——
-        // 重建会 destroy 正在被 GPU 使用的 buffer → NVIDIA 驱动 device lost（画面卡死，
-        // 2026-08-18 修复：切到小网格武器触发重建导致崩溃）。
-        // 未来新增更大枪模时 max() 自动扩容（首帧重建一次，代价可接受）。
+        // 枪模缓冲容量：预分配全局最大（当前最大 verts=63283 / idx=70479 ⇒
+        // next_power_of_two = 65536 / 262144）。**只增不减**：切枪永不重建缓冲
+        // （重建会 destroy 正在被 GPU 使用的 buffer → NVIDIA 驱动 device lost）。
+        //
+        // 🔴 2026-09-15 修的正是这句注释与代码不符：旧判据是
+        // `need != capacity` 就重建，于是**换成更小的枪也会重建** ——
+        // 实测按一下 "2"（AK-12M 63283 顶点 / 容量 65536 → AK-104 11705 顶点 /
+        // 需要 32768 ≠ 65536）当场 `vkQueueSubmit` 返回 `VK_ERROR_DEVICE_LOST`，
+        // 画面上是"切枪 = 整台设备消失"。
+        // ⇒ 判据必须是 `need > capacity`（与 `set_props` 同一写法），
+        //   并且真扩容前无条件 `device_wait_idle()`。
         let need_verts = 32768u32.max((verts.len() as u32).next_power_of_two());
         let need_idx = 262_144u32.max((indices.len() as u32).next_power_of_two());
-        if need_verts != self.gun_buffer_capacity_verts
-            || need_idx != self.gun_buffer_capacity_idx
+        if need_verts > self.gun_buffer_capacity_verts
+            || need_idx > self.gun_buffer_capacity_idx
             || self.gun_mapped.is_null()
             || self.gun_vertex_buffer == vk::Buffer::null()
         {
+            // 真扩容（或首次创建）才等：等待发生在帧与帧之间、不在命令缓冲记录期间，安全。
+            unsafe {
+                let _ = self.device.device_wait_idle();
+            }
             if self.gun_vertex_buffer != vk::Buffer::null() {
                 unsafe { self.device.destroy_buffer(self.gun_vertex_buffer, None) };
             }

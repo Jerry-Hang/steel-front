@@ -3685,6 +3685,49 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// 🔴 每把 GLB 枪模的索引必须落在顶点数以内，且顶点不得含 NaN/Inf。
+    ///
+    /// 存在理由（2026-09-15）：**按 2 切枪（AK-104）会直接把设备打掉**
+    /// （`vkQueueSubmit` → `VK_ERROR_DEVICE_LOST`）。越界索引在 GPU 上是**顶点抓取越界**：
+    /// 不报 VUID、不 panic，只是整台设备消失 —— 而索引是 GLB 解析器算出来的，
+    /// 只要合并多 primitive 时漏加基址偏移就会整段偏出去。
+    /// 这条测试把"能不能安全上传"变成上传**之前**就能判的纯数字判据。
+    #[test]
+    fn gun_glb_indices_all_in_range() {
+        let mut checked = 0;
+        for entry in std::fs::read_dir("assets/guns").expect("assets/guns 目录必须存在") {
+            let path = entry.expect("读取 assets/guns 项失败").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("glb") {
+                continue;
+            }
+            let key = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("枪模文件名必须是 UTF-8")
+                .to_string();
+            let Some((verts, indices)) = GameApp::load_gun_glb(&key) else {
+                continue;
+            };
+            checked += 1;
+            assert!(!verts.is_empty(), "{key}: 顶点不得为空");
+            let max_i = indices.iter().copied().max().unwrap_or(0);
+            assert!(
+                (max_i as usize) < verts.len(),
+                "{key}: 索引越界 —— 最大索引 {max_i} ≥ 顶点数 {}（GPU 顶点抓取越界 = device lost）",
+                verts.len()
+            );
+            for (i, v) in verts.iter().enumerate() {
+                assert!(
+                    v.pos.iter().all(|c| c.is_finite()) && v.color.iter().all(|c| c.is_finite()),
+                    "{key}: 顶点 #{i} 含 NaN/Inf（pos={:?} color={:?}）",
+                    v.pos,
+                    v.color
+                );
+            }
+        }
+        assert!(checked >= 10, "至少应校验到 10 把 GLB 枪模，实际 {checked}");
+    }
+
     /// raw 不可用的平台（本机 Windows）**连试都不许试** `Locked`。
     /// 闭包写成 panic 而不是返回 false，是为了把"没被调用"也钉住 ——
     /// 若哪天有人把 `raw_motion &&` 去掉，这条测试会立刻炸，而不是静默退化成
