@@ -1299,7 +1299,163 @@ fn compile_wgsl_mesh(source: &str) -> Vec<u32> {
         lang_version: (1, 4),
         ..naga::back::spv::Options::default()
     };
-    naga::back::spv::write_vec(&module, &info, &options, None).expect("SPIR-V 生成失败")
+    let mut spirv = naga::back::spv::write_vec(&module, &info, &options, None)
+        .expect("SPIR-V 生成失败");
+    strip_workgroup_explicit_layout(&mut spirv);
+    spirv
+}
+
+/// 剥掉 **Workgroup 可达类型**上的显式布局装饰（`Offset` / `ArrayStride` /
+/// `MatrixStride` / `RowMajor` / `ColMajor`）。
+///
+/// ## 为什么必须剥
+///
+/// `MeshShadingEXT` 要求 SPIR-V >= 1.4；而 `Offset` 装饰在 SPIR-V ≤ 1.3 允许，
+/// **1.4 起对非 `Block` 类型禁止**（`ArrayStride` 同理），
+/// 严格校验器直接报 `VUID-StandaloneSpirv-None-10684`：
+///
+/// ```text
+/// the Workgroup storage class has a explicit layout from the Offset decoration
+/// ```
+///
+/// 根因在 **naga-30.0.0 `src/back/spv/writer.rs:3597`**：`decorate_struct_member`
+/// **无条件**写 `Offset`，不区分存储类；网格输出被它落成 `Workgroup` 变量
+/// `%_struct_21`。已验证 `global_needs_wrapper`（对 Workgroup 直接 `return false`）
+/// 与 `WriterFlags` 都**没有**"别写 Offset"的开关 —— 所以只能在写出后自己剥。
+/// （2026-09-14 曾想手写后处理器但中途放弃；2026-09-15 用本函数收口，实测
+/// `spirv-val --target-env vulkan1.3/1.4 assets/mesh.spv` 双双 **exit 0**。）
+///
+/// ## 为什么安全
+///
+/// 🔴 **只能剥 Workgroup 可达的类型。** `Block` 的 Uniform / StorageBuffer /
+/// PushConstant（本文件里是 `_struct_300/303/308`）**一个字节都不能动** ——
+/// 那些布局由宿主 Rust 侧按同一份偏移写入，剥了就是缓冲错位（本仓最贵的一类 bug）。
+///
+/// 而 Workgroup 内存**宿主永远不碰**，着色器访问一律走 `OpAccessChain` 的
+/// **成员索引**、偏移由驱动按 std430 自行推导 —— 只要同一个着色器内部一致，
+/// 具体偏移是多少都不影响结果。所以"剥掉显式布局"对 Workgroup 是**语义无损**的。
+///
+/// 可达集**只**从 `OpVariable`（storage class = Workgroup）出发推导，
+/// 绝不从"出现了 Offset 装饰"出发 —— 后者会把 Uniform 一起剥掉。
+fn strip_workgroup_explicit_layout(words: &mut Vec<u32>) {
+    let (_, hits) = workgroup_layout_decorations(words);
+    if hits.is_empty() {
+        return;
+    }
+    let dropped = hits.len();
+    let mut out = Vec::with_capacity(words.len());
+    out.extend_from_slice(&words[..5]);
+    let mut i = 5usize;
+    while i < words.len() {
+        let count = (words[i] >> 16) as usize;
+        if !hits.contains(&i) {
+            out.extend_from_slice(&words[i..i + count]);
+        }
+        i += count;
+    }
+    *words = out;
+    // 自检：剥完再扫一遍必须是 0 条。**比静默产出坏 SPIR-V 强** ——
+    // 真出现漏网（比如 naga 换了新装饰），构建当场失败而不是等到驱动拒载。
+    let (_, leftover) = workgroup_layout_decorations(words);
+    assert!(
+        leftover.is_empty(),
+        "Workgroup 显式布局装饰未剥净：还剩 {} 条（严格 spirv-val 会拒载 mesh.spv）",
+        leftover.len()
+    );
+    println!(
+        "cargo:info=mesh.spv 剥离 {} 条 Workgroup 显式布局装饰（SPIR-V 1.4 禁止非 Block 类型带 Offset）",
+        dropped
+    );
+}
+
+/// 单遍扫描 SPIR-V：返回（**Workgroup 可达类型集合**，命中显式布局装饰的指令起始下标）。
+///
+/// `words` 是 SPIR-V 字流：`[0..5]` 是魔数与版本头，之后每条指令是
+/// `(word_count << 16) | opcode` 加操作数。
+fn workgroup_layout_decorations(words: &[u32]) -> (std::collections::HashSet<u32>, Vec<usize>) {
+    use std::collections::{HashMap, HashSet};
+
+    const OP_TYPE_ARRAY: u32 = 28;
+    const OP_TYPE_RUNTIME_ARRAY: u32 = 29;
+    const OP_TYPE_STRUCT: u32 = 30;
+    const OP_TYPE_POINTER: u32 = 32;
+    const OP_VARIABLE: u32 = 59;
+    const OP_DECORATE: u32 = 71;
+    const OP_MEMBER_DECORATE: u32 = 72;
+    const STORAGE_WORKGROUP: u32 = 4;
+    /// `RowMajor` / `ColMajor` / `ArrayStride` / `MatrixStride` / `Offset`
+    const EXPLICIT_LAYOUT: [u32; 5] = [4, 5, 6, 7, 35];
+
+    assert_eq!(
+        words.first().copied(),
+        Some(0x0723_0203),
+        "不是 SPIR-V 字流（魔数不符）"
+    );
+
+    let mut structs: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut arrays: HashMap<u32, u32> = HashMap::new();
+    let mut pointers: HashMap<u32, (u32, u32)> = HashMap::new();
+    let mut seeds: Vec<u32> = Vec::new();
+
+    let mut i = 5usize;
+    while i < words.len() {
+        let count = (words[i] >> 16) as usize;
+        let op = words[i] & 0xFFFF;
+        let w = &words[i..i + count];
+        match op {
+            OP_TYPE_STRUCT => {
+                structs.insert(w[1], w[2..].to_vec());
+            }
+            OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY => {
+                arrays.insert(w[1], w[2]);
+            }
+            OP_TYPE_POINTER => {
+                pointers.insert(w[1], (w[2], w[3]));
+            }
+            OP_VARIABLE if w[3] == STORAGE_WORKGROUP => {
+                if let Some(&(storage, pointee)) = pointers.get(&w[1]) {
+                    if storage == STORAGE_WORKGROUP {
+                        seeds.push(pointee);
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += count;
+    }
+
+    // 从 Workgroup 变量出发做类型可达性闭包（结构体成员 + 数组元素）。
+    let mut reachable: HashSet<u32> = HashSet::new();
+    let mut stack = seeds;
+    while let Some(ty) = stack.pop() {
+        if !reachable.insert(ty) {
+            continue;
+        }
+        if let Some(members) = structs.get(&ty) {
+            stack.extend(members.iter().copied());
+        }
+        if let Some(&elem) = arrays.get(&ty) {
+            stack.push(elem);
+        }
+    }
+
+    let mut hits = Vec::new();
+    let mut i = 5usize;
+    while i < words.len() {
+        let count = (words[i] >> 16) as usize;
+        let op = words[i] & 0xFFFF;
+        let w = &words[i..i + count];
+        let hit = match op {
+            OP_MEMBER_DECORATE => reachable.contains(&w[1]) && EXPLICIT_LAYOUT.contains(&w[3]),
+            OP_DECORATE => reachable.contains(&w[1]) && EXPLICIT_LAYOUT.contains(&w[2]),
+            _ => false,
+        };
+        if hit {
+            hits.push(i);
+        }
+        i += count;
+    }
+    (reachable, hits)
 }
 
 /// HUD 覆盖层顶点着色器：屏幕空间直通（位置已由 CPU 转为 NDC，Y 翻转完成）

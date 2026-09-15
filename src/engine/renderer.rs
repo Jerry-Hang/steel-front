@@ -11631,3 +11631,179 @@ mod npc_visual_tests {
         }
     }
 }
+
+/// `assets/mesh.spv` 的 **Workgroup 显式布局**回归守卫（2026-09-15）。
+///
+/// ## 守的是什么
+///
+/// `MeshShadingEXT` 要求 SPIR-V >= 1.4，而 `Offset` / `ArrayStride` 这类**显式布局装饰**
+/// 在 SPIR-V ≤ 1.3 允许、**1.4 起对非 `Block` 类型禁止**。naga 30 的 SPIR-V 写入器
+/// （`src/back/spv/writer.rs` 的 `decorate_struct_member`）**无条件**写 `Offset`，
+/// 于是网格着色器一度是 7 个 `.spv` 里**唯一**过不了严格校验的那个：
+///
+/// ```text
+/// spirv-val --target-env vulkan1.3 assets/mesh.spv
+/// [VUID-StandaloneSpirv-None-10684] the Workgroup storage class has a explicit layout
+/// from the Offset decoration
+/// ```
+///
+/// `build.rs::strip_workgroup_explicit_layout` 在写出前把它去掉。这条测试**独立复算**
+/// 一遍"从 Workgroup 变量出发的类型可达闭包"，所以下面三种情况都会让它变红：
+/// ① 有人把 build.rs 里那次调用删了；② naga 升级后又多写了别的显式布局装饰；
+/// ③ 网格着色器 WGSL 改出新形态的 Workgroup 类型。
+///
+/// ## 为什么"去掉"对 Workgroup 是无损的
+///
+/// Workgroup 内存**主机侧永远不碰**（`renderer.rs` 一级的实例/光照 buffer 都是
+/// Uniform/StorageBuffer，那些带 `Block`、装饰**必须原样保留**），着色器访问一律走
+/// `OpAccessChain` 的**成员索引**，字节偏移由驱动按 std430 自行推导 —— 只要同一个
+/// 着色器内部一致，偏移取多少都不影响结果。反过来，动到带 `Block` 的类型上就是
+/// **缓冲布局错位**，所以这条测试也顺带断言了那几个 `Block` 类型仍有 `Offset`。
+#[cfg(test)]
+mod workgroup_layout_tests {
+    use std::collections::{HashMap, HashSet};
+
+    const OP_TYPE_ARRAY: u32 = 28;
+    const OP_TYPE_RUNTIME_ARRAY: u32 = 29;
+    const OP_TYPE_STRUCT: u32 = 30;
+    const OP_TYPE_POINTER: u32 = 32;
+    const OP_VARIABLE: u32 = 59;
+    const OP_DECORATE: u32 = 71;
+    const OP_MEMBER_DECORATE: u32 = 72;
+    const DECORATION_BLOCK: u32 = 2;
+    const DECORATION_OFFSET: u32 = 35;
+    const STORAGE_WORKGROUP: u32 = 4;
+    /// `RowMajor` / `ColMajor` / `ArrayStride` / `MatrixStride` / `Offset`
+    const EXPLICIT_LAYOUT: [u32; 5] = [4, 5, 6, 7, 35];
+
+    fn words_of_mesh_spv() -> Vec<u32> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/mesh.spv");
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("读 {} 失败: {e}", path.display()));
+        assert_eq!(bytes.len() % 4, 0, "SPIR-V 字节数必须是 4 的倍数");
+        bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    }
+
+    struct Scan {
+        /// 从 Workgroup 变量出发可达的类型
+        workgroup_reachable: HashSet<u32>,
+        /// 可达类型上的显式布局装饰（`(类型, 装饰)`）
+        workgroup_layout: Vec<(u32, u32)>,
+        /// 带 `Block` 装饰的类型
+        block_types: HashSet<u32>,
+        /// 带 `Block` 的类型的 `Offset` 装饰条数
+        block_offsets: usize,
+    }
+
+    fn scan(words: &[u32]) -> Scan {
+        assert_eq!(words[0], 0x0723_0203, "不是 SPIR-V 字流（魔数不符）");
+        let mut structs: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut arrays: HashMap<u32, u32> = HashMap::new();
+        let mut pointers: HashMap<u32, (u32, u32)> = HashMap::new();
+        let mut seeds: Vec<u32> = Vec::new();
+        let mut block_types: HashSet<u32> = HashSet::new();
+        let mut decorations: Vec<(u32, u32, Option<u32>)> = Vec::new(); // (目标, 装饰, 成员)
+
+        let mut i = 5usize;
+        while i < words.len() {
+            let count = (words[i] >> 16) as usize;
+            let op = words[i] & 0xFFFF;
+            let w = &words[i..i + count];
+            match op {
+                OP_TYPE_STRUCT => {
+                    structs.insert(w[1], w[2..].to_vec());
+                }
+                OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY => {
+                    arrays.insert(w[1], w[2]);
+                }
+                OP_TYPE_POINTER => {
+                    pointers.insert(w[1], (w[2], w[3]));
+                }
+                OP_VARIABLE if w[3] == STORAGE_WORKGROUP => {
+                    if let Some(&(storage, pointee)) = pointers.get(&w[1]) {
+                        if storage == STORAGE_WORKGROUP {
+                            seeds.push(pointee);
+                        }
+                    }
+                }
+                OP_DECORATE => {
+                    if w[2] == DECORATION_BLOCK {
+                        block_types.insert(w[1]);
+                    }
+                    decorations.push((w[1], w[2], None));
+                }
+                OP_MEMBER_DECORATE => decorations.push((w[1], w[3], Some(w[2]))),
+                _ => {}
+            }
+            i += count;
+        }
+
+        let mut reachable: HashSet<u32> = HashSet::new();
+        let mut stack = seeds;
+        while let Some(ty) = stack.pop() {
+            if !reachable.insert(ty) {
+                continue;
+            }
+            if let Some(members) = structs.get(&ty) {
+                stack.extend(members.iter().copied());
+            }
+            if let Some(&elem) = arrays.get(&ty) {
+                stack.push(elem);
+            }
+        }
+
+        let mut workgroup_layout = Vec::new();
+        let mut block_offsets = 0usize;
+        for (target, decoration, _member) in decorations {
+            if reachable.contains(&target) && EXPLICIT_LAYOUT.contains(&decoration) {
+                workgroup_layout.push((target, decoration));
+            }
+            if block_types.contains(&target) && decoration == DECORATION_OFFSET {
+                block_offsets += 1;
+            }
+        }
+        Scan { workgroup_reachable: reachable, workgroup_layout, block_types, block_offsets }
+    }
+
+    /// 主语：网格着色器不得带任何 Workgroup 显式布局装饰（否则严格 `spirv-val` 拒载）。
+    #[test]
+    fn mesh_spirv_has_no_workgroup_explicit_layout() {
+        let words = words_of_mesh_spv();
+        let s = scan(&words);
+        assert!(
+            !s.workgroup_reachable.is_empty(),
+            "mesh.spv 里找不到 Workgroup 变量 —— 网格着色器结构变了，这条守卫已失效，必须重写"
+        );
+        assert!(
+            s.workgroup_layout.is_empty(),
+            "mesh.spv 的 Workgroup 类型上仍有 {} 条显式布局装饰（类型/装饰：{:?}）。\n\
+             修法：确认 build.rs::compile_wgsl_mesh 仍调用 strip_workgroup_explicit_layout；\n\
+             若是 naga 新增了别的装饰种类，把它加进 build.rs 的 EXPLICIT_LAYOUT。\n\
+             验证命令：spirv-val --target-env vulkan1.3 assets/mesh.spv",
+            s.workgroup_layout.len(),
+            s.workgroup_layout
+        );
+    }
+
+    /// 反面：去掉装饰**只**能碰 Workgroup 可达类型。带 `Block` 的 Uniform / StorageBuffer /
+    /// PushConstant 一旦被动，主机侧按同一份偏移写入的数据全部错位（静默、不报 VUID）。
+    #[test]
+    fn block_types_keep_their_offsets() {
+        let words = words_of_mesh_spv();
+        let s = scan(&words);
+        assert!(
+            !s.block_types.is_empty(),
+            "mesh.spv 里找不到 Block 类型 —— 这条反向守卫已失效"
+        );
+        assert!(
+            s.block_offsets > 0,
+            "带 Block 的类型（{:?}）的 Offset 装饰被去掉了 —— 缓冲布局会错位",
+            s.block_types
+        );
+        for ty in &s.block_types {
+            assert!(
+                !s.workgroup_reachable.contains(ty),
+                "Block 类型 {ty} 同时是 Workgroup 可达的 —— 去掉规则会误伤它，必须先改 build.rs 的取舍"
+            );
+        }
+    }
+}
