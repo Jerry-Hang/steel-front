@@ -947,6 +947,9 @@ pub struct Renderer {
     texture_anisotropy_enabled: bool,
     // ---- HUD 覆盖层（自包含：独立 pipeline / 独立顶点缓冲，不侵入主 pass）----
     hud_pipeline: vk::Pipeline,
+    /// HUD **overlay pass 专用**管线（1 采样、无深度、`render_pass = hud_render_pass`）。
+    /// 与 `hud_pipeline` 的区别只有渲染状态 —— 主 pass 那份是 MSAA + 带深度的，绑错就是 UB。
+    hud_overlay_pipeline: vk::Pipeline,
     hud_pipeline_layout: vk::PipelineLayout,
     hud_vertex_buffer: vk::Buffer,
     hud_vertex_buffer_memory: vk::DeviceMemory,
@@ -1594,6 +1597,7 @@ impl Renderer {
             skin_tex_enabled: std::env::var("RV3D_SKIN_TEX").as_deref() != Ok("0"),
             texture_anisotropy_enabled: physical_device_features.sampler_anisotropy != 0,
             hud_pipeline: vk::Pipeline::null(),
+            hud_overlay_pipeline: vk::Pipeline::null(),
             hud_pipeline_layout: vk::PipelineLayout::null(),
             hud_vertex_buffer: vk::Buffer::null(),
             hud_vertex_buffer_memory: vk::DeviceMemory::null(),
@@ -5367,8 +5371,41 @@ impl Renderer {
         let compute_info = vk::ComputePipelineCreateInfo::default().stage(stage_info).layout(pl);
         let pipelines = unsafe { self.device.create_compute_pipelines(vk::PipelineCache::null(), &[compute_info], None).map_err(|e| format!("PT pipe {:?}", e.1))? };
         let pipeline = pipelines[0];
+        // 🔴 **图像格式必须与 GLSL 里声明的 `rgba8` 逐位一致**（2026-09-15 修正）。
+        //
+        // 原来这里是 `B8G8R8A8_UNORM`，而 `assets/rt/pt_panorama.glsl` 写的是
+        // `layout(set=0, binding=1, rgba8) uniform writeonly image2D OutImg;` ——
+        // 两者**兼容但不相等**，于是验证层（`RV3D_VALIDATION=1`）报：
+        //
+        // ```text
+        // vkCmdDispatch(): the storage image descriptor [... variable "OutImg"] is accessed by a
+        // OpTypeImage that has a Format operand Rgba8 (VK_FORMAT_R8G8B8A8_UNORM) which doesn't match
+        // the VkImageView format (VK_FORMAT_B8G8R8A8_UNORM). Any loads or stores with the variable
+        // will produce undefined values to the whole image (not just the texel being accessed).
+        // While the formats are compatible, Storage Images must exactly match.
+        // ```
+        //
+        // ⇒ 一句话：**PT 一直在往这张图里写"未定义值"**，不崩、不报错、只是画面发灰发脏 ——
+        // 这正是本项目一直在防的那一类「静默 UB」（同教训 15 的越界读）。修法是让图像跟着着色器走
+        // （而不是改着色器去迁就图像）：blit 到 B8G8R8A8_SRGB 交换链时驱动会做通道映射，
+        // 两者属于同一 format compatibility class，颜色不会错位。
+        let pt_img_format = vk::Format::R8G8B8A8_UNORM;
+        // 明确查一次：STORAGE_IMAGE 对具体格式是**可选**能力，不支持就大声失败，
+        // 不要留下一张"能创建但写不进"的图（那又会退回静默 UB）
+        let pt_fmt_props = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, pt_img_format)
+        };
+        if !pt_fmt_props
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
+        {
+            return Err(format!(
+                "设备不支持 {pt_img_format:?} 的 STORAGE_IMAGE —— PT 需要它来匹配 GLSL 的 rgba8"
+            ));
+        }
         let img_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
+            .image_type(vk::ImageType::TYPE_2D).format(pt_img_format)
             .extent(vk::Extent3D { width: w, height: h, depth: 1 }).mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1)
             .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
@@ -5379,7 +5416,7 @@ impl Renderer {
         let img_mem = unsafe { self.device.allocate_memory(&img_alloc, None) }.map_err(|e| format!("PT im: {e}"))?;
         unsafe { self.device.bind_image_memory(image, img_mem, 0) }.map_err(|e| format!("PT ib: {e}"))?;
         let img_view_info = vk::ImageViewCreateInfo::default()
-            .image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::B8G8R8A8_UNORM)
+            .image(image).view_type(vk::ImageViewType::TYPE_2D).format(pt_img_format)
             .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
         let view = unsafe { self.device.create_image_view(&img_view_info, None) }.map_err(|e| format!("PT iv: {e}"))?;
         // 时域累积图像：RGBA32F（rgb=Σ线性样本，a=已累积 spp）。必须 STORAGE 且常驻，
@@ -8427,6 +8464,19 @@ impl Renderer {
     }
 
     /// PT 覆盖后重绘 HUD 的 overlay pass（load=LOAD 保留 PT 画面！2026-09-01）
+    ///
+    /// 🔴 **2026-09-15 修了三处**（都由验证层在 PT 打开时抓出，见未结案 #2 的后续）：
+    /// ① `initialLayout` 曾是 `PRESENT_SRC_KHR`，而调用方在 `cmd_begin_render_pass` **之前**
+    ///    已经把图手动转成了 `COLOR_ATTACHMENT_OPTIMAL` ⇒
+    ///    `VUID-vkCmdBeginRenderPass-initialLayout-00900`（"初始布局必须等于当前布局"）。
+    ///    现在声明成 `COLOR_ATTACHMENT_OPTIMAL`，与那次手动 barrier 对齐；
+    ///    `finalLayout` 仍是 `PRESENT_SRC_KHR`，由 render pass 自己做最后那次转换。
+    /// ② HUD 覆盖层以前**复用主 pass 的 `hud_pipeline`**（那是 MSAA 4x + 带深度附件的管线），
+    ///    而 overlay pass 是 1 采样、无深度 ⇒ `VUID-vkCmdDraw-renderPass-02684`（管线与当前
+    ///    render pass 不兼容 = UB）。现在单独建一条 `hud_overlay_pipeline`。
+    /// ③ 收尾那次 `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` 的 barrier 是多余的，
+    ///    而且与 render pass 的 `finalLayout` 撞车 ⇒ `VUID-VkImageMemoryBarrier-oldLayout-01197`。
+    ///    已删除（转换由 render pass 负责）。
     pub fn init_hud_overlay(&mut self) -> Result<(), String> {
         unsafe {
             let color_attachment = vk::AttachmentDescription::default()
@@ -8436,7 +8486,7 @@ impl Renderer {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
             let color_refs = [vk::AttachmentReference::default()
                 .attachment(0)
@@ -8452,7 +8502,129 @@ impl Renderer {
             self.hud_render_pass = self.device.create_render_pass(&rp_info, None)
                 .map_err(|e| format!("hud rp: {e}"))?;
         }
+        self.create_hud_overlay_pipeline()?;
         self.recreate_hud_framebuffers()
+    }
+
+    /// 建 **HUD overlay 专用**图形管线：与 `hud_pipeline` 同着色器/同顶点格式/同混合，
+    /// 但 `render_pass = hud_render_pass`、**1 采样、无深度附件** —— 渲染状态必须与 render pass
+    /// 逐项兼容，复用主 pass 的管线就是 `VUID-vkCmdDraw-renderPass-02684`（UB）。
+    /// 只借用 `hud_pipeline_layout`（同一套着色器 ⇒ 同一套布局，空描述符集 + 空 push constant）。
+    fn create_hud_overlay_pipeline(&mut self) -> Result<(), String> {
+        let vs_spirv = load_spirv("assets/hud.vert.spv")?;
+        let fs_spirv = load_spirv("assets/hud.frag.spv")?;
+        let vs_module = self.create_shader_module(&vs_spirv)?;
+        let fs_module = self.create_shader_module(&fs_spirv)?;
+        let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs_module)
+            .name(c"vs_main");
+        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs_module)
+            .name(c"fs_main");
+        let shader_stages = [vs_stage, fs_stage];
+
+        let hud_binding = vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(std::mem::size_of::<HudVertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX);
+        let hud_attributes = [
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(0),
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(1)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(std::mem::size_of::<[f32; 2]>() as u32),
+        ];
+        let hud_bindings = [hud_binding];
+        let hud_vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&hud_bindings)
+            .vertex_attribute_descriptions(&hud_attributes);
+        let hud_input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+        let hud_viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(self.swapchain_extent.width as f32)
+            .height(self.swapchain_extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let hud_scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D { x: 0, y: 0 })
+            .extent(self.swapchain_extent);
+        let hud_viewports = [hud_viewport];
+        let hud_scissors = [hud_scissor];
+        let hud_viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&hud_viewports)
+            .scissors(&hud_scissors);
+        let hud_rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false);
+        // 🔴 这一行是本次修法的关键：overlay pass 只有 1 个采样，不是主 pass 的 MSAA 数
+        let hud_multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let hud_depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(false)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::ALWAYS);
+        let hud_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD);
+        let hud_blend_attachments = [hud_blend_attachment];
+        let hud_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&hud_blend_attachments);
+        let hud_dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let hud_dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&hud_dynamic_states);
+        let create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&hud_vertex_input)
+            .input_assembly_state(&hud_input_assembly)
+            .viewport_state(&hud_viewport_state)
+            .rasterization_state(&hud_rasterizer)
+            .multisample_state(&hud_multisampling)
+            .depth_stencil_state(&hud_depth_stencil)
+            .color_blend_state(&hud_blend_state)
+            .dynamic_state(&hud_dynamic_state)
+            .layout(self.hud_pipeline_layout)
+            .render_pass(self.hud_render_pass)
+            .subpass(0);
+        let result = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
+        };
+        unsafe {
+            self.device.destroy_shader_module(vs_module, None);
+            self.device.destroy_shader_module(fs_module, None);
+        }
+        self.hud_overlay_pipeline =
+            result.map_err(|(_, e)| format!("创建 HUD overlay 管线失败: {}", e))?.remove(0);
+        Ok(())
     }
 
     /// 按**当前** `swapchain_image_views` 重建 HUD overlay 的 framebuffer。
@@ -9362,19 +9534,19 @@ impl Renderer {
                         .framebuffer(self.hud_framebuffers[image_index as usize])
                         .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.swapchain_extent }),
                         vk::SubpassContents::INLINE);
-                    self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.hud_pipeline);
+                    // ⚠ 必须绑 **overlay 专用**管线：overlay pass 是 1 采样、无深度，
+                    // 而 `hud_pipeline` 是给主 pass（MSAA + 深度）建的 —— 绑错就是
+                    // `VUID-vkCmdDraw-renderPass-02684`（管线与 render pass 不兼容 = UB）
+                    self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.hud_overlay_pipeline);
                     let vb = [self.hud_vertex_buffer];
                     let offs = [0u64];
                     self.device.cmd_bind_vertex_buffers(command_buffer, 0, &vb, &offs);
                     self.device.cmd_draw(command_buffer, self.hud_vertex_count, 1, 0, 0);
                     self.device.cmd_end_render_pass(command_buffer);
-                    let hud_back = vk::ImageMemoryBarrier::default()
-                        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE).dst_access_mask(vk::AccessFlags::MEMORY_READ)
-                        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(sw_img)
-                        .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
-                    self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[hud_back]);
+                    // ⚠ 这里**不再**补 `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` 的 barrier：
+                    // render pass 的 `finalLayout` 已经做了那次转换，再补一条就是"从已经变成
+                    // PRESENT_SRC 的图再转一次 COLOR_ATTACHMENT_OPTIMAL" ⇒
+                    // `VUID-VkImageMemoryBarrier-oldLayout-01197`（2026-09-15 删掉的就是它）。
                 }
             }
         }
@@ -10406,6 +10578,9 @@ impl Drop for Renderer {
             // 释放 HUD 覆盖层（独立 pipeline / 顶点缓冲）
             if self.hud_pipeline != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.hud_pipeline, None);
+            }
+            if self.hud_overlay_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.hud_overlay_pipeline, None);
             }
             if self.hud_pipeline_layout != vk::PipelineLayout::null() {
                 self.device.destroy_pipeline_layout(self.hud_pipeline_layout, None);
