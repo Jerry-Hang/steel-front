@@ -209,9 +209,24 @@ def cmd_extract(font_path: Path, keep_all: bool, size: int = CELL, dy: int = 0) 
 //! licence governs whether this file may be redistributed. The pre-2026-09-14
 //! revision of this file was extracted from Windows' **SimSun**, a proprietary
 //! font whose licence prohibits redistribution -- see `THIRD-PARTY-NOTICES.md`
-//! section 3. When regenerating, use a font that is licensed for redistribution
-//! and for embedding a derived bitmap (SIL OFL 1.1 fonts such as Noto Sans CJK
-//! or Source Han Sans are the recommended choice).
+//! section 3. The current table is a derived work of **Noto Sans SC (SIL OFL
+//! 1.1)**, whose licence text ships in `assets/fonts/OFL-NotoSansCJK.txt`.
+//!
+//! ## Reproducing this file
+//!
+//! The source font is **deliberately not committed** (8.3 MB for a 163 KB table);
+//! the file name above records what produced the bytes in this revision. To
+//! regenerate: obtain Noto Sans SC (or any SIL OFL 1.1 CJK face -- Source Han
+//! Sans is metrically compatible), then run the two steps in order:
+//!
+//!     python tools/extract_cjk_glyphs.py --scan                      # no font needed
+//!     python tools/extract_cjk_glyphs.py --font <NotoSansSC.otf>
+//!
+//! `--scan` refreshes `tools/cjk_used_codepoints.txt` from the source and exits
+//! non-zero if any referenced code point has no glyph. It needs **no font**.
+//! Only the second step does, and its output is deterministic for a given font
+//! file, size and `dy`. A different face shifts individual pixels -- the table
+//! stays valid (all contract tests pass), it just will not match byte for byte.
 //!
 //! ## Format contract
 //!
