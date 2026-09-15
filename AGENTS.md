@@ -222,6 +222,14 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - PT 资产：`PT_MAX_BOXES=1024`（**2026-09-14 由 512 提高**，见未结案 #10）一次分配；
   **BLAS 尺寸必须按容量上限而非当前盒数**（按 4 盒算 5376B 塞满容量 → 越界写 device lost）；
   scratch 归 `PtAssets` 所有；两次构建之间加 barrier。
+- 🔴 **存储图像格式必须与 GLSL 声明逐位相等**：`pt_img` 对应 `rgba8` ⇒ 图像与 view 都必须是
+  `R8G8B8A8_UNORM`。**"兼容"不算数** —— 不等就是**整张图写入未定义值**（不崩不报，只是画面发灰发脏）。
+  建图前查 `optimal_tiling_features.STORAGE_IMAGE`（该能力对具体格式是**可选**的），不支持就返回 Err。
+- 🔴 **PT 要 blit 进交换链 ⇒ `image_usage` 必须含 `TRANSFER_DST`**（缺它 = blit 与 barrier 两条 VUID）。
+- 🔴 **PT 的 HUD overlay 必须用独立管线**（1 采样、无深度、`render_pass = hud_render_pass`）：
+  主 pass 那条 `hud_pipeline` 是 MSAA 4x + 带深度的，绑上去 = `renderPass-02684`（UB）。
+  该 render pass 的 `initialLayout` 必须是 **`COLOR_ATTACHMENT_OPTIMAL`**（调用方在 begin 前已手动转过），
+  `finalLayout = PRESENT_SRC_KHR`，**别再补收尾 barrier**（会与 finalLayout 撞车 = `oldLayout-01197`）。
 
 ---
 
@@ -553,29 +561,21 @@ baseline（红 +X / 蓝 −X）均值 **+12.8**、极差 29；swapped（红 −X
 **三层读法**：① 两臂均值分居零两侧且与 8 轮那次（+16.5 / −6.3）同向 ⇒ 可能真有个 ~20 点的位置倾向；
 ② 但臂内极差均值 41.5 **大于臂间差 23.1**；③ ⇒ **任何"单次对撞谁赢"都不构成证据**（教训 24/27）。
 **"红方恒胜"与"−X 半场占优"两个说法都撤回。**
-四条静态测量**全部对称**（每条都有可复现测试）：掩体占地 **0.999**、出生环被挡 **39.1% / 39.4%**、
-角度均值最大差 **0.6°**、平均出生半径**两侧同为 174.00 m** ⇒ 可划掉：掩体分布 / 出生点可站立性 /
-出生几何配对 / 角色分配。**若还要继续，先解决"测不准"**（每局方差 ~±30 点）：把每局拉到 190 s 以上。
+四条静态测量**全部对称**（掩体 0.999 / 出生环被挡 39.1% vs 39.4% / 角度差 0.6° / 半径两侧同为 174.00 m）
+⇒ 可划掉掩体分布、出生点可站立性、出生几何配对、角色分配。**要继续先解决"测不准"**（每局方差 ~±30 点）。
 
 - 相关：军情 JSON 的 `击杀` 字段实际是**该营自身阵亡数**（`round_kills_*` 按阵亡者阵营计数）。
   若 `llm_commander.py` 当"我方战果"读则**信号是反的** —— 调参前先核对。
 1. ~~**`PrintWindow` 对非前台窗口返回冻结帧**~~ **已结案（2026-09-14）：症状不复现**。
     `cap_safe.ps1` 用 `PrintWindow(h, dc, **2**)` = **`PW_RENDERFULLCONTENT`**，Vulkan 窗口靠它才抓得到活画面。
     ⚠️ **别把那个 2 改成 0**（改回去症状立刻回来）；复测判据 = 同刻两张图差异像素 **1.36%**（冻结会是 0.00%）。
-2. ~~**PT 崩溃 `0xC0000005`**~~ **已结案（2026-09-15）—— PT 首次真正出图**（`screenshots/pt_live_b.png`）。
-   两个独立的真 bug，**都只有验证层跑起来才看得见**（它此前一直灰屏，见 #9）：
-   ① 交换链 `image_usage` 缺 **`TRANSFER_DST`** —— PT 要把 `pt_img` blit 进交换链图像
-   （`VUID-vkCmdBlitImage-dstImage-00224` / `VkImageMemoryBarrier-oldLayout-01213`）；
-   ② **`hud_framebuffers` 悬空**：它只在 `init_hud_overlay()` 建一次，而 `destroy_swapchain()`
-   会销毁它依赖的 `swapchain_image_views`（启动阶段 resize 就有 **5 次**重建）、
-   `recreate_swapchain()` 又不补 ⇒ 指向已销毁的 ImageView。
-   **而它唯一的消费者是 PT 通路**（光栅走 `self.framebuffers`）⇒ 症状正是
-   "**光栅一切正常、一开 PT 就崩**"，崩因与 PT 代码毫无关系。
-   修法：usage 加 `TRANSFER_DST`（先查 `supported_usage_flags`）+ 抽出
-   `recreate_hud_framebuffers()`（`recreate_swapchain` 里调、`destroy_swapchain`/`Drop` 里销毁）。
-   PT 打开状态下冒烟 `ALL-OK`。**遗留**（不致命，PT 能出图）：PT 通路布局记账还不干净，验证层剩 3 条 ——
-   `VkImageMemoryBarrier-oldLayout-01197` / `vkCmdBeginRenderPass-initialLayout-00900` /
-   `vkCmdDraw-renderPass-02684`（绑定的管线与当前 render pass 不兼容）。
+2. ~~**PT 崩溃 `0xC0000005`**~~ **已结案（2026-09-15）：PT 首次真正出图，且 PT 通路的验证层问题当日全部清零**
+   （跑一整轮 PT 现在只剩 #23 那条层侧误报）。四个真 bug，**都只有验证层跑起来才看得见**（它此前一直灰屏，见 #9）：
+   **①交换链缺 `TRANSFER_DST`**（PT 要 blit 进交换链）/ **②`hud_framebuffers` 悬空** —— 它只在启动建一次，
+   而启动阶段就有 **5 次**交换链重建，且**唯一消费者是 PT 通路**（光栅走 `self.framebuffers`）
+   ⇒ 症状正是"**光栅一切正常、一开 PT 就崩**"，崩因与 PT 代码毫无关系 /
+   **③`pt_img` 格式与 GLSL 的 `rgba8` 不等 ⇒ 整张图写入未定义值** / **④overlay pass 复用主 pass 的 MSAA+深度管线**。
+   **①②③④ 的判据都已写进铁律 B 的 PT 段**（那才是下次改动前该读的地方）。
 3. ~~**`config.rs` 不读 `pt_enable` / `rt_enable`**~~ **原结案是错的，2026-09-15 重开并真修**：
    当时只看"字段存在（`config.rs:25/27`）+ `main.rs` 在读"就判结案，**没看 parse 分支** ——
    真相是 `load_from` 没有这两个 arm、`save_to` 也不写 ⇒ 两字段只能是源码默认值，
@@ -603,15 +603,15 @@ baseline（红 +X / 蓝 −X）均值 **+12.8**、极差 29；swapped（红 −X
     `block_types_keep_their_offsets`，都验证过会红）。同机位 A/B 与同二进制对照均为
     **同一 HUD 文字包围盒内的 ~250–280 像素** ⇒ 3D 画面逐像素一致。
 10. ~~**PT 512 盒上限静默截断**~~ **已结案（2026-09-14）：512 → 1024 + 一次性告警**。
-    实测 `marker=547 > 512` ⇒ 每次丢 35 个盒子，而 PT 是低 spp 噪点图、**肉眼看不出来**；
-    代价仅 **0.92 MB → 1.84 MB**（余量 87%）。⚠️ 另补 `Renderer::pt_box_cap_warned` 闩（超容告警一次不刷屏）。
+    实测 `marker=547 > 512` ⇒ 每次丢 35 个盒子，而 PT 是低 spp 噪点图、**肉眼看不出来**；代价仅
+    **0.92 → 1.84 MB**（余量 87%）。⚠️ 另补 `Renderer::pt_box_cap_warned` 闩（超容告警一次不刷屏）。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
     **lead**：按像素重投影复用，或运动自适应 spp。相关：`signature()` 量化已改分层
     （位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。
 12. ~~**`MAX_RIGID_BODIES` vs `MAX_AI`** 溢出静默丢弃~~ **已结案（2026-09-14）——两个常量都已不存在**
-    （`physics.rs` 刚体表已是 `pub bodies: Vec<Body>`，动态增长 ⇒ 结构上不可能溢出）。
-    「静默丢弃」这个**模式**仍值得防：`set_npc_visuals` / `set_dead_bodies` 超容时**不崩不报**，
-    只是"少了几个兵"。**已补一次性告警**（`Renderer::warn_npc_cap_once`，容量 3072 vs 峰值 2220）。
+    （`physics.rs` 刚体表已是 `pub bodies: Vec<Body>`）。但「静默丢弃」这个**模式**仍值得防：
+    `set_npc_visuals` / `set_dead_bodies` 超容时**不崩不报**，只是"少了几个兵"——
+    **已补一次性告警**（`Renderer::warn_npc_cap_once`）。
 13. **联网 NAT / 断线重连 / 远端实体渲染为 TODO**（UDP 客户端/服务端已有 Input/Snapshot + 插值 + 超时；
     快照的**位置修正应用**与**实体插值渲染消费**均未接线）。
 14. ~~**道具是否进阴影 pass 未确认**~~ **已结案（2026-09-14）：确实没进，两处都已补**（道具 + 士兵）。
@@ -621,11 +621,10 @@ baseline（红 +X / 蓝 −X）均值 **+12.8**、极差 29；swapped（红 −X
     顺手清了三处**陈旧**的 `#[allow(dead_code)]`。⚠️ 其余 `#[allow]` **必须保留**（只有 `cfg(test)` 用处）。
 16. ~~**`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**~~ **已结案（2026-09-14）——文件已不存在**（条目描述的状态早被清理，只是没人回来划掉它）。
 17. **`survive` 完整 5 波真机未验**；手榴弹弹道落点测试受玩家出生点影响。
-    ~~手榴弹 AoE 不结算障碍~~ **已结案（2026-09-15）**：`obstacle_blocks_blast` 只挡"爆心→目标之间"
-    的障碍（含爆心/目标的障碍跳过，否则贴脸炸会把自己堵死），NPC 伤害与玩家自伤都过它。
-    ~~切枪无动画~~ **已结案（2026-09-15）**：`WeaponRack::switch_progress()` 给出 0→1 归一化进度
-    （分母是私有的 `switch_time`，不让渲染层猜），枪模用 `sin(π·t)` 包络做下坠 0.18 m + 前倾 12° + 侧转 6°
-    （**两端为 0 ⇒ 起止速度连续**）。两条都**验证过测试会红**。
+    ~~手榴弹 AoE 不结算障碍~~ / ~~切枪无动画~~ **均已结案（2026-09-15）**：`obstacle_blocks_blast` 只挡
+    "爆心→目标之间"的障碍（含爆心/目标的障碍跳过，否则贴脸炸会把自己堵死）；`WeaponRack::switch_progress()`
+    给出 0→1 归一化进度，枪模用 `sin(π·t)` 包络做下坠 0.18 m + 前倾 12° + 侧转 6°（**两端为 0 ⇒
+    起止速度连续**）。两条都**验证过测试会红**。
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；
@@ -637,10 +636,8 @@ baseline（红 +X / 蓝 −X）均值 **+12.8**、极差 29；swapped（红 −X
     🔴 **实测噪声底**：同一二进制连跑两次（25s）中位 fps **69.7 / 71.8（差 2.8%）** ⇒ 单次 A/B 证明不了
     任何 < ~5% 的差异（教训 24/35）。
 21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：已支持交错布局**。
-    交错缓冲读错时每个数**都是合法浮点数**：不崩、不报错、几何静静变乱麻。修法 =
-    `elem_stride = byteStride.unwrap_or(step * comps)` ⇒ 密集布局**逐位不变**。
-    🔴 补了测试 `glb_honours_buffer_view_byte_stride` 并**验证过它会红**（临时关掉 stride 支持 ⇒ FAILED）。
-    **⇒ "先用必然能测出差异的已知变化验一次工具"同样适用于测试本身。**
+    交错缓冲读错时每个数**都是合法浮点数**（不崩不报、几何静静变乱麻）；修法 = `byteStride.unwrap_or(...)`。
+    🔴 补了测试并**验证过它会红**（临时关掉 stride 支持 ⇒ FAILED）⇒ **这条判据同样适用于测试本身**。
 22. ~~**`data/` 里的历史残留**~~ **已清理（2026-09-13）**：62 文件 → **只留 3 个被代码引用的**
     （`llm_decisions.jsonl` / `llm_server.jsonl` / `llm_doctrine.json`）；同批 `screenshots/` 300→25、
     `logs/` 646→20、`dist/` 删除。**共回收约 600 MB。**
