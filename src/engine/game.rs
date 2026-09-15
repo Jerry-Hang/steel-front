@@ -3221,6 +3221,15 @@ impl Game {
         }
     }
 
+    /// 🔴 **切枪动画进度** 0..=1（0 = 刚换手、枪在最低点；1 = 抬回瞄准位）。
+    ///
+    /// 2026-09-15 加：切枪此前只有"禁止开火"的计时器，**没有任何动作** ——
+    /// 按下数字键后枪是直接跳变的。枪模（`main.rs::fp_gun_matrix`）每帧读这个值
+    /// 做下坠/侧转。取不到武器（空架）时返回 1.0（= 无位移），与"没在切枪"同义。
+    pub fn weapon_switch_progress(&self) -> f32 {
+        self.weapons.switch_progress()
+    }
+
     /// 请求换弹（R 键）；已在换弹/满弹匣/无备弹/切枪中时无副作用
     pub fn request_reload(&mut self) {
         if self.weapons.is_switching() {

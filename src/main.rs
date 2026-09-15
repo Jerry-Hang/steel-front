@@ -278,6 +278,18 @@ const GUN_HIP_DEPTH_M: f32 = 0.60;
 /// （旧实现只有缩放补了 tan(fov/2)，平移没补——两条通道不一致就是 bug #2）。
 const GUN_HIP_HALF_TAN: f32 = 0.700_208;
 
+/// 🔴 **切枪动画**（2026-09-15）：切枪此前只是"禁止开火"的计时器，枪是直接跳变的。
+///
+/// 包络用 `sin(π·t)`：`t=0` 与 `t=1` 处都为 0、中点最大 —— **两端连续**是关键，
+/// 直接对 `t` 做线性（或对 `1-t` 做三角波）会在起止两端留下速度阶跃，
+/// 那正是本仓枪模历史上"残影/抖动"的成因（见 `GunSway` 上那段注释的同类教训）。
+///
+/// 幅值：0.18 m 下坠 + 12° 前倾 + 6° 侧转（视空间）。下坠量按 `screen_gain` 补偿，
+/// 与后坐/摆动走同一套换算，否则开镜切枪时视觉幅度会放大近 2 倍。
+const GUN_SWITCH_DROP_M: f32 = 0.18;
+const GUN_SWITCH_PITCH_RAD: f32 = 0.21; // ≈12°
+const GUN_SWITCH_ROLL_RAD: f32 = 0.10; // ≈6°
+
 /// 第一人称枪摆动状态。
 ///
 /// 全部量在 `update()` 内按 delta_time 积分（`fp_gun_matrix()` 只读），原因是
@@ -1729,12 +1741,24 @@ impl GameApp {
         // 模型缩放与摆动偏移共用同一个 fov 补偿量（fov_gain），保证两条通道
         // 在腰射/开镜之间视觉一致（旧实现只有这里补了 fov，摆动没补）
         let gun_scale = fov_gain.clamp(0.5, 1.0) * base_scale;
+        // ④ 切枪动作（2026-09-15）：包络 sin(π·t) 两端为 0 ⇒ 起止速度连续。
+        //    只在真的在切枪时非零：switch_time == 0 时 progress 直接是 1.0 ⇒ sin(π)=0。
+        let (switch_drop, switch_pitch, switch_roll) = {
+            let t = self.game.weapon_switch_progress();
+            let swing = (std::f32::consts::PI * t).sin();
+            (
+                GUN_SWITCH_DROP_M * swing * screen_gain,
+                GUN_SWITCH_PITCH_RAD * swing,
+                GUN_SWITCH_ROLL_RAD * swing,
+            )
+        };
+        anchor.y -= switch_drop;
         let view_inv = cam.view_matrix().inverse();
         view_inv
             * glam::Mat4::from_translation(anchor)
-            * glam::Mat4::from_rotation_z(0.0)
+            * glam::Mat4::from_rotation_z(switch_roll)
             * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
-            * glam::Mat4::from_rotation_x(-0.045)
+            * glam::Mat4::from_rotation_x(-0.045 + switch_pitch)
             * glam::Mat4::from_rotation_y(std::f32::consts::PI)
     }
 

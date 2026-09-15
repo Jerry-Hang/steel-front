@@ -720,6 +720,22 @@ impl WeaponRack {
         self.switch_timer > 0.0
     }
 
+    /// 🔴 **切枪动画进度**：0.0 = 换手刚到位（枪收到最低）、1.0 = 抬回瞄准位。
+    ///
+    /// 2026-09-15 加：切枪此前**只是个禁止开火的计时器**（源码注释里就写着"纯计时器，
+    /// 无动画"），玩家按下数字键后枪是"啪"地直接换掉的 —— 没有任何动作。
+    ///
+    /// 归一化放在这里而不是让渲染层自己算，是因为**分母（`switch_time`）是武器架的私有量**：
+    /// 外面只拿得到剩余时间，除以一个猜来的常数会在 `switch_time` 被配置改动时静默错位。
+    /// 进度用 `1 - 剩余/总时长`，所以 `switch_time == 0`（关闭切枪惩罚）时本函数返回 1.0，
+    /// 渲染侧乘出来就是 0 位移 —— 不需要在渲染层再判一次"是不是 0"。
+    pub fn switch_progress(&self) -> f32 {
+        if self.switch_time <= 0.0 {
+            return 1.0;
+        }
+        (1.0 - self.switch_timer / self.switch_time).clamp(0.0, 1.0)
+    }
+
     /// 重置全部槽位弹药：每把枪弹匣补满 + 备弹恢复初始（死亡补给/重开一局用）
     pub fn reset_all_ammo(&mut self) {
         for (_, firearm) in self.weapons.iter_mut() {
@@ -1275,6 +1291,50 @@ mod tests {
         assert_eq!(rack.active_name(), "Thompson SMG");
         rack.switch_prev(); // 1 → 0
         assert_eq!(rack.active_name(), "M1 Rifle");
+    }
+
+    /// 🔴 **切枪动画进度**（2026-09-15）：`switch_progress()` 必须给出 0→1 的归一化进度，
+    /// 且**不许让渲染层自己去猜分母**。
+    ///
+    /// 判据三层：① 切枪瞬间为 0、中途按比例、结束为 1；② 没在切枪时恒为 1（无位移）；
+    /// ③ **`switch_time == 0` 时返回 1.0 而不是 NaN** —— 那种配置下 `switch_timer` 可能是 0，
+    /// 除法会得到 0/0；返回 1.0 让渲染侧的 `sin(π·t)` 恰好为 0（无动画），
+    /// 不必在渲染层再判一次"是不是 0"。
+    #[test]
+    fn switch_progress_is_normalised_and_safe_at_zero_switch_time() {
+        let mut rack = WeaponRack::new(
+            vec![
+                ("A".to_string(), thompson_smg_firearm()),
+                ("B".to_string(), thompson_smg_firearm()),
+            ],
+            1.0,
+        );
+        // 未在切换：进度 1.0（抬到位）
+        assert_eq!(rack.switch_progress(), 1.0, "未切枪时应为 1.0");
+
+        rack.switch_to(1);
+        assert_eq!(rack.switch_progress(), 0.0, "切枪瞬间应为 0.0");
+        rack.update(0.25);
+        assert!(
+            (rack.switch_progress() - 0.25).abs() < 1e-6,
+            "1/4 时长后应为 0.25，实测 {}",
+            rack.switch_progress()
+        );
+        // 中点：包络 sin(π·0.5) = 1 ⇒ 动画峰值恰在时间中点
+        rack.update(0.25);
+        let mid = rack.switch_progress();
+        assert!(
+            (std::f32::consts::PI * mid).sin() > 0.99,
+            "时间中点应是动画峰值（sin≈1），实测 t={mid}"
+        );
+        rack.update(0.5);
+        assert_eq!(rack.switch_progress(), 1.0, "结束后应回到 1.0");
+
+        // switch_time == 0：不得产生 NaN
+        let rack0 = WeaponRack::new(vec![("A".to_string(), thompson_smg_firearm())], 0.0);
+        let p = rack0.switch_progress();
+        assert!(p.is_finite(), "switch_time=0 时不得返回 NaN/Inf，实测 {p}");
+        assert_eq!(p, 1.0, "switch_time=0 应等价于'没有切枪动画'");
     }
 
     #[test]
