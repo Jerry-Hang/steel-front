@@ -52,6 +52,12 @@ const GRID_HALF: f32 = GRID_CELL * (GRID_SIZE as f32) * 0.5;
 const NPC_COUNT: usize = 8;
 /// NPC 命中球心高度（脚上 1.0m；hit_npc_index 的球心与 hit_height 公式共用此值）
 const NPC_HIT_CENTER_Y: f32 = 1.0;
+/// NPC 手榴弹出手高度（米，相对脚底 = 手的位置，不是脚底）。
+/// 🔴 必须离地：`update_grenades` 的落地判据是 `y <= ground + 0.05`，从脚底出手的
+/// 手榴弹在**高帧率下第一帧仍落在容差内**（出手后第一帧只上升 `vy*dt`，dt≤9.3ms 即
+/// ≥108fps 时不足 5cm）⇒ 原地引爆，8m/120 伤的 AoE 把投掷者自己打死。
+/// 见回归测试 `npc_grenade_does_not_detonate_on_release`。
+const NPC_GRENADE_RELEASE_Y: f32 = 1.2;
 /// NPC 发现玩家距离（米）
 const NPC_SIGHT: f32 = 60.0;
 /// 波间倒计时（秒）
@@ -3477,7 +3483,13 @@ impl Game {
         }
         for (i, tp) in to_throw {
             let npc = &self.npcs[i];
-            let origin = npc.position;
+            // 🔴 出手点必须抬到离地高度：脚底出手 = 高帧率下第一帧就被判"落地" → 自爆
+            // （机理与现场证据见 `NPC_GRENADE_RELEASE_Y` 定义处）
+            let origin = [
+                npc.position[0],
+                npc.position[1] + NPC_GRENADE_RELEASE_Y,
+                npc.position[2],
+            ];
             // 方向：本 NPC → 目标（水平）+ 上抛分量（与玩家投掷同链路，参数化）
             let dx = tp[0] - origin[0];
             let dz = tp[2] - origin[2];
@@ -7916,6 +7928,72 @@ mod tests {
             game.grenades_vec.len() > before,
             "冷却结束的 Attack 态 NPC 应投掷手榴弹"
         );
+    }
+
+    /// 🔴 2026-09-16 真机现场：NPC 手榴弹**出手即自爆**（帧率相关）。
+    ///
+    /// 证据（`RV3D_MAP=assets/maps/defense_line.toml`、survive、130fps）：
+    /// `grenade: npc #12 throws at (0, 0)` 与 `kill: npc #12 eliminated` **同一秒**，
+    /// 而 `weapons: shot #` 全程 **0 条** ⇒ 投掷者炸死了自己，玩家一枪没开。
+    ///
+    /// 机理：NPC 从**脚底**出手（`npc.position`，平地 y=0），落地判据是
+    /// `pos.y <= ground + 0.05`；出手后第一帧只上升 `vy*dt`（vy≈5.35 m/s）
+    /// ⇒ **dt ≤ 9.3ms（≥108fps）时第一帧仍在容差内 → 原地引爆**。
+    /// 60fps 下第一帧上升 8.9cm 所以不复现 —— 这是个只在快机器上出现的自杀。
+    /// 修法 = 出手点抬到 `NPC_GRENADE_RELEASE_Y`（手的高度）。
+    #[test]
+    fn npc_grenade_does_not_detonate_on_release() {
+        for fps in [60.0f32, 130.0, 240.0] {
+            let dt = 1.0 / fps;
+            let mut game = Game::new();
+            game.stress = true;
+            let mut a = npc_at(0, Team::Red, [0.0, 0.0, 0.0]);
+            let mut b = npc_at(1, Team::Blue, [12.0, 0.0, 0.0]);
+            let p = NpcPerception {
+                enemy_visible: true,
+                enemy_in_range: true,
+                ..NpcPerception::default()
+            };
+            a.state_machine.update(p);
+            a.state_machine.update(p);
+            b.state_machine.update(p);
+            b.state_machine.update(p);
+            a.grenade_timer = 0.0;
+            b.grenade_timer = 999.0;
+            game.npcs = vec![a, b];
+            let targets = pick_stress_targets(&game.npcs, STRESS_SIGHT);
+            game.frame_no = 1; // h = (0*31 + 1*7) % 100 = 7 < 8 → 必投掷
+            game.npc_throw_grenades(dt, &targets);
+            assert_eq!(game.grenades_vec.len(), 1, "{}fps: 应投出一枚", fps);
+            assert!(
+                game.grenades_vec[0].position()[1] > 1.0,
+                "{}fps: 出手点应抬到离地高度，实际 y={}",
+                fps,
+                game.grenades_vec[0].position()[1]
+            );
+            // 出手后的头几帧绝不允许引爆（自爆窗口就在这里）
+            for _ in 0..8 {
+                game.update_grenades(dt);
+                assert!(
+                    !game.grenades_vec.is_empty() && !game.grenades_vec[0].exploded(),
+                    "{}fps: 出手后 {}s 内不得引爆（否则原地炸死投掷者）",
+                    fps,
+                    dt * 8.0
+                );
+            }
+            // 抛物线走完：落点应在 8m 爆炸半径之外（投掷者安全）
+            for _ in 0..(fps as usize * 3) {
+                game.update_grenades(dt);
+                if game.grenades_vec.is_empty() {
+                    break;
+                }
+            }
+            assert!(
+                game.npcs.iter().all(|n| n.hp > 0.0),
+                "{}fps: 投掷者不该被自己的手榴弹炸死",
+                fps
+            );
+        }
     }
 
     /// 爆炸击杀：hp≤0 移除 + 计分 + 任务推进
