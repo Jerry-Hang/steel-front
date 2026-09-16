@@ -1247,6 +1247,15 @@ struct AiStepCtx<'a> {
     target_occluded: &'a [bool],
 }
 
+/// `RV3D_AI_DIAG=1`：NPC 停在非 Attack 态时每 5s 打一行"为什么"（未结案 #17 的定位工具，
+/// 见 `step_npc` 里的调用点；默认关 ⇒ 生产行为与日志量不变）。
+fn ai_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RV3D_AI_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+    })
+}
+
 /// step_npc 解析"本 NPC 这一帧的目标位置"的唯一规则。
 /// 遮挡预计算必须与决策走同一条分支，否则会出现"按玩家算遮挡、按 NPC 行动"的错位。
 fn resolve_ai_target(
@@ -4832,6 +4841,30 @@ impl Game {
             under_fire,
         };
         let state = npc.state_machine.update(npc.perception);
+        // 诊断埋点（`RV3D_AI_DIAG=1`）：把"这个 NPC 为什么不进 Attack"压成一行。
+        // 未结案 #17：survive 第 1 波残余 1–2 只十余分钟恒为 `Patrol`，波次永远清不掉；
+        // 而 `Patrol` 只能由 `enemy_visible == false` 维持（`ai.rs::NpcStateMachine`），
+        // `enemy_visible = dist < sight && !occluded` ⇒ 只可能是"太远"或"被挡"，
+        // 这一行把二者分开（`occluded` 是原始判据；`lines` 为 0 = 遮挡数据缺失、按未挡处理）。
+        // 键 = 时间桶(5s) + id ⇒ 每个卡住的 NPC 每 5s 一行，不刷屏。
+        if ai_diag() && state != NpcState::Attack {
+            static SEEN: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(u64::MAX);
+            let key = ((ctx.time / 5.0) as u64) << 32 | npc.id as u64;
+            if SEEN.swap(key, std::sync::atomic::Ordering::Relaxed) != key {
+                log::info!(
+                    "aidiag: #{} state={:?} dist={:.1} sight={:.0} occluded={} lines={} pos=({:.1}, {:.1})",
+                    npc.id,
+                    state,
+                    dist,
+                    sight,
+                    occluded,
+                    ctx.target_occluded.len(),
+                    npc.position[0],
+                    npc.position[2]
+                );
+            }
+        }
         // 火-机动交替打（2026-08-26）：攻击态站打数秒 → 换下一个掩体/侧移点（再站打）
         if state == NpcState::Attack {
             npc.attack_timer += ctx.dt;
