@@ -5,13 +5,14 @@
 > **本文件 166 KB / 2918 行，不要通读。** 先读这一节，再按关键词往下搜。
 >
 > ### 当前基线
-> `cargo test --release` **492 passed / 0 failed / 0 警告**（2026-09-15）；
+> `cargo test --release` **493 passed / 0 failed / 0 警告**（2026-09-16，强制重编 `game.rs` 复核过）；
 > 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**）；
 > `RV3D_VALIDATION=1` 跑一整轮只剩 #23 那条层侧误报（5 次交换链创建 = 5 条报文）。
-> `AGENTS.md` **59,771 B（58.4 KB）** —— 仍超 <48KB 目标，但**距 65,536 B 硬上限有 5.7 KB 余量**
-> （2026-09-15 三件事同一轮落地：**切枪 device lost 修复** / **弹孔（弹着标记）** / **mesh 路径 Authored 编码补齐**，
-> 并顺带发现"障碍 marker 可见尺寸 = 碰撞盒 2 倍"这条未结案；同一轮把 AGENTS.md 从 65,435 B 连续压到 59,771 B，
-> 结构自检：铁律 A–F / 未结案 / 37 条教训齐全）。详见本文件顶部的迭代记录。
+> `AGENTS.md` **62,351 B（60.9 KB）** —— 仍超 <48KB 目标，**距 65,536 B 硬上限只剩 3.1 KB，再加料前先删旧料**。
+> 最新迭代（2026-09-16）：**survive 5 波真机首验 —— 没跑通，挖出「NPC 手榴弹出手即自爆（≥108fps，已修）」+
+> 「残余 NPC 卡 Patrol 导致波次清不掉（open）**；未结案 #17 保持 open。详见本文件顶部。
+> 再往前（2026-09-15 三件事同一轮落地：**切枪 device lost 修复** / **弹孔（弹着标记）** / **mesh 路径 Authored 编码补齐**，
+> 并顺带发现"障碍 marker 可见尺寸 = 碰撞盒 2 倍"这条未结案；结构自检：铁律 A–F / 未结案 / **39** 条教训齐全）。
 > 🔴 **`scripts/scheduler.log` 已停止跟踪**（`*.log` 本来就在 `.gitignore` 里，只是这个文件早年入库了）——
 > 会话自动化脚本 `send_work.ps1` / `dsh_scheduler.ps1` 会持续追加它，此前每轮结束都会让工作树变脏。
 > 最新迭代（2026-09-15 续二）：**弹孔 + 切枪 device lost** 见顶部；再往前是
@@ -49,6 +50,66 @@
 
 
 
+
+# 🔴 survive 5 波真机首验：没跑通，但挖出「NPC 手榴弹出手即自爆（≥108fps）」（2026-09-16）
+
+未结案 #17 第一次被真正驱动起来（`scripts/run_survive_pm.ps1` + `scripts/survive_pm.py`，
+`RV3D_MAP=assets/maps/defense_line.toml`，`RV3D_INVINCIBLE=1`，130fps，800s 预算）。
+**结论：第 1 波就没清完 —— 但原因不是"规则没实现"，而是两个真缺陷。**
+
+| 观测量 | 实测值 |
+|---|---|
+| `wave: wave 1 spawned 6 enemies` | 6 只（`4+2·1`，与 `wave_profile` 一致） |
+| `kill: npc #N eliminated` | **4 条**（#9/#10/#12/#13），score 0 → 40 |
+| `grenade: npc #N throws` | **4 条**，与 4 条击杀**逐条同秒、同 id** |
+| `weapons: shot #`（玩家开火） | **0 条** ⇒ 这 4 个击杀**没有一个来自玩家** |
+| `wave: wave 1 cleared` / `survive: 波间补给` / `survive: 全部 5 波守住` | **全部 0 条** |
+| 残余 NPC 状态 | 十余分钟恒为 `patrol=2 chase=0 attack=0`（`ai:` 行 42 次采样同一形态） |
+| `has been lost` / `panicked` | 0 / 0 |
+
+HUD 取证图 `screenshots/survive_pm_wave1.png`：**`WAVE 1/5`**（`defense_line.toml` 的
+`[rule] kind="survive" waves=5` 确实加载了）、`LEVEL 1`、`HP 100/100`、`npc: I0 P4 C2 A0`。
+
+## 1. ✅ 根因一：NPC 手榴弹**出手即自爆**（已修）
+
+- **现场**：`grenade: npc #12 throws at (0, 0) fuse=1.70s` 与 `kill: npc #12 eliminated` **同一秒**，
+  被炸死的正是**投掷者自己**；全场玩家 `shot #` = 0。
+- **机理（读代码 + 算数）**：`npc_throw_grenades` 用 `origin = npc.position` = **脚底**（平地 y=0），
+  而 `update_grenades` 的落地判据是 `pos.y <= ground + 0.05`。出手后第一帧只上升 `vy*dt`
+  （`vy = 0.9·18·0.330 ≈ 5.35 m/s`）⇒ **dt ≤ 9.3ms（≥108fps）时第一帧仍在 5cm 容差内 → 原地引爆**，
+  8m/120 伤的 AoE 把投掷者自己打死。60fps 下第一帧上升 8.9cm，所以**只在快机器上复现**
+  （本机 128–130fps 恒定命中）。
+- **修法**：新增 `NPC_GRENADE_RELEASE_Y = 1.2`（手的高度），出手点抬到 `npc.position[1] + 1.2`。
+- **回归测试** `npc_grenade_does_not_detonate_on_release`：**60 / 130 / 240fps 三档**，
+  断言 ①出手点 y>1.0；②出手后 8 帧内不得 `exploded()`；③抛物线走完后投掷者仍 `hp>0`。
+- **推论（重要）**：此前所有 ≥108fps 的 NPC 手榴弹局 —— 含 **20 轮红蓝对称性 A/B（跑在 130fps）**——
+  里，投掷者都在自杀。那份结论取数前必须先看这条。
+
+## 2. ❌ 根因二：残余 NPC 卡在 Patrol，波次永远清不掉（**open**）
+
+自炸掉 4/6 之后，剩下 2 只十几分钟恒为 `patrol=2 chase=0 attack=0`，**不推进、不进 Attack**。
+`update_waves` 要求 `npcs.is_empty()` 才清波 ⇒ **没有波间补给、没有第 2..5 波、没有胜利态**，
+survive 在真机上**不可通关**（玩家想赢只能自己满地图找那两只）。
+**lead**：survive 规则下 NPC 的目标应恒为玩家/防守点（不靠视距感知），属设计决定，本轮**未动**。
+
+## 3. 顺带纠正两条口径
+
+- **`kill`/score ≠ 玩家命中**：`damage_npc` 对**任何**敌方死亡都 `score += 10`（不分击杀者），
+  所以冒烟判据里的 `killed>=1` 在"会有 NPC 自伤的模式"（survive / 压力模式手榴弹）**不能当命中证据**；
+  判"玩家打中了"要看 `weapons: shot #`（每发一条）。⇒ `AGENTS.md` 教训 39。
+- **时间步相关判据**：`spawn → 第一帧就判落地` 的组合必须问"dt 缩小 10 倍还成立吗"。
+  ⇒ `AGENTS.md` 教训 38。
+
+## 4. 本轮未做完的事（诚实记账）
+
+- 修完的**只**是根因一；**没有**再跑一轮端到端 survive（时间预算用尽）⇒
+  "5 波能通关"**仍未获证**，`#17` 保持 open。
+- `survive_pm.py` 在"无活目标"分支里空转（只 `sleep 2` + 重读日志），本轮**一枪没开**
+  （0 条 `shot #`）—— 这套闭环瞄准只在冒烟的 wave 模式里验证过，survive 下 NPC 停在
+  40m 外不进 Attack 时它不会主动去找。**下次给"长时间无目标"加一条推进/搜寻路径。**
+- 失败分支（`survive: 玩家阵亡 → Defeat`）因 `RV3D_INVINCIBLE=1` 未走到，仍只有单测覆盖。
+
+---
 
 # ✅ 弹孔（弹着标记）落地 + 一路挖出两个静默 bug（切枪 device lost / marker 可见尺寸 2 倍）（2026-09-15 续二）
 
