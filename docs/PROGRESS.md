@@ -109,6 +109,41 @@ survive 在真机上**不可通关**（玩家想赢只能自己满地图找那�
   40m 外不进 Attack 时它不会主动去找。**下次给"长时间无目标"加一条推进/搜寻路径。**
 - 失败分支（`survive: 玩家阵亡 → Defeat`）因 `RV3D_INVINCIBLE=1` 未走到，仍只有单测覆盖。
 
+## 5. 第二轮（修后复验，同日）：自爆根因**确认消失**，Patrol 卡死**独立复现**
+
+修完手榴弹出手点后原样再跑一轮（同样 `defense_line.toml` + `RV3D_INVINCIBLE=1`，540s 预算）。
+**两轮对照（同一套驱动、同一张图、同一个 130fps）**：
+
+| 观测量 | 第一轮（修前） | 第二轮（修后） |
+|---|---|---|
+| `grenade: npc #N throws` | 4 | **5** |
+| 投掷者**同秒**阵亡 | **4**（每次投掷都炸死自己） | **0**（投掷→阵亡最小间隔 **+1s**，而引信本身就是 1.64–1.72s） |
+| 玩家 `weapons: shot #` | **0**（一枪没开） | **60** |
+| 击杀归因 | 全是自爆（score 0→40） | 每次阵亡都与玩家开火同秒（`shot#14→#10`、`shot#19~22→#9`、`shot#40~42→#12`），score 0→50 |
+| 第 1 波生成 → 结束 | 6 → 2 只（4 只自爆） | 6 → **1** 只（5 只被玩家打死） |
+| 残余 NPC 的状态 | `patrol=2 chase=0 attack=0` 十余分钟 | **同样** `patrol=2 chase=0 attack=0`（HUD 取证图 `survive_pm_t182.png`：`WAVE 1/5`、`SCORE 40`、`npc: I0 P2 C0 A0`、`hits: 17`、kill feed 有 `损失哨兵 #12`） |
+| `wave cleared` / `波间补给` / 胜利 | 0 / 0 / 0 | 0 / 0 / 0 |
+
+⇒ ① **手榴弹修复有效且可判**（同秒自杀 4→0，且这一轮 aimbot 真的开火了：闭环瞄准在 survive 里可用的前提是
+NPC 进 Attack，而投掷者不再自杀才会持续进 Attack）；② **Patrol 卡死与手榴弹无关**，两轮独立复现，
+是 survive 通关的**真·阻塞点**。
+
+驱动自己的 stdout 就是逐条归因证据（`scripts/survive_pm.py`，`RELEASE OK` 正常收尾）：
+`aim: cur=(0.0,0.0) tgt=(167.9,3.8) err=167.9 → inject -1180px` … `aim: err=(-0.1,0.4)` → `KILL (score 0 → 10)`，
+5 次全部如此；最后一轮结束时 `enemies=1`、`wave` 仍为 1。
+
+**把 open 条目的解释空间压到两条（读代码，不用再猜）**：
+`Patrol` 只能因 `enemy_visible == false` 维持（`ai.rs::NpcStateMachine`：Patrol→Chase 需 visible）；
+`enemy_visible = dist < NPC_SIGHT(60) && !occluded`（`game.rs::step_npc`）；
+`occluded` 由 `target_occlusion` 给出 —— 两条线（NPC 眼高 1.4 → 玩家 +1.0 / +1.7）**都**被挡才算挡。
+实测幸存者质心距玩家 **36.7m（< 60）** ⇒ **要么个体在 60m 外，要么 `occluded` 为真**。
+**下一个动作 = 一行埋点**：`RV3D_AI_DIAG=1` 时每 5s 打印未进 Attack 的 NPC 的
+`state / dist / occluded / can_see_target`，一次 run 分辨二者（教训 20：卡住就不要继续推理）。
+
+**顺带排除一个自证陷阱**：`RV3D_INVINCIBLE=1` 会走"观战兜底目标 = 敌方重心"那条分支，
+但那分支在 `resolve_ai_target` 里**只在 `stress` 下生效**，survive 是非压力模式 ⇒ 恒返回玩家位置，
+**不是**本次 Patrol 卡死的原因。
+
 ---
 
 # ✅ 弹孔（弹着标记）落地 + 一路挖出两个静默 bug（切枪 device lost / marker 可见尺寸 2 倍）（2026-09-15 续二）
