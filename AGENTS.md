@@ -555,18 +555,23 @@ release_input.ps1 取代）。
       玩家 46 发把投掷者自己打死（`shot #14 → kill: npc #10`、`shot #22 → kill: npc #9`）。
       ⚠️ **推论：此前所有 ≥108fps 的 NPC 手榴弹局（含 130fps 那份 20 轮红蓝对称性 A/B）里，
       投掷者都在自杀** —— 那份取数前先看这条。
-    - ❌ **残余 NPC 卡在 Patrol ⇒ 波次永远清不掉**（**open**）：两轮**都**复现（自炸 4/6 后剩 2 只，
-      以及修好后玩家打死 4/6 后剩 2 只），十余分钟恒为 `patrol=2 chase=0 attack=0`，不推进、不进 Attack。
-      `update_waves` 要求 `npcs.is_empty()` 才清波 ⇒ 没有波间补给、没有第 2..5 波、没有胜利态，
-      survive 在真机上**不可通关**。**已排除的解释**（读代码，勿再猜这两条）：
-      ① **与 `RV3D_INVINCIBLE=1` 无关** —— `resolve_ai_target` 的 spectator/fallback 分支只在
-      `stress` 下生效，非压力模式（survive）恒返回玩家位置；② 目标也不是"敌方重心"（同上）。
-      **⇒ 已知约束**：`Patrol` 只能因 `enemy_visible == false` 维持（`state_machine`：Patrol→Chase
-      需 visible），而 `enemy_visible = dist < NPC_SIGHT(60) && !occluded`；遮挡判据
-      （`target_occlusion`）= 两条线（NPC 眼高 1.4 → 玩家 +1.0 / +1.7）**都**被挡才算挡。
-      实测幸存者质心距玩家 **36.7m（< 60）** ⇒ **要么它个体在 60m 外，要么 `occluded` 为真**。
-      **⇒ 下一个动作（一行埋点，别再推理）**：`RV3D_AI_DIAG=1` 时每 5s 打印未进 Attack 的 NPC 的
-      `state / dist / occluded / can_see_target`，一次 run 就能分辨这两条。
+    - ❌ **残余 NPC 卡在 Patrol ⇒ 波次永远清不掉**（**open，但根因已定位到数字**）：两轮**都**复现；
+      第三轮开 `RV3D_AI_DIAG=1` 一次就定死了原因 —— **出生半径超出视距**：
+      - 波次出生半径 = `40 + 40·((slot·7 + wave·3) % 5)/4` ⇒ **40–80m**（`game.rs::spawn_npc`），
+        而 `NPC_SIGHT = 60` ⇒ `enemy_visible = dist < 60` 对 **>60m 出生的人恒为 false**。
+      - 实测（最后 2000 条诊断采样）：`dist≥60` 的样本 **500/500 全是 Patrol**（`occluded=false`，
+        遮挡完全无辜）；`dist<60` 的 **1440 条是 Chase**、只有 60 条 Patrol（刚跨过阈值的过渡）。
+        `#8` 在 **77.8m** 上一动不动守了整局（`pos` 逐样本不变）。
+      - `update_waves` 要求 `npcs.is_empty()` ⇒ 只要有一只 >60m，**这一波永远清不掉** ⇒ 没有波间补给、
+        没有第 2..5 波、没有胜利态。**这与地图无关**：默认程序化城市用同一个 `spawn_npc`，
+        冒烟之所以一直绿，只因为它只要求 `killed>=1`（<60m 的那几只足够）。
+      - **修法（未实施，二选一，属设计决定）**：① 让 wave/survive 的 Patrol **朝目标推进**而不是游荡；
+        ② 把感知拆成两条 —— 「目标已知」（管 Idle/Patrol→Chase）与「敌人可见」（管 Chase→Attack/开火）。
+        ② 更正确：**进攻方不该靠视距才知道要打哪**，但**开火仍必须要求视线**（隔墙掉血那条历史教训）。
+        底层不匹配是 `NPC_SIGHT(60) < 出生半径上限(80)`。
+      - 诊断工具：`RV3D_AI_DIAG=1`（每次启动 **一个 run 即可**，默认关、不刷屏）。
+      已排除的解释（别再猜）：与 `RV3D_INVINCIBLE=1` 无关 —— `resolve_ai_target` 的 spectator/fallback
+      分支只在 `stress` 下生效，非压力模式（survive）恒返回玩家位置。
     - 口径：本次跑用 `RV3D_INVINCIBLE=1`（否则先死），**失败分支（玩家阵亡）仍只有单测覆盖**。
     ~~手榴弹弹道落点测试受玩家出生点影响~~；~~手榴弹 AoE 不结算障碍~~ / ~~切枪无动画~~ **均已结案（2026-09-15）**：`obstacle_blocks_blast` 只挡"爆心→目标之间"的障碍（含爆心/目标的障碍跳过，否则贴脸炸会把自己堵死）；`WeaponRack::switch_progress()` 给出 0→1 归一化进度，枪模用 `sin(π·t)` 包络做下坠 0.18 m + 前倾 12° + 侧转 6°。两条都**验证过测试会红**。
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。

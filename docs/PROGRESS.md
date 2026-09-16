@@ -144,6 +144,42 @@ NPC 进 Attack，而投掷者不再自杀才会持续进 Attack）；② **Patro
 但那分支在 `resolve_ai_target` 里**只在 `stress` 下生效**，survive 是非压力模式 ⇒ 恒返回玩家位置，
 **不是**本次 Patrol 卡死的原因。
 
+## 6. 第三轮（同日晚）：`RV3D_AI_DIAG=1` 一次就把 Patrol 的根因钉死 —— **出生半径 > 视距**
+
+新增诊断埋点后跑 200s（同为 `defense_line.toml`，默认关时不影响生产），第一屏输出就已经给出答案：
+
+```
+aidiag: #8  state=Patrol dist=70.0 sight=60 occluded=false lines=6 pos=(65.3, 25.3)
+aidiag: #9  state=Chase  dist=40.0 sight=60 occluded=false lines=6 pos=(6.1, 39.5)
+aidiag: #10 state=Chase  dist=60.0 sight=60 occluded=false lines=6 pos=(-46.8, 37.6)
+aidiag: #11 state=Patrol dist=80.0 sight=60 occluded=false lines=6 pos=(-74.6, -28.9)
+aidiag: #12 state=Chase  dist=50.0 sight=60 occluded=false lines=6 pos=(-7.6, -49.4)
+aidiag: #13 state=Patrol dist=70.0 sight=60 occluded=false lines=6 pos=(54.6, -43.9)
+```
+
+最后 2000 条采样按「状态 × 距离是否 ≥ 60」分组：
+
+| 分组 | 条数 |
+|---|---|
+| `Chase` 且 `dist < 60` | **1440** |
+| `Patrol` 且 `dist ≥ 60` | **500**（`occluded=false`，**遮挡完全无辜**） |
+| `Patrol` 且 `dist < 60` | 60（刚跨过阈值的过渡帧） |
+
+**根因**：波次出生半径 = `40 + 40·((slot·7 + wave·3) % 5)/4` ⇒ **40–80m**（`game.rs::spawn_npc`），
+而 `NPC_SIGHT = 60` ⇒ **出生在 >60m 的人 `enemy_visible` 恒为 false**（`enemy_visible = dist < sight && !occluded`），
+`Patrol → Chase` 永远不触发 ⇒ 它原地游荡（`#8` 在 **77.8m** 上逐样本位置不变），
+而 `update_waves` 要求 `npcs.is_empty()` ⇒ **这一波永远清不掉**。两轮各 6 只里都有 2 只落在 >60m。
+
+**这不是 survive 独有**：默认程序化城市用的是同一个 `spawn_npc`，冒烟之所以一直绿，
+只因为它只要求 `killed>=1`（<60m 的那几只足够）⇒ **普通波次同样可能永远清不完**，只是没人看。
+
+**修法（未实施，属设计决定）**：① 让 wave/survive 的 `Patrol` 朝目标推进而不是游荡（最小）；
+② 把感知拆成「目标已知」（管 Idle/Patrol→Chase）与「敌人可见」（管 Chase→Attack/开火）——
+② 更正确：**进攻方不该靠视距才知道打哪，但开火仍必须要求视线**（"隔墙掉血"那条历史教训）。
+底层不匹配 = `NPC_SIGHT(60) < 出生半径上限(80)`。
+
+**工具**：`RV3D_AI_DIAG=1`（`feat(ai)` commit `527cbc8`），默认关、每 5s 每个卡住的 NPC 一行。
+
 ---
 
 # ✅ 弹孔（弹着标记）落地 + 一路挖出两个静默 bug（切枪 device lost / marker 可见尺寸 2 倍）（2026-09-15 续二）
