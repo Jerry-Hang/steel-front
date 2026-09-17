@@ -89,6 +89,10 @@ const WOOD_BENCH: [f32; 3] = [0.46, 0.34, 0.18];
 const TENT_CAMO: [f32; 3] = [0.36, 0.40, 0.26];
 const FLAG_POLE: [f32; 3] = [0.70, 0.71, 0.73];
 const CURB_STONE: [f32; 3] = [0.52, 0.51, 0.48];
+/// 花坛里的裸露泥土：灌木是从**土**里长出来的，不是从石头上。
+/// 比 `TREE_BARK` 再暗一档且几乎无饱和，所以它在平着色下读作"阴影里的土面"，
+/// 不会跟树干的暖棕混成一块。
+const SOIL_DARK: [f32; 3] = [0.155, 0.130, 0.100];
 const LAMP_GLOW: [f32; 3] = [0.85, 0.82, 0.70];
 
 /// 一栋楼的立面配色（同栋楼内部一致，街区间切换）。
@@ -764,8 +768,16 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
         .enumerate()
     {
         let (ax, az) = (cx + dx, cz + dz);
-        c.push(Part::new(ObstacleKind::Building, ax, az, 4.0, 4.0, UNDER_GROUND, 0.62, GRANITE));
-        // 灌木一律走 [`bush`]：两团不互相穿插的球，宽高比 ≈0.77。
+        // 花坛：**石框 + 里面的土 + 灌木**，不是一整块 4×4×0.62 的石头实台。
+        // 旧版那块台子有三个问题（实机 v6_bush_b.png）：① 0.62m 高的整块方石读作
+        // "广场上一块被遗弃的混凝土墩"，不像种植池；② 灌木长在石头顶上，没有土；
+        // ③ 4m 见方比灌木本身还大一圈，石头边比植物更显眼。
+        // 现在：0.28m 厚的石框（顶 0.42m < PLAYER_STEP_UP=0.45，人可以直接迈进去）
+        // + 框内一片略低的土面 + 居中灌木。`rim()` 走 deco，所以石框不挡人也不挡子弹
+        // —— 0.42m 的矮框本来就该迈得过去、射得过去。
+        c.rim(ax, az, 3.4, 3.4, 0.28, UNDER_GROUND, 0.42, GRANITE);
+        c.deco(Part::new(ObstacleKind::Building, ax, az, 2.84, 2.84, UNDER_GROUND, 0.30, SOIL_DARK));
+        // 灌木一律走 [`bush`]：一簇 5 团小球，宽高比 ≈0.77。
         // 这里原来手搓了一颗 **3.4m 宽、只有 1.4m 高**的扁球（宽高比 0.41）外加一颗偏心副球，
         // 平着色下读作一块压在石框上的绿色巨石——和 `block_edges` 那批"没有树干的树"
         // 是同一个错误（把球压扁当灌木，结果只像石头）。
@@ -785,8 +797,12 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
             let px = cx + (k as f32 - 2.5) * 4.2;
             let pz = cz + side * 12.5;
             c.push(Part::new(ObstacleKind::Block, px, pz, 0.62, 0.62, UNDER_GROUND, 4.6, PLASTER_CREAM).cyl());
-            c.deco(Part::new(ObstacleKind::Block, px, pz, 0.9, 0.9, UNDER_GROUND, 0.34, GRANITE).cyl());
-            c.deco(Part::new(ObstacleKind::Block, px, pz, 0.92, 0.92, 4.6, 4.95, GRANITE).cyl());
+            // 柱础与柱头都做**方的**（abacus / plinth），不做同径的圆盘。
+            // 圆盘在 4.6m 高处被仰视时只能看到它的底面 —— 一个纯平的暗色圆盘面，
+            // 实机读作"一根管子的开口"（v5_bush_b.png 右上那根柱）。方压顶有可见的
+            // 侧立面与清晰的转角，一眼是"柱子的头"。
+            c.deco(Part::new(ObstacleKind::Block, px, pz, 1.02, 1.02, UNDER_GROUND, 0.34, GRANITE));
+            c.deco(Part::new(ObstacleKind::Block, px, pz, 1.06, 1.06, 4.6, 4.95, GRANITE));
         }
         // 通长檐梁配色（2026-09-12 第 67 轮改）：原为 CONCRETE [0.56,0.55,0.53]。
         // 这根梁是 25m 长 x 1.5m 深 x **0.6m 高**的极扁比例，架在 4.95~5.55m 高处 ——
@@ -909,23 +925,42 @@ fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
     );
 }
 
-/// 灌木：两团同心、不互相穿插的细分球。
+/// 灌木：**一簇小球**，不是一个的大球。
+///
+/// 旧实现是两个几乎同心、半径 0.95..1.45 的细分球叠在一起。本引擎法线来自屏幕导数
+/// ⇒ 纯平着色，两个同心的凸多面体只会读成**一块绿色巨石**（实机 `v5_bush_b.png`：
+/// 广场边上排着一列灰绿色的大石头，完全不像绿化）。灌木的轮廓信息全在**剪影的起伏**上，
+/// 所以改成 5 团：中心一团 + 四周一圈，横向错开 0.3..0.5r、顶高互相差 0.2..0.7r，
+/// 并在三档绿之间轮换 —— 明暗切面从此落在不同朝向的小面上，而不是一整个大球面。
+///
+/// 占地保持 ≈1.9r（旧值 2r），不碰街道/人行道的净空预算。
+/// 代价 = 每件灌木多 3 个 marker 实例：SPH 模板走实例化，**不进道具顶点缓冲**。
 fn bush(c: &mut City, x: f32, z: f32, seed: i32) {
     let r = mixf(seed, 1, 0.95, 1.45);
-    c.deco(Part::new(ObstacleKind::Tree, x, z, r * 2.0, r * 2.0, UNDER_GROUND, r * 1.55, TREE_LEAF_2).sph());
-    c.deco(
-        Part::new(
-            ObstacleKind::Tree,
-            x + r * 0.22,
-            z - r * 0.18,
-            r * 1.3,
-            r * 1.3,
-            UNDER_GROUND,
-            r * 1.95,
-            TREE_LEAF_3,
-        )
-        .sph(),
-    );
+    // (圆心偏移 ×r, 半径 ×r, 顶高系数)
+    let clods = [
+        (0.00, 0.00, 0.52, 1.45),
+        (0.46, 0.20, 0.42, 1.55),
+        (-0.42, 0.30, 0.38, 1.30),
+        (0.12, -0.48, 0.44, 1.60),
+        (-0.26, -0.30, 0.35, 1.20),
+    ];
+    for (n, (dx, dz, br, hh)) in clods.into_iter().enumerate() {
+        let leaf = [TREE_LEAF, TREE_LEAF_2, TREE_LEAF_3][(seed + n as i32).rem_euclid(3) as usize];
+        c.deco(
+            Part::new(
+                ObstacleKind::Tree,
+                x + dx * r,
+                z + dz * r,
+                br * r * 2.0,
+                br * r * 2.0,
+                UNDER_GROUND,
+                br * r * 2.0 * hh,
+                leaf,
+            )
+            .sph(),
+        );
+    }
 }
 
 /// 哨卡/检查站：错缝堆叠的沙袋墙、HESCO 桶、帐篷、车辆残骸、拒马。
