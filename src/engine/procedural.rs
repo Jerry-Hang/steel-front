@@ -63,7 +63,13 @@ fn unit_from_hash(h: u32) -> f32 {
     (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// 双线性 smoothstep 值噪声（确定性、低频平缓）
+/// 双线性 smoothstep 值噪声（确定性、低频平缓）。
+///
+/// 🔴 **值域是 `[-1, 1)`，不是 `[0, 1)`**（[`lattice`] 是带符号的）。同文件里的
+/// [`periodic_noise`] 值域却是 `[0, 1)` —— **两个同名 `*_noise` 值域不同**，
+/// 把其中一个的写法照抄给另一个，得到的不是"±10% 抖动"而是"−87%..+87% 且均值掉半档"。
+/// 2026-09-17 就是靠这条差异定到位面那些无定形暗斑的根因（`city_zone_color` 全部分区
+/// 都曾把本函数当 [0,1) 用）。要无符号的 [0,1) 请显式写 `(value_noise(..) + 1.0) * 0.5`。
 fn value_noise(x: f32, z: f32, cell: f32, seed: u32) -> f32 {
     let fx = x / cell;
     let fz = z / cell;
@@ -78,6 +84,24 @@ fn value_noise(x: f32, z: f32, cell: f32, seed: u32) -> f32 {
     let a = h00 + (h10 - h00) * tx;
     let b = h01 + (h11 - h01) * tx;
     a + (b - a) * tz
+}
+
+/// 宏观地面纹理的一个纹素覆盖多少米：512m / 1024 = **0.5m**。
+pub const GROUND_TEXEL_M: f32 = 2.0 * WORLD_HALF / GROUND_TEXTURE_SIZE as f32;
+
+/// 宏观地面噪声的**最小格距**（米）= 5 个纹素。
+///
+/// 奈奎斯特的下限是 2 纹素/格，这里取 5 是给 smoothstep 插值的双边带留余量。
+/// 低于它的噪声**不会只是"看不清"，而是折叠成低频**：能量守恒地变成十几米一块的
+/// 无定形暗斑，且关阴影、关光照都不消失（2026-09-17 实机对照 `RV3D_NO_SHADOW=1`
+/// 与 `RV3D_PROC_TEX=0` 定位）。本文件在"人行道缝宽 ≥2 纹素"那条注释里早就写了这条
+/// 规矩，沥青底噪却一直在用 0.9m 格距（= 1.8 纹素）—— 立了规矩的地方守了，
+/// 没立的地方就漏了，所以把它做成常量并由 [`ground_noise`] 强制执行。
+pub const GROUND_NOISE_MIN_CELL: f32 = GROUND_TEXEL_M * 5.0;
+
+/// 带奈奎斯特下限的宏观地面噪声：`city_zone_color` 一律走这个，别再直接调 [`value_noise`]。
+fn ground_noise(x: f32, z: f32, cell: f32, seed: u32) -> f32 {
+    value_noise(x, z, cell.max(GROUND_NOISE_MIN_CELL), seed)
 }
 
 // ============================================================
@@ -293,14 +317,36 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
     match zone {
         2 => {
             // 沥青：暗灰 + 细噪 + 磨损车辙 + 黄色断续中线
-            let speck = value_noise(x, z, 0.9, seed.wrapping_add(60)) * 0.10;
+            //
+            // 🔴 这里同时踩过两个坑，两个都会烘焙成"路面上十几米一块的无定形暗斑"
+            //    （实机对照：`RV3D_NO_SHADOW=1` 时它们纹丝不动 ⇒ 与阴影无关；
+            //     `RV3D_PROC_TEX=0` 时整片消失 ⇒ 就在这张图里）：
+            // ① **值域**。旧写法 `value_noise(x,z,0.9)*0.10` 被当成 [0,1) 的"±10% 抖动"，
+            //    但 [`value_noise`] 其实是 **[-1,1)** ⇒ 实际是 0.015..0.215 对 0.115 的底，
+            //    也就是 **−87%..+87%**。见该函数上的值域警告。
+            // ② **格距**。0.9m 一格 = 1.8 纹素（本纹理 2 纹素/米），违反本文件
+            //    "人行道缝宽 ≥2 纹素"自己立的规矩；采样不足的能量不会消失，会折叠成低频。
+            //    现在由 [`ground_noise`] 强制 5 纹素下限。
+            // 幅度取 ±10%（0.012 / 0.115），**均值与旧实现完全一致**，所以路面亮度没变。
+            let speck = ground_noise(x, z, 2.6, seed.wrapping_add(60)) * 0.012;
             // 车辙：两条长期被轮胎压亮的带，给空旷的路面一个方向感
+            //
+            // 🔴 `along`/`across` 必须按**离哪条街轴更近**来选，旧实现两个分支写反了
+            //    （`dx < dz` 时取 along=x）。dx 是到"沿 Z 那条街"的轴距离，所以
+            //    `dx < dz` 恰恰意味着我们在那条**沿 Z** 的街上，此时沿街方向是 z 而不是 x。
+            //    后果有两条，都是实机看到的缺陷而不是理论问题：
+            //    ① 车辙被画成**横切**街道的暗带，并在 dx≈dz 的判据翻转处（每个路口内侧）
+            //       留下一块不连续的暗斑 —— 路面上那些"来路不明的暗斑"之一就是它；
+            //    ② 中线断续的相位取自 `along`，取错轴时沿街方向的 z≈0 恒定 ⇒
+            //       `dashed` 恒为 true ⇒ 中线**连续**，正是注释里 D7"发光跑道"那条
+            //       要求"必须断续"的判据被静默违反（改宽度、降对比都治不了它）。
             let fx = (x / crate::engine::city::STREET_EVERY).round();
             let fz = (z / crate::engine::city::STREET_EVERY).round();
             let dx = (x - fx * crate::engine::city::STREET_EVERY).abs();
             let dz = (z - fz * crate::engine::city::STREET_EVERY).abs();
-            let along = if dx < dz { x } else { z };
-            let across = if dx < dz { dz } else { dx };
+            // 归属到最近的那条街：dz < dx ⇒ 在沿 X 的街上（该街轴是 z = fz*55）
+            let along_x_street = dz < dx;
+            let (along, across) = if along_x_street { (x, dz) } else { (z, dx) };
             let rut = 1.0 - smoothstep(0.35, 1.6, (across - 2.4).abs());
             let mut c = [0.115 + speck, 0.120 + speck, 0.128 + speck];
             c = lerp3(c, [0.150, 0.152, 0.158], rut * 0.55);
@@ -316,11 +362,14 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
             //    旧值 0.230 对沥青 0.115 是 2.0 倍，现在 0.175 对 0.120 约 1.45 倍，
             //    近看仍能读出是道路标记，远看不再自发光。
             // ③ 必须断续（3m 漆 + 3m 空）：连续线沿视线一路延伸到地平线，透视下占据极大屏幕角。
+            //    ⚠ 相位必须取 `along`（沿街方向），见上面那条 along/across 写反的记录。
             let g = along * (1.0 / 6.0);
             let dashed = (g - g.floor()) < 0.5;
-            if (dx < 1.2 || dz < 1.2) && dashed {
+            // `across` 就是"到所属那条街轴的垂距"，所以旧式 `(dx < 1.2 || dz < 1.2)`
+            // 与它逐点等价（离谁更近就归谁），写成一个量不再有两套判据走偏的可能。
+            if across < 1.2 && dashed {
                 c = [0.175, 0.162, 0.118]; // 磨损黄色中线（断续、低对比）
-            } else if (dx > 4.1 && dx < 4.9) || (dz > 4.1 && dz < 4.9) {
+            } else if across > 4.1 && across < 4.9 {
                 c = [0.185, 0.185, 0.190]; // 路缘磨损条（同样压对比）
             }
             c
@@ -359,16 +408,20 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
         }
         5 => {
             // 建筑地基/院落铺装：冷灰混凝土地坪，双频斑驳
-            let speck = value_noise(x, z, 1.6, seed.wrapping_add(61)) * 0.055;
-            let blot = value_noise(x, z, 6.5, seed.wrapping_add(72));
-            let k = 0.90 + blot * 0.22;
+            // ⚠ `ground_noise` 是 **[-1,1)**（见 [`value_noise`] 的值域警告），所以这里
+            //   按"零均值 ±10%"写，均值 k=0.90 与旧实现一致（旧实现写的是 0.90+blot*0.22，
+            //   因为把值域当成 [0,1)，实际起伏是它的两倍、且盖不住的方向偏暗）。
+            let speck = ground_noise(x, z, 3.2, seed.wrapping_add(61)) * 0.014;
+            let blot = ground_noise(x, z, 6.5, seed.wrapping_add(72));
+            let k = 0.90 + blot * 0.11;
             [0.185 * k + speck, 0.182 * k + speck, 0.176 * k + speck]
         }
         1 => {
             // 沙土：拉出黄褐色的色相，不再接近灰
-            let d = value_noise(x, z, 4.0, seed.wrapping_add(62)) * 0.5
-                + value_noise(x, z, 1.2, seed.wrapping_add(63)) * 0.5;
-            let k = 0.86 + d * 0.30;
+            // ⚠ 值域 [-1,1)：保持旧均值 k=0.86，把"当 [0,1) 用"造成的双倍起伏压回一半。
+            let d = ground_noise(x, z, 4.0, seed.wrapping_add(62)) * 0.5
+                + ground_noise(x, z, 1.2, seed.wrapping_add(63)) * 0.5;
+            let k = 0.86 + d * 0.15;
             [0.360 * k, 0.278 * k, 0.152 * k]
         }
         _ => {
@@ -383,10 +436,14 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
             // 新配色：低饱和的土橄榄（R≈G>B），亮度与原色相当（不改整体明度关系），
             // 但色相从"草绿"挪到"干枯植被/泥土"，并保留原有的干草斑与双频抖动。
             // 仍比人行道(0.46 档)暗，所以"未铺装"依然可辨识。
-            let d = value_noise(x, z, 3.2, seed.wrapping_add(64)) * 0.6
-                + value_noise(x, z, 0.9, seed.wrapping_add(65)) * 0.4;
-            let k = 0.86 + d * 0.32;
-            let patch = value_noise(x, z, 9.0, seed.wrapping_add(66));
+            let d = ground_noise(x, z, 3.2, seed.wrapping_add(64)) * 0.6
+                + ground_noise(x, z, 0.9, seed.wrapping_add(65)) * 0.4;
+            // ⚠ `d` 与 `patch` 都是 **[-1,1)**（[`value_noise`] 的值域）。旧写法把 `d`
+            //   当 [0,1) 用 ⇒ k 的实际起伏是设计值的两倍；`patch` 的阈值 0.35/0.85 本来就是
+            //   按带符号值调出来的（约 1/3 面积出斑），所以那两行**不动**，只把 k 的摆幅减半、
+            //   均值仍留 0.86。第二路噪声的格距交给 ground_noise 抬到 5 纹素下限。
+            let k = 0.86 + d * 0.16;
+            let patch = ground_noise(x, z, 9.0, seed.wrapping_add(66));
             let mut c = [0.135 * k, 0.140 * k, 0.092 * k];
             if patch > 0.35 {
                 // 干草/枯叶斑（暖黄，与原绿形成色相对比 —— 保留原来的手法）
@@ -440,6 +497,8 @@ pub const GROUND_DETAIL_METRES: f32 = 2.0;
 
 /// 周期性格点哈希：格坐标按 `period` 取模后再哈希，**保证 tile 无缝**。
 ///
+/// ⚠ 值域 **[0, 1)**（走 [`unit_from_hash`]），与 [`value_noise`] 的 `[-1, 1)` 不同。
+///
 /// 必须取模。直接对 `ix` 哈希的话，tile 左右边缘落在不同格点上，平铺处会出现一条
 /// 明显的接缝亮线——而细节层是按 2m 高频重复的，接缝会铺满整个地面，比现在更糟。
 fn periodic_grid_hash(ix: i32, iy: i32, period: i32, seed: u32) -> f32 {
@@ -491,9 +550,19 @@ fn periodic_noise(x: f32, y: f32, cells: f32, seed: u32) -> f32 {
 /// 4 倍密度且启动烘焙要几十秒；平铺细节层是常数代价换 64 倍密度。
 ///
 /// ## 三个倍频
-/// 骨料(高频) + 斑驳(中频) + 裂纹(低频带方向性)，合成一个"什么材质都能压一层"的
+/// 骨料(2cm) + 细斑(4cm) + 补丁(16cm)，**零均值相加**合成一个"什么材质都能压一层"的
 /// 通用颗粒。存的是**亮度调制**（均值 1.0），片元里乘到基色上，所以不需要知道分区。
 /// 无缝性由 `periodic_noise` 保证，可任意 REPEAT。
+///
+/// 🔴 **不要再用"取噪声等值线"的手法做裂纹**（2026-09-17 实机定案）。旧实现是
+/// `crack_line = (1-|2n-1|)^6`，即把噪声压成一条窄带后取 1-x —— 画出来是**一圈圈闭合
+/// 细线**，2m 一 tile 平铺之后整片街面读作"皱掉的塑料布"，完全不像沥青。
+/// 判据实验：`RV3D_PROC_TEX=0` 时大块暗斑消失而网纹原样保留 ⇒ 网纹 100% 来自本层，
+/// 与光照、阴影、宏观纹理无关。要"裂纹"就得让裂纹的**宽度**到 1cm 量级以上且带方向性，
+/// 而不是拿各向同性的噪声等值线凑。
+///
+/// 旧的调制域是 [0.65, 1.22]（-35% / +22%）—— 对一层"质感"太过头，它把 tile 的重复
+/// 直接印到了人眼可辨的程度。现在压到 ±15% 以内。
 pub fn generate_ground_detail_texture(size: u32, seed: u32) -> Vec<u8> {
     let mut out = vec![0u8; (size as usize) * (size as usize) * 4];
     for py in 0..size {
@@ -501,16 +570,12 @@ pub fn generate_ground_detail_texture(size: u32, seed: u32) -> Vec<u8> {
         for px in 0..size {
             let u = (px as f32 + 0.5) / size as f32;
             // 倍频必须是 tile 边长的整数倍，否则取模后格点也对不上
-            let grit = periodic_noise(u, v, 64.0, seed);
-            let blot = periodic_noise(u, v, 16.0, seed.wrapping_add(1));
-            let crack = periodic_noise(u, v, 8.0, seed.wrapping_add(2));
-            // 裂纹：窄带，用 1-|2n-1| 的幂次压细
-            let crack_line = (1.0 - (crack * 2.0 - 1.0).abs()).powf(6.0);
-            let mut lum = 0.86 + grit * 0.20 + blot * 0.14 - crack_line * 0.22;
-            // 归一到均值≈1.0，避免整层细节把地面系统性压暗或提亮
-            lum *= 1.02;
+            let grain = periodic_noise(u, v, 128.0, seed) - 0.5;
+            let speck = periodic_noise(u, v, 64.0, seed.wrapping_add(1)) - 0.5;
+            let patch = periodic_noise(u, v, 16.0, seed.wrapping_add(2)) - 0.5;
+            let lum = 1.0 + grain * 0.08 + speck * 0.10 + patch * 0.13;
             // 半值编码（见函数头）：纹素 = 调制 / 2，调制 1.0 → 128。
-            // 调制域 ≈[0.65, 1.22] → 纹素域 ≈[0.33, 0.61]，离 0 与 1 都有大余量：
+            // 调制域 ≈[0.85, 1.15] → 纹素域 ≈[0.43, 0.57]，离 0 与 1 都有大余量：
             // 既不裁顶，也永不取到 0（纹素为 0 就等于把地面乘成纯黑）。
             let byte = ((lum * 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
             let idx = ((py * size + px) * 4) as usize;
@@ -672,6 +737,97 @@ pub fn generate_default_npc_skin_texture() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 宏观地面噪声的格距下限必须真的是 **5 个纹素**（本纹理 2 纹素/米 ⇒ 2.5m），
+    /// 且 [`ground_noise`] 真的在执行它。
+    ///
+    /// 低于 2 纹素/格的噪声不是"看不清"，而是**折叠成低频**：路面上出现十几米一块的
+    /// 无定形暗斑，与光照/阴影毫无关系（2026-09-17 用 `RV3D_NO_SHADOW=1` 与
+    /// `RV3D_PROC_TEX=0` 两组对照定位）。把"格距"这个隐性前提做成显式约束。
+    #[test]
+    fn ground_noise_min_cell_respects_nyquist() {
+        assert!(
+            (GROUND_TEXEL_M - 0.5).abs() < 1e-6,
+            "地面纹理应是 1024² 覆盖 512m（0.5m/纹素），实际 {GROUND_TEXEL_M}m —— \
+             尺寸改了的话下限要重算"
+        );
+        assert!(
+            GROUND_NOISE_MIN_CELL >= GROUND_TEXEL_M * 4.0,
+            "噪声格距 {GROUND_NOISE_MIN_CELL}m 只有 {} 个纹素，会走样成低频暗斑",
+            GROUND_NOISE_MIN_CELL / GROUND_TEXEL_M
+        );
+        // 下限真的生效：0.9m（旧值，1.8 纹素）必须被抬到下限
+        assert_eq!(
+            ground_noise(3.0, -5.0, 0.9, DEFAULT_SEED),
+            ground_noise(3.0, -5.0, GROUND_NOISE_MIN_CELL, DEFAULT_SEED),
+            "ground_noise 没有执行格距下限"
+        );
+        // 本来就够大的格距不得被下限改掉
+        assert_ne!(
+            ground_noise(3.0, -5.0, 40.0, DEFAULT_SEED),
+            ground_noise(3.0, -5.0, GROUND_NOISE_MIN_CELL, DEFAULT_SEED),
+            "下限把更大的格距也改掉了"
+        );
+    }
+
+    /// 沥青分区的**低频均匀度**，并且**自带对照组**。
+    ///
+    /// 沿几条街的中段（避开中线/车辙/路缘磨损条这些**故意**画的亮暗结构）每 0.5m 采一次
+    /// 基色亮度，求任意 16m 窗口均值相对全局均值的最大偏移；同一条线上再用**旧参数**
+    /// （`value_noise(x, z, 0.9)` = 1.8 纹素/格）重建一份作为对照。
+    /// 判据 = 新实现的偏移必须小于旧实现的 1/3。
+    ///
+    /// 为什么要有对照组：本仓栽过太多次"工具测不出差异就等于没有差异"（教训 27）。
+    /// 绝对阈值会被噪声自身的低频内容顶到，而"走样折叠出的暗斑"这种缺陷的正确判据是
+    /// **相对同幅度过采样结果的放大倍数** —— 旧值瞬时起伏 ±87% 且违反奈奎斯特，
+    /// 能量守恒地折进低频，倍数远超 3。
+    #[test]
+    fn asphalt_mottling_is_far_below_the_aliased_reference() {
+        let step = 0.5f32;
+        let every = crate::engine::city::STREET_EVERY;
+        let mut now: Vec<f32> = Vec::new();
+        let mut old: Vec<f32> = Vec::new();
+        // z = 4.0：在车辙带（2.4±1.6）与路缘磨损条（4.1..4.9）之外
+        // x ∈ [街轴+10, 街轴+45]：离两侧路口都 ≥10m，不会被"另一条街"的判据接管
+        for k in -4..4i32 {
+            let mut x = k as f32 * every + 10.0;
+            while x < k as f32 * every + 45.0 {
+                let c = city_zone_color(2, x, 4.0, DEFAULT_SEED);
+                now.push(0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]);
+                // 旧实现的沥青：0.115/0.120/0.128 + value_noise(0.9m)*0.10
+                let speck = value_noise(x, 4.0, 0.9, DEFAULT_SEED.wrapping_add(60)) * 0.10;
+                old.push(0.2126 * (0.115 + speck) + 0.7152 * (0.120 + speck)
+                    + 0.0722 * (0.128 + speck));
+                x += step;
+            }
+        }
+        let worst = |lum: &[f32]| -> f32 {
+            let n = lum.len();
+            let global = lum.iter().sum::<f32>() / n as f32;
+            let win = (16.0 / step) as usize;
+            let mut w = 0.0f32;
+            for s in 0..=n - win {
+                let m = lum[s..s + win].iter().sum::<f32>() / win as f32;
+                w = w.max((m - global).abs() / global);
+            }
+            w
+        };
+        let (w_now, w_old) = (worst(&now), worst(&old));
+        assert!(
+            w_now < w_old / 3.0,
+            "16m 窗口均值偏移：现在 {:.1}%，旧参数（0.9m 格=1.8 纹素）{:.1}% —— \
+             不足 3 倍说明地面噪声又回到亚奈奎斯特状态，会烘焙出十几米的无定形暗斑",
+            w_now * 100.0,
+            w_old * 100.0
+        );
+        // 绝对下限也要有：对照组本身若因为改动而变得不走样，上面的比值就失去意义
+        assert!(
+            w_old > 0.05,
+            "对照组偏移只有 {:.1}%：它已经不再走样，本测试失去判据，\
+             要重新挑一个确实违反奈奎斯特的参考参数",
+            w_old * 100.0
+        );
+    }
 
     /// 诊断用：把城市地面烘焙纹理原样写成 PNG 并打印逐分区平均色。
     ///
@@ -1084,8 +1240,8 @@ mod tests {
              GROUND_DETAIL_TEXEL_M = {SHADER_TEXEL_M} 不一致：改一边必须改另一边，\
              否则地面细节层的 mip 选择整体偏移一档"
         );
-        // 倍频（64/16/8）必须整除边长，否则 periodic_noise 取模后格点接不上
-        for cells in [64.0f32, 16.0, 8.0] {
+        // 倍频必须整除边长，否则 periodic_noise 取模后格点接不上
+        for cells in [128.0f32, 64.0, 16.0] {
             assert_eq!(
                 size as f32 % cells,
                 0.0,
