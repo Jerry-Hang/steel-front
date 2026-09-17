@@ -65,6 +65,28 @@ def weld_one(src, out_dir):
         ca = c
         break
 
+    # 🔴 颜色必须按**属性自己的 domain**取，不能一律用顶点下标。
+    # glTF 导入器把 COLOR_0 建成 **CORNER** domain（实测 tree_oak：2725 顶点 / 2994 loop，
+    # `Color` 的 len(data) = 2994 = loop 数）。旧写法 `ca.data[i]` 里 i 是**顶点**下标，
+    # 于是读到的是"第 i 个 loop"的颜色 —— 一次静默的颜色错位。
+    # 实测判据（target/weld_diag.py）：**2725 个顶点里 2284 个（84%）拿到的颜色不是它自己的**。
+    # 后果就在游戏里：树冠里出现大块树皮棕（`screenshots/v5_tree_b.png`），
+    # 因为顶点和 loop 都是"按部件顺序"排的，错位是**单调漂移**而不是随机噪声 ——
+    # 大部分顶点碰巧还对，只有部件交界处错，所以看起来"像是设计如此"。
+    # 焊接收益（顶点 −78%）是真的，但 commit 82a2306 写的"画面无退化"是错的。
+    col_of = None
+    if ca is not None:
+        if ca.domain == "POINT":
+            col_of = [ca.data[i].color for i in range(len(me.vertices))]
+        else:
+            # CORNER / INDEX：取该顶点自己的第一个 loop 的颜色。
+            # 本资产族每个面的颜色是**整面统一**的（gen_props 每个图元一次给一个 col），
+            # 共享顶点只可能出现在同色面之间，所以"第一个 loop"就是它自己的颜色。
+            col_of = [None] * len(me.vertices)
+            for li, lp in enumerate(me.loops):
+                if col_of[lp.vertex_index] is None:
+                    col_of[lp.vertex_index] = ca.data[li].color
+
     # Dedup key: quantised position + quantised colour (1e-4 m, 1/1000 colour step).
     key_of = {}
     new_verts = []
@@ -73,8 +95,8 @@ def weld_one(src, out_dir):
     for i, v in enumerate(me.vertices):
         p = (round(v.co.x, 4), round(v.co.y, 4), round(v.co.z, 4))
         col = (0.5, 0.5, 0.5, 1.0)
-        if ca is not None:
-            c = ca.data[i].color
+        if col_of is not None:
+            c = col_of[i]
             col = (round(c[0], 3), round(c[1], 3), round(c[2], 3), 1.0)
         k = (p, col)
         j = key_of.get(k)

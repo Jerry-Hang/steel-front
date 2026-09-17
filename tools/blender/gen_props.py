@@ -335,39 +335,60 @@ def asset_barrel():
 
 
 def asset_tree():
-    """Deciduous tree: tapered trunk, branches that carry leaf clusters low down,
-    and a wide multi-blob canopy.
+    """Deciduous tree: tapered trunk, branches that stay INSIDE the foliage shell,
+    and a canopy built as a closed 3-layer shell rather than a ring of separate balls.
 
     The old procedural trees read as a canopy on stilts: no trunk volume, and one flat
     disc of foliage on top. Two things actually make a tree read at 100 m — a trunk that
     visibly tapers, and a canopy whose silhouette is irregular, which needs overlapping
     blobs at different greens rather than one sphere.
+
+    ## 2026-09-17: why the shell, and why the bark got darker
+    In-engine close-up (`screenshots/v5_tree_b.png`, camera 6 m from the crown at eye
+    height) showed the old 8-blob canopy as "green balloons on a brown skeleton": the
+    blobs formed a ring at radius ~1.55 m and left the whole underside around the trunk
+    open, so from any street-level view you look straight up into the tree and see bark.
+    A vertex-colour audit of the shipped asset (`tools/glb_color_audit.py` + a position
+    split) put **42% of the verts at bark brown, reaching y = 7.18 m at radius 3.10 m** —
+    i.e. the skeleton is visible all the way up through the gaps.
+    Two changes, both cheap:
+      * a **lower skirt ring** whose blobs are big enough to overlap each other AND cover
+        the trunk (radius-from-axis 1.25 with blob radius 1.35 ⇒ inner edge < 0), plus a
+        mid ring and a top cluster. 10 blobs total — same vertex count as before, because
+        the old asset had 8 blobs + 6 long limbs.
+      * limbs pulled in to radius <= 0.9 and tips below the skirt top, so nothing
+        structural pokes into a gap.
+      * bark darkened ~1.8x and desaturated: whatever is still visible between leaves now
+        reads as shadow inside the crown instead of "dead brown leaves". `bark` is used by
+        this asset only (verified: 4 references in this file, all inside asset_tree).
     """
     rng = random.Random(7)
     p = Part("tree_oak")
     h = 3.5
-    cylinder(p, (0, 0, 0.0), (0.12, -0.07, h + 1.4), 0.34, 0.10, C["bark"], segs=9)
+    cylinder(p, (0, 0, 0.0), (0.12, -0.07, h + 1.9), 0.34, 0.13, C["bark"], segs=9)
     # root flare so the base does not look like a drilled post
     cylinder(p, (0, 0, 0.0), (0, 0, 0.7), 0.50, 0.32, C["bark"], segs=9, caps=False)
-    # limbs branching from mid-trunk: these are what break the lollipop silhouette
-    limbs = [(0.5, 1.30, 0.55, 1.9), (2.5, 1.45, -0.5, 2.0),
-             (4.2, 1.15, 0.2, 1.6), (1.6, 0.95, -0.9, 1.4),
-             (3.4, 1.40, 0.9, 1.8), (5.4, 1.10, -0.3, 1.5)]
+    # limbs: short enough that every tip ends up inside the foliage shell
+    limbs = [(0.5, 0.85, 0.45, 1.05), (2.5, 0.90, -0.4, 1.10),
+             (4.2, 0.70, 0.2, 0.90), (1.6, 0.75, -0.55, 0.85),
+             (3.4, 0.80, 0.5, 1.00), (5.4, 0.72, -0.25, 0.80)]
     for ang, ln, yb, zb in limbs:
         bx, by = math.cos(ang) * ln, math.sin(ang) * ln
         cylinder(p, (0.04, 0.0, h - 0.35 + zb * 0.25), (bx, by, h + zb * 0.6),
                  0.13, 0.05, C["bark"], segs=6)
-    # canopy: one dominant mass plus skirt blobs that hang down over the limbs
-    blobs = [(0.0, 0.0, h + 1.90, 2.30, C["foliage_b"]),
-             (1.55, 0.55, h + 1.15, 1.55, C["foliage_a"]),
-             (-1.45, -0.65, h + 1.25, 1.60, C["foliage_c"]),
-             (0.25, -1.60, h + 1.35, 1.45, C["foliage_a"]),
-             (-0.45, 1.55, h + 1.45, 1.50, C["foliage_c"]),
-             (1.05, -0.95, h + 2.55, 1.35, C["foliage_b"]),
-             (-1.15, 0.95, h + 2.45, 1.30, C["foliage_a"]),
-             (0.15, 0.25, h + 3.20, 1.45, C["foliage_c"])]
-    for bx, by, bz, br, bc in blobs:
-        icosphere(p, (bx, by, bz), br, bc, subdiv=1, flatten=0.78,
+    # canopy: core + closed lower skirt + mid ring + top cluster
+    greens = (C["foliage_b"], C["foliage_a"], C["foliage_c"])
+    blobs = [(0.0, 0.0, h + 1.95, 2.05, 0)]
+    for i in range(4):                       # skirt: seals the underside around the trunk
+        a = math.pi * 0.25 * i + 0.35
+        blobs.append((math.cos(a) * 1.25, math.sin(a) * 1.25, h + 0.75, 1.35, (i + 1) % 3))
+    for i in range(3):                       # mid ring: breaks the silhouette
+        a = math.pi * 2.0 * i / 3.0 + 1.1
+        blobs.append((math.cos(a) * 1.50, math.sin(a) * 1.50, h + 1.95, 1.50, i))
+    blobs.append((0.78, -0.30, h + 3.10, 1.30, 1))   # top cluster
+    blobs.append((-0.70, 0.42, h + 3.25, 1.22, 2))
+    for bx, by, bz, br, gi in blobs:
+        icosphere(p, (bx, by, bz), br, greens[gi], subdiv=1, flatten=0.78,
                   jitter=0.13, rng=rng, stretch=(1.0, 1.0, 1.0))
     return p, (6.6, 6.6, h + 4.7)
 
