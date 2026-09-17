@@ -831,17 +831,42 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
         c.deco(Part::new(ObstacleKind::Building, cx, cz + side * 12.5, 25.0, 1.5, 4.95, 5.55, CONCRETE_DARK));
     }
     if !monument {
-        // 喷泉水池（非纪念碑块）：石缘 + 内凹水面，给广场一个视觉中心
-        c.push(Part::new(ObstacleKind::Building, cx, cz, 9.0, 9.0, UNDER_GROUND, 0.62, GRANITE));
-        c.deco(Part::new(ObstacleKind::Block, cx, cz, 7.6, 7.6, 0.30, 0.56, GLASS_BLUE));
-        c.push(Part::new(ObstacleKind::Block, cx, cz, 1.3, 1.3, 0.56, 2.3, CONCRETE_LIGHT).cyl());
-        c.deco(Part::new(ObstacleKind::Block, cx, cz, 2.6, 2.6, 2.3, 2.55, GRANITE));
+        // 喷泉水池：石圈 + 略高于石圈的水面。
+        //
+        // 🔴 旧写法是 `9×9 实心石盆到 0.62m` + `7.6×7.6 水面 0.30..0.56` —— 那是
+        //    **一块 0.62m 高的实心石板**，水面还嵌在石板顶面以下 6cm。
+        //    实机（`z20check_b.png`，相机在池西 3m）读作"广场上一个下沉的砖砌坑"：
+        //    0.62m 的石立面在 3m 处就是一道墙，池顶面成了"坑底"，
+        //    而池外 3.5m 的那张长椅被拼进同一个轮廓里，读成"坑里一张塌掉的椅子"
+        //    （我为这个"坑"追了六轮机位复拍，最后定死它是**水池太高 + 有可见内壁**，
+        //     不是透视错觉）。
+        // 🔴 但"把水面压低一点"是**反向**的错：水面一旦低于石盆顶，它就被实心石盆整个
+        //    包住 = 根本不画出来（本仓的坑：不报错、只是东西没了）。
+        //    判据：**要么水面高于边沿，要么边沿是空心的圈；两者不能都要"内凹"。**
+        //    现在：石圈 0.5m 厚、顶 0.26；水面 8.0 见方正好填满圈口、顶 0.30 高出 4cm
+        //    ⇒ 任何视角都看不到内壁，也没有可藏东西的空洞。水面是 solid（走 push），
+        //    所以玩家不能直接走过去，与"这是水"的直觉一致。
+        c.rim(cx, cz, 9.0, 9.0, 0.5, UNDER_GROUND, 0.26, GRANITE);
+        c.push(Part::new(ObstacleKind::Building, cx, cz, 8.0, 8.0, UNDER_GROUND, 0.30, GLASS_BLUE));
+        c.push(Part::new(ObstacleKind::Block, cx, cz, 1.3, 1.3, 0.30, 1.75, CONCRETE_LIGHT).cyl());
+        c.deco(Part::new(ObstacleKind::Block, cx, cz, 2.6, 2.6, 1.75, 2.0, GRANITE));
     }
     // 广场树阵（两排，避开中心与出生净空）
     for k in 0..3i32 {
         let px = cx + (k as f32 - 1.0) * 9.0;
         tree(c, px, cz - 18.5, k + 3, 1);
         tree(c, px, cz + 18.5, k + 3, 2);
+    }
+    // 长椅绕池一圈，但**必须离池沿足够远**：旧值 ±8m 时椅端到石盆沿只有 3.5m，
+    // 从池边的低机位看，椅子与 0.62m 的石盆立面叠成同一个轮廓 ⇒ 读成"池底一堆残骸"
+    // （见上）。石盆降到 0.26m 后这个问题小得多，但 10m 让"绕池座椅"的层次真的成立。
+    for (dx, dz, along) in [
+        (-10.0f32, 0.0, true),
+        (10.0, 0.0, true),
+        (0.0, -10.0, false),
+        (0.0, 10.0, false),
+    ] {
+        bench(c, cx + dx, cz + dz, along);
     }
 }
 
