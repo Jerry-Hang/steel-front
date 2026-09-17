@@ -99,38 +99,39 @@ impl Shape {
         }
     }
 
-    /// 该形状的**可见半尺寸**相对于碰撞 AABB 半尺寸的倍率（按轴：0=x / 1=y / 2=z）。
+    /// 几何模板在该轴上的**半幅**（按轴：0=x / 1=y / 2=z）。实例缩放 = 想要的半尺寸 ÷ 它，
+    /// 于是**画出来的尺寸恒等于碰撞 AABB**。
     ///
-    /// ## 为什么需要它（2026-09-15 实测）
+    /// ## 为什么必须有它（2026-09-17）
+    /// 模板不是单位盒：立方体/球是 **±1**（半幅 1.0），圆柱是 **r=1、y∈[−0.5, 0.5]**
+    /// （xz 半幅 1.0、y 半幅 0.5）。`WorldMarker::for_obstacle` 此前对三个轴一律写
+    /// `2*half` ⇒ **所有程序化构件画出来是设计尺寸的 2 倍**，而圆柱的高度恰好是对的、
+    /// 直径错 2 倍 —— 这种"部分正确"的约定比全错更难被发现，它存活了三周。
     ///
-    /// marker 的实例缩放写的是 `2*half`（`WorldMarker::for_obstacle`），而模板几何是
-    /// **±1 的立方体**（`renderer.rs::VERTICES` / `build.rs::CUBE_POS`）与
-    /// **单位圆柱**（r=1、y∈[−0.5, 0.5]，NPC 四肢共用同一模板）。两者相乘 ⇒
-    /// **可见尺寸是碰撞盒的 2 倍**；圆柱竖直方向（模板已经是 ±0.5）恰好是 1 倍。
+    /// 实测后果（出生点机位 `RV3D_DUMP_NEAR` 逐件对表）：
+    /// · 路缘石设计 0.55 宽 × 0.21 高 ⇒ 画成 1.1 m 宽、0.42 m 高的矮墙；
+    /// · 柱廊柱设计 φ0.62 / 柱头 φ0.92 ⇒ 画成 φ1.24 / φ1.84（柱头读作悬空圆盘）；
+    /// · 灌木球设计 φ2.86 ⇒ 画成 φ5.7 的巨石；
+    /// · 中央隔离带三段式的**宽度**全部翻倍 ⇒ 读作一条 U 形槽而不是花坛；
+    /// · 玩家能站进"看得见的那半个盒子"里（碰撞 AABB 只有可见尺寸的一半）= 穿模；
+    /// · 子弹打不中看得见的外挑部分、却打不中看不见的部分；PT 场景按 AABB 建盒
+    ///   ⇒ 光追与光栅对同一件东西的尺寸认知不一致。
     ///
-    /// 实测判据（不是读代码推的）：玩家站在 (0,1.6,−10.65)、近处的那根
-    /// `Block @(0,1.5,−11.8) 尺寸=0.22×0.22×0.70 shape=Cylinder` 在画面上的
-    /// **宽/高比 = 0.61**；半径 0.22（2×）预测 0.44/0.70 = 0.63 ✓，半径 0.11（1×）
-    /// 预测 0.31 ✗。
-    ///
-    /// 消费者：**弹孔贴面**（`game.rs::first_obstacle_hit`）—— 贴在碰撞面上会被
-    /// 可见几何整片盖住（不报错、只是"打了枪墙上没有孔"）。改 marker 缩放或模板时，
-    /// 这里与 `for_obstacle` 必须一起改。
-    ///
-    /// `Shape::None` 是**只碰撞不绘制**的 GLB 碰撞核：可见面就是 GLB 模型本身，
-    /// 与它的 AABB 重合 ⇒ 1.0（贴弹孔就贴在这个面上）。
-    pub const fn visual_half_gain(self, axis: usize) -> f32 {
+    /// 🔴 **本常量唯一的消费者是 `for_obstacle`**：改这里必须同时看那里，
+    /// 二者不同步就是"全城构件集体变大/变小一倍"这种一眼可见的事故。
+    pub const fn template_half_extent(self, axis: usize) -> f32 {
         match self {
+            // 只碰撞不绘制的 GLB 碰撞核不走 marker 模板；取 1.0 让缩放退化成半尺寸本身
             Shape::None => 1.0,
-            // 单位圆柱的 y 已是 ±0.5（高度与 AABB 一致），半径是 1（比 AABB 大一倍）
+            // 单位圆柱：r=1，但 y 已经烘成 ±0.5
             Shape::Cylinder => {
                 if axis == 1 {
-                    1.0
+                    0.5
                 } else {
-                    2.0
+                    1.0
                 }
             }
-            Shape::Sphere | Shape::Authored | Shape::Legacy => 2.0,
+            Shape::Sphere | Shape::Authored | Shape::Legacy => 1.0,
         }
     }
 
@@ -218,22 +219,24 @@ mod tests {
         assert_eq!(Shape::default().tag(), 1.0);
     }
 
-    /// 可见半尺寸倍率：立方体/球 2×，圆柱水平 2×、竖直 1×，GLB 碰撞核 1×。
+    /// 模板半幅：立方体/球 ±1，圆柱 r=1 但 y 只有 ±0.5，GLB 碰撞核退化成 1。
     ///
-    /// 这条锁的是**弹孔贴面**赖以成立的判据 —— 数值错了弹孔就会整片埋进可见几何里
-    /// （不报错，只是"墙上没有弹孔"）。
+    /// 这条锁的是 `for_obstacle` 的缩放推导的输入。数值错了不会崩、不会报 VUID，
+    /// 只会让全城构件集体变大或变小一倍（`renderer.rs::marker_visible_size_matches_aabb`
+    /// 是端到端的那一条，两条要一起看）。
     #[test]
-    fn visual_half_gain_matches_the_rendered_templates() {
+    fn template_half_extent_matches_the_rendered_templates() {
         for axis in 0..3 {
-            assert_eq!(Shape::Legacy.visual_half_gain(axis), 2.0);
-            assert_eq!(Shape::Sphere.visual_half_gain(axis), 2.0);
-            // GLB 碰撞核不绘制：可见面就是模型本身的 AABB
-            assert_eq!(Shape::None.visual_half_gain(axis), 1.0);
+            // CUBE_POS / SPH_POS 都是 ±1
+            assert_eq!(Shape::Legacy.template_half_extent(axis), 1.0);
+            assert_eq!(Shape::Sphere.template_half_extent(axis), 1.0);
+            // GLB 碰撞核不绘制：取 1.0 使缩放退化成半尺寸本身
+            assert_eq!(Shape::None.template_half_extent(axis), 1.0);
         }
-        // 单位圆柱：半径 1（2×）、高度已是 ±0.5（1×）
-        assert_eq!(Shape::Cylinder.visual_half_gain(0), 2.0);
-        assert_eq!(Shape::Cylinder.visual_half_gain(1), 1.0);
-        assert_eq!(Shape::Cylinder.visual_half_gain(2), 2.0);
+        // 单位圆柱：xz 半径 1.0，y 已烘成 ±0.5
+        assert_eq!(Shape::Cylinder.template_half_extent(0), 1.0);
+        assert_eq!(Shape::Cylinder.template_half_extent(1), 0.5);
+        assert_eq!(Shape::Cylinder.template_half_extent(2), 1.0);
     }
 
     #[test]

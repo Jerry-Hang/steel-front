@@ -3914,11 +3914,11 @@ impl Game {
     /// 扫描顺序与 `hit_obstacle_index` 一致（同序 `world.bodies`），两者用同一份求交，
     /// 所以"子弹被谁挡下"与"弹孔画在哪堵墙"永不会给出不同答案。法线取**入口面**的轴向。
     ///
-    /// 🔴 弹着点被抬到**可见表面**上，而不是碰撞 AABB 面：`WorldMarker` 的实例缩放写的是
-    /// `2*half`，而模板几何是 ±1 的单位立方体/单位圆柱 ⇒ **可见尺寸是碰撞盒的 2 倍**
-    /// （逐轴判据见 `geom::Shape::visual_half_gain`，那里有实测数据）。
-    /// 贴在碰撞面上会被可见几何整片盖住 —— 不崩不报，只是"打了枪墙上没有孔"
-    /// （2026-09-15 实测：弹孔一直没出现，根因就是这个 2 倍）。
+    /// 🔴 弹着点就取碰撞 AABB 的入口面：2026-09-17 起 marker 的**可见尺寸 == 碰撞 AABB**
+    /// （判据见 `geom::Shape::template_half_extent`），AABB 面就是画出来的那层面。
+    /// 在此之前这里必须乘一个 `visual_half_gain = 2.0` 才能把弹孔推到墙皮上 ——
+    /// 那是同一个"可见尺寸翻倍"约定的另一半，不一起改就会把弹孔埋进几何里
+    /// （不崩不报，只是"打了枪墙上没有孔"，2026-09-15 实测踩过）。
     fn first_obstacle_hit(&self, p: &Projectile) -> Option<(usize, [f32; 3], [f32; 3])> {
         let a = p.prev_position();
         let b = p.position;
@@ -3953,17 +3953,9 @@ impl Game {
             let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]][axis];
             let mut normal = [0.0f32; 3];
             normal[axis] = if d > 0.0 { -1.0 } else { 1.0 };
-            // 抬到可见面：沿法线轴把交点从 AABB 面推到 gain 倍的可见面上；
-            // 另外两轴保持命中点（弹孔不会横向漂移）。
-            let gain = self
-                .map
-                .obstacles
-                .get(i)
-                .map(|ob| ob.shape.visual_half_gain(axis))
-                .unwrap_or(1.0);
-            let centre = (lo[axis] + hi[axis]) * 0.5;
-            let half = (hi[axis] - lo[axis]) * 0.5;
-            point[axis] = centre + normal[axis] * gain * half;
+            // 弹着点取入口面本身：另外两轴保持命中点（弹孔不会横向漂移）。
+            // 可见尺寸 == 碰撞 AABB 之后，AABB 面就是画出来的那层墙皮，不需要任何补偿倍率。
+            point[axis] = if normal[axis] > 0.0 { hi[axis] } else { lo[axis] };
             best = Some((t, i, point, normal));
         }
         best.map(|(_, i, point, normal)| (i, point, normal))
@@ -8701,8 +8693,8 @@ mod tests {
         game.world.spheres.clear();
         // 一堵墙：中心 (0, 1.2, -10)，半尺寸 4 × 1.2 × 0.5 ⇒ 碰撞近面 z = -9.5
         // ⚠ `world.bodies[i]` 与 `map.obstacles[i]` 必须**同序同尺寸**（引擎的不变式）：
-        // 弹着点要按障碍的 `shape` 抬到**可见面**（见 geom::Shape::visual_half_gain），
-        // 只建刚体不建障碍表，就会拿到别的障碍的倍率。
+        // 弹着点直接取该障碍的 AABB 面（2026-09-17 起可见尺寸 == AABB，见
+        // geom::Shape::template_half_extent），只建刚体不建障碍表就会贴到别的东西上。
         let aabb = Body::new_static(Pv::new(0.0, 1.2, -10.0), Pv::new(4.0, 1.2, 0.5));
         let wall = MapObstacle {
             x: 0.0,
@@ -8733,9 +8725,10 @@ mod tests {
         assert_eq!(marks.len(), 1, "命中障碍应留下 1 个弹孔，实际 {}", marks.len());
         let m = marks[0];
         assert!(
-            (m.pos[2] + 9.0).abs() < 0.01,
-            "弹孔应贴在**可见面** z=-9.0（Legacy marker 的可见尺寸是碰撞盒的 2 倍；\
-             碰撞面在 z=-9.5，贴那儿会被可见几何盖住），实际 z={}",
+            (m.pos[2] + 9.5).abs() < 0.01,
+            "弹孔应贴在**可见面** z=-9.5（2026-09-17 起 marker 可见尺寸 == 碰撞 AABB，\
+             见 geom::Shape::template_half_extent；此前这里是 -9.0，因为可见盒是 AABB 的 2 倍），\
+             实际 z={}",
             m.pos[2]
         );
         assert!(

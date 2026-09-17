@@ -549,23 +549,32 @@ pub struct WorldMarker {
 }
 
 impl WorldMarker {
-    /// 从物理障碍盒构建世界 marker：模型 = 平移(x, 1.2, z) × 缩放(2·half_w, 2.4, 2·half_d)。
+    /// 障碍 marker 的模型矩阵 = 平移到盒心 × 逐轴归一的缩放。
     ///
-    /// 与 game.rs apply_level 的物理刚体严格同尺寸：刚体 AABB = (x, 1.2, z) ± (half_w, 1.2, half_d)
-    /// （高 MAP_BLOCK_HEIGHT = 2.4），即渲染盒与碰撞盒水平足迹逐米一致 —— 玩家被挡距离仅由
-    /// 玩家胶囊半径（0.5m）决定，不存在“视觉细/碰撞粗”的 AABB 与 marker 尺寸差。
+    /// 缩放取 `half / template_half_extent(axis)`，因此**画出来的尺寸恒等于碰撞 AABB**：
+    /// 立方体/球模板是 ±1（半幅 1）⇒ 缩放 = half；单位圆柱 y 只烘到 ±0.5 ⇒ 该轴缩放 = 2·half。
+    /// 判据与"为什么以前一律写 `2*half` 是错的"见 `geom::Shape::template_half_extent`。
+    fn obstacle_model(ob: &MapObstacle) -> glam::Mat4 {
+        let half = glam::Vec3::new(ob.half_w, ob.half_h, ob.half_d);
+        let tmpl = glam::Vec3::new(
+            ob.shape.template_half_extent(0),
+            ob.shape.template_half_extent(1),
+            ob.shape.template_half_extent(2),
+        );
+        glam::Mat4::from_translation(glam::Vec3::new(ob.x, ob.y, ob.z))
+            * glam::Mat4::from_scale(half / tmpl)
+    }
+
+    /// 从物理障碍盒构建世界 marker：模型见 [`Self::obstacle_model`]，
+    /// 即渲染盒与碰撞 AABB **逐轴同尺寸**（2026-09-17 起；此前可见尺寸是 AABB 的 2 倍，
+    /// 玩家能站进看得见的那半个盒子里，子弹也会打空）。
     ///
     /// 材质：按 ObstacleKind 调色板 + 确定性逐障碍微变（terrain_hash 量化格点），
     /// 墙（砖红）/块（金属灰蓝）/栅栏（木板）/树（树干棕）/建筑（混凝土）/残骸（土棕）
     /// 各有可辨识材质色；同一种类的相邻盒子明度/色相 ±6% 抖动，形成砖缝/板纹颗粒感。
     pub fn for_obstacle(ob: &MapObstacle) -> Self {
         WorldMarker {
-            model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, ob.y, ob.z))
-                * glam::Mat4::from_scale(glam::Vec3::new(
-                    ob.half_w * 2.0,
-                    ob.half_h * 2.0,
-                    ob.half_d * 2.0,
-                )),
+            model: Self::obstacle_model(ob),
             tint: {
                 // 🔴 `RV3D_DEBUG_KIND=1`：按 `ObstacleKind` 给六种纯色，**让几何自报家门**。
                 //
@@ -588,12 +597,7 @@ impl WorldMarker {
                         ObstacleKind::Ruin => [0.0, 1.0, 1.0],      // 青
                     };
                     return WorldMarker {
-                        model: glam::Mat4::from_translation(glam::Vec3::new(ob.x, ob.y, ob.z))
-                            * glam::Mat4::from_scale(glam::Vec3::new(
-                                ob.half_w * 2.0,
-                                ob.half_h * 2.0,
-                                ob.half_d * 2.0,
-                            )),
+                        model: Self::obstacle_model(ob),
                         tint: [c[0], c[1], c[2], ob.shape.tag()],
                     };
                 }
@@ -10915,6 +10919,76 @@ unsafe extern "system" fn vulkan_debug_callback(
         }
     }
     vk::FALSE
+}
+
+// ============================================================
+// 障碍 marker 尺寸单元测试
+// ============================================================
+
+#[cfg(test)]
+mod marker_scale_tests {
+    use super::*;
+    use crate::engine::geom::Shape;
+
+    /// 端到端不变式：**画出来的尺寸逐轴恒等于碰撞 AABB**。
+    ///
+    /// 存在理由：`for_obstacle` 此前对三个轴一律写 `2*half`，而模板是 ±1 的立方体/球、
+    /// r=1 的圆柱 ⇒ 全城 1700 多个程序化构件画成设计尺寸的 **2 倍**（灌木球 φ2.86 画成
+    /// φ5.7、路缘石 0.55 宽画成 1.1 m 矮墙、柱头 φ0.92 画成 φ1.84 的悬空圆盘），并且
+    /// 玩家能站进"看得见的那半个盒子"里 = 穿模。它存活了三周，因为**圆柱的高度恰好是对的**
+    /// （模板 y 已是 ±0.5），"部分正确"让每次目视核对都能找到一条反例说服自己。
+    ///
+    /// 这条测试按形状逐轴验，任何一侧（模板 or 缩放推导）单独改动都会让它红。
+    #[test]
+    fn marker_visible_size_matches_aabb() {
+        for shape in [
+            Shape::Legacy,
+            Shape::Cylinder,
+            Shape::Sphere,
+            Shape::Authored,
+        ] {
+            let ob = MapObstacle::new(ObstacleKind::Block, 1.0, -2.0, 0.35, 0.6)
+                .shaped(0.5, 1.25, Some([0.5, 0.5, 0.5]))
+                .geom(shape);
+            let m = WorldMarker::for_obstacle(&ob);
+            // 模型 = T × S ⇒ 三个基向量的模长就是逐轴缩放
+            let scale = [
+                m.model.x_axis.length(),
+                m.model.y_axis.length(),
+                m.model.z_axis.length(),
+            ];
+            let half = [ob.half_w, ob.half_h, ob.half_d];
+            for axis in 0..3 {
+                let drawn = scale[axis] * shape.template_half_extent(axis) * 2.0;
+                let want = half[axis] * 2.0;
+                assert!(
+                    (drawn - want).abs() < 1e-5,
+                    "{shape:?} 轴 {axis}：画出来 {drawn} m，碰撞 AABB 是 {want} m —— \
+                     可见尺寸与碰撞盒不一致（判据见 geom::Shape::template_half_extent）"
+                );
+            }
+            // 盒心必须原样落在障碍中心，不得被缩放带偏
+            let t = m.model.w_axis.truncate();
+            assert_eq!([t.x, t.y, t.z], [ob.x, ob.y, ob.z]);
+        }
+    }
+
+    /// 缩放必须是**纯对角**的：模板按轴归一后若还带旋转/剪切，光照法线（屏幕导数重建）
+    /// 与阴影深度都会错，而且绕序判定不再成立。
+    #[test]
+    fn marker_model_is_pure_translation_and_scale() {
+        let ob = MapObstacle::new(ObstacleKind::Building, 3.0, -7.0, 1.5, 2.25).geom(Shape::Cylinder);
+        let m = WorldMarker::for_obstacle(&ob).model;
+        for (i, col) in [m.x_axis, m.y_axis, m.z_axis, m.w_axis].iter().enumerate() {
+            for j in 0..3 {
+                if i == j || (i == 3 && j != 3) {
+                    continue;
+                }
+                let v = [col.x, col.y, col.z][j];
+                assert_eq!(v, 0.0, "模型矩阵第 {i} 列第 {j} 行应为 0，实际 {v}");
+            }
+        }
+    }
 }
 
 // ============================================================

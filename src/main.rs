@@ -290,8 +290,9 @@ const GUN_SWITCH_DROP_M: f32 = 0.18;
 const GUN_SWITCH_PITCH_RAD: f32 = 0.21; // ≈12°
 const GUN_SWITCH_ROLL_RAD: f32 = 0.10; // ≈6°
 
-/// 弹孔方片的边长（米）。`WorldMarker` 的缩放 = **全长**（marker 模板是 ±1 的单位盒，
-/// 见 `geom::Shape::visual_half_gain`），所以 0.08 就是 8cm 见方的一块。
+/// 弹孔方片的边长（米）。marker 模板是 **±1 的单位盒** ⇒ 实例缩放 = **半幅**，所以这里
+/// 按 `DECAL_SIZE_M * 0.5` 缩放基向量，画出来正好是 8cm 见方的一块
+/// （障碍 marker 走的是另一条推导，见 `geom::Shape::template_half_extent`）。
 /// 再小：10m 外不足一个像素（等于没画）；再大：读起来像贴纸而不是弹孔。
 const DECAL_SIZE_M: f32 = 0.08;
 /// 弹孔厚度（米）。方片**埋进墙里一半、露出约 1cm**：共面贴片会与墙面打 z-fighting，
