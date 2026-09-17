@@ -379,9 +379,19 @@ def asset_tree():
     # canopy: core + closed lower skirt + mid ring + top cluster
     greens = (C["foliage_b"], C["foliage_a"], C["foliage_c"])
     blobs = [(0.0, 0.0, h + 1.95, 2.05, 0)]
-    for i in range(4):                       # skirt: seals the underside around the trunk
-        a = math.pi * 0.25 * i + 0.35
-        blobs.append((math.cos(a) * 1.25, math.sin(a) * 1.25, h + 0.75, 1.35, (i + 1) % 3))
+    # 🔴 下裙必须**低到能盖住轴线上那段裸干**，否则从任何街面视角都能从冠底看进去。
+    # 上一版裙团在 z=h+0.75、半径 1.35、偏心 1.25：flatten 0.78 让它的竖直半高只有 1.05，
+    # 而在轴线上它的有效覆盖是 ±1.05*sqrt(1-(1.25/1.35)^2) = ±0.40 —— 只盖住 y 3.85..4.65。
+    # 核心球在轴线上从 3.85 起，于是 **y 3.2..3.85 那段裸干（直径 0.68m）整条露在冠底正中**，
+    # 加上 4 团 90 度排布时对角方向漏出的枝根，合起来就是实机里树冠中心那一大块棕色
+    # （`v14/v15/v16_same_b.png`，372 棵树，每帧都在画面里）。
+    # 现在 5 团、72 度排布、偏心 1.15、半径 1.55、降到 z=h+0.35：
+    #   竖直半高 1.55*0.78=1.21，轴线上覆盖 ±1.21*sqrt(1-(1.15/1.55)^2)=±0.80
+    #   => 轴线 y 3.05..4.65，与核心球(3.85..7.05)接上 ⇒ 冠底封死。
+    #   相邻两团圆心相距 2*1.15*sin36=1.35 << 2*1.55 ⇒ 环本身也是闭合的。
+    for i in range(5):                       # skirt: seals the underside around the trunk
+        a = math.pi * 2.0 * i / 5.0 + 0.35
+        blobs.append((math.cos(a) * 1.15, math.sin(a) * 1.15, h + 0.35, 1.55, i % 3))
     for i in range(3):                       # mid ring: breaks the silhouette
         a = math.pi * 2.0 * i / 3.0 + 1.1
         blobs.append((math.cos(a) * 1.50, math.sin(a) * 1.50, h + 1.95, 1.50, i))

@@ -846,11 +846,15 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
         // 🔴 但"把水面压低一点"是**反向**的错：水面一旦低于石盆顶，它就被实心石盆整个
         //    包住 = 根本不画出来（本仓的坑：不报错、只是东西没了）。
         //    判据：**要么水面高于边沿，要么边沿是空心的圈；两者不能都要"内凹"。**
-        //    现在：石圈 0.5m 厚、顶 0.26；水面 8.0 见方正好填满圈口、顶 0.30 高出 4cm
-        //    ⇒ 任何视角都看不到内壁，也没有可藏东西的空洞。水面是 solid（走 push），
-        //    所以玩家不能直接走过去，与"这是水"的直觉一致。
-        c.rim(cx, cz, 9.0, 9.0, 0.5, UNDER_GROUND, 0.26, GRANITE);
-        c.push(Part::new(ObstacleKind::Building, cx, cz, 8.0, 8.0, UNDER_GROUND, 0.30, GLASS_BLUE));
+        // 🔴🔴 而我上一版选"空心圈"那条，等于**把花坛刚定案的错误在下一个物件上重做一遍**：
+        //   `rim()` 是四条边围成的**空心环**，空心环 = 坑。实机（`z20check_b.png` 之后这三张
+        //   同机位复拍）里池子仍是一道砖墙围着的下沉方格，池底那三块棕色板状物
+        //   （= 空洞里的喷泉柱基座与水面盒的边缘）读成"坑里一堆残骸"。
+        //   ⇒ 统一解法，与花坛同一条：**实心台 + 水面高出台沿**，一个空洞都不留。
+        //   石台 9×9 到 0.22；水面 8.2 见方、顶 0.30（高出石沿 8cm）—— 水像是从台子里
+        //   漫出来的一层，四周看不到任何内壁；喷泉柱与压顶坐在水面上。
+        c.push(Part::new(ObstacleKind::Building, cx, cz, 9.0, 9.0, UNDER_GROUND, 0.22, GRANITE));
+        c.push(Part::new(ObstacleKind::Building, cx, cz, 8.2, 8.2, UNDER_GROUND, 0.30, GLASS_BLUE));
         c.push(Part::new(ObstacleKind::Block, cx, cz, 1.3, 1.3, 0.30, 1.75, CONCRETE_LIGHT).cyl());
         c.deco(Part::new(ObstacleKind::Block, cx, cz, 2.6, 2.6, 1.75, 2.0, GRANITE));
     }
