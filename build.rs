@@ -961,8 +961,8 @@ const CUBE_TRI: array<vec3<u32>, 12> = array<vec3<u32>, 12>(
     vec3<u32>(4u, 5u, 6u), vec3<u32>(4u, 6u, 7u),
     vec3<u32>(8u, 9u, 10u), vec3<u32>(8u, 10u, 11u),
     vec3<u32>(12u, 13u, 14u), vec3<u32>(12u, 14u, 15u),
-    vec3<u32>(16u, 17u, 18u), vec3<u32>(16u, 18u, 19u),
-    vec3<u32>(20u, 21u, 22u), vec3<u32>(20u, 22u, 23u),
+    vec3<u32>(16u, 18u, 17u), vec3<u32>(16u, 19u, 18u),
+    vec3<u32>(20u, 22u, 21u), vec3<u32>(20u, 23u, 22u),
 );
 
 // 远档十字双 quad（FAR_VERTS + FAR_INDICES）
@@ -1214,10 +1214,10 @@ fn mesh_main(
             }
         } else if (lid < 72u) {
             let i = lid - 48u;
-            mesh_out.primitives[lid].indices = vec3<u32>(48u, ((i + 1u) % 24u) + 24u, i + 24u);
+            mesh_out.primitives[lid].indices = vec3<u32>(48u, i + 24u, ((i + 1u) % 24u) + 24u);
         } else if (lid < 96u) {
             let i = lid - 72u;
-            mesh_out.primitives[lid].indices = vec3<u32>(49u, i, (i + 1u) % 24u);
+            mesh_out.primitives[lid].indices = vec3<u32>(49u, ((i + 1u) % 24u), i);
         }
         if (lid == 0u) {
             mesh_out.vertex_count = 50u;

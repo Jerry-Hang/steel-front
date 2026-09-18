@@ -120,8 +120,8 @@ const INDICES: [u32; 36] = [
      4,  5,  6,  4,  6,  7, // 后
      8,  9, 10,  8, 10, 11, // 右
     12, 13, 14, 12, 14, 15, // 左
-    16, 17, 18, 16, 18, 19, // 上
-    20, 21, 22, 20, 22, 23, // 下
+    16, 18, 17, 16, 19, 18, // 上（绕序同地面 quad：从上方看是正面）
+    20, 22, 21, 20, 23, 22, // 下（反向：从下方看才是正面）
 ];
 
 /// 远档 LOD：十字交叉双 quad（8 顶点 / 12 索引），边长与立方体一致（±1.0）。
@@ -146,9 +146,11 @@ const FAR_INDICES: [u32; 12] = [
 /// 地面实例专用（近档+远档共用）：几何本身无侧壁，实例矩阵纯平移，彻底消除旧版
 /// 立方体/压扁薄片侧壁带来的"掀盖纸箱铺地"格子感。顶点色白，纹理/颜色混合结果
 /// 与旧立方体顶面一致。
-/// 绕序注意：本管线为 FrontFace::CLOCKWISE + shader Y 翻转，水平地面从上方看必须是
-/// 逆时针（索引 [0,2,1, 0,3,2]）才是正面；立方体顶面用的顺时针在长期被背面剔除，
-/// 这正是旧版"只剩侧壁竖立"的根因。marker/NPC 的垂直面不受影响。
+/// 绕序注意：本管线为 FrontFace::CLOCKWISE + shader Y 翻转，水平面从上方看必须是
+/// 逆时针（索引 [0,2,1, 0,3,2]）才是正面。立方体顶/底面与 mesh 圆柱盖曾按相反约定
+/// 绕序 —— 顶面从上方恒被背面剔除，每个 marker 盒子实际是"顶面开口的盒子"（喷泉池/
+/// 花坛"坑"、柱头"管口"的根因），2026-09-19 已统一，回归判据见 `horizontal_winding_tests`。
+/// marker/NPC 的垂直面不受影响。
 const GROUND_VERTS: [Vertex; 4] = [
     Vertex { pos: [-1.0, 0.0,  1.0], color: [1.0, 1.0, 1.0], uv: [0.0, 0.0] },
     Vertex { pos: [ 1.0, 0.0,  1.0], color: [1.0, 1.0, 1.0], uv: [1.0, 0.0] },
@@ -3424,8 +3426,10 @@ impl Renderer {
         Ok(())
     }
 
-    /// 创建 NPC 人体圆柱几何（四肢用）：单位圆柱 r=1 h=1 沿 Y，24 段，含上下盖。
-    fn create_cylinder_geometry(&mut self) -> Result<(), String> {
+    /// 圆柱几何数据（上传与绕序回归测试共用）：单位圆柱 r=1 h=1 沿 Y，24 段，含上下盖。
+    /// 水平盖的绕序必须与地面 quad 同约定（从上方可见 ⇔ (x,z) 有向面积 > 0），
+    /// 立方体顶/底面曾因反绕被上方剔除，判据见 `horizontal_winding_tests`。
+    fn cylinder_mesh_data() -> (Vec<Vertex>, Vec<u32>) {
         const SEGS: u32 = 24;
         let mut verts: Vec<Vertex> = Vec::with_capacity((SEGS * 2 + 2) as usize);
         // 侧壁：上下两圈（y = ±0.5）
@@ -3456,11 +3460,17 @@ impl Renderer {
             let t2 = SEGS + a;
             let t3 = SEGS + b;
             indices.extend_from_slice(&[t0, t2, t1, t1, t2, t3]);
-            // 上盖 fan
+            // 上盖 fan（绕序同地面 quad：从上方看是正面）
             indices.extend_from_slice(&[top_center, t2, t3]);
-            // 下盖 fan
+            // 下盖 fan（反向：从下方看才是正面）
             indices.extend_from_slice(&[bottom_center, t1, t0]);
         }
+        (verts, indices)
+    }
+
+    /// 创建 NPC 人体圆柱几何（四肢用）：单位圆柱 r=1 h=1 沿 Y，24 段，含上下盖。
+    fn create_cylinder_geometry(&mut self) -> Result<(), String> {
+        let (verts, indices) = Self::cylinder_mesh_data();
         let vert_size = (verts.len() * std::mem::size_of::<Vertex>()) as u64;
         let (v_buffer, v_memory) =
             self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vert_size)?;
@@ -12209,6 +12219,81 @@ mod workgroup_layout_tests {
             assert!(
                 !s.workgroup_reachable.contains(ty),
                 "Block 类型 {ty} 同时是 Workgroup 可达的 —— 去掉规则会误伤它，必须先改 build.rs 的取舍"
+            );
+        }
+    }
+}
+
+/// 水平面绕序回归守卫（2026-09-19）。
+///
+/// 本管线 `FrontFace::CLOCKWISE` + 着色器 Y 翻转：水平面**从上方可见 ⇔ (x,z) 有向面积 > 0**，
+/// 以地面 quad 为参照。立方体顶/底面与 mesh 圆柱盖曾按相反约定绕序 ⇒ 顶面从上方恒被
+/// 背面剔除，每个 marker 盒子实际是"顶面开口的盒子"：底面埋地的（喷泉池沿/水面、花坛、
+/// 路缘石、碑座下两级）从开口露出地面，读作"坑"——追了两天的池子"坑"与柱头"管口"全是它。
+/// 悬空盒子的"顶面"其实一直是透过开口看到的**底面**（平着色 + 法线翻向让它无从分辨）。
+#[cfg(test)]
+mod horizontal_winding_tests {
+    use super::{Renderer, GROUND_INDICES, GROUND_VERTS, INDICES, VERTICES};
+
+    /// 三角形在 (x,z) 平面的有向面积（正 = 与地面 quad 同绕序 = 从上方可见）。
+    fn area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+        (b[0] - a[0]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[0] - a[0])
+    }
+
+    #[test]
+    fn ground_reference_and_cube_horizontal_faces_follow_it() {
+        let g = |i: usize| GROUND_VERTS[GROUND_INDICES[i] as usize].pos;
+        assert!(
+            area_xz(g(0), g(1), g(2)) > 0.0,
+            "地面 quad 自身绕序变了 —— 这条守卫失效，按新约定重写"
+        );
+        let v = |i: usize| VERTICES[INDICES[i] as usize].pos;
+        for t in (24..30).step_by(3) {
+            assert!(
+                area_xz(v(t), v(t + 1), v(t + 2)) > 0.0,
+                "立方体顶面 INDICES[{t}..] 与地面反绕 → 从上方被剔除（开口盒 bug 复发）"
+            );
+        }
+        for t in (30..36).step_by(3) {
+            assert!(
+                area_xz(v(t), v(t + 1), v(t + 2)) < 0.0,
+                "立方体底面 INDICES[{t}..] 从上方可见 → 盒子会被看穿"
+            );
+        }
+    }
+
+    #[test]
+    fn cylinder_caps_follow_the_ground_winding() {
+        let (verts, indices) = Renderer::cylinder_mesh_data();
+        let pos = |i: u32| verts[i as usize].pos;
+        // 每段 12 个索引：6 侧壁 + 3 上盖 + 3 下盖
+        let segs = (indices.len() / 12) as u32;
+        for i in 0..segs {
+            let t = (i * 12 + 6) as usize;
+            assert!(
+                area_xz(pos(indices[t]), pos(indices[t + 1]), pos(indices[t + 2])) > 0.0,
+                "圆柱上盖第 {i} 片从上方被剔除（柱头会读成管口）"
+            );
+            let b = (i * 12 + 9) as usize;
+            assert!(
+                area_xz(pos(indices[b]), pos(indices[b + 1]), pos(indices[b + 2])) < 0.0,
+                "圆柱下盖第 {i} 片从上方可见（空心会被看穿）"
+            );
+        }
+    }
+
+    #[test]
+    fn mesh_shader_horizontal_winding_matches_cpu() {
+        let src = include_str!("../../build.rs");
+        for pat in [
+            "vec3<u32>(16u, 18u, 17u), vec3<u32>(16u, 19u, 18u)",
+            "vec3<u32>(20u, 22u, 21u), vec3<u32>(20u, 23u, 22u)",
+            "vec3<u32>(48u, i + 24u, ((i + 1u) % 24u) + 24u)",
+            "vec3<u32>(49u, ((i + 1u) % 24u), i)",
+        ] {
+            assert!(
+                src.contains(pat),
+                "mesh 着色的水平面绕序与 CPU 不一致，缺 `{pat}`（两条路径必须同约定）"
             );
         }
     }
