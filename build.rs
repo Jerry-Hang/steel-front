@@ -366,6 +366,24 @@ fn evaluate_point(light: PointLight, world_pos: vec3<f32>, normal: vec3<f32>, vi
     return light.color_intensity.xyz * light.color_intensity.w * atten * (diffuse + SPEC_CONTRIB * spec);
 }
 
+// NaN-safe 屏幕空间面法线（2026-09-19）：相交缝（如树冠 blob 重叠处）会产生退化三角形，
+// 叉积模长趋 0，normalize 出 NaN → 光照 NaN → 落盘钳成纯黑（树冠下仰视的"黑带"）。
+// 退化判据用相对量 |cr|/(|dx||dy|) ≈ 两导数向量夹角正弦，不随面的像素尺度漂移；
+// 退化面退回 vdir（朝相机的法线），给出合理灰而不是黑洞。fs_main 里原有的 valid_nrm 闸
+// 只护了菲涅耳，主光照/皮肤/自发光仍会吃 NaN —— 本函数是三处共用的正解。
+fn safe_face_normal(wp: vec3<f32>, vdir: vec3<f32>) -> vec3<f32> {
+    let dx = dpdx(wp);
+    let dy = dpdy(wp);
+    let cr = cross(dx, dy);
+    let l = length(cr);
+    let dmax = max(length(dx), max(length(dy), 1e-9));
+    var n = select(vdir, cr / max(l, 1e-9), l / (dmax * dmax) > 1e-3);
+    if (dot(n, vdir) < 0.0) {
+        n = -n;
+    }
+    return n;
+}
+
 // 光照应用（地面与 marker/NPC 共用，2026-08-22）：屏幕导数法线 + 3x3 PCF 阴影 + 方向/点光。
 // 障碍/建筑此前走“纯色直出”无面光照 → 一律同色剪影，纸片感；现在与地面同光源后，
 // 顶面/迎光面/背光面自然分层，建筑/树/集装箱有立体明暗。
@@ -374,10 +392,7 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
         return color;
     }
     let view_dir = normalize(input.view_dir);
-    var normal = normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos)));
-    if (dot(normal, view_dir) < 0.0) {
-        normal = -normal;
-    }
+    var normal = safe_face_normal(input.world_pos, view_dir);
     let deriv = world_derivatives(input.world_pos);
     var shadow_factor = 0.0;
     var debug_outside = true;
@@ -566,7 +581,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 轮廓来伪造体积光晕：ndv = |N·V| 在球心≈1、轮廓≈0。
     if (input.fade > 1.0) {
         let edir = normalize(input.view_dir);
-        let enorm = normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos)));
+        let enorm = safe_face_normal(input.world_pos, edir);
         let ndv = abs(dot(enorm, edir));
         if (input.fade > 3.0) {
             // 烟：暗灰、中心略亮、边缘缓衰减，并吃一点环境光，避免变成纯黑洞
@@ -594,7 +609,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let dmax = max(deriv.x, max(deriv.y, deriv.z));
         let vdir = normalize(input.view_dir);
         let cr = cross(dpdx(input.world_pos), dpdy(input.world_pos));
-        var fnrm = normalize(cr);
+        // 退化面（相交缝 sliver）的 cr 模长趋 0 → normalize 出 NaN，会穿透 valid_nrm
+        // 的 smoothstep 把 base/光照全染 NaN → 落盘纯黑。与 safe_face_normal 同一相对判据。
+        let crl = length(cr);
+        var fnrm = select(vdir, cr / max(crl, 1e-9), crl / max(dmax * dmax, 1e-9) > 1e-3);
         if (dot(fnrm, vdir) < 0.0) {
             fnrm = -fnrm;
         }
