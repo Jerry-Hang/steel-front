@@ -2804,13 +2804,14 @@ impl Game {
         quads
     }
 
-    /// 构建默认光照场景（方向光 + 环境光 + 2 点光；阴影未绑定贴图，保持关闭）
+    /// 构建默认光照场景（方向光 + 环境光 + 2 点光；阴影默认开，`RV3D_NO_SHADOW=1` 关）
     ///
     /// 强度配平（2026-09-01 建模重构第 1 批）：旧值 sun=1.5 / ambient=0.5×(0.5,0.55,0.6)
     /// 使任何 NdotL>0.5 的面全部撞上 `min(radiance,1)` 截顶，明暗比只有 4:1 且高光端全糊。
-    /// 片元改用不截顶的指数压缩后，这里把太阳降到 1.15、环境降到 0.30，让
-    /// [背光 0.20, 迎光 0.87] 整个区间都落在曲线未饱和的部分——同样的 4:1 对比，
-    /// 但朝向梯度不再被抹平。改这两个数必须同时看 build.rs::apply_lighting 的曲线。
+    /// 片元改用不截顶的指数压缩后，批次 1 先降到 sun=1.15 / 环境 0.30，把
+    /// [背光 0.20, 迎光 0.87] 整个区间放回曲线未饱和段；同日质量 pass（c5a2a67）
+    /// 因阴影面街道读不清再把两者上调到**当前的 sun=1.35 / 环境 0.55**。
+    /// 改这两个数必须同时看 build.rs::apply_lighting 的曲线。
     pub fn light_uniform(&self) -> super::lighting::LightUniform {
         use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
         let sun = DirectionalLight::new(
