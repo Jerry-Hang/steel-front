@@ -12,7 +12,11 @@ param(
     # lParam bit16-23 carries the scancode (MapVirtualKey) -- winit needs it.
     [int[]]$Keys = @(),
     [int]$AfterKeysSec = 3,
-    [switch]$Stress
+    [switch]$Stress,
+    # -NoAuto: do NOT force RV3D_AUTOSTART=1, so the game stays in its menu state.
+    # Needed to screenshot the frosted-glass menu (every cap_safe run before 2026-09-19
+    # auto-started a run, so the menu was never capturable). Kill-in-finally unchanged.
+    [switch]$NoAuto
 )
 
 # Mouse-safety harness for steel-front. The engine self-grabs the cursor on entering
@@ -92,7 +96,11 @@ Kill-Game
 Start-Sleep -Seconds 1
 
 # Start-Process inherits this session's environment, so set the RV3D_* knobs directly.
-$env:RV3D_AUTOSTART = "1"
+if ($NoAuto) {
+    Remove-Item Env:RV3D_AUTOSTART -ErrorAction SilentlyContinue
+} else {
+    $env:RV3D_AUTOSTART = "1"
+}
 if ($Stress) { $env:RV3D_STRESS_AI = "1" }
 
 $exitNote = "ok"
