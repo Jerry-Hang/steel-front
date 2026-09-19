@@ -273,6 +273,81 @@ pub fn merge_binned(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
 ) -> BinnedGeometry {
+    merge_binned_impl(set, placements, cell, ground, false)
+}
+
+/// 阴影专用几何（2026-09-19 建筑 LOD 专项，PROGRESS §13）：与 [`merge_binned`]
+/// 同一条分桶/变换/翻面路径，唯一区别是 [`is_shadow_boxed`] 名单里的网格烘成
+/// **AABB 盒壳**（8 顶点/12 三角，替代 ~2.2k 三角的窗洞 recess）。阴影是单张
+/// 2048² 深度图、建筑剪影只由外轮廓决定——+56 栋分段楼把阴影 pass 推过拐点
+/// （同机位 fps 82→47，NO_SHADOW 对照回 106）后，这是剔无可剔之下的正解。
+/// 主 pass 不用这份几何，外观零影响。
+pub fn merge_shadow_binned(
+    set: &PropSet,
+    placements: &[PropPlacement],
+    cell: f32,
+    ground: impl Fn(f32, f32) -> f32,
+) -> BinnedGeometry {
+    merge_binned_impl(set, placements, cell, ground, true)
+}
+
+/// 2026-09-19 阴影建筑 LOD：名单内的网格在**阴影几何**里被替换为 AABB 盒壳。
+/// 判据 = "凸盒轮廓即剪影"：楼壳体（窗洞凹进、檐口凸 0.7m 都远小于盒误差）。
+/// 树/路灯/残骸车/沙袋不入选——它们的剪影本身就是阴影内容。
+/// 名单按资产名精确匹配，新增建筑类资产要显式加进来。
+pub fn is_shadow_boxed(name: &str) -> bool {
+    matches!(
+        name,
+        "building_shed"
+            | "building_block"
+            | "building_wide"
+            | "building_corner"
+            | "building_tall"
+            | "panel_block"
+    )
+}
+
+/// 盒壳索引：8 角点、12 三角，**按 GLB 资产约定（从外面看 CCW）编写**，
+/// 与真网格走同一条 `tri[0],tri[2],tri[1]` 翻面路径 ⇒ 落盘后与建筑实体的
+/// 正面约定逐面一致（教训 40：顶面从上方可见 ⇔ (x,z) 面积 > 0）。
+/// 角点编号：0-3 底面逆时针（俯视），4-7 顶面对应上移。
+const BOX_INDICES: [u32; 36] = [
+    0, 1, 2, 0, 2, 3, // 底（资产约定翻面后从下方可见）
+    4, 6, 5, 4, 7, 6, // 顶
+    0, 4, 1, 4, 5, 1, // -Z
+    3, 2, 7, 2, 6, 7, // +Z
+    0, 3, 4, 3, 7, 4, // -X
+    1, 5, 2, 5, 6, 2, // +X
+];
+
+/// 生成 `min..max` 的 8 角点盒壳顶点（`[f32;11]` 布局 pos/nrm/uv/col）。
+/// 法线/uv/色在阴影管线里全部不读（shadow VS 只读 location 0），填常量即可。
+fn box_verts(min: [f32; 3], max: [f32; 3]) -> Vec<[f32; 11]> {
+    let (x0, y0, z0) = (min[0], min[1], min[2]);
+    let (x1, y1, z1) = (max[0], max[1], max[2]);
+    let corners = [
+        [x0, y0, z0],
+        [x1, y0, z0],
+        [x1, y0, z1],
+        [x0, y0, z1],
+        [x0, y1, z0],
+        [x1, y1, z0],
+        [x1, y1, z1],
+        [x0, y1, z1],
+    ];
+    corners
+        .iter()
+        .map(|p| [p[0], p[1], p[2], 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+        .collect()
+}
+
+fn merge_binned_impl(
+    set: &PropSet,
+    placements: &[PropPlacement],
+    cell: f32,
+    ground: impl Fn(f32, f32) -> f32,
+    shadow_lod: bool,
+) -> BinnedGeometry {
     let mut out = BinnedGeometry::default();
     if cell <= 0.0 || placements.is_empty() {
         return out;
@@ -300,12 +375,24 @@ pub fn merge_binned(
                 Some(m) => m,
                 None => continue,
             };
+            // 阴影 LOD：建筑网格换成 AABB 盒壳，走同一条变换+翻面路径，
+            // 绕序与实体逐面一致（BOX_INDICES 按资产约定编写）。
+            let boxed: Option<Vec<[f32; 11]>> =
+                if shadow_lod && is_shadow_boxed(&mesh.name) {
+                    Some(box_verts(mesh.min, mesh.max))
+                } else {
+                    None
+                };
+            let (vsrc, isrc): (&Vec<[f32; 11]>, &[u32]) = match &boxed {
+                Some(v) => (v, &BOX_INDICES),
+                None => (&mesh.verts, &mesh.indices),
+            };
             let base = out.verts.len() as u32;
             let (sy, cy) = (p.yaw.sin(), p.yaw.cos());
             let gy = ground(p.x, p.z) + p.y;
             // 同型号内部的差异：见 placement_tint
             let tint = placement_tint(&p);
-            for v in &mesh.verts {
+            for v in vsrc {
                 // 绕 +Y 旋转：(x, z) → (x·cosθ + z·sinθ, -x·sinθ + z·cosθ)
                 let vx = v[0] * p.scale;
                 let vy = v[1] * p.scale;
@@ -315,6 +402,10 @@ pub fn merge_binned(
                 let py = gy + vy;
                 let nx = v[3] * cy + v[5] * sy;
                 let nz = -v[3] * sy + v[5] * cy;
+                // 🔴 通道修复（2026-09-19 阴影 LOD 专项读码抓到）：`[f32;11]` 布局是
+                //   pos(3) nrm(3) uv(2) col(3)（assets.rs 导入器），tint 必须乘在
+                //   v[8..11] 上。旧代码乘在 v[6..9] —— 把 uv 缩放了两轴、只给 color.r
+                //   染色，"克隆军团"对策自出生起就没生效（相邻楼同色）。
                 let baked = [
                     px,
                     py,
@@ -322,11 +413,11 @@ pub fn merge_binned(
                     nx,
                     v[4],
                     nz,
-                    (v[6] * tint[0]).min(1.0),
-                    (v[7] * tint[1]).min(1.0),
-                    (v[8] * tint[2]).min(1.0),
-                    v[9],
-                    v[10],
+                    v[6],
+                    v[7],
+                    (v[8] * tint[0]).min(1.0),
+                    (v[9] * tint[1]).min(1.0),
+                    (v[10] * tint[2]).min(1.0),
                 ];
                 for k in 0..3 {
                     bin_min[k] = bin_min[k].min(baked[k]);
@@ -337,12 +428,12 @@ pub fn merge_binned(
                 out.verts.push(baked);
             }
             // 与 merge() 同一条绕序约定：外部建模进来要换一次面
-            for tri in mesh.indices.chunks_exact(3) {
+            for tri in isrc.chunks_exact(3) {
                 out.indices.push(tri[0] + base);
                 out.indices.push(tri[2] + base);
                 out.indices.push(tri[1] + base);
             }
-            for i in mesh.indices.chunks_exact(3).remainder() {
+            for i in isrc.chunks_exact(3).remainder() {
                 out.indices.push(*i + base);
             }
         }
@@ -516,6 +607,114 @@ mod tests {
         assert_eq!(g.bins.len(), 1);
     }
 
+    /// 阴影建筑 LOD 专项（PROGRESS §14）：名单只含建筑盒体资产，且这些名字
+    /// 必须真的存在于套件里——资产改名会让盒化静默失效，靠这条发现。
+    #[test]
+    fn shadow_box_list_is_exact_and_resolvable() {
+        assert!(is_shadow_boxed("building_tall"));
+        assert!(is_shadow_boxed("panel_block"));
+        assert!(!is_shadow_boxed("tree_oak"), "树冠剪影就是阴影内容，不许盒化");
+        assert!(!is_shadow_boxed("car_wreck"));
+        assert!(!is_shadow_boxed("street_lamp"));
+        assert!(!is_shadow_boxed("sandbag_wall"));
+        let Some(set) = kit() else { return };
+        for n in [
+            "building_shed",
+            "building_block",
+            "building_wide",
+            "building_corner",
+            "building_tall",
+            "panel_block",
+        ] {
+            assert!(set.index_of(n).is_some(), "名单资产 {n} 不在套件里");
+        }
+    }
+
+    /// 阴影几何里建筑桶恰好 12 三角/件，非建筑（树）与全量几何逐桶一致。
+    #[test]
+    fn shadow_lod_boxes_buildings_and_keeps_the_rest() {
+        let Some(set) = kit() else { return };
+        let tall = set.index_of("building_tall").unwrap();
+        let tree = set.index_of("tree_oak").unwrap();
+        let ps = vec![
+            PropPlacement::new(tall, 300.0, 300.0, 0.0, 1.0, false),
+            PropPlacement::new(tall, 305.0, 300.0, 0.0, 1.0, false),
+            PropPlacement::new(tree, -300.0, -300.0, 0.0, 1.0, false),
+        ];
+        let full = merge_binned(&set, &ps, 40.0, |_, _| 0.0);
+        let lod = merge_shadow_binned(&set, &ps, 40.0, |_, _| 0.0);
+        assert!(lod.indices.len() * 2 < full.indices.len(), "阴影几何必须比全量几何小一半以上");
+        // 建筑桶：2 件 × 12 三角 = 24 三角 = 72 索引
+        let b_bin = lod.bins.iter().find(|b| b.center[0] > 0.0).unwrap();
+        assert_eq!(b_bin.index_count, 72, "两件盒化建筑应恰好 24 三角");
+        // 树桶与全量几何同键同长
+        let t_full = full.bins.iter().find(|b| b.center[0] < 0.0).unwrap();
+        let t_lod = lod.bins.iter().find(|b| b.center[0] < 0.0).unwrap();
+        assert_eq!(t_full.index_count, t_lod.index_count, "名单外的网格不该被动一根手指");
+    }
+
+    /// 盒壳绕序定式（教训 40 的判据搬到 CPU 路径）：翻面落盘后，顶面三角形
+    /// 的 (x,z) 有向面积必须 > 0（从上方可见），底面 < 0。
+    #[test]
+    fn shadow_box_follows_horizontal_winding_rule() {
+        let Some(set) = kit() else { return };
+        let tall = set.index_of("building_tall").unwrap();
+        let m = set.get(tall).unwrap();
+        let top_y = m.max[1];
+        let ps = vec![PropPlacement::new(tall, 0.0, 0.0, 0.0, 1.0, false)];
+        let g = merge_shadow_binned(&set, &ps, 40.0, |_, _| 0.0);
+        assert_eq!(g.verts.len(), 8);
+        assert_eq!(g.indices.len(), 36);
+        let mut tops = 0;
+        let mut bottoms = 0;
+        for tri in g.indices.chunks_exact(3) {
+            let p = |i: &u32| g.verts[*i as usize];
+            let (a, b, c) = (p(&tri[0]), p(&tri[1]), p(&tri[2]));
+            let area = (b[0] - a[0]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[0] - a[0]);
+            let eps = 1e-4;
+            let at = |v: [f32; 11], y: f32| (v[1] - y).abs() < eps;
+            if at(a, top_y) && at(b, top_y) && at(c, top_y) {
+                assert!(area > 0.0, "顶面 (x,z) 面积={area} ≤ 0 ⇒ 从上方会被剔除");
+                tops += 1;
+            } else if at(a, 0.0) && at(b, 0.0) && at(c, 0.0) {
+                assert!(area < 0.0, "底面 (x,z) 面积={area} ≥ 0 ⇒ 约定反了");
+                bottoms += 1;
+            }
+        }
+        assert_eq!((tops, bottoms), (2, 2), "盒壳必须有顶 2 三角 + 底 2 三角");
+    }
+
+    /// tint 通道回归（本轮读码抓到的旧 bug）：色调必须乘在 color(v8..11) 上、
+    /// uv(v6,v7) 原样直通。旧代码乘在 v[6..9]——uv 被缩放、只有 color.r 染色。
+    #[test]
+    fn placement_tint_lands_on_color_channels_not_uv() {
+        let set = PropSet {
+            meshes: vec![PropMesh {
+                name: "tri".into(),
+                verts: vec![
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.25, 0.75, 0.5, 0.6, 0.7],
+                    [0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.25, 0.75, 0.5, 0.6, 0.7],
+                    [0.0, 3.0, 0.0, 0.0, 1.0, 0.0, 0.25, 0.75, 0.5, 0.6, 0.7],
+                ],
+                indices: vec![0, 1, 2],
+                min: [0.0; 3],
+                max: [1.0; 3],
+            }],
+        };
+        let p = PropPlacement::new(0, 12.0, -40.0, 0.0, 1.0, false);
+        let tint = placement_tint(&p);
+        let g = merge_binned(&set, &[p], 40.0, |_, _| 0.0);
+        let v = g.verts[0];
+        assert_eq!((v[6], v[7]), (0.25, 0.75), "uv 不许被 tint 缩放");
+        assert!(
+            (v[8] - 0.5 * tint[0]).abs() < 1e-6
+                && (v[9] - 0.6 * tint[1]).abs() < 1e-6
+                && (v[10] - 0.7 * tint[2]).abs() < 1e-6,
+            "三个色通道必须各自乘上对应 tint：拿到 {:?}",
+            &v[8..11]
+        );
+    }
+
     #[test]
     fn bin_visible_rejects_a_bin_outside_a_simple_frustum() {
         // 构造一个只看 +X 方向的退化视锥：左平面法线朝 -X，位于 x=0
@@ -662,19 +861,20 @@ mod tests {
         // 顶点位置逐位相同，但索引被刻意换了一次面（适配引擎 CLOCKWISE 约定）
         assert_eq!(g.indices, vec![0, 2, 1], "merge 必须交换三角形第二、三个索引");
         for (a, b) in g.verts.iter().zip(set.meshes[0].verts.iter()) {
-            // 位置/法线/UV 仍然逐位相同。颜色是**唯一**被有意调制的通道：
-            // placement_tint 给同型号的每个摆放一点色调差异（治"克隆军团"），
-            // 所以这里按"源色 × 该摆放的色调"精确比对，而不是放松成范围断言。
-            let geom_a = [a[0], a[1], a[2], a[3], a[4], a[5], a[9], a[10]];
-            let geom_b = [b[0], b[1], b[2], b[3], b[4], b[5], b[9], b[10]];
+            // 布局按导入器（assets.rs）：pos(0..3) nrm(3..6) uv(6..8) color(8..11)。
+            // 位置/法线/UV 逐位相同；颜色是唯一被有意调制的通道。
+            // ⚠ 本测试旧版把 tint 断言在 6..9 —— 那正是当年通道错位 bug 的形状
+            //   （uv 被缩放、只有 color.r 染色），2026-09-19 阴影 LOD 专项修正。
+            let geom_a = [a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]];
+            let geom_b = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
             assert_eq!(geom_a, geom_b, "零位姿下位置/法线/UV 必须与源网格逐位相同");
             let tint = placement_tint(&p);
             for k in 0..3 {
-                let want = (b[6 + k] * tint[k]).min(1.0);
+                let want = (b[8 + k] * tint[k]).min(1.0);
                 assert!(
-                    (a[6 + k] - want).abs() < 1e-6,
+                    (a[8 + k] - want).abs() < 1e-6,
                     "颜色必须恰为源色 × placement_tint（通道 {k}：得 {} 期望 {want}）",
-                    a[6 + k]
+                    a[8 + k]
                 );
             }
         }

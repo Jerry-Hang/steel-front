@@ -1020,6 +1020,17 @@ pub struct Renderer {
     /// 道具的空间分桶（每桶一段连续索引 + 包围球）。见 `engine::props::merge_binned`。
     /// 桶共用同一个 VBO/IBO，剔除只决定发不发某一段索引，不需要重传顶点。
     prop_bins: Vec<crate::engine::props::PropBin>,
+    /// 阴影专用几何（2026-09-19 建筑 LOD 专项，PROGRESS §14）：名单建筑烘成
+    /// AABB 盒壳（`merge_shadow_binned`），只被 shadow pass 绑定；主 pass 不读它。
+    /// 缓冲随地图重载整体重建，不做持久映射。
+    prop_sh_vertex_buffer: vk::Buffer,
+    prop_sh_vertex_memory: vk::DeviceMemory,
+    prop_sh_index_buffer: vk::Buffer,
+    prop_sh_index_memory: vk::DeviceMemory,
+    prop_sh_index_count: u32,
+    prop_sh_bins: Vec<crate::engine::props::PropBin>,
+    /// RV3D_SHADOW_LOD=0 → 阴影退回全量道具几何（A/B 诊断门，同 RV3D_NO_SHADOW 惯例）
+    shadow_lod: bool,
     /// 本帧视锥 6 平面（法线朝外）。由 `render()` 在写 CameraUniform 的同一处填，
     /// 那时 `record_command_buffer()` 还没被调用，所以道具分桶剔除拿到的一定是本帧的。
     frame_frustum: [[f32; 4]; 6],
@@ -1641,6 +1652,13 @@ impl Renderer {
             prop_capacity_verts: 0,
             prop_capacity_idx: 0,
             prop_bins: Vec::new(),
+            prop_sh_vertex_buffer: vk::Buffer::null(),
+            prop_sh_vertex_memory: vk::DeviceMemory::null(),
+            prop_sh_index_buffer: vk::Buffer::null(),
+            prop_sh_index_memory: vk::DeviceMemory::null(),
+            prop_sh_index_count: 0,
+            prop_sh_bins: Vec::new(),
+            shadow_lod: std::env::var("RV3D_SHADOW_LOD").as_deref() != Ok("0"),
             frame_frustum: [[0.0f32; 4]; 6],
             last_near_count: 0,
             last_far_count: 0,
@@ -5227,6 +5245,10 @@ impl Renderer {
         self.prop_vertex_count = 0;
         self.prop_index_count = 0;
         self.prop_bins.clear();
+        // 任何提前返回都先把阴影几何清零：shadow loop 会退回全量，绝不会引用
+        // 上一张地图的分桶。
+        self.prop_sh_index_count = 0;
+        self.prop_sh_bins.clear();
         if merged.verts.is_empty() || merged.indices.is_empty() {
             log::info!("props: 无摆放几何（套件 {} 件 / 摆放 {} 处）", set.len(), placements.len());
             return;
@@ -5368,6 +5390,123 @@ impl Renderer {
             need_v, need_i / 3, placements.len(), self.prop_bins.len(), PROP_BIN_CELL_M,
             merged.min[0], merged.max[0], merged.min[1], merged.max[1],
             merged.min[2], merged.max[2]
+        );
+        self.set_shadow_props(set, placements);
+    }
+
+    /// 阴影建筑 LOD 专用几何上传（2026-09-19 专项，PROGRESS §14）。
+    /// 整体重建、无持久映射；任何失败都只把 `prop_sh_index_count` 留 0，
+    /// shadow loop 自动退回全量道具几何——**退化方向是"多画三角形"，不是缺阴影**。
+    fn set_shadow_props(
+        &mut self,
+        set: &crate::engine::props::PropSet,
+        placements: &[crate::engine::props::PropPlacement],
+    ) {
+        if !self.shadow_lod || std::env::var("RV3D_NO_PROPS").as_deref() == Ok("1") {
+            return;
+        }
+        let merged = crate::engine::props::merge_shadow_binned(
+            set,
+            placements,
+            PROP_BIN_CELL_M,
+            |x, z| terrain_height_at(x, z),
+        );
+        if merged.verts.is_empty() || merged.indices.is_empty() {
+            return;
+        }
+        let need_v = merged.verts.len() as u32;
+        let need_i = merged.indices.len() as u32;
+        let vsize = need_v as u64 * std::mem::size_of::<Vertex>() as u64;
+        let isz = need_i as u64 * 4;
+        unsafe {
+            // 与主缓冲同一套安全规矩：旧缓冲可能正被 GPU 引用，先等空闲再销毁
+            let _ = self.device.device_wait_idle();
+            for (buf, mem) in [
+                (self.prop_sh_vertex_buffer, self.prop_sh_vertex_memory),
+                (self.prop_sh_index_buffer, self.prop_sh_index_memory),
+            ] {
+                if buf != vk::Buffer::null() {
+                    self.device.destroy_buffer(buf, None);
+                }
+                if mem != vk::DeviceMemory::null() {
+                    self.device.free_memory(mem, None);
+                }
+            }
+            self.prop_sh_vertex_buffer = vk::Buffer::null();
+            self.prop_sh_index_buffer = vk::Buffer::null();
+        }
+        let (vb, vm) = match self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vsize) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("props/shadow: 顶点缓冲创建失败，阴影退回全量几何: {e}");
+                return;
+            }
+        };
+        let (ib, im) = match self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, isz) {
+            Ok(v) => v,
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_buffer(vb, None);
+                    self.device.free_memory(vm, None);
+                }
+                log::error!("props/shadow: 索引缓冲创建失败，阴影退回全量几何: {e}");
+                return;
+            }
+        };
+        let mut ok = true;
+        unsafe {
+            match self.device.map_memory(vm, 0, vsize, vk::MemoryMapFlags::empty()) {
+                Ok(ptr) => {
+                    let dst = ptr as *mut Vertex;
+                    for (i, v) in merged.verts.iter().enumerate() {
+                        *dst.add(i) = Vertex {
+                            pos: [v[0], v[1], v[2]],
+                            color: [v[8], v[9], v[10]],
+                            uv: [v[6], v[7]],
+                        };
+                    }
+                    self.device.unmap_memory(vm);
+                }
+                Err(e) => {
+                    log::error!("props/shadow: 顶点映射失败: {e}");
+                    ok = false;
+                }
+            }
+            if ok {
+                match self.device.map_memory(im, 0, isz, vk::MemoryMapFlags::empty()) {
+                    Ok(ptr) => {
+                        std::ptr::copy_nonoverlapping(
+                            merged.indices.as_ptr() as *const u8,
+                            ptr as *mut u8,
+                            merged.indices.len() * 4,
+                        );
+                        self.device.unmap_memory(im);
+                    }
+                    Err(e) => {
+                        log::error!("props/shadow: 索引映射失败: {e}");
+                        ok = false;
+                    }
+                }
+            }
+            if !ok {
+                self.device.destroy_buffer(vb, None);
+                self.device.destroy_buffer(ib, None);
+                self.device.free_memory(vm, None);
+                self.device.free_memory(im, None);
+                return;
+            }
+        }
+        self.prop_sh_vertex_buffer = vb;
+        self.prop_sh_vertex_memory = vm;
+        self.prop_sh_index_buffer = ib;
+        self.prop_sh_index_memory = im;
+        self.prop_sh_index_count = need_i;
+        self.prop_sh_bins = merged.bins.clone();
+        log::info!(
+            "props/shadow: 建筑盒壳几何 顶点 {} / 三角 {} / 分桶 {} 个",
+            need_v,
+            need_i / 3,
+            self.prop_sh_bins.len()
         );
     }
 
@@ -9827,23 +9966,43 @@ impl Renderer {
         // 但也不能不剔除：全画 81 个桶实测把帧率从约 250 压到 134。
         // 正解是**用光源自己的视锥剔**（`light_view_proj` 的 6 个平面），
         // 于是"正确"和"便宜"同时成立。margin 给 2m，与主 pass 同档。
-        if self.prop_vertex_buffer != vk::Buffer::null() && self.prop_index_buffer != vk::Buffer::null()
-        {
+        // 🏢 阴影建筑 LOD（2026-09-19 专项）：优先盒壳几何；未建成或
+        // RV3D_SHADOW_LOD=0 时退回全量——退化方向是"多画三角形"，永不缺阴影。
+        let use_lod = self.shadow_lod
+            && self.prop_sh_index_count > 0
+            && !self.prop_sh_bins.is_empty()
+            && self.prop_sh_vertex_buffer != vk::Buffer::null()
+            && self.prop_sh_index_buffer != vk::Buffer::null();
+        let (sh_vb, sh_ib, sh_bins): (vk::Buffer, vk::Buffer, &[crate::engine::props::PropBin]) =
+            if use_lod {
+                (
+                    self.prop_sh_vertex_buffer,
+                    self.prop_sh_index_buffer,
+                    &self.prop_sh_bins,
+                )
+            } else if self.prop_vertex_buffer != vk::Buffer::null()
+                && self.prop_index_buffer != vk::Buffer::null()
+            {
+                (self.prop_vertex_buffer, self.prop_index_buffer, &self.prop_bins)
+            } else {
+                (vk::Buffer::null(), vk::Buffer::null(), &[])
+            };
+        if sh_ib != vk::Buffer::null() {
             let light_frustum =
                 Self::extract_frustum_planes_from(self.light_data.shadow.light_view_proj);
-            let prop_vb = [self.prop_vertex_buffer];
+            let bind_vb = [sh_vb];
             let prop_off = [0u64];
             unsafe {
                 self.device
-                    .cmd_bind_vertex_buffers(command_buffer, 0, &prop_vb, &prop_off);
+                    .cmd_bind_vertex_buffers(command_buffer, 0, &bind_vb, &prop_off);
                 self.device.cmd_bind_index_buffer(
                     command_buffer,
-                    self.prop_index_buffer,
+                    sh_ib,
                     0,
                     vk::IndexType::UINT32,
                 );
             }
-            for bin in &self.prop_bins {
+            for bin in sh_bins {
                 if bin.index_count == 0 {
                     continue;
                 }
@@ -10658,6 +10817,18 @@ impl Drop for Renderer {
             }
             if self.prop_index_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.prop_index_memory, None);
+            }
+            if self.prop_sh_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.prop_sh_vertex_buffer, None);
+            }
+            if self.prop_sh_vertex_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.prop_sh_vertex_memory, None);
+            }
+            if self.prop_sh_index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.prop_sh_index_buffer, None);
+            }
+            if self.prop_sh_index_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.prop_sh_index_memory, None);
             }
             if self.render_pass != vk::RenderPass::null() {
                 self.device.destroy_render_pass(self.render_pass, None);
