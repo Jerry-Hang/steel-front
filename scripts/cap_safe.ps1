@@ -16,7 +16,9 @@ param(
     # -NoAuto: do NOT force RV3D_AUTOSTART=1, so the game stays in its menu state.
     # Needed to screenshot the frosted-glass menu (every cap_safe run before 2026-09-19
     # auto-started a run, so the menu was never capturable). Kill-in-finally unchanged.
-    [switch]$NoAuto
+    [switch]$NoAuto,
+    # VRAM admission budget in MiB (2026-09-19, PROGRESS 19.2). 0 = skip the gate.
+    [int]$MaxGpuMib = 3200
 )
 
 # Mouse-safety harness for steel-front. The engine self-grabs the cursor on entering
@@ -29,6 +31,23 @@ $exe = Join-Path $repo "target\release\steel-front.exe"
 $shots = Join-Path $repo "screenshots"
 $logs = Join-Path $repo "logs"
 New-Item -ItemType Directory -Force -Path $shots, $logs | Out-Null
+
+# VRAM admission gate. When an external workload (user ML eval) holds the card, the
+# game dies allocating the depth image BEFORE any window appears -- indistinguishable
+# from a code regression from the outside (cost a whole debugging detour 2026-09-19).
+# Refuse loudly instead of producing garbage. No nvidia-smi / unparseable => pass:
+# this gate must never block hosts where it cannot measure.
+if ($MaxGpuMib -gt 0 -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+    $gpuLine = (& nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
+    $gpuUsed = 0
+    if ($gpuLine -and [int]::TryParse([string]$gpuLine.Trim(), [ref]$gpuUsed)) {
+        if ($gpuUsed -gt $MaxGpuMib) {
+            Write-Host "GPU-BUSY: ${gpuUsed}MiB used > ${MaxGpuMib}MiB budget - refusing to launch (external VRAM load?)"
+            exit 3
+        }
+        Write-Host "gpu-gate: ok (${gpuUsed}MiB used)"
+    }
+}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @"

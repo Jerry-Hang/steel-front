@@ -15,6 +15,23 @@ $LOG  = Join-Path $repo "logs\smoke_pm.log"
 $LOGERR = "$LOG.err"
 $beat = "$env:TEMP\sf_play.beat"
 
+# VRAM admission gate (2026-09-19, PROGRESS 19.2): an external VRAM load makes the game
+# die at depth-image allocation -> NO-WINDOW -> looks like a code regression. Refuse instead.
+# No nvidia-smi / unparseable => pass (never block hosts the gate cannot measure).
+$MaxGpuMib = 3200
+if ((Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+    $gpuLine = (& nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
+    $gpuUsed = 0
+    if ($gpuLine -and [int]::TryParse([string]$gpuLine.Trim(), [ref]$gpuUsed)) {
+        if ($gpuUsed -gt $MaxGpuMib) {
+            Write-Host "GPU-BUSY: ${gpuUsed}MiB used > ${MaxGpuMib}MiB budget - refusing to launch (external VRAM load?)"
+            Write-Host "RESULT: GPU-BUSY"
+            exit 3
+        }
+        Write-Host "gpu-gate: ok (${gpuUsed}MiB used)"
+    }
+}
+
 Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 Remove-Item -Force $LOG, $LOGERR -ErrorAction SilentlyContinue
