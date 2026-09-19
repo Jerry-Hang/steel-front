@@ -526,7 +526,11 @@ release_input.ps1 取代）。
 6. **`svd_63` 未入库** — 源文件是含两把相差 90° 重叠枪身 + 独立瞄具的产品宣传图，
    `install_guns.py` 仍 SKIP。需人工删掉重叠枪身后装为 `svd12`。
 7. ~~**D12 士兵近距观感**~~ **已结案（2026-09-13）：士兵由 `assets/soldier/soldier.glb`（1082 顶点/540 三角形）经 `cmd_draw_indexed(…, SOLDIER_INSTANCE_BASE)` + `self.pipeline` 实例化绘制（不需新管线）**；🔴 **阵营色 = 队色 × `tint.w = 6.0`**（不接会整身涂成一队色）。**仍缺**骨骼动画（现为整体起伏）与两套队色顶点变体，详见 `docs/HANDOFF-soldier.md`。
-8. **D4 墙缝天空亮条 / 悬浮亮条** — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
+8. ~~**D4 墙缝天空亮条 / 悬浮亮条**~~ — **lead**：疑似楼间缝隙的正常天空，需定点复现再定。
+   ✅ **结案（2026-09-19，数值巡检）**：两个候选成因都封死——"悬浮亮条"=柱廊檐梁，
+   09-12 第 67 轮已压暗成 `CONCRETE_DARK`，现帧里梁行亮度 139–144 < 天空 166；
+   "楼缝亮条"实测亮度恰=天空上限 166，是正常天空梯度，非缺陷。判据脚本见
+   `tools/patrol.py` + 行亮度检查（排除小地图列，教训 65 的坑）。
 9. ~~**mesh 着色器过不了严格 `spirv-val`**~~ **已结案（2026-09-15）**：根因 = naga-30 `decorate_struct_member` 无条件写 `Offset`，而 SPIR-V ≥1.4 禁止对非 Block 类型写它、mesh 又必须用 1.4；现由 **`build.rs::strip_workgroup_explicit_layout`** 去掉，🔴 **只去掉 Workgroup 可达类型**（带 `Block` 的 `_struct_300/303/308` 动一个字节即缓冲错位）。**7 个 `.spv` 全 exit 0**；`mesh_spirv_has_no_workgroup_explicit_layout` / `block_types_keep_their_offsets` 两条测试锁住两个方向（都会红）。
 10. ~~**PT 512 盒上限静默截断**~~ **已结案（2026-09-14）：512 → 1024 一次分配 + 一次性告警**（`Renderer::pt_box_cap_warned` 有闩）；代价仅 **0.92 → 1.84 MB**（余量 87%）。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）；移动相机每次全量重开累积。
