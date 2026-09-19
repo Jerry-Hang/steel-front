@@ -1118,6 +1118,42 @@ fn pt_albedo_of(b: &crate::engine::ray_tracer::PtBox) -> [f32; 3] {
     obstacle_base_color(k)
 }
 
+/// PT 道具逐三角属性表烘焙（纯函数，判据见 `pt_prop_attrs_tests`）：
+/// 每三角 2×u32 = 量化面法线（(v·127+127) 每轴 u8）+ 平均顶点色（u8×3）。
+/// 法线由世界坐标顶点直接算（道具是闭合壳，着色器再翻到迎向来射侧，绕序无关）；
+/// 退化三角形回退 [0,1,0]（NaN 钳黑教训同源）。不足一整三角的尾索引被丢弃，
+/// 由 build_pt_as 的 `prop_attr_tris*3 == prop_index_count` 等式把关兜底。
+fn pt_bake_prop_attrs(verts: &[[f32; 11]], indices: &[u32]) -> Vec<u32> {
+    let ntri = indices.len() / 3;
+    let mut attrs: Vec<u32> = Vec::with_capacity(ntri * 2);
+    let qn = |v: f32| -> u32 { (v.clamp(-1.0, 1.0) * 127.0 + 127.0).round() as u32 & 0xFF };
+    let qc = |v: f32| -> u32 { (v.clamp(0.0, 1.0) * 255.0).round() as u32 & 0xFF };
+    for tri in indices.chunks_exact(3) {
+        let vp = |k: usize, c: usize| verts[tri[k] as usize][c];
+        let e1 = [vp(1, 0) - vp(0, 0), vp(1, 1) - vp(0, 1), vp(1, 2) - vp(0, 2)];
+        let e2 = [vp(2, 0) - vp(0, 0), vp(2, 1) - vp(0, 1), vp(2, 2) - vp(0, 2)];
+        let mut n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let ln = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if ln > 1e-7 {
+            n = [n[0] / ln, n[1] / ln, n[2] / ln];
+        } else {
+            n = [0.0, 1.0, 0.0];
+        }
+        let w0 = qn(n[0]) | (qn(n[1]) << 8) | (qn(n[2]) << 16);
+        let cr = (vp(0, 8) + vp(1, 8) + vp(2, 8)) / 3.0;
+        let cg = (vp(0, 9) + vp(1, 9) + vp(2, 9)) / 3.0;
+        let cb = (vp(0, 10) + vp(1, 10) + vp(2, 10)) / 3.0;
+        let w1 = qc(cr) | (qc(cg) << 8) | (qc(cb) << 16);
+        attrs.push(w0);
+        attrs.push(w1);
+    }
+    attrs
+}
+
 /// 场景指纹（坐标量化到 1m）：只有盒集合真的变了才重建 BLAS，避免逐帧重建
 fn pt_scene_sig(boxes: &[crate::engine::ray_tracer::PtBox]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -5431,35 +5467,10 @@ impl Renderer {
         // 🏢 PT 道具逐三角属性表（2026-09-19）：每三角 2×u32 = 量化面法线（(v·127+127)
         //   每轴 u8）+ 平均顶点色（u8×3）。PT 着色器一次命中读一个 8B u32x2——
         //   device-local，**不再随机读 host-visible 主 VB**（pt3 实测那是 80× 的 PCIe 风暴）。
-        //   法线由世界坐标顶点直接算（道具是闭合壳，着色器再翻到迎向来射侧，绕序无关）。
+        //   烘焙本体是纯函数 pt_bake_prop_attrs（判据在 pt_prop_attrs_tests）。
         {
-            let ntri = merged.indices.len() / 3;
-            let mut attrs: Vec<u32> = Vec::with_capacity(ntri * 2);
-            let qn = |v: f32| -> u32 { (v.clamp(-1.0, 1.0) * 127.0 + 127.0).round() as u32 & 0xFF };
-            let qc = |v: f32| -> u32 { (v.clamp(0.0, 1.0) * 255.0).round() as u32 & 0xFF };
-            for tri in merged.indices.chunks_exact(3) {
-                let vp = |k: usize, c: usize| merged.verts[tri[k] as usize][c];
-                let e1 = [vp(1, 0) - vp(0, 0), vp(1, 1) - vp(0, 1), vp(1, 2) - vp(0, 2)];
-                let e2 = [vp(2, 0) - vp(0, 0), vp(2, 1) - vp(0, 1), vp(2, 2) - vp(0, 2)];
-                let mut n = [
-                    e1[1] * e2[2] - e1[2] * e2[1],
-                    e1[2] * e2[0] - e1[0] * e2[2],
-                    e1[0] * e2[1] - e1[1] * e2[0],
-                ];
-                let ln = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                if ln > 1e-7 {
-                    n = [n[0] / ln, n[1] / ln, n[2] / ln];
-                } else {
-                    n = [0.0, 1.0, 0.0];
-                }
-                let w0 = qn(n[0]) | (qn(n[1]) << 8) | (qn(n[2]) << 16);
-                let cr = (vp(0, 8) + vp(1, 8) + vp(2, 8)) / 3.0;
-                let cg = (vp(0, 9) + vp(1, 9) + vp(2, 9)) / 3.0;
-                let cb = (vp(0, 10) + vp(1, 10) + vp(2, 10)) / 3.0;
-                let w1 = qc(cr) | (qc(cg) << 8) | (qc(cb) << 16);
-                attrs.push(w0);
-                attrs.push(w1);
-            }
+            let attrs = pt_bake_prop_attrs(&merged.verts, &merged.indices);
+            let ntri = attrs.len() / 2;
             let mut bytes: Vec<u8> = Vec::with_capacity(attrs.len() * 4);
             for w in &attrs {
                 bytes.extend_from_slice(&w.to_le_bytes());
@@ -12855,5 +12866,103 @@ mod horizontal_winding_tests {
                 "mesh 着色的水平面绕序与 CPU 不一致，缺 `{pat}`（两条路径必须同约定）"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pt_prop_attrs_tests {
+    use super::pt_bake_prop_attrs;
+
+    fn dec_n(w: u32, shift: u32) -> f32 {
+        (((w >> shift) & 0xFF) as f32 - 127.0) / 127.0
+    }
+    fn dec_c(w: u32, shift: u32) -> f32 {
+        ((w >> shift) & 0xFF) as f32 / 255.0
+    }
+    fn v(pos: [f32; 3], col: [f32; 3]) -> [f32; 11] {
+        let mut a = [0.0f32; 11];
+        a[0..3].copy_from_slice(&pos);
+        a[8..11].copy_from_slice(&col);
+        a
+    }
+
+    #[test]
+    fn quantization_roundtrip_stays_within_u8_bounds() {
+        // 任意朝向三角：法线往返误差 ≤ 半格（1/127·0.5 容差放宽到 1/127），色 ≤ 1/255
+        let verts = [
+            v([0.0, 0.0, 0.0], [0.10, 0.50, 0.90]),
+            v([1.0, 0.3, 0.0], [0.20, 0.55, 0.85]),
+            v([0.2, 1.0, 0.7], [0.30, 0.45, 0.80]),
+        ];
+        let idx = [0u32, 1, 2];
+        let a = pt_bake_prop_attrs(&verts, &idx);
+        assert_eq!(a.len(), 2);
+        let raw = {
+            let e1 = [1.0f32, 0.3, 0.0];
+            let e2 = [0.2f32, 1.0, 0.7];
+            let n = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            [n[0] / l, n[1] / l, n[2] / l]
+        };
+        for (k, want) in raw.iter().enumerate() {
+            let got = dec_n(a[0], (k as u32) * 8);
+            assert!(
+                (got - want).abs() <= 1.0 / 127.0 + 1e-6,
+                "法线轴 {k} 往返误差越界: got {got} want {want}"
+            );
+        }
+        for (k, want) in [(0u32, 0.20f32), (8, 0.5), (16, 0.85)] {
+            let got = dec_c(a[1], k);
+            assert!(
+                (got - (want * 255.0).round() / 255.0).abs() < 1e-6,
+                "色均值量化不是最近格点: shift {k} got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn degenerate_triangle_falls_back_to_up_normal() {
+        let verts = [
+            v([0.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+            v([2.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+            v([1.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+        ];
+        let a = pt_bake_prop_attrs(&verts, &[0, 1, 2]);
+        assert_eq!(dec_n(a[0], 0), 0.0);
+        assert_eq!(dec_n(a[0], 8), 1.0);
+        assert_eq!(dec_n(a[0], 16), 0.0);
+    }
+
+    #[test]
+    fn tail_indices_below_one_full_triangle_are_dropped() {
+        // 7 个索引 = 2 整角 + 1 尾：尾被丢弃 ⇒ 4 个字；
+        // 与 prop_index_count(=7) 的等式把关会因此拒绝道具进 BLAS（宁缺不漏）
+        let verts = [
+            v([0.0, 0.0, 0.0], [0.4, 0.4, 0.4]),
+            v([1.0, 0.0, 0.0], [0.4, 0.4, 0.4]),
+            v([0.0, 1.0, 0.0], [0.4, 0.4, 0.4]),
+            v([0.0, 0.0, 1.0], [0.4, 0.4, 0.4]),
+        ];
+        let a = pt_bake_prop_attrs(&verts, &[0, 1, 2, 0, 1, 3, 0]);
+        assert_eq!(a.len(), 4);
+        assert_ne!(a.len() as u32 / 2 * 3, 7, "等式把关对残缺索引必须不成立");
+    }
+
+    #[test]
+    fn axis_aligned_faces_get_exact_normals() {
+        // 水平面（+Y）与竖直面（+Z）的量化法线必须精确落在 ±1/0 格点上
+        let up = [
+            v([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            v([1.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            v([0.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
+        ];
+        let a = pt_bake_prop_attrs(&up, &[0, 2, 1]);
+        assert_eq!(dec_n(a[0], 8), 1.0, "水平面法线必须是 +Y");
+        assert_eq!(dec_n(a[0], 0), 0.0);
+        assert_eq!(dec_n(a[0], 16), 0.0);
     }
 }
