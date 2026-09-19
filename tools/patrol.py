@@ -5,7 +5,7 @@
 （PROGRESS 2026-09-19 §7）。
 
 用法:
-  python tools/patrol.py sweep                    # 预设 10 机位逐个拍摄（走 cap_safe，强杀兜底）
+  python tools/patrol.py sweep                    # 预设 12 机位逐个拍摄（走 cap_safe，强杀兜底）
   python tools/patrol.py stats a.png [b.png ...]  # 每帧 mean/过曝/纯黑/异常色占比
   python tools/patrol.py gate <png> [limit]       # 纯黑占比 < limit（默认 0.5%），超了 exit 1
 
@@ -18,7 +18,8 @@ import sys
 
 from PIL import Image
 
-# 预设机位：双街向、四广场、柱廊仰视、NPC 环、树阵正下方（NaN 黑带的案发机位）、高空俯视
+# 预设机位：双街向、四广场、柱廊仰视、NPC 环、树阵正下方（NaN 黑带的案发机位）、高空俯视、
+# 哨卡院（cp1 穿模案发位）、商铺骑楼（棚带/牛腿）
 CAMERAS = [
     ("sw01", "0,1.7,2:180,4"),
     ("sw02", "27.5,1.7,12:180,-25"),
@@ -30,6 +31,8 @@ CAMERAS = [
     ("sw08", "55,1.7,55:225,0"),
     ("sw09", "27.5,1.7,9:0,-30"),
     ("sw10", "0,45,0:180,55"),
+    ("sw11", "-137.5,1.7,-6:0,4"),
+    ("sw12", "82.5,1.7,-10:0,-8"),
 ]
 
 
