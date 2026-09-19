@@ -798,10 +798,9 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
         bush(c, ax, az, n as i32 + 1);
     }
 
-    // 长椅：座面 + 靠背 + 四条腿（旧版是一块悬空的板）
-    for (dx, dz, along) in [(-8.0f32, 0.0, true), (8.0, 0.0, true), (0.0, -8.0, false), (0.0, 8.0, false)] {
-        bench(c, cx + dx, cz + dz, along);
-    }
+    // 长椅只留下面绕喷泉的那一圈（±10m）。这里曾有一个 ±8m 的旧环：246e2a7 把座椅
+    // 挪到 ±10m 时忘了删它 ⇒ 每个广场 8 把椅、相邻两把沿轴向重叠 0.4m，低机位从椅端
+    // 看过去就是"一条从脚边伸到池沿的长板"（d1pool_b 实锤，回归判据 benches_per_plaza）。
 
     // 广场本身要有内容，否则中央 4 块就是 110m×110m 的盐碱地（实测截图里画面
     // 55% 是这块空地）。全部限制在街区中心 ±13m 内，保证出生点 10m 净空不破。
@@ -1613,6 +1612,35 @@ mod city_layout_tests {
                     bottom,
                     ob.x,
                     ob.z
+                );
+            }
+        }
+    }
+
+    /// 每个广场恰好 4 把椅座、且全部在距广场中心 10m 环上 ——
+    /// 锁死"±8 旧环没删、8 把椅叠成长板"（d1pool_b）的修复。
+    #[test]
+    fn benches_per_plaza_is_exactly_one_ring() {
+        let m = generate_city();
+        for (px, pz) in [(27.5f32, 27.5f32), (-27.5, 27.5), (27.5, -27.5), (-27.5, -27.5)] {
+            let seats: Vec<_> = m
+                .obstacles
+                .iter()
+                .filter(|ob| {
+                    ob.tint == Some(WOOD_BENCH)
+                        && (ob.y - ob.half_h - 0.34).abs() < 0.01
+                        && (ob.x - px).hypot(ob.z - pz) < 12.0
+                })
+                .collect();
+            assert_eq!(seats.len(), 4, "广场 ({px},{pz}) 椅座应为 4 把");
+            for ob in &seats {
+                let d = (ob.x - px).hypot(ob.z - pz);
+                assert!(
+                    (d - 10.0).abs() < 0.01,
+                    "椅不在 10m 环上：({:.1},{:.1}) d={:.2}",
+                    ob.x,
+                    ob.z,
+                    d
                 );
             }
         }
