@@ -23,8 +23,6 @@ pub struct GameConfig {
     pub quality: u32,
     /// 路径追踪全景渲染（2026-08-29：默认开启——整帧 RT core 路径追踪）
     pub pt_enable: bool,
-    /// 光线追踪增量（阴影/反射射线；pt_enable 的补充开关）
-    pub rt_enable: bool,
 }
 
 impl Default for GameConfig {
@@ -38,7 +36,6 @@ impl Default for GameConfig {
             resolution_explicit: false,
             quality: 2, // HIGH（2026-08-28：用户机器全高实测 —— RTX 5060L + Zen4）
             pt_enable: false, // 2026-09-03 复现确认：源码与 35a 基线逐字节相同仍 0xC0000005（Cargo.lock 假设已证伪）；关=可玩，建模验收走光栅
-            rt_enable: true,
         }
     }
 }
@@ -115,12 +112,13 @@ fn load_from(path: &Path) -> GameConfig {
                 let max = (QUALITY_LABELS.len() - 1) as u32;
                 cfg.quality = value.parse::<u32>().unwrap_or(cfg.quality).min(max);
             }
-            // 🔴 这两行曾经**缺失**（2026-09-15 补）：字段在结构体里、`main.rs` 也读了，
+            // 🔴 这行曾经**缺失**（2026-09-15 补）：字段在结构体里、`main.rs` 也读了，
             // 但 `load_from` 没有分支、`save_to` 也不写 —— 于是 `pt_enable` 在真实运行里
             // **永远只能是默认值**，配置文件根本开不了 PT。
             // ⇒ 教训：**"字段存在 + 有人在读"不等于"接线完成"，必须把 parse 分支一起看**。
+            // （当时同病的还有 `rt_enable`——它连"有人在读"都没有，2026-09-19 确认为
+            // 死开关后随 RT 一并删除。）
             "pt_enable" => cfg.pt_enable = parse_bool(cfg.pt_enable),
-            "rt_enable" => cfg.rt_enable = parse_bool(cfg.rt_enable),
             // 键码 = winit 0.30 KeyCode 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/
             // KeyR=36/Space=62/ContextMenu=54），见 ui.rs KeyBindings::defaults
             "bind_forward" if bindings_ok => {
@@ -175,7 +173,6 @@ fn save_to(path: &Path, cfg: &GameConfig) {
     text.push_str(&format!("quality={}\n", cfg.quality));
     // 0/1 与 load 的 parse_bool 对齐（也接受 true/false）
     text.push_str(&format!("pt_enable={}\n", cfg.pt_enable as u8));
-    text.push_str(&format!("rt_enable={}\n", cfg.rt_enable as u8));
     // 键位格式版本：旧版（无此行）键码是 USB HID 码，与 winit 0.30 KeyCode 序号错位，
     // 加载时忽略旧 bind_* 行回退默认键位（见 load_from 的 bindings_ok）
     text.push_str("bindings_version=1\n");
@@ -216,11 +213,10 @@ mod tests {
         cfg.resolution_explicit = true; // save 会写 resolution 行，load 后应还原为显式
         cfg.quality = 2;
         // 🔴 **必须挑一个"与默认值不同"的值来测**（2026-09-15）：这条 roundtrip 测试此前
-        // 放着 `pt_enable` / `rt_enable` 不管，而**两个字段当时既没被 save 写、也没被 load 读** ——
+        // 放着 `pt_enable` 不管，而它当时既没被 save 写、也没被 load 读 ——
         // 因为落盘与读回都走默认值，`assert_eq!` 照样通过，于是这个 bug 在测试全绿的情况下活了很久。
         // ⇒ 教训：**roundtrip 测试只有对"非默认值"才有分辨力**。
         cfg.pt_enable = true; // 默认 false
-        cfg.rt_enable = false; // 默认 true
         cfg.bindings.bind(BindingAction::Forward, 5); // T
         cfg.bindings.bind(BindingAction::Fire, 6); // Y
         save_to(&path, &cfg);
@@ -263,32 +259,31 @@ mod tests {
         assert_eq!(cfg.quality, 2, "越界画质应 clamp 到最高档");
     }
 
-    /// `pt_enable` / `rt_enable` 必须能**从配置文件开启**（2026-09-15 修的回归守卫）。
+    /// `pt_enable` 必须能**从配置文件开启**（2026-09-15 修的回归守卫；2026-09-19 随
+    /// RT 死开关拆除把 `rt_enable` 断言改为"旧文件的残留行必须被静默忽略"）。
     ///
-    /// 修之前 `load_from` 根本没有这两个分支，于是 `main.rs` 读到的永远是默认 `false` ——
+    /// 修之前 `load_from` 根本没有这个分支，于是 `main.rs` 读到的永远是默认 `false` ——
     /// **设置面板里那个"路径追踪"开关在重启后必然失效，配置文件也开不了 PT**。
     /// 详见未结案 #3 的更正记录。
     #[test]
-    fn pt_and_rt_enable_are_read_from_file() {
+    fn pt_enable_is_read_from_file() {
         let path = std::env::temp_dir().join(format!(
             "steel_front_cfg_pt_{}.cfg",
             std::process::id()
         ));
-        // 1) 手写文件（用户真正会走的路径）：pt 开、rt 关 —— 两个都与默认相反
-        fs::write(&path, "volume=0.5\npt_enable=true\nrt_enable=false\n").unwrap();
+        // 1) 手写文件（用户真正会走的路径）：与默认相反
+        fs::write(&path, "volume=0.5\npt_enable=true\n").unwrap();
         let cfg = load_from(&path);
         assert!(cfg.pt_enable, "pt_enable=true 必须被读进来（否则配置文件开不了 PT）");
-        assert!(!cfg.rt_enable, "rt_enable=false 必须被读进来");
-        // 2) 0/1 写法与 true/false 等价
-        fs::write(&path, "pt_enable=1\nrt_enable=0\n").unwrap();
+        // 2) 0/1 写法与 true/false 等价；旧配置里 RT 拆除后残留的 rt_enable 行静默忽略
+        fs::write(&path, "pt_enable=1\nrt_enable=1\n").unwrap();
         let cfg = load_from(&path);
-        assert!(cfg.pt_enable && !cfg.rt_enable, "0/1 写法应与 true/false 等价");
+        assert!(cfg.pt_enable, "0/1 写法应与 true/false 等价");
         // 3) 非法值保持默认，不 panic（与其余行的容错口径一致）
-        fs::write(&path, "pt_enable=maybe\nrt_enable=\n").unwrap();
+        fs::write(&path, "pt_enable=maybe\n").unwrap();
         let cfg = load_from(&path);
         let d = GameConfig::default();
         assert_eq!(cfg.pt_enable, d.pt_enable, "非法值应保持默认");
-        assert_eq!(cfg.rt_enable, d.rt_enable, "空值应保持默认");
         let _ = fs::remove_file(&path);
     }
 

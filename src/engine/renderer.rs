@@ -1077,6 +1077,16 @@ pub struct Renderer {
     pt_box_count: usize,
     /// 场景指纹（WorldMarker 集合变化时重建 BLAS，避免逐帧重建）
     pt_scene_sig: u64,
+    /// 当前 PT BLAS 创建时的道具几何键：(道具 VB 句柄, 道具属性表句柄, 道具索引数)。
+    /// 任一变化 ⇒ BLAS 尺寸/引用都要变 ⇒ 必须整体重建（就地 rebuild 只重写内容）。
+    /// 见 2026-09-19「道具喂进 BLAS」专项（用户决策）。
+    pt_prop_key: (u64, u64, u32),
+    /// 🏢 道具逐三角属性表（2×u32/三角：量化面法线 + 平均顶点色），**device-local**。
+    /// 着色器绝不允许直接随机读道具主 VB——那是 HOST_VISIBLE 内存，每次命中都走 PCIe，
+    /// pt3 实测把 PT 从 126fps 打到 1.5fps。表在 set_props 里随道具一起重建。
+    prop_attr_buf: vk::Buffer,
+    prop_attr_mem: vk::DeviceMemory,
+    prop_attr_tris: u32,
     /// 截图请求路径（Some 表示本帧渲染完成后读回 swapchain 图像并写 PNG）
     screenshot_request: Option<std::path::PathBuf>,
     /// 截图读回 staging buffer（按 max_frames_in_flight 双缓冲，惰性创建）
@@ -1670,6 +1680,10 @@ impl Renderer {
             pt_params: crate::engine::ray_tracer::PtParams::default(),
             pt_box_count: 0,
             pt_scene_sig: 0,
+            pt_prop_key: (0, 0, 0),
+            prop_attr_buf: vk::Buffer::null(),
+            prop_attr_mem: vk::DeviceMemory::null(),
+            prop_attr_tris: 0,
             pt_img: vk::Image::null(),
             pt_img_mem: vk::DeviceMemory::null(),
             pt_view: vk::ImageView::null(),
@@ -5249,6 +5263,20 @@ impl Renderer {
         // 上一张地图的分桶。
         self.prop_sh_index_count = 0;
         self.prop_sh_bins.clear();
+        // 🏢 PT 道具属性表同理随道具一起作废（重建在下面上传成功后进行）。
+        // 先静默再销毁：旧表可能正被上一帧的 PT dispatch 读着。
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            if self.prop_attr_buf != vk::Buffer::null() {
+                self.device.destroy_buffer(self.prop_attr_buf, None);
+                self.prop_attr_buf = vk::Buffer::null();
+            }
+            if self.prop_attr_mem != vk::DeviceMemory::null() {
+                self.device.free_memory(self.prop_attr_mem, None);
+                self.prop_attr_mem = vk::DeviceMemory::null();
+            }
+        }
+        self.prop_attr_tris = 0;
         if merged.verts.is_empty() || merged.indices.is_empty() {
             log::info!("props: 无摆放几何（套件 {} 件 / 摆放 {} 处）", set.len(), placements.len());
             return;
@@ -5286,9 +5314,18 @@ impl Renderer {
             // 2 的幂向上取整：地图尺寸只会小幅波动，避免每次重载都重建
             let cap_v = need_v.next_power_of_two().max(65_536);
             let cap_i = need_i.next_power_of_two().max(65_536);
+            // 🏢 道具进 BLAS（2026-09-19，用户决策）：PT 的第二个三角形几何**零拷贝**
+            //   直接引用这两个缓冲 ⇒ usage 必须叠加 SHADER_DEVICE_ADDRESS +
+            //   ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY；顶点色还要给 PT 着色器当
+            //   albedo ⇒ VB 再加 STORAGE_BUFFER。主 pass 不受影响（usage 只做加法）。
             let (vb, vm) = match self
-                .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER,
-                                    cap_v as u64 * std::mem::size_of::<Vertex>() as u64)
+                .create_host_buffer(
+                    vk::BufferUsageFlags::VERTEX_BUFFER
+                        | vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                    cap_v as u64 * std::mem::size_of::<Vertex>() as u64,
+                )
             {
                 Ok(v) => v,
                 Err(e) => {
@@ -5297,7 +5334,13 @@ impl Renderer {
                 }
             };
             let (ib, im) = match self
-                .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, cap_i as u64 * 4)
+                .create_host_buffer(
+                    vk::BufferUsageFlags::INDEX_BUFFER
+                        | vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                    cap_i as u64 * 4,
+                )
             {
                 Ok(v) => v,
                 Err(e) => {
@@ -5385,6 +5428,59 @@ impl Renderer {
         self.prop_index_count = need_i;
         // 桶数量级只有几十，clone 成本可忽略；存下来供 record_command_buffer 逐桶剔除
         self.prop_bins = merged.bins.clone();
+        // 🏢 PT 道具逐三角属性表（2026-09-19）：每三角 2×u32 = 量化面法线（(v·127+127)
+        //   每轴 u8）+ 平均顶点色（u8×3）。PT 着色器一次命中读一个 8B u32x2——
+        //   device-local，**不再随机读 host-visible 主 VB**（pt3 实测那是 80× 的 PCIe 风暴）。
+        //   法线由世界坐标顶点直接算（道具是闭合壳，着色器再翻到迎向来射侧，绕序无关）。
+        {
+            let ntri = merged.indices.len() / 3;
+            let mut attrs: Vec<u32> = Vec::with_capacity(ntri * 2);
+            let qn = |v: f32| -> u32 { (v.clamp(-1.0, 1.0) * 127.0 + 127.0).round() as u32 & 0xFF };
+            let qc = |v: f32| -> u32 { (v.clamp(0.0, 1.0) * 255.0).round() as u32 & 0xFF };
+            for tri in merged.indices.chunks_exact(3) {
+                let vp = |k: usize, c: usize| merged.verts[tri[k] as usize][c];
+                let e1 = [vp(1, 0) - vp(0, 0), vp(1, 1) - vp(0, 1), vp(1, 2) - vp(0, 2)];
+                let e2 = [vp(2, 0) - vp(0, 0), vp(2, 1) - vp(0, 1), vp(2, 2) - vp(0, 2)];
+                let mut n = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let ln = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                if ln > 1e-7 {
+                    n = [n[0] / ln, n[1] / ln, n[2] / ln];
+                } else {
+                    n = [0.0, 1.0, 0.0];
+                }
+                let w0 = qn(n[0]) | (qn(n[1]) << 8) | (qn(n[2]) << 16);
+                let cr = (vp(0, 8) + vp(1, 8) + vp(2, 8)) / 3.0;
+                let cg = (vp(0, 9) + vp(1, 9) + vp(2, 9)) / 3.0;
+                let cb = (vp(0, 10) + vp(1, 10) + vp(2, 10)) / 3.0;
+                let w1 = qc(cr) | (qc(cg) << 8) | (qc(cb) << 16);
+                attrs.push(w0);
+                attrs.push(w1);
+            }
+            let mut bytes: Vec<u8> = Vec::with_capacity(attrs.len() * 4);
+            for w in &attrs {
+                bytes.extend_from_slice(&w.to_le_bytes());
+            }
+            match self.create_device_local_buffer(
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                &bytes,
+                "prop-attr",
+            ) {
+                Ok((b, m)) => {
+                    self.prop_attr_buf = b;
+                    self.prop_attr_mem = m;
+                    self.prop_attr_tris = ntri as u32;
+                }
+                Err(e) => {
+                    // 属性表失败 ⇒ 道具不进 BLAS（build_pt_as 以 prop_attr_tris 为准），
+                    // PT 退回盒体原型——退化方向是"少几何"，不是越界读
+                    log::error!("props/PT: 属性表上传失败，道具不进 BLAS: {e}");
+                }
+            }
+        }
         log::info!(
             "props: 上传完成 顶点 {} / 三角 {} / 摆放 {} 处 / 分桶 {} 个（cell={}m），包围盒 x∈[{:.1},{:.1}] y∈[{:.1},{:.1}] z∈[{:.1},{:.1}]",
             need_v, need_i / 3, placements.len(), self.prop_bins.len(), PROP_BIN_CELL_M,
@@ -5533,15 +5629,18 @@ impl Renderer {
             .binding(2).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
         let acc_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(3).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout];
+        // 🏢 binding 4 = 道具逐三角属性表（device-local，2×u32/三角）——道具进 BLAS 专项
+        let propv_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
         let pipe_layouts = [sl];
-        // push constants：6×vec4 = 96B（pt_panorama.glsl 的 PC 块 a..f）
+        // push constants：7×vec4 = 112B（pt_panorama.glsl 的 PC 块 a..g）
         let pc_ranges = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(96)];
+            .size(112)];
         let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
         let pl = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }.map_err(|e| format!("PT pl: {e}"))?;
         let stage_info = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(vs_module).name(c"main");
@@ -5616,7 +5715,8 @@ impl Renderer {
         let pool_sizes = [
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+            // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
@@ -5635,6 +5735,17 @@ impl Renderer {
             buffer: assets.mat_buf,
             offset: 0,
             range: (crate::engine::ray_tracer::PT_MAX_BOXES * 16) as u64,
+        };
+        // 🏢 binding 4 = 道具逐三角属性表（device-local）；表未就绪时占位 verts_buf——
+        // 那时 BLAS 没有道具几何，着色器道具分支按几何索引必然不可达
+        let propv_buf_info = vk::DescriptorBufferInfo {
+            buffer: if self.prop_attr_tris > 0 && self.prop_attr_buf != vk::Buffer::null() {
+                self.prop_attr_buf
+            } else {
+                assets.verts_buf
+            },
+            offset: 0,
+            range: vk::WHOLE_SIZE,
         };
         let writes = [
             vk::WriteDescriptorSet {
@@ -5664,6 +5775,13 @@ impl Renderer {
                 dst_set: dset, dst_binding: 3, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
                 p_image_info: std::slice::from_ref(&acc_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 4, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&propv_buf_info).as_ptr(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];
@@ -5830,8 +5948,28 @@ impl Renderer {
             scratch_buf: vk::Buffer::null(),
             scratch_mem: vk::DeviceMemory::null(),
             scratch_blas: 0,
+            prop_tris: 0,
         };
         self.pt_fill_geom(&mut assets, &boxes[..n], &albedos)?;
+        // 🏢 道具进 BLAS（2026-09-19，用户决策）：第二个三角形几何**零拷贝**引用道具主
+        //   VB/IB——但**只在 BLAS 构建期被驱动读取**（烘进 BVH）。着色器命中时绝不读它们：
+        //   那是 HOST_VISIBLE 内存，每命中随机读 = PCIe 风暴（pt3 实测 126fps→1.5fps）。
+        //   道具的法线/颜色走 binding 4 的 device-local 逐三角属性表（set_props 构建）。
+        //   分流按 rayQueryGetIntersectionGeometryIndexEXT（0=盒、1=道具）：ray query 的
+        //   图元索引是**几何内局部**编号，不跨几何连续（pt3 灰树冠事故证伪了旧
+        //   "hitPrim 全局连续 + pc.g.x 边界"假设——道具最前 21480 三角被当成盒查 boxMats）。
+        // 🏢 道具几何只有在**属性表就绪**时才进 BLAS：着色器道具路径读的就是这张表，
+        //   没有它分流就无意义（属性表失败时 set_props 已回退为不进）。
+        let prop_tris = if self.prop_attr_tris > 0
+            && self.prop_attr_tris * 3 == self.prop_index_count
+            && self.prop_vertex_buffer != vk::Buffer::null()
+            && self.prop_index_buffer != vk::Buffer::null()
+        {
+            self.prop_attr_tris
+        } else {
+            0
+        };
+        assets.prop_tris = prop_tris;
         let vaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.verts_buf); self.device.get_buffer_device_address(&i) };
         let iaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.idx_buf); self.device.get_buffer_device_address(&i) };
         let mut tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
@@ -5846,17 +5984,39 @@ impl Renderer {
         geo.geometry_type = vk::GeometryTypeKHR::TRIANGLES;
         geo.geometry = vk::AccelerationStructureGeometryDataKHR { triangles: tri };
         geo.flags = vk::GeometryFlagsKHR::OPAQUE;
+        let mut geos = vec![geo];
+        // 尺寸查询按**容量**算盒、按**当前**算道具：盒数波动就地重建够用；道具三角形数
+        // 变化会换 `pt_prop_key` ⇒ 走整体重建，不会撑爆这块 AS 存储。
+        let mut counts: Vec<u32> = vec![(PT_MAX_BOXES * 12) as u32];
+        if prop_tris > 0 {
+            let pvaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(self.prop_vertex_buffer); self.device.get_buffer_device_address(&i) };
+            let piaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(self.prop_index_buffer); self.device.get_buffer_device_address(&i) };
+            let mut ptri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
+            ptri.vertex_format = vk::Format::R32G32B32_SFLOAT;
+            ptri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: pvaddr };
+            ptri.vertex_stride = 32;
+            ptri.max_vertex = self.prop_vertex_count.saturating_sub(1);
+            ptri.index_type = vk::IndexType::UINT32;
+            ptri.index_data = vk::DeviceOrHostAddressConstKHR { device_address: piaddr };
+            ptri.transform_data = vk::DeviceOrHostAddressConstKHR { device_address: 0 };
+            let mut pgeo = vk::AccelerationStructureGeometryKHR::default();
+            pgeo.geometry_type = vk::GeometryTypeKHR::TRIANGLES;
+            pgeo.geometry = vk::AccelerationStructureGeometryDataKHR { triangles: ptri };
+            pgeo.flags = vk::GeometryFlagsKHR::OPAQUE;
+            geos.push(pgeo);
+            counts.push(prop_tris);
+        }
         let mut geom = vk::AccelerationStructureBuildGeometryInfoKHR::default();
         geom.ty = vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL;
         geom.flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
-        geom.geometry_count = 1;
-        geom.p_geometries = &geo;
+        geom.geometry_count = geos.len() as u32;
+        geom.p_geometries = geos.as_ptr();
         geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
         let mut size_info = vk::AccelerationStructureBuildSizesInfoKHR::default();
         unsafe {
             // 尺寸按 PT_MAX_BOXES 容量算（不是当前盒数）：换场景只重建 BLAS，
             // 若按初始 4 盒分配，塞进 512 盒会越界写 AS 缓冲 -> device lost
-            ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &[(PT_MAX_BOXES * 12) as u32], &mut size_info);
+            ext.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &geom, &counts, &mut size_info);
         }
         let count = size_info.acceleration_structure_size;
         log::info!("PT-BLAS: size={} scratch_build={} prims={}", count, size_info.build_scratch_size, n * 12);
@@ -5993,12 +6153,25 @@ impl Renderer {
             Vec::with_capacity(markers.len() + 1);
         let mut albedos: Vec<[f32; 3]> = Vec::with_capacity(markers.len() + 1);
         // 盒 0 = 地面大盒（游戏地形中央压平，PT 用平面盒近似，烘焙参照足够）
+        // 🏢 albedo 从旧沙色 [0.34,0.32,0.29] 改成沥青线性基色（与 procedural.rs zone 2
+        //   同源）：§15 实测 PT 路面比光栅亮 2.14×，这颗地面盒是主因之一。
         boxes.push(crate::engine::ray_tracer::PtBox {
             center: [0.0, -1.0, 0.0],
             half: [400.0, 1.0, 400.0],
             material: 0,
         });
-        albedos.push([0.34, 0.32, 0.29]);
+        albedos.push([0.115, 0.120, 0.128]);
+        // 🔴 容量比对挪到 take **之前**（2026-09-19）：take 截断让 build_pt_as 里的告警闩
+        //   永远不触发——marker=1789 > 旧容量 1024 静默丢 765 个就是从这里漏出去的
+        //   （#10 这一族坑的第三次复发，容量现已提到 2048）。
+        if markers.len() + 1 > PT_MAX_BOXES && !self.pt_box_cap_warned {
+            self.pt_box_cap_warned = true;
+            log::warn!(
+                "PT: marker 数 {} + 地面盒超过盒容量 {} ⇒ 超出部分正被 take 截断，请提高 PT_MAX_BOXES",
+                markers.len(),
+                PT_MAX_BOXES - 1
+            );
+        }
         for m in markers.iter().take(PT_MAX_BOXES - 1) {
             let c = m.model.w_axis;
             let hx = m.model.x_axis.length() * 0.5;
@@ -6015,11 +6188,57 @@ impl Renderer {
             albedos.push([m.tint[0], m.tint[1], m.tint[2]]);
         }
         let sig = pt_scene_sig(&boxes);
-        if sig == self.pt_scene_sig {
+        // 🏢 道具几何句柄/三角数变了 ⇒ BLAS 的尺寸与引用都变 ⇒ 必须整体重建
+        //（就地 rebuild 只重写盒体内容，改不了 AS 大小）。
+        let prop_key = (
+            ash::vk::Handle::as_raw(self.prop_vertex_buffer),
+            ash::vk::Handle::as_raw(self.prop_attr_buf),
+            self.prop_index_count,
+        );
+        let props_changed = prop_key != self.pt_prop_key;
+        if sig == self.pt_scene_sig && !props_changed {
             return Ok(());
         }
         self.pt_scene_sig = sig;
+        self.pt_prop_key = prop_key;
         let n = boxes.len();
+        if props_changed {
+            // 顺序：静默 → 建新（双几何尺寸查询+创建+填充）→ 重写描述符 → 构建+静默 → 销毁旧。
+            // 帧内顺序（set_props → 本函数 → render）保证新旧之间没有 dispatch 引用旧缓冲。
+            unsafe {
+                let _ = self.device.device_wait_idle();
+            }
+            let old = self.pt_resident.take();
+            let fresh = match self.build_pt_as(&boxes) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.pt_resident = old;
+                    return Err(e);
+                }
+            };
+            let fresh_prop_tris = fresh.prop_tris;
+            self.pt_resident = Some(Box::new(fresh));
+            self.pt_refresh_dset()?;
+            let res = self.pt_scene_rebuild(
+                self.pt_resident.as_ref().unwrap(),
+                &boxes,
+                &albedos,
+                n,
+            );
+            if let Some(o) = old {
+                unsafe { self.pt_destroy_assets(&o) };
+            }
+            res?;
+            self.pt_box_count = n;
+            self.pt_frame.set(0);
+            self.pt_reset.set(true);
+            log::info!(
+                "PT-SCENE: 道具几何变化 → BLAS 整体重建：盒 {} + 道具三角 {}",
+                n,
+                fresh_prop_tris
+            );
+            return Ok(());
+        }
         // 取出 assets（避免 &mut self.pt_resident 与随后的 &self 方法调用冲突）
         let assets = match self.pt_resident.take() {
             Some(a) => a,
@@ -6064,6 +6283,106 @@ impl Renderer {
         Ok(())
     }
 
+    /// BLAS 整体重建后重写 PT 常驻描述符集：binding 0（新 TLAS）/ 2（新 mat_buf）/
+    /// 4（道具 VB）。**必须在设备静默后调用**（更新在飞中的 set = UB）——调用方
+    /// （pt_set_scene_markers 重建分支）已先 device_wait_idle。
+    /// binding 1/3 指渲染器自有的输出/累积图像，句柄跨重建不变，不用动。
+    fn pt_refresh_dset(&self) -> Result<(), String> {
+        use crate::engine::ray_tracer::PT_MAX_BOXES;
+        let assets = self.pt_resident.as_ref().ok_or("PT 未常驻")?;
+        if self.pt_dset == vk::DescriptorSet::null() {
+            return Ok(());
+        }
+        let accel_write = vk::WriteDescriptorSetAccelerationStructureKHR {
+            s_type: vk::StructureType::WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            p_next: std::ptr::null(),
+            acceleration_structure_count: 1,
+            p_acceleration_structures: std::slice::from_ref(&assets.tlas).as_ptr(),
+            _marker: std::marker::PhantomData,
+        };
+        let mat_info = vk::DescriptorBufferInfo {
+            buffer: assets.mat_buf,
+            offset: 0,
+            range: (PT_MAX_BOXES * 16) as u64,
+        };
+        let propv_info = vk::DescriptorBufferInfo {
+            buffer: if assets.prop_tris > 0 { self.prop_attr_buf } else { assets.verts_buf },
+            offset: 0,
+            range: vk::WHOLE_SIZE,
+        };
+        let writes = [
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: &accel_write as *const _ as *const std::ffi::c_void,
+                dst_set: self.pt_dset,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                p_image_info: std::ptr::null(),
+                p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(),
+                _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: self.pt_dset,
+                dst_binding: 2,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                p_image_info: std::ptr::null(),
+                p_buffer_info: std::slice::from_ref(&mat_info).as_ptr(),
+                p_texel_buffer_view: std::ptr::null(),
+                _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: self.pt_dset,
+                dst_binding: 4,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                p_image_info: std::ptr::null(),
+                p_buffer_info: std::slice::from_ref(&propv_info).as_ptr(),
+                p_texel_buffer_view: std::ptr::null(),
+                _marker: std::marker::PhantomData,
+            },
+        ];
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        Ok(())
+    }
+
+    /// 只销毁 PtAssets 内部的 GPU 资源（管线/图像归渲染器所有，本函数不动）。
+    /// 供道具几何变化触发的整体重建在**新资源就绪后**释放旧的一份。
+    unsafe fn pt_destroy_assets(&self, a: &crate::engine::ray_tracer::PtAssets) {
+        let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
+        if a.tlas != vk::AccelerationStructureKHR::null() {
+            ext.destroy_acceleration_structure(a.tlas, None);
+        }
+        if a.blas != vk::AccelerationStructureKHR::null() {
+            ext.destroy_acceleration_structure(a.blas, None);
+        }
+        for (buf, mem) in [
+            (a.verts_buf, a.verts_mem),
+            (a.idx_buf, a.idx_mem),
+            (a.inst_buf, a.inst_mem),
+            (a.mat_buf, a.mat_mem),
+            (a.scratch_buf, a.scratch_mem),
+            (a.tlas_buf, a.tlas_mem),
+            (a.blas_buf, a.blas_mem),
+        ] {
+            if buf != vk::Buffer::null() {
+                self.device.destroy_buffer(buf, None);
+            }
+            if mem != vk::DeviceMemory::null() {
+                self.device.free_memory(mem, None);
+            }
+        }
+    }
+
     /// 每帧取景参数（相机 + 太阳 + 曝光）
     pub fn set_pt_params(&mut self, p: crate::engine::ray_tracer::PtParams) {
         self.pt_params = p;
@@ -6099,7 +6418,13 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout];
+        // 🏢 binding 4 = 道具逐三角属性表（device-local，2×u32/三角）——道具进 BLAS 专项
+        let propv_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(4)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }
             .map_err(|e| format!("PT set: {e}"))?;
@@ -6107,7 +6432,7 @@ impl Renderer {
         let pc_ranges = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(96)];
+            .size(112)];
         let pipe_create = vk::PipelineLayoutCreateInfo::default().set_layouts(&pipe_layouts).push_constant_ranges(&pc_ranges);
         let pipe_layout = unsafe { self.device.create_pipeline_layout(&pipe_create, None) }
             .map_err(|e| format!("PT layout: {e}"))?;
@@ -6173,7 +6498,8 @@ impl Renderer {
         let pool_sizes = [
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1),
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1),
+            // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }
@@ -6203,6 +6529,17 @@ impl Renderer {
             buffer: assets.mat_buf,
             offset: 0,
             range: (crate::engine::ray_tracer::PT_MAX_BOXES * 16) as u64,
+        };
+        // 🏢 binding 4 = 道具逐三角属性表（device-local）；表未就绪时占位 verts_buf——
+        // 那时 BLAS 没有道具几何，着色器道具分支按几何索引必然不可达
+        let propv_buf_info = vk::DescriptorBufferInfo {
+            buffer: if self.prop_attr_tris > 0 && self.prop_attr_buf != vk::Buffer::null() {
+                self.prop_attr_buf
+            } else {
+                assets.verts_buf
+            },
+            offset: 0,
+            range: vk::WHOLE_SIZE,
         };
         let writes = [
             vk::WriteDescriptorSet {
@@ -6235,6 +6572,14 @@ impl Renderer {
                 dst_set: dset, dst_binding: 3, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
                 p_image_info: std::slice::from_ref(&acc_info_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 4, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&propv_buf_info).as_ptr(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];
@@ -6284,7 +6629,7 @@ impl Renderer {
                 .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
             for i in 0..spp {
-                let pc = self.pt_params.pack(size, size, i, i == 0, spp, 0.0);
+                let pc = self.pt_params.pack(size, size, i, i == 0, spp, 0.0, (self.pt_box_count * 12) as u32);
                 self.device.cmd_push_constants(cb, pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, bytemuck_bytes(&pc));
                 self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
                 if i + 1 < spp {
@@ -6583,11 +6928,45 @@ impl Renderer {
         b_geo.geometry_type = vk::GeometryTypeKHR::TRIANGLES;
         b_geo.geometry = vk::AccelerationStructureGeometryDataKHR { triangles: tri };
         b_geo.flags = vk::GeometryFlagsKHR::OPAQUE;
-        b_geom.p_geometries = &b_geo;
+        // 🏢 道具几何与 build_pt_as 创建 BLAS 时同一套引用（pt_prop_key 保证句柄/三角数
+        //   一致，见 pt_set_scene_markers 的整体重建分支）
+        let mut geos = vec![b_geo];
+        let mut ranges = vec![
+            vk::AccelerationStructureBuildRangeInfoKHR {
+                primitive_count: (box_count * 12) as u32,
+                primitive_offset: 0,
+                first_vertex: 0,
+                transform_offset: 0,
+            },
+        ];
+        if assets.prop_tris > 0 {
+            let pvaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(self.prop_vertex_buffer); self.device.get_buffer_device_address(&i) };
+            let piaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(self.prop_index_buffer); self.device.get_buffer_device_address(&i) };
+            let mut ptri = vk::AccelerationStructureGeometryTrianglesDataKHR::default();
+            ptri.vertex_format = vk::Format::R32G32B32_SFLOAT;
+            ptri.vertex_data = vk::DeviceOrHostAddressConstKHR { device_address: pvaddr };
+            ptri.vertex_stride = 32;
+            ptri.max_vertex = self.prop_vertex_count.saturating_sub(1);
+            ptri.index_type = vk::IndexType::UINT32;
+            ptri.index_data = vk::DeviceOrHostAddressConstKHR { device_address: piaddr };
+            ptri.transform_data = vk::DeviceOrHostAddressConstKHR { device_address: 0 };
+            let mut pgeo = vk::AccelerationStructureGeometryKHR::default();
+            pgeo.geometry_type = vk::GeometryTypeKHR::TRIANGLES;
+            pgeo.geometry = vk::AccelerationStructureGeometryDataKHR { triangles: ptri };
+            pgeo.flags = vk::GeometryFlagsKHR::OPAQUE;
+            geos.push(pgeo);
+            ranges.push(vk::AccelerationStructureBuildRangeInfoKHR {
+                primitive_count: assets.prop_tris,
+                primitive_offset: 0,
+                first_vertex: 0,
+                transform_offset: 0,
+            });
+        }
+        b_geom.geometry_count = geos.len() as u32;
+        b_geom.p_geometries = geos.as_ptr();
         b_geom.dst_acceleration_structure = assets.blas;
         b_geom.scratch_data = vk::DeviceOrHostAddressKHR { device_address: scratch_base };
         b_geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
-        let range_b = vk::AccelerationStructureBuildRangeInfoKHR { primitive_count: (box_count * 12) as u32, primitive_offset: 0, first_vertex: 0, transform_offset: 0 };
         // TLAS
         let mut t_geom = vk::AccelerationStructureBuildGeometryInfoKHR::default();
         t_geom.ty = vk::AccelerationStructureTypeKHR::TOP_LEVEL;
@@ -6606,8 +6985,7 @@ impl Renderer {
         t_geom.mode = vk::BuildAccelerationStructureModeKHR::BUILD;
         let range_t = vk::AccelerationStructureBuildRangeInfoKHR { primitive_count: 1, primitive_offset: 0, first_vertex: 0, transform_offset: 0 };
         unsafe {
-            let rb: [vk::AccelerationStructureBuildRangeInfoKHR; 1] = [range_b];
-            let rbs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [&rb];
+            let rbs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [ranges.as_slice()];
             ext.cmd_build_acceleration_structures(cmd, &[b_geom], &rbs);
             // BLAS 写完 -> TLAS 读几何/引用其结果，两次构建之间必须有执行依赖
             let bb = vk::MemoryBarrier::default()
@@ -9653,7 +10031,9 @@ impl Renderer {
                             self.pt_move_base_cam.set(c1);
                             self.pt_move_base_fwd.set(f1);
                             (d * 20.0).min(1.0)
-                        }
+                        },
+                        // 🏢 盒体三角形边界（道具路径分流判据，见 pt_panorama.glsl 的 pc.g）
+                        (self.pt_box_count * 12) as u32,
                     );
                     self.pt_reset.set(false);
                     self.device.cmd_push_constants(
@@ -10829,6 +11209,14 @@ impl Drop for Renderer {
             }
             if self.prop_sh_index_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.prop_sh_index_memory, None);
+            }
+            // 🏢 PT 道具逐三角属性表（道具进 BLAS 专项）：渲染器自有的 device-local
+            //   缓冲，teardown 必须销毁，否则验证层在设备销毁时报泄漏
+            if self.prop_attr_buf != vk::Buffer::null() {
+                self.device.destroy_buffer(self.prop_attr_buf, None);
+            }
+            if self.prop_attr_mem != vk::DeviceMemory::null() {
+                self.device.free_memory(self.prop_attr_mem, None);
             }
             if self.render_pass != vk::RenderPass::null() {
                 self.device.destroy_render_pass(self.render_pass, None);

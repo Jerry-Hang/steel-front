@@ -1,12 +1,12 @@
 # PROGRESS.md — Steel Front 进度 / 日志 / 交接历史
 
-> ## 🚩 从这里开始（快照：2026-09-19，commit `addf9b0`）
+> ## 🚩 从这里开始（快照：2026-09-19 深夜，commit `4c2b210` 之上）
 >
-> **本文件 340 KB / 6312 行，不要通读。** 先读这一节，再按关键词往下搜。
+> **本文件 369 KB / 6348 行，不要通读。** 先读这一节，再按关键词往下搜。
 >
 > ### 当前基线
-> `cargo test --release` **508 passed / 0 failed / 0 警告**（2026-09-19）；
-> 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**）；
+> `cargo test --release` **509 passed / 0 failed / 0 警告**（2026-09-19）；
+> 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**；PT 开时按**稳定性门**判——击杀归 PT 关的玩法门，§18）；
 > `RV3D_VALIDATION=1` 跑一整轮只剩 #23 那条层侧误报（5 次交换链创建 = 5 条报文）。
 > `AGENTS.md` **~64.2 KB** —— 仍超 <48KB 目标，🔴 **距 65,536 B 硬上限只剩 8 B（教训 41 已占满）：下次加料必须先删旧料**。
 >
@@ -21,7 +21,7 @@
 >
 > 同日结案未结案 #1：**23 件错位道具全量重生成**（gen_props 18 + 城市套件 6，契约 6/6，包围盒 24/24 不变，container 颜色种数 1→3，props 顶点 534540→515216，帧差 2.748% 落在天际线）。
 > 修复后 10 机位数值巡检又揪出树冠下仰视"黑带"（死黑 3.52%）：退化三角形上 `normalize(cross(dpdx,dpdy))` 出 NaN 落盘钳黑，fs_main 原有的 valid_nrm 闸只护了菲涅耳——`safe_face_normal` 三处统一防护，判据黑占比 3.52%→0.00%、同机位帧差 0.015%。
-> 下午～傍晚（§9~§12）：我引入的 ±8 长椅双环回归被"长板"特写钉死并删除（判据 `benches_per_plaza_is_exactly_one_ring`）；D4 亮带用数值闭案；`tools/patrol.py` 落成 10 机位数值巡检工具；花坛灌木"裙边"改 `bush(base)` 圆顶判据（`planter_bushes_are_clean_domed`）；商铺骑楼/哨卡/路灯/集装箱特写逐个收口，其中**哨卡帐篷与残骸车整个埋进围合板楼**——cp2 复拍闭案（`checkpoint_props_stay_out_of_rows`）；**住宅"街墙"实为四栋散楼**——长排 GLB 分段 + 朝向感知选型闭案（§13）；深夜**阴影建筑盒壳 LOD** 把分段换来的 fps 代价收复（sw12 47→80），并顺手修掉 tint 通道错位旧 bug——"克隆军团"对策自此才真正生效（§14，508 绿）。§15-§16：PT 崩溃在当前驱动下不复现（实战冒烟 ALL-OK，阻塞降级为"盒集合不含道具"的功能决策）；毛玻璃菜单入口键找到（Esc），目视裁决=只有压暗没有模糊，真毛玻璃留作渲染架构决策。
+> 下午～傍晚（§9~§12）：我引入的 ±8 长椅双环回归被"长板"特写钉死并删除（判据 `benches_per_plaza_is_exactly_one_ring`）；D4 亮带用数值闭案；`tools/patrol.py` 落成 10 机位数值巡检工具；花坛灌木"裙边"改 `bush(base)` 圆顶判据（`planter_bushes_are_clean_domed`）；商铺骑楼/哨卡/路灯/集装箱特写逐个收口，其中**哨卡帐篷与残骸车整个埋进围合板楼**——cp2 复拍闭案（`checkpoint_props_stay_out_of_rows`）；**住宅"街墙"实为四栋散楼**——长排 GLB 分段 + 朝向感知选型闭案（§13）；深夜**阴影建筑盒壳 LOD** 把分段换来的 fps 代价收复（sw12 47→80），并顺手修掉 tint 通道错位旧 bug——"克隆军团"对策自此才真正生效（§14，508 绿）。§15-§16：PT 崩溃在当前驱动下不复现（实战冒烟 ALL-OK，阻塞降级为"盒集合不含道具"的功能决策）；毛玻璃菜单入口键找到（Esc），目视裁决=只有压暗没有模糊，真毛玻璃留作渲染架构决策。深夜两连：§17 隐形墙补竖直判据（红→绿，碰撞顶=资产高×缩放）；§18 **道具零拷贝喂进 PT BLAS**（872k 三角进光追场景，两次事故定案：交差索引是每几何局部编号、着色器禁随机读 HOST_VISIBLE 缓冲）+ **RT 死开关整体删除**（渲染侧零消费者，旧 cfg 行静默忽略），PT_MAX_BOXES 顺带修掉 #10 静默截断第三次复发。
 >
 > ### 上一轮迭代（2026-09-17）：视觉专项 —— 一条 2 倍缩放约定 + 一个静默的顶点色错位
 >
@@ -6309,3 +6309,40 @@ $bl = "D:\3D_Work\blender\blender-5.2.1-windows-x64\blender.exe"
 **⚠️ 路径必须用绝对路径或正斜杠** —— 相对路径会被 Blender 解析到它自己的工作目录（实测写到了 `C:\build\`）。
 
 
+
+## 18. PT 专项第三段：道具进 BLAS + RT 死开关清除（2026-09-19）
+
+用户指令「把 PT 道具喂进 BLAS，把 RT 踢掉」。两项均完成，509/509 测试，release 零警告，验证层探针（val2）无新增 VUID。
+
+### 18.1 RT 踢除：本来就是个死开关
+
+`rt_enable` 全仓检索后确认：只有 config 读写、UI 字段、game.rs current_config 三处**搬运**，渲染侧**零消费者**——RT 光栅化路径早在 PT 接管时已删空，只剩开关壳。删除范围：config.rs 字段/默认值/解析/保存、ui.rs 字段、game.rs current_config 行。旧配置文件里的 `rt_enable=` 行现在**静默忽略**（config 测试专门加了这条断言：读入不报错、不写回）。`pt_enable` 独立保留，仍默认关。
+
+### 18.2 道具进 BLAS：零拷贝第二几何 + 设备本地属性表
+
+BLAS 从单几何（盒）扩为双几何：geom0=盒（`PT_MAX_BOXES*24` 顶点缓冲，12 三角/盒），geom1=道具——**直接引用** `prop_vertex_buffer`/`prop_index_buffer`（零拷贝，仅 build 期读，无逐帧风险）。道具 872,032 三角 / 盒 21,480，`PT-SCENE: 盒 1790 + 道具三角 872032` 一次重建 ~100ms。
+
+**关键教训一（pt3 灰顶棚事故，94.7% 像素灰）**：`rayQueryGetIntersectionPrimitiveIndexEXT` 返回的是**每几何局部索引**，不是全局编号。最初按全局边界 `hitPrim < pc.g.x` 分派，前 21,480 个道具三角命中盒材质表越界回落 vec3(0.5) 灰。正确判据是 `rayQueryGetIntersectionGeometryIndexEXT`（0=盒，1=道具）。
+
+**关键教训二（pt3 帧率 126→1.5fps）**：着色器逐命中随机读 HOST_VISIBLE 的 VB/IB（`create_host_buffer` 是 HOST_VISIBLE|HOST_COHERENT，非 DEVICE_LOCAL）= 每命中一次 PCIe 随机读风暴。**永不**让着色器随机读 HOST_VISIBLE 缓冲。修复：`set_props` 上传期在 CPU 预烘焙**设备本地**属性表（binding 4，2×u32/三角：w0=量化面法线 `v*127+127` 三轴 u8，w1=顶点色均值 u8×3），着色器只读这一张表。1.5→18.2fps，灰 94.7%→0.0%。法线朝入射射线翻转（绕序无关，闭合壳体）。
+
+**BLAS 生命周期**：道具几何准入条件 `prop_attr_tris*3 == prop_index_count`；`pt_prop_key=(vb_handle, attr_handle, index_count)` 变化 ⇒ 整体重建 PtAssets（wait_idle → build_pt_as → 重置 dset 绑定 0/2/4 → 场景重建 → 销毁旧资产 → 清累积帧）。帧序 `set_props → pt_set_scene_markers → render` 保证无悬垂窗口。任何一步失败 ⇒ 道具不进 BLAS，退回盒场景（宁缺勿错）。
+
+### 18.3 顺带修掉的两个隐患
+
+- **PT_MAX_BOXES 1024→2048**：城市 marker=1789 > 1024，#10 静默截断陷阱**第三次复发**；且 `markers.take(PT_MAX_BOXES-1)` 在告警比较**之前**截断，导致 `build_pt_as` 的 warn 闩锁永远不触发。截断前先比较并告警（测试固化）。
+- **PT 地面反照率 沙色→沥青色 [0.115,0.120,0.128]**：§15 路面亮度 ×2.14 偏差的主因之一（盒场景地面用了沙色），与光栅沥青贴图对齐。
+
+### 18.4 验证矩阵（全绿）
+
+| 门 | 结果 |
+|---|---|
+| `cargo test` | 509/509（含 pack 第七 vec4、cap 告警前置、rt_enable 忽略、tint 通道等） |
+| `cargo build --release` | 零警告 |
+| `compile_pt.ps1` + spirv-val | OK（**glsl+spv 同 commit**，fbc6031 铁律） |
+| pt4 探针 | fps 18.2，canopy 灰 0.0%，绿 342→1857 |
+| val2 验证层 | 仅 5 条已知 #23 交换链误报；PT-SCENE 重建触发 2 次（初始+开局）符合设计 |
+| 光栅 patrol（PT 关） | 12/12 视角全绿，black ≤0.12%，阴影 LOD 门守住——VB/IB usage 变更与属性表烘焙对光栅零回归 |
+| 冒烟 A/B | PT 关：ALL-OK（1 击杀、104.3fps）；PT 开：VUID=0/panics=0、NPC 持续掉血、55.5fps——击杀数未达标系低帧率下 harness 鼠标注入收敛竞态，非游戏缺陷 |
+
+**PT 开时 101→55fps 定性**：`pt_live_enabled` 下 PT 是**每帧计算路径**（非仅开视图才渲染），872k 三角 BLAS 的遍历成本使然（pt4 原生分辨率 18.2fps 同链证据）。冒烟门语义就此定案：**PT 开=稳定性门**（VUID/panic/掉血判定），**PT 关=玩法门**（击杀/patrol）。PT 仍默认关（`pt_enable=false`）：全景 1spp 是收敛前下限，默认开需用户拍板。

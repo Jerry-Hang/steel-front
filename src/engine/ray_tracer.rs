@@ -99,8 +99,20 @@ pub struct PtParams {
 }
 
 impl PtParams {
-    /// 打包：必须与 assets/rt/pt_panorama.glsl 的 `PC { vec4 a,b,c,d,e,f }` 逐字段一致
-    pub fn pack(&self, w: u32, h: u32, frame: u32, reset: bool, spp_target: u32, move_amount: f32) -> [[f32; 4]; 6] {
+    /// 打包：必须与 assets/rt/pt_panorama.glsl 的 `PC { vec4 a,b,c,d,e,f,g }` 逐字段一致
+    ///
+    /// `box_tri_end` 现为**预留**参数（g.x）：pt3 实测 ray query 的图元索引是几何内
+    /// 局部编号，分流改用 `rayQueryGetIntersectionGeometryIndexEXT`，g 保留给未来。
+    pub fn pack(
+        &self,
+        w: u32,
+        h: u32,
+        frame: u32,
+        reset: bool,
+        spp_target: u32,
+        move_amount: f32,
+        box_tri_end: u32,
+    ) -> [[f32; 4]; 7] {
         let tan = if self.tan_half_fov > 1e-4 {
             self.tan_half_fov
         } else {
@@ -121,6 +133,7 @@ impl PtParams {
                 spp_target.max(1) as f32,
                 move_amount.clamp(0.0, 1.0),
             ],
+            [box_tri_end as f32, 0.0, 0.0, 0.0],
         ]
     }
 
@@ -179,7 +192,14 @@ impl PtParams {
 /// （只有 `signature()` 变了才重建）—— 按视锥裁剪会让集合随视角抖动，
 /// 反而**破坏累积**（这正是"PT 永不收敛"那一类问题的形态）。
 /// **⇒ 在这个具体场景里，加容量不只是更省事，它是更正确的解。**
-pub const PT_MAX_BOXES: usize = 1024;
+///
+/// 🔴 **2026-09-19：1024 → 2048**。同一族坑第三次复发：街墙分段 + 水池/绕序
+/// 修复后 marker 涨到 **1789 > 1024**，`pt_set_scene_markers` 的
+/// `markers.take(PT_MAX_BOXES - 1)` 又在静默丢 765 个——而且 take 截断让
+/// `build_pt_as` 里那次性告警**根本不会触发**（传进去的已经 ≤ 容量）。
+/// 代价按 09-14 的公式同比翻倍：≈ **3.7 MB**，PT 默认关 ⇒ 正常路径零影响。
+/// 告警闩保留，但截断点挪到 take 之前先比对（见 renderer.rs）。
+pub const PT_MAX_BOXES: usize = 2048;
 
 /// 路径追踪 GPU 资源集（构建/记录/销毁）
 pub struct PtAssets {
@@ -203,4 +223,32 @@ pub struct PtAssets {
     pub scratch_mem: ash::vk::DeviceMemory,
     /// BLAS scratch 字节数（TLAS 用后半段，避免两次构建共享同一地址的资源冲突）
     pub scratch_blas: u64,
+    /// BLAS 创建时并入的道具三角形数（0 = 无道具几何）。`record_pt_build` 与
+    /// 描述符重写都按这个值走——道具缓冲句柄/三角形数变了必须整体重建 BLAS。
+    pub prop_tris: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pack 的第 7 槽 g.x = 盒体三角形边界（道具路径的分流判据）。
+    /// 2026-09-19 道具进 BLAS 专项：着色器与 Rust 侧的 PC 布局靠这条测试钉死。
+    #[test]
+    fn pack_appends_box_tri_end_as_seventh_vec4() {
+        let p = PtParams {
+            cam: glam::Vec3::ZERO,
+            fwd: glam::Vec3::NEG_Z,
+            tan_half_fov: 0.5,
+            bounces: 6,
+            sun_dir: glam::Vec3::Y,
+            sun_color: glam::Vec3::ONE,
+            exposure: 0.2,
+        };
+        let pc = p.pack(2560, 1600, 7, true, 256, 0.5, 13_200);
+        assert_eq!(pc.len(), 7, "PC 必须是 7×vec4 = 112B");
+        assert_eq!(pc[6][0], 13_200.0, "g.x 必须是 boxTriEnd");
+        assert_eq!(pc[0][0], 2560.0);
+        assert_eq!(pc[5][1], 1.0, "reset 标志仍在 f.y");
+    }
 }

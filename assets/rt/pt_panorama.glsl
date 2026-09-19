@@ -13,8 +13,14 @@ layout(set = 0, binding = 1, rgba8) uniform writeonly image2D OutImg;
 layout(set = 0, binding = 2, std430) readonly buffer Mats { vec4 boxMats[]; };
 // 时域累积缓冲（线性 HDR 累加：rgb=Σ样本，a=已累积 spp）。逐像素单写者，无需原子。
 layout(set = 0, binding = 3, rgba32f) uniform image2D AccImg;
+// 🏢 道具逐三角属性表（2026-09-19 道具进 BLAS，用户决策）：每三角 2×u32 =
+//    量化面法线（(v·127+127) 每轴）+ 平均顶点色，set_props 里构建，**device-local**。
+//    为什么不让着色器直接随机读道具主 VB/IB：那是 HOST_VISIBLE 内存，每次命中跨 PCIe
+//    ——pt3 实测 126fps→1.5fps。道具未上传时 Rust 侧绑占位缓冲，那时 BLAS 没有道具
+//    几何，道具分支按几何索引必然不可达。
+layout(set = 0, binding = 4, std430) readonly buffer PropTris { uint propAttr[]; };
 
-// 6 x vec4 = 96B，Rust 侧 [[f32;4];6] 逐字段对齐，无填充歧义
+// 7 x vec4 = 112B，Rust 侧 [[f32;4];7] 逐字段对齐，无填充歧义
 // 相机直接传 forward 向量（不传 yaw/pitch）=> 与 engine/camera.rs 的基底严格同源，无前后手风险
 layout(push_constant) uniform PC {
     vec4 a; // (resX, resY, tanHalfFov, bounces)
@@ -22,7 +28,8 @@ layout(push_constant) uniform PC {
     vec4 c; // fwd.xyz      = camera.forward()
     vec4 d; // sunDir.xyz   表面->太阳
     vec4 e; // sunColor.rgb, exposure
-    vec4 f; // (frameIndex, resetFlag, sppTarget, unused)
+    vec4 f; // (frameIndex, resetFlag, sppTarget, moveAmount)
+    vec4 g; // 预留（原 boxTriEnd——分流已改用几何索引，见 traceRay）
 } pc;
 
 const vec3 SKY_ZENITH  = vec3(0.28, 0.42, 0.66);
@@ -33,6 +40,18 @@ const float PI = 3.14159265;
 uint hitPrim;
 vec3 hitPos;
 vec3 hitNrm;
+bool hitIsProp;
+vec3 hitAlb;
+
+// 道具逐三角属性解包：w0 = 量化面法线（(v-127)/127），w1 = 平均顶点色（/255）
+vec3 ptNormal(uint lp) {
+    uint w = propAttr[lp * 2u];
+    return (vec3(uvec3(w & 0xFFu, (w >> 8u) & 0xFFu, (w >> 16u) & 0xFFu)) - 127.0) / 127.0;
+}
+vec3 ptAlbedo(uint lp) {
+    uint w = propAttr[lp * 2u + 1u];
+    return vec3(uvec3(w & 0xFFu, (w >> 8u) & 0xFFu, (w >> 16u) & 0xFFu)) / 255.0;
+}
 
 vec3 skyColor(vec3 rd) {
     float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
@@ -55,13 +74,31 @@ bool traceRay(vec3 ro, vec3 rd, float tmax) {
     // 各 2 三角顺序展开，故 (primitive % 12) / 2 就是面号。
     // （旧「来射方向主轴」近似在浅角度下会把地面法线错判成 ±Z，导致 ndl<0、地面全黑）
     hitPrim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
-    uint f = (hitPrim % 12u) / 2u;
-    hitNrm = f == 0u ? vec3(-1.0, 0.0, 0.0)
-             : f == 1u ? vec3(1.0, 0.0, 0.0)
-             : f == 2u ? vec3(0.0, -1.0, 0.0)
-             : f == 3u ? vec3(0.0, 1.0, 0.0)
-             : f == 4u ? vec3(0.0, 0.0, -1.0)
-             : vec3(0.0, 0.0, 1.0);
+    // 🏢 按**几何索引**分流（0=盒、1=道具）。ray query 返回的图元索引是**几何内局部**
+    //    编号，不跨几何连续——pt3 的灰树冠事故：旧「hitPrim 与全局边界 pc.g.x 比较」
+    //    的假设把道具最前的 21480 个三角当成盒，albedoOf 越界拿 0.5 中性灰。
+    uint gi = rayQueryGetIntersectionGeometryIndexEXT(rq, true);
+    if (gi == 0u) {
+        // 盒体路径：面号表（ray_tracer::box_triangles 不变量：6 面按 -X,+X,-Y,+Y,-Z,+Z
+        // 各 2 三角顺序展开，故 (primitive % 12) / 2 就是面号）。
+        // （旧「来射方向主轴」近似在浅角度下会把地面法线错判成 ±Z，导致 ndl<0、地面全黑）
+        hitIsProp = false;
+        uint f = (hitPrim % 12u) / 2u;
+        hitNrm = f == 0u ? vec3(-1.0, 0.0, 0.0)
+                 : f == 1u ? vec3(1.0, 0.0, 0.0)
+                 : f == 2u ? vec3(0.0, -1.0, 0.0)
+                 : f == 3u ? vec3(0.0, 1.0, 0.0)
+                 : f == 4u ? vec3(0.0, 0.0, -1.0)
+                 : vec3(0.0, 0.0, 1.0);
+    } else {
+        // 🏢 道具路径：法线从属性表解包后翻到**迎向来射**一侧（道具是闭合壳，外表面
+        //    即命中面，与绕序无关）；albedo = 平均顶点色（逐摆放 tint 已烘进去）。
+        hitIsProp = true;
+        vec3 n = ptNormal(hitPrim);
+        if (dot(n, rd) > 0.0) n = -n;
+        hitNrm = normalize(n);
+        hitAlb = ptAlbedo(hitPrim);
+    }
     return true;
 }
 
@@ -127,7 +164,7 @@ void main() {
         uint seed = pxSeed ^ (frameSeed * 0x27D4EB2Fu) ^ (s * 0x165667B1u);
         for (uint b = 0u; b < bounces; b++) {
             if (!traceRay(rq, rs, 500.0)) { lq += tq * skyColor(rs); break; }
-            vec3 alb = albedoOf(hitPrim / 12u);
+            vec3 alb = hitIsProp ? hitAlb : albedoOf(hitPrim / 12u);
             float ndl = max(dot(hitNrm, sunDir), 0.0);
             // 2026-09-01v3：偏移 0.02 防阴影内棱线（acne）；太阳盘 jitter 2 点 = 软边 + 更准
             if (ndl > 0.0) {

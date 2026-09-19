@@ -400,8 +400,6 @@ pub struct HudState {
     pub quality_index: u8,
     /// 路径追踪全景渲染开关（2026-08-29：默认 true）
     pub pt_enable: bool,
-    /// 光线追踪增量开关（默认 true）
-    pub rt_enable: bool,
     /// 键位配置（默认 WASD + R + ESC + SPACE）
     pub key_bindings: KeyBindings,
     /// 设置面板当前选中项（0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=键位，Tab 循环）
@@ -503,7 +501,6 @@ impl HudState {
             resolution_index: 0,
             quality_index: 1,
             pt_enable: true,
-            rt_enable: true,
             key_bindings: KeyBindings::defaults(),
             settings_selection: 0,
             weapon_name: "M1 Rifle".to_string(),
