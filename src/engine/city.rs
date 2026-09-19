@@ -399,16 +399,25 @@ fn building(
             //
             // 视觉尺寸 = 资产 footprint × scale；楼绕 +Y 转了 yaw（只取 0 / ±90° / 180°），
             // ±90° 时 x/z 两个方向互换。
-            let (vw, vd) = match c.set.index_of(name).and_then(|i| c.set.get(i)) {
-                Some(m) => m.half_footprint(),
-                None => (w * 0.5, d * 0.5),
+            // 🔴 垂直同源（2026-09-19）：碰撞顶原来用逻辑层高 FLOOR_H×floors，与
+            //   GLB 视觉高（资产高×scale）脱钩——13 层写字楼的 tall 资产 ×1.667 视觉
+            //   23m、碰撞却 41m ⇒ 楼顶上方 18m 隐形柱；3 层排楼视觉又比碰撞高 4.9m
+            //   ⇒ 可见顶楼被子弹穿过。城内地形恒 0（TERRAIN_FLAT_RADIUS 230 >
+            //   CITY_WALL 215），所以碰撞顶直接取视觉高即可，无需叠地高。
+            let (hw0, hd0, vh0) = match c.set.index_of(name).and_then(|i| c.set.get(i)) {
+                Some(m) => {
+                    let (a, b) = m.half_footprint();
+                    (a, b, m.max[1] - m.min[1])
+                }
+                None => (w * 0.5, d * 0.5, h),
             };
-            let (vw, vd) = (vw * 2.0 * scale, vd * 2.0 * scale);
+            let (vw, vd) = (hw0 * 2.0 * scale, hd0 * 2.0 * scale);
+            let vh = (vh0 * scale).max(1.0);
             let (bw, bd) = if quarter { (vd, vw) } else { (vw, vd) };
             // 兜底：绝不比 1m 还小（极端的资产/格子比例下会让碰撞退化）
             let (bw, bd) = (bw.max(1.0), bd.max(1.0));
             c.push(
-                Part::new(ObstacleKind::Building, cx, cz, bw, bd, UNDER_GROUND, h, pal.wall)
+                Part::new(ObstacleKind::Building, cx, cz, bw, bd, UNDER_GROUND, vh, pal.wall)
                     .invisible(),
             );
             return;
@@ -608,9 +617,19 @@ fn row_houses(
             }
         }
         if ok {
-            for (sx, sz, _, _, _) in &segs {
+            for (sx, sz, _, name, scale) in &segs {
+                // 垂直同源（同 building() 的 GLB 路线）：碰撞顶 = 资产高×scale，
+                // 不再用逻辑层高——3 层排楼的 tall 资产视觉 14.9m 高于旧碰撞 10.05m，
+                // 顶楼立面挡不住子弹。红证：旧写法下新断言报"碰撞顶≠视觉顶"。
+                let vh = c
+                    .set
+                    .index_of(name)
+                    .and_then(|i| c.set.get(i))
+                    .map(|m| (m.max[1] - m.min[1]) * scale)
+                    .unwrap_or(h)
+                    .max(1.0);
                 c.push(
-                    Part::new(ObstacleKind::Building, *sx, *sz, sw, sd, UNDER_GROUND, h, pal.wall)
+                    Part::new(ObstacleKind::Building, *sx, *sz, sw, sd, UNDER_GROUND, vh, pal.wall)
                         .invisible(),
                 );
             }
@@ -2121,7 +2140,7 @@ mod city_layout_tests {
         };
         let mut covered = 0usize;
         for core in m.obstacles.iter().filter(|o| o.shape == Shape::None) {
-            let mut hit = false;
+            let mut hit: Option<&crate::engine::props::PropPlacement> = None;
             for p in &m.props {
                 let Some((hw, hd)) = p.rotated_footprint(&set) else { continue };
                 if (p.x - core.x).abs() <= 0.5
@@ -2129,16 +2148,37 @@ mod city_layout_tests {
                     && hw + 0.5 >= core.half_w
                     && hd + 0.5 >= core.half_d
                 {
-                    hit = true;
+                    hit = Some(p);
                     break;
                 }
             }
             assert!(
-                hit,
+                hit.is_some(),
                 "({:.1}, {:.1}) 的碰撞核不可见，且没有任何 GLB 道具整体盖住它——这会是一面无形墙",
                 core.x,
                 core.z
             );
+            let p = hit.unwrap();
+            // 垂直同源（2026-09-19）：建筑类隐形核的碰撞顶必须与道具视觉顶持平
+            // （城内地形恒 0）。旧实现用逻辑层高 FLOOR_H×floors：13 层写字楼碰撞
+            // 41m vs 视觉 23m ⇒ 楼顶 18m 隐形柱；3 层排楼视觉高出碰撞 4.9m ⇒
+            // 顶楼被子弹穿过。水平修于 09-13，垂直漏了整整一族。
+            if core.kind == ObstacleKind::Building {
+                let vis_top = p.y
+                    + set
+                        .get(p.mesh)
+                        .map(|mm| (mm.max[1] - mm.min[1]) * p.scale)
+                        .unwrap_or(0.0);
+                let core_top = core.y + core.half_h;
+                assert!(
+                    (core_top - vis_top).abs() <= 0.5,
+                    "建筑碰撞顶 {:.1} ≠ 视觉顶 {:.1} @({:.1},{:.1})——垂直隐形墙/穿楼子弹",
+                    core_top,
+                    vis_top,
+                    core.x,
+                    core.z
+                );
+            }
             covered += 1;
         }
         assert!(
