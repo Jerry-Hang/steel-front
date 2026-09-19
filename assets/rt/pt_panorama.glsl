@@ -32,8 +32,11 @@ layout(push_constant) uniform PC {
     vec4 g; // 预留（原 boxTriEnd——分流已改用几何索引，见 traceRay）
 } pc;
 
-const vec3 SKY_ZENITH  = vec3(0.28, 0.42, 0.66);
-const vec3 SKY_HORIZON = vec3(0.72, 0.74, 0.76);
+// 天空 = 补光源（烘焙参照语义），不是显示天空：数值对齐光栅半球环境项
+// （lighting.rs ambient (0.5,0.55,0.6)×0.55 ≈ 0.30 支），余弦加权半球均值 ≈ 0.30。
+// 显示天空的色差（光栅是艺术清屏色）是已知且刻意的——参照判表面不判天空。
+const vec3 SKY_ZENITH  = vec3(0.27, 0.30, 0.36);
+const vec3 SKY_HORIZON = vec3(0.32, 0.33, 0.34);
 const float SUN_COS = 0.9997;   // 太阳圆盘角阈值
 const float PI = 3.14159265;
 
@@ -57,7 +60,7 @@ vec3 skyColor(vec3 rd) {
     float t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 col = mix(SKY_HORIZON, SKY_ZENITH, t * t);
     if (dot(rd, normalize(pc.d.xyz)) > SUN_COS) col += vec3(12.0);
-    return col * 0.9;
+    return col;
 }
 
 // true = 命中。不剔除任何朝向（凸盒从外部入射，closest-hit 即入射面，与绕序无关）
@@ -173,7 +176,9 @@ void main() {
                 vec3 sd2 = normalize(sunDir - rgt * 0.0012 - up * 0.0012);
                 float lit1 = traceRay(sh_o, sd1, 499.0) ? 0.0 : 1.0;
                 float lit2 = traceRay(sh_o, sd2, 499.0) ? 0.0 : 1.0;
-                lq += tq * alb * pc.e.rgb * ndl * (lit1 + lit2) * 1.1;
+                // 两点抖动取和×0.5 = 均值归一：全照 = 1.0×sun×ndl，与光栅
+                // evaluate_directional 同尺度（旧 ×1.1 使全照太阳高 2.2 倍）
+                lq += tq * alb * pc.e.rgb * ndl * (lit1 + lit2) * 0.5;
             }
             tq *= alb;
             rq = hitPos + hitNrm * 0.002;
@@ -199,7 +204,9 @@ void main() {
     imageStore(AccImg, gid, acc);
 
     vec3 outc = acc.rgb / max(acc.a, 1.0);
-    outc = clamp((outc * (2.51 * outc + 0.03)) / (outc * (2.43 * outc + 0.59) + 0.14), 0.0, 1.0);
+    // 色调映射与光栅 apply_lighting 同源（build.rs: 1-exp(-x*1.55) 指数压缩，不截顶）——
+    // 参照帧与实机帧必须走同一条曲线，否则分区偏差表测的是曲线差而不是光照差
+    outc = vec3(1.0) - exp(-clamp(outc, vec3(0.0), vec3(16.0)) * 1.55);
     outc = mix(outc * 12.92,
                1.055 * pow(max(outc, vec3(1e-4)), vec3(1.0 / 2.4)) - 0.055,
                step(vec3(0.0031308), outc));

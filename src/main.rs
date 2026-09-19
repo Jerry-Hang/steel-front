@@ -2565,7 +2565,10 @@ impl GameApp {
                 sun_dir: lu.directional.direction.truncate(),
                 sun_color: lu.directional.color_intensity.truncate()
                     * lu.directional.color_intensity.w,
-                exposure: 0.2,
+                // 0.4 = 标定值（2026-09-19 §19）：光栅把反照率乘在 tone 之外
+                // （alb×(1-exp(-1.55L))），PT 物理正确在之内；0.4 使两模型在
+                // albedo 0.1~0.8 区间分区均值互差 ≤15%。曲线本身已与光栅同源。
+                exposure: 0.4,
             });
             // PT 场景 = 光栅化同一批 WorldMarker（盒集合变化时才重建 BLAS，指纹判定在渲染器内）
             if let Err(e) = renderer.pt_set_scene_markers(&markers) {
