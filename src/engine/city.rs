@@ -282,7 +282,11 @@ impl City {
     /// 一堆窗格以不同角度叠在一起（用户 2026-09-13 报的"透视错误/建模问题"）。
     /// 而建筑模型本身在 Blender 里渲出来是规整窗格 —— 问题一直在摆放，不在模型。
     /// **"无形的墙"那个顾虑改由调用方把碰撞盒设成真实视觉尺寸来消掉**（见 `building_at`）。
-    fn pick_building(&self, w: f32, d: f32, floors: u32) -> Option<(&'static str, f32)> {
+    ///
+    /// `quarter` = 该位置的 `face_nearest_street` yaw 是 ±90°：旋转后资产的 x/z 轴
+    /// 互换，比例匹配与 min 贴合都必须按**交换后的有效轴**算——否则竖比例的排段
+    /// 配到横比例的楼，min 会在短轴留下几米缺口（2026-09-19 分段判据首红抓到）。
+    fn pick_building(&self, w: f32, d: f32, floors: u32, quarter: bool) -> Option<(&'static str, f32)> {
         let cands: &[&'static str] = match floors {
             0 | 1 => &["building_shed"],
             2 => &["building_block", "building_wide", "building_corner"],
@@ -295,11 +299,12 @@ impl City {
             let i = self.set.index_of(name)?;
             let (hx, hz) = self.set.get(i)?.half_footprint();
             let (gw, gd) = (hx * 2.0, hz * 2.0);
-            if gw < 0.5 || gd < 0.5 {
+            let (aw, ad) = if quarter { (gd, gw) } else { (gw, gd) };
+            if aw < 0.5 || ad < 0.5 {
                 continue;
             }
-            let cost = ((gw / gd).ln() - target).abs();
-            let scale = (w / gw).min(d / gd);
+            let cost = ((aw / ad).ln() - target).abs();
+            let scale = (w / aw).min(d / ad);
             if best.is_none() || best.unwrap().0 > cost {
                 best = Some((cost, name, scale));
             }
@@ -377,8 +382,9 @@ fn building(
     // GLB 路线：立面细节（窗洞、窗台、角石、檐口、屋顶、店面）全部来自建模资产，
     // 下面那批薄盒一条都不再生成。碰撞核留在表里（物理/AI/伤害按下标依赖它），但标成
     // 不可见，否则它的侧面会和 GLB 外墙共面打 z-fighting——那正是缺陷 D11 的成因。
-    if let Some((name, scale)) = c.pick_building(w, d, floors) {
-        let yaw = City::face_nearest_street(cx, cz);
+    let yaw = City::face_nearest_street(cx, cz);
+    let quarter = (yaw.abs() - core::f32::consts::FRAC_PI_2).abs() < 0.01;
+    if let Some((name, scale)) = c.pick_building(w, d, floors, quarter) {
         if c.prop(name, cx, cz, yaw, scale) {
             // 🔴🔴 2026-09-13 修（用户"建筑透视错误/一堆建模问题"的根因）：
             //
@@ -398,7 +404,6 @@ fn building(
                 None => (w * 0.5, d * 0.5),
             };
             let (vw, vd) = (vw * 2.0 * scale, vd * 2.0 * scale);
-            let quarter = (yaw.abs() - core::f32::consts::FRAC_PI_2).abs() < 0.01;
             let (bw, bd) = if quarter { (vd, vw) } else { (vw, vd) };
             // 兜底：绝不比 1m 还小（极端的资产/格子比例下会让碰撞退化）
             let (bw, bd) = (bw.max(1.0), bd.max(1.0));
@@ -552,13 +557,63 @@ fn row_houses(
     // 一排穿楼而过的挑板。住宅/商铺街区全部走这里，所以这一处不接 GLB，全城建筑就
     // 仍然是一堆平板（实测 220 处摆放里建筑只有 12 处，因为 building() 仅 3 个调用点）。
     // 碰撞核保留但设为不可见：物理/弹道/AI 视线一行不动。
-    if let Some((name, scale)) = c.pick_building(w, d, floors) {
-        let yaw = City::face_nearest_street(cx, cz);
-        if c.prop(name, cx, cz, yaw, scale) {
-            c.push(
-                Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall)
-                    .invisible(),
-            );
+    //
+    // 🔴 长排分段（2026-09-19 c2west_b 实机）：单件 GLB 最大约 13m 宽，此前"一行
+    //   一个 GLB"让 26m 长排只有中间 ~11m 有实体、两侧各 7.5m 是隐形墙（碰撞按整排
+    //   footprint），楼角两侧各 15m 豁口——围合"街墙"实际是四栋散楼。分段 ≤14m：
+    //   段碰撞精确平铺原 footprint（阻挡格不变），每段 GLB 铺满。任一段拿不到 GLB
+    //   则整排退回程序化。判据：invisible_cores_must_be_covered_by_a_prop 升级为
+    //   "核心必须被某一件道具的旋转包围盒整体盖住"，旧写法下 26m 核 RED。
+    {
+        let seg_max = 14.0f32;
+        let n = ((w.max(d) / seg_max).ceil() as usize).max(1);
+        let (sw, sd) = if w >= d { (w / n as f32, d) } else { (w, d / n as f32) };
+        let seg_len = sw.max(sd);
+        let block_center = |v: f32| -> f32 { (((v / 55.0) + 2.5).round() - 2.5) * 55.0 };
+        let mut segs: Vec<(f32, f32, f32, &'static str, f32)> = Vec::new();
+        let mut ok = true;
+        for s in 0..n {
+            let off = (s as f32 - (n - 1) as f32 * 0.5) * seg_len;
+            let (sx, sz) = if w >= d { (cx + off, cz) } else { (cx, cz + off) };
+            // yaw 按排的长轴定（立面沿长边、正面朝外），不用 face_nearest_street：
+            // 它会把 12×9.5 的商铺横排旋成 9.5×12.2——x 向短一截成隐形墙、z 向溢出，
+            // 而骑楼在南面、"最近街"却算成西（c2west 分段判据第二红抓到）。
+            let (bcx, bcz) = (block_center(sx), block_center(sz));
+            let yaw = if sw >= sd {
+                if sz - bcz < 0.0 {
+                    0.0
+                } else {
+                    std::f32::consts::PI
+                }
+            } else if sx - bcx < 0.0 {
+                core::f32::consts::FRAC_PI_2
+            } else {
+                -core::f32::consts::FRAC_PI_2
+            };
+            let quarter = (yaw.abs() - core::f32::consts::FRAC_PI_2).abs() < 0.01;
+            match c.pick_building(sw, sd, floors, quarter) {
+                Some((name, scale)) => segs.push((sx, sz, yaw, name, scale)),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            for (sx, sz, yaw, name, scale) in &segs {
+                if !c.prop(name, *sx, *sz, *yaw, *scale) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            for (sx, sz, _, _, _) in &segs {
+                c.push(
+                    Part::new(ObstacleKind::Building, *sx, *sz, sw, sd, UNDER_GROUND, h, pal.wall)
+                        .invisible(),
+                );
+            }
             return;
         }
     }
@@ -1220,7 +1275,9 @@ fn residential_block(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
     hydrant(c, cx, cz);
     for k in 0..4i32 {
         let z = cz - 4.0 + k as f32 * 2.7;
-        c.deco(Part::new(ObstacleKind::Building, cx + 11.0, z, 5.0, 0.24, UNDER_GROUND, 0.18, CONCRETE_LIGHT));
+        // 车位线原来在 cx+11——那是东排围合板楼的 footprint 带（内缘 7.5），线整个
+        // 埋在楼里，"内院车位"从未被看见过（c1corner dump 实锤）。挪回院内。
+        c.deco(Part::new(ObstacleKind::Building, cx + 4.5, z, 5.0, 0.24, UNDER_GROUND, 0.18, CONCRETE_LIGHT));
     }
 }
 
@@ -1733,6 +1790,38 @@ mod city_layout_tests {
         assert_eq!(n, 8 + 32, "应为 8 台残骸车 + 8 哨卡 × 4 级帐篷 = 40 件");
     }
 
+    /// 住宅内院车位线必须在院子内（围合内缘 ±7.5 以内）。旧版放在 cx+11，整个
+    /// 埋在东排板楼的 footprint 带里，从未被看见（c1corner dump：线 @x=-126.5 ∈
+    /// 排带 [-130,-119]）。
+    #[test]
+    fn parking_strips_are_inside_courtyards() {
+        let m = generate_city();
+        let near = |v: f32| -> f32 {
+            let k = ((v / 55.0) + 2.5).round().clamp(0.0, 5.0);
+            (k - 2.5) * 55.0
+        };
+        let mut n = 0;
+        for ob in &m.decor {
+            if ob.tint != Some(CONCRETE_LIGHT)
+                || (ob.half_w * 2.0 - 5.0).abs() > 0.01
+                || (ob.half_d * 2.0 - 0.24).abs() > 0.01
+            {
+                continue;
+            }
+            n += 1;
+            let (dx, dz) = ((ob.x - near(ob.x)).abs(), (ob.z - near(ob.z)).abs());
+            assert!(
+                dx < 7.5 && dz < 7.5,
+                "车位线在围合排带里：dx={:.1} dz={:.1} @({:.1},{:.1})",
+                dx,
+                dz,
+                ob.x,
+                ob.z
+            );
+        }
+        assert_eq!(n, 32, "8 个住宅格 × 4 条线");
+    }
+
     /// 装饰件与结构件不得有完全重合的盒（同一批像素上打架）。
     #[test]
     fn decor_never_coincides_with_structure() {
@@ -2019,8 +2108,9 @@ mod city_layout_tests {
         assert!(checked > 0, "一个凸出核心的立面构件都没查到：装饰表可能被清空了");
     }
 
-    /// GLB 路线的对偶不变式：盒子可以隐形，但**必须**有网格盖住它。
-    /// 否则玩家会撞上一面什么都看不见的墙——比纸盒楼严重得多。
+    /// GLB 路线的对偶不变式：盒子可以隐形，但**必须被某件道具的旋转包围盒整体盖住**。
+    /// "中心有道具"不够——26m 长排放一个 11m 居中的 GLB 也能过中心判据，两侧却各
+    /// 留 7.5m 无形墙（c2west_b 实机）。0.5m 容差吸收容器类 4cm 级的四舍五入。
     #[test]
     fn invisible_cores_must_be_covered_by_a_prop() {
         let m = generate_city();
@@ -2034,14 +2124,18 @@ mod city_layout_tests {
             let mut hit = false;
             for p in &m.props {
                 let Some((hw, hd)) = p.rotated_footprint(&set) else { continue };
-                if (p.x - core.x).abs() <= hw + 0.5 && (p.z - core.z).abs() <= hd + 0.5 {
+                if (p.x - core.x).abs() <= 0.5
+                    && (p.z - core.z).abs() <= 0.5
+                    && hw + 0.5 >= core.half_w
+                    && hd + 0.5 >= core.half_d
+                {
                     hit = true;
                     break;
                 }
             }
             assert!(
                 hit,
-                "({:.1}, {:.1}) 的碰撞核不可见，但没有任何 GLB 道具盖住它——这会是一面无形墙",
+                "({:.1}, {:.1}) 的碰撞核不可见，且没有任何 GLB 道具整体盖住它——这会是一面无形墙",
                 core.x,
                 core.z
             );
