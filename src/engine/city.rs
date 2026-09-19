@@ -1063,8 +1063,9 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
         c.push(Part::new(ObstacleKind::Block, bx, cz + 7.0, 2.0, 2.0, UNDER_GROUND, 1.5, SANDBAG).cyl());
         c.deco(Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 1.7, 1.7, 1.5, 1.95, CONCRETE_DARK).sph());
     }
-    // 帐篷：4 级递减近似双坡面
-    let (tx, tz) = (cx - 12.0, cz);
+    // 帐篷：4 级递减近似双坡面。位置在院内西北角（西/北排内缘 ±7.5 各留 ≥0.5m），
+    // 旧版 (cx-12, cz) 整个埋进西排板楼（cp1_b，判据 checkpoint_props_stay_out_of_rows）。
+    let (tx, tz) = (cx - 4.5, cz - 6.5);
     for s in 0..4i32 {
         c.push(Part::new(
             ObstacleKind::Building,
@@ -1077,8 +1078,9 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
             TENT_CAMO,
         ));
     }
-    // 车辆残骸
-    wreck_car(c, cx + 12.0, cz + 2.0, WRECK_TAN);
+    // 车辆残骸：院内东南敞口带（x 留 7.5 内缘余量，z 已出东西排的 ±13 范围）。
+    // 旧版 (cx+12, cz+2) 整个埋进东排板楼（cp1_b 右缘墙面上悬空的黑片）。
+    wreck_car(c, cx + 4.5, cz + 11.5, WRECK_TAN);
     // 拒马
     for k in 0..3i32 {
         let px = cx + (k as f32 - 1.0) * 3.4;
@@ -1228,10 +1230,17 @@ fn mixed_block(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
     let floors = 3 + (hash01(pi + 1, pj) * 2.0).floor() as u32;
     // 南侧敞开，让哨卡院子朝街打开（也是玩家可突入的缺口）
     perimeter_ring(c, cx, cz, floors, pi, pj, Some(1));
-    checkpoint(c, cx + 2.0, cz + 2.0);
-    lamp_post(c, cx - 8.0, cz + 15.0);
-    lamp_post(c, cx + 8.0, cz + 15.0);
-    tree(c, cx - 14.0, cz - 2.0, pi + 9, pj);
+    // 🔴 哨卡中心 x 必须与街区中心对齐（2026-09-19 cp1_b 实机）：三面围合的板楼
+    //   内缘在 cx±7.5，旧版把哨卡放在 cx+2、帐篷/残骸车再 ±12 ⇒ 帐篷整个埋进西排、
+    //   残骸车整个埋进东排（画面里只剩墙面上几块悬空黑片），第 4 台 HESCO 也咬进
+    //   东排 1.8m。判据测试 checkpoint_props_stay_out_of_rows。
+    checkpoint(c, cx, cz + 2.0);
+    lamp_post(c, cx - 6.0, cz + 15.0);
+    lamp_post(c, cx + 6.0, cz + 15.0);
+    // 树同族问题：旧版 (cx-14, cz-2) 在西排板楼带 [-18.5,-7.5] 里，树干整个埋进
+    // 墙身、树冠骑在屋顶上。挪到院内东南空地（沙袋墙 x∈[-1.7,1.7]、帐篷 x∈[-7,-2]
+    // 都让开；冠缘少量叠进东排内缘，与住宅内院树同款、已被历史帧接受）。
+    tree(c, cx + 5.5, cz - 5.5, pi + 9, pj);
 }
 
 /// 街区边界：四条路缘石带 + 四角树池。
@@ -1691,6 +1700,37 @@ mod city_layout_tests {
             );
         }
         assert_eq!(n, 64, "16 个花坛应有恰好 64 团灌木");
+    }
+
+    /// 哨卡家具不许埋进围合板楼（cp1_b 实机：帐篷埋西排、残骸车埋东排，墙面上
+    /// 只剩几块悬空黑片）。三面围合内缘在街区中心 ±7.5、北排带 dz∈[-13,-7.5]。
+    /// 判据：残骸车（Ruin）与帐篷（TENT_CAMO）件的中心 |dx|<7.4 且不落北排带。
+    #[test]
+    fn checkpoint_props_stay_out_of_rows() {
+        let m = generate_city();
+        let near = |v: f32| -> f32 {
+            let k = ((v / 55.0) + 2.5).round().clamp(0.0, 5.0);
+            (k - 2.5) * 55.0
+        };
+        let mut n = 0;
+        for ob in &m.obstacles {
+            let wreck = ob.kind == ObstacleKind::Ruin;
+            let tent = ob.tint == Some(TENT_CAMO);
+            if !wreck && !tent {
+                continue;
+            }
+            n += 1;
+            let (dx, dz) = (ob.x - near(ob.x), ob.z - near(ob.z));
+            assert!(
+                dx.abs() < 7.4 && dz > -7.4,
+                "哨卡件埋进板楼排：dx={:.1} dz={:.1} @({:.1},{:.1})",
+                dx,
+                dz,
+                ob.x,
+                ob.z
+            );
+        }
+        assert_eq!(n, 8 + 32, "应为 8 台残骸车 + 8 哨卡 × 4 级帐篷 = 40 件");
     }
 
     /// 装饰件与结构件不得有完全重合的盒（同一批像素上打架）。
