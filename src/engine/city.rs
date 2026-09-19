@@ -795,7 +795,7 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
         // 这里原来手搓了一颗 **3.4m 宽、只有 1.4m 高**的扁球（宽高比 0.41）外加一颗偏心副球，
         // 平着色下读作一块压在石框上的绿色巨石——和 `block_edges` 那批"没有树干的树"
         // 是同一个错误（把球压扁当灌木，结果只像石头）。
-        bush(c, ax, az, n as i32 + 1);
+        bush(c, ax, az, n as i32 + 1, 0.34);
     }
 
     // 长椅只留下面绕喷泉的那一圈（±10m）。这里曾有一个 ±8m 的旧环：246e2a7 把座椅
@@ -908,7 +908,7 @@ fn park(c: &mut City, cx: f32, cz: f32) {
         }
     }
     for (dx, dz, s) in [(-19.0f32, 6.0, 1), (19.0, -6.0, 2), (6.0, 19.0, 3), (-6.0, -19.0, 4)] {
-        bush(c, cx + dx, cz + dz, s);
+        bush(c, cx + dx, cz + dz, s, 0.0);
     }
     for dx in [-6.0f32, 6.0] {
         bench(c, cx + dx, cz - 4.0, true);
@@ -995,7 +995,14 @@ fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
 ///
 /// 占地 2.0r（与原始版一致），不碰街道/人行道的净空预算。
 /// 代价 = 每件灌木多 2 个 marker 实例：SPH 模板走实例化，**不进道具顶点缓冲**。
-fn bush(c: &mut City, x: f32, z: f32, seed: i32) {
+///
+/// 第 4 版（`p4plant_b.png` 实机，2026-09-19）：`base` = 灌木坐落的面（裸地 0，
+/// 花坛 = 台顶 0.34）。原来球底只埋 `UNDER_GROUND(-0.05)`，台顶平面在球**接近底极**
+/// 处切球 ⇒ 交线附近的面与台面近乎平行，平着色下每片下缘facet都是一道往石桌上
+/// 垂的裙边。判据：**切平面必须不低于球心**——现在球心一律放在
+/// `base - BUSH_SINK`，露出的永远是干净的圆顶，台面/地面只截到最大周长附近。
+fn bush(c: &mut City, x: f32, z: f32, seed: i32, base: f32) {
+    const BUSH_SINK: f32 = 0.15;
     let r = mixf(seed, 1, 0.95, 1.45);
     // (圆心偏移 ×r, 半径 ×r, 顶高系数)
     let clods = [
@@ -1006,6 +1013,7 @@ fn bush(c: &mut City, x: f32, z: f32, seed: i32) {
     ];
     for (n, (dx, dz, br, hh)) in clods.into_iter().enumerate() {
         let leaf = [TREE_LEAF, TREE_LEAF_2, TREE_LEAF_3][(seed + n as i32).rem_euclid(3) as usize];
+        let top = br * r * 2.0 * hh;
         c.deco(
             Part::new(
                 ObstacleKind::Tree,
@@ -1013,8 +1021,8 @@ fn bush(c: &mut City, x: f32, z: f32, seed: i32) {
                 z + dz * r,
                 br * r * 2.0,
                 br * r * 2.0,
-                UNDER_GROUND,
-                br * r * 2.0 * hh,
+                2.0 * (base - BUSH_SINK) - top,
+                top,
                 leaf,
             )
             .sph(),
@@ -1205,7 +1213,7 @@ fn residential_block(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
     // 内院：树 + 长椅 + 消防栓 + 车位线
     tree(c, cx - 5.0, cz - 4.0, pi + 7, pj);
     tree(c, cx + 5.0, cz + 4.0, pi, pj + 7);
-    bush(c, cx + 6.0, cz - 5.0, pi + pj);
+    bush(c, cx + 6.0, cz - 5.0, pi + pj, 0.0);
     bench(c, cx - 6.0, cz + 5.0, true);
     hydrant(c, cx, cz);
     for k in 0..4i32 {
@@ -1644,6 +1652,45 @@ mod city_layout_tests {
                 );
             }
         }
+    }
+
+    /// 花坛灌木圆顶判据（p4plant_b）：切平面（台顶 0.34）不得低于球心，
+    /// 否则下缘 facet 会像裙边一样垂到石台上。锁死 bush(base=0.34) 的修复。
+    #[test]
+    fn planter_bushes_are_clean_domed() {
+        let m = generate_city();
+        // 花坛以广场中心 (±27.5,±27.5) 为基准四角 ±13m，共 16 个。
+        let planters: Vec<(f32, f32)> = [-27.5f32, 27.5]
+            .into_iter()
+            .flat_map(|px| {
+                [-27.5f32, 27.5]
+                    .into_iter()
+                    .flat_map(move |pz| {
+                        [-13.0f32, 13.0]
+                            .into_iter()
+                            .flat_map(move |dx| [-13.0f32, 13.0].into_iter().map(move |dz| (px + dx, pz + dz)))
+                    })
+            })
+            .collect();
+        let mut n = 0;
+        for o in &m.decor {
+            if o.kind != ObstacleKind::Tree {
+                continue;
+            }
+            let Some((ax, az)) = planters
+                .iter()
+                .find(|(ax, az)| (o.x - ax).abs() < 1.2 && (o.z - az).abs() < 1.2)
+            else {
+                continue;
+            };
+            n += 1;
+            assert!(
+                o.y <= 0.34 + 1e-3,
+                "花坛 ({ax},{az}) 灌木球心 y={:.2} 高于台顶 0.34 ⇒ 台面从球心以下切球，会垂裙边",
+                o.y
+            );
+        }
+        assert_eq!(n, 64, "16 个花坛应有恰好 64 团灌木");
     }
 
     /// 装饰件与结构件不得有完全重合的盒（同一批像素上打架）。
