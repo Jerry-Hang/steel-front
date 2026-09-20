@@ -2349,6 +2349,65 @@ impl GameApp {
                     }
                 }
             }
+            // 🔴 `RV3D_EXPORT_CITY=<path>`：把本关**完整城市布局**（太阳/环境光 + marker
+            //    盒 + GLB 道具摆放）导出为 JSON，供 `tools/blender/prerender_city.py`
+            //    在无头 Blender 里合成**同布局预渲染参照帧**（建模/光照/烘焙的独立真值，
+            //    不经游戏光栅管线）。坐标系原样输出游戏约定（右手 Y-up，米，道具 yaw 绕 +Y），
+            //    轴变换归 Blender 脚本管。一次性导出（写成功才置位，早帧数据不全可重试）。
+            if let Ok(path) = std::env::var("RV3D_EXPORT_CITY") {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static CITY_EXPORTED: AtomicBool = AtomicBool::new(false);
+                if !CITY_EXPORTED.load(Ordering::Relaxed) {
+                    let placements = self.game.prop_placements();
+                    let set_guard = self.prop_set.as_ref();
+                    if let Some(set) = set_guard.filter(|s| !s.is_empty()) {
+                        if !placements.is_empty() {
+                            let lu = self.game.light_uniform();
+                            let mut mj: Vec<String> = Vec::new();
+                            for o in self.game.render_geometry() {
+                                if o.shape == engine::geom::Shape::None {
+                                    continue;
+                                }
+                                // tint 与渲染侧同源：for_obstacle 内含调色板+逐件抖动
+                                let t = engine::renderer::WorldMarker::for_obstacle(&o).tint;
+                                mj.push(format!(
+                                    "{{\"kind\":\"{:?}\",\"x\":{:.3},\"y\":{:.3},\"z\":{:.3},\"hw\":{:.3},\"hh\":{:.3},\"hd\":{:.3},\"tint\":[{:.4},{:.4},{:.4}]}}",
+                                    o.kind, o.x, o.y, o.z, o.half_w, o.half_h, o.half_d,
+                                    t[0], t[1], t[2]
+                                ));
+                            }
+                            let pj: Vec<String> = placements
+                                .iter()
+                                .map(|p| {
+                                    format!(
+                                        "{{\"mesh\":\"{}\",\"x\":{:.3},\"y\":{:.3},\"z\":{:.3},\"yaw\":{:.4},\"scale\":{:.4}}}",
+                                        set.meshes[p.mesh].name, p.x, p.y, p.z, p.yaw, p.scale
+                                    )
+                                })
+                                .collect();
+                            let d = lu.directional;
+                            let json = format!(
+                                "{{\"version\":1,\"handedness\":\"right_y_up_meters\",\"sun\":{{\"dir\":[{:.5},{:.5},{:.5}],\"color\":[{:.4},{:.4},{:.4}],\"intensity\":{:.4}}},\"ambient\":{{\"color\":[{:.4},{:.4},{:.4}],\"intensity\":{:.4}}},\"markers\":[{}],\"props\":[{}]}}",
+                                d.direction.x, d.direction.y, d.direction.z,
+                                d.color_intensity.x, d.color_intensity.y, d.color_intensity.z, d.color_intensity.w,
+                                lu.ambient.x, lu.ambient.y, lu.ambient.z, lu.ambient.w,
+                                mj.join(","),
+                                pj.join(",")
+                            );
+                            match std::fs::write(&path, json.as_bytes()) {
+                                Ok(()) => {
+                                    CITY_EXPORTED.store(true, Ordering::Relaxed);
+                                    log::info!(
+                                        "CITY-EXPORT: {} 字节 → {}（marker {} + 道具 {}）",
+                                        json.len(), path, mj.len(), pj.len()
+                                    );
+                                }
+                                Err(e) => log::error!("CITY-EXPORT 写入失败 {path}: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
             // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
             // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）；
             // 动画字段：移动中摆臂摆腿（步态）、攻击态枪身后坐脉冲
