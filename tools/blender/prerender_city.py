@@ -231,6 +231,9 @@ except AttributeError:
 
 # ------------------------------------------------------------------ cameras (game RV3D_CAM syntax)
 def game_cam_to_blender(spec):
+    if not all(ch in "0123456789.,:-" for ch in spec.replace(":", "")):
+        raise ValueError("cam spec must be ASCII digits/punct, got %r "
+                         "(non-ASCII minus/comma from shell encoding is a known trap)" % spec)
     pos_s, rot_s = spec.split(":")
     px, py, pz = (float(v) for v in pos_s.split(","))
     yaw, pitch = (float(v) for v in rot_s.split(","))
