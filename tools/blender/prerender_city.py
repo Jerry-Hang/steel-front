@@ -78,9 +78,15 @@ sun.rotation_euler = d.to_track_quat('Z', 'Y').to_euler()
 scene.collection.objects.link(sun)
 
 # ------------------------------------------------------------------ ground plane
-bpy.ops.mesh.primitive_plane_add(size=900.0, location=(0, 0, 0))
+# sits at game ground level (UNDER_GROUND = -0.05): an eye-height camera at
+# y=1.7 must be ABOVE this plane, or the plane's backface fills the frame
+bpy.ops.mesh.primitive_plane_add(size=900.0, location=(0, 0, -0.05))
 ground = bpy.context.active_object
 ground.name = "cityGround"
+try:
+    ground.visible_face_culling = True   # Blender 5.x: object-level viewport/render culling
+except AttributeError:
+    pass
 gmat = bpy.data.materials.new("cityGround")
 gmat.use_nodes = True
 gb = gmat.node_tree.nodes.get("Principled BSDF")
@@ -132,6 +138,16 @@ def get_template(name):
     t.location = (0.0, 0.0, 0.0)
     t.hide_render = True
     t.hide_viewport = True
+    # the game's raster culls backfaces on EVERYTHING; a camera inside a prop must
+    # see through it here too, or audit frames go solid (plaza cam sits in a trunk)
+    for slot in t.material_slots:
+        mat = slot.material
+        if mat is None:
+            continue
+        try:
+            mat.use_backface_culling = True
+        except AttributeError:
+            mat.backface_culling = 'BACK'
     lib[name] = t
     return t
 
@@ -165,6 +181,10 @@ if show_markers:
         if key not in mat_cache:
             mt = bpy.data.materials.new("mk_%g_%g_%g" % key)
             mt.use_nodes = True
+            try:
+                mt.use_backface_culling = True   # camera inside a box sees through it
+            except AttributeError:
+                mt.backface_culling = 'BACK'
             mb = mt.node_tree.nodes.get("Principled BSDF")
             if mb:
                 mb.inputs["Base Color"].default_value = (key[0], key[1], key[2], 1.0)
@@ -224,6 +244,19 @@ def game_cam_to_blender(spec):
     return loc, quat.to_euler()
 
 for i, spec in enumerate(cams):
+    # audit hygiene: report whatever swallows the camera (game culls box/prop
+    # interiors; EEVEE may not) so a flat frame is explained, not guessed at
+    gp = spec.split(":")[0]
+    gx, gy, gz = (float(v) for v in gp.split(","))
+    inside = [m["kind"] for m in city["markers"]
+              if abs(m["x"] - gx) <= m["hw"] and abs(m["z"] - gz) <= m["hd"]
+              and m["y"] - m["hh"] <= gy <= m["y"] + m["hh"]]
+    near_props = [p["mesh"] for p in city["props"]
+                  if ((p["x"] - gx) ** 2 + (p["z"] - gz) ** 2) ** 0.5 < 1.5
+                  and p["y"] <= gy <= p["y"] + 8.0]
+    if inside or near_props:
+        print("PRERENDER WARN cam%d %s inside markers=%s near props=%s"
+              % (i, spec, inside, near_props))
     cam_data = bpy.data.cameras.new("cam%d" % i)
     cam_data.lens = 35.0   # ~60 deg hfov-ish
     cam = bpy.data.objects.new("cam%d" % i, cam_data)
