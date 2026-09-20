@@ -33,7 +33,8 @@ layout(push_constant) uniform PC {
 } pc;
 
 // 天空 = 补光源（烘焙参照语义），不是显示天空：数值对齐光栅半球环境项
-// （lighting.rs ambient (0.5,0.55,0.6)×0.55 ≈ 0.30 支），余弦加权半球均值 ≈ 0.30。
+// （lighting.rs ambient (0.5,0.55,0.6)×0.55 ≈ 0.30 支）。t² 混合下余弦加权半球均值
+// = 0.292·H + 0.708·Z ≈ (0.285,0.309,0.354)（∫(u+1)²u·du/4 ÷ 1/2 = 0.708）。
 // 显示天空的色差（光栅是艺术清屏色）是已知且刻意的——参照判表面不判天空。
 const vec3 SKY_ZENITH  = vec3(0.27, 0.30, 0.36);
 const vec3 SKY_HORIZON = vec3(0.32, 0.33, 0.34);
@@ -178,7 +179,15 @@ void main() {
                 float lit2 = traceRay(sh_o, sd2, 499.0) ? 0.0 : 1.0;
                 // 两点抖动取和×0.5 = 均值归一：全照 = 1.0×sun×ndl，与光栅
                 // evaluate_directional 同尺度（旧 ×1.1 使全照太阳高 2.2 倍）
-                lq += tq * alb * pc.e.rgb * ndl * (lit1 + lit2) * 0.5;
+                // + Blinn-Phong 高光镜像光栅（build.rs bp_specular：pow(N·H,32)，
+                //   SPEC_CONTRIB=0.4，反照率整体在外乘——§19 走查发现 PT 纯漫反射
+                //   是立面 bldg L ×0.84 的候选主因：大道立面是 GLB 楼，两侧顶点色
+                //   同源，差的不是反照率，是光栅有高光 PT 没有）
+                float sh = (lit1 + lit2) * 0.5;
+                vec3 vv = normalize(-rs);
+                vec3 hv = normalize(sunDir + vv);
+                float spec = pow(max(dot(hitNrm, hv), 0.0), 32.0);
+                lq += tq * alb * pc.e.rgb * sh * (ndl + 0.4 * spec);
             }
             tq *= alb;
             rq = hitPos + hitNrm * 0.002;
