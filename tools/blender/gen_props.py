@@ -958,7 +958,10 @@ def asset_car_wreck():
     p = Part("car_wreck")
     body = (0.085, 0.080, 0.078)
     soot = (0.035, 0.033, 0.032)
-    glass = (0.03, 0.03, 0.035)
+    # 审计修复：旧玻璃 (0.03,0.03,0.035) 与烟黑几乎同值，平光下整个侧窗带读成
+    # "敞篷浴缸"（预渲染被误读两次）；提到比车漆更亮的冷暗色——真实烧毁车的窗
+    # 反射天光本就比烟黑车身高，"亮窗"才读得出"这里有玻璃"
+    glass = (0.115, 0.125, 0.15)
     HW = 0.86                                   # half width
     # side elevation, x+ is the front, listed CCW as seen from +Y
     prof = [(-2.30, 0.34), (-2.30, 0.80), (-1.62, 0.98), (-1.02, 1.04),
@@ -968,36 +971,49 @@ def asset_car_wreck():
             (-1.62, 0.30), (-2.05, 0.34)]
     extrude_y(p, prof, -HW, HW, body)
     # greenhouse: darker glass band inset on both flanks, following the pillar line
+    # 🔴 绕序按面朝向翻转（教训 40 的资产侧复发）：两侧原用同一顶点序，-Y 侧
+    # 从外侧看是 CW ⇒ 被背面剔除 ⇒ 近侧整条窗带消失、座舱读成"敞篷浴缸"
+    # （预渲染与游戏同此假象）。sy=-1 侧反序即正对观察者。
     for sy in (-1, 1):
         y = sy * (HW + 0.012)
         gp = [(-1.00, 1.06), (-0.66, 1.44), (0.50, 1.46), (1.02, 1.08)]
         for i in range(len(gp) - 1):
             x0, z0 = gp[i]
             x1, z1 = gp[i + 1]
-            p.add_quad((x0, y, z0), (x1, y, z1), (x1, y, z1 - 0.30),
-                       (x0, y, z0 - 0.30), glass)
-        # B pillar splitting the two side windows
-        box(p, (0.02, y, 1.24), (0.10, 0.03, 0.42), body)
+            a = (x0, y, z0)
+            b = (x1, y, z1)
+            c = (x1, y, z1 - 0.30)
+            d = (x0, y, z0 - 0.30)
+            p.add_quad(a, b, c, d, glass) if sy > 0 else p.add_quad(d, c, b, a, glass)
+        # B pillar splitting the two side windows（原顶 1.66 戳出车顶 1.52 成鳍，压回 1.44）
+        box(p, (0.02, y, 1.10), (0.10, 0.03, 0.34), body)
     # wheel arch lips + bare hubs
+    # 2026-09-21 预渲染审计修复：轮心 0.36→0.24（r=0.24 ⇒ 轮底恰 z=0 接地，
+    # 旧值整车悬空 12.4cm 违反"原点在底面"资产约定）；唇板随轮下移
     for fx in (1.46, -1.46):
         for sy in (-1, 1):
-            box(p, (fx, sy * HW, 0.44), (0.86, 0.06, 0.10), soot)
-            cylinder(p, (fx, sy * (HW - 0.02), 0.36), (fx, sy * (HW + 0.05), 0.36),
+            box(p, (fx, sy * HW, 0.32), (0.86, 0.06, 0.10), soot)
+            cylinder(p, (fx, sy * (HW - 0.02), 0.24), (fx, sy * (HW + 0.05), 0.24),
                      0.24, 0.24, soot, segs=9)
-            cylinder(p, (fx, sy * (HW + 0.05), 0.36), (fx, sy * (HW + 0.10), 0.36),
+            cylinder(p, (fx, sy * (HW + 0.05), 0.24), (fx, sy * (HW + 0.10), 0.24),
                      0.11, 0.11, C["metal_rust"], segs=8)
     # a door left hanging open — reads instantly as "abandoned in a hurry"
-    box(p, (-0.45, HW + 0.42, 0.72), (1.15, 0.055, 0.66), body, rot_z=0.62)
-    box(p, (-0.45, HW + 0.80, 1.06), (1.05, 0.05, 0.30), glass, rot_z=0.62)
+    # 审计修复：铰链端原埋进车身 0.24m（中心 HW+0.42，rot 后铰链端 y=0.62<0.86），
+    # 现铰链端恰贴车身侧面：中心 y = HW + 1.15·sin(0.62) = HW + 0.66；
+    # 门玻璃原悬在门板外 0.38m（两块浮板），现贴门板外侧 +0.06
+    box(p, (-0.45, HW + 0.66, 0.72), (1.15, 0.055, 0.66), body, rot_z=0.62)
+    box(p, (-0.45, HW + 0.72, 1.06), (1.05, 0.05, 0.30), glass, rot_z=0.62)
     # nose and tail detail so it is not a monolith
     box(p, (2.28, 0, 0.62), (0.06, HW * 2 - 0.1, 0.20), soot)             # grille
     box(p, (-2.29, 0, 0.66), (0.05, HW * 2 - 0.1, 0.16), (0.28, 0.06, 0.05))  # tail lights
     for sy in (-1, 1):
         box(p, (2.24, sy * 0.58, 0.74), (0.14, 0.22, 0.10), soot)         # headlight shells
     # underbody shadow mass + soot up the flanks
+    # 审计修复：烟黑侧带原 z∈[0.16,0.76] 与窗带连成整面黑 ⇒ "浴缸感"主因；
+    # 收窄成下裙边（z∈[0.16,0.46]），让车漆中段露出来，明暗三段才读得出车
     box(p, (0, 0, 0.24), (4.1, HW * 2 - 0.2, 0.12), soot)
     for sy in (-1, 1):
-        box(p, (0, sy * (HW + 0.008), 0.46), (4.2, 0.02, 0.30), soot)
+        box(p, (0, sy * (HW + 0.008), 0.31), (4.2, 0.02, 0.15), soot)
     return p, (4.7, HW * 2 + 1.0, 1.6)
 
 

@@ -1166,9 +1166,11 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
 /// 一辆报废车：优先用 GLB（真轿车侧影），没有资产时退回盒子堆。
 fn wreck_car(c: &mut City, x: f32, z: f32, tint: [f32; 3]) {
     if c.prop("car_wreck", x, z, mixf(x as i32, z as i32, 0.0, std::f32::consts::TAU), 1.0) {
-        // 碰撞体沿用原来的车壳尺寸：网格含一扇敞开的车门（4.7 × 2.72），
-        // 所以 4.4 × 2.1 的核必然埋在车身里，不会戳出轮廓。
-        c.push(Part::new(ObstacleKind::Ruin, x, z, 4.4, 2.1, UNDER_GROUND, 1.55, tint).invisible());
+        // 碰撞核必须**任意 yaw 下都可证明埋在车壳里**：车体净尺寸 4.62×1.72，核取
+        // 4.0×1.7（半 2.0×0.85 ≤ 车体半 2.31×0.86）。旧核 4.4×2.1 的"埋在车身里"
+        // 是假话——斜 yaw 下旋转 AABB 收缩，核戳出轮廓 0.51m（2026-09-21 门玻璃
+        // 贴回门板后契约测试当场抓获：此前靠悬浮玻璃撑大的假包围盒才通过）。
+        c.push(Part::new(ObstacleKind::Ruin, x, z, 4.0, 1.7, UNDER_GROUND, 1.55, tint).invisible());
         return;
     }
     c.push(Part::new(ObstacleKind::Ruin, x, z, 4.4, 2.1, UNDER_GROUND, 1.3, tint));
