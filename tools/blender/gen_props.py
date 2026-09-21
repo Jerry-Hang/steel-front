@@ -777,8 +777,12 @@ def extrude_y(part, profile, y0, y1, col):
         part.add_quad((x0, y0, z0), (x0, y1, z0), (x1, y1, z1), (x1, y0, z1), col)
     for i in range(1, n - 1):
         a, b, c = profile[0], profile[i], profile[i + 1]
-        part.add_tri((a[0], y1, a[1]), (b[0], y1, b[1]), (c[0], y1, c[1]), col)
-        part.add_tri((a[0], y0, a[1]), (c[0], y0, c[1]), (b[0], y0, b[1]), col)
+        # 🔴 端盖绕序修正（2026-09-21 预渲染审计）：profile 点序从 +Y 看实为 CW
+        # （注释原写 CCW 是错的——(-2.30,0.34)→(-2.30,0.80)→… 顺时针对证），
+        # 旧扇形序 ⇒ 两端面法线全朝内 ⇒ 从外侧被背面剔除 ⇒ 车体是两头空心的管，
+        # 座舱"敞篷浴缸"是几何事实而非观感。翻转两侧扇形即各自朝外。
+        part.add_tri((a[0], y1, a[1]), (c[0], y1, c[1]), (b[0], y1, b[1]), col)
+        part.add_tri((a[0], y0, a[1]), (b[0], y0, b[1]), (c[0], y0, c[1]), col)
 
 
 def asset_container(color="oxide"):
