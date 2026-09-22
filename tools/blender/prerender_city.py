@@ -78,9 +78,12 @@ sun.rotation_euler = d.to_track_quat('Z', 'Y').to_euler()
 scene.collection.objects.link(sun)
 
 # ------------------------------------------------------------------ ground plane
-# sits at game ground level (UNDER_GROUND = -0.05): an eye-height camera at
-# y=1.7 must be ABOVE this plane, or the plane's backface fills the frame
-bpy.ops.mesh.primitive_plane_add(size=900.0, location=(0, 0, -0.05))
+# game ground level is the tiled ground quad at **+0.05** (renderer.rs
+# TERRAIN_RENDER_SINK comment: quad raised to +0.05, terrain mesh sunk -0.35).
+# The first version of this script used UNDER_GROUND=-0.05, which is the prop
+# burial rule, not the visible plane -- it inflated every contact by 10 cm and
+# manufactured "floating prop" false positives (aud2: hesco toe stones).
+bpy.ops.mesh.primitive_plane_add(size=900.0, location=(0, 0, 0.05))
 ground = bpy.context.active_object
 ground.name = "cityGround"
 try:

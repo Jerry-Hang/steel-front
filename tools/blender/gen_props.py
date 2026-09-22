@@ -583,9 +583,10 @@ def asset_sandbags():
     bag = (1.45, 0.62, 0.55)          # long, narrow, squat
     step = 0.52
     for r in range(rows):
-        # z base 0.08: bottom vertex 0.08-0.132 = -0.052 lands exactly on the game
-        # ground plane (-0.05). At 0.15 the whole wall floated 7 cm on a 0.7 m prop.
-        z = 0.08 + r * 0.245
+        # burial rule (city.rs module doc #3): prop bottom must sit <= 0 so the
+        # +0.05 ground quad swallows >=5cm. Old base 0.15 left the blob bottom at
+        # +0.018 (above the rule line); 0.13 puts it at -0.002 with design height kept.
+        z = 0.13 + r * 0.245
         n = 6 if r % 2 == 0 else 5
         x0 = -1.30 if r % 2 == 0 else -1.30 + step * 0.5
         for c in range(n):
@@ -892,10 +893,10 @@ def asset_barrier_hesco():
                   flatten=fh / fr, jitter=0.09, rng=rng,
                   stretch=(rng.uniform(1.1, 1.5), rng.uniform(0.7, 0.9), 1.0))
     # a few stones and a spilled sandbag at the toe so it does not sit like a die-cut.
-    # centre z must be low enough that the flattened bottom vertex (0.85*r*0.7 ≈ 0.08)
-    # crosses the game ground plane at -0.05; at 0.09 these read as floating marbles.
+    # burial rule: bottom (0.05-0.85*0.14*0.7 = -0.033) must be <= 0 under the +0.05
+    # ground quad; 0.05 leaves ~half of each 17cm stone showing as toe rubble.
     for i in range(4):
-        icosphere(p, (rng.uniform(-1.2, 1.2), rng.uniform(-0.9, 0.9), 0.02), 0.14,
+        icosphere(p, (rng.uniform(-1.2, 1.2), rng.uniform(-0.9, 0.9), 0.05), 0.14,
                   C["concrete_dk"], subdiv=0, flatten=0.7, jitter=0.05, rng=rng)
     return p, (L + 0.3, W + 0.4, H + 0.6)
 
