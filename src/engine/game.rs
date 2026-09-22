@@ -5890,12 +5890,15 @@ fn advance_npc(
                 if let Some(wp) = squad_wp {
                     world_to_grid(wp[0], wp[1])
                 } else {
+                    // 🔴 #17 根因修复：旧版绕 home 画圆（r=20+id*3），出生在视距
+                    // 外的敌人永远绕自家转圈不收敛（aidiag 实证：dist 83-91m、
+                    // occluded=false），波次永远清不掉。现在圆心向目标推进 70%、
+                    // 半径封顶 18m：扫掠仍提供变化，但每圈都在逼近，走进视距后
+                    // Chase/Attack 自然接管。
                     let angle = npc.id as f32 * 2.399 + (time / 8.0).floor() * 0.7;
-                    let r = 20.0 + npc.id as f32 * 3.0;
-                    world_to_grid(
-                        npc.home[0] + r * angle.cos(),
-                        npc.home[1] + r * angle.sin(),
-                    )
+                    let cx = npc.home[0] + (target.x - npc.home[0]) * 0.7;
+                    let cz = npc.home[1] + (target.z - npc.home[1]) * 0.7;
+                    world_to_grid(cx + 18.0 * angle.cos(), cz + 18.0 * angle.sin())
                 }
             }
         }

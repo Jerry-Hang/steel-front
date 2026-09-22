@@ -14,11 +14,14 @@ Injection layer
 ---------------
 Reuses `gameplay_smoke_pm.py` verbatim (PostMessage only, the four calibrated recipes,
 the closed-loop aim against `npc: #id stand`).  No SendInput, no foreground change, no
-cursor grab.  Since 2026-09-22 the player DOES move: a capped stand line gets up to
-`--max-repos` perpendicular A/D strafes before give-up, so aim angles are computed
-player-relative via `target_angles_rel` + the `pos=` field on the engine's 1s `game:`
-status line -- the smoke-side origin assumption of `target_angles` no longer applies
-here (smoke itself still never moves).
+cursor grab.  Since 2026-09-22 the player DOES move: distant targets get an
+approach walk (W along the sight line), a capped stand line gets up to
+`--max-repos` perpendicular A/D strafes before give-up, and bursts are
+reload-aware (the engine auto-reloads on an empty mag but loses that shot, so
+missing `shot #` ticks mean "wait out the 2.3s window, fire the rest").  Aim
+angles are computed player-relative via `target_angles_rel` + the `pos=` field
+on the engine's 1s `game:` status line -- the smoke-side origin assumption of
+`target_angles` no longer applies here (smoke itself still never moves).
 
 Caveat stated up front: this run uses RV3D_INVINCIBLE=1 so the match cannot end in
 `survive: 玩家阵亡于第 N 波 → 失败` before wave 5 -- the defeat path is covered by unit
@@ -142,6 +145,34 @@ def player_pos(txt):
     return (float(m[-1][0]), float(m[-1][1])) if m else None
 
 
+def shots_count(txt):
+    """Cumulative player shots from the engine's own `weapons: shot #N` counter."""
+    m = re.findall(r"weapons: shot #(\d+)", txt)
+    return int(m[-1]) if m else 0
+
+
+def move_hold(hwnd, logpath, key, hold):
+    """Hold a movement key for `hold` seconds and report the ACTUAL displacement
+    measured from the engine's pos= field (blocked movement shows as ~0m, which
+    is exactly what the caller needs to know). Waits for a status line that
+    postdates the key release (the line is 1s-cadenced, so poll up to ~2.4s)."""
+    p0 = player_pos(S.log_tail(logpath))
+    S.post_key(hwnd, key, True)
+    time.sleep(hold)
+    S.post_key(hwnd, key, False)
+    p1 = p0
+    for _ in range(6):
+        time.sleep(0.4)
+        cand = player_pos(S.log_tail(logpath))
+        if cand is not None:
+            p1 = cand
+            if p0 and (abs(cand[0] - p0[0]) > 0.2 or abs(cand[1] - p0[1]) > 0.2):
+                break
+    if p0 and p1:
+        return math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+    return -1.0
+
+
 def target_angles_rel(npc, ppos):
     """S.target_angles minus the player's actual position. The smoke version
     hardcodes the origin because smoke never moves; survive strafes now, so
@@ -155,26 +186,8 @@ def target_angles_rel(npc, ppos):
 
 
 def reposition(hwnd, logpath, side):
-    """Hold A or D for ~0.5s (PLAYER_SPEED=6 m/s => ~3m strafe) and report the
-    ACTUAL displacement measured from the engine's own pos= field -- if the
-    strafe is blocked by cover the caller sees ~0m and the alternating side
-    gets the next try. Waits for a status line that postdates the key release
-    (the line is 1s-cadenced, so poll up to ~2.4s)."""
-    p0 = player_pos(S.log_tail(logpath))
-    S.post_key(hwnd, side, True)
-    time.sleep(0.5)
-    S.post_key(hwnd, side, False)
-    p1 = p0
-    for _ in range(6):
-        time.sleep(0.4)
-        cand = player_pos(S.log_tail(logpath))
-        if cand is not None:
-            p1 = cand
-            if p0 and (abs(cand[0] - p0[0]) > 0.2 or abs(cand[1] - p0[1]) > 0.2):
-                break
-    if p0 and p1:
-        return math.hypot(p1[0] - p0[0], p1[1] - p0[1])
-    return -1.0
+    """One ~3m perpendicular strafe (PLAYER_SPEED=6 m/s x 0.5s) via move_hold."""
+    return move_hold(hwnd, logpath, side, 0.5)
 
 
 def main():
@@ -191,6 +204,12 @@ def main():
                          "giving up (alternating d/a; a converged-aim-no-kill means "
                          "the NPC is behind cover, and a perpendicular 3m strafe is "
                          "the cheapest way to break that alignment)")
+    ap.add_argument("--approach-gt", type=float, default=35.0,
+                    help="walk toward a target farther than this (m): the 1.5deg "
+                         "aim tolerance is ~1.6m of drift at 60m, wider than an "
+                         "NPC hitbox -- distant targets are unkillable, period")
+    ap.add_argument("--approach-stop", type=float, default=20.0,
+                    help="close to roughly this range before firing")
     ap.add_argument("--shotdir", default=None)
     args = ap.parse_args()
 
@@ -310,16 +329,48 @@ def main():
               % (time.time() - t0, wave, 5, enemies, npc_id, pos[0], pos[1], pos[2],
                  attempts[npc_id]), flush=True)
         ppos = player_pos(txt) or (0.0, 0.0)
-        ty, tp = target_angles_rel((npc_id, pos[0], pos[1], pos[2]), ppos)
+        npc = (npc_id, pos[0], pos[1], pos[2])
+        ty, tp = target_angles_rel(npc, ppos)
+        # Approach: W walks along the camera forward, so aim first, close the
+        # gap on the line of sight, then re-aim from the new position. The
+        # wave-3 cluster sat 50-75m out and ate 150 engagements with zero
+        # kills -- not cover, just geometry: 1.5deg tolerance > NPC hitbox.
+        dist = math.hypot(pos[0] - ppos[0], pos[2] - ppos[1])
+        if dist > args.approach_gt:
+            if S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
+                moved = move_hold(hwnd, logpath, "w",
+                                  max(min((dist - args.approach_stop) / 6.0, 5.0), 0.5))
+                print("    approach w: moved %.1fm toward npc#%d (was %.0fm)"
+                      % (moved, npc_id, dist), flush=True)
+                txt = S.log_tail(logpath)
+                ppos = player_pos(txt) or ppos
+                ty, tp = target_angles_rel(npc, ppos)
         if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
             print("    aim did not converge", flush=True)
             continue
+        # Reload-aware burst: try_fire on an EMPTY magazine auto-arms the
+        # reload but loses that shot (weapons.rs try_fire + the
+        # firearm_empty_magazine_auto_reloads_and_cannot_fire test), and every
+        # click inside the 2.3s window is silent -- the 2026-09-22 run wasted
+        # ~60% of its trigger pulls that way (282 shots from 700 clicks).
+        # Count what the engine actually fired and make up the rest after the
+        # window instead of eating the dry clicks.
+        s0 = shots_count(txt)
         for _ in range(4):
             S.post_lbutton(hwnd, True, cx, cy)
             time.sleep(0.08)
             S.post_lbutton(hwnd, False, cx, cy)
             time.sleep(0.16)
         time.sleep(0.4)
+        fired = shots_count(S.log_tail(logpath)) - s0
+        if 0 <= fired < 4:
+            time.sleep(2.6)
+            for _ in range(4 - fired):
+                S.post_lbutton(hwnd, True, cx, cy)
+                time.sleep(0.08)
+                S.post_lbutton(hwnd, False, cx, cy)
+                time.sleep(0.16)
+            time.sleep(0.4)
         sc1 = score_now(S.log_tail(logpath))
         if sc1 > sc0 >= 0:
             print("    KILL (score %d -> %d), enemies=%d"
