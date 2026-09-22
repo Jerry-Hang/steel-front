@@ -2133,14 +2133,18 @@ impl Game {
         if self.time - self.last_status_log >= 1.0 {
             self.last_status_log = self.time;
             let enemy_hp = self.npcs.first().map(|n| n.max_hp).unwrap_or(0.0);
+            // 玩家位置入状态行：survive harness 走位支持需要它算相对方位角
+            let pp = self.player_pos();
             log::info!(
-                "game: wave={} enemies={} enemy_hp={:.0} hp={:.0}/{:.0} score={} phys_us={} ai_us={} audio_us={} net_us={}",
+                "game: wave={} enemies={} enemy_hp={:.0} hp={:.0}/{:.0} score={} pos=({:.1},{:.1}) phys_us={} ai_us={} audio_us={} net_us={}",
                 self.wave,
                 self.npcs.len(),
                 enemy_hp,
                 self.hud.health,
                 self.hud.max_health,
                 self.score,
+                pp.x,
+                pp.z,
                 self.stage_physics_us,
                 self.stage_ai_us,
                 self.stage_audio_us,

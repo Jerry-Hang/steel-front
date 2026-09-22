@@ -14,8 +14,11 @@ Injection layer
 ---------------
 Reuses `gameplay_smoke_pm.py` verbatim (PostMessage only, the four calibrated recipes,
 the closed-loop aim against `npc: #id stand`).  No SendInput, no foreground change, no
-cursor grab.  Player never moves (no W/A/S/D), which is what keeps the "npc world
-position == player-relative position" assumption in `target_angles` true.
+cursor grab.  Since 2026-09-22 the player DOES move: a capped stand line gets up to
+`--max-repos` perpendicular A/D strafes before give-up, so aim angles are computed
+player-relative via `target_angles_rel` + the `pos=` field on the engine's 1s `game:`
+status line -- the smoke-side origin assumption of `target_angles` no longer applies
+here (smoke itself still never moves).
 
 Caveat stated up front: this run uses RV3D_INVINCIBLE=1 so the match cannot end in
 `survive: 玩家阵亡于第 N 波 → 失败` before wave 5 -- the defeat path is covered by unit
@@ -24,10 +27,12 @@ tests, the point here is the wave/intermission/victory chain.
 Usage
 -----
     python scripts/survive_pm.py <log path> [--secs 900] [--shot-every 60]
+                                   [--max-engage 6] [--max-repos 2]
 """
 import argparse
 import ctypes
 import ctypes.wintypes as wintypes
+import math
 import os
 import re
 import sys
@@ -129,6 +134,49 @@ def score_now(txt):
     return int(m[-1]) if m else -1
 
 
+def player_pos(txt):
+    """(x, z) from the LAST `game:` status line's pos= field (added 2026-09-22
+    together with the repositioning below; the 1s cadence is fine because the
+    player only ever moves inside reposition())."""
+    m = re.findall(r"game: wave=\d+ .*? pos=\(([-\d.]+),([-\d.]+)\)", txt)
+    return (float(m[-1][0]), float(m[-1][1])) if m else None
+
+
+def target_angles_rel(npc, ppos):
+    """S.target_angles minus the player's actual position. The smoke version
+    hardcodes the origin because smoke never moves; survive strafes now, so
+    the subtraction is mandatory -- yaw is atan2 of the PLAYER->NPC vector."""
+    _, nx, ny, nz = npc
+    EYE = 1.6
+    rx, rz = nx - ppos[0], nz - ppos[1]
+    ry = ny + 0.8 - EYE
+    return (math.degrees(math.atan2(-rx, -rz)),
+            math.degrees(math.atan2(-ry, math.hypot(rx, rz))))
+
+
+def reposition(hwnd, logpath, side):
+    """Hold A or D for ~0.5s (PLAYER_SPEED=6 m/s => ~3m strafe) and report the
+    ACTUAL displacement measured from the engine's own pos= field -- if the
+    strafe is blocked by cover the caller sees ~0m and the alternating side
+    gets the next try. Waits for a status line that postdates the key release
+    (the line is 1s-cadenced, so poll up to ~2.4s)."""
+    p0 = player_pos(S.log_tail(logpath))
+    S.post_key(hwnd, side, True)
+    time.sleep(0.5)
+    S.post_key(hwnd, side, False)
+    p1 = p0
+    for _ in range(6):
+        time.sleep(0.4)
+        cand = player_pos(S.log_tail(logpath))
+        if cand is not None:
+            p1 = cand
+            if p0 and (abs(cand[0] - p0[0]) > 0.2 or abs(cand[1] - p0[1]) > 0.2):
+                break
+    if p0 and p1:
+        return math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+    return -1.0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("logpath")
@@ -138,6 +186,11 @@ def main():
                     help="give up on one stand line after this many aim engagements "
                          "(smoke's 'stopping this target' equivalent; the 2026-09-22 "
                          "run dead-looped to try=85 without it)")
+    ap.add_argument("--max-repos", type=int, default=2,
+                    help="strafe repositions to try on a capped stand line before "
+                         "giving up (alternating d/a; a converged-aim-no-kill means "
+                         "the NPC is behind cover, and a perpendicular 3m strafe is "
+                         "the cheapest way to break that alignment)")
     ap.add_argument("--shotdir", default=None)
     args = ap.parse_args()
 
@@ -178,6 +231,7 @@ def main():
     last_shot_at = t0
     attempts = {}
     stand_pos = {}          # npc_id -> the stand line the attempts are counted against
+    repos_left = {}         # npc_id -> repositioning budget left for the CURRENT line
     waves_seen = []
     last_wave = -1
     engaged = 0
@@ -225,8 +279,23 @@ def main():
         if stand_pos.get(npc_id) != pos:
             stand_pos[npc_id] = pos
             attempts[npc_id] = 0
+            repos_left.pop(npc_id, None)   # fresh line = fresh repositioning budget too
         attempts[npc_id] = attempts.get(npc_id, 0) + 1
         if attempts[npc_id] > args.max_engage:
+            # Reposition BEFORE surrendering: both observed failure shapes break
+            # under a perpendicular strafe -- a converged-aim-no-kill means the
+            # firing line is occluded and 3m sideways walks it off the cover; a
+            # frozen stale line gets a fresh geometry to fail against. The corpse
+            # sentinel (>=90) must not burn repositions, hence the <90 guard.
+            left = repos_left.get(npc_id, args.max_repos)
+            if left > 0 and attempts[npc_id] < 90:
+                repos_left[npc_id] = left - 1
+                side = "d" if (args.max_repos - left) % 2 == 0 else "a"
+                moved = reposition(hwnd, logpath, side)
+                print("    reposition %s: moved %.1fm, re-arming npc#%d (%d left)"
+                      % (side, moved, npc_id, left - 1), flush=True)
+                attempts[npc_id] = 0
+                continue
             # == max+1 prints exactly once per line; the corpse sentinel (99)
             # skips the message and just never re-engages.
             if attempts[npc_id] == args.max_engage + 1:
@@ -240,7 +309,8 @@ def main():
         print("[%6.0fs] wave %d/%d enemies=%d  aim npc#%d @(%.1f,%.1f,%.1f) try=%d"
               % (time.time() - t0, wave, 5, enemies, npc_id, pos[0], pos[1], pos[2],
                  attempts[npc_id]), flush=True)
-        ty, tp = S.target_angles((npc_id, pos[0], pos[1], pos[2]))
+        ppos = player_pos(txt) or (0.0, 0.0)
+        ty, tp = target_angles_rel((npc_id, pos[0], pos[1], pos[2]), ppos)
         if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
             print("    aim did not converge", flush=True)
             continue
