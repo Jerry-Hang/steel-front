@@ -768,16 +768,18 @@ fn warehouse(c: &mut City, cx: f32, cz: f32, seed_i: i32, seed_j: i32) {
                         .invisible(),
                 );
                 if i == 1 && j == 0 {
-                    // 第二层：抬一个箱高（2.85）叠在同一列上
+                    // 第二层：抬一个 GLB 实箱高叠在同一列上。2.85 是回退路径"箱体
+                    // 2.6 + 顶盖 0.25"的和；GLB 箱体 2.591 + 顶筋 0.045 ≈ 2.64，
+                    // 照抄 2.85 会让上层浮空 0.21m，还在 2.6~2.85 留出碰撞空洞。
                     c.prop_y(
                         CONTAINER_PROPS[(i + j + 1) as usize % 3],
                         bx,
-                        2.85,
+                        2.64,
                         bz,
                         0.0,
                         1.0,
                     );
-                    c.push(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.85, 5.45, col).invisible());
+                    c.push(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.6, 5.25, col).invisible());
                 }
                 continue;
             }
@@ -1182,8 +1184,11 @@ fn wreck_car(c: &mut City, x: f32, z: f32, tint: [f32; 3]) {
 }
 
 /// 路灯：优先用 GLB（锥形杆 + 弯臂 + 灯头），没有资产时退回圆柱堆。
-fn lamp_post(c: &mut City, x: f32, z: f32) {
-    if c.prop("street_lamp", x, z, mixf(x as i32, z as i32, 0.0, std::f32::consts::TAU), 1.0) {
+/// yaw 是灯臂指向（资产 +X 为臂向），由调用方按"杆位→路面中心"给出；
+/// 旧版用 mixf 全随机，预渲染检查里灯臂朝建筑、朝院墙，一排街灯没有一个
+/// 照向街面——真实街灯不会有这种布局。
+fn lamp_post(c: &mut City, x: f32, z: f32, yaw: f32) {
+    if c.prop("street_lamp", x, z, yaw, 1.0) {
         // 碰撞只给一根埋在杆身里的细柱：street_lamp 杆底半径 0.13、往上收，
         // 半宽 0.10 恒小于它，所以盒子不会从圆杆里戳出来（戳出来比"灯杆是方的"更糟）。
         c.push(Part::new(ObstacleKind::Block, x, z, 0.20, 0.20, UNDER_GROUND, 4.6, DARK).cyl().invisible());
@@ -1252,7 +1257,8 @@ fn shop_block(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
         c.deco(Part::new(ObstacleKind::Block, px, cz + 7.4, 0.72, 0.72, 3.30, 3.62, GRANITE).cyl());
     }
     for dx in [-14.0f32, 14.0] {
-        lamp_post(c, cx + dx, cz + 9.5);
+        // 棚前广场在 cz 一侧，灯臂越过人流动线（-Z 向）
+        lamp_post(c, cx + dx, cz + 9.5, std::f32::consts::FRAC_PI_2);
     }
 }
 
@@ -1313,8 +1319,8 @@ fn mixed_block(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
     //   残骸车整个埋进东排（画面里只剩墙面上几块悬空黑片），第 4 台 HESCO 也咬进
     //   东排 1.8m。判据测试 checkpoint_props_stay_out_of_rows。
     checkpoint(c, cx, cz + 2.0);
-    lamp_post(c, cx - 6.0, cz + 15.0);
-    lamp_post(c, cx + 6.0, cz + 15.0);
+    lamp_post(c, cx - 6.0, cz + 15.0, std::f32::consts::FRAC_PI_2);
+    lamp_post(c, cx + 6.0, cz + 15.0, std::f32::consts::FRAC_PI_2);
     // 树同族问题：旧版 (cx-14, cz-2) 在西排板楼带 [-18.5,-7.5] 里，树干整个埋进
     // 墙身、树冠骑在屋顶上。挪到院内东南空地（沙袋墙 x∈[-1.7,1.7]、帐篷 x∈[-7,-2]
     // 都让开；冠缘少量叠进东排内缘，与住宅内院树同款、已被历史帧接受）。
@@ -1367,8 +1373,9 @@ fn street_furniture(c: &mut City) {
     for k in [-3i32, -2, -1, 1, 2, 3] {
         let t = k as f32 * STREET_EVERY;
         for side in [-7.0f32, 7.0] {
-            lamp_post(c, side, t);
-            lamp_post(c, t, side);
+            // 灯臂越过车道：rotY(yaw)·(+X) = (cos yaw, 0, -sin yaw)
+            lamp_post(c, side, t, if side < 0.0 { 0.0 } else { std::f32::consts::PI });
+            lamp_post(c, t, side, side * std::f32::consts::FRAC_PI_2 / 7.0);
         }
     }
     for k in -2i32..=2 {
