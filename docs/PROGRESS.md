@@ -6506,3 +6506,15 @@ min/max，glTF +Y 为游戏 up）+ 引擎代码对照发现：prerender 地面�
 教训：**审计工具自身要有基准真值——渲染器里的地面高度以引擎常量为准，
 不能拿"埋没规则"当可见面**。
 
+**实机验收（新 exe，city.json 重导出 17:57）**：`layout_check.py` 判 4/4 叠箱在
+2.64、2.85 零残留、48 盏街灯 4 种臂向全对格（0 随机值）；`float_scan.py` 全资产
+埋没合规（仅 car_wreck +0.004，判可接受）。实拍 stack2_b：上层箱顶贴下层箱顶、
+缝只剩接触阴影；wreck3_b：残骸座舱闭合顶+玻璃带+接地全对（§20.5 修复实机确认）；
+aud3b 北侧沙袋三层咬合贴地。aud3_1 灯头弯臂完整、aud3_2 坡脚石半埋。
+**RV3D_CAM 的坑（入册）**：cam_override 分支在 `update()` 顶部 early-return，
+位置**早于** autostart 段 ⇒ 带 RV3D_CAM 的 cap_safe 永远停菜单态（main.rs:756 注释
+早就写了，我撞了才看见）；正解 = `-Keys 32`（空格经事件循环进 Playing）。
+另记：机位 yaw 语义 fwd=(−sin yaw,0,−cos yaw)，"站在 +z 侧看 −z 方向的物体"用
+yaw=0，不是 180——wreck2 白跑一轮就是这个反向错误。
+
+
