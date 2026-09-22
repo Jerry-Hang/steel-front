@@ -583,7 +583,9 @@ def asset_sandbags():
     bag = (1.45, 0.62, 0.55)          # long, narrow, squat
     step = 0.52
     for r in range(rows):
-        z = 0.15 + r * 0.245
+        # z base 0.08: bottom vertex 0.08-0.132 = -0.052 lands exactly on the game
+        # ground plane (-0.05). At 0.15 the whole wall floated 7 cm on a 0.7 m prop.
+        z = 0.08 + r * 0.245
         n = 6 if r % 2 == 0 else 5
         x0 = -1.30 if r % 2 == 0 else -1.30 + step * 0.5
         for c in range(n):
