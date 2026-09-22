@@ -6550,9 +6550,13 @@ GLB 布点资产（hesco/block/tall/wreck/箱×3/沙袋/街灯/树）全部经�
 （score 0→40+）、无 panic 无崩溃——游戏侧稳定通过。但暴露 **harness 缺陷**：
 survive_pm.py 的瞄准环对 npc#8 死区空转（inject 3,5px 相机不动，try 冲到 63+
 仍无退路；smoke 在 ~40 try 有 "did not converge, stopping" 而 survive 没有），
-到用户返回前未自然收敛，由我 taskkill 游戏 + 杀 python 树保证鼠标释放。**待修
-入册：survive_pm.py 补与 smoke 同款 try 上限放弃逻辑**（测试工具缺陷，不影响
-游戏判定，未占用本轮提交）。
+**待修已修（当晚 19:40 复核跑）**：`--max-engage`（默认 6）落地并真机验证——上限触发
+两例（npc#12/npc#8）措辞对齐 smoke；**按 stand 行不按 id** 的设计被实况抓到一次
+教科书行为：npc#8 行刷新 (1.1,11.9)→(1.0,12.0) 后计数清零重新给满预算。稳定性
+满分（VUID=0/panics=0/fps 176/RELEASE OK）。但 wave 1/5 仍未打通（4 杀 19 交战，
+3 敌卡死）：两例 give-up 都是"瞄准已收敛但击杀不落地"= 敌人掩体后，而 harness
+玩家固定不移动（no WASD 是 target_angles 前提）——**#17 的下一瓶颈是"会走位/
+会绕射的玩家模拟"，不是瞄准环**。give-up 修复达成其目标；5 波胜利验证另案。
 
 
 

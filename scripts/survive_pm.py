@@ -134,6 +134,10 @@ def main():
     ap.add_argument("logpath")
     ap.add_argument("--secs", type=float, default=900.0, help="driving budget")
     ap.add_argument("--shot-every", type=float, default=60.0)
+    ap.add_argument("--max-engage", type=int, default=6,
+                    help="give up on one stand line after this many aim engagements "
+                         "(smoke's 'stopping this target' equivalent; the 2026-09-22 "
+                         "run dead-looped to try=85 without it)")
     ap.add_argument("--shotdir", default=None)
     args = ap.parse_args()
 
@@ -173,6 +177,7 @@ def main():
     deadline = t0 + args.secs
     last_shot_at = t0
     attempts = {}
+    stand_pos = {}          # npc_id -> the stand line the attempts are counted against
     waves_seen = []
     last_wave = -1
     engaged = 0
@@ -212,7 +217,24 @@ def main():
         order = sorted(live.items(), key=lambda kv: (attempts.get(kv[0], 0),
                                                      kv[1][0] ** 2 + kv[1][2] ** 2))
         npc_id, pos = order[0]
+        # The cap is per stand LINE, not per id: a fresh line (the NPC left and
+        # re-entered Attack at a different spot) is a new target worth a full
+        # budget again. The 2026-09-22 run dead-looped on one frozen line to
+        # try=85 because nothing stopped engaging it (smoke has "stopping this
+        # target"; survive's outer loop re-picks every iteration).
+        if stand_pos.get(npc_id) != pos:
+            stand_pos[npc_id] = pos
+            attempts[npc_id] = 0
         attempts[npc_id] = attempts.get(npc_id, 0) + 1
+        if attempts[npc_id] > args.max_engage:
+            # == max+1 prints exactly once per line; the corpse sentinel (99)
+            # skips the message and just never re-engages.
+            if attempts[npc_id] == args.max_engage + 1:
+                print("    giving up on npc#%d after %d tries (stale stand line or "
+                      "behind cover), stopping this target"
+                      % (npc_id, args.max_engage), flush=True)
+            time.sleep(2.0)
+            continue
         engaged += 1
         sc0 = score_now(txt)
         print("[%6.0fs] wave %d/%d enemies=%d  aim npc#%d @(%.1f,%.1f,%.1f) try=%d"
