@@ -6546,5 +6546,13 @@ marker 细节只能实机审（aud4 的路子）。
 屋顶正俯视再次落入"平面低信息"陷阱（roof_b 同族），不作判据。**至此 10 类
 GLB 布点资产（hesco/block/tall/wreck/箱×3/沙袋/街灯/树）全部经近景裁决一轮。**
 
+**survive 长时门禁（新 exe，386s 主动收尾）**：wave 1/5 实战 386 秒、多次击杀
+（score 0→40+）、无 panic 无崩溃——游戏侧稳定通过。但暴露 **harness 缺陷**：
+survive_pm.py 的瞄准环对 npc#8 死区空转（inject 3,5px 相机不动，try 冲到 63+
+仍无退路；smoke 在 ~40 try 有 "did not converge, stopping" 而 survive 没有），
+到用户返回前未自然收敛，由我 taskkill 游戏 + 杀 python 树保证鼠标释放。**待修
+入册：survive_pm.py 补与 smoke 同款 try 上限放弃逻辑**（测试工具缺陷，不影响
+游戏判定，未占用本轮提交）。
+
 
 
