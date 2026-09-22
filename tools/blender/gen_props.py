@@ -889,9 +889,11 @@ def asset_barrier_hesco():
                   (0.23, 0.185, 0.135) if i % 2 else (0.185, 0.15, 0.115), subdiv=1,
                   flatten=fh / fr, jitter=0.09, rng=rng,
                   stretch=(rng.uniform(1.1, 1.5), rng.uniform(0.7, 0.9), 1.0))
-    # a few stones and a spilled sandbag at the toe so it does not sit like a die-cut
+    # a few stones and a spilled sandbag at the toe so it does not sit like a die-cut.
+    # centre z must be low enough that the flattened bottom vertex (0.85*r*0.7 ≈ 0.08)
+    # crosses the game ground plane at -0.05; at 0.09 these read as floating marbles.
     for i in range(4):
-        icosphere(p, (rng.uniform(-1.2, 1.2), rng.uniform(-0.9, 0.9), 0.09), 0.14,
+        icosphere(p, (rng.uniform(-1.2, 1.2), rng.uniform(-0.9, 0.9), 0.02), 0.14,
                   C["concrete_dk"], subdiv=0, flatten=0.7, jitter=0.05, rng=rng)
     return p, (L + 0.3, W + 0.4, H + 0.6)
 
