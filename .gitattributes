@@ -1,0 +1,15 @@
+# 行尾与二进制标记。
+#
+# 为什么需要：`.githooks/*` 是 **sh 脚本**，git for Windows 的 sh 会把 CR 当命令的一部分
+# （`#!/bin/sh\r` 直接报 bad interpreter）。本机 core.autocrlf 会把文本检出成 CRLF，
+# 所以这里对钩子强制 LF —— 否则"刚克隆的机器上钩子静默不生效"。
+#
+# 二进制资产显式标记：`*.glb` / `*.spv` / `*.png` 绝不能参与行尾转换或 diff 文本化。
+*.glb binary
+*.spv binary
+*.png binary
+*.jpg binary
+*.ico binary
+
+.githooks/* text eol=lf
+*.sh text eol=lf

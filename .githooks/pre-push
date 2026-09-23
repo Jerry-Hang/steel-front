@@ -1,0 +1,12 @@
+#!/bin/sh
+# Steel Front pre-push：把推送交给原有的门（DSH 的 Secret Gate），别吞掉它。
+#
+# 为什么要这个文件：`core.hooksPath` 只能指向**一个**目录。一旦指到 .githooks，
+# 原目录里的 pre-push（公网推送密钥门）就不会再被调用 —— 那是**静默失效的安全门**。
+# 所以这里显式转交。install_git_hooks.ps1 会把原路径记进 steelfront.baseHooksPath。
+set -e
+base=$(git config --get steelfront.baseHooksPath || true)
+if [ -n "$base" ] && [ -f "$base/pre-push" ]; then
+    exec "$base/pre-push" "$@"
+fi
+exit 0

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Steel Front pre-commit 守卫 —— 只放行白名单路径，且拦截明文密钥。
+#
+# 为什么在钩子里做：`git commit` 是唯一能决定"什么东西进仓库"的地方。
+# 钩子失败 = 提交没发生，改错成本为零；等推到远端再补救要重写历史。
+#
+# 链式：如果本仓原本还有别的钩子目录（例如 DSH 的 gates），install_git_hooks.ps1 会把它
+# 记在 `steelfront.baseHooksPath` 里，这里先把原 pre-commit 跑完再跑我们的守卫 ——
+# **不覆盖、不吞掉别人的门**。
+#
+# 启用：powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_git_hooks.ps1
+# 旁路：COMMIT_GUARD_BYPASS="理由" git commit ...   （空理由不放行，理由会留痕）
+set -e
+root=$(git rev-parse --show-toplevel)
+
+base=$(git config --get steelfront.baseHooksPath || true)
+if [ -n "$base" ] && [ -f "$base/pre-commit" ]; then
+    "$base/pre-commit" "$@" || exit $?
+fi
+
+if command -v python >/dev/null 2>&1; then
+    py=python
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    echo "commit-guard: 找不到 python，跳过密钥扫描（白名单未生效；可手工跑 tools/commit_guard.py）" >&2
+    exit 0
+fi
+
+exec "$py" "$root/tools/commit_guard.py" --staged
