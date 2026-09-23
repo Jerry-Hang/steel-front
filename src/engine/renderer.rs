@@ -5170,6 +5170,11 @@ impl Renderer {
         verts: &[crate::engine::meshgen::GVertex],
         indices: &[u32],
     ) {
+        // 🔴 2026-09-22 复查：先记下"旧枪模的计数"。
+        // 扩容失败时旧 buffer 仍完好，只有把计数也恢复成旧值，两者才继续自洽；
+        // 否则会出现"旧缓冲 + 新计数" ⇒ 按新计数抓取旧缓冲的索引 = 越界（静默的错误几何）。
+        let prev_vcount = self.gun_vertex_count;
+        let prev_icount = self.gun_index_count;
         self.gun_vertex_count = verts.len() as u32;
         self.gun_index_count = indices.len() as u32;
         if verts.is_empty() || indices.is_empty() {
@@ -5197,6 +5202,57 @@ impl Renderer {
             unsafe {
                 let _ = self.device.device_wait_idle();
             }
+            // 🔴 2026-09-22 复查（灰色地带修复）：**先建新的，成功了再毁旧的**。
+            // 旧写法是「先 destroy 两个旧 buffer，再 `create_host_buffer(..).expect(..)`」：
+            //  ① 分配失败（显存碎片 / OOM）直接 panic —— 游戏在切枪瞬间整个进程没了；
+            //  ② 更糟的是**即使不 panic，旧句柄也已经毁掉了**（自留悬空句柄，
+            //     之后任何一次 destroy/free 都是二次释放）。
+            // 现在失败路径只 log::error 并**保留原缓冲**（降级：这一枪不换，其余照常跑）；
+            // 成功路径多占一份旧缓冲的显存（几 MB）直到销毁，代价可忽略。
+            let v_size = need_verts as u64 * std::mem::size_of::<Vertex>() as u64;
+            let i_size = need_idx as u64 * 4; // 索引容量独立按实际索引数
+            let (vb, vm) = match self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, v_size)
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    log::error!("枪模顶点缓冲扩容失败，保留原枪模：{e}");
+                    self.gun_vertex_count = prev_vcount;
+                    self.gun_index_count = prev_icount;
+                    return;
+                }
+            };
+            let (ib, im) = match self.create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, i_size) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    log::error!("枪模索引缓冲扩容失败，保留原枪模：{e}");
+                    unsafe {
+                        self.device.destroy_buffer(vb, None);
+                        self.device.free_memory(vm, None);
+                    }
+                    self.gun_vertex_count = prev_vcount;
+                    self.gun_index_count = prev_icount;
+                    return;
+                }
+            };
+            let mapped = match unsafe {
+                self.device
+                    .map_memory(vm, 0, v_size, vk::MemoryMapFlags::empty())
+            } {
+                Ok(p) => p,
+                Err(e) => {
+                    log::error!("枪模顶点缓冲映射失败，保留原枪模：{e}");
+                    unsafe {
+                        self.device.destroy_buffer(vb, None);
+                        self.device.free_memory(vm, None);
+                        self.device.destroy_buffer(ib, None);
+                        self.device.free_memory(im, None);
+                    }
+                    self.gun_vertex_count = prev_vcount;
+                    self.gun_index_count = prev_icount;
+                    return;
+                }
+            };
+            // 新的三件套齐了，才拆旧的（前面已 `device_wait_idle()`，不会撞在飞帧）
             if self.gun_vertex_buffer != vk::Buffer::null() {
                 unsafe { self.device.destroy_buffer(self.gun_vertex_buffer, None) };
             }
@@ -5209,23 +5265,11 @@ impl Renderer {
             if self.gun_index_buffer_memory != vk::DeviceMemory::null() {
                 unsafe { self.device.free_memory(self.gun_index_buffer_memory, None) };
             }
-            let v_size = need_verts as u64 * std::mem::size_of::<Vertex>() as u64;
-            let (vb, vm) = self
-                .create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, v_size)
-                .expect("枪模顶点缓冲创建失败");
-            let i_size = need_idx as u64 * 4; // 索引容量独立按实际索引数
-            let (ib, im) = self
-                .create_host_buffer(vk::BufferUsageFlags::INDEX_BUFFER, i_size)
-                .expect("枪模索引缓冲创建失败");
             self.gun_vertex_buffer = vb;
             self.gun_vertex_buffer_memory = vm;
             self.gun_index_buffer = ib;
             self.gun_index_buffer_memory = im;
-            self.gun_mapped = unsafe {
-                self.device
-                    .map_memory(vm, 0, v_size, vk::MemoryMapFlags::empty())
-                    .expect("枪模顶点缓冲映射失败")
-            };
+            self.gun_mapped = mapped;
             self.gun_buffer_capacity_verts = need_verts;
             self.gun_buffer_capacity_idx = need_idx;
         }
