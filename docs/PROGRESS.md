@@ -158,7 +158,48 @@
   本轮压缩已结案条目 + 新增铁律 G，落到 **65,064 B**（余量 472 B）。
   🔴 **下次往里加东西前必须先删旧料**。
 
-（Rust 静默陷阱 / Vulkan 静默陷阱的分项审查结论见本轮后续小节。）
+（Rust 静默陷阱 / Vulkan 静默陷阱的分项审查结论见下面 §3。）
+
+## 3. 逐条审查结论（用户给的清单 → 本仓实际情况）
+
+### Rust 侧
+
+| 陷阱 | 本仓结论 | 证据 |
+|---|---|---|
+| Release/Debug 构建性能 | **不适用**：全程 `cargo build/test --release`，没有 Debug 跑法 | `SteelFront.bat` / 所有脚本都是 `--release` |
+| 未缓冲 I/O 在循环里 | **不成立**：`perf_log::frame()` 每帧调用但**内部按 1s 采样**才 `writeln!`（`File::flush()` 对无缓冲 `File` 本就是 no-op）；`config.rs` 只在存档时写盘 | `src/perf_log.rs:41-56`、`config.rs:193` |
+| 热路径 `unwrap()/expect()` | **审到一处真的**：枪模缓冲扩容 `create_host_buffer(..).expect(..)` + `map_memory(..).expect(..)` ⇒ **已修**（见 `921097c`：先建后毁 + 失败保旧 + 恢复计数）。其余热路径 unwrap 全部**紧邻判据**（`net_mode` 刚判过 / `is_none()` 的 else 臂），当天不可达 ⇒ **只记录不改**（改成 `if let` 要重排借用、零运行收益） | `renderer.rs:5205+`、`main.rs:2445-2447`、`game.rs:4900` |
+| 整数溢出 / `as` 截断 | **审到但未发现缺陷**：出现处都是音频打包（带显式掩码）、网格坐标（宽度已知且小）、`bool as u8` 写配置 | `audio.rs:250`、`ai.rs:196`、`config.rs:175` |
+| 每帧分配 | **存在但量级可忽略**：渲染路径每帧 `collect()` 出 `npc_visuals` / markers（KB 级）；作者已经把真正热的（`hit_damage_popups` / `corpses` / `particles`）做成**结构体字段复用**。⇒ **不改**（收益 < 1%，而 main.rs 里把 scratch 挂到 self 会与 `&self.game` 借用打架） | `main.rs:638/675/2446` |
+| unsafe / 裸指针 | 集中在 `renderer.rs`（423 处，ash 胶水）+ `simd.rs`/`cpu.rs`/`audio_out.rs`；**`ash::util::Align` 未被使用**（用户点名的 unsound 面不适用），只用 `util::read_spv` | `renderer.rs:1101` |
+| 异步任务挂起 | **不适用**：无 async 运行时（线程池是同步 join + 超时） | `engine/cpu.rs` |
+
+### Vulkan 侧
+
+| 陷阱 | 本仓结论 | 证据 |
+|---|---|---|
+| 过宽同步（ALL_COMMANDS 气泡） | **不存在**：全仓 **0 处** `ALL_COMMANDS`/`ALL_GRAPHICS`；13 处 `TRANSFER`、4 处 `COLOR_ATTACHMENT_OUTPUT`、4 处 `EARLY_FRAGMENT_TESTS`、3 处 `ACCELERATION_STRUCTURE_BUILD_KHR`… 都是窄掩码。`TOP_OF_PIPE`（6 处）只作一次性上传的 src（标准写法） | `renderer.rs` 屏障掩码直方图 |
+| 内存管理 / HOST_VISIBLE 滥用 | **正确**：静态几何走 staging → **DEVICE_LOCAL**；每帧 CPU 写的（实例场 / 地形 morph / HUD / UBO）才用 **HOST_VISIBLE\|HOST_COHERENT**；代码里甚至有注释警告"着色器不得随机读道具 VB（HOST_VISIBLE 每次命中走 PCIe）" | `renderer.rs:3108-3145`、`1085` |
+| 描述符集每帧重建 | **不存在**：9 处 `update_descriptor_sets` 全在**初始化或 PT 专用路径**（`init_descriptors`×3 / `init_shadow_resources`×1 / `update_texture_descriptor_sets`×1 且只被调 1 次 / PT×4） | 调用点归属逐一核对 |
+| 缺 bindless | **不需要**：没有 per-draw 描述符 —— 每物件数据走**实例场 + mesh shader**，一次 draw 覆盖全场景 ⇒ bindless 要解决的问题在本设计里不存在 | 铁律 A/B |
+| 忽略 VkResult | **18/18 `allocate_memory` 全部 `map_err(..)?`**，`bind_*` / `create_*` 同样传播；唯一 `let _ =` 的是 `device_wait_idle()`（那些位置失败无可作为） | `renderer.rs` 全量 grep |
+| O(N×M) 空间结构 | **有一处，且已知**：`target_occlusion` = 每 NPC × 全部 bodies（实测占 `ai_us` 18–39%），代码注释里已有实测数字与"要建粗相位索引"的结论。**本轮不动**（属算法级改动 + 本机帧率是 `wait_fence` 受限，AI 侧优化不涨帧 —— 见第 103 轮） | `game.rs:1288-1297` |
+
+### Rust × Vulkan 交界
+
+- **没有引入安全包装层**（不用 vulkano/wgpu），全部是 ash 裸接口 ⇒ "安全抽象开销"这一条不适用；
+  代价是 `unsafe` 数量大，本轮抽查了最危险的几类模式：**映射写顶点**（先算 `size_of` 再 `copy_nonoverlapping`，
+  尺寸由容量而非当前长度决定 ✓）、**字节视图**（`slice::from_raw_parts(v as *const T as *const u8, size_of::<T>())`
+  —— 类型都是 `#[repr(C)]` 且无内部填充，无 UB 面）、**`p_next` 链**（`&mut x as *mut _`，被指向的结构体
+  都在同一 `unsafe` 块作用域内存活 ✓）。
+- **跨线程**：渲染（含设备/队列/命令缓冲）**只在主线程**；AI 线程池不持有任何 Vulkan 句柄 ✓（与"渲染不拆线程"一致）。
+
+### 本轮**没做**的事（诚实记账）
+
+- 按用户要求**没跑游戏**（混合输出），因此**没有**跑验证层、没有跑冒烟、没有做任何图像取证；
+  以上结论**全部是静态审查 + `cargo build/test`**。图形相关的改动本轮**为零**。
+- O(N×M) 的空间索引、bindless、per-frame 分配复用：**审到但判定不改**（理由见上表），
+  已写进本文件而不是留在脑子里。
 
 ---
 
