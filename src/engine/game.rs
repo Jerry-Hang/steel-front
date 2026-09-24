@@ -1754,6 +1754,10 @@ impl Game {
         self.hud.settings_open = false;
         self.hud.confirm_quit = false;
         self.hud.victory_banner = None;
+        // 🔴 2026-09-22 复查补：击杀提示是**每局**的事件流。不清它，上一局的
+        // "你被击杀了" / 击杀行会跟到新一局（最多 6s，`KILL_FEED_DURATION`），
+        // 而重开时 score 已归零 —— 读数自相矛盾。`victory_banner` 同理（上一行）。
+        self.hud.kill_feed.clear();
         self.hud.cancel_rebind();
         self.score = 0;
         self.wave = 1;
@@ -1780,6 +1784,15 @@ impl Game {
             self.player_body.pos = Pv::new(0.0, 0.0, 0.0);
         }
         self.player_body.vel = Pv::ZERO;
+        // 🔴 2026-09-22 复查补：跳跃状态必须一起复位。玩家可以在**空中**被打死
+        // （NPC 伤害每秒结算一次，不看你在不在空中），此时 `jump_vel`（上升速度）与
+        // `jump_hvel`（冲刺跳的水平惯性）会带进新一局 —— 重开瞬间凭空弹起/继续滑行；
+        // `jump_pressed`（一直按着空格不松）则会"落地即起跳"。
+        // ⚠️ 必须在这里清：`move_first_person` 里只要 `jump_vel != 0` 就跳过落地分支，
+        // 残留的上升速度不会自己消失（`jump_hvel` 才会）。
+        self.jump_vel = 0.0;
+        self.jump_hvel = glam::Vec3::ZERO;
+        self.jump_pressed = false;
         self.move_forward = false;
         self.move_backward = false;
         self.move_left = false;
@@ -8060,6 +8073,45 @@ mod tests {
         assert!(game.grenades_vec.is_empty(), "重开后不得残留上一局的手榴弹");
         assert!(game.explosions.is_empty(), "重开后不得残留上一局的爆炸");
         assert_eq!(game.shake_timer, 0.0, "重开后震屏应归零");
+    }
+
+    /// 重开一局必须复位**跳跃状态**：玩家可能在空中被打死，
+    /// 否则新一局开局会带着上一局的上升速度与冲刺跳惯性，甚至"落地即起跳"。
+    /// 本测试在 `start_run` 补这三行复位之前会红。
+    #[test]
+    fn restart_resets_jump_state() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        // 模拟"冲刺跳之后在空中被打死"：仍在上升 + 带着水平惯性 + 空格一直没松
+        game.jump_vel = JUMP_SPEED;
+        game.jump_hvel = glam::Vec3::new(6.0, 0.0, 0.0);
+        game.jump_pressed = true;
+        game.game_state = GameState::GameOver;
+        game.request_restart(&glam::Vec3::ZERO);
+        assert_eq!(game.jump_vel, 0.0, "重开后不得带上一局的上升速度");
+        assert_eq!(
+            game.jump_hvel,
+            glam::Vec3::ZERO,
+            "重开后不得带上一局的跳跃惯性"
+        );
+        assert!(!game.jump_pressed, "重开后不得保留上一局的跳跃按键");
+    }
+
+    /// 重开一局必须清掉上一局的击杀提示：feed 是每局的事件流，
+    /// 而重开时 score 已归零 —— 残留的"你被击杀了"与清零的分数自相矛盾。
+    /// 本测试在 `start_run` 补 `kill_feed.clear()` 之前会红。
+    #[test]
+    fn restart_clears_kill_feed() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.hud.push_kill("你被击杀了".to_string());
+        assert!(!game.hud.kill_feed.is_empty(), "前置：feed 里应有一条");
+        game.game_state = GameState::GameOver;
+        game.request_restart(&glam::Vec3::ZERO);
+        assert!(
+            game.hud.kill_feed.is_empty(),
+            "重开后不得残留上一局的击杀提示"
+        );
     }
 
     /// 爆炸击杀：hp≤0 移除 + 计分 + 任务推进
