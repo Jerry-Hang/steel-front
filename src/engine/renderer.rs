@@ -5340,29 +5340,50 @@ impl Renderer {
             }
         }
         // 2026-08-28 终极可见性修复：unmap → remap（host-coherent 亦可能被驱动缓存延迟可见）
+        //
+        // 🔴 2026-09-22 复查补（灰色地带）：这里原来是 `.expect("枪模顶点缓冲重映射失败")` ——
+        // 映射失败 = 切枪瞬间 panic。更要紧的是失败时 `gun_mapped` 会**停在悬空指针上**：
+        // unmap 已经执行，旧指针指向已解除映射的内存 ⇒ 下一枪的顶点写入是野地址写。
+        // 现在改成与其它失败路径同款：报错 + 指针置空（入口判据 `gun_mapped.is_null()`
+        // 会让**下一枪**走重建分支、重新上传并恢复）。
+        // ⚠️ 计数**不回退**：新顶点数据此刻已经写进新缓冲了，回退计数反而会让 draw
+        // 按旧数量去抓新缓冲（也就是 5227 行注释里那种"新缓冲 + 旧计数"的错配）。
         unsafe {
             self.device.unmap_memory(self.gun_vertex_buffer_memory);
-            self.gun_mapped = self
-                .device
-                .map_memory(
-                    self.gun_vertex_buffer_memory,
-                    0,
-                    self.gun_buffer_capacity_verts as u64 * std::mem::size_of::<Vertex>() as u64,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .expect("枪模顶点缓冲重映射失败")
+            match self.device.map_memory(
+                self.gun_vertex_buffer_memory,
+                0,
+                self.gun_buffer_capacity_verts as u64 * std::mem::size_of::<Vertex>() as u64,
+                vk::MemoryMapFlags::empty(),
+            ) {
+                Ok(p) => self.gun_mapped = p,
+                Err(e) => {
+                    log::error!(
+                        "枪模顶点缓冲重映射失败：本枪仍按已写入的数据绘制，指针置空，下一枪重建: {e}"
+                    );
+                    self.gun_mapped = std::ptr::null_mut();
+                }
+            }
         }
         // 索引上传（独立映射窗口，用一次性的暂存：直接再 map 索引内存）
         unsafe {
-            let iptr = self
-                .device
-                .map_memory(
-                    self.gun_index_buffer_memory,
-                    0,
-                    self.gun_index_count as u64 * 4,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .expect("枪模索引缓冲映射失败");
+            let iptr = match self.device.map_memory(
+                self.gun_index_buffer_memory,
+                0,
+                self.gun_index_count as u64 * 4,
+                vk::MemoryMapFlags::empty(),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    // 索引没写进去 ⇒ 缓冲里是**上一把枪的索引**（或未初始化数据）。
+                    // 按新计数抓取 = 画错几何，最坏是越界索引 ⇒ 设备消失。
+                    // ⇒ 本枪不画（计数归零），并把顶点指针置空，让下一枪整体重建后重传两件套。
+                    log::error!("枪模索引缓冲映射失败：本枪不画，下一枪重建: {e}");
+                    self.gun_index_count = 0;
+                    self.gun_mapped = std::ptr::null_mut();
+                    return;
+                }
+            };
             std::ptr::copy_nonoverlapping(
                 indices.as_ptr() as *const u8,
                 iptr as *mut u8,
@@ -13062,5 +13083,73 @@ mod pt_prop_attrs_tests {
         assert_eq!(dec_n(a[0], 8), 1.0, "水平面法线必须是 +Y");
         assert_eq!(dec_n(a[0], 0), 0.0);
         assert_eq!(dec_n(a[0], 16), 0.0);
+    }
+}
+
+/// Vulkan **失败路径**的守卫（2026-09-22 复查新增）。
+///
+/// 本仓这一年 GPU 侧的事故，修法全都是 `log` + 降级；而失败路径上有一种写法
+/// 会把"偶发的一次分配/映射失败"直接升级成"整个进程没了"：
+/// `.expect(..)` / `.unwrap()` 接在 `map_memory` / `create_buffer` / `allocate_memory`
+/// 这类调用后面（切枪那一枪正好走这条路）。
+///
+/// 这一条**没法用普通单测触发**（本机 `map_memory` 不会失败），所以退一步：
+/// 加一条源码检查把这种写法挡住。它是**检查，不是证明** —— 只管这一条。
+#[cfg(test)]
+mod vk_failure_path_tests {
+    /// Vulkan 调用关键字（与真实写法逐字一致）
+    const CALLS: [&str; 8] = [
+        ".map_memory(",
+        ".create_buffer(",
+        ".allocate_memory(",
+        ".bind_buffer_memory(",
+        ".create_image(",
+        ".create_image_view(",
+        ".create_swapchain(",
+        ".create_command_pool(",
+    ];
+
+    /// 第 `idx` 行（含）往前 `window` 行内是否出现过 Vulkan 调用；返回相隔行数
+    fn vk_call_within(lines: &[&str], idx: usize, window: usize) -> Option<usize> {
+        (0..=window).find(|&back| {
+            idx.checked_sub(back)
+                .and_then(|j| lines.get(j))
+                .is_some_and(|l| CALLS.iter().any(|c| l.contains(c)))
+        })
+    }
+
+    /// 判据：`renderer.rs` 里对 Vulkan 调用的结果不许 `.expect()` / `.unwrap()`。
+    /// 现状（2026-09-22 修完后）为 0 处；修前会红在两处枪模 `map_memory`（5353 / 5365 行）。
+    #[test]
+    fn no_expect_or_unwrap_on_vulkan_calls() {
+        // ⚠️ 只扫**生产代码**：`include_str!` 会把本测试模块自身也读进来，
+        // 而它正文里就写着 `.expect(` 这几个字（自指 ⇒ 这条检查永远红）。
+        let full = include_str!("renderer.rs");
+        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        let lines: Vec<&str> = src.lines().collect();
+        // 先证明这条检查真的扫到了东西（否则文件被搬走/改名时会静默恒真）
+        assert!(
+            lines.iter().any(|l| l.contains(".map_memory(")),
+            "检查失效：源码里一个 map_memory 都没扫到"
+        );
+        let mut bad = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if !(line.contains(".expect(") || line.contains(".unwrap()")) {
+                continue;
+            }
+            if let Some(back) = vk_call_within(&lines, i, 8) {
+                bad.push(format!(
+                    "第 {} 行（Vulkan 调用在 {} 行之前）: {}",
+                    i + 1,
+                    i + 1 - back,
+                    line.trim()
+                ));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "Vulkan 失败路径必须 log + 降级，不许 panic：\n{}",
+            bad.join("\n")
+        );
     }
 }
