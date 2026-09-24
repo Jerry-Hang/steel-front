@@ -367,6 +367,77 @@ const _: () = assert!(INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTA
 
 ---
 
+## 7. 审查第五轮（同日续）：Vulkan **失败路径**专项（用户点名的"忽略 VkResult"那一类）
+
+方法：不按文件读，按**失败路径**扫 —— 先把"能失败"的调用点列出来
+（`map_memory` 33 处、`create_*`/`allocate_memory` 若干），再逐个问三个问题：
+① 失败时**有没有报**？② 失败后**接着用的状态对不对**？③ 有没有把失败**吞掉**？
+
+### 7.1 本轮改动（三个 commit，均已推送）
+
+| commit | 缺陷 | 后果 |
+|---|---|---|
+| `1afb7fc` | `set_first_person_gun_mesh` 的两处 `.expect(map_memory)` | 切枪路径上 panic = 整个进程没了。**更要紧的是顶点那条**：`unmap` 已执行，任何"优雅返回"都会把 `gun_mapped` 留在**悬空指针**上 ⇒ 下一枪往已解除映射的内存写。现改为置空 + 降级（入口判据 `gun_mapped.is_null()` 让下一枪重建恢复） |
+| `800c154` | `set_soldier_mesh` 的索引映射写成 `if let Ok(..)` | 映射失败**被吞掉**：索引一个都没写，函数却照常把 `soldier_index_count` 设成 `indices.len()` ⇒ draw call 读**未初始化显存**（几何错乱，最坏越界索引 = 设备消失），且不报错。同一函数另三条失败路径（创建/映射/重映射失败）直接 `return`，句柄还没存进 `self` ⇒ **永久泄漏显存**；新增局部 `free_pair` 统一收尾 |
+| `13e1ec8` | 呈现只处理 `OUT_OF_DATE` 与 `SUBOPTIMAL`，**其余 `Err` 落空** | `ERROR_SURFACE_LOST_KHR` / `ERROR_DEVICE_LOST` 被当成"这一帧呈现成功" ⇒ 主循环以为一切正常（画面已死，帧计数与 fps 照走）。抽出纯函数 `classify_present`（Presented / RecreateSwapchain / Failed），只认 `Ok(false)` 为成功 |
+
+### 7.2 新增**两条源码守卫**（`renderer.rs::vk_failure_path_tests`）
+
+Vulkan 的失败路径**没法用普通单测触发**（本机 `map_memory` 不会失败），所以退一步钉写法：
+
+1. `no_expect_or_unwrap_on_vulkan_calls` —— `.expect()`/`.unwrap()` 不得出现在 Vulkan 调用后 8 行内；
+2. `no_if_let_ok_swallowing_vulkan_calls` —— `if let Ok(..)` 不得吞掉 Vulkan 调用。
+
+**两条的牙都验过**：第 1 条修前精确报出 5353 / 5365 两行；第 2 条用 `#[cfg(any())]` 的恒假 decoy
+把两种写法放回去，两条各自报出该行，移除后转绿。踩到的两个坑都写进注释了：
+- `include_str!("renderer.rs")` 会把**守卫自己**读进来（自指 ⇒ 永远红）⇒ 扫到 `mod vk_failure_path_tests` 为止；
+- 为解释这个坑，注释里本来就要写出这两个模式 ⇒ 守卫改为**只扫代码行**（`is_comment` 排除）。
+
+另外 `13e1ec8` 的分类是**纯函数**，所以它有一条真正的行为单测
+（`present_result_tests::surface_lost_and_device_lost_are_failures`）：把分类改回旧行为立刻红。
+
+### 7.3 本轮核验**干净**的区域（附判据）
+
+| 区域 | 判据 |
+|---|---|
+| `memory_type_bits` | 10 处选内存类型**全部**带 `(requirements.memory_type_bits & type_mask) != 0`（含截图/纹理/PT/BLAS 那几处手写 find）⇒ 不会挑到该资源不允许的类型 |
+| HOST_VISIBLE 用法 | 所有映射写都建在 `HOST_VISIBLE + HOST_COHERENT` 上（无 flush 需求）；`prefer_device_local` 只给永不映射的资源 |
+| `ash::util::Align` | **全仓 0 处使用**（上传一律 `map_memory` + `copy_nonoverlapping`）⇒ 用户点名的 Align 隐患在本仓不存在 |
+| 映射写越界 | 逐点核对写入长度 vs 分配容量：HUD 先 `min(capacity)` 再写；枪模/道具/士兵/NPC/实例槽都按容量或常量上限收口；截图读回 `raw.len() == buffer_size`；道具索引写 `need_i == merged.indices.len()`（**不是**容量） |
+| `debug_assert` 审计 | 23 处，除一处外全是"参数形状"（长度相等类），release 里消失也无害 |
+
+### 7.4 ⏸ **暂停点**：下一轮直接接着修这一条（唯一的未修项）
+
+`renderer.rs::cull_and_upload`（约 7476 行）：
+```rust
+let nw = pool.workers() + 1;          // 段数
+...
+let mut near_prefix = [0u32; 64];     // ← 栈上定长
+let mut far_prefix = [0u32; 64];
+debug_assert!(nw <= 64, "并行段数超栈数组上限");   // 🔴 release 里**不存在**
+```
+`workers + 1 > 64` 的机器（64 核 128 线程以上，**每帧**都走这条路）会直接
+`index out of bounds: the len is 64 but the index is 64` —— 那句 `debug_assert` 在 release
+里被编译掉，兜不住；Rust 的索引检查会让它 panic（不是静默 UB，但等于"高核数机器一启动就崩"）。
+本机（16C32T）`workers + 1` 远小于 64 ⇒ **当前不可达**，属"硬件放大"的隐患。
+
+**修法（已定，勿再重新分析）**：加 `const CULL_MAX_SEGMENTS: usize = 64;` +
+纯函数 `fn cull_segment_count(workers: usize) -> usize { (workers + 1).min(CULL_MAX_SEGMENTS) }`，
+`nw` 改用它；补单测：`workers=3 → 4`、`=63 → 64`、`=1000 → 64`
+（红证 = 用旧公式，第三条给 1001 而非 64）。
+`.min(64)` 在本机是**空操作**（nw 本来就 < 64）⇒ 行为零变化，不碰线程调度逻辑。
+
+### 7.5 本轮**没做**的事（诚实记账）
+
+- 依旧**没有实机跑**（混合输出 + ComfyUI 占显存）：全部结论 = 静态审查 + `cargo test --release`
+  （**522 passed / 0 failed / 0 警告**）。上面三条修复的"失败路径"都**没有实机触发过**
+  （要触发得先人为让 `map_memory` 失败），判据是代码审查 + 守卫测试 + 纯函数单测。
+- 未逐个核对：`create_*` 家族里 `let _ = self.device.device_wait_idle()` 六处（**有意**忽略：
+  `wait_idle` 失败通常意味着设备已丢，此时继续销毁反而是正确处置），以及 `main.rs` 三处
+  `let _ = renderer.recreate_swapchain()`（重建失败只影响这一帧，下一帧会再试）。
+
+---
+
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
 
 ## 1. 症状与误诊
