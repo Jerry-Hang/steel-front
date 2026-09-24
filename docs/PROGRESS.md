@@ -238,6 +238,56 @@ git -c "http.curloptResolve=github.com:443:<真实IP>" push origin master
 **实测**：`761db34..db8902f` 推送成功，且 DSH 的 pre-push 密钥门同一轮报
 `✅ 通过：11 个文件已审查，未发现敏感凭据`（两道门是串联的，见铁律 G）。
 
+## 4. 审查第二轮（同日续）：转到**正确性**，并明确绕开线程调度
+
+> 🔴 **用户指示**：线程调度器 / 线程优化**不要动**（"那个地方不需要做优化，只要确认程序能正常运行"）
+> ⇒ `engine/cpu.rs` 的池子、亲和性、AI 降频逻辑**本轮只读不改**。
+
+### 4.1 已核验**干净**的区域（附判据，别再重复查）
+
+| 区域 | 判据 |
+|---|---|
+| **同步对象** | `image_available` + fence 按**在飞帧**、`render_finished` 按**交换链图像数**（两个函数里都写着 VUID-00067 的原始报文与理由）—— 这是现代 swapchain 的正确分配法，不需要改 |
+| **交换链生命周期** | `recreate_swapchain` = wait_idle → destroy → init → 信号量重排 → **hud framebuffers** → MSAA → depth → framebuffers → 命令缓冲 → **作废截图资源**；`destroy_swapchain` 逐个视图/图像/内存销毁且顺序正确（hud framebuffer 先于 swapchain image view）。没有漏项，也没看到按次泄漏 |
+| **网络收包解析** | `Reader::bytes(n)` 越界即 `Err(Truncated)`；`decode()` 先校 `HEADER_LEN`/magic/version 才索引；`net.rs` 的 `unwrap()` **全在 `#[cfg(test)]`** ⇒ 远端构造畸形包打不出 panic |
+| **投射物命中索引** | `hit_npc_index` 返回的 `idx` 在同一个块里用完即 `continue`，`damage_npc` 的 `remove` 不会留下陈旧索引；爆炸结算用倒序 `while i>0 { i-=1; damage_npc(i) }` ⇒ 删除安全 |
+| **顶点步长推导** | 主管线用 `std::mem::offset_of!(Vertex, pos/color/uv)` + `size_of::<Vertex>()`，全仓**没有**写死的 `stride(32)`/`stride(24)` ⇒ 偏移不会跟结构体脱钩 |
+| **上传容量守卫** | 实例/NPC/尸体各上传路径已有一次性告警闩（`warn_npc_cap_once` 等），超容不静默 |
+
+### 4.2 本轮改动（`79ef1ac`）：把"恒真断言"换成**会红的**布局断言
+
+发现本仓自称"最贵的一类 bug"的守卫其实**恒真**：
+
+```rust
+const _: () = assert!(INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTANCE_BUFFER_ELEMS > 0);
+```
+
+而 `INSTANCE_BUFFER_ELEMS` 恰恰**就是**由 `SOLDIER_INSTANCE_BASE + MAX_SOLDIER_INSTANCES` 定义的、
+`SOLDIER_INSTANCE_BASE` 又是 `GUN_INSTANCE_INDEX + 2` ⇒ 按教训 14「永远成立的断言等于没写」，
+对"新增槽位却忘了扩容量"毫无拦截力。改成 5 条**写死具体数字**的断言：
+
+| 断言 | 值 | 谁必须跟着改 |
+|---|---|---|
+| `GUN_INSTANCE_INDEX` | 83_009 | `build.rs` 枪槽字面量 |
+| `EMISSIVE_SLOT_BASE` | 82_945 | `build.rs` 的 `EMISSIVE_INSTANCE_BASE` |
+| `PROP_INSTANCE_INDEX` | 83_010 | `build.rs` |
+| `SOLDIER_INSTANCE_BASE` | 83_011 | `build.rs` |
+| `INSTANCE_BUFFER_ELEMS` | 83_779 | 三处 `.range()`（建 buffer / 主管线 / 阴影 pass） |
+
+另补两条**步长契约**（本仓已有 `size_of::<InstanceData>() == 80` 的先例）：
+`Vertex == 32B`（pos@0/color@12/uv@24）、`HudVertex == 24B` —— 两者一变，顶点属性就整体错位，
+而 **Vulkan 与驱动都不报错**，只是画面默默变错。
+
+**红测**（会红才算数）：把 `83_009` 临时改成 `83_008` → 编译期
+`error[E0080]: evaluation panicked: 枪模槽位变了：必须与 build.rs 的枪槽字面量同步`，随后改回。
+
+### 4.3 本轮**没做**的事
+
+- 按用户指示**不碰线程调度**；也**没跑游戏**（混合输出 + ComfyUI 占显存）⇒ 无验证层、无冒烟、
+  无图像取证，全部结论来自**静态审查 + `cargo build/test`**。
+- 顺手记：`main.rs` 的 `net_mode` + `as_ref().unwrap()`（每帧路径）**审到但判定不改** ——
+  判据就在上一行且中间无任何可变借用，"永久成立"；改成 `if let` 要重排借用，收益只是风格。
+
 ---
 
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
