@@ -317,6 +317,56 @@ const _: () = assert!(INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTA
 
 ---
 
+## 6. 审查第四轮（同日续）：重开/结算路径的状态一致性 —— "**每局残留**"一族
+
+题面：四条终局路径（普通死亡 / survive 阵亡 / survive 守满波 / 据点规则判定）在
+`Defeat`/`Victory`/`GameOver` 之间切换后，`request_restart` / `on_any_key` 是否把**所有**
+每局状态复位。方法：把 `Game` / `HudState` 的字段逐个过一遍"它是不是每局的"，
+再用 `grep` 找它的所有写入点，而不是只看 `start_run` 里写了什么。
+
+### 6.1 核验**干净**的区域（附判据）
+
+| 区域 | 判据 |
+|---|---|
+| 四条终局路径本身 | 全部**幂等且互斥**：手榴弹自伤 `game.rs:4207`、NPC 每秒 dps `game.rs:5508`、survive 守满波 `game.rs:4456`、据点规则 `game.rs:2192`。存活/失败两条都先判 `is_survive_rule()`，且都先过 `game_state == Playing` ⇒ 不会二次切换 |
+| `won_team` 记账 | survive 胜 = `set_won_team(Blue)`；两条败北路径都写 `obj_state.won_team = Red`（与"红方获胜"一致，不是各写一半） |
+| 重开的入口 | `request_restart` 只在 `GameOver / Victory(_) / Defeat` 生效（`game.rs:1742`）；`on_any_key` 只在 `StartMenu / LoadingMap` 生效 ⇒ 玩法中误按 R 不会重开 |
+| 据点进度 | `start_run` 把 `points[].progress / owner`、`kills / elapsed / won_team` 全部归零（`game.rs:1811`）⇒ **不会带着上一局的胜利条件进新一局**（曾担心"重开即秒胜"，实测不成立） |
+| `hud.reloading / medkits / heal_progress` | 三者**每帧**从权威源重同步（`game.rs:2065/2071/2072`），而 `medkits / heal_timer` 在 `apply_level` 里复位（`2235/2236`）⇒ 死亡时正在打药/换弹不会残留 |
+| HUD 屏映射 | `GameOver | Defeat → HudScreen::GameOver`、`Victory → HudScreen::Game` + 横幅（`game.rs:2770`）；`victory_banner` 在 `start_run` 与升关处清除 |
+| `kill_feed` 老化 | `hud.tick(dt)` 每帧调用（`game.rs:2080`）⇒ 残留最多 6s 后自然消失（但这 6s 本身就是缺陷，见 6.2） |
+
+### 6.2 本轮改动（三个 commit）：都是"上一局的残留物活到了下一局"
+
+| commit | 残留 | 后果 |
+|---|---|---|
+| `4f4670e` | `grenades_vec` / `explosions` / `shake_timer` | 投掷后死亡/通关 → 按 R，手榴弹跟着进新一局并在第 1 波爆炸：**多算击杀得分**，还可能自伤。`grenades_vec` 只在爆炸后由 `retain` 清，**不会自己过期** |
+| `1b9b42a` ① | `jump_vel` / `jump_hvel` / `jump_pressed` | 玩家可以在**空中**被打死（NPC 伤害每秒结算，不看是否在空中）：残留上升速度 ⇒ 重开瞬间凭空弹起；留着空格 ⇒ 落地即起跳。⚠️ `move_first_person` 里 `jump_vel != 0` **会跳过落地分支** ⇒ 这个残留不会自愈（`jump_hvel` 才会） |
+| `1b9b42a` ② | `hud.kill_feed` | feed 是**每局**的事件流：上一局的"你被击杀了"/击杀行最多跟到新一局 6s，而重开时 score 已归零 ⇒ 画面自相矛盾 |
+
+### 6.3 红测（会红才算数）
+
+三条各配一条回归测试，**每一条都先把改动撤掉确认会红**，失败信息分别是：
+`重开后不得残留上一局的手榴弹`（8060 行）、`重开后不得带上一局的上升速度`、
+`重开后不得残留上一局的击杀提示`。恢复后 **517 passed / 0 failed、0 警告**。
+
+### 6.4 有意**不改**的（记一笔，免得下次当 bug 修）
+
+- `stance`（站/蹲/卧）跨重开保持：读作设计选择 —— 重开是"从第 1 关重来"，不是"重置玩家姿态"。
+- `frame_no` 永不回绕清零：注释写明是远组降频的确定性分帧基准，属**有意**设计。
+- `last_blast_center`：字段注释已声明"不在结算期间的值是残留，不参与任何判定"。
+- `time` 不随重开归零，但 `last_damage_time` 归零 = "从未受伤" ⇒ 1 秒伤害节拍正确，无需改。
+
+### 6.5 本轮**没做**的事（诚实记账）
+
+- 全部结论来自**静态审查 + `cargo test --release`**，**没有实机跑**（混合输出 + ComfyUI 占显存，
+  按用户要求不做图形验证）。"重开瞬间凭空弹起"因此是**代码推断**，不是实拍。
+  要实拍：空中被打死 → R → 看第一人称机位 y 曲线（或 `RV3D_CAM` 俯看）。
+- 只覆盖了单机路径：`net_*` / `stress` 两条分支里的每局字段（`round_reset_at` 等）**未逐个验**，
+  它们由压力模式自己的 `spawn_stress_battle` 重置。
+
+---
+
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
 
 ## 1. 症状与误诊
