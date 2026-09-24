@@ -430,6 +430,32 @@ fn convert_pixels_to_rgba(format: vk::Format, src: &[u8], dst: &mut [u8]) -> Res
     Ok(())
 }
 
+/// `queue_present` 的结果分类（纯函数，可单测）。
+///
+/// 🔴 2026-09-22 复查补：此前只处理 `Err(ERROR_OUT_OF_DATE_KHR)` 与 `Ok(true)`（SUBOPTIMAL），
+/// **其余 `Err` 一律被静默忽略** —— `ERROR_SURFACE_LOST_KHR` / `ERROR_DEVICE_LOST` 会被
+/// 当成"这一帧呈现成功"，主循环继续跑（画面已经死了，帧计数与 fps 照走）。
+/// 现在只认 `Ok(false)` 为成功；除"重建交换链"两种之外的 Err 一律升级为错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentOutcome {
+    /// `Ok(false)`：真·呈现成功
+    Presented,
+    /// OUT_OF_DATE / SUBOPTIMAL：交换链需要重建（这是**成功的一类**，不是失败）
+    RecreateSwapchain,
+    /// 其它 Err（SURFACE_LOST / DEVICE_LOST / …）：不能当成功
+    Failed,
+}
+
+/// 纯函数：`queue_present` 的返回值 → 处置方式。判据见 `PresentOutcome`。
+fn classify_present(result: Result<bool, vk::Result>) -> PresentOutcome {
+    match result {
+        Ok(false) => PresentOutcome::Presented,
+        Ok(true) => PresentOutcome::RecreateSwapchain,
+        Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => PresentOutcome::RecreateSwapchain,
+        Err(_) => PresentOutcome::Failed,
+    }
+}
+
 /// 某顶点 (x,z) 在下一级（更粗）网格曲面上的高度：
 /// 先定位所在粗网格 cell，再用与地形索引一致的三角形剖分做重心插值。
 /// 粗网格点与细网格点重合处返回值与该点粗网格高度完全一致。
@@ -11127,13 +11153,19 @@ impl Renderer {
         };
         self.stage_present_us = t0.elapsed().as_micros() as u64;
 
-        if let Err(vk::Result::ERROR_OUT_OF_DATE_KHR) = present_result {
-            log::warn!("呈现 OUT_OF_DATE，重建交换链...");
-            return Err("交换链过期".to_string());
-        }
-        if let Ok(true) = present_result {
-            log::warn!("呈现 SUBOPTIMAL，重建交换链...");
-            return Err("交换链过期".to_string());
+        // 🔴 2026-09-22 复查补：呈现结果**必须每条都处理**（分类见 `classify_present`）。
+        // 旧写法只处理 OUT_OF_DATE 与 SUBOPTIMAL，其余 Err（SURFACE_LOST / DEVICE_LOST）
+        // 落空 ⇒ 主循环以为呈现成功，继续按"一切正常"跑下去。
+        match classify_present(present_result) {
+            PresentOutcome::Presented => {}
+            PresentOutcome::RecreateSwapchain => {
+                log::warn!("呈现 {:?}，重建交换链...", present_result);
+                return Err("交换链过期".to_string());
+            }
+            PresentOutcome::Failed => {
+                log::error!("呈现失败（{:?}）—— 不能当成成功", present_result);
+                return Err(format!("呈现失败: {:?}", present_result));
+            }
         }
 
         if let Some(e) = screenshot_err {
@@ -13240,6 +13272,44 @@ mod vk_failure_path_tests {
             bad.is_empty(),
             "Vulkan 调用的失败不许用 if let Ok 吞掉（要 log + 降级）：\n{}",
             bad.join("\n")
+        );
+    }
+}
+
+/// `queue_present` 结果分类的判据（2026-09-22 复查新增）。
+///
+/// 背景：呈现路径此前只认两种"需要重建交换链"的结果，**其余 `Err` 落空** ——
+/// 于是 `ERROR_SURFACE_LOST_KHR` / `ERROR_DEVICE_LOST` 被当成呈现成功。
+/// 这个分类是纯函数，所以这条真的能用单测钉住（不像上面的源码守卫）。
+#[cfg(test)]
+mod present_result_tests {
+    use super::{classify_present, PresentOutcome};
+    use ash::vk;
+
+    #[test]
+    fn only_ok_false_counts_as_presented() {
+        assert_eq!(classify_present(Ok(false)), PresentOutcome::Presented);
+    }
+
+    #[test]
+    fn suboptimal_and_out_of_date_ask_for_a_new_swapchain() {
+        assert_eq!(classify_present(Ok(true)), PresentOutcome::RecreateSwapchain);
+        assert_eq!(
+            classify_present(Err(vk::Result::ERROR_OUT_OF_DATE_KHR)),
+            PresentOutcome::RecreateSwapchain
+        );
+    }
+
+    /// 这两条就是"改了 2026-09-22 之前会红"的判据：旧写法把它们当成功了。
+    #[test]
+    fn surface_lost_and_device_lost_are_failures() {
+        assert_eq!(
+            classify_present(Err(vk::Result::ERROR_SURFACE_LOST_KHR)),
+            PresentOutcome::Failed
+        );
+        assert_eq!(
+            classify_present(Err(vk::Result::ERROR_DEVICE_LOST)),
+            PresentOutcome::Failed
         );
     }
 }
