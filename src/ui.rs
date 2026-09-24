@@ -1334,9 +1334,23 @@ impl HudState {
             });
         }
         // 分辨率 / 画质行（右侧显示当前值，Enter 循环切换，与键位行同一套高亮交互）
+        // 🔴 两处都是**查表**：`resolution_index` / `quality_index` 是 `pub` 字段，
+        // 裸下标一旦越界，设置面板每帧绘制都会 panic（与 `resolution()` 同一类隐患）。
         let display_rows = [
-            ("分辨率", RESOLUTION_LABELS[self.resolution_index as usize]),
-            ("画质", QUALITY_LABELS[self.quality_index as usize]),
+            (
+                "分辨率",
+                RESOLUTION_LABELS
+                    .get(self.resolution_index as usize)
+                    .copied()
+                    .unwrap_or(RESOLUTION_LABELS[0]),
+            ),
+            (
+                "画质",
+                QUALITY_LABELS
+                    .get(self.quality_index as usize)
+                    .copied()
+                    .unwrap_or(QUALITY_LABELS[0]),
+            ),
         ];
         for (i, (name, value)) in display_rows.iter().enumerate() {
             let row = 3 + i as u8; // 0=音量 1=灵敏度 2=音乐 3=分辨率 4=画质
@@ -1456,8 +1470,16 @@ impl HudState {
     }
 
     /// 当前分辨率 (宽, 高)（与 config.rs 持久化的 resolution 对齐）
+    ///
+    /// 🔴 这里是**查表而不是下标**：`resolution_index` 是 `pub` 字段（`main.rs` 直接赋值、
+    /// 外部也能写），越界时 `RESOLUTIONS[i]` 会直接 panic（设置面板一开就崩）。
+    /// 现在的调用点都用 `position(..).unwrap_or(0)` 夹过，所以**当下不可达**；
+    /// 但那是"别人代码里的前置条件"，不该由查表处承担 ⇒ 越界回退到第 0 档并照常出图。
     pub fn resolution(&self) -> (u32, u32) {
-        RESOLUTIONS[self.resolution_index as usize]
+        RESOLUTIONS
+            .get(self.resolution_index as usize)
+            .copied()
+            .unwrap_or(RESOLUTIONS[0])
     }
 
     /// 窗口尺寸变化时同步 HUD 布局基准（16:10 等非 16:9 分辨率下保证 HUD 不错位）
@@ -2523,6 +2545,24 @@ mod tests {
         assert_eq!(hud.resolution_index, 0, "默认分辨率索引应为 0");
         assert_eq!(hud.resolution(), (1280, 720), "默认分辨率应为 1280x720");
         assert_eq!(hud.quality_index, 1, "默认画质应为 MEDIUM");
+    }
+
+    /// 越界的 `resolution_index` 必须**回退**而不是 panic ——
+    /// 它是 `pub` 字段（`main.rs` 与外部都能直接赋值），查表处不该依赖调用方的前置条件。
+    /// 本测试在改成查表之前会 panic（index out of bounds），改完返回第 0 档。
+    #[test]
+    fn resolution_index_out_of_range_falls_back() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        hud.resolution_index = 200; // 远超 RESOLUTIONS.len()
+        assert_eq!(
+            hud.resolution(),
+            RESOLUTIONS[0],
+            "越界索引应回退到第 0 档，而不是 panic"
+        );
+        hud.quality_index = 200;
+        // 设置面板的"显示行"构建路径：越界时同样必须能画出这一帧
+        let quads = hud.settings_elements();
+        assert!(!quads.is_empty(), "越界索引下设置面板仍应能构建出元素");
     }
 
     #[test]
