@@ -7183,6 +7183,18 @@ impl Renderer {
         }
         let v_size = SOLDIER_MESH_VERTS as u64 * std::mem::size_of::<Vertex>() as u64;
         let i_size = SOLDIER_MESH_INDICES as u64 * 4;
+        // 失败路径统一收尾：释放**已经建好、但还没存进 `self`** 的 buffer/memory。
+        // 直接 `return` 等于永久泄漏这几份显存 —— 没有任何别的引用还找得到它们。
+        fn free_pair(device: &ash::Device, b: vk::Buffer, m: vk::DeviceMemory) {
+            unsafe {
+                if b != vk::Buffer::null() {
+                    device.destroy_buffer(b, None);
+                }
+                if m != vk::DeviceMemory::null() {
+                    device.free_memory(m, None);
+                }
+            }
+        }
         let (vb, vm) = match self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, v_size) {
             Ok(x) => x,
             Err(e) => {
@@ -7194,6 +7206,8 @@ impl Renderer {
             Ok(x) => x,
             Err(e) => {
                 log::error!("soldier: 索引缓冲创建失败，退回 18 段箱体: {e}");
+                // 🔴 2026-09-22 复查补：顶点那一对已经建好了，必须先释放再退出。
+                free_pair(&self.device, vb, vm);
                 return;
             }
         };
@@ -7204,6 +7218,8 @@ impl Renderer {
             Ok(p) => p,
             Err(e) => {
                 log::error!("soldier: 顶点缓冲映射失败，退回 18 段箱体: {e}");
+                free_pair(&self.device, vb, vm);
+                free_pair(&self.device, ib, im);
                 return;
             }
         };
@@ -7218,14 +7234,30 @@ impl Renderer {
             }
         }
         // 索引也要 host-visible：单独 map 索引缓冲
-        if let Ok(ip) = unsafe { self.device.map_memory(im, 0, i_size, vk::MemoryMapFlags::empty()) }
-        {
-            let iptr = ip as *mut u32;
-            for (i, idx) in indices.iter().enumerate() {
-                unsafe { *iptr.add(i) = *idx };
+        //
+        // 🔴 2026-09-22 复查补：这里原来是把 `map_memory` 的结果用 `if let Ok` 吞掉 ——
+        // **映射失败被静默吞掉**：索引一个都没写进去，函数却照常往下走，把
+        // `soldier_index_count` 设成 `indices.len()` ⇒ draw call 按这个数去读
+        // **未初始化的显存**（几何错乱，最坏是越界索引 = 设备消失），且不报任何错。
+        // 现在与其它失败路径同款：报错 + 释放已建资源 + 退回 18 段箱体。
+        let ip = match unsafe {
+            self.device
+                .map_memory(im, 0, i_size, vk::MemoryMapFlags::empty())
+        } {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("soldier: 索引缓冲映射失败，退回 18 段箱体: {e}");
+                unsafe { self.device.unmap_memory(vm) };
+                free_pair(&self.device, vb, vm);
+                free_pair(&self.device, ib, im);
+                return;
             }
-            unsafe { self.device.unmap_memory(im) };
+        };
+        let iptr = ip as *mut u32;
+        for (i, idx) in indices.iter().enumerate() {
+            unsafe { *iptr.add(i) = *idx };
         }
+        unsafe { self.device.unmap_memory(im) };
         // 与枪模/道具同样的 unmap→remap：host-coherent 内存也可能被驱动延迟可见。
         // 顶点只上传这一次，所以重映射后**不留指针**（枪模留是因为它要反复重写）。
         unsafe {
@@ -7235,6 +7267,9 @@ impl Renderer {
                 .map_memory(vm, 0, v_size, vk::MemoryMapFlags::empty())
             {
                 log::error!("soldier: 顶点缓冲重映射失败，退回 18 段箱体: {e}");
+                // vm 刚刚已 unmap（不能重复 unmap），直接释放两对句柄即可。
+                free_pair(&self.device, vb, vm);
+                free_pair(&self.device, ib, im);
                 return;
             }
             self.device.unmap_memory(vm);
@@ -13086,17 +13121,25 @@ mod pt_prop_attrs_tests {
     }
 }
 
-/// Vulkan **失败路径**的守卫（2026-09-22 复查新增）。
-///
-/// 本仓这一年 GPU 侧的事故，修法全都是 `log` + 降级；而失败路径上有一种写法
-/// 会把"偶发的一次分配/映射失败"直接升级成"整个进程没了"：
-/// `.expect(..)` / `.unwrap()` 接在 `map_memory` / `create_buffer` / `allocate_memory`
-/// 这类调用后面（切枪那一枪正好走这条路）。
-///
-/// 这一条**没法用普通单测触发**（本机 `map_memory` 不会失败），所以退一步：
-/// 加一条源码检查把这种写法挡住。它是**检查，不是证明** —— 只管这一条。
 #[cfg(test)]
 mod vk_failure_path_tests {
+    //! Vulkan **失败路径**的守卫（2026-09-22 复查新增）。
+    //!
+    //! 本仓这一年 GPU 侧的事故，修法全都是 `log` + 降级；而失败路径上有两种写法
+    //! 会把"偶发的一次分配/映射失败"升级成更坏的状态：
+    //! 1. 把 `expect` / `unwrap` 接在 `map_memory` / `create_buffer` / `allocate_memory`
+    //!    这类调用后面 —— 直接 panic（切枪那一枪正好走这条路 = 整个进程没了）；
+    //! 2. 用 `if let Ok(..)` 接 —— 失败被吞掉，后面的代码继续用**未初始化的显存**
+    //!    （画错或设备消失，且不报错）。
+    //!
+    //! 这两条**没法用普通单测触发**（本机 `map_memory` 不会失败），所以退一步：
+    //! 加源码检查把它们挡住。它是**检查，不是证明** —— 只管这两种写法。
+    //! 判据：修之前这两条检查各自报出真实位置（枪模重映射两处 / 士兵索引映射一处），
+    //! 修完转绿。
+    //!
+    //! ⚠️ 正文写在 `mod` 之内（`//!` 而不是 `///`）：外层的文档注释在 `mod` 行**之前**，
+    //! 会被自己的扫描算进去 —— 那段文字里就写着这两个模式，自指 ⇒ 永远红。
+
     /// Vulkan 调用关键字（与真实写法逐字一致）
     const CALLS: [&str; 8] = [
         ".map_memory(",
@@ -13109,12 +13152,19 @@ mod vk_failure_path_tests {
         ".create_command_pool(",
     ];
 
+    /// 只把**代码行**算进扫描：注释里为了解释这个坑，本来就要写出这两个模式，
+    /// 不排除的话"解释它的注释"会自己踩线（第一次就是这么红的）。
+    fn is_comment(line: &str) -> bool {
+        let t = line.trim_start();
+        t.starts_with("//") || t.starts_with("/*") || t.starts_with('*')
+    }
+
     /// 第 `idx` 行（含）往前 `window` 行内是否出现过 Vulkan 调用；返回相隔行数
     fn vk_call_within(lines: &[&str], idx: usize, window: usize) -> Option<usize> {
         (0..=window).find(|&back| {
             idx.checked_sub(back)
                 .and_then(|j| lines.get(j))
-                .is_some_and(|l| CALLS.iter().any(|c| l.contains(c)))
+                .is_some_and(|l| !is_comment(l) && CALLS.iter().any(|c| l.contains(c)))
         })
     }
 
@@ -13134,6 +13184,9 @@ mod vk_failure_path_tests {
         );
         let mut bad = Vec::new();
         for (i, line) in lines.iter().enumerate() {
+            if is_comment(line) {
+                continue;
+            }
             if !(line.contains(".expect(") || line.contains(".unwrap()")) {
                 continue;
             }
@@ -13149,6 +13202,43 @@ mod vk_failure_path_tests {
         assert!(
             bad.is_empty(),
             "Vulkan 失败路径必须 log + 降级，不许 panic：\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// 判据：Vulkan 调用的失败不许被 `if let Ok(..)` **静默吞掉**。
+    /// 修前会红在士兵网格的索引映射（`if let Ok(ip) = ...map_memory(...)`）——
+    /// 那一处失败时索引一个都没写，函数却继续把 `soldier_index_count` 设成
+    /// `indices.len()`，draw call 读未初始化显存。
+    #[test]
+    fn no_if_let_ok_swallowing_vulkan_calls() {
+        let full = include_str!("renderer.rs");
+        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        let lines: Vec<&str> = src.lines().collect();
+        assert!(
+            lines.iter().any(|l| l.contains(".map_memory(")),
+            "检查失效：源码里一个 map_memory 都没扫到"
+        );
+        let mut bad = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if is_comment(line) {
+                continue;
+            }
+            if !line.contains("if let Ok(") {
+                continue;
+            }
+            if let Some(back) = vk_call_within(&lines, i, 8) {
+                bad.push(format!(
+                    "第 {} 行（Vulkan 调用在 {} 行之前）: {}",
+                    i + 1,
+                    i + 1 - back,
+                    line.trim()
+                ));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "Vulkan 调用的失败不许用 if let Ok 吞掉（要 log + 降级）：\n{}",
             bad.join("\n")
         );
     }
