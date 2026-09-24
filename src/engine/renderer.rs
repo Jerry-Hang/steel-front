@@ -58,6 +58,14 @@ struct Vertex {
     color: [f32; 3],
     uv: [f32; 2],
 }
+// 步长契约：主管线把它当 `stride` 用（`size_of::<Vertex>()`），而**着色器把
+// `location 0/1/2 = pos/color/uv` 与 32B 步长当成既成事实**（`build.rs` 的 mesh 路径
+// 与 `铁律 B` 的 "stride=32" 都这么写）。加字段/加填充会让属性整体错位，
+// 而 Vulkan 与驱动**都不报错**（只是画面默默变错）⇒ 在这里把它钉死。
+const _: () = assert!(
+    std::mem::size_of::<Vertex>() == 32,
+    "Vertex 必须是 32B（pos@0/color@12/uv@24）：管线步长与着色器取属性都按它写死"
+);
 
 /// 性能快照（供性能日志系统，2026-08-16）：帧耗时与各渲染阶段耗时（微秒）
 #[derive(Clone, Copy)]
@@ -79,6 +87,12 @@ struct HudVertex {
     pos: [f32; 2],
     color: [f32; 4],
 }
+// HUD 覆盖层自己的步长契约（与主管线的 `Vertex` 无关）：`hud.vert.spv` 按
+// `pos vec2 + color vec4` 取属性，步长由这里推导 ⇒ 改动同样必须在这里被挡住。
+const _: () = assert!(
+    std::mem::size_of::<HudVertex>() == 24,
+    "HudVertex 必须是 24B（pos vec2 + color vec4）：HUD 着色器按此布局取属性"
+);
 
 /// 立方体 24 顶点（每面 4 个，CCW 外侧绕序；每面 UV 铺满 0..1）
 const VERTICES: [Vertex; 24] = [
@@ -528,9 +542,32 @@ const INSTANCE_BUFFER_ELEMS: u64 =
 // ⇒ **10.0 是这条杠杆的拐点**：再细分只会增加绘制调用与剔除开销，不再减少顶点吞吐。
 // **不要再往下调，除非先证明瓶颈已从"顶点吞吐"变成别的。**
 const PROP_BIN_CELL_M: f32 = 10.0;
+// 🔴 槽位布局断言改成**写死具体数字**。
+// 原来这里写的是 `INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX`，而它永远成立
+// （本常量就是由 `SOLDIER_INSTANCE_BASE + MAX_SOLDIER_INSTANCES` 定义出来的，而
+//  `SOLDIER_INSTANCE_BASE` 又是 `GUN_INSTANCE_INDEX + 2`）⇒ 按教训 14「永远成立的断言等于没写」。
+// 现在任何槽位/容量改动都会**编译失败**，改动者必须回来同步 `build.rs` 的槽位常量
+// 与三处 `.range()`（建 buffer / 主管线 / 阴影 pass）—— 那正是 2026-09-04 静默越界
+// （几何整体消失、无 VUID）的入口。
 const _: () = assert!(
-    INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTANCE_BUFFER_ELEMS > 0,
-    "实例 buffer 必须覆盖所有已知槽位"
+    GUN_INSTANCE_INDEX == 83_009,
+    "枪模槽位变了：必须与 build.rs 的枪槽字面量同步"
+);
+const _: () = assert!(
+    EMISSIVE_SLOT_BASE == 82_945,
+    "自发光区起点变了：必须与 build.rs 的 EMISSIVE_INSTANCE_BASE 同步"
+);
+const _: () = assert!(
+    PROP_INSTANCE_INDEX == 83_010,
+    "道具槽位变了：必须与 build.rs 同步"
+);
+const _: () = assert!(
+    SOLDIER_INSTANCE_BASE == 83_011,
+    "士兵实例区起点变了：必须与 build.rs 同步"
+);
+const _: () = assert!(
+    INSTANCE_BUFFER_ELEMS == 83_779,
+    "实例 buffer 容量变了：必须同步三处 .range() 与 build.rs"
 );
 
 
