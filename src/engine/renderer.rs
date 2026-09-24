@@ -503,7 +503,10 @@ const PROP_INSTANCE_INDEX: u32 = GUN_INSTANCE_INDEX + 1;
 /// 道具也早就在用它 —— 所以这里不需要新增任何管线。
 const SOLDIER_INSTANCE_BASE: u32 = PROP_INSTANCE_INDEX + 1;
 /// 士兵实例槽容量。取 `MAX_AI`(768) 的上限：压力模式红蓝各 128，加上普通波次也够。
-/// **超出的 NPC 直接不画真网格**（退回 18 段箱体），不是静默越界 —— 见 `write_soldier_instances`。
+/// **超出的 NPC 直接不画真网格**（退回 18 段箱体），不是静默越界：
+/// `set_npc_visuals` 里 `len() < MAX_SOLDIER_INSTANCES` 就不再 push，`upload_soldiers`
+/// 上传时再按容量取一次 min。（2026-09-22 复查：这里原先引用的 `write_soldier_instances`
+/// 已不存在，是过期名字，已改正。）
 const MAX_SOLDIER_INSTANCES: u32 = 768;
 /// 士兵网格的顶点/索引预留容量（`soldier.glb` 实测 1082 顶点 / 540 索引，留 4 倍余量）。
 /// ⚠️ 换更细的士兵模型要同步放大，否则 `set_soldier_mesh` 会拒绝上传并打 error。
