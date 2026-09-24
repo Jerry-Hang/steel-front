@@ -1786,6 +1786,13 @@ impl Game {
         self.move_right = false;
         self.footstep_timer = 0.0;
         self.projectiles.clear();
+        // 🔴 2026-09-22 复查补：重开/换图必须连**在飞的手榴弹与爆炸**一起清。
+        // 否则"投掷后死亡（或通关），再按 R 重开"时，上一局的手榴弹会留在场上并进入新一局 ——
+        // 它在新的第 1 波里爆炸，会多算击杀得分，还可能伤到玩家。
+        // （`grenades_vec` 只在爆炸后由 `retain` 清，不会自己过期。）
+        self.grenades_vec.clear();
+        self.explosions.clear();
+        self.shake_timer = 0.0;
         self.shots = 0;
         self.hits = 0;
         self.total_collisions = 0;
@@ -8026,6 +8033,33 @@ mod tests {
                 fps
             );
         }
+    }
+
+    /// 重开一局必须清掉**在飞的手榴弹与爆炸**：
+    /// 否则"投掷后死亡/通关 → 按 R 重开"会把上一局的手榴弹带进新一局，
+    /// 它在新一局的第 1 波里爆炸 —— 多算击杀得分，还可能伤到玩家。
+    /// 本测试在补这两行清除之前会红（`grenades_vec` 非空）。
+    #[test]
+    fn restart_clears_in_flight_grenades_and_explosions() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        // 造一颗"在飞"的手榴弹 + 一团爆炸（都还没过期）
+        game.grenades_vec.push(Grenade::new(
+            [0.0, 1.5, 0.0],
+            [0.0, 0.3, -1.0],
+            GRENADE_SPEED,
+            2.0,
+        ));
+        game.spawn_explosion([1.0, 1.0, 1.0], EXPLOSION_RADIUS, 1.0, false);
+        assert!(
+            !game.grenades_vec.is_empty() && !game.explosions.is_empty(),
+            "前置：场上应有在飞手榴弹与爆炸"
+        );
+        game.game_state = GameState::GameOver;
+        game.request_restart(&glam::Vec3::ZERO);
+        assert!(game.grenades_vec.is_empty(), "重开后不得残留上一局的手榴弹");
+        assert!(game.explosions.is_empty(), "重开后不得残留上一局的爆炸");
+        assert_eq!(game.shake_timer, 0.0, "重开后震屏应归零");
     }
 
     /// 爆炸击杀：hp≤0 移除 + 计分 + 任务推进
