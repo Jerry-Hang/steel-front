@@ -3051,6 +3051,20 @@ impl Renderer {
             self.swapchain_extent.height.max(1) as f32,
         );
         let count = quads.len().min(self.hud_capacity_quads as usize);
+        // 2026-09-22 复查补：HUD 是全仓**最后一处静默截断** —— NPC / 尸体 / 道具那几处
+        // 早就有一次性告警闩（`warn_npc_cap_once` 形态），只有这里超容不提示。
+        // 仍按容量截断（行为不变，防越界写映射内存），但把"少画了东西"变成可诊断的一行日志。
+        if quads.len() > self.hud_capacity_quads as usize {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                log::warn!(
+                    "HUD quad 超容：需要 {} 个，容量 {}，超出部分本帧不绘制（一次性告警）",
+                    quads.len(),
+                    self.hud_capacity_quads
+                );
+            }
+        }
         self.hud_vertex_count = (count * 6) as u32;
         if count == 0 || self.hud_mapped.is_null() {
             return;
