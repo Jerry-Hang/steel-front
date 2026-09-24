@@ -288,6 +288,33 @@ const _: () = assert!(INSTANCE_BUFFER_ELEMS > GUN_INSTANCE_INDEX as u64 && INSTA
 - 顺手记：`main.rs` 的 `net_mode` + `as_ref().unwrap()`（每帧路径）**审到但判定不改** ——
   判据就在上一行且中间无任何可变借用，"永久成立"；改成 `if let` 要重排借用，收益只是风格。
 
+## 5. 审查第三轮（同日续）：查表越界那类"隐藏前置条件"
+
+### 5.1 核验**干净**的区域
+
+| 区域 | 判据 |
+|---|---|
+| `font_cjk::glyph` | 返回 `Option`；`ui.rs::glyph` 已按设计回退 `?`（有测试锁：`glyph('\u{0}') == glyph('?')`）。`font_cjk.rs` 里那条 `panic!` 在 `#[cfg(test)]` 内 ⇒ **运行时不可达** |
+| `config.rs` 解析 | 全是 `parse::<..>().unwrap_or(默认值)` + `clamp`；分辨率先 `RESOLUTIONS.contains(&(w, h))` 才接受 ⇒ 手改配置文件打不出 panic |
+| `advance_level` | 空关卡表 → `false`；已是最后一关 → `false`；之后才 `level_idx += 1` 并索引 ✓ |
+| `resolution_index` 的两处赋值 | 都是 `RESOLUTIONS.iter().position(..).unwrap_or(0)` ⇒ 索引必在界内 |
+
+### 5.2 本轮改动（`85517f2`）：三处裸下标改成查表
+
+`ui.rs::resolution()` 与设置面板那两行标签，都把 **`pub` 字段**直接当下标用：
+`RESOLUTIONS[resolution_index]` / `RESOLUTION_LABELS[..]` / `QUALITY_LABELS[..]`。
+字段当下由 `position(..).unwrap_or(0)` 保证在界内 ⇒ **当前不可达**；但查表处不该依赖
+"别人代码里的前置条件"：新增档位、或外部/配置写这个字段，就会让**设置面板每帧绘制** panic。
+改成 `get(..).copied().unwrap_or(第0档)`，合法索引下行为完全不变。
+
+**红测**（会红才算数）：改前，新测试 `resolution_index_out_of_range_falls_back` panic
+`index out of bounds: the len is 5 but the index is 200`（ui.rs:1479）；改后 **514 passed / 0 failed**。
+
+### 5.3 自我纠错（记一笔，别犯第四次）
+
+这一轮我又拿 `Get-Content` 取行号去核对源码，读到的位置与 `git grep` 对不上
+（两者对 CR/LF 的处理不同）——**按教训 8，行号一律用 `read` 工具**。
+
 ---
 
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
