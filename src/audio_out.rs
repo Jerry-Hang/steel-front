@@ -4,7 +4,8 @@
 //! 但游戏默认挂了 SilentSink（静默占位）——2026-08-22 用户反馈"进游戏一点声音都没有"。
 //! 本模块提供 WaveOutSink：16-bit PCM 交错样本 → waveOut 环形缓冲队列 → 声卡。
 //!
-//! 结构：4 块 2048 帧双声道缓冲（~85ms 队列）。主线程每帧 tick 写入小块样本
+//! 结构：4 块 2048 帧双声道缓冲（48kHz 下 4×2048/48000 = **170ms** 队列 —— 旧注释写"~85ms"是
+//! 按 2 块算的，已更正）。主线程每帧 tick 写入小块样本
 //! （350FPS 时 ~137 帧/帧），回调线程完成 buffer 后归还空闲槽；free 列表用
 //! Arc<Mutex<Vec<usize>>> 保护（回调与主线程竞争）。
 //!
@@ -144,14 +145,36 @@ mod win {
         }
         let mut buffers = Vec::with_capacity(BUFFER_COUNT);
         for _ in 0..BUFFER_COUNT {
-            let mut b = WaveBuffer::new();
+            buffers.push(WaveBuffer::new());
+        }
+        // 🔴 2026-09-23 复查：**prepare 必须在最终地址上做**。
+        // 驱动会在 prepare 时把 WAVEHDR 的地址记进它自己的表（`waveOutWrite` 收的是这个地址，
+        // 回调的 `dwParam1` 也是它），而 WAVEHDR 里还有 `reserved` 是"驱动内部使用、应用不得改"的。
+        // 旧写法先在**栈上临时量**prepare、再 `buffers.push(b)` 搬家 ⇒ 准备的地址 ≠ 使用的地址。
+        // 现在先收齐（`Vec` 容量一次给足，此后堆区不再变动）再逐个 prepare。
+        for i in 0..buffers.len() {
             let rc = unsafe {
-                waveOutPrepareHeader(handle, &mut b.hdr, std::mem::size_of::<WaveHdr>() as u32)
+                waveOutPrepareHeader(
+                    handle,
+                    &mut buffers[i].hdr,
+                    std::mem::size_of::<WaveHdr>() as u32,
+                )
             };
             if rc != 0 {
+                // 失败路径收尾：已 prepare 的头要 unprepare，设备句柄要 close。
+                // （旧写法直接 `return Err` ⇒ 句柄与已准备的缓冲全部泄漏，且设备一直开着。）
+                unsafe {
+                    for b in buffers.iter_mut().take(i) {
+                        waveOutUnprepareHeader(
+                            handle,
+                            &mut b.hdr as *mut _,
+                            std::mem::size_of::<WaveHdr>() as u32,
+                        );
+                    }
+                    waveOutClose(handle);
+                }
                 return Err(format!("waveOutPrepareHeader 失败 rc={}", rc));
             }
-            buffers.push(b);
         }
         Ok((handle, ctx, buffers))
     }
@@ -225,10 +248,16 @@ impl WaveOutSink {
         };
         let idx = (|| ctx.free.lock().ok().and_then(|mut f| f.pop()))();
         let Some(idx) = idx else {
-            return; // 全部在播：丢弃（85ms 队列在 350FPS 下足够）
+            return; // 全部在播：丢弃（48kHz 下 4×2048 帧 = 170ms 队列，正常帧率下够用）
         };
         let b = &mut self.buffers[idx];
-        let n = samples.len().min(FRAMES_PER_BUFFER * self.channels as usize);
+        let (n, truncated) = submit_plan(
+            samples.len(),
+            FRAMES_PER_BUFFER * self.channels as usize,
+        );
+        if truncated {
+            warn_submit_truncation_once(samples.len(), FRAMES_PER_BUFFER * self.channels as usize);
+        }
         let data8 = b.data.as_mut_ptr();
         for i in 0..n {
             let s = samples[i].clamp(-1.0, 1.0);
@@ -295,6 +324,28 @@ pub type DefaultSink = WaveOutSink;
 #[cfg(not(target_os = "windows"))]
 pub type DefaultSink = crate::audio::SilentSink;
 
+/// 单块最多能装多少**样本**（交错后的 f32 个数）：`FRAMES_PER_BUFFER × 声道数`。
+///
+/// 🔴 2026-09-23 复查补的判据：本帧要写的样本数可能超过这个容量（帧率骤降到
+/// `48000/2048 ≈ 23fps` 以下，或加载/卡顿让某一帧的 dt 覆盖 170ms 以上）。
+/// 超出的部分**丢弃是有意的**（卡顿之后不需要补播旧音频），但**不能静默** —— 见 `submit`。
+fn submit_plan(available: usize, capacity: usize) -> (usize, bool) {
+    (available.min(capacity), available > capacity)
+}
+
+/// 一次性告警（不刷屏）：单块装不下的样本被丢弃
+fn warn_submit_truncation_once(available: usize, capacity: usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "audio: 单块只能装 {} 个样本，本帧要写 {} 个 —— 超出部分已丢弃（帧率骤降时会有杂音；后续同样情况不再提示）",
+            capacity,
+            available
+        );
+    }
+}
+
 pub fn open_default_sink(sample_rate: u32, channels: u16) -> DefaultSink {
     #[cfg(target_os = "windows")]
     {
@@ -304,5 +355,28 @@ pub fn open_default_sink(sample_rate: u32, channels: u16) -> DefaultSink {
     {
         let _ = (sample_rate, channels);
         crate::audio::SilentSink::new(sample_rate, channels)
+    }
+}
+
+/// 单块容量/截断判定的判据（纯函数，跨平台可测 —— 不依赖声卡）。
+#[cfg(test)]
+mod tests {
+    use super::{submit_plan, FRAMES_PER_BUFFER};
+
+    #[test]
+    fn submit_plan_never_exceeds_source_or_capacity() {
+        let cap = FRAMES_PER_BUFFER * 2; // 双声道
+        // 正常帧（48kHz / 60fps = 800 帧 → 1600 样本）：全写，不截断
+        assert_eq!(submit_plan(1600, cap), (1600, false));
+        // 边界：刚好装满
+        assert_eq!(submit_plan(cap, cap), (cap, false));
+        // 帧率骤降（48kHz / 20fps = 2400 帧 → 4800 样本）：截到容量，并报告截断
+        assert_eq!(submit_plan(4800, cap), (cap, true));
+        // 空输入：写 0，不算截断
+        assert_eq!(submit_plan(0, cap), (0, false));
+        // 🔴 这一条是"改错了会红"的关键：绝不能返回超过 available 的长度 ——
+        // `submit` 会按这个数去索引 `samples[i]`（越界读 = panic）。
+        let (n, _) = submit_plan(3, cap);
+        assert!(n <= 3, "返回的写入长度不得超过源切片长度");
     }
 }
