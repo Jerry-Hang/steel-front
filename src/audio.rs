@@ -670,6 +670,9 @@ impl<S: AudioSink> AudioPlayer<S> {
         &self.sink
     }
 
+    /// 对称访问器（预留）：当前无调用方；`sink()` 有测试用，`sink_mut()` 是配套的可变版本。
+    /// 🔴 2026-09-23 复查（编译器判定）：非测试构建里 0 引用 —— 需要它时（例如运行时切换输出后端）再接。
+    #[allow(dead_code)]
     pub fn sink_mut(&mut self) -> &mut S {
         &mut self.sink
     }

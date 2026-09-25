@@ -67,7 +67,10 @@ pub struct Camera {
     flight_pos: Vec3,
     /// 第一人称眼睛位置
     fp_pos: Vec3,
-    /// 第一人称速度（预留：Wave2 玩家移动由游戏侧写入）
+    /// 第一人称速度（预留：Wave2 玩家移动由游戏侧写入）。
+    /// 🔴 2026-09-23 复查（编译器判定）：**当前无人读、也无人写** —— 现代玩家移动走
+    /// `physics::PlayerBody`（速度在那边），相机只被 `set_position` 摆位。
+    /// 保留是历史预留；要接线就先明确"谁写"，否则它会一直是 0。
     fp_vel: Vec3,
     /// 视角后坐力累计（pitch/yaw，弧度），FirstPerson 更新时指数衰减
     recoil_pitch: f32,

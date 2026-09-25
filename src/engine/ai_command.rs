@@ -60,7 +60,7 @@ pub enum BattleSituation {
 pub struct Squad {
     pub id: usize,
     pub members: Vec<usize>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 建编成时已写入（`members.first()`），当前**无读取方** —— 连级只读 `Company::leader`；排/班级查询预留
     pub leader: Option<usize>,
     pub objective: [f32; 2],
     pub order: CompanyOrder,
@@ -69,7 +69,7 @@ pub struct Squad {
 pub struct Platoon {
     pub id: usize,
     pub members: Vec<usize>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 同 `Squad::leader`：写入过（`pm.last()`），当前无读取方；排级查询预留
     pub leader: Option<usize>,
     pub squads: Vec<usize>,
     pub objective: [f32; 2],
@@ -88,7 +88,8 @@ pub struct Company {
     pub members: Vec<usize>,
     pub leader: Option<usize>,
     #[allow(dead_code)]
-    /// 所属排序号（排 id 列表；内容一直是排 id，2026-08-23 由 squads 更名避免歧义）
+    /// 所属排序号（排 id 列表；内容一直是排 id，2026-08-23 由 squads 更名避免歧义）。
+    /// 建编成时写入；当前**无读取方** —— 保留给营/连级"下属有哪些排"的查询（与 `squads` 对称）。
     pub platoon_ids: Vec<usize>,
     pub objective: [f32; 2],
     pub order: CompanyOrder,

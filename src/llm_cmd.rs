@@ -64,6 +64,10 @@ struct Shared {
 
 pub struct LlmCommander {
     shared: Arc<Shared>,
+    /// HTTP 指挥线程的句柄（`spawn` 时存下）。
+    /// 🔴 2026-09-23 复查（编译器判定）：**没有任何地方 join 它** —— 线程靠 `Shared::stopped`
+    /// 标志自行退出，进程结束时由 OS 回收；句柄保留是为了将来在 `Drop` 里做优雅 join
+    /// （当前没有这个 Drop）。⚠️ 因此进程退出时该线程可能正在写 `data/llm_*.jsonl`。
     #[allow(dead_code)]
     handle: Option<std::thread::JoinHandle<()>>,
 }
