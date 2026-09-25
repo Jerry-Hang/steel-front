@@ -609,7 +609,17 @@ def main():
         rounds = 4
         s0 = shots_count(txt)
         h0 = hits_now(txt)
-        for _ in range(rounds):
+        for k in range(rounds):
+            # 🔴 2026-09-25：连发本身要花 ~1 秒，而目标以 4–5 m/s 走 —— 70m 外 1 秒就是 3.5°，
+            # 足够让后面几发整发打空（`RV3D_PROJ_DIAG` 里 41–50% 的子弹是"飞到寿命尽头"）。
+            # 所以**每发之前**都拿最新样本重瞄一次（`S.aim` 自己会收敛，不必重算四次）。
+            if k:
+                t2 = S.log_tail(logpath)
+                p2 = targets(t2).get(npc_id)
+                if p2:
+                    ppos2 = player_pos(t2) or ppos
+                    ty, tp = target_angles_rel((npc_id, p2[0], p2[1], p2[2]), ppos2)
+                    S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=2)
             S.post_lbutton(hwnd, True, cx, cy)
             time.sleep(0.08)
             S.post_lbutton(hwnd, False, cx, cy)
