@@ -688,6 +688,53 @@ git checkout -- src
 
 ---
 
+## 13. 审查第十轮（同日续）：**不可信输入**路径（UDP 报文 / 手写 TOML 关卡）（`849a0de`）
+
+> 前几轮查的是"内部状态被写坏"，这一轮换一个提问方式：**谁能把数据喂进来**？
+> 只有两个入口 —— 网线上的 UDP 报文，与用户手改的 `assets/maps/*.toml`。
+> 对这两条路径，判据是：畸形输入必须**报错**，不许 panic、不许越界、不许被放大成资源消耗。
+
+### 13.1 `map.rs`（手写 TOML）：逐处核对**字节切片**
+
+`&str` 按字节下标切片是这一类最典型的 panic 来源（**非 char 边界 / 起点大于终点**），
+而关卡文件里中文注释是常态，所以把 19 处 `[...]` / `char_indices` 全过了一遍：
+
+| 位置 | 写法 | 判据 |
+|---|---|---|
+| `parse_section_header` | `line[1..line.len()-1]` | 全仓**唯一调用点**有 `line.starts_with('[')` 守卫，且 `[`/`]` 都是 1 字节 ⇒ 两头必是 char 边界；`len==1`（`"["`）被 `ends_with(']')` 挡掉 ✓ |
+| `parse_kv_multiline` / 内联表 / 内联数组 | `line[..eq]`、`line[eq+1..]` | `eq` 来自 `find('=')`（ASCII，char 边界）✓ |
+| `parse_value` | `s.as_bytes()[0]` | 上一行就是 `if s.is_empty() { return Err }` ✓ |
+| `parse_string` / `scan_braced` / `split_top` | `&s[start..i]`、`&s[1..i]` | 下标来自 `char_indices()` ⇒ 必是 char 边界 ✓ |
+| `bracket_depth` | `depth -= 1` | `depth` 是 **i32**（不是 usize）⇒ 多余的 `]` 只会变负，不回绕 ✓ |
+
+**结论：畸形/中文 TOML 不会 panic**（超前的 `]`、缺 `=`、空值、未闭合括号都有 `Err` 分支）。
+
+### 13.2 `net.rs`（UDP）：本轮修的**一处不对称**
+
+`Snapshot` 分支原来是裸的 `Vec::with_capacity(n)`，而 `n` 是**报文里的 2 字节 u16**（≤65535）
+⇒ 伪造报文只花 2 字节就能让接收方一次预留约 **1.6 MB**（`NpcSnapshot` ≈28B × 65535，
+放大比约 **8e5:1**）。而同一份数据报里的 `ObjectiveState` 分支**早就**这么防了
+（`n.min(MAX_OBJECTIVE_POINTS)`，注释写着"防止攻击者仅凭 2 字节 count 触发大分配"）。
+⇒ 补成 `snapshot_capacity_hint(n) = n.min(MAX_SNAPSHOT_NPCS)`，只压容量提示、**不改接受语义**。
+
+**已核验干净**（判据）：`Reader::u8/u32/f32` 全部 `get(off).ok_or(Truncated)?`（无裸下标）；
+`decode` 先校验 `buf.len() < total`；`String::from_utf8` 错误映射为 `InvalidUtf8`；
+读缓冲是固定 `[u8; MAX_DATAGRAM]`（不随报文增长）；`encode` 侧对实体数/据点数都有截断上限。
+
+**新增 3 条测试**：容量提示封顶（红证：去掉 `min` ⇒ 立刻红 `65535/1024`）、
+伪造 `count=65535` 得 `Truncated` 不 panic、快照路径**任意前缀**均为 `Truncated`
+（后者防的是"某处越界读/切片 panic"，与 obj 版本同款判据）。
+
+### 13.3 本轮**没做**的（诚实记账）
+
+- **没有跑真 fuzz**：`cargo-fuzz`/`arbitrary` 会新增第三方依赖（本仓硬约束"不新增依赖"）
+  ⇒ 用"任意前缀截断"+"伪造超大 count"两种结构性用例代替。
+  真要 fuzz 得先决定是否破例引入 dev-dependency（那是**需要用户拍板**的决定，不是我能顺手加的）。
+- 只覆盖了**解码**侧；编码侧（`encode`）的越界只可能来自内部状态，属前三轮的范畴
+  （实例/实体容量上限都已收口 + 一次性告警）。
+
+---
+
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
 
 ## 1. 症状与误诊
