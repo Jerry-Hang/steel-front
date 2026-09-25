@@ -2394,8 +2394,11 @@ impl Game {
             let enemy_hp = self.npcs.first().map(|n| n.max_hp).unwrap_or(0.0);
             // 玩家位置入状态行：survive harness 走位支持需要它算相对方位角
             let pp = self.player_pos();
+            // `hits=` = 玩家弹丸**命中 NPC** 的累计次数（打墙/打友军不计，见结算循环）。
+            // 🔴 2026-09-25 加：harness 想知道"打中率"此前只能拿 `kills/shots` 反推，
+            // 而那里面混着"打了掩体"和"残局空点" ⇒ 无法判"改瞄法到底有没有用"。
             log::info!(
-                "game: wave={} enemies={} enemy_hp={:.0} hp={:.0}/{:.0} score={} pos=({:.1},{:.1}) phys_us={} ai_us={} audio_us={} net_us={}",
+                "game: wave={} enemies={} enemy_hp={:.0} hp={:.0}/{:.0} score={} pos=({:.1},{:.1}) phys_us={} ai_us={} audio_us={} net_us={} hits={}",
                 self.wave,
                 self.npcs.len(),
                 enemy_hp,
@@ -2407,7 +2410,8 @@ impl Game {
                 self.stage_physics_us,
                 self.stage_ai_us,
                 self.stage_audio_us,
-                self.stage_net_us
+                self.stage_net_us,
+                self.hits()
             );
             // 机器可读的**活靶**位置（`RV3D_NPC_POS=1`）：每秒每只 NPC 一行。
             //
@@ -4723,14 +4727,27 @@ impl Game {
                     // 每关 WAVES_PER_LEVEL 波清完 → 升关：重新生成地图并回到本关第 1 波；
                     // 难度按累计有效波次递进（effective_wave），跨关不回落
                     // survive 规则：总波数 = rule.waves，守住全部波 → 胜利（补给窗口后进入胜利态）
-                    if self.is_survive_rule() && self.wave >= self.survive_total_waves() {
-                        self.hud.victory_banner = Some("防区固守！全部波次守住".to_string());
-                        self.game_state = GameState::Victory(crate::engine::ai::Team::Blue);
-                        self.set_won_team(crate::engine::ai::Team::Blue);
-                        log::info!(
-                            "survive: 全部 {} 波守住 → 胜利",
-                            self.survive_total_waves()
-                        );
+                    //
+                    // 🔴 `rule.waves` **可以长于** `WAVES_PER_LEVEL`（`defense_line.toml` 是 5）：
+                    // survive 下必须**整条走 rule.waves**，不许掉进「清满 3 波就升关」那条分支 ——
+                    // 旧写法在 waves=5 的图上第 3 波清完就升关并把 wave 归 1，于是第 4/5 波永远
+                    // 到不了、胜利条件永远不成立（2026-09-25 真机：`wave 3 cleared` 之后紧跟
+                    // `wave 1 spawned … effective=4`；红测
+                    // `survive_wave_count_above_waves_per_level_still_reaches_victory`）。
+                    if self.is_survive_rule() {
+                        if self.wave >= self.survive_total_waves() {
+                            self.hud.victory_banner = Some("防区固守！全部波次守住".to_string());
+                            self.game_state = GameState::Victory(crate::engine::ai::Team::Blue);
+                            self.set_won_team(crate::engine::ai::Team::Blue);
+                            log::info!(
+                                "survive: 全部 {} 波守住 → 胜利",
+                                self.survive_total_waves()
+                            );
+                        } else {
+                            self.wave += 1;
+                            // survive：波间补给窗口（血量回复 + 弹药补满）
+                            self.supply_survive_break();
+                        }
                     } else if self.wave >= WAVES_PER_LEVEL {
                         let next_level = self.level + 1;
                         self.apply_level(next_level);
@@ -4741,10 +4758,6 @@ impl Game {
                         );
                     } else {
                         self.wave += 1;
-                        // survive：波间补给窗口（血量回复 + 弹药补满）
-                        if self.is_survive_rule() {
-                            self.supply_survive_break();
-                        }
                     }
                     self.spawn_wave(self.wave, player);
                 }
@@ -8920,6 +8933,37 @@ mod tests {
             game.game_state,
             GameState::Victory(crate::engine::ai::Team::Blue),
             "守住全部波次应胜利"
+        );
+    }
+
+    /// survive 规则的波数**可以长于** `WAVES_PER_LEVEL`（`defense_line.toml` 写的是 `waves = 5`）。
+    ///
+    /// 🔴 2026-09-25 真机实测（`defense_line` + `run_survive_pm.ps1`）：`wave 3 cleared` 之后
+    /// 紧跟的不是 wave 4，而是 `wave: wave 1 spawned 12 enemies (… effective=4)` —— 旧逻辑
+    /// 先判胜利，再判 `wave >= WAVES_PER_LEVEL`(3) 就**升关并把 wave 归 1**，于是第 4/5 波
+    /// 永远到不了、`survive: 全部 5 波守住 → 胜利` 永远不成立（旧测试只覆盖 `waves = 2`，
+    /// 恰好低于阈值 3 ⇒ 这个洞一直没被测到）。
+    #[test]
+    fn survive_wave_count_above_waves_per_level_still_reaches_victory() {
+        let mut game = Game::new();
+        game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
+            crate::engine::objective::GameRule::Survive { waves: 5 },
+        ));
+        game.on_any_key(&glam::Vec3::ZERO);
+        let camera = Camera::new();
+        for expected in 1..=5u32 {
+            assert_eq!(game.wave, expected, "波次必须连续推进到 rule.waves");
+            assert_eq!(game.level, 1, "survive 规则下不许按关卡进度升关");
+            game.npcs.clear();
+            game.wave_timer = 0.0;
+            for _ in 0..200 {
+                game.update(1.0 / 60.0, &camera);
+            }
+        }
+        assert_eq!(
+            game.game_state,
+            GameState::Victory(crate::engine::ai::Team::Blue),
+            "守住 rule.waves 波应胜利（旧逻辑第 3 波清完就升关，永远到不了这里）"
         );
     }
 
