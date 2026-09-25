@@ -7899,6 +7899,46 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
   ⇒ 改成 复查 / 相关条 后 `tools/cjk_used_codepoints.txt` 回到 1595 条、**零 diff**。
   **注释也算文案**，这条测试对注释一视同仁。
 
+### 21.13 验证层真机抓到 2 条 VUID：命令缓冲按「图像」索引 = 重录 pending 的命令缓冲
+
+**这是本轮审查最贵的一条**（也是 `RV3D_VALIDATION=1` 第一次在这个场景下跑）。
+
+- **怎么发现的**：改完 §21.12 后按铁律 B「改 pipeline / swapchain / 同步前先开验证层跑一轮」，
+  用 `RV3D_VALIDATION=1` + `DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1`（关掉那两个**隐式层**，
+  否则只会看到 §21.9 那 5 条 swapchain 噪音）跑独显 + mailbox + `-NoShot`：
+  ```
+  vkBeginCommandBuffer(): on active VkCommandBuffer 0x…c66d0 before it has completed.
+    VUID-vkBeginCommandBuffer-commandBuffer-00049
+  vkQueueSubmit(): … VkCommandBuffer 0x…c66d0 is already in use …
+    VUID-vkQueueSubmit-pCommandBuffers-00071
+  ```
+  **两次运行各 2 条**（90s / 150s 各一次）⇒ 可复现，不是噪声。同一指针 ⇒ 同一帧里
+  "先重录了一条还在飞的命令缓冲，又把它提交了一次"。
+- **定位（一次性探针，验完即删）**：在 `record_command_buffer` 前打
+  `sync-diag: cf=? image=? cb=? fence=?`，报错那一拍是**相邻两帧**：
+  `cf=0 image=1 cb=0x…c66d0` 紧跟 `cf=1 image=1 cb=0x…c66d0` ——
+  **同一张交换链图像被连续两帧 acquire**（mailbox 下完全合法），
+  而第二帧等的是 `fence[1]`，守护那条命令缓冲的却是 `fence[0]`。
+- **根因**：命令缓冲按 **`image_index`** 索引（3 条），围栏按 **在飞帧槽位**（2 条）。
+  `wait_for_fences(fence[current_frame])` 只保证**这个槽位**的上一次提交完成；
+  它等于"这条命令缓冲的上一次提交完成"**只当两者同槽**。`image_index` 与槽位是两套编号，
+  实测 (cf,image) 六种组合都会出现 ⇒ 迟早错位。
+  旧写法把"图像画完并 present 了"当成"命令缓冲可以重录了"——**present 释放的是图像，
+  不是命令缓冲**，而 VVL 只认后者。
+- **改法**：命令缓冲数量 = **`max_frames_in_flight`**（`init_command_buffers` /
+  `recreate_command_buffers` 两处），`render()` 里 `record` 与 `submit` 都取
+  `command_buffers[self.current_frame]`；`image_index` **只**用来选 framebuffer
+  （`record_command_buffer` 的入参）。占位录制按 `i % framebuffers.len()` 取模防越界。
+- **判据（修前修后同一条命令线）**：修前 `VUID=2`（两次），修后 **`VUID=0`**；
+  探针复核 `cf→cb` 变成严格一对一（`cbs=2`），而 (cf,image) 仍出现全部 6 种组合
+  ——正是"图像不能当槽位用"的直接证据。
+- **红测**：`command_buffer_is_indexed_by_frame_slot_not_by_swapchain_image`
+  （源码守卫，写在既有 `vk_failure_path_tests` 模块里，带"扫到了东西"自检）。
+  修前它报出 3 处真实位置（record / submit / cmd_buffers 数组），修后转绿。
+  闸门：**565 passed / 0 failed**、0 警告。
+- ⚠️ 顺手又被 CJK 守门测试拦一次（这次是 **阱 U+9631**，写在"自指陷阱"里）——
+  §21.12 那条教训完全适用：**代码注释里的字也在守门范围内**。
+
 
 
 

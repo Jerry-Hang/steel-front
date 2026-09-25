@@ -9658,11 +9658,13 @@ impl Renderer {
     }
 
     fn init_command_buffers(&mut self) -> Result<(), String> {
-
+        // 🔴 数量 = **在飞帧数**，不是交换链图像数：命令缓冲与 `in_flight_fences[slot]`
+        // 一对一，`render()` 按 `current_frame` 取（判据见
+        // `command_buffer_is_indexed_by_frame_slot_not_by_swapchain_image`）。
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(self.framebuffers.len() as u32);
+            .command_buffer_count(self.max_frames_in_flight as u32);
 
         self.command_buffers = unsafe {
             self.device
@@ -9670,8 +9672,11 @@ impl Renderer {
                 .map_err(|e| format!("分配命令缓冲失败: {}", e))?
         };
 
+        // 占位录制（每帧都会重录）：图像下标只用来选 framebuffer，取模防止
+        // 交换链图像数 < 在飞帧数时越界。
+        let fbs = self.framebuffers.len().max(1);
         for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
+            self.record_command_buffer(command_buffer, i % fbs, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
         }
         Ok(())
     }
@@ -11370,8 +11375,16 @@ impl Renderer {
 
         // 每帧重录 command buffer（instance_count 随剔除结果变化）
         let t0 = Instant::now();
+        // 🔴 **命令缓冲按「在飞帧槽位」取，不按 `image_index`**（2026-09-25 验证层实测，
+        // 判据见 `command_buffer_is_indexed_by_frame_slot_not_by_swapchain_image`）：
+        // 围栏 `in_flight_fences[current_frame]` 只保证**这个槽位**的上一次提交已完成，
+        // 而 `image_index` 与槽位是两套编号 —— 同一张图像可以被连续两帧 acquire
+        // （mailbox 下很常见），那时按图像取就会重录一条**仍 pending** 的命令缓冲
+        // （VUID-vkBeginCommandBuffer-commandBuffer-00049 / VUID-vkQueueSubmit-pCommandBuffers-00071）。
+        // 图像下标只用来选 framebuffer（见 `record_command_buffer` 的入参）。
+        let cmd_buffer = self.command_buffers[self.current_frame];
         self.record_command_buffer(
-            self.command_buffers[image_index as usize],
+            cmd_buffer,
             image_index as usize,
             near_count,
             far_count,
@@ -11395,7 +11408,7 @@ impl Renderer {
                 )
             })?;
         let signal_semaphores = [render_finished];
-        let cmd_buffers = [self.command_buffers[image_index as usize]];
+        let cmd_buffers = [cmd_buffer];
 
         let submit_info = vk::SubmitInfo::default()
             .wait_semaphores(&wait_semaphores)
@@ -11503,17 +11516,19 @@ impl Renderer {
             self.device
                 .free_command_buffers(self.command_pool, &self.command_buffers);
         }
+        // 同 `init_command_buffers`：数量按**在飞帧数**（命令缓冲与围栏槽位一对一）
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(self.framebuffers.len() as u32);
+            .command_buffer_count(self.max_frames_in_flight as u32);
         self.command_buffers = unsafe {
             self.device
                 .allocate_command_buffers(&alloc_info)
                 .map_err(|e| format!("重新分配命令缓冲失败: {}", e))?
         };
+        let fbs = self.framebuffers.len().max(1);
         for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
+            self.record_command_buffer(command_buffer, i % fbs, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
         }
         Ok(())
     }
@@ -13488,6 +13503,54 @@ mod vk_failure_path_tests {
                 .and_then(|j| lines.get(j))
                 .is_some_and(|l| !is_comment(l) && CALLS.iter().any(|c| l.contains(c)))
         })
+    }
+
+    /// 🔴 **命令缓冲必须按「在飞帧槽位」取，不能按 `image_index` 取**（2026-09-25 验证层实测 + 探针）。
+    ///
+    /// 复现：独显 + mailbox + `RV3D_VALIDATION=1`（`DISABLE_RTSS_LAYER`/`DISABLE_GAMEPP_LAYER` 关掉
+    /// 隐式层）跑 survive，两轮各 2 条：
+    /// ```text
+    /// vkBeginCommandBuffer(): on active VkCommandBuffer 0x…c66d0 before it has completed.
+    ///   VUID-vkBeginCommandBuffer-commandBuffer-00049
+    /// vkQueueSubmit(): … VkCommandBuffer 0x…c66d0 is already in use …
+    ///   VUID-vkQueueSubmit-pCommandBuffers-00071
+    /// ```
+    /// 一次性探针（`RV3D_SYNC_DIAG=1`，验完即删）在报错那一拍打出**相邻两帧**：
+    /// `cf=0 image=1 cb=0x…c66d0` 紧跟 `cf=1 image=1 cb=0x…c66d0` ——
+    /// 同一张交换链图像被**连续两帧** acquire（mailbox 下完全合法），
+    /// 而我们要等的围栏属于**另一个槽位** ⇒ 上一次提交还没完成就重录了同一条命令缓冲。
+    /// 围栏只保证"这个槽位的上一次提交完成了"；它等于"这条命令缓冲的上一次提交完成了"
+    /// **只当两者同槽**。所以命令缓冲必须跟着**围栏/槽位**走，不能跟着图像走。
+    #[test]
+    fn command_buffer_is_indexed_by_frame_slot_not_by_swapchain_image() {
+        // ⚠️ 与上面那条同样的自指问题：正文写在 `mod` 之内，且先切掉本测试模块
+        let full = include_str!("renderer.rs");
+        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
+        // 先证明这条检查真的扫到了东西（否则文件改名/被搬走时会静默恒真）
+        assert!(
+            code.iter().any(|l| l.contains("fn render(")),
+            "检查失效：生产代码里没扫到 render()"
+        );
+        let bad: Vec<&str> = code
+            .iter()
+            .copied()
+            .filter(|l| l.contains("command_buffers[image_index"))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "命令缓冲按图像下标取 ⇒ 会重录仍在 pending 的命令缓冲（VUID-00049 / -00071）：\n{}",
+            bad.join("\n")
+        );
+        let by_slot = code
+            .iter()
+            .filter(|l| l.contains("command_buffers[self.current_frame]"))
+            .count();
+        assert!(
+            by_slot >= 2,
+            "record 与 submit 两处都必须按 current_frame 取，实际命中 {} 处",
+            by_slot
+        );
     }
 
     /// 判据：`renderer.rs` 里对 Vulkan 调用的结果不许 `.expect()` / `.unwrap()`。
