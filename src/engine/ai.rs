@@ -269,6 +269,71 @@ pub fn passable_or_nearest(map: &GridMap, from: GridPos, max_ring: i32) -> Optio
     None
 }
 
+/// A* 的**可复用 scratch**（线程本地）：见 [`find_path`] 里的长注释（未结案 #25 的实测依据）。
+///
+/// 三份 O(格数) 缓冲不再每次调用分配/清零，而是靠 generation 戳判断"本次搜索是否访问过"。
+/// 🔴 **必须用两张戳**（`seen` / `closed`）：只用一张的话，"先记起点的 g"与"出堆才算关闭"
+/// 会打架 —— 起点会被自己的戳挡住、一个节点都展不开（2026-09-25 实测：`astar_straight_line`
+/// 直接返回 `None`）。两张戳的语义与旧实现逐条等价：
+///   - `seen[i] == gen`  ⇒ `g[i]` / `parent[i]` 有效；
+///   - `closed[i] == gen` ⇒ 已出堆（旧 `closed: Vec<bool>`）。
+struct AstarScratch {
+    open: BinaryHeap<HeapNode>,
+    /// 到该节点的已知最短距离（仅在 `seen[i] == gen` 时有效）
+    g: Vec<u32>,
+    /// 前驱（仅在 `seen[i] == gen` 时有效）
+    parent: Vec<Option<usize>>,
+    /// "有有效 g"的戳
+    seen: Vec<u32>,
+    /// "已出堆"的戳
+    closed: Vec<u32>,
+    /// 当前 generation（0 保留给"从未访问"）
+    gen: u32,
+}
+
+impl AstarScratch {
+    fn new() -> Self {
+        Self {
+            open: BinaryHeap::new(),
+            g: Vec::new(),
+            parent: Vec::new(),
+            seen: Vec::new(),
+            closed: Vec::new(),
+            gen: 0,
+        }
+    }
+
+    /// 开始一次搜索：必要时扩到 `cells` 项 / 回绕 generation（回绕时整体清零一次，极少发生）
+    fn begin(&mut self, cells: usize) {
+        if self.seen.len() < cells {
+            self.g.resize(cells, 0);
+            self.parent.resize(cells, None);
+            self.seen.resize(cells, 0);
+            self.closed.resize(cells, 0);
+            self.gen = 0;
+        }
+        self.open.clear();
+        self.gen = self.gen.wrapping_add(1);
+        if self.gen == 0 {
+            // u32 回绕（约 43 亿次搜索）：整体清零一次，避免"戳相等"误判
+            for s in self.seen.iter_mut() {
+                *s = 0;
+            }
+            for s in self.closed.iter_mut() {
+                *s = 0;
+            }
+            self.gen = 1;
+        }
+    }
+}
+
+thread_local! {
+    /// 每线程一份 scratch。AI 会走 `step_ai_parallel`（多线程），**不能**用全局 `Mutex`
+    /// （那等于把并行 AI 串行化）；线程本地既免分配又不争用。
+    static ASTAR_SCRATCH: std::cell::RefCell<AstarScratch> =
+        std::cell::RefCell::new(AstarScratch::new());
+}
+
 /// A* 寻路：求 `start` 到 `goal` 的最短四方向路径（含两端点）。
 ///
 /// - 自动绕过阻挡格（阻挡格不可进入）
@@ -313,12 +378,47 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
     let start_idx = map.index(start);
     let goal_idx = map.index(goal);
 
-    let mut g_score = vec![u32::MAX; cell_count];
-    let mut parent: Vec<Option<usize>> = vec![None; cell_count];
-    let mut closed = vec![false; cell_count];
-    g_score[start_idx] = 0;
+    // 🔴 2026-09-25 改（未结案 #25，**实测数据支持的那一条**）：把三份 O(格数) 缓冲
+    // （`g_score` / `parent` / `closed`，各 16384 项）从"每次调用分配 + 清零"改成
+    // **线程本地 scratch + generation 戳**。
+    //
+    // 依据（独显 `perf_run.ps1 -Secs 30` 压力模式 27 个 1s 样本 + 新增的展开计数）：
+    //   `ai_us` 中位 9253µs / 最大 17235µs，而**单次调用最大只展开 9 个节点**（p95 也是 9）
+    //   ⇒ 贵的不是搜索本身，而是"每秒约 300–700 次调用 × 每次 ~400KB 的分配+清零"。
+    //   ⇒ 正解是 scratch 复用（原 lead②），**不是**节点预算（原 lead①：单次 9 个节点，加预算白改）。
+    //
+    // 语义：`stamp[i] == gen` ⇒ 节点 i 在**本次**搜索里被访问过（旧的 `closed[i]`）；
+    // `g[i]`/`parent[i]` 只在 `stamp[i] == gen` 时有效 ⇒ **不必清零**，`gen` 自增即"清空"。
+    // `open` 堆每次 `clear()`（O(1)，只把长度置 0）。AI 是多线程步进的（`step_ai_parallel`），
+    // 所以 scratch 必须是 **thread_local**，不能是全局 `Mutex`（那会把并行 AI 串行化）。
+    ASTAR_SCRATCH.with(|s| {
+        let s = &mut *s.borrow_mut();
+        s.begin(cell_count);
+        find_path_search(map, start, goal, start_idx, goal_idx, width, s)
+    })
+}
 
-    let mut open = BinaryHeap::new();
+/// 一次 A* 搜索（scratch 由调用方提供，见 [`ASTAR_SCRATCH`] 的说明）
+fn find_path_search(
+    map: &GridMap,
+    start: GridPos,
+    goal: GridPos,
+    start_idx: usize,
+    goal_idx: usize,
+    width: usize,
+    s: &mut AstarScratch,
+) -> Option<Vec<GridPos>> {
+    let AstarScratch { open, g, parent, seen, closed, gen } = s;
+    let gen = *gen;
+    let max_steps = map.width() * map.height();
+    g[start_idx] = 0;
+    seen[start_idx] = gen;
+    // 🔴 起点的 `parent` **必须显式清掉**：scratch 复用后它可能还留着上一次搜索的旧前驱，
+    // 而 `reconstruct_path` 会顺着链一路走上去 —— 旧链与新链接上就是一个**环**，
+    // 于是 `path.push` 无限增长直到 OOM（2026-09-25 实测：16 GiB 分配失败）。
+    // 旧实现每次 `vec![None; cells]` 天然没这个问题，改成 scratch 后必须自己清。
+    parent[start_idx] = None;
+
     open.push(HeapNode {
         f: start.manhattan(goal),
         g: 0,
@@ -345,15 +445,15 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
     let mut pushed = 0u64;
 
     while let Some(node) = open.pop() {
-        if closed[node.index] {
-            continue;
+        if closed[node.index] == gen {
+            continue; // 本次搜索已出堆（旧的 `closed[i]`）
         }
-        closed[node.index] = true;
+        closed[node.index] = gen;
         expanded += 1;
 
         if node.index == goal_idx {
             note_astar_work(expanded, pushed);
-            return Some(reconstruct_path(&parent, width, Some(node.index)));
+            return Some(reconstruct_path(parent, width, Some(node.index), max_steps));
         }
 
         let cur_pos = GridPos::new((node.index % width) as i32, (node.index / width) as i32);
@@ -369,14 +469,13 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
                 continue;
             }
             let next_idx = map.index(next);
-            if closed[next_idx] {
-                continue;
-            }
             let tentative_g = node.g + 1;
-            if tentative_g >= g_score[next_idx] {
+            // 未访问（seen != gen）⇒ 视为 g = ∞；否则比 g 值。**不清零**，见 scratch 注释。
+            if seen[next_idx] == gen && tentative_g >= g[next_idx] {
                 continue;
             }
-            g_score[next_idx] = tentative_g;
+            g[next_idx] = tentative_g;
+            seen[next_idx] = gen;
             parent[next_idx] = Some(node.index);
             pushed += 1;
             open.push(HeapNode {
@@ -393,7 +492,7 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
         if diag_on() {
             ASTAR_PARTIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        return Some(reconstruct_path(&parent, width, Some(best_idx)));
+        return Some(reconstruct_path(parent, width, Some(best_idx), max_steps));
     }
     note_astar_fail(AstarFailReason::Exhausted);
     None
@@ -437,9 +536,22 @@ pub fn reachable_mask(map: &GridMap, from: GridPos) -> Vec<bool> {
 }
 
 /// 由 `parent` 链反推出路径（含起点与终点，顺序 start→goal）
-fn reconstruct_path(parent: &[Option<usize>], width: usize, mut cur: Option<usize>) -> Vec<GridPos> {
+///
+/// `max_steps` = 地图格数：**防御性上界**。scratch 复用后 `parent` 是复用的数组，
+/// 一旦有陈旧前驱接成了环（见 `find_path_search` 里 `parent[start_idx] = None` 的注释），
+/// 这里会无限 `push` 直到 OOM（实测 16 GiB 分配失败、进程直接 abort）。
+/// 有上界时最坏退化成"一条长路径"，而不是把整台机器拖死。
+fn reconstruct_path(
+    parent: &[Option<usize>],
+    width: usize,
+    mut cur: Option<usize>,
+    max_steps: usize,
+) -> Vec<GridPos> {
     let mut path = Vec::new();
     while let Some(i) = cur {
+        if path.len() >= max_steps {
+            break;
+        }
         path.push(GridPos::new((i % width) as i32, (i / width) as i32));
         cur = parent[i];
     }
@@ -1570,6 +1682,37 @@ mod tests {
         assert!(none.iter().all(|b| !b), "起点在墙里时不该有可达格");
         // 越界起点同样安全
         assert!(reachable_mask(&map, GridPos::new(-1, 0)).iter().all(|b| !b));
+    }
+
+    /// 🔴 **scratch 复用必须无状态泄漏**：同一张图连续问两次"同一对起点终点"必须给出**逐格相同**
+    /// 的路径；中间插入一次别的搜索（成功 / 失败 / 部分路径各一次）也不能污染下一次的结果。
+    /// 这是 generation 戳实现（不清零 `g`/`parent`/`stamp`）的**唯一**回归网：
+    /// 漏掉 `stamp[next] = gen` 或误用 `g_score[i]` 未判戳，都会在这里红。
+    #[test]
+    fn astar_scratch_reuse_is_stateless() {
+        let mut map = GridMap::new(12, 12);
+        for y in 2..10 {
+            map.block(GridPos::new(5, y)); // 一堵竖墙，右侧只能从上下绕
+        }
+        let a = GridPos::new(1, 5);
+        let b = GridPos::new(10, 5);
+        let first = find_path(&map, a, b).expect("绕行路径应存在");
+        assert!(first.len() > 1);
+        // 中间穿插：目标落在墙里（O(1) 失败）+ 部分路径查询 + 另一对端点
+        assert!(
+            find_path(&map, GridPos::new(0, 0), GridPos::new(5, 5)).is_none(),
+            "(5,5) 在墙里 ⇒ 必须 O(1) 返回 None"
+        );
+        let _ = find_path(&map, GridPos::new(1, 2), GridPos::new(10, 2));
+        let _ = find_path(&map, GridPos::new(0, 0), GridPos::new(11, 11));
+        // 再问同一对：必须逐格相同
+        let again = find_path(&map, a, b).expect("第二次也必须给出路径");
+        assert_eq!(first, again, "scratch 复用后同一查询必须给出同一条路径");
+        // 反向也要自洽（对称图里应等长）
+        let back = find_path(&map, b, a).expect("反向路径应存在");
+        assert_eq!(back.len(), first.len(), "四方向网格上正反路径长度应相同");
+        // 起点==终点：返回单格路径（不碰 scratch 的边界分支）
+        assert_eq!(find_path(&map, a, a), Some(vec![a]));
     }
 
     #[test]
