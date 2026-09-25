@@ -564,7 +564,7 @@ release_input.ps1 取代）。
     - ✅ **残余 NPC 卡在 Patrol ⇒ 波次永远清不掉**（**2026-09-23 修，`90605b1`**）：根因 = **出生半径超出视距**
       （40–80m 出生 vs `NPC_SIGHT=60`）⇒ 出生在 60m 外的人恒 Patrol，`update_waves` 又要求 `npcs.is_empty()`。
       修法 = 拆「目标已知 `target_known`」与「敌人可见 `enemy_visible`」两条通道（**只有后者能开火**），
-      接线只在 `Playing && !stress`。5 条回归测试，判据与红证见 `docs/PROGRESS.md` §9。
+      接线只在 `Playing && !stress`。5 条回归测试，判据与红证见 `docs/PROGRESS.md` 2026-09-23 节 §9。
       🔴 **实机复验仍未做**：波次清空 / 第 2..5 波 / 胜利态要一次 `defense_line` 实测才算闭环。
     - 口径：本次跑用 `RV3D_INVINCIBLE=1`（否则先死），**失败分支（玩家阵亡）仍只有单测覆盖**。
     ~~手榴弹弹道落点测试受玩家出生点影响~~；~~手榴弹 AoE 不结算障碍~~ / ~~切枪无动画~~ **均已结案（2026-09-15）**：`obstacle_blocks_blast` 只挡"爆心→目标之间"的障碍（含爆心/目标的障碍跳过，否则贴脸炸会把自己堵死）；`WeaponRack::switch_progress()` 给出 0→1 归一化进度，枪模用 `sin(π·t)` 包络做下坠 0.18 m + 前倾 12° + 侧转 6°。两条都**验证过测试会红**。
@@ -590,7 +590,7 @@ release_input.ps1 取代）。
     **lead**：① 节点预算 + "不可达目标"短时缓存；② scratch 复用 + generation 戳（免清零）。
     **判据**：改前后各跑 `perf_run.ps1 -Secs 30`，看 `ai_us` 的 **p95 与最大值**（中位本来就不高），
     并用 `RV3D_AI_DIAG=1` 看新加的 `aidiag: astar 1s 内 calls=… fails=…`（`ab89eb2`；fails 高 = 不可达目标在反复触发）。
-    细节见 `docs/PROGRESS.md` §15。
+    细节见 `docs/PROGRESS.md` 2026-09-23 节 §15。
     ⚠️ **先立 lead 不动手**：没有实机 A/B 就改这里，等于拿"我以为更快"换掉"AI 真的能找到路"。
 
 ---
