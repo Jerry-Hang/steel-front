@@ -532,6 +532,59 @@ debug_assert!(nw <= 64, "并行段数超栈数组上限");   // 🔴 release 里
 
 ---
 
+## 10. 审查第七轮（同日续）：音频输出层 / 每帧日志 / 跨线程锁（`8d05bb9` `9b8a1ae`）
+
+> 主题仍是"静默"：这一轮找的是**该报的没报**与**不该刷屏的刷屏**两头。
+
+### 10.1 改动一：`audio_out.rs`（`8d05bb9`）—— waveOut 输出层三处
+
+| # | 问题 | 判据 / 后果 |
+|---|---|---|
+| ① | `waveOutPrepareHeader` 在**栈上临时量**上调用，随后 `buffers.push(b)` 搬家 | 驱动在 prepare 时记录该结构（`waveOutWrite` 收的地址、回调的 `dwParam1` 都是它，且 `WAVEHDR.reserved` 是"驱动内部使用、应用不得改"）⇒ 准备的地址 ≠ 使用的地址。改成**先收齐（容量一次给足，此后堆区不变）再逐个 prepare**。⚠️ **无法单测**（要真声卡），判据是代码顺序 |
+| ② | `waveOutPrepareHeader` 中途失败时直接 `return Err` | 已 prepare 的头没 unprepare、**设备句柄一直开着** ⇒ 泄漏。现补收尾（unprepare 前 i 个 + `waveOutClose`） |
+| ③ | 单块容量 2048 帧；帧率掉到 `48000/2048 ≈ 23fps` 以下（或一帧 dt 超过 170ms）时样本装不下，旧写法 `min()` 之后**静默丢弃** | 拆出纯函数 `submit_plan(available, capacity) -> (可写, 是否截断)`，首次截断打一条**一次性**告警。丢弃本身是**有意**的（卡顿后不补播旧音频），改的只是可观测性 |
+
+顺带更正两处过期注释：队列长度 `4×2048/48000 = 170ms`（旧写"~85ms"是按 2 块算的）；
+`submit` 里"85ms 队列在 350FPS 下足够"同步更正。
+**红证**：`submit_plan` 改成忽略 `available`（正是"越界读源切片"那个错法）⇒
+`submit_plan_never_exceeds_source_or_capacity` 立刻红（`left (4096,false) / right (1600,false)`）。
+
+### 10.2 改动二：`simd.rs` + `renderer.rs`（`9b8a1ae`）—— 恒定条件下的每帧告警
+
+`RV3D_FORCE_SIMD` 指向硬件不支持的档位时（**可达组合**：`RV3D_DISABLE_AVX512=1` +
+`RV3D_FORCE_SIMD=avx512`，或 Intel 11/12 代——本仓对它们防御性关闭 AVX-512——照文档强制 avx512），
+三个调用点原来**每次调用打一行**：地形 morph 每级一次、视锥剔除**每段**一次（最多 9 次）、
+冲击波每帧一次 ⇒ 一帧最多十几行日志。现统一走 `simd::warn_forced_simd_unsupported`（`OnceLock` 闩），
+与 `set_hud_quads` / `warn_npc_cap_once` / PT 盒上限同款：**该报的报一次，不该刷屏的一次都不刷**。
+测试 `forced_simd_warning_is_latched_to_once`（第二次必须返回 `false`）。
+
+🔴 **这条测试第一次跑就红了，抓的是我自己**：闩的实现写成 `*WARNED.get_or_init(|| true)`
+—— 它闩的是"打过"这件事，但**每次**都返回 `true`（返回值语义 = "本次打没打"）。
+改成 `set(true).is_err()`（Err = 已经设过 ⇒ 本次不打）后转绿；这条判据写进了函数注释。
+
+### 10.3 核验**干净**（附判据，别再重复查）
+
+| 区域 | 判据 |
+|---|---|
+| **每帧日志刷屏**（`warn`/`error` 全仓按所属函数过一遍） | 每帧路径上的只剩三类：① 已有一次性闩（`set_hud_quads` / `warn_npc_cap_once` / PT 盒上限 / 本次的 SIMD 选路）；② 条件罕见（net 客户端超时、`push_out_of_obstacle` 扩环失败——它只在**出生**时调用）；③ **有意 loud**：交换链 `SUBOPTIMAL/OUT_OF_DATE`、呈现失败、渲染错误——这些每帧刷屏本身就是"设备/窗口出事了"的症状，不该被闩住 |
+| **每帧描述符重建** | `pt_refresh_dset()` 全仓**只有一个调用点**（`pt_scene_rebuild` 内、在场景指纹门之后）⇒ 不是每帧；主 pass 的 `update_descriptor_sets` 全在 init ✓ |
+| **跨线程锁** | 全部是**短作用域**（`lock()` 直接 `push/pop/clone/take`）：`audio_out` 回调、`llm_cmd` 的共享局面（逐个 lock、无嵌套）、`game.rs::EventBuffer`（物理监听者 → 主线程 drain）。**没有任何锁被跨 `join`/`recv` 持有** ⇒ 无死锁路径 |
+| **事件缓冲增长** | `drain_collisions` 用 `std::mem::take(&mut *buf)`（不是 `clone`）⇒ 每帧搬走并清空，容量随 `self.collisions` 走，**不会无限增长** |
+| `cpu.rs::run_sync`（只读） | 已在上轮记录：`nw - 1`/`senders[w-1]` 由 `worker_count + 1` 保证安全；两处无本地不变式的 panic（`lock().unwrap()` 中毒、`recv().expect()` 池线程崩溃连带）**保持原样**（铁律 E 的线程红线） |
+
+### 10.4 记一笔**不改**的：每帧堆分配清单
+
+按审计清单查了每帧分配，找到三处（都**有意不动**）：
+① `set_hud_quads` 每帧 `Vec::with_capacity(count*6)`（实际 HUD 约 100 quad ⇒ ~14 KB/帧）；
+② `update_ai` 每帧 `self.occl_cache.clone()`（255 bool）；③ `HudState::layout()` 每帧构造
+`Vec<HudElement>` 与若干 `String`。
+**判据（为什么不动）**：本仓的性能瓶颈已被反复实测为 **GPU 顶点吞吐**
+（AGENTS 铁律 D 的焊接收益；perf 日志里 `wait_fence ≈ frame` = CPU 在等 GPU），
+而这些合计远低于 0.1% ⇒ 按"阈值纪律"（教训 24/35：<5% 的差异必须先有多轮测量才能开口）
+**不做无测量的优化**。真要动，先按 `perf_run.ps1` 的噪声底 2.8% 设计对照。
+
+---
+
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
 
 ## 1. 症状与误诊
