@@ -523,7 +523,23 @@ pub fn grid_to_world(g: GridPos) -> (f32, f32) {
 /// 阈值取 1/3 而不是 1/2，是为了让 3×3m 的哨塔仍能封格（最实的格子 6.25m² = 39%），
 /// 保住 `find_cover_points` 的掩体点判定；而 6×0.9 隔离墩（3.6m² = 22%）、
 /// 1m 厚沙袋（4m² = 25%）、0.34m 护柱（1.4m²）都不再封格。
+///
+/// ⚠️ 只对**短件**生效；长件（≥ [`CELL_BLOCK_LONG_EXTENT_M`]）仍按保守规则封格。
 const CELL_BLOCK_MIN_OVERLAP_M2: f32 = GRID_CELL * GRID_CELL / 3.0;
+
+/// "长件"阈值（米）：任一水平方向 ≥ 该值的障碍按**保守规则**（碰到就封）建网。
+///
+/// 🔴 2026-09-25 补（覆盖率规则的第一版修正）：只按覆盖率封格时，1m 厚的沙袋环/矮墙
+/// **不再封格** ⇒ A* 的路径直接穿墙 ⇒ NPC 撞上后只能贴墙滑 ⇒ 在**凹角**里来回磨死。
+/// 真机实测（RV3D_AI_DIAG=1，defense_line 残局）：剩下两只卡在沙袋环的**内角**
+/// （`#9 pos=(8.3,8.9) #10 pos=(-8.9,1.6)`，`wp_d` 恒定 3.0，逐秒位移 0.2m，
+/// `occluded=true` ⇒ 进不了 Attack），`被障碍抵消` 却是 0 —— 因为滑动确实在动，只是原地打转。
+///
+/// 判据因此分成两类：
+///   - **长件**（沙袋/矮墙/围墙/建筑，≥8m）：NPC 必须**绕着走**，先把所在格封住；
+///   - **短件**（隔离墩 6m / 长椅 6m / 花坛 3.4m / 护柱 0.34m / 树 0.4m）：按覆盖率封格 ——
+///     它们封整格才是"把 4m 格子放大成一面墙"的根源。
+const CELL_BLOCK_LONG_EXTENT_M: f32 = GRID_CELL * 2.0;
 
 /// 把一个障碍盒"够格"的格子标成阻挡，返回**新封的格数**。这是导航网格的**唯一建网规则**。
 ///
@@ -543,6 +559,8 @@ fn block_obstacle_cells(grid: &mut GridMap, ob: &MapObstacle) -> usize {
     let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
     let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
     let (hx, hz) = (GRID_CELL * 0.5, GRID_CELL * 0.5);
+    // 长件（沙袋/矮墙/围墙/建筑）保守封格：NPC 必须绕着走，见 `CELL_BLOCK_LONG_EXTENT_M`
+    let long = ob.half_w.max(ob.half_d) * 2.0 >= CELL_BLOCK_LONG_EXTENT_M;
     let mut newly_blocked = 0usize;
     for gx in g0.x..=g1.x {
         for gz in g0.y..=g1.y {
@@ -557,7 +575,7 @@ fn block_obstacle_cells(grid: &mut GridMap, ob: &MapObstacle) -> usize {
             if ox <= 0.0 || oz <= 0.0 {
                 continue;
             }
-            if ox * oz < CELL_BLOCK_MIN_OVERLAP_M2 {
+            if !long && ox * oz < CELL_BLOCK_MIN_OVERLAP_M2 {
                 continue;
             }
             if grid.is_passable(pos) {
@@ -6279,14 +6297,14 @@ fn advance_npc(
         }
         let step = npc.speed * dt;
         let (step_x0, step_z0) = (npc.position[0], npc.position[2]);
-        npc.position[0] += mx * step;
-        npc.position[2] += mz * step;
-        // 2026-08-25 穿墙修复：移动后对存活的静态障碍 AABB 推开（直行/路径均在障碍外滑行）
-        let (px, pz) = resolve_circle_obstacles(obstacles, npc.position[0], npc.position[2], 0.45);
+        // 2026-08-25 穿墙修复 + 2026-09-25 沿墙滑动：移动后对存活的静态障碍 AABB 推开；
+        // 若整步被推回（覆盖率建网后 NPC 会贴着薄墙/家具走），改沿接触面切向滑一步。
+        let (px, pz) =
+            step_with_slide(obstacles, (step_x0, step_z0), (mx, mz), step, NPC_BODY_RADIUS);
         npc.position[0] = px;
         npc.position[2] = pz;
-        // 归因埋点（#17）：这一步"想走"了多远、实际净位移多少 —— 净位移 < 半步 即被障碍推回
-        // （典型 = 顶着 AABB 走：每帧进 0.16m、被推回 0.16m ⇒ 原地踏步）。
+        // 归因埋点（#17）：这一步"想走"了多远、实际净位移多少 —— 净位移 < 半步 即仍被障碍推回
+        // （滑动也没救回来的正撞/夹角，是真正贴着墙磨的帧）。
         if ai_diag() {
             let ord = std::sync::atomic::Ordering::Relaxed;
             NOTE_MOVE_STEP.fetch_add(1, ord);
@@ -6297,6 +6315,59 @@ fn advance_npc(
         }
     }
     npc.position[1] = terrain_height_at(npc.position[0], npc.position[2]);
+}
+
+/// NPC 身体半径（米）：与 `resolve_circle_obstacles` 的推开半径、`world_to_grid` 的
+/// 「身体所在格」判据共用同一个值（别在别处再写 0.45）。
+const NPC_BODY_RADIUS: f32 = 0.45;
+
+/// 一步"走 + 防穿墙 + **沿墙滑动**"：返回新的水平位置。
+///
+/// 🔴 2026-09-25 加（覆盖率建网规则的配套修复）。导航网格改成"覆盖 ≥1/3 格才封格"之后，
+/// 路径会贴着薄墙/家具走，而原实现把"走进障碍"的整步交给 `resolve_circle_obstacles` 推回来
+/// ⇒ 真机实测（RV3D_AI_DIAG=1，defense_line 第 1 波残局）**1 秒 64 帧里有 18–30 帧位移被
+/// 完全抵消**，NPC 实测速度掉到 **1.3–2.2 m/s**（设定 4.0）⇒ 9–14m 外磨到超时，
+/// 波次照样清不掉。
+///
+/// 修法与玩家的 `push_out_of_aabb` **一样**：推回量超过半步时，把意图方向**投影到接触面的
+/// 切向**再走一次 —— 撞墙只损失法向分量，不丢整帧。正撞（意图与法线平行）没有切向可走，
+/// 保留推回点；滑动结果若还不如原地，也保留推回点（**绝不倒退**）。
+fn step_with_slide(
+    obs: &[MapObstacle],
+    from: (f32, f32),
+    dir: (f32, f32),
+    step: f32,
+    r: f32,
+) -> (f32, f32) {
+    let want = (from.0 + dir.0 * step, from.1 + dir.1 * step);
+    let (px, pz) = resolve_circle_obstacles(obs, want.0, want.1, r);
+    let net = ((px - from.0).powi(2) + (pz - from.1).powi(2)).sqrt();
+    if net >= step * 0.5 {
+        return (px, pz);
+    }
+    // 接触法线方向 = 意图点 − 推回点（即障碍把这一步顶回来的方向）
+    let (nx, nz) = (want.0 - px, want.1 - pz);
+    let nl = (nx * nx + nz * nz).sqrt();
+    if nl < 1e-4 {
+        return (px, pz);
+    }
+    let (ux, uz) = (nx / nl, nz / nl);
+    let dot = dir.0 * ux + dir.1 * uz;
+    let (mut tx, mut tz) = (dir.0 - dot * ux, dir.1 - dot * uz);
+    let tl = (tx * tx + tz * tz).sqrt();
+    if tl < 1e-3 {
+        return (px, pz); // 正撞：没有切向可走
+    }
+    tx /= tl;
+    tz /= tl;
+    let (sx, sz) = (px + tx * step, pz + tz * step);
+    let (qx, qz) = resolve_circle_obstacles(obs, sx, sz, r);
+    let gain = ((qx - from.0).powi(2) + (qz - from.1).powi(2)).sqrt();
+    if gain > net {
+        (qx, qz)
+    } else {
+        (px, pz)
+    }
 }
 
 /// 圆（半径 r）对存活障碍 AABB 的水平推开（NPC 移动后防穿墙；MapObstacle 版）
@@ -6498,6 +6569,53 @@ mod tests {
             }
             assert_ring(name, &grid);
         }
+    }
+
+    /// 撞墙不丢帧：意图方向被障碍挡住时，必须沿墙滑出**有意义的一段**位移。
+    ///
+    /// 红证（改动前）：`resolve_circle_obstacles` 把整步推回 ⇒ 净位移只剩 0.07m（< 半步 0.08m）。
+    /// 真机后果（RV3D_AI_DIAG=1）：1 秒 64 帧里 18–30 帧被完全抵消，NPC 实测 1.3–2.2 m/s。
+    ///
+    /// 对照断言（**防止测试变成恒真**）：先证明"无滑动"这一步确实是被抵消的，
+    /// 再要求滑动后的位移明显更大。
+    #[test]
+    fn step_with_slide_keeps_moving_along_the_wall() {
+        // 一堵 10m 长、1m 厚的墙（沿 x 轴，中心在原点）；NPC 在墙南面外 0.5m
+        let obstacles = vec![MapObstacle::new(ObstacleKind::Wall, 0.0, 0.0, 5.0, 0.5)];
+        let from = (0.0f32, 1.0f32);
+        let step = 0.16f32;
+        // 朝"西北偏北"：大部分分量撞进墙里，只有一小部分沿墙（-x）
+        let dir = (-0.3f32, -0.954f32);
+        let r = NPC_BODY_RADIUS;
+        // 对照组：只有"走 + 推回"（旧行为）
+        let (bx, bz) = resolve_circle_obstacles(&obstacles, from.0 + dir.0 * step, from.1 + dir.1 * step, r);
+        let blocked = ((bx - from.0).powi(2) + (bz - from.1).powi(2)).sqrt();
+        assert!(
+            blocked < step * 0.5,
+            "对照组本该被抵消（否则这条测试是恒真的）：位移 {blocked:.4} ≥ 半步 {:.4}",
+            step * 0.5
+        );
+        // 处理组：加上沿墙滑动
+        let (x, z) = step_with_slide(&obstacles, from, dir, step, r);
+        let moved = ((x - from.0).powi(2) + (z - from.1).powi(2)).sqrt();
+        assert!(
+            moved > blocked * 2.0 && moved > step * 0.5,
+            "滑动后应当保住大部分步长：{moved:.4}（对照 {blocked:.4}，步长 {step:.2}）"
+        );
+        assert!(x < from.0 - 1e-3, "必须真的朝目标方向的 −x 分量挪了：x={x:.4}");
+        assert!(
+            z >= 0.5 + r - 1e-3,
+            "不得插进墙里（墙南面 z=0.5 + 半径 {r}）：z={z:.4}"
+        );
+        // 正撞（意图与法线平行）没有切向可走 ⇒ 不许凭空侧移，也不许倒退
+        let (hx, hz) = step_with_slide(&obstacles, from, (0.0, -1.0), step, r);
+        let head_on = ((hx - from.0).powi(2) + (hz - from.1).powi(2)).sqrt();
+        assert!(head_on <= blocked + 1e-4, "正撞不该比推回点走得更远：{head_on:.4}");
+        assert!(hz >= 0.5 + r - 1e-3, "正撞后仍须在墙外：z={hz:.4}");
+        // 空旷处（无接触）必须与旧行为逐位一致：一步就是 step
+        let (ox, oz) = step_with_slide(&obstacles, (0.0, 5.0), (0.6, 0.8), step, r);
+        let free = ((ox - 0.0f32).powi(2) + (oz - 5.0f32).powi(2)).sqrt();
+        assert!((free - step).abs() < 1e-5, "无障碍时不该改变步长：{free:.4}");
     }
 
     /// 部位伤害倍率阈值（设计文档：头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6）

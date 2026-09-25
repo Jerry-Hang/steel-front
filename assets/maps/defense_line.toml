@@ -24,13 +24,21 @@ objectives = [
 # 障碍：环形防线工事——内圈沙袋（cover）环绕中心，外圈哨塔（block）四角，
 # 通道口矮墙（barrier）引导进攻路径（NPC 从缺口涌入，防守方有掩体）
 obstacles = [
-    # 内圈环形沙袋（cover）：中心工事，四个方向留缺口
-    { type = "cover", position = { x = -8.0, y = 0.75, z = -8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
-    { type = "cover", position = { x = 8.0, y = 0.75, z = -8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
-    { type = "cover", position = { x = -8.0, y = 0.75, z = 8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
-    { type = "cover", position = { x = 8.0, y = 0.75, z = 8.0 }, size = { x = 10.0, y = 1.5, z = 1.0 } },
-    { type = "cover", position = { x = -8.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 10.0 } },
-    { type = "cover", position = { x = 8.0, y = 0.75, z = 0.0 }, size = { x = 1.0, y = 1.5, z = 10.0 } },
+    # 内圈环形沙袋（cover）：中心工事，四个方向各留 10m 缺口。
+    # 🔴 2026-09-25 改（原为 4 段 10m 横墙 + 2 段 10m 纵墙，缺口只有 6m / 2.5m）：
+    #   导航网格是 4m 的格子，长件（≥8m）按「碰到就封」建网 ⇒ 缺口两侧的墙各伸进邻格最多 1m，
+    #   6m 缺口正好跨在两列格子的边界上、两侧的格子都被封住 ⇒ 整圈在网格里是一道**封闭的墙**：
+    #   实测玩家所在连通域只剩 4 格、出生环 64 个采样点全不可达 ⇒ NPC 永远走不进来、
+    #   波次永远清不掉（判据 `wave_spawn_ring_is_reachable_from_the_player`）。
+    #   现在每边拆成两段 8m 的墙，缺口取 x/z ∈ (−5,5)（正对格子边界 0±4）⇒ 网格里稳定留出 2 格（8m）通道。
+    { type = "cover", position = { x = -9.0, y = 0.75, z = -8.0 }, size = { x = 8.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 9.0, y = 0.75, z = -8.0 }, size = { x = 8.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = -9.0, y = 0.75, z = 8.0 }, size = { x = 8.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = 9.0, y = 0.75, z = 8.0 }, size = { x = 8.0, y = 1.5, z = 1.0 } },
+    { type = "cover", position = { x = -8.0, y = 0.75, z = -9.0 }, size = { x = 1.0, y = 1.5, z = 8.0 } },
+    { type = "cover", position = { x = -8.0, y = 0.75, z = 9.0 }, size = { x = 1.0, y = 1.5, z = 8.0 } },
+    { type = "cover", position = { x = 8.0, y = 0.75, z = -9.0 }, size = { x = 1.0, y = 1.5, z = 8.0 } },
+    { type = "cover", position = { x = 8.0, y = 0.75, z = 9.0 }, size = { x = 1.0, y = 1.5, z = 8.0 } },
     # 外圈哨塔（block）：四角防御塔
     { type = "block", position = { x = -25.0, y = 1.5, z = -25.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
     { type = "block", position = { x = 25.0, y = 1.5, z = -25.0 }, size = { x = 3.0, y = 3.0, z = 3.0 } },
