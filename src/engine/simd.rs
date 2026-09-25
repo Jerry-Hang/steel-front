@@ -17,6 +17,26 @@
 //! 微码取数淹没向量收益，仅 0.82–0.92×）；ARM 用 `vld3q_f32` 结构步长加载，
 //! 均与标量逐位一致。
 
+/// `RV3D_FORCE_SIMD` 指定了硬件不支持的档位 ⇒ 回退自动选路时的**一次性**告警。
+///
+/// 🔴 2026-09-23 复查：这条告警的调用方全都是**每帧**调用的（地形 morph 每级一次、
+/// 视锥剔除**每段**一次最多 9 次、冲击波每帧一次），而"强制档位不受支持"是一个
+/// **恒定条件** ⇒ 三个调用点原来都是**每次调用打一行**（一帧最多十几行）。
+/// 这正是"不许静默"的反面：**该报的报一次，不该刷屏的一次都不刷。**
+///
+/// 返回值 = 本次是否真的打了日志（测试用；调用方可忽略）。
+pub fn warn_forced_simd_unsupported(forced: &str) -> bool {
+    use std::sync::OnceLock;
+    static WARNED: OnceLock<bool> = OnceLock::new();
+    // ⚠️ 不能用 `*WARNED.get_or_init(|| true)` —— 那样**每次**都返回 true（闩的是"打过"这件事，
+    // 不是"这一次打没打"）。`set` 的 Err 才表示"已经设过 ⇒ 本次不打"。
+    if WARNED.set(true).is_err() {
+        return false;
+    }
+    log::warn!("cpu: 强制 {forced} 但硬件不支持，回退自动选路（后续同样情况不再提示）");
+    true
+}
+
 /// 冲击波压力场选路入口：对每个采样点计算压力写入 `out`，返回实际启用的指令集路径名。
 /// x86_64：AVX-512（16 点/批）> AVX2（8）> AVX（8）> SSE4.2（4）> 标量；
 /// aarch64：NEON（4）> 标量；其余平台：标量。
@@ -73,7 +93,8 @@ pub fn shockwave_pressure(
                 }
                 return forced;
             }
-            log::warn!("cpu: 强制 {forced} 但硬件不支持，回退自动选路");
+            // 每次调用都会走到这里（每帧一次）⇒ 必须走一次性告警，见函数注释
+            warn_forced_simd_unsupported(forced);
         }
         if crate::engine::cpu::avx512_enabled() {
             // safety: 上面已运行时检测 AVX-512（含 Intel 11/12 代型号过滤）
@@ -657,5 +678,17 @@ mod simd_shockwave_tests {
             println!("{:<8}{:>12}{:>9.2}x{:>10}", name, us[i], speedup, eq);
         }
         assert!(us[scalar_idx] > 0, "scalar 计时异常");
+    }
+
+    /// 强制选路的"不支持"告警**必须只打一次**：
+    /// 三个调用点（地形 morph 每级 / 视锥剔除每段 / 冲击波每帧）都是每帧路径，
+    /// 而"强制档位不受支持"是恒定条件 ⇒ 不闩住就是每帧十几行日志。
+    #[test]
+    fn forced_simd_warning_is_latched_to_once() {
+        let _ = warn_forced_simd_unsupported("test-path");
+        assert!(
+            !warn_forced_simd_unsupported("test-path"),
+            "第二次必须被闩住 —— 否则每帧刷屏（这条红了说明 OnceLock 没了）"
+        );
     }
 }

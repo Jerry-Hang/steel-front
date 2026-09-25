@@ -3970,7 +3970,8 @@ impl Renderer {
                     }
                     return;
                 }
-                log::warn!("cpu: 强制 {forced} 但硬件不支持，回退自动选路");
+                // 每帧调用（morph 每级 / 剔除每段）⇒ 走一次性告警，见 `simd::warn_forced_simd_unsupported`
+                crate::engine::simd::warn_forced_simd_unsupported(forced);
             }
             if crate::engine::cpu::avx512_enabled() {
                 // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
@@ -7658,7 +7659,8 @@ impl Renderer {
                     }
                     return;
                 }
-                log::warn!("cpu: 强制 {forced} 但硬件不支持，回退自动选路");
+                // 每帧调用（morph 每级 / 剔除每段）⇒ 走一次性告警，见 `simd::warn_forced_simd_unsupported`
+                crate::engine::simd::warn_forced_simd_unsupported(forced);
             }
             if crate::engine::cpu::avx512_enabled() {
                 // safety: 上面已运行时检测 AVX-512，CPU 支持才进入该分支
