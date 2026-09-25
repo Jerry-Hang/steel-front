@@ -188,19 +188,18 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - `PLAYER_STEP_UP = 0.45` m：路缘/台阶能迈上去，护栏(1.5m)/集装箱(2.6m)必须跳。
 
 **呈现模式（2026-09-13）**
-- `RV3D_PRESENT_MODE` 支持 `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**。
-- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（快速转视角时读成"残影/鬼影"）。**`PrintWindow`
-  抓不到它** —— 它抓的是已合成的完整帧，撕裂只发生在显示器上。**别再用静态截图去证伪"残影"。**
-- **玩家路径由 `SteelFront.bat` 设 `RV3D_PRESENT_MODE=mailbox`**（不撕裂、也不像 FIFO
-  那样在独显直连下等不到 vblank 而死锁）。引擎默认 IMMEDIATE 是为了基准最稳。
-- 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：
-  独显 + `defense_line` + 默认 IMMEDIATE 会在第一个 Playing 帧后**静默卡死**（Windows 日志 4 条
-  `LiveKernelEvent` **P1=141** = TDR；换 mailbox 后 fps 162、零 VUID；核显同图、独显城市图都正常）。
-  而"静默"本身是引擎缺陷：`wait_for_fences`/`acquire_next_image` 以前用 **`u64::MAX`** 无限等 ⇒
-  现在 acquire 1s（连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s（连 3 次 ⇒ `gpu_stalled`，之后
-  `render()` 直接返回：**画面静止但进程与输入还在**，实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
-  **判据**：`rg 'u64::MAX' src/engine/renderer.rs` 不应出现在等待处；
-  测试 `swapchain_waits_are_bounded` 会在改回无限等待时红。`perf_run.ps1` 保持 IMMEDIATE。
+- `RV3D_PRESENT_MODE` = `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**（基准最稳），
+  **玩家路径由 `SteelFront.bat` 设 `mailbox`**（不撕裂；FIFO 在独显直连下等不到 vblank 而锁死）。
+- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（快速转视角时读成"残影/鬼影"）；**`PrintWindow` 抓不到它**
+  （它抓的是已合成的完整帧）⇒ **别再用静态截图去证伪"残影"。**
+- 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
+  `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（Windows 日志 4 条 `LiveKernelEvent`
+  **P1=141** = TDR；换 mailbox 后 fps 162、零 VUID；核显同图、独显城市图都正常）。而"静默"本身是引擎
+  缺陷：`wait_for_fences`/`acquire_next_image` 以前用 **`u64::MAX`** 无限等 ⇒ 现在 acquire 1s
+  （连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s（连 3 次 ⇒ `gpu_stalled`，之后 `render()` 直接返回：
+  **画面静止但进程与输入还在**，实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
+  **判据**：`rg 'u64::MAX' src/engine/renderer.rs` 不应出现在等待处；测试 `swapchain_waits_are_bounded`
+  会在改回无限等待时红。`perf_run.ps1` 保持 IMMEDIATE。
 
 **建筑摆放（2026-09-13）**
 - `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。用 `max` 会按较大方向
@@ -578,14 +577,12 @@ release_input.ps1 取代）。
 16. ~~**`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**~~ **已结案（2026-09-14）——文件已不存在**。
 17. ✅ **`survive` 5 波真机：2026-09-25 晚首次通关（结案）**（`RV3D_MAP=assets/maps/defense_line.toml`
     是这张图**唯一**的开启方式）。驱动 = `scripts/run_survive_pm.ps1` + `survive_pm.py`；口径
-    `RV3D_INVINCIBLE=1`（否则先死），**失败分支仍只有单测覆盖**。
+    `RV3D_INVINCIBLE=1`；失败分支已真机验（`-NoInvincible` ⇒ 20s DEFEAT）。
     通关判据（`-Secs 500 -NoShot`，独显 + mailbox）：`VICTORY (288s)`、`waves cleared ['1'..'5']`、
     `kills/shots 52/623`、`hits 205`（32.9%）、`VUID=0 panics=0 device_lost=0`、**`RESULT: ALL-OK`**。
-    收口过程共 5 次修复（判据与红证见 `docs/PROGRESS.md` §21 与 §21.6）：① 手榴弹出手即自爆；
-    ② `target_known` 拆通道；③ 四条根因链（包抄跳变 / 起点在墙里 / 导航网格封孤岛 / 凹角磨死）；
-    ④ 出生点收口到主连通域；⑤ **survive 波数可长于 `WAVES_PER_LEVEL`** + 胜利那一拍不再刷最后一波
-    + 任务目标按 `rule.waves` 计（三条都带红测）。harness 侧另修：换枪判据（含空格武器名 + 有活靶
-    也要换）、卡死看门狗、`hits=` 尺子。
+    收口 5 次引擎修复（手榴弹自爆 / `target_known` 拆通道 / 四条根因链 / 出生点收口 /
+    **survive 波数可长于 `WAVES_PER_LEVEL`**）+ harness 3 处（换枪判据 / 卡死看门狗 / `hits=` 尺子）
+    的判据与红证见 `docs/PROGRESS.md` §21 与 §21.6。
     **剩下的只是枪法**：理想 ≈3.9 发/杀 vs 实际 12 发/杀（移动靶 + 掩体），不影响通关。
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。

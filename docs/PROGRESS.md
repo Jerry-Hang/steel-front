@@ -7857,6 +7857,19 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 **同批闸门**：改完 renderer（等待有界）后重跑独显冒烟 —— `VUID=0 panics=0 fps=104.4`、
 `shots_fired=30`、击杀 1、**`RESULT: ALL-OK`**（说明这次的渲染循环改动没有破坏健康路径）。
 
+### 21.11 `survive` **失败分支**首次真机验证（`-NoInvincible`，2026-09-25 深夜）
+
+- **动机**：结案 #17 时**胜利**分支已在真机跑通两次，但**失败**分支（玩家阵亡 → `Defeat`）
+  一直只有单测覆盖 —— 与教训 42 同一形态：**真机走不到的分支等于没验**。
+- **做法**：`scripts/run_survive_pm.ps1` 加开关 `-NoInvincible`（纯 ASCII，见铁律 G）；
+  它只在 harness 侧写 `RV3D_INVINCIBLE` = 0/1，**不动引擎**，默认仍为 1（否则长跑到不了第 5 波）。
+- **判据（独显 + mailbox + `-NoShot -Secs 200 -NoInvincible`）**：harness 打
+  `result: DEFEAT (20s of a 200s budget)`；引擎打 `survive: 玩家阵亡于第 1 波 → 失败`；
+  `kills/shots 5/70`、`hits 8`、`VUID=0 panics=0 device_lost=0`、`fps=158.6`。
+  ⇒ **胜负两条分支现在都有真机证据**（此前失败分支只有 `cargo test` 的断言）。
+- **顺带**：AGENTS.md 压缩两处冗余（「呈现模式」四条并成三条、#17 的收口明细改指本文件）：
+  65528 → **65135 B**。此前只剩 8 B 余量，**任何一条新约束都会静默截断**（比超标更危险）。
+
 
 
 

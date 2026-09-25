@@ -12,7 +12,7 @@
 # "Playing + capture" reproducibly loses the Vulkan device (2026-09-25), while the
 # same scene without capture runs fine. Use it for dGPU runs; screenshots still work
 # on the integrated GPU.
-param([int]$Secs = 780, [int]$ShotEvery = 90, [switch]$NoShot, [string]$PresentMode = "mailbox")
+param([int]$Secs = 780, [int]$ShotEvery = 90, [switch]$NoShot, [string]$PresentMode = "mailbox", [switch]$NoInvincible)
 $ErrorActionPreference = "Continue"
 $repo = "D:\Rust\steel-front"
 $exe  = Join-Path $repo "target\release\steel-front.exe"
@@ -27,12 +27,15 @@ Remove-Item -Force $LOG, $LOGERR -ErrorAction SilentlyContinue
 $env:RV3D_STRESS_AI  = "0"
 $env:RV3D_AUTOSTART   = "1"
 $env:RV3D_MAP         = "assets/maps/defense_line.toml"
-$env:RV3D_INVINCIBLE  = "1"
+# RV3D_INVINCIBLE=1 is deliberate: it removes the "player dies at wave N" branch so the
+# run can reach wave 5 at all. -NoInvincible flips it OFF to exercise the Defeat branch
+# on real hardware (which otherwise only has unit-test coverage).
+if ($NoInvincible) { $env:RV3D_INVINCIBLE = "0" } else { $env:RV3D_INVINCIBLE = "1" }
 # Machine-readable live NPC positions (one `npcpos:` line per NPC per second).
 # The harness aims by it: `npc: #N stand` is only a snapshot from the moment an NPC
 # entered Attack, so moving targets were aimed at a stale point (12 shots/kill).
 $env:RV3D_NPC_POS     = "1"
-# 🔴 2026-09-25: the discrete GPU **hangs** (Windows TDR 0x141 VIDEO_ENGINE_TIMEOUT_DETECTED,
+# !! 2026-09-25: the discrete GPU **hangs** (Windows TDR 0x141 VIDEO_ENGINE_TIMEOUT_DETECTED,
 # 4 events in the Application log) when this map is played with the engine default
 # IMMEDIATE present mode: the game logged `game: run started (wave 1)` and then died at the
 # first Playing frame (no fps line, no panic, no VUID). The same map on the integrated GPU,
