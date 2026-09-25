@@ -159,6 +159,14 @@ impl Ord for HeapNode {
 /// （会一路展开整张 128×128 网格）。没有这两个计数器，那条 lead 就只是句话。
 static ASTAR_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static ASTAR_FAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 失败三因分列（2026-09-25 补）：真机上"几乎 100% 失败"已实测到，必须知道是哪一种 ——
+/// 起点/目标落在阻挡格是 O(1) 快速失败，连通域穷尽才是 #25 的尖峰来源。
+static ASTAR_FAIL_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ASTAR_FAIL_GOAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ASTAR_FAIL_EXHAUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// "目标不可达 ⇒ 返回**部分路径**（走到最接近目标的可达格）"的次数（2026-09-25 加）。
+/// 它**不是失败**：这是修掉"被围死就原地贴着墙"的那条兜底在生效。
+static ASTAR_PARTIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `RV3D_AI_DIAG` 开关（与 `game.rs::ai_diag()` 同一套取值：`1`/`on`/`true`）
 fn diag_on() -> bool {
@@ -176,6 +184,58 @@ pub fn astar_calls_take() -> u64 {
 /// 取走并清零"这一秒的寻路失败数"（诊断用）
 pub fn astar_fails_take() -> u64 {
     ASTAR_FAILS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 取走并清零三种失败原因（诊断用）：返回 `(起点阻挡, 目标阻挡, 连通域穷尽)`
+pub fn astar_fail_reasons_take() -> (u64, u64, u64) {
+    (
+        ASTAR_FAIL_START.swap(0, std::sync::atomic::Ordering::Relaxed),
+        ASTAR_FAIL_GOAL.swap(0, std::sync::atomic::Ordering::Relaxed),
+        ASTAR_FAIL_EXHAUSTED.swap(0, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// 取走并清零"部分路径"次数（诊断用）—— 目标不可达但给了"最接近目标的可达格"那条兜底
+pub fn astar_partial_take() -> u64 {
+    ASTAR_PARTIAL.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `from` 可通行就原样返回；否则**确定性扩环**找最近的可通行格（越界/超环返回 `None`）。
+///
+/// 🔴 2026-09-25 真机实测（iGPU 上的 survive 跑）：`aidiag: astar 1s 内 calls=108 fails=108
+/// （起点阻挡=108 目标阻挡=0 连通域穷尽=0）` —— **每一只 NPC 都站在阻挡格里**，
+/// 而 `find_path` 的第一条判据就是"起点必须可通行" ⇒ 它们**永远拿不到路径**，
+/// 只能靠 `direct_goal` 直行，于是越顶越深地贴在墙里、`occluded=true`、玩家打不到
+/// ⇒ **波次永远清不掉**（#17 的可见症状）。
+///
+/// 环内取"直线距离最小"的那个（与 `game.rs` 里原有的目标兜底螺旋同口径），
+/// 保证结果**确定**（同一输入必得同一输出）。
+pub fn passable_or_nearest(map: &GridMap, from: GridPos, max_ring: i32) -> Option<GridPos> {
+    if map.is_passable(from) {
+        return Some(from);
+    }
+    for r in 1..=max_ring {
+        let mut best: Option<(i64, GridPos)> = None;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dy.abs() != r {
+                    continue; // 只看这一环的边框
+                }
+                let gp = GridPos::new(from.x + dx, from.y + dy);
+                if !map.is_passable(gp) {
+                    continue;
+                }
+                let d = (dx * dx + dy * dy) as i64;
+                if best.as_ref().map_or(true, |(bd, _)| d < *bd) {
+                    best = Some((d, gp));
+                }
+            }
+        }
+        if let Some((_, gp)) = best {
+            return Some(gp);
+        }
+    }
+    None
 }
 
 /// A* 寻路：求 `start` 到 `goal` 的最短四方向路径（含两端点）。
@@ -199,7 +259,18 @@ pub fn find_path(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<Gri
 
 /// [`find_path`] 的实现主体（与诊断计数分离）
 fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<GridPos>> {
-    if !map.is_passable(start) || !map.is_passable(goal) {
+    // 🔴 2026-09-25 实测补：真机日志显示寻路**几乎 100% 失败**（`aidiag: astar … calls=104 fails=104`）。
+    // 失败有三种完全不同的原因，代价也差三个量级，必须分开数：
+    //   ① 起点就在阻挡格 / 越界 ⇒ O(1) 立即返回；
+    //   ② 目标在阻挡格 / 越界 ⇒ 同样 O(1)（调用方会螺旋找附近可行格再试一次）；
+    //   ③ 起点目标都合法但**被围死** ⇒ 展开可达的整片连通域（最贵，才是 #25 的尖峰来源）。
+    // 只有①②时，那 100% 失败是"快速失败"，CPU 尖峰另有原因；③占多数则尖峰就是它。
+    if !map.is_passable(start) {
+        note_astar_fail(AstarFailReason::StartBlocked);
+        return None;
+    }
+    if !map.is_passable(goal) {
+        note_astar_fail(AstarFailReason::GoalBlocked);
         return None;
     }
     if start == goal {
@@ -222,6 +293,20 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
         g: 0,
         index: start_idx,
     });
+    // 目标不可达时的**部分路径**兜底（2026-09-25 真机实测加）：
+    // 记下搜索过程中"离目标最近"的那个可达节点；堆空时回退到它，而不是返回 `None`。
+    // 依据：修掉"起点落在阻挡格"之后，实测失败原因 100% 变成 `连通域穷尽`（NPC 被墙围在
+    // 另一个连通域里），返回 `None` 会让 NPC 退回直行贴墙、永远停在玩家看不见的地方
+    // ⇒ 波次清不掉。给出"走到最接近目标的可达格"至少让它们走到屏障边（可见、可打），
+    // 而且路径非空 ⇒ 不必每 1/3 秒重规划一次（CPU 也跟着降）。
+    //
+    // 🔴 2026-09-25 修（**非确定性**，由 `astar_goal_surrounded_returns_partial_path` 红测抓出）：
+    // 原先按**曼哈顿** h 取最小，而曼哈顿 h 在斜向上一大片格子并列（本例 (1,3)/(2,2)/(3,1)
+    // 都是 h=2）⇒ 谁先出堆全看二叉堆内部顺序 ⇒ **同样的输入、同样的实现，选点可以不一样**。
+    // 现在改成"直线距离² 最小，再取格子序号最小"：与堆顺序无关、可复现，
+    // 且与"离目标最近"的字面语义一致（(2,2) 的 d²=2 唯一最小）。
+    let mut best_idx = start_idx;
+    let mut best_d2 = i64::MAX;
 
     while let Some(node) = open.pop() {
         if closed[node.index] {
@@ -230,17 +315,16 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
         closed[node.index] = true;
 
         if node.index == goal_idx {
-            let mut path = Vec::new();
-            let mut cur = Some(node.index);
-            while let Some(i) = cur {
-                path.push(GridPos::new((i % width) as i32, (i / width) as i32));
-                cur = parent[i];
-            }
-            path.reverse();
-            return Some(path);
+            return Some(reconstruct_path(&parent, width, Some(node.index)));
         }
 
         let cur_pos = GridPos::new((node.index % width) as i32, (node.index / width) as i32);
+        let (gx, gy) = ((cur_pos.x - goal.x) as i64, (cur_pos.y - goal.y) as i64);
+        let d2 = gx * gx + gy * gy;
+        if (d2, node.index) < (best_d2, best_idx) {
+            best_d2 = d2;
+            best_idx = node.index;
+        }
         for (dx, dy) in NEIGHBOR_OFFSETS {
             let next = GridPos::new(cur_pos.x + dx, cur_pos.y + dy);
             if !map.is_passable(next) {
@@ -264,7 +348,87 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
         }
     }
 
+    // 堆空 = 起点所在连通域里没有目标
+    if best_idx != start_idx {
+        if diag_on() {
+            ASTAR_PARTIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return Some(reconstruct_path(&parent, width, Some(best_idx)));
+    }
+    note_astar_fail(AstarFailReason::Exhausted);
     None
+}
+
+/// 从 `from` 出发的 4 邻域**可达掩码**（行主序，`true` = 可通行且与 `from` 连通）。
+///
+/// 🔴 2026-09-25 加（#17 真根因）：`find_path` 找不到路只是**症状**，真正要回答的问题是
+/// "这个出生点到底走不走得到玩家"。程序化城市地图实测：中央广场被一圈低矮装饰
+/// （0.6m 台沿 / 0.2m 立柱）围住，导航网格按"障碍盒覆盖整格"判定 ⇒ 玩家所在域只有
+/// **24 格**，而全图可通行 13165 格；NPC 出生在 40–80m 外 ⇒ 出生即在**另一个连通域**，
+/// 永远走不到玩家 ⇒ `update_waves` 等不到 `npcs.is_empty()` ⇒ 波次永远清不掉。
+///
+/// 用于**出生选点校验**（`game.rs::spawn_npc_ring`）与地图连通性巡检（单测）。
+/// 成本 O(格数)；由调用方决定缓存策略（每波一次足够）。
+pub fn reachable_mask(map: &GridMap, from: GridPos) -> Vec<bool> {
+    let w = map.width();
+    let h = map.height();
+    let mut seen = vec![false; w * h];
+    if w == 0 || h == 0 || !map.is_passable(from) {
+        return seen;
+    }
+    let mut queue = std::collections::VecDeque::new();
+    seen[from.y as usize * w + from.x as usize] = true;
+    queue.push_back(from);
+    while let Some(p) = queue.pop_front() {
+        for (dx, dy) in NEIGHBOR_OFFSETS {
+            let next = GridPos::new(p.x + dx, p.y + dy);
+            if !map.is_passable(next) {
+                continue;
+            }
+            let i = next.y as usize * w + next.x as usize;
+            if seen[i] {
+                continue;
+            }
+            seen[i] = true;
+            queue.push_back(next);
+        }
+    }
+    seen
+}
+
+/// 由 `parent` 链反推出路径（含起点与终点，顺序 start→goal）
+fn reconstruct_path(parent: &[Option<usize>], width: usize, mut cur: Option<usize>) -> Vec<GridPos> {
+    let mut path = Vec::new();
+    while let Some(i) = cur {
+        path.push(GridPos::new((i % width) as i32, (i / width) as i32));
+        cur = parent[i];
+    }
+    path.reverse();
+    path
+}
+
+/// 寻路失败的原因（诊断用；只影响 `RV3D_AI_DIAG=1` 时的计数）
+#[derive(Debug, Clone, Copy)]
+enum AstarFailReason {
+    /// 起点落在阻挡格/越界（O(1) 返回）
+    StartBlocked,
+    /// 目标落在阻挡格/越界（O(1) 返回）
+    GoalBlocked,
+    /// 两端都合法但连通域里找不到目标（展开整片连通域，最贵）
+    Exhausted,
+}
+
+/// 记一次寻路失败（关闭诊断时**零成本**：一个 `OnceLock` 读）
+fn note_astar_fail(reason: AstarFailReason) {
+    if !diag_on() {
+        return;
+    }
+    let counter = match reason {
+        AstarFailReason::StartBlocked => &ASTAR_FAIL_START,
+        AstarFailReason::GoalBlocked => &ASTAR_FAIL_GOAL,
+        AstarFailReason::Exhausted => &ASTAR_FAIL_EXHAUSTED,
+    };
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// NPC 状态
@@ -905,8 +1069,14 @@ mod tests {
         }
     }
 
+    /// 🔴 **契约变更（2026-09-25，真机实测驱动）**：目标被围死时**不再返回 `None`**，
+    /// 而是给出"走到最接近目标的可达格"的**部分路径**。
+    ///
+    /// 依据（核显 survive 实测）：旧行为下被墙围死的 NPC 拿不到路径 ⇒ 退回 `direct_goal` 直行
+    /// ⇒ 顶着墙、`occluded=true`、玩家打不到 ⇒ **波次永远清不掉**。
+    /// 这条测试原来断言 `None`（旧契约），改契约时它**必然红** —— 那是预期的。
     #[test]
-    fn astar_no_path_when_goal_surrounded() {
+    fn astar_goal_surrounded_returns_partial_path() {
         let mut map = GridMap::new(5, 5);
         for pos in [
             GridPos::new(2, 3),
@@ -916,10 +1086,84 @@ mod tests {
         ] {
             map.block(pos);
         }
+        let goal = GridPos::new(3, 3);
+        let start = GridPos::new(0, 0);
+        let path = find_path(&map, start, goal).expect("目标被围死也必须给部分路径");
+        assert_eq!(path[0], start, "路径首格 = 起点");
+        let last = *path.last().expect("部分路径不该为空");
+        assert_ne!(last, goal, "目标格真的走不到");
         assert_eq!(
-            find_path(&map, GridPos::new(0, 0), GridPos::new(3, 3)),
-            None
+            last,
+            GridPos::new(2, 2),
+            "应停在离目标最近的可达格（h=2；四个邻居 h=1 但都被封）"
         );
+        for w in path.windows(2) {
+            let d = (w[1].x - w[0].x).abs() + (w[1].y - w[0].y).abs();
+            assert_eq!(d, 1, "部分路径也必须四方向逐格相邻: {w:?}");
+            assert!(map.is_passable(w[1]));
+        }
+    }
+
+    /// 目标在**另一个连通域**（整列封死）时：部分路径应停在最贴近目标的墙边格。
+    #[test]
+    fn astar_partial_path_stops_at_the_barrier() {
+        let mut map = GridMap::new(9, 9);
+        for y in 0..9 {
+            map.block(GridPos::new(4, y));
+        }
+        let start = GridPos::new(1, 4);
+        let goal = GridPos::new(7, 4); // 右半域，不可达
+        assert!(map.is_passable(start) && map.is_passable(goal), "两端本身要合法");
+        let path = find_path(&map, start, goal).expect("不可达目标也要给部分路径");
+        assert!(path.len() > 1, "应当真的走了一段: {path:?}");
+        assert_eq!(*path.last().unwrap(), GridPos::new(3, 4), "停在墙左侧最近格");
+    }
+
+    /// 真·穷尽（起点自己就是孤岛）：仍然返回 `None`（这才是 `fails` 该计的那种）
+    #[test]
+    fn astar_returns_none_only_when_start_is_an_island() {
+        let mut island = GridMap::new(5, 5);
+        for y in 0..5 {
+            for x in 0..5 {
+                if (x, y) != (1, 1) {
+                    island.block(GridPos::new(x, y));
+                }
+            }
+        }
+        assert!(island.is_passable(GridPos::new(1, 1)));
+        assert_eq!(
+            find_path(&island, GridPos::new(1, 1), GridPos::new(3, 3)),
+            None,
+            "四周全封 ⇒ 连一个可达的更近格都没有 ⇒ None"
+        );
+    }
+
+    /// `passable_or_nearest`：可通行原样返回；不可通行时按**环由近及远**找最近的可通行格。
+    /// 这条红了 = "NPC 站在阻挡格里就永远拿不到路径"（实测 108/108）会复发。
+    #[test]
+    fn passable_or_nearest_finds_deterministic_nearest() {
+        let mut map = GridMap::new(9, 9);
+        for y in 3..=5 {
+            for x in 3..=5 {
+                map.block(GridPos::new(x, y));
+            }
+        }
+        // 可通行 ⇒ 原样返回
+        assert_eq!(
+            passable_or_nearest(&map, GridPos::new(0, 0), 8),
+            Some(GridPos::new(0, 0))
+        );
+        // 被 3×3 封住的中心：环 1 全封，环 2 上直线距离最小的是边中点 (4,2)（d²=4）
+        let p = GridPos::new(4, 4);
+        assert!(!map.is_passable(p));
+        let n = passable_or_nearest(&map, p, 8).expect("环 2 上应有可通行格");
+        assert!(map.is_passable(n), "返回值必须可通行");
+        assert_eq!(n, GridPos::new(4, 2), "确定性：环内取直线距离最小、顺序固定");
+        // 半径不够 ⇒ None（调用方据此知道"救不回来"）
+        assert_eq!(passable_or_nearest(&map, p, 1), None, "半径 1 全封");
+        // 越界输入：要么 None，要么给一个真的可通行格（不能原样返回越界点）
+        let oob = passable_or_nearest(&map, GridPos::new(-5, -5), 8);
+        assert!(oob.is_none() || map.is_passable(oob.unwrap()));
     }
 
     #[test]
@@ -1264,6 +1508,28 @@ mod tests {
             }
             prev = Some(g);
         }
+    }
+
+    /// 可达掩码：4 邻域连通、阻挡格排除、起点不可通行时**全 false 且不 panic**。
+    /// 它是"出生点走不走得到玩家"的唯一判据（见 `reachable_mask` 的文档）。
+    #[test]
+    fn reachable_mask_matches_grid_connectivity() {
+        let mut map = GridMap::new(5, 5);
+        // 中间一整列封死 ⇒ 左侧可达、右侧不可达
+        for y in 0..5 {
+            map.block(GridPos::new(2, y));
+        }
+        let mask = reachable_mask(&map, GridPos::new(0, 0));
+        let at = |x: i32, y: i32| mask[y as usize * 5 + x as usize];
+        assert!(at(0, 0) && at(0, 4) && at(1, 4), "左侧连通域应全部可达");
+        assert!(!at(2, 0), "阻挡格自身不可达");
+        assert!(!at(3, 0) && !at(4, 0) && !at(4, 4), "被墙隔开的右侧不该可达");
+        // 起点本身不可通行 ⇒ 全 false（不 panic、不越界）
+        let none = reachable_mask(&map, GridPos::new(2, 2));
+        assert_eq!(none.len(), 25);
+        assert!(none.iter().all(|b| !b), "起点在墙里时不该有可达格");
+        // 越界起点同样安全
+        assert!(reachable_mask(&map, GridPos::new(-1, 0)).iter().all(|b| !b));
     }
 
     #[test]
