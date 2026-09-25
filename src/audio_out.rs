@@ -312,7 +312,26 @@ impl Drop for WaveOutSink {
                             std::mem::size_of::<win::WaveHdr>() as u32,
                         );
                     }
-                    win::waveOutClose(self.handle);
+                    // 🔴 2026-09-23 复查：`waveOutClose` 的返回值原来被丢掉。
+                    // 它**可能失败**（`WAVERR_STILLPLAYING`：还有缓冲没播完/没 unprepare 成功），
+                    // 而失败 ⇒ 设备仍然开着、**回调线程随时可能再进来一次**：
+                    // 回调做两件事 —— 解引用 `Arc::as_ptr` 给出去的裸指针（**不增加引用计数**）、
+                    // 再 `lock` 那个 Mutex。而 Drop 一结束，`ctx` 与 `buffers` 两个字段就会被释放
+                    // ⇒ **use-after-free**（"关声/退出时偶发崩溃"的典型形态；缓冲的 `lpData`
+                    // 同理可能还握在驱动手里）。
+                    // ⇒ 关不掉时把这两份一次性分配**刻意泄漏**（进程正在退出，量级几十 KB），
+                    // 换掉 UAF 窗口。泄漏是**有意的**，不是忘了释放。
+                    let rc = win::waveOutClose(self.handle);
+                    if rc != 0 {
+                        if let Some(ctx) = self.ctx.take() {
+                            std::mem::forget(ctx);
+                        }
+                        std::mem::forget(std::mem::take(&mut self.buffers));
+                        log::warn!(
+                            "audio: waveOutClose 失败 rc={}，回调上下文与缓冲已刻意泄漏以避免 use-after-free",
+                            rc
+                        );
+                    }
                 }
             }
         }
