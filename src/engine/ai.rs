@@ -167,6 +167,25 @@ static ASTAR_FAIL_EXHAUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// "目标不可达 ⇒ 返回**部分路径**（走到最接近目标的可达格）"的次数（2026-09-25 加）。
 /// 它**不是失败**：这是修掉"被围死就原地贴着墙"的那条兜底在生效。
 static ASTAR_PARTIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 这一秒内 A* **展开的节点总数 / 单次最大展开数 / 堆入队总数**（2026-09-25 加，未结案 #25）。
+///
+/// 🔴 存在的理由：`ai_us` 的 41.6ms 尖峰既不是"起点阻挡"（O(1) 返回）也不是"连通域穷尽"
+/// （真机 `aidiag: astar 1s` 实测**恒为 0**）⇒ 旧归因站不住。**先量再改**：没有这三个数，
+/// 任何"加节点预算/缓存"的优化都是拿"我以为更快"换掉"AI 真的能找到路"。1 Hz 取走并清零。
+static ASTAR_EXPANDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ASTAR_EXPANDED_MAX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ASTAR_PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 记一次寻路的工作量（关闭诊断时零成本：一个 `OnceLock` 读 + 提前返回）
+fn note_astar_work(expanded: u64, pushed: u64) {
+    if !diag_on() {
+        return;
+    }
+    use std::sync::atomic::Ordering::Relaxed;
+    ASTAR_EXPANDED.fetch_add(expanded, Relaxed);
+    ASTAR_PUSHED.fetch_add(pushed, Relaxed);
+    ASTAR_EXPANDED_MAX.fetch_max(expanded, Relaxed);
+}
 
 /// `RV3D_AI_DIAG` 开关（与 `game.rs::ai_diag()` 同一套取值：`1`/`on`/`true`）
 fn diag_on() -> bool {
@@ -198,6 +217,18 @@ pub fn astar_fail_reasons_take() -> (u64, u64, u64) {
 /// 取走并清零"部分路径"次数（诊断用）—— 目标不可达但给了"最接近目标的可达格"那条兜底
 pub fn astar_partial_take() -> u64 {
     ASTAR_PARTIAL.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 取走并清零 A* 的工作量（诊断用）：返回 `(这一秒展开节点总数, 单次最大展开数, 这一秒入队总数)`。
+/// 未结案 #25 的判据就挂在这三个数上 —— 尖峰到底来自"某一只算爆了"（max 大）还是"调用太多"
+/// （calls 大但每次很小），一眼可分。
+pub fn astar_work_take() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        ASTAR_EXPANDED.swap(0, Relaxed),
+        ASTAR_EXPANDED_MAX.swap(0, Relaxed),
+        ASTAR_PUSHED.swap(0, Relaxed),
+    )
 }
 
 /// `from` 可通行就原样返回；否则**确定性扩环**找最近的可通行格（越界/超环返回 `None`）。
@@ -307,14 +338,21 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
     // 且与"离目标最近"的字面语义一致（(2,2) 的 d²=2 唯一最小）。
     let mut best_idx = start_idx;
     let mut best_d2 = i64::MAX;
+    // 分项计时（未结案 #25 的 lead③）：本次调用**展开了多少节点**。
+    // `ai_us` 41.6ms 的尖峰既不是"起点阻挡"（那是 O(1)）也不是"连通域穷尽"（实测恒为 0），
+    // 所以在拿到"展开节点数"之前不该改算法 —— 先量，再决定是否加预算/缓存。
+    let mut expanded = 0u64;
+    let mut pushed = 0u64;
 
     while let Some(node) = open.pop() {
         if closed[node.index] {
             continue;
         }
         closed[node.index] = true;
+        expanded += 1;
 
         if node.index == goal_idx {
+            note_astar_work(expanded, pushed);
             return Some(reconstruct_path(&parent, width, Some(node.index)));
         }
 
@@ -340,6 +378,7 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
             }
             g_score[next_idx] = tentative_g;
             parent[next_idx] = Some(node.index);
+            pushed += 1;
             open.push(HeapNode {
                 f: tentative_g + next.manhattan(goal),
                 g: tentative_g,
@@ -349,6 +388,7 @@ fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<G
     }
 
     // 堆空 = 起点所在连通域里没有目标
+    note_astar_work(expanded, pushed);
     if best_idx != start_idx {
         if diag_on() {
             ASTAR_PARTIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

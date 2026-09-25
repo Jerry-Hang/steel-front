@@ -2285,6 +2285,7 @@ impl Game {
                 let (f_start, f_goal, f_ex) = crate::engine::ai::astar_fail_reasons_take();
                 let partial = crate::engine::ai::astar_partial_take();
                 let unstuck = NOTE_NPC_UNSTUCK.swap(0, std::sync::atomic::Ordering::Relaxed);
+                let (expanded, expanded_max, pushed) = crate::engine::ai::astar_work_take();
                 let ord = std::sync::atomic::Ordering::Relaxed;
                 let mv_step = NOTE_MOVE_STEP.swap(0, ord);
                 let mv_undone = NOTE_MOVE_UNDONE.swap(0, ord);
@@ -2377,14 +2378,17 @@ impl Game {
                 );
                 self.ai_diag_prev_t = self.time;
                 log::info!(
-                    "aidiag: astar 1s 内 calls={} fails={} partial={}（起点阻挡={} 目标阻挡={} 连通域穷尽={}）；NPC 站在阻挡格里被挪回={}",
+                    "aidiag: astar 1s 内 calls={} fails={} partial={}（起点阻挡={} 目标阻挡={} 连通域穷尽={}）；NPC 站在阻挡格里被挪回={}；展开={}（单次最大={}）入队={}",
                     calls,
                     fails,
                     partial,
                     f_start,
                     f_goal,
                     f_ex,
-                    unstuck
+                    unstuck,
+                    expanded,
+                    expanded_max,
+                    pushed
                 );
             }
             let enemy_hp = self.npcs.first().map(|n| n.max_hp).unwrap_or(0.0);
