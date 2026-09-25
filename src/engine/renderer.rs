@@ -387,7 +387,8 @@ fn quality_params(preset: QualityPreset) -> QualityParams {
 // PNG 截图（swapchain 图像读回，纯逻辑部分）
 // ============================================================
 
-/// 截图读回时主机侧等待 render_finished 信号量的超时（纳秒，2 秒足够完成一帧渲染）
+/// 截图读回时主机侧等待**围栏**的超时（纳秒，2 秒足够完成一帧渲染）。
+/// 两处都用它：等本帧渲染完成（`in_flight_fences[slot]`）与等拷贝命令完成（截图自己的围栏）。
 const SCREENSHOT_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
 
 /// 交换链图像获取的超时（纳秒）。**绝不可以用 `u64::MAX`**：呈现引擎不给图像时
@@ -8162,9 +8163,15 @@ impl Renderer {
             self.device
                 .queue_submit(self.graphics_queue, &[submit_info], fence)
                 .map_err(|e| format!("提交截图命令失败: {}", e))?;
+            // 🔴 超时必须有限（`u64::MAX` = 无限等 ⇒ 铁律 B 那个"静默卡死"的同一形态；
+            // 2026-09-25 复查时这句是**漏网的一处**，判据 `no_unbounded_wait_on_vulkan_calls`）。
+            // ⚠️ 超时后**故意不释放**这条命令缓冲：它可能仍在 pending（释放 = 未定义行为），
+            // 代价是每次超时漏一条一次性命令缓冲 —— 比 UB 便宜得多。同理那条围栏仍是 pending，
+            // 下一次截图 `reset_fences` 会踩 UB；但这一路径只在 GPU 已经卡住时才可达
+            // （那种情况下主循环的围栏看门狗会先 `gpu_stalled`，画面本来就不再更新）。
             self.device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .map_err(|e| format!("等待截图围栏失败: {}", e))?;
+                .wait_for_fences(&[fence], true, SCREENSHOT_WAIT_TIMEOUT_NS)
+                .map_err(|e| format!("等待截图围栏失败（限时 {}s）: {}", SCREENSHOT_WAIT_TIMEOUT_NS / 1_000_000_000, e))?;
             self.device.free_command_buffers(self.command_pool, &[cmd_buffer]);
         }
 
@@ -13547,9 +13554,55 @@ mod vk_failure_path_tests {
             .filter(|l| l.contains("command_buffers[self.current_frame]"))
             .count();
         assert!(
-            by_slot >= 2,
-            "record 与 submit 两处都必须按 current_frame 取，实际命中 {} 处",
+            by_slot >= 1,
+            "按 current_frame 取命令缓冲的那一行不见了（实际命中 {} 处）",
             by_slot
+        );
+        // record 与 submit 必须用**同一条**：取一次存进局部变量，两处都用它
+        assert!(
+            code.iter().any(|l| l.contains("let cmd_buffer = self.command_buffers[self.current_frame]")),
+            "期望 render() 里把命令缓冲取进局部变量 cmd_buffer，再由 record 与 submit 共用"
+        );
+    }
+
+    /// Vulkan **等待**调用关键字（与真实写法逐字一致）
+    const WAIT_CALLS: [&str; 4] = [
+        ".wait_for_fences(",
+        ".wait_semaphores(",
+        ".acquire_next_image(",
+        ".device_wait_idle(",
+    ];
+
+    /// 🔴 **所有 Vulkan 等待必须有上界**（铁律 B，2026-09-25 真机代价 = "游戏静默卡死"）。
+    ///
+    /// `u64::MAX` 当超时 = 无限等：GPU 侧再也不会 signal 时，进程**日志停住、无 panic、
+    /// 无 VUID、无 `has been lost`**，外面只能看到"游戏死了"。判据就是这一条源码检查
+    /// （改回无限等立刻红）。同类判据：`swapchain_waits_are_bounded` 钉住那几个常量有限。
+    ///
+    /// 现状：2026-09-25 复查时**截图读回那句 `wait_for_fences(..., u64::MAX)` 是漏网的一处**
+    /// （第一轮只改了 acquire 与主循环围栏），修完为 0 处。
+    #[test]
+    fn no_unbounded_wait_on_vulkan_calls() {
+        let full = include_str!("renderer.rs");
+        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
+        // 先证明这条检查真的扫到了等待调用（否则文件被搬走/改名时会静默恒真）
+        let waits = code
+            .iter()
+            .filter(|l| WAIT_CALLS.iter().any(|w| l.contains(w)))
+            .count();
+        assert!(waits >= 3, "检查失效：只扫到 {} 处等待调用", waits);
+        let bad: Vec<&str> = code
+            .iter()
+            .copied()
+            .filter(|l| {
+                l.contains("u64::MAX") && WAIT_CALLS.iter().any(|w| l.contains(w))
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "等待必须有限（u64::MAX = 无限等 ⇒ 静默卡死）：\n{}",
+            bad.join("\n")
         );
     }
 

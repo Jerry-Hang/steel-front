@@ -7939,6 +7939,27 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 - ⚠️ 顺手又被 CJK 守门测试拦一次（这次是 **阱 U+9631**，写在"自指陷阱"里）——
   §21.12 那条教训完全适用：**代码注释里的字也在守门范围内**。
 
+### 21.14 复查补：截图读回那句 `wait_for_fences(..., u64::MAX)` 是漏网的一处
+
+- **发现**：收工时按铁律 B 的判据 `rg 'u64::MAX' src/engine/renderer.rs` 复查 —— 第一轮只改了
+  acquire 与主循环围栏，**`do_screenshot_readback` 第 3 步（等拷贝命令完成）仍是无限等**。
+  同一类形状第三次出现（"改了主路径，漏了旁路"）。
+- **改法**：改用既有的 `SCREENSHOT_WAIT_TIMEOUT_NS`（2s；它本来就用在第 1 步"等本帧渲染完成"）。
+  超时后**故意不释放**那条一次性命令缓冲（它可能仍在 pending，释放 = UB），代价是漏一条命令缓冲；
+  同一处那条围栏也会留在 pending ⇒ 下次截图 `reset_fences` 同样踩 UB —— **该路径只在 GPU 已卡住时可达**
+  （那时主循环的围栏看门狗会先 `gpu_stalled`），已写进注释而不是假装不存在。
+- **判据升级（关键）**：这条铁律以前只有"用眼睛 `rg`"，**现在有源码守卫**
+  `no_unbounded_wait_on_vulkan_calls` —— 扫生产代码里 `u64::MAX` 与等待调用**同一行**的组合
+  （`.wait_for_fences(` / `.wait_semaphores(` / `.acquire_next_image(` / `.device_wait_idle(`），
+  并带"必须真的扫到 ≥3 处等待调用"的自检防恒真。**红证**：修前它报出真实位置
+  `.wait_for_fences(&[fence], true, u64::MAX)`，修后 0 处。
+- **真机验证**（F12 触发引擎自带截图；独显 + `cap_safe.ps1 -Keys 123`）：日志 `截图已保存:` ×2、
+  无 `has been lost`、无 VUID、无 panic，fps 104–110（该次跑的是 255 NPC 压力场景）
+  ⇒ 收紧超时**没有**破坏截图链路。同一验证做了两遍（先一次、重建 exe 后再一次）。
+- 闸门：**566 passed / 0 failed**、0 警告。
+- ⚠️ **一晚第三次**被 CJK 守门测试拦下（审/姊/妹 → 阱 → **拾 U+62FE**，写在"只收拾了"里）
+  ⇒ 结论写进 `AGENTS.md` 的 cjk_glyphs 行：**注释里的字同样算**，且字模表没法重建。
+
 
 
 

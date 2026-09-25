@@ -199,7 +199,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s（连 3 次 ⇒ `gpu_stalled`，之后 `render()` 直接返回：
   **画面静止但进程与输入还在**，实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
   **判据**：`rg 'u64::MAX' src/engine/renderer.rs` 不应出现在等待处；测试 `swapchain_waits_are_bounded`
-  会在改回无限等待时红。`perf_run.ps1` 保持 IMMEDIATE。
+  钉住那几个常量有限、`no_unbounded_wait_on_vulkan_calls` 会在**任何**等待里再出现 `u64::MAX` 时红。
+  `perf_run.ps1` 保持 IMMEDIATE。
 - 🔴 **成功 acquire 之后不许提前 return**（`image_available` 信号量**不随交换链重建而重建**）：
   acquire 的 `suboptimal` 只登记、本帧照常 present，重建一律放到 present **之后**；
   判据 `frame_action` + 测试 `acquire_suboptimal_never_aborts_before_present`。
