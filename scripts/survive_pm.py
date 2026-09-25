@@ -176,11 +176,19 @@ def move_hold(hwnd, logpath, key, hold):
 def target_angles_rel(npc, ppos):
     """S.target_angles minus the player's actual position. The smoke version
     hardcodes the origin because smoke never moves; survive strafes now, so
-    the subtraction is mandatory -- yaw is atan2 of the PLAYER->NPC vector."""
+    the subtraction is mandatory -- yaw is atan2 of the PLAYER->NPC vector.
+
+    🔴 2026-09-25 瞄点由 +0.8m 抬到 +1.25m（**胸腔**）。引擎的部位倍率
+    （`Game::part_multiplier`：头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6）按**离地高度**分区，
+    0.8m 落在腿/臂区 ⇒ 每发只有 0.6–0.8 倍伤害。真机实测（600s，wave 2 剩 3 只）：
+    瞄点收敛到 err≈0.0 却打不动，`kills/shots 11/150`、最后 250 秒 100 发只杀 1 只；
+    按 120HP / 0.6 倍算正好每次要 ~11 发。抬到 1.25m = 胸区 1.0 倍，同样的命中率下
+    击杀时间缩短约 1.6 倍（且胸腔比头大得多，不追求爆头）。
+    """
     _, nx, ny, nz = npc
     EYE = 1.6
     rx, rz = nx - ppos[0], nz - ppos[1]
-    ry = ny + 0.8 - EYE
+    ry = ny + 1.25 - EYE
     return (math.degrees(math.atan2(-rx, -rz)),
             math.degrees(math.atan2(-ry, math.hypot(rx, rz))))
 

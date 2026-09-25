@@ -212,10 +212,14 @@ def aim(hwnd, cx, cy, logpath, tgt_yaw, tgt_pitch, rounds=6):
 
 def target_angles(npc):
     """NPC world position -> (yaw, pitch) in degrees. The player spawns at the origin,
-    so the NPC's world coordinates double as player-relative ones."""
+    so the NPC's world coordinates double as player-relative ones.
+
+    🔴 2026-09-25 瞄点由 +0.8m 抬到 +1.25m（胸腔）：引擎部位倍率按离地高度分区
+    （头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6），0.8m 打在腿/臂区只有 0.6–0.8 倍伤害。
+    详见 `survive_pm.py::target_angles_rel` 的实测记录（kills/shots 11/150）。"""
     _, nx, ny, nz = npc
     EYE = 1.6
-    rx, ry, rz = nx, ny + 0.8 - EYE, nz
+    rx, ry, rz = nx, ny + 1.25 - EYE, nz
     tgt_yaw = math.degrees(math.atan2(-rx, -rz))
     tgt_pitch = math.degrees(math.atan2(-ry, math.hypot(rx, rz)))
     return tgt_yaw, tgt_pitch
