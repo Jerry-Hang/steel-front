@@ -7993,6 +7993,33 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 - ⇒ 今晚这条线有三条**互相独立**的证据：① 冒烟闸门 ② 验证层 + 改窗口尺寸 + F12（§21.15）
   ③ survive 长跑（§21.12/§21.13）。
 
+### 21.17 两条审计记录：`unwrap/expect` 全量巡检（无洞）+ PT 验证没验到东西（诚实记录）
+
+**(a) 生产代码里的 `unwrap()/expect()` 全量巡检 —— 11 处，逐处判过，没有崩溃点。**
+
+- 方法：逐文件扫 `src/**/*.rs` 的生产段（`#[cfg(test)]` 之后与注释行不计），命中 11 处，逐处读上下文。
+- 结论：**全部要么有显式守卫、要么不可能失败**——三处"看着危险"的尤其要记：
+  - `main.rs:2447 self.game.net_client.as_ref().unwrap()`：紧跟在 `let net_mode = is_some()` 之后 ✓；
+  - `ai_command.rs:299 &llm.unwrap()[ci]`：`llm_ok = llm.map(|o| o.len() == company_count)` 同时守住
+    `None` 与越界（`ci < company_count`）✓ —— 等于"检查过再 unwrap"；
+  - `game.rs:5339 npc.reposition.unwrap()`：在 `if npc.reposition.is_none() {…} else {…}` 的 else 里 ✓。
+  - 其余：`props.rs:44` `[..3].try_into()`（元素是定长数组，恒有 ≥3）、渲染器的 mesh 加载器
+    `expect`（由 `mesh_enabled` 门控）、`pt_resident.unwrap`（调用方先查 is_some）、
+    `SfxBank` 合成参数 `expect`（内部常量）、`rdv.rs` 绑端口 `expect`（独立小工具）。
+- 意义：**"解析外部数据时 unwrap 崩掉"这一类，本仓当前是干净的**（GLB / TOML / 配置 / 网络四条
+  外部输入路径都不在表里）。**判据可复用**：上面那条逐文件扫描命令（比按符号名匹配可靠）。
+
+**(b) PT 的验证层运行：`VUID=0`，但那次**并没有真的跑 PT** —— 别当成"PT 已验证"。**
+
+- 现象：按 `RV3D_PT_LIVE=1 RV3D_PT_SPP=64 RV3D_PT_SIZE=512` 跑（独显 + mailbox + 验证层）
+  ⇒ `VUID=0`、无 device lost，但日志里 `RT: 路径追踪全景 = 关闭`、`PT-RESIDENT`/`PT-SCENE` 一条都没有。
+- 根因（读码）：`main.rs:2822` 的 `init_pt_resident(...)`（分配 PT 资源）**只在
+  `config::load().pt_enable == true` 时调用**；而 `RV3D_PT_LIVE` 只改 `renderer.pt_live_enabled`。
+  于是 `pt_resident == None` 时 `renderer.rs:10390`（`pt_live_enabled && pt_resident.is_some()`）
+  恒假 ⇒ PT 通路一个字节都没执行。
+- ⇒ **要真跑 PT 必须先把 `~/.steel_front.cfg` 的 `pt_enable` 打开**（或走设置面板），
+  只设 `RV3D_PT_LIVE` 不够。这条留在这里是为了**防止下一个人（包括未来的我）拿"VUID=0"当 PT 已验**。
+
 
 
 
