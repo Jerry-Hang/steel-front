@@ -498,6 +498,44 @@ fn find_path_search(
     None
 }
 
+/// 全图**最大连通域**的掩码（行主序）。
+///
+/// 🔴 2026-09-25 加（真机实测驱动）：压力模式的出生点在 150–198m 环上，而那一圈正好穿过城市
+/// 街区 —— `push_out_of_obstacle` 只保证"落在可通行格"，**不保证落在主域里**。实测 4 只红方
+/// 里 2 只落在 **9 格 / 2 格**的小口袋里（`tmp_stress_spawn_reachability` 探针），于是
+/// `aidiag: astar` 里每秒 278 次调用**全部** `连通域穷尽` —— 两军各在各的院子里"隔空对射"。
+/// 修法：出生选点先算"主域"，再把它拉进主域（见 `game.rs::nearest_in_component`）。
+///
+/// 成本：逐格扫描 + 对每个未访问的可通行格做一次 BFS，典型只有几个域 ⇒ O(格数)。
+pub fn largest_component_mask(map: &GridMap) -> Vec<bool> {
+    let w = map.width();
+    let h = map.height();
+    let mut done = vec![false; w * h];
+    let mut best: Vec<bool> = vec![false; w * h];
+    let mut best_n = 0usize;
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let pos = GridPos::new(x, y);
+            let i = y as usize * w + x as usize;
+            if done[i] || !map.is_passable(pos) {
+                continue;
+            }
+            let mask = reachable_mask(map, pos);
+            let n = mask.iter().filter(|b| **b).count();
+            for (k, m) in mask.iter().enumerate() {
+                if *m {
+                    done[k] = true;
+                }
+            }
+            if n > best_n {
+                best_n = n;
+                best = mask;
+            }
+        }
+    }
+    best
+}
+
 /// 从 `from` 出发的 4 邻域**可达掩码**（行主序，`true` = 可通行且与 `from` 连通）。
 ///
 /// 🔴 2026-09-25 加（#17 真根因）：`find_path` 找不到路只是**症状**，真正要回答的问题是

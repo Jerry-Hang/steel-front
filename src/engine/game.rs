@@ -4685,6 +4685,9 @@ impl Game {
             let slot_base = (profile.count as f32 * self.npc_scale).round().max(1.0) as u32;
             let divisor = slot_base.max(1);
             let effective = self.effective_wave(self.wave);
+            // 援军同样收口到玩家可达域（与主波次同一条规则）
+            let reach =
+                crate::engine::ai::reachable_mask(&self.grid, world_to_grid(player.x, player.z));
             for k in 0..profile.reinforcement_count {
                 self.spawn_npc_ring(
                     player,
@@ -4695,6 +4698,7 @@ impl Game {
                     profile.hp,
                     profile.attack_range,
                     role_for(slot_base + k, effective, profile.flank_chance),
+                    &reach,
                 );
             }
             log::info!(
@@ -4771,6 +4775,8 @@ impl Game {
         let speed = profile.speed;
         let hp = profile.hp;
         let attack_range = profile.attack_range;
+        // 出生点收口用的**玩家可达域**：整个波次算一次（O(格数)），每只出生只做一次查表。
+        let reach = crate::engine::ai::reachable_mask(&self.grid, world_to_grid(player.x, player.z));
         for i in 0..count {
             // Boss 波最后一只为主怪：替换常规小怪，max_hp 大 → 渲染侧体型/外观体现
             let (spd, hpx, rng) = match profile.boss {
@@ -4783,7 +4789,7 @@ impl Game {
             } else {
                 role_for(i as u32, effective, profile.flank_chance)
             };
-            let id = self.spawn_npc_ring(player, i as u32, count as u32, n, spd, hpx, rng, role);
+            let id = self.spawn_npc_ring(player, i as u32, count as u32, n, spd, hpx, rng, role, &reach);
             if profile.boss.is_some() && i + 1 == count {
                 log::info!(
                     "wave: boss #{} spawn (hp={:.0} speed={:.1} attack={:.0})",
@@ -4821,6 +4827,7 @@ impl Game {
         hp: f32,
         attack_range: f32,
         role: TacticalRole,
+        reach: &[bool],
     ) -> usize {
         let tau = std::f32::consts::TAU;
         let angle = slot as f32 * (tau / divisor.max(1) as f32) + wave_n as f32 * 0.37;
@@ -4829,6 +4836,13 @@ impl Game {
             (player.x + angle.cos() * radius).clamp(-250.0, 250.0),
             (player.z + angle.sin() * radius).clamp(-250.0, 250.0),
         );
+        // 🔴 出生点收口到**玩家可达域**（`reach`）：只保证"可站立"是不够的 ——
+        // 可站立的小口袋会让这只永远走不到玩家（#17 根因链第 3 条的出生侧），
+        // 且它每 1/3 秒重规划一次、每秒几百次 A* 全部 `连通域穷尽`。
+        let (x, z) = match self.nearest_in_component(reach, world_to_grid(x, z)) {
+            Some(g) => grid_to_world(g),
+            None => (x, z),
+        };
         let id = self.next_npc_id as usize;
         self.next_npc_id += 1;
         let y = terrain_height_at(x, z);
@@ -4904,6 +4918,38 @@ impl Game {
         !self.grid.is_passable(world_to_grid(x, z))
     }
 
+    /// 在给定连通域（`mask`，由 `ai::reachable_mask` / `ai::largest_component_mask` 给出）里
+    /// 取离 `want` 最近的格；`want` 本身在域内就原样返回。
+    ///
+    /// 确定性：先比直线距离²，再比行主序序号（同一输入必得同一格）。
+    /// 用途 = **出生点收口**：`push_out_of_obstacle` 只保证"可站立"，而可站立的**小口袋**
+    /// （院子里 9 格、墙缝 2 格）会让单位永远走不到任何人（实测每秒几百次 A* 全部
+    /// `连通域穷尽`）。域内没有格时返回 `None`（调用方保持原点位，不 panic）。
+    fn nearest_in_component(&self, mask: &[bool], want: GridPos) -> Option<GridPos> {
+        let w = self.grid.width();
+        let h = self.grid.height();
+        let inside = |x: i32, y: i32| {
+            x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h && mask[y as usize * w + x as usize]
+        };
+        if inside(want.x, want.y) {
+            return Some(want);
+        }
+        let mut best: Option<(i64, usize, GridPos)> = None;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                if !inside(x, y) {
+                    continue;
+                }
+                let d = ((x - want.x) as i64).pow(2) + ((y - want.y) as i64).pow(2);
+                let idx = y as usize * w + x as usize;
+                if best.as_ref().map_or(true, |(bd, bi, _)| (d, idx) < (*bd, *bi)) {
+                    best = Some((d, idx, GridPos::new(x, y)));
+                }
+            }
+        }
+        best.map(|(_, _, g)| g)
+    }
+
     /// 该点是否可站立。调试机位用它挑一个**不被墙挡**的观察方向 ——
     /// 手算方向失败过 13 次，判据本来就该由程序用（见 docs/PROGRESS.md）。
     pub fn standable(&self, x: f32, z: f32) -> bool {
@@ -4943,6 +4989,13 @@ impl Game {
         let swap_sides = std::env::var("RV3D_SWAP_SIDES").as_deref() == Ok("1");
         // 见下方 `facing` 的注释：出生时朝向"对面半场"而不是朝向玩家
         let face_enemy = std::env::var("RV3D_FACE_ENEMY").as_deref() == Ok("1");
+        // 🔴 压力模式的出生点必须收口到**主连通域**（2026-09-25 真机实测）：
+        // 出生环 150–198m 正好穿过城市街区，`push_out_of_obstacle` 只保证"可通行"，
+        // 实测 4 只红方里 2 只落在 **9 格 / 2 格**的小口袋（探针
+        // `tmp_stress_spawn_reachability`），于是每秒几百次 A* 全部 `连通域穷尽` ——
+        // 红蓝两军各在自己的院子里隔空对射，那套"20 轮红蓝对撞"的 A/B 也受此影响。
+        // 参考域取**全图最大连通域**（不能取玩家所在的中央安全区：那是另一个小域）。
+        let reach = crate::engine::ai::largest_component_mask(&self.grid);
         for side in 0..2u32 {
             let team = if side == 0 { Team::Red } else { Team::Blue };
             let base_angle = if (side == 0) != swap_sides { 0.0 } else { std::f32::consts::PI };
@@ -4957,6 +5010,10 @@ impl Game {
                     (player.x + angle.cos() * radius).clamp(-250.0, 250.0),
                     (player.z + angle.sin() * radius).clamp(-250.0, 250.0),
                 );
+                let (x, z) = match self.nearest_in_component(&reach, world_to_grid(x, z)) {
+                    Some(g) => grid_to_world(g),
+                    None => (x, z),
+                };
                 let id = self.next_npc_id as usize;
                 self.next_npc_id += 1;
                 let y = terrain_height_at(x, z);
@@ -6648,6 +6705,70 @@ mod tests {
         let (ox, oz) = step_with_slide(&obstacles, (0.0, 5.0), (0.6, 0.8), step, r);
         let free = ((ox - 0.0f32).powi(2) + (oz - 5.0f32).powi(2)).sqrt();
         assert!((free - step).abs() < 1e-5, "无障碍时不该改变步长：{free:.4}");
+    }
+
+    /// 🔴 **压力模式不变式**：红蓝两侧的出生点必须落在**同一个连通域**里。
+    ///
+    /// 起因（2026-09-25 真机）：`aidiag: astar` 显示压力模式每秒 278 次调用**全部**
+    /// `连通域穷尽` ⇒ 探针一量：出生环 150–198m 穿过城市街区，`push_out_of_obstacle` 只保证
+    /// "可通行"，实测 4 只红方里 2 只落在 **9 格 / 2 格**的小口袋 ⇒ **两军各在自己的院子里
+    /// 隔空对射**，那套"20 轮红蓝对撞"的 A/B 全部带上这个前提。
+    /// 修法 = `spawn_stress_battle` 把出生点收口到**全图最大连通域**（`nearest_in_component`）。
+    #[test]
+    fn stress_spawns_land_in_one_component() {
+        let mut game = Game::new();
+        game.stress = true;
+        game.stress_sides = 4;
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        game.spawn_stress_battle(&player);
+        let grid = game.grid.clone();
+        let w = grid.width();
+        let cell_of = |team: Team| -> Vec<GridPos> {
+            game.npcs
+                .iter()
+                .filter(|n| n.team == team)
+                .map(|n| world_to_grid(n.position[0], n.position[2]))
+                .collect()
+        };
+        let red = cell_of(Team::Red);
+        let blue = cell_of(Team::Blue);
+        assert!(red.len() >= 2 && !blue.is_empty(), "两侧都要有人：{red:?} {blue:?}");
+        // 以红 0 为参考域：每一只（红与蓝）都必须在里面
+        let mask = crate::engine::ai::reachable_mask(&grid, red[0]);
+        let n = mask.iter().filter(|b| **b).count();
+        assert!(
+            n > 1000,
+            "参考域只有 {n} 格 —— 出生点又落进小口袋了（红0 = {:?}）",
+            red[0]
+        );
+        for g in red.iter().chain(blue.iter()) {
+            assert!(
+                mask[g.y as usize * w + g.x as usize],
+                "出生点 {g:?} 不在主连通域里 ⇒ 它永远走不到对面（每秒几百次 A* 全部连通域穷尽）"
+            );
+        }
+    }
+
+    /// 🔴 **波次出生点不变式**：`spawn_wave` 出来的每一只都必须在**玩家可达域**里。
+    /// 与 `wave_spawn_ring_is_reachable_from_the_player`（几何采样）互补：这条查**真实出生结果**，
+    /// 连 `push_out_of_obstacle` 的落点与 `nearest_in_component` 的收口一起验。
+    #[test]
+    fn wave_spawns_land_inside_the_players_component() {
+        let mut game = Game::new();
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        game.spawn_wave(1, &player);
+        assert!(!game.npcs.is_empty());
+        let mask =
+            crate::engine::ai::reachable_mask(&game.grid, world_to_grid(player.x, player.z));
+        let w = game.grid.width();
+        for n in &game.npcs {
+            let g = world_to_grid(n.position[0], n.position[2]);
+            assert!(
+                mask[g.y as usize * w + g.x as usize],
+                "npc #{} 出生在 {g:?} —— 不在玩家可达域里（永远走不到玩家，波次清不掉）",
+                n.id
+            );
+        }
     }
 
     /// 部位伤害倍率阈值（设计文档：头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6）
