@@ -1324,6 +1324,8 @@ pub struct Game {
     reinforcement_done: bool,
     /// 上次状态日志时间（1 秒一条 game: wave=...）
     last_status_log: f32,
+    /// 上次 `npcpos:` 时间（频率由 `RV3D_NPC_POS_HZ` 决定，见 `npc_pos_period`）
+    last_npcpos_log: f32,
     /// 任务目标（本关/本轮歼灭数；达成 → 胜利横幅/日志）
     objective: MissionObjective,
     /// 关卡系统地图管理器（RV3D_MAP/RV3D_MAPS 环境变量启用；None = 程序化地图，默认行为）
@@ -1396,6 +1398,23 @@ fn npc_pos_log() -> bool {
     *ON.get_or_init(|| {
         std::env::var("RV3D_NPC_POS").is_ok_and(|v| v == "1" || v == "on" || v == "true")
     })
+}
+
+/// `npcpos:` 的发送周期（秒）—— 纯函数，可单测。
+///
+/// `RV3D_NPC_POS_HZ`（默认 1）决定频率，夹在 `[1, 30]`：小于 1 没意义，大于 30 只会刷屏。
+/// 🔴 2026-09-25 加：注入 harness 打移动靶时，位置样本的**年龄**直接决定命中率 ——
+/// 1 Hz 意味着它可能瞄一个 1 秒前的位置（NPC 4–5 m/s ⇒ 差出好几米）。
+/// 这条旋钮让 harness 能按需取到 ~10 Hz 的新鲜位置，而默认仍是原来的 1 Hz（不改变既有日志量）。
+fn npc_pos_period(hz_env: Option<u32>) -> f32 {
+    let hz = hz_env.unwrap_or(1).clamp(1, 30);
+    1.0 / hz as f32
+}
+
+/// `RV3D_NPC_POS_HZ`（只读一次；非法值视为缺省 = 1 Hz）。
+fn npc_pos_hz() -> Option<u32> {
+    static HZ: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *HZ.get_or_init(|| std::env::var("RV3D_NPC_POS_HZ").ok().and_then(|v| v.parse::<u32>().ok()))
 }
 
 /// step_npc 解析"本 NPC 这一帧的目标位置"的唯一规则。
@@ -1771,6 +1790,7 @@ impl Game {
             score: 0,
             next_npc_id: NPC_COUNT as u32,
             last_status_log: 0.0,
+            last_npcpos_log: 0.0,
             objective: MissionObjective::new(0),
             map_mgr: None,
             map_path: None,
@@ -2476,23 +2496,26 @@ impl Game {
                 self.stage_net_us,
                 self.hits()
             );
-            // 机器可读的**活靶**位置（`RV3D_NPC_POS=1`）：每秒每只 NPC 一行。
-            //
-            // 🔴 2026-09-25 加：注入 harness 此前只能从 `npc: #N stand (x,y,z)` 取目标位置，
-            // 而那行是**进入 Attack 那一刻**的快照 —— 移动靶/反复进出 Attack 的目标全程打空
-            // （实测 12 发/杀、残局 8 分钟零命中）。这一行让 harness 打"当前位置"。
-            // 与 `RV3D_AI_DIAG` 分开：harness 要的是位置，不需要 AI 归因那一堆统计。
-            if npc_pos_log() {
-                for n in &self.npcs {
-                    log::info!(
-                        "npcpos: #{} {:.2} {:.2} {:.2} {:?}",
-                        n.id,
-                        n.position[0],
-                        n.position[1],
-                        n.position[2],
-                        n.state_machine.state()
-                    );
-                }
+        }
+        // 机器可读的**活靶**位置（`RV3D_NPC_POS=1`）：默认每秒每只 NPC 一行，
+        // `RV3D_NPC_POS_HZ` 可提到最高 30 Hz（harness 打移动靶的命中率取决于**样本年龄**：
+        // 1 Hz 意味着它可能瞄一个 1 秒前的位置，而 NPC 是 4–5 m/s，见 `npc_pos_period`）。
+        //
+        // 🔴 2026-09-25 加：注入 harness 此前只能从 `npc: #N stand (x,y,z)` 取目标位置，
+        // 而那行是**进入 Attack 那一刻**的快照 —— 移动靶/反复进出 Attack 的目标全程打空
+        // （实测 12 发/杀、残局 8 分钟零命中）。这一行让 harness 打"当前位置"。
+        // 与 `RV3D_AI_DIAG` 分开：harness 要的是位置，不需要 AI 归因那一堆统计。
+        if npc_pos_log() && self.time - self.last_npcpos_log >= npc_pos_period(npc_pos_hz()) {
+            self.last_npcpos_log = self.time;
+            for n in &self.npcs {
+                log::info!(
+                    "npcpos: #{} {:.2} {:.2} {:.2} {:?}",
+                    n.id,
+                    n.position[0],
+                    n.position[1],
+                    n.position[2],
+                    n.state_machine.state()
+                );
             }
         }
         // 音频：每帧按 dt 渲染样本（SilentSink 丢弃输出，混音/衰减链路真实运行）
@@ -4040,6 +4063,12 @@ impl Game {
         // 弹道诊断（RV3D_PROJ_DIAG=1 时启用，节流 2s）：默认关闭避免生产日志噪音
         static PROJ_DIAG_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         static LAST_PROJ_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // 弹丸**去向**计数（2026-09-25 加）：harness 只有 `hits` 一个数，打了多少发、
+        // 有多少打在掩体上、多少飞没了**都看不见** ⇒ "改瞄法到底有没有用"无法判定。
+        // 三个计数器在下面三个结算分支里各加一，随 2s 诊断行一起打印并清零。
+        static PROJ_OBSTACLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static PROJ_NPC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static PROJ_EXPIRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if *PROJ_DIAG_ON
             .get_or_init(|| std::env::var("RV3D_PROJ_DIAG").as_deref() == Ok("1"))
         {
@@ -4050,6 +4079,10 @@ impl Game {
             let last = LAST_PROJ_LOG.load(std::sync::atomic::Ordering::Relaxed);
             if now_ms - last > 2000 {
                 LAST_PROJ_LOG.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                use std::sync::atomic::Ordering::Relaxed;
+                let obs = PROJ_OBSTACLE.swap(0, Relaxed);
+                let npc = PROJ_NPC.swap(0, Relaxed);
+                let exp = PROJ_EXPIRED.swap(0, Relaxed);
                 let first = self.projectiles.first().map(|p| {
                     format!(
                         "pos=({:.0},{:.0},{:.0}) dist={:.0}m",
@@ -4069,10 +4102,13 @@ impl Game {
                     })
                     .fold(f32::MAX, f32::min);
                 log::info!(
-                    "proj-diag: alive={} first=[{}] nearest_npc={:.0}m",
+                    "proj-diag: alive={} first=[{}] nearest_npc={:.0}m 去向(2s) npc={} obstacle={} expired={}",
                     self.projectiles.len(),
                     first.unwrap_or_else(|| "none".to_string()),
-                    nearest_npc
+                    nearest_npc,
+                    npc,
+                    obs,
+                    exp
                 );
             }
         }
@@ -4091,6 +4127,7 @@ impl Game {
         let mut alive = Vec::with_capacity(old.len());
         for p in old {
             if !p.is_alive() {
+                PROJ_EXPIRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // 弹着点：仅爆炸弹（如未来榴弹武器）过期时引爆 AoE；普通子弹静默消失
                 // （修复：V3.0 高速弹射程尽头"神秘连发爆炸"特效——子弹不是炸弹）
                 if p.explosive() {
@@ -4112,6 +4149,7 @@ impl Game {
                 continue;
             }
             if self.collide_physics(&p) {
+                PROJ_OBSTACLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // 命中障碍：子弹直接消耗（障碍永久存在，枪械不再打爆障碍；
                 // 手榴弹/爆炸物 AoE 仍可摧毁掩体，见爆炸结算）。
                 // 不计入 hit_count → 不触发命中提示/音效（打墙没有"命中反馈"）。
@@ -4134,6 +4172,7 @@ impl Game {
                     continue;
                 }
                 hit_count += 1;
+                PROJ_NPC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // V3.0：部位倍率按武器分段表 + 已飞距离查表（投射物携带 part_tiers）
                 let mult = p.part_multiplier(hit_h, self.npcs[idx].position[1]);
                 let dmg = p.damage_at_distance() * mult;
@@ -6665,6 +6704,18 @@ fn team_centroids(npcs: &[Npc]) -> ([f32; 2], [f32; 2]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 harness 打移动靶的命中率直接由**位置样本年龄**决定（1 Hz ⇒ 可能瞄 1 秒前的位置）。
+    /// 这条旋钮必须：默认仍是 1 Hz（不改变既有日志量）、10 Hz 给到 0.1s、越界值被夹住。
+    #[test]
+    fn npc_pos_period_follows_the_rate_knob() {
+        assert_eq!(npc_pos_period(None), 1.0, "缺省必须还是 1 Hz");
+        assert_eq!(npc_pos_period(Some(0)), 1.0, "0 视为缺省");
+        assert_eq!(npc_pos_period(Some(1)), 1.0);
+        assert!((npc_pos_period(Some(10)) - 0.1).abs() < 1e-6);
+        assert!((npc_pos_period(Some(30)) - 1.0 / 30.0).abs() < 1e-6);
+        assert!((npc_pos_period(Some(240)) - 1.0 / 30.0).abs() < 1e-6, ">30 夹到 30");
+    }
 
     /// 🔴 **导航不变式**：出生环（40–80m）上的每个可站立点都必须在**玩家可达域**里。
     ///

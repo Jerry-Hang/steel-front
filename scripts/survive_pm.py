@@ -533,6 +533,23 @@ def main():
         if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
             print("    aim did not converge", flush=True)
             continue
+        # 🔴 2026-09-25：到此为止瞄的是**上一次读日志时**的位置。样本过期 + NPC 走动
+        # （4–5 m/s）= 提前量错误，这正是 hits 只有 20–33%、12–15 发/杀的来源。
+        # 现在两件事一起做：① 引擎侧 `RV3D_NPC_POS_HZ=10`（样本年龄 ≤100ms）；
+        # ② 扣扳机前**再读一次**尾日志，目标动过 ≥0.5m 就重算角度再收敛一次。
+        txt = S.log_tail(logpath)
+        fresh = targets(txt).get(npc_id)
+        if fresh:
+            moved_m = math.hypot(fresh[0] - pos[0], fresh[2] - pos[2])
+            if moved_m > 0.5:
+                print("    re-aim: npc#%d moved %.1fm since the sample" % (npc_id, moved_m),
+                      flush=True)
+                pos = fresh
+                npc = (npc_id, pos[0], pos[1], pos[2])
+                ty, tp = target_angles_rel(npc, player_pos(txt) or ppos)
+                if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
+                    print("    re-aim did not converge", flush=True)
+                    continue
         # Reload-aware burst: try_fire on an EMPTY magazine auto-arms the
         # reload but loses that shot (weapons.rs try_fire + the
         # firearm_empty_magazine_auto_reloads_and_cannot_fire test), and every

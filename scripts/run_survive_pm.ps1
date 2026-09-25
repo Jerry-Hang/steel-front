@@ -31,10 +31,14 @@ $env:RV3D_MAP         = "assets/maps/defense_line.toml"
 # run can reach wave 5 at all. -NoInvincible flips it OFF to exercise the Defeat branch
 # on real hardware (which otherwise only has unit-test coverage).
 if ($NoInvincible) { $env:RV3D_INVINCIBLE = "0" } else { $env:RV3D_INVINCIBLE = "1" }
-# Machine-readable live NPC positions (one `npcpos:` line per NPC per second).
+# Machine-readable live NPC positions (one `npcpos:` line per NPC per firing tick).
 # The harness aims by it: `npc: #N stand` is only a snapshot from the moment an NPC
 # entered Attack, so moving targets were aimed at a stale point (12 shots/kill).
+# HZ=10: the aim only helps if the sample is FRESH -- at 1 Hz the harness may aim at a
+# one-second-old position while the NPC walks 4-5 m/s (2026-09-25). The engine side knob
+# is `npc_pos_period` in game.rs (clamped to 1..=30 Hz).
 $env:RV3D_NPC_POS     = "1"
+$env:RV3D_NPC_POS_HZ  = "10"
 # !! 2026-09-25: the discrete GPU **hangs** (Windows TDR 0x141 VIDEO_ENGINE_TIMEOUT_DETECTED,
 # 4 events in the Application log) when this map is played with the engine default
 # IMMEDIATE present mode: the game logged `game: run started (wave 1)` and then died at the
