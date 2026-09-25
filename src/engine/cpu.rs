@@ -174,13 +174,25 @@ mod win_topology {
         v
     }
 
-    /// 按 `Size` 遍历变长条目。`f(relationship, 条目数据指针)`。
+    /// 这一条变长条目是否**够长**到按 `T` 解引用（`T` 从条目偏移 8 处开始）。
+    ///
+    /// 🔴 2026-09-23 复查：`sz` 是**系统给的**，`walk` 只保证 `sz >= 8` 且不越过缓冲末尾；
+    /// 调用方要按 `ProcessorRel` / `CacheRel` 解引用 ⇒ 必须自己确认够长，
+    /// 否则畸形/截断条目会读越界（UB）。这条判据零成本，且不动任何调度逻辑。
+    /// （调度/亲和/降频这三样本轮一行都没改 —— 只加长度判据。）
+    fn entry_fits<T>(sz: u32) -> bool {
+        (sz as usize) >= 8 + std::mem::size_of::<T>()
+    }
+
+    /// 按 `Size` 遍历变长条目。`f(relationship, 条目数据指针, 条目字节数)`。
     ///
     /// 🔴 2026-09-13：**不能用固定跨度**。`GetLogicalProcessorInformationEx` 返回的是
     /// 一串**变长**的 `SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX`，每条首部含
     /// `Relationship` 与 `Size`；缓存关系的条目比核心关系长。原实现用
     /// `size_of::<InfoEx>()`（48）当固定跨度扫，**条目一多就整体错位**
     /// ⇒ 本机只解析出 2 个物理核（应为 8）⇒ 线程池各只建 1 个 worker。
+    /// ⚠️ `Size` 只保证"条目本身"的边界，**不保证**它够长到能按具体关系结构解引用 ——
+    /// 那一层判断归 [`entry_fits`]，调用方必须自己做。
     fn walk(buf: &[u64], mut f: impl FnMut(u32, *const u8, u32)) {
         let bytes = buf.len() * std::mem::size_of::<u64>();
         let base = buf.as_ptr() as *const u8;
@@ -203,8 +215,15 @@ mod win_topology {
         let mut ccx: Vec<Vec<usize>> = Vec::new();
 
         if let Some(buf) = query(REL_PROCESSOR_CORE) {
-            walk(&buf, |rel, p, _sz| {
+            walk(&buf, |rel, p, sz| {
                 if rel != REL_PROCESSOR_CORE {
+                    return;
+                }
+                // 🔴 2026-09-23 复查：`sz` 是**系统给的**，`walk` 只保证 `sz >= 8` 且不越过缓冲末尾，
+                // 而下面要按 `ProcessorRel` 解引用（偏移 8）⇒ 必须自己确认这一条够长。
+                // 畸形/截断的条目会读越界（UB）；正常系统不会这样，但这条判据零成本。
+                // ⚠️ 这里**没有**改任何调度/亲和/降频逻辑，只加一条长度判据。
+                if !entry_fits::<ProcessorRel>(sz) {
                     return;
                 }
                 let pr = unsafe { &*(p.add(8) as *const ProcessorRel) };
@@ -222,8 +241,12 @@ mod win_topology {
             });
         }
         if let Some(buf) = query(REL_CACHE) {
-            walk(&buf, |rel, p, _sz| {
+            walk(&buf, |rel, p, sz| {
                 if rel != REL_CACHE {
+                    return;
+                }
+                // 同上的长度判据（缓存条目比核心条目长；按 `CacheRel` 解引用前先确认够长）
+                if !entry_fits::<CacheRel>(sz) {
                     return;
                 }
                 let cr = unsafe { &*(p.add(8) as *const CacheRel) };
@@ -243,6 +266,32 @@ mod win_topology {
             ccx_groups: ccx,
             efficiency,
         })
+    }
+
+    /// 变长条目的长度判据：**够长才允许按 `T` 解引用**（`T` 从条目偏移 8 处开始）。
+    /// 红了说明 `entry_fits` 的比较被改坏（丢了 `8 +`、或把 `>=` 写成 `>`）——
+    /// 那个方向就是"畸形条目读越界"（UB）。
+    /// ⚠️ 放在本模块内是为了不改任何可见性（这些解析结构是私有的）。
+    #[cfg(test)]
+    mod entry_fits_tests {
+        use super::{entry_fits, CacheRel, ProcessorRel};
+
+        #[test]
+        fn entry_fits_requires_room_for_the_full_struct() {
+            let need_pr = 8 + std::mem::size_of::<ProcessorRel>();
+            let need_cr = 8 + std::mem::size_of::<CacheRel>();
+            assert!(!entry_fits::<ProcessorRel>(8), "只有头部（8B）时必须拒绝");
+            assert!(
+                !entry_fits::<ProcessorRel>((need_pr - 1) as u32),
+                "差 1 字节也必须拒绝"
+            );
+            assert!(entry_fits::<ProcessorRel>(need_pr as u32), "刚好够长必须放行");
+            assert!(entry_fits::<CacheRel>(need_cr as u32));
+            assert!(
+                need_cr > need_pr,
+                "缓存条目比核心条目长（09-13 那次错位就是按固定跨度扫出来的）"
+            );
+        }
     }
 }
 
