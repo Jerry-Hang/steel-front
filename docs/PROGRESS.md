@@ -7981,6 +7981,18 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 - 用法：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_resize_probe.ps1`
   （`-NoShot` 跳过 F12；`-Tag` / `-WarmupSec` / `-AfterSecs` / `-Sizes` 可调）。
 
+### 21.16 收尾闸门（同一晚，三处 renderer 改动之后）
+
+- `cargo test --release` → **566 passed / 0 failed**、0 警告；
+  `cargo clippy --release --all-targets` → **0 警告**；工作树干净、全部已推送。
+- 官方冒烟（`scripts/run_smoke_pm.ps1`，独显 + mailbox）：`VUID=0 panics=0`、`shots_fired=30`、
+  score 0→10（击杀已登记）、fps 119.0、**`RESULT: ALL-OK`** + `RELEASE OK`
+  ⇒ 今晚对帧循环的三处改动（acquire 后不提前 return / 命令缓冲按槽位索引 / 截图等待有界）
+  **没有破坏健康路径**。
+- survive 端到端：§21.13 那次验证运行本身就是（150s、VUID=0、fps 164.8、清 2 波）。
+- ⇒ 今晚这条线有三条**互相独立**的证据：① 冒烟闸门 ② 验证层 + 改窗口尺寸 + F12（§21.15）
+  ③ survive 长跑（§21.12/§21.13）。
+
 
 
 
