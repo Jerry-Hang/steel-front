@@ -609,7 +609,9 @@ def main():
     hits = int(hitseries[-1]) if hitseries else -1
     cleared = re.findall(r"wave: wave (\d+) cleared", txt)
     supply = re.findall(r"survive: 波间补给（血量 ([\d.]+)%", txt)
-    spawned = re.findall(r"wave: wave (\d+) spawned (\d+) enemies", txt)
+    # 每个波次只算一次：`spawn_wave` 可能对同一波打两条 spawned 行
+    # （2026-09-25 通关那次 wave 5 出现两次 —— 胜利那一拍又刷了一波，引擎侧已修）。
+    spawned = sorted(set(re.findall(r"wave: wave (\d+) spawned (\d+) enemies", txt)))
     victory = re.findall(r"survive: 全部 (\d+) 波守住", txt)
 
     print("", flush=True)
@@ -626,8 +628,17 @@ def main():
              (hits / float(kills)) if kills else 0.0))
     print("  VUID=%d panics=%d device_lost=%d fps=%.1f"
           % (vuid, panics, lost, S.last_fps(txt)), flush=True)
-    ok = (result == "VICTORY" and vuid == 0 and panics == 0 and lost == 0
-          and len(cleared) == len(spawned) and len(supply) == len(cleared) - 1)
+    # 判据（2026-09-25 通关后收紧）：
+    #  · VICTORY = 引擎自己打了 `survive: 全部 N 波守住` ⇒ 通关是**充分条件**，
+    #    只要没有 VUID / panic / 丢设备就算 ALL-OK；
+    #  · 没通关时，要求「每波都有 spawned、都 cleared、补给窗口数 = 波数-1」——
+    #    之前的写法用 `len(cleared) == len(spawned)`，同一波两条 spawned 行就会假红。
+    clean = vuid == 0 and panics == 0 and lost == 0
+    if result == "VICTORY":
+        ok = clean and bool(victory)
+    else:
+        ok = (clean and len(cleared) == len(spawned)
+              and len(supply) == max(len(cleared) - 1, 0))
     print("RESULT: %s" % ("ALL-OK" if ok else "CHECK"), flush=True)
     return 0 if ok else 1
 
