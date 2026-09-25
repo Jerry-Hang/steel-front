@@ -467,6 +467,15 @@ pub struct Firearm {
     kick_yaw: f32,
     /// 累计发射数，用于生成确定性的后坐力微扰
     shots_fired: u32,
+    /// 「备弹耗尽」一次性告警闩。
+    ///
+    /// 🔴 2026-09-25 加（真机实测发现的**静默死局**）：弹匣空 + 备弹 0 时 `try_fire` 永远返回
+    /// `None`（`can_fire()` 假、`start_reload()` 因为 `reserve == 0` 直接不生效），
+    /// **一条日志都不打**。survive 实测：注入 harness 空点了 8 分钟，日志里只有
+    /// `weapons: shot #` 停在 120 —— 只能靠"发射计数不再增长"倒推，排查成本极高。
+    /// 现在首次进入该状态打一条 `warn`（只在"这一局再也打不出一发"时触发），
+    /// `reset_ammo()`（死亡复活 / 波间补给）会清闩。
+    dry_warned: bool,
 }
 
 impl Firearm {
@@ -491,6 +500,7 @@ impl Firearm {
             kick_pitch,
             kick_yaw,
             shots_fired: 0,
+            dry_warned: false,
         }
     }
 
@@ -539,6 +549,8 @@ impl Firearm {
         self.reloading = false;
         self.reload_timer = 0.0;
         self.shots_fired = 0;
+        // 补给之后重新武装"备弹耗尽"告警闩（否则第二次打空时不再留痕）
+        self.dry_warned = false;
     }
 
     /// 尝试发射：可开火时扣弹并返回投射物；空弹匣自动开始换弹并返回 None；
@@ -548,6 +560,15 @@ impl Firearm {
             // 空弹匣（且未在换弹）自动开始换弹；换弹中不重复触发
             if self.magazine == 0 && !self.reloading {
                 self.start_reload();
+                // 换弹也没得换（备弹 0）⇒ 这一局已经打不出任何一发：**必须留下痕迹**
+                // （否则表现为"扣扳机毫无反应且日志空白"，见 `dry_warned` 的文档）
+                if self.reserve == 0 && !self.dry_warned {
+                    self.dry_warned = true;
+                    log::warn!(
+                        "weapons: {} 备弹耗尽（弹匣 0 / 备弹 0）—— 本局再也打不出一发，只能等波间补给或换武器",
+                        self.weapon.name
+                    );
+                }
             }
             return None;
         }
@@ -995,6 +1016,45 @@ mod tests {
         // 满弹开火扣 1 发：3 → 2
         assert!((gun.ammo_ratio() - (2.0 / 3.0)).abs() < 1e-6);
         assert!(gun.can_fire());
+    }
+
+    /// 备弹耗尽 = **这一局再也打不出一发**（`try_fire` 恒返回 `None`，这是设计），
+    /// 但必须留下**一次性**痕迹，且补给（`reset_ammo`）后重新武装。
+    ///
+    /// 🔴 真机背景（2026-09-25，survive）：注入 harness 空点了 8 分钟，日志里只有
+    /// `weapons: shot #` 停在 120 一条线索都没有 ⇒ 加 `dry_warned` 闩后才可判。
+    #[test]
+    fn firearm_dry_reserve_warns_once_and_rearms_after_resupply() {
+        let rifle = ProjectileWeapon::new("步枪", 50.0, 2.0, 200.0, 300.0, 2.0);
+        // 弹匣 3 + 备弹 3：打空 3 发后自动换弹一次（补 3 发），再打空就真的没了
+        let mut gun = Firearm::new(rifle, 3, 3, 1.5, 0.014, 0.004);
+        for _ in 0..3 {
+            assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_some());
+        }
+        assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_none()); // 触发换弹
+        gun.update(1.5); // 换弹完成：magazine 3 / reserve 0
+        assert_eq!(gun.magazine(), 3);
+        assert_eq!(gun.reserve(), 0);
+        assert!(!gun.dry_warned, "换弹尚未把备弹用光，不该告警");
+        for _ in 0..3 {
+            assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_some());
+        }
+        // 弹匣空 + 备弹 0：首次扣扳机置闩
+        assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_none());
+        assert!(gun.dry_warned, "备弹耗尽必须留下痕迹");
+        // 再扣多少次都不重复告警，也永远打不出来
+        for _ in 0..5 {
+            assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_none());
+            gun.update(0.1);
+        }
+        assert!(gun.dry_warned);
+        assert_eq!(gun.magazine(), 0);
+        // 补给（死亡复活 / 波间补给）后重新武装
+        gun.reset_ammo();
+        assert!(!gun.dry_warned, "补给后必须重新武装告警闩");
+        assert_eq!(gun.magazine(), 3);
+        assert_eq!(gun.reserve(), 3);
+        assert!(gun.try_fire([0.0; 3], [1.0, 0.0, 0.0]).is_some());
     }
 
     #[test]
