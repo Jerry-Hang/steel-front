@@ -7686,3 +7686,65 @@ aidiag: astar 1s 内 calls=278 fails=278 partial=278（起点阻挡=0/目标阻�
 `survive` 剩下的失败点在 **harness 枪法**（§21.1 的两条）与**第 2 波以后的弹药/续航**（§21.2），
 不再是 AI 导航。
 
+### 21.6 🎉 survive 5 波**首次真机通关**（2026-09-25 晚，未结案 #17 结案）+ 当场抓到的三个引擎 bug
+
+**结果**（独显 RTX 5060 + `RV3D_PRESENT_MODE=mailbox` + `-NoShot`，
+`scripts\run_survive_pm.ps1 -Secs 500`）：
+
+```
+result        : VICTORY (288s of a 500s budget)
+waves logged  : [1, 2, 3, 4, 5]
+spawns        : [('1','6'), ('2','8'), ('3','10'), ('4','12'), ('5','14')]
+waves cleared : ['1', '2', '3', '4', '5']
+supply windows: ['100', '100', '100', '100']
+victory line  : ['5']            <- survive: 全部 5 波守住 → 胜利
+kills/shots   : 52 / 623   engagements=76
+hits          : 205   (命中率 32.9%，理想 ≈3.9 发/杀)
+VUID=0 panics=0 device_lost=0 fps=162.4
+RESULT: ALL-OK   (exit 0)
+```
+
+⇒ **未结案 #17 的核心目标（5 波打通到胜利态）达成**；此前 4 次长跑都停在 wave 2/3。
+
+#### 21.6.1 独显 + 默认呈现模式 = **GPU 挂死（TDR）**，与"加速器"无关
+
+第一次独显跑 survive 时：日志打完 `game: run started (wave 1)` 就在**第一个 Playing 帧**断掉 ——
+没有 fps 行、没有 panic、没有 VUID、没有 `has been lost`，harness 对着一个死进程空跑 900 秒。
+
+- **判据 1**：Windows 应用程序日志同一时段 4 条 `LiveKernelEvent`，**P1 = 141**
+  （`VIDEO_ENGINE_TIMEOUT_DETECTED`，即 TDR）。
+- **判据 2**：同一台机器上「核显 + 同图」正常、「独显 + 城市图」正常
+  （`perf_run.ps1 -Secs 30` 实测 mean 209 fps / median 218）⇒ 不是机器被占满。
+- **处置**：`run_survive_pm.ps1` 显式设 `RV3D_PRESENT_MODE=mailbox`
+  （`SteelFront.bat` 的玩家路径本来就是它，引擎默认 IMMEDIATE 是"基准最稳"用的）⇒
+  同一张图同一场景 **fps 162.4、零 VUID、零丢设备**，之后两次长跑全部跑到胜利。
+
+⇒ 之前记的「独显 + Playing + 抓屏丢设备」很可能也是同一个根因（当时的 run 都是 IMMEDIATE）；
+**独显上的玩法/长跑一律显式 mailbox**，`perf_run.ps1` 保持 IMMEDIATE（城市图实测无问题）。
+
+#### 21.6.2 通关当场抓到并修掉的三个引擎 bug（各带红测）
+
+| # | 症状（真机原文） | 根因 | 修法 / 红测 |
+|---|---|---|---|
+| 1 | `wave 3 cleared` 之后是 `wave 1 spawned … effective=4` | survive 的 `rule.waves`(5) 长于 `WAVES_PER_LEVEL`(3)，旧分支「清满 3 波就升关并把 wave 归 1」⇒ 第 4/5 波永远到不了、胜利条件永远不成立 | `if is_survive_rule()` 整条走 `rule.waves`；红测 `survive_wave_count_above_waves_per_level_still_reaches_victory`（先红 `left: 1 / right: 4`） |
+| 2 | `survive: 全部 5 波守住 → 胜利` 之后紧跟 `wave 5 spawned 14 enemies (kind=Boss …)`，NPC #60–#73 又刷一批 | `spawn_wave` 挂在整条 if/else **之后**，胜利那一拍照样生成 | `spawn_next` 收口；红测 `survive_victory_does_not_spawn_another_wave`（先红 `实际 6 只`） |
+| 3 | `objective: 本关敌军全灭达成（26 击杀）→ victory`，而实际通关是 **52 杀** | `level_objective_target` 无条件按 `1..=WAVES_PER_LEVEL` 累加 | 改按 `survive_total_waves()`；红测 `survive_objective_target_counts_every_rule_wave`（先红 `left: 26 / right: 52`，与真机数字逐字对上） |
+
+🔴 **三条的共同教训**：旧测试只覆盖 `waves = 2`（**恰好低于阈值 3**）⇒ 「波数 > 阈值」这条分支
+从来没有被跑过，而线上地图用的正是 5。**阈值型分支的测试必须取"跨过阈值"的值**（见教训 42）。
+通关后复测：`objective: …（52 击杀）→ victory`、胜利行之后**再无 spawn**、波次 1→2→3→4→5 连续。
+
+#### 21.6.3 harness 侧同期修掉的三件事（都是"看着在跑、其实空转"）
+
+1. **换枪判据两处坏**（`fix(scripts)` `2f36cd3`）：正则 `(\S+)` 匹配不了含空格的武器名
+   （`AK-12M 风暴`），且换枪藏在 `if not live:` 里 ⇒ 有活靶时永远不换枪。
+   真机症状：`备弹耗尽` 之后 **100 秒 0 发**。修后同一 run 三次换枪全部落地、wave 2 首次清掉。
+2. **卡死看门狗**（`d51d1b3`）：`attempts > max_engage` 的收尾分支只 `sleep(2)` 然后 `continue`，
+   场上一只躲在掩体后的 NPC 能让它 **8 分钟一发未发**。现在「有敌人但 `--stall-secs`(25s) 无进展」
+   ⇒ 清零预算 + 换位重来。
+3. **"打出去但 `hits` 不动" ⇒ 换位置**（`d39259b`）：新加的 `hits=` 尺子（引擎 1 Hz 状态行）
+   让 harness 能判"这一枪线被掩体挡住"。实测 4 次触发都紧跟击杀；通关 run 里
+   `hits 205 / shots 623`（32.9%），理想 ≈3.9 发/杀、实际 12 发/杀 ⇒ **枪法仍是唯一的大头**
+   （移动靶 + 掩体），但已经不再影响"能不能通关"。
+
+
