@@ -638,6 +638,56 @@ debug_assert!(nw <= 64, "并行段数超栈数组上限");   // 🔴 release 里
 
 ---
 
+## 12. 审查第九轮（同日续）：`#[allow(dead_code)]` 全量复核（编译器判定，`5432106` `985c65e`）
+
+### 12.1 方法（可复现，四条命令）
+
+```powershell
+# 1) 确认干净树（这一步会改源码，靠 git 还原）
+git status --short
+# 2) 把全仓 100 处 allow 临时注释掉（幂等，只动这一种行）
+python -c "import pathlib; [p.write_text(p.read_text(encoding='utf-8').replace('#[allow(dead_code)]','//#[allow(dead_code)]'), encoding='utf-8', newline='') for p in pathlib.Path('src').rglob('*.rs')]"
+# 3) 让编译器把"被压住的 dead code"全说出来
+cargo build --release 2>&1 | Set-Content -Encoding utf8 "$env:TEMP\deadcode.txt"
+# 4) 还原（**必须**用 git checkout，别手改回去）
+git checkout -- src
+```
+⚠️ 判据必须看**非测试构建**（`cargo build`，不含 `#[cfg(test)]`）—— 这是关键：
+"只在测试里用"的条目在非测试构建里必然报 dead，而 `--tests` 会把它们算成被使用。
+
+### 12.2 结果：100 处 allow 压住了 **90 个** dead 条目
+
+| 分类 | 数量 | 说明 |
+|---|---|---|
+| **只在测试里用** | **66** | allow 是**承重**的：删掉它，非测试构建立刻报警。绝不能当成"陈旧压制"批量删 |
+| **有说明的预留** | 16 | 例如 `audio.rs` 的 WAV 管线四件套（`read_*_le`）、`OggDecoder`/`NullOggDecoder`（lewton 集成阶段）、`with_explosive`（榴弹武器接入时）、`generate_default_ground_texture`（旧程序化纹理 A/B 保留） |
+| 无测试引用、也无说明 | 8 | 见 12.3（脚本判定，人工复核后部分其实有说明） |
+
+**结论**：那一句 `#[allow(dead_code)]` 绝大多数**不是**在藏问题，而是"仅测试使用"与"有出处的预留"。
+⇒ **不做批量删除**；本仓"看到规划中的 dead code 必须回答为什么没接线"这条，答案就在上表。
+
+### 12.3 本轮实际动的手（两处，都有编译器判据）
+
+1. **删掉一处真重复**（`5432106`）：`Game::fire_burst` 与 `fire_burst_player` 是**逐行重复**的函数体
+   （只差 `fire_shot(.., false/true)`），而前者**零调用方** —— 靠一句 allow 压着，旧注释还写着
+   "AI/网络/测试用三连发"（**未兑现的注释**，照它去找调用方会白找）。
+   合并成 `fire_burst(origin, dir, rounds, from_player)` + 一行薄入口，重复消失 ⇒ 那条 allow 也删掉。
+   顺带补了 `player_burst_fires_three_rounds`：此前**玩家连发路径零覆盖**。
+2. **给 5 处预留补说明**（`985c65e`）：`Squad::leader` / `Platoon::leader` / `Company::platoon_ids`
+   （建编成时**写入**、当前无读取方）、`Camera::fp_vel`（**读写都没有**，现代玩家移动在 `physics::PlayerBody`）、
+   `AudioPlayer::sink_mut`（对称访问器）、`LlmCommander::handle`（**从没 join 过**：线程靠 `Shared::stopped`
+   自退，进程退出时 OS 回收 —— 且此刻它可能正在写 `data/llm_*.jsonl`）。
+
+### 12.4 ⚠️ 分类脚本的**已知漏判**（别把它当权威）
+
+自动分类（"item 上方 6 行内找 allow，再看尾注释/上方注释）对三种写法会判成"无说明"：
+**同行尾注释**（`#[allow(dead_code)] // 预留：…`）、**结构体/impl 级 allow**（字段/方法本身没属性）、
+**自带 doc 注释的字段**（如 `fp_vel` 的"预留：Wave2"）。
+⇒ 12.2 表里那 8 条是**脚本判定**，我人工复核了其中 5 条并补/确认了说明；剩下 3 条已确认各自有 doc 或
+结构体级 allow（`decode_pcm_int`、`EnvStage::Release`、`chunk`）。**下次要重跑这张表，先修脚本的这三处漏判。**
+
+---
+
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
 
 ## 1. 症状与误诊
