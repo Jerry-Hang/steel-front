@@ -234,6 +234,11 @@ def reposition(hwnd, logpath, side):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("logpath")
+    ap.add_argument("--no-shot", action="store_true",
+                    help="skip every PrintWindow capture. On the discrete GPU the "
+                         "combination of Playing + capture reproducibly loses the Vulkan "
+                         "device (2026-09-25 matrix), while the same scene without capture "
+                         "runs fine at ~100fps; the integrated GPU is unaffected.")
     ap.add_argument("--secs", type=float, default=900.0, help="driving budget")
     ap.add_argument("--shot-every", type=float, default=60.0)
     ap.add_argument("--max-engage", type=int, default=6,
@@ -317,7 +322,8 @@ def main():
             last_wave = wave
             waves_seen.append(wave)
             taken = os.path.join(shotdir, "%s_wave%d.png" % (tag, wave))
-            screenshot(hwnd, taken)
+            if not args.no_shot:
+                screenshot(hwnd, taken)
             print("[%6.0fs] WAVE %d  enemies=%d  -> %s"
                   % (time.time() - t0, wave, enemies, os.path.basename(taken)), flush=True)
 
@@ -441,7 +447,8 @@ def main():
         if time.time() - last_shot_at >= args.shot_every:
             last_shot_at = time.time()
             shot = os.path.join(shotdir, "%s_t%.0f.png" % (tag, time.time() - t0))
-            screenshot(hwnd, shot)
+            if not args.no_shot:
+                screenshot(hwnd, shot)
             print("    shot -> %s" % os.path.basename(shot), flush=True)
 
     txt = S.log_tail(logpath)

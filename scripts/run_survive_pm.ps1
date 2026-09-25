@@ -7,8 +7,12 @@
 # RV3D_INVINCIBLE=1 is deliberate: it removes the "player dies at wave N" branch so the
 # run can reach wave 5 at all. The defeat branch is covered by unit tests.
 #
-# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_survive_pm.ps1 [-Secs 780]
-param([int]$Secs = 780, [int]$ShotEvery = 90)
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_survive_pm.ps1 [-Secs 780] [-NoShot]
+# -NoShot skips every PrintWindow capture: on the discrete GPU the combination of
+# "Playing + capture" reproducibly loses the Vulkan device (2026-09-25), while the
+# same scene without capture runs fine. Use it for dGPU runs; screenshots still work
+# on the integrated GPU.
+param([int]$Secs = 780, [int]$ShotEvery = 90, [switch]$NoShot)
 $ErrorActionPreference = "Continue"
 $repo = "D:\Rust\steel-front"
 $exe  = Join-Path $repo "target\release\steel-front.exe"
@@ -37,7 +41,9 @@ try {
     Write-Host "launched RV3D_MAP=$env:RV3D_MAP ; waiting 10s"
     for ($i = 0; $i -lt 10; $i++) { Set-Content $beat (Get-Date -Format o); Start-Sleep -Seconds 1 }
 
-    python (Join-Path $repo "scripts\survive_pm.py") $LOG --secs $Secs --shot-every $ShotEvery
+    $pyargs = @((Join-Path $repo "scripts\survive_pm.py"), $LOG, "--secs", "$Secs", "--shot-every", "$ShotEvery")
+    if ($NoShot) { $pyargs += "--no-shot" }
+    python @pyargs
     $rc = $LASTEXITCODE
 }
 finally {
