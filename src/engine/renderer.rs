@@ -430,6 +430,64 @@ fn convert_pixels_to_rgba(format: vk::Format, src: &[u8], dst: &mut [u8]) -> Res
     Ok(())
 }
 
+/// 物理设备选择偏好（来自 `RV3D_GPU`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GpuPreference {
+    /// 不设 `RV3D_GPU`：有窗口表面的设备里**优先独显**（本仓历史行为）
+    Auto,
+    Discrete,
+    Integrated,
+    /// 设备名包含该子串（已转小写）
+    Name(String),
+}
+
+/// 解析 `RV3D_GPU`：`igpu`/`integrated` → 集显；`dgpu`/`discrete` → 独显；
+/// 其它非空值 → **按设备名子串匹配**（大小写不敏感，例如 `RV3D_GPU=radeon`）；空/未设 → `Auto`。
+fn parse_gpu_preference(raw: Option<&str>) -> GpuPreference {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return GpuPreference::Auto;
+    };
+    match s.to_ascii_lowercase().as_str() {
+        "igpu" | "integrated" => GpuPreference::Integrated,
+        "dgpu" | "discrete" => GpuPreference::Discrete,
+        other => GpuPreference::Name(other.to_string()),
+    }
+}
+
+/// 设备类型排序权重（`Auto` 用：独显 2 > 集显 1 > 其它 0）
+fn gpu_type_rank(t: vk::PhysicalDeviceType) -> u8 {
+    match t {
+        vk::PhysicalDeviceType::DISCRETE_GPU => 2,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+        _ => 0,
+    }
+}
+
+/// 从候选里挑一个设备（**纯函数，可单测**）：返回下标；匹配不到返回 `None`
+/// （调用方据此**报错退出**，不静默回退 —— 见调用点注释）。
+fn pick_physical_device(
+    candidates: &[(vk::PhysicalDeviceType, String)],
+    pref: &GpuPreference,
+) -> Option<usize> {
+    match pref {
+        GpuPreference::Discrete => candidates
+            .iter()
+            .position(|(t, _)| *t == vk::PhysicalDeviceType::DISCRETE_GPU),
+        GpuPreference::Integrated => candidates
+            .iter()
+            .position(|(t, _)| *t == vk::PhysicalDeviceType::INTEGRATED_GPU),
+        GpuPreference::Name(want) => candidates
+            .iter()
+            .position(|(_, n)| n.to_ascii_lowercase().contains(want.as_str())),
+        // 与历史行为一致：`max_by_key` 取"最大的那个"，并列时取**最后一个**
+        GpuPreference::Auto => candidates
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (t, _))| gpu_type_rank(*t))
+            .map(|(i, _)| i),
+    }
+}
+
 /// `queue_present` 的结果分类（纯函数，可单测）。
 ///
 /// 🔴 2026-09-22 复查补：此前只处理 `Err(ERROR_OUT_OF_DATE_KHR)` 与 `Ok(true)`（SUBOPTIMAL），
@@ -1394,7 +1452,11 @@ impl Renderer {
             return Err("没有找到支持 Vulkan 的 GPU".to_string());
         }
 
-        let (physical_device, physical_device_properties) = physical_devices
+        // 🔴 2026-09-23：设备选择从"写死优先独显"改为**可指定**（`RV3D_GPU`）。
+        // 起因：验证时 dGPU 可能被别的任务占着（用户在跑 AI），而本机是**双 GPU 笔记本**
+        // （RTX 5060 Laptop + AMD Radeon 集显）—— 没有这个开关就只能跑在独显上。
+        // 默认仍是"有窗口表面的设备里优先独显"⇒ 不设 `RV3D_GPU` 时行为与从前逐字一致。
+        let candidates: Vec<(vk::PhysicalDeviceType, String, vk::PhysicalDevice)> = physical_devices
             .iter()
             .filter_map(|&device| {
                 let properties = unsafe { instance.get_physical_device_properties(device) };
@@ -1404,24 +1466,42 @@ impl Renderer {
                         .unwrap_or(false)
                 };
                 if surface_support {
-                    Some((device, properties))
+                    let name = unsafe {
+                        CStr::from_ptr(properties.device_name.as_ptr())
+                            .to_string_lossy()
+                            .to_string()
+                    };
+                    Some((properties.device_type, name, device))
                 } else {
                     None
                 }
             })
-            .max_by_key(|&(_, props)| match props.device_type {
-                vk::PhysicalDeviceType::DISCRETE_GPU => 2,
-                vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
-                _ => 0,
-            })
-            .ok_or_else(|| "没有找到合适的物理设备".to_string())?;
-
-        let device_name = unsafe {
-            CStr::from_ptr(physical_device_properties.device_name.as_ptr())
-                .to_string_lossy()
-                .to_string()
-        };
-        log::info!("选择物理设备: {}", device_name);
+            .collect();
+        if candidates.is_empty() {
+            return Err("没有找到支持本窗口表面的物理设备".to_string());
+        }
+        let gpu_pref = parse_gpu_preference(std::env::var("RV3D_GPU").ok().as_deref());
+        let pick_list: Vec<(vk::PhysicalDeviceType, String)> =
+            candidates.iter().map(|(t, n, _)| (*t, n.clone())).collect();
+        let picked = pick_physical_device(&pick_list, &gpu_pref).ok_or_else(|| {
+            // ⚠️ 匹配不到时**报错退出**，不静默回退到独显 —— 否则"以为在核显上验的"会是假的
+            let available: Vec<&str> = candidates.iter().map(|(_, n, _)| n.as_str()).collect();
+            format!(
+                "RV3D_GPU={:?} 没有匹配到任何设备（可选：{}；也可用 igpu/dgpu）",
+                gpu_pref,
+                available.join(" / ")
+            )
+        })?;
+        let (physical_device_type, picked_name, physical_device) = candidates[picked].clone();
+        let physical_device_properties =
+            unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_name = picked_name;
+        log::info!(
+            "选择物理设备: {}（{:?}；RV3D_GPU={:?}）",
+            device_name,
+            physical_device_type,
+            gpu_pref
+        );
         // GPU 硬件能力探测：光追/Tensor Core/DLSS 可用性判定（仅日志，不影响初始化）
         crate::engine::gpu_caps::log_gpu_hardware_caps(&instance, physical_device, &device_name);
 
@@ -13366,5 +13446,81 @@ mod cull_segment_tests {
             CULL_MAX_SEGMENTS >= 64,
             "段数上限被调小了：常见 32C64T 拓扑会退化成段数不足（只是少并行，不会算错）"
         );
+    }
+}
+
+/// `RV3D_GPU`（物理设备选择）的判据（2026-09-23 加）。
+///
+/// 起因：本机是双 GPU 笔记本，验证时 dGPU 可能被占（用户在跑 AI）⇒ 需要一个"强制走核显"的开关。
+/// 这两条纯函数把"怎么解析"与"怎么挑"分开，于是**不需要真显卡就能单测**。
+#[cfg(test)]
+mod gpu_pick_tests {
+    use super::{parse_gpu_preference, pick_physical_device, GpuPreference};
+    use ash::vk;
+
+    fn dgpu() -> (vk::PhysicalDeviceType, String) {
+        (
+            vk::PhysicalDeviceType::DISCRETE_GPU,
+            "NVIDIA GeForce RTX 5060 Laptop GPU".to_string(),
+        )
+    }
+    fn igpu() -> (vk::PhysicalDeviceType, String) {
+        (
+            vk::PhysicalDeviceType::INTEGRATED_GPU,
+            "AMD Radeon 610M (integrated)".to_string(),
+        )
+    }
+
+    #[test]
+    fn parse_gpu_preference_maps_known_aliases() {
+        assert_eq!(parse_gpu_preference(None), GpuPreference::Auto);
+        assert_eq!(parse_gpu_preference(Some("")), GpuPreference::Auto);
+        assert_eq!(parse_gpu_preference(Some("   ")), GpuPreference::Auto, "空白 = 未设");
+        assert_eq!(parse_gpu_preference(Some("igpu")), GpuPreference::Integrated);
+        assert_eq!(parse_gpu_preference(Some("IGPU")), GpuPreference::Integrated);
+        assert_eq!(
+            parse_gpu_preference(Some("integrated")),
+            GpuPreference::Integrated
+        );
+        assert_eq!(parse_gpu_preference(Some("dgpu")), GpuPreference::Discrete);
+        assert_eq!(
+            parse_gpu_preference(Some("discrete")),
+            GpuPreference::Discrete
+        );
+        // 其它值 = 名字子串，统一转小写
+        assert_eq!(
+            parse_gpu_preference(Some("  Radeon ")),
+            GpuPreference::Name("radeon".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_physical_device_honours_preference() {
+        let both = [dgpu(), igpu()];
+        // 🔴 默认必须是独显（历史行为，不许因为加了开关而改变）
+        assert_eq!(pick_physical_device(&both, &GpuPreference::Auto), Some(0));
+        assert_eq!(pick_physical_device(&both, &GpuPreference::Discrete), Some(0));
+        assert_eq!(pick_physical_device(&both, &GpuPreference::Integrated), Some(1));
+        assert_eq!(
+            pick_physical_device(&both, &GpuPreference::Name("radeon".into())),
+            Some(1)
+        );
+        assert_eq!(
+            pick_physical_device(&both, &GpuPreference::Name("nvidia".into())),
+            Some(0)
+        );
+        // 匹配不到 ⇒ None（调用方据此**报错退出**，绝不静默回退到独显）
+        assert_eq!(
+            pick_physical_device(&both, &GpuPreference::Name("intel".into())),
+            None
+        );
+        // 只有集显的机器上要独显 ⇒ 也是 None
+        assert_eq!(
+            pick_physical_device(&[igpu()], &GpuPreference::Discrete),
+            None
+        );
+        // 顺序无关：集显在前的列表里 Auto 仍选独显
+        let flipped = [igpu(), dgpu()];
+        assert_eq!(pick_physical_device(&flipped, &GpuPreference::Auto), Some(1));
     }
 }
