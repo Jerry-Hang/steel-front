@@ -1244,6 +1244,17 @@ pub struct Game {
     stage_ai_us: u64,
     stage_audio_us: u64,
     stage_net_us: u64,
+    /// `ai_us` 的**分项**（未结案 #25 的"AI 到底花在哪"）：那一格其实是整段玩法
+    /// （投掷物 + AI + 波次 + 据点）的合计 ⇒ 不拆开就无法判断优化该往哪打。
+    /// 本帧值 + 本秒累计值（`RV3D_AI_DIAG=1` 时随 aidiag 行每秒打一条）。
+    stage_proj_us: u64,
+    stage_ai_only_us: u64,
+    stage_wave_us: u64,
+    stage_obj_us: u64,
+    acc_proj_us: u64,
+    acc_ai_only_us: u64,
+    acc_wave_us: u64,
+    acc_obj_us: u64,
     /// 冲击波/爆炸 SIMD 实测开关（RV3D_EXPLOSION_SIM=1；默认关，不影响主玩法）
     explosion_sim: bool,
     /// 冲击波压力场采样点（64×64 覆盖 512m 场地，惰性初始化）
@@ -1691,6 +1702,14 @@ impl Game {
             stage_ai_us: 0,
             stage_audio_us: 0,
             stage_net_us: 0,
+            stage_proj_us: 0,
+            stage_ai_only_us: 0,
+            stage_wave_us: 0,
+            stage_obj_us: 0,
+            acc_proj_us: 0,
+            acc_ai_only_us: 0,
+            acc_wave_us: 0,
+            acc_obj_us: 0,
             explosion_sim: std::env::var("RV3D_EXPLOSION_SIM")
                 .is_ok_and(|v| v == "1" || v == "true"),
             shock_points: Vec::new(),
@@ -2256,18 +2275,32 @@ impl Game {
         match self.game_state {
             GameState::StartMenu => {
                 // 菜单吸引模式：世界照常运行（NPC 游走/追击），不结算伤害与波次
+                let t = std::time::Instant::now();
                 self.update_projectiles(dt, true);
+                self.stage_proj_us = t.elapsed().as_micros() as u64;
+                let t = std::time::Instant::now();
                 self.update_ai(dt, camera);
+                self.stage_ai_only_us = t.elapsed().as_micros() as u64;
+                self.stage_wave_us = 0;
+                self.stage_obj_us = 0;
             }
             GameState::LoadingMap => {
                 // 关卡加载为同步操作（init_map_system 已载入），此态仅作状态机过渡
             }
             GameState::Playing => {
+                let t = std::time::Instant::now();
                 self.update_projectiles(dt, true);
+                self.stage_proj_us = t.elapsed().as_micros() as u64;
+                let t = std::time::Instant::now();
                 self.update_ai(dt, camera);
+                self.stage_ai_only_us = t.elapsed().as_micros() as u64;
+                let t = std::time::Instant::now();
                 self.update_waves(dt, &camera.position());
+                self.stage_wave_us = t.elapsed().as_micros() as u64;
                 // 关卡系统：每帧推进据点占领 + 胜负判定（未启用时无操作）
+                let t = std::time::Instant::now();
                 self.update_objectives(dt, &camera.position());
+                self.stage_obj_us = t.elapsed().as_micros() as u64;
             }
             GameState::GameOver
             | GameState::Victory(_)
@@ -2286,6 +2319,11 @@ impl Game {
         // 状态日志（1 秒一条，冒烟断言 game: wave= 序列用）
         if self.time - self.last_status_log >= 1.0 {
             self.last_status_log = self.time;
+            // 玩法分项计时累计（见 `stage_proj_us` 段注释）：`ai_us` 那一格是整段，不是 AI。
+            self.acc_proj_us += self.stage_proj_us as u64;
+            self.acc_ai_only_us += self.stage_ai_only_us as u64;
+            self.acc_wave_us += self.stage_wave_us as u64;
+            self.acc_obj_us += self.stage_obj_us as u64;
             // 寻路诊断（**独立一行**，只在 RV3D_AI_DIAG=1 时打）：
             // 未结案 #25 的验收要"数 find_path 返回 None 的比例"，而上面那行状态日志的字段顺序
             // 是被冒烟/survive harness 解析的，**不能往里塞字段** ⇒ 另起一行。
@@ -2400,7 +2438,22 @@ impl Game {
                     expanded_max,
                     pushed
                 );
+                // 玩法分项（未结案 #25 的"AI 花在哪"）：`game:` 行的 `ai_us` 是**整段**
+                // （投掷物 + AI + 波次 + 据点）⇒ 这里给每秒累计值，四段互不相交。
+                log::info!(
+                    "aidiag: stage 1s proj={}us ai={}us wave={}us obj={}us（合计={}us，占 ai_us 的一格）",
+                    self.acc_proj_us,
+                    self.acc_ai_only_us,
+                    self.acc_wave_us,
+                    self.acc_obj_us,
+                    self.acc_proj_us + self.acc_ai_only_us + self.acc_wave_us + self.acc_obj_us
+                );
             }
+            // 累计值**无条件**清零（不依赖诊断开关，否则关掉 diag 时会一直累加）
+            self.acc_proj_us = 0;
+            self.acc_ai_only_us = 0;
+            self.acc_wave_us = 0;
+            self.acc_obj_us = 0;
             let enemy_hp = self.npcs.first().map(|n| n.max_hp).unwrap_or(0.0);
             // 玩家位置入状态行：survive harness 走位支持需要它算相对方位角
             let pp = self.player_pos();
