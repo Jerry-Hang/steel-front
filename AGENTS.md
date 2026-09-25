@@ -193,13 +193,14 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   抓不到它** —— 它抓的是已合成的完整帧，撕裂只发生在显示器上。**别再用静态截图去证伪"残影"。**
 - **玩家路径由 `SteelFront.bat` 设 `RV3D_PRESENT_MODE=mailbox`**（不撕裂、也不像 FIFO
   那样在独显直连下等不到 vblank 而死锁）。引擎默认 IMMEDIATE 是为了基准最稳。
-- 🔴 **2026-09-25 实测：独显 + `defense_line` + 默认 IMMEDIATE = GPU 挂死（TDR）**。
-  日志打完 `game: run started (wave 1)` 就在第一个 Playing 帧断掉（无 fps 行、无 panic、
-  无 VUID、无 `has been lost`），Windows 日志留 4 条 `LiveKernelEvent` **P1=141**
-  （`VIDEO_ENGINE_TIMEOUT_DETECTED`）。同一场景换 mailbox 后 fps 162、零 VUID；
-  核显同图、独显城市图（`perf_run.ps1`，IMMEDIATE）都正常。
-  **⇒ 独显上跑"进入 Playing 的长跑"一律显式 `mailbox`**（`run_survive_pm.ps1` 已内置）；
-  `perf_run.ps1` 保持 IMMEDIATE（它是基准尺子）。
+- 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：
+  独显 + `defense_line` + 默认 IMMEDIATE 会在第一个 Playing 帧后**静默卡死**（Windows 日志 4 条
+  `LiveKernelEvent` **P1=141** = TDR；换 mailbox 后 fps 162、零 VUID；核显同图、独显城市图都正常）。
+  而"静默"本身是引擎缺陷：`wait_for_fences`/`acquire_next_image` 以前用 **`u64::MAX`** 无限等 ⇒
+  现在 acquire 1s（连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s（连 3 次 ⇒ `gpu_stalled`，之后
+  `render()` 直接返回：**画面静止但进程与输入还在**，实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
+  **判据**：`rg 'u64::MAX' src/engine/renderer.rs` 不应出现在等待处；
+  测试 `swapchain_waits_are_bounded` 会在改回无限等待时红。`perf_run.ps1` 保持 IMMEDIATE。
 
 **建筑摆放（2026-09-13）**
 - `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。用 `max` 会按较大方向
@@ -592,12 +593,11 @@ release_input.ps1 取代）。
 20. **DLSS 立项评估未做**（**open**，唯一剩下的子项）。~~`playtest_perf.py` 未做 Windows 移植~~ **已结案（2026-09-15）：搬不过来**（X11/XImage/`pgrep`/`/proc` 全是 Linux 的）⇒ 改用 **`scripts/perf_run.ps1`**（只"启动 → 等待 → 读 `logs/perf_*.log` → 统计"，不注入、不抓屏）；🔴 **噪声底 2.8%**，见教训 35。
 21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：已支持交错布局**。⚠️ 读错时每个数**都是合法浮点数**（不崩不报）⇒ **凡"支持"都要补一条会红的测试**。
 22. ~~**`data/` 里的历史残留**~~ **已清理（2026-09-13）**：62 文件 → **只留 3 个被引用的**；同批 `screenshots/` 300→25、`logs/` 646→20，**共回收约 600 MB**。
-23. **`VUID-VkSwapchainCreateInfoKHR-flags-parameter` 与输入矛盾，按「层侧误报」挂着**（2026-09-15）。
-    报文说 `flags` 带 `MUTABLE_FORMAT` 却没启用 `VK_KHR_swapchain_mutable_format`。**三条否证**：
-    ① 全仓只有一个 `create_swapchain` 调用点、从不设 `flags`；② 实测把 flags 打进日志是**空的**；
-    ③ ash 的 `SwapchainCreateInfoKHR` 是 `#[repr(C)]` 且字段序与 C 头一致。5 次创建 = 5 条报文（1:1）。
-    **下一步**：更像 1.4.357 层与 1.3.281 头文件的版本错位。要证伪就把 `flags` 临时设成未定义位看报文是否改口；
-    **在上述三条被推翻前不要再改代码"修"它。**
+23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`：2026-09-25 结案 —— 是 `RTSS`/`GamePP`
+    两个**隐式层**往 swapchain 创建结构里塞了 `MUTABLE_FORMAT`，不是引擎的事。**
+    **判据**：加 `DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1` 后 **VUID 归零**；而传
+    `.flags(0x8)` 时层报 `MUTABLE_FORMAT|DEFERRED_MEMORY_ALLOCATION` = 我们传的值 | 0x4。
+    **⇒ 这台机器上开 `RV3D_VALIDATION=1` 必见 5 条，不要去改引擎。**
 24. ~~**广场"坑"**~~ **已结案（2026-09-19）= 水平面绕序反了**（判据 `horizontal_winding_tests`）。
 25. ✅ **`ai_us` 单帧尖峰（41.6ms）：2026-09-25 结案 —— 它是出生点小连通域那个 bug 的下游症状。**
     🔴 **先量再改的第一课：`ai_us` 量的根本不是 AI** —— 它是 `update_projectiles + update_ai +

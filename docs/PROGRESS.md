@@ -7790,5 +7790,59 @@ aidiag: stage 1s proj=0us ai=6996us wave=0us obj=0us（合计=6996us，占 ai_us
 **每秒 AI 成本稳定在 ~7ms、单秒最大 8.6ms，没有尖峰**，单次搜索规模也只有两位数节点。
 ⇒ 两条 lead（失败缓存 / 节点预算）**不需要做了**；要动就见 §21.7 的判据（分项 + `ai_us`）。
 
+### 21.8 「游戏静默卡死」的真身：`u64::MAX` 无限等待（2026-09-25 晚，独显排查）
+
+**症状**：独显 + `defense_line` + 默认 IMMEDIATE 时，日志打完 `game: run started (wave 1)` 后
+**6 秒断掉** —— 没有 fps 行、没有 panic、没有 VUID、没有 `has been lost`。用户视角就是"游戏死了"，
+而我这边 harness 对着一个死进程空跑了 75 秒（0 发 0 杀）。
+
+**根因（把无限等待改成有界等待之后，日志立刻自己说了）**：
+
+```
+ERROR steel_front] 渲染错误: 等待围栏失败: A wait operation has not completed in the specified time
+ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒ 判定 GPU 侧卡死：后续帧不再等待/提交/呈现
+```
+
+**GPU 侧再也不会 signal 那一帧的围栏**，而 `render()` 里 `wait_for_fences(..., u64::MAX)` ⇒
+主循环永远停在那里：**不崩、不报、不打日志**。这是引擎侧的真缺陷（GPU 卡死是外因）。
+
+**修法**（`fix(renderer)`）：
+
+| 等待 | 以前 | 现在 |
+|---|---|---|
+| `acquire_next_image` | `u64::MAX` | 1s；`classify_acquire_err` 分类：TIMEOUT/NOT_READY ⇒ 重试；连 3 次 ⇒ **降级 mailbox 重建**（自愈）；连 30 次 ⇒ 放弃这一帧并报错 |
+| `wait_for_fences` | `u64::MAX` | 5s；连 3 次（`fence_stall_due`）⇒ 置 `gpu_stalled`，之后 `render()` 直接返回 `Ok(())` |
+
+**实测对照（同机同图，60s，独显）**：
+
+| | 修改前 | 修改后 |
+|---|---|---|
+| IMMEDIATE（会卡死那条路） | 6 秒后静默僵死，**0 发 0 杀** | 5 秒内报出两条 ERROR，**90 发 5 杀**、进程与输入保持响应 |
+| mailbox（控制组） | 正常 | 正常（wave 1 清掉、12 杀 135 发、fps 97.9、VUID=0） |
+
+**守卫**：`swapchain_waits_are_bounded`（改回 `u64::MAX` 立刻红）、`acquire_errors_are_classified`、
+`fence_stall_escalates_after_three_timeouts`。harness 侧 `run_survive_pm.ps1` 新增
+`-PresentMode <mode>` 以便复测。
+**⇒ 下次看到"游戏没反应"，先 `rg '等待围栏超时|判定 GPU 侧卡死' logs/*.log.err`。**
+
+### 21.9 未结案 #23 结案：`flags` 里那个 `MUTABLE_FORMAT` 是**隐式层**塞进去的
+
+10 天的悬案，两个实验就落地了：
+
+1. **证伪实验**：临时把 `.flags(0x8)`（`DEFERRED_MEMORY_ALLOCATION`）传进去 ⇒ Khronos 层报的是
+   `MUTABLE_FORMAT|DEFERRED_MEMORY_ALLOCATION` = **我们传的值 | 0x4** —— 那个 0x4 是别人加的
+   （而我们自己打的 `swapchain diag: … flags=` 一直是空的）。
+2. **定位**：`DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1` 之后 **VUID 归零**（`VUID kinds: []`）。
+
+层横幅把整条链列得清清楚楚：`VK_LAYER_NV_optimus` / `VK_LAYER_NV_present` / **`VK_LAYER_GAMEPP`**
+（`C:\ProgramData\GamePPSdk\…` = 用户说的"加速器"）/ **`VK_LAYER_RTSS`**（MSI Afterburner 的 OSD）
+/ `VK_LAYER_KHRONOS_validation` —— 都是 Implicit 层，靠 `vkCreateSwapchainKHR` 钩子插自己的合成位。
+**⇒ 引擎侧无缺陷；这台机器上开验证层必见 5 条（每次创建一条），不要去改代码"修"它。**
+
+**顺带**：被否证掉的旧结论（"1.4.357 层与 1.3.281 头文件版本错位"）已从 AGENTS.md 删除；
+"`PrintWindow` 抓屏 + 独显丢设备"那一类现象现在有了更可信的嫌疑对象（同一条 overlay 链），
+但**不作为结论**——它需要单独一次实验（关层后再复现抓屏场景）。
+
+
 
 
