@@ -207,6 +207,12 @@ def self_test():
         dry_switch(dry_line, 1, {"AK-12M 风暴"}) is None)
     chk("last slot does not switch", dry_switch(dry_line, 9, set()) is None)
     chk("shot line never switches", dry_switch(shot_line, 0, set()) is None)
+    chk("stall watchdog: no enemies -> never fires",
+        not stall_due(1000.0, 0.0, 0, 25.0))
+    chk("stall watchdog: recent progress -> no stall",
+        not stall_due(1000.0, 990.0, 3, 25.0))
+    chk("stall watchdog: stale + enemies alive -> stall",
+        stall_due(1000.0, 900.0, 3, 25.0))
 
     logp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "logs", "survive_pm.log.err")
@@ -223,7 +229,7 @@ def self_test():
         print("  real log replay: %s not found" % logp)
 
     print("SELF-TEST: %s (%d checks, %d failed)"
-          % ("OK" if not fails else "FAIL", 7 + 1, len(fails)))
+          % ("OK" if not fails else "FAIL", 10 + 1, len(fails)))
     return 0 if not fails else 1
 
 
@@ -298,6 +304,16 @@ def reposition(hwnd, logpath, side):
     return move_hold(hwnd, logpath, side, 0.5)
 
 
+def stall_due(now, last_progress_at, enemies, stall_secs):
+    """卡死看门狗判据（纯函数，`--self-test` 钉住它）。
+
+    🔴 2026-09-25 加：600s 那次 run 里「预算打满就 `sleep 2.0` 无限循环」让 harness 在
+    **只剩一只躲在掩体后的 NPC** 时 8 分钟一发未发（整场只 202 发），而引擎那边一切正常。
+    判据 = 还有敌人活着、但「上一次有进展」（开火/走位/换位）已经过去 `stall_secs` 秒。
+    """
+    return enemies > 0 and (now - last_progress_at) > stall_secs
+
+
 def main():
     if "--self-test" in sys.argv:
         return self_test()
@@ -319,6 +335,10 @@ def main():
                          "giving up (alternating d/a; a converged-aim-no-kill means "
                          "the NPC is behind cover, and a perpendicular 3m strafe is "
                          "the cheapest way to break that alignment)")
+    ap.add_argument("--stall-secs", type=float, default=25.0,
+                    help="stall watchdog: enemies alive but nothing fired/moved for "
+                         "this long -> clear every target budget and reposition "
+                         "(the 2026-09-25 600s run dead-looped 8 minutes this way)")
     ap.add_argument("--approach-gt", type=float, default=35.0,
                     help="walk toward a target farther than this (m): the 1.5deg "
                          "aim tolerance is ~1.6m of drift at 60m, wider than an "
@@ -368,6 +388,8 @@ def main():
     repos_left = {}         # npc_id -> repositioning budget left for the CURRENT line
     slot = [0]              # 当前武器槽（0 起）；备弹耗尽时递增换枪（见主循环）
     dry_handled = set()     # 已经因「备弹耗尽」换掉过的武器名（滑动窗口会一直看得见旧行）
+    last_progress_at = t0   # 上一次"有进展"（开火 / 走位 / 换位）的时间；卡死看门狗用它
+    stalls = 0              # 看门狗触发次数（打印用，也让左右侧移交替）
     waves_seen = []
     last_wave = -1
     engaged = 0
@@ -407,6 +429,21 @@ def main():
                 screenshot(hwnd, taken)
             print("[%6.0fs] WAVE %d  enemies=%d  -> %s"
                   % (time.time() - t0, wave, enemies, os.path.basename(taken)), flush=True)
+
+        # 卡死看门狗：有敌人活着但「上一次有进展」已经过了 --stall-secs 秒 ⇒
+        # 清零全部目标的尝试预算 + 换个射击位置重来（旧版在这里永久放弃 ⇒ 8 分钟一发未发）。
+        if stall_due(time.time(), last_progress_at, enemies, args.stall_secs):
+            stalls += 1
+            attempts.clear()
+            stand_pos.clear()
+            repos_left.clear()
+            side = "d" if stalls % 2 else "a"
+            moved = move_hold(hwnd, logpath, side, 1.0)
+            print("    STALL %.0fs with %d enemies alive, nothing fired -> budgets cleared, "
+                  "reposition %s %.1fm"
+                  % (time.time() - last_progress_at, enemies, side, moved), flush=True)
+            last_progress_at = time.time()
+            continue
 
         dead = dead_ids(txt)
         # 瞄点用**活靶位置**（`npcpos:`，引擎 `RV3D_NPC_POS=1` 每秒一只一行），stand 行兜底；
@@ -450,6 +487,8 @@ def main():
                 moved = reposition(hwnd, logpath, side)
                 print("    reposition %s: moved %.1fm, re-arming npc#%d (%d left)"
                       % (side, moved, npc_id, left - 1), flush=True)
+                if moved > 0.5:
+                    last_progress_at = time.time()
                 attempts[npc_id] = 0
                 continue
             # == max+1 prints exactly once per line; the corpse sentinel (99)
@@ -479,6 +518,8 @@ def main():
                                   max(min((dist - args.approach_stop) / 6.0, 5.0), 0.5))
                 print("    approach w: moved %.1fm toward npc#%d (was %.0fm)"
                       % (moved, npc_id, dist), flush=True)
+                if moved > 0.5:
+                    last_progress_at = time.time()
                 txt = S.log_tail(logpath)
                 ppos = player_pos(txt) or ppos
                 ty, tp = target_angles_rel(npc, ppos)
@@ -500,6 +541,8 @@ def main():
             time.sleep(0.16)
         time.sleep(0.4)
         fired = shots_count(S.log_tail(logpath)) - s0
+        if fired > 0:
+            last_progress_at = time.time()
         if 0 <= fired < 4:
             time.sleep(2.6)
             for _ in range(4 - fired):
@@ -527,6 +570,10 @@ def main():
     lost = len(re.findall(r"has been lost", txt))
     kills = len(re.findall(r"kill: npc #\d+ eliminated", txt))
     shots = len(re.findall(r"shot #", txt))
+    # `hits=` = 玩家弹丸命中 NPC 的**累计**次数（引擎 1 Hz 状态行，2026-09-25 加）。
+    # 这是唯一能判「改瞄法有没有用」的指标：`kills/shots` 里混着"打掩体"和"残局空点"。
+    hitseries = re.findall(r"hits=(\d+)", txt)
+    hits = int(hitseries[-1]) if hitseries else -1
     cleared = re.findall(r"wave: wave (\d+) cleared", txt)
     supply = re.findall(r"survive: 波间补给（血量 ([\d.]+)%", txt)
     spawned = re.findall(r"wave: wave (\d+) spawned (\d+) enemies", txt)
@@ -541,6 +588,9 @@ def main():
     print("  supply windows: %s (hp%%)" % (supply,))
     print("  victory line  : %s" % (victory,))
     print("  kills/shots   : %d / %d   engagements=%d" % (kills, shots, engaged))
+    print("  hits          : %d   (命中率 %.1f%%，理想 ≈%.1f 发/杀)"
+          % (hits, (100.0 * hits / shots) if shots else 0.0,
+             (hits / float(kills)) if kills else 0.0))
     print("  VUID=%d panics=%d device_lost=%d fps=%.1f"
           % (vuid, panics, lost, S.last_fps(txt)), flush=True)
     ok = (result == "VICTORY" and vuid == 0 and panics == 0 and lost == 0
