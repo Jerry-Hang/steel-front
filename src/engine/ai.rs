@@ -462,29 +462,43 @@ pub fn find_cover_points(grid: &GridMap, player: GridPos, max_dist: u32) -> Vec<
     covers
 }
 
-/// 计算包抄目标点：以 `player → target` 方向为基准，沿垂直轴向
-/// `side`（+1/-1）方向偏移 `offset` 格，结果 clamp 到地图范围。
+/// 计算包抄目标点：把「玩家 → 本单位」的方向**旋转 90°**（`side=+1` 顺时针 / `-1` 逆时针），
+/// 在距玩家 `offset` 格处取点，结果 clamp 到地图范围。
 ///
-/// 四方向网格中垂直方向取主导轴的另一轴：水平主导走 y 轴，垂直主导走 x 轴。
+/// 🔴 2026-09-25 重写（修 #17 的最后一个死循环）。旧版按**主导轴**二选一：
+/// `|dx| >= |dy|` → `(player.x, player.y + side*off)`，否则 → `(player.x + side*off, player.y)`。
+/// 问题是这两支**互不相容**：`u=(1,0)` 时垂直方向取 `+y`，而 `u=(0,1)` 时取 `+x` ——
+/// 同一个旋转方向在两个象限里给出相反的垂直向量。于是本单位走过 45° 分界线时，
+/// 包抄点在两个相距 √8 格的点之间跳变，NPC 就在这两点间无限来回（真机日志：
+/// `tac=Flank goal=(14,2) → (2,14) → (14,2) …`，永远进不了 `Attack`）。
+/// 现在改用**一致的旋转**：单位方位连续变化 ⇒ 包抄点连续变化（判据见
+/// `flank_goal_never_jumps_across_the_diagonal`，跳变版红、旋转版绿）。
+///
+/// `side` 只决定顺/逆时针（4 邻域网格下无法只靠"左上/右下"表达侧翼，需要符号），
+/// 调用方用 id 奇偶定钳形；`ambush_goal` 则按玩家朝向在两个 side 里挑背后那个。
+///
+/// ⚠️ **偏移量必须小于交战距离**：包抄点 = 目的地，NPC 到了就不再靠近
+/// （`path_index` 走完即原地重规划）。旧调用值 3 格 = 12m 恰好等于射程 ⇒
+/// 包抄手永远停在射程外一步（见 `game.rs::FLANK_OFFSET` 注释与
+/// `flank_and_ambush_goals_land_inside_engage_range`）。
 pub fn flank_goal(grid: &GridMap, player: GridPos, target: GridPos, side: i32, offset: u32) -> GridPos {
-    let dx = target.x - player.x;
-    let dy = target.y - player.y;
-    if dx == 0 && dy == 0 {
-        // 方向退化（玩家与目标同格）：无包抄方向，返回玩家位置
-        let max_x = grid.width() as i32 - 1;
-        let max_y = grid.height() as i32 - 1;
-        return GridPos::new(player.x.clamp(0, max_x), player.y.clamp(0, max_y));
-    }
-    let off = side * offset as i32;
-    let raw = if dx.abs() >= dy.abs() {
-        // 水平主导：垂直方向为 y 轴
-        GridPos::new(player.x, player.y + off)
-    } else {
-        // 垂直主导：垂直方向为 x 轴
-        GridPos::new(player.x + off, player.y)
-    };
+    let dx = (target.x - player.x) as f32;
+    let dy = (target.y - player.y) as f32;
+    let len = (dx * dx + dy * dy).sqrt();
     let max_x = grid.width() as i32 - 1;
     let max_y = grid.height() as i32 - 1;
+    if len < 1e-3 {
+        // 方向退化（玩家与本单位同格）：已经贴脸，不再绕圈，返回玩家位置
+        return GridPos::new(player.x.clamp(0, max_x), player.y.clamp(0, max_y));
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    // 顺时针 90°（+1）= (x,y) -> (-y, x)；逆时针（-1）取其反
+    let (px, py) = if side >= 0 { (-uy, ux) } else { (uy, -ux) };
+    let r = offset as f32;
+    let raw = GridPos::new(
+        player.x + (px * r).round() as i32,
+        player.y + (py * r).round() as i32,
+    );
     GridPos::new(raw.x.clamp(0, max_x), raw.y.clamp(0, max_y))
 }
 
@@ -1169,10 +1183,15 @@ mod tests {
         assert_eq!(corner_covers[0].openness, 2);
     }
 
+    /// 包抄点 = 「玩家 → 本单位」旋转 90°（一致旋转）+ 地图 clamp。
+    ///
+    /// ⚠️ 2026-09-25 随 `flank_goal` 重写更新：旧断言把**不一致**的"主导轴"写法固化了下来
+    /// （水平主导取 `+y`、垂直主导取 `+x`）。改成一致旋转后，`u=(1,0)` 的两条断言不变，
+    /// `u=(0,1)` 的两条**左右互换**（旋转方向必须自洽，这正是修掉跳变的前提）。
     #[test]
-    fn flank_goal_vertical_offset_and_clamp() {
+    fn flank_goal_rotates_and_clamps() {
         let map = GridMap::new(10, 10);
-        // 水平主导（player→target 沿 x 轴）：垂直方向为 y 轴
+        // 本单位在玩家东侧（u=(1,0)）：顺时针 90° → +y
         assert_eq!(
             flank_goal(&map, GridPos::new(2, 2), GridPos::new(7, 2), 1, 2),
             GridPos::new(2, 4)
@@ -1181,14 +1200,14 @@ mod tests {
             flank_goal(&map, GridPos::new(2, 2), GridPos::new(7, 2), -1, 2),
             GridPos::new(2, 0)
         );
-        // 垂直主导（player→target 沿 y 轴）：垂直方向为 x 轴
+        // 本单位在玩家南侧（u=(0,1)）：同一个旋转给出 -x（与上一支构成自洽的 90° 旋转）
         assert_eq!(
             flank_goal(&map, GridPos::new(4, 4), GridPos::new(4, 9), 1, 2),
-            GridPos::new(6, 4)
+            GridPos::new(2, 4)
         );
         assert_eq!(
             flank_goal(&map, GridPos::new(4, 4), GridPos::new(4, 9), -1, 2),
-            GridPos::new(2, 4)
+            GridPos::new(6, 4)
         );
         // clamp 到地图范围
         assert_eq!(
@@ -1201,15 +1220,50 @@ mod tests {
             GridPos::new(0, 3)
         );
         assert_eq!(
-            flank_goal(&map, GridPos::new(9, 9), GridPos::new(0, 9), 1, 5),
+            flank_goal(&map, GridPos::new(9, 9), GridPos::new(0, 9), -1, 5),
             GridPos::new(9, 9),
             "正方向越界应 clamp 到上界"
         );
-        // 玩家与目标同格：退化为玩家位置
+        // 玩家与本单位同格：退化不再绕圈，返回玩家位置
         assert_eq!(
             flank_goal(&map, GridPos::new(3, 3), GridPos::new(3, 3), 1, 2),
             GridPos::new(3, 3)
         );
+    }
+
+    /// 🔴 包抄点必须**随本单位方位连续变化**（#17 最后一个死循环的红证）。
+    ///
+    /// 旧实现按「玩家→本单位」的**主导轴**二选一（`|dx|>=|dy|` → 沿 y 偏移，否则沿 x 偏移），
+    /// 于是单位走过 45° 分界线时包抄点在两个相距 √8 格的点之间**跳变**。实机后果（2026-09-25
+    /// `RV3D_AI_DIAG=1` 真机日志）：
+    /// `tac=Flank goal=(14.0,2.0)` → `(2.0,14.0)` → `(14.0,2.0)` … 无限来回，
+    /// NPC 在离玩家 15–22m 处走了一整个波次，永远进不了 `Attack`（射程 12m），
+    /// 波次永远清不掉。
+    ///
+    /// 判据：单位绕玩家一圈（固定半径 8 格，逐度采样），相邻两次包抄点不得超过 2 格。
+    /// 跳变版 = √8 ≈ 2.83 格（红）；连续旋转版 ≤ √2 ≈ 1.42 格（绿）。
+    #[test]
+    fn flank_goal_never_jumps_across_the_diagonal() {
+        let grid = GridMap::new(128, 128);
+        let player = GridPos::new(64, 64);
+        let radius = 8.0f32;
+        let mut prev: Option<GridPos> = None;
+        for deg in 0..360 {
+            let a = (deg as f32).to_radians();
+            let npc = GridPos::new(
+                player.x + (radius * a.cos()).round() as i32,
+                player.y + (radius * a.sin()).round() as i32,
+            );
+            let g = flank_goal(&grid, player, npc, 1, 2);
+            if let Some(p) = prev {
+                let d = (((g.x - p.x).pow(2) + (g.y - p.y).pow(2)) as f32).sqrt();
+                assert!(
+                    d <= 2.0,
+                    "包抄点在 {deg}° 处跳变：{p:?} -> {g:?}（相距 {d} 格）"
+                );
+            }
+            prev = Some(g);
+        }
     }
 
     #[test]

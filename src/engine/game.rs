@@ -187,10 +187,18 @@ const ZIGZAG_DIST: f32 = 40.0;
 const ZIGZAG_AMP: f32 = 1.5;
 /// 被瞄准/火力威胁时的锯齿幅度（米）
 const ZIGZAG_AMP_HIGH: f32 = 2.5;
-/// 侧翼包抄偏移（格，12m）
-const FLANK_OFFSET: u32 = 3;
-/// 偷袭绕背偏移（格，20m）
-const AMBUSH_OFFSET: u32 = 5;
+/// 侧翼包抄偏移（格）。**硬约束：×`GRID_CELL` 必须明显小于 `attack_range`（12m）**。
+///
+/// 🔴 2026-09-25 由 3 改为 2：旧值 3 格 = **12m == 射程**，于是包抄手走到目的地时仍在射程外
+/// 一步 ⇒ `state` 恒为 `Chase`、永不进 `Attack`，同时还反复换点。真机日志（`RV3D_AI_DIAG=1`）
+/// 抓到它在这两个点之间走了整场：`tac=Flank goal=(14.0,2.0) → (2.0,14.0) → (14.0,2.0) …`，
+/// NPC 离玩家 15–22m 来回，「第 1 波清不掉」的最后一块拼图。
+/// 2 格 = 8m，留 4m 余量给玩家在格内的偏移与路径末端的落点误差
+/// （判据 `flank_and_ambush_goals_land_inside_engage_range`）。
+const FLANK_OFFSET: u32 = 2;
+/// 偷袭绕背偏移（格）。与 `FLANK_OFFSET` 同一条约束（同样由 5 改为 2，理由见上）。
+/// 「绕大圈」现在由寻路路线（障碍环带/楼群）提供，不再靠一个射程外的远目标点。
+const AMBUSH_OFFSET: u32 = 2;
 /// 脚步声音效限频间隔（秒）
 const FOOTSTEP_INTERVAL: f32 = 0.5;
 /// 每关波次数：清完 WAVES_PER_LEVEL 波升关，难度按累计有效波次递进（跨关不回落）
@@ -6212,6 +6220,29 @@ mod tests {
         assert_eq!(Game::part_multiplier(0.1, 0.0), 0.6);
         // 地面高度偏移：NPC 站山坡上时以 NPC 地面为基准
         assert_eq!(Game::part_multiplier(2.0, 0.5), 1.5);
+    }
+
+    /// 🔴 包抄 / 偷袭目标点必须落在**交战距离以内**（#17 死循环的红证）。
+    ///
+    /// 实机（2026-09-25，`RV3D_AI_DIAG=1`）：`tac=Flank goal=(14.0,2.0)`，而玩家格中心是
+    /// `(2.0,2.0)` ⇒ 包抄点距玩家 **3 格 = 12m**，恰好等于波次 NPC 的 `attack_range`（12m）。
+    /// NPC 于射程外一步反复「到点 → 重规划 → 换点」，`state` 恒为 `Chase`、永不进
+    /// `Attack`，`update_waves` 又要求 `npcs.is_empty()` ⇒ **波次永远清不掉**。
+    /// 判据：目标点半径必须**明显小于**射程（留 4m 余量，容下玩家在格内的偏移与 float 误差）。
+    #[test]
+    fn flank_and_ambush_goals_land_inside_engage_range() {
+        // 波次 NPC 的射程（`ai::wave_profile` 默认档，也是 `Npc::attack_range` 的实际取值）
+        let attack_range = 12.0f32;
+        let flank_m = FLANK_OFFSET as f32 * GRID_CELL;
+        let ambush_m = AMBUSH_OFFSET as f32 * GRID_CELL;
+        assert!(
+            flank_m <= attack_range - 4.0,
+            "包抄点 {flank_m}m 离射程 {attack_range}m 太近（NPC 会在射程外一步无限来回）"
+        );
+        assert!(
+            ambush_m <= attack_range - 4.0,
+            "偷袭点 {ambush_m}m 离射程 {attack_range}m 太近（同上）"
+        );
     }
 
     /// 散布方向：单位长度、轴向零散布保持原方向、非零散布仍归一化
