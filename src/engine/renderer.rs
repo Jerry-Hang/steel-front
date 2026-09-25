@@ -546,6 +546,23 @@ const SOLDIER_MESH_INDICES: u32 = 8192;
 /// 现在由最高槽位反推，结构上不可能再漏。
 const INSTANCE_BUFFER_ELEMS: u64 =
     SOLDIER_INSTANCE_BASE as u64 + MAX_SOLDIER_INSTANCES as u64;
+/// 并行剔除的**段数上限** = `cull_and_upload` 里两张栈上前缀和表 `[u32; N]` 的长度。
+///
+/// 🔴 2026-09-22 复查补：段数原来是裸的 `pool.workers() + 1`，只靠一句
+/// `debug_assert!(nw <= 64)` 兜着 —— 而 **release 里 `debug_assert` 根本不存在**
+/// （本仓 `[profile.release]` 用默认：`debug-assertions = false`、`overflow-checks = false`）。
+/// 64 个 worker 以上的机器（64C/128T 起）会**每帧**在 `near_prefix[w]` 上
+/// `index out of bounds: the len is 64 but the index is 64` —— 高核数机器一启动就崩。
+/// 现在由 [`cull_segment_count`] 硬夹上限；本机的 `workers + 1` 远小于 64 ⇒ **行为零变化**。
+const CULL_MAX_SEGMENTS: usize = 64;
+
+/// 纯函数：worker 数 → 并行剔除段数（调用线程参与首段，故 +1），并以
+/// [`CULL_MAX_SEGMENTS`] 为上限 —— 段数只影响并行度，不影响结果（前缀和按段相加，
+/// 段边界怎么切都不改变可见集合与近/远分档）。**不碰线程调度策略**：池的拓扑、
+/// 亲和、降频都在 `cpu.rs`，这里只决定"切几段"。
+fn cull_segment_count(workers: usize) -> usize {
+    (workers + 1).min(CULL_MAX_SEGMENTS)
+}
 /// 道具分桶边长（米）。全城约 ±175m ⇒ 约 9×9 格。
 /// 🔴 2026-09-12 第 44 轮：由 40m 改为 20m。**原注释的理由已被实测推翻** ——
 /// 「桶再小则 draw call 数上升（每桶一次 cmd_draw_indexed 与其绑定开销）」
@@ -7473,7 +7490,8 @@ impl Renderer {
 
         // 池大小（调用线程参与首段 → 并发 = workers+1）；段计数数组按需建一次
         let pool = crate::engine::cpu::scene_pool();
-        let nw = pool.workers() + 1;
+        // 段数硬夹 `CULL_MAX_SEGMENTS`（下面两张前缀和表是栈上定长数组，见该常量的注释）
+        let nw = cull_segment_count(pool.workers());
         if self.seg_near_counts.len() != nw {
             self.seg_near_counts = (0..nw)
                 .map(|_| std::sync::atomic::AtomicU32::new(0))
@@ -7529,9 +7547,10 @@ impl Renderer {
         });
 
         // ---- 前缀和（串行，段数 ≤ 9，微秒级）：每段近/远档写入起点 ----
-        let mut near_prefix = [0u32; 64];
-        let mut far_prefix = [0u32; 64];
-        debug_assert!(nw <= 64, "并行段数超栈数组上限");
+        // 表长 = `CULL_MAX_SEGMENTS`，而 `nw` 已由 `cull_segment_count` 夹到同一上限
+        // （原来这里是一句 `debug_assert!(nw <= 64)` —— release 里不存在，等于没写）
+        let mut near_prefix = [0u32; CULL_MAX_SEGMENTS];
+        let mut far_prefix = [0u32; CULL_MAX_SEGMENTS];
         let mut near_total = 0u32;
         let mut far_total = 0u32;
         for w in 0..nw {
@@ -13310,6 +13329,40 @@ mod present_result_tests {
         assert_eq!(
             classify_present(Err(vk::Result::ERROR_DEVICE_LOST)),
             PresentOutcome::Failed
+        );
+    }
+}
+
+/// 并行剔除**段数上限**的判据（2026-09-22 复查新增）。
+///
+/// `cull_and_upload` 的两张前缀和表是栈上定长 `[u32; CULL_MAX_SEGMENTS]`，
+/// 段数必须 ≤ 表长。旧写法是裸的 `pool.workers() + 1`，只有一句
+/// `debug_assert!(nw <= 64)` 兜着 —— 而 **release 里 `debug_assert` 不存在**
+/// ⇒ 64 个 worker 以上的机器（64C/128T 起）每帧 `index out of bounds`。
+#[cfg(test)]
+mod cull_segment_tests {
+    use super::{cull_segment_count, CULL_MAX_SEGMENTS};
+
+    #[test]
+    fn segment_count_is_workers_plus_one_within_limit() {
+        // 本机这一类（16C 级）与旧公式逐值一致 ⇒ 改动是空操作
+        assert_eq!(cull_segment_count(0), 1, "0 个 worker 也要有 1 段（调用线程自己跑）");
+        assert_eq!(cull_segment_count(3), 4);
+        assert_eq!(cull_segment_count(31), 32);
+        // 边界：刚好填满表
+        assert_eq!(cull_segment_count(CULL_MAX_SEGMENTS - 1), CULL_MAX_SEGMENTS);
+        // 🔴 这一条是"修之前会红"的判据：旧公式在这里给 65 / 1001
+        assert_eq!(cull_segment_count(CULL_MAX_SEGMENTS), CULL_MAX_SEGMENTS);
+        assert_eq!(cull_segment_count(1000), CULL_MAX_SEGMENTS);
+    }
+
+    /// 上限本身：低于 64 只会让"每核一段"的机器少用几个核（慢一点，结果不变），
+    /// 但不该被顺手调小 —— 顺带锁住它的量级。
+    #[test]
+    fn limit_covers_common_topologies() {
+        assert!(
+            CULL_MAX_SEGMENTS >= 64,
+            "段数上限被调小了：常见 32C64T 拓扑会退化成段数不足（只是少并行，不会算错）"
         );
     }
 }
