@@ -714,6 +714,77 @@ mod tests {
         Aabb::new(Vec3::new(x0, y0, z0), Vec3::new(x1, y1, z1))
     }
 
+    // ------------------------------------------------------------------
+    // 退化输入 / NaN 不变量（2026-09-23 复查补）
+    //
+    // 为什么专门测这个：碰撞解析里一旦出现 NaN，**所有比较都会变成 false** ——
+    // 物体既不相交也不落地，从此静默穿墙/穿地，**不 panic、不报错、日志里什么都没有**。
+    // 现有实现是安全的（法向走轴对齐 ±1 或带 `dist_sq > 1e-12` 守卫），但此前**没有任何测试锁住它**：
+    // 谁把法向"简化"成一句 `delta.normalized()`（中心重合时 0 * inf = NaN）就会静默退化。
+    // 这一组就是那条锁。
+    // ------------------------------------------------------------------
+
+    fn assert_finite3(v: Vec3, what: &str) {
+        assert!(
+            v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+            "{what} 必须是有限值，实际 {v:?}"
+        );
+    }
+
+    #[test]
+    fn normalized_zero_vector_is_zero_not_nan() {
+        let n = Vec3::new(0.0, 0.0, 0.0).normalized();
+        assert_eq!(n, Vec3::ZERO, "零向量归一化必须回零向量（否则是 NaN 源）");
+        assert_finite3(n, "零向量归一化结果");
+    }
+
+    #[test]
+    fn aabb_separation_handles_identical_and_degenerate_boxes() {
+        // ① 完全重合（同位置同尺寸）：法向必须是**轴对齐单位向量**，穿透有限
+        let a = aabb(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let (normal, pen) = aabb_separation(&a, &a).expect("完全重合也应当有解析结果");
+        assert_finite3(normal, "重合盒法向");
+        assert!(pen.is_finite() && pen > 0.0, "穿透必须有限且为正: {pen}");
+        let comps = [normal.x, normal.y, normal.z];
+        let nonzero: Vec<f32> = comps.iter().copied().filter(|v| v.abs() > 0.0).collect();
+        // ⚠️ 判据必须是"恰好一个分量为 ±1"：写成 `.filter(..).all(..)` 时，
+        // **零法向会空集通过**（`all` 对空迭代器恒真）—— 那正是"推不动"的退化解，必须红。
+        assert_eq!(
+            nonzero.len(),
+            1,
+            "法向必须恰好沿一个轴（零法向 = 推不动 ⇒ 退化）: {normal:?}"
+        );
+        assert!(
+            (nonzero[0].abs() - 1.0).abs() < 1e-6,
+            "该轴分量必须是 ±1: {normal:?}"
+        );
+
+        // ② 零尺寸盒（min == max）嵌在大盒内部：不得产生 NaN
+        let mut point = aabb(1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let big = aabb(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let event = point.resolve(&big).expect("零尺寸盒在内部时仍应解析");
+        assert!(
+            event.penetration.is_finite() && event.penetration > 0.0,
+            "零尺寸盒穿透必须有限且为正: {}",
+            event.penetration
+        );
+        assert_finite3(point.min, "零尺寸盒解析后的 min");
+        assert_finite3(point.max, "零尺寸盒解析后的 max");
+    }
+
+    #[test]
+    fn sphere_resolve_handles_coincident_centers() {
+        // 中心完全重合：按文档沿 +X 推出，穿透 = r1 + r2，**绝不能是 NaN**
+        let mut a = Sphere::new(Vec3::new(3.0, 4.0, 5.0), 1.0);
+        let b = Sphere::new(Vec3::new(3.0, 4.0, 5.0), 0.5);
+        assert!(a.intersects(&b), "前置：中心重合必然相交");
+        let event = a.resolve(&b).expect("重合球应有解析结果");
+        assert_eq!(event.normal, Vec3::new(1.0, 0.0, 0.0), "重合时按文档沿 +X");
+        assert!((event.penetration - 1.5).abs() < 1e-6, "穿透应为 r1+r2");
+        assert_finite3(a.center, "重合球解析后的圆心");
+        assert!(!a.intersects(&b), "解析后不应再相交");
+    }
+
     #[test]
     fn aabb_overlap() {
         let a = aabb(0.0, 0.0, 0.0, 2.0, 2.0, 2.0);
