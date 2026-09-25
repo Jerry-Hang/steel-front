@@ -2158,6 +2158,18 @@ impl Game {
         // 状态日志（1 秒一条，冒烟断言 game: wave= 序列用）
         if self.time - self.last_status_log >= 1.0 {
             self.last_status_log = self.time;
+            // 寻路诊断（**独立一行**，只在 RV3D_AI_DIAG=1 时打）：
+            // 未结案 #25 的验收要"数 find_path 返回 None 的比例"，而上面那行状态日志的字段顺序
+            // 是被冒烟/survive harness 解析的，**不能往里塞字段** ⇒ 另起一行。
+            if ai_diag() {
+                let calls = crate::engine::ai::astar_calls_take();
+                let fails = crate::engine::ai::astar_fails_take();
+                log::info!(
+                    "aidiag: astar 1s 内 calls={} fails={}（fails 高 = 目标不可达大量触发，见未结案 #25）",
+                    calls,
+                    fails
+                );
+            }
             let enemy_hp = self.npcs.first().map(|n| n.max_hp).unwrap_or(0.0);
             // 玩家位置入状态行：survive harness 走位支持需要它算相对方位角
             let pp = self.player_pos();

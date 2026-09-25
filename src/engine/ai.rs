@@ -153,12 +153,52 @@ impl Ord for HeapNode {
     }
 }
 
+/// 寻路诊断计数（**只在 `RV3D_AI_DIAG=1` 时累加**，由 `game.rs` 每秒取走并打一行）。
+///
+/// 未结案 #25 的验收要"数 `find_path` 返回 `None` 的比例" —— 目标不可达正是单帧尖峰的来源
+/// （会一路展开整张 128×128 网格）。没有这两个计数器，那条 lead 就只是句话。
+static ASTAR_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ASTAR_FAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `RV3D_AI_DIAG` 开关（与 `game.rs::ai_diag()` 同一套取值：`1`/`on`/`true`）
+fn diag_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RV3D_AI_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+    })
+}
+
+/// 取走并清零"这一秒的寻路调用数"（诊断用）
+pub fn astar_calls_take() -> u64 {
+    ASTAR_CALLS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 取走并清零"这一秒的寻路失败数"（诊断用）
+pub fn astar_fails_take() -> u64 {
+    ASTAR_FAILS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A* 寻路：求 `start` 到 `goal` 的最短四方向路径（含两端点）。
 ///
 /// - 自动绕过阻挡格（阻挡格不可进入）
 /// - 起点/终点越界或为阻挡格时返回 `None`
 /// - 无可通行路径时返回 `None`
+///
+/// 诊断开关关闭时**零额外成本**（只是多一次 `is_none()` 判断）；实现见 [`find_path_inner`]。
 pub fn find_path(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<GridPos>> {
+    let diag = diag_on();
+    if diag {
+        ASTAR_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let r = find_path_inner(map, start, goal);
+    if diag && r.is_none() {
+        ASTAR_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    r
+}
+
+/// [`find_path`] 的实现主体（与诊断计数分离）
+fn find_path_inner(map: &GridMap, start: GridPos, goal: GridPos) -> Option<Vec<GridPos>> {
     if !map.is_passable(start) || !map.is_passable(goal) {
         return None;
     }
@@ -825,6 +865,30 @@ mod tests {
         let path = find_path(&map, start, goal).expect("方块未封死边界，应有绕行路径");
         assert_path_valid(&map, start, goal, &path);
         assert!(path.len() > 7, "直线 7 格被方块挡住，必须绕行: {:?}", path);
+    }
+
+    /// 包装层（诊断计数）必须与实现体**结果完全一致**：计数器绝不许改变寻路结果。
+    /// 这条红了 = `find_path` 的包装改坏了（例如提前 return None 或吞掉路径）。
+    #[test]
+    fn find_path_wrapper_matches_inner() {
+        let mut map = GridMap::new(9, 9);
+        for y in 0..=4 {
+            map.block(GridPos::new(4, y));
+        }
+        let cases = [
+            (GridPos::new(0, 0), GridPos::new(8, 8)), // 需绕墙
+            (GridPos::new(1, 1), GridPos::new(2, 2)), // 近距
+            (GridPos::new(0, 0), GridPos::new(0, 0)), // 起终点相同
+            (GridPos::new(4, 6), GridPos::new(8, 8)), // 起点在阻挡格上 → 双方都 None
+            (GridPos::new(0, 0), GridPos::new(4, 2)), // 终点在阻挡格上 → 双方都 None
+        ];
+        for (s, g) in cases {
+            assert_eq!(
+                find_path(&map, s, g),
+                find_path_inner(&map, s, g),
+                "包装层与实现体结果必须一致: {s:?} -> {g:?}"
+            );
+        }
     }
 
     #[test]
