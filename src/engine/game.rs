@@ -3014,19 +3014,30 @@ impl Game {
         ok
     }
 
-    /// 三连发（Burst3 模式）：无视冷却快速连打 3 发，之后强制冷却 3×间隔；
-    /// 返回实际发射数（弹匣打空即停）。切枪计时中返回 0。
-    /// AI/网络/测试用三连发（不带玩家标记）。玩家入口见 fire_burst_player。
-    /// `rounds` 由调用方给（`FireMode::burst_rounds()`）—— 双发与三连发共用这一条路径。
-    #[allow(dead_code)]
-    pub fn fire_burst(&mut self, origin: [f32; 3], direction: [f32; 3], rounds: u32) -> u32 {
+    /// 连发（Burst2/Burst3 共用这一条路径）：无视冷却快速连打 `rounds` 发，
+    /// 之后强制冷却 `rounds ×` 间隔；返回实际发射数（弹匣打空即停）。
+    /// 切枪计时中返回 0。`rounds` 由调用方给（`FireMode::burst_rounds()`）。
+    /// `from_player` = true 时弹带玩家标记（友军豁免）；AI/网络侧传 false。
+    ///
+    /// 🔴 2026-09-23 复查：此前 `fire_burst` 与 `fire_burst_player` 是**两份逐行重复的函数体**
+    /// （只差 `fire_shot(.., false)` / `fire_shot(.., true)`），而前者**没有任何调用方** ——
+    /// 它靠一句 `#[allow(dead_code)]` 压着，旧注释还写着"AI/网络/测试用"（照它去找调用方会白找）。
+    /// 现在合成一条路径 + 一个薄入口：重复没了，`from_player` 的语义写在签名上，
+    /// 那条 `#[allow(dead_code)]` 也一并删掉（它能被删掉本身就是"没有重复"的证明）。
+    pub fn fire_burst(
+        &mut self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        rounds: u32,
+        from_player: bool,
+    ) -> u32 {
         if self.weapons.is_switching() {
             return 0;
         }
         let mut n = 0u32;
         let rounds = rounds.max(1);
         for _ in 0..rounds {
-            if self.fire_shot(origin, direction, false) {
+            if self.fire_shot(origin, direction, from_player) {
                 n += 1;
             } else {
                 break;
@@ -3038,24 +3049,9 @@ impl Game {
         n
     }
 
-    /// 玩家三连发（main.rs 调用）：弹带玩家标记（友军豁免）
+    /// 玩家三连发（main.rs 调用）：= [`Game::fire_burst`] 带玩家标记（友军豁免）
     pub fn fire_burst_player(&mut self, origin: [f32; 3], direction: [f32; 3], rounds: u32) -> u32 {
-        if self.weapons.is_switching() {
-            return 0;
-        }
-        let mut n = 0u32;
-        let rounds = rounds.max(1);
-        for _ in 0..rounds {
-            if self.fire_shot(origin, direction, true) {
-                n += 1;
-            } else {
-                break;
-            }
-        }
-        if n > 0 {
-            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval() * rounds as f32;
-        }
-        n
+        self.fire_burst(origin, direction, rounds, true)
     }
 
     /// 设置散布缩放（main.rs 每帧按 ADS 混合更新：1.0 腰射 → 0.3 开镜）
@@ -6763,6 +6759,23 @@ mod tests {
         assert!(
             stress.npcs.iter().all(|n| !n.perception.target_known),
             "压力模式不该走这条通道（它有 STRESS_SIGHT + pick_stress_targets）"
+        );
+    }
+
+    /// 🔴 连发路径的判据（2026-09-23 补）：`fire_burst`/`fire_burst_player` 合并成一条路径后，
+    /// 玩家入口必须真的打满 `rounds` 发、计数与强制冷却都要跟上。
+    /// 这条红了 = 连发被改坏（例如循环次数被改、或 `from_player` 传错导致 `fire_shot` 拒发）。
+    #[test]
+    fn player_burst_fires_three_rounds() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        let shots_before = game.shots;
+        let fired = game.fire_burst_player([0.0, 1.6, 0.0], [0.0, 0.0, -1.0], 3);
+        assert_eq!(fired, 3, "三连发应打满 3 发");
+        assert_eq!(game.shots, shots_before + 3, "发射计数应 +3");
+        assert!(
+            game.fire_cooldown > 0.0,
+            "连发结束后应进入强制冷却（rounds × 间隔）"
         );
     }
 
