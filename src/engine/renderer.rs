@@ -390,6 +390,27 @@ fn quality_params(preset: QualityPreset) -> QualityParams {
 /// 截图读回时主机侧等待 render_finished 信号量的超时（纳秒，2 秒足够完成一帧渲染）
 const SCREENSHOT_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
 
+/// 交换链图像获取的超时（纳秒）。**绝不可以用 `u64::MAX`**：呈现引擎不给图像时
+/// （隐藏/被遮挡窗口 + IMMEDIATE 是已知诱因）主循环会静默卡死，外面只看到"日志停住"。
+const ACQUIRE_TIMEOUT_NS: u64 = 1_000_000_000;
+
+/// 检视围栏等待超时（纳秒）。5 秒足够任何一帧；超时说明 GPU 侧出了问题，要留下日志。
+const FENCE_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
+
+/// 连续 acquire 超时到第几次就**降级到 mailbox 自动恢复**（≈3 秒没图像）
+const ACQUIRE_STALL_FALLBACK: u32 = 3;
+
+/// 连续 acquire 超时到第几次就放弃这一帧并报错（≈30 秒没图像，日志里要能被看见）
+const ACQUIRE_STALL_MAX: u32 = 30;
+
+/// 连续**围栏**超时到第几次就判定"GPU 侧卡死"（3 × 5s = 15s 没有任何一帧完成）
+const FENCE_STALL_MAX: u32 = 3;
+
+/// 是否已经该判定 GPU 侧卡死（纯函数，可单测）
+fn fence_stall_due(timeouts: u32) -> bool {
+    timeouts >= FENCE_STALL_MAX
+}
+
 /// 像素字节序策略（由 swapchain 像素格式决定）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PixelOrder {
@@ -511,6 +532,32 @@ fn classify_present(result: Result<bool, vk::Result>) -> PresentOutcome {
         Ok(true) => PresentOutcome::RecreateSwapchain,
         Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => PresentOutcome::RecreateSwapchain,
         Err(_) => PresentOutcome::Failed,
+    }
+}
+
+/// `acquire_next_image` 的**错误**结果分类（纯函数，可单测）。
+///
+/// 🔴 2026-09-25 复查补：此前 acquire 用的是 `timeout = u64::MAX`，于是"呈现引擎一直不给图像"
+/// 会让主循环**静默卡死**在 acquire 里 —— 日志停住、无 panic、无 VUID、无 `has been lost`，
+/// 从外面看就是"游戏死了"（当晚独显 + `defense_line` + IMMEDIATE 的 TDR 就是这个形态）。
+/// 现在超时有限（`ACQUIRE_TIMEOUT_NS`），超时会计数、记日志，并最终降级到 mailbox 自动恢复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcquireOutcome {
+    /// 这一轮没有图像：`TIMEOUT` / `NOT_READY`，可以重试
+    Retry,
+    /// 交换链要重建（OUT_OF_DATE / SURFACE_LOST）
+    RecreateSwapchain,
+    /// 不可恢复（DEVICE_LOST 等）
+    Failed,
+}
+
+fn classify_acquire_err(e: vk::Result) -> AcquireOutcome {
+    match e {
+        vk::Result::TIMEOUT | vk::Result::NOT_READY => AcquireOutcome::Retry,
+        vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::ERROR_SURFACE_LOST_KHR => {
+            AcquireOutcome::RecreateSwapchain
+        }
+        _ => AcquireOutcome::Failed,
     }
 }
 
@@ -941,6 +988,14 @@ pub struct Renderer {
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
+    /// 连续 acquire 超时计数（>0 说明呈现引擎没给图像；判据见 `classify_acquire_err`）
+    acquire_timeouts: u32,
+    /// 连续围栏超时计数 + "GPU 侧卡死"标志：卡死后 render() 直接返回 Ok(())，
+    /// 主循环保持响应（输入/日志照常），而不是每帧卡满超时。
+    fence_timeouts: u32,
+    gpu_stalled: bool,
+    /// 呈现模式覆盖（`None` = 按 `RV3D_PRESENT_MODE` 选）；acquire 持续超时会降级写 mailbox
+    present_mode_override: Option<vk::PresentModeKHR>,
     current_frame: usize,
     max_frames_in_flight: usize,
     /// 上一帧 render() 总耗时（微秒，性能日志用）
@@ -1718,6 +1773,10 @@ impl Renderer {
             image_available_semaphores: Vec::new(),
             render_finished_semaphores: Vec::new(),
             in_flight_fences: Vec::new(),
+            acquire_timeouts: 0,
+            fence_timeouts: 0,
+            gpu_stalled: false,
+            present_mode_override: None,
             current_frame: 0,
             max_frames_in_flight: 2,
             last_frame_us: 0,
@@ -1949,11 +2008,14 @@ impl Renderer {
         //   * IMMEDIATE —— 最稳但撕裂
         // ⇒ 默认仍保持 IMMEDIATE（基准/压力测试要的是最稳 + 全速），
         //   **玩家路径由 `SteelFront.bat` 显式设成 mailbox**（见该文件）。
-        let preferred = match std::env::var("RV3D_PRESENT_MODE").as_deref() {
-            Ok("immediate") => vk::PresentModeKHR::IMMEDIATE,
-            Ok("fifo") => vk::PresentModeKHR::FIFO,
-            Ok("mailbox") => vk::PresentModeKHR::MAILBOX,
-            _ => vk::PresentModeKHR::IMMEDIATE,
+        let preferred = match self.present_mode_override {
+            Some(m) => m,
+            None => match std::env::var("RV3D_PRESENT_MODE").as_deref() {
+                Ok("immediate") => vk::PresentModeKHR::IMMEDIATE,
+                Ok("fifo") => vk::PresentModeKHR::FIFO,
+                Ok("mailbox") => vk::PresentModeKHR::MAILBOX,
+                _ => vk::PresentModeKHR::IMMEDIATE,
+            },
         };
         let present_mode = present_modes
             .iter()
@@ -10930,31 +10992,107 @@ impl Renderer {
     // ============================================================
 
     pub fn render(&mut self, view: glam::Mat4, proj: glam::Mat4) -> Result<(), String> {
+        // GPU 侧已被判定卡死（连续 N 次围栏超时）：不再等待/提交/呈现 —— 否则每帧都要
+        // 卡满 5 秒超时，主循环形同僵死。保持响应、把结论留在日志里，交给上层决定。
+        if self.gpu_stalled {
+            return Ok(());
+        }
         let frame_start = Instant::now();
         let fence = self.in_flight_fences[self.current_frame];
         let t0 = Instant::now();
-        unsafe {
+        match unsafe {
+            // 🔴 超时有限（5s）：`u64::MAX` 会让"GPU 侧再也不会 signal"变成**静默死锁**
+            // （日志停住、无 panic、无 VUID）。超时给出可诊断的错误。
             self.device
-                .wait_for_fences(&[fence], true, u64::MAX)
-                .map_err(|e| format!("等待围栏失败: {}", e))?;
+                .wait_for_fences(&[fence], true, FENCE_WAIT_TIMEOUT_NS)
+        } {
+            Ok(()) => {
+                self.fence_timeouts = 0;
+            }
+            Err(e) => {
+                self.fence_timeouts += 1;
+                let n = self.fence_timeouts;
+                if n == 1 {
+                    log::error!(
+                        "等待围栏超时（{:.0}s 内这一帧没完成）—— GPU 侧没有 signal；\
+                         旧写法在这里用 u64::MAX 无限等 ⇒ 整个进程静默卡死",
+                        FENCE_WAIT_TIMEOUT_NS as f32 / 1e9
+                    );
+                }
+                if fence_stall_due(n) {
+                    self.gpu_stalled = true;
+                    log::error!(
+                        "连续 {} 次围栏超时（≈{:.0}s 无任何一帧完成）⇒ 判定 GPU 侧卡死：\
+                         后续帧不再等待/提交/呈现（画面会静止，但进程与输入保持响应）",
+                        n,
+                        n as f32 * FENCE_WAIT_TIMEOUT_NS as f32 / 1e9
+                    );
+                }
+                return Err(format!("等待围栏失败: {}", e));
+            }
         }
         self.stage_wait_fence_us = t0.elapsed().as_micros() as u64;
 
         let t0 = Instant::now();
-        let (image_index, suboptimal) = unsafe {
-            self.swapchain_loader
-                .acquire_next_image(
+        // 有限超时 + 分类重试（判据见 `classify_acquire_err`）：呈现引擎不给图像时
+        // 不能无限等 —— 先记日志，再降级到 mailbox 重建，最后才报错交出这一帧。
+        let (image_index, suboptimal) = loop {
+            let r = unsafe {
+                self.swapchain_loader.acquire_next_image(
                     self.swapchain,
-                    u64::MAX,
+                    ACQUIRE_TIMEOUT_NS,
                     self.image_available_semaphores[self.current_frame],
                     vk::Fence::null(),
                 )
-                .map_err(|e| match e {
-                    vk::Result::ERROR_OUT_OF_DATE_KHR => "交换链过期".to_string(),
-                    vk::Result::ERROR_SURFACE_LOST_KHR => "表面丢失".to_string(),
-                    _ => format!("获取交换链图像失败: {}", e),
-                })?
+            };
+            match r {
+                Ok(v) => break v,
+                Err(e) => match classify_acquire_err(e) {
+                    AcquireOutcome::Retry => {
+                        self.acquire_timeouts += 1;
+                        let n = self.acquire_timeouts;
+                        if n == 1 || n % 5 == 0 {
+                            log::warn!(
+                                "获取交换链图像超时（已连续 {} 次，累计 {:.1}s）—— 呈现引擎没有交出图像；\
+                                 隐藏/被遮挡的窗口 + IMMEDIATE 是已知诱因",
+                                n,
+                                t0.elapsed().as_secs_f32()
+                            );
+                        }
+                        if n >= ACQUIRE_STALL_FALLBACK
+                            && self.present_mode_override != Some(vk::PresentModeKHR::MAILBOX)
+                        {
+                            // 自动恢复：换 mailbox 重建交换链（mailbox 会丢弃待呈现图像，
+                            // 不会像 IMMEDIATE 那样把图像全留在呈现引擎手里）
+                            log::error!(
+                                "连续 {} 次拿不到交换链图像 ⇒ 把呈现模式降级为 MAILBOX 并重建交换链",
+                                n
+                            );
+                            self.present_mode_override = Some(vk::PresentModeKHR::MAILBOX);
+                            return Err("交换链过期".to_string());
+                        }
+                        if n >= ACQUIRE_STALL_MAX {
+                            log::error!(
+                                "连续 {} 次拿不到交换链图像（{:.1}s）—— 放弃这一帧",
+                                n,
+                                t0.elapsed().as_secs_f32()
+                            );
+                            return Err(format!("交换链长时间无可用图像（连续 {} 次超时）", n));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        continue;
+                    }
+                    AcquireOutcome::RecreateSwapchain => {
+                        log::warn!("获取交换链图像返回 {:?}，重建交换链...", e);
+                        return Err("交换链过期".to_string());
+                    }
+                    AcquireOutcome::Failed => {
+                        return Err(format!("获取交换链图像失败: {:?}", e));
+                    }
+                },
+            }
         };
+        self.acquire_timeouts = 0;
         self.stage_acquire_us = t0.elapsed().as_micros() as u64;
 
         if suboptimal {
@@ -13385,6 +13523,10 @@ mod vk_failure_path_tests {
 #[cfg(test)]
 mod present_result_tests {
     use super::{classify_present, PresentOutcome};
+    use super::{classify_acquire_err, AcquireOutcome};
+    use super::{ACQUIRE_STALL_FALLBACK, ACQUIRE_STALL_MAX, ACQUIRE_TIMEOUT_NS};
+    use super::FENCE_WAIT_TIMEOUT_NS;
+    use super::{fence_stall_due, FENCE_STALL_MAX};
     use ash::vk;
 
     #[test]
@@ -13411,6 +13553,65 @@ mod present_result_tests {
         assert_eq!(
             classify_present(Err(vk::Result::ERROR_DEVICE_LOST)),
             PresentOutcome::Failed
+        );
+    }
+
+    /// 🔴 **等待必须有上界**（2026-09-25 真机教训）：独显 + `defense_line` + IMMEDIATE 那次
+    /// "游戏死了"的真身是主循环用 `u64::MAX` 无限等 acquire ⇒ 日志停住、无 panic、无 VUID。
+    /// 这条断言把"不许再出现无限等待"钉死（改回 `u64::MAX` 立刻红）。
+    #[test]
+    fn swapchain_waits_are_bounded() {
+        assert!(
+            ACQUIRE_TIMEOUT_NS > 0 && ACQUIRE_TIMEOUT_NS <= 2_000_000_000,
+            "acquire 超时必须有限且 ≤2s，实际 {}",
+            ACQUIRE_TIMEOUT_NS
+        );
+        assert!(
+            FENCE_WAIT_TIMEOUT_NS > 0 && FENCE_WAIT_TIMEOUT_NS <= 10_000_000_000,
+            "围栏超时必须有限且 ≤10s，实际 {}",
+            FENCE_WAIT_TIMEOUT_NS
+        );
+        assert!(
+            ACQUIRE_STALL_FALLBACK >= 1 && ACQUIRE_STALL_FALLBACK < ACQUIRE_STALL_MAX,
+            "降级阈值必须在放弃阈值之前（{} < {}）",
+            ACQUIRE_STALL_FALLBACK,
+            ACQUIRE_STALL_MAX
+        );
+    }
+
+    /// 围栏超时的升级判据：前两次只报错（可能只是某一帧特别久），第三次才判定卡死。
+    #[test]
+    fn fence_stall_escalates_after_three_timeouts() {
+        assert!(!fence_stall_due(0));
+        assert!(!fence_stall_due(1));
+        assert!(!fence_stall_due(FENCE_STALL_MAX - 1));
+        assert!(fence_stall_due(FENCE_STALL_MAX));
+        assert!(fence_stall_due(FENCE_STALL_MAX + 5));
+    }
+
+    /// acquire 的错误分类：只有"这轮没图像"能重试；OUT_OF_DATE/SURFACE_LOST 要重建；
+    /// DEVICE_LOST 之类必须当失败（旧写法把它们全都静默丢进 `?` 的 map 里）。
+    #[test]
+    fn acquire_errors_are_classified() {
+        assert_eq!(
+            classify_acquire_err(vk::Result::TIMEOUT),
+            AcquireOutcome::Retry
+        );
+        assert_eq!(
+            classify_acquire_err(vk::Result::NOT_READY),
+            AcquireOutcome::Retry
+        );
+        assert_eq!(
+            classify_acquire_err(vk::Result::ERROR_OUT_OF_DATE_KHR),
+            AcquireOutcome::RecreateSwapchain
+        );
+        assert_eq!(
+            classify_acquire_err(vk::Result::ERROR_SURFACE_LOST_KHR),
+            AcquireOutcome::RecreateSwapchain
+        );
+        assert_eq!(
+            classify_acquire_err(vk::Result::ERROR_DEVICE_LOST),
+            AcquireOutcome::Failed
         );
     }
 }

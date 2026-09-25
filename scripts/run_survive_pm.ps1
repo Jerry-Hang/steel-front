@@ -12,7 +12,7 @@
 # "Playing + capture" reproducibly loses the Vulkan device (2026-09-25), while the
 # same scene without capture runs fine. Use it for dGPU runs; screenshots still work
 # on the integrated GPU.
-param([int]$Secs = 780, [int]$ShotEvery = 90, [switch]$NoShot)
+param([int]$Secs = 780, [int]$ShotEvery = 90, [switch]$NoShot, [string]$PresentMode = "mailbox")
 $ErrorActionPreference = "Continue"
 $repo = "D:\Rust\steel-front"
 $exe  = Join-Path $repo "target\release\steel-front.exe"
@@ -38,8 +38,8 @@ $env:RV3D_NPC_POS     = "1"
 # first Playing frame (no fps line, no panic, no VUID). The same map on the integrated GPU,
 # and the city map on the discrete GPU, are both fine. SteelFront.bat already plays with
 # mailbox (AGENTS.md, iron rule B) -- this harness now matches the player path instead of
-# the benchmark default.
-$env:RV3D_PRESENT_MODE = "mailbox"
+# the benchmark default. `-PresentMode immediate` exists to re-test that finding.
+$env:RV3D_PRESENT_MODE = $PresentMode
 
 Set-Content -Path $beat -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
 $rc = 1
