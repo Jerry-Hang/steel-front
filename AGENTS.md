@@ -589,7 +589,8 @@ release_input.ps1 取代）。
     且**每次调用分配三份 O(格数) 缓冲**（`parent` 一项就 ≈256KB）。
     **lead**：① 节点预算 + "不可达目标"短时缓存；② scratch 复用 + generation 戳（免清零）。
     **判据**：改前后各跑 `perf_run.ps1 -Secs 30`，看 `ai_us` 的 **p95 与最大值**（中位本来就不高），
-    并用 `RV3D_AI_DIAG=1` 数 `find_path` 返回 None 的比例。细节见 `docs/PROGRESS.md` §15。
+    并用 `RV3D_AI_DIAG=1` 看新加的 `aidiag: astar 1s 内 calls=… fails=…`（`ab89eb2`；fails 高 = 不可达目标在反复触发）。
+    细节见 `docs/PROGRESS.md` §15。
     ⚠️ **先立 lead 不动手**：没有实机 A/B 就改这里，等于拿"我以为更快"换掉"AI 真的能找到路"。
 
 ---
