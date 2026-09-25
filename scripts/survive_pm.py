@@ -155,9 +155,76 @@ def dry_weapons(txt):
 
     引擎侧 2026-09-25 新加的一次性告警（commit d1391d1）：弹药打空后 `try_fire` 恒返回
     None 且此前一条日志都不打 ⇒ harness 空点 8 分钟。有了这行，harness 才能知道该换枪。
+
+    🔴 武器名**含空格**（实机那行是 `weapons: AK-12M 风暴 备弹耗尽（…）`）⇒ 这里只能用
+    `(.+?)` 惰性吃到标记词。旧版 `(\\S+) 备弹耗尽` 在真机上**恒不匹配**（2026-09-25 实测）。
     """
     return set(m.group(1) for m in
-               re.finditer(r"weapons: (\S+) 备弹耗尽", txt))
+               re.finditer(r"weapons:\s+(.+?)\s+备弹耗尽", txt))
+
+
+def dry_switch(txt, slot, handled, max_slot=9):
+    """→ `(新槽位, 本次新识别的武器名集合)`；不需要换枪时返回 `None`。
+
+    两条判据都是从实机 bug 反推的（2026-09-25 那次 run 的 10:19:44 告警之后 **100 秒 0 发**）：
+
+    1. **换枪与「有没有活靶」无关** —— 弹药是全局的：引擎说这一把打不出来了，再瞄多久
+       也是 0 发。旧版把换枪藏在 `if not live:` 分支里 ⇒ **有活靶时永远不换枪**。
+    2. **只认没处理过的武器名** —— `log_tail` 是滑动窗口，换枪之后旧的「耗尽」行仍在
+       窗口里；若按「窗口里有没有耗尽行」判，harness 会把 9 个槽一路空切到底。
+    """
+    fresh = dry_weapons(txt) - set(handled)
+    if not fresh or slot >= max_slot:
+        return None
+    return slot + 1, fresh
+
+
+def self_test():
+    """`--self-test`：把「从实机 bug 反推出来的判据」钉死（不进游戏、不注入输入）。
+
+    夹具取自 `logs/survive_pm.log.err` 里那两行**原文**。有真日志时顺手回放一次
+    （只打印统计，不设断言 —— 免得以后修好了反而红）。
+    """
+    dry_line = ("[2026-09-25T10:19:44Z WARN  steel_front::engine::weapons] "
+                "weapons: AK-12M 风暴 备弹耗尽（弹匣 0 / 备弹 0）"
+                "—— 本局再也打不出一发，只能等波间补给或换武器")
+    shot_line = ("[2026-09-25T10:18:49Z INFO  steel_front::engine::game] "
+                 "weapons: shot #1 (1 alive) [AK-12M 风暴]")
+    fails = []
+
+    def chk(name, cond):
+        print("  %-56s %s" % (name, "ok" if cond else "FAIL"))
+        if not cond:
+            fails.append(name)
+
+    chk("dry line -> full weapon name (name has a space!)",
+        dry_weapons(dry_line) == {"AK-12M 风暴"})
+    chk("ordinary shot line is not a dry warning", dry_weapons(shot_line) == set())
+    chk("empty text yields nothing", dry_weapons("") == set())
+    chk("dry -> switch to the next slot",
+        dry_switch(dry_line, 0, set()) == (1, {"AK-12M 风暴"}))
+    chk("handled weapon does not switch again",
+        dry_switch(dry_line, 1, {"AK-12M 风暴"}) is None)
+    chk("last slot does not switch", dry_switch(dry_line, 9, set()) is None)
+    chk("shot line never switches", dry_switch(shot_line, 0, set()) is None)
+
+    logp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "logs", "survive_pm.log.err")
+    if os.path.exists(logp):
+        with open(logp, "r", encoding="utf-8", errors="replace") as fh:
+            real = fh.read()
+        if "备弹耗尽" in real:
+            tail = real.split("备弹耗尽", 1)[1]
+            print("  real log replay: dry names=%s, `shot #` after the dry line=%d"
+                  % (sorted(dry_weapons(real)), tail.count("shot #")))
+        else:
+            print("  real log replay: no dry warning in %s" % os.path.basename(logp))
+    else:
+        print("  real log replay: %s not found" % logp)
+
+    print("SELF-TEST: %s (%d checks, %d failed)"
+          % ("OK" if not fails else "FAIL", 7 + 1, len(fails)))
+    return 0 if not fails else 1
 
 
 def wave_now(txt):
@@ -232,6 +299,8 @@ def reposition(hwnd, logpath, side):
 
 
 def main():
+    if "--self-test" in sys.argv:
+        return self_test()
     ap = argparse.ArgumentParser()
     ap.add_argument("logpath")
     ap.add_argument("--no-shot", action="store_true",
@@ -298,6 +367,7 @@ def main():
     stand_pos = {}          # npc_id -> the stand line the attempts are counted against
     repos_left = {}         # npc_id -> repositioning budget left for the CURRENT line
     slot = [0]              # 当前武器槽（0 起）；备弹耗尽时递增换枪（见主循环）
+    dry_handled = set()     # 已经因「备弹耗尽」换掉过的武器名（滑动窗口会一直看得见旧行）
     waves_seen = []
     last_wave = -1
     engaged = 0
@@ -317,6 +387,17 @@ def main():
             result = "PANIC"
             break
 
+        # 换枪优先于一切交战决策：弹药是全局的（判据见 dry_switch 的注释）。
+        sw = dry_switch(txt, slot[0], dry_handled)
+        if sw:
+            slot[0], fresh = sw
+            dry_handled |= fresh
+            S.tap_key(hwnd, str(slot[0] + 1), 0.12)
+            print("    dry (%s) -> switch to slot %d"
+                  % (",".join(sorted(fresh)), slot[0] + 1), flush=True)
+            time.sleep(1.2)
+            continue
+
         wave, enemies = wave_now(txt)
         if wave != last_wave:
             last_wave = wave
@@ -334,17 +415,6 @@ def main():
         lines = {i: p for i, p in stands(txt).items() if i not in dead}
         live = {i: p for i, p in targets(txt).items() if i not in dead}
         if not live:
-            # 打空就换枪：引擎在备弹耗尽时打一条一次性 warn（`d1391d1`），
-            # 此前 harness 会一直空点（实测 8 分钟零命中）。玩家带的是**全部 14 件武器**，
-            # 换一把就是一份新弹药基数 ⇒ 这条不修，wave 2 之后必然卡死。
-            dry = dry_weapons(txt)
-            if dry and slot[0] < 9:
-                slot[0] += 1
-                S.tap_key(hwnd, str(slot[0] + 1), 0.12)
-                print("    dry (%s) -> switch to slot %d" % (",".join(sorted(dry)), slot[0] + 1),
-                      flush=True)
-                time.sleep(1.2)
-                continue
             time.sleep(2.0)
             continue
 
