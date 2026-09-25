@@ -2076,11 +2076,21 @@ impl Game {
         );
     }
 
-    /// 本关任务目标：WAVES_PER_LEVEL 波出场敌人总数（含援军；count 按
-    /// RV3D_NPC_SCALE 缩放后四舍五入，与 spawn_wave 的出生数量逐波一致）
+    /// 本关任务目标：本关出场敌人总数（含援军；count 按
+    /// RV3D_NPC_SCALE 缩放后四舍五入，与 spawn_wave 的出生数量逐波一致）。
+    ///
+    /// 🔴 **survive 规则的波数 = `rule.waves`，可以长于 `WAVES_PER_LEVEL`**（`defense_line`
+    /// 是 5）⇒ 目标数必须同源，否则第 3 波刚打完就报「本关敌军全灭」。2026-09-25 真机抓到：
+    /// wave 3 清完那一刻 `objective: 普通模式本关 歼灭全部敌人达成（26 击杀）→ victory`，
+    /// 而后面还有第 4、5 波（实际通关是 52 杀）。
     fn level_objective_target(&self, level: u32) -> u32 {
         let mut total = 0u32;
-        for w in 1..=WAVES_PER_LEVEL {
+        let waves = if self.is_survive_rule() {
+            self.survive_total_waves()
+        } else {
+            WAVES_PER_LEVEL
+        };
+        for w in 1..=waves {
             let effective = w + (level.saturating_sub(1)) * WAVES_PER_LEVEL;
             let profile = wave_profile(effective);
             let count = (profile.count as f32 * self.npc_scale).round().max(1.0) as u32;
@@ -4734,6 +4744,11 @@ impl Game {
                     // 到不了、胜利条件永远不成立（2026-09-25 真机：`wave 3 cleared` 之后紧跟
                     // `wave 1 spawned … effective=4`；红测
                     // `survive_wave_count_above_waves_per_level_still_reaches_victory`）。
+                    // 胜利那一拍**不许再生成下一波**：旧代码把 `spawn_wave` 放在整个 if/else
+                    // 之后，于是「守住全部波次 → 胜利」的同一帧又把最后一波重新刷了出来
+                    // （2026-09-25 真机 5 波通关抓到：`survive: 全部 5 波守住 → 胜利` 之后
+                    // 紧跟 `wave: wave 5 spawned 14 enemies (kind=Boss …)`，NPC #60–#73 又刷一批）。
+                    let mut spawn_next = true;
                     if self.is_survive_rule() {
                         if self.wave >= self.survive_total_waves() {
                             self.hud.victory_banner = Some("防区固守！全部波次守住".to_string());
@@ -4743,6 +4758,7 @@ impl Game {
                                 "survive: 全部 {} 波守住 → 胜利",
                                 self.survive_total_waves()
                             );
+                            spawn_next = false;
                         } else {
                             self.wave += 1;
                             // survive：波间补给窗口（血量回复 + 弹药补满）
@@ -4759,7 +4775,9 @@ impl Game {
                     } else {
                         self.wave += 1;
                     }
-                    self.spawn_wave(self.wave, player);
+                    if spawn_next {
+                        self.spawn_wave(self.wave, player);
+                    }
                 }
             }
         }
@@ -8964,6 +8982,88 @@ mod tests {
             game.game_state,
             GameState::Victory(crate::engine::ai::Team::Blue),
             "守住 rule.waves 波应胜利（旧逻辑第 3 波清完就升关，永远到不了这里）"
+        );
+    }
+
+    /// 胜利那一拍**不许再生成下一波**：旧代码把 `spawn_wave` 放在整个 if/else 之后，
+    /// 于是「守住全部波次 → 胜利」的同一帧又把最后一波重新刷了出来。
+    ///
+    /// 🔴 2026-09-25 真机 5 波通关时抓到（独显 + mailbox，277s）：`survive: 全部 5 波守住 → 胜利`
+    /// 之后紧跟 `wave: wave 5 spawned 14 enemies (kind=Boss …)`，NPC #60–#73 又刷了一批，
+    /// 胜利画面里凭空多出一整波敌人。
+    #[test]
+    fn survive_victory_does_not_spawn_another_wave() {
+        let mut game = Game::new();
+        game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
+            crate::engine::objective::GameRule::Survive { waves: 1 },
+        ));
+        game.on_any_key(&glam::Vec3::ZERO);
+        let camera = Camera::new();
+        game.npcs.clear();
+        game.wave_timer = 0.0;
+        for _ in 0..400 {
+            game.update(1.0 / 60.0, &camera);
+            if game.game_state == GameState::Victory(crate::engine::ai::Team::Blue) {
+                break;
+            }
+        }
+        assert_eq!(
+            game.game_state,
+            GameState::Victory(crate::engine::ai::Team::Blue),
+            "守住唯一一波应胜利"
+        );
+        assert!(
+            game.npcs.is_empty(),
+            "胜利那一拍不应再生成波次，实际 {} 只",
+            game.npcs.len()
+        );
+        // 胜利后再跑几帧也不许刷
+        for _ in 0..120 {
+            game.update(1.0 / 60.0, &camera);
+        }
+        assert!(
+            game.npcs.is_empty(),
+            "胜利后继续跑仍不应生成敌人，实际 {} 只",
+            game.npcs.len()
+        );
+    }
+
+    /// survive 的任务目标数必须覆盖 `rule.waves` **全部**波次，而不是 `WAVES_PER_LEVEL`。
+    ///
+    /// 🔴 2026-09-25 真机：5 波的图上 wave 3 清完就报「本关敌军全灭」（26 杀），
+    /// 而实际通关是 52 杀 ⇒ 目标数只有 3 波的和。这条测试直接比两个数（不比对常量），
+    /// 所以 `WAVES_PER_LEVEL` 将来变了它也不会失真。
+    #[test]
+    fn survive_objective_target_counts_every_rule_wave() {
+        let mut game = Game::new();
+        game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
+            crate::engine::objective::GameRule::Survive { waves: 5 },
+        ));
+        let expected: u32 = (1..=5u32)
+            .map(|w| {
+                let p = wave_profile(w);
+                (p.count as f32 * game.npc_scale).round().max(1.0) as u32
+                    + p.reinforcement_count
+            })
+            .sum();
+        assert_eq!(
+            game.level_objective_target(1),
+            expected,
+            "survive 目标数应为 rule.waves 波之和"
+        );
+        // 非空对照：3 波（WAVES_PER_LEVEL）的和必须比它小，否则这条测试恒真
+        let three: u32 = (1..=3u32)
+            .map(|w| {
+                let p = wave_profile(w);
+                (p.count as f32 * game.npc_scale).round().max(1.0) as u32
+                    + p.reinforcement_count
+            })
+            .sum();
+        assert!(
+            expected > three,
+            "5 波之和({})应大于 3 波之和({})，否则这条测试测不出东西",
+            expected,
+            three
         );
     }
 
