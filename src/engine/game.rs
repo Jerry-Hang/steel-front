@@ -513,6 +513,62 @@ pub fn grid_to_world(g: GridPos) -> (f32, f32) {
     (x, z)
 }
 
+/// 封格判据：障碍盒与格子（4m×4m）的重叠面积 ≥ 该值（m²）才把这一格标成阻挡。
+///
+/// 🔴 2026-09-25 由 **0.0（碰到就封）** 改为 **1/3 格（≈5.33m²）**，理由与实测数据见
+/// `block_obstacle_cells` 的文档。一句话：4m 的格子对这个 1:1 的世界太粗，
+/// "碰到就封"会把**几何上并不相连的装饰件在网格里连成一道墙**，
+/// 实测把玩家封在 24 格（城市）/ 4 格（defense_line）的孤岛里 ⇒ 波次永远清不掉。
+///
+/// 阈值取 1/3 而不是 1/2，是为了让 3×3m 的哨塔仍能封格（最实的格子 6.25m² = 39%），
+/// 保住 `find_cover_points` 的掩体点判定；而 6×0.9 隔离墩（3.6m² = 22%）、
+/// 1m 厚沙袋（4m² = 25%）、0.34m 护柱（1.4m²）都不再封格。
+const CELL_BLOCK_MIN_OVERLAP_M2: f32 = GRID_CELL * GRID_CELL / 3.0;
+
+/// 把一个障碍盒"够格"的格子标成阻挡，返回**新封的格数**。这是导航网格的**唯一建网规则**。
+///
+/// 判据 = 障碍 AABB 与该格（`GRID_CELL` 见方）的**重叠面积** ≥ [`CELL_BLOCK_MIN_OVERLAP_M2`]。
+/// 逐格算 AABB∩格 的精确面积（不是"包围盒范围全封"），因为 4m 的格子对这个 1:1 的世界太粗：
+/// 一件 6×0.9m 的中央隔离墩用"碰到就封"会封掉 3×2 = 6 格（96m²，实际占地 5.4m²），
+/// 0.34m 的护柱封掉整整一格（16m²）—— 于是**几何上并不相连的装饰件在网格里连成一道墙**。
+///
+/// 实测后果（`reachable_mask` + 临时探针，数字见 `docs/PROGRESS.md` 2026-09-25 节）：
+/// 程序化城市地图上玩家出生的十字路口被隔离墩/护柱/树/消防栓围成 **24 格的孤岛**
+/// （全图可通行 13165 格），出生环 64 个采样点**一个都到不了玩家**；defense_line 的
+/// 沙袋环同理（玩家所在连通域只剩 **4 格**）⇒ NPC 出生即在另一个连通域 ⇒ 永远走不到玩家 ⇒
+/// `update_waves` 等不到 `npcs.is_empty()` ⇒ **波次永远清不掉**（未结案 #17 的真根因）。
+///
+/// 调用方：`apply_level`（生产）与单测的建网；**不许再写第二套循环**。
+fn block_obstacle_cells(grid: &mut GridMap, ob: &MapObstacle) -> usize {
+    let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
+    let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
+    let (hx, hz) = (GRID_CELL * 0.5, GRID_CELL * 0.5);
+    let mut newly_blocked = 0usize;
+    for gx in g0.x..=g1.x {
+        for gz in g0.y..=g1.y {
+            let pos = GridPos::new(gx, gz);
+            if !grid.in_bounds(pos) {
+                continue;
+            }
+            let (cx, cz) = grid_to_world(pos);
+            // AABB ∩ 格的逐轴重叠长度（≤0 表示该轴不重叠）；障碍比格宽时按格宽封顶
+            let ox = (hx + ob.half_w - (ob.x - cx).abs()).min(GRID_CELL);
+            let oz = (hz + ob.half_d - (ob.z - cz).abs()).min(GRID_CELL);
+            if ox <= 0.0 || oz <= 0.0 {
+                continue;
+            }
+            if ox * oz < CELL_BLOCK_MIN_OVERLAP_M2 {
+                continue;
+            }
+            if grid.is_passable(pos) {
+                grid.block(pos);
+                newly_blocked += 1;
+            }
+        }
+    }
+    newly_blocked
+}
+
 /// 障碍种类：决定摆放形态与尺寸（渲染侧 marker 颜色由 main.rs 按 kind 映射）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObstacleKind {
@@ -1956,21 +2012,11 @@ impl Game {
                 Pv::new(ob.half_w, ob.half_h, ob.half_d),
             ));
         }
-        // AI 网格：障碍盒覆盖的格全部标记阻挡（NPC 寻路绕行 / 掩体点判定共用同一网格）
+        // AI 网格：**唯一**建网规则 = `block_obstacle_cells`（NPC 寻路绕行 / 掩体点判定共用）
         let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
         let mut blocked_cells = 0usize;
         for ob in &self.map.obstacles {
-            let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
-            let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
-            for gx in g0.x..=g1.x {
-                for gz in g0.y..=g1.y {
-                    let pos = GridPos::new(gx, gz);
-                    if grid.in_bounds(pos) {
-                        grid.block(pos);
-                        blocked_cells += 1;
-                    }
-                }
-            }
+            blocked_cells += block_obstacle_cells(&mut grid, ob);
         }
         self.grid = grid;
         // 升关/重开时把玩家拉回原点安全区（中央环带无阻碍，见 MAP_RING_INNER 注释）
@@ -6376,6 +6422,84 @@ fn team_centroids(npcs: &[Npc]) -> ([f32; 2], [f32; 2]) {
 mod tests {
     use super::*;
 
+    /// 🔴 **导航不变式**：出生环（40–80m）上的每个可站立点都必须在**玩家可达域**里。
+    ///
+    /// 这是"波次能不能清掉"的前置条件：`update_waves` 要求 `npcs.is_empty()`，而波次 NPC 出生在
+    /// 40–80m 的环上 —— 只要有一只在玩家到不了的连通域里，那一波就**永远清不掉**
+    /// （真机实测：defense_line 第 1 波打完 5 只后卡在最后一只到超时，见 docs/PROGRESS.md
+    /// 2026-09-25）。判据与地图来源无关：可站立 ⇒ 必须可达。
+    ///
+    /// 检查的是**真实建网结果**（走生产同一个 `block_obstacle_cells`），不是几何推测。
+    #[test]
+    fn wave_spawn_ring_is_reachable_from_the_player() {
+        let assert_ring = |name: &str, grid: &GridMap| {
+            let w = grid.width();
+            let reach = crate::engine::ai::reachable_mask(grid, world_to_grid(0.0, 0.0));
+            let mut ok = 0;
+            let mut bad: Vec<(i32, GridPos)> = Vec::new();
+            for k in 0..32 {
+                let a = std::f32::consts::TAU * k as f32 / 32.0;
+                for r in 40..=80i32 {
+                    let g = world_to_grid(r as f32 * a.cos(), r as f32 * a.sin());
+                    if !grid.is_passable(g) {
+                        continue; // 障碍格：出生时会沿径向外推（push_out_of_obstacle），不算失败
+                    }
+                    if reach[g.y as usize * w + g.x as usize] {
+                        ok += 1;
+                    } else if bad.len() < 4 {
+                        bad.push((r, g));
+                    }
+                }
+            }
+            assert!(
+                ok + bad.len() > 0,
+                "{name}: 出生环上没有任何可站立点（整圈都是障碍格）"
+            );
+            assert!(
+                bad.is_empty(),
+                "{name}: 出生环上有可站立点不在玩家可达域（可达样本 {ok}），例如 {bad:?} —— \
+                 这些 NPC 永远走不到玩家，波次清不掉"
+            );
+        };
+        // ① 程序化城市（默认地图：玩家出生在中央十字路口）
+        let game = Game::new();
+        assert_ring("procedural(city)", &game.grid);
+        // ② 五张手写关卡（`index.toml` 是关卡**列表**不是地图，走 `load_map_list`）：
+        //    按 `apply_level` 的同一套规则重建网格。
+        for name in [
+            "street_fight",
+            "open_field",
+            "factory_ambush",
+            "bridgehead",
+            "defense_line",
+        ] {
+            let path = format!("assets/maps/{name}.toml");
+            let Some(mgr) = crate::engine::map::MapManager::load(&path).ok() else {
+                panic!("关卡 {name} 加载失败");
+            };
+            let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
+            for def in mgr.obstacles() {
+                let (kind, x, z, half_w, half_d) =
+                    crate::engine::map::obstacle_to_map_obstacle(def);
+                let ob = MapObstacle {
+                    x,
+                    z,
+                    half_w,
+                    half_d,
+                    y: 1.2,
+                    half_h: 1.2,
+                    kind,
+                    tint: None,
+                    max_hp: obstacle_max_hp(kind),
+                    hp: obstacle_max_hp(kind),
+                    shape: Shape::Legacy,
+                };
+                block_obstacle_cells(&mut grid, &ob);
+            }
+            assert_ring(name, &grid);
+        }
+    }
+
     /// 部位伤害倍率阈值（设计文档：头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6）
     #[test]
     fn part_multiplier_zones() {
@@ -8868,19 +8992,10 @@ mod tests {
         // 用 street_fight 式的墙：x=0,z=0,half_w=5,half_d=0.5 → 格 (0,0) 及邻域 blocked
         let ob = MapObstacle::new(ObstacleKind::Wall, 0.0, 0.0, 5.0, 0.5);
         game.map.obstacles.push(ob);
-        // 重建网格（把障碍格 block）
+        // 重建网格（把障碍格 block）—— 走生产同一套规则（`block_obstacle_cells`）
         let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
         for o in &game.map.obstacles {
-            let g0 = world_to_grid(o.x - o.half_w, o.z - o.half_d);
-            let g1 = world_to_grid(o.x + o.half_w, o.z + o.half_d);
-            for gx in g0.x..=g1.x {
-                for gz in g0.y..=g1.y {
-                    let pos = GridPos::new(gx, gz);
-                    if grid.in_bounds(pos) {
-                        grid.block(pos);
-                    }
-                }
-            }
+            block_obstacle_cells(&mut grid, o);
         }
         game.grid = grid;
         let grid = game.grid.clone();
@@ -9042,16 +9157,7 @@ mod tests {
         let mut grid = GridMap::new(GRID_SIZE, GRID_SIZE);
         let obstacles = vec![MapObstacle::new(ObstacleKind::Wall, 60.0, 0.0, 3.0, 3.0)];
         for ob in &obstacles {
-            let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
-            let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
-            for gx in g0.x..=g1.x {
-                for gz in g0.y..=g1.y {
-                    let pos = GridPos::new(gx, gz);
-                    if grid.in_bounds(pos) {
-                        grid.block(pos);
-                    }
-                }
-            }
+            block_obstacle_cells(&mut grid, ob);
         }
         // 目标（被攻击方）在障碍东侧（环带内）；NPC 在障碍西侧追近
         let target = world_to_grid(66.0, 0.0);
