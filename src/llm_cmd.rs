@@ -280,6 +280,8 @@ fn http_post_json(url: &str, body: &str, timeout: Duration) -> Result<String, St
     )
     .map_err(|e| format!("连接 {addr} 失败: {e}"))?;
     let _ = tcp.set_read_timeout(Some(timeout));
+    // 写超时原来没设（请求体小、TCP 缓冲装得下就不会阻塞，但两边不对称没道理）
+    let _ = tcp.set_write_timeout(Some(timeout));
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
@@ -288,13 +290,20 @@ fn http_post_json(url: &str, body: &str, timeout: Duration) -> Result<String, St
     let mut stream = tcp;
     {
         use std::io::Write;
-        let _ = stream.write_all(req.as_bytes());
-        let _ = stream.flush();
+        // 🔴 2026-09-23 复查：这里原来 `let _ = stream.write_all(..)` —— **写失败被丢掉**，
+        // 紧接着 read 拿到空 body，最终报出来的是"JSON 解析失败"，指不到真凶（连接被重置/对端拒收）。
+        stream
+            .write_all(req.as_bytes())
+            .and_then(|()| stream.flush())
+            .map_err(|e| format!("写请求到 {addr} 失败: {e}"))?;
     }
     let mut buf = Vec::new();
     {
         use std::io::Read;
-        let _ = stream.read_to_end(&mut buf);
+        // 读失败（含读超时）同样不能再吞：半截 body 送进 JSON 解析只会得到误导性的错误
+        stream
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("读 {addr} 响应失败: {e}"))?;
     }
     let text = String::from_utf8_lossy(&buf).to_string();
     let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
@@ -304,7 +313,19 @@ fn http_post_json(url: &str, body: &str, timeout: Duration) -> Result<String, St
 const DEFAULT_PATH: &str = "/v1/chat/completions";
 
 fn parse_url(url: &str) -> Result<(String, u16, String), String> {
-    let rest = url.trim_start_matches("http://").trim_start_matches("https://");
+    let url = url.trim();
+    // 🔴 2026-09-23 复查：`https://` 原来被 `trim_start_matches` **静默去掉** ⇒ 对 TLS 端点
+    // 按明文 HTTP 发到 **80 端口**（本仓是零依赖客户端，没有 TLS 实现）。
+    // 用户把 DeepSeek 的 https 端点填进 `RV3D_LLM` 只会得到一串看不出原因的失败 —— 现在直接拒绝，
+    // 并在错误信息里说清"该填什么"（本地/内网明文端点，例如 `RV3D_LLM=1` 的 127.0.0.1:8080）。
+    if url.starts_with("https://") {
+        return Err(
+            "不支持 https://（本仓 HTTP 客户端零依赖、无 TLS）。请填明文端点，\
+             例如本地中继 http://127.0.0.1:8080（RV3D_LLM=1 即用这个）"
+                .to_string(),
+        );
+    }
+    let rest = url.trim_start_matches("http://");
     let (hp, path) = match rest.find('/') {
         Some(i) => (&rest[..i], rest[i..].to_string()),
         None => (rest, DEFAULT_PATH.to_string()),
@@ -549,5 +570,61 @@ impl LlmCommander {
 
     pub fn take_blue(&self) -> Option<Vec<CompanyCmd>> {
         self.shared.blue.latest.lock().ok().and_then(|m| m.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_url, DEFAULT_PATH};
+
+    fn expect_ok(url: &str) -> (String, u16, String) {
+        parse_url(url).unwrap_or_else(|e| panic!("{url} 应当解析成功: {e}"))
+    }
+
+    #[test]
+    fn parse_url_accepts_plain_http_forms() {
+        assert_eq!(
+            expect_ok("http://127.0.0.1:8080"),
+            ("127.0.0.1".to_string(), 8080, DEFAULT_PATH.to_string())
+        );
+        assert_eq!(
+            expect_ok("127.0.0.1:9000/v1/chat/completions"),
+            (
+                "127.0.0.1".to_string(),
+                9000,
+                "/v1/chat/completions".to_string()
+            )
+        );
+        // 无端口 → 80；无路径 → 默认路径
+        assert_eq!(
+            expect_ok("http://relay.local"),
+            ("relay.local".to_string(), 80, DEFAULT_PATH.to_string())
+        );
+        // 前后空白要吃掉（env var 里常有）
+        assert_eq!(expect_ok("  http://h:80/p  ").2, "/p".to_string());
+    }
+
+    /// 红证（修之前会红）：`https://` 原来被静默降级成"明文 + 80 端口"，
+    /// 于是对 TLS 端点明发文请求，失败信息完全指不到根因。
+    #[test]
+    fn parse_url_rejects_https_instead_of_silently_downgrading() {
+        let e = parse_url("https://api.deepseek.com/v1/chat/completions")
+            .expect_err("https 必须被拒绝，而不是被静默降级");
+        assert!(
+            e.contains("https") && e.contains("TLS"),
+            "错误信息要说明「不支持 https/TLS」并给出该填什么: {e}"
+        );
+    }
+
+    #[test]
+    fn parse_url_reports_bad_port() {
+        assert!(
+            parse_url("http://h:notaport/").is_err(),
+            "非法端口应报错而不是 panic"
+        );
+        assert!(parse_url("http://h:70000/").is_err(), "端口越界（>65535）应报错");
+        // IPv6 字面量不在支持范围：**要么成功要么报错，但不能 panic**
+        // （残片 "[::1" 会被 `rsplit_once(':')` 拆成 host="[:" port=1 ⇒ 到连接阶段才失败，可接受）
+        let _ = parse_url("http://[::1");
     }
 }
