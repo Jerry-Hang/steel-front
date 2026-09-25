@@ -585,6 +585,59 @@ debug_assert!(nw <= 64, "并行段数超栈数组上限");   // 🔴 release 里
 
 ---
 
+## 11. 审查第八轮（同日续）：`unsafe` 面清点 / WinAPI 生命周期 / 拓扑解析边界（`5f5f1aa` `8159470`）
+
+### 11.1 `unsafe` 面清点（全仓，附判据）
+
+| 模式 | 数量 | 判据 |
+|---|---|---|
+| `transmute` | **0** | — |
+| `get_unchecked` / `union` | **0** | — |
+| `unsafe impl` | **2** | 都是 `cpu.rs::SendPtr<T>` 的 `Send`/`Sync`，旁边有生命周期论证（"join 后才返回"，与 `thread::scope` 同款）。**未改** |
+| `from_raw_parts` | **7** | 逐个核对长度来源：`bytemuck_bytes`（`size_of::<T>()`）、地形 vert/idx（`len × size`，与分配同源）、mesh push constant（`[u32; 4]`）、PT 回读（`size*size*4` = `map_memory` 的同一表达式）、`cpu.rs` 段（文档化指针段）⇒ 全部自洽 |
+| `as *mut / *const` | 117 | 绝大多数是 `&mut x as *mut _` 这类 FFI 出参；风险集中在下面两条 |
+
+### 11.2 改动一（`5f5f1aa`）：`waveOutClose` 失败 = 关声瞬间的 use-after-free
+
+`Drop for WaveOutSink` 里 `waveOutClose` 的返回值原来被丢掉。它**可能失败**
+（`WAVERR_STILLPLAYING`：还有缓冲没播完 / unprepare 没成功）；失败 ⇒ **设备仍开着、回调线程随时可能再进来**：
+回调要做两件事 —— 解引用 `Arc::as_ptr` 给出去的裸指针（**不增加引用计数**）、再 `lock` 那个 Mutex；
+而 `Drop` 一结束，`ctx` 与 `buffers` 两个字段就被释放 ⇒ **UAF**（缓冲的 `lpData` 同理可能还握在驱动手里）。
+这正是"退出/关声时偶发崩溃、依赖驱动时序、平时看不见"的形态。
+
+修法：判 `rc`，非 0 时把 `ctx`（`mem::forget`）与 `buffers`（`mem::take` 后 forget）**刻意泄漏** + 一条 warn。
+进程正在退出，量级几十 KB，换掉一个 UB 窗口 —— **泄漏是有意的**，注释里写明理由。
+⚠️ **无单测**（要真声卡 + 让 `waveOutClose` 失败），判据 = 代码审查（Drop 顺序 + 回调生命周期）。
+
+### 11.3 改动二（`8159470`）：Windows 拓扑解析的变长条目边界
+
+`walk()` 只保证"条目 `sz >= 8` 且不越过缓冲末尾"，而两个调用方紧接着按
+`ProcessorRel` / `CacheRel` 解引用（偏移 8）⇒ 系统若给出截断条目就是**读越界（UB）**。
+抽纯函数 `entry_fits::<T>(sz) = sz >= 8 + size_of::<T>()`，两处各判一次，
+配 4 条单测（只有头部拒绝 / 差 1 字节拒绝 / 刚好够长放行 / 缓存条目比核心条目长）。
+🔴 **口径：本轮在 `cpu.rs` 里一行调度逻辑都没改**（用户红线），只加长度判据 + 单测。
+**红证**：把 `entry_fits` 改成 `>` 并丢掉 `8 +` ⇒ 单测红在"刚好够长必须放行"。
+
+### 11.4 记一笔**不改**的：GLPI 缓冲区的 64 字节对齐
+
+`win_topology::query` 的注释写着"Win32 要求缓冲 64 字节对齐"，而实现用 `Vec<u64>`（8 字节）。
+**实测本机工作正常**（09-13 修掉变长条目错位后能解出 8 个物理核），且这条要求本身存疑
+⇒ **不改**。要证伪只需临时换成 `#[repr(align(64))]` 包装，看 `detect()` 的结果是否变化；
+**在没有这个对照之前不要动它**（改了也证明不了什么）。
+
+### 11.5 本轮踩的坑（写给下一次的自己）
+
+- 🔴 **给 `git commit` 传中文消息时，消息里不能出现 ASCII 双引号**：本机 shell 会把命令行再解析一次，
+  `-m '……"xxx"……'` 被拆成多个 pathspec ⇒ 提交失败并报 `pathspec 'xxx' did not match any file(s)`。
+  **一天内踩了三次**，引用一律用「」或中文引号。
+- 🔴 **edit 工具：`old_string` 以换行结尾、`new_string` 不以换行结尾 ⇒ 会把下一行并上来**。
+  本日在同一形态上毁过 4 处（`terrain_coarse_height`、`open_default_sink`、
+  `parse_cpu_list_supports_ranges_and_lists`、`walk` 的文档注释）。
+  **⇒ 规矩：插入内容时，`old_string` 与 `new_string` 都写成"包含锚点行的完整块"，
+  两边行数与尾随换行一致；改完立刻 `git diff -U0 | grep '^-[^-]'` 看删了什么。**
+
+---
+
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
 
 ## 1. 症状与误诊

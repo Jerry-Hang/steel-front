@@ -425,6 +425,9 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - 🔴 **`> file` 重定向会写成 UTF-16**（实测 102552 B 的真实文件写成 184852 B）：
   要取 HEAD 版本做字节比对，用 `git checkout-index` / `git cat-file` 写二进制，或用
   `git diff` / `git status` 判断，**不要用 PowerShell 的 `>`**（教训 7 的另一面）。
+- 🔴 **`git commit -m` 的中文消息里不要出现 ASCII 双引号**：本机 shell 会再解析一次命令行，
+  `-m '……"x"……'` 被拆成多个 pathspec ⇒ 报 `pathspec 'x' did not match any file(s)`、提交失败。
+  引用一律用「」或中文引号（2026-09-23 一天踩了三次）。
 - 🔴 **脚本里取备份必须取"未改动的"那一份**（脚本跑两次 ⇒ 第二次的备份已是剥过的版本，回滚会把坏文件写回去）：备份从 `git show HEAD:` 取，或开头判断"备份已存在则复用"，**回滚用 `git checkout --`**（教训 30）。
 - **看到"规划中"的 dead code，必须回答"那它为什么没被接线"，不许加 `#[allow]` 了事。**
   现状：**全仓 `#[allow(dead_code)]` 共 109 处**（`audio.rs`(38) / `weapons.rs`(15) /
