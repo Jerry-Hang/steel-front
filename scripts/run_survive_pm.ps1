@@ -32,6 +32,14 @@ $env:RV3D_INVINCIBLE  = "1"
 # The harness aims by it: `npc: #N stand` is only a snapshot from the moment an NPC
 # entered Attack, so moving targets were aimed at a stale point (12 shots/kill).
 $env:RV3D_NPC_POS     = "1"
+# 🔴 2026-09-25: the discrete GPU **hangs** (Windows TDR 0x141 VIDEO_ENGINE_TIMEOUT_DETECTED,
+# 4 events in the Application log) when this map is played with the engine default
+# IMMEDIATE present mode: the game logged `game: run started (wave 1)` and then died at the
+# first Playing frame (no fps line, no panic, no VUID). The same map on the integrated GPU,
+# and the city map on the discrete GPU, are both fine. SteelFront.bat already plays with
+# mailbox (AGENTS.md, iron rule B) -- this harness now matches the player path instead of
+# the benchmark default.
+$env:RV3D_PRESENT_MODE = "mailbox"
 
 Set-Content -Path $beat -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
 $rc = 1

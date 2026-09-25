@@ -304,6 +304,12 @@ def reposition(hwnd, logpath, side):
     return move_hold(hwnd, logpath, side, 0.5)
 
 
+def hits_now(txt):
+    """引擎状态行的累计命中数（打墙/打友军不计）。没有该字段时返回 -1。"""
+    m = re.findall(r"hits=(\d+)", txt)
+    return int(m[-1]) if m else -1
+
+
 def stall_due(now, last_progress_at, enemies, stall_secs):
     """卡死看门狗判据（纯函数，`--self-test` 钉住它）。
 
@@ -390,6 +396,7 @@ def main():
     dry_handled = set()     # 已经因「备弹耗尽」换掉过的武器名（滑动窗口会一直看得见旧行）
     last_progress_at = t0   # 上一次"有进展"（开火 / 走位 / 换位）的时间；卡死看门狗用它
     stalls = 0              # 看门狗触发次数（打印用，也让左右侧移交替）
+    blocked = {}            # npc_id -> "打出去但 hits 不动"的连续次数（换位判据）
     waves_seen = []
     last_wave = -1
     engaged = 0
@@ -533,8 +540,10 @@ def main():
         # ~60% of its trigger pulls that way (282 shots from 700 clicks).
         # Count what the engine actually fired and make up the rest after the
         # window instead of eating the dry clicks.
+        rounds = 4
         s0 = shots_count(txt)
-        for _ in range(4):
+        h0 = hits_now(txt)
+        for _ in range(rounds):
             S.post_lbutton(hwnd, True, cx, cy)
             time.sleep(0.08)
             S.post_lbutton(hwnd, False, cx, cy)
@@ -543,14 +552,38 @@ def main():
         fired = shots_count(S.log_tail(logpath)) - s0
         if fired > 0:
             last_progress_at = time.time()
-        if 0 <= fired < 4:
+        if 0 <= fired < rounds:
             time.sleep(2.6)
-            for _ in range(4 - fired):
+            for _ in range(rounds - fired):
                 S.post_lbutton(hwnd, True, cx, cy)
                 time.sleep(0.08)
                 S.post_lbutton(hwnd, False, cx, cy)
                 time.sleep(0.16)
             time.sleep(0.4)
+        # 打空枪的判据：**打出去了，但累计命中数没动** ⇒ 这一条射击线被掩体挡住
+        # （2026-09-25 实测：环形工事外的 npc#34 卡在 (-13.1,-14.3)，harness 隔着墙连打
+        # 4 把枪把它打「干」，`hits` 全程不动）。射不动就**换位置**，别继续喂子弹：
+        # 先朝目标走 1.2s，走不动就侧移 1.2s（相当于贴墙找门），再来一轮。
+        h1 = hits_now(S.log_tail(logpath))
+        if fired >= 3 and h1 >= 0 and h1 == h0:
+            blocked[npc_id] = blocked.get(npc_id, 0) + 1
+            if blocked[npc_id] >= 2:
+                moved = move_hold(hwnd, logpath, "w", 1.2)
+                if moved < 0.5:
+                    side = "d" if blocked[npc_id] % 2 == 0 else "a"
+                    moved = move_hold(hwnd, logpath, side, 1.2)
+                    where = side
+                else:
+                    where = "w"
+                print("    no hit after %d rounds x%d -> move %s %.1fm (firing line blocked)"
+                      % (fired, blocked[npc_id], where, moved), flush=True)
+                blocked[npc_id] = 0
+                attempts[npc_id] = 0
+                if moved > 0.5:
+                    last_progress_at = time.time()
+                continue
+        elif h1 > h0:
+            blocked[npc_id] = 0
         sc1 = score_now(S.log_tail(logpath))
         if sc1 > sc0 >= 0:
             print("    KILL (score %d -> %d), enemies=%d"
