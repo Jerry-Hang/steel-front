@@ -601,6 +601,45 @@ fn frame_action(acquire_suboptimal: bool, present: PresentOutcome) -> FrameActio
     }
 }
 
+/// 启动时要不要构建 PT 常驻资源（纯函数，可单测）。
+///
+/// 🔴 2026-09-25 修：`RV3D_PT_LIVE=1` 自称"强制开"，但它**只**改 `pt_live_enabled`，
+/// 而 PT 真正出画还要求 `pt_resident.is_some()`（判据见 `render()` 里那句
+/// `if self.pt_live_enabled && self.pt_resident.is_some()`），常驻资源却只在
+/// `config.pt_enable == true` 时构建 ⇒ **只设环境变量时 PT 一帧都跑不出来**，
+/// 外面只看到"开关写着开了、画面没变"。那次"PT 验证"因此什么也没验到（§21.17）。
+///
+/// 现在三态一致：`1` 强制开（含常驻资源）、`0` 强制关（连资源都不建，省显存）、
+/// 未设时跟随配置。
+pub fn pt_resident_needed(configured: bool, live_env: Option<&str>) -> bool {    match live_env {
+        Some("0") => false,
+        Some("1") => true,
+        _ => configured,
+    }
+}
+
+/// PT 实时渲染分辨率（纯函数，可单测）：`(窗口宽, 窗口高, RV3D_PT_SIZE)` → `(w, h)`。
+///
+/// 三态：`RV3D_PT_SIZE` 合法（128..=4096 且 8 的倍数）时**等比**缩放到该宽度；
+/// 未设或非法时跟随窗口；两者都对齐到 8 的倍数（`%8==0` 是 PT 图像的硬要求），
+/// 且窗口退化为 0 时也不会返回 0（驱动不接受 0 尺寸）。
+///
+/// 🔴 2026-09-25 修：注释一直写着"单值覆盖（**等比**）"，但实现只改了宽、高取窗口高，
+/// 于是 `RV3D_PT_SIZE=512` 在 2560x1600 的窗口上得到 **512x1600** 的压扁图 ——
+/// PT 参照帧与功耗 A/B 都因此失去可比性（判据 = 本函数上方那条单测）。
+pub fn pt_render_extent(win_w: u32, win_h: u32, size_env: Option<u32>) -> (u32, u32) {
+    let snap = |v: u32| (v & !7).max(8);
+    let (w, h) = (snap(win_w.max(64)), snap(win_h.max(64)));
+    match size_env {
+        Some(s) if (128..=4096).contains(&s) && s % 8 == 0 => {
+            // 等比：高 = 窗口高 × (s / 窗口宽)，再对齐 8
+            let scaled = (h as f32 * (s as f32 / w as f32)).round() as u32;
+            (s, snap(scaled.max(8)))
+        }
+        _ => (w, h),
+    }
+}
+
 /// 某顶点 (x,z) 在下一级（更粗）网格曲面上的高度：
 /// 先定位所在粗网格 cell，再用与地形索引一致的三角形剖分做重心插值。
 /// 粗网格点与细网格点重合处返回值与该点粗网格高度完全一致。
@@ -13366,6 +13405,51 @@ mod horizontal_winding_tests {
                 "mesh 着色的水平面绕序与 CPU 不一致，缺 `{pat}`（两条路径必须同约定）"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pt_config_tests {
+    use super::pt_resident_needed;
+
+    /// 🔴 `RV3D_PT_LIVE=1` 自称"强制开"，但 2026-09-25 之前它**只改 `pt_live_enabled`**，
+    /// 而 PT 真正出画还要求 `pt_resident.is_some()`（常驻资源只在 `config.pt_enable==true` 时构建）
+    /// ⇒ 只设环境变量时 PT **一帧都跑不出来**，外面只看到"开了但画面没变"。
+    /// 那次"PT 验证"因此什么也没验到（详见 `docs/PROGRESS.md` §21.17）。
+    ///
+    /// 判据：环境变量 `1` 必须**也**触发常驻资源；显式 `0` 不构建（省显存，也符合"强制关"）。
+    #[test]
+    fn pt_live_env_one_also_builds_the_resident() {
+        assert!(pt_resident_needed(false, Some("1")), "强制开必须真的能开");
+        assert!(pt_resident_needed(true, None), "配置开着就构建");
+        assert!(pt_resident_needed(true, Some("1")));
+    }
+
+    #[test]
+    fn pt_resident_is_off_when_nothing_asks_for_it() {
+        assert!(!pt_resident_needed(false, None));
+        assert!(!pt_resident_needed(false, Some("0")));
+        assert!(!pt_resident_needed(true, Some("0")), "强制关也要能关掉常驻资源");
+    }
+
+    use super::pt_render_extent;
+
+    /// 🔴 `RV3D_PT_SIZE` 的注释写着"单值覆盖（等比）"，但 2026-09-25 之前它**只改宽**、
+    /// 高始终取窗口高 ⇒ 实际是 `512x1600` 这种被压扁的图（PT 参照帧/功耗 A/B 因此失去可比性，
+    /// 2026-09-25 那次 PT 验证就跑在 `512x1600` 上）。这里把它钉成"等比 + 8 的倍数"。
+    #[test]
+    fn pt_size_env_scales_proportionally() {
+        // 2560x1600 窗口、用户给 512 ⇒ 高按同比例缩到 320（不是 1600）
+        assert_eq!(pt_render_extent(2560, 1600, Some(512)), (512, 320));
+        // 16:9 窗口：注意窗口高**先**对齐 8（900 → 896），再按 1024/1600 等比 ⇒ 896×0.64 = 573 → 568
+        assert_eq!(pt_render_extent(1600, 900, Some(1024)), (1024, 568));
+        // 未设 / 非法值 ⇒ 跟随窗口（仍是 8 的倍数）
+        assert_eq!(pt_render_extent(2561, 1601, None), (2560, 1600));
+        assert_eq!(pt_render_extent(2560, 1600, Some(100)), (2560, 1600)); // <128 非法
+        assert_eq!(pt_render_extent(2560, 1600, Some(513)), (2560, 1600)); // 非 8 的倍数
+        assert_eq!(pt_render_extent(2560, 1600, Some(8192)), (2560, 1600)); // >4096 非法
+        // 窗口退化时不 panic、不返回 0
+        assert_eq!(pt_render_extent(0, 0, Some(256)), (256, 256));
     }
 }
 

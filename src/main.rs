@@ -2819,27 +2819,31 @@ impl ApplicationHandler for GameApp {
                 }
                 // 2026-08-29：路径追踪全景开关（设置面板 pt_enable；默认开）
             let mut renderer = renderer;
-            if crate::config::load().pt_enable {
-                // RV3D_PT_SIZE：实时 PT 渲染分辨率（默认 1024；调高可验证 RT 通路真在算，
+            // RV3D_PT_LIVE: 0=强制关 1=强制开 未设=跟随配置
+            // 🔴 常驻资源与这个开关**同源**（判据 = `pt_resident_needed` 的两个单测）：
+            // 以前 `RV3D_PT_LIVE=1` 只改 `pt_live_enabled`，常驻资源却只在配置开着时构建，
+            // 而 PT 出画还要求 `pt_resident.is_some()` ⇒ 那个"强制开"实际**一帧都跑不出来**，
+            // 外面只看到"开着、画面没变"（2026-09-25 的 PT 验证就是这么空跑一次）。
+            let pt_cfg = crate::config::load().pt_enable;
+            let pt_live_env = std::env::var("RV3D_PT_LIVE").ok();
+            renderer.pt_live_enabled = match pt_live_env.as_deref() {
+                Some("1") => true,
+                Some("0") => false,
+                _ => pt_cfg,
+            };
+            if crate::engine::renderer::pt_resident_needed(pt_cfg, pt_live_env.as_deref()) {
+                // RV3D_PT_SIZE：实时 PT 渲染分辨率（**等比**缩放到该宽度；调高可验证 RT 通路真在算，
                 // 也可为光照烘焙取更高分辨率参照帧）
-                // 原生分辨率：直接对齐窗口物理尺寸（2560×1600！）；RV3D_PT_SIZE 单值覆盖（等比）
+                // 未设时对齐窗口物理尺寸（2560×1600！）；两者都对齐 8 的倍数
+                // （判据 = `engine::renderer::pt_render_extent` 的单测）
                 let win_sz = window.inner_size();
-                let def_w = win_sz.width.max(64);
-                let def_h = win_sz.height.max(64);
-                let pt_w = std::env::var("RV3D_PT_SIZE").ok().and_then(|v| v.parse::<u32>().ok())
-                    .filter(|v| (128..=4096).contains(v) && v % 8 == 0).unwrap_or(def_w & !7);
-                let pt_h = def_h & !7;
+                let size_env = std::env::var("RV3D_PT_SIZE").ok().and_then(|v| v.parse::<u32>().ok());
+                let (pt_w, pt_h) =
+                    crate::engine::renderer::pt_render_extent(win_sz.width, win_sz.height, size_env);
                 if let Err(e) = renderer.init_pt_resident(pt_w, pt_h) {
                     log::info!("PT-RESIDENT init: {e}");
                 }
             }
-            let mut pt_on = crate::config::load().pt_enable;
-            // RV3D_PT_LIVE: 0=强制关 1=强制开 未设=跟随配置
-            if let Ok(v) = std::env::var("RV3D_PT_LIVE") {
-                if v == "1" { pt_on = true; }
-                else if v == "0" { pt_on = false; }
-            }
-            renderer.pt_live_enabled = pt_on;
             log::info!("RT: 路径追踪全景 = {}", if renderer.pt_live_enabled { "开启" } else { "关闭" });
             self.renderer = Some(renderer);
             }

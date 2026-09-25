@@ -8020,6 +8020,36 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 - ⇒ **要真跑 PT 必须先把 `~/.steel_front.cfg` 的 `pt_enable` 打开**（或走设置面板），
   只设 `RV3D_PT_LIVE` 不够。这条留在这里是为了**防止下一个人（包括未来的我）拿"VUID=0"当 PT 已验**。
 
+**⚠️ 上面这段有一处我自己读错了，已修正（2026-09-25 深夜，紧接着就查清了）**
+
+- 我写 §21.17(b) 时把日志里的 `RT: 路径追踪全景 = 开启` **看成了"关闭"**：本 shell 的控制台是 GBK，
+  两个词的 mojibake 都是 `����`，我按印象读了。**判据**：把日志尾巴的码点打出来 ——
+  `[0x5f00, 0x542f]` = 开启（关闭 是 `[0x5173, 0x95ed]`）。⇒ 这正是教训 27「先确认你的测量工具
+  测的是你以为的东西」的第 N 次：**中文日志不要靠眼睛认 mojibake，打码点**。
+- 真相：`RV3D_PT_LIVE=1` **确实**把 `pt_live_enabled` 置真；PT 一帧不出的唯一原因是
+  `pt_resident == None`（常驻资源只在 `config.pt_enable == true` 时构建）。
+  于是"环境变量写着强制开、实际开不了"**是真的缺陷**，只是原因与我最初写的那句不同。
+
+**(b-2) 因此修掉两处（各带红测），并**真的**把 PT 跑起来验了一遍。**
+
+- **修 1：`RV3D_PT_LIVE=1` 现在也构建常驻资源。** 新增纯函数
+  `renderer::pt_resident_needed(configured, live_env)`（三态：`1` 强制开含资源、`0` 强制关
+  连资源都不建、未设跟随配置），`main.rs` 的常驻资源与 `pt_live_enabled` 改为**同源**。
+  红测 `pt_live_env_one_also_builds_the_resident` / `pt_resident_is_off_when_nothing_asks_for_it`。
+- **修 2：`RV3D_PT_SIZE` 终于真的"等比"。** 注释一直写着"单值覆盖（**等比**）"，实现却只改宽、
+  高取窗口高 ⇒ `RV3D_PT_SIZE=512` 在 2560×1600 上得到 **512×1600 的压扁图**
+  （PT 参照帧与功耗 A/B 因此都失去可比性；我上面那次"验证"就跑在压扁图上）。
+  新增纯函数 `renderer::pt_render_extent(win_w, win_h, size_env)`：先把窗口尺寸对齐 8、
+  再按比例缩、再对齐 8，窗口退化为 0 也不返回 0。红测 `pt_size_env_scales_proportionally`
+  （第一条就写了 16:9 的坑：**窗口高先 900→896 再缩放** ⇒ 573→568）。
+- **真机判据（独显 + mailbox + 验证层）**：`RV3D_PT_LIVE=1 RV3D_PT_SIZE=512 RV3D_PT_SPP=32`
+  ⇒ 日志出现 `PT-RESIDENT: 512x320`（**等比**，修前是 512x1600）、`PT-SCENE: … BLAS … 三角形 872032`、
+  `RT: … = 开启`（码点核对过），**VUID = 0**、`has been lost` 0、`panicked` 0
+  ⇒ **PT 通路第一次真的在验证层下跑过**，没有 VUID。
+- 闸门：`cargo test --release` **569 passed / 0 failed**、0 警告。
+  ⚠️ 这一轮又被 CJK 字模守门测试拦了**两次**（尊 U+5C0A、兑 U+5151，都写在注释里）——
+  今晚第 5、6 次，见 `AGENTS.md` 那行的结论。
+
 **(c) 顺手清一处陈旧的 `#[allow(dead_code)]`（判据 = 编译器，不是文本匹配）。**
 
 - `renderer.rs::recreate_swapchain` 上挂着 `#[allow(dead_code)]`，而 `main.rs` **三处**在调它
