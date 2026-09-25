@@ -24,6 +24,10 @@ $env:RV3D_STRESS_AI  = "0"
 $env:RV3D_AUTOSTART   = "1"
 $env:RV3D_MAP         = "assets/maps/defense_line.toml"
 $env:RV3D_INVINCIBLE  = "1"
+# Machine-readable live NPC positions (one `npcpos:` line per NPC per second).
+# The harness aims by it: `npc: #N stand` is only a snapshot from the moment an NPC
+# entered Attack, so moving targets were aimed at a stale point (12 shots/kill).
+$env:RV3D_NPC_POS     = "1"
 
 Set-Content -Path $beat -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
 $rc = 1

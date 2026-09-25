@@ -127,6 +127,39 @@ def stands(txt):
     return out
 
 
+def live_pos(txt):
+    """id -> (x, y, z) of the LAST `npcpos: #id x y z State` line（引擎侧 `RV3D_NPC_POS=1`）.
+
+    🔴 2026-09-25 加：`stands()` 给的只是**进入 Attack 那一刻**的快照，移动靶/反复进出
+    Attack 的残局目标全程被瞄在旧位置上打空（实测 12 发/杀、残局 8 分钟零命中）。
+    `npcpos` 每秒一只一行 ⇒ 这才是"当前在哪"。没开这个开关时返回空表，调用方回退到 stands()。
+    """
+    out = {}
+    for m in re.finditer(
+            r"npcpos: #(\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ", txt):
+        out[int(m.group(1))] = (float(m.group(2)), float(m.group(3)), float(m.group(4)))
+    return out
+
+
+def targets(txt):
+    """活靶优先、stand 行兜底：id -> (x, y, z)。"""
+    live = live_pos(txt)
+    fallback = stands(txt)
+    for k, v in fallback.items():
+        live.setdefault(k, v)
+    return live
+
+
+def dry_weapons(txt):
+    """引擎报「备弹耗尽」的武器名集合（`weapons: <名> 备弹耗尽（弹匣 0 / 备弹 0）`）。
+
+    引擎侧 2026-09-25 新加的一次性告警（commit d1391d1）：弹药打空后 `try_fire` 恒返回
+    None 且此前一条日志都不打 ⇒ harness 空点 8 分钟。有了这行，harness 才能知道该换枪。
+    """
+    return set(m.group(1) for m in
+               re.finditer(r"weapons: (\S+) 备弹耗尽", txt))
+
+
 def wave_now(txt):
     m = re.findall(r"game: wave=(\d+) enemies=(\d+)", txt)
     return (int(m[-1][0]), int(m[-1][1])) if m else (0, -1)
@@ -259,6 +292,7 @@ def main():
     attempts = {}
     stand_pos = {}          # npc_id -> the stand line the attempts are counted against
     repos_left = {}         # npc_id -> repositioning budget left for the CURRENT line
+    slot = [0]              # 当前武器槽（0 起）；备弹耗尽时递增换枪（见主循环）
     waves_seen = []
     last_wave = -1
     engaged = 0
@@ -288,23 +322,42 @@ def main():
                   % (time.time() - t0, wave, enemies, os.path.basename(taken)), flush=True)
 
         dead = dead_ids(txt)
-        live = {i: p for i, p in stands(txt).items() if i not in dead}
+        # 瞄点用**活靶位置**（`npcpos:`，引擎 `RV3D_NPC_POS=1` 每秒一只一行），stand 行兜底；
+        # 但「尝试预算」的键仍用 **stand 行**：活靶位置每秒都在变，拿它当键会把预算无限重置
+        # （`max_engage` 形同虚设 —— 那正是 2026-09-22 try=85 死循环的成因）。
+        lines = {i: p for i, p in stands(txt).items() if i not in dead}
+        live = {i: p for i, p in targets(txt).items() if i not in dead}
         if not live:
+            # 打空就换枪：引擎在备弹耗尽时打一条一次性 warn（`d1391d1`），
+            # 此前 harness 会一直空点（实测 8 分钟零命中）。玩家带的是**全部 14 件武器**，
+            # 换一把就是一份新弹药基数 ⇒ 这条不修，wave 2 之后必然卡死。
+            dry = dry_weapons(txt)
+            if dry and slot[0] < 9:
+                slot[0] += 1
+                S.tap_key(hwnd, str(slot[0] + 1), 0.12)
+                print("    dry (%s) -> switch to slot %d" % (",".join(sorted(dry)), slot[0] + 1),
+                      flush=True)
+                time.sleep(1.2)
+                continue
             time.sleep(2.0)
             continue
 
         # Nearest first, then least-attempted: an NPC already shot at twice without
         # dying is usually one whose stand line is stale or which is behind cover.
-        order = sorted(live.items(), key=lambda kv: (attempts.get(kv[0], 0),
+        # ⚠️ 弹药是稀缺资源（满弹 120 发 / 一局）⇒ **交火中（有 stand 行 = 有视线）的目标优先**，
+        # 只在"没人交火"时才退而求其次打"只有活靶位置"的那批。
+        order = sorted(live.items(), key=lambda kv: (0 if kv[0] in lines else 1,
+                                                     attempts.get(kv[0], 0),
                                                      kv[1][0] ** 2 + kv[1][2] ** 2))
         npc_id, pos = order[0]
+        budget_key = lines.get(npc_id, pos)
         # The cap is per stand LINE, not per id: a fresh line (the NPC left and
         # re-entered Attack at a different spot) is a new target worth a full
         # budget again. The 2026-09-22 run dead-looped on one frozen line to
         # try=85 because nothing stopped engaging it (smoke has "stopping this
         # target"; survive's outer loop re-picks every iteration).
-        if stand_pos.get(npc_id) != pos:
-            stand_pos[npc_id] = pos
+        if stand_pos.get(npc_id) != budget_key:
+            stand_pos[npc_id] = budget_key
             attempts[npc_id] = 0
             repos_left.pop(npc_id, None)   # fresh line = fresh repositioning budget too
         attempts[npc_id] = attempts.get(npc_id, 0) + 1
