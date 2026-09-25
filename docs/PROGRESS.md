@@ -7590,3 +7590,41 @@ survive_pm.py 的瞄准环对 npc#8 死区空转（inject 3,5px 相机不动，t
 测的可能是"两队各走各的、从未接火"。**下一步**：把 §21 的不变式测试扩到"压力模式两侧出生点
 必须互相可达"，先量出来再决定怎么改。
 
+### 21.4 #25 修复落地 + 独显验证通道的一个坑（同日晚）
+
+**修复**（`e1603dd`）：`find_path` 的 scratch 改成 **线程本地复用 + 两张 generation 戳**
+（`seen`/`closed`），去掉每次调用的三份 O(格数) 分配与清零。红测（`astar_scratch_reuse_is_stateless`）
+不只抓出"两张戳必须分开"（单戳会让起点被自己的戳挡住、一个节点都展不开 ⇒ `astar_straight_line`
+直接返回 `None`），还抓出一个**更凶的** bug：起点没清 `parent` ⇒ 陈旧前驱与新链接成环 ⇒
+`reconstruct_path` 无限 `push` 到 **`memory allocation of 17179869184 bytes failed`**（进程 abort）。
+修法 = 搜索开始显式 `parent[start_idx] = None` + `reconstruct_path` 加"最多走地图格数步"的防御上界。
+
+**效果**（独显 `perf_run.ps1 -Secs 30`，压力模式，同一命令）：
+
+| | 中位 `ai_us` | p95 | max |
+|---|---|---|---|
+| 改前（1 次采样，n=27） | 9253µs | 11440 | 17235 |
+| 改后 run A（n=27） | 6104µs | 14924 | 25231 |
+| 改后 run B（n=27） | 6947µs | 9108 | 9974 |
+| 改后 run C（n=23） | 5923µs | 6769 | 8390 |
+
+⇒ **中位稳定改善 ≈25–36%（3/3 低于基线）**；p95/max 方差大（1/3 高于基线）⇒ 只能说中位改善，
+尾部要更多样本（教训 35）。同批 `fps` 均值 88→101（单次，不足以开口）。
+
+🔴 **独显验证通道的坑（复现矩阵，务必记住）**：
+
+| 场景（独显 RTX 5060） | 结果 |
+|---|---|
+| 城市图 + Playing + **不抓屏**（冒烟 30s） | ✅ 103.8 fps、VUID=0、击杀 1 |
+| 城市图 + **菜单** + `cap_safe` 抓屏 | ✅ 98–100 fps、`device_lost=0` |
+| 城市图 + **Playing** + `cap_safe` 抓屏 | ❌ ~14 帧后 `等待围栏失败: The logical device has been lost` |
+| `defense_line` + survive（wave1 处抓屏） | ❌ 卡死/丢设备（无 `game:` 状态行） |
+| `defense_line` + survive + **`-NoShot`** | ⚠️ `device_lost=0` 但渲染掉到 **9.9 fps**、0 交战 |
+
+⇒ **`PrintWindow` 抓屏 + Playing 态**是独显上的高危组合（核显同场景全程无问题）；
+`nvidia-smi` 显示独显当时 16% 占用、~1.5GB 显存、32W ⇒ **不是被别的任务占满**。
+今天之前独显带抓屏的 survive 是跑通的（文档里有 fps 176–190 的记录）⇒ 变量是
+**用户今天打开的加速器**（疑似带显示钩子/overlay）或驱动状态。**处置**：逻辑验证继续用核显
+（`RV3D_GPU=igpu`），独显只跑**不抓屏**的 `perf_run.ps1`（已验证可用）；harness 新增
+`-NoShot` / `--no-shot` 以备独显排查。
+
