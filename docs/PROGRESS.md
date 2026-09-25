@@ -683,8 +683,11 @@ git checkout -- src
 自动分类（"item 上方 6 行内找 allow，再看尾注释/上方注释）对三种写法会判成"无说明"：
 **同行尾注释**（`#[allow(dead_code)] // 预留：…`）、**结构体/impl 级 allow**（字段/方法本身没属性）、
 **自带 doc 注释的字段**（如 `fp_vel` 的"预留：Wave2"）。
-⇒ 12.2 表里那 8 条是**脚本判定**，我人工复核了其中 5 条并补/确认了说明；剩下 3 条已确认各自有 doc 或
-结构体级 allow（`decode_pcm_int`、`EnvStage::Release`、`chunk`）。**下次要重跑这张表，先修脚本的这三处漏判。**
+⇒ 12.2 表里那 8 条是**脚本判定**，我人工复核了**全部 8 条**：
+**6 条补上了说明**（`Squad::leader` / `Platoon::leader` / `Company::platoon_ids` / `Camera::fp_vel` /
+`AudioPlayer::sink_mut` / `LlmCommander::handle`），另 **2 条确认本来就有**
+（`decode_pcm_int` 的同行尾注释"随 WAV 管线预留"、`EnvStage::Release` 由 `AdsrEnv::release` 的注释覆盖）——
+两者都属脚本漏读的形态。**下次要重跑这张表，先修脚本的这三处漏判。**
 
 ---
 
@@ -806,6 +809,45 @@ HTTP 超时 150s 有界；音频声部管理另有测试锁死（超限丢最旧
   **这不是缺陷，但说明"phys_us 的 O(n²) 配对"只在程序化城市那一侧才有量级**
   （`resolve_body_pairs` 是全量两两配对，无 broadphase：1355 体 ≈ 91.7 万次/帧）。
   ⇒ 记一笔 lead：若将来要动它，先按 §15.3 同一套判据量（当前 500 µs / 7.7 ms 帧 = 6.5%）。
+
+---
+
+## 16. 收口：门禁现状 + "遗留清理事项"清点（2026-09-23 收工前）
+
+> 用户问："这一轮当中有没有该清理而没清理的报错/警告？" —— 逐类查过，结论如下。
+
+### 16.1 硬门禁：全绿（无遗留）
+
+| 门禁 | 结果 | 命令 |
+|---|---|---|
+| rustc 警告 | **0** | `cargo build --release` / `cargo test --release` |
+| 测试 | **540 passed / 0 failed** | `cargo test --release` |
+| clippy **correctness / suspicious（已 deny）** | **0 error / 0 warning** | `cargo clippy --release --all-targets` |
+| clippy 默认集（含 `unused`） | **0 warning** | 同上 |
+| 临时标记残留（`RED-TEST` / `//#[allow` / `dbg!`） | **0 处**（全仓 grep） | — |
+| 我留下的临时文件（分析脚本） | **0**（都在 `%TEMP%`，已删） | — |
+| 仓库未跟踪文件 | **0**（`git status --porcelain` 空） | — |
+
+### 16.2 建议性 lint 存量（**明确不改**，附理由）
+
+打开全部建议组跑一遍（`-W clippy::style -W clippy::perf -W clippy::complexity -W clippy::pedantic`）：
+
+**16,748 条**，Top：`unreadable_literal` 11851（数字没加下划线）、`doc_markdown` 838、
+`cast_possible_truncation` 766、`cast_precision_loss` 721、`uninlined_format_args` 554、`float_cmp` 268…
+**这不是我这几轮引入的**，是仓库长期存量，且 `Cargo.toml` 里**已写明策略**：
+"style / complexity / perf → allow：想清理时临时 `cargo clippy -- -W clippy::style` 分批做，
+不作为常态门禁"（理由：手调过的 Vulkan 渲染器上逐条改写是纯 churn，且没有回归网兜着）。
+⇒ **本轮不动**；真要清，应先建"改完仍 0 警告 + 540 测试全绿"的流程，再分批。
+
+**唯一做了抽查的子集**（因为它可能与"整数溢出"那轮有关）：`cast_*` 三类共 **563 处**，
+按"最危险形态 = 计数器被窄化（`u64/usize→u32/u16`）"扫了一遍结果 **0 处命中**；
+其余是 `f32→u32`（Rust 浮点→整型**饱和**，不 UB）、以及有界计数/位运算 ⇒ 无可复现缺陷。
+
+### 16.3 本轮自己造成的**文档残留**：修掉 1 处
+
+`§12.4` 原先写"剩下 3 条已确认有 doc（`decode_pcm_int`、`EnvStage::Release`、`chunk`）"——
+`chunk` 不在那 8 条里（写错了名字），且复核后应是"8 条全部人工看过：6 条补说明 + 2 条本来就有"。
+已改正。**教训：结论文档里点名的符号，写下去前用 `rg` 确认它真的在清单里**（与"未结案条目会过期"同源）。
 
 ---
 
