@@ -63,6 +63,18 @@ pub const SESSION_VERSION: u16 = 2;
 pub const MAX_DATAGRAM: usize = 65507;
 /// 单条快照最多携带的实体数：超出截断（保护 length 字段 u16 上限；本轮 128 NPC 远低于此）
 pub const MAX_SNAPSHOT_NPCS: usize = 1024;
+
+/// 解码快照时的**容量提示**：按协议上限封顶。
+///
+/// 🔴 2026-09-23 复查：`Snapshot` 分支原来是裸的 `Vec::with_capacity(n)`，而 `n` 是
+/// **报文里的 2 字节 u16**（最大 65535）⇒ 伪造报文可以只花 2 字节就让接收方一次预留
+/// ~1.6 MB（`NpcSnapshot` 约 28B × 65535），放大比约 800,000:1。
+/// 旁边 `ObjectiveState` 分支**早就**这么防了（`n.min(MAX_OBJECTIVE_POINTS)`，注释写着
+/// "防止攻击者仅凭 2 字节 count 触发大分配"）—— 这条只是把同一个判据补到快照上。
+/// ⚠️ 只压容量提示，**不改"接受多少条"的语义**（逐条读取本来就有边界检查）。
+fn snapshot_capacity_hint(n: usize) -> usize {
+    n.min(MAX_SNAPSHOT_NPCS)
+}
 /// 单条目标状态最多携带的据点数：超出截断（单关据点通常 1-5 个，64 为防御性上限；
 /// 每个据点约 6-261B，64 个最坏约 17KB，远低于 MAX_DATAGRAM）
 pub const MAX_OBJECTIVE_POINTS: usize = 64;
@@ -540,7 +552,8 @@ impl NetworkMessage {
                 let pos = [r.f32()?, r.f32()?, r.f32()?];
                 let rot = r.f32()?;
                 let n = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
-                let mut npcs = Vec::with_capacity(n);
+                // 容量提示封顶（见 `snapshot_capacity_hint`）：不让伪造的 2 字节 count 触发大分配
+                let mut npcs = Vec::with_capacity(snapshot_capacity_hint(n));
                 for _ in 0..n {
                     let id = r.u32()?;
                     let pos = [r.f32()?, r.f32()?, r.f32()?];
@@ -1640,6 +1653,68 @@ mod tests {
         let rule_off = HEADER_LEN + 4 + 4 + 1;
         bytes[rule_off] = 0xFF;
         assert_eq!(NetworkMessage::decode(&bytes), Err(NetError::InvalidUtf8));
+    }
+
+    /// 🔴 快照容量提示必须按协议上限封顶：`n` 是**报文里的 2 字节**，
+    /// 不封顶就是"2 字节换 ~1.6MB 分配"（放大比约 8e5）。红了说明 `min` 被去掉。
+    #[test]
+    fn snapshot_capacity_hint_is_capped_by_protocol_limit() {
+        assert_eq!(snapshot_capacity_hint(0), 0);
+        assert_eq!(snapshot_capacity_hint(128), 128);
+        assert_eq!(snapshot_capacity_hint(MAX_SNAPSHOT_NPCS), MAX_SNAPSHOT_NPCS);
+        assert_eq!(
+            snapshot_capacity_hint(u16::MAX as usize),
+            MAX_SNAPSHOT_NPCS,
+            "伪造的 65535 必须被压到协议上限"
+        );
+    }
+
+    /// 伪造的 `count = 65535`（载荷不足）⇒ 逐条读取撞边界 → `Truncated`，**不 panic**。
+    /// 与 `objective_state_decode_rejects_oversized_point_count` 同一判据，补上快照这一侧。
+    #[test]
+    fn snapshot_decode_rejects_oversized_npc_count() {
+        let msg = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.0,
+            player_id: 7,
+            player: PlayerState::new([0.0, 0.0, 0.0], 0.0),
+            npcs: vec![],
+        };
+        let mut bytes = msg.encode();
+        // 载荷布局：seq(4) + time(4) + player_id(4) + pos(12) + rot(4) = 28B，随后是 count(2)
+        let count_off = HEADER_LEN + 28;
+        bytes[count_off] = 0xFF;
+        bytes[count_off + 1] = 0xFF;
+        assert_eq!(NetworkMessage::decode(&bytes), Err(NetError::Truncated));
+    }
+
+    /// 快照路径的"任何前缀都不 panic"：去掉尾部若干字节，只能是 `Truncated`
+    /// （否则就是某处越界读/切片 panic）。与需求侧同款判据，见 obj 版本。
+    #[test]
+    fn snapshot_decode_rejects_truncated_prefixes() {
+        let msg = NetworkMessage::Snapshot {
+            seq: 3,
+            time: 1.5,
+            player_id: 1,
+            player: PlayerState::new([1.0, 2.0, 3.0], 0.25),
+            npcs: vec![NpcSnapshot {
+                id: 42,
+                pos: [4.0, 0.0, 5.0],
+                facing: 1.0,
+                hp: 100.0,
+                team: 0,
+                firing: 0,
+            }],
+        };
+        let bytes = msg.encode();
+        for cut in 0..bytes.len() {
+            assert_eq!(
+                NetworkMessage::decode(&bytes[..cut]),
+                Err(NetError::Truncated),
+                "prefix cut={cut} should be Truncated"
+            );
+        }
+        assert_eq!(NetworkMessage::decode(&bytes), Ok(msg));
     }
 
     // -----------------------------------------------------------------------
