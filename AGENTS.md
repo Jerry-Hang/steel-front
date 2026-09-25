@@ -35,18 +35,18 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 ### 模块地图（`src/`，按体量）
 
-| 文件 | 行数 | 职责 |
+| 文件 | 行数（2026-09-25 实测） | 职责 |
 |---|---|---|
-| `engine/renderer.rs` | 11605 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
-| `engine/game.rs` | 8123 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
-| `main.rs` | 3853 | GameApp + winit 事件循环 + 输入/光标捕获 |
-| `audio.rs` | 2747 | 合成音效与音乐（`audio_out.rs` 是 waveOut 输出层） |
-| `ui.rs` | 2615 | HUD / 菜单 / 设置 / 键位表 |
-| `engine/city.rs` | 2004 | 程序化城市生成 |
-| `net.rs` | 1732 | UDP 联机（协议魔数 'S'） |
+| `engine/renderer.rs` | 13526 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
+| `engine/game.rs` | 9582 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
+| `main.rs` | 4025 | GameApp + winit 事件循环 + 输入/光标捕获 |
+| `audio.rs` | 2750 | 合成音效与音乐（`audio_out.rs` 是 waveOut 输出层） |
+| `ui.rs` | 2661 | HUD / 菜单 / 设置 / 键位表 |
+| `engine/city.rs` | 2357 | 程序化城市生成 |
+| `net.rs` | 1807 | UDP 联机（协议魔数 'S'） |
 | `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。2026-09-14 由 21490 行/2.26 MB 裁到 166 KB（Noto Sans SC + 只留源码用到的 1595 码点）。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`：**它红 = 有人加了没用过的字**，而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统 `NotoSansSC-VF.ttf` 顶替：会改掉每个字形，红 `cjk_glyph_generates`）。 |
-| `engine/ai.rs` / `weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1435 / 1431 / 1139 / 1124 / 1096 / 1054 | AI 分层与战术 / 武器系统 / CPU 拓扑与亲和 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
-| `llm_cmd.rs` | 549 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
+| `engine/ai.rs` / `weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1912 / 1491 / 1188 / 1124 / 1266 / 1125 | AI 分层与战术 / 武器系统 / CPU 拓扑与亲和 / TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
+| `llm_cmd.rs` | 630 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
 其余：`config.rs`（`$HOME/.steel_front.cfg`，原子写 + 容错加载，测试不写盘）、
 `engine/objective.rs`（据点/胜负）、`engine/ai_command.rs`、`engine/ray_tracer.rs`（PT）、
