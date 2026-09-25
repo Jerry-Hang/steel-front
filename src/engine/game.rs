@@ -2507,14 +2507,19 @@ impl Game {
         // 与 `RV3D_AI_DIAG` 分开：harness 要的是位置，不需要 AI 归因那一堆统计。
         if npc_pos_log() && self.time - self.last_npcpos_log >= npc_pos_period(npc_pos_hz()) {
             self.last_npcpos_log = self.time;
-            for n in &self.npcs {
+            for (i, n) in self.npcs.iter().enumerate() {
+                // `vis=0/1`：玩家眼位能不能看到它（= 这一枪的射线有没有被障碍挡）。
+                // 🔴 2026-09-25 加：埋点量出**33% 的子弹打在掩体上**（§21.18），
+                // 而 harness 拿不到遮挡信息、只能乱选目标 ⇒ 把判据直接发给它
+                // （`npc_occluded` 是既有真源，别再写第二套）。
                 log::info!(
-                    "npcpos: #{} {:.2} {:.2} {:.2} {:?}",
+                    "npcpos: #{} {:.2} {:.2} {:.2} {:?} vis={}",
                     n.id,
                     n.position[0],
                     n.position[1],
                     n.position[2],
-                    n.state_machine.state()
+                    n.state_machine.state(),
+                    if self.npc_occluded(i) { 0 } else { 1 }
                 );
             }
         }

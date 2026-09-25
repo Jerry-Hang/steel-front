@@ -128,7 +128,7 @@ def stands(txt):
 
 
 def live_pos(txt):
-    """id -> (x, y, z) of the LAST `npcpos: #id x y z State` line（引擎侧 `RV3D_NPC_POS=1`）.
+    """id -> (x, y, z) of the LAST `npcpos: #id x y z State [vis=0|1]` line.
 
     🔴 2026-09-25 加：`stands()` 给的只是**进入 Attack 那一刻**的快照，移动靶/反复进出
     Attack 的残局目标全程被瞄在旧位置上打空（实测 12 发/杀、残局 8 分钟零命中）。
@@ -138,6 +138,19 @@ def live_pos(txt):
     for m in re.finditer(
             r"npcpos: #(\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ", txt):
         out[int(m.group(1))] = (float(m.group(2)), float(m.group(3)), float(m.group(4)))
+    return out
+
+
+def live_visible(txt):
+    """id -> True/False：引擎给的「玩家眼位看不看得见」判据（`npcpos: … vis=0|1`）。
+
+    🔴 2026-09-25 加：`RV3D_PROJ_DIAG` 的两秒行量出 **33% 的子弹打在掩体上**（§21.18）
+    —— 盲选目标 = 三分之一的弹药送给墙。`vis=1` 才是"这一枪有射线"。
+    没有这个字段（旧引擎/未开 `RV3D_NPC_POS`）时返回空表 ⇒ 调用方按"全都可见"处理。
+    """
+    out = {}
+    for m in re.finditer(r"npcpos: #(\d+) [-\d.]+ [-\d.]+ [-\d.]+ \S+ vis=(\d)", txt):
+        out[int(m.group(1))] = (m.group(2) == "1")
     return out
 
 
@@ -213,6 +226,24 @@ def self_test():
         not stall_due(1000.0, 990.0, 3, 25.0))
     chk("stall watchdog: stale + enemies alive -> stall",
         stall_due(1000.0, 900.0, 3, 25.0))
+    # 🔴 2026-09-25：33% 的子弹打在掩体上（`RV3D_PROJ_DIAG` 量出来的，见 PROGRESS §21.18）
+    # ⇒ 目标选择必须能用引擎给的遮挡判据。夹具是引擎 `npcpos:` 行的原文格式。
+    vis_line = ("[2026-09-25T23:10:00Z INFO  steel_front::engine::game] "
+                "npcpos: #7 12.34 0.00 -5.67 Attack vis=1\n"
+                "[2026-09-25T23:10:00Z INFO  steel_front::engine::game] "
+                "npcpos: #8 -3.00 0.00 9.00 Chase vis=0")
+    chk("npcpos vis field: 1 = visible, 0 = blocked",
+        live_visible(vis_line) == {7: True, 8: False})
+    chk("npcpos without vis (old engine) -> empty map (all visible)",
+        live_visible("npcpos: #7 12.34 0.00 -5.67 Attack") == {})
+    chk("position parse is unaffected by the trailing vis field",
+        live_pos(vis_line)[7] == (12.34, 0.0, -5.67))
+    # 选择顺序：可见的排前面（哪怕它更远）
+    mk = lambda i, vis_: (i, (100.0 if i == 8 else 5.0, 0.0, 0.0))
+    order = sorted([mk(7, True), mk(8, False)],
+                   key=lambda kv: (0 if live_visible(vis_line).get(kv[0], True) else 1,
+                                   0, 0, kv[1][0] ** 2))
+    chk("target order prefers the visible one", [i for i, _ in order] == [7, 8])
 
     logp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "logs", "survive_pm.log.err")
@@ -229,7 +260,7 @@ def self_test():
         print("  real log replay: %s not found" % logp)
 
     print("SELF-TEST: %s (%d checks, %d failed)"
-          % ("OK" if not fails else "FAIL", 10 + 1, len(fails)))
+          % ("OK" if not fails else "FAIL", 14 + 1, len(fails)))
     return 0 if not fails else 1
 
 
@@ -458,6 +489,9 @@ def main():
         # （`max_engage` 形同虚设 —— 那正是 2026-09-22 try=85 死循环的成因）。
         lines = {i: p for i, p in stands(txt).items() if i not in dead}
         live = {i: p for i, p in targets(txt).items() if i not in dead}
+        # 遮挡判据（引擎侧 `npc_occluded`）：33% 的子弹原本送给掩体（§21.18）。
+        # 表为空（旧引擎 / 没开 RV3D_NPC_POS）时按"全都可见"处理，行为与旧版一致。
+        vis = {i: v for i, v in live_visible(txt).items() if i not in dead}
         if not live:
             time.sleep(2.0)
             continue
@@ -466,7 +500,9 @@ def main():
         # dying is usually one whose stand line is stale or which is behind cover.
         # ⚠️ 弹药是稀缺资源（满弹 120 发 / 一局）⇒ **交火中（有 stand 行 = 有视线）的目标优先**，
         # 只在"没人交火"时才退而求其次打"只有活靶位置"的那批。
-        order = sorted(live.items(), key=lambda kv: (0 if kv[0] in lines else 1,
+        # 🔴 2026-09-25：可见性排在最前 —— 打看不见的目标 = 打墙（实测 33% 的子弹）。
+        order = sorted(live.items(), key=lambda kv: (0 if vis.get(kv[0], True) else 1,
+                                                     0 if kv[0] in lines else 1,
                                                      attempts.get(kv[0], 0),
                                                      kv[1][0] ** 2 + kv[1][2] ** 2))
         npc_id, pos = order[0]
@@ -530,6 +566,19 @@ def main():
                 txt = S.log_tail(logpath)
                 ppos = player_pos(txt) or ppos
                 ty, tp = target_angles_rel(npc, ppos)
+        # 🔴 2026-09-25：看不见就别开枪 —— 埋点量出 **33% 的子弹打在掩体上**（§21.18）。
+        # 对着被挡住的目标扣扳机是纯浪费（弹药一局就那么多）；改成"转向它 + 走过去拿视线"，
+        # 把子弹留给打得着的目标。visibility 表为空（旧引擎）时按可见处理 = 旧行为。
+        if not vis.get(npc_id, True):
+            if S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
+                moved = move_hold(hwnd, logpath, "w", 1.0)
+                print("    no line of sight to npc#%d -> walked %.1fm to gain it"
+                      % (npc_id, moved), flush=True)
+                if moved > 0.5:
+                    last_progress_at = time.time()
+            else:
+                print("    no line of sight and aim did not converge", flush=True)
+            continue
         if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
             print("    aim did not converge", flush=True)
             continue
