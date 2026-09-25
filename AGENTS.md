@@ -163,7 +163,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 验证层 `RV3D_VALIDATION=1`（默认关）—— 以前开它会因 mesh.spv 过不了严格 spirv-val 而**灰屏**
   （未结案 #9 的副作用），🔴 **2026-09-15 修掉根因后它才真的能跑**。**它是本仓最强的排障工具**：
   开起来第一轮就抓出两条一直存在、此前完全看不见的 VUID（见 #23）。
-  **改 pipeline / swapchain / 同步 / 描述符前先开它跑一轮。**
+  **改 pipeline / swapchain / 同步 / 描述符前先开它跑一轮**（交换链/重建路径用
+  `scripts/run_resize_probe.ps1`：改窗口尺寸 + F12，实测 VUID=0）。
 - 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式。
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
 - 🔴 **⚠️ 有两个同名的 `npc`，别混**（据此写下的错误结论已撤回）：

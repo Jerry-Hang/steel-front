@@ -7960,6 +7960,27 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 - ⚠️ **一晚第三次**被 CJK 守门测试拦下（审/姊/妹 → 阱 → **拾 U+62FE**，写在"只收拾了"里）
   ⇒ 结论写进 `AGENTS.md` 的 cjk_glyphs 行：**注释里的字同样算**，且字模表没法重建。
 
+### 21.15 交换链重建路径**第一次在验证层下真跑**：0 条 VUID（新增 `scripts/run_resize_probe.ps1`）
+
+- **动机**：铁律 B 写着"改 pipeline / swapchain / 同步前先开验证层跑一轮"，但**此前的验证层运行
+  全是"启动一次、从不改窗口大小"**；而今晚两处改动（命令缓冲按槽位索引、数量改成在飞帧数）
+  恰好落在 `recreate_swapchain` 那条路上：destroy/init swapchain、hud framebuffer、
+  render-finished 信号量按图像数重排、命令缓冲重分配、MSAA/depth/framebuffer 重建。
+- **做法（新脚本，纯 ASCII）**：`scripts/run_resize_probe.ps1` —— `RV3D_VALIDATION=1`
+  + 关掉 RTSS/GamePP 两个隐式层（否则只会看到 §21.9 那 5 条噪音）+ 独显 + mailbox + 压力场景；
+  用 `SetWindowPos(SWP_NOACTIVATE|NOZORDER|NOMOVE)` 连续改 5 种尺寸（**不抢焦点、不碰光标**，
+  符合鼠标安全协议），可选再投一次 F12 走引擎自带截图读回，收尾 taskkill，
+  并直接从 `logs/<tag>.log.err` 统计 VUID / 窗口事件 / 设备丢失。
+- **结果（连跑两次）**：`窗口大小变化` **9 次**、`size mismatch → 重建交换链` **4 次**、
+  `截图已保存` **2 次**（F12）、**VUID = 0**、`has been lost` 0、`panicked` 0、**`RESULT: ALL-OK`**。
+  ⇒ 命令缓冲的槽位化改动**在重建路径上也干净**（重建会重新分配命令缓冲 = 新代码的必经处）。
+- **踩坑留痕**：自己写窗口查找时，`FindWindowW` 的 P/Invoke 第一个参数必须是 `IntPtr`、
+  调用传 `[IntPtr]::Zero`；声明成 `string cls` 再传 `$null` 会被 marshal 成**空类名** ⇒ 查找失败
+  （现象是"窗口找不到"，与 AGENTS 里那条"句柄只能 FindWindowW + 轮询"是同一处）。
+  `cap_safe.ps1` 里本来就是对的，照抄即可。
+- 用法：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_resize_probe.ps1`
+  （`-NoShot` 跳过 F12；`-Tag` / `-WarmupSec` / `-AfterSecs` / `-Sizes` 可调）。
+
 
 
 
