@@ -8168,7 +8168,7 @@ impl Renderer {
             // ⚠️ 超时后**故意不释放**这条命令缓冲：它可能仍在 pending（释放 = 未定义行为），
             // 代价是每次超时漏一条一次性命令缓冲 —— 比 UB 便宜得多。同理那条围栏仍是 pending，
             // 下一次截图 `reset_fences` 会踩 UB；但这一路径只在 GPU 已经卡住时才可达
-            // （那种情况下主循环的围栏看门狗会先 `gpu_stalled`，画面本来就不再更新）。
+            // （那种情况下主循环的围栏超时判定会先 `gpu_stalled`，画面本来就不再更新）。
             self.device
                 .wait_for_fences(&[fence], true, SCREENSHOT_WAIT_TIMEOUT_NS)
                 .map_err(|e| format!("等待截图围栏失败（限时 {}s）: {}", SCREENSHOT_WAIT_TIMEOUT_NS / 1_000_000_000, e))?;
@@ -11495,7 +11495,9 @@ impl Renderer {
         }
     }
 
-    #[allow(dead_code)]
+    /// 重建交换链（窗口尺寸变化 / `交换链过期` 两条路都调它；`main.rs` 三处调用）。
+    /// 🔴 开头**必须** `wait_idle()`：销毁可能仍在被 pending present 等待的信号量与
+    /// framebuffer 是未定义行为（见 `resize_render_finished_semaphores` 的文档）。
     pub fn recreate_swapchain(&mut self) -> Result<(), String> {
         self.wait_idle()?;
         self.destroy_swapchain();
