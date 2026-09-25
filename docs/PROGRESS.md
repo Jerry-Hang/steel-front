@@ -469,6 +469,69 @@ debug_assert!(nw <= 64, "并行段数超栈数组上限");   // 🔴 release 里
 
 ---
 
+## 9. ✅ 未结案 #17 的后半条：进攻方「**目标已知**」通道（2026-09-23，`90605b1`）
+
+### 9.1 症状与根因（09-16 已定位到数字，本轮动手）
+
+`survive`（`RV3D_MAP=assets/maps/defense_line.toml`）**第 1 波永远清不掉**：
+出生半径 = `40 + 40·((slot·7 + wave·3) % 5) / 4` = **40–80m**，而 `NPC_SIGHT = 60`
+⇒ 出生在 60m 之外的那批 `enemy_visible` **恒为 false** ⇒ 状态机只能停在 Patrol；
+`update_waves` 又要求 `npcs.is_empty()` ⇒ 没有波间补给、没有第 2..5 波、没有胜利态。
+实测（`RV3D_AI_DIAG=1`，最后 2000 条采样）：`dist≥60` 的样本 **500/500 全是 Patrol** 且
+`occluded=false`（遮挡无辜），`#8` 在 **77.8m** 上一动不动守了整局。
+
+### 9.2 修法：把「知道要打谁」与「现在看得见」拆成两条通道
+
+| 通道 | 字段 | 管什么 |
+|---|---|---|
+| 目标已知 | `NpcPerception::target_known`（新） | `Idle/Patrol → Chase`、以及 `Chase`/`Attack` 在看不见目标时的**维持**（去推进、重新找视线） |
+| 敌人可见 | `NpcPerception::enemy_visible`（原有 = `dist < sight && !occluded`） | **只有它能开火**：`Chase → Attack` 必须 `enemy_visible && enemy_in_range` |
+
+🔴 **分工边界是本条改动的全部风险所在**：`target_known` 单独**不许**进 Attack
+（否则就回到"隔着整栋楼输出"那个历史 bug）。这条边界写进了字段注释、状态机文档，并有一条专门测试。
+
+状态机四个分支的改法都保持"`target_known == false` 时与旧版逐条等价"：
+- `Idle`：`enemy_visible || target_known → Chase`，其余不变；
+- `Patrol`：同上；
+- `Chase`：看不见时 `target_known ? Chase : Idle`；看得见时才判 `enemy_in_range → Attack`；
+- `Attack`：看不见时 `target_known ? Chase : Idle`（**去重新找视线，而不是忘掉目标**）。
+
+**接线**（`AiStepCtx::target_known`，唯一表达式在 `update_ai`）：
+`self.game_state == GameState::Playing && !self.stress` ——
+开始菜单的 AI 游走（`StartMenu` 同样调 `update_ai`）保持"没看见就随便走"的观感；
+压力模式继续走 `pick_stress_targets`（`STRESS_SIGHT = 512`）。默认 `false` ⇒ 所有不填它的调用方不变。
+
+### 9.3 判据（5 条测试，逐条撤改动验过红）
+
+| 测试 | 判据 | 红证 |
+|---|---|---|
+| `target_known_makes_npc_advance_instead_of_patrolling` | Idle/Patrol + 已知 ⇒ Chase；Chase + 看不见 + 已知 ⇒ **保持** Chase | 还原旧 `Chase` 分支 ⇒ 红 |
+| `target_known_alone_never_enters_attack` | 已知 + 距离够 + **看不见** ⇒ 只能 Chase；恢复视线 ⇒ Attack；再丢视线 ⇒ Chase | 同上（该测试覆盖 Chase/Attack 两支） |
+| `target_unknown_keeps_legacy_transitions` | 未知（默认值）时逐条等于旧行为 | 由前两条的红证共同覆盖 |
+| `far_npc_gets_a_target_instead_of_patrolling_forever` | 用 `step_npc` 直喂感知层：80m 外**第 1 帧就必须 Chase**；跑 10 秒后比"目标未知"的对照组更靠近玩家 | 断 `step_npc` 的接线 ⇒ 红在"第一帧就该去追，实际 Patrol" |
+| `target_known_is_wired_only_for_real_missions` | 菜单游走 / Playing 波次 / 压力模式三条接线各断言一次 | 断 `update_ai` 的表达式 ⇒ 红在"Playing 状态下应当已知目标" |
+
+**本轮最值得记的一笔（自我纠错）**：第一版回归测试写成"跑 600 帧后看远程 NPC 是否还在 Idle/Patrol"，
+它在**旧代码下也通过** —— 因为巡逻游走本身会让 NPC 在十秒内自己走进 60m 视距、从而"偶然"进入 Chase
+（`far_decimate_skips_idle_npcs_by_frame` 已证明 600m 外的 NPC 每帧都在动）。
+**⇒ 那条测试是恒真的（教训 14），已删除并换成"第 1 帧就判 + 同场景对照组"**。
+判据一句话：**"跑久一点看状态"分不清修复前后；必须找一个旧代码必然不成立的时刻（这里是第 1 帧）。**
+
+### 9.4 本轮**没做** / 风险（诚实记账）
+
+- 🔴 **实机未复验**：本机按要求不跑图，所以"波次真正清空 / 第 2..5 波 / 胜利态"仍是**推断**。
+  闭环要一次 `defense_line` run（`scripts/run_survive_pm.ps1` + `RV3D_INVINCIBLE=1`），
+  看 `game: wave=` 是否推进到 5 与 `survive: 全部 5 波守住 → 胜利`。
+- **难度影响**：默认程序化城市模式下，敌军现在会**主动推进**（以前是就地游走）。
+  这符合"进攻方不该靠视距才知道要打哪"的设计意图，但**强度是否合适只有实机能判**。
+  要收敛作用域只需一行：把 `update_ai` 里那个表达式改成 `… && self.is_survive_rule()`。
+- **没有碰**：`should_decimate_far`（它只在 `decimate_far = self.stress && …` 时生效，
+  且把 Chase/Attack 排除在外 ⇒ 与本次改动**零交互**）；`cpu.rs` 的任何调度逻辑。
+- 诊断工具已顺手加字段：`RV3D_AI_DIAG=1` 的行里现在有 `known=`（旧代码那轮只有 `occluded=`），
+  下次实测能一眼看出"是因为看不见还是因为没目标"。
+
+---
+
 # ✅ 追了两天的"池子坑"真根因：水平面绕序反了，顶面从上方恒被剔除（2026-09-19）
 
 ## 1. 症状与误诊

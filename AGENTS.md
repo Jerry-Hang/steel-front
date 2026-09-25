@@ -548,7 +548,7 @@ release_input.ps1 取代）。
 17. **`survive` 5 波真机仍未跑通 —— 2026-09-16 实测第 1 波就没清完**（`RV3D_MAP=assets/maps/defense_line.toml`，
     `RV3D_MAP` 是这张图**唯一**的开启方式；`defense_line.toml:48` 的 `waves = 5` 是规则来源）。
     驱动 = `scripts/run_survive_pm.ps1` + `scripts/survive_pm.py`（复用冒烟那套 PostMessage 注入与闭环瞄准）。
-    两处根因，**已修一个**：
+    两处根因，**都已修（代码+单测），但"5 波真机跑通"仍未复验**：
     - ✅ **NPC 手榴弹「出手即自爆」**（已修，**第二轮复验通过**）：从**脚底**出手，而落地判据是
       `y <= ground+0.05`，出手后第一帧只上升 `vy*dt` ⇒ **≥108fps 时第一帧仍在容差内 → 原地引爆**
       （8m/120 伤打死自己）。修法 = `NPC_GRENADE_RELEASE_Y`（手的高度 1.2m），回归测试
@@ -558,23 +558,17 @@ release_input.ps1 取代）。
       玩家 46 发把投掷者自己打死（`shot #14 → kill: npc #10`、`shot #22 → kill: npc #9`）。
       ⚠️ **推论：此前所有 ≥108fps 的 NPC 手榴弹局（含 130fps 那份 20 轮红蓝对称性 A/B）里，
       投掷者都在自杀** —— 那份取数前先看这条。
-    - ❌ **残余 NPC 卡在 Patrol ⇒ 波次永远清不掉**（**open，但根因已定位到数字**）：两轮**都**复现；
-      第三轮开 `RV3D_AI_DIAG=1` 一次就定死了原因 —— **出生半径超出视距**：
-      - 波次出生半径 = `40 + 40·((slot·7 + wave·3) % 5)/4` ⇒ **40–80m**（`game.rs::spawn_npc`），
-        而 `NPC_SIGHT = 60` ⇒ `enemy_visible = dist < 60` 对 **>60m 出生的人恒为 false**。
-      - 实测（最后 2000 条诊断采样）：`dist≥60` 的样本 **500/500 全是 Patrol**（`occluded=false`，
-        遮挡完全无辜）；`dist<60` 的 **1440 条是 Chase**、只有 60 条 Patrol（刚跨过阈值的过渡）。
-        `#8` 在 **77.8m** 上一动不动守了整局（`pos` 逐样本不变）。
-      - `update_waves` 要求 `npcs.is_empty()` ⇒ 只要有一只 >60m，**这一波永远清不掉** ⇒ 没有波间补给、
-        没有第 2..5 波、没有胜利态。**这与地图无关**：默认程序化城市用同一个 `spawn_npc`，
-        冒烟之所以一直绿，只因为它只要求 `killed>=1`（<60m 的那几只足够）。
-      - **修法（未实施，二选一，属设计决定）**：① 让 wave/survive 的 Patrol **朝目标推进**而不是游荡；
-        ② 把感知拆成两条 —— 「目标已知」（管 Idle/Patrol→Chase）与「敌人可见」（管 Chase→Attack/开火）。
-        ② 更正确：**进攻方不该靠视距才知道要打哪**，但**开火仍必须要求视线**（隔墙掉血那条历史教训）。
-        底层不匹配是 `NPC_SIGHT(60) < 出生半径上限(80)`。
-      - 诊断工具：`RV3D_AI_DIAG=1`（每次启动 **一个 run 即可**，默认关、不刷屏）。
-      已排除的解释（别再猜）：与 `RV3D_INVINCIBLE=1` 无关 —— `resolve_ai_target` 的 spectator/fallback
-      分支只在 `stress` 下生效，非压力模式（survive）恒返回玩家位置。
+    - ✅ **残余 NPC 卡在 Patrol ⇒ 波次永远清不掉**（**2026-09-23 修，`90605b1`**）：根因 = **出生半径超出视距** ——
+      出生半径 `40 + 40·((slot·7+wave·3)%5)/4` = **40–80m**，而 `NPC_SIGHT = 60` ⇒ 出生在 60m 外的人
+      `enemy_visible` 恒 false ⇒ 状态机只能停在 Patrol；`update_waves` 要求 `npcs.is_empty()` ⇒
+      这一波永远清不掉（实测 `#8` 在 **77.8m** 一动不动守了整局；`dist≥60` 的采样 500/500 全是 Patrol、
+      `occluded=false` ⇒ 遮挡无辜）。**这与地图无关**：默认程序化城市用同一个 `spawn_npc`。
+      修法（采 ②）= 拆两条通道：`NpcPerception::target_known`（**知道要打谁**：管 Idle/Patrol→Chase 与 Chase 维持）
+      与 `enemy_visible`（**现在看得见**：`Chase→Attack` 必须同时满足 ⇒ 不会退回"隔墙掉血"）。
+      接线只在 `Playing && !stress`（菜单游走 / 压力模式的 `pick_stress_targets` 都不变），默认 `false` ⇒ 旧调用方逐条等价。
+      回归测试 5 条（含"第 1 帧就该 Chase"、"`target_known` 单独不许进 Attack"、"只在这三种模式下接线"），**都撤改动验过红**。
+      🔴 **实机复验仍未做**（本机不跑图）：波次真正清空 / 第 2..5 波 / 胜利态要一次 `defense_line` 实测才算闭环。
+      诊断工具：`RV3D_AI_DIAG=1`（**已带 `known=` 字段**，一次 run 即可，默认关、不刷屏）。
     - 口径：本次跑用 `RV3D_INVINCIBLE=1`（否则先死），**失败分支（玩家阵亡）仍只有单测覆盖**。
     ~~手榴弹弹道落点测试受玩家出生点影响~~；~~手榴弹 AoE 不结算障碍~~ / ~~切枪无动画~~ **均已结案（2026-09-15）**：`obstacle_blocks_blast` 只挡"爆心→目标之间"的障碍（含爆心/目标的障碍跳过，否则贴脸炸会把自己堵死）；`WeaponRack::switch_progress()` 给出 0→1 归一化进度，枪模用 `sin(π·t)` 包络做下坠 0.18 m + 前倾 12° + 侧转 6°。两条都**验证过测试会红**。
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
