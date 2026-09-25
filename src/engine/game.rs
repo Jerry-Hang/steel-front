@@ -1377,6 +1377,16 @@ fn ai_diag() -> bool {
     })
 }
 
+/// `RV3D_NPC_POS=1`：每秒给**每只** NPC 打一行机器可读位置 `npcpos: #id x y z state`，
+/// 供注入 harness 跟踪**活靶**（`npc: #N stand` 只在进 Attack 那一刻打一次，移动靶全程打空）。
+/// 与 `RV3D_AI_DIAG` 分开：harness 只要位置，不需要那一堆 AI 归因统计。
+fn npc_pos_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RV3D_NPC_POS").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+    })
+}
+
 /// step_npc 解析"本 NPC 这一帧的目标位置"的唯一规则。
 /// 遮挡预计算必须与决策走同一条分支，否则会出现"按玩家算遮挡、按 NPC 行动"的错位。
 fn resolve_ai_target(
@@ -2395,6 +2405,24 @@ impl Game {
                 self.stage_audio_us,
                 self.stage_net_us
             );
+            // 机器可读的**活靶**位置（`RV3D_NPC_POS=1`）：每秒每只 NPC 一行。
+            //
+            // 🔴 2026-09-25 加：注入 harness 此前只能从 `npc: #N stand (x,y,z)` 取目标位置，
+            // 而那行是**进入 Attack 那一刻**的快照 —— 移动靶/反复进出 Attack 的目标全程打空
+            // （实测 12 发/杀、残局 8 分钟零命中）。这一行让 harness 打"当前位置"。
+            // 与 `RV3D_AI_DIAG` 分开：harness 要的是位置，不需要 AI 归因那一堆统计。
+            if npc_pos_log() {
+                for n in &self.npcs {
+                    log::info!(
+                        "npcpos: #{} {:.2} {:.2} {:.2} {:?}",
+                        n.id,
+                        n.position[0],
+                        n.position[1],
+                        n.position[2],
+                        n.state_machine.state()
+                    );
+                }
+            }
         }
         // 音频：每帧按 dt 渲染样本（SilentSink 丢弃输出，混音/衰减链路真实运行）
         let t0 = std::time::Instant::now();
