@@ -406,26 +406,25 @@ Vulkan 的失败路径**没法用普通单测触发**（本机 `map_memory` 不�
 | 映射写越界 | 逐点核对写入长度 vs 分配容量：HUD 先 `min(capacity)` 再写；枪模/道具/士兵/NPC/实例槽都按容量或常量上限收口；截图读回 `raw.len() == buffer_size`；道具索引写 `need_i == merged.indices.len()`（**不是**容量） |
 | `debug_assert` 审计 | 23 处，除一处外全是"参数形状"（长度相等类），release 里消失也无害 |
 
-### 7.4 ⏸ **暂停点**：下一轮直接接着修这一条（唯一的未修项）
+### 7.4 ✅ **已结案（同日，`c603ef5`）**：`cull_and_upload` 段数上限
 
-`renderer.rs::cull_and_upload`（约 7476 行）：
+`renderer.rs::cull_and_upload` 原来写成：
 ```rust
 let nw = pool.workers() + 1;          // 段数
-...
 let mut near_prefix = [0u32; 64];     // ← 栈上定长
-let mut far_prefix = [0u32; 64];
 debug_assert!(nw <= 64, "并行段数超栈数组上限");   // 🔴 release 里**不存在**
 ```
-`workers + 1 > 64` 的机器（64 核 128 线程以上，**每帧**都走这条路）会直接
-`index out of bounds: the len is 64 but the index is 64` —— 那句 `debug_assert` 在 release
-里被编译掉，兜不住；Rust 的索引检查会让它 panic（不是静默 UB，但等于"高核数机器一启动就崩"）。
-本机（16C32T）`workers + 1` 远小于 64 ⇒ **当前不可达**，属"硬件放大"的隐患。
+`workers + 1 > 64` 的机器（64 核 128 线程以上）会**每帧**在 `near_prefix[w]` 上
+`index out of bounds: the len is 64 but the index is 64`（Rust 索引检查 ⇒ 是 panic，不是静默 UB，
+但等于"高核数机器一启动就崩"）。本机（16C32T）不可达 ⇒ 属"硬件放大"的隐患。
 
-**修法（已定，勿再重新分析）**：加 `const CULL_MAX_SEGMENTS: usize = 64;` +
-纯函数 `fn cull_segment_count(workers: usize) -> usize { (workers + 1).min(CULL_MAX_SEGMENTS) }`，
-`nw` 改用它；补单测：`workers=3 → 4`、`=63 → 64`、`=1000 → 64`
-（红证 = 用旧公式，第三条给 1001 而非 64）。
-`.min(64)` 在本机是**空操作**（nw 本来就 < 64）⇒ 行为零变化，不碰线程调度逻辑。
+**修法（已落地）**：`const CULL_MAX_SEGMENTS = 64` + 纯函数
+`cull_segment_count(workers) = (workers + 1).min(CULL_MAX_SEGMENTS)`，两张表也用该常量。
+`.min(64)` 在本机是**空操作**（nw 本来就 < 64）⇒ 行为零变化；段数只影响并行度、不影响结果
+（前缀和按段相加，段边界怎么切都改变不了可见集合与近/远分档），**没有碰 `cpu.rs` 的调度/亲和/降频**。
+
+**红证**：把纯函数改回 `workers + 1`，`cull_segment_tests::segment_count_is_workers_plus_one_within_limit`
+立刻红（`left: 65 / right: 64`）；恢复后 **524 passed / 0 failed / 0 警告**。
 
 ### 7.5 本轮**没做**的事（诚实记账）
 
@@ -435,6 +434,38 @@ debug_assert!(nw <= 64, "并行段数超栈数组上限");   // 🔴 release 里
 - 未逐个核对：`create_*` 家族里 `let _ = self.device.device_wait_idle()` 六处（**有意**忽略：
   `wait_idle` 失败通常意味着设备已丢，此时继续销毁反而是正确处置），以及 `main.rs` 三处
   `let _ = renderer.recreate_swapchain()`（重建失败只影响这一帧，下一帧会再试）。
+
+---
+
+## 8. 审查第六轮（同日续）：整数回绕 / 热路径 panic / 光源循环
+
+> 前提（本轮显式写进了 `Cargo.toml`）：本仓 release 用 cargo 默认值 ⇒
+> **`debug_assert!` 不存在、`overflow-checks = false`**。所以"有断言兜着"和"减法不会负"
+> 这两类想法在发布版里**都不成立**，必须逐个看守卫。
+
+### 8.1 已核验**干净**（附判据，别再重复查）
+
+| 区域 | 判据 |
+|---|---|
+| **非测试代码里能 panic 的调用**（`unwrap()`/`expect(`/`panic!`） | 全仓仅 **15 处**，逐个查了守卫：`ai_command:298`（`llm_ok` 已保证 `Some` 且 `ci < o.len()`）、`weapons:371`+`weapon_data:91`（上一行就是 `if self.part_tiers.is_empty()` 分支）、`props:44`（`[..3].try_into()` 长度恒为 3）、`game:4920`（`else` 对应 `if npc.reposition.is_none()`）、`main:2447`（上一行 `let net_mode = …is_some()`）、`renderer:9643`（`mesh_enabled` 与 `mesh_shader` 同源于 init 的 `mesh_shader_available`，此后全仓无第二处赋值）、`renderer:6396`（上一行刚 `pt_resident = Some(..)`）、`renderer:1365`/`audio:1524`（启动期，失败即大声退出）、`cpu:439`（上一行 `if group.is_empty() { continue }`）、`bin/rdv.rs:8`（独立中继小工具，CLI 直接退出是对的） |
+| **无符号减法** | 全部 8 处有守卫：`medkits -= 1` / `grenades -= 1`（同一函数里先判 0）、`occl_cache_age -= 1`（`recompute = age == 0 \|\| …` 的 else 分支）、`i -= 1`（`while i > 0` 形态）、`weapons:703 len()-1`（`!is_empty()` 守卫）、`map.rs` 三处 `depth -= 1`（`depth` 是 **i32**，不是 usize ⇒ 负数不崩）、`net.rs:1262`（测试代码且切片非空） |
+| **光源循环** | FS 侧 `for (var i = 0u; i < 4u; …)`（`array<PointLight, 4>`）+ 阴影 3×3 PCF ⇒ **全是常数次**；CPU 侧 `LightUniform::pack` 用 `.take(MAX_POINT_LIGHTS)` ⇒ 不存在 O(N×M) |
+| `cpu.rs::par_for_each_mut` / `run_sync`（**只读审计，红线不动调度**） | `nw = worker_count + 1 ≥ 1` ⇒ `nw - 1` 不回绕；`data.len() == 0` 提前返回；`senders[w-1]` 的 `w` 范围 `1..nw` 与 senders 数量同源。**唯一两处没有本地不变式的 panic**：`slot.lock().unwrap()`（中毒才 panic，而锁只包一个 `take()` ⇒ 实际不可达）与 `rx.recv().expect(..)`（池线程 panic 会连带把调用方拖崩，报错信息会指向 run_sync 而不是真凶）—— **记录在案，不改**（属调度器代码） |
+
+### 8.2 本轮改动（`c603ef5` + 一条 chore）
+
+- `c603ef5`：§7.4 那条已修（判据见上）。
+- `Cargo.toml`：新增显式 `[profile.release] debug-assertions = false / overflow-checks = false`
+  ＋注释说明"这两个值就是默认值，写出来只是把决策留在仓库里"。**零行为变化**，
+  但下次有人想拿 `debug_assert!` 当护栏时能先在仓库里看到它不存在。
+
+### 8.3 下一轮（本条为**计划**，不是结论）
+
+未结案 #17 的后半条仍在：`NPC_SIGHT(60) < 波次出生半径上限(80)` ⇒ 出生在 60m 外的进攻方
+永远停在 Patrol，`update_waves` 要求 `npcs.is_empty()` ⇒ **survive 波次永远清不掉**。
+已定的修法（**未实施**）：把感知拆两条通道 —— 「目标已知」（管 Idle/Patrol → Chase）与
+「敌人可见（视距+遮挡）」（管 Chase → Attack/开火），进攻方不靠视距才知道要打哪，
+但**开火仍必须要求视线**（否则重演"隔墙掉血"）。
 
 ---
 

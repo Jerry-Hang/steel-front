@@ -49,3 +49,16 @@ suspicious = { level = "deny", priority = -1 }
 style = { level = "allow", priority = -1 }
 complexity = { level = "allow", priority = -1 }
 perf = { level = "allow", priority = -1 }
+
+# ---------------------------------------------------------------------------
+# 2026-09-22 复查：把 release 的两个开关**写出来**，不靠"默认值"这种隐性知识。
+#   - debug-assertions = false ⇒ `debug_assert!` 在 release 里**根本不存在**。
+#     当天修的那条 cull 段数越界就是这么埋进去的：`debug_assert!(nw <= 64)` 看着像护栏，
+#     而发布版里它是空的（64 worker 以上的机器每帧 index out of bounds）。
+#   - overflow-checks = false ⇒ 无符号减法**静默回绕**（`0usize - 1 == usize::MAX`）。
+#     ⇒ 无符号计数器一律 `saturating_sub` 或先判 0；关键路径已逐个核过（见 PROGRESS）。
+# 这两个值就是 cargo 的 release 默认值，写出来**不改变任何行为**，只把决策留在仓库里。
+# ---------------------------------------------------------------------------
+[profile.release]
+debug-assertions = false
+overflow-checks = false
