@@ -7870,6 +7870,35 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 - **顺带**：AGENTS.md 压缩两处冗余（「呈现模式」四条并成三条、#17 的收口明细改指本文件）：
   65528 → **65135 B**。此前只剩 8 B 余量，**任何一条新约束都会静默截断**（比超标更危险）。
 
+### 21.12 审查补：成功 acquire 之后提前 return ⇒ signaled 信号量被复用（静默 UB）
+
+- **发现**（审 `render()` 的失败路径时逐条走）：`acquire_next_image` **成功**即
+  `image_available_semaphores[current_frame]` 被 signal，而旧写法在 `suboptimal` 处直接
+  `return Err("交换链过期")` —— **丢掉了已经拿到手的那张图像**。关键点是
+  `image_available_semaphores` 属**渲染器生命周期对象**（`init_sync_objects` 只建一次，
+  `recreate_swapchain` 不重建它），`current_frame` 又只在整帧走完时才前进
+  ⇒ **下一帧拿一个仍 signaled 的二值信号量去 acquire** = UB
+  （`VUID-vkAcquireNextImageKHR-semaphore-01286`：semaphore 必须 unsignaled；
+  相关条 `-01779`：不得有未完成的 signal/wait）。本机默认不开验证层 ⇒ 这类问题完全静默。
+- **可达性（诚实记录，不吹成"已观测故障"）**：144 份历史日志里 `SUBOPTIMAL` **零命中**、
+  acquire 超时也零命中 ⇒ 这是"规格上允许、实现上尚未触发"的潜在 UB。
+  `WindowEvent::Resized` 会立刻 `recreate_swapchain`，所以最常见的 resize 走不到这里；
+  但 resize 不是唯一诱因（surface 失去匹配、DPI/显示模式变化同样会让 acquire 返回 SUBOPTIMAL），
+  且**重建交换链并不能清掉那个信号量** ⇒ 一旦命中就是静默的。
+- **改法**：新增纯函数 `frame_action(acquire_suboptimal, present_outcome)` —— acquire 的
+  suboptimal 只**登记**（本帧照常 record/submit/present），重建统一发生在 present **之后**
+  （与 present 自己返回 SUBOPTIMAL / OUT_OF_DATE 合流）。**不变式由签名承载**：
+  想返回 `RecreateAfterPresent` 就必须把 present 结果传进来 = 必须先 present 过。
+  同一条不变式下的第二处（`reset_fences` 失败，原本也是 `?` 提前返回）改为先
+  `gpu_stalled = true` 再返回，于是那个信号量**永不再被使用**（进程保持响应）。
+- **红测**：`acquire_suboptimal_never_aborts_before_present`（表驱动；核心断言 =
+  suboptimal 单独出现**永远不得**判成 `Fail`）。红证 = 实施前先跑
+  `cargo test --release --no-run`，报 `cannot find function frame_action`（测试先写）。
+- **闸门**：`cargo test --release` **564 passed / 0 failed**、0 警告。
+  ⚠️ 过程中被 CJK 守门测试拦下一次：新注释里的 审/姊/妹 三个码点**没有字模**
+  ⇒ 改成 复查 / 相关条 后 `tools/cjk_used_codepoints.txt` 回到 1595 条、**零 diff**。
+  **注释也算文案**，这条测试对注释一视同仁。
+
 
 
 

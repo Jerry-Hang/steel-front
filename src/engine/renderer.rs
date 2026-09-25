@@ -561,6 +561,45 @@ fn classify_acquire_err(e: vk::Result) -> AcquireOutcome {
     }
 }
 
+/// 一帧**走完呈现之后**的处置（纯函数，可单测）。判据见 `frame_action` 的文档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameAction {
+    /// 本帧正常结束（已呈现、无需重建）
+    Presented,
+    /// 本帧**已呈现**，随后重建交换链
+    RecreateAfterPresent,
+    /// 设备级失败（SURFACE_LOST / DEVICE_LOST …）：交回上层
+    Fail,
+}
+
+/// 纯函数：`(acquire 是否 SUBOPTIMAL, present 的结果)` → 本帧处置。
+///
+/// 🔴 2026-09-25 深夜复查补：**成功 acquire 之后、present 之前，不许再 return**。
+///
+/// `acquire_next_image` 成功 ⇒ `image_available_semaphores[current_frame]` 已被 signal，
+/// 而这张图像只有走完 present 才会被交还；那个信号量是**渲染器生命周期对象**
+/// （`init_sync_objects` 只建一次，`recreate_swapchain` 不会重建它），而 `current_frame`
+/// 也只在整帧走完时才前进 ⇒ 成功 acquire 之后提前 return，会让**下一帧拿一个仍 signaled
+/// 的二值信号量去 acquire** —— 未定义行为（`VUID-vkAcquireNextImageKHR-semaphore-01286`：
+/// semaphore 必须 unsignaled；相关条 `-01779`：不得有未完成的 signal/wait）。本机默认不开
+/// 验证层（`RV3D_VALIDATION=1` 才开）⇒ 这类问题**完全静默**，本仓历史上最贵的一类 bug 同形。
+///
+/// 旧写法把"acquire 说 suboptimal"与"present 说 suboptimal"混成了同一件事：前者直接
+/// `return Err("交换链过期")` **丢掉了已经拿到手的图像**。现在两件事分开 ——
+/// acquire 的 suboptimal 只是一个**登记**（本帧照常 record/submit/present），
+/// 重建统一发生在 present 之后（与 present 自己返回 SUBOPTIMAL / OUT_OF_DATE 合流）。
+///
+/// 签名本身承载这条不变式：**present 结果必须作为参数传进来**，
+/// 也就是"想返回 `RecreateAfterPresent` 就必须先 present 过"。
+fn frame_action(acquire_suboptimal: bool, present: PresentOutcome) -> FrameAction {
+    match present {
+        PresentOutcome::Failed => FrameAction::Fail,
+        PresentOutcome::RecreateSwapchain => FrameAction::RecreateAfterPresent,
+        PresentOutcome::Presented if acquire_suboptimal => FrameAction::RecreateAfterPresent,
+        PresentOutcome::Presented => FrameAction::Presented,
+    }
+}
+
 /// 某顶点 (x,z) 在下一级（更粗）网格曲面上的高度：
 /// 先定位所在粗网格 cell，再用与地形索引一致的三角形剖分做重心插值。
 /// 粗网格点与细网格点重合处返回值与该点粗网格高度完全一致。
@@ -11095,15 +11134,24 @@ impl Renderer {
         self.acquire_timeouts = 0;
         self.stage_acquire_us = t0.elapsed().as_micros() as u64;
 
+        // 🔴 `suboptimal` **只登记，不许在这里 return**（2026-09-25 深夜复查）：
+        // acquire 已经成功 ⇒ `image_available_semaphores[current_frame]` 已被 signal，而该信号量
+        // 不会随交换链重建而重建 ⇒ 提前 return 会让它留在 signaled 状态被下一帧复用 = UB 且静默。
+        // 这一帧照常走完（record/submit/present），重建统一放到 present 之后，判据见 `frame_action`。
         if suboptimal {
-            log::warn!("交换链 SUBOPTIMAL，重建...");
-            return Err("交换链过期".to_string());
+            log::warn!("交换链 SUBOPTIMAL（acquire）—— 本帧照常呈现，随后重建交换链");
         }
 
         unsafe {
-            self.device
-                .reset_fences(&[fence])
-                .map_err(|e| format!("重置围栏失败: {}", e))?;
+            if let Err(e) = self.device.reset_fences(&[fence]) {
+                // 同一条不变式（见 `frame_action` 文档）：这里也已经 acquire 成功过，
+                // 直接 `?` 会把 `image_available_semaphores[current_frame]` 留在 signaled 状态
+                // 被下一帧复用。既然连围栏都重置不了，设备事实上已经不可用 ⇒ 走既有的
+                // `gpu_stalled` 降级：`render()` 之后直接返回，那个信号量**永不再被使用**。
+                self.gpu_stalled = true;
+                log::error!("重置围栏失败（{}）⇒ 判定 GPU 侧不可用，停止渲染循环", e);
+                return Err(format!("重置围栏失败: {}", e));
+            }
         }
 
         // ---- 每帧视锥剔除：可见实例压缩上传到当前帧 slot 的 HOST_VISIBLE buffer ----
@@ -11395,13 +11443,16 @@ impl Renderer {
         // 🔴 2026-09-22 复查补：呈现结果**必须每条都处理**（分类见 `classify_present`）。
         // 旧写法只处理 OUT_OF_DATE 与 SUBOPTIMAL，其余 Err（SURFACE_LOST / DEVICE_LOST）
         // 落空 ⇒ 主循环以为呈现成功，继续按"一切正常"跑下去。
-        match classify_present(present_result) {
-            PresentOutcome::Presented => {}
-            PresentOutcome::RecreateSwapchain => {
+        //
+        // 2026-09-25 补：本帧的处置交给纯函数 `frame_action` —— 它**必须**拿到 present 结果，
+        // 于是"成功 acquire 之后先 present 再决定"由签名保证（理由见该函数文档）。
+        match frame_action(suboptimal, classify_present(present_result)) {
+            FrameAction::Presented => {}
+            FrameAction::RecreateAfterPresent => {
                 log::warn!("呈现 {:?}，重建交换链...", present_result);
                 return Err("交换链过期".to_string());
             }
-            PresentOutcome::Failed => {
+            FrameAction::Fail => {
                 log::error!("呈现失败（{:?}）—— 不能当成成功", present_result);
                 return Err(format!("呈现失败: {:?}", present_result));
             }
@@ -13524,6 +13575,7 @@ mod vk_failure_path_tests {
 mod present_result_tests {
     use super::{classify_present, PresentOutcome};
     use super::{classify_acquire_err, AcquireOutcome};
+    use super::{frame_action, FrameAction};
     use super::{ACQUIRE_STALL_FALLBACK, ACQUIRE_STALL_MAX, ACQUIRE_TIMEOUT_NS};
     use super::FENCE_WAIT_TIMEOUT_NS;
     use super::{fence_stall_due, FENCE_STALL_MAX};
@@ -13587,6 +13639,43 @@ mod present_result_tests {
         assert!(!fence_stall_due(FENCE_STALL_MAX - 1));
         assert!(fence_stall_due(FENCE_STALL_MAX));
         assert!(fence_stall_due(FENCE_STALL_MAX + 5));
+    }
+
+    /// 🔴 **成功 acquire 之后不许提前 return**（2026-09-25 深夜复查）。
+    ///
+    /// acquire 成功 = `image_available_semaphores[current_frame]` 已被 signal，而这张图像只有
+    /// 走完 present 才会被交还；那个信号量是渲染器生命周期对象，**重建交换链不会重建它**
+    /// （`init_sync_objects` 只建一次），且 `current_frame` 只在整帧走完时才前进
+    /// ⇒ 成功 acquire 之后任何提前 return 都会让**下一帧拿一个仍 signaled 的信号量去 acquire**
+    /// （UB：`VUID-vkAcquireNextImageKHR-semaphore-01286` / `-01779`，本机默认不开验证层 ⇒ 静默）。
+    ///
+    /// 旧写法正是在 `suboptimal` 处直接 `return Err("交换链过期")`。**红证**：该分支被判成失败，
+    /// 于是在旧代码上"acquire suboptimal + present 成功"这一格不可能给出"已呈现"的结论。
+    #[test]
+    fn acquire_suboptimal_never_aborts_before_present() {
+        // suboptimal 只登记重建意图：本帧照常 present，然后才重建
+        assert_eq!(
+            frame_action(true, PresentOutcome::Presented),
+            FrameAction::RecreateAfterPresent
+        );
+        // 关键不变式：acquire 的 suboptimal 标志**永远不能**单独把这一帧判成失败
+        assert_ne!(frame_action(true, PresentOutcome::Presented), FrameAction::Fail);
+        // present 自己说 suboptimal/out-of-date 时同样是"先呈现再重建"
+        assert_eq!(
+            frame_action(false, PresentOutcome::RecreateSwapchain),
+            FrameAction::RecreateAfterPresent
+        );
+        assert_eq!(
+            frame_action(true, PresentOutcome::RecreateSwapchain),
+            FrameAction::RecreateAfterPresent
+        );
+        // 正常路径与真失败路径不受影响
+        assert_eq!(
+            frame_action(false, PresentOutcome::Presented),
+            FrameAction::Presented
+        );
+        assert_eq!(frame_action(false, PresentOutcome::Failed), FrameAction::Fail);
+        assert_eq!(frame_action(true, PresentOutcome::Failed), FrameAction::Fail);
     }
 
     /// acquire 的错误分类：只有"这轮没图像"能重试；OUT_OF_DATE/SURFACE_LOST 要重建；

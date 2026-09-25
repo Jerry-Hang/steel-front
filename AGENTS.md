@@ -200,6 +200,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   **画面静止但进程与输入还在**，实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
   **判据**：`rg 'u64::MAX' src/engine/renderer.rs` 不应出现在等待处；测试 `swapchain_waits_are_bounded`
   会在改回无限等待时红。`perf_run.ps1` 保持 IMMEDIATE。
+- 🔴 **成功 acquire 之后不许提前 return**（`image_available` 信号量**不随交换链重建而重建**）：
+  acquire 的 `suboptimal` 只登记、本帧照常 present，重建一律放到 present **之后**；
+  判据 `frame_action` + 测试 `acquire_suboptimal_never_aborts_before_present`。
 
 **建筑摆放（2026-09-13）**
 - `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。用 `max` 会按较大方向
@@ -603,12 +606,10 @@ release_input.ps1 取代）。
 24. ~~**广场"坑"**~~ **已结案（2026-09-19）= 水平面绕序反了**（判据 `horizontal_winding_tests`）。
 25. ✅ **`ai_us` 单帧尖峰（41.6ms）：2026-09-25 结案 —— 它是出生点小连通域那个 bug 的下游症状。**
     🔴 **先量再改的第一课：`ai_us` 量的根本不是 AI** —— 它是 `update_projectiles + update_ai +
-    update_waves + update_objectives` 四段之和。现在四段各自计时（`RV3D_AI_DIAG=1` 多打一行
-    `aidiag: stage 1s proj=… ai=… wave=… obj=…`），压力模式 255 只实测：**四段之和 ≡ `ai_us`**、
-    `proj/wave/obj` 全为 0、**100% 在 `update_ai`**（中位 6996 µs/s、最大 8588，≈0.3 µs/NPC/帧），
-    同批 `astar calls` 中位 **0**、**单次搜索展开最大 93 格**（不是"展开整张网格"）⇒ 无尖峰。
-    修掉的两处：`b7a3639` 出生点收口（调用量 278/s → 0）、`e1603dd` scratch 复用（去掉每次调用
-    三份 O(格数) 分配）。判据见 `docs/PROGRESS.md` §21.7。
+    update_waves + update_objectives` 四段之和（现已各自计时，`RV3D_AI_DIAG=1` 多打一行
+    `aidiag: stage 1s`）。压力模式 255 只实测：**四段之和 ≡ `ai_us`**、`proj/wave/obj` 全 0、
+    **100% 在 `update_ai`**（中位 6996 µs/s ≈0.3 µs/NPC/帧）、`astar calls` 中位 **0**、
+    单次搜索展开最大 93 格 ⇒ 无尖峰。判据见 `docs/PROGRESS.md` §21.7。
 
 ---
 
