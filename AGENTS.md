@@ -590,7 +590,12 @@ release_input.ps1 取代）。
 18. **CoverSeek 战术占比偏低**（压力模式实测 4%，另一次 0；由掩体密度决定）。
     **lead**：加 TOML 关卡掩体。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（半透明暗色遮罩近似，需 shader 后处理采样主 pass）；~~kill feed 仅英文~~ **已中文化**；~~不分击杀者名字~~ **已结案（2026-09-15）**（`DamageSource` + `kill_line` 共用）；~~弹孔贴花~~ **已结案**（铁律 B 弹孔段）；第一人称枪模动画仍欠。
-20. **DLSS 立项评估未做**（**open**，唯一剩下的子项）。~~`playtest_perf.py` 未做 Windows 移植~~ **已结案（2026-09-15）：搬不过来**（X11/XImage/`pgrep`/`/proc` 全是 Linux 的）⇒ 改用 **`scripts/perf_run.ps1`**（只"启动 → 等待 → 读 `logs/perf_*.log` → 统计"，不注入、不抓屏）；🔴 **噪声底 2.8%**，见教训 35。
+20. ✅ **DLSS 立项评估：2026-09-25 结案 —— 不接**（详见 `docs/DLSS-evaluation.md`）：硬件支持
+    （`VK_NVX_image_view_handle`/`VK_NVX_binary_import`=true），但**本仓是顶点瓶颈**
+    （像素面积减到 1/4 只 +12%、焊接顶点 −67% 却 **+18.6%**），而 DLSS 省的是**像素**；
+    且缺三样必需输入（**逐像素运动矢量** / jitter / 深度暴露）＋要新增 NGX SDK（违反不新增依赖）。
+    **重开判据**：内部分辨率降到 1/4 面积而 fps 提升 **>40%**（像素成为主项）时才谈。
+    ~~`playtest_perf.py` 未做 Windows 移植~~ **已结案**：搬不过来 ⇒ 用 `scripts/perf_run.ps1`，噪声底 2.8%（教训 35）。
 21. ~~**GLB 加载器忽略 `bufferViews[].byteStride`**~~ **已结案（2026-09-14）：已支持交错布局**。⚠️ 读错时每个数**都是合法浮点数**（不崩不报）⇒ **凡"支持"都要补一条会红的测试**。
 22. ~~**`data/` 里的历史残留**~~ **已清理（2026-09-13）**：62 文件 → **只留 3 个被引用的**；同批 `screenshots/` 300→25、`logs/` 646→20，**共回收约 600 MB**。
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`：2026-09-25 结案 —— 是 `RTSS`/`GamePP`
@@ -606,7 +611,7 @@ release_input.ps1 取代）。
     `proj/wave/obj` 全为 0、**100% 在 `update_ai`**（中位 6996 µs/s、最大 8588，≈0.3 µs/NPC/帧），
     同批 `astar calls` 中位 **0**、**单次搜索展开最大 93 格**（不是"展开整张网格"）⇒ 无尖峰。
     修掉的两处：`b7a3639` 出生点收口（调用量 278/s → 0）、`e1603dd` scratch 复用（去掉每次调用
-    三份 O(格数) 分配）。**判据留在 `docs/PROGRESS.md` §21.7**；要再动这里，先看那两行分项数字。
+    三份 O(格数) 分配）。判据见 `docs/PROGRESS.md` §21.7。
 
 ---
 
