@@ -1237,6 +1237,12 @@ struct AiStepCtx<'a> {
     squad_wps: &'a [Option<[f32; 2]>],
     /// 观战模式（玩家无敌）：NPC 无可见敌人时的兜底目标 = 敌方重心（不再锁玩家造成火力浪费）
     spectator: bool,
+    /// 目标**已知**（2026-09-23，未结案 #17 的修法②）：进攻方从出生起就知道要打哪。
+    /// 普通波次/防守波为 `true`（玩家是它的任务目标），压力模式为 `false`
+    /// （红蓝对抗有自己的选目标逻辑 `pick_stress_targets`），开始菜单游走也为 `false`。
+    /// ⚠️ 它**不是**开火许可：开火仍要求 `enemy_visible`（视距 + 遮挡），
+    /// 见 `ai.rs::NpcPerception::target_known` 与 `NpcStateMachine::update`。
+    target_known: bool,
     fallback_targets: &'a [[f32; 3]],
     /// 每 NPC 的"目标是否被几何体挡住"。`true` = 挡住。
     ///
@@ -4846,6 +4852,12 @@ impl Game {
         let can_see_target = dist < sight && !occluded;
         npc.perception = NpcPerception {
             enemy_visible: can_see_target,
+            // 🔴「知道要打谁」与「现在看得见」分两条通道（未结案 #17 的修法②）：
+            // 出生半径 40–80m 而 `NPC_SIGHT = 60` ⇒ 出生在 60m 外的那批**永远**看不见玩家，
+            // 旧行为下它们恒为 Patrol，而 `update_waves` 要求 `npcs.is_empty()` ⇒
+            // **这一波永远清不掉**（实测 #8 在 77.8m 上守了整局）。进攻方不该靠视距才知道要打哪。
+            // ⚠️ 开火不受影响：`Chase → Attack` 仍要求 `enemy_visible`（上面那行）。
+            target_known: ctx.target_known,
             // 压力模式攻击距离放宽 x2.5（约 30m）：同速互追刷步机的残局收敛（2026-08-23）
             enemy_in_range: dist < npc.attack_range * if ctx.stress { 2.5 } else { 1.0 },
             start_patrol: prev == NpcState::Idle,
@@ -4869,11 +4881,12 @@ impl Game {
             let key = ((ctx.time / 5.0) as u64) << 32 | npc.id as u64;
             if SEEN.swap(key, std::sync::atomic::Ordering::Relaxed) != key {
                 log::info!(
-                    "aidiag: #{} state={:?} dist={:.1} sight={:.0} occluded={} lines={} pos=({:.1}, {:.1})",
+                    "aidiag: #{} state={:?} dist={:.1} sight={:.0} known={} occluded={} lines={} pos=({:.1}, {:.1})",
                     npc.id,
                     state,
                     dist,
                     sight,
+                    ctx.target_known,
                     occluded,
                     ctx.target_occluded.len(),
                     npc.position[0],
@@ -5443,6 +5456,10 @@ impl Game {
                 obstacles: &self.map.obstacles,
                 squad_wps: &squad_wps,
                 spectator: self.player_invincible,
+                // 只有在"真在打的一局"里才把玩家当作已知目标：
+                // 开始菜单的游走（StartMenu 也调 update_ai）必须保持"没看见就随便走"的观感，
+                // 压力模式有自己的一套选目标逻辑（target_known 会让红蓝绕过 pick_stress_targets）。
+                target_known: self.game_state == GameState::Playing && !self.stress,
                 fallback_targets: &fallback_targets,
                 target_occluded: &target_occluded,
             };
@@ -6320,6 +6337,7 @@ mod tests {
                 obstacles: &game.map.obstacles,
                 squad_wps: &[],
                 spectator: false,
+                target_known: false,
                 fallback_targets: &[],
                 target_occluded: &[],
             };
@@ -6639,6 +6657,112 @@ mod tests {
                 .iter()
                 .any(|n| n.state_machine.state() != NpcState::Idle),
             "at least one npc should leave Idle near the player"
+        );
+    }
+
+    /// 🔴 未结案 #17 的**根因级**回归（2026-09-23）：`NPC_SIGHT(60) < 出生半径上限(80)`
+    /// ⇒ 出生在视距之外的进攻方在旧行为下**只会 Patrol**（`enemy_visible` 恒 false），
+    /// 而 `update_waves` 要求 `npcs.is_empty()` ⇒ 这一波永远清不掉、没有波间补给、
+    /// 没有第 2..N 波、没有胜利态（实测 `#8` 在 77.8m 上一动不动守了整局）。
+    ///
+    /// 这里把感知层直接喂给 `step_npc`，把变量压到只剩"目标已知"这一条：
+    /// `target_known=true` ⇒ 必须 Chase 并朝玩家推进；`false` ⇒ 旧行为（没有目标就不追）。
+    ///
+    /// ⚠️ 对照组故意只跑 1 帧：巡逻游走**本身**会让 NPC 慢慢走到 60m 内、从而"偶然"进入 Chase
+    /// （见 `far_decimate_skips_idle_npcs_by_frame`：600m 外的 NPC 每帧都在动），
+    /// 所以"跑很久之后它不在 Patrol"**不能**证明这条修法生效 —— 判据必须是"目标已知 ⇒ 立刻去追"。
+    #[test]
+    fn far_npc_gets_a_target_instead_of_patrolling_forever() {
+        let game = Game::new();
+        let grid = game.grid.clone();
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        let flags = vec![false; 1];
+        let targets = vec![None];
+        let occupied = vec![false; 1];
+        let run = |target_known: bool, frames: u32| {
+            // 80m > NPC_SIGHT(60)：这一只"看不见玩家"
+            let mut npc = npc_at(1, Team::Red, [80.0, 0.0, 0.0]);
+            for frame in 0..frames {
+                let ctx = AiStepCtx {
+                    player: &player,
+                    player_yaw: 0.0,
+                    charge: false,
+                    under_fire: &flags,
+                    targets: &targets,
+                    grid: &grid,
+                    time: 1.0 + frame as f32 / 60.0,
+                    dt: 1.0 / 60.0,
+                    stress: false,
+                    frame,
+                    decimate_far: false,
+                    ring_inner: MAP_RING_INNER,
+                    ring_outer: MAP_RING_OUTER,
+                    obstacles: &game.map.obstacles,
+                    squad_wps: &[],
+                    spectator: false,
+                    target_known,
+                    fallback_targets: &[],
+                    target_occluded: &occupied,
+                };
+                Game::step_npc(0, &mut npc, &ctx);
+            }
+            let d = (npc.position[0] * npc.position[0] + npc.position[2] * npc.position[2]).sqrt();
+            (npc.state_machine.state(), d)
+        };
+        let (st_known_1f, _) = run(true, 1);
+        assert!(
+            matches!(st_known_1f, NpcState::Chase | NpcState::Attack),
+            "80m 外的进攻方在目标已知时**第一帧**就该去追，实际 {st_known_1f:?}"
+        );
+        // 对照组 = 旧行为：80m 外没有视线、也没有"目标已知"这条通道 ⇒ 进不了 Chase
+        let (st_old_1f, _) = run(false, 1);
+        assert!(
+            matches!(st_old_1f, NpcState::Idle | NpcState::Patrol),
+            "对照组：目标未知时第一帧进不了 Chase（实际 {st_old_1f:?}）"
+        );
+        // 跑满 10 秒：两只都会被巡逻游走带着动，但**已知目标**那只必须是直接朝玩家去的那个。
+        // 判据用"同一场景下两者比距离"，而不是绝对值 —— 绝对值会被游走路径的偶然性影响。
+        let (_, d_known) = run(true, 600);
+        let (_, d_old) = run(false, 600);
+        assert!(
+            d_known < d_old - 5.0,
+            "同样跑 10 秒，已知目标的那只应当明显更靠近玩家：{d_known:.1}m vs 对照组 {d_old:.1}m"
+        );
+    }
+
+    /// 接线判据：`AiStepCtx::target_known` 的唯一表达式在 `update_ai` 里，
+    /// 语义是"只有在真在打的一局里，玩家才是进攻方的已知目标"。
+    /// 三条分支各断言一次（菜单游走 / 正常波次 / 压力模式）——
+    /// 漏掉 `!self.stress` 或漏掉 `Playing` 都会被这条抓住。
+    #[test]
+    fn target_known_is_wired_only_for_real_missions() {
+        let cam = Camera::new();
+        // ① 开始菜单（`Game::new` 后不调 on_any_key）：NPC 照常游走，不该把玩家当已知目标
+        let mut menu = Game::new();
+        menu.update(1.0 / 60.0, &cam);
+        assert!(!menu.npcs.is_empty());
+        assert!(
+            menu.npcs.iter().all(|n| !n.perception.target_known),
+            "开始菜单的游走不该把玩家当成已知目标"
+        );
+        // ② 真在打的一局：波次进攻方从出生起就已知目标
+        let mut run = Game::new();
+        run.on_any_key(&glam::Vec3::ZERO);
+        run.update(1.0 / 60.0, &cam);
+        assert!(!run.npcs.is_empty());
+        assert!(
+            run.npcs.iter().all(|n| n.perception.target_known),
+            "Playing 状态下的波次进攻方应当已知目标（未结案 #17）"
+        );
+        // ③ 压力模式：红蓝对抗走 pick_stress_targets，不经过这条通道
+        let mut stress = Game::new();
+        stress.stress = true;
+        stress.on_any_key(&glam::Vec3::ZERO);
+        stress.update(1.0 / 60.0, &cam);
+        assert!(!stress.npcs.is_empty());
+        assert!(
+            stress.npcs.iter().all(|n| !n.perception.target_known),
+            "压力模式不该走这条通道（它有 STRESS_SIGHT + pick_stress_targets）"
         );
     }
 
@@ -8387,6 +8511,7 @@ mod tests {
                 obstacles: &game.map.obstacles,
                 squad_wps: &[],
                 spectator: false,
+                target_known: false,
                 fallback_targets: &[],
                 target_occluded: &[],
             };
@@ -8407,6 +8532,7 @@ mod tests {
                 obstacles: &game.map.obstacles,
                 squad_wps: &[],
                 spectator: false,
+                target_known: false,
                 fallback_targets: &[],
                 target_occluded: &[],
             };
@@ -8474,6 +8600,7 @@ mod tests {
             obstacles: &game.map.obstacles,
             squad_wps: &[],
             spectator: false,
+            target_known: false,
             fallback_targets: &[],
             target_occluded: &[],
         };
@@ -8557,6 +8684,7 @@ mod tests {
             obstacles: &game.map.obstacles,
             squad_wps: &[],
             spectator: false,
+            target_known: false,
             fallback_targets: &[],
             target_occluded: &[],
         };

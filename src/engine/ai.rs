@@ -247,6 +247,18 @@ pub enum NpcState {
 pub struct NpcPerception {
     /// 视野内是否存在敌人
     pub enemy_visible: bool,
+    /// 🔴 **目标已知**（2026-09-23 补，未结案 #17 的修法②）：与"看得见"**分两条通道**。
+    ///
+    /// 进攻方（波次/防守波里的敌军）从出生起就知道要打哪 —— 玩家就是它的任务目标，
+    /// 不需要靠视距去"发现"。它只影响 `Idle/Patrol → Chase` 与 `Chase` 的**维持**：
+    /// 目标已知的 NPC 会一路推进（A* 走位）去找人。
+    ///
+    /// ⚠️ **开火仍然只认 [`Self::enemy_visible`]**（视距 + 遮挡）：`Chase → Attack` 必须
+    /// 同时满足"看得见"，否则就重演历史上的"隔墙掉血"（见 `game.rs` 里 `target_occluded`
+    /// 那段注释）。这一条是"目标已知"与"敌人可见"的分工边界，别把 Attack 的入口放宽。
+    ///
+    /// 默认 `false` ⇒ 不填这一项的调用方（单测、压力模式、开始菜单游走）行为与旧版逐条一致。
+    pub target_known: bool,
     /// 敌人是否在攻击距离内
     pub enemy_in_range: bool,
     /// 是否开始巡逻（有待巡逻路线）
@@ -269,10 +281,14 @@ pub struct NpcPerception {
 ///
 /// 转换条件：
 /// - `Idle → Patrol`：`start_patrol`
-/// - `Idle/Patrol → Chase`：发现敌人 `enemy_visible`
-/// - `Chase → Attack`：发现敌人且在攻击距离内 `enemy_in_range`
-/// - `Attack → Chase`：敌人仍在视野但脱离攻击距离
-/// - `Patrol/Chase/Attack → Idle`：巡逻完成 / 丢失敌人
+/// - `Idle/Patrol → Chase`：发现敌人 `enemy_visible`，**或目标已知 `target_known`**
+/// - `Chase → Attack`：发现敌人且在攻击距离内（`enemy_visible && enemy_in_range`）
+/// - `Attack → Chase`：敌人仍在视野但脱离攻击距离；**或目标已知但暂时看不见**（去重新找视线）
+/// - `Patrol/Chase/Attack → Idle`：巡逻完成 / 丢失敌人**且目标未知**
+///
+/// 🔴 `target_known`（2026-09-23，未结案 #17 的修法②）是"知道要打谁"，
+/// `enemy_visible` 是"现在看得见"。**只有后者能开火** —— 两个条件在 `Chase → Attack`
+/// 处必须同时成立，否则就回到"隔着整栋楼输出"的老 bug。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NpcStateMachine {
     state: NpcState,
@@ -290,10 +306,13 @@ impl NpcStateMachine {
     }
 
     /// 根据感知输入推进状态机，返回转换后的状态
+    ///
+    /// ⚠️ `target_known == false` 时，下面每个分支都与加入该字段之前**逐条等价**
+    /// （旧行为由"目标未知"这一支完整保留）：单测、压力模式、开始菜单游走都不受影响。
     pub fn update(&mut self, perception: NpcPerception) -> NpcState {
         self.state = match self.state {
             NpcState::Idle => {
-                if perception.enemy_visible {
+                if perception.enemy_visible || perception.target_known {
                     NpcState::Chase
                 } else if perception.start_patrol {
                     NpcState::Patrol
@@ -302,7 +321,7 @@ impl NpcStateMachine {
                 }
             }
             NpcState::Patrol => {
-                if perception.enemy_visible {
+                if perception.enemy_visible || perception.target_known {
                     NpcState::Chase
                 } else if perception.patrol_finished {
                     NpcState::Idle
@@ -311,9 +330,16 @@ impl NpcStateMachine {
                 }
             }
             NpcState::Chase => {
+                // 看不见目标时：目标已知 ⇒ 继续追（推进找视线）；否则丢失敌人回 Idle
                 if !perception.enemy_visible {
-                    NpcState::Idle
+                    if perception.target_known {
+                        NpcState::Chase
+                    } else {
+                        NpcState::Idle
+                    }
                 } else if perception.enemy_in_range {
+                    // 🔴 开火入口：这里**必须**已经通过 `enemy_visible`（上个分支），
+                    // `enemy_in_range` 单独成立不算数（隔墙不得进入 Attack）
                     NpcState::Attack
                 } else {
                     NpcState::Chase
@@ -321,7 +347,12 @@ impl NpcStateMachine {
             }
             NpcState::Attack => {
                 if !perception.enemy_visible {
-                    NpcState::Idle
+                    // 视线丢了：有目标情报就去重新找视线（Chase），没有就回 Idle
+                    if perception.target_known {
+                        NpcState::Chase
+                    } else {
+                        NpcState::Idle
+                    }
                 } else if !perception.enemy_in_range {
                     NpcState::Chase
                 } else {
@@ -935,6 +966,68 @@ mod tests {
         p.enemy_in_range = true;
         fsm.update(p);
         assert_eq!(fsm.update(p), NpcState::Attack);
+    }
+
+    /// 🔴 未结案 #17 的修法②（2026-09-23）：目标**已知**但要靠推进去获得视线。
+    /// 这条是"进攻方不该靠视距才知道要打哪"的最小判据。
+    #[test]
+    fn target_known_makes_npc_advance_instead_of_patrolling() {
+        // Idle + 目标已知 → Chase（不需要 enemy_visible）
+        let mut fsm = NpcStateMachine::new();
+        let mut p = perception();
+        p.target_known = true;
+        assert_eq!(fsm.update(p), NpcState::Chase);
+
+        // Chase + 目标已知 + 看不见（太远/被挡）→ 保持 Chase（继续推进），不回 Idle
+        assert_eq!(fsm.update(p), NpcState::Chase);
+        assert_eq!(fsm.update(p), NpcState::Chase);
+
+        // Patrol + 目标已知 → Chase（巡逻中的也一样）
+        let mut fsm = NpcStateMachine::new();
+        let mut p = perception();
+        p.start_patrol = true;
+        assert_eq!(fsm.update(p), NpcState::Patrol);
+        let mut p = perception();
+        p.target_known = true;
+        assert_eq!(fsm.update(p), NpcState::Chase);
+    }
+
+    /// 🔴 分工边界：`target_known` **绝不能**变成开火许可。
+    /// 目标已知、距离够近、但看不见（被墙挡住）⇒ 只能 Chase，不能 Attack。
+    /// 这条红了就等于"隔着整栋楼输出"那个老 bug 回来了。
+    #[test]
+    fn target_known_alone_never_enters_attack() {
+        let mut fsm = NpcStateMachine::new();
+        let mut p = perception();
+        p.target_known = true;
+        p.enemy_in_range = true; // 距离已在攻击范围内，但看不见
+        assert_eq!(fsm.update(p), NpcState::Chase, "看不见就不许进 Attack");
+
+        // 一旦看得见（且仍已知）⇒ 立刻进 Attack
+        p.enemy_visible = true;
+        assert_eq!(fsm.update(p), NpcState::Attack);
+
+        // 视线又丢（例如目标躲到墙后）⇒ 回 Chase 去重新找视线（而不是回 Idle 忘记目标）
+        p.enemy_visible = false;
+        assert_eq!(fsm.update(p), NpcState::Chase);
+    }
+
+    /// 目标**未知**时（默认值）：与加入 `target_known` 字段之前逐条一致 ——
+    /// 压力模式 / 开始菜单游走 / 旧单测都靠这条。
+    #[test]
+    fn target_unknown_keeps_legacy_transitions() {
+        let mut fsm = NpcStateMachine::new();
+        // Idle 不动
+        assert_eq!(fsm.update(perception()), NpcState::Idle);
+        // 看不见 ⇒ 从 Chase 掉回 Idle
+        let mut p = perception();
+        p.enemy_visible = true;
+        assert_eq!(fsm.update(p), NpcState::Chase);
+        assert_eq!(fsm.update(perception()), NpcState::Idle);
+        // 看不见时即使距离够近也不进 Attack，也不维持 Chase
+        let mut p = perception();
+        p.enemy_in_range = true;
+        assert_eq!(fsm.update(p), NpcState::Idle);
     }
 
     #[test]
