@@ -1251,8 +1251,13 @@ impl GameApp {
             self.gun_sway.tick(dt, p, right, fwd, fired > 0);
         }
 
-        // 相机参数日志（1 秒一条，冒烟断言 yaw/pitch 变化用）
-        if self.last_cam_log.elapsed().as_secs_f32() >= 1.0 {
+        // 相机参数日志（默认 1 秒一条；`RV3D_NPC_POS=1` 时跟随 `RV3D_NPC_POS_HZ`）。
+        // 🔴 2026-09-25：注入 harness 的瞄准环**拿这一行做回读**（注入像素 → 读回 yaw/pitch →
+        // 再算误差），1 Hz 的回报让每轮 0.5s 的闭环经常读到同一行 ⇒ 重复注入 ⇒ 过冲/假收敛。
+        // 同频到 10 Hz 之后，闭环才真的闭合。判据见 `game::diagnostic_period_secs` 的文档。
+        if self.last_cam_log.elapsed().as_secs_f32()
+            >= crate::engine::game::diagnostic_period_secs()
+        {
             let (yaw, pitch, dist) = self.camera.orbit_params();
             // `spread` = 腰射准星扩散（第⑤条）。打在这里是为了**能脱离截图做验收** ——
             // 像素测量会被"两次运行场景不同 / 蹲下相机高度不同"混杂（第 65、76 轮实测），

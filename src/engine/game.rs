@@ -1417,6 +1417,28 @@ fn npc_pos_hz() -> Option<u32> {
     *HZ.get_or_init(|| std::env::var("RV3D_NPC_POS_HZ").ok().and_then(|v| v.parse::<u32>().ok()))
 }
 
+/// 诊断通道的刷新周期（秒）：`RV3D_NPC_POS=1` 时按 `RV3D_NPC_POS_HZ`，否则保持 1 Hz。
+///
+/// 🔴 2026-09-25：`main.rs` 的 `cam:` 行（yaw/pitch）**也**要用它。这是当天最重要的一个发现：
+/// 注入 harness 的瞄准环是拿 `cam:` 行做**回读**的（注入一像素 → 读回当前角度 → 再算误差），
+/// 而 `cam:` 原本 1 Hz，瞄准环每轮只 sleep 0.5s ⇒ **常常读到同一行**（旧角度）⇒ 把同一个
+/// 修正量**再注入一次** ⇒ 过冲 / 假装收敛。弹道埋点正是这么露的马脚：过期弹 117/118
+/// 差最近的人 **2m 以上**（12m 交火距离上那是 ~10° 的偏差，只可能是回读失灵）。
+/// 判据：同频后 `RV3D_PROJ_DIAG` 的 `>2m` 桶必须显著下降（PROGRESS §21.22）。
+pub fn diagnostic_period_secs() -> f32 {
+    if npc_pos_log() {
+        npc_pos_period(npc_pos_hz())
+    } else {
+        1.0
+    }
+}
+
+/// `RV3D_PROJ_DIAG=1`：弹道诊断通道（弹丸去向 / 过期分桶 / 每枪瞄得准不准）。
+fn proj_diag_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RV3D_PROJ_DIAG").as_deref() == Ok("1"))
+}
+
 /// step_npc 解析"本 NPC 这一帧的目标位置"的唯一规则。
 /// 遮挡预计算必须与决策走同一条分支，否则会出现"按玩家算遮挡、按 NPC 行动"的错位。
 fn resolve_ai_target(
@@ -3289,6 +3311,36 @@ impl Game {
                     }
                 }
                 self.shots += 1;
+                // 🔴 2026-09-25：**这一枪瞄得准不准**（`RV3D_PROJ_DIAG=1`）——与角度最小的
+                // NPC 胸口之间的夹角。这是"空放"归因的最后一格：夹角普遍很小 ⇒ 子弹在飞、
+                // 是**命中体/时序**问题；夹角普遍很大 ⇒ 目标根本不在准星附近（harness 侧）。
+                if from_player && proj_diag_on() {
+                    let mut best = (f32::MAX, -1i32, 0.0f32);
+                    for n in &self.npcs {
+                        let v = [
+                            n.position[0] - origin[0],
+                            n.position[1] + 1.2 - origin[1],
+                            n.position[2] - origin[2],
+                        ];
+                        let d = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                        if d < 1e-3 {
+                            continue;
+                        }
+                        let cos = (v[0] * fire_dir[0] + v[1] * fire_dir[1] + v[2] * fire_dir[2]) / d;
+                        let ang = cos.clamp(-1.0, 1.0).acos().to_degrees();
+                        if ang < best.0 {
+                            best = (ang, n.id as i32, d);
+                        }
+                    }
+                    if best.1 >= 0 {
+                        log::info!(
+                            "shot-aim: npc=#{} ang={:.1}deg dist={:.0}m",
+                            best.1,
+                            best.0,
+                            best.2
+                        );
+                    }
+                }
                 // 程序化枪声：按武器类别选音色（步枪/冲锋/狙击/机枪/霰弹/手枪），
                 // 带确定性音量抖动（0.95..=1.0）避免机械重复
                 let shot_scale = 0.95 + 0.05 * ((self.shots % 5) as f32 / 4.0);
@@ -4071,7 +4123,6 @@ impl Game {
     /// `allow_kills = false`（GameOver 冻结）：投射物照常飞行/到期，但不判定任何命中。
     fn update_projectiles(&mut self, dt: f32, allow_kills: bool) {
         // 弹道诊断（RV3D_PROJ_DIAG=1 时启用，节流 2s）：默认关闭避免生产日志噪音
-        static PROJ_DIAG_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         static LAST_PROJ_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         // 弹丸**去向**计数（2026-09-25 加）：harness 只有 `hits` 一个数，打了多少发、
         // 有多少打在掩体上、多少飞没了**都看不见** ⇒ "改瞄法到底有没有用"无法判定。
@@ -4084,8 +4135,7 @@ impl Game {
         static PROJ_MISS_NEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         static PROJ_MISS_MID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         static PROJ_MISS_FAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let diag = *PROJ_DIAG_ON
-            .get_or_init(|| std::env::var("RV3D_PROJ_DIAG").as_deref() == Ok("1"));
+        let diag = proj_diag_on();
         if diag {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
