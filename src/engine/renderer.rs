@@ -12737,6 +12737,37 @@ impl Drop for Renderer {
             if self.hud_vertex_buffer_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.hud_vertex_buffer_memory, None);
             }
+            // 🧊 释放 HUD 磨砂玻璃的那套资源（2026-09-26 补）：图像 / 内存 / 视图 / 采样器 /
+            // 描述符池 + set layout。**这五样是当天新加的，当时没进释放清单** ——
+            // 是 `tools/audit_vk_resources.py` 在它自己上线两小时后抓出来的
+            // （"no release call found: 5"，全部指向这几个字段）。
+            // 顺序：先释放依赖资源的池/layout，再拆 view/sampler，最后 image + memory。
+            if self.hud_glass_pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.hud_glass_pool, None);
+                self.hud_glass_pool = vk::DescriptorPool::null();
+                self.hud_glass_set = vk::DescriptorSet::null();
+            }
+            if self.hud_glass_set_layout != vk::DescriptorSetLayout::null() {
+                self.device
+                    .destroy_descriptor_set_layout(self.hud_glass_set_layout, None);
+                self.hud_glass_set_layout = vk::DescriptorSetLayout::null();
+            }
+            if self.menu_blur_view != vk::ImageView::null() {
+                self.device.destroy_image_view(self.menu_blur_view, None);
+                self.menu_blur_view = vk::ImageView::null();
+            }
+            if self.menu_blur_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.menu_blur_sampler, None);
+                self.menu_blur_sampler = vk::Sampler::null();
+            }
+            if self.menu_blur_image != vk::Image::null() {
+                self.device.destroy_image(self.menu_blur_image, None);
+                self.menu_blur_image = vk::Image::null();
+            }
+            if self.menu_blur_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.menu_blur_memory, None);
+                self.menu_blur_memory = vk::DeviceMemory::null();
+            }
             // 释放第一人称枪模缓冲
             if self.gun_vertex_buffer != vk::Buffer::null() {
                 self.device.destroy_buffer(self.gun_vertex_buffer, None);
