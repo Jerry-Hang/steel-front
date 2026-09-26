@@ -12,6 +12,11 @@ param(
     # lParam bit16-23 carries the scancode (MapVirtualKey) -- winit needs it.
     [int[]]$Keys = @(),
     [int]$AfterKeysSec = 3,
+    # Seconds to wait BETWEEN posted keys. Default 1s is too fast for a multi-step UI
+    # sequence: entering a game goes through LoadingMap (map generation), and a key sent
+    # while still loading is dropped -- e.g. "R then ESC" never reached the pause menu
+    # (2026-09-26). Use -KeyGapSec 5 for sequences that cross a state change.
+    [int]$KeyGapSec = 1,
     [switch]$Stress,
     # -NoAuto: do NOT force RV3D_AUTOSTART=1, so the game stays in its menu state.
     # Needed to screenshot the frosted-glass menu (every cap_safe run before 2026-09-19
@@ -157,7 +162,7 @@ try {
             foreach ($vk in $Keys) {
                 Write-Host "POST VK $vk"
                 Post-Key $h $vk
-                Start-Sleep -Seconds 1
+                Start-Sleep -Seconds $KeyGapSec
             }
             if ($Keys.Count -gt 0) { Start-Sleep -Seconds $AfterKeysSec }
             Screenshot $h (Join-Path $shots "$Tag`_b.png")
