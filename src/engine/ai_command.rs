@@ -475,12 +475,15 @@ fn platoon_company(companies: &[Company], platoon_id: usize) -> usize {
 }
 
 impl Army {
-    /// 该排归哪个连（与 `platoon_company` 同一个真源；测试与调用方都用它）
+    /// 该排归哪个连（与 `platoon_company` 同一个真源）。调用方只有判据测试 ——
+    /// `update` 里那条路要同时可变借用 `companies`，只能直调同名自由函数。
+    #[allow(dead_code)] // 使用者全在 `#[cfg(test)]` ⇒ 非 test 构建看不见（2026-09-26：`cargo build` 报过 never used，`cargo test` 不报）
     pub fn company_of_platoon(&self, platoon_id: usize) -> usize {
         platoon_company(&self.companies, platoon_id)
     }
 
-    /// 该班归哪个排（余数班归**末排**，与「末连承接余排」同一约定）
+    /// 该班归哪个排（余数班归**末排**，与「末连承接余排」同一约定）。同上的测试入口。
+    #[allow(dead_code)] // 同 `company_of_platoon`：只在判据测试里被调用
     pub fn platoon_of_squad(&self, squad_id: usize) -> usize {
         platoon_of_squad(&self.platoons, squad_id)
     }
