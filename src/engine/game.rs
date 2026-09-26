@@ -1181,6 +1181,15 @@ pub struct Game {
     /// `occl_cache_age == 0` 表示"该重算了"。
     pub occl_cache: Vec<bool>,
     pub occl_cache_age: u32,
+    /// 遮挡剔除自计时（累计微秒 / 调用次数），只有 `RV3D_CULL_DIAG=1` 时累加；
+    /// `main.rs` 每秒读一次并清零（`Cell` = 只读方法也能累加）。
+    pub occl_us: std::cell::Cell<u64>,
+    pub occl_calls: std::cell::Cell<u64>,
+    /// 渲染用「玩家看得见否」缓存（每个 NPC 一个 bool）+ 分摊刷新的帧计数。
+    /// 判据与实测依据见 `NPC_VIS_REFRESH_FRAMES`；`npc_vis_scans` = 累计重算次数（诊断/单测用）。
+    npc_vis: Vec<bool>,
+    npc_vis_frame: u32,
+    pub npc_vis_scans: std::cell::Cell<u64>,
     /// 开火模式（B 键循环切换）
     fire_mode: FireMode,
     /// 连发热量 0..1：连续射击累积，压制枪口上扬；停火后衰减
@@ -1399,6 +1408,34 @@ fn npc_pos_log() -> bool {
         std::env::var("RV3D_NPC_POS").is_ok_and(|v| v == "1" || v == "on" || v == "true")
     })
 }
+
+/// `RV3D_CULL_DIAG=1`：把「NPC 遮挡剔除」的 CPU 成本按秒量出来（默认关；关着时每个调用
+/// 只多一次已缓存的 bool 比较）。
+///
+/// **为什么要这把尺子**：`npc_occluded` 每帧对**每个** NPC 做 2 条线段 × `world.bodies`
+/// 的 AABB 扫描（城市图 1240 个障碍）⇒ 255 人一帧约 63 万次相交测试，而 `main.rs` 里
+/// 它被**调两遍**（上屏列表 + 枪口焰筛选）⇒ 一帧约 126 万次。这个数量级**不许靠推理**：
+/// 先量出来（教训 20 / 25），再决定要不要缓存或换宽相。
+pub fn cull_diag_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RV3D_CULL_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+    })
+}
+
+/// 渲染用「玩家看得见否」缓存的重算周期（帧）—— 纯常量，判据见
+/// `npc_visibility_cache_is_staggered` 与 `npc_visibility_refreshes_within_the_window`。
+///
+/// **实测依据（2026-09-26）**：255 NPC / 1240 障碍的压力场景，`cull-diag` 中位
+/// **102 ms/s**（≈51k 次调用/s、每次约 2 µs、每帧 510 次）⇒ 在 98 fps（帧 5.5 ms）下
+/// **约占 18% 的帧预算**。而遮挡关系在相邻帧之间几乎不变 —— AI 那边早就为此加了
+/// `OCCLUSION_REFRESH` 缓存（该节曾占 `ai_us` 的 18–39%），渲染这条路一直没有。
+///
+/// 取 4（≈40ms @100fps）：这是**画面语义**，刷新窗口必须小到看不出；分摊刷新（每个 NPC
+/// 落在固定槽位）保证任何时刻只有 1/4 的 NPC 数据是旧的，而不是整场同时跳变。
+/// **把 N 设成 1 = 每帧全量重算**（只剩"两条调用路共用一份结果"的去重收益、零额外延迟）
+/// —— 想用最保守的语义时改这一个常量即可。
+const NPC_VIS_REFRESH_FRAMES: u32 = 4;
 
 /// `npcpos:` 的发送周期（秒）—— 纯函数，可单测。
 ///
@@ -1685,6 +1722,11 @@ impl Game {
             cull_eye_override: None,
             occl_cache: Vec::new(),
             occl_cache_age: 0,
+            occl_us: std::cell::Cell::new(0),
+            occl_calls: std::cell::Cell::new(0),
+            npc_vis: Vec::new(),
+            npc_vis_frame: 0,
+            npc_vis_scans: std::cell::Cell::new(0),
             fire_mode: FireMode::Auto,
             auto_heat: 0.0,
             npc_hit_flash: std::collections::HashMap::new(),
@@ -3563,7 +3605,22 @@ impl Game {
     /// NPC 是否被障碍物完全遮挡：玩家眼位 → NPC 的采样点（身体中心 +1.0m 与头部 +1.7m）
     /// 的线段与任一障碍 AABB 相交。两处都被挡才算完全遮挡；任一处可见（如从矮墙
     /// 上方露出头/肩）即不遮挡——修复"隔墙透视"同时避免"半身可见却消失"。
+    ///
+    /// ⚠️ `RV3D_CULL_DIAG=1` 时这里会计时（见 `cull_diag_on`），用于**先量再改**：
+    /// 一次调用最坏要扫 2 × `world.bodies.len()` 个 AABB，而 `main.rs` 每帧对全部 NPC
+    /// 调它**两遍**。
     pub fn npc_occluded(&self, idx: usize) -> bool {
+        if !cull_diag_on() {
+            return self.npc_occluded_untimed(idx);
+        }
+        let t0 = std::time::Instant::now();
+        let r = self.npc_occluded_untimed(idx);
+        self.occl_us.set(self.occl_us.get() + t0.elapsed().as_micros() as u64);
+        self.occl_calls.set(self.occl_calls.get() + 1);
+        r
+    }
+
+    fn npc_occluded_untimed(&self, idx: usize) -> bool {
         let Some(n) = self.npcs.get(idx) else {
             return false;
         };
@@ -3579,6 +3636,37 @@ impl Game {
             }
         }
         true
+    }
+
+    /// 刷新渲染用的「玩家看得见否」缓存（分摊刷新，见 `NPC_VIS_REFRESH_FRAMES`）。
+    ///
+    /// 每个 NPC 有一个固定槽位：只有 `(frame + i) % N == 0` 的那些这一帧才真做遮挡测试
+    /// ⇒ 每帧重算 **1/N** 的 NPC，而每个 NPC 的判定最多旧 N−1 帧（≈40ms @100fps）。
+    /// 分摊（而不是"每 N 帧全体重算一次"）是为了让过时数据**散在几个 NPC 上**，
+    /// 不会整场一起跳变 —— 视觉上只是一两个士兵晚 40ms 才消失。
+    ///
+    /// 新出现的 NPC 一律**先按可见处理**（fail-open）：宁可多画一个也不让新兵隐形，
+    /// 它的第一次刷新最迟 N−1 帧后到。
+    pub fn refresh_npc_visibility(&mut self) {
+        let n = self.npcs.len();
+        if self.npc_vis.len() != n {
+            self.npc_vis.resize(n, true);
+        }
+        let shift = self.npc_vis_frame % NPC_VIS_REFRESH_FRAMES;
+        for i in 0..n {
+            if (i as u32 + shift) % NPC_VIS_REFRESH_FRAMES != 0 {
+                continue;
+            }
+            self.npc_vis[i] = !self.npc_occluded(i);
+            self.npc_vis_scans.set(self.npc_vis_scans.get() + 1);
+        }
+        self.npc_vis_frame = self.npc_vis_frame.wrapping_add(1);
+    }
+
+    /// 上一帧 [`Game::refresh_npc_visibility`] 的结果（`true` = 玩家看得见）。
+    /// 索引越界返回 `true`（fail-open，理由同上）。
+    pub fn npc_visibility_flags(&self) -> &[bool] {
+        &self.npc_vis
     }
 
     /// 取走本帧开火累计的后坐力（pitch/yaw 弧度），由 main.rs 施加到相机
@@ -7866,6 +7954,78 @@ mod tests {
         assert_eq!(
             game.map.obstacles[0].hp, hp_before,
             "障碍 HP 不应被子弹削减"
+        );
+    }
+
+    /// 判据：渲染可见性缓存**必须**是分摊刷新 —— 一帧只重算一部分，而 N 帧里每个 NPC
+    /// 都**恰好**被重算一次（"缓存"不能退化成"再也不更新"）。
+    ///
+    /// 实测依据：不缓存时压力场景 `cull-diag` 中位 **102 ms/s**（510 次/帧 × ~2 µs，
+    /// 每帧 5.5 ms ⇒ 约 18% 帧预算）。
+    #[test]
+    fn npc_visibility_cache_is_staggered() {
+        let mut game = Game::new();
+        let n = game.npcs.len();
+        assert!(n >= 2, "测试场景至少要两个 NPC");
+        game.refresh_npc_visibility(); // 建缓存（新条目 fail-open）
+        assert_eq!(game.npc_visibility_flags().len(), n);
+        let mut per_frame = Vec::new();
+        for _ in 0..NPC_VIS_REFRESH_FRAMES {
+            let before = game.npc_vis_scans.get();
+            game.refresh_npc_visibility();
+            per_frame.push(game.npc_vis_scans.get() - before);
+        }
+        assert!(
+            per_frame.iter().all(|&c| (c as usize) < n),
+            "每帧重算数必须小于 NPC 总数（否则等于没缓存），实际每帧：{:?}",
+            per_frame
+        );
+        let total: u64 = per_frame.iter().sum();
+        assert_eq!(
+            total, n as u64,
+            "{} 帧内每个 NPC 必须恰好被重算一次，实际每帧：{:?}",
+            NPC_VIS_REFRESH_FRAMES, per_frame
+        );
+    }
+
+    /// 判据：**过时数据最多旧 N 帧** —— 遮挡关系变了以后，NPC 必须在一个刷新窗口内
+    /// 被重新判定（否则"看不见的人"会永远隐形，那是最坏的一类卡死）。
+    #[test]
+    fn npc_visibility_refreshes_within_the_window() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.truncate(1);
+        // 3m 高窄柱挡在玩家与 NPC 之间（与 `npc_occluded_by_obstacle_between` 同一套布景）
+        game.world.bodies.push(physics::Body::new_static(
+            Pv::new(0.0, 1.5, 0.0),
+            Pv::new(0.5, 1.5, 0.5),
+        ));
+        game.player_body.pos = Pv::new(-40.0, 0.0, 0.0);
+        game.npcs[0].position = [30.0, 0.0, 0.0];
+        assert!(game.npc_occluded(0), "布景本身要能挡住（否则这条测试没意义）");
+        // 先跑满一个窗口，让缓存必然拿到"被挡"的判定
+        for _ in 0..NPC_VIS_REFRESH_FRAMES {
+            game.refresh_npc_visibility();
+        }
+        assert!(
+            !game.npc_visibility_flags()[0],
+            "缓存应已判出遮挡：{:?}",
+            game.npc_visibility_flags()
+        );
+        // 把 NPC 挪到无遮挡处：最多一个窗口之后必须变回"可见"
+        game.npcs[0].position = [30.0, 0.0, 90.0];
+        let mut refreshed_after = None;
+        for f in 1..=NPC_VIS_REFRESH_FRAMES {
+            game.refresh_npc_visibility();
+            if game.npc_visibility_flags()[0] {
+                refreshed_after = Some(f);
+                break;
+            }
+        }
+        assert!(
+            refreshed_after.is_some_and(|f| f <= NPC_VIS_REFRESH_FRAMES),
+            "一个刷新窗口内必须重新判定，实际用了 {:?} 帧",
+            refreshed_after
         );
     }
 

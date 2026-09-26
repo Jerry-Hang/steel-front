@@ -558,6 +558,8 @@ struct GameApp {
     last_npc_snapshot: std::collections::HashMap<usize, ([f32; 3], f32, [f32; 4])>,
     /// 上一帧 FPS（性能日志用）
     last_fps: f64,
+    /// 上次打印 `cull-diag:` 的时刻（`RV3D_CULL_DIAG=1`，默认关掉时这个字段只被读一次/秒）
+    last_cull_diag: std::time::Instant,
     /// 倒地尸体：(位置, 朝向, 阵营色, 已存留秒数)；上限 20 具，超过 10 秒消退
     corpses: Vec<([f32; 3], f32, [f32; 4], f32)>,
     /// 枪口焰/弹壳粒子（0=枪口焰无重力淡出，1=弹壳重力落地）；渲染走 emissive 通道
@@ -672,6 +674,7 @@ impl GameApp {
             anim_clock: 0.0,
             last_npc_snapshot: std::collections::HashMap::new(),
             last_fps: 0.0,
+            last_cull_diag: std::time::Instant::now(),
             corpses: Vec::new(),
             particles: Vec::new(),
             perf_log: None,
@@ -2448,6 +2451,13 @@ impl GameApp {
             // 覆盖，而 `id>=100k` 恰好是 `id<100k` 的反面，吸收律化简后那段 id 判据是多余的
             // （clippy::nonminimal_bool 报的就是这个）。化简式逐档等价。
             let net_mode = self.game.net_client.is_some();
+            // 🔴 渲染剔除走**分摊刷新缓存**（2026-09-26 实测优化）：
+            // 原来每帧对全部 NPC 直接调 `npc_occluded`（每次最坏 2×1240 次 AABB 相交），
+            // 而枪口焰那段**又调了一遍** ⇒ 压力场景 510 次/帧、`cull-diag` 实测中位
+            // **102 ms/s（≈18% 帧预算）**。现在一帧只刷新 1/N 的 NPC，两条路共用同一份结果。
+            // 判据 = `cull-diag: <us>/s`（`RV3D_CULL_DIAG=1`）与 `npc_vis_scans`。
+            self.game.refresh_npc_visibility();
+            let vis = self.game.npc_visibility_flags();
             let npc_visuals: Vec<engine::renderer::NpcVisual> = if net_mode {
                 let client = self.game.net_client.as_ref().unwrap();
                 client
@@ -2486,8 +2496,8 @@ impl GameApp {
                 .npcs
                 .iter()
                 .enumerate()
-                // 隔墙透视修复：被障碍物完全遮挡的 NPC 不渲染
-                .filter(|(i, _)| !cull || !self.game.npc_occluded(*i))
+                // 隔墙透视修复：被障碍物完全遮挡的 NPC 不渲染（`vis[i]` 即该判定）
+                .filter(|(i, _)| !cull || vis.get(*i).copied().unwrap_or(true))
                 .map(|(_, n)| {
                     let base = self
                         .last_npc_snapshot
@@ -2528,16 +2538,35 @@ impl GameApp {
             };
             // （士兵 GLB 的上传已移到 `Renderer::new` 之后，见那里的注释：
             renderer.set_npc_visuals(&npc_visuals);
+            // RV3D_CULL_DIAG=1：每秒报一次「NPC 遮挡剔除」的实测成本 —— 先量再改的尺子。
+            // 判据 = `cull-diag: <us>/s calls=<N> npcs=<M> bodies=<B>`（关着时零成本）。
+            if engine::game::cull_diag_on() && self.last_cull_diag.elapsed().as_secs_f32() >= 1.0 {
+                let us = self.game.occl_us.replace(0);
+                let calls = self.game.occl_calls.replace(0);
+                let scans = self.game.npc_vis_scans.replace(0);
+                log::info!(
+                    "cull-diag: {} us/s calls={} recomputed={} npcs={} bodies={}",
+                    us,
+                    calls,
+                    scans,
+                    self.game.npcs.len(),
+                    self.game.world.bodies.len()
+                );
+                self.last_cull_diag = std::time::Instant::now();
+            }
             // NPC 枪口焰/弹壳：攻击态 NPC 限流生成（每帧最多 4 个，按 id 相位轮转避免全爆发）
+            //
+            // 🔴 判据顺序是有意的（2026-09-26）：**先筛状态、再查可见性**。旧顺序反过来 ——
+            // 于是为了挑出最多 4 个开火者，每帧对**全部 255 个** NPC 都做了一次遮挡测试
+            // （就算它根本没在开火）。现在开火态先出局，遮挡测试只落在少数开火者身上，
+            // 而且用的是上面那份**同一份**缓存（`vis`），不再有第二次全量扫描。
             let mut firing_npcs: Vec<[f32; 3]> = self
                 .game
                 .npcs
                 .iter()
                 .enumerate()
-                .filter(|(i, n)| {
-                    !self.game.npc_occluded(*i)
-                        && n.state_machine.state() == crate::engine::ai::NpcState::Attack
-                })
+                .filter(|(_, n)| n.state_machine.state() == crate::engine::ai::NpcState::Attack)
+                .filter(|(i, _)| vis.get(*i).copied().unwrap_or(true))
                 .map(|(_, n)| n)
                 .filter(|n| (n.id as f32 + self.anim_clock * 6.0) % 4.0 < 1.0)
                 .take(4)

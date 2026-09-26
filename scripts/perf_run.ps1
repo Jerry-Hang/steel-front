@@ -34,7 +34,11 @@ param(
     [int]$Stress = 128,
     [switch]$NoShadow,
     [string]$Cam = "",
-    [string]$Res = ""
+    [string]$Res = "",
+    # -CullDiag sets RV3D_CULL_DIAG=1: the engine then logs one `cull-diag:` line per second
+    # with the measured CPU cost of the NPC occlusion culling (us/s, call count, NPC and
+    # obstacle-body counts). Use it before touching that code path -- see lesson 20/25.
+    [switch]$CullDiag
 )
 $ErrorActionPreference = "Continue"
 
@@ -60,8 +64,9 @@ $env:RV3D_STRESS_AI = "$Stress"
 if ($NoShadow) { $env:RV3D_NO_SHADOW = "1" }
 if ($Cam -ne "") { $env:RV3D_CAM = $Cam }
 if ($Res -ne "") { $env:RV3D_RES = $Res }
+if ($CullDiag) { $env:RV3D_CULL_DIAG = "1" }
 
-Write-Host "perf_run: stress=$Stress secs=$Secs$(if ($NoShadow) { ' noshadow' })$(if ($Cam -ne '') { " cam=$Cam" })"
+Write-Host "perf_run: stress=$Stress secs=$Secs$(if ($NoShadow) { ' noshadow' })$(if ($Cam -ne '') { " cam=$Cam" })$(if ($CullDiag) { ' culldiag' })"
 
 $rc = 1
 try {
@@ -79,7 +84,7 @@ finally {
     # pointer captured.
     Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 1
-    Remove-Item Env:RV3D_AUTOSTART, Env:RV3D_STRESS_AI, Env:RV3D_NO_SHADOW, Env:RV3D_CAM, Env:RV3D_RES -ErrorAction SilentlyContinue
+    Remove-Item Env:RV3D_AUTOSTART, Env:RV3D_STRESS_AI, Env:RV3D_NO_SHADOW, Env:RV3D_CAM, Env:RV3D_RES, Env:RV3D_CULL_DIAG -ErrorAction SilentlyContinue
 }
 
 $perf = @(Get-ChildItem (Join-Path $repo "logs") -Filter "perf_*.log" -ErrorAction SilentlyContinue |
