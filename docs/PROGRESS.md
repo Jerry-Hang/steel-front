@@ -10317,3 +10317,47 @@ VUID=0 panics=0 device_lost=0        RESULT: NO-LEAK
 
 5. **小的收尾项**：`README.md` 1 行 LF / `scripts/llm_commander.py` 1 行 CRLF 的混行尾
    （无害、改了只制造 diff）；§21.62 列的 26 个调试开关若要写进文档，只能进 PROGRESS（AGENTS 没余量）。
+
+### 21.71 三处不可信输入的变异模糊：**GLB 解析器抓到两个真 bug**（`7b2917a` / `493b8bb` / `f472295`）
+
+**思路**：本仓有三处"外部输入"——UDP 报文、手写 TOML 地图、二进制 GLB 资产。
+它们的正确行为都只有一条：**要么解析成功、要么带信息的 Err，绝不 panic**；
+而"解析成功"之后还有各自必须成立的硬不变式。三条判据都要求
+"**先证明模糊测试真的走到了解析层**"（教训 27：否则"没 panic"什么都没证明）。
+
+| 目标 | 判据 | 接受率（自检阈值≥50/3000） | 结果 |
+|---|---|---|---|
+| `net.rs::decode` | `decode_never_panics_on_mutated_bytes_and_reencodes` | **1598/3000** | 无 panic；且**每条被接受的重编码后仍可解码** |
+| `map.rs::parse_map_toml` | `map_parser_never_panics_on_mutated_input` | **2210/3000** | 无 panic；错误信息一律非空 |
+| `assets.rs::parse_glb` | `glb_parser_never_panics_on_mutated_bytes_and_keeps_indices_in_range` | **1729/3000** | 无 panic；且**每条被接受的网格索引都在顶点范围内** |
+
+**🔴 GLB 那条抓到两个真 bug**（第一次跑就红，还是两种不同形态）：
+
+1. **越界索引被接受**：把某个索引改成 `0xFFFFFFFF`，`parse_glb` **照样返回 Ok**。
+   索引越界在 GPU 上是**顶点抓取越界**：不报 VUID、不 panic，只是**整台设备消失**
+   —— 与 `gun_glb_indices_all_in_range` 同一条失效模式，但那条只覆盖"入库的枪"，
+   而解析器面对的是**任意资产**。修法：拼 `indices` 时逐个校验并 `Err("…索引越界…")`；
+   判据 = 定点复现的 `glb_rejects_out_of_range_indices`。
+2. **截断的 GLB 会 panic**：`parse_glb` 直接拿**文件头里的 `json_len`** 去切片
+   （`&bytes[20..20 + json_len]`），长度没人校验 ⇒ 实测
+   `range end index 872 out of range for slice of length 725`。
+   同一函数的 BIN 块切片本来就有 `.min(bytes.len())`，**唯独 JSON 块漏了**。
+   修法：`20usize.checked_add(json_len).filter(|&e| e <= bytes.len())` ⇒ 变成带信息的 Err。
+
+**⚠️ 三条判据的第一版**里，两条是**空洞的**，都被我加的自检当场抓住：
+`net.rs` 版写"合法头部 + 随机载荷"⇒ **0/2000**（随机载荷能整体通过字段校验的概率几乎为 0）；
+`map.rs` 版写"随机改任意一个字符"⇒ **0/3000**（地图里改掉 `[map]` 就整份作废）。
+改成**按结构分层变异**（报文偏向载荷、地图偏向引号内字符与数字位）后接受率到 53% / 74%，
+测试才真的覆盖到解析器的正常路径。
+⇒ 教训 27 的落地方式就一句话：**自检要写成"必须有一部分成功"，而不是"必须不崩"**。
+
+验证：`cargo test --release` **619 passed / 0 failed**；`cargo build --release` **0 警告**；
+真实资产（`ak12.glb`、道具包 24 件）测试全绿 ⇒ **严格化没有误伤入库资产**。
+
+⚠️ **待补的一次实机验证**：GLB 解析器改动后想再跑一遍冒烟（验证 24 件道具 + 士兵 + 枪械
+在引擎里照常载入），但**显存窗口已经关闭** —— `run_smoke_pm.ps1` 的准入闸门直接拒绝：
+`GPU-BUSY: 4344MiB used > 3200MiB budget`（与今晚早些时候用户 Edge 占用时是同一个数字）。
+**工具在这里是对的**（宁可拒绝，也不要在一个被外部显存挤压的环境里把"分配失败"误读成代码回归）。
+已有的**单元级**证据仍然成立：`glb_parses_real_ak12` / `glb_parses_real_ak12_orig` /
+`glb_prop_kit_loads_with_valid_range` 三条都直接加载**真实资产文件**并通过。
+⇒ 下次显存空出来时，用 §21.64 的同一条命令补一次冒烟即可（十分钟的事）。
