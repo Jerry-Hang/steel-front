@@ -29,6 +29,11 @@
 # Read the output as: "MEDIAN PAIRED DELTA" is the effect, "arm range" is the drift, and the
 # sign test is how many pairs agreed. A delta inside the A/A floor is not an effect.
 #
+# Exit codes (2026-09-26): 0 = every requested pair completed, 1 = the batch never started
+# (missing exe / no usable pairs), 2 = SOME pairs were skipped because an arm failed
+# (perf_run exit code != 0) -> the batch is degraded and must not be quoted as the
+# "n >= 5 pairs" evidence lesson 45 asks for. The stats are still printed for inspection.
+#
 # One instance at a time: two games would contend for the GPU and both fps numbers are noise.
 param(
     [int]$Pairs = 4,
@@ -66,6 +71,15 @@ function Run-Arm([string]$exe, [string]$label, [int]$secs, [string]$extra) {
     $psArgs += @("-Secs", "$secs")
     if ($extra -ne "") { $psArgs += @("-Extra", $extra) }
     $out = & powershell @psArgs 2>&1
+    # 2026-09-26: the exit code used to be ignored -- only a missing "fps" line was caught.
+    # perf_run.ps1 now distinguishes "no data" (1) from "stats, but no steady-state window"
+    # (2); either way the arm is NOT a usable measurement, so fail closed here.
+    $armRc = $LASTEXITCODE
+    if ($armRc -ne 0) {
+        Write-Host ("ab_pair: {0} perf_run exit code {1}; tail:" -f $label, $armRc)
+        $out | Select-Object -Last 6 | ForEach-Object { Write-Host ("    " + $_) }
+        return $null
+    }
     $line = ($out | Select-String -Pattern 'fps\s+mean' | Select-Object -First 1)
     if (-not $line) {
         Write-Host ("ab_pair: {0} produced no fps line; tail:" -f $label)
@@ -86,16 +100,31 @@ function Median($vals) {
 
 Write-Host ("ab_pair: {0} pairs, {1}s per run; A={2} ({3}){6}  B={4} ({5}){7}" -f $Pairs, $Secs, $LabelA, $ExeA,
     $LabelB, $ExeB, $(if ($ExtraA -ne "") { " [$ExtraA]" } else { "" }), $(if ($ExtraB -ne "") { " [$ExtraB]" } else { "" }))
-$deltas = @(); $as = @(); $bs = @()
+$deltas = @(); $as = @(); $bs = @(); $incomplete = 0
 for ($i = 1; $i -le $Pairs; $i++) {
-    $a = Run-Arm $pathA $LabelA $Secs $ExtraA
-    $b = Run-Arm $pathB $LabelB $Secs $ExtraB
-    if ($null -eq $a -or $null -eq $b) { Write-Host "ab_pair: pair $i incomplete, skipping"; continue }
+    # Lesson 45 asks for rotation, and that includes the ORDER inside a pair: run A then B on
+    # odd pairs and B then A on even ones (ABBA...). The arms are still compared as paired
+    # differences of the same pair, so rotation only removes a residual "the first run of a
+    # pair is systematically slower/faster" bias that a fixed A-then-B order would bake into
+    # every pair. (Not yet measured end-to-end: the 2026-09-26 floor numbers were A-then-B.)
+    $order = $(if ($i % 2 -eq 0) { "BA" } else { "AB" })
+    if ($order -eq "BA") {
+        $b = Run-Arm $pathB $LabelB $Secs $ExtraB
+        $a = Run-Arm $pathA $LabelA $Secs $ExtraA
+    } else {
+        $a = Run-Arm $pathA $LabelA $Secs $ExtraA
+        $b = Run-Arm $pathB $LabelB $Secs $ExtraB
+    }
+    if ($null -eq $a -or $null -eq $b) {
+        Write-Host "ab_pair: pair $i incomplete, skipping"
+        $incomplete++
+        continue
+    }
     $as += $a; $bs += $b
     $d = $b - $a
     $deltas += $d
-    Write-Host ("  pair {0}: {1}={2:N2}  {3}={4:N2}  delta={5:+0.00;-0.00} ({6:+0.0;-0.0}%)" -f `
-        $i, $LabelA, $a, $LabelB, $b, $d, (100.0 * $d / $a))
+    Write-Host ("  pair {0} [{7}]: {1}={2:N2}  {3}={4:N2}  delta={5:+0.00;-0.00} ({6:+0.0;-0.0}%)" -f `
+        $i, $LabelA, $a, $LabelB, $b, $d, (100.0 * $d / $a), $order)
 }
 
 if ($deltas.Count -eq 0) { Write-Host "ab_pair: no complete pairs"; exit 1 }
@@ -107,7 +136,8 @@ $sortedA = @($as | Sort-Object); $sortedB = @($bs | Sort-Object)
 $spreadA = 100.0 * ($sortedA[-1] - $sortedA[0]) / $mA
 $spreadB = 100.0 * ($sortedB[-1] - $sortedB[0]) / $mB
 Write-Host ""
-Write-Host ("==== ab_pair result ({0} complete pairs) ====" -f $deltas.Count)
+Write-Host ("==== ab_pair result ({0} complete pairs of {1} requested, {2} skipped) ====" -f `
+    $deltas.Count, $Pairs, $incomplete)
 Write-Host ("  {0}: median {1:N2} fps (arm range {2:N1}%, n={3})" -f $LabelA, $mA, $spreadA, $as.Count)
 Write-Host ("  {0}: median {1:N2} fps (arm range {2:N1}%, n={3})" -f $LabelB, $mB, $spreadB, $bs.Count)
 Write-Host ("  paired deltas (B-A): " + (($deltas | ForEach-Object { "{0:+0.00;-0.00}" -f $_ }) -join "  "))
@@ -116,4 +146,10 @@ $signs = @($deltas | ForEach-Object { [math]::Sign($_) })
 $pos = @($signs | Where-Object { $_ -gt 0 }).Count
 Write-Host ("  sign test: {0} of {1} pairs favour {2}" -f $pos, $deltas.Count, $LabelB)
 Write-Host "  NOTE: compare |MEDIAN PAIRED DELTA| against the A/A floor measured with -ExeA == -ExeB."
+if ($deltas.Count -lt $Pairs) {
+    Write-Host ("ab_pair: exit 2 - only {0} of {1} requested pairs completed; a degraded batch is not" -f `
+        $deltas.Count, $Pairs)
+    Write-Host "         the n >= 5 evidence lesson 45 asks for. Re-run before quoting a number."
+    exit 2
+}
 exit 0

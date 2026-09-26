@@ -18,7 +18,12 @@
 # Reading the result: the printed spread (max-min)/min is the floor. A claimed improvement
 # below that floor is unmeasured, no matter how clean the two logs look.
 #
-# Exit code 0 when every run produced a parsed fps line; 1 otherwise.
+# Exit codes (2026-09-26). The header used to CLAIM "0 when every run produced a parsed fps
+# line; 1 otherwise", while the code only failed when fewer than 2 runs parsed -- so 4 failed
+# runs out of 6 still printed "the floor" and exited 0. Now the contract is the code:
+#   0 = every requested run produced a steady-state fps line
+#   1 = fewer than 2 usable runs (nothing can be said about spread)
+#   2 = partial batch: the spread is printed, but it is NOT the floor for this binary+flags
 param(
     [int]$Runs = 4,
     [int]$Secs = 20,
@@ -33,18 +38,21 @@ $out = Join-Path $repo "logs\aa_probe_raw.txt"
 
 $means = @()
 $medians = @()
+$failed = 0
 for ($i = 1; $i -le $Runs; $i++) {
     # NOT $args: that is an automatic variable in PowerShell (script arguments), do not shadow it.
     $pArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $repo "scripts\perf_run.ps1"),
                "-Secs", "$Secs", "-Stress", "$Stress")
     if ($Extra -ne "") { $pArgs += @("-Extra", $Extra) }
     $text = & powershell @pArgs 2>&1 | Out-String
+    $runRc = $LASTEXITCODE
     $perf = [regex]::Match($text, "perf log = (\S+)").Groups[1].Value
     $m = [regex]::Match($text, "mean\s+([\d.]+)\s+median\s+([\d.]+)")
-    if (-not $m.Success) {
-        Write-Host ("aa_probe: run {0} produced no fps line; tail:" -f $i)
+    if ($runRc -ne 0 -or -not $m.Success) {
+        $failed++
+        Write-Host ("aa_probe: run {0} unusable (perf_run exit code {1}); tail:" -f $i, $runRc)
         ($text -split "`n" | Select-Object -Last 6) | ForEach-Object { Write-Host ("    " + $_) }
-        Add-Content -Encoding ascii $out ("run {0}`tPARSE-FAIL`t{1}" -f $i, $perf)
+        Add-Content -Encoding ascii $out ("run {0}`tUNUSABLE`trc={1}`t{2}" -f $i, $runRc, $perf)
         continue
     }
     $mean = [double]$m.Groups[1].Value
@@ -69,11 +77,16 @@ function Spread($vals, $name) {
 }
 
 Write-Host ""
-Write-Host ("==== A/A noise floor: {0} identical runs (secs={1} stress={2}{3}) ====" -f `
-    $Runs, $Secs, $Stress, $(if ($Extra -ne "") { " extra=$Extra" } else { "" }))
+Write-Host ("==== A/A noise floor: {0} usable runs of {1} requested (secs={2} stress={3}{4}) ====" -f `
+    $means.Count, $Runs, $Secs, $Stress, $(if ($Extra -ne "") { " extra=$Extra" } else { "" }))
 Spread $means "mean"
 Spread $medians "median"
 Write-Host "  a claimed delta below the spread above is NOT measured (AGENTS lesson 24/35)"
 Write-Host ("  raw log   {0}" -f $out)
 
+if ($failed -gt 0) {
+    Write-Host ("aa_probe: exit 2 - {0} of {1} runs were unusable; the spread above is NOT the floor" -f `
+        $failed, $Runs)
+    exit 2
+}
 exit 0
