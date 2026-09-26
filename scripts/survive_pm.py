@@ -233,6 +233,31 @@ def dry_switch(txt, slot, handled, max_slot=9):
     return slot + 1, fresh
 
 
+def resolve_engine_log(path):
+    """引擎日志的**真实**路径：`path` 有内容就用它，否则回退到 `path + ".err"`。
+
+    🔴 2026-09-26（这一天最贵的一处）：引擎用 `env_logger` 写 **stderr** ⇒
+    `-RedirectStandardOutput` 那个 `.log` **恒为 0 字节**（AGENTS 教训 11），
+    真正的日志在 `.log.err`。而 `run_survive_pm.ps1` 把 **stdout 那个路径**传了进来，
+    本脚本又只读 `argv[1]` ⇒ **判据是在一个空文件上算的**：
+    `len(cleared) == len(spawned)` 退化成 `0 == 0`、VUID/panic/device_lost 全 0，
+    于是打印 `RESULT: ALL-OK`。**此前所有 survive 绿灯都是这么来的**（含 AGENTS 里
+    那条"整局 gameplay + 验证层 = 5 波全清"的"最强验证"结论）。
+
+    兄弟脚本 `gameplay_smoke_pm.py` 一直是 `for p in (path, path + ".err")`，
+    所以冒烟那套没这个问题 —— 这也是为什么"冒烟可信、survive 不可信"。
+
+    返回 None = **两个文件都没有内容 ⇒ 没跑成**（调用方报 exit 2，不许当通过）。
+    """
+    for cand in (path, path + ".err"):
+        try:
+            if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                return cand
+        except OSError:
+            continue
+    return None
+
+
 def self_test():
     """`--self-test`：把「从实机 bug 反推出来的判据」钉死（不进游戏、不注入输入）。
 
@@ -245,9 +270,11 @@ def self_test():
     shot_line = ("[2026-09-25T10:18:49Z INFO  steel_front::engine::game] "
                  "weapons: shot #1 (1 alive) [AK-12M 风暴]")
     fails = []
+    checks = []
 
     def chk(name, cond):
         print("  %-56s %s" % (name, "ok" if cond else "FAIL"))
+        checks.append(name)
         if not cond:
             fails.append(name)
 
@@ -325,6 +352,32 @@ def self_test():
                    "playerpos: 1.50 -2.50") == (1.5, -2.5))
     chk("player position: falls back to the game line when playerpos is absent",
         player_pos("game: wave=1 enemies=1 score=0 pos=(9.0,8.0)") == (9.0, 8.0))
+    # 🔴 日志路径解析（2026-09-26）：stdout 的 `.log` 恒为 0 字节 ⇒ 必须回退 `.err`。
+    # 判据用临时目录现场造三种输入，免得夹具依赖磁盘上恰好还在的日志。
+    import shutil
+    import tempfile
+    td = tempfile.mkdtemp(prefix="sf_logresolve_")
+    try:
+        empty = os.path.join(td, "run.log")
+        with open(empty, "w", encoding="utf-8") as fh:
+            pass
+        with open(empty + ".err", "w", encoding="utf-8") as fh:
+            fh.write("game: wave=1 enemies=1\n")
+        chk("empty stdout log falls back to the .err sibling",
+            resolve_engine_log(empty) == empty + ".err")
+        with open(empty, "w", encoding="utf-8") as fh:
+            fh.write("real stdout content\n")
+        chk("a non-empty path is used as-is",
+            resolve_engine_log(empty) == empty)
+        chk("neither file present -> None (means 'did not run')",
+            resolve_engine_log(os.path.join(td, "missing.log")) is None)
+        with open(os.path.join(td, "zero.err"), "w", encoding="utf-8") as fh:
+            pass
+        chk("zero-byte .err with no other file -> None",
+            resolve_engine_log(os.path.join(td, "zero.log")) is None)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
     logp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "logs", "survive_pm.log.err")
     if os.path.exists(logp):
@@ -340,7 +393,7 @@ def self_test():
         print("  real log replay: %s not found" % logp)
 
     print("SELF-TEST: %s (%d checks, %d failed)"
-          % ("OK" if not fails else "FAIL", 30, len(fails)))
+          % ("OK" if not fails else "FAIL", len(checks), len(fails)))
     return 0 if not fails else 1
 
 
@@ -527,7 +580,10 @@ def main():
     shotdir = args.shotdir or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                            "..", "screenshots")
     os.makedirs(shotdir, exist_ok=True)
-    tag = os.path.splitext(os.path.basename(logpath))[0]
+    base = os.path.basename(logpath)
+    if base.endswith(".err"):
+        base = base[:-4]
+    tag = os.path.splitext(base)[0]
 
     # 🔴 2026-09-26：**日志不存在/为空 ⇒ 没跑成，直接退出 2**（不能等到最后再算分）。
     #
@@ -537,10 +593,19 @@ def main():
     # 扫描面为 0 被当成"干净"。真正的兜底是窗口不存在时那句 `NO-WINDOW`（exit 2），
     # 但"窗口还在、日志却没写出来"（启动即崩、重定向写错文件）就漏过去了。
     # 判据：**要么给出真实判据，要么明说"没跑成"** —— 没有第三种结局。
-    if not os.path.exists(logpath) or os.path.getsize(logpath) == 0:
-        print("LOG-MISSING/EMPTY (%s): 没有引擎输出 ⇒ 这不是通过，是没跑成" % logpath,
+    #
+    # 🔴 而且这道闸门当天就抓到了**它自己人**：`run_survive_pm.ps1` 传的是 stdout 的
+    # `.log`（引擎只写 stderr ⇒ 恒 0 字节），于是闸门一开就红 —— 说明此前那些
+    # `RESULT: ALL-OK` 全是在空文件上算的。修法 = `resolve_engine_log()` 回退到 `.err`，
+    # 并把**实际使用的那份日志**打出来（判据必须能说出自己的证据来源）。
+    resolved = resolve_engine_log(logpath)
+    if resolved is None:
+        print("LOG-MISSING/EMPTY (%s 及其 .err): 没有引擎输出 ⇒ 这不是通过，是没跑成" % logpath,
               file=sys.stderr, flush=True)
         return 2
+    if resolved != logpath:
+        print("log: %s（stdout 那份是空的，引擎只写 stderr）" % resolved, flush=True)
+    logpath = resolved
 
     hwnd = S.find_window()
     if not hwnd:
