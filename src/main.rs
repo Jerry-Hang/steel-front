@@ -3931,8 +3931,13 @@ fn main() {
                         .next()
                         .and_then(|p| p.parse::<u16>().ok())
                         .unwrap_or(27015);
-                    let _ = server.rdv_register(rdv, &net_name, port);
-                    log::info!("net: 已向中继 {rdv} 注册房间 {net_name}（端口 {port}，等待玩家查询）");
+                    let res = server.rdv_register(rdv, &net_name, port);
+                    let (ok, msg) = rdv_register_report(rdv, &net_name, port, &res);
+                    if ok {
+                        log::info!("{msg}");
+                    } else {
+                        log::error!("{msg}");
+                    }
                 }
                 app.game.set_net_server(server);
             }
@@ -3976,9 +3981,62 @@ fn main() {
     log::info!("程序正常退出");
 }
 
+/// 中继注册的结论文案：**成功与否由 `res` 决定**，返回 `(是否成功, 文案)`。
+///
+/// 🔴 存在理由（2026-09-26 复查）：调用点以前是 `let _ = server.rdv_register(...)` 紧接着
+/// **无条件**打「已向中继注册房间…（等待玩家查询）」。注册失败时这条日志把「没跑成」写成了成功，
+/// 而它是 NAT 打洞链路上唯一的现场证据：中继侧没有 REG 记录，客户端 `net::rdv_resolve`
+/// 就只会等到 5s 超时，排查的人会一路去怀疑打洞逻辑与防火墙。
+/// 判据 = 测试 `relay_registration_report_never_claims_success_on_failure`。
+fn rdv_register_report(
+    rdv: &str,
+    name: &str,
+    port: u16,
+    res: &std::io::Result<()>,
+) -> (bool, String) {
+    match res {
+        Ok(()) => (
+            true,
+            format!("net: 已向中继 {rdv} 注册房间 {name}（端口 {port}，等待玩家查询）"),
+        ),
+        Err(e) => (
+            false,
+            format!(
+                "net: 向中继 {rdv} 注册房间 {name} 失败: {e} —— 中继侧没有这条记录，客户端按房间名解析只会超时（先确认中继地址可达与出站 UDP 未被拦）"
+            ),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 判据：中继注册失败时**不许**报「已注册」（教训 46：日志不许把「没跑成」写成成功）。
+    ///
+    /// 两个方向都要：成功时文案里必须有房间名与端口（现场要用它核对），
+    /// 失败时文案里必须**没有**成功字样，且必须带出原始错误。
+    #[test]
+    fn relay_registration_report_never_claims_success_on_failure() {
+        let ok: std::io::Result<()> = Ok(());
+        let (okv, msg) = rdv_register_report("10.0.0.1:9000", "steel", 27015, &ok);
+        assert!(okv, "成功必须报成功: {msg}");
+        assert!(msg.contains("已向中继") && msg.contains("steel"), "{msg}");
+        assert!(msg.contains("27015"), "端口要出现在现场日志里: {msg}");
+
+        let err: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no route",
+        ));
+        let (okv2, msg2) = rdv_register_report("10.0.0.1:9000", "steel", 27015, &err);
+        assert!(!okv2, "失败不许报成功: {msg2}");
+        assert!(msg2.contains("失败"), "{msg2}");
+        assert!(
+            !msg2.contains("已向中继"),
+            "失败文案里不许留下成功字样: {msg2}"
+        );
+        assert!(msg2.contains("no route"), "要把原始错误带出来: {msg2}");
+    }
 
     /// 🔴 判据：`scripts/*.ps1` 的**每一行都不许以非 ASCII 字节结尾**。
     ///
