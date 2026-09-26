@@ -42,7 +42,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `engine/city.rs` | 2357 | 程序化城市生成（40+ 条几何/契约测试） |
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
 | `net.rs` | 2406 | UDP 联机（协议魔数 'S'） |
-| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**（2026-09-14 由 2.26 MB 裁到 166 KB）。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`：**它红 = 有人加了没有字模的字**，而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统 `NotoSansSC-VF.ttf` 顶替：会改掉字形，红 `cjk_glyph_generates`）；**注释里的字同样算**。定位用 `python tools/find_codepoint.py <HEX> <file>` |
+| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`：**它红 = 有人加了没有字模的字**，而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统 `NotoSansSC-VF.ttf` 顶替：会改掉字形，红 `cjk_glyph_generates`）；**注释里的字同样算**。定位用 `python tools/find_codepoint.py <HEX> <file>` |
 | `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1561 / 1188 / 1290 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
 | `llm_cmd.rs` | 712 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
@@ -459,7 +459,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - **上下文节约**：不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）、不反汇编（看 .spv 先 `spirv-dis` 到临时文件）；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat`（教训 8）。
 - 🔴 **`cargo check` 不能替代 0 警告闸门**：`check` 与 `build` 的 fingerprint 不同，**`check` 会重放缓存
   下来的旧诊断**（实测报 28 条 `never used`，同一份代码 `build --release` 是 0 警告）。
-  **判据：`0 警告` 只能用 `cargo build --release`（或 `cargo test --release`）验。** ⚠️ 实验占着 exe 时
+  **判据：`0 警告` 只能用 `cargo build --release` 验** —— 🔴 `cargo test --release` 不算
+  （`cfg(test)` 用到测试专用符号 ⇒ 实测漏报 1 条，§21.75）。⚠️ 实验占着 exe 时
   `build` 会卡在**链接**，但**编译与警告在此之前已产出** ⇒ 看警告仍有效。
 - 🔴 **`> file` 重定向会写成 UTF-16**（实测 102552 B 的真实文件写成 184852 B）：
   要取 HEAD 版本做字节比对，用 `git checkout-index` / `git cat-file` 写二进制，或用
@@ -611,7 +612,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。
 24. **广场"坑"** = 水平面绕序反了（判据 `horizontal_winding_tests`）。
 25. ✅ **`ai_us` 单帧尖峰**：出生点小连通域 bug 的下游症状；255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
-26. **编制尾数不进连报告**：128 人的营三连只覆盖 **108 人**（尾数 20 人不在任何连的 `members` 里）⇒ 不计入 `CompanyReport`。**lead** = 尾数并入末连；改战斗行为，须重跑 `run_llm_battle.ps1`。
+26. ✅ **编制尾数并入末位**（2026-09-26 `7877855`）：连名单逐人等于全营（判据 `every_soldier_is_carried_by_a_company`），重组阈值分母也不再写死 128（`44c7464` / `regroup_threshold_follows_the_roster`）。
 
 ---
 
@@ -665,12 +666,12 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 45. **🔴 成本地图（"关掉某个东西"的对照实验）三件套：正对照臂 + 同轮轮转 + 每臂 ≥5 对。**
   ① **正对照臂**（物理上必然更快的那个）不快 ⇒ **整批作废**；但它快**也证明不了其余臂**。
   ② **同轮轮转**，不许一个臂连跑几对再换下一个：2026-09-26 两次都撞在这上面
-  （`NO_PROPS` 少画 246k 三角形却 −17%、`NO_DECALS` −13.4%），机理 = 外部干扰周期（分钟级）
+  （`NO_PROPS` 少画 246k 三角形却 −17%），机理 = 外部干扰周期（分钟级）
   **远长于**交替周期（25 秒）；明细见 §21.27/§21.45/§21.61。
   ③ 🔴 **每臂 1 对时，噪声本身就有 ±20%**：同日 A/A（`-Pairs 4`、两臂同 exe）**中位 −5.51%**、
   单对低到 −23.6% ⇒ **1~5% 的效应测不出来**。
   **⇒ 先量 A/A 底噪（同日同参数）、n ≥5 对、报中位差 + 符号一致数；
-  底噪大于效应就写"没测到"，不要给一个数。** 前后都看 `Get-Process msedge` 与 CPU 负载。
+  底噪大于效应就写"没测到"，不要给一个数。** 前后看 `msedge` 与 CPU 负载。
 46. **🔴 审计/闸门工具必须有第三种结局：「没跑成」。** 扫描面 = 0 不算通过、读不到输入要
   fail-closed、**空日志也不算通过**（`history_secret_audit` 在非仓库目录打"没有命中"、
   **`survive_pm` 的判据整整读了一份空文件**，见 §21.51）。**⇒ 先问：它扫到 0 个时会说什么？**
