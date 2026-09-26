@@ -749,6 +749,23 @@ pub struct RemoteEntity {
 // UDP Server / Client
 // ---------------------------------------------------------------------------
 
+/// 序号算术的半程（2^31）：`wrapping_sub` 差值达到它即视为「过期」而非「前进」。
+///
+/// 🔴 这里以前两处各写一遍 `diff >= u32::MAX / 2`（= 2^31-1，比文档说的 2^31 **小 1**），
+/// 而模块文档与两处注释都写「差值 ≥ 2^31 视为过期」⇒ 最远的**合法**前进（差值 2^31-1）
+/// 被当成了过期。判据 = `sequence_staleness_uses_the_documented_half_range`。
+pub const SEQ_HALF_RANGE: u32 = 0x8000_0000;
+
+/// `seq` 是否比 `last` 新（序号算术，RFC 1982 风格）。
+///
+/// **单一真源**：快照与目标状态两条丢弃路径都走这里，别再各写一遍判据
+/// （两处副本正是实例 buffer 那类静默 bug 的常见来源）。
+/// 相等 = 重复、差值 ≥ [`SEQ_HALF_RANGE`] = 乱序/过期 ⇒ 都返回 `false`。
+pub fn seq_is_newer(seq: u32, last: u32) -> bool {
+    let diff = seq.wrapping_sub(last);
+    diff != 0 && diff < SEQ_HALF_RANGE
+}
+
 /// UDP 服务器：绑定监听地址，跟踪已注册客户端并为 Join 分配玩家 id
 pub struct Server {
     socket: UdpSocket,
@@ -1045,12 +1062,9 @@ impl Client {
                 None
             }
             NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
-                // 丢弃乱序/重复快照（seq wrapping 差值 ≥ 2^31 视为过期；相等视为重复）
-                if self.has_snapshot {
-                    let diff = seq.wrapping_sub(self.snapshot_seq);
-                    if diff == 0 || diff >= u32::MAX / 2 {
-                        return None;
-                    }
+                // 丢弃乱序/重复快照（判据 = `seq_is_newer`）
+                if self.has_snapshot && !seq_is_newer(seq, self.snapshot_seq) {
+                    return None;
                 }
                 self.has_snapshot = true;
                 self.snapshot_seq = seq;
@@ -1129,12 +1143,9 @@ impl Client {
                 return Some(player_id);
             }
             NetworkMessage::ObjectiveState { seq, rule_kind, points, .. } => {
-                // 目标状态（据点归属/进度）：乱序/重复丢弃（与 Snapshot 同策略）
-                if self.has_objective {
-                    let diff = seq.wrapping_sub(self.objective_seq);
-                    if diff == 0 || diff >= u32::MAX / 2 {
-                        return None;
-                    }
+                // 目标状态（据点归属/进度）：乱序/重复丢弃（与 Snapshot 同一条判据）
+                if self.has_objective && !seq_is_newer(seq, self.objective_seq) {
+                    return None;
                 }
                 self.has_objective = true;
                 self.objective_seq = seq;
@@ -1834,6 +1845,30 @@ mod tests {
     // -----------------------------------------------------------------------
     // UDP loopback：握手 → Input 往返 → Snapshot 往返 → 客户端应用快照
     // -----------------------------------------------------------------------
+
+    /// 序号算术的**边界**：文档（模块头 + 两处调用点）写「差值 ≥ 2^31 视为过期」，
+    /// 所以 2^31-1 是**最远的合法前进**、必须被接受；2^31 恰好是半程、必须被判过期。
+    ///
+    /// 旧实现两处各写 `diff >= u32::MAX / 2`（= 2^31-1）⇒ 把最远合法前进当成过期
+    /// （注释与代码差 1）。这条测试就是那个差 1 的判据。
+    #[test]
+    fn sequence_staleness_uses_the_documented_half_range() {
+        // 正对照先来：差 1 必须新（保证下面的断言不是因为函数恒 false）
+        assert!(seq_is_newer(8, 7), "前进 1 必须视为新");
+        // 跨 0 回绕也是前进：last = u32::MAX，seq = 1 ⇒ 前进 2
+        assert!(seq_is_newer(1, u32::MAX), "跨 0 回绕必须视为新");
+        // 边界两侧
+        assert!(
+            seq_is_newer(0x7FFF_FFFF, 0),
+            "差值 2^31-1 是最远的合法前进，必须接受（旧写法 >= u32::MAX/2 会把它丢掉）"
+        );
+        assert!(!seq_is_newer(0x8000_0000, 0), "差值 2^31 恰好是半程 ⇒ 视为过期");
+        // 反向一步 = 过期；相等 = 重复
+        assert!(!seq_is_newer(u32::MAX, 0), "差值 2^32-1 = 反向一步 ⇒ 过期");
+        assert!(!seq_is_newer(7, 7), "相等 = 重复 ⇒ 丢弃");
+        // 两条丢弃路径共用同一条判据（单一真源），常量本身也不许再被写错
+        assert_eq!(SEQ_HALF_RANGE, 0x8000_0000, "半程 = 2^31，别写成 u32::MAX/2");
+    }
 
     #[test]
     fn udp_loopback_handshake_input_snapshot_roundtrip() {
