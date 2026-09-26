@@ -7,7 +7,8 @@
 > **只写仍然生效的约束**：铁律 / 未结案 / 教训 / 验收红线。
 > 被推翻的**直接删掉**，不要留"错误 + 更正"两段；已结案的只留一行结论。
 > **进度与时间线一律写进 `docs/PROGRESS.md`，不要写回本文件。**
-> 目标 **< 48KB**；**硬上限 65,536 B**（超了会静默截断，比超标更危险）。
+> 目标 **< 48KB**；**硬上限 65,536 B** —— 实测**超出一点点就真的会被截断**（2026-09-26 截掉了末尾
+> 的教训条目，文件本身没坏、但注入进来的是残的）⇒ 改完必须看字节数，留 500 B 余量。
 > 加之前先问："这条三个月后还成立吗、别人会不会照它做错事"。
 
 ---
@@ -188,9 +189,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 **玩家碰撞契约（2026-09-13 变更，勿退回旧写法）**
 - 🔴 `PlayerBody::push_out_of_aabb` **现在带 Y 判据**：只有玩家的垂直区间
   `[pos.y, pos.y + eye_height]` 与 `Aabb` 的 `[min.y, max.y]` **相交**时才推挤。
-  - 旧契约（**已废弃**）："墙的 y 范围不包含玩家 y，**但水平碰撞仍应生效**"（不管多高，
-    只要 XZ 落进盒子就被水平推开）⇒ **直接后果是永远站不到任何东西上面**，正是用户报的
-    "嵌进地板 / 穿进墙里"。
+  - 旧契约（**已废弃**）："墙的 y 范围不包含玩家 y，**但水平碰撞仍应生效**" ⇒ **永远站不到任何
+    东西上面**，正是用户报的"嵌进地板 / 穿进墙里"。
   - **曾经有 5 条测试把旧契约写死**（`player_y_untouched_by_collision` 的注释甚至
     明写"但水平碰撞仍应生效"）—— 改动时它们会红，那是**预期的**，要改测试而不是改回代码。
 - 🔴 **站立面 = `max(terrain_height_at(x,z), PlayerBody::support_height(world, PLAYER_STEP_UP))`**。
@@ -205,11 +205,11 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（快速转视角时读成"残影/鬼影"）；**`PrintWindow` 抓不到它**
   （它抓的是已合成的完整帧）⇒ **别再用静态截图去证伪"残影"。**
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
-  `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（Windows 日志 4 条 `LiveKernelEvent`
-  **P1=141** = TDR；换 mailbox 后 fps 162、零 VUID；核显同图、独显城市图都正常）。而"静默"本身是引擎
-  缺陷：`wait_for_fences`/`acquire_next_image` 以前用 **`u64::MAX`** 无限等 ⇒ 现在 acquire 1s
-  （连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s（连 3 次 ⇒ `gpu_stalled`，之后 `render()` 直接返回：
-  **画面静止但进程与输入还在**，实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
+  `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（`LiveKernelEvent` **P1=141** = TDR；
+  换 mailbox 后 fps 162、零 VUID）。而"静默"本身是引擎缺陷：`wait_for_fences`/`acquire_next_image`
+  以前用 **`u64::MAX`** 无限等 ⇒ 现在 acquire 1s（连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s
+  （连 3 次 ⇒ `gpu_stalled`，之后 `render()` 直接返回：**画面静止但进程与输入还在**，
+  实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
   **判据** = 测试 `swapchain_waits_are_bounded` + `no_unbounded_wait_on_vulkan_calls`（任何等待里再出现 `u64::MAX` 即红）。
   `perf_run.ps1` 保持 IMMEDIATE。
 - 🔴 **成功 acquire 之后不许提前 return**（`image_available` 信号量**不随交换链重建而重建**）：
@@ -417,11 +417,13 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - ⚠ **预览图只对"几何与比例"可信，对"最终颜色"不可信**：预览走 Blender 自己的光照 +
   AgX 视图变换。**颜色判断必须在引擎里做**（`RV3D_CAM` 固定机位取证）。
 - **顶点预算**：`props: 缓冲扩容 顶点 N/2097152` ⇒ **硬容量 2^21 = 2,097,152**，加细节前先看这个数。
-  🔴 **顶点分布（2026-09-26 普查）**：场景 628 680 顶点里 `building_tall`（132 件 × **2672**）占 **56%**、
-  `tree_oak`（372 件 × **584**）占 **35%** ⇒ **要动就动 building_tall 的单件几何，别看件数多的 tree_oak**。
-  每帧实际提交 171 994 顶点 / 246 172 三角形（桶 146/514 可见）。判据 = `RV3D_PROP_STATS=1` 的
-  `proptypes:`（按顶点排序）与 `propdraw:` 两行。两个资产的 GLB 都已焊接（无 NORMAL 属性 ⇒
-  这 2672 个顶点是立面细节的真实顶点数，不是导出器拆面造成的）。
+  🔴 **顶点分布（2026-09-26）**：场景 520 392 顶点里 `building_tall`（132 件 × **1872**）占 **47%**、
+  `tree_oak`（372 件 × 584）占 **42%** ⇒ 要动就动这两类，别看件数。判据 = `RV3D_PROP_STATS=1` 的
+  `proptypes:`（按顶点排序）与 `propdraw:`（每帧提交量）两行。
+  🔴 **立面 quad 已按行合并**（`wall_panel()`，`20285e8`；单件 −30% 顶点、帧率 +2.8%）：同一行带内
+  非洞格子的顶点色**逐位相同**（`base` 只看层缝、AO 只看 z）⇒ 合并是**逐像素等价**的。
+  **再砍 17% 顶点 ≈ 再 +3%**（道具开销近似正比于顶点数）⇒ **资产改动先用 `propdraw:` 的几何量
+  验收，帧率只用来确认"换到时间了没有"**；GLB 已焊接（无 NORMAL 属性 = 顶点数是真几何不是拆面）。
 - 🔴🔴 **道具/GLB 的两条通则（改动前先读）**：
   1. **`box_project_uv` 的逐面 UV 岛 + `export_normals=True` 的逐面法线都会阻止顶点共享**
      （`tree_oak` 838 三角形曾被导出器拆成 **2264 顶点**）。焊接后的真实分布见下面"顶点预算"条。
@@ -502,7 +504,6 @@ cargo build --release
 cargo test --release
 # 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK：命中 + 击杀 + VUID=0）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
-# 旧的 run_gameplay_smoke.ps1 走 SendInput，在本机结构性跑不通（见铁律 C），别用它判断回归
 # LLM 战术指挥会战（红蓝 128v128，服务端下令；实测 14 条命令全被采纳）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
 # 截图取证（finally 里 taskkill + 硬超时）
@@ -511,11 +512,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag or
 powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
 # 无焦点接管一局（PostMessage 注入：不抢前台、不抓光标、不锁指针）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm_play.ps1 -Tag demo1 -TurnPx 1200 -WalkMs 1500
-# 输入路由诊断（同一按键用 SendInput / PostMessage 各投一次，报游戏线程焦点）
+# 输入路由诊断：同一按键 SendInput / PostMessage 各投一次，报游戏线程焦点
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\input_probe.ps1
-# 输入归还校验（解除 ClipCursor + 复核，给 OK/FAIL）
+# 输入归还校验（解除 ClipCursor + 复核，给 OK/FAIL）；心跳看门狗（**常驻**，别临时 arm，见教训 19）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
-# 心跳看门狗：**常驻**后台即可，不要每次运行临时 arm 一个（见教训 19）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
 # 性能尺子（Windows 原生；压力模式跑 N 秒，读 logs/perf_*.log 出统计，退出时交还机器）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
@@ -603,21 +603,21 @@ release_input.ps1 取代）。
 8. **D4 墙缝天空亮条**（2026-09-19）：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
 9. **mesh 着色器过不了严格 `spirv-val`**（2026-09-15）：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
 10. **PT 盒上限静默截断**（2026-09-14）：512 → 1024 一次分配 + 一次性告警。
-11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 按像素重投影复用，或运动自适应 spp；`signature()` 量化已分层（~0.5m / ~3° / ~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（2026-09-26，含 `RV3D_PT_EXPOSURE`）。
+11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 像素重投影复用或运动自适应 spp；`signature()` 分层（~0.5m/~3°/~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（含 `RV3D_PT_EXPOSURE`）。
 12. **溢出静默丢弃**（2026-09-14）：两个旧常量已不存在；模式仍要防 —— 超容处有 `Renderer::warn_npc_cap_once`。
 13. **联网**（2026-09-26）：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染已接线（`net.rs` 单测）。**仍未做**：NAT 打洞、回滚、双进程真机验证。
 14. **道具进阴影 pass**（2026-09-14）：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
 15. **阴影 `normal_bias` 一直在用**；清了三处**陈旧** `#[allow(dead_code)]` ⇒ ⚠️ 其余 `#[allow]` **必须保留**。
 16. **`tests/rayquery_probe.rs`**（2026-09-14）：文件已不存在。
-17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY`、`waves cleared ['1'..'5']`、`VUID=0 panics=0 device_lost=0`、`RESULT: ALL-OK`（harness = `scripts/run_survive_pm.ps1`）。
+17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0 device_lost=0`（harness = `scripts/run_survive_pm.ps1`）。
 18. ✅ **CoverSeek 占比偏低**（2026-09-26）：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler` ⇒ 7.2%/1.8%）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `RV3D_AI_DIAG=1` 的 `aidiag: tactic 1s`。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（需 shader 后处理）。第一人称枪模动画**已补**（2026-09-26：冲刺/换弹/静止呼吸；判据 = `RV3D_GUN_DIAG=1` + `scripts\run_gunpose_probe.ps1`）。
 20. ✅ **DLSS：不接**（2026-09-25，`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素；另缺运动矢量/jitter/深度暴露。**重开判据**：面积 1/4 而 fps 提升 >40%。
 21. **GLB `byteStride`**（2026-09-14）：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
 22. **`data/` 历史残留**（2026-09-13）：62 → 3 个被引用的。
-23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**（2026-09-25）：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT`。**⇒ 开 `RV3D_VALIDATION=1` 必加 `DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1`，不要去改引擎。**
+23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。
 24. **广场"坑"**（2026-09-19）= 水平面绕序反了（判据 `horizontal_winding_tests`）。
-25. ✅ **`ai_us` 单帧尖峰**（2026-09-25）：是出生点小连通域 bug 的下游症状。`ai_us` = 四段之和（`aidiag: stage 1s`）；压力模式 255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰。
+25. ✅ **`ai_us` 单帧尖峰**：是出生点小连通域 bug 的下游症状；压力模式 255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
 
 ---
 
