@@ -488,8 +488,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
 - **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py`，判据 = **`vuid==0 and panics==0 and killed>=1`**，
-  **无 fps 门槛**（`fps=` 只用于打印）。旧版误把 `fps>=120` 写进这里 —— 那是**旧 SendInput 版
-  `gameplay_smoke.py`** 的规则，而本文件又写着"别用旧脚本"。**两个脚本的口径别混。**
+  **无 fps 门槛**（`fps=` 只用于打印）。旧版误把 `fps>=120` 写进这里 —— 那是 **X11/SendInput
+  时代那个冒烟脚本**的规则（2026-09-26 连同 `run_gameplay_smoke.sh` 一并删除）。**两套口径别混。**
   `playtest_perf.py` 是**时长制**：跑满 `PT_SECS`（默认 600s）即完成，击杀是附带指标、不设门槛、不判 FAIL。
 - 微基准：`cargo test --release <名> -- --nocapture --test-threads=1`
   （`shockwave_path_microbench` / `simd_cull_microbench`）；
