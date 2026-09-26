@@ -13,6 +13,7 @@ tris, world bbox) which are the numbers the engine loader cares about.
 """
 import sys
 import math
+import os
 import bpy
 from mathutils import Vector
 
@@ -22,7 +23,14 @@ if len(argv) < 2:
     raise SystemExit("usage: blender --background --python preview_glb.py -- "
                      "<in.glb> <out_prefix> [view_count]")
 src_path = argv[0]
-out_prefix = argv[1]
+# 🔴 2026-09-26：`render.filepath` 是**相对 Blender 自己的基准目录**解析的，不是进程 CWD
+# （实测：传 `logs\svdprev` 时文件写到了 `C:\logs\`，而本脚本照样打印
+# "PREVIEW wrote logs\svdprev_0_front.png" —— 又是一次"工具说写了、其实写在别处"）。
+# ⇒ 在脚本里就把前缀解析成绝对路径、并把目录建出来，打印的也就是真路径。
+out_prefix = os.path.abspath(argv[1])
+_out_dir = os.path.dirname(out_prefix)
+if _out_dir:
+    os.makedirs(_out_dir, exist_ok=True)
 view_count = int(argv[2]) if len(argv) > 2 else 4
 
 # ------------------------------------------------------------------ clean scene
