@@ -9895,3 +9895,41 @@ Windows 上没松）。**前置条件也记下来**：目标必须先 `rustup ta
 
 验证：`cargo test --release` **611 passed / 0 failed**；`cargo build --release` **0 警告**；
 CJK 字模闸门绿（「审」U+5BA1 与「恰」无字模 ⇒ 改写为「复查」「正好」；这是当天第 5、6 次）。
+
+### 21.59 panic 面审计：18 处 unwrap/expect 里 1 处是真缺陷；GLB 第三处静默默认值（`5d9c569` / `2ec3b1b`）
+
+**方法**：写了个多轴扫描器（`logs/runtime_audit.py`：panic / 浮点相等 / 窄化 cast / 取模），
+注释与字符串先剥掉、`#[cfg(test)]` 整块挖掉 —— 否则测试里的断言会被当成运行时缺陷。
+
+**结果（含"没有发现"的轴，记下来免得下一轮重扫）**：
+
+| 轴 | 命中 | 结论 |
+|---|---|---|
+| `unwrap` / `expect`（生产代码） | 18 | **1 处真缺陷**，其余 17 处逐条看过：`city.rs:308`/`game.rs:5690`/`props.rs:44`/`renderer.rs:7011` 都有紧邻的 `is_none()`/`is_empty()`/`Some(..)` 守着；`ai_command.rs:299` 的 `llm_ok` 已证 `Some` 且长度匹配；`renderer.rs:10602` 是 init 建立的不变量（留消息是对的）；`cpu.rs` 3 处属线程红线（只读）；`bin/rdv.rs` 是开发小工具 |
+| 浮点 `==` | 3 | 全是刻意的哨兵/常量比较（`base_angle == 0.0`、`fps_min == f64::MAX`），非缺陷 |
+| 取模除数 | 9 | 全部有守卫（`if total > 0.0`、`% every.max(1)`、`if !weapons.is_empty()`）或除数来自字面量（`comps` 只可能 2/3/4/1），非缺陷 |
+| 窄化 cast | 135 | 本仓尺寸量级远小于 u32 上限，且关键处已有 `.min(0x7FFF_FF00)` 之类夹取；**没有**逐个复核的价值，记为"看过，不追" |
+
+**真缺陷（`5d9c569`）**：`init_instance() -> Result<Self, String>` 里
+`.create_debug_utils_messenger(&info, None).expect("创建调试报告器失败")`
+—— **函数本来就返回 `Result`**，一次本可以干净返回的错误被升级成进程 abort。
+**为什么既有判据没拦住**：`no_expect_or_unwrap_on_vulkan_calls` 靠一张**调用名表**
+`CALLS: [&str; 8]` 匹配，而这个名字不在表里
+⇒ **判据漏掉一个名字，规则就等于没有**（与教训 46「第三种结局：没跑成」同形）。
+改法：先把名字补进表（`8 → 9`）→ 判据当场在 `renderer.rs:1768` 红 → 改成
+`.map_err(|e| format!("创建调试报告器失败: {e}"))?` → 16 条 `vk_failure_path_tests` 全绿。
+
+**第二处（`2ec3b1b`）**：GLB `COLOR_0` 的分量数写作
+`.map(|s| if s == "VEC4" { 4 } else { 3 }).unwrap_or(3)` —— **任何**别的 type
+（`VEC2`/`MAT4`/拼错的名字/字段缺失）都按 3 分量读，与今天刚修的 `componentType`
+`_ => (4, 1.0)` 是**同一个 bug 的第三个面**：读出来仍是合法浮点数 ⇒ 不崩不报，顶点色静静错位。
+glTF 2.0 只允许 `VEC3`/`VEC4` ⇒ 改为明说读不了；红测
+`glb_unknown_colour_layout_is_an_error_that_names_itself`（修前 `parse_glb` 成功返回），
+而 `glb_parses_real_ak12_orig` / `glb_prop_kit_loads_with_valid_range` 仍绿
+⇒ **真实资产没有一个依赖那条宽松默认值**。
+
+⇒ 一天之内在同一个函数里抓到**三处同形**（`byteStride` → `componentType` → `type`）：
+**"未知输入 ⇒ 用一个看起来合理的默认值"就是本仓的头号静默 bug 形状**，
+比"越界"更值得逐处排查，因为它连越界检查都不会触发。
+
+验证：`cargo test --release` **612 passed / 0 failed**；`cargo build --release` **0 警告**。
