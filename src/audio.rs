@@ -283,7 +283,8 @@ impl OggDecoder for NullOggDecoder {
 
 /// 播放后端 trait：接收混音器输出的交错样本，送往平台音频设备
 // sample_rate/channels 查询预留；write 已用于 SilentSink
-#[allow(dead_code)] // sample_rate/channels 查询预留；write 已用于 SilentSink
+// sample_rate/channels 查询预留；write 已用于 SilentSink
+#[allow(dead_code)] // sample_rate/channels 查询预留；write 已用于 SilentSink（2026-09-26 编译器复查：`channels` 仍无人调用 ⇒ 压制保留）
 pub trait AudioSink {
     /// 设备采样率（Hz）
     fn sample_rate(&self) -> u32;
@@ -1479,7 +1480,9 @@ impl MusicSynth {
 /// 游戏音效种类
 // 事件式合成走 DspSynth；本枚举仍被预合成链路使用（2026-09-26 复查）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // 事件式合成走 DspSynth（2026-09-26 复查：Gunshot/Footstep/Ambient
+// 事件式合成走 DspSynth（2026-09-26 复查：Gunshot/Footstep/Ambient
+                      // 三个变体仍未被构造 ⇒ 压制保留；Hit/Reload/UiBlip 在用）
+#[allow(dead_code)] // 事件式合成走 DspSynth（2026-09-26 编译器复查：Gunshot/Footstep/Ambient
                       // 三个变体仍未被构造 ⇒ 压制保留；Hit/Reload/UiBlip 在用）
 pub enum SfxKind {
     /// 枪声

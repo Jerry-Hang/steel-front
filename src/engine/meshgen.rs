@@ -258,7 +258,7 @@ pub fn cylinder(r: f32, height: f32, seg: u32) -> Mesh {
 
 /// 圆环弧段（torus arc）：环半径 R、管半径 r，沿环角度 [t0, t1]（弧度），
 /// 环平面为 XY（θ 绕 Z），φ 绕管。用于扳机护圈等环形细节（2026-08-16 P2）。
-#[allow(dead_code)]
+
 pub fn torus_arc(ring_r: f32, tube_r: f32, t0: f32, t1: f32, seg_ring: u32, seg_tube: u32) -> Mesh {
     let seg_ring = seg_ring.max(6);
     let seg_tube = seg_tube.max(6);
@@ -292,7 +292,7 @@ pub fn torus_arc(ring_r: f32, tube_r: f32, t0: f32, t1: f32, seg_ring: u32, seg_
 }
 
 /// 单位球体（UV 经纬，法线 = 位置）；预留 NPC 头部等使用
-#[allow(dead_code)]
+
 pub fn sphere(seg: u32, rings: u32) -> Mesh {
     let mut mesh = Mesh::default();
     for j in 0..=rings {

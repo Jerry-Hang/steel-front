@@ -158,7 +158,7 @@ pub const ALL_WEAPONS: [WeaponSpec; 35] = [
 ];
 
 /// 按编号取武器规格：命令窗口输入 1..=35（联合体 1-17 / 同盟 18-35）
-#[allow(dead_code)] // 供测试/命令窗口使用（当前切枪直接以槽位索引等价编号）
+// 供测试/命令窗口使用（当前切枪直接以槽位索引等价编号）
 pub fn spec_by_number(n: usize) -> Option<&'static WeaponSpec> {
     ALL_WEAPONS.get(n.wrapping_sub(1))
 }

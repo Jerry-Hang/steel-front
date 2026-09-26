@@ -196,7 +196,7 @@ impl Army {
     }
 
     /// 该 NPC 所在班
-    #[allow(dead_code)]
+
     /// 该 NPC 是否班长
     pub fn is_leader(&self, npc_id: usize) -> bool {
         self.soldier_slot
@@ -206,7 +206,7 @@ impl Army {
     }
 
     /// 全营存活数
-    #[allow(dead_code)]
+
     /// 指挥节拍：每 0.5s 重新评估军情并下发命令（由 game.rs 在 update_ai 内调用）
     pub fn update(
         &mut self,

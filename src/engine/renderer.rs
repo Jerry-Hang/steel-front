@@ -1155,14 +1155,14 @@ pub fn terrain_height_at(x: f32, z: f32) -> f32 {
 pub struct Renderer {
     _entry: Entry,
     instance: Instance,
-    #[allow(dead_code)]
+
     debug_utils: Option<DebugUtils>,
-    #[allow(dead_code)]
+
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     surface_loader: Surface,
     surface: vk::SurfaceKHR,
     physical_device: vk::PhysicalDevice,
-    #[allow(dead_code)]
+
     physical_device_properties: vk::PhysicalDeviceProperties,
     graphics_queue_family_index: u32,
     present_queue_family_index: u32,
@@ -12067,7 +12067,7 @@ impl Renderer {
 
     /// 设置画质预设（纯 CPU 侧参数：地形 LOD 切换距离 + 实例近/远档分界距离等，
     /// 不触碰 pipeline/shader/swapchain 创建路径）。由外部（main.rs）按需调用。
-    #[allow(dead_code)]
+
     pub fn set_quality(&mut self, preset: QualityPreset) {
         self.quality = preset;
         log::info!("画质预设已切换: {}", preset.label());
@@ -12080,7 +12080,7 @@ impl Renderer {
 
     /// 请求截图：置 pending 标记，本帧渲染完成后读回 swapchain 图像并保存 PNG。
     /// 支持 B8G8R8A8 / R8G8B8A8 的 UNORM/SRGB 像素格式；一切失败返回 Err（不 panic）。
-    #[allow(dead_code)]
+
     pub fn capture_screenshot(&mut self, path: &std::path::Path) -> Result<(), String> {
         if self.screenshot_buffers.is_empty() {
             self.init_screenshot_resources()?;

@@ -45,7 +45,8 @@ pub enum CameraMode {
 }
 
 /// 三模式相机
-#[allow(dead_code)]
+
+#[allow(dead_code)] // 2026-09-26 编译器复查：字段 `fp_vel` 仍无人读（先在飞速度缓冲）⇒ 压制保留
 pub struct Camera {
     /// 当前模式
     pub mode: CameraMode,
