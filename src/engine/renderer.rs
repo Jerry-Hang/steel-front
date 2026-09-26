@@ -828,7 +828,10 @@ const NPC_SPH_SLOT_BASE: u32 = NPC_CYL_SLOT_BASE + MAX_NPC_INSTANCES;
 /// 自发光实体上限（爆炸闪光等瞬时特效，并发数远小于此）
 const MAX_EMISSIVE_INSTANCES: u32 = 64;
 /// 自发光实体在实例 buffer 中的起始 slot：紧接 NPC 区之后（见 NPC_SPH_SLOT_BASE）。
-/// 必须与 build.rs 的 EMISSIVE_INSTANCE_BASE（NPC_INSTANCE_BASE + 3072）同步。
+/// 必须与 build.rs 的 `EMISSIVE_INSTANCE_BASE`（`NPC_INSTANCE_BASE + 9216`，即
+/// **三个 NPC 几何区各 3072**）同步 —— 这条注释 2026-09-26 之前写的是 `+ 3072`，
+/// 照它改容量会算错 9216-3072=6144 个槽。判据 = `instance_slot_layout_tests::
+/// gun_slot_layout_is_pinned` + `marker_band_does_not_bleed_into_npc_band`。
 const EMISSIVE_SLOT_BASE: u32 = NPC_SPH_SLOT_BASE + MAX_NPC_INSTANCES;
 /// 枪模专用 identity 槽（走 flat=1 纯色路径，与 build.rs 顶点 shader 同步）
 const GUN_INSTANCE_INDEX: u32 =

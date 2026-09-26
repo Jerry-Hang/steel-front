@@ -131,15 +131,16 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   → 只能纯平着色；AO / 烘焙光照**必须进顶点色**；**绕序反了的面直接黑掉且不报错**。
 - 实例场与障碍立方体顶点色**全部白化**，颜色只走 tint；地形实例 tint=0.7 灰、
   marker tint=`WorldMarker.tint`（勿混）。
-- `flat_flag`：槽位 ≥ 65601（`NPC_SLOT_BASE`）顶点着色器置 1，片元走纯色路径跳过贴图 50% 混合。
-  改槽位常量须同步 `build.rs::NPC_INSTANCE_BASE` 与 `renderer.rs::NPC_SLOT_BASE`。
+- `flat_flag`（顶点着色器按槽位定，别凭记忆写阈值）：**0=地面 / 1=marker / 2=NPC(≥73729) /
+  1.25=Authored / 3=枪槽**；改槽位常量必须同步 `build.rs::NPC_INSTANCE_BASE` 与
+  `renderer.rs::NPC_SLOT_BASE`（判据 `instance_slot_layout_tests`，65537/73729/83009 全钉死）。
 - `Shape::Authored`（`tint.w = 6.0`）→ `flat_flag = 1.25`，跳过四条程序化表面效果
   （`window_dark` / `glass_shade`+菲涅尔 / `is_canopy` 值噪声 / marker 混凝土皮肤）。
   **不接这条，GLB 立面会被再画一层错位窗带（D11 重演）**。
 - **调试/材质开关**：`RV3D_PROC_TEX=0` 关程序化贴图（见铁律 D）、`RV3D_NO_SHADOW=1` 关阴影、
   `RV3D_DEBUG_SHADOW=1` 看 R=frag_depth / G=阴影图深度均值（见上）、`RV3D_SKIN_TEX=1` 开皮肤贴图
   （缺省 0 纯色回退，冒烟基线不变）、`RV3D_INSPECT=1` 检视模式（实例矩阵用 `Mat4::IDENTITY`）。
-  `flat_flag` 材质编码 **0=地面 / 1=marker / 2=NPC**（binding 7/8）。
+  （编码见上条 `flat_flag`；binding 7/8。）
 
 **地面**
 - 专用平铺 quad（`GROUND_VERTS/INDICES`，4 顶点 6 索引）：绕序必须 `[0,2,1,0,3,2]` 反向才正面朝上；
@@ -593,7 +594,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，必须连 parse 分支一起看。**
 4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`。
 5. **`FLOOR_H` 常量分叉**：6 模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6。
-6. ✅ **`svd_63` 已入库为 `svd12`**（2026-09-26 `c20e154`）：`clean_svd_shot.py` 清产品图 → prep → `assets/guns/svd12.glb`；判据 = 真机切枪 VUID=0 + `gun-glb: svd12 ← …/svd12.glb` + **第一人称实机截图**（§21.60）。
+6. ✅ **`svd_63` 已入库为 `svd12`**（2026-09-26 `c20e154`）：`clean_svd_shot.py` 清产品图 → prep → `assets/guns/svd12.glb`；判据 = 真机切枪 VUID=0 + `gun-glb: svd12` + **第一人称实机截图**（§21.60）。
 7. **D12 士兵近距观感**：`soldier.glb` 实例化绘制；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画（`docs/HANDOFF-soldier.md`）。
 8. **D4 墙缝天空亮条**：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
 9. **mesh 着色器过不了严格 `spirv-val`**：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
@@ -672,7 +673,6 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
   **⇒ 先量 A/A 底噪（同日同参数）、n ≥5 对、报中位差 + 符号一致数；
   底噪大于效应就写"没测到"，不要给一个数。** 前后都看 `Get-Process msedge` 与 CPU 负载。
 46. **🔴 审计/闸门工具必须有第三种结局：「没跑成」。** 扫描面 = 0 不算通过、读不到输入要
-  fail-closed、**空日志也不算通过**（一天在 7 个工具里各抓一处：`history_secret_audit` 在非仓库目录
-  打"没有命中"、`commit_guard::staged_blob` 读失败当空文件、**`survive_pm` 的判据整整读了一份
-  空文件**，见 §21.51）。**⇒ 先问：它扫到 0 个时会说什么？** 约定
+  fail-closed、**空日志也不算通过**（一天在 7 个工具里：`history_secret_audit` 在非仓库目录
+  打"没有命中"、**`survive_pm` 的判据整整读了一份空文件**，见 §21.51）。**⇒ 先问：它扫到 0 个时会说什么？** 约定
   **0 = 真扫过无命中 / 1 = 有命中 / 2 = 根本没扫成**。
