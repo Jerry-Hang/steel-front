@@ -1765,7 +1765,7 @@ impl Renderer {
             let messenger = unsafe {
                 debug_utils_loader
                     .create_debug_utils_messenger(&debug_create_info, None)
-                    .expect("创建调试报告器失败")
+                    .map_err(|e| format!("创建调试报告器失败: {e}"))?
             };
             Some((debug_utils_loader, messenger))
         } else {
@@ -14701,7 +14701,13 @@ mod vk_failure_path_tests {
     //! 会被自己的扫描算进去 —— 那段文字里就写着这两个模式，自指 ⇒ 永远红。
 
     /// Vulkan 调用关键字（与真实写法逐字一致）
-    const CALLS: [&str; 8] = [
+    ///
+    /// 🔴 2026-09-26：`.create_debug_utils_messenger(` **不在这张表里**，于是
+    /// `init_instance()` 里那句 `.expect("创建调试报告器失败")` 一直躲过了
+    /// `no_expect_or_unwrap_on_vulkan_calls` —— 而那个函数**本来就返回 `Result`**，
+    /// 也就是说：一次本可以干净返回的错误被升级成了进程 abort。
+    /// **判据漏掉一个名字，规则就等于没有**（与教训 46「没跑成的第三种结局」同形）。
+    const CALLS: [&str; 9] = [
         ".map_memory(",
         ".create_buffer(",
         ".allocate_memory(",
@@ -14710,6 +14716,7 @@ mod vk_failure_path_tests {
         ".create_image_view(",
         ".create_swapchain(",
         ".create_command_pool(",
+        ".create_debug_utils_messenger(",
     ];
 
     /// 只把**代码行**算进扫描：注释里为了解释这个坑，本来就要写出这两个模式，
