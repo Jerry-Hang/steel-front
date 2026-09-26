@@ -31,7 +31,21 @@ pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
         return Err("非 GLB 文件（缺少 glTF magic）".into());
     }
     let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
-    let json_str = std::str::from_utf8(&bytes[20..20 + json_len]).map_err(|_| "GLB JSON 非 UTF-8")?;
+    // 🔴 2026-09-26（变异模糊发现的一次**真 panic**）：`json_len` 来自**文件头**，是不可信输入，
+    // 修前直接拿它切片 —— 截断/损坏的 GLB 会让 `parse_glb` panic
+    // （实测 "range end index 872 out of range for slice of length 725"），而正确行为是返回 Err。
+    // 下面那个 BIN 块的切片本来就有 `.min(bytes.len())`，唯独 JSON 块漏了。
+    // 判据 = `glb_parser_never_panics_on_mutated_bytes_and_keeps_indices_in_range`。
+    let json_end = 20usize
+        .checked_add(json_len)
+        .filter(|&e| e <= bytes.len())
+        .ok_or_else(|| {
+            format!(
+                "GLB JSON 块长度越界：头里写 {json_len} 字节，实际只剩 {}",
+                bytes.len().saturating_sub(20)
+            )
+        })?;
+    let json_str = std::str::from_utf8(&bytes[20..json_end]).map_err(|_| "GLB JSON 非 UTF-8")?;
     let json = crate::llm_cmd::parse_json_fn(json_str).map_err(|e| format!("GLB JSON 解析失败: {e}"))?;
     let bin_start = 20 + json_len;
     let bin = if bin_start + 8 <= bytes.len() {
@@ -245,7 +259,22 @@ fn append_prim(
             c[0], c[1], c[2],
         ]);
     }
+    // 🔴 2026-09-26（模糊测试发现）：**越界索引必须在这里就被拒**。
+    //
+    // 索引越界在 GPU 上是**顶点抓取越界**：不报 VUID、不 panic，只是整台设备消失
+    // —— 与 `gun_glb_indices_all_in_range` 是同一条失效模式，但那条只覆盖"入库的枪"，
+    // 而 `read_acc` 面对的是**任意资产**（损坏的文件、从网上下来的模型）。
+    // 修前实测：把某个索引改成 `0xFFFFFFFF`，`parse_glb` 照样返回 Ok。
+    // 判据 = `glb_rejects_out_of_range_indices` +
+    // `glb_parser_never_panics_on_mutated_bytes_and_keeps_indices_in_range`。
+    let vert_count = (pos.len() / 3) as f32;
     for v in &ind {
+        if !(*v >= 0.0 && *v < vert_count) {
+            return Err(format!(
+                "GLB 索引越界：索引 {v} 超出本 primitive 的 {} 个顶点（越界索引 = GPU 顶点抓取越界 = 设备消失）",
+                pos.len() / 3
+            ));
+        }
         out.indices.push((*v as u32) + base);
     }
     out.base_color = base_color;
@@ -657,6 +686,106 @@ mod tests {
         assert!(
             err.contains("componentType"),
             "错误信息必须点名 componentType，实际: {err}"
+        );
+    }
+
+    /// 🔴 判据：**越界索引必须在解析阶段就被拒**（模糊测试发现，2026-09-26）。
+    ///
+    /// 索引越界在 GPU 上是**顶点抓取越界**：不报 VUID、不 panic，只是整台设备消失 ——
+    /// 与 `gun_glb_indices_all_in_range` 同一条失效模式，但那条只覆盖"入库的枪"，
+    /// 而 `parse_glb` 面对的是**任意资产**（损坏的文件、下载来的模型）。
+    /// 修前：把某个索引改成 `0xFFFFFFFF`，`parse_glb` **照样返回 Ok**
+    /// （`read_acc` 把 5125 读成 f32 后直接 `as u32` 拼进 `indices`）。
+    #[test]
+    fn glb_rejects_out_of_range_indices() {
+        let colour: Vec<u8> = (0..24u8).collect();
+        let mut bytes = build_glb(
+            &glb_json(
+                r#"{"bufferView":3,"componentType":5123,"count":3,"type":"VEC4","normalized":true}"#,
+                96, 24, 120,
+            ),
+            &glb_bin(&colour),
+        );
+        assert!(parse_glb(&bytes).is_ok(), "基线 GLB 必须能解析");
+        // 索引在 GLB 末尾：3 × u32；把第一个改成 0xFFFFFFFF
+        let n = bytes.len();
+        bytes[n - 12..n - 8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        let err = parse_glb(&bytes)
+            .err()
+            .expect("越界索引必须被拒（否则 GPU 顶点抓取越界 ⇒ 设备消失）");
+        assert!(err.contains("索引"), "错误信息要点出是索引问题，实际: {err}");
+        assert!(err.contains("越界"), "错误信息要点出越界，实际: {err}");
+    }
+
+    /// 🔴 判据：**外部 GLB 是二进制且不可信——畸形字节不许 panic，且"被接受"就必须安全**。
+    ///
+    /// 今天在 `read_acc` 里连修了四处（`byteStride` / 未知 `componentType` / `COLOR_0` 的 `type` /
+    /// 必填字段兜底），它们的共同点是"坏资产读出来的**仍是合法浮点数**" ⇒ 不崩不报、几何全乱。
+    /// 所以这里不只查 panic，还查一条**引擎真正依赖的硬不变式**：
+    /// **解析成功 ⇒ 索引必须全部落在顶点数以内**（越界索引 = GPU 顶点抓取越界 = 设备消失，
+    /// 与 `gun_glb_indices_all_in_range` 同一条。那条只覆盖"入库的枪"，这条覆盖"任意畸形输入"）。
+    ///
+    /// 变异按字节做（GLB 是二进制）：四成只动 BIN 块（数据区，多数仍应解析成功）、
+    /// 两成动 JSON 块、两成按长度截断、两成破坏 GLB 头。自检（教训 27）：必须有一部分仍解析成功。
+    #[test]
+    fn glb_parser_never_panics_on_mutated_bytes_and_keeps_indices_in_range() {
+        let colour: Vec<u8> = (0..24u8).collect();
+        let base = build_glb(
+            &glb_json(
+                r#"{"bufferView":3,"componentType":5123,"count":3,"type":"VEC4","normalized":true}"#,
+                96, 24, 120,
+            ),
+            &glb_bin(&colour),
+        );
+        assert!(parse_glb(&base).is_ok(), "基线 GLB 必须能解析（否则这条测试测的不是解析器）");
+        let mut seed: u32 = 0x5EED_1234;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        // JSON 块之后的偏移 = 数据区；12 字节 GLB 头 + 8 字节块头 + JSON 长度
+        let json_len = u32::from_le_bytes([base[12], base[13], base[14], base[15]]) as usize;
+        let bin_start = 12 + 8 + json_len + 8;
+        let mut ok_count = 0usize;
+        for i in 0..3000 {
+            let mut buf = base.clone();
+            match next() % 10 {
+                0..=3 => {
+                    if bin_start < buf.len() {
+                        let at = bin_start + (next() as usize) % (buf.len() - bin_start);
+                        buf[at] = (next() >> 24) as u8;
+                    }
+                }
+                4..=5 => {
+                    let at = 12 + (next() as usize) % json_len.max(1);
+                    buf[at] = (next() >> 24) as u8;
+                }
+                6..=7 => {
+                    let cut = (next() as usize) % buf.len();
+                    buf.truncate(cut);
+                }
+                8 => {
+                    let at = (next() as usize) % 12.min(buf.len()).max(1);
+                    buf[at] = (next() >> 24) as u8;
+                }
+                _ => {
+                    buf.push((next() >> 24) as u8);
+                }
+            }
+            if let Ok(m) = parse_glb(&buf) {
+                ok_count += 1;
+                assert!(
+                    m.indices.iter().all(|&ix| (ix as usize) < m.verts.len()),
+                    "第 {i} 条变异 GLB 被接受，却带着越界索引（顶点 {} / 最大索引 {:?}）",
+                    m.verts.len(),
+                    m.indices.iter().max()
+                );
+            }
+        }
+        println!("glb fuzz: {ok_count}/3000 条变异资产仍可解析（其余带信息拒绝，全程无 panic）");
+        assert!(
+            ok_count >= 50,
+            "3000 条里只解出 {ok_count} 条 ⇒ 测试没走到解析层"
         );
     }
 }
