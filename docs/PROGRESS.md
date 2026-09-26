@@ -8823,7 +8823,59 @@ sprint 那张枪明显压低、前倾、内转）。要纯姿态差得用固定�
 `perf_run.ps1` 的 `-Extra` 环境变量用 `Remove-Item Env:($expr)` 在 PS 5.1 里根本不成立，
 `-ErrorAction SilentlyContinue` 把报错静默掉 ⇒ **开关会留在环境里带到下一次运行**（随 `7724b38` 修掉）。
 
+### 21.38 阴影拆成「静态图 + 动态图」两张：**+23.5%**（静态几何不再每帧重画）
 
+**(a) 先量：那 18% 到底是谁花的。** §21.27(e) 的成本地图说阴影 ≈18% 帧时间，但没说花在谁身上。
+新加四个诊断门（`RV3D_SHADOW_SKIP_{STATIC,DYNAMIC,GROUND,TERRAIN}`，都是"把实例数置 0"实现跳过），
+交替测量给出定性答案：
 
+| 关闭的东西 | 相对基线 | 结论 |
+|---|---|---|
+| 静态组（地形 / 地面实例场 / marker / 道具） | ≈ 关掉整个阴影 pass | **那 18% 基本全是静态几何** |
+| 动态组（NPC 盒柱球 / 士兵 GLB） | 几乎不变 | NPC 影子非常便宜 |
+| 只关地面实例场 / 只关地形网格 | 几乎不变 | 剩下的在道具与地形网格上，量级都不小 |
 
+⇒ 静态几何每帧重画就是浪费：世界不动时阴影图内容也不动。
 
+**(b) 改法：两张同格式同尺寸（2048² D32）的图。**
+
+| | 静态图 `shadow_image`（binding 5） | 动态图 `shadow_dyn_image`（binding 10） |
+|---|---|---|
+| 内容 | 地形 / 地面实例场 / marker / 道具 | NPC 盒柱球 + 士兵 GLB |
+| 节奏 | 每 `RV3D_SHADOW_STATIC_EVERY` 帧（默认 **30**） | 每 `RV3D_SHADOW_EVERY` 帧（默认 **2**，与拆分前整图节奏一致） |
+| 采样 | 片元 PCF 3×3（原有那段不动） | 再采一次，取 `max()`（两张图遮挡互相独立 ⇒ 或关系）；`DYN_PCF_RADIUS` 默认 1（3×3），0 = 单次采样 |
+
+对照组 = `RV3D_NO_SHADOW_SPLIT=1`：**单张图、两类一起画**，逐帧等价于拆分前的代码路径。
+
+**(c) 实测（外部 ML 负载在跑，绝对帧率偏低，所以只读**同批交替**的相对值）**
+
+`scripts\run_shadow_split_probe.ps1 -Rounds 3 -Secs 20`：
+拆分 **113.32**（108.41–115.90） vs 单图 **91.79**（91.21–92.38） ⇒ **+23.5%**，两臂不重叠。
+同一次会话里紧接着的两条验证层冒烟（同场景、只差一个环境变量）：默认 **127.2** / 对照组 **100.8**
+（+26%，与上面互相印证）。
+
+**(d) 视觉（同机位 F12 + `scripts\png_diff.py`）**：默认 vs `RV3D_NO_SHADOW=1` 差 **18.9%** 像素
+（影子确实在，差异铺满整帧 2560×1177）；默认 vs 单图差 **0.33%**（13 508 px、平均灰度差 5.0）
+—— 两张图与单张图**几乎逐像素一致**，差的只是 NPC 影子边缘的 PCF 合成方式（`max(PCF_a, PCF_b)`
+≠ `PCF(合成深度)`）。同配置两次抓图的地板是 0.015%。
+
+**(e) 🔴 两个实现要点（都踩过）**
+
+1. **两张图必须在 init 时先转成 `SHADER_READ_ONLY_OPTIMAL`**：描述符从第一帧起就按这个布局绑定，
+   而每张图**不一定都会在第一帧被渲染**（关掉拆分时动态图永不渲染、检视模式下两张都不渲染）。
+   不先转就是 `VUID-vkCmdDraw-None-08114` —— 实测 `RV3D_NO_SHADOW_SPLIT=1` 下 **11 条**，
+   补上一次性 barrier 后 **0 条**。这也顺手把"首次渲染用 UNDEFINED 还是 SHADER_READ_ONLY"的分支
+   整个删掉了（现在恒为 SHADER_READ_ONLY，语义唯一）。
+2. **主 descriptor pool 的 `SAMPLED_IMAGE` 计数必须同步 +1**（`max_frames*5` → `*6`）：本仓的池是
+   按 set 数×每 set 绑定数精确分配的，少一个就是 set 分配失败 = **启动即报错**（不是运行期才炸）。
+
+**(f) 闸门**：`cargo test --release` **596 passed / 0 failed、0 警告**（新增
+`static_shadow_pass_is_scheduled_every_n_frames`：默认 30 帧一次、`every=0` 夹成 1 而不是永不画、
+关拆分与检视模式都不单独画）；验证层下 **三条路都 VUID=0**（默认 / `RV3D_NO_SHADOW_SPLIT=1` /
+`RV3D_INSPECT=1`）；**整局 + 验证层** `run_survive_pm.ps1 -Secs 400` ⇒ **VICTORY(246s)、5 波全清、
+VUID=0 panics=0 device_lost=0、fps 164.8、RESULT ALL-OK**。
+附带修掉一个审计发现：NPC 球/柱几何缓冲此前不在任何释放表里（见 `tools/audit_vk_resources.py`）。
+
+**(g) 顺带更新了诊断门的语义**：拆分之后 `RV3D_SHADOW_SKIP_{STATIC,GROUND,TERRAIN}` 只影响静态图
+（1/30 的帧）⇒ 它们现在读出来 ≈ 基线（实测：skip_ground 143.9 / skip_terrain 131.0 / skip_static 124.8
+对基线 133.6）。**这本身就是"那部分工作已经不在每帧路径上"的旁证**，不是"跳过没用"。
