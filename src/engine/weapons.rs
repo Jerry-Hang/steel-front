@@ -258,6 +258,13 @@ pub struct Projectile {
     alive: bool,
     /// 上一帧位置（segment 命中检测用；高速弹避免跳过小目标）
     prev_position: [f32; 3],
+    /// 飞行途中**离最近的 NPC 胸口有多近**（米；`f32::MAX` = 还没量过）。
+    ///
+    /// 🔴 2026-09-25 加：`RV3D_PROJ_DIAG` 量出 44–49% 的子弹"飞到寿命尽头什么都没碰到"，
+    /// 但**分不清**是"差一点点"（瞄点/抖动）还是"差很多"（瞄错目标/几何）。
+    /// 这个量由 `Game::update_projectiles` 在 `RV3D_PROJ_DIAG=1` 时逐帧更新，
+    /// 过期时按 <0.5m / 0.5–2m / >2m 分桶打印（只诊断用，生产路径不读它）。
+    pub min_npc_dist: f32,
 }
 
 impl Projectile {
@@ -296,6 +303,7 @@ impl Projectile {
             explosive: false,
             from_player: false,
             alive: true,
+            min_npc_dist: f32::MAX,
         }
     }
 

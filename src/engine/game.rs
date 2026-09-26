@@ -2507,6 +2507,11 @@ impl Game {
         // 与 `RV3D_AI_DIAG` 分开：harness 要的是位置，不需要 AI 归因那一堆统计。
         if npc_pos_log() && self.time - self.last_npcpos_log >= npc_pos_period(npc_pos_hz()) {
             self.last_npcpos_log = self.time;
+            // 玩家位置同频发一行：harness 的角度是**以玩家位置为基准**算的，而它走路 6 m/s
+            // ⇒ 1 Hz 的 `game:` 行会让"收敛好的准星"指向错的目标点
+            // （弹道埋点：过期弹 117/118 差最近 NPC 有 2m 以上，见 PROGRESS §21.21）。
+            let pp = self.player_pos();
+            log::info!("playerpos: {:.2} {:.2}", pp.x, pp.z);
             for (i, n) in self.npcs.iter().enumerate() {
                 // `vis=0/1`：玩家眼位能不能看到它（= 这一枪的射线有没有被障碍挡）。
                 // 🔴 2026-09-25 加：埋点量出**33% 的子弹打在掩体上**（§21.18），
@@ -4074,9 +4079,14 @@ impl Game {
         static PROJ_OBSTACLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         static PROJ_NPC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         static PROJ_EXPIRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        if *PROJ_DIAG_ON
-            .get_or_init(|| std::env::var("RV3D_PROJ_DIAG").as_deref() == Ok("1"))
-        {
+        // 过期弹**差多远**（分桶）：<0.5m = 差一点点（瞄点/抖动），0.5–2m = 接近，
+        // >2m = 根本不是瞄着它飞的（瞄错目标/几何）。判"该怎么修"全靠这三格。
+        static PROJ_MISS_NEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static PROJ_MISS_MID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static PROJ_MISS_FAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let diag = *PROJ_DIAG_ON
+            .get_or_init(|| std::env::var("RV3D_PROJ_DIAG").as_deref() == Ok("1"));
+        if diag {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
@@ -4088,6 +4098,9 @@ impl Game {
                 let obs = PROJ_OBSTACLE.swap(0, Relaxed);
                 let npc = PROJ_NPC.swap(0, Relaxed);
                 let exp = PROJ_EXPIRED.swap(0, Relaxed);
+                let m_near = PROJ_MISS_NEAR.swap(0, Relaxed);
+                let m_mid = PROJ_MISS_MID.swap(0, Relaxed);
+                let m_far = PROJ_MISS_FAR.swap(0, Relaxed);
                 let first = self.projectiles.first().map(|p| {
                     format!(
                         "pos=({:.0},{:.0},{:.0}) dist={:.0}m",
@@ -4107,19 +4120,39 @@ impl Game {
                     })
                     .fold(f32::MAX, f32::min);
                 log::info!(
-                    "proj-diag: alive={} first=[{}] nearest_npc={:.0}m 去向(2s) npc={} obstacle={} expired={}",
+                    "proj-diag: alive={} first=[{}] nearest_npc={:.0}m 去向(2s) npc={} obstacle={} expired={} | 过期弹离最近 NPC: <0.5m={} 0.5-2m={} >2m={}",
                     self.projectiles.len(),
                     first.unwrap_or_else(|| "none".to_string()),
                     nearest_npc,
                     npc,
                     obs,
-                    exp
+                    exp,
+                    m_near,
+                    m_mid,
+                    m_far
                 );
             }
         }
         for p in self.projectiles.iter_mut() {
             if p.is_alive() {
                 p.update(dt);
+                // 只诊断时算：这发弹离**最近 NPC 胸口**有多近（过期分桶用）。
+                // 字段级借用互不相交（projectiles 可变 / npcs 只读），不必克隆。
+                if diag {
+                    let mut best = f32::MAX;
+                    for n in &self.npcs {
+                        let dx = n.position[0] - p.position[0];
+                        let dy = n.position[1] + 1.2 - p.position[1];
+                        let dz = n.position[2] - p.position[2];
+                        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if d < best {
+                            best = d;
+                        }
+                    }
+                    if best < p.min_npc_dist {
+                        p.min_npc_dist = best;
+                    }
+                }
             }
         }
         // 弹着标记老化：先老化再生成（本帧刚打的孔从 age=0 开始）
@@ -4133,6 +4166,13 @@ impl Game {
         for p in old {
             if !p.is_alive() {
                 PROJ_EXPIRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if p.min_npc_dist < 0.5 {
+                    PROJ_MISS_NEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else if p.min_npc_dist <= 2.0 {
+                    PROJ_MISS_MID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    PROJ_MISS_FAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 // 弹着点：仅爆炸弹（如未来榴弹武器）过期时引爆 AoE；普通子弹静默消失
                 // （修复：V3.0 高速弹射程尽头"神秘连发爆炸"特效——子弹不是炸弹）
                 if p.explosive() {
