@@ -28,7 +28,8 @@ const DEFAULT_ROLLOFF: f32 = 0.02;
 
 /// WAV 解析错误
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // WAV 解析错误类型：随 parse_wav 管线预留（rodio 集成后启用）
+#[allow(dead_code)] // WAV 解析错误类型：parse_wav 只有测试在用，生产未接线
+                      // （2026-09-26 复查：`rodio` 这条出路不存在 —— 本仓禁新增第三方依赖）
 pub enum WavError {
     /// 不是 RIFF 容器
     NotRiff,
@@ -70,7 +71,7 @@ impl std::error::Error for WavError {}
 
 /// 音频片段：持有 f32 样本（帧交错）与采样率
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // 字段/访问器随 WAV 管线预留；new 已用于程序化测试音
+// 字段/访问器目前都在生产路径上被引用（2026-09-26 复查：删掉 allow 后两种 profile 都 0 警告）
 pub struct AudioClip {
     /// 样本数据，按帧交错：[f0_ch0, f0_ch1, f1_ch0, ...]
     samples: Vec<f32>,
@@ -163,7 +164,7 @@ const FORMAT_PCM: u16 = 1;
 const FORMAT_FLOAT: u16 = 3;
 
 /// 解析 WAV 字节流为 `AudioClip`（支持 PCM 8/16/24/32 位整数与 32 位 float）
-#[allow(dead_code)] // WAV 文件加载预留（rodio 未装，当前用程序化测试音）
+#[allow(dead_code)] // WAV 文件加载：生产用程序化测试音，此入口仅测试用（2026-09-26 复查）
 pub fn parse_wav(bytes: &[u8]) -> Result<AudioClip, WavError> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" {
         return Err(WavError::NotRiff);
@@ -281,6 +282,7 @@ impl OggDecoder for NullOggDecoder {
 }
 
 /// 播放后端 trait：接收混音器输出的交错样本，送往平台音频设备
+// sample_rate/channels 查询预留；write 已用于 SilentSink
 #[allow(dead_code)] // sample_rate/channels 查询预留；write 已用于 SilentSink
 pub trait AudioSink {
     /// 设备采样率（Hz）
@@ -427,7 +429,7 @@ impl MasterVolume {
     }
 
     /// 当前主音量
-    #[allow(dead_code)] // 查询 getter 预留（set/gain 已用）
+    // 查询 getter 已被引用（2026-09-26 复查：压制已删，编译器判据同左）
     pub fn get(&self) -> f32 {
         self.0
     }
@@ -1128,7 +1130,7 @@ impl DspSynth {
     }
 
     /// 手榴弹落地滚动：短促低音 thud（60Hz 正弦 × 快衰减 + 噪声，~0.1s），体积固定 0.6
-    #[allow(dead_code)] // 预留：主会话 game.rs 手榴弹落地事件接入（指令单 #4 阶段三，集成由主会话完成）
+    // 主会话 game.rs 的手榴弹落地事件已接入（2026-09-26 复查：压制已删）
     pub fn play_grenade_bounce(&mut self, position: Vec3) -> VoiceId {
         self.spawn_full(
             SynthKind::GrenadeBounce,
@@ -1475,8 +1477,10 @@ impl MusicSynth {
 }
 
 /// 游戏音效种类
-#[allow(dead_code)] // 预留：事件式合成已走 DspSynth，旧 SfxKind 仅保留预合成链路（Hit/Reload/UiBlip 在用）
+// 事件式合成走 DspSynth；本枚举仍被预合成链路使用（2026-09-26 复查）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 事件式合成走 DspSynth（2026-09-26 复查：Gunshot/Footstep/Ambient
+                      // 三个变体仍未被构造 ⇒ 压制保留；Hit/Reload/UiBlip 在用）
 pub enum SfxKind {
     /// 枪声
     Gunshot,
@@ -1564,27 +1568,27 @@ impl SfxBank {
 }
 
 /// 合成辅助：按帧数生成单声道 clip（采样率合法且帧数 > 0）
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn build_clip(sample_rate: u32, frames: usize, f: impl FnMut(usize) -> f32) -> Arc<AudioClip> {
     let samples: Vec<f32> = (0..frames).map(f).collect();
     Arc::new(AudioClip::new(samples, sample_rate, 1).expect("SfxBank 合成参数合法"))
 }
 
 /// 确定性伪随机数（LCG，固定种子，std-only，无 rand 依赖）
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn lcg_next(state: &mut u32) -> u32 {
     *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
     *state
 }
 
 /// LCG 输出归一化为 [-1, 1) 的白噪声样本
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn noise_unit(state: &mut u32) -> f32 {
     (lcg_next(state) as f32 / u32::MAX as f32) * 2.0 - 1.0
 }
 
 /// 枪声：0.15s，白噪声 × 快指数衰减 + 80Hz 低频 thump（峰值约 0.55）
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn synth_gunshot(sample_rate: u32) -> Arc<AudioClip> {
     let frames = (0.15 * sample_rate as f32) as usize;
     let sr = sample_rate as f32;
@@ -1598,7 +1602,7 @@ fn synth_gunshot(sample_rate: u32) -> Arc<AudioClip> {
 }
 
 /// 脚步声：0.08s，120Hz 低频衰减脉冲 + 轻微噪声（峰值约 0.48）
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn synth_footstep(sample_rate: u32) -> Arc<AudioClip> {
     let frames = (0.08 * sample_rate as f32) as usize;
     let sr = sample_rate as f32;
@@ -1612,7 +1616,7 @@ fn synth_footstep(sample_rate: u32) -> Arc<AudioClip> {
 }
 
 /// 命中：0.06s，短促 1kHz tick（正弦 × 快衰减，峰值约 0.5）
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn synth_hit(sample_rate: u32) -> Arc<AudioClip> {
     let frames = (0.06 * sample_rate as f32) as usize;
     let sr = sample_rate as f32;
@@ -1623,7 +1627,7 @@ fn synth_hit(sample_rate: u32) -> Arc<AudioClip> {
 }
 
 /// 换弹：0.25s，两个短噪声脉冲 click（间隔约 0.12s，峰值约 0.52）
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn synth_reload(sample_rate: u32) -> Arc<AudioClip> {
     let frames = (0.25 * sample_rate as f32) as usize;
     let sr = sample_rate as f32;
@@ -1642,7 +1646,7 @@ fn synth_reload(sample_rate: u32) -> Arc<AudioClip> {
 }
 
 /// HUD 提示音：0.08s，880Hz 正弦 × 起落包络（峰值约 0.4）
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn synth_ui_blip(sample_rate: u32) -> Arc<AudioClip> {
     let frames = (0.08 * sample_rate as f32) as usize;
     let sr = sample_rate as f32;
@@ -1657,7 +1661,7 @@ fn synth_ui_blip(sample_rate: u32) -> Arc<AudioClip> {
 /// 环境音：2.0s，60Hz + 120Hz 低频 drone + 0.5Hz 缓动（峰值约 0.35）
 ///
 /// 60Hz/120Hz/0.5Hz 在 2.0s 内均为整数周期，循环点无缝，供 `looping` 播放。
-#[allow(dead_code)] // 预留：SfxBank 合成辅助
+// SfxBank 合成辅助，已被引用（2026-09-26 复查：压制已删）
 fn synth_ambient(sample_rate: u32) -> Arc<AudioClip> {
     let frames = (2.0 * sample_rate as f32) as usize;
     let sr = sample_rate as f32;
