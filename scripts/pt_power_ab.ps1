@@ -1,8 +1,17 @@
-﻿param([int]$Seconds = 22)
+param([int]$Seconds = 22)
 
-# PT 开/关 A/B 实测 GPU 功耗·利用率·显存·帧率（回答"全景路径追踪到底有没有在跑"）
+# PT on/off A/B: measures GPU power, utilisation, VRAM and fps, to answer the question
+# "is the full-scene path tracer actually running?".
+#
+# ASCII ONLY (2026-09-26): this file used to have Chinese comments, and Windows PowerShell 5.1
+# reads a BOM-less script as ANSI -- the trailing character of line 3 was decoded as a GBK lead
+# byte whose trail byte became the line ending, so `function Run-Case(...)` on the next line was
+# glued onto the comment and silently commented out. The script could never have worked: every
+# Run-Case call at the bottom would fail with "not recognized". Same for line 5 ($csv) and the
+# last case (pton1536). See docs/PROGRESS.md 2026-09-26.
 function Run-Case([string]$name, [string]$ptLive, [string]$spp, [string]$size = '512') {
-    # Start-Job 默认工作目录是用户主目录，相对路径会把 CSV 写到别处 -> 必须绝对路径
+    # Start-Job runs in the user's home directory, so a relative path would write the CSV
+    # somewhere else -- use an absolute path.
     $csv = Join-Path (Get-Location).Path "data\gpu_$name.csv"
     Remove-Item $csv -ErrorAction SilentlyContinue
     $job = Start-Job -ArgumentList $csv -ScriptBlock {
@@ -33,20 +42,23 @@ function Run-Case([string]$name, [string]$ptLive, [string]$spp, [string]$size = 
         [pscustomobject]@{ W = [double]$w; U = [int]$u; M = [double]$m }
     }
     if ($rows) {
-        "{0,-7} n={1}  功耗 avg={2:F1}W max={3:F1}W | 利用率 avg={4:F0}% | 显存 avg={5:F0}MiB" -f `
+        "{0,-7} n={1}  power avg={2:F1}W max={3:F1}W | util avg={4:F0}% | vram avg={5:F0}MiB" -f `
             $name, $rows.Count, `
             (($rows | Measure-Object W -Average).Average), (($rows | Measure-Object W -Maximum).Maximum), `
             (($rows | Measure-Object U -Average).Average), (($rows | Measure-Object M -Average).Average)
-    } else { "$name 无 nvidia-smi 采样" }
+    } else { "$name : no nvidia-smi samples" }
 
     $f = Select-String -Path $log -Pattern 'fps=([0-9\.]+)' -ErrorAction SilentlyContinue | ForEach-Object { [double]$_.Matches[0].Groups[1].Value }
-    if ($f) { "        游戏 fps avg={0:F1} max={1:F1}（n={2}）" -f (($f | Measure-Object -Average).Average), (($f | Measure-Object -Maximum).Maximum), $f.Count }
-    Select-String -Path $log -Pattern 'PT-RESIDENT|RT: 路径追踪' -ErrorAction SilentlyContinue | ForEach-Object { "        " + $_.Line }
+    if ($f) { "        game fps avg={0:F1} max={1:F1} (n={2})" -f (($f | Measure-Object -Average).Average), (($f | Measure-Object -Maximum).Maximum), $f.Count }
+    # Match on the ASCII prefix only: the engine's own line is "RT: ... = on/off" (UTF-8 log),
+    # and a Chinese pattern inside an ANSI-read script would be mojibake and never match anyway.
+    Select-String -Path $log -Pattern 'PT-RESIDENT|RT: ' -ErrorAction SilentlyContinue | ForEach-Object { "        " + $_.Line }
 }
 
 Run-Case 'ptoff' '0' '256' '512'
 Start-Sleep -Seconds 3
 Run-Case 'pton512' '1' '4096' '512'
 Start-Sleep -Seconds 3
-# 可证伪对照：PT 若真在算，像素 ×9 必然掉帧抬功耗；若纹丝不动则说明通道是假的
+# Falsifiable contrast: if PT really computes, 9x the pixels must cost fps and raise power;
+# if both stay flat, the PT channel is not doing anything.
 Run-Case 'pton1536' '1' '4096' '1536'

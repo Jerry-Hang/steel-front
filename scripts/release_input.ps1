@@ -96,11 +96,15 @@ if ($fixed -gt 1) { for ($i = 1; $i -lt $fixed; $i++) { [RlsInput]::ShowCursor($
 $visible1 = Get-CursorVisible
 
 # -- 4. verdict: every item verified, none inferred -----------------------------
-# 进程退出与窗口销毁是**异步**的：调用方（如 cap_safe.ps1 的 finally）刚 kill 完就
-# 立刻调本脚本时，steel-front 可能还在收尾、ClipCursor 也尚未随窗口销毁而失效，
-# 于是单次判定会误报 FAILED。2026-09-12 实测踩到过一次，而同一条命令紧接着再跑一次
-# 就是 OK —— 安全网的**假警报和漏报一样有害**，它会让人以后不再当回事。
-# 这里给 1.5 秒收敛窗口：每轮都重试解除限制，只在**始终**不满足时才判负。
+# Process exit and window destruction are ASYNC: when a caller (e.g. cap_safe.ps1's finally)
+# has just killed the game and immediately runs this script, steel-front may still be tearing
+# down and ClipCursor may not be released yet, so a single-shot verdict reports FAILED. That
+# false alarm was hit once on 2026-09-12 while the very same command run again was OK -- a
+# safety net's false alarms are as harmful as misses (people stop believing it).
+# Hence a 1.5 s convergence window: retry the release every round and only fail if it NEVER
+# converges. (ASCII only: a trailing Chinese character in a comment is read as a GBK lead byte
+# whose trail byte becomes the line ending, which silently commented out the next line -- here
+# `$alive = 0`. See docs/PROGRESS.md 2026-09-26.)
 $alive = 0
 $clipAfter = $null
 $visible1 = $false

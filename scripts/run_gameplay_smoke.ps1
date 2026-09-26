@@ -1,5 +1,15 @@
-# Steel Front Windows 原生冒烟启动器（替代 run_gameplay_smoke.sh）
-# 用法: powershell -ExecutionPolicy Bypass -File scripts/run_gameplay_smoke.ps1
+# Steel Front Windows-native smoke launcher (replaces run_gameplay_smoke.sh).
+# Usage: powershell -ExecutionPolicy Bypass -File scripts/run_gameplay_smoke.ps1
+#
+# DEPRECATED: this one drives the game with SendInput, which structurally cannot work on this
+# machine (input goes to whatever window owns the foreground). Use scripts\run_smoke_pm.ps1
+# (PostMessage injection) instead -- see AGENTS.md, section 3. Kept only as a historical record.
+#
+# ASCII ONLY (2026-09-26): with Chinese comments, Windows PowerShell 5.1 read this file as ANSI
+# and several trailing characters ate their line ending, gluing the NEXT line onto the comment.
+# That silently commented out real code here: the pre-run `Stop-Process`, `$env:RV3D_STRESS_AI`,
+# the `Start-Process` that launches the game and the `python ...` smoke call itself.
+# See docs/PROGRESS.md 2026-09-26.
 $ErrorActionPreference = "Continue"
 Set-Location "$PSScriptRoot\.."
 $ROOT = (Get-Location).Path
@@ -7,24 +17,25 @@ $EXE = (Join-Path $ROOT "target\release\steel-front.exe")
 $LOG = (Join-Path $ROOT "smoke.log")
 $LOGERR = "$LOG.err"
 
-# 清场：杀残留游戏进程
+# Clean slate: kill any leftover game process.
 Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 Remove-Item -Force $LOG, $LOGERR -ErrorAction SilentlyContinue
 
-# 冒烟固定波次模式：NPC 在中央安全环内（无障碍遮挡），保证注入瞄准-击杀链路确定性；
-# 默认大战场（红 64 vs 蓝 63+玩家）由 scripts/switch_smoke.ps1 与手动 battle 冒烟覆盖。
+# Smoke uses fixed-wave mode: NPCs sit inside the central safe ring (no obstacle occlusion),
+# which keeps the injected aim/kill chain deterministic. The default large battle
+# (red 64 vs blue 63 + player) is covered by scripts/switch_smoke.ps1 and manual runs.
 $env:RV3D_STRESS_AI = "0"
-# 启动游戏（-WorkingDirectory 必须显式指定：-File 模式下 Set-Location 不改子进程 cwd，
-# 否则游戏找不到 assets/*.spv 会渲染器初始化失败退出）
+# Launch the game (-WorkingDirectory must be explicit: under -File, Set-Location does not change
+# the child process cwd, and the game would fail to find assets/*.spv and exit during renderer init).
 Start-Process -FilePath $EXE -WorkingDirectory $ROOT -RedirectStandardOutput $LOG -RedirectStandardError $LOGERR -PassThru | Out-Null
 Start-Sleep -Seconds 8
 
-# 跑冒烟（SendInput 注入 + 日志断言，脚本内部合并两个日志）
+# Run the smoke (SendInput injection + log assertions; the script merges both logs).
 python scripts\gameplay_smoke_win.py $LOG
 $RC = $LASTEXITCODE
 
-# 收尾
+# Teardown.
 Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 Write-Host "=== log tail (last 20 lines) ==="

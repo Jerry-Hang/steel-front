@@ -1,6 +1,12 @@
 
-# 钢铁前线 → 千问桥（半自动）：自动激活千问 → 点击输入框 → 粘贴截图 → 输入英文问题 → 发送
-# 用法: .ask_qianwen.ps1 -Image <png路径> -Question "英文问题" [-WaitSec 10]
+# Steel Front -> Qwen bridge (semi-automatic): focus Qwen, click the input box, paste the
+# screenshot, type an English question, send it.
+# Usage: .ask_qianwen.ps1 -Image <png path> -Question "english question" [-WaitSec 10]
+#
+# ASCII ONLY (2026-09-26): with Chinese comments this file was read as ANSI by Windows
+# PowerShell 5.1, and a trailing multi-byte character ate the following line -- here
+# `$ix = $rect.Left + [int]($w * 0.25)` was silently commented out, so the click landed at
+# x=0. See docs/PROGRESS.md 2026-09-26.
 param(
   [string]$Image = '',
   [string]$Question = 'Describe this screenshot briefly.',
@@ -20,13 +26,13 @@ public class QWB {
 }
 "@
 $proc = Get-Process | Where-Object { $_.ProcessName -eq 'qianwen' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-if (-not $proc) { Write-Output 'ERR: qianwen 进程未找到'; exit 1 }
+if (-not $proc) { Write-Output 'ERR: qianwen process not found'; exit 1 }
 [QWB]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
 Start-Sleep -Milliseconds 800
 $rect = New-Object RECTB
 [QWB]::GetWindowRect($proc.MainWindowHandle, [ref]$rect) | Out-Null
 $w = $rect.Right - $rect.Left; $h = $rect.Bottom - $rect.Top
-# 输入框：窗口左 25%、底部 -45（千问客户端实测位置）
+# Input box: 25% from the window's left edge, 45 px above its bottom (measured on the client).
 $ix = $rect.Left + [int]($w * 0.25)
 $iy = $rect.Top + $h - 45
 [QWB]::SetCursorPos($ix, $iy) | Out-Null
@@ -40,11 +46,11 @@ if ($Image -ne '') {
   Start-Sleep -Milliseconds 300
   [System.Windows.Forms.SendKeys]::SendWait('^v')
   Start-Sleep -Milliseconds 2500
-  Write-Output 'OK: 图片已粘贴'
+  Write-Output 'OK: image pasted'
 }
 [System.Windows.Forms.SendKeys]::SendWait($Question)
 Start-Sleep -Milliseconds 500
 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
-Write-Output ('OK: 已发送（等 ' + $WaitSec + ' 秒回答）')
+Write-Output ('OK: sent (waiting ' + $WaitSec + ' s for the answer)')
 Start-Sleep -Seconds $WaitSec
-Write-Output 'OK: 请查看千问窗口中的回答'
+Write-Output 'OK: read the answer in the Qwen window'
