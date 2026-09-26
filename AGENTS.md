@@ -46,7 +46,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `engine/city.rs` | 2357 | 程序化城市生成（40+ 条几何/契约测试） |
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
 | `net.rs` | 2041 | UDP 联机（协议魔数 'S'） |
-| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**（2026-09-14 由 2.26 MB 裁到 166 KB）。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`：**它红 = 有人加了没有字模的字**，而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统 `NotoSansSC-VF.ttf` 顶替：会改掉每个字形，红 `cjk_glyph_generates`）。**注释里的字同样算**。快速定位用 `python tools/find_codepoint.py <HEX> <file>` |
+| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**（2026-09-14 由 2.26 MB 裁到 166 KB）。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`：**它红 = 有人加了没有字模的字**，而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统 `NotoSansSC-VF.ttf` 顶替：会改掉字形，红 `cjk_glyph_generates`）；**注释里的字同样算**。定位用 `python tools/find_codepoint.py <HEX> <file>` |
 | `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1559 / 1188 / 1124 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
 | `llm_cmd.rs` | 630 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
@@ -205,9 +205,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 **呈现模式（2026-09-13）**
 - `RV3D_PRESENT_MODE` = `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**（基准最稳），
-  **玩家路径由 `SteelFront.bat` 设 `mailbox`**（不撕裂；FIFO 在独显直连下等不到 vblank 而锁死）。
-- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（快速转视角时读成"残影/鬼影"）；**`PrintWindow` 抓不到它**
-  （它抓的是已合成的完整帧）⇒ **别再用静态截图去证伪"残影"。**
+  **玩家路径由 `SteelFront.bat` 设 `mailbox`**（FIFO 在独显直连下等不到 vblank 会锁死）。
+- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（转视角读成"残影"），而 **`PrintWindow` 抓不到它**
+  （抓的是已合成帧）⇒ **别用静态截图去证伪"残影"。**
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
   `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（`LiveKernelEvent` **P1=141** = TDR；
   换 mailbox 后 fps 162、零 VUID）。而"静默"本身是引擎缺陷：`wait_for_fences`/`acquire_next_image`
@@ -288,9 +288,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 ### ⭐ 鼠标安全协议（用户 2026-09-03 明确要求，2026-09-12 实测**证实其正确**）
 
-> 引擎自己抓光标，抓取期间鼠标被锁 → 用户的机器会"像死机"。
+> 引擎自己抓光标，抓取期间鼠标被锁 → 用户的机器会「像死机」。
 > **按键用 `PostMessage` 投给游戏窗口句柄，不用 `SendInput`、不用 `SetForegroundWindow`。**
-> 实测 `SendInput` 喂的是前台窗口队列（6/6 被系统接受、游戏一个没收到）；`PostMessage` 才进目标窗口队列。
+> 实测 `SendInput` 喂的是前台窗口队列（6/6 被接受、游戏一个没收到）；`PostMessage` 才进目标窗口队列。
 > 截图用 `PrintWindow`，不前置窗口。
 > 每次启动游戏必须用 `cap_safe.ps1`（`finally` 里 taskkill + 硬超时）。
 > 手动流程 = 启动后点一下游戏窗口 → 按 R 进入操控；死亡后再按一次 R 复活。
@@ -450,16 +450,15 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - **线程红线**：攻击态/接火 NPC **必须每帧步进**，降频仅限无感知的非攻击 NPC
   （`AI_FAR_DECIMATE=4`，`RV3D_AI_DECIMATE=off` 关闭）。渲染**不拆线程**（仍=主线程）。
   **不可写死 SMT 奇偶**：运行时读 sysfs 每对取最小 vCPU，不可读时回退旧行为。
-- 硬件门槛：最低 3300X + RX 6500 XT（RDNA2，mesh shader 起点）4C8T、内存最低 8GB / 推荐 12GB+；
-  推荐 8C16T 中端独显；最高 16C32T + RTX 40/50。详见 `docs/hardware-requirements-2026-08-11.md`。
+- 硬件门槛：最低 3300X + RX 6500 XT（RDNA2，mesh shader 起点）4C8T、内存 8GB / 推荐 12GB+；
+  推荐 8C16T 中端独显，最高 16C32T + RTX 40/50。详见 `docs/hardware-requirements-2026-08-11.md`。
 
 ---
 
 ## 铁律 F — 协作 / 上下文 / 工具
 
 - **并行分身**：文件集两两不相交；**分身禁止 cargo**（12GB 只允许一个）**与 git**；
-  `renderer.rs` 上万行**禁止整文件重写**，只许精确 edit；跨文件接口由主 Agent 定义；
-  开工前先把在飞改动 commit 成干净基线。
+  `renderer.rs` 上万行**禁止整文件重写**，只许精确 edit；开工前先把在飞改动 commit 成干净基线。
 - **上下文节约**：不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）、不反汇编（看 .spv 先 `spirv-dis` 到临时文件）、不反复读同一文件；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat`。⚠ `Get-Content` 数行数不准，**行号以 `read` 工具为准**（教训 8）。
 - 🔴 **`cargo check` 不能替代 0 警告闸门**：`check` 与 `build` 的 fingerprint 不同，**`check` 会重放自己
   缓存下来的旧诊断**（实测报 28 条 `never used`，而同一次 `git checkout` 后 `build --release` 是 0 警告）。
@@ -512,13 +511,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag or
 powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
 # 无焦点接管一局（PostMessage 注入：不抢前台、不抓光标、不锁指针）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm_play.ps1 -Tag demo1 -TurnPx 1200 -WalkMs 1500
-# 输入路由诊断：同一按键 SendInput / PostMessage 各投一次，报游戏线程焦点
+# 输入路由诊断：同一按键两种注入各投一次，报游戏线程焦点
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\input_probe.ps1
 # 输入归还校验（解除 ClipCursor + 复核，给 OK/FAIL）；心跳看门狗（**常驻**，别临时 arm，见教训 19）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
 # 性能尺子（压力模式跑 N 秒，读 logs/perf_*.log 出统计）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
+# 交替 A/B 驱动器（教训 24 的实现：逐对交替 + 配对差中位数 + 互换对照 + A/A 底噪）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ab_pair.ps1 -Pairs 5
 # 画面差分（第一道筛子）：同机位 A/B 的差异像素占比 + **差异包围盒**
 # —— 没有包围盒，几百个差异像素既可能是"引擎坏了"也可能是"HUD 上的 FPS 数字变了"
 python scripts\png_diff.py screenshots\a.png screenshots\b.png
@@ -532,10 +533,9 @@ release_input.ps1 取代）。
 
 ## 铁律 G — 凭据 / 提交白名单（2026-09-22）
 
-- **真实密钥/令牌一律不进仓库**，包括"先提交、回头再删"：历史 blob 清不掉，公网爬虫会收割。
-  🔴 **2026-08-21 已真实发生**（`scripts/vision_ps.ps1` / `vision_test.py` 硬编码 DeepSeek key 并推送到公开远端，
-  删文件也删不掉历史 —— 见 `docs/PROGRESS.md` 2026-09-22 节）。**密钥只从环境变量或仓库外文件读**，
-  文档写占位符 `<YOUR_KEY>`。
+- **真实密钥/令牌一律不进仓库**，包括「先提交、回头再删」：历史 blob 清不掉，公网爬虫会收割。
+  🔴 **2026-08-21 已真实发生**（`scripts/vision_ps.ps1` / `vision_test.py` 硬编码 DeepSeek key 并推送到公开远端 ——
+  见 `docs/PROGRESS.md` 2026-09-22 节）。**密钥只从环境变量或仓库外文件读**，文档写占位符 `<YOUR_KEY>`。
 - **提交侧闸门**：`core.hooksPath` → `.githooks`（`scripts/install_git_hooks.ps1` 安装，
   **链式保留** `~/.dsh/gates/hooks` 的 pre-push 密钥门 —— 直接改指会把它**静默**关掉）。
   规则 = 路径白名单 + 路径拒绝表 + 内容扫描，**默认拒绝**；放行要改 `tools/commit_guard.py` 的白名单（改动即留痕）。
@@ -553,8 +553,8 @@ release_input.ps1 取代）。
 
 - **建网规则只有一个真源**：`game.rs::block_obstacle_cells`（`apply_level` 与单测共用，
   别在别处再写第二套循环）。判据**按尺寸分两类**：
-  - **长件**（任一水平方向 ≥ `CELL_BLOCK_LONG_EXTENT_M` = 8m；沙袋/矮墙/围墙/建筑）**保守封格**
-    （碰到就封）—— 这类结构 NPC **必须绕着走**，路径不许穿墙；
+  - **长件**（任一水平方向 ≥ `CELL_BLOCK_LONG_EXTENT_M` = 8m；沙袋/矮墙/围墙/建筑）**碰到就封**
+    —— 这类结构 NPC **必须绕着走**，路径不许穿墙；
   - **短件**（隔离墩 6m / 长椅 6m / 花坛 3.4m / 哨塔 3m / 护柱 0.34m / 树 0.4m）按
     **覆盖率 ≥1/3 格**（`CELL_BLOCK_MIN_OVERLAP_M2`）才封格。
   🔴 **4m 的格子对 1:1 的世界太粗**：旧规则「碰到就封」把几何上不相连的装饰件连成一道墙 ——
@@ -640,7 +640,7 @@ release_input.ps1 取代）。
 17. **同一个现象别用没量纲区分度的量去判**（"投影跨度""截图观感"都能被误读）。
 18. **"键没生效"这类结论要先排除自己**：`cmd.exe` 传数组会被并成一个数字。
 19. **看门狗用「心跳式」**，不要按"启动后睡 N 秒"来 arm（遗留看门狗曾把新会话杀掉）。
-20. **卡住两轮以上就去改代码加埋点，不要继续推理**（连推四轮全落空，加一行日志后四个真因一次全暴露）。**临时埋点验完就删**；⚠️ 调试 `build.rs` 不要靠打印 cargo warning（会被归并/缓存）：往文件里写日志。
+20. **卡住两轮以上就去改代码加埋点，不要继续推理**（连推四轮全落空，加一行日志后四个真因一次全暴露）。**临时埋点验完就删**；⚠️ 调试 `build.rs` 别靠打印 cargo warning（会被归并/缓存），往文件里写。
 21. **跨进程读窗口尺寸前必须 `SetProcessDPIAware()`**（本机 DPI 1.5x ⇒ 注入坐标整体偏 1.5 倍且不报错）。
 22. **几何/坐标换算的前提假设要么写注释、要么加断言**（开场多按了 1.5 秒 W 打破"玩家在原点"⇒ 38 发点射命中零）。**回路收敛 ≠ 打中了正确的东西。**
 24. **单次 A/B 说明不了任何事**：必须「互换对照 + 无处理对照」，先确认对照组本身没有一边倒。⚠️ **小于 A/A 噪声底的差不算数**（见教训 43 的 `aa_probe.ps1`）。
@@ -658,10 +658,10 @@ release_input.ps1 取代）。
 36. **🔴 「工具跑不起来」本身就是一条要修的缺陷**（验证层因 mesh.spv 被拒而灰屏、被写进文档当"已知限制"后再没人开过 ⇒ 那期间所有渲染改动都没有验证层兜底）。**⇒ 任何"工具用不了"都要当场问根因，修好后的第一个动作就是重跑它。**
 37. **🔴 截图是「崩溃前的最后一帧」**："改动毫无效果"之前先 grep `has been lost` / `panicked`（2026-09-15 查弹孔时依次否掉了实例/矩阵/颜色/尺寸/遮挡，而两张 A/B 图都是设备 lost 后不再更新的死画面）。
 38. **🔴 时间步相关判据不要拿"刚出生的物体"去比**：`y <= ground + 0.05` 对脚底出手的手榴弹在 ≥108fps 时恒真 ⇒ 原地引爆。**⇒ 任何 `spawn → 第一帧就判落地/越界/自碰`，先问"dt 缩小 10 倍还成立吗"，并让测试跑多个帧率档。**
-39. **🔴 计分不等于"我打中了"**：`damage_npc` 对**任何**敌方死亡都 `score += 10` ⇒ 会有 NPC 自伤的模式（survive / 压力模式手榴弹）里 `killed>=1` 不能当命中证据。**⇒ 判命中看 `weapons: shot #` 与命中/击杀来源；判 AI 自杀看 `grenade: npc #N throws` 与 `kill: npc #N` 是否同一秒。**
+39. **🔴 计分不等于「我打中了」**：`damage_npc` 对**任何**敌方死亡都 `score += 10` ⇒ 有 NPC 自伤的模式（survive / 压力模式手榴弹）里 `killed>=1` 不是命中证据。**⇒ 判命中看 `weapons: shot #` 与命中来源；判 AI 自杀看 `grenade: npc #N throws` 与 `kill: npc #N` 是否同秒。**
 40. **🔴 "某个面没画出来"先查绕序/背面剔除，再查几何参数**（代价 = 两天）：本管线水平面与竖直面的正面约定相反，立方体顶/底面与圆柱盖长期反绕 ⇒ 顶面恒被上方剔除，一个绕序 bug 伪装成"建模/烘焙"。**⇒ 回归判据 `horizontal_winding_tests`；探针 = 可疑面涂不可能色（顶面→绿）。**
 41. **断言"构件没渲染"前先确认相机在它的正面 + 它在不在别的体块里**（shop1 从街北拍商铺误报"没有雨棚"；cp1 反向实锤残骸车/帐篷整个埋进围合板楼）⇒ `checkpoint_props_stay_out_of_rows`。
-42. **🔴 阈值型分支的测试必须取「跨过阈值」的输入，否则等于没测**：`survive` 的 `rule.waves` 与 `WAVES_PER_LEVEL`(3) 就是这种分支 —— 旧测试用 `waves = 2` 一路绿，而线上地图用 5 ⇒ 升关那条真实路径**从没被执行过**。**⇒ 看到 `>= N` / `> N` / `min(N, …)`，测试必须给"刚好越过"那一档；线上真实取值（TOML/配置）就是必须覆盖的那档。**
+42. **🔴 阈值型分支的测试必须取「跨过阈值」的输入**：`survive` 的 `rule.waves` 与 `WAVES_PER_LEVEL`(3) 就是这种分支 —— 旧测试用 `waves = 2` 一路绿，而线上地图用 5 ⇒ 升关那条真实路径**从没被执行过**。**⇒ 看到 `>= N` / `> N` / `min(N, …)`，必须给"刚好越过"那一档；线上真实取值就是必须覆盖的那档。**
 43. **🔴 帧率口径：`fps` 必须是「窗口内帧数 / 窗口时长」**，不能是"某一帧的 `1/dt`"（同行 `frame_us` 是**另一帧**的耗时 ⇒ 自相矛盾；同一二进制两次能"差 48%"，我据此写过**错误的 +58%**，见 §21.36/§21.37）。**⇒ 性能结论先跑 `scripts\aa_probe.ps1 -Runs 3` 量噪声底，小于它不算数。⚠️ **噪声底不是常数**：重负载 0.2%、轻负载 2.5~3.0% ⇒ 每轮现场量（§21.40(b)）。**
 44. **🔴 「跳过某个对象的处理」的分支必须回答：它还会不会自己结束/推进？** 2026-09-26：`Mixer::mix` 对 `gain <= 0.0`（静音）的声部直接 `continue` ⇒ 游标不前进、声部不退队 ⇒ 静音期间每发枪堆一个（`voices` 无界增长），解除静音后**旧枪声齐鸣**。判据 = `mixer_retires_voices_even_when_muted` / `unmuting_does_not_replay_stale_voices`。同形的还有环形缓冲与寿命表：**你省掉的那一步，往往正是它退场的唯一机会**。
 45. **🔴 成本地图（以及任何"关掉某个东西"的对照实验）必须放一条「物理上必然更快」的正对照臂。**
