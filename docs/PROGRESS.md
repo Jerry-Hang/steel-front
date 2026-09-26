@@ -10087,3 +10087,36 @@ MEDIAN PAIRED DELTA = -7.68 fps (-5.51%)   sign test 0/4   aa2 臂内极差 24.1
 
 ⇒ 一条可复用的规矩：**扫描这类形状时，"规范里是必填还是可选"才是判据** ——
 必填字段带兜底 = 缺陷；可选字段带兜底 = 正常。
+
+**实机验证（同一晚，验证层开着）**：`run_smoke_pm.ps1` +
+`RV3D_VALIDATION=1 DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1` ⇒
+`VUID=0 panics=0 有击杀 RESULT: ALL-OK`，且日志里**真实资产全部照常载入**：
+`props: 载入 24 件 GLB 道具网格` + `摆放 632 处`、`soldier: 载入 soldier.glb`（1082 顶点）、
+`gun-glb: ak12m`（63283 顶点）/ `ak104`（11705 顶点）—— **没有一条资产被新的必填校验拒掉**。
+这比单测更有说服力：单测只覆盖被写进 fixture 的那几种布局，实机走的是全部 24+3 件真资产。
+
+### 21.64 今晚这批改动的验证账（GPU 窗口 18:40~19:50 全部用上）
+
+今晚共 6 个代码/工具提交，**每一个都跑过实机或编译器判据**，清单与证据：
+
+| 改动 | commit | 判据与结果 |
+|---|---|---|
+| 序号过期判据差 1（收成单一真源） | `f683be2` | 红测（改回旧写法 ⇒ `net.rs:1861` 红）+ 614 passed |
+| `device_wait_idle` 失败不再静默（6 处） | `82d096b` | 源码判据 + 红测（`renderer.rs:15302`）；冒烟里 `wait_idle` 路径实跑且无告警 |
+| 调试报告器失败不再 abort | `5d9c569` | 把调用名补进 `CALLS` ⇒ 既有判据当场红（`renderer.rs:1768`）⇒ 改 `map_err?` ⇒ 16 条 `vk_failure_path_tests` 绿 |
+| GLB `COLOR_0` 的 type 不明说读不了 | `2ec3b1b` | 红测（修前 `parse_glb` 成功返回）+ 真实资产全绿 |
+| 删掉从不被读取的 `GunMesh.display_name` | `bd7f4ea` | **判据是编译器**：614 passed / 0 警告 ⇒ 无一处读取 |
+| GLB accessor 必填字段 `count`/`componentType` | `128eec3` | 两条红测（其中一条断言"不许甩锅给缺 POSITION"）+ 15 条 GLB 测试绿 |
+
+**四道实机闸门（都在今晚的二进制上）**：
+1. **冒烟 + 验证层**：`VUID=0 panics=0` 有击杀 `ALL-OK`，真实资产 24 件道具 + 士兵 + 2 把枪全部载入；
+2. **交换链/重建探针**：`9 resizes / 5 size-mismatch rebuilds`、`VUID=0`、`resizes ok=True`、`ALL-OK`；
+3. **整局 survive（400 s 预算 + 验证层）**：**VICTORY 259 s**、`waves cleared ['1'..'5']`、
+   出生 6/8/10/12/14、**52 杀 / 568 发、220 命中（38.7%）**、`VUID=0 panics=0 device_lost=0`、**fps 164.7**；
+4. **静态闸门**：`audit_vk_resources.py` 135 个 `vk::` 句柄字段 / **0 处只创建不释放**；
+   `cargo check --release --target aarch64-unknown-linux-gnu` **0 error / 0 warning**；
+   `cargo test --release` **614 passed / 0 failed**；`cargo build --release` **0 警告**；CJK 字模闸门绿。
+
+⚠️ 期间踩到并已记录的两个"测量陷阱"（都属今天的主线）：
+`Copy-Item` 恢复源码**保留旧 mtime ⇒ cargo 不重编，测试跑的是磁盘上已不存在的那一版**（§21.58 已记）；
+以及成本地图的样本量问题（§21.61：同日 A/A 中位 −5.51%）。
