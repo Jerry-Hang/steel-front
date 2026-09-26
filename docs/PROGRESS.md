@@ -8489,6 +8489,31 @@ RESULT: ALL-OK
 - 附带确认：`gun buffer` 扩容行为、NPC 剔除缓存、道具上传顺序这些改动**都不改变玩法判定**
   （命中/击杀来源与跑位逻辑未动），这一点由"波次照样清完"间接印证。
 
+### 21.32 生产路径 panic 全仓普查（结论：只有 4 处、都被判据守着）+ 又一处静默保存失败
+
+**(a) 新工具 `tools/prod_panic_sweep.py`**：按 `#[cfg(test)]` 切开、**只扫生产段**，
+否则计数全是测试里的断言（"N 处 unwrap"这种数字在本仓从来没定位出过任何东西）。
+全仓生产路径只剩 **4 处** `unwrap/expect`，逐条核实都被前置判据守着：
+
+| 位置 | 守它的判据 |
+|---|---|
+| `main.rs` `net_client.unwrap()` | 同一表达式里的 `net_mode` 与之同源 |
+| `game.rs` `reposition.unwrap()` | `if npc.reposition.is_none() { … } else { … }` 的 else 分支 |
+| `props.rs` `verts[0]` | 前面有 `if m.verts.is_empty() { return mesh }` |
+| `audio.rs` `AudioClip::new(..).expect(..)` | SfxBank 合成参数是编译期常量，启动即验 |
+
+⇒ **这一类不是当前的杠杆**，记在这里免得下一轮再普查一遍。
+
+**(b) 同一轮里抓到的真问题：`config.rs::save_to` 的两个失败都被吞掉**
+`fs::write(tmp)` 与 `fs::rename(tmp, path)` 以前都是 `let _ =` —— Windows 上目标文件被别的
+进程占着（编辑器/杀软扫描）rename 就会失败，而表现是"**设置改了、重启又变回去**"，
+日志里一个字都没有，且 `*.cfg.tmp` 会留在 HOME 里。现在两个失败各留一条 warn（含路径与原因），
+rename 失败顺手删临时文件。
+**红测** `save_failure_leaves_no_temp_file_and_does_not_panic`：把目标路径指成一个**目录**
+⇒ `write(tmp)` 成功、`rename` 必失败 ⇒ 断言"不留临时文件、不 panic"（修前必红）。
+
+闸门：`cargo test --release` **586 passed / 0 failed**、0 警告。
+
 ### 21.28 联机审计：断线的人**永远站在场上** + 插值器**从来没接线**
 
 **(a) 幽灵玩家的三个环节，一个都没接**
