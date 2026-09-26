@@ -10606,4 +10606,8 @@ lead = 把喂进去的 `kills` 换成**敌方损失**（= 本营战果），或�
 
 闸门：`cargo test --release` **636 passed / 0 failed**；`cargo build --release` **0 警告**。
 
+**收尾冒烟：没跑成**（`RESULT: GPU-BUSY`）—— `run_smoke_pm.ps1` 的显存闸门看到外部占用
+**4344 MiB > 3200 MiB 预算**（用户在放视频）就拒绝启动。这是**闸门按设计工作**，不是缺陷；
+今晚这一条没跑成，下一轮**在 GPU 空闲窗口补跑**（判据仍是 `vuid==0 and panics==0 and killed>=1`）。
+
 
