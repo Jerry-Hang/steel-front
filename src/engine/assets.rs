@@ -186,9 +186,23 @@ fn append_prim(
             .and_then(|a| a.as_arr())
             .and_then(|a| a.get(ci as usize))
             .and_then(|a| a.get("type"))
-            .and_then(|t| t.as_str())
-            .map(|s| if s == "VEC4" { 4 } else { 3 })
-            .unwrap_or(3);
+            .and_then(|t| t.as_str());
+        // 🔴 2026-09-26：这里以前是 `.map(|s| if s == "VEC4" { 4 } else { 3 }).unwrap_or(3)`
+        // —— **任何**别的 type（`VEC2` / `MAT4` / 拼错的名字 / 字段缺失）都按 **3 分量**读，
+        // 与上面 `componentType` 那处 `_ => (4, 1.0)` 完全同形：读出来的仍是合法浮点数
+        // ⇒ 不崩、不报错，顶点色静静错位（纯平着色下不像几何错位那样刺眼）。
+        // glTF 2.0 只允许 COLOR_0 是 `VEC3` / `VEC4` ⇒ **读不了就明说读不了**。
+        // 判据 = `glb_unknown_colour_layout_is_an_error_that_names_itself`。
+        let ty = match ty {
+            Some("VEC3") => 3,
+            Some("VEC4") => 4,
+            other => {
+                return Err(format!(
+                    "GLB COLOR_0 的 type 不支持: {}（只允许 VEC3 / VEC4）",
+                    other.unwrap_or("缺失")
+                ));
+            }
+        };
         col_stride = ty;
         read_acc(json, bin, ci as usize, ty)
             .map_err(|e| format!("GLB COLOR_0: {e}"))?
@@ -580,6 +594,26 @@ mod tests {
             .err()
             .expect("坏掉的 NORMAL accessor 必须被拒，不能静默当成\"没有法线\"");
         assert!(err.contains("NORMAL"), "错误信息要点出是哪个属性，实际: {err}");
+    }
+
+    /// 同一形状的**第三面**：`COLOR_0` 的 `type` 以前是 `.map(|s| if s == "VEC4" { 4 } else { 3 })`
+    /// —— 任何别的 type（`VEC2` / `MAT4` / 拼错的名字 / 字段缺失）都按 **3 分量**读。
+    ///
+    /// 与 `componentType` `_ => (4, 1.0)` 完全同形：读出来的**仍是合法浮点数** ⇒
+    /// 不崩、不报错，顶点色静静错位（颜色错位在纯平着色下不像几何错位那么刺眼）。
+    /// glTF 2.0 只允许 COLOR_0 是 `VEC3` / `VEC4` ⇒ 读不了就明说读不了。
+    #[test]
+    fn glb_unknown_colour_layout_is_an_error_that_names_itself() {
+        let colour: Vec<u8> = (0..24u8).collect();     // 3 × VEC2
+        let json = glb_json(
+            r#"{"bufferView":3,"componentType":5126,"count":3,"type":"VEC2"}"#,
+            120, 24, 144,
+        );
+        let err = parse_glb(&build_glb(&json, &glb_bin(&colour)))
+            .err()
+            .expect("COLOR_0 的 type 不合法必须被拒（否则是静默错色）");
+        assert!(err.contains("COLOR_0"), "错误信息要点出是哪个属性，实际: {err}");
+        assert!(err.contains("VEC2"), "错误信息要点出实际的 type，实际: {err}");
     }
 }
 
