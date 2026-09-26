@@ -10444,3 +10444,34 @@ CJK 字模预检 `tools/cjk_cover_check.py` 每轮都跑（又撞了 3 个无字
 `renderer.rs 14402→15628`、`net.rs 2041→2406`、`main.rs 4282→4465`、`audio.rs 2750→2919`、
 `ui.rs 2661→2833`、`map.rs 1124→1290`、`llm_cmd.rs 630→712` 等（口径 = python `splitlines()`，
 `Get-Content` 不准见教训 8）；并把「尺子的退出码约定」写进 AGENTS 的常用命令段。
+
+### 21.74 据点进度条能被对手继承：0.2 秒白拿 99%（`3a1ad63`，联网可达、单机躲过）
+
+**怎么找到的**：审计日把还没细看过的 `objective.rs`（454 行）读了一遍 —— 逐条对着模块文档里的
+「判定规则细节（勿回退）」核实现，读到第 2 条「进度向**当前推进方**增长」时发现：`progress`
+是个**裸标量**，结构体里没有任何字段记录「这份进度是谁推起来的」。
+
+**可复现的后果**（先写红测，修前实测 `switched=true`）：
+
+| 时刻 | 输入 | 修前 | 修后 |
+|---|---|---|---|
+| t=9.9s | `[Blue]` 单人进点、无敌对 | progress 0.99 | progress 0.99 |
+| t=10.1s | `[Red]` 单人进点（Blue 已离场） | **0.99+0.02 ≥ 1 ⇒ 点直接归 Red** | Red 从 0 起算 ⇒ 0.02，点仍中立 |
+
+单机只有 Blue 一方玩家（`players_inside` 恒为 `vec![Blue]`），所以这条路**单机永远走不到**；
+联网双人（服务端视角同时存在 Red 房主与 Blue 客户端）时可达 —— 与 #13 那条「联网还没做
+双进程真机验证」正好互相成全：**做双人验证时顺手验它**。
+
+**修法**：`CapturePoint` 增 `advancing: Option<Team>`（这份进度是谁推起来的）——
+推进方一变就清零；同队短暂离场再回来**仍接着自己的进度推**（与「无人缓慢消散」的设计一致，
+为此专门配了一条护栏测试，免得把「换人才清零」写成「离开就清零」）；占领完成/衰减到 0 时清空。
+
+**顺带修的第二处（同形）**：重开本关的复位（`game.rs`）以前只写 `pt.progress = 0.0;
+pt.owner = None;` —— 加了 `advancing` 之后它会留下上一局的推进方。这正是 §21.72
+「清理路径必须把同族状态一起带走」的第三次重演，所以把复位收成 `CapturePoint::reset()`
+一个定义、调用方只写一行。
+
+判据（三条，全部实测红→绿）：`capture_progress_is_not_inherited_by_the_other_team`、
+`capture_progress_survives_a_brief_absence_of_the_same_team`、
+`point_reset_clears_owner_progress_and_advancing`。
+闸门：`cargo test --release` **629 passed / 0 failed**；`cargo build --release` **0 警告**。
