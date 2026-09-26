@@ -663,6 +663,9 @@ fn advance_voice_cursor(cursor: f64, total: f64, looping: bool, frames: usize) -
 pub struct AudioPlayer<S: AudioSink> {
     mixer: Mixer,
     synth: DspSynth,
+    /// 合成总线的复用暂存缓冲（交错立体声）。**必须是字段而不是每帧 `vec![]`**：
+    /// `tick` 每帧都调用，按 8192 帧算一次就是 64 KB 的分配/清零。
+    synth_bus: Vec<f32>,
     sink: S,
 }
 
@@ -673,6 +676,7 @@ impl<S: AudioSink> AudioPlayer<S> {
         Self {
             mixer: Mixer::new(),
             synth: DspSynth::new(sample_rate),
+            synth_bus: Vec::new(),
             sink,
         }
     }
@@ -710,7 +714,19 @@ impl<S: AudioSink> AudioPlayer<S> {
         // 混音总线：音乐合成输出乘 Music 通道音量（Sfx 声部由 Mixer 内部按通道分层；淡入淡出在 MusicSynth 内）
         self.synth
             .set_music_channel_volume(self.mixer.channel_volume(Channel::Music));
-        self.synth.render(listener, frames, &mut buf);
+        // 🔴 **合成总线必须单独渲染、再按主音量缩放进主缓冲**。
+        // `DspSynth::render` 是 `out[i] += s` 语义，直接渲染进 `buf` 就再也分不出哪部分是合成声部了；
+        // 而主音量只在 `Mixer::mix` 内部相乘 ⇒ 那样写的直接后果是**枪声/脚步/爆炸/环境风完全不受
+        // 设置面板"音量"控制**（静音后它们照旧满音量，2026-09-26 复查发现，见 §21.39(e)）。
+        // 现在的语义与模块文档一致：`主音量 × 分通道音量 × 距离衰减`，两条总线都吃主音量。
+        // 判据：`master_volume_scales_the_synth_bus`。
+        self.synth_bus.clear();
+        self.synth_bus.resize(frames * 2, 0.0);
+        self.synth.render(listener, frames, &mut self.synth_bus);
+        let master = self.mixer.master();
+        for (dst, s) in buf.iter_mut().zip(self.synth_bus.iter()) {
+            *dst += s * master;
+        }
         self.sink.write(&buf);
     }
 
@@ -2021,6 +2037,43 @@ mod tests {
         // 播放完毕后再 tick 输出静音
         player.tick(&AudioListener::new(Vec3::ZERO), 2);
         assert_eq!(player.sink().samples[4..], [0.0; 4]);
+    }
+
+    /// 判据：**「音量」（主音量）必须同时压住两条总线** —— clip 声部（Mixer）与合成声部（DspSynth）。
+    ///
+    /// 2026-09-26 复查发现：`AudioPlayer::tick` 把 `DspSynth` 的输出**直接 `+=` 进主缓冲**，
+    /// 而 `master` 只在 `Mixer::mix` 内部相乘 ⇒ 把设置面板的"音量"拉到 0 之后，
+    /// **枪声 / 脚步 / 爆炸 / 环境风照旧以满音量播放**（只有 Hit/Reload/UiBlip 变哑）。
+    /// 这与本模块文档写的 `MasterVolume × 分通道音量 × 距离衰减` 不符。见 `docs/PROGRESS.md` §21.39(e)。
+    ///
+    /// 两组都要断言：对照组（master = 1.0）必须**出声**，否则本测试可能因为"合成器根本没响"而假绿。
+    #[test]
+    fn master_volume_scales_the_synth_bus() {
+        let listener = AudioListener::new(Vec3::ZERO);
+        let peak = |p: &AudioPlayer<CollectingSink>| {
+            p.sink().samples.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+        };
+
+        let mut loud = AudioPlayer::new(CollectingSink::new(44_100, 2));
+        loud.mixer_mut().set_master(1.0);
+        loud.synth_mut().play_shot(Vec3::ZERO, 1.0);
+        loud.tick(&listener, 256);
+        let loud_peak = peak(&loud);
+        assert!(
+            loud_peak > 1e-3,
+            "对照组（音量 1.0）必须真的出声，否则这条测试什么也没测到：peak={loud_peak}"
+        );
+
+        let mut muted = AudioPlayer::new(CollectingSink::new(44_100, 2));
+        muted.mixer_mut().set_master(0.0);
+        muted.synth_mut().play_shot(Vec3::ZERO, 1.0);
+        muted.tick(&listener, 256);
+        for (i, v) in muted.sink().samples.iter().enumerate() {
+            assert!(
+                v.abs() < EPS,
+                "第 {i} 个样本 {v}：音量为 0 时合成总线（枪声/脚步/爆炸/环境风）也必须静音"
+            );
+        }
     }
 
     /// 全部 6 种音效（与 SfxKind 枚举顺序一致）
