@@ -3985,26 +3985,36 @@ mod tests {
     /// 但它后面跟着 ASCII 的 `}`），被吃掉的一定是"行尾非 ASCII"的那些行。
     #[test]
     fn powershell_scripts_never_end_a_line_with_a_non_ascii_byte() {
-        let dir = std::path::Path::new("scripts");
+        // 🔴 2026-09-26：扫描面以前只有 `scripts/`，而 `tools/shot_diff.ps1`（**已入库**）
+        // 当时就有 6 行以中文结尾 ⇒ 它下一行（`$ErrorActionPreference` / `$src = ...` /
+        // `$step = 7`）全被注释掉了 —— `tools/` 不在扫描面里，所以这条判据一直是绿的。
+        // **判据的扫描面必须覆盖"所有入库的 .ps1"**，否则它只保护它恰好记得的那一个目录。
+        let dirs = ["scripts", "tools"];
         let mut checked = 0usize;
         let mut bad: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(dir).expect("scripts 目录必须存在") {
-            let path = entry.expect("读取 scripts 项失败").path();
-            if path.extension().and_then(|s| s.to_str()) != Some("ps1") {
-                continue;
-            }
-            checked += 1;
-            let bytes = std::fs::read(&path).expect("读 .ps1 失败");
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-            for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
-                // 结尾的 CR 不算行尾内容（CRLF 文件）
-                let end = if line.last() == Some(&b'\r') { line.len().saturating_sub(1) } else { line.len() };
-                if end == 0 {
+        for dir in dirs {
+            for entry in std::fs::read_dir(dir).expect("目录必须存在") {
+                let path = entry.expect("读取目录项失败").path();
+                if path.extension().and_then(|s| s.to_str()) != Some("ps1") {
                     continue;
                 }
-                if line[end - 1] >= 0x80 {
-                    let text = String::from_utf8_lossy(&line[..end]).to_string();
-                    bad.push(format!("{name}:{}  …{}", i + 1, &text[text.len().saturating_sub(40)..]));
+                checked += 1;
+                let bytes = std::fs::read(&path).expect("读 .ps1 失败");
+                let name = format!(
+                    "{}/{}",
+                    dir,
+                    path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+                );
+                for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
+                    // 结尾的 CR 不算行尾内容（CRLF 文件）
+                    let end = if line.last() == Some(&b'\r') { line.len().saturating_sub(1) } else { line.len() };
+                    if end == 0 {
+                        continue;
+                    }
+                    if line[end - 1] >= 0x80 {
+                        let text = String::from_utf8_lossy(&line[..end]).to_string();
+                        bad.push(format!("{name}:{}  …{}", i + 1, &text[text.len().saturating_sub(40)..]));
+                    }
                 }
             }
         }
