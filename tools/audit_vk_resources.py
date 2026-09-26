@@ -161,6 +161,13 @@ def main():
     print()
     print("NOTE: heuristic (pools / Vecs / ownership transfer can legitimately account for a")
     print("      hit). Read the source before treating a line as a leak.")
+    # 🔴 2026-09-26：「扫了 0 个字段」**不算通过** —— 在错误的目录下跑（SRC 为空）
+    # 会打印 `scanned 0 / no release 0` 然后 exit 0，看起来像"一片干净"。
+    # 判据：0 = 真扫过；**2 = 根本没扫成**（同 `history_secret_audit.py` 的约定）。
+    if total == 0:
+        print("结论：**一个 vk:: 句柄字段都没扫到** —— 这不是通过，是扫描没跑起来（检查 cwd / src 路径）。",
+              file=sys.stderr)
+        return 2
     return 0
 
 

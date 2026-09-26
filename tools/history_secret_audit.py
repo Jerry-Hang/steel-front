@@ -132,6 +132,21 @@ def main():
             findings.append((path, sha, "suspicious-path(no-match)", "-", 0))
 
     print(f"history_secret_audit: 扫描 {scanned} 个 blob（{len(seen)} 个 路径×版本）")
+    # 🔴 2026-09-26：「一个 blob 都没扫到」**绝不能算通过**。
+    # 实测（红）：在非仓库目录里跑，输出「扫描 0 个 blob / 结论：历史里没有明文凭据命中」并 **exit 0**
+    # —— `git rev-list` 失败被 `git()` 吞成空字符串 ⇒ 扫描面为 0 ⇒ 一条命中也"不可能"有。
+    # 这正是 §21.37 里那类"永远绿灯的工具"（同 `cjk_cover_check.py` 的旧版）。
+    # 判据 = 本函数返回码：0 = 真扫过且无命中；1 = 有命中；**2 = 根本没扫成**（环境/仓库问题）。
+    if scanned == 0:
+        print(
+            "结论：**没有扫到任何 blob** —— 这不是通过，是扫描没跑起来。",
+            file=sys.stderr,
+        )
+        print(
+            "     检查：是否在仓库根目录、git 是否可用、`git rev-list --objects --all` 是否有输出。",
+            file=sys.stderr,
+        )
+        return 2
     if not findings:
         print("结论：历史里没有明文凭据命中")
         return 0
