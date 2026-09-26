@@ -1269,6 +1269,21 @@ def main():
     out, only, preview = _args()
     os.makedirs(out, exist_ok=True)
     names = only if only else list(ASSETS.keys())
+    # 🔴🔴 2026-09-26：**六个建筑模块不归本文件管**，它们由 `build_city_kit.py::MODULES`
+    # （2026-09-12 起的设计套件）生成并入库。本文件的 `ASSETS` 表里那六条是**旧的参数化
+    # 建筑**（`asset_building` 那一代），当年照同一批槽位标的 ⇒ 尺寸只差 0.14m、高度逐件相同，
+    # **看尺寸分辨不出来**；一旦整表重跑并入库，全城会静默退回"参数拼箱子"的观感，而
+    # `cargo test` / 预渲染 / 尺寸普查**全都发现不了**。
+    # ⇒ 默认**跳过**它们（不是报错退出：整表重跑是常见操作，跳过 + 响亮提示足够），
+    #    想重新生成旧几何必须显式点名（`--only building_tall`），那是明确意图。
+    # 判据 = `props.rs::building_assets_match_the_designed_size_contract`（入库侧闸门）。
+    KIT_OWNED = ("building_block", "building_wide", "building_tall",
+                 "building_corner", "building_shed", "panel_block")
+    if not only:
+        skipped = [n for n in names if n in KIT_OWNED]
+        if skipped:
+            print("SKIP kit-owned (build_city_kit.py 才是它们的生成器):", ",".join(skipped))
+        names = [n for n in names if n not in KIT_OWNED]
     if preview:
         os.makedirs(os.path.dirname(preview), exist_ok=True)
         render_preview(names, preview)

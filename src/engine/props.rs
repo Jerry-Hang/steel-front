@@ -781,6 +781,53 @@ mod tests {
         }
     }
 
+    /// 判据：**六个建筑模块的包围盒必须等于设计套件的尺寸契约**（`build_city_kit.py::MODULES`）。
+    ///
+    /// 为什么需要这一条：仓库里有**两套**生成器都能产出同名的建筑资产 ——
+    /// `tools/blender/build_city_kit.py`（2026-09-12 起的设计套件，实际入库的那套）与
+    /// `tools/blender/gen_props.py` 的 `ASSETS` 表（旧的参数化建筑，已被取代）。
+    /// 后者**高度逐件相同、水平只小 0.14m**（当年就是照同一批槽位标的）⇒ 光看"大概多大"
+    /// 分辨不出来：用错生成器重跑并入库，`cargo test` 一路绿灯，而全城会静默退回
+    /// `asset_building` 那一代的观感（D11 那条路的老几何）。
+    ///
+    /// 0.14 = 设计套件的**底座外扩**（±0.06/侧，实测 0.14/轴）—— 两套几何的可分辨特征。
+    #[test]
+    fn building_assets_match_the_designed_size_contract() {
+        let Some(set) = kit() else { return };
+        // (名字, w, d, 高度) —— 与 tools/blender/build_city_kit.py::MODULES 同源，改一处必须改两处
+        const CONTRACT: [(&str, f32, f32, f32); 6] = [
+            ("building_block", 14.0, 10.925, 10.390),
+            ("building_wide", 18.0, 9.925, 10.390),
+            ("building_tall", 12.0, 9.925, 13.790),
+            ("building_corner", 11.0, 10.925, 10.390),
+            ("building_shed", 13.0, 8.925, 6.990),
+            ("panel_block", 20.5, 12.5, 17.325),
+        ];
+        const TOL: f32 = 0.02;
+        const PLINTH: f32 = 0.14;
+        for (name, w, d, h) in CONTRACT {
+            let i = set.index_of(name).unwrap_or_else(|| panic!("套件缺少 {name}"));
+            let m = &set.meshes[i];
+            let (sx, sz) = (m.max[0] - m.min[0], m.max[2] - m.min[2]);
+            assert!(
+                (sx - (w + PLINTH)).abs() < TOL,
+                "{name}: x 尺寸 {sx:.3}，契约 {:.3}（含底座外扩 {PLINTH}）—— 是不是用 gen_props.py 重跑过？",
+                w + PLINTH
+            );
+            assert!(
+                (sz - (d + PLINTH)).abs() < TOL,
+                "{name}: z 尺寸 {sz:.3}，契约 {:.3}（含底座外扩 {PLINTH}）—— 是不是用 gen_props.py 重跑过？",
+                d + PLINTH
+            );
+            assert!(
+                (m.height() - h).abs() < TOL,
+                "{name}: 高度 {:.3}，契约 {h:.3}",
+                m.height()
+            );
+            assert!(m.min[1].abs() < 0.01, "{name}: 原点不在底面 min.y={}", m.min[1]);
+        }
+    }
+
     #[test]
     fn footprint_is_axis_aligned_at_zero_yaw() {
         let Some(set) = kit() else { return };
