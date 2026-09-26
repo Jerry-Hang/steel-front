@@ -633,6 +633,29 @@ pub fn load_map(path: &str) -> Result<MapData, String> {
             path
         ));
     }
+    // 🔴 每种规则必须带齐它自己的参数（2026-09-26）。这些键在解析时是 `unwrap_or(0)`，
+    // 而**有没有兜底**决定了它是"默认值"还是"静默错规则"（逐条对着 `game.rs` 的
+    // `GameRule` 构造核过）：
+    //   * `kind = "kill"` 的 `target`：**不 clamp** ⇒ `kills >= 0` 恒真 ⇒ 开局即胜利；
+    //   * `kind = "time"` 的 `seconds`：**不 clamp** ⇒ `elapsed < 0` 为假 ⇒ t≈0 判胜负；
+    //   * `kind = "survive"` 的 `waves`：有 `.max(1)` 兜底（默认 1 波）—— 但那正是错字
+    //     （`wave = 5`）被吞掉的地方；要 1 波就明写 `waves = 1`，所以这里也要求写明。
+    // `required` **不在这里校验**：`capture` 的 `required.max(1)` 兜底是文档写明的行为
+    // （"缺省 = 占 1 个点"，没有 `[rule]` 节的地图靠它）。
+    // 判据 = `rule_parameters_are_required_per_kind`（含"参数齐全/无 [rule] 都必须能加载"的正对照）。
+    let kind = data.rule.kind.as_str();
+    let missing = match kind {
+        "survive" if data.rule.waves == 0 => Some("waves"),
+        "kill" if data.rule.target == 0 => Some("target"),
+        "time" if data.rule.seconds <= 0.0 => Some("seconds"),
+        _ => None,
+    };
+    if let Some(key) = missing {
+        return Err(format!(
+            "map: {} 的 [rule] kind = \"{}\" 缺少 {}（或值不是正数）",
+            path, kind, key
+        ));
+    }
     Ok(data)
 }
 
@@ -965,6 +988,46 @@ obstacles = [ { type = "wall", position = { x = 1, y = 0, z = 1 }, size = { x = 
         // 文件不存在
         let e3 = load_map("/tmp/steel_front_does_not_exist_98765.toml").unwrap_err();
         assert!(e3.contains("无法读取"), "{}", e3);
+    }
+
+    /// 🔴 判据：**每种规则必须带齐它自己的参数**（缺了的后果是静默的）。
+    ///
+    /// 存在理由（2026-09-26）：`[rule]` 的键缺了会走 `unwrap_or(0)`，而**有没有兜底**
+    /// 决定它是"默认值"还是"静默错规则"（逐条对着 `game.rs` 的 `GameRule` 构造核过）：
+    ///   * `kill` 的 `target` **不 clamp** → `kills >= 0` 恒真 ⇒ **开局即胜利**；
+    ///   * `time` 的 `seconds` **不 clamp** → `elapsed < 0` 为假 ⇒ **t≈0 就判胜负**；
+    ///   * `survive` 的 `waves` 有 `.max(1)` → `wave = 5` 手滑 ⇒ **5 波变 1 波**（错字被吞）。
+    /// `capture` 的 `required` **有意不校验**：`required.max(1)` 是文档写明的默认
+    /// （"缺省 = 占 1 个点"），没有 `[rule]` 节的地图也靠它 —— 所以下面还钉了一条正对照。
+    #[test]
+    fn rule_parameters_are_required_per_kind() {
+        let base = "[map]\nname = \"x\"\nspawn_points = [ { x = 0, y = 0, z = 0, team = \"blue\" } ]\nobjectives = [ { id = \"A\", type = \"capture\", position = { x = 0, y = 0, z = 0 }, radius = 5 } ]\n";
+        let cases = [
+            ("survive", "[rule]\nkind = \"survive\"\n", "waves"),
+            ("kill", "[rule]\nkind = \"kill\"\n", "target"),
+            ("time", "[rule]\nkind = \"time\"\n", "seconds"),
+        ];
+        for (kind, rule, key) in cases {
+            let p = write_tmp(&format!("{base}{rule}"), &format!("rule_{kind}"));
+            let err = load_map(&p.to_str().unwrap())
+                .err()
+                .unwrap_or_else(|| panic!("kind = {kind} 缺 {key} 必须报错，不能静默取 0"));
+            remove_tmp(&p);
+            assert!(err.contains(key), "错误信息要点出缺的是 {key}，实际: {err}");
+        }
+        // 正对照 1：参数齐全的同款地图必须能加载 —— 否则上面三条可以靠"一律报错"变绿。
+        let p = write_tmp(&format!("{base}[rule]\nkind = \"survive\"\nwaves = 5\n"), "rule_ok");
+        let data = load_map(&p.to_str().unwrap()).expect("参数齐全时必须能加载");
+        remove_tmp(&p);
+        assert_eq!(data.rule.waves, 5);
+        // 正对照 2：**没有 `[rule]` 节**的地图必须照旧能加载（解析器给 kind = "capture"、
+        // required = 0，运行时 `.max(1)` 兜成"占 1 个点"）。这条是这次改动的边界，
+        // 钉住它才不会把"缺省"一起禁掉 —— 改宽校验时它必须先红。
+        let p = write_tmp(base, "rule_absent");
+        let data = load_map(&p.to_str().unwrap()).expect("没有 [rule] 的地图必须仍能加载");
+        remove_tmp(&p);
+        assert_eq!(data.rule.kind, "capture");
+        assert_eq!(data.rule.required, 0, "缺省仍是 0，由运行时 .max(1) 兜底");
     }
 
     #[test]
