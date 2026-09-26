@@ -9231,3 +9231,65 @@ RESULT: ALL-OK
   —— 都**有**上限或清理路径。
 - 静态阴影图的调度（`shadow_static_due`：`frame_seq % every == 0`，首帧必画）在换关卡/重建后
   最多滞后 `every` 帧（默认 30 帧 ≈ 0.2s），而它只装静态投射者 ⇒ 可接受，不改。
+
+### 21.44 未结案 #19 落地：**真·磨砂玻璃菜单**（`4dd3788` + `8a78cbb`）
+
+**(a) 难点在哪**：HUD 是一条**无纹理**管线（顶点只有 `pos vec2 + color vec4`、layout 里
+一个描述符都没有），而"毛玻璃"要采**面板背后的画面** —— 可主 pass 的 HUD 正画在
+**MSAA 解析目标**上：同一 pass 内不能采自己，普通 sampler 也不能采多采样图。
+⇒ 两条死路，只剩"把 HUD 挪出主 pass"。
+
+**(b) 做法（顺序与 barrier 全部照抄 PT 通路 —— 那条路已经跑很久且 VUID=0）**
+
+```
+主 pass（finalLayout = PRESENT_SRC_KHR，此时交换链已是单采样、内容 = 场景）
+  → ① barrier：PRESENT_SRC → TRANSFER_SRC
+  → ② barrier：模糊图 SHADER_READ_ONLY → TRANSFER_DST
+  → ③ vkCmdBlitImage(swapchain → 320×200, Filter::LINEAR)   ← **8×8 盒式平均就是模糊本身**
+  → ④ barrier：模糊图 TRANSFER_DST → SHADER_READ_ONLY
+  → ⑤ barrier：交换链 TRANSFER_SRC → COLOR_ATTACHMENT_OPTIMAL
+  → ⑥ overlay HUD pass（1 采样、无深度、load=LOAD）里画 HUD，玻璃 quad 采 ③ 那张图
+```
+
+片元：`uv_glass.z`（= `ui.rs::Quad::glass`）≥ 0.5 时采模糊图（5 抽头补块边界）并与面板色
+按 0.45 混合；否则**逐位等价于旧的纯色路径**。`ui.rs` 里开始菜单/设置/ESC 三处全屏遮罩
+改成 `Quad::glass`。开关 `RV3D_MENU_GLASS=0`（回退 + A/B）。
+
+**(c) 四个关键取舍**
+
+1. **只有"本帧 HUD 里有玻璃 quad"时才走这条路**（`set_hud_quads` 里算 `hud_has_glass`）
+   ⇒ 游戏内 HUD 的绘制路径**逐字节不变**（仍画在主 pass），风险面被压到"菜单/设置/暂停"三个状态。
+2. **模糊图固定 320×200，不跟交换链走**：换窗口尺寸不必重建它 ⇒ 描述符集不必在交换链重建
+   路径里重写（少一个"忘了重写"的坑）。代价是横竖模糊半径不等，对"磨砂"无影响。
+3. **交换链本来就有 `TRANSFER_SRC`**（F12 截图在用）⇒ 这次**不用改交换链用法**。
+4. **建立时立刻清成深灰并转 `SHADER_READ_ONLY_OPTIMAL`**：描述符从第一帧起按这个布局绑定，
+   而菜单出现之前没人写它 —— 不清就是首帧采到未定义内容（与 §21.38 两张阴影图同一类问题）。
+
+**(d) 三个"漏一个就炸"的地方（都写进注释了）**
+
+- `hud_pipeline_layout` 现在带一套（`glass_tex` + `glass_smp`），而着色器**静态**引用 binding 0/1
+  ⇒ **三处 HUD 绘制都要绑这套描述符集**：主 pass 的、overlay 的、**以及 PT 那条**。漏 PT 那条 =
+  描述符未绑定类 VUID（这次是主动补上的，不是被验证层抓出来的）。
+- **PT 模式强制 `glass=0`**（`set_hud_quads` 里 `glass_on = menu_glass_enabled && !pt_live_enabled`）：
+  PT 那条路是"blit PT 图 + 叠 HUD"，没有"面板背后的光栅画面"，而且 PT 的 HUD 绘制与主 pass 的
+  HUD 互斥 —— 留真值会出现"HUD 一次都不画"或"采到陈旧帧"。
+- `ui.rs::Quad` 加了 `glass` 字段 ⇒ `Quad::new` 保持默认 false，**新面板要显式用 `Quad::glass`**。
+
+**(e) 验证（每一态都单跑了一遍验证层）**
+
+| 场景 | 命令 | 结果 |
+|---|---|---|
+| 菜单态（玻璃生效） | `cap_safe -Tag glass1`（+验证层） | **VUID=0**，`screenshots/glass1_a.png` |
+| 游戏内（玻璃不生效，走旧路） | `run_smoke_pm.ps1`（+验证层） | **VUID=0 panics=0 ALL-OK**、fps 165.1 |
+| 暂停菜单（Playing + ESC） | `cap_safe -Keys 82,27 -KeyGapSec 6`（+验证层） | **VUID=0**，`screenshots/glass_pause3_b.png` |
+| 交换链重建路径 | `run_resize_probe.ps1`（+验证层） | 9 次窗口事件 / 5 次重建、**VUID=0、ALL-OK** |
+| 开关是否真起作用 | 同机位 `glass_off_a.png` 对 `glass1_a.png` | 差 **99.94%** 像素（模糊背景 vs 纯色遮罩） |
+
+`cargo test --release` 602 passed / 0 failed、0 警告。
+
+**(f) 这一轮又踩了一次的旧坑（教训 18 同形）**：`cap_safe.ps1 -File ... -Keys 82,27` 把两个键
+**并成一个数字 8227**（日志里就是 `POST VK 8227`）⇒ 我先"验证"了两轮都以为"ESC 打不开暂停菜单"。
+正确姿势是 `-Command`（AGENTS 铁律 F 写着，我还是踩了）。
+顺带把"跨状态切换的按键序列"这件事修进脚本：**`cap_safe.ps1` 新增 `-KeyGapSec`**（默认 1 秒，
+跨状态用 6 秒）—— 进游戏要走 `LoadingMap`（地图生成 1~2 秒），加载期间投的键**会被丢掉**，
+这正是"R 之后 1 秒投 ESC"到不了暂停菜单的原因。
