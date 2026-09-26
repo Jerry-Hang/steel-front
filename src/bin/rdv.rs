@@ -42,7 +42,4 @@ fn main() {
             _ => {}
         }
     }
-    // 常驻循环
-    #[allow(unreachable_code)]
-    ()
 }
