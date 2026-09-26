@@ -2610,7 +2610,9 @@ impl GameApp {
                         "size mismatch: window={}x{} swapchain={}x{} → 重建交换链",
                         is.width, is.height, sw, sh
                     );
-                    let _ = renderer.recreate_swapchain();
+                    if let Err(e) = renderer.recreate_swapchain() {
+                        log::error!("尺寸自检重建交换链失败：{}", e);
+                    }
                     let _ = self.game.hud.set_screen_size(is.width as f32, is.height as f32);
                 }
             }
@@ -2636,7 +2638,9 @@ impl GameApp {
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
                     log::warn!("交换链过期，尝试重建...");
-                    let _ = renderer.recreate_swapchain();
+                    if let Err(e2) = renderer.recreate_swapchain() {
+                        log::error!("交换链过期后重建失败：{}", e2);
+                    }
                 } else {
                     log::error!("渲染错误: {}", e);
                 }
@@ -3576,7 +3580,9 @@ impl ApplicationHandler for GameApp {
                     .hud
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
                 if let Some(renderer) = &mut self.renderer {
-                    let _ = renderer.recreate_swapchain();
+                    if let Err(e) = renderer.recreate_swapchain() {
+                        log::error!("窗口尺寸变化后重建交换链失败：{}", e);
+                    }
                 }
             }
 

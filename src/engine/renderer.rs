@@ -601,6 +601,17 @@ fn frame_action(acquire_suboptimal: bool, present: PresentOutcome) -> FrameActio
     }
 }
 
+/// 这一帧要不要**跳过渲染**（纯函数，可单测）。
+///
+/// 两种降级都必须跳过：① `gpu_stalled`（围栏连续超时 ⇒ GPU 侧已卡死，再提交也只是白等
+/// 5 秒）；② `swapchain_broken`（**重建交换链中途失败** ⇒ `swapchain` 等句柄可能已被
+/// `destroy_swapchain` 销毁，再 acquire/提交就是拿空句柄调 Vulkan）。
+/// 两者都保持进程与输入响应；后者在下一次重建**成功**时自动清除（尺寸变化 / 5 秒
+/// 尺寸自检都会重试）。
+fn frame_suppressed(gpu_stalled: bool, swapchain_broken: bool) -> bool {
+    gpu_stalled || swapchain_broken
+}
+
 /// 启动时要不要构建 PT 常驻资源（纯函数，可单测）。
 ///
 /// 🔴 2026-09-25 修：`RV3D_PT_LIVE=1` 自称"强制开"，但它**只**改 `pt_live_enabled`，
@@ -611,7 +622,8 @@ fn frame_action(acquire_suboptimal: bool, present: PresentOutcome) -> FrameActio
 ///
 /// 现在三态一致：`1` 强制开（含常驻资源）、`0` 强制关（连资源都不建，省显存）、
 /// 未设时跟随配置。
-pub fn pt_resident_needed(configured: bool, live_env: Option<&str>) -> bool {    match live_env {
+pub fn pt_resident_needed(configured: bool, live_env: Option<&str>) -> bool {
+    match live_env {
         Some("0") => false,
         Some("1") => true,
         _ => configured,
@@ -1072,7 +1084,11 @@ pub struct Renderer {
     /// 连续围栏超时计数 + "GPU 侧卡死"标志：卡死后 render() 直接返回 Ok(())，
     /// 主循环保持响应（输入/日志照常），而不是每帧卡满超时。
     fence_timeouts: u32,
+    /// 连续围栏超时判定 GPU 卡死后的降级开关（见 `render()` 开头）
     gpu_stalled: bool,
+    /// 重建交换链**中途失败**后的降级开关（见 `recreate_swapchain`）：失败时句柄可能
+    /// 已被销毁 ⇒ 在恢复前不许再提交帧。下一次重建成功即清除。
+    swapchain_broken: bool,
     /// 呈现模式覆盖（`None` = 按 `RV3D_PRESENT_MODE` 选）；acquire 持续超时会降级写 mailbox
     present_mode_override: Option<vk::PresentModeKHR>,
     current_frame: usize,
@@ -1855,6 +1871,7 @@ impl Renderer {
             acquire_timeouts: 0,
             fence_timeouts: 0,
             gpu_stalled: false,
+            swapchain_broken: false,
             present_mode_override: None,
             current_frame: 0,
             max_frames_in_flight: 2,
@@ -11084,7 +11101,9 @@ impl Renderer {
     pub fn render(&mut self, view: glam::Mat4, proj: glam::Mat4) -> Result<(), String> {
         // GPU 侧已被判定卡死（连续 N 次围栏超时）：不再等待/提交/呈现 —— 否则每帧都要
         // 卡满 5 秒超时，主循环形同僵死。保持响应、把结论留在日志里，交给上层决定。
-        if self.gpu_stalled {
+        // 同理 `swapchain_broken`（见 `recreate_swapchain`）：重建**中途**失败时
+        // `swapchain` 等句柄可能已经被销毁，再 acquire/提交就是拿空句柄调 Vulkan。
+        if frame_suppressed(self.gpu_stalled, self.swapchain_broken) {
             return Ok(());
         }
         let frame_start = Instant::now();
@@ -11534,10 +11553,28 @@ impl Renderer {
         }
     }
 
-    /// 重建交换链（窗口尺寸变化 / `交换链过期` 两条路都调它；`main.rs` 三处调用）。
+    /// 重建交换链（窗口尺寸变化 / `交换链过期` / 5 秒尺寸自检三条路都调它）。
     /// 🔴 开头**必须** `wait_idle()`：销毁可能仍在被 pending present 等待的信号量与
     /// framebuffer 是未定义行为（见 `resize_render_finished_semaphores` 的文档）。
+    ///
+    /// 🔴 2026-09-25 复查补：这个函数**先销毁再重建**，中间有 8 个可能失败的步骤，而
+    /// 调用方（`main.rs` 三处）以前都 `let _ =` 把错误丢掉 ⇒ 一旦中途失败，渲染器就带着
+    /// **半销毁**的状态继续每帧 acquire/提交（拿空句柄调 Vulkan，日志里只有一串含义不明的报错）。
+    /// 现在失败一律置 `swapchain_broken` 降级：不再提交帧，等下一次
+    /// 重建**成功**时自动恢复。判据 = `frame_suppressed` 的单测。
     pub fn recreate_swapchain(&mut self) -> Result<(), String> {
+        let r = self.try_recreate_swapchain();
+        self.swapchain_broken = r.is_err();
+        if let Err(e) = &r {
+            log::error!(
+                "重建交换链失败：{} —— 进入降级（不再提交帧；下一次重建成功即恢复）",
+                e
+            );
+        }
+        r
+    }
+
+    fn try_recreate_swapchain(&mut self) -> Result<(), String> {
         self.wait_idle()?;
         self.destroy_swapchain();
         self.init_swapchain()?;
@@ -13690,6 +13727,20 @@ mod vk_failure_path_tests {
             "等待必须有限（u64::MAX = 无限等 ⇒ 静默卡死）：\n{}",
             bad.join("\n")
         );
+    }
+
+    use super::{frame_suppressed};
+
+    /// 判据：降级状态必须真的挡住提交（`gpu_stalled` / `swapchain_broken`）。
+    #[test]
+    fn degraded_states_suppress_the_frame() {
+        assert!(!frame_suppressed(false, false));
+        assert!(frame_suppressed(true, false), "GPU 卡死必须停止提交");
+        assert!(
+            frame_suppressed(false, true),
+            "交换链重建中途失败后不许再拿可能已销毁的句柄提交"
+        );
+        assert!(frame_suppressed(true, true));
     }
 
     /// 判据：`renderer.rs` 里对 Vulkan 调用的结果不许 `.expect()` / `.unwrap()`。
