@@ -22,8 +22,7 @@
 
 **21 世纪架空世界观的大战场 FPS**（⚠ 旧版曾误写为「二战题材」；
 装备是现代系，默认武器 **AK-12 风暴 7.62×39mm**）。
-美术基调按 **2020s 当代东欧/中东战乱城镇**走（混凝土板楼 + 抹灰老城 + 破损，冷灰色调），
-不是战壕与 1940 年代道具。
+美术基调按 **2020s 当代东欧/中东战乱城镇**走（混凝土板楼 + 抹灰老城 + 破损，冷灰色调）。
 
 Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 `ash` 0.38 / `ash-window` 0.13 / `winit` 0.30(rwh_06) / `glam` 0.29 / `raw-window-handle` 0.6 /
@@ -117,7 +116,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
   参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
-  🔴 阴影是**两张图**（2026-09-26 实测 **+18~+24%**，两臂不重叠，见 §21.40(c)）：
+  🔴 阴影是**两张图**（实测增益见 §21.40(c)）：
   `shadow_image`(binding 5) 只装静态投射者（地形/地面场/marker/道具）、每
   `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；`shadow_dyn_image`(binding 10) 只装
   NPC/士兵、每 `RV3D_SHADOW_EVERY` 帧（默认 2）重画；
@@ -172,8 +171,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   `scripts/run_resize_probe.ps1`（改窗口尺寸 + F12，实测 VUID=0）。
   🔴 **最强的验证跑法是"整局 gameplay + 验证层"**（2026-09-26 实测）：设
   `RV3D_VALIDATION=1 DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1` 后跑
-  `run_survive_pm.ps1 -Secs 400 -NoShot` ⇒ **通关**（2026-09-26 两次：318s / 259s，1..5 全 cleared、
-  VUID=0、fps ≈164.7）。🔴 判据须读 **`.log.err`**（引擎只写 stderr，见 §21.51）。
+  `run_survive_pm.ps1 -Secs 400 -NoShot` ⇒ **通关**（2026-09-26 两次，判据见 §21.51）。
   20 秒的 perf/probe 只能证明"启动不炸"，整局才覆盖波次/死亡/关卡切换/弹孔/粒子这些路径。
 - 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式。
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
@@ -207,7 +205,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （抓的是已合成帧）⇒ **别用静态截图去证伪"残影"。**
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
   `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（`LiveKernelEvent` **P1=141** = TDR；
-  换 mailbox 后 fps 162、零 VUID）。而"静默"本身是引擎缺陷：`wait_for_fences`/`acquire_next_image`
+  换 mailbox 后正常）。而"静默"本身是引擎缺陷：`wait_for_fences`/`acquire_next_image`
   以前用 **`u64::MAX`** 无限等 ⇒ 现在 acquire 1s（连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s
   （连 3 次 ⇒ `gpu_stalled`，之后 `render()` 直接返回：**画面静止但进程与输入还在**，
   实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
@@ -218,14 +216,14 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   判据 `frame_action` + 测试 `acquire_suboptimal_never_aborts_before_present`。
 - 🔴 **命令缓冲按「在飞帧槽位」索引，不按 `image_index`**：围栏只保证**本槽位**的上一次提交完成，
   而同一张图像可被连续两帧 acquire（mailbox 下很常见）⇒ 按图像取 = 重录**仍在 pending** 的命令缓冲
-  （VUID-…-00049 / `-pCommandBuffers-00071`，2026-09-25 验证层实测 2 条，修后 0 条）。
+  （2026-09-25 验证层实测 2 条，修后 0 条）。
   判据 `command_buffer_is_indexed_by_frame_slot_not_by_swapchain_image`。
 - 🔴 **上传缓冲一律「先建新的，成功了再拆旧的」**（枪模 VB/IB 与道具 VB/IB 两条路）：失败路径必须
   原样保留旧句柄，且 `destroy` 之后立刻把字段置 `null` —— 非 null 的已销毁句柄会被阴影 pass 绑上、
   并在下一次扩容/退出时**二次 `destroy_buffer`**。生长判据 = `need > capacity`（**不是** `!=`，
   纯函数 `prop_buffer_growth_needed`）。判据 `upload_buffers_are_created_before_the_old_ones_are_destroyed`。
-- 🔴 **设备丢失 = 不可恢复**：`device_lost` 粘性位置位后不再提交、不再重试重建（实测每帧重试 =
-  12 秒 1961 轮、5900 行错误日志，而进程看着还活着、窗口还在）。判据 `device_lost_stops_rebuilding`
+- 🔴 **设备丢失 = 不可恢复**：`device_lost` 粘性位置位后不再提交、不再重试重建（实测每帧重试
+  1961 轮 / 5900 行错误日志）。判据 `device_lost_stops_rebuilding`
   + `should_retry_swapchain`（重建失败后限流 1 Hz，仍保留"成功即自动恢复"）。
 - 🔴 **验证必须覆盖「非默认配置」**：PT 上屏 blit 的目标范围曾写死 `2560x1600`，而**默认窗口就是它**
   ⇒ 此前每轮 PT 验证都躲过去了；换尺寸就 `VUID-vkCmdBlitImage-dstOffset-00248` 并把设备打掉。
@@ -272,7 +270,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 🔴 **弹孔贴的是「可见面」**：2026-09-17 起 marker 的**可见尺寸 == 碰撞 AABB**（半幅唯一真源 =
   `geom::Shape::template_half_extent`，测试 `marker_visible_size_matches_aabb`）⇒ 贴 AABB 入口面
   就是贴画出来的那层面。**两者必须同源**：可见面一旦比碰撞盒大，弹孔就被几何盖住
-  （"打了枪墙上没有孔"，2026-09-15 实测；那时这里要乘 `×2.0`）。
+  （"打了枪墙上没有孔"，2026-09-15 实测）。
 - 🔴 **命中体取「参数 t 最小」的那个**，不是"`world.bodies` 里第一个命中的" ——
   那是**建关顺序**，远处障碍可能排在近处前面 ⇒ 弹孔画在被前面柱子挡住的那面墙上。
 - 方片参数：8cm 见方 / 厚 1.6cm / 沿法线外移 0.4cm（**埋进墙里一半**：既不打 z-fighting，
@@ -377,7 +375,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 枪械色彩空间：`Image.pixels` 返回**原始 sRGB 编码值**（脚本自己做 sRGB→linear）；
   `baseColorFactor` 已是线性直接用；贴图 socket 的 0.8 默认值**刻意忽略**。
 - 枪模 buffer **只增不减**：容量 = `max(32768, next_pow2(顶点))` / `max(262144, next_pow2(索引))`。
-  🔴 AK-12M = **63283 顶点（容量 65536 = 96.6%）** / 70479 索引（旧文档"11949/32768"已过期）。换更大的枪会触发一次扩容重建 ⇒
+  🔴 AK-12M = **63283 顶点（容量 65536 = 96.6%）** / 70479 索引。换更大的枪会触发一次扩容重建 ⇒
   **扩容前必须 `device_wait_idle()`**；而**换成更小的枪绝不允许重建**（destroy 在飞 buffer =
   device lost：2026-09-15 按一下 "2" 就把整台设备打掉）。回归测试 `gun_glb_indices_all_in_range`
   逐把校验 GLB 索引范围（越界索引 = GPU 顶点抓取越界 = 设备消失，同样不报 VUID）。
@@ -390,7 +388,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 ### ⭐ 设计化建模链路（2026-09-12 建立，取代 `gen_props.py::asset_building`）
 
 > 6 个建筑模块由 `tools/blender/build_city_kit.py` 生成，比例**照着真实板楼/抹灰楼写死**，
-> 不是尺寸区间（旧的"参数拼箱子"路线生不出品味，已弃）。
+> 不是尺寸区间。
 
 ```powershell
 # 1) 尺寸普查（占地/高度/底面，**尺寸契约的唯一来源**）
@@ -462,7 +460,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   **判据：`0 警告` 只能用 `cargo build --release` 验** —— 🔴 `cargo test --release` 不算
   （`cfg(test)` 用到测试专用符号 ⇒ 实测漏报 1 条，§21.75）。⚠️ 实验占着 exe 时
   `build` 会卡在**链接**，但**编译与警告在此之前已产出** ⇒ 看警告仍有效。
-- 🔴 **`> file` 重定向会写成 UTF-16**（实测 102552 B 的真实文件写成 184852 B）：
+- 🔴 **`> file` 重定向会写成 UTF-16**（同一个文件会从 100 KB 变成 180 KB）：
   要取 HEAD 版本做字节比对，用 `git checkout-index` / `git cat-file` 写二进制，或用
   `git diff` / `git status` 判断，**不要用 PowerShell 的 `>`**（教训 7 的另一面）。
 - 🔴 **`git commit -m` 的中文消息里不要出现 ASCII 双引号**：本机 shell 会再解析一次命令行，
@@ -613,6 +611,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 24. **广场"坑"** = 水平面绕序反了（判据 `horizontal_winding_tests`）。
 25. ✅ **`ai_us` 单帧尖峰**：出生点小连通域 bug 的下游症状；255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
 26. ✅ **编制尾数并入末位**（2026-09-26 `7877855`）：连名单逐人等于全营（判据 `every_soldier_is_carried_by_a_company`），重组阈值分母也不再写死 128（`44c7464` / `regroup_threshold_follows_the_roster`）。
+27. **「重组」是死分支**：判据 `存活 < 编制×0.55 且 kills < 8`，而 `kills` = **本营阵亡** ⇒ 两支互斥（≥33 人的营：存活 <0.55×编制 ⟹ 阵亡 ≥15 >8）。170 秒会战实测 `态势` 只有 Pincer/Offense/Defend，Regroup 全来自 LLM 覆写。**lead** = 喂**敌方损失**（= 本营战果）或改判据；改战斗行为，须重跑 `run_llm_battle.ps1` 对照（§21.76）。
 
 ---
 
