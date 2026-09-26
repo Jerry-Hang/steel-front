@@ -596,14 +596,24 @@ impl Mixer {
         }
         let frames = out.len() / 2;
         for v in self.voices.iter_mut() {
+            let total = v.clip.frame_count() as f64;
             let gain = self.master.gain()
                 * self.channels.get(v.channel)
                 * v.source.volume
                 * distance_attenuation(listener.position.distance(v.source.position), self.rolloff);
             if gain <= 0.0 {
+                // 🔴 **听不见 ≠ 时间停止**：静音（音量 0）时仍必须推进游标、并让播完的声部退出队列。
+                // 旧实现这里直接 `continue` ⇒ 游标永不前进、声部永不 `finished`：
+                //   · 用户静音之后每一发枪都堆一个声部（`Arc<AudioClip>` 引用一起堆），队列无界增长；
+                //   · 解除静音时**累积的枪声一起响**（几十秒前的枪声齐鸣）。
+                // 判据：`mixer_retires_voices_even_when_muted` / `unmuting_does_not_replay_stale_voices`。
+                let (cursor, finished) = advance_voice_cursor(v.cursor, total, v.looping, frames);
+                v.cursor = cursor;
+                if finished {
+                    v.finished = true;
+                }
                 continue;
             }
-            let total = v.clip.frame_count() as f64;
             for f in 0..frames {
                 let mut fi = v.cursor.floor() as usize;
                 if fi >= v.clip.frame_count() {
@@ -628,6 +638,23 @@ impl Mixer {
         let mut out = vec![0.0; frames * 2];
         self.mix(listener, &mut out);
         out
+    }
+}
+
+/// 静音声部的时间轴推进（纯函数，可单测）：返回 (新游标, 是否播完)。
+///
+/// 见 `Mixer::mix` 里 `gain <= 0.0` 那条分支的注释：静音只是"不写进输出缓冲"，
+/// **不是"时间停止"** —— 不推进游标就等于让声部永远留在队列里。
+/// `total <= 0`（空 clip）时非循环声部直接判播完；循环声部游标保持 0（不做取模除零）。
+fn advance_voice_cursor(cursor: f64, total: f64, looping: bool, frames: usize) -> (f64, bool) {
+    let next = cursor + frames as f64;
+    if looping {
+        let c = if total > 0.0 { next % total } else { 0.0 };
+        (c, false)
+    } else if next >= total {
+        (total.max(0.0), true)
+    } else {
+        (next, false)
     }
 }
 
@@ -1819,6 +1846,22 @@ mod tests {
         Arc::new(AudioClip::new(vec![v; frames], 44100, 1).unwrap())
     }
 
+    /// 判据：静音推进的**退化输入**（空 clip / 循环）不产出 NaN、也不越界。
+    #[test]
+    fn silent_advance_handles_empty_and_looping_clips() {
+        // 非循环 + 空 clip（total = 0）：立刻判播完
+        let (c, fin) = advance_voice_cursor(0.0, 0.0, false, 64);
+        assert!(fin && c == 0.0);
+        // 循环 + 空 clip：不退出、游标保持 0（取模除零会产 NaN，那会让后续所有增益比较失效）
+        let (c, fin) = advance_voice_cursor(0.0, 0.0, true, 64);
+        assert!(!fin && c == 0.0 && c.is_finite());
+        // 循环 + 正常长度：游标落回 [0, total)
+        let (c, fin) = advance_voice_cursor(5.0, 8.0, true, 100);
+        assert!(!fin && (0.0..8.0).contains(&c), "循环游标必须落在区间内：{c}");
+        // 非循环 + 未播完：只推进
+        let (c, fin) = advance_voice_cursor(2.0, 100.0, false, 30);
+        assert!(!fin && (c - 32.0).abs() < 1e-9);
+    }
     #[test]
     fn mixer_multiplies_master_and_channel_volume() {
         let clip = const_clip(0.8, 8);
@@ -1835,6 +1878,72 @@ mod tests {
         }
         // music 通道音量不影响 sfx 声音
         assert_eq!(mixer.channel_volume(Channel::Music), 0.9);
+    }
+
+    /// 判据：**听不见的声部也必须走完时间轴并退出队列**。
+    ///
+    /// 依据（2026-09-26 复查）：`Mixer::mix` 原来对 `gain <= 0.0` 的声部直接 `continue`，
+    /// 于是它们的 `cursor` **永不前进**、也永不 `finished`：
+    ///   · 用户把音量拉到 0（设置面板的"音量"滑条）之后，每一发枪/每次命中都会 push 一个
+    ///     永不退出的声部 ⇒ `voices` 无界增长（每秒十几发、每发一个 `Arc<AudioClip>` 引用）；
+    ///   · 等他再把音量调回来，**累积下来的声音会一起响**（几十秒前的枪声齐鸣）。
+    /// 静音只是"不写进输出缓冲"，**不是"时间停止"**。
+    #[test]
+    fn mixer_retires_voices_even_when_muted() {
+        let clip = const_clip(0.5, 8);
+        let mut mixer = Mixer::new();
+        mixer.set_master(0.0); // 用户静音
+        for _ in 0..20 {
+            mixer.play(clip.clone(), AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
+        }
+        let mut out = vec![0.0; 2 * 64];
+        for _ in 0..4 {
+            mixer.mix(&AudioListener::new(Vec3::ZERO), &mut out);
+        }
+        assert_eq!(
+            mixer.voice_count(),
+            0,
+            "静音期间声部也必须走完并退出（否则队列无界增长，解除静音时一起爆响）"
+        );
+    }
+
+    /// 判据：**解除静音不会重放累积的旧声音**（上面那条的另一面）。
+    #[test]
+    fn unmuting_does_not_replay_stale_voices() {
+        let clip = const_clip(0.5, 8);
+        let mut mixer = Mixer::new();
+        mixer.set_master(0.0);
+        mixer.play(clip, AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
+        let mut out = vec![0.0; 2 * 64];
+        let listener = AudioListener::new(Vec3::ZERO);
+        for _ in 0..4 {
+            mixer.mix(&listener, &mut out);
+        }
+        mixer.set_master(1.0);
+        mixer.mix(&listener, &mut out);
+        for (i, v) in out.iter().enumerate() {
+            assert!(v.abs() < EPS, "第 {i} 个样本 {v}：静音期间就该播完了，不该在解除静音后补响");
+        }
+    }
+
+    /// 判据：**循环声部在静音期间不会因为越界而卡死**（`cursor` 取模后仍在 [0, len) 内）。
+    #[test]
+    fn muted_looping_voice_stays_in_range() {
+        let clip = const_clip(0.5, 8);
+        let mut mixer = Mixer::new();
+        mixer.set_master(0.0);
+        mixer.play(clip, AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, true);
+        let mut out = vec![0.0; 2 * 100];
+        let listener = AudioListener::new(Vec3::ZERO);
+        for _ in 0..5 {
+            mixer.mix(&listener, &mut out);
+        }
+        assert_eq!(mixer.voice_count(), 1, "循环声部不该退出");
+        mixer.set_master(1.0);
+        mixer.mix(&listener, &mut out);
+        for v in out.iter() {
+            assert!(v.is_finite() && v.abs() <= 1.0, "解除静音后必须仍是合法样本：{v}");
+        }
     }
 
     #[test]
