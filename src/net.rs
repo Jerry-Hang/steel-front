@@ -1159,7 +1159,17 @@ impl Client {
         let before = self.entities.len();
         self.entities
             .retain(|_, e| now - e.last_seen <= max_age);
-        before - self.entities.len()
+        let removed = before - self.entities.len();
+        // 🔴 实体退场必须把**插值缓冲**一起带走（2026-09-26 复查）：`remote_players` 的另一个
+        // 出口只有 `Leave` 报文 —— 而这条兜底存在的理由正是"`Leave` 可能丢包"。
+        // 只清 `entities` 的后果：幽灵玩家的插值缓冲永久留在表里（`net: remote_players=N`
+        // 只增不减；`remote_state_at()` 对一个早就离场的人照样返回最后一帧）。
+        if removed > 0 {
+            let entities = &self.entities;
+            self.remote_players
+                .retain(|id, _| entities.contains_key(&NET_PLAYER_BASE.wrapping_add(*id)));
+        }
+        removed
     }
 
     /// 远端玩家在本地时刻 t 的插值状态
@@ -2037,5 +2047,65 @@ mod tests {
         assert_eq!(client.entities().len(), 2, "本机玩家 + NPC");
         assert_eq!(client.prune_stale_entities(now2, ENTITY_STALE_AFTER), 0);
         assert_eq!(client.entities().len(), 2);
+    }
+
+    /// 🔴 判据：兜底清理必须把**插值缓冲**一起退场 —— `remote_players` 的另一个出口只有
+    /// `Leave` 报文，而这条兜底存在的理由正是"`Leave` 可能丢包"。
+    ///
+    /// 真机代价（2026-09-26 复查）：`prune_stale_entities` 原来只 `retain` 了 `entities`，
+    /// `remote_players` 谁都不删 ⇒ 幽灵玩家的插值缓冲永久留在表里：`net: remote_players=N`
+    /// 只增不减，`remote_state_at()` 对一个早就离场的人照样返回最后一帧。
+    #[test]
+    fn stale_prune_also_drops_the_interpolation_buffer() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        // 远端玩家 7：`Position` 报文建插值缓冲；快照里以 NPC 行（id = BASE+7）建实体
+        assert_eq!(
+            client.handle_message(NetworkMessage::Position {
+                player_id: 7,
+                seq: 1,
+                state: state(7.0, 0.0, 7.0, 0.0),
+            }),
+            None
+        );
+        assert!(
+            client.remote_players().contains_key(&7),
+            "Position 报文应建立插值缓冲"
+        );
+        let snap = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 1.0,
+            player_id: 0,
+            player: state(0.0, 0.0, 0.0, 0.0),
+            npcs: vec![NpcSnapshot {
+                id: NET_PLAYER_BASE + 7,
+                pos: [7.0, 0.0, 7.0],
+                facing: 0.0,
+                hp: 100.0,
+                team: 1,
+                firing: 0,
+            }],
+        };
+        assert_eq!(client.handle_message(snap), None);
+        assert!(client.entities().contains_key(&(NET_PLAYER_BASE + 7)));
+        // 还新鲜：实体与插值缓冲都不许动
+        let now = client.now();
+        assert_eq!(client.prune_stale_entities(now, ENTITY_STALE_AFTER), 0);
+        assert!(
+            client.remote_players().contains_key(&7),
+            "新鲜时不许清插值缓冲"
+        );
+        // 超过陈旧阈值：实体（本机玩家 + 远端玩家）退场，插值缓冲必须跟着退场
+        let later = now + ENTITY_STALE_AFTER + 0.001;
+        assert_eq!(client.prune_stale_entities(later, ENTITY_STALE_AFTER), 2);
+        assert!(!client.entities().contains_key(&(NET_PLAYER_BASE + 7)));
+        assert!(
+            !client.remote_players().contains_key(&7),
+            "实体退场时插值缓冲必须一起退场（否则就是永久幽灵）"
+        );
+        assert!(
+            client.remote_state_at(7, later).is_none(),
+            "已离场的人不该再插值出状态"
+        );
     }
 }
