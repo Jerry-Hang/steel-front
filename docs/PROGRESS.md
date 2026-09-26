@@ -9761,3 +9761,77 @@ Sketchfab **产品宣传图** —— 探针列出 22 个对象：**两把相差 
 的指向（不然下一个人还会按旧结论找）；并把"中间产物不进版本库"这句**不实**的话改掉 ——
 实测 `git ls-files assets/guns_ext` 有 14 个（它们一直在库里），新增的
 `svd_63_cleaned.glb` 按既有事实一并入库，保持这一类文件状态一致。
+
+### 21.55 铁律 E 的 aarch64 交叉验证**从来没跑成过**（目标没装）⇒ 那条路漂到 2 错 12 警（`ede8b62`）
+
+**发现方式**：审"今天改过的非 Windows 代码有没有被验过"时，
+`rustup target list --installed` 只有 `x86_64-pc-windows-msvc` ——
+而铁律 E 明写"交叉验证 `cargo check --target aarch64-unknown-linux-gnu`"。
+那条命令**连依赖都编译不过**（`rustc` 没有目标标准库），所以**从来没有人真的跑过它**，
+非 Windows 那条路于是一路漂到 **2 个编译错误 + 12 条警告**：
+
+| 文件 | 问题 | 修法 |
+|---|---|---|
+| `engine/mod.rs` | `cjk_glyphs` 被 `#[cfg(windows)]` 门控，而 `font_cjk.rs` **无条件** `use` 它的表 ⇒ `E0432` | 去掉 cfg（表只是数据；`font_cjk` 的 docstring 本来就写"跨平台无依赖"） |
+| `engine/simd.rs` | `E0308`：`points.as_ptr()` 是 `*const [f32; 3]`，`vld3q_f32` 要 `*const f32` | 加 `as *const f32`（xyz 连续交错，逐位等价） |
+| `audio_out.rs` | `Arc`/`Mutex` 只有 Windows 的 `mod win` 用得到 ⇒ 未使用导入 | 导入加 `#[cfg(target_os = "windows")]` |
+| `main.rs` | 其余 12 条都是"按平台只在 Windows 用得到"（waveOut 辅助、CJK 表 —— 非 Windows 明确回退 `None`） | **一行**平台作用域 `#![cfg_attr(not(windows), allow(dead_code))]` |
+
+判据：`cargo check --release --target aarch64-unknown-linux-gnu` **0 error / 0 warning**；
+Windows 侧 `cargo build --release` + `cargo test --release` **0 警告 / 608 passed**（dead-code 判据在
+Windows 上没松）。**前置条件也记下来**：目标必须先 `rustup target add aarch64-unknown-linux-gnu`
+（本机 2026-09-26 才装上；没装时那条规则等于不存在）。
+
+⇒ **这是今天第 6 处"判据没真跑过"**（survive 读空文件、ab_pair 空串参数被吞、`.ps1` 中文行尾吃掉
+下一行、preview_glb 写到 `C:\`、cap_safe 对着没写出的文件打印 SAVED、本条）。
+形状始终一样：**"我写了检查"与"检查真的在跑"是两件事**；
+⇒ 新增判据/命令时，**把"它需要的前置条件"一起写进同一行**（工具装没装、文件在哪、
+哪一列是判据列），否则下一个人只会看到一个从没红过的绿灯。
+
+⚠️ 同一天里 CJK 字模判据（`source_cjk_codepoints_all_have_glyphs`）挡了我**三次**
+（`繁` U+7E41、`闸` U+95F8，加上更早的 `审` U+5BA1）—— 我新写的注释里用到的字，
+**注释同样算**，而源字体未入库 ⇒ 只能改写文案。`python tools/cjk_cover_check.py` 是快速前置检查。
+
+### 21.56 文档里的"判据名"审计：AGENTS 有一条引用的是**已经改名掉的符号**（`tools/cite_audit.py`）
+
+**触发**：审"未结案/铁律里引用的判据，是不是都还真的存在"。
+本仓的规则是**靠引用符号名来生效**的（`判据 = ...`、`回归测试 ...`）⇒ 名字一旦改名/删除，
+规则就**静默失去执行力**，下一个人还会照着它去找一个不存在的东西。
+
+**工具**：`python tools/cite_audit.py`（新，`--self-test` 14/14、`--strict` 可选）。
+分两层，因为**一条规则不可能同时做到"完整"和"不吵"**：
+
+| 层 | 扫描面 | 未解析时 | 理由 |
+|---|---|---|---|
+| **Tier 1（硬）** | 判据行（含`判据`/`测试`/`回归`/`红测`） | **exit 1** | 这些句子**承诺了执行力**，名字是幽灵就是缺陷 |
+| **Tier 2（复核）** | 其余所有行 | 只打印；`--strict` 才 1 | 文档会合法地引用 std / ash / glam / Blender 工具 / 日志字段 |
+
+退出码沿用本仓约定：**0 = 真扫过且干净 / 1 = 有幽灵 / 2 = 根本没扫成**。
+
+**结果**：Tier 1 共 68 个被当判据引用的名字，**全部解析成功**；2 条是**有记录的退役**
+（`visual_half_gain` → `template_half_extent`、`pt_and_rt_enable_are_read_from_file` →
+`pt_enable_is_read_from_file` + `pt_exposure_is_read_and_clamped`）。Tier 2 另有 27 条待复核，
+逐条看过：全是 std/ash/glam 的方法名、Blender 工具函数、日志字段与资产名，**没有幽灵**。
+
+**真被修掉的那条**（AGENTS.md 弹孔条）：它引用 `geom::Shape::visual_half_gain` 当"半幅唯一真源"——
+**该符号 2026-09-17 已改名**；同一条还留着"可见尺寸 = 碰撞盒的 2 倍"这个**已被推翻**的说法。
+两条一起改掉，指向现存的 `geom::Shape::template_half_extent`（`geom.rs:122`
+`pub const fn template_half_extent`）+ 测试 `marker_visible_size_matches_aabb`。
+⚠️ 教训：**"符号名还在文档里"和"符号还在代码里"是两件事**；而**同一条里可以同时藏着
+一个死符号和一个过期数值**，改名时只 grep 代码是不够的。
+
+**这次审计自己踩的坑（值钱的三个）**：
+
+1. **第一版工具漏掉了它本该抓的那条**：它只扫"含判据关键字的行"，
+   而 HEAD 里那条幽灵引用**所在的句子没有judgement 关键字** ⇒ Tier 1 看不见它
+   （正对照实测：不填退役表时，`visual_half_gain` 只在 Tier 2 出现，且 Tier 1 报了 PROGRESS 那条）。
+   ⇒ 这就是 Tier 2 存在的理由：**关键字过滤是覆盖率漏洞，不是过滤器**。
+2. **定义索引有两个正则 bug，把真名字判成幽灵**：`fn|const|...` 的捕获组是 `[a-z_]` 开头 ⇒
+   **全大写的 `const` 全部看不见**；`pub const fn NAME` 会先匹配到 `const`、然后捕获到字面量
+   **`fn`**。实测 false red 从 18 条（AGENTS）/26 条（PROGRESS）降到 0。
+   ⇒ 与教训 17 同形：**先怀疑正则，再怀疑数据**。
+3. **self-test 自己是"为错的理由通过"的**：第一版 `audit()` 把源码根写死在模块里，
+   于是自测用**合成文档**去查**真仓库**的符号 —— 12 项里 11 项绿，而它们根本没测到合成树。
+   ⇒ 修法：`roots`/`tool_root` 变成参数，并**加一条反证检查**（"合成索引不得借到真仓库的符号"：
+   引 `marker_visible_size_matches_aabb` 必须红）。**这是教训 27 的第 N 次重演**：
+   校验工具的工具，同样要先证明它会红。
