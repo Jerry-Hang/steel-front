@@ -145,13 +145,54 @@ def live_visible(txt):
     """id -> True/False：引擎给的「玩家眼位看不看得见」判据（`npcpos: … vis=0|1`）。
 
     🔴 2026-09-25 加：`RV3D_PROJ_DIAG` 的两秒行量出 **33% 的子弹打在掩体上**（§21.18）
-    —— 盲选目标 = 三分之一的弹药送给墙。`vis=1` 才是"这一枪有射线"。
+    —— 选目标不看视线 = 三分之一的弹药送给墙。`vis=1` 才是"这一枪有射线"。
     没有这个字段（旧引擎/未开 `RV3D_NPC_POS`）时返回空表 ⇒ 调用方按"全都可见"处理。
     """
     out = {}
     for m in re.finditer(r"npcpos: #(\d+) [-\d.]+ [-\d.]+ [-\d.]+ \S+ vis=(\d)", txt):
         out[int(m.group(1))] = (m.group(2) == "1")
     return out
+
+
+def live_track(txt):
+    """id -> (x, z, vx, vz)：用**最后两条** `npcpos:` 样本估速度（米/秒）。
+
+    🔴 2026-09-25 加（弹道埋点逼出来的）：过期弹里 **>2m 的占 117/118** —— 不是"差一点"。
+    原因是**瞄准环本身的延迟**：读样本 → 注入像素 → `S.aim` 每轮 sleep 0.5s → 收敛耗时
+    约 1 秒，而 NPC 4–5 m/s ⇒ 扣扳机时子弹指向的是**4–5m 之前**的位置。
+    这里给出速度，调用方按 `lead_point()` 提前量瞄（`--lead-secs`）。
+    只有一条样本（刚出生/刚进日志窗）时速度为 0 = 退化成旧行为。
+    """
+    last = {}   # id -> (x, z)
+    prev = {}   # id -> (x, z)
+    for m in re.finditer(r"npcpos: #(\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ", txt):
+        i = int(m.group(1))
+        p = (float(m.group(2)), float(m.group(4)))
+        if i in last and last[i] != p:
+            prev[i] = last[i]
+        last[i] = p
+    out = {}
+    # 相邻样本间隔 0.1s（`RV3D_NPC_POS_HZ=10`）。没有时间戳时按标称频率算 ——
+    # 速度只用来做**提前量修正**，量级对就够（何况下一轮还有 `re-aim` 兜底）。
+    dt = 0.1
+    for i, p in last.items():
+        q = prev.get(i)
+        if q is None:
+            out[i] = (p[0], p[1], 0.0, 0.0)
+        else:
+            out[i] = (p[0], p[1], (p[0] - q[0]) / dt, (p[1] - q[1]) / dt)
+    return out
+
+
+def lead_point(track, lead_s):
+    """(x, z, vx, vz) + 提前量秒数 → 瞄准点 (x, z)。
+
+    速度夹在 ±8 m/s：日志窗口里跨了"重生/传送"时速度会是几十 m/s，
+    照它瞄会飞到天上 —— 夹住之后最坏也只是少给一点提前量。
+    """
+    x, z, vx, vz = track
+    k = max(-8.0, min(8.0, lead_s))
+    return (x + max(-8.0, min(8.0, vx)) * k, z + max(-8.0, min(8.0, vz)) * k)
 
 
 def targets(txt):
@@ -226,6 +267,40 @@ def self_test():
         not stall_due(1000.0, 990.0, 3, 25.0))
     chk("stall watchdog: stale + enemies alive -> stall",
         stall_due(1000.0, 900.0, 3, 25.0))
+    # 🔴 2026-09-25：收敛容差按距离给。写死 1.5° 在 70m 外是 1.8m，远超人形靶半宽 0.35m
+    # ⇒ 收敛了也照样打空（`RV3D_PROJ_DIAG` 里 44% 的子弹飞到寿命尽头）。判据：
+    # 70m 约 0.29°、20m 约 1.0°、5m 夹到上限 1.5°、极远夹到下 0.05°。
+    chk("aim tolerance: 70m is about 0.29 deg",
+        abs(aim_tolerance_deg(70.0) - 0.286) < 0.02)
+    chk("aim tolerance: near range clamps to 1.5 deg",
+        aim_tolerance_deg(5.0) == 1.5)
+    chk("aim tolerance: far range clamps to 0.05 deg",
+        aim_tolerance_deg(5000.0) == 0.05)
+    chk("aim tolerance: degenerate distance falls back to 1.5",
+        aim_tolerance_deg(0.0) == 1.5)
+    chk("aim tolerance: shrinks monotonically with distance",
+        aim_tolerance_deg(10.0) > aim_tolerance_deg(30.0) > aim_tolerance_deg(90.0))
+    # 🔴 提前量：过期弹 >2m 占 117/118，根因是瞄准环自身 ~1s 延迟（NPC 4–5 m/s）
+    trk_two = ("npcpos: #5 10.00 0.00 0.00 Attack vis=1\n"
+               "npcpos: #5 10.50 0.00 0.00 Attack vis=1")
+    chk("live_track estimates 5 m/s from two 0.1s samples",
+        abs(live_track(trk_two)[5][2] - 5.0) < 1e-6)
+    chk("live_track: a single sample means zero velocity (old behaviour)",
+        live_track("npcpos: #5 10.00 0.00 0.00 Attack vis=1")[5][2:] == (0.0, 0.0))
+    chk("lead_point leads a walking target by 0.75s",
+        lead_point((10.0, 0.0, 4.0, 0.0), 0.75) == (13.0, 0.0))
+    chk("lead_point clamps absurd velocities (respawn across the map)",
+        lead_point((0.0, 0.0, 900.0, 0.0), 1.0) == (8.0, 0.0))
+    chk("lead_point with zero lead is the plain position",
+        lead_point((3.0, -4.0, 5.0, 5.0), 0.0) == (3.0, -4.0))
+    # 🔴 每次跑的总结要能自己说清"子弹去哪了"（`RV3D_PROJ_DIAG=1` 的两秒行）
+    fate_line = ("proj-diag: alive=1 first=[pos=(0,0,0) dist=10m] nearest_npc=12m "
+                 "去向(2s) npc=3 obstacle=4 expired=5 "
+                 "| 过期弹离最近 NPC: <0.5m=1 0.5-2m=2 >2m=2")
+    chk("fate_totals parses the proj-diag line", fate_totals(fate_line) == (3, 4, 5))
+    chk("miss_buckets parses the expired histogram", miss_buckets(fate_line) == (1, 2, 2))
+    chk("fate_totals without the diag line is all zero (no false numbers)",
+        fate_totals("game: wave=1 enemies=0") == (0, 0, 0))
     # 🔴 2026-09-25：33% 的子弹打在掩体上（`RV3D_PROJ_DIAG` 量出来的，见 PROGRESS §21.18）
     # ⇒ 目标选择必须能用引擎给的遮挡判据。夹具是引擎 `npcpos:` 行的原文格式。
     vis_line = ("[2026-09-25T23:10:00Z INFO  steel_front::engine::game] "
@@ -245,6 +320,11 @@ def self_test():
                                    0, 0, kv[1][0] ** 2))
     chk("target order prefers the visible one", [i for i, _ in order] == [7, 8])
 
+    chk("player position: fresh playerpos line wins over the 1 Hz game line",
+        player_pos("game: wave=1 enemies=1 score=0 pos=(9.0,9.0)\n"
+                   "playerpos: 1.50 -2.50") == (1.5, -2.5))
+    chk("player position: falls back to the game line when playerpos is absent",
+        player_pos("game: wave=1 enemies=1 score=0 pos=(9.0,8.0)") == (9.0, 8.0))
     logp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "logs", "survive_pm.log.err")
     if os.path.exists(logp):
@@ -260,7 +340,7 @@ def self_test():
         print("  real log replay: %s not found" % logp)
 
     print("SELF-TEST: %s (%d checks, %d failed)"
-          % ("OK" if not fails else "FAIL", 14 + 1, len(fails)))
+          % ("OK" if not fails else "FAIL", 30, len(fails)))
     return 0 if not fails else 1
 
 
@@ -275,11 +355,42 @@ def score_now(txt):
 
 
 def player_pos(txt):
-    """(x, z) from the LAST `game:` status line's pos= field (added 2026-09-22
-    together with the repositioning below; the 1s cadence is fine because the
-    player only ever moves inside reposition())."""
+    """(x, z) of the player: the freshest `playerpos:` line if present, else the
+    LAST `game:` status line's pos= field.
+
+    🔴 2026-09-25：以前只有 `game:` 那条 **1 Hz** 的状态行。而角度是拿**玩家位置**算的
+    （`target_angles_rel`），harness 走路/侧移是 6 m/s ⇒ 1 秒前的玩家位置会让"收敛好的准星"
+    指向一个**错的目标点**（闭环只反馈 cam 角度，看不错自己）。
+    弹道埋点证实了这一点：过期弹里 **117/118 差最近的 NPC 有 2m 以上**（不是"差一点"）。
+    引擎现在按 `RV3D_NPC_POS_HZ` 同时发 `playerpos: x z`（10 Hz）。
+    """
+    m = re.findall(r"playerpos: ([-\d.]+) ([-\d.]+)", txt)
+    if m:
+        return (float(m[-1][0]), float(m[-1][1]))
     m = re.findall(r"game: wave=\d+ .*? pos=\(([-\d.]+),([-\d.]+)\)", txt)
     return (float(m[-1][0]), float(m[-1][1])) if m else None
+
+
+def fate_totals(txt):
+    """`RV3D_PROJ_DIAG=1` 的 2s 行 → 子弹去向合计（`npc`, `obstacle`, `expired`）。
+
+    🔴 2026-09-25 加：命中率一个数说不清"该怎么修" —— 打掩体多 ⇒ 换目标；
+    空放多 ⇒ 瞄法/延迟。这两类的修法完全不同，所以每次跑的总结里都该带上它。
+    没有这行（未开 `RV3D_PROJ_DIAG`）时返回 `(0, 0, 0)`。
+    """
+    rows = re.findall(
+        r"去向\(2s\) npc=(\d+) obstacle=(\d+) expired=(\d+)", txt)
+    return tuple(sum(int(r[i]) for r in rows) for i in range(3))
+
+
+def miss_buckets(txt):
+    """过期弹"离最近 NPC 多远"的三个桶（`<0.5m`, `0.5-2m`, `>2m`）。
+
+    判据意义：三个桶全在 `<0.5m` ⇒ 差一点（瞄法）；全在 `>2m` ⇒ 根本没往人身上飞
+    （延迟/选目标）——2026-09-25 实测就是 `0/1/117`，见 PROGRESS §21.21。
+    """
+    rows = re.findall(r"过期弹离最近 NPC: <0\.5m=(\d+) 0\.5-2m=(\d+) >2m=(\d+)", txt)
+    return tuple(sum(int(r[i]) for r in rows) for i in range(3))
 
 
 def shots_count(txt):
@@ -308,6 +419,20 @@ def move_hold(hwnd, logpath, key, hold):
     if p0 and p1:
         return math.hypot(p1[0] - p0[0], p1[1] - p0[1])
     return -1.0
+
+
+def aim_tolerance_deg(dist_m, half_width_m=0.35):
+    """收敛容差（度）—— 纯函数，`--self-test` 钉住它。
+
+    🔴 2026-09-25：`S.aim` 的容差以前写死 **1.5°**。1.5° 在 70m 外是 **1.8m**，
+    而人形靶半宽只有 ~0.35m ⇒ **收敛了也照样打空**（`RV3D_PROJ_DIAG` 里 44% 的子弹
+    "飞到寿命尽头"，PROGRESS §21.20）。这里按距离反解"刚好罩住靶子"的角度，并
+    下限 0.05°（再小就没法靠注入像素收敛了）、上限 1.5°（近距离不需要更严）。
+    """
+    if dist_m <= 0:
+        return 1.5
+    tol = math.degrees(math.atan2(half_width_m, dist_m))
+    return max(0.05, min(1.5, tol))
 
 
 def target_angles_rel(npc, ppos):
@@ -383,6 +508,19 @@ def main():
     ap.add_argument("--approach-stop", type=float, default=20.0,
                     help="close to roughly this range before firing")
     ap.add_argument("--shotdir", default=None)
+    ap.add_argument("--burst", type=int, default=1,
+                    help="rounds per engagement (each round re-aims first). Engine kicks "
+                         "the camera ~1.2deg per shot and springs back; measured over 2x100s "
+                         "runs (RV3D_PROJ_DIAG shot-aim + hit rate): burst=1 33.9%% hits / "
+                         "median 6.1deg, burst=2 27.8%% / 7.2deg, burst=4 25.5%% / 9.4deg "
+                         "-- long bursts spend rounds inside the recoil arc.")
+    ap.add_argument("--lead-secs", type=float, default=0.0,
+                    help="aim this many seconds AHEAD of the sampled position. Default 0 "
+                         "(off): a sweep with burst=1 (100s each, shot-aim median / hit rate) "
+                         "gave lead 0 -> 8.6deg / 29.0%%, 0.4 -> 9.6deg / 30.4%%, "
+                         "0.9 -> 10.5deg / 27.4%%, 1.5 -> 12.9deg / 22.5%% -- the lead HURTS "
+                         "alignment (the aim loop is faster than assumed, and a target that "
+                         "stops keeps the lead error). Kept as a knob for future A/Bs.")
     args = ap.parse_args()
 
     logpath = args.logpath
@@ -431,6 +569,7 @@ def main():
     waves_seen = []
     last_wave = -1
     engaged = 0
+    engage_dists = []       # 每次交火的距离（米）：解释"这一轮为什么命中率不同"最直接的一列
     result = "TIMEOUT"
 
     while time.time() < deadline:
@@ -506,6 +645,16 @@ def main():
                                                      attempts.get(kv[0], 0),
                                                      kv[1][0] ** 2 + kv[1][2] ** 2))
         npc_id, pos = order[0]
+        # 提前量：瞄准环自己就要 ~0.5–1s，NPC 4–5 m/s ⇒ 不补提前量等于瞄"它刚才在哪"。
+        # 速度来自最后两条 10 Hz 样本（`live_track`）；表为空/速度 0 时退化成旧行为。
+        trk = live_track(txt).get(npc_id)
+        if trk:
+            lx, lz = lead_point(trk, args.lead_secs)
+            if (lx, lz) != (pos[0], pos[2]):
+                print("    lead %.2fs: npc#%d (%.1f,%.1f) -> (%.1f,%.1f) v=(%.1f,%.1f)"
+                      % (args.lead_secs, npc_id, pos[0], pos[2], lx, lz, trk[2], trk[3]),
+                      flush=True)
+                pos = (lx, pos[1], lz)
         budget_key = lines.get(npc_id, pos)
         # The cap is per stand LINE, not per id: a fresh line (the NPC left and
         # re-entered Attack at a different spot) is a new target worth a full
@@ -544,19 +693,23 @@ def main():
             continue
         engaged += 1
         sc0 = score_now(txt)
-        print("[%6.0fs] wave %d/%d enemies=%d  aim npc#%d @(%.1f,%.1f,%.1f) try=%d"
-              % (time.time() - t0, wave, 5, enemies, npc_id, pos[0], pos[1], pos[2],
-                 attempts[npc_id]), flush=True)
         ppos = player_pos(txt) or (0.0, 0.0)
+        dist = math.hypot(pos[0] - ppos[0], pos[2] - ppos[1])
+        engage_dists.append(dist)
+        print("[%6.0fs] wave %d/%d enemies=%d  aim npc#%d @(%.1f,%.1f,%.1f) dist=%.0fm try=%d"
+              % (time.time() - t0, wave, 5, enemies, npc_id, pos[0], pos[1], pos[2],
+                 dist, attempts[npc_id]), flush=True)
         npc = (npc_id, pos[0], pos[1], pos[2])
         ty, tp = target_angles_rel(npc, ppos)
         # Approach: W walks along the camera forward, so aim first, close the
         # gap on the line of sight, then re-aim from the new position. The
         # wave-3 cluster sat 50-75m out and ate 150 engagements with zero
         # kills -- not cover, just geometry: 1.5deg tolerance > NPC hitbox.
-        dist = math.hypot(pos[0] - ppos[0], pos[2] - ppos[1])
+        # 🔴 2026-09-25：容差按**距离**给（`aim_tolerance_deg`）—— 写死的 1.5° 在 70m 外
+        # 是 1.8m，远大于人形靶半宽 0.35m ⇒ 收敛了也照样打空（§21.20 的 44% 空放）。
+        tol = aim_tolerance_deg(dist)
         if dist > args.approach_gt:
-            if S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
+            if S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=6, tol_deg=tol):
                 moved = move_hold(hwnd, logpath, "w",
                                   max(min((dist - args.approach_stop) / 6.0, 5.0), 0.5))
                 print("    approach w: moved %.1fm toward npc#%d (was %.0fm)"
@@ -570,7 +723,7 @@ def main():
         # 对着被挡住的目标扣扳机是纯浪费（弹药一局就那么多）；改成"转向它 + 走过去拿视线"，
         # 把子弹留给打得着的目标。visibility 表为空（旧引擎）时按可见处理 = 旧行为。
         if not vis.get(npc_id, True):
-            if S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
+            if S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4, tol_deg=tol):
                 moved = move_hold(hwnd, logpath, "w", 1.0)
                 print("    no line of sight to npc#%d -> walked %.1fm to gain it"
                       % (npc_id, moved), flush=True)
@@ -579,7 +732,7 @@ def main():
             else:
                 print("    no line of sight and aim did not converge", flush=True)
             continue
-        if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
+        if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=6, tol_deg=tol):
             print("    aim did not converge", flush=True)
             continue
         # 🔴 2026-09-25：到此为止瞄的是**上一次读日志时**的位置。样本过期 + NPC 走动
@@ -596,7 +749,8 @@ def main():
                 pos = fresh
                 npc = (npc_id, pos[0], pos[1], pos[2])
                 ty, tp = target_angles_rel(npc, player_pos(txt) or ppos)
-                if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=4):
+                tol = aim_tolerance_deg(math.hypot(fresh[0] - ppos[0], fresh[2] - ppos[1]))
+                if not S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=6, tol_deg=tol):
                     print("    re-aim did not converge", flush=True)
                     continue
         # Reload-aware burst: try_fire on an EMPTY magazine auto-arms the
@@ -606,7 +760,7 @@ def main():
         # ~60% of its trigger pulls that way (282 shots from 700 clicks).
         # Count what the engine actually fired and make up the rest after the
         # window instead of eating the dry clicks.
-        rounds = 4
+        rounds = max(1, args.burst)
         s0 = shots_count(txt)
         h0 = hits_now(txt)
         for k in range(rounds):
@@ -619,7 +773,9 @@ def main():
                 if p2:
                     ppos2 = player_pos(t2) or ppos
                     ty, tp = target_angles_rel((npc_id, p2[0], p2[1], p2[2]), ppos2)
-                    S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=2)
+                    S.aim(hwnd, cx, cy, logpath, ty, tp, rounds=3,
+                          tol_deg=aim_tolerance_deg(math.hypot(p2[0] - ppos2[0],
+                                                              p2[2] - ppos2[1])))
             S.post_lbutton(hwnd, True, cx, cy)
             time.sleep(0.08)
             S.post_lbutton(hwnd, False, cx, cy)
@@ -702,6 +858,21 @@ def main():
     print("  hits          : %d   (命中率 %.1f%%，理想 ≈%.1f 发/杀)"
           % (hits, (100.0 * hits / shots) if shots else 0.0,
              (hits / float(kills)) if kills else 0.0))
+    # 🔴 子弹去向 + 过期弹分桶（要 `RV3D_PROJ_DIAG=1`）：命中率一个数说不清该怎么修 ——
+    # 打掩体多 ⇒ 该换目标；空放多且都以 >2m 计 ⇒ 该修延迟/提前量（判据见 §21.19–§21.21）。
+    ft = fate_totals(txt)
+    if sum(ft) > 0:
+        tot = float(sum(ft))
+        print("  fate          : npc=%d obstacle=%d expired=%d (%.0f%%/%.0f%%/%.0f%%)"
+              % (ft[0], ft[1], ft[2], 100 * ft[0] / tot, 100 * ft[1] / tot, 100 * ft[2] / tot))
+    mb = miss_buckets(txt)
+    if sum(mb) > 0:
+        print("  expired dist  : <0.5m=%d  0.5-2m=%d  >2m=%d" % mb)
+    if engage_dists:
+        engage_dists.sort()
+        print("  engage dist   : median=%.0fm  min=%.0fm  max=%.0fm  (n=%d)"
+              % (engage_dists[len(engage_dists) // 2], engage_dists[0],
+                 engage_dists[-1], len(engage_dists)))
     print("  VUID=%d panics=%d device_lost=%d fps=%.1f"
           % (vuid, panics, lost, S.last_fps(txt)), flush=True)
     # 判据（2026-09-25 通关后收紧）：

@@ -191,8 +191,14 @@ def look(hwnd, cx, cy, dpx_x, dpx_y):
     return steps
 
 
-def aim(hwnd, cx, cy, logpath, tgt_yaw, tgt_pitch, rounds=6):
-    """闭环瞄准：读日志里的当前 cam yaw/pitch，按标定换算成像素注入，直到误差收敛。"""
+def aim(hwnd, cx, cy, logpath, tgt_yaw, tgt_pitch, rounds=6, tol_deg=1.5):
+    """闭环瞄准：读日志里的当前 cam yaw/pitch，按标定换算成像素注入，直到误差收敛。
+
+    🔴 2026-09-25：`tol_deg` 以前是**写死的 1.5°**，而 1.5° 在 70m 外就是 **1.8m** ——
+    远大于人形靶（半宽 ~0.35m）⇒ 收敛了也照样打空（`RV3D_PROJ_DIAG` 量出 44% 的子弹
+    "飞到寿命尽头"，PROGRESS §21.20）。现在由调用方按**距离**给容差
+    （`survive_pm.aim_tolerance_deg`），默认值仍是 1.5 以保持冒烟脚本行为不变。
+    """
     for _ in range(rounds):
         cur = cam_now(log_tail(logpath))
         if not cur:
@@ -203,9 +209,9 @@ def aim(hwnd, cx, cy, logpath, tgt_yaw, tgt_pitch, rounds=6):
         # yaw -= dx*sens ⇒ dx = -dyaw/sens;cam 日志是度 ⇒ 先转度到像素
         dpx_x = -dyaw / DEG_PX
         dpx_y = dpitch / DEG_PX
-        print("  aim: cur=(%.1f,%.1f) tgt=(%.1f,%.1f) err=(%.1f,%.1f) -> inject %.0f,%.0f px"
-              % (cur[0], cur[1], tgt_yaw, tgt_pitch, dyaw, dpitch, dpx_x, dpx_y), flush=True)
-        if abs(dyaw) <= 1.5 and abs(dpitch) <= 1.5:
+        print("  aim: cur=(%.1f,%.1f) tgt=(%.1f,%.1f) err=(%.1f,%.1f) tol=%.2f -> inject %.0f,%.0f px"
+              % (cur[0], cur[1], tgt_yaw, tgt_pitch, dyaw, dpitch, tol_deg, dpx_x, dpx_y), flush=True)
+        if abs(dyaw) <= tol_deg and abs(dpitch) <= tol_deg:
             return True
         look(hwnd, cx, cy, dpx_x, dpx_y)
         time.sleep(0.5)

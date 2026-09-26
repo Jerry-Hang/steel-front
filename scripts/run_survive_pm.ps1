@@ -12,7 +12,7 @@
 # "Playing + capture" reproducibly loses the Vulkan device (2026-09-25), while the
 # same scene without capture runs fine. Use it for dGPU runs; screenshots still work
 # on the integrated GPU.
-param([int]$Secs = 780, [int]$ShotEvery = 90, [switch]$NoShot, [string]$PresentMode = "mailbox", [switch]$NoInvincible)
+param([int]$Secs = 780, [int]$ShotEvery = 90, [switch]$NoShot, [string]$PresentMode = "mailbox", [switch]$NoInvincible, [double]$LeadSecs = -1, [int]$Burst = 0)
 $ErrorActionPreference = "Continue"
 $repo = "D:\Rust\steel-front"
 $exe  = Join-Path $repo "target\release\steel-front.exe"
@@ -58,6 +58,11 @@ try {
 
     $pyargs = @((Join-Path $repo "scripts\survive_pm.py"), $LOG, "--secs", "$Secs", "--shot-every", "$ShotEvery")
     if ($NoShot) { $pyargs += "--no-shot" }
+    # -LeadSecs: A/B the aim lead (0 = aim at the sampled position, the old behaviour).
+    # Negative (default) leaves survive_pm.py's own default in place.
+    if ($LeadSecs -ge 0) { $pyargs += @("--lead-secs", "$LeadSecs") }
+    # -Burst N: rounds per engagement (0 = leave survive_pm.py's default).
+    if ($Burst -gt 0) { $pyargs += @("--burst", "$Burst") }
     python @pyargs
     $rc = $LASTEXITCODE
 }
