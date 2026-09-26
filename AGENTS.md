@@ -591,7 +591,7 @@ release_input.ps1 取代）。
 16. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（2026-09-14）：文件已不存在。
 17. ✅ **`survive` 5 波真机首次通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；驱动 `scripts/run_survive_pm.ps1` + `survive_pm.py`（口径 `RV3D_INVINCIBLE=1`，失败分支用 `-NoInvincible` 验过）。通关判据：`VICTORY (288s)`、`waves cleared ['1'..'5']`、`VUID=0 panics=0 device_lost=0`、`RESULT: ALL-OK`。**剩下的只是枪法**（理想 ≈3.9 发/杀 vs 实际 12）。
 18. **CoverSeek 战术占比偏低**（压力模式 4%，另一次 0）。**lead** = 加 TOML 关卡掩体。
-19. **呈现层欠账**：毛玻璃菜单非真模糊（需 shader 后处理采样主 pass）；第一人称枪模动画仍欠。
+19. **呈现层欠账**：毛玻璃菜单非真模糊（需 shader 后处理采样主 pass）。~~第一人称枪模动画~~ **已补**（2026-09-26：后坐/行走摆动/切枪/ADS 插值本来就有，本轮补了**冲刺持枪姿态 / 换弹动作 / 静止呼吸**；判据 = `RV3D_GUN_DIAG=1` 的 `gundiag:` 行 + `scripts\run_gunpose_probe.ps1`）。
 20. ✅ **DLSS：不接**（2026-09-25，`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（像素面积减到 1/4 只 +12%、焊接顶点 −67% 却 +18.6%），而 DLSS 省的是像素；且缺运动矢量/jitter/深度暴露 + 要新增 NGX SDK。**重开判据**：面积 1/4 而 fps 提升 >40%。
 21. **GLB 加载器忽略 `byteStride`**（2026-09-14）：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数**（不崩不报）⇒ **凡"支持"都要补一条会红的测试**。
 22. **`data/` 历史残留**（2026-09-13）：62 文件 → 只留 3 个被引用的。

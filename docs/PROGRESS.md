@@ -8485,6 +8485,53 @@ cull-diag: 97818 us/s calls=49980 recomputed=… npcs=255 bodies=1240
 服务端重放/回滚（无 client-side prediction，"超 3m 硬对齐"是唯一的位置修正）、
 **双进程真机验证**（本机双开 2560x1600 太重；这一轮全部证据来自单测 + 回环链路）。
 
+### 21.29 第一人称枪模：补上**冲刺姿态 / 换弹动作 / 静止呼吸**（原来只有后坐/走摆/切枪/ADS）
+
+**(a) 先纠正一条过期待办**：AGENTS #19 写着"第一人称枪模动画仍欠"，但读 `fp_gun_matrix`
+发现它早就有：后坐指数包络（τ=75ms）、行走摆动（侧摆/上下/前后/惯性滞后四分量 + smoothstep
+起落 + 帧率无关低通）、切枪动作（`sin(π·t)` 包络）、ADS 位置插值 + FOV 补偿。
+**真正缺的是三个最常见状态**：冲刺时枪不动、换弹时枪不动、站立不动时枪完全静止。
+
+**(b) 本轮补的三样（都在 `fp_gun_matrix` 的同一套"屏幕等幅"换算里）**
+
+| 动作 | 触发 | 幅度 | 平滑方式 |
+|---|---|---|---|
+| 冲刺持枪 | `Game::sprinting()`（Shift+W、站立、非 ADS） | 0.10 m 下坠 + 24° 前倾 + 10° 侧转 | `GunSway::sprint` 指数低通（与速度同一 τ） |
+| 换弹 | `hud.reload_progress` | 0.07 m + 17° + 8°，中点最大 | `reload_envelope(1-progress)`（纯函数） |
+| 静止呼吸 | 站立不动 | 2.2 mm + 0.02 rad，0.22 Hz 的 ∞ 字 | `idle_sway(clock)`（纯函数，开镜再 ×0.25） |
+
+**(c) 判据（先量再改的那把尺子）**：新增 `RV3D_GUN_DIAG=1` ⇒ 每秒一行
+
+```text
+gundiag: sprint=1.000 walk_env=0.000 reload=0.999 idle=(-0.860,-0.527) ads=0.00
+```
+
+按住 W+Shift 时 `sprint` 到 **1.000**、松开回到 **0.000**；换弹中点 `reload` 到 **0.999**、
+两端为 0（日志里能看到 0.198 → 0.999 → 0.229 → 0.000 这条 `sin(π·p)` 曲线）。
+`walk_env` 直接复用渲染用的那个包络（新抽的 `gun_walk_env()`）—— **尺子必须量真正参与渲染的数**。
+
+**(d) 三个单元判据**（共 585 passed / 0 failed）：`reload_envelope_is_continuous_and_peaks_at_midpoint`、
+`idle_sway_is_bounded_and_figure_eight`（含"半周期后 x 反相、y 同相"= 真的是 ∞ 字）、
+`gun_sprint_pose_converges_and_is_framerate_independent`（30 fps 与 165 fps 差 <0.02，松开回精确 0，
+传送帧不抹掉姿态）。
+⚠️ 写第一版包络测试时我按"缓入缓出"的直觉断言"两端变化率远小于中点"—— **错了**：
+`sin(πp)` 的导数在两端恰好最大（±π），中点最小。测试当场红。已在文档里写明"包络的连续指位移、不指速度"。
+
+**(e) 视觉证据**：新增 `scripts\run_gunpose_probe.ps1`（纯 ASCII、只 PostMessage、按住键拍 F12），
+四张同机位图 + `tools/diff_gun_region.py`：
+
+| 对照 | 枪区域差异像素 |
+|---|---|
+| idle → walk | 22.1% |
+| idle → sprint | **37.9%** |
+| idle → reload | 41.4% |
+
+⚠️ **诚实标注**：这张表不是纯姿态差 —— 探针按顺序拍，walk/sprint 让玩家真的移动了，背景跟着变。
+所以**主证据是 (c) 的数字**，截图只作"确实出画"的辅证（我也肉眼看了 idle 与 sprint 两张：
+sprint 那张枪明显压低、前倾、内转）。要纯姿态差得用固定相机，留给以后。
+⚠️ 另一个坑：第一版探针换弹那一步 `reload=0.000` 整轮 —— 因为**弹匣是满的**，
+`start_reload()` 在满弹匣时直接不生效；探针现在先左键打三发再按 R。
+
 
 
 

@@ -290,6 +290,52 @@ const GUN_SWITCH_DROP_M: f32 = 0.18;
 const GUN_SWITCH_PITCH_RAD: f32 = 0.21; // ≈12°
 const GUN_SWITCH_ROLL_RAD: f32 = 0.10; // ≈6°
 
+/// 冲刺持枪姿态（2026-09-26 补）：冲刺时枪**压低 + 前倾 + 侧转**。
+///
+/// 为什么以前没有：摆动/后坐/切枪/ADS 都做了，唯独"按住 Shift 跑"这个**最常见**的状态
+/// 完全没有姿态变化 —— 玩家冲刺时枪仍端在瞄准线上，读起来像"滑行"而不是"奔跑"。
+/// 幅度取真实持枪的样子：0.10 m 下坠（视空间，走 `screen_gain` 补偿）、24° 前倾、
+/// 10° 侧转（枪身向身体中线内收）。这是**姿态**不是动画，靠 `GunSway::sprint` 的
+/// 指数低通平滑过渡（与速度包络同一套 τ），所以起止无位置跳变。
+const GUN_SPRINT_DROP_M: f32 = 0.10;
+const GUN_SPRINT_PITCH_RAD: f32 = 0.42; // ≈24°
+const GUN_SPRINT_ROLL_RAD: f32 = 0.18; // ≈10°
+
+/// 换弹动作（2026-09-26 补）：换弹时枪下沉、枪口下压、向身体侧倾，中点最大。
+/// 包络 = `reload_envelope(1 - progress)`：进度 1→0 的整段里**两端位移为 0**、中点为 1
+/// （与切枪同一套 `sin(π·p)` ⇒ 起止不出现位置跳变；该包络两端速度最大，
+/// 视觉上是"很快沉下去、再抬回来"）。
+/// 幅度 0.07 m / 17° / 8°：比切枪小一号（换弹是手里的动作，切枪是整支枪出画）。
+const GUN_RELOAD_DROP_M: f32 = 0.07;
+const GUN_RELOAD_PITCH_RAD: f32 = 0.30; // ≈17°
+const GUN_RELOAD_ROLL_RAD: f32 = 0.14; // ≈8°
+
+/// 静止呼吸微摆（2026-09-26 补）：站立不动时枪口极缓慢地画 ∞ 字（0.22 Hz），
+/// 幅值 2.2 mm / 0.02 rad。**只有"几乎不动"时才出现**（乘 `1 - 行走包络`），
+/// 且开镜时再乘 0.25 —— 否则瞄准时枪口在漂，精确射击就不可信。
+const GUN_IDLE_SWAY_M: f32 = 0.0022;
+const GUN_IDLE_ROLL_RAD: f32 = 0.020;
+const GUN_IDLE_HZ: f32 = 0.22;
+
+/// 静止呼吸微摆的**单位轨迹**（纯函数，可单测）：返回两轴偏移，各自在 `[-1, 1]`。
+///
+/// x 走 1× 频率、y 走 2× 且错开相位 ⇒ 枪口画一个极扁的"∞"字（而不是一条来回直线）。
+/// 有界性由 `sin` 保证，且**不含任何累积量** ⇒ 玩多久都不会漂（与 `GunSway::stride`
+/// 回绕是同一类考虑：相位必须有界）。
+fn idle_sway(clock: f32) -> (f32, f32) {
+    let w = clock * std::f32::consts::TAU * GUN_IDLE_HZ;
+    (w.sin(), (w * 2.0).sin() * 0.6)
+}
+
+/// `RV3D_GUN_DIAG=1`：每秒打一行枪姿态诊断（见 `fp_gun_matrix` 调用点的注释）。
+/// 关掉时零成本（只多一次已缓存的 bool 比较）。
+fn gun_diag_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RV3D_GUN_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+    })
+}
+
 /// 弹孔方片的边长（米）。marker 模板是 **±1 的单位盒** ⇒ 实例缩放 = **半幅**，所以这里
 /// 按 `DECAL_SIZE_M * 0.5` 缩放基向量，画出来正好是 8cm 见方的一块
 /// （障碍 marker 走的是另一条推导，见 `geom::Shape::template_half_extent`）。
@@ -327,6 +373,9 @@ struct GunSway {
     stride: f32,
     /// 后坐冲量包络 [0,1]：开火帧置 1，其后按 exp(-dt/τ) 连续衰减
     kick: f32,
+    /// 冲刺姿态混合 [0,1]：按住 Shift 且真的在跑时收敛到 1，否则回 0。
+    /// 与速度同一套帧率无关低通 ⇒ 起止无阶跃（冲刺姿态不许"啪"地跳出来）。
+    sprint: f32,
     /// 摆动总增益（RV3D_GUN_SWAY 覆盖，缺省 1.0；=0 可完全关闭摆动做 A/B 判定）
     gain: f32,
 }
@@ -340,6 +389,7 @@ impl GunSway {
             fore: 0.0,
             stride: 0.0,
             kick: 0.0,
+            sprint: 0.0,
             // 诊断门（与项目其它 RV3D_* 一致）：RV3D_GUN_SWAY=0 关闭全部枪摆动
             gain: env_f32("RV3D_GUN_SWAY").unwrap_or(1.0).clamp(0.0, 3.0),
         }
@@ -355,7 +405,8 @@ impl GunSway {
     }
 
     /// 每帧积分：`now_pos` 为玩家本帧脚底世界坐标，`right`/`fwd` 为相机基向量，
-    /// `fired` 为本帧是否击发，`dt` 为本次 update 的帧时间（秒）。
+    /// `fired` 为本帧是否击发，`sprinting` 为本帧是否处于冲刺（姿态包络目标），
+    /// `dt` 为本次 update 的帧时间（秒）。
     fn tick(
         &mut self,
         dt: f32,
@@ -363,7 +414,15 @@ impl GunSway {
         right: glam::Vec3,
         fwd: glam::Vec3,
         fired: bool,
+        sprinting: bool,
     ) {
+        // 冲刺姿态低通：与速度用同一个 τ（帧率无关）。**放在瞬移保护之外** ——
+        // 重生/传送不该抹掉"我正按着 Shift 跑"这个姿态目标。
+        let sprint_a = 1.0 - (-dt / GUN_SWAY_SMOOTH_TAU).exp();
+        self.sprint += ((sprinting as u32 as f32) - self.sprint) * sprint_a;
+        if self.sprint < 1e-4 {
+            self.sprint = 0.0; // 收敛到精确 0：姿态项彻底不参与（也保证 A/B 可判定）
+        }
         // 位移按水平面处理（y 是地形跟随，不属于步态）
         let moved = self
             .prev_pos
@@ -560,6 +619,8 @@ struct GameApp {
     last_fps: f64,
     /// 上次打印 `cull-diag:` 的时刻（`RV3D_CULL_DIAG=1`，默认关掉时这个字段只被读一次/秒）
     last_cull_diag: std::time::Instant,
+    /// 上次打印 `gundiag:` 的时刻（`RV3D_GUN_DIAG=1`，同上）
+    last_gun_diag: std::time::Instant,
     /// 倒地尸体：(位置, 朝向, 阵营色, 已存留秒数)；上限 20 具，超过 10 秒消退
     corpses: Vec<([f32; 3], f32, [f32; 4], f32)>,
     /// 枪口焰/弹壳粒子（0=枪口焰无重力淡出，1=弹壳重力落地）；渲染走 emissive 通道
@@ -675,6 +736,7 @@ impl GameApp {
             last_npc_snapshot: std::collections::HashMap::new(),
             last_fps: 0.0,
             last_cull_diag: std::time::Instant::now(),
+            last_gun_diag: std::time::Instant::now(),
             corpses: Vec::new(),
             particles: Vec::new(),
             perf_log: None,
@@ -1251,7 +1313,7 @@ impl GameApp {
             let f = self.camera.forward();
             let fwd = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
             let right = self.camera.right();
-            self.gun_sway.tick(dt, p, right, fwd, fired > 0);
+            self.gun_sway.tick(dt, p, right, fwd, fired > 0, self.game.sprinting());
         }
 
         // 相机参数日志（默认 1 秒一条；`RV3D_NPC_POS=1` 时跟随 `RV3D_NPC_POS_HZ`）。
@@ -1694,6 +1756,19 @@ impl GameApp {
         // 未随包发布），所以平时看不见，一旦命中就是彻底坏掉。
         (gun.verts.clone(), gun.indices.clone())
     }
+    /// 行走摆动的幅值包络（0..1）：`smoothstep(平滑速度) × 开火阻尼 × RV3D_GUN_SWAY 增益`。
+    ///
+    /// 单独抽出来是因为它同时被 `fp_gun_matrix` 与 `RV3D_GUN_DIAG` 的诊断行用 ——
+    /// 诊断必须量**真正参与渲染的那个数**，不能另写一套近似（否则尺子和被测物不是一回事）。
+    fn gun_walk_env(&self) -> f32 {
+        let t = ((self.gun_sway.speed - GUN_SWAY_SPEED_LO)
+            / (GUN_SWAY_SPEED_HI - GUN_SWAY_SPEED_LO))
+            .clamp(0.0, 1.0);
+        let smooth = t * t * (3.0 - 2.0 * t); // Hermite smoothstep：起止斜率为 0
+        let fire_damp = 1.0 - (1.0 - GUN_SWAY_FIRE_DAMP) * self.gun_sway.kick;
+        smooth * fire_damp * self.gun_sway.gain
+    }
+
     /// 第一人称枪的世界空间矩阵（程序化/导入枪模共用）：view_inv × anchor × scale。
     /// 开火后坐 + 行走摆动 + ADS 插值 + FOV 缩放（2026-08-27 抽离共享；
     /// 2026-09-01 摆动/后坐全部改由 `gun_sway` 的连续状态量驱动，见该结构注释）
@@ -1728,14 +1803,7 @@ impl GameApp {
         //    连续，且 speed 已在 update() 里做过与帧率无关的低通，所以不存在
         //    "逐帧通断"的阶跃（那是旧实现高频残影的直接来源）。
         //    ADS 的按轴抑制放在下面各分量里，避免这里再乘一次造成双重衰减。
-        let env = {
-            let t = ((self.gun_sway.speed - GUN_SWAY_SPEED_LO)
-                / (GUN_SWAY_SPEED_HI - GUN_SWAY_SPEED_LO))
-                .clamp(0.0, 1.0);
-            let smooth = t * t * (3.0 - 2.0 * t); // Hermite smoothstep：起止斜率为 0
-            let fire_damp = 1.0 - (1.0 - GUN_SWAY_FIRE_DAMP) * kick;
-            smooth * fire_damp * self.gun_sway.gain
-        };
+        let env = self.gun_walk_env();
         if env > 1e-6 {
             let ads = self.ads_blend;
             let st = self.gun_sway.stride;
@@ -1772,12 +1840,36 @@ impl GameApp {
             )
         };
         anchor.y -= switch_drop;
+        // ⑤ 冲刺姿态（2026-09-26 补）：平滑混合到"压低 + 前倾 + 内收"。
+        //    混合量来自 `GunSway::sprint`（帧率无关低通），所以按住/松开 Shift 都是渐变。
+        let sprint = self.gun_sway.sprint;
+        anchor.y -= GUN_SPRINT_DROP_M * sprint * screen_gain;
+        // ⑥ 换弹动作（2026-09-26 补）：包络中点最大、两端为 0（见 `reload_envelope` 的测试）
+        let reload = crate::engine::game::reload_envelope(
+            1.0 - self.game.hud.reload_progress,
+        );
+        anchor.y -= GUN_RELOAD_DROP_M * reload * screen_gain;
+        // ⑦ 静止呼吸微摆（2026-09-26 补）：只在几乎不动时出现，开镜时再压到 1/4。
+        //    用 `anim_clock` 当相位（已有、单调）⇒ 不需另加计时器；幅值与姿态无关，
+        //    走 `screen_gain` 保持与其它通道的屏幕等幅。
+        let idle_w = (1.0 - env).clamp(0.0, 1.0) * (1.0 - 0.75 * self.ads_blend);
+        let (idle_x, idle_y) = idle_sway(self.anim_clock);
+        anchor.x += idle_x * GUN_IDLE_SWAY_M * screen_gain * idle_w;
+        anchor.y += idle_y * GUN_IDLE_SWAY_M * screen_gain * idle_w;
         let view_inv = cam.view_matrix().inverse();
         view_inv
             * glam::Mat4::from_translation(anchor)
-            * glam::Mat4::from_rotation_z(switch_roll)
+            * glam::Mat4::from_rotation_z(
+                switch_roll + GUN_SPRINT_ROLL_RAD * sprint + GUN_RELOAD_ROLL_RAD * reload
+                    + GUN_IDLE_ROLL_RAD * idle_x * idle_w,
+            )
             * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
-            * glam::Mat4::from_rotation_x(-0.045 + switch_pitch)
+            * glam::Mat4::from_rotation_x(
+                -0.045
+                    + switch_pitch
+                    + GUN_SPRINT_PITCH_RAD * sprint
+                    + GUN_RELOAD_PITCH_RAD * reload,
+            )
             * glam::Mat4::from_rotation_y(std::f32::consts::PI)
     }
 
@@ -2008,6 +2100,23 @@ impl GameApp {
             }
         }
         // 2026-08-28：枪实例矩阵预计算（进入 renderer 借用前）
+        // `RV3D_GUN_DIAG=1`：每秒一行枪姿态诊断 —— 姿态是**动画**，静态截图只能证明
+        // "画面变了"，证明不了"姿态项真的按状态在动"。这一行给出可判定的数字：
+        // 冲刺时 `sprint→1`、行走时 `walk_env→1`、换弹中点 `reload≈1`、开镜 `ads→1`。
+        // 判据 = `scripts\run_gunpose_probe.ps1` 的日志（见 PROGRESS §21.29）。
+        if gun_diag_on() && self.last_gun_diag.elapsed().as_secs_f32() >= 1.0 {
+            self.last_gun_diag = std::time::Instant::now();
+            let (ix, iy) = idle_sway(self.anim_clock);
+            log::info!(
+                "gundiag: sprint={:.3} walk_env={:.3} reload={:.3} idle=({:+.3},{:+.3}) ads={:.2}",
+                self.gun_sway.sprint,
+                self.gun_walk_env(),
+                crate::engine::game::reload_envelope(1.0 - self.game.hud.reload_progress),
+                ix,
+                iy,
+                self.ads_blend
+            );
+        }
         let fp_gun_pre = {
             let show = self.inspect_weapon.is_some()
                 || (self.game.state() == GameState::Playing
@@ -3958,11 +4067,11 @@ mod tests {
         let right = glam::Vec3::X;
         let fwd = glam::Vec3::NEG_Z;
         let mut pos = glam::Vec3::ZERO;
-        s.tick(dt, pos, right, fwd, false);
+        s.tick(dt, pos, right, fwd, false, false);
         let step = speed * dt;
         for _ in 0..(secs / dt).round() as usize {
             pos += fwd * step;
-            s.tick(dt, pos, right, fwd, false);
+            s.tick(dt, pos, right, fwd, false, false);
         }
         s
     }
@@ -3986,6 +4095,82 @@ mod tests {
             fast.speed,
             slow.speed
         );
+    }
+
+    /// 判据：静止呼吸微摆**有界、两轴都真的在动、且 y 走 2× 频率**（画"∞"而不是来回直线）。
+    /// 并钉住"长时间运行不漂"（纯函数、无累积量）。
+    #[test]
+    fn idle_sway_is_bounded_and_figure_eight() {
+        let mut max_x = 0.0f32;
+        let mut max_y = 0.0f32;
+        let mut x_changed = false;
+        let mut y_changed = false;
+        let mut prev = idle_sway(0.0);
+        for i in 0..=2000 {
+            let t = i as f32 * 0.01;
+            let (x, y) = idle_sway(t);
+            assert!(
+                (-1.0..=1.0).contains(&x) && (-1.0..=1.0).contains(&y),
+                "单位轨迹必须有界：({x}, {y})"
+            );
+            max_x = max_x.max(x.abs());
+            max_y = max_y.max(y.abs());
+            if (x - prev.0).abs() > 1e-3 {
+                x_changed = true;
+            }
+            if (y - prev.1).abs() > 1e-3 {
+                y_changed = true;
+            }
+            prev = (x, y);
+        }
+        assert!(x_changed && y_changed, "两轴都必须真的在动");
+        assert!(max_x > 0.99, "x 轴应达到满幅，实际 {max_x}");
+        assert!((max_y - 0.6).abs() < 0.01, "y 轴应是 0.6 倍幅值，实际 {max_y}");
+        // 2× 频率：x 走半个周期时 y 回到同号（一圈"∞"的两个环在 y 上同相）
+        let period_x = 1.0 / GUN_IDLE_HZ;
+        let (x0, y0) = idle_sway(0.1);
+        let (x1, y1) = idle_sway(0.1 + period_x * 0.5);
+        assert!((x1 + x0).abs() < 0.02, "x 半周期后应反相：{x0} vs {x1}");
+        assert!((y1 - y0).abs() < 0.02, "y 是 2× 频率 ⇒ 半周期后同相：{y0} vs {y1}");
+    }
+
+    /// 判据：冲刺姿态包络**必须帧率无关地收敛**，且松开 Shift 后回到精确 0
+    /// （0 是 A/B 与"姿态项彻底不参与"的判据）。
+    #[test]
+    fn gun_sprint_pose_converges_and_is_framerate_independent() {
+        let run = |dt: f32, secs: f32, sprinting: bool| {
+            let mut s = GunSway::new();
+            for _ in 0..(secs / dt).round() as usize {
+                s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false, sprinting);
+            }
+            s
+        };
+        let fast = run(1.0 / 165.0, 0.5, true);
+        let slow = run(1.0 / 30.0, 0.5, true);
+        assert!(fast.sprint > 0.99, "0.5 s 后应基本收敛到满姿态：{}", fast.sprint);
+        assert!(
+            (fast.sprint - slow.sprint).abs() < 0.02,
+            "冲刺姿态低通应与帧率无关：{} vs {}",
+            fast.sprint,
+            slow.sprint
+        );
+        // 松开 Shift：回到精确 0（不是"接近 0"）
+        let mut s = fast;
+        for _ in 0..200 {
+            s.tick(1.0 / 165.0, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false, false);
+        }
+        assert_eq!(s.sprint, 0.0, "松开冲刺后包络应收敛到精确 0");
+        // 传送帧不该抹掉姿态目标（冲刺状态与位置无关）
+        let mut t = run(1.0 / 165.0, 0.3, true);
+        t.tick(
+            1.0 / 165.0,
+            glam::Vec3::new(80.0, 0.0, 80.0),
+            glam::Vec3::X,
+            glam::Vec3::NEG_Z,
+            false,
+            true,
+        );
+        assert!(t.sprint > 0.9, "传送帧后冲刺姿态应保持：{}", t.sprint);
     }
 
     /// 有界性 + 相位回绕：长时间运行后相位仍在 [0, 2π)、速度不发散、包络 ≤1。
@@ -4031,6 +4216,7 @@ mod tests {
             glam::Vec3::X,
             glam::Vec3::NEG_Z,
             false,
+            false,
         );
         assert!(s.speed < 1e-3, "传送帧速度应归零，实际 {}", s.speed);
     }
@@ -4041,11 +4227,11 @@ mod tests {
     fn gun_recoil_kick_decays_continuously() {
         let mut s = GunSway::new();
         let dt = 1.0 / 165.0;
-        s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, true);
+        s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, true, false);
         assert!(s.kick > 0.9, "击发帧应接近满幅后坐");
         let mut prev = s.kick;
         for _ in 0..60 {
-            s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false);
+            s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false, false);
             assert!(s.kick <= prev, "包络不得回升：{} > {}", s.kick, prev);
             assert!(
                 prev - s.kick < 0.08,
