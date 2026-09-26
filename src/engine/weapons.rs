@@ -28,7 +28,8 @@ pub fn tiered_damage(base: f32, tiers: &[(f32, f32)], dist: f32) -> f32 {
 }
 
 /// 武器特征：近战与投射物武器的公共接口
-#[allow(dead_code)] // 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire
+// 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire
+#[allow(dead_code)] // 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire（2026-09-26 编译器复查：name/damage/range/in_range/dps 五个方法仍无人调用 ⇒ 压制保留）
 pub trait Weapon {
     /// 武器名称
     fn name(&self) -> &'static str;
@@ -105,7 +106,7 @@ impl Weapon for MeleeWeapon {
 }
 
 /// 投射物武器：发射沿直线运动的投射物
-#[allow(dead_code)]
+
 pub struct ProjectileWeapon {
     name: &'static str,
     damage: f32,
@@ -228,7 +229,7 @@ impl Weapon for ProjectileWeapon {
 }
 
 /// 投射物：沿直线匀速运动，超过射程或寿命后自动销毁
-#[allow(dead_code)]
+
 pub struct Projectile {
     /// 当前位置（x, y, z）
     pub position: [f32; 3],
@@ -405,7 +406,7 @@ impl Projectile {
     }
 
     /// 已飞行距离（米）
-    #[allow(dead_code)] // 调试/诊断预留 getter
+    // 诊断/调试 getter，已被引用（2026-09-26 编译器复查：压制已删）
     pub fn distance_traveled(&self) -> f32 {
         self.distance_traveled
     }
