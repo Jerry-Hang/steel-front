@@ -8314,6 +8314,48 @@ size mismatch                                        1961   （12 秒内）
 
 `cargo test --release` **576 passed / 0 failed**、0 警告（新增 2 条判据）。
 
+### 21.25 滚轮切枪在日志里完全隐形 —— 我的"尺子"量不到，差点写成"现象不存在"
+
+**(a) 起因**：给枪模缓冲那条路（历史上两次把设备打掉的地方）补一个验证层探针。
+新写的 `scripts/run_weapon_probe.ps1` 用**安全注入**（PostMessage，不抢焦点；旧的
+`probe_weapons.ps1` 会 `SetForegroundWindow` + `AttachFocus`，违反鼠标安全协议，已删）
+在验证层下按 1..9 再滚两格，然后数引擎日志里的切枪行。
+
+**(b) 差点写错结论**：第一轮摘要写着
+
+```text
+switches after 9 digit keys: 8
+switches caused by the two wheel notches: 0 (0 = the wheel path did not fire)
+```
+
+看起来像"`PostMessage(WM_MOUSEWHEEL)` 到不了 winit"。**去读代码**才发现：滚轮那条路
+（`main.rs` 的 `MouseWheel` → `Game::cycle_weapon`）**直接调 `WeaponRack::switch_next/prev`，
+绕过了 `Game::switch_weapon` 里唯一那行 `weapons: 切枪` 日志** ⇒ **日志里根本不会有滚轮切枪**。
+"0" 不是"没生效"，是**我的计数模式量不到**（教训 27 的又一例：**量不到 ≠ 现象不存在**）。
+
+**(c) 修法**（`game.rs`）：抽出 `log_switch_if_changed(prev, tag)`，两条路共用，
+**标签不同**（`切枪` / `滚轮切枪`）—— 既补上隐形的那条，又让探针能分开计数。
+
+**(d) 红→绿（同一探针、同一命令，改前改后）**
+
+| | 改前 | 改后 |
+|---|---|---|
+| 数字键切换 | 8 | **8** |
+| 滚轮切换 | **0（量不到）** | **2** |
+| VUID / device lost / panics | 0 / 0 / 0 | 0 / 0 / 0 |
+| 枪模缓冲扩容行 | 0 | **0**（切 10 次都没重建 ⇒ "只增不减"确实生效） |
+
+**(e) 副产品**
+- 旧 `scripts/probe_weapons.ps1` **删除**（抢焦点；且它当年那个"滚轮截图"同样因为量不到而
+  证明不了任何事 —— 两处都指向同一条纪律）。
+- 新探针把两个已知的坑写进注释：① 日志被重定向时 `File.ReadAllText` 会撞
+  "file is being used by another process"，必须 `FileShare.ReadWrite` 打开；
+  ② 一次 F12 会打**两条**同样路径的日志 ⇒ 数 `steel_front_\d+\.png` 的**去重**值才是文件数。
+
+**(f) 判据**：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_weapon_probe.ps1 -Wheel`
+⇒ `switches: 8 by number key, 2 by mouse wheel` + `RESULT: ALL-OK`（探针自带"注入没生效"告警：
+数字键少于 7 次就 `!!`，不会静默记成通过）。
+
 
 
 

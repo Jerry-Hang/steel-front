@@ -3230,7 +3230,9 @@ impl ApplicationHandler for GameApp {
                     //   * 按 1/2 也只能到前两个槽位
                     // 用户 2026-09-13 实测「输入数字用指令切枪的时候，枪的模型没有变化」，
                     // 我用 `scripts/probe_weapons.ps1` 复现：按 1 后画面与基准**逐像素相同**
-                    // （`tools/diff_gun_region.py` 报 0.00% 差异）。
+                    // （`tools/diff_gun_region.py` 报 0.00% 差异）。⚠️ 那个脚本 2026-09-26 已删除
+                    // —— 它会 `SetForegroundWindow` **抢焦点**（违反鼠标安全协议），
+                    // 由 `scripts/run_weapon_probe.ps1` 取代（PostMessage + 验证层 + 两条切枪路都计数）。
                     //
                     // 槽位越界由 `WeaponSystem::switch_weapon` 自己忽略，这里不必再判。
                     KeyCode::Digit1

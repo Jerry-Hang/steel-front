@@ -3730,23 +3730,37 @@ impl Game {
         }
         let prev = self.weapons.active_index();
         self.weapons.switch_to(index);
-        if self.weapons.active_index() != prev {
+        self.log_switch_if_changed(prev, "切枪");
+    }
+
+    /// 切枪日志（两条路共用）：**只在真的换成了才打**，且 `tag` 区分是哪条路。
+    ///
+    /// 🔴 2026-09-26 补：滚轮那条路（`cycle_weapon`）原来**绕过这里直接调 rack**，
+    /// 于是滚轮切枪在日志里**完全隐形** —— 当天写 `scripts/run_weapon_probe.ps1` 时
+    /// 就据此得出了"滚轮没生效"的结论，其实是我的尺子量不到（教训 27 的又一例：
+    /// **量不到 ≠ 现象不存在**）。现在两条路都留痕且标签不同，探针能分别计数。
+    fn log_switch_if_changed(&self, prev: usize, tag: &str) {
+        let now = self.weapons.active_index();
+        if now != prev {
             log::info!(
-                "weapons: 切枪 {} -> {} ({})",
+                "weapons: {} {} -> {} ({})",
+                tag,
                 prev,
-                index,
+                now,
                 self.weapons.active_name()
             );
         }
     }
 
-    /// 循环切换武器（滚轮向上 = 下一把，向下 = 上一把）
+    /// 循环切换武器（滚轮向上 = 下一把，向下 = 上一把；末尾回到 0 / 开头回到末尾）
     pub fn cycle_weapon(&mut self, delta: i32) {
+        let prev = self.weapons.active_index();
         if delta > 0 {
             self.weapons.switch_next();
         } else if delta < 0 {
             self.weapons.switch_prev();
         }
+        self.log_switch_if_changed(prev, "滚轮切枪");
     }
 
     /// 🔴 **切枪动画进度** 0..=1（0 = 刚换手、枪在最低点；1 = 抬回瞄准位）。
