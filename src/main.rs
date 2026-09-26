@@ -1745,7 +1745,6 @@ impl GameApp {
                             crate::engine::guns::GunMesh {
                                 verts: Vec::new(),
                                 indices: Vec::new(),
-                                display_name: "EMPTY",
                                 length: 0.0,
                             }
                         })

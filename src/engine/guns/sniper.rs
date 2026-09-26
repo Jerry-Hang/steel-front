@@ -36,7 +36,7 @@ pub fn sv98() -> GunMesh {
         (t(0.0, 0.075, -0.160), beveled_box(0.050, 0.040, 0.05, 0.008, 4), DARK),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "SV-98M 针叶", length: 1.10 }
+    GunMesh { verts, indices, length: 1.10 }
 }
 
 pub fn m2010() -> GunMesh {
@@ -65,7 +65,7 @@ pub fn m2010() -> GunMesh {
         (t(0.0, 0.078, 0.600), beveled_box(0.007, 0.018, 0.007, 0.003, 4), DEEP),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M2010 ESR 界标", length: 1.13 }
+    GunMesh { verts, indices, length: 1.13 }
 }
 
 pub fn mrad() -> GunMesh {
@@ -94,5 +94,5 @@ pub fn mrad() -> GunMesh {
         (t(0.0, -0.015, 0.300), cylinder(0.012, 0.030, 16), DARK),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "MRAD 巨石", length: 1.14 }
+    GunMesh { verts, indices, length: 1.14 }
 }

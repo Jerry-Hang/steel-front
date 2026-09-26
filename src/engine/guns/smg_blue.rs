@@ -46,7 +46,7 @@ pub fn mpx() -> crate::engine::guns::GunMesh {
         (t(-0.036, 0.088, -0.090) * Mat4::from_scale(glam::vec3(0.005, 0.005, 0.005)), sphere(10, 8), [0.10, 0.10, 0.12]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "MPX 燕鸥", length: 0.67 }
+    GunMesh { verts, indices, length: 0.67 }
 }
 
 /// MP5SD 雨燕：微声冲锋枪，粗一体消音器（r0.024 长 0.30）、厚实机匣、手枪握把、固定厚托。
@@ -91,7 +91,7 @@ pub fn mp5sd() -> crate::engine::guns::GunMesh {
         (t(0.034, 0.080, 0.020), beveled_box(0.008, 0.022, 0.055, 0.003, 4), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "MP5SD 雨燕", length: 0.81 }
+    GunMesh { verts, indices, length: 0.81 }
 }
 
 /// P90：无托 PDW，流线粗枪身、顶部扁平弹匣、一体粗握把。
@@ -135,7 +135,7 @@ pub fn p90() -> crate::engine::guns::GunMesh {
         (t(0.036, 0.060, -0.150) * ry(-FRAC_PI_2), torus_arc(0.008, 0.0025, 0.0, TAU, 12, 6), [0.10, 0.10, 0.12]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "P90", length: 0.65 }
+    GunMesh { verts, indices, length: 0.65 }
 }
 
 /// MP7：紧凑 PDW，短粗枪身、粗枪管、折叠托。
@@ -179,5 +179,5 @@ pub fn mp7() -> crate::engine::guns::GunMesh {
         (t(0.032, 0.080, 0.060), beveled_box(0.007, 0.018, 0.050, 0.002, 4), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "MP7", length: 0.70 }
+    GunMesh { verts, indices, length: 0.70 }
 }

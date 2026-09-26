@@ -52,7 +52,7 @@ pub fn osv96() -> crate::engine::guns::GunMesh {
         (t(-0.033, -0.159, 0.528) * Mat4::from_rotation_z(-0.25) * Mat4::from_rotation_x(1.10) * rz(), cylinder(0.007, 0.30, 16), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "OSV-96 削岩", length: 1.06 }
+    GunMesh { verts, indices, length: 1.06 }
 }
 
 /// M82A1：反器材，.50 BMG，大型多槽制退器，粗壮机匣(0.08宽)，
@@ -105,5 +105,5 @@ pub fn m82a1() -> crate::engine::guns::GunMesh {
         (t(-0.035, -0.168, 0.553) * Mat4::from_rotation_z(-0.25) * Mat4::from_rotation_x(1.10) * rz(), cylinder(0.008, 0.32, 16), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M82A1", length: 1.45 }
+    GunMesh { verts, indices, length: 1.45 }
 }

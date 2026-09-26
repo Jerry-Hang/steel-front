@@ -54,7 +54,7 @@ pub fn svd12() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.080, -0.545) * rx(0.30), beveled_box(0.060, 0.12, 0.02, 0.008, 2), deep),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "SVD-12M 支点", length: 1.16 }
+    GunMesh { verts, indices, length: 1.16 }
 }
 
 pub fn m110a1() -> crate::engine::guns::GunMesh {
@@ -111,7 +111,7 @@ pub fn m110a1() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.065, -0.603), beveled_box(0.060, 0.115, 0.025, 0.010, 2), deep),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M110A1 信使", length: 1.19 }
+    GunMesh { verts, indices, length: 1.19 }
 }
 
 pub fn mk14p() -> crate::engine::guns::GunMesh {
@@ -168,5 +168,5 @@ pub fn mk14p() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.20, 0.0), beveled_box(0.036, 0.030, 0.03, 0.008, 2), black),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "MK14P 仲裁者", length: 1.14 }
+    GunMesh { verts, indices, length: 1.14 }
 }

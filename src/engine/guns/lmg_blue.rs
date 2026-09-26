@@ -50,7 +50,7 @@ pub fn m249() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.005, 0.33) * Mat4::from_rotation_z(0.35) * rx(-0.55), cylinder(0.0055, 0.21, 16), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M249 SAAR 蜂群", length: 1.11 }
+    GunMesh { verts, indices, length: 1.11 }
 }
 
 pub fn m240l() -> crate::engine::guns::GunMesh {
@@ -101,5 +101,5 @@ pub fn m240l() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.0, 0.31) * Mat4::from_rotation_z(0.35) * rx(-0.55), cylinder(0.005, 0.20, 16), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M240L 铁砧", length: 1.425 }
+    GunMesh { verts, indices, length: 1.425 }
 }

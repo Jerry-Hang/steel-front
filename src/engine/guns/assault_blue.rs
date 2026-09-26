@@ -46,7 +46,7 @@ pub fn hk416() -> crate::engine::guns::GunMesh {
         (t(0.038, 0.02, -0.045) * Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2), cylinder(0.007, 0.014, 16), deep),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "HK416 A8 游隼", length: 0.755 }
+    GunMesh { verts, indices, length: 0.755 }
 }
 
 pub fn mk18() -> crate::engine::guns::GunMesh {
@@ -91,5 +91,5 @@ pub fn mk18() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.058, -0.10), beveled_box(0.018, 0.026, 0.035, 0.005, 2), dark),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "MK18 隼爪", length: 0.715 }
+    GunMesh { verts, indices, length: 0.715 }
 }

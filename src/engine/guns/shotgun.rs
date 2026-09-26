@@ -52,7 +52,7 @@ pub fn saiga12() -> crate::engine::guns::GunMesh {
         (t(0.090, 0.10, -0.26) * Mat4::from_scale(glam::vec3(0.016, 0.016, 0.016)), sphere(10, 6), [0.62, 0.65, 0.70]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "Saiga-12 圆木", length: 1.15 }
+    GunMesh { verts, indices, length: 1.15 }
 }
 
 // ===== M1014 破门：半自动霰弹枪，粗管+破门制退器，管式弹仓，聚合物护木/机匣，粗伸缩托 =====
@@ -102,7 +102,7 @@ pub fn m1014() -> crate::engine::guns::GunMesh {
         (t(0.092, 0.10, -0.30) * Mat4::from_scale(glam::vec3(0.016, 0.016, 0.016)), sphere(10, 6), [0.62, 0.65, 0.70]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M1014 破门", length: 1.11 }
+    GunMesh { verts, indices, length: 1.11 }
 }
 
 // ===== AA-12 风暴：全自动霰弹枪，粗管+隔热罩，重型枪身，厚盒式弹匣，提把，重托 =====
@@ -152,5 +152,5 @@ pub fn aa12() -> crate::engine::guns::GunMesh {
         (t(0.100, 0.115, -0.28) * Mat4::from_scale(glam::vec3(0.016, 0.016, 0.016)), sphere(10, 6), [0.62, 0.65, 0.70]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "AA-12 风暴", length: 1.08 }
+    GunMesh { verts, indices, length: 1.08 }
 }

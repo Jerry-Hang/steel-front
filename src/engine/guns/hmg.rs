@@ -52,7 +52,7 @@ pub fn rope12() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.065, -0.60), beveled_box(0.074, 0.130, 0.030, 0.008, 3), [0.10, 0.10, 0.12]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "绳结 12.7mm 重机枪", length: 1.72 }
+    GunMesh { verts, indices, length: 1.72 }
 }
 
 // ===== m2a1 硬汉：.50 重机枪，粗管带散热环（r0.033细环×5套在管上），机匣侧大型弹箱，厚实重托 =====
@@ -100,5 +100,5 @@ pub fn m2a1() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.07, -0.66), beveled_box(0.074, 0.135, 0.030, 0.008, 3), [0.10, 0.10, 0.12]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M2A1 硬汉", length: 1.66 }
+    GunMesh { verts, indices, length: 1.66 }
 }

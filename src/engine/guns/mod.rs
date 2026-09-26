@@ -33,9 +33,6 @@ pub mod sniper;
 pub struct GunMesh {
     pub verts: Vec<GVertex>,
     pub indices: Vec<u32>,
-    /// 显示名（中文，HUD/命令用）
-    #[allow(dead_code)] // 元数据：命令窗口/调试日志用
-    pub display_name: &'static str,
     /// 全枪长度（米，用于摆放/缩放参考）
     #[allow(dead_code)] // 元数据：第三人称摆放/缩放用
     pub length: f32,

@@ -52,7 +52,7 @@ pub fn rpk16() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.045, 0.615) * rz(), frustum(0.017, 0.022, 0.07, 16, true), [0.62, 0.65, 0.70]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "RPK-16 桦木", length: 1.08 }
+    GunMesh { verts, indices, length: 1.08 }
 }
 
 // ===== PKM 钢线：通用机枪，右侧弹链盒（0.07×0.16×0.05），粗管+亮钢环，枪口助推器，前端两脚架，桦木托 =====
@@ -103,7 +103,7 @@ pub fn pkm() -> crate::engine::guns::GunMesh {
         (t(0.096, 0.09, 0.05) * Mat4::from_scale(glam::vec3(0.021, 0.021, 0.021)), sphere(10, 6), [0.16, 0.17, 0.19]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "PKM 钢线", length: 1.18 }
+    GunMesh { verts, indices, length: 1.18 }
 }
 
 // ===== PKP 佩切涅格：通用机枪，重管+散热套筒（粗0.03套细0.02），提把，右侧弹链盒，两脚架，聚合物托 =====
@@ -155,6 +155,6 @@ pub fn pkp() -> crate::engine::guns::GunMesh {
         (t(0.096, 0.09, 0.05) * Mat4::from_scale(glam::vec3(0.021, 0.021, 0.021)), sphere(10, 6), [0.16, 0.17, 0.19]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "PKP 佩切涅格", length: 1.18 }
+    GunMesh { verts, indices, length: 1.18 }
 }
 

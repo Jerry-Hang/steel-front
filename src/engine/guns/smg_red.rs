@@ -56,7 +56,7 @@ pub fn pp19() -> crate::engine::guns::GunMesh {
         (t(0.032, 0.0, 0.02), beveled_box(0.014, 0.03, 0.008, 0.003, 2), DEEP_BLACK),
     ];
     let (verts, indices) = assemble(&parts);
-    crate::engine::guns::GunMesh { verts, indices, display_name: "PP-19-01 勇士", length: 0.68 }
+    crate::engine::guns::GunMesh { verts, indices, length: 0.68 }
 }
 
 pub fn pp9() -> crate::engine::guns::GunMesh {
@@ -104,7 +104,7 @@ pub fn pp9() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.02, -0.175), beveled_box(0.034, 0.02, 0.02, 0.005, 4), STEEL_D),
     ];
     let (verts, indices) = assemble(&parts);
-    crate::engine::guns::GunMesh { verts, indices, display_name: "PP-9 胡蜂", length: 0.79 }
+    crate::engine::guns::GunMesh { verts, indices, length: 0.79 }
 }
 
 pub fn vss() -> crate::engine::guns::GunMesh {
@@ -153,7 +153,7 @@ pub fn vss() -> crate::engine::guns::GunMesh {
         (t(0.0, -0.115, -0.035), beveled_box(0.038, 0.014, 0.052, 0.005, 4), DEEP_BLACK),
     ];
     let (verts, indices) = assemble(&parts);
-    crate::engine::guns::GunMesh { verts, indices, display_name: "VSS Vintorez", length: 0.86 }
+    crate::engine::guns::GunMesh { verts, indices, length: 0.86 }
 }
 
 pub fn asval() -> crate::engine::guns::GunMesh {
@@ -202,5 +202,5 @@ pub fn asval() -> crate::engine::guns::GunMesh {
         (t(0.0, -0.085, -0.045) * rx(0.18), beveled_box(0.036, 0.11, 0.05, 0.008, 4), STEEL_D),
     ];
     let (verts, indices) = assemble(&parts);
-    crate::engine::guns::GunMesh { verts, indices, display_name: "AS Val", length: 0.78 }
+    crate::engine::guns::GunMesh { verts, indices, length: 0.78 }
 }

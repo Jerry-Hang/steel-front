@@ -73,7 +73,7 @@ pub fn ak12m() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.055, 0.338) * rz(), frustum(0.017, 0.020, 0.065, 16, true), [0.20, 0.21, 0.23]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "AK-12M 风暴", length: 0.90 }
+    GunMesh { verts, indices, length: 0.90 }
 }
 // ===== AK-104 短剑：紧凑AK，短粗管+消焰器，弧形弹匣，折叠托 =====
 pub fn ak104() -> crate::engine::guns::GunMesh {
@@ -123,7 +123,7 @@ pub fn ak104() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.078, -0.1725), beveled_box(0.058, 0.085, 0.045, 0.01, 3), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "AK-104 短剑", length: 0.75 }
+    GunMesh { verts, indices, length: 0.75 }
 }
 
 // ===== ASh-12 破城锤：重型突击，粗短枪管+大型枪口制退器，20发短弹匣，粗壮枪身 =====
@@ -174,5 +174,5 @@ pub fn ash12() -> crate::engine::guns::GunMesh {
         (t(0.0, 0.155, -0.26), beveled_box(0.05, 0.035, 0.10, 0.01, 3), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "ASh-12 破城锤", length: 0.78 }
+    GunMesh { verts, indices, length: 0.78 }
 }

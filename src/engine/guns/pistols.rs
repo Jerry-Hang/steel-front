@@ -31,7 +31,7 @@ pub fn mp443() -> crate::engine::guns::GunMesh {
         (t(-0.0175, 0.03, -0.02), beveled_box(0.004, 0.016, 0.01, 0.002, 2), black),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "MP-443 乌鸦", length: 0.21 }
+    GunMesh { verts, indices, length: 0.21 }
 }
 
 /// RSh-12 撞锤：12.7×55 左轮，大转轮 + 制退器 + 木握把片
@@ -63,7 +63,7 @@ pub fn rsh12() -> crate::engine::guns::GunMesh {
         (rx(0.0, 0.046, -0.128, 0.2), beveled_box(0.024, 0.034, 0.014, 0.003, 2), dsteel),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "RSh-12 撞锤", length: 0.40 }
+    GunMesh { verts, indices, length: 0.40 }
 }
 
 /// M18 信标：9×19 紧凑手枪，沙色聚合物握把 + 亮钢套筒
@@ -94,7 +94,7 @@ pub fn m18() -> crate::engine::guns::GunMesh {
         (t(-0.0155, 0.024, -0.02), beveled_box(0.004, 0.012, 0.009, 0.002, 2), dsteel),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "M18 信标", length: 0.16 }
+    GunMesh { verts, indices, length: 0.16 }
 }
 
 /// Mk23 海豹：.45 重型手枪，带螺纹枪管 + 皮卡汀尼导轨
@@ -126,5 +126,5 @@ pub fn mk23() -> crate::engine::guns::GunMesh {
         (rx(0.0, 0.044, -0.082, 0.15), beveled_box(0.02, 0.026, 0.01, 0.002, 2), dsteel),
     ];
     let (verts, indices) = assemble(&parts);
-    GunMesh { verts, indices, display_name: "Mk23 海豹", length: 0.25 }
+    GunMesh { verts, indices, length: 0.25 }
 }
