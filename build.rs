@@ -178,6 +178,11 @@ const GROUND_DETAIL_GAIN: f32 = 2.0;
 // 阴影贴图（2026-08-11）：depth-only pass 渲光空间深度，片元 3x3 PCF 深度比较
 @group(0) @binding(5) var shadow_map: texture_depth_2d;
 @group(0) @binding(6) var shadow_sampler: sampler;
+// 动态阴影图（2026-09-26，binding 10）：第二张同尺寸阴影图，**只装每帧会动的投射者**
+// （NPC/士兵），而 binding 5 那张只偶尔重画、装静态投射者（地形/地面场/marker/道具）。
+// 绑定号必须与 renderer.rs 的 SHADOW_DYN_BINDING 同步（10 = ground_detail(9) 之后第一个空位）。
+// 依据：实测只关静态投射者 ≈ 关掉整个阴影 pass，只关动态几乎不变 ⇒ 静态几何才是那 18% 的来源。
+@group(0) @binding(10) var shadow_dyn_map: texture_depth_2d;
 
 // ---- 光照 Uniform（默认全零 = 光照关闭，保持原混合渲染向后兼容）----
 struct DirectionalLight {
@@ -387,6 +392,11 @@ fn safe_face_normal(wp: vec3<f32>, vdir: vec3<f32>) -> vec3<f32> {
 // 光照应用（地面与 marker/NPC 共用，2026-08-22）：屏幕导数法线 + 3x3 PCF 阴影 + 方向/点光。
 // 障碍/建筑此前走“纯色直出”无面光照 → 一律同色剪影，纸片感；现在与地面同光源后，
 // 顶面/迎光面/背光面自然分层，建筑/树/集装箱有立体明暗。
+// 动态阴影图的 PCF 半径（纹素）。静态图那份是 3x3（半径 1）；动态图这张要在**每一帧的
+// 每个片元**上多花 (2R+1)^2 次深度采样，所以它单独可调：R=1 → 9 次（默认，边缘与静态图同档），
+// R=0 → 1 次（NPC 影子边缘偏硬，但采样量降到 1/9）。改这里必须重新构建（build.rs 生成 .spv）。
+const DYN_PCF_RADIUS: i32 = 1;
+
 fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     if (light_data.flags.x < 0.5) {
         return color;
@@ -482,6 +492,49 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             return vec3<f32>(0.0, 0.0, 1.0);
         }
         return vec3<f32>(frag_depth, d_avg, 0.0);
+    }
+    // ---- 动态阴影图（第二张）：NPC/士兵每帧重画，静态图只偶尔重画 ----
+    // 两张图的遮挡互相独立（各画各的投射者），所以结果取 max：任一张判定被遮就是被遮。
+    // 放在 RV3D_DEBUG_SHADOW 的早退**之后**，所以调试视图仍然是"只看静态图"的原语义。
+    // config.z = 动态图有效（renderer.rs::set_lights 每帧置位）。
+    if (light_data.shadow.config.z >= 0.5 && light_data.flags.y >= 0.5
+        && light_data.shadow.bias.z >= 0.5) {
+        let lvp2 = light_data.shadow.light_view_proj;
+        let row_x2 = vec3<f32>(lvp2[0].x, lvp2[1].x, lvp2[2].x);
+        let row_z2 = vec3<f32>(lvp2[0].z, lvp2[1].z, lvp2[2].z);
+        let extent_m2 = 1.0 / max(length(row_x2), 1e-6);
+        let depth_m2 = 1.0 / max(length(row_z2), 1e-6);
+        let map2 = max(light_data.shadow.config.x, 256.0);
+        let texel2 = 1.0 / map2;
+        let m_per_texel2 = 2.0 * extent_m2 / map2;
+        let to_light2 = -normalize(row_z2);
+        let ndotl2 = clamp(dot(normal, to_light2), 0.0, 1.0);
+        let slope2 = min(sqrt(max(0.0, 1.0 - ndotl2 * ndotl2)) / max(ndotl2, 0.25), 1.6);
+        let push_m2 = light_data.shadow.bias.y + m_per_texel2 * (1.25 + 0.9 * slope2);
+        let bias_d2 = (min(light_data.shadow.bias.x, 0.5) + 0.12) / depth_m2;
+        let sp2 = lvp2 * vec4<f32>(input.world_pos + normal * push_m2, 1.0);
+        let uv2 = vec2<f32>(sp2.x * 0.5 + 0.5, 1.0 - (sp2.y * 0.5 + 0.5));
+        if (uv2.x >= 0.0 && uv2.x <= 1.0 && uv2.y >= 0.0 && uv2.y <= 1.0
+            && sp2.z >= 0.0 && sp2.z <= 1.0) {
+            let base_uv2 = (floor(uv2 * map2) + vec2<f32>(0.5)) * texel2;
+            let d_c2 = textureSample(shadow_dyn_map, shadow_sampler, base_uv2);
+            let gap_m2 = max(0.0, sp2.z - bias_d2 - d_c2) * depth_m2;
+            let foot_m2 = max(deriv.x, max(deriv.y, deriv.z));
+            let pen_m2 = clamp(0.06 * gap_m2, 0.45, 4.0) + foot_m2;
+            let step_uv2 = clamp(pen_m2 / max(m_per_texel2, 1e-6), 1.5, 5.0) * texel2;
+            let w_d2 = max(pen_m2, m_per_texel2) / depth_m2;
+            var occluded2 = 0.0;
+            var taps2 = 0.0;
+            for (var dy2 = -DYN_PCF_RADIUS; dy2 <= DYN_PCF_RADIUS; dy2 = dy2 + 1) {
+                for (var dx2 = -DYN_PCF_RADIUS; dx2 <= DYN_PCF_RADIUS; dx2 = dx2 + 1) {
+                    let d2 = textureSample(shadow_dyn_map, shadow_sampler,
+                        base_uv2 + vec2<f32>(f32(dx2), f32(dy2)) * step_uv2);
+                    occluded2 = occluded2 + smoothstep(0.0, w_d2, sp2.z - bias_d2 - d2);
+                    taps2 = taps2 + 1.0;
+                }
+            }
+            shadow_factor = max(shadow_factor, occluded2 / max(taps2, 1.0));
+        }
     }
     // 半球环境光：上方取天光（冷、满量），下方取地面反弹（暖、约 0.4 倍）。
     // 原来是单一常数环境项 → 檐下、凹角、物体底面与开阔面一样亮，所有东西像贴

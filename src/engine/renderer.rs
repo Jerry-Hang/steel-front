@@ -191,6 +191,11 @@ const FADE_END: f32 = 900.0;
 /// 相机周边的地面乘成纯黑（见 `Renderer::ground_detail_image` 注释）。
 const GROUND_DETAIL_BINDING: u32 = 9;
 
+/// 动态阴影图的绑定号（片元第二张阴影图，见 `shadow_dyn_image` 字段注释）。
+/// 10 是本 set layout 里 ground_detail(9) 之后的第一个空位；**必须与 build.rs WGSL 的
+/// `@group(0) @binding(10) var shadow_dyn_map` 同步**。
+const SHADOW_DYN_BINDING: u32 = 10;
+
 // ============================================================
 // 地形常量（世界 512×512，与实例场同域）
 // ============================================================
@@ -616,6 +621,15 @@ fn frame_suppressed(gpu_stalled: bool, swapchain_broken: bool) -> bool {
 /// `every = 1` 就是每帧（A/B 对照）；`void_mode`（检视模式）下从不画。
 fn shadow_due(frame_seq: u64, every: u32, void_mode: bool) -> bool {
     !void_mode && frame_seq % every.max(1) as u64 == 0
+}
+
+/// **静态**阴影图这一帧要不要重画（纯函数，可单测）。
+///
+/// 静态图只装世界不动的那批投射者（地形/地面场/marker/道具），所以它只需要偶尔重画：
+/// `every` 帧一次（默认 30 ≈ 半秒，安全网），`split = false`（A/B 关掉拆分）时不单独画
+/// —— 那条路走"单张图、每帧两类投射者一起画"的旧逻辑。`void_mode`（检视模式）下从不画。
+fn shadow_static_due(frame_seq: u64, every: u64, void_mode: bool, split: bool) -> bool {
+    split && !void_mode && frame_seq % every.max(1) == 0
 }
 
 /// surface 未给出 `current_extent`（= `u32::MAX`）时的**兜底**尺寸：必须夹进
@@ -1169,6 +1183,15 @@ pub struct Renderer {
     /// ⇒ 隔帧重画只让 NPC 的影子旧一帧（10ms @100fps，肉眼不可见），代价换来约一半的阴影开销。
     /// **1 = 每帧重画**（与旧行为逐帧一致，用于 A/B 判定）。
     shadow_every: u32,
+    /// 阴影是否拆成**静态图 + 动态图**两张（默认开；`RV3D_NO_SHADOW_SPLIT=1` 回到旧行为做 A/B）。
+    /// 依据见 `shadow_dyn_image` 字段注释。
+    shadow_split: bool,
+    /// 静态阴影图的重画间隔（帧）：`RV3D_SHADOW_STATIC_EVERY`，默认 **30**。
+    /// 世界不动时静态图内容就不变，所以它只需要偶尔重画（安全网：万一静态内容变了 —— 换关、
+    /// 道具重传、太阳转动 —— 最多 30 帧后自动修正）。
+    shadow_static_every: u64,
+    /// 本帧要不要重画静态阴影图（由 `render()` 用 `shadow_static_due` 算好，录制里只读）
+    shadow_static_frame: bool,
     /// 本帧要不要画阴影（由 `render()` 用 `shadow_due` 算好，`record_command_buffer` 只读）
     shadow_frame: bool,
     /// `render()` 的单调帧序号（⚠️ 与在飞槽位 `current_frame` 是两回事，别混）
@@ -1281,6 +1304,19 @@ pub struct Renderer {
     shadow_sampler: vk::Sampler,
     shadow_render_pass: vk::RenderPass,
     shadow_framebuffer: vk::Framebuffer,
+    /// **动态**阴影图（第二张，与静态图同格式同尺寸）：只画每帧会动的投射者（NPC/士兵）。
+    ///
+    /// 为什么要两张（2026-09-26 实测，见 §21.27(e)/§21.38）：成本地图显示阴影 pass ≈18% 帧时间，
+    /// 而把**静态**投射者（地形/地面场/marker/道具）单独关掉就能拿回几乎全部（`skip_static` 与
+    /// `-NoShadow` 同档），只关动态投射者（NPC/士兵）则几乎不变 ⇒ 静态几何才是那 18% 的来源。
+    /// 于是：静态图**隔一段时间才重画**（世界不动时内容就不变），动态图每帧重画（只画 NPC，
+    /// 三角形数极少）⇒ 静态几何从每帧重画里彻底拿掉，而 NPC 影子反而**比原来更实时**
+    /// （原来是整张图隔帧重画）。
+    shadow_dyn_image: vk::Image,
+    shadow_dyn_image_memory: vk::DeviceMemory,
+    shadow_dyn_image_view: vk::ImageView,
+    shadow_dyn_framebuffer: vk::Framebuffer,
+    /// SHADER_READ_ONLY_OPTIMAL —— 拆分后它可能隔着几十帧才重画，中间一直被主 pass 采样）。
     shadow_pipeline_layout: vk::PipelineLayout,
     shadow_pipeline: vk::Pipeline,
     /// 阴影 UBO（每帧 slot 一份 64B mat4，避免 in-flight 竞态）
@@ -1966,13 +2002,21 @@ impl Renderer {
             fence_timeouts: 0,
             gpu_stalled: false,
             swapchain_broken: false,
-            // 帧预算地图显示阴影 pass 占 ~32% 帧时间，而画面里每帧会动的只有 NPC 的箱子
-            // ⇒ 默认隔帧重画（判据见字段注释；RV3D_SHADOW_EVERY=1 回到每帧，做 A/B）
+            // 阴影拆两张（静态图 + 动态图，见 shadow_dyn_image）：静态图偶尔重画、动态图按
+            // `shadow_every` 的节奏重画。默认 **2**（与拆分前整图的节奏一致），于是
+            // `RV3D_NO_SHADOW_SPLIT=1` 就是逐帧等价的对照组；=1 可让 NPC 影子更实时。
             shadow_every: std::env::var("RV3D_SHADOW_EVERY")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|v| (1..=8).contains(v))
                 .unwrap_or(2),
+            shadow_split: std::env::var("RV3D_NO_SHADOW_SPLIT").is_err(),
+            shadow_static_every: std::env::var("RV3D_SHADOW_STATIC_EVERY")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| (1..=600).contains(v))
+                .unwrap_or(30),
+            shadow_static_frame: true, // 首帧必须画（此时静态图里还没有任何内容）
             shadow_frame: true, // 首帧（以及启动时那批 dummy 录制）必须画
             frame_seq: 0,
             device_lost: false,
@@ -2049,6 +2093,10 @@ impl Renderer {
             shadow_sampler: vk::Sampler::null(),
             shadow_render_pass: vk::RenderPass::null(),
             shadow_framebuffer: vk::Framebuffer::null(),
+            shadow_dyn_image: vk::Image::null(),
+            shadow_dyn_image_memory: vk::DeviceMemory::null(),
+            shadow_dyn_image_view: vk::ImageView::null(),
+            shadow_dyn_framebuffer: vk::Framebuffer::null(),
             shadow_pipeline_layout: vk::PipelineLayout::null(),
             shadow_pipeline: vk::Pipeline::null(),
             shadow_ubo_buffers: Vec::new(),
@@ -2726,6 +2774,12 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        // 动态阴影图（binding=10；build.rs 片元 `shadow_dyn_map`，静态图是 binding 5）
+        let shadow_dyn_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(SHADOW_DYN_BINDING)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let bindings = [
             ubo_layout_binding,
             sampled_image_binding,
@@ -2737,6 +2791,7 @@ impl Renderer {
             marker_skin_binding,
             npc_skin_binding,
             ground_detail_binding,
+            shadow_dyn_binding,
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -2834,9 +2889,10 @@ impl Renderer {
                 .descriptor_count((max_frames * 3) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                // binding 1 地面贴图 + binding 5 阴影图 + binding 7/8 marker/NPC 皮肤纹理
-                // + binding 9 地面微细节层（缺一个 = 该 set 分配失败 → 启动即报错）
-                .descriptor_count((max_frames * 5) as u32),
+                // binding 1 地面贴图 + binding 5 静态阴影图 + binding 7/8 marker/NPC 皮肤纹理
+                // + binding 9 地面微细节层 + binding 10 动态阴影图（缺一个 = 该 set 分配失败
+                // → 启动即报错）。加采样图绑定**必须同时改这个数**。
+                .descriptor_count((max_frames * 6) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count((max_frames * 2) as u32),
@@ -3529,6 +3585,15 @@ impl Renderer {
     /// 更新光照 uniform（每帧渲染前调用；默认全零 = 光照关闭）
     pub fn set_lights(&mut self, lights: &LightUniform) {
         self.light_data = *lights;
+        // 动态阴影图是否参与采样（两张图取 max）。放在这里统一置位，免得依赖
+        // game.rs 构造 LightUniform 时是否知道"阴影拆了两张"这件事。
+        self.light_data.shadow.config.z = if self.shadow_split
+            && self.shadow_dyn_image_view != vk::ImageView::null()
+        {
+            1.0
+        } else {
+            0.0
+        };
         // RV3D_DEBUG_SHADOW=1：片元直出 shadow_factor 灰度（阴影诊断）
         if std::env::var("RV3D_DEBUG_SHADOW").as_deref() == Ok("1") {
             self.light_data.shadow.config.y = 1.0;
@@ -9188,10 +9253,10 @@ impl Renderer {
     /// 创建阴影贴图资源：2048x2048 D32_SFLOAT（DEPTH_STENCIL_ATTACHMENT | SAMPLED）、
     /// depth-compare 采样器、depth-only render pass、framebuffer、每帧 shadow UBO、
     /// shadow descriptor set layout + sets（binding 0 = shadow UBO，binding 2 = 实例 storage）。
-    fn init_shadow_resources(&mut self) -> Result<(), String> {
+    /// 建一张阴影图（image + 显存 + view）。静态图与动态图除用途外完全同构，
+    /// 所以创建代码只留这一份（加第二张图时把它从内联收口成函数）。
+    fn create_shadow_map_image(&self) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView), String> {
         use crate::engine::lighting::SHADOW_MAP_SIZE;
-
-        // ---- 1. 阴影图 Image + 内存 + View ----
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::D32_SFLOAT)
@@ -9204,34 +9269,31 @@ impl Renderer {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED,
-            )
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let shadow_image = unsafe {
+        let image = unsafe {
             self.device
                 .create_image(&image_info, None)
                 .map_err(|e| format!("创建阴影图 Image 失败: {}", e))?
         };
-        let mem_reqs = unsafe { self.device.get_image_memory_requirements(shadow_image) };
+        let mem_reqs = unsafe { self.device.get_image_memory_requirements(image) };
         let memory_type = self.pick_memory_type(mem_reqs, true)?;
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_reqs.size)
             .memory_type_index(memory_type);
-        let shadow_image_memory = unsafe {
+        let memory = unsafe {
             self.device
                 .allocate_memory(&alloc_info, None)
                 .map_err(|e| format!("分配阴影图 Image 内存失败: {}", e))?
         };
         unsafe {
             self.device
-                .bind_image_memory(shadow_image, shadow_image_memory, 0)
+                .bind_image_memory(image, memory, 0)
                 .map_err(|e| format!("绑定阴影图 Image 内存失败: {}", e))?;
         }
         let view_info = vk::ImageViewCreateInfo::default()
-            .image(shadow_image)
+            .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(vk::Format::D32_SFLOAT)
             .subresource_range(
@@ -9242,14 +9304,83 @@ impl Renderer {
                     .base_array_layer(0)
                     .layer_count(1),
             );
-        let shadow_image_view = unsafe {
+        let view = unsafe {
             self.device
                 .create_image_view(&view_info, None)
                 .map_err(|e| format!("创建阴影图 Image View 失败: {}", e))?
         };
+        Ok((image, memory, view))
+    }
+
+    /// 建一个阴影 pass 的 framebuffer（单附件 = 那张图的 view）。
+    /// 静态图与动态图共用 `shadow_render_pass`，所以只有附件不同。
+    fn create_shadow_framebuffer(&self, view: vk::ImageView) -> Result<vk::Framebuffer, String> {
+        use crate::engine::lighting::SHADOW_MAP_SIZE;
+        let attachments = [view];
+        let info = vk::FramebufferCreateInfo::default()
+            .render_pass(self.shadow_render_pass)
+            .attachments(&attachments)
+            .width(SHADOW_MAP_SIZE)
+            .height(SHADOW_MAP_SIZE)
+            .layers(1);
+        unsafe {
+            self.device
+                .create_framebuffer(&info, None)
+                .map_err(|e| format!("创建阴影帧缓冲失败: {}", e))
+        }
+    }
+
+    fn init_shadow_resources(&mut self) -> Result<(), String> {
+        use crate::engine::lighting::SHADOW_MAP_SIZE;
+
+        // ---- 1. 阴影图 Image + 内存 + View（静态图 + 动态图，见字段注释）----
+        let (shadow_image, shadow_image_memory, shadow_image_view) =
+            self.create_shadow_map_image()?;
         self.shadow_image = shadow_image;
         self.shadow_image_memory = shadow_image_memory;
         self.shadow_image_view = shadow_image_view;
+        let (dyn_image, dyn_memory, dyn_view) = self.create_shadow_map_image()?;
+        self.shadow_dyn_image = dyn_image;
+        self.shadow_dyn_image_memory = dyn_memory;
+        self.shadow_dyn_image_view = dyn_view;
+
+        // 两张图创建后**立刻**转成 SHADER_READ_ONLY_OPTIMAL：它们的描述符（binding 5 / 10）
+        // 从第一帧起就按这个布局绑定，而每张图**不一定都会在第一帧被渲染**（关掉拆分时动态图
+        // 永不渲染；检视模式下两张都不渲染）。不先转布局就采样一个仍停在 UNDEFINED 的图像 =
+        // VUID-vkCmdDraw-None-08114（2026-09-26 实测：RV3D_NO_SHADOW_SPLIT=1 下 11 条）。
+        // 转完之后的每次阴影 pass 都以 SHADER_READ_ONLY 为旧布局（见 record_shadow_pass）。
+        let maps = [self.shadow_image, self.shadow_dyn_image];
+        let barrier_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        self.run_single_time_commands(|cb| unsafe {
+            let barriers: Vec<vk::ImageMemoryBarrier> = maps
+                .iter()
+                .map(|&img| {
+                    vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(img)
+                        .subresource_range(barrier_range)
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                })
+                .collect();
+            self.device.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &barriers,
+            );
+        })?;
 
         // ---- 2. 阴影采样器（PCF：NEAREST + CLAMP_TO_EDGE）----
         // 手动 PCF 用 textureSample 读原始深度再比较，必须是普通采样器：
@@ -9302,19 +9433,9 @@ impl Renderer {
                 .map_err(|e| format!("创建阴影渲染流程失败: {}", e))?
         };
 
-        // ---- 4. framebuffer（单附件：阴影图 view）----
-        let framebuffer_attachments = [self.shadow_image_view];
-        let framebuffer_info = vk::FramebufferCreateInfo::default()
-            .render_pass(self.shadow_render_pass)
-            .attachments(&framebuffer_attachments)
-            .width(SHADOW_MAP_SIZE)
-            .height(SHADOW_MAP_SIZE)
-            .layers(1);
-        self.shadow_framebuffer = unsafe {
-            self.device
-                .create_framebuffer(&framebuffer_info, None)
-                .map_err(|e| format!("创建阴影帧缓冲失败: {}", e))?
-        };
+        // ---- 4. framebuffer（单附件：阴影图 view）——静态图 + 动态图各一个 ----
+        self.shadow_framebuffer = self.create_shadow_framebuffer(self.shadow_image_view)?;
+        self.shadow_dyn_framebuffer = self.create_shadow_framebuffer(self.shadow_dyn_image_view)?;
 
         // ---- 5. shadow descriptor layout（binding 0 = UBO，binding 2 = 实例 storage）----
         let ubo_binding = vk::DescriptorSetLayoutBinding::default()
@@ -9601,6 +9722,19 @@ impl Renderer {
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&ground_detail_infos);
+            // 动态阴影图（binding 10）：片元在静态图之外再采一张，两张取 max（互不覆盖）。
+            // 采样器仍走 binding 6 那条 SAMPLER 写入（两张图共用同一个 sampled-depth 采样器）。
+            let shadow_dyn_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(self.shadow_dyn_image_view)
+                .sampler(self.shadow_sampler);
+            let shadow_dyn_infos = [shadow_dyn_info];
+            let shadow_dyn_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(SHADOW_DYN_BINDING)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&shadow_dyn_infos);
 
             let writes = [
                 sampled_image_write,
@@ -9610,6 +9744,7 @@ impl Renderer {
                 marker_skin_write,
                 npc_skin_write,
                 ground_detail_write,
+                shadow_dyn_write,
             ];
             unsafe {
                 self.device.update_descriptor_sets(&writes, &[]);
@@ -9908,9 +10043,46 @@ impl Renderer {
         // ---- 阴影 pass：depth-only 渲光空间深度，供主 pass 3x3 PCF 采样 ----
         // （mesh 路径已冻结，shadow 只服务传统 VERTEX 几何；mesh 模式 near=INSTANCE_COUNT
         //   地面实例静态上传，marker/NPC/自发光照常上传，同一槽位布局可复用）
-        // 隔帧时**整段跳过**：沿用上一帧的阴影图（`shadow_frame` 由 `render()` 算好）。
-        if self.shadow_frame {
-            self.record_shadow_pass(command_buffer, near_count, far_count, terrain_lod)?;
+        //
+        // 默认（拆分）：**两张图** —— 动态图每帧只画 NPC/士兵（便宜、影子实时），
+        // 静态图每隔 `shadow_static_every` 帧画一次地形/地面场/marker/道具。
+        // 旧行为（`RV3D_NO_SHADOW_SPLIT=1`）：单张静态图，两类一起画，按 `shadow_frame` 隔帧。
+        if self.shadow_split {
+            if self.shadow_frame {
+                self.record_shadow_pass(
+                    command_buffer,
+                    near_count,
+                    far_count,
+                    terrain_lod,
+                    self.shadow_dyn_image,
+                    self.shadow_dyn_framebuffer,
+                    false,
+                    true,
+                )?;
+            }
+            if self.shadow_static_frame {
+                self.record_shadow_pass(
+                    command_buffer,
+                    near_count,
+                    far_count,
+                    terrain_lod,
+                    self.shadow_image,
+                    self.shadow_framebuffer,
+                    true,
+                    false,
+                )?;
+            }
+        } else if self.shadow_frame {
+            self.record_shadow_pass(
+                command_buffer,
+                near_count,
+                far_count,
+                terrain_lod,
+                self.shadow_image,
+                self.shadow_framebuffer,
+                true,
+                true,
+            )?;
         }
 
         // clear values 按 attachment 索引寻址：0=MSAA 颜色(CLEAR)、1=resolve(DONT_CARE，
@@ -10750,15 +10922,64 @@ impl Renderer {
 
     /// 记录阴影 depth-only pass：布局转换（UNDEFINED → DEPTH_STENCIL_ATTACHMENT_OPTIMAL）
     /// → 渲几何到 2048x2048 阴影图 →（DEPTH_STENCIL_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL）。
-    /// 绘制几何与主 pass 传统路径一致：地形 + 地面实例场 + marker + NPC + 自发光。
+    ///
+    /// 🔴 **一次调用只画一类投射者**（`draw_static` / `draw_dynamic`），目标图由 `image` +
+    /// `framebuffer` 指定 —— 默认路径是"静态图 + 动态图"两张（见 `shadow_dyn_image` 字段注释）：
+    /// 静态那类隔一阵子画一次，动态那类每帧画。`RV3D_NO_SHADOW_SPLIT=1` 时调用方改成
+    /// "单张图、两类一起画"，与拆分前逐帧等价。
     fn record_shadow_pass(
         &self,
         command_buffer: vk::CommandBuffer,
         near_count: u32,
         far_count: u32,
         terrain_lod: usize,
+        image: vk::Image,
+        framebuffer: vk::Framebuffer,
+        draw_static: bool,
+        draw_dynamic: bool,
     ) -> Result<(), String> {
         use crate::engine::lighting::SHADOW_MAP_SIZE;
+
+        // 🔬 诊断门（只为测量，不影响默认行为）：把阴影 pass 的**静态**投射者与**动态**投射者
+        // 分开关掉，用来回答"阴影那 18% 里，静态占多少"。
+        // 依据（2026-09-26 实测）：只关静态 ≈ 关掉整个阴影 pass（`skip_static` 与 `-NoShadow`
+        // 同档），只关动态几乎不变 ⇒ 静态几何才是阴影开销的来源，这正是拆两张图的理由。
+        // OnceLock：env 只读一次，热路径上没有分配。
+        static SKIP_STATIC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static SKIP_DYNAMIC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // 第三个门：只跳过**地面实例场**（near/far 实例数置 0），保留地形网格/marker/道具。
+        // 目的：地面场是 65536 实例的实例化 draw（顶点量级远大于道具的 246k 三角形），
+        // 而它本身就是地面 —— 地面给自己投影几乎没有视觉意义。若它真是阴影 pass 的大头，
+        // 那"把地面场从阴影 pass 拿掉"就是一行改动，比两张阴影图简单得多。
+        static SKIP_GROUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let skip_ground =
+            *SKIP_GROUND.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_GROUND").is_ok());
+        let draw_static =
+            draw_static && !*SKIP_STATIC.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_STATIC").is_ok());
+        let draw_dynamic = draw_dynamic
+            && !*SKIP_DYNAMIC.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_DYNAMIC").is_ok());
+        // 第四/五个门（同一族诊断）：只跳过**地形网格**（257² 网格，High LOD ≈13 万三角形，
+        // 量级最大）或只跳过地面实例场，用来分辨"阴影 pass 的顶点量到底花在哪一层地面上"。
+        static SKIP_TERRAIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let skip_terrain =
+            *SKIP_TERRAIN.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_TERRAIN").is_ok());
+        // 静态组：地形 / 地面实例场 / marker / 道具；动态组：NPC 盒柱球 / 士兵 GLB。
+        // 用"把实例数置 0"实现跳过（`draw_shadow_range` 对 0 会早退），不动绘制逻辑本身。
+        let (near_count, far_count) = if draw_static && !skip_ground {
+            (near_count, far_count)
+        } else {
+            (0, 0)
+        };
+        let marker_near = if draw_static { self.last_marker_near } else { 0 };
+        let marker_far = if draw_static { self.last_marker_far } else { 0 };
+        let npc_box_near = if draw_dynamic { self.last_npc_box_near } else { 0 };
+        let npc_box_far = if draw_dynamic { self.last_npc_box_far } else { 0 };
+        let npc_cyl_near = if draw_dynamic { self.last_npc_cyl_near } else { 0 };
+        let npc_cyl_far = if draw_dynamic { self.last_npc_cyl_far } else { 0 };
+        let npc_sph_near = if draw_dynamic { self.last_npc_sph_near } else { 0 };
+        let npc_sph_far = if draw_dynamic { self.last_npc_sph_far } else { 0 };
+        let soldier_drawn = if draw_dynamic { self.soldier_drawn } else { 0 };
+        let skip_static = !draw_static;
 
         let subresource = vk::ImageSubresourceRange::default()
             .aspect_mask(vk::ImageAspectFlags::DEPTH)
@@ -10767,21 +10988,27 @@ impl Renderer {
             .base_array_layer(0)
             .layer_count(1);
 
-        // UNDEFINED → DEPTH_STENCIL_ATTACHMENT_OPTIMAL（内容作废，反正 render pass 会 CLEAR）
+        // 进入 attachment 布局：旧布局固定 SHADER_READ_ONLY_OPTIMAL —— 两张图在 init 时就被
+        // 转到这个布局（见 init_shadow_resources 的一次性 barrier），而拆分之后静态图可能隔着
+        // 几十帧才重画，中间那些帧主 pass 一直在采样它（FRAGMENT_SHADER 读）。写之前必须让
+        // 上一次的读可见/完成：srcStage=FRAGMENT_SHADER + srcAccess=SHADER_READ。
+        let old_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+        let src_stage = vk::PipelineStageFlags::FRAGMENT_SHADER;
+        let src_access = vk::AccessFlags::SHADER_READ;
         let to_attachment = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::UNDEFINED)
+            .old_layout(old_layout)
             .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(self.shadow_image)
+            .image(image)
             .subresource_range(subresource)
-            .src_access_mask(vk::AccessFlags::empty())
+            .src_access_mask(src_access)
             .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
         let to_attachment_barriers = [to_attachment];
         unsafe {
             self.device.cmd_pipeline_barrier(
                 command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                src_stage,
                 vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
                 vk::DependencyFlags::empty(),
                 &[],
@@ -10799,7 +11026,7 @@ impl Renderer {
         }];
         let shadow_pass_info = vk::RenderPassBeginInfo::default()
             .render_pass(self.shadow_render_pass)
-            .framebuffer(self.shadow_framebuffer)
+            .framebuffer(framebuffer)
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: vk::Extent2D {
@@ -10831,7 +11058,12 @@ impl Renderer {
         }
 
         // 地形（保留 identity 实例 = INSTANCE_COUNT，与主 pass 一致）
-        if let Some(mesh) = self.terrain_lods.get(terrain_lod) {
+        let terrain_mesh = if skip_static || skip_terrain {
+            None
+        } else {
+            self.terrain_lods.get(terrain_lod)
+        };
+        if let Some(mesh) = terrain_mesh {
             let terrain_vertex_buffers = [mesh.vertex_buffer];
             let offsets = [0u64];
             unsafe {
@@ -10881,7 +11113,7 @@ impl Renderer {
             self.vertex_buffer,
             self.index_buffer,
             INDICES.len() as u32,
-            self.last_marker_near,
+            marker_near,
             MARKER_SLOT_BASE,
         )?;
         self.draw_shadow_range(
@@ -10889,8 +11121,8 @@ impl Renderer {
             self.far_vertex_buffer,
             self.far_index_buffer,
             FAR_INDICES.len() as u32,
-            self.last_marker_far,
-            MARKER_SLOT_BASE + self.last_marker_near,
+            marker_far,
+            MARKER_SLOT_BASE + marker_near,
         )?;
         // NPC 盒体区（躯干/脚/枪；阴影以盒体近似）
         self.draw_shadow_range(
@@ -10898,7 +11130,7 @@ impl Renderer {
             self.vertex_buffer,
             self.index_buffer,
             INDICES.len() as u32,
-            self.last_npc_box_near,
+            npc_box_near,
             NPC_SLOT_BASE,
         )?;
         self.draw_shadow_range(
@@ -10906,8 +11138,8 @@ impl Renderer {
             self.far_vertex_buffer,
             self.far_index_buffer,
             FAR_INDICES.len() as u32,
-            self.last_npc_box_far,
-            NPC_SLOT_BASE + self.last_npc_box_near,
+            npc_box_far,
+            NPC_SLOT_BASE + npc_box_near,
         )?;
         // NPC 圆柱区（四肢；阴影以盒体近似）
         self.draw_shadow_range(
@@ -10915,7 +11147,7 @@ impl Renderer {
             self.vertex_buffer,
             self.index_buffer,
             INDICES.len() as u32,
-            self.last_npc_cyl_near,
+            npc_cyl_near,
             NPC_CYL_SLOT_BASE,
         )?;
         self.draw_shadow_range(
@@ -10923,8 +11155,8 @@ impl Renderer {
             self.far_vertex_buffer,
             self.far_index_buffer,
             FAR_INDICES.len() as u32,
-            self.last_npc_cyl_far,
-            NPC_CYL_SLOT_BASE + self.last_npc_cyl_near,
+            npc_cyl_far,
+            NPC_CYL_SLOT_BASE + npc_cyl_near,
         )?;
         // NPC 球体区（头；阴影以盒体近似）
         self.draw_shadow_range(
@@ -10932,7 +11164,7 @@ impl Renderer {
             self.vertex_buffer,
             self.index_buffer,
             INDICES.len() as u32,
-            self.last_npc_sph_near,
+            npc_sph_near,
             NPC_SPH_SLOT_BASE,
         )?;
         self.draw_shadow_range(
@@ -10940,8 +11172,8 @@ impl Renderer {
             self.far_vertex_buffer,
             self.far_index_buffer,
             FAR_INDICES.len() as u32,
-            self.last_npc_sph_far,
-            NPC_SPH_SLOT_BASE + self.last_npc_sph_near,
+            npc_sph_far,
+            NPC_SPH_SLOT_BASE + npc_sph_near,
         )?;
         // 🪖 士兵 GLB（2026-09-14 补）——**这条是补我自己的回归**。
         //
@@ -10957,7 +11189,7 @@ impl Renderer {
             self.soldier_vertex_buffer,
             self.soldier_index_buffer,
             self.soldier_index_count,
-            self.soldier_drawn,
+            soldier_drawn,
             SOLDIER_INSTANCE_BASE,
         )?;
         // 🌳 道具（2026-09-14 补）—— 此前**道具完全不投影**（未结案 #14 定案）。
@@ -10999,7 +11231,7 @@ impl Renderer {
             } else {
                 (vk::Buffer::null(), vk::Buffer::null(), &[])
             };
-        if sh_ib != vk::Buffer::null() {
+        if !skip_static && sh_ib != vk::Buffer::null() {
             let light_frustum =
                 Self::extract_frustum_planes_from(self.light_data.shadow.light_view_proj);
             let bind_vb = [sh_vb];
@@ -11061,7 +11293,7 @@ impl Renderer {
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(self.shadow_image)
+            .image(image)
             .subresource_range(subresource)
             .src_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ);
@@ -11629,6 +11861,9 @@ impl Renderer {
         // 到采样所需的 SHADER_READ_ONLY_OPTIMAL 之间那道 barrier 在 `record_shadow_pass` 末尾，
         // 跳帧时图像就停在 SHADER_READ_ONLY_OPTIMAL，主 pass 读它是合法状态。
         self.shadow_frame = shadow_due(self.frame_seq, self.shadow_every, self.void_mode);
+        // 静态图单独一条节奏（默认 30 帧一次）：它装的是不动的东西，没必要每帧重画。
+        self.shadow_static_frame =
+            shadow_static_due(self.frame_seq, self.shadow_static_every, self.void_mode, self.shadow_split);
         self.frame_seq = self.frame_seq.wrapping_add(1);
         self.record_command_buffer(
             cmd_buffer,
@@ -12090,6 +12325,19 @@ impl Drop for Renderer {
             if self.shadow_image_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.shadow_image_memory, None);
             }
+            // 动态阴影图（第二张）：与静态图同一套顺序（framebuffer → view → image → memory）
+            if self.shadow_dyn_framebuffer != vk::Framebuffer::null() {
+                self.device.destroy_framebuffer(self.shadow_dyn_framebuffer, None);
+            }
+            if self.shadow_dyn_image_view != vk::ImageView::null() {
+                self.device.destroy_image_view(self.shadow_dyn_image_view, None);
+            }
+            if self.shadow_dyn_image != vk::Image::null() {
+                self.device.destroy_image(self.shadow_dyn_image, None);
+            }
+            if self.shadow_dyn_image_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.shadow_dyn_image_memory, None);
+            }
 
             // 释放图像视图
             for &image_view in &self.swapchain_image_views {
@@ -12150,6 +12398,23 @@ impl Drop for Renderer {
             }
             if self.ground_index_buffer_memory != vk::DeviceMemory::null() {
                 self.device.free_memory(self.ground_index_buffer_memory, None);
+            }
+            // NPC 近似几何：球（头）与圆柱（四肢）。这两对缓冲由 `create_sphere_geometry` /
+            // `create_cylinder_geometry` 在 init 时各建一次，**此前不在任何释放表里**
+            // （2026-09-26 用 tools/audit_vk_resources.py 扫出来的）：一次性小泄漏，但退出路径
+            // 不完整就会被后来照抄这段的人继续放大。
+            for (b, m) in [
+                (self.sphere_vertex_buffer, self.sphere_vertex_buffer_memory),
+                (self.sphere_index_buffer, self.sphere_index_buffer_memory),
+                (self.cylinder_vertex_buffer, self.cylinder_vertex_buffer_memory),
+                (self.cylinder_index_buffer, self.cylinder_index_buffer_memory),
+            ] {
+                if b != vk::Buffer::null() {
+                    self.device.destroy_buffer(b, None);
+                }
+                if m != vk::DeviceMemory::null() {
+                    self.device.free_memory(m, None);
+                }
             }
             // 释放地形 LOD 网格（顶点/索引缓冲）
             for mesh in &self.terrain_lods {
@@ -14020,7 +14285,7 @@ mod vk_failure_path_tests {
 
     use super::{
         clamp_swapchain_extent, frame_suppressed, is_device_lost_error, prop_buffer_growth_needed,
-        shadow_due, should_retry_swapchain, RECREATE_RETRY_MIN_SECS,
+        shadow_due, shadow_static_due, should_retry_swapchain, RECREATE_RETRY_MIN_SECS,
     };
     use ash::vk;
 
@@ -14110,6 +14375,24 @@ mod vk_failure_path_tests {
             shadow_due(3, 0, false),
             "非法间隔（0）被夹成 1 ⇒ 仍然每帧画，绝不能变成永不画"
         );
+    }
+
+    /// 判据：**静态**阴影图的调度（纯函数）。
+    ///
+    /// 静态图装的是不动的那批投射者（地形/地面场/marker/道具），所以它只需要偶尔重画；
+    /// 关掉拆分（`split = false`）时不单独画 —— 那条路走"单张图、两类一起画"的旧逻辑。
+    #[test]
+    fn static_shadow_pass_is_scheduled_every_n_frames() {
+        // 默认 30 帧一次：只有 0、30、60… 这几帧画
+        assert!(shadow_static_due(0, 30, false, true), "首帧必须画（图里还什么都没有）");
+        assert!(!shadow_static_due(1, 30, false, true));
+        assert!(shadow_static_due(30, 30, false, true));
+        assert!(!shadow_static_due(31, 30, false, true));
+        // 非法间隔被夹成 1 ⇒ 退化成每帧画，绝不能变成"永不画"
+        assert!(shadow_static_due(7, 0, false, true));
+        // 关掉拆分 / 检视模式：都不单独画静态图
+        assert!(!shadow_static_due(0, 30, false, false), "拆分关掉时不画静态图");
+        assert!(!shadow_static_due(0, 30, true, true), "检视模式不画");
     }
 
     /// 判据：道具缓冲**只在要得更多时**才重建（`need > capacity`，不是 `need != capacity`）。
