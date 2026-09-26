@@ -2,7 +2,7 @@
 
 > 架空历史 · 2020 年代 · 大规模战场 FPS ｜ Rust + Vulkan 自研引擎（ash / winit / glam）｜ 零第三方游戏引擎依赖
 
-**📖 中文（当前）** · [English](#steel-front--english)
+> **🌐 语言 / Language** ：**📖 中文（当前）** ｜ [English ↓](#english)
 
 ---
 
@@ -23,6 +23,16 @@
 | 2026-09-03 | 路径追踪管线打通（`VK_KHR_ray_query` 全景 PT + NEE + 时域累积降噪）；**建模路线改为 Blender 资产化** |
 | 2026-09-04 | **地面大面积纯黑根治**（未绑定描述符乘零）；**GLB 道具首次上屏**；主管线开启深度遮挡（枪模拆独立管线）；修复实例 buffer 三份抄写导致的静默越界读；GLB 加载器四个错读修复 |
 | 2026-09-05 | **网格着色器恢复为主路径**（顶点管线冻结）；道具空间分桶 + 逐桶视锥剔除（fps 112→152）；13 把外部枪械模型规范化并接入 |
+| 2026-09-09 | 枪口朝向根因根治（`detect_axes` 两端测量对调）；`assets/*.spv` 每次构建都变脏查清并修掉 |
+| 2026-09-12 | 士兵观感定型：头/盔按真人比例收小、NPC 枪身收到真 AK-12 长度（0.94 m） |
+| 2026-09-13 | **中文字模换源**：从专有 SimSun 换成 **Noto Sans SC（SIL OFL 1.1）**并裁到 1,580 码点 / 167 KB，附可复现提取器；士兵 GLB 上传移到构造之后（不再静默退回箱体） |
+| 2026-09-15 | **弹孔系统**（子弹在障碍表面留弹着标记）；切枪到更小枪模不再重建在飞缓冲（按一下「2」不再丢设备） |
+| 2026-09-16 | NPC 手榴弹改从手的高度出手（高帧率下不再原地自爆）；`RV3D_AI_DIAG=1` NPC 诊断埋点 |
+| 2026-09-19 | 阴影建筑盒壳 LOD（sw12 fps 47→80）；GLB 建筑碰撞顶 = 视觉高（垂直方向同源） |
+| 2026-09-22 | **survive 波次闭环**：harness 走位/重瞄 + Patrol 绕圈永不收敛的根因修复（真机首破 wave 1+2） |
+| 2026-09-23 | 提交白名单守卫 + 历史密钥审计工具（链式保留原钩子）；枪模缓冲扩容改「先建后毁」 |
+| 2026-09-25 | **所有 Vulkan 等待加上界**（acquire 1 s / 围栏 5 s + 卡死降级）——修掉「独显静默卡死」；命令缓冲按在飞帧槽位索引 |
+| 2026-09-26 | **审计日**：阴影拆静态/动态两张图（**+23.5%**）、磨砂玻璃菜单、第一人称枪模动画（冲刺/换弹/呼吸）、SVD-12M 真模型实装、军情口径四连修（编制逐人闭合 / 阵亡计数 / 快照同源 / 重组可达）、十余处静默失败（perf_log / net / audio / assets / config）、GLB 与 TOML、网络三处变异模糊 |
 
 ---
 
@@ -335,8 +345,8 @@ python tools\install_guns.py
 **运行时按进程 cwd 找 `assets/`，所以必须从仓库根（或与 assets 同级）启动**。
 玩家入口是 `SteelFront.bat`（它设 `RV3D_PRESENT_MODE=mailbox` 并 touch 构建脚本）。
 
-产物在 `release_dist/`，含启动器、游戏本体与 `联机主机.bat` / `联机加入.bat`。
-⚠ 打包时务必确认 `assets/guns/` 子目录与 `assets/rt/` 一并随包发布——缺失不会报错，只会静默回退到程序化枪模。
+发布包是**手工整理**的（没有现成脚本，`release_dist/` 不入库）：把 exe 与 `assets\` 放到
+`release_dist\game\`，连同启动器与 `联机主机.bat` / `联机加入.bat` 一起发布。
 
 ---
 
@@ -353,12 +363,20 @@ python tools\install_guns.py
 
 一句话概括：**开源使用永远免费；闭源使用在季度总营收低于人民币 1000 万元时自动免费；达到或超过则需书面商业授权。**
 
-⚠️ **再分发前请注意两项已知风险**（详见 `THIRD-PARTY-NOTICES.md`）：
+⚠️ **再分发前请读这两条**（逐项依据见 `THIRD-PARTY-NOTICES.md`，枪械另见
+[`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LICENCE-AUDIT.md)）：
 
-1. `src/engine/cjk_glyphs.rs` 的中文点阵提取自 Windows 系统字体 **SimSun（专有字体，禁止再分发）**。
-   **此项未解决前，本仓库不宜视为可干净再分发。**
-2. `assets/guns/` 与 `assets/guns_ext/` 的枪械模型来自第三方站点，**逐个许可证尚未核实**；
-   其中若含 CC BY-NC 一类条款，则不可用于商业构建。
+1. ✅ **中文字模已解决**（2026-09-14）：不再来自专有字体，而是从 **Noto Sans SC（SIL OFL 1.1）**
+   重新提取，并裁到源码真正用到的 1,580 个码点；OFL 全文随包发布
+   （`assets/fonts/OFL-NotoSansCJK.txt`），提取器 `tools/extract_cjk_glyphs.py` 可复现，
+   `cargo test` 会挡住"加了没有字模的字"。**唯一义务 = 保留 OFL 文本与出处**（不叫 Noto 即可，无需改名）。
+2. ⚠️ **枪械模型只完成了部分核实**（§4，2026-09-14：14 件里 4 件确认、2 件较可能，全部 CC BY）：
+   **闭源/商业构建发布前，必须按 `docs/WEAPON-LICENCE-AUDIT.md` 逐件核实**；
+   若某件不适合再分发，从 `assets/guns*/` 删除即可 —— 引擎对缺模型会回退 `ak12.glb`，**不会坏构建、只降画质**。
+
+**再分发清单（照做即可）**：`LICENSE` + `THIRD-PARTY-NOTICES.md` + `assets/fonts/OFL-NotoSansCJK.txt`
+随包；10 个 Rust 依赖的许可证文本按 §1 逐条附带；`assets/guns*/` 逐件过审；
+`assets/guns/` 与 `assets/rt/` 缺少时不会报错、只会静默回退 —— 打包后请实际清点一次。
 
 ---
 
@@ -373,10 +391,36 @@ English copy that drifted out of sync with `LICENSE`.
 automatically free below CNY 10,000,000 of quarterly revenue, and requires a
 written commercial license at or above it.
 
-⚠️ **Two known issues to read before redistributing** (details in the notices):
-the CJK glyph bitmaps are derived from the proprietary **SimSun** font, and the
-licenses of the weapon models in `assets/guns*/` have not been verified
-individually.
+⚠️ **Read these two before redistributing** (per-item evidence in `THIRD-PARTY-NOTICES.md`;
+weapon models additionally in [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LICENCE-AUDIT.md)):
+
+1. ✅ **CJK glyphs: resolved (2026-09-14).** They are no longer derived from a proprietary font but
+   re-extracted from **Noto Sans SC (SIL OFL 1.1)**, trimmed to the 1,580 code points the source
+   actually uses. The full OFL text ships at `assets/fonts/OFL-NotoSansCJK.txt`, the extractor
+   (`tools/extract_cjk_glyphs.py`) is reproducible, and `cargo test` rejects any character that has
+   no glyph. **The only obligation is keeping the OFL text and the attribution** (nothing here is
+   named "Noto", so the Reserved Font Name clause needs no action).
+2. ⚠️ **Weapon models: only partially audited** (§4, 2026-09-14 — 4 of 14 positively identified,
+   2 more plausible, all CC BY). **Verify each asset against `docs/WEAPON-LICENCE-AUDIT.md` before
+   shipping a commercial or closed-source build.** If one cannot be redistributed, just delete it
+   from `assets/guns*/`: the engine falls back to `ak12.glb`, so the build stays valid and only the
+   visuals degrade.
+
+**Redistribution checklist:** ship `LICENSE`, `THIRD-PARTY-NOTICES.md` and
+`assets/fonts/OFL-NotoSansCJK.txt`; attach the license text of each of the 10 Rust dependencies
+(§1 lists them); clear `assets/guns*/` item by item; and count `assets/guns/` + `assets/rt/` after
+packaging — their absence raises no error, it silently falls back to procedural models.
+
+---
+
+<a id="english"></a>
+
+# Steel Front · English
+
+> Alternate-history 2020s large-scale battlefield FPS — a Rust + Vulkan engine written from
+> scratch (ash / winit / glam), with zero third-party game-engine dependencies.
+
+> **🌐 Language / 语言** ：[中文 ↑](#钢铁前线--steel-front) ｜ **📖 English（当前）**
 
 ## Major Feature Milestones
 
@@ -395,6 +439,16 @@ individually.
 | 2026-09-03 | Path-tracing pipeline brought up (`VK_KHR_ray_query` panoramic PT + NEE + temporal accumulation denoise); **modelling route switched to Blender-authored assets** |
 | 2026-09-04 | **Large-area black ground fixed** (an unbound descriptor multiplying albedo to zero); **GLB props on screen for the first time**; depth testing enabled on the main pipeline (weapon moved to its own pipeline); silent out-of-bounds read caused by three copied instance-buffer sizes repaired; four GLB loader misreads fixed |
 | 2026-09-05 | **Mesh shader restored as the main path** (vertex pipeline frozen); spatial binning + per-bin frustum culling for props (fps 112→152); 13 external weapon models normalised and wired in |
+| 2026-09-09 | Muzzle-orientation root cause fixed (the two ends of `detect_axes` were swapped); `assets/*.spv` rewriting itself dirty on every build diagnosed and fixed |
+| 2026-09-12 | Soldier look locked in: head/helmet shrunk to human proportions, NPC rifle shortened to the real AK-12 length (0.94 m) |
+| 2026-09-13 | **CJK glyph table re-sourced**: proprietary SimSun replaced by **Noto Sans SC (SIL OFL 1.1)**, trimmed to 1,580 code points / 167 KB, with a reproducible extractor; soldier GLB upload moved after construction (it can no longer silently fall back to boxes) |
+| 2026-09-15 | **Bullet-hole decals** (impacts leave marks on obstacle surfaces); switching to a smaller weapon no longer rebuilds in-flight buffers (pressing "2" no longer kills the device) |
+| 2026-09-16 | NPC grenades thrown from hand height (no more self-detonation at high frame rates); `RV3D_AI_DIAG=1` NPC diagnostics |
+| 2026-09-19 | Shadow building-shell LOD (sw12 fps 47→80); GLB building collision top = visual height (same source in the vertical axis) |
+| 2026-09-22 | **survive wave loop closed**: harness repositioning/re-aiming plus the root cause of Patrol circling forever (first real-machine clear of waves 1+2) |
+| 2026-09-23 | Commit whitelist guard + history secret audit (chaining the pre-existing hook); weapon-buffer growth switched to "create first, destroy after" |
+| 2026-09-25 | **Every Vulkan wait bounded** (acquire 1 s / fence 5 s + stall degradation) — the "discrete GPU hangs silently" defect; command buffers indexed by in-flight frame slot |
+| 2026-09-26 | **Audit day**: shadows split into static/dynamic maps (**+23.5%**), frosted-glass menus, first-person weapon animation (sprint/reload/breathing), SVD-12M real model shipped, four battle-intel accounting fixes (roster closure / death tally / snapshot identity / regroup reachability), a dozen silent failures (perf_log / net / audio / assets / config), mutation fuzzing over GLB, TOML and the network codec |
 
 ---
 

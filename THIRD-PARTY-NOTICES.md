@@ -269,8 +269,8 @@ Any model that cannot be traced back to a source page should be treated as
 | Hand-written map TOML, PT shaders | No | **Yes** |
 | Build-time `.spv` products | No | **Yes** |
 | 10 Rust dependencies | Yes — MIT/Apache-2.0 | **Yes**, with notices bundled |
-| CJK glyph bitmaps (§3) | ⚠️ Yes — derived from a proprietary font | **No — must be re-sourced first** |
-| Gun models (§4) | Yes — per-asset | **Unknown — verify per asset** |
+| CJK glyph bitmaps (§3) | Yes — derived from **Noto Sans SC (SIL OFL 1.1)**, subset to the 1,580 code points in use | **Yes** — keep the OFL text (`assets/fonts/OFL-NotoSansCJK.txt`) and the attribution |
+| Gun models (§4) | Yes — per-asset | **Unknown — verify per asset** (`docs/WEAPON-LICENCE-AUDIT.md`) |
 
 ---
 
