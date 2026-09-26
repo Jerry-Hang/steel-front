@@ -10175,3 +10175,41 @@ MEDIAN PAIRED DELTA = -7.68 fps (-5.51%)   sign test 0/4   aa2 臂内极差 24.1
 
 验证：`cargo test --release` **615 passed / 0 failed**；`cargo build --release` **0 警告**；
 CJK 字模闸门绿；`docs/` + `src/` 全树 NUL=0。
+
+### 21.67 终于把「清陈旧压制」按 AGENTS 的判据执行了一遍：109 → 82（`243ca4a` / `a97a4da` / `a3e96ea`）
+
+**背景**：AGENTS 铁律 F 写着"要清陈旧抑制，判据只能是编译器，不能是文本匹配"，
+并说"按符号名出现次数判定的脚本已弃用"——但**从没有人真按编译器跑过**。
+今晚做了，方法可复现（`logs/dead_code_probe.py` / `dead_code_decide.py` / `dead_code_bulk.py`）：
+
+1. 把一个文件里**所有** `#[allow(dead_code)]` 删掉；
+2. `cargo build --release` + `cargo test --release` **各跑一遍**（两种 profile 都必须 0 警告，
+   只看一种会把"仅测试使用"的项误判成陈旧）；
+3. 收集 `never used / never read / never constructed` 的**条目名**，与属性位点配对：
+   **还会警告的 = 压制必要；两种 profile 都不警告的 = 陈旧**；
+4. 删掉的顺手把"预留"之类的注释改成事实。
+
+**结果**：`#[allow(dead_code)]` **109 → 82**（清掉 27 处：`audio.rs` 12、`weapons.rs` 3、
+其余 8 个文件 12）。`cargo build` / `cargo test` **两种 profile 各 0 警告**、**615 passed**。
+被清掉的那批有着共同画像：注释写着"预留：SfxBank 合成辅助 / 随 WAV 管线预留 / 查询 getter 预留"，
+而**它们其实早就在生产路径上被引用了**——压制没人删，注释也就没人改。
+剩下的 82 处各有其理（WAV 解析器只有测试在用、`lighting.rs` 那批 WGSL 镜像函数只有对照测试在用、
+只写不读的诊断字段等），而且现在**每一处都能说出"删了会警告什么"**。
+
+**⚠️ 三个坑（都是"逐行读 diff 再提交"拦下来的；文本工具改的是文本，不是语法）**：
+
+1. **容器型误判**：属性 annotate 的是 `struct`/`trait`/`enum`，警告却指向**成员**
+   （`field fp_vel is never read`、`methods name, damage… are never used`、
+   `variants Gunshot… are never constructed`）。按条目名配对会误判成陈旧 —— 命中 4 次
+   （`struct Camera`、`trait Weapon`、`trait AudioSink`、`enum SfxKind`），
+   **每次都是验证构建报出警告后**才恢复的。⇒ 脚本给候选，**编译器签字**。
+2. **注释里的字面量**：`game.rs` 有两条**文档注释正文**在讲"这条压制已经被删掉"，
+   于是正文里就写着 `#[allow(dead_code)]` ⇒ 脚本把它们也"删"了，注释被改残。
+   已按 HEAD 原文恢复（`game.rs` 现在与 HEAD 逐字节一致）。
+3. **build.rs 的九处根本不是属性**：它们是
+   `output.push_str("#[allow(dead_code)]\n")` —— **要生成到 shaders 源码里的字符串**。
+   脚本改它们等于改**生成代码**；读 diff 时发现并整体 `git checkout -- build.rs` 还原。
+
+⇒ **判据（写给下一个人）**：要动压制，先按"**顶格/缩进且不在引号内、不在注释里**"过滤，
+再让编译器签字；扫出来的候选**必须逐行读 diff** 才能提交。
+AGENTS 那句"绝大多数是有注释的诚实预留"现在有了数字：**109 处里至少 82 处（75%）真的必要**。
