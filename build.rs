@@ -1570,13 +1570,32 @@ struct VertexOutput {
     @location(1) uv_glass: vec3<f32>,
 }
 
+// 🧊 磨砂玻璃：面板背后的画面（渲染器每帧把交换链降采样成的模糊图）。
+// `uv_glass.z` = 该 quad 是不是玻璃面板（ui.rs 的 `Quad::glass`）。
+@group(0) @binding(0) var glass_tex: texture_2d<f32>;
+@group(0) @binding(1) var glass_smp: sampler;
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // 🧊 磨砂玻璃（stage 2 接上模糊图后在这里采样）：目前 `uv_glass` 只透传，
-    // 输出与改动前逐位相同 —— 这一笔单独落库，为的是把"顶点格式从 24B 变 36B"
-    // 这件事与后面的渲染路径改动分开验。
-    _ = input.uv_glass;
-    return input.color;
+    let glass = input.uv_glass.z;
+    if (glass < 0.5) {
+        return input.color;
+    }
+    // 模糊图本身就是 1/8 降采样（一次线性 blit ≈ 8×8 盒式平均），这里再补一次五抽头，
+    // 把 8 像素块的边界抹平 —— 只采一次时近处的高对比边缘会露出来。
+    let uv = input.uv_glass.xy;
+    // 纹素尺寸从纹理本身取 —— **不在着色器里写死 320×200**（那是 CPU 侧 `MENU_BLUR_W/H`
+    // 的值，写两处就会在改尺寸时静默错位）。
+    let texel = 1.0 / vec2<f32>(textureDimensions(glass_tex));
+    var blur = textureSample(glass_tex, glass_smp, uv).rgb * 0.36;
+    blur = blur + textureSample(glass_tex, glass_smp, uv + vec2<f32>(texel.x, 0.0)).rgb * 0.16;
+    blur = blur + textureSample(glass_tex, glass_smp, uv - vec2<f32>(texel.x, 0.0)).rgb * 0.16;
+    blur = blur + textureSample(glass_tex, glass_smp, uv + vec2<f32>(0.0, texel.y)).rgb * 0.16;
+    blur = blur + textureSample(glass_tex, glass_smp, uv - vec2<f32>(0.0, texel.y)).rgb * 0.16;
+    // 面板色只当**染色**：玻璃本身不该把背后抹平，所以底色占比不高（0.45），
+    // 再叠一点点亮度让文字有对比。alpha 仍取顶点色 ⇒ 面板外的 HUD 元素不受影响。
+    let tinted = mix(blur, input.color.rgb, 0.45) * 1.06;
+    return vec4<f32>(tinted, input.color.a);
 }
 "#;
 

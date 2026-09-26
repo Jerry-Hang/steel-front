@@ -734,7 +734,9 @@ impl HudState {
         let w = self.screen_w / s;
         let h = self.screen_h / s;
         // 全屏半透明遮罩（模拟毛玻璃暗化背景）
-        elems.push(HudElement::Quad(Quad::new(
+        // 🧊 2026-09-26：**改成真磨砂玻璃**（未结案 #19）—— 渲染器会先把背后的画面
+        // 降采样成模糊图，这块 quad 再把它染暗。`RV3D_MENU_GLASS=0` 可回到旧的纯色遮罩。
+        elems.push(HudElement::Quad(Quad::glass(
             Rect::new(0.0, 0.0, w, h),
             Color::new(0.02, 0.03, 0.05, 0.55),
         )));
@@ -1234,7 +1236,7 @@ impl HudState {
         let s = self.ui_scale();
         let w = self.screen_w / s;
         let h = self.screen_h / s;
-        elems.push(HudElement::Quad(Quad::new(
+        elems.push(HudElement::Quad(Quad::glass(
             Rect::new(0.0, 0.0, w, h),
             Color::new(0.0, 0.0, 0.0, 0.72),
         )));
@@ -1383,7 +1385,7 @@ impl HudState {
         let w = self.screen_w / s;
         let h = self.screen_h / s;
         // 半透明底
-        elems.push(HudElement::Quad(Quad::new(
+        elems.push(HudElement::Quad(Quad::glass(
             Rect::new(0.0, 0.0, w, h),
             Color::new(0.0, 0.0, 0.0, 0.60),
         )));

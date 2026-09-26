@@ -200,6 +200,11 @@ const GROUND_DETAIL_BINDING: u32 = 9;
 /// `@group(0) @binding(10) var shadow_dyn_map` 同步**。
 const SHADOW_DYN_BINDING: u32 = 10;
 
+/// 🧊 磨砂玻璃背景模糊图的尺寸（固定，不随交换链变化 —— 理由见 `init_menu_blur`）。
+/// 320×200 ≈ 交换链的 1/8，一次线性 blit 就得到 8×8 盒式平均，正是"毛玻璃"需要的低频。
+const MENU_BLUR_W: u32 = 320;
+const MENU_BLUR_H: u32 = 200;
+
 // ============================================================
 // 地形常量（世界 512×512，与实例场同域）
 // ============================================================
@@ -1306,6 +1311,19 @@ pub struct Renderer {
     shadow_image_memory: vk::DeviceMemory,
     shadow_image_view: vk::ImageView,
     shadow_sampler: vk::Sampler,
+    /// 🧊 磨砂玻璃的背景模糊图（固定 `MENU_BLUR_W × MENU_BLUR_H`，见 `init_menu_blur`）
+    menu_blur_image: vk::Image,
+    menu_blur_memory: vk::DeviceMemory,
+    menu_blur_view: vk::ImageView,
+    menu_blur_sampler: vk::Sampler,
+    /// 🧊 HUD 玻璃描述符集（绑定 `glass_tex` / `glass_smp`，全局唯一一份）
+    hud_glass_set_layout: vk::DescriptorSetLayout,
+    hud_glass_pool: vk::DescriptorPool,
+    hud_glass_set: vk::DescriptorSet,
+    /// 本帧 HUD 里有没有磨砂玻璃 quad（由 `set_hud_quads` 算；真 ⇒ 走"模糊 + overlay 画 HUD"）
+    hud_has_glass: bool,
+    /// 🧊 磨砂玻璃总开关（`RV3D_MENU_GLASS=0` 关，用于同机位 A/B 与回退）
+    menu_glass_enabled: bool,
     shadow_render_pass: vk::RenderPass,
     shadow_framebuffer: vk::Framebuffer,
     /// **动态**阴影图（第二张，与静态图同格式同尺寸）：只画每帧会动的投射者（NPC/士兵）。
@@ -1608,6 +1626,10 @@ impl Renderer {
         renderer.init_msaa_resources()?;
         renderer.init_depth_resources()?;
         renderer.init_descriptors()?;       // ← 新增
+        // 🧊 磨砂玻璃的背景图 / 采样器 / 描述符集：**必须早于 `init_hud`**（HUD 的
+        // pipeline layout 引用 `hud_glass_set_layout`）。
+        renderer.init_menu_blur()?;
+        renderer.init_hud_glass_set()?;
         renderer.init_pipeline()?;
         renderer.init_mesh_pipeline()?;
         renderer.init_hud()?;
@@ -2095,6 +2117,18 @@ impl Renderer {
             shadow_image_memory: vk::DeviceMemory::null(),
             shadow_image_view: vk::ImageView::null(),
             shadow_sampler: vk::Sampler::null(),
+            menu_blur_image: vk::Image::null(),
+            menu_blur_memory: vk::DeviceMemory::null(),
+            menu_blur_view: vk::ImageView::null(),
+            menu_blur_sampler: vk::Sampler::null(),
+            hud_glass_set_layout: vk::DescriptorSetLayout::null(),
+            hud_glass_pool: vk::DescriptorPool::null(),
+            hud_glass_set: vk::DescriptorSet::null(),
+            hud_has_glass: false,
+            menu_glass_enabled: match std::env::var("RV3D_MENU_GLASS") {
+                Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false")),
+                Err(_) => true,
+            },
             shadow_render_pass: vk::RenderPass::null(),
             shadow_framebuffer: vk::Framebuffer::null(),
             shadow_dyn_image: vk::Image::null(),
@@ -3451,9 +3485,13 @@ impl Renderer {
             .logic_op(vk::LogicOp::COPY)
             .attachments(&hud_blend_attachments);
 
-        // 独立 pipeline layout：无描述符
+        // 独立 pipeline layout：🧊 只带一个 set（HUD 玻璃：`glass_tex` + `glass_smp`）。
+        // 🔴 **两个 HUD 管线共用这一个 layout**（主 pass 的 `hud_pipeline` 与 overlay 的），
+        // 而着色器**静态**引用了 binding 0/1 ⇒ 两边都必须带这套 set（运行时 `glass=0` 也照样
+        // 需要有合法描述符绑定，见 `set_hud_quads` 与两处 HUD 绘制里的 `cmd_bind_descriptor_sets`）。
+        let hud_set_layouts = [self.hud_glass_set_layout];
         let hud_layout_info = vk::PipelineLayoutCreateInfo::default()
-            .set_layouts(&[])
+            .set_layouts(&hud_set_layouts)
             .push_constant_ranges(&[]);
         self.hud_pipeline_layout = unsafe {
             self.device
@@ -3530,6 +3568,15 @@ impl Renderer {
             }
         }
         self.hud_vertex_count = (count * 6) as u32;
+        // 🧊 本帧有没有磨砂玻璃面板：有 ⇒ `record_command_buffer` 会把 HUD 挪到
+        // overlay pass、并在它之前把交换链降采样成模糊图（见 `MENU_BLUR_W`）。
+        // 判定放在这里（唯一的上传入口），main.rs / ui.rs 都不需要额外接线。
+        //
+        // 🔴 PT 模式下**一律当没有玻璃**：那条路把 PT 图 blit 上来再叠 HUD，没有"面板背后的
+        // 光栅画面"这回事；更要紧的是 PT 的 HUD 绘制与主 pass 的 HUD 绘制互斥，
+        // 若这里留真值，主 pass 那份 HUD 会被跳过而 PT 那份又采不到正确的模糊图。
+        let glass_on = self.menu_glass_enabled && !self.pt_live_enabled;
+        self.hud_has_glass = glass_on && quads.iter().take(count).any(|q| q.glass);
         if count == 0 || self.hud_mapped.is_null() {
             return;
         }
@@ -3544,7 +3591,8 @@ impl Renderer {
             // 降采样副本，所以 uv 直接就是"这一点在屏幕上的位置"。
             let (u0, v0) = (q.rect.x / w, q.rect.y / h);
             let (u1, v1) = ((q.rect.x + q.rect.w) / w, (q.rect.y + q.rect.h) / h);
-            let g = if q.glass { 1.0 } else { 0.0 };
+            // PT 模式（或总开关关掉）时把标志位写成 0 —— 顶点格式恒定，只有这个分量在变
+            let g = if q.glass && glass_on { 1.0 } else { 0.0 };
             for (px, py, u, v) in [
                 (x0, y0, u0, v0),
                 (x1, y0, u1, v0),
@@ -9393,6 +9441,217 @@ impl Renderer {
         }
     }
 
+    /// 🧊 磨砂玻璃的"背景模糊图"（2026-09-26，未结案 #19）：一张**固定尺寸**的降采样副本。
+    ///
+    /// 为什么固定尺寸（不跟交换链走）：换窗口尺寸时**不用重建**它，描述符集也就不用在
+    /// 交换链重建路径里重写 —— 这条路上少一个"忘了重写"的机会（对比阴影图：那是固定
+    /// 2048²，同样与交换链无关）。代价只是横竖缩放比不同 ⇒ 模糊半径在两个方向上不等，
+    /// 对"磨砂"这件事完全不受影响。
+    ///
+    /// 建立后**立刻清成深灰并转到 `SHADER_READ_ONLY_OPTIMAL`**：描述符从第一帧起就按这个
+    /// 布局绑定，而菜单出现之前根本不会有人写它 ⇒ 不清就是"首帧采到未定义内容"
+    /// （与 §21.38 两张阴影图必须 init 时先转布局是同一类问题）。
+    fn init_menu_blur(&mut self) -> Result<(), String> {
+        let format = self.swapchain_format;
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width: MENU_BLUR_W,
+                height: MENU_BLUR_H,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe {
+            self.device
+                .create_image(&image_info, None)
+                .map_err(|e| format!("创建菜单模糊图失败: {e}"))?
+        };
+        let reqs = unsafe { self.device.get_image_memory_requirements(image) };
+        let memory_type = self.pick_memory_type(reqs, true)?;
+        let memory = unsafe {
+            self.device
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(reqs.size)
+                        .memory_type_index(memory_type),
+                    None,
+                )
+                .map_err(|e| format!("分配菜单模糊图内存失败: {e}"))?
+        };
+        unsafe {
+            self.device
+                .bind_image_memory(image, memory, 0)
+                .map_err(|e| format!("绑定菜单模糊图内存失败: {e}"))?;
+        }
+        let view = unsafe {
+            self.device
+                .create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(format)
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .base_mip_level(0)
+                                .level_count(1)
+                                .base_array_layer(0)
+                                .layer_count(1),
+                        ),
+                    None,
+                )
+                .map_err(|e| format!("创建菜单模糊图 View 失败: {e}"))?
+        };
+        let sampler = unsafe {
+            self.device
+                .create_sampler(
+                    &vk::SamplerCreateInfo::default()
+                        .mag_filter(vk::Filter::LINEAR)
+                        .min_filter(vk::Filter::LINEAR)
+                        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                    None,
+                )
+                .map_err(|e| format!("创建菜单模糊图采样器失败: {e}"))?
+        };
+        self.menu_blur_image = image;
+        self.menu_blur_memory = memory;
+        self.menu_blur_view = view;
+        self.menu_blur_sampler = sampler;
+
+        // 一次性：UNDEFINED → TRANSFER_DST → 清成深灰 → SHADER_READ_ONLY（之后永远可采样）
+        let clear = vk::ClearColorValue {
+            float32: [0.02, 0.02, 0.03, 1.0],
+        };
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        self.run_single_time_commands(|cb| unsafe {
+            let to_dst = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::NONE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(range);
+            self.device.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_dst],
+            );
+            self.device
+                .cmd_clear_color_image(cb, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear, &[range]);
+            let to_read = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(range);
+            self.device.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_read],
+            );
+        })?;
+        Ok(())
+    }
+
+    /// 🧊 HUD 玻璃描述符集（`glass_tex` + `glass_smp`）：**只有一份**，不在在飞帧之间复制 ——
+    /// 图像与采样器建好后永不改动，也就不存在"写一个正在被读的 set"。
+    fn init_hud_glass_set(&mut self) -> Result<(), String> {
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
+        self.hud_glass_set_layout = unsafe {
+            self.device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                    None,
+                )
+                .map_err(|e| format!("创建 HUD 玻璃 set layout 失败: {e}"))?
+        };
+        let pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1),
+        ];
+        self.hud_glass_pool = unsafe {
+            self.device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .pool_sizes(&pool_sizes)
+                        .max_sets(1),
+                    None,
+                )
+                .map_err(|e| format!("创建 HUD 玻璃 pool 失败: {e}"))?
+        };
+        let layouts = [self.hud_glass_set_layout];
+        self.hud_glass_set = unsafe {
+            self.device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(self.hud_glass_pool)
+                        .set_layouts(&layouts),
+                )
+                .map_err(|e| format!("分配 HUD 玻璃 set 失败: {e}"))?
+        }[0];
+        let image_info = [vk::DescriptorImageInfo::default()
+            .image_view(self.menu_blur_view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let sampler_info = [vk::DescriptorImageInfo::default()
+            .sampler(self.menu_blur_sampler)];
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.hud_glass_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.hud_glass_set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&sampler_info),
+        ];
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        Ok(())
+    }
+
     fn init_shadow_resources(&mut self) -> Result<(), String> {
         use crate::engine::lighting::SHADOW_MAP_SIZE;
 
@@ -10827,14 +11086,30 @@ impl Renderer {
         }
 
         // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
-        if self.hud_vertex_count > 0 && self.hud_pipeline != vk::Pipeline::null() {
+        // 🧊 有磨砂玻璃面板时**这一处不画**：玻璃要采"面板背后的画面"，而主 pass 里
+        // 交换链是 MSAA 解析目标、根本不能采样自己 ⇒ 那种帧改走 overlay pass
+        // （先 blit 出模糊图，再画 HUD，见 `record_command_buffer` 末尾）。
+        if self.hud_vertex_count > 0
+            && self.hud_pipeline != vk::Pipeline::null()
+            && !self.hud_has_glass
+        {
             let hud_vertex_buffers = [self.hud_vertex_buffer];
             let hud_offsets = [0u64];
+            let hud_sets = [self.hud_glass_set];
             unsafe {
                 self.device.cmd_bind_pipeline(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.hud_pipeline,
+                );
+                // 着色器静态引用 binding 0/1（见 `hud_pipeline_layout`）⇒ 这一处也得绑。
+                self.device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.hud_pipeline_layout,
+                    0,
+                    &hud_sets,
+                    &[],
                 );
                 self.device.cmd_bind_vertex_buffers(
                     command_buffer,
@@ -10850,7 +11125,176 @@ impl Renderer {
             self.device.cmd_end_render_pass(command_buffer);
         }
 
-        // ===== 2026-08-29 路径追踪全景：全部记录进主命令缓冲（零第二提交/围栏冲突；常驻零分配）=====
+        // ===== 🧊 磨砂玻璃（未结案 #19）：主 pass 之后、PT 之前，把交换链降采样成模糊图 =====
+        //
+        // 为什么必须在这里、而且必须换 pass 画 HUD：主 pass 的 HUD 是画在 **MSAA 解析目标**
+        // 上的，而"面板背后的画面"要么是它自己（同一 pass 内不能采样）、要么是那张 MSAA 图
+        // （普通 sampler 不能采多采样图）。⇒ 唯一干净的做法 = 主 pass 结束（此时交换链已是
+        // 单采样、`finalLayout = PRESENT_SRC_KHR`）→ blit 出模糊图 → 用 **overlay HUD pass**
+        // 把 HUD 画在模糊图之上。overlay pass 与它的 barrier 顺序**照抄 PT 通路**
+        // （那条路已经跑了很久、VUID=0），raster 路径只是第一次走它。
+        if self.hud_has_glass && self.hud_vertex_count > 0 {
+            let sw_img = self.swapchain_images[image_index as usize];
+            let range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            unsafe {
+                // ① 交换链 PRESENT_SRC → TRANSFER_SRC
+                let to_src = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::MEMORY_READ)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(sw_img)
+                    .subresource_range(range);
+                self.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_src],
+                );
+                // ② 模糊图 SHADER_READ_ONLY → TRANSFER_DST（它上一帧被采过，所以不是 UNDEFINED）
+                let blur_to_dst = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_READ)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(self.menu_blur_image)
+                    .subresource_range(range);
+                self.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[blur_to_dst],
+                );
+                // ③ blit（LINEAR = 8×8 盒式平均，这**就是**模糊本身）
+                let blit = vk::ImageBlit::default()
+                    .src_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: self.swapchain_extent.width as i32,
+                            y: self.swapchain_extent.height as i32,
+                            z: 1,
+                        },
+                    ])
+                    .dst_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: MENU_BLUR_W as i32,
+                            y: MENU_BLUR_H as i32,
+                            z: 1,
+                        },
+                    ]);
+                self.device.cmd_blit_image(
+                    command_buffer,
+                    sw_img,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    self.menu_blur_image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[blit],
+                    vk::Filter::LINEAR,
+                );
+                // ④ 模糊图 → SHADER_READ_ONLY（HUD 片元要采它）
+                let blur_to_read = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(self.menu_blur_image)
+                    .subresource_range(range);
+                self.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[blur_to_read],
+                );
+                // ⑤ 交换链 TRANSFER_SRC → COLOR_ATTACHMENT（overlay HUD pass 的 initialLayout）
+                let to_color = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(sw_img)
+                    .subresource_range(range);
+                self.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_color],
+                );
+                // ⑥ overlay HUD pass（load=LOAD 保住场景 + 模糊图之上的 HUD）
+                if self.hud_render_pass != vk::RenderPass::null() {
+                    self.device.cmd_begin_render_pass(
+                        command_buffer,
+                        &vk::RenderPassBeginInfo::default()
+                            .render_pass(self.hud_render_pass)
+                            .framebuffer(self.hud_framebuffers[image_index as usize])
+                            .render_area(vk::Rect2D {
+                                offset: vk::Offset2D { x: 0, y: 0 },
+                                extent: self.swapchain_extent,
+                            })
+                            .clear_values(&[]),
+                        vk::SubpassContents::INLINE,
+                    );
+                    let hud_vb = [self.hud_vertex_buffer];
+                    let hud_off = [0u64];
+                    let hud_sets = [self.hud_glass_set];
+                    self.device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.hud_overlay_pipeline,
+                    );
+                    self.device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.hud_pipeline_layout,
+                        0,
+                        &hud_sets,
+                        &[],
+                    );
+                    self.device.cmd_bind_vertex_buffers(command_buffer, 0, &hud_vb, &hud_off);
+                    self.device
+                        .cmd_draw(command_buffer, self.hud_vertex_count, 1, 0, 0);
+                    self.device.cmd_end_render_pass(command_buffer);
+                }
+            }
+        }
         if self.pt_live_enabled && self.pt_resident.is_some() {
             let sw_img = self.swapchain_images[image_index as usize];
             // 与 init_pt_resident 创建的图像同尺寸（硬编码会与新分辨率错配）
@@ -10971,6 +11415,19 @@ impl Renderer {
                     // 而 `hud_pipeline` 是给主 pass（MSAA + 深度）建的 —— 绑错就是
                     // `VUID-vkCmdDraw-renderPass-02684`（管线与 render pass 不兼容 = UB）
                     self.device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, self.hud_overlay_pipeline);
+                    // 🧊 `hud_pipeline_layout` 现在还带一套 HUD 玻璃 set（着色器静态引用
+                    // binding 0/1）⇒ **PT 这条 HUD 绘制也必须绑它**，否则就是
+                    // "描述符集未绑定"类 VUID。PT 模式下不会走玻璃分支（见 `set_hud_quads`
+                    // 里的 `glass_on`：PT 时把标志位写成 0），所以采到的内容不会被用到。
+                    let hud_sets = [self.hud_glass_set];
+                    self.device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.hud_pipeline_layout,
+                        0,
+                        &hud_sets,
+                        &[],
+                    );
                     let vb = [self.hud_vertex_buffer];
                     let offs = [0u64];
                     self.device.cmd_bind_vertex_buffers(command_buffer, 0, &vb, &offs);
