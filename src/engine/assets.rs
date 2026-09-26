@@ -121,7 +121,15 @@ fn append_prim(
             5122 => (2, if norm { 32767.0 } else { 1.0 }), // SHORT
             5123 => (2, if norm { 65535.0 } else { 1.0 }), // UNSIGNED_SHORT
             5125 => (4, 1.0),                              // UNSIGNED_INT (indices)
-            _ => (4, 1.0),                                 // FLOAT
+            5126 => (4, 1.0),                              // FLOAT
+            // 🔴 2026-09-26：这里以前是 `_ => (4, 1.0)` —— **任何**未知 componentType
+            // 都按 4 字节浮点读。与上面 byteOffset / byteStride 两处是同一个形状：
+            // 4 字节整数当 f32 读出来**仍是合法浮点数**，于是坏资产不崩不报，
+            // 几何静静变成一团乱麻。**读不了就明说读不了**（判据见
+            // `glb_unknown_component_type_is_an_error_that_names_itself`）。
+            other => {
+                return Err(format!("GLB accessor 不支持的 componentType {other}"));
+            }
         };
         let mut out = Vec::with_capacity(count * comps);
         // 交错时：元素间距 = `stride`，元素内分量间距 = `step`。
@@ -139,7 +147,10 @@ fn append_prim(
                 5122 => i16::from_le_bytes([bin[b], bin[b + 1]]) as f32,
                 5121 => bin[b] as f32,
                 5120 => bin[b] as i8 as f32,
-                _ => f32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]]),
+                // 上面已把其余类型全部拒绝，这里只可能是 FLOAT（写 `_` 会让"漏了一种类型"
+                // 重新变成静默路径）。
+                5126 => f32::from_le_bytes([bin[b], bin[b + 1], bin[b + 2], bin[b + 3]]),
+                other => unreachable!("componentType {other} 已在上面被拒"),
             };
             out.push(v / div);
         }
@@ -149,15 +160,22 @@ fn append_prim(
     // accessor 0（通常是 POSITION）当成缺失的法线/UV/索引来读，于是"没有 UV 的网格"
     // 拿到的是"位置当 UV"，几何与着色全错却零报错。下游已按长度做了兜底
     // （法线缺 → (0,1,0)，UV 缺 → (0,0)），空向量才是安全值。
-    let attr = |name: &str, comps: usize| -> Vec<f32> {
+    // 🔴 2026-09-26：**accessor 读失败**与**属性缺失**是两件事，以前被 `unwrap_or_default()`
+    // 合并成一件 —— 坏 accessor 退化成"空属性"，错误信息于是变成"缺少 POSITION"
+    // （把人指向错的方向）；NORMAL/UV 更糟：它们本来就有"缺了就回退默认值"的兜底，
+    // 一个读不了的 accessor 会伪装成"这个模型没导出法线"，纯平着色下看不出异常。
+    // ⇒ **属性缺失走默认值，accessor 读不了就报错**（判据
+    // `glb_broken_normal_accessor_is_not_silently_dropped`）。
+    let attr = |name: &str, comps: usize| -> Result<Vec<f32>, String> {
         match prim.get("attributes").and_then(|a| a.get(name)).and_then(|p| p.as_f64()) {
-            Some(i) => read_acc(json, bin, i as usize, comps).unwrap_or_default(),
-            None => Vec::new(),
+            Some(i) => read_acc(json, bin, i as usize, comps)
+                .map_err(|e| format!("GLB {name}: {e}")),
+            None => Ok(Vec::new()),
         }
     };
-    let pos = attr("POSITION", 3);
-    let nrm = attr("NORMAL", 3);
-    let uv = attr("TEXCOORD_0", 2);
+    let pos = attr("POSITION", 3)?;
+    let nrm = attr("NORMAL", 3)?;
+    let uv = attr("TEXCOORD_0", 2)?;
     // 顶点色（Blender 烘焙 COLOR_0；有则优先于材质基色）。分量数按 accessor 的 type 取，
     // 后面也必须按同一个数寻址——写死 4 会让 VEC3 颜色逐顶点错位，越界后静默退回基色。
     let col = prim.get("attributes").and_then(|a| a.get("COLOR_0")).and_then(|p| p.as_f64());
@@ -172,7 +190,8 @@ fn append_prim(
             .map(|s| if s == "VEC4" { 4 } else { 3 })
             .unwrap_or(3);
         col_stride = ty;
-        read_acc(json, bin, ci as usize, ty).unwrap_or_default()
+        read_acc(json, bin, ci as usize, ty)
+            .map_err(|e| format!("GLB COLOR_0: {e}"))?
     } else {
         Vec::new()
     };
@@ -525,5 +544,42 @@ mod tests {
         assert_ne!(&m.verts[0][3..6], &m.verts[1][..3], "法线读成了下一个顶点的位置");
     }
 
+    /// 🔴 判据：**读不了的 `componentType` 必须报错，而且要说得出是它**。
+    ///
+    /// 旧写法是 `_ => (4, 1.0)`：任何未知类型（例如 5124 INT）都按 4 字节浮点读。
+    /// 4 字节整数当 f32 读出来**仍然是合法浮点数** —— 与上面 `byteOffset` / `byteStride`
+    /// 两处是同一个形状：不崩、不报错，几何静静变成一团乱麻。
+    /// 更早一层还有 `attr()` 的 `unwrap_or_default()`：accessor 读失败会被吞成"空"，
+    /// 于是错误信息变成"缺少 POSITION"（把人指向错误的方向）。
+    #[test]
+    fn glb_unknown_component_type_is_an_error_that_names_itself() {
+        let bin: Vec<u8> = (0..36u8).collect();
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}}]}],"accessors":[{"bufferView":0,"byteOffset":0,"componentType":5124,"count":3,"type":"VEC3"},{"bufferView":0,"byteOffset":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":0,"byteOffset":0,"componentType":5126,"count":3,"type":"VEC2"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962}]}"#;
+        let err = parse_glb(&build_glb(json, &bin))
+            .err()
+            .expect("未知 componentType 必须被拒（否则是静默错几何）");
+        assert!(
+            err.contains("componentType"),
+            "错误信息必须点出 componentType，实际: {err}"
+        );
+        assert!(
+            !err.contains("缺少 POSITION"),
+            "读不了的 accessor 不能被吞成\"属性缺失\"（那会把人指向错方向），实际: {err}"
+        );
+    }
+
+    /// 同一形状的第二面：**NORMAL 的 accessor 读不了也不能静默回退**。
+    ///
+    /// 现在 `nrm` 短了会按 (0,1,0) 兜底（那是为"属性本来就没导出"设计的），
+    /// 于是一个坏 accessor 会伪装成"这个模型没有法线"，纯平着色看不出异常。
+    #[test]
+    fn glb_broken_normal_accessor_is_not_silently_dropped() {
+        let bin: Vec<u8> = (0..36u8).collect();
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1}}]}],"accessors":[{"bufferView":0,"byteOffset":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":0,"byteOffset":0,"componentType":5124,"count":3,"type":"VEC3"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962}]}"#;
+        let err = parse_glb(&build_glb(json, &bin))
+            .err()
+            .expect("坏掉的 NORMAL accessor 必须被拒，不能静默当成\"没有法线\"");
+        assert!(err.contains("NORMAL"), "错误信息要点出是哪个属性，实际: {err}");
+    }
 }
 
