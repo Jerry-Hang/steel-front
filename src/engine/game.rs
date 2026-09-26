@@ -7852,6 +7852,48 @@ mod tests {
         );
     }
 
+    /// 🔴 判据：**军情的连强度只数活人**（`CompanyReport.strength` 的语义就是"活着的人"）。
+    ///
+    /// 2026-09-26 修：以前按「在 `npcs` 里」计数 ⇒ 本帧刚阵亡、**还没被清场的尸体同帧既算活人
+    /// 又算阵亡**（真机会战日志 66 行里有 6 行 `击杀 + Σ强度` 比编制多 1~3 人，
+    /// 判据工具 = `tools/battle_tally_check.py`）。这里把那个同帧状态直接造出来验一次。
+    #[test]
+    fn company_report_counts_only_the_living() {
+        let cam = Camera::new();
+        let mut game = Game::new();
+        game.stress = true;
+        game.stress_sides = 64;
+        let player = glam::Vec3::ZERO;
+        game.spawn_stress_battle(&player);
+        game.game_state = GameState::Playing;
+        let roster = game
+            .command
+            .as_ref()
+            .map(|(red, _)| red.roster_size())
+            .unwrap_or(0);
+        assert_eq!(roster, 64, "压力模式红营编制 = stress_sides");
+        // 造「本帧刚阵亡、还没清场」：hp 归零但**留在 `npcs` 里**
+        let ri = game
+            .npcs
+            .iter()
+            .position(|n| n.team == Team::Red)
+            .expect("压力模式应有红方 NPC");
+        game.npcs[ri].hp = 0.0;
+        // 跑一帧（指挥节拍 0.5s）——`update_ai` 里的军情汇总排在 `update_stress_respawns` 之前
+        game.update(0.6, &cam);
+        let (red, _) = game.command.as_ref().expect("压力模式有指挥层");
+        let sum: usize = red
+            .companies
+            .iter()
+            .map(|c| c.report.strength as usize)
+            .sum();
+        assert_eq!(
+            sum,
+            roster - 1,
+            "阵亡者不许再算进连强度，否则同帧的「击杀 + Σ强度」会超出编制"
+        );
+    }
+
     /// 接线判据：`AiStepCtx::target_known` 的唯一表达式在 `update_ai` 里，
     /// 语义是"只有在真在打的一局里，玩家才是进攻方的已知目标"。
     /// 三条分支各断言一次（菜单游走 / 正常波次 / 压力模式）——

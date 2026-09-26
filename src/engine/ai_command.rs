@@ -271,9 +271,12 @@ impl Army {
         self.tick = 0.0;
 
         // 1) 逐连自下而上汇总报告（战士 → 班 → 排 → 连）
+        // 🔴 2026-09-26 修：以前只按「在 `npcs` 里」计数 ⇒ **本帧刚阵亡、还没被清场的尸体同帧
+        // 既算活人又算阵亡**，军情的两个数自相矛盾。判据 = `tools/battle_tally_check.py`
+        // （不变式：`击杀 + Σ强度 == 编制`；修前 66 行里 6 行超出 1~3 人）。
         let alive: Vec<(usize, [f32; 3])> = npcs
             .iter()
-            .filter(|n| n.team == self.side)
+            .filter(|n| n.team == self.side && n.hp > 0.0)
             .map(|n| (n.id, n.position))
             .collect();
         let mut company_reports = Vec::with_capacity(self.companies.len());
