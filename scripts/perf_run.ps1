@@ -38,7 +38,11 @@ param(
     # -CullDiag sets RV3D_CULL_DIAG=1: the engine then logs one `cull-diag:` line per second
     # with the measured CPU cost of the NPC occlusion culling (us/s, call count, NPC and
     # obstacle-body counts). Use it before touching that code path -- see lesson 20/25.
-    [switch]$CullDiag
+    [switch]$CullDiag,
+    # -Extra passes extra engine env vars, e.g. -Extra "RV3D_NO_PROPS=1,RV3D_PROC_TEX=0".
+    # Split on comma/semicolon. Everything is cleared again in the finally block, so a run
+    # cannot leak a diagnostic switch into the next one.
+    [string]$Extra = ""
 )
 $ErrorActionPreference = "Continue"
 
@@ -65,6 +69,17 @@ if ($NoShadow) { $env:RV3D_NO_SHADOW = "1" }
 if ($Cam -ne "") { $env:RV3D_CAM = $Cam }
 if ($Res -ne "") { $env:RV3D_RES = $Res }
 if ($CullDiag) { $env:RV3D_CULL_DIAG = "1" }
+$extraKeys = @()
+if ($Extra -ne "") {
+    foreach ($kv in $Extra.Split(",;")) {
+        if ($kv.Trim() -eq "") { continue }
+        $parts = $kv.Split("=")
+        if ($parts.Count -ne 2) { Write-Host "perf_run: bad -Extra item '$kv' (want KEY=VALUE)"; exit 1 }
+        Set-Item -Path ("Env:" + $parts[0].Trim()) -Value $parts[1].Trim()
+        $extraKeys += $parts[0].Trim() + "=" + $parts[1].Trim()
+    }
+    Write-Host ("perf_run: extra env -> " + ($extraKeys -join " "))
+}
 
 Write-Host "perf_run: stress=$Stress secs=$Secs$(if ($NoShadow) { ' noshadow' })$(if ($Cam -ne '') { " cam=$Cam" })$(if ($CullDiag) { ' culldiag' })"
 
@@ -85,6 +100,7 @@ finally {
     Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 1
     Remove-Item Env:RV3D_AUTOSTART, Env:RV3D_STRESS_AI, Env:RV3D_NO_SHADOW, Env:RV3D_CAM, Env:RV3D_RES, Env:RV3D_CULL_DIAG -ErrorAction SilentlyContinue
+    foreach ($k in $extraKeys) { Remove-Item Env:($k.Split("=")[0]) -ErrorAction SilentlyContinue }
 }
 
 $perf = @(Get-ChildItem (Join-Path $repo "logs") -Filter "perf_*.log" -ErrorAction SilentlyContinue |
