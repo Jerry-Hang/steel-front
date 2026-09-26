@@ -3,10 +3,10 @@
 //! 编制（**按代码实测写**，判据 `organization_matches_the_documented_three_three_rule`）：
 //! - 每 **4 人**切 1 个班（最后一班可以不足 4 人）、每 **3 班**成 1 排、每 **3 排**成 1 连；
 //! - 「班长 / 排长 / 连长」都是**本级成员的最后一个**（不额外占编制，`leader` 只做标记）；
-//! - 128 人 ⇒ **32 班 / 10 排 / 3 连**：三连只吃下前 9 个排（**108 人**），
-//!   第 10 排与末尾 2 个班共 **20 人**属编制尾数 —— 它们**不在任何连的成员名单里**
-//!   （⇒ 不计入 `CompanyReport.strength/centroid/contact`），行军目标靠兜底接管：
-//!   **余数一律归末位**（`platoon_company` 归末连、`platoon_of_squad` 归末排）。
+//! - 128 人 ⇒ **32 班 / 10 排 / 3 连**，且**连名单逐人等于全营**：末尾凑不满 3 个排的那一截
+//!   **并入末位**（末排承接余班、末连承接余排）—— 军情是按连名单汇总的，漏掉一截就是漏一份兵力。
+//!   判据 `every_soldier_is_carried_by_a_company`。⚠️ 不足 33 人（9 个班 = 3 个排）编不成连，
+//!   此时 `Army::update` 直接跳过指挥层、逐人战术照常。
 //!   ⚠️ 旧文案写的「营 = 3 连 + 营部 5 人」与代码不符：**没有单独的营部编制**。
 //!
 //! 指挥链：战士向班长汇报（状态/位置），班→排→连→营逐级汇总为「军情报告」；
@@ -189,6 +189,38 @@ impl Army {
                 }
             }
         }
+        // 收尾：编制尾数并入末位（末排承接余班、末连承接余排）—— 2026-09-26 复查修。
+        //
+        // 上面的循环只在「刚好凑满 3 个」的那一刻建排/建连 ⇒ 末尾凑不满 3 个排的那一截会留在
+        // 连名单之外，而军情 `CompanyReport` 是**按连的 `members` 汇总**的 ⇒ **128 人的营只上报
+        // 108 人、64 人只上报 36 人**：那一截的兵力与伤亡对营司令完全隐形（行军目标另有兜底，
+        // 所以"看着还在动"，缺陷不会自己暴露）。判据 = `every_soldier_is_carried_by_a_company`。
+        //
+        // ⚠️ 一个连都没编成（不足 33 人 = 9 个班 = 3 个排）时**保持原样**：`update` 的
+        // `companies.is_empty()` 会跳过整个指挥层，不许凭空造连去改小规模战斗的行为。
+        if !companies.is_empty() {
+            // 1) 余班并入末排（末排承接余班）
+            let last_p = platoons.len() - 1;
+            for s in &squads[platoons.len() * 3..] {
+                platoons[last_p].squads.push(s.id);
+                platoons[last_p].members.extend(s.members.iter().copied());
+            }
+            // 2) 按 `platoon_company` 的同一口径重建连名单（末连承接余排）
+            //    ⚠️ `Company::members` 是建连那一刻复制的**快照** ⇒ 只把余班补进末排而不重建连名单，
+            //    「只差 1 人凑不满 3 个排」的营仍然漏报（实测 n=37 依旧红：连 0 只认 36 人）。
+            let owner: Vec<usize> = platoons
+                .iter()
+                .map(|p| platoon_company(&companies, p.id))
+                .collect();
+            for c in companies.iter_mut() {
+                c.platoon_ids.clear();
+                c.members.clear();
+            }
+            for (i, p) in platoons.iter().enumerate() {
+                companies[owner[i]].platoon_ids.push(p.id);
+                companies[owner[i]].members.extend(p.members.iter().copied());
+            }
+        }
         Army {
             side,
             kills: 0,
@@ -227,7 +259,7 @@ impl Army {
         self.tick += dt;
         self.kills = kills;
         self.enemy_centroid = enemy_centroid;
-        // 小规模（<9 人）连未编成：跳过指挥层（逐人战术照常）
+        // 不足 33 人（9 个班 = 3 个排）连未编成：跳过指挥层（逐人战术照常）
         if self.companies.is_empty() {
             return;
         }
@@ -479,25 +511,33 @@ mod tests {
 
     /// 判据：**余数一律归末位**（末连承接余排、末排承接余班）——两处兜底必须是同一个约定。
     ///
-    /// 128 人的营实测编成 = **3 连 / 10 排 / 32 班**：三连只吃下前 9 个排（108 人），
-    /// 第 10 排与末尾 2 个班（共 20 人）落在编制尾数上，只能靠兜底接管。以前排的兜底是
-    /// 「末连」而班的兜底是「首排」⇒ 末尾 8 人被指去最左侧的连。
+    /// 128 人的营实测编成 = **3 连 / 10 排 / 32 班**：末连（连 2）承接第 10 排、末排（排 9）
+    /// 承接末尾 2 个班 ⇒ **全营 128 人逐人都在连名单里**。2026-09-26 前的写法只认「刚好凑满
+    /// 3 个」，尾数（20 人）落在连名单外 ⇒ 军情漏报（判据见 `every_soldier_is_carried_by_a_company`）。
     #[test]
     fn organization_tail_follows_the_last_platoon() {
         let a = army_of(128);
-        assert_eq!(a.companies.len(), 3, "128 人 = 3 个满连");
+        assert_eq!(a.companies.len(), 3, "128 人 = 3 个连（末连吃尾数）");
         assert_eq!(a.platoons.len(), 10, "每 3 个班成 1 排 ⇒ 30 个班 10 排，余 2 班");
         assert_eq!(a.squads.len(), 32, "每班 4 人 ⇒ 128/4");
 
         let in_companies: usize = a.companies.iter().map(|c| c.members.len()).sum();
-        assert_eq!(in_companies, 108, "三连 × 3 排 × 12 人 = 108（营部/尾数不在连名单里）");
-        assert_eq!(a.soldier_slot.len(), 128, "每个士兵都必须进编制表");
-        assert!(in_companies + 20 == a.soldier_slot.len(), "尾数 = 第 10 排 12 人 + 2 个班 8 人");
+        assert_eq!(in_companies, 128, "连名单必须覆盖全营，漏一个就是漏一份兵力");
+        assert_eq!(
+            a.companies[2].platoon_ids,
+            vec![6, 7, 8, 9],
+            "末连 = 3 个满排 + 第 10 排"
+        );
+        assert_eq!(
+            a.platoons[9].squads,
+            vec![27, 28, 29, 30, 31],
+            "末排 = 第 30~32 个班（后两个是余数班）"
+        );
 
         // 末连承接余排（第 10 排 ⇒ 连 2）
         assert_eq!(a.company_of_platoon(9), 2, "第 10 排（下标 9）归末连");
         assert_eq!(a.company_of_platoon(10), 2, "同理");
-        // 末排承接余班（第 31/32 个班 ⇒ 排 9）—— 这就是本次修的那处
+        // 末排承接余班（第 32 个班 ⇒ 排 9）—— 这就是上一轮修的那处
         assert_eq!(
             a.platoon_of_squad(31),
             9,
@@ -524,6 +564,69 @@ mod tests {
             assert_eq!(a.soldier_slot.len(), n, "每个士兵都要在编制表里，n={n}");
             assert_eq!(a.platoon_of_squad(0), 0, "没有排时兜底返回 0，不许下溢，n={n}");
             assert_eq!(a.company_of_platoon(0), 0, "没有连时兜底返回 0，不许下溢，n={n}");
+        }
+    }
+
+    /// 判据：**每个士兵都必须进一个连**，且排/班/连三级名单逐人等于 `0..n`（不重不漏）。
+    ///
+    /// 🔴 2026-09-26 实测的红：连只在「排数刚好 % 3 == 0」那一刻成立 ⇒ 末尾凑不满 3 个排的那一截
+    /// 落在连名单之外。而军情 `CompanyReport` 是**按连的 `members` 汇总**的 ⇒
+    /// **128 人的营只上报 108 人、64 人只上报 36 人**，司令看到的是"编制外用不存在的部队"，
+    /// 尾数那一截（含他们的伤亡）对它完全隐形。判据就是这条名单相等。
+    #[test]
+    fn every_soldier_is_carried_by_a_company() {
+        let all = |n: usize| (0..n).collect::<Vec<usize>>();
+        for n in 1..=200usize {
+            let a = army_of(n);
+            if a.companies.is_empty() {
+                // 不足 33 人（9 个班）编不成连 ⇒ `update` 跳过指挥层，逐人战术照常。
+                assert!(n <= 32, "n={n}：33 人起（9 个班 = 3 个排）就必须编出连");
+                continue;
+            }
+            let mut carried: Vec<usize> = a
+                .companies
+                .iter()
+                .flat_map(|c| c.members.iter().copied())
+                .collect();
+            carried.sort_unstable();
+            assert_eq!(
+                carried,
+                all(n),
+                "n={n}：连名单漏人或重复 ⇒ 军情的强度/重心把这些人当空气"
+            );
+            for (level, got) in [
+                (
+                    "排",
+                    a.platoons
+                        .iter()
+                        .flat_map(|p| p.members.iter().copied())
+                        .collect::<Vec<usize>>(),
+                ),
+                (
+                    "班",
+                    a.squads
+                        .iter()
+                        .flat_map(|s| s.members.iter().copied())
+                        .collect::<Vec<usize>>(),
+                ),
+            ] {
+                let mut got = got;
+                got.sort_unstable();
+                assert_eq!(got, all(n), "n={n}：{level}名单漏人");
+            }
+            // 索引安全：`update` 里是直接下标，越界即 panic
+            for s in 0..a.squads.len() {
+                assert!(
+                    a.platoon_of_squad(s) < a.platoons.len(),
+                    "n={n}：班 {s} 的排下标越界（update 会 panic）"
+                );
+            }
+            for p in 0..a.platoons.len() {
+                assert!(
+                    a.company_of_platoon(p) < a.companies.len(),
+                    "n={n}：排 {p} 的连下标越界"
+                );
+            }
         }
     }
 }
