@@ -33,8 +33,12 @@
 //! - 超时判定：客户端 3s 未收到任何数据报视为断线（`snapshot_timeout`）；
 //!   服务端 5s 未收到某客户端数据报则移除其注册（`timeout_clients`）
 //!
-//! 限制与后续 TODO：单数据报不做分片/重组（快照 NPC 上限 MAX_SNAPSHOT_NPCS，超出截断）；
-//! NAT 穿透、断线重连/恢复、真实两机实战场、快照增量压缩、输入预测/回滚均未实现。
+//! 限制与后续 TODO：单数据报不做分片/重组（快照 NPC 上限 MAX_SNAPSHOT_NPCS，超出截断）。
+//! **已接线**（2026-09-26 复查逐条对过代码，别再照旧条目找）：远端实体插值渲染
+//! （`main.rs` 按 `entity_state_at` 取平滑位置）、自身位置上行校正（`game.rs`，水平差 >3m
+//! 硬对齐）、断线自动重连（`reset_connection` + `retry_join`；重连后按**新 id** 加入
+//! ⇒ **会话恢复**未做）、中继注册/解析 + 打洞探测包（`rdv_register` / `rdv_resolve`，第一步）。
+//! **未做**：NAT 双进程真机验证、快照增量压缩、输入预测/回滚、真实两机实战场。
 //!
 //! 本模块仅使用 `std`，不引入外部依赖；如将来需要新依赖，在文件头部按
 //! `// DEP: crate = version` 声明。
@@ -859,7 +863,8 @@ impl Server {
     }
 
     /// 移除超过 `timeout` 未收到任何数据报的客户端，返回被移除的玩家 id。
-    /// UDP 尽力而为：超时即丢弃注册（断线重连/恢复为后续 TODO）
+    /// UDP 尽力而为：超时即丢弃注册。客户端侧会自动重新握手（`reset_connection` +
+    /// `retry_join`），但那是以**新 id** 重新加入 ⇒ 服务端这边的旧 id 不会被恢复。
     pub fn timeout_clients(&mut self, timeout: Duration) -> Vec<u32> {
         let now = Instant::now();
         let mut removed = Vec::new();
@@ -951,7 +956,11 @@ pub struct Client {
     snapshot_time: f32,
     /// 是否收到过快照
     has_snapshot: bool,
-    /// 服务端本机玩家状态（客户端可用作权威修正，应用为后续 TODO）
+    /// 服务端本机（房主）玩家的权威状态。
+    ///
+    /// ⚠️ 这是**房主**的状态，不是客户端自己的：客户端自身的位置校正在 `game.rs` 里走
+    /// `entity_state_at(NET_PLAYER_BASE + own)`（服务端把每个客户端也当远端实体广播）。
+    /// 当前消费点只有 `game.rs` 的诊断行；重连会把它清掉（见 `reset_connection`）。
     own_state: Option<PlayerState>,
     /// 远端实体插值表（NPC / 玩家共用，key = 实体 id）
     entities: HashMap<u32, RemoteEntity>,
@@ -1219,7 +1228,7 @@ impl Client {
         self.snapshot_time
     }
 
-    /// 服务端本机玩家状态（快照权威值；客户端可用作位置修正，应用为后续 TODO）
+    /// 服务端本机（房主）玩家的权威状态（见字段注释：**不是**客户端自己的状态）
     pub fn own_state(&self) -> Option<PlayerState> {
         self.own_state
     }
@@ -1244,12 +1253,18 @@ impl Client {
         &self.entities
     }
 
-    /// 实体 id 在本地时刻 t 的插值状态（位置平滑，渲染消费为后续 TODO）
+    /// 实体 id 在本地时刻 t 的插值状态（位置平滑）
+    ///
+    /// 消费点：`main.rs` 用它给远端 NPC / 远端玩家取平滑位置（取不到时退回 `state.curr`），
+    /// `game.rs` 用它做自身上行校正。**已接线**，不是待办。
     pub fn entity_state_at(&self, id: u32, t: f64) -> Option<PlayerState> {
         self.entities.get(&id).map(|e| e.state.state_at(t))
     }
 
-    /// 超过超时阈值未收到任何数据报（断线基本判定；重连为后续 TODO）
+    /// 超过超时阈值未收到任何数据报（断线基本判定）
+    ///
+    /// 重连已经接线：`game.rs::step_net_client` 在 `player_id.is_some() && snapshot_timeout()`
+    /// 时调 `reset_connection` 并靠 `retry_join` 重新握手（以新 id 加入，会话恢复未做）。
     pub fn snapshot_timeout(&self) -> bool {
         self.last_rx.elapsed() > self.timeout
     }

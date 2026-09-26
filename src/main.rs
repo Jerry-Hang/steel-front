@@ -3909,7 +3909,8 @@ fn main() {
     // RV3D_NET_ADDR=127.0.0.1:<port>（默认 127.0.0.1:27015）。
     // 服务器：权威模拟 + 每 tick 广播快照；客户端：输入上报 + 快照插值缓冲。
     // 无头回环集成测试在 net.rs / game.rs（不依赖 Vulkan/winit）；
-    // 渲染远端实体、NAT 穿透、断线重连为后续 TODO。
+    // 远端实体插值渲染（本文件 2579 起的 `entity_state_at`）与断线自动重连（game.rs）**已接线**；
+    // 未做：NAT 双进程真机验证、输入预测/回滚（见 net.rs 头部「已接线 / 未做」两行）。
     let net_role = std::env::var("RV3D_NET").unwrap_or_default();
     let net_addr =
         std::env::var("RV3D_NET_ADDR").unwrap_or_else(|_| "127.0.0.1:27015".to_string());
