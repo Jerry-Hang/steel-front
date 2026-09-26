@@ -11,6 +11,10 @@
 //!
 //! 失败降级：waveOutOpen 失败 → 内部静默模式（不开声但绝不崩溃），日志告警。
 
+// 🔴 2026-09-26：这两个导入只有 Windows 那条路（`mod win` 的回调上下文）用得到，
+// 非 Windows 下 `SilentSink` 不需要它们 ⇒ 原来在 aarch64-linux 上是一条 unused-import 警告
+// （而本仓要求 0 警告，交叉验证那条命令以前根本跑不起来，见 engine/mod.rs 的同类修复）。
+#[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex};
 
 const FRAMES_PER_BUFFER: usize = 2048;

@@ -452,7 +452,11 @@ unsafe fn shockwave_pressure_neon(
     let zero = vdupq_n_f32(0.0);
     let mut i = 0usize;
     while i + 4 <= points.len() {
-        let s = vld3q_f32(points.as_ptr().add(i));
+        // 🔴 2026-09-26：`points: &[[f32; 3]]` ⇒ `as_ptr()` 是 `*const [f32; 3]`，
+        // 而 `vld3q_f32` 要 `*const f32`（它按 3 个交错分量取 4 个点）⇒ 原来这里
+        // `E0308 mismatched types`，aarch64 那条交叉验证编译不过。
+        // 布局本来就是 xyz 连续交错，所以这个 cast 是逐位等价的（判据：交叉验证 0 error）。
+        let s = vld3q_f32(points.as_ptr().add(i) as *const f32);
         let px = s.0;
         let py = s.1;
         let pz = s.2;

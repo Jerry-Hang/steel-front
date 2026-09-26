@@ -22,6 +22,16 @@
 // `logs/play_latest.log.err`。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// 🔴 2026-09-26：**非 Windows 是"只编译不运行"的交叉验证目标**（铁律 E：
+// `cargo check --target aarch64-unknown-linux-gnu`）。那条命令在 2026-09-26 之前
+// **根本跑不起来**（目标没装），于是它一路漂成 2 个编译错误 + 12 条警告 —— 修掉错误之后，
+// 剩下的警告全是"按平台设计就只在 Windows 用得到"的东西：waveOut 的常量/辅助函数、
+// 以及 CJK 字形表（`ui.rs::glyph_cjk` 在非 Windows 明确回退成 `None`，docstring 写明
+// "回退为 `?`、不 panic"）。
+// ⇒ 把 dead-code 的判据**只按平台**放宽（Windows 那侧一个字都没松），这样交叉验证的输出
+// 才干净到"新警告一眼可见"。**这不是给未接线的代码开后门**：Windows 构建照旧 0 警告。
+#![cfg_attr(not(windows), allow(dead_code))]
+
 /// 构建期内嵌着色器（build.rs 生成 OUT_DIR/shaders.rs）
 pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/shaders.rs"));

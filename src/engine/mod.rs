@@ -16,7 +16,11 @@ pub mod ai_command;
 pub mod assets;
 pub mod camera;
 pub mod city;
-#[cfg(windows)]
+// 🔴 2026-09-26：这一行以前是 `#[cfg(windows)]`，而 `font_cjk.rs` **无条件** `use` 它的
+// `CJK_GLYPHS` ⇒ `cargo check --target aarch64-unknown-linux-gnu` 直接
+// `E0432: unresolved import crate::engine::cjk_glyphs`（而本仓铁律 E 要求跑这条交叉验证）。
+// 表本身只是一份数据（docstring 也写着"跨平台无依赖"），没有理由按平台门控 ⇒ 去掉 cfg，
+// 让代码与文档一致。判据 = 那条交叉验证 0 error / 0 warning。
 pub mod cjk_glyphs;
 pub mod font_cjk;
 pub mod cpu;
