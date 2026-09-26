@@ -1,15 +1,22 @@
 //! 连排班指挥体系（三三制）：营 → 连 → 排 → 班 → 战士。
 //!
-//! 编制（每营 128 人，精确三三制）：
-//! - 班 = 3 战士 + 班长（4 人）；排 = 3 班 + 排长（13）；连 = 3 排 + 连长/副官（41）；
-//! - 营 = 3 连 + 营部 5 人（128）。红蓝各一营（128v128 战场）。
+//! 编制（**按代码实测写**，判据 `organization_matches_the_documented_three_three_rule`）：
+//! - 每 **4 人**切 1 个班（最后一班可以不足 4 人）、每 **3 班**成 1 排、每 **3 排**成 1 连；
+//! - 「班长 / 排长 / 连长」都是**本级成员的最后一个**（不额外占编制，`leader` 只做标记）；
+//! - 128 人 ⇒ **32 班 / 10 排 / 3 连**：三连只吃下前 9 个排（**108 人**），
+//!   第 10 排与末尾 2 个班共 **20 人**属编制尾数 —— 它们**不在任何连的成员名单里**
+//!   （⇒ 不计入 `CompanyReport.strength/centroid/contact`），行军目标靠兜底接管：
+//!   **余数一律归末位**（`platoon_company` 归末连、`platoon_of_squad` 归末排）。
+//!   ⚠️ 旧文案写的「营 = 3 连 + 营部 5 人」与代码不符：**没有单独的营部编制**。
 //!
 //! 指挥链：战士向班长汇报（状态/位置），班→排→连→营逐级汇总为「军情报告」；
-//! 营司令官（AI 司令）按战场形势（前线推进度/兵力/伤亡）每 0.5s 做出战役决策：
-//! - 进攻：全线前推至接触线；- 防御：占领线保持，伤亡>40% 时转入；
-//! - 侧翼：连队向敌阵侧后迂回包抄（钳形）；- 重组：班退回连部方向整补。
-//! 命令逐级下发为「班目标点」，未接敌的战士按班目标编队推进（班长居中、
-//! 左右战士侧后 3m 楔形）；接敌后仍交由既有逐人战术（掩体/侧翼/偷袭/压制）。
+//! 营司令官（AI 司令）每 0.5s 决策一次，判据就是 `Army::update` 里那三段：
+//! - 连名单内存活 < 128×0.55 **且** 累计击杀 < 8 → 重组；否则比敌我重心到地图中心的距离：
+//!   我方 < 0.8×敌 ⇒ 进攻；> 1.25×敌 ⇒ 防御；其余 ⇒ 钳形侧翼。
+//!   （⚠️ 旧文案「伤亡>40% 转入防御」对不上代码：那个阈值判的是**重组**，防御看重心距离。）
+//! 命令逐级下发为「班目标点」；未接敌的战士按班目标 + `FORMATION_OFFSETS` 槽位推进
+//! （班长前中 4m、双翼侧后 4/3m、殿后 7m；**不随朝向旋转**，大战场上取确定性优先）；
+//! 接敌后仍交由既有逐人战术（掩体/侧翼/偷袭/压制）。
 //!
 //! 同时提供：连长对班长投掷压制的指挥权加成（压制翻倍）、班长大致向敌方向
 //! 投掷的信息（投掷逻辑在 game.rs，此处仅编制/目标/报告）。
@@ -436,11 +443,87 @@ fn platoon_company(companies: &[Company], platoon_id: usize) -> usize {
     (platoon_id / 3).min(companies.len().saturating_sub(1))
 }
 
+impl Army {
+    /// 该排归哪个连（与 `platoon_company` 同一个真源；测试与调用方都用它）
+    pub fn company_of_platoon(&self, platoon_id: usize) -> usize {
+        platoon_company(&self.companies, platoon_id)
+    }
+
+    /// 该班归哪个排（余数班归**末排**，与「末连承接余排」同一约定）
+    pub fn platoon_of_squad(&self, squad_id: usize) -> usize {
+        platoon_of_squad(&self.platoons, squad_id)
+    }
+}
+
 fn platoon_of_squad(platoons: &[Platoon], squad_id: usize) -> usize {
     for (pi, p) in platoons.iter().enumerate() {
         if p.squads.contains(&squad_id) {
             return pi;
         }
     }
-    0
+    // 🔴 2026-09-26 复查修：这里以前回落 **0（首排）** —— 而 `platoon_company` 的余数约定是
+    // 「归末位」（`.min(len-1)`）。两处不一致的后果：128 人的营有 2 个班（8 人）落在这个兜底上，
+    // 它们会被指到**首排** ⇒ 跟着最左侧的连（`spread` 里 ci=0 那条，横向 −55m）跑，而不是
+    // 跟着编号相邻、出生点也相邻的末排。判据 = `organization_tail_follows_the_last_platoon`。
+    platoons.len().saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn army_of(n: usize) -> Army {
+        let ids: Vec<usize> = (0..n).collect();
+        Army::build(Team::Red, &ids)
+    }
+
+    /// 判据：**余数一律归末位**（末连承接余排、末排承接余班）——两处兜底必须是同一个约定。
+    ///
+    /// 128 人的营实测编成 = **3 连 / 10 排 / 32 班**：三连只吃下前 9 个排（108 人），
+    /// 第 10 排与末尾 2 个班（共 20 人）落在编制尾数上，只能靠兜底接管。以前排的兜底是
+    /// 「末连」而班的兜底是「首排」⇒ 末尾 8 人被指去最左侧的连。
+    #[test]
+    fn organization_tail_follows_the_last_platoon() {
+        let a = army_of(128);
+        assert_eq!(a.companies.len(), 3, "128 人 = 3 个满连");
+        assert_eq!(a.platoons.len(), 10, "每 3 个班成 1 排 ⇒ 30 个班 10 排，余 2 班");
+        assert_eq!(a.squads.len(), 32, "每班 4 人 ⇒ 128/4");
+
+        let in_companies: usize = a.companies.iter().map(|c| c.members.len()).sum();
+        assert_eq!(in_companies, 108, "三连 × 3 排 × 12 人 = 108（营部/尾数不在连名单里）");
+        assert_eq!(a.soldier_slot.len(), 128, "每个士兵都必须进编制表");
+        assert!(in_companies + 20 == a.soldier_slot.len(), "尾数 = 第 10 排 12 人 + 2 个班 8 人");
+
+        // 末连承接余排（第 10 排 ⇒ 连 2）
+        assert_eq!(a.company_of_platoon(9), 2, "第 10 排（下标 9）归末连");
+        assert_eq!(a.company_of_platoon(10), 2, "同理");
+        // 末排承接余班（第 31/32 个班 ⇒ 排 9）—— 这就是本次修的那处
+        assert_eq!(
+            a.platoon_of_squad(31),
+            9,
+            "余数班必须跟着编号相邻的末排，而不是首排"
+        );
+        assert_eq!(a.platoon_of_squad(0), 0, "正常班仍按所属排走");
+        assert_eq!(a.platoon_of_squad(29), 9, "第 30 个班属于第 10 排");
+    }
+
+    /// 判据：编成必须**逐字**符合文档写的那条规则（每班 ≤4 人、每 3 班成排、每 3 排成连），
+    /// 且任何人数下兜底都不下溢 —— 用「模型」算期望值比写死几个数字更能防走样：
+    /// 128 人 ⇒ 32 班 / 10 排 / 3 连；33 人才刚够 9 个班 ⇒ 3 排 ⇒ 1 连（**门槛是 33 不是 36**，
+    /// 因为最后一个班可以是 1 人的残班）。
+    #[test]
+    fn organization_matches_the_documented_three_three_rule() {
+        for n in 0..=200usize {
+            let a = army_of(n);
+            let squads = n.div_ceil(4);
+            let platoons = squads / 3;
+            let companies = platoons / 3;
+            assert_eq!(a.squads.len(), squads, "n={n}：每班 ≤4 人");
+            assert_eq!(a.platoons.len(), platoons, "n={n}：每 3 班成 1 排");
+            assert_eq!(a.companies.len(), companies, "n={n}：每 3 排成 1 连");
+            assert_eq!(a.soldier_slot.len(), n, "每个士兵都要在编制表里，n={n}");
+            assert_eq!(a.platoon_of_squad(0), 0, "没有排时兜底返回 0，不许下溢，n={n}");
+            assert_eq!(a.company_of_platoon(0), 0, "没有连时兜底返回 0，不许下溢，n={n}");
+        }
+    }
 }
