@@ -601,12 +601,12 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 10. **PT 盒上限静默截断**：512 → 1024 一次分配 + 一次性告警。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 像素重投影复用或运动自适应 spp；`signature()` 分层（~0.5m/~3°/~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（含 `RV3D_PT_EXPOSURE`）。
 12. **溢出静默丢弃**：超容处有 `Renderer::warn_npc_cap_once`。
-13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染已接线（`net.rs` 单测）。**仍未做**：NAT 打洞、回滚、双进程真机验证。
+13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步。**仍未做**：NAT 双进程真机验证、回滚、快照增量压缩、会话恢复。
 14. **道具进阴影 pass**：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
 15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F（其余 `#[allow]` 必须保留）。
 17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0 device_lost=0`（harness = `scripts/run_survive_pm.ps1`）。
 18. ✅ **CoverSeek 占比偏低**：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler` ⇒ 7.2%/1.8%）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `aidiag: tactic 1s`。
-19. ✅ **毛玻璃菜单已落地**（2026-09-26 `4dd3788`，约束见铁律 B 的 HUD 磨砂玻璃条）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1` + `run_gunpose_probe.ps1`）。
+19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1` + `run_gunpose_probe.ps1`）。
 20. ✅ **DLSS：不接**（`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素。**重开判据**：面积 1/4 而 fps 提升 >40%。
 21. **GLB `byteStride`**：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。

@@ -10362,3 +10362,42 @@ VUID=0 panics=0 device_lost=0        RESULT: NO-LEAK
 已有的**单元级**证据仍然成立：`glb_parses_real_ak12` / `glb_parses_real_ak12_orig` /
 `glb_prop_kit_loads_with_valid_range` 三条都直接加载**真实资产文件**并通过。
 ⇒ 下次显存空出来时，用 §21.64 的同一条命令补一次冒烟即可（十分钟的事）。
+
+### 21.72 审计日第二批：「工具/日志不许把没跑成说成成功」五处（`f5f1b23`…`dbce85b`）
+
+**主题**：这一批全是同一类缺陷 —— **失败被静默抹平**（教训 46 在代码里的落地：审计/日志/工具
+必须有第三种结局「没跑成」）。每条都带**会红的**判据：能单测的就先写红测，不能的就拿真实场景复现。
+
+| commit | 位置 | 缺陷 | 判据（全部真跑过） |
+|---|---|---|---|
+| `75cdaaa` | `perf_log.rs` | `create()` 全程静默（`logs/` 建不出来 ⇒ 这轮没有性能日志，却什么都不说）；`finish()` **无条件**打「性能日志已保存」 | 只读句柄造**真实**写失败 ⇒ `save_verdict()` 必须 `Err(n)`；目录不可用必须 fail-closed 返 `None`；外带一条正对照（可用目录必须建得出且头部落盘） |
+| `13b8a71` | `main.rs` NAT 中继 | `let _ = rdv_register(...)` 之后**无条件**打「已向中继注册…等待玩家查询」 | `rdv_register_report(...)` 两方向钉死：成功文案含房间名+端口；失败文案含原始错误且**不含成功字样** |
+| `fcb9dc2` | `net.rs::Reader::f32` | `from_bits` 原样解出 NaN/±inf ⇒ 位置 NaN ⇒ 实例矩阵 NaN ⇒ **远端实体静默不画** | `non_finite_floats_are_rejected_at_the_wire`：NaN 位置 / NaN 时间戳 / inf 坐标各拒一条 + 正对照 |
+| `a8be88d` | `net.rs::reset_connection` | 只清 `player_id`/`entities`/`has_snapshot` ⇒ 重连后新会话据点序号被上一局的 `objective_seq` 判成「过期」⇒ **据点消息全被丢弃**（HUD 停在上一局） | `reset_connection_clears_session_scoped_state`：**先写红，实测红在 `own_state` 那一条**，修完转绿 |
+| `dbce85b` | `net.rs` / `main.rs` 注释 | 6 处「…为后续 TODO」其实**都已经接线** | 逐条对过代码（渲染消费在 `main.rs` 2579 起、自身校正在 `game.rs` 3095、重连在 `game.rs` 3107）；改写成「已接线 / 未做」两行 |
+
+**几条值得留下的细节**（下次别再踩）：
+
+- **同一个「flush」两副面孔**：Windows 上只读句柄的 `write` 会失败、而 `flush` **会成功**
+  —— 首版测试的 `assert!(write_errors > n)` 就在这里红了。修法不是删断言，而是把 flush 的
+  失败也接到**同一个** `note_write_error`（计数与告警只有一份实现），并在注释里写明
+  「flush 真失败的分支无测试覆盖」——**不装作测到了**。
+- **NaN 是一条完整的静默链**：`lerp_state` 的 `alpha.clamp(0.0, 1.0)` 对 NaN 返回 NaN
+  （`a <= 0.0` 与 `a >= 1.0` **都不成立**，所以两条早退都躲过去）⇒ 位置 NaN ⇒ 矩阵 NaN ⇒ 不画；
+  `Snapshot.time` 为 NaN 时 `interpolate_at` 的 `dt <= 0.0` 为假 ⇒ 插值恒走 NaN 分支。
+  收口点只有一个：`Reader::f32`（位置/角度/时间/hp/进度全经过它）。
+  **严格化没有误伤合法报文**：变异模糊接受率不变（**1598/3000**，种子固定）。
+- **`own_state` 的语义以前写反了**：它是**房主**的状态，不是客户端自己的；客户端自身校正在
+  `game.rs` 走 `entity_state_at(NET_PLAYER_BASE + own)`（服务端把每个客户端也当远端实体广播）。
+- **清理路径必须把同族缓存一起带走**：`entities` 清了而 `remote_players` / `objective_seq`
+  没清，就是 2026-09-26「幽灵实体」那条修复的另一半 —— 同一个道理第三次出现，已收进
+  `reset_connection`。
+
+验证：`cargo test --release` **626 passed / 0 failed**；`cargo build --release` **0 警告**；
+CJK 字模预检 `tools/cjk_cover_check.py` 每轮都跑（又撞了 3 个无字模的字：吻 / 审 / 账，
+全部改写成已有字；**字体表不可重建**这条约束没有松动）。
+
+⚠️ **仍未补的那次实机验证**：GLB 解析器严格化后的冒烟（24 件道具 + 士兵 + 枪械在引擎里照常载入）
+依旧卡在显存窗口 —— 20:2x 复核 `nvidia-smi` 仍是 `4344MiB used / 77% util`（用户 Edge 占用），
+`run_smoke_pm.ps1` 的准入闸门会如实拒绝（**工具在这里是对的**）。
+今晚这批改动全在网络层与日志层，**不碰 Vulkan 路径** ⇒ 对它们不构成缺口；§21.71 的 GLB 改动仍欠那一次。
