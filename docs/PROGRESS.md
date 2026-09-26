@@ -10244,3 +10244,12 @@ AGENTS 那句"绝大多数是有注释的诚实预留"现在有了数字：**109
 **收尾实机**：最终二进制（含今晚全部改动）再跑一遍冒烟 + 验证层 ——
 `VUID=0 panics=0`、击杀成立、`RESULT: ALL-OK`；`cargo build --release` **0 警告**、
 `cargo test --release` **615 passed / 0 failed**、CJK 字模闸门绿、工作树干净、全部已推送。
+
+**同一轮还核了"容量上限有没有静默截断"**（未结案 #12 / #10 那一类，全仓 6 个 `MAX_*` 上限）：
+`MAX_EMISSIVE=64` **是有意设计且有注释**（`main.rs:2368` 那段写明：按插入顺序截断会让
+"远处/将熄的焰"占坑、近处新焰被丢，正是 D8 那几团悬空琥珀色圆盘的成因 ⇒ 改成
+"爆炸保底 + 粒子按相机距离由近及远"）；`MAX_SNAPSHOT_NPCS=1024` 与 `MAX_OBJECTIVE_POINTS=64`
+在 `net.rs` 模块文档里写明"超出截断"，且**实际量级远低于上限**（255 NPC vs 1024）；
+`MAX_POINT_LIGHTS=4` 是 WGSL `array<PointLight, 4>` 的镜像；`MAX_DATAGRAM` 是收包缓冲；
+`MAX_SYNTH_VOICES` 的丢弃策略**有测试正面断言**（"超限应丢弃最旧声部"）。
+⇒ **这一轴没有发现缺陷**（不是没查，是查了没有）。
