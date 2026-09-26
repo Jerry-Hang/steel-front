@@ -7,8 +7,11 @@ ak12.glb。预处理脚本的输出名沿用 Sketchfab 源文件名，因此这�
   PP-9 是 Bizon 最初的设计代号，PP-19-01 才是 Vityaz —— 武器表里 `pp9` / `pp19`
   两个 key 就来自这两个编号，看文件名很容易装反。
 
-`assets/guns_ext/` 是**可再生的中间产物**（重跑 prep_guns.py 约 2 分钟），所以它
-不进版本库；只有安装后的 assets/guns/<key>.glb 进。这样二进制资产只有一份真相。
+`assets/guns_ext/` 是**可再生的中间产物**（原始源在 `D:\Rust\3D`，重跑 prep_guns.py 约 2 分钟）。
+⚠️ 2026-09-26 更正：这段原来写"不进版本库"，但**它们一直在库里**（`git ls-files assets/guns_ext`
+= 14 个），而这条路更实际 —— 源文件在仓库外，不带上中间产物的话，**克隆出来的仓库无法重新安装**
+（而已安装的 assets/guns/<key>.glb 才是引擎真正读的那一份）。所以新增的
+`svd_63_cleaned.glb` 同样按既有事实入库，保持这一类文件状态一致。
 
 用法:
     python tools/install_guns.py            # 安装并报告
