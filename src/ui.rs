@@ -57,11 +57,21 @@ impl Rect {
 pub struct Quad {
     pub rect: Rect,
     pub color: Color,
+    /// 🧊 **磨砂玻璃面板**（2026-09-26）：为真时渲染器会把这块 quad 背后的画面
+    /// （上一帧的降采样模糊图）当底色，再叠 `color`——菜单/设置/ESC 面板用它。
+    /// 别的 quad 一律 false（默认路径逐字节不变）。
+    pub glass: bool,
 }
 
 impl Quad {
     pub const fn new(rect: Rect, color: Color) -> Self {
-        Self { rect, color }
+        Self { rect, color, glass: false }
+    }
+
+    /// 磨砂玻璃面板（见 `glass` 字段）。**只有菜单/设置这类"压在世界之上"的面板该用**：
+    /// 它要渲染器先做一次 `swapchain → 模糊图` 的 blit，整帧代价不低。
+    pub const fn glass(rect: Rect, color: Color) -> Self {
+        Self { rect, color, glass: true }
     }
 }
 

@@ -86,12 +86,16 @@ pub struct PerfSnapshot {
 struct HudVertex {
     pos: [f32; 2],
     color: [f32; 4],
+    /// 🧊 `(u, v, glass)`：u/v = 该顶点在**屏幕上的归一化位置**（磨砂玻璃按它采样
+    /// 那张降采样模糊图）；`glass` = ui.rs 的 `Quad::glass` 标志（0/1）。
+    /// 非玻璃 quad 照样写 uv（不额外分支），片元按 `glass` 决定用不用它。
+    uv_glass: [f32; 3],
 }
 // HUD 覆盖层自己的步长契约（与主管线的 `Vertex` 无关）：`hud.vert.spv` 按
-// `pos vec2 + color vec4` 取属性，步长由这里推导 ⇒ 改动同样必须在这里被挡住。
+// `pos vec2 + color vec4 + uv_glass vec3` 取属性，步长由这里推导 ⇒ 改动同样必须在这里被挡住。
 const _: () = assert!(
-    std::mem::size_of::<HudVertex>() == 24,
-    "HudVertex 必须是 24B（pos vec2 + color vec4）：HUD 着色器按此布局取属性"
+    std::mem::size_of::<HudVertex>() == 36,
+    "HudVertex 必须是 36B（pos vec2 + color vec4 + uv_glass vec3）：HUD 着色器按此布局取属性"
 );
 
 /// 立方体 24 顶点（每面 4 个，CCW 外侧绕序；每面 UV 铺满 0..1）
@@ -3377,6 +3381,12 @@ impl Renderer {
                 .location(1)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
                 .offset(std::mem::size_of::<[f32; 2]>() as u32),
+            // 🧊 location 2 = `uv_glass`（vec3，见 `HudVertex`）。**与 overlay 那份必须一致**。
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(2)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(std::mem::size_of::<HudVertex>() as u32 - std::mem::size_of::<[f32; 3]>() as u32),
         ];
         let hud_bindings = [hud_binding];
         let hud_vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
@@ -3530,15 +3540,24 @@ impl Renderer {
             let x1 = (q.rect.x + q.rect.w) / w * 2.0 - 1.0;
             let y1 = 1.0 - (q.rect.y + q.rect.h) / h * 2.0;
             let color = [q.color.r, q.color.g, q.color.b, q.color.a];
-            for (px, py) in [
-                (x0, y0),
-                (x1, y0),
-                (x0, y1),
-                (x1, y0),
-                (x1, y1),
-                (x0, y1),
+            // 屏幕归一化 UV（与 NDC 同一套换算，只是不乘 2 也不减 1）—— 模糊图是整个屏幕的
+            // 降采样副本，所以 uv 直接就是"这一点在屏幕上的位置"。
+            let (u0, v0) = (q.rect.x / w, q.rect.y / h);
+            let (u1, v1) = ((q.rect.x + q.rect.w) / w, (q.rect.y + q.rect.h) / h);
+            let g = if q.glass { 1.0 } else { 0.0 };
+            for (px, py, u, v) in [
+                (x0, y0, u0, v0),
+                (x1, y0, u1, v0),
+                (x0, y1, u0, v1),
+                (x1, y0, u1, v0),
+                (x1, y1, u1, v1),
+                (x0, y1, u0, v1),
             ] {
-                verts.push(HudVertex { pos: [px, py], color });
+                verts.push(HudVertex {
+                    pos: [px, py],
+                    color,
+                    uv_glass: [u, v, g],
+                });
             }
         }
         unsafe {
@@ -9874,6 +9893,15 @@ impl Renderer {
                 .location(1)
                 .format(vk::Format::R32G32B32A32_SFLOAT)
                 .offset(std::mem::size_of::<[f32; 2]>() as u32),
+            // 🧊 location 2 = `uv_glass`（vec3）：磨砂玻璃的屏幕 UV + 标志位。
+            // ⚠️ **两个 HUD 管线（主 pass 的 `hud_pipeline` 与 overlay 的 `hud_overlay_pipeline`）
+            // 必须同时加**：它们共用 `hud_pipeline_layout` / 同一套着色器，只加一处 =
+            // 另一处按 24B 步长解读 36B 顶点 = 静默错位的几何。
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(2)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(std::mem::size_of::<HudVertex>() as u32 - std::mem::size_of::<[f32; 3]>() as u32),
         ];
         let hud_bindings = [hud_binding];
         let hud_vertex_input = vk::PipelineVertexInputStateCreateInfo::default()

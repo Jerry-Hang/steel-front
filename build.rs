@@ -1545,16 +1545,19 @@ const HUD_VERTEX_SHADER_WGSL: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) uv_glass: vec3<f32>,
 }
 
 @vertex
 fn vs_main(
     @location(0) position: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) uv_glass: vec3<f32>,
 ) -> VertexOutput {
     var output: VertexOutput;
     output.position = vec4<f32>(position, 0.0, 1.0);
     output.color = color;
+    output.uv_glass = uv_glass;
     return output;
 }
 "#;
@@ -1564,10 +1567,15 @@ const HUD_FRAGMENT_SHADER_WGSL: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) uv_glass: vec3<f32>,
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // 🧊 磨砂玻璃（stage 2 接上模糊图后在这里采样）：目前 `uv_glass` 只透传，
+    // 输出与改动前逐位相同 —— 这一笔单独落库，为的是把"顶点格式从 24B 变 36B"
+    // 这件事与后面的渲染路径改动分开验。
+    _ = input.uv_glass;
     return input.color;
 }
 "#;
