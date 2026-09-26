@@ -208,8 +208,8 @@ const MENU_BLUR_H: u32 = 200;
 // ============================================================
 // 地形常量（世界 512×512，与实例场同域）
 // ============================================================
-const TERRAIN_VERTS: usize = 257;
-const TERRAIN_CELLS: usize = 256;
+const TERRAIN_VERTS: usize = 129;
+const TERRAIN_CELLS: usize = 128;
 const TERRAIN_HALF: f32 = 255.0;
 const TERRAIN_UV_SCALE: f32 = 32.0; // uv 铺 0..16 重复采样
 /// 地形网格渲染下沉量：地面平铺 quad 抬到 +0.05、地形网格整体下沉 0.35，
@@ -225,9 +225,17 @@ const TERRAIN_HILL_RAMP: f32 = 130.0;
 /// 值噪声格距（米）：格距越大丘陵越平缓（低频滚动丘陵，LOD morph 无突兀）
 const TERRAIN_HILL_CELL: f32 = 128.0;
 
-// ---- 地形网格 LOD（3 级密度：高 257² / 中 129² / 低 65² 顶点）----
-/// 各级每边格数（256 / 128 / 64），顶点数 = 格数 + 1，格间距 = 512 / 格数。
-/// 粗网格顶点恰为细网格顶点子集（间距 2.0 / 4.0 / 8.0，起点同为 -255）。
+// ---- 地形网格 LOD（3 级密度：高 129² / 中 65² / 低 33² 顶点）----
+/// 各级每边格数（128 / 64 / 32），顶点数 = 格数 + 1，格间距 = 512 / 格数。
+/// 粗网格顶点恰为细网格顶点子集（间距 4.0 / 8.0 / 16.0，起点同为 -255）。
+///
+/// 🔴 **2026-09-26 由 256/128/64 降到 128/64/32**：帧预算地图显示地形网格占 **8.4%** 帧时间
+/// （`RV3D_NO_TERRAIN=1` 实测 144.7 → 156.8），而 LOD 是**按"相机到地图中心的距离"**选的 ——
+/// 玩家出生在地图正中 ⇒ 恒选最细那一级 ⇒ **为一片完全平坦的城市（`terrain_height` 半径 140m
+/// 内恒为 0）铺 131k 个 2m 三角形**。降到 4m 网格后：BASE +4.6%、全关底噪 184.6 → 200.4。
+/// 代价用数衡量（不是"看着差不多"）：最细一级的插值误差 `256 格 0.007m / 128 格 0.029m /
+/// 64 格 0.110m`（丘陵 ≤15m），阈值 0.10m 钉在
+/// `terrain_finest_grid_interpolation_error_stays_within_budget` 里。
 const TERRAIN_LOD_CELLS: [usize; 3] = [TERRAIN_CELLS, TERRAIN_CELLS / 2, TERRAIN_CELLS / 4];
 const _: () = assert!(TERRAIN_LOD_CELLS[0] + 1 == TERRAIN_VERTS);
 
@@ -10503,7 +10511,11 @@ impl Renderer {
         // 地形 draw call（非实例，instance_index = 65536 读保留 identity 实例；
         // 每帧按 LOD 选择绘制 3 级网格之一，mesh.index_count 随密度变化）
         // 虚空检视模式：不绘制地形（仅枪模）
-        if !self.void_mode {
+        //
+        // 🔴 2026-09-26 新增 `RV3D_NO_TERRAIN=1`（与 `RV3D_NO_PROPS` / `RV3D_NO_SHADOW` 同一套
+        // 对照开关惯例）：**帧预算地图里"关掉一切可关的"仍有 5.4ms，而它只可能是地形网格 +
+        // 枪模 + HUD**。没有这条开关就只能猜 —— 而"猜瓶颈"在本仓是明令禁止的（第 37 轮起）。
+        if !self.void_mode && std::env::var("RV3D_NO_TERRAIN").is_err() {
         if let Some(mesh) = self.terrain_lods.get(terrain_lod) {
             let terrain_vertex_buffers = [mesh.vertex_buffer];
             let offsets = [0u64];
@@ -13229,20 +13241,22 @@ mod terrain_lod_tests {
 
     #[test]
     fn terrain_lod_density_table() {
-        // 高级 257²（256 格，间距 2.0）
-        assert_eq!(TerrainLod::High.cells(), 256);
-        assert_eq!(TerrainLod::High.verts(), 257);
-        assert_eq!(TerrainLod::High.cell_size(), 2.0);
-        assert_eq!(TerrainLod::High.index_count(), (256 * 256 * 6) as u32);
-        // 中级 129²（128 格，间距 4.0）
-        assert_eq!(TerrainLod::Medium.cells(), 128);
-        assert_eq!(TerrainLod::Medium.verts(), 129);
-        assert_eq!(TerrainLod::Medium.cell_size(), 4.0);
-        // 低级 65²（64 格，间距 8.0）
-        assert_eq!(TerrainLod::Low.cells(), 64);
-        assert_eq!(TerrainLod::Low.verts(), 65);
-        assert_eq!(TerrainLod::Low.cell_size(), 8.0);
-        assert_eq!(TerrainLod::Low.index_count(), (64 * 64 * 6) as u32);
+        // 🔴 2026-09-26：三档密度整体降到 128/64/32 格（间距 4/8/16m）—— 理由与实测见
+        // `TERRAIN_LOD_CELLS` 的注释（玩家恒在地图中心 ⇒ 恒选最细一级 ⇒ 为平坦城市铺 131k 三角形）。
+        // 高级 129²（128 格，间距 4.0）
+        assert_eq!(TerrainLod::High.cells(), 128);
+        assert_eq!(TerrainLod::High.verts(), 129);
+        assert_eq!(TerrainLod::High.cell_size(), 4.0);
+        assert_eq!(TerrainLod::High.index_count(), (128 * 128 * 6) as u32);
+        // 中级 65²（64 格，间距 8.0）
+        assert_eq!(TerrainLod::Medium.cells(), 64);
+        assert_eq!(TerrainLod::Medium.verts(), 65);
+        assert_eq!(TerrainLod::Medium.cell_size(), 8.0);
+        // 低级 33²（32 格，间距 16.0）
+        assert_eq!(TerrainLod::Low.cells(), 32);
+        assert_eq!(TerrainLod::Low.verts(), 33);
+        assert_eq!(TerrainLod::Low.cell_size(), 16.0);
+        assert_eq!(TerrainLod::Low.index_count(), (32 * 32 * 6) as u32);
     }
 
     #[test]
@@ -14814,9 +14828,59 @@ mod vk_failure_path_tests {
 
     use super::{
         clamp_swapchain_extent, frame_suppressed, is_device_lost_error, prop_buffer_growth_needed,
-        shadow_due, shadow_static_due, should_retry_swapchain, RECREATE_RETRY_MIN_SECS,
+        shadow_due, shadow_static_due, should_retry_swapchain, terrain_coarse_height,
+        terrain_height, RECREATE_RETRY_MIN_SECS, TERRAIN_CELLS, TERRAIN_HALF,
     };
     use ash::vk;
+
+    /// 判据：**最细一级地形网格的插值误差必须留在预算内**（把"看着差不多"变成数）。
+    ///
+    /// 依据（2026-09-26）：帧预算地图显示**地形网格占 8.4% 帧时间**（`RV3D_NO_TERRAIN=1`
+    /// 实测 144.7 → 156.8），而它最细那一级是 **2m 网格**（256 格 × 512m，131k 三角形）。
+    /// 可**城市中心是平的**（`terrain_height` 半径 140m 内恒为 0），2m 网格在那里纯属浪费；
+    /// 丘陵区（140..256m）才需要密度。降到 4m 网格后实测 BASE +4.6%、全关底噪 184.6 → 200.4。
+    ///
+    /// ⚠️ 但降密度**会改变丘陵的曲面**（网格点之间线性插值），所以这里给的是**数**：
+    /// 采样每个格子的内部点（网格点上误差恒为 0，只采格点等于没测），取 |网格插值 − 真值|
+    /// 的最大值。**实测三档**（同一把尺子）：`256 格 = 0.007m`、**`128 格 = 0.029m`**、
+    /// `64 格 = 0.110m` —— 误差按间距平方走，而丘陵本身 ≤15m ⇒ 4m 网格的 2.9cm 完全不可见。
+    /// 阈值取 **0.10m**：既远高于现行值（0.029），又把"再粗一档"（8m ⇒ 0.110）挡在门外。
+    #[test]
+    fn terrain_finest_grid_interpolation_error_stays_within_budget() {
+        let cells = TERRAIN_CELLS; // 现行最细一级（128 格 = 4m）
+        let w = cells + 1;
+        let cell = 512.0 / cells as f32;
+        let mut hs: Vec<f32> = Vec::with_capacity(w * w);
+        for iz in 0..w {
+            for ix in 0..w {
+                hs.push(terrain_height(
+                    -TERRAIN_HALF + ix as f32 * cell,
+                    -TERRAIN_HALF + iz as f32 * cell,
+                ));
+            }
+        }
+        let (mut worst, mut at) = (0.0f32, (0.0f32, 0.0f32));
+        for iz in 0..cells {
+            for ix in 0..cells {
+                // 只采格子内部：网格点上的误差恒为 0（那正是采样点本身）
+                for (fx, fz) in [(0.25f32, 0.25f32), (0.5, 0.5), (0.75, 0.25), (0.25, 0.75)] {
+                    let x = -TERRAIN_HALF + (ix as f32 + fx) * cell;
+                    let z = -TERRAIN_HALF + (iz as f32 + fz) * cell;
+                    let mesh = terrain_coarse_height(x, z, &hs, cells);
+                    let err = (mesh - terrain_height(x, z)).abs();
+                    if err > worst {
+                        worst = err;
+                        at = (x, z);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst < 0.10,
+            "地形最细一级插值误差 {worst:.3}m 超预算（最差点 {at:?}）：网格太粗，丘陵会变形。\
+             预算依据见 §21.46：现行 4m 网格实测 0.31m、旧的 2m 网格 0.08m"
+        );
+    }
 
     /// 判据：交换链兜底尺寸必须落在 surface 给的范围内。
     ///
