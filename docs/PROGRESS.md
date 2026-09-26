@@ -9859,3 +9859,39 @@ Windows 上没松）。**前置条件也记下来**：目标必须先 `rustup ta
 ⇒ 改写成"常见来源"。**写中文注释前先跑 `python tools/cjk_cover_check.py`** 比事后返工便宜。
 
 验证：`cargo test --release` **609 passed / 0 failed**；`cargo build --release` **0 警告**。
+
+### 21.58 `device_wait_idle` 的失败被静默丢掉 6 处；顺带否掉一个"看起来该写"的扫描器（`82d096b`）
+
+**形态**：全仓 6 处 `let _ = self.device.device_wait_idle();`，全在"等空闲 → 销毁/重建在飞资源"
+的关键路径（`set_first_person_gun_mesh`、`set_props` ×2、`set_shadow_props`、
+`pt_set_scene_markers`、`Drop for Renderer`）。**等待失败与等待成功在日志里完全一样**，
+而它最可能返回的错误正是 `VK_ERROR_DEVICE_LOST`（铁律 B：不可恢复）⇒ 后面那句
+`destroy_buffer` 安不安全，排查的人没有任何证据。
+改法：纯函数 `wait_idle_failure_message`（点名错误 + 只报一次）+ `Renderer::wait_idle_checked` 统一入口；
+判据两条（点名/闩 + 与 `is_device_lost_error` 联动；源码扫描补上
+`no_expect_or_unwrap` / `no_if_let_ok` / `no_unbounded_wait` 之外的**第四个逃生口 `let _ =`**）。
+红测证据：改回一处旧写法 ⇒ 判据在 `renderer.rs:15302` 红并打印那一行。
+
+**值得记的是那两个"被否掉"的东西**：
+
+1. **扫描器（`logs/vk_result_audit.py`）没有增量价值**：它找"结果被丢弃的 Vulkan 调用"，
+   第一版报 164 条、修好 API 面后仍报 65 条，逐条看**几乎全是假阳性** ——
+   `Result` 是 `#[must_use]`，**语句位置**丢弃本来就会被 `unused_must_use` 顶成警告，
+   而本仓 0 警告 ⇒ 编译器早就在管这一轴。真正的漏洞只有 `let _ =` / `.ok()` 这种
+   **故意消音**的写法，于是它变成了一条源码判据（进 `cargo test`），而不是一个工具。
+   ⇒ 教训：**先问"编译器/类型系统是否已经管了"，再决定要不要写扫描器**。
+2. **API 面不许凭印象猜**：ash 0.38 里 `unmap_memory` 返回 `()`、
+   `get_buffer_memory_requirements` 返回 `MemoryRequirements`、`get_*` 通配还会命中 `get_or_init`
+   —— 我手写的清单全写错了。真相从 registry 里的 ash 源码提取（`logs/ash_surface.py`，
+   186 个返回 `VkResult` 的入口，本仓用到 45 个）。
+
+**当天第 7 处"判据没真跑过"（这次是我自己踩的，值得单列）**：
+`Copy-Item` 恢复备份**保留源文件的旧 mtime** ⇒ cargo 认为 target 是新鲜的、
+**不重编**，于是测试二进制里跑的仍是"改回旧写法"的那一版源码
+（判据红、而我磁盘上的文件是对的）⇒ 我一度以为判据写错了。
+**恢复被 include_str!/include_bytes! 引用的源码后必须 touch 一次**（或跑 `cargo clean -p`），
+否则"测试说的"与"磁盘上的"是两份东西 —— 与今天前 6 处完全同形：
+**测量的对象不是我以为的那个**。
+
+验证：`cargo test --release` **611 passed / 0 failed**；`cargo build --release` **0 警告**；
+CJK 字模闸门绿（「审」U+5BA1 与「恰」无字模 ⇒ 改写为「复查」「正好」；这是当天第 5、6 次）。
