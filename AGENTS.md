@@ -1,6 +1,6 @@
 # AGENTS.md — Steel Front 项目记忆与 AI 交接文档
 
-> **体量约定（2026-09-12 加入，请遵守）** —— 本文件每次会话被**完整注入**，是稀缺资源：
+> **体量约定（请遵守）** —— 本文件每次会话被**完整注入**，是稀缺资源：
 > 它曾膨胀到 200KB，三分之二是重复段落、被推翻后没删的旧结论（见教训 1、2）。
 > **只写仍然生效的约束**（铁律 / 未结案 / 教训 / 验收红线）：被推翻的**直接删掉**，不留"错误 + 更正"两段；
 > 已结案的只留一行结论；**进度与时间线一律写进 `docs/PROGRESS.md`**。
@@ -34,17 +34,17 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 | 文件 | 行数（2026-09-26 实测） | 职责 |
 |---|---|---|
-| `engine/renderer.rs` | 14402 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
-| `engine/game.rs` | 10504 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
-| `main.rs` | 4282 | GameApp + winit 事件循环 + 输入/光标捕获 + 枪模姿态 |
-| `audio.rs` | 2750 | 合成音效与音乐（`audio_out.rs` 是 waveOut 输出层） |
-| `ui.rs` | 2661 | HUD / 菜单 / 设置 / 键位表 |
+| `engine/renderer.rs` | 15628 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
+| `engine/game.rs` | 10505 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
+| `main.rs` | 4465 | GameApp + winit 事件循环 + 输入/光标捕获 + 枪模姿态 |
+| `audio.rs` | 2919 | 合成音效与音乐（`audio_out.rs` 是 waveOut 输出层） |
+| `ui.rs` | 2833 | HUD / 菜单 / 设置 / 键位表 |
 | `engine/city.rs` | 2357 | 程序化城市生成（40+ 条几何/契约测试） |
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
-| `net.rs` | 2041 | UDP 联机（协议魔数 'S'） |
+| `net.rs` | 2406 | UDP 联机（协议魔数 'S'） |
 | `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**（2026-09-14 由 2.26 MB 裁到 166 KB）。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`：**它红 = 有人加了没有字模的字**，而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统 `NotoSansSC-VF.ttf` 顶替：会改掉字形，红 `cjk_glyph_generates`）；**注释里的字同样算**。定位用 `python tools/find_codepoint.py <HEX> <file>` |
-| `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1559 / 1188 / 1124 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
-| `llm_cmd.rs` | 630 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
+| `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1561 / 1188 / 1290 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
+| `llm_cmd.rs` | 712 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
 其余：`config.rs`（`$HOME/.steel_front.cfg`，原子写 + 容错加载，测试不写盘）、
 `engine/objective.rs`（据点/胜负）、`engine/ai_command.rs`、`engine/ray_tracer.rs`（PT）、
@@ -515,9 +515,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\input_probe.ps1
 # 输入归还校验（解除 ClipCursor + 复核，给 OK/FAIL）；心跳看门狗（**常驻**，别临时 arm，见教训 19）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
-# 性能尺子（压力模式跑 N 秒，读 logs/perf_*.log 出统计）
+# 性能尺子（跑 N 秒，读 logs/perf_*.log 出统计；退出码 0=可用 / 1=没数据 / 2=没稳态窗口）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
-# 交替 A/B 驱动器（教训 24 的实现：逐对交替 + 配对差中位数 + 互换对照 + A/A 底噪）
+# 交替 A/B 驱动器（逐对交替 + 顺序轮转 + 配对差中位数 + A/A 底噪；退出码 2 = 批次不全，别当 n≥5 证据）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ab_pair.ps1 -Pairs 5
 # 画面差分（第一道筛子）：同机位 A/B 的差异像素占比 + **差异包围盒**
 # —— 没有包围盒，几百个差异像素既可能是"引擎坏了"也可能是"HUD 上的 FPS 数字变了"
@@ -626,7 +626,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 5. **取证图必须带 provenance**（文件名 + 哪个 commit 的 exe + 相机高度）。
 6. **别用"看着像什么"代替验证**，也别用没验证过的输入（hFOV、距离、函数归属）。
 7. **改源码一律用编辑器工具，不要过 PowerShell 字符串**；`.ps1` 行尾必须 ASCII（见铁律 G）。
-8. **`Get-Content` 数行数不准**（差 400 行）—— 行号以 `read` 工具为准；**怀疑配置没生效时先用能正确解码的工具复核，再动手「修」**。
+8. **`Get-Content` 数行数不准** —— 行号以 `read` 工具为准；**怀疑配置没生效时先用能正确解码的工具复核，再动手「修」**。
 9. **先看日志再看图**（"键没生效"曾来自只瞄 HUD 小字，而日志里早有记录）。
 10. **脚本 kill 的"拆机噪声"不是崩溃**：与在飞帧竞争会刷一叠 `device has been lost`。
 11. **`.log` 常是空文件**，游戏日志看 **`.log.err`**。
@@ -652,7 +652,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 32. **"整类地改"只能否证、不能定位**（工具与半径判据见教训 17）。
 33. **🔴 论及资产是否"合理"前先走完证据链**：名字 → `glb_probe.py` 尺寸 → 生成器规格表（连错三轮都是每轮只补一个证据源）。
 34. **🔴 参数语义要读注释，别靠"同一套网格"外推**；另一面：**观感改善只能证明"改动有效果"，不能证明"数值变对了"**。
-35. **同一份代码跑两次的差异**：口径、A/A 工具与噪声底见教训 43（旧门槛来自错的 fps 口径）。
+35. **同一份代码跑两次的差异**：见教训 43（含量底噪的工具与口径）。
 36. **🔴 「工具跑不起来」本身就是一条要修的缺陷**（验证层曾因 mesh.spv 被拒而灰屏、被写成"已知限制"后再没人开过 ⇒ 那期间的渲染改动都没兜底）。**⇒ 任何"工具用不了"都要当场问根因，修好后的第一个动作就是重跑它。**
 37. **🔴 截图是「崩溃前的最后一帧」**："改动毫无效果"之前先 grep `has been lost` / `panicked`（2026-09-15 查弹孔时依次否掉了实例/矩阵/颜色/尺寸/遮挡，而两张 A/B 图都是设备 lost 后不再更新的死画面）。
 38. **🔴 时间步相关判据不要拿"刚出生的物体"去比**：`y <= ground + 0.05` 对脚底出手的手榴弹在 ≥108fps 时恒真 ⇒ 原地引爆。**⇒ 任何 `spawn → 第一帧就判落地/越界/自碰`，先问"dt 缩小 10 倍还成立吗"，并让测试跑多个帧率档。**
