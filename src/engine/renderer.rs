@@ -5873,39 +5873,46 @@ impl Renderer {
                 terrain_height_at(x, z)
             });
         // 按**摆放类型**统计（RV3D_PROP_STATS=1 时打一行）：道具是最大单项（≈38% 帧时间），
-        // 但此前只有"总共多少三角形"，不知道是哪几类资产贡献的。顶点数就是本仓的帧率，
-        // 所以先回答"三角形花在谁身上"，再决定是改资产还是改剔除。
+        // 但此前只有"总共多少三角形"，不知道是哪几类资产贡献的。**顶点数才是本仓的帧率**
+        // （无正常线槽位 ⇒ 每帧提交的顶点跨度就是成本），所以两类数一起给，并按**顶点**排序。
         if std::env::var("RV3D_PROP_STATS").is_ok() {
-            let mut per_type: Vec<(String, u32, u64)> = Vec::new();
+            let mut per_type: Vec<(String, u32, u64, u64)> = Vec::new();
             for p in placements {
                 let Some(mesh) = set.get(p.mesh) else { continue };
                 let tris = (mesh.indices.len() / 3) as u64;
+                let verts = mesh.verts.len() as u64;
                 match per_type.iter_mut().find(|t| t.0 == mesh.name) {
                     Some(t) => {
                         t.1 += 1;
                         t.2 += tris;
+                        t.3 += verts;
                     }
-                    None => per_type.push((mesh.name.clone(), 1, tris)),
+                    None => per_type.push((mesh.name.clone(), 1, tris, verts)),
                 }
             }
-            per_type.sort_by(|a, b| b.2.cmp(&a.2));
+            per_type.sort_by(|a, b| b.3.cmp(&a.3));
+            let total_v: u64 = per_type.iter().map(|t| t.3).sum();
             let total: u64 = per_type.iter().map(|t| t.2).sum();
             let top: Vec<String> = per_type
                 .iter()
                 .take(8)
                 .map(|t| {
-                    let pct = if total > 0 {
-                        100.0 * t.2 as f64 / total as f64
+                    let pct = if total_v > 0 {
+                        100.0 * t.3 as f64 / total_v as f64
                     } else {
                         0.0
                     };
-                    format!("{} x{} = {} tri ({:.0}%)", t.0, t.1, t.2, pct)
+                    format!(
+                        "{} x{} = {} tri / {} v ({:.0}% v)",
+                        t.0, t.1, t.2, t.3, pct
+                    )
                 })
                 .collect();
             log::info!(
-                "proptypes: 摆放 {} 处 / 场景三角形合计 {}；前 8 类：{}",
+                "proptypes: 摆放 {} 处 / 场景三角形合计 {} / 顶点合计 {}；按顶点前 8 类：{}",
                 placements.len(),
                 total,
+                total_v,
                 top.join(" / ")
             );
         }
