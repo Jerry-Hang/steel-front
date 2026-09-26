@@ -9933,3 +9933,42 @@ glTF 2.0 只允许 `VEC3`/`VEC4` ⇒ 改为明说读不了；红测
 比"越界"更值得逐处排查，因为它连越界检查都不会触发。
 
 验证：`cargo test --release` **612 passed / 0 failed**；`cargo build --release` **0 警告**。
+
+### 21.60 SVD-12 第一人称实机取证（结掉 §21.54 的"截图待补"）+ 顺手删掉一个"名字的第二真源"
+
+**GPU 窗口**：用户视频结束，`nvidia-smi` 回到 **263 MiB / 0%**（此前 4345 MiB 一直在闸门之上）。
+
+**(a) 两个渲染改动的实机验证（同一轮冒烟，验证层开着）**：
+`RV3D_VALIDATION=1 DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1` 跑 `run_smoke_pm.ps1`：
+`VUID=0 panics=0 fps=119.0`、**KILL REGISTERED**、`RESULT: ALL-OK`。
+日志里 `RV3D_VALIDATION=1 且验证层可用，已启用` + `Inserted device layer "VK_LAYER_KHRONOS_validation"`
+⇒ **§21.59 改的那一行（`create_debug_utils_messenger` 的 `map_err?`）真的被执行到了**，
+而 §21.58 的 `wait_idle_checked` 也覆盖了"换枪/道具上传/Drop"这几条路径（无 `device_wait_idle 失败` 告警）。
+
+**(b) SVD-12 第一人称截图**（`cap_safe.ps1 -Tag svd12_fp -Keys 55,123`，AUTOSTART 自动进 Playing）：
+- 引擎日志：`gun-glb: svd12 ← assets/guns/svd12.glb 顶点=10100 索引=10122
+  跨度=(0.06,0.19,1.00) align=IDENTITY luma_max=0.413 albedo_boost=1.00`
+  ⇒ **手上那把确实是 svd12**（不是 AK-12M；AK 那条是 `luma_max=0.077 albedo_boost=3.12`）；
+- 引擎侧 F12 回读 `screenshots/steel_front_1790419321.png`（2560×1600，2206856 B）+ cap_safe 的
+  `svd12_fp_b.png`；`VUID=0 panics=0 lost=0`；
+- 观感（引擎内，非 Blender 预览）：木质护木/枪托呈深红棕、机匣灰白、**瞄具坐在机匣顶面**
+  （`clean_svd_shot.py` 按实测 z=0.2456 就位），比例修长、与 SVD 家族一致；
+  `luma_max=0.413 ⇒ albedo_boost=1.00`（不需要提亮）——这正是"预览图对颜色不可信、必须引擎内判"的理由。
+- ⚠️ **取证现场的一个小插曲**：缩略图里 HUD 那行被我读成「SVD-12M 支架」，而 `src/` 里
+  **根本没有**「支架」这个字符串。按教训 29（先看清是什么，再读代码找它）放大原图 ⇒ 是
+  「SVD-12M **支点**」。**没有 bug，是我看错了**；但顺着 `name_zh` 查下去就碰到了 (c)。
+
+**(c) 同一把枪的名字存了两份，其中一份已经漂了 4 把（`bd7f4ea`）**：
+`weapon_data.rs::WeaponSpec.name_zh`（HUD/武器系统实际用它）与
+`guns/*.rs::GunMesh.display_name`（35 个构造函数各写一遍）。按 `guns/mod.rs` 的 key→builder 映射
+逐把比对：**31 把相同、4 把漂移**（`aa12` AA12/AA-12 风暴；`mk23` Mk23 Mod 0 海豹/Mk23 海豹；
+`rope12` 绳结 12.7mm/绳结 12.7mm 重机枪；`saiga12` 圆木 Saiga-12/Saiga-12 圆木）。
+而全仓 `\.display_name` **零次读取**（该字段自 2026-08-18 加入后再没被碰过）。
+⇒ 它虽带 `#[allow(dead_code)] // 元数据：命令窗口/调试日志用` 的"诚实预留"注释，
+但**没人读 + 与真源矛盾**的副本不是预留而是负债（谁改名都会先看到两个不同的值）。
+删除面 = 字段声明 + 35 处初始化 + `main.rs` 的 `"EMPTY"` 占位（39 行）；
+**判据是编译器**（还有一处读取就编译不过）：612 passed / 0 警告。
+**刻意留下 `length`**（同样未读，但它是唯一数据、没有第二份来源 —— 两者区别就在"有没有第二个真源"）。
+
+⇒ 教训：**"预留字段"要定期问一句"它现在还是唯一的那份数据吗"**；
+一旦它与真源出现分歧，"预留"就开始主动误导人。

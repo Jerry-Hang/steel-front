@@ -593,7 +593,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，必须连 parse 分支一起看。**
 4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`。
 5. **`FLOOR_H` 常量分叉**：6 模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6。
-6. ✅ **`svd_63` 已入库为 `svd12`**（2026-09-26 `c20e154`）：`clean_svd_shot.py` 清产品图 → prep → `assets/guns/svd12.glb`；判据 = 真机切枪 VUID=0 + `gun-glb: svd12 ← assets/guns/svd12.glb`。⚠️ 实机截图待补。
+6. ✅ **`svd_63` 已入库为 `svd12`**（2026-09-26 `c20e154`）：`clean_svd_shot.py` 清产品图 → prep → `assets/guns/svd12.glb`；判据 = 真机切枪 VUID=0 + `gun-glb: svd12 ← …/svd12.glb` + **第一人称实机截图**（§21.60）。
 7. **D12 士兵近距观感**：`soldier.glb` 实例化绘制；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画（`docs/HANDOFF-soldier.md`）。
 8. **D4 墙缝天空亮条**：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
 9. **mesh 着色器过不了严格 `spirv-val`**：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
