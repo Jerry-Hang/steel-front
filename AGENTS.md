@@ -120,9 +120,12 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
   参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
-  🔴 阴影图**默认隔帧重画**（`RV3D_SHADOW_EVERY`，默认 2，`=1` 回到逐帧）：每帧会动的只有 NPC
-  箱子（太阳/道具/地形都静止）⇒ 只让影子旧一帧。**实测 +25% 平均帧率**（4 轮/臂交替，
-  126.68 vs 101.39，两臂极差 ≤0.6%）—— 早先写的「+58%」是量错 fps 口径，已撤回（见教训 43）。
+  🔴 阴影是**两张图**（2026-09-26，实测 +23.5%）：`shadow_image`(binding 5) 只装静态投射者
+  （地形/地面场/marker/道具）、每 `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；
+  `shadow_dyn_image`(binding 10) 只装 NPC/士兵、每 `RV3D_SHADOW_EVERY` 帧（默认 2）重画；
+  片元各采一次取 `max()`；`RV3D_NO_SHADOW_SPLIT=1` = 单图旧路径（A/B 对照）。
+  🔴 两张图**必须在 init 时先转 `SHADER_READ_ONLY_OPTIMAL`**（否则未被渲染的那张被采样 =
+  `VUID-vkCmdDraw-None-08114`），且**主 descriptor pool 的 SAMPLED_IMAGE 计数要同步 +1**。
   排阴影问题先用 **`RV3D_DEBUG_SHADOW=1`**（R=frag_depth/G=阴影图深度均值），别再静态推矩阵。
 
 **顶点格式与着色**
