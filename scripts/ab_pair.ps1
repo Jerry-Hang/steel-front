@@ -36,7 +36,13 @@ param(
     [string]$ExeA = "logs\ab\old.exe",
     [string]$ExeB = "logs\ab\new.exe",
     [string]$LabelA = "A",
-    [string]$LabelB = "B"
+    [string]$LabelB = "B",
+    # Engine env switches per arm, in perf_run.ps1 -Extra syntax ("K=V,K2=V2").
+    # For a COST MAP both arms use the same exe and only -ExtraB differs; the arm that
+    # removes work must be measurably faster -- if it is not, the whole batch is void
+    # (repo lesson 45: a batch whose control arm does not move is measuring drift).
+    [string]$ExtraA = "",
+    [string]$ExtraB = ""
 )
 $ErrorActionPreference = "Continue"
 $repo = "D:\Rust\steel-front"
@@ -47,9 +53,9 @@ foreach ($p in @($pathA, $pathB)) {
     if (-not (Test-Path $p)) { Write-Host "ab_pair: missing $p"; exit 1 }
 }
 
-function Run-Arm([string]$exe, [string]$label, [int]$secs) {
+function Run-Arm([string]$exe, [string]$label, [int]$secs, [string]$extra) {
     Copy-Item -Force $exe $target
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo "scripts\perf_run.ps1") -Secs $secs 2>&1
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo "scripts\perf_run.ps1") -Secs $secs -Extra $extra 2>&1
     $line = ($out | Select-String -Pattern 'fps\s+mean' | Select-Object -First 1)
     if (-not $line) {
         Write-Host ("ab_pair: {0} produced no fps line; tail:" -f $label)
@@ -68,11 +74,12 @@ function Median($vals) {
     return ($s[$n / 2 - 1] + $s[$n / 2]) / 2
 }
 
-Write-Host ("ab_pair: {0} pairs, {1}s per run; A={2} ({3})  B={4} ({5})" -f $Pairs, $Secs, $LabelA, $ExeA, $LabelB, $ExeB)
+Write-Host ("ab_pair: {0} pairs, {1}s per run; A={2} ({3}){6}  B={4} ({5}){7}" -f $Pairs, $Secs, $LabelA, $ExeA,
+    $LabelB, $ExeB, $(if ($ExtraA -ne "") { " [$ExtraA]" } else { "" }), $(if ($ExtraB -ne "") { " [$ExtraB]" } else { "" }))
 $deltas = @(); $as = @(); $bs = @()
 for ($i = 1; $i -le $Pairs; $i++) {
-    $a = Run-Arm $pathA $LabelA $Secs
-    $b = Run-Arm $pathB $LabelB $Secs
+    $a = Run-Arm $pathA $LabelA $Secs $ExtraA
+    $b = Run-Arm $pathB $LabelB $Secs $ExtraB
     if ($null -eq $a -or $null -eq $b) { Write-Host "ab_pair: pair $i incomplete, skipping"; continue }
     $as += $a; $bs += $b
     $d = $b - $a
