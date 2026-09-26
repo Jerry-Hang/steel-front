@@ -9421,3 +9421,68 @@ AGENTS 里那句"全仓 109 处，绝大多数是有注释的'预留接口'，�
    与'同名的东西到处都是'"——**我自己又踩了一遍**。
    ⚠️ 附带教训：自动回装还会**重排** `#[derive(...)]` 与文档注释的相对顺序（语义不变但 diff 变脏）
    ⇒ 凡是"整文件重写式"的批处理，最后都要看一遍 `git diff` 再决定留不留（本轮最终就全还原了）。
+
+### 21.48 换切口：**审计"审计工具本身"** —— 一天里在 4 个工具中各抓到一处（含密钥闸门）
+
+GPU 被用户的 3 个并行任务占着（`GPU-BUSY: 4324MiB > 3200MiB`），于是把"该查 bug 的查 bug"
+换到不需要 GPU 的那一层：**先问"这些闸门/审计工具自己能不能失败"**。四个工具、四处，全部当天修完。
+
+**(a) `tools/prod_panic_sweep.py`：默认只扫 16/47 个文件**（`499f27c`）
+
+`DEFAULT` 是写死的 16 条路径，而 `src/` 下（含 `src/bin/`）共 **47 个 .rs**：
+`net.rs`（**解析外部 UDP 报文的那一个**）、`renderer.rs`、`weapons.rs`、`geom.rs`、`simd.rs`、
+`src/bin/rdv.rs` …**从来没被扫过**，而账上写的是"生产路径 panic 全仓普查（只有 4 处）"。
+改成 `rglob("*.rs")` 并打印 `scanned N .rs files`。
+**补扫结果：真实是 8 处（不是 4 处），逐个核过全部有守卫**（`is_empty()` 的 else 分支 /
+`llm_ok` 的 len 断言 / `reposition.is_none()` 的 else / `net_mode` 的 `is_some()` 等）。
+
+**(b) `tools/history_secret_audit.py`：扫描面为 0 时会报"干净"（红测已做）**（`bba34a4`）
+
+在非仓库目录里跑 ⇒ `git rev-list` 失败被 `git()` 吞成空字符串 ⇒ 0 个 blob ⇒
+打印**「扫描 0 个 blob / 结论：历史里没有明文凭据命中」并 exit 0**。
+凭据审计尤其不能有这个形状 ⇒ 现在 **0 = 真扫过无命中 / 1 = 有命中 / 2 = 根本没扫成**，
+并打印该检查什么。实测：非仓库目录 exit 2；仓库内 exit 1（**这是预期的** —— 2026-08-21 那次
+key 入库推送的命中仍在，见铁律 G）。
+
+**(c) `tools/audit_vk_resources.py`（本仓自己写的）：无条件 `return 0`**（`bba34a4`）
+⇒ 同样补上 `total == 0 ⇒ exit 2`。**并且它上线两小时后抓的第一件事，是我当天新写的代码**：
+
+```
+no release call found : 5
+  renderer.rs  hud_glass_pool / menu_blur_image / menu_blur_memory / menu_blur_sampler / menu_blur_view
+```
+
+⇒ 磨砂玻璃那五样资源**建了没拆**（`9926b81` 修：在 HUD 那段释放逻辑后按依赖顺序补上，
+每样拆完立刻置 `null`）。修后同一工具复跑 **`scanned 135 / no release call found: 0`**。
+**教训：新加 Vulkan 资源时，"建"和"拆"是同一步 —— 清单式释放最容易漏的永远是最后加的那一项。**
+
+**(d) `tools/commit_guard.py`（密钥闸门）：非 ASCII 路径根本没扫内容 + 读不到时 fail-open**（`4255240`）
+
+红测：造一个中文文件名的暂存文件（内容是伪造的 `sk-abcdefghij…`）：
+
+```
+$ git diff --cached --name-only
+"docs/\344\270\264\346\227\266-\345\257\206\351\222\245\346\216\242\351\222\210.md"
+$ python tools/commit_guard.py --staged     # 修前
+commit-guard[staged]: 拒绝 —— 1 处问题（已检查 0 个文件）
+  [NOT-ALLOWED] "docs//344/270/264/…md": 未在白名单内
+```
+
+⇒ **拦是拦住了，但理由与路径都是错的，而且「已检查 0 个文件」—— 内容从来没扫**。
+一旦白名单按模式放宽（`docs/*.md` 本来就该放行），这就变成"没扫却算通过"。
+修法：`staged_files()` / `tracked_set()` 一律 **`-z`（NUL 分隔，拿原始路径）**。修后同一场景：
+
+```
+commit-guard[staged]: 拒绝 —— 2 处问题（已检查 1 个文件）
+  [SECRET:openai/deepseek-sk] docs/临时-密钥探针.md: sk-abcdefg…(len=35)
+  [SECRET:assigned]           docs/临时-密钥探针.md: api_key = …(len=47)
+```
+
+第二处：`staged_blob` 读失败时 `return b""` 是 **fail-open** —— 空 blob ⇒ 一条命中也扫不出来，
+而调用方照样 `checked += 1` ⇒ 打印「OK — N 个文件通过白名单与密钥扫描」，**其中一个从没被扫过**。
+现在失败返回 `None` ⇒ 记一条 `UNREADABLE` 并**拒绝**（安全闸门的默认方向只能是拒绝）。
+
+**这一条的反面教材是我自己**：今天上午刚写过"`cjk_cover_check.py` 打印 OK 而真闸门是红的"，
+下午就在**同一个形状**上连踩两处（0 扫描面 = 通过；输入读不到 = 通过）。
+⇒ **形状记住了不等于会检查**：凡"扫描/枚举+结论文"的工具，都要问一句
+**"它扫到 0 个的时候会说什么"**。
