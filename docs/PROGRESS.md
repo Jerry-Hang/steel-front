@@ -9486,3 +9486,21 @@ commit-guard[staged]: 拒绝 —— 2 处问题（已检查 1 个文件）
 下午就在**同一个形状**上连踩两处（0 扫描面 = 通过；输入读不到 = 通过）。
 ⇒ **形状记住了不等于会检查**：凡"扫描/枚举+结论文"的工具，都要问一句
 **"它扫到 0 个的时候会说什么"**。
+
+**(e) 同一形状的第三、四处，在**我自己的证据链**上**（`b83d901`）
+
+`scripts/survive_pm.py` 与 `scripts/run_resize_probe.ps1` 的判据都是"VUID/panic/device_lost 全 0
+且该发生的事都发生了"——而**空日志让这些条件全部成立**：
+
+| 驱动器 | 空日志下的旧行为 | 修法 |
+|---|---|---|
+| `survive_pm.py` | `len(cleared) == len(spawned)` 退化成 `0 == 0` ⇒ **RESULT: ALL-OK** | 跑之前：日志缺失/0 字节 ⇒ `LOG-MISSING/EMPTY` + exit 2；算分前：日志里没有引擎自己的 `run started` ⇒ `RUN-NOT-STARTED` + exit 2 |
+| `run_resize_probe.ps1` | VUID/lost/panic 全 0 ⇒ **ALL-OK** | 补 `$ranOk = ($resize -ge 1)`（它**已经**为 `-PT` 装了同款判据 `PT-RESIDENT>=1`，只是没给"重建"装） |
+
+两条的"假通过"路径原来只被"找不到窗口"间接挡住（`NO-WINDOW` exit 2），
+而**窗口还在、日志却没写出来**（启动即崩 / 重定向写错文件）正好漏过去。
+实测（红→绿）：不存在的日志与 0 字节日志，修后都是 **exit 2** 并在 stderr 明说"这不是通过，是没跑成"。
+
+⚠️ 这一笔顺手又踩了一次 .ps1 行尾铁律：新加的注释行**以中文结尾** ⇒ 守门测试
+`powershell_scripts_never_end_a_line_with_a_non_ascii_byte` **立刻红**（PS 5.1 按 ANSI/GBK 读
+无 BOM 的 .ps1，行尾中文会吃掉换行本身）。**这条测试今天第二次救场** —— 铁律 G 不是纸面规矩。
