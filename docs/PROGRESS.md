@@ -5604,6 +5604,8 @@ RTX 5060 在 2917MHz 下应是 **10–20 G tris/s** 量级 —— **慢了约两
 
 **注意**：文档里那条"`RV3D_NO_GROUND_TEX=1` (0)"是**旧机位的结论**，
 按本轮纪律**不可信、必须同机位重测**（而且它禁的是纹理，不是那片几何）。
+⚠️ **2026-09-26 补**：这个开关**今天已经不存在**（`src/` 里没有 `RV3D_NO_GROUND_TEX`）⇒
+连"重测"都做不到，得先把它加回来；详见本项目里 2026-09-12 那张 A/B 表下的更正。
 
 ### 下一步判据（同机位，一次可判）
 
@@ -6463,6 +6465,13 @@ npc_cam: 目标 #16 在 (85.2, -136.0)，选用方向 offset=(0, -4) yaw=180
 | 相机 130m 俯视城市 | **183.6 fps** / 42.3 W | — |
 | `RV3D_NO_GROUND_TEX=1` | 104.9 vs 基线 105.3 | **零成本**，排除地面细节层 |
 | **道具近桶先画**（改 `record_command_buffer`） | **97.9 vs 基线 105.3** | **负结果，已回退** |
+
+> **更正（2026-09-26 审计）**：上面那行的 `RV3D_NO_GROUND_TEX` **今天在 `src/` 里已经不存在**
+> （全仓 grep 无此字符串），所以这条**无法复现**。今天能做的近似实验只有一个方向：
+> `RV3D_PROC_TEX=0` 把程序化地面纹理换成 `assets/textures/test.png` ——
+> **它换的是纹理来源，不是关掉采样**（binding 9 的细节层 `ground_detail_image` 仍无条件创建），
+> 所以两者**不是同一个实验**。要重测"地面纹理/细节层值多少帧率"，得先加一个真正的开关
+> （按铁律 B：`light_data.flags.w >= 0.5` 那条门控加一路 env 即可，改完立刻补冒烟 VUID=0）。
 
 - 🔴 **自我更正**：上一条我写"130m 高空全部道具可见只要 184fps ⇒ 开销是贴脸 overdraw"——
   **这个推断有漏洞**。130m 高度、60° FOV 的锥体只覆盖城市中央约 ±75m，而全城是 ±175m，
@@ -10023,3 +10032,31 @@ MEDIAN PAIRED DELTA = -7.68 fps (-5.51%)   sign test 0/4   aa2 臂内极差 24.1
   （自身累计 2662 s CPU）、`Steam++`/`WeChatAppEx`/`ProcessLasso` 各数百秒；
 - `system load=100%` 与 `4%` 的读数出现在同一批里 ⇒ **WMI 的 `LoadPercentage` 不能当判据**，
   要么用 `Get-Process msedge` 的 CPU 秒增量，要么直接看 A/A 底噪。
+
+### 21.62 环境开关审计：56 个写进文档、78 个代码在读；一个**文档里的开关已经不存在**
+
+**方法**：`src/**/*.rs` 里所有 `RV3D_*` 字符串字面量（跳过注释行）↔ `AGENTS.md` + `PROGRESS.md`
+里的全部出现，双向求差（脚本 `logs/env_audit.py`，几秒钟跑完）。
+结果：**两边都有 52 个 / 只在代码里 26 个 / 只在文档里 4 个**。
+
+**只在文档里的 4 个**：3 个是**我的正则抓到的散文简写**
+（`RV3D_SHADOW_SKIP_{STATIC,DYNAMIC,GROUND,TERRAIN}` 的花括号展开、`RV3D_TERRAIN_*` 通配），
+**不是缺陷**；第 4 个 `RV3D_NO_GROUND_TEX` **是真问题**：
+它是 2026-09-12 那张 A/B 表里的一行（"104.9 vs 基线 105.3，零成本，排除地面细节层"），
+而**今天 `src/` 里已经没有这个开关** ⇒ **那条结论无法复现**。
+今天最接近的只有 `RV3D_PROC_TEX=0`，但它**换的是纹理来源（test.png）而不是关掉采样**
+（binding 9 的 `ground_detail_image` 仍无条件创建）⇒ **不是同一个实验**。
+⇒ 已在两处原条目下补更正（按铁律 F：结案/更正必须写在原处，否则下一个人照旧条目去找）。
+
+**只在代码里的 26 个**（调试/基准开关，文档里没有）—— 列出来是为了让它们**可被发现**：
+`RV3D_AI_CPUS` `RV3D_AI_WORKERS` `RV3D_AUTOFIRE` `RV3D_BENCH_PITCH` `RV3D_BENCH_YAW`
+`RV3D_CPU_PIN` `RV3D_DIAG_NPC_FRONT` `RV3D_EXPLOSION_SIM` `RV3D_FACE_ENEMY` `RV3D_FPS`
+`RV3D_GUN_SWAY` `RV3D_LLM_INTERVAL` `RV3D_NET_NAME` `RV3D_NET_RDV` `RV3D_PROC_MAP`
+`RV3D_PT_BENCH` `RV3D_PT_VIEW` `RV3D_SCENE_WORKERS` `RV3D_SHADOW_SKIP_DYNAMIC`
+`RV3D_SHADOW_SKIP_GROUND` `RV3D_SHADOW_SKIP_STATIC` `RV3D_SHADOW_SKIP_TERRAIN`
+`RV3D_SOLDIER_STATS` `RV3D_SWAP_SIDES` `RV3D_SWITCH_WEAPON` `RV3D_SWITCH_WEAPON_AFTER`
+（其中 `RV3D_AI_CPUS`/`RV3D_CPU_PIN`/`RV3D_AI_WORKERS`/`RV3D_SCENE_WORKERS` 属**线程红线**区域：
+只读、不改，写在这里只是标注它们存在。）
+
+⇒ **不把它们塞进 AGENTS**（注入预算只有 ~1 KB 余量，而这 26 个是低频调试旋钮）；
+把它们记在这里 + 脚本可重跑，比塞进 AGENTS 更合算。
