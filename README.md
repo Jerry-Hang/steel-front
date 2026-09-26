@@ -26,43 +26,46 @@
 
 ---
 
-## 当前进度（截至 2026-09-01）
+## 当前进度（截至 2026-09-26）
 
-### 已完成
+> 🔴 **状态与约束的唯一真源**：工程铁律 / 未结案清单 / 教训 = `AGENTS.md`，逐轮进度与交接 =
+> `docs/PROGRESS.md`。本节只放"给外部读者看的一屏状态" —— **要改就改那两个文件**，
+> 别在这里长出第二份会过期的清单（README 曾经就是这么落后 25 天的）。
+
+**已完成（要点）**
 
 **引擎与渲染**
-- 纯 Rust + Vulkan 1.3，无 Unity/Unreal 黑盒；`ash 0.38` 全量 1.3 头，实例与设备均 1.3。
-- 网格着色器主路径（MESH + FRAGMENT），GPU 侧逐实例视锥测试与顶点生成，一个 workgroup 对应一个实例槽位，视锥测试在着色器内完成。
-- 地形三级 LOD 网格（257² / 129² / 65²）+ 帧间形态过渡（消除切换跳变）；65536 实例地面场；MSAA 4×；各向异性过滤与完整 mip 链。
-- 阴影贴图（方向光 + 点光立方体）、烘焙高度场 AO、静态光照烘焙、程序化皮肤纹理。
-- HUD 覆盖层自包含（独立管线与顶点缓冲，不侵入主渲染）；Windows GDI 中文字形光栅化。
+- 纯 Rust + Vulkan 1.3，**10 个依赖**；网格着色器主路径（MESH + FRAGMENT）+ 传统管线兼容回退。
+- 地形三级 LOD（257² / 129² / 65²）+ 帧间形态过渡；65536 实例地面场；MSAA 4×；完整 mip 链。
+- 阴影：**静态/动态两张图分离**（静态每 30 帧、动态每 2 帧重画）；烘焙 AO 与静态天光；程序化贴图。
+- HUD 覆盖层自包含（独立管线与顶点缓冲，不侵入主渲染）；磨砂玻璃菜单；Windows GDI 中文字形光栅化。
 
 **玩法与系统**
-- 35 把现代枪械，V3.0 数据表驱动（初速、下坠、散射、距离衰减、部位伤害倍率、开火模式、ADS 参数）。
-- 大战场：默认红 128 vs 蓝 127+玩家；波次模式与压力模式可切换。
-- AI：三三制编制（营→连→排→班）、火-机动交替、连级目标横向铺开、掩体点选择、LLM 战时指挥官（llama.cpp，零依赖）。
-- 联机：服务器权威 + 快照插值 + 断线重连 + 协议版本握手 + NAT 中继。
-- 关卡数据化：TOML 地图描述（出生点/目标/障碍/规则），F5 热重载，多关卡索引。
+- 35 把现代枪械，V3.0 数据表驱动（初速、下坠、散射、距离衰减、部位伤害、开火模式、ADS）。
+- 大战场：红 128 vs 蓝 127+玩家；波次 / 压力 / 据点三种规则；可破坏障碍与爆炸冲击波。
+- AI：三三制编制（营→连→排→班，**连名单逐人闭合**）、火-机动交替、掩体选择；
+  **HTTP LLM 战术指挥官**（红蓝各一上下文窗口互搏，无/失效时回退启发式）。
+- 联机：服务器权威 + 快照插值 + 断线重连 + 协议握手 + 中继注册/解析（NAT 打洞第一步）。
+- 关卡数据化：TOML 地图（出生点/目标/障碍/规则）、F5 热重载、6 张索引地图。
 
 **外部资产管线**
-- OBJ 与 glTF GLB 零依赖解析器（多 mesh 合并、componentType 感知 accessor、COLOR_0 顶点色、材质基色）。
+- OBJ 与 glTF GLB 零依赖解析器（多 mesh 合并、componentType 感知、交错 `byteStride`、COLOR_0 顶点色）。
 - Blender 无头控制闭环：导入 → 材质/AO 烘焙 → 节点净化 → 导出 GLB → 渲染 PNG → 看图自检。
-- AK-12 GLB 模型实装，第一/三人称与开火全链路验证。
+- 程序化城市（板楼/抹灰楼模块）+ 道具焊接（顶点数即帧率，见铁律 D）。
 
-### 优化方面待完成
+**验收现状（2026-09-26 实测）**
+- `cargo test --release` **636 passed / 0 failed**；`cargo build --release` **0 警告**
+  （🔴 判据只认 `cargo build --release` —— `cargo test` 会因 `cfg(test)` 漏报）。
+- 冒烟（`scripts/run_smoke_pm.ps1`）判据 = `vuid==0 and panics==0 and killed>=1`；
+  整局验证层跑法见 `AGENTS.md` 铁律 B。
+- 会战军情不变式（判据工具 `tools/battle_tally_check.py`）：`阵亡 + Σ连强度 == 编制` 与
+  `本营战果 == 敌方阵亡` —— 逐行成立才算过。
 
-- **路径追踪启动崩溃**：`0xC0000005`，当前 `pt_enable=false` 停用；依赖版本与驱动状态两项假设已被证据排除。
-- **地面场剔除**：网格路径将 65536 个地面 workgroup 静态全量上传、不做 CPU 剔除，是当前帧率天花板。
-- **道具剔除粒度**：分桶边长为固定值，未按街区密度自适应；远景道具尚无 LOD 分级。
-- **存量编译警告**：约 50 条待专项清理（本项目不使用 `#[allow(dead_code)]` 掩盖警告）。
+**主要待办**（完整清单与 lead 见 `AGENTS.md` 的未结案清单）
 
-### 改进方面待完成
-
-- **碰撞盒与视觉体尺寸校准**：为保证"GLB 不小于碰撞盒"（避免无形墙）而取的等比缩放，代价是玩家可能站进楼体。
-- **PBR 贴图采样**：金属度/环境反射；GLB 嵌入贴图（`images` / `bufferViews.byteStride`）解析。
-- **建筑变体覆盖**：部分变体尚未被选取，街道重复度仍可降低。
-- **第三方枪械素材清理**：一张狙击枪源文件含两把重叠枪身，需人工删重后接入。
-- **音频**：仅单声道输出；缺乏遮挡/距离衰减的声学模型。
+- **PT 与光栅同屏叠加**（当前是整屏替换）；**士兵骨骼动画**（`docs/HANDOFF-soldier.md`）。
+- **联网双进程真机验证**（NAT 打洞 / 回滚 / 快照增量压缩 / 会话恢复）。
+- **GPU 空闲窗口的 n≥5 对轮转成本地图**（尺子三件套，见 `AGENTS.md` 教训 45）。
 
 ---
 
@@ -232,7 +235,8 @@ GAME_DESIGN.txt        # 玩法设计文档（唯一设计依据）
 | 文档 | 用途 | 什么时候该读 |
 |---|---|---|
 | [GAME_DESIGN.txt](./GAME_DESIGN.txt) | **玩法设计的唯一依据** | 任何涉及数值、机制、关卡的判断之前 |
-| [AGENTS.md](./AGENTS.md) | AI 交接日志与迭代留痕（本项目唯一的正式交接载体） | 接手开发前必读；每次迭代结束必须追加 |
+| [AGENTS.md](./AGENTS.md) | **工程约束的唯一载体**：铁律 A–H、未结案清单、46 条教训、验收红线 | 接手开发前必读；每次改动前对照 |
+| [docs/PROGRESS.md](./docs/PROGRESS.md) | **逐轮进度与交接记录**（每轮一节，含红测→修法→判据） | 想知道"上一轮做了什么/下一步做什么"时 |
 | [大战场枪械设计V3.0](./docs/大战场枪械设计V3.0.txt) | 35 把枪的完整数据表与设计依据 | 改武器数值或新增枪械时 |
 | [LICENSE](./LICENSE) | 许可与商业授权条款 | 再分发或商用前 |
 | [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md) | 第三方依赖与素材的逐项来源核实、再分发清单、两项已知风险 | **再分发本仓库或其构建产物之前必读** |
@@ -292,15 +296,24 @@ $env:RV3D_AUTOSTART = '1'
 ### 验证与自检
 
 ```powershell
-# 单元测试（纯逻辑，不触碰 GPU）
+# 单元测试（纯逻辑，不触碰 GPU；0 警告的判据要看 cargo build --release）
 cargo test --release
+cargo build --release
 
-# 冒烟测试：启动、采图、检查 VUID 与 device-lost 后自动结束进程
-powershell -ExecutionPolicy Bypass -File scripts\run_gameplay_smoke.ps1
+# 冒烟（**用这个**：PostMessage 注入，不抢前台、不抓光标）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
+#   判据 = vuid==0 and panics==0 and killed>=1（无 fps 门槛）
+
+# 会战 + 军情不变式（阵亡 + Σ连强度 == 编制、本营战果 == 敌方阵亡）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
+python tools\battle_tally_check.py logs\llmbattle.log.err   # 退出码 0=干净 1=有命中 2=没跑成
 
 # 资产体检：判断一批 GLB 能否被本引擎直接加载
 python tools\glb_survey.py "路径\到\模型目录"
 ```
+
+⚠ `scripts\run_gameplay_smoke.ps1` **是废弃的历史记录**（SendInput 注入在本机结构上不工作），
+别照它跑；中文点阵字模的改动要过 `python tools\cjk_cover_check.py`。
 
 ### 接入外部 3D 资产
 
@@ -309,16 +322,18 @@ python tools\glb_survey.py "路径\到\模型目录"
 & "blender.exe" --background --factory-startup --python tools\blender\prep_guns.py -- --in "D:\我的模型"
 python tools\install_guns.py
 
-# 世界道具：重新生成 assets/props/ 并出顶点色预览图自查
-& "blender.exe" --background --python tools\blender\gen_props.py
-& "blender.exe" --background --python tools\blender\gen_props.py -- --preview screenshots/kit.png
+# 世界道具：改生成器 → 重新生成 → 焊接（顶点数就是帧率，见 AGENTS.md 铁律 D）
+& "blender.exe" --background --python tools\blender\build_city_kit.py -- <out_dir>
+& "blender.exe" --background --python tools\blender\weld_props.py -- <in.glb> <out.glb>
+& "blender.exe" --background --python tools\blender\preview_glb.py -- <in.glb> <out_prefix>
 ```
 
-### 发布打包
+### 打包
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\publish.ps1
-```
+没有独立的打包脚本：`cargo build --release` 之后，把 `target\release\steel-front.exe` 连同
+`assets\`（`*.spv` / `props\` / `guns\` / `soldier\` / `maps\`）一起拷走即可 ——
+**运行时按进程 cwd 找 `assets/`，所以必须从仓库根（或与 assets 同级）启动**。
+玩家入口是 `SteelFront.bat`（它设 `RV3D_PRESENT_MODE=mailbox` 并 touch 构建脚本）。
 
 产物在 `release_dist/`，含启动器、游戏本体与 `联机主机.bat` / `联机加入.bat`。
 ⚠ 打包时务必确认 `assets/guns/` 子目录与 `assets/rt/` 一并随包发布——缺失不会报错，只会静默回退到程序化枪模。
@@ -383,43 +398,59 @@ individually.
 
 ---
 
-## Current Progress (as of 2026-09-01)
+## Current Progress (as of 2026-09-26)
+
+> 🔴 **Single source of truth**: engineering rules / open items / lessons live in `AGENTS.md`;
+> per-round progress and handover live in `docs/PROGRESS.md`. This section is a one-screen
+> status for outside readers only — **edit those two files**, do not grow a second list here
+> (this README used to be 25 days behind for exactly that reason).
 
 ### Completed
 
 **Engine and rendering**
-- Pure Rust + Vulkan 1.3, no Unity/Unreal black box; `ash 0.38` full 1.3 headers, instance and device both at 1.3.
-- Mesh-shader main path (MESH + FRAGMENT): culling and vertex generation on the GPU, one workgroup per instance slot, frustum test performed inside the shader.
-- Three-level terrain LOD meshes (257² / 129² / 65²) with inter-frame morphing (removes switch popping); 65536-instance ground field; MSAA 4×; anisotropic filtering with full mip chains.
-- Shadow mapping (directional + point-light cubemap), baked height-field AO, static light baking, procedural skin textures.
-- Self-contained HUD overlay (own pipeline and vertex buffer, does not intrude on the main render pass); Windows GDI CJK glyph rasterisation.
+- Pure Rust + Vulkan 1.3, **10 dependencies**; mesh-shader main path (MESH + FRAGMENT) with the
+  classic vertex pipeline kept as a fallback.
+- Three-level terrain LOD (257² / 129² / 65²) with inter-frame morphing; 65536-instance ground
+  field; MSAA 4×; full mip chains.
+- Shadows: **split static/dynamic shadow maps** (static every 30 frames, dynamic every 2);
+  baked AO and static sky light; procedural textures.
+- Self-contained HUD overlay (own pipeline and vertex buffer); frosted-glass menus;
+  Windows GDI CJK glyph rasterisation.
 
 **Gameplay and systems**
-- 35 modern firearms driven by the V3.0 data table (muzzle velocity, bullet drop, spread, distance falloff, per-body-part damage multipliers, fire modes, ADS parameters).
-- Large battlefield: red 128 vs blue 127 + player by default; wave mode and pressure mode switchable.
-- AI: 3×3 hierarchy (battalion → company → platoon → section), fire-and-maneuver, company-level lateral objective spread, cover-point selection, optional LLM battlefield commander (llama.cpp, zero-dependency).
-- Multiplayer: server-authoritative + snapshot interpolation + reconnect + protocol version handshake + NAT rendezvous.
-- Data-driven levels: TOML map descriptions (spawns / objectives / obstacles / rules), F5 hot reload, multi-level index.
+- 35 modern firearms driven by the V3.0 data table (muzzle velocity, drop, spread, distance
+  falloff, per-body-part damage, fire modes, ADS).
+- Large battlefield: red 128 vs blue 127 + player; wave / pressure / capture-point rules;
+  destructible obstacles and explosion shockwaves.
+- AI: 3×3 hierarchy (battalion → company → platoon → section, with **every soldier carried by a
+  company**), fire-and-maneuver, cover selection, and an **HTTP LLM battlefield commander**
+  (one context window per side, heuristic fallback when unavailable).
+- Multiplayer: server-authoritative + snapshot interpolation + reconnect + protocol handshake
+  + relay registration/resolution (the first step of NAT hole punching).
+- Data-driven levels: TOML maps (spawns / objectives / obstacles / rules), F5 hot reload,
+  6 indexed maps.
 
 **External asset pipeline**
-- Zero-dependency OBJ and glTF GLB parsers (multi-mesh merge, componentType-aware accessors, COLOR_0 vertex colour, material base colour).
-- Headless Blender control loop: import → material/AO bake → node cleanup → GLB export → render to PNG → visual self-check.
-- AK-12 GLB model shipped, verified end-to-end across first person, third person and firing.
+- Zero-dependency OBJ and glTF GLB parsers (multi-mesh merge, componentType-aware accessors,
+  interleaved `byteStride`, COLOR_0 vertex colour).
+- Headless Blender loop: import → material/AO bake → node cleanup → GLB export → PNG preview.
+- Procedural city (panel-block and plastered-block kits) + welded props (vertex count *is* the
+  frame rate — see rule D in `AGENTS.md`).
 
-### Optimisation Backlog
+**Verification status (measured 2026-09-26)**
+- `cargo test --release` **636 passed / 0 failed**; `cargo build --release` **0 warnings**
+  (🔴 the warning gate only accepts `cargo build --release`; `cargo test` under-reports).
+- Smoke (`scripts/run_smoke_pm.ps1`) criterion = `vuid==0 and panics==0 and killed>=1`.
+- Battle-intel invariants (tool `tools/battle_tally_check.py`): `own_deaths + Σstrengths == roster`
+  and `camp score == the other camp's deaths` — checked line by line.
 
-- **Path-tracing startup crash**: `0xC0000005`, currently disabled via `pt_enable=false`; both the dependency-version and driver-state hypotheses have been disproved by evidence.
-- **Ground field culling**: the mesh path statically uploads all 65536 ground workgroups with no CPU culling — the remaining frame-rate ceiling.
-- **Prop culling granularity**: the bin edge length is a fixed constant, not adaptive to block density; no LOD tiering for distant props yet.
-- **Standing compiler warnings**: ~50 to be cleared in a dedicated pass. This project does not use `#[allow(dead_code)]` to hide warnings.
+### Backlog (full list with leads: the open-items list in `AGENTS.md`)
 
-### Improvement Backlog
-
-- **Collision vs visual size calibration**: the uniform scale chosen so that "GLB ≥ collision box" (avoiding invisible walls) costs the possibility of the player standing inside a building's visual volume.
-- **PBR texture sampling**: metallic / environment reflection; parsing of embedded GLB textures (`images`, `bufferViews.byteStride`).
-- **Building variant coverage**: some variants are never selected; street repetition can still be reduced.
-- **Third-party weapon asset cleanup**: one sniper source file contains two overlapping rifle bodies and needs manual de-duplication before it can ship.
-- **Audio**: mono output only; no occlusion or distance-attenuation acoustic model.
+- **Path-traced view composited over the raster frame** (currently a full-screen replacement);
+  **soldier skeletal animation** (`docs/HANDOFF-soldier.md`).
+- **Two-process multiplayer verification** (NAT hole punching / rollback / snapshot deltas /
+  session resume).
+- **Round-robin cost map with n≥5 pairs per arm** in a quiet GPU window (rule 45 in `AGENTS.md`).
 
 ---
 
@@ -647,15 +678,24 @@ $env:RV3D_AUTOSTART = '1'
 ### Verification and Self-Checks
 
 ```powershell
-# Unit tests (pure logic, never touches the GPU)
+# Unit tests (pure logic, never touches the GPU). The 0-warning gate is `cargo build --release`.
 cargo test --release
+cargo build --release
 
-# Smoke test: launch, capture, check for VUID and device-lost, then force-kill
-powershell -ExecutionPolicy Bypass -File scripts\run_gameplay_smoke.ps1
+# Smoke (**use this one**: PostMessage injection, never steals focus or grabs the cursor)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
+#   criterion = vuid==0 and panics==0 and killed>=1  (no fps threshold)
+
+# Battle + intel invariants (own_deaths + Sum(strengths) == roster, camp score == enemy deaths)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
+python tools\battle_tally_check.py logs\llmbattle.log.err   # exit 0=clean 1=findings 2=did not run
 
 # Asset triage: can a batch of GLB files be loaded by this engine as-is?
 python tools\glb_survey.py "path\to\models"
 ```
+
+⚠ `scripts\run_gameplay_smoke.ps1` is a **deprecated historical record** (SendInput injection cannot
+work on this machine); do not follow it. CJK glyph changes must pass `python tools\cjk_cover_check.py`.
 
 ### Importing External 3D Assets
 
@@ -665,18 +705,19 @@ python tools\glb_survey.py "path\to\models"
 & "blender.exe" --background --factory-startup --python tools\blender\prep_guns.py -- --in "D:\my\models"
 python tools\install_guns.py
 
-# World props: regenerate assets/props/ and emit a vertex-colour preview render for self-check
-& "blender.exe" --background --python tools\blender\gen_props.py
-& "blender.exe" --background --python tools\blender\gen_props.py -- --preview screenshots/kit.png
+# World props: change the generator → regenerate → weld (vertex count IS the frame rate, rule D)
+& "blender.exe" --background --python tools\blender\build_city_kit.py -- <out_dir>
+& "blender.exe" --background --python tools\blender\weld_props.py -- <in.glb> <out.glb>
+& "blender.exe" --background --python tools\blender\preview_glb.py -- <in.glb> <out_prefix>
 ```
 
 ### Packaging a Release
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\publish.ps1
-```
-
-Output lands in `release_dist/` with the launcher, the game binary and the multiplayer host/join batch files.
+There is no separate packaging script: after `cargo build --release`, copy
+`target\release\steel-front.exe` together with `assets\` (`*.spv`, `props\`, `guns\`, `soldier\`,
+`maps\`). The game resolves `assets/` relative to the process cwd, so it must be started from the
+repository root (or a directory where `assets/` sits beside it). The player entry point is
+`SteelFront.bat`.
 ⚠ When packaging, confirm `assets/guns/` and `assets/rt/` are shipped along with it — their absence raises no error; the game silently falls back to procedural weapon models.
 
 ---
