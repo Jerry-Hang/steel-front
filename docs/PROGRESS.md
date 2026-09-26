@@ -8438,6 +8438,53 @@ cull-diag: 97818 us/s calls=49980 recomputed=… npcs=255 bodies=1240
 先记成"噪声/外部因素候选"（窗口是隐藏的、机器可能在跑别的东西）。它不影响上面的中位数结论
 （中位数对单帧尖刺不敏感），但**任何以后想用 `max fps`/`p99` 做判据的人必须先解释它**。
 
+### 21.28 联机审计：断线的人**永远站在场上** + 插值器**从来没接线**
+
+**(a) 幽灵玩家的三个环节，一个都没接**
+
+1. **服务端**：`step_net_server` 里 `timeout_clients()` 的返回值**只用来打一行日志**，
+   `self.net_players` 一条不删 ⇒ 那个玩家永远以最后一帧的姿态留在**每帧广播的快照**里。
+2. **`Leave` 报文**：协议里定义了（`reason: 0=正常退出/1=超时/2=被踢`），但服务端 `_ => {}`
+   不收、客户端 `_ => {}` 不处理 —— 两端都没实现。
+3. **客户端**：`entities` 实体表**从不清理**；而 `main.rs` 对 `id ≥ NET_PLAYER_BASE` 的实体是
+   **无条件进画面**的（注释写着"两者无条件进"）。
+
+⇒ 在多人局里，任何断线/退出的玩家会**在所有人屏幕上永久站着**（而且不再移动）。
+这条不靠新功能就能修，属"接线"而不是"设计"。
+
+**(b) 修法（四点，都小）**
+
+- 服务端广播名单以**服务器注册表为唯一真源**：新增 `Server::player_ids()`，
+  `net_players.retain(|p| 注册表里有它)` —— Leave / 超时 / 将来任何移除路径都自动覆盖。
+- 收到 `Leave` 走 `Server::unregister(addr)`（新增）立刻注销，不用等 5 秒超时。
+- 客户端 `handle_message` 处理 `Leave`（删实体 + 删插值缓冲），并**返回离场 id** 供上层记日志。
+- 客户端兜底：`prune_stale_entities(now, ENTITY_STALE_AFTER = 2.0s)` —— 快照里连续 2 秒没出现
+  的实体一律删（覆盖"Leave 丢包 / 服务端压根没发"）。2.0s < `CLIENT_TIMEOUT`(3s)：
+  **先让幽灵消失，再判断线重连**。
+- 客户端正常退出（`CloseRequested`）时 `send_leave()`，省掉服务端那 5 秒窗口。
+
+**(c) 插值器为什么一直等于没接线**
+
+`RemotePlayer::delay` **从来没被赋过值**（恒 0）⇒ `state_at(now)` 里 `now > curr_time`
+⇒ alpha 被 clamp 到 1 ⇒ 插值退化成"直接用最新收到的那帧" ⇒ 远端玩家/实体按快照频率
+**一顿一顿地跳**（包抖动时更明显）。修法：客户端按快照间隔估 `interp_delay`
+（首个样本直接取间隔、之后 0.9/0.1 滑动平均、上限 0.25s），写进每个实体的插值器；
+`main.rs` 的远端渲染与枪口焰都改用 `entity_state_at(now)`。语义 = **渲染点取 `now - 一个间隔`**，
+落在 `[prev_time, curr_time]` 内 ⇒ 平滑，代价 0~1 个快照间隔的显示延迟（业界标准做法）。
+
+**(d) 新增 4 条判据（共 582 passed / 0 failed）**
+
+- `snapshot_interval_drives_interpolation_delay`：延迟由间隔驱动；渲染位置**严格落在两个快照之间**
+  （既不是 prev 也不是 curr = 真在插值）；没有第二个快照时退回"最新状态"（与旧行为一致）。
+- `leave_removes_the_remote_player_entity`：`Leave` 只删离场者，不误伤别人与 NPC。
+- `stale_entities_are_pruned_but_fresh_ones_survive`：过期的清掉、每帧刷新的留下。
+- `net_departed_player_stops_being_broadcast`：**真链路**（UDP 回环握手 → 客户端发 Leave →
+  服务端注销注册表 + 停播 + 之后几 tick 的快照里也不再有它）。
+
+**(e) 仍然没做（诚实）**：NAT 打洞（`rdv_register/rdv_resolve` 只有注册与查询）、
+服务端重放/回滚（无 client-side prediction，"超 3m 硬对齐"是唯一的位置修正）、
+**双进程真机验证**（本机双开 2560x1600 太重；这一轮全部证据来自单测 + 回环链路）。
+
 
 
 

@@ -2851,6 +2851,7 @@ impl Game {
     fn step_net_server(&mut self, camera: &Camera) {
         let mut inputs: Vec<(std::net::SocketAddr, NetInput)> = Vec::new();
         let mut joined: Vec<u32> = Vec::new();
+        let mut left: Vec<u32> = Vec::new();
         {
             let Some(server) = self.net_server.as_mut() else {
                 return;
@@ -2864,6 +2865,13 @@ impl Game {
                         }
                     }
                     NetworkMessage::Input { input, .. } => inputs.push((from, input)),
+                    // 🔴 2026-09-26：显式离场通知（客户端正常退出会发 Leave）。以前这条落在
+                    // `_ => {}`：既不注销注册表、也不清 `net_players` ⇒ 快照里继续带着他。
+                    NetworkMessage::Leave { .. } => {
+                        if let Some(id) = server.unregister(from) {
+                            left.push(id);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2871,6 +2879,24 @@ impl Game {
             let removed = server.timeout_clients(SERVER_TIMEOUT);
             if !removed.is_empty() {
                 log::warn!("net: server 移除超时客户端: {:?}", removed);
+                left.extend(removed);
+            }
+        }
+        // 🔴 停止广播"注册表里已经没有的人"：以前 `timeout_clients` 的返回值**只用来打一行
+        // 日志**，`self.net_players` 一条都不删 ⇒ 离场者永远以最后一帧的姿态留在每帧广播的
+        // 快照里，而客户端对远端玩家实体是**无条件进画面**的 ⇒ 所有人看到一个站着不动的幽灵。
+        // 判据取**服务器注册表**（唯一真源）：Leave / 超时 / 将来任何移除路径都自动覆盖。
+        if let Some(server) = self.net_server.as_ref() {
+            let alive = server.player_ids();
+            if self.net_players.iter().any(|p| !alive.contains(&p.id)) {
+                let before = self.net_players.len();
+                self.net_players.retain(|p| alive.contains(&p.id));
+                log::info!(
+                    "net: 停止广播 {} 个已离场远端玩家（注册表剩 {} 个，离场 {:?}）",
+                    before - self.net_players.len(),
+                    alive.len(),
+                    left
+                );
             }
         }
         // Join 注册（借用解耦后执行）：服务器权威远端玩家实体（主机=红营视角，远端=蓝营）
@@ -2999,9 +3025,18 @@ impl Game {
             time: client.now() as f32,
             input,
         });
-        // 收快照：进入实体插值表（位置平滑；渲染消费为后续 TODO，先保证数据缓冲正确）
+        // 收快照：进入实体插值表（位置平滑）
         while let Ok(Some((msg, _))) = client.recv() {
-            client.handle_message(msg);
+            if let Some(left_id) = client.handle_message(msg) {
+                log::info!("net: 远端玩家 #{left_id} 离场（Leave），已从实体表移除");
+            }
+        }
+        // 🔴 兜底清理：快照里连续 ENTITY_STALE_AFTER 秒没出现的实体一律删掉 —— `Leave` 可能
+        // 丢包、服务端超时路径也可能不通知，而客户端对远端玩家实体是**无条件进画面**的
+        // ⇒ 不清理就会留下"永久站在场上"的幽灵（2026-09-26 修）。
+        let stale = client.prune_stale_entities(client.now(), crate::net::ENTITY_STALE_AFTER);
+        if stale > 0 {
+            log::info!("net: 清理 {} 个已离场远端实体（{}s 未出现在快照里）", stale, crate::net::ENTITY_STALE_AFTER);
         }
         // 自身上行权威校正（2026-08-25）：服务器端本远端实体位置与本地超 3m → 硬对齐（防漂移）
         if let Some(own) = client.player_id() {
@@ -3728,6 +3763,23 @@ impl Game {
         self.sprint_held = on;
     }
 
+    /// 正常退出时通知服务端"我走了"（best-effort，UDP 同步发送，退出前能发出去）。
+    ///
+    /// 🔴 2026-09-26 加：不发的话服务端要等 `SERVER_TIMEOUT`(5s) 才摘掉我们，而这 5 秒里
+    /// **每个客户端都还看得见我们站在原地**（远端玩家实体是**无条件进画面**的）。
+    /// 非客户端模式（单机/服务端）下这是个空操作。
+    pub fn send_leave(&mut self) {
+        let Some(client) = self.net_client.as_ref() else {
+            return;
+        };
+        let Some(id) = client.player_id() else {
+            return;
+        };
+        if let Err(e) = client.send(&NetworkMessage::Leave { player_id: id, reason: 0 }) {
+            log::warn!("net: 离场通知发送失败（服务端会在 {SERVER_TIMEOUT:?} 后按超时清理）：{e}");
+        }
+    }
+
     /// 此刻是否真的在冲刺：按住 Shift **且** 正在前进、非后退、站立、未开镜、在地面。
     /// HUD/视场角可以据此变化；速度倍率在 `move_first_person` 里消费。
     pub fn sprinting(&self) -> bool {
@@ -3841,8 +3893,7 @@ impl Game {
     }
 
     /// 循环切换武器（滚轮向上 = 下一把，向下 = 上一把；末尾回到 0 / 开头回到末尾）
-    pub fn cycle_weapon(&mut self, delta: i32) {
-        let prev = self.weapons.active_index();
+    pub fn cycle_weapon(&mut self, delta: i32) {        let prev = self.weapons.active_index();
         if delta > 0 {
             self.weapons.switch_next();
         } else if delta < 0 {
@@ -6811,7 +6862,9 @@ fn resolve_circle_obstacles(obs: &[MapObstacle], x: f32, z: f32, r: f32) -> (f32
 }
 
 /// 网络远端玩家快照 id 基址（与 NPC id 空间隔离：100000+）
-const NET_PLAYER_BASE: u32 = 100_000;
+/// 快照里远端玩家的 id 区（`crate::net::NET_PLAYER_BASE` 的同源定义；改一处必须改两处
+/// —— 现在两处是同一个常量，见下面的 `use`）。
+const NET_PLAYER_BASE: u32 = crate::net::NET_PLAYER_BASE;
 
 /// 圆（半径 r）对静态障碍 AABB 的水平推开：返回 (x, z)（AABB 为 (cx±half_w, cz±half_d)）
 fn resolve_circle_static(
@@ -8591,10 +8644,79 @@ mod tests {
         );
     }
 
+    /// 🔴 判据：远端玩家离场后，服务端**必须停止在快照里广播它**。
+    ///
+    /// 真机代价（2026-09-26 复查）：服务端超时/离场只摘掉自己的注册表项，
+    /// `net_players` 一条不删 ⇒ 快照里继续带着它（最后一帧的姿态），
+    /// 而客户端对远端玩家实体是**无条件进画面**的 ⇒ 每个人看到一个站着不动的幽灵。
+    ///
+    /// 走的是真链路：回环握手 → 服务端注册远端玩家 → 客户端发 `Leave`（正常退出的路径）
+    /// → 服务端注销注册表并停止广播。
+    #[test]
+    fn net_departed_player_stops_being_broadcast() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut server_game = Game::new();
+        let mut client_game = Game::new();
+        server_game.set_net_server(server);
+        client_game.set_net_client(Client::connect(addr).unwrap());
+        client_game.set_movement(true, false, false, false);
+        let camera = Camera::new();
+        for _ in 0..20 {
+            client_game.update(1.0 / 60.0, &camera);
+            server_game.update(1.0 / 60.0, &camera);
+        }
+        // UDP 环回投递有毫秒级延迟：轮询到注册发生为止（同 `net_server_client_loopback_closed_loop`）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        while server_game.net_players.is_empty() && std::time::Instant::now() < deadline {
+            client_game.update(1.0 / 60.0, &camera);
+            server_game.update(1.0 / 60.0, &camera);
+        }
+        assert!(
+            !server_game.net_players.is_empty(),
+            "握手后服务端应注册远端玩家（否则这条测试没意义）"
+        );
+        let id = server_game.net_players[0].id;
+        assert_eq!(
+            server_game.net_server.as_ref().unwrap().player_id_of(
+                client_game.net_client.as_ref().unwrap().local_addr().unwrap()
+            ),
+            Some(id),
+            "注册表里应有该客户端的注册"
+        );
+        // 客户端正常退出：发 Leave，然后服务端再走一 tick
+        client_game
+            .net_client
+            .as_ref()
+            .unwrap()
+            .send(&NetworkMessage::Leave { player_id: id, reason: 0 })
+            .unwrap();
+        server_game.update(1.0 / 60.0, &camera);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        while server_game.net_server.as_ref().unwrap().client_count() > 0
+            && std::time::Instant::now() < deadline
+        {
+            server_game.update(1.0 / 60.0, &camera);
+        }
+        assert_eq!(
+            server_game.net_server.as_ref().unwrap().client_count(),
+            0,
+            "收到 Leave 必须注销注册表"
+        );
+        assert!(
+            server_game.net_players.is_empty(),
+            "离场玩家必须从广播名单里删掉（否则每帧快照继续带着一个幽灵）"
+        );
+        // 再走几 tick：后面的快照里也不该再有它的实体
+        for _ in 0..5 {
+            server_game.update(1.0 / 60.0, &camera);
+        }
+        assert!(server_game.net_players.is_empty());
+    }
+
     /// 目标状态回环：服务端广播 ObjectiveState → 客户端解析据点归属/进度
     #[test]
-    fn net_objective_state_loopback_broadcast_consumed() {
-        let server = Server::bind("127.0.0.1:0").unwrap();
+    fn net_objective_state_loopback_broadcast_consumed() {        let server = Server::bind("127.0.0.1:0").unwrap();
         let addr = server.local_addr().unwrap();
         let mut server_game = Game::new();
         let mut client_game = Game::new();

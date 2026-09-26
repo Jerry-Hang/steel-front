@@ -83,6 +83,20 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 /// 服务端超时判定：客户端超过该时长无数据报则移除注册（断线重连为后续 TODO）
 pub const SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 快照里**远端玩家**的 id 区：服务端发 `NET_PLAYER_BASE + player_id`，客户端据此把这些
+/// 实体与本地 NPC（小 id）区分开。定义在协议层是因为**服务端构包时就要用**，
+/// 而客户端解析 `Leave` 也要用它把 `player_id` 换算成实体 id。
+pub const NET_PLAYER_BASE: u32 = 100_000;
+
+/// 远端实体"多久没出现在快照里就当它已经离场"（秒）。
+///
+/// 🔴 2026-09-26 修：客户端以前**从不清理**实体表 —— 服务端超时把客户端从注册表里摘掉后
+/// （`timeout_clients`），客户端这边的实体仍以最后一帧的姿态留着，而 `main.rs` 对
+/// id ≥ `NET_PLAYER_BASE` 的实体是**无条件进画面**的 ⇒ 断线的人会**永久站在场上**。
+/// 取 2.0s：小于 `CLIENT_TIMEOUT`(3s)，即"判定断线之前先让幽灵消失"，同时容忍偶发丢包
+/// （快照每帧都发，连续 2 秒收不到说明真的没了）。
+pub const ENTITY_STALE_AFTER: f64 = 2.0;
+
 /// 消息类型标签（协议第 2 字节）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -726,6 +740,9 @@ pub struct RemoteEntity {
     pub team: u8,
     /// 开火指示（最近 0.2s 内开火；渲染枪口焰联动）
     pub firing: bool,
+    /// 最近一次**出现在快照里**的接收时刻（`Client::now()` 时间基准）。
+    /// 用于清理离场实体（见 `ENTITY_STALE_AFTER` 与 `Client::prune_stale_entities`）。
+    pub last_seen: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -787,9 +804,25 @@ impl Server {
         self.clients.get(&addr).copied()
     }
 
+    /// 注销一个客户端（收到 `Leave` 时用），返回它原来的玩家 id。
+    ///
+    /// 与 `timeout_clients` 的区别：那条按"多久没说话"批量清理，这条是**收到明确离场通知**
+    /// 时立刻清（客户端正常退出会发 `Leave`；服务端收到后要停止广播它的实体，
+    /// 否则每个客户端都会看到一个站着的幽灵 —— 见 game.rs::step_net_server）。
+    pub fn unregister(&mut self, addr: SocketAddr) -> Option<u32> {
+        self.last_seen.remove(&addr);
+        self.clients.remove(&addr)
+    }
+
     /// 已注册客户端数量
     pub fn client_count(&self) -> usize {
         self.clients.len()
+    }
+
+    /// 当前已注册的全部玩家 id —— **广播名单的唯一真源**（超时/离场/任何移除路径都经这里
+    /// 反映出来，见 `game.rs::step_net_server` 用它停掉已离场玩家的广播）。
+    pub fn player_ids(&self) -> Vec<u32> {
+        self.clients.values().copied().collect()
     }
 
     /// 移除超过 `timeout` 未收到任何数据报的客户端，返回被移除的玩家 id。
@@ -903,6 +936,16 @@ pub struct Client {
     objective_seq: u32,
     /// 是否收到过目标状态
     has_objective: bool,
+    /// 上一帧快照的**接收时刻**（本地时钟，秒）：用于估快照间隔
+    last_snapshot_at: f64,
+    /// 远端实体插值延迟（秒）≈ 快照间隔：渲染时刻取 `now - delay`。
+    ///
+    /// 🔴 2026-09-26 加：以前 `RemotePlayer::delay` **从来没被赋过值**（恒 0），
+    /// 于是 `state_at(now)` 里 `now > curr_time` ⇒ alpha 被 clamp 到 1 ⇒ 插值退化成
+    /// "直接用最新快照" ⇒ 远端玩家/实体按快照频率**一顿一顿地跳**（包抖动时更明显）。
+    /// 取 delay = 一个快照间隔，渲染点就落回 [prev_time, curr_time] 区间内 ⇒ 平滑，
+    /// 代价是 0~1 个快照间隔的显示延迟（标准做法，见 `interp_delay`）。
+    interp_delay: f64,
 }
 
 impl Client {
@@ -936,7 +979,14 @@ impl Client {
             objective_rule: String::new(),
             objective_seq: 0,
             has_objective: false,
+            last_snapshot_at: 0.0,
+            interp_delay: 0.0,
         })
+    }
+
+    /// 远端实体插值延迟（秒）：渲染时刻 = `本地时刻 - 它`。0 = 还没有两个快照可量。
+    pub fn interp_delay(&self) -> f64 {
+        self.interp_delay
     }
 
     /// 本地地址
@@ -971,15 +1021,18 @@ impl Client {
     }
 
     /// 处理一条消息：Join 确认记录自身 id；Position 更新远端玩家插值缓冲；
-    /// Snapshot 进入实体插值表并记录本机权威状态；任何消息都刷新 last_rx（断线判定）
-    pub fn handle_message(&mut self, msg: NetworkMessage) {
+    /// Snapshot 进入实体插值表并记录本机权威状态；任何消息都刷新 last_rx（断线判定）。
+    ///
+    /// 返回值：处理了 `Leave` 时返回离场玩家的 id（调用方据此打一行日志），其余为 `None`。
+    pub fn handle_message(&mut self, msg: NetworkMessage) -> Option<u32> {
         self.last_rx = Instant::now();
         let t = self.now();
-        match msg {
+        let left = match msg {
             NetworkMessage::Join { player_id, .. } => {
                 if player_id != 0 && self.player_id.is_none() {
                     self.player_id = Some(player_id);
                 }
+                None
             }
             NetworkMessage::Position { player_id, state, .. } => {
                 match self.remote_players.get_mut(&player_id) {
@@ -989,22 +1042,40 @@ impl Client {
                             .insert(player_id, RemotePlayer::new(player_id, state, t));
                     }
                 }
+                None
             }
             NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
                 // 丢弃乱序/重复快照（seq wrapping 差值 ≥ 2^31 视为过期；相等视为重复）
                 if self.has_snapshot {
                     let diff = seq.wrapping_sub(self.snapshot_seq);
                     if diff == 0 || diff >= u32::MAX / 2 {
-                        return;
+                        return None;
                     }
                 }
                 self.has_snapshot = true;
                 self.snapshot_seq = seq;
                 self.snapshot_time = time;
+                // 快照间隔 → 插值延迟（首个样本直接取间隔，之后滑动平均；上限 0.25s 防卡顿后
+                // 拖出一个巨大的延迟）。见 `interp_delay` 字段的文档。
+                if self.last_snapshot_at > 0.0 {
+                    let interval = t - self.last_snapshot_at;
+                    if interval > 0.0 && interval <= 0.25 {
+                        self.interp_delay = if self.interp_delay == 0.0 {
+                            interval
+                        } else {
+                            self.interp_delay * 0.9 + interval * 0.1
+                        };
+                    }
+                }
+                self.last_snapshot_at = t;
                 // 服务端本机玩家：进插值表（渲染用）+ 权威状态缓存（修正用）
                 self.own_state = Some(player);
                 match self.entities.get_mut(&player_id) {
-                    Some(e) => e.state.update(player, t),
+                    Some(e) => {
+                        e.state.update(player, t);
+                        e.state.delay = self.interp_delay;
+                        e.last_seen = t;
+                    }
                     None => {
                         self.entities.insert(
                             player_id,
@@ -1013,6 +1084,7 @@ impl Client {
                                 hp: 100.0,
                                 team: 0, // 服务器玩家默认红营（远端蓝营见 NPC 行）
                                 firing: false,
+                                last_seen: t,
                             },
                         );
                     }
@@ -1023,9 +1095,11 @@ impl Client {
                     match self.entities.get_mut(&npc.id) {
                         Some(e) => {
                             e.state.update(nstate, t);
+                            e.state.delay = self.interp_delay;
                             e.hp = npc.hp;
                             e.team = npc.team;
                             e.firing = npc.firing == 1;
+                            e.last_seen = t;
                         }
                         None => {
                             self.entities.insert(
@@ -1035,27 +1109,57 @@ impl Client {
                                     hp: npc.hp,
                                     team: npc.team,
                                     firing: npc.firing == 1,
+                                    last_seen: t,
                                 },
                             );
                         }
                     }
                 }
+                None
+            }
+            NetworkMessage::Leave { player_id, reason } => {
+                // 🔴 2026-09-26：这条以前落在 `_ => {}` 里 —— 服务端既不发（见 game.rs 的
+                // 超时分支）客户端也不处理。现在两头都接上：把该玩家的实体与插值缓冲一起清掉，
+                // 否则它会以最后一帧的姿态站在场上（客户端对远端玩家实体无条件进画面）。
+                let eid = NET_PLAYER_BASE.wrapping_add(player_id);
+                self.entities.remove(&eid);
+                self.remote_players.remove(&player_id);
+                // 返回值 = "确实处理了一次离场"（调用方据此打一行日志；net.rs 不依赖 log）
+                let _ = reason;
+                return Some(player_id);
             }
             NetworkMessage::ObjectiveState { seq, rule_kind, points, .. } => {
                 // 目标状态（据点归属/进度）：乱序/重复丢弃（与 Snapshot 同策略）
                 if self.has_objective {
                     let diff = seq.wrapping_sub(self.objective_seq);
                     if diff == 0 || diff >= u32::MAX / 2 {
-                        return;
+                        return None;
                     }
                 }
                 self.has_objective = true;
                 self.objective_seq = seq;
                 self.objective_rule = rule_kind;
                 self.objective = points;
+                None
             }
-            _ => {}
-        }
+            _ => None,
+        };
+        left
+    }
+
+    /// 清理"已经不再出现在快照里"的远端实体（离场的玩家、消失的 NPC），返回清理数量。
+    ///
+    /// 🔴 为什么必须有（2026-09-26 修）：服务端超时只摘掉自己的注册表项，而客户端这边
+    /// **从来不清理实体表**；再加上 `main.rs` 对 id ≥ `NET_PLAYER_BASE` 的实体是**无条件
+    /// 进画面**的 ⇒ 断线（或安静退出）的远端玩家会以最后一帧的姿态**永久站在场上**。
+    /// `Leave` 报文能覆盖"服务端主动通知"的情况，这条覆盖"通知丢了/压根没发"的情况。
+    ///
+    /// `max_age` 传 [`ENTITY_STALE_AFTER`]：小于断线判定时间，即先让幽灵消失再判重连。
+    pub fn prune_stale_entities(&mut self, now: f64, max_age: f64) -> usize {
+        let before = self.entities.len();
+        self.entities
+            .retain(|_, e| now - e.last_seen <= max_age);
+        before - self.entities.len()
     }
 
     /// 远端玩家在本地时刻 t 的插值状态
@@ -1414,7 +1518,7 @@ mod tests {
 
         // client：收到确认并记录自身 id
         let (got2, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
-        client.handle_message(got2);
+        let _ = client.handle_message(got2);
         assert_eq!(client.player_id(), Some(1));
 
         // client -> server：Position 状态上报
@@ -1439,7 +1543,7 @@ mod tests {
         assert_eq!(got4, action);
 
         // client：处理 Position 进入插值缓冲
-        client.handle_message(pos);
+        let _ = client.handle_message(pos);
         assert!(client.remote_players().contains_key(&1));
         let t = client.now();
         assert_eq!(client.remote_state_at(1, t), Some(state(1.0, 2.0, 3.0, 0.5)));
@@ -1736,7 +1840,7 @@ mod tests {
         assert_eq!(req, NetworkMessage::Join { player_id: 0, name: "player1".into(), version: SESSION_VERSION });
         server.handle_join(from, "player1".into(), SESSION_VERSION).unwrap();
         let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
-        client.handle_message(got);
+        let _ = client.handle_message(got);
         assert_eq!(client.player_id(), Some(1));
         assert!(client.is_connected());
 
@@ -1769,7 +1873,7 @@ mod tests {
         };
         server.send_to(&snapshot, from2).unwrap();
         let (got2, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
-        client.handle_message(got2);
+        let _ = client.handle_message(got2);
         assert_eq!(client.snapshot_seq(), 1);
         assert_eq!(client.snapshot_time(), 1.0);
         assert_eq!(client.own_state(), Some(state(5.0, 0.0, 5.0, 0.5)));
@@ -1782,7 +1886,7 @@ mod tests {
         assert!(!client.snapshot_timeout());
 
         // 重复快照（同 seq）被丢弃：序号与实体表不变
-        client.handle_message(snapshot);
+        let _ = client.handle_message(snapshot);
         assert_eq!(client.snapshot_seq(), 1);
         assert_eq!(client.entities().len(), 3);
     }
@@ -1794,14 +1898,144 @@ mod tests {
         let mut client = Client::connect(server_addr).unwrap();
         // 缩短超时阈值，避免真实时钟等待，保持测试快速且确定
         client.timeout = Duration::from_millis(10);
-        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into(), version: SESSION_VERSION });
+        let _ = client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into(), version: SESSION_VERSION });
         assert!(client.player_id().is_some());
         std::thread::sleep(Duration::from_millis(30));
         assert!(client.snapshot_timeout(), "超过阈值无数据报应判定断线");
         assert!(!client.is_connected());
         // 任何数据报刷新 last_rx → 恢复连接判定
-        client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into(), version: SESSION_VERSION });
+        let _ = client.handle_message(NetworkMessage::Join { player_id: 1, name: "p".into(), version: SESSION_VERSION });
         assert!(!client.snapshot_timeout());
         assert!(client.is_connected());
+    }
+
+    /// 🔴 判据：**插值延迟必须真的由快照间隔驱动**，且渲染时刻真的落在两个快照之间。
+    ///
+    /// 真机代价（2026-09-26 复查）：`RemotePlayer::delay` 从来没被赋过值（恒 0）
+    /// ⇒ `state_at(now)` 里 `now > curr_time` ⇒ alpha 被 clamp 到 1 ⇒ 插值退化成"用最新快照"
+    /// ⇒ 远端实体按快照频率**一顿一顿地跳**。这条测试同时钉住三件事：
+    /// ① 两个快照之后 `interp_delay > 0`；② 它约等于快照间隔；③ 用 `entity_state_at` 取到的
+    /// 位置**严格落在 prev 与 curr 之间**（既不是 prev 也不是 curr = 真的在插值）。
+    #[test]
+    fn snapshot_interval_drives_interpolation_delay() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        let snap = |seq: u32, x: f32| NetworkMessage::Snapshot {
+            seq,
+            time: seq as f32 * 0.02,
+            player_id: 0,
+            player: state(0.0, 0.0, 0.0, 0.0),
+            npcs: vec![NpcSnapshot {
+                id: 10,
+                pos: [x, 0.0, 0.0],
+                facing: 0.0,
+                hp: 100.0,
+                team: 0,
+                firing: 0,
+            }],
+        };
+        assert_eq!(client.handle_message(snap(1, 0.0)), None);
+        assert_eq!(client.interp_delay(), 0.0, "只有一个快照时量不出间隔");
+        // 第二个快照：间隔 ≈ 20ms（真实 sleep，容忍调度抖动）
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(client.handle_message(snap(2, 10.0)), None);
+        let delay = client.interp_delay();
+        assert!(
+            (0.005..0.25).contains(&delay),
+            "延迟应由快照间隔驱动（≈0.02s），实际 {delay}"
+        );
+        // 渲染时刻 = now - delay 落在 [prev_time, curr_time] 内 ⇒ 位置严格在 0 与 10 之间
+        let st = client.entity_state_at(10, client.now()).expect("实体应在表里");
+        assert!(
+            st.pos[0] > 0.0 && st.pos[0] < 10.0,
+            "渲染位置应落在两个快照之间（真的在插值），实际 {}",
+            st.pos[0]
+        );
+        // 兜底：delay 为 0（还没量出间隔）时退化成"最新状态"，不会 panic 也不会 NaN
+        let mut fresh = Client::connect(server.local_addr().unwrap()).unwrap();
+        assert_eq!(fresh.handle_message(snap(1, 3.0)), None);
+        assert_eq!(
+            fresh.entity_state_at(10, fresh.now()).map(|s| s.pos[0]),
+            Some(3.0),
+            "没有第二个快照时取最新状态（与旧行为一致）"
+        );
+    }
+
+    /// 🔴 判据：`Leave` 必须把该玩家的实体与插值缓冲一起清掉。
+    ///
+    /// 真机代价（2026-09-26 复查）：客户端以前把 `Leave` 丢进 `_ => {}`、实体表又从不清理，
+    /// 而 `main.rs` 对 id ≥ `NET_PLAYER_BASE` 的实体是**无条件进画面**的 ⇒ 断线（或安静退出）
+    /// 的远端玩家会以最后一帧的姿态**永久站在场上**。
+    #[test]
+    fn leave_removes_the_remote_player_entity() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        // 先让快照里出现两个远端玩家（id 5 / 6 ⇒ 实体 id = BASE+5 / BASE+6）与一个 NPC
+        let snap = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 1.0,
+            player_id: 0,
+            player: state(0.0, 0.0, 0.0, 0.0),
+            npcs: vec![
+                NpcSnapshot { id: NET_PLAYER_BASE + 5, pos: [5.0, 0.0, 5.0], facing: 0.0, hp: 100.0, team: 1, firing: 0 },
+                NpcSnapshot { id: NET_PLAYER_BASE + 6, pos: [6.0, 0.0, 6.0], facing: 0.0, hp: 100.0, team: 1, firing: 0 },
+                NpcSnapshot { id: 10, pos: [1.0, 0.0, 1.0], facing: 0.0, hp: 100.0, team: 0, firing: 0 },
+            ],
+        };
+        assert_eq!(client.handle_message(snap), None, "快照不是离场通知");
+        assert_eq!(client.entities().len(), 4, "本机玩家 + 2 远端玩家 + 1 NPC");
+        // 玩家 5 离场
+        let left = client.handle_message(NetworkMessage::Leave { player_id: 5, reason: 0 });
+        assert_eq!(left, Some(5), "处理 Leave 时应把离场者 id 报给调用方");
+        assert!(
+            !client.entities().contains_key(&(NET_PLAYER_BASE + 5)),
+            "离场玩家的实体必须被移除（否则就是站在场上的幽灵）"
+        );
+        assert!(
+            client.entities().contains_key(&(NET_PLAYER_BASE + 6)),
+            "没离场的人不许被误删"
+        );
+        assert!(client.entities().contains_key(&10), "NPC 不受 Leave 影响");
+    }
+
+    /// 🔴 判据：快照里长时间不出现的实体必须被清掉（`Leave` 可能丢包，这是兜底）。
+    /// 同时钉住"**新**实体不会被误清"（`last_seen` 每帧刷新）。
+    #[test]
+    fn stale_entities_are_pruned_but_fresh_ones_survive() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        let snap = |seq: u32| NetworkMessage::Snapshot {
+            seq,
+            time: 1.0,
+            player_id: 0,
+            player: state(0.0, 0.0, 0.0, 0.0),
+            npcs: vec![NpcSnapshot {
+                id: 10,
+                pos: [1.0, 0.0, 1.0],
+                facing: 0.0,
+                hp: 100.0,
+                team: 0,
+                firing: 0,
+            }],
+        };
+        assert_eq!(client.handle_message(snap(1)), None);
+        assert_eq!(client.entities().len(), 2, "服务端本机玩家(id 0) + NPC(10)");
+        // 立刻清理：没有东西过期
+        let now = client.now();
+        assert_eq!(client.prune_stale_entities(now, ENTITY_STALE_AFTER), 0);
+        // 超过陈旧阈值之后再清理：这一帧收到的两个实体都已经"很久没出现"了
+        let later = now + ENTITY_STALE_AFTER + 0.001;
+        assert_eq!(
+            client.prune_stale_entities(later, ENTITY_STALE_AFTER),
+            2,
+            "超过 ENTITY_STALE_AFTER 没出现的实体应被清理"
+        );
+        assert!(client.entities().is_empty());
+        // 新快照（含 NPC）又回来了 ⇒ 重新出现且不被误清
+        assert_eq!(client.handle_message(snap(2)), None);
+        let now2 = client.now();
+        assert_eq!(client.entities().len(), 2, "本机玩家 + NPC");
+        assert_eq!(client.prune_stale_entities(now2, ENTITY_STALE_AFTER), 0);
+        assert_eq!(client.entities().len(), 2);
     }
 }

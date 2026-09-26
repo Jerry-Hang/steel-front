@@ -2464,16 +2464,24 @@ impl GameApp {
                     .entities()
                     .iter()
                     .filter(|(id, e)| **id >= 100_000 || **id == 0 || e.hp > 0.0)
-                    .map(|(_, e)| {
+                    .map(|(id, e)| {
                         // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
                         let tint = if e.hp > 0.0 {
                             if e.team == 1 { [0.08, 0.35, 0.98, 1.0] } else { [0.95, 0.12, 0.08, 1.0] }
                         } else {
                             [0.32, 0.32, 0.32, 1.0]
                         };
+                        // 🔴 2026-09-26：这里以前直接用 `e.state.curr`（最新**收到**的那帧），
+                        // 于是远端实体按快照频率一顿一顿地跳、包抖动时更明显 ——
+                        // `RemotePlayer::delay` 一直是 0，插值器等于没接线。
+                        // 现按 `entity_state_at`（客户端内部用"now - 快照间隔"取值）取平滑位置；
+                        // 取不到时退回 curr（不改变任何极端情况下的行为）。
+                        let st = client
+                            .entity_state_at(*id, client.now())
+                            .unwrap_or(e.state.curr);
                         engine::renderer::NpcVisual {
-                            pos: [e.state.curr.pos[0], e.state.curr.pos[1], e.state.curr.pos[2]],
-                            yaw: e.state.curr.rot,
+                            pos: st.pos,
+                            yaw: st.rot,
                             tint,
                             phase: self.anim_clock,
                             moving: true,
@@ -2582,13 +2590,16 @@ impl GameApp {
                 .collect();
             // 网络远端实体开火 → 同链路枪口焰（你看到对面玩家开枪的火光）
             if let Some(client) = self.game.net_client.as_ref() {
-                for (_, e) in client.entities().iter() {
+                for (id, e) in client.entities().iter() {
                     if e.firing && e.hp > 0.0 {
-                        let (s, c) = e.state.curr.rot.sin_cos();
+                        let st = client
+                            .entity_state_at(*id, client.now())
+                            .unwrap_or(e.state.curr);
+                        let (s, c) = st.rot.sin_cos();
                         firing_npcs.push([
-                            e.state.curr.pos[0] + s * 0.85,
-                            e.state.curr.pos[1] + 0.15,
-                            e.state.curr.pos[2] + c * 0.85,
+                            st.pos[0] + s * 0.85,
+                            st.pos[1] + 0.15,
+                            st.pos[2] + c * 0.85,
                         ]);
                     }
                 }
@@ -3001,6 +3012,10 @@ impl ApplicationHandler for GameApp {
             // 关闭窗口请求
             WindowEvent::CloseRequested => {
                 log::info!("窗口关闭请求，退出程序");
+                // 🔴 2026-09-26：正常退出时给服务端发一条 Leave —— 否则服务端要等
+                // SERVER_TIMEOUT(5s) 才摘掉我们，而在这 5 秒里**每个客户端都还看得见我们
+                // 站在原地**（远端玩家实体无条件进画面）。UDP 是同步发送，进程退出前能发出去。
+                self.game.send_leave();
                 self.running = false;
                 event_loop.exit();
             }
