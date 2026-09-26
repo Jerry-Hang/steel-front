@@ -4730,6 +4730,23 @@ impl Game {
         self.map.obstacles.remove(idx);
     }
 
+    /// 记入本轮阵亡（`round_kills_*` 的**唯一写入口**）。
+    ///
+    /// 🔴 2026-09-26 修：阵亡有**两条路** —— `damage_npc`（子弹/爆炸的主路径，当场把阵亡者移出
+    /// `npcs`）与 `update_stress_respawns` 的兜底扫描（扫「还在数组里的 `hp <= 0`」）。以前只有
+    /// 后一条在计数 ⇒ 主路径一个人都没计：170 秒 128v127 会战实测**自报阵亡 35、实际 68**
+    /// （蓝营 79 vs 123；实际值由连强度反推：128 − 60）。指挥军情的 `kills` 字段直接读这个数，
+    /// 于是司令看到的伤亡只有真相的一半。判据 = `every_death_path_is_counted_in_the_round_tally`。
+    fn tally_round_deaths(&mut self, team: Team, count: u32) {
+        if count == 0 {
+            return;
+        }
+        match team {
+            Team::Red => self.round_kills_red += count,
+            Team::Blue => self.round_kills_blue += count,
+        }
+    }
+
     /// NPC 受伤结算：扣血至 0 → 移除 + 计分 + 任务目标推进；返回是否击杀。
     /// 调用方保证 `idx` 有效；下标移除后不再回移（调用方按逆序遍历或立即退出）。
     fn damage_npc(&mut self, idx: usize, dmg: f32, source: DamageSource) -> bool {
@@ -4742,6 +4759,7 @@ impl Game {
             return false;
         }
         let victim_team = npc.team;
+        self.tally_round_deaths(victim_team, 1);
         self.npcs.remove(idx);
         // 🔴 2026-09-13 修：**只有击杀敌方才算战果**。
         // 原先这三处对**任何**击杀都生效（`score += KILL_SCORE`、`objective.progress(1)`、
@@ -6386,20 +6404,23 @@ impl Game {
             return;
         }
         let before = self.npcs.len();
-        // 本轮击杀累计（阵亡者按阵营计数；供指挥军情 kills 字段）
+        // 本轮自损累计（阵亡者按阵营计数；供指挥军情的 kills 字段 = **该营自身阵亡数**）
         // enemy_dead = 敌军（Red）本帧阵亡数，单独累计供任务目标推进
-        let mut enemy_dead = 0u32;
+        // ⚠️ 这里只扫「还留在数组里的 hp<=0」（兜底路径）；`damage_npc` 打死的人当场就被移出数组，
+        // 所以那边必须自己计数 —— 见 `tally_round_deaths` 的注释与判据。
+        let mut red_dead = 0u32;
+        let mut blue_dead = 0u32;
         for n in &self.npcs {
             if n.hp <= 0.0 {
                 match n.team {
-                    Team::Red => {
-                        self.round_kills_red += 1;
-                        enemy_dead += 1;
-                    }
-                    Team::Blue => self.round_kills_blue += 1,
+                    Team::Red => red_dead += 1,
+                    Team::Blue => blue_dead += 1,
                 }
             }
         }
+        let enemy_dead = red_dead;
+        self.tally_round_deaths(Team::Red, red_dead);
+        self.tally_round_deaths(Team::Blue, blue_dead);
         self.npcs.retain(|n| n.hp > 0.0);
         let red = self.npcs.iter().filter(|n| n.team == Team::Red).count();
         let blue = self.npcs.len() - red;
@@ -10149,6 +10170,47 @@ mod tests {
         assert_eq!(game.npcs.len(), 7, "全量补员（红 4 + 蓝 3）");
         let red = game.npcs.iter().filter(|n| n.team == Team::Red).count();
         assert_eq!(red, 4);
+    }
+
+    /// 🔴 判据：**阵亡计数不能漏掉任何一条死亡路径**（军情/日志里的自损数必须等于真实阵亡）。
+    ///
+    /// 2026-09-26 实测（170 秒 128v127 会战，`logs/llmbattle.log.err`）：`command:` 行里红营自报
+    /// 阵亡 **35**，而三个连的强度合计 60 ⇒ 实际阵亡 128 − 60 = **68**（蓝营 79 vs 123）。
+    /// 根因：`damage_npc` 打死人时**直接从 `npcs` 里移除**，而 `round_kills_*` 只在
+    /// `update_stress_respawns` 里扫「还在数组里的 `hp <= 0`」⇒ **子弹/爆炸打死的主路径一个都没计**。
+    #[test]
+    fn every_death_path_is_counted_in_the_round_tally() {
+        let mut game = Game::new();
+        game.stress = true;
+        game.stress_sides = 4;
+        let player = glam::Vec3::new(0.0, 0.0, 0.0);
+        game.spawn_stress_battle(&player);
+        game.game_state = GameState::Playing;
+        let (red0, blue0) = (game.round_kills_red, game.round_kills_blue);
+        // 路径 A：`damage_npc`（子弹/爆炸的主路径，当场把阵亡者移出数组）
+        let ri = game
+            .npcs
+            .iter()
+            .position(|n| n.team == Team::Red)
+            .expect("压力模式应有红方 NPC");
+        assert!(
+            game.damage_npc(ri, 999.0, DamageSource::Player),
+            "999 伤害必须打死"
+        );
+        // 路径 B：兜底扫描（另有路径把 hp 打到 0、人还留在数组里）
+        let bi = game
+            .npcs
+            .iter()
+            .position(|n| n.team == Team::Blue)
+            .expect("压力模式应有蓝方 NPC");
+        game.npcs[bi].hp = 0.0;
+        game.update_stress_respawns(&player);
+        assert_eq!(
+            game.round_kills_red,
+            red0 + 1,
+            "damage_npc 打死的红方必须计入本轮自损（漏了它，日志里的自损只有真实值的一半）"
+        );
+        assert_eq!(game.round_kills_blue, blue0 + 1, "兜底扫描那条路同样要计入");
     }
 
     // ---- 新玩法：可破坏障碍 / 掩体利用 / 任务目标 ----
