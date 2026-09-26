@@ -26,7 +26,7 @@
 **21 世纪架空世界观的大战场 FPS**（⚠ 本文件与 README 旧版曾长期误写为「二战题材」，
 据此建模/选材会全错。装备是现代系，HUD 默认武器 **AK-12 风暴 7.62×39mm**，2018 年列装）。
 美术基调按 **2020s 当代东欧/中东战乱城镇**走（混凝土板楼 + 抹灰老城 + 破损，冷灰色调），
-不是战壕与 1940 年代道具，也**不是**旧版写的"近代复古城市"。
+不是战壕与 1940 年代道具。
 
 Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 `ash` 0.38 / `ash-window` 0.13 / `winit` 0.30(rwh_06) / `glam` 0.29 / `raw-window-handle` 0.6 /
@@ -120,7 +120,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
   参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
-  🔴 阴影是**两张图**（2026-09-26，实测 +23.5%）：`shadow_image`(binding 5) 只装静态投射者
+  🔴 阴影是**两张图**（2026-09-26，实测 **+18%（轻负载）~ +24%（重负载）**，两臂在两种环境下都不重叠，
+  见 §21.40(c)）：`shadow_image`(binding 5) 只装静态投射者
   （地形/地面场/marker/道具）、每 `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；
   `shadow_dyn_image`(binding 10) 只装 NPC/士兵、每 `RV3D_SHADOW_EVERY` 帧（默认 2）重画；
   片元各采一次取 `max()`；`RV3D_NO_SHADOW_SPLIT=1` = 单图旧路径（A/B 对照）。
@@ -180,9 +181,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
 - 🔴 **⚠️ 有两个同名的 `npc`，别混**（据此写下的错误结论已撤回）：
   - **HUD 左上那行的 `npc: I{} P{} C{} A{}`**（`game.rs:2640`）—— 是 NPC 的**状态人数**
-    （Idle / Patrol / Chase / Attack），**与渲染、与箱体实例数毫无关系**。
-    ⚠️ 那个 `I` 前缀很容易看漏：`npc: I1255 P0 C0 A0` 是"**1255 个 Idle**"，不是"npc=1255"。
-    `RV3D_NPC_CAM` 下 AI 不步进 ⇒ 全员 Idle ⇒ 这个数会很大。
+    （Idle/Patrol/Chase/Attack），**与渲染、与箱体实例数无关**。⚠️ `I` 前缀容易看漏：
+    `npc: I1255 P0 C0 A0` 是"**1255 个 Idle**"；`RV3D_NPC_CAM` 下 AI 不步进 ⇒ 全员 Idle。
   - **perf 日志里的 `npc=`**（`renderer.rs:8604` = `last_npc_box_near + last_npc_box_far`）= **箱体实例数**（判断"活体/尸体走 GLB 还是回退箱体"）。**排查"某物有没有被画"先看这两个计数再看图**；拿 HUD 那个数当实例数会得出完全错误的结论。
 
 **玩家碰撞契约（2026-09-13 变更，勿退回旧写法）**
@@ -227,8 +227,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   12 秒 1961 轮、5900 行错误日志，而进程看着还活着、窗口还在）。判据 `device_lost_stops_rebuilding`
   + `should_retry_swapchain`（重建失败后限流 1 Hz，仍保留"成功即自动恢复"）。
 - 🔴 **验证必须覆盖「非默认配置」**：PT 上屏 blit 的目标范围曾写死 `2560x1600`，而**默认窗口就是它**
-  ⇒ 此前每一轮 PT 验证都在默认尺寸上跑、全都躲过去了；`scripts/run_resize_probe.ps1 -PT` 一换尺寸
-  就 `VUID-vkCmdBlitImage-dstOffset-00248` **并把设备打掉**。判据
+  ⇒ 此前每轮 PT 验证都躲过去了；`scripts/run_resize_probe.ps1 -PT` 一换尺寸就
+  `VUID-vkCmdBlitImage-dstOffset-00248` **并把设备打掉**。判据
   `blit_regions_never_hardcode_pixel_extents`（非原点 `Offset3D` 不许是纯字面量）。
 
 **建筑摆放（2026-09-13）**
@@ -287,8 +287,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 > 引擎自己抓光标，抓取期间鼠标被锁 → 用户的机器会"像死机"。
 > **按键用 `PostMessage` 投给游戏窗口句柄，不用 `SendInput`、不用 `SetForegroundWindow`。**
-> **`SendInput` 喂的是前台窗口的输入队列**（实测 6/6 被系统接受、游戏一个没收到，前台不是游戏就是往别的程序打字）；
-> `PostMessage` 直接进目标窗口队列。截图用 `PrintWindow`，不前置窗口。
+> 实测 `SendInput` 喂的是前台窗口队列（6/6 被系统接受、游戏一个没收到）；`PostMessage` 才进目标窗口队列。
+> 截图用 `PrintWindow`，不前置窗口。
 > 每次启动游戏必须用 `cap_safe.ps1`（`finally` 里 taskkill + 硬超时）。
 > 手动流程 = 启动后点一下游戏窗口 → 按 R 进入操控；死亡后再按一次 R 复活。
 > `RV3D_AUTOSTART=1` **不跳过菜单**（旧版写它能跳过，是错的）；
@@ -417,16 +417,20 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - ⚠ **预览图只对"几何与比例"可信，对"最终颜色"不可信**：预览走 Blender 自己的光照 +
   AgX 视图变换。**颜色判断必须在引擎里做**（`RV3D_CAM` 固定机位取证）。
 - **顶点预算**：`props: 缓冲扩容 顶点 N/2097152` ⇒ **硬容量 2^21 = 2,097,152**，加细节前先看这个数。
+  🔴 **顶点分布（2026-09-26 普查）**：场景 628 680 顶点里 `building_tall`（132 件 × **2672**）占 **56%**、
+  `tree_oak`（372 件 × **584**）占 **35%** ⇒ **要动就动 building_tall 的单件几何，别看件数多的 tree_oak**。
+  每帧实际提交 171 994 顶点 / 246 172 三角形（桶 146/514 可见）。判据 = `RV3D_PROP_STATS=1` 的
+  `proptypes:`（按顶点排序）与 `propdraw:` 两行。两个资产的 GLB 都已焊接（无 NORMAL 属性 ⇒
+  这 2672 个顶点是立面细节的真实顶点数，不是导出器拆面造成的）。
 - 🔴🔴 **道具/GLB 的两条通则（改动前先读）**：
   1. **`box_project_uv` 的逐面 UV 岛 + `export_normals=True` 的逐面法线都会阻止顶点共享**
-     （`tree_oak` 838 三角形占 **2264 顶点**；全城 372 棵 = 整个道具缓冲的 54%）。
+     （`tree_oak` 838 三角形曾被导出器拆成 **2264 顶点**）。焊接后的真实分布见下面"顶点预算"条。
   2. **引擎根本不需要这两样**（无正常线槽位；`Shape::Authored` 在片元里**跳过**四条会采样 UV 的
      效果；`assets.rs` 只把 `POSITION` 当硬要求）。
   ⇒ **改法**：`tools/blender/weld_props.py`（按 pos+color 去重、UV 设常量、**`export_normals=False`**）。
   **`export_normals` 是总开关**：开着它时焊到 458 顶点、落盘又变回 2264（导出器按面拆分），只降 6.6%。
-  **收益（同机位实测）**：顶点 1563020→509616、显存 72→24 MB、每帧提交 476100→153363、
-  **中位帧率 +18.6%**，**三角形一个没少、画面无退化**。
-  **本仓是顶点瓶颈**（像素少 4 倍只 +12%；一次画完反而 −38%）⇒ 顶点数就是帧率，这是最高杠杆的一处。
+  **收益（同机位实测）**：顶点 1563020→509616、显存 72→24 MB、每帧提交 476100→153363、**中位帧率 +18.6%**，
+  三角形一个没少、画面无退化。**本仓是顶点瓶颈**（像素少 4 倍只 +12%；一次画完反而 −38%）⇒ 顶点数就是帧率。
 - **确定性**：`hash(str)` 每个进程都变（PYTHONHASHSEED），生成器里用 `zlib.crc32`。
 - 同型号建筑的"克隆军团"由 **`props.rs::placement_tint`** 治（逐摆放确定性色调 ±12%），
   不是靠堆更多型号。
@@ -458,7 +462,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - 🔴 **`cargo check` 不能替代 0 警告闸门**：`check` 与 `build` 的 fingerprint 不同，
   **`check` 会重放它自己缓存下来的旧诊断** —— 实测 `cargo check --release` 报 28 条 `never used`，
   而同一次 `git checkout` 之后 `cargo build --release` 是 0 警告。
-  **判据：`0 警告` 只能用 `cargo build --release`（或 `cargo test --release`）验。** ⚠️ 实验占着 exe 时 `build` 会卡在**链接**（`failed to remove …exe`），但**编译与警告在此之前就已产出** ⇒ 看警告仍然有效。
+  **判据：`0 警告` 只能用 `cargo build --release`（或 `cargo test --release`）验。** ⚠️ 实验占着 exe 时 `build` 会卡在**链接**，但**编译与警告在此之前就已产出** ⇒ 看警告仍然有效。
 - 🔴 **`> file` 重定向会写成 UTF-16**（实测 102552 B 的真实文件写成 184852 B）：
   要取 HEAD 版本做字节比对，用 `git checkout-index` / `git cat-file` 写二进制，或用
   `git diff` / `git status` 判断，**不要用 PowerShell 的 `>`**（教训 7 的另一面）。
@@ -529,9 +533,9 @@ release_input.ps1 取代）。
 ## 铁律 G — 凭据 / 提交白名单（2026-09-22）
 
 - **真实密钥/令牌一律不进仓库**，包括"先提交、回头再删"：历史 blob 清不掉，公网爬虫会收割。
-  🔴 **2026-08-21 已真实发生**（`scripts/vision_ps.ps1` / `vision_test.py` 硬编码 DeepSeek key，
-  `583950c` 入库并推送到公开远端；09-12 删了文件但历史仍在 —— 见 `docs/PROGRESS.md` 2026-09-22 节）。
-  密钥只从**环境变量**或**仓库外文件**读；文档/示例一律写占位符 `<YOUR_KEY>`。
+  🔴 **2026-08-21 已真实发生**（`scripts/vision_ps.ps1` / `vision_test.py` 硬编码 DeepSeek key 并推送到公开远端，
+  删文件也删不掉历史 —— 见 `docs/PROGRESS.md` 2026-09-22 节）。**密钥只从环境变量或仓库外文件读**，
+  文档写占位符 `<YOUR_KEY>`。
 - **提交侧闸门**：`core.hooksPath` → `.githooks`（`scripts/install_git_hooks.ps1` 安装，
   **链式保留** `~/.dsh/gates/hooks` 的 pre-push 密钥门 —— 直接改指会把它**静默**关掉）。
   规则 = 路径白名单 + 路径拒绝表 + 内容扫描，**默认拒绝**；放行要改 `tools/commit_guard.py` 的白名单（改动即留痕）。
@@ -594,21 +598,21 @@ release_input.ps1 取代）。
 3. **`config.rs` 不读 `pt_enable`**（2026-09-15）：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，必须连 parse 分支一起看。**
 4. **玩家站在 GLB 楼体内部**（2026-09-13）：`pick_building` 的 `max` → `min`。
 5. **`FLOOR_H` 常量分叉**（2026-09-12）：6 模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6。
-6. **`svd_63` 未入库（仍是 TODO）**：源图含两把重叠枪身 + 独立瞄具，`install_guns.py` 仍 SKIP；需人工删掉重叠枪身后装为 `svd12`。
+6. **`svd_63` 未入库**：源图有两把重叠枪身 + 独立瞄具，`install_guns.py` SKIP；需人工处理后装为 `svd12`。
 7. **D12 士兵近距观感**（2026-09-13）：`soldier.glb` 实例化绘制；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画与两套队色顶点变体（`docs/HANDOFF-soldier.md`）。
 8. **D4 墙缝天空亮条**（2026-09-19）：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
 9. **mesh 着色器过不了严格 `spirv-val`**（2026-09-15）：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
 10. **PT 盒上限静默截断**（2026-09-14）：512 → 1024 一次分配 + 一次性告警。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 按像素重投影复用，或运动自适应 spp；`signature()` 量化已分层（~0.5m / ~3° / ~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（2026-09-26，含 `RV3D_PT_EXPOSURE`）。
 12. **溢出静默丢弃**（2026-09-14）：两个旧常量已不存在；模式仍要防 —— 超容处有 `Renderer::warn_npc_cap_once`。
-13. **联网**（2026-09-26）：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染已接线（`net.rs` 单测）。**仍未做**：NAT 打洞、服务端重放/回滚、双进程真机验证。
+13. **联网**（2026-09-26）：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染已接线（`net.rs` 单测）。**仍未做**：NAT 打洞、回滚、双进程真机验证。
 14. **道具进阴影 pass**（2026-09-14）：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
-15. **阴影 `normal_bias`**（2026-09-14）：一直在用；清了三处**陈旧** `#[allow(dead_code)]` ⇒ ⚠️ 其余 `#[allow]` **必须保留**。
+15. **阴影 `normal_bias` 一直在用**；清了三处**陈旧** `#[allow(dead_code)]` ⇒ ⚠️ 其余 `#[allow]` **必须保留**。
 16. **`tests/rayquery_probe.rs`**（2026-09-14）：文件已不存在。
 17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY`、`waves cleared ['1'..'5']`、`VUID=0 panics=0 device_lost=0`、`RESULT: ALL-OK`（harness = `scripts/run_survive_pm.ps1`）。
-18. ✅ **CoverSeek 占比偏低结案**（2026-09-26）：不是"掩体不够"，是被"全队冲锋"抹掉了 —— 只豁免 `CoverCrawler` ⇒ CoverAdvance 7.2% / CoverSeek 1.8%。`COVER_SEEK_RANGE` 20→32 试过、无实测支持，已回退。判据 = `RV3D_AI_DIAG=1` 的 `aidiag: tactic 1s`。
+18. ✅ **CoverSeek 占比偏低**（2026-09-26）：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler` ⇒ 7.2%/1.8%）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `RV3D_AI_DIAG=1` 的 `aidiag: tactic 1s`。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（需 shader 后处理）。第一人称枪模动画**已补**（2026-09-26：冲刺/换弹/静止呼吸；判据 = `RV3D_GUN_DIAG=1` + `scripts\run_gunpose_probe.ps1`）。
-20. ✅ **DLSS：不接**（2026-09-25，`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的却是像素；另缺运动矢量/jitter/深度暴露 + 要新增 SDK。**重开判据**：面积 1/4 而 fps 提升 >40%。
+20. ✅ **DLSS：不接**（2026-09-25，`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素；另缺运动矢量/jitter/深度暴露。**重开判据**：面积 1/4 而 fps 提升 >40%。
 21. **GLB `byteStride`**（2026-09-14）：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
 22. **`data/` 历史残留**（2026-09-13）：62 → 3 个被引用的。
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**（2026-09-25）：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT`。**⇒ 开 `RV3D_VALIDATION=1` 必加 `DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1`，不要去改引擎。**
@@ -647,7 +651,7 @@ release_input.ps1 取代）。
 24. **单次 A/B 说明不了任何事**：必须「互换对照 + 无处理对照」，先确认对照组本身没有一边倒。⚠️ **小于 A/A 噪声底的差不算数**（见教训 43 的 `aa_probe.ps1`）。
 25. **"做完了"要有可判定的数字标准**；动手前把契约量出来，每次产出都比一遍。
 26. **安全网的假警报和漏报一样有害**：判定要允许收敛窗口（重试），不能只查一次 —— 会喊狼来了的脚本会训练人不再当回事。
-27. **🔴 先确认你的测量工具测的是你以为的东西**（一个会话为此栽了六次：键码空间 / 待测区域含小地图 / 均值只留 1 位小数 / 全图 diff 含 NPC / 读错文件 / 探针里写了 `break` ⇒"没测到"与"测到 0"分不清）。**判据：任何量化结论之前，先用一个"必然能测出差异"的已知变化验一次工具。**
+27. **🔴 先确认你的测量工具测的是你以为的东西**（一个会话为此栽了六次：键码空间 / 区域含小地图 / 小数位 / 全图 diff 含 NPC / 读错文件 / 探针里写了 `break`）。**判据：任何量化结论之前，先用一个"必然能测出差异"的已知变化验一次工具。**
 28. **视觉改动的验收必须给两个数，且两次运行场景必须一致**：同场基线 → 改动 → 重采 → 整幅 diff（第一道筛子）→ 在差异集中区取指标；整幅 diff 的数值**不能当改善幅度**用。图像通道不可靠时改**数值巡检**（代表机位全图扫描 + 过曝/纯黑/异常色占比，判据黑占比 <0.5%）。
 29. **"看着不对劲"先换视角看清它是什么，再去读代码找它**（曾连读五轮代码猜类别、五次全错）。**读代码是"知道名字之后"做的事。**
 30. **改回源码要用编辑器工具或 `git checkout --`**。⚠️ 本 shell 的 `ReadAllText` 按 GBK 解码（65918 B 的文件只读出 38703 字符）⇒ 针对中文的替换**全部静默打不中**、按"读到的行号"删除会**删掉别处的行** ⇒ **中文文档的编辑一律走编辑工具**。
@@ -663,5 +667,5 @@ release_input.ps1 取代）。
 40. **🔴 "某个面没画出来"先查绕序/背面剔除，再查几何参数**（代价 = 两天）：本管线水平面与竖直面的正面约定相反（CLOCKWISE + shader Y 翻转），立方体顶/底面与 mesh 圆柱盖长期反绕 ⇒ 顶面恒被上方剔除，一个绕序 bug 伪装成"建模/透视/烘焙"。**⇒ 两个一次重建的探针足以定性：可疑面片涂不可能色（顶面→绿）、可疑体积涂红；回归判据 `horizontal_winding_tests`。**
 41. **断言"构件没渲染"前先确认相机在它的正面 + 它在不在别的体块里**（shop1 从街北拍商铺误报"没有雨棚"；cp1 反向实锤残骸车/帐篷整个埋进围合板楼）⇒ `checkpoint_props_stay_out_of_rows`。
 42. **🔴 阈值型分支的测试必须取「跨过阈值」的输入，否则等于没测**：`survive` 的 `rule.waves` 与 `WAVES_PER_LEVEL`(3) 的比较就是这种分支 —— 旧测试用 `waves = 2`（低于阈值）一路绿，而线上地图用 5 ⇒ 升关那条真实路径**从没被执行过**。**⇒ 看到 `>= N` / `> N` / `min(N, …)` 这类比较，测试里必须给"刚好越过"的那一档；线上的真实取值（TOML/配置）就是必须覆盖的那一档。**
-43. **🔴 帧率口径：日志里的 `fps` 必须是「窗口内帧数 / 窗口时长」**，不能是"某一帧的 `1/dt`"（同一行的 `frame_us` 是**另一帧**的耗时 ⇒ 自相矛盾的行；同一二进制跑两次能"差 48%"，我据此写过**错误的 +58%**，见 §21.36/§21.37）。**⇒ 任何性能结论先跑 `scripts\aa_probe.ps1 -Runs 3` 量噪声底（实测极差 0.2%），小于它不算数。**
+43. **🔴 帧率口径：日志里的 `fps` 必须是「窗口内帧数 / 窗口时长」**，不能是"某一帧的 `1/dt`"（同一行的 `frame_us` 是**另一帧**的耗时 ⇒ 自相矛盾的行；同一二进制跑两次能"差 48%"，我据此写过**错误的 +58%**，见 §21.36/§21.37）。**⇒ 任何性能结论先跑 `scripts\aa_probe.ps1 -Runs 3` 量噪声底，小于它不算数。⚠️ **噪声底不是常数**：重负载实测 0.2%、轻负载 2.5~3.0%（§21.40(b)）⇒ 每轮现场量，别引用上一次会话的数字。**
 44. **🔴 「跳过某个对象的处理」的分支必须回答：它还会不会自己结束/推进？** 2026-09-26：`Mixer::mix` 对 `gain <= 0.0`（用户静音）的声部直接 `continue` ⇒ 游标永不前进、声部永不退队 —— 静音期间每发枪堆一个（`voices` 无界增长），解除静音后**旧枪声齐鸣**。判据 = `mixer_retires_voices_even_when_muted` / `unmuting_does_not_replay_stale_voices`。同形的还有环形缓冲与寿命表：**你省掉的那一步，往往正是它退场的唯一机会**。
