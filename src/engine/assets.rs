@@ -86,8 +86,19 @@ fn append_prim(
     // VEC4 + UNSIGNED_SHORT + normalized，直接取原值会得到 0..65535 当 albedo 用。
     fn read_acc(json: &crate::llm_cmd::Json, bin: &[u8], idx: usize, comps: usize) -> Result<Vec<f32>, String> {
         let acc = json.get("accessors").and_then(|a| a.as_arr()).and_then(|a| a.get(idx)).ok_or("accessor 缺失")?;
-        let count = acc.get("count").and_then(|c| c.as_f64()).unwrap_or(0.0) as usize;
-        let ctype = acc.get("componentType").and_then(|c| c.as_f64()).unwrap_or(5126.0) as u32;
+        // 🔴 2026-09-26：`count` 与 `componentType` 是 glTF accessor 的**必填**字段，
+        // 而它们以前各带一个兜底（`unwrap_or(0.0)` / `unwrap_or(5126.0)`）：
+        // - 缺 `count` ⇒ 读回 0 个元素 ⇒ 最后报"缺少 POSITION"（把"accessor 坏了"说成
+        //   "模型没导出位置"，**把人指向错方向**）；
+        // - 缺 `componentType` ⇒ **默认按 FLOAT 读**（VEC4+u16 的颜色会被当成浮点数 ⇒ 静默错色）。
+        // 与今天修的 `type`、未知 `componentType` 是同一条规矩：**读不了就明说读不了**。
+        // 判据 = `glb_accessor_missing_count_is_an_error_that_names_the_field` +
+        // `glb_accessor_missing_component_type_is_an_error_that_names_the_field`。
+        let count = acc.get("count").and_then(|c| c.as_f64()).ok_or("accessor 缺 count")? as usize;
+        let ctype = acc
+            .get("componentType")
+            .and_then(|c| c.as_f64())
+            .ok_or("accessor 缺 componentType")? as u32;
         let norm = acc.get("normalized").and_then(|b| b.as_bool()).unwrap_or(false);
         let bv = acc.get("bufferView").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
         let bview = json.get("bufferViews").and_then(|b| b.as_arr()).and_then(|b| b.get(bv));
@@ -614,6 +625,39 @@ mod tests {
             .expect("COLOR_0 的 type 不合法必须被拒（否则是静默错色）");
         assert!(err.contains("COLOR_0"), "错误信息要点出是哪个属性，实际: {err}");
         assert!(err.contains("VEC2"), "错误信息要点出实际的 type，实际: {err}");
+    }
+
+    /// 同一形状的**第四面**：`count` 与 `componentType` 是 glTF accessor 的**必填字段**，
+    /// 而它们以前都带 `unwrap_or(0.0)` / `unwrap_or(5126.0)` 兜底：
+    /// - `count` 缺失 ⇒ 读回 **0 个元素** ⇒ POSITION 变空 ⇒ 报"缺少 POSITION"
+    ///   （把"accessor 坏了"说成"模型没导出位置"，把人指向错方向）；
+    /// - `componentType` 缺失 ⇒ **按 FLOAT 读**（与今天修的 VEC2/未知 type 同一类静默错读）。
+    /// 判据 = 这两条测试（缺字段必须报错，且错误信息点名字段）。
+    #[test]
+    fn glb_accessor_missing_count_is_an_error_that_names_the_field() {
+        let bin: Vec<u8> = (0..36u8).collect();
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],"accessors":[{"bufferView":0,"componentType":5126,"type":"VEC3"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962}]}"#;
+        let err = parse_glb(&build_glb(json, &bin))
+            .err()
+            .expect("accessor 缺 count 必须报错，不能读成 0 个元素");
+        assert!(err.contains("count"), "错误信息必须点名 count，实际: {err}");
+        assert!(
+            !err.contains("缺少 POSITION"),
+            "不能把坏 accessor 说成\"模型没有位置\"（会把人指向错方向），实际: {err}"
+        );
+    }
+
+    #[test]
+    fn glb_accessor_missing_component_type_is_an_error_that_names_the_field() {
+        let bin: Vec<u8> = (0..36u8).collect();
+        let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],"accessors":[{"bufferView":0,"count":3,"type":"VEC3"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962}]}"#;
+        let err = parse_glb(&build_glb(json, &bin))
+            .err()
+            .expect("accessor 缺 componentType 必须报错，不能默认按 FLOAT 读");
+        assert!(
+            err.contains("componentType"),
+            "错误信息必须点名 componentType，实际: {err}"
+        );
     }
 }
 
