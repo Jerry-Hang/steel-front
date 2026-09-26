@@ -10120,3 +10120,31 @@ MEDIAN PAIRED DELTA = -7.68 fps (-5.51%)   sign test 0/4   aa2 臂内极差 24.1
 ⚠️ 期间踩到并已记录的两个"测量陷阱"（都属今天的主线）：
 `Copy-Item` 恢复源码**保留旧 mtime ⇒ cargo 不重编，测试跑的是磁盘上已不存在的那一版**（§21.58 已记）；
 以及成本地图的样本量问题（§21.61：同日 A/A 中位 −5.51%）。
+
+### 21.65 同步常量审计：判据都在，但两处"说明"把人指错了（`6f08151`）
+
+**思路**：AGENTS 里列着好几对"必须两边同步"的常量（改一侧必须同时改另一侧）。
+先逐个查**它们到底有没有判据兜住** —— 结果三对都钉得很死：
+
+| 同步对 | 判据 |
+|---|---|
+| `procedural.rs::GROUND_DETAIL_*` ↔ `build.rs::GROUND_DETAIL_TEXEL_M` | `procedural.rs` 里比对 `SHADER_TEXEL_M = 0.0078125` 的那条测试 |
+| `INSTANCE_BUFFER_ELEMS`（三处必须同源） | 编译期 `const _: () = assert!(INSTANCE_BUFFER_ELEMS == 83_779)` |
+| 槽位布局 ↔ `build.rs` 的字面量 | `instance_slot_layout_tests::gun_slot_layout_is_pinned`（注释里记着历史两次真 bug）+ `marker_band_does_not_bleed_into_npc_band` |
+
+**但两处"说明"本身是错的**（判据在，注释/文档却指错方向）：
+
+1. `renderer.rs::EMISSIVE_SLOT_BASE` 的注释写「与 `build.rs::EMISSIVE_INSTANCE_BASE`
+   （`NPC_INSTANCE_BASE + 3072`）同步」——**真实偏移是 +9216**（三个 NPC 几何区各 3072；
+   `build.rs:39` 与测试断言的 `73729 + 9216` 都是这个数）⇒ 照它改容量会**算错 6144 个槽**。
+2. AGENTS 写「`flat_flag`：槽位 ≥ **65601**（`NPC_SLOT_BASE`）置 **1**」——
+   **`65601` 全仓零命中**；真实阈值 `NPC_SLOT_BASE = 73729`，且 ≥ 该槽位的是 **2（NPC）**、
+   1 只给 marker 区（65537..73728）。已整条重写为
+   `0=地面 / 1=marker / 2=NPC(≥73729) / 1.25=Authored / 3=枪槽`，并写上是哪条测试钉的。
+
+**顺带核实**：AGENTS 说"全仓 109 处 `#[allow]`" ⇒ 实测**正好 109**（`dead_code`；全部 `#[allow]`
+共 117，其余是 `clippy::assertions_on_constants` 6 等）—— **这条文档是准的**，记下来省得下次再数。
+
+⇒ **教训：「必须同步」这行字本身就是一条未经校验的断言**。写它时顺手写上**判据名**
+（哪条测试钉的），下一个人才能分辨"这句话有人在守"还是"这句话只是当年这么想过"。
+本次两处修正都按这条做了（把测试名写进注释与 AGENTS）。
