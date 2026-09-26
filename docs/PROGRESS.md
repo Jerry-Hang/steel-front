@@ -9572,3 +9572,53 @@ commit-guard[staged]: 拒绝 —— 2 处问题（已检查 1 个文件）
 `remote_state_at()` 对早就离场的人照样返回最后一帧）。
 修法 = 实体退场时把对应插值缓冲一起带走；判据 = `stale_prune_also_drops_the_interpolation_buffer`
 （先红后绿：红在"实体退场时插值缓冲必须一起退场"那条断言上）。全量测试 **604 passed / 0 failed**。
+
+### 21.51 survive 的"最强验证"原来是**在空文件上算的**（教训 46 当天就抓到它自己人）
+
+**(a) 症状**：抢到 GPU 窗口后按 AGENTS 铁律 B 跑"整局 gameplay + 验证层"，
+第一次就退 **2**：`LOG-MISSING/EMPTY (logs\survive_pm.log)` —— 但那局游戏**跑得好好的**
+（同一时刻 `logs\survive_pm.log.err` 有 **109 KB** 正常日志：npcpos / cam / game 状态行齐全）。
+
+**(b) 根因（两层，缺一不可）**
+
+1. 引擎用 `env_logger` 写 **stderr** ⇒ `-RedirectStandardOutput` 的 `.log` **恒为 0 字节**。
+   这不是"常常"，是**恒**：`logs/` 下所有 stdout `.log` 全是 0 字节（教训 11 的极端版）。
+2. `run_survive_pm.ps1` 把那个 0 字节路径传给 `survive_pm.py`，而后者只读 `argv[1]`。
+   兄弟脚本 `gameplay_smoke_pm.py` 第 115 行一直是 `for p in (path, path + ".err")`
+   ⇒ **冒烟那套可信、survive 那套不可信**，两条链路从建起来那天起就不对称。
+
+**后果（严重）**：`len(cleared) == len(spawned)` 退化成 `0 == 0`、VUID/panic/device_lost 全 0
+⇒ 打印 `RESULT: ALL-OK`。**此前每一次 survive 绿灯都来自这个空文件**，
+包括 AGENTS 铁律 B 里那句"最强的验证跑法是整局 gameplay + 验证层 ⇒ 5 波全清"。
+讽刺的是：判它红的正是**同一天早上刚加的那道闸门**（教训 46：扫描面 = 0 不算通过）。
+
+**(c) 修法（`75afddc`）**：`resolve_engine_log(path)` —— 有内容就用、否则回退 `.err`、
+两个都空 ⇒ None ⇒ exit 2；并把**实际使用的那份日志**打出来（判据必须能说出自己的证据来源）。
+`--self-test` 加 4 条（临时目录现场造空 stdout + 有内容 `.err` / 非空原文件 / 两者皆无 / 两者皆空）；
+顺手把结果行里**写死的 `30`** 改成真实计数 —— 实测真实条数原本是 **29**，
+即旧输出连"我检查了多少条"都是假的。现在 `SELF-TEST: OK (33 checks, 0 failed)`。
+
+**(d) 真判据（这次是真的）**：`RV3D_VALIDATION=1 DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1`
++ `run_survive_pm.ps1 -Secs 400 -NoShot` ⇒
+
+| 项 | 值 |
+|---|---|
+| 结果 | **VICTORY，318s / 400s 预算** |
+| 波次 | logged `[1,2,3,4,5]`，spawns `6/8/10/12/14`，**cleared `['1','2','3','4','5']`** |
+| 交战 | 71 次接火、640 发、52 杀、231 命中（**36.1%**，理想 ≈4.4 发/杀） |
+| 接火距离 | 中位 13m / 4–48m |
+| 稳定性 | **VUID=0 panics=0 device_lost=0**，fps 164.8 |
+
+⇒ 结论与 AGENTS 里原来那句一致 —— 但这次它**是被量出来的**，而且多了波次/命中率/交战距离这些
+能证伪的细节（旧绿灯连一行都拿不出来）。
+
+**(e) 顺带清掉 WSL2 时代的 X11 冒烟链路**（`9e2cf4d`）：`scripts/gameplay_smoke.py`（12.5 KB，
+X11 + SendInput + 屏幕抓取）与 `scripts/run_gameplay_smoke.sh`（仓里**唯一**的 `.sh`）都是
+**2026-08-15 12:44**（迁离 WSL2 那天）之后没再动过的遗留；Windows 原生链路早已由
+`run_smoke_pm.ps1` → `gameplay_smoke_pm.py` 取代。它同时是"第二套口径"陷阱
+（旧 `fps>=120` 就是从它混进文档的）⇒ 删掉后 AGENTS 不再需要那句"两个脚本的口径别混"。
+
+**教训归并**：这条与教训 46 是**同一形状的第 7 处**，但它是**最贵的一处** ——
+前六处只是工具"没跑成"却报通过，这一处**把一整条验收链路的绿灯都变成了假的**。
+⇒ 补一条操作纪律：**判据读到的那份文件，必须是产出方真正写入的那一份**；
+"路径对不上"不会报错，只会让判据在一个空集合上恒真。

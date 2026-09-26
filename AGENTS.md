@@ -121,8 +121,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
   参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
-  🔴 阴影是**两张图**（2026-09-26，实测 **+18%（轻负载）~ +24%（重负载）**，两臂在两种环境下都不重叠，
-  见 §21.40(c)）：`shadow_image`(binding 5) 只装静态投射者
+  🔴 阴影是**两张图**（2026-09-26 实测 **+18%（轻负载）~ +24%（重负载）**，两臂不重叠，见 §21.40(c)）：`shadow_image`(binding 5) 只装静态投射者
   （地形/地面场/marker/道具）、每 `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；
   `shadow_dyn_image`(binding 10) 只装 NPC/士兵、每 `RV3D_SHADOW_EVERY` 帧（默认 2）重画；
   片元各采一次取 `max()`；`RV3D_NO_SHADOW_SPLIT=1` = 单图旧路径（A/B 对照）。
@@ -175,7 +174,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   `scripts/run_resize_probe.ps1`（改窗口尺寸 + F12，实测 VUID=0）。
   🔴 **最强的验证跑法是"整局 gameplay + 验证层"**（2026-09-26 实测）：先设
   `RV3D_VALIDATION=1 DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1`，再跑
-  `scripts\run_survive_pm.ps1 -Secs 400` ⇒ 5 波全清、VUID=0/panics=0/device_lost=0、ALL-OK。
+  `scripts\run_survive_pm.ps1 -Secs 400 -NoShot` ⇒ **实测 318s 通关**（1..5 全 cleared、52 杀/640 发、
+  VUID=0/panics=0/device_lost=0、fps 164.8）。🔴 判据必须读 **`.log.err`**：引擎只写 stderr，
+  stdout 那份恒 0 字节 —— 2026-09-26 之前它读的是空文件（见 §21.51）。
   20 秒的 perf/probe 只能证明"启动不炸"，整局才覆盖波次/死亡/关卡切换/弹孔/粒子这些路径。
 - 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式。
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
@@ -193,10 +194,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 **玩家碰撞契约（2026-09-13 变更，勿退回旧写法）**
 - 🔴 `PlayerBody::push_out_of_aabb` **现在带 Y 判据**：只有玩家的垂直区间
   `[pos.y, pos.y + eye_height]` 与 `Aabb` 的 `[min.y, max.y]` **相交**时才推挤。
-  - 旧契约（**已废弃**）："墙的 y 范围不包含玩家 y，**但水平碰撞仍应生效**" ⇒ **永远站不到任何
-    东西上面**，正是用户报的"嵌进地板 / 穿进墙里"。
-  - **曾经有 5 条测试把旧契约写死**（`player_y_untouched_by_collision` 的注释甚至
-    明写"但水平碰撞仍应生效"）—— 改动时它们会红，那是**预期的**，要改测试而不是改回代码。
+  - 旧契约（**已废弃**）："墙的 y 范围不含玩家 y，**但水平碰撞仍应生效**" ⇒ **永远站不到东西上面**
+    （用户报的"嵌进地板 / 穿进墙里"）。**曾有 5 条测试把它写死**（`player_y_untouched_by_collision`
+    的注释也这么写）—— 改动时它们会红，那是**预期的**：改测试，别改回代码。
 - 🔴 **站立面 = `max(terrain_height_at(x,z), PlayerBody::support_height(world, PLAYER_STEP_UP))`**。
   `support_height` 取所有**水平范围内（按 radius 外扩）且顶面不高于 `pos.y + step_up`**
   的盒子的顶面最大值；没有任何盒子时返回 `f32::NEG_INFINITY`。
@@ -303,8 +303,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - **`focused` 初值必须是 `false`**（`49d994f`）：写成 `true` 时，窗口被别的程序占着前台，
   winit 只在 `WM_SETFOCUS` 才发 `Focused(true)` ⇒ 本进程"自认为有焦点" ⇒ ClipCursor 把指针钉成 1×1。
   **用户 2026-09-03 报告的"鼠标死锁"就是这个。**
-- **捕获态的视角来源只有两条且互为唯一出口**：`device_event` 的 `DeviceEvent::MouseMotion`
-  与 `window_event` 的 `CursorMoved`（`cursor_locked` 时直接 `return`）。
+- **捕获态的视角来源只有两条且互为唯一出口**：`device_event` 的 `MouseMotion` 与 `window_event`
+  的 `CursorMoved`（`cursor_locked` 时直接 `return`）。
 - 🔴 **`DeviceEvent::MouseMotion` 在 Windows 上不存在**：winit 0.30 的 Windows 后端只构造
   `Added` / `Removed`。**Windows 上绝不能用 `Locked`** —— 锁定即视角失效，且编译期/运行期都不报错。
   现由常量 `RAW_MOUSE_MOTION` + 纯函数 `cursor_grab_plan` 决定（commit `2bfd767`），
@@ -393,8 +393,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 ### ⭐ 设计化建模链路（2026-09-12 建立，取代 `gen_props.py::asset_building`）
 
-> 旧路线把建筑写成"参数拼箱子"，生不出品味。现有 6 个建筑模块由
-> `tools/blender/build_city_kit.py` 生成，比例是**照着真实板楼/抹灰楼写死**的，不是尺寸区间。
+> 6 个建筑模块由 `tools/blender/build_city_kit.py` 生成，比例**照着真实板楼/抹灰楼写死**，
+> 不是尺寸区间（旧的"参数拼箱子"路线生不出品味，已弃）。
 
 ```powershell
 # 1) 尺寸普查（占地/高度/底面，**尺寸契约的唯一来源**）
@@ -422,8 +422,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   `proptypes:` / `propdraw:` 两行。
   🔴 **立面 quad 已按行合并**（`wall_panel()`，`20285e8`；单件 −30% 顶点、帧率 +2.8%）：同行带内
   非洞格子顶点色**逐位相同**（`base` 只看层缝、AO 只看 z）⇒ 合并**逐像素等价**。
-  **再砍 17% 顶点 ≈ 再 +3%**（道具开销近似正比顶点数）⇒ **资产改动先用 `propdraw:` 的几何量验收，
-  帧率只用来确认"换到时间了没有"**；GLB 已焊接（无 NORMAL = 顶点数是真几何不是拆面）。
+  **再砍 17% 顶点 ≈ 再 +3%**（道具开销正比于顶点数）⇒ **资产改动先用 `propdraw:` 的几何量验收，
+  帧率只确认"换到时间了没有"**；GLB 已焊接（无 NORMAL = 顶点数就是真几何）。
 - 🔴🔴 **道具/GLB 的两条通则（改动前先读）**：
   1. **`box_project_uv` 的逐面 UV 岛 + `export_normals=True` 的逐面法线都会阻止顶点共享**
      （`tree_oak` 838 三角形曾被导出器拆成 **2264 顶点**）。焊接后的真实分布见下面"顶点预算"条。
@@ -459,7 +459,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 
 - **并行分身**：文件集两两不相交；**分身禁止 cargo**（12GB 只允许一个）**与 git**；
   `renderer.rs` 上万行**禁止整文件重写**，只许精确 edit；开工前先把在飞改动 commit 成干净基线。
-- **上下文节约**：不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）、不反汇编（看 .spv 先 `spirv-dis` 到临时文件）、不反复读同一文件；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat`。⚠ `Get-Content` 数行数不准，**行号以 `read` 工具为准**（教训 8）。
+- **上下文节约**：不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）、不反汇编（看 .spv 先 `spirv-dis` 到临时文件）；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat`。⚠ `Get-Content` 数行数不准，**行号以 `read` 工具为准**（教训 8）。
 - 🔴 **`cargo check` 不能替代 0 警告闸门**：`check` 与 `build` 的 fingerprint 不同，**`check` 会重放自己
   缓存下来的旧诊断**（实测报 28 条 `never used`，而同一次 `git checkout` 后 `build --release` 是 0 警告）。
   **判据：`0 警告` 只能用 `cargo build --release`（或 `cargo test --release`）验。** ⚠️ 实验占着 exe 时
@@ -477,13 +477,13 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   按"符号名出现次数"判定的脚本会把 `new`/`get`/`update` 全报成陈旧（名字匹配分不清"被用了"
   与"同名到处都是"），已弃用。
 - 🔴 **未结案条目会过期，而"过期的待办"和"错的结论"一样有害**：
-  **⇒ 判据：动某条未结案之前，先用 `rg` 确认它引用的符号/文件**还在**。**
-  **⇒ 反过来：结案一条时必须把条目本身改掉或删掉** —— 只不再提的话，下一个人还会照着旧条目去找。
+  **动某条之前先用 `rg` 确认它引用的符号/文件还在**；**结案一条时必须把条目本身改掉或删掉**
+  —— 只不再提的话，下一个人还会照着旧条目去找。
 - 🔴 **核对"文档里的常量值 vs 源码"时，别写正则**（真实写法 `pub const PT_MAX_BOXES: usize = 1024;`
   中间夹着类型标注和一个额外的 `=`，字符类正则到不了那个数字）。
   **⇒ 判据：核对定义就用 `rg --fixed-strings "const $NAME"` 把整行打出来用眼睛看。**
-  这一类"我的匹配模式比数据复杂"的坑一晚踩了四次（符号名频次 / 字面路径 vs 基名 / 上述正则 /
-  行号跨版本比对），**同一形态：先有结论，再写一个刚好能"证明"它的工具。**
+  **同一形态：先有结论，再写一个刚好能"证明"它的工具**（一晚踩了四次：符号名频次 /
+  字面路径 vs 基名 / 上述正则 / 行号跨版本比对）。
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
@@ -567,8 +567,8 @@ release_input.ps1 取代）。
   压力模式 = `ai::largest_component_mask`），否则整支部队出生在 2–9 格的小口袋里 ⇒ 两军永远走不到一起。
   判据 = `aidiag: astar 1s … 连通域穷尽`（修前 278/278、修后 0）。**改地图 / 建网规则后先跑它。**
 - **改关卡障碍时按 4m 网格思考**：缺口要 ≥10m 且**对齐格子边界**（世界坐标 0±4k）才留得住通道；
-  6m 的缺口跨在边界上，两侧格子会被邻墙伸进来的 1m 全部封住（`defense_line` 的环形工事就是这么
-  把自己封死的：4 段 10m 横墙 + 2 段 10m 纵墙 ⇒ 缺口 6m/2.5m ⇒ 玩家连通域只剩 4 格）。
+  6m 的缺口跨在边界上，两侧格子会被邻墙伸进来的 1m 全部封住（`defense_line` 的环形工事就是这么封死自己：
+  4 段 10m 横墙 + 2 段 10m 纵墙 ⇒ 缺口 6m/2.5m ⇒ 玩家连通域只剩 4 格）。
 - **移动侧**：`step_with_slide` —— 整步被障碍推回 > 半步时，把意图方向投影到接触面切向再走一次
   （正撞无切向 / 滑动更差则保留推回点，**绝不倒退**）。判据 = `aidiag: move` 的「被障碍抵消」
   必须远小于「想走」（实测修前 18–30 帧/秒、修后 0–6）。
@@ -613,7 +613,7 @@ release_input.ps1 取代）。
 21. **GLB `byteStride`**：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。
 24. **广场"坑"** = 水平面绕序反了（判据 `horizontal_winding_tests`）。
-25. ✅ **`ai_us` 单帧尖峰**：是出生点小连通域 bug 的下游症状；压力模式 255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
+25. ✅ **`ai_us` 单帧尖峰**：出生点小连通域 bug 的下游症状；255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
 
 ---
 
@@ -647,7 +647,7 @@ release_input.ps1 取代）。
 25. **"做完了"要有可判定的数字标准**；动手前把契约量出来，每次产出都比一遍。
 26. **安全网的假警报和漏报一样有害**：判定要允许收敛窗口（重试），不能只查一次 —— 会喊狼来了的脚本会训练人不再当回事。
 27. **🔴 先确认你的测量工具测的是你以为的东西**（一个会话为此栽了六次）。**判据：任何量化结论之前，先用一个"必然能测出差异"的已知变化验一次工具**（2026-09-26 同形：成本地图要有必然更快的正对照臂，见教训 45）。
-28. **视觉改动的验收必须给两个数，且两次运行场景一致**：同场基线 → 改动 → 重采 → 整幅 diff（第一道筛子）→ 在差异集中区取指标；整幅 diff **不能当改善幅度**。图像通道不可靠时改**数值巡检**（全图扫描 + 过曝/纯黑/异常色占比 <0.5%）。
+28. **视觉改动的验收必须给两个数，且两次运行场景一致**：同场基线 → 改动 → 重采 → 整幅 diff（第一道筛子）→ 差异集中区取指标；整幅 diff **不能当改善幅度**。图像通道不可靠时改**数值巡检**（全图扫描 + 过曝/纯黑/异常色占比 <0.5%）。
 29. **"看着不对劲"先换视角看清它是什么，再去读代码找它**（曾连读五轮代码猜类别、五次全错）。**读代码是"知道名字之后"做的事。**
 30. **改回源码要用编辑器工具或 `git checkout --`**。⚠️ 本 shell 的 `ReadAllText` 按 GBK 解码 ⇒ 针对中文的替换**全部静默打不中**、按"读到的行号"删除会**删掉别处的行** ⇒ **中文文档一律用编辑工具改**。
 31. **🔴 遇到视觉缺陷，`rg` 代码注释是第一动作**（本仓惯例 = 改掉 + 在注释里留事后分析；用**现象的词**搜注释常直接命中历史）。
@@ -666,8 +666,8 @@ release_input.ps1 取代）。
 44. **🔴 「跳过某个对象的处理」的分支必须回答：它还会不会自己结束/推进？** 2026-09-26：`Mixer::mix` 对 `gain <= 0.0`（静音）的声部直接 `continue` ⇒ 游标不前进、声部不退队 ⇒ 静音期间每发枪堆一个（`voices` 无界增长），解除静音后**旧枪声齐鸣**。判据 = `mixer_retires_voices_even_when_muted` / `unmuting_does_not_replay_stale_voices`。同形的还有环形缓冲与寿命表：**你省掉的那一步，往往正是它退场的唯一机会**。
 45. **🔴 成本地图（以及任何"关掉某个东西"的对照实验）必须放一条「物理上必然更快」的正对照臂。**
   2026-09-26：同批交替测量里 `RV3D_NO_PROPS=1` 量出 **−17%**（少画 246k 三角形却更慢）、
-  `NO_MARKERS` −5.6%、`NO_TERRAIN_FIELD` −15% —— 物理上不可能，而 §21.27 同一条臂是 **+37.7%**。
-  机理：外部任务的干扰周期（分钟级）**远长于**交替周期（25 秒）⇒ 逐对交替配平抵不掉漂移。
+  `NO_MARKERS` −5.6%、`NO_TERRAIN_FIELD` −15% —— 物理上不可能（§21.27 同臂是 **+37.7%**）。
+  机理：外部干扰周期（分钟级）**远长于**交替周期（25 秒）⇒ 交替配平抵不掉漂移。
   **⇒ 该臂没明显变快，这一批数字就一个都不许引用**（不是引擎变了，是尺子坏了）。
 46. **🔴 审计/闸门工具必须有第三种结局：「没跑成」。** 扫描面 = 0 不算通过、读不到输入要
   fail-closed、**空日志也不算通过**（2026-09-26 一天在 6 个工具/驱动器里各抓到一处：
