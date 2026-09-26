@@ -259,7 +259,6 @@ impl Army {
         llm: Option<&[CmdOverride]>,
     ) {
         self.tick += dt;
-        self.kills = kills;
         self.enemy_centroid = enemy_centroid;
         // 不足 33 人（9 个班 = 3 个排）连未编成：跳过指挥层（逐人战术照常）
         if self.companies.is_empty() {
@@ -269,6 +268,11 @@ impl Army {
             return;
         }
         self.tick = 0.0;
+        // 🔴 军情是**一次快照**：`kills` 必须与下面这份连报告同一次刷新 —— 以前它在 tick 判定
+        // 之前就赋值（每帧都新），而强度要等 0.5s 的节拍 ⇒ 日志行里「击杀」是这一帧的、
+        // 强度是上一 tick 的，两个数自相矛盾（实测 +1~+3 人）。
+        // 判据 = `tools/battle_tally_check.py`（不变式 `击杀 + Σ强度 == 编制`），明细见 §21.77。
+        self.kills = kills;
 
         // 1) 逐连自下而上汇总报告（战士 → 班 → 排 → 连）
         // 🔴 2026-09-26 修：以前只按「在 `npcs` 里」计数 ⇒ **本帧刚阵亡、还没被清场的尸体同帧
