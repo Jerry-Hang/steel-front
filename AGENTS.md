@@ -594,7 +594,7 @@ release_input.ps1 取代）。
 15. **阴影 `normal_bias` 未使用**（2026-09-14）：一直在用；顺手清了三处**陈旧** `#[allow(dead_code)]` ⇒ ⚠️ 其余 `#[allow]` **必须保留**。
 16. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（2026-09-14）：文件已不存在。
 17. ✅ **`survive` 5 波真机首次通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；驱动 `scripts/run_survive_pm.ps1` + `survive_pm.py`（口径 `RV3D_INVINCIBLE=1`，失败分支用 `-NoInvincible` 验过）。通关判据：`VICTORY (288s)`、`waves cleared ['1'..'5']`、`VUID=0 panics=0 device_lost=0`、`RESULT: ALL-OK`。**剩下的只是枪法**（理想 ≈3.9 发/杀 vs 实际 12）。
-18. **CoverSeek 战术占比偏低**（压力模式 4%，另一次 0）。**lead** = 加 TOML 关卡掩体。
+18. ✅ **CoverSeek 占比偏低：2026-09-26 结案 —— 不是"掩体不够"，是被"全队冲锋"抹掉了**。实测（`RV3D_AI_DIAG=1` 的 `aidiag: tactic 1s` 分布，survive 270s）**CoverSeek/CoverAdvance 整场 0%**：`should_charge`（≥50% 在追/打 → 全队冲锋）几乎一直成立，把 CoverCrawler 也改成 Advance，而升级又要求 `!charge`。改法 = **只豁免 CoverCrawler**（约 1/6，第 3 波起）⇒ CoverAdvance 7.2% / CoverSeek 1.8%。**试过 `COVER_SEEK_RANGE` 20→32 但一轮实测没支持它，已回退**（判据留在常量注释里）。
 19. **呈现层欠账**：毛玻璃菜单非真模糊（需 shader 后处理采样主 pass）。~~第一人称枪模动画~~ **已补**（2026-09-26：后坐/行走摆动/切枪/ADS 插值本来就有，本轮补了**冲刺持枪姿态 / 换弹动作 / 静止呼吸**；判据 = `RV3D_GUN_DIAG=1` 的 `gundiag:` 行 + `scripts\run_gunpose_probe.ps1`）。
 20. ✅ **DLSS：不接**（2026-09-25，`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（像素面积减到 1/4 只 +12%、焊接顶点 −67% 却 +18.6%），而 DLSS 省的是像素；且缺运动矢量/jitter/深度暴露 + 要新增 NGX SDK。**重开判据**：面积 1/4 而 fps 提升 >40%。
 21. **GLB 加载器忽略 `byteStride`**（2026-09-14）：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数**（不崩不报）⇒ **凡"支持"都要补一条会红的测试**。

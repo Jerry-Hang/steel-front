@@ -8554,6 +8554,41 @@ fps 166（比无验证层的 174 低约 5%，与"验证层有开销"一致）。
 闸门：`cargo test --release` **587 passed / 0 failed**、0 警告；
 `perf_run.ps1 -Secs 20` 中位 102.3 fps（无回归）。
 
+### 21.35 #18 结案：掩体战术在 survive 模式**不是"掩体不够"，而是被"全队冲锋"抹掉了**
+
+**(a) 先给"战术占比"配尺子**：`aidiag: move 1s` 原本只打**最远 3 只**的战术，整场分布根本没量过
+（#18 挂的"压力模式 4%"没有留在仓库里的尺子）。新增每秒一行
+`aidiag: tactic 1s Advance=…% Flank=… Ambush=… Suppress=… CoverAdvance=… Retreat=… Hold=… CoverSeek=… 共N`。
+
+**(b) 第一次实测（survive 模式 270 s / 4 波，270 个样本）**
+
+| 战术 | 占比（均值） |
+|---|---|
+| Advance | 34.7% |
+| Retreat | 24.7% |
+| Suppress | 13.7% |
+| Flank / Ambush | 13.5% / 10.0% |
+| **CoverSeek** | **0.0%（整场一次都没有）** |
+| **CoverAdvance** | **0.0%** |
+
+⇒ **不是"地图没掩体"**（defense_line 内圈就有 8 段沙袋 + 4 个角堡 + 4 道矮墙）。
+真因是 `should_charge`（≥50% 的 NPC 在追/打 → 全队冲锋）**几乎一直成立**，而冲锋覆盖把
+**CoverCrawler 也改成 Advance**，CoverSeek 升级又要求 `!ctx.charge` ⇒ 两条路一起被掐死。
+
+**(c) 改法（只豁免一个角色）**：`TacticalRole::CoverCrawler`（约 1/6，第 3 波起存在）不被冲锋覆盖，
+并允许它在冲锋期参与 CoverSeek 升级（源战术集合加上 `CoverAdvance`）。
+"冲锋 = 其余角色全队直突"的原设计不变；`Tactic::CoverSeek` 的移动本来就有"找不到掩体就直行"的兜底。
+
+**(d) 改后实测**：`CoverAdvance 0% → 7.2%`、`CoverSeek 0% → 1.8%`（合计约 9% 的样本在利用掩体）；
+通关时间 303 s → 311 s（同量级），`VUID=0 panics=0 device_lost=0`。
+
+**(e) 试过但回退**：`COVER_SEEK_RANGE` 20 → 32（想让掩护推进覆盖整段接近路线）—— 一轮实测
+CoverAdvance 反而 7.2% → 4.4%（单轮噪声级，但方向不对）⇒ 按"改动必须能被量出来"**回退到 20**，
+并把"试过、不成、为什么回退"留在常量注释里（下次不用再试一遍）。
+
+**(f) 顺带**：新工具 `tools/find_codepoint.py`（按码点定位到行号）—— 这一轮 CJK 守门红在一个
+"舰"字（U+8230，字体子集里没有），有它就不用肉眼在几万行里找。
+
 ### 21.28 联机审计：断线的人**永远站在场上** + 插值器**从来没接线**
 
 **(a) 幽灵玩家的三个环节，一个都没接**
