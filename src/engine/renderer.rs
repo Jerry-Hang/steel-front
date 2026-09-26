@@ -15357,6 +15357,24 @@ mod vk_failure_path_tests {
             "Vulkan 调用的失败不许用 if let Ok 吞掉（要 log + 降级）：\n{}",
             bad.join("\n")
         );
+
+        // 同一类静默通路的另一半（2026-09-26 补）：`<vulkan 调用>(...).ok();`
+        // —— `.ok()` 把 `Err` 变成 `None`，**编译器就不再管了**（`Result` 的 #[must_use] 失效），
+        // 是 `let _ =` / `if let Ok` 之外的第三条静默通路。
+        // ⚠️ 只查**同一行**：`.ok()` 也大量出现在非 Vulkan 调用上（`env::var(..).ok()`、
+        // `Mutex::lock().ok()`），跨行匹配会把它们全算进来 —— **会误判的检查等于没有检查**（教训 26）。
+        let calls: Vec<&str> = CALLS.iter().chain(WAIT_CALLS.iter()).copied().collect();
+        let bad_ok: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|l| !is_comment(l))
+            .filter(|l| l.contains(".ok()") && calls.iter().any(|c| l.contains(c)))
+            .collect();
+        assert!(
+            bad_ok.is_empty(),
+            "Vulkan 调用的失败不许用 `.ok()` 抹平（要 log + 降级）：\n{}",
+            bad_ok.join("\n")
+        );
     }
 }
 
