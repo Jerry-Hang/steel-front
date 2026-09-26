@@ -189,8 +189,6 @@ pub struct WaveOutSink {
     ctx: Option<Arc<win::CallbackCtx>>,
     #[cfg(target_os = "windows")]
     buffers: Vec<win::WaveBuffer>,
-    #[cfg(target_os = "windows")]
-    queued: Vec<u32>,
     silenced: bool,
 }
 
@@ -213,7 +211,6 @@ impl WaveOutSink {
                         handle,
                         ctx: Some(ctx),
                         buffers,
-                        queued: vec![0; BUFFER_COUNT],
                         silenced: false,
                     };
                 }
@@ -235,8 +232,6 @@ impl WaveOutSink {
             ctx: None,
             #[cfg(target_os = "windows")]
             buffers: Vec::new(),
-            #[cfg(target_os = "windows")]
-            queued: Vec::new(),
             silenced: true,
         }
     }
@@ -248,7 +243,19 @@ impl WaveOutSink {
         };
         let idx = (|| ctx.free.lock().ok().and_then(|mut f| f.pop()))();
         let Some(idx) = idx else {
-            return; // 全部在播：丢弃（48kHz 下 4×2048 帧 = 170ms 队列，正常帧率下够用）
+            // 全部在播：丢弃。队列是 4×2048 帧 ≈ 170ms，正常帧率下够用。
+            // 🔴 2026-09-26：这条路径以前**完全静默** —— 帧率塌到 23fps 以下（或一次长卡顿）
+            // 时用户听到的是断音，而日志里一个字都没有，与上面 truncation 那条同源。
+            // 丢弃本身是有意的（卡顿之后不该补播旧音频），**不能静默**才是要修的。
+            // （同名的 `queued` 字段已删：它只写不读，且回调线程拿不到它 ⇒ 天生是陈旧数据。）
+            if first_starved_drop() {
+                log::warn!(
+                    "audio: 4 个缓冲全在播（≈170ms 队列已满），本帧 {} 个样本被丢弃 —— \
+                     之后若多次出现，听感就是断音",
+                    samples.len()
+                );
+            }
+            return;
         };
         let b = &mut self.buffers[idx];
         let (n, truncated) = submit_plan(
@@ -276,10 +283,12 @@ impl WaveOutSink {
                 std::mem::size_of::<win::WaveHdr>() as u32,
             )
         };
-        if rc == 0 {
-            self.queued[idx] = b.hdr.dw_buffer_length;
-        } else if let Ok(mut free) = ctx.free.lock() {
-            free.push(idx);
+        if rc != 0 {
+            // 提交失败：把缓冲还回空闲表 —— 否则 4 块用完之后音频**永久静音**
+            // （回调只在真正播完时才归还，失败的这块永远不会有 WOM_DONE）。
+            if let Ok(mut free) = ctx.free.lock() {
+                free.push(idx);
+            }
         }
     }
 }
@@ -365,6 +374,17 @@ fn warn_submit_truncation_once(available: usize, capacity: usize) {
     }
 }
 
+/// 「一个空闲缓冲都没有」的丢弃是否**第一次**发生（true = 调用方该打那条 warn）。
+///
+/// 🔴 2026-09-26：这条丢弃路径以前是完全静默的 —— 而它与 `submit_plan` 的截断是同一种
+/// 处境（缓冲/时间不够 ⇒ 丢样本），那边有一次性告警，这边什么都没有：用户听到断音，
+/// 日志里查不到任何线索。抽成纯闩函数是为了能直接测（`starved_drop_warns_only_once`）。
+fn first_starved_drop() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    !WARNED.swap(true, Ordering::Relaxed)
+}
+
 pub fn open_default_sink(sample_rate: u32, channels: u16) -> DefaultSink {
     #[cfg(target_os = "windows")]
     {
@@ -380,7 +400,7 @@ pub fn open_default_sink(sample_rate: u32, channels: u16) -> DefaultSink {
 /// 单块容量/截断判定的判据（纯函数，跨平台可测 —— 不依赖声卡）。
 #[cfg(test)]
 mod tests {
-    use super::{submit_plan, FRAMES_PER_BUFFER};
+    use super::{first_starved_drop, submit_plan, FRAMES_PER_BUFFER};
 
     #[test]
     fn submit_plan_never_exceeds_source_or_capacity() {
@@ -397,5 +417,16 @@ mod tests {
         // `submit` 会按这个数去索引 `samples[i]`（越界读 = panic）。
         let (n, _) = submit_plan(3, cap);
         assert!(n <= 3, "返回的写入长度不得超过源切片长度");
+    }
+
+    /// 🔴 判据：「缓冲全满 ⇒ 丢样本」只在**第一次**告警（否则 23fps 以下会每帧刷屏）。
+    ///
+    /// 这条路径原来是完全静默的（同文件里 `submit_plan` 的截断有一次性告警，
+    /// 这边没有）—— 用户听到断音、日志里查不到线索。
+    #[test]
+    fn starved_drop_warns_only_once() {
+        assert!(first_starved_drop(), "第一次必须返回 true（要打那条 warn）");
+        assert!(!first_starved_drop(), "第二次起必须为 false（不刷屏）");
+        assert!(!first_starved_drop(), "一直保持 false");
     }
 }
