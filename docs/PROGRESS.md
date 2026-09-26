@@ -10220,3 +10220,27 @@ AGENTS 那句"绝大多数是有注释的诚实预留"现在有了数字：**109
 ⇒ **压制消失得干干净净，因为被压的东西本来就不该在**。
 其余非 `dead_code` 压制（6 × `clippy::assertions_on_constants` + 1 × `too_many_arguments`）
 都已在原处写明理由（"整条测试就是断言常量"/"参数直通"），保留。
+
+### 21.68 收尾核对：几条"文档里写了的不变量"逐条验过（含负面结果，省得下一轮重查）
+
+今晚最后一遍把"文档声称成立"的几条逐个对代码核了一遍 —— **多数是负面结果（即：文档没错）**，
+一并记下来，避免下一个人再花时间：
+
+| 声称 | 核验方式 | 结果 |
+|---|---|---|
+| `SteelFront.bat` 的 touch 列表必须含 `build.rs` 与 `build_spv_rt.rs` | 通读该 bat（137 行，自带"为什么"注释：`copy /b +,,` 会造垃圾文件、`start /b` 否则抢焦点） | ✅ 两行都在，且 `fast/smoke/package/diag` 四条支路各自正确 |
+| 全仓 `#[allow(dead_code)]` 109 处 | 正则全树统计（`src/` + `build.rs` + `build_spv_rt.rs`） | ✅ 正好 109（已按 §21.67 清到 82） |
+| 非 `dead_code` 压制都有理由 | 逐个看上下文 | ✅ 6 × `clippy::assertions_on_constants`（"整条测试就是断言常量"）+ 1 × `too_many_arguments`（参数直通）+ 1 × `unreachable_code`（已删） |
+| 代码里没有悬空的 TODO/待办 | `rg TODO/FIXME/XXX/待办`（16 处命中，逐个看） | ✅ 全是误报（`RV3D_MAP=<...xxx.toml>` 这类占位）或**已知未结案**（NAT 打洞/断线重连 = 未结案 #13） |
+| 26 个调试开关没写进 AGENTS | §21.62 的双向差集 | ✅ 已列在 §21.62（低频旋钮，不占 AGENTS 注入预算） |
+| Vulkan 句柄无泄漏 | `tools/audit_vk_resources.py` | ✅ 135 个 `vk::` 句柄字段 / **0 处只创建不释放** |
+| 非 Windows 目标没漂 | `cargo check --release --target aarch64-unknown-linux-gnu` | ✅ 0 error / 0 warning |
+| 文本文件都能被文本工具读 | 新判据 `tracked_text_files_contain_no_nul_byte`（§21.66） | ✅ 70 个文件全树 NUL=0 |
+
+**两个低优先级的"不整齐"（记下但没动）**：
+`README.md` 有 1 行 LF 混在 682 行 CRLF 里；`scripts/llm_commander.py` 有 1 行 CRLF 混在 239 行 LF 里
+（`.gitattributes` 里 `core.autocrlf` 本来就会在提交时归一化，改了只是制造 diff，无功能收益）。
+
+**收尾实机**：最终二进制（含今晚全部改动）再跑一遍冒烟 + 验证层 ——
+`VUID=0 panics=0`、击杀成立、`RESULT: ALL-OK`；`cargo build --release` **0 警告**、
+`cargo test --release` **615 passed / 0 failed**、CJK 字模闸门绿、工作树干净、全部已推送。
