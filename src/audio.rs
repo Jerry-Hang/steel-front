@@ -283,7 +283,6 @@ impl OggDecoder for NullOggDecoder {
 
 /// 播放后端 trait：接收混音器输出的交错样本，送往平台音频设备
 // sample_rate/channels 查询预留；write 已用于 SilentSink
-// sample_rate/channels 查询预留；write 已用于 SilentSink
 #[allow(dead_code)] // sample_rate/channels 查询预留；write 已用于 SilentSink（2026-09-26 编译器复查：`channels` 仍无人调用 ⇒ 压制保留）
 pub trait AudioSink {
     /// 设备采样率（Hz）

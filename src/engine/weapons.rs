@@ -28,7 +28,6 @@ pub fn tiered_damage(base: f32, tiers: &[(f32, f32)], dist: f32) -> f32 {
 }
 
 /// 武器特征：近战与投射物武器的公共接口
-// 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire
 // 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire（2026-09-26 编译器复查：name/damage/range/in_range/dps 五个方法仍无人调用 ⇒ 压制保留）
 #[allow(dead_code)] // 完整接口预留：MeleeWeapon 未接线，主循环仅用 ProjectileWeapon::fire_interval/fire（2026-09-26 编译器复查：name/damage/range/in_range/dps 五个方法仍无人调用 ⇒ 压制保留）
 pub trait Weapon {
