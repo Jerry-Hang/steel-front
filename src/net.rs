@@ -1417,6 +1417,81 @@ mod tests {
         assert_eq!(NetworkMessage::decode(&bytes), Err(NetError::InvalidName));
     }
 
+    /// 🔴 判据：**任意字节流都不许让 `decode` panic**（网络输入是不可信的）。
+    ///
+    /// 现有测试是"每种错误各一例"（坏魔数 / 坏版本 / 未知类型 / 截断 / 尾随 / 坏 UTF-8），
+    /// 而**字段层的畸形组合**没人扫过：长度前缀与实际不符、超大 count、NaN 位型、
+    /// 合法与非法 UTF-8 混排…… 这些正是伪造报文最容易踩到的路径。
+    ///
+    /// ⚠️ **第一版写成"合法头部 + 随机载荷"，被自检当场抓住**：2000 条**一条都没解出来**
+    /// （随机载荷能整体通过字段校验的概率几乎为 0）⇒ 那种写法下"不 panic"是**空洞的**。
+    /// 改成**变异模糊**：从 `sample_messages()` 的真实报文出发做 1~4 次随机变异
+    /// （改字节 / 截断 / 追加 / 改写载荷长度字段），再叠加一小部分完全随机的字节流。
+    ///
+    /// 两条不变式：① 不 panic；② 只要 `decode` 返回 `Ok`，`encode` 出来的字节必须**还能被解码**
+    /// （⚠️ 不做相等比较：随机 f32 可能撞出 NaN，而 `NaN != NaN` 会假红 —— 那是量具的错）。
+    #[test]
+    fn decode_never_panics_on_mutated_bytes_and_reencodes() {
+        let mut seed: u32 = 0x1234_5678;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let bases: Vec<Vec<u8>> = sample_messages().iter().map(|m| m.encode()).collect();
+        let mut ok_count = 0usize;
+        for i in 0..3000 {
+            let mut buf = if i % 8 == 7 {
+                // 每 8 条里放一条完全随机的（覆盖头部校验路径）
+                let len = (next() % 256) as usize;
+                (0..len).map(|_| (next() >> 24) as u8).collect::<Vec<u8>>()
+            } else {
+                bases[(next() as usize) % bases.len()].clone()
+            };
+            // ⚠️ 变异要**偏向载荷**：五字节头部里有"长度必须与实际一致"的硬约束，
+            // 在头部随便改一个字节 ⇒ 消息直接作废，整条测试就退化成"只测头部校验"（第一版栽在这）。
+            if buf.len() > HEADER_LEN {
+                match next() % 10 {
+                    0..=4 => {
+                        // 载荷里翻一个字节：多数仍能解析 ⇒ 真正走到字段层的校验
+                        let at = HEADER_LEN + (next() as usize) % (buf.len() - HEADER_LEN);
+                        buf[at] = (next() >> 24) as u8;
+                    }
+                    5..=6 => {
+                        let at = HEADER_LEN + (next() as usize) % (buf.len() - HEADER_LEN);
+                        buf[at] = (next() >> 24) as u8;
+                        let at2 = HEADER_LEN + (next() as usize) % (buf.len() - HEADER_LEN);
+                        buf[at2] = (next() >> 24) as u8;
+                    }
+                    7 => {
+                        // 长度字段与实际不符（必须被 Truncated/TrailingData 拒掉）
+                        let fake = (next() % 1024) as u16;
+                        buf[3] = (fake >> 8) as u8;
+                        buf[4] = fake as u8;
+                    }
+                    8 => {
+                        let cut = HEADER_LEN + (next() as usize) % (buf.len() - HEADER_LEN);
+                        buf.truncate(cut);
+                    }
+                    _ => buf.push((next() >> 24) as u8),
+                }
+            }
+            if let Ok(msg) = NetworkMessage::decode(&buf) {
+                ok_count += 1;
+                let re = msg.encode();
+                assert!(
+                    NetworkMessage::decode(&re).is_ok(),
+                    "重编码后的字节必须仍可解码（第 {i} 条）"
+                );
+            }
+        }
+        // 自检（教训 27）：变异模糊**必须**有一部分仍然解得出，否则这条测试没走到解析层
+        println!("decode fuzz: {ok_count}/3000 条变异报文被接受（其余按错误拒绝，全程无 panic）");
+        assert!(
+            ok_count >= 50,
+            "3000 条变异报文只解出 {ok_count} 条 ⇒ 测试大概没生效（第一版就是这么被抓的）"
+        );
+    }
+
     #[test]
     fn lerp_endpoints() {
         let prev = state(0.0, 0.0, 0.0, 0.0);
