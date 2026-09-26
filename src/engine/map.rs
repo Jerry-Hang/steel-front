@@ -1184,4 +1184,107 @@ required = 2
         assert!(list[1].ends_with("b.toml"));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// 🔴 判据：**手写的 TOML 解析器不许被畸形输入打崩**（地图是用户可改的**不可信**输入）。
+    ///
+    /// 本仓的地图解析是零依赖手写实现（`map.rs` 里那套 `parse_*`），
+    /// 现有测试都是"正常地图能解析""几类错误带行号"——**畸形组合**没人扫过：
+    /// 半个数组、未闭合的引号、嵌套到一半的内联表、随机标点……
+    /// 与 `net.rs` 的报文一样，这类输入的正确行为只有一个：**要么 Ok、要么带信息的 Err，绝不 panic**。
+    ///
+    /// 变异从 `FULL_MAP`（真实地图）出发：字符替换 / 按字符边界截断 / 追加伪造行 / 整串随机，
+    /// 字符表里含 `[]=,.#{}` 这些结构字符与中文（字符串路径也要覆盖）。
+    /// 自检（教训 27）：必须有一部分仍然解析成功，否则这条测试没走到解析层。
+    #[test]
+    fn map_parser_never_panics_on_mutated_input() {
+        let mut seed: u32 = 0x9E37_79B9;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        const CHARS: &[char] = &[
+            '[', ']', '=', ' ', '\n', '"', '\'', ',', '.', '#', '{', '}', '0', '1', '9', '-',
+            '+', '_', 'a', 'z', '硫', '磺',
+        ];
+        // 引号内的字符位置（改这些**不破坏结构**；第一版乱改任意位置 ⇒ 0/3000 全废，测试等于没跑）
+        fn quoted_indices(s: &str) -> Vec<usize> {
+            let mut out = Vec::new();
+            let mut inside = false;
+            for (i, ch) in s.chars().enumerate() {
+                if ch == '"' {
+                    inside = !inside;
+                } else if inside {
+                    out.push(i);
+                }
+            }
+            out
+        }
+        fn digit_indices(s: &str) -> Vec<usize> {
+            s.chars()
+                .enumerate()
+                .filter(|(_, c)| c.is_ascii_digit())
+                .map(|(i, _)| i)
+                .collect()
+        }
+        let mut ok_count = 0usize;
+        for i in 0..3000 {
+            let mut s = FULL_MAP.to_string();
+            match next() % 10 {
+                0..=4 => {
+                    // 改引号里的一个字符（字符串内容变、结构不变）⇒ 应当照常解析成功
+                    let cand = quoted_indices(&s);
+                    if let Some(&idx) = cand.get((next() as usize) % cand.len().max(1)) {
+                        let c = ['a', 'z', '0', '9', '硫', '磺'][(next() as usize) % 6];
+                        s = s
+                            .chars()
+                            .enumerate()
+                            .map(|(k, ch)| if k == idx { c } else { ch })
+                            .collect();
+                    }
+                }
+                5..=6 => {
+                    // 改一个数字位（0↔9 互换）⇒ 数值变、结构不变
+                    let cand = digit_indices(&s);
+                    if let Some(&idx) = cand.get((next() as usize) % cand.len().max(1)) {
+                        let c = if next() % 2 == 0 { '9' } else { '0' };
+                        s = s
+                            .chars()
+                            .enumerate()
+                            .map(|(k, ch)| if k == idx { c } else { ch })
+                            .collect();
+                    }
+                }
+                7 => {
+                    let idx = (next() as usize) % s.chars().count().max(1);
+                    let c = CHARS[(next() as usize) % CHARS.len()];
+                    s = s
+                        .chars()
+                        .enumerate()
+                        .map(|(k, ch)| if k == idx { c } else { ch })
+                        .collect();
+                }
+                8 => {
+                    let n = (next() as usize) % (s.chars().count() + 1);
+                    s = s.chars().take(n).collect();
+                }
+                _ => {
+                    let c = CHARS[(next() as usize) % CHARS.len()];
+                    s.push('\n');
+                    s.push(c);
+                    s.push('=');
+                    s.push_str("[[[[");
+                }
+            }
+            match parse_map_toml(&s) {
+                Ok(_) => ok_count += 1,
+                // 错误信息必须非空 —— 这是"失败要能查"的底线（带行号更好，但那不是本测试的判据）
+                Err(e) => assert!(!e.is_empty(), "第 {i} 条的错误信息不能为空"),
+            }
+        }
+        println!("map fuzz: {ok_count}/3000 条变异地图仍可解析（其余带信息拒绝，全程无 panic）");
+        assert!(
+            ok_count >= 50,
+            "3000 条里只解出 {ok_count} 条 ⇒ 测试没走到解析层"
+        );
+    }
 }
