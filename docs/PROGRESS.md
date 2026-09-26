@@ -10060,3 +10060,30 @@ MEDIAN PAIRED DELTA = -7.68 fps (-5.51%)   sign test 0/4   aa2 臂内极差 24.1
 
 ⇒ **不把它们塞进 AGENTS**（注入预算只有 ~1 KB 余量，而这 26 个是低频调试旋钮）；
 把它们记在这里 + 脚本可重跑，比塞进 AGENTS 更合算。
+
+### 21.63 "未知输入 ⇒ 看起来合理的默认值"扫描：解析层 39 处里 2 处要改（`128eec3`）
+
+**方法**：`logs/default_audit.py` 把解析/IO 模块（`config.rs` / `map.rs` / `net.rs` /
+`llm_cmd.rs` / `assets.rs`）里**所有** `.unwrap_or*`（39 处）连上下文打出来逐条看 ——
+今天已经证明这条形状（`byteStride` → `componentType` → `type`）是本仓头号静默 bug 来源。
+
+**要改的 2 处**（都在 `assets.rs::read_acc`，都是 glTF 的**必填**字段）：
+
+| 字段 | 旧兜底 | 后果 | 修后 |
+|---|---|---|---|
+| `count` | `unwrap_or(0.0)` | 读回 0 个元素 ⇒ 最终报 **"缺少 POSITION"** —— 把"accessor 坏了"说成"模型没导出位置"，**指向错方向** | `Err("accessor 缺 count")` |
+| `componentType` | `unwrap_or(5126.0)` | **默认按 FLOAT 读**：VEC4+u16 的顶点色被当浮点数 ⇒ **静默错色** | `Err("accessor 缺 componentType")` |
+
+红测两条（修前都红，其中 `count` 那条还断言 **`!err.contains("缺少 POSITION")`**，
+专门钉死"不许甩锅给属性缺失"）；15 条 GLB 测试（含真实资产 `ak12`/道具包）全绿
+⇒ 真实资产没有一个依赖这两条兜底。
+
+**其余 37 处逐条看过，均不改**：`config.rs` 7 处 = "解析失败保留原值"的容错加载（手改配置场景，
+合理）；`map.rs` 4 处 `rule_*().unwrap_or(0)` **已被今天新增的
+`rule_parameters_are_required_per_kind` 接住**（`map.rs:1014` 那条断言就是"不许静默取 0"）；
+`llm_cmd.rs` = Mutex 中毒取内层 / JSON 缺字符串取空串；`net.rs` = 时钟回退；
+`assets.rs` 其余 = baseColorFactor 缺省 0.7、byteOffset 可选（规范就是可选）、
+`stride.unwrap_or(step * comps)`（有注释的既定语义）。
+
+⇒ 一条可复用的规矩：**扫描这类形状时，"规范里是必填还是可选"才是判据** ——
+必填字段带兜底 = 缺陷；可选字段带兜底 = 正常。
