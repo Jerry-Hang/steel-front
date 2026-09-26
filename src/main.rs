@@ -4037,6 +4037,62 @@ mod tests {
         );
     }
 
+    /// 🔴 判据：**入库的文本文件里不许有 NUL 字节**（2026-09-26 实测命中 1 处）。
+    ///
+    /// 存在理由：`docs/HANDOFF-soldier.md` 里藏着一个 NUL —— 就在「· 0 警告 ·」那句里，
+    /// `0` 被写成了 `0x00`。后果是**文本工具到此为止**：`read` 直接判定 "binary file" 拒绝读取，
+    /// 按行处理的脚本也会在那行出怪事 —— 而在终端里它只显示成空白，**完全看不出来**。
+    /// 这与教训 36 同族：文件"看着好好的"，工具却读不了。
+    ///
+    /// 扫描面 = `docs/*.md` + `src/**/*.rs` + `build.rs`/`build_spv_rt.rs`；
+    /// 自检：扫到的文件数必须 ≥ 30，否则路径写错也会静默通过（教训 27）。
+    #[test]
+    fn tracked_text_files_contain_no_nul_byte() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, out);
+                    } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir("docs") {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                    files.push(p);
+                }
+            }
+        }
+        walk(std::path::Path::new("src"), &mut files);
+        for extra in ["build.rs", "build_spv_rt.rs"] {
+            let p = std::path::PathBuf::from(extra);
+            if p.exists() {
+                files.push(p);
+            }
+        }
+        assert!(files.len() >= 30, "只扫到 {} 个文本文件，路径大概不对", files.len());
+        let bad: Vec<String> = files
+            .iter()
+            .filter_map(|p| {
+                let b = std::fs::read(p).ok()?;
+                let at = b.iter().position(|x| *x == 0)?;
+                let line = b[..at].iter().filter(|x| **x == b'\n').count() + 1;
+                Some(format!("{} 第 {line} 行附近（字节偏移 {at}）", p.display()))
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "文本文件里含 NUL 字节 ⇒ 文本工具会把它当二进制拒绝读取：\n{}",
+            bad.join("\n")
+        );
+    }
+
     /// 🔴 每把 GLB 枪模的索引必须落在顶点数以内，且顶点不得含 NaN/Inf。
     ///
     /// 存在理由（2026-09-15）：**按 2 切枪（AK-104）会直接把设备打掉**
