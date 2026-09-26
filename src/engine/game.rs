@@ -1185,9 +1185,9 @@ pub struct Game {
     /// `main.rs` 每秒读一次并清零（`Cell` = 只读方法也能累加）。
     pub occl_us: std::cell::Cell<u64>,
     pub occl_calls: std::cell::Cell<u64>,
-    /// 渲染用「玩家看得见否」缓存（每个 NPC 一个 bool）+ 分摊刷新的帧计数。
-    /// 判据与实测依据见 `NPC_VIS_REFRESH_FRAMES`；`npc_vis_scans` = 累计重算次数（诊断/单测用）。
-    npc_vis: Vec<bool>,
+    /// 渲染用「玩家看得见否」缓存：逐槽位 `(npc id, 可见)` —— 带 id 是为了在**下标前移**
+    /// （有人死亡）时立刻发现错位，见 `refresh_npc_visibility`。`npc_vis_scans` = 累计重算次数。
+    npc_vis: Vec<(usize, bool)>,
     npc_vis_frame: u32,
     pub npc_vis_scans: std::cell::Cell<u64>,
     /// 开火模式（B 键循环切换）
@@ -3693,19 +3693,27 @@ impl Game {
     /// 分摊（而不是"每 N 帧全体重算一次"）是为了让过时数据**散在几个 NPC 上**，
     /// 不会整场一起跳变 —— 视觉上只是一两个士兵晚 40ms 才消失。
     ///
+    /// 🔴 槽位里存的是 **`(npc.id, 可见)` 而不是单一个 bool**：NPC 死亡会把后面所有元素
+    /// 的**下标前移**（`npcs.retain` / `swap_remove`），只按下标缓存 ⇒ 死一个人之后，
+    /// 后面每个人的标志都变成了**前一个人的**（最多错 3 帧）。带上 id 就能一眼看出错位：
+    /// id 不符 ⇒ 无论槽位轮没轮到，当帧立刻重算（这是"精确性"那一边，不受分摊限制）。
+    ///
     /// 新出现的 NPC 一律**先按可见处理**（fail-open）：宁可多画一个也不让新兵隐形，
     /// 它的第一次刷新最迟 N−1 帧后到。
     pub fn refresh_npc_visibility(&mut self) {
         let n = self.npcs.len();
         if self.npc_vis.len() != n {
-            self.npc_vis.resize(n, true);
+            self.npc_vis.resize(n, (usize::MAX, true));
         }
         let shift = self.npc_vis_frame % NPC_VIS_REFRESH_FRAMES;
         for i in 0..n {
-            if (i as u32 + shift) % NPC_VIS_REFRESH_FRAMES != 0 {
+            let due = (i as u32 + shift) % NPC_VIS_REFRESH_FRAMES == 0;
+            // 下标错位（有人死了）：立刻重算，不等自己的槽位
+            let shifted = self.npc_vis[i].0 != self.npcs[i].id;
+            if !due && !shifted {
                 continue;
             }
-            self.npc_vis[i] = !self.npc_occluded(i);
+            self.npc_vis[i] = (self.npcs[i].id, !self.npc_occluded(i));
             self.npc_vis_scans.set(self.npc_vis_scans.get() + 1);
         }
         self.npc_vis_frame = self.npc_vis_frame.wrapping_add(1);
@@ -3713,8 +3721,10 @@ impl Game {
 
     /// 上一帧 [`Game::refresh_npc_visibility`] 的结果（`true` = 玩家看得见）。
     /// 索引越界返回 `true`（fail-open，理由同上）。
-    pub fn npc_visibility_flags(&self) -> &[bool] {
-        &self.npc_vis
+    pub fn npc_visibility_flags(&self) -> Vec<bool> {
+        // 每帧一次（255 个 bool）：把 `(id, flag)` 摊平成调用方要的形状。
+        // 就地返回 `&[bool]` 需要第二份并行数组，收益不值得（一次 255 字节的拷贝 ≈ 几十纳秒）。
+        self.npc_vis.iter().map(|(_, v)| *v).collect()
     }
 
     /// 取走本帧开火累计的后坐力（pitch/yaw 弧度），由 main.rs 施加到相机
@@ -8078,6 +8088,34 @@ mod tests {
             total, n as u64,
             "{} 帧内每个 NPC 必须恰好被重算一次，实际每帧：{:?}",
             NPC_VIS_REFRESH_FRAMES, per_frame
+        );
+    }
+
+    /// 判据：**NPC 死亡导致下标前移时，缓存必须立刻改判**（不能把前一个人的可见性
+    /// 用在后一个人身上）。
+    ///
+    /// 真机代价（2026-09-26 复查）：槽位以前只存一个 bool，而 `npcs` 用 `retain`/`swap_remove`
+    /// 删除 ⇒ 死一个人之后，后面每个人的标志都是前一个人的，最多错 N−1 帧。现在槽位存
+    /// `(id, 可见)`：id 不符就立刻重算。
+    #[test]
+    fn npc_visibility_cache_notices_index_shifts() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.truncate(4);
+        let starts = game.npc_vis_scans.get();
+        game.refresh_npc_visibility();
+        assert_eq!(game.npc_visibility_flags().len(), 4);
+        let after_first = game.npc_vis_scans.get();
+        assert!(after_first > starts, "首次必须建缓存");
+        // 删掉 0 号（后面三人下标前移）→ 下一次 refresh 里**那三个人都必须重算**
+        game.npcs.remove(0);
+        let before = game.npc_vis_scans.get();
+        game.refresh_npc_visibility();
+        let rescanned = game.npc_vis_scans.get() - before;
+        assert!(
+            rescanned >= 3,
+            "下标前移后每个受影响的人都要立刻重算，实际只重算了 {}",
+            rescanned
         );
     }
 
