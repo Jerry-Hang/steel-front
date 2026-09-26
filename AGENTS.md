@@ -121,7 +121,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
   参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
   🔴 阴影图**默认隔帧重画**（`RV3D_SHADOW_EVERY`，默认 2，`=1` 回到逐帧）：每帧会动的只有 NPC
-  箱子（太阳/道具/地形都静止）⇒ 只让影子旧一帧，实测中位帧率 101.8→161.2、冻结机位整幅差异 0.014%。
+  箱子（太阳/道具/地形都静止）⇒ 只让影子旧一帧。**实测 +25% 平均帧率**（4 轮/臂交替，
+  126.68 vs 101.39，两臂极差 ≤0.6%）—— 早先写的「+58%」是量错 fps 口径，已撤回（见教训 43）。
   排阴影问题先用 **`RV3D_DEBUG_SHADOW=1`**（R=frag_depth/G=阴影图深度均值），别再静态推矩阵。
 
 **顶点格式与着色**
@@ -206,8 +207,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   缺陷：`wait_for_fences`/`acquire_next_image` 以前用 **`u64::MAX`** 无限等 ⇒ 现在 acquire 1s
   （连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s（连 3 次 ⇒ `gpu_stalled`，之后 `render()` 直接返回：
   **画面静止但进程与输入还在**，实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
-  **判据**：`rg 'u64::MAX' src/engine/renderer.rs` 不应出现在等待处；测试 `swapchain_waits_are_bounded`
-  钉住那几个常量有限、`no_unbounded_wait_on_vulkan_calls` 会在**任何**等待里再出现 `u64::MAX` 时红。
+  **判据** = 测试 `swapchain_waits_are_bounded` + `no_unbounded_wait_on_vulkan_calls`（任何等待里再出现 `u64::MAX` 即红）。
   `perf_run.ps1` 保持 IMMEDIATE。
 - 🔴 **成功 acquire 之后不许提前 return**（`image_available` 信号量**不随交换链重建而重建**）：
   acquire 的 `suboptimal` 只登记、本帧照常 present，重建一律放到 present **之后**；
@@ -496,7 +496,7 @@ cargo test --release
 # 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK：命中 + 击杀 + VUID=0）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
 # 旧的 run_gameplay_smoke.ps1 走 SendInput，在本机结构性跑不通（见铁律 C），别用它判断回归
-# LLM 战术指挥通道会战（红蓝 128v128，由服务端下命令；实测 14 条命令全被采纳）
+# LLM 战术指挥会战（红蓝 128v128，服务端下令；实测 14 条命令全被采纳）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
 # 截图取证（finally 里 taskkill + 硬超时）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
@@ -504,9 +504,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag or
 powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
 # 无焦点接管一局（PostMessage 注入：不抢前台、不抓光标、不锁指针）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm_play.ps1 -Tag demo1 -TurnPx 1200 -WalkMs 1500
-# 输入路由诊断（报游戏线程焦点，并把同一按键用 SendInput / PostMessage 各投一次）
+# 输入路由诊断（同一按键用 SendInput / PostMessage 各投一次，报游戏线程焦点）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\input_probe.ps1
-# 输入归还校验（杀进程 + 解除 ClipCursor + 复核后给 OK/FAIL）
+# 输入归还校验（解除 ClipCursor + 复核，给 OK/FAIL）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
 # 心跳看门狗：**常驻**后台即可，不要每次运行临时 arm 一个（见教训 19）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
@@ -533,7 +533,13 @@ release_input.ps1 取代）。
   **链式保留** `~/.dsh/gates/hooks` 的 pre-push 密钥门 —— 直接改指会把它**静默**关掉）。
   规则 = 路径白名单 + 路径拒绝表 + 内容扫描，**默认拒绝**；放行要改 `tools/commit_guard.py` 的白名单（改动即留痕）。
   手动巡检 `python tools/commit_guard.py --scan`；历史审计 `python tools/history_secret_audit.py`。
-- **新 `.ps1` 必须纯 ASCII**：PS 5.1 按 ANSI 读 BOM-less 文件，中文写在**字符串字面量**里会破坏引号配对（教训 7）。
+- **`scripts/*.ps1` 的每一行都不许以非 ASCII 字节结尾**（判据 = 测试
+  `powershell_scripts_never_end_a_line_with_a_non_ascii_byte`）：PS 5.1 按 ANSI(GBK) 读**无 BOM** 的 .ps1，
+  行尾的中文会被当成 GBK 首字节、**把行尾本身当第二个字节吃掉 ⇒ 下一行并进这一行**；
+  若这行是注释，**下一行代码被静默注释掉**（2026-09-26 一次审计命中 5 个脚本：
+  `compile_pt.ps1` 丢了 `$ErrorActionPreference='Stop'`、`pt_power_ab.ps1` 丢了 `function Run-Case`、
+  `ask_qianwen.ps1` 丢了 `$ix`、`release_input.ps1` 丢了 `$alive = 0`、`run_gameplay_smoke.ps1` 丢了四处）。
+  中文写在行中间无害（`send_work.ps1` 的消息体就是中文），**行尾必须是 ASCII**。
 
 ---
 
@@ -576,7 +582,7 @@ release_input.ps1 取代）。
 
 > 每条只留一行结论 + 判据；案例细节在 `docs/PROGRESS.md`。
 
-- **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜""−X 半场占优"都撤回。⚠️ 军情 JSON 的 `击杀` = **该营自身阵亡数**，当战果读信号是反的。
+- **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜"等结论撤回。⚠️ 军情 JSON 的 `击杀` = **该营自身阵亡数**。
 - **障碍 marker 可见尺寸**（2026-09-17 `50b61b9`）：半幅唯一真源 = `geom::Shape::template_half_extent(axis)`；测试 `marker_visible_size_matches_aabb`。
 
 0. **`PrintWindow` 对非前台窗口返回冻结帧**（2026-09-14）：症状不复现（同刻两图差异 1.36%）。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)` = `PW_RENDERFULLCONTENT`。
@@ -588,29 +594,29 @@ release_input.ps1 取代）。
 6. **`svd_63` 未入库（仍是 TODO）**：源图含两把重叠枪身 + 独立瞄具，`install_guns.py` 仍 SKIP；需人工删掉重叠枪身后装为 `svd12`。
 7. **D12 士兵近距观感**（2026-09-13）：`soldier.glb` 经 `cmd_draw_indexed(…, SOLDIER_INSTANCE_BASE)` 实例化；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画与两套队色顶点变体（`docs/HANDOFF-soldier.md`）。
 8. **D4 墙缝天空亮条 / 悬浮亮条**（2026-09-19，数值巡检）：檐梁 139–144 < 天空 166 ⇒ 非缺陷。判据 = `tools/patrol.py` + 行亮度（**排除小地图列**）。
-9. **mesh 着色器过不了严格 `spirv-val`**（2026-09-15）：根因 = naga-30 给非 Block 类型写 `Offset`；`build.rs::strip_workgroup_explicit_layout` 剥掉它。🔴 **只剥 Workgroup 可达类型**（带 `Block` 的动一字节即缓冲错位），两条测试锁两个方向。
+9. **mesh 着色器过不了严格 `spirv-val`**（2026-09-15）：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**，两条测试锁两个方向。
 10. **PT 512 盒上限静默截断**（2026-09-14）：512 → 1024 一次分配 + 一次性告警（0.92 → 1.84 MB）。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 按像素重投影复用，或运动自适应 spp。`signature()` 量化已分层（位置 ~0.5m / 朝向 ~3° / 光照 ~0.01），**勿回退到 1mm**。**另欠**：PT 曝光仍硬编（`main.rs` 的 `exposure: 0.4` 是标定值，未进 `config.rs`/设置面板）。
-12. **`MAX_RIGID_BODIES` vs `MAX_AI` 溢出静默丢弃**（2026-09-14）：两个常量都已不存在；但「静默丢弃」这个模式仍要防 —— 超容处已补 `Renderer::warn_npc_cap_once`。
-13. **联网：NAT 打洞仍 TODO**；UDP 已有 Input/Snapshot + 插值 + 超时 + **离场清理**，快照位置修正（>3m 硬对齐）与实体插值渲染**已接线**（2026-09-26，见 `scripts/…`/`net.rs` 单测）。**仍未做**：NAT 打洞（`rdv_register/rdv_resolve` 只有注册与查询）、服务端重放/回滚（无 client-side prediction）、双进程真机验证。
-14. **道具进阴影 pass**（2026-09-14）：道具 + 士兵两处都已补；🔴 **剔除必须用光源视锥**（照抄相机视锥 ⇒ 影子随视角缺块）。
+12. **溢出静默丢弃**（2026-09-14）：两个旧常量已不存在；模式仍要防 —— 超容处有 `Renderer::warn_npc_cap_once`。
+13. **联网**（2026-09-26）：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染已接线（`net.rs` 单测）。**仍未做**：NAT 打洞（只有注册/查询）、服务端重放/回滚（无 client-side prediction）、双进程真机验证。
+14. **道具进阴影 pass**（2026-09-14）：已补；🔴 剔除必须用**光源**视锥（照抄相机视锥 ⇒ 影子随视角缺块）。
 15. **阴影 `normal_bias` 未使用**（2026-09-14）：一直在用；顺手清了三处**陈旧** `#[allow(dead_code)]` ⇒ ⚠️ 其余 `#[allow]` **必须保留**。
 16. **`tests/rayquery_probe.rs` 被改成 `.bak` 隔离**（2026-09-14）：文件已不存在。
-17. ✅ **`survive` 5 波真机首次通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；驱动 `scripts/run_survive_pm.ps1` + `survive_pm.py`（口径 `RV3D_INVINCIBLE=1`，失败分支用 `-NoInvincible` 验过）。通关判据：`VICTORY (288s)`、`waves cleared ['1'..'5']`、`VUID=0 panics=0 device_lost=0`、`RESULT: ALL-OK`。**剩下的只是枪法**（理想 ≈3.9 发/杀 vs 实际 12）。
-18. ✅ **CoverSeek 占比偏低：2026-09-26 结案 —— 不是"掩体不够"，是被"全队冲锋"抹掉了**。实测（`RV3D_AI_DIAG=1` 的 `aidiag: tactic 1s` 分布，survive 270s）**CoverSeek/CoverAdvance 整场 0%**：`should_charge`（≥50% 在追/打 → 全队冲锋）几乎一直成立，把 CoverCrawler 也改成 Advance，而升级又要求 `!charge`。改法 = **只豁免 CoverCrawler**（约 1/6，第 3 波起）⇒ CoverAdvance 7.2% / CoverSeek 1.8%。**试过 `COVER_SEEK_RANGE` 20→32 但一轮实测没支持它，已回退**（判据留在常量注释里）。
-19. **呈现层欠账**：毛玻璃菜单非真模糊（需 shader 后处理采样主 pass）。~~第一人称枪模动画~~ **已补**（2026-09-26：后坐/行走摆动/切枪/ADS 插值本来就有，本轮补了**冲刺持枪姿态 / 换弹动作 / 静止呼吸**；判据 = `RV3D_GUN_DIAG=1` 的 `gundiag:` 行 + `scripts\run_gunpose_probe.ps1`）。
+17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY`、`waves cleared ['1'..'5']`、`VUID=0 panics=0 device_lost=0`、`RESULT: ALL-OK`（harness = `scripts/run_survive_pm.ps1`）。
+18. ✅ **CoverSeek 占比偏低结案**（2026-09-26）：不是"掩体不够"，是被"全队冲锋"抹掉了 —— 只豁免 `CoverCrawler` ⇒ CoverAdvance 7.2% / CoverSeek 1.8%。`COVER_SEEK_RANGE` 20→32 试过、无实测支持，已回退。判据 = `RV3D_AI_DIAG=1` 的 `aidiag: tactic 1s`。
+19. **呈现层欠账**：毛玻璃菜单非真模糊（需 shader 后处理）。第一人称枪模动画**已补**（2026-09-26：冲刺/换弹/静止呼吸；判据 = `RV3D_GUN_DIAG=1` 的 `gundiag:` 行 + `scripts\run_gunpose_probe.ps1`）。
 20. ✅ **DLSS：不接**（2026-09-25，`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（像素面积减到 1/4 只 +12%、焊接顶点 −67% 却 +18.6%），而 DLSS 省的是像素；且缺运动矢量/jitter/深度暴露 + 要新增 NGX SDK。**重开判据**：面积 1/4 而 fps 提升 >40%。
 21. **GLB 加载器忽略 `byteStride`**（2026-09-14）：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数**（不崩不报）⇒ **凡"支持"都要补一条会红的测试**。
 22. **`data/` 历史残留**（2026-09-13）：62 文件 → 只留 3 个被引用的。
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**（2026-09-25）：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT`。**⇒ 开 `RV3D_VALIDATION=1` 必加 `DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1`，不要去改引擎。**
 24. **广场"坑"**（2026-09-19）= 水平面绕序反了（判据 `horizontal_winding_tests`）。
-25. ✅ **`ai_us` 单帧尖峰（41.6ms）**（2026-09-25）：**它是出生点小连通域 bug 的下游症状**。`ai_us` 量的不是 AI —— 它是 `update_projectiles + update_ai + update_waves + update_objectives` 四段之和（现有 `aidiag: stage 1s`）；压力模式 255 只实测四段之和 ≡ `ai_us`、100% 在 `update_ai`（中位 6996 µs/s）、`astar calls` 中位 0 ⇒ 无尖峰。
+25. ✅ **`ai_us` 单帧尖峰**（2026-09-25）：是出生点小连通域 bug 的下游症状。`ai_us` = `update_projectiles + update_ai + update_waves + update_objectives` 四段之和（`aidiag: stage 1s`）；压力模式 255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰。
 
 ---
 
 ## 教训清单（跨迭代去重合并）
 
-> 42 条，每条都真的付过代价。**只留可执行的判据**，案例细节见 `docs/PROGRESS.md`。
+> 43 条，每条都真的付过代价。**只留可执行的判据**，案例细节见 `docs/PROGRESS.md`。
 
 1. **新结论与旧约束冲突时，必须删掉旧的那条**（本文件曾同时存在同一铁律的"错误版 + 更正版"）。
 2. **先读文档，再动手**（曾花大半天重新发现用户三天前写下的结论）。
@@ -635,7 +641,7 @@ release_input.ps1 取代）。
 21. **跨进程读窗口尺寸前必须 `SetProcessDPIAware()`**（本机 DPI 1.5x：`GetClientRect` 报 1706x1066 而真实 2560x1600 ⇒ 注入坐标整体偏 1.5 倍且不报错）。
 22. **几何/坐标换算的前提假设要么写注释、要么加断言**（开场多按了 1.5 秒 W 打破"玩家在原点"⇒ 38 发点射命中零）。**回路收敛 ≠ 打中了正确的东西。**
 23. **怀疑配置没生效时，先用能正确解码的工具复核再动手"修"**（教训 8 的另一面）。
-24. **单次 A/B 说明不了任何事**：必须「互换对照 + 无处理对照」，先确认对照组本身没有一边倒。⚠️ **< ~5% 的帧率差必须多轮重复**（教训 35）。
+24. **单次 A/B 说明不了任何事**：必须「互换对照 + 无处理对照」，先确认对照组本身没有一边倒。⚠️ **小于 A/A 噪声底的差不算数**（见教训 43 的 `aa_probe.ps1`）。
 25. **"做完了"要有可判定的数字标准**；动手前把契约量出来，每次产出都比一遍。
 26. **安全网的假警报和漏报一样有害**：判定要允许收敛窗口（重试），不能只查一次 —— 会喊狼来了的脚本会训练人不再当回事。
 27. **🔴 先确认你的测量工具测的是你以为的东西**（一个会话为此栽了六次：键码空间 / 待测区域含小地图 / 均值只留 1 位小数 / 全图 diff 含 NPC / 读错文件 / 探针里写了 `break` ⇒"没测到"与"测到 0"分不清）。**判据：任何量化结论之前，先用一个"必然能测出差异"的已知变化验一次工具。**
@@ -646,7 +652,7 @@ release_input.ps1 取代）。
 32. **"整类地改"只能否证、不能定位**（工具与半径判据见教训 17）。
 33. **🔴 论及资产是否"合理"之前先走完证据链**：名字 → `glb_probe.py` 尺寸 → 生成器规格表（连错三轮的根因都是每轮只补一个证据源）。
 34. **🔴 参数语义要读注释，别靠"同一套网格"外推**；另一面：**观感改善只能证明"改动有效果"，不能证明"数值变对了"**。
-35. **🔴 同一份代码跑两次也有 ~3% 的差异**（同一二进制两次中位 fps 69.7 / 71.8）⇒ **小于 ~5% 的帧率差必须多轮重复才能开口**；单次 A/B 只能证伪"巨大回归"。
+35. **同一份代码跑两次的差异**：口径、A/A 工具与噪声底见教训 43（旧的 ~3% 与 ~5% 门槛都来自错的 fps 口径）。
 36. **🔴 「工具跑不起来」本身就是一条要修的缺陷**（验证层因 mesh.spv 布局被拒而灰屏、被写进文档当"已知限制"后再没人开过 ⇒ 期间所有渲染改动都没有验证层兜底；修掉根因当天一开就报出两条一直存在的 VUID）。**⇒ 任何"这个工具用不了"都要当场问根因，修好后的第一个动作就是重跑它。**
 37. **🔴 截图是「崩溃前的最后一帧」**："改动毫无效果"之前先 grep `has been lost` / `panicked`（2026-09-15 查弹孔时依次否掉了实例/矩阵/颜色/尺寸/遮挡，而两张 A/B 图都是设备 lost 后不再更新的死画面）。
 38. **🔴 时间步相关判据不要拿"刚出生的物体"去比**：`y <= ground + 0.05` 对脚底出手的手榴弹在 ≥108fps 时恒真 ⇒ 原地引爆。**⇒ 任何 `spawn → 第一帧就判落地/越界/自碰`，先问"dt 缩小 10 倍还成立吗"，并让测试跑多个帧率档。**
@@ -654,3 +660,4 @@ release_input.ps1 取代）。
 40. **🔴 "某个面没画出来"先查绕序/背面剔除，再查几何参数**（代价 = 两天）：本管线水平面与竖直面的正面约定相反（CLOCKWISE + shader Y 翻转），立方体顶/底面与 mesh 圆柱盖长期反绕 ⇒ 顶面恒被上方剔除，一个绕序 bug 伪装成"建模/透视/烘焙"。**⇒ 两个一次重建的探针足以定性：可疑面片涂不可能色（顶面→绿）、可疑体积涂红；回归判据 `horizontal_winding_tests`。**
 41. **断言"构件没渲染"前先确认相机在它的正面 + 它在不在别的体块里**（shop1 从街北拍商铺误报"没有雨棚"；cp1 反向实锤残骸车/帐篷整个埋进围合板楼）⇒ `checkpoint_props_stay_out_of_rows`。
 42. **🔴 阈值型分支的测试必须取「跨过阈值」的输入，否则等于没测**：`survive` 的 `rule.waves` 与 `WAVES_PER_LEVEL`(3) 的比较就是这种分支 —— 旧测试用 `waves = 2`（低于阈值）一路绿，而线上地图用 5 ⇒ 升关那条真实路径**从没被执行过**。**⇒ 看到 `>= N` / `> N` / `min(N, …)` 这类比较，测试里必须给"刚好越过"的那一档；线上的真实取值（TOML/配置）就是必须覆盖的那一档。**
+43. **🔴 帧率口径：写进日志的 `fps` 必须是「采样窗口内帧数 / 窗口时长」**，不能是"某一帧的 `1/dt`"。2026-09-26：旧 `perf_log` 把调用方的瞬时 `1/dt` 当 fps，而同一行的 `frame_us` 是**另一帧**的 render 耗时 ⇒ 日志里长期存在「163.8 fps 配 7550µs」这种自相矛盾的行，同一二进制跑两次能"差 48%"，我据此写下过一个**错误的 +58%** 结论。修好后 A/A（3 轮同参数）**极差 0.2%**。**⇒ 任何性能结论先跑 `scripts\aa_probe.ps1 -Runs 3` 量噪声底；小于该极差的差不算数。**
