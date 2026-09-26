@@ -1,14 +1,15 @@
 # Resize / swapchain-recreation probe (ASCII only: PS 5.1 reads BOM-less .ps1 as ANSI).
 #
-# Why this exists (2026-09-25): AGENTS 铁律 B says "开 RV3D_VALIDATION=1 跑一轮再改
-# pipeline / swapchain / 同步". The swapchain recreation path (destroy + init swapchain,
+# Why this exists (2026-09-25): AGENTS iron rule B says "open RV3D_VALIDATION=1 and run one
+# round before touching pipeline / swapchain / synchronisation". The swapchain recreation
+# path (destroy + init swapchain,
 # hud_framebuffers, render-finished semaphores, command buffers, MSAA/depth/framebuffers)
 # was the one part of that rule nobody had actually exercised under the layer -- the
 # validation runs were all "start once, never resize".
 #
 # This probe drives the resize path on purpose and reports the layer's verdict:
 #   * RV3D_VALIDATION=1 + DISABLE_RTSS_LAYER/DISABLE_GAMEPP_LAYER=1 (the two implicit
-#     layers on this machine inject VkSwapchainCreateInfoKHR::flags, see 未结案 #23:
+#     layers on this machine inject VkSwapchainCreateInfoKHR::flags, see open item #23:
 #     leave them enabled and you get 5 noise VUIDs that are not the engine's).
 #   * window resizing goes through SetWindowPos with SWP_NOACTIVATE + SWP_NOZORDER +
 #     SWP_NOMOVE: it never steals focus and never touches the cursor, so it respects the
@@ -23,12 +24,21 @@
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_resize_probe.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_resize_probe.ps1 -NoShot
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_resize_probe.ps1 -PT -NoShot
 param(
     [string]$Tag = "resize_probe",
     [int]$WarmupSec = 15,
     [int]$AfterSecs = 12,
     [string]$Sizes = "1280x720,1600x900,1024x768,2560x1600,1280x800",
-    [switch]$NoShot
+    [switch]$NoShot,
+    # -PT also turns on the live path tracer (RV3D_PT_LIVE=1) at 512-wide internal
+    # resolution (RV3D_PT_SIZE=512). The PT frame is blitted into the swapchain image,
+    # and until 2026-09-26 that blit hardcoded a 2560x1600 destination -- so it only
+    # stayed inside the destination image on the default window size, and any other
+    # size (exactly what this probe produces) trips
+    # VUID-vkCmdBlitImage-dstOffsets-00203. -PT is the regression repro for it:
+    #   scripts\run_resize_probe.ps1 -PT -Tag pt_resize -NoShot
+    [switch]$PT
 )
 $ErrorActionPreference = "Continue"
 $repo = "D:\Rust\steel-front"
@@ -78,6 +88,12 @@ $env:RV3D_PRESENT_MODE = "mailbox"
 $env:RV3D_VALIDATION = "1"
 $env:DISABLE_RTSS_LAYER = "1"
 $env:DISABLE_GAMEPP_LAYER = "1"
+if ($PT) {
+    $env:RV3D_PT_LIVE = "1"
+    $env:RV3D_PT_SIZE = "512"
+    $env:RV3D_PT_SPP = "16"
+    Write-Host "PT live path enabled (RV3D_PT_LIVE=1 RV3D_PT_SIZE=512 RV3D_PT_SPP=16)"
+}
 
 $exitNote = "ok"
 try {
@@ -130,12 +146,17 @@ $recreate = ([regex]::Matches($txt, "size mismatch")).Count
 $shot = ([regex]::Matches($txt, "\u622a\u56fe\u5df2\u4fdd\u5b58")).Count           # screenshot saved (.NET regex \u escape)
 $lost = ([regex]::Matches($txt, "has been lost")).Count
 $panic = ([regex]::Matches($txt, "panicked")).Count
+# Proves the live PT path actually engaged: without it a "VUID: 0" verdict from -PT
+# would mean "the thing I meant to exercise never ran" (lesson 27).
+$ptres = ([regex]::Matches($txt, "PT-RESIDENT:")).Count
 Write-Host ""
 Write-Host "=== resize probe summary ($Tag) ==="
 Write-Host "  exit note    : $exitNote"
 Write-Host "  resizes seen : $resize (window events) / $recreate (size-mismatch rebuilds)"
 Write-Host "  VUID         : $vuid"
 Write-Host "  screenshots  : $shot (engine-side saves; 0 with -NoShot)"
+Write-Host "  PT resident  : $ptres (needs >=1 when -PT was given)"
 Write-Host "  device lost  : $lost ; panics: $panic"
 Write-Host "  log          : $logErr"
-if ($vuid -eq 0 -and $lost -eq 0 -and $panic -eq 0) { Write-Host "RESULT: ALL-OK" } else { Write-Host "RESULT: CHECK" }
+$ptOk = ((-not $PT) -or ($ptres -ge 1))
+if ($vuid -eq 0 -and $lost -eq 0 -and $panic -eq 0 -and $ptOk) { Write-Host "RESULT: ALL-OK" } else { Write-Host "RESULT: CHECK" }
