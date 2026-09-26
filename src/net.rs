@@ -243,6 +243,8 @@ pub enum NetError {
     InvalidUtf8,
     /// 名字不是合法 UTF-8
     InvalidName,
+    /// 浮点字段是 NaN / ±inf（线路边界一律拒绝，见 `Reader::f32` 的理由）
+    NonFiniteField,
 }
 
 impl fmt::Display for NetError {
@@ -255,6 +257,7 @@ impl fmt::Display for NetError {
             NetError::TrailingData => write!(f, "trailing bytes after payload"),
             NetError::InvalidUtf8 => write!(f, "string field is not valid UTF-8"),
             NetError::InvalidName => write!(f, "player name is not valid UTF-8"),
+            NetError::NonFiniteField => write!(f, "non-finite float field (NaN or inf)"),
         }
     }
 }
@@ -357,8 +360,21 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes(a))
     }
 
+    /// 读一个 f32，并**拒绝非有限值**（NaN / ±inf）。
+    ///
+    /// 🔴 理由（2026-09-26 复查）：`from_bits` 会把任意 4 字节原样变成浮点数，NaN 也算合法读出，
+    /// 于是一张伪造/损坏的报文能把 NaN 一路送进插值与实例矩阵 ——
+    /// `lerp_state` 的 `alpha.clamp(0.0, 1.0)` 对 NaN 返回 NaN（`a <= 0.0` 与 `a >= 1.0` 都不成立），
+    /// 远端实体位置变 NaN ⇒ 矩阵 NaN ⇒ **静默不画**（不崩、不报 VUID、日志干净）；
+    /// 时间戳 NaN 更彻底：`interpolate_at` 的 `dt <= 0.0` 对 NaN 为假，插值永远走 NaN 分支。
+    /// 合法对端不会发非有限值 ⇒ 这里一律按协议错误拒绝，**线路边界是唯一的收口点**。
+    /// 判据 = `non_finite_floats_are_rejected_at_the_wire`。
     fn f32(&mut self) -> Result<f32, NetError> {
-        Ok(f32::from_bits(self.u32()?))
+        let v = f32::from_bits(self.u32()?);
+        if !v.is_finite() {
+            return Err(NetError::NonFiniteField);
+        }
+        Ok(v)
     }
 
     fn bytes(&mut self, n: usize) -> Result<&'a [u8], NetError> {
@@ -1428,8 +1444,9 @@ mod tests {
     /// 改成**变异模糊**：从 `sample_messages()` 的真实报文出发做 1~4 次随机变异
     /// （改字节 / 截断 / 追加 / 改写载荷长度字段），再叠加一小部分完全随机的字节流。
     ///
-    /// 两条不变式：① 不 panic；② 只要 `decode` 返回 `Ok`，`encode` 出来的字节必须**还能被解码**
-    /// （⚠️ 不做相等比较：随机 f32 可能撞出 NaN，而 `NaN != NaN` 会假红 —— 那是量具的错）。
+    /// 两条不变式：① 不 panic；② 只要 `decode` 返回 `Ok`，`encode` 出来的字节必须**还能被解码**。
+    /// （2026-09-26 起 `Reader::f32` 会拒掉 NaN/±inf ⇒ 能解出的报文不可能带非有限值；
+    ///  这里仍只验「解得出」——相等性是另一条判据的事，别把它塞进来。）
     #[test]
     fn decode_never_panics_on_mutated_bytes_and_reencodes() {
         let mut seed: u32 = 0x1234_5678;
@@ -1489,6 +1506,78 @@ mod tests {
         assert!(
             ok_count >= 50,
             "3000 条变异报文只解出 {ok_count} 条 ⇒ 测试大概没生效（第一版就是这么被抓的）"
+        );
+    }
+
+    /// 🔴 判据：非有限浮点（NaN / ±inf）必须在**线路边界**被拒 ——
+    /// 它一旦流进去就是静默故障：NaN 位置 ⇒ 实例矩阵 NaN ⇒ 不画（不崩、不报 VUID、日志干净）；
+    /// NaN 时间戳 ⇒ `interpolate_at` 的 `dt <= 0.0` 为假 ⇒ 插值恒走 NaN 分支。
+    ///
+    /// 三个方向各拒一条（NaN 位置 / NaN 时间戳 / inf 坐标），再加一条正对照：
+    /// 同一报文把浮点全换成有限值后**必须**照常解出 —— 否则「拒绝」可能来自别的原因。
+    #[test]
+    fn non_finite_floats_are_rejected_at_the_wire() {
+        let nan_pos = NetworkMessage::Position {
+            player_id: 1,
+            seq: 7,
+            state: PlayerState::new([f32::NAN, 0.0, 0.0], 0.0),
+        };
+        assert_eq!(
+            NetworkMessage::decode(&nan_pos.encode()),
+            Err(NetError::NonFiniteField),
+            "NaN 位置必须被拒"
+        );
+
+        let nan_time = NetworkMessage::Snapshot {
+            seq: 1,
+            time: f32::NAN,
+            player_id: 1,
+            player: PlayerState::new([0.0; 3], 0.0),
+            npcs: Vec::new(),
+        };
+        assert_eq!(
+            NetworkMessage::decode(&nan_time.encode()),
+            Err(NetError::NonFiniteField),
+            "NaN 时间戳必须被拒"
+        );
+
+        let inf_npc = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.5,
+            player_id: 1,
+            player: PlayerState::new([0.0; 3], 0.0),
+            npcs: vec![NpcSnapshot {
+                id: 9,
+                pos: [0.0, f32::INFINITY, 0.0],
+                facing: 0.0,
+                hp: 1.0,
+                team: 0,
+                firing: 0,
+            }],
+        };
+        assert_eq!(
+            NetworkMessage::decode(&inf_npc.encode()),
+            Err(NetError::NonFiniteField),
+            "inf 坐标必须被拒"
+        );
+
+        let finite = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.5,
+            player_id: 1,
+            player: PlayerState::new([1.0, 0.0, -2.0], 0.25),
+            npcs: vec![NpcSnapshot {
+                id: 9,
+                pos: [1.0, 0.0, 1.0],
+                facing: 0.1,
+                hp: 100.0,
+                team: 0,
+                firing: 1,
+            }],
+        };
+        assert!(
+            NetworkMessage::decode(&finite.encode()).is_ok(),
+            "全有限值的同一报文必须照常解出（正对照）"
         );
     }
 
