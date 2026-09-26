@@ -185,23 +185,44 @@ def wall_panel(part, run, sign, at, thick, u0, u1, z0, z1, col,
         return False
 
     out_n = nrm(0.0, sign, 0.0)
-    for iu in range(len(xs) - 1):
-        xa, xb = xs[iu], xs[iu + 1]
-        if xb - xa <= 1e-5:
+    # 🔴 2026-09-26（顶点普查之后）：**按行合并**，而不是逐格出 quad。
+    #
+    # 格点分解（xs × zs 全网格）是"把洞从墙上切出来"的正确做法，但它同时把**整片平墙**
+    # 也切碎了：长立面上每一行都被所有洞的竖边切成 ~12 段，其中绝大多数是同一片平墙。
+    # 而本模块的颜色只由 z 决定（`base` 只看是不是层缝、`k0/k1` = exposure_ao(za/zb)），
+    # ⇒ **同一行带里所有非洞格子的四个顶点色完全相同**，合并成一个大 quad 是**逐像素等价**的
+    # （平面上颜色沿 z 线性、沿 x 常数，合并前后同一个函数）。
+    #
+    # 代价 = 平面上重新出现 T 形接缝（相邻行带的细分不同）；但两侧共面、顶点位置逐位相同，
+    # 只是光栅化划归哪一侧的问题，实测像素差 0（见 docs/PROGRESS.md §21.41）。
+    # 收益 = building_tall 单件 quad 数近乎腰斩 —— 本仓顶点数就是帧率（铁律 D）。
+    for iz in range(len(zs) - 1):
+        za, zb = zs[iz], zs[iz + 1]
+        if zb - za <= 1e-5:
             continue
-        for iz in range(len(zs) - 1):
-            za, zb = zs[iz], zs[iz + 1]
-            if zb - za <= 1e-5:
+        zc = (za + zb) * 0.5
+        base = C["joint"] if is_joint(zc) else col
+        k0 = exposure_ao(za, floor_h)
+        k1 = exposure_ao(zb, floor_h)
+        cols = (_ao(base, k0), _ao(base, k0), _ao(base, k1), _ao(base, k1))
+        run_a = None
+        run_b = None
+        for iu in range(len(xs) - 1):
+            xa, xb = xs[iu], xs[iu + 1]
+            if xb - xa <= 1e-5:
                 continue
-            uc, zc = (xa + xb) * 0.5, (za + zb) * 0.5
-            if in_hole(uc, zc):
+            if in_hole((xa + xb) * 0.5, zc):
+                if run_a is not None:
+                    add_quad_n(part, pt(run_a, at, za), pt(run_b, at, za),
+                               pt(run_b, at, zb), pt(run_a, at, zb), cols, out_n)
+                    run_a = None
                 continue
-            base = C["joint"] if is_joint(zc) else col
-            k0 = exposure_ao(za, floor_h)
-            k1 = exposure_ao(zb, floor_h)
-            cols = (_ao(base, k0), _ao(base, k0), _ao(base, k1), _ao(base, k1))
-            add_quad_n(part, pt(xa, at, za), pt(xb, at, za),
-                       pt(xb, at, zb), pt(xa, at, zb), cols, out_n)
+            if run_a is None:
+                run_a = xa
+            run_b = xb
+        if run_a is not None:
+            add_quad_n(part, pt(run_a, at, za), pt(run_b, at, za),
+                       pt(run_b, at, zb), pt(run_a, at, zb), cols, out_n)
 
     if not revealed:
         return
