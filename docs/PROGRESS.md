@@ -8514,6 +8514,46 @@ rename 失败顺手删临时文件。
 
 闸门：`cargo test --release` **586 passed / 0 failed**、0 警告。
 
+### 21.33 整局 gameplay + 验证层：**5 波全清、VUID=0**（本仓目前最强的一次验证）
+
+以前开 `RV3D_VALIDATION=1` 都只跑 12–30 秒的 perf/探针（能证明"启动不炸"），
+从没在一整局玩法上开过。这次的跑法（已写进 AGENTS 铁律 B）：
+
+```powershell
+$env:RV3D_VALIDATION="1"; $env:DISABLE_RTSS_LAYER="1"; $env:DISABLE_GAMEPP_LAYER="1"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_survive_pm.ps1 -Secs 400 -Tag survive_val
+```
+
+结果（独显 + mailbox + 验证层）：
+
+```text
+result        : VICTORY (303s of a 400s budget)
+waves cleared : ['1', '2', '3', '4', '5']
+kills/shots   : 52 / 596   engagements=71
+VUID=0 panics=0 device_lost=0 fps=166.1
+RESULT: ALL-OK
+```
+
+⇒ 波次生成/清空、NPC 死亡移除、弹孔与粒子、关卡切换、HUD、音效这些路径**在验证层下全部干净**。
+fps 166（比无验证层的 174 低约 5%，与"验证层有开销"一致）。
+**判据**：以后改渲染/同步/描述符，除了 20 秒的 perf 轮，再跑这一条。
+
+### 21.34 NPC 可见性缓存带上 id（杀掉一个 NPC 不再让后面的人沿用"前一个人的标志"）
+
+**(a) 问题**：渲染可见性缓存按**下标**存布尔，而 `npcs` 用 `retain`/`swap_remove` 删除 ——
+死一个人之后，后面每个人的标志都变成了**前一个人的**（最多错 N−1 帧 ≈40ms；
+`N` = 分摊刷新周期 4）。分摊刷新保证最终自纠，但那几帧里会出现"该隐形的还站着 / 该站着的被隐形"。
+
+**(b) 改法**：槽位存 `(npc id, 可见)`；`refresh_npc_visibility` 除"轮到自己槽位"外再加一条
+**"id 不符就立刻重算"**（不受分摊限制）⇒ 下标前移当帧纠正。
+`npc_visibility_flags()` 相应改为每帧摊平出 `Vec<bool>`（255 字节拷贝，几十纳秒）。
+
+**(c) 红测**：`npc_visibility_cache_notices_index_shifts` —— 4 个 NPC 建缓存后
+`npcs.remove(0)`，断言下一次 refresh **至少重算 3 个**；修前只会重算轮到槽位的那 ~1 个 ⇒ 红。
+
+闸门：`cargo test --release` **587 passed / 0 failed**、0 警告；
+`perf_run.ps1 -Secs 20` 中位 102.3 fps（无回归）。
+
 ### 21.28 联机审计：断线的人**永远站在场上** + 插值器**从来没接线**
 
 **(a) 幽灵玩家的三个环节，一个都没接**

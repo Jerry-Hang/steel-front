@@ -165,6 +165,10 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   开起来第一轮就抓出两条一直存在、此前完全看不见的 VUID（见 #23）。
   **改 pipeline / swapchain / 同步 / 描述符前先开它跑一轮**（交换链/重建路径用
   `scripts/run_resize_probe.ps1`：改窗口尺寸 + F12，实测 VUID=0）。
+  🔴 **最强的验证跑法是"整局 gameplay + 验证层"**（2026-09-26 实测）：先设
+  `RV3D_VALIDATION=1 DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1`，再跑
+  `scripts\run_survive_pm.ps1 -Secs 400` ⇒ 5 波全清、VUID=0/panics=0/device_lost=0、ALL-OK。
+  20 秒的 perf/probe 只能证明"启动不炸"，整局才覆盖波次/死亡/关卡切换/弹孔/粒子这些路径。
 - 改共享计算（如 `fp_gun_pre` 顶点/矩阵管线）必须**双模式**截图验证：第一人称 + `RV3D_INSPECT=1` 检视模式。
 - 性能日志里的 `marker` / `npc` 字段 = 每帧 `upload_markers` / `upload_npcs` 的 (near+far) 计数。
 - 🔴 **⚠️ 有两个同名的 `npc`，别混**（据此写下的错误结论已撤回）：
