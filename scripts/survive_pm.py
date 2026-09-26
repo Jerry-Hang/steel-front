@@ -529,6 +529,19 @@ def main():
     os.makedirs(shotdir, exist_ok=True)
     tag = os.path.splitext(os.path.basename(logpath))[0]
 
+    # 🔴 2026-09-26：**日志不存在/为空 ⇒ 没跑成，直接退出 2**（不能等到最后再算分）。
+    #
+    # 起因：末尾的判据是「VUID/panic/device_lost 全 0 且 每波都已 cleared」——
+    # 而**空日志**让每一项都成立（0 命中、`len(cleared) == len(spawned)` 是 0 == 0），
+    # 于是会打 `RESULT: ALL-OK`。这与今天在几个审计工具里修的是**同一个形状**：
+    # 扫描面为 0 被当成"干净"。真正的兜底是窗口不存在时那句 `NO-WINDOW`（exit 2），
+    # 但"窗口还在、日志却没写出来"（启动即崩、重定向写错文件）就漏过去了。
+    # 判据：**要么给出真实判据，要么明说"没跑成"** —— 没有第三种结局。
+    if not os.path.exists(logpath) or os.path.getsize(logpath) == 0:
+        print("LOG-MISSING/EMPTY (%s): 没有引擎输出 ⇒ 这不是通过，是没跑成" % logpath,
+              file=sys.stderr, flush=True)
+        return 2
+
     hwnd = S.find_window()
     if not hwnd:
         print("NO-WINDOW, aborting", flush=True)
@@ -881,6 +894,14 @@ def main():
     #  · 没通关时，要求「每波都有 spawned、都 cleared、补给窗口数 = 波数-1」——
     #    之前的写法用 `len(cleared) == len(spawned)`，同一波两条 spawned 行就会假红。
     clean = vuid == 0 and panics == 0 and lost == 0
+    # 🔴 2026-09-26：结论必须建立在**正面证据**上 —— 日志里得有引擎自己写的 `run started`
+    # （实测：323 秒通关那一局的日志里有 1 条）。没有它 ⇒ 三种"干净"零命中全都是假的
+    # （同上面对空日志的早退，一处防早、一处防晚）。
+    if "run started" not in txt:
+        print("RUN-NOT-STARTED: 日志里没有 `run started` ⇒ 没跑成（VUID/波次计数全是 0 命中，"
+              "不构成通过）", file=sys.stderr, flush=True)
+        print("RESULT: CHECK (run never started)", flush=True)
+        return 2
     if result == "VICTORY":
         ok = clean and bool(victory)
     else:

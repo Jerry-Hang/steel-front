@@ -159,4 +159,15 @@ Write-Host "  PT resident  : $ptres (needs >=1 when -PT was given)"
 Write-Host "  device lost  : $lost ; panics: $panic"
 Write-Host "  log          : $logErr"
 $ptOk = ((-not $PT) -or ($ptres -ge 1))
-if ($vuid -eq 0 -and $lost -eq 0 -and $panic -eq 0 -and $ptOk) { Write-Host "RESULT: ALL-OK" } else { Write-Host "RESULT: CHECK" }
+# 2026-09-26: must prove the rebuild path actually ran. This probe exists only to drive
+# swapchain recreation; zero "window size change" lines means the path was never walked,
+# and then VUID=0 only means "nothing happened" -- same criterion as the PT-RESIDENT>=1
+# check above, and the same shape as the "scan surface = 0 counts as clean" tools (§21.48).
+# (ASCII only at end-of-line: PS 5.1 reads BOM-less .ps1 as ANSI/GBK, and a trailing CJK
+#  byte eats the newline itself -- see AGENTS.md 铁律 G.)
+$ranOk = ($resize -ge 1)
+if (-not (Test-Path $logErr)) {
+    Write-Host "  !! engine log is missing: $logErr -- not a pass, the run never happened"
+}
+Write-Host "  resizes ok   : $ranOk (must be true: at least one window-size change)"
+if ($vuid -eq 0 -and $lost -eq 0 -and $panic -eq 0 -and $ptOk -and $ranOk) { Write-Host "RESULT: ALL-OK" } else { Write-Host "RESULT: CHECK" }
