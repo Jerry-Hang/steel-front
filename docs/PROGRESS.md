@@ -8879,3 +8879,72 @@ VUID=0 panics=0 device_lost=0、fps 164.8、RESULT ALL-OK**。
 **(g) 顺带更新了诊断门的语义**：拆分之后 `RV3D_SHADOW_SKIP_{STATIC,GROUND,TERRAIN}` 只影响静态图
 （1/30 的帧）⇒ 它们现在读出来 ≈ 基线（实测：skip_ground 143.9 / skip_terrain 131.0 / skip_static 124.8
 对基线 133.6）。**这本身就是"那部分工作已经不在每帧路径上"的旁证**，不是"跳过没用"。
+
+### 21.39 音频审计之一：静音时声部永不退队（已修 `37de0eb`）+ **音量滑条够不到合成总线**（新发现，未修）
+
+**(a) 发现的入口**：审计"**跳过某个对象的处理**"这一类分支（就是这一晚写下的教训 44）。
+`Mixer::mix`（`audio.rs`）里有一条 `if gain <= 0.0 { continue; }` —— 增益为 0（用户把音量拉到 0，
+或该声部所在通道音量为 0）时**整条推进逻辑被跳过**。
+
+**(b) 机理：静音只是"不写进输出缓冲"，不是"时间停止"。** 那条 `continue` 跳掉的正是：
+
+1. `v.cursor += frames`（时间轴推进）；
+2. `v.finished = true`（播完标记）；
+3. 函数末尾 `self.voices.retain(|v| !v.finished)` 的命中条件。
+
+⇒ 静音期间每一个新声部都**永久留在队列里**，且每个都拖着 `Arc<AudioClip>` 引用。
+`Mixer::play` **没有任何容量上限**（对比：`DspSynth::spawn_full` 有 `MAX_SYNTH_VOICES` + 丢最旧），
+所以它是真的无界。解除静音时，累积的声部从它们**当初停下的位置**继续播放 ⇒ 旧声音齐鸣。
+
+**(c) 可达性与影响面（诚实版，含对提交信息的一处更正）**
+
+🔴 `37de0eb` 的提交信息里写的是"每一发枪"堆一个声部 —— **这句不准确，在此更正**。
+生产代码里走 Mixer（clip）路线的**只有 5 个调用点**（定位命令 `rg "sfx\.play\(" src/engine/game.rs`）：
+
+| 音效 | 数量 | 触发 |
+|---|---|---|
+| `SfxKind::Hit` | 1 | 命中目标（**唯一高频的一个**：连发命中时每秒几个到十几个） |
+| `SfxKind::Reload` | 2 | 换弹开始 / 换弹中（低频） |
+| `SfxKind::UiBlip` | 2 | 补给 / 关闭设置面板（低频） |
+
+**枪声 / 脚步 / 爆炸 / 环境风走的是另一条路**（`DspSynth::play_shot` / `play_footstep` /
+`play_explosion` / `set_ambient`），那条路径**不受静音影响**：它没有 `gain <= 0` 分支、ADSR 照常推进、
+`retain(|v| v.env.stage != Done)` 照常清退、而且有声部上限。
+⇒ 真实受影响的是 **命中 / 换弹 / UI 提示音**三类。其中 `Hit` 是高频的那个（每一次命中都推一个声部，
+连发打中时每秒几个到十几个；`Reload`/`UiBlip` 只是低频），所以"静音后长时间游玩会堆出上千个声部"
+这个量级成立，但**不是"每发枪一个"**。**结论本身不变**（无界增长 + 解除静音齐鸣），
+只是"枪声"应改成"命中/换弹/UI 提示音"。
+
+**(d) 修法**：新增纯函数 `advance_voice_cursor(cursor, total, looping, frames) -> (新游标, 是否播完)`，
+静音分支照常调用它（非循环到点判 finished；循环取模回区间；`total <= 0` 不做取模除零），
+然后走原来的 `retain` 清退。顺带把 `let total = …` 提到增益判断**之前**（原来在 `continue` 之后，
+静音时根本拿不到）。**先红后绿的四条测试**：
+`mixer_retires_voices_even_when_muted`（静音下播 20 个短 clip，几帧后活跃声部必须为 0）、
+`unmuting_does_not_replay_stale_voices`（解除静音后输出缓冲必须仍是静音）、
+`muted_looping_voice_stays_in_range`（循环声部不退出、解除静音后样本仍合法）、
+`silent_advance_handles_empty_and_looping_clips`（空 clip / 循环的退化输入不产 NaN ——
+`NaN` 会让后面所有增益比较静默失效）。闸门：`cargo test --release` **600 passed / 0 failed、0 警告**。
+
+**(e) 🔴 同一轮审计顺手发现的第二个缺陷（未修，判据已就绪）：音量滑条够不到合成总线。**
+
+模块文档第 7 行写的音量模型是 **`MasterVolume` × 分通道音量（Music/Sfx）× 距离衰减**，
+而 `game.rs:2350` 每帧做的正是 `self.audio.mixer_mut().set_master(self.hud.volume)`
+（设置面板"音量"滑条 → `hud.volume`）。但：
+
+```rust
+// AudioPlayer::tick —— 合成总线是**直接 ADD 进同一个缓冲**的
+let mut buf = self.mixer.mix_vec(listener, frames);   // clip 声部：master × 通道 × 距离
+self.synth.render(listener, frames, &mut buf);        // 合成声部：**只有距离衰减，没有 master**
+self.sink.write(&buf);
+```
+
+`Mixer::mix` 里的增益是 `master × channel × source.volume × 距离`，而 `DspSynth::render` 只乘
+`v.volume × 距离`（`v.volume` 是音色参数，如枪声的 `0.95 + 0.05*…` 抖动，**不是用户音量**）。
+⇒ **把设置里的"音量"拉到 0，枪声、脚步、爆炸、环境风照旧以满音量播放**，只有 Hit/Reload/UiBlip
+（以及音乐，它另有 Music 通道）会跟着变小。这与文档承诺的模型不符，属**接线缺失**（教训 3 的同形）。
+
+- **lead（修法）**：`AudioPlayer::tick` 里给合成总线一条**复用**的 scratch 缓冲（字段持有，避免每帧分配），
+  渲染完按 `self.mixer.master()` 缩放进主缓冲 ⇒ 主音量对两条总线同时生效，语义与文档一致。
+- **红测（先写、必须红）**：`master_volume_scales_the_synth_bus` —— `set_master(0.0)` 后触发一个
+  合成声部（`synth_mut().play_shot(...)`）再 `tick`，`CollectingSink` 收到的样本必须**全为 0**；
+  同一个测试里 `set_master(1.0)` 的对照组必须**非 0**（防止"把两条总线都关掉"也算通过）。
