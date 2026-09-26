@@ -701,6 +701,31 @@ pub fn is_device_lost_error(msg: &str) -> bool {
     msg.contains("device has been lost") || msg.contains("DEVICE_LOST")
 }
 
+/// `device_wait_idle` 失败时该打的日志（纯函数，可单测）：`None` = 这次不打。
+///
+/// 🔴 2026-09-26 复查发现全仓 6 处 `let _ = self.device.device_wait_idle();`
+/// （`set_first_person_gun_mesh` / `set_props` ×2 / `set_shadow_props` /
+/// `pt_set_scene_markers` / `Drop`）—— 全都是"**等空闲 → 销毁/重建在飞资源**"的关键路径，
+/// 而**等待失败与等待成功在日志里长得一模一样**：后面那句 `destroy_buffer` 到底安不安全，
+/// 排查的人手里没有任何证据。而这条命令最可能返回的错误正好是 `VK_ERROR_DEVICE_LOST`
+/// ——本仓最贵的一类故障（铁律 B「设备丢失 = 不可恢复」）。
+///
+/// 消息**必须点名错误**：否则 `device lost` 与 `out of host memory` 在日志里分不清，
+/// 而这两者的处置完全相反（前者不可恢复、后者可以少要点资源重试）。
+/// 用闩而不是每次都记：这几条路径在换枪 / 重载 / 进出 PT 时反复跑。
+///
+/// 判据 = `wait_idle_failure_is_named_and_reported_once` +
+/// `device_wait_idle_errors_are_never_silently_dropped`。
+pub fn wait_idle_failure_message(err: vk::Result, already_warned: bool) -> Option<String> {
+    if already_warned {
+        return None;
+    }
+    Some(format!(
+        "gpu: device_wait_idle 失败（{err:?}）—— 紧接着的 destroy/create 都发生在**尚未确认空闲**的\
+         设备上；若为 device lost 则不可恢复，见铁律 B"
+    ))
+}
+
 /// 道具缓冲要不要（重新）创建 —— 纯逻辑，可单测。
 ///
 /// 判据是 `need > capacity`，**不是** `need != capacity`：写成 `!=` 时"道具变少"也会重建，
@@ -1453,6 +1478,12 @@ pub struct Renderer {
     /// PT 本来就被当作"调试/烘焙参照视图"，所以更没人会去数盒子。
     /// 用闩是因为它由 `signature()` 量化（~0.5m）触发场景重建，移动相机时一秒能重建好几次。
     pt_box_cap_warned: bool,
+    /// `device_wait_idle` 失败告警的一次性闩（2026-09-26 复查）。
+    ///
+    /// 理由同 `npc_cap_warned`：6 处"等空闲再销毁在飞资源"的关键路径会反复跑
+    /// （换枪 / 道具重载 / PT 场景重建），每次失败都记会刷屏。
+    /// 见 `wait_idle_failure_message`。
+    wait_idle_warned: bool,
     /// GLB 道具合并网格（`engine::props::merge` 在 CPU 上烘好位姿的静态几何）。
     /// 全部道具共用一次 draw call：位姿已进顶点，所以只需要 `PROP_INSTANCE_INDEX`
     /// 这一个 identity 实例，不必为道具新开一整段实例区。
@@ -2204,6 +2235,7 @@ impl Renderer {
             soldier_parts: Vec::new(),
             npc_cap_warned: false,
             pt_box_cap_warned: false,
+            wait_idle_warned: false,
             soldier_drawn: 0,
             prop_vertex_buffer: vk::Buffer::null(),
             prop_vertex_memory: vk::DeviceMemory::null(),
@@ -5530,6 +5562,22 @@ impl Renderer {
         );
     }
 
+    /// 等 GPU 空闲 + **失败留痕**（`wait_idle_failure_message`）。
+    ///
+    /// 全仓 6 处"等空闲再销毁/重建在飞资源"统一走这里：原先每处都是
+    /// `let _ = self.device.device_wait_idle();` —— 等待失败与等待成功在日志里无法区分。
+    /// 判据 = `device_wait_idle_errors_are_never_silently_dropped`（源码扫描，改回 `let _ =` 即红）。
+    unsafe fn wait_idle_checked(&mut self) {
+        let err = match self.device.device_wait_idle() {
+            Ok(()) => return,
+            Err(e) => e,
+        };
+        if let Some(msg) = wait_idle_failure_message(err, self.wait_idle_warned) {
+            self.wait_idle_warned = true;
+            log::warn!("{msg}");
+        }
+    }
+
     pub fn set_npc_visuals(&mut self, visuals: &[NpcVisual]) {
         // 临时埋点（RV3D_NPC_POS=1）：每 120 次调用打一次。放在 `clear()` **之前**，
         // 于是 `self.npc_*_parts` 里还是**上一次循环的最终结果** —— 不必去找函数尾部，
@@ -5790,7 +5838,7 @@ impl Renderer {
         {
             // 真扩容（或首次创建）才等：等待发生在帧与帧之间、不在命令缓冲记录期间，安全。
             unsafe {
-                let _ = self.device.device_wait_idle();
+                self.wait_idle_checked();
             }
             // 🔴 2026-09-22 复查（灰色地带修复）：**先建新的，成功了再毁旧的**。
             // 旧写法是「先 destroy 两个旧 buffer，再 `create_host_buffer(..).expect(..)`」：
@@ -6001,7 +6049,7 @@ impl Renderer {
         // 🏢 PT 道具属性表同理随道具一起作废（重建在下面上传成功后进行）。
         // 先静默再销毁：旧表可能正被上一帧的 PT dispatch 读着。
         unsafe {
-            let _ = self.device.device_wait_idle();
+            self.wait_idle_checked();
             if self.prop_attr_buf != vk::Buffer::null() {
                 self.device.destroy_buffer(self.prop_attr_buf, None);
                 self.prop_attr_buf = vk::Buffer::null();
@@ -6037,7 +6085,7 @@ impl Renderer {
         ) {
             // 等待发生在帧与帧之间、不在命令缓冲记录期间，安全。
             unsafe {
-                let _ = self.device.device_wait_idle();
+                self.wait_idle_checked();
             }
             // 2 的幂向上取整：地图尺寸只会小幅波动，避免每次重载都重建
             let cap_v = need_v.next_power_of_two().max(65_536);
@@ -6256,7 +6304,7 @@ impl Renderer {
         let isz = need_i as u64 * 4;
         unsafe {
             // 与主缓冲同一套安全规矩：旧缓冲可能正被 GPU 引用，先等空闲再销毁
-            let _ = self.device.device_wait_idle();
+            self.wait_idle_checked();
             for (buf, mem) in [
                 (self.prop_sh_vertex_buffer, self.prop_sh_vertex_memory),
                 (self.prop_sh_index_buffer, self.prop_sh_index_memory),
@@ -6946,7 +6994,7 @@ impl Renderer {
             // 顺序：静默 → 建新（双几何尺寸查询+创建+填充）→ 重写描述符 → 构建+静默 → 销毁旧。
             // 帧内顺序（set_props → 本函数 → render）保证新旧之间没有 dispatch 引用旧缓冲。
             unsafe {
-                let _ = self.device.device_wait_idle();
+                self.wait_idle_checked();
             }
             let old = self.pt_resident.take();
             let fresh = match self.build_pt_as(&boxes) {
@@ -12666,7 +12714,7 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.device.device_wait_idle();
+            self.wait_idle_checked();
 
             // 2026-08-29 显存纪律：PT 常驻资源（AS/管线/图像）显式销毁——退出后驱动立刻回收！
             self.destroy_pt_resident();
@@ -14860,7 +14908,8 @@ mod vk_failure_path_tests {
     use super::{
         clamp_swapchain_extent, frame_suppressed, is_device_lost_error, prop_buffer_growth_needed,
         shadow_due, shadow_static_due, should_retry_swapchain, terrain_coarse_height,
-        terrain_height, RECREATE_RETRY_MIN_SECS, TERRAIN_CELLS, TERRAIN_HALF,
+        terrain_height, wait_idle_failure_message, RECREATE_RETRY_MIN_SECS, TERRAIN_CELLS,
+        TERRAIN_HALF,
     };
     use ash::vk;
 
@@ -15200,6 +15249,66 @@ mod vk_failure_path_tests {
             bad.is_empty(),
             "Vulkan 失败路径必须 log + 降级，不许 panic：\n{}",
             bad.join("\n")
+        );
+    }
+
+    /// `device_wait_idle` 的失败必须**点名错误**且只报一次（判据 = `wait_idle_failure_message`）。
+    ///
+    /// 点名是硬要求：`device lost` 与 `out of host memory` 的处置完全相反
+    /// （前者不可恢复、后者可以少要点资源重试），两者在日志里长得一样就等于什么都没说。
+    #[test]
+    fn wait_idle_failure_is_named_and_reported_once() {
+        let lost = wait_idle_failure_message(vk::Result::ERROR_DEVICE_LOST, false)
+            .expect("第一次失败必须留痕（静默正是这次复查要消灭的形状）");
+        assert!(lost.contains("ERROR_DEVICE_LOST"), "消息必须点名错误：{lost}");
+        // 与既有的"什么算设备丢失"判定联动：日志里出现它，外面就能认出"不可恢复"
+        assert!(
+            is_device_lost_error(&lost),
+            "device lost 必须能被 is_device_lost_error 认出：{lost}"
+        );
+        let oom = wait_idle_failure_message(vk::Result::ERROR_OUT_OF_HOST_MEMORY, false)
+            .expect("第一次失败必须留痕");
+        assert!(oom.contains("ERROR_OUT_OF_HOST_MEMORY"), "消息必须点名错误：{oom}");
+        assert!(!is_device_lost_error(&oom), "OOM 不该被误判成设备丢失");
+        assert_ne!(lost, oom, "两种错误不能长一样");
+        assert!(
+            wait_idle_failure_message(vk::Result::ERROR_DEVICE_LOST, true).is_none(),
+            "第二次必须被闩住 —— 这几条路径在换枪/重载/PT 重建时反复跑"
+        );
+    }
+
+    /// 🔴 **`device_wait_idle` 的结果不许被 `let _ =` 丢掉**（2026-09-26 复查实测 6 处）。
+    ///
+    /// 那 6 处全是"等空闲 → 销毁/重建在飞资源"的关键路径
+    /// （`set_first_person_gun_mesh` / `set_props` ×2 / `set_shadow_props` /
+    /// `pt_set_scene_markers` / `Drop`），而**等待失败与等待成功在日志里长得一模一样**：
+    /// 后面那句 `destroy_buffer` 到底安不安全，排查的人手里没有任何证据。
+    /// 它最可能返回的错误正好是 `VK_ERROR_DEVICE_LOST`（铁律 B：不可恢复）。
+    ///
+    /// 判据 = 本测试（改回 `let _ =` 立刻红）+ `wait_idle_failure_is_named_and_reported_once`。
+    #[test]
+    fn device_wait_idle_errors_are_never_silently_dropped() {
+        let full = include_str!("renderer.rs");
+        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
+        // 先证明这条检查真的扫到了那条调用（否则文件被搬走/改名时会静默恒真）
+        let calls = code.iter().filter(|l| l.contains(".device_wait_idle(")).count();
+        assert!(calls >= 1, "检查失效：生产代码里没扫到 device_wait_idle");
+        let bad: Vec<&str> = code
+            .iter()
+            .copied()
+            .filter(|l| l.contains("let _ =") && l.contains(".device_wait_idle("))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "device_wait_idle 的结果被丢掉 ⇒ 等待失败与等待成功在日志里无法区分，\
+             而失败时紧跟的 destroy/create 并不安全：\n{}",
+            bad.join("\n")
+        );
+        // 正对照：留痕入口必须在 —— 它才是把"失败"变成证据的那一处
+        assert!(
+            code.iter().any(|l| l.contains("fn wait_idle_checked")),
+            "统一的留痕入口 wait_idle_checked 不见了"
         );
     }
 
