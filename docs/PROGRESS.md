@@ -8468,6 +8468,27 @@ cull-diag: 97818 us/s calls=49980 recomputed=… npcs=255 bodies=1240
 ⇒ 那批 90–195 ms 的单帧来自"外层脚本同时在刷日志/拉起下一个进程"，不是引擎的周期性抖动。
 判据写进 §21.27(d)：**要量尖刺，先保证同一时刻只有被测进程。**
 
+### 21.31 本轮改动后的整机回归：survive 5 波 **VICTORY（243s）** + 冒烟 ALL-OK
+
+今天动过渲染剔除缓存、道具上传顺序、枪模姿态、联机与 PT 路径，所以跑一遍端到端玩法验收
+（`scripts/run_survive_pm.ps1 -Secs 420`，独显 + mailbox + `RV3D_INVINCIBLE=1`）：
+
+```text
+result        : VICTORY (243s of a 420s budget)
+waves cleared : ['1', '2', '3', '4', '5']
+kills/shots   : 52 / 596   engagements=61
+hits          : 222   (命中率 37.2%)
+engage dist   : median=12m  min=2m  max=39m
+VUID=0 panics=0 device_lost=0 fps=174.2
+RESULT: ALL-OK
+```
+
+- **诚实标注**：命中率 37.2% 高于通关记录里的 32.9%，但**不能当"改好了"的证据** ——
+  harness 单轮命中率的轮间波动是 12%–37%（§21.22），这是一轮的数据；这里只宣称
+  **"今天这一串改动没有把玩法打坏"**（5 波全清、通关、零 VUID/零 device lost）。
+- 附带确认：`gun buffer` 扩容行为、NPC 剔除缓存、道具上传顺序这些改动**都不改变玩法判定**
+  （命中/击杀来源与跑位逻辑未动），这一点由"波次照样清完"间接印证。
+
 ### 21.28 联机审计：断线的人**永远站在场上** + 插值器**从来没接线**
 
 **(a) 幽灵玩家的三个环节，一个都没接**
