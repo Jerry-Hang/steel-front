@@ -8203,6 +8203,70 @@ ERROR steel_front] 连续 3 次围栏超时（≈15s 无任何一帧完成）⇒
 - 保留的旋钮（`--lead-secs` / `--burst`）都写进了 `--help`，附上实测数字，
   下一个人才不用重新试一遍。
 
+### 21.23 PT 上屏 blit 把目标范围写死 2560x1600：默认尺寸能跑，换个窗口尺寸就打掉设备
+
+**(a) 怎么找到的：读代码读出来的，不是跑出来的**
+
+- 全仓最后一处把 `2560x1600` 写进**生产代码**的地方：PT 上屏那条 `cmd_blit_image` 的
+  `dst_offsets` 末角写死 `x: 2560, y: 1600`，而同一次 blit 的 `src_offsets` 用的是活值 `pw/ph`。
+- **为什么它躲过了此前每一轮验证**：默认窗口尺寸**就是** 2560x1600，而此前所有 PT 验证
+  都跑在默认尺寸上 —— 这行代码只在"别的尺寸"下越界。
+
+**(b) 真机红证**（`scripts\run_resize_probe.ps1 -PT -Tag pt_resize_red -NoShot`，
+独显 + mailbox + 验证层，隐式层已关）：
+
+```text
+vkCmdBlitImage(): pRegions[0].dstOffsets[1] … VUID-vkCmdBlitImage-dstOffset-00248   ×5
+渲染错误: 提交队列失败: The logical device has been lost.
+```
+
+- **不只是"验证层多一条"**：目标范围超出目标图像是 UB，NVIDIA 在**第一次 resize（1280x720）
+  的那一帧**直接把设备打掉 ⇒ 画面停住、进程还在。
+- **数字**：`VUID 6`（5 条 blit + 1 条 `vkDestroyDevice-05137`）、`has been lost` **3935 条**。
+
+**(c) 修法**：`dst_offsets` 取 `self.swapchain_extent`；注释里写明 PT 图像是 init 时定尺寸的
+（`pt_size` 不随交换链重建变化）⇒ **缩放在这一处发生**，换宽高比只会拉伸画面、不会错位。
+
+**(d) 红测**：源码检查 `blit_regions_never_hardcode_pixel_extents` —— 生产代码里**非原点**的
+`Offset3D` 不许是纯字面量（原点 `{0,0,0}` 合法）；检测器带三个自检样本（写死的必须判红、
+具名的必须判绿、**跨行写法**也要抓到）。
+⚠️ **自检当场抓到了检测器自己的漏洞**：第一版忘了放行 `\n`，跨行样本返回 0 ⇒ 若没有那条样本，
+这条检查会对"跨行写死"静默放过（又是"先有结论、再写一个刚好能证明它的工具"那一类）。
+
+**(e) 同一个红日志里抓到的第二个缺陷：设备丢失后每帧重试重建交换链**
+
+```text
+size mismatch                                        1961   （12 秒内）
+重建交换链失败：等待设备空闲失败: … has been lost      3930
+```
+
+- 进程还活着、窗口还在，**一帧都不再更新** —— 正是本仓最反对的那类静默。
+  根因：`main.rs` 的尺寸自检只比较"窗口尺寸 vs 交换链尺寸"，**完全不知道渲染器已经降级**，
+  于是每帧都去重建（`recreate_swapchain` 内部 `wait_idle()` 必然失败）。
+- 修法：新增粘性位 `device_lost` + 纯函数 `should_retry_swapchain(device_lost, broken, secs)`：
+  - 设备丢失 ⇒ **永不重试**（本引擎没有重建设备的路径，"下一次成功"永远不会来）；
+  - 只是重建失败 ⇒ **限流 1 Hz**（避免 160 Hz 刷屏，同时保留"成功即自动恢复"）；
+  - `main.rs` **三处**重建入口（尺寸自检 / 交换链过期 / `Resized`）全部改成先问
+    `Renderer::swapchain_recovery_allowed()`，降级期间连 WARN 都不再打。
+- 判据：`is_device_lost_error`（ash 的 Display 文本 `device has been lost`，样本取自真机日志）
+  + 两个红测 `device_lost_stops_rebuilding` / `device_lost_error_text_is_recognised`。
+
+**(f) 顺带**：`tools/cjk_cover_check.py` —— CJK 字模覆盖的**秒级预检**（等价于 `cargo test`
+里那条 `source_cjk_codepoints_all_have_glyphs`，省一次 3 分钟编译）。
+诞生原因很直接：这轮换掉 5 个表外字（忌/讳/怕/楚/蕴），就是被这条预检拦下的。
+
+**(g) 闸门与真机复验**
+
+| 项 | 红（修前） | 绿（修后） |
+|---|---|---|
+| `VUID` | **6** | **0** |
+| `device lost` | **3935** | **0** |
+| 交换链重建次数（同 12s 窗口） | **1961** | **5**（= 每次 resize 一次） |
+| `RESULT` | CHECK | **ALL-OK** |
+
+`cargo test --release` **574 passed / 0 failed**、0 警告（新增 3 条判据）；
+`cargo build --release` 0 警告。复验命令：`scripts\run_resize_probe.ps1 -PT -Tag pt_resize_green -NoShot`。
+
 
 
 

@@ -612,6 +612,32 @@ fn frame_suppressed(gpu_stalled: bool, swapchain_broken: bool) -> bool {
     gpu_stalled || swapchain_broken
 }
 
+/// 交换链重建失败后**多久才允许再试一次**（秒）。见 `should_retry_swapchain`。
+const RECREATE_RETRY_MIN_SECS: f32 = 1.0;
+
+/// 现在值不值得再试一次交换链重建（纯逻辑，可单测；"距上次尝试多久"由调用方折成秒）。
+///
+/// - 设备丢失 ⇒ **永远不值得**：本引擎没有重建设备的路径，重试只会失败。实测（2026-09-26）
+///   设备被打掉之后，`main.rs` 的尺寸自检**每帧**重试重建，12 秒跑 1961 轮、刷 5900 行
+///   错误日志，而进程看着还活着 —— "看起来在跑、其实一帧都画不出来"正是本仓最反对的静默。
+/// - 上一次刚失败（< `RECREATE_RETRY_MIN_SECS`）⇒ 先不试（限流，别刷屏）；
+/// - 其余 ⇒ 值得（重建成功即自动恢复 `swapchain_broken`）。
+fn should_retry_swapchain(device_lost: bool, swapchain_broken: bool, secs_since_attempt: f32) -> bool {
+    if device_lost {
+        return false;
+    }
+    !(swapchain_broken && secs_since_attempt < RECREATE_RETRY_MIN_SECS)
+}
+
+/// 这条错误串是不是"设备丢了"（纯函数，可单测）。
+///
+/// 引擎各层的错误类型都是 `String`（只做前缀拼接），`VK_ERROR_DEVICE_LOST` 到这一层
+/// 只剩 ash 的 Display 文本 `The logical device has been lost.` ⇒ 只能按子串判。
+/// 判据独立成函数是为了**只有一处**定义"什么算不可恢复"。
+pub fn is_device_lost_error(msg: &str) -> bool {
+    msg.contains("device has been lost") || msg.contains("DEVICE_LOST")
+}
+
 /// 启动时要不要构建 PT 常驻资源（纯函数，可单测）。
 ///
 /// 🔴 2026-09-25 修：`RV3D_PT_LIVE=1` 自称"强制开"，但它**只**改 `pt_live_enabled`，
@@ -1089,6 +1115,13 @@ pub struct Renderer {
     /// 重建交换链**中途失败**后的降级开关（见 `recreate_swapchain`）：失败时句柄可能
     /// 已被销毁 ⇒ 在恢复前不许再提交帧。下一次重建成功即清除。
     swapchain_broken: bool,
+    /// 设备丢失（`VK_ERROR_DEVICE_LOST`）= **不可恢复**：一旦置位就不再提交、不再重建。
+    /// 2026-09-26 实测代价：PT blit 的越界目标范围把设备打掉之后，尺寸自检**每帧**重试重建，
+    /// 12 秒里跑了 1961 轮、刷了 5900 行错误日志，而进程看着还活着（一帧都画不出来）。
+    /// 判据 = `device_lost_stops_rebuilding` / `swapchain_recovery_allowed` 的单测。
+    device_lost: bool,
+    /// 上一次交换链重建尝试的时刻（失败后限流用，见 `swapchain_recovery_allowed`）
+    last_recreate_attempt: Instant,
     /// 呈现模式覆盖（`None` = 按 `RV3D_PRESENT_MODE` 选）；acquire 持续超时会降级写 mailbox
     present_mode_override: Option<vk::PresentModeKHR>,
     current_frame: usize,
@@ -1872,6 +1905,8 @@ impl Renderer {
             fence_timeouts: 0,
             gpu_stalled: false,
             swapchain_broken: false,
+            device_lost: false,
+            last_recreate_attempt: Instant::now(),
             present_mode_override: None,
             current_frame: 0,
             max_frames_in_flight: 2,
@@ -10524,11 +10559,18 @@ impl Renderer {
                     .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
                 self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[sw_bar]);
                 // blit PT -> swapchain
+                // 🔴 目标范围必须取**活的**交换链尺寸。这里曾写死 2560x1600，于是
+                // "默认窗口尺寸能跑、别的尺寸越界" —— 而默认尺寸正是平时跑验证用的那一个，
+                // 所以它躲过了此前每一轮验证。真机复现 = `scripts\run_resize_probe.ps1 -PT`
+                // （窗口改到 1280x720 等尺寸后立刻 `VUID-vkCmdBlitImage-dstOffsets-00203`）。
+                // 判据 = 源码检查 `blit_regions_never_hardcode_pixel_extents`。
+                // ⚠️ PT 图像是 init 时定尺寸的（`pt_size`，不随交换链重建变化）⇒ 缩放在这里发生：
+                // 换个宽高比的窗口只会把 PT 参照画面拉伸，不会错位。
                 let blit = vk::ImageBlit::default()
                     .src_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
                     .src_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: pw as i32, y: ph as i32, z: 1 }])
                     .dst_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
-                    .dst_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: 2560, y: 1600, z: 1 }]);
+                    .dst_offsets([vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: self.swapchain_extent.width as i32, y: self.swapchain_extent.height as i32, z: 1 }]);
                 self.device.cmd_blit_image(command_buffer, self.pt_img, vk::ImageLayout::GENERAL, sw_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST);
                 // swapchain -> PRESENT_SRC
                 let sw_back = vk::ImageMemoryBarrier::default()
@@ -11103,7 +11145,9 @@ impl Renderer {
         // 卡满 5 秒超时，主循环形同僵死。保持响应、把结论留在日志里，交给上层决定。
         // 同理 `swapchain_broken`（见 `recreate_swapchain`）：重建**中途**失败时
         // `swapchain` 等句柄可能已经被销毁，再 acquire/提交就是拿空句柄调 Vulkan。
-        if frame_suppressed(self.gpu_stalled, self.swapchain_broken) {
+        // `device_lost` 包含 `swapchain_broken`（置位那一拍就是重建失败），这里并列写出来
+        // 是为了让"不可恢复 ⇒ 不提交"这条读起来是显式的。
+        if frame_suppressed(self.gpu_stalled, self.swapchain_broken || self.device_lost) {
             return Ok(());
         }
         let frame_start = Instant::now();
@@ -11562,14 +11606,38 @@ impl Renderer {
     /// **半销毁**的状态继续每帧 acquire/提交（拿空句柄调 Vulkan，日志里只有一串含义不明的报错）。
     /// 现在失败一律置 `swapchain_broken` 降级：不再提交帧，等下一次
     /// 重建**成功**时自动恢复。判据 = `frame_suppressed` 的单测。
+    ///
+    /// 🔴 2026-09-26 再加一层：失败原因若是**设备丢失**，那"下一次成功"永远不会来
+    /// （本引擎没有重建设备的路径），置 `device_lost` 之后 `swapchain_recovery_allowed()`
+    /// 恒假 ⇒ 调用方不再重试、不再刷日志。见该字段与 `is_device_lost_error` 的文档。
+    /// 现在**值不值得**再试一次交换链重建（`main.rs` 三处重建入口的判据）。
+    /// 语义与判据全在纯函数 `should_retry_swapchain` 里，这里只是把"距上次多久"喂进去。
+    pub fn swapchain_recovery_allowed(&self) -> bool {
+        should_retry_swapchain(
+            self.device_lost,
+            self.swapchain_broken,
+            self.last_recreate_attempt.elapsed().as_secs_f32(),
+        )
+    }
+
     pub fn recreate_swapchain(&mut self) -> Result<(), String> {
+        self.last_recreate_attempt = Instant::now();
         let r = self.try_recreate_swapchain();
         self.swapchain_broken = r.is_err();
         if let Err(e) = &r {
-            log::error!(
-                "重建交换链失败：{} —— 进入降级（不再提交帧；下一次重建成功即恢复）",
-                e
-            );
+            if is_device_lost_error(e) {
+                // 不可恢复：把结论**讲明白一次**，然后彻底停下来
+                self.device_lost = true;
+                log::error!(
+                    "设备已丢失（VK_ERROR_DEVICE_LOST，不可恢复）：停止提交与交换链重建，需要重启进程。原因：{}",
+                    e
+                );
+            } else {
+                log::error!(
+                    "重建交换链失败：{} —— 进入降级（不再提交帧；下一次重建成功即恢复）",
+                    e
+                );
+            }
         }
         r
     }
@@ -13729,7 +13797,127 @@ mod vk_failure_path_tests {
         );
     }
 
-    use super::{frame_suppressed};
+    /// 在源码文本里挑出「非原点、且整个角完全由字面量写死」的 `Offset3D`。
+    ///
+    /// 原点 `{ x: 0, y: 0, z: 0 }` 合法（每次 blit/copy 都要），所以只报非原点的那种。
+    /// 逐行扫会漏掉跨行写法（`vk::Offset3D {` 后面换行），所以整段拼起来再按记号切。
+    fn hardcoded_offsets_in(src: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        for frag in src.split("vk::Offset3D {").skip(1) {
+            let body = frag.split('}').next().unwrap_or("");
+            // 只含字段名/数字/分隔符/空白 ⇒ 这一角完全是字面量（`pw as i32` 这类带字母，被排除）。
+            // ⚠️ 必须放行换行：跨行写法（`vk::Offset3D {` 之后换行）正是最容易漏的一类，
+            // 第一版忘了放行 `\n`，下面那条跨行自检样本当场把它抓了出来。
+            let literal_only = !body.is_empty()
+                && body.chars().all(|c| {
+                    c.is_ascii_digit()
+                        || matches!(c, 'x' | 'y' | 'z' | ':' | ',' | ' ' | '-' | '\n' | '\r' | '\t')
+                });
+            if !literal_only {
+                continue;
+            }
+            let nonzero = body
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|t| !t.is_empty())
+                .any(|t| t.parse::<i64>().map(|n| n != 0).unwrap_or(false));
+            if nonzero {
+                bad.push(format!("vk::Offset3D {{{}", body.trim()));
+            }
+        }
+        bad
+    }
+
+    /// 判据：**blit / copy 的边界不许是写死的像素数** —— 非原点的 `Offset3D` 必须由
+    /// 具名尺寸（`swapchain_extent` / `src_w` / `dst_w` …）算出来。
+    ///
+    /// 真机代价（2026-09-26）：PT 上屏那次 `cmd_blit_image` 把目标角写死成 2560x1600，
+    /// 于是"默认窗口尺寸能跑、别的尺寸越界" —— 而**默认尺寸正是平时验证用的那一个**，
+    /// 所以它躲过了此前每一轮验证（这条 bug 是读代码读出来的，不是跑出来的）。
+    /// 复现 = `scripts\run_resize_probe.ps1 -PT`：窗口改到 1280x720 后立刻
+    /// `VUID-vkCmdBlitImage-dstOffsets-00203`。
+    #[test]
+    fn blit_regions_never_hardcode_pixel_extents() {
+        // 自检：检测器必须能在"写死的"样本上判红、在"具名的"样本上判绿。
+        // 少了这一步，"0 处"既可能是真干净，也可能是检测器根本没在工作（教训 27）。
+        assert_eq!(
+            hardcoded_offsets_in(
+                "vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: 2560, y: 1600, z: 1 }"
+            )
+            .len(),
+            1,
+            "自检失败：写死像素数的样本没被判红"
+        );
+        assert!(
+            hardcoded_offsets_in(
+                "vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: pw as i32, y: ph as i32, z: 1 }"
+            )
+            .is_empty(),
+            "自检失败：具名尺寸的样本被误判"
+        );
+        // 跨行写法也必须抓到（这正是逐行扫会漏掉的那种）
+        assert_eq!(
+            hardcoded_offsets_in("vk::Offset3D {\n    x: 2560,\n    y: 1600,\n    z: 1\n}").len(),
+            1
+        );
+
+        let full = include_str!("renderer.rs");
+        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
+        // 先证明真的扫到了 blit 区域（否则文件改名/被搬走时这条检查会静默恒真）
+        assert!(
+            code.iter().filter(|l| l.contains("vk::Offset3D {")).count() >= 4,
+            "检查失效：生产代码里几乎没扫到 Offset3D"
+        );
+        assert!(
+            code.iter().any(|l| l.contains(".cmd_blit_image(")),
+            "检查失效：生产代码里没扫到 cmd_blit_image"
+        );
+        let bad = hardcoded_offsets_in(&code.join("\n"));
+        assert!(
+            bad.is_empty(),
+            "blit/copy 的边界写死了像素数 ⇒ 换个窗口尺寸就越界（VUID-…-dstOffsets-00203）：\n{}",
+            bad.join("\n")
+        );
+    }
+
+    use super::{frame_suppressed, is_device_lost_error, should_retry_swapchain, RECREATE_RETRY_MIN_SECS};
+
+    /// 判据：**设备丢失之后不许再重试重建**。
+    ///
+    /// 真机代价（2026-09-26，`scripts\run_resize_probe.ps1 -PT`）：PT blit 的越界目标范围
+    /// 把设备打掉之后，`main.rs` 的尺寸自检每帧重试重建交换链 —— 12 秒 1961 轮，
+    /// 1961 条 WARN + 3930 条 ERROR（`重建交换链失败：等待设备空闲失败: … has been lost`），
+    /// 进程还活着、窗口还在，但一帧都不再更新。修复 = 设备丢失置粘性标志 ⇒ 这一处返回 false。
+    #[test]
+    fn device_lost_stops_rebuilding() {
+        // 设备丢失：无论距上次多久（就算已经过了很久），都不值得再试
+        assert!(
+            !should_retry_swapchain(true, true, RECREATE_RETRY_MIN_SECS * 10.0),
+            "设备丢失后重试重建 = 每帧刷错误日志（不可恢复）"
+        );
+        assert!(!should_retry_swapchain(true, true, 0.0));
+        // 不是设备丢失、交换链也没坏 ⇒ 值得试
+        assert!(should_retry_swapchain(false, false, 0.0));
+        // 刚失败过 ⇒ 限流（避免 160Hz 刷屏）
+        assert!(!should_retry_swapchain(false, true, 0.0));
+        assert!(!should_retry_swapchain(false, true, RECREATE_RETRY_MIN_SECS * 0.5));
+        // 过了一秒 ⇒ 允许再试（重建成功即自动恢复）
+        assert!(should_retry_swapchain(false, true, RECREATE_RETRY_MIN_SECS));
+        assert!(should_retry_swapchain(false, true, RECREATE_RETRY_MIN_SECS + 0.01));
+    }
+
+    /// 判据：`VK_ERROR_DEVICE_LOST` 必须能被认出来（引擎各层只做字符串前缀拼接，
+    /// 到这里只剩 ash 的 Display 文本）。样本取自真机日志那一行。
+    #[test]
+    fn device_lost_error_text_is_recognised() {
+        assert!(is_device_lost_error(
+            "重建交换链失败：等待设备空闲失败: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>"
+        ));
+        assert!(is_device_lost_error("等待围栏失败: ERROR_DEVICE_LOST"));
+        // 不许误判：普通的交换链失败（设备还活着）必须仍然是"可重试"
+        assert!(!is_device_lost_error("重建交换链失败：交换链创建失败: ERROR_OUT_OF_DATE_KHR"));
+        assert!(!is_device_lost_error("等待围栏超时（5s 内这一帧没完成）"));
+    }
 
     /// 判据：降级状态必须真的挡住提交（`gpu_stalled` / `swapchain_broken`）。
     #[test]

@@ -2611,12 +2611,17 @@ impl GameApp {
             if let Some(win) = &self.window {
                 let is = win.inner_size();
                 if (is.width != sw || is.height != sh) && is.width > 0 && is.height > 0 {
-                    log::warn!(
-                        "size mismatch: window={}x{} swapchain={}x{} → 重建交换链",
-                        is.width, is.height, sw, sh
-                    );
-                    if let Err(e) = renderer.recreate_swapchain() {
-                        log::error!("尺寸自检重建交换链失败：{}", e);
+                    // 🔴 降级/设备丢失时**不再每帧重试**：这一处曾每帧刷 1 条 WARN + 2 条 ERROR
+                    // （实测设备丢失后 12 秒 1961 轮、5900 行日志，而画面一帧都不更新）。
+                    // 判据 = `Renderer::swapchain_recovery_allowed`。
+                    if renderer.swapchain_recovery_allowed() {
+                        log::warn!(
+                            "size mismatch: window={}x{} swapchain={}x{} → 重建交换链",
+                            is.width, is.height, sw, sh
+                        );
+                        if let Err(e) = renderer.recreate_swapchain() {
+                            log::error!("尺寸自检重建交换链失败：{}", e);
+                        }
                     }
                     let _ = self.game.hud.set_screen_size(is.width as f32, is.height as f32);
                 }
@@ -2643,8 +2648,10 @@ impl GameApp {
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
                     log::warn!("交换链过期，尝试重建...");
-                    if let Err(e2) = renderer.recreate_swapchain() {
-                        log::error!("交换链过期后重建失败：{}", e2);
+                    if renderer.swapchain_recovery_allowed() {
+                        if let Err(e2) = renderer.recreate_swapchain() {
+                            log::error!("交换链过期后重建失败：{}", e2);
+                        }
                     }
                 } else {
                     log::error!("渲染错误: {}", e);
@@ -3585,8 +3592,11 @@ impl ApplicationHandler for GameApp {
                     .hud
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
                 if let Some(renderer) = &mut self.renderer {
-                    if let Err(e) = renderer.recreate_swapchain() {
-                        log::error!("窗口尺寸变化后重建交换链失败：{}", e);
+                    // 降级/设备丢失时不重试（判据 = `swapchain_recovery_allowed`）
+                    if renderer.swapchain_recovery_allowed() {
+                        if let Err(e) = renderer.recreate_swapchain() {
+                            log::error!("窗口尺寸变化后重建交换链失败：{}", e);
+                        }
                     }
                 }
             }
