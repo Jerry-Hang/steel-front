@@ -100,7 +100,11 @@ finally {
     Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 1
     Remove-Item Env:RV3D_AUTOSTART, Env:RV3D_STRESS_AI, Env:RV3D_NO_SHADOW, Env:RV3D_CAM, Env:RV3D_RES, Env:RV3D_CULL_DIAG -ErrorAction SilentlyContinue
-    foreach ($k in $extraKeys) { Remove-Item Env:($k.Split("=")[0]) -ErrorAction SilentlyContinue }
+    # 🔴 必须用字符串拼接：`Remove-Item Env:($k.Split("=")[0])` 在 PS 5.1 里**不成立**
+    # （`Env:` 与括号表达式被拆成两个位置参数 ⇒ 报 "A positional parameter cannot be found"），
+    # 而 -ErrorAction 只是"静默"，于是 **-Extra 设的开关会一直留在进程环境里**，
+    # 下一次同进程调用 perf_run 就带着上一轮的诊断开关跑（实测 2026-09-26）。
+    foreach ($k in $extraKeys) { Remove-Item ("Env:" + $k.Split("=")[0]) -ErrorAction SilentlyContinue }
 }
 
 $perf = @(Get-ChildItem (Join-Path $repo "logs") -Filter "perf_*.log" -ErrorAction SilentlyContinue |
@@ -113,24 +117,26 @@ if ($perf.Count -eq 0) {
 $perfPath = $perf[0].FullName
 Write-Host ("perf_run: perf log = {0}" -f (Split-Path $perfPath -Leaf))
 
-# Columns: 0=t 1=fps 2=frame_us 3=cull 4=terrain 5=wait 6=acquire 7=record 8=submit 9=present 10=near
+# Columns: 0=t 1=fps(window) 2=dt_us 3=frame_us 4=cull 5=terrain 6=wait 7=acquire 8=record 9=submit 10=present 11=near
+# 列定义的真源是 src/perf_log.rs 的 PERF_LOG_COLUMNS（有测试钉住下标），改那里必须同步这里。
 $rows = @()
 foreach ($line in Get-Content $perfPath) {
     $f = $line -split "`t"
-    if ($f.Count -lt 11) { continue }
+    if ($f.Count -lt 12) { continue }
     $fps = 0.0
     if (-not [double]::TryParse($f[1], [ref]$fps)) { continue }
     $rows += [pscustomobject]@{
         t        = [double]$f[0]
         fps      = $fps
-        frame_us = [double]$f[2]
-        cull     = [double]$f[3]
-        terrain  = [double]$f[4]
-        wait     = [double]$f[5]
-        record   = [double]$f[7]
-        submit   = [double]$f[8]
-        present  = [double]$f[9]
-        near     = [int]$f[10]
+        dt_us    = [double]$f[2]
+        frame_us = [double]$f[3]
+        cull     = [double]$f[4]
+        terrain  = [double]$f[5]
+        wait     = [double]$f[6]
+        record   = [double]$f[8]
+        submit   = [double]$f[9]
+        present  = [double]$f[10]
+        near     = [int]$f[11]
     }
 }
 
@@ -160,6 +166,7 @@ Write-Host ""
 Write-Host ("==== perf_run result: {0} samples over {1:N0}s (steady-state = t >= 3s, n={2}) ====" -f `
     $rows.Count, $rows[-1].t, $warm.Count)
 Stat @($warm | ForEach-Object { $_.fps }) "fps" ""
+Stat @($warm | ForEach-Object { $_.dt_us }) "dt_us" "us"
 Stat @($warm | ForEach-Object { $_.frame_us }) "frame_us" "us"
 Stat @($warm | ForEach-Object { $_.cull }) "cull" "us"
 Stat @($warm | ForEach-Object { $_.terrain }) "terrain" "us"

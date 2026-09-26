@@ -617,6 +617,10 @@ struct GameApp {
     last_npc_snapshot: std::collections::HashMap<usize, ([f32; 3], f32, [f32; 4])>,
     /// 上一帧 FPS（性能日志用）
     last_fps: f64,
+    /// 上一帧的**真实帧间隔**（微秒，未夹取）。
+    /// 为什么要存成字段：算 dt 的地方与 `render()` 是**两个方法**，而帧间隔只有前者知道。
+    /// 用途仅限性能日志的 `dt_us` 列（口径见 `perf_log.rs`：帧率本身按窗口算，不靠这个值）。
+    frame_dt_us: u64,
     /// 上次打印 `cull-diag:` 的时刻（`RV3D_CULL_DIAG=1`，默认关掉时这个字段只被读一次/秒）
     last_cull_diag: std::time::Instant,
     /// 上次打印 `gundiag:` 的时刻（`RV3D_GUN_DIAG=1`，同上）
@@ -735,6 +739,7 @@ impl GameApp {
             anim_clock: 0.0,
             last_npc_snapshot: std::collections::HashMap::new(),
             last_fps: 0.0,
+            frame_dt_us: 0,
             last_cull_diag: std::time::Instant::now(),
             last_gun_diag: std::time::Instant::now(),
             corpses: Vec::new(),
@@ -1065,6 +1070,10 @@ impl GameApp {
         let now = Instant::now();
         let delta_time = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
+        // 未夹取的**真实帧间隔**（微秒）：只喂给性能日志。上面那句 `min(0.1)` 是给玩法用的
+        // （防卡顿大跳），拿它去量帧率会把 1 秒的长卡记成 100ms；而窗口帧率本身由
+        // `perf_log` 按"窗口内帧数 / 窗口时长"算，不受这里影响。
+        self.frame_dt_us = (delta_time * 1e6) as u64;
 
         // 确保 delta_time 不会太大（防止卡顿时大跳）
         let delta_time = delta_time.min(0.1);
@@ -2806,11 +2815,11 @@ impl GameApp {
                     log::error!("渲染错误: {}", e);
                 }
             }
-            // 性能日志采样（1s 一行）
+            // 性能日志采样（1s 一行；帧率由 perf_log 自己按窗口算，见 perf_log.rs）
             if let Some(pl) = self.perf_log.as_mut() {
                 let snap = renderer.perf_snapshot();
                 let (near, _, _) = renderer.last_stats();
-                pl.frame(self.last_fps, near, &snap);
+                let _ = pl.frame(self.frame_dt_us, near, &snap);
             }
         }
     }
