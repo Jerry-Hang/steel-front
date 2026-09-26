@@ -11,9 +11,11 @@
 //!
 //! 指挥链：战士向班长汇报（状态/位置），班→排→连→营逐级汇总为「军情报告」；
 //! 营司令官（AI 司令）每 0.5s 决策一次，判据就是 `Army::update` 里那三段：
-//! - 连名单内存活 < 128×0.55 **且** 累计击杀 < 8 → 重组；否则比敌我重心到地图中心的距离：
+//! - 连名单内存活 < **本营编制 × 0.55** 且 累计击杀 < 8 → 重组；否则比敌我重心到地图中心的距离：
 //!   我方 < 0.8×敌 ⇒ 进攻；> 1.25×敌 ⇒ 防御；其余 ⇒ 钳形侧翼。
 //!   （⚠️ 旧文案「伤亡>40% 转入防御」对不上代码：那个阈值判的是**重组**，防御看重心距离。）
+//!   🔴 分母原来写死 `128.0` ⇒ `RV3D_STRESS_AI=64` 时"存活 64 人"恒 < 70.4 ⇒ 司令**永远重组**、
+//!   两军永远不接火。现在取 `Army::roster_size()`（各班名单之和）。
 //! 命令逐级下发为「班目标点」；未接敌的战士按班目标 + `FORMATION_OFFSETS` 槽位推进
 //! （班长前中 4m、双翼侧后 4/3m、殿后 7m；**不随朝向旋转**，大战场上取确定性优先）；
 //! 接敌后仍交由既有逐人战术（掩体/侧翼/偷袭/压制）。
@@ -313,17 +315,14 @@ impl Army {
         let d_enemy = (self.enemy_centroid[0] * self.enemy_centroid[0]
             + self.enemy_centroid[1] * self.enemy_centroid[1])
             .sqrt();
-        // 我方重心比敌方更靠近地图中心 → 我方压上；反之敌方前推 → 防御；伤亡>40% → 重组
-        let total = 128.0f32;
-        self.situation = if own_advance < total * 0.55 && self.kills < 8 {
-            BattleSituation::Regroup
-        } else if d_self < d_enemy * 0.8 {
-            BattleSituation::Offense
-        } else if d_self > d_enemy * 1.25 {
-            BattleSituation::Defend
-        } else {
-            BattleSituation::Pincer
-        };
+        // 我方重心比敌方更靠近地图中心 → 我方压上；反之敌方前推 → 防御；伤亡 >45% → 重组
+        self.situation = decide_situation(
+            own_advance,
+            self.roster_size() as f32,
+            self.kills,
+            d_self,
+            d_enemy,
+        );
         // 目标线：敌我重心连线中点附近（营命令基准）
         let mid = [
             (my_c[0] + self.enemy_centroid[0]) * 0.5,
@@ -485,6 +484,37 @@ impl Army {
     pub fn platoon_of_squad(&self, squad_id: usize) -> usize {
         platoon_of_squad(&self.platoons, squad_id)
     }
+
+    /// 全营编制人数 = 各班名单之和（军情伤亡比例的**分母**）。
+    ///
+    /// 🔴 这个数以前在 `update` 里被写死成 `128.0`：`RV3D_STRESS_AI=64` 时"存活 64 人"恒
+    /// `< 128×0.55 = 70.4` ⇒ **司令永远只会重组**（`Regroup` 保持 90m 距离、不再压上），
+    /// 小规模压力模式的两军于是永远打不起来。判据 = `regroup_threshold_follows_the_roster`。
+    pub fn roster_size(&self) -> usize {
+        self.squads.iter().map(|s| s.members.len()).sum()
+    }
+}
+
+/// 营司令的态势判定（纯函数：阈值可逐档验证，不必造 NPC）。
+///
+/// 阈值口径：**连名单内存活 < 本营编制 × 0.55 且累计击杀 < 8 → 重组**；否则比敌我重心到
+/// 地图中心的距离（我方 < 0.8×敌 ⇒ 进攻；> 1.25×敌 ⇒ 防御；其余 ⇒ 钳形侧翼）。
+fn decide_situation(
+    alive: f32,
+    roster: f32,
+    kills: u32,
+    d_self: f32,
+    d_enemy: f32,
+) -> BattleSituation {
+    if roster > 0.0 && alive < roster * 0.55 && kills < 8 {
+        BattleSituation::Regroup
+    } else if d_self < d_enemy * 0.8 {
+        BattleSituation::Offense
+    } else if d_self > d_enemy * 1.25 {
+        BattleSituation::Defend
+    } else {
+        BattleSituation::Pincer
+    }
 }
 
 fn platoon_of_squad(platoons: &[Platoon], squad_id: usize) -> usize {
@@ -625,6 +655,70 @@ mod tests {
                 assert!(
                     a.company_of_platoon(p) < a.companies.len(),
                     "n={n}：排 {p} 的连下标越界"
+                );
+            }
+        }
+    }
+
+    /// 判据：重组阈值必须按**本营实际编制**算，不许写死 128。
+    ///
+    /// 写死 128 的后果（2026-09-26 修）：`RV3D_STRESS_AI=64` 时"存活 64 人"恒
+    /// `< 128×0.55 = 70.4` ⇒ 司令**永远只会重组**（保持 90m 距离、不再压上）⇒ 小规模压力模式
+    /// 的两军永远不接火。
+    #[test]
+    fn regroup_threshold_follows_the_roster() {
+        // 128 人的营：重组线 = 70.4 人（刚好跨过阈值的两档都给）
+        assert_eq!(
+            decide_situation(70.0, 128.0, 0, 10.0, 10.0),
+            BattleSituation::Regroup
+        );
+        assert_eq!(
+            decide_situation(71.0, 128.0, 0, 10.0, 10.0),
+            BattleSituation::Pincer
+        );
+        // 64 人的营：重组线 = 35.2 人 —— 写死 128 时这两档都恒为 Regroup
+        assert_eq!(
+            decide_situation(36.0, 64.0, 0, 10.0, 10.0),
+            BattleSituation::Pincer
+        );
+        assert_eq!(
+            decide_situation(35.0, 64.0, 0, 10.0, 10.0),
+            BattleSituation::Regroup
+        );
+        // 击杀 ≥ 8 之后不再重组（原有口径未变）
+        assert_eq!(
+            decide_situation(10.0, 128.0, 8, 10.0, 10.0),
+            BattleSituation::Pincer
+        );
+        // 重心判据两侧都取"刚好跨过"的输入（教训 42）
+        assert_eq!(
+            decide_situation(128.0, 128.0, 0, 7.9, 10.0),
+            BattleSituation::Offense
+        );
+        assert_eq!(
+            decide_situation(128.0, 128.0, 0, 12.6, 10.0),
+            BattleSituation::Defend
+        );
+        assert_eq!(
+            decide_situation(128.0, 128.0, 0, 10.0, 10.0),
+            BattleSituation::Pincer
+        );
+    }
+
+    /// 判据：`roster_size()` = 军情比例的分母，必须等于全营实际人数，且与连名单闭合。
+    #[test]
+    fn roster_size_covers_every_built_soldier() {
+        for n in [1usize, 32, 33, 37, 64, 100, 128, 129, 200] {
+            let a = army_of(n);
+            assert_eq!(a.roster_size(), n, "n={n}：编制人数必须等于实际人数");
+            if !a.companies.is_empty() {
+                assert_eq!(
+                    a.companies
+                        .iter()
+                        .map(|c| c.members.len())
+                        .sum::<usize>(),
+                    n,
+                    "n={n}：连名单合计必须闭合到全营（尾数不许落在编制外）"
                 );
             }
         }
