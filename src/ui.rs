@@ -148,6 +148,127 @@ pub enum BindingAction {
     Menu,
 }
 
+/// 全部键位动作的**顺序唯一真源**：设置面板的键位行顺序 = 本数组顺序。
+/// `KeyBindings::action_for` / `HudState::selected_action` / 设置面板绘制都取自这里，
+/// 别再各写一份平行数组（写过三份，靠注释同步）。
+pub const ALL_ACTIONS: [BindingAction; 8] = [
+    BindingAction::Forward,
+    BindingAction::Backward,
+    BindingAction::Left,
+    BindingAction::Right,
+    BindingAction::Reload,
+    BindingAction::Fire,
+    BindingAction::Jump,
+    BindingAction::Menu,
+];
+
+/// 设置面板行索引的**唯一真源**。行 = 3 个滑条（0 音量 / 1 灵敏度 / 2 音乐）
+/// + 2 个循环项（3 分辨率 / 4 画质）+ `ALL_ACTIONS.len()` 个键位行（5..）。
+///
+/// 🔴 **为什么要收口**（2026-09-26 的真实缺陷）：这些数字原先散在四处各写一遍
+/// （`settings_elements` 的绘制、`cycle_settings_selection` 的 `% 13`、`selected_action`
+/// 的 `5..=12`、`main.rs::settings_click` 的 `0..7`）—— 结果**绘制画了 8 行键位，
+/// 鼠标点击只遍历 7 行，菜单键那一行点不中**，而键盘 Tab 能到（它按 `% 13` 循环）。
+/// 两条路径看着都"对"，差别只是一个字面量。
+pub const SETTINGS_SLIDER_ROWS: usize = 3;
+/// 循环项（分辨率/画质）行数，紧跟在滑条行之后
+pub const SETTINGS_DISPLAY_ROWS: usize = 2;
+/// 第一个键位行的行号（= 滑条 + 循环项）
+pub const SETTINGS_KEY_ROW_BASE: u8 = (SETTINGS_SLIDER_ROWS + SETTINGS_DISPLAY_ROWS) as u8;
+/// 面板总行数（Tab 循环的模）
+pub const SETTINGS_ROW_COUNT: u8 = SETTINGS_KEY_ROW_BASE + ALL_ACTIONS.len() as u8;
+/// 键位行标签（顺序与 `ALL_ACTIONS` 一一对应；用英文动作名会让面板变回全 ASCII，故保留中文）
+pub const KEY_ROW_LABELS: [&str; 8] = ["前进", "后退", "左移", "右移", "换弹", "开火", "跳跃", "菜单"];
+
+// 编译期契约：行数必须**派生**自动作表，而不是另一个字面量。
+const _: () = assert!(
+    SETTINGS_KEY_ROW_BASE as usize == SETTINGS_SLIDER_ROWS + SETTINGS_DISPLAY_ROWS
+        && SETTINGS_ROW_COUNT as usize == SETTINGS_KEY_ROW_BASE as usize + ALL_ACTIONS.len(),
+    "设置面板行数与动作表脱钩：请改 SETTINGS_* 常量，不要在别处写死行号"
+);
+
+/// 设置面板几何（**设计空间**，`ui_scale` 折算由调用方做）。
+///
+/// 绘制（`settings_elements`）与命中测试（`main.rs::settings_click`）共用同一份几何 ——
+/// 旧版两处各算一遍，还留了一句"布局必须与 ui.rs 一致"的注释当契约。注释挡不住漂移。
+#[derive(Clone, Copy, Debug)]
+pub struct SettingsLayout {
+    pub bar_w: f32,
+    pub bar_h: f32,
+    pub label_w: f32,
+    pub row_h: f32,
+    pub start_y: f32,
+    pub left: f32,
+    pub key_start_y: f32,
+    pub key_row_h: f32,
+}
+
+impl SettingsLayout {
+    /// 键位行高（比滑条行矮：8 行要挤在中下部）
+    pub const KEY_ROW_H: f32 = 18.0;
+    /// 键位列表与循环项之间的空隙
+    pub const KEY_LIST_GAP: f32 = 24.0;
+
+    pub fn new(design_w: f32, design_h: f32) -> Self {
+        let bar_w = (design_w * 0.32).min(320.0);
+        let label_w = 160.0;
+        let row_h = 34.0;
+        let start_y = design_h * 0.28;
+        Self {
+            bar_w,
+            bar_h: 20.0,
+            label_w,
+            row_h,
+            start_y,
+            left: design_w * 0.5 - (label_w + bar_w + 16.0) * 0.5,
+            key_start_y: start_y + SETTINGS_KEY_ROW_BASE as f32 * row_h + Self::KEY_LIST_GAP,
+            key_row_h: Self::KEY_ROW_H,
+        }
+    }
+
+    /// 滑条/循环项某一行的顶部 y
+    pub fn row_y(&self, row: u8) -> f32 {
+        self.start_y + row as f32 * self.row_h
+    }
+
+    /// 第 i 个键位行的顶部 y
+    pub fn key_row_y(&self, i: usize) -> f32 {
+        self.key_start_y + i as f32 * self.key_row_h
+    }
+
+    /// 滑条条体的左边界 x（标签右侧）
+    pub fn bar_left(&self) -> f32 {
+        self.left + self.label_w
+    }
+}
+
+/// 设置面板命中测试（纯函数，可单测）：返回设计空间 y 落在哪一行。
+///
+/// 契约：**画出来的每一行都必须点得到**（`0..SETTINGS_ROW_COUNT` 全覆盖），
+/// 行号与 `selected_action` / Tab 循环同一套编号。
+pub fn settings_row_at(layout: &SettingsLayout, y: f32) -> Option<u8> {
+    for i in 0..SETTINGS_SLIDER_ROWS {
+        let ry = layout.row_y(i as u8);
+        if y >= ry && y <= ry + layout.bar_h {
+            return Some(i as u8);
+        }
+    }
+    for i in 0..SETTINGS_DISPLAY_ROWS {
+        let row = SETTINGS_SLIDER_ROWS as u8 + i as u8;
+        let ry = layout.row_y(row);
+        if y >= ry && y <= ry + layout.bar_h {
+            return Some(row);
+        }
+    }
+    for i in 0..ALL_ACTIONS.len() {
+        let ry = layout.key_row_y(i);
+        if y >= ry && y <= ry + layout.key_row_h {
+            return Some(SETTINGS_KEY_ROW_BASE + i as u8);
+        }
+    }
+    None
+}
+
 /// 键位配置（纯数据，u32 物理键码 = winit 0.30 `KeyCode` 枚举序号，非 USB HID 码）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyBindings {
@@ -216,20 +337,11 @@ impl KeyBindings {
         }
     }
 
-    /// 按 Forward→Menu 顺序返回第一个绑定该键码的动作（互斥后通常唯一，顺序仅兜底）
+    /// 按 `ALL_ACTIONS` 顺序返回第一个绑定该键码的动作（互斥后通常唯一，顺序仅兜底）
     pub fn action_for(&self, code: u32) -> Option<BindingAction> {
-        [
-            BindingAction::Forward,
-            BindingAction::Backward,
-            BindingAction::Left,
-            BindingAction::Right,
-            BindingAction::Reload,
-            BindingAction::Fire,
-            BindingAction::Jump,
-            BindingAction::Menu,
-        ]
-        .into_iter()
-        .find(|&a| self.code_for(a) == code)
+        ALL_ACTIONS
+            .into_iter()
+            .find(|&a| self.code_for(a) == code)
     }
 
     /// 动作显示名（设置面板/按键提示用，ASCII 大写）
@@ -1285,20 +1397,22 @@ impl HudState {
                 scale: 1.2,
             });
         }
-        // 音量 / 灵敏度条
-        let bar_w = (w * 0.32).min(320.0);
-        let bar_h = 20.0;
-        let label_w = 160.0;
-        let row_h = 34.0;
-        let start_y = h * 0.28;
-        let left = w * 0.5 - (label_w + bar_w + 16.0) * 0.5;
+        // 音量 / 灵敏度条（几何来自 `SettingsLayout`：绘制与命中测试**同一份**，见其注释）
+        let layout = SettingsLayout::new(w, h);
+        let (bar_w, bar_h, label_w, left) = (
+            layout.bar_w,
+            layout.bar_h,
+            layout.label_w,
+            layout.left,
+        );
         let rows = [
             ("音量", self.volume, Color::CYAN),
             ("灵敏度", self.sensitivity, Color::ORANGE),
             ("音乐", self.music_volume, Color::GREEN),
         ];
+        debug_assert_eq!(rows.len(), SETTINGS_SLIDER_ROWS, "滑条行数与常量脱钩");
         for (i, (name, ratio, color)) in rows.iter().enumerate() {
-            let y = start_y + i as f32 * row_h;
+            let y = layout.row_y(i as u8);
             let selected = (i as u8) == self.settings_selection;
             elems.push(HudElement::Text {
                 text: if selected {
@@ -1353,8 +1467,8 @@ impl HudState {
             ),
         ];
         for (i, (name, value)) in display_rows.iter().enumerate() {
-            let row = 3 + i as u8; // 0=音量 1=灵敏度 2=音乐 3=分辨率 4=画质
-            let y = start_y + row as f32 * row_h;
+            let row = SETTINGS_SLIDER_ROWS as u8 + i as u8; // 3=分辨率 4=画质
+            let y = layout.row_y(row);
             let selected = row == self.settings_selection;
             elems.push(HudElement::Text {
                 text: if selected {
@@ -1375,21 +1489,13 @@ impl HudState {
                 scale: 1.0,
             });
         }
-        // 键位列表（顺序 = BindingAction 枚举顺序，与 selected_action() 索引映射一致）
-        let keys = [
-            ("前进", self.key_bindings.move_forward),
-            ("后退", self.key_bindings.move_backward),
-            ("左移", self.key_bindings.move_left),
-            ("右移", self.key_bindings.move_right),
-            ("换弹", self.key_bindings.reload),
-            ("开火", self.key_bindings.fire),
-            ("跳跃", self.key_bindings.jump),
-            ("菜单", self.key_bindings.menu),
-        ];
-        let key_start_y = start_y + 5.0 * row_h + 24.0;
-        for (i, (name, code)) in keys.iter().enumerate() {
-            let y = key_start_y + i as f32 * 18.0;
-            let selected = (5 + i as u8) == self.settings_selection;
+        // 键位列表（顺序 = `ALL_ACTIONS`（唯一真源），与 `selected_action()` 索引映射一致）。
+        // 旧版在这里又抄了一份 8 元素平行数组，靠注释保证与 `selected_action` 的顺序一致。
+        for (i, action) in ALL_ACTIONS.iter().enumerate() {
+            let name = KEY_ROW_LABELS.get(i).copied().unwrap_or("");
+            let code = self.key_bindings.code_for(*action);
+            let y = layout.key_row_y(i);
+            let selected = (SETTINGS_KEY_ROW_BASE + i as u8) == self.settings_selection;
             elems.push(HudElement::Text {
                 text: if selected {
                     format!("> {}", name)
@@ -1406,7 +1512,7 @@ impl HudState {
                 scale: 1.0,
             });
             elems.push(HudElement::Text {
-                text: KeyBindings::label(*code),
+                text: KeyBindings::label(code),
                 x: left + label_w + 40.0,
                 y,
                 color: Color::YELLOW,
@@ -1524,35 +1630,25 @@ impl HudState {
         self.rebinding = None;
     }
 
-    /// 循环切换设置面板选中项（12 项：0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=7 个键位动作，
-    /// 顺序与 `BindingAction` 及设置面板键位行一致）
+    /// 循环切换设置面板选中项（`SETTINGS_ROW_COUNT` 行：0=音量 / 1=灵敏度 / 2=音乐 /
+    /// 3=分辨率 / 4=画质 / 5..=键位动作，顺序与 `ALL_ACTIONS` 及设置面板键位行一致）
     pub fn cycle_settings_selection(&mut self) {
-        self.settings_selection = (self.settings_selection + 1) % 13;
+        self.settings_selection = (self.settings_selection + 1) % SETTINGS_ROW_COUNT;
     }
 
-    /// 当前选中项（0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=键位动作）
+    /// 当前选中项（0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=键位动作）
     pub fn settings_selection(&self) -> u8 {
         self.settings_selection
     }
 
-    /// 当前选中项对应的键位动作：settings_selection 在 5..=12 时返回
-    /// 第 (selection-5) 个动作（与设置面板键位行顺序一致），否则 None
+    /// 当前选中项对应的键位动作：`settings_selection` 落在键位行区间时返回
+    /// 第 (selection - SETTINGS_KEY_ROW_BASE) 个动作（顺序 = `ALL_ACTIONS`），否则 None
     ///
     /// 预留：尚未接入 main.rs，由其在设置面板按 ENTER 时决定重绑定哪个动作。
     pub fn selected_action(&self) -> Option<BindingAction> {
-        const ACTIONS: [BindingAction; 8] = [
-            BindingAction::Forward,
-            BindingAction::Backward,
-            BindingAction::Left,
-            BindingAction::Right,
-            BindingAction::Reload,
-            BindingAction::Fire,
-            BindingAction::Jump,
-            BindingAction::Menu,
-        ];
-        (5..=12)
+        (SETTINGS_KEY_ROW_BASE..SETTINGS_ROW_COUNT)
             .contains(&self.settings_selection)
-            .then(|| ACTIONS[(self.settings_selection - 5) as usize])
+            .then(|| ALL_ACTIONS[(self.settings_selection - SETTINGS_KEY_ROW_BASE) as usize])
     }
 
     /// 显示命中标记（准星外圈闪一下）
@@ -2466,13 +2562,73 @@ mod tests {
         assert_eq!(hud.selected_action(), None, "越界应返回 None");
     }
 
+    /// 判据：**画出来的每一行都必须点得到**（`settings_row_at` 覆盖 `0..SETTINGS_ROW_COUNT`）。
+    ///
+    /// 依据（2026-09-26 的真实缺陷）：主面板画了 8 行键位，鼠标点击循环却只遍历 7 行
+    /// ⇒ **菜单键那一行点不中**，而键盘 Tab（按 `% SETTINGS_ROW_COUNT` 循环）能到那一行。
+    /// 两条路径各写一份行号 = 迟早差一个数字，这条测试把"覆盖"变成契约。
+    #[test]
+    fn every_drawn_settings_row_is_clickable() {
+        // 设计空间按 ui.rs 的实际算法取（1280x720 与 2560x1600 两个尺寸都过一遍）
+        for (w, h) in [(1280.0f32, 720.0f32), (2560.0, 1600.0)] {
+            let layout = SettingsLayout::new(w, h);
+            for row in 0..SETTINGS_ROW_COUNT {
+                let y = if row < SETTINGS_KEY_ROW_BASE {
+                    layout.row_y(row) + layout.bar_h * 0.5
+                } else {
+                    layout.key_row_y((row - SETTINGS_KEY_ROW_BASE) as usize) + layout.key_row_h * 0.5
+                };
+                assert_eq!(
+                    settings_row_at(&layout, y),
+                    Some(row),
+                    "行 {row} 画出来了就必须点得到（{}x{}）",
+                    w,
+                    h
+                );
+            }
+            // 最后一行键位下方的空白不该命中任何行（否则"点空白"会选中最后一项）
+            let below = layout.key_row_y(ALL_ACTIONS.len() - 1) + layout.key_row_h * 2.0;
+            assert_eq!(settings_row_at(&layout, below), None);
+        }
+    }
+
+    /// 判据：行数/基址**派生自动作表**，不是各写一遍的字面量。
+    /// 谁把 `ALL_ACTIONS` 加减一项而忘了改别的，这条会红。
+    #[test]
+    fn settings_row_constants_derive_from_the_action_table() {
+        assert_eq!(ALL_ACTIONS.len(), 8, "键位动作数量变了要同步全部行号");
+        assert_eq!(
+            SETTINGS_KEY_ROW_BASE as usize,
+            SETTINGS_SLIDER_ROWS + SETTINGS_DISPLAY_ROWS
+        );
+        assert_eq!(
+            SETTINGS_ROW_COUNT as usize,
+            SETTINGS_KEY_ROW_BASE as usize + ALL_ACTIONS.len()
+        );
+        assert_eq!(
+            KEY_ROW_LABELS.len(),
+            ALL_ACTIONS.len(),
+            "键位行标签数必须等于动作数（少一个就是一行没有名字）"
+        );
+        // 每个键位行的行号都必须落在选中区间里，否则点得到却选不中
+        for i in 0..ALL_ACTIONS.len() {
+            let row = SETTINGS_KEY_ROW_BASE + i as u8;
+            assert!(row < SETTINGS_ROW_COUNT, "键位行 {row} 越出总行数");
+            let mut hud = HudState::new(1280.0, 720.0);
+            hud.settings_selection = row;
+            assert_eq!(hud.selected_action(), Some(ALL_ACTIONS[i]));
+        }
+    }
+
     #[test]
     fn cycle_settings_selection_wraps_13_rows() {
         let mut hud = HudState::new(1280.0, 720.0);
         assert_eq!(hud.settings_selection(), 0);
-        for expected in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0] {
+        // 循环一圈的期望序列由常量推出来（写死 13 项的话，加一行设置就又得改测试）
+        let expected: Vec<u8> = (1..SETTINGS_ROW_COUNT).chain(std::iter::once(0)).collect();
+        for want in expected {
             hud.cycle_settings_selection();
-            assert_eq!(hud.settings_selection(), expected);
+            assert_eq!(hud.settings_selection(), want);
         }
     }
 

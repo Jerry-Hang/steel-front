@@ -1375,59 +1375,35 @@ impl GameApp {
     }
 
     /// 设置面板鼠标点击：命中某行 → 选中该项（与 Tab 循环一致）；音量/灵敏度条内点击
-    /// 按位置比例直接设值（x 比例 = 值）。布局必须与 ui.rs settings_elements 一致。
+    /// 按位置比例直接设值（x 比例 = 值）。
+    ///
+    /// 🔴 几何与行号全部取自 `ui::SettingsLayout` / `ui::settings_row_at`（绘制用的同一份）。
+    /// 旧版在这里**又算了一遍**布局、点击循环还写死 `0..7` 行键位，而面板画了 8 行
+    /// ⇒ **菜单键那一行鼠标点不中**（键盘 Tab 能到）。注释里那句"布局必须与 ui.rs 一致"
+    /// 没能挡住这次漂移，所以改成同源。
     fn settings_click(&mut self, mx: f32, my: f32) {
         let s = self.game.hud.ui_scale();
-        let w = self.game.hud.screen_w;
-        let h = self.game.hud.screen_h;
-        let dw = w / s;
-        let dh = h / s;
-        let bar_w = (dw * 0.32).min(320.0);
-        let bar_h = 20.0;
-        let label_w = 160.0;
-        let row_h = 34.0;
-        let start_y = dh * 0.28;
-        let left = dw * 0.5 - (label_w + bar_w + 16.0) * 0.5;
+        let dw = self.game.hud.screen_w / s;
+        let dh = self.game.hud.screen_h / s;
+        let layout = crate::ui::SettingsLayout::new(dw, dh);
         let mx_d = mx / s;
         let my_d = my / s;
-        // 音量/灵敏度/音乐三行：点行选中；点在条上按比例设值
-        for i in 0..3usize {
-            let y = start_y + i as f32 * row_h;
-            if my_d >= y && my_d <= y + bar_h {
-                self.game.hud.settings_selection = i as u8;
-                if mx_d >= left + label_w && mx_d <= left + label_w + bar_w {
-                    let ratio = ((mx_d - (left + label_w)) / bar_w).clamp(0.0, 1.0);
-                    match i {
-                        0 => self.game.hud.volume = ratio,
-                        1 => self.game.hud.sensitivity = ratio,
-                        _ => self.game.hud.music_volume = ratio,
-                    }
-                    log::info!("settings: 鼠标点击设定 行{} = {:.0}%", i, ratio * 100.0);
-                } else {
-                    log::info!("settings: 鼠标选中行 {}", i);
-                }
-                return;
+        let Some(row) = crate::ui::settings_row_at(&layout, my_d) else {
+            return;
+        };
+        self.game.hud.settings_selection = row;
+        // 滑条行：点在条上按位置比例设值；点标签或行内空白只选中
+        let on_bar = mx_d >= layout.bar_left() && mx_d <= layout.bar_left() + layout.bar_w;
+        if (row as usize) < crate::ui::SETTINGS_SLIDER_ROWS && on_bar {
+            let ratio = ((mx_d - layout.bar_left()) / layout.bar_w).clamp(0.0, 1.0);
+            match row {
+                0 => self.game.hud.volume = ratio,
+                1 => self.game.hud.sensitivity = ratio,
+                _ => self.game.hud.music_volume = ratio,
             }
-        }
-        // 分辨率/画质行：点击选中
-        for i in 0..2usize {
-            let row = 3 + i as u8;
-            let y = start_y + row as f32 * row_h;
-            if my_d >= y && my_d <= y + bar_h {
-                self.game.hud.settings_selection = row;
-                log::info!("settings: 鼠标选中行 {}", row);
-                return;
-            }
-        }
-        // 键位行：点击选中
-        let key_start_y = start_y + 5.0 * row_h + 24.0;
-        for i in 0..7usize {
-            let y = key_start_y + i as f32 * 18.0;
-            if my_d >= y && my_d <= y + 18.0 {
-                self.game.hud.settings_selection = (5 + i) as u8;
-                log::info!("settings: 鼠标选中键位行 {}", 5 + i);
-                return;
-            }
+            log::info!("settings: 鼠标点击设定 行{} = {:.0}%", row, ratio * 100.0);
+        } else {
+            log::info!("settings: 鼠标选中行 {}", row);
         }
     }
 
@@ -3978,6 +3954,54 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 判据：`scripts/*.ps1` 的**每一行都不许以非 ASCII 字节结尾**。
+    ///
+    /// 存在理由（2026-09-26 实测，5 个文件全中）：Windows PowerShell 5.1 把**无 BOM** 的
+    /// `.ps1` 按系统 ANSI（本机 GBK）解码。某行若以中文/全角字符结尾，其最后一个字节落在
+    /// GBK 首字节区间，解码器就把**行尾**当成它的第二个字节吃掉 ⇒ 下一行被并进这一行；
+    /// 若这一行恰好是注释，**下一行代码就被静默注释掉**，脚本照跑但少了一条语句：
+    ///   * `compile_pt.ps1` 吃掉 `$ErrorActionPreference = 'Stop'`（编译失败不再中止）；
+    ///   * `pt_power_ab.ps1` 吃掉 `function Run-Case(...)`（整个脚本不可用）；
+    ///   * `ask_qianwen.ps1` 吃掉 `$ix = ...`（点击落在 x=0）；
+    ///   * `release_input.ps1` 吃掉 `$alive = 0`；
+    ///   * `run_gameplay_smoke.ps1` 吃掉四处代码（含启动游戏与跑冒烟的调用）。
+    /// 判据只看**行尾字节**：文件里出现中文没关系（`send_work.ps1` 的消息体就是中文，
+    /// 但它后面跟着 ASCII 的 `}`），被吃掉的一定是"行尾非 ASCII"的那些行。
+    #[test]
+    fn powershell_scripts_never_end_a_line_with_a_non_ascii_byte() {
+        let dir = std::path::Path::new("scripts");
+        let mut checked = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("scripts 目录必须存在") {
+            let path = entry.expect("读取 scripts 项失败").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("ps1") {
+                continue;
+            }
+            checked += 1;
+            let bytes = std::fs::read(&path).expect("读 .ps1 失败");
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+            for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
+                // 结尾的 CR 不算行尾内容（CRLF 文件）
+                let end = if line.last() == Some(&b'\r') { line.len().saturating_sub(1) } else { line.len() };
+                if end == 0 {
+                    continue;
+                }
+                if line[end - 1] >= 0x80 {
+                    let text = String::from_utf8_lossy(&line[..end]).to_string();
+                    bad.push(format!("{name}:{}  …{}", i + 1, &text[text.len().saturating_sub(40)..]));
+                }
+            }
+        }
+        // 目录走空时这条会静默通过 —— 那正是教训 27 的形态（"没测到"与"测到 0"分不清）
+        assert!(checked >= 10, "只扫到 {checked} 个 .ps1，路径大概不对");
+        assert!(
+            bad.is_empty(),
+            "有 {} 行以非 ASCII 字节结尾（PS 5.1 按 ANSI 读 ⇒ 会吞掉下一行）：\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
 
     /// 🔴 每把 GLB 枪模的索引必须落在顶点数以内，且顶点不得含 NaN/Inf。
     ///
