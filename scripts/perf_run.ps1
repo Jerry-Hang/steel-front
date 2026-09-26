@@ -23,12 +23,19 @@
 #
 # Exit code 0 when a perf log was produced and parsed; 1 otherwise.
 #
-# MEASURED NOISE FLOOR (2026-09-15)
-# ---------------------------------
-# Two consecutive runs of the SAME binary (stress=128, 25s) gave median fps 69.7 and
-# 71.8 -- a 2.8% spread. Treat any between-run difference below ~5% as unmeasured
-# until you have several repetitions per arm; a single A/B here proves nothing.
-# (This is the repo's own lesson 24: one run per arm is not evidence.)
+# MEASURED NOISE FLOOR
+# --------------------
+# 2026-09-15: two consecutive runs of the SAME binary (stress=128, 25s) gave median fps 69.7
+# and 71.8 -- a 2.8% spread. That is where the old "treat anything below ~5% as unmeasured"
+# rule came from.
+# 2026-09-26: most of that spread was an artefact of the fps column itself. It used to log
+# one frame's 1/dt while frame_us logged a DIFFERENT frame's render time, so identical runs
+# could appear to differ by up to 48% (and a single A/B pair "proved" a +58% win that was
+# not there). With src/perf_log.rs::window_fps the same measurement is stable to ~0.2%:
+#     aa_probe:  mean  min 126.11  max 126.34  spread 0.2%   (3 runs, same flags)
+# Use scripts\aa_probe.ps1 to measure the floor for the current binary and flags; treat any
+# claimed delta below the spread it prints as unmeasured. One run per arm is still not
+# evidence (repo lesson 24).
 param(
     [int]$Secs = 60,
     [int]$Stress = 128,
@@ -100,10 +107,12 @@ finally {
     Get-Process -Name steel-front -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 1
     Remove-Item Env:RV3D_AUTOSTART, Env:RV3D_STRESS_AI, Env:RV3D_NO_SHADOW, Env:RV3D_CAM, Env:RV3D_RES, Env:RV3D_CULL_DIAG -ErrorAction SilentlyContinue
-    # 🔴 必须用字符串拼接：`Remove-Item Env:($k.Split("=")[0])` 在 PS 5.1 里**不成立**
-    # （`Env:` 与括号表达式被拆成两个位置参数 ⇒ 报 "A positional parameter cannot be found"），
-    # 而 -ErrorAction 只是"静默"，于是 **-Extra 设的开关会一直留在进程环境里**，
-    # 下一次同进程调用 perf_run 就带着上一轮的诊断开关跑（实测 2026-09-26）。
+    # MUST use string concatenation: `Remove-Item Env:($k.Split("=")[0])` does NOT work in
+    # Windows PowerShell 5.1 -- `Env:` and the parenthesised expression are parsed as two
+    # positional arguments ("A positional parameter cannot be found that accepts argument
+    # 'RV3D_...'"), and -ErrorAction SilentlyContinue hides it, so every switch passed via
+    # -Extra stayed set in the process environment for the NEXT run in the same process.
+    # (ASCII comments only: see the note at the top of this file.)
     foreach ($k in $extraKeys) { Remove-Item ("Env:" + $k.Split("=")[0]) -ErrorAction SilentlyContinue }
 }
 
@@ -118,7 +127,8 @@ $perfPath = $perf[0].FullName
 Write-Host ("perf_run: perf log = {0}" -f (Split-Path $perfPath -Leaf))
 
 # Columns: 0=t 1=fps(window) 2=dt_us 3=frame_us 4=cull 5=terrain 6=wait 7=acquire 8=record 9=submit 10=present 11=near
-# 列定义的真源是 src/perf_log.rs 的 PERF_LOG_COLUMNS（有测试钉住下标），改那里必须同步这里。
+# The single source for these columns is src/perf_log.rs::PERF_LOG_COLUMNS (a unit test pins the
+# indices); changing it there means changing the $f[...] mapping here.
 $rows = @()
 foreach ($line in Get-Content $perfPath) {
     $f = $line -split "`t"
