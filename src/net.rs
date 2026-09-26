@@ -1264,10 +1264,24 @@ impl Client {
     /// 已确认时返回 true。
     /// 断线重置（2026-08-25 重连支持）：清除已注册 id/实体/超时状态，
     /// 使下一次 retry_join 重新握手（服务器端也会重新注册为新 id）
+    ///
+    /// 🔴 2026-09-26 复查补：**会话级**状态必须一起清 —— 只清 `player_id`/`entities`/
+    /// `has_snapshot` 会留下一条静默故障：新会话的据点序号从 0 重来，而 `has_objective`
+    /// 仍是 true、`objective_seq` 还是上一局的大值 ⇒ `seq_is_newer` 把每一条据点消息都判成
+    /// 「过期」⇒ **新会话的据点消息全被丢弃**，HUD 停在上一局的进度上（不报错、日志干净）。
+    /// `remote_players` / `own_state` 同属会话状态，留着就是幽灵实体那类问题的另一半。
+    /// 判据 = `reset_connection_clears_session_scoped_state`。
     pub fn reset_connection(&mut self) {
         self.player_id = None;
         self.entities.clear();
+        // 插值缓冲与实体表必须同生共死（见 `prune_stale_entities` 的同一条理由）
+        self.remote_players.clear();
         self.has_snapshot = false;
+        self.own_state = None;
+        self.objective.clear();
+        self.objective_rule.clear();
+        self.has_objective = false;
+        self.objective_seq = 0;
         self.last_join_at = Instant::now() - Duration::from_secs(3600);
     }
 
@@ -1507,6 +1521,73 @@ mod tests {
             ok_count >= 50,
             "3000 条变异报文只解出 {ok_count} 条 ⇒ 测试大概没生效（第一版就是这么被抓的）"
         );
+    }
+
+    /// 🔴 判据：`reset_connection` 必须把**会话级**状态一起清掉。
+    ///
+    /// 只清 `player_id`/`entities`/`has_snapshot` 的后果（静默）：新会话的据点序号从 0 重来，
+    /// 而 `has_objective` 仍是 true、`objective_seq` 还是上一局的大值 ⇒ `seq_is_newer` 把
+    /// 每一条都判成「过期」⇒ **新会话的据点消息全被丢弃**，HUD 永远停在上一局的进度上；
+    /// `own_state` / `remote_players` 则是"重连后仍留着上一局实体"的种子。
+    #[test]
+    fn reset_connection_clears_session_scoped_state() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        // 先造出"上一局"的状态：一份高序号快照 + 一条高序号据点消息
+        let snap = NetworkMessage::Snapshot {
+            seq: 900,
+            time: 12.0,
+            player_id: 0,
+            player: PlayerState::new([5.0, 0.0, 5.0], 0.5),
+            npcs: Vec::new(),
+        };
+        assert!(client.handle_message(snap).is_none());
+        assert!(
+            client.own_state().is_some(),
+            "快照必须真的写进 own_state（否则这条测试没走到目标路径）"
+        );
+        let obj = NetworkMessage::ObjectiveState {
+            seq: 900,
+            time: 12.0,
+            rule_kind: "capture".into(),
+            points: vec![("A".into(), 1, 0.75)],
+        };
+        assert!(client.handle_message(obj).is_none());
+        assert_eq!(client.objective_state().len(), 1);
+
+        client.reset_connection();
+
+        assert!(
+            client.own_state().is_none(),
+            "重连后不许留着上一局房主状态"
+        );
+        assert!(
+            client.objective_state().is_empty(),
+            "重连后不许留着上一局据点"
+        );
+        assert!(
+            client.objective_rule().is_empty(),
+            "重连后不许留着上一局规则名"
+        );
+        assert!(
+            client.entities().is_empty() && client.remote_players().is_empty(),
+            "实体表与插值缓冲都要清（幽灵实体的另一半）"
+        );
+
+        // 🔴 关键后果：新会话从 seq=1 重来也必须被接受（旧 seq=900 会把它判成「过期」）
+        let fresh = NetworkMessage::ObjectiveState {
+            seq: 1,
+            time: 0.1,
+            rule_kind: "capture".into(),
+            points: vec![("A".into(), 2, 0.1)],
+        };
+        assert!(client.handle_message(fresh).is_none());
+        assert_eq!(
+            client.objective_state().len(),
+            1,
+            "新会话的据点消息必须被接受（旧序号不许继续挡着）"
+        );
+        assert_eq!(client.objective_state()[0].1, 2, "归属码应来自新会话");
     }
 
     /// 🔴 判据：非有限浮点（NaN / ±inf）必须在**线路边界**被拒 ——
