@@ -10330,6 +10330,7 @@ VUID=0 panics=0 device_lost=0        RESULT: NO-LEAK
 | `net.rs::decode` | `decode_never_panics_on_mutated_bytes_and_reencodes` | **1598/3000** | 无 panic；且**每条被接受的重编码后仍可解码** |
 | `map.rs::parse_map_toml` | `map_parser_never_panics_on_mutated_input` | **2210/3000** | 无 panic；错误信息一律非空 |
 | `assets.rs::parse_glb` | `glb_parser_never_panics_on_mutated_bytes_and_keeps_indices_in_range` | **1729/3000** | 无 panic；且**每条被接受的网格索引都在顶点范围内** |
+| `llm_cmd.rs::parse_json_fn` | `json_parser_never_panics_on_mutated_input` | **717/3000** | 无 panic、错误信息非空、**无发现** —— 同一手段在 GLB 上抓到两个 bug，在它身上一个没有（`c5a2c00`） |
 
 **🔴 GLB 那条抓到两个真 bug**（第一次跑就红，还是两种不同形态）：
 
