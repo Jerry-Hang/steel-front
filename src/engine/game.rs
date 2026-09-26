@@ -154,7 +154,12 @@ const EXPLOSION_OBSTACLE_FACTOR: f32 = 1.0;
 /// 不会秒杀自己；NPC 爆炸对玩家同样生效——爆炸中心偏移保证实际伤害通常更低）
 const SELF_DAMAGE_FACTOR: f32 = 0.35;
 const SELF_DAMAGE_CAP: f32 = 45.0;
-/// 掩体利用触发距离（米）：Chase 态距目标 ≤ 攻击距离 + 该值时先寻障碍环带掩体
+/// 掩体利用触发距离（米）：Chase 态距目标 ≤ 攻击距离 + 该值时先寻障碍环带掩体。
+///
+/// 🔴 2026-09-26 试过 20 → 32（想让掩护推进覆盖整段接近路线），**一轮实测没支持它**：
+/// 掩体类占比 CoverAdvance 从 7.2% 掉到 4.4%、CoverSeek 持平 1.8%（单轮噪声级，但方向不对）
+/// ⇒ 按"改动必须能被量出来"的纪律**回退到 20**。真正让掩体战术从 0% 变成有值的是
+/// "掩体爬行者不被冲锋覆盖"那一条（见 `update_ai_npc` 里的注释），与这个半径无关。
 const COVER_SEEK_RANGE: f32 = 20.0;
 /// 玩家准星对准判定角（弧度，≈14°）
 const AIM_ANGLE: f32 = 0.25;
@@ -2504,6 +2509,41 @@ impl Game {
                 } else {
                     "--".to_string()
                 };
+                // 🔴 2026-09-26 加：**战术分布**按秒打一行。
+                // 为什么：AGENTS 未结案 #18 挂着"CoverSeek 占比偏低（压力模式 4%，另一次 0）"，
+                // 但那个数字**没有一把留在仓库里的尺子** —— `aidiag: move` 只打"最远 3 只"的战术。
+                // 想判断"是掩体不够，还是触发条件太窄"，先把整场的分布量出来（先量再改）。
+                // `Tactic` 是 8 个取值，直接数一遍（NPC 数百，1 Hz，可忽略）。
+                {
+                    use crate::engine::ai::Tactic;
+                    let mut t = [0u32; 8];
+                    for n in self.npcs.iter() {
+                        let i = match n.tactic {
+                            Tactic::Advance => 0,
+                            Tactic::Flank => 1,
+                            Tactic::Ambush => 2,
+                            Tactic::Suppress => 3,
+                            Tactic::CoverAdvance => 4,
+                            Tactic::Retreat => 5,
+                            Tactic::Hold => 6,
+                            Tactic::CoverSeek => 7,
+                        };
+                        t[i] += 1;
+                    }
+                    let total: u32 = t.iter().sum();
+                    let pct = |v: u32| {
+                        if total == 0 {
+                            0.0
+                        } else {
+                            v as f32 * 100.0 / total as f32
+                        }
+                    };
+                    log::info!(
+                        "aidiag: tactic 1s Advance={}({:.0}%) Flank={}({:.0}%) Ambush={}({:.0}%) Suppress={}({:.0}%) CoverAdvance={}({:.0}%) Retreat={}({:.0}%) Hold={}({:.0}%) CoverSeek={}({:.0}%) 共{}",
+                        t[0], pct(t[0]), t[1], pct(t[1]), t[2], pct(t[2]), t[3], pct(t[3]),
+                        t[4], pct(t[4]), t[5], pct(t[5]), t[6], pct(t[6]), t[7], pct(t[7]), total
+                    );
+                }
                 log::info!(
                     "aidiag: move 1s Chase={} 实测均速={} m/s 停滞(<0.5m/s)={}；想走={} 被障碍抵消={}；分离推={} 推>半步={}；最远{}",
                     chase,
@@ -5678,8 +5718,17 @@ impl Game {
         // 总指挥指令单 #1 阶段二）；其余角色冲锋时全队直突（行为与原设计一致）。
         let mut tactic = pick_tactic(npc.role, &npc.perception);
         let is_flank_maneuver = matches!(tactic, Tactic::Flank | Tactic::Ambush);
+        // 🔴 2026-09-26：**掩体爬行者（CoverCrawler）不再被冲锋覆盖**。
+        // 实测依据（survive 模式 270s / 4 波，`RV3D_AI_DIAG=1` 的 `aidiag: tactic 1s`）：
+        // `CoverSeek=0%` **整场**、`CoverAdvance=0%` —— 不是"地图没掩体"（defense_line 内圈
+        // 有 8 段沙袋），而是 `should_charge`（≥50% 的 NPC 在追/打就全队冲锋）**几乎一直成立**，
+        // 而下面那条 CoverSeek 升级要求 `!ctx.charge`，冲锋覆盖又把 CoverCrawler 也改成 Advance
+        // ⇒ 掩体战术在生存模式里**一次都没生效**。现在只豁免这一个角色（约 1/6，第 3 波起存在），
+        // "冲锋 = 其余角色全队直突"的原设计保持不变。
+        let is_cover_crawler = npc.role == TacticalRole::CoverCrawler;
         if ctx.charge
             && npc.role != TacticalRole::Suppressor
+            && !is_cover_crawler
             && tactic != Tactic::Retreat
             && !is_flank_maneuver
         {
@@ -5687,12 +5736,15 @@ impl Game {
         }
         // 掩体利用：突击/压制手接近射程边缘时先评估障碍环带掩体（先移动到掩体再推进开火）。
         // 环带内无射程内掩体（如玩家处于中央安全区）时保持原直线推进 → 冒烟站定语义不变；
-        // 只在 Chase 态生效且冲锋时不做（冲锋 = 全队直突）。
+        // 只在 Chase 态生效且冲锋时不做（冲锋 = 全队直突）——**唯一的例外是掩体爬行者**。
         // 压力模式（NPC-vs-NPC）：目标在射程内且本 NPC 附近（40m）存在障碍格 → 也进入
         // 掩体利用（互射战场用障碍环带/关卡掩体，总指挥指令单 #2 阶段二）。
         if state == NpcState::Chase
-            && !ctx.charge
-            && matches!(tactic, Tactic::Advance | Tactic::Suppress)
+            && (!ctx.charge || is_cover_crawler)
+            && matches!(
+                tactic,
+                Tactic::Advance | Tactic::Suppress | Tactic::CoverAdvance
+            )
         {
             // 压力模式：目标在射程附近（≤ attack_range + 40m）即进入掩体利用——
             // advance 沿目标方向找遮挡掩体（NPC 穿越障碍带时自然利用），不要求当前位置附近有障碍。
