@@ -190,8 +190,24 @@ fn save_to(path: &Path, cfg: &GameConfig) {
         text.push_str(&format!("{}={}\n", k, code));
     }
     let tmp = path.with_extension("cfg.tmp");
-    if fs::write(&tmp, text).is_ok() {
-        let _ = fs::rename(&tmp, path);
+    // 🔴 2026-09-26：这两个失败以前都被 `let _ =` 吞掉 —— 写临时文件失败 / rename 失败
+    // **一个字都不会打**，玩家看到的是"设置改了、重启又变回去"，日志里毫无线索
+    // （本仓最反对的一类静默）。现在失败至少留一条 warn，并清掉残留的临时文件。
+    // ⚠️ Windows 上 `rename` 会因为**目标文件被别的进程占着**而失败（编辑器/杀软扫描），
+    // 那是这台机器上最可能的一条路径。
+    if let Err(e) = fs::write(&tmp, text) {
+        log::warn!(
+            "config: 写临时文件失败，本次设置未保存 {}: {e}",
+            tmp.display()
+        );
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, path) {
+        log::warn!(
+            "config: 保存失败（设置不会持久化）{}: {e}",
+            path.display()
+        );
+        let _ = fs::remove_file(&tmp);
     }
 }
 
@@ -224,6 +240,37 @@ mod tests {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("cfg.tmp"));
         assert_eq!(loaded, cfg, "roundtrip should restore exact config");
+    }
+
+    /// 🔴 判据：**保存失败不许留垃圾、也不许 panic**。
+    ///
+    /// 真机代价（2026-09-26 复查）：`save_to` 里 `fs::write` 与 `fs::rename` 两个失败以前都被
+    /// `let _ =` 吞掉 ⇒ 玩家看到的是"设置改了、重启又变回去"，日志里一个字都没有；而 rename
+    /// 失败时那个 `*.cfg.tmp` 会一直留在 HOME 里。
+    ///
+    /// 构造：把**目标路径指成一个目录** ⇒ `fs::write(tmp)` 成功、`fs::rename(tmp, dir)` 必失败
+    /// （Windows 上文件改名到已存在目录 = ACCESS_DENIED / ALREADY_EXISTS）。
+    #[test]
+    fn save_failure_leaves_no_temp_file_and_does_not_panic() {
+        let dir = std::env::temp_dir().join(format!(
+            "steel_front_cfg_as_dir_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok(), "前置条件：测试目录要能建出来");
+        let tmp = dir.with_extension("cfg.tmp");
+        let _ = fs::remove_file(&tmp);
+
+        save_to(&dir, &GameConfig::default());
+
+        assert!(dir.is_dir(), "目标目录不该被写坏");
+        assert!(
+            !tmp.exists(),
+            "rename 失败后必须清掉残留的临时文件（以前会留在 HOME 里）：{}",
+            tmp.display()
+        );
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 损坏/缺失文件应回退默认值而不是崩溃
