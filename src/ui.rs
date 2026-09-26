@@ -512,6 +512,9 @@ pub struct HudState {
     pub quality_index: u8,
     /// 路径追踪全景渲染开关（2026-08-29：默认 true）
     pub pt_enable: bool,
+    /// PT 曝光标定值（`config.rs` 读入、`RV3D_PT_EXPOSURE` 可覆盖；**刻意不进设置面板** ——
+    /// 它绑在光栅 tone 曲线上，是标定值不是玩家选项，见 `ray_tracer.rs`）
+    pub pt_exposure: f32,
     /// 键位配置（默认 WASD + R + ESC + SPACE）
     pub key_bindings: KeyBindings,
     /// 设置面板当前选中项（0=音量 / 1=灵敏度 / 2=音乐 / 3=分辨率 / 4=画质 / 5..=11=键位，Tab 循环）
@@ -613,6 +616,7 @@ impl HudState {
             resolution_index: 0,
             quality_index: 1,
             pt_enable: true,
+            pt_exposure: crate::engine::ray_tracer::PT_EXPOSURE_DEFAULT,
             key_bindings: KeyBindings::defaults(),
             settings_selection: 0,
             weapon_name: "M1 Rifle".to_string(),

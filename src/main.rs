@@ -675,6 +675,20 @@ impl GameApp {
         game.hud.music_volume = cfg.music_volume;
         game.hud.sensitivity = cfg.sensitivity;
         game.hud.key_bindings = cfg.bindings;
+        // PT 曝光标定值：配置文件 → （可被）RV3D_PT_EXPOSURE 覆盖做 A/B。**它不是玩家选项**，
+        // 所以停在配置层与调试开关层，不进设置面板（理由见 ray_tracer.rs 的常量注释）。
+        game.hud.pt_exposure = cfg.pt_exposure;
+        if let Ok(v) = std::env::var("RV3D_PT_EXPOSURE") {
+            if let Ok(v) = v.trim().parse::<f32>() {
+                game.hud.pt_exposure = v.clamp(
+                    engine::ray_tracer::PT_EXPOSURE_MIN,
+                    engine::ray_tracer::PT_EXPOSURE_MAX,
+                );
+                log::info!("PT 曝光被 RV3D_PT_EXPOSURE 覆盖为 {:.3}", game.hud.pt_exposure);
+            } else {
+                log::warn!("RV3D_PT_EXPOSURE 不是数字，忽略：{v}");
+            }
+        }
         // 分辨率索引：显式保存过 → 用配置值；首次运行 → 0（resumed() 按显示器宽高比重选）
         game.hud.resolution_index = if cfg.resolution_explicit {
             RESOLUTIONS
@@ -2770,10 +2784,11 @@ impl GameApp {
                 sun_dir: lu.directional.direction.truncate(),
                 sun_color: lu.directional.color_intensity.truncate()
                     * lu.directional.color_intensity.w,
-                // 0.4 = 标定值（2026-09-19 §19）：光栅把反照率乘在 tone 之外
-                // （alb×(1-exp(-1.55L))），PT 物理正确在之内；0.4 使两模型在
-                // albedo 0.1~0.8 区间分区均值互差 ≤15%。曲线本身已与光栅同源。
-                exposure: 0.4,
+                // 曝光 = 标定值（默认 0.4，见 ray_tracer.rs 的常量注释）：光栅把反照率乘在
+                // tone 之外（alb×(1-exp(-1.55L))），PT 物理正确在之内；0.4 使两模型在
+                // albedo 0.1~0.8 区间分区均值互差 ≤15%。现由 config.rs 持久化、可被
+                // RV3D_PT_EXPOSURE 覆盖，不再是硬编码字面量（未结案 #11 的最后一小项）。
+                exposure: self.game.hud.pt_exposure,
             });
             // PT 场景 = 光栅化同一批 WorldMarker（盒集合变化时才重建 BLAS，指纹判定在渲染器内）
             if let Err(e) = renderer.pt_set_scene_markers(&markers) {

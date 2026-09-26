@@ -23,6 +23,8 @@ pub struct GameConfig {
     pub quality: u32,
     /// 路径追踪全景渲染（2026-08-29：默认开启——整帧 RT core 路径追踪）
     pub pt_enable: bool,
+    /// PT 曝光标定值（默认 `PT_EXPOSURE_DEFAULT`；见 `ray_tracer.rs` 的说明与区间常量）
+    pub pt_exposure: f32,
 }
 
 impl Default for GameConfig {
@@ -36,6 +38,7 @@ impl Default for GameConfig {
             resolution_explicit: false,
             quality: 2, // HIGH（2026-08-28：用户机器全高实测 —— RTX 5060L + Zen4）
             pt_enable: false, // 2026-09-03 复现确认：源码与 35a 基线逐字节相同仍 0xC0000005（Cargo.lock 假设已证伪）；关=可玩，建模验收走光栅
+            pt_exposure: crate::engine::ray_tracer::PT_EXPOSURE_DEFAULT,
         }
     }
 }
@@ -119,6 +122,16 @@ fn load_from(path: &Path) -> GameConfig {
             // （当时同病的还有 `rt_enable`——它连"有人在读"都没有，2026-09-19 确认为
             // 死开关后随 RT 一并删除。）
             "pt_enable" => cfg.pt_enable = parse_bool(cfg.pt_enable),
+            // PT 曝光（标定值，见 ray_tracer.rs）：非法值保持原值，越界夹回区间。
+            // 判据 `pt_exposure_is_read_and_clamped`。
+            "pt_exposure" => {
+                if let Ok(v) = value.trim().parse::<f32>() {
+                    cfg.pt_exposure = v.clamp(
+                        crate::engine::ray_tracer::PT_EXPOSURE_MIN,
+                        crate::engine::ray_tracer::PT_EXPOSURE_MAX,
+                    );
+                }
+            }
             // 键码 = winit 0.30 KeyCode 枚举序号（KeyW=41/KeyS=37/KeyA=19/KeyD=22/
             // KeyR=36/Space=62/ContextMenu=54），见 ui.rs KeyBindings::defaults
             "bind_forward" if bindings_ok => {
@@ -173,6 +186,8 @@ fn save_to(path: &Path, cfg: &GameConfig) {
     text.push_str(&format!("quality={}\n", cfg.quality));
     // 0/1 与 load 的 parse_bool 对齐（也接受 true/false）
     text.push_str(&format!("pt_enable={}\n", cfg.pt_enable as u8));
+    // PT 曝光标定值（0.4 = 与光栅 tone 曲线对齐的值；见 ray_tracer.rs 的说明）
+    text.push_str(&format!("pt_exposure={:.3}\n", cfg.pt_exposure));
     // 键位格式版本：旧版（无此行）键码是 USB HID 码，与 winit 0.30 KeyCode 序号错位，
     // 加载时忽略旧 bind_* 行回退默认键位（见 load_from 的 bindings_ok）
     text.push_str("bindings_version=1\n");
@@ -332,6 +347,43 @@ mod tests {
         let d = GameConfig::default();
         assert_eq!(cfg.pt_enable, d.pt_enable, "非法值应保持默认");
         let _ = fs::remove_file(&path);
+    }
+
+    /// PT 曝光（标定值）必须能**从配置文件读进来**，且非法值保持原值、越界夹回区间。
+    ///
+    /// 这条守的是未结案 #11 的最后一小项：曝光原先硬编在 `main.rs` 的 `exposure: 0.4`，
+    /// 既不可持久化也不可做 A/B ⇒ 换一张图/换一套光栅 tone 参数就必须改源码重编。
+    #[test]
+    fn pt_exposure_is_read_and_clamped() {
+        use crate::engine::ray_tracer::{PT_EXPOSURE_MAX, PT_EXPOSURE_MIN};
+        let path = std::env::temp_dir().join(format!(
+            "steel_front_cfg_ptexp_{}.cfg",
+            std::process::id()
+        ));
+        // 1) 正常值
+        fs::write(&path, "pt_exposure=0.750\n").unwrap();
+        let cfg = load_from(&path);
+        assert!((cfg.pt_exposure - 0.75).abs() < 1e-6, "配置文件里的曝光必须生效");
+        // 2) 非法值：保持加载前的值（= 默认），不 panic
+        fs::write(&path, "pt_exposure=abc\n").unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.pt_exposure, GameConfig::default().pt_exposure, "坏行回退默认");
+        // 3) 越界：夹回区间（上界/下界各一次）
+        fs::write(&path, "pt_exposure=99\n").unwrap();
+        assert_eq!(load_from(&path).pt_exposure, PT_EXPOSURE_MAX, "上界夹回");
+        fs::write(&path, "pt_exposure=-3\n").unwrap();
+        assert_eq!(load_from(&path).pt_exposure, PT_EXPOSURE_MIN, "下界夹回");
+        // 4) 存盘再读回来（roundtrip）：保存的格式化值不会把 0.75 读成别的数
+        let mut saved = GameConfig::default();
+        saved.pt_exposure = 0.75;
+        save_to(&path, &saved);
+        let back = load_from(&path);
+        let _ = fs::remove_file(&path);
+        assert!(
+            (back.pt_exposure - 0.75).abs() < 1e-6,
+            "roundtrip 必须保住曝光值（写的是 {:.3}）",
+            saved.pt_exposure
+        );
     }
 
     /// bindings_version=1 的配置文件：bind_* 行按 winit 0.30 KeyCode 序号解析

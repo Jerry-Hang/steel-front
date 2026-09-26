@@ -1416,6 +1416,9 @@ pub struct Renderer {
     /// 本帧视锥 6 平面（法线朝外）。由 `render()` 在写 CameraUniform 的同一处填，
     /// 那时 `record_command_buffer()` 还没被调用，所以道具分桶剔除拿到的一定是本帧的。
     frame_frustum: [[f32; 4]; 6],
+    /// 本帧相机位置（与 `frame_frustum` 同一处填）。用途：`RV3D_PROP_STATS=1` 的距离直方图
+    /// —— 它回答"按距离剔除还有多少可剔"，而 `record_command_buffer` 里拿不到 `view`。
+    frame_cam_pos: glam::Vec3,
     /// 上一帧渲染统计（供 HUD / 日志）
     last_near_count: u32,
     last_far_count: u32,
@@ -2126,6 +2129,7 @@ impl Renderer {
             prop_sh_bins: Vec::new(),
             shadow_lod: std::env::var("RV3D_SHADOW_LOD").as_deref() != Ok("0"),
             frame_frustum: [[0.0f32; 4]; 6],
+            frame_cam_pos: glam::Vec3::ZERO,
             last_near_count: 0,
             last_far_count: 0,
             last_terrain_lod_name: "high",
@@ -10419,6 +10423,11 @@ impl Renderer {
                 // **1 个 draw 快很多 ⇒ 逐 draw 的 state 开销贵**（28 次切换）。
                 // 前提：顶点数/三角形数/draw call 数/填充率四个维度都已排除对不上这 3.7ms。
                 let one_draw = std::env::var("RV3D_ONE_PROP_DRAW").is_ok();
+                // 距离直方图只在 RV3D_PROP_STATS=1 时统计（默认零成本）：
+                // 回答"按距离剔除还有多少可剔"——`noprops` 实测 +37%（2026-09-26 新尺子），
+                // 道具仍是最大单项，但**剔除半径**该定在哪要靠这个分布说话。
+                let stats_on = std::env::var("RV3D_PROP_STATS").is_ok();
+                let mut dist_bins = [0u32; 3]; // <200m / 200..400m / >=400m（XZ 平面距离）
                 let mut drawn_bins = 0u32;
                 let mut drawn_tris = 0u32;
                 let mut drawn_vert_span = 0u64;
@@ -10442,6 +10451,19 @@ impl Renderer {
                         drawn_bins += 1;
                         drawn_tris += bin.index_count / 3;
                         drawn_vert_span += (bin.max_vertex - bin.min_vertex + 1) as u64;
+                        if stats_on {
+                            let dx = bin.center[0] - self.frame_cam_pos.x;
+                            let dz = bin.center[2] - self.frame_cam_pos.z;
+                            let d = (dx * dx + dz * dz).sqrt();
+                            let slot = if d < 200.0 {
+                                0
+                            } else if d < 400.0 {
+                                1
+                            } else {
+                                2
+                            };
+                            dist_bins[slot] += 1;
+                        }
                         self.device.cmd_draw_indexed(
                             command_buffer,
                             bin.index_count,
@@ -10500,9 +10522,7 @@ impl Renderer {
                 {
                     use std::sync::atomic::{AtomicU32, Ordering};
                     static TICK: AtomicU32 = AtomicU32::new(0);
-                    if std::env::var("RV3D_PROP_STATS").is_ok()
-                        && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
-                    {
+                    if stats_on && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0 {
                         let max_bin = self
                             .prop_bins
                             .iter()
@@ -10510,9 +10530,12 @@ impl Renderer {
                             .max()
                             .unwrap_or(0);
                         log::info!(
-                            "propdraw: 桶 {drawn_bins}/{} 可见；提交三角形 {drawn_tris}；单桶最大 {max_bin}；顶点区间合计 {drawn_vert_span}（顶点总数 {}）",
+                            "propdraw: 桶 {drawn_bins}/{} 可见；提交三角形 {drawn_tris}；单桶最大 {max_bin}；顶点区间合计 {drawn_vert_span}（顶点总数 {}）；距离 <200m {} / 200-400m {} / >=400m {}",
                             self.prop_bins.len(),
-                            self.prop_vertex_count
+                            self.prop_vertex_count,
+                            dist_bins[0],
+                            dist_bins[1],
+                            dist_bins[2]
                         );
                     }
                 }
@@ -11528,6 +11551,8 @@ impl Renderer {
         // 为 false 时也要能剔除；全零平面会让 bin_visible 恒真（退化为不剔除，安全但无效），
         // 所以这里无条件算一次。extract_frustum_planes 是纯算术，成本可忽略。
         self.frame_frustum = Self::extract_frustum_planes(view, proj);
+        // 相机位置与视锥同处填：`RV3D_PROP_STATS=1` 的距离直方图要用它（见字段注释）
+        self.frame_cam_pos = view.inverse().w_axis.truncate();
         let ubo = CameraUniform {
             view,
             proj,

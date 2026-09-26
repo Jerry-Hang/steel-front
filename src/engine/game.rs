@@ -2288,6 +2288,7 @@ impl Game {
             resolution: self.hud.resolution(),
             resolution_explicit: true, // 保存时总是写 resolution 行，加载后视为显式选择
             pt_enable: self.hud.pt_enable,
+            pt_exposure: self.hud.pt_exposure,
             quality: self.hud.quality_index as u32,
         }
     }

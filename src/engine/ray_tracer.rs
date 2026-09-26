@@ -84,6 +84,17 @@ pub fn box_indices() -> [u32; 36] {
 pub const PT_SUN_DIR: [f32; 3] = [-0.4, 0.9, -0.3];
 pub const PT_SUN_INTENSITY: f32 = 1.5;
 
+/// PT 曝光的**标定值**（0.4）：光栅把反照率乘在 tone 之外（`alb×(1-exp(-1.55L))`），
+/// PT 物理正确在之内；0.4 使两模型在 albedo 0.1~0.8 区间分区均值互差 ≤15%（2026-09-19 §19）。
+///
+/// ⚠️ 它是**标定常数**而不是玩家选项：它绑死在光栅那条 tone 曲线上，乱动就等于把 PT 与光栅
+/// 的对照关系破坏掉。所以它进 `config.rs`（可持久化、可被 `RV3D_PT_EXPOSURE` 覆盖做 A/B），
+/// **不进设置面板**（面板里放一个玩家随手可改的标定值，只会造出一堆假的画面 bug）。
+pub const PT_EXPOSURE_DEFAULT: f32 = 0.4;
+/// 允许区间（配置文件与 `RV3D_PT_EXPOSURE` 共用；越界一律夹回来）
+pub const PT_EXPOSURE_MIN: f32 = 0.05;
+pub const PT_EXPOSURE_MAX: f32 = 4.0;
+
 /// PT 取景参数（每帧由 main.rs 注入，打包为 5×vec4 push constants）
 #[derive(Clone, Copy, Default)]
 pub struct PtParams {
