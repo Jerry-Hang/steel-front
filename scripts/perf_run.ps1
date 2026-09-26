@@ -21,7 +21,12 @@
 #   ... -NoShadow                # RV3D_NO_SHADOW=1 (shadow cost A/B)
 #   ... -Cam "0,0:0,0"           # RV3D_CAM fixed viewpoint (reproducible framing)
 #
-# Exit code 0 when a perf log was produced and parsed; 1 otherwise.
+# Exit codes (2026-09-26, lesson 46: a ruler needs a "did not run" outcome):
+#   0 = steady-state stats produced (t >= 3s window had at least 3 samples)
+#   1 = no perf log, or too few sample rows -> nothing to report
+#   2 = stats printed, but the t >= 3s window had < 3 samples, so cold-cache rows are
+#       included: the numbers are NOT a steady-state arm measurement. Callers
+#       (ab_pair.ps1 / aa_probe.ps1) treat any non-zero code as a failed run.
 #
 # MEASURED NOISE FLOOR
 # --------------------
@@ -62,6 +67,12 @@ if (-not (Test-Path $exe)) { Write-Host "perf_run: missing $exe (run cargo build
 
 # Record which perf logs exist BEFORE the run, so afterwards we can tell exactly
 # which one this run produced instead of guessing by timestamp.
+#
+# 2026-09-26: `-Filter "perf_*.log"` also matches THIS harness's own stdout redirect
+# (logs\perf_run.log). When that file happens to be the newest match, the script analyses
+# it, parses zero sample rows, and blames the run ("only 0 sample row(s) parsed") -- wrong
+# file, misleading message. Found by the ps_selftest harness in logs/ps_selftest/. The
+# discovery below now excludes the harness's own log by name.
 $before = @(Get-ChildItem (Join-Path $repo "logs") -Filter "perf_*.log" -ErrorAction SilentlyContinue |
             ForEach-Object { $_.FullName })
 
@@ -117,7 +128,7 @@ finally {
 }
 
 $perf = @(Get-ChildItem (Join-Path $repo "logs") -Filter "perf_*.log" -ErrorAction SilentlyContinue |
-          Where-Object { $before -notcontains $_.FullName } |
+          Where-Object { $before -notcontains $_.FullName -and $_.Name -ne "perf_run.log" } |
           Sort-Object LastWriteTime -Descending)
 if ($perf.Count -eq 0) {
     Write-Host "perf_run: FAIL - no new logs/perf_*.log was produced. Check logs\perf_run.log.err"
@@ -159,8 +170,15 @@ if ($rows.Count -lt 5) {
 # the pipelines on the very first frames, and the reported fps there is a cold-cache
 # artefact (this is the documented "first-frame window" trap in AGENTS.md). Report
 # both, but rank on the steady-state numbers so a run is not judged by its first second.
+#
+# 2026-09-26: this fallback used to be SILENT -- the header kept claiming
+# "steady-state = t >= 3s" even when that filter had been dropped, so a run that died
+# early looked exactly like a normal measurement and ab_pair.ps1 would use it as an arm.
+# Now the rule actually used is printed, and a fallback run exits 2 (see the header).
 $warm = @($rows | Where-Object { $_.t -ge 3.0 })
-if ($warm.Count -lt 3) { $warm = $rows }
+$steady = $true
+if ($warm.Count -lt 3) { $warm = $rows; $steady = $false }
+$steadyCount = @($rows | Where-Object { $_.t -ge 3.0 }).Count
 
 function Stat($vals, $name, $unit) {
     $sorted = @($vals | Sort-Object)
@@ -173,8 +191,13 @@ function Stat($vals, $name, $unit) {
 }
 
 Write-Host ""
-Write-Host ("==== perf_run result: {0} samples over {1:N0}s (steady-state = t >= 3s, n={2}) ====" -f `
-    $rows.Count, $rows[-1].t, $warm.Count)
+if ($steady) {
+    Write-Host ("==== perf_run result: {0} samples over {1:N0}s (steady-state = t >= 3s, n={2}) ====" -f `
+        $rows.Count, $rows[-1].t, $warm.Count)
+} else {
+    Write-Host ("==== perf_run result: {0} samples over {1:N0}s ====" -f $rows.Count, $rows[-1].t)
+    Write-Host ("  WARNING: only {0} sample(s) at t >= 3s (< 3) -- the stats below INCLUDE cold-cache rows" -f $steadyCount)
+}
 Stat @($warm | ForEach-Object { $_.fps }) "fps" ""
 Stat @($warm | ForEach-Object { $_.dt_us }) "dt_us" "us"
 Stat @($warm | ForEach-Object { $_.frame_us }) "frame_us" "us"
@@ -192,4 +215,8 @@ if ($rows.Count -ne $warm.Count) {
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo "scripts\release_input.ps1") 2>&1 |
     Select-Object -Last 1 | ForEach-Object { Write-Host ("  " + $_) }
 
+if (-not $steady) {
+    Write-Host "perf_run: exit 2 - the steady-state window was too small; do not use these numbers as an A/B arm"
+    exit 2
+}
 exit 0
