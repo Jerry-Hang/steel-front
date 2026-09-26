@@ -2075,11 +2075,10 @@ impl Game {
         } else {
             self.spawn_wave(1, player);
         }
-        // 关卡系统：重开本关 → 据点进度/击杀/计时归零（rule 保持当前地图的规则）
+        // 关卡系统：重开本关 → 据点进度/归属/推进方归零（rule 保持当前地图的规则）
         if let Some(obj) = self.obj_state.as_mut() {
             for pt in obj.points.iter_mut() {
-                pt.progress = 0.0;
-                pt.owner = None;
+                pt.reset(); // 归属 + 进度 + 推进方一起清（单一定义在 objective.rs）
             }
             obj.kills = 0;
             obj.elapsed = 0.0;

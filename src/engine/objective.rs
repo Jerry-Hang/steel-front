@@ -12,6 +12,8 @@
 //! 判定规则细节（勿回退）：
 //! - 占领进度为标量 0.0..=1.0，向「当前推进方」增长；满 1.0 → 归属切换为该方、进度归零
 //!   （owner 字段本身记录归属，归零后「已占领」状态由 owner 表达，撤离后敌对可从零重新累计）。
+//!   🔴 **进度属于「谁在推」**：推进方一变就清零重来（`advancing` 字段），否则 A 队推起来的进度
+//!   会被 B 队直接继承 —— 联网双人时 0.2 秒就能白拿对方推了 9.9 秒的 99%。
 //! - 推进条件 = 据点内恰好单一玩家阵营且无敌对（NPC/敌方玩家）在场；多阵营玩家同点视为争夺。
 //! - 衰减：敌对在场按 2×capture_time 快速衰减（争夺压制）；无人按 1×capture_time 缓慢消散；
 //!   owner 阵营玩家在场守点 → 进度维持（默认规则，含敌对在场场景）。
@@ -38,6 +40,14 @@ pub struct CapturePoint {
     pub owner: Option<Team>,
     /// 占领进度 0.0..=1.0（向当前推进方增长；满 1.0 归属切换并归零）
     pub progress: f32,
+    /// 这份进度**是谁推起来的**（None = 没有人在推、进度已归零）。
+    ///
+    /// 🔴 2026-09-26 复查补：`progress` 是个裸标量、不带「谁在推」的信息 ⇒ 中立点上 A 队推到
+    /// 0.99 后离场、B 队进场，B 只需 **0.2 秒**就能把点拿走（继承 = 白送 99%）。单机只有 Blue
+    /// 一方玩家时不可达，**联网双人时可达**。现在推进方一变就清零重来；同队短暂离场再回来
+    /// 仍接着自己的进度推（与「无人缓慢消散」的设计一致）。
+    /// 判据 = `capture_progress_is_not_inherited_by_the_other_team`。
+    pub advancing: Option<Team>,
 }
 
 impl CapturePoint {
@@ -51,7 +61,18 @@ impl CapturePoint {
             capture_time,
             owner: None,
             progress: 0.0,
+            advancing: None,
         }
+    }
+
+    /// 复位（重开本关 / 重载地图）：归属、进度、**推进方**一起清。
+    ///
+    /// 🔴 「清理路径必须把同族状态一起带走」——只清 progress/owner 而留下 advancing，
+    /// 就是 2026-09-26 那批静默缺陷的同一种形态（见 §21.72 的 `reset_connection`）。
+    pub fn reset(&mut self) {
+        self.owner = None;
+        self.progress = 0.0;
+        self.advancing = None;
     }
 
     /// 水平距离（忽略 y）<= radius 视为在据点内（恰在半径上算在内）
@@ -107,11 +128,17 @@ pub fn update_point(
 
     match capturer {
         Some(team) => {
-            // 规则 2：向推进方增长，满 1.0 归属切换
+            // 规则 2：向推进方增长，满 1.0 归属切换。
+            // 🔴 推进方变了 ⇒ 这份进度**不属于它**：清零重来（见字段 `advancing` 的理由）。
+            if point.advancing != Some(team) {
+                point.progress = 0.0;
+                point.advancing = Some(team);
+            }
             point.progress += dt * inv;
             if point.progress >= 1.0 {
                 point.owner = Some(team);
                 point.progress = 0.0;
+                point.advancing = None;
                 log::info!(
                     "objective: capture point {} now owned by {:?}",
                     point.id,
@@ -123,9 +150,12 @@ pub fn update_point(
             }
         }
         None => {
-            // 规则 3：衰减（敌对在场 2× 快，无人 1× 慢）
+            // 规则 3：衰减（敌对在场 2× 快，无人 1× 慢）；衰减到 0 就没人再推它了
             let rate = if enemies_inside { 2.0 * inv } else { inv };
             point.progress = (point.progress - dt * rate).max(0.0);
+            if point.progress <= 0.0 {
+                point.advancing = None;
+            }
             false
         }
     }
@@ -357,6 +387,62 @@ mod tests {
         assert!(switched);
         assert_eq!(p.owner, Some(Team::Red));
         assert_eq!(p.progress, 0.0);
+    }
+
+    /// 🔴 判据：**进度条属于「正在推的那一队」，不能被对手继承。**
+    ///
+    /// 依据（2026-09-26 复查）：`progress` 是个裸标量，不带「谁在推」的信息 ⇒ 中立点上
+    /// Blue 推到 0.99 后离场、Red 进场，Red 只需 **0.2 秒**就能把点拿走（等于 Blue 白送 99%）。
+    /// 单机只有 Blue 一方玩家时不可达，**联网双人时可达**（这也是它一直没被发现的原因）。
+    #[test]
+    fn capture_progress_is_not_inherited_by_the_other_team() {
+        let mut p = pt("A"); // capture_time = 10 ⇒ 每 0.1s 推 1%
+        update_point(&mut p, 9.9, &[Team::Blue], false);
+        assert!(
+            (p.progress - 0.99).abs() < 1e-6,
+            "先决条件：Blue 必须已经推到 0.99，实际 {:.3}",
+            p.progress
+        );
+        let switched = update_point(&mut p, 0.2, &[Team::Red], false);
+        assert!(
+            !switched,
+            "Red 只待了 0.2s，不该拿走 Blue 推了 9.9s 的点（继承 = 白送）"
+        );
+        assert_eq!(p.owner, None, "点不该在 0.2s 内易主");
+        assert!(
+            p.progress <= 0.2 / 10.0 + 1e-6,
+            "Red 的进度必须从 0 重新起算，实际 {:.3}",
+            p.progress
+        );
+    }
+
+    /// 对照：**同一队**短暂离场后回来，可以接着自己的进度推（与「无人缓慢消散」的设计一致）。
+    /// 它同时是上面那条修复的护栏：别把「换人才清零」写成「离开就清零」。
+    #[test]
+    fn capture_progress_survives_a_brief_absence_of_the_same_team() {
+        let mut p = pt("A");
+        update_point(&mut p, 6.0, &[Team::Blue], false); // 0.6
+        update_point(&mut p, 1.0, &[], false); // 无人 1× 衰减 ⇒ 0.5
+        update_point(&mut p, 3.0, &[Team::Blue], false); // 同队回来接着推 ⇒ 0.8
+        assert!(
+            (p.progress - 0.8).abs() < 1e-6,
+            "同队回来必须接着自己的进度，实际 {:.3}",
+            p.progress
+        );
+        assert_eq!(p.owner, None);
+    }
+
+    /// 判据：复位（重开本关 / 重载地图）必须把**推进方**一起清 —— 只清 owner/progress
+    /// 而留下 `advancing`，就是「清理路径漏掉同族状态」那类静默缺陷的又一次重演。
+    #[test]
+    fn point_reset_clears_owner_progress_and_advancing() {
+        let mut p = pt("A");
+        update_point(&mut p, 5.0, &[Team::Blue], false);
+        assert_eq!(p.advancing, Some(Team::Blue), "先决条件：有人在推");
+        p.reset();
+        assert_eq!(p.owner, None);
+        assert_eq!(p.progress, 0.0);
+        assert_eq!(p.advancing, None, "复位必须把推进方一起清掉");
     }
 
     #[test]
