@@ -575,7 +575,89 @@ impl LlmCommander {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_url, DEFAULT_PATH};
+    use super::{parse_json_fn, parse_url, DEFAULT_PATH};
+
+    /// 🔴 判据：**手写 JSON 解析器不许被畸形输入打崩**。
+    ///
+    /// 这条解析器有两个不可信来源：**LLM 的响应**（`parse_company_cmds`）与
+    /// **GLB 的 JSON 块**（`assets.rs::parse_glb` 直接调它）⇒ 它 panic 等于"资产加载崩溃"。
+    /// 畸形输入的正确行为只有一条：**要么 Ok、要么带信息的 Err**。
+    ///
+    /// 变异从一份"结构齐全"的 JSON 出发（对象/数组/字符串/转义/数字/真假/null 都有），
+    /// 按结构分层：改一个字符（多数仍合法）、截断、追加、插入嵌套片段。
+    /// 自检（教训 27）：必须有一部分仍解析成功，否则这条测试没走到解析层。
+    #[test]
+    fn json_parser_never_panics_on_mutated_input() {
+        const BASE: &str = r#"{"a":[1,2.5,-3e2,true,false,null,"s\u0041"],"b":{"c":"d"},"e":[]}"#;
+        const CHARS: &[char] = &[
+            '{', '}', '[', ']', ',', ':', '"', '\\', '/', '0', '1', '9', '.', 'e', '-', '+',
+            't', 'f', 'n', 'u', ' ', '\n', '\t', '硫',
+        ];
+        let mut seed: u32 = 0xC0FF_EE01;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let mut ok_count = 0usize;
+        for i in 0..3000 {
+            let mut s = BASE.to_string();
+            match next() % 10 {
+                0..=3 => {
+                    let idx = (next() as usize) % s.chars().count().max(1);
+                    let c = CHARS[(next() as usize) % CHARS.len()];
+                    s = s
+                        .chars()
+                        .enumerate()
+                        .map(|(k, ch)| if k == idx { c } else { ch })
+                        .collect();
+                }
+                4..=5 => {
+                    // 改**字符串内部**的一个字符（结构不动 ⇒ 应当照常解析）
+                    let inside: Vec<usize> = {
+                        let mut v = Vec::new();
+                        let mut q = false;
+                        for (k, ch) in s.chars().enumerate() {
+                            if ch == '"' {
+                                q = !q;
+                            } else if q {
+                                v.push(k);
+                            }
+                        }
+                        v
+                    };
+                    if let Some(&idx) = inside.get((next() as usize) % inside.len().max(1)) {
+                        let c = ['a', 'z', '0', '9', '硫'][(next() as usize) % 5];
+                        s = s
+                            .chars()
+                            .enumerate()
+                            .map(|(k, ch)| if k == idx { c } else { ch })
+                            .collect();
+                    }
+                }
+                6..=7 => {
+                    let n = (next() as usize) % (s.chars().count() + 1);
+                    s = s.chars().take(n).collect();
+                }
+                8 => {
+                    let frag = ["[[[{", "\"", "\\", "0e", "-", "{\"x\":"];
+                    s.push_str(frag[(next() as usize) % frag.len()]);
+                }
+                _ => {
+                    let n = (next() % 120) as usize;
+                    s = (0..n).map(|_| CHARS[(next() as usize) % CHARS.len()]).collect();
+                }
+            }
+            match parse_json_fn(&s) {
+                Ok(_) => ok_count += 1,
+                Err(e) => assert!(!e.is_empty(), "第 {i} 条的错误信息不能为空"),
+            }
+        }
+        println!("json fuzz: {ok_count}/3000 条变异 JSON 仍可解析（其余带信息拒绝，全程无 panic）");
+        assert!(
+            ok_count >= 50,
+            "3000 条里只解出 {ok_count} 条 ⇒ 测试没走到解析层"
+        );
+    }
 
     fn expect_ok(url: &str) -> (String, u16, String) {
         parse_url(url).unwrap_or_else(|e| panic!("{url} 应当解析成功: {e}"))
