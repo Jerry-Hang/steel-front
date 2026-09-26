@@ -638,6 +638,21 @@ pub fn is_device_lost_error(msg: &str) -> bool {
     msg.contains("device has been lost") || msg.contains("DEVICE_LOST")
 }
 
+/// 道具缓冲要不要（重新）创建 —— 纯逻辑，可单测。
+///
+/// 判据是 `need > capacity`，**不是** `need != capacity`：写成 `!=` 时"道具变少"也会重建，
+/// 而重建等于 destroy 正在被在飞帧与 PT BLAS 引用的缓冲。枪模那条路为此付过代价
+/// （2026-09-15 实测按一下 2 = 整台设备消失，见 `set_first_person_gun_mesh` 的注释）。
+fn prop_buffer_growth_needed(
+    need_v: u32,
+    cap_v: u32,
+    need_i: u32,
+    cap_i: u32,
+    mapped_ok: bool,
+) -> bool {
+    !mapped_ok || need_v > cap_v || need_i > cap_i
+}
+
 /// 启动时要不要构建 PT 常驻资源（纯函数，可单测）。
 ///
 /// 🔴 2026-09-25 修：`RV3D_PT_LIVE=1` 自称"强制开"，但它**只**改 `pt_live_enabled`，
@@ -5764,24 +5779,17 @@ impl Renderer {
         let need_i = merged.indices.len() as u32;
         let mapped_ok = self.prop_mapped != std::ptr::null_mut()
             && self.prop_vertex_buffer != vk::Buffer::null();
-        if !mapped_ok || need_v > self.prop_capacity_verts || need_i > self.prop_capacity_idx {
+        // 只在"要得更多"或"还没有"时重建（判据 `need > capacity`，不是 `!=`：与枪模同一条理由）
+        if prop_buffer_growth_needed(
+            need_v,
+            self.prop_capacity_verts,
+            need_i,
+            self.prop_capacity_idx,
+            mapped_ok,
+        ) {
+            // 等待发生在帧与帧之间、不在命令缓冲记录期间，安全。
             unsafe {
                 let _ = self.device.device_wait_idle();
-            }
-            if self.prop_mapped != std::ptr::null_mut() {
-                unsafe { self.device.unmap_memory(self.prop_vertex_memory) };
-                self.prop_mapped = std::ptr::null_mut();
-            }
-            for (buf, mem) in [
-                (self.prop_vertex_buffer, self.prop_vertex_memory),
-                (self.prop_index_buffer, self.prop_index_memory),
-            ] {
-                if buf != vk::Buffer::null() {
-                    unsafe { self.device.destroy_buffer(buf, None) };
-                }
-                if mem != vk::DeviceMemory::null() {
-                    unsafe { self.device.free_memory(mem, None) };
-                }
             }
             // 2 的幂向上取整：地图尺寸只会小幅波动，避免每次重载都重建
             let cap_v = need_v.next_power_of_two().max(65_536);
@@ -5790,51 +5798,88 @@ impl Renderer {
             //   直接引用这两个缓冲 ⇒ usage 必须叠加 SHADER_DEVICE_ADDRESS +
             //   ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY；顶点色还要给 PT 着色器当
             //   albedo ⇒ VB 再加 STORAGE_BUFFER。主 pass 不受影响（usage 只做加法）。
-            let (vb, vm) = match self
-                .create_host_buffer(
-                    vk::BufferUsageFlags::VERTEX_BUFFER
-                        | vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                    cap_v as u64 * std::mem::size_of::<Vertex>() as u64,
-                )
-            {
+            //
+            // 🔴 2026-09-26 复查（与枪模 5585 起同一形态）：**先建新的，成功了再拆旧的**。
+            // 旧写法是「先 unmap/destroy/free 旧的 → 再 create 新的」，而 create 失败时只
+            // log + return ⇒ 句柄字段里留着**已销毁、却非 null** 的 VkBuffer：
+            //   ① 阴影 pass 只判 `!= null` 就把它绑上（10866 行那条）；
+            //   ② 下一次扩容 / 退出清理会对同一个句柄**二次 destroy_buffer**（双重释放）。
+            // 现在失败路径原样保留旧缓冲（降级 = 这一张图的道具不画，其余照常跑，
+            // 而且因为旧映射没动，下一次 set_props 还能自己恢复）；
+            // 成功路径多占一份旧显存，直到下面 swap 时销毁，代价可忽略。
+            let (vb, vm) = match self.create_host_buffer(
+                vk::BufferUsageFlags::VERTEX_BUFFER
+                    | vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                cap_v as u64 * std::mem::size_of::<Vertex>() as u64,
+            ) {
                 Ok(v) => v,
                 Err(e) => {
                     log::error!("props: 顶点缓冲创建失败，跳过道具绘制: {e}");
                     return;
                 }
             };
-            let (ib, im) = match self
-                .create_host_buffer(
-                    vk::BufferUsageFlags::INDEX_BUFFER
-                        | vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                        | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                    cap_i as u64 * 4,
-                )
-            {
+            let (ib, im) = match self.create_host_buffer(
+                vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                cap_i as u64 * 4,
+            ) {
                 Ok(v) => v,
                 Err(e) => {
                     log::error!("props: 索引缓冲创建失败，跳过道具绘制: {e}");
+                    unsafe {
+                        self.device.destroy_buffer(vb, None);
+                        self.device.free_memory(vm, None);
+                    }
                     return;
                 }
             };
-            self.prop_vertex_buffer = vb;
-            self.prop_vertex_memory = vm;
-            self.prop_index_buffer = ib;
-            self.prop_index_memory = im;
-            self.prop_mapped = match unsafe {
-                self.device.map_memory(vm, 0,
+            let new_mapped = match unsafe {
+                self.device.map_memory(
+                    vm,
+                    0,
                     cap_v as u64 * std::mem::size_of::<Vertex>() as u64,
-                    vk::MemoryMapFlags::empty())
+                    vk::MemoryMapFlags::empty(),
+                )
             } {
                 Ok(p) => p,
                 Err(e) => {
                     log::error!("props: 顶点缓冲映射失败，跳过道具绘制: {e}");
+                    unsafe {
+                        self.device.destroy_buffer(vb, None);
+                        self.device.free_memory(vm, None);
+                        self.device.destroy_buffer(ib, None);
+                        self.device.free_memory(im, None);
+                    }
                     return;
                 }
             };
+            // 新的三件套齐了，才拆旧的（前面已 `device_wait_idle()`，不会撞在飞帧）
+            unsafe {
+                if self.prop_mapped != std::ptr::null_mut() {
+                    self.device.unmap_memory(self.prop_vertex_memory);
+                }
+                if self.prop_vertex_buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(self.prop_vertex_buffer, None);
+                }
+                if self.prop_vertex_memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(self.prop_vertex_memory, None);
+                }
+                if self.prop_index_buffer != vk::Buffer::null() {
+                    self.device.destroy_buffer(self.prop_index_buffer, None);
+                }
+                if self.prop_index_memory != vk::DeviceMemory::null() {
+                    self.device.free_memory(self.prop_index_memory, None);
+                }
+            }
+            self.prop_vertex_buffer = vb;
+            self.prop_vertex_memory = vm;
+            self.prop_index_buffer = ib;
+            self.prop_index_memory = im;
+            self.prop_mapped = new_mapped;
             self.prop_capacity_verts = cap_v;
             self.prop_capacity_idx = cap_i;
             log::info!(
@@ -13880,7 +13925,107 @@ mod vk_failure_path_tests {
         );
     }
 
-    use super::{frame_suppressed, is_device_lost_error, should_retry_swapchain, RECREATE_RETRY_MIN_SECS};
+    use super::{
+        frame_suppressed, is_device_lost_error, prop_buffer_growth_needed, should_retry_swapchain,
+        RECREATE_RETRY_MIN_SECS,
+    };
+
+    /// 判据：道具缓冲**只在要得更多时**才重建（`need > capacity`，不是 `need != capacity`）。
+    ///
+    /// 写成 `!=` 的代价枪模那边实测过：destroy 正在被 GPU 使用的 buffer ⇒ `VK_ERROR_DEVICE_LOST`。
+    #[test]
+    fn prop_buffer_growth_is_strictly_by_need() {
+        // 道具变少（换小地图）：绝不重建
+        assert!(!prop_buffer_growth_needed(10_000, 65_536, 20_000, 65_536, true));
+        // 刚好相等：不重建
+        assert!(!prop_buffer_growth_needed(65_536, 65_536, 65_536, 65_536, true));
+        // 要得更多（顶点 / 索引任一超过容量）：才重建
+        assert!(prop_buffer_growth_needed(65_537, 65_536, 20_000, 65_536, true));
+        assert!(prop_buffer_growth_needed(10_000, 65_536, 65_537, 65_536, true));
+        // 句柄还没建（首帧 / 上次创建失败）：必须建
+        assert!(prop_buffer_growth_needed(1, 65_536, 1, 65_536, false));
+    }
+
+    /// 判据：**先建新的，成功了再拆旧的** —— 上传缓冲的销毁不许出现在创建之前。
+    ///
+    /// 真机代价（2026-09-26 复查，`set_props`）：旧写法是「先 unmap/destroy/free 旧的 →
+    /// 再 create 新的」，而 create 失败时只 `log + return` ⇒ 句柄字段里留着
+    /// **已销毁却非 null** 的 VkBuffer：① 阴影 pass 只判 `!= null` 就绑它；
+    /// ② 下一次扩容 / 退出清理对同一句柄**二次 destroy_buffer**。
+    /// 枪模路径 2026-09-22 已改成"先建后毁"，道具这条路当时漏了 —— 所以这条检查
+    /// 对**两条路**都必须成立（两条都在这里扫）。
+    ///
+    /// ⚠️ 只认"跟这一对上传缓冲有关"的销毁：`set_props` 开头还会销毁 PT 属性表
+    /// （`prop_attr_buf`，那处本来就正确置空），把它算进来会误报（第一版就是这么红的）。
+    #[test]
+    fn upload_buffers_are_created_before_the_old_ones_are_destroyed() {
+        let full = include_str!("renderer.rs");
+        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        let lines: Vec<&str> = src.lines().collect();
+        // 函数名 → 该函数里"这一对上传缓冲"的字段名（用于把无关的销毁排除掉）
+        let targets: [(&str, [&str; 4]); 2] = [
+            (
+                "pub fn set_props(",
+                [
+                    "prop_vertex_buffer",
+                    "prop_index_buffer",
+                    "prop_vertex_memory",
+                    "prop_index_memory",
+                ],
+            ),
+            (
+                "pub fn set_first_person_gun_mesh(",
+                [
+                    "gun_vertex_buffer",
+                    "gun_index_buffer",
+                    "gun_vertex_buffer_memory",
+                    "gun_index_buffer_memory",
+                ],
+            ),
+        ];
+        for (fname, names) in targets {
+            let start = lines
+                .iter()
+                .position(|l| l.contains(fname))
+                .unwrap_or_else(|| panic!("检查失效：源码里找不到 {fname}"));
+            // 函数体 = 到下一个同级 `pub fn` / `fn` 为止（impl 内的方法都是 4 空格缩进）
+            let end = lines[start + 1..]
+                .iter()
+                .position(|l| l.starts_with("    pub fn ") || l.starts_with("    fn "))
+                .map(|i| start + 1 + i)
+                .unwrap_or(lines.len());
+            let body: Vec<&str> = lines[start..end]
+                .iter()
+                .copied()
+                .filter(|l| !is_comment(l))
+                .collect();
+            let first_create = body
+                .iter()
+                .position(|l| l.contains("create_host_buffer("))
+                .unwrap_or_else(|| panic!("检查失效：{fname} 里没扫到 create_host_buffer"));
+            // "这一对缓冲"的销毁：销毁语句本身提到字段名，或紧邻上文（旧写法把字段塞在一个
+            // 元组数组里循环销毁）提到字段名
+            let first_destroy = body.iter().enumerate().position(|(i, l)| {
+                if !(l.contains("destroy_buffer(") || l.contains("free_memory(")) {
+                    return false;
+                }
+                let from = i.saturating_sub(6);
+                body[from..=i]
+                    .iter()
+                    .any(|w| names.iter().any(|n| w.contains(n)))
+            });
+            let first_destroy = first_destroy
+                .unwrap_or_else(|| panic!("检查失效：{fname} 里没扫到销毁这一对上传缓冲的语句"));
+            assert!(
+                first_create < first_destroy,
+                "{fname}：销毁旧缓冲出现在创建新缓冲之前 —— 创建失败就会留下已销毁但非 null 的句柄\n\
+                 创建在第 {} 行、销毁在第 {} 行（函数内相对行号，不含注释）",
+                first_create + 1,
+                first_destroy + 1
+            );
+        }
+    }
+
 
     /// 判据：**设备丢失之后不许再重试重建**。
     ///

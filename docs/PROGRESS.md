@@ -8267,6 +8267,53 @@ size mismatch                                        1961   （12 秒内）
 `cargo test --release` **574 passed / 0 failed**、0 警告（新增 3 条判据）；
 `cargo build --release` 0 警告。复验命令：`scripts\run_resize_probe.ps1 -PT -Tag pt_resize_green -NoShot`。
 
+### 21.24 同一类缺陷在道具上传路上还没修：create 失败会留下**已销毁但非 null** 的句柄
+
+**(a) 怎么发现的**：修完 §21.23 之后顺着"销毁句柄"这条线复查，注意到 `set_props` 的形状与
+`set_first_person_gun_mesh` **不一样**：
+
+| | 枪模（2026-09-22 修过） | 道具（本轮之前） |
+|---|---|---|
+| 顺序 | **先建新的，成功了再拆旧的** | **先 unmap/destroy/free 旧的，再 create 新的** |
+| create 失败 | 只销毁刚建的那一份，旧缓冲原样保留 | 已经 `log + return`，而旧句柄**早被销毁** |
+
+⇒ 失败时 `prop_vertex_buffer` / `prop_index_buffer` 里留着**已销毁、却非 null** 的 VkBuffer
+（`prop_mapped` 同时为 null，`capacity` 还是旧值）。三个下游都只判 `!= null`：
+① 阴影 pass 直接 `cmd_bind_vertex_buffers`（10866 行那条）；
+② 下一次扩容 / 退出清理对同一句柄**二次 `destroy_buffer`**（双重释放）；
+③ 主 pass 那条有 `prop_index_count > 0` 兜底，安全（进 BLAS 那条也有 `prop_attr_tris > 0` 兜底）。
+
+**(b) 诚实评估可达性**：`cap_*` 是 `max(65536, next_pow2(need))`，而城市图的 628680 顶点
+一次就把容量顶到 1048576（= 硬上限 2^21 的一半），**此后不再增长** ⇒ 现实中要同时满足
+"更大的地图 + 显存分配失败"才踩到。所以这条不是"线上正在冒烟"，而是**同一类缺陷的第二处**
+（枪模那条已经付过 device lost 的学费），修它的理由是**形状一致性**：两条路都该是"先建后毁"。
+
+**(c) 修法**：把 `set_props` 的扩容段改成与枪模同形（建 VB → 建 IB（失败则只销毁刚建的 VB）
+→ map（失败则只销毁刚建的两份）→ **三件套齐了才** unmap/destroy/free 旧的 → 装上新的）。
+顺带：判断条件抽成纯函数 `prop_buffer_growth_needed(need_v, cap_v, need_i, cap_i, mapped_ok)`
+（判据 `need > capacity`，**不是** `!=`），并保留"失败即降级 = 这一张图的道具不画"的语义 ——
+因为旧映射没被动过，下一次 `set_props` 还能自己恢复。
+
+**(d) 红测两条**
+
+- `prop_buffer_growth_is_strictly_by_need`：变少/相等都不重建、变大才重建、句柄缺失必须建。
+- `upload_buffers_are_created_before_the_old_ones_are_destroyed`：**源码顺序检查** ——
+  `set_props` 与 `set_first_person_gun_mesh` 两条路里，"销毁这一对上传缓冲"都不许出现在
+  "创建"之前。
+  ⚠️ 第一版把**任何** `destroy_buffer(` 都算进来，于是 `set_props` 开头销毁 PT 属性表那处
+  （本来就正确置空）被误报成红 —— 现在只认"语句本身或紧邻上文提到这一对字段名"的销毁。
+
+**(e) 验证（真机，改的是每次载入地图都会走的创建路径）**
+
+| 项 | 结果 |
+|---|---|
+| `VUID` / `device lost` / `panics` | **0 / 0 / 0**（`-PT` 与光栅各一轮，含 5 次 resize + F12） |
+| 道具上传 | `缓冲扩容 顶点 628680/1048576 索引 2616096/4194304（48.0 MB）` + `上传完成 … 分桶 514 个` |
+| PT 道具几何 | `PT-SCENE: 道具几何变化 → BLAS 整体重建：盒 1790 + 道具三角 872032` |
+| 图像 | 光栅图（枪模/蓝天/建筑）与 PT 图（灰调/无枪模/树与柱廊）**两条都正常出画** |
+
+`cargo test --release` **576 passed / 0 failed**、0 警告（新增 2 条判据）。
+
 
 
 
