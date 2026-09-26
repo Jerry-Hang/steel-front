@@ -368,14 +368,16 @@ def asset_tree():
     cylinder(p, (0, 0, 0.0), (0.12, -0.07, h + 1.9), 0.34, 0.13, C["bark"], segs=9)
     # root flare so the base does not look like a drilled post
     cylinder(p, (0, 0, 0.0), (0, 0, 0.7), 0.50, 0.32, C["bark"], segs=9, caps=False)
-    # limbs: short enough that every tip ends up inside the foliage shell
-    limbs = [(0.5, 0.85, 0.45, 1.05), (2.5, 0.90, -0.4, 1.10),
-             (4.2, 0.70, 0.2, 0.90), (1.6, 0.75, -0.55, 0.85),
-             (3.4, 0.80, 0.5, 1.00), (5.4, 0.72, -0.25, 0.80)]
-    for ang, ln, yb, zb in limbs:
-        bx, by = math.cos(ang) * ln, math.sin(ang) * ln
-        cylinder(p, (0.04, 0.0, h - 0.35 + zb * 0.25), (bx, by, h + zb * 0.6),
-                 0.13, 0.05, C["bark"], segs=6)
+    # limbs: 原本是 6 根短枝干（每根 segs=6），注释写着 "short enough that every tip ends up
+    # inside the foliage shell" —— 即**整段都在树冠壳里**。
+    #
+    # 🔴 2026-09-26 顶点普查后删掉：它们占 144 顶点 / 144 三角形 = 一棵树 584 顶点的 **25%**
+    # （全城 372 棵 = 53 568 顶点，场景 520 392 顶点的 **10%**），而 2026-09-17 那轮已经用
+    # 「下裙 5 团 + 中环 3 团 + 顶 2 团 + 核心球」把冠底**封死**（见上面那段分析：轴线覆盖
+    # y 3.05..4.65 与核心球 3.85..7.05 接上）⇒ 壳内几何是纯冗余。
+    # ⚠️ 反过来若哪天冠底又被拆开（改 blob 参数），这里必须把枝干加回来 —— 那时看进去是
+    #    "透天的壳"，比原来的"棕色骨架"更糟。
+    # 判据：删除后**街面 / 树下仰视 / 远景三个机位的像素差必须为 0**（`docs/PROGRESS.md` §21.42）。
     # canopy: core + closed lower skirt + mid ring + top cluster
     greens = (C["foliage_b"], C["foliage_a"], C["foliage_c"])
     blobs = [(0.0, 0.0, h + 1.95, 2.05, 0)]
