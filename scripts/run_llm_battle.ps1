@@ -79,26 +79,28 @@ Get-Content $srvLog -Tail 12 -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host "=== battle result (last command line) ==="
 # The game logs one line per command tick:
-#   command: <red camp>[situation X kills N] company... | <blue camp>[situation X kills N] ...
+#   command: <red camp>[situation X DEAD n SCORE m] company... | <blue camp>[...] ...
+#            (the two Chinese markers are built from code points below)
 #
-# !! The field logged as "kills" is NOT kills inflicted. game.rs accumulates it as
-# !! round_kills_red / round_kills_blue counting the FALLEN BY TEAM -- the source
-# !! comment there calls them the camp's own losses for this round --
-# !! so it is each camp's OWN death toll. The side with the BIGGER "kills" number is
-# !! the side that LOST more men. Never rank the two sides by this field; an earlier
-# !! version of this block did exactly that and printed the winner INVERTED.
+# !! The field this block reads is the camp's OWN death toll (game.rs accumulates it as
+# !! round_kills_red / round_kills_blue over the FALLEN BY TEAM). The line also carries
+# !! that camp's SCORE (enemy losses) -- the Regroup branch of the commander reads the
+# !! score, not the death toll (see ai_command::decide_situation).
+# !! The side with the BIGGER death toll is the side that LOST more men. Never rank the
+# !! two sides by it; an earlier version of this block did exactly that and printed the
+# !! winner INVERTED.
 #
 # Outcome metric = total company strength (qiang du). It starts at the full roster on
 # both sides (128 = 36 + 36 + 56 for red, 127 for blue because the player fills one slot;
 # before 2026-09-26 the tail 20 men were missing from the company rosters so it read 108)
 # and only ever declines as that side takes losses, so higher = winning.
 # The Chinese markers are built from code points so this file stays ASCII.
-$KILLS = -join [char[]](0x51FB, 0x6740)          # ji sha -- own deaths, see note above
+$DEAD = -join [char[]](0x9635, 0x4EA1)           # zhen wang -- own deaths, see note above
 $STR   = [char]0x5F3A + [char]0x5EA6             # qiang du
 $last = Select-String -Path $LOGERR -Pattern 'command: ' -ErrorAction SilentlyContinue |
         Select-Object -Last 1
 if ($last) {
-    $m = [regex]::Matches($last.Line, "${KILLS}(\d+)")
+    $m = [regex]::Matches($last.Line, "${DEAD}(\d+)")
     # strengths come in the red-company block then the blue-company block; the log
     # line separates the two camps with ' | '
     $parts = $last.Line -split '\|'

@@ -5,9 +5,13 @@ Invariant (2026-09-26, after `8e913aa` + the company-report fix):
 
     for every `command:` line:   <own deaths> + sum(company strengths) == roster
 
-Why it matters: "own deaths" (`round_kills_*`) and the company strengths
-(`CompanyReport.strength`) are the two numbers the AI commander -- and the LLM
-command channel -- reads.  When they disagree with the roster the battle picture is
+Second check (same run, added with the Regroup fix): a camp's `score` field must equal the
+OTHER camp's death toll -- the commander's Regroup branch reads the score, so crossed wires
+there would silently feed it its own losses (which is exactly the old defect).
+
+Why it matters: "own deaths" (`round_kills_*`, logged as the `zhen wang` field) and the
+company strengths (`CompanyReport.strength`) are two numbers the AI commander -- and the
+LLM command channel -- reads.  When they disagree with the roster the battle picture is
 simply wrong, and that is exactly how two 2026-09-26 defects stayed hidden:
 
   * the tail 20 men were missing from the company rosters (128 reported as 108);
@@ -26,8 +30,9 @@ import re
 import sys
 
 # Chinese markers are built from code points so this file stays ASCII.
-KILLS = "\u51fb\u6740"   # ji sha   -- own deaths of that camp
-STR = "\u5f3a\u5ea6"     # qiang du -- company strength
+DEAD = "\u9635\u4ea1"    # zhen wang -- own deaths of that camp (log field)
+SCORE = "\u6218\u679c"   # zhan guo  -- that camp's score == the OTHER camp's deaths
+STR = "\u5f3a\u5ea6"     # qiang du  -- company strength
 ROSTER = re.compile(
     "\u7ea2\u8425\\s*(\\d+)\\s*\u4eba\\s*/\\s*\u84dd\u8425\\s*(\\d+)\\s*\u4eba"
 )
@@ -49,6 +54,9 @@ def main(argv):
     rosters = None
     checked = 0
     bad = []
+    cross = []
+    scores = {}
+    deaths = {}
     for line in text.split("\n"):
         if "command:" not in line:
             continue
@@ -63,7 +71,8 @@ def main(argv):
         if len(parts) < 2:
             continue
         for seg, roster, tag in ((parts[0], rosters[0], "RED"), (parts[1], rosters[1], "BLUE")):
-            k = re.search(KILLS + "(\\d+)", seg)
+            k = re.search(DEAD + "(\\d+)", seg)
+            sc = re.search(SCORE + "(\\d+)", seg)
             strengths = [int(x) for x in re.findall(STR + "(\\d+)", seg)]
             if not k or not strengths:
                 continue
@@ -72,6 +81,16 @@ def main(argv):
             if got != roster:
                 stamp = line.split("INFO")[0].strip().strip("[]")
                 bad.append((stamp, tag, roster, got, got - roster))
+            if sc:
+                scores[tag] = int(sc.group(1))
+                deaths[tag] = int(k.group(1))
+        # 交叉核对：本营战果必须等于**敌方阵亡**（重组判据读的就是战果）
+        if "RED" in scores and "BLUE" in scores:
+            if scores["RED"] != deaths["BLUE"] or scores["BLUE"] != deaths["RED"]:
+                stamp = line.split("INFO")[0].strip().strip("[]")
+                cross.append(
+                    (stamp, scores["RED"], deaths["BLUE"], scores["BLUE"], deaths["RED"])
+                )
 
     if rosters is None:
         print("did not run: no roster line (buildup) found in %s" % path)
@@ -86,8 +105,14 @@ def main(argv):
             print("  %s %-4s roster=%d got=%d (%+d)" % (stamp, tag, roster, got, delta))
         if len(bad) > 12:
             print("  ... and %d more" % (len(bad) - 12))
+    if cross:
+        print("CROSS-MISMATCH: %d lines where a camp's score != the other camp's deaths" % len(cross))
+        for stamp, rs, bd, bs, rd in cross[:8]:
+            print("  %s red_score=%d blue_deaths=%d | blue_score=%d red_deaths=%d" % (stamp, rs, bd, bs, rd))
+    if bad or cross:
         return 1
     print("OK: every line satisfies own_deaths + sum(strengths) == roster")
+    print("OK: every line satisfies camp_score == the other camp's deaths")
     return 0
 
 

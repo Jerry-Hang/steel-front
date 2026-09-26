@@ -11,11 +11,15 @@
 //!
 //! 指挥链：战士向班长汇报（状态/位置），班→排→连→营逐级汇总为「军情报告」；
 //! 营司令官（AI 司令）每 0.5s 决策一次，判据就是 `Army::update` 里那三段：
-//! - 连名单内存活 < **本营编制 × 0.55** 且 累计击杀 < 8 → 重组；否则比敌我重心到地图中心的距离：
+//! - 连名单内存活 < **本营编制 × 0.55** 且 **本轮战果（敌方阵亡）< 8** → 重组；否则比敌我重心到
+//!   地图中心的距离：
 //!   我方 < 0.8×敌 ⇒ 进攻；> 1.25×敌 ⇒ 防御；其余 ⇒ 钳形侧翼。
 //!   （⚠️ 旧文案「伤亡>40% 转入防御」对不上代码：那个阈值判的是**重组**，防御看重心距离。）
 //!   🔴 分母原来写死 `128.0` ⇒ `RV3D_STRESS_AI=64` 时"存活 64 人"恒 < 70.4 ⇒ 司令**永远重组**、
 //!   两军永远不接火。现在取 `Army::roster_size()`（各班名单之和）。
+//!   🔴 战果那一支原来喂的是**本营阵亡** ⇒ 与"存活 < 55%"互斥（≥33 人的营阵亡必然 ≥15 > 8）
+//!   ⇒ **重组分支结构性不可达**。现在喂敌方阵亡（= 本营战果），判据
+//!   `regroup_threshold_uses_the_roster_and_the_score`。
 //! 命令逐级下发为「班目标点」；未接敌的战士按班目标 + `FORMATION_OFFSETS` 槽位推进
 //! （班长前中 4m、双翼侧后 4/3m、殿后 7m；**不随朝向旋转**，大战场上取确定性优先）；
 //! 接敌后仍交由既有逐人战术（掩体/侧翼/偷袭/压制）。
@@ -112,7 +116,10 @@ pub struct Army {
     pub squads: Vec<Squad>,
     /// npc id → (班id, 班内序号 0=班长)
     pub soldier_slot: std::collections::HashMap<usize, (usize, usize)>,
+    /// 本营**自身阵亡**数（军情的一个口径；不变式 `阵亡 + Σ强度 == 编制` 用的就是它）
     pub kills: u32,
+    /// 本营**战果** = 敌方阵亡数（重组判据读的是这个 —— 见 `decide_situation`）
+    pub score: u32,
     tick: f32,
     situation: BattleSituation,
     /// 敌营重心（由 game.rs 每 tick 写入，供司令参考）
@@ -226,6 +233,7 @@ impl Army {
         Army {
             side,
             kills: 0,
+            score: 0,
             companies,
             platoons,
             squads,
@@ -254,7 +262,8 @@ impl Army {
         npcs: &[crate::engine::game::Npc],
         _grid: &GridMap,
         dt: f32,
-        kills: u32,
+        own_dead: u32,
+        score: u32,
         enemy_centroid: [f32; 2],
         llm: Option<&[CmdOverride]>,
     ) {
@@ -268,16 +277,17 @@ impl Army {
             return;
         }
         self.tick = 0.0;
-        // 🔴 军情是**一次快照**：`kills` 必须与下面这份连报告同一次刷新 —— 以前它在 tick 判定
-        // 之前就赋值（每帧都新），而强度要等 0.5s 的节拍 ⇒ 日志行里「击杀」是这一帧的、
+        // 🔴 军情是**一次快照**：`kills`/`score` 必须与下面这份连报告同一次刷新 —— 以前它们在
+        // tick 判定之前就赋值（每帧都新），而强度要等 0.5s 的节拍 ⇒ 日志行里「阵亡」是这一帧的、
         // 强度是上一 tick 的，两个数自相矛盾（实测 +1~+3 人）。
-        // 判据 = `tools/battle_tally_check.py`（不变式 `击杀 + Σ强度 == 编制`），明细见 §21.77。
-        self.kills = kills;
+        // 判据 = `tools/battle_tally_check.py`（不变式 `阵亡 + Σ强度 == 编制`），明细见 §21.77。
+        self.kills = own_dead;
+        self.score = score;
 
         // 1) 逐连自下而上汇总报告（战士 → 班 → 排 → 连）
         // 🔴 2026-09-26 修：以前只按「在 `npcs` 里」计数 ⇒ **本帧刚阵亡、还没被清场的尸体同帧
         // 既算活人又算阵亡**，军情的两个数自相矛盾。判据 = `tools/battle_tally_check.py`
-        // （不变式：`击杀 + Σ强度 == 编制`；修前 66 行里 6 行超出 1~3 人）。
+        // （不变式：`阵亡 + Σ强度 == 编制`；修前 66 行里 6 行超出 1~3 人）。
         let alive: Vec<(usize, [f32; 3])> = npcs
             .iter()
             .filter(|n| n.team == self.side && n.hp > 0.0)
@@ -326,7 +336,7 @@ impl Army {
         self.situation = decide_situation(
             own_advance,
             self.roster_size() as f32,
-            self.kills,
+            self.score,
             d_self,
             d_enemy,
         );
@@ -451,9 +461,10 @@ impl Army {
             })
             .collect();
         format!(
-            "营[态势{:?} 击杀{}] {}",
+            "营[态势{:?} 阵亡{} 战果{}] {}",
             self.situation,
             self.kills,
+            self.score,
             cs.join(" ")
         )
     }
@@ -507,16 +518,18 @@ impl Army {
 
 /// 营司令的态势判定（纯函数：阈值可逐档验证，不必造 NPC）。
 ///
-/// 阈值口径：**连名单内存活 < 本营编制 × 0.55 且累计击杀 < 8 → 重组**；否则比敌我重心到
-/// 地图中心的距离（我方 < 0.8×敌 ⇒ 进攻；> 1.25×敌 ⇒ 防御；其余 ⇒ 钳形侧翼）。
+/// 阈值口径：**连名单内存活 < 本营编制 × 0.55 且本轮战果（敌方阵亡）< 8 → 重组**；否则比敌我
+/// 重心到地图中心的距离（我方 < 0.8×敌 ⇒ 进攻；> 1.25×敌 ⇒ 防御；其余 ⇒ 钳形侧翼）。
+/// ⚠️ 战果必须喂**敌方**阵亡：喂本营阵亡的话这一支与「存活 < 55%」互斥（阵亡必然 > 8），
+/// 整个重组分支永远不触发（2026-09-26 实测 170 秒会战里 `态势` 只有 Pincer/Offense/Defend）。
 fn decide_situation(
     alive: f32,
     roster: f32,
-    kills: u32,
+    score: u32,
     d_self: f32,
     d_enemy: f32,
 ) -> BattleSituation {
-    if roster > 0.0 && alive < roster * 0.55 && kills < 8 {
+    if roster > 0.0 && alive < roster * 0.55 && score < 8 {
         BattleSituation::Regroup
     } else if d_self < d_enemy * 0.8 {
         BattleSituation::Offense
@@ -670,13 +683,10 @@ mod tests {
         }
     }
 
-    /// 判据：重组阈值必须按**本营实际编制**算，不许写死 128。
-    ///
-    /// 写死 128 的后果（2026-09-26 修）：`RV3D_STRESS_AI=64` 时"存活 64 人"恒
-    /// `< 128×0.55 = 70.4` ⇒ 司令**永远只会重组**（保持 90m 距离、不再压上）⇒ 小规模压力模式
-    /// 的两军永远不接火。
+    /// 判据：重组阈值必须按**本营实际编制**算，不许写死 128；且战果那一支必须喂**敌方阵亡**
+    /// （喂本营阵亡 ⇒ 与「存活 < 55%」互斥 ⇒ 重组分支永远不触发，未结案 27）。
     #[test]
-    fn regroup_threshold_follows_the_roster() {
+    fn regroup_threshold_uses_the_roster_and_the_score() {
         // 128 人的营：重组线 = 70.4 人（刚好跨过阈值的两档都给）
         assert_eq!(
             decide_situation(70.0, 128.0, 0, 10.0, 10.0),
@@ -686,6 +696,18 @@ mod tests {
             decide_situation(71.0, 128.0, 0, 10.0, 10.0),
             BattleSituation::Pincer
         );
+        // 🔴 可达性（未结案 27 的核心）：存活 70 人 = 阵亡 58 人，而**战果**只有 3 ⇒ 重组。
+        // 以前这里喂的是本营阵亡 58 ⇒ `kills < 8` 假 ⇒ 永远走不到这一支。
+        assert_eq!(
+            decide_situation(70.0, 128.0, 3, 10.0, 10.0),
+            BattleSituation::Regroup,
+            "伤亡过半、战果 < 8 时必须能选重组"
+        );
+        assert_eq!(
+            decide_situation(70.0, 128.0, 8, 10.0, 10.0),
+            BattleSituation::Pincer,
+            "战果 ≥ 8（换得动）就不重组 —— 与旧口径一致"
+        );
         // 64 人的营：重组线 = 35.2 人 —— 写死 128 时这两档都恒为 Regroup
         assert_eq!(
             decide_situation(36.0, 64.0, 0, 10.0, 10.0),
@@ -694,11 +716,6 @@ mod tests {
         assert_eq!(
             decide_situation(35.0, 64.0, 0, 10.0, 10.0),
             BattleSituation::Regroup
-        );
-        // 击杀 ≥ 8 之后不再重组（原有口径未变）
-        assert_eq!(
-            decide_situation(10.0, 128.0, 8, 10.0, 10.0),
-            BattleSituation::Pincer
         );
         // 重心判据两侧都取"刚好跨过"的输入（教训 42）
         assert_eq!(

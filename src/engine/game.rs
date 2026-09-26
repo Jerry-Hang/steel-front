@@ -6113,8 +6113,26 @@ impl Game {
                     self.llm.as_ref().and_then(|l| l.take_red()).map(to_ov);
                 let llm_blue: Option<Vec<crate::engine::ai_command::CmdOverride>> =
                     self.llm.as_ref().and_then(|l| l.take_blue()).map(to_ov);
-                cmd.0.update(&self.npcs, &grid, dt, self.round_kills_red, bc, llm_red.as_deref());
-                cmd.1.update(&self.npcs, &grid, dt, self.round_kills_blue, rc, llm_blue.as_deref());
+                // 军情两个口径：本营阵亡（round_kills_<自己>）与战果（= 敌方阵亡）。
+                // 🔴 重组判据读的是**战果** —— 喂本营阵亡会让那条分支永远不触发（未结案 27）。
+                cmd.0.update(
+                    &self.npcs,
+                    &grid,
+                    dt,
+                    self.round_kills_red,
+                    self.round_kills_blue,
+                    bc,
+                    llm_red.as_deref(),
+                );
+                cmd.1.update(
+                    &self.npcs,
+                    &grid,
+                    dt,
+                    self.round_kills_blue,
+                    self.round_kills_red,
+                    rc,
+                    llm_blue.as_deref(),
+                );
                 // 态势推送（红/蓝各独立上下文）
                 if let Some(l) = &self.llm {
                     let sr = build_llm_situation(&cmd.0);
