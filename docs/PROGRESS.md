@@ -10475,3 +10475,82 @@ pt.owner = None;` —— 加了 `advancing` 之后它会留下上一局的推进
 `capture_progress_survives_a_brief_absence_of_the_same_team`、
 `point_reset_clears_owner_progress_and_advancing`。
 闸门：`cargo test --release` **629 passed / 0 failed**；`cargo build --release` **0 警告**。
+
+---
+
+### 21.75 军情口径与真实兵力不一致：连名单漏掉编制尾数（128 只上报 108）、重组阈值写死 128（`7877855` / `44c7464` / `519f576`）
+
+**怎么找到的**：审计日按未结案 26 的 lead 动手。先写**红测**（`n = 1..=200` 逐档断言「连名单
+逐人等于全营、不重不漏」），一跑就红 —— 而且**不是只在 128 人时红**：`n=37` 就红（10 个班 → 3 个排
+→ 1 个连只认 36 人）。根因：`Army::build` 只在「排数刚好 `% 3 == 0`」的那一刻建连 ⇒ 末尾凑不满
+3 个排的那一截**永远落在连名单之外**，而军情 `CompanyReport` 是**按连名单汇总**的。
+
+**修前的规模**（连强度合计 = 司令看到的兵力）：
+
+| 编制 | 修前上报 | 修后上报 |
+|---|---|---|
+| 128 人（默认 `RV3D_STRESS_AI`） | 36+36+36 = **108**（少 20 人） | 36+36+56 = **128** |
+| 64 人 | 36（少 28 人） | 64 |
+| 37 人 | 36（少 1 人） | 37 |
+
+行军目标是另一条路（`platoon_company` / `platoon_of_squad` 的「余数归末位」兜底）⇒ 尾数**照样在
+走、照样在打**，所以这个缺陷**不会自己暴露**：司令只是把它当成"不存在的部队"，伤亡数字里没有它。
+
+**第一次修完仍然是红的**：只把余班补进末排不够 —— `Company::members` 是**建连那一刻复制的一份
+快照**，补了排不重建连，`n=37`（只差 1 人凑不满 3 个排）依旧漏报。改成：余班并入末排 → 再按
+`platoon_company` 的**同一口径**重建三个连的名单（`owner` 先算好再写，避开借用冲突）。
+不足 33 人（9 个班 = 3 个排）本来就不编连、`update` 直接跳过指挥层 —— 这条既有行为**保持不变**，
+不许为了让测试好看而凭空造连。
+
+**同一轮读出来的第二处（同形：口径 vs 实际）**：`update` 里 `let total = 128.0f32;` 是写死的分母。
+`RV3D_STRESS_AI=64` 时「存活 64 人」恒 `< 128×0.55 = 70.4` ⇒ **司令永远只会重组**（`Regroup`
+保持 90m 距离、不再压上）⇒ 小规模压力模式的两军**永远不接火**。128 是默认值，所以这行错着也
+不会有人撞见。改成 `Army::roster_size()`（各班名单之和），并把判定抽成纯函数
+`decide_situation(alive, roster, kills, d_self, d_enemy)` —— 阈值可以逐档验，不必造 NPC；
+测试给的是**刚好跨过阈值**的两侧输入（128 人营 70/71、64 人营 35/36、重心 7.9/10/12.6，教训 42）。
+
+**真机验证**（`run_llm_battle.ps1 -Secs 170 -Interval 20`，`logs/llmbattle.log.err`）：
+`command: 红营[态势Pincer 击杀2] 连0[进攻 强度33…] 连1[…强度36…] 连2[…强度56…]` ——
+**36+36+56 = 128**（修前这一行只能是 108），态势 `Pincer` 而不是恒 `Regroup`，双方连队陆续接敌、
+LLM 命令照常采纳（`llmcmd[red]: 命令已采纳`）。
+
+**顺带抓到的闸门漏检**（`519f576`）：上一轮把两个访问器提成 `pub` 供判据测试用，它们的**使用者
+全在 `#[cfg(test)]`** ⇒ `cargo build --release` 报 1 条 `never used`，而 `cargo test --release`
+全绿 —— 于是「0 警告」红线**漏检了一轮**。已用 `2dea788` 的版本单跑 `cargo build` 复现确认与
+本次改动无关。铁律 F 的判据据此更正：**0 警告只能用 `cargo build --release` 验**。
+
+判据：`every_soldier_is_carried_by_a_company`（先红后绿）、`organization_tail_follows_the_last_platoon`
+（按新契约重写：末连 `platoon_ids = [6,7,8,9]`、末排 `squads = [27,28,29,30,31]`）、
+`regroup_threshold_follows_the_roster`、`roster_size_covers_every_built_soldier`。
+闸门：`cargo test --release` **634 passed / 0 failed**；`cargo build --release` **0 警告**。
+
+---
+
+### 21.76 同一份会战日志里的第二个口径错误：阵亡只计了一半（`8e913aa`；顺带发现「重组」是死分支）
+
+**怎么找到的**：§21.75 拿真机日志验收「连强度 = 128」时顺手对了一下同一行里的两个数 ——
+红营自报 `击杀35`，而三个连强度合计 60 ⇒ 实际阵亡 128 − 60 = **68**。差一倍，不是取整误差。
+
+**根因**：阵亡有两条路，只有一条在计数。
+
+| 死亡路径 | 谁走 | 修前 |
+|---|---|---|
+| `damage_npc`（子弹 / 爆炸） | 玩家开火、AoE 的主路径 | ❌ 当场 `npcs.remove()`，没人计数 |
+| `update_stress_respawns` 兜底扫描（扫「还在数组里的 `hp <= 0`」） | 其他把 hp 打到 0 的路径 | ✅ |
+
+**实测**（170 秒 128v127，`logs/llmbattle.log.err`）：红营自报 35 / 实际 **68**；蓝营自报 79 / 实际 **123**
+（「实际」= 编制 − 连强度合计，连强度是直接从 `npcs` 数出来的，可信）。
+
+**修法**：把 `round_kills_*` 的写入口收成 `tally_round_deaths(team, count)`，两条路都过它；
+兜底扫描先按阵营数出 `red_dead` / `blue_dead` 再记账（`enemy_dead` 与它同源，任务目标不受影响）。
+判据 = `every_death_path_is_counted_in_the_round_tally`（修前 `left 0 / right 1`，修后绿）。
+闸门：`cargo test --release` **635 passed / 0 failed**；`cargo build --release` **0 警告**。
+
+**同一轮读出来的第三件事（→ 未结案 27）**：`kills` 的口径是**本营阵亡**，于是判据里那条
+`连名单内存活 < 编制×0.55 且 kills < 8 → 重组` **结构性不可达**：存活 < 0.55×编制 ⟹ 阵亡 > 0.45×编制，
+而编得成连的营 ≥ 33 人 ⟹ 阵亡 ≥ 15 > 8，两支条件互斥。170 秒会战里 `态势` 只出现过
+Pincer / Offense / Defend（出现的 Regroup **全部**来自 LLM 覆写）—— 与这条推理一致。
+lead = 把喂进去的 `kills` 换成**敌方损失**（= 本营战果），或改判据；两者都改战斗行为，
+必须重跑 `run_llm_battle.ps1` 对照，别只看单测。
+
+
