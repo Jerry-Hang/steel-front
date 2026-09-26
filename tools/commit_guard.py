@@ -141,14 +141,26 @@ def scan_bytes(path, blob):
 
 
 def staged_files():
-    r = subprocess.run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+    # 🔴 `-z`：**必须用 NUL 分隔的原始路径**。默认（`core.quotePath=true`）git 会把非 ASCII
+    # 路径输出成 `"docs/\344\270\264..."` 这种**带引号的转义形式** ⇒ 后面 `git show :<name>`
+    # 与白名单匹配拿到的都是一个不存在的路径。实测（2026-09-26）：一个中文文件名的暂存文件
+    # 被报成 `[NOT-ALLOWED] "docs//344/270/264/…md"` —— 拦是拦住了，但**理由与路径都是错的**，
+    # 而且一旦白名单按模式放宽（例如 `docs/*.md` 本来就该放行），它就会变成"内容没扫却算通过"。
+    r = subprocess.run(["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return [l for l in r.stdout.splitlines() if l.strip()]
+    return [l for l in r.stdout.split("\0") if l.strip()]
 
 
 def staged_blob(path):
+    """暂存区内容。**读不到就必须让调用方知道**（返回 None），不能悄悄当成空文件。
+
+    🔴 旧写法 `return r.stdout if r.returncode == 0 else b""` 是**fail-open**：
+    读失败 ⇒ 空 blob ⇒ `scan_bytes` 一条命中也扫不出来，而调用方照样 `checked += 1`
+    ⇒ 守卫打印「OK — N 个文件通过白名单与密钥扫描」，**其中一个文件根本没被扫过**。
+    安全闸门的默认方向只能是"拒绝"（同 `tracked_set` 用 `ls-tree HEAD` 而不是 `ls-files` 的那条）。
+    """
     r = subprocess.run(["git", "show", f":{path}"], capture_output=True)
-    return r.stdout if r.returncode == 0 else b""
+    return r.stdout if r.returncode == 0 else None
 
 
 def walk_files(roots):
@@ -201,9 +213,9 @@ def tracked_set():
     于是「刚 `git add` 进来的 .env」会被误判成"已入库的老文件"而降级成警告 ⇒
     守卫对"新加的敏感文件"完全失效（实测 2026-09-22，一次就踩到）。
     """
-    r = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"],
+    r = subprocess.run(["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return {norm_path(l) for l in r.stdout.splitlines() if l.strip()}
+    return {norm_path(l) for l in r.stdout.split("\0") if l.strip()}
 
 
 
@@ -268,6 +280,10 @@ def main(argv):
             continue
         if mode == "staged":
             blob = staged_blob(p)
+            if blob is None:
+                # 读不到 ⇒ **拒绝**（不是跳过）：见 `staged_blob` 的注释
+                findings.append(("UNREADABLE", p, "暂存内容读不出来（git show :<path> 失败）—— 无法扫描，按拒绝处理"))
+                continue
         else:
             try:
                 if os.path.getsize(p) > MAX_BYTES:
