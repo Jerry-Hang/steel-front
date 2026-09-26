@@ -8683,6 +8683,43 @@ sprint 那张枪明显压低、前倾、内转）。要纯姿态差得用固定�
 ⚠️ 另一个坑：第一版探针换弹那一步 `reload=0.000` 整轮 —— 因为**弹匣是满的**，
 `start_reload()` 在满弹匣时直接不生效；探针现在先左键打三发再按 R。
 
+### 21.36 阴影 pass 隔帧重画：中位帧率 101.8 → 161.2（+58%），画面差异 0.014%
+
+**(a) 依据（先量后改）**：§21.27 的帧预算地图里 `-NoShadow` 省 **32%** 帧时间 —— 阴影是仅次于
+道具的第二大开销。而阴影图里**每帧真正会动的只有 NPC 的箱子**：太阳方向静止、道具与地形是静态
+几何、marker 只在受击时变。⇒ 隔帧重画只让 NPC 的影子旧一帧（100 fps 下 10 ms），肉眼不可见。
+
+**(b) 实现**：纯函数 `shadow_due(frame_seq, every, void_mode)` + 三个字段
+（`shadow_every` / `shadow_frame` / `frame_seq`）。`RV3D_SHADOW_EVERY` 默认 **2**、夹在 `1..=8`
+（非法值回落默认；**`=1` 逐帧 = 旧行为**，专供 A/B）。`render()` 里算好，`record_command_buffer`
+只读，跳帧时整段不录。
+
+**(c) 布局安全性（为什么可以"整段跳过"而不是"清空阴影图"）**：
+- `record_shadow_pass` 的 render pass `initialLayout=UNDEFINED` + loadOp CLEAR ⇒ 只有真画的那一帧
+  才谈布局；跳帧不改布局；
+- pass 末尾那道 barrier 把图像留在 `SHADER_READ_ONLY_OPTIMAL` ⇒ 跳帧时它**就停在这个状态**，
+  主 pass 采样它合法（若停在 `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` 才是 `oldLayout` VUID）；
+- `shadow_frame` 初值 **true** ⇒ 首帧与启动时那批 dummy 命令缓冲一律画。
+
+**(d) 三个数（A/B 同一条命令，只差一个环境变量）**：
+
+| 量 | `RV3D_SHADOW_EVERY=1`（旧行为） | 默认 2 | 变化 |
+|---|---|---|---|
+| 中位帧率 | 101.8 | **161.2** | **+58%** |
+| 中位 `frame_us` | 6596 | 4931 | −25% |
+| 冻结机位 F12 差异像素 | 基准 | **570 / 4 096 000 = 0.014%** | 基本只剩 HUD 的 FPS 数字 |
+
+命令：`scripts\perf_run.ps1 -Secs 30 -Extra RV3D_SHADOW_EVERY=1` 对照默认；
+画面 A/B 用 `RV3D_NPC_CAM=1`（AI 不步进 ⇒ 场上所有东西都不动）两侧各按一次 F12 + `scripts\png_diff.py`。
+⚠️ 单轮 A/B（教训 24/35 要求 <5% 的差必须多轮），但这一档差距是运行间噪声（~3%）的十几倍，
+且方向与 `-NoShadow` 量到的上界（32%）一致。
+
+**(e) 闸门（改动后重跑）**：`cargo test --release` 全绿 0 警告（新增
+`shadow_pass_is_scheduled_every_n_frames`：`every=1` 必须逐帧、奇数帧跳过、`every=0` 被夹成 1
+而**不是**"永不画"）；`scripts\run_resize_probe.ps1` **ALL-OK**（VUID 0 / 设备丢失 0）；
+**整局 gameplay + 验证层**（`RV3D_VALIDATION=1` + 两个隐式层 DISABLE）`run_survive_pm.ps1 -Secs 400`
+⇒ **VICTORY(245s)、5 波全清、VUID=0 panics=0 device_lost=0、fps 186.6、RESULT ALL-OK**。
+
 
 
 

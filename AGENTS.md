@@ -120,6 +120,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
   参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
+  🔴 阴影图**默认隔帧重画**（`RV3D_SHADOW_EVERY`，默认 2，`=1` 回到逐帧）：每帧会动的只有 NPC
+  箱子（太阳/道具/地形都静止）⇒ 只让影子旧一帧，实测中位帧率 101.8→161.2、冻结机位整幅差异 0.014%。
   排阴影问题先用 **`RV3D_DEBUG_SHADOW=1`**（R=frag_depth/G=阴影图深度均值），别再静态推矩阵。
 
 **顶点格式与着色**
