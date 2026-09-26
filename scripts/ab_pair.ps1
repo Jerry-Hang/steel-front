@@ -55,7 +55,17 @@ foreach ($p in @($pathA, $pathB)) {
 
 function Run-Arm([string]$exe, [string]$label, [int]$secs, [string]$extra) {
     Copy-Item -Force $exe $target
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo "scripts\perf_run.ps1") -Secs $secs -Extra $extra 2>&1
+    # 2026-09-26: an EMPTY string cannot be passed as an argument here.
+    # `powershell -File perf_run.ps1 -Extra ""` fails parameter binding with
+    # "Missing an argument for parameter 'Extra'", so perf_run never runs and prints
+    # nothing -- every pair then reports "incomplete" (the first cost map burned ten
+    # minutes spinning like that). The no-switch arm must OMIT -Extra entirely.
+    # (Keep this file pure ASCII: PS 5.1 reads BOM-less .ps1 as ANSI.)
+    $psArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File")
+    $psArgs += (Join-Path $repo "scripts\perf_run.ps1")
+    $psArgs += @("-Secs", "$secs")
+    if ($extra -ne "") { $psArgs += @("-Extra", $extra) }
+    $out = & powershell @psArgs 2>&1
     $line = ($out | Select-String -Pattern 'fps\s+mean' | Select-Object -First 1)
     if (-not $line) {
         Write-Host ("ab_pair: {0} produced no fps line; tail:" -f $label)
