@@ -10253,3 +10253,12 @@ AGENTS 那句"绝大多数是有注释的诚实预留"现在有了数字：**109
 `MAX_POINT_LIGHTS=4` 是 WGSL `array<PointLight, 4>` 的镜像；`MAX_DATAGRAM` 是收包缓冲；
 `MAX_SYNTH_VOICES` 的丢弃策略**有测试正面断言**（"超限应丢弃最旧声部"）。
 ⇒ **这一轴没有发现缺陷**（不是没查，是查了没有）。
+
+**顺带把"文档里的路径"也核了一遍**（`logs/agents_paths.py`：抽出 AGENTS.md 里所有
+`` `xxx.rs/.ps1/.py/.glb/...` `` 形式的路径，先按全路径查、再按**基名**在 `src/ scripts/ tools/
+assets/ docs/ .githooks/` 里查）：69 个路径里只有 4 个"哪里都不存在"，
+而**这 4 个所在的句子本身就在说它们已被删除**：
+`scripts/play_cap.ps1`（"已于 2026-09-12 删除"）、`scripts/vision_ps.ps1` / `vision_test.py`
+（"2026-08-21 已真实发生…硬编码密钥"）、`run_gameplay_smoke.sh`（"连同…一并删除"）
+⇒ **AGENTS.md 没有悬空引用**。这条也写下来：基名解析是关键，否则 62 个"缺失"里绝大多数
+只是没写目录（`renderer.rs`、`cap_safe.ps1` 之类），那种误报会把闸门变成噪音。
