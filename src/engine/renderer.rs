@@ -612,6 +612,12 @@ fn frame_suppressed(gpu_stalled: bool, swapchain_broken: bool) -> bool {
     gpu_stalled || swapchain_broken
 }
 
+/// 这一帧要不要重画阴影图（纯函数，可单测）。见 `Renderer::shadow_every`：隔帧重画，
+/// `every = 1` 就是每帧（A/B 对照）；`void_mode`（检视模式）下从不画。
+fn shadow_due(frame_seq: u64, every: u32, void_mode: bool) -> bool {
+    !void_mode && frame_seq % every.max(1) as u64 == 0
+}
+
 /// 交换链重建失败后**多久才允许再试一次**（秒）。见 `should_retry_swapchain`。
 const RECREATE_RETRY_MIN_SECS: f32 = 1.0;
 
@@ -1130,6 +1136,17 @@ pub struct Renderer {
     /// 重建交换链**中途失败**后的降级开关（见 `recreate_swapchain`）：失败时句柄可能
     /// 已被销毁 ⇒ 在恢复前不许再提交帧。下一次重建成功即清除。
     swapchain_broken: bool,
+    /// 阴影 pass 的重画间隔（帧）：`RV3D_SHADOW_EVERY`，默认 **2**（隔帧）。
+    ///
+    /// 依据（2026-09-26 帧预算地图，`perf_run -NoShadow` 的 A/B）：阴影 pass 占约 **32%**
+    /// 帧时间，而**每帧真的会动的只有 NPC 的箱子** —— 太阳方向静止、道具与地形是静态几何
+    /// ⇒ 隔帧重画只让 NPC 的影子旧一帧（10ms @100fps，肉眼不可见），代价换来约一半的阴影开销。
+    /// **1 = 每帧重画**（与旧行为逐帧一致，用于 A/B 判定）。
+    shadow_every: u32,
+    /// 本帧要不要画阴影（由 `render()` 用 `shadow_due` 算好，`record_command_buffer` 只读）
+    shadow_frame: bool,
+    /// `render()` 的单调帧序号（⚠️ 与在飞槽位 `current_frame` 是两回事，别混）
+    frame_seq: u64,
     /// 设备丢失（`VK_ERROR_DEVICE_LOST`）= **不可恢复**：一旦置位就不再提交、不再重建。
     /// 2026-09-26 实测代价：PT blit 的越界目标范围把设备打掉之后，尺寸自检**每帧**重试重建，
     /// 12 秒里跑了 1961 轮、刷了 5900 行错误日志，而进程看着还活着（一帧都画不出来）。
@@ -1920,6 +1937,15 @@ impl Renderer {
             fence_timeouts: 0,
             gpu_stalled: false,
             swapchain_broken: false,
+            // 帧预算地图显示阴影 pass 占 ~32% 帧时间，而画面里每帧会动的只有 NPC 的箱子
+            // ⇒ 默认隔帧重画（判据见字段注释；RV3D_SHADOW_EVERY=1 回到每帧，做 A/B）
+            shadow_every: std::env::var("RV3D_SHADOW_EVERY")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|v| (1..=8).contains(v))
+                .unwrap_or(2),
+            shadow_frame: true, // 首帧（以及启动时那批 dummy 录制）必须画
+            frame_seq: 0,
             device_lost: false,
             last_recreate_attempt: Instant::now(),
             present_mode_override: None,
@@ -9844,7 +9870,8 @@ impl Renderer {
         // ---- 阴影 pass：depth-only 渲光空间深度，供主 pass 3x3 PCF 采样 ----
         // （mesh 路径已冻结，shadow 只服务传统 VERTEX 几何；mesh 模式 near=INSTANCE_COUNT
         //   地面实例静态上传，marker/NPC/自发光照常上传，同一槽位布局可复用）
-        if !self.void_mode {
+        // 隔帧时**整段跳过**：沿用上一帧的阴影图（`shadow_frame` 由 `render()` 算好）。
+        if self.shadow_frame {
             self.record_shadow_pass(command_buffer, near_count, far_count, terrain_lod)?;
         }
 
@@ -11537,6 +11564,13 @@ impl Renderer {
         // （VUID-vkBeginCommandBuffer-commandBuffer-00049 / VUID-vkQueueSubmit-pCommandBuffers-00071）。
         // 图像下标只用来选 framebuffer（见 `record_command_buffer` 的入参）。
         let cmd_buffer = self.command_buffers[self.current_frame];
+        // 阴影图隔帧重画（`shadow_every`）：本帧画不画在这里定，`record_command_buffer` 只读。
+        // ⚠️ 跳帧时阴影图**保持上一帧的内容**（render pass 的 initialLayout=UNDEFINED + CLEAR
+        // 只在真画的那一帧发生），主 pass 照常采样 —— 布局上从 DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        // 到采样所需的 SHADER_READ_ONLY_OPTIMAL 之间那道 barrier 在 `record_shadow_pass` 末尾，
+        // 跳帧时图像就停在 SHADER_READ_ONLY_OPTIMAL，主 pass 读它是合法状态。
+        self.shadow_frame = shadow_due(self.frame_seq, self.shadow_every, self.void_mode);
+        self.frame_seq = self.frame_seq.wrapping_add(1);
         self.record_command_buffer(
             cmd_buffer,
             image_index as usize,
@@ -13926,9 +13960,31 @@ mod vk_failure_path_tests {
     }
 
     use super::{
-        frame_suppressed, is_device_lost_error, prop_buffer_growth_needed, should_retry_swapchain,
-        RECREATE_RETRY_MIN_SECS,
+        frame_suppressed, is_device_lost_error, prop_buffer_growth_needed, shadow_due,
+        should_retry_swapchain, RECREATE_RETRY_MIN_SECS,
     };
+
+    /// 判据：阴影图**隔帧重画**的调度（纯函数）。
+    ///
+    /// 依据：`perf_run -NoShadow` 的 A/B 显示阴影 pass 占 ~32% 帧时间，而画面里每帧真的
+    /// 会动的只有 NPC 的箱子（太阳、道具、地形都静止）⇒ 隔帧重画只让影子旧一帧。
+    /// 这条测试同时钉住 `every = 1` 必须**逐帧**都画（A/B 对照组的语义）。
+    #[test]
+    fn shadow_pass_is_scheduled_every_n_frames() {
+        for s in 0..5u64 {
+            assert!(shadow_due(s, 1, false), "every=1 必须每帧都画（A/B 对照）");
+        }
+        assert!(shadow_due(0, 2, false));
+        assert!(!shadow_due(1, 2, false), "隔帧：奇数帧跳过");
+        assert!(shadow_due(2, 2, false));
+        assert!(shadow_due(4, 4, false));
+        assert!(!shadow_due(5, 4, false));
+        assert!(!shadow_due(0, 1, true), "检视模式从不画");
+        assert!(
+            shadow_due(3, 0, false),
+            "非法间隔（0）被夹成 1 ⇒ 仍然每帧画，绝不能变成永不画"
+        );
+    }
 
     /// 判据：道具缓冲**只在要得更多时**才重建（`need > capacity`，不是 `need != capacity`）。
     ///
