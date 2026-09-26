@@ -83,13 +83,15 @@ Write-Host "=== battle result (last command line) ==="
 #
 # !! The field logged as "kills" is NOT kills inflicted. game.rs accumulates it as
 # !! round_kills_red / round_kills_blue counting the FALLEN BY TEAM -- the source
-# !! comment there literally calls them "red/blue cumulative deaths this round" --
+# !! comment there calls them the camp's own losses for this round --
 # !! so it is each camp's OWN death toll. The side with the BIGGER "kills" number is
 # !! the side that LOST more men. Never rank the two sides by this field; an earlier
 # !! version of this block did exactly that and printed the winner INVERTED.
 #
-# Outcome metric = total company strength (qiang du). It starts equal on both sides
-# (108 = 3 x 36) and only ever declines as that side takes losses, so higher = winning.
+# Outcome metric = total company strength (qiang du). It starts at the full roster on
+# both sides (128 = 36 + 36 + 56 for red, 127 for blue because the player fills one slot;
+# before 2026-09-26 the tail 20 men were missing from the company rosters so it read 108)
+# and only ever declines as that side takes losses, so higher = winning.
 # The Chinese markers are built from code points so this file stays ASCII.
 $KILLS = -join [char[]](0x51FB, 0x6740)          # ji sha -- own deaths, see note above
 $STR   = [char]0x5F3A + [char]0x5EA6             # qiang du
