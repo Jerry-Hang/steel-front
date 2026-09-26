@@ -93,7 +93,16 @@ function Screenshot([IntPtr]$h, [string]$out) {
     $g.ReleaseHdc($dc); $g.Dispose()
     $bmp.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
-    Write-Host "SAVED $out (${w}x${ht})"
+    # 2026-09-26: $bmp.Save is a .NET call, and this script runs with
+    # $ErrorActionPreference = "Continue" -- so when Save throws, execution falls through and
+    # the old code printed "SAVED" for a file that was never written (the 5th instance today
+    # of "the tool said it wrote X, but X is not there"). Screenshots are this repo's primary
+    # evidence, so the FILE decides: exists and non-empty == SAVED, otherwise say so.
+    if ((Test-Path $out) -and ((Get-Item $out).Length -gt 0)) {
+        Write-Host "SAVED $out (${w}x${ht})"
+    } else {
+        Write-Host "SHOT-FAILED $out (Save produced no file) -- NOT evidence"
+    }
 }
 
 function Post-Key([IntPtr]$h, [int]$vk) {
