@@ -618,6 +618,32 @@ fn shadow_due(frame_seq: u64, every: u32, void_mode: bool) -> bool {
     !void_mode && frame_seq % every.max(1) as u64 == 0
 }
 
+/// surface 未给出 `current_extent`（= `u32::MAX`）时的**兜底**尺寸：必须夹进
+/// `[min_image_extent, max_image_extent]`（纯函数，可单测）。
+///
+/// Vulkan 规定 `current_extent` 未定义时 `imageExtent` 必须落在 surface 给的范围里
+/// （`VUID-VkSwapchainCreateInfoKHR-imageExtent-01274`）。旧代码在这一支直接写死 `1280x720` ——
+/// 只要某台设备的 `maxImageExtent` 比它小，创建交换链当场违规；而**本机 Win32 surface 恒给出
+/// 具体尺寸，所以这条分支在默认配置上永远走不到**（与 §21.23 的 PT blit 写死 2560x1600 是同一类：
+/// 默认配置恰好等于那个写死的值，于是缺陷永远被躲过去）。
+///
+/// 退化输入也要挡住：驱动若报 0 或 `max < min`，宁可退到 `min`（且不小于 1），
+/// 也不要提交一个 `imageExtent = 0` 的交换链 —— 那没有兜底路径。
+fn clamp_swapchain_extent(
+    fallback: vk::Extent2D,
+    min: vk::Extent2D,
+    max: vk::Extent2D,
+) -> vk::Extent2D {
+    let lo_w = min.width.max(1);
+    let lo_h = min.height.max(1);
+    let hi_w = max.width.max(lo_w);
+    let hi_h = max.height.max(lo_h);
+    vk::Extent2D {
+        width: fallback.width.clamp(lo_w, hi_w),
+        height: fallback.height.clamp(lo_h, hi_h),
+    }
+}
+
 /// 交换链重建失败后**多久才允许再试一次**（秒）。见 `should_retry_swapchain`。
 const RECREATE_RETRY_MIN_SECS: f32 = 1.0;
 
@@ -2198,7 +2224,15 @@ impl Renderer {
         let extent = if surface_capabilities.current_extent.width != u32::MAX {
             surface_capabilities.current_extent
         } else {
-            vk::Extent2D { width: 1280, height: 720 }
+            // 兜底尺寸也要夹进 surface 的范围（判据 `swapchain_fallback_extent_is_clamped`）
+            clamp_swapchain_extent(
+                vk::Extent2D {
+                    width: 1280,
+                    height: 720,
+                },
+                surface_capabilities.min_image_extent,
+                surface_capabilities.max_image_extent,
+            )
         };
 
         let image_count = {
@@ -13960,9 +13994,76 @@ mod vk_failure_path_tests {
     }
 
     use super::{
-        frame_suppressed, is_device_lost_error, prop_buffer_growth_needed, shadow_due,
-        should_retry_swapchain, RECREATE_RETRY_MIN_SECS,
+        clamp_swapchain_extent, frame_suppressed, is_device_lost_error, prop_buffer_growth_needed,
+        shadow_due, should_retry_swapchain, RECREATE_RETRY_MIN_SECS,
     };
+    use ash::vk;
+
+    /// 判据：交换链兜底尺寸必须落在 surface 给的范围内。
+    ///
+    /// 依据（2026-09-26 静态复查）：旧代码在 `current_extent == u32::MAX` 这一支写死 `1280x720`。
+    /// 本机 Win32 surface 恒给具体尺寸 ⇒ **这条分支在默认配置下永远走不到**，写死的值也就永远
+    /// 没被验证过（同 §21.23 的 PT blit：默认窗口恰好等于写死的 2560x1600）。
+    #[test]
+    fn swapchain_fallback_extent_is_clamped() {
+        let fallback = vk::Extent2D {
+            width: 1280,
+            height: 720,
+        };
+        let wide = (
+            vk::Extent2D {
+                width: 16,
+                height: 16,
+            },
+            vk::Extent2D {
+                width: 8192,
+                height: 8192,
+            },
+        );
+        // 1) 常规设备：兜底值本来就合法 ⇒ 原样使用
+        let e = clamp_swapchain_extent(fallback, wide.0, wide.1);
+        assert_eq!((e.width, e.height), (1280, 720));
+        // 2) max 更小 ⇒ 夹到 max（旧写死值就是在这条上违规）
+        let e = clamp_swapchain_extent(
+            fallback,
+            wide.0,
+            vk::Extent2D {
+                width: 1024,
+                height: 600,
+            },
+        );
+        assert_eq!((e.width, e.height), (1024, 600), "超过 max 必须夹回去");
+        // 3) min 更大 ⇒ 抬到 min
+        let e = clamp_swapchain_extent(
+            fallback,
+            vk::Extent2D {
+                width: 1920,
+                height: 1080,
+            },
+            wide.1,
+        );
+        assert_eq!((e.width, e.height), (1920, 1080), "低于 min 必须抬上来");
+        // 4) 退化输入：全 0 也不能产出 0（imageExtent=0 没有兜底路径）
+        let zero = vk::Extent2D {
+            width: 0,
+            height: 0,
+        };
+        let e = clamp_swapchain_extent(fallback, zero, zero);
+        assert_eq!((e.width, e.height), (1, 1), "零尺寸退到 1x1");
+        // 5) max < min（驱动乱报）：以 min 为准，且不小于 1
+        let e = clamp_swapchain_extent(
+            fallback,
+            vk::Extent2D {
+                width: 800,
+                height: 600,
+            },
+            vk::Extent2D {
+                width: 100,
+                height: 100,
+            },
+        );
+        assert_eq!((e.width, e.height), (800, 600));
+    }
 
     /// 判据：阴影图**隔帧重画**的调度（纯函数）。
     ///
