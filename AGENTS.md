@@ -501,7 +501,7 @@ cargo test --release
 # 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
 # LLM 战术指挥会战（红蓝 128v128，实测 14 条命令全被采纳）；军情不变式的判据 =
-# tools\battle_tally_check.py（击杀 + Σ连强度 == 编制；0 = 干净 / 1 = 有命中 / 2 = 没跑成）
+# tools\battle_tally_check.py（阵亡 + Σ连强度 == 编制；0 = 干净 / 1 = 有命中 / 2 = 没跑成）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
 # 截图取证（finally 里 taskkill + 硬超时）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
@@ -584,7 +584,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 
 > 每条只留一行结论 + 判据；案例细节在 `docs/PROGRESS.md`。
 
-- **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜"等结论撤回。⚠️ 军情 `击杀` = **该营自身阵亡数**。
+- **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜"等结论撤回。⚠️ 军情行的 `阵亡` = **该营自身阵亡数**、`战果` = 敌方阵亡数（**重组判据读的是战果**）。
 - **障碍 marker 可见尺寸**（2026-09-17 `50b61b9`）：半幅唯一真源 = `geom::Shape::template_half_extent(axis)`；测试 `marker_visible_size_matches_aabb`。
 
 0. **`PrintWindow` 对非前台窗口返回冻结帧**：症状不复现。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)`。
@@ -611,8 +611,8 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。
 24. **广场"坑"** = 水平面绕序反了（判据 `horizontal_winding_tests`）。
 25. ✅ **`ai_us` 单帧尖峰**：出生点小连通域 bug 的下游症状；255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
-26. ✅ **编制尾数并入末位**（2026-09-26 `7877855`）：连名单逐人等于全营（判据 `every_soldier_is_carried_by_a_company`），重组阈值分母也不再写死 128（`44c7464` / `regroup_threshold_follows_the_roster`）。
-27. **「重组」是死分支**：判据 `存活 < 编制×0.55 且 kills < 8`，而 `kills` = **本营阵亡** ⇒ 两支互斥（≥33 人的营：存活 <0.55×编制 ⟹ 阵亡 ≥15 >8）。170 秒会战实测 `态势` 只有 Pincer/Offense/Defend，Regroup 全来自 LLM 覆写。**lead** = 喂**敌方损失**（= 本营战果）或改判据；改战斗行为，须重跑 `run_llm_battle.ps1` 对照（§21.76）。
+26. ✅ **编制尾数并入末位**（2026-09-26 `7877855`）：连名单逐人等于全营（判据 `every_soldier_is_carried_by_a_company`），重组阈值分母也不再写死 128（`44c7464`）。
+27. ✅ **「重组」死分支修好**（2026-09-26）：判据改成 `存活 < 编制×0.55 且**战果（敌方阵亡）** < 8`，战果由 `game.rs` 按「敌方本轮阵亡」喂进来；军情行现在同时打 `阵亡`（自损，不变式的那个数）与 `战果`。判据 = `regroup_threshold_uses_the_roster_and_the_score` + 真机 `run_llm_battle.ps1`（§21.78）。
 
 ---
 

@@ -10521,7 +10521,7 @@ LLM 命令照常采纳（`llmcmd[red]: 命令已采纳`）。
 
 判据：`every_soldier_is_carried_by_a_company`（先红后绿）、`organization_tail_follows_the_last_platoon`
 （按新契约重写：末连 `platoon_ids = [6,7,8,9]`、末排 `squads = [27,28,29,30,31]`）、
-`regroup_threshold_follows_the_roster`、`roster_size_covers_every_built_soldier`。
+`regroup_threshold_uses_the_roster_and_the_score`、`roster_size_covers_every_built_soldier`。
 闸门：`cargo test --release` **634 passed / 0 failed**；`cargo build --release` **0 警告**。
 
 ---
@@ -10578,6 +10578,31 @@ lead = 把喂进去的 `kills` 换成**敌方损失**（= 本营战果），或�
 
 **教训**：**盯「两个数应该相等」比盯「某一个数对不对」更早发现问题**。本条与 §21.75 的三处
 （连名单/阈值分母/阵亡计数）是同一族：**"口径"错了不会崩、不会报错，只会让看到的人相信一个错的战场。**
+
+闸门：`cargo test --release` **636 passed / 0 failed**；`cargo build --release` **0 警告**。
+
+---
+
+### 21.78 「重组」从死分支变成可达：判据改喂**战果**，日志口径改名（未结案 27 结案）
+
+**上一轮的结论**（§21.76 末尾）：`存活 < 编制×0.55 且 kills < 8` 里的 `kills` 喂的是**本营阵亡**
+⇒ 与第一支互斥（≥33 人的营阵亡必然 ≥15 > 8）⇒ 那一支**结构性不可达**；170 秒会战里 `态势`
+只出现过 Pincer / Offense / Defend。
+
+**修法**：`Army::update` 现在收两个口径 —— `own_dead`（本营阵亡）与 `score`（敌方阵亡 = 本营战果），
+`decide_situation` 的重组支读 **`score`**。军情行同时打两个数：`营[态势X 阵亡N 战果M]` ——
+**口径写清楚**：`阵亡` 就是不变式用的那个数（自损），`战果` 是判据读的那个数。
+
+**连带改的两处消费者**（日志字段改名必须同步，否则解析器静默失效）：
+- `scripts/run_llm_battle.ps1`：标记常量改 `阵亡`；注释说明"战果"是另一支且重组读它。
+- `tools/battle_tally_check.py`：标记改 `阵亡`，并**新增交叉核对** `本营战果 == 敌方阵亡` ——
+  接线接反（把自损当战果喂进去，就是这次修的旧缺陷）会立刻红。
+
+**真机验证**（150 秒 128v127，`logs/llmbattle.log.err`）：
+**58/58 行同时满足两条不变式**（`阵亡 + Σ强度 == 编制`、`本营战果 == 敌方阵亡`），工具 exit 0；
+`VUID=0 panics=0`。这一局 **没有**出现 `态势Regroup`，而且是**符合规则**的：双方伤亡过半时
+战果都已 ≥ 8（红 117 / 蓝 95）⇒ "换得动就不重组"。可达性由单测那一档钉死
+（存活 70 / 战果 3 ⇒ 重组）；要在真机上看到它，得跑一局**单方面挨打**的场景（lead：不等兵力或长跑）。
 
 闸门：`cargo test --release` **636 passed / 0 failed**；`cargo build --release` **0 警告**。
 
