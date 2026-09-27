@@ -592,7 +592,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 0. **`PrintWindow` 对非前台窗口返回冻结帧**：症状不复现。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)`。
 1. ✅ **道具焊接流程**（2026-09-19）：改道具 = 改生成器 → 重跑 → 再焊接，绝不在已焊结果上"补"颜色。
 2. **PT 崩溃 `0xC0000005`**：四个真 bug 全修（判据见铁律 B PT 段）。
-3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，必须连 parse 分支一起看。**
+3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，要看 parse 分支。**
 4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`。
 5. **`FLOOR_H` 常量分叉**：6 模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6。
 6. ✅ **`svd_63` 已入库为 `svd12`**（`c20e154`）：判据 = 真机切枪 VUID=0 + `gun-glb: svd12` + 第一人称实机截图（§21.60）。
@@ -676,9 +676,8 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
   fail-closed、**空日志也不算通过**（`history_secret_audit` 在非仓库目录打"没有命中"、
   **`survive_pm` 的判据整整读了一份空文件**，见 §21.51）。**⇒ 先问：它扫到 0 个时会说什么？**
   约定 **0 = 真扫过无命中 / 1 = 有命中 / 2 = 根本没扫成**。
-  🔴 **同理：模糊/扫描类判据的自检要写"必须有一部分成功"，不是"必须不崩"** ——
-  2026-09-26 两版模糊（`net`/`map`）接受率都是 **0/3000**："没 panic"什么都没证明；
-  改成分层变异才到 53%/74%（§21.71）。
+  🔴 **模糊/扫描类判据的自检要写"必须有一部分成功"，不是"必须不崩"**：两版模糊接受率 0/3000 时
+  "没 panic"什么都没证明（§21.71）。
 47. **🔴 时间基减法必须 `checked_sub`：`Instant` 的原点是「开机时刻」**，所以
   `Instant::now() - Duration::from_secs(3600)` 在**机器启动不足 1 小时**时**下溢 panic**；
   同一份代码在开机几天的机器上一路绿 ⇒ **「上线首小时才炸」**（2026-09-27 早上重启后
