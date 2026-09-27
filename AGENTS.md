@@ -486,9 +486,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
 - **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py`，判据 = **`vuid==0 and panics==0 and killed>=1`**，
-  **无 fps 门槛**（`fps=` 只用于打印）。旧版误把 `fps>=120` 写进这里 —— 那是 **X11/SendInput
-  时代那个冒烟脚本**的规则（2026-09-26 连同 `run_gameplay_smoke.sh` 一并删除）。**两套口径别混。**
-  `playtest_perf.py` 是**时长制**：跑满 `PT_SECS`（默认 600s）即完成，击杀是附带指标、不设门槛、不判 FAIL。
+  **无 fps 门槛**（`fps=` 只用于打印）。**两套口径别混**：`playtest_perf.py` 是**时长制**
+  （跑满 `PT_SECS` 即完成，击杀只是附带指标、不判 FAIL）。
 - 微基准：`cargo test --release <名> -- --nocapture --test-threads=1`
   （`shockwave_path_microbench` / `simd_cull_microbench`）；
   `RV3D_FORCE_SIMD=avx512|avx2|avx|sse4.2|scalar`（硬件不支持时告警回退）。
@@ -585,7 +584,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 
 > 每条只留一行结论 + 判据；案例细节在 `docs/PROGRESS.md`。
 
-- **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜"等结论撤回。⚠️ 军情行的 `阵亡` = **该营自身阵亡数**、`战果` = 敌方阵亡数（**重组判据读的是战果**）。
+- **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜"等结论撤回。⚠️ 军情行的 `阵亡` = **该营自身阵亡数**、`战果` = 敌方阵亡数（**重组读战果**）。
 - **障碍 marker 可见尺寸**（2026-09-17 `50b61b9`）：半幅唯一真源 = `geom::Shape::template_half_extent(axis)`；测试 `marker_visible_size_matches_aabb`。
 
 0. **`PrintWindow` 对非前台窗口返回冻结帧**：症状不复现。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)`。
