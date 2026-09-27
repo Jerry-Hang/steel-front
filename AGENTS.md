@@ -41,7 +41,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `engine/city.rs` | 2357 | 程序化城市生成（40+ 条几何/契约测试） |
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
 | `net.rs` | 2406 | UDP 联机（协议魔数 'S'） |
-| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`：**它红 = 有人加了没有字模的字**，而**源字体 `noto-sc-subset.otf` 未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统 `NotoSansSC-VF.ttf` 顶替：会改掉字形，红 `cjk_glyph_generates`）；**注释里的字同样算**。定位用 `python tools/find_codepoint.py <HEX> <file>` |
+| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`（**注释里的字也算**）：**它红 = 有人加了没有字模的字**，而**源字体未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统字体顶替：会改字形、红 `cjk_glyph_generates`）。定位 `python tools/find_codepoint.py <HEX> <file>` |
 | `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1561 / 1188 / 1290 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
 | `llm_cmd.rs` | 712 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
@@ -201,15 +201,20 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 **呈现模式（2026-09-13）**
 - `RV3D_PRESENT_MODE` = `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**（基准最稳），
   **玩家路径由 `SteelFront.bat` 设 `mailbox`**（FIFO 在独显直连下等不到 vblank 会锁死）。
+- 🔴 **失焦 ≠ 停止渲染**（2026-09-27 实测 + 修）：失焦后主循环照样全速跑，实测 `steel-front`
+  独占 **99–105% 的 GPU 3D 份额**、dwm 只剩 **0–1%** ⇒ 桌面合成/拖窗口/打字回显全排队 =
+  用户报的「一开游戏整机像卡死」（**不是** CPU 降频：同轮实测 3.1–4.8 GHz、45–70 W/115 W、
+  三项节流标志全 Not Active、游戏只吃约 1 核 + 475 MB）。修法 = **`RV3D_BG_FPS`**（失焦上限，
+  纯函数 `effective_frame_cap`；**引擎默认 0 = 不限**，否则 perf_run/冒烟这些失焦跑法会被静默
+  变成 20 fps；玩家路径 `SteelFront.bat` 设 20：fps 165→19.9、GPU 99%→27%、功耗 69→16 W）。
+  诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
 - ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（转视角读成"残影"），而 **`PrintWindow` 抓不到它**
   （抓的是已合成帧）⇒ **别用静态截图去证伪"残影"。**
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
   `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（`LiveKernelEvent` **P1=141** = TDR；
-  换 mailbox 后正常）。而"静默"本身是引擎缺陷：`wait_for_fences`/`acquire_next_image`
-  以前用 **`u64::MAX`** 无限等 ⇒ 现在 acquire 1s（连 3 次 ⇒ 降级 mailbox 重建）、围栏 5s
-  （连 3 次 ⇒ `gpu_stalled`，之后 `render()` 直接返回：**画面静止但进程与输入还在**，
-  实测同场景从"0 发 0 杀"变成"90 发 5 杀"）。
-  **判据** = 测试 `swapchain_waits_are_bounded` + `no_unbounded_wait_on_vulkan_calls`（任何等待里再出现 `u64::MAX` 即红）。
+  换 mailbox 后正常）。"静默"本身也是缺陷：acquire 现在 1s（连 3 次 ⇒ 降级 mailbox 重建）、
+  围栏 5s（连 3 次 ⇒ `gpu_stalled`：**画面静止但进程与输入还在**）。
+  **判据** = `swapchain_waits_are_bounded` + `no_unbounded_wait_on_vulkan_calls`（等待里再出现 `u64::MAX` 即红）。
   `perf_run.ps1` 保持 IMMEDIATE。
 - 🔴 **成功 acquire 之后不许提前 return**（`image_available` 信号量**不随交换链重建而重建**）：
   acquire 的 `suboptimal` 只登记、本帧照常 present，重建一律放到 present **之后**；
@@ -219,12 +224,11 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （2026-09-25 验证层实测 2 条，修后 0 条）。
   判据 `command_buffer_is_indexed_by_frame_slot_not_by_swapchain_image`。
 - 🔴 **上传缓冲一律「先建新的，成功了再拆旧的」**（枪模 VB/IB 与道具 VB/IB 两条路）：失败路径必须
-  原样保留旧句柄，且 `destroy` 之后立刻把字段置 `null` —— 非 null 的已销毁句柄会被阴影 pass 绑上、
-  并在下一次扩容/退出时**二次 `destroy_buffer`**。生长判据 = `need > capacity`（**不是** `!=`，
-  纯函数 `prop_buffer_growth_needed`）。判据 `upload_buffers_are_created_before_the_old_ones_are_destroyed`。
-- 🔴 **设备丢失 = 不可恢复**：`device_lost` 粘性位置位后不再提交、不再重试重建（实测每帧重试
-  1961 轮 / 5900 行错误日志）。判据 `device_lost_stops_rebuilding`
-  + `should_retry_swapchain`（重建失败后限流 1 Hz，仍保留"成功即自动恢复"）。
+  原样保留旧句柄，且 `destroy` 之后立刻把字段置 `null`（非 null 的已销毁句柄会被阴影 pass 绑上、
+  退出时**二次 destroy**）。生长判据 = `need > capacity`（**不是** `!=`）。
+  判据 `upload_buffers_are_created_before_the_old_ones_are_destroyed`。
+- 🔴 **设备丢失 = 不可恢复**：`device_lost` 粘性位置位后不再提交、不再重试重建（曾实测每帧重试
+  1961 轮）。判据 `device_lost_stops_rebuilding` + `should_retry_swapchain`（重建失败后限流 1 Hz）。
 - 🔴 **验证必须覆盖「非默认配置」**：PT 上屏 blit 的目标范围曾写死 `2560x1600`，而**默认窗口就是它**
   ⇒ 此前每轮 PT 验证都躲过去了；换尺寸就 `VUID-vkCmdBlitImage-dstOffset-00248` 并把设备打掉。
   判据 `blit_regions_never_hardcode_pixel_extents`（非原点 `Offset3D` 不许是纯字面量）。
@@ -243,8 +247,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   `PtParams::pack` 与 GLSL `PC{a..f}` 两处 `.size(96)` 必须同步；
   累积图像逐帧 barrier 用 `GENERAL→GENERAL`（用 `old_layout=UNDEFINED` = 累积白做，且不报 VUID）；
   `pt_frame >= pt_spp_target` 即停派发；`RV3D_PT_SPP` 覆盖目标（实时默认 256，`run_pt_view` 默认 64）。
-- 时域累积/缓存的变化判定量化粒度**必须粗于相机 idle 抖动幅度**（现值：位置 ~0.5m、朝向 ~3°、
-  光照 ~0.01；旧的 ~1mm 正是"PT 永不收敛"的根因，已作废）。
+- 时域累积/缓存的变化判定量化粒度**必须粗于相机 idle 抖动幅度**（现值 ~0.5m/~3°/~0.01；
+  1mm 那版已作废，正是"PT 永不收敛"的根因）。
 - RT 命中判据：`rayQueryGetIntersectionTypeEXT(q, 1)` 必须是 **committed**；
   **声称"RT 已验证"必须给命中着色的图像证据，不能只给 rays/s**。
 - PT 着色器改 `assets/rt/pt_panorama.glsl` → glslangValidator → `.spv`，
@@ -417,8 +421,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   非洞格子顶点色**逐位相同**（`base` 只看层缝、AO 只看 z）⇒ 合并**逐像素等价**。
   **顶点还是唯一的杠杆**（道具开销正比于顶点数）⇒ **资产改动先用 `propdraw:` 的几何量验收，
   帧率只确认"换到时间了没有"**；GLB 已焊接（无 NORMAL = 顶点数就是真几何）。
-  ⚠️ 2026-09-26 控制臂实测**全部道具只占 ≈5.4% 帧时间**（§21.52）⇒ 顶点削减按同比例算收益；
-  **"再砍 17% ≈ +3%" 是道具占 27% 时的旧账，别再引用**。
+  ⚠️ 2026-09-26 控制臂实测**全部道具只占 ≈5.4% 帧时间**（§21.52）⇒ 顶点削减按同比例算收益
+  （**"再砍 17% ≈ +3%" 是道具占 27% 时的旧账**）。
 - 🔴🔴 **道具/GLB 的两条通则（改动前先读）**：
   1. **`box_project_uv` 的逐面 UV 岛 + `export_normals=True` 的逐面法线都会阻止顶点共享**
      （`tree_oak` 838 三角形曾被拆成 **2264 顶点**）。真实分布见上"顶点预算"条。
@@ -426,8 +430,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
      效果；`assets.rs` 只把 `POSITION` 当硬要求）。
   ⇒ **改法**：`tools/blender/weld_props.py`（按 pos+color 去重、UV 设常量、**`export_normals=False`**）。
   **`export_normals` 是总开关**（开着它时焊到 458 又变回 2264，只降 6.6%）。
-  **收益（同机位实测）**：顶点 1563020→509616、显存 72→24 MB、每帧提交 476100→153363、**中位帧率 +18.6%**，
-  三角形一个没少。**本仓是顶点瓶颈**（像素少 4 倍只 +12%；一次画完反而 −38%）⇒ 顶点数就是帧率。
+  **收益（同机位实测）**：顶点 1563020→509616、**中位帧率 +18.6%**，三角形一个没少。**本仓是顶点瓶颈**（像素少 4 倍只 +12%；一次画完反而 −38%）⇒ 顶点数就是帧率。
 - **确定性**：`hash(str)` 每个进程都变（PYTHONHASHSEED），生成器里用 `zlib.crc32`。
 - 同型号建筑的"克隆军团"由 **`props.rs::placement_tint`** 治（逐摆放确定性色调 ±12%），
   不是靠堆更多型号。
@@ -479,8 +482,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - 🔴 **核对"文档里的常量值 vs 源码"时，别写正则**（真实写法 `pub const PT_MAX_BOXES: usize = 1024;`
   中间夹着类型标注和一个额外的 `=`，字符类正则到不了那个数字）。
   **⇒ 判据：核对定义就用 `rg --fixed-strings "const $NAME"` 把整行打出来用眼睛看。**
-  **同一形态：先有结论，再写一个刚好能"证明"它的工具**（一晚踩了四次：符号名频次 /
-  字面路径 vs 基名 / 上述正则 / 行号跨版本比对）。
+  **同一形态：先有结论，再写一个刚好能"证明"它的工具**（一晚踩了四次）。
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
@@ -593,7 +595,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，必须连 parse 分支一起看。**
 4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`。
 5. **`FLOOR_H` 常量分叉**：6 模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6。
-6. ✅ **`svd_63` 已入库为 `svd12`**（`c20e154`）：`clean_svd_shot.py` 清产品图 → prep → `assets/guns/svd12.glb`；判据 = 真机切枪 VUID=0 + `gun-glb: svd12` + **第一人称实机截图**（§21.60）。
+6. ✅ **`svd_63` 已入库为 `svd12`**（`c20e154`）：判据 = 真机切枪 VUID=0 + `gun-glb: svd12` + 第一人称实机截图（§21.60）。
 7. **D12 士兵近距观感**：`soldier.glb` 实例化绘制；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画（`docs/HANDOFF-soldier.md`）。
 8. **D4 墙缝天空亮条**：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
 9. **mesh 着色器过不了严格 `spirv-val`**：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
@@ -646,7 +648,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 25. **"做完了"要有可判定的数字标准**；动手前把契约量出来，每次产出都比一遍。
 26. **安全网的假警报和漏报一样有害**：判定要允许收敛窗口（重试），不能只查一次 —— 会喊狼来了的脚本会训练人不再当回事。
 27. **🔴 先确认你的测量工具测的是你以为的东西**（一个会话为此栽了六次）。**判据：任何量化结论之前，先用一个"必然能测出差异"的已知变化验一次工具**（同形：教训 45）。
-28. **视觉改动的验收必须给两个数，且两次运行场景一致**：同场基线 → 改动 → 重采 → 整幅 diff（第一道筛子）→ 差异集中区取指标；整幅 diff **不能当改善幅度**。图像通道不可靠时改**数值巡检**（全图扫描 + 过曝/纯黑/异常色占比 <0.5%）。
+28. **视觉改动的验收必须给两个数，且两次运行场景一致**：同场基线 → 改动 → 重采 → 整幅 diff（第一道筛子）→ 差异集中区取指标；整幅 diff **不能当改善幅度**。图像通道不可靠时改**数值巡检**（过曝/纯黑/异常色占比 <0.5%）。
 29. **"看着不对劲"先换视角看清它是什么，再去读代码找它**。**读代码是"知道名字之后"做的事。**
 30. **改回源码要用编辑器工具或 `git checkout --`**。⚠️ 本 shell 的 `ReadAllText` 按 GBK 解码 ⇒ 针对中文的替换**全部静默打不中**、按"读到的行号"删除会**删掉别处的行** ⇒ **中文文档一律用编辑工具改**。
 31. **🔴 遇到视觉缺陷，`rg` 代码注释是第一动作**（本仓惯例 = 改掉 + 在注释里留事后分析；用**现象的词**搜注释常直接命中历史）。
@@ -656,21 +658,19 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 35. **同一份代码跑两次的差异**：见教训 43（含量底噪的工具与口径）。
 36. **🔴 「工具跑不起来」本身就是一条要修的缺陷**（验证层曾因 mesh.spv 被拒而灰屏、被写成"已知限制"后再没人开过 ⇒ 那期间的渲染改动都没兜底）。**⇒ 任何"工具用不了"都要当场问根因，修好后的第一个动作就是重跑它。**
 37. **🔴 截图是「崩溃前的最后一帧」**："改动毫无效果"之前先 grep `has been lost` / `panicked`（两张 A/B 图都可能是设备 lost 后不再更新的死画面）。
-38. **🔴 时间步相关判据不要拿"刚出生的物体"去比**：`y <= ground + 0.05` 对脚底出手的手榴弹在 ≥108fps 时恒真 ⇒ 原地引爆。**⇒ 任何 `spawn → 第一帧就判落地/越界/自碰`，先问"dt 缩小 10 倍还成立吗"，并让测试跑多个帧率档。**
+38. **🔴 时间步相关判据不要拿"刚出生的物体"去比**：`y <= ground + 0.05` 对脚底出手的手榴弹在 ≥108fps 时恒真 ⇒ 原地引爆。**⇒ 凡 `spawn → 第一帧就判落地/越界/自碰`，先问"dt 缩小 10 倍还成立吗"，并让测试跑多个帧率档。**
 39. **🔴 计分不等于「我打中了」**：`damage_npc` 对**任何**敌方死亡都 `score += 10` ⇒ 有 NPC 自伤的模式（survive / 压力模式手榴弹）里 `killed>=1` 不是命中证据。**⇒ 判命中看 `weapons: shot #` 与命中来源；判 AI 自杀看 `grenade: npc #N throws` 与 `kill: npc #N` 是否同秒。**
 40. **🔴 "某个面没画出来"先查绕序/背面剔除，再查几何参数**：本管线水平面与竖直面的正面约定相反，立方体顶/底面与圆柱盖长期反绕 ⇒ 顶面恒被剔除，一个绕序 bug 伪装成"建模/烘焙"。**⇒ 判据 `horizontal_winding_tests`；探针 = 可疑面涂不可能色。**
 41. **断言"构件没渲染"前先确认相机在它的正面 + 它在不在别的体块里**（shop1 误报"没有雨棚"；cp1 实锤残骸车整个埋进围合板楼）⇒ `checkpoint_props_stay_out_of_rows`。
 42. **🔴 阈值型分支的测试必须取「跨过阈值」的输入**：`survive` 的 `rule.waves` 与 `WAVES_PER_LEVEL`(3) 就是这种分支 —— 旧测试用 `waves = 2` 一路绿，而线上地图用 5 ⇒ 升关那条真实路径**从没被执行过**。**⇒ 看到 `>= N` / `> N` / `min(N, …)`，必须给"刚好越过"那一档；线上真实取值就是必须覆盖的那档。**
 43. **🔴 帧率口径：`fps` 必须是「窗口内帧数 / 窗口时长」**，不能是"某一帧的 `1/dt`"（同行 `frame_us` 是**另一帧**的耗时 ⇒ 自相矛盾；同一二进制两次能"差 48%"，我据此写过**错误的 +58%**，见 §21.36/§21.37）。**⇒ 先跑 `scripts\aa_probe.ps1 -Runs 3` / `ab_pair.ps1` 量噪声底，小于它不算数。⚠️ **噪声底不是常数**（实测 0.2~5.5%，§21.40(b)/§21.61）⇒ 每轮现场量。**
-44. **🔴 「跳过某个对象的处理」的分支必须回答：它还会不会自己结束/推进？** 2026-09-26：`Mixer::mix` 对 `gain <= 0.0`（静音）的声部直接 `continue` ⇒ 游标不前进、声部不退队 ⇒ 静音期间每发枪堆一个（`voices` 无界增长），解除静音后**旧枪声齐鸣**。判据 = `mixer_retires_voices_even_when_muted` / `unmuting_does_not_replay_stale_voices`。同形的还有环形缓冲与寿命表：**你省掉的那一步，往往正是它退场的唯一机会**。
+44. **🔴 「跳过某个对象的处理」的分支必须回答：它还会不会自己结束/推进？** 2026-09-26：`Mixer::mix` 对 `gain <= 0.0`（静音）的声部直接 `continue` ⇒ 游标不前进、声部不退队 ⇒ 静音期间每发枪堆一个（`voices` 无界增长），解除静音后**旧枪声齐鸣**。判据 = `mixer_retires_voices_even_when_muted`。同形的还有环形缓冲与寿命表：**你省掉的那一步，往往正是它退场的唯一机会**。
 45. **🔴 成本地图（"关掉某个东西"的对照实验）三件套：正对照臂 + 同轮轮转 + 每臂 ≥5 对。**
   ① **正对照臂**（物理上必然更快的那个）不快 ⇒ **整批作废**；但它快**也证明不了其余臂**。
-  ② **同轮轮转**，不许一个臂连跑几对再换下一个：2026-09-26 两次都撞在这上面
-  （`NO_PROPS` 少画 246k 三角形却 −17%），机理 = 外部干扰周期（分钟级）
-  **远长于**交替周期（25 秒）；明细见 §21.27/§21.45/§21.61。
-  ③ 🔴 **每臂 1 对时，噪声本身就有 ±20%**：同日 A/A（`-Pairs 4`、两臂同 exe）**中位 −5.51%**、
-  单对低到 −23.6% ⇒ **1~5% 的效应测不出来**。
-  **⇒ 先量 A/A 底噪（同日同参数）、n ≥5 对、报中位差 + 符号一致数；
+  ② **同轮轮转**，不许一个臂连跑几对再换下一个：机理 = 外部干扰周期（分钟级）**远长于**
+  交替周期（25 秒）；2026-09-26 两次都撞在这上面（`NO_PROPS` 少画 246k 三角形却 −17%）。
+  ③ 🔴 **每臂 1 对时噪声本身就有 ±20%**（同日 A/A 中位 −5.51%、单对低到 −23.6%）
+  ⇒ **1~5% 的效应测不出来**。**⇒ 先量 A/A 底噪（同日同参数）、n ≥5 对、报中位差 + 符号一致数；
   底噪大于效应就写"没测到"，不要给一个数。** 前后看 `msedge` 与 CPU 负载。
 46. **🔴 审计/闸门工具必须有第三种结局：「没跑成」。** 扫描面 = 0 不算通过、读不到输入要
   fail-closed、**空日志也不算通过**（`history_secret_audit` 在非仓库目录打"没有命中"、
@@ -679,3 +679,8 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
   🔴 **同理：模糊/扫描类判据的自检要写"必须有一部分成功"，不是"必须不崩"** ——
   2026-09-26 两版模糊（`net`/`map`）接受率都是 **0/3000**："没 panic"什么都没证明；
   改成分层变异才到 53%/74%（§21.71）。
+47. **🔴 时间基减法必须 `checked_sub`：`Instant` 的原点是「开机时刻」**，所以
+  `Instant::now() - Duration::from_secs(3600)` 在**机器启动不足 1 小时**时**下溢 panic**；
+  同一份代码在开机几天的机器上一路绿 ⇒ **「上线首小时才炸」**（2026-09-27 早上重启后
+  `reset_connection_clears_session_scoped_state` 当场红，§21.82）。
+  **⇒ 凡 `now ± Duration` 一律 `checked_sub`/`checked_add` + 显式回退，改完 `rg` 全仓再扫一遍。**

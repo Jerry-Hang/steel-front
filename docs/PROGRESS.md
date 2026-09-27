@@ -10612,6 +10612,71 @@ lead = 把喂进去的 `kills` 换成**敌方损失**（= 本营战果），或�
 
 ---
 
+### 21.82 `Instant` 减法下溢 —— 开机首小时内 `reset_connection` 会 panic（教训 47）
+
+今早重启后跑全量测试，`net::tests::reset_connection_clears_session_scoped_state` 当场红：
+`panicked at time.rs:445: overflow when subtracting duration from instant`。
+
+- **根因在生产代码**：`reset_connection` 里的
+  `self.last_join_at = Instant::now() - Duration::from_secs(3600);`
+  —— `Instant` 的原点在 Windows 上是**开机时刻** ⇒ **机器启动不足 1 小时**时这次减法直接下溢。
+  同一份代码在开机几天的机器上一路绿（昨晚就是这样通过的）⇒ 典型「上线首小时才炸」。
+  同文件 1016 行早就是 `checked_sub`（注释还写着「进程启动不足 1 小时时无下溢」），**只有这一处漏了**。
+- **修法**：`checked_sub(3600s).unwrap_or(now)`（推不到 1 小时就退化成"现在"，
+  语义上只把"立刻重试"推迟一个 interval，`retry_join` 每帧都调，无副作用）。`eb4db62`。
+- **判据** = 那条本来就红的测试（红→绿闭环）+ `rg` 确认全仓只有这一处 `Instant::now() - Duration`。
+
+---
+
+### 21.81 修「一开游戏整机就卡」：失焦后不再独占 GPU（`RV3D_BG_FPS`）
+
+**排查**（`logs/throttle_probe.ps1`，三次实测：后台 stress、可见窗口 stress、可见窗口 play；
+采样 CPU 频率/占用/DPC、GPU 利用率/频率/功耗/温度/三项节流标志、每进程 GPU 3D 引擎份额、
+内存与页读、游戏工作集/线程/优先级/亲和）：
+
+| 假设 | 实测 | 结论 |
+|---|---|---|
+| CPU 降频 | `% Processor Performance` **130–200**（标称 2.4 GHz ⇒ 3.1–4.8 GHz），最低单次 128 | **否** |
+| GPU 节流 | 99–100% 利用率时 2917 MHz / 45–70 W（上限 115 W）/ 64–73 °C，`sw_power_cap`+`hw_slowdown`+`hw_thermal` **全 Not Active** | **否** |
+| 游戏吃满 CPU | 游戏自身约 **1 个核**（3.2% × 32 线程）+ **475 MB** 工作集 | **否**（GPU 瓶颈） |
+| **失焦后仍全速渲染** | 失焦时 `steel-front` 占 **99–105% 的 GPU 3D 份额**、**dwm 只剩 0–1%** | ✅ **真凶** |
+
+机理：桌面合成、拖窗口、打字回显、任务管理器刷新都要经 dwm 合成，而 GPU 被游戏占满 ⇒
+**整机"一卡一卡"**，与用户描述（"打字有延迟、窗口拖动一顿一顿、任务管理器都刷不动"）一致。
+另有一次对照里非游戏进程（msedge）把 CPU 吃到 98%、可用内存掉到 977 MB —— 属叠加因素，非根因。
+
+**修法**（`2d0b78a`，不碰 `engine/cpu.rs`，线程池/亲和/降频一个字没动）：
+- 纯函数 `effective_frame_cap(fg, bg, focused)`：前台取前台上限；**失焦**时再夹上 `RV3D_BG_FPS`；
+  两侧 0 = 不限制；**后台只会更严不会放宽**；负值按"不设限"处理。
+- 帧率门控改用"有效上限"，上限变化时打一行 `frame-cap: N fps (focused=… fg=… bg=…)`（现场可判）。
+- **引擎默认 `RV3D_BG_FPS=0`（故意）**：perf_run / 冒烟都在失焦下跑，默认限流会把所有基准
+  静默变成 20 fps 的测量；**玩家路径由 `SteelFront.bat` 设 20**。
+- 诊断开关 `RV3D_FORCE_UNFOCUSED=1`（无人值守探针里复现"后台跑游戏"的负载）。
+
+**实测（stress 128v128，同一探针，改前 → 改后）**：fps 165 → **19.9**、GPU 利用率 99–100% →
+**26–28%**、GPU 频率 2917 → 1065–1425 MHz、功耗 45–69 W → **16 W**、温度 66–73 → **51–54 °C**、
+游戏帧耗时 3718–6483 µs → **222–357 µs**。
+
+**判据** = `frame_cap_is_disabled_by_default_and_only_tightens`（四条方向：默认不限 / 失焦夹住 /
+聚焦时 bg 不生效 / bg 只能收紧）+ 探针实测。闸门：**637 passed / 0 failed**、0 警告。
+
+**顺带的当日尺子账**（教训 43/45）：今晨 A/A 底噪两次实测为 **中位 −3.03%**（含一对 −20%，
+当时 Defender+SearchIndexer 正在跑）与 **+12.5%**（索引结束后仍在爬升：头两对 90–137 fps、
+后两对 ~170 fps）⇒ **今天量不出 <5% 的效应**，轮转成本地图推迟到有干净窗口再做。
+
+---
+
+### 21.80 本轮开工杂记（2026-09-27 上午）
+
+- 昨夜重启后 **DSH 客户端按 RunOnce 自动升级到 0.1.7-rc.2** 成功（`npm ls -g` 确认；
+  `--prefer-offline` 走缓存，日志在 `%USERPROFILE%\dsh-update.log`）。
+- 昨夜遗留的冒烟补跑：`run_smoke_pm.ps1` **ALL-OK**（`VUID=0 panics=0`，27 发、1 杀）
+  —— §21.78 记的"GPU-BUSY 没跑成"到此结清。
+- 代价：AGENTS 因为新增两条（失焦渲染 + 教训 47）**先顶到 65,834 B 被注入侧截断**，
+  随后按教训 1 连删/压缩 8 处历史细节回到 65 KB 以下 —— **加内容前先看字节数**这条又付了一次学费。
+
+---
+
 ### 21.79 本轮交接（2026-09-26 夜，审计日）：状态、没跑成的项、下一步（按价值排序）
 
 **闸门现状**：`cargo test --release` **636 passed / 0 failed**；`cargo build --release` **0 警告**
