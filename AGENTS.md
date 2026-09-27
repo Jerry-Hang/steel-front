@@ -432,7 +432,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
      效果；`assets.rs` 只把 `POSITION` 当硬要求）。
   ⇒ **改法**：`tools/blender/weld_props.py`（按 pos+color 去重、UV 设常量、**`export_normals=False`**）。
   **`export_normals` 是总开关**（开着它时焊到 458 又变回 2264，只降 6.6%）。
-  **收益（同机位实测）**：顶点 1563020→509616、**中位帧率 +18.6%**，三角形一个没少。**本仓是顶点瓶颈**（像素少 4 倍只 +12%；一次画完反而 −38%）⇒ 顶点数就是帧率。
+  **收益（同机位实测）**：顶点 1563020→509616、**中位帧率 +18.6%**，三角形一个没少。
 - **确定性**：`hash(str)` 每个进程都变（PYTHONHASHSEED），生成器里用 `zlib.crc32`。
 - 同型号建筑的"克隆军团"由 **`props.rs::placement_tint`** 治（逐摆放确定性色调 ±12%），
   不是靠堆更多型号。
@@ -606,9 +606,9 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 14. **道具进阴影 pass**：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
 15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F（其余 `#[allow]` 必须保留）。
 17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0`（harness = `run_survive_pm.ps1`）。
-18. ✅ **CoverSeek 占比偏低**：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler` ⇒ 7.2%/1.8%）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `aidiag: tactic 1s`。
+18. ✅ **CoverSeek 占比偏低**：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler`）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `aidiag: tactic 1s`。
 19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1`）。
-20. ✅ **DLSS：不接**（`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素。**重开判据**：面积 1/4 而 fps 提升 >40%。
+20. ✅ **DLSS：不接**（`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素。**重开判据**：面积 1/4 而 fps +>40%。
 21. **GLB `byteStride`**：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。
 24. **广场"坑"** = 水平面绕序反了（判据 `horizontal_winding_tests`）。
