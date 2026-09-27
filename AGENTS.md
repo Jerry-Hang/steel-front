@@ -68,7 +68,11 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 > **环境铁律（勿回退）**：开发/验证 = **Windows 原生**。2026-08-15 起从 WSL2 迁出，
 > WSL2 相关材料**全部作废**。
 
-- **机器**：RTX 5060 Laptop（NVIDIA 驱动 610.88）+ AMD 8940HX，内存 12GB。
+- **机器**：**ASUS TUF FA608PM**（BIOS FA608PM.309）+ RTX 5060 Laptop + AMD 8940HX，内存 12GB。
+  🔴 **混合输出**：面板 2560x1600@165 挂在 **AMD 610M**（2 CU 核显）上，独显 `display_attached=No`
+  ⇒ 每帧跨卡拷贝 + dwm 在核显合成（实测数字见 §21.81(a)）。**该机型有 MUX 开关**：
+  Armoury Crate → GPU 模式 → **独显输出** 即让面板直连 5060，跨卡拷贝与核显合成一起消失
+  （代价：待机功耗；切换通常要重启。切完仍是 mailbox，不受 FIFO 卡死那条影响）。
 - **编译**：`cargo build --release`。**测试**：`cargo test --release`（**0 警告**是硬红线；具体 passed 数见 `docs/PROGRESS.md`）。
   UDP 回环测试在沙箱内 bind 会 PermissionDenied → 需提权跑。
 - **GPU 能力（原生实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
