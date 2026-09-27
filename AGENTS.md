@@ -424,8 +424,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   `proptypes:` / `propdraw:` 两行。
   🔴 **立面 quad 已按行合并**（`wall_panel()`，§21.47）：同行带内
   非洞格子顶点色**逐位相同**（`base` 只看层缝、AO 只看 z）⇒ 合并**逐像素等价**。
-  **顶点还是唯一的杠杆**（道具开销正比于顶点数）⇒ **资产改动先用 `propdraw:` 的几何量验收，
-  帧率只确认"换到时间了没有"**；GLB 已焊接（无 NORMAL = 顶点数就是真几何）。
+  **顶点还是唯一的杠杆** ⇒ 资产改动先用 `propdraw:` 的几何量验收（GLB 已焊接 = 顶点数即真几何）。
   ⚠️ **道具的真实代价（2026-09-27 轮转成本地图，n=5/臂 + 正对照臂，§21.83）**：`NO_PROPS` 中位
   **+34 fps（4/5 同号）**、正对照 `NO_SHADOW` **+15.7（5/5）** ⇒ 道具约占 **20% 帧时间**；
   **§21.52 的"只占 5.4%"已被推翻**；地形/弹孔/程序化贴图**测不到**（≤当日噪声底）。
@@ -434,9 +433,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
      （`tree_oak` 838 三角形曾被拆成 **2264 顶点**）。真实分布见上"顶点预算"条。
   2. **引擎根本不需要这两样**（无正常线槽位；`Shape::Authored` 在片元里**跳过**四条会采样 UV 的
      效果；`assets.rs` 只把 `POSITION` 当硬要求）。
-  ⇒ **改法**：`tools/blender/weld_props.py`（按 pos+color 去重、UV 设常量、**`export_normals=False`**）。
-  **`export_normals` 是总开关**（开着它时焊到 458 又变回 2264，只降 6.6%）。
-  **收益（同机位实测）**：顶点 1563020→509616、**中位帧率 +18.6%**，三角形一个没少。
+  ⇒ **改法**：`tools/blender/weld_props.py`（按 pos+color 去重、UV 设常量、**`export_normals=False`**，
+  它是总开关）；验收看 `propdraw:` 的几何量，帧率只确认"换到时间了没有"。
 - **确定性**：`hash(str)` 每个进程都变（PYTHONHASHSEED），生成器里用 `zlib.crc32`。
 - 同型号建筑的"克隆军团"由 **`props.rs::placement_tint`** 治（逐摆放确定性色调 ±12%），
   不是靠堆更多型号。
@@ -595,7 +593,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 
 0. **`PrintWindow` 对非前台窗口返回冻结帧**：症状不复现。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)`。
 1. ✅ **道具焊接流程**（2026-09-19）：改道具 = 改生成器 → 重跑 → 再焊接，绝不在已焊结果上"补"颜色。
-2. **PT 崩溃 `0xC0000005`**：四个真 bug 全修（判据见铁律 B PT 段）。
+2. **PT 崩溃 `0xC0000005`**：四个真 bug 全修（见铁律 B PT 段）。
 3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，要看 parse 分支。**
 4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`。
 5. **`FLOOR_H` 常量分叉**：6 模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6。
@@ -645,7 +643,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 17. **同一个现象别用没量纲区分度的量去判**（"投影跨度""截图观感"都能被误读）。
 18. **"键没生效"这类结论要先排除自己**：`cmd.exe` 传数组会被并成一个数字。
 19. **看门狗用「心跳式」**，不要按"启动后睡 N 秒"来 arm（遗留看门狗曾把新会话杀掉）。
-20. **卡住两轮以上就去改代码加埋点，不要继续推理**（连推四轮全落空）。**临时埋点验完就删**；⚠️ 调试 `build.rs` 别靠打印 cargo warning（会被归并/缓存），往文件里写。
+20. **卡住两轮以上就去改代码加埋点，不要继续推理**。**临时埋点验完就删**；⚠️ 调试 `build.rs` 别靠打印 cargo warning（会被归并/缓存），往文件里写。
 21. **跨进程读窗口尺寸前必须 `SetProcessDPIAware()`**（本机 DPI 1.5x ⇒ 注入坐标整体偏 1.5 倍且不报错）。
 22. **几何/坐标换算的前提假设要么写注释、要么加断言**。**回路收敛 ≠ 打中了正确的东西。**
 24. **单次 A/B 说明不了任何事**：必须「互换对照 + 无处理对照」。⚠️ **小于 A/A 噪声底的差不算数**（教训 43/45）。
