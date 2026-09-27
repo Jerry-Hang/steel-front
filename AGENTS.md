@@ -473,9 +473,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - **看到"规划中"的 dead code，必须回答"那它为什么没被接线"，不许加 `#[allow]` 了事。**
   现状：**全仓 82 处**（2026-09-26 按编译器判据清掉 27 处陈旧压制，§21.67），
   其余**绝大多数是有注释的"预留接口"**，属诚实预留不是藏问题。
-  🔴 **要清陈旧压制，判据只能是编译器，不能是文本匹配**：删掉 `#[allow]` 后若仍 0 警告即为陈旧。
-  按"符号名出现次数"判定的脚本会把 `new`/`get`/`update` 全报成陈旧（名字匹配分不清"被用了"
-  与"同名到处都是"），已弃用。
+  🔴 **要清陈旧压制，判据只能是编译器，不能是文本匹配**：删掉 `#[allow]` 后若仍 0 警告即为陈旧
+  （按符号名频次判定的脚本已弃用）。
 - 🔴 **未结案条目会过期，而"过期的待办"和"错的结论"一样有害**：
   **动某条之前先用 `rg` 确认它引用的符号/文件还在**；**结案一条时必须把条目本身改掉或删掉**
   —— 只不再提的话，下一个人还会照着旧条目去找。
@@ -605,9 +604,9 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步。**仍未做**：NAT 双进程真机验证、回滚、快照增量压缩、会话恢复。
 14. **道具进阴影 pass**：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
 15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F（其余 `#[allow]` 必须保留）。
-17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0 device_lost=0`（harness = `scripts/run_survive_pm.ps1`）。
+17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0`（harness = `run_survive_pm.ps1`）。
 18. ✅ **CoverSeek 占比偏低**：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler` ⇒ 7.2%/1.8%）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `aidiag: tactic 1s`。
-19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1` + `run_gunpose_probe.ps1`）。
+19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1`）。
 20. ✅ **DLSS：不接**（`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素。**重开判据**：面积 1/4 而 fps 提升 >40%。
 21. **GLB `byteStride`**：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
 23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。
