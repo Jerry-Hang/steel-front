@@ -193,6 +193,28 @@ fn cursor_grab_plan(
 /// 设回正数（如 300）即恢复帧率门控。
 const MAX_FPS: u64 = 0;
 
+/// 有效帧率上限（fps）：前台用前台上限，**未聚焦**时再夹上「后台上限」。
+///
+/// 为什么需要这一条（2026-09-27 实测）：窗口失焦后主循环**照样全速渲染** ——
+/// 探针实测 `steel-front` 自己占 99–105% 的 GPU 3D 引擎份额、dwm 只剩 0–1%，
+/// 于是"游戏挂在后台"时整个桌面的合成、拖动窗口、打字回显都在排队，
+/// 用户报的「一运行游戏整机就像卡死」就是这个（不是 CPU 降频：同一轮实测
+/// CPU 频率 3.1–4.8 GHz、GPU 45–70W/115W、无任何节流标志）。
+///
+/// 语义（判据 `frame_cap_*` 四条测试）：
+/// - `0` = 不设上限；两侧都为 0 时返回 0（保持压测路径逐字节不变）。
+/// - 未聚焦且 `bg > 0` 时取 `min(fg, bg)`（`fg == 0` 视作无穷大）⇒ **后台只会更严，绝不会放宽**。
+/// - 聚焦时忽略 `bg`，只受 `fg` 约束。
+fn effective_frame_cap(fg_fps: f32, bg_fps: f32, focused: bool) -> f32 {
+    if focused || bg_fps <= 0.0 {
+        return fg_fps.max(0.0);
+    }
+    if fg_fps <= 0.0 {
+        return bg_fps;
+    }
+    fg_fps.min(bg_fps)
+}
+
 /// 环境变量真值解析（"1"/"true"/"on" = 真；其余为假）
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
@@ -589,6 +611,14 @@ struct GameApp {
     last_cycle_us: u64,
     /// 采集模式帧率上限（0 = 不限；LLM 模式 90）
     llm_cap_fps: f32,
+    /// 后台（窗口失焦）帧率上限（0 = 不额外限制；`RV3D_BG_FPS`，玩家路径由启动器设为 20）
+    /// —— 失焦后仍全速渲染会把 GPU 占满、把桌面合成挤到没余量（见 `effective_frame_cap`）
+    bg_cap_fps: f32,
+    /// 诊断用：强制按「未聚焦」处理（`RV3D_FORCE_UNFOCUSED=1`，仅用于在
+    /// 无人值守的探针里复现"后台跑游戏"的负载，正常路径恒为 false）
+    force_unfocused: bool,
+    /// 上一次打印过的有效帧率上限（变化时才打日志，避免每帧刷屏）
+    logged_cap_fps: f32,
     /// 上一帧 update（逻辑）耗时（微秒，性能日志用）
     last_update_us: u64,
     /// 上一帧 render（渲染提交）耗时（微秒，性能日志用）
@@ -741,6 +771,11 @@ impl GameApp {
                 let cap = env_f32("RV3D_FPS").unwrap_or(if llm_on { 120.0 } else { 300.0 });
                 cap.max(20.0)
             },
+            // 0 = 引擎默认不限制后台帧率（压测/采集路径逐字节不变）；
+            // 玩家路径由 SteelFront.bat 设 RV3D_BG_FPS=20（见 there 的注释与 AGENTS 铁律 B）
+            bg_cap_fps: env_f32("RV3D_BG_FPS").unwrap_or(0.0).max(0.0),
+            force_unfocused: env_truthy("RV3D_FORCE_UNFOCUSED"),
+            logged_cap_fps: -1.0,
             last_update_us: 0,
             last_render_us: 0,
             fire_requested: false,
@@ -3803,9 +3838,23 @@ impl ApplicationHandler for GameApp {
         self.last_cycle_us = cycle_start.elapsed().as_micros() as u64;
         // 采集模式帧率上限（RV3D_LLM=1 时 90FPS 封顶）：大幅降低 GPU 负载，
         // 避免与 llama-server 长时间同卡共存导致 VK_ERROR_DEVICE_LOST（2026-08-23）
-        if self.llm_cap_fps > 0.0 {
+        //
+        // 2026-09-27：这里改成"有效上限" —— 窗口失焦时再夹上后台上限（RV3D_BG_FPS）。
+        // 实测失焦后仍全速渲染会把 GPU 占满；桌面合成（dwm）拿不到时间片，用户看到的是
+        // "游戏一开整机就卡"。引擎默认 bg=0（不改变任何既有测量口径），玩家路径由
+        // SteelFront.bat 设 20。判据：pure fn effective_frame_cap 的四条测试 + 探针实测。
+        let focused_now = self.focused && !self.force_unfocused;
+        let cap_fps = effective_frame_cap(self.llm_cap_fps, self.bg_cap_fps, focused_now);
+        if (cap_fps - self.logged_cap_fps).abs() > 0.5 {
+            log::info!(
+                "frame-cap: {:.0} fps (focused={} fg={:.0} bg={:.0})",
+                cap_fps, focused_now, self.llm_cap_fps, self.bg_cap_fps
+            );
+            self.logged_cap_fps = cap_fps;
+        }
+        if cap_fps > 0.0 {
             let used = cycle_start.elapsed().as_secs_f32();
-            let target = 1.0 / self.llm_cap_fps;
+            let target = 1.0 / cap_fps;
             if used < target {
                 std::thread::sleep(std::time::Duration::from_secs_f32(target - used));
             }
@@ -4012,6 +4061,30 @@ fn rdv_register_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 判据：后台帧率上限（2026-09-27「游戏一开整机就卡」）。
+    ///
+    /// 四条各钉一个方向，缺一条就会出现"限了但限错"：
+    /// 1. 默认（两侧都 0）必须是**不限制** —— 压测/采集路径逐字节不变；
+    /// 2. 未聚焦且设了 bg 时必须被夹住（这是修的那个 bug）；
+    /// 3. 聚焦时 bg **不许**生效（否则玩家自己玩的时候也被限）；
+    /// 4. bg 只能**收紧**不能放宽（fg=30、bg=120 时仍取 30）。
+    #[test]
+    fn frame_cap_is_disabled_by_default_and_only_tightens() {
+        // 1) 默认不限制
+        assert_eq!(effective_frame_cap(0.0, 0.0, true), 0.0);
+        assert_eq!(effective_frame_cap(0.0, 0.0, false), 0.0);
+        // 2) 未聚焦：bg 夹住前台上限（含 fg=0 即"前台不限"的两侧组合）
+        assert_eq!(effective_frame_cap(300.0, 20.0, false), 20.0);
+        assert_eq!(effective_frame_cap(0.0, 20.0, false), 20.0);
+        // 3) 聚焦时 bg 不生效
+        assert_eq!(effective_frame_cap(300.0, 20.0, true), 300.0);
+        assert_eq!(effective_frame_cap(0.0, 20.0, true), 0.0);
+        // 4) bg 只能收紧：更宽的 bg 不改变更严的前台上限
+        assert_eq!(effective_frame_cap(30.0, 120.0, false), 30.0);
+        // 非法的负值按"不设限"处理，绝不允许变成负 fps
+        assert_eq!(effective_frame_cap(-5.0, -1.0, false), 0.0);
+    }
 
     /// 🔴 判据：中继注册失败时**不许**报「已注册」（教训 46：日志不许把「没跑成」写成成功）。
     ///

@@ -112,6 +112,17 @@ REM MAILBOX neither tears nor blocks (FIFO deadlocks on a dGPU-direct setup wait
 REM a vblank interrupt). To get the old behaviour:  set RV3D_PRESENT_MODE=immediate
 if not defined RV3D_PRESENT_MODE set "RV3D_PRESENT_MODE=mailbox"
 
+REM Background frame cap (2026-09-27). Measured with a probe while playing: once the window
+REM lost focus the engine kept rendering at ~165 fps and held 99-105% of the GPU 3D engine
+REM share, leaving dwm 0-1% -- so dragging a window, typing echo and even Task Manager all
+REM queued behind the game. That is the user-reported "the whole machine freezes while the
+REM game runs" (it is NOT CPU throttling: same probe showed 3.1-4.8 GHz clocks, 45-70 W of a
+REM 115 W GPU limit and no throttle flags). 20 fps while unfocused keeps the game alive and
+REM hands the GPU back to the desktop. Set RV3D_BG_FPS=0 to disable.
+REM The engine default is 0 on purpose: perf_run.ps1 / smoke harnesses run unfocused, and a
+REM default cap would silently turn every benchmark into a 20 fps measurement.
+if not defined RV3D_BG_FPS set "RV3D_BG_FPS=20"
+
 if not exist "logs" mkdir "logs"
 REM Capture stderr to a file. Without this the game's own log (log::info!/ERROR) goes
 REM to a console that closes with the window, so a play-test leaves NO evidence --
