@@ -1297,7 +1297,13 @@ impl Client {
         self.objective_rule.clear();
         self.has_objective = false;
         self.objective_seq = 0;
-        self.last_join_at = Instant::now() - Duration::from_secs(3600);
+        // 🔴 时间基减法必须 `checked_sub`：`Instant` 的原点在 Windows 上是**开机时刻**，
+        // 所以"进程启动不足 1 小时"时 `Instant::now() - 3600s` 会**下溢 panic**
+        // （2026-09-27 早上重启后跑测试，`reset_connection_clears_session_scoped_state`
+        //  就是这条红的；同一份代码在开机几天的机器上一路绿 ⇒ 典型的"上线首小时才炸"）。
+        // 推不到 1 小时就退化成"现在"：语义上只把立刻重试推迟一个 interval，无副作用。
+        let now = Instant::now();
+        self.last_join_at = now.checked_sub(Duration::from_secs(3600)).unwrap_or(now);
     }
 
     pub fn retry_join(&mut self, name: &str, interval: Duration) -> bool {
