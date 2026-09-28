@@ -226,6 +226,41 @@ fn env_truthy(name: &str) -> bool {
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|s| s.parse::<f32>().ok())
 }
+
+/// 把「请求的分辨率」夹进显示器物理尺寸，返回窗口要请求的**物理**像素尺寸。
+///
+/// 🔴 **2026-09-28 修（Linux 适配）**：调用方原来写的是
+/// `.with_inner_size(LogicalSize::new(w as f64 / 1.5, h as f64 / 1.5))` ——
+/// 那个 `/1.5` 是 Windows 那台机器 `scale_factor = 1.5` 的**硬编码补偿**。
+/// 它带来两个后果，都只在非 Windows 上暴露：
+///
+/// 1. **启动尺寸与设置里改出来的尺寸不一致**：配置 2560x1600、scale=1.0 的 Linux 上
+///    窗口实际是 1706x1066；而设置面板里改分辨率走的是 `PhysicalSize`（见 `main.rs`
+///    里应用新分辨率那条路）⇒ 同一个分辨率有两套语义。Wayland 下更糟：窗口尺寸直接
+///    决定交换链尺寸（`currentExtent` 未定义，见 `Renderer::window_extent`），
+///    于是错的是**整条渲染尺寸链**，不只是窗口。
+/// 2. 尺寸被夹小了，而日志照样打印"窗口创建成功: 2560x1600" ⇒ **日志与事实不符**。
+///
+/// ⇒ 语义定死：**这里的 `w`/`h` 与 `monitor` 全是物理像素**（`RESOLUTIONS` 与配置项
+/// 本来就是物理分辨率，`monitor.size()` 也是物理），所以一律用 `PhysicalSize`，
+/// **不再有任何魔法缩放系数**。判据 = `window_request_is_physical_and_clamped`
+/// （它同时钉住"不许再乘除任何常数"与"超屏必须等比缩"）。
+///
+/// `monitor = None`（Wayland 下 `primary_monitor()` 可能为 None）时不做夹取 ——
+/// 与其按一个猜出来的尺寸缩，不如如实请求，让合成器去处理。
+fn window_physical_request(w: u32, h: u32, monitor: Option<(u32, u32)>) -> (u32, u32) {
+    // 下限与 winit/合成器能接受的最小窗口一致，避免请求 0 尺寸
+    let (mut w, mut h) = (w.max(320), h.max(200));
+    if let Some((mw, mh)) = monitor {
+        if w > mw || h > mh {
+            let scale = (mw as f32 / w as f32).min(mh as f32 / h as f32);
+            w = ((w as f32 * scale) as u32).max(320);
+            h = ((h as f32 * scale) as u32).max(200);
+        }
+    }
+    (w, h)
+}
+
 /// 单帧预算（纳秒；`MAX_FPS = 0` 表示不设上限，预算为 0，不做 sleep/spin 节流）。
 ///
 /// 写成 `match` 而不是 `if MAX_FPS > 0`：后者在 `MAX_FPS` 当前取值 0 下，比较的
@@ -2898,38 +2933,35 @@ impl ApplicationHandler for GameApp {
         }
 
         // ---- 创建窗口（尺寸取 HUD 当前分辨率：配置显式值或按显示器选定的默认值）----
-        let (mut w, mut h) = self.game.hud.resolution();
-        // 2026-08-15：窗口尺寸 clamp 到主显示器可用区（防止配置分辨率超屏 → 内容只显示左上角）。
-        // 主显示器物理尺寸经 winit monitor.size()（物理像素）；DPI 缩放下逻辑 ≠ 物理，
-        // 但 PhysicalSize 请求按物理像素处理，超屏窗口会被系统裁切。
-        // 2026-08-15：窗口尺寸 clamp 到主显示器物理尺寸（防止超屏 → 内容只显示左上角）。
-        // 请求分辨率（如 2560x1600）等于显示器物理大小时窗口为全屏无边框语义，
-        // 但 Windows 任务栏会遮挡底部——此处仅防止"窗口 > 屏幕"的裁剪型错位。
-        if let Some(monitor) = event_loop.primary_monitor() {
-            let msize = monitor.size();
-            if w > msize.width || h > msize.height {
-                log::warn!(
-                    "窗口尺寸 {}x{} 超过主显示器 {}x{}，自动缩放适配",
-                    w, h, msize.width, msize.height
-                );
-                let scale = (msize.width as f32 / w.max(1) as f32)
-                    .min(msize.height as f32 / h.max(1) as f32);
-                w = (w as f32 * scale).max(320.0) as u32;
-                h = (h as f32 * scale).max(200.0) as u32;
-            }
+        let (w, h) = self.game.hud.resolution();
+        // 夹进显示器物理尺寸（防超屏 → 内容只显示左上角），并**保持物理像素语义**
+        // —— 这里绝不能再出现 `/1.5` 那类按某台机器标定出来的缩放系数，理由见
+        // `window_physical_request` 的文档（判据 `window_request_is_physical_and_clamped`）。
+        // Wayland 下 `primary_monitor()` 恒为 None（没有主显示器概念）⇒ 不夹取；
+        // 这不是缺陷，是这个后端的语义（同文件 `resumed` 上面的默认分辨率选择已同样处理）。
+        let monitor_size = event_loop.primary_monitor().map(|m| {
+            let s = m.size();
+            (s.width, s.height)
+        });
+        let (w, h) = window_physical_request(w, h, monitor_size);
+        if (w, h) != self.game.hud.resolution() {
+            log::warn!(
+                "请求分辨率 {}x{} 超过显示器 {:?}，已等比缩到 {}x{}",
+                self.game.hud.resolution().0,
+                self.game.hud.resolution().1,
+                monitor_size,
+                w,
+                h
+            );
         }
-        // 2026-08-15：无边框窗口——请求分辨率等于显示器物理尺寸时窗口恰好铺满屏幕，
-        // 无标题栏/边框挤压（否则窗口比屏幕略大 → DWM 裁剪 → 内容偏左上角）。
-        // 2026-08-15：窗口尺寸用 LogicalSize（winit 按 scale_factor 自动转物理）——
-        // 若直接给 PhysicalSize，DPI 缩放下 winit 可能按逻辑解释导致窗口/swapchain 尺寸错位
-        // （表现为画面偏左上角/缩放不正确）。无边框 + 逻辑尺寸 = 显示器比例一致。
-        // 2026-08-15：窗口尺寸用 LogicalSize（winit 按 scale_factor 自动转物理）——
-        // 若直接给 PhysicalSize，DPI 缩放下 winit 可能按逻辑解释导致窗口/swapchain 尺寸错位
-        // （表现为画面偏左上角/缩放不正确）。无边框 + 逻辑尺寸 = 显示器比例一致。
-        // 窗口位置显式 (0,0)：默认位置可能偏移，2560x1600 窗口超出屏幕右下 → 画面偏左上。
+        // 无边框窗口：请求分辨率等于显示器物理尺寸时窗口恰好铺满屏幕，无标题栏/边框挤压
+        // （否则窗口比屏幕略大 → 合成器裁切 → 内容偏左上角）。
+        // 🔴 尺寸一律 `PhysicalSize`：`w`/`h` 与 `monitor.size()` **都是物理像素**，
+        // 用 `LogicalSize` 等于让 winit 再乘一次 scale_factor（Windows 那台 scale=1.5 时
+        // 就是靠手写的 `/1.5` 抵消的 —— 换个平台必然错）。
         let winit_attr = Window::default_attributes()
             .with_title(window::WINDOW_TITLE)
-            .with_inner_size(winit::dpi::LogicalSize::new(w as f64 / 1.5, h as f64 / 1.5))
+            .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
             .with_position(winit::dpi::PhysicalPosition::new(0, 0))
             .with_decorations(false);
 
@@ -4089,6 +4121,35 @@ mod tests {
         assert_eq!(effective_frame_cap(30.0, 120.0, false), 30.0);
         // 非法的负值按"不设限"处理，绝不允许变成负 fps
         assert_eq!(effective_frame_cap(-5.0, -1.0, false), 0.0);
+    }
+
+    /// 🔴 **Linux 适配判据**：窗口请求尺寸必须是**物理像素**，且超屏时等比缩。
+    ///
+    /// 修的是 `LogicalSize::new(w / 1.5, h / 1.5)` —— 那个 1.5 是 Windows 那台机器
+    /// `scale_factor = 1.5` 的硬编码补偿，在 scale=1.0 的 Linux 上把 2560x1600
+    /// 变成 1706x1066，而 Wayland 下窗口尺寸直接决定交换链尺寸 ⇒ 整条渲染尺寸链都错。
+    ///
+    /// 三条断言各自对应一个会被写错的方向（都不是恒真断言）：
+    /// 1. **不缩放**：请求值原样返回 —— 任何乘除常数都会让这条红；
+    /// 2. **超屏等比缩**：且比例保持（缩完仍宽高比一致），不是只夹一边；
+    /// 3. **下限**：0 或极小值不许原样透出去（合成器会拒绝 0 尺寸窗口）。
+    #[test]
+    fn window_request_is_physical_and_clamped() {
+        // 1) 显式分辨率（物理）原样透传 —— 显示器足够大时一个像素都不许改
+        assert_eq!(window_physical_request(2560, 1600, Some((2560, 1600))), (2560, 1600));
+        assert_eq!(window_physical_request(1920, 1080, Some((3840, 2160))), (1920, 1080));
+        // 2) 超屏等比缩：3840x2160 请求放进 1920x1080 => 恰好一半，宽高比不变
+        let (w, h) = window_physical_request(3840, 2160, Some((1920, 1080)));
+        assert_eq!((w, h), (1920, 1080));
+        // 只超高（不超宽）时也要缩，且按**较小的**那个比例缩（否则会溢出另一边）
+        let (w, h) = window_physical_request(1920, 4000, Some((1920, 1080)));
+        assert!(w <= 1920 && h <= 1080, "缩完不许仍溢出：{w}x{h}");
+        assert!(w > 0 && h > 0);
+        // 3) 拿不到显示器（Wayland 的 primary_monitor() 恒 None）=> 如实请求，不猜
+        assert_eq!(window_physical_request(2560, 1600, None), (2560, 1600));
+        // 4) 下限：0 与极小值不许透传
+        assert_eq!(window_physical_request(0, 0, None), (320, 200));
+        assert_eq!(window_physical_request(100, 50, None), (320, 200));
     }
 
     /// 🔴 判据：中继注册失败时**不许**报「已注册」（教训 46：日志不许把「没跑成」写成成功）。
