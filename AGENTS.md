@@ -65,22 +65,25 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 ## 开发环境
 
-> **环境铁律（勿回退）**：开发/验证 = **Windows 原生**。2026-08-15 起从 WSL2 迁出，
-> WSL2 相关材料**全部作废**。
+> **环境铁律（勿回退）**：开发/验证 = **Windows** 或 **Linux 原生**（2026-09-28 并存，坑不互替）；
+> WSL2 材料**全部作废**。Linux 侧见 **`docs/linux-native.md`**。
 
 - **机器**：**ASUS TUF FA608PM**（BIOS FA608PM.309）+ RTX 5060 Laptop + AMD 8940HX，内存 12GB。
   🔴 **混合输出**：面板 2560x1600@165 挂在 **AMD 610M**（2 CU 核显）上，独显 `display_attached=No`
-  ⇒ 每帧跨卡拷贝 + dwm 在核显合成（实测数字见 §21.81(a)）。**该机型有 MUX 开关**：
-  Armoury Crate → GPU 模式 → **独显输出** 即让面板直连 5060，跨卡拷贝与核显合成一起消失
-  （代价：待机功耗；切换通常要重启。切完仍是 mailbox，不受 FIFO 卡死那条影响）。
-- **编译**：`cargo build --release`。**测试**：`cargo test --release`（**0 警告**是硬红线；具体 passed 数见 `docs/PROGRESS.md`）。
+  ⇒ 每帧跨卡拷贝 + 合成器在核显合成（实测数字见 §21.81(a)）。**该机型有 MUX 开关**：
+  `Armoury Crate → GPU 模式 → 独显输出`（Linux = `asusctl armoury set gpu_mux_mode 0`）即让面板
+  直连 5060，跨卡拷贝与核显合成一起消失（代价：待机功耗；通常要重启）。🔴 Linux 侧**同构**
+  （KWin Wayland 跑在 610M 上），不是 Windows 独有。
+- **编译**：`cargo build --release`。**测试**：`cargo test --release`（**0 警告**是硬红线；passed 数见 `docs/PROGRESS.md`）。
   UDP 回环测试在沙箱内 bind 会 PermissionDenied → 需提权跑。
-- **GPU 能力（原生实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
+- **GPU 能力（Windows 实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
   DLSS VK_NVX=true、`present_us 101–373µs`。
 - **分辨率**：默认 2560x1600（`C:\Users\Jerry-Huang\.steel_front.cfg`）。
-- **功率**：奥创中心手动模式 + 电源最佳性能，GPU 功耗墙解锁 111.92W（默认 55W）。
-- **git**：Windows 原生直接跑；`origin = https://github.com/Jerry-Hang/steel-front.git`，
-  分支 `master`，作者 `Evernight <3520143257@qq.com>`，push 走 GitHub 令牌（仅限本仓库）。
+- **功率**：Windows = 奥创中心手动模式解锁 111.92W（默认 55W）；Linux = `asusctl` + `nvidia-powerd`，
+  🔴 **基础 TGP 抬不动**（见 `docs/linux-native.md` §7）。
+- **git**：`origin = https://github.com/Jerry-Hang/steel-front.git`，分支 `master`，
+  作者 `Evernight <3520143257@qq.com>`，push 走 GitHub 令牌。🔴 Linux 钩子须可执行：
+  `scripts/install_git_hooks.sh`（100644 ⇒ git **静默跳过**闸门）。
 
 ---
 
