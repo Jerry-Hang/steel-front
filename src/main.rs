@@ -226,6 +226,159 @@ fn env_truthy(name: &str) -> bool {
 fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|s| s.parse::<f32>().ok())
 }
+
+/// 事件循环后端选择（只有 Linux 有两种 WSI 后端，其它平台恒为 `Auto`）。
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendChoice {
+    /// 不强制：winit 自己在有 `WAYLAND_DISPLAY` 时选 Wayland，否则选 X11。
+    Auto,
+    /// 经 `EventLoopBuilderExtX11::with_x11()` 强制 X11 / XWayland。
+    X11,
+}
+
+/// `RV3D_BACKEND` + WSL 自动判定 → 后端选择（纯函数，可单测）。
+///
+/// 优先级：**显式环境变量 > WSL 自动判定 > Auto**。
+///
+/// - `x11` / `xwayland` ⇒ `X11`，**与是不是 WSL 无关** —— 这正是修掉的那条：
+///   旧代码把「强制 X11」写死在 `is_wsl` 分支里，原生 Linux 用户**没有任何手段**
+///   退回 XWayland（winit 0.30 已删 `WINIT_UNIX_BACKEND`）。
+/// - `wayland` ⇒ `Auto`。winit 0.30 没有「强制 Wayland」的入口，
+///   而 `Auto` 在有 `WAYLAND_DISPLAY` 时就是 Wayland ⇒ **语义等价**，
+///   且不承诺一个做不到的事（写成 `Wayland` 变体也只能是空操作）。
+/// - 其它 / 未设 ⇒ `auto_x11`（WSL **且** 有 Wayland 会话）为真时 `X11`，否则 `Auto`。
+///
+/// 判据 = `backend_choice_x11_is_reachable_on_native_linux`：**非 WSL 的原生 Linux
+/// 也必须能选到 X11**（旧逻辑唯一做不到、而用户最需要的那一件事）。
+#[cfg(target_os = "linux")]
+fn backend_choice(env: Option<&str>, auto_x11: bool) -> BackendChoice {
+    match env.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("x11") | Some("xwayland") => BackendChoice::X11,
+        Some("wayland") => BackendChoice::Auto,
+        _ => {
+            if auto_x11 {
+                BackendChoice::X11
+            } else {
+                BackendChoice::Auto
+            }
+        }
+    }
+}
+
+/// 是否允许抓取光标。`RV3D_NO_CAPTURE=1` ⇒ **永不允许**。
+///
+/// 为什么需要它（2026-09-28，Linux 适配）：Windows 侧的「鼠标安全协议」（用户 2026-09-03
+/// 明确要求）靠的是 **`PostMessage` 投键 + 永不抢前台** —— 于是自动化能在**不抓光标**的
+/// 前提下驱动游戏。Linux **没有** PostMessage 这条路，而本引擎在 `Playing` 态**一定会**
+/// 抓光标（`Locked` 或 `Confined`）：自动化跑一局 = 用户的指针被锁进游戏窗口。
+/// 抓取会随进程退出而释放，但"跑测试期间桌面指针被夺走"本身就不该是自动化的副作用。
+///
+/// ⇒ Linux 侧的正确对偶不是"换个注入方式"，而是**把捕获关掉**：
+/// `RV3D_NO_CAPTURE=1` 时 `capture_wanted` 恒假，无论焦点/状态如何。
+/// 冒烟与性能脚本一律带上它 —— 这样"自动化不会碰用户输入"就成了**代码保证**，
+/// 而不是靠调用方自己记得别抢焦点。
+///
+/// ⚠️ 它只关**抓取**，不关视角输入：非捕获态本来就有左键拖拽转视角那条路
+/// （`dragging`），所以关掉捕获之后游戏依然可玩、可被脚本驱动。
+fn no_capture() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_truthy("RV3D_NO_CAPTURE"))
+}
+
+/// 捕获策略（纯函数，可单测）：`allowed && focused && Playing && 无面板`。
+///
+/// 抽出来的理由与 `cursor_grab_plan` 相同 —— 这条策略选错的后果是**静默**的：
+/// 漏掉 `allowed` 就是关不掉的指针锁定，漏掉 `esc_menu_open` 就是菜单里鼠标被锁死
+/// （只能 Alt+F4）。写成纯函数才能把这两个方向都钉进测试。
+fn capture_wanted(
+    focused: bool,
+    playing: bool,
+    settings_open: bool,
+    esc_menu_open: bool,
+    allowed: bool,
+) -> bool {
+    allowed && focused && playing && !settings_open && !esc_menu_open
+}
+
+/// 锁定态「相对增量到底有没有来」的判定结果（纯函数 `lock_observation` 的值域）。
+///
+/// 为什么需要它（2026-09-28，Linux 适配 —— 这是本仓在 Windows 上踩过两次的**同一个**
+/// 形态第三次出现）：`set_cursor_grab(Locked)` 返回 `Ok` **不等于锁生效了**。
+/// - **Wayland**：winit 的 `apply_on_pointer` 只对**已经 `wl_pointer::enter` 过**的指针
+///   生效 —— 指针还没进窗口时它**什么都没做也返回 `Ok`**；而且 winit 完全忽略合成器的
+///   确认事件（`ZwpLockedPointerV1` 的 Dispatch 函数体是空的）⇒ 应用层**无法**从
+///   返回值或事件里知道锁有没有生效。
+/// - 而 Wayland 下 `DeviceEvent::MouseMotion` 的唯一来源是 `zwp_relative_pointer_v1`，
+///   它**只在 `lock_pointer` 里一起创建** ⇒ **没锁 = 零 raw 事件 = 视角彻底不动**。
+/// - 绝对位置那条路在 Wayland 上也不通：`set_cursor_position` 只在已 `Locked` 时成功
+///   ⇒ `Confined` 下指针撞到窗口边就再也转不动。**所以不能"降级"了事**，
+///   必须让这个失败**可见**（症状与"鼠标坏了"完全一样，用户无从判断）。
+///
+/// ⇒ 唯一可信的判据是**行为证据**：锁定之后真的收到过相对增量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockObservation {
+    /// 还在观察窗内、且尚未收到增量 —— 结论未到，什么都别做
+    Pending,
+    /// 收到过相对增量 ⇒ 锁**确实生效**（Wayland 下这是唯一可信的证据）
+    Confirmed,
+    /// 观察窗已过、一个增量都没有 ⇒ 锁很可能是**假成功**
+    NoMotion,
+}
+
+/// 观察窗长度（毫秒）。取值理由：短了会把"用户刚锁定还没来得及动鼠标"误判成假成功；
+/// 长了用户要看着一个不动的视角干等。1.5s 够人手自然移动一次，也不至于让人以为卡死。
+const LOCK_OBSERVE_MS: u128 = 1500;
+
+/// 锁定态观察判定（纯函数，可单测）。
+///
+/// **增量优先**：只要收到过只要有 1 个相对增量就立刻 `Confirmed`，不必等满观察窗 ——
+/// 那是最强的正面证据，没有理由再等。
+fn lock_observation(elapsed_ms: u128, motion_delta: u64, window_ms: u128) -> LockObservation {
+    if motion_delta > 0 {
+        return LockObservation::Confirmed;
+    }
+    if elapsed_ms >= window_ms {
+        LockObservation::NoMotion
+    } else {
+        LockObservation::Pending
+    }
+}
+
+/// 把「请求的分辨率」夹进显示器物理尺寸，返回窗口要请求的**物理**像素尺寸。
+///
+/// 🔴 **2026-09-28 修（Linux 适配）**：调用方原来写的是
+/// `.with_inner_size(LogicalSize::new(w as f64 / 1.5, h as f64 / 1.5))` ——
+/// 那个 `/1.5` 是 Windows 那台机器 `scale_factor = 1.5` 的**硬编码补偿**。
+/// 它带来两个后果，都只在非 Windows 上暴露：
+///
+/// 1. **启动尺寸与设置里改出来的尺寸不一致**：配置 2560x1600、scale=1.0 的 Linux 上
+///    窗口实际是 1706x1066；而设置面板里改分辨率走的是 `PhysicalSize`（见 `main.rs`
+///    里应用新分辨率那条路）⇒ 同一个分辨率有两套语义。Wayland 下更糟：窗口尺寸直接
+///    决定交换链尺寸（`currentExtent` 未定义，见 `Renderer::window_extent`），
+///    于是错的是**整条渲染尺寸链**，不只是窗口。
+/// 2. 尺寸被夹小了，而日志照样打印"窗口创建成功: 2560x1600" ⇒ **日志与事实不符**。
+///
+/// ⇒ 语义定死：**这里的 `w`/`h` 与 `monitor` 全是物理像素**（`RESOLUTIONS` 与配置项
+/// 本来就是物理分辨率，`monitor.size()` 也是物理），所以一律用 `PhysicalSize`，
+/// **不再有任何魔法缩放系数**。判据 = `window_request_is_physical_and_clamped`
+/// （它同时钉住"不许再乘除任何常数"与"超屏必须等比缩"）。
+///
+/// `monitor = None`（Wayland 下 `primary_monitor()` 可能为 None）时不做夹取 ——
+/// 与其按一个猜出来的尺寸缩，不如如实请求，让合成器去处理。
+fn window_physical_request(w: u32, h: u32, monitor: Option<(u32, u32)>) -> (u32, u32) {
+    // 下限与 winit/合成器能接受的最小窗口一致，避免请求 0 尺寸
+    let (mut w, mut h) = (w.max(320), h.max(200));
+    if let Some((mw, mh)) = monitor {
+        if w > mw || h > mh {
+            let scale = (mw as f32 / w as f32).min(mh as f32 / h as f32);
+            w = ((w as f32 * scale) as u32).max(320);
+            h = ((h as f32 * scale) as u32).max(200);
+        }
+    }
+    (w, h)
+}
+
 /// 单帧预算（纳秒；`MAX_FPS = 0` 表示不设上限，预算为 0，不做 sleep/spin 节流）。
 ///
 /// 写成 `match` 而不是 `if MAX_FPS > 0`：后者在 `MAX_FPS` 当前取值 0 下，比较的
@@ -633,6 +786,18 @@ struct GameApp {
     /// false = 回退 Confined/无 grab，走绝对位置路径（WSLg/Xwayland 实测：
     /// 真实物理鼠标只产生 CursorMoved 绝对位置，不产生 XI_RawMotion raw 事件）
     cursor_locked: bool,
+    /// 锁定态观察窗：`(进入锁定态的时刻, 当时的 cursor_evt_count)`。
+    /// `None` = 不在观察中（非锁定态，或已有结论）。判定见 `LockObservation`。
+    ///
+    /// 为什么需要它：`set_cursor_grab(Locked)` 的 `Ok` **不等于锁生效**（Wayland 下
+    /// 指针尚未 enter 时它什么都没做也返回 `Ok`，且 winit 忽略合成器的确认事件），
+    /// 而失败的症状与"鼠标坏了"完全一样（零 raw 事件 ⇒ 视角不动）。
+    /// 唯一可信的判据是**行为证据**，所以必须真的去数一数增量有没有来。
+    lock_observe: Option<(Instant, u64)>,
+    /// 假成功时是否已补抓过一次（只补一次，见 `sync_cursor` 的 NoMotion 分支）
+    lock_retried: bool,
+    /// 假成功告警是否已发过（一次性，不刷屏）
+    lock_fake_warned: bool,
     /// 绝对位置路径：是否已收到首个真实指针位置基准（捕获瞬间未知指针位置，
     /// 首个事件只作基准，避免把"捕获前指针到中心差量"当视角位移）
     abs_baseline_valid: bool,
@@ -782,6 +947,9 @@ impl GameApp {
             fire_edge: false,
             cursor_captured: false,
             cursor_locked: false,
+            lock_observe: None,
+            lock_retried: false,
+            lock_fake_warned: false,
             abs_baseline_valid: false,
             // 必须从 false 起步，由 WindowEvent::Focused 驱动。
             // 写成 true 会让 sync_cursor 的 `want` 从第 1 帧就成立：
@@ -1970,10 +2138,13 @@ impl GameApp {
         let Some(window) = &self.window else {
             return;
         };
-        let want = self.focused
-            && self.game.state() == GameState::Playing
-            && !self.game.settings_open()
-            && !self.game.hud.esc_menu_open;
+        let want = capture_wanted(
+            self.focused,
+            self.game.state() == GameState::Playing,
+            self.game.settings_open(),
+            self.game.hud.esc_menu_open,
+            !no_capture(),
+        );
         // ESC 菜单/设置面板打开或失焦时释放鼠标（2026-08-15：菜单需鼠标点选）
         if want && !self.cursor_captured {
             // Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
@@ -2027,6 +2198,14 @@ impl GameApp {
             self.cursor_captured = grabbed || locked;
             self.cursor_locked = locked;
             self.abs_baseline_valid = false;
+            // 开始观察这次的锁到底有没有生效（见 `LockObservation`）。
+            // 基准取**当前的** `cursor_evt_count`，所以这个窗口内来一个增量就算确认。
+            if locked {
+                self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
+                self.lock_retried = false;
+            } else {
+                self.lock_observe = None;
+            }
             if !locked {
                 // WSLg/Xwayland 回退：绝对位置路径。不在捕获瞬间回中——
                 // 指针真实位置未知，等首个 CursorMoved 作基准（abs_baseline_valid）。
@@ -2061,8 +2240,59 @@ impl GameApp {
             self.cursor_locked = false;
             self.abs_baseline_valid = false;
             self.recenter_pending_until = None;
+            self.lock_observe = None;
             self.camera.set_rotation_active(false);
             log::info!("input: cursor released");
+        }
+
+        // ---- 锁定态观察：锁到底有没有真的生效（见 `LockObservation`）----
+        //
+        // 这一段是**诊断 + 一次补救**，不是降级：Wayland 下不能退回 Confined ——
+        // `set_cursor_position` 只在已 Locked 时才成功，Confined 下指针撞到窗口边
+        // 就再也转不动（比"完全不转"更难排查）。所以对 NoMotion 的处理是
+        // **补抓一次**（指针此时多半已经 enter 了，而 `apply_on_pointer` 只对
+        // 已 enter 的指针生效 ⇒ 这次多半能成），再不行就**给出明确的提示**。
+        if self.cursor_captured && self.cursor_locked {
+            if let Some((started, motion_at_start)) = self.lock_observe {
+                let delta = self.cursor_evt_count.saturating_sub(motion_at_start);
+                match lock_observation(started.elapsed().as_millis(), delta, LOCK_OBSERVE_MS) {
+                    LockObservation::Pending => {}
+                    LockObservation::Confirmed => {
+                        // 锁确实生效 —— 收工，之后不再观察（也不再补抓）
+                        self.lock_observe = None;
+                    }
+                    LockObservation::NoMotion => {
+                        if !self.lock_retried {
+                            // 指针很可能在抓取之后才进入窗口 ⇒ 补抓一次
+                            self.lock_retried = true;
+                            let ok = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
+                            self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
+                            log::warn!(
+                                "input: 锁定后 {}ms 内一个相对增量都没收到 —— 锁可能没生效，\
+                                 已补抓一次（set_cursor_grab(Locked) -> {}）。\
+                                 原因：winit 在指针尚未 enter 窗口时调 lock_pointer 会\
+                                 **什么都没做却返回 Ok**，且它忽略合成器的确认事件，\
+                                 所以失败无法从返回值看出来。",
+                                LOCK_OBSERVE_MS,
+                                if ok { "Ok" } else { "Err" }
+                            );
+                        } else if !self.lock_fake_warned {
+                            self.lock_fake_warned = true;
+                            self.lock_observe = None;
+                            log::error!(
+                                "input: 🔴 补抓之后仍然零相对增量 ⇒ 本会话的鼠标视角**不会工作**\
+                                 （锁定是假成功）。这不是鼠标故障，是后端差异：Wayland 下\
+                                 Locked 的失败是静默的，且 Confined 也无法回转指针。\
+                                 ⇒ 请用 RV3D_BACKEND=x11 走 Xwayland 重开一局 —— \
+                                 那里 set_cursor_grab(Locked) 会如实返回 NotSupported，\
+                                 引擎会自动落到 Confined + 绝对位置路径，而 X11 的\
+                                 set_cursor_position 走 XWarpPointer 是真的生效的。\
+                                 （本提示只发一次；`cam:` 日志里的 evt 计数可继续观测。）"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2898,38 +3128,35 @@ impl ApplicationHandler for GameApp {
         }
 
         // ---- 创建窗口（尺寸取 HUD 当前分辨率：配置显式值或按显示器选定的默认值）----
-        let (mut w, mut h) = self.game.hud.resolution();
-        // 2026-08-15：窗口尺寸 clamp 到主显示器可用区（防止配置分辨率超屏 → 内容只显示左上角）。
-        // 主显示器物理尺寸经 winit monitor.size()（物理像素）；DPI 缩放下逻辑 ≠ 物理，
-        // 但 PhysicalSize 请求按物理像素处理，超屏窗口会被系统裁切。
-        // 2026-08-15：窗口尺寸 clamp 到主显示器物理尺寸（防止超屏 → 内容只显示左上角）。
-        // 请求分辨率（如 2560x1600）等于显示器物理大小时窗口为全屏无边框语义，
-        // 但 Windows 任务栏会遮挡底部——此处仅防止"窗口 > 屏幕"的裁剪型错位。
-        if let Some(monitor) = event_loop.primary_monitor() {
-            let msize = monitor.size();
-            if w > msize.width || h > msize.height {
-                log::warn!(
-                    "窗口尺寸 {}x{} 超过主显示器 {}x{}，自动缩放适配",
-                    w, h, msize.width, msize.height
-                );
-                let scale = (msize.width as f32 / w.max(1) as f32)
-                    .min(msize.height as f32 / h.max(1) as f32);
-                w = (w as f32 * scale).max(320.0) as u32;
-                h = (h as f32 * scale).max(200.0) as u32;
-            }
+        let (w, h) = self.game.hud.resolution();
+        // 夹进显示器物理尺寸（防超屏 → 内容只显示左上角），并**保持物理像素语义**
+        // —— 这里绝不能再出现 `/1.5` 那类按某台机器标定出来的缩放系数，理由见
+        // `window_physical_request` 的文档（判据 `window_request_is_physical_and_clamped`）。
+        // Wayland 下 `primary_monitor()` 恒为 None（没有主显示器概念）⇒ 不夹取；
+        // 这不是缺陷，是这个后端的语义（同文件 `resumed` 上面的默认分辨率选择已同样处理）。
+        let monitor_size = event_loop.primary_monitor().map(|m| {
+            let s = m.size();
+            (s.width, s.height)
+        });
+        let (w, h) = window_physical_request(w, h, monitor_size);
+        if (w, h) != self.game.hud.resolution() {
+            log::warn!(
+                "请求分辨率 {}x{} 超过显示器 {:?}，已等比缩到 {}x{}",
+                self.game.hud.resolution().0,
+                self.game.hud.resolution().1,
+                monitor_size,
+                w,
+                h
+            );
         }
-        // 2026-08-15：无边框窗口——请求分辨率等于显示器物理尺寸时窗口恰好铺满屏幕，
-        // 无标题栏/边框挤压（否则窗口比屏幕略大 → DWM 裁剪 → 内容偏左上角）。
-        // 2026-08-15：窗口尺寸用 LogicalSize（winit 按 scale_factor 自动转物理）——
-        // 若直接给 PhysicalSize，DPI 缩放下 winit 可能按逻辑解释导致窗口/swapchain 尺寸错位
-        // （表现为画面偏左上角/缩放不正确）。无边框 + 逻辑尺寸 = 显示器比例一致。
-        // 2026-08-15：窗口尺寸用 LogicalSize（winit 按 scale_factor 自动转物理）——
-        // 若直接给 PhysicalSize，DPI 缩放下 winit 可能按逻辑解释导致窗口/swapchain 尺寸错位
-        // （表现为画面偏左上角/缩放不正确）。无边框 + 逻辑尺寸 = 显示器比例一致。
-        // 窗口位置显式 (0,0)：默认位置可能偏移，2560x1600 窗口超出屏幕右下 → 画面偏左上。
+        // 无边框窗口：请求分辨率等于显示器物理尺寸时窗口恰好铺满屏幕，无标题栏/边框挤压
+        // （否则窗口比屏幕略大 → 合成器裁切 → 内容偏左上角）。
+        // 🔴 尺寸一律 `PhysicalSize`：`w`/`h` 与 `monitor.size()` **都是物理像素**，
+        // 用 `LogicalSize` 等于让 winit 再乘一次 scale_factor（Windows 那台 scale=1.5 时
+        // 就是靠手写的 `/1.5` 抵消的 —— 换个平台必然错）。
         let winit_attr = Window::default_attributes()
             .with_title(window::WINDOW_TITLE)
-            .with_inner_size(winit::dpi::LogicalSize::new(w as f64 / 1.5, h as f64 / 1.5))
+            .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
             .with_position(winit::dpi::PhysicalPosition::new(0, 0))
             .with_decorations(false);
 
@@ -3792,6 +4019,11 @@ impl ApplicationHandler for GameApp {
                     .hud
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
                 if let Some(renderer) = &mut self.renderer {
+                    // 🔴 必须**先**把新尺寸告诉渲染器再重建：Wayland 下
+                    // `surface.currentExtent` 是未定义的，交换链尺寸只能来自这个字段
+                    // （见 `Renderer::window_extent` / `swapchain_extent_choice`）。
+                    // 顺序反了 = 重建出来的还是旧尺寸，而且**不报错**。
+                    renderer.set_window_extent(new_size.width, new_size.height);
                     // 降级/设备丢失时不重试（判据 = `swapchain_recovery_allowed`）
                     if renderer.swapchain_recovery_allowed() {
                         if let Err(e) = renderer.recreate_swapchain() {
@@ -3908,31 +4140,59 @@ fn main() {
     cpu.log_summary();
     cpu.pin_main_thread();
 
-    // WSLg（WSL2 + Wayland/Weston）的指针约束/相对指针协议支持不完整：
-    // 捕获后光标不隐藏、视角不动，且右键拖动会在原生层静默崩溃（无 panic 日志）。
-    // Xwayland 提供完整 XInput2 raw motion（本项目视角输入依赖，见 device_event），
-    // 因此 WSL + Wayland 会话下强制 X11 后端。
-    // 注意：winit 0.29+ 已删除 WINIT_UNIX_BACKEND 环境变量（v0.29 changelog），
-    // 必须经 EventLoopBuilderExtX11::with_x11() 设置 forced_backend 才真正生效。
+    // ---- 后端选择：X11 / Wayland ----
+    //
+    // 为什么这个开关是**必需**的（2026-09-28，Linux 适配）：
+    // WSLg（WSL2 + Wayland/Weston）的指针约束/相对指针协议支持不完整 —— 捕获后光标不隐藏、
+    // 视角不动，且右键拖动会在原生层静默崩溃（无 panic 日志）。所以旧代码在 WSL 下强制 X11。
+    // 但那条判据（`/proc/version` 含 "microsoft"）**只覆盖 WSL**，原生 Linux 会话走不到，
+    // 于是用户**没有任何手段退回 XWayland** —— 而 winit 0.30 已经删掉了
+    // `WINIT_UNIX_BACKEND` 环境变量（v0.29 changelog），不重建事件循环就没有第二条路。
+    //
+    // 为什么原生 Linux 更需要这个退路（不是"以防万一"，是**已知的功能差异**）：
+    // - **X11/XWayland**：`set_cursor_grab(Locked)` **恒返回 `Err(NotSupported)`**
+    //   （winit `x11/window.rs`），于是 `cursor_grab_plan` 退到 `Confined` + 绝对位置路径；
+    //   而 X11 的 `set_cursor_position` 走 `XWarpPointer` **真的生效**，
+    //   所以「回中 + 用 `CursorMoved` 增量算视角」这条路是**自洽可用的**。
+    // - **Wayland**：`Locked` 返回 `Ok`，但 winit 的 `apply_on_pointer` **只对已 enter 的指针
+    //   生效** —— 指针还没进窗口时它**什么都没做也返回 Ok**；而且 winit 完全忽略合成器的
+    //   确认事件（`ZwpLockedPointerV1` 的 Dispatch 函数体是空的）⇒ 应用层**无法感知**锁
+    //   到底有没有生效。绝对位置那条路在 Wayland 上也不通：`set_cursor_position` 只在
+    //   已 `Locked` 时才成功 ⇒ **Confined 下指针撞到窗口边就再也转不动**。
+    //   ⇒ Wayland 下唯一可用的是 Locked + 相对指针，而它的失败**是静默的**。
+    //
+    // ⇒ 语义：`RV3D_BACKEND` = `x11` / `wayland` / 未设（自动：WSL 下选 x11，其余不强制）。
+    // 判据 = `backend_choice_x11_is_reachable_on_native_linux`（它钉住"非 WSL 的原生 Linux
+    // 也必须能选到 x11"，而那正是旧逻辑唯一做不到的事）。
     #[cfg(target_os = "linux")]
-    let force_x11 = {
+    let backend_choice = {
         let is_wsl = std::fs::read_to_string("/proc/version")
             .map(|v| v.to_ascii_lowercase().contains("microsoft"))
             .unwrap_or(false);
-        if is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            log::info!(
-                "input: WSLg Wayland 指针支持不完整，强制 X11 后端（Xwayland + XInput2 raw motion）"
-            );
-            true
-        } else {
-            false
+        // WSLg 的自动判定保留旧条件（WSL **且** 有 Wayland 会话）：纯 X11 的 WSL 本来就走 X11
+        let auto_x11 = is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let explicit = std::env::var("RV3D_BACKEND").ok();
+        let choice = backend_choice(explicit.as_deref(), auto_x11);
+        match choice {
+            BackendChoice::X11 => log::info!(
+                "input: 强制 X11 后端（Xwayland + XInput2 raw motion）—— 来源：{}",
+                if explicit.is_some() {
+                    "RV3D_BACKEND"
+                } else {
+                    "WSLg 自动判定"
+                }
+            ),
+            BackendChoice::Auto => {
+                log::info!("input: 后端不强制（RV3D_BACKEND 未设或 =wayland），交给 winit 自动选择")
+            }
         }
+        choice
     };
-    // 创建事件循环（WSLg 下强制 X11，走 Xwayland + XInput2 raw motion）
+    // 创建事件循环（BackendChoice::X11 时经 with_x11() 强制 Xwayland）
     let event_loop = {
         let mut builder = EventLoop::builder();
         #[cfg(target_os = "linux")]
-        if force_x11 {
+        if backend_choice == BackendChoice::X11 {
             use winit::platform::x11::EventLoopBuilderExtX11;
             builder.with_x11();
         }
@@ -4084,6 +4344,130 @@ mod tests {
         assert_eq!(effective_frame_cap(30.0, 120.0, false), 30.0);
         // 非法的负值按"不设限"处理，绝不允许变成负 fps
         assert_eq!(effective_frame_cap(-5.0, -1.0, false), 0.0);
+    }
+
+    /// 🔴 **Linux 适配判据**：窗口请求尺寸必须是**物理像素**，且超屏时等比缩。
+    ///
+    /// 修的是 `LogicalSize::new(w / 1.5, h / 1.5)` —— 那个 1.5 是 Windows 那台机器
+    /// `scale_factor = 1.5` 的硬编码补偿，在 scale=1.0 的 Linux 上把 2560x1600
+    /// 变成 1706x1066，而 Wayland 下窗口尺寸直接决定交换链尺寸 ⇒ 整条渲染尺寸链都错。
+    ///
+    /// 三条断言各自对应一个会被写错的方向（都不是恒真断言）：
+    /// 1. **不缩放**：请求值原样返回 —— 任何乘除常数都会让这条红；
+    /// 2. **超屏等比缩**：且比例保持（缩完仍宽高比一致），不是只夹一边；
+    /// 3. **下限**：0 或极小值不许原样透出去（合成器会拒绝 0 尺寸窗口）。
+    #[test]
+    fn window_request_is_physical_and_clamped() {
+        // 1) 显式分辨率（物理）原样透传 —— 显示器足够大时一个像素都不许改
+        assert_eq!(window_physical_request(2560, 1600, Some((2560, 1600))), (2560, 1600));
+        assert_eq!(window_physical_request(1920, 1080, Some((3840, 2160))), (1920, 1080));
+        // 2) 超屏等比缩：3840x2160 请求放进 1920x1080 => 恰好一半，宽高比不变
+        let (w, h) = window_physical_request(3840, 2160, Some((1920, 1080)));
+        assert_eq!((w, h), (1920, 1080));
+        // 只超高（不超宽）时也要缩，且按**较小的**那个比例缩（否则会溢出另一边）
+        let (w, h) = window_physical_request(1920, 4000, Some((1920, 1080)));
+        assert!(w <= 1920 && h <= 1080, "缩完不许仍溢出：{w}x{h}");
+        assert!(w > 0 && h > 0);
+        // 3) 拿不到显示器（Wayland 的 primary_monitor() 恒 None）=> 如实请求，不猜
+        assert_eq!(window_physical_request(2560, 1600, None), (2560, 1600));
+        // 4) 下限：0 与极小值不许透传
+        assert_eq!(window_physical_request(0, 0, None), (320, 200));
+        assert_eq!(window_physical_request(100, 50, None), (320, 200));
+    }
+
+    /// 🔴 **Linux 适配判据**：`RV3D_BACKEND=x11` 在**原生 Linux** 上必须能生效。
+    ///
+    /// 旧代码的判据是 `is_wsl && WAYLAND_DISPLAY.is_some()` ⇒ 原生 Arch/KDE Wayland 上
+    /// **恒为 false**，而 winit 0.30 已删除 `WINIT_UNIX_BACKEND` ⇒ 用户**没有**任何
+    /// 退回 XWayland 的手段。这不是"以防万一"的开关：Wayland 下 `Locked` 抓取的失败
+    /// 是**静默**的（winit 忽略合成器的确认事件），XWayland 是唯一可验证的退路。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. **非 WSL 也必须能选到 x11**（这一条就是整个修复）；
+    /// 2. 显式变量**压过** WSL 自动判定（两个方向都测：wsl 上选 wayland、非 wsl 上选 x11）；
+    /// 3. 大小写/空白不敏感（`X11`、` xwayland ` 都要认）；
+    /// 4. 未设时不改变旧行为（WSL 自动选 x11；原生 Linux 保持 Auto）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backend_choice_x11_is_reachable_on_native_linux() {
+        // 1) 就是这个修复：非 WSL 的原生 Linux + 显式 x11
+        assert_eq!(backend_choice(Some("x11"), false), BackendChoice::X11);
+        // 2) 显式变量压过自动判定（两个方向）
+        assert_eq!(backend_choice(Some("wayland"), true), BackendChoice::Auto);
+        assert_eq!(backend_choice(Some("x11"), true), BackendChoice::X11);
+        // 3) 大小写与空白
+        assert_eq!(backend_choice(Some("X11"), false), BackendChoice::X11);
+        assert_eq!(backend_choice(Some(" xwayland "), false), BackendChoice::X11);
+        assert_eq!(backend_choice(Some("Wayland"), true), BackendChoice::Auto);
+        // 4) 未设 / 不认识的取值 ⇒ 旧行为不变
+        assert_eq!(backend_choice(None, true), BackendChoice::X11, "WSL 自动判定保持不变");
+        assert_eq!(backend_choice(None, false), BackendChoice::Auto, "原生 Linux 默认不强制");
+        assert_eq!(backend_choice(Some("nonsense"), false), BackendChoice::Auto);
+    }
+
+    /// 🔴 **Linux 适配判据**：锁定态的「假成功」必须能被**行为证据**判出来。
+    ///
+    /// `set_cursor_grab(Locked)` 返回 `Ok` 不代表锁生效（Wayland 下指针尚未 enter 时
+    /// winit 什么都没做也返回 `Ok`，且它忽略合成器的确认事件）。失败症状与"鼠标坏了"
+    /// 一模一样（零 raw 事件 ⇒ 视角不动），所以**唯一**可信的判据是"锁定之后真的
+    /// 收到过相对增量"。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. 观察窗内没增量 ⇒ `Pending`（**不许**提前下结论 —— 用户可能只是还没动鼠标，
+    ///    这一条挂了就会把正常玩家误判成假成功并去补抓，反而干扰他）；
+    /// 2. 增量**优先于时间**：就算第 1ms 就来，也立刻 `Confirmed`（最强的正面证据，
+    ///    没有理由再等满观察窗）；
+    /// 3. 到点仍为零 ⇒ `NoMotion`（这才是要报警的那条）；
+    /// 4. 边界：恰好等于窗口长度算到点（`>=` 而不是 `>` —— 写成 `>` 会让判定
+    ///    永远晚一帧，在 165fps 下无感，但语义上"满窗"就该有结论）。
+    #[test]
+    fn lock_observation_needs_evidence_not_just_ok() {
+        const W: u128 = 1500;
+        // 1) 窗口内、无增量 ⇒ 不许下结论
+        assert_eq!(lock_observation(0, 0, W), LockObservation::Pending);
+        assert_eq!(lock_observation(W - 1, 0, W), LockObservation::Pending);
+        // 2) 增量优先于时间：第 1ms 就来也立刻确认
+        assert_eq!(lock_observation(1, 1, W), LockObservation::Confirmed);
+        assert_eq!(lock_observation(0, 7, W), LockObservation::Confirmed);
+        // 3) 到点仍为零 ⇒ 假成功
+        assert_eq!(lock_observation(W, 0, W), LockObservation::NoMotion);
+        // 4) 边界：恰好满窗算到点；超时很久也仍是 NoMotion（不是 Confirmed）
+        assert_eq!(lock_observation(u128::MAX, 0, W), LockObservation::NoMotion);
+        // 反向保险：确认过之后再多的零增量也不该翻回 NoMotion（delta 是单调的）
+        assert_eq!(lock_observation(u128::MAX, 3, W), LockObservation::Confirmed);
+    }
+
+    /// 观察窗长度不许是 0 —— 那会让判定在第一帧就报假成功，把"还没动鼠标"当成故障。
+    #[test]
+    fn lock_observe_window_is_not_degenerate() {
+        assert!(LOCK_OBSERVE_MS >= 200, "太短会把正常玩家误判成假成功");
+        assert!(LOCK_OBSERVE_MS <= 5000, "太长则用户看着不动的视角干等");
+    }
+
+    /// 🔴 **Linux 适配判据**：`RV3D_NO_CAPTURE=1` 必须能**无条件**关掉光标抓取。
+    ///
+    /// 为什么这条在 Linux 上是必需品：Windows 侧的鼠标安全协议靠 `PostMessage`
+    /// 投键 + 不抢前台（用户 2026-09-03 的要求），于是自动化不必抓光标；Linux 没有
+    /// 这条路，而引擎在 `Playing` 态一定会抓（`Locked` 或 `Confined`）⇒ 跑一局冒烟
+    /// 就等于把用户的指针锁进游戏窗口。把"关掉捕获"做成一条判据，自动化不碰用户
+    /// 输入才是**代码保证**，而不是靠调用方自觉。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. `allowed=false` ⇒ 恒假（**这一条就是那个开关**；漏掉它 = 开关无效）；
+    /// 2. 四个条件的**每一个**单独为假都要能关掉捕获 —— 特别是 `esc_menu_open`：
+    ///    漏掉它就是"菜单里鼠标被锁死，只能 Alt+F4"（本仓 2026-08-15 修过一次）；
+    /// 3. 全真才为真（防止把 `||` 写成 `&&` 之类的反向错误）。
+    #[test]
+    fn capture_wanted_obeys_the_no_capture_switch_and_the_menu_gates() {
+        // 1) 开关优先：其它条件全真也必须是假
+        assert!(!capture_wanted(true, true, false, false, false), "RV3D_NO_CAPTURE=1 必须关掉捕获");
+        // 2) 四个条件逐个单独为假
+        assert!(!capture_wanted(false, true, false, false, true), "失焦不许抓");
+        assert!(!capture_wanted(true, false, false, false, true), "非 Playing 不许抓");
+        assert!(!capture_wanted(true, true, true, false, true), "设置面板打开不许抓");
+        assert!(!capture_wanted(true, true, false, true, true), "ESC 菜单打开不许抓");
+        // 3) 全真才抓
+        assert!(capture_wanted(true, true, false, false, true));
     }
 
     /// 🔴 判据：中继注册失败时**不许**报「已注册」（教训 46：日志不许把「没跑成」写成成功）。

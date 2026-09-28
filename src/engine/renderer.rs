@@ -675,6 +675,47 @@ fn clamp_swapchain_extent(
     }
 }
 
+/// 决定交换链到底用哪个尺寸 —— **窗口尺寸优先于那个写死的 1280x720**。
+///
+/// 🔴 **2026-09-28 修（Linux 适配，Wayland 阻断级）**：`currentExtent` 在
+/// **Wayland 下是设计上就未定义的**（Mesa 明确填 `{UINT32_MAX, UINT32_MAX}`，见
+/// `wsi_common_wayland.c::wsi_wl_surface_get_capabilities`），而在 Win32 / X11
+/// 下它**恒等于窗口尺寸** ⇒ 这条兜底分支在 Windows 上**永远走不到**，于是
+/// 「兜底 = 写死 1280x720」这个值一路漂到 Linux 才暴露，后果是三重错位：
+/// 交换链恒为 1280x720、投影用窗口尺寸、HUD 排版也用窗口尺寸 ⇒ 画面比例错乱、
+/// HUD 按窗口排版却画进 720p 视口；而 `Resized` 的重建**走的还是同一段代码**
+/// ⇒ **永远不跟随窗口**。
+///
+/// 这与 §21.23 的「PT blit 写死 2560x1600」是同一类缺陷：默认配置恰好等于那个
+/// 写死的值，于是缺陷永远被躲过去。
+///
+/// 语义（判据 `swapchain_extent_follows_the_window_when_current_extent_is_undefined`）：
+/// - `currentExtent.width != u32::MAX`（Win32 / X11）⇒ **原样返回**，
+///   与修复前逐字节一致，Windows 侧行为不变；
+/// - 未定义（Wayland）⇒ 用**调用方给的窗口物理尺寸**；
+/// - 窗口尺寸不可用（0，Wayland 首个 configure 之前）⇒ 才退到 1280x720 兜底。
+///
+/// 后两条都要夹进 `min/maxImageExtent`（`VUID-VkSwapchainCreateInfoKHR-imageExtent-01274`）。
+fn swapchain_extent_choice(
+    current: vk::Extent2D,
+    window: vk::Extent2D,
+    min: vk::Extent2D,
+    max: vk::Extent2D,
+) -> vk::Extent2D {
+    if current.width != u32::MAX {
+        return current;
+    }
+    let fallback = if window.width > 0 && window.height > 0 {
+        window
+    } else {
+        vk::Extent2D {
+            width: 1280,
+            height: 720,
+        }
+    };
+    clamp_swapchain_extent(fallback, min, max)
+}
+
 /// 交换链重建失败后**多久才允许再试一次**（秒）。见 `should_retry_swapchain`。
 const RECREATE_RETRY_MIN_SECS: f32 = 1.0;
 
@@ -1174,6 +1215,14 @@ pub struct Renderer {
     swapchain_images: Vec<vk::Image>,
     swapchain_format: vk::Format,
     swapchain_extent: vk::Extent2D,
+    /// **窗口的物理尺寸**（`Window::inner_size()`），由 `new()` 播种、`Resized` 更新。
+    ///
+    /// 为什么需要它（2026-09-28，Linux 适配）：Wayland 下
+    /// `VkSurfaceCapabilitiesKHR::currentExtent` 是**未定义**的（`UINT32_MAX`），
+    /// 交换链尺寸必须由应用自己按窗口尺寸算 —— 没有这个字段就只能写死一个常数，
+    /// 结果就是「交换链恒 1280x720、永远不跟随窗口」（见 `swapchain_extent_choice`）。
+    /// 这个字段就是那条路唯一缺的输入。
+    window_extent: vk::Extent2D,
     swapchain_image_views: Vec<vk::ImageView>,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
@@ -2026,6 +2075,17 @@ impl Renderer {
             swapchain_images: Vec::new(),
             swapchain_format: vk::Format::UNDEFINED,
             swapchain_extent: vk::Extent2D::default(),
+            // 播种窗口物理尺寸（见字段文档：Wayland 的 currentExtent 未定义时，
+            // 这是交换链尺寸唯一的真实来源）。此刻窗口可能还没收到首个 configure，
+            // 尺寸为 0 ⇒ `swapchain_extent_choice` 会退到兜底值，
+            // 随后 `Resized` 会更新本字段并重建。
+            window_extent: {
+                let s = window.inner_size();
+                vk::Extent2D {
+                    width: s.width,
+                    height: s.height,
+                }
+            },
             swapchain_image_views: Vec::new(),
             render_pass: vk::RenderPass::null(),
             pipeline_layout: vk::PipelineLayout::null(),
@@ -2354,19 +2414,12 @@ impl Renderer {
             .copied()
             .unwrap_or(vk::PresentModeKHR::FIFO);
 
-        let extent = if surface_capabilities.current_extent.width != u32::MAX {
-            surface_capabilities.current_extent
-        } else {
-            // 兜底尺寸也要夹进 surface 的范围（判据 `swapchain_fallback_extent_is_clamped`）
-            clamp_swapchain_extent(
-                vk::Extent2D {
-                    width: 1280,
-                    height: 720,
-                },
-                surface_capabilities.min_image_extent,
-                surface_capabilities.max_image_extent,
-            )
-        };
+        let extent = swapchain_extent_choice(
+            surface_capabilities.current_extent,
+            self.window_extent,
+            surface_capabilities.min_image_extent,
+            surface_capabilities.max_image_extent,
+        );
 
         let image_count = {
             let mut count = surface_capabilities.min_image_count + 1;
@@ -12585,6 +12638,18 @@ impl Renderer {
         )
     }
 
+    /// 更新「窗口物理尺寸」（`Window::inner_size()`）。**必须在 `recreate_swapchain()`
+    /// 之前调用**，否则 Wayland 下重建出来的交换链还是上一次的尺寸（`currentExtent`
+    /// 未定义 ⇒ 尺寸只能来自这里，见 `window_extent` 字段与 `swapchain_extent_choice`）。
+    ///
+    /// 为什么不让 `init_swapchain` 自己去问窗口：`init_swapchain` 只有 `&mut self`，
+    /// 拿不到 `Window`，而 Vulkan 的 surface 创建与窗口生命周期是分开的两件事
+    /// （见 `Renderer::new(window: &Window)`）—— 把窗口尺寸作为**显式输入**传进来，
+    /// 比让渲染器持有窗口引用更不容易出借用冲突，也让这条依赖在类型上可见。
+    pub fn set_window_extent(&mut self, width: u32, height: u32) {
+        self.window_extent = vk::Extent2D { width, height };
+    }
+
     pub fn recreate_swapchain(&mut self) -> Result<(), String> {
         self.last_recreate_attempt = Instant::now();
         let r = self.try_recreate_swapchain();
@@ -14917,9 +14982,9 @@ mod vk_failure_path_tests {
 
     use super::{
         clamp_swapchain_extent, frame_suppressed, is_device_lost_error, prop_buffer_growth_needed,
-        shadow_due, shadow_static_due, should_retry_swapchain, terrain_coarse_height,
-        terrain_height, wait_idle_failure_message, RECREATE_RETRY_MIN_SECS, TERRAIN_CELLS,
-        TERRAIN_HALF,
+        shadow_due, shadow_static_due, should_retry_swapchain, swapchain_extent_choice,
+        terrain_coarse_height, terrain_height, wait_idle_failure_message, RECREATE_RETRY_MIN_SECS,
+        TERRAIN_CELLS, TERRAIN_HALF,
     };
     use ash::vk;
 
@@ -15036,6 +15101,87 @@ mod vk_failure_path_tests {
             },
         );
         assert_eq!((e.width, e.height), (800, 600));
+    }
+
+    /// 🔴 **判据（Linux 适配）：`currentExtent` 未定义时必须用窗口尺寸，不是写死的 1280x720。**
+    ///
+    /// 背景：`VkSurfaceCapabilitiesKHR::currentExtent` 在 **Wayland 下是设计上未定义的**
+    /// （Mesa 填 `{UINT32_MAX, UINT32_MAX}`），而 Win32 / X11 下恒等于窗口尺寸
+    /// ⇒ 旧代码那条「否则用 1280x720」的分支**在 Windows 上永远走不到**，
+    /// 于是它在 Linux 上把整条渲染尺寸链钉死在 720p，且不报错。
+    ///
+    /// 四条断言各自钉住一个**会写错的方向**（都不是恒真断言）：
+    /// 1. `currentExtent` 有定义 ⇒ **原样返回**（Windows 侧行为不许被这次改动碰到）；
+    /// 2. 未定义 + 有窗口尺寸 ⇒ **返回窗口尺寸**（这才是修掉的那条）；
+    /// 3. 未定义 + 窗口尺寸为 0（Wayland 首个 configure 之前）⇒ 退到 1280x720；
+    /// 4. 前两条都必须过 `min/maxImageExtent` 这一关（否则 `imageExtent-01274`）。
+    #[test]
+    fn swapchain_extent_follows_the_window_when_current_extent_is_undefined() {
+        let undef = vk::Extent2D {
+            width: u32::MAX,
+            height: u32::MAX,
+        };
+        let wide = (
+            vk::Extent2D {
+                width: 16,
+                height: 16,
+            },
+            vk::Extent2D {
+                width: 8192,
+                height: 8192,
+            },
+        );
+        let win = vk::Extent2D {
+            width: 2560,
+            height: 1600,
+        };
+
+        // 1) 有定义 ⇒ 原样返回，**即使它和窗口尺寸不一致**（合成器说了算）
+        let e = swapchain_extent_choice(
+            vk::Extent2D {
+                width: 1920,
+                height: 1080,
+            },
+            win,
+            wide.0,
+            wide.1,
+        );
+        assert_eq!((e.width, e.height), (1920, 1080), "有定义时不许被窗口尺寸顶掉");
+
+        // 2) 未定义 ⇒ 窗口尺寸（旧代码在这条返回 1280x720）
+        let e = swapchain_extent_choice(undef, win, wide.0, wide.1);
+        assert_eq!(
+            (e.width, e.height),
+            (2560, 1600),
+            "Wayland 下交换链必须跟随窗口；返回 1280x720 就是这次修掉的缺陷"
+        );
+
+        // 3) 未定义且窗口还没尺寸 ⇒ 才退到兜底
+        let e = swapchain_extent_choice(
+            undef,
+            vk::Extent2D {
+                width: 0,
+                height: 0,
+            },
+            wide.0,
+            wide.1,
+        );
+        assert_eq!((e.width, e.height), (1280, 720));
+
+        // 4) 夹取对两条路都生效：窗口尺寸超 max ⇒ 夹回 max
+        let e = swapchain_extent_choice(
+            undef,
+            vk::Extent2D {
+                width: 16384,
+                height: 16384,
+            },
+            wide.0,
+            vk::Extent2D {
+                width: 4096,
+                height: 4096,
+            },
+        );
+        assert_eq!((e.width, e.height), (4096, 4096), "窗口尺寸也必须夹进 maxImageExtent");
     }
 
     /// 判据：阴影图**隔帧重画**的调度（纯函数）。
