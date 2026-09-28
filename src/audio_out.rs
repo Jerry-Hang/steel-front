@@ -276,11 +276,21 @@ mod alsa {
 
     /// 依次尝试的 PCM 名字（NUL 结尾的静态字节串：不过 `CString` ⇒ 没有分配，
     /// 也没有"名字里有内嵌 NUL"这条不可能发生的错误分支）。
+    ///
     /// - `default`：alsa.conf 里那条**用户可覆盖**的缺省路由，PipeWire/PulseAudio/dmix 都靠它接管，
-    ///   桌面机上一定存在（这也是"缺省设备"的语义）。
-    /// - `sysdefault`：部分最小化发行版/容器里 `default` 没被定义时的兜底。
-    /// 两个都失败才降级 —— 多试一个名字不会让任何机器变差（降级路径本身就是"静默"）。
-    const PCM_NAMES: [&[u8]; 2] = [b"default\0", b"sysdefault\0"];
+    ///   桌面机上**通常**存在 ⇒ 排第一，用户自己配的重定向优先。
+    /// - `pipewire`：PipeWire 的 ALSA 插件（`/usr/share/alsa/alsa.conf.d/50-pipewire.conf`
+    ///   定义的 `pcm.pipewire`）。
+    ///   🔴 **2026-09-28 真机跑出来才补的这一项**：本机（Arch + PipeWire）`default` 解析到
+    ///   **dmix** 并报 `snd_pcm_dmix_open: unable to open slave` ⇒ `snd_pcm_open` 返回 `-ENOENT`。
+    ///   根因是**系统侧**缺 `99-pipewire-default.conf`（那一条才会把 `!default` 指到 pipewire），
+    ///   实测 `aplay -D pipewire` 退出码 0 能出声、`aplay -D default` 失败。
+    ///   ⇒ 引擎**不能要求每个用户的 ALSA 配置都完整**，这个坑得自己兜住。
+    /// - `sysdefault`：前两个都没被定义时的兜底（最小化发行版/容器）。
+    ///
+    /// 三个都失败才降级 —— 多试一个名字不会让任何机器变差（降级本身就是静默的），
+    /// 而少试一个就会让"配置差一点的机器永远没声音"。成功时**把用的哪个名字写进日志**。
+    const PCM_NAMES: [&[u8]; 3] = [b"default\0", b"pipewire\0", b"sysdefault\0"];
 
     /// dlopen 出来的函数指针表。
     ///
@@ -501,6 +511,12 @@ mod alsa {
                 last = format!("snd_pcm_set_params 失败 {}", err_text(api, rc));
                 continue;
             }
+            // 成功即记录**用的哪个名字**：`default` / `pipewire` / `sysdefault` 三者在不同
+            // 发行版上哪个能用是不一样的（本机是 `pipewire`），不记下来下次"没声音"又要重推。
+            log::info!(
+                "audio: ALSA PCM 设备 = {}",
+                String::from_utf8_lossy(name.strip_suffix(b"\0").unwrap_or(name))
+            );
             return Ok(pcm);
         }
         Err(last)

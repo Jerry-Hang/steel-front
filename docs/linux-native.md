@@ -168,9 +168,23 @@ python3 tools/cjk_cover_check.py     # 1 秒，列出缺哪个字、在哪个文
 而**源字体未入库 ⇒ 字模表无法重建** ⇒ 唯一出路是**改写文案去用已有的字**。
 （本次移植在 `ui.rs` / `main.rs` / `audio_out.rs` 上一共踩了 4 次，共 18 个字。）
 
-### 5.4 音频 —— 见 `src/audio_out.rs` 的模块文档
+### 5.4 音频 —— Linux 已接 ALSA（`src/audio_out.rs`）
 
-Windows 走 `winmm` 的 waveOut 直接 FFI；Linux 侧的实现与降级策略见该文件。
+Windows 走 `winmm` 的 waveOut 直接 FFI；Linux 走 **`dlopen("libasound.so.2")` + 7 个 dlsym**，
+**刻意不硬链接 libasound**（没装 ALSA 的机器仍能编译运行，失败一律降级为静默并 warn 出错误码原文）。
+
+🔴 **设备名要试三个，只试 `default` 会让一部分机器永远没声音**（2026-09-28 真机跑出来才知道）：
+本机（Arch + PipeWire）`default` 会解析到 **dmix** 并报
+`snd_pcm_dmix_open: unable to open slave` ⇒ `snd_pcm_open` 返回 `-ENOENT`。
+根因在**系统侧**：缺 `99-pipewire-default.conf`（那一条才会把 `!default` 指到 pipewire），
+只有 `50-pipewire.conf`。实测 `aplay -D default` 失败、`aplay -D pipewire` **退出码 0 能出声**。
+⇒ 引擎按 `default` → `pipewire` → `sysdefault` 依次试，**并把成功的那个名字打进日志**
+（看 `audio: ALSA PCM 设备 = ...`）。
+
+**判据（真机实测）**：`audio: ALSA 打开成功 48000Hz/2ch（队列目标 170666µs ≈ 4×2048 帧）`
++ `VUID=0 panics=0`。⚠️ **尚未验证**：听感（本机没有能产生背压的设备可量部分写比例）。
+启动时出现过一次「缓冲已满，本帧 324 个样本被丢弃」的一次性告警 —— 是否只是启动瞬态、
+听感会不会断续**没有量到**，别当成已验证。若真断续，调 `queue_latency_us` 的队列长度即可。
 
 ---
 
