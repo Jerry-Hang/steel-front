@@ -227,6 +227,45 @@ fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok().and_then(|s| s.parse::<f32>().ok())
 }
 
+/// 事件循环后端选择（只有 Linux 有两种 WSI 后端，其它平台恒为 `Auto`）。
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendChoice {
+    /// 不强制：winit 自己在有 `WAYLAND_DISPLAY` 时选 Wayland，否则选 X11。
+    Auto,
+    /// 经 `EventLoopBuilderExtX11::with_x11()` 强制 X11 / XWayland。
+    X11,
+}
+
+/// `RV3D_BACKEND` + WSL 自动判定 → 后端选择（纯函数，可单测）。
+///
+/// 优先级：**显式环境变量 > WSL 自动判定 > Auto**。
+///
+/// - `x11` / `xwayland` ⇒ `X11`，**与是不是 WSL 无关** —— 这正是修掉的那条：
+///   旧代码把「强制 X11」写死在 `is_wsl` 分支里，原生 Linux 用户**没有任何手段**
+///   退回 XWayland（winit 0.30 已删 `WINIT_UNIX_BACKEND`）。
+/// - `wayland` ⇒ `Auto`。winit 0.30 没有「强制 Wayland」的入口，
+///   而 `Auto` 在有 `WAYLAND_DISPLAY` 时就是 Wayland ⇒ **语义等价**，
+///   且不承诺一个做不到的事（写成 `Wayland` 变体也只能是空操作）。
+/// - 其它 / 未设 ⇒ `auto_x11`（WSL **且** 有 Wayland 会话）为真时 `X11`，否则 `Auto`。
+///
+/// 判据 = `backend_choice_x11_is_reachable_on_native_linux`：**非 WSL 的原生 Linux
+/// 也必须能选到 X11**（旧逻辑唯一做不到、而用户最需要的那一件事）。
+#[cfg(target_os = "linux")]
+fn backend_choice(env: Option<&str>, auto_x11: bool) -> BackendChoice {
+    match env.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("x11") | Some("xwayland") => BackendChoice::X11,
+        Some("wayland") => BackendChoice::Auto,
+        _ => {
+            if auto_x11 {
+                BackendChoice::X11
+            } else {
+                BackendChoice::Auto
+            }
+        }
+    }
+}
+
 /// 把「请求的分辨率」夹进显示器物理尺寸，返回窗口要请求的**物理**像素尺寸。
 ///
 /// 🔴 **2026-09-28 修（Linux 适配）**：调用方原来写的是
@@ -3945,31 +3984,59 @@ fn main() {
     cpu.log_summary();
     cpu.pin_main_thread();
 
-    // WSLg（WSL2 + Wayland/Weston）的指针约束/相对指针协议支持不完整：
-    // 捕获后光标不隐藏、视角不动，且右键拖动会在原生层静默崩溃（无 panic 日志）。
-    // Xwayland 提供完整 XInput2 raw motion（本项目视角输入依赖，见 device_event），
-    // 因此 WSL + Wayland 会话下强制 X11 后端。
-    // 注意：winit 0.29+ 已删除 WINIT_UNIX_BACKEND 环境变量（v0.29 changelog），
-    // 必须经 EventLoopBuilderExtX11::with_x11() 设置 forced_backend 才真正生效。
+    // ---- 后端选择：X11 / Wayland ----
+    //
+    // 为什么这个开关是**必需**的（2026-09-28，Linux 适配）：
+    // WSLg（WSL2 + Wayland/Weston）的指针约束/相对指针协议支持不完整 —— 捕获后光标不隐藏、
+    // 视角不动，且右键拖动会在原生层静默崩溃（无 panic 日志）。所以旧代码在 WSL 下强制 X11。
+    // 但那条判据（`/proc/version` 含 "microsoft"）**只覆盖 WSL**，原生 Linux 会话走不到，
+    // 于是用户**没有任何手段退回 XWayland** —— 而 winit 0.30 已经删掉了
+    // `WINIT_UNIX_BACKEND` 环境变量（v0.29 changelog），不重建事件循环就没有第二条路。
+    //
+    // 为什么原生 Linux 更需要这个退路（不是"以防万一"，是**已知的功能差异**）：
+    // - **X11/XWayland**：`set_cursor_grab(Locked)` **恒返回 `Err(NotSupported)`**
+    //   （winit `x11/window.rs`），于是 `cursor_grab_plan` 退到 `Confined` + 绝对位置路径；
+    //   而 X11 的 `set_cursor_position` 走 `XWarpPointer` **真的生效**，
+    //   所以「回中 + 用 `CursorMoved` 增量算视角」这条路是**自洽可用的**。
+    // - **Wayland**：`Locked` 返回 `Ok`，但 winit 的 `apply_on_pointer` **只对已 enter 的指针
+    //   生效** —— 指针还没进窗口时它**什么都没做也返回 Ok**；而且 winit 完全忽略合成器的
+    //   确认事件（`ZwpLockedPointerV1` 的 Dispatch 函数体是空的）⇒ 应用层**无法感知**锁
+    //   到底有没有生效。绝对位置那条路在 Wayland 上也不通：`set_cursor_position` 只在
+    //   已 `Locked` 时才成功 ⇒ **Confined 下指针撞到窗口边就再也转不动**。
+    //   ⇒ Wayland 下唯一可用的是 Locked + 相对指针，而它的失败**是静默的**。
+    //
+    // ⇒ 语义：`RV3D_BACKEND` = `x11` / `wayland` / 未设（自动：WSL 下选 x11，其余不强制）。
+    // 判据 = `backend_choice_x11_is_reachable_on_native_linux`（它钉住"非 WSL 的原生 Linux
+    // 也必须能选到 x11"，而那正是旧逻辑唯一做不到的事）。
     #[cfg(target_os = "linux")]
-    let force_x11 = {
+    let backend_choice = {
         let is_wsl = std::fs::read_to_string("/proc/version")
             .map(|v| v.to_ascii_lowercase().contains("microsoft"))
             .unwrap_or(false);
-        if is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            log::info!(
-                "input: WSLg Wayland 指针支持不完整，强制 X11 后端（Xwayland + XInput2 raw motion）"
-            );
-            true
-        } else {
-            false
+        // WSLg 的自动判定保留旧条件（WSL **且** 有 Wayland 会话）：纯 X11 的 WSL 本来就走 X11
+        let auto_x11 = is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let explicit = std::env::var("RV3D_BACKEND").ok();
+        let choice = backend_choice(explicit.as_deref(), auto_x11);
+        match choice {
+            BackendChoice::X11 => log::info!(
+                "input: 强制 X11 后端（Xwayland + XInput2 raw motion）—— 来源：{}",
+                if explicit.is_some() {
+                    "RV3D_BACKEND"
+                } else {
+                    "WSLg 自动判定"
+                }
+            ),
+            BackendChoice::Auto => {
+                log::info!("input: 后端不强制（RV3D_BACKEND 未设或 =wayland），交给 winit 自动选择")
+            }
         }
+        choice
     };
-    // 创建事件循环（WSLg 下强制 X11，走 Xwayland + XInput2 raw motion）
+    // 创建事件循环（BackendChoice::X11 时经 with_x11() 强制 Xwayland）
     let event_loop = {
         let mut builder = EventLoop::builder();
         #[cfg(target_os = "linux")]
-        if force_x11 {
+        if backend_choice == BackendChoice::X11 {
             use winit::platform::x11::EventLoopBuilderExtX11;
             builder.with_x11();
         }
@@ -4150,6 +4217,36 @@ mod tests {
         // 4) 下限：0 与极小值不许透传
         assert_eq!(window_physical_request(0, 0, None), (320, 200));
         assert_eq!(window_physical_request(100, 50, None), (320, 200));
+    }
+
+    /// 🔴 **Linux 适配判据**：`RV3D_BACKEND=x11` 在**原生 Linux** 上必须能生效。
+    ///
+    /// 旧代码的判据是 `is_wsl && WAYLAND_DISPLAY.is_some()` ⇒ 原生 Arch/KDE Wayland 上
+    /// **恒为 false**，而 winit 0.30 已删除 `WINIT_UNIX_BACKEND` ⇒ 用户**没有**任何
+    /// 退回 XWayland 的手段。这不是"以防万一"的开关：Wayland 下 `Locked` 抓取的失败
+    /// 是**静默**的（winit 忽略合成器的确认事件），XWayland 是唯一可验证的退路。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. **非 WSL 也必须能选到 x11**（这一条就是整个修复）；
+    /// 2. 显式变量**压过** WSL 自动判定（两个方向都测：wsl 上选 wayland、非 wsl 上选 x11）；
+    /// 3. 大小写/空白不敏感（`X11`、` xwayland ` 都要认）；
+    /// 4. 未设时不改变旧行为（WSL 自动选 x11；原生 Linux 保持 Auto）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backend_choice_x11_is_reachable_on_native_linux() {
+        // 1) 就是这个修复：非 WSL 的原生 Linux + 显式 x11
+        assert_eq!(backend_choice(Some("x11"), false), BackendChoice::X11);
+        // 2) 显式变量压过自动判定（两个方向）
+        assert_eq!(backend_choice(Some("wayland"), true), BackendChoice::Auto);
+        assert_eq!(backend_choice(Some("x11"), true), BackendChoice::X11);
+        // 3) 大小写与空白
+        assert_eq!(backend_choice(Some("X11"), false), BackendChoice::X11);
+        assert_eq!(backend_choice(Some(" xwayland "), false), BackendChoice::X11);
+        assert_eq!(backend_choice(Some("Wayland"), true), BackendChoice::Auto);
+        // 4) 未设 / 不认识的取值 ⇒ 旧行为不变
+        assert_eq!(backend_choice(None, true), BackendChoice::X11, "WSL 自动判定保持不变");
+        assert_eq!(backend_choice(None, false), BackendChoice::Auto, "原生 Linux 默认不强制");
+        assert_eq!(backend_choice(Some("nonsense"), false), BackendChoice::Auto);
     }
 
     /// 🔴 判据：中继注册失败时**不许**报「已注册」（教训 46：日志不许把「没跑成」写成成功）。
