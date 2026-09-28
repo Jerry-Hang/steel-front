@@ -7,7 +7,7 @@
 #    ./SteelFront.sh play        同无参数
 #    ./SteelFront.sh fast        不重新构建，直接用现有 exe 启动
 #    ./SteelFront.sh diag        构建后带诊断开关启动（RV3D_AI_PROF=1 RV3D_PROP_STATS=1）
-#    ./SteelFront.sh smoke       冒烟门 —— 🚫 Linux 侧尚未实现（exit 2）
+#    ./SteelFront.sh smoke       冒烟门（转交 scripts/smoke_linux.sh，可加 -Secs N）
 #    ./SteelFront.sh package     打包   —— 🚫 Linux 侧尚未实现（exit 2）
 #    ./SteelFront.sh --help      打印本帮助
 #    ./SteelFront.sh <参数…>      构建后启动，并把参数**原样**透传给引擎
@@ -26,7 +26,7 @@ Steel Front 启动器（Linux）：./SteelFront.sh [模式] [引擎参数…]
   play（默认）   构建后启动
   fast           不构建，直接用现有 exe 启动
   diag           构建后带诊断开关启动（RV3D_AI_PROF=1 RV3D_PROP_STATS=1）
-  smoke          冒烟门 —— 🚫 Linux 侧尚未实现（exit 2）
+  smoke          冒烟门：零输入跑 45s，判据 vuid==0 且 panics==0 且 killed>=1
   package        打包   —— 🚫 Linux 侧尚未实现（exit 2）
   -h / --help    打印本帮助
 
@@ -65,20 +65,27 @@ case "$MODE_LC" in
         ;;
 esac
 
-# ---- smoke / package：Linux 侧还没有对应实现，明确报"没跑成" ----------------
-# 🔴 这两个模式在 bat 里是**转交**给 PowerShell 脚本的：
+# ---- smoke：转交给 Linux 版冒烟门；package 仍未实现，明确报"没跑成" ----------
+# bat 里这两个模式是**转交**给 PowerShell 脚本的：
 #   smoke   -> scripts/run_smoke_pm.ps1（PostMessage 注入 + 判据 vuid==0/panics==0/killed>=1）
 #   package -> scripts/package_release.ps1（build + 组装 dist/steel-front-<tag>.zip）
-# Linux 上这两个 .ps1 **跑不了**，而 Linux 版本还不存在 ⇒ 这里必须 exit 2：
-#   * 不能 exit 0 —— 那是"假装成功"，调用方会以为冒烟跑过了（假绿灯，本仓最贵的一类事故）；
-#   * 不能指向不存在的 scripts/*.sh —— 那只是把一个失败推给下一层；
+# Linux 上这两个 .ps1 **跑不了**。
+#
+# smoke 现在有 Linux 版了：`scripts/smoke_linux.sh` —— 判据**逐字同口径**
+# （vuid==0 and panics==0 and killed>=1），但驱动方式不同：Linux 没有 PostMessage，
+# 而 XTEST 是全局注入、会抢焦点并把指针锁进游戏窗口，正好违反 Windows 侧那条
+# 「鼠标安全协议」的本意 ⇒ 改用引擎自己的诊断开关做**零输入**驱动，
+# 并强制 `RV3D_NO_CAPTURE=1` 让"不夺指针"成为**代码级保证**。
+# 这里只**转交**，退出码原样带回（0/1/2 三态由那个脚本自己负责）。
+#
+# package 仍然没有 Linux 版 ⇒ 必须 exit 2：
+#   * 不能 exit 0 —— 那是"假装成功"，调用方会以为包打好了（假绿灯，本仓最贵的一类事故）；
+#   * 不能指向不存在的脚本 —— 那只是把一个失败推给下一层；
 #   * 也不能 exit 1 —— 1 表示"跑了但失败"，而我们**根本没跑**（三态要分得清）。
-# 三态约定见 AGENTS.md 教训 46。等 Linux 版冒烟/打包脚本落地后，在下面两个分支里转交。
+# 三态约定见 AGENTS.md 教训 46。
 case "$MODE_LC" in
     smoke)
-        echo "[steel-front] smoke 门在 Linux 侧尚未实现（Windows 侧是 scripts/run_smoke_pm.ps1，靠 PostMessage/taskkill 等 Windows 专有 API，Linux 上跑不了）。" >&2
-        echo "[steel-front] 现在没有任何可转交的 Linux 脚本 ⇒ exit 2（没跑成），不是成功、也不是失败。" >&2
-        exit 2
+        exec "$(dirname "$0")/scripts/smoke_linux.sh" "${@:2}"
         ;;
     package)
         echo "[steel-front] package 在 Linux 侧尚未实现（Windows 侧是 scripts/package_release.ps1，Linux 上跑不了）。" >&2

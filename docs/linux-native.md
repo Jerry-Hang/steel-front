@@ -276,14 +276,74 @@ asusctl armoury set gpu_mux_mode 0      # 需要重启；本机 gpu_mux_mode 是
 
 | 项 | 状态 |
 |---|---|
-| `scripts/run_smoke.sh` + Linux 冒烟判据 | **未实现**（`SteelFront.sh smoke` exit 2） |
-| `scripts/perf_run.sh` | **未实现** |
-| 真机跑通一局（起窗 / 分辨率 / CJK / VUID） | **待做** |
-| Linux 音频后端 | 见 `src/audio_out.rs` |
+| **Linux 冒烟门** | ✅ `scripts/smoke_linux.sh`（`./SteelFront.sh smoke`，见 §10） |
+| `scripts/perf_run.sh` | **未实现**（`perf_run.ps1` 只需换进程管理与路径，是最容易移植的一个） |
+| 真机跑通一局（起窗 / 分辨率 / CJK / VUID / 音频） | ✅ 见 §5 各条的实测数字 |
 | MUX 独显直连 | 用户选择暂不切（§7.3） |
+| `package`（打包） | **未实现**（`SteelFront.sh package` → exit 2） |
 | `launcher/`（Win32 原生 GUI 启动器） | **不在移植范围**（`#![cfg(windows)]`，整 crate） |
 | `queue_present` 上界 / RT 扩展过滤 / blanket `allow(dead_code)` | 见 §6 |
-| Wayland 下 `IMMEDIATE` 支持面 | 取决于合成器是否提供 `wp_tearing_control_v1`；KWin 待测 |
+| Wayland 下 `IMMEDIATE` 支持面 | 实测 NVIDIA Wayland **支持**（`present_mode: IMMEDIATE`）；`SteelFront.sh` 仍用 mailbox |
+
+---
+
+## 10. Linux 冒烟门（`./SteelFront.sh smoke`）
+
+```bash
+./SteelFront.sh smoke                 # 默认档：确定性闸门
+./SteelFront.sh smoke -Secs 90        # 跑久一点
+scripts/smoke_linux.sh -RequireKill   # 严格档：额外要求 killed>=1（见下）
+python3 scripts/smoke_linux.py --self-check    # 闸门自检（14 个用例，含 4 个 exit 2 分支）
+```
+
+**与 Windows 侧的关系**：判据口径**同源**（`vuid==0 and panics==0`），但**驱动方式完全不同**，
+这是平台决定的，不是偷懒：
+
+- **Windows** 靠 `PostMessage` 把按键投进目标窗口队列（因为抢前台会让 winit 不发 `Focused`，
+  光标永不抓取 —— 用户 2026-09-03 报的「鼠标死锁」就是这一类）。
+- **Linux 没有 PostMessage**，而 XTEST 是全局注入、**会抢焦点并把指针锁进游戏窗口**，
+  正好违反那条协议的本意 ⇒ 改为**零输入驱动**：`RV3D_AUTOSTART=1` +
+  `RV3D_DIAG_NPC_FRONT=1`（把 npcs[0] 摆到相机正前方 20m）+ `RV3D_AUTOFIRE=1`，
+  一根手指都不用碰，并强制 **`RV3D_NO_CAPTURE=1`** 让「不夺指针」成为**代码级保证**。
+
+### 🔴 两档判据，因为"击杀"那一档在本机是**不确定的**
+
+| 档 | 判据 | 稳定性（实测） |
+|---|---|---|
+| 默认 | `vuid==0 && panics==0` **且真的进过 Playing** | **8/8** —— 确定性 |
+| `-RequireKill` | 再加 `killed>=1` | **7/8 ≈ 88%** —— **不确定** |
+
+失败的那次是 `score 增量 0`：**零输入路径没有闭环瞄准**，`RV3D_AUTOFIRE` 每帧开火会累积
+后坐力与散布，`RV3D_DIAG_NPC_FRONT` 只把目标摆在正前方、**不保证命中** ⇒
+它靠的是"在 255 个目标里蒙中几个"。实测击杀数分布：45s → 3/2/2/2/1；60s → **0**/3。
+
+⇒ **默认档不要求击杀**。理由（AGENTS.md 教训 26）：**会喊狼来了的闸门会训练人不再当回事**，
+那种假警报与漏报一样有害。`-RequireKill` 仍然提供（与 Windows 同口径），
+但调用方必须知道那个 88% 的数字。
+
+⚠️ 顺带记下一个被推翻的旧结论：Windows 侧脚本设 `RV3D_STRESS_AI=0`（波次模式）并注明
+「压力模式下玩家无敌、killed 不可达」。**在 Linux 零输入路径上这是反的**：
+波次模式只有 6 个敌人且玩家会在 ~27s 被打死（`game: player down ... (GameOver: gameplay frozen)`），
+实测 **0/2**；压力模式（255 敌人 + 玩家无敌）才是 **3/3**。所以本脚本默认
+`RV3D_STRESS_AI=1` —— **不要照抄 Windows 那个值**。
+
+### 三态（教训 46）
+
+| 退出码 | 含义 |
+|---|---|
+| 0 | 通过 |
+| 1 | 失败（有 VUID / 有 panic / 开了 `-RequireKill` 时 0 杀） |
+| 2 | **没跑成** —— exe 不存在 / 日志空 / **从没进过 Playing** / 只有 1 个 score 采样点 |
+
+最后三条是**硬条件**：`vuid==0` 在一份**空日志**上同样是 0，不挡住就又是一个恒真判据
+（Windows 侧 `survive_pm` 就这么骗过一整轮）。
+
+### 尚未具备的能力（诚实记账）
+
+- **没有闭环瞄准** ⇒ 打不出稳定击杀。要补的话，参照 `gameplay_smoke_pm.py` 的 `aim`：
+  从日志里读出活着的敌人坐标 → 算需要的 yaw/pitch 增量 → 转视角 → 再开火。
+- **没有画面取证**（截图/差分）。Windows 的 `cap_safe.ps1` 靠 `PrintWindow` 不前置窗口；
+  Linux 可用引擎自带 F12（非 Windows 落 `/tmp`）或 X11 `XGetImage`，都还没做。
 
 ---
 
