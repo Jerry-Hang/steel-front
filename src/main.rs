@@ -3792,6 +3792,11 @@ impl ApplicationHandler for GameApp {
                     .hud
                     .set_screen_size(new_size.width as f32, new_size.height as f32);
                 if let Some(renderer) = &mut self.renderer {
+                    // 🔴 必须**先**把新尺寸告诉渲染器再重建：Wayland 下
+                    // `surface.currentExtent` 是未定义的，交换链尺寸只能来自这个字段
+                    // （见 `Renderer::window_extent` / `swapchain_extent_choice`）。
+                    // 顺序反了 = 重建出来的还是旧尺寸，而且**不报错**。
+                    renderer.set_window_extent(new_size.width, new_size.height);
                     // 降级/设备丢失时不重试（判据 = `swapchain_recovery_allowed`）
                     if renderer.swapchain_recovery_allowed() {
                         if let Err(e) = renderer.recreate_swapchain() {
