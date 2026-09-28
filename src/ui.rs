@@ -1843,32 +1843,34 @@ pub fn glyph(ch: char) -> [u8; 5] {
     }
 }
 
-/// 中文字形查询（8x8 点阵，行主序每行 1 字节，bit7=左侧）：
-/// 经 engine::font_cjk（Windows GDI 光栅化，零依赖）按需生成并缓存；
-/// 非 Windows 或字体缺失返回 None → 渲染回退为 `?`（不 panic、不方块）。
+/// 中文字形查询（12x12 点阵，行主序每行 u16 低 12 位，bit11=左侧）。
+///
+/// 🔴 **2026-09-28 修（Linux 适配）**：这里原本按平台分叉 —— Windows 走
+/// `engine::font_cjk::glyph`，**非 Windows 无条件返回 `None`**。那个回退是
+/// **GDI 光栅化时代的产物**（当时的 `font_cjk` 真的调 `GetGlyphOutline` 逐字生成）。
+/// 而 **2026-09-14 换源之后该函数已经是纯查表**（`cjk_glyphs.rs` 是随仓入库的预烘焙点阵，
+/// `font_cjk.rs` 的 docstring 明写「查询 O(log n) 二分查找，**跨平台无依赖**」）
+/// ⇒ 非 Windows 的回退**没有任何理由**，后果却是**静默**的：Linux 上每一个汉字都渲染成 `?`，
+/// 不 panic、不报错、日志里一个字都没有。
+///
+/// 这条不是孤例：`main.rs` 顶部那条 `#![cfg_attr(not(windows), allow(dead_code))]`
+/// 当初给出的理由之一，**正是**"CJK 字形表（`ui.rs::glyph_cjk` 在非 Windows 明确回退成
+/// `None`）" ⇒ 一个失效的分支把自己伪装成了"按平台设计"，
+/// 连带着把整个非 Windows 平台的 dead-code 警告一起关掉了。
+/// 判据 = `cjk_glyphs_are_not_platform_gated`（任意平台都必须能查到'铁'的字形）。
 pub fn glyph_cjk(ch: char) -> Option<[u16; 12]> {
-    #[cfg(windows)]
-    {
-        crate::engine::font_cjk::glyph(ch)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = ch;
-        None
-    }
+    crate::engine::font_cjk::glyph(ch)
 }
 
 /// 是否中文字符（统一表意/扩展区/全角标点等完整范围，见 font_cjk::is_cjk_char）
+///
+/// 🔴 同上一条：非 Windows 分支曾经**只覆盖 2 个区间**（统一表意 + CJK 标点），
+/// 而 `font_cjk::is_cjk_char` 覆盖 11 个。两者不一致的后果是**宽度算错**：
+/// `text_width` 按 `is_cjk` 决定每字 12 格还是 5 格，于是全角标点（`！`、`（`，U+FF00 段）、
+/// 假名、扩展 A 区汉字在非 Windows 上被当成半角 ⇒ 文本居中、对齐、换行全部偏移，
+/// 而 Windows 上是对的。**宽度与字形必须同源**，所以这里也只留一处判据。
 pub fn is_cjk(ch: char) -> bool {
-    #[cfg(windows)]
-    {
-        crate::engine::font_cjk::is_cjk_char(ch)
-    }
-    #[cfg(not(windows))]
-    {
-        let cp = ch as u32;
-        (0x4E00..=0x9FFF).contains(&cp) || (0x3000..=0x303F).contains(&cp)
-    }
+    crate::engine::font_cjk::is_cjk_char(ch)
 }
 
 /// 计算字符串的渲染宽度（像素，含字距）。ASCII 每字 FONT_COLS 列，
@@ -1888,8 +1890,10 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
 
 /// 把字符串按位图字体展开为小 quad 列表（自绘文本，无外部依赖）。
 ///
-/// ASCII 走内置 5x7 字体；中文（CJK）走 engine::font_cjk 的 8x8 点阵（Windows GDI
-/// 生成，位宽 8 行主序）；字符之间留 `FONT_SPACING` 像素间距。
+/// ASCII 走内置 5x7 字体；中文（CJK）走 `engine::font_cjk` 的 12x12 点阵
+/// （**仓内预烘焙的 Noto Sans SC 字模，纯查表、无系统字体依赖、无 GDI** ——
+/// 旧注释写"Windows GDI 生成"是 2026-09-14 换源之前的说法，已失效）；
+/// 字符之间留 `FONT_SPACING` 像素间距。
 pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &mut Vec<Quad>) {
     let mut cx = x;
     for ch in text.chars() {
@@ -2258,6 +2262,51 @@ mod tests {
                 .sum::<u32>();
             assert!(lit > 0, "ASCII {} ('{}') 字形不能为空", code, code as u8 as char);
         }
+    }
+
+    /// 🔴 **Linux 适配判据**：中文字模**不是**按平台门控的。
+    ///
+    /// `glyph_cjk` 曾经在非 Windows 无条件 `return None` —— 那是 `font_cjk` 还在用 GDI
+    /// 逐字光栅化时的写法；2026-09-14 换成仓内预烘焙点阵之后，`font_cjk::glyph`
+    /// 只是一次二分查找，**跨平台无依赖**。于是那个回退只剩下一个后果：
+    /// **非 Windows 上每个汉字都渲染成 `?`，不 panic、不报错、日志里一个字都没有。**
+    ///
+    /// 本测试在任何平台都必须绿 —— 它红就说明有人又把这条改回按平台分叉了。
+    #[test]
+    fn cjk_glyphs_are_not_platform_gated() {
+        for ch in ['铁', '前', '线'] {
+            assert_eq!(
+                glyph_cjk(ch),
+                crate::engine::font_cjk::glyph(ch),
+                "字形查询必须与字模表同源（不得按平台分叉）"
+            );
+            assert!(glyph_cjk(ch).is_some(), "该字在字模表内，返回 None 即静默降级");
+        }
+        // 有字模还不够 —— 全零字形会画出一个"空白汉字"，症状同样是"HUD 上少一个字"
+        let rows = glyph_cjk('铁').expect("'铁'必须有字模");
+        assert!(rows.iter().any(|&r| r != 0), "字形不能是全零");
+    }
+
+    /// 宽度必须与字形同源：`ui::is_cjk` 的区间不能比 `font_cjk::is_cjk_char` 窄。
+    ///
+    /// 旧的非 Windows 分支只覆盖「统一表意 + CJK 标点」两个区间（11 个里的 2 个），
+    /// 而 `text_width` 靠 `is_cjk` 决定每字 12 格还是 5 格 ⇒ 全角标点、假名、
+    /// 扩展 A 区汉字被当成半角 ⇒ **居中/对齐/换行整片偏移**，且只在非 Windows 上错。
+    /// 这里故意取**跨区间**的字，每一个都对应一条会被漏掉的区间。
+    #[test]
+    fn cjk_width_ranges_match_the_glyph_table() {
+        // 统一表意 / 全角形式 / CJK 标点 —— 三个不同区间
+        for ch in ['铁', '！', '（', '，'] {
+            assert_eq!(
+                is_cjk(ch),
+                crate::engine::font_cjk::is_cjk_char(ch),
+                "'{}'的宽度判据必须与字形表同一套区间",
+                ch
+            );
+            assert!(is_cjk(ch), "'{}'是宽字符，漏判会让 text_width 少算一半", ch);
+        }
+        assert!(!is_cjk('A'), "ASCII 是半角");
+        assert!(!is_cjk(' '), "空格是半角");
     }
 
     #[test]
