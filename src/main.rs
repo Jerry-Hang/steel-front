@@ -266,6 +266,85 @@ fn backend_choice(env: Option<&str>, auto_x11: bool) -> BackendChoice {
     }
 }
 
+/// 是否允许抓取光标。`RV3D_NO_CAPTURE=1` ⇒ **永不允许**。
+///
+/// 为什么需要它（2026-09-28，Linux 适配）：Windows 侧的「鼠标安全协议」（用户 2026-09-03
+/// 明确要求）靠的是 **`PostMessage` 投键 + 永不抢前台** —— 于是自动化能在**不抓光标**的
+/// 前提下驱动游戏。Linux **没有** PostMessage 这条路，而本引擎在 `Playing` 态**一定会**
+/// 抓光标（`Locked` 或 `Confined`）：自动化跑一局 = 用户的指针被锁进游戏窗口。
+/// 抓取会随进程退出而释放，但"跑测试期间桌面指针被夺走"本身就不该是自动化的副作用。
+///
+/// ⇒ Linux 侧的正确对偶不是"换个注入方式"，而是**把捕获关掉**：
+/// `RV3D_NO_CAPTURE=1` 时 `capture_wanted` 恒假，无论焦点/状态如何。
+/// 冒烟与性能脚本一律带上它 —— 这样"自动化不会碰用户输入"就成了**代码保证**，
+/// 而不是靠调用方自己记得别抢焦点。
+///
+/// ⚠️ 它只关**抓取**，不关视角输入：非捕获态本来就有左键拖拽转视角那条路
+/// （`dragging`），所以关掉捕获之后游戏依然可玩、可被脚本驱动。
+fn no_capture() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_truthy("RV3D_NO_CAPTURE"))
+}
+
+/// 捕获策略（纯函数，可单测）：`allowed && focused && Playing && 无面板`。
+///
+/// 抽出来的理由与 `cursor_grab_plan` 相同 —— 这条策略选错的后果是**静默**的：
+/// 漏掉 `allowed` 就是关不掉的指针锁定，漏掉 `esc_menu_open` 就是菜单里鼠标被锁死
+/// （只能 Alt+F4）。写成纯函数才能把这两个方向都钉进测试。
+fn capture_wanted(
+    focused: bool,
+    playing: bool,
+    settings_open: bool,
+    esc_menu_open: bool,
+    allowed: bool,
+) -> bool {
+    allowed && focused && playing && !settings_open && !esc_menu_open
+}
+
+/// 锁定态「相对增量到底有没有来」的判定结果（纯函数 `lock_observation` 的值域）。
+///
+/// 为什么需要它（2026-09-28，Linux 适配 —— 这是本仓在 Windows 上踩过两次的**同一个**
+/// 形态第三次出现）：`set_cursor_grab(Locked)` 返回 `Ok` **不等于锁生效了**。
+/// - **Wayland**：winit 的 `apply_on_pointer` 只对**已经 `wl_pointer::enter` 过**的指针
+///   生效 —— 指针还没进窗口时它**什么都没做也返回 `Ok`**；而且 winit 完全忽略合成器的
+///   确认事件（`ZwpLockedPointerV1` 的 Dispatch 函数体是空的）⇒ 应用层**无法**从
+///   返回值或事件里知道锁有没有生效。
+/// - 而 Wayland 下 `DeviceEvent::MouseMotion` 的唯一来源是 `zwp_relative_pointer_v1`，
+///   它**只在 `lock_pointer` 里一起创建** ⇒ **没锁 = 零 raw 事件 = 视角彻底不动**。
+/// - 绝对位置那条路在 Wayland 上也不通：`set_cursor_position` 只在已 `Locked` 时成功
+///   ⇒ `Confined` 下指针撞到窗口边就再也转不动。**所以不能"降级"了事**，
+///   必须让这个失败**可见**（症状与"鼠标坏了"完全一样，用户无从判断）。
+///
+/// ⇒ 唯一可信的判据是**行为证据**：锁定之后真的收到过相对增量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockObservation {
+    /// 还在观察窗内、且尚未收到增量 —— 结论未到，什么都别做
+    Pending,
+    /// 收到过相对增量 ⇒ 锁**确实生效**（Wayland 下这是唯一可信的证据）
+    Confirmed,
+    /// 观察窗已过、一个增量都没有 ⇒ 锁很可能是**假成功**
+    NoMotion,
+}
+
+/// 观察窗长度（毫秒）。取值理由：短了会把"用户刚锁定还没来得及动鼠标"误判成假成功；
+/// 长了用户要看着一个不动的视角干等。1.5s 够人手自然移动一次，也不至于让人以为卡死。
+const LOCK_OBSERVE_MS: u128 = 1500;
+
+/// 锁定态观察判定（纯函数，可单测）。
+///
+/// **增量优先**：只要收到过只要有 1 个相对增量就立刻 `Confirmed`，不必等满观察窗 ——
+/// 那是最强的正面证据，没有理由再等。
+fn lock_observation(elapsed_ms: u128, motion_delta: u64, window_ms: u128) -> LockObservation {
+    if motion_delta > 0 {
+        return LockObservation::Confirmed;
+    }
+    if elapsed_ms >= window_ms {
+        LockObservation::NoMotion
+    } else {
+        LockObservation::Pending
+    }
+}
+
 /// 把「请求的分辨率」夹进显示器物理尺寸，返回窗口要请求的**物理**像素尺寸。
 ///
 /// 🔴 **2026-09-28 修（Linux 适配）**：调用方原来写的是
@@ -707,6 +786,18 @@ struct GameApp {
     /// false = 回退 Confined/无 grab，走绝对位置路径（WSLg/Xwayland 实测：
     /// 真实物理鼠标只产生 CursorMoved 绝对位置，不产生 XI_RawMotion raw 事件）
     cursor_locked: bool,
+    /// 锁定态观察窗：`(进入锁定态的时刻, 当时的 cursor_evt_count)`。
+    /// `None` = 不在观察中（非锁定态，或已有结论）。判定见 `LockObservation`。
+    ///
+    /// 为什么需要它：`set_cursor_grab(Locked)` 的 `Ok` **不等于锁生效**（Wayland 下
+    /// 指针尚未 enter 时它什么都没做也返回 `Ok`，且 winit 忽略合成器的确认事件），
+    /// 而失败的症状与"鼠标坏了"完全一样（零 raw 事件 ⇒ 视角不动）。
+    /// 唯一可信的判据是**行为证据**，所以必须真的去数一数增量有没有来。
+    lock_observe: Option<(Instant, u64)>,
+    /// 假成功时是否已补抓过一次（只补一次，见 `sync_cursor` 的 NoMotion 分支）
+    lock_retried: bool,
+    /// 假成功告警是否已发过（一次性，不刷屏）
+    lock_fake_warned: bool,
     /// 绝对位置路径：是否已收到首个真实指针位置基准（捕获瞬间未知指针位置，
     /// 首个事件只作基准，避免把"捕获前指针到中心差量"当视角位移）
     abs_baseline_valid: bool,
@@ -856,6 +947,9 @@ impl GameApp {
             fire_edge: false,
             cursor_captured: false,
             cursor_locked: false,
+            lock_observe: None,
+            lock_retried: false,
+            lock_fake_warned: false,
             abs_baseline_valid: false,
             // 必须从 false 起步，由 WindowEvent::Focused 驱动。
             // 写成 true 会让 sync_cursor 的 `want` 从第 1 帧就成立：
@@ -2044,10 +2138,13 @@ impl GameApp {
         let Some(window) = &self.window else {
             return;
         };
-        let want = self.focused
-            && self.game.state() == GameState::Playing
-            && !self.game.settings_open()
-            && !self.game.hud.esc_menu_open;
+        let want = capture_wanted(
+            self.focused,
+            self.game.state() == GameState::Playing,
+            self.game.settings_open(),
+            self.game.hud.esc_menu_open,
+            !no_capture(),
+        );
         // ESC 菜单/设置面板打开或失焦时释放鼠标（2026-08-15：菜单需鼠标点选）
         if want && !self.cursor_captured {
             // Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
@@ -2101,6 +2198,14 @@ impl GameApp {
             self.cursor_captured = grabbed || locked;
             self.cursor_locked = locked;
             self.abs_baseline_valid = false;
+            // 开始观察这次的锁到底有没有生效（见 `LockObservation`）。
+            // 基准取**当前的** `cursor_evt_count`，所以这个窗口内来一个增量就算确认。
+            if locked {
+                self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
+                self.lock_retried = false;
+            } else {
+                self.lock_observe = None;
+            }
             if !locked {
                 // WSLg/Xwayland 回退：绝对位置路径。不在捕获瞬间回中——
                 // 指针真实位置未知，等首个 CursorMoved 作基准（abs_baseline_valid）。
@@ -2135,8 +2240,59 @@ impl GameApp {
             self.cursor_locked = false;
             self.abs_baseline_valid = false;
             self.recenter_pending_until = None;
+            self.lock_observe = None;
             self.camera.set_rotation_active(false);
             log::info!("input: cursor released");
+        }
+
+        // ---- 锁定态观察：锁到底有没有真的生效（见 `LockObservation`）----
+        //
+        // 这一段是**诊断 + 一次补救**，不是降级：Wayland 下不能退回 Confined ——
+        // `set_cursor_position` 只在已 Locked 时才成功，Confined 下指针撞到窗口边
+        // 就再也转不动（比"完全不转"更难排查）。所以对 NoMotion 的处理是
+        // **补抓一次**（指针此时多半已经 enter 了，而 `apply_on_pointer` 只对
+        // 已 enter 的指针生效 ⇒ 这次多半能成），再不行就**给出明确的提示**。
+        if self.cursor_captured && self.cursor_locked {
+            if let Some((started, motion_at_start)) = self.lock_observe {
+                let delta = self.cursor_evt_count.saturating_sub(motion_at_start);
+                match lock_observation(started.elapsed().as_millis(), delta, LOCK_OBSERVE_MS) {
+                    LockObservation::Pending => {}
+                    LockObservation::Confirmed => {
+                        // 锁确实生效 —— 收工，之后不再观察（也不再补抓）
+                        self.lock_observe = None;
+                    }
+                    LockObservation::NoMotion => {
+                        if !self.lock_retried {
+                            // 指针很可能在抓取之后才进入窗口 ⇒ 补抓一次
+                            self.lock_retried = true;
+                            let ok = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
+                            self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
+                            log::warn!(
+                                "input: 锁定后 {}ms 内一个相对增量都没收到 —— 锁可能没生效，\
+                                 已补抓一次（set_cursor_grab(Locked) -> {}）。\
+                                 原因：winit 在指针尚未 enter 窗口时调 lock_pointer 会\
+                                 **什么都没做却返回 Ok**，且它忽略合成器的确认事件，\
+                                 所以失败无法从返回值看出来。",
+                                LOCK_OBSERVE_MS,
+                                if ok { "Ok" } else { "Err" }
+                            );
+                        } else if !self.lock_fake_warned {
+                            self.lock_fake_warned = true;
+                            self.lock_observe = None;
+                            log::error!(
+                                "input: 🔴 补抓之后仍然零相对增量 ⇒ 本会话的鼠标视角**不会工作**\
+                                 （锁定是假成功）。这不是鼠标故障，是后端差异：Wayland 下\
+                                 Locked 的失败是静默的，且 Confined 也无法回转指针。\
+                                 ⇒ 请用 RV3D_BACKEND=x11 走 Xwayland 重开一局 —— \
+                                 那里 set_cursor_grab(Locked) 会如实返回 NotSupported，\
+                                 引擎会自动落到 Confined + 绝对位置路径，而 X11 的\
+                                 set_cursor_position 走 XWarpPointer 是真的生效的。\
+                                 （本提示只发一次；`cam:` 日志里的 evt 计数可继续观测。）"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -4247,6 +4403,71 @@ mod tests {
         assert_eq!(backend_choice(None, true), BackendChoice::X11, "WSL 自动判定保持不变");
         assert_eq!(backend_choice(None, false), BackendChoice::Auto, "原生 Linux 默认不强制");
         assert_eq!(backend_choice(Some("nonsense"), false), BackendChoice::Auto);
+    }
+
+    /// 🔴 **Linux 适配判据**：锁定态的「假成功」必须能被**行为证据**判出来。
+    ///
+    /// `set_cursor_grab(Locked)` 返回 `Ok` 不代表锁生效（Wayland 下指针尚未 enter 时
+    /// winit 什么都没做也返回 `Ok`，且它忽略合成器的确认事件）。失败症状与"鼠标坏了"
+    /// 一模一样（零 raw 事件 ⇒ 视角不动），所以**唯一**可信的判据是"锁定之后真的
+    /// 收到过相对增量"。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. 观察窗内没增量 ⇒ `Pending`（**不许**提前下结论 —— 用户可能只是还没动鼠标，
+    ///    这一条挂了就会把正常玩家误判成假成功并去补抓，反而干扰他）；
+    /// 2. 增量**优先于时间**：就算第 1ms 就来，也立刻 `Confirmed`（最强的正面证据，
+    ///    没有理由再等满观察窗）；
+    /// 3. 到点仍为零 ⇒ `NoMotion`（这才是要报警的那条）；
+    /// 4. 边界：恰好等于窗口长度算到点（`>=` 而不是 `>` —— 写成 `>` 会让判定
+    ///    永远晚一帧，在 165fps 下无感，但语义上"满窗"就该有结论）。
+    #[test]
+    fn lock_observation_needs_evidence_not_just_ok() {
+        const W: u128 = 1500;
+        // 1) 窗口内、无增量 ⇒ 不许下结论
+        assert_eq!(lock_observation(0, 0, W), LockObservation::Pending);
+        assert_eq!(lock_observation(W - 1, 0, W), LockObservation::Pending);
+        // 2) 增量优先于时间：第 1ms 就来也立刻确认
+        assert_eq!(lock_observation(1, 1, W), LockObservation::Confirmed);
+        assert_eq!(lock_observation(0, 7, W), LockObservation::Confirmed);
+        // 3) 到点仍为零 ⇒ 假成功
+        assert_eq!(lock_observation(W, 0, W), LockObservation::NoMotion);
+        // 4) 边界：恰好满窗算到点；超时很久也仍是 NoMotion（不是 Confirmed）
+        assert_eq!(lock_observation(u128::MAX, 0, W), LockObservation::NoMotion);
+        // 反向保险：确认过之后再多的零增量也不该翻回 NoMotion（delta 是单调的）
+        assert_eq!(lock_observation(u128::MAX, 3, W), LockObservation::Confirmed);
+    }
+
+    /// 观察窗长度不许是 0 —— 那会让判定在第一帧就报假成功，把"还没动鼠标"当成故障。
+    #[test]
+    fn lock_observe_window_is_not_degenerate() {
+        assert!(LOCK_OBSERVE_MS >= 200, "太短会把正常玩家误判成假成功");
+        assert!(LOCK_OBSERVE_MS <= 5000, "太长则用户看着不动的视角干等");
+    }
+
+    /// 🔴 **Linux 适配判据**：`RV3D_NO_CAPTURE=1` 必须能**无条件**关掉光标抓取。
+    ///
+    /// 为什么这条在 Linux 上是必需品：Windows 侧的鼠标安全协议靠 `PostMessage`
+    /// 投键 + 不抢前台（用户 2026-09-03 的要求），于是自动化不必抓光标；Linux 没有
+    /// 这条路，而引擎在 `Playing` 态一定会抓（`Locked` 或 `Confined`）⇒ 跑一局冒烟
+    /// 就等于把用户的指针锁进游戏窗口。把"关掉捕获"做成一条判据，自动化不碰用户
+    /// 输入才是**代码保证**，而不是靠调用方自觉。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. `allowed=false` ⇒ 恒假（**这一条就是那个开关**；漏掉它 = 开关无效）；
+    /// 2. 四个条件的**每一个**单独为假都要能关掉捕获 —— 特别是 `esc_menu_open`：
+    ///    漏掉它就是"菜单里鼠标被锁死，只能 Alt+F4"（本仓 2026-08-15 修过一次）；
+    /// 3. 全真才为真（防止把 `||` 写成 `&&` 之类的反向错误）。
+    #[test]
+    fn capture_wanted_obeys_the_no_capture_switch_and_the_menu_gates() {
+        // 1) 开关优先：其它条件全真也必须是假
+        assert!(!capture_wanted(true, true, false, false, false), "RV3D_NO_CAPTURE=1 必须关掉捕获");
+        // 2) 四个条件逐个单独为假
+        assert!(!capture_wanted(false, true, false, false, true), "失焦不许抓");
+        assert!(!capture_wanted(true, false, false, false, true), "非 Playing 不许抓");
+        assert!(!capture_wanted(true, true, true, false, true), "设置面板打开不许抓");
+        assert!(!capture_wanted(true, true, false, true, true), "ESC 菜单打开不许抓");
+        // 3) 全真才抓
+        assert!(capture_wanted(true, true, false, false, true));
     }
 
     /// 🔴 判据：中继注册失败时**不许**报「已注册」（教训 46：日志不许把「没跑成」写成成功）。
