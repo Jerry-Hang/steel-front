@@ -255,6 +255,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   `PtParams::pack` 与 GLSL `PC{a..f}` 两处 `.size(96)` 必须同步；
   累积图像逐帧 barrier 用 `GENERAL→GENERAL`（用 `old_layout=UNDEFINED` = 累积白做，且不报 VUID）；
   `pt_frame >= pt_spp_target` 即停派发；`RV3D_PT_SPP` 覆盖目标（实时默认 256，`run_pt_view` 默认 64）。
+- 🔴 **改"实例缩放 ↔ 真实尺寸"的约定必须同改所有消费者**：`pt_set_scene_markers` 的 `* 0.5`
+  是 9-17 前"渲染盒 = 2×AABB"的遗留，漏改 ⇒ PT 的 marker 盒整体小一半（§22.14）。
+  还原半尺寸一律乘 `Shape::template_half_extent`。
 - 时域累积/缓存的变化判定量化粒度**必须粗于相机 idle 抖动幅度**（现值 ~0.5m/~3°/~0.01；
   1mm 那版已作废，正是"PT 永不收敛"的根因）。
 - RT 命中判据：`rayQueryGetIntersectionTypeEXT(q, 1)` 必须是 **committed**；
