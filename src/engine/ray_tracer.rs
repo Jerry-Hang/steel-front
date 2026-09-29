@@ -101,6 +101,9 @@ pub struct PtParams {
     pub cam: glam::Vec3,
     /// 相机前向（直接取 camera.forward()，与光栅化同源，不重推 yaw/pitch 公式）
     pub fwd: glam::Vec3,
+    /// **垂直**半角正切（`camera.fov` = `perspective_rh` 的 fov_y，与光栅同源）；
+    /// 水平项由着色器乘 aspect 还原——2026-09-29 之前着色器两轴共用此值，
+    /// PT 帧相对游戏视角水平拉伸 1.6 倍（判据见 pt_panorama.glsl 取景段注释）。
     pub tan_half_fov: f32,
     pub bounces: u32,
     /// 表面→太阳（与 DirectionalLight::direction 同语义）

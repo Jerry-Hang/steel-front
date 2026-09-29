@@ -145,8 +145,13 @@ void main() {
 
     float ux = (float(gid.x) + 0.5) / pc.a.x * 2.0 - 1.0;
     float uy = 1.0 - (float(gid.y) + 0.5) / pc.a.y * 2.0;
+    // 🔴 pc.a.z 是**垂直**半角的正切（camera.fov = perspective_rh 的 fov_y），光栅的
+    // 水平半角 = atan(aspect·tan)。x 项必须乘 aspect，否则 PT 帧相对游戏视角水平拉伸：
+    // 2026-09-29 实机对照（16:10 窗口）——同一固定机位，远景门柱间距光栅 110px、
+    // PT 175px，比值 1.59 = aspect 本身；地平线位置两帧一致（垂直本来就是对的）。
     float tan = pc.a.z;
-    vec3 rd = normalize(fwd + rgt * (ux * tan) + up * (uy * tan));
+    float aspect = pc.a.x / pc.a.y;
+    vec3 rd = normalize(fwd + rgt * (ux * tan * aspect) + up * (uy * tan));
     vec3 ro = pc.b.xyz;
 
     uint bounces = uint(max(pc.a.w, 1.0));
