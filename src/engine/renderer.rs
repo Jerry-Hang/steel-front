@@ -6476,7 +6476,11 @@ impl Renderer {
         // 🏢 binding 4 = 道具逐三角属性表（device-local，2×u32/三角）——道具进 BLAS 专项
         let propv_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout];
+        // 🏪 binding 5 = 程序化地面纹理（与光栅同一张）：PT 地面盒按 world-space UV 采样，
+        // 参照帧的地面反照率不再是一颗均匀沥青（单值表不出分区，道路区曾偏亮 22%）。
+        let ground_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(5).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
         let pipe_layouts = [sl];
@@ -6561,6 +6565,8 @@ impl Renderer {
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
+            // COMBINED_IMAGE_SAMPLER ×1：binding 5（程序化地面纹理，🔴 布局加了就得同步计数）
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
@@ -6575,6 +6581,11 @@ impl Renderer {
         };
         let img_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL };
         let acc_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: acc_view, image_layout: vk::ImageLayout::GENERAL };
+        let ground_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.texture_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
         let mat_buf_info = vk::DescriptorBufferInfo {
             buffer: assets.mat_buf,
             offset: 0,
@@ -6626,6 +6637,15 @@ impl Renderer {
                 dst_set: dset, dst_binding: 4, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                 p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&propv_buf_info).as_ptr(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            // 🏪 binding 5 = 光栅同一张程序化地面纹理（init_texture 先于本函数跑完，
+            // 图像已在 SHADER_READ_ONLY_OPTIMAL；常驻资源不随场景重建换，故 pt_refresh_dset 不重写它）
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 5, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&ground_desc).as_ptr(), p_buffer_info: std::ptr::null(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];
@@ -6997,8 +7017,9 @@ impl Renderer {
             Vec::with_capacity(markers.len() + 1);
         let mut albedos: Vec<[f32; 3]> = Vec::with_capacity(markers.len() + 1);
         // 盒 0 = 地面大盒（游戏地形中央压平，PT 用平面盒近似，烘焙参照足够）
-        // 🏢 albedo 从旧沙色 [0.34,0.32,0.29] 改成沥青线性基色（与 procedural.rs zone 2
-        //   同源）：§15 实测 PT 路面比光栅亮 2.14×，这颗地面盒是主因之一。
+        // 🏪 它的 boxMats 反照率自 2026-09-29 起不再被着色器读取：地面改采样与光栅
+        //   同一张程序化纹理（binding 5，见 pt_panorama.glsl）——单颗均匀沥青表不出
+        //   分区（道路区曾比光栅偏亮 22%）。保留条目只为盒序号与 marker 一一对应。
         boxes.push(crate::engine::ray_tracer::PtBox {
             center: [0.0, -1.0, 0.0],
             half: [400.0, 1.0, 400.0],
@@ -7268,7 +7289,14 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout];
+        // 🏪 binding 5 = 程序化地面纹理（与 init_pt_resident 同布局：着色器静态引用了它，
+        // 不绑 = UB；玩具场景的"地面"会显示市心广场的纹理像素，无害）
+        let ground_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(5)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }
             .map_err(|e| format!("PT set: {e}"))?;
@@ -7344,6 +7372,8 @@ impl Renderer {
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
+            // COMBINED_IMAGE_SAMPLER ×1：binding 5（程序化地面纹理）
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }
@@ -7385,6 +7415,11 @@ impl Renderer {
             offset: 0,
             range: vk::WHOLE_SIZE,
         };
+        let ground_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.texture_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
         let writes = [
             vk::WriteDescriptorSet {
                 s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
@@ -7424,6 +7459,14 @@ impl Renderer {
                 dst_set: dset, dst_binding: 4, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                 p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&propv_buf_info).as_ptr(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 5, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&ground_desc).as_ptr(), p_buffer_info: std::ptr::null(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];

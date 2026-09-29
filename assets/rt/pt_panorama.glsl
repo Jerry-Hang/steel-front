@@ -19,6 +19,10 @@ layout(set = 0, binding = 3, rgba32f) uniform image2D AccImg;
 //    ——pt3 实测 126fps→1.5fps。道具未上传时 Rust 侧绑占位缓冲，那时 BLAS 没有道具
 //    几何，道具分支按几何索引必然不可达。
 layout(set = 0, binding = 4, std430) readonly buffer PropTris { uint propAttr[]; };
+// 🏪 地面 = 与光栅同一张程序化地面纹理（binding 5，R8G8B8A8_SRGB，采样自动解码为线性）。
+// 地面盒（盒 0）不再用一颗均匀沥青反照率：单值反照率表不出分区（道路区实测比光栅
+// 偏亮 22%），接纹理后 PT 的地面直射与反弹光和实机逐纹素同源。
+layout(set = 0, binding = 5) uniform sampler2D GroundTex;
 
 // 7 x vec4 = 112B，Rust 侧 [[f32;4];7] 逐字段对齐，无填充歧义
 // 相机直接传 forward 向量（不传 yaw/pitch）=> 与 engine/camera.rs 的基底严格同源，无前后手风险
@@ -173,7 +177,15 @@ void main() {
         uint seed = pxSeed ^ (frameSeed * 0x27D4EB2Fu) ^ (s * 0x165667B1u);
         for (uint b = 0u; b < bounces; b++) {
             if (!traceRay(rq, rs, 500.0)) { lq += tq * skyColor(rs); break; }
-            vec3 alb = hitIsProp ? hitAlb : albedoOf(hitPrim / 12u);
+            // 反照率：道具=逐三角顶点色；盒 0=地面，采样与光栅同一张程序化纹理
+            // （world-space UV，与 build.rs 片元的 (xz+256)/512 映射逐位一致）；
+            // 其余盒=boxMats 的真实 tint。
+            uint boxIdx = hitPrim / 12u;
+            vec3 alb;
+            if (hitIsProp) alb = hitAlb;
+            else if (boxIdx == 0u)
+                alb = textureLod(GroundTex, (hitPos.xz + vec2(256.0)) / 512.0, 0.0).rgb;
+            else alb = albedoOf(boxIdx);
             float ndl = max(dot(hitNrm, sunDir), 0.0);
             // 2026-09-01v3：偏移 0.02 防阴影内棱线（acne）；太阳盘 jitter 2 点 = 软边 + 更准
             if (ndl > 0.0) {
