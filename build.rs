@@ -734,8 +734,26 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
         } else if (light_data.flags.z >= 0.5 && !is_glass && !authored) {
             // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
+            //
+            // 🔴 皮肤按**世界尺度**采样（§22.4b/§22.4f）。原来直接用 `input.uv`，而 marker
+            // 的模板 uv 是**逐面 0..1**（铁律 B），`marker_skin` 又在这 0..1 内画 4×4 砖
+            // ⇒ 砖行高 = 面高 ÷ 4，**随物体大小线性缩放**：0.45m 护柱得 11cm 砖，
+            // 而 2.35m 边界围墙得 **59cm 巨砖**（§22.4f 用围墙竖直 FFT 主峰 k=4=0.570m
+            // 定量确认，肉眼亦数到约 4~5 道横带）。真实混凝土砌块约 0.20m 高 × 0.40m 宽，
+            // 与墙多大无关 ⇒ 按主轴把世界坐标投影到面内平面，再换算成米制 tile：
+            // 一个 tile = 4 砖 ⇒ 水平方向每 1.6m、竖直方向每 0.8m 一个 tile。
+            // 分母与 `procedural.rs::marker_skin` 的 `rows=4`/`u*4.0` 同源，勿在此另猜。
+            // 远距收敛沿用下面既有的 `detail` 因子，不新增第二套衰减。
+            let an = abs(fnrm);
+            var skin_uv = input.world_pos.xy;
+            if (an.x > an.y && an.x > an.z) {
+                skin_uv = input.world_pos.zy;
+            } else if (an.y > an.x && an.y > an.z) {
+                skin_uv = input.world_pos.xz;
+            }
             base = mix(input.color,
-                       textureSample(marker_skin_tex, texture_sampler, input.uv).rgb,
+                       textureSample(marker_skin_tex, texture_sampler,
+                                     skin_uv / vec2<f32>(1.6, 0.8)).rgb,
                        0.45 * (0.25 + 0.75 * detail));
         }
         // 玻璃底面：逐层渐变 + 分格 + 逐格随机（见 glass_shade）。
