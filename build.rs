@@ -38,6 +38,31 @@ const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
 // 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
 
+// 砌块皮肤的最小尺寸（米，取物体最长轴）。
+//
+// `marker_skin` 画的是**用 0.4×0.2m 的块砌出来的立面**（tile 1.6×0.8m = 4 砖 4 行）。
+// 自 §22.4b 起皮肤按世界尺度采样，于是"面上出现横竖砂浆缝"就成了**一句关于材质的断言**：
+// 观者看见缝就读作"这是砌出来的"。0.34m 直径、0.9m 高的花岗岩护柱被这样一断言立刻说谎
+// —— 1.6m 宽的 tile 在它身上只剩**一道被任意切断的竖缝**，0.8m 的 tile 切成 4 道横缝，
+// 合起来读作"刷了条纹的柱子"（实机取证 `mat_bollard_b.png`，十字准星正中）。
+// 真实世界不会把砖砌进一根车削出来的石柱；反过来，3.4m 见方的花坛石台、55m 长的边界
+// 围墙、6m 长的泽西护栏都该有砖。所以判据是**尺寸**，不是颜色：最长轴 < 1.5m 的 marker
+// 不发砌块皮肤（仍保留 tint × 光照 × `weather_stain` 低频风化，不会变成死平面）。
+//
+// 1.5m 这个数按现表算出来：护柱 0.9 / 反光柱 0.7 / 消防栓 0.83 / 灯柱底座 0.72 /
+// 灯罩球 0.85 全在下方，花坛石台 3.4 / 护栏 6.0 / 围墙 55 全在上方，中间没有别的件。
+// 取**最长轴**（不是最短轴）是为了保护细长砌体：0.4m 高的压顶梁只要有 20m 长就仍是砖。
+const MASONRY_MIN_SPAN: f32 = 1.5;
+
+// marker 的最长世界轴长。实例矩阵 = 平移 × 逐轴缩放、无旋转（`renderer.rs::obstacle_model`
+// 写成 `scale = half / template_half`），所以对角元就是每轴的"半尺寸 ÷ 模板半尺寸"。
+// 模板半尺寸只有圆柱的 Y 轴是 0.5（单位圆柱 y∈[-0.5,0.5]），其余形状三轴恒为 1.0；
+// 形状标签在 `tint.w`（语义见 `engine/geom.rs` 的 Shape::tag）。
+fn marker_span(model: mat4x4<f32>, tint: vec4<f32>) -> f32 {
+    let hy = select(1.0, 0.5, tint.w > 1.5 && tint.w < 2.5);
+    return 2.0 * max(abs(model[0][0]), max(abs(model[1][1]) * hy, abs(model[2][2])));
+}
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -86,6 +111,13 @@ fn vs_main(
         output.flat_flag = 2.0;
     } else if (instance_index >= MARKER_INSTANCE_BASE) {
         output.flat_flag = 1.0;
+        // 太小、不可能是砌体的 marker 不吃皮肤（判据见上面 MASONRY_MIN_SPAN）。
+        // 编码用 flat_flag 的**空闲子区间 1.05**：片元现有的每一条判据
+        // （>0.5、>1.1&&<1.4、>1.5、<1.5）对 1.05 与 1.0 取值完全相同，唯一区别
+        // 就是皮肤分支新增的那道闸 ⇒ 不新增插值属性、不动 mesh 管线的 workgroup 结构。
+        if (marker_span(inst.model, inst.tint) < MASONRY_MIN_SPAN) {
+            output.flat_flag = 1.05;
+        }
     } else {
         output.flat_flag = 0.0;
     }
@@ -732,8 +764,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
             // 近处幅度 0.55+0.90·luma 与 D1 验收式逐位一致（勿回退），远处收到 0.55+0.12·luma
             base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
-        } else if (light_data.flags.z >= 0.5 && !is_glass && !authored) {
+        } else if (light_data.flags.z >= 0.5 && !is_glass && !authored
+                   && input.flat_flag < 1.02) {
             // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
+            //
+            // `flat_flag < 1.02` = 顶点/mesh 两侧的尺寸闸（1.05 = "这件太小、不可能是砌体"）。
+            // 少了它，0.34m 的花岗岩护柱会在一根柱子上摆出"一道被切断的竖缝 + 4 道横缝"，
+            // 读作刷了条纹而不是砌了砖——见 vs_main 上方 MASONRY_MIN_SPAN 的取证。
             //
             // 🔴 皮肤按**世界尺度**采样（§22.4b/§22.4f）。原来直接用 `input.uv`，而 marker
             // 的模板 uv 是**逐面 0..1**（铁律 B），`marker_skin` 又在这 0..1 内画 4×4 砖
@@ -929,6 +966,16 @@ const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 8192u; // marker 区 = MAX_MARKER_I
 const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
+
+// 砌块皮肤尺寸闸（与顶点着色器路径逐字同值，理由写在那一侧）：最长轴 < 1.5m 的
+// marker 不吃 `marker_skin`，因为 1.6×0.8m 的砌块 tile 压在一根 0.34m 的石柱上
+// 只剩一道被切断的竖缝，读作"刷了条纹"而不是"砌了砖"。
+const MASONRY_MIN_SPAN: f32 = 1.5;
+
+fn marker_span(model: mat4x4<f32>, tint: vec4<f32>) -> f32 {
+    let hy = select(1.0, 0.5, tint.w > 1.5 && tint.w < 2.5);
+    return 2.0 * max(abs(model[0][0]), max(abs(model[1][1]) * hy, abs(model[2][2])));
+}
 
 // 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
 struct VertexOutput {
@@ -1251,6 +1298,10 @@ fn mesh_main(
         flat = 2.0;
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
+        // 与 vs_main 同源：太小、不可能是砌体的 marker 用 1.05 标记，片元据此跳过皮肤。
+        if (marker_span(inst.model, inst.tint) < MASONRY_MIN_SPAN) {
+            flat = 1.05;
+        }
     }
     // 外部建模网格（geom.rs Shape::Authored，tint.w = 6.0）→ flat = 1.25，
     // 与顶点路径 vs_main 的第 99 行**同源**。

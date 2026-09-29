@@ -1975,6 +1975,74 @@ mod city_layout_tests {
         }
     }
 
+    /// 砌块皮肤尺寸门（`build.rs::MASONRY_MIN_SPAN = 1.5`）两侧必须留有空档。
+    ///
+    /// 皮肤自 §22.4b 起按世界尺度采样，tile 是 1.6×0.8m 的砌块立面，于是"面上出现砂浆缝"
+    /// 就成了**对材质的一句断言**。0.34m 直径、0.9m 高的石质护柱因此被画成"刷了条纹的
+    /// 柱子"（实机取证 `mat_bollard_b.png`，十字准星正中）⇒ 最长轴 < 1.5m 的 marker 不发皮肤。
+    ///
+    /// 1.5 **不是调出来的数**：实测全城 1789 件可见 marker 里，被拦下的最大件 1.45m、
+    /// 放行的最小件 2.20m，中间 0.75m 一个件都没有 ⇒ 阈值取在 (1.45, 2.20) 内任何一处，
+    /// 画面逐件相同。这条断言钉的就是这个空档：**以后任何人往空档里放东西**（一根 1.6m
+    /// 的石栏杆柱、一面 1.3m 的砖矮墙都会撞）**就必须在这里重新判断它该不该穿砌块皮肤**，
+    /// 而不是等实机截图上出现半道被切断的砂浆缝才发现。
+    #[test]
+    fn masonry_skin_gate_leaves_an_empty_band() {
+        // 与 build.rs 的 MASONRY_MIN_SPAN 同值；两处不一致时本测试失去意义。
+        const GATE: f32 = 1.5;
+        // 任何一件的跨度都不许贴到阈值这么近以内（实测最近的是 1.45，余量 0.05）。
+        const MARGIN: f32 = 0.04;
+        let m = generate_city();
+        let mut gated = 0usize;
+        let mut hi_gated = 0.0f32;
+        let mut lo_kept = f32::MAX;
+        let mut too_close: Option<(f32, String)> = None;
+        for o in m.render_geometry() {
+            // 只碰撞不绘制的结构碰撞核：GPU 侧根本看不到它，不参与皮肤分派。
+            if o.shape.tag() == Shape::TAG_NONE {
+                continue;
+            }
+            // 与 shader 的 marker_span 同式。模板半幅只有圆柱的 Y 轴是 0.5，而实例缩放
+            // = 半尺寸 ÷ 模板半幅，两者在"全尺寸"上恰好抵消 ⇒ 三轴一律取 2*half。
+            // ⚠ 别在最外面再乘 2：`half_* * 2.0` 已经是全尺寸。第一版就是这么错的
+            //   （写成 `2.0 * max(2*hw, …)` ⇒ 跨度全部翻倍 ⇒ 1.5m 的门限悄悄变成 0.75m，
+            //   拦下 264 件而不是上面那个 536 件）。是"件数与独立测得的 536 对不上"
+            //   才把它抓出来——**判据必须来自独立测量，不能就地调成代码算出的数**。
+            let span = (o.half_w * 2.0).max((o.half_h * 2.0).max(o.half_d * 2.0));
+            if (span - GATE).abs() < MARGIN {
+                too_close = Some((
+                    span,
+                    format!("@({:.1},{:.1}) y={:.2} {:?}", o.x, o.z, o.y, o.kind),
+                ));
+            }
+            if span < GATE {
+                gated += 1;
+                hi_gated = hi_gated.max(span);
+            } else {
+                lo_kept = lo_kept.min(span);
+            }
+        }
+        // 拦下的件数下界：街道设施（护柱/消防栓/灯柱底座/柱帽柱础/反光柱）一共 500+ 件。
+        // 这一条防的是"这道门悄悄失效"——比如有人把 marker_span 改成恒返回 10，画面会
+        // 逐像素回到修复前，而上面那条空档断言仍然成立。
+        assert!(
+            gated > 300,
+            "被尺寸门拦下的 marker 只有 {gated} 件 ⇒ 护柱/消防栓/柱帽这批街道设施本该全在里面，\
+             检查 build.rs 的 marker_span 与 MASONRY_MIN_SPAN 是否被改坏"
+        );
+        if let Some((span, where_)) = too_close {
+            panic!(
+                "有 marker 的跨度贴到阈值 {GATE}m 的 ±{MARGIN}m 之内（实测 {span:.2}m，{where_}）\
+                 ⇒ 1.5m 从「空档中点」退化成临界值：必须重新判断这一件该不该穿砌块皮肤，\
+                 并把阈值挪到新空档的中点",
+            );
+        }
+        assert!(
+            hi_gated < GATE && lo_kept > GATE,
+            "阈值两侧都得有件才说得清空档：拦下最大 {hi_gated:.2}m / 放行最小 {lo_kept:.2}m"
+        );
+    }
+
     /// 悬空的几何件必须"挂在"别的件上：水平方向重叠，且底面落在对方竖直跨度内
     /// （被包住）或正落在对方顶面上（被托住）。
     ///
