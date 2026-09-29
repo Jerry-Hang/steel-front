@@ -81,9 +81,12 @@ impl Shape {
     /// 标签值 → 形状。未知/越界值一律退回 [`Shape::Legacy`]，让 GPU 侧的兜底分支
     /// 去处理，而不是在这里发明新语义。
     ///
-    /// `#[cfg(test)]`：CPU 侧从不反读 tint.w（`renderer.rs` 只写不读），所以这个解码器
-    /// 唯一的作用是配合 [`Shape::tag`] 钉住线格式，防止有人改数值把 GPU 分支错位。
-    #[cfg(test)]
+    /// 生产侧**现在**也要反读 `tint.w`：PT 的 `pt_set_scene_markers` 必须把实例缩放还原成
+    /// 真实半尺寸，而"缩放 ÷ 半尺寸"的那个系数就是形状自己的模板半幅（见
+    /// [`Shape::template_half_extent`]）。以前这里标 `#[cfg(test)]`（"CPU 侧从不反读"）
+    /// 已经过期——那条前提在 2026-09-17 改成"逐轴同尺寸"之后就不成立了，
+    /// PT 侧漏改留下的后果记在 docs/PROGRESS.md §22.14。
+    /// 保留配合 [`Shape::tag`] 的线格式钉死作用。
     pub const fn from_tag(v: f32) -> Shape {
         // f32 精确比较：标签只由 tag() 写入，取值是 1/2/4/5/6 这些可精确表示的小整数。
         if v == Shape::TAG_CYLINDER {

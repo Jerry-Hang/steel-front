@@ -7054,9 +7054,19 @@ impl Renderer {
         }
         for m in markers.iter().take(PT_MAX_BOXES - 1) {
             let c = m.model.w_axis;
-            let hx = m.model.x_axis.length() * 0.5;
-            let hy = m.model.y_axis.length() * 0.5;
-            let hz = m.model.z_axis.length() * 0.5;
+            // 🔴 实例缩放 = 真实半尺寸 ÷ 模板半幅（`obstacle_model` 的 `half / tmpl`），
+            // 所以还原半尺寸要**乘回模板半幅**，不是乘 0.5。
+            // 模板半幅只有圆柱的 Y 是 0.5（单位圆柱 y∈[−0.5,0.5]），其余形状三轴都是 1.0
+            // （立方体/球模板是 **±1**，见本文件 `VERTICES`）。
+            // 旧代码一律 `* 0.5` 是 **2026-09-17 之前**的约定——那时渲染盒是 AABB 的 2 倍
+            // （`half / tmpl` 之前写的是 `2*half / tmpl`，`* 0.5` 恰好抵消）。
+            // 9-17 把渲染盒改成与碰撞盒逐轴同尺寸时，这里没跟着改 ⇒ **PT 的 marker 盒
+            // 整体小了一半**（只有圆柱的高度因为模板半幅正好是 0.5 而恰好正确）。
+            // 后果与取证见 docs/PROGRESS.md §22.14。
+            let shape = crate::engine::geom::Shape::from_tag(m.tint[3]);
+            let hx = m.model.x_axis.length() * shape.template_half_extent(0);
+            let hy = m.model.y_axis.length() * shape.template_half_extent(1);
+            let hz = m.model.z_axis.length() * shape.template_half_extent(2);
             if !(hx > 0.01 && hy > 0.01 && hz > 0.01) {
                 continue;
             }
