@@ -6480,7 +6480,11 @@ impl Renderer {
         // 参照帧的地面反照率不再是一颗均匀沥青（单值表不出分区，道路区曾偏亮 22%）。
         let ground_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(5).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout];
+        // 🧱 binding 6 = marker 砌块皮肤（与光栅 binding 7 同一张纹理）：PT 参照帧里
+        // 围墙/花坛/护栏不再死平一块纯色。布局两处副本（这里 + run_pt_view）必须同步。
+        let skin_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(6).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout, skin_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
         let pipe_layouts = [sl];
@@ -6565,8 +6569,9 @@ impl Renderer {
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
-            // COMBINED_IMAGE_SAMPLER ×1：binding 5（程序化地面纹理，🔴 布局加了就得同步计数）
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1),
+            // COMBINED_IMAGE_SAMPLER ×2：binding 5（程序化地面纹理）+ binding 6（marker 砌块
+            // 皮肤）。🔴 布局加了就得同步计数，否则 allocate_descriptor_sets 直接失败。
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
@@ -6584,6 +6589,12 @@ impl Renderer {
         let ground_desc = vk::DescriptorImageInfo {
             sampler: self.texture_sampler,
             image_view: self.texture_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        // 🧱 PT 的 marker 皮肤与光栅共用同一张图与同一个采样器（光栅绑在 binding 7）
+        let skin_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.skin_marker_image_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         };
         let mat_buf_info = vk::DescriptorBufferInfo {
@@ -6646,6 +6657,14 @@ impl Renderer {
                 dst_set: dset, dst_binding: 5, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 p_image_info: std::slice::from_ref(&ground_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            // 🧱 binding 6 = marker 砌块皮肤（同为常驻资源，pt_refresh_dset 不重写）
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 6, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&skin_desc).as_ptr(), p_buffer_info: std::ptr::null(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];
@@ -7002,7 +7021,25 @@ impl Renderer {
             mats[k * 4] = a[0];
             mats[k * 4 + 1] = a[1];
             mats[k * 4 + 2] = a[2];
-            mats[k * 4 + 3] = 0.0;
+            // 🔴 `.a` = 该盒的**最长世界轴跨度（米）**，不是 0/1 开关。
+            //
+            // 为什么把跨度传进着色器而不是在这里判完：光栅侧那条门（§22.7）除了
+            // "够不够大所以是不是砌体"，还要给皮肤算一个按面尺寸收敛的 `detail` 因子
+            // （`base = mix(color, skin, 0.45 * (0.25 + 0.75*detail))`）。跨度给出去，
+            // PT 才能把同一个表达式抄过来；在这里压成 0/1 就只剩"有/没有"，
+            // 远处会一直按 0.45 混合一张 mip 模糊过的灰图 ⇒ 越远越偏灰，与实机不符。
+            // 玻璃/树冠的排除放在着色器里做（它手上就有 tint，与光栅同一条判据）。
+            //
+            // 尺寸门在这里先过一遍（着色器还会再判同样的阈值，两侧各自成立）：
+            // 不合格的写 0.0，着色器拿到 0 必然落不进砌体分支。
+            // 盒 0 = 地面大盒，跨度 800 会看着"像砌体"，但着色器对 boxIdx==0 走
+            // GroundTex 分支、根本到不了这里，故无需特判。
+            let span = 2.0 * (b.half[0].max(b.half[1]).max(b.half[2]));
+            mats[k * 4 + 3] = if span >= crate::engine::ray_tracer::MASONRY_MIN_SPAN {
+                span
+            } else {
+                0.0
+            };
         }
         unsafe {
             let vb = verts.len() * 4;
@@ -7321,7 +7358,13 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout];
+        // 🧱 binding 6 = marker 砌块皮肤（与 init_pt_resident 同布局：着色器静态引用了它）
+        let skin_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(6)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout, skin_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }
             .map_err(|e| format!("PT set: {e}"))?;
@@ -7397,8 +7440,8 @@ impl Renderer {
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
-            // COMBINED_IMAGE_SAMPLER ×1：binding 5（程序化地面纹理）
-            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1),
+            // COMBINED_IMAGE_SAMPLER ×2：binding 5（程序化地面纹理）+ binding 6（marker 皮肤）
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }
@@ -7443,6 +7486,12 @@ impl Renderer {
         let ground_desc = vk::DescriptorImageInfo {
             sampler: self.texture_sampler,
             image_view: self.texture_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        // 🧱 binding 6 = marker 砌块皮肤（与光栅 binding 7 同一张图、同一个采样器）
+        let skin_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.skin_marker_image_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         };
         let writes = [
@@ -7492,6 +7541,15 @@ impl Renderer {
                 dst_set: dset, dst_binding: 5, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 p_image_info: std::slice::from_ref(&ground_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            // 🧱 binding 6 = marker 砌块皮肤
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 6, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&skin_desc).as_ptr(), p_buffer_info: std::ptr::null(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];

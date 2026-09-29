@@ -215,6 +215,17 @@ impl PtParams {
 /// 告警闩保留，但截断点挪到 take 之前先比对（见 renderer.rs）。
 pub const PT_MAX_BOXES: usize = 2048;
 
+/// 砌块皮肤的最小跨度（米，取盒子最长轴）——🔴 **必须与 `build.rs` WGSL 里的
+/// `MASONRY_MIN_SPAN` 同值**，两处任一改动都要同步。
+///
+/// 为什么 PT 侧要在 CPU 判：光栅那条判据长在**顶点着色器**里（`marker_span` 读实例矩阵
+/// 对角元，写进 `flat_flag` 的 1.05 子区间），而 PT 没有顶点阶段，只有盒子的
+/// `center/half/tint`。`PtBox::half` 就是真实半尺寸（自 §22.14 起），所以跨度与光栅的
+/// `marker_span` 同值，判据可以逐字搬过来。
+/// 值不是调出来的：实测全城 1789 件 marker 里被拦的最大 1.45m、放行最小 2.20m，
+/// 中间 0.75m 空档（判据与验证见 docs/PROGRESS.md §22.7）。
+pub const MASONRY_MIN_SPAN: f32 = 1.5;
+
 /// 路径追踪 GPU 资源集（构建/记录/销毁）
 pub struct PtAssets {
     pub tlas: ash::vk::AccelerationStructureKHR,

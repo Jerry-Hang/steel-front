@@ -23,6 +23,17 @@ layout(set = 0, binding = 4, std430) readonly buffer PropTris { uint propAttr[];
 // 地面盒（盒 0）不再用一颗均匀沥青反照率：单值反照率表不出分区（道路区实测比光栅
 // 偏亮 22%），接纹理后 PT 的地面直射与反弹光和实机逐纹素同源。
 layout(set = 0, binding = 5) uniform sampler2D GroundTex;
+// 🧱 marker 砌块皮肤 = 与光栅**同一张**程序化纹理（binding 6，R8G8B8A8_SRGB）。
+// 在此之前 PT 与实机只剩一条已知反照率分歧：光栅给大砌体画 0.4×0.2m 砌块，
+// PT 一律 boxMats.rgb 纯色 ⇒ 参照帧里围墙/花坛/护栏是死平一块（§22.2 只统一了地面）。
+// 绑定号必须与 renderer.rs 的 init_pt_resident / run_pt_view 两处 set layout 同步。
+layout(set = 0, binding = 6) uniform sampler2D MarkerSkin;
+
+// 砌块皮肤的最小跨度（米）——🔴 必须与 build.rs WGSL 与 ray_tracer.rs 的同名常量一致。
+// 光栅那条判据长在顶点着色器里（PT 没有顶点阶段），跨度由 boxMats[].a 直接传过来。
+const float MASONRY_MIN_SPAN = 1.5;
+// 皮肤 tile = 4 砖 × 4 行，与 build.rs 的 skin_uv / vec2(1.6, 0.8) 同源，勿在此另猜。
+const vec2  SKIN_TILE_M = vec2(1.6, 0.8);
 
 // 7 x vec4 = 112B，Rust 侧 [[f32;4];7] 逐字段对齐，无填充歧义
 // 相机直接传 forward 向量（不传 yaw/pitch）=> 与 engine/camera.rs 的基底严格同源，无前后手风险
@@ -139,6 +150,13 @@ vec3 albedoOf(uint boxIdx) {
     return boxMats[int(boxIdx)].rgb;
 }
 
+// 每盒最长世界轴跨度（米）。越界返回 0 ⇒ 自动判为"不够大、不穿砌块皮肤"，
+// 与 albedoOf 的兜底同向（宁可少画细节，也不拿邻盒数据乱画）。
+float boxSpanM(uint boxIdx) {
+    if (int(boxIdx) >= boxMats.length()) return 0.0;
+    return boxMats[int(boxIdx)].a;
+}
+
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
     if (gid.x >= int(pc.a.x) || gid.y >= int(pc.a.y)) return;
@@ -185,7 +203,41 @@ void main() {
             if (hitIsProp) alb = hitAlb;
             else if (boxIdx == 0u)
                 alb = textureLod(GroundTex, (hitPos.xz + vec2(256.0)) / 512.0, 0.0).rgb;
-            else alb = albedoOf(boxIdx);
+            else {
+                // 🧱 大砌体：与光栅画**同一张**皮肤、按**同一个世界尺度**采样。
+                vec3 tint = albedoOf(boxIdx);
+                float span = boxSpanM(boxIdx);   // 越界 ⇒ 0 ⇒ 自动不穿皮肤
+                alb = tint;
+                // 判据与光栅片元逐条同式：够大才是砌体；玻璃(b > r·1.4)与树冠
+                // (g 最大且 > b·1.4)在光栅里也被排除，这里必须一起排除，否则
+                // PT 会给玻璃幕墙和树冠长出砖缝——两侧"看着不一样"正是本条要修的。
+                vec3 hn = normalize(hitNrm);
+                vec3 an = abs(hn);
+                bool masonry = span >= MASONRY_MIN_SPAN
+                    && !(tint.b > tint.r * 1.4)
+                    && !(tint.g > tint.r && tint.g > tint.b * 1.4);
+                if (masonry) {
+                    // 主轴投影到面内平面（与 build.rs 的 skin_uv 三分支逐字同式）
+                    vec2 suv = hitPos.xy;
+                    if (an.x > an.y && an.x > an.z) suv = hitPos.zy;
+                    else if (an.y > an.x && an.y > an.z) suv = hitPos.xz;
+                    // compute 里没有屏幕导数 ⇒ 显式估 mip：一个像素在表面上盖多少米。
+                    // 2·tan/resY 是垂直角分辨率；水平方向因为 aspect = resX/resY 而**等值**，
+                    // 不必分轴取大（乘了 aspect 再除 resX 会自己抵消，容易写错）。
+                    float dist = length(hitPos - rq);
+                    float pxm = dist * (2.0 * tan / pc.a.y)
+                              / max(abs(dot(hn, normalize(rs))), 0.15);
+                    // 皮肤 v 方向 0.8m 跨 512 纹素 = 640 纹素/米（两轴里更密的一侧）
+                    float lvl = log2(max(pxm * 640.0, 1.0));
+                    // 远距收敛照抄光栅的 detail：foot = 一个像素占这个面的几分之几
+                    // ≈ pxm / span。⚠ 光栅用的是**该面**的短轴，这里只有最长轴，
+                    // 所以扁长件（55m×2.35m 围墙）的收敛比实机**晚**一些——
+                    // 只影响很远距离的混合权重，不改砖的尺寸（那是 §22.4 的判据）。
+                    float detail = 1.0 - smoothstep(0.015, 0.22, pxm / span);
+                    alb = mix(tint, textureLod(MarkerSkin, suv / SKIN_TILE_M, lvl).rgb,
+                              0.45 * (0.25 + 0.75 * detail));
+                }
+            }
             float ndl = max(dot(hitNrm, sunDir), 0.0);
             // 2026-09-01v3：偏移 0.02 防阴影内棱线（acne）；太阳盘 jitter 2 点 = 软边 + 更准
             if (ndl > 0.0) {
