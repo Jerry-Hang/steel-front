@@ -144,8 +144,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （`window_dark` / `glass_shade`+菲涅尔 / `is_canopy` 值噪声 / marker 混凝土皮肤）。
   **不接这条，GLB 立面会被再画一层错位窗带（D11 重演）**。
 - **调试/材质开关**：`RV3D_PROC_TEX=0` 关程序化贴图（见铁律 D）、`RV3D_NO_SHADOW=1` 关阴影、
-  `RV3D_DEBUG_SHADOW=1` 看 R=frag_depth / G=阴影图深度均值（见上）、`RV3D_SKIN_TEX=1` 开皮肤贴图
-  （缺省 0 纯色回退，冒烟基线不变）、`RV3D_INSPECT=1` 检视模式（实例矩阵用 `Mat4::IDENTITY`）。
+  `RV3D_DEBUG_SHADOW=1` 看 R=frag_depth / G=阴影图深度均值（见上）、`RV3D_SKIN_TEX=0` 关皮肤贴图
+  （缺省开）、`RV3D_INSPECT=1` 检视模式（实例矩阵用 `Mat4::IDENTITY`）。
   （编码见上条 `flat_flag`；binding 7/8。）
 
 **地面**
