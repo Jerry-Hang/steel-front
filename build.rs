@@ -472,10 +472,24 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             let w_d = max(pen_m, m_per_texel) / depth_m;
             var occluded = 0.0;
             var dsum = 0.0;
+            // 🔴 逐像素旋转抽头核（2026-09-29 治"阴影内部棋盘格马赛克"）。
+            // 上面把 base_uv snap 到纹素中心是治"移动时爬线"的，但它带来一个副作用：
+            // 抽头偏移是 `step_uv = k·texel`（k 为整数/半整数），于是 9 个抽头与
+            // 纹素网格**相位锁定**——同一个 shadow texel 覆盖的所有地面像素采到
+            // **完全相同**的 9 个纹素，遮挡度逐 texel 常量 ⇒ 阴影内部被量化成
+            // 0.39m 的方块马赛克（实机只在阴影内部可见、受光路面干净，正合此机制）。
+            // 旋转角取**屏幕像素**的函数：屏幕像素随时间稳定 ⇒ 不引入闪噪，
+            // 而相邻像素落在不同的纹素组合上 ⇒ 把方块打散成高频噪声，9 抽头平均即平滑。
+            let ang = fract(sin(dot(floor(input.position.xy),
+                vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+            let kca = cos(ang);
+            let ksa = sin(ang);
             for (var dy = -1; dy <= 1; dy = dy + 1) {
                 for (var dx = -1; dx <= 1; dx = dx + 1) {
+                    let ox = f32(dx) * kca - f32(dy) * ksa;
+                    let oy = f32(dx) * ksa + f32(dy) * kca;
                     let d = textureSample(shadow_map, shadow_sampler,
-                        base_uv + vec2<f32>(f32(dx), f32(dy)) * step_uv);
+                        base_uv + vec2<f32>(ox, oy) * step_uv);
                     dsum = dsum + d;
                     // 分数测试（percentage-closer filtering）代替 if/>+1.0：
                     // 把"9 个 0/1 计票"变成连续量，影子里侧到外侧是渐变而不是 9 档跳变
@@ -525,10 +539,19 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             let w_d2 = max(pen_m2, m_per_texel2) / depth_m2;
             var occluded2 = 0.0;
             var taps2 = 0.0;
+            // 🔴 与静态图同款：逐像素旋转抽头核，解掉抽头与纹素网格的相位锁定
+            // （否则 NPC 影子内部出同样的 0.39m 方块马赛克）。角度取屏幕像素的函数，
+            // 与静态图那份同源；两张图用同一个角，影子边缘的噪声才不会互相错位。
+            let ang2 = fract(sin(dot(floor(input.position.xy),
+                vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+            let kca2 = cos(ang2);
+            let ksa2 = sin(ang2);
             for (var dy2 = -DYN_PCF_RADIUS; dy2 <= DYN_PCF_RADIUS; dy2 = dy2 + 1) {
                 for (var dx2 = -DYN_PCF_RADIUS; dx2 <= DYN_PCF_RADIUS; dx2 = dx2 + 1) {
+                    let rx2 = f32(dx2) * kca2 - f32(dy2) * ksa2;
+                    let ry2 = f32(dx2) * ksa2 + f32(dy2) * kca2;
                     let d2 = textureSample(shadow_dyn_map, shadow_sampler,
-                        base_uv2 + vec2<f32>(f32(dx2), f32(dy2)) * step_uv2);
+                        base_uv2 + vec2<f32>(rx2, ry2) * step_uv2);
                     occluded2 = occluded2 + smoothstep(0.0, w_d2, sp2.z - bias_d2 - d2);
                     taps2 = taps2 + 1.0;
                 }
