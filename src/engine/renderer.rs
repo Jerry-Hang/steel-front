@@ -6689,7 +6689,17 @@ impl Renderer {
         self.pt_acc_mem = acc_mem;
         self.pt_acc_view = acc_view;
         self.pt_size = (w, h);
-        // RV3D_PT_SPP 覆盖累积目标（默认 256；调参/快速预览可设小值）
+        // RV3D_PT_SPP 覆盖的是**累积帧数**（不是每帧样本数！默认 256）。
+        //
+        // 🔴 设小值 = 改曝光，不是只改速度。片元末尾的时域累积是**指数滑动平均**
+        // （`acc = mix(acc.rgb, lum, 1/a)`），而显示时又按"求和的样本数"再除一次
+        // （`outc = acc.rgb / acc.a`）——双重归一化的后果是 `acc` 从 0 起步的**暂态被直接
+        // 显示出来**：按稳态窗口 64 帧估，第 N 帧只到稳值的 1−(63/64)^N
+        // ⇒ 16 帧 = 22.3%、64 帧 = 63.5%、256 帧（默认）= 98.2%。
+        // 实测（同机位 `fly:60,1.5,-208:0,4`，全局灰度均值）：16 帧 90.7、64 帧 114.1。
+        // ⇒ **拿 PT 做定量对照（与光栅比亮度、比反照率、比砖纹对比度）必须用默认 256**，
+        // 小值只可用于"看个大概构图"。2026-09-29 我就是照旧注释把 16/64 当同图对比，
+        // 得到了一条假缺陷（PROGRESS §22.11 → §22.11b 更正）。
         self.pt_spp_target = std::env::var("RV3D_PT_SPP")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -6698,7 +6708,12 @@ impl Renderer {
         self.pt_frame.set(0);
         self.pt_reset.set(true);
         self.pt_view_sig.set(0);
-        log::info!("PT-RESIDENT: {}x{} spp 目标 {}（时域累积）", w, h, self.pt_spp_target);
+        log::info!(
+            "PT-RESIDENT: {}x{} 累积目标 {} 帧（时域 EMA，未到 256 帧时画面偏暗，见上方注释）",
+            w,
+            h,
+            self.pt_spp_target
+        );
         Ok(())
     }
 
