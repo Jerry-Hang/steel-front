@@ -213,7 +213,15 @@ void main() {
                 // PT 会给玻璃幕墙和树冠长出砖缝——两侧"看着不一样"正是本条要修的。
                 vec3 hn = normalize(hitNrm);
                 vec3 an = abs(hn);
+                // 🔴 朝下的面（梁底、压顶底面）不画砌块网格 —— 与光栅 `build.rs` 同一条
+                // 判据，理由见 docs/PROGRESS.md §23.10：真实砌体的底面要么露一排砖端、
+                // 要么整浇混凝土留模板缝，不存在"底面显示 1.6m 见方砖格平面排布"。
+                // ⚠ 语义与光栅不同：盒体的 hitNrm 是**面号表查出的几何外法线**
+                // （见本文件上面 `f == 2u → (0,-1,0)`），**不随视线翻转**；而光栅那边的
+                // `fnrm` 是翻向观察者的。两边都判 `y < 0` 结论相同，但别以为同一变量。
+                bool facing_down = an.y > an.x && an.y > an.z && hn.y < 0.0;
                 bool masonry = span >= MASONRY_MIN_SPAN
+                    && !facing_down
                     && !(tint.b > tint.r * 1.4)
                     && !(tint.g > tint.r && tint.g > tint.b * 1.4);
                 if (masonry) {
