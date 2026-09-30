@@ -781,17 +781,31 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             // 一个 tile = 4 砖 ⇒ 水平方向每 1.6m、竖直方向每 0.8m 一个 tile。
             // 分母与 `procedural.rs::marker_skin` 的 `rows=4`/`u*4.0` 同源，勿在此另猜。
             // 远距收敛沿用下面既有的 `detail` 因子，不新增第二套衰减。
+            //
+            // 🔴 但**朝下的水平面不画砌块网格**（§23.7 / §23.8）。上面三分支对"水平面"
+            // 一视同仁：法线主轴是 Y 就取 `world_pos.xz`，于是顶面与底面都显示一张
+            // 1.6m×0.8m 的**平面方格网**。这两件事并不等价：
+            //   · **顶面**读作帽石/铺地的分缝——俯视实拍 `copingt_b.png` 判定可接受 ⇒ 保持原样；
+            //   · **底面**从下方掠射看就是一张"吊顶"，而**同一根构件的竖直面**画的是 0.2m
+            //     砖行顺砌（`sw02_b.png` 正中的横梁）⇒ 一个物体上并排两套砌体系统。
+            // 真实砌体不存在"底面露出砖的平面排布"：砖墙底面要么露一排砖端，要么是全浇
+            // 混凝土的模板缝，不会是 1.6m 见方的砖格 ⇒ 这是**物理判据，不是口味取舍**，
+            // 也正因此只切朝下的那一半、不动刚被实拍判定为可接受的顶面。
+            // `fnrm` 在前面已翻向观察者 ⇒ 看得见的底面必有 `fnrm.y < 0`；
+            // 竖直面的 `fnrm.y ≈ 0`，走 x/z 主轴分支，完全不受这条影响。
             let an = abs(fnrm);
-            var skin_uv = input.world_pos.xy;
-            if (an.x > an.y && an.x > an.z) {
-                skin_uv = input.world_pos.zy;
-            } else if (an.y > an.x && an.y > an.z) {
-                skin_uv = input.world_pos.xz;
+            if !(an.y > an.x && an.y > an.z && fnrm.y < 0.0) {
+                var skin_uv = input.world_pos.xy;
+                if (an.x > an.y && an.x > an.z) {
+                    skin_uv = input.world_pos.zy;
+                } else if (an.y > an.x && an.y > an.z) {
+                    skin_uv = input.world_pos.xz;
+                }
+                base = mix(input.color,
+                           textureSample(marker_skin_tex, texture_sampler,
+                                         skin_uv / vec2<f32>(1.6, 0.8)).rgb,
+                           0.45 * (0.25 + 0.75 * detail));
             }
-            base = mix(input.color,
-                       textureSample(marker_skin_tex, texture_sampler,
-                                     skin_uv / vec2<f32>(1.6, 0.8)).rgb,
-                       0.45 * (0.25 + 0.75 * detail));
         }
         // 玻璃底面：逐层渐变 + 分格 + 逐格随机（见 glass_shade）。
         // 只给**近竖直**的面画"层/格"图案：天窗、占领底盘这类横放的蓝面没有楼层可言，
