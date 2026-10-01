@@ -2739,13 +2739,22 @@ impl Game {
 
     /// 关卡系统据点数据（供 main.rs 渲染世界标记）：(id, x, z, 归属, 进度 0..=1)。
     /// 未启用关卡系统或无据点 → 空列表。
-    pub fn capture_points(&self) -> Vec<(String, f32, f32, Option<crate::engine::ai::Team>, f32)> {
+    ///
+    /// 🔴 返回值里**必须带 `radius`**：占领底盘是**视觉**，它必须等于**玩法**的占领判定半径。
+    /// 早先这里只给 `(id,x,z,owner,progress)`，渲染侧拿不到 radius，于是 `main.rs` 把底盘
+    /// 写成了硬编码 `from_scale(10.0, …)` —— 而立方体模板是 ±1、`from_scale` 传的是
+    /// **半尺寸**，结果底盘画成半径 10m，对 `street_fight`(5.0) / `bridgehead`(5.0/6.0)
+    /// 是**真实占领圈的两倍**，对 `defense_line`(12.0) 又**反而小一圈**。
+    /// 玩家据此判断"我进圈了没有"，是玩法级的误导，不只是好看问题。
+    pub fn capture_points(
+        &self,
+    ) -> Vec<(String, f32, f32, f32, Option<crate::engine::ai::Team>, f32)> {
         self.obj_state
             .as_ref()
             .map(|o| {
                 o.points
                     .iter()
-                    .map(|p| (p.id.clone(), p.x, p.z, p.owner, p.progress))
+                    .map(|p| (p.id.clone(), p.x, p.z, p.radius, p.owner, p.progress))
                     .collect()
             })
             .unwrap_or_default()

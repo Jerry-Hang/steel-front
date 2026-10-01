@@ -2540,13 +2540,13 @@ impl GameApp {
                 .map(engine::renderer::WorldMarker::for_obstacle)
                 .collect();
             // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
-            // 每据点 = 细高立柱（归属色）+ 扁平底盘（半径 5.0，半透明归属色）。
+            // 每据点 = 细高立柱（归属色）+ 扁平板状底盘（归属色，不透明）。
             // 复用 WorldMarker 通道（主 pipeline 实例化），零渲染管线改动。
             let capture_markers: Vec<engine::renderer::WorldMarker> = self
                 .game
                 .capture_points()
                 .into_iter()
-                .flat_map(|(id, x, z, owner, _progress)| {
+                .flat_map(|(_id, x, z, radius, owner, _progress)| {
                     let tint = match owner {
                         Some(crate::engine::ai::Team::Blue) => [0.08, 0.35, 0.98, 1.0],
                         Some(crate::engine::ai::Team::Red) => [0.95, 0.12, 0.08, 1.0],
@@ -2554,23 +2554,34 @@ impl GameApp {
                     };
                     // 底盘配色：三通道等比缩放 → 色相/饱和度不变，归属色语义（蓝/红/灰）保持
                     let base_tint = [tint[0] * 0.8, tint[1] * 0.8, tint[2] * 0.8, 0.6];
-                    let _ = id; // 标记 id 暂不绘制文字（HUD 已有 id 标签）
                     [
-                        // 立柱（旗杆）
+                        // 立柱（旗杆）：0.4m 见方、高 4m、底面落在地面。
+                        // 🔴 `from_scale` 传的是**半尺寸**（立方体模板 ±1，
+                        // `renderer.rs:1019 obstacle_model` 用 `scale = half / tmpl`）。
+                        // 旧值 (0.4, 4.0, 0.4) 是 2026-09-17 之前"scale = 全尺寸"的写法，
+                        // 改约定后没跟着改 ⇒ 实际画出 0.8m 宽、8m 高、底部埋进地里 2m。
                         engine::renderer::WorldMarker {
                             model: glam::Mat4::from_translation(glam::Vec3::new(x, 2.0, z))
-                                * glam::Mat4::from_scale(glam::Vec3::new(0.4, 4.0, 0.4)),
+                                * glam::Mat4::from_scale(glam::Vec3::new(0.2, 2.0, 0.2)),
                             tint,
                         },
-                        // 地面底盘（占领半径范围，半径 5.0 → scale 10.0）。
-                        // D10 根因：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，而地面实例
-                        // 平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；玩家视线 ~1.7m 看
-                        // 一层 10cm 的板几乎完全侧向（edge-on）→ 投影不足一像素 → 底盘"消失"，
-                        // 据点读起来只剩两根电线杆。改为 0.5m 厚的低台（底面埋进地里 5cm 避免
-                        // 与地形之间留缝），顶面离地 ~40cm，任何视角都能读出"这是一块领地"。
+                        // 地面底盘：**半径直接取玩法的占领判定半径**，不再写魔数。
+                        // D10 根因（保留）：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，
+                        // 而地面实例平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；
+                        // 玩家视线 ~1.7m 看一层 10cm 的板几乎完全侧向 → 投影不足一像素 →
+                        // 底盘"消失"，据点读起来只剩两根电线杆。改为 0.5m 厚低台
+                        // （底面埋进地里 5cm 避免与地形之间留缝），顶面离地 ~40cm。
+                        // 🔴 第二个根因（本轮修）：这里原先硬编码 `from_scale(10.0, 0.5, 10.0)`
+                        // 并注释"半径 5.0 → scale 10.0"——那是"scale = 全尺寸"的旧约定。
+                        // 按现在的约定它画的是**半径 10m**，而玩法判定半径是
+                        // street_fight 5.0 / bridgehead 5.0·6.0 / defense_line 12.0，
+                        // ⇒ 领地标记在前两者上是真实圈子的 **2 倍**、在后者上**反而小一圈**，
+                        // 玩家靠它判断"进圈了没有"会被系统性误导。改成由 `radius` 推导，
+                        // 魔数消失，这类漂移不可能再回来。
+                        // 半高 0.25 + 中心 y=0.20 ⇒ 跨 [−0.05, +0.45]，与上面 D10 的意图逐值一致。
                         engine::renderer::WorldMarker {
                             model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.20, z))
-                                * glam::Mat4::from_scale(glam::Vec3::new(10.0, 0.5, 10.0)),
+                                * glam::Mat4::from_scale(glam::Vec3::new(radius, 0.25, radius)),
                             tint: base_tint,
                         },
                     ]
