@@ -607,7 +607,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 7. **D12 士兵近距观感**：`soldier.glb` 实例化绘制；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画（`docs/HANDOFF-soldier.md`）。
 8. **D4 墙缝天空亮条**：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
 9. **mesh 着色器过不了严格 `spirv-val`**：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
-10. **PT 盒上限静默截断**：512 → 1024 一次分配 + 一次性告警。
+10. **PT 盒上限静默截断**：512 → 1024 → **现值 2048**；一次分配 + 一次性告警。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 像素重投影复用或运动自适应 spp；`signature()` 分层（~0.5m/~3°/~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（含 `RV3D_PT_EXPOSURE`）。
 12. **溢出静默丢弃**：超容处有 `Renderer::warn_npc_cap_once`。
 13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步。**仍未做**：NAT 双进程真机验证、回滚、快照增量压缩、会话恢复。
