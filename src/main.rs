@@ -4621,6 +4621,102 @@ mod tests {
         );
     }
 
+    /// 🔴 跨文件重复的着色器常量必须逐值一致（2026-10-01）。
+    ///
+    /// 存在理由：本会话修掉的**两条真缺陷是同一个模式**——同一约定存在若干份物理副本，
+    /// 改了生产者、漏改消费者：
+    /// - `pt_set_scene_markers` 的 `* 0.5` 是 2026-09-17 之前"渲染盒 = 2×AABB"的遗留，
+    ///   生产者改了、PT 这个消费者没跟上 ⇒ **PT 的每个 marker 盒整体小一半**（§22.14）；
+    /// - `main.rs` 占领底盘 `from_scale(10.0,…)` 配注释"半径 5.0 → scale 10.0"，
+    ///   同样是旧约定遗留 ⇒ **领地底盘画成真实占领圈的 2 倍**（§23.13）。
+    /// 两条都**从画面上看不出来**、只能靠把值对起来算。既然算得出来，就该在测试里算，
+    /// 而不是等下一位再花两小时反推。
+    ///
+    /// 自检（教训 27：判据必须能红）：**每份副本都必须真的被找到**。若某处改了名、
+    /// 挪了文件或正则不匹配，"找到 0 份"绝不能算通过——那正是本仓反复踩的恒真断言。
+    #[test]
+    fn duplicated_shader_constants_stay_in_sync() {
+        /// 取某个标识符在**非注释行**上的所有声明值。
+        /// 跳过注释是必须的：说明性注释里满是"必须与 X 同值"这类句子，
+        /// 不跳过的话注释里提到的数字会被当成一份副本，把测试变成噪音。
+        fn decls(src: &str, name: &str) -> Vec<f32> {
+            let mut out = Vec::new();
+            for line in src.lines() {
+                let t = line.trim_start();
+                if t.starts_with("//") || !line.contains(name) {
+                    continue;
+                }
+                let Some(eq) = line.find('=') else { continue };
+                // 必须先 trim：`const X: f32 = 1.5;` 的等号后紧跟一个空格，
+                // 不 trim 则 take_while 首字符即失败、解析出空串 ⇒ 一份都找不到。
+                // （本函数第一版就栽在这里，靠下面"必须找到 4 份"的自检才没静默通过。）
+                let rest = line[eq + 1..].trim_start();
+                let num: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                    .collect();
+                if let Ok(v) = num.parse::<f32>() {
+                    out.push(v);
+                }
+            }
+            out
+        }
+
+        let read = |p: &str| -> String {
+            std::fs::read_to_string(p)
+                .unwrap_or_else(|e| panic!("读 {p} 失败：{e}（测试工作目录应为仓库根）"))
+        };
+        let build = read("build.rs");
+        let ray = read("src/engine/ray_tracer.rs");
+        let ptshader = read("assets/rt/pt_panorama.glsl");
+
+        // ① 砌块皮肤尺寸门：光栅 WGSL 两份（顶点着色器 + mesh 着色器各一份）
+        //    + PT 的 Rust 常量 + PT 的 GLSL 常量 = 4 份。
+        let mut gate: Vec<(&str, f32)> = Vec::new();
+        for (i, v) in decls(&build, "MASONRY_MIN_SPAN").into_iter().enumerate() {
+            gate.push((if i == 0 { "build.rs(VS)" } else { "build.rs(mesh)" }, v));
+        }
+        for v in decls(&ray, "MASONRY_MIN_SPAN") {
+            gate.push(("ray_tracer.rs", v));
+        }
+        for v in decls(&ptshader, "MASONRY_MIN_SPAN") {
+            gate.push(("pt_panorama.glsl", v));
+        }
+        assert_eq!(
+            gate.len(),
+            4,
+            "MASONRY_MIN_SPAN 应有 4 份声明，实际找到 {} 份（{:?}）\
+             ⇒ 有副本被改名/挪走/删掉了，这个测试本身需要跟着更新，不要直接放宽断言",
+            gate.len(),
+            gate
+        );
+        let want = crate::engine::ray_tracer::MASONRY_MIN_SPAN;
+        let off: Vec<String> = gate
+            .iter()
+            .filter(|(_, v)| (*v - want).abs() > 1e-6)
+            .map(|(w, v)| format!("{w} = {v}"))
+            .collect();
+        assert!(
+            off.is_empty(),
+            "MASONRY_MIN_SPAN 各副本与 ray_tracer 的 {want} 不一致：{}\
+             ⇒ 尺寸门会在光栅/PT 两侧给出不同判定（§22.14 同族错法）",
+            off.join("；")
+        );
+
+        // ② 皮肤 tile 尺寸：光栅用字面量、PT 用常量，两处必须同为 1.6 × 0.8。
+        //    这是 §22.4b 那套"砖块尺度"的唯一真值来源，任一侧改动都会让两侧砖大小不同。
+        assert!(
+            build.contains("vec2<f32>(1.6, 0.8)"),
+            "build.rs 里找不到皮肤 tile 字面量 `vec2<f32>(1.6, 0.8)`\
+             ⇒ 若改了写法（例如换成常量），请同步更新本测试与 PT 侧，不要删断言"
+        );
+        assert!(
+            ptshader.contains("SKIN_TILE_M = vec2(1.6, 0.8)"),
+            "pt_panorama.glsl 里找不到 `SKIN_TILE_M = vec2(1.6, 0.8)`\
+             ⇒ 两侧皮肤 tile 已脱钩，砖块尺度会光栅/PT 不一致"
+        );
+    }
+
     /// 🔴 每把 GLB 枪模的索引必须落在顶点数以内，且顶点不得含 NaN/Inf。
     ///
     /// 存在理由（2026-09-15）：**按 2 切枪（AK-104）会直接把设备打掉**
