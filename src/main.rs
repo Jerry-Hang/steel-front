@@ -4717,6 +4717,112 @@ mod tests {
         );
     }
 
+    /// 🔴 尺寸门用的 **1.05 必须"除门本身以外与 1.0 不可区分"**（§22.7）。
+    ///
+    /// `flat_flag` 是片元着色器的材质分派值：0=地面、1.0=marker、1.25=外部建模、
+    /// 2.0=NPC、3.0=枪。2026-09-30 起多了一个 **1.05 = "太小、不发砌块皮肤"的 marker**
+    /// （`MASONRY_MIN_SPAN` 尺寸门，护柱/消防栓这类小件走它）。
+    ///
+    /// 风险不在门本身，而在**将来新加的那一条分支**：只要有人写出
+    /// `flat_flag > 1.0` 或 `flat_flag <= 1.03` 这种**在 1.0 与 1.05 上取值不同**的判据，
+    /// 被门挡下的 1.05 就会**悄悄走进与 1.0 不同的分支** —— 症状是"护柱忽然少了一层
+    /// 效果"，而没人会去查一个 0.05 的差。⇒ 把它变成硬约束：
+    /// **片元里每条 flat_flag 判据在 1.0 与 1.05 上取值必须相同，
+    /// 唯一例外是阈值恰为 1.02 的那条（尺寸门自己）。**
+    ///
+    /// ⚠️ 判据是"**取值不同**"，不是"阈值落在 1.0~1.05 之间"：`flat_flag < 1.1`
+    /// 两条都成立 ⇒ **无害**，本测试不该报它（第一版把例子写成 `< 1.1`，
+    /// 被 `target/guardlogic.py` 的合成用例当场否掉）。
+    ///
+    /// 自检（教训 27：判据必须能红）：解析到的判据数必须 **>= 8**，且必须**至少找到
+    /// 一条阈值 1.02 的门** —— 否则"没有例外"会因为"什么都没解析到"而恒真通过。
+    #[test]
+    fn gated_marker_flag_is_indistinguishable_except_at_the_gate() {
+        /// 把非注释行里的 `flat_flag <op> <num>` 解析成 (算子, 阈值, 行号)。
+        fn atoms(src: &str) -> Vec<(String, f32, usize)> {
+            let mut out = Vec::new();
+            for (ln, line) in src.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let mut base = 0usize;
+                while let Some(k) = line[base..].find("flat_flag") {
+                    let i = base + k + "flat_flag".len();
+                    let rest = line[i..].trim_start();
+                    let op = ["<=", ">=", "==", "!=", "<", ">"]
+                        .iter()
+                        .find(|o| rest.starts_with(**o))
+                        .copied();
+                    let Some(op) = op else {
+                        base = i;
+                        continue;
+                    };
+                    let num: String = rest[op.len()..]
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    if let Ok(v) = num.parse::<f32>() {
+                        out.push((op.to_string(), v, ln + 1));
+                    }
+                    base = i;
+                }
+            }
+            out
+        }
+
+        fn holds(op: &str, flag: f32, rhs: f32) -> bool {
+            match op {
+                "<=" => flag <= rhs,
+                ">=" => flag >= rhs,
+                "==" => flag == rhs,
+                "!=" => flag != rhs,
+                "<" => flag < rhs,
+                ">" => flag > rhs,
+                other => panic!("未知算子 {other}"),
+            }
+        }
+
+        let build = std::fs::read_to_string("build.rs")
+            .expect("读 build.rs 失败（测试工作目录应为仓库根）");
+        let lines: Vec<&str> = build.lines().collect();
+        let from = lines
+            .iter()
+            .position(|l| l.contains("const FRAGMENT_SHADER_WGSL"))
+            .expect("找不到 FRAGMENT_SHADER_WGSL 起点");
+        let to = lines[from + 1..]
+            .iter()
+            .position(|l| l.contains("const MESH_SHADER_WGSL"))
+            .map(|p| p + from + 1)
+            .expect("找不到 FRAGMENT_SHADER_WGSL 终点（MESH_SHADER_WGSL 之后）");
+
+        let a = atoms(&lines[from..to].join("\n"));
+        assert!(
+            a.len() >= 8,
+            "片元里只解析到 {} 条 flat_flag 判据（应 >= 8）⇒ 着色器改了形态或解析器坏了，\
+             本测试会因'没解析到'而假通过，必须先修解析器再下结论",
+            a.len()
+        );
+        assert!(
+            a.iter().any(|(_, v, _)| (*v - 1.02).abs() < 1e-6),
+            "一条阈值 1.02 的尺寸门都没找到 ⇒ 门被删了或本测试期望已过时（§22.7）"
+        );
+
+        let diff: Vec<String> = a
+            .iter()
+            .filter(|(op, v, _)| {
+                (v - 1.02).abs() > 1e-6 && holds(op, 1.0, *v) != holds(op, 1.05, *v)
+            })
+            .map(|(op, v, ln)| format!("build.rs:{ln}  flat_flag {op} {v}"))
+            .collect();
+        assert!(
+            diff.is_empty(),
+            "这些 flat_flag 判据会让 1.05（被尺寸门挡下的小件）与 1.0 走不同分支：{}\
+             ⇒ 要么把阈值挪出 (1.0, 1.05] 区间，要么显式写成对 1.05 也成立",
+            diff.join("；")
+        );
+    }
+
     /// 🔴 每把 GLB 枪模的索引必须落在顶点数以内，且顶点不得含 NaN/Inf。
     ///
     /// 存在理由（2026-09-15）：**按 2 切枪（AK-104）会直接把设备打掉**
