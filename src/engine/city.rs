@@ -713,11 +713,23 @@ fn warehouse(c: &mut City, cx: f32, cz: f32, seed_i: i32, seed_j: i32) {
     c.deco(Part::new(ObstacleKind::Building, cx, cz, w + 0.7, d + 0.7, UNDER_GROUND, 1.2, GRANITE));
     c.deco(Part::new(ObstacleKind::Building, cx, cz, w + 0.9, d + 0.9, h - 0.9, h, CONCRETE_DARK));
 
-    // 屋面天窗：下沉 0.5m 的玻璃槽 + 两侧挡边（有真实进深，不是贴皮）。
-    // 2 条而不是 3 条：仓库只有 4 座，但每条天窗要 3 个件才不共面。
+    // 屋面天窗：**凸起采光带**——玻璃顶面必须高过壳体顶面与两侧挡边，否则一像素都不画。
+    //
+    // 🔴 这里原来写的是"下沉 0.5m 的玻璃槽（有真实进深，不是贴皮）"，玻璃顶面取 `h-0.10`。
+    // 但壳体是 `UNDER_GROUND..h` 的**实心盒**、占满 `w × d`，而本引擎**没有 CSG、
+    // 主 pass 全不透明** ⇒ 玻璃三轴都被壳体（和屋面环带）完整包住 ⇒ **8 块玻璃
+    // （4 座仓库 × 2 条）实际渲染 0 像素**：不报错、不警告，只是东西没了。
+    // 由 `no_part_strictly_enclosed_by_another` 抓到（该测试先红在恰好这 8 件上，
+    // 每条被两个包住者各列一次 ⇒ 16 行；修好后转绿）。
+    //
+    // 修法沿用本仓定过的规则（`city.rs:921-928` 喷泉那条）：**面高出台沿，一个空洞都不留**。
+    // 玻璃顶面 = 挡边顶(h+0.22) + RELIEF_STEP(0.14) = h+0.36 ⇒ 高出屋面 0.36m，
+    // 读作工业建筑常见的**凸起采光带**；下沉式采光井要真做，得把壳体拆成环，
+    // 那是碰撞与阴影分档的连锁改动，不该顺手塞在这里。
+    // 底面仍留在 h-0.55（埋进屋面以下），所以从上方看玻璃是有厚度的实体、不会与壳体共面。
     for k in [-1i32, 1] {
         let z = cz + k as f32 * (d * 0.26);
-        c.deco(Part::new(ObstacleKind::Block, cx, z, w - 6.0, 2.6, h - 0.55, h - 0.10, GLASS_BLUE));
+        c.deco(Part::new(ObstacleKind::Block, cx, z, w - 6.0, 2.6, h - 0.55, h + 0.36, GLASS_BLUE));
         for s in [-1.0f32, 1.0] {
             c.deco(Part::new(
                 ObstacleKind::Building,
@@ -1973,6 +1985,61 @@ mod city_layout_tests {
                 );
             }
         }
+    }
+
+    /// 没有任何一件被另一件**三轴严格包住**。
+    ///
+    /// 为什么这条值得钉死：本引擎**没有 CSG，主 pass 是全不透明管线**
+    /// （`build.rs` 里 marker 分支明确写着不引入 alpha 混合）。所以一件被实心件
+    /// 完整包住时，它**一个像素都不会画**——**不报错、不警告，只是东西没了**。
+    ///
+    /// 这条已经真实咬过一次：仓库"下沉式天窗"的玻璃
+    /// （`city.rs:720`：`w-6.0 × 2.6`、顶面 `h-0.10`）三轴都在壳体
+    /// （`city.rs:711`：`UNDER_GROUND..h`、占满 `w × d`）内部 ⇒ **4 座仓库 × 2 条
+    /// = 8 块玻璃完全不显示**，而注释还写着"有真实进深，不是贴皮"。
+    /// 更糟的是 `no_degenerate_geometry`（只查最小轴）、
+    /// `decor_is_either_buried_or_attached`（`bottom >= 3.0` 直接豁免，天窗底在 7.4~10.5m）、
+    /// `decor_never_coincides_with_structure`（只拒**逐字节相同**的盒）**三条全都不拦它**。
+    ///
+    /// 判据本身可校准：先让它**红**，红名单必须恰好是这 8 件；修好后转绿。
+    /// 一条永远不会红的"包住检测"没有意义（教训 27：判据必须能红）。
+    #[test]
+    fn no_part_strictly_enclosed_by_another() {
+        // 收缩量：包住判定要求内件每轴都留出这个余量，避免"齐平贴皮"被误报
+        //（贴皮件与本意相同：它就是画在表面上的一层，不该算被吞掉）。
+        const MARGIN: f32 = 0.05;
+        let m = generate_city();
+        let parts: Vec<_> = m.render_geometry().collect();
+        let mut bad: Vec<String> = Vec::new();
+        for (i, a) in parts.iter().enumerate() {
+            if a.shape.tag() == Shape::TAG_NONE {
+                continue; // 只碰撞不绘制的结构碰撞核，本来就不该出现
+            }
+            for (j, b) in parts.iter().enumerate() {
+                if i == j || b.shape.tag() == Shape::TAG_NONE {
+                    continue;
+                }
+                let inside = a.x - a.half_w > b.x - b.half_w + MARGIN
+                    && a.x + a.half_w < b.x + b.half_w - MARGIN
+                    && a.z - a.half_d > b.z - b.half_d + MARGIN
+                    && a.z + a.half_d < b.z + b.half_d - MARGIN
+                    && a.y - a.half_h > b.y - b.half_h + MARGIN
+                    && a.y + a.half_h < b.y + b.half_h - MARGIN;
+                if inside {
+                    bad.push(format!(
+                        "#{} {:?} {:.2}x{:.2}x{:.2} @({:.1},{:.1}) y={:.2}  被  #{} {:?} {:.2}x{:.2}x{:.2} @({:.1},{:.1}) y={:.2} 完整包住",
+                        i, a.kind, a.half_w * 2.0, a.half_d * 2.0, a.half_h * 2.0, a.x, a.z, a.y,
+                        j, b.kind, b.half_w * 2.0, b.half_d * 2.0, b.half_h * 2.0, b.x, b.z, b.y
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} 件被别的件完整包住 ⇒ 它们一像素都不画：\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
     }
 
     /// 砌块皮肤尺寸门（`build.rs::MASONRY_MIN_SPAN = 1.5`）两侧必须留有空档。
