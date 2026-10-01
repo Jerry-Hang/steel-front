@@ -764,9 +764,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
             // 近处幅度 0.55+0.90·luma 与 D1 验收式逐位一致（勿回退），远处收到 0.55+0.12·luma
             base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
-        } else if (light_data.flags.z >= 0.5 && !is_glass && !authored
+        } else if (light_data.flags.z >= 0.5 && !is_glass && !is_canopy && !authored
                    && input.flat_flag < 1.02) {
             // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
+            //
+            // 🔴 `!is_canopy` 是补漏，不是新行为。上面 756-759 的树冠值噪声是
+            // **2026-08-23 为修"纸片树 / 移动时大量线条"专门加的**，而本分支写的是
+            // `base = mix(input.color, …)` —— **从 `input.color` 起重算，不带上游 `base`**，
+            // 于是树冠噪声被整块覆盖：树冠/灌木重新变回"贴了砂浆缝的纯色团"，
+            // 且 `detail` 对 SPH/ICO 恒为 1（那两套模板 uv≡(0,0)，见 663-667 的注释）
+            // ⇒ 距离衰减也救不了它，近看就是叶子上长砖缝。
+            // 同一条排除在 PT 侧一直是有的（`pt_panorama.glsl` 的 `masonry` 条件），
+            // 所以两侧对每丛灌木都不一致；`procedural.rs:627` 那句
+            // "树=绿色细节…共用此皮肤"是 §22.7 之前的旧设计，已被 8-23 的树冠噪声取代。
             //
             // `flat_flag < 1.02` = 顶点/mesh 两侧的尺寸闸（1.05 = "这件太小、不可能是砌体"）。
             // 少了它，0.34m 的花岗岩护柱会在一根柱子上摆出"一道被切断的竖缝 + 4 道横缝"，
