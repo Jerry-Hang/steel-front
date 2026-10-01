@@ -34,10 +34,11 @@
 | 2026-09-25 | **所有 Vulkan 等待加上界**（acquire 1 s / 围栏 5 s + 卡死降级）——修掉「独显静默卡死」；命令缓冲按在飞帧槽位索引 |
 | 2026-09-26 | **审计日**：阴影拆静态/动态两张图（**+23.5%**）、磨砂玻璃菜单、第一人称枪模动画（冲刺/换弹/呼吸）、SVD-12M 真模型实装、军情口径四连修（编制逐人闭合 / 阵亡计数 / 快照同源 / 重组可达）、十余处静默失败（perf_log / net / audio / assets / config）、GLB 与 TOML、网络三处变异模糊 |
 | 2026-09-29 | **PT 与光栅同源日**：修掉 PT 取景水平拉伸 1.6×；PT 的地面与 marker 改采样**与实机同一套**程序化纹理；根治阴影内部棋盘格（PCF 抽头与阴影纹素相位锁死 ⇒ 改逐像素旋转核）；砌块皮肤两处尺度修正（砖行按世界尺度 + 最长轴 <1.5m 不发皮肤，护柱不再"刷条纹"）；🔴 查出 **PT 的 marker 盒自 09-17 起整体小一半**（改"渲染盒 = 碰撞 AABB"约定时漏改了这个消费者） |
+| 2026-10-01 | **并行只读代理审计日**：修掉 `!is_canopy` 漏项——后加的砌块皮肤分支把 2026-08-23 的树冠值噪声**整块静默覆盖**；仓库天窗 **8 块玻璃原本一像素都不画**（被壳体完整包住，主通道全不透明）；占领点底盘/旗杆 **2× 超尺寸**（09-17 约定漂移的第二个漏改消费者，改由玩法半径推导）；新增两条守卫（跨文件重复常量、被完整包住的几何）。🔴 另记两条关于我自己的：`assets/*.spv` 运行时从磁盘读而 cargo 会缓存 `build.rs` ⇒ **改着色器只认 spv 哈希**；以及我为一次自我更正**编造过一条引用**，已撤回 |
 
 ---
 
-## 当前进度（截至 2026-09-30）
+## 当前进度（截至 2026-10-01）
 
 > 🔴 **状态与约束的唯一真源**：工程铁律 / 未结案清单 / 教训 = `AGENTS.md`，逐轮进度与交接 =
 > `docs/PROGRESS.md`。本节只放"给外部读者看的一屏状态" —— **要改就改那两个文件**，
@@ -64,8 +65,8 @@
 - Blender 无头控制闭环：导入 → 材质/AO 烘焙 → 节点净化 → 导出 GLB → 渲染 PNG → 看图自检。
 - 程序化城市（板楼/抹灰楼模块）+ 道具焊接（顶点数即帧率，见铁律 D）。
 
-**验收现状（2026-09-30 实测）**
-- `cargo test --release` **645 passed / 0 failed**；`cargo build --release` **0 警告**
+**验收现状（2026-10-01 实测）**
+- `cargo test --release` **647 passed / 0 failed**；`cargo build --release` **0 警告**
   （🔴 判据只认 `cargo build --release` —— `cargo test` 会因 `cfg(test)` 漏报）。
 - 冒烟（`scripts/run_smoke_pm.ps1`）判据 = `vuid==0 and panics==0 and killed>=1`；
   整局验证层跑法见 `AGENTS.md` 铁律 B。
@@ -451,10 +452,11 @@ packaging — their absence raises no error, it silently falls back to procedura
 | 2026-09-25 | **Every Vulkan wait bounded** (acquire 1 s / fence 5 s + stall degradation) — the "discrete GPU hangs silently" defect; command buffers indexed by in-flight frame slot |
 | 2026-09-26 | **Audit day**: shadows split into static/dynamic maps (**+23.5%**), frosted-glass menus, first-person weapon animation (sprint/reload/breathing), SVD-12M real model shipped, four battle-intel accounting fixes (roster closure / death tally / snapshot identity / regroup reachability), a dozen silent failures (perf_log / net / audio / assets / config), mutation fuzzing over GLB, TOML and the network codec |
 | 2026-09-29 | **PT / raster same-source day**: fixed PT's 1.6× horizontal FOV stretch; PT's ground and markers now sample the **same** procedural textures as the raster; cured the shadow-interior checkerboard (PCF taps phase-locked to shadow texels → per-pixel rotated kernel); two masonry-skin scale fixes (metric courses plus a <1.5 m span gate, so bollards no longer look "painted with stripes"); 🔴 found that **PT marker boxes had been half-size since 09-17** (the "render box = collision AABB" convention change missed this consumer) |
+| 2026-10-01 | **Parallel read-only agent audit day**: fixed the missing `!is_canopy` term — the later masonry-skin branch was **silently overwriting** the 2026-08-23 canopy value noise; 8 warehouse skylight glass panes that **rendered zero pixels** (strictly enclosed by the shell, and the main pass is fully opaque); the capture-point disc and pole were **2× oversized** (second missed consumer of the 09-17 convention change, now derived from the gameplay radius); two new guards (cross-file duplicated constants, strictly-enclosed geometry). 🔴 Plus two entries about myself: `assets/*.spv` is read from disk at runtime while cargo caches `build.rs` ⇒ **verify shader edits by spv hash, never by "it compiled"**, and a **quote I fabricated** to support one of my own corrections — retracted |
 
 ---
 
-## Current Progress (as of 2026-09-30)
+## Current Progress (as of 2026-10-01)
 
 > 🔴 **Single source of truth**: engineering rules / open items / lessons live in `AGENTS.md`;
 > per-round progress and handover live in `docs/PROGRESS.md`. This section is a one-screen
@@ -493,8 +495,8 @@ packaging — their absence raises no error, it silently falls back to procedura
 - Procedural city (panel-block and plastered-block kits) + welded props (vertex count *is* the
   frame rate — see rule D in `AGENTS.md`).
 
-**Verification status (measured 2026-09-30)**
-- `cargo test --release` **645 passed / 0 failed**; `cargo build --release` **0 warnings**
+**Verification status (measured 2026-10-01)**
+- `cargo test --release` **647 passed / 0 failed**; `cargo build --release` **0 warnings**
   (🔴 the warning gate only accepts `cargo build --release`; `cargo test` under-reports).
 - Smoke (`scripts/run_smoke_pm.ps1`) criterion = `vuid==0 and panics==0 and killed>=1`.
 - Battle-intel invariants (tool `tools/battle_tally_check.py`): `own_deaths + Σstrengths == roster`
