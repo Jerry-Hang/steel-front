@@ -251,8 +251,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 **路径追踪（PT，默认关）**
 - 默认关的最新理由 = "整帧替换光栅画面 + 1 spp 噪声大"，属调试/烘焙参照视图，**不是"命中没修"**。
   `RV3D_PT_LIVE=0` 强制关。
-- 采样种子**必须含帧索引**（`frameSeed*64+b`）；push constants 6×vec4=96B，
-  `PtParams::pack` 与 GLSL `PC{a..f}` 两处 `.size(96)` 必须同步；
+- 采样种子**必须含帧索引**（`frameSeed*64+b`）；push constants 7×vec4=112B，
+  `PtParams::pack` 与 GLSL `PC{a..g}` 两处 `.size(112)` 必须同步；
   累积图像逐帧 barrier 用 `GENERAL→GENERAL`（用 `old_layout=UNDEFINED` = 累积白做，且不报 VUID）；
   `pt_frame >= pt_spp_target` 即停派发；`RV3D_PT_SPP` 覆盖目标（实时默认 256，`run_pt_view` 默认 64）。
 - 🔴 **改"实例缩放 ↔ 真实尺寸"的约定必须同改所有消费者**：`pt_set_scene_markers` 的 `* 0.5`
