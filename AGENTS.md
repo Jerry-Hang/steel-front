@@ -122,7 +122,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （`sun.direction` 直接传，勿加负号）；采样器 `.compare_enable(false)` 手动 PCF
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
-  参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
+  参数 2048² D32、半宽 400m、near=1/far=800、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
   🔴 阴影是**两张图**（实测增益见 §21.40(c)）：
   `shadow_image`(binding 5) 只装静态投射者（地形/地面场/marker/道具）、每
   `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；`shadow_dyn_image`(binding 10) 只装
