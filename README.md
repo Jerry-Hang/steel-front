@@ -66,7 +66,7 @@
 - 程序化城市（板楼/抹灰楼模块）+ 道具焊接（顶点数即帧率，见铁律 D）。
 
 **验收现状（2026-10-02 实测）**
-- `cargo test --release` **654 passed / 0 failed**；`cargo build --release` **0 警告**
+- `cargo test --release` **655 passed / 0 failed**；`cargo build --release` **0 警告**
   （🔴 判据只认 `cargo build --release` —— `cargo test` 会因 `cfg(test)` 漏报）。
 - 冒烟（`scripts/run_smoke_pm.ps1`）判据 = `vuid==0 and panics==0 and killed>=1`；
   整局验证层跑法见 `AGENTS.md` 铁律 B。
@@ -496,7 +496,7 @@ packaging — their absence raises no error, it silently falls back to procedura
   frame rate — see rule D in `AGENTS.md`).
 
 **Verification status (measured 2026-10-02)**
-- `cargo test --release` **654 passed / 0 failed**; `cargo build --release` **0 warnings**
+- `cargo test --release` **655 passed / 0 failed**; `cargo build --release` **0 warnings**
   (🔴 the warning gate only accepts `cargo build --release`; `cargo test` under-reports).
 - Smoke (`scripts/run_smoke_pm.ps1`) criterion = `vuid==0 and panics==0 and killed>=1`.
 - Battle-intel invariants (tool `tools/battle_tally_check.py`): `own_deaths + Σstrengths == roster`

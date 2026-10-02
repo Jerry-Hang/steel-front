@@ -1640,6 +1640,47 @@ mod city_layout_tests {
         assert!(m.decor.len() > 500, "装饰件只有 {}，细化没有落地", m.decor.len());
     }
 
+    /// 🔴 城市还必须装得进 **PT 的盒预算**——它是上面那条 8192 的**四分之一**，
+    /// 所以 8192 那条绿着，PT 照样可以已经在丢几何。
+    ///
+    /// 存在理由（2026-10-02，PROGRESS §45）：`PT_MAX_BOXES = 2048`，其中盒 0 固定给地面
+    /// （`renderer.rs:7085`）⇒ 可用 **2047**；而 `street_fight` 实测只有 1789 个可绘制
+    /// marker ⇒ **余量 258，约 13%**。这一族坑本仓已复发**三次**：2026-09-19 那次
+    /// `marker=1789 > 旧容量 1024` 静默丢了 765 个，原因是容量比对写在 `.take()` **之后**，
+    /// 告警闩永远不触发（`renderer.rs:7091-7093` 记着这件事）。
+    /// ⇒ 症状是**光栅一切正常、只有烘焙参照帧缺整块街区**，属于最难归因的那一类。
+    ///
+    /// 🔴 口径必须跟真实数据流一致（`main.rs:2536`）：PT 收的是 `render_geometry()`
+    /// **过滤掉 `Shape::None`** 之后的结果；上面那条 8192 测试数的是未过滤的
+    /// `obstacles + decor`，两者**不能互相代替**。弹孔弹痕不进 PT（它们是
+    /// `append_markers` 追加到渲染器内部的带上，见 §45）。
+    #[test]
+    fn generated_city_fits_pt_box_budget() {
+        /// 占领点每个占 2 个盒（立柱 + 底盘）；关卡系统下最多几个不好猜，留 16 个盒余量。
+        const CAPTURE_BOX_RESERVE: usize = 16;
+
+        let m = generate_city();
+        let drawn = m
+            .render_geometry()
+            .filter(|o| o.shape != Shape::None)
+            .count();
+        let budget = crate::engine::ray_tracer::PT_MAX_BOXES - 1 - CAPTURE_BOX_RESERVE;
+
+        assert!(
+            drawn <= budget,
+            "城市有 {drawn} 个可绘制 marker，超过 PT 盒预算 {budget} \
+             ⇒ PT 会丢掉尾部整块街区的几何（光栅不受影响，只有烘焙参照帧缺块）。\
+             要么提高 ray_tracer::PT_MAX_BOXES（注意 PT 顶点缓冲 = 盒数 × 24 × 32 B，\
+             提到 8192 就是 6 MB，得和显存预算一起算），要么缩小城市。"
+        );
+        // 防空转：口径若被改坏（比如过滤写错导致数为 0），上面那条会假绿
+        assert!(
+            drawn > 1000,
+            "只数到 {drawn} 个可绘制 marker（实测约 1789）⇒ \
+             `render_geometry()` 或 None 过滤出了问题，本测试已失去意义"
+        );
+    }
+
     /// 没有任何几何件是"大张纸片"： footprint 两个方向都超过 2m、**又悬在空中**的件，
     /// 厚度必须 ≥ 20cm。旧版 0.12m × 6.8m 的灯杆/窗带/贴皮就是这么混进场景的。
     /// 埋进地里的薄板不在此列——人行道抬台就是 14cm 厚的铺装，它的底面看不见，
