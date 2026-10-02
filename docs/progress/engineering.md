@@ -2678,6 +2678,22 @@ sw09 FAIL / sw10 ok / sw11 FAIL / sw12 ok` —— 不是"前缀成功后窗口�
 ⇒ 顺带修掉一个我自己埋的不一致：`gates.py` 预检原先用 3100、`cap_safe` 用 3200，
    21:47 那次 `used=3161` 时 waitfree 判空、预检判忙，**把一次能跑的窗口挡掉了** ⇒ 已对齐到 3200。
 
+### ✅ 22:05 销账：`patrol` 在 `bd46ede` 构建上 **12/12 全过**（169 秒）
+
+窗口 22:03 空出（`used=3030 MiB`），`gates.py` 一轮完整 sweep：
+
+```
+sw01 ok sw02 ok sw03 ok sw04 ok sw05 ok sw06 ok
+sw07 ok sw08 ok sw09 ok sw10 ok sw11 ok sw12 ok
+机位行 12 条，其中 ok 12 条；用时 169s   --- patrol: PASS
+```
+
+⇒ **`bd46ede` 的四项 GPU 门禁至此全部真通过**：noise 0.0027% / smoke ALL-OK /
+   patrol 12/12 / vvl（1 类 swapchain VUID ×5、errs=0）。
+   §65 里那条"唯一欠账"**销账**；`gates.py status` 现在四项全 `PASS`。
+⇒ 顺带把前面所有部分结果串成一条完整证据：9/12（21:36）→ 12/12（22:05），
+   中间每一次 FAIL 都已被证明是启动被拒而非画面不合格 ⇒ **该构建的画面判据从未失败过**。
+
 ### 已定根因、**故意未实施**的一条修法（§55 / §63 / §64）
 
 人眼高度俯视时地面散点的根因已经钉到一行：`marker_span` 取三轴 `max`，
