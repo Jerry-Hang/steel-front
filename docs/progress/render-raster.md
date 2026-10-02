@@ -2152,6 +2152,32 @@ if (masonry && !facing_down) { ... }
 ⇒ 下一轮的第一步应该是**确认 binding 1 的图由哪个函数生成**，再决定要不要给它做 A/B 门；
 不要在没有这一步的情况下去做"关掉烘焙图"的实验（会连材质分域与 AO 一起关掉，无法归因）。
 
+### ✅ 上一步的疑问已经查掉，而且**要做的实验早就存在**（18:09）
+
+顺着 `dst_binding(1)` → `self.texture_image_view` → `init_texture()` 读到源头（`renderer.rs:9177-9194`）：
+
+1. **真正的生产者不是那个 `dead_code` 版本**，而是
+   **`procedural::generate_city_ground_texture(size, &height_at)`**（`GROUND_TEXTURE_SIZE`，
+   烘焙 `terrain_height` 的 AO 与静态天光）。⇒ 我上面那句"它可能已经不是现在在用的那张"是对的，
+   若照 `generate_ground_texture` 去做 A/B 会关错对象。
+2. **`RV3D_PROC_TEX=0` 这个 A/B 门早就存在**（回退到 `assets/textures/test.png`），
+   正是我准备去实现的那个 ⇒ **§55 的定性实验零代码改动即可跑**。
+
+⇒ **下一次显存窗口的第一条命令**（机位与 §55 基线完全一致）：
+```
+set "RV3D_PT_LIVE=0" & set "RV3D_CAM=fly:27.5,1.7,9:0,-30" & set "RV3D_PROC_TEX=0"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 ^
+  -Tag spk_noProctex -WarmupSec 12 -HoldSec 1 -Keys 32 -KeyGapSec 5 -AfterKeysSec 12
+python -P target\ratio.py spk_base_b.png spk_noProctex_b.png
+python -P target\switch_effect.py spk_base_b.png spk_noProctex_b.png   # 先证明开关有效
+```
+判读（**顺序不能反**：先确认画面真的变了，再读占比）：
+- 占比塌回 ~0.2% 且画面确有大变 ⇒ **§55 在程序化地面纹理的内容里** ⇒ 属**内容设计**问题
+  （`generate_city_ground_texture` 里有大对比的稀疏/线状结构），不是着色路径缺陷；
+- 占比仍 ~4.9% ⇒ 地面纹理内容不是来源，得回到着色路径找（届时再议 instrument 逐像素分解）。
+⚠️ 注意 `test.png` 与程序化图**内容完全不同**，所以"消失"只能定性到"在纹理内容里"，
+**不能**定位到具体哪个特征 —— 别把定性当成定位。
+
 ### §55 到此为止的状态（本轮收手，不当已解决）
 
 已有效排除：H1 细节层、H2 阴影、H3 扰动法线、H4 NEAREST mip、缺 mip 链、UB 导数、NPC、道具、
