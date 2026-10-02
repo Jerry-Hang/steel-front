@@ -14019,3 +14019,43 @@ assert!(authored_flat > 0.5 && authored_flat < 1.5);   // ← 比的是自己
 名字里带 `matches_shader_constant` 不构成任何证据——**必须做一次注入才知道**。
 ⇒ 建议下轮顺手把这条写进 `AGENTS.md` 铁律 F（那里已有"凡'支持'都要补一条会红的测试"，
    这一条是它的对偶：**凡'同步'类测试，都要注入一次分叉证明它会红**）。
+
+### 41. ✅ 拆掉**第二条假守卫**（`geom.rs` 的 "gpu_side_thresholds"），并踩到一个新 bug 类型
+
+`gpu_side_thresholds_leave_room_for_none_and_authored` 名字自称"GPU 侧阈值"，实现却是：
+```rust
+let authored_flat = 1.25f32;                            // 本地字面量
+assert!(authored_flat > 0.5 && authored_flat < 1.5);    // 比本地字面量 ⇒ 恒真
+```
+从头到尾没读过着色器。改 `build.rs` 里的 1.25，它照绿。
+（同测试里后两条 `Shape::from_tag` 是真的，所以整条不至于全废——**但"GPU 侧"那部分是装饰**。）
+
+**改法**：从 `build.rs` 的 Authored 分支里把那个数**读出来**，并断言
+① 恰好找到 **2 处**（顶点段 + mesh 段，少一处就 panic，不许"没读到"当通过）；
+② 两侧**数值相同**；③ 落在 `(0.5, 1.5)` 内；④ 与 marker 的 1.0 有 >0.05 间隙。
+
+🔴 **红注入实证**：只改顶点段 `1.25 → 1.6`（模拟"改了一条路径忘了另一条"）⇒
+```
+assertion `left == right` failed: 两条管线的 Authored flat_flag 不一致（1.6 vs 1.25）
+⇒ 回退路径与主路径分叉
+```
+这正是 §27.1 记下的那条"两个生产者可能分叉"的**潜在雷**——现在它有了看守。
+随后还原，`cargo build` **0 警告**（1m20s）、`cargo test` **654 passed / 0 failed**，
+且 `triangle.frag.spv` / `mesh.spv` 与 HEAD **逐字节相同** ⇒ 注入没留痕迹。
+
+### 41.1 🆕 新 bug 类型：**在含中文的源文件上按字节切片会 panic**
+
+第一版解析器写的是 `&src[idx..idx + 240]`，直接炸：
+```
+panicked at src\engine\geom.rs:214:32:
+end byte index 84831 is not a char boundary; it is inside '误' (bytes 84830..84833)
+```
+⇒ 本仓 `build.rs` 里有大量中文注释，**任何"取固定字节窗口"的源码解析都必须按字符走**。
+改成 `src[idx..].chars().take(240).collect::<String>()`。
+📌 这个坑对所有"解析源码文本"的守卫都成立——包括今天早些时候那条
+`wgsl_slot_constants_match_the_rust_layout`（它按行 `lines()` 走，天然安全）
+和 `gated_marker_flag_is_indistinguishable_except_at_the_gate`（同样按行）。
+⇒ **规则：解析源码一律按行或按字符，不许按字节偏移。**
+
+📌 另外第二次撞上同一个字形：`谓`(U+8C13)（上午"谓词"、这次"分派条件"前又写了"谓词"）。
+⇒ 已改成"分派条件"。**同一条门撞两次，说明该把这个字记进自己的常用禁字表**。
