@@ -2879,4 +2879,101 @@ mod tests {
             assert!(!hud.handle_event(e), "UI 层不得消费输入: {:?}", e);
         }
     }
+
+    /// ESC 菜单的**绘制矩形**（本文件 `esc_menu_elements`）与**鼠标命中矩形**
+    /// （`main.rs::menu_click_hit`）是同一套布局的**两份手写副本**。
+    /// `main.rs:2089` 的注释明写「矩形布局必须与 ui.rs `esc_menu_elements` 一致」却没有守卫，
+    /// 分叉的后果是"看得见但点不动 / 点得到但看不见高亮" —— 与 §50 那一族同形。
+    ///
+    /// ⇒ 把两份的布局数逐个**从源码文本**解析后对齐（含两条派生关系：
+    /// 第二个选项的 y 必须等于 `base + step`，命中框下沿偏移必须等于 `高 - 上沿偏移`），
+    /// 不抄数字。已实测：今天两处**是一致的**（90+56=146、34-6=28）。
+    ///
+    /// 为什么不做成"两边共用一个函数"的结构修法：那要改鼠标命中路径，
+    /// 而本轮显存被外部负载占满、**跑不了图** ⇒ 被钉住的重复优于未经验证的行为改动。
+    #[test]
+    fn esc_menu_hit_rect_matches_the_drawn_rect() {
+        fn body(src: &str, head: &str) -> String {
+            let at = src
+                .find(head)
+                .unwrap_or_else(|| panic!("找不到 `{head}`：函数被改名或删了？"));
+            let rest = &src[at..];
+            let end = rest[1..]
+                .find("\n    fn ")
+                .map(|k| k + 1)
+                .unwrap_or(rest.len());
+            rest[..end].to_string()
+        }
+        /// 取 `needle` 之后紧跟的第一个数字（跳过空白与括号）。
+        fn num(src: &str, needle: &str, what: &str) -> f32 {
+            nums(src, needle, what).remove(0)
+        }
+        fn nums(src: &str, needle: &str, what: &str) -> Vec<f32> {
+            let mut out = Vec::new();
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find(needle) {
+                let rest = &src[from + rel + needle.len()..];
+                let b: Vec<char> = rest.chars().take(24).collect();
+                let mut i = 0;
+                while i < b.len() && (b[i].is_whitespace() || b[i] == '(' || b[i] == '*') {
+                    i += 1;
+                }
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_digit() || b[i] == '.') {
+                    i += 1;
+                }
+                let tok: String = b[start..i].iter().collect();
+                let v: f32 = tok
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{what} 在 `{needle}` 之后不是数字：{tok:?}"));
+                out.push(v);
+                from += rel + needle.len();
+            }
+            assert!(!out.is_empty(), "{what} 里找不到 `{needle}`：布局被改写，本测试需同步");
+            out
+        }
+
+        let ui = body(include_str!("ui.rs"), "fn esc_menu_elements");
+        let mn = body(include_str!("main.rs"), "fn menu_click_hit");
+
+        // 面板尺寸与内缩：两份必须给同样的数
+        for (needle, what) in [("let pw = ", "面板宽"), ("let ph = ", "面板高")] {
+            let a = num(&ui, needle, "ui.rs");
+            let b = num(&mn, needle, "main.rs");
+            assert!((a - b).abs() < 1e-6, "{what}分叉：绘制 {a} vs 命中 {b}");
+        }
+        for (needle, what) in [("px + ", "选项左边内缩"), ("pw - ", "选项宽度扣减")] {
+            let a = num(&ui, needle, "ui.rs");
+            let b = num(&mn, needle, "main.rs");
+            assert!((a - b).abs() < 1e-6, "{what}分叉：绘制 {a} vs 命中 {b}");
+        }
+        let top = num(&ui, "oy - ", "ui.rs");
+        let top_hit = num(&mn, "oy - ", "main.rs");
+        assert!(
+            (top - top_hit).abs() < 1e-6,
+            "选项上沿偏移分叉：绘制 {top} vs 命中 {top_hit}"
+        );
+
+        // 派生关系 1：命中框下沿 = 高 - 上沿偏移
+        let h = num(&ui, "120.0, ", "ui.rs");
+        let bottom_hit = num(&mn, "oy + ", "main.rs");
+        assert!(
+            ((h - top) - bottom_hit).abs() < 1e-6,
+            "命中框下沿 {bottom_hit} 应等于 高 {h} - 上沿 {top} = {}",
+            h - top
+        );
+
+        // 派生关系 2：命中框逐个列出的 y，必须等于绘制端的 base + i*step
+        let base = num(&ui, "let oy = py + ", "ui.rs");
+        let step = num(&ui, "i as f32 * ", "ui.rs");
+        let ys = nums(&mn, "py + ", "main.rs");
+        assert_eq!(ys.len(), 2, "命中检测的选项数变了（今天 2 个）");
+        for (i, y) in ys.iter().enumerate() {
+            let want = base + i as f32 * step;
+            assert!(
+                (y - want).abs() < 1e-6,
+                "第 {i} 个选项 y 分叉：命中 {y} vs 绘制 {base}+{i}*{step} = {want}"
+            );
+        }
+    }
 }

@@ -2355,8 +2355,8 @@ HUD/小地图**没有**被牵连（它们压根不消费几何），所以改动
 | 档 | 条目 | 判定 |
 |---|---|---|
 | 🔴 该守，但要**改结构**而不是写测试 | `renderer.rs:3522` `uv_glass` location 2「**与 overlay 那份必须一致**」；`renderer.rs:1238` 枪模管线「与 `pipeline` 完全同源」 | 顶点属性列表在盘上**至少三处**（`:3166/3172`、`:3526`、`:10118/10410`）。用源码解析写"两份一致"的守卫极易做成**会假绿的脆守卫**（就是我这两天在拆的东西）。正解：让多个管线共用**同一个** `fn hud_vertex_attributes()`，分叉在结构上不可能 ⇒ 但这是动管线创建的产线改动，**必须跑图验证**（写错就是 device lost），显存窗口内再做 |
-| 🟡 该守，CPU 侧可判 | `main.rs:2089` 菜单矩形「必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中）」 | 命中测试矩形与绘制布局分叉 ⇒ 点击错位。可解析两处常量对齐，工作量小 |
-| 🟡 该守，但要先确认接线 | `ray_tracer.rs:114` PT「`camera.fov` = `perspective_rh` 的 fov_y，**与光栅同源**」 | PT 取景若与光栅 FOV 分叉，参照帧整体尺度就错（§第④条"取景失败"就是这一族）。要先确认 `pack()` 收到的 `tan_half_fov` 真的来自同一个 fov_y |
+| 🟡 该守，CPU 侧可判 —— **已守** | `main.rs:2089` 菜单矩形「必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中）」 | 逐值核过：今天两处**是一致的**（`90+56=146`、`34-6=28`）。新守卫 `esc_menu_hit_rect_matches_the_drawn_rect`（`ui.rs`）从两份源码解析布局数并钉住**两条派生关系**（第二个选项 y = `base+i*step`、命中框下沿 = `高-上沿偏移`），不抄数字。红注入：绘制端步长 56→60 ⇒ 红在 `ui.rs:2973`，已还原。**刻意不做**"两边共用一个函数"的结构修法：那要改鼠标命中路径而本轮跑不了图 ⇒ 被钉住的重复优于未经验证的行为改动 |
+| 🟡 该守，但要先确认接线 —— **已查完** | `ray_tracer.rs:114` PT「`camera.fov` = `perspective_rh` 的 fov_y，**与光栅同源**」 | 逐点核过：光栅 `camera.rs:416` 用的就是 `self.fov`，实机 PT `main.rs:3068` 传 `(camera.fov*0.5).tan()` ⇒ **接线正确**；`main.rs:3257` 那个 60° 是四盒玩具冒烟场景自洽，**不是缺陷**（差点误修）。真问题在 `pack()` 的 60° **静默兜底** ⇒ 已加 `debug_assert` 绊线。详见 `raytrace-pt.md` 的「§50 挂账之 PT 取景 fov_y」 |
 | ⚪ 描述行为，不是跨文件同源 | `game.rs:4649` 扫描顺序、`renderer.rs:528` `max_by_key` 并列取最后一个、`renderer.rs:2142` `shadow_every` 节奏、`renderer.rs:909`/`main.rs:3221` `set_soldier_mesh`、`main.rs:462` `fov_gain` 两通道、`lighting.rs:158/273/287` `ShadowInfo`/`evaluate_directional`/`evaluate_point` | 前几项是**同一文件内**的语义说明，没有可解析的第二处；`lighting.rs` 那三条是**数学式**同源，CPU 参考与 WGSL 数值对照需要真跑着色器 ⇒ 归到"要跑图"那一类 |
 
 ⇒ 这一节的产出是**一张有名有姓的清单 + 每条的处置判断**，而不是又一条绿测试。
