@@ -2434,3 +2434,66 @@ python -P target\switch_effect.py spk_rep1_b.png spk_rep2_b.png   # <= 这才是
 📌 通用形态：**"A 与 B 只差 X%" 本身不是效应量，除非你知道"什么都不改"能差多少。**
 本轮我两次把"没测对照"当成"测出了结论"（另一次见 §55 用基色层 dump 否证 H6）。
 
+## 61. 🧱 §55 的读码突破：那块面**不是地面，是吃砌块皮肤的 marker**（2026-10-02 18:56）
+
+`build.rs` 片元的控制流是关键，之前我一直没看它的前半段：
+
+```wgsl
+        let fg = fog_amount(view_distance(input));
+        return vec4<f32>(mix(shaded, FOG_TINT, fg) * input.fade, 1.0);   // <= marker/NPC/自发光在此就返回
+    }
+    // 世界空间 UV：…（marker/NPC/自发光已走 flat_flag 纯色路径，**不采样**）
+    let world_uv = (input.world_pos.xz + vec2<f32>(256.0, 256.0)) / 512.0;
+    let texel = textureSample(texture_sampled, texture_sampler, world_uv);   // 只有地面/地形走到这
+```
+
+再加 `build.rs:920` 的明文：细节层乘法「位于地面/地形分支（`flat_flag <= 0.5` 才走到）
+⇒ **marker/NPC/自发光完全不受影响**」。
+
+⇒ 于是 §55 那张"什么都关不动"的表**一次性自洽了**：
+**我盯着的那块面根本不是地面，而是一个 flat-color 的 `Building` marker** ——
+`whatground.py` 其实早就给出了它：视野中心落点 `(27.5, 38.4)` 上覆盖的正是
+`Building pos=(+27.50,+40.00) y=+5.25 half=(12.50, 0.300, 0.75) tint=(0.4,0.39,0.38)`，
+我上一轮把它当成"排除法剩下的怪事"，**没认出它就是答案**。
+
+### 关键推论：这块 marker **吃砌块皮肤**，而皮肤是我唯一没测过的纹理
+
+`MASONRY_MIN_SPAN = 1.5`（`build.rs:996`），判据取最长轴 ⇒ 该 marker 最长轴 **25 m ≫ 1.5** ⇒
+**它会采样 `MarkerSkin`（binding 8），用 `SKIN_TILE_M = 1.6 × 0.8 m` 的砖 tile。**
+把 1.6 m 的砖压在 25 m × 1.5 m 的扁带上，砖缝是**高对比规则图样**，
+在近旁射角下与像素栅格干涉 ⇒ 正是 §55 的形态（嵌套弧 / 羽状长条，随视角换族）。
+幅度也对得上：皮肤以最高 `0.45` 权重混进 `tint`，砖缝 mortar 的对比远超 16% 判据线。
+
+⇒ 这条假设**同时解释了 §55 全部四条最难解释的观测**：
+① 只随视角变（皮肤 lod 由 `pxm` 驱动）；② 关阴影/道具/NPC/地面细节层全无效（都不碰它）；
+③ 换掉宏观地面纹理无效（marker 不采样 binding 1）；④ 幅度够大（砖缝高对比）。
+
+### 一次抓帧就能定案（比加开关便宜）
+
+把同一机位对准**没有 marker 覆盖的真空地**（公园草地中央），若散点消失 ⇒ §55 在 marker 皮肤上。
+`target/whatground.py` 已能列出"某点上方是否有扁平面 marker"，可先 CPU 侧选点，再抓一帧对照。
+⇒ 若成立，修法在**皮肤侧**（砖缝对比、`detail` 淡出窗口、或给这类"长而扁"的件关掉皮肤），
+**不在地面侧** —— 这正是我前面几轮反复找错地方的原因。
+
+**对照机位已选好**（`target/pick_clear_spot.py`）：全图共 **326 个**"可能吃皮肤的扁平面 marker"，
+城市内离它们最远的开阔点是 **(-180, -180)（净距 28.3 m）** ⇒
+```
+set "RV3D_PT_LIVE=0" & set "RV3D_CAM=fly:-180.0,1.7,-209.4:0,-30"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 ^
+  -Tag spk_openground -WarmupSec 12 -HoldSec 1 -Keys 32 -KeyGapSec 5 -AfterKeysSec 12
+python -P target\ratio.py spk_base_b.png spk_openground_b.png
+```
+判读：`spk_openground` 占比 ≈ 0.2%（干净机位水平）⇒ **§61 成立**；
+仍 ≈ 4.9% ⇒ §61 被否证，问题真在地面侧。
+⚠️ 选点第一版挑到 `(-250,-250)`——那是**城外角落**，相机 `z=-279.4` 已在 `WORLD_HALF=256` 之外，
+拍的是天际线不是地面；"离一切 marker 最远"这种朴素判据会自动跑到地图边角。
+⇒ 已改为**限制在城市内 + 只按离扁平 marker 最远**评分。这类"看起来更干净其实是无效样本"的选点，
+是 §58/§60 那族（工具会给出漂亮但无意义的结果）在**选点**上的再现。
+
+### 本轮在这条线上第三次找错地方，根因是同一个
+
+`sw09` 的名字让我先入为主认定"看的是地面"，于是我：先查地面纹理（否）、再查地形（否）、
+再查地面细节层（否）——**三次都在"地面"这个假设里打转，而答案在 20 行代码之外的一个 `return` 里。**
+⇒ 教训：**机位名/直觉不是几何证据。** 定位表面身份要先问"这个屏幕点上的射线打到哪个实例"，
+而我直到第 61 节才去做这件事。
+
