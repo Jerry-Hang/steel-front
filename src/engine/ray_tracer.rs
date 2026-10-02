@@ -137,6 +137,16 @@ impl PtParams {
         move_amount: f32,
         box_tri_end: u32,
     ) -> [[f32; 4]; 7] {
+        // 取景半角正切必须**由调用方给真实值**。这里原先是静默回退到 60°：
+        // 一旦哪天传进 0，PT 会照常出图、只是**整体尺度错**，而画面看起来"没问题"——
+        // 与本仓已确立的原则冲突（`RV3D_GPU` 匹配不到就报错退出，"不静默回退 ——
+        // 否则'在核显上验过'这句是假的"）。⇒ 保留回退以免发布版崩，但开发构建里先响。
+        debug_assert!(
+            self.tan_half_fov > 1e-4,
+            "PtParams.tan_half_fov = {} 不是有效取景值；调用方必须传 (camera.fov * 0.5).tan()，\
+             否则 PT 参照帧整体尺度静默错掉",
+            self.tan_half_fov
+        );
         let tan = if self.tan_half_fov > 1e-4 {
             self.tan_half_fov
         } else {
