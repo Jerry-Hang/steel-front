@@ -1374,9 +1374,18 @@ fn mesh_main(
     let m_cyl = is_marker && shape_tag > 1.5 && shape_tag < 2.5;
     let m_ico = is_marker && shape_tag > 2.5 && shape_tag < 3.5;
     let m_sph = is_marker && shape_tag > 3.5 && shape_tag < 4.5;
-    // 过渡兜底：只有"未打标签"（Shape::Legacy = 1.0）的绿色 marker 才沿用旧的颜色嗅探，
-    // 这样 main.rs 里手写 tint=[r,g,b,1.0] 的掩体/植被画面逐位不变；显式 Shape::Box(0.0)
-    // 不受影响。等所有构造点都显式打标后可删掉这一行。
+    // 过渡兜底：只有"未打标签"（Shape::Legacy = 1.0）的绿色 marker 才沿用旧的颜色嗅探。
+    // 🔴 但下面这两句原注释的说法**经 2026-10-02 逐条复核是不成立的**，保留代码、先纠正记录：
+    //   ① 「显式 `Shape::Box(0.0)` 不受影响」——**该变体已于 2026-09-08 删除**
+    //      （`geom.rs:29-32`），今天**没有任何标签能表达"我是方块、别嗅我"**；
+    //      `Legacy` 既是方块、又正好落进本判据的 (0.5,1.5) 窗。
+    //   ② 「main.rs 手写掩体/植被靠它保持画面」——`main.rs` 里唯一"绿色 + tint.w=1.0"的
+    //      手写 marker 是手雷（`:2692`），而它在**自发光槽带**上，被上面 `is_glow` 那条
+    //      分支先接走，**走不到这里**。所以本行今天**不服务任何合法用途**。
+    //   实际受害者：`city.rs` 的帐篷四层（`TENT_CAMO`，导出实测 32 件）与集装箱回退件
+    //   （`city.rs:803`，仅在 GLB 道具缺失时走到）——三者自己的注释都写着要的是**方块**。
+    // ⇒ 删除它才是正解；但这是**可见几何变更**，必须配同机位 before/after + 全套门，
+    //   故本轮只纠正注释，删除动作与判据见 `docs/PROGRESS.md` §29。
     let is_tree = is_foliage(inst.tint) && shape_tag > 0.5 && shape_tag < 1.5;
     if (is_npc_cyl || m_cyl) {
         // 四肢：程序化单位圆柱（r=1、y∈[-0.5,0.5]、Y 轴、24 段含盖；
