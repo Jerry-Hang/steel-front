@@ -1,115 +1,14 @@
 # raytrace-pt —— `PROGRESS.md` 主题分档
 
-> 由 `docs/PROGRESS.md` 按主题切档而来（2026-10-02）。
-> **移动单位 = 一整节 `## `**：任何一节都没被从中间切开，代码围栏与
-> "原文 + 追加更正"的链条完整留在本文件内。历史约定不变：**错版保留 + 追加更正**。
-> 本档 12 节、21.9 KB，日期 0000-00-00 .. 2026-09-19。跨主题引用查 `docs/PROGRESS.md` 索引。
+> 由 `docs/PROGRESS.md` 按主题切档而来（2026-10-02，v5）。
+> **移动单位 = 一个完整事件**：事件标题（H1，或带事件标记的 H2）+ 其下所有
+> 续写标题（`改动` / `取证` / `判定` / `症状与根因` / `为什么` …）整段连续搬运，
+> 绝不从中间切开；H3/H4 本来就在正文内，未作为切点。
+> 历史约定不变：**错版保留 + 追加更正**。
+> 本档 4 个事件（含 7 个续写标题）、15.6 KB，日期 2026-09-12 .. 2026-09-19。
+> 跨主题引用查 `docs/PROGRESS.md` 索引。
 
-<!-- 原 PROGRESS.md 第 1283 行 · 0000-00-00 -->
-## 2. 🔴 地面纹理的三个独立根因（`84bf26e` + `2b4987b`，烘焙/预渲染）
-
-实机路面上那些**十几米一块的无定形暗斑**，用两组对照一次分离出来源：
-`RV3D_NO_SHADOW=1` 时它们纹丝不动 ⇒ **不是阴影**；`RV3D_PROC_TEX=0` 时整片消失 ⇒
-就在烘焙纹理里。往下查出三件互相独立的事：
-
-1. **值域用错**：`value_noise` 返回 **[-1,1)**（`lattice` 是带符号的），而
-   `city_zone_color` 全部按 [0,1) 用 ⇒ 写的是"±10% 抖动"，实际是 **−87%..+87%**。
-   同文件的 `periodic_noise` 却是 [0,1) —— **两个同名 `*_noise` 值域不同是温床**。
-   已在两个函数上写明值域，并把均值保持原样（只降摆幅、不改亮度）。
-2. **亚奈奎斯特**：沥青底噪格距 0.9m = **1.8 纹素**（本纹理 2 纹素/米），违反本文件
-   "人行道缝宽 ≥2 纹素"自立的规矩；采样不足的能量不消失，**折叠成低频暗斑**。
-   新增 `GROUND_TEXEL_M` / `GROUND_NOISE_MIN_CELL`(5 纹素) 与强制下限的 `ground_noise()`。
-3. **沿街轴写反**：`along/across` 用 `dx < dz` 选，选反了 —— `dx` 是到"沿 Z 那条街"的
-   轴距离，`dx<dz` 恰恰意味着在沿 Z 的街上。后果两条：车辙画成**横切**街道的暗带并在
-   路口留下不连续暗斑；**中线断续的相位取自错误轴后沿街道恒定 ⇒ `dashed` 恒真 ⇒
-   中线连续** —— 正是 D7"发光跑道"要求"必须断续"那条被静默违反（改宽度、降对比都治不了）。
-
-细节层另有一处：`crack_line=(1-|2n-1|)^6` 是**取噪声等值线**，画出一圈圈闭合细线，
-2m 一 tile 平铺后整片街面读作"皱掉的塑料布"。改成三个零均值倍频，调制域从
-[0.65,1.22] 压到 ±15%。标线改成软衰减带（硬边在 mip 平均时能量集中，正是"一摊"的成因）。
-
-**验证**：新增 `ground_noise_min_cell_respects_nyquist` 与
-`asphalt_mottling_is_far_below_the_aliased_reference` —— 后者**自带旧参数作对照组**，
-判据是相对倍数而非绝对阈值（教训 27：绝对阈值会被噪声自身的低频内容顶到，
-而"没有对照组"会让人把测不出差异当成没有差异）。同机位 A/B diff **46.0%**。
-
-<!-- 原 PROGRESS.md 第 1589 行 · 0000-00-00 -->
-## 1. 最有价值的一条：存储图像格式不匹配 ⇒ **整张图写入未定义值**
-
-- `pt_img` 建的是 **`B8G8R8A8_UNORM`**，而 `assets/rt/pt_panorama.glsl` 声明的是
-  `layout(set = 0, binding = 1, rgba8) uniform writeonly image2D OutImg;`（= **`R8G8B8A8_UNORM`**）。
-- 验证层原文（节选）：*"… OpTypeImage … Format operand **Rgba8** (VK_FORMAT_R8G8B8A8_UNORM) which
-  doesn't match the VkImageView format (VK_FORMAT_B8G8R8A8_UNORM). Any loads or stores with the
-  variable will produce **undefined values to the whole image** (not just the texel being accessed).
-  While the formats are **compatible**, Storage Images must **exactly match**."*
-- ⇒ **PT 一直在往图里写未定义值**：不崩、不报错、没有症状，只是画面**略灰略脏** ——
-  与**教训 15（越界读静默）**完全同一类 UB。
-- 修法：**让图像跟着着色器走** —— `pt_img` 与它的 view **双双改成 `R8G8B8A8_UNORM`**。blit 到
-  `B8G8R8A8_SRGB` 交换链**通道仍然正确**：两者同属一个格式兼容类，R/B 的 swizzle 由 blit 承担。
-- 顺手补了**建图前的显式检查**（`vkGetPhysicalDeviceFormatProperties(...).optimal_tiling_features.STORAGE_IMAGE`
-  —— 该能力对具体格式是**可选**的）：不支持就返回 `Err`，而不是静默建出一张不能当存储图像用的图。
-
-<!-- 原 PROGRESS.md 第 1604 行 · 0000-00-00 -->
-## 2. PT → HUD overlay 通路上还有三个真 bug
-
-三个都是**验证层在 PT 真的跑起来之后**才报出来的（此前 PT 必然灰屏/崩溃，谁也看不见）：
-
-- **`VUID-vkCmdBeginRenderPass-initialLayout-00900`**：overlay 的 render pass 声明
-  `initialLayout = PRESENT_SRC_KHR`，而调用方在 begin **之前已把它转到 `COLOR_ATTACHMENT_OPTIMAL`**。
-  修法：`initialLayout` 改成 **`COLOR_ATTACHMENT_OPTIMAL`**（对齐那条 barrier），
-  `finalLayout` **保持 `PRESENT_SRC_KHR`**。
-- **`VUID-vkCmdDraw-renderPass-02684`**：overlay pass **复用了主 pass 的 `hud_pipeline`** —— 那条管线
-  是给 **MSAA 4x + 带深度附件**的主 render pass 建的，overlay 是 **1 采样、无深度**。验证层证据：
-  `pAttachments[0].samples (1_BIT) != (4_BIT)`、`pDepthStencilAttachment ... VK_ATTACHMENT_UNUSED
-  while the second is 2`、`dependencyCount 0 != 1`。修法：**新增专用 `hud_overlay_pipeline`**（同着色器 /
-  同顶点格式 / 同混合状态，**1 采样、无深度、`render_pass = hud_render_pass`**），**复用
-  `hud_pipeline_layout`**；主通路的 `hud_pipeline` 没动。
-- **`VUID-VkImageMemoryBarrier-oldLayout-01197`**：overlay render pass 之后又发了一条
-  `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` 的 barrier，**而 `finalLayout` 已把图像停在
-  `PRESENT_SRC_KHR`** ⇒ `oldLayout` 是错的。修法：**删掉这条 barrier**（转换由 render pass 完成）。
-
-<!-- 原 PROGRESS.md 第 1629 行 · 0000-00-00 -->
-## 4. 验收（三条互相独立的证据）
-
-- **PT 出图 + HUD 完整**：`screenshots/pt_clean_cap_b.png` —— 路径追踪画面之上 **FPS / LOD / 目标 /
-  小地图 / 血量 / 武器 HUD 全部正常合成** ⇒ **换管线 + 删 barrier 没打坏 overlay**（本轮唯一有
-  "画面回归"风险的改动）。
-- **光栅不受影响**：同机位 A/B（`RV3D_CAM=fly:0,140,80:0,50` + `RV3D_NO_NPC_CULL=1`）差
-  **439 / 4,096,000 px（0.011%）**，**包围盒 (144,48)-(458,143) = HUD 的 fps/实体文字块**，与既有噪声底
-  （**251–311 px、同一包围盒**）同一量级 ⇒ 3D 画面逐像素一致。
-- `cargo build --release` **0 警告**；`cargo test --release` **485 passed / 0 failed**；
-  `scripts/run_smoke_pm.ps1`（光栅、PT 关）→ **`RESULT: ALL-OK`**。
-
-<!-- 原 PROGRESS.md 第 1673 行 · 0000-00-00 -->
-## Bug B（真正的崩溃源）：`hud_framebuffers` 指向已销毁的 ImageView
-
-- `hud_framebuffers` 只在 `init_hud_overlay()` 里建一次，取自当时的 `swapchain_image_views`；
-  而 `destroy_swapchain()` 会销毁这些 image view，`recreate_swapchain()` **从不重建 HUD framebuffer**。
-- **启动阶段光是 resize 事件就有 5 次交换链重建** ⇒ 它们指向的全是已销毁的 `VkImageView`。
-- **它唯一的消费者恰恰是 PT 通路**（光栅通路画的是 `self.framebuffers`，那个是重建的）⇒
-  症状精确地是「**光栅一切正常、一开 PT 就崩**」，而崩溃原因**与 PT 代码毫无关系**。
-- 验证层：`vkCmdBeginRenderPass(): pCreateInfo->pAttachments[0] VkImageView ... is invalid` 与
-  `VUID-VkRenderPassBeginInfo-framebuffer-parameter`。
-- 修法：抽出 `recreate_hud_framebuffers()`（先销毁旧的、再按当前 views 重建），
-  由 `recreate_swapchain()` 在 `init_swapchain()` 之后调用；`destroy_swapchain()` 与 `Drop` 也销毁它。
-
-<!-- 原 PROGRESS.md 第 1685 行 · 0000-00-00 -->
-## 验收（**PT 打开状态下**）
-
-- 跑到 `PT-BLAS` / `PT-TLAS` / `PT-RESIDENT (2560x1600, spp target 256)` / `PT-SCENE (1024 boxes)`，
-  **渲出一张一眼就是路径追踪的图，约 75 fps，HUD 正确合成在上面** ⇒ `screenshots/pt_live_b.png`。
-- **两族 VUID 全部消失**；`scripts/run_smoke_pm.ps1` 在 **PT 打开**下报 `RESULT: ALL-OK`
-  （VUID=0、panics=0、kill 已登记、fps 76.5）。
-- `cargo build --release` **0 警告**、`cargo test --release` **485 passed / 0 failed**。
-
-<!-- 原 PROGRESS.md 第 1693 行 · 0000-00-00 -->
-## ⚠️ 遗留（不致命，PT 能出图）：布局记账还不干净
-
-验证层还剩 3 条：`VUID-VkImageMemoryBarrier-oldLayout-01197`、
-`VUID-vkCmdBeginRenderPass-initialLayout-00900`（HUD 的 render pass 声明 `initialLayout=PRESENT_SRC_KHR`，
-而实际布局不是它）、`VUID-vkCmdDraw-renderPass-02684`（绑定的管线与当前 render pass 不兼容）。
-
-<!-- 原 PROGRESS.md 第 2419 行 · 2026-09-12 -->
+<!-- 原 PROGRESS.md 第 2419-2436 行 · 2026-09-12 · H2 · 1 个标题 -->
 ## ✅ 确认：地面 AO 烘焙的调用链完整（2026-09-12 第 98 轮）
 
 第 96/97 轮我据 `procedural.rs` 的**模块注释**判定"⑦ 的烘焙已有一半"。本轮**从调用链验证**它确实接到了屏幕上：
@@ -128,50 +27,71 @@ AO/静态天光（高度场凹度遮蔽）→ 上传为地面纹理 → 片元�
 
 **⇒ 第 97 轮写进入口摘要的"⑦ 烘焙已有一半"现在是从调用链验证过的结论，不只是从注释推断。**
 
-# 🔴 重大矛盾：`scale` 可能是【全尺寸】语义 ⇒ 第 122 / 133 两轮可能改反了（2026-09-12 第 134 轮）
-
-<!-- 原 PROGRESS.md 第 1648 行 · 2026-09-15 -->
-## 6. 📄 文档：铁律 B 的 PT 段 + `AGENTS.md` 逼近硬上限
-
-- (1)(2) 里**仍然生效**的规则已写进 `AGENTS.md` **铁律 B 的 PT 段**：存储图像格式必须与 GLSL 声明
-  **逐位相等**（"兼容"不算数 + 建图前查 `STORAGE_IMAGE`）、PT 要 blit ⇒ `image_usage` 必须含
-  `TRANSFER_DST`、overlay **必须用独立管线**且 `initialLayout = COLOR_ATTACHMENT_OPTIMAL`、
-  **别补收尾 barrier**。
-- 为留在 **65,536 B 硬上限**内，同轮把几条**已结案**的未结案条目压成一行；随后又做了一次**结构性瘦身**：
-  `AGENTS.md` **65,435 → 58,251 B**（余量从 ~101 B 恢复到 ~7.3 KB），铁律 / 未结案 / 教训三类内容一条没删。
-
-
+<!-- 原 PROGRESS.md 第 1658-1720 行 · 2026-09-15 · H1 · 8 个标题 -->
 # ✅ 未结案 #2 结案 —— PT 史上首次真正出图；#3 原结案被推翻并真修（2026-09-15）
 
-<!-- 原 PROGRESS.md 第 1196 行 · 2026-09-19 -->
-## 15. 深夜巡检：PT 崩溃不再复现（阻塞项状态变更）+ 路面"棋盘格"证伪（2026-09-19）
+## 前提：验证层当天上午才第一次能跑
 
-§14 提交后的自主巡检，两条都是**状态级**发现：
+- 当天上午修掉 mesh 着色器的 SPIR-V 布局问题（未结案 #9）之后，`RV3D_VALIDATION=1` **第一次真的可用**
+  —— 此前它必然**灰屏**（它的失败曾被当成"已知限制"写进文档，见教训 36）。
+- 于是"把 PT 打开"第一次产生了**指名道姓的验证层报文**，两个互相独立的真 bug 因此一次全暴露。
 
-- **PT 阻塞项降级**：用 `target/pt_home/.steel_front.cfg`（scratch HOME，不碰用户配置）
-  开 `pt_enable=1` 探针两次：PT-RESIDENT 2560×1600 正常启动、70s 无崩溃、126fps。
-  随后**带 PT 跑完整战斗冒烟**（`run_smoke_pm.ps1`，移动相机 + 开火 + 击杀 +
-  BLAS 重建路径）：`RT: 路径追踪全景 = 开启` 确认在跑，RESULT ALL-OK
-  （VUID=0、panics=0、fps 101、killed≥1）。**09-03 定案的 0xC0000005 在当前
-  驱动/SDK（1.4.357）下不复现**——当年"源码逐字节回退 35a 仍崩"的结论没作废，
-  变的是环境。默认仍是关（一次不复现不足以翻默认，且 PT 表面还没校准，见下条），
-  但"PT 同屏叠加"从崩溃问题降级成下面的场景内容问题。
-- **PT live 与光栅差 2× 的真因 = 场景内容，不是曝光**：同机位分区对照（pt1_b vs
-  bat1_b，`fly:0,1.7,30:180,2`）：天空 ×1.02 一致，路面 ×2.14（92→197）、楼体 ×1.91、
-  树冠 ×1.90。我最初猜"live 没吃到曝光"——**读码证伪**：live 的 `sun_color` 直接取
-  `lu.directional`（与光栅同源），`exposure=0.2` 比 PT-VIEW 的 0.5 更暗（main.rs:2560）。
-  真因是 **PT 场景 = WorldMarker 盒集合，不含 632 件 GLB 道具**（main.rs:2570 注释
-  原话），建筑/树在 PT 里根本不存在（pt1_b 只剩细杆与亮地），地面盒用平 albedo
-  而非烘焙沥青纹理 ⇒ 亮的是"原型场景"，不是曝光错。**⇒ 下一候选专项改为：
-  PT 场景内容对齐（道具进 BLAS）+ 地面 albedo 接烘焙色**——这是功能扩建，
-  是否值得做属用户决策，暂不动。
-- **路面"棋盘格"证伪**：回放帧里路面出现大方格，PNG 行剖面自相关单调衰减
-  （lag2 +0.93 → lag64 −0.01，无半周期负峰）、方差 2.8（σ≈1.7 灰阶）——真实路面
-  平滑，方格是 zoom 通道 JPEG 压缩伪影。**⇒ 判据复证（教训 28 家族）：通道图的
-  纹理级观感一律先回 PNG 数值，再决定要不要修。**
+## Bug A：交换链 `image_usage` 缺 `VK_IMAGE_USAGE_TRANSFER_DST_BIT`
+
+- PT 通路要把 `pt_img` **blit 进交换链图像**（先 barrier 到 `TRANSFER_DST_OPTIMAL`，再 `vkCmdBlitImage`），
+  而 `image_usage` 里没有 `TRANSFER_DST`。
+- 验证层：`VUID-vkCmdBlitImage-dstImage-00224` 与 `VUID-VkImageMemoryBarrier-oldLayout-01213`。
+- 修法：加上 `TRANSFER_DST`（先查 `surface_capabilities.supported_usage_flags`，不支持则告警）。
+
+## Bug B（真正的崩溃源）：`hud_framebuffers` 指向已销毁的 ImageView
+
+- `hud_framebuffers` 只在 `init_hud_overlay()` 里建一次，取自当时的 `swapchain_image_views`；
+  而 `destroy_swapchain()` 会销毁这些 image view，`recreate_swapchain()` **从不重建 HUD framebuffer**。
+- **启动阶段光是 resize 事件就有 5 次交换链重建** ⇒ 它们指向的全是已销毁的 `VkImageView`。
+- **它唯一的消费者恰恰是 PT 通路**（光栅通路画的是 `self.framebuffers`，那个是重建的）⇒
+  症状精确地是「**光栅一切正常、一开 PT 就崩**」，而崩溃原因**与 PT 代码毫无关系**。
+- 验证层：`vkCmdBeginRenderPass(): pCreateInfo->pAttachments[0] VkImageView ... is invalid` 与
+  `VUID-VkRenderPassBeginInfo-framebuffer-parameter`。
+- 修法：抽出 `recreate_hud_framebuffers()`（先销毁旧的、再按当前 views 重建），
+  由 `recreate_swapchain()` 在 `init_swapchain()` 之后调用；`destroy_swapchain()` 与 `Drop` 也销毁它。
+
+## 验收（**PT 打开状态下**）
+
+- 跑到 `PT-BLAS` / `PT-TLAS` / `PT-RESIDENT (2560x1600, spp target 256)` / `PT-SCENE (1024 boxes)`，
+  **渲出一张一眼就是路径追踪的图，约 75 fps，HUD 正确合成在上面** ⇒ `screenshots/pt_live_b.png`。
+- **两族 VUID 全部消失**；`scripts/run_smoke_pm.ps1` 在 **PT 打开**下报 `RESULT: ALL-OK`
+  （VUID=0、panics=0、kill 已登记、fps 76.5）。
+- `cargo build --release` **0 警告**、`cargo test --release` **485 passed / 0 failed**。
+
+## ⚠️ 遗留（不致命，PT 能出图）：布局记账还不干净
+
+验证层还剩 3 条：`VUID-VkImageMemoryBarrier-oldLayout-01197`、
+`VUID-vkCmdBeginRenderPass-initialLayout-00900`（HUD 的 render pass 声明 `initialLayout=PRESENT_SRC_KHR`，
+而实际布局不是它）、`VUID-vkCmdDraw-renderPass-02684`（绑定的管线与当前 render pass 不兼容）。
+
+## 未结案 #3 重开：原结案只查了"字段存在"，没查接线
+
+- **原结案是错的**：当时只核对字段存在（`config.rs:25/27`）与 `main.rs` 在读它，**没看 parse 分支**。
+- 真相：`load_from` 的 match **没有 `pt_enable` / `rt_enable` 两个 arm**，`save_to` **也从不写这两个键**
+  ⇒ 两字段**只可能等于编译进去的默认值**，**配置文件与设置面板根本开不了 PT**
+  （这也是 #2 那条"设 true 一启动即崩"无法从正常路径复现的原因）。
+- 修法：补两个 arm + `parse_bool`（接受 `1/0` 与 `true/false`，**非法值保持默认、不 panic**）；
+  `save_to` 现在两个键都写。
+- 测试：新增 `pt_and_rt_enable_are_read_from_file`；并**加强**原有 `save_then_load_roundtrip` ——
+  它原先对这两个字段**既不写也不读**，两边都取默认值，`assert_eq!` 照样通过，**正好把 bug 藏住**。
+- **守卫验证过会红**：临时删掉 `load_from` 的两个 arm ⇒ **两条测试同时 FAIL**。
+- 🔴 **教训**：**往返测试只对"非默认值"有区分度**；**"字段存在"≠"接线完成"——
+  结案前要走完整条 写 → 读 → 用 的链路。**
+
+## 📄 文档维护：`AGENTS.md` 压缩 + 教训 36
+
+- 把几条已结案的未结案条目压成一行，以留在 **65,536 B 硬上限**之内（超限会**静默截断**注入视图）。
+- 新增**教训 36**：「**「工具跑不起来」本身就是一条要修的缺陷**」——
+  验证层因灰屏被写进文档当"已知限制"，此后**几周没人开过它**；
+  根因修掉的当天第一次开起来，**立刻**报出两条一直存在的 VUID。
 
 
-<!-- 原 PROGRESS.md 第 7183 行 · 2026-09-19 -->
+<!-- 原 PROGRESS.md 第 7183-7219 行 · 2026-09-19 · H2 · 1 个标题 -->
 ## 18. PT 专项第三段：道具进 BLAS + RT 死开关清除（2026-09-19）
 
 用户指令「把 PT 道具喂进 BLAS，把 RT 踢掉」。两项均完成，509/509 测试，release 零警告，验证层探针（val2）无新增 VUID。
@@ -209,7 +129,7 @@ BLAS 从单几何（盒）扩为双几何：geom0=盒（`PT_MAX_BOXES*24` 顶点
 
 **PT 开时 101→55fps 定性**：`pt_live_enabled` 下 PT 是**每帧计算路径**（非仅开视图才渲染），872k 三角 BLAS 的遍历成本使然（pt4 原生分辨率 18.2fps 同链证据）。冒烟门语义就此定案：**PT 开=稳定性门**（VUID/panic/掉血判定），**PT 关=玩法门**（击杀/patrol）。PT 仍默认关（`pt_enable=false`）：全景 1spp 是收敛前下限，默认开需用户拍板。
 
-<!-- 原 PROGRESS.md 第 7220 行 · 2026-09-19 -->
+<!-- 原 PROGRESS.md 第 7220-7275 行 · 2026-09-19 · H2 · 1 个标题 -->
 ## 19. PT↔光栅标定对齐：参照帧走同一条曲线（2026-09-19 深夜）
 
 §18 后复审 §15 分区偏差表（同机位 `fly:0,1.7,30:180,2`，bat5 光栅基线 vs pt5 PT 实时合成）：方向从 §15 的 **×2.14 过亮翻成 ×0.44-0.59 过暗**。道具遮挡+沥青地面收掉了过亮侧，暴露出剩下的是**结构性不可比**，不是光照差：

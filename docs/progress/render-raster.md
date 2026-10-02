@@ -1,73 +1,14 @@
 # render-raster —— `PROGRESS.md` 主题分档
 
-> 由 `docs/PROGRESS.md` 按主题切档而来（2026-10-02）。
-> **移动单位 = 一整节 `## `**：任何一节都没被从中间切开，代码围栏与
-> "原文 + 追加更正"的链条完整留在本文件内。历史约定不变：**错版保留 + 追加更正**。
-> 本档 14 节、136.8 KB，日期 0000-00-00 .. 2026-10-02。跨主题引用查 `docs/PROGRESS.md` 索引。
+> 由 `docs/PROGRESS.md` 按主题切档而来（2026-10-02，v5）。
+> **移动单位 = 一个完整事件**：事件标题（H1，或带事件标记的 H2）+ 其下所有
+> 续写标题（`改动` / `取证` / `判定` / `症状与根因` / `为什么` …）整段连续搬运，
+> 绝不从中间切开；H3/H4 本来就在正文内，未作为切点。
+> 历史约定不变：**错版保留 + 追加更正**。
+> 本档 6 个事件（含 6 个续写标题）、132.8 KB，日期 0000-00-00 .. 2026-10-02。
+> 跨主题引用查 `docs/PROGRESS.md` 索引。
 
-<!-- 原 PROGRESS.md 第 1024 行 · 0000-00-00 -->
-## 7. 修复后巡检：10 机位数值扫描揪出树冠"黑带"（NaN 退化法线）
-
-绕序 + 道具两轮修复改变了全城成像，图像通道又只回放旧帧 ⇒ 巡检改数值口径：10 个
-代表机位（双街向、四广场、柱廊仰视、NPC 环、树阵正下方、高空俯视）逐帧统计过曝/
-死黑/异常色。**9 机位干净；sw09（树阵下仰视）死黑 3.52%。**
-
-定位：黑像素是两条向灭点汇聚的细带，落在两侧冠团底面投影区；纯 (0,0,0) 不可能由
-"绿 × AO × 环境光"产生 ⇒ 只能是 NaN 落盘钳黑。根因：冠团相交缝的退化三角形上
-`normalize(cross(dpdx, dpdy))` 出 NaN——**fs_main 原有的 valid_nrm 闸只护了菲涅耳，主光照
-（apply_lighting）、皮肤法线（fs_main）、自发光（emissive）三处仍直接吃 NaN**；烟雾
-分支那句旧注释"避免变成纯黑洞"就是同一症状的历史目击。
-
-修法：`build.rs` 新增 `safe_face_normal`（相对判据 |cr|/(|dx||dy|) > 1e-3，退化面退回
-vdir），三处统一替换。判据 `black_gate.py`（树冠下黑占比 <0.5%）：修复前 3.52% FAIL
-→ 修复后 0.00% PASS；同机位前后帧差 0.015%（正常面零扰动，残差是 NPC 走动）。
-500 测试全绿。**⇒ 判据：巡检不必靠眼睛——十机位色彩统计（过曝/死黑/异常色占比）
-能自动揪出"纯黑/纯白"类成像事故。**
-
-<!-- 原 PROGRESS.md 第 1723 行 · 0000-00-00 -->
-## 症状与根因
-
-- 症状：`spirv-val --target-env vulkan1.3 assets/mesh.spv` 非零退出 ——
-  `[VUID-StandaloneSpirv-None-10684] the Workgroup storage class has a explicit layout from the Offset decoration`。
-  **7 个被跟踪的 `assets/*.spv` 里只有它一个失败。**
-- 根因（在 naga 里，不在我们的 WGSL 里）：**naga-30.0.0 `src/back/spv/writer.rs:3597`** 的
-  `decorate_struct_member` **无条件**写 `Offset`，不看 storage class。而 `Offset` / `ArrayStride`
-  在 SPIR-V ≤1.3 合法、**1.4 起对非 `Block` 类型禁止**，mesh（`MeshShadingEXT`）又**必须**用 1.4。
-  `global_needs_wrapper` 与全部 `WriterFlags` 都查过，**没有任何开关可以关掉它**。
-
-<!-- 原 PROGRESS.md 第 3913 行 · 0000-00-00 -->
-## 发现
-
-加了一条"距相机最近 3 人"诊断后，`RV3D_NO_NPC_CULL=1` 一开，**renderer 行的 `npc` 从 288 变成 4590**：
-
-```
-npc=288    ← 关剔除前的稳态（≈16 个人）
-npc=4590   ← 255 人 × 18 段，全部上传
-```
-
-**⇒ `npc_occluded()` 剔掉了 94% 的士兵实例。**
-
-<!-- 原 PROGRESS.md 第 3942 行 · 0000-00-00 -->
-## 修法（下一轮）
-
-`npc_occluded` 应当用**当前生效的相机**而不是硬取 `player_eye()`：
-- 正常玩法：相机 = 玩家眼位 ⇒ **行为完全不变**（零风险）；
-- 调试相机：剔除按相机算 ⇒ 取证不再自欺。
-
-**⚠️ 在此之前，所有调试相机取证都必须带 `RV3D_NO_NPC_CULL=1`。**
-这条已记入 `AGENTS.md` 铁律 C。
-
-<!-- 原 PROGRESS.md 第 5524 行 · 0000-00-00 -->
-## ⚠️ 交接注意
-
-- **本次会话所有 A/B 都在同一个默认机位**（出生点、`cam: yaw=0 pitch=0`）。
-  **文档里更早的性能结论（道具 9.1ms、阴影 +2fps、`NO_GROUND_TEX` 0）都是旧机位测的，
-  不可与本次数字混用** —— 第 37–39 轮已逐条标注。
-- **`nvidia-smi` 的 `gpu_util` 对负载极不敏感**（空场景仍报 97%）：
-  **不要再用它判断"显卡忙不忙"**，要看 `frame_us` / `wait_fence_us`。
-- 硬件/功耗支线已彻底排除（第 36 轮）：`sw_power_cap`/`hw_slowdown`/`hw_thermal` 全 `Not Active`。
-
-<!-- 原 PROGRESS.md 第 13896 行 · 0000-00-00 -->
+<!-- 原 PROGRESS.md 第 13896-13962 行 · 0000-00-00 · H2 · 1 个标题 -->
 ## 39. 🔴 新线索（**待验假设**，非结论）：小物件集体不投影，而代码说它们该投
 
 **观察来源**：重放的俯视存档图 `screenshots/tc_b_b.png`（BEFORE，非当前状态）。
@@ -135,25 +76,7 @@ let skip_static = !draw_static;
 📌 本轮 GPU 全程被占（`cap_safe` 累计 7 次拒绝：3253→7794→7779→7742→7707 MiB > 3200 MiB），
 这条复核**排在 §33（PT 亮度）与 §39 之前**——因为它最便宜，而且能决定后面两条要不要做。
 
-<!-- 原 PROGRESS.md 第 2553 行 · 2026-09-12 -->
-## 顺带记录的产出清单（`procedural.rs` 共 9 个 `pub fn`）
-
-| 函数 | 用途 | 消费者 |
-|---|---|---|
-| `generate_city_ground_texture` | **含烘焙 AO/天光的地面纹理** | `renderer.rs:7133` ✅ |
-| `generate_ground_texture` / `_default_` | 通用/回退地面 | via above |
-| `generate_ground_detail_texture` / `_default_` | **地面细节层**（`GROUND_DETAIL_SIZE=256`，纹素级） | `renderer.rs:7545` ✅ |
-| `generate_marker_skin_texture` / `_default_` | marker 混凝土皮肤 | `renderer.rs:7512` ✅ |
-| `generate_npc_skin_texture` / `_default_` | NPC 皮肤（`RV3D_SKIN_TEX` 门控） | `renderer.rs:7521` ✅ |
-
-**⇒ 9 个公开函数全部有消费者，没有"造好没接线"的。**
-
-**⚠️ 这条否定的价值**：本会话已多次遇到"造好但没接线"（如 `pt_enable` 的 resident 从未建、
-`maxMeshWorkGroupCount` 的分块）。**这次专门查了，结论是干净的** —— 不必再查。
-
-# ✅ 第④条第六处：**NPC 枪身 1.24m → 0.94m**（2026-09-12 第 132 轮）
-
-<!-- 原 PROGRESS.md 第 5902 行 · 2026-09-12 -->
+<!-- 原 PROGRESS.md 第 5902-5939 行 · 2026-09-12 · H2 · 1 个标题 -->
 ## ❌ 圆柱网格也无罪 —— 并对我第 28 轮的判读做诚实修正（2026-09-12 第 30 轮）
 
 ```rust
@@ -192,64 +115,69 @@ pub fn cylinder(r: f32, height: f32, seg: u32) -> Mesh { frustum(r, r, height, s
 
 **建议下一轮先试 1 与 3**，因为"玩家在正常视角下看到的士兵是什么样"才是第④条真正要回答的问题。
 
-<!-- 原 PROGRESS.md 第 1561 行 · 2026-09-13 -->
-## 3. mesh 路径漏了 Authored 材质编码（同一个功能的第三个坑）
+<!-- 原 PROGRESS.md 第 1721-1781 行 · 2026-09-15 · H1 · 7 个标题 -->
+# ✅ 未结案 #9 结案：mesh 着色器通过严格 `spirv-val`（2026-09-15）
 
-`vs_main`（顶点路径）从 2026-09-13 起就按 `tint.w ∈ (5.5,6.5)` 把 `flat_flag` 置 1.25，
-让片元跳过四条"给纯 tint 盒子补细节"的程序化效果；**mesh 路径没有这一条**。
-⇒ 同一份实例在两条路径上材质不同，弹孔被叠上窗带。已在 `mesh_main` 里补齐（限定 marker 槽内），
-`assets/mesh.spv` 同步重生成，`spirv-val --target-env vulkan1.3` exit 0。
+## 症状与根因
 
-<!-- 原 PROGRESS.md 第 1165 行 · 2026-09-19 -->
-## 14. 阴影建筑 LOD 专项：盒壳剪影把 sw12 拉回 80fps + 顺手挖出 tint 通道错位（2026-09-19 深夜）
+- 症状：`spirv-val --target-env vulkan1.3 assets/mesh.spv` 非零退出 ——
+  `[VUID-StandaloneSpirv-None-10684] the Workgroup storage class has a explicit layout from the Offset decoration`。
+  **7 个被跟踪的 `assets/*.spv` 里只有它一个失败。**
+- 根因（在 naga 里，不在我们的 WGSL 里）：**naga-30.0.0 `src/back/spv/writer.rs:3597`** 的
+  `decorate_struct_member` **无条件**写 `Offset`，不看 storage class。而 `Offset` / `ArrayStride`
+  在 SPIR-V ≤1.3 合法、**1.4 起对非 `Block` 类型禁止**，mesh（`MeshShadingEXT`）又**必须**用 1.4。
+  `global_needs_wrapper` 与全部 `WriterFlags` 都查过，**没有任何开关可以关掉它**。
 
-§13 收口时留的"下一专项"。阴影是单张 2048² 深度图、道具段已有光源视锥剔除——
-剔无可剔，唯一出路是让每棵投影几何本身变小。
+## 修法 `build.rs::strip_workgroup_explicit_layout(&mut Vec<u32>)`
 
-- **盒壳 LOD**：`merge_shadow_binned` 与主合并同一条分桶/变换/翻面路径，唯一区别是
-  名单建筑（building_shed/block/wide/corner/tall + panel_block）烘成自身 AABB 盒壳
-  （8 顶点/12 三角，替代 ~2.2k 三角的窗洞 recess）。树/路灯/残骸/沙袋不入选——
-  它们的剪影就是阴影内容。阴影 pass 绑定专用缓冲（地图重载整体重建；任何创建/
-  映射失败只把计数留 0 ⇒ 自动退回全量几何，**退化方向是多画三角形，永不缺阴影**）。
-  A/B 旋钮 `RV3D_SHADOW_LOD=0`，同 RV3D_NO_SHADOW 惯例。
-- 绕序：`BOX_INDICES` 按 GLB 资产约定（外向 CCW）编写、走同一条翻面路径；判据
-  `shadow_box_follows_horizontal_winding_rule` 把教训 40 搬到 CPU 烘焙路径（顶面
-  (x,z) 面积 > 0）。名单判据 `shadow_box_list_is_exact_and_resolvable`：资产改名
-  会让盒化静默失效，靠它发现。
-- **实测**：阴影三角 872k→482k（−45%）；sw12 机位 fps 47→**80**（同轮 LOD-off
-  对照 62）——不止收复 §13 的 35% 代价，基本回到分段前的 82。LOD 开/关帧差
-  4.48% 像素、差异像素幅度 1.82/255，强变化只在阴影边界（盒壁比窗面外移，
-  边界移动厘米级）⇒ 阴影活着且位置正确。
-- 🔴 **顺手挖出的旧 bug：tint 通道错位**（"克隆军团"对策自出生起没生效）——
-  `merge_binned` 把 `placement_tint` 乘在 v[6..9]，而导入器布局是
-  pos(3)nrm(3)**uv(2)col(3)** ⇒ 实际是 uv 两轴被缩放 ±12%、color 只有 r 染色。
-  更阴的是**旧测试把 bug 固化**：`single_bin_at_identity_reproduces_source_vertices`
-  按错误布局断言"逐位相同"，测试与实现互相印证、双双绿着。**⇒ 教训：测试断言
-  的是"实现的形状"还是"约定的形状"，写的时候要能分清。** 修复：tint 乘三色、uv
-  直通；新判据 `placement_tint_lands_on_color_channels_not_uv`，旧测试按导入器
-  真实布局改写。副作用（正向）：同型号相邻楼从此真的有亮度/冷暖差异。
-- 4 条新判据，基线 504→508。收口门：patrol 12/12 black ≤0.12%（与改前持平，
-  mean 漂移 ≤2 档 = tint 三色生效的预期微移）；冒烟 ALL-OK（VUID=0、fps 71.5）。
+- 由 `compile_wgsl_mesh` 调用：先**只从 storage class = Workgroup 的 `OpVariable`** 出发算类型可达闭包，
+  再删掉目标类型落在闭包里的 `OpMemberDecorate … Offset` / `OpDecorate … ArrayStride`
+  （连同 `MatrixStride` / `RowMajor` / `ColMajor`）；**构建期自检重扫输出，还有残留就 `panic!`**。
+- 🔴 **带 `Block` 的类型（`_struct_300/303/308` = Uniform / StorageBuffer / PushConstant）一个字节都不许动** ——
+  那是主机侧写入的缓冲布局，动了就是**静默错位**。
+- **为什么它语义无损**：Workgroup 内存主机侧永不触碰，着色器只按 `OpAccessChain` 的成员索引访问、
+  偏移由驱动自算 ⇒ **任何内部自洽的布局都等价**。
+
+## 测量 / 回归 / A/B / 验收
+
+- **7 个 `.spv` 现在全部 `spirv-val --target-env vulkan1.3` exit 0**（`mesh.spv` 在 `vulkan1.4`
+  与默认 target 下也过）；`assets/mesh.spv` **27572 → 27300 B**（删掉 17 条装饰指令）。
+- 两条测试（`src/engine/renderer.rs` 模块 `workgroup_layout_tests`）**锁住两个方向**：
+  `mesh_spirv_has_no_workgroup_explicit_layout`（不许有）+ 反向的
+  `block_types_keep_their_offsets`（`Block` 类型必须**保留**偏移）。**两条都验证过会真的红**：
+  临时去掉 `strip_workgroup_explicit_layout` 的调用后，`spirv-val` 重新失败、第一条测试 **FAILED**。
+- 同机位 A/B（`RV3D_CAM=fly:0,140,80:0,50`、`RV3D_NO_NPC_CULL=1`，同一场景）：
+  baseline vs stripped 差 **279 像素 / 4,096,000（0.007%）**，包围盒 (168,52)-(458,143)；
+  **对照 = 同一 stripped 二进制连跑两次差 251 像素、同一包围盒 (168,48)-(458,135)**
+  ⇒ **3D 画面逐像素一致，残余差异就是 HUD 上跳动的 FPS 数字。**
+- 验收：`scripts/run_smoke_pm.ps1` → **ALL-OK**（VUID=0 panics=0、kill 已登记、score 0 → 10、fps 71.4）；
+  `cargo build --release` **0 警告**、`cargo test --release` **484 passed / 0 failed**（原 482，+2 条新测试）。
+
+## 🔧 附带产出：`scripts/png_diff.py`（整幅差分 + **差异包围盒**）
+
+- 打印尺寸、差异像素数/占比、差异像素上的平均通道差，以及**新增的差异包围盒**。
+- 包围盒是**被证明决定性之后**才加的：没有它，几百个差异像素既可能是"引擎坏了"，
+  也可能是"HUD 上的 FPS 数字变了"。用法 = `scripts/cap_safe.ps1` 取图 + 固定 `RV3D_CAM`；
+  已写进 `AGENTS.md` 的**常用命令**。
+
+## ⚠️ 附带记录（**有意不修**）：CJK 字模表**无法逐字节重建**
+
+- `src/engine/cjk_glyphs.rs` 头部记的源字体 `noto-sc-subset.otf` **不在仓库里** ⇒ 这张表没法重建。
+- 本次在两处新代码注释里加了汉字（**剥 U+5265、宿 U+5BBF**），守卫测试
+  `engine::font_cjk::tests::source_cjk_codepoints_all_have_glyphs` **如实转红**。
+- 用系统 `C:\Windows\Fonts\NotoSansSC-VF.ttf`（**变量字体**）重跑 ⇒ **1596 行字形全被改写**，
+  并被 `cjk_glyph_generates` 拦下：**"灭 字形过稀疏（rows=7 cols=9）"**（变量字体默认实例更细）。
+- **两次重写全部回退**，改法 = 把注释**改写为只用表里已有的字** ⇒ 重扫回到 **1595 个码点 /
+  0 缺失 / 0 冗余**。结论已记进 `tools/extract_cjk_glyphs.py` 的 docstring 与 `AGENTS.md` 模块地图：
+  **加中文若没有原始子集字体，就改写文案用已有的字** —— **不要拿别的字体顶替，也不要放松密度断言**。
+
+## 📄 文档维护：`AGENTS.md` 压缩
+
+- **66440 B → 63302 B**（后续增补后又到 **64341 B**）：**15 条已结案的未结案条目压成一行结论**，
+  以留在 **65,536 B 硬上限**之内（超限会**静默截断**注入视图）。⚠️ 现距上限只剩 **1.2 KB**。
 
 
-<!-- 原 PROGRESS.md 第 1223 行 · 2026-09-19 -->
-## 16. 毛玻璃菜单：入口键找到、目视裁决完成——"毛玻璃"是模拟的（2026-09-19 深夜）
-
-搁置多会话的"毛玻璃菜单需要眼睛"项，今晚两头都解开了：
-
-- **入口**：cap_safe 此前硬编码 `RV3D_AUTOSTART=1`，菜单态从未被拍到（`-NoAuto` 已加，
-  见 `644101e`）。实测菜单键 = **Esc**（VK 27）：`-Keys @(82,27)` 即"开局→暂停"，
-  menu4_b 拍到完整 PAUSED 面板。Apps 键（VK 93，bind_menu=54 的物理键）无面板响应。
-- **目视裁决**：面板可读、高亮条与排版干净、无 Z 缺陷；但"毛玻璃"只有**压暗遮罩**
-  ——ui.rs:613 注释自认"模拟毛玻璃暗化背景"，面板内外树缘同样锐利，无模糊。
-  真毛玻璃需要"场景渲到离屏 → 降采样 → 两遍高斯 → 与 UI 合成"的管线改造
-  （当前场景直渲 swapchain、UI 同 pass 叠加）。**这是为暂停菜单做一次渲染架构
-  决策，不做盲改**——留用户裁决；届时可参考阴影 LOD 专项的做法先量后动。
-- 附带观察（非缺陷，记录备查）：暂停态 HUD（OBJECTIVE/枪模）仍显示——是否该在
-  菜单后隐藏属 UI 设计，未动。
-
-
-<!-- 原 PROGRESS.md 第 10784 行 · 2026-09-29 -->
+<!-- 原 PROGRESS.md 第 10784-12084 行 · 2026-09-29 · H2 · 1 个标题 -->
 ## 22. 2026-09-29：PT 取景与地面两处同源修复 + 近距阴影棋盘格 + 砌块皮肤砖块尺度与尺寸门
 
 **开工前置**：本机是 Windows 线（`D:\Rust\steel-front`，PowerShell/cap_safe.ps1 体系）。
@@ -1551,7 +1479,7 @@ walltop_selfcal.py（行均值梯度，窗口限制在 200..900）
 **§23.5 开放项第 1 条（PT 墙顶高 0.28m）→ 关闭。**
 
 
-<!-- 原 PROGRESS.md 第 12085 行 · 2026-09-29 -->
+<!-- 原 PROGRESS.md 第 12085-12384 行 · 2026-09-29 · H2 · 1 个标题 -->
 ## 23. 2026-09-29 → 09-30 日级汇总（视觉线）：8 条代码改动进主干、7 项判为非缺陷、5 次自我更正
 
 当日 36 条提交，其中**代码/着色器改动 8 条**，每条都带"同机位数值判据 + 全套门禁"。
@@ -1852,7 +1780,7 @@ if (masonry && !facing_down) { ... }
 ⇒ 规则：**任何由整体图引起的几何怀疑，先放大到原区再看，再谈取数**；
 两步都过了才有资格立案。
 
-<!-- 原 PROGRESS.md 第 13263 行 · 2026-10-02 -->
+<!-- 原 PROGRESS.md 第 13263-13345 行 · 2026-10-02 · H2 · 1 个标题 -->
 ## 28. 2026-10-02：10 份并行代理交付**全部收到并逐条复核**——2 条进主干、1 条被推翻、3 条零证据
 
 ### 28.1 交付质量分三档（先记账，防止下轮把猜测当事实）
