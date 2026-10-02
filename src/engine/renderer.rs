@@ -195,6 +195,14 @@ const FADE_END: f32 = 900.0;
 /// 相机周边的地面乘成纯黑（见 `Renderer::ground_detail_image` 注释）。
 const GROUND_DETAIL_BINDING: u32 = 9;
 
+/// `RV3D_NO_GROUND_TEX=1` 时关掉地面微细节层（`light_data.flags.w` 保持 0）。
+/// A/B 诊断门，与 `RV3D_NO_SHADOW` 同一套惯例。**读一次缓存住**：本函数在每帧构建
+/// 光照 UBO 的路径上，不该每帧 `getenv`。
+fn no_ground_detail_tex() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RV3D_NO_GROUND_TEX").as_deref() == Ok("1"))
+}
+
 /// 动态阴影图的绑定号（片元第二张阴影图，见 `shadow_dyn_image` 字段注释）。
 /// 10 是本 set layout 里 ground_detail(9) 之后的第一个空位；**必须与 build.rs WGSL 的
 /// `@group(0) @binding(10) var shadow_dyn_map` 同步**。
@@ -12601,7 +12609,12 @@ impl Renderer {
         // 未绑定描述符采样恒返回 0，而地面分支是乘性的（`mixed *= mix(1.0, g*2, gdetail)`），
         // 于是相机周边近处整圈地面被乘成纯黑。以图像句柄非空为条件是必要的——万一
         // init_texture 建图失败，这里保持 0，着色器就退回"没有细节层"而不是回到黑地。
-        if self.ground_detail_image_view != vk::ImageView::null() {
+        //
+        // 🔴 `RV3D_NO_GROUND_TEX=1` 关掉这一层（A/B 诊断门）。**这个开关本仓早就写在
+        // `renderer.rs:6134` 的注释里**（"与 RV3D_NO_SHADOW / RV3D_NO_GROUND_TEX 同一套惯例"），
+        // 但**全仓从未实现过它** —— 拿它做 A/B 会得到"两边完全相同"的假结论
+        // （§55 判别时就差点这样把 H1 误判为已否证）。现在补上，并读一次缓存住。
+        if self.ground_detail_image_view != vk::ImageView::null() && !no_ground_detail_tex() {
             light_ubo.flags.w = 1.0;
         }
         if let Some(&ptr) = self.light_uniform_mapped.get(self.current_frame) {
