@@ -1112,10 +1112,9 @@ const SPH_TRI: array<vec3<u32>, 80> = array<vec3<u32>, 80>(
     vec3<u32>(9u, 41u, 17u), vec3<u32>(2u, 27u, 41u), vec3<u32>(5u, 17u, 27u), vec3<u32>(41u, 27u, 17u),
     vec3<u32>(7u, 29u, 34u), vec3<u32>(2u, 40u, 29u), vec3<u32>(11u, 34u, 40u), vec3<u32>(29u, 40u, 34u),
 );
-// 树冠识别：绿色 tint（g 显著大于 r/b）
-fn is_foliage(tint: vec4<f32>) -> bool {
-    return tint.g > tint.r && tint.g > tint.b * 1.4;
-}
+// （2026-10-02 删除）树冠识别 `is_foliage(t) = t.g > t.r && t.g > t.b * 1.4`。
+// 它曾是 mesh 路径"按颜色猜形状"的唯一入口，已被上面的 `shape_tag` 分派取代后成为死代码；
+// 保留定义只会诱使后来人再拿颜色猜几何——见 §31 的帐篷事故。
 
 const CUBE_POS: array<vec3<f32>, 24> = array<vec3<f32>, 24>(
     vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(1.0, -1.0, 1.0),
@@ -1374,19 +1373,19 @@ fn mesh_main(
     let m_cyl = is_marker && shape_tag > 1.5 && shape_tag < 2.5;
     let m_ico = is_marker && shape_tag > 2.5 && shape_tag < 3.5;
     let m_sph = is_marker && shape_tag > 3.5 && shape_tag < 4.5;
-    // 过渡兜底：只有"未打标签"（Shape::Legacy = 1.0）的绿色 marker 才沿用旧的颜色嗅探。
-    // 🔴 但下面这两句原注释的说法**经 2026-10-02 逐条复核是不成立的**，保留代码、先纠正记录：
-    //   ① 「显式 `Shape::Box(0.0)` 不受影响」——**该变体已于 2026-09-08 删除**
-    //      （`geom.rs:29-32`），今天**没有任何标签能表达"我是方块、别嗅我"**；
-    //      `Legacy` 既是方块、又正好落进本判据的 (0.5,1.5) 窗。
-    //   ② 「main.rs 手写掩体/植被靠它保持画面」——`main.rs` 里唯一"绿色 + tint.w=1.0"的
-    //      手写 marker 是手雷（`:2692`），而它在**自发光槽带**上，被上面 `is_glow` 那条
-    //      分支先接走，**走不到这里**。所以本行今天**不服务任何合法用途**。
-    //   实际受害者：`city.rs` 的帐篷四层（`TENT_CAMO`，导出实测 32 件）与集装箱回退件
-    //   （`city.rs:803`，仅在 GLB 道具缺失时走到）——三者自己的注释都写着要的是**方块**。
-    // ⇒ 删除它才是正解；但这是**可见几何变更**，必须配同机位 before/after + 全套门，
-    //   故本轮只纠正注释，删除动作与判据见 `docs/PROGRESS.md` §29。
-    let is_tree = is_foliage(inst.tint) && shape_tag > 0.5 && shape_tag < 1.5;
+    // 🔴 2026-10-02 删除颜色嗅探兜底 `is_tree = is_foliage(tint) && tag∈(0.5,1.5)`。
+    //    旧注释声称它服务于"未打标签的绿色植被"，逐条复核**不成立**：
+    //      · `city.rs` 的树冠与灌木球全部显式 `.sph()`（tag 4.0），由上面的 `m_sph` 接走；
+    //      · `main.rs` 唯一"绿色 + `tint.w=1.0`"的手写件是手雷（`:2692`），
+    //        而它在自发光槽带、被 `is_glow` 先接走，走不到这条判据；
+    //      · 也没有"我是方块、别嗅我"的标签可用——`Shape::Box(0.0)` 已于 2026-09-08 删除
+    //        （`geom.rs:29-32`），而 `Legacy` 既是方块、又正好落在 (0.5,1.5) 窗内。
+    //    ⇒ 它当时**只做坏事**：把"绿色 + `Shape::Legacy`"的方块改画成二十面体，
+    //      全城 8 顶帐篷（四层堆叠的 `TENT_CAMO` 方块，导出实测 32 个 marker）
+    //      因此变成畸形绿色团块；外圈营地与集装箱回退件同病。
+    //    ⇒ 形状一律由 `shape_tag` 决定，不再由颜色决定。判据与前后截图见 §31。
+    //    ⚠ 片元侧 `fs_main` 的 `is_canopy` 仍是同族的颜色嗅探（只影响着色、不影响几何），
+    //      彻底修需要把形状标签送进片元；那是另一次可见变更，单独一轮做。
     if (is_npc_cyl || m_cyl) {
         // 四肢：程序化单位圆柱（r=1、y∈[-0.5,0.5]、Y 轴、24 段含盖；
         // 与 CPU create_cylinder_geometry 同单位空间，实例矩阵按此构建）。
@@ -1442,17 +1441,6 @@ fn mesh_main(
         if (lid == 0u) {
             mesh_out.vertex_count = 42u;
             mesh_out.primitive_count = 80u;
-        }
-    } else if (is_tree) {
-        if (lid < 12u) {
-            write_vertex(lid, ICO_POS[lid] * 0.9, vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
-        }
-        if (lid < 20u) {
-            mesh_out.primitives[lid].indices = ICO_TRI[lid];
-        }
-        if (lid == 0u) {
-            mesh_out.vertex_count = 12u;
-            mesh_out.primitive_count = 20u;
         }
     } else if (is_marker || dist2 < camera.cam_pos.w) {
         if (lid < 24u) {
