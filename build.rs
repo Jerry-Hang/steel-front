@@ -28,13 +28,13 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // flat_flag = 1（marker）/ 2（NPC）由片元着色器决定采样程序化皮肤纹理还是纯色
 // （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
-// NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
+// NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 8192 marker 之后）。
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 8192u; // marker 区 = MAX_MARKER_INSTANCES(8192)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市；实测 CPU 剔除 4034 个 marker 只花 20µs，所以容量不是瓶颈，再翻一档到 8192。改容量必须同步改本行两处副本 + renderer.rs + 枪槽字面量，见 gun_slot_layout_is_pinned）
 // NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
 const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
-// 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×1024：
+// 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×3072：
 // 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
 

@@ -5230,7 +5230,9 @@ impl Renderer {
 
     /// 每帧上传世界障碍 marker 到实例 buffer 的 MARKER_SLOT_BASE 之后区域
     /// （跳过 65536 identity slot，见 MARKER_SLOT_BASE 注释），返回 (近档, 远档) 计数。
-    /// marker 量小（≤64），不做视锥剔除，仅按距离分近/远档。
+    /// marker 数量**不小**（全城实测 ~1789 件，容量 `MAX_MARKER_INSTANCES`=8192），
+    /// 但历史上不做视锥剔除，只按距离分近/远档；且当前 `near_sq = f32::MAX`
+    /// ⇒ 远档恒空（障碍 marker 恒走近档立方体，见下方 `upload_markers`）。
     fn upload_markers(&mut self, cam_pos: glam::Vec3) -> (u32, u32) {
         let slot = match self.instance_mapped.get(self.current_frame) {
             Some(&p) if !p.is_null() => p as *mut u8,
@@ -13450,7 +13452,7 @@ mod instance_slot_layout_tests {
 
     /// 槽位布局钉死测试。
     ///
-    /// `build.rs` 的两段 WGSL（顶点/网格着色器）里，枪模槽是**字面量** `78913u`，
+    /// `build.rs` 的两段 WGSL（顶点/网格着色器）里，枪模槽是**字面量** `83009u`，
     /// 而它由 `MAX_MARKER_INSTANCES` 推导。历史上这里已经因为"改了容量忘了改字面量"
     /// 出过两次真 bug（枪槽区间覆盖 NPC 圆柱/球体段 → 四肢和头被 z=0 深度覆盖，
     /// 表现为"鬼魂穿模"）。字面量没法被 Rust 类型系统检查，所以用测试兜住：

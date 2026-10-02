@@ -1315,7 +1315,7 @@ impl GameApp {
         }
         self.corpses.retain(|c| c.3 < 10.0); // 尸体 10 秒后消退
         while self.corpses.len() > 20 {
-            self.corpses.remove(0); // 上限 20 具（NPC 槽位 1024 = 146 人 × 7 段）
+            self.corpses.remove(0); // 上限 20 具（NPC 槽位容量见 renderer.rs::MAX_NPC_INSTANCES = 3072）
         }
         // 粒子推进：弹壳重力下落 + 落地停止；超龄移除
         for p in self.particles.iter_mut() {
