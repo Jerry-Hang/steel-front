@@ -622,17 +622,28 @@ pub fn generate_default_ground_detail_texture() -> Vec<u8> {
 /// 地面 mip 级数决定，同尺寸保证两套纹理 mip 级数完全一致，采样器参数直接复用。
 pub const SKIN_TEXTURE_SIZE: u32 = 512;
 
+/// 🔴 砌块在**一个 tile 内**的行数与列数。二者与 tile 的世界尺寸（`pt_panorama.glsl`
+/// 的 `SKIN_TILE_M`、`build.rs` 片元里的同名字面量）共同决定**砖的真实尺寸**：
+/// `砖宽 = tile.x / 列数`、`砖高 = tile.y / 行数` ⇒ 现值 1.6/4 = 0.4m、0.8/4 = 0.2m。
+/// 必须具名：原来列数是个裸字面量 `4.0`，改它不会让任何测试变红，
+/// 而光栅与 PT 采样**同一张纹理** ⇒ 改错了是"两边一致地错"，肉眼很难归因。
+/// 判据见 `brick_world_size_matches_the_documented_tile`。
+pub const SKIN_BRICK_ROWS: f32 = 4.0;
+pub const SKIN_BRICK_COLS: f32 = 4.0;
+
 /// 障碍物（marker）皮肤：中性灰混凝土砌块墙。
 /// 浅灰底 + 砌块横排错缝（砂浆缝）+ 骨料噪点 + 水渍/风化暗斑（确定性纯函数）。
 /// 设计（2026-08-22）：纹理只供「表面细节/凹凸感」，颜色由障碍 tint 主导
 /// （shader mix 权重 0.45）→ 墙=混凝土、树=绿色细节、集装箱=彩色细节共用此皮肤。
 fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
-    // 砌块横排错缝：4 行 × 4 列（UV 0..1 内；上行与下行错半块）
-    let rows = 4.0f32;
+    // 砌块横排错缝（UV 0..1 内；上行与下行错半块）。
+    // 🔴 行/列数一律取 `SKIN_BRICK_*`，不许再写裸字面量——砖的真实世界尺寸
+    //    = `SKIN_TILE_M` ÷ 行列数，三者有一处没同步就会"两边一致地错"（见常量文档）。
+    let rows = SKIN_BRICK_ROWS;
     let vv = v * rows;
     let row = vv.floor().min(rows - 1.0) as i32;
     let off = if row % 2 == 0 { 0.0 } else { 0.5 };
-    let fu = (u * 4.0 + off).fract();
+    let fu = (u * SKIN_BRICK_COLS + off).fract();
 
     // 砂浆缝：块边缘 0.06 宽暗缝（水平缝 + 垂直缝）
     let u_edge = fu.min(1.0 - fu);
@@ -751,6 +762,68 @@ pub fn generate_default_npc_skin_texture() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 砖的世界尺寸 = `SKIN_TILE_M` ÷ 行列数，必须等于注释承诺的 **0.4 × 0.2 m**。
+    ///
+    /// 存在理由（2026-10-02）：行数、列数、tile 世界尺寸这三组数**分别写在三个地方**
+    /// （本文件的 `SKIN_BRICK_ROWS/COLS`、`pt_panorama.glsl` 的 `SKIN_TILE_M`、
+    /// `build.rs` 片元里的同名字面量），而砖的真实尺寸只有它们的**商**才有意义。
+    /// 原来列数还是个裸字面量 `4.0` ⇒ 把行数改成 8，砖立刻从 0.4×0.2 变成 0.4×0.1，
+    /// 而**光栅与 PT 采样同一张纹理 ⇒ 两边一致地错**：现有 substring 守卫全绿、肉眼也难归因。
+    ///
+    /// 自检（教训 27：判据必须能红）：两处 tile 字面量**必须真的被解析到**，
+    /// 解析不到直接 panic，绝不"没测到就当通过"（§31.6 刚栽过一次）。
+    #[test]
+    fn brick_world_size_matches_the_documented_tile() {
+        const EXPECT_BRICK_W: f32 = 0.4;
+        const EXPECT_BRICK_H: f32 = 0.2;
+
+        // 以 PT 的**具名常量**为 tile 的源（它比 build.rs 里的裸字面量更可寻址）
+        let glsl = include_str!("../../assets/rt/pt_panorama.glsl");
+        let marker = "SKIN_TILE_M = vec2(";
+        let at = glsl
+            .find(marker)
+            .expect("`pt_panorama.glsl` 里找不到 `SKIN_TILE_M = vec2(` ⇒ 改名了，本测试需同步");
+        let rest = &glsl[at + marker.len()..];
+        let end = rest.find(')').expect("`SKIN_TILE_M` 的 vec2 没有右括号");
+        let mut parts = rest[..end].split(',');
+        let tile_w: f32 = parts
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .expect("SKIN_TILE_M 的 x 不是数字");
+        let tile_h: f32 = parts
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .expect("SKIN_TILE_M 的 y 不是数字");
+
+        // build.rs 片元里必须出现**同一组**字面量，否则两侧砖尺度已经分叉
+        let build = include_str!("../../build.rs");
+        let lit = format!("vec2<f32>({}, {})", tile_w, tile_h);
+        assert!(
+            build.contains(&lit),
+            "build.rs 里找不到与 PT 同值的 tile 字面量 `{}` ⇒ 光栅与 PT 的砖尺度已经分叉",
+            lit
+        );
+
+        let brick_w = tile_w / SKIN_BRICK_COLS;
+        let brick_h = tile_h / SKIN_BRICK_ROWS;
+        assert!(
+            (brick_w - EXPECT_BRICK_W).abs() < 1e-6,
+            "砖宽 = tile.x {} ÷ 列数 {} = {:.4}，与文档承诺的 {} m 不符",
+            tile_w,
+            SKIN_BRICK_COLS,
+            brick_w,
+            EXPECT_BRICK_W
+        );
+        assert!(
+            (brick_h - EXPECT_BRICK_H).abs() < 1e-6,
+            "砖高 = tile.y {} ÷ 行数 {} = {:.4}，与文档承诺的 {} m 不符",
+            tile_h,
+            SKIN_BRICK_ROWS,
+            brick_h,
+            EXPECT_BRICK_H
+        );
+    }
 
     /// 宏观地面噪声的格距下限必须真的是 **5 个纹素**（本纹理 2 纹素/米 ⇒ 2.5m），
     /// 且 [`ground_noise`] 真的在执行它。
