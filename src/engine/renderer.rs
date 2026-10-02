@@ -1042,11 +1042,17 @@ impl WorldMarker {
                 // ⚠ 环境变量**只解析一次**。本函数每帧被调用 1700+ 次（`marker=1709`）——
                 //    原先每次都 `std::env::var(...)`（带锁 + 扫环境表），**开关关着也照调**，
                 //    130fps 下约 22 万次/秒，是纯浪费（2026-09-12 第 93 轮修）。
+                // 🔴 Block 必须用**橙色**，不能用纯绿：mesh 着色器的树冠兜底判据是
+                //    `is_foliage(tint) = g > r && g > b * 1.4`（`build.rs:1116`），
+                //    纯绿 [0,1,0] 两条全中 ⇒ 本开关一开，所有 Shape::Legacy 的方块
+                //    会被改画成二十面体（`build.rs:1380` 的 is_tree），
+                //    于是"让几何自报家门"的诊断图**自己造出一个四尖星伪影**（§27.5）。
+                //    橙色 g=0.55 < r=1.0 ⇒ 这条判据永远为假，且与其余五色一眼可区分。
                 static DEBUG_KIND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                 if *DEBUG_KIND.get_or_init(|| std::env::var("RV3D_DEBUG_KIND").is_ok()) {
                     let c = match ob.kind {
                         ObstacleKind::Wall => [1.0, 0.0, 0.0],      // 红
-                        ObstacleKind::Block => [0.0, 1.0, 0.0],     // 绿
+                        ObstacleKind::Block => [1.0, 0.55, 0.0],    // 橙（见上：绿色会触发 is_tree）
                         ObstacleKind::Barrier => [0.0, 0.0, 1.0],   // 蓝
                         ObstacleKind::Tree => [1.0, 1.0, 0.0],      // 黄
                         ObstacleKind::Building => [1.0, 0.0, 1.0],  // 品红
