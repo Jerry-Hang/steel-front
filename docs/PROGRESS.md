@@ -13633,3 +13633,51 @@ vec3 outc = acc.rgb / max(acc.a, 1.0);            // :292  ← 多除了一次
 📌 **本轮没做**：`cap_safe` 三次拒绝启动（3253 → 7794 → 7794 MiB > 3200 MiB 预算，
 占用来自用户的浏览器）。**没有放宽 `-MaxGpuMib`、没有绕过闸门**。
 ⇒ 这一整块是**下一个 GPU 窗口的第一件事**，方案与判据都已在此，无需重推。
+
+### 34. 🔴 王冠案：六条机制**全部否证完毕**，剩下的唯一方向已经收窄到一处
+
+今天用 SPIR-V 反汇编否证了最后一条、也是我最怀疑的一条——"naga 对 `MeshEXT` 入口点
+可能不像对 `Vertex` 那样施加 Vulkan Y 翻转"。**它施加了，且逐指令同形**：
+
+```
+顶点着色器 assets/triangle.vert.spv（entry vs_main / Vertex）
+  %327 = OpCompositeExtract ...            %328 = OpFNegate %float %327
+  %326 = OpAccessChain %_ptr_Output_float %gl_Position %uint_1
+  OpStore %326 %328
+
+网格着色器 assets/mesh.spv（entry mesh_main / MeshEXT）
+  %1147 = OpCompositeExtract %float %1144 1     ← 分量 1 = Y
+  %1148 = OpFNegate %float %1147
+  %1149 = OpAccessChain %_ptr_Output_float %1145 %uint_1
+  OpStore %1149 %1148
+```
+⇒ 两条管线的 `FrontFace::CLOCKWISE` 作用在**同样翻转过**的裁剪空间上 ⇒ 不存在
+"一条 inside-out、一条正常"的系统性差异。判据文件：`target/spvflip.py`、`target/negate.py`
+（反汇编产物留在 `target/*.spv.dis`，`spirv-dis` 来自 `C:\VulkanSDK\1.4.357.0\Bin`）。
+
+**本案目前已否证的六条机制**（下轮**不要再走**）：
+
+| # | 机制 | 否证依据 |
+|---|---|---|
+| 1 | 立方体/圆柱模板两侧绕序不一致 | `CUBE_TRI`/`CUBE_POS` 与 CPU `INDICES`/`VERTICES` **逐位相同** |
+| 2 | 模型矩阵行列式为负 | 1789 个 marker **无负、无零**半尺寸 |
+| 3 | 远档十字双 quad | `renderer.rs:5257 near_sq = f32::MAX` ⇒ 远档恒空（三次独立确认） |
+| 4 | 多放了一个盒子（花坛"长椅"前例） | 柱帽/柱身/檐梁坐标与 `city.rs` 逐值吻合，无重叠异主 |
+| 5 | `is_tree` 颜色嗅探 | 解释了**调试图**里的四尖星（已修 `5c8703b`）；但 `CONCRETE[0.56,0.55,0.53]` 的 `g<r`，**从不命中** ⇒ 解释不了正常配色的三角 |
+| 6 | naga 对 MeshEXT 不翻 Y | **今天否证**（上面的 SPIR-V 逐指令对照） |
+
+**仍然成立的事实**：只关 mesh 主管线的背面剔除就能让伪影消失（§32 的单变量实验，31.53% vs 三处全关 31.90%）
+⇒ 伪影**确实**是"该画近面时被剔除了"，但**数据侧没有任何一条能解释为什么**。
+
+⇒ **收窄后的唯一未查方向：`mesh_out.primitives[lid]` 的写入完整性。**
+`@workgroup_size(96)`，而各分支写入量不同（立方体 12、圆柱 96、二十面体 20、球 80、十字 4）；
+`primitive_count` 与 `vertex_count` 只在 `lid == 0u` 时设置。
+⇒ 要查的是：**是否存在 `primitive_count` 大于本分支实际写入的索引三元数的路径**，
+或同一 workgroup 的槽位被上一次 dispatch 的残留索引复用。
+这类 bug 的特征与观测**完全吻合**：会凭空多出方向随机的三角形（所以剔除结果不可预测）、
+局部出现、且 PT（自建 `PtBox`、无 mesh 语义）永远干净。
+（`d3c2390` 在零读取状态下把这条列为它的首选怀疑 C2，方向对，但当时谁也没证据。）
+
+📌 **一条方法论收获**：本案今天最大的进展不是"找到 bug"，而是**用 6 次否证把搜索空间压到 1 个方向**，
+其中第 5 条还顺带挖出并修掉了真正的帐篷缺陷。
+⇒ **否证是有复利的**：每条带证据的"不是它"，都比一条没验证的"是它"值钱。
