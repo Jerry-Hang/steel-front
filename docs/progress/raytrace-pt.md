@@ -225,16 +225,44 @@ PT-VIEW 参考帧路径（exposure 0.5、PT_SUN_INTENSITY 1.5）语义不变，�
 `lum *= pc.e.w` → 红在 `ray_tracer.rs:316`。
 
 **已验证**：`cargo build --release` 绿；`cargo test --release` **656 passed / 0 failed**；
-CJK 门禁绿（1590 用点）；`scripts/compile_pt.ps1` + `spirv-val` 通过；
-`pt_panorama.spv` SHA256 `838557e1…445946` → `4a7db466…0672c5`（24,660 → 24,604 B）。
+CJK 门禁绿（1590 用点）；`scripts/compile_pt.ps1` + `spirv-val` 通过。
+`pt_panorama.spv` SHA256 链（每步都按哈希验，不按"我编译过了"验）：
+`838557e1cc9e…46445946`（24,660 B，改前）→ `4a7db466453e…300672c5`（24,604 B，增益归一）
+→ `daa52dd45b3a…0d572df5`（首帧采纳，见下）。
+
+## 追加（同日）：同族记账偏差第二处 —— 复位后的 16 倍暗淡入
+
+推导电平增益时顺带算出来的：复位后第一帧 `acc.a = 0` ⇒ `a = min(0+SPP, win) = 16`、
+`alpha = 1/16` ⇒ `acc.rgb = 均值/16`，之后要爬约 64 帧（≈1 秒）才满。
+⇒ **静止端每次镜头切换 / 曝光变化 / 取景指纹改变，都会来一段 16 倍暗的淡入。**
+运动端 `win = 1 ⇒ alpha = 1` 本来就没这问题，所以它**只在"停下来之后"看得见**。
+旧代码同样有（旧值 `outc = acc.rgb/acc.a` 第一帧也是 `Le/16`）⇒ **不是本次改动引入的回归**，
+但它是真缺陷，且与刚修的 SPP/win 增益同属"累积记账偏差"一族。
+
+修法（1 行）：首帧直接采纳当帧均值，不按 `1/SPP` 往 0 里混 ——
+`if (acc.a < 0.5) { acc = vec4(lum, a); } else { acc = vec4(mix(acc.rgb, lum, alpha), a); }`
+⇒ 稳态与收敛速度都不变，只去掉复位带来的暗闪。spv 由 `4a7db466…` 变到 `daa52dd4…`。
+⚠️ 这一条**只能靠眼睛收**（要拍到"复位后前 1 秒"的序列），已计入下面的待跑门禁。
+
+## 🔴 差点白测：PT 的 SPIR-V 是**编进二进制**的，换磁盘 `.spv` 不改变运行中的 exe
+
+`build.rs:1799` 在**构建期**读 `assets/rt/pt_panorama.spv`，生成
+`pub const PT_FRAME_SPV: &[u32] = &[...]`。
+⇒ 第一版 A/B harness（`target/ptab.py`）的前提"同一 exe、只换磁盘 `.spv`、曝光用环境变量覆盖"
+**是错的**：换磁盘文件对 exe 毫无影响，那三次采集测的是**同一个着色器** ——
+`B/A` 会等于 1.0 报假 FAIL，或在噪声内报假 PASS。两种都是垃圾结论。
+⇒ `ptab.py` 已改成**拒绝运行**的存根（不静默删，留着记这个坑）。新 harness `target/ptab2.py`：
+**先 `prep` 预编译 `exe_old` / `exe_new` 两个二进制**（纯 CPU、不需要窗口，已跑完：
+`exe_new = d4381eb18372`、`exe_old = 636231c23006`），窗口内只复制 exe 文件
+⇒ 三次采集约 90 秒，塞得进实测那种约 2 分钟的短窗口；曝光仍走 `RV3D_PT_EXPOSURE` 运行时覆盖。
+⇒ 通用教训：**验"同机位 / 同二进制 / 逐字"之前，先确认被测对象真的换了。**
 
 **未验证（阻塞在显存准入，未放宽门禁）**：smoke / patrol sweep / VVL 轮 / 视觉三方 A/B。
 本机显存今天反复被外部负载占到 7.8 GB / 8.1 GB，`cap_safe.ps1` 的 3200 MiB 准入门正确拒绝；
 实测可用窗口只有约 2 分钟（14:16 那次 4753 MiB 空闲，14:18 就回到 7608 MiB 占用）。
-为此把 A/B 做成一键可跑：`python -P target/ptab.py`（旧 spv 已存 `target/pt_old.spv`，
-同一 exe 只换 `.spv`，曝光用 `RV3D_PT_EXPOSURE` 覆盖，不需要重编）：
-A = old + 0.4（真·改前基线）、B = new + 0.4（应显著变亮，证明"改一个必须改另一个"）、
-C = new + 0.1（必须与 A 同亮度）。判据 `|mean(C)-mean(A)|/mean(A) < 3%` 且 `mean(B)/mean(A) > 1.30`。
+A/B 判据：`|mean(C)-mean(A)|/mean(A) < 3%` 且 `mean(B)/mean(A) > 1.30`，
+其中 A = `exe_old`+0.4（真·改前基线）、B = `exe_new`+0.4（只改着色器，应亮约 4 倍）、
+C = `exe_new`+0.1（成对后的最终态，必须与 A 同亮度）。
 
 **⚠️ 本节随代码在分支 `pt-gain-fix`，未进 master**：上面四项门禁跑完之前，不把未验收的视觉改动推上主线。
 A/B 与冒烟通过 → fast-forward 到 master；不通过 → revert 分支，退回"只保留守卫与手抄值修正"的形态。

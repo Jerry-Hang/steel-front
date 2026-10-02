@@ -296,7 +296,12 @@ void main() {
     float win = mix(64.0f, 1.0f, move);
     float a = min(acc.a + float(SPP), win);
     float alpha = 1.0 / a;
-    acc = vec4(mix(acc.rgb, lum, alpha), a);
+    // 🔴 首帧（acc 刚被复位成 0）**直接采纳当帧均值**，不要按 alpha=1/SPP 往 0 里混。
+    // 否则复位后 acc.rgb = 均值/16，要爬 ~64 帧（≈1 秒）才满 —— 静止端每次镜头切换/
+    // 曝光变化/取景指纹改变都会来一段 16 倍暗的淡入。运动端 win=1 ⇒ alpha=1 本来就没这问题，
+    // 所以这个缺陷只在"停下来之后"看得见，与刚修掉的 SPP/win 增益是同一族记账偏差。
+    if (acc.a < 0.5) { acc = vec4(lum, a); }
+    else { acc = vec4(mix(acc.rgb, lum, alpha), a); }
     imageStore(AccImg, gid, acc);
 
     // acc.rgb 已是"每帧均值"的 EMA，直接就是线性 HDR radiance。
