@@ -2323,14 +2323,35 @@ HUD/小地图**没有**被牵连（它们压根不消费几何），所以改动
 ⇒ 红在 `city.rs:2598`；已还原，`git diff --stat` 只剩守卫本身 +76 行。
 ⇒ 这条的价值密度最高：**声明过 + 出过事 + 肉眼可见 + 零守卫**，四样凑齐却一直没被守住。
 
-### 剩下 1 处候选（如实挂账，未修）
+### 候选 3 结案：更好的检测器是**仓库自己打的标签**
 
-- `lighting.rs:43 DEFAULT_SHININESS = 32.0` ↔ `build.rs:535 let shininess = 32.0`
-  没修的原因不是懒：`build.rs:535` 那行在 WGSL 字符串内部，但它与 Rust 侧材质默认值
-  **是否语义同源还没核实**（着色器可能对不同材质走别的 shininess，那 32.0 就只是
-  "统一高光指数的实现值"而非 `DEFAULT_SHININESS` 的镜像）。
-  ⇒ 同值不等于同源；要先读懂 `build.rs` 里 shininess 的用法再决定守不守。
+`DEFAULT_SHININESS = 32.0` ↔ `build.rs:535 let shininess = 32.0` 这条，我**先判同源再加守卫**
+（同值 ≠ 同源）：读下去发现 `lighting.rs` 模块头自称「`FRAGMENT_SHADER_WGSL` 光照计算的
+参考实现（函数/常量与 WGSL **一一对应**）」，而这两个常数各自带着「（与 WGSL 一致）」注释
+和 `#[allow(dead_code)]`（只被参考测试用）。
+⇒ **仓库早就把这些不变量打上标签了**，按标签扫（`grep 与 WGSL`）比我按数值猜同源可靠得多
+——这条方法上的改进直接来自本轮审计：数值审计出 38 个候选要逐个人判，标签一扫就是一条条明文承诺。
 
-**门禁**：`cargo test --release` **658 passed / 0 failed**（本轮 648 → 655 → 656 → 657 → 658）；
+按标签又捞出一个同族：`SPECULAR_STRENGTH = 0.4`（`lighting.rs:46`）↔
+`const SPEC_CONTRIB: f32 = 0.4`（`build.rs:190`，WGSL 全局常量），两侧都在
+`diffuse + K * spec` 里当同一个 K；而 `pt_panorama.glsl:260` 的注释还**点名引用** `SPEC_CONTRIB=0.4`
+⇒ 三方知情、零守卫，又是同一族。
+
+⇒ 新守卫 `reference_lighting_constants_match_the_raster_shader`（`lighting.rs`）：
+从 `build.rs` 源码解析 `let shininess = ` 与 `const SPEC_CONTRIB: f32 = ` 两个值，
+与 CPU 参考实现的两个常数对齐。**红注入**：`DEFAULT_SHININESS` 32→33 ⇒ 红在 `:573`；
+`SPECULAR_STRENGTH` 0.4→0.5 ⇒ 红在 `:594`，且**同模块另外 12 条测试照常绿**
+（证明注入只 trip 新守卫、没弄坏参考测试）。两次注入均已还原。
+
+### 审计的净产出
+
+| 项 | 结果 |
+|---|---|
+| 真接线缺陷 | 1（`NET_PLAYER_BASE` 被抄成 `100_000`）→ 已修 |
+| 声明过 / 出过事 / 零守卫 | 3 族（地面 UV、立面层带、参考光照常数）→ 全部补守卫并红注入 |
+| 误报（查过才没动手） | 1（High 预设的 260.0 与 `MED_END` 巧合） |
+| 仍挂账 | `SHADOW_MAP_SIZE`、`MAX_NPC_INSTANCES` 等"测试里写死同一个数"——那是**故意的**锚点，不该改成引用常量 |
+
+**门禁**：`cargo test --release` **659 passed / 0 failed**（本轮 648 → 655 → 656 → 657 → 658 → 659）；
 CJK 门禁绿；`cargo build --release` 绿；`target/verify_v6.py` 全绿。
 探针：`target/mirror_audit.py`（271 个具名常量 → 38 个候选 → 逐条人判）。
