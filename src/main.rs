@@ -2857,7 +2857,7 @@ impl GameApp {
                 client
                     .entities()
                     .iter()
-                    .filter(|(id, e)| **id >= 100_000 || **id == 0 || e.hp > 0.0)
+                    .filter(|(id, e)| **id >= net::NET_PLAYER_BASE || **id == 0 || e.hp > 0.0)
                     .map(|(id, e)| {
                         // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
                         let tint = if e.hp > 0.0 {

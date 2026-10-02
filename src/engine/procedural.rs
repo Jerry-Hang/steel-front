@@ -1372,4 +1372,104 @@ mod tests {
             );
         }
     }
+
+    /// 地面 UV 映射是**三方共享**的事实：CPU 生成的纹理（`WORLD_HALF`）、光栅片元
+    /// （`build.rs`）、PT 采样（`assets/rt/pt_panorama.glsl`）必须同用
+    /// `uv = (xz + WORLD_HALF) / (2 * WORLD_HALF)`。
+    ///
+    /// 两个着色器里它是**裸字面量**（`256.0` / `512.0`）。改 `WORLD_HALF` 会让两侧**同时**错，
+    /// 而 PT 与光栅彼此仍然一致 ⇒ PT↔光栅分区对照表**抓不到**，只有地面皮肤尺度悄悄走形。
+    /// 所以这条守卫必须把三方一起钉住，而不是只比 PT 与光栅。
+    /// `build.rs` 里的 WGSL 存在多份副本（槽位常量那组就是 2 份），故对**每一处**出现都取值。
+    #[test]
+    fn ground_uv_mapping_is_shared_by_cpu_raster_and_pt() {
+        /// 从 `s` 里取第一个"独立数字"（前面不是字母/数字/下划线），
+        /// 这样 `vec2<f32>` 里的 2 与 32 不会被误当成数值。
+        fn first_float(s: &str, what: &str, role: &str) -> f32 {
+            let b: Vec<char> = s.chars().collect();
+            for i in 0..b.len() {
+                let prev_ident = i > 0 && (b[i - 1].is_alphanumeric() || b[i - 1] == '_');
+                if !b[i].is_ascii_digit() || prev_ident {
+                    continue;
+                }
+                let mut j = i;
+                while j < b.len() && (b[j].is_ascii_digit() || b[j] == '.') {
+                    j += 1;
+                }
+                let tok: String = b[i..j].iter().collect();
+                return tok
+                    .parse::<f32>()
+                    .unwrap_or_else(|_| panic!("{what} 的{role}不是数字：{tok:?}"));
+            }
+            panic!("{what} 找不到{role}数字：{s}")
+        }
+
+        /// 取出 `+ vec2...(OFF)` 的偏移与 `) / DIV` 的除数。
+        fn uv_pair(line: &str, what: &str) -> (f32, f32) {
+            let plus = line
+                .find("+ vec2")
+                .unwrap_or_else(|| panic!("{what} 的地面 UV 不是 `+ vec2(...)` 形式：{line}"));
+            let off = first_float(&line[plus..], what, "偏移");
+            let dpos = line
+                .find(") /")
+                .or_else(|| line.find(")/"))
+                .unwrap_or_else(|| panic!("{what} 的地面 UV 没有 `/ 除数`：{line}"));
+            (off, first_float(&line[dpos..], what, "除数"))
+        }
+
+        /// 对 needle 的**每一处**出现取值，并要求它们彼此一致。
+        fn all_pairs(src: &str, needle: &str, what: &str) -> Vec<(f32, f32)> {
+            let mut out = Vec::new();
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find(needle) {
+                let at = from + rel;
+                let end = src[at..]
+                    .find('\n')
+                    .map(|k| at + k)
+                    .unwrap_or(src.len());
+                out.push(uv_pair(&src[at..end], what));
+                from = end;
+            }
+            assert!(
+                !out.is_empty(),
+                "{what} 里找不到 `{needle}`：地面 UV 映射被改名或删了？"
+            );
+            assert!(
+                out.iter().all(|p| *p == out[0]),
+                "{what} 里地面 UV 的多份副本互不一致：{out:?}"
+            );
+            out
+        }
+
+        let build = include_str!("../../build.rs");
+        let pt = include_str!("../../assets/rt/pt_panorama.glsl");
+        let raster = all_pairs(build, "world_uv = (input.world_pos.xz", "build.rs 光栅片元");
+        let pts = all_pairs(pt, "textureLod(GroundTex, (hitPos.xz", "PT 着色器");
+
+        let half = WORLD_HALF;
+        let span = 2.0 * WORLD_HALF;
+        for (name, pairs) in [("光栅", &raster), ("PT", &pts)] {
+            let (off, div) = pairs[0];
+            assert!(
+                (off - half).abs() < 1e-4,
+                "{name} 的地面 UV 偏移 = {off}，与 CPU 侧 WORLD_HALF = {half} 不符：\
+                 改 WORLD_HALF 必须同时改两个着色器里的字面量"
+            );
+            assert!(
+                (div - span).abs() < 1e-4,
+                "{name} 的地面 UV 除数 = {div}，应为 2*WORLD_HALF = {span}"
+            );
+        }
+        assert_eq!(
+            raster.len(),
+            pts.len(),
+            "光栅与 PT 的地面 UV 副本数不同：光栅 {raster:?} / PT {pts:?}"
+        );
+        let (ro, rd) = raster[0];
+        let (po, pd) = pts[0];
+        assert!(
+            (ro - po).abs() < 1e-4 && (rd - pd).abs() < 1e-4,
+            "光栅与 PT 的地面 UV 映射分叉：光栅 ({ro},{rd}) / PT ({po},{pd})"
+        );
+    }
 }

@@ -2260,3 +2260,63 @@ HUD/小地图**没有**被牵连（它们压根不消费几何），所以改动
    改过任何着色器后**先比 `certutil -hashfile assets\*.spv` 再跑门**（§24.4）。
 
 ---
+
+<!-- 以下为本档**切档后新增**的日志，不属于切档原文；verify_v6 会在此处截断逐字比对。 -->
+
+## 50. 🔍 同值镜像审计：一处真接线缺陷 + 一条无人守卫的三方一致声明（2026-10-02）
+
+**起因**：修 PT 增益时扫出 `ray_tracer.rs::pack()` 里 `else { 0.4 }` 是 `PT_EXPOSURE_DEFAULT`
+旧值的手抄副本。同类缺陷不会只有一处 ⇒ 写探针 `target/mirror_audit.py` 系统扫一遍：
+收集 `src/**/*.rs` + `build.rs` 里 **271 个具名数值常量**，对每个常量找"同一数值以裸字面量
+出现在别处"（跳过定义行、跳过注释、跳过 0/1/2/0.5 这类无区分度的数、出现 >8 次视为噪声）
+⇒ **38 个候选**，逐条人判。
+
+### 真缺陷 1（已修）：`NET_PLAYER_BASE` 在 main.rs 里被抄成 `100_000`
+
+- `net.rs:93` `pub const NET_PLAYER_BASE: u32 = 100_000;`，而 `net.rs:99 / :1189 / :2278`
+  三处注释**点名描述**了"main.rs 对 id ≥ `NET_PLAYER_BASE` 的实体无条件进画面"这条不变量；
+- 可 `main.rs:2860` 写的却是裸 `**id >= 100_000`，且 `main.rs` 全文**从未引用过**这个常量。
+- ⇒ 改成 `net::NET_PLAYER_BASE`。行为完全等价（值相同），但"文档点名、代码抄数"这个形状
+  正是下一次静默错行为的种子：改基址 ⇒ 联网客户端的 NPC 过滤条件悄悄失效。
+
+### 真缺陷 2（已加守卫）：地面 UV 映射是**三方共享**的事实，却零守卫
+
+`uv = (xz + WORLD_HALF) / (2 * WORLD_HALF)` 同时活在三个地方：
+
+| 处 | 写法 |
+|---|---|
+| CPU `procedural.rs:16` | `pub const WORLD_HALF: f32 = 256.0` |
+| 光栅 `build.rs:887` | `(input.world_pos.xz + vec2<f32>(256.0, 256.0)) / 512.0` |
+| PT `pt_panorama.glsl:205` | `textureLod(GroundTex, (hitPos.xz + vec2(256.0)) / 512.0, 0.0)` |
+
+最要紧的一点：**改 `WORLD_HALF` 会让两个着色器同时错，而 PT 与光栅彼此仍然一致**
+⇒ 我天天用的 PT↔光栅分区对照表**结构上抓不到它**，只有地面皮肤尺度悄悄走形。
+而 `procedural.rs:14` 那行文档注释**早就写着**"必须与 `build.rs` 片元着色器里 world-space UV
+的分母/偏移保持一致" —— **一条被声明了、却从来没有守卫的不变量**（与 §24 那两条假守卫同一族）。
+
+⇒ 新守卫 `ground_uv_mapping_is_shared_by_cpu_raster_and_pt`（`procedural.rs`）：
+用 `include_str!` 真读 `build.rs` 与 `pt_panorama.glsl`，从**每一处**出现解析偏移与除数
+（`build.rs` 的 WGSL 有多份副本，副本间不一致也直接红），再与 `WORLD_HALF` / `2*WORLD_HALF` 三方对齐。
+取值时跳过 `vec2<f32>` 里的 `2` 与 `32`（只认"前面不是标识符字符"的数字起点）。
+**红注入**：`WORLD_HALF` 256.0 → 257.0 ⇒ 红在 `procedural.rs:1453`；已还原。
+
+### 误报 1 条，查过才没动手（差点造成真回归）
+
+`TERRAIN_LOD_MED_END = 260.0`（`renderer.rs:247`）与 `renderer.rs:396`
+`terrain_lod_med_morph_start: 260.0` 同值。看一眼像镜像，**读上下文才发现不是**：
+`:392-397` 是 `QualityParams` 的 **High 预设独立取值**（145/340/95/260/160），
+那个 260.0 与默认 `MED_END` 相等纯属巧合。若"顺手改成 `TERRAIN_LOD_MED_MORPH_START`（200.0）"，
+就是给 High 预设改 LOD 行为的**真回归**。⇒ 探针给的是候选，不是结论。
+
+### 剩下两处候选（如实挂账，未修）
+
+- `city.rs:40 FLOOR_H = 3.15` ↔ `build.rs:623 const FLOOR_H: f32 = 3.15`（同名同值，跨语言镜像，无守卫）
+- `lighting.rs:43 DEFAULT_SHININESS = 32.0` ↔ `build.rs:535 let shininess = 32.0`
+
+两处都是"Rust 常量 ↔ 构建脚本里的字面量"，形状与上面地面 UV 完全一样。
+本轮没修是因为它们**不在今天的视觉主线上**，而守卫要写对得先确认语义真的同源
+（`FLOOR_H` 同名，大概率是；`shininess` 是材质默认值，需核对 `build.rs:535` 的上下文）。
+⇒ 下一步照 `ground_uv_mapping_*` 的形状补两条即可，探针会重复利用。
+
+**门禁**：`cargo test --release` **657 passed / 0 failed**；CJK 门禁绿；`cargo build --release` 绿。
+探针：`target/mirror_audit.py`。
