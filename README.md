@@ -65,8 +65,8 @@
 - Blender 无头控制闭环：导入 → 材质/AO 烘焙 → 节点净化 → 导出 GLB → 渲染 PNG → 看图自检。
 - 程序化城市（板楼/抹灰楼模块）+ 道具焊接（顶点数即帧率，见铁律 D）。
 
-**验收现状（2026-10-01 实测）**
-- `cargo test --release` **648 passed / 0 failed**；`cargo build --release` **0 警告**
+**验收现状（2026-10-02 实测）**
+- `cargo test --release` **652 passed / 0 failed**；`cargo build --release` **0 警告**
   （🔴 判据只认 `cargo build --release` —— `cargo test` 会因 `cfg(test)` 漏报）。
 - 冒烟（`scripts/run_smoke_pm.ps1`）判据 = `vuid==0 and panics==0 and killed>=1`；
   整局验证层跑法见 `AGENTS.md` 铁律 B。
@@ -495,8 +495,8 @@ packaging — their absence raises no error, it silently falls back to procedura
 - Procedural city (panel-block and plastered-block kits) + welded props (vertex count *is* the
   frame rate — see rule D in `AGENTS.md`).
 
-**Verification status (measured 2026-10-01)**
-- `cargo test --release` **648 passed / 0 failed**; `cargo build --release` **0 warnings**
+**Verification status (measured 2026-10-02)**
+- `cargo test --release` **652 passed / 0 failed**; `cargo build --release` **0 warnings**
   (🔴 the warning gate only accepts `cargo build --release`; `cargo test` under-reports).
 - Smoke (`scripts/run_smoke_pm.ps1`) criterion = `vuid==0 and panics==0 and killed>=1`.
 - Battle-intel invariants (tool `tools/battle_tally_check.py`): `own_deaths + Σstrengths == roster`
