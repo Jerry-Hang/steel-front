@@ -186,3 +186,61 @@ PT-VIEW 参考帧路径（exposure 0.5、PT_SUN_INTENSITY 1.5）语义不变，�
 
 **教训 42：渲染数值对照永远同日跑；跨天的 ×N.NN 先怀疑机器日态，再怀疑代码。**
 
+## §33 结案（部分）：PT 显示增益与 SPP/win 解耦 —— 代码与守卫已落地，视觉验收仍等显存窗口（2026-10-02）
+
+**缺陷**（推导，非猜测）：`pt_panorama.glsl` 里 `lum` 是每帧 SPP 个样本的**求和**，却直接进时域 EMA；
+显示端再除以饱和于 `win` 的 `acc.a` ⇒ 稳态显示增益 = **SPP/win**：
+
+| 状态 | SPP | win | 稳态 outc |
+|---|---|---|---|
+| 静止 | 16 | 64 | 0.25·L·e |
+| 行走 | 64 | 1 | 64·L·e |
+
+同一个像素在"走"与"站"之间摆 **256 倍**。
+
+**修复**（两处必须成对）：
+
+1. 入栈前归一 `lum *= pc.e.w / float(SPP);`，显示端 `vec3 outc = acc.rgb;`（去掉 `/ max(acc.a, 1.0)`）
+   ⇒ 稳态 outc = L·e，与 SPP、win 无关。
+2. 标定值 `PT_EXPOSURE_DEFAULT` 0.4 → **0.1**（÷4）。tone 曲线 `1-exp(-x·1.55)` 在两侧同形可约去，
+   静止端 `f(0.25·L·0.4) = f(0.1·L)` 与新实现 `f(L·0.1)` **逐字相等** ⇒ §19 静态参照帧标定原样保持。
+
+**为什么归一放"入栈前"而不是"显示端除以当帧 SPP"**：后者在停下的瞬间 `acc.rgb` 里还混着旧帧的
+64·L·e，会先亮约 4 倍、再花 ~1 秒衰减回去（亮度脉冲）；前者在运动期 alpha=1、`acc.rgb` 本就等于
+当帧均值，mix 的是同一个量 ⇒ 切换无脉冲。这一条是**偏离原计划**的地方，理由在此，不当作笔误。
+
+**顺带扫出的第二处缺陷**：`ray_tracer.rs::pack()` 里的 `else { 0.4 }` 是旧标定值的**手抄副本**，
+改常量后它就成了全仓唯一还认为标定是 0.4 的地方（当前不可达：config 与 `RV3D_PT_EXPOSURE` 都夹在
+`PT_EXPOSURE_MIN = 0.05` 之上）。已改为引用 `PT_EXPOSURE_DEFAULT`。
+另核 `spp_target`：它被打包进 `pc.f.z` 而着色器从不读 `f.z`（只读 f.x/f.y/f.w）—— 但 CPU 侧
+`renderer.rs:11563` 用它决定何时停止累积，所以是**打包冗余**，不是"存在但未接线"那类缺陷。
+
+**新守卫** `pt_display_gain_is_motion_independent_and_paired_with_exposure`：真的去读
+`assets/rt/pt_panorama.glsl` 源，锁三件事 —— 入栈前必须 `/ float(SPP)`、显示端不得再除 `acc.a`、
+`PT_EXPOSURE_DEFAULT == 0.4 × (着色器当下的静止 SPP/win)`。SPP/win 端点是**从着色器解析**出来的，
+不是抄进测试的数字（抄数字就是我这周拆掉的那两条假守卫的形状）。两侧都做过**红注入**：
+改 `PT_EXPOSURE_DEFAULT` → 红在 `ray_tracer.rs:341`；把 `lum *= pc.e.w / float(SPP)` 改回
+`lum *= pc.e.w` → 红在 `ray_tracer.rs:316`。
+
+**已验证**：`cargo build --release` 绿；`cargo test --release` **656 passed / 0 failed**；
+CJK 门禁绿（1590 用点）；`scripts/compile_pt.ps1` + `spirv-val` 通过；
+`pt_panorama.spv` SHA256 `838557e1…445946` → `4a7db466…0672c5`（24,660 → 24,604 B）。
+
+**未验证（阻塞在显存准入，未放宽门禁）**：smoke / patrol sweep / VVL 轮 / 视觉三方 A/B。
+本机显存今天反复被外部负载占到 7.8 GB / 8.1 GB，`cap_safe.ps1` 的 3200 MiB 准入门正确拒绝；
+实测可用窗口只有约 2 分钟（14:16 那次 4753 MiB 空闲，14:18 就回到 7608 MiB 占用）。
+为此把 A/B 做成一键可跑：`python -P target/ptab.py`（旧 spv 已存 `target/pt_old.spv`，
+同一 exe 只换 `.spv`，曝光用 `RV3D_PT_EXPOSURE` 覆盖，不需要重编）：
+A = old + 0.4（真·改前基线）、B = new + 0.4（应显著变亮，证明"改一个必须改另一个"）、
+C = new + 0.1（必须与 A 同亮度）。判据 `|mean(C)-mean(A)|/mean(A) < 3%` 且 `mean(B)/mean(A) > 1.30`。
+
+**⚠️ 本节随代码在分支 `pt-gain-fix`，未进 master**：上面四项门禁跑完之前，不把未验收的视觉改动推上主线。
+A/B 与冒烟通过 → fast-forward 到 master；不通过 → revert 分支，退回"只保留守卫与手抄值修正"的形态。
+
+**踩到的工具坑**：`target/struct.py`（早前探针）**遮蔽标准库 `struct`** —— 从 `target/` 里跑脚本时
+`sys.path[0]` 就是该目录，于是 `import numpy` 连带 `pickle → struct` 全部炸掉，而且 `struct.py`
+会在导入时执行并打印无关内容。⇒ 跑 `target/` 下的脚本一律 `python -P`。
+
+**教训：手抄的标定值就是下一个缺陷。** 一个常数出现在两个地方，改动的当天它就已经是错的了；
+今天不是靠测试抓到的，是靠"改完再扫一遍还有谁写着 0.4"扫到的。
+

@@ -84,13 +84,23 @@ pub fn box_indices() -> [u32; 36] {
 pub const PT_SUN_DIR: [f32; 3] = [-0.4, 0.9, -0.3];
 pub const PT_SUN_INTENSITY: f32 = 1.5;
 
-/// PT 曝光的**标定值**（0.4）：光栅把反照率乘在 tone 之外（`alb×(1-exp(-1.55L))`），
-/// PT 物理正确在之内；0.4 使两模型在 albedo 0.1~0.8 区间分区均值互差 ≤15%（2026-09-19 §19）。
+/// PT 曝光的**标定值**：光栅把反照率乘在 tone 之外（`alb×(1-exp(-1.55L))`），
+/// PT 物理正确在之内；该值使两模型在 albedo 0.1~0.8 区间分区均值互差 ≤15%（2026-09-19 §19）。
+///
+/// 🔴 **2026-10-02：0.4 → 0.1，与 `assets/rt/pt_panorama.glsl` 的增益修复严格成对。**
+/// 那条修复把"每帧 SPP 个样本之和"改为"每帧均值"后再进时域 EMA，消掉了稳态显示增益
+/// = SPP/win 的缺陷（静止 16/64=0.25、运动 64/1=64 ⇒ 同一像素在走与站之间摆 **256 倍**）。
+/// 代价是**静止**稳态亮度恰好提高 4 倍（0.25 → 1.0），所以标定值同步 ÷4，
+/// 把 §19 标定所依据的静态参照帧亮度**原样保持**。⇒ 这两个数是一个事实的两半，
+/// **改一个必须改另一个**：只改着色器 ⇒ PT 整体亮 4 倍；只改这里 ⇒ 静止 PT 暗 4 倍。
+/// 复测判据：改前/改后静态参照帧均值灰差 <3%；静止 vs 行走 <10%（旧值 256×）。
+/// 已知遗留：§19 的分区偏差表是在旧的非均匀增益下测的，静态端数值不变，
+/// 但当时"行走中的 PT"未被该表覆盖——那正是本条修掉的部分，表可择机复测。
 ///
 /// ⚠️ 它是**标定常数**而不是玩家选项：它绑死在光栅那条 tone 曲线上，乱动就等于把 PT 与光栅
 /// 的对照关系破坏掉。所以它进 `config.rs`（可持久化、可被 `RV3D_PT_EXPOSURE` 覆盖做 A/B），
 /// **不进设置面板**（面板里放一个玩家随手可改的标定值，只会造出一堆假的画面 bug）。
-pub const PT_EXPOSURE_DEFAULT: f32 = 0.4;
+pub const PT_EXPOSURE_DEFAULT: f32 = 0.1;
 /// 允许区间（配置文件与 `RV3D_PT_EXPOSURE` 共用；越界一律夹回来）
 pub const PT_EXPOSURE_MIN: f32 = 0.05;
 pub const PT_EXPOSURE_MAX: f32 = 4.0;
@@ -134,7 +144,14 @@ impl PtParams {
         };
         let s = self.sun_dir.normalize_or_zero();
         let f = if self.fwd.length_squared() > 1e-6 { self.fwd } else { glam::Vec3::NEG_Z };
-        let exp = if self.exposure > 1e-4 { self.exposure } else { 0.4 };
+        // 兜底值必须引用标定常量，不能写字面量：这里原先写死 `0.4`，是旧标定值的手抄副本，
+        // 2026-10-02 标定值随增益修复改成 0.1 时，它就成了全仓唯一还认为标定是 0.4 的地方。
+        // （当前不可达：config 与 RV3D_PT_EXPOSURE 都夹在 PT_EXPOSURE_MIN=0.05 之上。）
+        let exp = if self.exposure > 1e-4 {
+            self.exposure
+        } else {
+            PT_EXPOSURE_DEFAULT
+        };
         [
             [w as f32, h as f32, tan, self.bounces.clamp(1, 8) as f32],
             [self.cam.x, self.cam.y, self.cam.z, 0.0],
@@ -256,6 +273,89 @@ pub struct PtAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 从 `mix(a, b, move)` 形式里取出两个端点常量（a=静止端、b=运动端）。
+    /// 故意不写死数字：判据绑的是着色器**当下**的字面量，改 SPP/win 会立刻把这条测试推到
+    /// 对曝光标定提出新要求，而不是让它悄悄绿。
+    fn mix_endpoints(src: &str, needle: &str) -> (f32, f32) {
+        let line = src
+            .lines()
+            .map(str::trim_start)
+            .find(|l| !l.starts_with("//") && l.contains(needle))
+            .unwrap_or_else(|| panic!("着色器里找不到 `{needle}`，归一/窗口判据已失效"));
+        let open = line.find("mix(").expect("mix(") + 4;
+        let close = line[open..].find(')').expect("mix 的右括号");
+        let args: Vec<f32> = line[open..open + close]
+            .split(',')
+            .take(2)
+            .map(|s| {
+                s.trim()
+                    .trim_end_matches('f')
+                    .parse::<f32>()
+                    .unwrap_or_else(|_| panic!("`{needle}` 的端点必须是浮点字面量：{s:?}"))
+            })
+            .collect();
+        (args[0], args[1])
+    }
+
+    /// PT 的显示增益必须与 `move`（⇒ SPP、时域窗口 win）**无关**，
+    /// 且 Rust 侧的曝光标定必须与着色器的归一方式**成对**。
+    ///
+    /// 由来：2026-10-02 修掉的缺陷 —— `lum` 是每帧 SPP 个样本之和，却直接进 EMA，
+    /// 显示端又除以饱和于 win 的 `acc.a` ⇒ 稳态增益 = SPP/win = 静止 0.25 / 运动 64，
+    /// 同一个像素在走与站之间摆 **256 倍**。修复 = 入栈前除以 SPP + 显示端去掉除数，
+    /// 并把标定值同步 ÷4（0.4 → 0.1）以保持 §19 静态参照帧标定。
+    ///
+    /// 这条守卫同时卡住两侧：只改着色器（回归 256×）或只改标定（静止 PT 暗/亮 4 倍）都会红。
+    #[test]
+    fn pt_display_gain_is_motion_independent_and_paired_with_exposure() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/rt/pt_panorama.glsl"),
+        )
+        .expect("必须真的读着色器源；拿抄件比对就是假守卫");
+
+        // 1) 入栈前必须按当帧样本数归一
+        let lum = src
+            .lines()
+            .map(str::trim_start)
+            .find(|l| !l.starts_with("//") && l.contains("lum *="))
+            .expect("找不到 lum 的曝光行");
+        assert!(
+            lum.contains("/ float(SPP)"),
+            "`lum` 是 SPP 个样本之和，进 EMA 前必须除以 SPP，否则显示增益随运动摆 SPP/win 倍：{lum}"
+        );
+
+        // 2) 显示端不得再除累积样本数（与 1) 叠加就会多除一个 SPP）
+        assert!(
+            !src.contains("acc.rgb / max(acc.a"),
+            "显示端仍除以 acc.a：与入栈前的归一叠加，静止 PT 会暗 SPP 倍"
+        );
+        assert!(
+            src.lines()
+                .map(str::trim_start)
+                .any(|l| !l.starts_with("//") && l.replace(' ', "") == "vec3outc=acc.rgb;"),
+            "显示端应直接取 acc.rgb（它已是每帧均值的 EMA）"
+        );
+
+        // 3) 标定值必须 = 改前标定 × 着色器当下的静止增益
+        //    改前标定是**历史冻结值**（§19 在旧归一下测出），不是从别处抄来的活值。
+        const PRE_FIX_PT_EXPOSURE: f32 = 0.4;
+        let (spp_rest, _spp_move) = mix_endpoints(&src, "uint SPP = uint(round(mix(");
+        let (win_rest, _win_move) = mix_endpoints(&src, "float win = mix(");
+        let rest_gain = spp_rest / win_rest;
+        let want = PRE_FIX_PT_EXPOSURE * rest_gain;
+        let have = PT_EXPOSURE_DEFAULT;
+        assert!(
+            (have - want).abs() < 1e-6,
+            "曝光标定与着色器归一不成对：静止增益 {spp_rest}/{win_rest} = {rest_gain} ⇒ \
+             PT_EXPOSURE_DEFAULT 应为 {want}，实为 {have}"
+        );
+        // 反空转：这条测试若被写成恒真，rest_gain 会失去意义
+        assert!(
+            (rest_gain - 0.25).abs() < 1e-6,
+            "静止端 SPP/win 已不是 16/64，本测试的成对判据需随之重写"
+        );
+    }
 
     /// pack 的第 7 槽 g.x = 盒体三角形边界（道具路径的分流判据）。
     /// 2026-09-19 道具进 BLAS 专项：着色器与 Rust 侧的 PC 布局靠这条测试钉死。

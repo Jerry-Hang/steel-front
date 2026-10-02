@@ -276,20 +276,32 @@ void main() {
         lum += lq;
     }
 
-    // 时域累积：线性 HDR 求和，a 通道记已累积样本数；色调映射只作用于运行均值
+    // 时域累积：线性 HDR，a 通道记已累积样本数；色调映射只作用于运行均值
     // （否则每帧各自 ACES+sRGB 再平均会把高光压平、gamma 域相加也不物理）
-    lum *= pc.e.w;
+    //
+    // 🔴 `lum` 是 SPP 个样本的**求和**，必须先归一成**每帧均值**再进 EMA。
+    // 原先把和值直接喂进 mix ⇒ acc.rgb ≈ SPP·L·exposure，而显示端除以 acc.a
+    // （饱和于 win）⇒ 稳态显示增益 = SPP/win：静止 16/64 = 0.25、运动 64/1 = 64，
+    // **同一个像素在"走"与"站"之间摆 256 倍**。归一后 acc.rgb 恒为 L·exposure，
+    // 与 SPP、win 都无关，显示端不再需要任何除数。
+    // 为什么不在显示端除以当帧 SPP：那样停下瞬间 acc.rgb 里还混着旧帧的 64·L·e，
+    // 会先亮约 4 倍、再花 ~1 秒衰减回去（亮度脉冲）。而运动期 alpha=1，acc.rgb 本来
+    // 就等于当帧均值，归一放进入栈前 ⇒ mix 的是同一个量 ⇒ 切换无脉冲。
+    lum *= pc.e.w / float(SPP);
     vec4 acc = imageLoad(AccImg, gid);
     if (pc.f.y > 0.5) { acc = vec4(0.0); }
     // 运动自适应时域窗口：运动大 => 窗口短（10 帧，快速丢弃旧视角=去拖影）+ spp 高（瞬时降噪）；
     // 静止 => 窗口长（64 帧，时域收割=干净）
+    // 修复后 win/SPP 只决定**收敛速度与降噪量**，不再决定亮度 —— 这正是本条的全部意义。
     float win = mix(64.0f, 1.0f, move);
     float a = min(acc.a + float(SPP), win);
     float alpha = 1.0 / a;
     acc = vec4(mix(acc.rgb, lum, alpha), a);
     imageStore(AccImg, gid, acc);
 
-    vec3 outc = acc.rgb / max(acc.a, 1.0);
+    // acc.rgb 已是"每帧均值"的 EMA，直接就是线性 HDR radiance。
+    // 旧的 `/ max(acc.a, 1.0)` 是对求和值做的归一，与上面的入栈前归一叠加就会多除一个 SPP。
+    vec3 outc = acc.rgb;
     // 色调映射与光栅 apply_lighting 同源（build.rs: 1-exp(-x*1.55) 指数压缩，不截顶）——
     // 参照帧与实机帧必须走同一条曲线，否则分区偏差表测的是曲线差而不是光照差
     outc = vec3(1.0) - exp(-clamp(outc, vec3(0.0), vec3(16.0)) * 1.55);
