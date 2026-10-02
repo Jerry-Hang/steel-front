@@ -14900,6 +14900,182 @@ mod horizontal_winding_tests {
             );
         }
     }
+
+    /// 🔴 两条管线的**几何模板必须逐值相同**，且每张表都要"真的被解析到"。
+    ///
+    /// 存在理由（2026-10-02）：`build.rs` 的 mesh 路径自带一整套 `CUBE_POS/CUBE_TRI/
+    /// ICO_POS/SPH_POS/...`，与 CPU 侧 `VERTICES/INDICES`、`cylinder_mesh_data()`
+    /// 是**两份独立维护的副本**；原有的 `mesh_shader_horizontal_winding_matches_cpu`
+    /// 只做 `src.contains("vec3<u32>(16u, 18u, 17u)")` 这类**子串比对**——
+    /// 既不比数值、也只覆盖水平面。改一侧忘改另一侧 ⇒ 回退路径与主路径画的不是同一个东西。
+    ///
+    /// ⚠ **本测试刻意不断言"绕序朝外"**，原因见 §36：
+    ///   立方体 4 个侧面原始法线朝外、顶/底两面朝内（`renderer.rs:14664` 注释自述
+    ///   "曾因反绕被上方剔除"，后改用 `xz` 有向面积约定）；而二十面体在同一修正规则下
+    ///   8/20 个面朝内 ⇒ **两个模板用的约定并不一致**。
+    ///   在用一个 GPU 实验定死"引擎到底哪一面算正面"之前，任何朝外判据都是猜的，
+    ///   写出来只会得到一个"要么常红、要么被后人删掉"的假守卫。
+    ///
+    /// 自检（教训 27：判据必须能红）：每张表解析出的三元组数量**必须等于它自己声明的
+    /// `array<vec3<T>, N>` 里的 N**；表被改名/解析器坏掉时直接红，
+    /// 绝不"没测到就当通过"（§31.6 刚栽过一次）。
+    #[test]
+    fn procedural_geometry_templates_agree_across_paths() {
+        /// 取出 `const NAME: array<vec3<TY>, N> = array<...>( vec3<TY>(a, b, c), ... );`
+        /// 里的三元组，连同它声明的 N（用来证明"真的解析到了"）。
+        fn table_of(src: &str, name: &str, ty: &str) -> (Vec<[f32; 3]>, usize) {
+            let head = format!("const {}:", name);
+            let at = src
+                .find(&head)
+                .unwrap_or_else(|| panic!("build.rs 里找不到表 `{}`（被改名或删了？）", name));
+            let close = src[at..]
+                .find("\n);")
+                .unwrap_or_else(|| panic!("表 `{}` 找不到结尾", name));
+            let body = &src[at..at + close];
+
+            // 声明长度：`array<vec3<f32>, 24>` 里的那个 24（注意 `>` 在 `,` **之前**）
+            let tag = format!("array<vec3<{}>, ", ty);
+            let dpos = body
+                .find(&tag)
+                .unwrap_or_else(|| panic!("表 `{}` 的声明里没有 `{}`", name, tag));
+            let declared: usize = body[dpos + tag.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("表 `{}` 声明的长度不是数字", name));
+
+            let marker = format!("vec3<{}>(", ty);
+            let mut out: Vec<[f32; 3]> = Vec::new();
+            let mut pos = 0usize;
+            while let Some(rel) = body[pos..].find(&marker) {
+                let s = pos + rel + marker.len();
+                let Some(re) = body[s..].find(')') else { break };
+                let mut vals = [0f32; 3];
+                let mut n = 0usize;
+                for part in body[s..s + re].split(',') {
+                    let compact: String = part.chars().filter(|c| !c.is_whitespace()).collect();
+                    let token = compact.strip_suffix('u').unwrap_or(compact.as_str());
+                    let v: f32 = token.parse().unwrap_or_else(|_| {
+                        panic!("表 `{}` 有解析不了的三元组 `{:?}`", name, &body[s..s + re])
+                    });
+                    assert!(n < 3, "表 `{}` 的三元组超过 3 个分量", name);
+                    vals[n] = v;
+                    n += 1;
+                }
+                assert_eq!(n, 3, "表 `{}` 有不足 3 分量的三元组", name);
+                out.push(vals);
+                pos = s + re;
+            }
+            (out, declared)
+        }
+
+        /// 校验一张 (顶点, 索引) 表：索引必须落在顶点范围内、且三角形不退化；
+        /// 返回检查过的三角形数（用来证明"真的检查了东西"，而不是解析器空转）。
+        fn check_indices(verts: &[[f32; 3]], tris: &[[f32; 3]], label: &str) -> usize {
+            for (i, t) in tris.iter().enumerate() {
+                let (ia, ib, ic) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                assert!(
+                    ia < verts.len() && ib < verts.len() && ic < verts.len(),
+                    "{} 第 {} 个三角形索引越界：{:?}（顶点数 {}）\
+                     ⇒ mesh 路径会读到**从未写过的 vertices 槽位**，画出来就是随机三角形",
+                    label,
+                    i,
+                    t,
+                    verts.len()
+                );
+                assert!(
+                    ia != ib && ib != ic && ia != ic,
+                    "{} 第 {} 个三角形退化（索引重复）：{:?}",
+                    label,
+                    i,
+                    t
+                );
+            }
+            tris.len()
+        }
+
+        let src = include_str!("../../build.rs");
+        let mut checked = 0usize;
+
+        // ---- mesh 主管线的三张闭合模板 ----
+        for (pos_name, tri_name, n_pos, n_tri) in [
+            ("CUBE_POS", "CUBE_TRI", 24usize, 12usize),
+            ("ICO_POS", "ICO_TRI", 12usize, 20usize),
+            ("SPH_POS", "SPH_TRI", 42usize, 80usize),
+        ] {
+            let (verts, declared) = table_of(src, pos_name, "f32");
+            assert_eq!(
+                verts.len(),
+                declared,
+                "{} 声明 {} 个顶点，实际解析到 {} 个 ⇒ 解析器或表格式变了",
+                pos_name,
+                declared,
+                verts.len()
+            );
+            assert_eq!(verts.len(), n_pos, "{} 顶点数应当是 {}", pos_name, n_pos);
+            let (tris, declared_t) = table_of(src, tri_name, "u32");
+            assert_eq!(
+                tris.len(),
+                declared_t,
+                "{} 声明 {} 个三角形，实际解析到 {} 个",
+                tri_name,
+                declared_t,
+                tris.len()
+            );
+            assert_eq!(tris.len(), n_tri, "{} 三角形数应当是 {}", tri_name, n_tri);
+            checked += check_indices(&verts, &tris, pos_name);
+        }
+
+        // ---- CPU 侧立方体：直接用常量，不走文本解析（另一条独立路径）----
+        let cpu_verts: Vec<[f32; 3]> = VERTICES.iter().map(|v| v.pos).collect();
+        let cpu_tris: Vec<[f32; 3]> = INDICES
+            .chunks(3)
+            .map(|t| [t[0] as f32, t[1] as f32, t[2] as f32])
+            .collect();
+        checked += check_indices(&cpu_verts, &cpu_tris, "CPU VERTICES/INDICES");
+
+        // ---- CPU 侧圆柱（含上下盖）：真实数据，不是复制公式 ----
+        let (cyl_v, cyl_i) = Renderer::cylinder_mesh_data();
+        let cyl_verts: Vec<[f32; 3]> = cyl_v.iter().map(|v| v.pos).collect();
+        let cyl_tris: Vec<[f32; 3]> = cyl_i
+            .chunks(3)
+            .map(|t| [t[0] as f32, t[1] as f32, t[2] as f32])
+            .collect();
+        checked += check_indices(&cyl_verts, &cyl_tris, "CPU cylinder_mesh_data");
+
+        // ---- 两条管线的立方体模板必须逐值相同，否则回退路径与主路径画的不是同一个东西 ----
+        let (mesh_cube, _) = table_of(src, "CUBE_POS", "f32");
+        for i in 0..24 {
+            assert_eq!(
+                mesh_cube[i], cpu_verts[i],
+                "CUBE_POS[{}] {:?} 与 CPU VERTICES[{}] {:?} 不一致 \
+                 ⇒ 两条管线的盒子不是同一个几何",
+                i,
+                mesh_cube[i],
+                i,
+                cpu_verts[i]
+            );
+        }
+        let (mesh_cube_tri, _) = table_of(src, "CUBE_TRI", "u32");
+        for i in 0..12 {
+            assert_eq!(
+                mesh_cube_tri[i], cpu_tris[i],
+                "CUBE_TRI[{}] {:?} 与 CPU INDICES 第 {} 个三角形 {:?} 不一致",
+                i,
+                mesh_cube_tri[i],
+                i,
+                cpu_tris[i]
+            );
+        }
+
+        assert!(
+            checked >= 200,
+            "本测试只检查了 {} 个三角形（应 >= 200）⇒ 解析器或表结构变了，\
+             此时'全部通过'可能只是因为**什么都没测到**（§31.6 的教训）",
+            checked
+        );
+    }
 }
 
 #[cfg(test)]
