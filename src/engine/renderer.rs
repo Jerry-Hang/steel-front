@@ -13481,6 +13481,166 @@ mod instance_slot_layout_tests {
         );
     }
 
+    /// 🔴 `build.rs` 两段 WGSL 里的**槽位常量必须与 Rust 侧逐值相等**，且各自必须恰好两份。
+    ///
+    /// 存在理由（2026-10-02）：`build.rs` 的 `NPC_INSTANCE_BASE` 那行注释写着
+    /// 「改容量必须同步改本行两处副本 + renderer.rs + 枪槽字面量，见 `gun_slot_layout_is_pinned`」——
+    /// **但那条测试只比 Rust 常量之间是否自洽，看不见 WGSL 里的字面量**
+    /// （build script 与 crate 是两个编译单元，此前没有任何测试读过 `build.rs` 的槽位块）。
+    /// 于是「改了 `MAX_MARKER_INSTANCES` 忘了改 WGSL」会**编译通过、测试全绿**，
+    /// 而 GPU 侧的 marker 带边界与 CPU 上传错位 ⇒ marker 被当成 NPC/自发光来画。
+    /// 这正是 §22.14（PT marker 盒半尺寸）那一族「改了生产者、漏改消费者」的错法形状。
+    ///
+    /// 自检（教训 27：判据必须能红）：每个名字**必须找到恰好 2 份**——
+    /// 解析到 0 份或 1 份都直接红，绝不允许"没解析到"被当成通过。
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn wgsl_slot_constants_match_the_rust_layout() {
+        /// 收集 WGSL 里所有 `const NAME: u32 = EXPR;`，返回 (名字 → 全部副本的 EXPR, 名字 → 求值)。
+        /// 🔴 两个坑：① EXPR 可以是 `65536u + 1u`，也可以是 `NPC_INSTANCE_BASE + 3072u` ——
+        /// **标识项必须递归查表求值**，只把数字挑出来相加会静默丢掉标识项，
+        /// 于是 `NPC_CYL_BASE` 被算成 3072（而不是 76801）；第一版就栽在这里。
+        /// ② WGSL 的 `65536u` 带 `u` 后缀，`parse::<u64>()` 会**直接失败** ⇒ 必须先去掉它。
+        /// 本地模拟器：`target/parsim.py`（跑一次即可复现下面 6 个期望值）。
+        fn wgsl_consts(
+            src: &str,
+        ) -> (
+            std::collections::HashMap<String, Vec<String>>,
+            std::collections::HashMap<String, u64>,
+        ) {
+            let mut exprs: std::collections::HashMap<String, Vec<String>> = Default::default();
+            for line in src.lines() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("const ") else { continue };
+                let Some(colon) = rest.find(':') else { continue };
+                let name = &rest[..colon];
+                let Some(after) = rest[colon..].strip_prefix(": u32 = ") else { continue };
+                let Some(semi) = after.find(';') else { continue };
+                exprs
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(after[..semi].trim().to_string());
+            }
+            // 迭代求值到不动点（槽位布局是单向依赖，几轮就收敛）。
+            let mut values: std::collections::HashMap<String, u64> = Default::default();
+            loop {
+                let mut progressed = false;
+                for (name, es) in &exprs {
+                    if values.contains_key(name) {
+                        continue;
+                    }
+                    let mut sum = 0u64;
+                    let mut done = true;
+                    for term in es[0].split('+') {
+                        let token: String = term
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .collect();
+                        if token.is_empty() {
+                            done = false;
+                            break;
+                        }
+                        // WGSL 整数字面量的 `u` 后缀：去掉后再解析。
+                        let (digits, bare) = match token.strip_suffix('u') {
+                            Some(d) if !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) => {
+                                (Some(d), false)
+                            }
+                            _ => (None, token.chars().all(|c| c.is_ascii_digit())),
+                        };
+                        if let Some(d) = digits {
+                            sum += d.parse::<u64>().unwrap_or(0);
+                        } else if bare {
+                            sum += token.parse::<u64>().unwrap_or(0);
+                        } else if let Some(v) = values.get(&token) {
+                            sum += v;
+                        } else {
+                            done = false;
+                            break;
+                        }
+                    }
+                    if done {
+                        values.insert(name.clone(), sum);
+                        progressed = true;
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            (exprs, values)
+        }
+
+        let build = std::fs::read_to_string("build.rs")
+            .expect("读 build.rs 失败（测试工作目录应为仓库根）");
+        let (exprs, values) = wgsl_consts(&build);
+        let cases: [(&str, u32); 5] = [
+            ("MARKER_INSTANCE_BASE", MARKER_SLOT_BASE),
+            ("NPC_INSTANCE_BASE", NPC_SLOT_BASE),
+            ("NPC_CYL_BASE", NPC_CYL_SLOT_BASE),
+            ("NPC_SPH_BASE", NPC_SPH_SLOT_BASE),
+            ("EMISSIVE_INSTANCE_BASE", EMISSIVE_SLOT_BASE),
+        ];
+        for (name, want) in cases {
+            let es = exprs.get(name).cloned().unwrap_or_default();
+            assert_eq!(
+                es.len(),
+                2,
+                "WGSL `const {}` 应有 2 份声明（顶点段 + mesh 段），实际 {} 份 \
+                 ⇒ 有副本被改名/删除/挪走，本测试需同步更新，不要直接放宽断言",
+                name,
+                es.len()
+            );
+            assert_eq!(
+                es[0], es[1],
+                "`{}` 的两份 WGSL 副本表达式不再逐字符相同（{:?} vs {:?}）\
+                 ⇒ 顶点段与 mesh 段对槽位带的理解已经分叉",
+                name,
+                es[0],
+                es[1]
+            );
+            let got = values.get(name).unwrap_or_else(|| {
+                panic!("`const {}` 无法求值（表达式引用了表外的名字）⇒ 解析器需更新", name)
+            });
+            assert_eq!(
+                *got,
+                want as u64,
+                "WGSL `const {}` = {} 与 Rust 侧 {} 不一致 \
+                 ⇒ GPU 的槽位带边界与 CPU 上传错位，marker 会被当成 NPC/自发光来画",
+                name,
+                got,
+                want
+            );
+        }
+
+        // 枪槽在 WGSL 里是**裸字面量**（顶点段 `instance_index == 83009u`、
+        // mesh 段 `slot == 83009u`），Rust 侧由 MAX_* 推导 ⇒ 这是最容易漏的一对。
+        let gun_literals = build.matches("83009u").count();
+        assert_eq!(
+            gun_literals, 2,
+            "build.rs 里枪槽字面量 `83009u` 应有 2 处（顶点段 + mesh 段），实际 {} 处",
+            gun_literals
+        );
+        assert_eq!(
+            GUN_INSTANCE_INDEX, 83_009,
+            "Rust 侧 GUN_INSTANCE_INDEX 已变，但 WGSL 里的 `83009u` 是按旧值写死的 \
+             ⇒ 改容量必须同时改 build.rs 两处字面量"
+        );
+
+        // 地形 identity 槽：Rust 侧没有同名常量（只在注释里提到），所以只钉 WGSL 两份副本同值。
+        let terr = exprs.get("TERRAIN_INSTANCE_INDEX").cloned().unwrap_or_default();
+        assert_eq!(
+            terr.len(),
+            2,
+            "`TERRAIN_INSTANCE_INDEX` 应有 2 份 WGSL 声明，实际 {} 份",
+            terr.len()
+        );
+        assert_eq!(
+            values.get("TERRAIN_INSTANCE_INDEX").copied(),
+            Some(65_536),
+            "WGSL 的 `TERRAIN_INSTANCE_INDEX` 必须是 65536（shader 硬编码读该槽）"
+        );
+    }
+
     /// marker 区不得越界侵占 NPC 区（曾因 1024/3072 写错导致前 2048 个 NPC 盒体被当 marker）。
     #[test]
     fn marker_band_does_not_bleed_into_npc_band() {
