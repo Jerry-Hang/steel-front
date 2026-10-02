@@ -2308,15 +2308,29 @@ HUD/小地图**没有**被牵连（它们压根不消费几何），所以改动
 那个 260.0 与默认 `MED_END` 相等纯属巧合。若"顺手改成 `TERRAIN_LOD_MED_MORPH_START`（200.0）"，
 就是给 High 预设改 LOD 行为的**真回归**。⇒ 探针给的是候选，不是结论。
 
-### 剩下两处候选（如实挂账，未修）
+### 候选 2 的后续：立面垂直同源同批补上了守卫
 
-- `city.rs:40 FLOOR_H = 3.15` ↔ `build.rs:623 const FLOOR_H: f32 = 3.15`（同名同值，跨语言镜像，无守卫）
+`city.rs:40 FLOOR_H = 3.15` ↔ `build.rs:623 const FLOOR_H: f32 = 3.15` 经查**确实是同源**，
+而且 `build.rs:619` 的注释自己就写着「⚠ FLOOR_H 必须等于 city.rs 的 FLOOR_H（3.15m）…
+不同步则暗带画在**看得见的**混凝土裙墙上 → 整栋楼被切成一道亮一道黑的空框架」，
+还记了一次真实事故（旧值 3.0m ⇒ 每层错 0.15m，20 层累积 3m ≈ 一整层）。
+同一段注释里另两组也是镜像：`BAND_LO = 0.62` ↔ `city.rs:440 band_base = fy + 0.62`、
+`BAND_HI = 2.73` ↔ `city.rs:441 band_top = fy + FLOOR_H - 0.42`（= 3.15 − 0.42）。
+
+⇒ 新守卫 `facade_band_geometry_matches_the_shader_phase_constants`（`city.rs`）：
+三条等式全部**从真实源码解析**后对齐（`include_str!` 读 `build.rs` 与本文件），
+不抄任何数字。**红注入**：把 `city.rs` 的 `0.42` 改成 `0.43`（窗带顶差 1 厘米）
+⇒ 红在 `city.rs:2598`；已还原，`git diff --stat` 只剩守卫本身 +76 行。
+⇒ 这条的价值密度最高：**声明过 + 出过事 + 肉眼可见 + 零守卫**，四样凑齐却一直没被守住。
+
+### 剩下 1 处候选（如实挂账，未修）
+
 - `lighting.rs:43 DEFAULT_SHININESS = 32.0` ↔ `build.rs:535 let shininess = 32.0`
+  没修的原因不是懒：`build.rs:535` 那行在 WGSL 字符串内部，但它与 Rust 侧材质默认值
+  **是否语义同源还没核实**（着色器可能对不同材质走别的 shininess，那 32.0 就只是
+  "统一高光指数的实现值"而非 `DEFAULT_SHININESS` 的镜像）。
+  ⇒ 同值不等于同源；要先读懂 `build.rs` 里 shininess 的用法再决定守不守。
 
-两处都是"Rust 常量 ↔ 构建脚本里的字面量"，形状与上面地面 UV 完全一样。
-本轮没修是因为它们**不在今天的视觉主线上**，而守卫要写对得先确认语义真的同源
-（`FLOOR_H` 同名，大概率是；`shininess` 是材质默认值，需核对 `build.rs:535` 的上下文）。
-⇒ 下一步照 `ground_uv_mapping_*` 的形状补两条即可，探针会重复利用。
-
-**门禁**：`cargo test --release` **657 passed / 0 failed**；CJK 门禁绿；`cargo build --release` 绿。
-探针：`target/mirror_audit.py`。
+**门禁**：`cargo test --release` **658 passed / 0 failed**（本轮 648 → 655 → 656 → 657 → 658）；
+CJK 门禁绿；`cargo build --release` 绿；`target/verify_v6.py` 全绿。
+探针：`target/mirror_audit.py`（271 个具名常量 → 38 个候选 → 逐条人判）。

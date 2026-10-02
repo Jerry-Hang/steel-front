@@ -2531,4 +2531,80 @@ mod city_layout_tests {
         );
         assert!(stats[0].0 > 0 && stats[1].0 > 0, "没有采样到出生点");
     }
+
+    /// 立面"层相位"的**垂直同源**：`build.rs` 生成的 WGSL 用 `FLOOR_H` / `BAND_LO` /
+    /// `BAND_HI` 排布层带暗纹与壁柱，必须与 `city.rs` 真实窗带几何一致。
+    ///
+    /// `build.rs:619` 的注释自己就写着：「⚠ FLOOR_H 必须等于 city.rs 的 FLOOR_H（3.15m）…
+    /// 着色器里的"层相位"若与它不同步，暗带就会画在**看得见的**混凝土裙墙和层线上…
+    /// → 整栋楼被切成一道亮一道黑的空框架」，并记了一次事故（旧值 3.0m ⇒ 每层错 0.15m，
+    /// 20 层累积 3m ≈ 一整层）。⇒ 这是一条**声明过、出过事、却依然没有守卫**的不变量，
+    /// 与 §40 拆掉的那两条假守卫同族。本测试把三方等式全部从**真实源码解析**后对齐，
+    /// 不抄任何数字（抄数字就是假守卫的形状）。
+    #[test]
+    fn facade_band_geometry_matches_the_shader_phase_constants() {
+        let build = include_str!("../../build.rs");
+        let own = include_str!("city.rs");
+
+        /// 读 `const NAME: f32 = V;`（build.rs 与 city.rs 都是这个写法）。
+        fn f32_const(src: &str, name: &str, what: &str) -> f32 {
+            let needle = format!("const {}: f32 = ", name);
+            let at = src
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{what} 里找不到 `{needle}`（改名或被删了？）",));
+            number_after(&src[at + needle.len()..], what, &needle)
+        }
+
+        /// 从 `src` 开头解析一个浮点字面量。
+        fn number_after(src: &str, what: &str, ctx: &str) -> f32 {
+            let b: Vec<char> = src.chars().collect();
+            let mut i = 0;
+            while i < b.len() && (b[i] == '-' || b[i].is_ascii_digit() || b[i] == '.') {
+                i += 1;
+            }
+            let tok: String = b[..i].iter().collect();
+            tok.parse::<f32>()
+                .unwrap_or_else(|_| panic!("{what} 在 `{ctx}` 之后不是数字：{tok:?}"))
+        }
+
+        /// 找到 `needle` 后紧跟的浮点字面量（用于 city.rs 里的换算量）。
+        fn number_after_text(src: &str, needle: &str, what: &str) -> f32 {
+            let at = src
+                .find(needle)
+                .unwrap_or_else(|| panic!("{what} 里找不到 `{needle}`：窗带几何被改写了？"));
+            number_after(&src[at + needle.len()..], what, needle)
+        }
+
+        let shader_floor = f32_const(build, "FLOOR_H", "build.rs");
+        let shader_lo = f32_const(build, "BAND_LO", "build.rs");
+        let shader_hi = f32_const(build, "BAND_HI", "build.rs");
+
+        let cpu_floor = FLOOR_H;
+        // city.rs:440-441  band_base = fy + 0.62 ; band_top = (fy + FLOOR_H - 0.42).min(...)
+        let cpu_lo = number_after_text(own, "let band_base = fy + ", "city.rs band_base");
+        let cpu_hi_gap = number_after_text(own, "fy + FLOOR_H - ", "city.rs band_top");
+        let cpu_hi = cpu_floor - cpu_hi_gap;
+
+        assert!(
+            (shader_floor - cpu_floor).abs() < 1e-6,
+            "build.rs 的 FLOOR_H = {shader_floor} 与 city.rs 的 {cpu_floor} 不同步：\
+             每层差 {:.3} m ⇒ 暗带会画在混凝土裙墙上，整栋楼变成一道亮一道黑的空框架",
+            (shader_floor - cpu_floor).abs()
+        );
+        assert!(
+            (shader_lo - cpu_lo).abs() < 1e-6,
+            "build.rs BAND_LO = {shader_lo} 与 city.rs 的 band_base 偏移 {cpu_lo} 不同步"
+        );
+        assert!(
+            (shader_hi - cpu_hi).abs() < 1e-6,
+            "build.rs BAND_HI = {shader_hi} 与 city.rs 的 band_top（{cpu_floor} - {cpu_hi_gap} \
+             = {cpu_hi}）不同步"
+        );
+        // 防空转：若哪天把 needle 改成匹配不到而 panic 固然好，但改成匹配到**同一处**也会假绿
+        assert!(
+            (cpu_hi - cpu_lo).abs() > 0.5,
+            "窗带高度差只有 {} m，解析口径可疑（实测应约 2.11 m）",
+            (cpu_hi - cpu_lo).abs()
+        );
+    }
 }
