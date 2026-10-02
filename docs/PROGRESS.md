@@ -13959,3 +13959,63 @@ let skip_static = !draw_static;
 
 📌 本轮 GPU 全程被占（`cap_safe` 累计 7 次拒绝：3253→7794→7779→7742→7707 MiB > 3200 MiB），
 这条复核**排在 §33（PT 亮度）与 §39 之前**——因为它最便宜，而且能决定后面两条要不要做。
+
+## 40. 🔴 拆掉一条**假守卫**：它自称"与 build.rs 一致"，其实比的是自己抄的冻结字面量
+
+### 40.1 缺陷
+
+`procedural.rs` 的 `ground_detail_texel_size_matches_shader_constant`（名字直译就是
+"与着色器常量一致"）原本这么写：
+```rust
+const SHADER_TEXEL_M: f32 = 0.0078125;   // build.rs: GROUND_DETAIL_TEXEL_M
+let texel = GROUND_DETAIL_METRES / GROUND_DETAIL_SIZE as f32;
+assert!((texel - SHADER_TEXEL_M).abs() < 1e-9, ...);
+```
+⇒ 它拿**测试内部一个手抄的字面量**去比 CPU 侧算术，**从头到尾没打开过 `build.rs`**。
+把 `build.rs:203` 的 `GROUND_DETAIL_TEXEL_M` 改成任何值，**这条测试照样绿**。
+⇒ 比"没有测试"更糟：它挂在 CI 里，会让人以为这个跨文件同步**已经有看守**。
+
+### 40.2 修复 + 红注入实证（关键差别在这）
+
+改成**真的去读 `build.rs` 文本并求值**（`shader_f32_const`，支持 `2.0 / 256` 这种一次除法；
+常量被改名/删掉直接 panic，不会空过）。
+
+🔴 然后做旧守卫**必然通不过**的实验——只改着色器一侧：
+```
+build.rs:203  GROUND_DETAIL_TEXEL_M  0.0078125 → 0.01
+procedural.rs 的 2/256 = 0.0078125 与 build.rs GROUND_DETAIL_TEXEL_M = 0.01 不一致：
+改一边必须改另一边，否则地面细节层的 mip 选择整体偏移一档
+test result: FAILED. 0 passed; 1 failed
+```
+⇒ 新守卫**精确抓住**了旧守卫会放过的分叉；随后还原，全量复跑 **654 passed / 0 failed**。
+⇒ 顺带第二次证明**本仓 SPIR-V 生成是确定性的**：
+注入→还原后 `triangle.frag.spv` 与 HEAD **逐字节相同**（`49baeef0…`, 39324 B）、
+`mesh.spv` 亦然（`95433584…`, 27404 B）。
+⚠ 但 `git status` 仍把 `triangle.frag.spv` 标成 `M`——**那只是 mtime 撞了 stat 缓存**。
+⇒ **判"产物有没有变"只能比哈希，不能信 `git status`**（§24.4 的同一课，今天第二次撞上）。
+
+### 40.3 还有**第二条**同类假守卫，本轮**未修**（已定位、已给判据）
+
+`geom.rs:198` `gpu_side_thresholds_leave_room_for_none_and_authored`：
+```rust
+let authored_flat = 1.25f32;                       // ← 本地字面量
+assert!(authored_flat > 0.5 && authored_flat < 1.5);   // ← 比的是自己
+```
+测试名叫"GPU 侧阈值给 None/Authored 留了空间"，但它**从不读片元着色器的阈值**，
+只验证了一个自己写死的数落在自己写死的区间里 ⇒ **恒真**。
+（它后两条 `Shape::from_tag(TAG_AUTHORED/TAG_NONE)` 是真的，所以整条测试**不至于全废**，
+但"GPU 侧"那部分完全是装饰。）
+
+⇒ 修法与 §40.2 同一条路：把片元里所有 `flat_flag <op> <num>` 阈值**解析出来**
+（`renderer.rs::gated_marker_flag_is_indistinguishable_except_at_the_gate` 里
+已经有现成的 `atoms()` 解析器可复用），再断言 `1.25` 落在
+"(0.5,1.5) 之内、且不等于任何已用阈值"。
+**本轮不做的原因**：那条测试今天刚被 §27.1 用到过（两个 `flat_flag` 生产者的比对），
+改它要连带重跑全套门，而我今天的时间给了更值钱的帐篷缺陷；
+⇒ **登记为下轮第一个纯 CPU 任务**，判据与可复用的解析器都已指名。
+
+📌 **本节真正的方法产出**：一条守卫**是否有效**，唯一判据是
+"**改它声称看守的那个东西，它会不会红**"。
+名字里带 `matches_shader_constant` 不构成任何证据——**必须做一次注入才知道**。
+⇒ 建议下轮顺手把这条写进 `AGENTS.md` 铁律 F（那里已有"凡'支持'都要补一条会红的测试"，
+   这一条是它的对偶：**凡'同步'类测试，都要注入一次分叉证明它会红**）。

@@ -1314,17 +1314,53 @@ mod tests {
     }
 
     /// 细节层的纹素密度必须与 build.rs 的 `GROUND_DETAIL_TEXEL_M` 一致：
-    /// 那个常量写死为 `2.0 / 256`，片元据此选显式 mip。不同步 = 每个距离都错一级 mip。
+    /// 片元据此选显式 mip，不同步 = 每个距离都错一级 mip。
+    ///
+    /// 🔴 2026-10-02 拆掉一条**假守卫**：原来这里写死
+    /// `const SHADER_TEXEL_M: f32 = 0.0078125; // build.rs: GROUND_DETAIL_TEXEL_M`
+    /// —— 拿一个**冻结字面量**当作"着色器里的值"。改 `build.rs:203` 那个常量，
+    /// 本测试**照样绿**，而它的名字却自称 "matches shader constant"。
+    /// ⇒ 现在真的去读 `build.rs` 文本并求值（支持 `a / b` 写法），
+    ///   两侧一旦分叉立刻红；表里那个数被删掉/改名也直接 panic，不会空过。
     #[test]
     fn ground_detail_texel_size_matches_shader_constant() {
-        const SHADER_TEXEL_M: f32 = 0.0078125; // build.rs: GROUND_DETAIL_TEXEL_M
+        /// 从 build.rs 读出 `const NAME: f32 = <expr>;`，允许 `2.0 / 256` 这种一次除法。
+        fn shader_f32_const(src: &str, name: &str) -> f32 {
+            let needle = format!("const {}: f32 = ", name);
+            let at = src.find(&needle).unwrap_or_else(|| {
+                panic!("build.rs 里找不到 `const {}: f32`（改名或被删了？）", name)
+            });
+            let rest = &src[at + needle.len()..];
+            let end = rest
+                .find(';')
+                .unwrap_or_else(|| panic!("`{}` 的声明没有分号结尾", name));
+            let text: String = rest[..end].chars().filter(|c| !c.is_whitespace()).collect();
+            match text.find('/') {
+                Some(slash) => {
+                    let num: f32 = text[..slash]
+                        .parse()
+                        .unwrap_or_else(|_| panic!("`{}` 的分子 `{}` 不是数字", name, text));
+                    let den: f32 = text[slash + 1..]
+                        .parse()
+                        .unwrap_or_else(|_| panic!("`{}` 的分母 `{}` 不是数字", name, text));
+                    assert_ne!(den, 0.0, "`{}` 的分母为 0", name);
+                    num / den
+                }
+                None => text
+                    .parse()
+                    .unwrap_or_else(|_| panic!("`{}` 的值 `{}` 不是数字", name, text)),
+            }
+        }
+
+        let build = include_str!("../../build.rs");
+        let shader_texel = shader_f32_const(build, "GROUND_DETAIL_TEXEL_M");
         let size = GROUND_DETAIL_SIZE;
         let metres = GROUND_DETAIL_METRES;
         let texel = metres / size as f32;
         assert!(
-            (texel - SHADER_TEXEL_M).abs() < 1e-9,
+            (texel - shader_texel).abs() < 1e-9,
             "procedural.rs 的 {metres}/{size} = {texel} 与 build.rs \
-             GROUND_DETAIL_TEXEL_M = {SHADER_TEXEL_M} 不一致：改一边必须改另一边，\
+             GROUND_DETAIL_TEXEL_M = {shader_texel} 不一致：改一边必须改另一边，\
              否则地面细节层的 mip 选择整体偏移一档"
         );
         // 倍频必须整除边长，否则 periodic_noise 取模后格点接不上
