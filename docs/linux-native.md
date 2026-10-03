@@ -358,6 +358,7 @@ asusctl armoury set gpu_mux_mode 0      # 需要重启；本机 gpu_mux_mode 是
 |---|---|
 | **Linux 冒烟门** | ✅ `scripts/smoke_linux.sh`（`./SteelFront.sh smoke`，见 §10） |
 | **性能尺子** | ✅ `scripts/perf_run.sh`（三态 0/1/2 均已实测；`-Log` 可离线复核已有日志，见 §11） |
+| **交换链重建探针** | ✅ `scripts/resize_probe.sh`（对应 `run_resize_probe.ps1`，见 §13） |
 | 真机跑通一局（起窗 / 分辨率 / CJK / VUID / **音频**） | ✅ 全部实测；音频听感见 §5.4（录音 + 引擎计数双向印证） |
 | MUX 独显直连 | 用户选择暂不切（§7.3） |
 | `package`（打包） | ✅ `scripts/package_release.sh`（`./SteelFront.sh package`，见 §12） |
@@ -537,3 +538,60 @@ props: 未载入（读取 assets/props 失败: No such file or directory）
   而包里其实有 56 个 —— 那是个会让人误判「资产漏拷了」的假数字。
 
 退出码：0 = 打成 / 1 = 跑了但失败 / 2 = 没跑成。
+
+---
+
+## 13. 交换链重建探针（`scripts/resize_probe.sh`）
+
+```bash
+scripts/resize_probe.sh                              # 5 个尺寸，验证层开
+scripts/resize_probe.sh -PT -Tag pt_resize           # 连 PT 实时路径一起测
+scripts/resize_probe.sh -Sizes "1280x720,1024x768" -AfterSecs 5
+```
+
+铁律 B 说「改 pipeline / swapchain / 同步 / 描述符前先开 `RV3D_VALIDATION=1` 跑一轮」，
+而**交换链重建路径**恰恰是"改过、但从没在验证层下真的缩放过"的那一段 ——
+冒烟跑的是固定尺寸，一次 `WindowEvent::Resized` 都不会发生。
+Linux 侧这条尤其要紧：`b3874af` 修的就是「Wayland 下 `currentExtent` 恒为 `UINT32_MAX`
+⇒ 交换链永远停在 1280x720」，而**只有真的缩放才能证明它还成立**。
+
+### 实测结果（2026-10-03）
+
+| 步 | 脚本设置（KWin **逻辑**坐标） | 引擎观测（**物理**） | ×1.25 校验 |
+|---|---|---|---|
+| 1 | 1280x720 | 1600x900 | ✓ |
+| 2 | 1600x900 | 2000x1125 | ✓ |
+| 3 | 1024x768 | 1280x960 | ✓ |
+| 4 | 2560x1600 | 3200x2000 | ✓ |
+| 5 | 1280x800 | 1600x1000 | ✓ |
+
+`VUID=0 panics=0 设备丢失=0`（`-PT` 档同样：`PT-RESIDENT=1` + `VUID=0`）。
+`swapchain diag` 首行仍是 `current_extent=4294967295x4294967295` —— 那条 Wayland 陷阱
+真实存在，而修复让交换链**跟着窗口走了**。
+
+> ⚠️ **KWin 的 `frameGeometry` 是逻辑坐标**（本机 `scale_factor=1.25`）：脚本设 1280x720，
+> 引擎日志里是 **1600x900**。这不是 bug —— 上表五步全部精确 ×1.25，恰恰是换算正确的证据。
+
+### 与 Windows 侧的两处差异（**不要互相照抄**）
+
+1. **缩放靠 KWin 脚本**（`qdbus6 org.kde.KWin /Scripting loadScript` + `start`，脚本里设
+   `w.frameGeometry`），不是 `SetWindowPos` —— Wayland 下客户端改不了自己的尺寸。
+   全程**不抢焦点、不碰指针**，天然符合鼠标安全协议。
+2. **没有 F12 截图步骤**：Linux 上截图的唯一触发是 F12 按键，而 Wayland 下注入按键
+   需要抢焦点/`ydotool` 之类，正好违反那条协议。画面取证另有记账（§10 末尾）。
+
+### 两条照抄过来的硬教训，以及我自己踩的那次
+
+- **必须证明"缩放路径真的走过"**：探针存在的唯一目的就是驱动交换链重建，
+  所以「一次窗口大小变化都没有」时 `VUID=0` **只意味着什么都没发生**（教训 27 / §21.48）。
+  判据里这一条单独占一个退出码（**2 = 没跑成**）。
+- `-PT` 时必须证明 PT 真的启用（`PT-RESIDENT >= 1`），否则同样可能"想测的东西没跑"。
+- 🔴 **第一版探针把上面两条都违反了，而且报出了 ALL-OK**，两处原因：
+  ① KWin 脚本环境里 **`setTimeout` 回调不触发**（最小复现：只 `print` + `setTimeout(...,500)`，
+  print 打了、回调没打）⇒ 靠 setTimeout 串起来的步骤**一次都没执行**；
+  ② 判据把**启动时**那次 `窗口大小变化` 当成了"路径走过"。
+  ⇒ 现在改成 bash 侧逐尺寸 `load+start`，并且**只数预热结束之后**的变化。
+  反证已验：把窗口匹配改成永不命中后，探针如实报 `exit 2` 而不是 ALL-OK。
+
+退出码：0 = ALL-OK / 1 = 有 VUID、panic 或设备丢失 / 2 = **没跑成**（日志缺失、
+一次缩放都没有、或 `-PT` 给了但 PT 从未驻留）。
