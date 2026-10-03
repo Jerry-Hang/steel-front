@@ -198,15 +198,32 @@ Windows 走 `winmm` 的 waveOut 直接 FFI；Linux 走 **`dlopen("libasound.so.2
   「CJK 字形表在非 Windows 明确回退成 `None`」—— 而那个回退**已证明是失效代码**
   （见 §5.3）。⇒ 这条 blanket `allow` 的正当性**已经被削弱**，它会把真正的
   dead code 一起藏住。**尚未清理**（清它要按编译器判据逐条过，别用文本匹配）。
-- **`queue_present` 没有上界**：本仓「所有 Vulkan 等待必须有上界」只覆盖了 acquire 与
-  fence。Wayland 下 FIFO 在没有 `wp_fifo_v1` 的合成器上**就是在 present 里阻塞等 frame
-  callback**，而不可见的 surface 收不到 frame callback ⇒ 最小化/切 workspace 可能冻结主循环。
-  **尚未修**。真机第一步：最小化 30 s 看进程是否还活着。
-- **RT 设备扩展随 `VK_EXT_mesh_shader` 无条件启用**：缺任一（`buffer_device_address` /
-  `deferred_host_operations` / `acceleration_structure` / `ray_query` /
-  `ray_tracing_pipeline`）时 `create_device` **直接失败 = 游戏起不来**，
-  而代码其实算出了缺失集合却只打 warn。`RV3D_GPU=igpu` 选 610M 时取决于 RADV 是否暴露 RT。
-  **尚未修**。
+- ✅ **`queue_present` 已补上耗时判据与降级**（2026-10-03，commit `7029677`）。
+  `vkQueuePresentKHR` 的签名里**没有超时参数**，加不了真正的上界 ⇒ 判据只能退化到耗时：
+  单次 ≥ `PRESENT_STALL_US`(1s) 记一次，连续 `PRESENT_STALL_FALLBACK`(3) 次就按与 acquire
+  **完全相同**的方式降级为 MAILBOX 并重建交换链。1s 有实测支撑：本机 `present_us`
+  中位 81µs / 最大 160µs ⇒ **6000 倍余量**，不会把「某帧慢了一下」误判成卡死。
+  判据 `present_stall_classifies_and_clears`（含"正常帧必须清零"—— 漏了它，几次偶发
+  长卡顿会累积成"连续三次"从而误降级）。
+  ⚠️ **仍未在真机上最小化验证过这条路径**（FIFO 是 opt-in，玩家路径用 mailbox）：
+  要验就 `RV3D_PRESENT_MODE=fifo` 跑起来后最小化 30s，看进程是否还活着。
+- ✅ **RT 设备扩展已改为按真实能力筛选**（2026-10-03，commit `d7b2444`）。
+  原来在 `VK_EXT_mesh_shader` 可用时**无条件**请求 5 个光追扩展，缺任一就是
+  `create_device` 失败 = **游戏起不来**（而 PT 是**默认关**的，根本不值得为它挡住启动）。
+  现在光追组**全有或全无**：缺一个就整组不启用 —— 只启用一半时，特性链与后续代码路径
+  都假设它们齐全，**半套是未定义行为，比整组不用更危险**。
+  同一段还有第二处一并修了：`RayQueryFeaturesKHR` / `AccelerationStructureFeaturesKHR` /
+  `BufferDeviceAddressFeaturesKHR` 三个特性结构原来**无条件挂进 pNext**，即使对应扩展
+  没启用（本身就是无效用法）。
+  判据 `device_extensions_degrade_instead_of_failing`（已实测会红）。
+  `RV3D_GPU=igpu` 选 610M 时取决于 RADV 是否暴露 RT —— 现在缺了只是没有 RT，不是起不来。
+- ✅ **致命启动错误不再以退出码 0 结束**（2026-10-03，commit `9d398ff`）。
+  实测踩到：从 TTY/自动化 shell 跑（`XDG_SESSION_TYPE=tty`，缺 `WAYLAND_DISPLAY`/`DISPLAY`）
+  时引擎报「创建事件循环失败」然后 `return` ⇒ **退出码 0**，`perf_run.sh` 只看到
+  「游戏提前退出（code 0）」、当成正常结束。同一处的 `run_app` 出错路径还会继续打出
+  「程序正常退出」。判据 `fatal_startup_paths_never_exit_zero`（源码扫描型，已实测会红）。
+  `smoke_linux.sh` / `perf_run.sh` 另加图形会话预检：`/run/user/$UID/wayland-0` 存在就
+  自动补 `WAYLAND_DISPLAY=wayland-0`，否则**明确退 2**（没跑成）。
 
 ---
 
@@ -277,12 +294,13 @@ asusctl armoury set gpu_mux_mode 0      # 需要重启；本机 gpu_mux_mode 是
 | 项 | 状态 |
 |---|---|
 | **Linux 冒烟门** | ✅ `scripts/smoke_linux.sh`（`./SteelFront.sh smoke`，见 §10） |
-| `scripts/perf_run.sh` | **未实现**（`perf_run.ps1` 只需换进程管理与路径，是最容易移植的一个） |
+| **性能尺子** | ✅ `scripts/perf_run.sh`（三态 0/1/2 均已实测；`-Log` 可离线复核已有日志，见 §11） |
 | 真机跑通一局（起窗 / 分辨率 / CJK / VUID / 音频） | ✅ 见 §5 各条的实测数字 |
 | MUX 独显直连 | 用户选择暂不切（§7.3） |
 | `package`（打包） | **未实现**（`SteelFront.sh package` → exit 2） |
 | `launcher/`（Win32 原生 GUI 启动器） | **不在移植范围**（`#![cfg(windows)]`，整 crate） |
-| `queue_present` 上界 / RT 扩展过滤 / blanket `allow(dead_code)` | 见 §6 |
+| `queue_present` 上界 / RT 扩展过滤 / 致命错误退出码 | ✅ 均已修（见 §6）；⚠️ present 那条的**最小化场景仍未真机验过** |
+| blanket `allow(dead_code)`（`main.rs`） | **未清**（清它要按编译器判据逐条过，别用文本匹配） |
 | Wayland 下 `IMMEDIATE` 支持面 | 实测 NVIDIA Wayland **支持**（`present_mode: IMMEDIATE`）；`SteelFront.sh` 仍用 mailbox |
 
 ---
@@ -356,3 +374,58 @@ python3 scripts/smoke_linux.py --self-check    # 闸门自检（14 个用例，�
 | 强制 X11 | 不适用 | `RV3D_BACKEND=x11` |
 | 玩家入口 | `SteelFront.bat`（`start /b` 异步） | `SteelFront.sh`（前台，回传退出码） |
 | 性能旋钮 | 奥创中心 | `asusctl` + `nvidia-powerd` |
+
+---
+
+## 11. Linux 性能尺子（`scripts/perf_run.sh`）
+
+```bash
+scripts/perf_run.sh                       # 默认 60s，压力模式 128/方
+scripts/perf_run.sh -Secs 30 -NoShadow    # 阴影成本 A/B
+scripts/perf_run.sh -Cam "0,0:0,0"        # 固定机位，可复现取景
+scripts/perf_run.sh -CullDiag             # 剔除的 CPU 成本
+scripts/perf_run.sh -Extra "RV3D_NO_PROPS=1,RV3D_PROC_TEX=0"
+scripts/perf_run.sh -Log logs/perf_20261003_103217.log   # 只复核已有日志，不启动游戏
+```
+
+**为什么是另写而不是移植 `playtest_perf.py`**：那份是 **X11 专有**的（libX11/XTest 注入、
+XImage 截屏、`/proc` 解析），移植它不是改路径而是重写。本脚本改为复用仓库里**已经实测过**
+的两样东西 —— 引擎每秒写的 `logs/perf_<stamp>.log`，以及 `pkill -x`。
+⇒ **不需要输入注入、不需要截屏**，于是它天然不碰鼠标。
+
+### 三态退出码（教训 46），**三条都实测过**
+
+| 码 | 含义 | 实测 |
+|---|---|---|
+| 0 | 产出稳态统计（`t >= 3s` 窗口里 ≥3 个样本） | 24 样本 / 稳态 22 |
+| 1 | 没有 perf 日志，或样本 <5 行 | 移走 exe 后复现 |
+| 2 | 统计打出来了，但稳态窗口 <3 样本 ⇒ **这些数不能当 A/B 的一条臂** | 合成日志复现（见下） |
+
+⚠️ **态 2 靠真实时长几乎落不进去**：引擎每秒一行 ⇒ `NROWS=N` 必然推出 `STEADY_N=N-2`，
+所以加了 **`-Log <路径>`**（只分析已有日志、不启动游戏）—— 它同时让这条分支
+**可确定性验证**：合成 5 行且 `t` 最大 2.9 ⇒ 实测 `exit 2`；同样 5 行但 `t` 到 5.0 ⇒ 实测 `exit 0`。
+
+### 与 Windows 侧的差异（**不要互相照抄**）
+
+- Windows 版在 `finally` 里调 `release_input.ps1` 解 `ClipCursor`；**Linux 不需要** ——
+  游戏在后台跑，永远拿不到焦点（`capture_wanted` 恒 false），且额外设了
+  `RV3D_NO_CAPTURE=1`，把"不夺指针"变成**代码级保证**而不是"碰巧没夺"。
+- **只许 `pkill -x`**（精确进程名），**绝不许 `-f`** —— 本仓库目录名就叫 `steel-front`。
+- 认领本轮 perf 日志时**必须排除本脚本自己的 `logs/perf_run.log`**，否则会分析错文件、
+  却把锅甩给这一轮跑动（`perf_run.ps1` 里记录了同一个坑）。
+- ⚠️ **不设 `RV3D_PRESENT_MODE`**：与 Windows 版一致，量的是引擎默认（IMMEDIATE）。
+
+### 图形会话预检
+
+从 **TTY/自动化 shell** 里跑时，`WAYLAND_DISPLAY`/`DISPLAY` **不在**（实测
+`XDG_SESSION_TYPE=tty`，只有 `XDG_RUNTIME_DIR`），引擎会报
+`neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set`。
+两个脚本现在都会：`/run/user/$UID/wayland-0` 存在就自动补 `WAYLAND_DISPLAY=wayland-0`，
+否则**明确退 2**（没跑成）。配合 `fix(main)` 的退出码修复（原来这种情况退 0）。
+
+### 噪声底（**别把小于它的差当结论**）
+
+`perf_run.ps1` 头部记着：同一二进制连跑两次曾差 2.8%，而其中大部分是 fps 列本身的假象
+（它曾记"某一帧的 1/dt"，而 `frame_us` 记的是**另一帧**的耗时 ⇒ 同二进制能"差 48%"）。
+改用 `perf_log.rs::window_fps` 后稳定到 ~0.2%。
+⇒ **先量当前二进制与参数的 A/A 底噪，低于它一律写"没测到"**；单次一对不是证据（教训 24/45）。
