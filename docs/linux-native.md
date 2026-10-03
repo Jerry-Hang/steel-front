@@ -182,9 +182,36 @@ Windows 走 `winmm` 的 waveOut 直接 FFI；Linux 走 **`dlopen("libasound.so.2
 （看 `audio: ALSA PCM 设备 = ...`）。
 
 **判据（真机实测）**：`audio: ALSA 打开成功 48000Hz/2ch（队列目标 170666µs ≈ 4×2048 帧）`
-+ `VUID=0 panics=0`。⚠️ **尚未验证**：听感（本机没有能产生背压的设备可量部分写比例）。
-启动时出现过一次「缓冲已满，本帧 324 个样本被丢弃」的一次性告警 —— 是否只是启动瞬态、
-听感会不会断续**没有量到**，别当成已验证。若真断续，调 `queue_latency_us` 的队列长度即可。
++ `VUID=0 panics=0`。
+
+#### ✅ 听感已从「未验证」结案（2026-10-03，客观测量）
+
+此前一直挂着「听感没量到」。现在用**录 sink monitor + 逐 50ms RMS** 量了，
+并且**引擎计数与录音两条独立证据互相印证**：
+
+| 证据 | 结果 |
+|---|---|
+| **稳态段静音窗口**（t=4.5–30s，50ms 窗） | **0/534** ⇒ 没有任何 ≥0.2s 的连续静音 |
+| 中位电平 | **−30.4 dBFS**（有声、不削顶） |
+| 引擎「缓冲已满」告警 | 整轮 30s **只出现 1 次**，在 ALSA 打开后 1 秒 |
+| ALSA `xrun/underrun/EPIPE/ESTRPIPE/recover` | **0 次** |
+| `audio_us`（混音耗时） | 中位 **30µs** / 最大 86µs |
+
+⇒ **开局那次丢弃是「队列从空到满」的一次性瞬态，不是持续欠载。**
+分段看得很清楚：`t=0–2.0`（游戏未启动）40/40 静音且是 −180 dBFS 的**真数字静音**；
+`t=2.0–4.5`（引擎启动）12/50 静音；`t=4.5` 之后**一个静音窗口都没有**。
+
+复现方法（`parec` 录 sink monitor，30s 后逐窗算 RMS；注意**先录再启动游戏**，
+否则会把引擎启动窗口误判成丢帧 —— 我第一次就差点这么读）：
+
+```bash
+SINK=$(pactl list short sinks | awk '{print $2}' | head -1)
+parec -d "$SINK.monitor" --file-format=wav /tmp/audio_cap.wav &
+sleep 2 && RV3D_AUTOSTART=1 RV3D_AUTOFIRE=1 ./target/release/steel-front &
+sleep 30; pkill -x steel-front
+```
+
+若真出现断续，调 `queue_latency_us` 的队列长度即可（现为 4×2048 帧 ≈ 170ms）。
 
 ---
 
@@ -295,7 +322,7 @@ asusctl armoury set gpu_mux_mode 0      # 需要重启；本机 gpu_mux_mode 是
 |---|---|
 | **Linux 冒烟门** | ✅ `scripts/smoke_linux.sh`（`./SteelFront.sh smoke`，见 §10） |
 | **性能尺子** | ✅ `scripts/perf_run.sh`（三态 0/1/2 均已实测；`-Log` 可离线复核已有日志，见 §11） |
-| 真机跑通一局（起窗 / 分辨率 / CJK / VUID / 音频） | ✅ 见 §5 各条的实测数字 |
+| 真机跑通一局（起窗 / 分辨率 / CJK / VUID / **音频**） | ✅ 全部实测；音频听感见 §5.4（录音 + 引擎计数双向印证） |
 | MUX 独显直连 | 用户选择暂不切（§7.3） |
 | `package`（打包） | **未实现**（`SteelFront.sh package` → exit 2） |
 | `launcher/`（Win32 原生 GUI 启动器） | **不在移植范围**（`#![cfg(windows)]`，整 crate） |
