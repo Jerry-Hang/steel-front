@@ -526,6 +526,40 @@ scripts/aa_probe.sh -Extra "RV3D_SHADOW_EVERY=1"     # 针对某套配置的 A/A
 拿部分批次当底噪会**低估**它，于是把噪声当成改善。
 （Windows 侧 2026-09-26 修过同一个洞：那时 6 次里坏 4 次仍然打印"底噪"并 exit 0。）
 
+### 11.2 交替 A/B 驱动器（`scripts/ab_pair.sh`）
+
+```bash
+mkdir -p logs/ab && cp target/release/steel-front logs/ab/old
+# 改一处再重编，产物放 logs/ab/new
+scripts/ab_pair.sh -Pairs 3 -ExeA logs/ab/new -ExeB logs/ab/new -LabelA newA -LabelB newB  # 先量 A/A
+scripts/ab_pair.sh -Pairs 5 -ExeA logs/ab/old -ExeB logs/ab/new -LabelA old -LabelB new     # 再跑真的
+scripts/ab_pair.sh -Pairs 5 -ExtraB "RV3D_NO_PROPS=1" -LabelB noprops                      # 成本地图
+```
+
+教训 24：单次 A/B 什么都证明不了。站得住的设计是 —— 逐对交替（**含对内的先后**：
+奇数对 A→B、偶数对 B→A，ABBA…）、重复、用**配对差的中位数**排名、并且拿同一个 exe
+在两个臂里各跑一次量 A/A 底噪。尺子**原样复用 `perf_run.sh`**，所以数字与之前的
+`perf_run` / `aa_probe` 可比。
+
+🔴 **本机 A/A 自测结果（2026-10-03，3 对 × 12s，同一个 exe 给两次）**：
+
+```
+配对差 (B-A): -0.30  +10.70  +4.20
+MEDIAN PAIRED DELTA = +4.20 fps（+2.56%）
+符号检验: 2 / 3 对偏向 A2
+```
+
+**"自己 vs 自己"量出了 +2.56% 的"效应"。** 这就是为什么任何低于底噪的差都必须写成
+"没测到" —— 它不只是理论上的谨慎，是这台机器上会真实发生的。
+（同时注意 `aa_probe` 量到的 3 次散布只有 1.1%：**同一批数据里，逐次散布与配对差的散布
+不是一回事**，后者更大。所以判断效应要看**配对差**相对底噪的大小。）
+
+退出码三态，**三条都实测过**：0 = 每对都跑完 / 1 = 批次没起来（缺 exe）/
+2 = **部分对被跳过** ⇒ 降级批次，不许当成教训 45 要的「n ≥ 5 对」证据。
+
+⚠️ 两条纪律（教训 45）：**正对照臂不动 = 整批作废**（那是在量漂移）；
+**1~5% 的效应本来就测不出来**，先量底噪再决定值不值得测。
+
 ---
 
 ## 12. Linux 打包（`./SteelFront.sh package`）
