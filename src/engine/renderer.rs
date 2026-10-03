@@ -716,6 +716,41 @@ fn swapchain_extent_choice(
     clamp_swapchain_extent(fallback, min, max)
 }
 
+/// 设备扩展选择：**缺扩展要降级，不要让 `create_device` 直接失败**。
+///
+/// 🔴 **2026-09-29 修**。原代码在 `VK_EXT_mesh_shader` 可用时**无条件**追加 5 个光追扩展，
+/// 而 `enumerate_device_extension_properties` 的结果只在**事后**用来打一行 warn ——
+/// 于是"设备缺任一光追扩展"的后果不是降级，而是 **`create_device` 失败 = 游戏起不来**，
+/// 而 PT 本来就是**默认关**的，根本不值得为它挡住启动。
+/// 同一段还有第二处：`PhysicalDeviceRayQueryFeaturesKHR` 等**特性结构无条件挂进 pNext**，
+/// 即使对应扩展没启用 —— 那本身就是无效用法。
+///
+/// 语义（判据 `device_extensions_degrade_instead_of_failing`）：
+/// - `required`：逐个按实际支持情况启用；缺的**如实报出来**（是否致命由调用方决定，
+///   本函数不替它决定 —— 这里只负责"别把可选的东西当必需"）；
+/// - `all_or_nothing`：**全有或全无**的一组。
+///   🔴 光追那 5 个必须同进同退：只启用一半时，特性链与后续代码路径都假设它们齐全，
+///   半套就是未定义行为 —— 比"整组不用"危险得多。
+///   ⇒ 缺任何一个就**整组不启用**，并把缺的那些报出来。
+fn pick_device_extensions<'a>(
+    available: &[String],
+    required: &[&'a str],
+    all_or_nothing: &[&'a str],
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let has = |n: &str| available.iter().any(|a| a == n);
+    let mut enabled: Vec<&'a str> = required.iter().copied().filter(|n| has(n)).collect();
+    let mut missing: Vec<&'a str> = required.iter().copied().filter(|n| !has(n)).collect();
+    let absent: Vec<&'a str> = all_or_nothing.iter().copied().filter(|n| !has(n)).collect();
+    if absent.is_empty() {
+        enabled.extend(all_or_nothing.iter().copied());
+    } else {
+        // 整组不启用：把缺的那些报出去（**已存在的那几个也算"没启用"**，
+        // 因为调用方要的是"这一组能不能用"，不是"哪几个名字恰好存在"）
+        missing.extend(absent);
+    }
+    (enabled, missing)
+}
+
 /// 交换链重建失败后**多久才允许再试一次**（秒）。见 `should_retry_swapchain`。
 const RECREATE_RETRY_MIN_SECS: f32 = 1.0;
 
@@ -1941,25 +1976,28 @@ impl Renderer {
 
         let swapchain_ext_name = c"VK_KHR_swapchain";
         let mesh_shader_ext_name = c"VK_EXT_mesh_shader";
+        // 设备**实际支持**的扩展名（只枚举一次；下面 mesh 与光追两组都基于它判定）。
+        // 旧代码把这次枚举关在 mesh 那个块里，于是光追那组只能"先无条件请求、事后打日志"——
+        // 那正是"缺扩展就起不来"的来源。
+        let device_ext_names: Vec<String> = unsafe {
+            instance
+                .enumerate_device_extension_properties(physical_device)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| {
+                    CStr::from_ptr(e.extension_name.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        };
         // ---- 可选网格着色器路径：检测 VK_EXT_mesh_shader（仿 gpu_caps.rs 枚举模式）。
         //      本机 WSLg/dzn 实测扩展缺失 → mesh_enabled=false，设备创建与今天逐字节一致。
         //      支持时：扩展加入 enabled_extension_names，并把
         //      PhysicalDeviceMeshShaderFeaturesEXT(mesh_shader=true) 挂到 pNext 链
         //      （task_shader 不启用：本设计为纯 mesh 阶段，无 task 阶段）。
         let mesh_shader_available = {
-            let ext_names: Vec<String> = unsafe {
-                instance
-                    .enumerate_device_extension_properties(physical_device)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|e| {
-                        CStr::from_ptr(e.extension_name.as_ptr())
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                    .collect()
-            };
-            if ext_names.iter().any(|n| n == "VK_EXT_mesh_shader") {
+            if device_ext_names.iter().any(|n| n == "VK_EXT_mesh_shader") {
                 let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
                 let mut f2 = vk::PhysicalDeviceFeatures2::default();
                 f2.p_next = &mut mesh_features as *mut _ as *mut std::ffi::c_void;
@@ -1981,11 +2019,35 @@ impl Renderer {
             }
         };
 
-        // 设备创建：mesh 可用时仅追加扩展名与特性结构（其余字段不变）；
-        // 不可用时与旧代码完全一致（enabled_extension_names=[swapchain]，pNext=null）。
+        // 光追扩展组：**全有或全无**（理由见 `pick_device_extensions` 的文档）。
+        // 只有真的全齐、且 mesh 路径可用时才启用 —— PT 是默认关的可选功能，
+        // 缺扩展的正确后果是"本局没有 RT"，不是"游戏起不来"。
+        const RT_DEVICE_EXTENSIONS: [&str; 5] = [
+            "VK_KHR_buffer_device_address",
+            "VK_KHR_deferred_host_operations",
+            "VK_KHR_acceleration_structure",
+            "VK_KHR_ray_query",
+            "VK_KHR_ray_tracing_pipeline",
+        ];
+        let (rt_enabled, rt_missing) =
+            pick_device_extensions(&device_ext_names, &[], &RT_DEVICE_EXTENSIONS);
+        let rt_available = mesh_shader_available && rt_missing.is_empty();
+        if rt_missing.is_empty() {
+            log::info!("device-create: 光追扩展全齐，启用 {:?}", rt_enabled);
+        } else {
+            log::warn!(
+                "device-create: 光追扩展缺 {:?} ⇒ **整组不启用**（半套是未定义行为）；\
+                 本局无 RT/PT，其余渲染路径不受影响",
+                rt_missing
+            );
+        }
+
+        // 设备创建：按**实际支持**逐个启用（mesh 可用时追加 mesh；光追组全齐才追加）。
         let mut device_extensions: Vec<RawCString> = vec![swapchain_ext_name.as_ptr()];
         if mesh_shader_available {
             device_extensions.push(mesh_shader_ext_name.as_ptr());
+        }
+        if rt_available {
             // 2026-08-29 路径追踪基准：启用光线追踪核心扩展（ray_query 计算侧；AS 构建）
             device_extensions.push(c"VK_KHR_buffer_device_address".as_ptr());
             device_extensions.push(c"VK_KHR_deferred_host_operations".as_ptr());
@@ -2016,25 +2078,19 @@ impl Renderer {
         } else {
             device_create_info
         };
-        // RT 特性链（Ext 启用 ≠ Feature 启用；rayQuery/accelStructure 必须显式 true）
-        let device_create_info = device_create_info
-            .push_next(&mut as_features)
-            .push_next(&mut bda_features)
-            .push_next(&mut rq_features);
+        // RT 特性链（Ext 启用 ≠ Feature 启用；rayQuery/accelStructure 必须显式 true）。
+        // 🔴 **必须与扩展启用同步**：只启用扩展不启用特性 = 功能不可用；
+        // 而**扩展没启用却把特性结构挂进 pNext 本身就是无效用法** ——
+        // 旧代码无条件挂这三个，是这次一并修掉的第二处。
+        let device_create_info = if rt_available {
+            device_create_info
+                .push_next(&mut as_features)
+                .push_next(&mut bda_features)
+                .push_next(&mut rq_features)
+        } else {
+            device_create_info
+        };
 
-        {
-            let mut names = Vec::new();
-            let exts = unsafe { instance.enumerate_device_extension_properties(physical_device).unwrap_or_default() };
-            for e in &exts {
-                let n = unsafe { std::ffi::CStr::from_ptr(e.extension_name.as_ptr()) }.to_string_lossy().into_owned();
-                names.push(n);
-            }
-            let want: Vec<String> = unsafe {
-                use std::ffi::CStr;
-                device_extensions.iter().map(|p| CStr::from_ptr(*p).to_string_lossy().into_owned()).collect()
-            };
-            log::warn!("device-create: 请求={:?} 缺失={:?}", want, want.iter().filter(|w| !names.contains(*w)).collect::<Vec<_>>());
-        }
         let device = unsafe {
             instance
                 .create_device(physical_device, &device_create_info, None)
@@ -14981,10 +15037,10 @@ mod vk_failure_path_tests {
     }
 
     use super::{
-        clamp_swapchain_extent, frame_suppressed, is_device_lost_error, prop_buffer_growth_needed,
-        shadow_due, shadow_static_due, should_retry_swapchain, swapchain_extent_choice,
-        terrain_coarse_height, terrain_height, wait_idle_failure_message, RECREATE_RETRY_MIN_SECS,
-        TERRAIN_CELLS, TERRAIN_HALF,
+        clamp_swapchain_extent, frame_suppressed, is_device_lost_error, pick_device_extensions,
+        prop_buffer_growth_needed, shadow_due, shadow_static_due, should_retry_swapchain,
+        swapchain_extent_choice, terrain_coarse_height, terrain_height, wait_idle_failure_message,
+        RECREATE_RETRY_MIN_SECS, TERRAIN_CELLS, TERRAIN_HALF,
     };
     use ash::vk;
 
@@ -15035,6 +15091,45 @@ mod vk_failure_path_tests {
             "地形最细一级插值误差 {worst:.3}m 超预算（最差点 {at:?}）：网格太粗，丘陵会变形。\
              预算依据见 §21.46：现行 4m 网格实测 0.31m、旧的 2m 网格 0.08m"
         );
+    }
+
+    /// 🔴 **判据：缺扩展要降级，不是让 `create_device` 失败。**
+    ///
+    /// 原代码在 `VK_EXT_mesh_shader` 可用时**无条件**请求 5 个光追扩展，而枚举结果
+    /// 只在事后打一行 warn ⇒ "设备缺任一光追扩展"的后果是**游戏起不来**，
+    /// 而 PT 本来就是**默认关**的，根本不值得为它挡住启动。
+    ///
+    /// 三个方向各钉一条（都不是恒真断言）：
+    /// 1. 全齐 ⇒ 整组启用（免得把正常路径也改坏）；
+    /// 2. **缺任何一个 ⇒ 整组不启用** —— 这是最关键的一条：只启用剩下几个时，
+    ///    特性链与后续代码路径都假设它们齐全，**半套是未定义行为，比整组不用更危险**；
+    /// 3. `required` 缺了就如实报出来，但**不阻止**其它已支持的扩展启用
+    ///    （把"可选"当"必需"正是这次要修的错）。
+    #[test]
+    fn device_extensions_degrade_instead_of_failing() {
+        let rt = ["A", "B", "C", "D", "E"];
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+
+        // 1) 全齐 ⇒ swap + 5 个光追全部启用，且不报缺失
+        let (en, miss) = pick_device_extensions(&s(&["swap", "A", "B", "C", "D", "E"]), &["swap"], &rt);
+        assert_eq!(miss.len(), 0, "全齐时不该报缺失");
+        assert_eq!(en.len(), 6, "swap + 光追 5 个都该启用");
+
+        // 2) 缺一个 ⇒ **整组**不启用（不是"启用剩下 4 个"）
+        let (en, miss) = pick_device_extensions(&s(&["swap", "A", "B", "C", "D"]), &["swap"], &rt);
+        assert_eq!(en, vec!["swap"], "光追组缺一个就必须整组不启用，只留 required");
+        assert_eq!(miss, vec!["E"], "缺的那个要如实报出来");
+
+        // 3) required 缺了 ⇒ 报出来，但不影响已支持的那一组
+        let (en, miss) = pick_device_extensions(&s(&["A", "B", "C", "D", "E"]), &["swap"], &rt);
+        assert!(!en.contains(&"swap"), "不支持的 required 不许出现在启用列表里");
+        assert_eq!(miss, vec!["swap"]);
+        assert_eq!(en.len(), 5, "光追组不受 required 缺失影响");
+
+        // 4) 一个都没有 ⇒ 两边都空/都报，不 panic
+        let (en, miss) = pick_device_extensions(&s(&[]), &["swap"], &rt);
+        assert!(en.is_empty());
+        assert_eq!(miss.len(), 6, "1 个 required + 5 个光追全报");
     }
 
     /// 判据：交换链兜底尺寸必须落在 surface 给的范围内。
