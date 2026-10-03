@@ -232,8 +232,25 @@ sleep 30; pkill -x steel-front
   中位 81µs / 最大 160µs ⇒ **6000 倍余量**，不会把「某帧慢了一下」误判成卡死。
   判据 `present_stall_classifies_and_clears`（含"正常帧必须清零"—— 漏了它，几次偶发
   长卡顿会累积成"连续三次"从而误降级）。
-  ⚠️ **仍未在真机上最小化验证过这条路径**（FIFO 是 opt-in，玩家路径用 mailbox）：
-  要验就 `RV3D_PRESENT_MODE=fifo` 跑起来后最小化 30s，看进程是否还活着。
+  ✅ **已真机验证：这个冻结场景在本机不复现**（2026-10-03）。
+  做法 —— `RV3D_PRESENT_MODE=fifo` 启动后用 **KWin 脚本**把窗口最小化
+  （`qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript <js>` +
+  `...start`，脚本里 `w.minimized = true`），再逐秒观察 20s：
+
+  | 观测 | 结果 |
+  |---|---|
+  | 最小化是否真的执行 | ✅ `kwin_wayland: minimized: Steel Front - Vulkan` |
+  | 进程 | **20 秒全程存活**（CPU 从 32% 缓降到 16%） |
+  | `present_us` 最大值 | **172µs**（阈值 1s，差 5800 倍） |
+  | 卡顿检测触发次数 | **0** |
+
+  ⚠️ **这个负结果只有验过"最小化真的生效"才算数** —— 否则就是一次什么都没做的空跑，
+  而空跑同样会报"进程存活"。所以上面同时留了两条证据：KWin 自己的 print，
+  以及一个**独立查询脚本**（`KWINQUERY ... minimized=`）确认脚本 API 确实匹配到了
+  `cls=steel-front` 那个窗口。（教训 27：先确认你的测量工具测的是你以为的东西。）
+
+  ⇒ 所以 `present_stall` 那套在本机**是纯防御性的**：场景不复现，但别的合成器/驱动组合上
+  仍可能出现（Wayland 下 FIFO 等 frame callback 是规范允许的行为），保留它成本极低。
 - ✅ **RT 设备扩展已改为按真实能力筛选**（2026-10-03，commit `d7b2444`）。
   原来在 `VK_EXT_mesh_shader` 可用时**无条件**请求 5 个光追扩展，缺任一就是
   `create_device` 失败 = **游戏起不来**（而 PT 是**默认关**的，根本不值得为它挡住启动）。
