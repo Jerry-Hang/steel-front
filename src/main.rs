@@ -4200,7 +4200,13 @@ fn main() {
             Ok(el) => el,
             Err(e) => {
                 log::error!("创建事件循环失败: {:?}", e);
-                return;
+                // 🔴 致命启动错误**必须非零退出**。原来这里是 `return`，而 `fn main`
+                // 正常返回就是退出码 0 ⇒ 调用方（perf_run / 冒烟 / CI）看到的是"跑完了"，
+                // 实际上一帧都没渲染。2026-10-03 实测踩到：在没有图形会话环境变量的 shell 里
+                // （XDG_SESSION_TYPE=tty，缺 WAYLAND_DISPLAY/DISPLAY）报的就是这一条，
+                // 而 perf_run.sh 只看到"游戏提前退出（code 0）"、当成一次正常结束。
+                // 这就是教训 46 的形态：工具必须能说"我没跑成"。
+                std::process::exit(1);
             }
         }
     };
@@ -4286,6 +4292,10 @@ fn main() {
 
     if let Err(e) = event_loop.run_app(&mut app) {
         log::error!("应用运行错误: {:?}", e);
+        // 🔴 同上，而且这里还多一层误导：原来出错后**继续往下走**，
+        // 打出"程序正常退出"并以 0 退出 —— 日志说"正常"、退出码说"成功"，
+        // 而实际是异常终止。出错就既不许说正常，也不许退 0。
+        std::process::exit(1);
     }
 
     log::info!("程序正常退出");
@@ -4321,6 +4331,74 @@ fn rdv_register_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 **判据：`main()` 里的致命错误路径不许以退出码 0 结束。**
+    ///
+    /// 2026-10-03 实测踩到：在一个**没有图形会话环境变量**的 shell 里
+    /// （`XDG_SESSION_TYPE=tty`，缺 `WAYLAND_DISPLAY`/`DISPLAY`），引擎报
+    /// "创建事件循环失败" 然后 `return` ⇒ **退出码 0**。
+    /// `perf_run.sh` 只看到"游戏提前退出（code 0）"，无法把「一帧都没渲染」
+    /// 和「正常结束」区分开 —— 教训 46 的形态：工具必须能说"我没跑成"。
+    /// 同一晚还发现 `run_app` 出错后会继续往下打出"程序正常退出"（日志说正常、
+    /// 退出码说成功，而实际是异常终止），一并钉住。
+    ///
+    /// ⚠️ 这是**源码扫描**型判据，两个坑都要防：
+    /// 1. **必须先证明它真的扫到了东西** —— 文件被搬走/改名/那段被重写时，
+    ///    `find` 返回 `None` 会让断言静默恒真；
+    /// 2. **必须先去注释** —— 修这个 bug 时写的注释里就引用了「程序正常退出」，
+    ///    不去注释的话扫描会先撞上注释、让判据自行满足（本仓 `no_unbounded_wait_on_vulkan_calls`
+    ///    同样先做 `is_comment` 过滤）。
+    #[test]
+    fn fatal_startup_paths_never_exit_zero() {
+        let src = include_str!("main.rs");
+        // 只扫生产代码那段（测试模块里引用了同样的字符串，不切开会自我满足）
+        let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+        // 去注释：行首是 // 的一律丢掉
+        let code: String = prod
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let anchors = ["创建事件循环失败", "run_app(&mut app)"];
+        for a in anchors {
+            assert!(
+                code.contains(a),
+                "检查失效：去注释后扫不到锚点 {a:?}（源码被改名/搬走了？）"
+            );
+        }
+
+        // 🔴 **必须把两半切开**：第一版写成 `code[i..].contains("process::exit")`，
+        // 扫的是"锚点之后的全部内容" ⇒ **第二处修复把第一处的断言喂饱了**，
+        // 把事件循环那条改回 `return` 时测试照样绿（反证实测发现）。
+        // 这正是本仓教训 14 的形态：恒真的断言等于没写。
+        let split = code.find("run_app(&mut app)").unwrap();
+        let (startup, running) = code.split_at(split);
+
+        // 1) 事件循环创建失败之后必须出现 process::exit（只在**这一半**里找）
+        let i = startup.find("创建事件循环失败").unwrap();
+        assert!(
+            startup[i..].contains("process::exit"),
+            "事件循环创建失败是致命错误，不能只 return（`fn main` 正常返回 = 退出码 0）"
+        );
+
+        // 2) run_app 出错分支也必须有 process::exit，且**必须早于**「程序正常退出」那句
+        let exit_at = running.find("process::exit");
+        let normal_at = running.find("程序正常退出");
+        assert!(
+            normal_at.is_some(),
+            "检查失效：去注释后扫不到「程序正常退出」那句，说明扫描窗口不对"
+        );
+        assert!(
+            exit_at.is_some(),
+            "run_app 出错是致命错误，不能退 0"
+        );
+        assert!(
+            exit_at.unwrap() < normal_at.unwrap(),
+            "run_app 出错后必须先退出，不能掉到「程序正常退出」那句（日志说正常、退出码说成功，\
+             而实际是异常终止）"
+        );
+    }
 
     /// 🔴 判据：后台帧率上限（2026-09-27「游戏一开整机就卡」）。
     ///
