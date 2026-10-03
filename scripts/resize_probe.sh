@@ -50,6 +50,7 @@ WARMUP=15
 AFTER=8
 SIZES="1280x720,1600x900,1024x768,2560x1600,1280x800"
 PT=0
+NOSHOT=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -58,6 +59,7 @@ while [ $# -gt 0 ]; do
         -AfterSecs|--after)     AFTER="${2:?-AfterSecs 后面要给秒数}"; shift 2 ;;
         -Sizes|--sizes)         SIZES="${2:?-Sizes 后面要给 WxH,...}"; shift 2 ;;
         -PT|--pt)               PT=1; shift ;;
+        -NoShot|--no-shot)      NOSHOT=1; shift ;;
         -h|--help)              sed -n '2,50p' "$0"; exit 0 ;;
         *) echo "resize_probe: 不认识的参数 $1（-h 看用法）" >&2; exit 2 ;;
     esac
@@ -149,6 +151,16 @@ export RV3D_BG_FPS=0
 export RV3D_NO_CAPTURE=1          # 鼠标安全：本探针不注入输入、不夺焦点，双保险
 export RV3D_VALIDATION=1
 # 本机**没有** RTSS / GamePP 那两个隐式层（Windows 专有），所以不像 ps1 那样设 DISABLE_*_LAYER。
+# 截图：**用引擎自带的 RV3D_SHOT_AT，不注入 F12 按键**。
+# Windows 侧的同一探针走 PostMessage(WM_KEYDOWN)，Linux 上要等价就得抢焦点/用 ydotool，
+# 正好违反铁律 C 的鼠标安全协议 ⇒ 走这个不需要输入的触发（2026-10-03 为此新加）。
+# 时刻取"全部缩放做完之后"（预热 + 每步 2s + 1s 余量），这样截到的是缩放后的画面。
+SHOT_AT=""
+if [ "$NOSHOT" = 0 ]; then
+    SHOT_AT=$(( WARMUP + $(grep -c . "$STEPS") * 2 + 1 ))
+    export RV3D_SHOT_AT="$SHOT_AT"
+    echo "resize_probe: 将在第 ${SHOT_AT}s 自动截一张（RV3D_SHOT_AT，不需要输入注入）"
+fi
 if [ "$PT" = 1 ]; then
     export RV3D_PT_LIVE=1 RV3D_PT_SIZE=512 RV3D_PT_SPP=16
     echo "resize_probe: PT 实时路径已开（RV3D_PT_LIVE=1 RV3D_PT_SIZE=512 RV3D_PT_SPP=16）"
@@ -203,6 +215,7 @@ LOST=$(count 'has been lost')
 RESIZE=$(count_t '窗口大小变化')       # ⚠️ 只数探测期间的
 MISMATCH=$(count 'size mismatch')
 PTRES=$(count 'PT-RESIDENT')
+SHOTS=$(count '截图已保存')
 
 echo
 echo "=== resize probe 结果（$TAG）==="
@@ -210,6 +223,7 @@ echo "  窗口大小变化 : $RESIZE 次（**探测期间**的；必须 >=1，�
 echo "  尺寸不符重建 : $MISMATCH 次"
 echo "  VUID         : $VUID"
 echo "  PT-RESIDENT  : $PTRES$([ "$PT" = 1 ] && echo '（-PT 时必须 >=1，证明 PT 真的跑起来了）' || echo '（未开 PT）')"
+echo "  截图         : $SHOTS 张$([ "$NOSHOT" = 1 ] && echo '（-NoShot，不截图）' || echo "（RV3D_SHOT_AT=$SHOT_AT）")"
 echo "  设备丢失     : $LOST ;  panic: $PANIC"
 echo "  引擎日志     : $LOGERR"
 echo "--- 交换链实际用过的尺寸（去重，证明它真的跟着窗口走了）---"
@@ -223,6 +237,10 @@ if [ "$RESIZE" -lt 1 ]; then
 fi
 if [ "$PT" = 1 ] && [ "$PTRES" -lt 1 ]; then
     echo "resize_probe: exit 2 —— 没跑成：-PT 给了但 PT 从未驻留（想测的东西没跑起来）" >&2
+    exit 2
+fi
+if [ "$NOSHOT" = 0 ] && [ "$SHOTS" -lt 1 ]; then
+    echo "resize_probe: exit 2 —— 没跑成：要了截图但一张都没落盘（取证这一步没发生）" >&2
     exit 2
 fi
 if [ "$VUID" -eq 0 ] && [ "$LOST" -eq 0 ] && [ "$PANIC" -eq 0 ]; then
