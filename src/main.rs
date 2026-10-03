@@ -720,6 +720,13 @@ fn fp_gun_bake_color(n: glam::Vec3, raw: [f32; 3], albedo_boost: f32) -> [f32; 3
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// 致命错误的原因。**非 None 表示这次不是正常退出** ——
+    /// 由 `event_loop.exit()` 只能走"正常"通道（`run_app` 返回 `Ok`），
+    /// 所以致命路径必须额外把原因记在这里，循环结束后据此非零退出。
+    /// 🔴 2026-10-03：`创建窗口失败` 与 `渲染器初始化失败` 原来只 `log::error!` + `exit()`，
+    /// 于是引擎打出「程序正常退出」并以 **0** 退出 —— 用户解包后跑错目录（缺 assets/mesh.spv）
+    /// 看到的就是这个。这是最容易被真人撞上的一类假绿灯（教训 46）。
+    fatal: Option<String>,
     /// winit 窗口
     window: Option<Window>,
     /// Vulkan 渲染器
@@ -874,6 +881,7 @@ struct Particle {
 impl GameApp {
     /// 创建游戏应用实例
     fn new() -> Self {
+        let fatal = None;
         let mut game = Game::new();
         // 加载持久化配置（键位/音量/灵敏度）；文件缺失回退默认，见 config.rs
         let cfg = config::load();
@@ -907,6 +915,7 @@ impl GameApp {
         // 画质索引与 ui.rs 选项表对齐；配置异常值回退默认
         game.hud.quality_index = cfg.quality.min(2) as u8;
         Self {
+            fatal,
             window: None,
             renderer: None,
             camera: Camera::new(),
@@ -3163,7 +3172,9 @@ impl ApplicationHandler for GameApp {
         let window = match event_loop.create_window(winit_attr) {
             Ok(w) => w,
             Err(e) => {
-                log::error!("创建窗口失败: {:?}", e);
+                let msg = format!("创建窗口失败: {e:?}");
+                log::error!("{msg}");
+                self.fatal = Some(msg);
                 event_loop.exit();
                 return;
             }
@@ -3285,7 +3296,9 @@ impl ApplicationHandler for GameApp {
             self.renderer = Some(renderer);
             }
             Err(e) => {
-                log::error!("渲染器初始化失败: {}", e);
+                let msg = format!("渲染器初始化失败: {e}");
+                log::error!("{msg}");
+                self.fatal = Some(msg);
                 event_loop.exit();
                 return;
             }
@@ -4298,6 +4311,13 @@ fn main() {
         std::process::exit(1);
     }
 
+    // 🔴 致命错误可能是在事件循环**内部**记下的（那时只能 `event_loop.exit()`，
+    // 而它会让 `run_app` 返回 `Ok`）⇒ 这里补上那次判断，否则同样是"日志报错、退出码说成功"。
+    if let Some(why) = app.fatal.take() {
+        log::error!("以错误退出：{why}");
+        std::process::exit(1);
+    }
+
     log::info!("程序正常退出");
 }
 
@@ -4397,6 +4417,28 @@ mod tests {
             exit_at.unwrap() < normal_at.unwrap(),
             "run_app 出错后必须先退出，不能掉到「程序正常退出」那句（日志说正常、退出码说成功，\
              而实际是异常终止）"
+        );
+
+        // 3) **循环内部**的致命错误也必须被记进 `fatal`。
+        //    这两处只能 `event_loop.exit()`，而它让 `run_app` 返回 `Ok` ⇒ 上面那条
+        //    `run_app` 检查抓不到它们。2026-10-03 实测：解包后跑错目录（缺 assets/mesh.spv）
+        //    报的就是「渲染器初始化失败」+「程序正常退出」+ 退出码 0。
+        for anchor in ["创建窗口失败", "渲染器初始化失败"] {
+            let i = code.find(anchor).unwrap_or_else(|| {
+                panic!("检查失效：去注释后扫不到锚点 {anchor:?}（源码被改名/搬走了？）")
+            });
+            let tail = &code[i..(i + 300).min(code.len())];
+            assert!(
+                tail.contains("self.fatal = Some"),
+                "{anchor} 是致命错误，必须记进 `self.fatal` —— 否则 event_loop.exit() 会让 \
+                 run_app 返回 Ok，引擎打出「程序正常退出」并以 0 退出"
+            );
+        }
+
+        // 4) `fatal` 必须在循环结束后被消费掉（只记不查等于没记）
+        assert!(
+            running.contains("app.fatal"),
+            "`fatal` 记了却没人查 —— 循环结束后必须据此非零退出"
         );
     }
 
