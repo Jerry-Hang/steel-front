@@ -22,15 +22,29 @@
 // `logs/play_latest.log.err`。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// 🔴 2026-09-26：**非 Windows 是"只编译不运行"的交叉验证目标**（铁律 E：
-// `cargo check --target aarch64-unknown-linux-gnu`）。那条命令在 2026-09-26 之前
-// **根本跑不起来**（目标没装），于是它一路漂成 2 个编译错误 + 12 条警告 —— 修掉错误之后，
-// 剩下的警告全是"按平台设计就只在 Windows 用得到"的东西：waveOut 的常量/辅助函数、
-// 以及 CJK 字形表（`ui.rs::glyph_cjk` 在非 Windows 明确回退成 `None`，docstring 写明
-// "回退为 `?`、不 panic"）。
-// ⇒ 把 dead-code 的判据**只按平台**放宽（Windows 那侧一个字都没松），这样交叉验证的输出
-// 才干净到"新警告一眼可见"。**这不是给未接线的代码开后门**：Windows 构建照旧 0 警告。
-#![cfg_attr(not(windows), allow(dead_code))]
+// 🔴 2026-10-03：**顶部那条 `#![cfg_attr(not(windows), allow(dead_code))]` 已删除。**
+//
+// 它是 2026-09-26 加的，当时的理由是：非 Windows **只是"只编译不运行"的交叉验证目标**
+// （铁律 E 的 `cargo check --target aarch64-unknown-linux-gnu`）；拆掉后剩下的警告
+// 全是"按平台设计就只在 Windows 用得到"的东西（waveOut 常量、CJK 字模表）。
+//
+// **那个前提现在不成立了**：Linux 已经是原生支持、而且**要真的跑起来**的平台
+// （见 `docs/linux-native.md`，PR #1 已合并）。于是这个 blanket allow 会在 Linux 上
+// **藏住真正的死代码** —— 而 Linux 恰恰是现在必须保证干净的一侧。
+//
+// 拆掉之后实测浮出 4 条，全部在 `audio_out.rs`：
+//   * `WaveOutSink` 的字段与 `new`（3 条）：它只在 Windows 上被构造
+//     （`DefaultSink` 在 Linux 是 `AlsaSink`），而原来只有**字段**带 cfg，
+//     结构体与 impl 在 Linux 上也编 ⇒ 整条链没人用；
+//   * `submit_plan` / `warn_submit_truncation_once`：只被 `WaveOutSink::submit` 调用。
+//
+// 修法是**按平台门控**，不是加 `allow`（铁律 F：看到死代码必须回答"为什么没被接线"）：
+// 整个 `WaveOutSink` 及其 impl 加 `#[cfg(target_os = "windows")]`；两个**纯函数**用
+// `#[cfg(any(target_os = "windows", test))]` —— 生产代码只有 Windows 用得到，但
+// `submit_plan_never_exceeds_source_or_capacity` 是纯函数判据，不该因为平台丢掉
+// Linux 上的覆盖。
+//
+// ⇒ 现在两侧都是**真的 0 警告**，不再是"靠 allow 压出来的 0"。
 
 /// 构建期内嵌着色器（build.rs 生成 OUT_DIR/shaders.rs）
 pub mod shaders {

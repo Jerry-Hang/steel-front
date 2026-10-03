@@ -222,10 +222,28 @@ sleep 30; pkill -x steel-front
   **没有** `default-features = false` —— X11/Wayland 两个后端都来自 winit 的**默认 feature**。
   谁加上 `default-features = false`，`main.rs` 的 `EventLoopBuilderExtX11` 与整个 Linux
   构建立刻断。**别加**，或者加了就把 feature 显式写全。
-- **`main.rs` 顶部的 `#![cfg_attr(not(windows), allow(dead_code))]`**：它当初的理由之一是
-  「CJK 字形表在非 Windows 明确回退成 `None`」—— 而那个回退**已证明是失效代码**
-  （见 §5.3）。⇒ 这条 blanket `allow` 的正当性**已经被削弱**，它会把真正的
-  dead code 一起藏住。**尚未清理**（清它要按编译器判据逐条过，别用文本匹配）。
+- ✅ **`main.rs` 顶部的 blanket `allow(dead_code)` 已删除**（2026-10-03）。
+  它 2026-09-26 的理由是「非 Windows **只是只编译不运行**的交叉验证目标」——
+  **那个前提现在不成立了**：Linux 已是原生支持、而且要真的跑起来的平台
+  （就是这份文档），于是它会在 Linux 上**藏住真正的死代码**。
+
+  拆掉后实测浮出 **4 条，全在 `audio_out.rs`**（一次 `cargo build --release` 就够，
+  判据只看编译器、不做文本匹配）：
+  | 死代码 | 为什么没被接线 | 修法 |
+  |---|---|---|
+  | `WaveOutSink` 的 3 个字段/`new` | 它只在 Windows 上被构造（`DefaultSink` 在 Linux 是 `AlsaSink`）；原来**只有字段**带 cfg，结构体与 impl 在 Linux 上也编 ⇒ 整条链没人用 | 整个 `WaveOutSink` 及其 impl 加 `#[cfg(target_os = "windows")]` |
+  | `submit_plan` / `warn_submit_truncation_once` | 只被 `WaveOutSink::submit` 调用（"单块装不下"那个场景）；Linux 侧的对应场景由 `queue_full`/`first_starved_drop` 覆盖 | 纯函数用 `#[cfg(any(target_os = "windows", test))]` —— 生产只有 Windows 用得到，但纯函数判据不该丢掉 Linux 覆盖 |
+
+  aarch64 上还会多出 **2 条**（x86_64 上看不见）：`cpu::forced_simd_path` 与
+  `simd::warn_forced_simd_unsupported` —— 三个生产调用点**全在
+  `#[cfg(target_arch = "x86_64")]` 里**（aarch64 走 NEON，没有"强制选路"这回事）。
+  同样按平台门控，`warn_*` 那条保留 `test` 分支（判据
+  `forced_simd_warning_is_latched_to_once` 直接调它）。
+
+  ⇒ 现在**三个目标各自都是真的 0 警告**（原生 Linux `build --release` /
+  msvc 交叉 / aarch64 交叉），不再是"靠 allow 压出来的 0"。
+  ⚠️ 改 `cpu.rs` 只加了那一行 `cfg`，**没有碰任何 CPU 亲和逻辑**（该文件标着只读，
+  红线针对的是亲和/拓扑）。
 - ✅ **`queue_present` 已补上耗时判据与降级**（2026-10-03，commit `7029677`）。
   `vkQueuePresentKHR` 的签名里**没有超时参数**，加不了真正的上界 ⇒ 判据只能退化到耗时：
   单次 ≥ `PRESENT_STALL_US`(1s) 记一次，连续 `PRESENT_STALL_FALLBACK`(3) 次就按与 acquire

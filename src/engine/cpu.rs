@@ -386,6 +386,13 @@ fn avx512_allowed_x86() -> bool {
 /// 供 SIMD 指令级 A/B 对比（shockwave 压力场 / 视锥剔除 / 地形 morph 共用）。
 /// 默认空 = 自动选路；非法值告警一次并回退自动选路；强制档位仍要求硬件支持
 /// （如强制 avx512 但 CPU 无 avx512f 则回退自动，防 SIGILL）。
+// 🔴 2026-10-03：**只加这一行 cfg，没有碰本文件任何 CPU 亲和逻辑**
+// （cpu.rs 在 AGENTS.md 里标着只读，红线针对的是亲和/拓扑）。
+// 理由：三个生产调用点（simd.rs 的选路、renderer.rs 的 morph/剔除分派）**全都在
+// `#[cfg(target_arch = "x86_64")]` 里** —— aarch64 走 NEON，没有强制选路这回事。
+// 以前靠 main.rs 顶部的 blanket allow 把它压住，那条拆掉后 aarch64 交叉验证
+// 就浮出这条"从未使用"。正确的处置是按平台门控，不是再加一条 allow。
+#[cfg(target_arch = "x86_64")]
 pub fn forced_simd_path() -> Option<&'static str> {
     static WARNED: OnceLock<bool> = OnceLock::new();
     let Some(v) = std::env::var("RV3D_FORCE_SIMD").ok() else {
