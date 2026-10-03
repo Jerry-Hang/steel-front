@@ -90,8 +90,9 @@ scripts/install_git_hooks.sh --uninstall
 
 只在这三个变量**未设置**时补默认值，不覆盖用户的值。退出码 0=成功 / 1=失败 / **2=没跑成**。
 
-⚠️ **`smoke` / `package` 两个模式在 Linux 侧尚未实现，会 exit 2**（不是 0）——
-三态约定：不许把「没跑成」写成成功，也不许指向一个不存在的脚本。
+`smoke` 与 `package` 两个模式在 Linux 侧**都已实现**（分别转交 `scripts/smoke_linux.sh`
+与 `scripts/package_release.sh`，退出码原样带回）。三态约定贯穿到底：
+不许把「没跑成」写成成功，也不许指向一个不存在的脚本。
 
 ---
 
@@ -341,7 +342,7 @@ asusctl armoury set gpu_mux_mode 0      # 需要重启；本机 gpu_mux_mode 是
 | **性能尺子** | ✅ `scripts/perf_run.sh`（三态 0/1/2 均已实测；`-Log` 可离线复核已有日志，见 §11） |
 | 真机跑通一局（起窗 / 分辨率 / CJK / VUID / **音频**） | ✅ 全部实测；音频听感见 §5.4（录音 + 引擎计数双向印证） |
 | MUX 独显直连 | 用户选择暂不切（§7.3） |
-| `package`（打包） | **未实现**（`SteelFront.sh package` → exit 2） |
+| `package`（打包） | ✅ `scripts/package_release.sh`（`./SteelFront.sh package`，见 §12） |
 | `launcher/`（Win32 原生 GUI 启动器） | **不在移植范围**（`#![cfg(windows)]`，整 crate） |
 | `queue_present` 上界 / RT 扩展过滤 / 致命错误退出码 | ✅ 均已修（见 §6）；⚠️ present 那条的**最小化场景仍未真机验过** |
 | blanket `allow(dead_code)`（`main.rs`） | **未清**（清它要按编译器判据逐条过，别用文本匹配） |
@@ -473,3 +474,48 @@ XImage 截屏、`/proc` 解析），移植它不是改路径而是重写。本�
 （它曾记"某一帧的 1/dt"，而 `frame_us` 记的是**另一帧**的耗时 ⇒ 同二进制能"差 48%"）。
 改用 `perf_log.rs::window_fps` 后稳定到 ~0.2%。
 ⇒ **先量当前二进制与参数的 A/A 底噪，低于它一律写"没测到"**；单次一对不是证据（教训 24/45）。
+
+---
+
+## 12. Linux 打包（`./SteelFront.sh package`）
+
+```bash
+./SteelFront.sh package                    # 构建 + 打包，tag = 当前时间
+./SteelFront.sh package -SkipBuild         # 用现有 exe
+./SteelFront.sh package -Tag rc1
+```
+
+产出 `dist/steel-front-<tag>/`（可运行目录）与 `dist/steel-front-<tag>.tar.gz`。
+
+### 与 Windows 侧的三处差异（**不要互相照抄**）
+
+| | Windows（`package_release.ps1`） | Linux |
+|---|---|---|
+| 压缩格式 | `.zip`（Compress-Archive） | **`.tar.gz`** —— tar/gzip 是 Linux 必备，而 **zip 本机根本没装**；收包方换了，格式就该换 |
+| 启动器 | 双击 exe（系统把 CWD 设成 exe 目录） | **多装一个 `run.sh`**（见下） |
+| exe 名 | `steel-front.exe` | `steel-front` |
+
+🔴 **`run.sh` 不是装饰**：引擎**所有资产都是相对 CWD 的路径**，而 Linux 没有"双击自动
+设 CWD"这个默认动作。做过反证 —— 从别的目录直接跑 exe：
+
+```
+props: 未载入（读取 assets/props 失败: No such file or directory）
+渲染器初始化失败: 打开着色器文件失败 'assets/mesh.spv': No such file or directory
+```
+
+⇒ 起不来。用 `run.sh`（只做 `cd` 到自己所在目录 + `exec`）则正常起来。
+（而且**上面那次失败当时退出码是 0** —— 这条假绿灯已由 `fix(main)` 修掉。）
+
+### 自检与最强验收
+
+- 照抄了「**装出来跑不起来的包，比没有包更糟**」：缺任一必需资产
+  （exe / `mesh.spv` / `triangle.vert.spv` / `triangle.frag.spv` / `maps/index.toml` / `run.sh`）
+  就**拒绝出包并删掉半成品**，绝不产出一个"看着成功"的坏包。
+- **最强验收 = 解到干净目录真的跑一次**：`tar -xzf` 到 `/tmp`，
+  **从别的 CWD** 用 `run.sh` 启动 ⇒ 找到 GPU、交换链 2560x1543 初始化完成。
+- 另外逐字节 `diff -r assets <包内 assets>` 一致（56 个 glb：props 24 / guns 16 /
+  guns_ext 15 / soldier 1）。
+- ⚠️ 报告里「模型 N 个 glb」刻意数**整包**：照抄 Windows 只数 `assets/props` 会写 24，
+  而包里其实有 56 个 —— 那是个会让人误判「资产漏拷了」的假数字。
+
+退出码：0 = 打成 / 1 = 跑了但失败 / 2 = 没跑成。
