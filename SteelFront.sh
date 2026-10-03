@@ -8,7 +8,7 @@
 #    ./SteelFront.sh fast        不重新构建，直接用现有 exe 启动
 #    ./SteelFront.sh diag        构建后带诊断开关启动（RV3D_AI_PROF=1 RV3D_PROP_STATS=1）
 #    ./SteelFront.sh smoke       冒烟门（转交 scripts/smoke_linux.sh，可加 -Secs N）
-#    ./SteelFront.sh package     打包   —— 🚫 Linux 侧尚未实现（exit 2）
+#    ./SteelFront.sh package     打包（转交 scripts/package_release.sh，可加 -Tag/-SkipBuild）
 #    ./SteelFront.sh --help      打印本帮助
 #    ./SteelFront.sh <参数…>      构建后启动，并把参数**原样**透传给引擎
 #
@@ -27,7 +27,7 @@ Steel Front 启动器（Linux）：./SteelFront.sh [模式] [引擎参数…]
   fast           不构建，直接用现有 exe 启动
   diag           构建后带诊断开关启动（RV3D_AI_PROF=1 RV3D_PROP_STATS=1）
   smoke          冒烟门：零输入跑 45s，判据 vuid==0 且 panics==0 且 killed>=1
-  package        打包   —— 🚫 Linux 侧尚未实现（exit 2）
+  package        打包：产出 dist/steel-front-<tag>/ 与 .tar.gz（可加 -Tag/-SkipBuild）
   -h / --help    打印本帮助
 
   RV3D_* 环境变量原样透传给引擎（本脚本只在**未设置**时补默认值，不覆盖你的值）。
@@ -88,9 +88,8 @@ case "$MODE_LC" in
         exec "$(dirname "$0")/scripts/smoke_linux.sh" "${@:2}"
         ;;
     package)
-        echo "[steel-front] package 在 Linux 侧尚未实现（Windows 侧是 scripts/package_release.ps1，Linux 上跑不了）。" >&2
-        echo "[steel-front] 现在没有任何可转交的 Linux 脚本 ⇒ exit 2（没跑成），不是成功、也不是失败。" >&2
-        exit 2
+        # 与 smoke 同等的转交：退出码原样带回（0=打成 / 1=跑了但失败 / 2=没跑成）。
+        exec "$(dirname "$0")/scripts/package_release.sh" "${@:2}"
         ;;
 esac
 

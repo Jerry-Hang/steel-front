@@ -25,6 +25,10 @@
 /// 这正是"不许静默"的反面：**该报的报一次，不该刷屏的一次都不刷。**
 ///
 /// 返回值 = 本次是否真的打了日志（测试用；调用方可忽略）。
+// 🔴 2026-10-03：与 `cpu::forced_simd_path` 同因 —— 生产调用点全在 x86_64 门控里。
+// 这里是 `any(..., test)` 而不是纯 `x86_64`：判据 `forced_simd_warning_is_latched_to_once`
+// 直接调它，不该因为换架构就丢掉这条覆盖。
+#[cfg(any(target_arch = "x86_64", test))]
 pub fn warn_forced_simd_unsupported(forced: &str) -> bool {
     use std::sync::OnceLock;
     static WARNED: OnceLock<bool> = OnceLock::new();

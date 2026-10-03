@@ -22,15 +22,29 @@
 // `logs/play_latest.log.err`。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// 🔴 2026-09-26：**非 Windows 是"只编译不运行"的交叉验证目标**（铁律 E：
-// `cargo check --target aarch64-unknown-linux-gnu`）。那条命令在 2026-09-26 之前
-// **根本跑不起来**（目标没装），于是它一路漂成 2 个编译错误 + 12 条警告 —— 修掉错误之后，
-// 剩下的警告全是"按平台设计就只在 Windows 用得到"的东西：waveOut 的常量/辅助函数、
-// 以及 CJK 字形表（`ui.rs::glyph_cjk` 在非 Windows 明确回退成 `None`，docstring 写明
-// "回退为 `?`、不 panic"）。
-// ⇒ 把 dead-code 的判据**只按平台**放宽（Windows 那侧一个字都没松），这样交叉验证的输出
-// 才干净到"新警告一眼可见"。**这不是给未接线的代码开后门**：Windows 构建照旧 0 警告。
-#![cfg_attr(not(windows), allow(dead_code))]
+// 🔴 2026-10-03：**顶部那条 `#![cfg_attr(not(windows), allow(dead_code))]` 已删除。**
+//
+// 它是 2026-09-26 加的，当时的理由是：非 Windows **只是"只编译不运行"的交叉验证目标**
+// （铁律 E 的 `cargo check --target aarch64-unknown-linux-gnu`）；拆掉后剩下的警告
+// 全是"按平台设计就只在 Windows 用得到"的东西（waveOut 常量、CJK 字模表）。
+//
+// **那个前提现在不成立了**：Linux 已经是原生支持、而且**要真的跑起来**的平台
+// （见 `docs/linux-native.md`，PR #1 已合并）。于是这个 blanket allow 会在 Linux 上
+// **藏住真正的死代码** —— 而 Linux 恰恰是现在必须保证干净的一侧。
+//
+// 拆掉之后实测浮出 4 条，全部在 `audio_out.rs`：
+//   * `WaveOutSink` 的字段与 `new`（3 条）：它只在 Windows 上被构造
+//     （`DefaultSink` 在 Linux 是 `AlsaSink`），而原来只有**字段**带 cfg，
+//     结构体与 impl 在 Linux 上也编 ⇒ 整条链没人用；
+//   * `submit_plan` / `warn_submit_truncation_once`：只被 `WaveOutSink::submit` 调用。
+//
+// 修法是**按平台门控**，不是加 `allow`（铁律 F：看到死代码必须回答"为什么没被接线"）：
+// 整个 `WaveOutSink` 及其 impl 加 `#[cfg(target_os = "windows")]`；两个**纯函数**用
+// `#[cfg(any(target_os = "windows", test))]` —— 生产代码只有 Windows 用得到，但
+// `submit_plan_never_exceeds_source_or_capacity` 是纯函数判据，不该因为平台丢掉
+// Linux 上的覆盖。
+//
+// ⇒ 现在两侧都是**真的 0 警告**，不再是"靠 allow 压出来的 0"。
 
 /// 构建期内嵌着色器（build.rs 生成 OUT_DIR/shaders.rs）
 pub mod shaders {
@@ -201,6 +215,38 @@ const MAX_FPS: u64 = 0;
 /// 用户报的「一运行游戏整机就像卡死」就是这个（不是 CPU 降频：同一轮实测
 /// CPU 频率 3.1–4.8 GHz、GPU 45–70W/115W、无任何节流标志）。
 ///
+/// `RV3D_SHOT_AT` 的解析（纯函数，可单测）：以 `,` 分隔的秒数 ⇒ **去重升序**列表。
+///
+/// 🔴 2026-10-03 加。存在的理由：**Linux 上原来没有任何自动截图手段** ——
+/// 唯一的触发是 F12 按键，而 Wayland 下注入按键要抢焦点（`ydotool`/XTEST 那一类），
+/// 正好违反铁律 C 的鼠标安全协议。于是 `resize_probe.sh` 只能停在"没有画面取证"，
+/// 而 Windows 侧的同一探针是能 F12 的。给一个**不需要输入**的触发就把这个不对称补平，
+/// 顺带 Windows 上做无人值守取证也一样用得上。
+///
+/// 非法项（非数字、NaN、<=0）**直接丢弃**：这是取证开关，不该因为写错一个数就让整局启动失败。
+fn parse_shot_at(raw: &str) -> Vec<f32> {
+    let mut v: Vec<f32> = raw
+        .split(',')
+        .filter_map(|t| t.trim().parse::<f32>().ok())
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.dedup();
+    v
+}
+
+/// 取走**已到点**的时刻（纯函数，可单测）：把 `pending` 里所有 `<= elapsed` 的项移出，
+/// 返回移出的个数（= 这一帧该截几张）。
+///
+/// 🔴 用「取走」而不是「判等」：某一帧可能跨过两三个时刻（长卡顿、低帧率、
+/// 或首个窗口还没渲染的那些时刻），判等会**永久漏掉**被跨过的那些 —— 而截图是取证用的，
+/// 漏一张就少一份证据，且**不会报错**。
+fn take_due_shots(pending: &mut Vec<f32>, elapsed: f32) -> usize {
+    let before = pending.len();
+    pending.retain(|t| *t > elapsed);
+    before - pending.len()
+}
+
 /// 语义（判据 `frame_cap_*` 四条测试）：
 /// - `0` = 不设上限；两侧都为 0 时返回 0（保持压测路径逐字节不变）。
 /// - 未聚焦且 `bg > 0` 时取 `min(fg, bg)`（`fg == 0` 视作无穷大）⇒ **后台只会更严，绝不会放宽**。
@@ -720,6 +766,18 @@ fn fp_gun_bake_color(n: glam::Vec3, raw: [f32; 3], albedo_boost: f32) -> [f32; 3
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// `RV3D_SHOT_AT` 还没到点的时刻（升序）。空 = 不自动截图（默认）。
+    /// 用「逐帧取走已到点的」而不是「判等」—— 理由见 `take_due_shots` 的文档。
+    shot_pending: Vec<f32>,
+    /// 自动截图的计时起点（第一次渲染时锚定，见 `about_to_wait`）。
+    shot_t0: Option<Instant>,
+    /// 致命错误的原因。**非 None 表示这次不是正常退出** ——
+    /// 由 `event_loop.exit()` 只能走"正常"通道（`run_app` 返回 `Ok`），
+    /// 所以致命路径必须额外把原因记在这里，循环结束后据此非零退出。
+    /// 🔴 2026-10-03：`创建窗口失败` 与 `渲染器初始化失败` 原来只 `log::error!` + `exit()`，
+    /// 于是引擎打出「程序正常退出」并以 **0** 退出 —— 用户解包后跑错目录（缺 assets/mesh.spv）
+    /// 看到的就是这个。这是最容易被真人撞上的一类假绿灯（教训 46）。
+    fatal: Option<String>,
     /// winit 窗口
     window: Option<Window>,
     /// Vulkan 渲染器
@@ -874,6 +932,17 @@ struct Particle {
 impl GameApp {
     /// 创建游戏应用实例
     fn new() -> Self {
+        let fatal = None;
+        // 取证开关：`RV3D_SHOT_AT=5,15,30` ⇒ 进游戏后第 5/15/30 秒各截一张。
+        // 不设 = 空列表 = 逐帧那次判断直接短路，玩家路径零开销、逐字节不变。
+        let shot_pending = std::env::var("RV3D_SHOT_AT")
+            .ok()
+            .map(|v| parse_shot_at(&v))
+            .unwrap_or_default();
+        if !shot_pending.is_empty() {
+            log::info!("自动截图已安排（RV3D_SHOT_AT）：{:?} 秒", shot_pending);
+        }
+        let shot_t0 = None;
         let mut game = Game::new();
         // 加载持久化配置（键位/音量/灵敏度）；文件缺失回退默认，见 config.rs
         let cfg = config::load();
@@ -907,6 +976,9 @@ impl GameApp {
         // 画质索引与 ui.rs 选项表对齐；配置异常值回退默认
         game.hud.quality_index = cfg.quality.min(2) as u8;
         Self {
+            shot_pending,
+            shot_t0,
+            fatal,
             window: None,
             renderer: None,
             camera: Camera::new(),
@@ -3174,7 +3246,9 @@ impl ApplicationHandler for GameApp {
         let window = match event_loop.create_window(winit_attr) {
             Ok(w) => w,
             Err(e) => {
-                log::error!("创建窗口失败: {:?}", e);
+                let msg = format!("创建窗口失败: {e:?}");
+                log::error!("{msg}");
+                self.fatal = Some(msg);
                 event_loop.exit();
                 return;
             }
@@ -3296,7 +3370,9 @@ impl ApplicationHandler for GameApp {
             self.renderer = Some(renderer);
             }
             Err(e) => {
-                log::error!("渲染器初始化失败: {}", e);
+                let msg = format!("渲染器初始化失败: {e}");
+                log::error!("{msg}");
+                self.fatal = Some(msg);
                 event_loop.exit();
                 return;
             }
@@ -4077,6 +4153,20 @@ impl ApplicationHandler for GameApp {
         let render_start = Instant::now();
         self.render();
         self.last_render_us = render_start.elapsed().as_micros() as u64;
+
+        // 自动截图（RV3D_SHOT_AT）：**渲染之后**取，保证截到的是本帧真实画面。
+        // 计时起点在第一次渲染时锚定 —— 不是在启动时：引擎起来到第一帧之间要加载
+        // 着色器/城市/GLB，那段时间截图只会得到一张黑图或半成品，对取证没有意义。
+        if !self.shot_pending.is_empty() {
+            let t0 = *self.shot_t0.get_or_insert_with(Instant::now);
+            let due = take_due_shots(&mut self.shot_pending, t0.elapsed().as_secs_f32());
+            for _ in 0..due {
+                self.capture_screenshot();
+            }
+            if self.shot_pending.is_empty() {
+                log::info!("自动截图：全部时刻已到，停止检查");
+            }
+        }
         self.last_update_us = update_us;
         self.last_cycle_us = cycle_start.elapsed().as_micros() as u64;
         // 采集模式帧率上限（RV3D_LLM=1 时 90FPS 封顶）：大幅降低 GPU 负载，
@@ -4211,7 +4301,13 @@ fn main() {
             Ok(el) => el,
             Err(e) => {
                 log::error!("创建事件循环失败: {:?}", e);
-                return;
+                // 🔴 致命启动错误**必须非零退出**。原来这里是 `return`，而 `fn main`
+                // 正常返回就是退出码 0 ⇒ 调用方（perf_run / 冒烟 / CI）看到的是"跑完了"，
+                // 实际上一帧都没渲染。2026-10-03 实测踩到：在没有图形会话环境变量的 shell 里
+                // （XDG_SESSION_TYPE=tty，缺 WAYLAND_DISPLAY/DISPLAY）报的就是这一条，
+                // 而 perf_run.sh 只看到"游戏提前退出（code 0）"、当成一次正常结束。
+                // 这就是教训 46 的形态：工具必须能说"我没跑成"。
+                std::process::exit(1);
             }
         }
     };
@@ -4297,6 +4393,17 @@ fn main() {
 
     if let Err(e) = event_loop.run_app(&mut app) {
         log::error!("应用运行错误: {:?}", e);
+        // 🔴 同上，而且这里还多一层误导：原来出错后**继续往下走**，
+        // 打出"程序正常退出"并以 0 退出 —— 日志说"正常"、退出码说"成功"，
+        // 而实际是异常终止。出错就既不许说正常，也不许退 0。
+        std::process::exit(1);
+    }
+
+    // 🔴 致命错误可能是在事件循环**内部**记下的（那时只能 `event_loop.exit()`，
+    // 而它会让 `run_app` 返回 `Ok`）⇒ 这里补上那次判断，否则同样是"日志报错、退出码说成功"。
+    if let Some(why) = app.fatal.take() {
+        log::error!("以错误退出：{why}");
+        std::process::exit(1);
     }
 
     log::info!("程序正常退出");
@@ -4332,6 +4439,135 @@ fn rdv_register_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 **判据：`main()` 里的致命错误路径不许以退出码 0 结束。**
+    ///
+    /// 2026-10-03 实测踩到：在一个**没有图形会话环境变量**的 shell 里
+    /// （`XDG_SESSION_TYPE=tty`，缺 `WAYLAND_DISPLAY`/`DISPLAY`），引擎报
+    /// "创建事件循环失败" 然后 `return` ⇒ **退出码 0**。
+    /// `perf_run.sh` 只看到"游戏提前退出（code 0）"，无法把「一帧都没渲染」
+    /// 和「正常结束」区分开 —— 教训 46 的形态：工具必须能说"我没跑成"。
+    /// 同一晚还发现 `run_app` 出错后会继续往下打出"程序正常退出"（日志说正常、
+    /// 退出码说成功，而实际是异常终止），一并钉住。
+    ///
+    /// ⚠️ 这是**源码扫描**型判据，两个坑都要防：
+    /// 1. **必须先证明它真的扫到了东西** —— 文件被搬走/改名/那段被重写时，
+    ///    `find` 返回 `None` 会让断言静默恒真；
+    /// 2. **必须先去注释** —— 修这个 bug 时写的注释里就引用了「程序正常退出」，
+    ///    不去注释的话扫描会先撞上注释、让判据自行满足（本仓 `no_unbounded_wait_on_vulkan_calls`
+    ///    同样先做 `is_comment` 过滤）。
+    #[test]
+    fn fatal_startup_paths_never_exit_zero() {
+        let src = include_str!("main.rs");
+        // 只扫生产代码那段（测试模块里引用了同样的字符串，不切开会自我满足）
+        let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+        // 去注释：行首是 // 的一律丢掉
+        let code: String = prod
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let anchors = ["创建事件循环失败", "run_app(&mut app)"];
+        for a in anchors {
+            assert!(
+                code.contains(a),
+                "检查失效：去注释后扫不到锚点 {a:?}（源码被改名/搬走了？）"
+            );
+        }
+
+        // 🔴 **必须把两半切开**：第一版写成 `code[i..].contains("process::exit")`，
+        // 扫的是"锚点之后的全部内容" ⇒ **第二处修复把第一处的断言喂饱了**，
+        // 把事件循环那条改回 `return` 时测试照样绿（反证实测发现）。
+        // 这正是本仓教训 14 的形态：恒真的断言等于没写。
+        let split = code.find("run_app(&mut app)").unwrap();
+        let (startup, running) = code.split_at(split);
+
+        // 1) 事件循环创建失败之后必须出现 process::exit（只在**这一半**里找）
+        let i = startup.find("创建事件循环失败").unwrap();
+        assert!(
+            startup[i..].contains("process::exit"),
+            "事件循环创建失败是致命错误，不能只 return（`fn main` 正常返回 = 退出码 0）"
+        );
+
+        // 2) run_app 出错分支也必须有 process::exit，且**必须早于**「程序正常退出」那句
+        let exit_at = running.find("process::exit");
+        let normal_at = running.find("程序正常退出");
+        assert!(
+            normal_at.is_some(),
+            "检查失效：去注释后扫不到「程序正常退出」那句，说明扫描窗口不对"
+        );
+        assert!(
+            exit_at.is_some(),
+            "run_app 出错是致命错误，不能退 0"
+        );
+        assert!(
+            exit_at.unwrap() < normal_at.unwrap(),
+            "run_app 出错后必须先退出，不能掉到「程序正常退出」那句（日志说正常、退出码说成功，\
+             而实际是异常终止）"
+        );
+
+        // 3) **循环内部**的致命错误也必须被记进 `fatal`。
+        //    这两处只能 `event_loop.exit()`，而它让 `run_app` 返回 `Ok` ⇒ 上面那条
+        //    `run_app` 检查抓不到它们。2026-10-03 实测：解包后跑错目录（缺 assets/mesh.spv）
+        //    报的就是「渲染器初始化失败」+「程序正常退出」+ 退出码 0。
+        for anchor in ["创建窗口失败", "渲染器初始化失败"] {
+            let i = code.find(anchor).unwrap_or_else(|| {
+                panic!("检查失效：去注释后扫不到锚点 {anchor:?}（源码被改名/搬走了？）")
+            });
+            let tail = &code[i..(i + 300).min(code.len())];
+            assert!(
+                tail.contains("self.fatal = Some"),
+                "{anchor} 是致命错误，必须记进 `self.fatal` —— 否则 event_loop.exit() 会让 \
+                 run_app 返回 Ok，引擎打出「程序正常退出」并以 0 退出"
+            );
+        }
+
+        // 4) `fatal` 必须在循环结束后被消费掉（只记不查等于没记）
+        assert!(
+            running.contains("app.fatal"),
+            "`fatal` 记了却没人查 —— 循环结束后必须据此非零退出"
+        );
+    }
+
+    /// 🔴 判据：`RV3D_SHOT_AT` 的解析与"取走到点"两条（2026-10-03）。
+    ///
+    /// 加这个开关的理由是**平台不对称**：Windows 侧的 `run_resize_probe.ps1` 能用
+    /// `PostMessage` 发 F12 截图，而 Linux 上唯一的截图触发就是 F12 按键，
+    /// Wayland 下注入按键要抢焦点，违反铁律 C 的鼠标安全协议
+    /// ⇒ Linux 的探针只能停在"没有画面取证"。给一个不需要输入的触发把这条补平。
+    ///
+    /// 两条各钉一个方向，第 3 条是真正要命的那个：
+    /// 1. 解析要**去重升序**并丢弃非法项（取证开关不该因为写错一个数就让整局起不来）；
+    /// 2. 非正数（0 / 负数）必须丢 —— `0` 会让 `retain(t > elapsed)` 在 elapsed=0 时
+    ///    把它留下、之后又永远取不走，变成每帧都截一张；
+    /// 3. 🔴 **一帧跨过多个时刻时不能漏**：低帧率或长卡顿下，某一帧的 elapsed 可能
+    ///    同时越过 5s 和 15s。用"判等"实现会永久漏掉被跨过的那个 ——
+    ///    而截图是取证用的，漏一张就少一份证据，**且不会报错**。
+    #[test]
+    fn shot_at_parsing_and_due_taking_are_falsifiable() {
+        // 1) 去重升序 + 丢弃非法项
+        assert_eq!(parse_shot_at("15,5,5,abc,-2,0"), vec![5.0, 15.0]);
+        assert_eq!(parse_shot_at("  3.5 , 1 "), vec![1.0, 3.5]);
+        assert!(parse_shot_at("").is_empty());
+        assert!(parse_shot_at("nope").is_empty());
+        assert!(parse_shot_at("NaN,inf,-1,0").is_empty(), "NaN/inf/非正数都要丢");
+
+        // 2) 只取走"已到点"的，其余原样保留
+        let mut p = parse_shot_at("5,10,15");
+        assert_eq!(take_due_shots(&mut p, 4.9), 0);
+        assert_eq!(p, vec![5.0, 10.0, 15.0]);
+        assert_eq!(take_due_shots(&mut p, 5.0), 1, "到点即取（含等于）");
+        assert_eq!(p, vec![10.0, 15.0]);
+
+        // 3) **一帧跨过两个时刻**：必须一次取走两个，不能只取一个
+        assert_eq!(take_due_shots(&mut p, 12.0), 1);
+        assert_eq!(p, vec![15.0]);
+        let mut q = parse_shot_at("1,2,3");
+        assert_eq!(take_due_shots(&mut q, 100.0), 3, "跨过全部时一次全取走");
+        assert!(q.is_empty());
+        assert_eq!(take_due_shots(&mut q, 100.0), 0, "取空之后不再重复计数");
+    }
 
     /// 🔴 判据：后台帧率上限（2026-09-27「游戏一开整机就卡」）。
     ///

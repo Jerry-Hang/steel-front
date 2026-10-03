@@ -430,6 +430,52 @@ const ACQUIRE_TIMEOUT_NS: u64 = 1_000_000_000;
 /// 检视围栏等待超时（纳秒）。5 秒足够任何一帧；超时说明 GPU 侧出了问题，要留下日志。
 const FENCE_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
 
+/// 单次**呈现**耗时超过多少算「卡住」（微秒）。
+///
+/// 取值理由：正常呈现实测 Linux 43–101µs、Windows 101–373µs
+/// ⇒ 1 秒留了**三个数量级**余量，不会把"某帧慢了一下"误判成卡死。
+const PRESENT_STALL_US: u64 = 1_000_000;
+
+/// 连续呈现卡顿到第几次就降级到 mailbox（与 `ACQUIRE_STALL_FALLBACK` 同语义）。
+const PRESENT_STALL_FALLBACK: u32 = 3;
+
+/// 呈现卡顿的处置（纯函数，可单测）。语义与 `FrameAction` / `PresentOutcome` 一致：
+/// **分类归纯函数，动作归调用方**，这样三条分支都能在没 GPU 的机器上钉住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentStall {
+    /// 正常 —— 调用方把连续计数**清零**（漏了它，一次偶发卡顿会累积成"连续三次"）
+    Ok,
+    /// 偶发一次：值得留一条日志（否则就是静默），但**不动行为**
+    Warn,
+    /// 连续多次：该按 acquire 那套方式降级了
+    Degrade,
+}
+
+/// `(本次呈现耗时, 含本次在内的连续卡顿次数)` → 处置。判据
+/// `present_stall_classifies_and_clears`。
+fn present_stall(present_us: u64, consecutive: u32) -> PresentStall {
+    if present_us < PRESENT_STALL_US {
+        PresentStall::Ok
+    } else if consecutive < PRESENT_STALL_FALLBACK {
+        PresentStall::Warn
+    } else {
+        PresentStall::Degrade
+    }
+}
+
+/// 连续卡顿计数的推进（纯函数）。**正常帧必须清零** ——
+/// 漏了清零，几次**偶发**长卡顿会累积成"连续三次"从而误降级。
+///
+/// 🔴 单独抽出来的理由是**让测试真的钉住调用方**：状态机若写在测试里的局部闭包里，
+/// 真实调用方忘了清零时测试照样绿（那只是把意图抄了一遍，不是判据）。
+/// 抽成纯函数后，线上与测试跑的是同一份逻辑。
+fn next_stall_count(current: u32, present_us: u64) -> u32 {
+    match present_stall(present_us, current.saturating_add(1)) {
+        PresentStall::Ok => 0,
+        _ => current.saturating_add(1),
+    }
+}
+
 /// 连续 acquire 超时到第几次就**降级到 mailbox 自动恢复**（≈3 秒没图像）
 const ACQUIRE_STALL_FALLBACK: u32 = 3;
 
@@ -724,6 +770,41 @@ fn swapchain_extent_choice(
         }
     };
     clamp_swapchain_extent(fallback, min, max)
+}
+
+/// 设备扩展选择：**缺扩展要降级，不要让 `create_device` 直接失败**。
+///
+/// 🔴 **2026-09-29 修**。原代码在 `VK_EXT_mesh_shader` 可用时**无条件**追加 5 个光追扩展，
+/// 而 `enumerate_device_extension_properties` 的结果只在**事后**用来打一行 warn ——
+/// 于是"设备缺任一光追扩展"的后果不是降级，而是 **`create_device` 失败 = 游戏起不来**，
+/// 而 PT 本来就是**默认关**的，根本不值得为它挡住启动。
+/// 同一段还有第二处：`PhysicalDeviceRayQueryFeaturesKHR` 等**特性结构无条件挂进 pNext**，
+/// 即使对应扩展没启用 —— 那本身就是无效用法。
+///
+/// 语义（判据 `device_extensions_degrade_instead_of_failing`）：
+/// - `required`：逐个按实际支持情况启用；缺的**如实报出来**（是否致命由调用方决定，
+///   本函数不替它决定 —— 这里只负责"别把可选的东西当必需"）；
+/// - `all_or_nothing`：**全有或全无**的一组。
+///   🔴 光追那 5 个必须同进同退：只启用一半时，特性链与后续代码路径都假设它们齐全，
+///   半套就是未定义行为 —— 比"整组不用"危险得多。
+///   ⇒ 缺任何一个就**整组不启用**，并把缺的那些报出来。
+fn pick_device_extensions<'a>(
+    available: &[String],
+    required: &[&'a str],
+    all_or_nothing: &[&'a str],
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let has = |n: &str| available.iter().any(|a| a == n);
+    let mut enabled: Vec<&'a str> = required.iter().copied().filter(|n| has(n)).collect();
+    let mut missing: Vec<&'a str> = required.iter().copied().filter(|n| !has(n)).collect();
+    let absent: Vec<&'a str> = all_or_nothing.iter().copied().filter(|n| !has(n)).collect();
+    if absent.is_empty() {
+        enabled.extend(all_or_nothing.iter().copied());
+    } else {
+        // 整组不启用：把缺的那些报出去（**已存在的那几个也算"没启用"**，
+        // 因为调用方要的是"这一组能不能用"，不是"哪几个名字恰好存在"）
+        missing.extend(absent);
+    }
+    (enabled, missing)
 }
 
 /// 交换链重建失败后**多久才允许再试一次**（秒）。见 `should_retry_swapchain`。
@@ -1404,6 +1485,9 @@ pub struct Renderer {
     stage_record_us: u64,
     stage_submit_us: u64,
     stage_present_us: u64,
+    /// 连续呈现卡顿的帧数（见 `present_stall`）。正常帧必须清零 ——
+    /// 漏了清零，几次**偶发**长卡顿会累积成"连续三次"从而误触发降级。
+    present_stall_frames: u32,
     depth_images: Vec<vk::Image>,
     depth_images_memory: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,
@@ -1957,25 +2041,28 @@ impl Renderer {
 
         let swapchain_ext_name = c"VK_KHR_swapchain";
         let mesh_shader_ext_name = c"VK_EXT_mesh_shader";
+        // 设备**实际支持**的扩展名（只枚举一次；下面 mesh 与光追两组都基于它判定）。
+        // 旧代码把这次枚举关在 mesh 那个块里，于是光追那组只能"先无条件请求、事后打日志"——
+        // 那正是"缺扩展就起不来"的来源。
+        let device_ext_names: Vec<String> = unsafe {
+            instance
+                .enumerate_device_extension_properties(physical_device)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| {
+                    CStr::from_ptr(e.extension_name.as_ptr())
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        };
         // ---- 可选网格着色器路径：检测 VK_EXT_mesh_shader（仿 gpu_caps.rs 枚举模式）。
         //      本机 WSLg/dzn 实测扩展缺失 → mesh_enabled=false，设备创建与今天逐字节一致。
         //      支持时：扩展加入 enabled_extension_names，并把
         //      PhysicalDeviceMeshShaderFeaturesEXT(mesh_shader=true) 挂到 pNext 链
         //      （task_shader 不启用：本设计为纯 mesh 阶段，无 task 阶段）。
         let mesh_shader_available = {
-            let ext_names: Vec<String> = unsafe {
-                instance
-                    .enumerate_device_extension_properties(physical_device)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|e| {
-                        CStr::from_ptr(e.extension_name.as_ptr())
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                    .collect()
-            };
-            if ext_names.iter().any(|n| n == "VK_EXT_mesh_shader") {
+            if device_ext_names.iter().any(|n| n == "VK_EXT_mesh_shader") {
                 let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
                 let mut f2 = vk::PhysicalDeviceFeatures2::default();
                 f2.p_next = &mut mesh_features as *mut _ as *mut std::ffi::c_void;
@@ -1997,11 +2084,35 @@ impl Renderer {
             }
         };
 
-        // 设备创建：mesh 可用时仅追加扩展名与特性结构（其余字段不变）；
-        // 不可用时与旧代码完全一致（enabled_extension_names=[swapchain]，pNext=null）。
+        // 光追扩展组：**全有或全无**（理由见 `pick_device_extensions` 的文档）。
+        // 只有真的全齐、且 mesh 路径可用时才启用 —— PT 是默认关的可选功能，
+        // 缺扩展的正确后果是"本局没有 RT"，不是"游戏起不来"。
+        const RT_DEVICE_EXTENSIONS: [&str; 5] = [
+            "VK_KHR_buffer_device_address",
+            "VK_KHR_deferred_host_operations",
+            "VK_KHR_acceleration_structure",
+            "VK_KHR_ray_query",
+            "VK_KHR_ray_tracing_pipeline",
+        ];
+        let (rt_enabled, rt_missing) =
+            pick_device_extensions(&device_ext_names, &[], &RT_DEVICE_EXTENSIONS);
+        let rt_available = mesh_shader_available && rt_missing.is_empty();
+        if rt_missing.is_empty() {
+            log::info!("device-create: 光追扩展全齐，启用 {:?}", rt_enabled);
+        } else {
+            log::warn!(
+                "device-create: 光追扩展缺 {:?} ⇒ **整组不启用**（半套是未定义行为）；\
+                 本局无 RT/PT，其余渲染路径不受影响",
+                rt_missing
+            );
+        }
+
+        // 设备创建：按**实际支持**逐个启用（mesh 可用时追加 mesh；光追组全齐才追加）。
         let mut device_extensions: Vec<RawCString> = vec![swapchain_ext_name.as_ptr()];
         if mesh_shader_available {
             device_extensions.push(mesh_shader_ext_name.as_ptr());
+        }
+        if rt_available {
             // 2026-08-29 路径追踪基准：启用光线追踪核心扩展（ray_query 计算侧；AS 构建）
             device_extensions.push(c"VK_KHR_buffer_device_address".as_ptr());
             device_extensions.push(c"VK_KHR_deferred_host_operations".as_ptr());
@@ -2032,25 +2143,19 @@ impl Renderer {
         } else {
             device_create_info
         };
-        // RT 特性链（Ext 启用 ≠ Feature 启用；rayQuery/accelStructure 必须显式 true）
-        let device_create_info = device_create_info
-            .push_next(&mut as_features)
-            .push_next(&mut bda_features)
-            .push_next(&mut rq_features);
+        // RT 特性链（Ext 启用 ≠ Feature 启用；rayQuery/accelStructure 必须显式 true）。
+        // 🔴 **必须与扩展启用同步**：只启用扩展不启用特性 = 功能不可用；
+        // 而**扩展没启用却把特性结构挂进 pNext 本身就是无效用法** ——
+        // 旧代码无条件挂这三个，是这次一并修掉的第二处。
+        let device_create_info = if rt_available {
+            device_create_info
+                .push_next(&mut as_features)
+                .push_next(&mut bda_features)
+                .push_next(&mut rq_features)
+        } else {
+            device_create_info
+        };
 
-        {
-            let mut names = Vec::new();
-            let exts = unsafe { instance.enumerate_device_extension_properties(physical_device).unwrap_or_default() };
-            for e in &exts {
-                let n = unsafe { std::ffi::CStr::from_ptr(e.extension_name.as_ptr()) }.to_string_lossy().into_owned();
-                names.push(n);
-            }
-            let want: Vec<String> = unsafe {
-                use std::ffi::CStr;
-                device_extensions.iter().map(|p| CStr::from_ptr(*p).to_string_lossy().into_owned()).collect()
-            };
-            log::warn!("device-create: 请求={:?} 缺失={:?}", want, want.iter().filter(|w| !names.contains(*w)).collect::<Vec<_>>());
-        }
         let device = unsafe {
             instance
                 .create_device(physical_device, &device_create_info, None)
@@ -2228,6 +2333,7 @@ impl Renderer {
             stage_record_us: 0,
             stage_submit_us: 0,
             stage_present_us: 0,
+            present_stall_frames: 0,
             depth_images: Vec::new(),
             depth_images_memory: Vec::new(),
             depth_image_views: Vec::new(),
@@ -12747,6 +12853,46 @@ impl Renderer {
             }
         }
 
+        // 🔴 **2026-09-29：`queue_present` 是最后一个没有上界的 Vulkan 等待。**
+        //
+        // acquire 有 1s 超时、围栏有 5s 超时，但 present **没有** ——
+        // 而 Wayland 下 FIFO（合成器不提供 `wp_fifo_v1` 时）**就是在 present 里阻塞等
+        // frame callback**，窗口隐藏/最小化时那个回调不会来。后果与 acquire 那次同类：
+        // 日志停住、无 panic、无 VUID、无 `has been lost`，从外面看就是"游戏死了"。
+        //
+        // `vkQueuePresentKHR` 的签名里没有超时参数，加不了超时 ⇒ 判据只能是**耗时**：
+        // 超阈值就数一次，连续到阈值就按与 acquire **完全相同**的方式降级到 mailbox 并重建。
+        // 放在 `frame_action` **之后**是刻意的：呈现结果的处置是硬不变量，
+        // 不能被这里的提前 return 跳过。
+        let consecutive = next_stall_count(self.present_stall_frames, self.stage_present_us);
+        self.present_stall_frames = consecutive;
+        match present_stall(self.stage_present_us, consecutive) {
+            PresentStall::Ok => {}
+            PresentStall::Warn => {
+                if consecutive == 1 {
+                    log::error!(
+                        "单次呈现耗时 {}ms（阈值 {}ms）—— vkQueuePresentKHR 没有超时参数，\
+                         卡在这里主循环就停了。Wayland FIFO 等一个不会来的 frame callback\
+                         （窗口不可见时）是已知诱因。连续 {} 次后会降级为 MAILBOX 并重建交换链。",
+                        self.stage_present_us / 1000,
+                        PRESENT_STALL_US / 1000,
+                        PRESENT_STALL_FALLBACK
+                    );
+                }
+            }
+            PresentStall::Degrade => {
+                if self.present_mode_override != Some(vk::PresentModeKHR::MAILBOX) {
+                    log::error!(
+                        "连续 {} 次呈现卡顿 ⇒ 降级为 MAILBOX 并重建交换链\
+                         （mailbox 会丢弃待呈现图像，不像 FIFO 那样等 frame callback）",
+                        consecutive
+                    );
+                    self.present_mode_override = Some(vk::PresentModeKHR::MAILBOX);
+                    return Err("交换链过期".to_string());
+                }
+            }
+        }
+
         if let Some(e) = screenshot_err {
             return Err(format!("截图失败: {}", e));
         }
@@ -15471,10 +15617,11 @@ mod vk_failure_path_tests {
     }
 
     use super::{
-        clamp_swapchain_extent, frame_suppressed, is_device_lost_error, prop_buffer_growth_needed,
-        shadow_due, shadow_static_due, should_retry_swapchain, swapchain_extent_choice,
-        terrain_coarse_height, terrain_height, wait_idle_failure_message, RECREATE_RETRY_MIN_SECS,
-        TERRAIN_CELLS, TERRAIN_HALF,
+        clamp_swapchain_extent, frame_suppressed, is_device_lost_error, pick_device_extensions,
+        next_stall_count, present_stall, prop_buffer_growth_needed, shadow_due, shadow_static_due,
+        should_retry_swapchain, swapchain_extent_choice, terrain_coarse_height, terrain_height,
+        wait_idle_failure_message, PresentStall, PRESENT_STALL_FALLBACK, PRESENT_STALL_US,
+        RECREATE_RETRY_MIN_SECS, TERRAIN_CELLS, TERRAIN_HALF,
     };
     use ash::vk;
 
@@ -15525,6 +15672,95 @@ mod vk_failure_path_tests {
             "地形最细一级插值误差 {worst:.3}m 超预算（最差点 {at:?}）：网格太粗，丘陵会变形。\
              预算依据见 §21.46：现行 4m 网格实测 0.31m、旧的 2m 网格 0.08m"
         );
+    }
+
+    /// 🔴 **判据：缺扩展要降级，不是让 `create_device` 失败。**
+    ///
+    /// 原代码在 `VK_EXT_mesh_shader` 可用时**无条件**请求 5 个光追扩展，而枚举结果
+    /// 只在事后打一行 warn ⇒ "设备缺任一光追扩展"的后果是**游戏起不来**，
+    /// 而 PT 本来就是**默认关**的，根本不值得为它挡住启动。
+    ///
+    /// 三个方向各钉一条（都不是恒真断言）：
+    /// 1. 全齐 ⇒ 整组启用（免得把正常路径也改坏）；
+    /// 2. **缺任何一个 ⇒ 整组不启用** —— 这是最关键的一条：只启用剩下几个时，
+    ///    特性链与后续代码路径都假设它们齐全，**半套是未定义行为，比整组不用更危险**；
+    /// 3. `required` 缺了就如实报出来，但**不阻止**其它已支持的扩展启用
+    ///    （把"可选"当"必需"正是这次要修的错）。
+    #[test]
+    fn device_extensions_degrade_instead_of_failing() {
+        let rt = ["A", "B", "C", "D", "E"];
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+
+        // 1) 全齐 ⇒ swap + 5 个光追全部启用，且不报缺失
+        let (en, miss) = pick_device_extensions(&s(&["swap", "A", "B", "C", "D", "E"]), &["swap"], &rt);
+        assert_eq!(miss.len(), 0, "全齐时不该报缺失");
+        assert_eq!(en.len(), 6, "swap + 光追 5 个都该启用");
+
+        // 2) 缺一个 ⇒ **整组**不启用（不是"启用剩下 4 个"）
+        let (en, miss) = pick_device_extensions(&s(&["swap", "A", "B", "C", "D"]), &["swap"], &rt);
+        assert_eq!(en, vec!["swap"], "光追组缺一个就必须整组不启用，只留 required");
+        assert_eq!(miss, vec!["E"], "缺的那个要如实报出来");
+
+        // 3) required 缺了 ⇒ 报出来，但不影响已支持的那一组
+        let (en, miss) = pick_device_extensions(&s(&["A", "B", "C", "D", "E"]), &["swap"], &rt);
+        assert!(!en.contains(&"swap"), "不支持的 required 不许出现在启用列表里");
+        assert_eq!(miss, vec!["swap"]);
+        assert_eq!(en.len(), 5, "光追组不受 required 缺失影响");
+
+        // 4) 一个都没有 ⇒ 两边都空/都报，不 panic
+        let (en, miss) = pick_device_extensions(&s(&[]), &["swap"], &rt);
+        assert!(en.is_empty());
+        assert_eq!(miss.len(), 6, "1 个 required + 5 个光追全报");
+    }
+
+    /// 🔴 **判据：`queue_present` 卡顿必须能被分类，且正常帧必须清零计数。**
+    ///
+    /// 背景：`vkQueuePresentKHR` **签名里没有超时参数**，加不了上界 —— 而 Wayland 下
+    /// FIFO（合成器不提供 `wp_fifo_v1`）**就是在 present 里阻塞等 frame callback**，
+    /// 窗口不可见时那个回调不会来。acquire 与围栏都有超时，present 此前是唯一没有的，
+    /// 后果与 acquire 那次同类：日志停住、无 panic、无 VUID，从外面看就是"游戏死了"。
+    /// 既然加不了超时，判据只能退化到**耗时**，所以更要保证它不会被误触发。
+    ///
+    /// 三条各有指向：
+    /// 1. 正常耗时要判 `Ok` —— 否则每帧都在报"卡顿"；
+    /// 2. 阈值附近要**跨过阈值取点**（教训 42：阈值型分支的测试必须取跨过阈值的输入，
+    ///    `PRESENT_STALL_US - 1` 与 `PRESENT_STALL_US` 必须落在不同分支）；
+    /// 3. **第 3 条是关键**：`Ok` 时调用方清零，所以"一次长卡顿 + 一次正常"之后
+    ///    计数必须回到 1 而不是 2 —— 漏了清零，几次**偶发**长卡顿会累积成"连续三次"
+    ///    从而误降级（把好端端的 mailbox/fifo 换掉）。
+    ///    这里用**状态机走一遍**来钉住它，不是只调一次纯函数。
+    #[test]
+    fn present_stall_classifies_and_clears() {
+        // 1) 正常帧：Ok，且必须让计数清零
+        assert_eq!(present_stall(43, 1), PresentStall::Ok);
+        assert_eq!(present_stall(373, 1), PresentStall::Ok);
+
+        // 2) 跨过阈值取点（教训 42）
+        assert_eq!(present_stall(PRESENT_STALL_US - 1, 1), PresentStall::Ok);
+        assert_eq!(present_stall(PRESENT_STALL_US, 1), PresentStall::Warn);
+        assert_eq!(present_stall(PRESENT_STALL_US, PRESENT_STALL_FALLBACK), PresentStall::Degrade);
+
+        // 3) 状态机走一遍 —— **用的是线上那个 `next_stall_count`**，不是测试里另抄一份。
+        //    漏了清零时几次偶发长卡顿会累积成"连续三次"从而误降级，这条就是钉它的。
+        let mut n: u32 = 0;
+        n = next_stall_count(n, PRESENT_STALL_US);
+        assert_eq!(n, 1, "第 1 次卡顿");
+        n = next_stall_count(n, 43);
+        assert_eq!(n, 0, "中间来一个正常帧 ⇒ 必须清零");
+        n = next_stall_count(n, PRESENT_STALL_US);
+        assert_eq!(n, 1, "清零后重新数，不能是 2");
+        n = next_stall_count(n, PRESENT_STALL_US);
+        assert_eq!(n, 2);
+        n = next_stall_count(n, PRESENT_STALL_US);
+        assert_eq!(n, 3, "连续 3 次才该降级");
+        assert_eq!(
+            present_stall(PRESENT_STALL_US, n),
+            PresentStall::Degrade,
+            "计数到 FALLBACK 时必须判降级"
+        );
+
+        // 4) 计数的饱和：u32 上限下不许 panic（release 里溢出是回绕，别让它变成"突然不卡了"）
+        assert_eq!(next_stall_count(u32::MAX, PRESENT_STALL_US), u32::MAX);
     }
 
     /// 判据：交换链兜底尺寸必须落在 surface 给的范围内。

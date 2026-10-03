@@ -770,6 +770,7 @@ mod alsa {
     }
 }
 
+#[cfg(target_os = "windows")]
 pub struct WaveOutSink {
     sample_rate: u32,
     channels: u16,
@@ -782,6 +783,7 @@ pub struct WaveOutSink {
     silenced: bool,
 }
 
+#[cfg(target_os = "windows")]
 impl WaveOutSink {
     pub fn new(sample_rate: u32, channels: u16) -> Self {
         #[cfg(target_os = "windows")]
@@ -886,6 +888,7 @@ impl WaveOutSink {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl crate::audio::AudioSink for WaveOutSink {
     fn sample_rate(&self) -> u32 {
         self.sample_rate
@@ -900,6 +903,7 @@ impl crate::audio::AudioSink for WaveOutSink {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl Drop for WaveOutSink {
     fn drop(&mut self) {
         #[cfg(target_os = "windows")]
@@ -1109,11 +1113,13 @@ pub type DefaultSink = crate::audio::SilentSink;
 /// 🔴 2026-09-23 复查补的判据：本帧要写的样本数可能超过这个容量（帧率骤降到
 /// `48000/2048 ≈ 23fps` 以下，或加载/卡顿让某一帧的 dt 覆盖 170ms 以上）。
 /// 超出的部分**丢弃是有意的**（卡顿之后不需要补播旧音频），但**不能静默** —— 见 `submit`。
+#[cfg(any(target_os = "windows", test))]
 fn submit_plan(available: usize, capacity: usize) -> (usize, bool) {
     (available.min(capacity), available > capacity)
 }
 
 /// 一次性告警（不刷屏）：单块装不下的样本被丢弃
+#[cfg(target_os = "windows")]
 fn warn_submit_truncation_once(available: usize, capacity: usize) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
