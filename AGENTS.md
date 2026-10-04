@@ -122,7 +122,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （`sun.direction` 直接传，勿加负号）；采样器 `.compare_enable(false)` 手动 PCF
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
-  参数 2048² D32、半宽 250m、near=1/far=500、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
+  参数 2048² D32、半宽 400m、near=1/far=800、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
   🔴 阴影是**两张图**（实测增益见 §21.40(c)）：
   `shadow_image`(binding 5) 只装静态投射者（地形/地面场/marker/道具）、每
   `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；`shadow_dyn_image`(binding 10) 只装
@@ -144,8 +144,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （`window_dark` / `glass_shade`+菲涅尔 / `is_canopy` 值噪声 / marker 混凝土皮肤）。
   **不接这条，GLB 立面会被再画一层错位窗带（D11 重演）**。
 - **调试/材质开关**：`RV3D_PROC_TEX=0` 关程序化贴图（见铁律 D）、`RV3D_NO_SHADOW=1` 关阴影、
-  `RV3D_DEBUG_SHADOW=1` 看 R=frag_depth / G=阴影图深度均值（见上）、`RV3D_SKIN_TEX=1` 开皮肤贴图
-  （缺省 0 纯色回退，冒烟基线不变）、`RV3D_INSPECT=1` 检视模式（实例矩阵用 `Mat4::IDENTITY`）。
+  `RV3D_DEBUG_SHADOW=1` 看 R=frag_depth / G=阴影图深度均值（见上）、`RV3D_SKIN_TEX=0` 关皮肤贴图
+  （缺省开）、`RV3D_INSPECT=1` 检视模式（实例矩阵用 `Mat4::IDENTITY`）。
   （编码见上条 `flat_flag`；binding 7/8。）
 
 **地面**
@@ -251,10 +251,13 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 **路径追踪（PT，默认关）**
 - 默认关的最新理由 = "整帧替换光栅画面 + 1 spp 噪声大"，属调试/烘焙参照视图，**不是"命中没修"**。
   `RV3D_PT_LIVE=0` 强制关。
-- 采样种子**必须含帧索引**（`frameSeed*64+b`）；push constants 6×vec4=96B，
-  `PtParams::pack` 与 GLSL `PC{a..f}` 两处 `.size(96)` 必须同步；
+- 采样种子**必须含帧索引**（`frameSeed*64+b`）；push constants 7×vec4=112B，
+  `PtParams::pack` 与 GLSL `PC{a..g}` 两处 `.size(112)` 必须同步；
   累积图像逐帧 barrier 用 `GENERAL→GENERAL`（用 `old_layout=UNDEFINED` = 累积白做，且不报 VUID）；
   `pt_frame >= pt_spp_target` 即停派发；`RV3D_PT_SPP` 覆盖目标（实时默认 256，`run_pt_view` 默认 64）。
+- 🔴 **改"实例缩放 ↔ 真实尺寸"的约定必须同改所有消费者**：`pt_set_scene_markers` 的 `* 0.5`
+  是 9-17 前"渲染盒 = 2×AABB"的遗留，漏改 ⇒ PT 的 marker 盒整体小一半（§22.14）。
+  还原半尺寸一律乘 `Shape::template_half_extent`。
 - 时域累积/缓存的变化判定量化粒度**必须粗于相机 idle 抖动幅度**（现值 ~0.5m/~3°/~0.01；
   1mm 那版已作废，正是"PT 永不收敛"的根因）。
 - RT 命中判据：`rayQueryGetIntersectionTypeEXT(q, 1)` 必须是 **committed**；
@@ -262,7 +265,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - PT 着色器改 `assets/rt/pt_panorama.glsl` → glslangValidator → `.spv`，
   `spirv-val --target-env vulkan1.3` 严格通过；用 `scripts/compile_pt.ps1`（勿手工拼装 SPIR-V）。
 - PT 盒面法线用不变量 `(primitive % 12) / 2` 查表（"来射方向主轴"近似会把地面法线判成 ±Z → 地面全黑）。
-- PT 资产：`PT_MAX_BOXES=1024` 一次分配；
+- PT 资产：`PT_MAX_BOXES=2048` 一次分配；
   **BLAS 尺寸必须按容量上限而非当前盒数**（按 4 盒算 5376B 塞满容量 → 越界写 device lost）；
   scratch 归 `PtAssets` 所有；两次构建之间加 barrier。
 - 🔴 **存储图像格式必须与 GLSL 声明逐位相等**：`pt_img` 对应 `rgba8` ⇒ 图像与 view 都必须是
@@ -605,7 +608,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 7. **D12 士兵近距观感**：`soldier.glb` 实例化绘制；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画（`docs/HANDOFF-soldier.md`）。
 8. **D4 墙缝天空亮条**：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
 9. **mesh 着色器过不了严格 `spirv-val`**：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
-10. **PT 盒上限静默截断**：512 → 1024 一次分配 + 一次性告警。
+10. **PT 盒上限静默截断**：512 → 1024 → **现值 2048**；一次分配 + 一次性告警。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 像素重投影复用或运动自适应 spp；`signature()` 分层（~0.5m/~3°/~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（含 `RV3D_PT_EXPOSURE`）。
 12. **溢出静默丢弃**：超容处有 `Renderer::warn_npc_cap_once`。
 13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步。**仍未做**：NAT 双进程真机验证、回滚、快照增量压缩、会话恢复。

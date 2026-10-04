@@ -19,6 +19,21 @@ layout(set = 0, binding = 3, rgba32f) uniform image2D AccImg;
 //    ——pt3 实测 126fps→1.5fps。道具未上传时 Rust 侧绑占位缓冲，那时 BLAS 没有道具
 //    几何，道具分支按几何索引必然不可达。
 layout(set = 0, binding = 4, std430) readonly buffer PropTris { uint propAttr[]; };
+// 🏪 地面 = 与光栅同一张程序化地面纹理（binding 5，R8G8B8A8_SRGB，采样自动解码为线性）。
+// 地面盒（盒 0）不再用一颗均匀沥青反照率：单值反照率表不出分区（道路区实测比光栅
+// 偏亮 22%），接纹理后 PT 的地面直射与反弹光和实机逐纹素同源。
+layout(set = 0, binding = 5) uniform sampler2D GroundTex;
+// 🧱 marker 砌块皮肤 = 与光栅**同一张**程序化纹理（binding 6，R8G8B8A8_SRGB）。
+// 在此之前 PT 与实机只剩一条已知反照率分歧：光栅给大砌体画 0.4×0.2m 砌块，
+// PT 一律 boxMats.rgb 纯色 ⇒ 参照帧里围墙/花坛/护栏是死平一块（§22.2 只统一了地面）。
+// 绑定号必须与 renderer.rs 的 init_pt_resident / run_pt_view 两处 set layout 同步。
+layout(set = 0, binding = 6) uniform sampler2D MarkerSkin;
+
+// 砌块皮肤的最小跨度（米）——🔴 必须与 build.rs WGSL 与 ray_tracer.rs 的同名常量一致。
+// 光栅那条判据长在顶点着色器里（PT 没有顶点阶段），跨度由 boxMats[].a 直接传过来。
+const float MASONRY_MIN_SPAN = 1.5;
+// 皮肤 tile = 4 砖 × 4 行，与 build.rs 的 skin_uv / vec2(1.6, 0.8) 同源，勿在此另猜。
+const vec2  SKIN_TILE_M = vec2(1.6, 0.8);
 
 // 7 x vec4 = 112B，Rust 侧 [[f32;4];7] 逐字段对齐，无填充歧义
 // 相机直接传 forward 向量（不传 yaw/pitch）=> 与 engine/camera.rs 的基底严格同源，无前后手风险
@@ -135,6 +150,13 @@ vec3 albedoOf(uint boxIdx) {
     return boxMats[int(boxIdx)].rgb;
 }
 
+// 每盒最长世界轴跨度（米）。越界返回 0 ⇒ 自动判为"不够大、不穿砌块皮肤"，
+// 与 albedoOf 的兜底同向（宁可少画细节，也不拿邻盒数据乱画）。
+float boxSpanM(uint boxIdx) {
+    if (int(boxIdx) >= boxMats.length()) return 0.0;
+    return boxMats[int(boxIdx)].a;
+}
+
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
     if (gid.x >= int(pc.a.x) || gid.y >= int(pc.a.y)) return;
@@ -145,8 +167,13 @@ void main() {
 
     float ux = (float(gid.x) + 0.5) / pc.a.x * 2.0 - 1.0;
     float uy = 1.0 - (float(gid.y) + 0.5) / pc.a.y * 2.0;
+    // 🔴 pc.a.z 是**垂直**半角的正切（camera.fov = perspective_rh 的 fov_y），光栅的
+    // 水平半角 = atan(aspect·tan)。x 项必须乘 aspect，否则 PT 帧相对游戏视角水平拉伸：
+    // 2026-09-29 实机对照（16:10 窗口）——同一固定机位，远景门柱间距光栅 110px、
+    // PT 175px，比值 1.59 = aspect 本身；地平线位置两帧一致（垂直本来就是对的）。
     float tan = pc.a.z;
-    vec3 rd = normalize(fwd + rgt * (ux * tan) + up * (uy * tan));
+    float aspect = pc.a.x / pc.a.y;
+    vec3 rd = normalize(fwd + rgt * (ux * tan * aspect) + up * (uy * tan));
     vec3 ro = pc.b.xyz;
 
     uint bounces = uint(max(pc.a.w, 1.0));
@@ -168,7 +195,57 @@ void main() {
         uint seed = pxSeed ^ (frameSeed * 0x27D4EB2Fu) ^ (s * 0x165667B1u);
         for (uint b = 0u; b < bounces; b++) {
             if (!traceRay(rq, rs, 500.0)) { lq += tq * skyColor(rs); break; }
-            vec3 alb = hitIsProp ? hitAlb : albedoOf(hitPrim / 12u);
+            // 反照率：道具=逐三角顶点色；盒 0=地面，采样与光栅同一张程序化纹理
+            // （world-space UV，与 build.rs 片元的 (xz+256)/512 映射逐位一致）；
+            // 其余盒=boxMats 的真实 tint。
+            uint boxIdx = hitPrim / 12u;
+            vec3 alb;
+            if (hitIsProp) alb = hitAlb;
+            else if (boxIdx == 0u)
+                alb = textureLod(GroundTex, (hitPos.xz + vec2(256.0)) / 512.0, 0.0).rgb;
+            else {
+                // 🧱 大砌体：与光栅画**同一张**皮肤、按**同一个世界尺度**采样。
+                vec3 tint = albedoOf(boxIdx);
+                float span = boxSpanM(boxIdx);   // 越界 ⇒ 0 ⇒ 自动不穿皮肤
+                alb = tint;
+                // 判据与光栅片元逐条同式：够大才是砌体；玻璃(b > r·1.4)与树冠
+                // (g 最大且 > b·1.4)在光栅里也被排除，这里必须一起排除，否则
+                // PT 会给玻璃幕墙和树冠长出砖缝——两侧"看着不一样"正是本条要修的。
+                vec3 hn = normalize(hitNrm);
+                vec3 an = abs(hn);
+                // 🔴 朝下的面（梁底、压顶底面）不画砌块网格 —— 与光栅 `build.rs` 同一条
+                // 判据，理由见 docs/PROGRESS.md §23.10：真实砌体的底面要么露一排砖端、
+                // 要么整浇混凝土留模板缝，不存在"底面显示 1.6m 见方砖格平面排布"。
+                // ⚠ 语义与光栅不同：盒体的 hitNrm 是**面号表查出的几何外法线**
+                // （见本文件上面 `f == 2u → (0,-1,0)`），**不随视线翻转**；而光栅那边的
+                // `fnrm` 是翻向观察者的。两边都判 `y < 0` 结论相同，但别以为同一变量。
+                bool facing_down = an.y > an.x && an.y > an.z && hn.y < 0.0;
+                bool masonry = span >= MASONRY_MIN_SPAN
+                    && !facing_down
+                    && !(tint.b > tint.r * 1.4)
+                    && !(tint.g > tint.r && tint.g > tint.b * 1.4);
+                if (masonry) {
+                    // 主轴投影到面内平面（与 build.rs 的 skin_uv 三分支逐字同式）
+                    vec2 suv = hitPos.xy;
+                    if (an.x > an.y && an.x > an.z) suv = hitPos.zy;
+                    else if (an.y > an.x && an.y > an.z) suv = hitPos.xz;
+                    // compute 里没有屏幕导数 ⇒ 显式估 mip：一个像素在表面上盖多少米。
+                    // 2·tan/resY 是垂直角分辨率；水平方向因为 aspect = resX/resY 而**等值**，
+                    // 不必分轴取大（乘了 aspect 再除 resX 会自己抵消，容易写错）。
+                    float dist = length(hitPos - rq);
+                    float pxm = dist * (2.0 * tan / pc.a.y)
+                              / max(abs(dot(hn, normalize(rs))), 0.15);
+                    // 皮肤 v 方向 0.8m 跨 512 纹素 = 640 纹素/米（两轴里更密的一侧）
+                    float lvl = log2(max(pxm * 640.0, 1.0));
+                    // 远距收敛照抄光栅的 detail：foot = 一个像素占这个面的几分之几
+                    // ≈ pxm / span。⚠ 光栅用的是**该面**的短轴，这里只有最长轴，
+                    // 所以扁长件（55m×2.35m 围墙）的收敛比实机**晚**一些——
+                    // 只影响很远距离的混合权重，不改砖的尺寸（那是 §22.4 的判据）。
+                    float detail = 1.0 - smoothstep(0.015, 0.22, pxm / span);
+                    alb = mix(tint, textureLod(MarkerSkin, suv / SKIN_TILE_M, lvl).rgb,
+                              0.45 * (0.25 + 0.75 * detail));
+                }
+            }
             float ndl = max(dot(hitNrm, sunDir), 0.0);
             // 2026-09-01v3：偏移 0.02 防阴影内棱线（acne）；太阳盘 jitter 2 点 = 软边 + 更准
             if (ndl > 0.0) {
@@ -199,20 +276,37 @@ void main() {
         lum += lq;
     }
 
-    // 时域累积：线性 HDR 求和，a 通道记已累积样本数；色调映射只作用于运行均值
+    // 时域累积：线性 HDR，a 通道记已累积样本数；色调映射只作用于运行均值
     // （否则每帧各自 ACES+sRGB 再平均会把高光压平、gamma 域相加也不物理）
-    lum *= pc.e.w;
+    //
+    // 🔴 `lum` 是 SPP 个样本的**求和**，必须先归一成**每帧均值**再进 EMA。
+    // 原先把和值直接喂进 mix ⇒ acc.rgb ≈ SPP·L·exposure，而显示端除以 acc.a
+    // （饱和于 win）⇒ 稳态显示增益 = SPP/win：静止 16/64 = 0.25、运动 64/1 = 64，
+    // **同一个像素在"走"与"站"之间摆 256 倍**。归一后 acc.rgb 恒为 L·exposure，
+    // 与 SPP、win 都无关，显示端不再需要任何除数。
+    // 为什么不在显示端除以当帧 SPP：那样停下瞬间 acc.rgb 里还混着旧帧的 64·L·e，
+    // 会先亮约 4 倍、再花 ~1 秒衰减回去（亮度脉冲）。而运动期 alpha=1，acc.rgb 本来
+    // 就等于当帧均值，归一放进入栈前 ⇒ mix 的是同一个量 ⇒ 切换无脉冲。
+    lum *= pc.e.w / float(SPP);
     vec4 acc = imageLoad(AccImg, gid);
     if (pc.f.y > 0.5) { acc = vec4(0.0); }
     // 运动自适应时域窗口：运动大 => 窗口短（10 帧，快速丢弃旧视角=去拖影）+ spp 高（瞬时降噪）；
     // 静止 => 窗口长（64 帧，时域收割=干净）
+    // 修复后 win/SPP 只决定**收敛速度与降噪量**，不再决定亮度 —— 这正是本条的全部意义。
     float win = mix(64.0f, 1.0f, move);
     float a = min(acc.a + float(SPP), win);
     float alpha = 1.0 / a;
-    acc = vec4(mix(acc.rgb, lum, alpha), a);
+    // 🔴 首帧（acc 刚被复位成 0）**直接采纳当帧均值**，不要按 alpha=1/SPP 往 0 里混。
+    // 否则复位后 acc.rgb = 均值/16，要爬 ~64 帧（≈1 秒）才满 —— 静止端每次镜头切换/
+    // 曝光变化/取景指纹改变都会来一段 16 倍暗的淡入。运动端 win=1 ⇒ alpha=1 本来就没这问题，
+    // 所以这个缺陷只在"停下来之后"看得见，与刚修掉的 SPP/win 增益是同一族记账偏差。
+    if (acc.a < 0.5) { acc = vec4(lum, a); }
+    else { acc = vec4(mix(acc.rgb, lum, alpha), a); }
     imageStore(AccImg, gid, acc);
 
-    vec3 outc = acc.rgb / max(acc.a, 1.0);
+    // acc.rgb 已是"每帧均值"的 EMA，直接就是线性 HDR radiance。
+    // 旧的 `/ max(acc.a, 1.0)` 是对求和值做的归一，与上面的入栈前归一叠加就会多除一个 SPP。
+    vec3 outc = acc.rgb;
     // 色调映射与光栅 apply_lighting 同源（build.rs: 1-exp(-x*1.55) 指数压缩，不截顶）——
     // 参照帧与实机帧必须走同一条曲线，否则分区偏差表测的是曲线差而不是光照差
     outc = vec3(1.0) - exp(-clamp(outc, vec3(0.0), vec3(16.0)) * 1.55);

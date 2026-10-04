@@ -951,6 +951,59 @@ obstacles = [ { type = "wall", position = { x = 1, y = 0, z = 1 }, size = { x = 
         assert!(e.contains("第 2 行"), "错误应带行号: {}", e);
     }
 
+    /// 🔴 占领目标必须落在**地形平坦半径**内，否则占领底盘会被丘陵埋掉或悬空。
+    ///
+    /// 存在理由（2026-10-02）：占领底盘是 `main.rs` 里一块**固定 y 的平板**
+    /// （由玩法半径推导宽度、摆在 y=0.20，占 y ∈ [-0.05, 0.45]），它**不采样地形高度**。
+    /// 今天所有据点都在 `TERRAIN_FLAT_RADIUS`(=230m) 的平地上
+    /// （`terrain_height()` 在该圆内恒等于 0），所以看不出来。
+    /// 但平坦区外的丘陵最大可抬 15m（`TERRAIN_HILL_AMPLITUDE`）——
+    /// 谁把新地图的据点放到 230m 外，那块盘子就会整片插进山里或浮在半空，
+    /// 而玩法判定（`objective.rs::inside()` 只看水平距离）完全不受影响
+    /// ⇒ 一个"能玩、但看不见领地"的静默错。
+    ///
+    /// 自检（教训 27：判据必须能红）：必须真的读到 >= 5 张图、且至少 1 个 capture 目标，
+    /// 否则"目录为空 / 字段改名"会让本测试空转通过。
+    #[test]
+    fn capture_objectives_sit_on_flat_terrain() {
+        let flat_r = crate::engine::renderer::TERRAIN_FLAT_RADIUS;
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir("assets/maps")
+            .expect("assets/maps 必须存在（测试工作目录应为仓库根）")
+            .map(|e| e.expect("读 assets/maps 项失败").path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("toml"))
+            .filter(|p| p.file_stem().and_then(|s| s.to_str()) != Some("index"))
+            .collect();
+        files.sort();
+        assert!(
+            files.len() >= 5,
+            "只找到 {} 张地图 TOML（应 >= 5）⇒ 目录或后缀变了，本测试会空转通过",
+            files.len()
+        );
+        let mut seen_capture = 0usize;
+        for p in &files {
+            let data = load_map(&p.to_string_lossy())
+                .unwrap_or_else(|e| panic!("{} 加载失败：{e}", p.display()));
+            for o in &data.objectives {
+                if o.kind != "capture" {
+                    continue;
+                }
+                seen_capture += 1;
+                let r = (o.x * o.x + o.z * o.z).sqrt();
+                assert!(
+                    r < flat_r,
+                    "{} 的据点 {} 距中心 {r:.1}m，已达平坦半径 {flat_r:.0}m 之外\
+                     ⇒ 固定 y 的占领底盘会被丘陵（幅值 <=15m）埋掉或悬空",
+                    p.file_stem().and_then(|s| s.to_str()).unwrap_or("?"),
+                    o.id,
+                );
+            }
+        }
+        assert!(
+            seen_capture >= 1,
+            "地图里一个 capture 目标都没有 ⇒ `kind` 字段可能已改名，本测试已失去意义"
+        );
+    }
+
     #[test]
     fn load_map_from_temp_file() {
         let path = write_tmp(FULL_MAP, "full");

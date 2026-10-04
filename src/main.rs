@@ -1387,7 +1387,7 @@ impl GameApp {
         }
         self.corpses.retain(|c| c.3 < 10.0); // 尸体 10 秒后消退
         while self.corpses.len() > 20 {
-            self.corpses.remove(0); // 上限 20 具（NPC 槽位 1024 = 146 人 × 7 段）
+            self.corpses.remove(0); // 上限 20 具（NPC 槽位容量见 renderer.rs::MAX_NPC_INSTANCES = 3072）
         }
         // 粒子推进：弹壳重力下落 + 落地停止；超龄移除
         for p in self.particles.iter_mut() {
@@ -2613,13 +2613,13 @@ impl GameApp {
                 .map(engine::renderer::WorldMarker::for_obstacle)
                 .collect();
             // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
-            // 每据点 = 细高立柱（归属色）+ 扁平底盘（半径 5.0，半透明归属色）。
+            // 每据点 = 细高立柱（归属色）+ 扁平板状底盘（归属色，不透明）。
             // 复用 WorldMarker 通道（主 pipeline 实例化），零渲染管线改动。
             let capture_markers: Vec<engine::renderer::WorldMarker> = self
                 .game
                 .capture_points()
                 .into_iter()
-                .flat_map(|(id, x, z, owner, _progress)| {
+                .flat_map(|(_id, x, z, radius, owner, _progress)| {
                     let tint = match owner {
                         Some(crate::engine::ai::Team::Blue) => [0.08, 0.35, 0.98, 1.0],
                         Some(crate::engine::ai::Team::Red) => [0.95, 0.12, 0.08, 1.0],
@@ -2627,23 +2627,34 @@ impl GameApp {
                     };
                     // 底盘配色：三通道等比缩放 → 色相/饱和度不变，归属色语义（蓝/红/灰）保持
                     let base_tint = [tint[0] * 0.8, tint[1] * 0.8, tint[2] * 0.8, 0.6];
-                    let _ = id; // 标记 id 暂不绘制文字（HUD 已有 id 标签）
                     [
-                        // 立柱（旗杆）
+                        // 立柱（旗杆）：0.4m 见方、高 4m、底面落在地面。
+                        // 🔴 `from_scale` 传的是**半尺寸**（立方体模板 ±1，
+                        // `renderer.rs:1019 obstacle_model` 用 `scale = half / tmpl`）。
+                        // 旧值 (0.4, 4.0, 0.4) 是 2026-09-17 之前"scale = 全尺寸"的写法，
+                        // 改约定后没跟着改 ⇒ 实际画出 0.8m 宽、8m 高、底部埋进地里 2m。
                         engine::renderer::WorldMarker {
                             model: glam::Mat4::from_translation(glam::Vec3::new(x, 2.0, z))
-                                * glam::Mat4::from_scale(glam::Vec3::new(0.4, 4.0, 0.4)),
+                                * glam::Mat4::from_scale(glam::Vec3::new(0.2, 2.0, 0.2)),
                             tint,
                         },
-                        // 地面底盘（占领半径范围，半径 5.0 → scale 10.0）。
-                        // D10 根因：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，而地面实例
-                        // 平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；玩家视线 ~1.7m 看
-                        // 一层 10cm 的板几乎完全侧向（edge-on）→ 投影不足一像素 → 底盘"消失"，
-                        // 据点读起来只剩两根电线杆。改为 0.5m 厚的低台（底面埋进地里 5cm 避免
-                        // 与地形之间留缝），顶面离地 ~40cm，任何视角都能读出"这是一块领地"。
+                        // 地面底盘：**半径直接取玩法的占领判定半径**，不再写魔数。
+                        // D10 根因（保留）：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，
+                        // 而地面实例平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；
+                        // 玩家视线 ~1.7m 看一层 10cm 的板几乎完全侧向 → 投影不足一像素 →
+                        // 底盘"消失"，据点读起来只剩两根电线杆。改为 0.5m 厚低台
+                        // （底面埋进地里 5cm 避免与地形之间留缝），顶面离地 ~40cm。
+                        // 🔴 第二个根因（本轮修）：这里原先硬编码 `from_scale(10.0, 0.5, 10.0)`
+                        // 并注释"半径 5.0 → scale 10.0"——那是"scale = 全尺寸"的旧约定。
+                        // 按现在的约定它画的是**半径 10m**，而玩法判定半径是
+                        // street_fight 5.0 / bridgehead 5.0·6.0 / defense_line 12.0，
+                        // ⇒ 领地标记在前两者上是真实圈子的 **2 倍**、在后者上**反而小一圈**，
+                        // 玩家靠它判断"进圈了没有"会被系统性误导。改成由 `radius` 推导，
+                        // 魔数消失，这类漂移不可能再回来。
+                        // 半高 0.25 + 中心 y=0.20 ⇒ 跨 [−0.05, +0.45]，与上面 D10 的意图逐值一致。
                         engine::renderer::WorldMarker {
                             model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.20, z))
-                                * glam::Mat4::from_scale(glam::Vec3::new(10.0, 0.5, 10.0)),
+                                * glam::Mat4::from_scale(glam::Vec3::new(radius, 0.25, radius)),
                             tint: base_tint,
                         },
                     ]
@@ -2919,7 +2930,7 @@ impl GameApp {
                 client
                     .entities()
                     .iter()
-                    .filter(|(id, e)| **id >= 100_000 || **id == 0 || e.hp > 0.0)
+                    .filter(|(id, e)| **id >= net::NET_PLAYER_BASE || **id == 0 || e.hp > 0.0)
                     .map(|(id, e)| {
                         // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
                         let tint = if e.hp > 0.0 {
@@ -4844,6 +4855,208 @@ mod tests {
             bad.is_empty(),
             "文本文件里含 NUL 字节 ⇒ 文本工具会把它当二进制拒绝读取：\n{}",
             bad.join("\n")
+        );
+    }
+
+    /// 🔴 跨文件重复的着色器常量必须逐值一致（2026-10-01）。
+    ///
+    /// 存在理由：本会话修掉的**两条真缺陷是同一个模式**——同一约定存在若干份物理副本，
+    /// 改了生产者、漏改消费者：
+    /// - `pt_set_scene_markers` 的 `* 0.5` 是 2026-09-17 之前"渲染盒 = 2×AABB"的遗留，
+    ///   生产者改了、PT 这个消费者没跟上 ⇒ **PT 的每个 marker 盒整体小一半**（§22.14）；
+    /// - `main.rs` 占领底盘 `from_scale(10.0,…)` 配注释"半径 5.0 → scale 10.0"，
+    ///   同样是旧约定遗留 ⇒ **领地底盘画成真实占领圈的 2 倍**（§23.13）。
+    /// 两条都**从画面上看不出来**、只能靠把值对起来算。既然算得出来，就该在测试里算，
+    /// 而不是等下一位再花两小时反推。
+    ///
+    /// 自检（教训 27：判据必须能红）：**每份副本都必须真的被找到**。若某处改了名、
+    /// 挪了文件或正则不匹配，"找到 0 份"绝不能算通过——那正是本仓反复踩的恒真断言。
+    #[test]
+    fn duplicated_shader_constants_stay_in_sync() {
+        /// 取某个标识符在**非注释行**上的所有声明值。
+        /// 跳过注释是必须的：说明性注释里满是"必须与 X 同值"这类句子，
+        /// 不跳过的话注释里提到的数字会被当成一份副本，把测试变成噪音。
+        fn decls(src: &str, name: &str) -> Vec<f32> {
+            let mut out = Vec::new();
+            for line in src.lines() {
+                let t = line.trim_start();
+                if t.starts_with("//") || !line.contains(name) {
+                    continue;
+                }
+                let Some(eq) = line.find('=') else { continue };
+                // 必须先 trim：`const X: f32 = 1.5;` 的等号后紧跟一个空格，
+                // 不 trim 则 take_while 首字符即失败、解析出空串 ⇒ 一份都找不到。
+                // （本函数第一版就栽在这里，靠下面"必须找到 4 份"的自检才没静默通过。）
+                let rest = line[eq + 1..].trim_start();
+                let num: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                    .collect();
+                if let Ok(v) = num.parse::<f32>() {
+                    out.push(v);
+                }
+            }
+            out
+        }
+
+        let read = |p: &str| -> String {
+            std::fs::read_to_string(p)
+                .unwrap_or_else(|e| panic!("读 {p} 失败：{e}（测试工作目录应为仓库根）"))
+        };
+        let build = read("build.rs");
+        let ray = read("src/engine/ray_tracer.rs");
+        let ptshader = read("assets/rt/pt_panorama.glsl");
+
+        // ① 砌块皮肤尺寸门：光栅 WGSL 两份（顶点着色器 + mesh 着色器各一份）
+        //    + PT 的 Rust 常量 + PT 的 GLSL 常量 = 4 份。
+        let mut gate: Vec<(&str, f32)> = Vec::new();
+        for (i, v) in decls(&build, "MASONRY_MIN_SPAN").into_iter().enumerate() {
+            gate.push((if i == 0 { "build.rs(VS)" } else { "build.rs(mesh)" }, v));
+        }
+        for v in decls(&ray, "MASONRY_MIN_SPAN") {
+            gate.push(("ray_tracer.rs", v));
+        }
+        for v in decls(&ptshader, "MASONRY_MIN_SPAN") {
+            gate.push(("pt_panorama.glsl", v));
+        }
+        assert_eq!(
+            gate.len(),
+            4,
+            "MASONRY_MIN_SPAN 应有 4 份声明，实际找到 {} 份（{:?}）\
+             ⇒ 有副本被改名/挪走/删掉了，这个测试本身需要跟着更新，不要直接放宽断言",
+            gate.len(),
+            gate
+        );
+        let want = crate::engine::ray_tracer::MASONRY_MIN_SPAN;
+        let off: Vec<String> = gate
+            .iter()
+            .filter(|(_, v)| (*v - want).abs() > 1e-6)
+            .map(|(w, v)| format!("{w} = {v}"))
+            .collect();
+        assert!(
+            off.is_empty(),
+            "MASONRY_MIN_SPAN 各副本与 ray_tracer 的 {want} 不一致：{}\
+             ⇒ 尺寸门会在光栅/PT 两侧给出不同判定（§22.14 同族错法）",
+            off.join("；")
+        );
+
+        // ② 皮肤 tile 尺寸：光栅用字面量、PT 用常量，两处必须同为 1.6 × 0.8。
+        //    这是 §22.4b 那套"砖块尺度"的唯一真值来源，任一侧改动都会让两侧砖大小不同。
+        assert!(
+            build.contains("vec2<f32>(1.6, 0.8)"),
+            "build.rs 里找不到皮肤 tile 字面量 `vec2<f32>(1.6, 0.8)`\
+             ⇒ 若改了写法（例如换成常量），请同步更新本测试与 PT 侧，不要删断言"
+        );
+        assert!(
+            ptshader.contains("SKIN_TILE_M = vec2(1.6, 0.8)"),
+            "pt_panorama.glsl 里找不到 `SKIN_TILE_M = vec2(1.6, 0.8)`\
+             ⇒ 两侧皮肤 tile 已脱钩，砖块尺度会光栅/PT 不一致"
+        );
+    }
+
+    /// 🔴 尺寸门用的 **1.05 必须"除门本身以外与 1.0 不可区分"**（§22.7）。
+    ///
+    /// `flat_flag` 是片元着色器的材质分派值：0=地面、1.0=marker、1.25=外部建模、
+    /// 2.0=NPC、3.0=枪。2026-09-30 起多了一个 **1.05 = "太小、不发砌块皮肤"的 marker**
+    /// （`MASONRY_MIN_SPAN` 尺寸门，护柱/消防栓这类小件走它）。
+    ///
+    /// 风险不在门本身，而在**将来新加的那一条分支**：只要有人写出
+    /// `flat_flag > 1.0` 或 `flat_flag <= 1.03` 这种**在 1.0 与 1.05 上取值不同**的判据，
+    /// 被门挡下的 1.05 就会**悄悄走进与 1.0 不同的分支** —— 症状是"护柱忽然少了一层
+    /// 效果"，而没人会去查一个 0.05 的差。⇒ 把它变成硬约束：
+    /// **片元里每条 flat_flag 判据在 1.0 与 1.05 上取值必须相同，
+    /// 唯一例外是阈值恰为 1.02 的那条（尺寸门自己）。**
+    ///
+    /// ⚠️ 判据是"**取值不同**"，不是"阈值落在 1.0~1.05 之间"：`flat_flag < 1.1`
+    /// 两条都成立 ⇒ **无害**，本测试不该报它（第一版把例子写成 `< 1.1`，
+    /// 被 `target/guardlogic.py` 的合成用例当场否掉）。
+    ///
+    /// 自检（教训 27：判据必须能红）：解析到的判据数必须 **>= 8**，且必须**至少找到
+    /// 一条阈值 1.02 的门** —— 否则"没有例外"会因为"什么都没解析到"而恒真通过。
+    #[test]
+    fn gated_marker_flag_is_indistinguishable_except_at_the_gate() {
+        /// 把非注释行里的 `flat_flag <op> <num>` 解析成 (算子, 阈值, 行号)。
+        fn atoms(src: &str) -> Vec<(String, f32, usize)> {
+            let mut out = Vec::new();
+            for (ln, line) in src.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let mut base = 0usize;
+                while let Some(k) = line[base..].find("flat_flag") {
+                    let i = base + k + "flat_flag".len();
+                    let rest = line[i..].trim_start();
+                    let op = ["<=", ">=", "==", "!=", "<", ">"]
+                        .iter()
+                        .find(|o| rest.starts_with(**o))
+                        .copied();
+                    let Some(op) = op else {
+                        base = i;
+                        continue;
+                    };
+                    let num: String = rest[op.len()..]
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    if let Ok(v) = num.parse::<f32>() {
+                        out.push((op.to_string(), v, ln + 1));
+                    }
+                    base = i;
+                }
+            }
+            out
+        }
+
+        fn holds(op: &str, flag: f32, rhs: f32) -> bool {
+            match op {
+                "<=" => flag <= rhs,
+                ">=" => flag >= rhs,
+                "==" => flag == rhs,
+                "!=" => flag != rhs,
+                "<" => flag < rhs,
+                ">" => flag > rhs,
+                other => panic!("未知算子 {other}"),
+            }
+        }
+
+        let build = std::fs::read_to_string("build.rs")
+            .expect("读 build.rs 失败（测试工作目录应为仓库根）");
+        let lines: Vec<&str> = build.lines().collect();
+        let from = lines
+            .iter()
+            .position(|l| l.contains("const FRAGMENT_SHADER_WGSL"))
+            .expect("找不到 FRAGMENT_SHADER_WGSL 起点");
+        let to = lines[from + 1..]
+            .iter()
+            .position(|l| l.contains("const MESH_SHADER_WGSL"))
+            .map(|p| p + from + 1)
+            .expect("找不到 FRAGMENT_SHADER_WGSL 终点（MESH_SHADER_WGSL 之后）");
+
+        let a = atoms(&lines[from..to].join("\n"));
+        assert!(
+            a.len() >= 8,
+            "片元里只解析到 {} 条 flat_flag 判据（应 >= 8）⇒ 着色器改了形态或解析器坏了，\
+             本测试会因'没解析到'而假通过，必须先修解析器再下结论",
+            a.len()
+        );
+        assert!(
+            a.iter().any(|(_, v, _)| (*v - 1.02).abs() < 1e-6),
+            "一条阈值 1.02 的尺寸门都没找到 ⇒ 门被删了或本测试期望已过时（§22.7）"
+        );
+
+        let diff: Vec<String> = a
+            .iter()
+            .filter(|(op, v, _)| {
+                (v - 1.02).abs() > 1e-6 && holds(op, 1.0, *v) != holds(op, 1.05, *v)
+            })
+            .map(|(op, v, ln)| format!("build.rs:{ln}  flat_flag {op} {v}"))
+            .collect();
+        assert!(
+            diff.is_empty(),
+            "这些 flat_flag 判据会让 1.05（被尺寸门挡下的小件）与 1.0 走不同分支：{}\
+             ⇒ 要么把阈值挪出 (1.0, 1.05] 区间，要么显式写成对 1.05 也成立",
+            diff.join("；")
         );
     }
 

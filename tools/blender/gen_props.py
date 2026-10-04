@@ -98,7 +98,29 @@ def _xf(m, p):
 
 
 def box(part, center, size, col, rot_z=0.0):
-    """Axis-aligned box, optionally yawed. center is the box centre."""
+    """Axis-aligned box, optionally yawed. `size` is the FULL extent on each axis
+    (the corners are built from size*0.5), and `center` is the box centre **only when
+    rot_z == 0**.
+
+    🔴 With rot_z != 0 the transform is `R @ T`, so the rotation is applied to the
+    TRANSLATED corner: the box actually lands at `R @ center`, i.e. it is spun around the
+    ASSET ORIGIN, not yawed in place. A caller that writes `box(..., (x, 0, z), rot_z=a)`
+    and expects the part to stay at (x, 0, z) is wrong -- it moves to
+    (x*cos a, x*sin a, z).
+
+    Measured on the committed `car_wreck.glb`: the hanging door is authored at
+    centre (-0.45, 1.52, 0.72) with rot_z=0.62 and really does sit at
+    (-1.249, 0.976, 0.72) -- free end at lateral 1.31, hinge end buried 0.22 m inside the
+    body flank. It looks correct only because `asset_car_wreck`'s audit comment computes
+    the hinge offset twice wrong in ways that cancel (it treats `size` as a half-extent
+    *and* assumes rotation about the centre), so "fixing" that arithmetic to match its
+    stated intent WILL move the door and can make it float.
+
+    Do not change this function's semantics casually: 11 call sites pass rot_z, and any
+    change silently relocates parts across several assets. Assets can only be rebuilt with
+    Blender (`tools/blender/gen_props.py`), so a semantics change must be paired with a
+    regeneration + preview_glb before/after, not just a code edit.
+    """
     cx, cy, cz = center
     sx, sy, sz = size
     hx, hy, hz = sx * 0.5, sy * 0.5, sz * 0.5

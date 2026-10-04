@@ -28,15 +28,40 @@ const TERRAIN_INSTANCE_INDEX: u32 = 65536u;
 // flat_flag = 1（marker）/ 2（NPC）由片元着色器决定采样程序化皮肤纹理还是纯色
 // （RV3D_SKIN_TEX=1 启用皮肤纹理，缺省 0 保持纯 tint 色，冒烟基线不变）。
 const MARKER_INSTANCE_BASE: u32 = 65536u + 1u;
-// NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 64 marker 之后）。
+// NPC 士兵段实例起始槽（与 renderer.rs NPC_SLOT_BASE 一致：65536 identity + 8192 marker 之后）。
 const NPC_INSTANCE_BASE: u32 = 65536u + 1u + 8192u; // marker 区 = MAX_MARKER_INSTANCES(8192)，与 renderer.rs 对齐（2026-09-01 建模重构：1024 装不下真城市；实测 CPU 剔除 4034 个 marker 只花 20µs，所以容量不是瓶颈，再翻一档到 8192。改容量必须同步改本行两处副本 + renderer.rs + 枪槽字面量，见 gun_slot_layout_is_pinned）
 // NPC 圆柱段（四肢）/ 球体段（头）起始槽：与 renderer.rs NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE 一致（各区 3072）
 const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
 // 槽位 >= 该值的实例为「自发光」实体（爆炸闪光等）：片元跳过光照与贴图混合，直出纯色。
-// 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×1024：
+// 必须与 renderer.rs 的 EMISSIVE_SLOT_BASE 同步（NPC 区 3×3072：
 // 盒体段 + 圆柱段（四肢）+ 球体段（头），见 NPC_SLOT_BASE/NPC_CYL_SLOT_BASE/NPC_SPH_SLOT_BASE）。
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
+
+// 砌块皮肤的最小尺寸（米，取物体最长轴）。
+//
+// `marker_skin` 画的是**用 0.4×0.2m 的块砌出来的立面**（tile 1.6×0.8m = 4 砖 4 行）。
+// 自 §22.4b 起皮肤按世界尺度采样，于是"面上出现横竖砂浆缝"就成了**一句关于材质的断言**：
+// 观者看见缝就读作"这是砌出来的"。0.34m 直径、0.9m 高的花岗岩护柱被这样一断言立刻说谎
+// —— 1.6m 宽的 tile 在它身上只剩**一道被任意切断的竖缝**，0.8m 的 tile 切成 4 道横缝，
+// 合起来读作"刷了条纹的柱子"（实机取证 `mat_bollard_b.png`，十字准星正中）。
+// 真实世界不会把砖砌进一根车削出来的石柱；反过来，3.4m 见方的花坛石台、55m 长的边界
+// 围墙、6m 长的泽西护栏都该有砖。所以判据是**尺寸**，不是颜色：最长轴 < 1.5m 的 marker
+// 不发砌块皮肤（仍保留 tint × 光照 × `weather_stain` 低频风化，不会变成死平面）。
+//
+// 1.5m 这个数按现表算出来：护柱 0.9 / 反光柱 0.7 / 消防栓 0.83 / 灯柱底座 0.72 /
+// 灯罩球 0.85 全在下方，花坛石台 3.4 / 护栏 6.0 / 围墙 55 全在上方，中间没有别的件。
+// 取**最长轴**（不是最短轴）是为了保护细长砌体：0.4m 高的压顶梁只要有 20m 长就仍是砖。
+const MASONRY_MIN_SPAN: f32 = 1.5;
+
+// marker 的最长世界轴长。实例矩阵 = 平移 × 逐轴缩放、无旋转（`renderer.rs::obstacle_model`
+// 写成 `scale = half / template_half`），所以对角元就是每轴的"半尺寸 ÷ 模板半尺寸"。
+// 模板半尺寸只有圆柱的 Y 轴是 0.5（单位圆柱 y∈[-0.5,0.5]），其余形状三轴恒为 1.0；
+// 形状标签在 `tint.w`（语义见 `engine/geom.rs` 的 Shape::tag）。
+fn marker_span(model: mat4x4<f32>, tint: vec4<f32>) -> f32 {
+    let hy = select(1.0, 0.5, tint.w > 1.5 && tint.w < 2.5);
+    return 2.0 * max(abs(model[0][0]), max(abs(model[1][1]) * hy, abs(model[2][2])));
+}
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -86,6 +111,13 @@ fn vs_main(
         output.flat_flag = 2.0;
     } else if (instance_index >= MARKER_INSTANCE_BASE) {
         output.flat_flag = 1.0;
+        // 太小、不可能是砌体的 marker 不吃皮肤（判据见上面 MASONRY_MIN_SPAN）。
+        // 编码用 flat_flag 的**空闲子区间 1.05**：片元现有的每一条判据
+        // （>0.5、>1.1&&<1.4、>1.5、<1.5）对 1.05 与 1.0 取值完全相同，唯一区别
+        // 就是皮肤分支新增的那道闸 ⇒ 不新增插值属性、不动 mesh 管线的 workgroup 结构。
+        if (marker_span(inst.model, inst.tint) < MASONRY_MIN_SPAN) {
+            output.flat_flag = 1.05;
+        }
     } else {
         output.flat_flag = 0.0;
     }
@@ -472,10 +504,24 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             let w_d = max(pen_m, m_per_texel) / depth_m;
             var occluded = 0.0;
             var dsum = 0.0;
+            // 🔴 逐像素旋转抽头核（2026-09-29 治"阴影内部棋盘格马赛克"）。
+            // 上面把 base_uv snap 到纹素中心是治"移动时爬线"的，但它带来一个副作用：
+            // 抽头偏移是 `step_uv = k·texel`（k 为整数/半整数），于是 9 个抽头与
+            // 纹素网格**相位锁定**——同一个 shadow texel 覆盖的所有地面像素采到
+            // **完全相同**的 9 个纹素，遮挡度逐 texel 常量 ⇒ 阴影内部被量化成
+            // 0.39m 的方块马赛克（实机只在阴影内部可见、受光路面干净，正合此机制）。
+            // 旋转角取**屏幕像素**的函数：屏幕像素随时间稳定 ⇒ 不引入闪噪，
+            // 而相邻像素落在不同的纹素组合上 ⇒ 把方块打散成高频噪声，9 抽头平均即平滑。
+            let ang = fract(sin(dot(floor(input.position.xy),
+                vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+            let kca = cos(ang);
+            let ksa = sin(ang);
             for (var dy = -1; dy <= 1; dy = dy + 1) {
                 for (var dx = -1; dx <= 1; dx = dx + 1) {
+                    let ox = f32(dx) * kca - f32(dy) * ksa;
+                    let oy = f32(dx) * ksa + f32(dy) * kca;
                     let d = textureSample(shadow_map, shadow_sampler,
-                        base_uv + vec2<f32>(f32(dx), f32(dy)) * step_uv);
+                        base_uv + vec2<f32>(ox, oy) * step_uv);
                     dsum = dsum + d;
                     // 分数测试（percentage-closer filtering）代替 if/>+1.0：
                     // 把"9 个 0/1 计票"变成连续量，影子里侧到外侧是渐变而不是 9 档跳变
@@ -525,10 +571,19 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             let w_d2 = max(pen_m2, m_per_texel2) / depth_m2;
             var occluded2 = 0.0;
             var taps2 = 0.0;
+            // 🔴 与静态图同款：逐像素旋转抽头核，解掉抽头与纹素网格的相位锁定
+            // （否则 NPC 影子内部出同样的 0.39m 方块马赛克）。角度取屏幕像素的函数，
+            // 与静态图那份同源；两张图用同一个角，影子边缘的噪声才不会互相错位。
+            let ang2 = fract(sin(dot(floor(input.position.xy),
+                vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+            let kca2 = cos(ang2);
+            let ksa2 = sin(ang2);
             for (var dy2 = -DYN_PCF_RADIUS; dy2 <= DYN_PCF_RADIUS; dy2 = dy2 + 1) {
                 for (var dx2 = -DYN_PCF_RADIUS; dx2 <= DYN_PCF_RADIUS; dx2 = dx2 + 1) {
+                    let rx2 = f32(dx2) * kca2 - f32(dy2) * ksa2;
+                    let ry2 = f32(dx2) * ksa2 + f32(dy2) * kca2;
                     let d2 = textureSample(shadow_dyn_map, shadow_sampler,
-                        base_uv2 + vec2<f32>(f32(dx2), f32(dy2)) * step_uv2);
+                        base_uv2 + vec2<f32>(rx2, ry2) * step_uv2);
                     occluded2 = occluded2 + smoothstep(0.0, w_d2, sp2.z - bias_d2 - d2);
                     taps2 = taps2 + 1.0;
                 }
@@ -709,11 +764,58 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let luma = dot(texel.rgb, vec3<f32>(0.299, 0.587, 0.114));
             // 近处幅度 0.55+0.90·luma 与 D1 验收式逐位一致（勿回退），远处收到 0.55+0.12·luma
             base = input.color * (0.55 + (0.12 + 0.78 * detail) * luma);
-        } else if (light_data.flags.z >= 0.5 && !is_glass && !authored) {
+        } else if (light_data.flags.z >= 0.5 && !is_glass && !is_canopy && !authored
+                   && input.flat_flag < 1.02) {
             // marker 障碍：混凝土墙纹理 × 障碍 tint（近期权重 0.45：tint 保色相，纹理供细节）
-            base = mix(input.color,
-                       textureSample(marker_skin_tex, texture_sampler, input.uv).rgb,
-                       0.45 * (0.25 + 0.75 * detail));
+            //
+            // 🔴 `!is_canopy` 是补漏，不是新行为。上面 756-759 的树冠值噪声是
+            // **2026-08-23 为修"纸片树 / 移动时大量线条"专门加的**，而本分支写的是
+            // `base = mix(input.color, …)` —— **从 `input.color` 起重算，不带上游 `base`**，
+            // 于是树冠噪声被整块覆盖：树冠/灌木重新变回"贴了砂浆缝的纯色团"，
+            // 且 `detail` 对 SPH/ICO 恒为 1（那两套模板 uv≡(0,0)，见 663-667 的注释）
+            // ⇒ 距离衰减也救不了它，近看就是叶子上长砖缝。
+            // 同一条排除在 PT 侧一直是有的（`pt_panorama.glsl` 的 `masonry` 条件），
+            // 所以两侧对每丛灌木都不一致；`procedural.rs:627` 那句
+            // "树=绿色细节…共用此皮肤"是 §22.7 之前的旧设计，已被 8-23 的树冠噪声取代。
+            //
+            // `flat_flag < 1.02` = 顶点/mesh 两侧的尺寸闸（1.05 = "这件太小、不可能是砌体"）。
+            // 少了它，0.34m 的花岗岩护柱会在一根柱子上摆出"一道被切断的竖缝 + 4 道横缝"，
+            // 读作刷了条纹而不是砌了砖——见 vs_main 上方 MASONRY_MIN_SPAN 的取证。
+            //
+            // 🔴 皮肤按**世界尺度**采样（§22.4b/§22.4f）。原来直接用 `input.uv`，而 marker
+            // 的模板 uv 是**逐面 0..1**（铁律 B），`marker_skin` 又在这 0..1 内画 4×4 砖
+            // ⇒ 砖行高 = 面高 ÷ 4，**随物体大小线性缩放**：0.45m 护柱得 11cm 砖，
+            // 而 2.35m 边界围墙得 **59cm 巨砖**（§22.4f 用围墙竖直 FFT 主峰 k=4=0.570m
+            // 定量确认，肉眼亦数到约 4~5 道横带）。真实混凝土砌块约 0.20m 高 × 0.40m 宽，
+            // 与墙多大无关 ⇒ 按主轴把世界坐标投影到面内平面，再换算成米制 tile：
+            // 一个 tile = 4 砖 ⇒ 水平方向每 1.6m、竖直方向每 0.8m 一个 tile。
+            // 分母与 `procedural.rs::marker_skin` 的 `rows=4`/`u*4.0` 同源，勿在此另猜。
+            // 远距收敛沿用下面既有的 `detail` 因子，不新增第二套衰减。
+            //
+            // 🔴 但**朝下的水平面不画砌块网格**（§23.7 / §23.8）。上面三分支对"水平面"
+            // 一视同仁：法线主轴是 Y 就取 `world_pos.xz`，于是顶面与底面都显示一张
+            // 1.6m×0.8m 的**平面方格网**。这两件事并不等价：
+            //   · **顶面**读作帽石/铺地的分缝——俯视实拍 `copingt_b.png` 判定可接受 ⇒ 保持原样；
+            //   · **底面**从下方掠射看就是一张"吊顶"，而**同一根构件的竖直面**画的是 0.2m
+            //     砖行顺砌（`sw02_b.png` 正中的横梁）⇒ 一个物体上并排两套砌体系统。
+            // 真实砌体不存在"底面露出砖的平面排布"：砖墙底面要么露一排砖端，要么是全浇
+            // 混凝土的模板缝，不会是 1.6m 见方的砖格 ⇒ 这是**物理判据，不是口味取舍**，
+            // 也正因此只切朝下的那一半、不动刚被实拍判定为可接受的顶面。
+            // `fnrm` 在前面已翻向观察者 ⇒ 看得见的底面必有 `fnrm.y < 0`；
+            // 竖直面的 `fnrm.y ≈ 0`，走 x/z 主轴分支，完全不受这条影响。
+            let an = abs(fnrm);
+            if !(an.y > an.x && an.y > an.z && fnrm.y < 0.0) {
+                var skin_uv = input.world_pos.xy;
+                if (an.x > an.y && an.x > an.z) {
+                    skin_uv = input.world_pos.zy;
+                } else if (an.y > an.x && an.y > an.z) {
+                    skin_uv = input.world_pos.xz;
+                }
+                base = mix(input.color,
+                           textureSample(marker_skin_tex, texture_sampler,
+                                         skin_uv / vec2<f32>(1.6, 0.8)).rgb,
+                           0.45 * (0.25 + 0.75 * detail));
+            }
         }
         // 玻璃底面：逐层渐变 + 分格 + 逐格随机（见 glass_shade）。
         // 只给**近竖直**的面画"层/格"图案：天窗、占领底盘这类横放的蓝面没有楼层可言，
@@ -889,6 +991,16 @@ const NPC_CYL_BASE: u32 = NPC_INSTANCE_BASE + 3072u;
 const NPC_SPH_BASE: u32 = NPC_INSTANCE_BASE + 6144u;
 const EMISSIVE_INSTANCE_BASE: u32 = NPC_INSTANCE_BASE + 9216u;
 
+// 砌块皮肤尺寸闸（与顶点着色器路径逐字同值，理由写在那一侧）：最长轴 < 1.5m 的
+// marker 不吃 `marker_skin`，因为 1.6×0.8m 的砌块 tile 压在一根 0.34m 的石柱上
+// 只剩一道被切断的竖缝，读作"刷了条纹"而不是"砌了砖"。
+const MASONRY_MIN_SPAN: f32 = 1.5;
+
+fn marker_span(model: mat4x4<f32>, tint: vec4<f32>) -> f32 {
+    let hy = select(1.0, 0.5, tint.w > 1.5 && tint.w < 2.5);
+    return 2.0 * max(abs(model[0][0]), max(abs(model[1][1]) * hy, abs(model[2][2])));
+}
+
 // 与顶点着色器输出逐成员一致（片元着色器原样复用，location 0..5 不可改）
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -1000,10 +1112,9 @@ const SPH_TRI: array<vec3<u32>, 80> = array<vec3<u32>, 80>(
     vec3<u32>(9u, 41u, 17u), vec3<u32>(2u, 27u, 41u), vec3<u32>(5u, 17u, 27u), vec3<u32>(41u, 27u, 17u),
     vec3<u32>(7u, 29u, 34u), vec3<u32>(2u, 40u, 29u), vec3<u32>(11u, 34u, 40u), vec3<u32>(29u, 40u, 34u),
 );
-// 树冠识别：绿色 tint（g 显著大于 r/b）
-fn is_foliage(tint: vec4<f32>) -> bool {
-    return tint.g > tint.r && tint.g > tint.b * 1.4;
-}
+// （2026-10-02 删除）树冠识别 `is_foliage(t) = t.g > t.r && t.g > t.b * 1.4`。
+// 它曾是 mesh 路径"按颜色猜形状"的唯一入口，已被上面的 `shape_tag` 分派取代后成为死代码；
+// 保留定义只会诱使后来人再拿颜色猜几何——见 §31 的帐篷事故。
 
 const CUBE_POS: array<vec3<f32>, 24> = array<vec3<f32>, 24>(
     vec3<f32>(-1.0, -1.0, 1.0), vec3<f32>(1.0, -1.0, 1.0),
@@ -1210,6 +1321,10 @@ fn mesh_main(
         flat = 2.0;
     } else if (slot >= MARKER_INSTANCE_BASE) {
         flat = 1.0;
+        // 与 vs_main 同源：太小、不可能是砌体的 marker 用 1.05 标记，片元据此跳过皮肤。
+        if (marker_span(inst.model, inst.tint) < MASONRY_MIN_SPAN) {
+            flat = 1.05;
+        }
     }
     // 外部建模网格（geom.rs Shape::Authored，tint.w = 6.0）→ flat = 1.25，
     // 与顶点路径 vs_main 的第 99 行**同源**。
@@ -1258,10 +1373,19 @@ fn mesh_main(
     let m_cyl = is_marker && shape_tag > 1.5 && shape_tag < 2.5;
     let m_ico = is_marker && shape_tag > 2.5 && shape_tag < 3.5;
     let m_sph = is_marker && shape_tag > 3.5 && shape_tag < 4.5;
-    // 过渡兜底：只有"未打标签"（Shape::Legacy = 1.0）的绿色 marker 才沿用旧的颜色嗅探，
-    // 这样 main.rs 里手写 tint=[r,g,b,1.0] 的掩体/植被画面逐位不变；显式 Shape::Box(0.0)
-    // 不受影响。等所有构造点都显式打标后可删掉这一行。
-    let is_tree = is_foliage(inst.tint) && shape_tag > 0.5 && shape_tag < 1.5;
+    // 🔴 2026-10-02 删除颜色嗅探兜底 `is_tree = is_foliage(tint) && tag∈(0.5,1.5)`。
+    //    旧注释声称它服务于"未打标签的绿色植被"，逐条复核**不成立**：
+    //      · `city.rs` 的树冠与灌木球全部显式 `.sph()`（tag 4.0），由上面的 `m_sph` 接走；
+    //      · `main.rs` 唯一"绿色 + `tint.w=1.0`"的手写件是手雷（`:2692`），
+    //        而它在自发光槽带、被 `is_glow` 先接走，走不到这条判据；
+    //      · 也没有"我是方块、别嗅我"的标签可用——`Shape::Box(0.0)` 已于 2026-09-08 删除
+    //        （`geom.rs:29-32`），而 `Legacy` 既是方块、又正好落在 (0.5,1.5) 窗内。
+    //    ⇒ 它当时**只做坏事**：把"绿色 + `Shape::Legacy`"的方块改画成二十面体，
+    //      全城 8 顶帐篷（四层堆叠的 `TENT_CAMO` 方块，导出实测 32 个 marker）
+    //      因此变成畸形绿色团块；外圈营地与集装箱回退件同病。
+    //    ⇒ 形状一律由 `shape_tag` 决定，不再由颜色决定。判据与前后截图见 §31。
+    //    ⚠ 片元侧 `fs_main` 的 `is_canopy` 仍是同族的颜色嗅探（只影响着色、不影响几何），
+    //      彻底修需要把形状标签送进片元；那是另一次可见变更，单独一轮做。
     if (is_npc_cyl || m_cyl) {
         // 四肢：程序化单位圆柱（r=1、y∈[-0.5,0.5]、Y 轴、24 段含盖；
         // 与 CPU create_cylinder_geometry 同单位空间，实例矩阵按此构建）。
@@ -1317,17 +1441,6 @@ fn mesh_main(
         if (lid == 0u) {
             mesh_out.vertex_count = 42u;
             mesh_out.primitive_count = 80u;
-        }
-    } else if (is_tree) {
-        if (lid < 12u) {
-            write_vertex(lid, ICO_POS[lid] * 0.9, vec2<f32>(0.0, 0.0), inst, cam, fade, flat, is_gun, false);
-        }
-        if (lid < 20u) {
-            mesh_out.primitives[lid].indices = ICO_TRI[lid];
-        }
-        if (lid == 0u) {
-            mesh_out.vertex_count = 12u;
-            mesh_out.primitive_count = 20u;
         }
     } else if (is_marker || dist2 < camera.cam_pos.w) {
         if (lid < 24u) {

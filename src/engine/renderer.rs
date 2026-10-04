@@ -195,6 +195,14 @@ const FADE_END: f32 = 900.0;
 /// 相机周边的地面乘成纯黑（见 `Renderer::ground_detail_image` 注释）。
 const GROUND_DETAIL_BINDING: u32 = 9;
 
+/// `RV3D_NO_GROUND_TEX=1` 时关掉地面微细节层（`light_data.flags.w` 保持 0）。
+/// A/B 诊断门，与 `RV3D_NO_SHADOW` 同一套惯例。**读一次缓存住**：本函数在每帧构建
+/// 光照 UBO 的路径上，不该每帧 `getenv`。
+fn no_ground_detail_tex() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RV3D_NO_GROUND_TEX").as_deref() == Ok("1"))
+}
+
 /// 动态阴影图的绑定号（片元第二张阴影图，见 `shadow_dyn_image` 字段注释）。
 /// 10 是本 set layout 里 ground_detail(9) 之后的第一个空位；**必须与 build.rs WGSL 的
 /// `@group(0) @binding(10) var shadow_dyn_map` 同步**。
@@ -217,7 +225,9 @@ const TERRAIN_UV_SCALE: f32 = 32.0; // uv 铺 0..16 重复采样
 /// （旧版实例场与地形几乎共面，远档顶面被深度测试剔除、只剩侧壁可见）。
 const TERRAIN_RENDER_SINK: f32 = 0.35;
 /// 程序化地形平坦半径（米）：覆盖中央 60×60 安全区、障碍环带 58–130m 与两军接火区
-const TERRAIN_FLAT_RADIUS: f32 = 230.0; // 城市占地 ±215 需平地（2026-08-21 城市地图）
+/// 🔴 2026-10-02 起改 `pub`：被 `map.rs` 的地图守卫引用（据点若落在平坦区外，
+/// 固定 y 的占领底盘会被丘陵埋掉或悬空）。
+pub const TERRAIN_FLAT_RADIUS: f32 = 230.0; // 城市占地 ±215 需平地（2026-08-21 城市地图）
 /// 平坦区外丘陵最大抬升（米，平滑抬升 × 噪声幅值，恒 ≤ 本常量）
 const TERRAIN_HILL_AMPLITUDE: f32 = 15.0;
 /// 丘陵抬升过渡带宽（米）：半径 140 → 320 内 smoothstep 从 0 升到满幅（起点斜率 0）
@@ -1121,11 +1131,17 @@ impl WorldMarker {
                 // ⚠ 环境变量**只解析一次**。本函数每帧被调用 1700+ 次（`marker=1709`）——
                 //    原先每次都 `std::env::var(...)`（带锁 + 扫环境表），**开关关着也照调**，
                 //    130fps 下约 22 万次/秒，是纯浪费（2026-09-12 第 93 轮修）。
+                // 🔴 Block 必须用**橙色**，不能用纯绿：mesh 着色器的树冠兜底判据是
+                //    `is_foliage(tint) = g > r && g > b * 1.4`（`build.rs:1116`），
+                //    纯绿 [0,1,0] 两条全中 ⇒ 本开关一开，所有 Shape::Legacy 的方块
+                //    会被改画成二十面体（`build.rs:1380` 的 is_tree），
+                //    于是"让几何自报家门"的诊断图**自己造出一个四尖星伪影**（§27.5）。
+                //    橙色 g=0.55 < r=1.0 ⇒ 这条判据永远为假，且与其余五色一眼可区分。
                 static DEBUG_KIND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                 if *DEBUG_KIND.get_or_init(|| std::env::var("RV3D_DEBUG_KIND").is_ok()) {
                     let c = match ob.kind {
                         ObstacleKind::Wall => [1.0, 0.0, 0.0],      // 红
-                        ObstacleKind::Block => [0.0, 1.0, 0.0],     // 绿
+                        ObstacleKind::Block => [1.0, 0.55, 0.0],    // 橙（见上：绿色会触发 is_tree）
                         ObstacleKind::Barrier => [0.0, 0.0, 1.0],   // 蓝
                         ObstacleKind::Tree => [1.0, 1.0, 0.0],      // 黄
                         ObstacleKind::Building => [1.0, 0.0, 1.0],  // 品红
@@ -5329,7 +5345,9 @@ impl Renderer {
 
     /// 每帧上传世界障碍 marker 到实例 buffer 的 MARKER_SLOT_BASE 之后区域
     /// （跳过 65536 identity slot，见 MARKER_SLOT_BASE 注释），返回 (近档, 远档) 计数。
-    /// marker 量小（≤64），不做视锥剔除，仅按距离分近/远档。
+    /// marker 数量**不小**（全城实测 ~1789 件，容量 `MAX_MARKER_INSTANCES`=8192），
+    /// 但历史上不做视锥剔除，只按距离分近/远档；且当前 `near_sq = f32::MAX`
+    /// ⇒ 远档恒空（障碍 marker 恒走近档立方体，见下方 `upload_markers`）。
     fn upload_markers(&mut self, cam_pos: glam::Vec3) -> (u32, u32) {
         let slot = match self.instance_mapped.get(self.current_frame) {
             Some(&p) if !p.is_null() => p as *mut u8,
@@ -6583,7 +6601,15 @@ impl Renderer {
         // 🏢 binding 4 = 道具逐三角属性表（device-local，2×u32/三角）——道具进 BLAS 专项
         let propv_layout = vk::DescriptorSetLayoutBinding::default()
             .binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout];
+        // 🏪 binding 5 = 程序化地面纹理（与光栅同一张）：PT 地面盒按 world-space UV 采样，
+        // 参照帧的地面反照率不再是一颗均匀沥青（单值表不出分区，道路区曾偏亮 22%）。
+        let ground_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(5).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+        // 🧱 binding 6 = marker 砌块皮肤（与光栅 binding 7 同一张纹理）：PT 参照帧里
+        // 围墙/花坛/护栏不再死平一块纯色。布局两处副本（这里 + run_pt_view）必须同步。
+        let skin_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(6).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout, skin_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let sl = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }.map_err(|e| format!("PT sl: {e}"))?;
         let pipe_layouts = [sl];
@@ -6668,6 +6694,9 @@ impl Renderer {
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
+            // COMBINED_IMAGE_SAMPLER ×2：binding 5（程序化地面纹理）+ binding 6（marker 砌块
+            // 皮肤）。🔴 布局加了就得同步计数，否则 allocate_descriptor_sets 直接失败。
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let pool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| format!("PT dp: {e}"))?;
@@ -6682,6 +6711,17 @@ impl Renderer {
         };
         let img_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL };
         let acc_info_desc = vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: acc_view, image_layout: vk::ImageLayout::GENERAL };
+        let ground_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.texture_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        // 🧱 PT 的 marker 皮肤与光栅共用同一张图与同一个采样器（光栅绑在 binding 7）
+        let skin_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.skin_marker_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
         let mat_buf_info = vk::DescriptorBufferInfo {
             buffer: assets.mat_buf,
             offset: 0,
@@ -6735,6 +6775,23 @@ impl Renderer {
                 p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&propv_buf_info).as_ptr(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
+            // 🏪 binding 5 = 光栅同一张程序化地面纹理（init_texture 先于本函数跑完，
+            // 图像已在 SHADER_READ_ONLY_OPTIMAL；常驻资源不随场景重建换，故 pt_refresh_dset 不重写它）
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 5, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&ground_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            // 🧱 binding 6 = marker 砌块皮肤（同为常驻资源，pt_refresh_dset 不重写）
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET, p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 6, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&skin_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
         ];
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         // AS 一次性构建 + 等待（与 run_pt_view 同款——已验证路径！）
@@ -6776,7 +6833,17 @@ impl Renderer {
         self.pt_acc_mem = acc_mem;
         self.pt_acc_view = acc_view;
         self.pt_size = (w, h);
-        // RV3D_PT_SPP 覆盖累积目标（默认 256；调参/快速预览可设小值）
+        // RV3D_PT_SPP 覆盖的是**累积帧数**（不是每帧样本数！默认 256）。
+        //
+        // 🔴 设小值 = 改曝光，不是只改速度。片元末尾的时域累积是**指数滑动平均**
+        // （`acc = mix(acc.rgb, lum, 1/a)`），而显示时又按"求和的样本数"再除一次
+        // （`outc = acc.rgb / acc.a`）——双重归一化的后果是 `acc` 从 0 起步的**暂态被直接
+        // 显示出来**：按稳态窗口 64 帧估，第 N 帧只到稳值的 1−(63/64)^N
+        // ⇒ 16 帧 = 22.3%、64 帧 = 63.5%、256 帧（默认）= 98.2%。
+        // 实测（同机位 `fly:60,1.5,-208:0,4`，全局灰度均值）：16 帧 90.7、64 帧 114.1。
+        // ⇒ **拿 PT 做定量对照（与光栅比亮度、比反照率、比砖纹对比度）必须用默认 256**，
+        // 小值只可用于"看个大概构图"。2026-09-29 我就是照旧注释把 16/64 当同图对比，
+        // 得到了一条假缺陷（PROGRESS §22.11 → §22.11b 更正）。
         self.pt_spp_target = std::env::var("RV3D_PT_SPP")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -6785,7 +6852,12 @@ impl Renderer {
         self.pt_frame.set(0);
         self.pt_reset.set(true);
         self.pt_view_sig.set(0);
-        log::info!("PT-RESIDENT: {}x{} spp 目标 {}（时域累积）", w, h, self.pt_spp_target);
+        log::info!(
+            "PT-RESIDENT: {}x{} 累积目标 {} 帧（时域 EMA，未到 256 帧时画面偏暗，见上方注释）",
+            w,
+            h,
+            self.pt_spp_target
+        );
         Ok(())
     }
 
@@ -7074,7 +7146,25 @@ impl Renderer {
             mats[k * 4] = a[0];
             mats[k * 4 + 1] = a[1];
             mats[k * 4 + 2] = a[2];
-            mats[k * 4 + 3] = 0.0;
+            // 🔴 `.a` = 该盒的**最长世界轴跨度（米）**，不是 0/1 开关。
+            //
+            // 为什么把跨度传进着色器而不是在这里判完：光栅侧那条门（§22.7）除了
+            // "够不够大所以是不是砌体"，还要给皮肤算一个按面尺寸收敛的 `detail` 因子
+            // （`base = mix(color, skin, 0.45 * (0.25 + 0.75*detail))`）。跨度给出去，
+            // PT 才能把同一个表达式抄过来；在这里压成 0/1 就只剩"有/没有"，
+            // 远处会一直按 0.45 混合一张 mip 模糊过的灰图 ⇒ 越远越偏灰，与实机不符。
+            // 玻璃/树冠的排除放在着色器里做（它手上就有 tint，与光栅同一条判据）。
+            //
+            // 尺寸门在这里先过一遍（着色器还会再判同样的阈值，两侧各自成立）：
+            // 不合格的写 0.0，着色器拿到 0 必然落不进砌体分支。
+            // 盒 0 = 地面大盒，跨度 800 会看着"像砌体"，但着色器对 boxIdx==0 走
+            // GroundTex 分支、根本到不了这里，故无需特判。
+            let span = 2.0 * (b.half[0].max(b.half[1]).max(b.half[2]));
+            mats[k * 4 + 3] = if span >= crate::engine::ray_tracer::MASONRY_MIN_SPAN {
+                span
+            } else {
+                0.0
+            };
         }
         unsafe {
             let vb = verts.len() * 4;
@@ -7104,8 +7194,9 @@ impl Renderer {
             Vec::with_capacity(markers.len() + 1);
         let mut albedos: Vec<[f32; 3]> = Vec::with_capacity(markers.len() + 1);
         // 盒 0 = 地面大盒（游戏地形中央压平，PT 用平面盒近似，烘焙参照足够）
-        // 🏢 albedo 从旧沙色 [0.34,0.32,0.29] 改成沥青线性基色（与 procedural.rs zone 2
-        //   同源）：§15 实测 PT 路面比光栅亮 2.14×，这颗地面盒是主因之一。
+        // 🏪 它的 boxMats 反照率自 2026-09-29 起不再被着色器读取：地面改采样与光栅
+        //   同一张程序化纹理（binding 5，见 pt_panorama.glsl）——单颗均匀沥青表不出
+        //   分区（道路区曾比光栅偏亮 22%）。保留条目只为盒序号与 marker 一一对应。
         boxes.push(crate::engine::ray_tracer::PtBox {
             center: [0.0, -1.0, 0.0],
             half: [400.0, 1.0, 400.0],
@@ -7125,9 +7216,19 @@ impl Renderer {
         }
         for m in markers.iter().take(PT_MAX_BOXES - 1) {
             let c = m.model.w_axis;
-            let hx = m.model.x_axis.length() * 0.5;
-            let hy = m.model.y_axis.length() * 0.5;
-            let hz = m.model.z_axis.length() * 0.5;
+            // 🔴 实例缩放 = 真实半尺寸 ÷ 模板半幅（`obstacle_model` 的 `half / tmpl`），
+            // 所以还原半尺寸要**乘回模板半幅**，不是乘 0.5。
+            // 模板半幅只有圆柱的 Y 是 0.5（单位圆柱 y∈[−0.5,0.5]），其余形状三轴都是 1.0
+            // （立方体/球模板是 **±1**，见本文件 `VERTICES`）。
+            // 旧代码一律 `* 0.5` 是 **2026-09-17 之前**的约定——那时渲染盒是 AABB 的 2 倍
+            // （`half / tmpl` 之前写的是 `2*half / tmpl`，`* 0.5` 恰好抵消）。
+            // 9-17 把渲染盒改成与碰撞盒逐轴同尺寸时，这里没跟着改 ⇒ **PT 的 marker 盒
+            // 整体小了一半**（只有圆柱的高度因为模板半幅正好是 0.5 而恰好正确）。
+            // 后果与取证见 docs/PROGRESS.md §22.14。
+            let shape = crate::engine::geom::Shape::from_tag(m.tint[3]);
+            let hx = m.model.x_axis.length() * shape.template_half_extent(0);
+            let hy = m.model.y_axis.length() * shape.template_half_extent(1);
+            let hz = m.model.z_axis.length() * shape.template_half_extent(2);
             if !(hx > 0.01 && hy > 0.01 && hz > 0.01) {
                 continue;
             }
@@ -7375,7 +7476,20 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE);
-        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout];
+        // 🏪 binding 5 = 程序化地面纹理（与 init_pt_resident 同布局：着色器静态引用了它，
+        // 不绑 = UB；玩具场景的"地面"会显示市心广场的纹理像素，无害）
+        let ground_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(5)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        // 🧱 binding 6 = marker 砌块皮肤（与 init_pt_resident 同布局：着色器静态引用了它）
+        let skin_layout = vk::DescriptorSetLayoutBinding::default()
+            .binding(6)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let set_bindings = [as_layout, img_layout, mat_layout, acc_layout, propv_layout, ground_layout, skin_layout];
         let set_create = vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_bindings);
         let set_layout_handle = unsafe { self.device.create_descriptor_set_layout(&set_create, None) }
             .map_err(|e| format!("PT set: {e}"))?;
@@ -7451,6 +7565,8 @@ impl Renderer {
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_IMAGE).descriptor_count(2),
             // STORAGE_BUFFER ×2：binding 2（盒材质）+ binding 4（道具逐三角属性表）
             vk::DescriptorPoolSize::default().ty(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(2),
+            // COMBINED_IMAGE_SAMPLER ×2：binding 5（程序化地面纹理）+ binding 6（marker 皮肤）
+            vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(2),
         ];
         let pool_info = vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
         let dpool = unsafe { self.device.create_descriptor_pool(&pool_info, None) }
@@ -7492,6 +7608,17 @@ impl Renderer {
             offset: 0,
             range: vk::WHOLE_SIZE,
         };
+        let ground_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.texture_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        // 🧱 binding 6 = marker 砌块皮肤（与光栅 binding 7 同一张图、同一个采样器）
+        let skin_desc = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: self.skin_marker_image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
         let writes = [
             vk::WriteDescriptorSet {
                 s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
@@ -7531,6 +7658,23 @@ impl Renderer {
                 dst_set: dset, dst_binding: 4, dst_array_element: 0, descriptor_count: 1,
                 descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
                 p_image_info: std::ptr::null(), p_buffer_info: std::slice::from_ref(&propv_buf_info).as_ptr(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 5, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&ground_desc).as_ptr(), p_buffer_info: std::ptr::null(),
+                p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
+            },
+            // 🧱 binding 6 = marker 砌块皮肤
+            vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: dset, dst_binding: 6, dst_array_element: 0, descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                p_image_info: std::slice::from_ref(&skin_desc).as_ptr(), p_buffer_info: std::ptr::null(),
                 p_texel_buffer_view: std::ptr::null(), _marker: std::marker::PhantomData,
             },
         ];
@@ -12572,7 +12716,12 @@ impl Renderer {
         // 未绑定描述符采样恒返回 0，而地面分支是乘性的（`mixed *= mix(1.0, g*2, gdetail)`），
         // 于是相机周边近处整圈地面被乘成纯黑。以图像句柄非空为条件是必要的——万一
         // init_texture 建图失败，这里保持 0，着色器就退回"没有细节层"而不是回到黑地。
-        if self.ground_detail_image_view != vk::ImageView::null() {
+        //
+        // 🔴 `RV3D_NO_GROUND_TEX=1` 关掉这一层（A/B 诊断门）。**这个开关本仓早就写在
+        // `renderer.rs:6134` 的注释里**（"与 RV3D_NO_SHADOW / RV3D_NO_GROUND_TEX 同一套惯例"），
+        // 但**全仓从未实现过它** —— 拿它做 A/B 会得到"两边完全相同"的假结论
+        // （§55 判别时就差点这样把 H1 误判为已否证）。现在补上，并读一次缓存住。
+        if self.ground_detail_image_view != vk::ImageView::null() && !no_ground_detail_tex() {
             light_ubo.flags.w = 1.0;
         }
         if let Some(&ptr) = self.light_uniform_mapped.get(self.current_frame) {
@@ -13463,7 +13612,7 @@ mod instance_slot_layout_tests {
 
     /// 槽位布局钉死测试。
     ///
-    /// `build.rs` 的两段 WGSL（顶点/网格着色器）里，枪模槽是**字面量** `78913u`，
+    /// `build.rs` 的两段 WGSL（顶点/网格着色器）里，枪模槽是**字面量** `83009u`，
     /// 而它由 `MAX_MARKER_INSTANCES` 推导。历史上这里已经因为"改了容量忘了改字面量"
     /// 出过两次真 bug（枪槽区间覆盖 NPC 圆柱/球体段 → 四肢和头被 z=0 深度覆盖，
     /// 表现为"鬼魂穿模"）。字面量没法被 Rust 类型系统检查，所以用测试兜住：
@@ -13489,6 +13638,166 @@ mod instance_slot_layout_tests {
         assert!(
             GUN_INSTANCE_INDEX >= EMISSIVE_SLOT_BASE + 64,
             "枪槽落进自发光区间会被判成 emissive（历史 bug）"
+        );
+    }
+
+    /// 🔴 `build.rs` 两段 WGSL 里的**槽位常量必须与 Rust 侧逐值相等**，且各自必须恰好两份。
+    ///
+    /// 存在理由（2026-10-02）：`build.rs` 的 `NPC_INSTANCE_BASE` 那行注释写着
+    /// 「改容量必须同步改本行两处副本 + renderer.rs + 枪槽字面量，见 `gun_slot_layout_is_pinned`」——
+    /// **但那条测试只比 Rust 常量之间是否自洽，看不见 WGSL 里的字面量**
+    /// （build script 与 crate 是两个编译单元，此前没有任何测试读过 `build.rs` 的槽位块）。
+    /// 于是「改了 `MAX_MARKER_INSTANCES` 忘了改 WGSL」会**编译通过、测试全绿**，
+    /// 而 GPU 侧的 marker 带边界与 CPU 上传错位 ⇒ marker 被当成 NPC/自发光来画。
+    /// 这正是 §22.14（PT marker 盒半尺寸）那一族「改了生产者、漏改消费者」的错法形状。
+    ///
+    /// 自检（教训 27：判据必须能红）：每个名字**必须找到恰好 2 份**——
+    /// 解析到 0 份或 1 份都直接红，绝不允许"没解析到"被当成通过。
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn wgsl_slot_constants_match_the_rust_layout() {
+        /// 收集 WGSL 里所有 `const NAME: u32 = EXPR;`，返回 (名字 → 全部副本的 EXPR, 名字 → 求值)。
+        /// 🔴 两个坑：① EXPR 可以是 `65536u + 1u`，也可以是 `NPC_INSTANCE_BASE + 3072u` ——
+        /// **标识项必须递归查表求值**，只把数字挑出来相加会静默丢掉标识项，
+        /// 于是 `NPC_CYL_BASE` 被算成 3072（而不是 76801）；第一版就栽在这里。
+        /// ② WGSL 的 `65536u` 带 `u` 后缀，`parse::<u64>()` 会**直接失败** ⇒ 必须先去掉它。
+        /// 本地模拟器：`target/parsim.py`（跑一次即可复现下面 6 个期望值）。
+        fn wgsl_consts(
+            src: &str,
+        ) -> (
+            std::collections::HashMap<String, Vec<String>>,
+            std::collections::HashMap<String, u64>,
+        ) {
+            let mut exprs: std::collections::HashMap<String, Vec<String>> = Default::default();
+            for line in src.lines() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("const ") else { continue };
+                let Some(colon) = rest.find(':') else { continue };
+                let name = &rest[..colon];
+                let Some(after) = rest[colon..].strip_prefix(": u32 = ") else { continue };
+                let Some(semi) = after.find(';') else { continue };
+                exprs
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(after[..semi].trim().to_string());
+            }
+            // 迭代求值到不动点（槽位布局是单向依赖，几轮就收敛）。
+            let mut values: std::collections::HashMap<String, u64> = Default::default();
+            loop {
+                let mut progressed = false;
+                for (name, es) in &exprs {
+                    if values.contains_key(name) {
+                        continue;
+                    }
+                    let mut sum = 0u64;
+                    let mut done = true;
+                    for term in es[0].split('+') {
+                        let token: String = term
+                            .chars()
+                            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .collect();
+                        if token.is_empty() {
+                            done = false;
+                            break;
+                        }
+                        // WGSL 整数字面量的 `u` 后缀：去掉后再解析。
+                        let (digits, bare) = match token.strip_suffix('u') {
+                            Some(d) if !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) => {
+                                (Some(d), false)
+                            }
+                            _ => (None, token.chars().all(|c| c.is_ascii_digit())),
+                        };
+                        if let Some(d) = digits {
+                            sum += d.parse::<u64>().unwrap_or(0);
+                        } else if bare {
+                            sum += token.parse::<u64>().unwrap_or(0);
+                        } else if let Some(v) = values.get(&token) {
+                            sum += v;
+                        } else {
+                            done = false;
+                            break;
+                        }
+                    }
+                    if done {
+                        values.insert(name.clone(), sum);
+                        progressed = true;
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            (exprs, values)
+        }
+
+        let build = std::fs::read_to_string("build.rs")
+            .expect("读 build.rs 失败（测试工作目录应为仓库根）");
+        let (exprs, values) = wgsl_consts(&build);
+        let cases: [(&str, u32); 5] = [
+            ("MARKER_INSTANCE_BASE", MARKER_SLOT_BASE),
+            ("NPC_INSTANCE_BASE", NPC_SLOT_BASE),
+            ("NPC_CYL_BASE", NPC_CYL_SLOT_BASE),
+            ("NPC_SPH_BASE", NPC_SPH_SLOT_BASE),
+            ("EMISSIVE_INSTANCE_BASE", EMISSIVE_SLOT_BASE),
+        ];
+        for (name, want) in cases {
+            let es = exprs.get(name).cloned().unwrap_or_default();
+            assert_eq!(
+                es.len(),
+                2,
+                "WGSL `const {}` 应有 2 份声明（顶点段 + mesh 段），实际 {} 份 \
+                 ⇒ 有副本被改名/删除/挪走，本测试需同步更新，不要直接放宽断言",
+                name,
+                es.len()
+            );
+            assert_eq!(
+                es[0], es[1],
+                "`{}` 的两份 WGSL 副本表达式不再逐字符相同（{:?} vs {:?}）\
+                 ⇒ 顶点段与 mesh 段对槽位带的理解已经分叉",
+                name,
+                es[0],
+                es[1]
+            );
+            let got = values.get(name).unwrap_or_else(|| {
+                panic!("`const {}` 无法求值（表达式引用了表外的名字）⇒ 解析器需更新", name)
+            });
+            assert_eq!(
+                *got,
+                want as u64,
+                "WGSL `const {}` = {} 与 Rust 侧 {} 不一致 \
+                 ⇒ GPU 的槽位带边界与 CPU 上传错位，marker 会被当成 NPC/自发光来画",
+                name,
+                got,
+                want
+            );
+        }
+
+        // 枪槽在 WGSL 里是**裸字面量**（顶点段 `instance_index == 83009u`、
+        // mesh 段 `slot == 83009u`），Rust 侧由 MAX_* 推导 ⇒ 这是最容易漏的一对。
+        let gun_literals = build.matches("83009u").count();
+        assert_eq!(
+            gun_literals, 2,
+            "build.rs 里枪槽字面量 `83009u` 应有 2 处（顶点段 + mesh 段），实际 {} 处",
+            gun_literals
+        );
+        assert_eq!(
+            GUN_INSTANCE_INDEX, 83_009,
+            "Rust 侧 GUN_INSTANCE_INDEX 已变，但 WGSL 里的 `83009u` 是按旧值写死的 \
+             ⇒ 改容量必须同时改 build.rs 两处字面量"
+        );
+
+        // 地形 identity 槽：Rust 侧没有同名常量（只在注释里提到），所以只钉 WGSL 两份副本同值。
+        let terr = exprs.get("TERRAIN_INSTANCE_INDEX").cloned().unwrap_or_default();
+        assert_eq!(
+            terr.len(),
+            2,
+            "`TERRAIN_INSTANCE_INDEX` 应有 2 份 WGSL 声明，实际 {} 份",
+            terr.len()
+        );
+        assert_eq!(
+            values.get("TERRAIN_INSTANCE_INDEX").copied(),
+            Some(65_536),
+            "WGSL 的 `TERRAIN_INSTANCE_INDEX` 必须是 65536（shader 硬编码读该槽）"
         );
     }
 
@@ -14750,6 +15059,187 @@ mod horizontal_winding_tests {
                 "mesh 着色的水平面绕序与 CPU 不一致，缺 `{pat}`（两条路径必须同约定）"
             );
         }
+    }
+
+    /// 🔴 两条管线的**几何模板必须逐值相同**，且每张表都要"真的被解析到"。
+    ///
+    /// 存在理由（2026-10-02）：`build.rs` 的 mesh 路径自带一整套 `CUBE_POS/CUBE_TRI/
+    /// ICO_POS/SPH_POS/...`，与 CPU 侧 `VERTICES/INDICES`、`cylinder_mesh_data()`
+    /// 是**两份独立维护的副本**；原有的 `mesh_shader_horizontal_winding_matches_cpu`
+    /// 只做 `src.contains("vec3<u32>(16u, 18u, 17u)")` 这类**子串比对**——
+    /// 既不比数值、也只覆盖水平面。改一侧忘改另一侧 ⇒ 回退路径与主路径画的不是同一个东西。
+    ///
+    /// ⚠ **本测试刻意不断言"绕序朝外"**：
+    ///   立方体 4 个侧面原始法线朝外、顶/底两面朝内（`renderer.rs:14664` 自述
+    ///   "曾因反绕被上方剔除"，后改用 `xz` 有向面积约定）⇒ 只看立方体，
+    ///   "把叉积的 y 分量取负"很像是本引擎的真实规则。**但它对倾斜面无效**：
+    ///   拿那条规则判二十面体会得到"8/20 朝内"，而一条**与渲染约定无关**的拓扑判据
+    ///   （可定向闭合网格的每条无向边必须被两个三角形**反向**共享）证明
+    ///   `ICO_TRI` / `SPH_TRI` 完全可定向且闭合 ⇒ 那个 8/20 是**我的模型错，不是几何错**（§37）。
+    ///   ⇒ 在没有一个"差异局部于案发区"的 GPU 实验定死引擎真实前向规则之前，
+    ///     任何朝外判据都是猜的；硬写出来只会得到一个要么常红、要么被后人删掉的假守卫。
+    ///   另注：立方体**不能**用那条拓扑判据自查——它是"每面 4 个独立顶点"（24 顶点 / 6 面），
+    ///     面与面之间没有公共索引边，跑拓扑判据必然得到 24 条"未闭合边"的**假红**。
+    ///
+    /// 自检（教训 27：判据必须能红）：每张表解析出的三元组数量**必须等于它自己声明的
+    /// `array<vec3<T>, N>` 里的 N**；表被改名/解析器坏掉时直接红，
+    /// 绝不"没测到就当通过"（§31.6 刚栽过一次）。
+    #[test]
+    fn procedural_geometry_templates_agree_across_paths() {
+        /// 取出 `const NAME: array<vec3<TY>, N> = array<...>( vec3<TY>(a, b, c), ... );`
+        /// 里的三元组，连同它声明的 N（用来证明"真的解析到了"）。
+        fn table_of(src: &str, name: &str, ty: &str) -> (Vec<[f32; 3]>, usize) {
+            let head = format!("const {}:", name);
+            let at = src
+                .find(&head)
+                .unwrap_or_else(|| panic!("build.rs 里找不到表 `{}`（被改名或删了？）", name));
+            let close = src[at..]
+                .find("\n);")
+                .unwrap_or_else(|| panic!("表 `{}` 找不到结尾", name));
+            let body = &src[at..at + close];
+
+            // 声明长度：`array<vec3<f32>, 24>` 里的那个 24（注意 `>` 在 `,` **之前**）
+            let tag = format!("array<vec3<{}>, ", ty);
+            let dpos = body
+                .find(&tag)
+                .unwrap_or_else(|| panic!("表 `{}` 的声明里没有 `{}`", name, tag));
+            let declared: usize = body[dpos + tag.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("表 `{}` 声明的长度不是数字", name));
+
+            let marker = format!("vec3<{}>(", ty);
+            let mut out: Vec<[f32; 3]> = Vec::new();
+            let mut pos = 0usize;
+            while let Some(rel) = body[pos..].find(&marker) {
+                let s = pos + rel + marker.len();
+                let Some(re) = body[s..].find(')') else { break };
+                let mut vals = [0f32; 3];
+                let mut n = 0usize;
+                for part in body[s..s + re].split(',') {
+                    let compact: String = part.chars().filter(|c| !c.is_whitespace()).collect();
+                    let token = compact.strip_suffix('u').unwrap_or(compact.as_str());
+                    let v: f32 = token.parse().unwrap_or_else(|_| {
+                        panic!("表 `{}` 有解析不了的三元组 `{:?}`", name, &body[s..s + re])
+                    });
+                    assert!(n < 3, "表 `{}` 的三元组超过 3 个分量", name);
+                    vals[n] = v;
+                    n += 1;
+                }
+                assert_eq!(n, 3, "表 `{}` 有不足 3 分量的三元组", name);
+                out.push(vals);
+                pos = s + re;
+            }
+            (out, declared)
+        }
+
+        /// 校验一张 (顶点, 索引) 表：索引必须落在顶点范围内、且三角形不退化；
+        /// 返回检查过的三角形数（用来证明"真的检查了东西"，而不是解析器空转）。
+        fn check_indices(verts: &[[f32; 3]], tris: &[[f32; 3]], label: &str) -> usize {
+            for (i, t) in tris.iter().enumerate() {
+                let (ia, ib, ic) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                assert!(
+                    ia < verts.len() && ib < verts.len() && ic < verts.len(),
+                    "{} 第 {} 个三角形索引越界：{:?}（顶点数 {}）\
+                     ⇒ mesh 路径会读到**从未写过的 vertices 槽位**，画出来就是随机三角形",
+                    label,
+                    i,
+                    t,
+                    verts.len()
+                );
+                assert!(
+                    ia != ib && ib != ic && ia != ic,
+                    "{} 第 {} 个三角形退化（索引重复）：{:?}",
+                    label,
+                    i,
+                    t
+                );
+            }
+            tris.len()
+        }
+
+        let src = include_str!("../../build.rs");
+        let mut checked = 0usize;
+
+        // ---- mesh 主管线的三张闭合模板 ----
+        for (pos_name, tri_name, n_pos, n_tri) in [
+            ("CUBE_POS", "CUBE_TRI", 24usize, 12usize),
+            ("ICO_POS", "ICO_TRI", 12usize, 20usize),
+            ("SPH_POS", "SPH_TRI", 42usize, 80usize),
+        ] {
+            let (verts, declared) = table_of(src, pos_name, "f32");
+            assert_eq!(
+                verts.len(),
+                declared,
+                "{} 声明 {} 个顶点，实际解析到 {} 个 ⇒ 解析器或表格式变了",
+                pos_name,
+                declared,
+                verts.len()
+            );
+            assert_eq!(verts.len(), n_pos, "{} 顶点数应当是 {}", pos_name, n_pos);
+            let (tris, declared_t) = table_of(src, tri_name, "u32");
+            assert_eq!(
+                tris.len(),
+                declared_t,
+                "{} 声明 {} 个三角形，实际解析到 {} 个",
+                tri_name,
+                declared_t,
+                tris.len()
+            );
+            assert_eq!(tris.len(), n_tri, "{} 三角形数应当是 {}", tri_name, n_tri);
+            checked += check_indices(&verts, &tris, pos_name);
+        }
+
+        // ---- CPU 侧立方体：直接用常量，不走文本解析（另一条独立路径）----
+        let cpu_verts: Vec<[f32; 3]> = VERTICES.iter().map(|v| v.pos).collect();
+        let cpu_tris: Vec<[f32; 3]> = INDICES
+            .chunks(3)
+            .map(|t| [t[0] as f32, t[1] as f32, t[2] as f32])
+            .collect();
+        checked += check_indices(&cpu_verts, &cpu_tris, "CPU VERTICES/INDICES");
+
+        // ---- CPU 侧圆柱（含上下盖）：真实数据，不是复制公式 ----
+        let (cyl_v, cyl_i) = Renderer::cylinder_mesh_data();
+        let cyl_verts: Vec<[f32; 3]> = cyl_v.iter().map(|v| v.pos).collect();
+        let cyl_tris: Vec<[f32; 3]> = cyl_i
+            .chunks(3)
+            .map(|t| [t[0] as f32, t[1] as f32, t[2] as f32])
+            .collect();
+        checked += check_indices(&cyl_verts, &cyl_tris, "CPU cylinder_mesh_data");
+
+        // ---- 两条管线的立方体模板必须逐值相同，否则回退路径与主路径画的不是同一个东西 ----
+        let (mesh_cube, _) = table_of(src, "CUBE_POS", "f32");
+        for i in 0..24 {
+            assert_eq!(
+                mesh_cube[i], cpu_verts[i],
+                "CUBE_POS[{}] {:?} 与 CPU VERTICES[{}] {:?} 不一致 \
+                 ⇒ 两条管线的盒子不是同一个几何",
+                i,
+                mesh_cube[i],
+                i,
+                cpu_verts[i]
+            );
+        }
+        let (mesh_cube_tri, _) = table_of(src, "CUBE_TRI", "u32");
+        for i in 0..12 {
+            assert_eq!(
+                mesh_cube_tri[i], cpu_tris[i],
+                "CUBE_TRI[{}] {:?} 与 CPU INDICES 第 {} 个三角形 {:?} 不一致",
+                i,
+                mesh_cube_tri[i],
+                i,
+                cpu_tris[i]
+            );
+        }
+
+        assert!(
+            checked >= 200,
+            "本测试只检查了 {} 个三角形（应 >= 200）⇒ 解析器或表结构变了，\
+             此时'全部通过'可能只是因为**什么都没测到**（§31.6 的教训）",
+            checked
+        );
     }
 }
 

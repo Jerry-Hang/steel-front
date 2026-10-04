@@ -545,4 +545,56 @@ mod tests {
         let u = LightUniform::build(None, &[], Vec3::ZERO, 0.0, None);
         assert_eq!(u, LightUniform::default());
     }
+
+    /// CPU 侧**参考光照**与光栅 WGSL 必须用同一组常数。
+    ///
+    /// 本模块头注释自称「`FRAGMENT_SHADER_WGSL` 光照计算的参考实现
+    /// （函数/常量与 WGSL **一一对应**）」，而下面这两个常数各自带着「（与 WGSL 一致）」
+    /// 的注释与 `#[allow(dead_code)]`（只被参考测试用）。⇒ 它们是**声明过却没有守卫**的
+    /// 不变量：一旦分叉，本模块的参考测试验证的就是着色器**已经不再实现**的模型。
+    ///
+    /// | CPU 参考 | 值 | WGSL 侧 |
+    /// |---|---|---|
+    /// | `DEFAULT_SHININESS` | 32.0 | `let shininess = 32.0;`（`build.rs:535`，全场景硬编） |
+    /// | `SPECULAR_STRENGTH` | 0.4  | `const SPEC_CONTRIB: f32 = 0.4;`（`build.rs:190`） |
+    ///
+    /// `SPEC_CONTRIB` 还被 `pt_panorama.glsl:260` 的注释点名引用，是三方知情的那一族。
+    /// 判据全部**从 build.rs 源码解析**，不抄数字（同值 ≠ 同源，这里逐个核实过用法才收）。
+    #[test]
+    fn reference_lighting_constants_match_the_raster_shader() {
+        let build = include_str!("../../build.rs");
+
+        /// 取 `let NAME = V;` / `const NAME: f32 = V;` 的数值。
+        fn value_after(src: &str, needle: &str, what: &str) -> f32 {
+            let at = src
+                .find(needle)
+                .unwrap_or_else(|| panic!("{what} 里找不到 `{needle}`（被改名或删了？）"));
+            let rest = &src[at + needle.len()..];
+            let end = rest
+                .find(';')
+                .unwrap_or_else(|| panic!("`{needle}` 没有分号结尾，解析口径失效"));
+            let tok = rest[..end].trim();
+            tok.parse::<f32>()
+                .unwrap_or_else(|_| panic!("{what} 的 `{needle}` 之后不是数字：{tok:?}"))
+        }
+
+        let cpu_shininess = DEFAULT_SHININESS;
+        let cpu_spec = SPECULAR_STRENGTH;
+
+        // 1) 高光指数：WGSL 里是全场景硬编的 `let shininess = …`，不读任何材质
+        let shader_shininess = value_after(build, "let shininess = ", "build.rs WGSL");
+        assert!(
+            (shader_shininess - cpu_shininess).abs() < 1e-6,
+            "光栅 WGSL 的 shininess = {shader_shininess}，CPU 参考实现用 {cpu_shininess}：\
+             分叉后本模块的参考测试验证的是着色器不再实现的模型"
+        );
+
+        // 2) 高光贡献权重：两侧都在 `diffuse + K * spec` 里当同一个 K
+        let shader_spec = value_after(build, "const SPEC_CONTRIB: f32 = ", "build.rs WGSL");
+        assert!(
+            (shader_spec - cpu_spec).abs() < 1e-6,
+            "光栅 WGSL 的 SPEC_CONTRIB = {shader_spec}，CPU 参考实现用 {cpu_spec}：\
+             两者必须同时出现在 diffuse + K*spec 这一个式子里"
+        );
+    }
 }

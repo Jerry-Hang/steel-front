@@ -81,9 +81,12 @@ impl Shape {
     /// 标签值 → 形状。未知/越界值一律退回 [`Shape::Legacy`]，让 GPU 侧的兜底分支
     /// 去处理，而不是在这里发明新语义。
     ///
-    /// `#[cfg(test)]`：CPU 侧从不反读 tint.w（`renderer.rs` 只写不读），所以这个解码器
-    /// 唯一的作用是配合 [`Shape::tag`] 钉住线格式，防止有人改数值把 GPU 分支错位。
-    #[cfg(test)]
+    /// 生产侧**现在**也要反读 `tint.w`：PT 的 `pt_set_scene_markers` 必须把实例缩放还原成
+    /// 真实半尺寸，而"缩放 ÷ 半尺寸"的那个系数就是形状自己的模板半幅（见
+    /// [`Shape::template_half_extent`]）。以前这里标 `#[cfg(test)]`（"CPU 侧从不反读"）
+    /// 已经过期——那条前提在 2026-09-17 改成"逐轴同尺寸"之后就不成立了，
+    /// PT 侧漏改留下的后果记在 docs/PROGRESS.md §22.14。
+    /// 保留配合 [`Shape::tag`] 的线格式钉死作用。
     pub const fn from_tag(v: f32) -> Shape {
         // f32 精确比较：标签只由 tag() 写入，取值是 1/2/4/5/6 这些可精确表示的小整数。
         if v == Shape::TAG_CYLINDER {
@@ -196,9 +199,62 @@ mod tests {
         // 片元/顶点着色器用 flat_flag 的**区间**分路径（>2.5 枪、>1.5 NPC、>0.5 皮肤、
         // <1.5 marker/立面加工）。Authored 走 flat_flag = 1.25，必须落在
         // "(0.5, 1.5) 之内、且不等于任何既有阈值"，否则会被 NPC 轮廓光或枪模直出抢走。
-        let authored_flat = 1.25f32;
-        assert!(authored_flat > 0.5 && authored_flat < 1.5);
-        assert!((authored_flat - 1.0).abs() > 0.05, "不能与 marker 的 1.0 重合");
+        //
+        // 🔴 2026-10-02 拆掉本测试里的**第二个假守卫**（第一个见 §40.2）：
+        //   原来写的是 `let authored_flat = 1.25f32; assert!(authored_flat > 0.5 && ...)`
+        //   —— 本地字面量比本地字面量，**恒真**，从头到尾没读过着色器，
+        //   而测试名字自称 "gpu_side_thresholds"。改 build.rs 里的 1.25 它照绿。
+        //   ⇒ 现在真的从 `build.rs` 的 Authored 分支里把那个数**读出来**。
+        /// 取出 Authored 分支赋给 flat_flag 的数值（顶点段与 mesh 段各一处）。
+        /// 🔴 窗口必须按**字符**取，不能按字节切：`build.rs` 里有中文注释，
+        ///    `&src[idx..idx + 240]` 会落在多字节字符中间并直接 panic
+        ///    （第一版就是这么炸的：`end byte index 84831 is not a char boundary`）。
+        fn authored_flat_values(src: &str) -> Vec<f32> {
+            let predicate = "inst.tint.w > 5.5 && inst.tint.w < 6.5";
+            let mut out = Vec::new();
+            for (idx, _) in src.match_indices(predicate) {
+                // 只看这个 if 之后的一小段，取第一个 `flat(_flag)? = <数>;`
+                let tail: String = src[idx..].chars().take(240).collect();
+                let eq = match tail.find("flat_flag = ").or_else(|| tail.find("flat = ")) {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let after = &tail[eq..];
+                let start = after.find("= ").map(|k| k + 2).unwrap_or(0);
+                let end = after.find(';').unwrap_or(after.len());
+                let text: String = after[start..end].chars().filter(|c| !c.is_whitespace()).collect();
+                if let Ok(v) = text.parse::<f32>() {
+                    out.push(v);
+                }
+            }
+            out
+        }
+
+        let build = include_str!("../../build.rs");
+        let vals = authored_flat_values(build);
+        assert_eq!(
+            vals.len(),
+            2,
+            "build.rs 里应恰好有 **2 处** Authored 赋值（顶点段 + mesh 段），实际找到 {} 处 \
+             ⇒ Authored 的分派条件被改写、或某一条路径漏了这个分支（本测试不允许'没读到'当通过）",
+            vals.len()
+        );
+        assert_eq!(
+            vals[0], vals[1],
+            "两条管线的 Authored flat_flag 不一致（{} vs {}）⇒ 回退路径与主路径分叉",
+            vals[0],
+            vals[1]
+        );
+        let authored_flat = vals[0];
+        assert!(
+            authored_flat > 0.5 && authored_flat < 1.5,
+            "Authored 的 flat_flag = {authored_flat} 不在 (0.5, 1.5) 内 \
+             ⇒ 会被 NPC 轮廓光（>1.5）或枪模直出（>2.5）抢走，或掉出皮肤分支（>0.5）"
+        );
+        assert!(
+            (authored_flat - 1.0).abs() > 0.05,
+            "Authored 的 flat_flag = {authored_flat} 与 marker 的 1.0 重合 ⇒ 外部建模会被当程序化立面加工"
+        );
         assert_eq!(Shape::from_tag(Shape::TAG_AUTHORED), Shape::Authored);
         assert_eq!(Shape::from_tag(Shape::TAG_NONE), Shape::None);
     }

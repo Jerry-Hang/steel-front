@@ -372,6 +372,11 @@ pub struct Npc {
     pub tactic: Tactic,
     /// 受击/火力威胁后的侧向躲避剩余时间（秒）
     dodge_timer: f32,
+    /// `RV3D_AI_DIAG` 逐 NPC 节流状态：上一次打印所用的 (5s 桶 << 32 | id)。
+    /// 必须是**每只 NPC 一份**——旧实现是一个全局 `AtomicU64` 只记最后一个 key，
+    /// 两只以上卡住的 NPC 逐帧交替即恒真（§20.6 实测 300s 刷 16.4 万行）。
+    /// `step_npc` 对每个 `npc` 是 `&mut` 独占（`par_for_each_mut`）⇒ 无需 atomic。
+    aidiag_bucket: u64,
     /// 两次躲避的最小间隔倒计时（秒）
     hit_cooldown: f32,
     /// 上一帧血量（受击检测）
@@ -1642,6 +1647,32 @@ fn blast_kill_line(center: [f32; 3], victim: &str) -> String {
     format!("爆炸（{:.0},{:.0}）击杀了{victim}", center[0], center[2])
 }
 
+/// `RV3D_AI_DIAG` 的逐 NPC 节流桶宽（秒）。
+const AIDIAG_BUCKET_SECS: f32 = 5.0;
+
+/// 判断"这只 NPC 本帧该不该打一行 `aidiag`"，并把节流状态写回**它自己的**槽位。
+///
+/// 存在理由（2026-10-02）：旧实现是 `step_npc` 里的一个 `static SEEN: AtomicU64`，
+/// 只记"上一个打印过的 key"。键里**确实**含 id，但全局只有一个槽 ⇒
+/// 两只以上卡住的 NPC 逐帧交替时，每次都"与上次不同"，判据恒真，
+/// 于是每帧两只各打一行（§20.6 实测 300s 刷 16.4 万行，
+/// 而那行注释一直声称"每个卡住的 NPC 每 5s 一行"）。
+/// ⇒ **诊断工具在它最该工作的场景（多只同时卡住）里把自己刷成了噪声。**
+///
+/// 状态改为随 `Npc` 携带：`step_npc` 对每个 `npc` 是 `&mut` 独占
+/// （`par_for_each_mut` 切片）⇒ **不需要 atomic**。
+/// 判据：`aidiag_throttle_is_per_npc`（正）与 `aidiag_single_shared_slot_would_flood`
+/// （把旧实现的错误行为钉成特征测试，见其注释）。
+fn aidiag_due(last_key: &mut u64, time: f32, id: usize) -> bool {
+    let bucket = (time / AIDIAG_BUCKET_SECS) as u64;
+    let key = (bucket << 32) | (id as u64 & 0xFFFF_FFFF);
+    if *last_key == key {
+        return false;
+    }
+    *last_key = key;
+    true
+}
+
 impl Game {
     /// 创建游戏中枢：初始化物理演示场景
     pub fn new() -> Self {
@@ -1678,6 +1709,7 @@ impl Game {
                 direct_x: 0.0,
                 direct_z: 0.0,
                 last_goal: [0.0, 0.0],
+                aidiag_bucket: u64::MAX,
                 attack_timer: 0.0,
                 reposition: None,                hp: 100.0,
                 max_hp: 100.0,
@@ -2739,13 +2771,22 @@ impl Game {
 
     /// 关卡系统据点数据（供 main.rs 渲染世界标记）：(id, x, z, 归属, 进度 0..=1)。
     /// 未启用关卡系统或无据点 → 空列表。
-    pub fn capture_points(&self) -> Vec<(String, f32, f32, Option<crate::engine::ai::Team>, f32)> {
+    ///
+    /// 🔴 返回值里**必须带 `radius`**：占领底盘是**视觉**，它必须等于**玩法**的占领判定半径。
+    /// 早先这里只给 `(id,x,z,owner,progress)`，渲染侧拿不到 radius，于是 `main.rs` 把底盘
+    /// 写成了硬编码 `from_scale(10.0, …)` —— 而立方体模板是 ±1、`from_scale` 传的是
+    /// **半尺寸**，结果底盘画成半径 10m，对 `street_fight`(5.0) / `bridgehead`(5.0/6.0)
+    /// 是**真实占领圈的两倍**，对 `defense_line`(12.0) 又**反而小一圈**。
+    /// 玩家据此判断"我进圈了没有"，是玩法级的误导，不只是好看问题。
+    pub fn capture_points(
+        &self,
+    ) -> Vec<(String, f32, f32, f32, Option<crate::engine::ai::Team>, f32)> {
         self.obj_state
             .as_ref()
             .map(|o| {
                 o.points
                     .iter()
-                    .map(|p| (p.id.clone(), p.x, p.z, p.owner, p.progress))
+                    .map(|p| (p.id.clone(), p.x, p.z, p.radius, p.owner, p.progress))
                     .collect()
             })
             .unwrap_or_default()
@@ -5313,6 +5354,7 @@ impl Game {
             direct_x: 0.0,
             direct_z: 0.0,
             last_goal: [0.0, 0.0],
+            aidiag_bucket: u64::MAX,
                 attack_timer: 0.0,
                 reposition: None,            hp,
             max_hp: hp,
@@ -5483,6 +5525,7 @@ impl Game {
                 direct_x: 0.0,
                 direct_z: 0.0,
                 last_goal: [0.0, 0.0],
+                aidiag_bucket: u64::MAX,
                 attack_timer: 0.0,
                 reposition: None,                    hp: profile.hp,
                     max_hp: profile.hp,
@@ -5632,12 +5675,13 @@ impl Game {
         // 而 `Patrol` 只能由 `enemy_visible == false` 维持（`ai.rs::NpcStateMachine`），
         // `enemy_visible = dist < sight && !occluded` ⇒ 只可能是"太远"或"被挡"，
         // 这一行把二者分开（`occluded` 是原始判据；`lines` 为 0 = 遮挡数据缺失、按未挡处理）。
-        // 键 = 时间桶(5s) + id ⇒ 每个卡住的 NPC 每 5s 一行，不刷屏。
+        // 🔴 键 = 时间桶(5s) + id，但**节流状态必须挂在每只 NPC 自己身上**。
+        //   旧实现是 `static SEEN: AtomicU64` 只记"最后一个 key"：两只以上卡住的 NPC
+        //   逐帧交替 ⇒ 每帧都"变了" ⇒ 恒真，300s 刷 16.4 万行（§20.6 实测），
+        //   而这里的注释一直声称"每个卡住的 NPC 每 5s 一行"——注释与代码同时是错的。
+        //   `step_npc` 对每个 `npc` 是 `&mut` 独占（`par_for_each_mut`）⇒ 无需 atomic。
         if ai_diag() && state != NpcState::Attack {
-            static SEEN: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(u64::MAX);
-            let key = ((ctx.time / 5.0) as u64) << 32 | npc.id as u64;
-            if SEEN.swap(key, std::sync::atomic::Ordering::Relaxed) != key {
+            if aidiag_due(&mut npc.aidiag_bucket, ctx.time, npc.id) {
                 // 2026-09-25 扩展：实测 NPC 有路径却在**爬行**（0.02 m/s vs 设定 4 m/s），
                 // 只靠 state/dist 判不出来 ⇒ 把"移动为什么没发生"的四个候选一起打出来：
                 //   path=idx/len（路点推进到哪）wp_d（离当前路点多远）
@@ -7068,6 +7112,50 @@ fn team_centroids(npcs: &[Npc]) -> ([f32; 2], [f32; 2]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 判据（正例）：`aidiag` 节流必须**逐 NPC 独立**——同一个 5s 桶里两只不同的 NPC
+    /// 都要各自拿到一行；同一只在同一桶内不得重复。
+    ///
+    /// 为什么必须显式测"两只"：旧实现把状态放在一个全局 `AtomicU64` 里，
+    /// **单只 NPC 的行为完全正确**（每 5s 一行），所以老代码在这条性质上根本不会被发现；
+    /// 只有"多只同时卡住"——也就是这个诊断工具存在的唯一理由——才暴露它。
+    #[test]
+    fn aidiag_throttle_is_per_npc() {
+        let mut a = u64::MAX;
+        let mut b = u64::MAX;
+        assert!(aidiag_due(&mut a, 12.0, 1), "第一只在该桶首帧必须打印");
+        assert!(
+            aidiag_due(&mut b, 12.0, 2),
+            "同一个桶里第二只也必须打印（旧的全局单槽会吞掉它）"
+        );
+        assert!(!aidiag_due(&mut a, 13.0, 1), "同一桶内不得重复");
+        assert!(!aidiag_due(&mut b, 14.9, 2), "同一桶内不得重复");
+        assert!(aidiag_due(&mut a, 17.0, 1), "跨到下一个桶应恢复");
+        assert!(aidiag_due(&mut b, 16.0, 2), "跨到下一个桶应恢复");
+    }
+
+    /// 🔴 特征测试（反例）：把**旧实现的错误行为**钉成断言。
+    ///
+    /// 两只 NPC 共用一个槽时，逐帧交替会让判据每帧都成立 ⇒ 10 帧刷 20 行，
+    /// 而不是 10 帧 2 行。这正是 §20.6 那次"300s 打 16.4 万行"的机制。
+    /// ⚠ 这条**断言的是坏行为**，它绿不代表实现正确；留着是因为：
+    /// 一旦有人把 `Npc::aidiag_bucket` 换回 `static`，上一条会红而这条仍然绿，
+    /// 两条放在一起读，才看得出差别到底在哪。
+    #[test]
+    fn aidiag_single_shared_slot_would_flood() {
+        let mut shared = u64::MAX;
+        let mut lines = 0usize;
+        for frame in 0..10 {
+            let t = 12.0 + frame as f32 * 0.016;
+            if aidiag_due(&mut shared, t, 1) {
+                lines += 1;
+            }
+            if aidiag_due(&mut shared, t, 2) {
+                lines += 1;
+            }
+        }
+        assert_eq!(lines, 20, "共用一个槽 ⇒ 10 帧刷满 20 行（每帧两只都打）");
+    }
 
     /// 判据：换弹动作包络**两端位移为 0、中点为 1**、区间外被夹住，前半段单调递增。
     ///
@@ -9877,6 +9965,7 @@ mod tests {
             direct_x: 0.0,
             direct_z: 0.0,
             last_goal: [0.0, 0.0],
+            aidiag_bucket: u64::MAX,
                 attack_timer: 0.0,
                 reposition: None,            hp: 100.0,
             max_hp: 100.0,

@@ -10,7 +10,8 @@
 //! ## 现在的做法
 //! - **形状成为数据**：`engine::geom::Shape`（立方/圆柱/二十面体/球）。灯杆、树干、
 //!   消防栓、通风管、穹顶终于可以是圆的。
-//! - **容量 1024 → 4096**，够一栋楼拆成十几个部件。
+//! - **容量 1024 → 8192**（2026-09-01 先提到 4096，同日实测 1024/4096 都装不下真城市，
+//!   再翻一档到 8192），够一栋楼拆成十几个部件。
 //! - **结构件与装饰件分表**（`LevelMap::obstacles` / `LevelMap::decor`）：挑檐、窗带、
 //!   壁柱、屋顶设备只进渲染，不进刚体表、不进导航网格、不可摧毁。画面拿到全部细节，
 //!   物理只付结构体的钱，也顺手消灭了"屋顶空调机在街面留下一圈隐形墙"。
@@ -713,11 +714,23 @@ fn warehouse(c: &mut City, cx: f32, cz: f32, seed_i: i32, seed_j: i32) {
     c.deco(Part::new(ObstacleKind::Building, cx, cz, w + 0.7, d + 0.7, UNDER_GROUND, 1.2, GRANITE));
     c.deco(Part::new(ObstacleKind::Building, cx, cz, w + 0.9, d + 0.9, h - 0.9, h, CONCRETE_DARK));
 
-    // 屋面天窗：下沉 0.5m 的玻璃槽 + 两侧挡边（有真实进深，不是贴皮）。
-    // 2 条而不是 3 条：仓库只有 4 座，但每条天窗要 3 个件才不共面。
+    // 屋面天窗：**凸起采光带**——玻璃顶面必须高过壳体顶面与两侧挡边，否则一像素都不画。
+    //
+    // 🔴 这里原来写的是"下沉 0.5m 的玻璃槽（有真实进深，不是贴皮）"，玻璃顶面取 `h-0.10`。
+    // 但壳体是 `UNDER_GROUND..h` 的**实心盒**、占满 `w × d`，而本引擎**没有 CSG、
+    // 主 pass 全不透明** ⇒ 玻璃三轴都被壳体（和屋面环带）完整包住 ⇒ **8 块玻璃
+    // （4 座仓库 × 2 条）实际渲染 0 像素**：不报错、不警告，只是东西没了。
+    // 由 `no_part_strictly_enclosed_by_another` 抓到（该测试先红在恰好这 8 件上，
+    // 每条被两个包住者各列一次 ⇒ 16 行；修好后转绿）。
+    //
+    // 修法沿用本仓定过的规则（`city.rs:921-928` 喷泉那条）：**面高出台沿，一个空洞都不留**。
+    // 玻璃顶面 = 挡边顶(h+0.22) + RELIEF_STEP(0.14) = h+0.36 ⇒ 高出屋面 0.36m，
+    // 读作工业建筑常见的**凸起采光带**；下沉式采光井要真做，得把壳体拆成环，
+    // 那是碰撞与阴影分档的连锁改动，不该顺手塞在这里。
+    // 底面仍留在 h-0.55（埋进屋面以下），所以从上方看玻璃是有厚度的实体、不会与壳体共面。
     for k in [-1i32, 1] {
         let z = cz + k as f32 * (d * 0.26);
-        c.deco(Part::new(ObstacleKind::Block, cx, z, w - 6.0, 2.6, h - 0.55, h - 0.10, GLASS_BLUE));
+        c.deco(Part::new(ObstacleKind::Block, cx, z, w - 6.0, 2.6, h - 0.55, h + 0.36, GLASS_BLUE));
         for s in [-1.0f32, 1.0] {
             c.deco(Part::new(
                 ObstacleKind::Building,
@@ -1627,6 +1640,47 @@ mod city_layout_tests {
         assert!(m.decor.len() > 500, "装饰件只有 {}，细化没有落地", m.decor.len());
     }
 
+    /// 🔴 城市还必须装得进 **PT 的盒预算**——它是上面那条 8192 的**四分之一**，
+    /// 所以 8192 那条绿着，PT 照样可以已经在丢几何。
+    ///
+    /// 存在理由（2026-10-02，PROGRESS §45）：`PT_MAX_BOXES = 2048`，其中盒 0 固定给地面
+    /// （`renderer.rs:7085`）⇒ 可用 **2047**；而 `street_fight` 实测只有 1789 个可绘制
+    /// marker ⇒ **余量 258，约 13%**。这一族坑本仓已复发**三次**：2026-09-19 那次
+    /// `marker=1789 > 旧容量 1024` 静默丢了 765 个，原因是容量比对写在 `.take()` **之后**，
+    /// 告警闩永远不触发（`renderer.rs:7091-7093` 记着这件事）。
+    /// ⇒ 症状是**光栅一切正常、只有烘焙参照帧缺整块街区**，属于最难归因的那一类。
+    ///
+    /// 🔴 口径必须跟真实数据流一致（`main.rs:2536`）：PT 收的是 `render_geometry()`
+    /// **过滤掉 `Shape::None`** 之后的结果；上面那条 8192 测试数的是未过滤的
+    /// `obstacles + decor`，两者**不能互相代替**。弹孔弹痕不进 PT（它们是
+    /// `append_markers` 追加到渲染器内部的带上，见 §45）。
+    #[test]
+    fn generated_city_fits_pt_box_budget() {
+        /// 占领点每个占 2 个盒（立柱 + 底盘）；关卡系统下最多几个不好猜，留 16 个盒余量。
+        const CAPTURE_BOX_RESERVE: usize = 16;
+
+        let m = generate_city();
+        let drawn = m
+            .render_geometry()
+            .filter(|o| o.shape != Shape::None)
+            .count();
+        let budget = crate::engine::ray_tracer::PT_MAX_BOXES - 1 - CAPTURE_BOX_RESERVE;
+
+        assert!(
+            drawn <= budget,
+            "城市有 {drawn} 个可绘制 marker，超过 PT 盒预算 {budget} \
+             ⇒ PT 会丢掉尾部整块街区的几何（光栅不受影响，只有烘焙参照帧缺块）。\
+             要么提高 ray_tracer::PT_MAX_BOXES（注意 PT 顶点缓冲 = 盒数 × 24 × 32 B，\
+             提到 8192 就是 6 MB，得和显存预算一起算），要么缩小城市。"
+        );
+        // 防空转：口径若被改坏（比如过滤写错导致数为 0），上面那条会假绿
+        assert!(
+            drawn > 1000,
+            "只数到 {drawn} 个可绘制 marker（实测约 1789）⇒ \
+             `render_geometry()` 或 None 过滤出了问题，本测试已失去意义"
+        );
+    }
+
     /// 没有任何几何件是"大张纸片"： footprint 两个方向都超过 2m、**又悬在空中**的件，
     /// 厚度必须 ≥ 20cm。旧版 0.12m × 6.8m 的灯杆/窗带/贴皮就是这么混进场景的。
     /// 埋进地里的薄板不在此列——人行道抬台就是 14cm 厚的铺装，它的底面看不见，
@@ -1973,6 +2027,129 @@ mod city_layout_tests {
                 );
             }
         }
+    }
+
+    /// 没有任何一件被另一件**三轴严格包住**。
+    ///
+    /// 为什么这条值得钉死：本引擎**没有 CSG，主 pass 是全不透明管线**
+    /// （`build.rs` 里 marker 分支明确写着不引入 alpha 混合）。所以一件被实心件
+    /// 完整包住时，它**一个像素都不会画**——**不报错、不警告，只是东西没了**。
+    ///
+    /// 这条已经真实咬过一次：仓库"下沉式天窗"的玻璃
+    /// （`city.rs:720`：`w-6.0 × 2.6`、顶面 `h-0.10`）三轴都在壳体
+    /// （`city.rs:711`：`UNDER_GROUND..h`、占满 `w × d`）内部 ⇒ **4 座仓库 × 2 条
+    /// = 8 块玻璃完全不显示**，而注释还写着"有真实进深，不是贴皮"。
+    /// 更糟的是 `no_degenerate_geometry`（只查最小轴）、
+    /// `decor_is_either_buried_or_attached`（`bottom >= 3.0` 直接豁免，天窗底在 7.4~10.5m）、
+    /// `decor_never_coincides_with_structure`（只拒**逐字节相同**的盒）**三条全都不拦它**。
+    ///
+    /// 判据本身可校准：先让它**红**，红名单必须恰好是这 8 件；修好后转绿。
+    /// 一条永远不会红的"包住检测"没有意义（教训 27：判据必须能红）。
+    #[test]
+    fn no_part_strictly_enclosed_by_another() {
+        // 收缩量：包住判定要求内件每轴都留出这个余量，避免"齐平贴皮"被误报
+        //（贴皮件与本意相同：它就是画在表面上的一层，不该算被吞掉）。
+        const MARGIN: f32 = 0.05;
+        let m = generate_city();
+        let parts: Vec<_> = m.render_geometry().collect();
+        let mut bad: Vec<String> = Vec::new();
+        for (i, a) in parts.iter().enumerate() {
+            if a.shape.tag() == Shape::TAG_NONE {
+                continue; // 只碰撞不绘制的结构碰撞核，本来就不该出现
+            }
+            for (j, b) in parts.iter().enumerate() {
+                if i == j || b.shape.tag() == Shape::TAG_NONE {
+                    continue;
+                }
+                let inside = a.x - a.half_w > b.x - b.half_w + MARGIN
+                    && a.x + a.half_w < b.x + b.half_w - MARGIN
+                    && a.z - a.half_d > b.z - b.half_d + MARGIN
+                    && a.z + a.half_d < b.z + b.half_d - MARGIN
+                    && a.y - a.half_h > b.y - b.half_h + MARGIN
+                    && a.y + a.half_h < b.y + b.half_h - MARGIN;
+                if inside {
+                    bad.push(format!(
+                        "#{} {:?} {:.2}x{:.2}x{:.2} @({:.1},{:.1}) y={:.2}  被  #{} {:?} {:.2}x{:.2}x{:.2} @({:.1},{:.1}) y={:.2} 完整包住",
+                        i, a.kind, a.half_w * 2.0, a.half_d * 2.0, a.half_h * 2.0, a.x, a.z, a.y,
+                        j, b.kind, b.half_w * 2.0, b.half_d * 2.0, b.half_h * 2.0, b.x, b.z, b.y
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} 件被别的件完整包住 ⇒ 它们一像素都不画：\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
+
+    /// 砌块皮肤尺寸门（`build.rs::MASONRY_MIN_SPAN = 1.5`）两侧必须留有空档。
+    ///
+    /// 皮肤自 §22.4b 起按世界尺度采样，tile 是 1.6×0.8m 的砌块立面，于是"面上出现砂浆缝"
+    /// 就成了**对材质的一句断言**。0.34m 直径、0.9m 高的石质护柱因此被画成"刷了条纹的
+    /// 柱子"（实机取证 `mat_bollard_b.png`，十字准星正中）⇒ 最长轴 < 1.5m 的 marker 不发皮肤。
+    ///
+    /// 1.5 **不是调出来的数**：实测全城 1789 件可见 marker 里，被拦下的最大件 1.45m、
+    /// 放行的最小件 2.20m，中间 0.75m 一个件都没有 ⇒ 阈值取在 (1.45, 2.20) 内任何一处，
+    /// 画面逐件相同。这条断言钉的就是这个空档：**以后任何人往空档里放东西**（一根 1.6m
+    /// 的石栏杆柱、一面 1.3m 的砖矮墙都会撞）**就必须在这里重新判断它该不该穿砌块皮肤**，
+    /// 而不是等实机截图上出现半道被切断的砂浆缝才发现。
+    #[test]
+    fn masonry_skin_gate_leaves_an_empty_band() {
+        // 与 build.rs 的 MASONRY_MIN_SPAN 同值；两处不一致时本测试失去意义。
+        const GATE: f32 = 1.5;
+        // 任何一件的跨度都不许贴到阈值这么近以内（实测最近的是 1.45，余量 0.05）。
+        const MARGIN: f32 = 0.04;
+        let m = generate_city();
+        let mut gated = 0usize;
+        let mut hi_gated = 0.0f32;
+        let mut lo_kept = f32::MAX;
+        let mut too_close: Option<(f32, String)> = None;
+        for o in m.render_geometry() {
+            // 只碰撞不绘制的结构碰撞核：GPU 侧根本看不到它，不参与皮肤分派。
+            if o.shape.tag() == Shape::TAG_NONE {
+                continue;
+            }
+            // 与 shader 的 marker_span 同式。模板半幅只有圆柱的 Y 轴是 0.5，而实例缩放
+            // = 半尺寸 ÷ 模板半幅，两者在"全尺寸"上恰好抵消 ⇒ 三轴一律取 2*half。
+            // ⚠ 别在最外面再乘 2：`half_* * 2.0` 已经是全尺寸。第一版就是这么错的
+            //   （写成 `2.0 * max(2*hw, …)` ⇒ 跨度全部翻倍 ⇒ 1.5m 的门限悄悄变成 0.75m，
+            //   拦下 264 件而不是上面那个 536 件）。是"件数与独立测得的 536 对不上"
+            //   才把它抓出来——**判据必须来自独立测量，不能就地调成代码算出的数**。
+            let span = (o.half_w * 2.0).max((o.half_h * 2.0).max(o.half_d * 2.0));
+            if (span - GATE).abs() < MARGIN {
+                too_close = Some((
+                    span,
+                    format!("@({:.1},{:.1}) y={:.2} {:?}", o.x, o.z, o.y, o.kind),
+                ));
+            }
+            if span < GATE {
+                gated += 1;
+                hi_gated = hi_gated.max(span);
+            } else {
+                lo_kept = lo_kept.min(span);
+            }
+        }
+        // 拦下的件数下界：街道设施（护柱/消防栓/灯柱底座/柱帽柱础/反光柱）一共 500+ 件。
+        // 这一条防的是"这道门悄悄失效"——比如有人把 marker_span 改成恒返回 10，画面会
+        // 逐像素回到修复前，而上面那条空档断言仍然成立。
+        assert!(
+            gated > 300,
+            "被尺寸门拦下的 marker 只有 {gated} 件 ⇒ 护柱/消防栓/柱帽这批街道设施本该全在里面，\
+             检查 build.rs 的 marker_span 与 MASONRY_MIN_SPAN 是否被改坏"
+        );
+        if let Some((span, where_)) = too_close {
+            panic!(
+                "有 marker 的跨度贴到阈值 {GATE}m 的 ±{MARGIN}m 之内（实测 {span:.2}m，{where_}）\
+                 ⇒ 1.5m 从「空档中点」退化成临界值：必须重新判断这一件该不该穿砌块皮肤，\
+                 并把阈值挪到新空档的中点",
+            );
+        }
+        assert!(
+            hi_gated < GATE && lo_kept > GATE,
+            "阈值两侧都得有件才说得清空档：拦下最大 {hi_gated:.2}m / 放行最小 {lo_kept:.2}m"
+        );
     }
 
     /// 悬空的几何件必须"挂在"别的件上：水平方向重叠，且底面落在对方竖直跨度内
@@ -2353,5 +2530,81 @@ mod city_layout_tests {
             if ratio < 0.8 { "  ← 明显不对称" } else { "  （大致对称）" }
         );
         assert!(stats[0].0 > 0 && stats[1].0 > 0, "没有采样到出生点");
+    }
+
+    /// 立面"层相位"的**垂直同源**：`build.rs` 生成的 WGSL 用 `FLOOR_H` / `BAND_LO` /
+    /// `BAND_HI` 排布层带暗纹与壁柱，必须与 `city.rs` 真实窗带几何一致。
+    ///
+    /// `build.rs:619` 的注释自己就写着：「⚠ FLOOR_H 必须等于 city.rs 的 FLOOR_H（3.15m）…
+    /// 着色器里的"层相位"若与它不同步，暗带就会画在**看得见的**混凝土裙墙和层线上…
+    /// → 整栋楼被切成一道亮一道黑的空框架」，并记了一次事故（旧值 3.0m ⇒ 每层错 0.15m，
+    /// 20 层累积 3m ≈ 一整层）。⇒ 这是一条**声明过、出过事、却依然没有守卫**的不变量，
+    /// 与 §40 拆掉的那两条假守卫同族。本测试把三方等式全部从**真实源码解析**后对齐，
+    /// 不抄任何数字（抄数字就是假守卫的形状）。
+    #[test]
+    fn facade_band_geometry_matches_the_shader_phase_constants() {
+        let build = include_str!("../../build.rs");
+        let own = include_str!("city.rs");
+
+        /// 读 `const NAME: f32 = V;`（build.rs 与 city.rs 都是这个写法）。
+        fn f32_const(src: &str, name: &str, what: &str) -> f32 {
+            let needle = format!("const {}: f32 = ", name);
+            let at = src
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{what} 里找不到 `{needle}`（改名或被删了？）",));
+            number_after(&src[at + needle.len()..], what, &needle)
+        }
+
+        /// 从 `src` 开头解析一个浮点字面量。
+        fn number_after(src: &str, what: &str, ctx: &str) -> f32 {
+            let b: Vec<char> = src.chars().collect();
+            let mut i = 0;
+            while i < b.len() && (b[i] == '-' || b[i].is_ascii_digit() || b[i] == '.') {
+                i += 1;
+            }
+            let tok: String = b[..i].iter().collect();
+            tok.parse::<f32>()
+                .unwrap_or_else(|_| panic!("{what} 在 `{ctx}` 之后不是数字：{tok:?}"))
+        }
+
+        /// 找到 `needle` 后紧跟的浮点字面量（用于 city.rs 里的换算量）。
+        fn number_after_text(src: &str, needle: &str, what: &str) -> f32 {
+            let at = src
+                .find(needle)
+                .unwrap_or_else(|| panic!("{what} 里找不到 `{needle}`：窗带几何被改写了？"));
+            number_after(&src[at + needle.len()..], what, needle)
+        }
+
+        let shader_floor = f32_const(build, "FLOOR_H", "build.rs");
+        let shader_lo = f32_const(build, "BAND_LO", "build.rs");
+        let shader_hi = f32_const(build, "BAND_HI", "build.rs");
+
+        let cpu_floor = FLOOR_H;
+        // city.rs:440-441  band_base = fy + 0.62 ; band_top = (fy + FLOOR_H - 0.42).min(...)
+        let cpu_lo = number_after_text(own, "let band_base = fy + ", "city.rs band_base");
+        let cpu_hi_gap = number_after_text(own, "fy + FLOOR_H - ", "city.rs band_top");
+        let cpu_hi = cpu_floor - cpu_hi_gap;
+
+        assert!(
+            (shader_floor - cpu_floor).abs() < 1e-6,
+            "build.rs 的 FLOOR_H = {shader_floor} 与 city.rs 的 {cpu_floor} 不同步：\
+             每层差 {:.3} m ⇒ 暗带会画在混凝土裙墙上，整栋楼变成一道亮一道黑的空框架",
+            (shader_floor - cpu_floor).abs()
+        );
+        assert!(
+            (shader_lo - cpu_lo).abs() < 1e-6,
+            "build.rs BAND_LO = {shader_lo} 与 city.rs 的 band_base 偏移 {cpu_lo} 不同步"
+        );
+        assert!(
+            (shader_hi - cpu_hi).abs() < 1e-6,
+            "build.rs BAND_HI = {shader_hi} 与 city.rs 的 band_top（{cpu_floor} - {cpu_hi_gap} \
+             = {cpu_hi}）不同步"
+        );
+        // 防空转：若哪天把 needle 改成匹配不到而 panic 固然好，但改成匹配到**同一处**也会假绿
+        assert!(
+            (cpu_hi - cpu_lo).abs() > 0.5,
+            "窗带高度差只有 {} m，解析口径可疑（实测应约 2.11 m）",
+            (cpu_hi - cpu_lo).abs()
+        );
     }
 }

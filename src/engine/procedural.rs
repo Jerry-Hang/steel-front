@@ -622,17 +622,28 @@ pub fn generate_default_ground_detail_texture() -> Vec<u8> {
 /// 地面 mip 级数决定，同尺寸保证两套纹理 mip 级数完全一致，采样器参数直接复用。
 pub const SKIN_TEXTURE_SIZE: u32 = 512;
 
+/// 🔴 砌块在**一个 tile 内**的行数与列数。二者与 tile 的世界尺寸（`pt_panorama.glsl`
+/// 的 `SKIN_TILE_M`、`build.rs` 片元里的同名字面量）共同决定**砖的真实尺寸**：
+/// `砖宽 = tile.x / 列数`、`砖高 = tile.y / 行数` ⇒ 现值 1.6/4 = 0.4m、0.8/4 = 0.2m。
+/// 必须具名：原来列数是个裸字面量 `4.0`，改它不会让任何测试变红，
+/// 而光栅与 PT 采样**同一张纹理** ⇒ 改错了是"两边一致地错"，肉眼很难归因。
+/// 判据见 `brick_world_size_matches_the_documented_tile`。
+pub const SKIN_BRICK_ROWS: f32 = 4.0;
+pub const SKIN_BRICK_COLS: f32 = 4.0;
+
 /// 障碍物（marker）皮肤：中性灰混凝土砌块墙。
 /// 浅灰底 + 砌块横排错缝（砂浆缝）+ 骨料噪点 + 水渍/风化暗斑（确定性纯函数）。
 /// 设计（2026-08-22）：纹理只供「表面细节/凹凸感」，颜色由障碍 tint 主导
 /// （shader mix 权重 0.45）→ 墙=混凝土、树=绿色细节、集装箱=彩色细节共用此皮肤。
 fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
-    // 砌块横排错缝：4 行 × 4 列（UV 0..1 内；上行与下行错半块）
-    let rows = 4.0f32;
+    // 砌块横排错缝（UV 0..1 内；上行与下行错半块）。
+    // 🔴 行/列数一律取 `SKIN_BRICK_*`，不许再写裸字面量——砖的真实世界尺寸
+    //    = `SKIN_TILE_M` ÷ 行列数，三者有一处没同步就会"两边一致地错"（见常量文档）。
+    let rows = SKIN_BRICK_ROWS;
     let vv = v * rows;
     let row = vv.floor().min(rows - 1.0) as i32;
     let off = if row % 2 == 0 { 0.0 } else { 0.5 };
-    let fu = (u * 4.0 + off).fract();
+    let fu = (u * SKIN_BRICK_COLS + off).fract();
 
     // 砂浆缝：块边缘 0.06 宽暗缝（水平缝 + 垂直缝）
     let u_edge = fu.min(1.0 - fu);
@@ -751,6 +762,68 @@ pub fn generate_default_npc_skin_texture() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 砖的世界尺寸 = `SKIN_TILE_M` ÷ 行列数，必须等于注释承诺的 **0.4 × 0.2 m**。
+    ///
+    /// 存在理由（2026-10-02）：行数、列数、tile 世界尺寸这三组数**分别写在三个地方**
+    /// （本文件的 `SKIN_BRICK_ROWS/COLS`、`pt_panorama.glsl` 的 `SKIN_TILE_M`、
+    /// `build.rs` 片元里的同名字面量），而砖的真实尺寸只有它们的**商**才有意义。
+    /// 原来列数还是个裸字面量 `4.0` ⇒ 把行数改成 8，砖立刻从 0.4×0.2 变成 0.4×0.1，
+    /// 而**光栅与 PT 采样同一张纹理 ⇒ 两边一致地错**：现有 substring 守卫全绿、肉眼也难归因。
+    ///
+    /// 自检（教训 27：判据必须能红）：两处 tile 字面量**必须真的被解析到**，
+    /// 解析不到直接 panic，绝不"没测到就当通过"（§31.6 刚栽过一次）。
+    #[test]
+    fn brick_world_size_matches_the_documented_tile() {
+        const EXPECT_BRICK_W: f32 = 0.4;
+        const EXPECT_BRICK_H: f32 = 0.2;
+
+        // 以 PT 的**具名常量**为 tile 的源（它比 build.rs 里的裸字面量更可寻址）
+        let glsl = include_str!("../../assets/rt/pt_panorama.glsl");
+        let marker = "SKIN_TILE_M = vec2(";
+        let at = glsl
+            .find(marker)
+            .expect("`pt_panorama.glsl` 里找不到 `SKIN_TILE_M = vec2(` ⇒ 改名了，本测试需同步");
+        let rest = &glsl[at + marker.len()..];
+        let end = rest.find(')').expect("`SKIN_TILE_M` 的 vec2 没有右括号");
+        let mut parts = rest[..end].split(',');
+        let tile_w: f32 = parts
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .expect("SKIN_TILE_M 的 x 不是数字");
+        let tile_h: f32 = parts
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .expect("SKIN_TILE_M 的 y 不是数字");
+
+        // build.rs 片元里必须出现**同一组**字面量，否则两侧砖尺度已经分叉
+        let build = include_str!("../../build.rs");
+        let lit = format!("vec2<f32>({}, {})", tile_w, tile_h);
+        assert!(
+            build.contains(&lit),
+            "build.rs 里找不到与 PT 同值的 tile 字面量 `{}` ⇒ 光栅与 PT 的砖尺度已经分叉",
+            lit
+        );
+
+        let brick_w = tile_w / SKIN_BRICK_COLS;
+        let brick_h = tile_h / SKIN_BRICK_ROWS;
+        assert!(
+            (brick_w - EXPECT_BRICK_W).abs() < 1e-6,
+            "砖宽 = tile.x {} ÷ 列数 {} = {:.4}，与文档承诺的 {} m 不符",
+            tile_w,
+            SKIN_BRICK_COLS,
+            brick_w,
+            EXPECT_BRICK_W
+        );
+        assert!(
+            (brick_h - EXPECT_BRICK_H).abs() < 1e-6,
+            "砖高 = tile.y {} ÷ 行数 {} = {:.4}，与文档承诺的 {} m 不符",
+            tile_h,
+            SKIN_BRICK_ROWS,
+            brick_h,
+            EXPECT_BRICK_H
+        );
+    }
 
     /// 宏观地面噪声的格距下限必须真的是 **5 个纹素**（本纹理 2 纹素/米 ⇒ 2.5m），
     /// 且 [`ground_noise`] 真的在执行它。
@@ -1241,17 +1314,53 @@ mod tests {
     }
 
     /// 细节层的纹素密度必须与 build.rs 的 `GROUND_DETAIL_TEXEL_M` 一致：
-    /// 那个常量写死为 `2.0 / 256`，片元据此选显式 mip。不同步 = 每个距离都错一级 mip。
+    /// 片元据此选显式 mip，不同步 = 每个距离都错一级 mip。
+    ///
+    /// 🔴 2026-10-02 拆掉一条**假守卫**：原来这里写死
+    /// `const SHADER_TEXEL_M: f32 = 0.0078125; // build.rs: GROUND_DETAIL_TEXEL_M`
+    /// —— 拿一个**冻结字面量**当作"着色器里的值"。改 `build.rs:203` 那个常量，
+    /// 本测试**照样绿**，而它的名字却自称 "matches shader constant"。
+    /// ⇒ 现在真的去读 `build.rs` 文本并求值（支持 `a / b` 写法），
+    ///   两侧一旦分叉立刻红；表里那个数被删掉/改名也直接 panic，不会空过。
     #[test]
     fn ground_detail_texel_size_matches_shader_constant() {
-        const SHADER_TEXEL_M: f32 = 0.0078125; // build.rs: GROUND_DETAIL_TEXEL_M
+        /// 从 build.rs 读出 `const NAME: f32 = <expr>;`，允许 `2.0 / 256` 这种一次除法。
+        fn shader_f32_const(src: &str, name: &str) -> f32 {
+            let needle = format!("const {}: f32 = ", name);
+            let at = src.find(&needle).unwrap_or_else(|| {
+                panic!("build.rs 里找不到 `const {}: f32`（改名或被删了？）", name)
+            });
+            let rest = &src[at + needle.len()..];
+            let end = rest
+                .find(';')
+                .unwrap_or_else(|| panic!("`{}` 的声明没有分号结尾", name));
+            let text: String = rest[..end].chars().filter(|c| !c.is_whitespace()).collect();
+            match text.find('/') {
+                Some(slash) => {
+                    let num: f32 = text[..slash]
+                        .parse()
+                        .unwrap_or_else(|_| panic!("`{}` 的分子 `{}` 不是数字", name, text));
+                    let den: f32 = text[slash + 1..]
+                        .parse()
+                        .unwrap_or_else(|_| panic!("`{}` 的分母 `{}` 不是数字", name, text));
+                    assert_ne!(den, 0.0, "`{}` 的分母为 0", name);
+                    num / den
+                }
+                None => text
+                    .parse()
+                    .unwrap_or_else(|_| panic!("`{}` 的值 `{}` 不是数字", name, text)),
+            }
+        }
+
+        let build = include_str!("../../build.rs");
+        let shader_texel = shader_f32_const(build, "GROUND_DETAIL_TEXEL_M");
         let size = GROUND_DETAIL_SIZE;
         let metres = GROUND_DETAIL_METRES;
         let texel = metres / size as f32;
         assert!(
-            (texel - SHADER_TEXEL_M).abs() < 1e-9,
+            (texel - shader_texel).abs() < 1e-9,
             "procedural.rs 的 {metres}/{size} = {texel} 与 build.rs \
-             GROUND_DETAIL_TEXEL_M = {SHADER_TEXEL_M} 不一致：改一边必须改另一边，\
+             GROUND_DETAIL_TEXEL_M = {shader_texel} 不一致：改一边必须改另一边，\
              否则地面细节层的 mip 选择整体偏移一档"
         );
         // 倍频必须整除边长，否则 periodic_noise 取模后格点接不上
@@ -1262,5 +1371,105 @@ mod tests {
                 "细节层倍频 {cells} 不整除边长 {size}：tile 平铺会有接缝"
             );
         }
+    }
+
+    /// 地面 UV 映射是**三方共享**的事实：CPU 生成的纹理（`WORLD_HALF`）、光栅片元
+    /// （`build.rs`）、PT 采样（`assets/rt/pt_panorama.glsl`）必须同用
+    /// `uv = (xz + WORLD_HALF) / (2 * WORLD_HALF)`。
+    ///
+    /// 两个着色器里它是**裸字面量**（`256.0` / `512.0`）。改 `WORLD_HALF` 会让两侧**同时**错，
+    /// 而 PT 与光栅彼此仍然一致 ⇒ PT↔光栅分区对照表**抓不到**，只有地面皮肤尺度悄悄走形。
+    /// 所以这条守卫必须把三方一起钉住，而不是只比 PT 与光栅。
+    /// `build.rs` 里的 WGSL 存在多份副本（槽位常量那组就是 2 份），故对**每一处**出现都取值。
+    #[test]
+    fn ground_uv_mapping_is_shared_by_cpu_raster_and_pt() {
+        /// 从 `s` 里取第一个"独立数字"（前面不是字母/数字/下划线），
+        /// 这样 `vec2<f32>` 里的 2 与 32 不会被误当成数值。
+        fn first_float(s: &str, what: &str, role: &str) -> f32 {
+            let b: Vec<char> = s.chars().collect();
+            for i in 0..b.len() {
+                let prev_ident = i > 0 && (b[i - 1].is_alphanumeric() || b[i - 1] == '_');
+                if !b[i].is_ascii_digit() || prev_ident {
+                    continue;
+                }
+                let mut j = i;
+                while j < b.len() && (b[j].is_ascii_digit() || b[j] == '.') {
+                    j += 1;
+                }
+                let tok: String = b[i..j].iter().collect();
+                return tok
+                    .parse::<f32>()
+                    .unwrap_or_else(|_| panic!("{what} 的{role}不是数字：{tok:?}"));
+            }
+            panic!("{what} 找不到{role}数字：{s}")
+        }
+
+        /// 取出 `+ vec2...(OFF)` 的偏移与 `) / DIV` 的除数。
+        fn uv_pair(line: &str, what: &str) -> (f32, f32) {
+            let plus = line
+                .find("+ vec2")
+                .unwrap_or_else(|| panic!("{what} 的地面 UV 不是 `+ vec2(...)` 形式：{line}"));
+            let off = first_float(&line[plus..], what, "偏移");
+            let dpos = line
+                .find(") /")
+                .or_else(|| line.find(")/"))
+                .unwrap_or_else(|| panic!("{what} 的地面 UV 没有 `/ 除数`：{line}"));
+            (off, first_float(&line[dpos..], what, "除数"))
+        }
+
+        /// 对 needle 的**每一处**出现取值，并要求它们彼此一致。
+        fn all_pairs(src: &str, needle: &str, what: &str) -> Vec<(f32, f32)> {
+            let mut out = Vec::new();
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find(needle) {
+                let at = from + rel;
+                let end = src[at..]
+                    .find('\n')
+                    .map(|k| at + k)
+                    .unwrap_or(src.len());
+                out.push(uv_pair(&src[at..end], what));
+                from = end;
+            }
+            assert!(
+                !out.is_empty(),
+                "{what} 里找不到 `{needle}`：地面 UV 映射被改名或删了？"
+            );
+            assert!(
+                out.iter().all(|p| *p == out[0]),
+                "{what} 里地面 UV 的多份副本互不一致：{out:?}"
+            );
+            out
+        }
+
+        let build = include_str!("../../build.rs");
+        let pt = include_str!("../../assets/rt/pt_panorama.glsl");
+        let raster = all_pairs(build, "world_uv = (input.world_pos.xz", "build.rs 光栅片元");
+        let pts = all_pairs(pt, "textureLod(GroundTex, (hitPos.xz", "PT 着色器");
+
+        let half = WORLD_HALF;
+        let span = 2.0 * WORLD_HALF;
+        for (name, pairs) in [("光栅", &raster), ("PT", &pts)] {
+            let (off, div) = pairs[0];
+            assert!(
+                (off - half).abs() < 1e-4,
+                "{name} 的地面 UV 偏移 = {off}，与 CPU 侧 WORLD_HALF = {half} 不符：\
+                 改 WORLD_HALF 必须同时改两个着色器里的字面量"
+            );
+            assert!(
+                (div - span).abs() < 1e-4,
+                "{name} 的地面 UV 除数 = {div}，应为 2*WORLD_HALF = {span}"
+            );
+        }
+        assert_eq!(
+            raster.len(),
+            pts.len(),
+            "光栅与 PT 的地面 UV 副本数不同：光栅 {raster:?} / PT {pts:?}"
+        );
+        let (ro, rd) = raster[0];
+        let (po, pd) = pts[0];
+        assert!(
+            (ro - po).abs() < 1e-4 && (rd - pd).abs() < 1e-4,
+            "光栅与 PT 的地面 UV 映射分叉：光栅 ({ro},{rd}) / PT ({po},{pd})"
+        );
     }
 }
