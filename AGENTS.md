@@ -36,7 +36,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `engine/renderer.rs` | 15628 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
 | `engine/game.rs` | 10505 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
 | `main.rs` | 4465 | GameApp + winit 事件循环 + 输入/光标捕获 + 枪模姿态 |
-| `audio.rs` | 2919 | 合成音效与音乐（`audio_out.rs` 是 waveOut 输出层） |
+| `audio.rs` | 2919 | 合成音效与音乐（`audio_out.rs` = 输出层：waveOut / ALSA） |
 | `ui.rs` | 2833 | HUD / 菜单 / 设置 / 键位表 |
 | `engine/city.rs` | 2357 | 程序化城市生成（40+ 条几何/契约测试） |
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
@@ -66,7 +66,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 ## 开发环境
 
 > **环境铁律（勿回退）**：开发/验证 = **Windows** 或 **Linux 原生**（2026-09-28 并存，坑不互替）；
-> WSL2 材料**全部作废**。Linux 侧见 **`docs/linux-native.md`**。
+> WSL2 材料**全部作废**。Linux 侧见 **`docs/linux-native.md`**（**命令在 §10–§15**，入口 `SteelFront.sh`）。
 
 - **机器**：**ASUS TUF FA608PM**（BIOS FA608PM.309）+ RTX 5060 Laptop + AMD 8940HX，内存 12GB。
   🔴 **混合输出**：面板 2560x1600@165 挂在 **AMD 610M**（2 CU 核显）上，独显 `display_attached=No`
@@ -143,9 +143,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - `Shape::Authored`（`tint.w = 6.0`）→ `flat_flag = 1.25`，跳过四条程序化表面效果
   （`window_dark` / `glass_shade`+菲涅尔 / `is_canopy` 值噪声 / marker 混凝土皮肤）。
   **不接这条，GLB 立面会被再画一层错位窗带（D11 重演）**。
-- **调试/材质开关**：`RV3D_PROC_TEX=0` 关程序化贴图（见铁律 D）、`RV3D_NO_SHADOW=1` 关阴影、
-  `RV3D_DEBUG_SHADOW=1` 看 R=frag_depth / G=阴影图深度均值（见上）、`RV3D_SKIN_TEX=0` 关皮肤贴图
-  （缺省开）、`RV3D_INSPECT=1` 检视模式（实例矩阵用 `Mat4::IDENTITY`）。
+- **调试/材质开关**（`RV3D_DEBUG_SHADOW` 见上条）：`RV3D_PROC_TEX=0` 关程序化贴图（铁律 D）、
+  `RV3D_NO_SHADOW=1` 关阴影、`RV3D_SKIN_TEX=0` 关皮肤贴图（缺省开）、`RV3D_INSPECT=1` 检视模式。
   （编码见上条 `flat_flag`；binding 7/8。）
 
 **地面**
@@ -397,8 +396,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 程序化贴图（勿回退）：写 `R8G8B8A8_SRGB` 前必须 linear→sRGB 编码；材质分域用**世界尺度**
   value_noise（biome ~120m、detail ~10m），旧 `fbm(x*0.025)`（2560m）会致整图单色；
   `RV3D_PROC_TEX=0` 回退做 A/B；`MARKER_INSTANCE_BASE=65537`；片元用 world-space UV。
-- `SteelFront.bat` 的 touch 列表**必须含 `build.rs` 与 `build_spv_rt.rs`**
-  （只改着色器/构建脚本时 cargo 静默不重编 = 启动旧版本；该 bat 自带这一段说明）。
+- `SteelFront.bat` / `SteelFront.sh` 的 touch 列表**必须含 `build.rs` 与 `build_spv_rt.rs`**（否则改着色器后 cargo 静默不重编 = 启动旧版本）。
 
 ### ⭐ 设计化建模链路（2026-09-12 建立，取代 `gen_props.py::asset_building`）
 
@@ -504,9 +502,6 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - `cargo clippy --fix` 在本仓**不可用**（build.rs 代码生成缓存行为，反复提示却不改字节），别再试。
 
 ### 常用命令
-
-> 🔴 本节是 **Windows 侧**命令；**Linux 原生对等命令见 `docs/linux-native.md` §10–§15**
-> （入口 `SteelFront.sh`，退出码同为三态 0/1/2）。
 
 ```powershell
 cargo build --release
@@ -629,7 +624,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 
 ## 教训清单（跨迭代去重合并）
 
-> 46 条编号 / 45 条内容（`23` 已并入 `8`，编号沿用历史、不复用），每条都真的付过代价。**只留可执行的判据**，案例细节见 `docs/PROGRESS.md`。
+> 46 条编号 / 44 条内容（`23` 已并入 `8`、`35` 已并入 `43`，编号沿用历史、不复用），每条都真的付过代价。**只留可执行的判据**，案例细节见 `docs/PROGRESS.md`。
 
 1. **新结论与旧约束冲突时，必须删掉旧的那条**（本文件曾同时存在同一铁律的"错误版 + 更正版"）。
 2. **先读文档，再动手**（曾花大半天重新发现用户三天前写下的结论）。
@@ -664,7 +659,6 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 32. **"整类地改"只能否证、不能定位**（工具与半径判据见教训 17）。
 33. **🔴 论及资产是否"合理"前先走完证据链**：名字 → `glb_probe.py` 尺寸 → 生成器规格表（连错三轮）。
 34. **🔴 参数语义要读注释，别靠"同一套网格"外推**；另一面：**观感改善只能证明"改动有效果"，不能证明"数值变对了"**。
-35. **同一份代码跑两次的差异**：见教训 43（含量底噪的工具与口径）。
 36. **🔴 「工具跑不起来」本身就是一条要修的缺陷**（验证层曾因 mesh.spv 被拒而灰屏、被写成"已知限制"后再没人开过 ⇒ 那期间的渲染改动都没兜底）。**⇒ 任何"工具用不了"都要当场问根因，修好后的第一个动作就是重跑它。**
 37. **🔴 截图是「崩溃前的最后一帧」**："改动毫无效果"之前先 grep `has been lost` / `panicked`（两张 A/B 图都可能是设备 lost 后不再更新的死画面）。
 38. **🔴 时间步相关判据不要拿"刚出生的物体"去比**：`y <= ground + 0.05` 对脚底出手的手榴弹在 ≥108fps 时恒真 ⇒ 原地引爆。**⇒ 凡 `spawn → 第一帧就判落地/越界/自碰`，先问"dt 缩小 10 倍还成立吗"，并让测试跑多个帧率档。**
