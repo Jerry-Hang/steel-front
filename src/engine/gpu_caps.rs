@@ -1,6 +1,10 @@
-//! GPU 硬件能力探测：在 WSLg/dzn（Vulkan-on-D3D12 转译）视角下判定
-//! 光追（RT Core）、Tensor Core/协作矩阵、DLSS 私有扩展的可用性，
+//! GPU 硬件能力探测：判定光追（RT Core）、Tensor Core/协作矩阵、DLSS 私有扩展的可用性，
 //! 供"是否迁移环境 / 如何打通光追与 DLSS 路径"决策。
+//!
+//! 🔴 环境（2026-09-28 起，见 AGENTS.md 环境铁律）：开发/验证 = **Windows 原生**或
+//! **Linux 原生**，两者并存、坑不互替。本模块历史上是为 **WSLg/dzn**
+//! （Vulkan-on-D3D12 转译）写的 —— **那段材料已全部作废**，别再按它解释这里的输出。
+//! 探测逻辑本身与平台无关（枚举扩展 + 查特性 + 试建设备），在原生两边照常使用。
 //!
 //! 判定逻辑：
 //! - 枚举 device 扩展，按 光追 / 协作矩阵 / DLSS 私有 / 其它 分类；
@@ -41,7 +45,7 @@ pub fn log_gpu_hardware_caps(
     physical_device: vk::PhysicalDevice,
     device_name: &str,
 ) {
-    log::info!("gpu-caps: 设备 {} 硬件能力探测（WSLg/dzn 视角）", device_name);
+    log::info!("gpu-caps: 设备 {} 硬件能力探测", device_name);
 
     // 1. device 扩展枚举
     let ext_names: Vec<String> = unsafe {
@@ -188,7 +192,9 @@ pub fn log_gpu_hardware_caps(
     ];
     let cuda_ok = cuda_libs.iter().any(|p| std::path::Path::new(p).exists());
     log::info!(
-        "gpu-caps: CUDA 直通（Tensor Core 可编程访问）={}（libcuda in /usr/lib/wsl/lib）",
+        "gpu-caps: CUDA 直通（Tensor Core 可编程访问）={}\
+         （判据是 /usr/lib/wsl/lib 下有没有 libcuda —— **只有 WSL 才有这个路径**，\
+          原生 Windows / Linux 上这里恒为 false，不代表这台机器没有 CUDA）",
         cuda_ok
     );
     let dlss_vulkan_ok = has_ext(&ext_names, "VK_NVX_image_view_handle")

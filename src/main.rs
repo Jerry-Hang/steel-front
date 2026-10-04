@@ -2405,7 +2405,8 @@ impl GameApp {
     }
 
     /// F12 截图：调渲染器把当前帧保存到 <平台截图目录>/steel_front_<秒时间戳>.png
-    /// （Windows = 当前目录 screenshots/，非 Windows 沿用 /tmp 保持 WSL2 行为）
+    /// （Windows = 当前目录 screenshots/；Linux 原生写 /tmp —— 本条原写作"保持 WSL2 行为"，
+    ///   而 WSL2 材料已作废（AGENTS.md 环境铁律），落盘位置本身不变。）
     fn capture_screenshot(&mut self) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

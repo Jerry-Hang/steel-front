@@ -2041,7 +2041,8 @@ impl Renderer {
                 .collect()
         };
         // ---- 可选网格着色器路径：检测 VK_EXT_mesh_shader（仿 gpu_caps.rs 枚举模式）。
-        //      本机 WSLg/dzn 实测扩展缺失 → mesh_enabled=false，设备创建与今天逐字节一致。
+        //      设备没有 VK_EXT_mesh_shader 时 mesh_enabled=false，设备创建与旧代码逐字节一致。
+        //      （历史上这条是在 WSLg/dzn 上实测出来的缺失；那段环境已作废，但回退路径照旧有效。）
         //      支持时：扩展加入 enabled_extension_names，并把
         //      PhysicalDeviceMeshShaderFeaturesEXT(mesh_shader=true) 挂到 pNext 链
         //      （task_shader 不启用：本设计为纯 mesh 阶段，无 task 阶段）。
@@ -3453,7 +3454,7 @@ impl Renderer {
     /// - rasterization（Back cull + CLOCKWISE）/ depth / blend / viewport 与主管线完全一致；
     /// - pipeline layout 复用同一 descriptor set layout，仅追加 MESH_EXT push constant
     ///   （base_slot，16 字节）；传统管线共用同一 descriptor set layout 不受影响。
-    /// mesh_enabled=false（本机 WSLg/dzn）时直接返回，不加载 mesh.spv、不创建任何资源。
+    /// mesh_enabled=false（设备没有 VK_EXT_mesh_shader）时直接返回，不加载 mesh.spv、不创建任何资源。
     fn init_mesh_pipeline(&mut self) -> Result<(), String> {
         if !self.mesh_enabled {
             return Ok(());
