@@ -505,6 +505,9 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 
 ### 常用命令
 
+> 🔴 本节是 **Windows 侧**命令；**Linux 原生对等命令见 `docs/linux-native.md` §10–§15**
+> （入口 `SteelFront.sh`，退出码同为三态 0/1/2）。
+
 ```powershell
 cargo build --release
 cargo test --release
@@ -534,8 +537,6 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 ```
 
 ⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
-⚠ `scripts/play_cap.ps1` 已于 2026-09-12 删除（SetCursorPos + mouse_event 拿到焦点后不真正释放，
-正是用户报的鼠标死锁那一类；已由 cap_safe + pm_play + release_input 取代）。
 ---
 
 ## 铁律 G — 凭据 / 提交白名单（2026-09-22）

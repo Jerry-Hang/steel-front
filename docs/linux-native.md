@@ -90,8 +90,9 @@ scripts/install_git_hooks.sh --uninstall
 
 只在这三个变量**未设置**时补默认值，不覆盖用户的值。退出码 0=成功 / 1=失败 / **2=没跑成**。
 
-⚠️ **`smoke` / `package` 两个模式在 Linux 侧尚未实现，会 exit 2**（不是 0）——
-三态约定：不许把「没跑成」写成成功，也不许指向一个不存在的脚本。
+`smoke` 与 `package` 两个模式在 Linux 侧**都已实现**（分别转交 `scripts/smoke_linux.sh`
+与 `scripts/package_release.sh`，退出码原样带回）。三态约定贯穿到底：
+不许把「没跑成」写成成功，也不许指向一个不存在的脚本。
 
 ---
 
@@ -182,9 +183,36 @@ Windows 走 `winmm` 的 waveOut 直接 FFI；Linux 走 **`dlopen("libasound.so.2
 （看 `audio: ALSA PCM 设备 = ...`）。
 
 **判据（真机实测）**：`audio: ALSA 打开成功 48000Hz/2ch（队列目标 170666µs ≈ 4×2048 帧）`
-+ `VUID=0 panics=0`。⚠️ **尚未验证**：听感（本机没有能产生背压的设备可量部分写比例）。
-启动时出现过一次「缓冲已满，本帧 324 个样本被丢弃」的一次性告警 —— 是否只是启动瞬态、
-听感会不会断续**没有量到**，别当成已验证。若真断续，调 `queue_latency_us` 的队列长度即可。
++ `VUID=0 panics=0`。
+
+#### ✅ 听感已从「未验证」结案（2026-10-03，客观测量）
+
+此前一直挂着「听感没量到」。现在用**录 sink monitor + 逐 50ms RMS** 量了，
+并且**引擎计数与录音两条独立证据互相印证**：
+
+| 证据 | 结果 |
+|---|---|
+| **稳态段静音窗口**（t=4.5–30s，50ms 窗） | **0/534** ⇒ 没有任何 ≥0.2s 的连续静音 |
+| 中位电平 | **−30.4 dBFS**（有声、不削顶） |
+| 引擎「缓冲已满」告警 | 整轮 30s **只出现 1 次**，在 ALSA 打开后 1 秒 |
+| ALSA `xrun/underrun/EPIPE/ESTRPIPE/recover` | **0 次** |
+| `audio_us`（混音耗时） | 中位 **30µs** / 最大 86µs |
+
+⇒ **开局那次丢弃是「队列从空到满」的一次性瞬态，不是持续欠载。**
+分段看得很清楚：`t=0–2.0`（游戏未启动）40/40 静音且是 −180 dBFS 的**真数字静音**；
+`t=2.0–4.5`（引擎启动）12/50 静音；`t=4.5` 之后**一个静音窗口都没有**。
+
+复现方法（`parec` 录 sink monitor，30s 后逐窗算 RMS；注意**先录再启动游戏**，
+否则会把引擎启动窗口误判成丢帧 —— 我第一次就差点这么读）：
+
+```bash
+SINK=$(pactl list short sinks | awk '{print $2}' | head -1)
+parec -d "$SINK.monitor" --file-format=wav /tmp/audio_cap.wav &
+sleep 2 && RV3D_AUTOSTART=1 RV3D_AUTOFIRE=1 ./target/release/steel-front &
+sleep 30; pkill -x steel-front
+```
+
+若真出现断续，调 `queue_latency_us` 的队列长度即可（现为 4×2048 帧 ≈ 170ms）。
 
 ---
 
@@ -194,19 +222,71 @@ Windows 走 `winmm` 的 waveOut 直接 FFI；Linux 走 **`dlopen("libasound.so.2
   **没有** `default-features = false` —— X11/Wayland 两个后端都来自 winit 的**默认 feature**。
   谁加上 `default-features = false`，`main.rs` 的 `EventLoopBuilderExtX11` 与整个 Linux
   构建立刻断。**别加**，或者加了就把 feature 显式写全。
-- **`main.rs` 顶部的 `#![cfg_attr(not(windows), allow(dead_code))]`**：它当初的理由之一是
-  「CJK 字形表在非 Windows 明确回退成 `None`」—— 而那个回退**已证明是失效代码**
-  （见 §5.3）。⇒ 这条 blanket `allow` 的正当性**已经被削弱**，它会把真正的
-  dead code 一起藏住。**尚未清理**（清它要按编译器判据逐条过，别用文本匹配）。
-- **`queue_present` 没有上界**：本仓「所有 Vulkan 等待必须有上界」只覆盖了 acquire 与
-  fence。Wayland 下 FIFO 在没有 `wp_fifo_v1` 的合成器上**就是在 present 里阻塞等 frame
-  callback**，而不可见的 surface 收不到 frame callback ⇒ 最小化/切 workspace 可能冻结主循环。
-  **尚未修**。真机第一步：最小化 30 s 看进程是否还活着。
-- **RT 设备扩展随 `VK_EXT_mesh_shader` 无条件启用**：缺任一（`buffer_device_address` /
-  `deferred_host_operations` / `acceleration_structure` / `ray_query` /
-  `ray_tracing_pipeline`）时 `create_device` **直接失败 = 游戏起不来**，
-  而代码其实算出了缺失集合却只打 warn。`RV3D_GPU=igpu` 选 610M 时取决于 RADV 是否暴露 RT。
-  **尚未修**。
+- ✅ **`main.rs` 顶部的 blanket `allow(dead_code)` 已删除**（2026-10-03）。
+  它 2026-09-26 的理由是「非 Windows **只是只编译不运行**的交叉验证目标」——
+  **那个前提现在不成立了**：Linux 已是原生支持、而且要真的跑起来的平台
+  （就是这份文档），于是它会在 Linux 上**藏住真正的死代码**。
+
+  拆掉后实测浮出 **4 条，全在 `audio_out.rs`**（一次 `cargo build --release` 就够，
+  判据只看编译器、不做文本匹配）：
+  | 死代码 | 为什么没被接线 | 修法 |
+  |---|---|---|
+  | `WaveOutSink` 的 3 个字段/`new` | 它只在 Windows 上被构造（`DefaultSink` 在 Linux 是 `AlsaSink`）；原来**只有字段**带 cfg，结构体与 impl 在 Linux 上也编 ⇒ 整条链没人用 | 整个 `WaveOutSink` 及其 impl 加 `#[cfg(target_os = "windows")]` |
+  | `submit_plan` / `warn_submit_truncation_once` | 只被 `WaveOutSink::submit` 调用（"单块装不下"那个场景）；Linux 侧的对应场景由 `queue_full`/`first_starved_drop` 覆盖 | 纯函数用 `#[cfg(any(target_os = "windows", test))]` —— 生产只有 Windows 用得到，但纯函数判据不该丢掉 Linux 覆盖 |
+
+  aarch64 上还会多出 **2 条**（x86_64 上看不见）：`cpu::forced_simd_path` 与
+  `simd::warn_forced_simd_unsupported` —— 三个生产调用点**全在
+  `#[cfg(target_arch = "x86_64")]` 里**（aarch64 走 NEON，没有"强制选路"这回事）。
+  同样按平台门控，`warn_*` 那条保留 `test` 分支（判据
+  `forced_simd_warning_is_latched_to_once` 直接调它）。
+
+  ⇒ 现在**三个目标各自都是真的 0 警告**（原生 Linux `build --release` /
+  msvc 交叉 / aarch64 交叉），不再是"靠 allow 压出来的 0"。
+  ⚠️ 改 `cpu.rs` 只加了那一行 `cfg`，**没有碰任何 CPU 亲和逻辑**（该文件标着只读，
+  红线针对的是亲和/拓扑）。
+- ✅ **`queue_present` 已补上耗时判据与降级**（2026-10-03，commit `7029677`）。
+  `vkQueuePresentKHR` 的签名里**没有超时参数**，加不了真正的上界 ⇒ 判据只能退化到耗时：
+  单次 ≥ `PRESENT_STALL_US`(1s) 记一次，连续 `PRESENT_STALL_FALLBACK`(3) 次就按与 acquire
+  **完全相同**的方式降级为 MAILBOX 并重建交换链。1s 有实测支撑：本机 `present_us`
+  中位 81µs / 最大 160µs ⇒ **6000 倍余量**，不会把「某帧慢了一下」误判成卡死。
+  判据 `present_stall_classifies_and_clears`（含"正常帧必须清零"—— 漏了它，几次偶发
+  长卡顿会累积成"连续三次"从而误降级）。
+  ✅ **已真机验证：这个冻结场景在本机不复现**（2026-10-03）。
+  做法 —— `RV3D_PRESENT_MODE=fifo` 启动后用 **KWin 脚本**把窗口最小化
+  （`qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript <js>` +
+  `...start`，脚本里 `w.minimized = true`），再逐秒观察 20s：
+
+  | 观测 | 结果 |
+  |---|---|
+  | 最小化是否真的执行 | ✅ `kwin_wayland: minimized: Steel Front - Vulkan` |
+  | 进程 | **20 秒全程存活**（CPU 从 32% 缓降到 16%） |
+  | `present_us` 最大值 | **172µs**（阈值 1s，差 5800 倍） |
+  | 卡顿检测触发次数 | **0** |
+
+  ⚠️ **这个负结果只有验过"最小化真的生效"才算数** —— 否则就是一次什么都没做的空跑，
+  而空跑同样会报"进程存活"。所以上面同时留了两条证据：KWin 自己的 print，
+  以及一个**独立查询脚本**（`KWINQUERY ... minimized=`）确认脚本 API 确实匹配到了
+  `cls=steel-front` 那个窗口。（教训 27：先确认你的测量工具测的是你以为的东西。）
+
+  ⇒ 所以 `present_stall` 那套在本机**是纯防御性的**：场景不复现，但别的合成器/驱动组合上
+  仍可能出现（Wayland 下 FIFO 等 frame callback 是规范允许的行为），保留它成本极低。
+- ✅ **RT 设备扩展已改为按真实能力筛选**（2026-10-03，commit `d7b2444`）。
+  原来在 `VK_EXT_mesh_shader` 可用时**无条件**请求 5 个光追扩展，缺任一就是
+  `create_device` 失败 = **游戏起不来**（而 PT 是**默认关**的，根本不值得为它挡住启动）。
+  现在光追组**全有或全无**：缺一个就整组不启用 —— 只启用一半时，特性链与后续代码路径
+  都假设它们齐全，**半套是未定义行为，比整组不用更危险**。
+  同一段还有第二处一并修了：`RayQueryFeaturesKHR` / `AccelerationStructureFeaturesKHR` /
+  `BufferDeviceAddressFeaturesKHR` 三个特性结构原来**无条件挂进 pNext**，即使对应扩展
+  没启用（本身就是无效用法）。
+  判据 `device_extensions_degrade_instead_of_failing`（已实测会红）。
+  `RV3D_GPU=igpu` 选 610M 时取决于 RADV 是否暴露 RT —— 现在缺了只是没有 RT，不是起不来。
+- ✅ **致命启动错误不再以退出码 0 结束**（2026-10-03，commit `9d398ff`）。
+  实测踩到：从 TTY/自动化 shell 跑（`XDG_SESSION_TYPE=tty`，缺 `WAYLAND_DISPLAY`/`DISPLAY`）
+  时引擎报「创建事件循环失败」然后 `return` ⇒ **退出码 0**，`perf_run.sh` 只看到
+  「游戏提前退出（code 0）」、当成正常结束。同一处的 `run_app` 出错路径还会继续打出
+  「程序正常退出」。判据 `fatal_startup_paths_never_exit_zero`（源码扫描型，已实测会红）。
+  `smoke_linux.sh` / `perf_run.sh` 另加图形会话预检：`/run/user/$UID/wayland-0` 存在就
+  自动补 `WAYLAND_DISPLAY=wayland-0`，否则**明确退 2**（没跑成）。
 
 ---
 
@@ -277,13 +357,32 @@ asusctl armoury set gpu_mux_mode 0      # 需要重启；本机 gpu_mux_mode 是
 | 项 | 状态 |
 |---|---|
 | **Linux 冒烟门** | ✅ `scripts/smoke_linux.sh`（`./SteelFront.sh smoke`，见 §10） |
-| `scripts/perf_run.sh` | **未实现**（`perf_run.ps1` 只需换进程管理与路径，是最容易移植的一个） |
-| 真机跑通一局（起窗 / 分辨率 / CJK / VUID / 音频） | ✅ 见 §5 各条的实测数字 |
+| **性能尺子** | ✅ `scripts/perf_run.sh`（三态 0/1/2 均已实测；`-Log` 可离线复核已有日志，见 §11） |
+| **交换链重建探针** | ✅ `scripts/resize_probe.sh`（对应 `run_resize_probe.ps1`，见 §13） |
+| 真机跑通一局（起窗 / 分辨率 / CJK / VUID / **音频**） | ✅ 全部实测；音频听感见 §5.4（录音 + 引擎计数双向印证） |
 | MUX 独显直连 | 用户选择暂不切（§7.3） |
-| `package`（打包） | **未实现**（`SteelFront.sh package` → exit 2） |
+| `package`（打包） | ✅ `scripts/package_release.sh`（`./SteelFront.sh package`，见 §12） |
 | `launcher/`（Win32 原生 GUI 启动器） | **不在移植范围**（`#![cfg(windows)]`，整 crate） |
-| `queue_present` 上界 / RT 扩展过滤 / blanket `allow(dead_code)` | 见 §6 |
+| `queue_present` 上界 / RT 扩展过滤 / 致命错误退出码 | ✅ 均已修（见 §6）；⚠️ present 那条的**最小化场景仍未真机验过** |
+| blanket `allow(dead_code)`（`main.rs`） | ✅ **已清**（`aca295c`）：拆掉后浮出 6 处真死代码，按平台门控而非加 `allow` |
 | Wayland 下 `IMMEDIATE` 支持面 | 实测 NVIDIA Wayland **支持**（`present_mode: IMMEDIATE`）；`SteelFront.sh` 仍用 mailbox |
+
+---
+
+## 9. 与 Windows 侧的分工（不要互相照抄）
+
+| | Windows | Linux |
+|---|---|---|
+| 输入注入 | `PostMessage` + VK 码（**不抢前台**） | XTEST 会抢焦点；引擎侧用 `RV3D_NO_CAPTURE=1` 保证不抓光标 |
+| 截图 | `PrintWindow`（不前置窗口） | 引擎自带 F12（非 Windows 写 `/tmp`） |
+| 强制 X11 | 不适用 | `RV3D_BACKEND=x11` |
+| 玩家入口 | `SteelFront.bat`（`start /b` 异步） | `SteelFront.sh`（前台，回传退出码） |
+| 性能旋钮 | 奥创中心 | `asusctl` + `nvidia-powerd` |
+
+---
+
+---
+
 
 ---
 
@@ -345,14 +444,306 @@ python3 scripts/smoke_linux.py --self-check    # 闸门自检（14 个用例，�
 - **没有画面取证**（截图/差分）。Windows 的 `cap_safe.ps1` 靠 `PrintWindow` 不前置窗口；
   Linux 可用引擎自带 F12（非 Windows 落 `/tmp`）或 X11 `XGetImage`，都还没做。
 
+## 11. Linux 性能尺子（`scripts/perf_run.sh`）
+
+```bash
+scripts/perf_run.sh                       # 默认 60s，压力模式 128/方
+scripts/perf_run.sh -Secs 30 -NoShadow    # 阴影成本 A/B
+scripts/perf_run.sh -Cam "0,0:0,0"        # 固定机位，可复现取景
+scripts/perf_run.sh -CullDiag             # 剔除的 CPU 成本
+scripts/perf_run.sh -Extra "RV3D_NO_PROPS=1,RV3D_PROC_TEX=0"
+scripts/perf_run.sh -Log logs/perf_20261003_103217.log   # 只复核已有日志，不启动游戏
+```
+
+**为什么是另写而不是移植 `playtest_perf.py`**：那份是 **X11 专有**的（libX11/XTest 注入、
+XImage 截屏、`/proc` 解析），移植它不是改路径而是重写。本脚本改为复用仓库里**已经实测过**
+的两样东西 —— 引擎每秒写的 `logs/perf_<stamp>.log`，以及 `pkill -x`。
+⇒ **不需要输入注入、不需要截屏**，于是它天然不碰鼠标。
+
+### 三态退出码（教训 46），**三条都实测过**
+
+| 码 | 含义 | 实测 |
+|---|---|---|
+| 0 | 产出稳态统计（`t >= 3s` 窗口里 ≥3 个样本） | 24 样本 / 稳态 22 |
+| 1 | 没有 perf 日志，或样本 <5 行 | 移走 exe 后复现 |
+| 2 | 统计打出来了，但稳态窗口 <3 样本 ⇒ **这些数不能当 A/B 的一条臂** | 合成日志复现（见下） |
+
+⚠️ **态 2 靠真实时长几乎落不进去**：引擎每秒一行 ⇒ `NROWS=N` 必然推出 `STEADY_N=N-2`，
+所以加了 **`-Log <路径>`**（只分析已有日志、不启动游戏）—— 它同时让这条分支
+**可确定性验证**：合成 5 行且 `t` 最大 2.9 ⇒ 实测 `exit 2`；同样 5 行但 `t` 到 5.0 ⇒ 实测 `exit 0`。
+
+### 与 Windows 侧的差异（**不要互相照抄**）
+
+- Windows 版在 `finally` 里调 `release_input.ps1` 解 `ClipCursor`；**Linux 不需要** ——
+  游戏在后台跑，永远拿不到焦点（`capture_wanted` 恒 false），且额外设了
+  `RV3D_NO_CAPTURE=1`，把"不夺指针"变成**代码级保证**而不是"碰巧没夺"。
+- **只许 `pkill -x`**（精确进程名），**绝不许 `-f`** —— 本仓库目录名就叫 `steel-front`。
+- 认领本轮 perf 日志时**必须排除本脚本自己的 `logs/perf_run.log`**，否则会分析错文件、
+  却把锅甩给这一轮跑动（`perf_run.ps1` 里记录了同一个坑）。
+- ⚠️ **不设 `RV3D_PRESENT_MODE`**：与 Windows 版一致，量的是引擎默认（IMMEDIATE）。
+
+### 图形会话预检
+
+从 **TTY/自动化 shell** 里跑时，`WAYLAND_DISPLAY`/`DISPLAY` **不在**（实测
+`XDG_SESSION_TYPE=tty`，只有 `XDG_RUNTIME_DIR`），引擎会报
+`neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set`。
+两个脚本现在都会：`/run/user/$UID/wayland-0` 存在就自动补 `WAYLAND_DISPLAY=wayland-0`，
+否则**明确退 2**（没跑成）。配合 `fix(main)` 的退出码修复（原来这种情况退 0）。
+
+### 噪声底（**别把小于它的差当结论**）
+
+`perf_run.ps1` 头部记着：同一二进制连跑两次曾差 2.8%，而其中大部分是 fps 列本身的假象
+（它曾记"某一帧的 1/dt"，而 `frame_us` 记的是**另一帧**的耗时 ⇒ 同二进制能"差 48%"）。
+改用 `perf_log.rs::window_fps` 后稳定到 ~0.2%。
+⇒ **先量当前二进制与参数的 A/A 底噪，低于它一律写"没测到"**；单次一对不是证据（教训 24/45）。
+
+### 11.1 A/A 噪声底（`scripts/aa_probe.sh`）
+
+```bash
+scripts/aa_probe.sh -Runs 3 -Secs 20 -Stress 128
+scripts/aa_probe.sh -Extra "RV3D_SHADOW_EVERY=1"     # 针对某套配置的 A/A
+```
+
+教训 24/35 说单次 A/B 什么都证明不了 —— 但在此之前仓库里**没有工具去量那个底噪**，
+只有一句"两次跑差 2.8%"的注释。这个脚本就是那把尺子：**宣称任何性能差之前先跑它。**
+
+**本机实测（2026-10-03，3 次 × 12s，stress=64）**：
+
+| 指标 | min | max | spread |
+|---|---|---|---|
+| mean | 166.38 | 168.21 | **1.1%** |
+| median | 166.70 | 167.90 | **0.7%** |
+
+⇒ **Linux 侧低于 ~1% 的"改善"一律算没测到。**
+（这是当前二进制 + 当前参数的底噪；换参数要重测 —— 底噪不是常数，见教训 43。）
+
+退出码三态，**三条都实测过**：
+
+| 码 | 含义 | 实测 |
+|---|---|---|
+| 0 | 每次请求的运行都产出了稳态 fps 行（散布**就是**底噪） | 上面那次 |
+| 1 | 可用运行 < 2（散布无从谈起） | `-Extra BADITEM`（perf_run 全失败） |
+| 2 | **部分批次**：散布打出来了，但它**不是**本配置的底噪 | 受控注入一次失败 |
+
+⚠️ 态 2 单独占一个退出码是刻意的：缺的那几次**可能正好落在散布端点外侧**，
+拿部分批次当底噪会**低估**它，于是把噪声当成改善。
+（Windows 侧 2026-09-26 修过同一个洞：那时 6 次里坏 4 次仍然打印"底噪"并 exit 0。）
+
+### 11.2 交替 A/B 驱动器（`scripts/ab_pair.sh`）
+
+```bash
+mkdir -p logs/ab && cp target/release/steel-front logs/ab/old
+# 改一处再重编，产物放 logs/ab/new
+scripts/ab_pair.sh -Pairs 3 -ExeA logs/ab/new -ExeB logs/ab/new -LabelA newA -LabelB newB  # 先量 A/A
+scripts/ab_pair.sh -Pairs 5 -ExeA logs/ab/old -ExeB logs/ab/new -LabelA old -LabelB new     # 再跑真的
+scripts/ab_pair.sh -Pairs 5 -ExtraB "RV3D_NO_PROPS=1" -LabelB noprops                      # 成本地图
+```
+
+教训 24：单次 A/B 什么都证明不了。站得住的设计是 —— 逐对交替（**含对内的先后**：
+奇数对 A→B、偶数对 B→A，ABBA…）、重复、用**配对差的中位数**排名、并且拿同一个 exe
+在两个臂里各跑一次量 A/A 底噪。尺子**原样复用 `perf_run.sh`**，所以数字与之前的
+`perf_run` / `aa_probe` 可比。
+
+🔴 **本机 A/A 自测结果（2026-10-03，3 对 × 12s，同一个 exe 给两次）**：
+
+```
+配对差 (B-A): -0.30  +10.70  +4.20
+MEDIAN PAIRED DELTA = +4.20 fps（+2.56%）
+符号检验: 2 / 3 对偏向 A2
+```
+
+**"自己 vs 自己"量出了 +2.56% 的"效应"。** 这就是为什么任何低于底噪的差都必须写成
+"没测到" —— 它不只是理论上的谨慎，是这台机器上会真实发生的。
+（同时注意 `aa_probe` 量到的 3 次散布只有 1.1%：**同一批数据里，逐次散布与配对差的散布
+不是一回事**，后者更大。所以判断效应要看**配对差**相对底噪的大小。）
+
+退出码三态，**三条都实测过**：0 = 每对都跑完 / 1 = 批次没起来（缺 exe）/
+2 = **部分对被跳过** ⇒ 降级批次，不许当成教训 45 要的「n ≥ 5 对」证据。
+
+⚠️ 两条纪律（教训 45）：**正对照臂不动 = 整批作废**（那是在量漂移）；
+**1~5% 的效应本来就测不出来**，先量底噪再决定值不值得测。
+
 ---
 
-## 9. 与 Windows 侧的分工（不要互相照抄）
+## 12. Linux 打包（`./SteelFront.sh package`）
 
-| | Windows | Linux |
+```bash
+./SteelFront.sh package                    # 构建 + 打包，tag = 当前时间
+./SteelFront.sh package -SkipBuild         # 用现有 exe
+./SteelFront.sh package -Tag rc1
+```
+
+产出 `dist/steel-front-<tag>/`（可运行目录）与 `dist/steel-front-<tag>.tar.gz`。
+
+### 与 Windows 侧的三处差异（**不要互相照抄**）
+
+| | Windows（`package_release.ps1`） | Linux |
 |---|---|---|
-| 输入注入 | `PostMessage` + VK 码（**不抢前台**） | XTEST 会抢焦点；引擎侧用 `RV3D_NO_CAPTURE=1` 保证不抓光标 |
-| 截图 | `PrintWindow`（不前置窗口） | 引擎自带 F12（非 Windows 写 `/tmp`） |
-| 强制 X11 | 不适用 | `RV3D_BACKEND=x11` |
-| 玩家入口 | `SteelFront.bat`（`start /b` 异步） | `SteelFront.sh`（前台，回传退出码） |
-| 性能旋钮 | 奥创中心 | `asusctl` + `nvidia-powerd` |
+| 压缩格式 | `.zip`（Compress-Archive） | **`.tar.gz`** —— tar/gzip 是 Linux 必备，而 **zip 本机根本没装**；收包方换了，格式就该换 |
+| 启动器 | 双击 exe（系统把 CWD 设成 exe 目录） | **多装一个 `run.sh`**（见下） |
+| exe 名 | `steel-front.exe` | `steel-front` |
+
+🔴 **`run.sh` 不是装饰**：引擎**所有资产都是相对 CWD 的路径**，而 Linux 没有"双击自动
+设 CWD"这个默认动作。做过反证 —— 从别的目录直接跑 exe：
+
+```
+props: 未载入（读取 assets/props 失败: No such file or directory）
+渲染器初始化失败: 打开着色器文件失败 'assets/mesh.spv': No such file or directory
+```
+
+⇒ 起不来。用 `run.sh`（只做 `cd` 到自己所在目录 + `exec`）则正常起来。
+（而且**上面那次失败当时退出码是 0** —— 这条假绿灯已由 `fix(main)` 修掉。）
+
+### 自检与最强验收
+
+- 照抄了「**装出来跑不起来的包，比没有包更糟**」：缺任一必需资产
+  （exe / `mesh.spv` / `triangle.vert.spv` / `triangle.frag.spv` / `maps/index.toml` / `run.sh`）
+  就**拒绝出包并删掉半成品**，绝不产出一个"看着成功"的坏包。
+- **最强验收 = 解到干净目录真的跑一次**：`tar -xzf` 到 `/tmp`，
+  **从别的 CWD** 用 `run.sh` 启动 ⇒ 找到 GPU、交换链 2560x1543 初始化完成。
+- 另外逐字节 `diff -r assets <包内 assets>` 一致（56 个 glb：props 24 / guns 16 /
+  guns_ext 15 / soldier 1）。
+- ⚠️ 报告里「模型 N 个 glb」刻意数**整包**：照抄 Windows 只数 `assets/props` 会写 24，
+  而包里其实有 56 个 —— 那是个会让人误判「资产漏拷了」的假数字。
+
+退出码：0 = 打成 / 1 = 跑了但失败 / 2 = 没跑成。
+
+---
+
+## 13. 交换链重建探针（`scripts/resize_probe.sh`）
+
+```bash
+scripts/resize_probe.sh                              # 5 个尺寸，验证层开
+scripts/resize_probe.sh -PT -Tag pt_resize           # 连 PT 实时路径一起测
+scripts/resize_probe.sh -Sizes "1280x720,1024x768" -AfterSecs 5
+```
+
+铁律 B 说「改 pipeline / swapchain / 同步 / 描述符前先开 `RV3D_VALIDATION=1` 跑一轮」，
+而**交换链重建路径**恰恰是"改过、但从没在验证层下真的缩放过"的那一段 ——
+冒烟跑的是固定尺寸，一次 `WindowEvent::Resized` 都不会发生。
+Linux 侧这条尤其要紧：`b3874af` 修的就是「Wayland 下 `currentExtent` 恒为 `UINT32_MAX`
+⇒ 交换链永远停在 1280x720」，而**只有真的缩放才能证明它还成立**。
+
+### 实测结果（2026-10-03）
+
+| 步 | 脚本设置（KWin **逻辑**坐标） | 引擎观测（**物理**） | ×1.25 校验 |
+|---|---|---|---|
+| 1 | 1280x720 | 1600x900 | ✓ |
+| 2 | 1600x900 | 2000x1125 | ✓ |
+| 3 | 1024x768 | 1280x960 | ✓ |
+| 4 | 2560x1600 | 3200x2000 | ✓ |
+| 5 | 1280x800 | 1600x1000 | ✓ |
+
+`VUID=0 panics=0 设备丢失=0`（`-PT` 档同样：`PT-RESIDENT=1` + `VUID=0`）。
+`swapchain diag` 首行仍是 `current_extent=4294967295x4294967295` —— 那条 Wayland 陷阱
+真实存在，而修复让交换链**跟着窗口走了**。
+
+> ⚠️ **KWin 的 `frameGeometry` 是逻辑坐标**（本机 `scale_factor=1.25`）：脚本设 1280x720，
+> 引擎日志里是 **1600x900**。这不是 bug —— 上表五步全部精确 ×1.25，恰恰是换算正确的证据。
+
+### 与 Windows 侧的两处差异（**不要互相照抄**）
+
+1. **缩放靠 KWin 脚本**（`qdbus6 org.kde.KWin /Scripting loadScript` + `start`，脚本里设
+   `w.frameGeometry`），不是 `SetWindowPos` —— Wayland 下客户端改不了自己的尺寸。
+   全程**不抢焦点、不碰指针**，天然符合鼠标安全协议。
+2. ✅ **截图走引擎自带的 `RV3D_SHOT_AT`，不注入 F12 按键**（2026-10-03 起）。
+   原因：Linux 上截图的唯一触发原本就是 F12，而 Wayland 下注入按键需要抢焦点/
+   `ydotool` 之类，正好违反那条协议 ⇒ 那时这一步只能空着。现在引擎支持
+   `RV3D_SHOT_AT=<秒>[,<秒>...]`（不需要任何输入，见 §14），探针把它设在
+   「全部缩放做完之后」⇒ 截到的是**缩放后**的画面。
+
+   **真机验收**：探针跑完 5 步缩放后落下一张 **1600x1000** 的 PNG ——
+   正好等于最后一步的物理尺寸（1280x800 逻辑 × 1.25），画面里 HUD 自适应、
+   中文正常、枪模/小地图/敌人计数齐全 ⇒ 缩放 → 重建 → 新尺寸渲染 → 取证 整条链通了。
+   `-NoShot` 与 ps1 同名同义；要了截图却一张都没落盘 ⇒ **exit 2（没跑成）**，
+   不让"取证这一步没发生"混进 ALL-OK 里。
+
+### 两条照抄过来的硬教训，以及我自己踩的那次
+
+- **必须证明"缩放路径真的走过"**：探针存在的唯一目的就是驱动交换链重建，
+  所以「一次窗口大小变化都没有」时 `VUID=0` **只意味着什么都没发生**（教训 27 / §21.48）。
+  判据里这一条单独占一个退出码（**2 = 没跑成**）。
+- `-PT` 时必须证明 PT 真的启用（`PT-RESIDENT >= 1`），否则同样可能"想测的东西没跑"。
+- 🔴 **第一版探针把上面两条都违反了，而且报出了 ALL-OK**，两处原因：
+  ① KWin 脚本环境里 **`setTimeout` 回调不触发**（最小复现：只 `print` + `setTimeout(...,500)`，
+  print 打了、回调没打）⇒ 靠 setTimeout 串起来的步骤**一次都没执行**；
+  ② 判据把**启动时**那次 `窗口大小变化` 当成了"路径走过"。
+  ⇒ 现在改成 bash 侧逐尺寸 `load+start`，并且**只数预热结束之后**的变化。
+  反证已验：把窗口匹配改成永不命中后，探针如实报 `exit 2` 而不是 ALL-OK。
+
+退出码：0 = ALL-OK / 1 = 有 VUID、panic 或设备丢失 / 2 = **没跑成**（日志缺失、
+一次缩放都没有、或 `-PT` 给了但 PT 从未驻留）。
+
+---
+
+## 14. 自动截图（`RV3D_SHOT_AT`）
+
+```bash
+RV3D_SHOT_AT=5,15,30 ./SteelFront.sh fast     # 进游戏后第 5/15/30 秒各截一张
+```
+
+落盘位置与 F12 相同：Windows = `./screenshots/steel_front_<秒>.png`，
+非 Windows = `/tmp/steel_front_<秒>.png`。
+
+**为什么要有它**：Linux 上截图的唯一触发原本是 F12 按键，而 Wayland 下注入按键
+（`ydotool`/XTEST）需要抢焦点，违反铁律 C 的鼠标安全协议
+⇒ **自动化路径在 Linux 上完全没有画面取证手段**，`resize_probe.sh` 只能空着那一步。
+给一个不需要输入的触发就把这个不对称补平（Windows 上做无人值守取证同样用得上）。
+
+三条实现约定：
+
+- **不设时零开销**：空列表 ⇒ 逐帧那次判断直接短路，玩家路径逐字节不变。
+- **计时起点锚在第一次渲染**，不是启动：引擎起来到第一帧之间要加载着色器/城市/GLB，
+  那段时间截图只会得到黑图或半成品，对取证没有意义。
+- **用「取走已到点的」而不是「判等」**（`take_due_shots`）：低帧率或长卡顿下，
+  某一帧的 elapsed 可能同时越过 5s 和 15s，判等会**永久漏掉**被跨过的那个 ——
+  而截图是取证用的，漏一张就少一份证据，**且不会报错**。
+  判据 `shot_at_parsing_and_due_taking_are_falsifiable` 已实测会红（改成判等后 left=0/right=1）。
+
+⚠️ 非法项（非数字 / NaN / inf / 非正数）**直接丢弃**而不是让整局启动失败 ——
+取证开关不该因为写错一个数就把游戏挡在门外。其中 `0` 必须丢：它会让
+`retain(t > elapsed)` 在 elapsed=0 时留下、之后又永远取不走，变成**每帧截一张**。
+
+---
+
+## 15. 心跳看门狗（`scripts/play_watchdog.sh`）
+
+```bash
+scripts/play_watchdog.sh &                          # 每会话起一次，常驻
+scripts/play_watchdog.sh -StaleSec 60 -PollSec 5
+scripts/play_watchdog.sh --touch                    # 喂一次心跳（驱动方在跑的时候调）
+```
+
+**为什么不是「睡 N 秒然后杀」**：那个显而易见的设计在 2026-09-12 撞过两次 ——
+上一轮留下的看门狗在**新一轮跑到一半**时开火把游戏杀了，现场看起来就是
+「窗口从来没起来」。教训 19 因此定了规矩：**依赖"这一局还活着的证据"，而不是"它自己启动了多久"。**
+
+### 判据：三条**同时**成立才动手
+
+1. 存在 `steel-front` 进程；
+2. **心跳文件存在**（= 某个驱动方认领了这一局）；
+3. 心跳比 `-StaleSec` 更旧。
+
+🔴 **第 2 条是承重的**：没有它，看门狗会在**用户自己手动启动**的游戏上于 ~`StaleSec`
+后开火 —— 这个形态的 bug 真实发生过（教训 19）。**不许放宽。**
+
+**两条都已实测**（不是看代码推的）：
+
+| 场景 | 结果 |
+|---|---|
+| 手动启动的游戏（**没有**心跳文件） | ✅ 跑 14 秒**没被碰** |
+| 心跳文件 mtime 是 2 分钟前 | ✅ 开火、杀进程、核验已退出、清掉心跳 |
+
+### 与 Windows 侧的两处差异
+
+1. Windows 开火后调 `release_input.ps1` 去解 `ClipCursor`；**Linux 不需要** ——
+   鼠标安全是代码级的（`RV3D_NO_CAPTURE=1` ⇒ `capture_wanted` 恒假，
+   进程退出后合成器自然收回指针）。但**"核验而不是假定"**这条纪律照旧：
+   开火后必须确认进程真的没了才报成功（杀不掉时会明确说要人工介入）。
+2. 心跳文件默认在 `$XDG_RUNTIME_DIR`（按用户隔离、注销即清），不是 Windows 的 `%TEMP%`。
+
+### 谁该喂心跳
+
+**长期无人值守驱动这一局的脚本**。⚠️ **短跑脚本不要喂** ——
+`smoke_linux.sh` / `resize_probe.sh` / `perf_run.sh` 都自带硬超时与 `trap` 收尾，
+喂了反而会让看门狗以为"有人认领"，**失去保护意义**。

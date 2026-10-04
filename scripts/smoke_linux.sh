@@ -53,6 +53,24 @@ while [ $# -gt 0 ]; do
 done
 case "$SECS" in (*[!0-9]*|'') echo "smoke_linux: -Secs 必须是正整数，收到 '$SECS'" >&2; exit 2 ;; esac
 
+# 🔴 图形会话环境预检（2026-10-03 实测踩到）
+# 引擎需要 WAYLAND_DISPLAY（或 DISPLAY）才能建事件循环，而从 TTY/自动化 shell 里跑时
+# 这些变量不在（实测 XDG_SESSION_TYPE=tty）⇒ 引擎报 "neither WAYLAND_DISPLAY nor ..."。
+# 修之前它还会**以 0 退出**，把调用方骗过去（引擎侧已改为非零退出）。
+# 这里能自动补就补，补不上就 fail-closed 退 2 —— "没跑成"必须说出口。
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+    _rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [ -S "$_rt/wayland-0" ]; then
+        export WAYLAND_DISPLAY=wayland-0
+        export DISPLAY="${DISPLAY:-:0}"
+        echo "smoke_linux: 补上图形会话环境 WAYLAND_DISPLAY=$WAYLAND_DISPLAY DISPLAY=$DISPLAY"
+    else
+        echo "smoke_linux: 没跑成 —— 既没有 WAYLAND_DISPLAY/DISPLAY，$_rt/wayland-0 也不存在。" >&2
+        echo "             请在图形会话的终端里跑，或先 export WAYLAND_DISPLAY=wayland-0。" >&2
+        exit 2
+    fi
+fi
+
 EXE="$repo/target/release/steel-front"
 LOG="$repo/logs/smoke_linux.log"
 
