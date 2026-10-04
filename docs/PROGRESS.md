@@ -1,16 +1,21 @@
 # PROGRESS.md — Steel Front 进度 / 日志 / 交接历史
 
-> ## 🚩 从这里开始（快照：2026-09-23 收工前，commit `044837f`）
+> ## 🚩 从这里开始（快照：**2026-10-04**，commit `0beea04`）
 >
-> **本文件 464 KB / 5310 行，不要通读。** 先读这一节，再按关键词往下搜。
+> 🔴 **Linux 原生适配已完成并有一半入 master**：`feature/linux-port` 已合（PR #1，11 commit），
+> `feature/linux-port-followup` 待合（PR #2，21 commit）⇒ 详见 **§21.84**。入口 `SteelFront.sh`，
+> 全套工具与实测数字在 **`docs/linux-native.md`**。
+>
+> **本文件 712 KB / 10880 行，不要通读。** 先读这一节，再按关键词往下搜。
 >
 > ### 当前基线
-> `cargo test --release` **543 passed / 0 failed / 0 警告**（2026-09-23）；
+> `cargo test --release` **653 passed / 0 failed**；`cargo build --release` **0 警告**（2026-10-04）
+> —— ⚠️ **0 警告的判据只认 `cargo build --release`**，`cargo test` 会漏报（教训见铁律 F）；
 > `cargo clippy --release --all-targets` **0 警告**（`correctness`/`suspicious` 已在 `Cargo.toml` 里 deny）。
 > 端到端冒烟 `scripts/run_smoke_pm.ps1` → **ALL-OK**（`vuid==0 && panics==0 && killed>=1`，**无 fps 门槛**；
 > PT 开时按**稳定性门**判——击杀归 PT 关的玩法门，§18）；该结论取自 2026-09-20 那次运行，**09-23 未重跑**。
 > `RV3D_VALIDATION=1` 跑一整轮只剩 #23 那条层侧误报（5 次交换链创建 = 5 条报文）。
-> `AGENTS.md` **65,212 B / 65,536 B 硬上限（余量 324 B）** —— 🔴 **加料前必须先删旧料**。
+> `AGENTS.md` **64,472 B / 65,536 B 硬上限（余量 1,064 B ✓）** —— 🔴 **加料前必须先删旧料**。
 >
 > ### 最新迭代（2026-09-23）：12 轮代码审查（**本日节 §6–§17**）+ 未结案 #17 真修
 >
@@ -10780,3 +10785,101 @@ Get-CimInstance Win32_VideoController | Select Name,CurrentHorizontalResolution,
 - 🔴 **不碰 `engine/cpu.rs` 的线程池/亲和/降频**（用户红线，只读）。
 
 
+
+### 21.84 Linux 原生适配（2026-10-04）——PR #1 已合并、PR #2 待合（21 个 commit）
+
+**补记理由**：环境铁律 2026-09-28 就从「Windows 原生 only」改成「Windows / Linux 原生并存」，
+而本文件此前**没有这段的任何记录**（`grep 'linux-port'` 命中 **0**）。进度只写这里，所以补上。
+
+**分支与状态**
+- `feature/linux-port` → **PR #1 已合并进 master**（11 commit，merge commit `80bfa00`）。
+- `feature/linux-port-followup` → **PR #2 待合**（21 commit，最新 `0beea04`），基于旧 master 但 `MERGEABLE`。
+- ⚠️ **合并时别点 Squash** —— 会把 11 / 21 条压成 1 条，`git log` 与贡献图都失去粒度。
+
+**闸门现状（2026-10-04）**：`cargo test --release` **653 passed / 0 failed**；
+`cargo build --release` **0 警告**（判据只认 `build`）；CJK 字模闸门 OK；提交白名单 OK；
+**三个目标各自 0 问题** —— 原生 Linux `build --release` / `check --target x86_64-pc-windows-msvc` /
+`check --target aarch64-unknown-linux-gnu`；真机冒烟 **ALL-OK**（`VUID=0 panics=0`，`visible=65536/65536`）。
+`AGENTS.md` **64,472 B**（余量 1,064 B ✓）。
+
+**修掉的真缺陷（共同主题：不是崩，是"让人相信一个错的状态"）**
+
+| commit | 症状 |
+|---|---|
+| `14b633a` | **中文在非 Windows 全变 `?`** —— 字模 2026-09-14 已换成仓内预烘焙点阵（纯查表、跨平台），但 `ui.rs` 还留着 GDI 时代的 `#[cfg]` 分叉；且 `is_cjk` 只覆盖 11 个区间里的 2 个 ⇒ 全角标点被当半角 |
+| `b3874af` | **交换链恒 1280x720** —— Wayland 下 `currentExtent` 实测 `UINT32_MAX`（**NVIDIA 专有驱动也一样**，不只是 Mesa），而兜底分支在 Win32/X11 上**永远走不到** |
+| `106c086` | 窗口请求尺寸写死 DPI 1.5（Windows 那台 scale=1.5 的补偿） |
+| `72e9862` | 没有换后端的退路（「强制 X11」写死在 `is_wsl` 分支里，而 winit 0.30 删了 `WINIT_UNIX_BACKEND`） |
+| `3ce98f3` | Wayland `Locked` 抓取**假成功**（winit 只对已 enter 的指针生效、且忽略合成器确认 ⇒ 失败无法从返回值看出） |
+| `278ad39` | 提交闸门在 Linux 上**完全失效**（钩子 100644 ⇒ git 静默跳过） |
+| `5265eef` `32c275b` | Linux **完全没有声音**；ALSA 只试 `default` 会让一部分机器永远没声音（本机 `default` 解析到 dmix 并报 `unable to open slave`，缺 `99-pipewire-default.conf`） |
+| `d7b2444` | **设备扩展缺一个就整个游戏起不来**（`create_device` 失败），而 PT 本来就**默认关**；同段还有"扩展没启用却把特性结构挂进 pNext" |
+| `7029677` | `queue_present` 是**最后一个无上界的 Vulkan 等待**（Wayland FIFO 就是在 present 里等 frame callback） |
+| `9d398ff` `2c92568` | **致命错误以退出码 0 结束**（两处：启动期 + 事件循环内）⇒ 调用方分不清"没跑成"和"跑完了"。**最容易被真人撞上的一类假绿灯** |
+| `aca295c` | `blanket allow(dead_code)` 在 Linux 上藏住 **6 处**真死代码 |
+
+**新增的 Linux 侧工具**（用法都在 `docs/linux-native.md` §10–§15）
+`SteelFront.sh` / `compile_pt.sh` / `install_git_hooks.sh` / `smoke_linux.{sh,py}` /
+`perf_run.sh` / `aa_probe.sh` / `ab_pair.sh` / `resize_probe.sh` / `package_release.sh` /
+`play_watchdog.sh`；引擎侧新增 **`RV3D_SHOT_AT`**（不需要输入注入的自动截图 ——
+Linux 上 F12 是唯一触发，而 Wayland 注入按键要抢焦点，违反鼠标安全协议）。
+`smoke` 与 `package` 已接进 `SteelFront.sh`；**退出码一律三态 0/1/2**。
+
+**实测结掉的三条"未验证"**（都给了可复现命令，别再当待办）
+
+1. **音频**：录 sink monitor + 逐 50ms RMS ⇒ 稳态段 **534 个窗口 0 静音**，中位 −30.4 dBFS；
+   引擎侧「缓冲已满」整轮 30s **只 1 次**（开局）、ALSA `xrun/underrun/EPIPE` **0 次**、
+   `audio_us` 中位 30µs ⇒ **开局那次丢弃是"队列从空到满"的瞬态，不是持续欠载**。
+2. **present 冻结**：FIFO + KWin 脚本最小化窗口 20s ⇒ 进程存活、`present_us` 最大 **172µs**、
+   卡顿检测 **0 次触发** ⇒ **本机不复现**。（负结果，但**验过"最小化真的生效"** ——
+   否则一个什么都没做的空跑同样会报"进程存活"。）
+3. **交换链缩放**：5 步缩放全部精确 **×1.25**（KWin 逻辑坐标 → 物理），VUID=0；
+   `-PT` 档同样 ALL-OK 且 `PT-RESIDENT=1` ⇒ 那个"blit 目标写死 2560x1600"的回归在 Linux 上确认修好。
+
+**真机实测数据（Linux 侧，与 Windows 对照）**
+
+- `present_us` 中位 **81µs** / 最大 160µs（阈值 1s ⇒ **6000 倍余量**）
+- **A/A 噪声底**：3 次 × 12s ⇒ mean spread **1.1%**、median 0.7%
+  ⚠️ 而 `ab_pair.sh` 的 **A/A 自测（同一个 exe 给两次）配对差中位数 = +2.56%** ——
+  **"自己 vs 自己"就能量出 2.56% 的"效应"**。⇒ 低于底噪的差一律写"没测到"。
+- GPU：`VK_EXT_mesh_shader` / 光追 RT / DLSS `VK_NVX` **全部 true，一项没丢**；
+  功耗 **56–60W**（>55W 基础墙 ⇒ `nvidia-powerd` 的 Dynamic Boost 生效）。
+- **瓶颈形态与 Windows 逐字相同**：核显空载 0% → 游戏中 **61–100%**；独显 97–100% 但只有 56–60W；
+  `acquire_us` **3.6–6.8ms** 而一帧才 7ms ⇒ **引擎在等交换链图像，不是自己画得慢**
+  （`record_us` 只有 35–75µs）。三种呈现模式帧率几乎无差（138/145/140）⇒ 限速点在合成器那条跨卡链上。
+
+**踩过的坑（都写进代码/文档注释了，别再踩）**
+
+- 🔴 **判据被第二处修复"喂饱"**：`code[i..].contains("process::exit")` 扫的是锚点之后**全部**内容
+  ⇒ 把第一处改回 `return` 时测试照样绿。**必须把源码切成两半、各自在"自己那一半"里找**（教训 14 形态）。
+- 🔴 **KWin 脚本环境里 `setTimeout` 回调不触发**（最小复现：只 `print` + `setTimeout(...,500)`，
+  print 打了、回调没打）⇒ `resize_probe` 第一版靠它串步骤，**一次都没缩放却报了 ALL-OK**。
+- 🔴 **判据把"启动时"那次窗口变化当成"路径走过"** ⇒ 必须只数预热**结束之后**的。
+- 🔴 **`printf X | grep -q Y` 的断管**：`set -o pipefail` 下管道状态取上游 printf 的 141
+  ⇒ **匹配成功也走 else 分支**（实测把取到的 meta 判成"没取到"）。
+- 🔴 **`$( )` 是子 shell**：命令替换里自增的计数器传不回父进程。反证因此**做了两次才生效**
+  （第一次被赋值覆盖、第二次变量不共享）。
+- 🔴 **heredoc 与外层同名** ⇒ bash 提前终止；**`printf 密码 | sudo -S cmd <<EOF`** 会让 heredoc
+  抢走 stdin、sudo 把配置内容当密码（触发 `pam_faillock` 锁号）。
+- 🔴 **中文注释缺字模**：本会话踩了 **4 次**（`逗`/`剥`/`骗`/`尤`…）。⇒ **写中文注释前先跑
+  `python3 tools/cjk_cover_check.py`**（1 秒），别等提交后才发现。
+- 🔴 **`ls -t | head -1` 取备份：没读内容就用** ⇒ 回滚时把"改过的版本"当成原始版恢复了回去。
+  备份要**按名字辨认**，别只按时间戳。
+
+**没跑成的 / 仍未验（诚实记账，别当成已验）**
+
+1. **Windows 侧没有真机验证** —— 合并依据是**交叉编译 + 静态 diff**，不是"在 Windows 上跑过"。
+   最后一块拼图：`git pull` 后跑一次 `SteelFront.bat` 或 `scripts\run_smoke_pm.ps1`。
+2. **present 冻结**：本机不复现（见上），但别的合成器/驱动组合仍可能出现，保留防御性检测。
+3. **冒烟门的击杀档不确定**：默认档（`vuid==0 && panics==0 && 进过 Playing`）实测 **8/8** 稳定；
+   `-RequireKill`（与 Windows 同口径）实测 **7/8 ≈ 88%** —— 零输入路径没有闭环瞄准，
+   靠"在 255 个目标里蒙中几个"。**默认不要求击杀**（会喊狼来了的闸门会训练人不再当回事）。
+4. **MUX 独显直连**：用户选择暂不切（收益最大的一刀，但固件级、黑屏就没有命令退路）。
+5. **缩放只测了 5 步**，没做 20 次以上的连续长跑。
+
+**下一步（按价值排序）**
+
+1. **合 PR #2（别 Squash）→ 然后在 Windows 上跑一次冒烟**，补上第 1 条那个洞。
+2. **`launcher/`**（整 crate `#![cfg(windows)]`）**不在本次移植范围**；要做 Linux 桌面集成
+   （`.desktop` + 图标 + 文件关联）那是个明确的下一步。
+3. 窗口缩放**长跑**（≥20 次连续缩放 + 中途切 PT），目前只有 5 步的证据。
