@@ -364,8 +364,25 @@ asusctl armoury set gpu_mux_mode 0      # 需要重启；本机 gpu_mux_mode 是
 | `package`（打包） | ✅ `scripts/package_release.sh`（`./SteelFront.sh package`，见 §12） |
 | `launcher/`（Win32 原生 GUI 启动器） | **不在移植范围**（`#![cfg(windows)]`，整 crate） |
 | `queue_present` 上界 / RT 扩展过滤 / 致命错误退出码 | ✅ 均已修（见 §6）；⚠️ present 那条的**最小化场景仍未真机验过** |
-| blanket `allow(dead_code)`（`main.rs`） | **未清**（清它要按编译器判据逐条过，别用文本匹配） |
+| blanket `allow(dead_code)`（`main.rs`） | ✅ **已清**（`aca295c`）：拆掉后浮出 6 处真死代码，按平台门控而非加 `allow` |
 | Wayland 下 `IMMEDIATE` 支持面 | 实测 NVIDIA Wayland **支持**（`present_mode: IMMEDIATE`）；`SteelFront.sh` 仍用 mailbox |
+
+---
+
+## 9. 与 Windows 侧的分工（不要互相照抄）
+
+| | Windows | Linux |
+|---|---|---|
+| 输入注入 | `PostMessage` + VK 码（**不抢前台**） | XTEST 会抢焦点；引擎侧用 `RV3D_NO_CAPTURE=1` 保证不抓光标 |
+| 截图 | `PrintWindow`（不前置窗口） | 引擎自带 F12（非 Windows 写 `/tmp`） |
+| 强制 X11 | 不适用 | `RV3D_BACKEND=x11` |
+| 玩家入口 | `SteelFront.bat`（`start /b` 异步） | `SteelFront.sh`（前台，回传退出码） |
+| 性能旋钮 | 奥创中心 | `asusctl` + `nvidia-powerd` |
+
+---
+
+---
+
 
 ---
 
@@ -426,20 +443,6 @@ python3 scripts/smoke_linux.py --self-check    # 闸门自检（14 个用例，�
   从日志里读出活着的敌人坐标 → 算需要的 yaw/pitch 增量 → 转视角 → 再开火。
 - **没有画面取证**（截图/差分）。Windows 的 `cap_safe.ps1` 靠 `PrintWindow` 不前置窗口；
   Linux 可用引擎自带 F12（非 Windows 落 `/tmp`）或 X11 `XGetImage`，都还没做。
-
----
-
-## 9. 与 Windows 侧的分工（不要互相照抄）
-
-| | Windows | Linux |
-|---|---|---|
-| 输入注入 | `PostMessage` + VK 码（**不抢前台**） | XTEST 会抢焦点；引擎侧用 `RV3D_NO_CAPTURE=1` 保证不抓光标 |
-| 截图 | `PrintWindow`（不前置窗口） | 引擎自带 F12（非 Windows 写 `/tmp`） |
-| 强制 X11 | 不适用 | `RV3D_BACKEND=x11` |
-| 玩家入口 | `SteelFront.bat`（`start /b` 异步） | `SteelFront.sh`（前台，回传退出码） |
-| 性能旋钮 | 奥创中心 | `asusctl` + `nvidia-powerd` |
-
----
 
 ## 11. Linux 性能尺子（`scripts/perf_run.sh`）
 
