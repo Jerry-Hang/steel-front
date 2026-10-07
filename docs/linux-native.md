@@ -779,3 +779,44 @@ scripts/net_pair.sh -Validation 1        # 带验证层（更慢，但能抓 VUI
 
 **实测（2026-10-07，Linux 原生）**：`RESULT: ALL-OK`，
 服务端记录 `net: server 远端玩家 #1 加入 @(-110,60)`。
+
+---
+
+## 17. 桌面集成（`scripts/install_desktop.sh`）
+
+**为什么不移植 `launcher/`**：那是一个 **986 行、零依赖的 Win32 原生 GUI**
+（`#![cfg(windows)]` + `#![windows_subsystem]`，自带安装向导 / 自动更新 / 桌面快捷方式）。
+搬到 Linux 要么引入 GUI 依赖（**违反「不新增第三方依赖」这条硬约束**），要么用
+X11/Wayland 原语重写一遍 —— 都不划算。而 Linux 的"启动器"本来就是**桌面环境提供的**：
+一份 `.desktop` + 一个图标就得到了 launcher 里"双击就能启动"那一项，且零代码依赖。
+
+```bash
+scripts/install_desktop.sh              # 安装（幂等，可重复跑）
+scripts/install_desktop.sh --check      # 只报将要写什么，不落盘
+scripts/install_desktop.sh --uninstall  # 卸载
+```
+
+- **只动你自己的家目录**（`~/.local/share/{applications,icons/hicolor}`），
+  不碰 `/etc`、不碰 systemd、**不需要 sudo**。
+- 图标是 `desktop/steel-front.svg`（手写、纯矢量、无字体依赖），
+  用 `rsvg-convert` 出 16/24/32/48/64/128/256 七档 PNG；**没有 rsvg-convert 时**
+  退化成只装 `scalable/`（不报错，但会明说"不出 PNG"）。
+- `Exec=` 是**绝对路径** + `play` 模式。**工作目录不用担心**：
+  `SteelFront.sh` 开头已 `cd` 到自己真实所在目录（还解软链接），
+  `package_release.sh` 头部记的那个"从别处跑找不到 assets"的坑在这里不成立。
+- ⚠️ `Terminal=false`（游戏不该弹终端），**代价是首次构建失败时看不到原因** ⇒
+  首次请先在终端跑一次 `./SteelFront.sh`（要 `cargo build --release`），之后从菜单点即可。
+
+**三态退出码**：0=装好了 / 1=装了但自检没过 / 2=前置条件不满足或"本来就没装"。
+
+### 17.1 用眼睛看才发现的坑（自检查不出来）
+
+🔴 **SVG 渐变默认用 `objectBoundingBox`，而一条水平线的包围盒高度为 0 ⇒ 渐变退化 ⇒
+描边整个画不出来。** 第一版图标的四段准星臂**全部丢失**，只剩中心点与圆环，
+而 `desktop-file-validate` 通过、文件大小正常、所有自检项全绿 —— **只有看图才发现**。
+修法：`gradientUnits="userSpaceOnUse"`（绝对坐标，所有图形共用一套）。
+
+⇒ 同一天内第二次撞上「**判据全绿但东西是错的**」：另一次是 `.desktop` 的
+`Categories=...;FPS;` —— `FPS` **不是 freedesktop 注册分类**，
+`desktop-file-validate` 报了错、自检正确地返回了 `exit 1`（这一条是判据**抓到**的）。
+两条合起来说明：**结构校验与视觉/语义正确性是两件事，两边都要有。**

@@ -9,6 +9,7 @@
 #    ./SteelFront.sh diag        构建后带诊断开关启动（RV3D_AI_PROF=1 RV3D_PROP_STATS=1）
 #    ./SteelFront.sh smoke       冒烟门（转交 scripts/smoke_linux.sh，可加 -Secs N）
 #    ./SteelFront.sh package     打包（转交 scripts/package_release.sh，可加 -Tag/-SkipBuild）
+#    ./SteelFront.sh desktop     桌面集成（转交 scripts/install_desktop.sh，可加 --uninstall/--check）
 #    ./SteelFront.sh --help      打印本帮助
 #    ./SteelFront.sh <参数…>      构建后启动，并把参数**原样**透传给引擎
 #
@@ -90,6 +91,10 @@ case "$MODE_LC" in
     package)
         # 与 smoke 同等的转交：退出码原样带回（0=打成 / 1=跑了但失败 / 2=没跑成）。
         exec "$(dirname "$0")/scripts/package_release.sh" "${@:2}"
+        ;;
+    desktop)
+        # 桌面集成（装/卸 .desktop + 图标）。同样原样带回三态退出码。
+        exec "$(dirname "$0")/scripts/install_desktop.sh" "${@:2}"
         ;;
 esac
 
