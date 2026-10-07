@@ -606,7 +606,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 10. **PT 盒上限静默截断**：512 → 1024 → **现值 2048**；一次分配 + 一次性告警。
 11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 像素重投影复用或运动自适应 spp；`signature()` 分层（~0.5m/~3°/~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（含 `RV3D_PT_EXPOSURE`）。
 12. **溢出静默丢弃**：超容处有 `Renderer::warn_npc_cap_once`。
-13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步。**仍未做**：NAT 双进程真机验证、回滚、快照增量压缩、会话恢复。
+13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步；**双进程真机握手已验通**（`net_pair.sh`）。**仍未做**：NAT 打洞真机验证、回滚、快照增量压缩、会话恢复。
 14. **道具进阴影 pass**：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
 15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F（其余 `#[allow]` 必须保留）。
 17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0`（harness = `run_survive_pm.ps1`）。
