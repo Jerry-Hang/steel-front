@@ -44,7 +44,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
 | `net.rs` | 2406 | UDP 联机（协议魔数 'S'） |
 | `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`（**注释里的字也算**）：**红了 = 有人加了没有字模的字**，而**源字体未入库 ⇒ 表不能重建** ⇒ 只能**改写文案**（别拿系统字体顶替：会改字形）。定位 `python tools/find_codepoint.py <HEX> <file>` |
-| `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1561 / 1188 / 1290 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
+| `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1561 / 1188 / 1290 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / 程序化贴图 + 烘焙 / 物理 |
 | `llm_cmd.rs` | 712 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
 其余：`config.rs`（`$HOME/.steel_front.cfg`，原子写 + 容错加载，测试不写盘）、
@@ -430,7 +430,7 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   🔴 **顶点分布（2026-09-26）**：场景 489 144 顶点里 `building_tall`（132 件 × **1872**）占 **50%**、
   `tree_oak`（372 件 × **500**）占 **38%** ⇒ 要动就动这两类，别看件数。判据 = `RV3D_PROP_STATS=1`。
   **顶点还是唯一的杠杆** ⇒ 资产改动先用 `propdraw:` 的几何量验收（GLB 已焊接 = 顶点数即真几何）；
-  ⚠️ 道具真实代价见下条（≈20% 帧时间，§21.83，**不是**旧记录的 5.4%）。
+  ⚠️ 道具真实代价 ≈20% 帧时间（§21.83，**不是**旧记录的 5.4%）。
 - 🔴🔴 **道具/GLB 的两条通则（改动前先读）**：
   1. **`box_project_uv` 的逐面 UV 岛 + `export_normals=True` 的逐面法线都会阻止顶点共享**
      （`tree_oak` 838 三角形曾被拆成 **2264 顶点**）。真实分布见上"顶点预算"条。
