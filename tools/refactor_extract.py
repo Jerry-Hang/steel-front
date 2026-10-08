@@ -45,9 +45,11 @@ use super::*;
 
 """
 
-# 与 tools/refactor_move_check.py 里的同一条（可见性加宽）。允许两种形态：
-#   缩进 4 空格的方法（impl 内）与**顶格的自由函数**；带 unsafe/const 限定词。
-WIDEN_RE = re.compile(r"^(    |)(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)", re.M)
+# 与 tools/refactor_move_check.py 里的同一条（可见性加宽）。覆盖三种形态：
+#   缩进 4 空格的方法（impl 内）、顶格的自由函数、顶格的类型/常量定义（拆 consts 模块时要用）。
+WIDEN_RE = re.compile(
+    r"^(    |)(?:pub(?:\([^)]*\))? )?"
+    r"((?:unsafe )?(?:const )?fn \w+|(?:struct|enum|union|static|type) \w+|const \w+)", re.M)
 
 
 def read(path):
