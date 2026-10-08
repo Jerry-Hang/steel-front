@@ -220,8 +220,10 @@ mod vk_failure_path_tests {
     #[test]
     fn command_buffer_is_indexed_by_frame_slot_not_by_swapchain_image() {
         // ⚠️ 与上面那条同样的自指问题：正文写在 `mod` 之内，且先切掉本测试模块
-        let full = include_str!("../renderer.rs");
-        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        // 扫**整个 renderer 生产子树**（拆模块后只扫 renderer.rs 会漏掉搬走的代码）；
+        // 支持模块见 src/engine/renderer/tests_support.rs（fail-closed）。
+        let full = super::tests_support::renderer_production_sources();
+        let src = full.as_str();
         let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
         // 先证明这条检查真的扫到了东西（否则文件改名/被搬走时会静默恒真）
         assert!(
@@ -272,8 +274,10 @@ mod vk_failure_path_tests {
     /// （第一轮只改了 acquire 与主循环围栏），修完为 0 处。
     #[test]
     fn no_unbounded_wait_on_vulkan_calls() {
-        let full = include_str!("../renderer.rs");
-        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        // 扫**整个 renderer 生产子树**（拆模块后只扫 renderer.rs 会漏掉搬走的代码）；
+        // 支持模块见 src/engine/renderer/tests_support.rs（fail-closed）。
+        let full = super::tests_support::renderer_production_sources();
+        let src = full.as_str();
         let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
         // 先证明这条检查真的扫到了等待调用（否则文件被搬走/改名时会静默恒真）
         let waits = code
@@ -358,8 +362,10 @@ mod vk_failure_path_tests {
             1
         );
 
-        let full = include_str!("../renderer.rs");
-        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        // 扫**整个 renderer 生产子树**（拆模块后只扫 renderer.rs 会漏掉搬走的代码）；
+        // 支持模块见 src/engine/renderer/tests_support.rs（fail-closed）。
+        let full = super::tests_support::renderer_production_sources();
+        let src = full.as_str();
         let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
         // 先证明真的扫到了 blit 区域（否则文件改名/被搬走时这条检查会静默恒真）
         assert!(
@@ -741,13 +747,17 @@ mod vk_failure_path_tests {
     /// （`prop_attr_buf`，那处本来就正确置空），把它算进来会误报（第一版就是这么红的）。
     #[test]
     fn upload_buffers_are_created_before_the_old_ones_are_destroyed() {
-        let full = include_str!("../renderer.rs");
-        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        // 扫**整个 renderer 生产子树**（拆模块后只扫 renderer.rs 会漏掉搬走的代码）；
+        // 支持模块见 src/engine/renderer/tests_support.rs（fail-closed）。
+        let full = super::tests_support::renderer_production_sources();
+        let src = full.as_str();
         let lines: Vec<&str> = src.lines().collect();
         // 函数名 → 该函数里"这一对上传缓冲"的字段名（用于把无关的销毁排除掉）
+        // ⚠️ 只匹配 `fn NAME(`：拆模块时这些方法统一加宽成 `pub(crate) fn`（Rust 的方法私有性
+        // 不同于字段私有性，见 docs/refactor-plan.md），写死 `pub fn ` 会扫不到而误红。
         let targets: [(&str, [&str; 4]); 2] = [
             (
-                "pub fn set_props(",
+                "fn set_props(",
                 [
                     "prop_vertex_buffer",
                     "prop_index_buffer",
@@ -756,7 +766,7 @@ mod vk_failure_path_tests {
                 ],
             ),
             (
-                "pub fn set_first_person_gun_mesh(",
+                "fn set_first_person_gun_mesh(",
                 [
                     "gun_vertex_buffer",
                     "gun_index_buffer",
@@ -770,10 +780,14 @@ mod vk_failure_path_tests {
                 .iter()
                 .position(|l| l.contains(fname))
                 .unwrap_or_else(|| panic!("检查失效：源码里找不到 {fname}"));
-            // 函数体 = 到下一个同级 `pub fn` / `fn` 为止（impl 内的方法都是 4 空格缩进）
+            // 函数体 = 到下一个同级 `fn` 为止（impl 内的方法都是 4 空格缩进；含 `pub(crate) fn`）
             let end = lines[start + 1..]
                 .iter()
-                .position(|l| l.starts_with("    pub fn ") || l.starts_with("    fn "))
+                .position(|l| {
+                    l.starts_with("    fn ")
+                        || l.starts_with("    pub fn ")
+                        || l.starts_with("    pub(crate) fn ")
+                })
                 .map(|i| start + 1 + i)
                 .unwrap_or(lines.len());
             let body: Vec<&str> = lines[start..end]
@@ -864,8 +878,10 @@ mod vk_failure_path_tests {
     fn no_expect_or_unwrap_on_vulkan_calls() {
         // ⚠️ 只扫**生产代码**：`include_str!` 会把本测试模块自身也读进来，
         // 而它正文里就写着 `.expect(` 这几个字（自指 ⇒ 这条检查永远红）。
-        let full = include_str!("../renderer.rs");
-        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        // 扫**整个 renderer 生产子树**（拆模块后只扫 renderer.rs 会漏掉搬走的代码）；
+        // 支持模块见 src/engine/renderer/tests_support.rs（fail-closed）。
+        let full = super::tests_support::renderer_production_sources();
+        let src = full.as_str();
         let lines: Vec<&str> = src.lines().collect();
         // 先证明这条检查真的扫到了东西（否则文件被搬走/改名时会静默恒真）
         assert!(
@@ -932,8 +948,10 @@ mod vk_failure_path_tests {
     /// 判据 = 本测试（改回 `let _ =` 立刻红）+ `wait_idle_failure_is_named_and_reported_once`。
     #[test]
     fn device_wait_idle_errors_are_never_silently_dropped() {
-        let full = include_str!("../renderer.rs");
-        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        // 扫**整个 renderer 生产子树**（拆模块后只扫 renderer.rs 会漏掉搬走的代码）；
+        // 支持模块见 src/engine/renderer/tests_support.rs（fail-closed）。
+        let full = super::tests_support::renderer_production_sources();
+        let src = full.as_str();
         let code: Vec<&str> = src.lines().filter(|l| !is_comment(l)).collect();
         // 先证明这条检查真的扫到了那条调用（否则文件被搬走/改名时会静默恒真）
         let calls = code.iter().filter(|l| l.contains(".device_wait_idle(")).count();
@@ -962,8 +980,10 @@ mod vk_failure_path_tests {
     /// `indices.len()`，draw call 读未初始化显存。
     #[test]
     fn no_if_let_ok_swallowing_vulkan_calls() {
-        let full = include_str!("../renderer.rs");
-        let src = full.split("mod vk_failure_path_tests").next().unwrap_or("");
+        // 扫**整个 renderer 生产子树**（拆模块后只扫 renderer.rs 会漏掉搬走的代码）；
+        // 支持模块见 src/engine/renderer/tests_support.rs（fail-closed）。
+        let full = super::tests_support::renderer_production_sources();
+        let src = full.as_str();
         let lines: Vec<&str> = src.lines().collect();
         assert!(
             lines.iter().any(|l| l.contains(".map_memory(")),

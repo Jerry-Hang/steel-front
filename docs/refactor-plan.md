@@ -36,6 +36,11 @@
 
 ## 后续顺序（每步一个 commit，最大块优先）
 
+> **进度（2026-09-28）**：`renderer.rs` 已从 **16501 → 10710 行**。已落地：
+> `tests_geom.rs`(901) / `tests_gpu.rs`(852) / `tests_vk.rs`(1242) / `geometry.rs`(816) /
+> `instances.rs`(963) / `parts.rs`(1085)。工具：`tools/refactor_extract.py`（spec 驱动搬运）
+> + `tools/refactor_move_check.py`（逐字节判据）。
+
 1. **renderer 的小类型与纯函数**：`QualityPreset`(665) / `WorldMarker`(711) / `TerrainLod`(82) /
    地形高度与噪声函数 → `renderer/quality.rs`、`renderer/world_marker.rs`、`renderer/terrain.rs`。
 2. **`impl Renderer` 分片**（当前 11205 行）：PT(≈1600) / 场景上传(≈1200) /
@@ -62,3 +67,18 @@
 4. **推送前先 `fetch`**：本机 Windows 会话与 Linux 会话同时推同一仓库，
    基于旧 `renderer.rs` 行号的搬运会在 rebase 时冲突 ⇒ **搬运脚本必须可重放**
    （结构驱动、不手打行号），冲突后重跑即可。
+5. **Rust 的「方法私有性」≠「字段私有性」**（第一条切缝当场踩到，43 条编译错误）：
+   私有**字段**对定义模块的后代可见 ⇒ 子模块里的 `impl` 照旧能读写 `Renderer` 的字段；
+   但私有**方法**只在"定义它的模块及其后代"可见 ⇒ 父模块与 `renderer::tests_*` 都看不见
+   子模块 impl 里的私有 `fn`。所以搬走的方法统一加宽为 `pub(crate)`，并在范围表里以 `widen=*`
+   记账（加宽后编译器还会报 `private_interfaces`，要求把签名里的私有类型一并提到 `pub(crate)`：
+   已按它的要求做了 `Vertex` / `TerrainLod` / `InstanceData`）。
+6. **搬方法必须套 `impl` 外壳**：搬出来的是方法，裸 `fn` 带 `self` 是语法错 ⇒ 目标文件写
+   `impl Renderer { … }`（外壳是脚手架，不计入搬运字节）。
+7. 🔴 **自扫源码的判据必须跟着扩到整个子树**（第二条切缝当场红了 1 条）：
+   `upload_buffers_are_created_before_the_old_ones_are_destroyed` 扫 `renderer.rs` 找 `pub fn set_props(`，
+   而那段已搬进 `parts.rs`。修法是新增 `renderer/tests_support.rs::renderer_production_sources()`：
+   **运行时枚举** `renderer.rs` + 全部非 `tests_*.rs` 子模块（跟着拆分自动变大，不需要谁记得改），
+   并用根文件的 `mod` 声明做**交叉校验**（声明了却没被扫到 ⇒ 直接红）、加字节下限与
+   `impl Renderer` 存在性下限 ⇒ **fail-closed**，避免退化成"扫了个空还说 OK"（教训 46）。
+   同时把判据里的 `pub fn NAME(` 改成 `fn NAME(`（加宽后前者匹配不到，会误红）。
