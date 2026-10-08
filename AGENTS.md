@@ -33,9 +33,10 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 | 文件 | 行数（2026-09-28 实测） | 职责 |
 |---|---|---|
-| `engine/renderer.rs` | 10710 | **模块根**：`Renderer` 结构体 + 构造 + 每帧编排。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
-| `engine/renderer/*.rs` | geometry 816 / instances 963 / parts 1085 / tests_* 2995 | 拆分出的子模块；`tests_support.rs` 提供**扫整个子树**的源码判据入口（见 `docs/refactor-plan.md`） |
-| `engine/game.rs` | 10505 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络（**待拆**） |
+| `engine/renderer.rs` | **1197** | **模块根**：`Renderer` 结构体 + 类型/常量定义 + 16 个子模块（`pub(crate) use …::*;` 再导出）。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
+| `engine/renderer/*.rs` | geometry 816 / instances 963 / parts 1085 / record 1105 / textures 1002 / pipelines 996 / device 922 / shadow 863 / frame 898 / pt_* 1529 / helpers 637 / gpu_layout 215 / tests_* 2995 | 拆分出的子模块（拆法与判据见 `docs/refactor-plan.md`）。`tests_support.rs` 提供**扫整个子树**的源码判据入口 |
+| `engine/game.rs` | **1117** | **模块根**：类型/常量定义 + 12 个子模块（同上再导出） |
+| `engine/game/*.rs` | session 1173 / npc_ai 739 / weapons 620 / projectiles 585 / ai_util 581 / waves 483 / net 397 / map_util 256 / player 250 / types 146 / diag 103 / tests 3324 | 拆分出的子模块；`game/tests.rs` 仍超 1200 行（待分组） |
 | `main.rs` | 4465 | GameApp + winit 事件循环 + 输入/光标捕获 + 枪模姿态 |
 | `audio.rs` | 2919 | 合成音效与音乐（`audio_out.rs` = 输出层：waveOut / ALSA） |
 | `ui.rs` | 2833 | HUD / 菜单 / 设置 / 键位表 |

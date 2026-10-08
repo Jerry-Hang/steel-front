@@ -36,10 +36,13 @@
 
 ## 后续顺序（每步一个 commit，最大块优先）
 
-> **进度（2026-09-28）**：`renderer.rs` 已从 **16501 → 10710 行**。已落地：
-> `tests_geom.rs`(901) / `tests_gpu.rs`(852) / `tests_vk.rs`(1242) / `geometry.rs`(816) /
-> `instances.rs`(963) / `parts.rs`(1085)。工具：`tools/refactor_extract.py`（spec 驱动搬运）
-> + `tools/refactor_move_check.py`（逐字节判据）。
+> **进度（2026-09-28 完成）**：`renderer.rs` **16501 → 1197 行**，`game.rs` **10715 → 1117 行**，
+> 两个根文件都落进 800–1200 行区间。renderer 子模块 16 个（geometry / instances / parts / record /
+> pt_assets / pt_render / textures / shadow / pipelines / descriptors / device / swapchain / frame /
+> drop / helpers / gpu_layout），game 子模块 12 个（session / weapons / npc_ai / projectiles / waves /
+> net / player / collisions / types / ai_util / map_util / diag），外加两边的 tests_*。
+> 逐步证据与十个工具缺陷见 [`docs/progress/refactor-modularization.md`](progress/refactor-modularization.md)。
+> 仍未做：`game/tests.rs`（3324 行）与 `renderer/tests_vk.rs`（1242 行）两个大测试文件的分组。
 
 1. **renderer 的小类型与纯函数**：`QualityPreset`(665) / `WorldMarker`(711) / `TerrainLod`(82) /
    地形高度与噪声函数 → `renderer/quality.rs`、`renderer/world_marker.rs`、`renderer/terrain.rs`。

@@ -15,6 +15,7 @@
 | [`progress/character-gun.md`](progress/character-gun.md) | 角色与枪：士兵建模 / 迷彩 / 剪影 / 枪模动画 | 29 | 138.0 KB |
 | [`progress/ai-net-audio.md`](progress/ai-net-audio.md) | AI / 联网 / 性能：寻路 / 波次 / 帧率 / 音频 | 25 | 351.0 KB |
 | [`progress/engineering.md`](progress/engineering.md) | 工程方法：门禁 / 探针与守卫 / 撤回与更正 / 验证与文档约定 | 20 | 163.0 KB |
+| [`progress/refactor-modularization.md`](progress/refactor-modularization.md) | 模块化拆分：renderer.rs 16501→1197 / game.rs 10715→1117 行，纯移动 + 逐字节判据 | 1 | 7.0 KB |
 
 ## 切档说明与已知噪声（2026-10-02，v6）
 
