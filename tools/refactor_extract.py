@@ -230,9 +230,11 @@ def main() -> int:
         return block
 
     blocks = {}
+    target_existed = {}
     for target, items in by_target.items():
         parts = []
         exists = os.path.exists(target)
+        target_existed[target] = exists
         if not exists:
             header = HEADER.format(src=src_label, root=root)
             if args.no_header_use:
@@ -307,10 +309,14 @@ def main() -> int:
         else:
             dropped.add(b - a + 1)
 
+    # 只声明**本次新建**的模块：往已存在的模块文件里追加代码时，它的声明在拥有者那一侧
+    # （实测：向 tests/session.rs 追加两个测试，却给 ai.rs / combat.rs 各插了一条 `mod session;`
+    #  ⇒ 变成 game::tests::ai::session，rustc 去找 tests/ai/session.rs，找不到）。
+    new_targets = {t for t in by_target if not target_existed.get(t, False)}
     decls = []
     decl_file = args.declare_in or args.file
     decl_text = read(decl_file) if args.declare_in else text
-    for target in by_target:
+    for target in new_targets:
         stem = os.path.splitext(os.path.basename(target))[0]
         if re.search(rf"^\s*(?:#\[[^\]]*\]\s*)*(?:pub )?mod {re.escape(stem)}\s*;", decl_text, re.M):
             continue
@@ -344,7 +350,7 @@ def main() -> int:
     # (--declare-in when the container is itself a child module, else the container)
     new_text = read(decl_file)
     missing = []
-    for t in by_target:
+    for t in new_targets:
         stem = os.path.splitext(os.path.basename(t))[0]
         if not re.search(rf"^\s*(?:#\[[^\]]*\]\s*)*(?:pub )?mod {re.escape(stem)}\s*;", new_text, re.M):
             missing.append(stem)

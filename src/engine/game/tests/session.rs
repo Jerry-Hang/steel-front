@@ -911,3 +911,182 @@ use super::*;
             }
         }
     }
+    /// 重开一局必须清掉上一局的击杀提示：feed 是每局的事件流，
+    /// 而重开时 score 已归零 —— 残留的"你被击杀了"与清零的分数自相矛盾。
+    /// 本测试在 `start_run` 补 `kill_feed.clear()` 之前会红。
+    #[test]
+    fn restart_clears_kill_feed() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.hud.push_kill("你被击杀了".to_string());
+        assert!(!game.hud.kill_feed.is_empty(), "前置：feed 里应有一条");
+        game.game_state = GameState::GameOver;
+        game.request_restart(&glam::Vec3::ZERO);
+        assert!(
+            game.hud.kill_feed.is_empty(),
+            "重开后不得残留上一局的击杀提示"
+        );
+    }
+    /// 爆炸击杀：hp≤0 移除 + 计分 + 任务推进
+    #[test]
+    fn explosion_kills_and_scores() {
+        let mut npcs = vec![npc_at(7, Team::Red, [0.5, 0.0, 0.0])];
+        npcs[0].hp = 30.0;
+        npcs[0].last_hp = 30.0;
+        let game = explode_on(npcs, [0.0, 1.0, 0.0], EXPLOSION_DAMAGE, true);
+        assert!(game.npcs.is_empty(), "30hp NPC 被爆心击杀");
+        assert_eq!(game.score, KILL_SCORE, "击杀计分");
+        assert_eq!(game.objective.eliminated, 1, "任务目标推进");
+    }
+    /// survive 规则波次推进：清波 → 补给窗口（血量回复/弹药补满）→ 下一波；
+    /// 守住全部波 → 胜利态（阶段一）
+    #[test]
+    fn survive_rule_advances_waves_and_wins_at_last() {
+        let mut game = Game::new();
+        game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
+            crate::engine::objective::GameRule::Survive { waves: 2 },
+        ));
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.hud.health = 50.0; // 半血，验证补给回复
+        game.grenades = 0;
+        let camera = Camera::new();
+        // 清空 NPC（模拟玩家清完 wave 1）+ 推进 update_waves
+        game.npcs.clear();
+        game.wave_timer = 0.0;
+        for _ in 0..200 {
+            game.update(1.0 / 60.0, &camera);
+        }
+        // wave 1 清完 → wave_timer 置为 WAVE_INTERMISSION → 递减到 0 → wave 2 + 补给
+        assert_eq!(game.wave, 2, "survive 第 1 波清完应进入第 2 波");
+        assert!(
+            game.hud.health > 50.0,
+            "波间补给应回复血量: {}",
+            game.hud.health
+        );
+        assert_eq!(game.grenades, game.grenades_max, "波间补给应补满手榴弹");
+        // 清完 wave 2（最后一波）→ 胜利
+        game.npcs.clear();
+        game.wave_timer = 0.0;
+        for _ in 0..300 {
+            game.update(1.0 / 60.0, &camera);
+            if game.game_state == GameState::Victory(crate::engine::ai::Team::Blue) {
+                break;
+            }
+        }
+        assert_eq!(
+            game.game_state,
+            GameState::Victory(crate::engine::ai::Team::Blue),
+            "守住全部波次应胜利"
+        );
+    }
+    /// 重开一局必须复位**跳跃状态**：玩家可能在空中被打死，
+    /// 否则新一局开局会带着上一局的上升速度与冲刺跳惯性，甚至"落地即起跳"。
+    /// 本测试在 `start_run` 补这三行复位之前会红。
+    #[test]
+    fn restart_resets_jump_state() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        // 模拟"冲刺跳之后在空中被打死"：仍在上升 + 带着水平惯性 + 空格一直没松
+        game.jump_vel = JUMP_SPEED;
+        game.jump_hvel = glam::Vec3::new(6.0, 0.0, 0.0);
+        game.jump_pressed = true;
+        game.game_state = GameState::GameOver;
+        game.request_restart(&glam::Vec3::ZERO);
+        assert_eq!(game.jump_vel, 0.0, "重开后不得带上一局的上升速度");
+        assert_eq!(
+            game.jump_hvel,
+            glam::Vec3::ZERO,
+            "重开后不得带上一局的跳跃惯性"
+        );
+        assert!(!game.jump_pressed, "重开后不得保留上一局的跳跃按键");
+    }
+    /// 判据：**过时数据最多旧 N 帧** —— 遮挡关系变了以后，NPC 必须在一个刷新窗口内
+    /// 被重新判定（否则"看不见的人"会永远隐形，那是最坏的一类卡死）。
+    #[test]
+    fn npc_visibility_refreshes_within_the_window() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.truncate(1);
+        // 3m 高窄柱挡在玩家与 NPC 之间（与 `npc_occluded_by_obstacle_between` 同一套布景）
+        game.world.bodies.push(physics::Body::new_static(
+            Pv::new(0.0, 1.5, 0.0),
+            Pv::new(0.5, 1.5, 0.5),
+        ));
+        game.player_body.pos = Pv::new(-40.0, 0.0, 0.0);
+        game.npcs[0].position = [30.0, 0.0, 0.0];
+        assert!(game.npc_occluded(0), "布景本身要能挡住（否则这条测试没意义）");
+        // 先跑满一个窗口，让缓存必然拿到"被挡"的判定
+        for _ in 0..NPC_VIS_REFRESH_FRAMES {
+            game.refresh_npc_visibility();
+        }
+        assert!(
+            !game.npc_visibility_flags()[0],
+            "缓存应已判出遮挡：{:?}",
+            game.npc_visibility_flags()
+        );
+        // 把 NPC 挪到无遮挡处：最多一个窗口之后必须变回"可见"
+        game.npcs[0].position = [30.0, 0.0, 90.0];
+        let mut refreshed_after = None;
+        for f in 1..=NPC_VIS_REFRESH_FRAMES {
+            game.refresh_npc_visibility();
+            if game.npc_visibility_flags()[0] {
+                refreshed_after = Some(f);
+                break;
+            }
+        }
+        assert!(
+            refreshed_after.is_some_and(|f| f <= NPC_VIS_REFRESH_FRAMES),
+            "一个刷新窗口内必须重新判定，实际用了 {:?} 帧",
+            refreshed_after
+        );
+    }
+    /// NPC 遮挡判定：障碍 AABB 在玩家与 NPC 之间 → occluded；移开 NPC → 可见
+    #[test]
+    fn npc_occluded_by_obstacle_between() {
+        let mut game = Game::new();
+        game.on_any_key(&glam::Vec3::ZERO);
+        game.npcs.truncate(1);
+        // 2026-08-23：自建确定性障碍（3m 高窄柱）——地图障碍部署位置随改版漂移，
+        // 高层建筑斜线必挡、低屏障又太矮；自建柱体唯一确定
+        let ob = MapObstacle {
+            x: 0.0,
+            z: 0.0,
+            half_w: 0.5,
+            half_d: 0.5,
+            y: 1.5,
+            half_h: 1.5,
+            kind: ObstacleKind::Block,
+            tint: None,
+            max_hp: 300.0,
+            hp: 300.0,
+            shape: Shape::Legacy,
+        };
+        game.map.obstacles.push(ob);
+        game.world
+            .bodies
+            .push(physics::Body::new_static(Pv::new(0.0, 1.5, 0.0), Pv::new(0.5, 1.5, 0.5)));
+        // 玩家 → 障碍中心 → NPC 在障碍另一侧 30m
+        game.player_body.pos = Pv::new(-40.0, 0.0, 0.0);
+        game.npcs[0].position = [30.0, 0.0, 0.0];
+        assert!(
+            game.npc_occluded(0),
+            "障碍挡在玩家与 NPC 之间应判定遮挡"
+        );
+        // NPC 移到障碍同一侧 20m（视线无遮挡）→ 可见
+        game.npcs[0].position = [ob.x + ob.half_w + 30.0, 0.0, ob.z + 80.0];
+        assert!(
+            !game.npc_occluded(0),
+            "无遮挡时应可见"
+        );
+        // 越界索引安全
+        assert!(!game.npc_occluded(999));
+        // 双采样验证：近距离贴墙（墙高 MAP_BLOCK_HEIGHT ≥ 1.7m）NPC 在墙正后方
+        // → 身体与头部都被挡，仍判遮挡
+        game.npcs.truncate(1);
+        game.npcs[0].position = [ob.x + ob.half_w + 2.0, 0.0, ob.z];
+        game.player_body.pos = Pv::new(ob.x - ob.half_w - 1.0, 0.0, ob.z);
+        assert!(
+            game.npc_occluded(0),
+            "高墙正后方 NPC 应完全遮挡（双采样均被挡）"
+        );
+    }
