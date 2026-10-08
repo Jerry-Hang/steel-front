@@ -1077,6 +1077,9 @@ const NET_PLAYER_BASE: u32 = crate::net::NET_PLAYER_BASE;
 
 
 
+// 子模块（见 docs/refactor-plan.md）
+mod view;
+
 #[cfg(test)] mod tests;
 
 // 子模块（见 docs/refactor-plan.md）

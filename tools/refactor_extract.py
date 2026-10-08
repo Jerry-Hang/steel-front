@@ -340,16 +340,16 @@ def main() -> int:
     with io.open(args.file, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines) + ("\n" if trailing_newline else ""))
 
-    # self-check #2: every target is declared in the source (allow an attribute prefix such as
-    # `#[cfg(test)] mod tests;`)
-    new_text = read(args.file)
+    # self-check #2: every target is declared in the file that owns the declarations
+    # (--declare-in when the container is itself a child module, else the container)
+    new_text = read(decl_file)
     missing = []
     for t in by_target:
         stem = os.path.splitext(os.path.basename(t))[0]
         if not re.search(rf"^\s*(?:#\[[^\]]*\]\s*)*(?:pub )?mod {re.escape(stem)}\s*;", new_text, re.M):
             missing.append(stem)
     if missing:
-        print(f"SELF-CHECK FAIL: module(s) not declared in {args.file}: {missing}")
+        print(f"SELF-CHECK FAIL: module(s) not declared in {decl_file}: {missing}")
         return 1
 
     with io.open(args.ranges_out, "w", encoding="utf-8", newline="\n") as fh:
