@@ -198,6 +198,12 @@ def main() -> int:
     src_label = args.file.replace("\\", "/")
 
     def apply_widen(block, names, label):
+        # trait impl 里的方法不能带可见性限定符（`impl Trait for Type { fn default() … }`）：
+        # 加了就是 E0449 visibility qualifiers are not permitted here（实测一次）。
+        head = block.lstrip().split("\n", 1)[0]
+        if re.match(r"^impl\s+[\w:<>, '\[\]]+\s+for\s+", head):
+            print(f"note: {label} is a trait impl ({head.strip()[:50]}) -- skipping widen")
+            return block
         if names == ["*"]:
             new_block, n = WIDEN_RE.subn(lambda m: f"{m.group(1)}pub(crate) {m.group(2)}", block)
             if n == 0:

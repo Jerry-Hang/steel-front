@@ -239,10 +239,15 @@ def main() -> int:
         block = "\n".join(lines[lo - 1:hi])
         applied = []
         if getattr(args, "widen_all", False):
-            block, n = re.subn(r"^(    )(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)",
-                               lambda m: f"{m.group(1)}pub(crate) {m.group(2)}", block, flags=re.M)
-            if n:
-                applied.append(f"widen {n} method(s) to pub(crate)")
+            head = block.lstrip().split("\n", 1)[0]
+            if re.match(r"^impl\s+[\w:<>, '\[\]]+\s+for\s+", head):
+                # trait impl 的方法不能带可见性限定符 ⇒ 搬运工具对它跳过加宽，判据同样跳过
+                applied.append(f"skip widen (trait impl: {head.strip()[:40]})")
+            else:
+                block, n = re.subn(r"^(    )(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)",
+                                   lambda m: f"{m.group(1)}pub(crate) {m.group(2)}", block, flags=re.M)
+                if n:
+                    applied.append(f"widen {n} method(s) to pub(crate)")
         for old_s, new_s in subs:
             n = block.count(old_s)
             if n:
