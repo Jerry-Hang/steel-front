@@ -240,6 +240,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 🔴 **验证必须覆盖「非默认配置」**：PT 上屏 blit 的目标范围曾写死 `2560x1600`，而**默认窗口就是它**
   ⇒ 此前每轮 PT 验证都躲过去了；换尺寸就 `VUID-vkCmdBlitImage-dstOffset-00248` 并把设备打掉。
   判据 `blit_regions_never_hardcode_pixel_extents`（非原点 `Offset3D` 不许是纯字面量）。
+- 🔴 **交换链 create info 会被驱动回写**（2026-10-08 实测）：`create_swapchain()` 返回**之后**
+  `imageUsage` 会**多出 STORAGE**（**关掉验证层仍回写** ⇒ 不是验证层干的），验证层随后照被改过的
+  结构体报 `02275`/`01778`。**引擎用法合法**；对策：**传副本给驱动**、日志只打印我们申请的那份。
 
 **建筑摆放（2026-09-13）**
 - `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。用 `max` 会按较大方向
@@ -489,9 +492,11 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
   `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
   重跑确认 —— **别改测试、别调阈值**。
-- **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py`，判据 = **`vuid==0 and panics==0 and killed>=1`**，
-  **无 fps 门槛**（`fps=` 只用于打印）。**两套口径别混**：`playtest_perf.py` 是**时长制**
-  （跑满 `PT_SECS` 即完成，击杀只是附带指标、不判 FAIL）。
+- **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py`，判据 = **`panics==0` + `killed>=1` +
+  没有未知 VUID**（三条已验证噪声不计：驱动回写 `02275`/`01778`、RTSS/GamePP 的 `flags-parameter`；
+  **别的 VUID 一律 FAIL**）。🔴 **`RV3D_VALIDATION` 未开时脚本明说「VUID 判据不适用」**——
+  验证层关着时日志里没有 VUID 字样，旧判据 `vuid==0` 是**结构性恒真**（教训 46 同形）。
+  **无 fps 门槛**；`playtest_perf.py` 是另一套口径（时长制，跑满即完成，击杀不判 FAIL）。
 - 微基准：`cargo test --release <名> -- --nocapture --test-threads=1`
   （`shockwave_path_microbench` / `simd_cull_microbench`）；
   `RV3D_FORCE_SIMD=avx512|avx2|avx|sse4.2|scalar`（硬件不支持时告警回退）。
