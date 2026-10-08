@@ -102,6 +102,9 @@ def main() -> int:
                     help="wrap the appended blocks in `impl TYPE { ... }` (required when moving "
                          "methods: a bare `fn` with `self` is a syntax error). The wrapper is "
                          "scaffolding -- the moved bytes themselves stay identical.")
+    ap.add_argument("--raw", action="store_true",
+                    help="move whole items verbatim with NO wrapper (e.g. an entire `impl Drop for X`), "
+                         "and do not trim a trailing `}` off the block")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -150,7 +153,7 @@ def main() -> int:
         # 兜底：块尾不允许是顶格的 `}`（那是 impl/模块的收尾括号，不是方法的一部分）。
         # 实测踩过一次：把 impl 的 `}` 一起搬走 ⇒ 源文件 unclosed delimiter，编译期才报。
         trimmed = 0
-        while b > a and lines[b - 1] == "}":
+        while b > a and lines[b - 1] == "}" and not args.raw:
             b -= 1
             trimmed += 1
         if trimmed:
