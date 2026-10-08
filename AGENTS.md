@@ -43,7 +43,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 | `engine/city.rs` | 2357 | 程序化城市生成（40+ 条几何/契约测试） |
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
 | `net.rs` | 2406 | UDP 联机（协议魔数 'S'） |
-| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`（**注释里的字也算**）：**它红 = 有人加了没有字模的字**，而**源字体未入库 ⇒ 表没法重建** ⇒ 唯一出路是**改写文案去用已有的字**（别拿系统字体顶替：会改字形、红 `cjk_glyph_generates`）。定位 `python tools/find_codepoint.py <HEX> <file>` |
+| `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`（**注释里的字也算**）：**红了 = 有人加了没有字模的字**，而**源字体未入库 ⇒ 表不能重建** ⇒ 只能**改写文案**（别拿系统字体顶替：会改字形）。定位 `python tools/find_codepoint.py <HEX> <file>` |
 | `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1561 / 1188 / 1290 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / **程序化贴图 + 烘焙 AO/静态天光** / 物理 |
 | `llm_cmd.rs` | 712 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
 
@@ -615,7 +615,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1`）。
 20. ✅ **DLSS：不接**（`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素。**重开判据**：面积 1/4 而 fps +>40%。
 21. **GLB `byteStride`**：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
-23. ✅ **`VUID-VkSwapchainCreateInfoKHR-flags-parameter`**：是 `RTSS`/`GamePP` 两个**隐式层**塞的 `MUTABLE_FORMAT` ⇒ **不要去改引擎**（开验证层的正确姿势见铁律 B）。
+23. ✅ **`flags-parameter` 那条 VUID**：`RTSS`/`GamePP` 隐式层塞的 `MUTABLE_FORMAT`，非引擎问题（见「验收口径」）。
 24. **广场"坑"** = 水平面绕序反了（判据 `horizontal_winding_tests`）。
 25. ✅ **`ai_us` 单帧尖峰**：出生点小连通域 bug 的下游症状；255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
 26. ✅ **编制尾数并入末位**（2026-09-26 `7877855`）：连名单逐人等于全营（判据 `every_soldier_is_carried_by_a_company`），重组阈值分母也不再写死 128（`44c7464`）。
