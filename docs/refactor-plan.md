@@ -36,13 +36,15 @@
 
 ## 后续顺序（每步一个 commit，最大块优先）
 
-> **进度（2026-09-28 完成）**：`renderer.rs` **16501 → 1197 行**，`game.rs` **10715 → 1117 行**，
-> 两个根文件都落进 800–1200 行区间。renderer 子模块 16 个（geometry / instances / parts / record /
-> pt_assets / pt_render / textures / shadow / pipelines / descriptors / device / swapchain / frame /
-> drop / helpers / gpu_layout），game 子模块 12 个（session / weapons / npc_ai / projectiles / waves /
-> net / player / collisions / types / ai_util / map_util / diag），外加两边的 tests_*。
-> 逐步证据与十个工具缺陷见 [`docs/progress/refactor-modularization.md`](progress/refactor-modularization.md)。
-> 仍未做：`game/tests.rs`（3324 行）与 `renderer/tests_vk.rs`（1242 行）两个大测试文件的分组。
+> **进度（2026-09-28 完成）**：`renderer.rs` **16501 → 1199 行**，`game.rs` **10715 → 1120 行**，
+> 两个模块树（40 个文件）**全部 ≤ 1200 行**（最大 1199 / 最小 63，合计 27,679 行）。
+> renderer 子模块 19 个（geometry / instances / parts / record / pt_assets / pt_render / textures /
+> shadow / pipelines / descriptors / device / swapchain / frame / drop / helpers / gpu_layout + tests_*），
+> game 子模块 16 个（session / view / weapons / npc_ai / projectiles / waves / net / player /
+> collisions / types / ai_util / map_util / diag + tests/{ai,combat,session}）。
+> 逐步证据与十四个工具缺陷见 [`docs/progress/refactor-modularization.md`](progress/refactor-modularization.md)。
+> 终局闸门：`cargo test --release` 664 passed / 0 failed、`cargo build --release` 0 警告、CJK OK、
+> 真机冒烟 `VUID=0 panics=0` ALL-OK。
 
 1. **renderer 的小类型与纯函数**：`QualityPreset`(665) / `WorldMarker`(711) / `TerrainLod`(82) /
    地形高度与噪声函数 → `renderer/quality.rs`、`renderer/world_marker.rs`、`renderer/terrain.rs`。

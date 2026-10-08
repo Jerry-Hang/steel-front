@@ -33,10 +33,10 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 | 文件 | 行数（2026-09-28 实测） | 职责 |
 |---|---|---|
-| `engine/renderer.rs` | **1197** | **模块根**：`Renderer` 结构体 + 类型/常量定义 + 子模块声明（`pub(crate) use …::*;` 再导出）。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
-| `engine/renderer/*.rs` | 16 个子模块（56–1105 行） | geometry / instances / parts / record / pt_assets / pt_render / textures / shadow / pipelines / descriptors / device / swapchain / frame / drop / helpers / gpu_layout + tests_*。拆法与判据见 `docs/refactor-plan.md`；`tests_support.rs` 提供**扫整个子树**的源码判据入口 |
-| `engine/game.rs` | **1117** | **模块根**：类型/常量定义 + 子模块声明（同上再导出） |
-| `engine/game/*.rs` | 12 个子模块（103–1173 行） | session / npc_ai / weapons / projectiles / ai_util / waves / net / map_util / player / types / diag + tests（3324 行，**待分组**） |
+| `engine/renderer.rs` | **1199** | **模块根**：`Renderer` 结构体 + 类型/常量定义 + 子模块声明（`pub(crate) use …::*;` 再导出）。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
+| `engine/renderer/*.rs` | 19 个子模块（100–1105 行） | geometry / instances / parts / record / pt_assets / pt_render / textures / shadow / pipelines / descriptors / device / swapchain / frame / drop / helpers / gpu_layout + tests_*。拆法与判据见 `docs/refactor-plan.md`；`tests_support.rs` 提供**扫整个子树**的源码判据入口 |
+| `engine/game.rs` | **1120** | **模块根**：类型/常量定义 + 子模块声明（同上再导出） |
+| `engine/game/*.rs` | 16 个子模块（63–1136 行） | session / view / npc_ai / weapons / projectiles / ai_util / waves / net / map_util / player / collisions / types / diag + tests/{ai,combat,session}。**两个模块树（40 个文件）全部 ≤ 1200 行** |
 | `main.rs` | 4465 | GameApp + winit 事件循环 + 输入/光标捕获 + 枪模姿态 |
 | `audio.rs` | 2919 | 合成音效与音乐（`audio_out.rs` = 输出层：waveOut / ALSA） |
 | `ui.rs` | 2833 | HUD / 菜单 / 设置 / 键位表 |

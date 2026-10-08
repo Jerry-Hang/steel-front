@@ -68,7 +68,30 @@
 
 ### 还没做的（下一轮）
 
-- ⏳ **两个大测试文件仍在区间外**：`game/tests.rs` 3 324 行（原 `mod tests` 的内容整体搬出）、
-  `renderer/tests_vk.rs` 1 242 行。搬法与主体同款（按 `#[test]` 分组整体搬运），只是还没轮到。
-- ⏳ `renderer.rs` 名义上 1 197 行、`game.rs` 1 117 行都在区间内，但两者**都是定义 + 再导出**的
-  模块根；若将来定义继续膨胀，按 `gpu_layout.rs` 的办法（定义下沉 + 字段 `pub(crate)` + 再导出）再切一刀。
+- （已做）两个大测试文件：`game/tests.rs` 3,604 → `tests/{ai,combat,session}.rs` = **1182/1182/1092 行**
+  + 168 行的索引与共享 helper；`renderer/tests_vk.rs` 1,248 → 1,248 − 354 = **897 + 359 行**（`tests_vk_side.rs`）。
+- （已做）`game/session.rs` 1,302 → **1,136 行**（`view.rs` 173 行：HUD 与光照访问器）。
+
+## 2026-09-28 收尾：**两个模块树 40 个文件全部 ≤ 1,200 行**
+
+终审（`python -c` 遍历两棵树）：**40 个文件，超过 1200 行的 = 0**；最大 `renderer.rs` **1199**、
+最小 `collisions.rs` **63**；两棵树合计 27,679 行。终局闸门：`cargo test --release` **664 passed /
+0 failed**、`cargo build --release` **0 警告**、CJK 闸门 OK、真机冒烟 **`VUID=0 panics=0 fps=183.3`
+ALL-OK**。
+
+### 收尾阶段又踩到的四个坑（都是"工具语义"而不是"搬错代码"）
+
+11. 🔴 **测试文件里的共享 helper 不能跟着搬**：`game/tests.rs` 里 118 个 `#[test]` 之外还有 2 个被多组
+    复用的 helper（`explode_on` / `npc_at`）—— 按「所有 fn」分组会让另外两组找不到它（实测 23 条
+    E0425）。改法：只搬 `#[test]` 项，helper 留在父文件（**父模块的私有项对子模块可见**）。
+12. 🔴 **驱动器崩溃留下的陈旧 spec 会被下游照用**：分组器报错退出后，上一轮那份（含 helper 的）spec
+    还在盘上，搬运工具照用 ⇒ 分组器现在开跑先删自己的输出（与搬运工具同款防线：失败就没有证据文件）。
+13. 🔴 **一次搬运横跨两个文件时，回滚必须整对回滚**：平衡测试时我先从 `ai.rs` 挪 2 个测试进
+    `session.rs`，随后为重做 combat 那一半而 `git checkout -- combat.rs session.rs` ——
+    **session.rs 被回滚、ai.rs 的"移出"留在工作区** ⇒ 测试从 **664 掉到 662**。
+    **抓住它的是"测试总数守恒"这条判据**（不是人眼）。修法：从 HEAD 恢复 `ai.rs` 后按原 spec 重放。
+14. **模块声明归属**：容器本身是子模块时，新建的兄弟模块要声明在**父模块文件**里（把
+    `tests_vk_side` 声明进 `tests_vk.rs` ⇒ rustc 去找 `renderer/tests_vk/tests_vk_side.rs`，E0583）；
+    而**往已存在的模块文件追加代码时不该再声明一次**（实测给 `ai.rs`/`combat.rs` 各插了一条
+    `mod session;`）。两者都已进工具：`--declare-in FILE` + "只声明本次新建的模块"。
+
