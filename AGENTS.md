@@ -33,7 +33,7 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 | 文件 | 行数（2026-09-28 实测） | 职责 |
 |---|---|---|
-| `engine/renderer.rs` | **1199** | **模块根**：`Renderer` 结构体 + 类型/常量定义 + 子模块声明（`pub(crate) use …::*;` 再导出）。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
+| `engine/renderer.rs` | **1199** | **模块根**：`Renderer` 结构体 + 类型/常量定义 + 子模块声明（`pub(crate) use …::*;` 再导出）。**改 pipeline/shader/swapchain 须先跑冒烟验 VUID** |
 | `engine/renderer/*.rs` | 19 个子模块（100–1105 行） | 按职责拆出（几何/实例/管线/描述符/交换链/PT/纹理/阴影/录制…），清单见 `docs/refactor-plan.md`。`tests_support.rs` 提供**扫整个子树**的源码判据入口 |
 | `engine/game.rs` | **1120** | **模块根**：类型/常量定义 + 子模块声明（同上再导出） |
 | `engine/game/*.rs` | 16 个子模块（63–1136 行） | 按职责拆出（会话/玩家/武器/弹道/AI/波次/联机/地图/诊断 + tests/*）。**两个模块树（40 个文件）全部 ≤ 1200 行** |
