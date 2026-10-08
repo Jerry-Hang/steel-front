@@ -54,6 +54,45 @@ def read(path):
         return fh.read()
 
 
+DOC_COM = ("///", "#[", "//!")
+
+
+def head_start(lines, a):
+    """1-based start of the item at `a`, including its doc-comment/attribute block.
+
+    The block may contain BLANK LINES between the docs and the `fn` -- that is the actual style in
+    this repo (measured 2026-09-28: `/// 设置画质…` / blank / `pub fn set_quality`).  Stopping at the
+    blank line left the docs behind as a dangling doc comment (compiler: `expected item after doc
+    comment`) and silently stripped documentation off the moved method.  A blank line only continues
+    the walk when the line above it is itself doc/attribute -- otherwise it is a real separator.
+    """
+    i = a
+    while i - 1 >= 1:
+        s = lines[i - 2].lstrip()
+        if s.startswith(DOC_COM):
+            i -= 1
+            continue
+        if s == "" and i - 2 >= 1 and lines[i - 3].lstrip().startswith(DOC_COM):
+            i -= 1
+            continue
+        break
+    return i
+
+
+def first_dangling_doc(text):
+    """Line number of a `///` block that documents nothing; best-effort lint, reported only."""
+    ls = text.split("\n")
+    for i, l in enumerate(ls):
+        if not l.lstrip().startswith("///"):
+            continue
+        j = i + 1
+        while j < len(ls) and (ls[j].strip() == "" or ls[j].lstrip().startswith(DOC_COM)):
+            j += 1
+        if j >= len(ls) or ls[j].lstrip().startswith("}"):
+            return i + 1
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", required=True, help="the big source file to move code out of")
@@ -106,7 +145,7 @@ def main() -> int:
     #   2) 带注释：把条目自己的 /// 与 #[...] 一起带走，否则源文件里会留下悬空 doc 注释。
     norm = []
     for target, name, a, b, widen in rows:
-        while b > a and (lines[b - 1].strip() == "" or lines[b - 1].lstrip().startswith(("///", "#[", "//!"))):
+        while b > a and (lines[b - 1].strip() == "" or lines[b - 1].lstrip().startswith(DOC_COM)):
             b -= 1
         # 兜底：块尾不允许是顶格的 `}`（那是 impl/模块的收尾括号，不是方法的一部分）。
         # 实测踩过一次：把 impl 的 `}` 一起搬走 ⇒ 源文件 unclosed delimiter，编译期才报。
@@ -117,8 +156,8 @@ def main() -> int:
         if trimmed:
             print(f"note: trimmed {trimmed} closing brace(s) off the end of {name} "
                   f"(they belong to the enclosing impl/module)")
-        while a - 1 >= 1 and lines[a - 2].lstrip().startswith(("///", "#[", "//!")):
-            a -= 1
+        # 把条目自己的文档/属性一起带走（允许文档与 fn 之间夹空行）
+        a = head_start(lines, a)
         if not any(l.strip() for l in lines[a - 1:b]):
             print(f"range {a}..{b} for {name} is blank -- refusing to call that a move")
             return 2
@@ -236,6 +275,10 @@ def main() -> int:
         for target, name, a, b, widen in rows:
             extra = (" widen=" + ",".join(widen)) if widen else ""
             fh.write(f"{name} {a} {b} {target}{extra}\n")
+    lint = first_dangling_doc(read(args.file))
+    if lint:
+        print(f"WARNING: source line {lint} looks like a doc comment that documents nothing "
+              f"(the compiler will reject it) -- check the block boundary rules")
     moved = sum(dropped) if len(dropped) == 1 else sum(b - a + 1 for _, _, a, b, _ in rows)
     print(f"source: {total} -> {len(lines)} lines (moved {moved}); "
           f"{len(decls)} module declaration(s) added; ranges -> {args.ranges_out}")
