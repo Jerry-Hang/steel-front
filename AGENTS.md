@@ -509,8 +509,7 @@ cargo build --release
 cargo test --release
 # 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
-# LLM 战术指挥会战（红蓝 128v128，实测 14 条命令全被采纳）；军情不变式的判据 =
-# tools\battle_tally_check.py（阵亡 + Σ连强度 == 编制；0 = 干净 / 1 = 有命中 / 2 = 没跑成）
+# LLM 战术指挥会战（红蓝 128v128）；军情不变式判据 = tools\battle_tally_check.py（0=干净 1=有命中 2=没跑成）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
 # 截图取证（finally 里 taskkill + 硬超时）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
@@ -527,8 +526,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
 # 交替 A/B 驱动器（逐对交替 + 顺序轮转 + 配对差中位数 + A/A 底噪；退出码 2 = 批次不全，别当 n≥5 证据）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ab_pair.ps1 -Pairs 5
-# 画面差分（第一道筛子）：同机位 A/B 的差异像素占比 + **差异包围盒**
-# —— 没有包围盒，几百个差异像素既可能是"引擎坏了"也可能是"HUD 上的 FPS 数字变了"
+# 画面差分（第一道筛子）：差异像素占比 + **差异包围盒**（没包围盒分不清"引擎坏了"和"HUD 数字变了"）
 python scripts\png_diff.py screenshots\a.png screenshots\b.png
 ```
 
