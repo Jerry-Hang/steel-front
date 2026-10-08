@@ -118,8 +118,8 @@ def main() -> int:
                     metavar="NAME", help="named substitution, no shell quoting involved. "
                     "Known: include-str-renderer")
     ap.add_argument("--ranges-from", metavar="FILE",
-                    help="read `name start end target` lines from FILE instead of --range/--in "
-                         "(single source of truth: the splitter script emits this file)")
+                    help="read `name start end target [widen=*|widen=a,b]` lines from FILE instead of "
+                         "--range/--in (single source of truth: the splitter script emits this file)")
     ap.add_argument("--list-test-blocks", action="store_true",
                     help="structure-driven listing: doc comments + #[cfg(test)] + `mod NAME {` "
                          "up to the next block (or the end of the range)")
@@ -131,12 +131,28 @@ def main() -> int:
         except SystemExit:
             return 2
         for row in rows:
-            if len(row) != 4:
+            if len(row) not in (4, 5):
                 print(f"bad range row in {args.ranges_from}: {row}")
                 return 2
             name, a, b, target = row[0], int(row[1]), int(row[2]), row[3]
             args.range.append([a, b])
             args.targets.append(target)
+            if len(row) == 5:
+                if not row[4].startswith("widen="):
+                    print(f"bad 5th column in {args.ranges_from}: {row}")
+                    return 2
+                spec = row[4][len("widen="):]
+                if spec == "*":
+                    # 搬运工具对整块方法统一加宽到 pub(crate)（Rust 的方法私有性不同于字段：
+                    # 子模块 impl 里的私有 fn，父模块与测试模块都看不见）⇒ 显式记账
+                    args.widen_all = True
+                else:
+                    for meth in spec.split(","):
+                        if meth:
+                            args.normalize.append(f"    fn {meth}(=    pub(crate) fn {meth}(")
+                print(f"loaded range {a}..{b} -> {target}  [{row[4]}]")
+            else:
+                print(f"loaded range {a}..{b} -> {target}")
         print(f"loaded {len(rows)} range(s) from {args.ranges_from}")
 
     if not args.range:
@@ -219,6 +235,11 @@ def main() -> int:
             return 2
         block = "\n".join(lines[lo - 1:hi])
         applied = []
+        if getattr(args, "widen_all", False):
+            block, n = re.subn(r"^(    )(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)",
+                               lambda m: f"{m.group(1)}pub(crate) {m.group(2)}", block, flags=re.M)
+            if n:
+                applied.append(f"widen {n} method(s) to pub(crate)")
         for old_s, new_s in subs:
             n = block.count(old_s)
             if n:
