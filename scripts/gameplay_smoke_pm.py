@@ -325,6 +325,20 @@ def main():
 
     txt = log_tail(logpath)
     final = game_state(txt)
+    # 🔴 VUID 判据必须区分「真扫过 0 条」与「验证层根本没开」（教训 46 同形）：
+    #    验证层默认关（RV3D_VALIDATION=1 才开），不开时日志里永远不会有 VUID 字样，
+    #    `vuid == 0` 是**结构性恒真**、什么都证明不了。这里显式报告它是否生效。
+    validation_on = os.environ.get("RV3D_VALIDATION", "").strip() not in ("", "0", "false", "False")
+    known_driver = {
+        "VUID-VkImageViewCreateInfo-usage-02275": "驱动回写 STORAGE（见 swapchain.rs 注释）",
+        "VUID-VkSwapchainCreateInfoKHR-imageFormat-01778": "驱动回写 STORAGE（见 swapchain.rs 注释）",
+        # 已结案 #23：这条来自 RTSS / GamePP 两个**隐式层**给交换链塞 MUTABLE_FORMAT，
+        # 不是引擎用法错误（用 DISABLE_RTSS_LAYER=1 DISABLE_GAMEPP_LAYER=1 跑就没有）。
+        "VUID-VkSwapchainCreateInfoKHR-flags-parameter": "RTSS/GamePP 隐式层注入，非引擎问题（已结案 #23）",
+    }
+    codes = re.findall(r"VUID-[A-Za-z0-9-]+", txt)
+    known_hits = {c: codes.count(c) for c in known_driver if c in codes}
+    unexpected = [c for c in codes if c not in known_driver]
     vuid = len(re.findall(r"VUID", txt))
     panics = len(re.findall(r"panic", txt, re.I))
     fps = last_fps(txt)
@@ -333,7 +347,17 @@ def main():
     print("", flush=True)
     print("VUID=%d panics=%d fps=%.1f shots_fired=%d score %s -> %s (score delta %d; 10 pts per kill)"
           % (vuid, panics, fps, shots, kills_before[1] if kills_before else "?", final[1] if final else "?", killed), flush=True)
-    ok = vuid == 0 and panics == 0 and killed >= 1
+    if not validation_on:
+        print("VUID 判据：**不适用** —— 验证层未开（RV3D_VALIDATION 未设），这一行恒为 0，不代表查过",
+              flush=True)
+    elif known_hits:
+        for code, n in sorted(known_hits.items()):
+            print("VUID 已知噪声：%s x%d（%s）" % (code, n, known_driver[code]), flush=True)
+    if unexpected:
+        print("VUID 未知：%s" % sorted(set(unexpected)), flush=True)
+    # 判据：panic=0、有击杀、且**没有未知 VUID**（已验证的驱动回写噪声不计；验证层没开时
+    # VUID 不参与判定，但上面那行会明说"不适用"，不会假装是通过）。
+    ok = panics == 0 and killed >= 1 and not unexpected
     print("RESULT: %s" % ("ALL-OK" if ok else "FAIL"), flush=True)
     return 0 if ok else 1
 

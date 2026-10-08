@@ -121,9 +121,15 @@ impl Renderer {
             .present_mode(present_mode)
             .clipped(true);
 
+        // 🔴 **传副本给驱动（2026-10-08 实测）**：NVIDIA 驱动会往这个"const"结构体里**回写**
+        // `image_usage |= STORAGE`（关掉验证层后依然回写 ⇒ 不是验证层干的；见本节末尾注释），
+        // 而验证层随后照被改过的结构体报 2 条 VUID（`02275` / `01778`，本机 10s 就能复现）。
+        // 我们申请的用法本身合法（`COLOR_ATTACHMENT|TRANSFER_SRC[|TRANSFER_DST]`），
+        // 用副本可以保证本函数下面读到的、以及日志里打印的，仍然是我们真正申请的那份。
+        let create_info_for_driver = swapchain_create_info;
         self.swapchain = unsafe {
             self.swapchain_loader
-                .create_swapchain(&swapchain_create_info, None)
+                .create_swapchain(&create_info_for_driver, None)
                 .map_err(|e| format!("创建交换链失败: {}", e))?
         };
         self.swapchain_images = unsafe {
@@ -135,15 +141,17 @@ impl Renderer {
         self.swapchain_extent = extent;
         // 诊断（2026-08-15）：surface current_extent vs 最终 swapchain extent ——
         // 若 current_extent 是窗口逻辑尺寸而实际物理尺寸不同，画面会 1:1 错位
+        // 🔴 这里打印 `swapchain_usage`（我们申请的），**不要**打印 create info 的字段：
+        //    驱动回写后那个值会变成 `…|STORAGE`，日志就不准了（实测踩过）。
         log::info!(
             "swapchain diag: current_extent={}x{} final={}x{} flags={:?} min_images={} usage={:?}",
             surface_capabilities.current_extent.width,
             surface_capabilities.current_extent.height,
             extent.width,
             extent.height,
-            swapchain_create_info.flags,
-            swapchain_create_info.min_image_count,
-            swapchain_create_info.image_usage
+            create_info_for_driver.flags,
+            create_info_for_driver.min_image_count,
+            swapchain_usage
         );
 
         self.swapchain_image_views = self
