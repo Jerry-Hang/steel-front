@@ -103,8 +103,17 @@ def main() -> int:
                          "methods: a bare `fn` with `self` is a syntax error). The wrapper is "
                          "scaffolding -- the moved bytes themselves stay identical.")
     ap.add_argument("--raw", action="store_true",
-                    help="move whole items verbatim with NO wrapper (e.g. an entire `impl Drop for X`), "
-                         "and do not trim a trailing `}` off the block")
+                    help="move whole items verbatim with NO wrapper (e.g. an entire "
+                         "`impl Drop for X` or `mod tests { ... }`), and do not trim a trailing `}`")
+    ap.add_argument("--no-header-use", action="store_true",
+                    help="omit `use super::*;` from the new file header (needed when the moved item "
+                         "brings its own imports, e.g. a whole `mod tests { ... }` -- an unused "
+                         "glob import is a warning, and the 0-warning gate is a hard red line)")
+    ap.add_argument("--also-delete", nargs=2, type=int, action="append", default=[],
+                    metavar=("START", "END"),
+                    help="also delete this range from the source WITHOUT moving it (scaffolding such "
+                         "as a module wrapper `mod X { ... }` whose contents were moved). Recorded as "
+                         "a `#` comment row in the ranges file so the deletion stays visible.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -114,6 +123,10 @@ def main() -> int:
     except OSError as exc:
         print(f"cannot read input: {exc}")
         return 2
+    # 陈旧范围表会骗过判据（实测：本次自检失败退出后，判据读到的还是上一轮的旧行号）。
+    # 所以每次开跑先把输出文件删掉：失败就没有"证据文件"，绝不留下过期数据。
+    if os.path.exists(args.ranges_out):
+        os.remove(args.ranges_out)
 
     lines = text.split("\n")
     trailing_newline = text.endswith("\n")
@@ -206,7 +219,10 @@ def main() -> int:
         parts = []
         exists = os.path.exists(target)
         if not exists:
-            parts.append(HEADER.format(src=src_label, root=root))
+            header = HEADER.format(src=src_label, root=root)
+            if args.no_header_use:
+                header = header.replace("use super::*;\n\n", "")
+            parts.append(header)
         if args.impl_type:
             parts.append(f"impl {args.impl_type} {{\n")
         for name, a, b, widen in items:
@@ -225,6 +241,10 @@ def main() -> int:
               f"{len(items)} block(s), {body.count(chr(10))} lines"
               f"{'' if exists else ' (new file)'}")
         if not args.dry_run:
+            d = os.path.dirname(target)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+                print(f"created directory {d}")
             mode = "a" if exists else "w"
             with io.open(target, mode, encoding="utf-8", newline="\n") as fh:
                 fh.write(body)
@@ -240,18 +260,36 @@ def main() -> int:
         print("RESULT: self-check failed -- source left untouched")
         return 1
 
-    # remove the ranges from the source (bottom-up) and declare the new modules
+    # remove the ranges from the source (bottom-up) and declare the new modules。
+    # 🔴 所有删除必须在**同一次降序扫描**里完成：先删脚手架再删搬运块会让第二次删除的各行号
+    #    相对已漂移的文本（实测踩过：留下一条本该搬走的 `use super::*;`）。
     dropped = set()
-    for target, name, a, b, _widen in sorted(rows, key=lambda r: -r[2]):
+    dele = [(a, b) for a, b in args.also_delete]
+    for a, b in dele:
+        if not (1 <= a <= b <= total):
+            print(f"--also-delete range {a}..{b} outside 1..{total}")
+            return 2
+        for row in rows:
+            if not (b < row[2] or a > row[3]):
+                print(f"--also-delete {a}..{b} overlaps moved block {row[1]} {row[2]}..{row[3]}")
+                return 2
+    plan = [(a, b, f"scaffolding {a}..{b} ({b - a + 1} lines, deleted not moved)") for a, b in dele]
+    plan += [(a, b, None) for _t, _n, a, b, _w in rows]
+    for a, b, label in sorted(plan, key=lambda r: -r[0]):
         del lines[a - 1:b]
-        dropped.add(b - a + 1)
+        if label:
+            print("deleted " + label)
+        else:
+            dropped.add(b - a + 1)
 
     decls = []
     for target in by_target:
         stem = os.path.splitext(os.path.basename(target))[0]
         if re.search(rf"^\s*(pub )?mod {re.escape(stem)}\s*;", text, re.M):
             continue
-        decls.append(f"mod {stem};")
+        # tests 开头的模块只在测试构建里编译：漏掉 #[cfg(test)] 会让测试代码进入 release 构建
+        cfg = "#[cfg(test)] " if stem.startswith("tests") else ""
+        decls.append(f"{cfg}mod {stem};")
     if decls:
         marker = next((i for i, l in enumerate(lines) if l.strip() == "#[cfg(test)]"), None)
         block = ["// 子模块（见 docs/refactor-plan.md）"] + decls + [""]
@@ -265,16 +303,21 @@ def main() -> int:
     with io.open(args.file, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines) + ("\n" if trailing_newline else ""))
 
-    # self-check #2: every target is declared in the source
+    # self-check #2: every target is declared in the source (allow an attribute prefix such as
+    # `#[cfg(test)] mod tests;`)
     new_text = read(args.file)
-    missing = [os.path.splitext(os.path.basename(t))[0] for t in by_target
-               if not re.search(rf"^\s*(pub )?mod {re.escape(os.path.splitext(os.path.basename(t))[0])}\s*;",
-                                new_text, re.M)]
+    missing = []
+    for t in by_target:
+        stem = os.path.splitext(os.path.basename(t))[0]
+        if not re.search(rf"^\s*(?:#\[[^\]]*\]\s*)*(?:pub )?mod {re.escape(stem)}\s*;", new_text, re.M):
+            missing.append(stem)
     if missing:
         print(f"SELF-CHECK FAIL: module(s) not declared in {args.file}: {missing}")
         return 1
 
     with io.open(args.ranges_out, "w", encoding="utf-8", newline="\n") as fh:
+        for a, b in args.also_delete:
+            fh.write(f"# scaffolding deleted (not moved): {a}..{b}\n")
         for target, name, a, b, widen in rows:
             extra = (" widen=" + ",".join(widen)) if widen else ""
             fh.write(f"{name} {a} {b} {target}{extra}\n")

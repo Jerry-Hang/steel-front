@@ -131,6 +131,9 @@ def main() -> int:
         except SystemExit:
             return 2
         for row in rows:
+            if row[0].startswith("#"):  # 记账行（例如被删掉的脚手架），不是搬运块
+                print(" ".join(row))
+                continue
             if len(row) not in (4, 5):
                 print(f"bad range row in {args.ranges_from}: {row}")
                 return 2
