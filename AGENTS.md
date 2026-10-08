@@ -31,10 +31,11 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 
 ### 模块地图（`src/`，按体量）
 
-| 文件 | 行数（2026-09-26 实测） | 职责 |
+| 文件 | 行数（2026-09-28 实测） | 职责 |
 |---|---|---|
-| `engine/renderer.rs` | 15628 | 地形 LOD + 65536 实例场 + HUD 覆盖层。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
-| `engine/game.rs` | 10505 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络 |
+| `engine/renderer.rs` | 10710 | **模块根**：`Renderer` 结构体 + 构造 + 每帧编排。**改 pipeline/shader/swapchain 风险最高，须先跑冒烟验 VUID** |
+| `engine/renderer/*.rs` | geometry 816 / instances 963 / parts 1085 / tests_* 2995 | 拆分出的子模块；`tests_support.rs` 提供**扫整个子树**的源码判据入口（见 `docs/refactor-plan.md`） |
+| `engine/game.rs` | 10505 | 运行时中枢：每帧 `update(dt, camera)` 编排物理/武器/AI/UI/音频/网络（**待拆**） |
 | `main.rs` | 4465 | GameApp + winit 事件循环 + 输入/光标捕获 + 枪模姿态 |
 | `audio.rs` | 2919 | 合成音效与音乐（`audio_out.rs` = 输出层：waveOut / ALSA） |
 | `ui.rs` | 2833 | HUD / 菜单 / 设置 / 键位表 |
@@ -208,13 +209,12 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - `RV3D_PRESENT_MODE` = `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**（基准最稳），
   **玩家路径由 `SteelFront.bat` 设 `mailbox`**（FIFO 在独显直连下等不到 vblank 会锁死）。
 - 🔴 **失焦 ≠ 停止渲染**（2026-09-27 实测 + 修）：失焦后照样全速跑 ⇒ 整机像卡死。**本机是混合输出**：
-  `nvidia-smi` 报 `display_attached=No`，面板 2560x1600@165 挂 **AMD 610M**，游戏跑 **5060** ⇒ 每帧
-  **跨适配器拷贝**（`steel-front` Copy 23–26%）再由 **dwm 在 610M 上合成**（dwm 3D 22–44%）⇒ 窄的是
-  **iGPU 的拷贝+合成链**，不是 5060（100% 但无节流：3.1–4.8 GHz、45–70 W/115 W、节流标志全 Not Active）。
-  修法 = **`RV3D_BG_FPS`**（失焦上限，纯函数 `effective_frame_cap`；**引擎默认 0 = 不限**，否则
-  perf_run/冒烟这些失焦跑法会被静默变成 20 fps；玩家路径 `SteelFront.bat` 设 20：fps 165→19.9）。
-  🔴 **GPU Engine 计数器必须按 `luid`（适配器）分组**：按进程名聚合会把两块卡的份额相加 ⇒ 会得出
-  "dwm 只占 0–1%" 的错结论（真值 22–44%，在 610M 上）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
+  面板 2560x1600@165 挂 **AMD 610M**，游戏跑 **5060** ⇒ 每帧**跨适配器拷贝** + 由合成器在核显合成
+  ⇒ 窄的是**核显的拷贝+合成链**，不是 5060（实测数字见 §21.81(a)）。
+  修法 = **`RV3D_BG_FPS`**（失焦上限，`effective_frame_cap`；**引擎默认 0 = 不限**，否则 perf/冒烟
+  这些失焦跑法会被静默变成 20 fps；玩家路径 `SteelFront.bat` 设 20：fps 165→19.9）。
+  🔴 **GPU Engine 计数器必须按 `luid`（适配器）分组**：按进程名聚合会把两块卡相加 ⇒ 会得出
+  "dwm 只占 0–1%" 的错结论（真值 22–44%）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
 - ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（转视角读成"残影"），而 **`PrintWindow` 抓不到它**
   （抓的是已合成帧）⇒ **别用静态截图去证伪"残影"。**
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
@@ -597,18 +597,18 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 1. ✅ **道具焊接流程**（2026-09-19）：改道具 = 改生成器 → 重跑 → 再焊接，绝不在已焊结果上"补"颜色。
 2. **PT 崩溃 `0xC0000005`**：四个真 bug 全修（见铁律 B PT 段）。
 3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，要看 parse 分支。**
-4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`。
+4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`（缩放取 `min`）。
 5. **`FLOOR_H` 常量分叉**：6 模块「上层 3.15 + 底层反解 + 女儿墙/压顶」，实测 6/6。
 6. ✅ **`svd_63` 已入库为 `svd12`**（`c20e154`）：判据 = 真机切枪 VUID=0 + `gun-glb: svd12` + 第一人称实机截图（§21.60）。
 7. **D12 士兵近距观感**：`soldier.glb` 实例化绘制；🔴 阵营色 = 队色 × `tint.w = 6.0`。**仍缺**骨骼动画（`docs/HANDOFF-soldier.md`）。
-8. **D4 墙缝天空亮条**：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度，排除小地图列）。
+8. **D4 墙缝天空亮条**：檐梁 139–144 < 天空 166 ⇒ 非缺陷（判据 = `tools/patrol.py` + 行亮度）。
 9. **mesh 着色器过不了严格 `spirv-val`**：`build.rs::strip_workgroup_explicit_layout` 剥掉 naga-30 给非 Block 类型写的 `Offset`；🔴 **只剥 Workgroup 可达类型**（测试锁两个方向）。
 10. **PT 盒上限静默截断**：512 → 1024 → **现值 2048**；一次分配 + 一次性告警。
-11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 像素重投影复用或运动自适应 spp；`signature()` 分层（~0.5m/~3°/~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`（含 `RV3D_PT_EXPOSURE`）。
+11. **PT 与光栅同屏叠加未做**（现为整体替换）。**lead** = 像素重投影复用或运动自适应 spp；`signature()` 分层（~0.5m/~3°/~0.01），**勿回退到 1mm**。PT 曝光已进 `config.rs`。
 12. **溢出静默丢弃**：超容处有 `Renderer::warn_npc_cap_once`。
 13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步；**双进程真机握手已验通**（`net_pair.sh`）。**仍未做**：NAT 打洞真机验证、回滚、快照增量压缩、会话恢复。
 14. **道具进阴影 pass**：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
-15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F（其余 `#[allow]` 必须保留）。
+15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F。
 17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0`（harness = `run_survive_pm.ps1`）。
 18. ✅ **CoverSeek 占比偏低**：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler`）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `aidiag: tactic 1s`。
 19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1`）。
