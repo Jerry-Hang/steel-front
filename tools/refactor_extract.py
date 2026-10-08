@@ -255,6 +255,16 @@ def main() -> int:
             with io.open(target, mode, encoding="utf-8", newline="\n") as fh:
                 fh.write(body)
 
+    if not args.raw and not args.impl_type:
+        for (target, name), block in blocks.items():
+            first = next((l for l in block.split("\n") if l.strip()), "")
+            if re.match(r"^\s+(?:pub(?:\([^)]*\))? )?(?:unsafe )?(?:const )?fn \w+", first):
+                print(f"refusing: block {name} looks like a METHOD (indented fn) but no --impl-type "
+                      f"was given -- it would land as a bare module-level function and every caller "
+                      f"would fail with E0599 (measured 2026-09-28). Pass --impl-type <Type>, or "
+                      f"--raw if the block really is a whole impl/mod.")
+                return 2
+
     # self-check #1: byte-identical inside the target
     bad = 0
     for (target, name), block in blocks.items():
