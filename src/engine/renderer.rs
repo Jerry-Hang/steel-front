@@ -1190,6 +1190,8 @@ mod gpu_layout;
 #[cfg(test)]
 mod tests_support;
 #[cfg(test)]
+mod tests_vk_side;
+#[cfg(test)]
 mod tests_geom;
 #[cfg(test)]
 mod tests_gpu;

@@ -117,6 +117,12 @@ def main() -> int:
                     help="also delete this range from the source WITHOUT moving it (scaffolding such "
                          "as a module wrapper `mod X { ... }` whose contents were moved). Recorded as "
                          "a `#` comment row in the ranges file so the deletion stays visible.")
+    ap.add_argument("--declare-in", metavar="FILE",
+                    help="write the `mod X;` declarations into this file instead of --file. Needed when "
+                         "the container is itself a child module: a new sibling module of the PARENT "
+                         "must be declared in the parent's file (measured 2026-09-28: declaring "
+                         "`tests_vk_side` inside `tests_vk.rs` made rustc look for "
+                         "renderer/tests_vk/tests_vk_side.rs -> E0583).")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -302,13 +308,25 @@ def main() -> int:
             dropped.add(b - a + 1)
 
     decls = []
+    decl_file = args.declare_in or args.file
+    decl_text = read(decl_file) if args.declare_in else text
     for target in by_target:
         stem = os.path.splitext(os.path.basename(target))[0]
-        if re.search(rf"^\s*(pub )?mod {re.escape(stem)}\s*;", text, re.M):
+        if re.search(rf"^\s*(?:#\[[^\]]*\]\s*)*(?:pub )?mod {re.escape(stem)}\s*;", decl_text, re.M):
             continue
         # tests 开头的模块只在测试构建里编译：漏掉 #[cfg(test)] 会让测试代码进入 release 构建
         cfg = "#[cfg(test)] " if stem.startswith("tests") else ""
         decls.append(f"{cfg}mod {stem};")
+    if decls and args.declare_in:
+        block = ["// 子模块（见 docs/refactor-plan.md）"] + decls + [""]
+        dlines = decl_text.split("\n")
+        marker = next((i for i, l in enumerate(dlines) if l.strip().startswith("#[cfg(test)]")), None)
+        at = marker if marker is not None else len(dlines)
+        dlines[at:at] = block
+        with io.open(decl_file, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(dlines))
+        print(f"declared {len(decls)} module(s) in {decl_file} (--declare-in)")
+        decls = []  # 已在别处落盘
     if decls:
         marker = next((i for i, l in enumerate(lines) if l.strip() == "#[cfg(test)]"), None)
         block = ["// 子模块（见 docs/refactor-plan.md）"] + decls + [""]
