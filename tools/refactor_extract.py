@@ -108,6 +108,15 @@ def main() -> int:
     for target, name, a, b, widen in rows:
         while b > a and (lines[b - 1].strip() == "" or lines[b - 1].lstrip().startswith(("///", "#[", "//!"))):
             b -= 1
+        # 兜底：块尾不允许是顶格的 `}`（那是 impl/模块的收尾括号，不是方法的一部分）。
+        # 实测踩过一次：把 impl 的 `}` 一起搬走 ⇒ 源文件 unclosed delimiter，编译期才报。
+        trimmed = 0
+        while b > a and lines[b - 1] == "}":
+            b -= 1
+            trimmed += 1
+        if trimmed:
+            print(f"note: trimmed {trimmed} closing brace(s) off the end of {name} "
+                  f"(they belong to the enclosing impl/module)")
         while a - 1 >= 1 and lines[a - 2].lstrip().startswith(("///", "#[", "//!")):
             a -= 1
         if not any(l.strip() for l in lines[a - 1:b]):
