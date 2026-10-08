@@ -605,7 +605,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 13. **联网**：UDP Input/Snapshot + 插值 + 超时 + 离场清理 + 实体插值渲染 + 断线重连已接线（`net.rs` 单测）；中继注册/解析 = 打洞第一步；**双进程真机握手已验通**（`net_pair.sh`）。**仍未做**：NAT 打洞真机验证、回滚、快照增量压缩、会话恢复。
 14. **道具进阴影 pass**：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
 15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F。
-17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是这张图**唯一**开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0`（harness = `run_survive_pm.ps1`）。
+17. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是唯一开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0`（`run_survive_pm.ps1`）。
 18. ✅ **CoverSeek 占比偏低**：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler`）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `aidiag: tactic 1s`。
 19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1`）。
 20. ✅ **DLSS：不接**（`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素。**重开判据**：面积 1/4 而 fps +>40%。
