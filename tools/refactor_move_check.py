@@ -244,7 +244,7 @@ def main() -> int:
                 # trait impl 的方法不能带可见性限定符 ⇒ 搬运工具对它跳过加宽，判据同样跳过
                 applied.append(f"skip widen (trait impl: {head.strip()[:40]})")
             else:
-                block, n = re.subn(r"^(    )(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)",
+                block, n = re.subn(r"^(    |)(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)",
                                    lambda m: f"{m.group(1)}pub(crate) {m.group(2)}", block, flags=re.M)
                 if n:
                     applied.append(f"widen {n} method(s) to pub(crate)")

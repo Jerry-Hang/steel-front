@@ -45,8 +45,9 @@ use super::*;
 
 """
 
-# 与 tools/refactor_move_check.py 里的同一条（方法可见性加宽；允许 unsafe/const 限定词）
-WIDEN_RE = re.compile(r"^(    )(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)", re.M)
+# 与 tools/refactor_move_check.py 里的同一条（可见性加宽）。允许两种形态：
+#   缩进 4 空格的方法（impl 内）与**顶格的自由函数**；带 unsafe/const 限定词。
+WIDEN_RE = re.compile(r"^(    |)(?:pub(?:\([^)]*\))? )?((?:unsafe )?(?:const )?fn \w+)", re.M)
 
 
 def read(path):
