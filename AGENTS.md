@@ -587,7 +587,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 > 每条只留一行结论 + 判据；案例细节在 `docs/PROGRESS.md`。
 
 - **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜"等结论撤回。⚠️ 军情行的 `阵亡` = **该营自身阵亡数**、`战果` = 敌方阵亡数（**重组读战果**）。
-- **障碍 marker 可见尺寸**（2026-09-17 `50b61b9`）：半幅唯一真源 = `geom::Shape::template_half_extent(axis)`；测试 `marker_visible_size_matches_aabb`。
+- **障碍 marker 可见尺寸**（2026-09-17 `50b61b9`）：半幅唯一真源 = `geom::Shape::template_half_extent`；判据 `marker_visible_size_matches_aabb`。
 
 0. **`PrintWindow` 对非前台窗口返回冻结帧**：症状不复现。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)`。
 1. ✅ **道具焊接流程**（2026-09-19）：改道具 = 改生成器 → 重跑 → 再焊接，绝不在已焊结果上"补"颜色。
