@@ -40,6 +40,7 @@
     python3 scripts/smoke_linux.py logs/smoke_linux.log
 """
 
+import os
 import re
 import sys
 
@@ -50,6 +51,16 @@ KILL_SCORE = 10
 # 只锚定到 score 为止：后面的字段（phys_us/ai_us/...）会随版本增减，
 # 锚进去就等于把判据绑死在无关字段的格式上。
 GAME_LINE = re.compile(r"game: wave=\d+ enemies=(\d+) .*? score=(\d+)")
+
+# 🔴 **已知噪声**：这些 VUID 不是引擎用错了，不该让闸门红（教训 26：会喊狼来了的闸门
+#    会训练人不再当回事）。与 Windows 侧 `gameplay_smoke_pm.py` 的 `known_driver` **同步**。
+KNOWN_VUID = {
+    "VUID-VkImageViewCreateInfo-usage-02275": "驱动回写 STORAGE（见 renderer/swapchain.rs 注释）",
+    "VUID-VkSwapchainCreateInfoKHR-imageFormat-01778": "驱动回写 STORAGE（见 renderer/swapchain.rs 注释）",
+    # 已结案 #23：RTSS / GamePP 两个**隐式层**给交换链塞 MUTABLE_FORMAT，不是引擎用法错误。
+    # ⚠️ Linux 侧通常没有这两个层；留着是为了两侧判据**逐条对齐**，便于对照日志。
+    "VUID-VkSwapchainCreateInfoKHR-flags-parameter": "RTSS/GamePP 隐式层注入，非引擎问题（已结案 #23）",
+}
 SCORE_ONLY = re.compile(r" score=(\d+)")
 
 
@@ -75,7 +86,9 @@ def score_track(txt):
     return [int(m.group(1)) for m in SCORE_ONLY.finditer(txt)]
 
 
-def judge(txt, require_kill=False):
+def judge(txt, require_kill=False, validation_on=True):
+    """⚠️ `validation_on=False` 时 VUID **不参与判定**（并在结论里明说不适用）。
+    默认 True：自检用例里那些杜撰的 VUID 要能被判红。"""
     """纯函数：日志文本 -> (exit_code, 给人看的一行结论, 明细 dict)。
 
     抽成纯函数是为了能在没有游戏、没有 GPU 的机器上测三条分支（含 exit 2），
@@ -99,6 +112,14 @@ def judge(txt, require_kill=False):
     `vuid==0` 在一份**空日志**上同样是 0，不挡住就又是一个恒真判据
     （Windows 侧 `survive_pm` 就是这么骗过一整轮的）。
     """
+    # 🔴 VUID 判据必须区分「真扫过 0 条」与「**验证层根本没开**」（教训 46 同形）：
+    #    验证层不开时日志里永远不会有 VUID 字样 ⇒ `vuid == 0` 是**结构性恒真**、什么都证明不了。
+    #    （Linux 侧 `smoke_linux.sh` 默认把它打开，所以这个洞平时被掩盖着；
+    #      但 `smoke_linux.py` 能被直接调用，且 `RV3D_VALIDATION=0` 一设就退化。）
+    codes = re.findall(r"VUID-[A-Za-z0-9-]+", txt)
+    known_hits = {c: codes.count(c) for c in KNOWN_VUID if c in codes}
+    unexpected = [c for c in codes if c not in KNOWN_VUID]
+    # `vuid` 保留"总出现次数"，只用于打印（判据用 unexpected，不是它）
     vuid = len(re.findall(r"VUID", txt))
     panics = len(re.findall(r"panic", txt, re.I))
     # "没跑成"的三条硬条件
@@ -115,6 +136,9 @@ def judge(txt, require_kill=False):
     killed = delta // KILL_SCORE
     detail = {
         "vuid": vuid,
+        "vuid_unexpected": sorted(set(unexpected)),
+        "vuid_known": known_hits,
+        "validation_on": validation_on,
         "panics": panics,
         "score_first": scores[0],
         "score_last": scores[-1],
@@ -124,10 +148,23 @@ def judge(txt, require_kill=False):
         "wave_lines": len(waves),
         "require_kill": require_kill,
     }
-    if vuid or panics:
-        return 1, "FAIL：vuid=%d panics=%d" % (vuid, panics), detail
+    if panics:
+        return 1, "FAIL：panics=%d" % panics, detail
+    if validation_on and unexpected:
+        return 1, "FAIL：**未知** VUID %s（已知噪声不计：%s）" % (
+            sorted(set(unexpected)), ", ".join(sorted(known_hits)) or "无"), detail
+    # 验证层没开 ⇒ VUID 不参与判定，但**必须明说**，不许假装查过（这正是本函数存在的理由）
+    not_applicable = (not validation_on)
+    if vuid and not validation_on:
+        note = "（VUID 判据不适用：验证层未开；日志里那 %d 处 VUID 字样不计）" % vuid
+        detail["vuid_note"] = note
     if require_kill and delta < KILL_SCORE:
         return 1, "FAIL（-RequireKill）：score 增量 %d < %d（击杀数 0）" % (delta, KILL_SCORE), detail
+    if not validation_on:
+        return 0, "ALL-OK（⚠️ VUID 判据**不适用**：验证层未开，这一项恒为 0，不代表查过）", detail
+    if known_hits:
+        return 0, "ALL-OK（VUID 已知噪声 %s，不计）" % ", ".join(
+            "%s x%d" % (c, n) for c, n in sorted(known_hits.items())), detail
     return 0, "ALL-OK", detail
 
 
@@ -162,10 +199,21 @@ def self_check():
         ("RequireKill：不够一杀 0->3 => 失败", (G % 0) + (G % 3), 1, True),
         ("RequireKill：VUID 仍然优先于击杀", (G % 0) + (G % 30) + "VUID-x\n", 1, True),
         ("RequireKill：没进 Playing 仍是 exit 2（不被击杀档吞掉）", "初始化完成\n", 2, True),
+        # --- VUID 判据本身的两条（与 Windows 侧对齐；这正是「结构性恒 0」的补丁）---
+        ("已知噪声 VUID（驱动回写 02275）不算失败",
+         (G % 0) + (G % 30) + "VUID-VkImageViewCreateInfo-usage-02275\n", 0, False, True),
+        ("已知噪声 VUID（flags-parameter）不算失败",
+         (G % 0) + (G % 30) + "VUID-VkSwapchainCreateInfoKHR-flags-parameter\n", 0, False, True),
+        ("已知噪声 + 未知 VUID 混在一起 => 仍然失败",
+         (G % 0) + (G % 30) + "VUID-VkImageViewCreateInfo-usage-02275\nVUID-vkCmdDraw-None-9999\n", 1, False, True),
+        ("验证层没开 => 未知 VUID 也不参与判定（但结论会说不适用）",
+         (G % 0) + (G % 30) + "VUID-vkCmdDraw-None-9999\n", 0, False, False),
     ]
     bad = []
-    for name, txt, want, rk in cases:
-        got, verdict, _ = judge(txt, require_kill=rk)
+    for case in cases:
+        name, txt, want, rk = case[0], case[1], case[2], case[3]
+        von = case[4] if len(case) > 4 else True
+        got, verdict, _ = judge(txt, require_kill=rk, validation_on=von)
         if got != want:
             bad.append("%s：期望 exit %d，实得 %d（%s）" % (name, want, got, verdict))
     return len(cases), bad
@@ -192,7 +240,12 @@ def main(argv):
     print("读取: %s" % (", ".join(got) if got else "(两个文件都不存在)"))
     print("判据档: %s" % ("-RequireKill（与 Windows 同口径，约 88% 稳定）" if require_kill
                           else "默认（确定性：只看 vuid/panics/进过 Playing）"))
-    code, verdict, d = judge(txt, require_kill=require_kill)
+    # 与 Windows 侧同一条判据：验证层没开时 VUID 项不成立，必须显式告知（教训 46）
+    validation_on = os.environ.get("RV3D_VALIDATION", "").strip() not in ("", "0", "false", "False")
+    if not validation_on:
+        print("VUID 判据: **不适用** —— 验证层未开（RV3D_VALIDATION 未设/为 0）。"
+              "这一项恒为 0，不代表查过；要它生效请 RV3D_VALIDATION=1")
+    code, verdict, d = judge(txt, require_kill=require_kill, validation_on=validation_on)
     if d:
         print(
             "VUID=%s panics=%s score %s -> %s (delta %s = %s 杀) enemies_last=%s"
