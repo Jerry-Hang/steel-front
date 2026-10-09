@@ -4203,6 +4203,18 @@ fn main() {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // RV3D_ASSETS_FROM_MEMORY=1：把 assets/ 预载进内存并安装为全局资产来源，
+    // 在桌面上验证"资产不来自文件系统"这条路径（为 Android AAssetManager 铺路，
+    // 见 docs/HANDOFF-mobile.md 4.3）。
+    if env_truthy("RV3D_ASSETS_FROM_MEMORY") {
+        let src = crate::engine::asset_source::MemSource::preload_tree("assets");
+        log::info!(
+            "RV3D_ASSETS_FROM_MEMORY=1：已预载 assets/ 到内存（{} 项）",
+            src.len()
+        );
+        crate::engine::asset_source::install(Box::new(src));
+    }
+
     // 默认大战场：红 128 vs 蓝 127+玩家（=128v128，2026-08-22 要求海量 NPC 模拟真人压力）；
     // RV3D_STRESS_AI=N 自定义，=0 恢复传统波次模式
     if std::env::var("RV3D_STRESS_AI").is_err() {
