@@ -1,0 +1,8 @@
+# Gradle
+.gradle/
+build/
+local.properties
+
+# 构建产物（由 cargo-ndk / cp 生成，不入库）
+app/src/main/jniLibs/
+app/src/main/assets/

@@ -42,6 +42,9 @@ ALLOW_EXT = {
     "yml", "yaml", "glsl", "wgsl", "spv", "glb", "png", "jpg", "jpeg", "svg",
     "ico", "cs", "c", "h", "cpp", "hpp", "gitignore", "gitattributes",
     "editorconfig", "csv",
+    # Android 工程（2026-10-09）：Gradle Kotlin DSL / 清单 / Java 壳 / 属性文件。
+    # 内容仍过下面的 PATTERNS 密钥扫描；这里只放宽扩展名。
+    "kts", "xml", "java", "properties",
     # `log` 在白名单里，是因为 docs/ 下有**刻意入库的性能证据日志**（perf-*/**.log）；
     # 运行时日志靠拒绝表的 `logs/*` + `.gitignore` 的 `*.log` 挡，不靠扩展名。
     "log",
