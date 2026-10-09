@@ -838,8 +838,30 @@ impl Renderer {
         match frame_action(suboptimal, classify_present(present_result)) {
             FrameAction::Presented => {}
             FrameAction::RecreateAfterPresent => {
-                log::warn!("呈现 {:?}，重建交换链...", present_result);
-                return Err("交换链过期".to_string());
+                // Android（2026-10-09 实机）：swapchain.rs 为修横屏旋转刻意用
+                // `preTransform = IDENTITY`，而 surface 的 `currentTransform` 是 ROTATE_90
+                // ⇒ Adreno 驱动**每帧**都回 SUBOPTIMAL。画面本身是对的（OCR 实测），
+                // 但每帧重建交换链会把帧率拖死（实测 8 秒 236 次重建、GPU 利用率上不去）。
+                // 故 Android 上把「Ok(true)」视为正常，只有真正过期/丢失才重建。
+                #[cfg(target_os = "android")]
+                {
+                    if matches!(present_result, Ok(true)) {
+                        static ONCE: std::sync::Once = std::sync::Once::new();
+                        ONCE.call_once(|| {
+                            log::info!(
+                                "呈现 SUBOPTIMAL（Android preTransform=IDENTITY 的正常现象），不重建交换链"
+                            )
+                        });
+                    } else {
+                        log::warn!("呈现 {:?}，重建交换链...", present_result);
+                        return Err("交换链过期".to_string());
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    log::warn!("呈现 {:?}，重建交换链...", present_result);
+                    return Err("交换链过期".to_string());
+                }
             }
             FrameAction::Fail => {
                 log::error!("呈现失败（{:?}）—— 不能当成成功", present_result);

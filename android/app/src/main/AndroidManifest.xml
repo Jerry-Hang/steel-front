@@ -4,7 +4,7 @@
     <application
         android:label="Steel Front"
         android:allowBackup="false"
-        android:theme="@style/Theme.AppCompat.NoActionBar"
+        android:theme="@style/Theme.SteelFront"
         android:extractNativeLibs="true">
 
         <activity

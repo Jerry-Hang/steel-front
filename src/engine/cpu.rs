@@ -300,7 +300,7 @@ static TOPOLOGY: OnceLock<CpuTopology> = OnceLock::new();
 /// 按 sysfs 的 `cpu_capacity` 把在线核分成两簇（不硬编码任何核数组合）。
 ///
 /// 为什么用容量而不是名字（见 KB「真机簇组合核实表」）：手机的组合有 1+3+4 / 2+4+4 /
-/// 2+4+2+2 / 2+3+3…，还混着高通 Oryon、小米玄戒这类自研核与 Arm 的 C1/C2 新命名，
+/// 2+4+2+2 / 2+3+3…，还混着高通 Oryon、小米自研这类核心与 Arm 的 C1/C2 新命名，
 /// **按名字匹配必然失效**；而 `cpu_capacity` 是内核 EAS 自己归一化到 1024 的容量值。
 ///
 /// 返回 `(高容量簇, 低容量簇, 低容量簇核数)`；同构或读不到时返回 `None`（调用方回退旧逻辑）。
@@ -316,7 +316,7 @@ fn sysfs_capacity_clusters(threads: usize) -> Option<(Vec<usize>, Vec<usize>, us
             caps.push((c, v));
         }
     }
-    // 热插拔核可能不在线：数量对不上就不敢用（避免把簇切错）
+    // 离线核可能读不到：数量对不上就不能用（避免把簇切错）
     if caps.len() != threads || threads < 2 {
         return None;
     }

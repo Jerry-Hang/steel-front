@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      全屏游戏主题（2026-10-09 实机排查）：
+      设备 OPPO PLD620 屏幕 1080x2400，横屏时 display cutout insets = 左 120px。
+      默认 cutout 模式下系统会把应用「信箱化」避开挖孔 —— 实测游戏 surface 只有
+      2280x1080（2400-120），左侧一条 120px 黑边。
+      shortEdges 允许内容铺进挖孔区，恢复 2400x1080 满屏。
+    -->
+    <style name="Theme.SteelFront" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+</resources>
