@@ -871,6 +871,9 @@ struct GameApp {
     game: Game,
     /// 程序是否正在运行
     running: bool,
+    /// Android 生命周期：true = 已 Suspended（surface 被系统收回），暂停渲染。
+    /// 见 docs/HANDOFF-mobile.md 4.2；桌面恒为 false（不改变桌面行为）。
+    suspended: bool,
     /// 事件循环代理（菜单点击退出用：请求事件循环退出）
     event_proxy: Option<winit::event_loop::EventLoopProxy<()>>,
     /// 配置中是否显式保存过分辨率（false = 首次运行，窗口创建时按显示器宽高比选默认）
@@ -1034,6 +1037,7 @@ impl GameApp {
             last_cam_log: Instant::now(),
             game,
             running: true,
+            suspended: false,
             event_proxy: None,
             resolution_explicit: cfg.resolution_explicit,
             anim_clock: 0.0,
@@ -3181,6 +3185,19 @@ impl ApplicationHandler for GameApp {
     /// 应用恢复/启动时创建窗口和渲染器
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
+            // Android：再次 resumed（surface 回来）⇒ 恢复渲染并重建交换链。
+            // （桌面只在启动时进这里一次，且 suspended 恒 false，行为不变。）
+            if self.suspended {
+                log::info!("生命周期：Resumed（surface 可用），恢复渲染");
+                self.suspended = false;
+                if let Some(renderer) = &mut self.renderer {
+                    if renderer.swapchain_recovery_allowed() {
+                        if let Err(e) = renderer.recreate_swapchain() {
+                            log::warn!("Resumed 后重建交换链失败（等后续 Resized 重试）：{}", e);
+                        }
+                    }
+                }
+            }
             return;
         }
 
@@ -3473,6 +3490,13 @@ impl ApplicationHandler for GameApp {
     }
 
     /// 处理窗口事件
+    /// Android 生命周期：surface 被系统收回（切后台/锁屏）⇒ 停止渲染。
+    /// 见 docs/HANDOFF-mobile.md 4.2。
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        log::info!("生命周期：Suspended（surface 被系统收回），暂停渲染");
+        self.suspended = true;
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -4129,7 +4153,8 @@ impl ApplicationHandler for GameApp {
 
     /// 事件队列空闲时调用（主循环体）
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if !self.running || self.window.is_none() {
+        // Suspended（Android 切后台）时不渲染：surface 已不可用。
+        if !self.running || self.window.is_none() || self.suspended {
             return;
         }
 
