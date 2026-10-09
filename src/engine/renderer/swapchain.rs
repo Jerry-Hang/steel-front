@@ -63,6 +63,19 @@ impl Renderer {
             .copied()
             .unwrap_or(vk::PresentModeKHR::FIFO);
 
+        // 诊断（2026-10-09）：Android 上画面转了 90°，先把 surface 的真实能力打出来。
+        log::info!(
+            "surface: current_transform={:?} current_extent={}x{} window_extent={}x{} min={}x{} max={}x{}",
+            surface_capabilities.current_transform,
+            surface_capabilities.current_extent.width,
+            surface_capabilities.current_extent.height,
+            self.window_extent.width,
+            self.window_extent.height,
+            surface_capabilities.min_image_extent.width,
+            surface_capabilities.min_image_extent.height,
+            surface_capabilities.max_image_extent.width,
+            surface_capabilities.max_image_extent.height
+        );
         let extent = swapchain_extent_choice(
             surface_capabilities.current_extent,
             self.window_extent,
@@ -111,6 +124,22 @@ impl Renderer {
                 "surface 不支持 TRANSFER_DST：PT 实时通路无法 blit 到交换链（PT 打开时画面会异常）"
             );
         }
+        // 旋转（实机 2026-10-09）：Android 横屏时 `currentTransform` 是 ROTATE_90/270，
+        // 而 `preTransform = currentTransform` 的语义是"我的图像内容**已经**转好了" ——
+        // 引擎的投影并没有跟着转，于是画面整体转 90°（手机上实测）。
+        // 桌面 `currentTransform` 恒为 IDENTITY，所以这条只在 Android 上生效。
+        // 取 IDENTITY 让呈现引擎替我们转；它不在 supportedTransforms 里时退回原值。
+        #[cfg(target_os = "android")]
+        let pre_transform = if surface_capabilities
+            .supported_transforms
+            .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+        {
+            vk::SurfaceTransformFlagsKHR::IDENTITY
+        } else {
+            surface_capabilities.current_transform
+        };
+        #[cfg(not(target_os = "android"))]
+        let pre_transform = surface_capabilities.current_transform;
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(self.surface)
             .min_image_count(image_count)
@@ -121,7 +150,7 @@ impl Renderer {
             .image_usage(swapchain_usage)
             .image_sharing_mode(sharing_mode)
             .queue_family_indices(&queue_family_indices)
-            .pre_transform(surface_capabilities.current_transform)
+            .pre_transform(pre_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(present_mode)
             .clipped(true);
