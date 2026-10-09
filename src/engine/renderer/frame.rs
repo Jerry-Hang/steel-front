@@ -44,6 +44,15 @@ impl Renderer {
         } else {
             0.0
         };
+        // 片元成本对比开关（2026-10-09，性能定位用）：shadow.config.w
+        //   0 = 正常（默认，逐位不变）
+        //   1 = 跳过逐像素阴影 PCF
+        //   2 = apply_lighting 直接返回底色（光照全关）
+        //   3 = 片元直出常量色（纯填充/几何下限）
+        // 实机：setprop debug.sf.shadow_mode 1
+        self.light_data.shadow.config.w = crate::syscfg::cfg("RV3D_SHADOW_MODE")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(0.0);
         // RV3D_DEBUG_SHADOW=1：片元直出 shadow_factor 灰度（阴影诊断）
         if std::env::var("RV3D_DEBUG_SHADOW").as_deref() == Ok("1") {
             self.light_data.shadow.config.y = 1.0;

@@ -264,14 +264,19 @@ fn effective_frame_cap(fg_fps: f32, bg_fps: f32, focused: bool) -> f32 {
 
 /// 环境变量真值解析（"1"/"true"/"on" = 真；其余为假）
 fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
+    crate::syscfg::cfg(name)
         .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "TRUE" | "ON" | "True"))
         .unwrap_or(false)
 }
 
 /// 环境变量浮点读取（解析失败返回 None）
 fn env_f32(name: &str) -> Option<f32> {
-    std::env::var(name).ok().and_then(|s| s.parse::<f32>().ok())
+    crate::syscfg::cfg(name).and_then(|s| s.parse::<f32>().ok())
+}
+
+/// 环境变量字符串读取（Android 上回退到系统属性，见 `syscfg::cfg`）
+fn env_str(name: &str) -> Option<String> {
+    crate::syscfg::cfg(name)
 }
 
 /// 事件循环后端选择（只有 Linux 有两种 WSI 后端，其它平台恒为 `Auto`）。
@@ -1090,7 +1095,7 @@ impl GameApp {
             },
             inspect_armed: false,
             cam_logged: false,
-            cam_override: std::env::var("RV3D_CAM").ok().and_then(|s| {
+            cam_override: crate::syscfg::cfg("RV3D_CAM").and_then(|s| {
                 let mut it = s.split(':');
                 let _mode = it.next()?; // 模式标记（fly）
                 let pos = it.next()?.trim();

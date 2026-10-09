@@ -430,6 +430,10 @@ fn safe_face_normal(wp: vec3<f32>, vdir: vec3<f32>) -> vec3<f32> {
 const DYN_PCF_RADIUS: i32 = 1;
 
 fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
+    // 消融档 2：光照全关（默认档 0 不进这里）
+    if (light_data.shadow.config.w >= 1.5 && light_data.shadow.config.w < 2.5) {
+        return color;
+    }
     if (light_data.flags.x < 0.5) {
         return color;
     }
@@ -440,7 +444,23 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     var debug_outside = true;
     var d_avg = 0.0;
     var frag_depth = 0.0;
-    if (light_data.flags.y >= 0.5 && light_data.shadow.bias.z >= 0.5) {
+    // 逐像素抽头旋转角（2026-10-09）：静态图与动态图原来各算一遍**完全相同**的
+    // sin/cos（同一个 floor(position.xy)），提到这里只算一次 —— 逐位等价。
+    // 消融档 4：常量角（量「每像素随机角」把纹理取数打散的代价）
+    // 消融档 5：角量化到 2x2 像素块（候选优化：保住打散效果、换回取数合并）
+    var pcf_ang = 0.0;
+    if (light_data.shadow.config.w < 3.5) {
+        pcf_ang = fract(sin(dot(floor(input.position.xy),
+            vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    } else if (light_data.shadow.config.w > 4.5) {
+        // 量化到 2x2 像素块：块内 4 个 lane 用同一个方向 ⇒ 取数重新合并
+        pcf_ang = fract(sin(dot(floor(input.position.xy * 0.5),
+            vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    }
+    let pcf_ca = cos(pcf_ang);
+    let pcf_sa = sin(pcf_ang);
+    if (light_data.flags.y >= 0.5 && light_data.shadow.bias.z >= 0.5
+        && !(light_data.shadow.config.w > 0.5 && light_data.shadow.config.w < 1.5)) {
         // ---- 光空间帧尺度：从 light_view_proj 反解，零新增 uniform / 零新 pass ----
         // 正交光矩阵的 3x3 块 = diag(1/extent, 1/extent, 1/(near-far)) · 光相机单位基向量，
         // 因此**每一行的长度就是该轴的投影缩放**（基向量单位长，与旋转无关）。
@@ -512,10 +532,8 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             // 0.39m 的方块马赛克（实机只在阴影内部可见、受光路面干净，正合此机制）。
             // 旋转角取**屏幕像素**的函数：屏幕像素随时间稳定 ⇒ 不引入闪噪，
             // 而相邻像素落在不同的纹素组合上 ⇒ 把方块打散成高频噪声，9 抽头平均即平滑。
-            let ang = fract(sin(dot(floor(input.position.xy),
-                vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
-            let kca = cos(ang);
-            let ksa = sin(ang);
+            let kca = pcf_ca;
+            let ksa = pcf_sa;
             for (var dy = -1; dy <= 1; dy = dy + 1) {
                 for (var dx = -1; dx <= 1; dx = dx + 1) {
                     let ox = f32(dx) * kca - f32(dy) * ksa;
@@ -544,7 +562,8 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     // 放在 RV3D_DEBUG_SHADOW 的早退**之后**，所以调试视图仍然是"只看静态图"的原语义。
     // config.z = 动态图有效（renderer.rs::set_lights 每帧置位）。
     if (light_data.shadow.config.z >= 0.5 && light_data.flags.y >= 0.5
-        && light_data.shadow.bias.z >= 0.5) {
+        && light_data.shadow.bias.z >= 0.5
+        && !(light_data.shadow.config.w > 0.5 && light_data.shadow.config.w < 1.5)) {
         let lvp2 = light_data.shadow.light_view_proj;
         let row_x2 = vec3<f32>(lvp2[0].x, lvp2[1].x, lvp2[2].x);
         let row_z2 = vec3<f32>(lvp2[0].z, lvp2[1].z, lvp2[2].z);
@@ -574,10 +593,8 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             // 🔴 与静态图同款：逐像素旋转抽头核，解掉抽头与纹素网格的相位锁定
             // （否则 NPC 影子内部出同样的 0.39m 方块马赛克）。角度取屏幕像素的函数，
             // 与静态图那份同源；两张图用同一个角，影子边缘的噪声才不会互相错位。
-            let ang2 = fract(sin(dot(floor(input.position.xy),
-                vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
-            let kca2 = cos(ang2);
-            let ksa2 = sin(ang2);
+            let kca2 = pcf_ca;
+            let ksa2 = pcf_sa;
             for (var dy2 = -DYN_PCF_RADIUS; dy2 <= DYN_PCF_RADIUS; dy2 = dy2 + 1) {
                 for (var dx2 = -DYN_PCF_RADIUS; dx2 <= DYN_PCF_RADIUS; dx2 = dx2 + 1) {
                     let rx2 = f32(dx2) * kca2 - f32(dy2) * ksa2;
@@ -680,6 +697,10 @@ fn window_dark(nrm: vec3<f32>, world_pos: vec3<f32>, deriv: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // 消融档 3：片元直出常量色（量纯填充/几何下限；默认档 0 不进这里）
+    if (light_data.shadow.config.w > 2.5 && light_data.shadow.config.w < 3.5) {
+        return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    }
     if (input.fade <= 0.02) {
         discard;
     }

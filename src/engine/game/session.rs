@@ -259,7 +259,7 @@ impl Game {
     /// 两者皆未设置 → 保持 None（程序化地图 + StartMenu，默认行为与测试基线零回归）。
     /// 加载失败仅告警并回退程序化地图（不 panic、不中断启动）。
     pub(crate) fn init_map_system(&mut self) {
-        let single = std::env::var("RV3D_MAP").ok().filter(|p| !p.is_empty());
+        let single = crate::syscfg::cfg("RV3D_MAP").filter(|p| !p.is_empty());
         let index = std::env::var("RV3D_MAPS").ok().filter(|p| !p.is_empty());
         let (path, list) = if let Some(p) = single {
             (p, Vec::new())

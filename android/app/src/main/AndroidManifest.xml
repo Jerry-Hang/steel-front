@@ -3,6 +3,8 @@
 
     <application
         android:label="Steel Front"
+        android:appCategory="game"
+        android:isGame="true"
         android:allowBackup="false"
         android:theme="@style/Theme.SteelFront"
         android:extractNativeLibs="true">
