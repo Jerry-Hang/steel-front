@@ -618,7 +618,8 @@ fn parse_map_toml(text: &str) -> Result<MapData, String> {
 
 /// 读取并解析关卡地图文件，并做基本校验（≥1 出生点；≥1 障碍或目标）
 pub fn load_map(path: &str) -> Result<MapData, String> {
-    let text = std::fs::read_to_string(path)
+    let text = crate::engine::asset_source::global()
+        .read_to_string(path)
         .map_err(|e| format!("map: 无法读取 {}: {}", path, e))?;
     let data = parse_map_toml(&text)?;
     if data.spawn_points.is_empty() {

@@ -6,7 +6,6 @@
 
 use std::ffi::CStr;
 use std::time::Instant;
-use std::fs::File;
 use ash::{
     ext::{debug_utils::Instance as DebugUtils, mesh_shader::Device as MeshShaderDevice},
     khr::{surface::Instance as Surface, swapchain::Device as Swapchain},

@@ -564,8 +564,12 @@ pub(crate) fn terrain_height_at(x: f32, z: f32) -> f32 {
 // 渲染器
 // ============================================================
 pub(crate) fn load_spirv(path: &str) -> Result<Vec<u32>, String> {
-    let mut file = File::open(path).map_err(|e| format!("打开着色器文件失败 '{}': {}", path, e))?;
-    util::read_spv(&mut file).map_err(|e| format!("读取 SPIR-V 文件失败 '{}': {}", path, e))
+    // 2026-10-09：改走资产抽象层（Android 侧将换 AAssetManager，见 engine/asset_source.rs）。
+    let bytes = crate::engine::asset_source::global()
+        .read(path)
+        .map_err(|e| format!("打开着色器文件失败 '{}': {}", path, e))?;
+    let mut cur = std::io::Cursor::new(bytes);
+    util::read_spv(&mut cur).map_err(|e| format!("读取 SPIR-V 文件失败 '{}': {}", path, e))
 }
 /// POD → &[u8]（push constants 上传，零外部依赖）
 #[inline]

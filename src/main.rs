@@ -1770,7 +1770,9 @@ impl GameApp {
     }
 
     fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
-        let path = if std::path::Path::new(&format!("assets/guns/{key}.glb")).exists() {
+        let path = if crate::engine::asset_source::global()
+            .exists(&format!("assets/guns/{key}.glb"))
+        {
             format!("assets/guns/{key}.glb")
         } else {
             "assets/guns/ak12.glb".to_string()
