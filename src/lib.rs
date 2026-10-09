@@ -786,7 +786,7 @@ struct GameApp {
     camera: Camera,
     /// 键盘按键状态
     key_state: KeyState,
-    /// Android 触控：左半屏操纵杆（id + 起点）
+    /// Android 触控：左半屏方向杆（id + 起点）
     #[cfg(target_os = "android")]
     touch_move: Option<(u64, f32, f32)>,
     /// Android 触控：右半屏拖动转视角（id + 上一次位置）
@@ -3206,7 +3206,7 @@ impl GameApp {
 /// `key_state`（移动）/ `camera.look`（视角）/ `fire_requested`（开火）。
 ///
 /// 分区（屏幕坐标，y 向下）：
-/// - 左半屏        → 操纵杆：起点为圆心，偏移超死区即产生 WASD。
+/// - 左半屏        → 方向杆：起点为圆心，偏移超死区即产生 WASD。
 /// - 右下角热区    → 开火（按住连发）。
 /// - 其余（右半屏）→ 拖动转视角。
 #[cfg(target_os = "android")]
@@ -3238,7 +3238,7 @@ impl GameApp {
             TouchPhase::Moved => {
                 if let Some((id, ox, oy)) = self.touch_move {
                     if id == touch.id {
-                        // 操纵杆半径取屏高的 12%，死区 25%
+                        // 方向杆半径取屏高的 12%，死区 25%
                         let r = (sh * 0.12).max(24.0);
                         let dead = r * 0.25;
                         let (dx, dy) = (x - ox, y - oy);
@@ -4219,7 +4219,7 @@ impl ApplicationHandler for GameApp {
             }
 
             // 窗口大小变化时重建交换链
-            // Android 触控：左半屏操纵杆 / 右半屏视角 / 右下角开火。
+            // Android 触控：左半屏方向杆 / 右半屏视角 / 右下角开火。
             #[cfg(target_os = "android")]
             WindowEvent::Touch(t) => {
                 self.handle_touch(t);
