@@ -297,14 +297,53 @@ mod win_topology {
 
 static TOPOLOGY: OnceLock<CpuTopology> = OnceLock::new();
 
+/// 按 sysfs 的 `cpu_capacity` 把在线核分成两簇（不硬编码任何核数组合）。
+///
+/// 为什么用容量而不是名字（见 KB「真机簇组合核实表」）：手机的组合有 1+3+4 / 2+4+4 /
+/// 2+4+2+2 / 2+3+3…，还混着高通 Oryon、小米玄戒这类自研核与 Arm 的 C1/C2 新命名，
+/// **按名字匹配必然失效**；而 `cpu_capacity` 是内核 EAS 自己归一化到 1024 的容量值。
+///
+/// 返回 `(高容量簇, 低容量簇, 低容量簇核数)`；同构或读不到时返回 `None`（调用方回退旧逻辑）。
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sysfs_capacity_clusters(threads: usize) -> Option<(Vec<usize>, Vec<usize>, usize)> {
+    let mut caps: Vec<(usize, u32)> = Vec::new();
+    for c in 0..threads {
+        let p = format!("/sys/devices/system/cpu/cpu{c}/cpu_capacity");
+        let Ok(s) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        if let Ok(v) = s.trim().parse::<u32>() {
+            caps.push((c, v));
+        }
+    }
+    // 热插拔核可能不在线：数量对不上就不敢用（避免把簇切错）
+    if caps.len() != threads || threads < 2 {
+        return None;
+    }
+    let max = caps.iter().map(|x| x.1).max()?;
+    let min = caps.iter().map(|x| x.1).min()?;
+    if max == min {
+        return None; // 同构拓扑：不拆
+    }
+    let mid = (max + min) / 2;
+    let big: Vec<usize> = caps.iter().filter(|x| x.1 > mid).map(|x| x.0).collect();
+    let little: Vec<usize> = caps.iter().filter(|x| x.1 <= mid).map(|x| x.0).collect();
+    if big.is_empty() || little.is_empty() {
+        return None;
+    }
+    let e = little.len();
+    Some((big, little, e))
+}
+
 /// 取全局 CPU 拓扑（首次调用触发 `detect()`，幂等）
 pub fn topology() -> &'static CpuTopology {
     TOPOLOGY.get_or_init(CpuTopology::detect)
 }
 
-// Linux `sched_setaffinity`（cpu_set_t = 1024 位，x86_64 下 16×u64）；
-// 仅 Linux 提供该系统调用（macOS/iOS 无，Apple Silicon 构建时线程调度交由系统 QoS）
-#[cfg(target_os = "linux")]
+// Linux `sched_setaffinity`（cpu_set_t = 1024 位，16×u64）；
+// macOS/iOS 无该系统调用（Apple Silicon 交给系统 QoS）。
+// Android 也是 Linux ⇒ 一并启用（2026-10-09）。
+#[cfg(any(target_os = "linux", target_os = "android"))]
 extern "C" {
     fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
 }
@@ -637,7 +676,19 @@ impl CpuTopology {
                             ((0..threads).collect(), Vec::new(), 0)
                         }
                     }
-                    CpuVendor::Other => ((0..threads).collect(), Vec::new(), 0),
+                    CpuVendor::Other => {
+                        // Android / aarch64 等：先按 sysfs 容量聚类，读不到才退回全核主簇。
+                        #[cfg(any(target_os = "linux", target_os = "android"))]
+                        if let Some((big, little, e)) = sysfs_capacity_clusters(threads) {
+                            (big, little, e)
+                        } else {
+                            ((0..threads).collect(), Vec::new(), 0)
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                        {
+                            ((0..threads).collect(), Vec::new(), 0)
+                        }
+                    }
                 };
                 (primary_set, secondary_set, Vec::new(), Vec::new(), Vec::new(), e_cores)
             };
@@ -750,7 +801,7 @@ impl CpuTopology {
                 }
             }
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             let mut mask = [0u64; 16];
             for &c in &target {
@@ -778,7 +829,7 @@ impl CpuTopology {
                 log::warn!("cpu: sched_setaffinity 失败（环境不支持），保持默认调度");
             }
         }
-        #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+        #[cfg(all(not(target_os = "linux"), not(target_os = "android"), not(target_os = "windows")))]
         {
             // 非 Linux/Windows（如未来 macOS/iOS Apple Silicon 构建）：无 sched_setaffinity，
             // 不手工绑核，线程调度交给系统 QoS/调度器
@@ -824,7 +875,7 @@ impl CpuTopology {
     /// 把「当前线程」绑定到目标 vCPU 集合（供池内工作线程/作用域线程启动时自绑）。
     /// 非 Linux 平台（如 macOS/iOS）无 `sched_setaffinity`，恒返回 false，调度交给系统。
     pub fn pin_current_thread(set: &[usize]) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             let threads = topology().threads;
             let mut mask = [0u64; 16];
@@ -837,7 +888,7 @@ impl CpuTopology {
                 sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), mask.as_ptr()) == 0
             }
         }
-        #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+        #[cfg(all(not(target_os = "linux"), not(target_os = "android"), not(target_os = "windows")))]
         {
             let _ = set;
             false
