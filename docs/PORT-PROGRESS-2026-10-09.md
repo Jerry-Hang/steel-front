@@ -59,11 +59,26 @@ timeout 15 ./target/release/steel-front
 - 截图落 `/tmp/steel_front_<unix秒>.png`（Linux）
 - 比对：`python3 scripts/png_diff.py A.png B.png`
 
+## 第二轮（2026-10-09 晚）：用户指定四步 —— 全部完成
+
+分支 `feature/android-port`（从 master `978408c` 开出；master 已回退保持干净）。
+
+| 步 | 提交 | 内容 |
+|---|---|---|
+| 1. 重构 | `d0743a5` | `main.rs`→`lib.rs` + 薄 bin；`[lib] crate-type=["rlib","cdylib"]` ⇒ 产出 `libsteel_front.so` |
+| 2. 生命周期 | `1bba17d` | `suspended` 字段 + `fn suspended()` + `resumed()` 重入重建交换链 + `about_to_wait` 暂停 |
+| 3. 渲染管线 | `345fad5` `4b1c518` | 实例 `api_version` 取 `min(1.3, loader)`；Android 默认呈现模式 FIFO |
+| 4. 标记依赖 | `f8975d2` | AGENTS.md 例外段补全 Android 传递依赖全集；Cargo.toml 加指向注释 |
+
+**踩坑**：`Resumed`/`Suspended` **不是 `WindowEvent`**，是 `ApplicationHandler` 的方法；ash 的 `version_major/minor/patch` 已废弃（用 `api_version_*`）。
+
+**最终闸门**：宿主 / Android 均 0 警告；`cargo test --release` 673 通过；`libsteel_front.so` 470880 字节。
+
+---
+
 ## 下一步（未做）
 
-- [ ] Android 打包成 `.so`（jniLibs）需要把 crate 改成 **cdylib**（当前是纯 bin crate）
-- [ ] 生命周期：`onPause`/`onResume`/`onDestroy`；surface 丢失恢复（与铁律 B 的 `device_lost` 粘性冲突）
-- [ ] `audio_out.rs` 的 Android 路径（AAudio）——**Android 目标已 0 警告**（`15f7c75` 用 cfg 收窄），但音频仍走静默回退，真机需实装 AAudio
-- [ ] `AAssetManager` 实现（接 `AssetSource` 的第三个实现）——需新增 `ndk` 直接依赖（又一次破"10 依赖"铁律，需记账），且只能在真机验证
-- [ ] 触摸输入（铁律 C 前提反转）、质量档、ASTC 纹理
-- [ ] 渲染非确定性的根因（mip 链 / 采样路径）
+- Android 打包：还需 **Gradle 工程**（jniLibs 放 `.so`）+ GameActivity 的 Java/Kotlin 侧
+- `AAssetManager`（`AssetSource` 第三实现，需 `ndk` 直接依赖）/ AAudio
+- 触摸输入（铁律 C 前提反转）、质量档、ASTC 纹理
+- 渲染非确定性的根因（mip 链 / 采样路径）
