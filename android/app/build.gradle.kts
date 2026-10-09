@@ -23,6 +23,14 @@ android {
         }
     }
 
+    // GameActivity 的原生 JNI 注册在 extractNativeLibs=false（默认）下会
+    // RegisterNatives failed 崩溃 ⇒ 用传统打包（.so 解压到 lib/）。
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -34,6 +42,6 @@ android {
 
 dependencies {
     // GameActivity：winit 的 android-game-activity 后端对应的 Activity 基类
-    implementation("androidx.games:games-activity:2.0.2")
+    implementation("androidx.games:games-activity:4.4.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
 }
