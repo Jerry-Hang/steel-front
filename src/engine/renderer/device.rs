@@ -480,16 +480,14 @@ impl Renderer {
             // 阴影拆两张（静态图 + 动态图，见 shadow_dyn_image）：静态图偶尔重画、动态图按
             // `shadow_every` 的节奏重画。默认 **2**（与拆分前整图的节奏一致），于是
             // `RV3D_NO_SHADOW_SPLIT=1` 就是逐帧等价的对照组；=1 可让 NPC 影子更实时。
-            shadow_every: std::env::var("RV3D_SHADOW_EVERY")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .filter(|v| (1..=8).contains(v))
+            shadow_every: crate::syscfg::cfg("RV3D_SHADOW_EVERY")
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|v| (1..=1_000_000).contains(v))
                 .unwrap_or(2),
-            shadow_split: std::env::var("RV3D_NO_SHADOW_SPLIT").is_err(),
-            shadow_static_every: std::env::var("RV3D_SHADOW_STATIC_EVERY")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .filter(|v| (1..=600).contains(v))
+            shadow_split: crate::syscfg::cfg("RV3D_NO_SHADOW_SPLIT").is_none(),
+            shadow_static_every: crate::syscfg::cfg("RV3D_SHADOW_STATIC_EVERY")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| (1..=1_000_000).contains(v))
                 .unwrap_or(30),
             shadow_static_frame: true, // 首帧必须画（此时静态图里还没有任何内容）
             shadow_frame: true, // 首帧（以及启动时那批 dummy 录制）必须画

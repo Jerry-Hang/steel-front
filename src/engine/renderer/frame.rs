@@ -767,6 +767,12 @@ impl Renderer {
         // 静态图单独一条节奏（默认 30 帧一次）：它装的是不动的东西，没必要每帧重画。
         self.shadow_static_frame =
             shadow_static_due(self.frame_seq, self.shadow_static_every, self.void_mode, self.shadow_split);
+        // 性能测量（2026-10-09）：RV3D_SHADOW_PASS_OFF=1 跳过阴影图重画，
+        // 用来单独量「阴影 map pass」在帧时间里的占比。画面会变成旧影子，仅用于测量。
+        if crate::syscfg::flag("RV3D_SHADOW_PASS_OFF") {
+            self.shadow_frame = false;
+            self.shadow_static_frame = false;
+        }
         self.frame_seq = self.frame_seq.wrapping_add(1);
         self.record_command_buffer(
             cmd_buffer,
