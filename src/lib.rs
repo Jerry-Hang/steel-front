@@ -786,16 +786,16 @@ struct GameApp {
     camera: Camera,
     /// 键盘按键状态
     key_state: KeyState,
-    /// Android 触摸：左半屏虚拟摇杆（id + 起点）
+    /// Android 触控：左半屏操纵杆（id + 起点）
     #[cfg(target_os = "android")]
     touch_move: Option<(u64, f32, f32)>,
-    /// Android 触摸：右半屏拖动转视角（id + 上一次位置）
+    /// Android 触控：右半屏拖动转视角（id + 上一次位置）
     #[cfg(target_os = "android")]
     touch_look: Option<(u64, f32, f32)>,
-    /// Android 触摸：开火按钮（按住连发）
+    /// Android 触控：开火按钮（按住连发）
     #[cfg(target_os = "android")]
     touch_fire: Option<u64>,
-    /// 最近一次窗口尺寸（触摸分区用）
+    /// 最近一次窗口尺寸（触控分区用）
     screen_size: (f32, f32),
     /// 🔴 2026-09-13 诊断：`CursorMoved` 到达/被吞/被判跳变 的计数，
     /// 用于区分"鼠标事件没到"与"到了但被守卫丢掉"（见 `cam:` 日志行）。
@@ -3199,14 +3199,14 @@ impl GameApp {
     }
 }
 
-/// Android 触摸输入（2026-10-09）。
+/// Android 触控输入（2026-10-09）。
 ///
 /// 为什么完全绕开鼠标那套：铁律 C 的光标捕获协议在手机上**前提不成立**
 /// （没有光标、没有悬停、没有右键）。这里直接驱动引擎内部的三个状态：
 /// `key_state`（移动）/ `camera.look`（视角）/ `fire_requested`（开火）。
 ///
 /// 分区（屏幕坐标，y 向下）：
-/// - 左半屏        → 虚拟摇杆：起点为圆心，偏移超死区即产生 WASD。
+/// - 左半屏        → 操纵杆：起点为圆心，偏移超死区即产生 WASD。
 /// - 右下角热区    → 开火（按住连发）。
 /// - 其余（右半屏）→ 拖动转视角。
 #[cfg(target_os = "android")]
@@ -3219,7 +3219,7 @@ impl GameApp {
         let in_fire_zone = x > sw * 0.78 && y > sh * 0.60;
         match touch.phase {
             TouchPhase::Started => {
-                // 开始菜单/加载中：点一下即开局（手机上只有触摸，没有键盘）。
+                // 开始菜单/加载中：点一下即开局（手机上只有触控，没有键盘）。
                 let st = self.game.state();
                 if st == GameState::StartMenu || st == GameState::LoadingMap {
                     self.game.on_any_key(&self.camera.position());
@@ -3238,7 +3238,7 @@ impl GameApp {
             TouchPhase::Moved => {
                 if let Some((id, ox, oy)) = self.touch_move {
                     if id == touch.id {
-                        // 摇杆半径取屏高的 12%，死区 25%
+                        // 操纵杆半径取屏高的 12%，死区 25%
                         let r = (sh * 0.12).max(24.0);
                         let dead = r * 0.25;
                         let (dx, dy) = (x - ox, y - oy);
@@ -4219,7 +4219,7 @@ impl ApplicationHandler for GameApp {
             }
 
             // 窗口大小变化时重建交换链
-            // Android 触摸：左半屏摇杆 / 右半屏视角 / 右下角开火。
+            // Android 触控：左半屏操纵杆 / 右半屏视角 / 右下角开火。
             #[cfg(target_os = "android")]
             WindowEvent::Touch(t) => {
                 self.handle_touch(t);
