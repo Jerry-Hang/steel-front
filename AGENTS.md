@@ -35,6 +35,10 @@ Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
 `log` 0.4 / `env_logger` 0.11 / `image` 0.25 / `naga` 30(wgsl-in,spv-out,spv-in) / `rspirv` 0.11。
 **不新增第三方依赖**是硬约束。工具链：rustc 1.96.1（2026-06-26）。
 > ⚠ **例外（2026-10-09，仅 Android 目标）**：`winit` 的 `android-game-activity` feature 会引入**传递依赖** `android-activity`（及其 `ndk` / `ndk-sys` / `jni`）。它是 winit **官方指定的 Android 入口**（Activity 生命周期 + `ANativeWindow` surface + 输入），不是我们另找的轮子；本约束的目的是「别让依赖膨胀、别把可移植性卖出去」，而它恰是为可移植性存在的官方适配层。**桌面直接依赖仍为 10 个，本例外不改变桌面构建图。** 编译须走 `cargo ndk -t arm64-v8a check`（裸 `cargo check` 会因 cc-rs 找不到 `aarch64-linux-android-clang++` 而失败）。
+> **Android 目标实际引入的传递依赖全集（2026-10-09 实测 `cargo tree --target aarch64-linux-android`）**：
+> `android-activity` 0.6.1、`android-properties` 0.2.2、`jni` 0.22.4（+`jni-macros`）、
+> `jni-sys`（0.3.1 / 0.4.1 + `jni-sys-macros`）、`ndk` 0.9.0、`ndk-sys` 0.6.0、`ndk-context` 0.1.1。
+> **全部仅 Android 目标生效；桌面（Windows / Linux）构建图不变（直接依赖仍 10 个）。**
 
 ### 模块地图（`src/`，按体量）
 
