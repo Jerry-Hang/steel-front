@@ -1,0 +1,5418 @@
+//! 钢铁前线 (Steel Front) - 程序入口
+//!
+//! 游戏主循环：
+//! 1. 初始化窗口（winit）
+//! 2. 初始化 Vulkan 渲染器（ash）
+//! 3. 事件循环处理输入
+//! 4. 每帧更新相机并渲染
+
+// 🔴🔴 2026-09-13：**release 构建不创建控制台窗口**。
+//
+// 病根：Rust 的 bin 默认是 **console 子系统**，所以双击 exe 时 Windows 会**先创建一个
+// 控制台窗口并让它成为前台**，游戏窗口随后才创建。实测枚举本进程的窗口可见：
+//     class='Window Class'        title='Steel Front - Vulkan'   ← 游戏窗口
+//     class='ConsoleWindowClass'  title='...steel-front.exe'     ← 控制台，可见
+// 两个同属一个进程的顶层窗口互相争前台。而 `sync_cursor` 要求
+// "本进程是前台进程" 才抓光标（见 `window_is_foreground`）—— 于是**光标永不抓取**，
+// 表现就是"键盘与左右键有反应、鼠标完全转不了视角"（用户 2026-09-13 反复报告）。
+//
+// 改成 windows 子系统后根本不存在控制台 ⇒ 没有可争的前台 ⇒ 抓取成立。
+// **调试构建保留控制台**（`debug_assertions` 时保留），否则 `cargo run` 时看不到日志。
+// 发布版的日志走 stderr 重定向：用 `SteelFront.bat` 启动会落到
+// `logs/play_latest.log.err`。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+// 🔴 2026-10-03：**顶部那条 `#![cfg_attr(not(windows), allow(dead_code))]` 已删除。**
+//
+// 它是 2026-09-26 加的，当时的理由是：非 Windows **只是"只编译不运行"的交叉验证目标**
+// （铁律 E 的 `cargo check --target aarch64-unknown-linux-gnu`）；拆掉后剩下的警告
+// 全是"按平台设计就只在 Windows 用得到"的东西（waveOut 常量、CJK 字模表）。
+//
+// **那个前提现在不成立了**：Linux 已经是原生支持、而且**要真的跑起来**的平台
+// （见 `docs/linux-native.md`，PR #1 已合并）。于是这个 blanket allow 会在 Linux 上
+// **藏住真正的死代码** —— 而 Linux 恰恰是现在必须保证干净的一侧。
+//
+// 拆掉之后实测浮出 4 条，全部在 `audio_out.rs`：
+//   * `WaveOutSink` 的字段与 `new`（3 条）：它只在 Windows 上被构造
+//     （`DefaultSink` 在 Linux 是 `AlsaSink`），而原来只有**字段**带 cfg，
+//     结构体与 impl 在 Linux 上也编 ⇒ 整条链没人用；
+//   * `submit_plan` / `warn_submit_truncation_once`：只被 `WaveOutSink::submit` 调用。
+//
+// 修法是**按平台门控**，不是加 `allow`（铁律 F：看到死代码必须回答"为什么没被接线"）：
+// 整个 `WaveOutSink` 及其 impl 加 `#[cfg(target_os = "windows")]`；两个**纯函数**用
+// `#[cfg(any(target_os = "windows", test))]` —— 生产代码只有 Windows 用得到，但
+// `submit_plan_never_exceeds_source_or_capacity` 是纯函数判据，不该因为平台丢掉
+// Linux 上的覆盖。
+//
+// ⇒ 现在两侧都是**真的 0 警告**，不再是"靠 allow 压出来的 0"。
+
+/// 构建期内嵌着色器（build.rs 生成 OUT_DIR/shaders.rs）
+pub mod shaders {
+    include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
+}
+
+mod engine;
+mod audio;
+mod audio_out;
+mod llm_cmd;
+mod net;
+mod ui;
+mod config;
+mod perf_log;
+
+use std::time::{Duration, Instant};
+
+use winit::{
+    application::ApplicationHandler,
+    event::{
+        DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+    },
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{Window, WindowId},
+};
+
+use engine::camera::{Camera, CameraMode, KeyState};
+use engine::ai::Team;
+use engine::game::{Game, GameState};
+use engine::renderer::{QualityPreset, Renderer};
+use engine::window;
+use net::{Client, Server};
+use ui::{BindingAction, KeyBindings, RESOLUTIONS};
+use winit::window::CursorGrabMode;
+
+/// 绝对位置路径（CursorMoved）单次位移最大像素：超过视为光标传送伪事件
+/// （X 服务端 warp/焦点切换跳变），跳过该事件并重基准 last_cursor，
+/// 防止第一人称视角跳变/自转。仅用于非捕获态拖拽路径（菜单/设置预览）。
+/// 捕获态视角由 DeviceEvent::MouseMotion（XInput2 raw 相对增量）驱动，
+/// 不适用此像素阈值（raw 位移单位是设备原始计数，可远大于屏幕像素）。
+const MAX_LOOK_DELTA_PX: f64 = 512.0;
+
+/// raw 相对增量单事件上限：物理手速（1000Hz 采样下单事件 ≤ 几十计数）
+/// 不可能达到的量级；超过视为残留 warp 回声（X 服务端 warp 在个别栈上
+/// 也会产生 raw motion），跳过防止反馈环自转。
+const MAX_RAW_LOOK_DELTA: f64 = 1024.0;
+
+/// 本平台是否会投递 `DeviceEvent::MouseMotion`（raw 相对增量）。
+///
+/// 这不是可选优化，而是捕获态**唯一**的相对视角来源：`window_event` 的
+/// `CursorMoved` 分支在 `cursor_locked` 时直接 `return`（"raw 增量已驱动视角，
+/// 绝对位置只更新基准"），而 `device_event` 的 `MouseMotion` 分支只在
+/// `cursor_locked` 时生效 —— 两条路径互斥且各自是对方的唯一出口。
+/// 于是 `Locked` 一旦成功，绝对位置路径就被关掉；若该平台又从不投递
+/// `MouseMotion`，视角就完全无输入，且编译期与运行期都不报错。
+///
+/// winit 0.30 的 Windows 后端只构造 `DeviceEvent::Added` / `Removed`
+/// （`platform_impl/windows/` 下没有 `MouseMotion` 的构造点），该事件目前
+/// 只由 X11 / Wayland / macOS / web 后端发出。引入本分支的 `5373a08` 正是为
+/// XInput2（X11）写的；2026-08-15 迁到 Windows 原生后该前提不再成立，
+/// 但这里没跟着改，于是在 Windows 上 `Locked` 成功 = 视角失效。
+#[cfg(target_os = "windows")]
+const RAW_MOUSE_MOTION: bool = false;
+#[cfg(not(target_os = "windows"))]
+const RAW_MOUSE_MOTION: bool = true;
+
+/// 🔴🔴 2026-09-13：**直接问操作系统**"我们的进程是不是前台"。
+///
+/// 为什么前面两条路都不行（用户实测"键盘能用、鼠标完全转不了视角"，两次修复都无效）：
+///
+/// 1. **`WindowEvent::Focused` 不够**：它只在收到 `WM_SETFOCUS` 时发出。而
+///    **窗口在创建时就已经有焦点**是启动的常见情形 —— 此时 Windows **不会再发一次
+///    `WM_SETFOCUS`** ⇒ winit 永远不发 `Focused(true)` ⇒ `self.focused` 停在初值
+///    `false` ⇒ `want` 恒假 ⇒ **光标永不抓取**。键盘与左右键不经过 `want`，所以照常工作。
+///
+/// 2. **`Window::has_focus()` 也不行** —— winit 0.30 的文档自己写着
+///    "This queries the same state information as WindowEvent::Focused"，
+///    Windows 实现是 `window_state.has_active_focus()`，读的**就是同一个内部标志**。
+///    事件不来，它同样是 false。**2026-09-13 我第一版修复正是栽在这里。**
+///
+/// **判据用"前台窗口属于本进程"而不是"HWND 相等"**：本工程的 winit 程序有多个窗口
+/// （AGENTS.md 记录过 `Process.MainWindowHandle` 拿到的**不是**接收输入的那个），
+/// 拿 HWND 做相等比较会漏判。比进程 ID 与窗口身份无关，稳得多。
+#[cfg(target_os = "windows")]
+fn window_is_foreground(_window: &winit::window::Window) -> Option<bool> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> *mut core::ffi::c_void;
+        fn GetWindowThreadProcessId(hwnd: *mut core::ffi::c_void, pid: *mut u32) -> u32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() {
+        last_fg_pid().store(0, std::sync::atomic::Ordering::Relaxed);
+        return Some(false); // 没有任何前台窗口（极少见）：按未聚焦处理
+    }
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+    last_fg_pid().store(pid, std::sync::atomic::Ordering::Relaxed);
+    if pid == 0 {
+        return None; // 查询失败：让调用方回退
+    }
+    Some(pid == unsafe { GetCurrentProcessId() })
+}
+
+/// 最近一次查询到的**前台窗口所属进程 ID**。只用于日志：
+/// 用户报告"鼠标转不了视角"时，`cam:` 行里的 `fgpid=` 与 `mypid=` 一比就知道
+/// 是"窗口真没在前台"还是"判据本身错了"（2026-09-13 连续两次误判的教训）。
+#[cfg(target_os = "windows")]
+fn last_fg_pid() -> &'static std::sync::atomic::AtomicU32 {
+    static V: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    &V
+}
+#[cfg(not(target_os = "windows"))]
+fn last_fg_pid() -> &'static std::sync::atomic::AtomicU32 {
+    static V: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    &V
+}
+
+#[cfg(target_os = "windows")]
+fn my_pid() -> u32 {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+    unsafe { GetCurrentProcessId() }
+}
+#[cfg(not(target_os = "windows"))]
+fn my_pid() -> u32 {
+    std::process::id()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn window_is_foreground(_window: &winit::window::Window) -> Option<bool> {
+    None
+}
+
+/// 捕获方式决策：返回 `(cursor_locked, grabbed)`。
+///
+/// `Locked` 只在 raw 相对增量真会到达时才有意义（见 [`RAW_MOUSE_MOTION`]），
+/// 否则退到 `Confined` + 绝对位置路径（该路径靠 `CursorMoved` 里的回中维持，
+/// 详见 `window_event`）。抽成纯函数是为了让"raw 不可用的平台连试都不试
+/// `Locked`"这条不变量能被单测钉住 —— 选错的后果是视角静默失效。
+fn cursor_grab_plan(
+    raw_motion: bool,
+    locked_ok: impl FnOnce() -> bool,
+    confined_ok: impl FnOnce() -> bool,
+) -> (bool, bool) {
+    if raw_motion && locked_ok() {
+        return (true, true);
+    }
+    (false, confined_ok())
+}
+
+/// 帧率上限（present 节流）：0 = 无上限（压测模式，主循环全速跑以暴露渲染瓶颈）。
+/// 设回正数（如 300）即恢复帧率门控。
+const MAX_FPS: u64 = 0;
+
+/// 有效帧率上限（fps）：前台用前台上限，**未聚焦**时再夹上「后台上限」。
+///
+/// 为什么需要这一条（2026-09-27 实测）：窗口失焦后主循环**照样全速渲染** ——
+/// 探针实测 `steel-front` 自己占 99–105% 的 GPU 3D 引擎份额、dwm 只剩 0–1%，
+/// 于是"游戏挂在后台"时整个桌面的合成、拖动窗口、打字回显都在排队，
+/// 用户报的「一运行游戏整机就像卡死」就是这个（不是 CPU 降频：同一轮实测
+/// CPU 频率 3.1–4.8 GHz、GPU 45–70W/115W、无任何节流标志）。
+///
+/// `RV3D_SHOT_AT` 的解析（纯函数，可单测）：以 `,` 分隔的秒数 ⇒ **去重升序**列表。
+///
+/// 🔴 2026-10-03 加。存在的理由：**Linux 上原来没有任何自动截图手段** ——
+/// 唯一的触发是 F12 按键，而 Wayland 下注入按键要抢焦点（`ydotool`/XTEST 那一类），
+/// 正好违反铁律 C 的鼠标安全协议。于是 `resize_probe.sh` 只能停在"没有画面取证"，
+/// 而 Windows 侧的同一探针是能 F12 的。给一个**不需要输入**的触发就把这个不对称补平，
+/// 顺带 Windows 上做无人值守取证也一样用得上。
+///
+/// 非法项（非数字、NaN、<=0）**直接丢弃**：这是取证开关，不该因为写错一个数就让整局启动失败。
+fn parse_shot_at(raw: &str) -> Vec<f32> {
+    let mut v: Vec<f32> = raw
+        .split(',')
+        .filter_map(|t| t.trim().parse::<f32>().ok())
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.dedup();
+    v
+}
+
+/// 取走**已到点**的时刻（纯函数，可单测）：把 `pending` 里所有 `<= elapsed` 的项移出，
+/// 返回移出的个数（= 这一帧该截几张）。
+///
+/// 🔴 用「取走」而不是「判等」：某一帧可能跨过两三个时刻（长卡顿、低帧率、
+/// 或首个窗口还没渲染的那些时刻），判等会**永久漏掉**被跨过的那些 —— 而截图是取证用的，
+/// 漏一张就少一份证据，且**不会报错**。
+fn take_due_shots(pending: &mut Vec<f32>, elapsed: f32) -> usize {
+    let before = pending.len();
+    pending.retain(|t| *t > elapsed);
+    before - pending.len()
+}
+
+/// 语义（判据 `frame_cap_*` 四条测试）：
+/// - `0` = 不设上限；两侧都为 0 时返回 0（保持压测路径逐字节不变）。
+/// - 未聚焦且 `bg > 0` 时取 `min(fg, bg)`（`fg == 0` 视作无穷大）⇒ **后台只会更严，绝不会放宽**。
+/// - 聚焦时忽略 `bg`，只受 `fg` 约束。
+fn effective_frame_cap(fg_fps: f32, bg_fps: f32, focused: bool) -> f32 {
+    if focused || bg_fps <= 0.0 {
+        return fg_fps.max(0.0);
+    }
+    if fg_fps <= 0.0 {
+        return bg_fps;
+    }
+    fg_fps.min(bg_fps)
+}
+
+/// 环境变量真值解析（"1"/"true"/"on" = 真；其余为假）
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "TRUE" | "ON" | "True"))
+        .unwrap_or(false)
+}
+
+/// 环境变量浮点读取（解析失败返回 None）
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name).ok().and_then(|s| s.parse::<f32>().ok())
+}
+
+/// 事件循环后端选择（只有 Linux 有两种 WSI 后端，其它平台恒为 `Auto`）。
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendChoice {
+    /// 不强制：winit 自己在有 `WAYLAND_DISPLAY` 时选 Wayland，否则选 X11。
+    Auto,
+    /// 经 `EventLoopBuilderExtX11::with_x11()` 强制 X11 / XWayland。
+    X11,
+}
+
+/// `RV3D_BACKEND` + WSL 自动判定 → 后端选择（纯函数，可单测）。
+///
+/// 优先级：**显式环境变量 > WSL 自动判定 > Auto**。
+///
+/// - `x11` / `xwayland` ⇒ `X11`，**与是不是 WSL 无关** —— 这正是修掉的那条：
+///   旧代码把「强制 X11」写死在 `is_wsl` 分支里，原生 Linux 用户**没有任何手段**
+///   退回 XWayland（winit 0.30 已删 `WINIT_UNIX_BACKEND`）。
+/// - `wayland` ⇒ `Auto`。winit 0.30 没有「强制 Wayland」的入口，
+///   而 `Auto` 在有 `WAYLAND_DISPLAY` 时就是 Wayland ⇒ **语义等价**，
+///   且不承诺一个做不到的事（写成 `Wayland` 变体也只能是空操作）。
+/// - 其它 / 未设 ⇒ `auto_x11`（WSL **且** 有 Wayland 会话）为真时 `X11`，否则 `Auto`。
+///
+/// 判据 = `backend_choice_x11_is_reachable_on_native_linux`：**非 WSL 的原生 Linux
+/// 也必须能选到 X11**（旧逻辑唯一做不到、而用户最需要的那一件事）。
+#[cfg(target_os = "linux")]
+fn backend_choice(env: Option<&str>, auto_x11: bool) -> BackendChoice {
+    match env.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("x11") | Some("xwayland") => BackendChoice::X11,
+        Some("wayland") => BackendChoice::Auto,
+        _ => {
+            if auto_x11 {
+                BackendChoice::X11
+            } else {
+                BackendChoice::Auto
+            }
+        }
+    }
+}
+
+/// 是否允许抓取光标。`RV3D_NO_CAPTURE=1` ⇒ **永不允许**。
+///
+/// 为什么需要它（2026-09-28，Linux 适配）：Windows 侧的「鼠标安全协议」（用户 2026-09-03
+/// 明确要求）靠的是 **`PostMessage` 投键 + 永不抢前台** —— 于是自动化能在**不抓光标**的
+/// 前提下驱动游戏。Linux **没有** PostMessage 这条路，而本引擎在 `Playing` 态**一定会**
+/// 抓光标（`Locked` 或 `Confined`）：自动化跑一局 = 用户的指针被锁进游戏窗口。
+/// 抓取会随进程退出而释放，但"跑测试期间桌面指针被夺走"本身就不该是自动化的副作用。
+///
+/// ⇒ Linux 侧的正确对偶不是"换个注入方式"，而是**把捕获关掉**：
+/// `RV3D_NO_CAPTURE=1` 时 `capture_wanted` 恒假，无论焦点/状态如何。
+/// 冒烟与性能脚本一律带上它 —— 这样"自动化不会碰用户输入"就成了**代码保证**，
+/// 而不是靠调用方自己记得别抢焦点。
+///
+/// ⚠️ 它只关**抓取**，不关视角输入：非捕获态本来就有左键拖拽转视角那条路
+/// （`dragging`），所以关掉捕获之后游戏依然可玩、可被脚本驱动。
+fn no_capture() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| env_truthy("RV3D_NO_CAPTURE"))
+}
+
+/// 捕获策略（纯函数，可单测）：`allowed && focused && Playing && 无面板`。
+///
+/// 抽出来的理由与 `cursor_grab_plan` 相同 —— 这条策略选错的后果是**静默**的：
+/// 漏掉 `allowed` 就是关不掉的指针锁定，漏掉 `esc_menu_open` 就是菜单里鼠标被锁死
+/// （只能 Alt+F4）。写成纯函数才能把这两个方向都钉进测试。
+fn capture_wanted(
+    focused: bool,
+    playing: bool,
+    settings_open: bool,
+    esc_menu_open: bool,
+    allowed: bool,
+) -> bool {
+    allowed && focused && playing && !settings_open && !esc_menu_open
+}
+
+/// 锁定态「相对增量到底有没有来」的判定结果（纯函数 `lock_observation` 的值域）。
+///
+/// 为什么需要它（2026-09-28，Linux 适配 —— 这是本仓在 Windows 上踩过两次的**同一个**
+/// 形态第三次出现）：`set_cursor_grab(Locked)` 返回 `Ok` **不等于锁生效了**。
+/// - **Wayland**：winit 的 `apply_on_pointer` 只对**已经 `wl_pointer::enter` 过**的指针
+///   生效 —— 指针还没进窗口时它**什么都没做也返回 `Ok`**；而且 winit 完全忽略合成器的
+///   确认事件（`ZwpLockedPointerV1` 的 Dispatch 函数体是空的）⇒ 应用层**无法**从
+///   返回值或事件里知道锁有没有生效。
+/// - 而 Wayland 下 `DeviceEvent::MouseMotion` 的唯一来源是 `zwp_relative_pointer_v1`，
+///   它**只在 `lock_pointer` 里一起创建** ⇒ **没锁 = 零 raw 事件 = 视角彻底不动**。
+/// - 绝对位置那条路在 Wayland 上也不通：`set_cursor_position` 只在已 `Locked` 时成功
+///   ⇒ `Confined` 下指针撞到窗口边就再也转不动。**所以不能"降级"了事**，
+///   必须让这个失败**可见**（症状与"鼠标坏了"完全一样，用户无从判断）。
+///
+/// ⇒ 唯一可信的判据是**行为证据**：锁定之后真的收到过相对增量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockObservation {
+    /// 还在观察窗内、且尚未收到增量 —— 结论未到，什么都别做
+    Pending,
+    /// 收到过相对增量 ⇒ 锁**确实生效**（Wayland 下这是唯一可信的证据）
+    Confirmed,
+    /// 观察窗已过、一个增量都没有 ⇒ 锁很可能是**假成功**
+    NoMotion,
+}
+
+/// 观察窗长度（毫秒）。取值理由：短了会把"用户刚锁定还没来得及动鼠标"误判成假成功；
+/// 长了用户要看着一个不动的视角干等。1.5s 够人手自然移动一次，也不至于让人以为卡死。
+const LOCK_OBSERVE_MS: u128 = 1500;
+
+/// 锁定态观察判定（纯函数，可单测）。
+///
+/// **增量优先**：只要收到过只要有 1 个相对增量就立刻 `Confirmed`，不必等满观察窗 ——
+/// 那是最强的正面证据，没有理由再等。
+fn lock_observation(elapsed_ms: u128, motion_delta: u64, window_ms: u128) -> LockObservation {
+    if motion_delta > 0 {
+        return LockObservation::Confirmed;
+    }
+    if elapsed_ms >= window_ms {
+        LockObservation::NoMotion
+    } else {
+        LockObservation::Pending
+    }
+}
+
+/// 把「请求的分辨率」夹进显示器物理尺寸，返回窗口要请求的**物理**像素尺寸。
+///
+/// 🔴 **2026-09-28 修（Linux 适配）**：调用方原来写的是
+/// `.with_inner_size(LogicalSize::new(w as f64 / 1.5, h as f64 / 1.5))` ——
+/// 那个 `/1.5` 是 Windows 那台机器 `scale_factor = 1.5` 的**硬编码补偿**。
+/// 它带来两个后果，都只在非 Windows 上暴露：
+///
+/// 1. **启动尺寸与设置里改出来的尺寸不一致**：配置 2560x1600、scale=1.0 的 Linux 上
+///    窗口实际是 1706x1066；而设置面板里改分辨率走的是 `PhysicalSize`（见 `main.rs`
+///    里应用新分辨率那条路）⇒ 同一个分辨率有两套语义。Wayland 下更糟：窗口尺寸直接
+///    决定交换链尺寸（`currentExtent` 未定义，见 `Renderer::window_extent`），
+///    于是错的是**整条渲染尺寸链**，不只是窗口。
+/// 2. 尺寸被夹小了，而日志照样打印"窗口创建成功: 2560x1600" ⇒ **日志与事实不符**。
+///
+/// ⇒ 语义定死：**这里的 `w`/`h` 与 `monitor` 全是物理像素**（`RESOLUTIONS` 与配置项
+/// 本来就是物理分辨率，`monitor.size()` 也是物理），所以一律用 `PhysicalSize`，
+/// **不再有任何魔法缩放系数**。判据 = `window_request_is_physical_and_clamped`
+/// （它同时钉住"不许再乘除任何常数"与"超屏必须等比缩"）。
+///
+/// `monitor = None`（Wayland 下 `primary_monitor()` 可能为 None）时不做夹取 ——
+/// 与其按一个猜出来的尺寸缩，不如如实请求，让合成器去处理。
+fn window_physical_request(w: u32, h: u32, monitor: Option<(u32, u32)>) -> (u32, u32) {
+    // 下限与 winit/合成器能接受的最小窗口一致，避免请求 0 尺寸
+    let (mut w, mut h) = (w.max(320), h.max(200));
+    if let Some((mw, mh)) = monitor {
+        if w > mw || h > mh {
+            let scale = (mw as f32 / w as f32).min(mh as f32 / h as f32);
+            w = ((w as f32 * scale) as u32).max(320);
+            h = ((h as f32 * scale) as u32).max(200);
+        }
+    }
+    (w, h)
+}
+
+/// 单帧预算（纳秒；`MAX_FPS = 0` 表示不设上限，预算为 0，不做 sleep/spin 节流）。
+///
+/// 写成 `match` 而不是 `if MAX_FPS > 0`：后者在 `MAX_FPS` 当前取值 0 下，比较的
+/// 真分支永远不可达（clippy 以 deny 级报 `unnecessary_sanity_check`），而这里
+/// "0 = 无上限"是**约定**、不是运行时输入，用模式匹配把它摊开更直白，
+/// 也仍然挡住 `1_000_000_000 / 0`。改 `MAX_FPS` 为非 0 时两个分支都照旧工作。
+const FRAME_BUDGET: Duration = match MAX_FPS {
+    0 => Duration::ZERO,
+    fps => Duration::from_nanos(1_000_000_000 / fps),
+};
+
+// ============================================================
+// 第一人称枪摆动（viewmodel sway）参数 —— 2026-09-01 平滑化重写
+// ============================================================
+/// 步态相位推进速率（弧度 / 米水平行程）。取值是从"视觉频率"反推的，不是真实步幅：
+/// 本作玩家水平速度只有两档——6.0 m/s（game.rs:68 PLAYER_SPEED）与开镜
+/// 3.9 m/s（game.rs move_first_person 的 ads_factor 0.65）。1.047 rad/m × 6.0 m/s
+/// = 6.28 rad/s = **侧向 1.0 Hz / 上下 2.0 Hz**，这是"人在跑"的观感上限。
+/// 若按真实步幅（1.2 m 一周期）会得到 5 Hz 上下 + 2.5 Hz 左右的高频抖，
+/// 正是玩家报的"高频小幅度摆动"。
+/// 旧实现是 `sin(anim_clock*7.5)`：频率与速度无关（固定 1.2 Hz），停下仍继续晃，
+/// 通断瞬间相位随机 → 每次开关都是一次位置跳变。改按行程推进后，停止即冻结相位，
+/// 包络再平滑收到 0，起步从同一相位平滑起振。
+const GUN_GAIT_PHASE_PER_M: f32 = 1.047;
+/// 相位推进的角速度上限（弧度/秒）。8.0 → 侧向 ≤1.27 Hz、上下 ≤2.54 Hz。
+/// 有了这道上限，即使日后加入冲刺/载具把速度推到 20 m/s 以上，摆频也不会
+/// 爬进"读成振动"的区间（>3 Hz）；当前最高速度 6 m/s 只用到 6.28 rad/s，不触发。
+const GUN_GAIT_MAX_RATE: f32 = 8.0;
+/// 侧向摆幅上限（视空间米，饱和时）。0.010 m 在腰射锚距 0.60 m、垂直 FOV 70°
+/// 下的屏幕位移 = 0.010/(0.60×tan35°) = 2.4% 半屏高 → 1080p 约 ±13 px（峰峰 26 px），
+/// 与旧实现的 0.009 同量级——玩家抱怨的是"高频"，不是"大幅度"，故幅值保持原档；
+/// 再大就开始读成"枪在飘"而不是"人在走"。
+const GUN_SWAY_SIDE_M: f32 = 0.010;
+/// 上下摆幅（米）：落地冲击约为侧向的 80%（人体质心垂向位移 ~5 cm、侧向 ~4 cm
+/// 的比例），取 0.008 → 1080p 约 ±10 px。
+const GUN_SWAY_BOB_M: f32 = 0.008;
+/// 前后摆幅（米）：枪随手臂前后拖拽。取侧向的一半（0.005）——沿视轴方向的位移
+/// 只改变成像大小，同样的米数在视觉上比侧向更抢眼，故幅值必须更小。
+const GUN_SWAY_FORE_M: f32 = 0.005;
+/// 侧向"惯性滞后"偏移（米）：与侧移速度同幅反号（向右跨步时枪相对身体留在后面），
+/// 这是 strafe 时唯一有重量感的线索。取侧向摆幅的 40%（0.004）——它可与步态侧摆
+/// 同相叠加，最坏合计 0.014 m（约 ±18 px），仍贴近旧实现意图中的 0.009 m 档；
+/// 再大就会盖过步态本身，左右跨步看着像"枪在横扫"。
+const GUN_SWAY_LEAN_M: f32 = 0.004;
+/// 速度→摆幅的 smoothstep 区间下界（m/s）：0.5 m/s 以下视为静止。
+/// 旧实现是 `speed > 0.6` 的**布尔**判据，速度在阈值附近逐帧来回穿越时
+/// 摆动偏移在"满幅"和"0"之间硬跳（跳变频率 = 帧率）→ 高频小振幅抖动 + 残影。
+const GUN_SWAY_SPEED_LO: f32 = 0.5;
+/// 速度→摆幅的 smoothstep 区间上界（m/s）：取 game.rs PLAYER_SPEED = 6.0，
+/// 即本作最高水平速度才饱和——摆幅因此严格有上界，且在开镜移速 3.9 m/s 时
+/// 自然落到 smoothstep=0.67 包络（叠加按轴 ADS 因子后侧向只剩 0.67×0.12≈8%）。
+/// 旧实现的幅值虽恒定但通断无界，起步瞬间从 0 跳到满幅。
+const GUN_SWAY_SPEED_HI: f32 = 6.0;
+/// 速度低通的时间常数（秒）。0.06 s ≈ 165 fps 下的 10 帧：足以抹掉逐帧位移噪声
+/// （玩家本作是**瞬时无惯性**位移——game.rs move_first_person 直接按 dt 改 pos，
+/// 所以按键的那一帧速度就从 0 跳到 6 m/s，低通是唯一的连续化手段），
+/// 又远小于一次落脚间隔（6 m/s 下 ≈0.5 s），不会让人感到"枪跟不上脚"。
+/// 超过 0.15 s 开始出现脱节感。
+const GUN_SWAY_SMOOTH_TAU: f32 = 0.06;
+/// 后坐冲量衰减时间常数（秒）。0.075 s → 单发在 0.2 s 内衰到 7%（视觉上一次
+/// 干脆的"上抬→回落"）；连发按 0.1 s 间隔时包络回不到 0，自然叠成持续抬升。
+/// 旧实现用 `(1-t)²` 抛物线 + 0.30 s 硬截止，且阻尼系数在 0.25 s 整点从 0.15
+/// 阶跃到 1.0 —— 两处都是位置不连续。
+const GUN_RECOIL_TAU: f32 = 0.075;
+/// 开火瞬间的摆动阻尼（连续量，随 kick 指数回升到 1.0）：0.45 = 枪在后坐的一瞬
+/// 摆幅降到 45%。旧实现是 0.15 → 1.0 的阶跃。
+const GUN_SWAY_FIRE_DAMP: f32 = 0.45;
+/// ADS（开镜）各轴的摆幅保留比例：侧向 12% / 上下 25% / 前后 15%。
+/// 机瞄贴腮时身体运动仍会传到手上传感器上，但必须显著小于腰射。
+const GUN_SWAY_ADS_SIDE: f32 = 0.12;
+const GUN_SWAY_ADS_BOB: f32 = 0.25;
+const GUN_SWAY_ADS_FORE: f32 = 0.15;
+/// 腰射锚距（米）：与 `fp_gun_matrix` 的 hip_pos.z 同值，改一处必须改两处。
+/// 它同时是「屏幕等幅」归一化的分母之一——视空间平移在屏幕上的位移
+/// ∝ offset / (锚距 × tan(fov/2))，故开镜（锚距 0.42 m、fov 55°）会把同样的
+/// offset 视觉放大 (0.60/0.42)×(tan35/tan27.5) = 1.43×1.35 ≈ **1.92 倍**。
+/// 不补这个几何增益，就出现"越是开镜精确瞄准、左右移动时枪甩得越凶"。
+const GUN_HIP_DEPTH_M: f32 = 0.60;
+/// tan(腰射半视角) —— FOV 70° 的一半 35° 的正切（tan 35° = 0.7002075）。
+/// 与 GUN_HIP_DEPTH_M 一起构成屏幕等幅基准；`gun_scale` 与摆动偏移共用
+/// 同一个 `fov_gain`，保证"模型缩放"和"摆动平移"两条通道对 FOV 的补偿完全一致
+/// （旧实现只有缩放补了 tan(fov/2)，平移没补——两条通道不一致就是 bug #2）。
+const GUN_HIP_HALF_TAN: f32 = 0.700_208;
+
+/// 🔴 **切枪动画**（2026-09-15）：切枪此前只是"禁止开火"的计时器，枪是直接跳变的。
+///
+/// 包络用 `sin(π·t)`：`t=0` 与 `t=1` 处都为 0、中点最大 —— **两端连续**是关键，
+/// 直接对 `t` 做线性（或对 `1-t` 做三角波）会在起止两端留下速度阶跃，
+/// 那正是本仓枪模历史上"残影/抖动"的成因（见 `GunSway` 上那段注释的同类教训）。
+///
+/// 幅值：0.18 m 下坠 + 12° 前倾 + 6° 侧转（视空间）。下坠量按 `screen_gain` 补偿，
+/// 与后坐/摆动走同一套换算，否则开镜切枪时视觉幅度会放大近 2 倍。
+const GUN_SWITCH_DROP_M: f32 = 0.18;
+const GUN_SWITCH_PITCH_RAD: f32 = 0.21; // ≈12°
+const GUN_SWITCH_ROLL_RAD: f32 = 0.10; // ≈6°
+
+/// 冲刺持枪姿态（2026-09-26 补）：冲刺时枪**压低 + 前倾 + 侧转**。
+///
+/// 为什么以前没有：摆动/后坐/切枪/ADS 都做了，唯独"按住 Shift 跑"这个**最常见**的状态
+/// 完全没有姿态变化 —— 玩家冲刺时枪仍端在瞄准线上，读起来像"滑行"而不是"奔跑"。
+/// 幅度取真实持枪的样子：0.10 m 下坠（视空间，走 `screen_gain` 补偿）、24° 前倾、
+/// 10° 侧转（枪身向身体中线内收）。这是**姿态**不是动画，靠 `GunSway::sprint` 的
+/// 指数低通平滑过渡（与速度包络同一套 τ），所以起止无位置跳变。
+const GUN_SPRINT_DROP_M: f32 = 0.10;
+const GUN_SPRINT_PITCH_RAD: f32 = 0.42; // ≈24°
+const GUN_SPRINT_ROLL_RAD: f32 = 0.18; // ≈10°
+
+/// 换弹动作（2026-09-26 补）：换弹时枪下沉、枪口下压、向身体侧倾，中点最大。
+/// 包络 = `reload_envelope(1 - progress)`：进度 1→0 的整段里**两端位移为 0**、中点为 1
+/// （与切枪同一套 `sin(π·p)` ⇒ 起止不出现位置跳变；该包络两端速度最大，
+/// 视觉上是"很快沉下去、再抬回来"）。
+/// 幅度 0.07 m / 17° / 8°：比切枪小一号（换弹是手里的动作，切枪是整支枪出画）。
+const GUN_RELOAD_DROP_M: f32 = 0.07;
+const GUN_RELOAD_PITCH_RAD: f32 = 0.30; // ≈17°
+const GUN_RELOAD_ROLL_RAD: f32 = 0.14; // ≈8°
+
+/// 静止呼吸微摆（2026-09-26 补）：站立不动时枪口极缓慢地画 ∞ 字（0.22 Hz），
+/// 幅值 2.2 mm / 0.02 rad。**只有"几乎不动"时才出现**（乘 `1 - 行走包络`），
+/// 且开镜时再乘 0.25 —— 否则瞄准时枪口在漂，精确射击就不可信。
+const GUN_IDLE_SWAY_M: f32 = 0.0022;
+const GUN_IDLE_ROLL_RAD: f32 = 0.020;
+const GUN_IDLE_HZ: f32 = 0.22;
+
+/// 静止呼吸微摆的**单位轨迹**（纯函数，可单测）：返回两轴偏移，各自在 `[-1, 1]`。
+///
+/// x 走 1× 频率、y 走 2× 且错开相位 ⇒ 枪口画一个极扁的"∞"字（而不是一条来回直线）。
+/// 有界性由 `sin` 保证，且**不含任何累积量** ⇒ 玩多久都不会漂（与 `GunSway::stride`
+/// 回绕是同一类考虑：相位必须有界）。
+fn idle_sway(clock: f32) -> (f32, f32) {
+    let w = clock * std::f32::consts::TAU * GUN_IDLE_HZ;
+    (w.sin(), (w * 2.0).sin() * 0.6)
+}
+
+/// `RV3D_GUN_DIAG=1`：每秒打一行枪姿态诊断（见 `fp_gun_matrix` 调用点的注释）。
+/// 关掉时零成本（只多一次已缓存的 bool 比较）。
+fn gun_diag_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RV3D_GUN_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+    })
+}
+
+/// 弹孔方片的边长（米）。marker 模板是 **±1 的单位盒** ⇒ 实例缩放 = **半幅**，所以这里
+/// 按 `DECAL_SIZE_M * 0.5` 缩放基向量，画出来正好是 8cm 见方的一块
+/// （障碍 marker 走的是另一条推导，见 `geom::Shape::template_half_extent`）。
+/// 再小：10m 外不足一个像素（等于没画）；再大：读起来像贴纸而不是弹孔。
+const DECAL_SIZE_M: f32 = 0.08;
+/// 弹孔厚度（米）。方片**埋进墙里一半、露出约 1cm**：共面贴片会与墙面打 z-fighting，
+/// 而整个浮在表面又会被看出是一块"贴上去的板"（侧壁在掠射角下可见）。
+const DECAL_THICK_M: f32 = 0.016;
+/// 方片中心沿法线的外移量（米）：正值 = 更凸出。取厚度的 1/4 ⇒ 露出 1.2cm、埋进 0.4cm。
+const DECAL_LIFT_M: f32 = DECAL_THICK_M * 0.25;
+
+/// 第一人称枪摆动状态。
+///
+/// 全部量在 `update()` 内按 delta_time 积分（`fp_gun_matrix()` 只读），原因是
+/// 旧实现在矩阵函数里就地用两个逐帧不连续的输入：
+/// ① `game.player_speed() > 0.6` 硬开关（原始瞬时速度，无任何平滑）；
+/// ② `sin(anim_clock * 7.5)` —— 相位参数随会话时长**无上界累积**，f32 尾数
+///    24 bit，anim_clock 到 ~2.4 h 后 `相位 × 7.5` 的 ulp 已与每帧相位增量同量级，
+///    sin 输出被量化 → 越玩越抖；且相位按时间而非行程推进，与帧率互相拍频。
+/// ③ `fire_damp` 0.15→1.0 阶跃。
+/// 新实现：相位按行程累积并恒定回绕到 [0, 2π)（参数有界 → 精度不衰减）；
+/// 速度经与帧率无关的指数低通（`x += (t-x)*(1-exp(-dt/τ))`）；幅值用 smoothstep
+/// 连续起落；后坐用连续指数包络。三者都满足"任意帧率下平滑且有界"。
+struct GunSway {
+    /// 上一帧玩家脚底世界坐标（用真实位移求速度，见 `update()` 里的说明）；
+    /// None = 尚未播种（启动首帧、瞬移/重生之后），此时不按位移伪造速度
+    prev_pos: Option<glam::Vec3>,
+    /// 平滑后的水平速度模长（m/s）→ 只驱动幅值包络
+    speed: f32,
+    /// 平滑后的侧向速度分量（+ = 向右），→ 驱动侧向"惯性滞后"偏移
+    strafe: f32,
+    /// 平滑后的前向速度分量（+ = 前进），→ 驱动前后拖拽偏移
+    fore: f32,
+    /// 步态相位（弧度，恒定回绕到 [0, 2π)）
+    stride: f32,
+    /// 后坐冲量包络 [0,1]：开火帧置 1，其后按 exp(-dt/τ) 连续衰减
+    kick: f32,
+    /// 冲刺姿态混合 [0,1]：按住 Shift 且真的在跑时收敛到 1，否则回 0。
+    /// 与速度同一套帧率无关低通 ⇒ 起止无阶跃（冲刺姿态不许"啪"地跳出来）。
+    sprint: f32,
+    /// 摆动总增益（RV3D_GUN_SWAY 覆盖，缺省 1.0；=0 可完全关闭摆动做 A/B 判定）
+    gain: f32,
+}
+
+impl GunSway {
+    fn new() -> Self {
+        Self {
+            prev_pos: None,
+            speed: 0.0,
+            strafe: 0.0,
+            fore: 0.0,
+            stride: 0.0,
+            kick: 0.0,
+            sprint: 0.0,
+            // 诊断门（与项目其它 RV3D_* 一致）：RV3D_GUN_SWAY=0 关闭全部枪摆动
+            gain: env_f32("RV3D_GUN_SWAY").unwrap_or(1.0).clamp(0.0, 3.0),
+        }
+    }
+
+    /// 下一帧不按位移伪造速度（重生/传送/切模式后用；`tick()` 会自动重新播种）
+    #[allow(dead_code)] // 预留：game.rs 侧提供显式传送事件时调用（当前由 2 m 瞬移保护兜底）
+    fn reset_motion(&mut self) {
+        self.speed = 0.0;
+        self.strafe = 0.0;
+        self.fore = 0.0;
+        self.prev_pos = None;
+    }
+
+    /// 每帧积分：`now_pos` 为玩家本帧脚底世界坐标，`right`/`fwd` 为相机基向量，
+    /// `fired` 为本帧是否击发，`sprinting` 为本帧是否处于冲刺（姿态包络目标），
+    /// `dt` 为本次 update 的帧时间（秒）。
+    fn tick(
+        &mut self,
+        dt: f32,
+        now_pos: glam::Vec3,
+        right: glam::Vec3,
+        fwd: glam::Vec3,
+        fired: bool,
+        sprinting: bool,
+    ) {
+        // 冲刺姿态低通：与速度用同一个 τ（帧率无关）。**放在瞬移保护之外** ——
+        // 重生/传送不该抹掉"我正按着 Shift 跑"这个姿态目标。
+        let sprint_a = 1.0 - (-dt / GUN_SWAY_SMOOTH_TAU).exp();
+        self.sprint += ((sprinting as u32 as f32) - self.sprint) * sprint_a;
+        if self.sprint < 1e-4 {
+            self.sprint = 0.0; // 收敛到精确 0：姿态项彻底不参与（也保证 A/B 可判定）
+        }
+        // 位移按水平面处理（y 是地形跟随，不属于步态）
+        let moved = self
+            .prev_pos
+            .map(|p| now_pos - p)
+            .unwrap_or(glam::Vec3::ZERO);
+        self.prev_pos = Some(now_pos);
+        let dxz = glam::Vec3::new(moved.x, 0.0, moved.z);
+        let dist = dxz.length();
+        // 瞬移保护：单帧 >2 m 只可能来自重生/传送/热重载（玩家最快 ~5 m/s，
+        // 6 ms 帧内 ≤3 cm）。当作不连续事件：速度归零，不吃这一帧的假速度。
+        if dist > 2.0 {
+            self.speed = 0.0;
+            self.strafe = 0.0;
+            self.fore = 0.0;
+        } else {
+            // 与帧率无关的指数低通：a = 1 - exp(-dt/τ)，30 fps 与 165 fps 下
+            // 同一段行程得到同一条速度曲线（旧实现直接取原始逐帧速度）
+            let a = 1.0 - (-dt / GUN_SWAY_SMOOTH_TAU).exp();
+            let inv = 1.0 / dt.max(1e-4);
+            self.speed += (dist * inv - self.speed) * a;
+            // 投影到相机水平基向量（分量式，避免构造 Vec3 的额外开销）
+            let v_strafe = (dxz.x * right.x + dxz.z * right.z) * inv;
+            let v_fore = (dxz.x * fwd.x + dxz.z * fwd.z) * inv;
+            self.strafe += (v_strafe - self.strafe) * a;
+            self.fore += (v_fore - self.fore) * a;
+            // 相位按**行程**推进，随后回绕：sin/cos 的参数恒在 [0, 2π)，
+            // 不会因长时间游玩而精度衰减；单帧推进量再受角速度上限约束，
+            // 于是摆频在任何速度/帧率组合下都有硬上界
+            let dphase = (dist * GUN_GAIT_PHASE_PER_M).min(dt * GUN_GAIT_MAX_RATE);
+            self.stride = (self.stride + dphase) % std::f32::consts::TAU;
+        }
+        // 后坐包络：击发帧置 1（连发不叠加超过 1，保证幅值有上界），随后连续指数衰减
+        if fired {
+            self.kick = 1.0;
+        }
+        self.kick *= (-dt / GUN_RECOIL_TAU).exp();
+        if self.kick < 1e-4 {
+            self.kick = 0.0; // 收敛到精确 0，省掉之后每帧的无穷次微小乘法
+        }
+    }
+}
+
+// ============================================================
+// 导入 GLB 枪模的顶点色烘焙（flat=3 直出通道）—— 2026-09-01 修"纯黑剪影"
+// ============================================================
+/// 参考反照率（线性空间）。0.24 的取值依据：本项目的 swapchain 首选
+/// `B8G8R8A8_SRGB`（renderer.rs pick_format），而枪模走 build.rs 片元着色器的
+/// `flat_flag > 2.5` 分支——顶点色**直出、不经曝光/色调映射/雾**，只被硬件做一次
+/// linear→sRGB 编码。0.24 × 满光照 1.45 ≈ 0.35 线性 → 屏显 sRGB ≈ 0.62（受光面，
+/// 读作亮钢）；0.24 × 环境下限 0.20 ≈ 0.048 线性 → 屏显 sRGB ≈ 0.24（背光面，
+/// 读作暗钢但不纯黑）。明暗比 7:1 是"能看出是金属"的最低要求，纯黑剪影时是 1:0.06。
+const GUN_REF_ALBEDO: f32 = 0.24;
+/// 亮度阈值（Rec.709 luma）：低于此值判定"资产没有可用基色"。
+/// 现存的 assets/guns/ak12.glb（所有武器 key 的公共回退）两个材质的
+/// baseColorFactor 实测为 0.0573 / 0.0768，且**无 COLOR_0 属性、无 baseColorTexture**
+/// ——Sketchfab 抠件的典型产物：颜色本在贴图里，导出时贴图被丢弃、只留下近乎纯黑的
+/// 调色因子。而 engine/assets.rs 的 GLB 解析器不读贴图 → 顶点色 = 0.057 →
+/// 0.057×(0.85..1.15) = 0.049..0.066，光照梯度被基色乘掉后只剩 ±0.017，
+/// 屏显即"无明暗的纯黑卡片"。0.18 定在"正常深灰武器漆(0.25+)与坏资产(0.08)"之间。
+const GUN_DARK_LUMA: f32 = 0.18;
+/// 环境光下限（朝下的面）：0.20 = 地面反弹，保留暗部形状而不落到 0
+const GUN_AMB_MIN: f32 = 0.20;
+/// 环境光上限（朝上的面）：0.42 = 天穹漫反射。上下比 2.1:1 提供"哪面朝上"的读感
+const GUN_AMB_MAX: f32 = 0.42;
+/// 主光漫反射增益：与环境项相加后总区间 [0.20, 1.47]（旧实现 [0.85,1.15]，
+/// 只有 1.35:1 的压缩动态范围，是"看不出明暗"的第二个原因）
+const GUN_DIFF_GAIN: f32 = 1.05;
+/// 高光 Phong 指数：26 → 亮带半角约 12°。金属件（机匣/枪管）需要一条窄而亮的
+/// 高光才能读出曲率；聚合物/木质件拿不到高光仍保持哑光
+const GUN_SPEC_POWER: f32 = 26.0;
+/// 高光增益（金属 F0 近似）：0.55 而非 1.0，避免直出通道下高光过曝成白块
+const GUN_SPEC_GAIN: f32 = 0.55;
+/// 主光方向（**烘焙局部系**：枪口 +Z、枪顶 +Y，见 load_gun_glb 的 align）。
+/// 与 `guns::assemble()` 用同一条光线，保证程序化枪模与导入枪模明暗方向一致。
+/// viewmodel 在局部系里相对屏幕固定，所以在局部系烘光 = 屏幕上固定方向来光。
+const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
+
+/// 把「材质基色 + 局部法线」烘成 flat=3 直出用的顶点色。
+///
+/// 三段式（全部只用 n·常量，无逐帧量 → 结果对同一资产确定不变）：
+/// ① 半兰伯特平方漫反射：`(0.5·N·L+0.5)²`。直接 `max(N·L,0)` 会把背光面全压成 0，
+///    而枪身有一半的面法线背离主光；平方后的半兰伯特在 N·L=0 处仍有 0.25 且斜率
+///    连续，明暗过渡不带"腰线"。
+/// ② 天穹环境：按 `n.y` 线性插值 [GUN_AMB_MIN, GUN_AMB_MAX]，让朝上的面亮、
+///    朝下的面暗（旧实现的 0.85 常数底噪正是把梯度抹平的东西）。
+/// ③ 金属高光：`(N·H)^26`，H 为"主光 + 镜头方向"的半角向量。镜头方向在烘焙局部系
+///    里是常量 -Z（fp_gun_matrix 的 rotY(π) 把局部 +Z 转到屏幕深处），所以可以烘。
+fn fp_gun_bake_color(n: glam::Vec3, raw: [f32; 3], albedo_boost: f32) -> [f32; 3] {
+    let key = GUN_KEY_DIR.normalize();
+    // 局部系里指向镜头的方向恒定（viewmodel 钉在屏幕上），故高光可烘焙
+    let half = (key + glam::Vec3::new(0.0, 0.0, -1.0)).normalize();
+    let ndl = n.dot(key);
+    let wrap = 0.5 * ndl + 0.5;
+    let diff = wrap * wrap;
+    let sky = (0.5 + 0.5 * n.y).clamp(0.0, 1.0);
+    let amb = GUN_AMB_MIN + (GUN_AMB_MAX - GUN_AMB_MIN) * sky;
+    let spec = n.dot(half).max(0.0).powf(GUN_SPEC_POWER) * GUN_SPEC_GAIN;
+    let shade = amb + GUN_DIFF_GAIN * diff + spec;
+    let a = [
+        raw[0] * albedo_boost,
+        raw[1] * albedo_boost,
+        raw[2] * albedo_boost,
+    ];
+    [
+        (a[0] * shade).clamp(0.0, 1.0),
+        (a[1] * shade).clamp(0.0, 1.0),
+        (a[2] * shade).clamp(0.0, 1.0),
+    ]
+}
+
+/// 游戏应用主管理结构
+struct GameApp {
+    /// `RV3D_SHOT_AT` 还没到点的时刻（升序）。空 = 不自动截图（默认）。
+    /// 用「逐帧取走已到点的」而不是「判等」—— 理由见 `take_due_shots` 的文档。
+    shot_pending: Vec<f32>,
+    /// 自动截图的计时起点（第一次渲染时锚定，见 `about_to_wait`）。
+    shot_t0: Option<Instant>,
+    /// 致命错误的原因。**非 None 表示这次不是正常退出** ——
+    /// 由 `event_loop.exit()` 只能走"正常"通道（`run_app` 返回 `Ok`），
+    /// 所以致命路径必须额外把原因记在这里，循环结束后据此非零退出。
+    /// 🔴 2026-10-03：`创建窗口失败` 与 `渲染器初始化失败` 原来只 `log::error!` + `exit()`，
+    /// 于是引擎打出「程序正常退出」并以 **0** 退出 —— 用户解包后跑错目录（缺 assets/mesh.spv）
+    /// 看到的就是这个。这是最容易被真人撞上的一类假绿灯（教训 46）。
+    fatal: Option<String>,
+    /// winit 窗口
+    window: Option<Window>,
+    /// Vulkan 渲染器
+    renderer: Option<Renderer>,
+    /// FPS 相机
+    camera: Camera,
+    /// 键盘按键状态
+    key_state: KeyState,
+    /// 🔴 2026-09-13 诊断：`CursorMoved` 到达/被吞/被判跳变 的计数，
+    /// 用于区分"鼠标事件没到"与"到了但被守卫丢掉"（见 `cam:` 日志行）。
+    cursor_evt_count: u64,
+    cursor_evt_eaten: u64,
+    cursor_evt_teleport: u64,
+    cursor_evt_last: (f64, f64),
+    /// 1x1 全透明光标（见 `resumed` 里的注释）。捕获时用它：屏幕上不显示箭头，
+    /// 同时让 winit 认为光标"未隐藏"，从而把指针限制在窗口内而不是钉成 1x1。
+    blank_cursor: Option<winit::window::CustomCursor>,
+    /// 鼠标左键是否按住（拖拽轨道旋转）
+    dragging: bool,
+    /// 鼠标右键是否按住（飞行模式拖拽转视角）
+    right_dragging: bool,
+    /// 开镜瞄准（右键按住；第一人称 FPS：准星收窄 + 枪模居中 + FOV 缩小）
+    ads_active: bool,
+    /// 开镜混合度 0..1（腰射→开镜 0.2s 指数平滑；驱动枪模锚点插值）
+    ads_blend: f32,
+    /// 最近一次开火时刻（anim_clock）。2026-09-01 起枪模后坐改由 `gun_sway.kick`
+    /// 的连续指数包络驱动（旧写法直接按此值算 `(1-t)²` 抛物线 + 0.30 s 硬截止，
+    /// 连发时每个周期都有位置阶跃）。本字段现在只被写入，留作击发时刻的观测点
+    // 只写不读，留给后坐/射速诊断挂点（2026-09-26 编译器复查：两种 profile 都不再为此告警
+    // —— `Debug` 派生算一次读取 ⇒ 压制已删；**字段本身保留**，三处写入的语义不动）
+    last_shot_at: f32,
+    /// 第一人称枪摆动状态（步态相位 + 低通速度 + 后坐包络），每帧在 `update()`
+    /// 里按 delta_time 积分，`fp_gun_matrix()` 只读 → 摆动与帧率无关且逐帧连续
+    gun_sway: GunSway,
+    /// 伤害飘字列表：(伤害, 剩余秒)；命中时 push，0.6s 淡出（塔克夫式受击反馈）
+    hit_damage_popups: Vec<(f32, f32)>,
+    /// 上一帧光标位置（屏幕坐标）
+    last_cursor: (f64, f64),
+    /// 上一帧时间戳（用于 delta_time 计算）
+    last_frame: Instant,
+    /// 上一帧 update+render 总耗时（微秒，性能日志用）
+    last_cycle_us: u64,
+    /// 采集模式帧率上限（0 = 不限；LLM 模式 90）
+    llm_cap_fps: f32,
+    /// 后台（窗口失焦）帧率上限（0 = 不额外限制；`RV3D_BG_FPS`，玩家路径由启动器设为 20）
+    /// —— 失焦后仍全速渲染会把 GPU 占满、把桌面合成挤到没余量（见 `effective_frame_cap`）
+    bg_cap_fps: f32,
+    /// 诊断用：强制按「未聚焦」处理（`RV3D_FORCE_UNFOCUSED=1`，仅用于在
+    /// 无人值守的探针里复现"后台跑游戏"的负载，正常路径恒为 false）
+    force_unfocused: bool,
+    /// 上一次打印过的有效帧率上限（变化时才打日志，避免每帧刷屏）
+    logged_cap_fps: f32,
+    /// 上一帧 update（逻辑）耗时（微秒，性能日志用）
+    last_update_us: u64,
+    /// 上一帧 render（渲染提交）耗时（微秒，性能日志用）
+    last_render_us: u64,
+    /// 是否请求开火（按住状态，Auto 模式持续开火；抬起复位）
+    fire_requested: bool,
+    /// 开火按下瞬间（edge 触发：Semi/Burst3 模式用；update 消费后复位）
+    fire_edge: bool,
+    /// 光标是否已捕获（Playing 下鼠标视角）
+    cursor_captured: bool,
+    /// 捕获模式是否为系统级 Locked（raw 相对增量驱动视角）；
+    /// false = 回退 Confined/无 grab，走绝对位置路径（WSLg/Xwayland 实测：
+    /// 真实物理鼠标只产生 CursorMoved 绝对位置，不产生 XI_RawMotion raw 事件）
+    cursor_locked: bool,
+    /// 锁定态观察窗：`(进入锁定态的时刻, 当时的 cursor_evt_count)`。
+    /// `None` = 不在观察中（非锁定态，或已有结论）。判定见 `LockObservation`。
+    ///
+    /// 为什么需要它：`set_cursor_grab(Locked)` 的 `Ok` **不等于锁生效**（Wayland 下
+    /// 指针尚未 enter 时它什么都没做也返回 `Ok`，且 winit 忽略合成器的确认事件），
+    /// 而失败的症状与"鼠标坏了"完全一样（零 raw 事件 ⇒ 视角不动）。
+    /// 唯一可信的判据是**行为证据**，所以必须真的去数一数增量有没有来。
+    lock_observe: Option<(Instant, u64)>,
+    /// 假成功时是否已补抓过一次（只补一次，见 `sync_cursor` 的 NoMotion 分支）
+    lock_retried: bool,
+    /// 假成功告警是否已发过（一次性，不刷屏）
+    lock_fake_warned: bool,
+    /// 绝对位置路径：是否已收到首个真实指针位置基准（捕获瞬间未知指针位置，
+    /// 首个事件只作基准，避免把"捕获前指针到中心差量"当视角位移）
+    abs_baseline_valid: bool,
+    /// 窗口是否聚焦（失焦时释放捕获，防止卡视角）
+    focused: bool,
+    /// 捕获瞬间回中 warp 的回声吞噬窗口：recenter 后 150ms 内到达的下一个
+    /// CursorMoved / DeviceEvent::MouseMotion 视为 warp 回声（只作新基准、
+    /// 不应用视角位移），防止把"捕获前光标到窗口中心的差量"当成视角位移。
+    recenter_pending_until: Option<Instant>,
+    /// 上次相机参数日志时间（1 秒一条，冒烟/调试用）
+    last_cam_log: Instant,
+    /// 游戏运行时中枢（物理/武器/AI/UI/音频/网络）
+    game: Game,
+    /// 程序是否正在运行
+    running: bool,
+    /// 事件循环代理（菜单点击退出用：请求事件循环退出）
+    event_proxy: Option<winit::event_loop::EventLoopProxy<()>>,
+    /// 配置中是否显式保存过分辨率（false = 首次运行，窗口创建时按显示器宽高比选默认）
+    resolution_explicit: bool,
+    /// NPC 动画时钟（秒，每帧累加 delta_time；驱动步态/后坐相位）
+    anim_clock: f32,
+    /// 上一帧存活 NPC 快照：id → (位置, 朝向, 阵营色)（尸体跟踪：本帧消失的 id 记入 corpses）
+    last_npc_snapshot: std::collections::HashMap<usize, ([f32; 3], f32, [f32; 4])>,
+    /// 上一帧 FPS（性能日志用）
+    last_fps: f64,
+    /// 上一帧的**真实帧间隔**（微秒，未夹取）。
+    /// 为什么要存成字段：算 dt 的地方与 `render()` 是**两个方法**，而帧间隔只有前者知道。
+    /// 用途仅限性能日志的 `dt_us` 列（口径见 `perf_log.rs`：帧率本身按窗口算，不靠这个值）。
+    frame_dt_us: u64,
+    /// 上次打印 `cull-diag:` 的时刻（`RV3D_CULL_DIAG=1`，默认关掉时这个字段只被读一次/秒）
+    last_cull_diag: std::time::Instant,
+    /// 上次打印 `gundiag:` 的时刻（`RV3D_GUN_DIAG=1`，同上）
+    last_gun_diag: std::time::Instant,
+    /// 倒地尸体：(位置, 朝向, 阵营色, 已存留秒数)；上限 20 具，超过 10 秒消退
+    corpses: Vec<([f32; 3], f32, [f32; 4], f32)>,
+    /// 枪口焰/弹壳粒子（0=枪口焰无重力淡出，1=弹壳重力落地）；渲染走 emissive 通道
+    particles: Vec<Particle>,
+    /// 性能日志（每次启动一份，logs/perf_*.log）
+    perf_log: Option<perf_log::PerfLog>,
+    /// 命令输入窗口是否打开（Enter 开关，Minecraft 风格左下角输入框）
+    command_open: bool,
+    /// 枪械检视模式（RV3D_INSPECT=武器编号 1-35）：只展示枪模，Orbit 相机拖拽查看
+    inspect_weapon: Option<usize>,
+    inspect_armed: bool,
+    cam_logged: bool,
+    /// RV3D_CAM 调试机位（飞行模式固定位姿；地图/场景检查用）
+    cam_override: Option<(glam::Vec3, f32, f32)>,
+    /// 命令输入缓冲（当前只接受数字，回车切换武器）
+    command_buf: String,
+    /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
+    gun_mesh_cache: Option<(String, crate::engine::guns::GunMesh)>,
+    /// 导入的 GLB 枪模缓存（按武器 key：assets/guns/{key}.glb → 顶点；无则该武器回退程序化枪模）
+    gun_glbs: std::collections::HashMap<String, Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)>>,
+    /// GLB 道具网格套件（懒加载一次；None = 还没尝试加载）。摆放列表在 LevelMap::props 上，
+    /// 但那份列表只存下标，网格本体归这里——重载地图不必重新解析 24 个 GLB。
+    prop_set: Option<engine::props::PropSet>,
+    /// 上次上传道具几何时的地图代号；哨兵值保证首帧一定上传一次。
+    prop_map_gen: u64,
+    /// 延迟自动切枪（测试用）：(目标武器号, 触发时刻)
+    switch_weapon_at: Option<(usize, f32)>,
+}
+
+/// 视觉粒子：枪口焰（无重力，快速淡出）+ 弹壳（重力下落，落地消散）
+struct Particle {
+    pos: [f32; 3],
+    vel: [f32; 3],
+    age: f32,
+    life: f32,
+    size: f32,
+    tint: [f32; 4],
+    kind: u8, // 0=枪口焰 1=弹壳
+}
+
+impl GameApp {
+    /// 创建游戏应用实例
+    fn new() -> Self {
+        let fatal = None;
+        // 取证开关：`RV3D_SHOT_AT=5,15,30` ⇒ 进游戏后第 5/15/30 秒各截一张。
+        // 不设 = 空列表 = 逐帧那次判断直接短路，玩家路径零开销、逐字节不变。
+        let shot_pending = std::env::var("RV3D_SHOT_AT")
+            .ok()
+            .map(|v| parse_shot_at(&v))
+            .unwrap_or_default();
+        if !shot_pending.is_empty() {
+            log::info!("自动截图已安排（RV3D_SHOT_AT）：{:?} 秒", shot_pending);
+        }
+        let shot_t0 = None;
+        let mut game = Game::new();
+        // 加载持久化配置（键位/音量/灵敏度）；文件缺失回退默认，见 config.rs
+        let cfg = config::load();
+        game.hud.volume = cfg.volume;
+        game.hud.music_volume = cfg.music_volume;
+        game.hud.sensitivity = cfg.sensitivity;
+        game.hud.key_bindings = cfg.bindings;
+        // PT 曝光标定值：配置文件 → （可被）RV3D_PT_EXPOSURE 覆盖做 A/B。**它不是玩家选项**，
+        // 所以停在配置层与调试开关层，不进设置面板（理由见 ray_tracer.rs 的常量注释）。
+        game.hud.pt_exposure = cfg.pt_exposure;
+        if let Ok(v) = std::env::var("RV3D_PT_EXPOSURE") {
+            if let Ok(v) = v.trim().parse::<f32>() {
+                game.hud.pt_exposure = v.clamp(
+                    engine::ray_tracer::PT_EXPOSURE_MIN,
+                    engine::ray_tracer::PT_EXPOSURE_MAX,
+                );
+                log::info!("PT 曝光被 RV3D_PT_EXPOSURE 覆盖为 {:.3}", game.hud.pt_exposure);
+            } else {
+                log::warn!("RV3D_PT_EXPOSURE 不是数字，忽略：{v}");
+            }
+        }
+        // 分辨率索引：显式保存过 → 用配置值；首次运行 → 0（resumed() 按显示器宽高比重选）
+        game.hud.resolution_index = if cfg.resolution_explicit {
+            RESOLUTIONS
+                .iter()
+                .position(|&r| r == cfg.resolution)
+                .unwrap_or(0) as u8
+        } else {
+            0
+        };
+        // 画质索引与 ui.rs 选项表对齐；配置异常值回退默认
+        game.hud.quality_index = cfg.quality.min(2) as u8;
+        Self {
+            shot_pending,
+            shot_t0,
+            fatal,
+            window: None,
+            renderer: None,
+            camera: Camera::new(),
+            key_state: KeyState::new(),
+            cursor_evt_count: 0,
+            cursor_evt_eaten: 0,
+            cursor_evt_teleport: 0,
+            cursor_evt_last: (0.0, 0.0),
+            blank_cursor: None,
+            dragging: false,
+            right_dragging: false,
+            ads_active: false,
+            ads_blend: 0.0,
+            last_shot_at: -1.0,
+            gun_sway: GunSway::new(),
+            hit_damage_popups: Vec::new(),
+            last_cursor: (0.0, 0.0),
+            last_frame: Instant::now(),
+            last_cycle_us: 0,
+            llm_cap_fps: {
+                // 全局帧率上限（2026-08-23 防 GPU 驻停留态 device lost）：
+                // RV3D_FPS 覆盖；默认 240；LLM 采集模式 90（留 GPU 余量）
+                let llm_on = std::env::var("RV3D_LLM")
+                    .map(|v| !(v.is_empty() || v == "0" || v == "off"))
+                    .unwrap_or(false);
+                // 2026-08-28 实测：128v128 无上限 311fps @99% GPU；默认 300（LLM 120）
+                let cap = env_f32("RV3D_FPS").unwrap_or(if llm_on { 120.0 } else { 300.0 });
+                cap.max(20.0)
+            },
+            // 0 = 引擎默认不限制后台帧率（压测/采集路径逐字节不变）；
+            // 玩家路径由 SteelFront.bat 设 RV3D_BG_FPS=20（见 there 的注释与 AGENTS 铁律 B）
+            bg_cap_fps: env_f32("RV3D_BG_FPS").unwrap_or(0.0).max(0.0),
+            force_unfocused: env_truthy("RV3D_FORCE_UNFOCUSED"),
+            logged_cap_fps: -1.0,
+            last_update_us: 0,
+            last_render_us: 0,
+            fire_requested: false,
+            fire_edge: false,
+            cursor_captured: false,
+            cursor_locked: false,
+            lock_observe: None,
+            lock_retried: false,
+            lock_fake_warned: false,
+            abs_baseline_valid: false,
+            // 必须从 false 起步，由 WindowEvent::Focused 驱动。
+            // 写成 true 会让 sync_cursor 的 `want` 从第 1 帧就成立：
+            // winit 只在收到 WM_SETFOCUS 时才发 Focused(true)，所以窗口若是被
+            // 别的程序占着前台（启动瞬间很常见），本进程根本收不到该事件、
+            // 也不会收到 Focused(false) —— 于是游戏在"自认为有焦点"的状态下
+            // ClipCursor 把指针钉成 1×1，用户看到的就是整台机器像死机。
+            focused: false,
+            recenter_pending_until: None,
+            last_cam_log: Instant::now(),
+            game,
+            running: true,
+            event_proxy: None,
+            resolution_explicit: cfg.resolution_explicit,
+            anim_clock: 0.0,
+            last_npc_snapshot: std::collections::HashMap::new(),
+            last_fps: 0.0,
+            frame_dt_us: 0,
+            last_cull_diag: std::time::Instant::now(),
+            last_gun_diag: std::time::Instant::now(),
+            corpses: Vec::new(),
+            particles: Vec::new(),
+            perf_log: None,
+            command_open: false,
+            // 检视模式：--inspect=N 或 --inspect N 命令行参数优先，其次 RV3D_INSPECT 环境变量
+            inspect_weapon: {
+                let mut args = std::env::args().skip(1);
+                let mut parsed: Option<usize> = None;
+                while let Some(a) = args.next() {
+                    if let Some(v) = a.strip_prefix("--inspect=") {
+                        parsed = v.parse().ok();
+                    } else if a == "--inspect" {
+                        parsed = args.next().and_then(|v| v.parse().ok());
+                    }
+                }
+                parsed
+                    .or_else(|| {
+                        std::env::var("RV3D_INSPECT")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok())
+                    })
+                    .filter(|&n| (1..=35).contains(&n))
+            },
+            inspect_armed: false,
+            cam_logged: false,
+            cam_override: std::env::var("RV3D_CAM").ok().and_then(|s| {
+                let mut it = s.split(':');
+                let _mode = it.next()?; // 模式标记（fly）
+                let pos = it.next()?.trim();
+                let rot = it.next()?.trim();
+                let p: Vec<f32> = pos.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                let r: Vec<f32> = rot.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                if p.len() == 3 && r.len() == 2 {
+                    Some((
+                        glam::Vec3::new(p[0], p[1], p[2]),
+                        r[0].to_radians(),
+                        r[1].to_radians(),
+                    ))
+                } else {
+                    None
+                }
+            }),
+            command_buf: String::new(),
+            gun_mesh_cache: None,
+            gun_glbs: std::collections::HashMap::new(),
+            prop_set: None,
+            // 哨兵：保证第一帧就上传一次道具几何
+            prop_map_gen: u64::MAX,
+            switch_weapon_at: None,
+        }
+    }
+
+    /// 更新逻辑（每帧调用）
+    fn update(&mut self) {
+        // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。
+        let npc_cam = std::env::var("RV3D_NPC_CAM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        // RV3D_CAM=fly:x,y,z:yaw_deg,pitch_deg：调试固定机位（地图/场景检查用）
+        // 两个变量都给时**必须一起进这个分支**（否则 cam_override 为 None 时分支根本不跑），
+        // 且 NPC 机位要在 cam_override **之后**应用才不会被覆盖。
+        if self.cam_override.is_some() || npc_cam.is_some() {
+            // 仍推进帧时间/HUD FPS（避免调试机位下 HUD 恒 0 显像为“卡死”）
+            let now = Instant::now();
+            let dt = now.duration_since(self.last_frame).as_secs_f32();
+            self.last_frame = now;
+            if dt > 1e-6 {
+                self.last_fps = 1.0 / dt.min(0.1) as f64;
+            }
+            self.anim_clock += dt.min(0.1);
+            self.camera.mode = CameraMode::Flight;
+            // RV3D_NPC_CAM=<i>：把调试机位**吸附到第 i 个 NPC 的斜前方**，坐标由程序算。
+            // 存在的理由：我按 `RV3D_NPC_POS` 打出的坐标手算过 13 次机位，全部失败
+            // （见 docs/PROGRESS.md 第 8–16 轮）。这些坐标程序本来就有 —— 该由程序算，
+            // 不该由我猜。`pitch` 取正 = 低头（与鼠标 dy>0 同号，见铁律 C）。
+            if let Some((p, yaw, pitch)) = self.cam_override {
+                self.camera.set_flight_pos(p);
+                self.camera.yaw = yaw;
+                self.camera.pitch = pitch;
+            }
+            // 🔴 NPC 机位**必须放在 cam_override 之后**：否则同时给 `RV3D_CAM` 时，
+            // 上面那段 fly: 会把它整个覆盖掉 —— 第 16 轮就是这么白跑一次的
+            // （无告警、没报错，画面一直是 fly: 那个远景）。
+            if let Some(i) = npc_cam {
+                // 🔴 本分支的 early-return **早于** `update()` 里调用 `on_any_key()` 的
+                // autostart 段 ⇒ 不补这一步，游戏会停在菜单态、**NPC 永远不会生成**。
+                // 13 次取景失败里有相当一部分就是这个（我一直在对着没有士兵的世界摆机位）。
+                if self.game.state() == GameState::StartMenu {
+                    self.game.on_any_key(&self.camera.position());
+                }
+                match self.game.npcs.get(i) {
+                    Some(n) => {
+                        // **由程序挑一个不被墙挡的方向**：四个正交方向各 4m 做可站立判定，
+                        // 取第一个通过的。手算方向失败过 13 次，而判据本来就在引擎里
+                        // （`GameState::standable`，与单位能否移动同一条口径）。
+                        // 偏移量与 yaw 的对应：forward = (-sin, 0, -cos) ⇒ 相机在 +Z 看 -Z 时 yaw=0。
+                        const DIRS: [(f32, f32, f32); 4] = [
+                            (0.0, 4.0, 0.0),
+                            (0.0, -4.0, 180.0),
+                            (4.0, 0.0, 90.0),
+                            (-4.0, 0.0, -90.0),
+                        ];
+                        let (bx, bz) = (n.position[0], n.position[2]);
+                        // 判据从"一个点"升级为"**一条线**"：沿 相机→NPC 线段均匀取 6 个采样点，
+                        // 全部可站立才接受该方向。只测相机那一格是不够的 —— 墙可以横在相机与
+                        // NPC 之间，相机站得再合法也看不见人（第 17 轮定位到的缺口）。
+                        let los_clear = |ox: f32, oz: f32| -> bool {
+                            (1..=6).all(|k| {
+                                let f = k as f32 / 7.0;
+                                self.game.standable(bx + ox * f, bz + oz * f)
+                            })
+                        };
+                        let (dx, dz, yaw) = DIRS
+                            .iter()
+                            .copied()
+                            .find(|(dx, dz, _)| los_clear(*dx, *dz))
+                            .unwrap_or((0.0, 4.0, 0.0));
+                        self.camera
+                            .set_flight_pos(glam::Vec3::new(bx + dx, n.position[1] + 1.6, bz + dz));
+                        self.camera.yaw = yaw.to_radians();
+                        self.camera.pitch = 10.0_f32.to_radians();
+                        if std::env::var("RV3D_NPC_POS").is_ok() {
+                            // 假设验证（第 21 轮）：NPC 的 y 恒为 0，而该处地形可能高于 0
+                            // ⇒ 士兵被地形埋掉。用**与地形渲染同一个** `terrain_height`，
+                            // 不另写一套判据。差 > 1m 即假设成立。
+                            let th = crate::engine::renderer::terrain_height(bx, bz);
+                            // 一致性对照（第 24 轮）：在**同一组采样点**上各跑一次
+                            // `standable`（导航网格）与 `point_in_body`（建筑刚体 AABB）。
+                            // 两者不一致 ⇒ 导航网格缺建筑，也就是未结案 4 的根因，
+                            // 同时解释了"六个采样点全 standable 却仍看不到人"。
+                            let (mut n_nav, mut n_body, mut n_mismatch) = (0u32, 0u32, 0u32);
+                            for k in 1..=6 {
+                                let f = k as f32 / 7.0;
+                                let (px, pz) = (bx + dx * f, bz + dz * f);
+                                let nav = self.game.standable(px, pz);
+                                let body = self.game.point_in_body(px, 1.0, pz);
+                                if nav {
+                                    n_nav += 1;
+                                }
+                                if body {
+                                    n_body += 1;
+                                }
+                                if nav && body {
+                                    n_mismatch += 1;
+                                }
+                            }
+                            // 最后一道未验证环节：把**相机自己的读数**打出来。
+                            // 前面所有推理都建立在"机位就是 (bx+dx, +1.6, bz+dz)"这个假设上，
+                            // 而它是本轮唯一还没被验证过的东西（pitch 符号、NPC 是否生成、
+                            // 是否被埋、是否尸体、是否有墙 —— 都已逐个否掉）。
+                            let cp = self.camera.position();
+                            let cf = self.camera.forward();
+                            log::info!(
+                                "npc_cam: 目标 #{} npc=({:.1},{:.1},{:.1}) hp={:.0} state={:?} 地形高={th:.1} 机位=({:.1},{:.1},{:.1}) offset=({dx:.0},{dz:.0}) | 采样6点: 导航可走={n_nav} 建筑体内={n_body} 两者矛盾={n_mismatch} | 相机读数=({:.1},{:.1},{:.1}) 朝向=({:.2},{:.2},{:.2})",
+                                n.id,
+                                n.position[0], n.position[1], n.position[2],
+                                n.hp,
+                                n.state_machine.state(),
+                                bx + dx, n.position[1] + 1.6, bz + dz,
+                                cp.x, cp.y, cp.z,
+                                cf.x, cf.y, cf.z
+                            );
+                            // 🔴 2026-09-12 第④条补：**离相机最近的 3 个 NPC**。
+                            // 理由：`npc=` 与 `机位=` 两条读数各自都对（#8 在 x=65.0，
+                            // 机位在 x=61.0，朝向 +X），但实机截图里 4m 正前方**没有士兵**，
+                            // 画面里那个人在 ~19m 外。两者不能同时成立 ⇒
+                            // 直接问"相机附近到底有没有人"，而不是继续推坐标。
+                            let mut near: Vec<(f32, usize)> = self
+                                .game
+                                .npcs
+                                .iter()
+                                .enumerate()
+                                .map(|(k, q)| {
+                                    let d = glam::Vec3::new(
+                                        q.position[0] - cp.x,
+                                        q.position[1] - cp.y,
+                                        q.position[2] - cp.z,
+                                    )
+                                    .length();
+                                    (d, k)
+                                })
+                                .collect();
+                            near.sort_by(|a, b| {
+                                a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let s: Vec<String> = near
+                                .iter()
+                                .take(3)
+                                .map(|(d, k)| format!("#{k} d={d:.1}m"))
+                                .collect();
+                            log::info!("npc_cam: 距相机最近 3 人 = {}", s.join(" / "));
+                        }
+                    }
+                    // 找不到**必须**打日志。本轮的核心教训就是"静默失败"：相机没生效、
+                    // NPC 不存在、pitch 反了，三者都只有画面能看出来，而画面又要靠它们
+                    // 才能取到 —— 于是必须让失败自己浮出来。
+                    None => log::warn!(
+                        "npc_cam: 第 {i} 个 NPC 不存在（当前 {} 个），机位未覆盖",
+                        self.game.npcs.len()
+                    ),
+                }
+            }
+            // HUD 那行大号青色 FPS 由 `game.update()` 里的滑动窗口算出（game.rs
+            // `self.hud.fps = frames / window_secs`），而本分支直接 return、不跑玩法帧，
+            // 于是 hud.fps 永远停在初值 0 —— 表现成"游戏 0 帧"，而同一帧 HUD 上
+            // `VULKAN: 150 FPS`（渲染器自己的计数）和 logs 里的 fps=146~152 都是正常的。
+            // 调试机位下用刚量到的 last_fps 直接补上，别让取证截图显示一个假 0。
+            self.game.hud.fps = self.last_fps as f32;
+            // 🔴 剔除眼位必须在这里设（2026-09-12 第④条修）：**本分支下面立刻 return**，
+            // 放在常规更新路径里的赋值根本跑不到（第一次就栽在这，实测 npc 仍是 288）。
+            // `npc_occluded` 原本硬取 `player_eye()`；调试相机移离玩家后，
+            // "相机眼前的人"会被按"从玩家位置看不到"整片剔掉。
+            self.game.cull_eye_override = Some(self.camera.position());
+            return;
+        }
+        // 枪械检视模式：不跑游戏逻辑，仅 Orbit 相机绕枪模（鼠标拖拽旋转/滚轮缩放，
+        // 事件处理已有 orbit 控制）；首次进入设置相机朝向。
+        // 用 `if let` 绑住槽位号，替掉原来"外层 is_some() + 日志里 unwrap()"的写法：
+        // 那对组合靠两处代码之间的距离保证不 panic，改一处就可能漏另一处。
+        if let Some(inspect_w) = self.inspect_weapon {
+            self.camera.mode = CameraMode::Orbit;
+            if !self.inspect_armed {
+                self.inspect_armed = true;
+                self.camera.target = glam::Vec3::new(0.0, 1.0, 0.0);
+                self.camera.yaw = std::f32::consts::FRAC_PI_2; // 正侧视：枪口朝左
+                self.camera.pitch = 0.08;
+                self.camera.fov = 45.0_f32.to_radians();
+                // 产品照式取景：远距离 + 长焦（弱透视，近远端大小接近，同真枪照片）
+                self.camera.distance = 2.0;
+                if let Some(n) = self.inspect_weapon {
+                    if let Some(spec) = crate::engine::weapon_data::spec_by_number(n) {
+                        if let Some(gm) = crate::engine::guns::gun_mesh_by_key(spec.key) {
+                            let mut mn = [f32::MAX; 3];
+                            let mut mx = [f32::MIN; 3];
+                            for v in &gm.verts {
+                                for i in 0..3 {
+                                    mn[i] = mn[i].min(v.pos[i]);
+                                    mx[i] = mx[i].max(v.pos[i]);
+                                }
+                            }
+                            let e = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+                            let diag = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+                            // 距离 = 4.5× 对角线：近端/远端大小差 <25%（之前 1.36m 时差达 2 倍，
+                            // 广角微距式变形就是 1-4/1-5 里“这不像枪”的根源）
+                            let dist = (diag * 4.5).max(2.0);
+                            self.camera.distance = dist;
+                            // 长焦 fov：按距离反推，保证整枪入画（1.15 余量）
+                            self.camera.fov = (2.0 * ((diag * 0.5 * 1.15) / dist).atan())
+                                .to_degrees()
+                                .to_radians();
+                            log::info!(
+                                "inspect: bbox=[{:.3},{:.3},{:.3}]..[{:.3},{:.3},{:.3}] ext=[{:.3},{:.3},{:.3}] diag={:.3} dist={:.3}",
+                                mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
+                                e[0], e[1], e[2], diag, self.camera.distance
+                            );
+                        }
+                    }
+                }
+                log::info!(
+                    "inspect: 枪械检视模式（武器 #{}）——拖拽旋转 / 滚轮缩放",
+                    inspect_w
+                );
+            }
+            return;
+        }
+        // RV3D_AUTOSTART=1：测试用自动开始（绕过键盘，进 Playing 复现/冒烟）
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static AUTO_STARTED: AtomicBool = AtomicBool::new(false);
+        if !AUTO_STARTED.swap(true, Ordering::SeqCst)
+            && env_truthy("RV3D_AUTOSTART")
+        {
+            let st = self.game.state();
+            if st == GameState::StartMenu || st == GameState::LoadingMap {
+                log::info!("autostart: RV3D_AUTOSTART=1 自动开始");
+                self.game.on_any_key(&self.camera.position());
+            }
+            // RV3D_SWITCH_WEAPON=n：进入后自动切到 n 号武器（复现切枪崩溃用）；
+            // RV3D_SWITCH_WEAPON_AFTER=秒：延迟切枪（模拟玩一会儿再切）
+            let after = env_f32("RV3D_SWITCH_WEAPON_AFTER");
+            let (target, switch_at) = match std::env::var("RV3D_SWITCH_WEAPON") {
+                Ok(n) => (n.parse::<usize>().ok(), after.unwrap_or(0.0)),
+                Err(_) => (None, 0.0),
+            };
+            if let Some(n) = target {
+                if switch_at <= 0.0 {
+                    log::info!("autostart: 自动切枪 #{}", n);
+                    self.game.switch_weapon(n.saturating_sub(1));
+                } else {
+                    self.switch_weapon_at = Some((n, self.anim_clock + switch_at));
+                }
+            }
+        }
+        // 延迟自动切枪（测试用）
+        if let Some((n, at)) = self.switch_weapon_at {
+            if self.anim_clock >= at && self.game.state() == GameState::Playing {
+                log::info!("autostart: 延迟切枪 #{}", n);
+                self.game.switch_weapon(n.saturating_sub(1));
+                self.switch_weapon_at = None;
+            }
+        }
+        // RV3D_DIAG_NPC_FRONT=1：把 npc[0] 放到玩家正前方 20m 固定（弹道诊断隔离实验）
+        static DIAG_NPC_FRONT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DIAG_NPC_FRONT.get_or_init(|| {
+            env_truthy("RV3D_DIAG_NPC_FRONT")
+        }) && self.game.state() == GameState::Playing
+        {
+            // 相机 yaw=0 时 forward 方向（与 fire 弹道同源），NPC 放前方 20m
+            let fwd = self.camera.forward();
+            let pos = self.camera.position();
+            let nx = pos.x + fwd.x * 20.0;
+            let nz = pos.z + fwd.z * 20.0;
+            let ny = crate::engine::renderer::terrain_height_at(nx, nz);
+            self.game.diag_place_npc([nx, ny, nz]);
+        }
+        // RV3D_AUTOFIRE=1：自动开火（诊断射击链路：fire 是否发射、弹道是否命中）
+        static AUTO_FIRE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *AUTO_FIRE.get_or_init(|| env_truthy("RV3D_AUTOFIRE"))
+            && self.game.state() == GameState::Playing
+        {
+            self.fire_requested = true;
+        }
+        // 同步光标捕获状态（Playing + 聚焦 = 捕获；菜单/结算/失焦 = 释放）
+        self.sync_cursor();
+
+        // 计算帧时间差
+        let now = Instant::now();
+        let delta_time = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+        // 未夹取的**真实帧间隔**（微秒）：只喂给性能日志。上面那句 `min(0.1)` 是给玩法用的
+        // （防卡顿大跳），拿它去量帧率会把 1 秒的长卡记成 100ms；而窗口帧率本身由
+        // `perf_log` 按"窗口内帧数 / 窗口时长"算，不受这里影响。
+        self.frame_dt_us = (delta_time * 1e6) as u64;
+
+        // 确保 delta_time 不会太大（防止卡顿时大跳）
+        let delta_time = delta_time.min(0.1);
+        if delta_time > 1e-6 {
+            self.last_fps = 1.0 / delta_time as f64;
+        }
+        // NPC 动画时钟（步态/后坐相位）与尸体老化
+        self.anim_clock += delta_time;
+        for c in self.corpses.iter_mut() {
+            c.3 += delta_time;
+        }
+        self.corpses.retain(|c| c.3 < 10.0); // 尸体 10 秒后消退
+        while self.corpses.len() > 20 {
+            self.corpses.remove(0); // 上限 20 具（NPC 槽位容量见 renderer.rs::MAX_NPC_INSTANCES = 3072）
+        }
+        // 粒子推进：弹壳重力下落 + 落地停止；超龄移除
+        for p in self.particles.iter_mut() {
+            p.age += delta_time;
+            if p.kind == 1 {
+                p.vel[1] -= 18.0 * delta_time; // 弹壳重力
+                p.pos[0] += p.vel[0] * delta_time;
+                p.pos[1] += p.vel[1] * delta_time;
+                p.pos[2] += p.vel[2] * delta_time;
+                if p.pos[1] <= 0.05 {
+                    p.pos[1] = 0.05;
+                    p.vel = [0.0, 0.0, 0.0];
+                    p.life = p.life.min(0.4); // 落地后最多停留 0.4s
+                }
+            }
+        }
+        self.particles.retain(|p| p.age < p.life);
+        while self.particles.len() > 48 {
+            self.particles.remove(0); // 上限 48 颗粒子
+        }
+
+        // 更新相机（双模式：轨道/飞行，含惯性速度与边界 clamp）
+        self.camera.update(&self.key_state, delta_time);
+        // 开镜瞄准：FOV 平滑过渡（70° 腰射 → 55° 开镜，步枪 ADS 轻微收窄而非狙击 zoom）
+        // + 锚点混合度（枪模腰射右下 → 开镜居中，0.2s 指数平滑）
+        let ads_target = if self.ads_active {
+            55.0_f32.to_radians()
+        } else {
+            70.0_f32.to_radians()
+        };
+        let fov_delta = ads_target - self.camera.fov;
+        if fov_delta.abs() > 1e-4 {
+            self.camera.fov += fov_delta * (1.0 - (-10.0 * delta_time).exp());
+        }
+        let ads_blend_target = if self.ads_active { 1.0 } else { 0.0 };
+        self.ads_blend +=
+            (ads_blend_target - self.ads_blend) * (1.0 - (-10.0 * delta_time).exp());
+        // 开镜状态硬化：非 Playing/菜单/设置打开时强制复位（防右键状态卡死 → 准星变小/消失）
+        let ads_valid = self.ads_active
+            && self.camera.mode == CameraMode::FirstPerson
+            && self.game.state() == GameState::Playing
+            && !self.game.settings_open()
+            && !self.game.hud.esc_menu_open;
+        self.game.hud.ads = ads_valid;
+        // 🔴 剔除眼位（2026-09-12 第④条修）：`npc_occluded` 原本硬取 `player_eye()`。
+        // 正常玩法相机就在玩家眼位 ⇒ 下面的距离判定为 0 ⇒ **恒为 None，行为完全不变**。
+        // 只有 `RV3D_CAM` / `RV3D_NPC_CAM` 把相机移离玩家时（> 1m）才改用相机 ——
+        // 否则"相机眼前的人"会被按"从玩家位置看不到"整片剔掉
+        // （实测关剔除前 npc=288 ≈16 人，开后 4590 = 255 人 × 18 段）。
+        let cam_pos = self.camera.position();
+        let eye_pos = self.game.player_eye();
+        self.game.cull_eye_override = if cam_pos.distance(eye_pos) > 1.0 {
+            Some(cam_pos)
+        } else {
+            None
+        };
+        // 小地图朝向（旋转地图使玩家前方朝上）
+        self.game.hud.mm_yaw = self.camera.yaw;
+        if !ads_valid {
+            self.ads_active = false;
+        }
+
+        // 更新游戏逻辑（物理、武器、AI 等）
+        // 先把本帧开火意图转发给网络层（客户端模式随 Input 上报服务端）
+        self.game.set_net_fire(self.fire_requested);
+        // V3.0 散射：开镜时散布缩小到 30%（腰射 100%）
+        self.game.set_spread_scale(1.0 - self.ads_blend * 0.7);
+        self.game.update(delta_time, &self.camera);
+
+        // 基准挂钩：RV3D_BENCH_YAW / RV3D_BENCH_PITCH（度）每帧强制相机朝向，
+        // 供性能基准固定视角用（与 RV3D_NPC_SCALE / RV3D_STRESS_AI 同类的测试环境变量，
+        // 不设置则完全不影响正常游玩）。鼠标/后坐力每帧会被覆盖，基准时无需 bot 拖视角。
+        if let Ok(yaw) = std::env::var("RV3D_BENCH_YAW") {
+            if let Ok(y) = yaw.parse::<f32>() {
+                self.camera.yaw = y.to_radians();
+            }
+        }
+        if let Ok(pitch) = std::env::var("RV3D_BENCH_PITCH") {
+            if let Ok(p) = pitch.parse::<f32>() {
+                self.camera.pitch = p.to_radians().clamp(
+                    -crate::engine::camera::PITCH_LIMIT,
+                    crate::engine::camera::PITCH_LIMIT,
+                );
+            }
+        }
+
+        // 第一人称：玩家身体位置 → 相机眼睛（FP 相机不自己移动），并同步灵敏度
+        if self.camera.mode == CameraMode::FirstPerson {
+            // 爆炸震屏：本帧抖动偏移叠加到眼睛位置（无震屏时偏移为 0）
+            let mut eye = self.game.player_eye();
+            let (sx, sz) = self.game.camera_shake_offset();
+            eye.x += sx;
+            eye.z += sz;
+            self.camera.set_first_person_eye(eye);
+            self.camera.set_mouse_sens(self.game.sensitivity_rads());
+        }
+
+        // 开火：按开火模式分发（Semi=edge 单发 / Burst3=edge 三连发 / Auto=按住连发）。
+        // 按住状态 fire_requested 保持 true，由武器 fire_cooldown 控制射速。
+        let pos = self.camera.position();
+        let dir = self.camera.forward();
+        let mut fired = 0u32;
+        match self.game.fire_mode() {
+            crate::engine::game::FireMode::Semi => {
+                if self.fire_edge {
+                    let ok = self
+                        .game
+                        .fire_player([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                    if ok {
+                        fired = 1;
+                        self.last_shot_at = self.anim_clock;
+                    }
+                }
+            }
+            crate::engine::game::FireMode::Burst2 | crate::engine::game::FireMode::Burst3 => {
+                if self.fire_edge {
+                    // 发数由档位决定（双发=2 / 三连发=3），共用同一条连打路径
+                    fired = self.game.fire_burst_player(
+                        [pos.x, pos.y, pos.z],
+                        [dir.x, dir.y, dir.z],
+                        self.game.fire_mode().burst_rounds(),
+                    );
+                    if fired > 0 {
+                        self.last_shot_at = self.anim_clock;
+                    }
+                }
+            }
+            crate::engine::game::FireMode::Auto => {
+                if self.fire_requested {
+                    let ok = self
+                        .game
+                        .fire_player([pos.x, pos.y, pos.z], [dir.x, dir.y, dir.z]);
+                    if ok {
+                        fired = 1;
+                        self.last_shot_at = self.anim_clock;
+                    }
+                }
+            }
+        }
+        self.fire_edge = false;
+        // 枪口焰 + 弹壳粒子（每实际发射一发生成一组）
+        for _ in 0..fired {
+            let muzzle = [
+                pos.x + dir.x * 0.5,
+                pos.y - 0.25,
+                pos.z + dir.z * 0.5,
+            ];
+            self.particles.push(Particle {
+                pos: muzzle,
+                vel: [0.0, 0.0, 0.0],
+                age: 0.0,
+                life: 0.09,
+                size: 0.18,
+                tint: [1.0, 0.75, 0.25, 1.0], // 橙黄枪口焰
+                kind: 0,
+            });
+            self.particles.push(Particle {
+                pos: muzzle,
+                vel: [dir.z * 1.5 + 0.4, 2.2, -dir.x * 1.5], // 侧向抛出
+                age: 0.0,
+                life: 1.4,
+                size: 0.06,
+                tint: [0.72, 0.55, 0.18, 1.0], // 黄铜弹壳
+                kind: 1,
+            });
+        }
+
+        // 伤害飘字：本帧命中伤害入列（0.6s 衰减淡出）。
+        // 同帧同值合并（霰弹一次开火 8 弹丸命中只显示一条伤害），
+        // 上限 3 条滚动——超出丢最旧，新伤害补进来（不出现"一次命中刷屏"）。
+        {
+            let mut seen = std::collections::HashSet::new();
+            for dmg in self.game.take_hit_damages() {
+                if seen.insert(dmg.to_bits()) {
+                    self.hit_damage_popups.push((dmg, 0.6));
+                }
+            }
+            if self.hit_damage_popups.len() > 3 {
+                let overflow = self.hit_damage_popups.len() - 3;
+                self.hit_damage_popups.drain(0..overflow);
+            }
+        }
+        // 衰减（iter_mut 可修改）→ 过滤（retain 只读判断，闭包参数为 &T）
+        for (_, t) in self.hit_damage_popups.iter_mut() {
+            *t -= delta_time;
+        }
+        self.hit_damage_popups.retain(|item| item.1 > 0.0);
+        // 命中火花：本帧命中点在目标处生成小火花粒子（受击反馈增强）
+        for hp in self.game.take_hit_points() {
+            for _ in 0..5 {
+                self.particles.push(Particle {
+                    pos: hp,
+                    vel: [
+                        (hp[0] * 13.7).fract() * 2.0 - 1.0,
+                        ((hp[0] + hp[2]) * 7.3).fract() * 1.4,
+                        (hp[2] * 11.3).fract() * 2.0 - 1.0,
+                    ],
+                    age: 0.0,
+                    life: 0.18,
+                    size: 0.03,
+                    tint: [1.0, 0.85, 0.3, 1.0], // 橙黄火花
+                    kind: 0,
+                });
+            }
+        }
+        // 武器后坐力：取走本帧开火累计的 kick 施加到相机（指数衰减由 camera.update 处理）
+        let (kick_pitch, kick_yaw) = self.game.drain_kick();
+        if kick_pitch != 0.0 || kick_yaw != 0.0 {
+            self.camera.add_recoil(kick_pitch, kick_yaw);
+        }
+
+        // 服务器模式：客户端输入视角驱动本机相机（快照权威视角；无客户端输入时保持本地视角）
+        if let Some((yaw, pitch)) = self.game.net_look() {
+            self.camera.yaw = yaw;
+            self.camera.pitch = pitch;
+        }
+
+        // 第一人称枪摆动状态积分（2026-09-01）。
+        // 速度取自**玩家脚底的实际位移 / dt**，不用 `game.player_speed()`：后者读
+        // PlayerBody.vel，而玩家移动走的是 `PlayerBody::try_move()`（直接改 pos，
+        // 从不写 vel）→ vel 恒为 0 → 旧摆动分支实际上一次都没执行过。这里改成
+        // 自带估计后，摆动不再依赖那个通道（game.rs/physics.rs 的 vel 修复另行提出）。
+        {
+            let p = self.game.player_pos();
+            // dt 下限 1e-4 s：卡帧后 delta_time 被 clamp 到 0.1，正常帧约 6 ms；
+            // 只有 0（同一时刻重复调用）会越过硬下限，此时按静止处理
+            let dt = delta_time.max(1e-4);
+            // 前向取**水平投影后归一化**：与 game.rs move_first_person 计算位移用的
+            // 同一个基向量一致（俯仰时 forward 含 y 分量，直接点乘水平位移会低估前向
+            // 速度，抬头/低头时前向摆动会莫名变小）。pitch 被 clamp 在 ±89°，
+            // 水平分量最小 cos(89°)=0.0175，归一化不会退化。
+            let f = self.camera.forward();
+            let fwd = glam::Vec3::new(f.x, 0.0, f.z).normalize_or_zero();
+            let right = self.camera.right();
+            self.gun_sway.tick(dt, p, right, fwd, fired > 0, self.game.sprinting());
+        }
+
+        // 相机参数日志（默认 1 秒一条；`RV3D_NPC_POS=1` 时跟随 `RV3D_NPC_POS_HZ`）。
+        // 🔴 2026-09-25：注入 harness 的瞄准环**拿这一行做回读**（注入像素 → 读回 yaw/pitch →
+        // 再算误差），1 Hz 的回报让每轮 0.5s 的闭环经常读到同一行 ⇒ 重复注入 ⇒ 过冲/假收敛。
+        // 同频到 10 Hz 之后，闭环才真的闭合。判据见 `game::diagnostic_period_secs` 的文档。
+        if self.last_cam_log.elapsed().as_secs_f32()
+            >= crate::engine::game::diagnostic_period_secs()
+        {
+            let (yaw, pitch, dist) = self.camera.orbit_params();
+            // `spread` = 腰射准星扩散（第⑤条）。打在这里是为了**能脱离截图做验收** ——
+            // 像素测量会被"两次运行场景不同 / 蹲下相机高度不同"混杂（第 65、76 轮实测），
+            // 而这个值是确定的：站立 0.30 / 蹲 0.18 / 趴 0.10（+冲刺 +开火）。
+            // 🔴 2026-09-13：加上**输入状态**（用户实测"鼠标抓不住、只有左右键能用"）。
+            // 原先这行没有这几项，导致我只能靠推理猜是哪一环挂了 —— 按教训 20，
+            // 卡住就去加埋点：这一行现在能直接区分
+            //   ① focused=false ⇒ 窗口没拿到焦点 ⇒ 根本不抓（want 的第一个条件）
+            //   ② captured=false ⇒ 抓取调用失败
+            //   ③ locked=true  ⇒ 走了 Locked（Windows 上等于视角失效）
+            //   ④ dragging     ⇒ 未捕获时的拖拽转视角路径有没有被置位
+            log::info!(
+                "cam: yaw={:.1} pitch={:.1} dist={:.1} mode={:?} spread={:.2} \
+                 focus={} cap={} lock={} drag={} rdrag={} absbase={} \
+                 fgpid={} mypid={} \
+                 mouse={} eaten={} tp={} at=({:.0},{:.0}) cyc={} upd={} ren={}",
+                yaw.to_degrees(),
+                pitch.to_degrees(),
+                dist,
+                self.camera.mode,
+                self.game.crosshair_spread(),
+                self.focused,
+                self.cursor_captured,
+                self.cursor_locked,
+                self.dragging,
+                self.right_dragging,
+                self.abs_baseline_valid,
+                last_fg_pid().load(std::sync::atomic::Ordering::Relaxed),
+                my_pid(),
+                self.cursor_evt_count,
+                self.cursor_evt_eaten,
+                self.cursor_evt_teleport,
+                self.cursor_evt_last.0,
+                self.cursor_evt_last.1,
+                self.last_cycle_us,
+                self.last_update_us,
+                self.last_render_us
+            );
+            self.last_cam_log = Instant::now();
+        }
+    }
+
+    /// 设置面板鼠标点击：命中某行 → 选中该项（与 Tab 循环一致）；音量/灵敏度条内点击
+    /// 按位置比例直接设值（x 比例 = 值）。
+    ///
+    /// 🔴 几何与行号全部取自 `ui::SettingsLayout` / `ui::settings_row_at`（绘制用的同一份）。
+    /// 旧版在这里**又算了一遍**布局、点击循环还写死 `0..7` 行键位，而面板画了 8 行
+    /// ⇒ **菜单键那一行鼠标点不中**（键盘 Tab 能到）。注释里那句"布局必须与 ui.rs 一致"
+    /// 没能挡住这次漂移，所以改成同源。
+    fn settings_click(&mut self, mx: f32, my: f32) {
+        let s = self.game.hud.ui_scale();
+        let dw = self.game.hud.screen_w / s;
+        let dh = self.game.hud.screen_h / s;
+        let layout = crate::ui::SettingsLayout::new(dw, dh);
+        let mx_d = mx / s;
+        let my_d = my / s;
+        let Some(row) = crate::ui::settings_row_at(&layout, my_d) else {
+            return;
+        };
+        self.game.hud.settings_selection = row;
+        // 滑条行：点在条上按位置比例设值；点标签或行内空白只选中
+        let on_bar = mx_d >= layout.bar_left() && mx_d <= layout.bar_left() + layout.bar_w;
+        if (row as usize) < crate::ui::SETTINGS_SLIDER_ROWS && on_bar {
+            let ratio = ((mx_d - layout.bar_left()) / layout.bar_w).clamp(0.0, 1.0);
+            match row {
+                0 => self.game.hud.volume = ratio,
+                1 => self.game.hud.sensitivity = ratio,
+                _ => self.game.hud.music_volume = ratio,
+            }
+            log::info!("settings: 鼠标点击设定 行{} = {:.0}%", row, ratio * 100.0);
+        } else {
+            log::info!("settings: 鼠标选中行 {}", row);
+        }
+    }
+
+
+    /// 第一人称枪模程序化高模：按当前武器键名从 guns 库取 35 把枪的网格，
+    /// 变换到视空间固定位置（view⁻¹ × 锚点 × 倾斜 × 缩放 × 俯角 × 翻转 180°：
+    /// guns 库局部坐标枪口朝 +Z，翻转后朝屏幕外 -Z）。
+    /// 开火后坐（相位脉冲）+ 行走晃动 + 腰射右倾/开镜扶正。
+    /// 导入枪模（按武器 key 自动寻找 assets/guns/{key}.glb；不存在回退 ak12.glb）
+    /// 2026-08-28 终局：使用原始模型材质本色（baseColorFactor 直出 × 忠实现光）
+    /// 🪖 加载士兵 GLB（2026-09-13）。路径固定为 `assets/soldier/soldier.glb`。
+    ///
+    /// **刻意不做任何归一化**：`soldier.glb` 是按铁律 D 的约定生成的
+    /// （1 单位 = 1 米、原点在底面中心、`export_yup=True`、单 mesh 无变换），
+    /// 本来就是引擎要的尺度与朝向。枪模那套"缩放到 0.94m + 几何居中 + 长轴对齐 +Z"
+    /// 是针对 Sketchfab 抠件的，**不要照抄到这里**。
+    ///
+    /// 返回 `None` 时（文件缺失/解析失败）渲染器保持 `soldier_vertex_count == 0`，
+    /// 于是 NPC **继续用原来的 18 段箱体** —— 与改动前逐字节一致，不会退化。
+    fn load_soldier_glb() -> Option<(Vec<[f32; 11]>, Vec<u32>)> {
+        // 🔴🔴 2026-09-13：**必须缓存**。调用点在每帧的渲染准备段里，而这个是
+        // "读盘 + 解析 GLB" —— 实测 12 秒内被调用 **1277 次**（每次 45KB 读盘 + 全量解析）。
+        // 士兵网格只在启动时用一次，缓存后每帧只是取一个 `&`。
+        // `OnceLock` 是 std 的，不引入依赖（本项目硬约束：不新增第三方依赖）。
+        static CACHE: std::sync::OnceLock<Option<(Vec<[f32; 11]>, Vec<u32>)>> =
+            std::sync::OnceLock::new();
+        if let Some(cached) = CACHE.get() {
+            // 只有 `Some` 需要克隆一次给调用方；`None` 直接返回。
+            // 克隆发生在每帧，但 1082 个顶点 × 44 字节 ≈ 47KB —— 比读盘+解析便宜两个量级。
+            return cached.clone();
+        }
+        let loaded = Self::load_soldier_glb_uncached();
+        let _ = CACHE.set(loaded.clone());
+        loaded
+    }
+
+    fn load_soldier_glb_uncached() -> Option<(Vec<[f32; 11]>, Vec<u32>)> {
+        const PATH: &str = "assets/soldier/soldier.glb";
+        let bytes = match std::fs::read(PATH) {
+            Ok(b) => b,
+            Err(e) => {
+                log::info!("soldier: 未发现 {PATH}（{e}），NPC 继续用 18 段箱体");
+                return None;
+            }
+        };
+        match crate::engine::assets::parse_glb(&bytes) {
+            Ok(mesh) => {
+                if mesh.verts.is_empty() || mesh.indices.is_empty() {
+                    log::warn!("soldier: {PATH} 为空网格，NPC 继续用 18 段箱体");
+                    return None;
+                }
+                log::info!(
+                    "soldier: 载入 {PATH}（{} 顶点 / {} 索引，原始尺度与朝向，未归一化）",
+                    mesh.verts.len(),
+                    mesh.indices.len()
+                );
+                Some((mesh.verts, mesh.indices))
+            }
+            Err(e) => {
+                log::warn!("soldier: {PATH} 解析失败（{e}），NPC 继续用 18 段箱体");
+                None
+            }
+        }
+    }
+
+    fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
+        let path = if crate::engine::asset_source::global()
+            .exists(&format!("assets/guns/{key}.glb"))
+        {
+            format!("assets/guns/{key}.glb")
+        } else {
+            "assets/guns/ak12.glb".to_string()
+        };
+        let path: &str = &path;
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::info!("assets: 未发现 {path}（{e}），使用程序化枪模");
+                return None;
+            }
+        };
+        match crate::engine::assets::parse_glb(&bytes) {
+            Ok(mesh) => {
+                if mesh.verts.is_empty() {
+                    log::warn!("assets: {path} 为空网格，回退程序化枪模");
+                    return None;
+                }
+                // 归一化：Sketchfab 原始刻度（本例长轴 Y 约 85 单位）→ 0.94m 真实枪长；
+                // 包围盒数据中心到原点；长轴（最大跨度）对齐 +Z（游戏枪模前向）；Y-up 校正
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &mesh.verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v[i]);
+                        mx[i] = mx[i].max(v[i]);
+                    }
+                }
+                let ext = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+                let long = ext[0].max(ext[1]).max(ext[2]);
+                // 枪模 m 矩阵含 0.5 缩放 → 模型长 1.35m 折算视觉 ~0.68m（AK-12 实枪比例）
+                let scale = 1.35 / long.max(1e-4);
+                // 长轴对齐：Sketchfab Z-up 导出（长轴=Y 85、高=Z 21、宽=X 7，枪竖立）
+                // 绕 X -90°：长轴→-Z、枪顶→+Y；再绕 Y 180° 预旋转（配合 fp_gun_matrix 的
+                // rotY(180°) 双重取负 → 最终枪口朝 -Z（屏幕深处），枪顶朝上
+                let (align, align_name) = if ext[1] >= ext[0] && ext[1] >= ext[2] {
+                    // 长轴=Y（Sketchfab Z-up 竖立枪）：-90°X 立正 + 180°Z 滚转（枪顶朝上、弹匣朝下）
+                    (
+                        glam::Mat4::from_rotation_z(std::f32::consts::PI)
+                            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                            * glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                        "Y-long",
+                    )
+                } else if ext[0] >= ext[1] && ext[0] >= ext[2] {
+                    (glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2), "X-long")
+                } else {
+                    // 长轴已在 Z = 资产已是规范化朝向（枪口 +Z）。由 fp_gun_matrix 的
+                    // rotY(π) 把局部 +Z 转到视空间 -Z，再经 view_inv 即相机前方 —— 与
+                    // `gun_mesh_by_key` 文档约定的「局部枪口朝 +Z」一致，故不需任何旋转。
+                    (glam::Mat4::IDENTITY, "IDENTITY")
+                };
+                let center = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                // 注意：不在此处做任何相机空间变换——FP 帧内与程序化枪共用 fp_gun_matrix
+                // （view_inv × anchor × scale；世界空间 + 每帧跟随相机）
+                // 基色可用性判定：先看整份网格最亮的顶点有多亮。GLB 解析器
+                // （engine/assets.rs）不读 baseColorTexture，只把 baseColorFactor 摊到
+                // 顶点色上，所以"贴图丢了只剩暗调色因子"的资产会给出近乎纯黑的基色
+                // （ak12.glb 实测 0.057/0.077）。此时按**全局最大值**归一到参考反照率：
+                // 保留各材质之间的相对明暗差（0.057 与 0.077 差 34%，归一后仍差 34%），
+                // 只是把它们整体抬到可分辨的亮度；正常资产（luma ≥ 0.18）不改变倍率。
+                let mut luma_max = 0.0f32;
+                for v in &mesh.verts {
+                    let l = 0.2126 * v[8] + 0.7152 * v[9] + 0.0722 * v[10];
+                    luma_max = luma_max.max(l);
+                }
+                let albedo_boost = if luma_max > 1e-5 && luma_max < GUN_DARK_LUMA {
+                    GUN_REF_ALBEDO / luma_max
+                } else {
+                    1.0
+                };
+                // 每个武器 key 只加载一次（结果按 key 缓存），所以这行日志不会刷屏。
+                // 它把两个"错了只会表现为枪看起来怪、不会报错"的决定摊开给人看：
+                // ① align 走了哪条分支——assets/guns 里由 tools/install_guns.py 安装的
+                //    资产是**规范化过的**（枪口 +Z、上 +Y、最长边 1.0），必然走 IDENTITY；
+                //    若哪天它走了别的分支，说明有资产没经过预处理就进来了，朝向是猜的。
+                // ② albedo_boost 是否为 1.0——不为 1 说明该资产基色过黑、走了亮度归一。
+                log::info!(
+                    "gun-glb: {key} ← {path} 顶点={} 索引={} 跨度=({:.2},{:.2},{:.2}) \
+                     align={align_name} luma_max={:.3} albedo_boost={:.2}",
+                    mesh.verts.len(),
+                    mesh.indices.len(),
+                    ext[0], ext[1], ext[2],
+                    luma_max, albedo_boost
+                );
+                let verts: Vec<crate::engine::meshgen::GVertex> = mesh
+                    .verts
+                    .iter()
+                    .map(|v| {
+                        let mut p = glam::Vec3::new(v[0] - center[0], v[1] - center[1], v[2] - center[2]) * scale;
+                        let mut n = glam::Vec3::from_slice(&v[3..6]);
+                        p = align.transform_point3(p);
+                        n = align.transform_vector3(n).normalize_or_zero();
+                        let c = fp_gun_bake_color(n, [v[8], v[9], v[10]], albedo_boost);
+                        crate::engine::meshgen::GVertex {
+                            pos: [p.x, p.y, p.z],
+                            normal: [n.x, n.y, n.z],
+                            uv: [v[6], v[7]],
+                            color: c,
+                        }
+                    })
+                    .collect();
+                log::info!(
+                    "assets: 导入枪模 {path}（{} 顶点 / {} 索引，基色亮度 {:.3} → 反照率增益 ×{:.2}，首色 {:?}）",
+                    verts.len(),
+                    mesh.indices.len(),
+                    luma_max,
+                    albedo_boost,
+                    verts.first().map(|v| v.color)
+                );
+                Some((verts, mesh.indices))
+            }
+            Err(e) => {
+                log::warn!("assets: {path} 解析失败: {e}；回退程序化枪模");
+                None
+            }
+        }
+    }
+
+    fn first_person_gun_mesh(&mut self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
+        // 导入枪模优先（按当前武器 key 缓存；检视与第一人称共用）
+        let gkey = self.game.active_weapon_key().to_string();
+        let load = |k: &String| Self::load_gun_glb(k);
+        // 只在某把枪**首次**入缓存时打一次几何探针，避免每帧刷屏。
+        // 用途：把"枪到底朝屏幕深处还是朝右"从肉眼判断变成一个数——把枪身局部包围盒
+        // 的顶点经真实 fp_gun_matrix 变到世界后，分别投影到相机前向与相机右向，
+        // 跨度大的那个才是枪身实际躺着的方向。肉眼已三次给出互相矛盾的结论。
+        let first_load = !self.gun_glbs.contains_key(&gkey);
+        // 先 clone 出来结束对 self.gun_glbs 的可变借用，否则下面没法再 &self 取矩阵/相机
+        let loaded = self
+            .gun_glbs
+            .entry(gkey.clone())
+            .or_insert_with(|| load(&gkey))
+            .clone();
+        if first_load {
+            if let Some((verts, _)) = &loaded {
+                if verts.len() > 8 {
+                    let m = self.fp_gun_matrix();
+                    // 输出**世界空间 AABB 各轴跨度**而不是"沿相机轴的投影长度"：
+                    // 后者要正确解释相机基向量的约定，我上一轮就是被这种间接量误导过。
+                    // 世界 AABB 无法误读——枪指入屏幕则 z 跨度大，横躺则 x 跨度大。
+                    let mut lo = [f32::MAX; 3];
+                    let mut hi = [f32::MIN; 3];
+                    for v in verts.iter() {
+                        let w = m.transform_point3(glam::Vec3::from_slice(&v.pos));
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(w[k]);
+                            hi[k] = hi[k].max(w[k]);
+                        }
+                    }
+                    let f = self.camera.forward();
+                    let r = self.camera.right();
+                    log::info!(
+                        "gun-orient: {gkey} 世界AABB跨度 x={:.3} y={:.3} z={:.3} \
+                         | 相机forward=({:.2},{:.2},{:.2}) right=({:.2},{:.2},{:.2})",
+                        hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2],
+                        f.x, f.y, f.z, r.x, r.y, r.z
+                    );
+                }
+            }
+        }
+        // 下面统一用已取出的 `loaded`，不再持有对 self.gun_glbs 的借用
+        // （函数体后面还要读 self.inspect_weapon / self.ads_blend 等字段）。
+        if let Some((verts, indices)) = loaded {
+            if self.inspect_weapon.is_some() {
+                // 居中到 (0, 1.0, 0)
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v.pos[i]);
+                        mx[i] = mx[i].max(v.pos[i]);
+                    }
+                }
+                let c = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                let moved: Vec<crate::engine::meshgen::GVertex> = verts
+                    .iter()
+                    .map(|v| crate::engine::meshgen::GVertex {
+                        pos: [v.pos[0] - c[0], v.pos[1] - c[1] + 1.0, v.pos[2] - c[2]],
+                        ..*v
+                    })
+                    .collect();
+                return (moved, indices);
+            }
+            // 第一人称：顶点已在加载时静态化到「视空间基座」，每帧仅由实例矩阵驱动
+            // （2026-08-28 残影修复：消除每帧 3MB CPU 重变换）
+            return (verts, indices);
+        }
+        // 检视模式：枪模放世界原点上方（居中），Orbit 相机绕其旋转查看
+        if let Some(n) = self.inspect_weapon {
+            let key = crate::engine::weapon_data::spec_by_number(n)
+                .map(|s| s.key)
+                .unwrap_or("ak12m");
+            if let Some(gm) = crate::engine::guns::gun_mesh_by_key(key) {
+                // 居中：bbox 中心移到 (0, 1.0, 0)（用包围盒中点，顶点均值会偏向部件密集侧）
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &gm.verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v.pos[i]);
+                        mx[i] = mx[i].max(v.pos[i]);
+                    }
+                }
+                let c = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                let verts: Vec<crate::engine::meshgen::GVertex> = gm
+                    .verts
+                    .iter()
+                    .map(|v| crate::engine::meshgen::GVertex {
+                        pos: [v.pos[0] - c[0], v.pos[1] - c[1] + 1.0, v.pos[2] - c[2]],
+                        normal: v.normal,
+                        uv: v.uv,
+                        color: v.color,
+                    })
+                    .collect();
+                return (verts, gm.indices.clone());
+            }
+        }
+        // 当前武器枪模：按键名取模（构建含光照烘焙，缓存避免每帧重建）。
+        // 优雅回退：无网格 / 构建 panic → 记录日志并回退默认 HK416。
+        let key = self.game.active_weapon_key();
+        let gun = match &self.gun_mesh_cache {
+            Some((k, gm)) if k == key => gm.clone(),
+            _ => {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::engine::guns::gun_mesh_by_key(key)
+                }))
+                .unwrap_or(None);
+                let gm = match built {
+                    Some(gm) => gm,
+                    None => {
+                        log::warn!(
+                            "weapons: 枪模回退——键 '{}' 无可用网格，使用默认 HK416",
+                            key
+                        );
+                        crate::engine::guns::gun_mesh_by_key("hk416").unwrap_or_else(|| {
+                            log::error!("weapons: 默认枪模也缺失，使用空网格（枪模不可见）");
+                            crate::engine::guns::GunMesh {
+                                verts: Vec::new(),
+                                indices: Vec::new(),
+                                length: 0.0,
+                            }
+                        })
+                    }
+                };
+                self.gun_mesh_cache = Some((key.to_string(), gm.clone()));
+                gm
+            }
+        };
+        // 程序化枪：返回**局部坐标**顶点，与导入 GLB 分支同一约定——矩阵只在
+        // `render()` 里作为实例 model（fp_gun_pre）施加一次。
+        // 2026-09-01 修复：这里曾先 `gun.transformed(fp_gun_matrix())` 把
+        // view_inv×anchor×scale 烘进顶点，而调用方又把同一个矩阵当作实例 model 再乘
+        // 一次 → 实际变换是 M·M·p。M 含 view_inv，M·M 里的第二个 view_inv 不会被 view
+        // 抵消，枪会被再平移一次相机位置（城区坐标 ±215 m）→ 整支枪飞出画面/
+        // 贴脸乱甩。该分支只在 GLB 缺失时命中（例如 release_dist/game/assets/guns
+        // 未随包发布），所以平时看不见，一旦命中就是彻底坏掉。
+        (gun.verts.clone(), gun.indices.clone())
+    }
+    /// 行走摆动的幅值包络（0..1）：`smoothstep(平滑速度) × 开火阻尼 × RV3D_GUN_SWAY 增益`。
+    ///
+    /// 单独抽出来是因为它同时被 `fp_gun_matrix` 与 `RV3D_GUN_DIAG` 的诊断行用 ——
+    /// 诊断必须量**真正参与渲染的那个数**，不能另写一套近似（否则尺子和被测物不是一回事）。
+    fn gun_walk_env(&self) -> f32 {
+        let t = ((self.gun_sway.speed - GUN_SWAY_SPEED_LO)
+            / (GUN_SWAY_SPEED_HI - GUN_SWAY_SPEED_LO))
+            .clamp(0.0, 1.0);
+        let smooth = t * t * (3.0 - 2.0 * t); // Hermite smoothstep：起止斜率为 0
+        let fire_damp = 1.0 - (1.0 - GUN_SWAY_FIRE_DAMP) * self.gun_sway.kick;
+        smooth * fire_damp * self.gun_sway.gain
+    }
+
+    /// 第一人称枪的世界空间矩阵（程序化/导入枪模共用）：view_inv × anchor × scale。
+    /// 开火后坐 + 行走摆动 + ADS 插值 + FOV 缩放（2026-08-27 抽离共享；
+    /// 2026-09-01 摆动/后坐全部改由 `gun_sway` 的连续状态量驱动，见该结构注释）
+    fn fp_gun_matrix(&self) -> glam::Mat4 {
+        let cam = &self.camera;
+        let hip_pos = glam::Vec3::new(0.25, -0.20, -0.60);
+        let ads_pos = glam::Vec3::new(0.0, -0.08, -0.42);
+        let anchor_base = hip_pos.lerp(ads_pos, self.ads_blend);
+        // 屏幕等幅归一化（2026-09-01，修 ADS 摆幅过大）：anchor 是**视空间**平移，
+        // 它在屏幕上的位移 = offset / (锚距 × tan(fov/2))。开镜时锚距 0.60→0.42、
+        // fov 70°→55°，两个因素叠起来把同样的 offset 视觉放大 1.92 倍；
+        // `gun_scale` 下面已经做了 tan(fov/2) 补偿，平移量必须用同一套基准补偿，
+        // 否则"模型不放大、摆动放大"→ 越是精确瞄准枪甩得越凶。
+        let depth_gain = (-anchor_base.z) / GUN_HIP_DEPTH_M;
+        let fov_gain = (cam.fov * 0.5).tan() / GUN_HIP_HALF_TAN;
+        // 横向/垂向偏移的等幅因子；前后偏移只改变成像比例，用 depth_gain
+        let screen_gain = depth_gain * fov_gain;
+        let mut anchor = anchor_base;
+        // ① 后坐：连续指数包络（击发帧置 1 后按 τ=75 ms 衰减）。
+        //    旧实现用 (1-t)² 抛物线 + 0.30 s 硬截止：连发（10 发/秒）时每 0.1 s
+        //    重新从 0.44 跳到 1.0，回落末端还有一次速度不连续 → 抖 + 残影。
+        //    同样要走屏幕等幅补偿：0.07 m 的下蹲在开镜锚距 0.42 m + FOV 55° 下
+        //    占半屏高 32%，而腰射只占 17% —— 不补偿时"开镜连发"就是玩家描述的
+        //    "开镜射击下左右移动甩得特别大"里幅度最大的那个分量。
+        //    视轴方向的前顶只改变成像比例，补偿因子是 depth（不含 tan(fov/2)）。
+        let kick = self.gun_sway.kick;
+        if kick > 0.0 {
+            anchor.y -= 0.07 * kick * screen_gain;
+            anchor.z += 0.05 * kick * depth_gain;
+        }
+        // ② 行走摆动。幅值 = smoothstep(速度) × 开火阻尼 × 诊断增益；三个因子全部
+        //    连续，且 speed 已在 update() 里做过与帧率无关的低通，所以不存在
+        //    "逐帧通断"的阶跃（那是旧实现高频残影的直接来源）。
+        //    ADS 的按轴抑制放在下面各分量里，避免这里再乘一次造成双重衰减。
+        let env = self.gun_walk_env();
+        if env > 1e-6 {
+            let ads = self.ads_blend;
+            let st = self.gun_sway.stride;
+            let two = st * 2.0;
+            // 侧向：1× 步频（一个完整步态周期回到原位一次）
+            let sway = st.sin() * GUN_SWAY_SIDE_M * (1.0 - (1.0 - GUN_SWAY_ADS_SIDE) * ads);
+            // 上下：2× 步频（每个落脚一次冲击），用 -cos 让 phase=0（刚落地）为最低点
+            let bob = -two.cos() * GUN_SWAY_BOB_M * (1.0 - (1.0 - GUN_SWAY_ADS_BOB) * ads);
+            // 前后：2× 步频、与落地错位 1/4 周期（手臂随步伐前后牵动）
+            let fore = (two + std::f32::consts::FRAC_PI_2).sin()
+                * GUN_SWAY_FORE_M
+                * (1.0 - (1.0 - GUN_SWAY_ADS_FORE) * ads);
+            // 侧向"惯性滞后"：与侧移速度反号、按饱和速度归一，最大 0.004 m
+            let lean = -(self.gun_sway.strafe / GUN_SWAY_SPEED_HI).clamp(-1.0, 1.0)
+                * GUN_SWAY_LEAN_M
+                * (1.0 - (1.0 - GUN_SWAY_ADS_SIDE) * ads);
+            anchor.x += (sway + lean) * screen_gain * env;
+            anchor.y += bob * screen_gain * env;
+            anchor.z += fore * depth_gain * env;
+        }
+        let base_scale = 0.50 - 0.03 * self.ads_blend;
+        // 模型缩放与摆动偏移共用同一个 fov 补偿量（fov_gain），保证两条通道
+        // 在腰射/开镜之间视觉一致（旧实现只有这里补了 fov，摆动没补）
+        let gun_scale = fov_gain.clamp(0.5, 1.0) * base_scale;
+        // ④ 切枪动作（2026-09-15）：包络 sin(π·t) 两端为 0 ⇒ 起止速度连续。
+        //    只在真的在切枪时非零：switch_time == 0 时 progress 直接是 1.0 ⇒ sin(π)=0。
+        let (switch_drop, switch_pitch, switch_roll) = {
+            let t = self.game.weapon_switch_progress();
+            let swing = (std::f32::consts::PI * t).sin();
+            (
+                GUN_SWITCH_DROP_M * swing * screen_gain,
+                GUN_SWITCH_PITCH_RAD * swing,
+                GUN_SWITCH_ROLL_RAD * swing,
+            )
+        };
+        anchor.y -= switch_drop;
+        // ⑤ 冲刺姿态（2026-09-26 补）：平滑混合到"压低 + 前倾 + 内收"。
+        //    混合量来自 `GunSway::sprint`（帧率无关低通），所以按住/松开 Shift 都是渐变。
+        let sprint = self.gun_sway.sprint;
+        anchor.y -= GUN_SPRINT_DROP_M * sprint * screen_gain;
+        // ⑥ 换弹动作（2026-09-26 补）：包络中点最大、两端为 0（见 `reload_envelope` 的测试）
+        let reload = crate::engine::game::reload_envelope(
+            1.0 - self.game.hud.reload_progress,
+        );
+        anchor.y -= GUN_RELOAD_DROP_M * reload * screen_gain;
+        // ⑦ 静止呼吸微摆（2026-09-26 补）：只在几乎不动时出现，开镜时再压到 1/4。
+        //    用 `anim_clock` 当相位（已有、单调）⇒ 不需另加计时器；幅值与姿态无关，
+        //    走 `screen_gain` 保持与其它通道的屏幕等幅。
+        let idle_w = (1.0 - env).clamp(0.0, 1.0) * (1.0 - 0.75 * self.ads_blend);
+        let (idle_x, idle_y) = idle_sway(self.anim_clock);
+        anchor.x += idle_x * GUN_IDLE_SWAY_M * screen_gain * idle_w;
+        anchor.y += idle_y * GUN_IDLE_SWAY_M * screen_gain * idle_w;
+        let view_inv = cam.view_matrix().inverse();
+        view_inv
+            * glam::Mat4::from_translation(anchor)
+            * glam::Mat4::from_rotation_z(
+                switch_roll + GUN_SPRINT_ROLL_RAD * sprint + GUN_RELOAD_ROLL_RAD * reload
+                    + GUN_IDLE_ROLL_RAD * idle_x * idle_w,
+            )
+            * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
+            * glam::Mat4::from_rotation_x(
+                -0.045
+                    + switch_pitch
+                    + GUN_SPRINT_PITCH_RAD * sprint
+                    + GUN_RELOAD_PITCH_RAD * reload,
+            )
+            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+    }
+
+    /// ESC 菜单鼠标点击命中检测：命中选项矩形则执行对应动作（0=退出 1=设置）。
+    /// 矩形布局必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中，
+    /// 选项 y = py+90 / py+146，宽 pw-120=260 居中，高 34）。返回是否命中任何选项。
+    fn menu_click_hit(&mut self, mx: f32, my: f32) -> bool {
+        // 面板布局按设计基准 1280x800 计算后乘 ui_scale（与 ui.rs 渲染一致）
+        let s = self.game.hud.ui_scale();
+        let dw = self.game.hud.screen_w / s;
+        let dh = self.game.hud.screen_h / s;
+        let pw = 380.0;
+        let ph = 240.0;
+        let px = (dw - pw) * 0.5;
+        let py = (dh - ph) * 0.5;
+        let opt_w = pw - 120.0;
+        let opt_x = px + 60.0;
+        for (i, oy) in [py + 90.0, py + 146.0].iter().enumerate() {
+            if mx >= (opt_x * s) && mx <= ((opt_x + opt_w) * s) && my >= ((*oy - 6.0) * s) && my <= ((*oy + 28.0) * s) {
+                if i == 0 {
+                    log::info!("ESC 菜单：鼠标点击退出游戏");
+                    self.running = false;
+                    if let Some(proxy) = &self.event_proxy {
+                        let _ = proxy.send_event(());
+                    }
+                } else {
+                    log::info!("ESC 菜单：鼠标点击设置");
+                    self.game.hud.esc_menu_open = false;
+                    self.game.toggle_settings();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 按游戏状态同步光标捕获：Playing = 捕获 + 隐藏；否则释放。
+    fn sync_cursor(&mut self) {
+        // 🔴🔴 2026-09-13 修（用户实测"鼠标完全转不了视角"的根因）：
+        // **焦点不能只靠 `WindowEvent::Focused` 事件**。
+        // 窗口在**创建时就已获得焦点**是启动的常见情形，此时 Windows **不会再发
+        // 一次 `WM_SETFOCUS`** ⇒ winit 不发 `Focused(true)` ⇒ `self.focused` 永远停在
+        // 初值 `false` ⇒ `want` 永远为假 ⇒ **光标永不抓取、视角永不响应鼠标**，
+        // 而键盘与左右键照常工作（它们不经过 `want`）—— 正是用户描述的现象。
+        // 2026-09-12 把初值从 `true` 改成 `false` 修掉了"没焦点却自认为有焦点"，
+        // 但代价就是这一条：**只信事件就永远抓不住**。
+        // ⇒ 直接问操作系统（`Window::has_focus()`），事件只作快速路径。
+        let actually_focused = match &self.window {
+            // 优先直接问系统（见 window_is_foreground 的注释：事件与 has_focus() 都不可靠）
+            Some(w) => window_is_foreground(w).unwrap_or_else(|| w.has_focus()),
+            None => return,
+        };
+        self.focused = actually_focused;
+        let Some(window) = &self.window else {
+            return;
+        };
+        let want = capture_wanted(
+            self.focused,
+            self.game.state() == GameState::Playing,
+            self.game.settings_open(),
+            self.game.hud.esc_menu_open,
+            !no_capture(),
+        );
+        // ESC 菜单/设置面板打开或失焦时释放鼠标（2026-08-15：菜单需鼠标点选）
+        if want && !self.cursor_captured {
+            // Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
+            // 仅在 raw 相对增量真会到达的平台才用它（见 RAW_MOUSE_MOTION）：
+            // 其余平台退 Confined + 绝对位置路径（Xwayland 与本机 Windows 同路）。
+            let (locked, grabbed) = cursor_grab_plan(
+                RAW_MOUSE_MOTION,
+                || window.set_cursor_grab(CursorGrabMode::Locked).is_ok(),
+                || window.set_cursor_grab(CursorGrabMode::Confined).is_ok(),
+            );
+            // 🔴🔴🔴 2026-09-13 定案（用户"鼠标完全转不了视角"的真正根因）：
+            // **在绝对位置路径上绝不能隐藏光标。**
+            //
+            // winit 0.30 的 Windows 后端（`window_state.rs` 的 `refresh_os_cursor`）这么写：
+            //     if locked        { 钉在窗口中心 1x1 }
+            //     else if HIDDEN   { 钉在窗口中心 1x1 }   ← ← ← 就是这条
+            //     else             { 限制在 client_rect 内 }
+            // 注释说这是为了"防止隐藏的光标去激活任务栏"。对**真相对鼠标**的游戏合理，
+            // 但我们的 Windows 路径是 **Confined + 绝对位置**（见 `RAW_MOUSE_MOTION`）——
+            // 视角完全靠 `CursorMoved` 的 `dx` 算出来。**光标被钉在一个像素上，
+            // `dx` 恒为 0，视角自然纹丝不动**，而键盘与左右键照常工作。
+            //
+            // 实测证据（2026-09-13，在用户真实会话的进程还活着时量的）：
+            //   `GetClipCursor` = 853,533 - 854,534   ⇒ **1×1 像素**
+            //   我自己的诊断里 `mouse=15` 但 `at=(1280,800)` **五条采样完全相同**（没动过）
+            //
+            // ⇒ 只在**真 Locked**（相对鼠标，`DeviceEvent::MouseMotion` 驱动视角）时才隐藏光标。
+            // 绝对路径**不能隐藏**（否则 winit 把指针钉成 1×1），但又不能给玩家看一个箭头 ——
+            // 用户 2026-09-13 反馈"鼠标图标一直浮在中心"。
+            //
+            // ⇒ 第三解：**设一个 1×1 全透明的自定义光标**。
+            // winit 只检查自己的 `CursorFlags::HIDDEN` 标志，**从不看光标图像本身**，
+            // 所以"未隐藏 + 图像透明"同时满足两边的要求：
+            //   * winit 侧 ⇒ 走 `Some(client_rect)`，光标能在窗口内自由移动（视角能转）
+            //   * 玩家侧 ⇒ 屏幕上什么都看不见
+            // 释放时用 `CursorIcon::Default` 恢复系统箭头（菜单里要用）。
+            if locked {
+                window.set_cursor_visible(false);
+            } else {
+                // 用启动时造好的那个 1x1 全透明光标（见 `resumed` 里的注释）。
+                // 它必须由事件循环创建，所以在这里只做 `set_cursor`。
+                match self.blank_cursor.clone() {
+                    Some(c) => {
+                        window.set_cursor_visible(true);
+                        window.set_cursor(c);
+                    }
+                    // 造不出来（驱动拒绝 1×1）就退回可见箭头 —— 能玩优先
+                    None => window.set_cursor_visible(true),
+                }
+            }
+            self.cursor_captured = grabbed || locked;
+            self.cursor_locked = locked;
+            self.abs_baseline_valid = false;
+            // 开始观察这次的锁到底有没有生效（见 `LockObservation`）。
+            // 基准取**当前的** `cursor_evt_count`，所以这个窗口内来一个增量就算确认。
+            if locked {
+                self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
+                self.lock_retried = false;
+            } else {
+                self.lock_observe = None;
+            }
+            if !locked {
+                // WSLg/Xwayland 回退：绝对位置路径。不在捕获瞬间回中——
+                // 指针真实位置未知，等首个 CursorMoved 作基准（abs_baseline_valid）。
+                self.recenter_pending_until = None;
+            } else {
+                // Locked grab 可用：raw 相对增量驱动。捕获瞬间回中隐藏光标，
+                // 150ms 窗口吞掉这次 warp 的 raw 回声（仅此一次 warp）。
+                let size = window.inner_size();
+                let center = winit::dpi::PhysicalPosition::new(
+                    size.width as f64 / 2.0,
+                    size.height as f64 / 2.0,
+                );
+                let _ = window.set_cursor_position(center);
+                self.last_cursor = (center.x, center.y);
+                self.recenter_pending_until = Some(Instant::now() + Duration::from_millis(150));
+            }
+            log::info!(
+                "input: cursor captured (mouse look on, grab={}, look={})",
+                if locked {
+                    "locked"
+                } else if grabbed {
+                    "confined"
+                } else {
+                    "none"
+                },
+                if locked { "relative" } else { "absolute" }
+            );
+        } else if !want && self.cursor_captured {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+            self.cursor_captured = false;
+            self.cursor_locked = false;
+            self.abs_baseline_valid = false;
+            self.recenter_pending_until = None;
+            self.lock_observe = None;
+            self.camera.set_rotation_active(false);
+            log::info!("input: cursor released");
+        }
+
+        // ---- 锁定态观察：锁到底有没有真的生效（见 `LockObservation`）----
+        //
+        // 这一段是**诊断 + 一次补救**，不是降级：Wayland 下不能退回 Confined ——
+        // `set_cursor_position` 只在已 Locked 时才成功，Confined 下指针撞到窗口边
+        // 就再也转不动（比"完全不转"更难排查）。所以对 NoMotion 的处理是
+        // **补抓一次**（指针此时多半已经 enter 了，而 `apply_on_pointer` 只对
+        // 已 enter 的指针生效 ⇒ 这次多半能成），再不行就**给出明确的提示**。
+        if self.cursor_captured && self.cursor_locked {
+            if let Some((started, motion_at_start)) = self.lock_observe {
+                let delta = self.cursor_evt_count.saturating_sub(motion_at_start);
+                match lock_observation(started.elapsed().as_millis(), delta, LOCK_OBSERVE_MS) {
+                    LockObservation::Pending => {}
+                    LockObservation::Confirmed => {
+                        // 锁确实生效 —— 收工，之后不再观察（也不再补抓）
+                        self.lock_observe = None;
+                    }
+                    LockObservation::NoMotion => {
+                        if !self.lock_retried {
+                            // 指针很可能在抓取之后才进入窗口 ⇒ 补抓一次
+                            self.lock_retried = true;
+                            let ok = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
+                            self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
+                            log::warn!(
+                                "input: 锁定后 {}ms 内一个相对增量都没收到 —— 锁可能没生效，\
+                                 已补抓一次（set_cursor_grab(Locked) -> {}）。\
+                                 原因：winit 在指针尚未 enter 窗口时调 lock_pointer 会\
+                                 **什么都没做却返回 Ok**，且它忽略合成器的确认事件，\
+                                 所以失败无法从返回值看出来。",
+                                LOCK_OBSERVE_MS,
+                                if ok { "Ok" } else { "Err" }
+                            );
+                        } else if !self.lock_fake_warned {
+                            self.lock_fake_warned = true;
+                            self.lock_observe = None;
+                            log::error!(
+                                "input: 🔴 补抓之后仍然零相对增量 ⇒ 本会话的鼠标视角**不会工作**\
+                                 （锁定是假成功）。这不是鼠标故障，是后端差异：Wayland 下\
+                                 Locked 的失败是静默的，且 Confined 也无法回转指针。\
+                                 ⇒ 请用 RV3D_BACKEND=x11 走 Xwayland 重开一局 —— \
+                                 那里 set_cursor_grab(Locked) 会如实返回 NotSupported，\
+                                 引擎会自动落到 Confined + 绝对位置路径，而 X11 的\
+                                 set_cursor_position 走 XWarpPointer 是真的生效的。\
+                                 （本提示只发一次；`cam:` 日志里的 evt 计数可继续观测。）"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 把 WASD 按键状态转发给游戏（FPS 玩家移动）
+    fn sync_game_movement(&mut self) {
+        let k = &self.key_state;
+        self.game.set_movement(k.forward, k.backward, k.left, k.right);
+    }
+
+    /// 把当前分辨率应用到窗口（尺寸相同则跳过；`Resized` 事件会触发渲染器重建交换链）
+    fn apply_resolution(&self) {
+        let (w, h) = self.game.hud.resolution();
+        let Some(window) = &self.window else {
+            log::info!("settings: 窗口未就绪，分辨率 {}x{} 待应用", w, h);
+            return;
+        };
+        let cur = window.inner_size();
+        if cur.width == w && cur.height == h {
+            log::info!("settings: 分辨率保持 {}x{}", w, h);
+            return;
+        }
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+        log::info!("settings: 应用分辨率 {}x{}", w, h);
+    }
+
+    /// 把当前画质应用到渲染器（设置面板切换后即时生效）
+    fn apply_quality(&mut self) {
+        let preset = match self.game.hud.quality_index {
+            0 => QualityPreset::Low,
+            1 => QualityPreset::Medium,
+            _ => QualityPreset::High,
+        };
+        log::info!("settings: 应用画质 {}", preset.label());
+        // 2026-08-28：枪实例矩阵预计算（进入 renderer 借用前——防借用冲突 + 每帧一次）
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_quality(preset);
+        }
+    }
+
+    /// F12 截图：调渲染器把当前帧保存到 <平台截图目录>/steel_front_<秒时间戳>.png
+    /// （Windows = 当前目录 screenshots/；Linux 原生写 /tmp —— 本条原写作"保持 WSL2 行为"，
+    ///   而 WSL2 材料已作废（AGENTS.md 环境铁律），落盘位置本身不变。）
+    fn capture_screenshot(&mut self) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        #[cfg(windows)]
+        let path = {
+            let dir = std::path::PathBuf::from("screenshots");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(format!("steel_front_{}.png", ts))
+        };
+        #[cfg(not(windows))]
+        let path = std::path::PathBuf::from(format!("/tmp/steel_front_{}.png", ts));
+        match self.renderer.as_mut() {
+            Some(renderer) => match renderer.capture_screenshot(&path) {
+                Ok(()) => log::info!("截图已保存: {}", path.display()),
+                Err(e) => log::error!("截图失败 {}: {}", path.display(), e),
+            },
+            None => log::warn!("截图跳过：渲染器未就绪"),
+        }
+    }
+
+    /// 渲染一帧
+    fn render(&mut self) {
+        // 第一人称枪模程序化网格（相机姿态）：在借用 renderer 前生成，避免借用冲突
+        let gun_mesh = self.first_person_gun_mesh();
+        // 诊断（每 5 秒一次）：窗口 inner_size vs swapchain extent vs HUD 尺寸
+        if self.anim_clock > 5.0 && (self.anim_clock - 5.0) % 5.0 < 0.05 {
+            if let Some(win) = &self.window {
+                let is = win.inner_size();
+                log::info!(
+                    "size diag: window_inner={}x{} hud={}x{}",
+                    is.width,
+                    is.height,
+                    self.game.hud.screen_w,
+                    self.game.hud.screen_h
+                );
+            }
+        }
+        // 2026-08-28：枪实例矩阵预计算（进入 renderer 借用前）
+        // `RV3D_GUN_DIAG=1`：每秒一行枪姿态诊断 —— 姿态是**动画**，静态截图只能证明
+        // "画面变了"，证明不了"姿态项真的按状态在动"。这一行给出可判定的数字：
+        // 冲刺时 `sprint→1`、行走时 `walk_env→1`、换弹中点 `reload≈1`、开镜 `ads→1`。
+        // 判据 = `scripts\run_gunpose_probe.ps1` 的日志（见 PROGRESS §21.29）。
+        if gun_diag_on() && self.last_gun_diag.elapsed().as_secs_f32() >= 1.0 {
+            self.last_gun_diag = std::time::Instant::now();
+            let (ix, iy) = idle_sway(self.anim_clock);
+            log::info!(
+                "gundiag: sprint={:.3} walk_env={:.3} reload={:.3} idle=({:+.3},{:+.3}) ads={:.2}",
+                self.gun_sway.sprint,
+                self.gun_walk_env(),
+                crate::engine::game::reload_envelope(1.0 - self.game.hud.reload_progress),
+                ix,
+                iy,
+                self.ads_blend
+            );
+        }
+        let fp_gun_pre = {
+            let show = self.inspect_weapon.is_some()
+                || (self.game.state() == GameState::Playing
+                    && self.camera.mode == CameraMode::FirstPerson);
+            // 检视模式：顶点已居中到世界坐标，需用单位矩阵
+            if self.inspect_weapon.is_some() { glam::Mat4::IDENTITY }
+            else if show { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY }
+        };
+
+        if let Some(renderer) = &mut self.renderer {
+            // 投影宽高比取实际窗口尺寸（16:10 等非 16:9 分辨率下不拉伸）
+            let aspect = self
+                .window
+                .as_ref()
+                .map(|w| {
+                    let s = w.inner_size();
+                    s.width.max(1) as f32 / s.height.max(1) as f32
+                })
+                .unwrap_or(16.0 / 9.0);
+            if self.inspect_weapon.is_some() && !self.cam_logged {
+                self.cam_logged = true;
+                log::info!(
+                    "inspect cam: pos=({:.3},{:.3},{:.3}) target=({:.3},{:.3},{:.3}) yaw={:.3} pitch={:.3} dist={:.3} fov={:.3} aspect={:.3}",
+                    self.camera.position().x, self.camera.position().y, self.camera.position().z,
+                    self.camera.target.x, self.camera.target.y, self.camera.target.z,
+                    self.camera.yaw, self.camera.pitch, self.camera.distance,
+                    self.camera.fov.to_degrees(), aspect
+                );
+            }
+            let view = self.camera.view_matrix();
+            // 投影矩阵不翻转 Y：主 shader（triangle.vert.spv）已在 gl_Position.y 上完成
+            // Vulkan 翻转，若这里再翻一次会双重翻转导致画面上下颠倒（与 HUD shader 一致）。
+            let proj = self.camera.projection_matrix(aspect);
+
+            // 枪械检视模式：虚空环境——只画枪模（renderer 跳过地形/NPC/marker/阴影）
+            renderer.void_mode = self.inspect_weapon.is_some();
+
+            // HUD：用上一帧渲染统计生成覆盖层 quad 并上传（首帧统计为 0）
+            let (near, far, lod) = renderer.last_stats();
+            // 检视模式：无游戏 HUD（纯枪模检视画面）
+            let mut quads = if self.inspect_weapon.is_some() {
+                Vec::new()
+            } else {
+                self.game.hud_quads(near, far, lod)
+            };
+            // 命令输入窗口（Minecraft 风格左下角）：深色半透明底 + 提示符 + 闪烁光标
+            if self.command_open && self.game.state() == GameState::Playing {
+                let s = self.game.hud.ui_scale();
+                let prompt = format!("> {}{}", self.command_buf, {
+                    if (self.anim_clock * 2.0).sin() > 0.0 { '_' } else { ' ' }
+                });
+                let box_x = 10.0 * s;
+                let box_y = (800.0 - 46.0) * s;
+                let box_h = 36.0 * s;
+                let text_scale = 2.0 * s;
+                let text_w = crate::ui::text_width(&prompt, text_scale);
+                let box_w = (text_w + 26.0 * s).max(180.0 * s);
+                quads.push(crate::ui::Quad::new(
+                    crate::ui::Rect::new(box_x, box_y, box_w, box_h),
+                    crate::ui::Color::new(0.06, 0.06, 0.12, 0.72),
+                ));
+                crate::ui::render_text(
+                    &prompt,
+                    box_x + 10.0 * s,
+                    box_y + 8.0 * s,
+                    crate::ui::Color::WHITE,
+                    text_scale,
+                    &mut quads,
+                );
+                // 提示行：武器编号范围说明
+                crate::ui::render_text(
+                    "武器编号 1-35（回车切换，Esc 关闭）",
+                    box_x + 2.0 * s,
+                    box_y - 22.0 * s,
+                    crate::ui::Color::YELLOW,
+                    1.3 * s,
+                    &mut quads,
+                );
+            }
+            // 伤害飘字：准星下方逐条显示（红色，随剩余时间上浮淡出）
+            let s = self.game.hud.ui_scale();
+            let mut popup_y = 120.0 * s;
+            for (dmg, remain) in &self.hit_damage_popups {
+                let alpha = (remain / 0.6).clamp(0.0, 1.0);
+                crate::ui::render_text(
+                    &format!("-{:.0}", dmg),
+                    (self.game.hud.screen_w / s) * 0.5 * s + 12.0 * s,
+                    popup_y,
+                    crate::ui::Color::new(1.0, 0.35 * alpha, 0.25 * alpha, alpha),
+                    1.6 * s,
+                    &mut quads,
+                );
+                popup_y += 20.0 * s;
+            }
+            renderer.set_hud_quads(&quads);
+            renderer.set_lights(&self.game.light_uniform());
+            // 世界障碍 marker：关卡地图几何 → 按种类材质着色的实例（复用主 pipeline，
+            // 见 renderer.rs MARKER_SLOT_BASE；模型矩阵/材质色统一由 WorldMarker::for_obstacle
+            // 构建，与物理刚体 AABB（game.rs apply_level，同 half_w/half_d）严格同尺寸）。
+            // 用 render_geometry() 而不是 map_obstacles()：后者只含会挡人的障碍，前者还包含
+            // 挑檐/窗带/壁柱/屋顶设备这类纯装饰件（game.rs LevelMap::decor）。
+            // 但要跳过 [`engine::geom::Shape::None`]：那是 GLB 道具的碰撞核，只参与物理与
+            // 布局不变式检查，画出来会和 GLB 表面共面 z-fighting（正是 city.rs 零共面纪律
+            // 禁止的那类穿帮）。过滤放在这里而不是 render_geometry() 内部，因为 city.rs 的
+            // 布局测试需要遍历到每一个盒子。
+            // 🔴 `RV3D_DUMP_NEAR=<米>`：把**相机附近**的 marker 逐件打印出来（序号/种类/位置/尺寸/形状）。
+            //
+            // 存在理由（2026-09-12 第 83 轮）：为画面正中一组薄板，我连试五个假设
+            // （柱廊檐梁 / 退化几何 / 长椅 / 喷泉池缘 / 路缘石）**全部落空** ——
+            // 因为每次都是"整类地改"（染色/搬走/压暗一整类），而**一类里有几百个实例**，
+            // 这种做法**只能否证、不能定位**。
+            //
+            // ⇒ 这条日志把"几何是什么"变成可读的数字，而不是靠像素颜色反推
+            //    （marker 的 tint 会经光照与程序化皮肤，读回来的颜色不可靠）。
+            //    **量在程序里就直接打出来** —— 这是第 76 轮已经验证过的方法。
+            if let Ok(s) = std::env::var("RV3D_DUMP_NEAR") {
+                // ⚠ 只在**第一次**打印。这段在渲染路径里、每帧都会跑到 ——
+                //    不加守卫就是几十行/秒刷屏，把真正要看的日志冲掉（第 92 轮修）。
+                //    几何在关卡加载后是静态的，一次就够；要看别的机位就重跑一局。
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static DUMPED: AtomicBool = AtomicBool::new(false);
+                if !DUMPED.swap(true, Ordering::Relaxed) {
+                    if let Ok(r) = s.parse::<f32>() {
+                        let c = self.camera.position();
+                        for (i, o) in self.game.render_geometry().enumerate() {
+                        if o.shape == engine::geom::Shape::None {
+                            continue;
+                        }
+                        let d = glam::Vec3::new(o.x - c.x, o.y - c.y, o.z - c.z).length();
+                        if d <= r {
+                            log::info!(
+                                "near#{i} d={d:.1} {:?} @({:.1},{:.1},{:.1}) 尺寸={:.2}x{:.2}x{:.2} 高=[{:.2}..{:.2}] shape={:?}",
+                                o.kind, o.x, o.y, o.z,
+                                o.half_w * 2.0, o.half_d * 2.0, o.half_h * 2.0,
+                                o.y - o.half_h, o.y + o.half_h,
+                                o.shape
+                            );
+                        }
+                        }
+                    }
+                }
+            }
+            let markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .render_geometry()
+                .filter(|o| o.shape != engine::geom::Shape::None)
+                .map(engine::renderer::WorldMarker::for_obstacle)
+                .collect();
+            // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
+            // 每据点 = 细高立柱（归属色）+ 扁平板状底盘（归属色，不透明）。
+            // 复用 WorldMarker 通道（主 pipeline 实例化），零渲染管线改动。
+            let capture_markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .capture_points()
+                .into_iter()
+                .flat_map(|(_id, x, z, radius, owner, _progress)| {
+                    let tint = match owner {
+                        Some(crate::engine::ai::Team::Blue) => [0.08, 0.35, 0.98, 1.0],
+                        Some(crate::engine::ai::Team::Red) => [0.95, 0.12, 0.08, 1.0],
+                        None => [0.45, 0.45, 0.45, 1.0],
+                    };
+                    // 底盘配色：三通道等比缩放 → 色相/饱和度不变，归属色语义（蓝/红/灰）保持
+                    let base_tint = [tint[0] * 0.8, tint[1] * 0.8, tint[2] * 0.8, 0.6];
+                    [
+                        // 立柱（旗杆）：0.4m 见方、高 4m、底面落在地面。
+                        // 🔴 `from_scale` 传的是**半尺寸**（立方体模板 ±1，
+                        // `renderer.rs:1019 obstacle_model` 用 `scale = half / tmpl`）。
+                        // 旧值 (0.4, 4.0, 0.4) 是 2026-09-17 之前"scale = 全尺寸"的写法，
+                        // 改约定后没跟着改 ⇒ 实际画出 0.8m 宽、8m 高、底部埋进地里 2m。
+                        engine::renderer::WorldMarker {
+                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 2.0, z))
+                                * glam::Mat4::from_scale(glam::Vec3::new(0.2, 2.0, 0.2)),
+                            tint,
+                        },
+                        // 地面底盘：**半径直接取玩法的占领判定半径**，不再写魔数。
+                        // D10 根因（保留）：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，
+                        // 而地面实例平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；
+                        // 玩家视线 ~1.7m 看一层 10cm 的板几乎完全侧向 → 投影不足一像素 →
+                        // 底盘"消失"，据点读起来只剩两根电线杆。改为 0.5m 厚低台
+                        // （底面埋进地里 5cm 避免与地形之间留缝），顶面离地 ~40cm。
+                        // 🔴 第二个根因（本轮修）：这里原先硬编码 `from_scale(10.0, 0.5, 10.0)`
+                        // 并注释"半径 5.0 → scale 10.0"——那是"scale = 全尺寸"的旧约定。
+                        // 按现在的约定它画的是**半径 10m**，而玩法判定半径是
+                        // street_fight 5.0 / bridgehead 5.0·6.0 / defense_line 12.0，
+                        // ⇒ 领地标记在前两者上是真实圈子的 **2 倍**、在后者上**反而小一圈**，
+                        // 玩家靠它判断"进圈了没有"会被系统性误导。改成由 `radius` 推导，
+                        // 魔数消失，这类漂移不可能再回来。
+                        // 半高 0.25 + 中心 y=0.20 ⇒ 跨 [−0.05, +0.45]，与上面 D10 的意图逐值一致。
+                        engine::renderer::WorldMarker {
+                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.20, z))
+                                * glam::Mat4::from_scale(glam::Vec3::new(radius, 0.25, radius)),
+                            tint: base_tint,
+                        },
+                    ]
+                })
+                .collect();
+            let mut markers = markers;
+            markers.extend(capture_markers);
+            // 爆炸闪光：冲击波球壳随年龄膨胀、颜色转淡；走自发光路径（emissive 槽位，
+            // shader 直出纯色跳过光照/贴图混合），夜间等暗光环境下依然清晰可见
+            // 爆炸多层视觉（4 层同源演算，立体感：火球核 + 贴地冲击波环 + 火柱 + 烟柱）
+            let mut emissive_markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .explosions()
+                .iter()
+                .flat_map(|ex| {
+                let t = (ex.age / ex.lifetime).clamp(0.0, 1.0);
+                let cx = ex.center[0];
+                let cz = ex.center[2];
+                let r = ex.radius;
+                // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）；半透明球形
+                let fireball_t = (t * 2.8).min(1.0);
+                let fb_s = r * (0.2 + 1.2 * fireball_t);
+                let mut out = vec![engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.2, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::splat(fb_s)),
+                    tint: [
+                        1.0,
+                        0.85 * (1.0 - fireball_t) + 0.2,
+                        0.35 * (1.0 - fireball_t),
+                        0.0, // tint.w = 火（build.rs 体积光晕分支选择器）
+                    ],
+                }];
+                // ② 贴地冲击波环：扁球体（球体几何压扁）沿地面水平扩散 + 高度衰减，半透明
+                let ring_s = r * (0.4 + 1.6 * t);
+                let ring_h = (1.1 * (1.0 - t)).max(0.15);
+                out.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, ring_h * 0.5, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::new(ring_s, ring_h, ring_s)),
+                    tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, 0.0], // 火
+                });
+                // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），半透明
+                let col_h = 2.2 + 2.6 * t;
+                out.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.1 + col_h * 0.5, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::new(r * 0.5, col_h, r * 0.5)),
+                    tint: [1.0, 0.45 * (1.0 - t), 0.05, 0.0], // 火
+                });
+                // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟），半透明
+                let smoke_s = r * (0.5 + 1.4 * t);
+                let smoke_h = 2.0 + 3.0 * t;
+                out.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 0.6 + smoke_h * 0.5, cz))
+                        * glam::Mat4::from_scale(glam::Vec3::new(smoke_s, smoke_h, smoke_s)),
+                    tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, 1.0], // 烟
+                });
+                out
+                })
+                .collect();
+            // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块。
+            // 自发光槽位只有 64 个（与 build.rs 的 EMISSIVE_INSTANCE_BASE + 64 严格同步）：
+            // 128v128 压力下上百个 NPC 同时开火，按插入顺序截断会让「远处/将熄的焰」占坑、
+            // 「近处的新焰」被丢弃 —— 玩家面前因此悬浮着几团本不该存在的琥珀色圆盘（D8）。
+            // 策略：爆炸特效保底，剩余槽位按相机距离由近及远分配。
+            const MAX_EMISSIVE: usize = 64;
+            let eye = self.camera.position();
+            // 预留：爆炸特效已入列的 + 紧随其后要画的手雷（数量很小），剩下的才给粒子
+            let reserved = emissive_markers.len() + self.game.grenade_positions().len();
+            let mut cand: Vec<(f32, engine::renderer::WorldMarker)> = self
+                .particles
+                .iter()
+                .map(|p| {
+                    let t = (p.age / p.life).clamp(0.0, 1.0);
+                    let size = if p.kind == 0 {
+                        p.size * (1.0 - t * 0.7) // 焰：快速收缩
+                    } else {
+                        p.size
+                    };
+                    let fade = 1.0 - t;
+                    let d = (p.pos[0] - eye.x).powi(2)
+                        + (p.pos[1] - eye.y).powi(2)
+                        + (p.pos[2] - eye.z).powi(2);
+                    (
+                        d,
+                        engine::renderer::WorldMarker {
+                            model: glam::Mat4::from_translation(glam::Vec3::from(p.pos))
+                                * glam::Mat4::from_scale(glam::Vec3::splat(size)),
+                            tint: [
+                        p.tint[0] * fade,
+                        p.tint[1] * fade,
+                        p.tint[2] * fade,
+                        if p.kind == 0 { 0.0 } else { 1.0 }, // 焰=火，壳=固体
+                    ],
+                        },
+                    )
+                })
+                .collect();
+            cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+            emissive_markers.extend(
+                cand.into_iter()
+                    .take(MAX_EMISSIVE.saturating_sub(reserved))
+                    .map(|(_, m)| m),
+            );
+            // 手雷可见实体：深橄榄色小方块（飞行/落地均可见，复用 emissive 通道）
+            for gp in self.game.grenade_positions() {
+                emissive_markers.push(engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::from(gp))
+                        * glam::Mat4::from_scale(glam::Vec3::splat(0.16)),
+                    tint: [0.35, 0.4, 0.12, 1.0],
+                });
+            }
+            // 弹孔：子弹打在障碍表面的着弹标记（`game.rs::impact_marks`）。
+            // 单独一批、只追加进光栅 marker 列表 —— 不喂 PT 场景（弹孔每枪都变，
+            // 会让 BLAS 指纹每帧重建，也白占 PT 盒容量）。方片的局部 +Z 用
+            // `ImpactMark::basis()` 摆到表面法线上，**右手基**是硬要求（否则正面绕序反掉）。
+            let decal_markers: Vec<engine::renderer::WorldMarker> = self
+                .game
+                .impact_marks()
+                .iter()
+                .map(|m| {
+                    let (t, u, n) = m.basis();
+                    let half = DECAL_SIZE_M * 0.5 * m.size_envelope();
+                    engine::renderer::WorldMarker {
+                        model: glam::Mat4::from_cols(
+                            (glam::Vec3::from(t) * half).extend(0.0),
+                            (glam::Vec3::from(u) * half).extend(0.0),
+                            (glam::Vec3::from(n) * (DECAL_THICK_M * 0.5)).extend(0.0),
+                            glam::Vec4::new(
+                                m.pos[0] + m.normal[0] * DECAL_LIFT_M,
+                                m.pos[1] + m.normal[1] * DECAL_LIFT_M,
+                                m.pos[2] + m.normal[2] * DECAL_LIFT_M,
+                                1.0,
+                            ),
+                        ),
+                        // `Shape::Authored`（tint.w = 6.0）在这里是**故意**用的：
+                        // 它让片元跳过"给纯 tint 盒子补细节"的四条程序化效果（窗带/玻璃分格/
+                        // 树冠噪声/混凝土皮肤）。弹孔要的就是一块**纯色暗方片** ——
+                        // 走 marker 皮肤路径会给它采样一层墙纹，看起来像贴了一块小面板。
+                        tint: [0.035, 0.030, 0.026, engine::geom::Shape::TAG_AUTHORED],
+                    }
+                })
+                .collect();
+            renderer.set_world_markers(&markers);
+            renderer.append_markers(&decal_markers);
+            renderer.set_emissive_markers(&emissive_markers);
+            // ---- GLB 道具几何上传 ----
+            // 套件懒加载一次（重载地图不必重新解析 24 个 GLB）；几何只在**地图代号变化**
+            // 时重传：一次合并是百万级顶点的 CPU 拷贝，绝不能进每帧路径。
+            // 读不到 assets/props 只意味着城市退回纯程序化外观，不是错误。
+            if self.prop_set.is_none() {
+                self.prop_set = Some(match engine::props::PropSet::load_dir("assets/props") {
+                    Ok(s) => {
+                        log::info!("props: 渲染侧载入 {} 件网格", s.len());
+                        s
+                    }
+                    Err(e) => {
+                        log::info!("props: 渲染侧未载入（{e}），不绘制道具");
+                        Default::default()
+                    }
+                });
+            }
+            let map_gen = self.game.map_generation();
+            if map_gen != self.prop_map_gen {
+                self.prop_map_gen = map_gen;
+                if let Some(set) = self.prop_set.as_ref() {
+                    if !set.is_empty() {
+                        renderer.set_props(set, self.game.prop_placements());
+                    }
+                }
+            }
+            // 🔴 `RV3D_EXPORT_CITY=<path>`：把本关**完整城市布局**（太阳/环境光 + marker
+            //    盒 + GLB 道具摆放）导出为 JSON，供 `tools/blender/prerender_city.py`
+            //    在无头 Blender 里合成**同布局预渲染参照帧**（建模/光照/烘焙的独立真值，
+            //    不经游戏光栅管线）。坐标系原样输出游戏约定（右手 Y-up，米，道具 yaw 绕 +Y），
+            //    轴变换归 Blender 脚本管。一次性导出（写成功才置位，早帧数据不全可重试）。
+            if let Ok(path) = std::env::var("RV3D_EXPORT_CITY") {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static CITY_EXPORTED: AtomicBool = AtomicBool::new(false);
+                if !CITY_EXPORTED.load(Ordering::Relaxed) {
+                    let placements = self.game.prop_placements();
+                    let set_guard = self.prop_set.as_ref();
+                    if let Some(set) = set_guard.filter(|s| !s.is_empty()) {
+                        if !placements.is_empty() {
+                            let lu = self.game.light_uniform();
+                            let mut mj: Vec<String> = Vec::new();
+                            for o in self.game.render_geometry() {
+                                if o.shape == engine::geom::Shape::None {
+                                    continue;
+                                }
+                                // tint 与渲染侧同源：for_obstacle 内含调色板+逐件抖动
+                                let t = engine::renderer::WorldMarker::for_obstacle(&o).tint;
+                                mj.push(format!(
+                                    "{{\"kind\":\"{:?}\",\"x\":{:.3},\"y\":{:.3},\"z\":{:.3},\"hw\":{:.3},\"hh\":{:.3},\"hd\":{:.3},\"tint\":[{:.4},{:.4},{:.4}]}}",
+                                    o.kind, o.x, o.y, o.z, o.half_w, o.half_h, o.half_d,
+                                    t[0], t[1], t[2]
+                                ));
+                            }
+                            let pj: Vec<String> = placements
+                                .iter()
+                                .map(|p| {
+                                    format!(
+                                        "{{\"mesh\":\"{}\",\"x\":{:.3},\"y\":{:.3},\"z\":{:.3},\"yaw\":{:.4},\"scale\":{:.4}}}",
+                                        set.meshes[p.mesh].name, p.x, p.y, p.z, p.yaw, p.scale
+                                    )
+                                })
+                                .collect();
+                            let d = lu.directional;
+                            let json = format!(
+                                "{{\"version\":1,\"handedness\":\"right_y_up_meters\",\"sun\":{{\"dir\":[{:.5},{:.5},{:.5}],\"color\":[{:.4},{:.4},{:.4}],\"intensity\":{:.4}}},\"ambient\":{{\"color\":[{:.4},{:.4},{:.4}],\"intensity\":{:.4}}},\"markers\":[{}],\"props\":[{}]}}",
+                                d.direction.x, d.direction.y, d.direction.z,
+                                d.color_intensity.x, d.color_intensity.y, d.color_intensity.z, d.color_intensity.w,
+                                lu.ambient.x, lu.ambient.y, lu.ambient.z, lu.ambient.w,
+                                mj.join(","),
+                                pj.join(",")
+                            );
+                            match std::fs::write(&path, json.as_bytes()) {
+                                Ok(()) => {
+                                    CITY_EXPORTED.store(true, Ordering::Relaxed);
+                                    log::info!(
+                                        "CITY-EXPORT: {} 字节 → {}（marker {} + 道具 {}）",
+                                        json.len(), path, mj.len(), pj.len()
+                                    );
+                                }
+                                Err(e) => log::error!("CITY-EXPORT 写入失败 {path}: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
+            // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
+            // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）；
+            // 动画字段：移动中摆臂摆腿（步态）、攻击态枪身后坐脉冲
+            let now_ids: std::collections::HashSet<usize> =
+                self.game.npcs.iter().map(|n| n.id).collect();
+            // 尸体跟踪：本帧消失的 NPC id（被击杀移除）→ 从上一帧快照找回位置/朝向/阵营
+            for id in self.last_npc_snapshot.keys() {
+                if !now_ids.contains(id) {
+                    if let Some((pos, yaw, tint)) = self.last_npc_snapshot.get(id) {
+                        self.corpses.push((*pos, *yaw, *tint, 0.0));
+                    }
+                }
+            }
+            // 更新快照（供下一帧 diff）
+            self.last_npc_snapshot = self
+                .game
+                .npcs
+                .iter()
+                .map(|n| {
+                    let tint = match n.team {
+                        Team::Red => [0.95, 0.12, 0.08, 1.0],
+                        Team::Blue => [0.08, 0.35, 0.98, 1.0],
+                    };
+                    (n.id, (n.position, n.facing, tint))
+                })
+                .collect();
+            // 客户端联机模式：显示服务器世界（快照实体：位置/朝向/血量来自服务器权威），
+            // 阵营色借用本地同 id NPC 的归属（同一确定性地图/波次，id 对齐）
+            //
+            // 进画面的规则：id 段 >=100_000 是远端玩家、id==0 是本机玩家槽，两者无条件进；
+            // 剩下的都是本地 NPC（id < 100_000），只有活着才进。
+            // 原来写成 `(id<100k && hp>0) || id==0 || id>=100k`：`id==0` 已被 `id<100k`
+            // 覆盖，而 `id>=100k` 恰好是 `id<100k` 的反面，吸收律化简后那段 id 判据是多余的
+            // （clippy::nonminimal_bool 报的就是这个）。化简式逐档等价。
+            let net_mode = self.game.net_client.is_some();
+            // 🔴 渲染剔除走**分摊刷新缓存**（2026-09-26 实测优化）：
+            // 原来每帧对全部 NPC 直接调 `npc_occluded`（每次最坏 2×1240 次 AABB 相交），
+            // 而枪口焰那段**又调了一遍** ⇒ 压力场景 510 次/帧、`cull-diag` 实测中位
+            // **102 ms/s（≈18% 帧预算）**。现在一帧只刷新 1/N 的 NPC，两条路共用同一份结果。
+            // 判据 = `cull-diag: <us>/s`（`RV3D_CULL_DIAG=1`）与 `npc_vis_scans`。
+            self.game.refresh_npc_visibility();
+            let vis = self.game.npc_visibility_flags();
+            let npc_visuals: Vec<engine::renderer::NpcVisual> = if net_mode {
+                let client = self.game.net_client.as_ref().unwrap();
+                client
+                    .entities()
+                    .iter()
+                    .filter(|(id, e)| **id >= net::NET_PLAYER_BASE || **id == 0 || e.hp > 0.0)
+                    .map(|(id, e)| {
+                        // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
+                        let tint = if e.hp > 0.0 {
+                            if e.team == 1 { [0.08, 0.35, 0.98, 1.0] } else { [0.95, 0.12, 0.08, 1.0] }
+                        } else {
+                            [0.32, 0.32, 0.32, 1.0]
+                        };
+                        // 🔴 2026-09-26：这里以前直接用 `e.state.curr`（最新**收到**的那帧），
+                        // 于是远端实体按快照频率一顿一顿地跳、包抖动时更明显 ——
+                        // `RemotePlayer::delay` 一直是 0，插值器等于没接线。
+                        // 现按 `entity_state_at`（客户端内部用"now - 快照间隔"取值）取平滑位置；
+                        // 取不到时退回 curr（不改变任何极端情况下的行为）。
+                        let st = client
+                            .entity_state_at(*id, client.now())
+                            .unwrap_or(e.state.curr);
+                        engine::renderer::NpcVisual {
+                            pos: st.pos,
+                            yaw: st.rot,
+                            tint,
+                            phase: self.anim_clock,
+                            moving: true,
+                            firing: e.firing,
+                        }
+                    })
+                    .collect()
+            } else {
+                // RV3D_NO_NPC_CULL=1：跳过"玩家看不到就不画"的剔除。
+                //
+                // 该剔除**以玩家眼位为准**（`npc_occluded` 内部用 `player_eye()`，不是相机），
+                // 这在玩法上是**正确**的：玩家隔着楼不该看见人。但**调试相机不是玩家** ——
+                // 用 `RV3D_NPC_CAM` 把相机摆到 160m 外某个 NPC 跟前时，目标仍会被
+                // "玩家视角"的判定剔掉。实测玩家站在原点时，255 人只有 **16 人**上屏
+                //（`npcvis: 收到 16 个 NPC`，段数 144+128=272），这正是取景一路扑空的真因。
+                // 关掉剔除后调试机位才看得到目标。
+                let cull = std::env::var("RV3D_NO_NPC_CULL").is_err();
+                self
+                .game
+                .npcs
+                .iter()
+                .enumerate()
+                // 隔墙透视修复：被障碍物完全遮挡的 NPC 不渲染（`vis[i]` 即该判定）
+                .filter(|(i, _)| !cull || vis.get(*i).copied().unwrap_or(true))
+                .map(|(_, n)| {
+                    let base = self
+                        .last_npc_snapshot
+                        .get(&n.id)
+                        .map(|(_, _, t)| *t)
+                        .unwrap_or(match n.team {
+                            Team::Red => [0.95, 0.12, 0.08, 1.0],
+                            Team::Blue => [0.08, 0.35, 0.98, 1.0],
+                        });
+                    // 受击反馈：命中瞬间闪白（按剩余强度混合白色）
+                    let flash = self.game.npc_flash(n.id);
+                    let tint = if flash > 0.0 {
+                        let k = flash * 0.85;
+                        [
+                            base[0] + (1.0 - base[0]) * k,
+                            base[1] + (1.0 - base[1]) * k,
+                            base[2] + (1.0 - base[2]) * k,
+                            1.0,
+                        ]
+                    } else {
+                        base
+                    };
+                    engine::renderer::NpcVisual {
+                        pos: n.position,
+                        yaw: n.facing,
+                        tint,
+                        phase: self.anim_clock,
+                        moving: n.speed > 0.5
+                            && matches!(
+                                n.state_machine.state(),
+                                crate::engine::ai::NpcState::Patrol
+                                    | crate::engine::ai::NpcState::Chase
+                            ),
+                        firing: n.state_machine.state() == crate::engine::ai::NpcState::Attack,
+                    }
+                })
+                .collect()
+            };
+            // （士兵 GLB 的上传已移到 `Renderer::new` 之后，见那里的注释：
+            renderer.set_npc_visuals(&npc_visuals);
+            // RV3D_CULL_DIAG=1：每秒报一次「NPC 遮挡剔除」的实测成本 —— 先量再改的尺子。
+            // 判据 = `cull-diag: <us>/s calls=<N> npcs=<M> bodies=<B>`（关着时零成本）。
+            if engine::game::cull_diag_on() && self.last_cull_diag.elapsed().as_secs_f32() >= 1.0 {
+                let us = self.game.occl_us.replace(0);
+                let calls = self.game.occl_calls.replace(0);
+                let scans = self.game.npc_vis_scans.replace(0);
+                log::info!(
+                    "cull-diag: {} us/s calls={} recomputed={} npcs={} bodies={}",
+                    us,
+                    calls,
+                    scans,
+                    self.game.npcs.len(),
+                    self.game.world.bodies.len()
+                );
+                self.last_cull_diag = std::time::Instant::now();
+            }
+            // NPC 枪口焰/弹壳：攻击态 NPC 限流生成（每帧最多 4 个，按 id 相位轮转避免全爆发）
+            //
+            // 🔴 判据顺序是有意的（2026-09-26）：**先筛状态、再查可见性**。旧顺序反过来 ——
+            // 于是为了挑出最多 4 个开火者，每帧对**全部 255 个** NPC 都做了一次遮挡测试
+            // （就算它根本没在开火）。现在开火态先出局，遮挡测试只落在少数开火者身上，
+            // 而且用的是上面那份**同一份**缓存（`vis`），不再有第二次全量扫描。
+            let mut firing_npcs: Vec<[f32; 3]> = self
+                .game
+                .npcs
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.state_machine.state() == crate::engine::ai::NpcState::Attack)
+                .filter(|(i, _)| vis.get(*i).copied().unwrap_or(true))
+                .map(|(_, n)| n)
+                .filter(|n| (n.id as f32 + self.anim_clock * 6.0) % 4.0 < 1.0)
+                .take(4)
+                .map(|n| {
+                    // 枪口世界位置：facing 为绕 Y 旋转角（0 = +Z），枪口在身前 0.85m、高 1.3m
+                    let (s, c) = n.facing.sin_cos();
+                    [
+                        n.position[0] + s * 0.85,
+                        1.3,
+                        n.position[2] + c * 0.85,
+                    ]
+                })
+                .collect();
+            // 网络远端实体开火 → 同链路枪口焰（你看到对面玩家开枪的火光）
+            if let Some(client) = self.game.net_client.as_ref() {
+                for (id, e) in client.entities().iter() {
+                    if e.firing && e.hp > 0.0 {
+                        let st = client
+                            .entity_state_at(*id, client.now())
+                            .unwrap_or(e.state.curr);
+                        let (s, c) = st.rot.sin_cos();
+                        firing_npcs.push([
+                            st.pos[0] + s * 0.85,
+                            st.pos[1] + 0.15,
+                            st.pos[2] + c * 0.85,
+                        ]);
+                    }
+                }
+            }
+            for muzzle in firing_npcs {
+                self.particles.push(Particle {
+                    pos: muzzle,
+                    vel: [0.0, 0.0, 0.0],
+                    age: 0.0,
+                    life: 0.07,
+                    size: 0.14,
+                    tint: [1.0, 0.7, 0.2, 1.0],
+                    kind: 0,
+                });
+            }
+            // 尸体渲染（躺倒姿态，7 段/具；与活体共用 NPC 槽位区）
+            let dead_visuals: Vec<engine::renderer::NpcVisual> = self
+                .corpses
+                .iter()
+                .map(|(pos, yaw, tint, _age)| engine::renderer::NpcVisual {
+                    pos: *pos,
+                    yaw: *yaw,
+                    tint: *tint,
+                    phase: 0.0,
+                    moving: false,
+                    firing: false,
+                })
+                .collect();
+            renderer.set_dead_bodies(&dead_visuals);
+
+            // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
+            // 枪模仅在第一人称游玩或检视模式渲染：结算/其它相机态下隐藏
+            // （否则枪模会按锚点漂浮在场景中——2-4 反馈“变成 M1 加兰德”观感）
+            let show_gun = self.inspect_weapon.is_some()
+                || (self.game.state() == GameState::Playing
+                    && self.camera.mode == CameraMode::FirstPerson);
+            if show_gun {
+                renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+                renderer.set_first_person_gun_model(fp_gun_pre);
+            } else {
+                renderer.set_first_person_gun_mesh(&[], &[]);
+                renderer.set_first_person_gun_model(fp_gun_pre);
+            }
+
+            // 尺寸保险（2026-08-15）：窗口实际尺寸与交换链不一致时重建——
+            // 覆盖 DPI 缩放/全屏切换等任何导致 swapchain 与窗口错位的场景，
+            // 根治"画面只显示左上角"（1:1 呈现但尺寸不匹配）。
+            let (sw, sh) = renderer.swapchain_size();
+            if let Some(win) = &self.window {
+                let is = win.inner_size();
+                if (is.width != sw || is.height != sh) && is.width > 0 && is.height > 0 {
+                    // 🔴 降级/设备丢失时**不再每帧重试**：这一处曾每帧刷 1 条 WARN + 2 条 ERROR
+                    // （实测设备丢失后 12 秒 1961 轮、5900 行日志，而画面一帧都不更新）。
+                    // 判据 = `Renderer::swapchain_recovery_allowed`。
+                    if renderer.swapchain_recovery_allowed() {
+                        log::warn!(
+                            "size mismatch: window={}x{} swapchain={}x{} → 重建交换链",
+                            is.width, is.height, sw, sh
+                        );
+                        if let Err(e) = renderer.recreate_swapchain() {
+                            log::error!("尺寸自检重建交换链失败：{}", e);
+                        }
+                    }
+                    let _ = self.game.hud.set_screen_size(is.width as f32, is.height as f32);
+                }
+            }
+            // PT 取景：与光栅化同一相机、同一太阳方向（路径追踪要当烘焙参照，参数必须同源）
+            let lu = self.game.light_uniform();
+            renderer.set_pt_params(crate::engine::ray_tracer::PtParams {
+                cam: self.camera.position(),
+                fwd: self.camera.forward(),
+                tan_half_fov: (self.camera.fov * 0.5).tan(),
+                bounces: 6,
+                sun_dir: lu.directional.direction.truncate(),
+                sun_color: lu.directional.color_intensity.truncate()
+                    * lu.directional.color_intensity.w,
+                // 曝光 = 标定值（默认 0.4，见 ray_tracer.rs 的常量注释）：光栅把反照率乘在
+                // tone 之外（alb×(1-exp(-1.55L))），PT 物理正确在之内；0.4 使两模型在
+                // albedo 0.1~0.8 区间分区均值互差 ≤15%。现由 config.rs 持久化、可被
+                // RV3D_PT_EXPOSURE 覆盖，不再是硬编码字面量（未结案 #11 的最后一小项）。
+                exposure: self.game.hud.pt_exposure,
+            });
+            // PT 场景 = 光栅化同一批 WorldMarker（盒集合变化时才重建 BLAS，指纹判定在渲染器内）
+            if let Err(e) = renderer.pt_set_scene_markers(&markers) {
+                log::warn!("PT-SCENE 失败: {e}");
+            }
+            if let Err(e) = renderer.render(view, proj) {
+                if e == "交换链过期" {
+                    log::warn!("交换链过期，尝试重建...");
+                    if renderer.swapchain_recovery_allowed() {
+                        if let Err(e2) = renderer.recreate_swapchain() {
+                            log::error!("交换链过期后重建失败：{}", e2);
+                        }
+                    }
+                } else {
+                    log::error!("渲染错误: {}", e);
+                }
+            }
+            // 性能日志采样（1s 一行；帧率由 perf_log 自己按窗口算，见 perf_log.rs）
+            if let Some(pl) = self.perf_log.as_mut() {
+                let snap = renderer.perf_snapshot();
+                let (near, _, _) = renderer.last_stats();
+                let _ = pl.frame(self.frame_dt_us, near, &snap);
+            }
+        }
+    }
+}
+
+impl ApplicationHandler for GameApp {
+    /// 应用恢复/启动时创建窗口和渲染器
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        // 首次运行（配置无显式分辨率）：按显示器宽高比选默认
+        // 16:10 → 1280x800，16:9 及其它 → 1280x720
+        if !self.resolution_explicit {
+            // Wayland 没有"主显示器"概念（winit primary_monitor() 恒 None），
+            // 回退到面积最大的可用显示器；两者都拿不到时退回 1280x720
+            let monitor = event_loop.primary_monitor().or_else(|| {
+                event_loop
+                    .available_monitors()
+                    .max_by_key(|m| m.size().width * m.size().height)
+            });
+            let default_res = monitor
+                .map(|m| {
+                    let size = m.size();
+                    let aspect = size.width as f32 / size.height.max(1) as f32;
+                    log::info!("显示器: {}x{} aspect={:.3}", size.width, size.height, aspect);
+                    if (1.5..=1.67).contains(&aspect) {
+                        (1280, 800)
+                    } else {
+                        (1280, 720)
+                    }
+                })
+                .unwrap_or((1280, 720));
+            self.game.hud.resolution_index = RESOLUTIONS
+                .iter()
+                .position(|&r| r == default_res)
+                .unwrap_or(0) as u8;
+            log::info!("默认分辨率: {}x{}", default_res.0, default_res.1);
+        }
+
+        // ---- 创建窗口（尺寸取 HUD 当前分辨率：配置显式值或按显示器选定的默认值）----
+        let (w, h) = self.game.hud.resolution();
+        // 夹进显示器物理尺寸（防超屏 → 内容只显示左上角），并**保持物理像素语义**
+        // —— 这里绝不能再出现 `/1.5` 那类按某台机器标定出来的缩放系数，理由见
+        // `window_physical_request` 的文档（判据 `window_request_is_physical_and_clamped`）。
+        // Wayland 下 `primary_monitor()` 恒为 None（没有主显示器概念）⇒ 不夹取；
+        // 这不是缺陷，是这个后端的语义（同文件 `resumed` 上面的默认分辨率选择已同样处理）。
+        let monitor_size = event_loop.primary_monitor().map(|m| {
+            let s = m.size();
+            (s.width, s.height)
+        });
+        let (w, h) = window_physical_request(w, h, monitor_size);
+        if (w, h) != self.game.hud.resolution() {
+            log::warn!(
+                "请求分辨率 {}x{} 超过显示器 {:?}，已等比缩到 {}x{}",
+                self.game.hud.resolution().0,
+                self.game.hud.resolution().1,
+                monitor_size,
+                w,
+                h
+            );
+        }
+        // 无边框窗口：请求分辨率等于显示器物理尺寸时窗口恰好铺满屏幕，无标题栏/边框挤压
+        // （否则窗口比屏幕略大 → 合成器裁切 → 内容偏左上角）。
+        // 🔴 尺寸一律 `PhysicalSize`：`w`/`h` 与 `monitor.size()` **都是物理像素**，
+        // 用 `LogicalSize` 等于让 winit 再乘一次 scale_factor（Windows 那台 scale=1.5 时
+        // 就是靠手写的 `/1.5` 抵消的 —— 换个平台必然错）。
+        let winit_attr = Window::default_attributes()
+            .with_title(window::WINDOW_TITLE)
+            .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
+            .with_position(winit::dpi::PhysicalPosition::new(0, 0))
+            .with_decorations(false);
+
+        let window = match event_loop.create_window(winit_attr) {
+            Ok(w) => w,
+            Err(e) => {
+                let msg = format!("创建窗口失败: {e:?}");
+                log::error!("{msg}");
+                self.fatal = Some(msg);
+                event_loop.exit();
+                return;
+            }
+        };
+
+        log::info!("窗口创建成功: {}x{}", w, h);
+
+        // 🔴 2026-09-13：造一个 **1×1 全透明光标**，捕获时用它。
+        // 为什么需要它（两个约束互相冲突，这是唯一的交集）：
+        //   * winit 若认为光标"已隐藏"（`CursorFlags::HIDDEN`），在 Confined 模式下会把指针
+        //     **钉在窗口中心 1×1**（`window_state.rs::refresh_os_cursor`）⇒ 我们靠
+        //     `CursorMoved` 增量算视角，`dx` 恒 0 ⇒ **视角纹丝不动**（用户实测）。
+        //   * 但把光标设成可见，屏幕上就**一直浮着一个箭头**（用户 2026-09-13 反馈）。
+        // ⇒ winit **只看自己的标志位，从不看光标图像**。所以"不隐藏 + 图像全透明"两边都满足。
+        // `CustomCursor` 必须由事件循环创建（`create_custom_cursor`），所以在这里做一次。
+        self.blank_cursor =
+            match winit::window::CustomCursor::from_rgba(vec![0u8, 0, 0, 0], 1, 1, 0, 0) {
+            Ok(src) => Some(event_loop.create_custom_cursor(src)),
+            Err(e) => {
+                log::warn!("无法创建透明光标（{e:?}），捕获时会显示系统箭头");
+                None
+            }
+        };
+        log::info!(
+            "winit inner_size: {}x{} scale_factor={:.2}",
+            window.inner_size().width,
+            window.inner_size().height,
+            window.scale_factor()
+        );
+
+        // ---- 初始化 Vulkan 渲染器 ----
+        match Renderer::new(&window) {
+            Ok(mut renderer) => {
+                log::info!("Vulkan 渲染器初始化成功");
+                // 🪖 士兵 GLB（2026-09-13）：**在这里上传，只做一次**。
+                //
+                // 🔴 为什么不放在每帧的 `render()` 里（我放错过两次）：
+                // 那个调用点在 `MainWindow::render()` 的某个状态分支内，**并不是每帧都执行** ——
+                // 用 `RV3D_NPC_CAM` 起调试机位时就走不到，于是 `soldier_vertex_count` 恒为 0，
+                // 而 `set_npc_visuals` / `set_dead_bodies` 都靠它判断走 GLB 还是回退箱体
+                // ⇒ **整个画面悄悄退回 18 段箱体**（实测 HUD `npc:` 从 17 跳回 1255），
+                // 而且不报任何错。**放在这里就结构上不可能被跳过。**
+                //
+                // 与枪模同源的做法：启动时上传一次，之后 `set_soldier_mesh` 的幂等守卫保证
+                // 再调用也无害（它现在只会在 `soldier_vertex_count == 0` 时才真的分配）。
+                //
+                // ⚠️ 顶点**不做任何归一化**：`soldier.glb` 是按铁律 D 的约定导出的
+                // （1 单位 = 1 米、原点在底面中心、`export_yup=True`），本来就是引擎要的尺度与朝向；
+                // 枪模那套"缩放到 0.94m + 居中 + 长轴对齐 +Z"是针对 Sketchfab 抠件的，**不要照抄**。
+                if let Some((sv, si)) = Self::load_soldier_glb() {
+                    renderer.set_soldier_mesh(&sv, &si);
+                }
+                // ---- RT core 纯求交吞吐基准（RV3D_PT_BENCH=1）----
+                if std::env::var("RV3D_PT_BENCH").as_deref() == Ok("1") {
+                    let boxes = vec![
+                        crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [50.0, 0.5, 50.0], material: 0 },
+                        crate::engine::ray_tracer::PtBox { center: [1.0, 1.0, 0.0], half: [2.0, 2.0, 1.0], material: 1 },
+                        crate::engine::ray_tracer::PtBox { center: [-4.0, 1.5, -2.0], half: [1.5, 1.5, 1.5], material: 2 },
+                        crate::engine::ray_tracer::PtBox { center: [0.5, 1.0, 5.0], half: [0.8, 0.8, 0.8], material: 3 },
+                    ];
+                    match renderer.run_pt_bench(&boxes, 1 << 20, 200) {
+                        Ok((mrays, hits)) => log::info!(
+                            "RT-BENCH: 1M射线 x 200 = 2亿射线, 命中 {hits}, {mrays:.1} Mrays/s"
+                        ),
+                        Err(e) => log::error!("RT-BENCH 失败: {e}"),
+                    }
+                }
+                // PT 参考帧（RV3D_PT_VIEW=1）
+                if std::env::var("RV3D_PT_VIEW").as_deref() == Ok("1") {
+                    let boxes = vec![
+                        crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [8.0, 0.5, 8.0], material: 0 },
+                        crate::engine::ray_tracer::PtBox { center: [0.0, 0.5, -2.0], half: [0.8, 0.8, 0.8], material: 1 },
+                        crate::engine::ray_tracer::PtBox { center: [-2.5, 0.7, 1.0], half: [0.5, 0.7, 0.5], material: 2 },
+                        crate::engine::ray_tracer::PtBox { center: [2.5, 0.5, 1.5], half: [0.6, 0.4, 0.6], material: 3 },
+                    ];
+                    // 取景：相机在 +Z 侧看向原点，与上面的玩具盒场景（地面 8m 见方）对得上
+                    renderer.set_pt_params(crate::engine::ray_tracer::PtParams {
+                        cam: glam::Vec3::new(0.0, 1.7, 6.5),
+                        fwd: glam::Vec3::new(0.0, -0.18, -0.98),
+                        tan_half_fov: (60f32.to_radians() * 0.5).tan(),
+                        bounces: 6,
+                        sun_dir: crate::engine::ray_tracer::PT_SUN_DIR.into(),
+                        sun_color: glam::Vec3::splat(1.0) * crate::engine::ray_tracer::PT_SUN_INTENSITY,
+                        exposure: 0.5,
+                    });
+                    match renderer.run_pt_view(&boxes, 256) {
+                        Ok(()) => log::info!("PT-VIEW: 参考帧已输出 screenshots/pt_ref.bmp (256x256)"),
+                        Err(e) => log::error!("PT-VIEW 失败: {e}"),
+                    }
+                }
+                // 2026-08-29：路径追踪全景开关（设置面板 pt_enable；默认开）
+            let mut renderer = renderer;
+            // RV3D_PT_LIVE: 0=强制关 1=强制开 未设=跟随配置
+            // 🔴 常驻资源与这个开关**同源**（判据 = `pt_resident_needed` 的两个单测）：
+            // 以前 `RV3D_PT_LIVE=1` 只改 `pt_live_enabled`，常驻资源却只在配置开着时构建，
+            // 而 PT 出画还要求 `pt_resident.is_some()` ⇒ 那个"强制开"实际**一帧都跑不出来**，
+            // 外面只看到"开着、画面没变"（2026-09-25 的 PT 验证就是这么空跑一次）。
+            let pt_cfg = crate::config::load().pt_enable;
+            let pt_live_env = std::env::var("RV3D_PT_LIVE").ok();
+            renderer.pt_live_enabled = match pt_live_env.as_deref() {
+                Some("1") => true,
+                Some("0") => false,
+                _ => pt_cfg,
+            };
+            if crate::engine::renderer::pt_resident_needed(pt_cfg, pt_live_env.as_deref()) {
+                // RV3D_PT_SIZE：实时 PT 渲染分辨率（**等比**缩放到该宽度；调高可验证 RT 通路真在算，
+                // 也可为光照烘焙取更高分辨率参照帧）
+                // 未设时对齐窗口物理尺寸（2560×1600！）；两者都对齐 8 的倍数
+                // （判据 = `engine::renderer::pt_render_extent` 的单测）
+                let win_sz = window.inner_size();
+                let size_env = std::env::var("RV3D_PT_SIZE").ok().and_then(|v| v.parse::<u32>().ok());
+                let (pt_w, pt_h) =
+                    crate::engine::renderer::pt_render_extent(win_sz.width, win_sz.height, size_env);
+                if let Err(e) = renderer.init_pt_resident(pt_w, pt_h) {
+                    log::info!("PT-RESIDENT init: {e}");
+                }
+            }
+            log::info!("RT: 路径追踪全景 = {}", if renderer.pt_live_enabled { "开启" } else { "关闭" });
+            self.renderer = Some(renderer);
+            }
+            Err(e) => {
+                let msg = format!("渲染器初始化失败: {e}");
+                log::error!("{msg}");
+                self.fatal = Some(msg);
+                event_loop.exit();
+                return;
+            }
+        }
+
+        self.window = Some(window);
+        if let Some(win) = &self.window {
+            let size = win.inner_size();
+            self.game.hud.set_screen_size(size.width as f32, size.height as f32);
+        }
+        self.last_frame = Instant::now();
+
+        // 应用持久化的分辨率与画质（窗口/渲染器就绪后即时生效）
+        self.apply_resolution();
+        self.apply_quality();
+
+        // ---- 性能日志（每次启动一份 logs/perf_*.log）----
+        let gpu = self
+            .renderer
+            .as_ref()
+            .map(|r| r.gpu_name())
+            .unwrap_or_else(|| "未知".to_string());
+        let topo = crate::engine::cpu::topology();
+        let vendor = match topo.vendor {
+            crate::engine::cpu::CpuVendor::Amd => "AMD",
+            crate::engine::cpu::CpuVendor::Intel => "Intel",
+            crate::engine::cpu::CpuVendor::Other => "Other",
+        };
+        let cpu = format!("{} {}线程", vendor, topo.threads);
+        let size = self.window.as_ref().map(|w| w.inner_size()).unwrap_or_default();
+        let header = format!(
+            "版本: {} | 启动: {} | GPU: {} | CPU: {} | 窗口: {}x{}",
+            env!("CARGO_PKG_VERSION"),
+            perf_log::now_human(),
+            gpu,
+            cpu,
+            size.width,
+            size.height
+        );
+        self.perf_log = perf_log::PerfLog::create(&header);
+        if self.perf_log.is_some() {
+            log::info!("性能日志已创建（logs/perf_*.log）");
+        }
+    }
+
+    /// 设备级事件：系统相对鼠标增量（XInput2 raw motion，与光标位置无关）驱动视角。
+    /// 捕获态唯一视角输入源：raw 增量是设备原始计数，与指针位置/grab 状态无关，
+    /// 不依赖窗口内指针位置，也不产生"每帧回中 warp → 回声"反馈环。
+    /// 用户事件（菜单点击退出用代理发送）：收到即退出事件循环
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
+        log::info!("input: 收到退出事件，退出游戏");
+        self.running = false;
+        if let Some(pl) = self.perf_log.as_mut() {
+            pl.finish();
+            self.perf_log = None;
+        }
+        event_loop.exit();
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            // raw 相对增量仅在 Locked grab 可用时有效（真实设备级增量）；
+            // WSLg/Xwayland（Locked 失败）真实鼠标不产生 raw 事件，走绝对位置路径。
+            if self.cursor_captured && self.cursor_locked {
+                // 捕获瞬间回中 warp 的 raw 回声在 recenter 窗口期（150ms）内到达：
+                // 跳过，避免把"捕获前光标到窗口中心的差量"当成视角位移。
+                // 真实鼠标移动不受限制：raw 增量直接驱动视角（不能用绝对像素阈值
+                // 过滤，见 MAX_LOOK_DELTA_PX 注释）。
+                if let Some(until) = self.recenter_pending_until {
+                    if Instant::now() < until {
+                        return;
+                    }
+                    self.recenter_pending_until = None;
+                }
+                let (dx, dy) = (delta.0 as f32, delta.1 as f32);
+                // raw 单事件超物理上限：残留 warp 回声，跳过（防反馈环自转）
+                if delta.0.abs() > MAX_RAW_LOOK_DELTA || delta.1.abs() > MAX_RAW_LOOK_DELTA {
+                    return;
+                }
+                match self.camera.mode {
+                    CameraMode::FirstPerson => self.camera.look(dx, dy),
+                    CameraMode::Orbit => self.camera.orbit(dx, dy),
+                    CameraMode::Flight => {
+                        self.camera.set_rotation_active(true);
+                        self.camera.add_rotation_input(dx, dy);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 处理窗口事件
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            // 关闭窗口请求
+            WindowEvent::CloseRequested => {
+                log::info!("窗口关闭请求，退出程序");
+                // 🔴 2026-09-26：正常退出时给服务端发一条 Leave —— 否则服务端要等
+                // SERVER_TIMEOUT(5s) 才摘掉我们，而在这 5 秒里**每个客户端都还看得见我们
+                // 站在原地**（远端玩家实体无条件进画面）。UDP 是同步发送，进程退出前能发出去。
+                self.game.send_leave();
+                self.running = false;
+                event_loop.exit();
+            }
+
+            // 键盘事件：处理 WASD 按键和 ESC 退出
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(key_code),
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                let pressed = state == ElementState::Pressed;
+
+                // 退出确认中：任意非 ESC 按键取消待确认退出
+                if pressed && key_code != KeyCode::Escape && self.game.hud.confirm_quit {
+                    self.game.hud.confirm_quit = false;
+                }
+
+                // 开始菜单 / 关卡加载中：任意键（除 ESC）开始游戏
+                if pressed
+                    && (self.game.state() == GameState::StartMenu
+                        || self.game.state() == GameState::LoadingMap)
+                    && key_code != KeyCode::Escape
+                {
+                    self.game.on_any_key(&self.camera.position());
+                }
+
+                // 设置面板键位绑定监听：非 ESC 按键完成绑定，ESC 取消；随后不再走常规按键
+                if self.game.settings_open() && self.game.rebinding_active() {
+                    if pressed {
+                        if key_code == KeyCode::Escape {
+                            log::info!("settings: 取消键位绑定");
+                            self.game.cancel_rebind();
+                        } else if KeyBindings::is_reserved(key_code as u32) {
+                            log::info!("settings: 保留键不可绑定 {:?}", key_code);
+                            self.game.cancel_rebind();
+                        } else {
+                            log::info!("settings: 键位绑定完成 code={:?}", key_code);
+                            self.game.complete_rebind(key_code as u32);
+                        }
+                    }
+                    return;
+                }
+
+                // 命令输入窗口（Minecraft 风格）：打开时数字/退格/回车/ESC 专属处理，
+                // 其余按键全部吞掉（移动/开火不响应）
+                if self.command_open && self.game.state() == GameState::Playing {
+                    if pressed {
+                        match key_code {
+                            KeyCode::Digit0 => self.command_buf.push('0'),
+                            KeyCode::Digit1 => self.command_buf.push('1'),
+                            KeyCode::Digit2 => self.command_buf.push('2'),
+                            KeyCode::Digit3 => self.command_buf.push('3'),
+                            KeyCode::Digit4 => self.command_buf.push('4'),
+                            KeyCode::Digit5 => self.command_buf.push('5'),
+                            KeyCode::Digit6 => self.command_buf.push('6'),
+                            KeyCode::Digit7 => self.command_buf.push('7'),
+                            KeyCode::Digit8 => self.command_buf.push('8'),
+                            KeyCode::Digit9 => self.command_buf.push('9'),
+                            KeyCode::Backspace => {
+                                self.command_buf.pop();
+                            }
+                            KeyCode::Enter => {
+                                let raw = self.command_buf.clone();
+                                let n: usize = match raw.parse() {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        // 优雅回退：非数字输入 → 记录原因并忽略
+                                        log::warn!(
+                                            "command: 输入回退——'{}' 无法解析为数字（{}），忽略",
+                                            raw,
+                                            e
+                                        );
+                                        self.command_open = false;
+                                        self.command_buf.clear();
+                                        return;
+                                    }
+                                };
+                                self.command_open = false;
+                                self.command_buf.clear();
+                                if n >= 1 {
+                                    // 越界由 game.switch_weapon 内回退并记录日志
+                                    log::info!("command: 切换到武器 #{}", n);
+                                    self.game.switch_weapon(n - 1);
+                                } else {
+                                    log::warn!("command: 输入回退——编号 0 无效，忽略");
+                                }
+                            }
+                            KeyCode::Escape => {
+                                self.command_open = false;
+                                self.command_buf.clear();
+                            }
+                            _ => {}
+                        }
+                        // 输入长度上限（35 最大两位，留余量）
+                        if self.command_buf.len() > 4 {
+                            self.command_buf.truncate(4);
+                        }
+                    }
+                    return;
+                }
+
+                // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭面板；
+                // 否则切换 ESC 毛玻璃菜单（退出游戏 / 设置两个选项）
+                if pressed && key_code == KeyCode::Escape {
+                    if self.game.settings_open() {
+                        log::info!("ESC 关闭设置面板");
+                        self.game.toggle_settings();
+                    } else if self.game.hud.esc_menu_open {
+                        log::info!("ESC 关闭菜单");
+                        self.game.hud.esc_menu_open = false;
+                    } else {
+                        log::info!("ESC 打开菜单（退出游戏 / 设置）");
+                        self.game.hud.esc_menu_open = true;
+                        self.game.hud.esc_menu_selection = 0;
+                        // 立即释放鼠标捕获（不等下一帧 sync_cursor）：否则用户立刻移动
+                        // 点击时 last_cursor 仍是捕获中心 → 菜单选项命中错位
+                        if self.cursor_captured {
+                            if let Some(window) = &self.window {
+                                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                                window.set_cursor_visible(true);
+                            }
+                            self.cursor_captured = false;
+                            self.cursor_locked = false;
+                            self.abs_baseline_valid = false;
+                            self.recenter_pending_until = None;
+                            log::info!("input: cursor released (ESC menu opened)");
+                        }
+                    }
+                    return;
+                }
+
+                // ESC 菜单导航：Tab 切换选项（0=退出 1=设置），Enter 确认，其它键关闭菜单
+                if self.game.hud.esc_menu_open {
+                    if pressed && key_code == KeyCode::Tab {
+                        self.game.hud.esc_menu_selection = (self.game.hud.esc_menu_selection + 1) % 2;
+                        log::info!("ESC 菜单选中: {}", if self.game.hud.esc_menu_selection == 0 { "退出游戏" } else { "设置" });
+                        return;
+                    }
+                    if pressed && key_code == KeyCode::Enter {
+                        if self.game.hud.esc_menu_selection == 0 {
+                            log::info!("ESC 菜单：退出游戏");
+                            self.running = false;
+                            event_loop.exit();
+                        } else {
+                            log::info!("ESC 菜单：打开设置");
+                            self.game.hud.esc_menu_open = false;
+                            self.game.toggle_settings();
+                        }
+                        return;
+                    }
+                    if pressed && key_code != KeyCode::Escape {
+                        self.game.hud.esc_menu_open = false;
+                    }
+                }
+
+                // 姿态与冲刺（2026-09-12）。这三个键**暂未并入 `BindingAction` 可重绑定表**：
+                // 并入要同步 ui.rs 的枚举 + 默认表 + getter/label/slot 四处 match + 键表测试，
+                // 先按固定键把功能落地；重绑定与 HUD 提示见 docs/PROGRESS.md 待办。
+                // Shift 是按住类（冲刺条件是"按住 + 前进 + 站立 + 未开镜 + 在地面"），
+                // C/Z 是按下即切换（松开不改变姿态）。
+                match key_code {
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight => self.game.set_sprint(pressed),
+                    KeyCode::KeyC if pressed => self.game.toggle_crouch(),
+                    KeyCode::KeyZ if pressed => self.game.toggle_prone(),
+                    // X = 打药（WX 里 X 的 VK 是 88）
+                    KeyCode::KeyX if pressed => self.game.use_medkit(),
+                    _ => {}
+                }
+
+                // 键位驱动：查当前键码绑定的可重绑定动作（移动/换弹/开火/菜单）
+                if let Some(action) = self.game.hud.key_bindings.action_for(key_code as u32) {
+                    match action {
+                        BindingAction::Forward => {
+                            self.key_state.forward = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Backward => {
+                            self.key_state.backward = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Left => {
+                            self.key_state.left = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Right => {
+                            self.key_state.right = pressed;
+                            self.sync_game_movement();
+                        }
+                        BindingAction::Reload => {
+                            if pressed {
+                                let st = self.game.state();
+                                if st == GameState::GameOver
+                                    || matches!(st, GameState::Victory(_) | GameState::Defeat)
+                                {
+                                    log::info!("game: 重开本关");
+                                    self.game.request_restart(&self.camera.position());
+                                } else if st == GameState::Playing && !self.game.settings_open() {
+                                    self.game.request_reload();
+                                }
+                            }
+                        }
+                        BindingAction::Fire => {
+                            if pressed
+                                && !self.game.settings_open()
+                                && !self.command_open
+                                && self.game.state() == GameState::Playing
+                            {
+                                self.fire_requested = true;
+                                self.fire_edge = true;
+                            } else if !pressed {
+                                self.fire_requested = false;
+                            }
+                        }
+                        BindingAction::Jump => {
+                            // Space 跳跃（2026-08-15：开火改鼠标左键，Space 让位给跳跃）
+                            if self.game.state() == GameState::Playing && !self.game.settings_open() {
+                                self.game.jump_requested(pressed);
+                            }
+                        }
+                        BindingAction::Menu => {
+                            if pressed && !self.game.settings_open() {
+                                log::info!("键位菜单键：打开设置面板");
+                                self.game.toggle_settings();
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // 系统键（不可重绑定）：Tab 设置循环/相机切换，Q/E 升降，N 补给
+                match key_code {
+                    // Tab：设置面板打开时循环选中项；否则切换相机模式
+                    KeyCode::Tab => {
+                        if pressed {
+                            if self.game.settings_open() {
+                                self.game.cycle_settings();
+                            } else {
+                                let mode = self.camera.toggle_mode();
+                                log::info!("相机模式切换: {:?}", mode);
+                            }
+                        }
+                    }
+                    KeyCode::KeyQ => self.key_state.down = pressed,
+                    KeyCode::KeyE => self.key_state.up = pressed,
+                    // 数字键 1..9：切换到对应武器槽位（0..8）。
+                    //
+                    // 🔴🔴 2026-09-13 修：原先**只有 `Digit1` / `Digit2` 两个分支**，
+                    // 而它们的注释还停留在「M1 Rifle / Thompson SMG」—— 那是**二战时代的
+                    // 遗留**（本作早已是现代装备，武器表也远不止两把）。这段代码从未随
+                    // 武器表增长而更新，于是：
+                    //   * 按 3/4/5/… **完全没有分支**，什么都不发生
+                    //   * 按 1/2 也只能到前两个槽位
+                    // 用户 2026-09-13 实测「输入数字用指令切枪的时候，枪的模型没有变化」，
+                    // 我用 `scripts/probe_weapons.ps1` 复现：按 1 后画面与基准**逐像素相同**
+                    // （`tools/diff_gun_region.py` 报 0.00% 差异）。⚠️ 那个脚本 2026-09-26 已删除
+                    // —— 它会 `SetForegroundWindow` **抢焦点**（违反鼠标安全协议），
+                    // 由 `scripts/run_weapon_probe.ps1` 取代（PostMessage + 验证层 + 两条切枪路都计数）。
+                    //
+                    // 槽位越界由 `WeaponSystem::switch_weapon` 自己忽略，这里不必再判。
+                    KeyCode::Digit1
+                    | KeyCode::Digit2
+                    | KeyCode::Digit3
+                    | KeyCode::Digit4
+                    | KeyCode::Digit5
+                    | KeyCode::Digit6
+                    | KeyCode::Digit7
+                    | KeyCode::Digit8
+                    | KeyCode::Digit9 => {
+                        if pressed
+                            && self.game.state() == GameState::Playing
+                            && !self.game.settings_open()
+                        {
+                            let slot = match key_code {
+                                KeyCode::Digit1 => 0,
+                                KeyCode::Digit2 => 1,
+                                KeyCode::Digit3 => 2,
+                                KeyCode::Digit4 => 3,
+                                KeyCode::Digit5 => 4,
+                                KeyCode::Digit6 => 5,
+                                KeyCode::Digit7 => 6,
+                                KeyCode::Digit8 => 7,
+                                _ => 8,
+                            };
+                            self.game.switch_weapon(slot);
+                        }
+                    }
+                    // B：切换开火模式（单发 / 三连发 / 连发）
+                    KeyCode::KeyB => {
+                        if pressed
+                            && self.game.state() == GameState::Playing
+                            && !self.game.settings_open()
+                        {
+                            self.game.cycle_fire_mode();
+                            log::info!(
+                                "command: 开火模式 -> {}",
+                                self.game.fire_mode().label()
+                            );
+                        }
+                    }
+                    // G：投掷手榴弹（抛物线 + 引信 1.5-2.5s + 爆炸复用）
+                    KeyCode::KeyG => {
+                        if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
+                            let eye = self.game.player_eye();
+                            let dir = self.camera.forward();
+                            self.game.throw_grenade(
+                                [eye.x, eye.y, eye.z],
+                                [dir.x, dir.y, dir.z],
+                            );
+                        }
+                    }
+                    // Enter / 斜杠 /：打开命令输入窗口（类 MC：/ 打开、数字切枪、回车执行）。
+                    // 设置面板打开时 Enter 仍走行循环/键位绑定逻辑
+                    KeyCode::Enter | KeyCode::Slash => {
+                        if pressed && self.game.settings_open() && key_code == KeyCode::Enter {
+                            match self.game.hud.settings_selection() {
+                                3 => {
+                                    // RESOLUTION 行：循环切换分辨率并即时应用
+                                    self.game.hud.cycle_resolution();
+                                    self.apply_resolution();
+                                }
+                                4 => {
+                                    // QUALITY 行：循环切换画质并即时应用
+                                    self.game.hud.cycle_quality();
+                                    self.apply_quality();
+                                }
+                                _ => {
+                                    log::info!("settings: Enter 进入键位绑定");
+                                    self.game.begin_rebind();
+                                }
+                            }
+                        } else if pressed
+                            && self.game.state() == GameState::Playing
+                            && !self.game.hud.esc_menu_open
+                        {
+                            log::info!("command: 打开命令窗口（/）");
+                            self.command_open = true;
+                            self.command_buf.clear();
+                            // 防卡键：清移动/开镜状态（窗口打开期间不响应移动/开火）
+                            self.key_state.reset();
+                            self.game.set_movement(false, false, false, false);
+                            self.ads_active = false;
+                        } else if pressed && key_code == KeyCode::Enter {
+                            // Enter 且非 Playing：死亡/胜利结算重开本关
+                            let st = self.game.state();
+                            if st == GameState::GameOver
+                                || matches!(st, GameState::Victory(_) | GameState::Defeat)
+                            {
+                                log::info!("game: Enter 重开本关");
+                                self.game.request_restart(&self.camera.position());
+                            }
+                        }
+                    }
+                    // 设置面板调试补给（N 键补满弹匣）；胜利结算 N 键进入下一关
+                    KeyCode::KeyN => {
+                        if pressed && self.game.settings_open() {
+                            log::info!("settings: N 键补给弹药");
+                            self.game.give_ammo();
+                        } else if pressed && matches!(self.game.state(), GameState::Victory(_)) {
+                            if self.game.advance_level(&self.camera.position()) {
+                                log::info!("game: N 进入下一关");
+                            } else {
+                                log::info!("game: 已通关（最后一关完成）");
+                            }
+                        }
+                    }
+                    // F5：关卡系统热重载（重新读取当前地图 TOML）
+                    KeyCode::F5 => {
+                        if pressed {
+                            match self.game.reload_current_map() {
+                                Ok(()) => log::info!("map: F5 热重载完成"),
+                                Err(e) => log::warn!("map: F5 热重载失败: {}", e),
+                            }
+                        }
+                    }
+                    // F12：截图（任意画面可用，Windows 写到 ./screenshots/）
+                    KeyCode::F12 => {
+                        if pressed {
+                            self.capture_screenshot();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // 焦点变化：失焦时重置按键/拖拽并释放捕获，防止"卡键"
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.key_state.reset();
+                    self.game.set_movement(false, false, false, false);
+                    self.dragging = false;
+                    self.right_dragging = false;
+                    self.camera.set_rotation_active(false);
+                    // 失焦立即释放鼠标捕获（Win 键呼出菜单栏/Alt-Tab 时窗口失焦，
+                    // 不等待下一帧 sync_cursor——否则鼠标被锁住只能 Alt+F4 强退）
+                    if self.cursor_captured {
+                        if let Some(window) = &self.window {
+                            let _ = window.set_cursor_grab(CursorGrabMode::None);
+                            window.set_cursor_visible(true);
+                        }
+                        self.cursor_captured = false;
+                        self.cursor_locked = false;
+                        self.abs_baseline_valid = false;
+                        self.recenter_pending_until = None;
+                        log::info!("input: cursor released (window unfocused)");
+                    }
+                }
+            }
+
+            // 鼠标按键：左键 = 开火（Playing）兼轨道拖拽；右键 = 飞行视角拖拽
+            WindowEvent::MouseInput {
+                state, button, ..
+            } => {
+                let pressed = state == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => {
+                        // ESC 菜单打开：点击命中选项（退出/设置），不触发开火
+                        if pressed && self.game.hud.esc_menu_open {
+                            let (mx, my) = self.last_cursor;
+                            if self.menu_click_hit(mx as f32, my as f32) {
+                                log::info!("ESC 菜单鼠标点击选项");
+                            }
+                            return;
+                        }
+                        // 设置面板打开：点击命中行（选择/调节），不触发开火
+                        if pressed && self.game.settings_open() {
+                            let (mx, my) = self.last_cursor;
+                            self.settings_click(mx as f32, my as f32);
+                            return;
+                        }
+                        if pressed && !self.game.settings_open() {
+                            // 开始菜单/加载中：点击也视为"任意键"开局（键盘焦点不可靠的环境兜底）
+                            let st = self.game.state();
+                            if st == GameState::StartMenu || st == GameState::LoadingMap {
+                                self.game.on_any_key(&self.camera.position());
+                            }
+                            if st == GameState::Playing && !self.command_open {
+                                self.fire_requested = true;
+                                self.fire_edge = true;
+                            }
+                        } else if !pressed {
+                            // 松开左键：停止连发
+                            self.fire_requested = false;
+                        }
+                        self.dragging = pressed && !self.game.settings_open();
+                    }
+                    MouseButton::Right => {
+                        // 第一人称：右键 = 开镜瞄准（ADS）；飞行模式保留右键拖拽转视角
+                        if self.camera.mode == CameraMode::FirstPerson
+                            && self.game.state() == GameState::Playing
+                            && !self.game.settings_open()
+                            && !self.command_open
+                        {
+                            self.ads_active = pressed;
+                        } else {
+                            self.right_dragging = pressed;
+                            self.camera.set_rotation_active(pressed);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // 鼠标移动（绝对位置）：非捕获态拖拽旋转；捕获态只重基准不驱动视角
+            WindowEvent::CursorMoved { position, .. } => {
+                let (px, py) = (position.x, position.y);
+                // 🔴 2026-09-13 诊断计数：回答"鼠标移动事件到底有没有到"。
+                // 用户实测"鼠标完全转不了视角"时，必须先分清是
+                //   ① 事件根本没来（winit/窗口/焦点层）
+                //   ② 事件来了但被某条守卫丢掉（recenter / teleport / dragging=false）
+                // 这两个原因的修法完全不同，靠推理分不开（教训 20）。
+                self.cursor_evt_count = self.cursor_evt_count.wrapping_add(1);
+                self.cursor_evt_last = (px, py);
+                // warp 回声事件吞噬窗口：recenter 后短时间内的下一个 CursorMoved
+                // 只是回中回声，把它作为新基准并跳过，防止回声环把落点偏移当视角位移
+                if let Some(until) = self.recenter_pending_until {
+                    self.recenter_pending_until = None;
+                    if Instant::now() < until {
+                        self.last_cursor = (px, py);
+                        self.cursor_evt_eaten = self.cursor_evt_eaten.wrapping_add(1);
+                        return;
+                    }
+                }
+                if self.cursor_captured {
+                    if self.cursor_locked {
+                        // Locked grab：raw 相对增量已驱动视角，绝对位置只更新基准
+                        self.last_cursor = (px, py);
+                        return;
+                    }
+                    // WSLg/Xwayland 回退：绝对位置路径。
+                    // 基准 = 真实指针位置（或 warp 成功确认后的窗口中心）——
+                    // 绝不把 last_cursor 假设为 warp 目标（旧 bug：warp 失败仍把
+                    // 基准设成中心，指针距中心偏差被当视角位移 → 灵敏度爆炸/压地）。
+                    if !self.abs_baseline_valid {
+                        self.abs_baseline_valid = true;
+                        self.last_cursor = (px, py);
+                        return;
+                    }
+                    let dx = px - self.last_cursor.0;
+                    let dy = py - self.last_cursor.1;
+                    // 光标传送（服务端跳变）：跳过该事件，只重基准
+                    if dx.abs() <= MAX_LOOK_DELTA_PX && dy.abs() <= MAX_LOOK_DELTA_PX {
+                        match self.camera.mode {
+                            CameraMode::FirstPerson => self.camera.look(dx as f32, dy as f32),
+                            CameraMode::Orbit => self.camera.orbit(dx as f32, dy as f32),
+                            CameraMode::Flight => {
+                                self.camera.set_rotation_active(true);
+                                self.camera.add_rotation_input(dx as f32, dy as f32);
+                            }
+                        }
+                    }
+                    // 回中指针（避免撞窗口边缘停顿）：warp 成功 → 基准=中心；
+                    // 失败 → 基准=当前真实位置（下一事件从真实位置算增量）。
+                    if let Some(window) = &self.window {
+                        let size = window.inner_size();
+                        let center = winit::dpi::PhysicalPosition::new(
+                            size.width as f64 / 2.0,
+                            size.height as f64 / 2.0,
+                        );
+                        if window.set_cursor_position(center).is_ok() {
+                            self.last_cursor = (center.x, center.y);
+                        } else {
+                            self.last_cursor = (px, py);
+                        }
+                    } else {
+                        self.last_cursor = (px, py);
+                    }
+                } else {
+                    let (dx, dy) = (px - self.last_cursor.0, py - self.last_cursor.1);
+                    // 非捕获态拖拽视角（菜单/设置预览 + 冒烟在无焦点环境下的瞄准路径）：
+                    // 左键按住 = 轨道/第一人称转视角，右键 = 飞行视角
+                    // 跳变（warp/传送）事件不转视角，只重基准
+                    let teleported = (px - self.last_cursor.0).abs() > MAX_LOOK_DELTA_PX
+                        || (py - self.last_cursor.1).abs() > MAX_LOOK_DELTA_PX;
+                    if teleported {
+                        self.cursor_evt_teleport = self.cursor_evt_teleport.wrapping_add(1);
+                    }
+                    if self.dragging && !teleported {
+                        match self.camera.mode {
+                            CameraMode::Orbit => self.camera.orbit(dx as f32, dy as f32),
+                            CameraMode::FirstPerson => self.camera.look(dx as f32, dy as f32),
+                            CameraMode::Flight => {}
+                        }
+                    }
+                    if self.right_dragging && self.camera.mode == CameraMode::Flight && !teleported {
+                        self.camera.add_rotation_input(dx as f32, dy as f32);
+                    }
+                    // 拖拽转视角时回中光标，避免把指针拖出窗口导致事件丢失（与捕获态一致）
+                    if self.dragging
+                        && (self.camera.mode == CameraMode::Orbit
+                            || self.camera.mode == CameraMode::FirstPerson)
+                    {
+                        if let Some(window) = &self.window {
+                            let size = window.inner_size();
+                            let center = winit::dpi::PhysicalPosition::new(
+                                size.width as f64 / 2.0,
+                                size.height as f64 / 2.0,
+                            );
+                            // 🔴 2026-09-13 修：**必须看返回值**。原写法
+                            // `let _ = set_cursor_position(center); last_cursor = center;`
+                            // 无条件把基准设成中心 —— 而窗口没焦点时这个 warp 会失败，
+                            // 真实指针并不在中心，于是下一个事件算出的 dx 是一个大跳变，
+                            // 被 MAX_LOOK_DELTA_PX 当"光标传送"**全部丢弃** ⇒
+                            // 表现就是"按住左键拖拽也转不了视角"（用户 2026-09-13 实测）。
+                            // 捕获态那条路早已修过同一个 bug（见上面 3036 行的注释），
+                            // 这条漏了。
+                            if window.set_cursor_position(center).is_ok() {
+                                self.last_cursor = (center.x, center.y);
+                                self.recenter_pending_until =
+                                    Some(Instant::now() + Duration::from_millis(150));
+                            } else {
+                                // warp 失败：基准留在真实位置，下一事件才能算出正确增量
+                                self.last_cursor = (px, py);
+                            }
+                        }
+                    } else {
+                        self.last_cursor = (px, py);
+                    }
+                }
+            }
+
+            // 滚轮：轨道 = 推拉距离；飞行 = 沿视线前进/后退
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as f32,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.05,
+                };
+                if self.game.settings_open() {
+                    self.game.adjust_settings(scroll * 0.05);
+                } else {
+                    match self.camera.mode {
+                        CameraMode::FirstPerson => {
+                            // 第一人称：滚轮切换武器（上=下一把，下=上一把）
+                            self.game.cycle_weapon(scroll.round() as i32);
+                        }
+                        CameraMode::Orbit => self.camera.zoom(scroll),
+                        CameraMode::Flight => self.camera.flight_wheel(scroll),
+                    }
+                }
+            }
+
+            // 光标移出窗口：停止拖拽，防止视角卡住
+            WindowEvent::CursorLeft { .. } => {
+                self.dragging = false;
+                self.right_dragging = false;
+                self.camera.set_rotation_active(false);
+            }
+
+            // 窗口大小变化时重建交换链
+            WindowEvent::Resized(new_size) => {
+                if new_size.width == 0 || new_size.height == 0 {
+                    return; // 窗口最小化
+                }
+                log::info!("窗口大小变化: {}x{}", new_size.width, new_size.height);
+                self.game
+                    .hud
+                    .set_screen_size(new_size.width as f32, new_size.height as f32);
+                if let Some(renderer) = &mut self.renderer {
+                    // 🔴 必须**先**把新尺寸告诉渲染器再重建：Wayland 下
+                    // `surface.currentExtent` 是未定义的，交换链尺寸只能来自这个字段
+                    // （见 `Renderer::window_extent` / `swapchain_extent_choice`）。
+                    // 顺序反了 = 重建出来的还是旧尺寸，而且**不报错**。
+                    renderer.set_window_extent(new_size.width, new_size.height);
+                    // 降级/设备丢失时不重试（判据 = `swapchain_recovery_allowed`）
+                    if renderer.swapchain_recovery_allowed() {
+                        if let Err(e) = renderer.recreate_swapchain() {
+                            log::error!("窗口尺寸变化后重建交换链失败：{}", e);
+                        }
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    /// 事件队列空闲时调用（主循环体）
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if !self.running || self.window.is_none() {
+            return;
+        }
+
+        // 帧率门控（MAX_FPS=0 时无上限，压测模式不做 sleep/spin）
+        if FRAME_BUDGET > Duration::ZERO {
+            // thread::sleep 粒度约 1ms，先粗睡到剩 ~1ms，再自旋精确到预算
+            let elapsed = self.last_frame.elapsed();
+            if elapsed < FRAME_BUDGET {
+                let remaining = FRAME_BUDGET - elapsed;
+                if remaining > Duration::from_millis(1) {
+                    std::thread::sleep(remaining - Duration::from_millis(1));
+                }
+                while self.last_frame.elapsed() < FRAME_BUDGET {
+                    std::hint::spin_loop();
+                }
+            }
+        }
+
+        // 更新逻辑（相机、物理等）+ 渲染（记录周期/分阶段耗时供性能定位）
+        let cycle_start = Instant::now();
+        let update_start = Instant::now();
+        self.update();
+        let update_us = update_start.elapsed().as_micros() as u64;
+        let render_start = Instant::now();
+        self.render();
+        self.last_render_us = render_start.elapsed().as_micros() as u64;
+
+        // 自动截图（RV3D_SHOT_AT）：**渲染之后**取，保证截到的是本帧真实画面。
+        // 计时起点在第一次渲染时锚定 —— 不是在启动时：引擎起来到第一帧之间要加载
+        // 着色器/城市/GLB，那段时间截图只会得到一张黑图或半成品，对取证没有意义。
+        if !self.shot_pending.is_empty() {
+            let t0 = *self.shot_t0.get_or_insert_with(Instant::now);
+            let due = take_due_shots(&mut self.shot_pending, t0.elapsed().as_secs_f32());
+            for _ in 0..due {
+                self.capture_screenshot();
+            }
+            if self.shot_pending.is_empty() {
+                log::info!("自动截图：全部时刻已到，停止检查");
+            }
+        }
+        self.last_update_us = update_us;
+        self.last_cycle_us = cycle_start.elapsed().as_micros() as u64;
+        // 采集模式帧率上限（RV3D_LLM=1 时 90FPS 封顶）：大幅降低 GPU 负载，
+        // 避免与 llama-server 长时间同卡共存导致 VK_ERROR_DEVICE_LOST（2026-08-23）
+        //
+        // 2026-09-27：这里改成"有效上限" —— 窗口失焦时再夹上后台上限（RV3D_BG_FPS）。
+        // 实测失焦后仍全速渲染会把 GPU 占满；桌面合成（dwm）拿不到时间片，用户看到的是
+        // "游戏一开整机就卡"。引擎默认 bg=0（不改变任何既有测量口径），玩家路径由
+        // SteelFront.bat 设 20。判据：pure fn effective_frame_cap 的四条测试 + 探针实测。
+        let focused_now = self.focused && !self.force_unfocused;
+        let cap_fps = effective_frame_cap(self.llm_cap_fps, self.bg_cap_fps, focused_now);
+        if (cap_fps - self.logged_cap_fps).abs() > 0.5 {
+            log::info!(
+                "frame-cap: {:.0} fps (focused={} fg={:.0} bg={:.0})",
+                cap_fps, focused_now, self.llm_cap_fps, self.bg_cap_fps
+            );
+            self.logged_cap_fps = cap_fps;
+        }
+        if cap_fps > 0.0 {
+            let used = cycle_start.elapsed().as_secs_f32();
+            let target = 1.0 / cap_fps;
+            if used < target {
+                std::thread::sleep(std::time::Duration::from_secs_f32(target - used));
+            }
+        }
+    }
+}
+
+/// 程序入口点
+#[cfg(target_os = "android")]
+use winit::platform::android::activity::AndroidApp;
+
+/// 非 Android 平台上的占位类型，仅为让 `run_steel_front` 的签名跨平台统一。
+#[cfg(not(target_os = "android"))]
+type AndroidApp = ();
+
+/// 引擎主循环（桌面与 Android 共用）。
+///
+/// Android 上由 `android_main` 调用并传入 `AndroidApp`（事件循环所有权反转，
+/// 见 docs/HANDOFF-mobile.md 4.2）；桌面上由 `main` 以 `None` 调用。
+fn run_steel_front(android_app: Option<AndroidApp>) {
+    // 初始化日志系统
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // RV3D_ASSETS_FROM_MEMORY=1：把 assets/ 预载进内存并安装为全局资产来源，
+    // 在桌面上验证"资产不来自文件系统"这条路径（为 Android AAssetManager 铺路，
+    // 见 docs/HANDOFF-mobile.md 4.3）。
+    if env_truthy("RV3D_ASSETS_FROM_MEMORY") {
+        let src = crate::engine::asset_source::MemSource::preload_tree("assets");
+        log::info!(
+            "RV3D_ASSETS_FROM_MEMORY=1：已预载 assets/ 到内存（{} 项）",
+            src.len()
+        );
+        crate::engine::asset_source::install(Box::new(src));
+    }
+
+    // 默认大战场：红 128 vs 蓝 127+玩家（=128v128，2026-08-22 要求海量 NPC 模拟真人压力）；
+    // RV3D_STRESS_AI=N 自定义，=0 恢复传统波次模式
+    if std::env::var("RV3D_STRESS_AI").is_err() {
+        std::env::set_var("RV3D_STRESS_AI", "128");
+    }
+
+    // 资源路径导向（启动器写入 resource_paths.ini）：记录地图/音效/建模自定义目录
+    if let Ok(text) = std::fs::read_to_string("resource_paths.ini") {
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if !v.is_empty() {
+                    log::info!("res-path: {} -> {}", k, v);
+                    let env_k = k
+                        .trim_end_matches("_path")
+                        .to_uppercase()
+                        .replace('-', "_");
+                    std::env::set_var(format!("STEELFRONT_{}", env_k), v);
+                }
+            }
+        }
+    }
+
+    // DPI awareness 由 winit 0.30 自己管理（默认 per-monitor V2）——手动调用
+    // SetProcessDpiAwarenessContext 会与 winit 内部设置冲突，导致窗口尺寸/缩放错位
+    // （曾出现：swapchain 2560x1600 但窗口实际 1898x1061 → 画面只显示左上角）。
+
+    // 中文字形按需惰性生成（font_cjk 缓存）；不预填充——GDI 光栅化会阻塞启动首帧
+
+    log::info!("========================================");
+    log::info!("  钢铁前线 (Steel Front) v{}", env!("CARGO_PKG_VERSION"));
+    log::info!("  二战FPS游戏引擎 - Rust + Vulkan");
+    log::info!("========================================");
+
+    // CPU 拓扑检测（全局缓存，Game/Renderer 复用同一份）+ 主线程亲和性绑定
+    // （AMD 双簇/Intel 混合；RV3D_CPU_PIN=off 可关）。渲染线程不固定 1-2 核：
+    // 主线程绑的是整簇集合（CCD0/P-core），OS 调度器把渲染工作分给集合内空闲率最高的核。
+    let cpu = engine::cpu::topology();
+    cpu.log_summary();
+    cpu.pin_main_thread();
+
+    // ---- 后端选择：X11 / Wayland ----
+    //
+    // 为什么这个开关是**必需**的（2026-09-28，Linux 适配）：
+    // WSLg（WSL2 + Wayland/Weston）的指针约束/相对指针协议支持不完整 —— 捕获后光标不隐藏、
+    // 视角不动，且右键拖动会在原生层静默崩溃（无 panic 日志）。所以旧代码在 WSL 下强制 X11。
+    // 但那条判据（`/proc/version` 含 "microsoft"）**只覆盖 WSL**，原生 Linux 会话走不到，
+    // 于是用户**没有任何手段退回 XWayland** —— 而 winit 0.30 已经删掉了
+    // `WINIT_UNIX_BACKEND` 环境变量（v0.29 changelog），不重建事件循环就没有第二条路。
+    //
+    // 为什么原生 Linux 更需要这个退路（不是"以防万一"，是**已知的功能差异**）：
+    // - **X11/XWayland**：`set_cursor_grab(Locked)` **恒返回 `Err(NotSupported)`**
+    //   （winit `x11/window.rs`），于是 `cursor_grab_plan` 退到 `Confined` + 绝对位置路径；
+    //   而 X11 的 `set_cursor_position` 走 `XWarpPointer` **真的生效**，
+    //   所以「回中 + 用 `CursorMoved` 增量算视角」这条路是**自洽可用的**。
+    // - **Wayland**：`Locked` 返回 `Ok`，但 winit 的 `apply_on_pointer` **只对已 enter 的指针
+    //   生效** —— 指针还没进窗口时它**什么都没做也返回 Ok**；而且 winit 完全忽略合成器的
+    //   确认事件（`ZwpLockedPointerV1` 的 Dispatch 函数体是空的）⇒ 应用层**无法感知**锁
+    //   到底有没有生效。绝对位置那条路在 Wayland 上也不通：`set_cursor_position` 只在
+    //   已 `Locked` 时才成功 ⇒ **Confined 下指针撞到窗口边就再也转不动**。
+    //   ⇒ Wayland 下唯一可用的是 Locked + 相对指针，而它的失败**是静默的**。
+    //
+    // ⇒ 语义：`RV3D_BACKEND` = `x11` / `wayland` / 未设（自动：WSL 下选 x11，其余不强制）。
+    // 判据 = `backend_choice_x11_is_reachable_on_native_linux`（它钉住"非 WSL 的原生 Linux
+    // 也必须能选到 x11"，而那正是旧逻辑唯一做不到的事）。
+    #[cfg(target_os = "linux")]
+    let backend_choice = {
+        let is_wsl = std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false);
+        // WSLg 的自动判定保留旧条件（WSL **且** 有 Wayland 会话）：纯 X11 的 WSL 本来就走 X11
+        let auto_x11 = is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let explicit = std::env::var("RV3D_BACKEND").ok();
+        let choice = backend_choice(explicit.as_deref(), auto_x11);
+        match choice {
+            BackendChoice::X11 => log::info!(
+                "input: 强制 X11 后端（Xwayland + XInput2 raw motion）—— 来源：{}",
+                if explicit.is_some() {
+                    "RV3D_BACKEND"
+                } else {
+                    "WSLg 自动判定"
+                }
+            ),
+            BackendChoice::Auto => {
+                log::info!("input: 后端不强制（RV3D_BACKEND 未设或 =wayland），交给 winit 自动选择")
+            }
+        }
+        choice
+    };
+    // 创建事件循环（BackendChoice::X11 时经 with_x11() 强制 Xwayland）
+    let event_loop = {
+        let mut builder = EventLoop::builder();
+        // Android：把系统传入的 AndroidApp 交给 winit（事件循环所有权反转，
+        // 见 docs/HANDOFF-mobile.md 4.2）。
+        #[cfg(target_os = "android")]
+        if let Some(app) = android_app.clone() {
+            use winit::platform::android::EventLoopBuilderExtAndroid;
+            builder.with_android_app(app);
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = &android_app;
+        #[cfg(target_os = "linux")]
+        if backend_choice == BackendChoice::X11 {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }
+        match builder.build() {
+            Ok(el) => el,
+            Err(e) => {
+                log::error!("创建事件循环失败: {:?}", e);
+                // 🔴 致命启动错误**必须非零退出**。原来这里是 `return`，而 `fn main`
+                // 正常返回就是退出码 0 ⇒ 调用方（perf_run / 冒烟 / CI）看到的是"跑完了"，
+                // 实际上一帧都没渲染。2026-10-03 实测踩到：在没有图形会话环境变量的 shell 里
+                // （XDG_SESSION_TYPE=tty，缺 WAYLAND_DISPLAY/DISPLAY）报的就是这一条，
+                // 而 perf_run.sh 只看到"游戏提前退出（code 0）"、当成一次正常结束。
+                // 这就是教训 46 的形态：工具必须能说"我没跑成"。
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // 设置控制流为 Poll（持续轮询，适合游戏）
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    // 创建并运行游戏应用：捕获态视角一律由 XInput2 raw 相对增量驱动
+    // （与指针位置无关，无 warp 回声环）；绝对位置仅用于非捕获拖拽路径。
+    let mut app = GameApp::new();
+    // 菜单点击退出用的事件循环代理（app 创建后设置）
+    app.event_proxy = Some(event_loop.create_proxy());
+
+    // 网络对战模式（默认关闭，不破坏单机）：RV3D_NET=server|client，
+    // RV3D_NET_ADDR=127.0.0.1:<port>（默认 127.0.0.1:27015）。
+    // 服务器：权威模拟 + 每 tick 广播快照；客户端：输入上报 + 快照插值缓冲。
+    // 无头回环集成测试在 net.rs / game.rs（不依赖 Vulkan/winit）；
+    // 远端实体插值渲染（本文件 2579 起的 `entity_state_at`）与断线自动重连（game.rs）**已接线**；
+    // 未做：NAT 双进程真机验证、输入预测/回滚（见 net.rs 头部「已接线 / 未做」两行）。
+    let net_role = std::env::var("RV3D_NET").unwrap_or_default();
+    let net_addr =
+        std::env::var("RV3D_NET_ADDR").unwrap_or_else(|_| "127.0.0.1:27015".to_string());
+    // NAT 中继（RV3D_NET_RDV=<host:port> + RV3D_NET_NAME=房间名）：
+    // 服务器向中继注册；客户端查询房间名→公网地址直连（NAT 打洞第一步）
+    let net_rdv = std::env::var("RV3D_NET_RDV").ok();
+    let net_name = std::env::var("RV3D_NET_NAME").unwrap_or_else(|_| "steel".to_string());
+    match net_role.as_str() {
+        "server" => match Server::bind(&net_addr) {
+            Ok(server) => {
+                let addr = server
+                    .local_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|_| net_addr.clone());
+                log::info!("net: 服务器模式，监听 {}", addr);
+                if let Some(rdv) = &net_rdv {
+                    let port = net_addr
+                        .rsplit(':')
+                        .next()
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .unwrap_or(27015);
+                    let res = server.rdv_register(rdv, &net_name, port);
+                    let (ok, msg) = rdv_register_report(rdv, &net_name, port, &res);
+                    if ok {
+                        log::info!("{msg}");
+                    } else {
+                        log::error!("{msg}");
+                    }
+                }
+                app.game.set_net_server(server);
+            }
+            Err(e) => log::error!("net: 服务器绑定 {} 失败: {}", net_addr, e),
+        },
+        "client" => {
+            // 中继解析：通过房间名拿到主机公网地址（打洞探测已在 rdv_resolve 内发出）
+            let target = if let Some(rdv) = &net_rdv {
+                match crate::net::rdv_resolve(rdv, &net_name) {
+                    Ok(a) => {
+                        log::info!("net: 中继解析房间 {net_name} → {}", a);
+                        a.to_string()
+                    }
+                    Err(e) => {
+                        log::error!("net: 中继解析 {net_name} 失败: {e}（改用直连地址）");
+                        net_addr.clone()
+                    }
+                }
+            } else {
+                net_addr.clone()
+            };
+            match Client::connect(&target) {
+                Ok(client) => {
+                    log::info!("net: 客户端模式，连接 {}", client.server_addr());
+                    app.game.set_net_client(client);
+                }
+                Err(e) => log::error!("net: 客户端连接 {} 失败: {}", target, e),
+            }
+        },
+        other => {
+            if !other.is_empty() {
+                log::warn!("net: 未知 RV3D_NET 值 {:?}（应为 server|client），忽略", other);
+            }
+        }
+    }
+
+    if let Err(e) = event_loop.run_app(&mut app) {
+        log::error!("应用运行错误: {:?}", e);
+        // 🔴 同上，而且这里还多一层误导：原来出错后**继续往下走**，
+        // 打出"程序正常退出"并以 0 退出 —— 日志说"正常"、退出码说"成功"，
+        // 而实际是异常终止。出错就既不许说正常，也不许退 0。
+        std::process::exit(1);
+    }
+
+    // 🔴 致命错误可能是在事件循环**内部**记下的（那时只能 `event_loop.exit()`，
+    // 而它会让 `run_app` 返回 `Ok`）⇒ 这里补上那次判断，否则同样是"日志报错、退出码说成功"。
+    if let Some(why) = app.fatal.take() {
+        log::error!("以错误退出：{why}");
+        std::process::exit(1);
+    }
+
+    log::info!("程序正常退出");
+}
+
+/// 中继注册的结论文案：**成功与否由 `res` 决定**，返回 `(是否成功, 文案)`。
+///
+/// 🔴 存在理由（2026-09-26 复查）：调用点以前是 `let _ = server.rdv_register(...)` 紧接着
+/// **无条件**打「已向中继注册房间…（等待玩家查询）」。注册失败时这条日志把「没跑成」写成了成功，
+/// 而它是 NAT 打洞链路上唯一的现场证据：中继侧没有 REG 记录，客户端 `net::rdv_resolve`
+/// 就只会等到 5s 超时，排查的人会一路去怀疑打洞逻辑与防火墙。
+/// 判据 = 测试 `relay_registration_report_never_claims_success_on_failure`。
+fn rdv_register_report(
+    rdv: &str,
+    name: &str,
+    port: u16,
+    res: &std::io::Result<()>,
+) -> (bool, String) {
+    match res {
+        Ok(()) => (
+            true,
+            format!("net: 已向中继 {rdv} 注册房间 {name}（端口 {port}，等待玩家查询）"),
+        ),
+        Err(e) => (
+            false,
+            format!(
+                "net: 向中继 {rdv} 注册房间 {name} 失败: {e} —— 中继侧没有这条记录，客户端按房间名解析只会超时（先确认中继地址可达与出站 UDP 未被拦）"
+            ),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 🔴 **判据：`main()` 里的致命错误路径不许以退出码 0 结束。**
+    ///
+    /// 2026-10-03 实测踩到：在一个**没有图形会话环境变量**的 shell 里
+    /// （`XDG_SESSION_TYPE=tty`，缺 `WAYLAND_DISPLAY`/`DISPLAY`），引擎报
+    /// "创建事件循环失败" 然后 `return` ⇒ **退出码 0**。
+    /// `perf_run.sh` 只看到"游戏提前退出（code 0）"，无法把「一帧都没渲染」
+    /// 和「正常结束」区分开 —— 教训 46 的形态：工具必须能说"我没跑成"。
+    /// 同一晚还发现 `run_app` 出错后会继续往下打出"程序正常退出"（日志说正常、
+    /// 退出码说成功，而实际是异常终止），一并钉住。
+    ///
+    /// ⚠️ 这是**源码扫描**型判据，两个坑都要防：
+    /// 1. **必须先证明它真的扫到了东西** —— 文件被搬走/改名/那段被重写时，
+    ///    `find` 返回 `None` 会让断言静默恒真；
+    /// 2. **必须先去注释** —— 修这个 bug 时写的注释里就引用了「程序正常退出」，
+    ///    不去注释的话扫描会先撞上注释、让判据自行满足（本仓 `no_unbounded_wait_on_vulkan_calls`
+    ///    同样先做 `is_comment` 过滤）。
+    #[test]
+    fn fatal_startup_paths_never_exit_zero() {
+        let src = include_str!("lib.rs");
+        // 只扫生产代码那段（测试模块里引用了同样的字符串，不切开会自我满足）
+        let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+        // 去注释：行首是 // 的一律丢掉
+        let code: String = prod
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let anchors = ["创建事件循环失败", "run_app(&mut app)"];
+        for a in anchors {
+            assert!(
+                code.contains(a),
+                "检查失效：去注释后扫不到锚点 {a:?}（源码被改名/搬走了？）"
+            );
+        }
+
+        // 🔴 **必须把两半切开**：第一版写成 `code[i..].contains("process::exit")`，
+        // 扫的是"锚点之后的全部内容" ⇒ **第二处修复把第一处的断言喂饱了**，
+        // 把事件循环那条改回 `return` 时测试照样绿（反证实测发现）。
+        // 这正是本仓教训 14 的形态：恒真的断言等于没写。
+        let split = code.find("run_app(&mut app)").unwrap();
+        let (startup, running) = code.split_at(split);
+
+        // 1) 事件循环创建失败之后必须出现 process::exit（只在**这一半**里找）
+        let i = startup.find("创建事件循环失败").unwrap();
+        assert!(
+            startup[i..].contains("process::exit"),
+            "事件循环创建失败是致命错误，不能只 return（`fn main` 正常返回 = 退出码 0）"
+        );
+
+        // 2) run_app 出错分支也必须有 process::exit，且**必须早于**「程序正常退出」那句
+        let exit_at = running.find("process::exit");
+        let normal_at = running.find("程序正常退出");
+        assert!(
+            normal_at.is_some(),
+            "检查失效：去注释后扫不到「程序正常退出」那句，说明扫描窗口不对"
+        );
+        assert!(
+            exit_at.is_some(),
+            "run_app 出错是致命错误，不能退 0"
+        );
+        assert!(
+            exit_at.unwrap() < normal_at.unwrap(),
+            "run_app 出错后必须先退出，不能掉到「程序正常退出」那句（日志说正常、退出码说成功，\
+             而实际是异常终止）"
+        );
+
+        // 3) **循环内部**的致命错误也必须被记进 `fatal`。
+        //    这两处只能 `event_loop.exit()`，而它让 `run_app` 返回 `Ok` ⇒ 上面那条
+        //    `run_app` 检查抓不到它们。2026-10-03 实测：解包后跑错目录（缺 assets/mesh.spv）
+        //    报的就是「渲染器初始化失败」+「程序正常退出」+ 退出码 0。
+        for anchor in ["创建窗口失败", "渲染器初始化失败"] {
+            let i = code.find(anchor).unwrap_or_else(|| {
+                panic!("检查失效：去注释后扫不到锚点 {anchor:?}（源码被改名/搬走了？）")
+            });
+            let tail = &code[i..(i + 300).min(code.len())];
+            assert!(
+                tail.contains("self.fatal = Some"),
+                "{anchor} 是致命错误，必须记进 `self.fatal` —— 否则 event_loop.exit() 会让 \
+                 run_app 返回 Ok，引擎打出「程序正常退出」并以 0 退出"
+            );
+        }
+
+        // 4) `fatal` 必须在循环结束后被消费掉（只记不查等于没记）
+        assert!(
+            running.contains("app.fatal"),
+            "`fatal` 记了却没人查 —— 循环结束后必须据此非零退出"
+        );
+    }
+
+    /// 🔴 判据：`RV3D_SHOT_AT` 的解析与"取走到点"两条（2026-10-03）。
+    ///
+    /// 加这个开关的理由是**平台不对称**：Windows 侧的 `run_resize_probe.ps1` 能用
+    /// `PostMessage` 发 F12 截图，而 Linux 上唯一的截图触发就是 F12 按键，
+    /// Wayland 下注入按键要抢焦点，违反铁律 C 的鼠标安全协议
+    /// ⇒ Linux 的探针只能停在"没有画面取证"。给一个不需要输入的触发把这条补平。
+    ///
+    /// 两条各钉一个方向，第 3 条是真正要命的那个：
+    /// 1. 解析要**去重升序**并丢弃非法项（取证开关不该因为写错一个数就让整局起不来）；
+    /// 2. 非正数（0 / 负数）必须丢 —— `0` 会让 `retain(t > elapsed)` 在 elapsed=0 时
+    ///    把它留下、之后又永远取不走，变成每帧都截一张；
+    /// 3. 🔴 **一帧跨过多个时刻时不能漏**：低帧率或长卡顿下，某一帧的 elapsed 可能
+    ///    同时越过 5s 和 15s。用"判等"实现会永久漏掉被跨过的那个 ——
+    ///    而截图是取证用的，漏一张就少一份证据，**且不会报错**。
+    #[test]
+    fn shot_at_parsing_and_due_taking_are_falsifiable() {
+        // 1) 去重升序 + 丢弃非法项
+        assert_eq!(parse_shot_at("15,5,5,abc,-2,0"), vec![5.0, 15.0]);
+        assert_eq!(parse_shot_at("  3.5 , 1 "), vec![1.0, 3.5]);
+        assert!(parse_shot_at("").is_empty());
+        assert!(parse_shot_at("nope").is_empty());
+        assert!(parse_shot_at("NaN,inf,-1,0").is_empty(), "NaN/inf/非正数都要丢");
+
+        // 2) 只取走"已到点"的，其余原样保留
+        let mut p = parse_shot_at("5,10,15");
+        assert_eq!(take_due_shots(&mut p, 4.9), 0);
+        assert_eq!(p, vec![5.0, 10.0, 15.0]);
+        assert_eq!(take_due_shots(&mut p, 5.0), 1, "到点即取（含等于）");
+        assert_eq!(p, vec![10.0, 15.0]);
+
+        // 3) **一帧跨过两个时刻**：必须一次取走两个，不能只取一个
+        assert_eq!(take_due_shots(&mut p, 12.0), 1);
+        assert_eq!(p, vec![15.0]);
+        let mut q = parse_shot_at("1,2,3");
+        assert_eq!(take_due_shots(&mut q, 100.0), 3, "跨过全部时一次全取走");
+        assert!(q.is_empty());
+        assert_eq!(take_due_shots(&mut q, 100.0), 0, "取空之后不再重复计数");
+    }
+
+    /// 🔴 判据：后台帧率上限（2026-09-27「游戏一开整机就卡」）。
+    ///
+    /// 四条各钉一个方向，缺一条就会出现"限了但限错"：
+    /// 1. 默认（两侧都 0）必须是**不限制** —— 压测/采集路径逐字节不变；
+    /// 2. 未聚焦且设了 bg 时必须被夹住（这是修的那个 bug）；
+    /// 3. 聚焦时 bg **不许**生效（否则玩家自己玩的时候也被限）；
+    /// 4. bg 只能**收紧**不能放宽（fg=30、bg=120 时仍取 30）。
+    #[test]
+    fn frame_cap_is_disabled_by_default_and_only_tightens() {
+        // 1) 默认不限制
+        assert_eq!(effective_frame_cap(0.0, 0.0, true), 0.0);
+        assert_eq!(effective_frame_cap(0.0, 0.0, false), 0.0);
+        // 2) 未聚焦：bg 夹住前台上限（含 fg=0 即"前台不限"的两侧组合）
+        assert_eq!(effective_frame_cap(300.0, 20.0, false), 20.0);
+        assert_eq!(effective_frame_cap(0.0, 20.0, false), 20.0);
+        // 3) 聚焦时 bg 不生效
+        assert_eq!(effective_frame_cap(300.0, 20.0, true), 300.0);
+        assert_eq!(effective_frame_cap(0.0, 20.0, true), 0.0);
+        // 4) bg 只能收紧：更宽的 bg 不改变更严的前台上限
+        assert_eq!(effective_frame_cap(30.0, 120.0, false), 30.0);
+        // 非法的负值按"不设限"处理，绝不允许变成负 fps
+        assert_eq!(effective_frame_cap(-5.0, -1.0, false), 0.0);
+    }
+
+    /// 🔴 **Linux 适配判据**：窗口请求尺寸必须是**物理像素**，且超屏时等比缩。
+    ///
+    /// 修的是 `LogicalSize::new(w / 1.5, h / 1.5)` —— 那个 1.5 是 Windows 那台机器
+    /// `scale_factor = 1.5` 的硬编码补偿，在 scale=1.0 的 Linux 上把 2560x1600
+    /// 变成 1706x1066，而 Wayland 下窗口尺寸直接决定交换链尺寸 ⇒ 整条渲染尺寸链都错。
+    ///
+    /// 三条断言各自对应一个会被写错的方向（都不是恒真断言）：
+    /// 1. **不缩放**：请求值原样返回 —— 任何乘除常数都会让这条红；
+    /// 2. **超屏等比缩**：且比例保持（缩完仍宽高比一致），不是只夹一边；
+    /// 3. **下限**：0 或极小值不许原样透出去（合成器会拒绝 0 尺寸窗口）。
+    #[test]
+    fn window_request_is_physical_and_clamped() {
+        // 1) 显式分辨率（物理）原样透传 —— 显示器足够大时一个像素都不许改
+        assert_eq!(window_physical_request(2560, 1600, Some((2560, 1600))), (2560, 1600));
+        assert_eq!(window_physical_request(1920, 1080, Some((3840, 2160))), (1920, 1080));
+        // 2) 超屏等比缩：3840x2160 请求放进 1920x1080 => 恰好一半，宽高比不变
+        let (w, h) = window_physical_request(3840, 2160, Some((1920, 1080)));
+        assert_eq!((w, h), (1920, 1080));
+        // 只超高（不超宽）时也要缩，且按**较小的**那个比例缩（否则会溢出另一边）
+        let (w, h) = window_physical_request(1920, 4000, Some((1920, 1080)));
+        assert!(w <= 1920 && h <= 1080, "缩完不许仍溢出：{w}x{h}");
+        assert!(w > 0 && h > 0);
+        // 3) 拿不到显示器（Wayland 的 primary_monitor() 恒 None）=> 如实请求，不猜
+        assert_eq!(window_physical_request(2560, 1600, None), (2560, 1600));
+        // 4) 下限：0 与极小值不许透传
+        assert_eq!(window_physical_request(0, 0, None), (320, 200));
+        assert_eq!(window_physical_request(100, 50, None), (320, 200));
+    }
+
+    /// 🔴 **Linux 适配判据**：`RV3D_BACKEND=x11` 在**原生 Linux** 上必须能生效。
+    ///
+    /// 旧代码的判据是 `is_wsl && WAYLAND_DISPLAY.is_some()` ⇒ 原生 Arch/KDE Wayland 上
+    /// **恒为 false**，而 winit 0.30 已删除 `WINIT_UNIX_BACKEND` ⇒ 用户**没有**任何
+    /// 退回 XWayland 的手段。这不是"以防万一"的开关：Wayland 下 `Locked` 抓取的失败
+    /// 是**静默**的（winit 忽略合成器的确认事件），XWayland 是唯一可验证的退路。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. **非 WSL 也必须能选到 x11**（这一条就是整个修复）；
+    /// 2. 显式变量**压过** WSL 自动判定（两个方向都测：wsl 上选 wayland、非 wsl 上选 x11）；
+    /// 3. 大小写/空白不敏感（`X11`、` xwayland ` 都要认）；
+    /// 4. 未设时不改变旧行为（WSL 自动选 x11；原生 Linux 保持 Auto）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backend_choice_x11_is_reachable_on_native_linux() {
+        // 1) 就是这个修复：非 WSL 的原生 Linux + 显式 x11
+        assert_eq!(backend_choice(Some("x11"), false), BackendChoice::X11);
+        // 2) 显式变量压过自动判定（两个方向）
+        assert_eq!(backend_choice(Some("wayland"), true), BackendChoice::Auto);
+        assert_eq!(backend_choice(Some("x11"), true), BackendChoice::X11);
+        // 3) 大小写与空白
+        assert_eq!(backend_choice(Some("X11"), false), BackendChoice::X11);
+        assert_eq!(backend_choice(Some(" xwayland "), false), BackendChoice::X11);
+        assert_eq!(backend_choice(Some("Wayland"), true), BackendChoice::Auto);
+        // 4) 未设 / 不认识的取值 ⇒ 旧行为不变
+        assert_eq!(backend_choice(None, true), BackendChoice::X11, "WSL 自动判定保持不变");
+        assert_eq!(backend_choice(None, false), BackendChoice::Auto, "原生 Linux 默认不强制");
+        assert_eq!(backend_choice(Some("nonsense"), false), BackendChoice::Auto);
+    }
+
+    /// 🔴 **Linux 适配判据**：锁定态的「假成功」必须能被**行为证据**判出来。
+    ///
+    /// `set_cursor_grab(Locked)` 返回 `Ok` 不代表锁生效（Wayland 下指针尚未 enter 时
+    /// winit 什么都没做也返回 `Ok`，且它忽略合成器的确认事件）。失败症状与"鼠标坏了"
+    /// 一模一样（零 raw 事件 ⇒ 视角不动），所以**唯一**可信的判据是"锁定之后真的
+    /// 收到过相对增量"。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. 观察窗内没增量 ⇒ `Pending`（**不许**提前下结论 —— 用户可能只是还没动鼠标，
+    ///    这一条挂了就会把正常玩家误判成假成功并去补抓，反而干扰他）；
+    /// 2. 增量**优先于时间**：就算第 1ms 就来，也立刻 `Confirmed`（最强的正面证据，
+    ///    没有理由再等满观察窗）；
+    /// 3. 到点仍为零 ⇒ `NoMotion`（这才是要报警的那条）；
+    /// 4. 边界：恰好等于窗口长度算到点（`>=` 而不是 `>` —— 写成 `>` 会让判定
+    ///    永远晚一帧，在 165fps 下无感，但语义上"满窗"就该有结论）。
+    #[test]
+    fn lock_observation_needs_evidence_not_just_ok() {
+        const W: u128 = 1500;
+        // 1) 窗口内、无增量 ⇒ 不许下结论
+        assert_eq!(lock_observation(0, 0, W), LockObservation::Pending);
+        assert_eq!(lock_observation(W - 1, 0, W), LockObservation::Pending);
+        // 2) 增量优先于时间：第 1ms 就来也立刻确认
+        assert_eq!(lock_observation(1, 1, W), LockObservation::Confirmed);
+        assert_eq!(lock_observation(0, 7, W), LockObservation::Confirmed);
+        // 3) 到点仍为零 ⇒ 假成功
+        assert_eq!(lock_observation(W, 0, W), LockObservation::NoMotion);
+        // 4) 边界：恰好满窗算到点；超时很久也仍是 NoMotion（不是 Confirmed）
+        assert_eq!(lock_observation(u128::MAX, 0, W), LockObservation::NoMotion);
+        // 反向保险：确认过之后再多的零增量也不该翻回 NoMotion（delta 是单调的）
+        assert_eq!(lock_observation(u128::MAX, 3, W), LockObservation::Confirmed);
+    }
+
+    /// 观察窗长度不许是 0 —— 那会让判定在第一帧就报假成功，把"还没动鼠标"当成故障。
+    #[test]
+    fn lock_observe_window_is_not_degenerate() {
+        assert!(LOCK_OBSERVE_MS >= 200, "太短会把正常玩家误判成假成功");
+        assert!(LOCK_OBSERVE_MS <= 5000, "太长则用户看着不动的视角干等");
+    }
+
+    /// 🔴 **Linux 适配判据**：`RV3D_NO_CAPTURE=1` 必须能**无条件**关掉光标抓取。
+    ///
+    /// 为什么这条在 Linux 上是必需品：Windows 侧的鼠标安全协议靠 `PostMessage`
+    /// 投键 + 不抢前台（用户 2026-09-03 的要求），于是自动化不必抓光标；Linux 没有
+    /// 这条路，而引擎在 `Playing` 态一定会抓（`Locked` 或 `Confined`）⇒ 跑一局冒烟
+    /// 就等于把用户的指针锁进游戏窗口。把"关掉捕获"做成一条判据，自动化不碰用户
+    /// 输入才是**代码保证**，而不是靠调用方自觉。
+    ///
+    /// 每条断言对应一个**会被写错的方向**：
+    /// 1. `allowed=false` ⇒ 恒假（**这一条就是那个开关**；漏掉它 = 开关无效）；
+    /// 2. 四个条件的**每一个**单独为假都要能关掉捕获 —— 特别是 `esc_menu_open`：
+    ///    漏掉它就是"菜单里鼠标被锁死，只能 Alt+F4"（本仓 2026-08-15 修过一次）；
+    /// 3. 全真才为真（防止把 `||` 写成 `&&` 之类的反向错误）。
+    #[test]
+    fn capture_wanted_obeys_the_no_capture_switch_and_the_menu_gates() {
+        // 1) 开关优先：其它条件全真也必须是假
+        assert!(!capture_wanted(true, true, false, false, false), "RV3D_NO_CAPTURE=1 必须关掉捕获");
+        // 2) 四个条件逐个单独为假
+        assert!(!capture_wanted(false, true, false, false, true), "失焦不许抓");
+        assert!(!capture_wanted(true, false, false, false, true), "非 Playing 不许抓");
+        assert!(!capture_wanted(true, true, true, false, true), "设置面板打开不许抓");
+        assert!(!capture_wanted(true, true, false, true, true), "ESC 菜单打开不许抓");
+        // 3) 全真才抓
+        assert!(capture_wanted(true, true, false, false, true));
+    }
+
+    /// 🔴 判据：中继注册失败时**不许**报「已注册」（教训 46：日志不许把「没跑成」写成成功）。
+    ///
+    /// 两个方向都要：成功时文案里必须有房间名与端口（现场要用它核对），
+    /// 失败时文案里必须**没有**成功字样，且必须带出原始错误。
+    #[test]
+    fn relay_registration_report_never_claims_success_on_failure() {
+        let ok: std::io::Result<()> = Ok(());
+        let (okv, msg) = rdv_register_report("10.0.0.1:9000", "steel", 27015, &ok);
+        assert!(okv, "成功必须报成功: {msg}");
+        assert!(msg.contains("已向中继") && msg.contains("steel"), "{msg}");
+        assert!(msg.contains("27015"), "端口要出现在现场日志里: {msg}");
+
+        let err: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no route",
+        ));
+        let (okv2, msg2) = rdv_register_report("10.0.0.1:9000", "steel", 27015, &err);
+        assert!(!okv2, "失败不许报成功: {msg2}");
+        assert!(msg2.contains("失败"), "{msg2}");
+        assert!(
+            !msg2.contains("已向中继"),
+            "失败文案里不许留下成功字样: {msg2}"
+        );
+        assert!(msg2.contains("no route"), "要把原始错误带出来: {msg2}");
+    }
+
+    /// 🔴 判据：`scripts/*.ps1` 的**每一行都不许以非 ASCII 字节结尾**。
+    ///
+    /// 存在理由（2026-09-26 实测，5 个文件全中）：Windows PowerShell 5.1 把**无 BOM** 的
+    /// `.ps1` 按系统 ANSI（本机 GBK）解码。某行若以中文/全角字符结尾，其最后一个字节落在
+    /// GBK 首字节区间，解码器就把**行尾**当成它的第二个字节吃掉 ⇒ 下一行被并进这一行；
+    /// 若这一行恰好是注释，**下一行代码就被静默注释掉**，脚本照跑但少了一条语句：
+    ///   * `compile_pt.ps1` 吃掉 `$ErrorActionPreference = 'Stop'`（编译失败不再中止）；
+    ///   * `pt_power_ab.ps1` 吃掉 `function Run-Case(...)`（整个脚本不可用）；
+    ///   * `ask_qianwen.ps1` 吃掉 `$ix = ...`（点击落在 x=0）；
+    ///   * `release_input.ps1` 吃掉 `$alive = 0`；
+    ///   * `run_gameplay_smoke.ps1` 吃掉四处代码（含启动游戏与跑冒烟的调用）。
+    /// 判据只看**行尾字节**：文件里出现中文没关系（`send_work.ps1` 的消息体就是中文，
+    /// 但它后面跟着 ASCII 的 `}`），被吃掉的一定是"行尾非 ASCII"的那些行。
+    #[test]
+    fn powershell_scripts_never_end_a_line_with_a_non_ascii_byte() {
+        // 🔴 2026-09-26：扫描面以前只有 `scripts/`，而 `tools/shot_diff.ps1`（**已入库**）
+        // 当时就有 6 行以中文结尾 ⇒ 它下一行（`$ErrorActionPreference` / `$src = ...` /
+        // `$step = 7`）全被注释掉了 —— `tools/` 不在扫描面里，所以这条判据一直是绿的。
+        // **判据的扫描面必须覆盖"所有入库的 .ps1"**，否则它只保护它恰好记得的那一个目录。
+        let dirs = ["scripts", "tools"];
+        let mut checked = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for dir in dirs {
+            for entry in std::fs::read_dir(dir).expect("目录必须存在") {
+                let path = entry.expect("读取目录项失败").path();
+                if path.extension().and_then(|s| s.to_str()) != Some("ps1") {
+                    continue;
+                }
+                checked += 1;
+                let bytes = std::fs::read(&path).expect("读 .ps1 失败");
+                let name = format!(
+                    "{}/{}",
+                    dir,
+                    path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+                );
+                for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
+                    // 结尾的 CR 不算行尾内容（CRLF 文件）
+                    let end = if line.last() == Some(&b'\r') { line.len().saturating_sub(1) } else { line.len() };
+                    if end == 0 {
+                        continue;
+                    }
+                    if line[end - 1] >= 0x80 {
+                        let text = String::from_utf8_lossy(&line[..end]).to_string();
+                        bad.push(format!("{name}:{}  …{}", i + 1, &text[text.len().saturating_sub(40)..]));
+                    }
+                }
+            }
+        }
+        // 目录走空时这条会静默通过 —— 那正是教训 27 的形态（"没测到"与"测到 0"分不清）
+        assert!(checked >= 10, "只扫到 {checked} 个 .ps1，路径大概不对");
+        assert!(
+            bad.is_empty(),
+            "有 {} 行以非 ASCII 字节结尾（PS 5.1 按 ANSI 读 ⇒ 会吞掉下一行）：\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
+
+    /// 🔴 判据：**入库的文本文件里不许有 NUL 字节**（2026-09-26 实测命中 1 处）。
+    ///
+    /// 存在理由：`docs/HANDOFF-soldier.md` 里藏着一个 NUL —— 就在「· 0 警告 ·」那句里，
+    /// `0` 被写成了 `0x00`。后果是**文本工具到此为止**：`read` 直接判定 "binary file" 拒绝读取，
+    /// 按行处理的脚本也会在那行出怪事 —— 而在终端里它只显示成空白，**完全看不出来**。
+    /// 这与教训 36 同族：文件"看着好好的"，工具却读不了。
+    ///
+    /// 扫描面 = `docs/*.md` + `src/**/*.rs` + `build.rs`/`build_spv_rt.rs`；
+    /// 自检：扫到的文件数必须 ≥ 30，否则路径写错也会静默通过（教训 27）。
+    #[test]
+    fn tracked_text_files_contain_no_nul_byte() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, out);
+                    } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir("docs") {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                    files.push(p);
+                }
+            }
+        }
+        walk(std::path::Path::new("src"), &mut files);
+        for extra in ["build.rs", "build_spv_rt.rs"] {
+            let p = std::path::PathBuf::from(extra);
+            if p.exists() {
+                files.push(p);
+            }
+        }
+        assert!(files.len() >= 30, "只扫到 {} 个文本文件，路径大概不对", files.len());
+        let bad: Vec<String> = files
+            .iter()
+            .filter_map(|p| {
+                let b = std::fs::read(p).ok()?;
+                let at = b.iter().position(|x| *x == 0)?;
+                let line = b[..at].iter().filter(|x| **x == b'\n').count() + 1;
+                Some(format!("{} 第 {line} 行附近（字节偏移 {at}）", p.display()))
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "文本文件里含 NUL 字节 ⇒ 文本工具会把它当二进制拒绝读取：\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// 🔴 跨文件重复的着色器常量必须逐值一致（2026-10-01）。
+    ///
+    /// 存在理由：本会话修掉的**两条真缺陷是同一个模式**——同一约定存在若干份物理副本，
+    /// 改了生产者、漏改消费者：
+    /// - `pt_set_scene_markers` 的 `* 0.5` 是 2026-09-17 之前"渲染盒 = 2×AABB"的遗留，
+    ///   生产者改了、PT 这个消费者没跟上 ⇒ **PT 的每个 marker 盒整体小一半**（§22.14）；
+    /// - `main.rs` 占领底盘 `from_scale(10.0,…)` 配注释"半径 5.0 → scale 10.0"，
+    ///   同样是旧约定遗留 ⇒ **领地底盘画成真实占领圈的 2 倍**（§23.13）。
+    /// 两条都**从画面上看不出来**、只能靠把值对起来算。既然算得出来，就该在测试里算，
+    /// 而不是等下一位再花两小时反推。
+    ///
+    /// 自检（教训 27：判据必须能红）：**每份副本都必须真的被找到**。若某处改了名、
+    /// 挪了文件或正则不匹配，"找到 0 份"绝不能算通过——那正是本仓反复踩的恒真断言。
+    #[test]
+    fn duplicated_shader_constants_stay_in_sync() {
+        /// 取某个标识符在**非注释行**上的所有声明值。
+        /// 跳过注释是必须的：说明性注释里满是"必须与 X 同值"这类句子，
+        /// 不跳过的话注释里提到的数字会被当成一份副本，把测试变成噪音。
+        fn decls(src: &str, name: &str) -> Vec<f32> {
+            let mut out = Vec::new();
+            for line in src.lines() {
+                let t = line.trim_start();
+                if t.starts_with("//") || !line.contains(name) {
+                    continue;
+                }
+                let Some(eq) = line.find('=') else { continue };
+                // 必须先 trim：`const X: f32 = 1.5;` 的等号后紧跟一个空格，
+                // 不 trim 则 take_while 首字符即失败、解析出空串 ⇒ 一份都找不到。
+                // （本函数第一版就栽在这里，靠下面"必须找到 4 份"的自检才没静默通过。）
+                let rest = line[eq + 1..].trim_start();
+                let num: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                    .collect();
+                if let Ok(v) = num.parse::<f32>() {
+                    out.push(v);
+                }
+            }
+            out
+        }
+
+        let read = |p: &str| -> String {
+            std::fs::read_to_string(p)
+                .unwrap_or_else(|e| panic!("读 {p} 失败：{e}（测试工作目录应为仓库根）"))
+        };
+        let build = read("build.rs");
+        let ray = read("src/engine/ray_tracer.rs");
+        let ptshader = read("assets/rt/pt_panorama.glsl");
+
+        // ① 砌块皮肤尺寸门：光栅 WGSL 两份（顶点着色器 + mesh 着色器各一份）
+        //    + PT 的 Rust 常量 + PT 的 GLSL 常量 = 4 份。
+        let mut gate: Vec<(&str, f32)> = Vec::new();
+        for (i, v) in decls(&build, "MASONRY_MIN_SPAN").into_iter().enumerate() {
+            gate.push((if i == 0 { "build.rs(VS)" } else { "build.rs(mesh)" }, v));
+        }
+        for v in decls(&ray, "MASONRY_MIN_SPAN") {
+            gate.push(("ray_tracer.rs", v));
+        }
+        for v in decls(&ptshader, "MASONRY_MIN_SPAN") {
+            gate.push(("pt_panorama.glsl", v));
+        }
+        assert_eq!(
+            gate.len(),
+            4,
+            "MASONRY_MIN_SPAN 应有 4 份声明，实际找到 {} 份（{:?}）\
+             ⇒ 有副本被改名/挪走/删掉了，这个测试本身需要跟着更新，不要直接放宽断言",
+            gate.len(),
+            gate
+        );
+        let want = crate::engine::ray_tracer::MASONRY_MIN_SPAN;
+        let off: Vec<String> = gate
+            .iter()
+            .filter(|(_, v)| (*v - want).abs() > 1e-6)
+            .map(|(w, v)| format!("{w} = {v}"))
+            .collect();
+        assert!(
+            off.is_empty(),
+            "MASONRY_MIN_SPAN 各副本与 ray_tracer 的 {want} 不一致：{}\
+             ⇒ 尺寸门会在光栅/PT 两侧给出不同判定（§22.14 同族错法）",
+            off.join("；")
+        );
+
+        // ② 皮肤 tile 尺寸：光栅用字面量、PT 用常量，两处必须同为 1.6 × 0.8。
+        //    这是 §22.4b 那套"砖块尺度"的唯一真值来源，任一侧改动都会让两侧砖大小不同。
+        assert!(
+            build.contains("vec2<f32>(1.6, 0.8)"),
+            "build.rs 里找不到皮肤 tile 字面量 `vec2<f32>(1.6, 0.8)`\
+             ⇒ 若改了写法（例如换成常量），请同步更新本测试与 PT 侧，不要删断言"
+        );
+        assert!(
+            ptshader.contains("SKIN_TILE_M = vec2(1.6, 0.8)"),
+            "pt_panorama.glsl 里找不到 `SKIN_TILE_M = vec2(1.6, 0.8)`\
+             ⇒ 两侧皮肤 tile 已脱钩，砖块尺度会光栅/PT 不一致"
+        );
+    }
+
+    /// 🔴 尺寸门用的 **1.05 必须"除门本身以外与 1.0 不可区分"**（§22.7）。
+    ///
+    /// `flat_flag` 是片元着色器的材质分派值：0=地面、1.0=marker、1.25=外部建模、
+    /// 2.0=NPC、3.0=枪。2026-09-30 起多了一个 **1.05 = "太小、不发砌块皮肤"的 marker**
+    /// （`MASONRY_MIN_SPAN` 尺寸门，护柱/消防栓这类小件走它）。
+    ///
+    /// 风险不在门本身，而在**将来新加的那一条分支**：只要有人写出
+    /// `flat_flag > 1.0` 或 `flat_flag <= 1.03` 这种**在 1.0 与 1.05 上取值不同**的判据，
+    /// 被门挡下的 1.05 就会**悄悄走进与 1.0 不同的分支** —— 症状是"护柱忽然少了一层
+    /// 效果"，而没人会去查一个 0.05 的差。⇒ 把它变成硬约束：
+    /// **片元里每条 flat_flag 判据在 1.0 与 1.05 上取值必须相同，
+    /// 唯一例外是阈值恰为 1.02 的那条（尺寸门自己）。**
+    ///
+    /// ⚠️ 判据是"**取值不同**"，不是"阈值落在 1.0~1.05 之间"：`flat_flag < 1.1`
+    /// 两条都成立 ⇒ **无害**，本测试不该报它（第一版把例子写成 `< 1.1`，
+    /// 被 `target/guardlogic.py` 的合成用例当场否掉）。
+    ///
+    /// 自检（教训 27：判据必须能红）：解析到的判据数必须 **>= 8**，且必须**至少找到
+    /// 一条阈值 1.02 的门** —— 否则"没有例外"会因为"什么都没解析到"而恒真通过。
+    #[test]
+    fn gated_marker_flag_is_indistinguishable_except_at_the_gate() {
+        /// 把非注释行里的 `flat_flag <op> <num>` 解析成 (算子, 阈值, 行号)。
+        fn atoms(src: &str) -> Vec<(String, f32, usize)> {
+            let mut out = Vec::new();
+            for (ln, line) in src.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let mut base = 0usize;
+                while let Some(k) = line[base..].find("flat_flag") {
+                    let i = base + k + "flat_flag".len();
+                    let rest = line[i..].trim_start();
+                    let op = ["<=", ">=", "==", "!=", "<", ">"]
+                        .iter()
+                        .find(|o| rest.starts_with(**o))
+                        .copied();
+                    let Some(op) = op else {
+                        base = i;
+                        continue;
+                    };
+                    let num: String = rest[op.len()..]
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    if let Ok(v) = num.parse::<f32>() {
+                        out.push((op.to_string(), v, ln + 1));
+                    }
+                    base = i;
+                }
+            }
+            out
+        }
+
+        fn holds(op: &str, flag: f32, rhs: f32) -> bool {
+            match op {
+                "<=" => flag <= rhs,
+                ">=" => flag >= rhs,
+                "==" => flag == rhs,
+                "!=" => flag != rhs,
+                "<" => flag < rhs,
+                ">" => flag > rhs,
+                other => panic!("未知算子 {other}"),
+            }
+        }
+
+        let build = std::fs::read_to_string("build.rs")
+            .expect("读 build.rs 失败（测试工作目录应为仓库根）");
+        let lines: Vec<&str> = build.lines().collect();
+        let from = lines
+            .iter()
+            .position(|l| l.contains("const FRAGMENT_SHADER_WGSL"))
+            .expect("找不到 FRAGMENT_SHADER_WGSL 起点");
+        let to = lines[from + 1..]
+            .iter()
+            .position(|l| l.contains("const MESH_SHADER_WGSL"))
+            .map(|p| p + from + 1)
+            .expect("找不到 FRAGMENT_SHADER_WGSL 终点（MESH_SHADER_WGSL 之后）");
+
+        let a = atoms(&lines[from..to].join("\n"));
+        assert!(
+            a.len() >= 8,
+            "片元里只解析到 {} 条 flat_flag 判据（应 >= 8）⇒ 着色器改了形态或解析器坏了，\
+             本测试会因'没解析到'而假通过，必须先修解析器再下结论",
+            a.len()
+        );
+        assert!(
+            a.iter().any(|(_, v, _)| (*v - 1.02).abs() < 1e-6),
+            "一条阈值 1.02 的尺寸门都没找到 ⇒ 门被删了或本测试期望已过时（§22.7）"
+        );
+
+        let diff: Vec<String> = a
+            .iter()
+            .filter(|(op, v, _)| {
+                (v - 1.02).abs() > 1e-6 && holds(op, 1.0, *v) != holds(op, 1.05, *v)
+            })
+            .map(|(op, v, ln)| format!("build.rs:{ln}  flat_flag {op} {v}"))
+            .collect();
+        assert!(
+            diff.is_empty(),
+            "这些 flat_flag 判据会让 1.05（被尺寸门挡下的小件）与 1.0 走不同分支：{}\
+             ⇒ 要么把阈值挪出 (1.0, 1.05] 区间，要么显式写成对 1.05 也成立",
+            diff.join("；")
+        );
+    }
+
+    /// 🔴 每把 GLB 枪模的索引必须落在顶点数以内，且顶点不得含 NaN/Inf。
+    ///
+    /// 存在理由（2026-09-15）：**按 2 切枪（AK-104）会直接把设备打掉**
+    /// （`vkQueueSubmit` → `VK_ERROR_DEVICE_LOST`）。越界索引在 GPU 上是**顶点抓取越界**：
+    /// 不报 VUID、不 panic，只是整台设备消失 —— 而索引是 GLB 解析器算出来的，
+    /// 只要合并多 primitive 时漏加基址偏移就会整段偏出去。
+    /// 这条测试把"能不能安全上传"变成上传**之前**就能判的纯数字判据。
+    #[test]
+    fn gun_glb_indices_all_in_range() {
+        let mut checked = 0;
+        for entry in std::fs::read_dir("assets/guns").expect("assets/guns 目录必须存在") {
+            let path = entry.expect("读取 assets/guns 项失败").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("glb") {
+                continue;
+            }
+            let key = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("枪模文件名必须是 UTF-8")
+                .to_string();
+            let Some((verts, indices)) = GameApp::load_gun_glb(&key) else {
+                continue;
+            };
+            checked += 1;
+            assert!(!verts.is_empty(), "{key}: 顶点不得为空");
+            let max_i = indices.iter().copied().max().unwrap_or(0);
+            assert!(
+                (max_i as usize) < verts.len(),
+                "{key}: 索引越界 —— 最大索引 {max_i} ≥ 顶点数 {}（GPU 顶点抓取越界 = device lost）",
+                verts.len()
+            );
+            for (i, v) in verts.iter().enumerate() {
+                assert!(
+                    v.pos.iter().all(|c| c.is_finite()) && v.color.iter().all(|c| c.is_finite()),
+                    "{key}: 顶点 #{i} 含 NaN/Inf（pos={:?} color={:?}）",
+                    v.pos,
+                    v.color
+                );
+            }
+        }
+        assert!(checked >= 10, "至少应校验到 10 把 GLB 枪模，实际 {checked}");
+    }
+
+    /// raw 不可用的平台（本机 Windows）**连试都不许试** `Locked`。
+    /// 闭包写成 panic 而不是返回 false，是为了把"没被调用"也钉住 ——
+    /// 若哪天有人把 `raw_motion &&` 去掉，这条测试会立刻炸，而不是静默退化成
+    /// "试了 Locked 拿到 Ok，于是 cursor_locked = true，视角从此无输入"。
+    #[test]
+    fn grab_plan_never_tries_locked_without_raw_motion() {
+        let (locked, grabbed) = cursor_grab_plan(
+            false,
+            || panic!("raw 不可用的平台不得尝试 Locked"),
+            || true,
+        );
+        assert!(!locked, "raw 不可用时 cursor_locked 必须为 false");
+        assert!(grabbed, "应退到 Confined 并报告已抓住");
+
+        let (locked, grabbed) = cursor_grab_plan(
+            false,
+            || panic!("raw 不可用的平台不得尝试 Locked"),
+            || false,
+        );
+        assert!(!locked);
+        assert!(!grabbed, "Confined 也失败时应如实报告未抓住");
+    }
+
+    /// raw 可用（X11/Wayland/macOS）时保持既有优先级：Locked → Confined。
+    #[test]
+    fn grab_plan_prefers_locked_where_raw_motion_exists() {
+        assert_eq!(cursor_grab_plan(true, || true, || false), (true, true));
+        assert_eq!(cursor_grab_plan(true, || false, || true), (false, true));
+        assert_eq!(cursor_grab_plan(true, || false, || false), (false, false));
+    }
+
+    /// Windows 上 RAW_MOUSE_MOTION 必须是 false：winit 的 Windows 后端不构造
+    /// DeviceEvent::MouseMotion，为真会让 capture 走进无输入的死路。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn windows_backend_has_no_raw_mouse_motion() {
+        assert!(
+            !RAW_MOUSE_MOTION,
+            "winit 的 Windows 后端只发 Added/Removed；这里若为真，锁定即等于视角失效"
+        );
+    }
+
+    /// 以恒定速度直行 `secs` 秒，返回积分后的摆动状态。
+    /// `dt` 故意可传入不同帧率，用于断言"同一行程得到同一状态"。
+    /// 进循环前先 tick 一次播种 `prev_pos`，否则两种帧率会各少吃一步的行程。
+    ///
+    /// 帧数必须**四舍五入**：`(0.5f32 / (1.0f32 / 30.0)) as usize` 截断成 14 而不是 15
+    /// （f32 里 1/30 的倒数乘回来是 14.999999），于是两种帧率模拟的根本不是同一段时长，
+    /// 这条测试就从"验证帧率无关"变成了"验证两个不同时长相等"，必然红。
+    fn walk(dt: f32, secs: f32, speed: f32) -> GunSway {
+        let mut s = GunSway::new();
+        let right = glam::Vec3::X;
+        let fwd = glam::Vec3::NEG_Z;
+        let mut pos = glam::Vec3::ZERO;
+        s.tick(dt, pos, right, fwd, false, false);
+        let step = speed * dt;
+        for _ in 0..(secs / dt).round() as usize {
+            pos += fwd * step;
+            s.tick(dt, pos, right, fwd, false, false);
+        }
+        s
+    }
+
+    /// 帧率无关性：以 6 m/s 直行 0.5 秒，165 fps 与 30 fps 必须得到同样的相位和包络
+    /// （旧实现用 `anim_clock * 7.5` 累积时间相位 + 逐帧原始速度，两者都与帧率耦合）。
+    /// 0.5 s 让总相位落在 π 附近——刻意避开 2π 回绕点，否则比较的是回绕后的余数。
+    #[test]
+    fn gun_sway_is_framerate_independent() {
+        let fast = walk(1.0 / 165.0, 0.5, 6.0);
+        let slow = walk(1.0 / 30.0, 0.5, 6.0);
+        assert!(
+            (fast.stride - slow.stride).abs() < 0.05,
+            "同样行程后相位应一致：{} vs {}",
+            fast.stride,
+            slow.stride
+        );
+        assert!(
+            (fast.speed - slow.speed).abs() < 0.25,
+            "低通后的速度应基本与帧率无关：{} vs {}",
+            fast.speed,
+            slow.speed
+        );
+    }
+
+    /// 判据：静止呼吸微摆**有界、两轴都真的在动、且 y 走 2× 频率**（画"∞"而不是来回直线）。
+    /// 并钉住"长时间运行不漂"（纯函数、无累积量）。
+    #[test]
+    fn idle_sway_is_bounded_and_figure_eight() {
+        let mut max_x = 0.0f32;
+        let mut max_y = 0.0f32;
+        let mut x_changed = false;
+        let mut y_changed = false;
+        let mut prev = idle_sway(0.0);
+        for i in 0..=2000 {
+            let t = i as f32 * 0.01;
+            let (x, y) = idle_sway(t);
+            assert!(
+                (-1.0..=1.0).contains(&x) && (-1.0..=1.0).contains(&y),
+                "单位轨迹必须有界：({x}, {y})"
+            );
+            max_x = max_x.max(x.abs());
+            max_y = max_y.max(y.abs());
+            if (x - prev.0).abs() > 1e-3 {
+                x_changed = true;
+            }
+            if (y - prev.1).abs() > 1e-3 {
+                y_changed = true;
+            }
+            prev = (x, y);
+        }
+        assert!(x_changed && y_changed, "两轴都必须真的在动");
+        assert!(max_x > 0.99, "x 轴应达到满幅，实际 {max_x}");
+        assert!((max_y - 0.6).abs() < 0.01, "y 轴应是 0.6 倍幅值，实际 {max_y}");
+        // 2× 频率：x 走半个周期时 y 回到同号（一圈"∞"的两个环在 y 上同相）
+        let period_x = 1.0 / GUN_IDLE_HZ;
+        let (x0, y0) = idle_sway(0.1);
+        let (x1, y1) = idle_sway(0.1 + period_x * 0.5);
+        assert!((x1 + x0).abs() < 0.02, "x 半周期后应反相：{x0} vs {x1}");
+        assert!((y1 - y0).abs() < 0.02, "y 是 2× 频率 ⇒ 半周期后同相：{y0} vs {y1}");
+    }
+
+    /// 判据：冲刺姿态包络**必须帧率无关地收敛**，且松开 Shift 后回到精确 0
+    /// （0 是 A/B 与"姿态项彻底不参与"的判据）。
+    #[test]
+    fn gun_sprint_pose_converges_and_is_framerate_independent() {
+        let run = |dt: f32, secs: f32, sprinting: bool| {
+            let mut s = GunSway::new();
+            for _ in 0..(secs / dt).round() as usize {
+                s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false, sprinting);
+            }
+            s
+        };
+        let fast = run(1.0 / 165.0, 0.5, true);
+        let slow = run(1.0 / 30.0, 0.5, true);
+        assert!(fast.sprint > 0.99, "0.5 s 后应基本收敛到满姿态：{}", fast.sprint);
+        assert!(
+            (fast.sprint - slow.sprint).abs() < 0.02,
+            "冲刺姿态低通应与帧率无关：{} vs {}",
+            fast.sprint,
+            slow.sprint
+        );
+        // 松开 Shift：回到精确 0（不是"接近 0"）
+        let mut s = fast;
+        for _ in 0..200 {
+            s.tick(1.0 / 165.0, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false, false);
+        }
+        assert_eq!(s.sprint, 0.0, "松开冲刺后包络应收敛到精确 0");
+        // 传送帧不该抹掉姿态目标（冲刺状态与位置无关）
+        let mut t = run(1.0 / 165.0, 0.3, true);
+        t.tick(
+            1.0 / 165.0,
+            glam::Vec3::new(80.0, 0.0, 80.0),
+            glam::Vec3::X,
+            glam::Vec3::NEG_Z,
+            false,
+            true,
+        );
+        assert!(t.sprint > 0.9, "传送帧后冲刺姿态应保持：{}", t.sprint);
+    }
+
+    /// 有界性 + 相位回绕：长时间运行后相位仍在 [0, 2π)、速度不发散、包络 ≤1。
+    ///
+    /// 这里**不**用紧容差查"不过冲"：600 s × 6 m/s 把坐标累加到 3.6e3 m，
+    /// `now_pos - prev_pos` 在该量级下每帧带约一个 ulp（≈2.4e-4）的舍入误差，
+    /// 再除以 dt=1/165 s 放大成约 7e-3 m/s 的**输入噪声**。低通本身单调逼近、不会过冲，
+    /// 超的是这个噪声。紧的那条断言在下面的 `gun_sway_low_pass_does_not_overshoot`。
+    #[test]
+    fn gun_sway_stays_bounded_and_wrapped() {
+        let s = walk(1.0 / 165.0, 600.0, 6.0);
+        assert!(s.stride >= 0.0 && s.stride < std::f32::consts::TAU);
+        assert!(
+            s.speed <= 6.05,
+            "长时间运行后速度发散，说明低通或相位累加失去了有界性：{}",
+            s.speed
+        );
+        assert!(s.kick <= 1.0);
+    }
+
+    /// 不过冲（紧容差）：短时运行下坐标只有十几米，浮点噪声比容差小三个数量级，
+    /// 因此这条能真正守住"指数低通单调逼近、绝不越过输入值"。
+    #[test]
+    fn gun_sway_low_pass_does_not_overshoot() {
+        let s = walk(1.0 / 165.0, 3.0, 6.0);
+        assert!(
+            s.speed <= 6.0 + 1e-4,
+            "指数低通是单调逼近，不应过冲：{}",
+            s.speed
+        );
+        assert!(s.speed > 5.99, "3 秒后应已收敛到满幅，实际 {}", s.speed);
+    }
+
+    /// 瞬移/重生保护：单帧几十米的位移不得被当成巨型速度（旧实现没有这层保护，
+    /// 而且 `player_speed()` 恒为 0，两种错法都会让摆动不可信）
+    #[test]
+    fn gun_sway_ignores_teleport() {
+        let mut s = walk(1.0 / 165.0, 0.5, 6.0);
+        assert!(s.speed > 5.0, "前置条件：应先积分出满幅速度");
+        s.tick(
+            1.0 / 165.0,
+            glam::Vec3::new(0.0, 0.0, -50.0),
+            glam::Vec3::X,
+            glam::Vec3::NEG_Z,
+            false,
+            false,
+        );
+        assert!(s.speed < 1e-3, "传送帧速度应归零，实际 {}", s.speed);
+    }
+
+    /// 后坐包络连续：击发后逐帧单调下降，单帧变化量 ≤8%
+    /// （旧实现在 0.25 s 整点把阻尼从 0.15 阶跃到 1.0，单帧变化 0.85 = 位置跳变）
+    #[test]
+    fn gun_recoil_kick_decays_continuously() {
+        let mut s = GunSway::new();
+        let dt = 1.0 / 165.0;
+        s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, true, false);
+        assert!(s.kick > 0.9, "击发帧应接近满幅后坐");
+        let mut prev = s.kick;
+        for _ in 0..60 {
+            s.tick(dt, glam::Vec3::ZERO, glam::Vec3::X, glam::Vec3::NEG_Z, false, false);
+            assert!(s.kick <= prev, "包络不得回升：{} > {}", s.kick, prev);
+            assert!(
+                prev - s.kick < 0.08,
+                "单帧后坐变化量应连续，实际 {}",
+                prev - s.kick
+            );
+            prev = s.kick;
+        }
+        assert!(s.kick < 0.01, "0.36 s 后应基本归零，实际 {}", s.kick);
+    }
+
+    /// 枪模顶点色：坏资产（baseColorFactor 0.057）经反照率补偿后必须给出
+    /// 可用的明暗区间，而不是旧公式的 0.049..0.066（梯度 ±0.017 = 纯黑剪影）
+    #[test]
+    fn gun_bake_color_keeps_a_readable_gradient() {
+        let boost = GUN_REF_ALBEDO / 0.0768; // ak12.glb 实测最亮材质
+        let raw = [0.0573, 0.0573, 0.0573];
+        let dirs = [
+            glam::Vec3::new(-0.45, 0.80, -0.30), // 迎光面（= 主光方向）
+            glam::Vec3::Y,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::X,
+            glam::Vec3::NEG_X,
+            glam::Vec3::NEG_Z, // 朝向镜头的侧面
+            glam::Vec3::Z,     // 枪口方向
+        ];
+        let mut lo = f32::MAX;
+        let mut hi: f32 = 0.0;
+        for d in dirs {
+            let n = d.normalize();
+            let c = fp_gun_bake_color(n, raw, boost);
+            for ch in c {
+                assert!(ch.is_finite() && (0.0..=1.0).contains(&ch), "{:?} → {:?}", n, c);
+                lo = lo.min(ch);
+                hi = hi.max(ch as f32);
+            }
+        }
+        assert!(lo > 0.03, "最暗面不应是纯黑，实际 {}", lo);
+        assert!(hi < 0.99, "最亮面不得削顶，实际 {}", hi);
+        assert!(
+            hi / lo >= 4.0,
+            "明暗比过小说明仍是平面剪影：{:.4} / {:.4}",
+            hi,
+            lo
+        );
+    }
+}
+ 
+
+/// 桌面入口：供薄 bin（`src/main.rs`）调用。
+pub fn run_steel_front_desktop() {
+    run_steel_front(None);
+}
+
+/// Android 入口：系统在 `.so` 加载后回调它（事件循环所有权反转）。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub fn android_main(app: AndroidApp) {
+    run_steel_front(Some(app));
+}

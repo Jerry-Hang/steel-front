@@ -4,6 +4,14 @@ version = "0.1.0"
 description = "钢铁前线 (Steel Front) - 21 世纪架空世界观大战场 FPS 引擎"
 edition = "2021"
 
+# 库目标：桌面给薄 bin 用（rlib）；Android 编 cdylib（.so）以导出 android_main。
+[lib]
+name = "steel_front"
+crate-type = ["rlib", "cdylib"]
+# 本仓原为纯 bin crate，从未跑过 doctest；doc 注释里的代码块是示例（如 RV3D_* 用法），
+# 不是可执行判据。改成 lib 后 `cargo test` 会默认跑 doctest ⇒ 显式关掉，保持与 bin 时期一致。
+doctest = false
+
 [dependencies]
 # Vulkan 绑定
 ash = { version = "0.38", features = ["debug"] }

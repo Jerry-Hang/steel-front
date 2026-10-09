@@ -2934,7 +2934,7 @@ mod tests {
         }
 
         let ui = body(include_str!("ui.rs"), "fn esc_menu_elements");
-        let mn = body(include_str!("main.rs"), "fn menu_click_hit");
+        let mn = body(include_str!("lib.rs"), "fn menu_click_hit");
 
         // 面板尺寸与内缩：两份必须给同样的数
         for (needle, what) in [("let pw = ", "面板宽"), ("let ph = ", "面板高")] {
