@@ -10,7 +10,7 @@ ash = { version = "0.38", features = ["debug"] }
 # Vulkan 窗口表面创建
 ash-window = "0.13"
 # 窗口管理（使用 rwh_06 以匹配 ash-window 0.13）
-winit = { version = "0.30", features = ["rwh_06"] }
+winit = { version = "0.30", features = ["rwh_06", "android-game-activity"] }
 # 线性代数（向量、矩阵）
 glam = "0.29"
 # 原始窗口句柄（vulkan 需要，rwh_06 以匹配 ash-window）
