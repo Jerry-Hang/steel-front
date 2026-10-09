@@ -49,6 +49,11 @@ impl Renderer {
                 Ok("immediate") => vk::PresentModeKHR::IMMEDIATE,
                 Ok("fifo") => vk::PresentModeKHR::FIFO,
                 Ok("mailbox") => vk::PresentModeKHR::MAILBOX,
+                // Android：可靠的基本只有 FIFO（IMMEDIATE 多数驱动不支持，
+                // MAILBOX 看机型）。见 docs/HANDOFF-mobile.md 5.6。
+                #[cfg(target_os = "android")]
+                _ => vk::PresentModeKHR::FIFO,
+                #[cfg(not(target_os = "android"))]
                 _ => vk::PresentModeKHR::IMMEDIATE,
             },
         };
