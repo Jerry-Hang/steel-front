@@ -53,8 +53,10 @@
 use std::sync::{Arc, Mutex};
 
 /// waveOut 的块大小；ALSA 侧只用它算队列目标（`BUFFER_COUNT × 这个数` 帧）。
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 const FRAMES_PER_BUFFER: usize = 2048;
 /// waveOut 的块数；ALSA 侧只用它算队列目标（见 `alsa::queue_latency_us`）。
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 const BUFFER_COUNT: usize = 4;
 
 #[cfg(target_os = "windows")]
@@ -1141,6 +1143,7 @@ fn warn_submit_truncation_once(available: usize, capacity: usize) {
 /// 🔴 2026-09-28：ALSA 侧**复用同一个闩**（`AlsaSink::submit` 收到 `-EAGAIN` 时）。两条后端的
 /// 处境逐字相同（"队列满 ⇒ 丢掉这一帧"），共用一个闩才不会分叉成「一条后端提示、另一条没动静」。
 /// 同一进程里两条后端互斥（Windows 只走 waveOut，Linux 只走 ALSA），不会互相吃掉对方的告警。
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn first_starved_drop() -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
