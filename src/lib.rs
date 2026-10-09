@@ -4231,17 +4231,33 @@ use winit::platform::android::activity::AndroidApp;
 #[cfg(not(target_os = "android"))]
 type AndroidApp = ();
 
+#[cfg(target_os = "android")]
+mod android_log;
+
 /// 引擎主循环（桌面与 Android 共用）。
 ///
 /// Android 上由 `android_main` 调用并传入 `AndroidApp`（事件循环所有权反转，
 /// 见 docs/HANDOFF-mobile.md 4.2）；桌面上由 `main` 以 `None` 调用。
 fn run_steel_front(android_app: Option<AndroidApp>) {
     // 初始化日志系统
+    // Android：env_logger 写 stderr，系统不看 ⇒ 改用 logcat（见 android_log.rs）。
+    #[cfg(target_os = "android")]
+    crate::android_log::init();
+    #[cfg(not(target_os = "android"))]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // RV3D_ASSETS_FROM_MEMORY=1：把 assets/ 预载进内存并安装为全局资产来源，
     // 在桌面上验证"资产不来自文件系统"这条路径（为 Android AAssetManager 铺路，
     // 见 docs/HANDOFF-mobile.md 4.3）。
+    // Android：把资产读取接到 AAssetManager（APK 内的 assets/）。
+    #[cfg(target_os = "android")]
+    if let Some(app) = &android_app {
+        crate::engine::asset_source::install(Box::new(
+            crate::engine::asset_source::AndroidAssetSource::new(app.asset_manager()),
+        ));
+        log::info!("asset_source: 已安装 AAssetManager 来源");
+    }
+
     if env_truthy("RV3D_ASSETS_FROM_MEMORY") {
         let src = crate::engine::asset_source::MemSource::preload_tree("assets");
         log::info!(

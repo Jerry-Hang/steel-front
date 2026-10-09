@@ -133,6 +133,50 @@ pub fn global() -> &'static dyn AssetSource {
 
 static FS: FsSource = FsSource;
 
+/// Android 资产来源：包在 `AAssetManager` 上（APK 内的 `assets/`）。
+///
+/// 路径约定：引擎传的是相对路径 `assets/foo`，而 `AAssetManager` 的路径相对
+/// **`assets/` 根**（即 `foo`）—— 这里去掉 `assets/` 前缀。
+#[cfg(target_os = "android")]
+pub struct AndroidAssetSource {
+    mgr: ndk::asset::AssetManager,
+}
+
+#[cfg(target_os = "android")]
+impl AndroidAssetSource {
+    pub fn new(mgr: ndk::asset::AssetManager) -> Self {
+        Self { mgr }
+    }
+
+    fn rel(path: &str) -> &str {
+        path.strip_prefix("assets/").unwrap_or(path)
+    }
+}
+
+#[cfg(target_os = "android")]
+impl AssetSource for AndroidAssetSource {
+    fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        let rel = Self::rel(path);
+        let c = std::ffi::CString::new(rel)
+            .map_err(|e| format!("资产路径含 NUL '{}': {}", path, e))?;
+        let mut a = self
+            .mgr
+            .open(&c)
+            .ok_or_else(|| format!("AAssetManager 打不开 '{}'（APK 内为 '{}'）", path, rel))?;
+        let buf = a
+            .buffer()
+            .map_err(|e| format!("读取资产 '{}' 失败: {}", path, e))?;
+        Ok(buf.to_vec())
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        let rel = Self::rel(path);
+        std::ffi::CString::new(rel)
+            .map(|c| self.mgr.open(&c).is_some())
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

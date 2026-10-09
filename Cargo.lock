@@ -2299,6 +2299,7 @@ dependencies = [
  "image",
  "log",
  "naga",
+ "ndk",
  "raw-window-handle",
  "rspirv",
  "winit",

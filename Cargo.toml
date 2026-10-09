@@ -32,6 +32,11 @@ env_logger = "0.11"
 # 图片解码（PNG 等本地贴图加载）
 image = "0.25"
 
+# Android 专属直接依赖：AAssetManager（AssetSource 的第三实现用）。
+# ⚠ 只在 Android 目标下拉入 ⇒ 桌面直接依赖数不变（仍 10 个）。
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = "0.9"
+
 [build-dependencies]
 # 编译 WGSL 着色器为 SPIR-V（构建时）
 naga = { version = "30", features = ["wgsl-in", "spv-out", "spv-in"] }
