@@ -59,6 +59,7 @@ mod net;
 mod ui;
 mod config;
 mod perf_log;
+mod syscfg;
 
 use std::time::{Duration, Instant};
 

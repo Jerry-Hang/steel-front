@@ -456,14 +456,14 @@ impl Renderer {
             void_mode: false,
             framebuffers: Vec::new(),
             // MSAA：RV3D_MSAA=1/2/4/8（默认 4x；0/1 = 关闭）
-            msaa_samples: match std::env::var("RV3D_MSAA") {
-                Ok(v) => match v.trim().parse::<u32>() {
+            msaa_samples: match crate::syscfg::cfg("RV3D_MSAA").as_deref() {
+                Some(v) => match v.trim().parse::<u32>() {
                     Ok(2) => vk::SampleCountFlags::TYPE_2,
                     Ok(4) => vk::SampleCountFlags::TYPE_4,
                     Ok(8) => vk::SampleCountFlags::TYPE_8,
                     _ => vk::SampleCountFlags::TYPE_1,
                 },
-                Err(_) => vk::SampleCountFlags::TYPE_4,
+                None => vk::SampleCountFlags::TYPE_4,
             },
             msaa_images: Vec::new(),
             msaa_image_memory: Vec::new(),

@@ -49,6 +49,13 @@ pub struct CpuTopology {
     pub primary_physical: Vec<usize>,
     /// 次簇内物理核心主线程 vCPU（AMD = CCD1 物理核；Intel E-core 无 SMT 时 = secondary_set）
     pub secondary_physical: Vec<usize>,
+    /// 「超大核」集合（1+3+4 里的 1）：高容量簇中容量严格最高、且**唯一**的核。
+    /// 空 = 本机没有这种核（同构簇）。只有 `RV3D_CPU_PRIME=1` 时才参与调度。
+    pub prime_set: Vec<usize>,
+    /// 重载线程集合（scene_pool：视锥剔除 / 实例上传 / 地形 morph）：
+    /// 默认 = 首簇物理核；`RV3D_CPU_PRIME=1` 时 = 首簇去掉超大核（1+3+4 里的 3）；
+    /// `RV3D_SCENE_CPUS=4-6` 可显式覆盖。
+    pub scene_set: Vec<usize>,
     /// 全部超线程 vCPU（SMT 对的最大 vCPU；无 SMT/sysfs 不可读时为空）
     pub smt_set: Vec<usize>,
     /// Intel 能效核数量（CPUID leaf 0x1A hybrid；AMD 恒 0）
@@ -335,6 +342,35 @@ fn sysfs_capacity_clusters(threads: usize) -> Option<(Vec<usize>, Vec<usize>, us
     Some((big, little, e))
 }
 
+/// 从高容量簇里挑出「超大核」（1+3+4 的 1 / 2+4+2+2 的超大核）。
+///
+/// 判据：该核的 `cpu_capacity` 在同簇里**严格最高且唯一**，且比第二名高出 ≥2%。
+/// 并列最高（同构簇，如 2+4 里 4 颗一样的大核）⇒ 返回空，不硬拆。
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sysfs_prime_split(big: &[usize]) -> Vec<usize> {
+    if big.len() < 2 {
+        return Vec::new();
+    }
+    let mut caps: Vec<(usize, u32)> = Vec::new();
+    for &c in big {
+        let p = format!("/sys/devices/system/cpu/cpu{c}/cpu_capacity");
+        match std::fs::read_to_string(&p).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
+            Some(v) => caps.push((c, v)),
+            None => return Vec::new(),
+        }
+    }
+    let max = caps.iter().map(|x| x.1).max().unwrap_or(0);
+    let n_max = caps.iter().filter(|x| x.1 == max).count();
+    if max == 0 || n_max != 1 {
+        return Vec::new();
+    }
+    let second = caps.iter().map(|x| x.1).filter(|&v| v < max).max().unwrap_or(0);
+    if second == 0 || (max as f64) < (second as f64) * 1.02 {
+        return Vec::new();
+    }
+    caps.iter().filter(|x| x.1 == max).map(|x| x.0).collect()
+}
+
 /// 取全局 CPU 拓扑（首次调用触发 `detect()`，幂等）
 pub fn topology() -> &'static CpuTopology {
     TOPOLOGY.get_or_init(CpuTopology::detect)
@@ -570,10 +606,10 @@ impl CpuTopology {
     /// AMD = 首簇 CCD0 物理核（与渲染主线程同簇，避免跨 CCD 访问，且避开超线程）；
     /// Intel = 仅 P-core 物理核（杜绝渲染工作被调度到 E-core/超线程）。
     pub fn scene_compute_set(&self) -> &[usize] {
-        if self.primary_physical.is_empty() {
+        if self.scene_set.is_empty() {
             &self.primary_set
         } else {
-            &self.primary_physical
+            &self.scene_set
         }
     }
 
@@ -583,6 +619,12 @@ impl CpuTopology {
     ///   12600K/13400F/12700K 的 4E 也接远组），近组/交互 AI 走 scene_pool（仅 P-core）；
     ///   无 E-core（全 P-core 平台）回退 primary_set。
     pub fn ai_set(&self) -> &[usize] {
+        // 手写调度（RV3D_CPU_PRIME=1）：延迟不敏感的重任务（AI / 地图生成）交给能效簇，
+        // 别去抢超大核和大核的带宽。
+        if crate::syscfg::flag("RV3D_CPU_PRIME") && !self.secondary_set.is_empty()
+        {
+            return &self.secondary_set;
+        }
         if self.vendor == CpuVendor::Intel && !self.secondary_set.is_empty() {
             // E-core 无超线程，集合即物理核，直接使用
             &self.secondary_set
@@ -752,6 +794,43 @@ impl CpuTopology {
         } else {
             primary_set.clone()
         };
+        // ---- 手写调度（1+3+4）：超大核跑主线程 / 三核跑重载 / 能效簇接不敏感重活 ----
+        // 由 `RV3D_CPU_PRIME=1` 打开；默认关闭 ⇒ 与之前行为逐位一致（A/B 才可比）。
+        let prime_mode = crate::syscfg::flag("RV3D_CPU_PRIME");
+        let prime_set = {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                sysfs_prime_split(&primary_set)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            {
+                Vec::new()
+            }
+        };
+        if !prime_set.is_empty() {
+            log::info!(
+                "cpu: 检测到超大核 vCPU {:?}（1+3+4 里的 1；RV3D_CPU_PRIME={}）",
+                prime_set,
+                if prime_mode { "1（启用）" } else { "0（未启用，仅记录）" }
+            );
+        }
+        let mut scene_set = if primary_physical.is_empty() {
+            primary_set.clone()
+        } else {
+            primary_physical.clone()
+        };
+        if prime_mode && !prime_set.is_empty() {
+            scene_set.retain(|c| !prime_set.contains(c));
+            if scene_set.is_empty() {
+                scene_set = primary_set.clone();
+            }
+        }
+        if let Some(v) = crate::syscfg::cfg("RV3D_SCENE_CPUS") {
+            match parse_cpu_list(&v) {
+                Some(cpus) => scene_set = cpus,
+                None => log::warn!("cpu: RV3D_SCENE_CPUS 格式无效（期望如 4-6），忽略"),
+            }
+        }
         CpuTopology {
             vendor,
             threads,
@@ -759,6 +838,8 @@ impl CpuTopology {
             secondary_set,
             primary_physical,
             secondary_physical,
+            prime_set,
+            scene_set,
             smt_set,
             e_cores,
             avx2: {
@@ -794,7 +875,11 @@ impl CpuTopology {
                 }
             },
             Err(_) => {
-                if self.primary_physical.is_empty() {
+                // 手写调度（RV3D_CPU_PRIME=1）：游戏主线程独占超大核。
+                if crate::syscfg::flag("RV3D_CPU_PRIME") && !self.prime_set.is_empty()
+                {
+                    self.prime_set.clone()
+                } else if self.primary_physical.is_empty() {
                     self.primary_set.clone()
                 } else {
                     self.primary_physical.clone()

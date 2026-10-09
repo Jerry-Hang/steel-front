@@ -45,10 +45,10 @@ impl Renderer {
         //   **玩家路径由 `SteelFront.bat` 显式设成 mailbox**（见该文件）。
         let preferred = match self.present_mode_override {
             Some(m) => m,
-            None => match std::env::var("RV3D_PRESENT_MODE").as_deref() {
-                Ok("immediate") => vk::PresentModeKHR::IMMEDIATE,
-                Ok("fifo") => vk::PresentModeKHR::FIFO,
-                Ok("mailbox") => vk::PresentModeKHR::MAILBOX,
+            None => match crate::syscfg::cfg("RV3D_PRESENT_MODE").as_deref() {
+                Some("immediate") => vk::PresentModeKHR::IMMEDIATE,
+                Some("fifo") => vk::PresentModeKHR::FIFO,
+                Some("mailbox") => vk::PresentModeKHR::MAILBOX,
                 // Android：可靠的基本只有 FIFO（IMMEDIATE 多数驱动不支持，
                 // MAILBOX 看机型）。见 docs/HANDOFF-mobile.md 5.6。
                 #[cfg(target_os = "android")]
