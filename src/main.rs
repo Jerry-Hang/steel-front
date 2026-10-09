@@ -4199,7 +4199,18 @@ impl ApplicationHandler for GameApp {
 }
 
 /// 程序入口点
-fn main() {
+#[cfg(target_os = "android")]
+use winit::platform::android::activity::AndroidApp;
+
+/// 非 Android 平台上的占位类型，仅为让 `run_steel_front` 的签名跨平台统一。
+#[cfg(not(target_os = "android"))]
+type AndroidApp = ();
+
+/// 引擎主循环（桌面与 Android 共用）。
+///
+/// Android 上由 `android_main` 调用并传入 `AndroidApp`（事件循环所有权反转，
+/// 见 docs/HANDOFF-mobile.md 4.2）；桌面上由 `main` 以 `None` 调用。
+fn run_steel_front(android_app: Option<AndroidApp>) {
     // 初始化日志系统
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -4307,6 +4318,15 @@ fn main() {
     // 创建事件循环（BackendChoice::X11 时经 with_x11() 强制 Xwayland）
     let event_loop = {
         let mut builder = EventLoop::builder();
+        // Android：把系统传入的 AndroidApp 交给 winit（事件循环所有权反转，
+        // 见 docs/HANDOFF-mobile.md 4.2）。
+        #[cfg(target_os = "android")]
+        if let Some(app) = android_app.clone() {
+            use winit::platform::android::EventLoopBuilderExtAndroid;
+            builder.with_android_app(app);
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = &android_app;
         #[cfg(target_os = "linux")]
         if backend_choice == BackendChoice::X11 {
             use winit::platform::x11::EventLoopBuilderExtX11;
@@ -5384,3 +5404,16 @@ mod tests {
     }
 }
  
+
+/// 桌面入口（Windows / Linux 原生）。Android 上真正的入口是下方的 `android_main`。
+/// ⏳ 注意：Android 打包成 `.so`（jniLibs）需要把 crate 改成 cdylib，属下一步。
+fn main() {
+    run_steel_front(None);
+}
+
+/// Android 入口：系统在 `.so` 加载后回调它（事件循环所有权反转）。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub fn android_main(app: AndroidApp) {
+    run_steel_front(Some(app));
+}
