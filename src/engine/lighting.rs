@@ -233,6 +233,11 @@ impl LightUniform {
             u.points[i].attenuation = Vec4::new(p.constant, p.linear, p.quadratic, p.range);
         }
         if let Some(s) = shadow {
+            // 性能诊断（2026-10-09）：RV3D_NO_SHADOW=1 关掉逐像素阴影 PCF，
+            // 用来量阴影在片元成本里占多少。实机：setprop debug.sf.no_shadow 1
+            if crate::syscfg::flag("RV3D_NO_SHADOW") {
+                return u;
+            }
             u.flags.y = 1.0;
             u.shadow.light_view_proj = s.view_proj();
             u.shadow.bias = Vec4::new(s.depth_bias, s.normal_bias, 1.0, 0.0);
