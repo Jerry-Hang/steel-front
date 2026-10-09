@@ -12,6 +12,8 @@
 | `fd0b5eb` | `feat(render)`：加 `RV3D_NO_MESH=1` 开关（强制走传统顶点管线，A/B 取证） |
 | `2798794` | `feat(assets)`：内存资产来源 `MemSource` + `RV3D_ASSETS_FROM_MEMORY=1` |
 | `661d155` | `feat(android)`：`android_main` 入口 + 主循环跨平台提取 |
+| `d09ffdb` | `docs(android)`：移植进度记录 |
+| `15f7c75` | `fix(android)`：Android 目标 0 警告（cfg 收窄 waveOut/ALSA 专属项） |
 
 ## 环境（本机已装好，免 sudo）
 
@@ -61,7 +63,7 @@ timeout 15 ./target/release/steel-front
 
 - [ ] Android 打包成 `.so`（jniLibs）需要把 crate 改成 **cdylib**（当前是纯 bin crate）
 - [ ] 生命周期：`onPause`/`onResume`/`onDestroy`；surface 丢失恢复（与铁律 B 的 `device_lost` 粘性冲突）
-- [ ] `audio_out.rs` 的 Android 路径（AAudio）——Android 目标现剩 3 条 dead_code 警告即来自此
-- [ ] `AAssetManager` 实现（接 `AssetSource` 的第三个实现）
+- [ ] `audio_out.rs` 的 Android 路径（AAudio）——**Android 目标已 0 警告**（`15f7c75` 用 cfg 收窄），但音频仍走静默回退，真机需实装 AAudio
+- [ ] `AAssetManager` 实现（接 `AssetSource` 的第三个实现）——需新增 `ndk` 直接依赖（又一次破"10 依赖"铁律，需记账），且只能在真机验证
 - [ ] 触摸输入（铁律 C 前提反转）、质量档、ASTC 纹理
 - [ ] 渲染非确定性的根因（mip 链 / 采样路径）
