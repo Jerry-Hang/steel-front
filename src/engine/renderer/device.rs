@@ -38,12 +38,34 @@ impl Renderer {
         let entry =
             unsafe { Entry::load().map_err(|e| format!("无法加载 Vulkan 库: {}", e))? };
 
+        // Android（以及老驱动）：loader 可能比 1.3 旧（部分 Adreno 只报 1.1）。
+        // 不能硬要 1.3 —— create_instance 会直接失败（手机上是黑屏退出），
+        // 见 docs/HANDOFF-mobile.md 4.1。取 min(1.3, loader 版本)；拿不到就保守用 1.0。
+        let loader_version = unsafe { entry.try_enumerate_instance_version() }
+            .ok()
+            .flatten()
+            .unwrap_or(vk::API_VERSION_1_0);
+        let api_version =
+            if (vk::api_version_major(loader_version), vk::api_version_minor(loader_version)) >= (1, 3) {
+                vk::API_VERSION_1_3
+            } else {
+                loader_version
+            };
+        log::info!(
+            "Vulkan loader 版本 {}.{}.{} ⇒ 实例 api_version 用 {}.{}.{}",
+            vk::api_version_major(loader_version),
+            vk::api_version_minor(loader_version),
+            vk::api_version_patch(loader_version),
+            vk::api_version_major(api_version),
+            vk::api_version_minor(api_version),
+            vk::api_version_patch(api_version)
+        );
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"Steel Front")
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(c"Steel Front Engine")
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::API_VERSION_1_3);
+            .api_version(api_version);
 
         let window_extensions = {
             let display_handle = window
