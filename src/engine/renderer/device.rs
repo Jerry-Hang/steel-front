@@ -280,6 +280,14 @@ impl Renderer {
             }
         };
 
+        // A/B 取证开关（2026-10-09）：强制走传统顶点管线，用于验证两条路径等价性。
+        let mesh_shader_available = if matches!(std::env::var("RV3D_NO_MESH").as_deref(), Ok("1")) {
+            log::warn!("RV3D_NO_MESH=1：强制关闭网格着色器，走传统顶点管线（A/B 取证）");
+            false
+        } else {
+            mesh_shader_available
+        };
+
         // 光追扩展组：**全有或全无**（理由见 `pick_device_extensions` 的文档）。
         // 只有真的全齐、且 mesh 路径可用时才启用 —— PT 是默认关的可选功能，
         // 缺扩展的正确后果是"本局没有 RT"，不是"游戏起不来"。
