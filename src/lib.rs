@@ -274,11 +274,6 @@ fn env_f32(name: &str) -> Option<f32> {
     crate::syscfg::cfg(name).and_then(|s| s.parse::<f32>().ok())
 }
 
-/// 环境变量字符串读取（Android 上回退到系统属性，见 `syscfg::cfg`）
-fn env_str(name: &str) -> Option<String> {
-    crate::syscfg::cfg(name)
-}
-
 /// 事件循环后端选择（只有 Linux 有两种 WSI 后端，其它平台恒为 `Auto`）。
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
