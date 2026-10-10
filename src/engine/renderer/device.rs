@@ -455,7 +455,14 @@ impl Renderer {
             mesh_max_wg_x: 1,
             void_mode: false,
             framebuffers: Vec::new(),
-            // MSAA：RV3D_MSAA=1/2/4/8（默认 4x；0/1 = 关闭）
+            // MSAA：RV3D_MSAA=1/2/4/8（0/1 = 关闭）。
+            // 🔴 **默认值按平台分叉（2026-10-11 实测）**：
+            //   Android → **关**；桌面 → 4x（保持原行为）。
+            // 依据：帧成本扫描（同机同会话，装机读 logcat `renderer::frame`）
+            //   基线（MSAA 4x）37.0 fps / 关 MSAA **44.7 fps** ⇒ **+21%，占了 7.7ms**
+            //   —— 比当时剩下的全部阴影 PCF 开销还贵（阴影全关的天花板只有 47.0）。
+            // MSAA 换来的只是边缘抗锯齿，而在 2400x1080 的手机屏上，
+            // 锯齿的观感代价远小于 21% 的帧率。要开回来：`setprop debug.sf.msaa 4`。
             msaa_samples: match crate::syscfg::cfg("RV3D_MSAA").as_deref() {
                 Some(v) => match v.trim().parse::<u32>() {
                     Ok(2) => vk::SampleCountFlags::TYPE_2,
@@ -463,7 +470,13 @@ impl Renderer {
                     Ok(8) => vk::SampleCountFlags::TYPE_8,
                     _ => vk::SampleCountFlags::TYPE_1,
                 },
-                None => vk::SampleCountFlags::TYPE_4,
+                None => {
+                    if cfg!(target_os = "android") {
+                        vk::SampleCountFlags::TYPE_1
+                    } else {
+                        vk::SampleCountFlags::TYPE_4
+                    }
+                }
             },
             msaa_images: Vec::new(),
             msaa_image_memory: Vec::new(),
