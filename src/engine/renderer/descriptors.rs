@@ -58,6 +58,15 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        // 硬件 PCF 的**比较采样器**（binding=11 SAMPLER，Fragment）。
+        // 为什么另开一个而不是改 binding 6：调试视图要读原始深度，比较采样器给不了。
+        // 🔴 加它的同时**必须**把池的 SAMPLER 计数 +1（见下面 pool_sizes），
+        //    否则该 set 分配失败 = 启动即报错。
+        let shadow_cmp_sampler_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(11)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         // marker/NPC 程序化皮肤纹理（binding=7/8 SAMPLED_IMAGE，Fragment 采样；
         // RV3D_SKIN_TEX=1 启用，缺省 0 纯色回退。绑定号必须与 build.rs WGSL 同步）
         let marker_skin_binding = vk::DescriptorSetLayoutBinding::default()
@@ -92,6 +101,7 @@ impl Renderer {
             light_ubo_binding,
             shadow_map_binding,
             shadow_sampler_binding,
+            shadow_cmp_sampler_binding,
             marker_skin_binding,
             npc_skin_binding,
             ground_detail_binding,
@@ -202,7 +212,8 @@ impl Renderer {
                 .descriptor_count((max_frames * 2) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count((max_frames * 2) as u32),
+                // binding 3 贴图采样器 + binding 6 阴影普通采样器 + **binding 11 阴影比较采样器**
+                .descriptor_count((max_frames * 3) as u32),
         ];
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -475,6 +486,15 @@ impl Renderer {
                 .image_info(&shadow_image_infos);
 
             // marker/NPC 程序化皮肤纹理（binding 7/8；RV3D_SKIN_TEX=1 时片元采样，缺省纯色回退）
+            // binding 11：硬件 PCF 的比较采样器（两张阴影图共用同一个）
+            let shadow_cmp_infos = [vk::DescriptorImageInfo::default()
+                .sampler(self.shadow_cmp_sampler)];
+            let shadow_cmp_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(11)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&shadow_cmp_infos);
             let marker_skin_info = vk::DescriptorImageInfo::default()
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                 .image_view(self.skin_marker_image_view)
@@ -530,6 +550,7 @@ impl Renderer {
                 sampler_write,
                 shadow_map_write,
                 shadow_sampler_write,
+                shadow_cmp_write,
                 marker_skin_write,
                 npc_skin_write,
                 ground_detail_write,

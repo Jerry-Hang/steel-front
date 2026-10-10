@@ -210,6 +210,11 @@ const GROUND_DETAIL_GAIN: f32 = 2.0;
 // 阴影贴图（2026-08-11）：depth-only pass 渲光空间深度，片元 3x3 PCF 深度比较
 @group(0) @binding(5) var shadow_map: texture_depth_2d;
 @group(0) @binding(6) var shadow_sampler: sampler;
+// 硬件 PCF 用的**比较采样器**（2026-10-11）：`textureSampleCompare` 一次调用内部做
+// **2x2 双线性深度比较**，等价于旧实现 4 次手写 `textureSample` + `smoothstep`。
+// 为什么不把 binding 6 直接改成比较采样器：调试视图 `RV3D_DEBUG_SHADOW=1` 的 G 通道要
+// 读**原始深度**，而比较采样器只能给比较结果 —— 所以两个采样器并存，各司其职。
+@group(0) @binding(11) var shadow_cmp: sampler_comparison;
 // 动态阴影图（2026-09-26，binding 10）：第二张同尺寸阴影图，**只装每帧会动的投射者**
 // （NPC/士兵），而 binding 5 那张只偶尔重画、装静态投射者（地形/地面场/marker/道具）。
 // 绑定号必须与 renderer.rs 的 SHADOW_DYN_BINDING 同步（10 = ground_detail(9) 之后第一个空位）。
@@ -523,7 +528,6 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             // 深度方向的软过渡宽度：至少一个 texel，否则 NEAREST 读数的台阶又是硬跳变
             let w_d = max(pen_m, m_per_texel) / depth_m;
             var occluded = 0.0;
-            var dsum = 0.0;
             // 🔴 逐像素旋转抽头核（2026-09-29 治"阴影内部棋盘格马赛克"）。
             // 上面把 base_uv snap 到纹素中心是治"移动时爬线"的，但它带来一个副作用：
             // 抽头偏移是 `step_uv = k·texel`（k 为整数/半整数），于是 9 个抽头与
@@ -532,22 +536,28 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             // 0.39m 的方块马赛克（实机只在阴影内部可见、受光路面干净，正合此机制）。
             // 旋转角取**屏幕像素**的函数：屏幕像素随时间稳定 ⇒ 不引入闪噪，
             // 而相邻像素落在不同的纹素组合上 ⇒ 把方块打散成高频噪声，9 抽头平均即平滑。
+            // 🔴 硬件 PCF（2026-10-11）：`textureSampleCompare` 一次调用 = 2x2 双线性深度比较
+            // ⇒ 等价旧实现 4 次手写抽头，抽头数 **9 → 4**，逐像素采样量降到 4/9。
+            // 实测依据（`6b80f92`）：**阴影 map pass 几乎不花时间**（23.4→23.7 fps），
+            // 17~18ms 的阴影成本**全在这 18 次逐像素采样**上 ⇒ 只有砍采样数才有用。
+            // 旋转保留：它解的是"抽头与纹素网格相位锁定"（否则出 0.39m 方块马赛克），
+            // 与采样方式无关；且 2x2 核在 90° 旋转下仍是同一组纹素，角度表本来就取了 45° 步长。
+            let ref_d = frag_depth - bias_d;
             let kca = pcf_ca;
             let ksa = pcf_sa;
-            for (var dy = -1; dy <= 1; dy = dy + 1) {
-                for (var dx = -1; dx <= 1; dx = dx + 1) {
+            for (var dy = -1; dy <= 1; dy = dy + 2) {
+                for (var dx = -1; dx <= 1; dx = dx + 2) {
                     let ox = f32(dx) * kca - f32(dy) * ksa;
                     let oy = f32(dx) * ksa + f32(dy) * kca;
-                    let d = textureSample(shadow_map, shadow_sampler,
-                        base_uv + vec2<f32>(ox, oy) * step_uv);
-                    dsum = dsum + d;
-                    // 分数测试（percentage-closer filtering）代替 if/>+1.0：
-                    // 把"9 个 0/1 计票"变成连续量，影子里侧到外侧是渐变而不是 9 档跳变
-                    occluded = occluded + smoothstep(0.0, w_d, frag_depth - bias_d - d);
+                    occluded = occluded + textureSampleCompare(shadow_map, shadow_cmp,
+                        base_uv + vec2<f32>(ox, oy) * step_uv, ref_d);
                 }
             }
-            d_avg = dsum / 9.0;
-            shadow_factor = occluded / 9.0;
+            // 调试视图 G 通道：比较采样器读不到原始深度 ⇒ 改用中心那一次普通采样
+            // （binding 6 的普通采样器仍在，`d_c` 就是它）。语义从"9 抽头均值"变成
+            // "中心深度"，对"看 frag_depth 与图深度的常数偏移"这个用途反而更直接。
+            d_avg = d_c;
+            shadow_factor = occluded / 4.0;
         }
     }
     let shininess = 32.0;
@@ -595,13 +605,14 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             // 与静态图那份同源；两张图用同一个角，影子边缘的噪声才不会互相错位。
             let kca2 = pcf_ca;
             let ksa2 = pcf_sa;
-            for (var dy2 = -DYN_PCF_RADIUS; dy2 <= DYN_PCF_RADIUS; dy2 = dy2 + 1) {
-                for (var dx2 = -DYN_PCF_RADIUS; dx2 <= DYN_PCF_RADIUS; dx2 = dx2 + 1) {
+            // 同静态图：硬件 PCF，步长 2 ⇒ 半径 1 的 3x3 退化成 2x2（4 抽头）。
+            let ref_d2 = sp2.z - bias_d2;
+            for (var dy2 = -DYN_PCF_RADIUS; dy2 <= DYN_PCF_RADIUS; dy2 = dy2 + 2) {
+                for (var dx2 = -DYN_PCF_RADIUS; dx2 <= DYN_PCF_RADIUS; dx2 = dx2 + 2) {
                     let rx2 = f32(dx2) * kca2 - f32(dy2) * ksa2;
                     let ry2 = f32(dx2) * ksa2 + f32(dy2) * kca2;
-                    let d2 = textureSample(shadow_dyn_map, shadow_sampler,
-                        base_uv2 + vec2<f32>(rx2, ry2) * step_uv2);
-                    occluded2 = occluded2 + smoothstep(0.0, w_d2, sp2.z - bias_d2 - d2);
+                    occluded2 = occluded2 + textureSampleCompare(shadow_dyn_map, shadow_cmp,
+                        base_uv2 + vec2<f32>(rx2, ry2) * step_uv2, ref_d2);
                     taps2 = taps2 + 1.0;
                 }
             }

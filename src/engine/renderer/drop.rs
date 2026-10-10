@@ -225,6 +225,10 @@ impl Drop for Renderer {
                     }
                 }
             }
+            if self.shadow_cmp_sampler != vk::Sampler::null() {
+                self.device.destroy_sampler(self.shadow_cmp_sampler, None);
+                self.shadow_cmp_sampler = vk::Sampler::null();
+            }
             if self.shadow_sampler != vk::Sampler::null() {
                 self.device.destroy_sampler(self.shadow_sampler, None);
             }

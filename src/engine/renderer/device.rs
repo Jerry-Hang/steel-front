@@ -565,6 +565,8 @@ impl Renderer {
             shadow_image_memory: vk::DeviceMemory::null(),
             shadow_image_view: vk::ImageView::null(),
             shadow_sampler: vk::Sampler::null(),
+            // 硬件 PCF 的比较采样器（binding 11），见 shadow.rs 的创建处
+            shadow_cmp_sampler: vk::Sampler::null(),
             menu_blur_image: vk::Image::null(),
             menu_blur_memory: vk::DeviceMemory::null(),
             menu_blur_view: vk::ImageView::null(),

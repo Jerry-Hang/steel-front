@@ -195,6 +195,30 @@ impl Renderer {
                 .map_err(|e| format!("创建阴影采样器失败: {}", e))?
         };
 
+        // 硬件 PCF 用的比较采样器（binding 11）：`textureSampleCompare` 要求
+        // `compare_enable(true)`，过滤必须是 LINEAR —— 硬件 PCF 的"2x2 免费抽头"
+        // 靠的就是这个双线性比较，用 NEAREST 会退化成单点比较（白改）。
+        let cmp_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .mip_lod_bias(0.0)
+            .anisotropy_enable(false)
+            .compare_enable(true)
+            .compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .min_lod(0.0)
+            .max_lod(1.0)
+            .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE)
+            .unnormalized_coordinates(false);
+        self.shadow_cmp_sampler = unsafe {
+            self.device
+                .create_sampler(&cmp_info, None)
+                .map_err(|e| format!("创建阴影比较采样器失败: {}", e))?
+        };
+
         // ---- 3. depth-only render pass（无颜色附件，clear 1.0，store 供主 pass 采样）----
         let depth_attachment = vk::AttachmentDescription::default()
             .format(vk::Format::D32_SFLOAT)

@@ -731,6 +731,9 @@ pub struct Renderer {
     shadow_image_memory: vk::DeviceMemory,
     shadow_image_view: vk::ImageView,
     shadow_sampler: vk::Sampler,
+    /// 硬件 PCF 的比较采样器（binding 11）。`textureSampleCompare` 一次 = 2x2 双线性比较，
+    /// 使阴影抽头 9→4。与 `shadow_sampler` 并存：后者供调试视图读**原始深度**。
+    shadow_cmp_sampler: vk::Sampler,
     /// 🧊 磨砂玻璃的背景模糊图（固定 `MENU_BLUR_W × MENU_BLUR_H`，见 `init_menu_blur`）
     menu_blur_image: vk::Image,
     menu_blur_memory: vk::DeviceMemory,
