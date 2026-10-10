@@ -547,19 +547,22 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
             let ref_d = frag_depth - bias_d;
             let kca = pcf_ca;
             let ksa = pcf_sa;
-            for (var dy = -1; dy <= 1; dy = dy + 2) {
-                for (var dx = -1; dx <= 1; dx = dx + 2) {
-                    let ox = f32(dx) * kca - f32(dy) * ksa;
-                    let oy = f32(dx) * ksa + f32(dy) * kca;
-                    occluded = occluded + textureSampleCompare(shadow_map, shadow_cmp,
-                        base_uv + vec2<f32>(ox, oy) * step_uv, ref_d);
-                }
-            }
+            // 3 抽头（2026-10-11 第三刀）：中心 + 一对旋转对角。
+            // 为什么敢砍到 3：硬件 PCF 每次调用内部已是 **2x2 双线性比较**（4 texel），
+            // 3 次 = 12 texel 参与滤波，而旧实现 9 次手写比较只覆盖 9 texel 且是硬 0/1。
+            // 中心那一下保证核覆盖采样点本身（少了它，核整体偏移会让阴影边界系统性位移）。
+            occluded = occluded + textureSampleCompare(shadow_map, shadow_cmp, base_uv, ref_d);
+            let d1x = kca - ksa;
+            let d1y = ksa + kca;
+            occluded = occluded + textureSampleCompare(shadow_map, shadow_cmp,
+                base_uv + vec2<f32>(d1x, d1y) * step_uv, ref_d);
+            occluded = occluded + textureSampleCompare(shadow_map, shadow_cmp,
+                base_uv - vec2<f32>(d1x, d1y) * step_uv, ref_d);
             // 调试视图 G 通道：比较采样器读不到原始深度 ⇒ 改用中心那一次普通采样
             // （binding 6 的普通采样器仍在，`d_c` 就是它）。语义从"9 抽头均值"变成
             // "中心深度"，对"看 frag_depth 与图深度的常数偏移"这个用途反而更直接。
             d_avg = d_c;
-            shadow_factor = occluded / 4.0;
+            shadow_factor = occluded / 3.0;
         }
     }
     let shininess = 32.0;
