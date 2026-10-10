@@ -2417,6 +2417,38 @@ impl GameApp {
     }
 
     /// 把 WASD 按键状态转发给游戏（FPS 玩家移动）
+    /// ESC 的语义（2026-10-11 从 `KeyboardInput` 分支里抽出）：
+    /// 设置面板打开 → 关面板；ESC 菜单打开 → 关菜单；否则 → 打开 ESC 菜单并**立即**释放鼠标捕获。
+    ///
+    /// 抽出来是为了让 **Android 返回键**复用同一条路径 —— 手机上返回键必须等价于 ESC，
+    /// 否则玩家退不出游戏（见下面 `NativeKeyCode::Android(4)` 那条 arm）。
+    /// ⚠️ 「立即释放捕获」那段不能省：等下一帧 `sync_cursor` 的话，用户立刻移动点击时
+    /// `last_cursor` 仍是捕获中心 ⇒ 菜单选项命中错位。
+    fn toggle_escape_menu(&mut self) {
+        if self.game.settings_open() {
+            log::info!("ESC 关闭设置面板");
+            self.game.toggle_settings();
+        } else if self.game.hud.esc_menu_open {
+            log::info!("ESC 关闭菜单");
+            self.game.hud.esc_menu_open = false;
+        } else {
+            log::info!("ESC 打开菜单（退出游戏 / 设置）");
+            self.game.hud.esc_menu_open = true;
+            self.game.hud.esc_menu_selection = 0;
+            if self.cursor_captured {
+                if let Some(window) = &self.window {
+                    let _ = window.set_cursor_grab(CursorGrabMode::None);
+                    window.set_cursor_visible(true);
+                }
+                self.cursor_captured = false;
+                self.cursor_locked = false;
+                self.abs_baseline_valid = false;
+                self.recenter_pending_until = None;
+                log::info!("input: cursor released (ESC menu opened)");
+            }
+        }
+    }
+
     fn sync_game_movement(&mut self) {
         let k = &self.key_state;
         self.game.set_movement(k.forward, k.backward, k.left, k.right);
@@ -3634,6 +3666,37 @@ impl ApplicationHandler for GameApp {
                 event_loop.exit();
             }
 
+            // 🔴 Android 返回键（2026-10-11 实测 + 修）：**它永远匹配不到下面那条 arm**。
+            //
+            // winit 0.30 把返回键投成 `PhysicalKey::Unidentified(NativeKeyCode::Android(4))`
+            // —— 物理键白名单里没有 `Back`（见 winit `keycodes.rs` 的 fallback），
+            // 而下面那条 pattern 写死是 `PhysicalKey::Code(key_code)` ⇒ 返回键掉进 `_ => {}`
+            // **被静默丢弃**。更糟的是 winit 已把它标成 `InputStatus::Handled`
+            // ⇒ `android-activity` 调 `finishEvent(handled=true)` ⇒ **系统也不做默认 finish()**。
+            //
+            // ⇒ 后果：**玩家在手机上退不出游戏**（也打不开设置、打不开菜单）。
+            // 这正是铁律 C 那条原则 ——「**别让游戏夺走用户对设备的控制**」——
+            // 在手机上的对偶问题：桌面上是别锁死鼠标，手机上就是**别锁死返回键**。
+            //
+            // ⇒ 对策：接到与 ESC **完全相同**的路径（`toggle_escape_menu`），
+            //    语义完全一致，不新增分支行为。退出本身仍走 ESC 菜单里的「退出游戏」，
+            //    所以**不会出现"按一下返回键就闪退"**（那也会是另一种"夺走控制"）。
+            #[cfg(target_os = "android")]
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Unidentified(
+                            winit::keyboard::NativeKeyCode::Android(4),
+                        ),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                log::info!("input: Android 返回键 → 按 ESC 语义处理");
+                self.toggle_escape_menu();
+            }
+
             // 键盘事件：处理 WASD 按键和 ESC 退出
             WindowEvent::KeyboardInput {
                 event:
@@ -3738,30 +3801,7 @@ impl ApplicationHandler for GameApp {
                 // ESC 是保留系统键（不参与重绑定）：设置面板打开时关闭面板；
                 // 否则切换 ESC 毛玻璃菜单（退出游戏 / 设置两个选项）
                 if pressed && key_code == KeyCode::Escape {
-                    if self.game.settings_open() {
-                        log::info!("ESC 关闭设置面板");
-                        self.game.toggle_settings();
-                    } else if self.game.hud.esc_menu_open {
-                        log::info!("ESC 关闭菜单");
-                        self.game.hud.esc_menu_open = false;
-                    } else {
-                        log::info!("ESC 打开菜单（退出游戏 / 设置）");
-                        self.game.hud.esc_menu_open = true;
-                        self.game.hud.esc_menu_selection = 0;
-                        // 立即释放鼠标捕获（不等下一帧 sync_cursor）：否则用户立刻移动
-                        // 点击时 last_cursor 仍是捕获中心 → 菜单选项命中错位
-                        if self.cursor_captured {
-                            if let Some(window) = &self.window {
-                                let _ = window.set_cursor_grab(CursorGrabMode::None);
-                                window.set_cursor_visible(true);
-                            }
-                            self.cursor_captured = false;
-                            self.cursor_locked = false;
-                            self.abs_baseline_valid = false;
-                            self.recenter_pending_until = None;
-                            log::info!("input: cursor released (ESC menu opened)");
-                        }
-                    }
+                    self.toggle_escape_menu();
                     return;
                 }
 
