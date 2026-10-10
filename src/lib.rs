@@ -852,6 +852,15 @@ struct GameApp {
     fire_edge: bool,
     /// 光标是否已捕获（Playing 下鼠标视角）
     cursor_captured: bool,
+    /// 上一次**打过日志**的抓取模式（0=未打过 / 1=confined / 2=locked）。
+    ///
+    /// 🔴 为什么需要它（2026-10-11，Android 实测）：`sync_cursor` 的守卫是
+    /// `want && !self.cursor_captured`，而 `cursor_captured = grabbed || locked` ——
+    /// **抓取失败时它是 false，下一帧守卫又成立 ⇒ 每帧重试 + 每帧打日志**。
+    /// Android 上没有光标，`set_cursor_grab` 必然失败 ⇒ 实测 **962 行日志里 737 行
+    /// 是这一条**（77%），把真正的性能日志挤掉。重试本身是对的（窗口可能变得可抓），
+    /// **每帧打日志才是错的** ⇒ 只在模式**变化**时打。
+    cursor_grab_logged: u8,
     /// 捕获模式是否为系统级 Locked（raw 相对增量驱动视角）；
     /// false = 回退 Confined/无 grab，走绝对位置路径（WSLg/Xwayland 实测：
     /// 真实物理鼠标只产生 CursorMoved 绝对位置，不产生 XI_RawMotion raw 事件）
@@ -1040,6 +1049,7 @@ impl GameApp {
             fire_requested: false,
             fire_edge: false,
             cursor_captured: false,
+            cursor_grab_logged: 0,
             cursor_locked: false,
             lock_observe: None,
             lock_retried: false,
@@ -2319,18 +2329,31 @@ impl GameApp {
                 self.last_cursor = (center.x, center.y);
                 self.recenter_pending_until = Some(Instant::now() + Duration::from_millis(150));
             }
-            log::info!(
-                "input: cursor captured (mouse look on, grab={}, look={})",
-                if locked {
-                    "locked"
-                } else if grabbed {
-                    "confined"
-                } else {
-                    "none"
-                },
-                if locked { "relative" } else { "absolute" }
-            );
+            // 只在**模式变化**时打（见 `cursor_grab_logged` 的注释）：
+            // 抓取持续失败时这段代码每帧都会走到，逐帧打日志会把 logcat 刷爆。
+            let mode: u8 = if locked {
+                2
+            } else if grabbed {
+                1
+            } else {
+                0
+            };
+            if mode != self.cursor_grab_logged {
+                self.cursor_grab_logged = mode;
+                log::info!(
+                    "input: cursor captured (mouse look on, grab={}, look={})",
+                    if locked {
+                        "locked"
+                    } else if grabbed {
+                        "confined"
+                    } else {
+                        "none"
+                    },
+                    if locked { "relative" } else { "absolute" }
+                );
+            }
         } else if !want && self.cursor_captured {
+            self.cursor_grab_logged = 0;
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.cursor_captured = false;
