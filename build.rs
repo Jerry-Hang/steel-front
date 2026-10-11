@@ -121,8 +121,16 @@ fn vs_main(
     // ⚠️ **物体自身运动**（NPC / 道具 / 枪模）还需要该实例的上一帧模型矩阵 ——
     //    本步只做相机部分（覆盖地形 / 地面 / 建筑这些静态几何，占屏幕像素的绝大多数）；
     //    动态物体的 MV 是下一步，**在那之前它们的运动会表现为鬼影**。
+    // 🔴 **显式重算当前帧的裁剪坐标，不要回读 `output.position`**（2026-10-11 实测修）：
+    // `output.position` 是 `@builtin(position)`，而 naga 会对该 builtin 做
+    // `ADJUST_COORDINATE_SPACE`（Y 翻转，见 AGENTS.md 里网格写入器那条同源记录）
+    // ⇒ 回读拿到的**可能已经是翻转后的值**，与下面未翻转的 `prev_clip` 不同量纲。
+    // 症状极具迷惑性：相机矩阵**逐帧精确相同**（诊断实测最大元素差 0.000000000），
+    // 而 MV 却是个恒定的非零值 —— 看着像"相机在动"，其实是两边的坐标空间不一致。
+    // 重算一次只多 4 个乘加，换来的是"两边用的是同一个变换链"。
+    let cur_clip = camera.proj * camera.view * world_pos;
     let prev_clip = camera.prev_view_proj * world_pos;
-    let cur_ndc = output.position.xy / output.position.w;
+    let cur_ndc = cur_clip.xy / cur_clip.w;
     let prev_ndc = prev_clip.xy / prev_clip.w;
     // NDC → UV：x 同向（×0.5），y **反向**（×−0.5）—— Vulkan 的 NDC y 向上、
     // 屏幕 UV y 向下，而本仓的 Y 翻转由着色器负责（铁律 B）。

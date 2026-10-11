@@ -697,7 +697,14 @@ impl Renderer {
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, cam_pos_w],
             // 运动向量：本帧的 uniform 拿**上一帧**的矩阵（首帧 = 当前 ⇒ MV 恒 0）
             prev_view_proj: self.prev_view_proj,
-            debug_params: [if self.mv_debug { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            // 【临时诊断 2026-10-11】y/z 塞已知值，用来验证"uniform → 输出"这条路干不干净。
+            // y=1.0 期望输出 255，z=0.5 期望输出 128。验完恢复成 0。
+            debug_params: [
+                if self.mv_debug { 1.0 } else { 0.0 },
+                1.0,
+                0.5,
+                0.0,
+            ],
         };
         if let Some(&ptr) = self.uniform_mapped.get(self.current_frame) {
             unsafe {
@@ -711,6 +718,23 @@ impl Renderer {
 
         // 帧末更新「上一帧矩阵」：**必须在写完 ubo 之后**，
         // 否则本帧的 uniform 会拿到本帧的矩阵 ⇒ MV 恒 0（而那是"看起来正常"的静默失败）。
+        // 【临时诊断 2026-10-11】判明相机矩阵是否逐帧变化 —— 决定 MV 的恒定非零值
+        // 是"相机真在动"还是"我的算法有常量偏置"。验完就删。
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let cur = proj * view;
+            let d = (0..16)
+                .map(|i| (cur.to_cols_array()[i] - self.prev_view_proj.to_cols_array()[i]).abs())
+                .fold(0.0f32, f32::max);
+            if n < 5 || n % 60 == 0 {
+                log::info!(
+                    "MV诊断 #{n}: |当前VP − 上帧VP| 最大元素差 = {d:.9}  view[3].xyz=({:.4},{:.4},{:.4}) proj[1][1]={:.6}",
+                    view.w_axis.x, view.w_axis.y, view.w_axis.z, proj.y_axis.y
+                );
+            }
+        }
         self.prev_view_proj = proj * view;
 
         // ---- 光照 Uniform：写入 game 每帧更新的 light_data（默认全零 = 光照关闭）----
