@@ -49,10 +49,19 @@ impl Renderer {
                 Some("immediate") => vk::PresentModeKHR::IMMEDIATE,
                 Some("fifo") => vk::PresentModeKHR::FIFO,
                 Some("mailbox") => vk::PresentModeKHR::MAILBOX,
-                // Android：可靠的基本只有 FIFO（IMMEDIATE 多数驱动不支持，
-                // MAILBOX 看机型）。见 docs/HANDOFF-mobile.md 5.6。
+                // 🔴 Android 默认改成 **MAILBOX**（2026-10-11 实机改）—— 原为 FIFO。
+                //
+                // 实测（OPPO PLD110 / Adreno 810，加了呈现模式诊断之后才看得见）：
+                //   驱动支持: [MAILBOX, FIFO, SHARED_DEMAND_REFRESH, SHARED_CONTINUOUS_REFRESH]
+                //   **IMMEDIATE 不在其中** ⇒ 请求它会被下面那句 `unwrap_or(FIFO)` 静默退回 FIFO，
+                //   而 FIFO 同步 vsync ⇒ **渲染再快也 present 不出去**，被钉在屏幕刷新率上。
+                //   性能档（1200×540）：FIFO 119.7 → **MAILBOX 148.5 fps（+24%）**。
+                //
+                // 为什么可以默认请求 MAILBOX：下面那句 `find(preferred).copied().unwrap_or(FIFO)`
+                // 就是**运行时回退** —— 不支持 MAILBOX 的机型自动退回 FIFO，不会起不来；
+                // 而且现在回退会打 WARN（见紧跟着的诊断），不会再静默。
                 #[cfg(target_os = "android")]
-                _ => vk::PresentModeKHR::FIFO,
+                _ => vk::PresentModeKHR::MAILBOX,
                 #[cfg(not(target_os = "android"))]
                 _ => vk::PresentModeKHR::IMMEDIATE,
             },
@@ -62,6 +71,23 @@ impl Renderer {
             .find(|&&m| m == preferred)
             .copied()
             .unwrap_or(vk::PresentModeKHR::FIFO);
+
+        // 🔴 诊断补（2026-10-11）：**这个回退此前是静默的** —— 日志只打最终模式，
+        // 看不出"我请求了什么、驱动到底支不支持"。排查"帧率封在屏幕刷新率"时
+        // （用户实测 119.7 ≈ 120，而屏幕支持 120Hz），第一步就必须能回答这个问题：
+        //   * 请求 IMMEDIATE 却回退到 FIFO ⇒ 呈现被 vsync 钉死，**渲染再快也present不出去**
+        //   * 驱动支持 IMMEDIATE ⇒ 那是别的环节在限帧
+        // 判据：这一行会打出驱动支持的**全集**，别再靠猜。
+        if present_mode != preferred {
+            log::warn!(
+                "呈现模式回退：请求 {:?} 但驱动不支持 ⇒ 实得 {:?}（驱动支持: {:?}）",
+                preferred,
+                present_mode,
+                present_modes
+            );
+        } else {
+            log::info!("呈现模式：{:?}（驱动支持: {:?}）", present_mode, present_modes);
+        }
 
         // 诊断（2026-10-09）：Android 上画面转了 90°，先把 surface 的真实能力打出来。
         log::info!(
