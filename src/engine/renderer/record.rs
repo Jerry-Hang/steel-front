@@ -4,6 +4,25 @@
 use super::*;
 
 impl Renderer {
+    /// HUD 是否**必须**走覆盖层 pass（即：不在主 pass 里画）。
+    ///
+    /// 两个独立理由，任一成立即可：
+    /// 1. 🧊 **磨砂玻璃**：玻璃要采"面板背后的画面"，而主 pass 里不能采样自己的附件；
+    /// 2. **内部渲染分辨率 < 交换链**（`RV3D_RENDER_SCALE`）：HUD 留主 pass 里画会被
+    ///    随后的升采样 blit 一起放大 ⇒ 文字糊掉。官方（Snapdragon GSR 文档）明确要求
+    ///    「2D UI 应在设备分辨率单独渲染叠加」。
+    ///
+    /// 把两个理由收在**一个**判据里，是为了不让"要不要走覆盖层"在代码里出现两份答案
+    /// —— 两份答案迟早会分叉（本仓"同源违反"那一类 bug 的典型形态）。
+    fn hud_needs_overlay(&self) -> bool {
+        if self.hud_vertex_count == 0 {
+            return false;
+        }
+        let scaled = self.render_extent.width != self.swapchain_extent.width
+            || self.render_extent.height != self.swapchain_extent.height;
+        self.hud_has_glass || scaled
+    }
+
     pub(crate) fn record_command_buffer(
         &self,
         command_buffer: vk::CommandBuffer,
@@ -745,7 +764,7 @@ impl Renderer {
         // （先 blit 出模糊图，再画 HUD，见 `record_command_buffer` 末尾）。
         if self.hud_vertex_count > 0
             && self.hud_pipeline != vk::Pipeline::null()
-            && !self.hud_has_glass
+            && !self.hud_needs_overlay()
         {
             let hud_vertex_buffers = [self.hud_vertex_buffer];
             let hud_offsets = [0u64];
@@ -893,6 +912,8 @@ impl Renderer {
         // 单采样、`finalLayout = PRESENT_SRC_KHR`）→ blit 出模糊图 → 用 **overlay HUD pass**
         // 把 HUD 画在模糊图之上。overlay pass 与它的 barrier 顺序**照抄 PT 通路**
         // （那条路已经跑了很久、VUID=0），raster 路径只是第一次走它。
+        // ⚠️ 这一段**只负责产出模糊图**（供玻璃面板采样）。HUD 本身改由下面那段覆盖层画 ——
+        // 因为"HUD 要不要走覆盖层"现在有两个独立的理由（见 `hud_needs_overlay`）。
         if self.hud_has_glass && self.hud_vertex_count > 0 {
             let sw_img = self.swapchain_images[image_index as usize];
             let range = vk::ImageSubresourceRange {
@@ -1003,11 +1024,47 @@ impl Renderer {
                     &[],
                     &[blur_to_read],
                 );
-                // ⑤ 交换链 TRANSFER_SRC → COLOR_ATTACHMENT（overlay HUD pass 的 initialLayout）
+            }
+        }
+
+        // ===== HUD 覆盖层（2026-10-11 起有两个理由走这里）=====
+        //
+        // ① 🧊 磨砂玻璃：玻璃要采"面板背后的画面"，而主 pass 里不能采样自己的附件；
+        // ② **内部渲染分辨率 < 交换链**：HUD 若留主 pass 里画，会被随后那条升采样 blit
+        //    一起放大 ⇒ 文字边缘糊掉。官方（Snapdragon GSR 文档）明确要求
+        //    「**2D UI 应在设备分辨率单独渲染叠加**」。
+        //
+        // 本仓 HUD 本来就有这条覆盖层通路（`hud_render_pass` = device 尺寸 / 1 采样 /
+        // 无深度 / 独立 framebuffer）⇒ **架构上早就满足**，这里只是把第二个理由并进同一个条件。
+        if self.hud_needs_overlay() {
+            let sw_img = self.swapchain_images[image_index as usize];
+            let range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            // 交换链此刻的布局取决于**上面那段跑没跑**：
+            //   跑了（玻璃）⇒ 它停在 TRANSFER_SRC_OPTIMAL，上一次写是那次 blit 读
+            //   没跑        ⇒ 它停在 PRESENT_SRC_KHR，上一次写是本帧的升采样 blit
+            let (from_layout, from_access) = if self.hud_has_glass && self.hud_vertex_count > 0 {
+                (
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::AccessFlags::TRANSFER_READ,
+                )
+            } else {
+                (
+                    vk::ImageLayout::PRESENT_SRC_KHR,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                )
+            };
+            unsafe {
+                // ⑤ 交换链 → COLOR_ATTACHMENT（overlay HUD pass 的 initialLayout）
                 let to_color = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .src_access_mask(from_access)
                     .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .old_layout(from_layout)
                     .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
