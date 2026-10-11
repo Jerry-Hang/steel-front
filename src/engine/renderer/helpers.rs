@@ -639,3 +639,122 @@ pub(crate) fn pt_scene_sig(boxes: &[crate::engine::ray_tracer::PtBox]) -> u64 {
     }
     h
 }
+
+
+// ---------------------------------------------------------------- 内部渲染分辨率档
+// 2026-10-11 用户指定。规格与 10 处改动点见 `docs/android-render-scale-plan.md`。
+//
+// 🔴 比例用**整数分数**而不是百分比：用户给的是 83.4% / 66.8% / 50%，而它们其实是
+// 5/6、2/3、1/2 的四舍五入。用分数算才落在**干净偶数**上 ——
+// 在 2400×1080 的屏上分别是 2000×900 / 1600×720 / 1200×540；
+// 直接用百分比会得到 2002×901 这类**奇数**（升采样的半纹素偏移不对称，
+// 且部分 GPU 操作要求偶数宽高）。
+//
+// 立项依据（实测）：该屏 2400×1080 → 23~24 fps，1600×720 → 43~46，1200×540 → 61~67
+// ⇒ 帧率随像素数单调上升 ⇒ **填充率/片元成本主导**，降内部分辨率是当前最大单一杠杆。
+
+/// 内部渲染分辨率档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenderTier {
+    /// 质量：屏幕 × 5/6（2400×1080 → 2000×900）
+    Quality,
+    /// 平衡：屏幕 × 2/3（2400×1080 → 1600×720）
+    Balanced,
+    /// 性能：屏幕 × 1/2（2400×1080 → 1200×540）
+    Performance,
+}
+
+impl RenderTier {
+    /// 缩放比例（分子, 分母）。**只此一处定义**，别在别处再写一套百分比。
+    pub(crate) fn ratio(self) -> (u32, u32) {
+        match self {
+            RenderTier::Quality => (5, 6),
+            RenderTier::Balanced => (2, 3),
+            RenderTier::Performance => (1, 2),
+        }
+    }
+    /// `RV3D_RENDER_SCALE` 的取值 → 档位。无法识别时返回 `None`（调用方保持全分辨率）。
+    pub(crate) fn parse(v: &str) -> Option<Self> {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "quality" | "high" | "质量" => Some(RenderTier::Quality),
+            "balanced" | "medium" | "平衡" => Some(RenderTier::Balanced),
+            "performance" | "low" | "性能" => Some(RenderTier::Performance),
+            _ => None,
+        }
+    }
+}
+
+/// 由窗口尺寸与档位算出**内部渲染**尺寸（纯函数，可单测，不依赖任何 Vulkan 状态）。
+///
+/// 保证：① 两端都是**偶数**（向下取偶）；② 不小于 320×180（小窗口别退化成 0 ⇒ 建 0 尺寸图像）。
+pub(crate) fn render_extent_choice(width: u32, height: u32, tier: RenderTier) -> (u32, u32) {
+    const MIN_W: u32 = 320;
+    const MIN_H: u32 = 180;
+    let (num, den) = tier.ratio();
+    let scale = |v: u32| -> u32 {
+        // 用 u64 中间量：极端尺寸下 u32 乘法会溢出
+        let scaled = (v as u64 * num as u64 / den as u64) as u32;
+        scaled & !1 // 向下取到偶数
+    };
+    (scale(width).max(MIN_W), scale(height).max(MIN_H))
+}
+
+#[cfg(test)]
+mod render_extent_tests {
+    use super::*;
+
+    /// 本机屏幕（OPPO PLD110，2400×1080）三档必须落在**用户指定的干净值**上。
+    /// ⚠️ 改比例常量时这三条会红 —— 那是预期的。
+    #[test]
+    fn render_tiers_hit_the_designed_extents_on_this_panel() {
+        assert_eq!(render_extent_choice(2400, 1080, RenderTier::Quality), (2000, 900));
+        assert_eq!(render_extent_choice(2400, 1080, RenderTier::Balanced), (1600, 720));
+        assert_eq!(render_extent_choice(2400, 1080, RenderTier::Performance), (1200, 540));
+    }
+
+    /// 🔴 必须全是偶数。用**奇数输入**去逼（偶数输入测不出这个 bug）。
+    #[test]
+    fn render_extents_are_always_even() {
+        for w in [2401u32, 2399, 1921, 1601, 1281, 801, 641] {
+            for h in [1081u32, 1079, 901, 721, 481, 361, 181] {
+                for t in [RenderTier::Quality, RenderTier::Balanced, RenderTier::Performance] {
+                    let (rw, rh) = render_extent_choice(w, h, t);
+                    assert_eq!(rw % 2, 0, "宽非偶数: {w}x{h} {t:?} -> {rw}x{rh}");
+                    assert_eq!(rh % 2, 0, "高非偶数: {w}x{h} {t:?} -> {rw}x{rh}");
+                }
+            }
+        }
+    }
+
+    /// 小窗口不许退化成 0（0 尺寸建图像 = 验证层报错）。
+    #[test]
+    fn tiny_windows_clamp_to_a_usable_minimum() {
+        for (w, h) in [(0u32, 0u32), (1, 1), (2, 2), (100, 50), (319, 179)] {
+            for t in [RenderTier::Quality, RenderTier::Balanced, RenderTier::Performance] {
+                let (rw, rh) = render_extent_choice(w, h, t);
+                assert!(rw >= 320 && rh >= 180, "{w}x{h} {t:?} -> {rw}x{rh} 低于下限");
+            }
+        }
+    }
+
+    /// 单调性：质量 > 平衡 > 性能。比例写错时这条会红。
+    #[test]
+    fn bigger_tier_never_renders_fewer_pixels() {
+        let mk = |t| render_extent_choice(2560, 1440, t);
+        let (q, b, p) = (mk(RenderTier::Quality), mk(RenderTier::Balanced), mk(RenderTier::Performance));
+        assert!(q.0 * q.1 > b.0 * b.1, "质量应大于平衡: {q:?} vs {b:?}");
+        assert!(b.0 * b.1 > p.0 * p.1, "平衡应大于性能: {b:?} vs {p:?}");
+    }
+
+    /// 字符串解析（`RV3D_RENDER_SCALE`）—— 认不出就返回 None，**不要静默给个默认档**。
+    #[test]
+    fn tier_parsing_is_explicit() {
+        assert_eq!(RenderTier::parse("quality"), Some(RenderTier::Quality));
+        assert_eq!(RenderTier::parse(" Balanced "), Some(RenderTier::Balanced));
+        assert_eq!(RenderTier::parse("PERFORMANCE"), Some(RenderTier::Performance));
+        assert_eq!(RenderTier::parse("质量"), Some(RenderTier::Quality));
+        assert_eq!(RenderTier::parse("0.75"), None, "百分比/倍率不该被接受");
+        assert_eq!(RenderTier::parse(""), None);
+        assert_eq!(RenderTier::parse("ultra"), None);
+    }
+}

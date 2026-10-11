@@ -21,7 +21,7 @@ impl Renderer {
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         let color_attachment_refs = [color_attachment_ref];
 
-        // 解析附件：MSAA 颜色 → 交换链图像（TYPE_1，最终呈现）
+        // 解析附件：MSAA 颜色 → **离屏场景图**（TYPE_1）。交换链图像由 `record.rs` 的 blit 写入。
         let resolve_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -30,7 +30,10 @@ impl Renderer {
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+            // 🔴 2026-10-11：resolve 目标从**交换链图像**改成**离屏场景图** ⇒ 出口布局
+            // 不再是 PRESENT_SRC_KHR，而是 `TRANSFER_SRC_OPTIMAL`（给随后那条升采样 blit 当源）。
+            // 交换链图像的布局转换现在由那次 blit 负责。
+            .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
         let resolve_attachment_ref = vk::AttachmentReference::default()
             .attachment(1)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
@@ -90,6 +93,109 @@ impl Renderer {
     }
     /// MSAA 颜色附件（每交换链图像一个，samples=msaa_samples）。
     /// 主 pass 渲染到该附件，subpass resolve 输出到交换链图像；MSAA 关闭时跳过。
+    /// 离屏场景图（**内部渲染分辨率**的载体）。
+    ///
+    /// 主 pass 渲到这里（含 MSAA resolve），随后 `record.rs` 把它 blit 升采样到交换链图像。
+    /// 尺寸由 `RV3D_RENDER_SCALE` 决定（Android：`setprop debug.sf.render_scale`）；
+    /// **未设或未识别 = 全分辨率** ⇒ 此时 `render_extent == swapchain_extent`，
+    /// 与引入本机制之前的行为**逐字节一致**（不静默给默认档，见 `RenderTier::parse` 的测试）。
+    ///
+    /// 🔴 必须在 `init_msaa_resources` / `init_depth_resources` / `init_framebuffers` **之前**调用
+    /// —— 后三者都要读 `render_extent`，而 Vulkan 要求**同一帧缓冲内所有附件尺寸一致**
+    /// （`VUID-VkFramebufferCreateInfo-pAttachments-00836`）⇒ 三家必须同尺寸，不能只改其中一处。
+    pub(crate) fn init_scene_resources(&mut self) -> Result<(), String> {
+        // 重建路径：先拆旧的（此时调用方已 `wait_idle`）
+        for &view in &self.scene_image_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        for &image in &self.scene_images {
+            unsafe { self.device.destroy_image(image, None) };
+        }
+        for &memory in &self.scene_image_memory {
+            unsafe { self.device.free_memory(memory, None) };
+        }
+        self.scene_image_views.clear();
+        self.scene_images.clear();
+        self.scene_image_memory.clear();
+
+        let tier = crate::syscfg::cfg("RV3D_RENDER_SCALE")
+            .as_deref()
+            .and_then(RenderTier::parse);
+        let (w, h) = match tier {
+            Some(t) => render_extent_choice(
+                self.swapchain_extent.width,
+                self.swapchain_extent.height,
+                t,
+            ),
+            None => (self.swapchain_extent.width, self.swapchain_extent.height),
+        };
+        self.render_extent = vk::Extent2D { width: w, height: h };
+        log::info!(
+            "内部渲染分辨率: {}x{}（交换链 {}x{}，档位 {}）",
+            w,
+            h,
+            self.swapchain_extent.width,
+            self.swapchain_extent.height,
+            match tier {
+                Some(RenderTier::Quality) => "质量 5/6",
+                Some(RenderTier::Balanced) => "平衡 2/3",
+                Some(RenderTier::Performance) => "性能 1/2",
+                None => "全分辨率",
+            }
+        );
+
+        for _ in 0..self.swapchain_images.len() {
+            let image_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(self.swapchain_format)
+                .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1) // resolve 目标恒为单采样
+                .tiling(vk::ImageTiling::OPTIMAL)
+                // TRANSFER_SRC = 给 `record.rs` 那条升采样 blit 当源
+                .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let image = unsafe {
+                self.device
+                    .create_image(&image_info, None)
+                    .map_err(|e| format!("创建离屏场景图失败: {e}"))?
+            };
+            let mem_reqs = unsafe { self.device.get_image_memory_requirements(image) };
+            let mem_type = self.pick_memory_type(mem_reqs, true)?;
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(mem_reqs.size)
+                .memory_type_index(mem_type);
+            let memory = unsafe {
+                self.device
+                    .allocate_memory(&alloc_info, None)
+                    .map_err(|e| format!("分配离屏场景图内存失败: {e}"))?
+            };
+            unsafe { self.device.bind_image_memory(image, memory, 0) }
+                .map_err(|e| format!("绑定离屏场景图内存失败: {e}"))?;
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(self.swapchain_format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let view = unsafe {
+                self.device
+                    .create_image_view(&view_info, None)
+                    .map_err(|e| format!("创建离屏场景图 ImageView 失败: {e}"))?
+            };
+            self.scene_images.push(image);
+            self.scene_image_memory.push(memory);
+            self.scene_image_views.push(view);
+        }
+        Ok(())
+    }
     pub(crate) fn init_msaa_resources(&mut self) -> Result<(), String> {
         self.msaa_images.clear();
         self.msaa_image_memory.clear();
@@ -101,9 +207,10 @@ impl Renderer {
             let image_info = vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(self.swapchain_format)
+                // 用内部渲染分辨率（不是交换链尺寸）—— 与帧缓冲里另外两个附件保持一致
                 .extent(vk::Extent3D {
-                    width: self.swapchain_extent.width,
-                    height: self.swapchain_extent.height,
+                    width: self.render_extent.width,
+                    height: self.render_extent.height,
                     depth: 1,
                 })
                 .mip_levels(1)
@@ -169,9 +276,10 @@ impl Renderer {
             let image_info = vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(depth_format)
+                // 同 MSAA：内部渲染分辨率
                 .extent(vk::Extent3D {
-                    width: self.swapchain_extent.width,
-                    height: self.swapchain_extent.height,
+                    width: self.render_extent.width,
+                    height: self.render_extent.height,
                     depth: 1,
                 })
                 .mip_levels(1)
@@ -228,8 +336,8 @@ impl Renderer {
         log::info!(
             "深度缓冲创建完成: {} 张 {}x{} D32_SFLOAT",
             self.depth_images.len(),
-            self.swapchain_extent.width,
-            self.swapchain_extent.height
+            self.render_extent.width,
+            self.render_extent.height
         );
         Ok(())
     }
@@ -965,24 +1073,30 @@ impl Renderer {
         Ok(())
     }
     pub(crate) fn init_framebuffers(&mut self) -> Result<(), String> {
+        // 注意：闭包参数 `_image_view` **不再使用**（交换链图像改由 blit 写入），
+        // 但循环仍按交换链图像数走 —— 离屏场景图也是每图像一张。
         self.framebuffers = self
             .swapchain_image_views
             .iter()
             .enumerate()
-            .map(|(i, &image_view)| {
-                // MSAA：attachments = [msaa 颜色, 交换链（resolve 目标）, 深度]；
-                // 关闭时 msaa view 即交换链本身（TYPE_1，无独立附件）
+            .map(|(i, _image_view)| {
+                // MSAA：attachments = [msaa 颜色, **离屏场景图**（resolve 目标）, 深度]；
+                // 关闭时颜色附件即离屏场景图本身（TYPE_1，无独立 MSAA 附件）。
+                //
+                // 🔴 三个附件**必须同尺寸**（`VUID-...-pAttachments-00836`）⇒ 都用 `render_extent`。
+                // `image_view`（交换链）在本帧缓冲里**不再出现** —— 它由随后那条 blit 写入。
+                let scene_view = self.scene_image_views[i];
                 let msaa_view = if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
-                    image_view
+                    scene_view
                 } else {
                     self.msaa_image_views[i]
                 };
-                let attachments = [msaa_view, image_view, self.depth_image_views[i]];
+                let attachments = [msaa_view, scene_view, self.depth_image_views[i]];
                 let framebuffer_create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(self.render_pass)
                     .attachments(&attachments)
-                    .width(self.swapchain_extent.width)
-                    .height(self.swapchain_extent.height)
+                    .width(self.render_extent.width)
+                    .height(self.render_extent.height)
                     .layers(1);
                 unsafe {
                     self.device

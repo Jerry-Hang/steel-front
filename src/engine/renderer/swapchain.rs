@@ -462,6 +462,8 @@ impl Renderer {
         // 漏掉这一步就是未结案 #2：PT 通路随后用一组指向已销毁 ImageView 的 framebuffer
         // （见 `recreate_hud_framebuffers` 的文档）
         self.recreate_hud_framebuffers()?;
+        // 交换链尺寸可能变了 ⇒ 内部渲染分辨率要重算、离屏场景图要重建
+        self.init_scene_resources()?;
         self.init_msaa_resources()?;
         self.init_depth_resources()?;
         self.init_framebuffers()?;

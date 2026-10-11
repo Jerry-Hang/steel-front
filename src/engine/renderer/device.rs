@@ -10,6 +10,8 @@ impl Renderer {
         renderer.init_render_pass()?;
         renderer.init_command_pool()?;
         renderer.create_instance_buffer()?;
+        // 必须在 msaa/depth/framebuffers 之前（三者都读 render_extent）
+        renderer.init_scene_resources()?;
         renderer.init_msaa_resources()?;
         renderer.init_depth_resources()?;
         renderer.init_descriptors()?;       // ← 新增
@@ -478,6 +480,13 @@ impl Renderer {
                     }
                 }
             },
+            // 内部渲染分辨率：RV3D_RENDER_SCALE（Android 走 setprop debug.sf.render_scale）。
+            // **默认不缩放** ⇒ render_extent == swapchain_extent，行为与改动前逐字节一致。
+            // 未识别/未设置一律保持全分辨率（不静默给默认档 —— 见 RenderTier::parse 的测试）。
+            render_extent: vk::Extent2D::default(),
+            scene_images: Vec::new(),
+            scene_image_memory: Vec::new(),
+            scene_image_views: Vec::new(),
             msaa_images: Vec::new(),
             msaa_image_memory: Vec::new(),
             msaa_image_views: Vec::new(),

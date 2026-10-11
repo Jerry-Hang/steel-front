@@ -779,6 +779,112 @@ impl Renderer {
             self.device.cmd_end_render_pass(command_buffer);
         }
 
+        // ===== 升采样：离屏场景图 → 交换链图像（2026-10-11，内部渲染分辨率）=====
+        //
+        // 主 pass 渲在 `render_extent`（见 `pipelines.rs::init_scene_resources`），这里用
+        // **LINEAR blit** 放大到交换链。
+        //
+        // 全分辨率档（默认，`render_extent == swapchain_extent`）时两端同尺寸 ⇒ blit 退化成
+        // 1:1 拷贝，结果与"主 pass 直接渲到交换链"一致 —— **这也是 A/B 的对照臂**。
+        //
+        // 布局链：
+        //   场景图：主 pass resolve 的 `finalLayout` 已是 TRANSFER_SRC_OPTIMAL（见 init_render_pass）
+        //   交换链：UNDEFINED → TRANSFER_DST → **PRESENT_SRC_KHR**
+        //
+        // 🔴 必须把交换链**留回 PRESENT_SRC_KHR**：下游两处都假设它是这个布局 ——
+        //    磨砂玻璃那条路的 ① 屏障（`old_layout(PRESENT_SRC_KHR)`）、以及最终 present。
+        //    PT 通路不关心（它自己的屏障用 `old_layout(UNDEFINED)`，因为 PT 覆盖整幅画面）。
+        {
+            let sw_img = self.swapchain_images[image_index as usize];
+            let scene_img = self.scene_images[image_index as usize];
+            let range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            unsafe {
+                // ① 交换链 UNDEFINED → TRANSFER_DST（本帧第一次碰它）
+                let to_dst = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(sw_img)
+                    .subresource_range(range);
+                self.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_dst],
+                );
+                // ② blit（LINEAR = 双线性升采样；全分辨率档下是 1:1 拷贝）
+                let blit = vk::ImageBlit::default()
+                    .src_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: self.render_extent.width as i32,
+                            y: self.render_extent.height as i32,
+                            z: 1,
+                        },
+                    ])
+                    .dst_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: self.swapchain_extent.width as i32,
+                            y: self.swapchain_extent.height as i32,
+                            z: 1,
+                        },
+                    ]);
+                self.device.cmd_blit_image(
+                    command_buffer,
+                    scene_img,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    sw_img,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[blit],
+                    vk::Filter::LINEAR,
+                );
+                // ③ 交换链 TRANSFER_DST → PRESENT_SRC_KHR
+                let to_present = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::empty())
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(sw_img)
+                    .subresource_range(range);
+                self.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_present],
+                );
+            }
+        }
+
         // ===== 🧊 磨砂玻璃（未结案 #19）：主 pass 之后、PT 之前，把交换链降采样成模糊图 =====
         //
         // 为什么必须在这里、而且必须换 pass 画 HUD：主 pass 的 HUD 是画在 **MSAA 解析目标**
@@ -798,8 +904,12 @@ impl Renderer {
             };
             unsafe {
                 // ① 交换链 PRESENT_SRC → TRANSFER_SRC
+                // 🔴 2026-10-11：交换链的内容**不再由主 pass 的颜色附件写入**，而是由上面那条
+                // 「离屏场景图 → 交换链」的 blit（TRANSFER）写入 ⇒ 本屏障的源阶段/源访问掩码
+                // 必须从 `COLOR_ATTACHMENT_OUTPUT / MEMORY_READ` 改成 `TRANSFER / TRANSFER_WRITE`，
+                // 否则同步范围对不上（原来那个组合是"主 pass 直接渲到交换链"时代的）。
                 let to_src = vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::MEMORY_READ)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
                     .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                     .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -809,7 +919,7 @@ impl Renderer {
                     .subresource_range(range);
                 self.device.cmd_pipeline_barrier(
                     command_buffer,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::TRANSFER,
                     vk::PipelineStageFlags::TRANSFER,
                     vk::DependencyFlags::empty(),
                     &[],

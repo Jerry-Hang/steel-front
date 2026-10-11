@@ -587,6 +587,15 @@ pub struct Renderer {
     msaa_images: Vec<vk::Image>,
     msaa_image_memory: Vec<vk::DeviceMemory>,
     msaa_image_views: Vec<vk::ImageView>,
+    /// **内部渲染分辨率**（场景 pass 的实际渲染色尺寸）。等于交换链尺寸时行为与改动前完全一致。
+    /// 见 `helpers::render_extent_choice` 与 `docs/android-render-scale-plan.md`。
+    render_extent: vk::Extent2D,
+    /// 离屏场景图（每交换链图像一张，尺寸 = `render_extent`）。
+    /// 主 pass 渲到这里（含 MSAA resolve），随后 blit 升采样到交换链图像。
+    /// 与 `swapchain_format` 同格式（blit 要求格式兼容）。
+    scene_images: Vec<vk::Image>,
+    scene_image_memory: Vec<vk::DeviceMemory>,
+    scene_image_views: Vec<vk::ImageView>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
