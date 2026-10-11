@@ -131,16 +131,23 @@ impl Renderer {
 
         // 动态 viewport/scissor：每帧按当前 swapchain_extent 重设（resize 后自动适配，
         // 2026-08-15 修复全屏/窗口变化后画面卡左上角）
+        // 🔴 用**内部渲染分辨率**（= 主 pass 帧缓冲的尺寸），不是交换链尺寸（2026-10-11 修）。
+        //
+        // 引入离屏场景图之后，主 pass 的帧缓冲变成 `render_extent`（缩放档下更小），
+        // 而这里仍写 `swapchain_extent` ⇒ viewport 是帧缓冲的 2 倍：
+        // NDC [-1,1] 被映到 [0, 2400]×[0, 1080]，而帧缓冲只有 [0,1200]×[0,540]
+        // ⇒ 屏幕上只剩**左下四分之一**（缩放档下），且几何被整体放大一倍。
+        // Vulkan 会把 viewport 夹到帧缓冲范围，所以**不报 VUID**，只是一直画错区域。
         let vp = vk::Viewport::default()
             .x(0.0)
             .y(0.0)
-            .width(self.swapchain_extent.width as f32)
-            .height(self.swapchain_extent.height as f32)
+            .width(self.render_extent.width as f32)
+            .height(self.render_extent.height as f32)
             .min_depth(0.0)
             .max_depth(1.0);
         let sc = vk::Rect2D::default()
             .offset(vk::Offset2D { x: 0, y: 0 })
-            .extent(self.swapchain_extent);
+            .extent(self.render_extent);
         unsafe {
             self.device.cmd_set_viewport(command_buffer, 0, &[vp]);
             self.device.cmd_set_scissor(command_buffer, 0, &[sc]);
@@ -1093,6 +1100,23 @@ impl Renderer {
                             .clear_values(&[]),
                         vk::SubpassContents::INLINE,
                     );
+                    // 🔴 overlay pass 渲到**交换链**（设备分辨率），而主 pass 刚把 viewport 设成
+                    // `render_extent` ⇒ 这里必须**自己再设一次**。viewport/scissor 是命令缓冲的
+                    // 动态状态，会跨 render pass 保留 —— 不设就等于用主 pass 的小 viewport 画 HUD，
+                    // 缩放档下 HUD 会缩到左下角一小块（且不报任何错）。
+                    // （本段已经在 `unsafe` 块内）
+                    let hud_vp = vk::Viewport::default()
+                        .x(0.0)
+                        .y(0.0)
+                        .width(self.swapchain_extent.width as f32)
+                        .height(self.swapchain_extent.height as f32)
+                        .min_depth(0.0)
+                        .max_depth(1.0);
+                    let hud_sc = vk::Rect2D::default()
+                        .offset(vk::Offset2D { x: 0, y: 0 })
+                        .extent(self.swapchain_extent);
+                    self.device.cmd_set_viewport(command_buffer, 0, &[hud_vp]);
+                    self.device.cmd_set_scissor(command_buffer, 0, &[hud_sc]);
                     let hud_vb = [self.hud_vertex_buffer];
                     let hud_off = [0u64];
                     let hud_sets = [self.hud_glass_set];

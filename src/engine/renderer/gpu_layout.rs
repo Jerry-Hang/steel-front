@@ -17,6 +17,17 @@ pub(crate) struct CameraUniform {
     pub(crate) planes: [[f32; 4]; 6],
     /// xyz = 相机世界位置，w = 近档距离²（几何 LOD 切换阈值）。仅网格着色器读取。
     pub(crate) cam_pos: [f32; 4],
+    /// **上一帧的 `proj * view`**（2026-10-11，运动向量 = GSR2 阶段 ③）。
+    ///
+    /// 逐像素运动向量 = 用**当前帧的世界坐标**分别乘本矩阵与当前矩阵，两次投影结果之差。
+    /// 首帧等于当前矩阵 ⇒ MV 恒 0（安全默认，不会给出假的运动）。
+    ///
+    /// ⚠️ 追加在 256 **之后**：前 144 字节是传统顶点着色器的 `ViewProj`，
+    /// 144..256 被网格路径的 `planes`/`cam_pos` 占着 —— **不能插在中间**。
+    pub(crate) prev_view_proj: glam::Mat4,
+    /// x = **MV 调试可视化**开关（`RV3D_MV_DEBUG=1` 时置 1）；yzw 保留。
+    /// 与 `light_data.flags.w`（地面细节门控）分开，避免共用一个"开关"。
+    pub(crate) debug_params: [f32; 4],
 }
 
 // 光照 Uniform 类型与布局由 lighting 模块统一维护（`lighting::LightUniform`，352 字节）。

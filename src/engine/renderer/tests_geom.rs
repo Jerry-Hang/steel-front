@@ -899,3 +899,53 @@ mod cull_segment_tests {
     }
 }
 
+
+
+/// 🔴 `build.rs` 里有两份 `struct VertexOutput`：一份在 `VERTEX_SHADER_WGSL`、一份在
+/// `FRAGMENT_SHADER_WGSL`。**两个 WGSL 字符串是分别编译的模块**，各自需要完整声明，
+/// 所以这一对**必须逐字段一致**。
+///
+/// 存在理由（2026-10-11）：加运动向量时只改了顶点那份，片元那份漏了 —— 而 naga
+/// **只在某一边真的被读取时才报**（`input.mv` 用得上就报，用不上就一路绿）。
+/// 那正是本仓最反对的"判据看着在读、其实没覆盖"形态。
+///
+/// 判据 = 把两个字符串里的声明抽出来**做字符串比较**（去掉空白与注释），
+/// 不一致就红。改任何一边都必须同步改另一边。
+#[test]
+fn vertex_output_declarations_match() {
+    let build = std::fs::read_to_string("build.rs")
+        .expect("读 build.rs 失败（测试工作目录应为仓库根）");
+
+    fn extract<'a>(src: &'a str, const_name: &str) -> String {
+        let start = src
+            .find(const_name)
+            .unwrap_or_else(|| panic!("build.rs 里找不到 {const_name}"));
+        let body = &src[start..];
+        let at = body
+            .find("struct VertexOutput {")
+            .unwrap_or_else(|| panic!("{const_name} 里找不到 struct VertexOutput"));
+        let body = &body[at..];
+        let end = body.find('}').expect("VertexOutput 没有闭合大括号");
+        // 只留 @location/@builtin 行，去掉空白与注释 —— 比较的是**接口**，不是排版
+        body[..end]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or("").trim())
+            .filter(|l| l.starts_with("@location") || l.starts_with("@builtin"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let vertex = extract(&build, "VERTEX_SHADER_WGSL");
+    let fragment = extract(&build, "FRAGMENT_SHADER_WGSL");
+
+    assert!(
+        vertex.lines().count() >= 6,
+        "抽取到的字段太少（{} 行）⇒ 抽取逻辑坏了，不是接口对了",
+        vertex.lines().count()
+    );
+    assert_eq!(
+        vertex, fragment,
+        "顶点与片元两份 `VertexOutput` 不一致 —— 它们是同一接口的两份副本，必须逐字段相同。\n\
+         \n  顶点: {vertex}\n  片元: {fragment}\n"
+    );
+}

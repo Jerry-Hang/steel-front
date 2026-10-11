@@ -11,6 +11,9 @@ impl Renderer {
         renderer.init_command_pool()?;
         renderer.create_instance_buffer()?;
         // 必须在 msaa/depth/framebuffers 之前（三者都读 render_extent）
+        // 诊断：MV 调试开关是否读到（`RV3D_MV_DEBUG` / Android `setprop debug.sf.mv_debug 1`）。
+        // 不加这条就只能靠"画面没变"去猜 —— 而那分不清"开关没读到"和"开关读了但没生效"。
+        log::info!("MV 调试开关: {}", renderer.mv_debug);
         renderer.init_scene_resources()?;
         renderer.init_msaa_resources()?;
         renderer.init_depth_resources()?;
@@ -483,6 +486,10 @@ impl Renderer {
             // 内部渲染分辨率：RV3D_RENDER_SCALE（Android 走 setprop debug.sf.render_scale）。
             // **默认不缩放** ⇒ render_extent == swapchain_extent，行为与改动前逐字节一致。
             // 未识别/未设置一律保持全分辨率（不静默给默认档 —— 见 RenderTier::parse 的测试）。
+            prev_view_proj: glam::Mat4::IDENTITY,
+            mv_debug: crate::syscfg::cfg("RV3D_MV_DEBUG")
+                .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             render_extent: vk::Extent2D::default(),
             scene_images: Vec::new(),
             scene_image_memory: Vec::new(),

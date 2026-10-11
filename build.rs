@@ -12,6 +12,21 @@ struct ViewProj {
     proj: mat4x4<f32>,
     // lod_params = (lod_dist, fade_start, fade_end, 0)
     lod_params: vec4<f32>,
+    // 🔴 144..256 被**网格路径**的 planes(96B) + cam_pos(16B) 占着。
+    // 传统顶点路径不读它们，但**必须显式留位** —— 缓冲布局是按字节数算的，
+    // 漏掉这段填充，下面的 prev_view_proj 就会落在偏移 144 上、读到平面数据
+    // （而那样**不会报任何错**，只会给出完全错误的运动向量）。
+    _mesh_reserved_a: vec4<f32>,
+    _mesh_reserved_b: vec4<f32>,
+    _mesh_reserved_c: vec4<f32>,
+    _mesh_reserved_d: vec4<f32>,
+    _mesh_reserved_e: vec4<f32>,
+    _mesh_reserved_f: vec4<f32>,
+    _mesh_reserved_g: vec4<f32>,
+    /// 上一帧的 `proj * view`（偏移 256）。首帧等于当前矩阵 ⇒ 运动向量恒 0。
+    prev_view_proj: mat4x4<f32>,
+    /// x = MV 调试可视化开关（`RV3D_MV_DEBUG=1`）
+    debug_params: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: ViewProj;
 
@@ -71,6 +86,12 @@ struct VertexOutput {
     @location(3) world_pos: vec3<f32>,
     @location(4) view_dir: vec3<f32>,
     @location(5) flat_flag: f32,
+    /// 逐像素运动向量（UV 单位，当前帧 − 上一帧）。见 `vs_main` 里的计算与符号说明。
+    @location(6) mv: vec2<f32>,
+    /// MV 调试开关，**从顶点阶段传下来**（`flat` = 不插值）。
+    /// 为什么不用 uniform：`FRAGMENT_SHADER_WGSL` 是**独立编译的模块**、里面没有
+    /// `camera` 声明（见 `FRAGMENT_SHADER_WGSL` 顶部只有 binding 1/3/7/8/9）。
+    @location(7) @interpolate(flat) mv_debug: f32,
 }
 @vertex
 fn vs_main(
@@ -94,6 +115,22 @@ fn vs_main(
     let world_pos = inst.model * vec4<f32>(pos, 1.0);
     output.position = camera.proj * camera.view * world_pos;
     output.world_pos = world_pos.xyz;
+    // ---- 运动向量（2026-10-11，GSR2 阶段 ③）----
+    // 用**当前帧的世界坐标**分别乘「上一帧」与「当前帧」的视图投影矩阵，两次 NDC 之差
+    // 就是该点的屏幕位移。这是**相机运动**的正确算法。
+    // ⚠️ **物体自身运动**（NPC / 道具 / 枪模）还需要该实例的上一帧模型矩阵 ——
+    //    本步只做相机部分（覆盖地形 / 地面 / 建筑这些静态几何，占屏幕像素的绝大多数）；
+    //    动态物体的 MV 是下一步，**在那之前它们的运动会表现为鬼影**。
+    let prev_clip = camera.prev_view_proj * world_pos;
+    let cur_ndc = output.position.xy / output.position.w;
+    let prev_ndc = prev_clip.xy / prev_clip.w;
+    // NDC → UV：x 同向（×0.5），y **反向**（×−0.5）—— Vulkan 的 NDC y 向上、
+    // 屏幕 UV y 向下，而本仓的 Y 翻转由着色器负责（铁律 B）。
+    // 🔴 符号错了不会报任何错，只会让超分器往反方向补偿（画面变"双影"）
+    //    ⇒ **必须**用 RV3D_MV_DEBUG=1 目视核对，别靠推理。
+    output.mv = (cur_ndc - prev_ndc) * vec2<f32>(0.5, -0.5);
+    // 调试开关从 uniform 读一次、随 varying 传下去（片元模块没有 `camera` 声明）
+    output.mv_debug = camera.debug_params.x;
     // 相机世界位置：view = [R|t]，相机位置 = -R^T * t（刚体变换）
     let t = camera.view[3].xyz;
     let cam_pos = -(camera.view[0].xyz * t.x + camera.view[1].xyz * t.y + camera.view[2].xyz * t.z);
@@ -174,6 +211,10 @@ fn vs_main(
 
 /// 片元着色器 - 接收颜色并输出
 const FRAGMENT_SHADER_WGSL: &str = r#"
+// 🔴 这份 `VertexOutput` 是**顶点着色器那份的副本**（两个 WGSL 字符串是分别编译的模块，
+// 各自需要完整声明）。**两处必须逐字段一致** —— 不一致时 naga 会报 location 不匹配，
+// 但**只在某一边真的被读取时才报** ⇒ 漏改一边可能长期不报错。
+// 判据见 `tests_vk.rs::vertex_output_declarations_match`。
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec3<f32>,
@@ -182,6 +223,8 @@ struct VertexOutput {
     @location(3) world_pos: vec3<f32>,
     @location(4) view_dir: vec3<f32>,
     @location(5) flat_flag: f32,
+    @location(6) mv: vec2<f32>,
+    @location(7) @interpolate(flat) mv_debug: f32,
 }
 
 @group(0) @binding(1) var texture_sampled: texture_2d<f32>;
@@ -498,7 +541,7 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
         //  斜率→∞，横推 2m 反而把墙根的影子从地面上抹掉）；② 只留 0.12m 常量深度
         // bias 兜浮点余量；③ **bias.x 的语义改为"米"**并 clamp 到 ≤0.5m：现值 0.005
         // 旧语义是 4m、新语义是 5mm≈无，所以不改 Rust 侧数值就能立刻拿到正确行为
-        // （要回退请改 lighting.rs::DEFAULT_SHADOW_DEPTH_BIAS，别再指望 shader 兼容旧量纲）。
+        // （要回退请改 lighting.rs::DEFAULT_SHADOW_DEPTH_BIAS，别再指望 shader 兼容旧单位）。
         let ndotl = clamp(dot(normal, to_light), 0.0, 1.0);
         let slope = min(sqrt(max(0.0, 1.0 - ndotl * ndotl)) / max(ndotl, 0.25), 1.6);
         let push_m = light_data.shadow.bias.y + m_per_texel * (1.25 + 0.9 * slope);
@@ -713,6 +756,15 @@ fn window_dark(nrm: vec3<f32>, world_pos: vec3<f32>, deriv: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // ---- 运动向量调试可视化（RV3D_MV_DEBUG=1，2026-10-11）----
+    // 这是**运动向量的验收工具**：MV 的符号 / 单位 / 是否恒 0，只能靠它看出来。
+    //   0.5 灰 = 无运动；R>0.5 = 向后（或向右）；G>0.5 = 向下
+    //   ⚠️ **放大 10 倍** —— 正常的逐像素 MV 通常远小于 1 个 UV 单位，不放大是一片灰。
+    //   判据：相机静止 ⇒ 全屏均匀 0.5 灰；相机平移 ⇒ 均匀某一色；
+    //         相机旋转 ⇒ 径向渐变（中心无位移、边缘位移最大）。
+    if (input.mv_debug >= 0.5) {
+        return vec4<f32>(input.mv * 10.0 + vec2<f32>(0.5, 0.5), 0.0, 1.0);
+    }
     // 消融档 3：片元直出常量色（量纯填充/几何下限；默认档 0 不进这里）
     if (light_data.shadow.config.w > 2.5 && light_data.shadow.config.w < 3.5) {
         return vec4<f32>(1.0, 0.0, 1.0, 1.0);

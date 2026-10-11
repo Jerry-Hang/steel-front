@@ -695,6 +695,9 @@ impl Renderer {
             ],
             planes,
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, cam_pos_w],
+            // 运动向量：本帧的 uniform 拿**上一帧**的矩阵（首帧 = 当前 ⇒ MV 恒 0）
+            prev_view_proj: self.prev_view_proj,
+            debug_params: [if self.mv_debug { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
         if let Some(&ptr) = self.uniform_mapped.get(self.current_frame) {
             unsafe {
@@ -705,6 +708,10 @@ impl Renderer {
                 );
             }
         }
+
+        // 帧末更新「上一帧矩阵」：**必须在写完 ubo 之后**，
+        // 否则本帧的 uniform 会拿到本帧的矩阵 ⇒ MV 恒 0（而那是"看起来正常"的静默失败）。
+        self.prev_view_proj = proj * view;
 
         // ---- 光照 Uniform：写入 game 每帧更新的 light_data（默认全零 = 光照关闭）----
         let mut light_ubo = self.light_data;

@@ -587,6 +587,11 @@ pub struct Renderer {
     msaa_images: Vec<vk::Image>,
     msaa_image_memory: Vec<vk::DeviceMemory>,
     msaa_image_views: Vec<vk::ImageView>,
+    /// 上一帧的 `proj * view`（运动向量用，见 `CameraUniform::prev_view_proj`）。
+    prev_view_proj: glam::Mat4,
+    /// `RV3D_MV_DEBUG=1`：把逐像素运动向量当颜色画出来（0.5 灰 = 无运动）。
+    /// **这是运动向量的验收工具** —— MV 的符号/单位错了，只能靠它看出来。
+    mv_debug: bool,
     /// **内部渲染分辨率**（场景 pass 的实际渲染色尺寸）。等于交换链尺寸时行为与改动前完全一致。
     /// 见 `helpers::render_extent_choice` 与 `docs/android-render-scale-plan.md`。
     render_extent: vk::Extent2D,

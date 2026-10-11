@@ -68,6 +68,6 @@ swapchain 尺寸 = surface 尺寸，由系统决定（`currentExtent`）。**内
 
 ## 明确不做
 
-- **SGSR2**（时域超分）：要运动矢量 + 抖动 + 深度采样路径，即 `docs/DLSS-evaluation.md:37-41`
+- **SGSR2**（时域超分）：要运动向量 + 抖动 + 深度采样路径，即 `docs/DLSS-evaluation.md:37-41`
   那份清单，本仓 `rg motion_vector src/` 零命中。
 - **SGSR1**：先做本档位，**量出真实收益再决定要不要接**（顺序不能反 —— 先把免费的采样数/像素数砍到位）。
