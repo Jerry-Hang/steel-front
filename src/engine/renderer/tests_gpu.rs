@@ -850,3 +850,190 @@ mod workgroup_layout_tests {
     }
 }
 
+
+
+/// A/B 微基准（隔离进程、无渲染并发）：可见索引的**近/远分档**用散列读还是连续读。
+///
+/// 背景（2026-10-11 实机）：`frame_us=1488` 里 `cull_us=1091`（73%）。阶段 A 第三个循环对
+/// 每个可见实例做 `instances[gi].model[12..14]`，而 `instances` 是 65536×80B = **5.2 MB**，
+/// 可见集约 2.2 万 ⇒ 两万多次随机访问。同一批数在 `instance_center_x/y/z` 里是**连续**的
+/// （地形场由 `from_translation` 建，平移列与中心逐值相同）。
+///
+/// 本基准只量这一步，回答"值不值得改"，不碰其余剔除逻辑。
+/// 运行：`cargo test --release near_far_classify_microbench -- --nocapture --test-threads=1`
+#[test]
+fn near_far_classify_microbench() {
+    use std::time::Instant;
+    // 自带一个确定性 LCG（不依赖同文件其它模块里的 Rng：它不在本作用域）
+    let mut seed: u64 = 0x0FA2_2026;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as u32 as f32) / (u32::MAX as f32 / 2.0) - 1.0 // 约 [-1,1)
+    };
+    let n = 65536usize;
+    // 造出与真实同形的数据：instances 是 80 字节步长的散列目标，center 三轴是连续数组
+    struct Inst80 {
+        model: [f32; 16],
+        tint: [f32; 4],
+    }
+    let mut instances: Vec<Inst80> = Vec::with_capacity(n);
+    let mut cx = Vec::with_capacity(n);
+    let mut cy = Vec::with_capacity(n);
+    let mut cz = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (x, y, z) = (
+            next() * 250.0,
+            next() * 10.0 + 10.0,
+            next() * 250.0,
+        );
+        let m = glam::Mat4::from_translation(glam::Vec3::new(x, y, z)).to_cols_array();
+        instances.push(Inst80 { model: m, tint: [0.7, 0.7, 0.7, 1.0] });
+        cx.push(x);
+        cy.push(y);
+        cz.push(z);
+    }
+    // 可见集：打乱后取 22000 个（模拟剔除后的稀疏索引）
+    let mut idx: Vec<u32> = (0..n as u32).collect();
+    for i in (1..idx.len()).rev() {
+        let j = (next() * (i as f32 + 1.0)) as usize % (i + 1);
+        idx.swap(i, j);
+    }
+    idx.truncate(22000);
+    let cam = glam::Vec3::new(0.0, 12.0, 0.0);
+    let near_sq = 120.0f32 * 120.0;
+
+    // 臂 A：现状 —— 散列读 instances[gi].model[12..14]
+    let arm_scattered = || -> u32 {
+        let (mut near, mut far) = (0u32, 0u32);
+        for &gi in &idx {
+            let inst = &instances[gi as usize];
+            let dx = inst.model[12] - cam.x;
+            let dy = inst.model[13] - cam.y;
+            let dz = inst.model[14] - cam.z;
+            if dx * dx + dy * dy + dz * dz < near_sq { near += 1 } else { far += 1 }
+        }
+        near + far
+    };
+    // 臂 B：改用连续的中心数组
+    let arm_contiguous = || -> u32 {
+        let (mut near, mut far) = (0u32, 0u32);
+        for &gi in &idx {
+            let gi = gi as usize;
+            let dx = cx[gi] - cam.x;
+            let dy = cy[gi] - cam.y;
+            let dz = cz[gi] - cam.z;
+            if dx * dx + dy * dy + dz * dz < near_sq { near += 1 } else { far += 1 }
+        }
+        near + far
+    };
+
+    // 两臂结果必须一致（否则"优化"是改行为，不是提速）
+    let (a, b) = (arm_scattered(), arm_contiguous());
+    assert_eq!(a, b, "两臂分类结果不一致 ⇒ 不能互换");
+
+    let mut ta: Vec<f64> = Vec::new();
+    let mut tb: Vec<f64> = Vec::new();
+    for round in 0..12 {
+        // 同轮轮转（顺序交替，抵消外部干扰）
+        if round % 2 == 0 {
+            let t = Instant::now(); std::hint::black_box(arm_scattered()); ta.push(t.elapsed().as_secs_f64() * 1e6);
+            let t = Instant::now(); std::hint::black_box(arm_contiguous()); tb.push(t.elapsed().as_secs_f64() * 1e6);
+        } else {
+            let t = Instant::now(); std::hint::black_box(arm_contiguous()); tb.push(t.elapsed().as_secs_f64() * 1e6);
+            let t = Instant::now(); std::hint::black_box(arm_scattered()); ta.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+    }
+    ta.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    tb.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let (ma, mb) = (ta[ta.len() / 2], tb[tb.len() / 2]);
+    println!("  near/far 分档微基准（22000 可见实例，中位，n=12）");
+    println!("    A 散列读 instances[gi].model : {ma:8.1} µs");
+    println!("    B 连续读 center_x/y/z       : {mb:8.1} µs");
+    println!("    差 = {:+.1} µs（{:+.1}%）", mb - ma, (mb - ma) / ma * 100.0);
+    assert!(ma > 0.0 && mb > 0.0, "计时异常");
+}
+
+
+/// A/B 微基准：阶段 B（压缩上传）的**搬运**代价 —— 确认它是不是 `cull_us` 的大头。
+///
+/// 背景（2026-10-11 实机）：`cull_us=1091µs`，而微基准显示 SIMD 视锥测试只要 ~33µs、
+/// near/far 分档只要 ~23µs（65536 / 22000 规模）⇒ 时间必然在**搬运**上：
+/// 每个可见实例从 5.2MB 的 `instances`（80B 步长）**随机读** 80 字节，再写进映射内存。
+///
+/// 本基准把这一步单独量出来（A 臂），并给一个"只读不写"的对照臂（B）分辨读/写各占多少。
+/// 运行：`cargo test --release cull_gather_scatter_microbench -- --nocapture --test-threads=1`
+#[test]
+fn cull_gather_scatter_microbench() {
+    use std::time::Instant;
+    let mut seed: u64 = 0xB0B0_2026;
+    let mut next = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as u32 as f32) / (u32::MAX as f32 / 2.0) - 1.0
+    };
+    const STRIDE: usize = 80;
+    let n = 65536usize;
+    // 源：与真实同形的 80 字节记录数组（5.2MB，远超 L2/L3 的一部分 ⇒ 会真打到内存）
+    let mut src = vec![0u8; n * STRIDE];
+    for (i, b) in src.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    // 可见集：22000 个打乱索引
+    let mut idx: Vec<u32> = (0..n as u32).collect();
+    for i in (1..idx.len()).rev() {
+        let j = (next() * (i as f32 + 1.0)) as usize % (i + 1);
+        idx.swap(i, j);
+    }
+    idx.truncate(22000);
+
+    // 目标：模拟当前帧实例槽（顺序写、每个可见实例 80 字节）
+    let mut dst = vec![0u8; idx.len() * STRIDE];
+    let dp = dst.as_mut_ptr() as usize;
+
+    // 臂 A：读 + 写（= 阶段 B 干的事）
+    let arm_full = |idx: &Vec<u32>, dst: &mut [u8]| {
+        let base = dst.as_mut_ptr();
+        for (k, &gi) in idx.iter().enumerate() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr().add(gi as usize * STRIDE),
+                    base.add(k * STRIDE),
+                    STRIDE,
+                );
+            }
+        }
+        // 🔴 不加这一句整段会被优化掉（写入从不被读 ⇒ 死代码）。
+        //    这正是本仓"微基准量到 0"的典型成因 —— 计时前先确认它真的在干活。
+        std::hint::black_box(unsafe { *base });
+    };
+    // 臂 B：只读（对照：分辨读占多少）
+    let arm_read_only = |idx: &Vec<u32>| {
+        let mut acc = 0u64;
+        for &gi in idx.iter() {
+            unsafe {
+                let p = src.as_ptr().add(gi as usize * STRIDE);
+                acc = acc.wrapping_add(*p as u64);
+            }
+        }
+        std::hint::black_box(acc);
+    };
+
+    let mut ta: Vec<f64> = Vec::new();
+    let mut tb: Vec<f64> = Vec::new();
+    for round in 0..12 {
+        if round % 2 == 0 {
+            let t = Instant::now(); arm_full(&idx, &mut dst); ta.push(t.elapsed().as_secs_f64() * 1e6);
+            let t = Instant::now(); arm_read_only(&idx); tb.push(t.elapsed().as_secs_f64() * 1e6);
+        } else {
+            let t = Instant::now(); arm_read_only(&idx); tb.push(t.elapsed().as_secs_f64() * 1e6);
+            let t = Instant::now(); arm_full(&idx, &mut dst); ta.push(t.elapsed().as_secs_f64() * 1e6);
+        }
+    }
+    ta.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    tb.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let (ma, mb) = (ta[ta.len() / 2], tb[tb.len() / 2]);
+    println!("  阶段B 搬运微基准（22000 可见 × 80B = {:.1} MB，中位，n=12）", 22000.0 * 80.0 / 1048576.0);
+    println!("    A 读+写（阶段B 现状）: {ma:8.1} µs");
+    println!("    B 只读一个字节       : {mb:8.1} µs   ⇒ 说明随机读本身就占 {:.0}%", mb / ma * 100.0);
+    println!("    ⇒ 若 A 接近实机的 cull_us(1091µs)，本相即大头");
+    assert!(ma > 0.0);
+}

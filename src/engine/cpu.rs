@@ -1130,8 +1130,9 @@ impl ThreadPool {
             bounds.push((n * i) / nw);
         }
         let (head, tail) = data.split_at_mut(bounds[1]);
-        f(0, 0, head);
         if tail.is_empty() {
+            // 只有一个段：没有可并行的部分，直接做掉
+            f(0, 0, head);
             return;
         }
         // 池作业闭包要求 'static：调用方数据/闭包/计数器都以裸指针传入（无生命周期），
@@ -1170,6 +1171,17 @@ impl ThreadPool {
                 }
             }
         }
+        // 🔴 **先把池作业全部发出去，再让调用线程做首段**（2026-10-11 修）。
+        //
+        // 原实现是「调用线程先同步做完首段，然后才发池作业」⇒ 发出去的这段时间里
+        // **池内每个 worker 都在空转**。nw 段等长时总耗时 = `T/nw + T/nw`，
+        // 而最优是 `T/nw` —— **整整慢一倍**，且不报任何错、不改变任何结果，
+        // 只是"并行看起来在跑、实际只拿到一半收益"。
+        //
+        // 本仓的剔除每帧调这里**两次**（阶段 A 剔除+计数、阶段 B 压缩上传），
+        // 实机 `cull_us=1091µs` 里两次都吃这个损失。判据见
+        // `par_for_each_mut_dispatches_before_working`。
+        f(0, 0, head);
         while done.load(Ordering::Acquire) != 0 {
             std::thread::yield_now();
         }
@@ -1327,5 +1339,52 @@ mod tests {
         // thread_siblings_list 常见格式 "0-1" / "0,1"，应能被 parse_cpu_list 解析
         assert_eq!(parse_cpu_list("0-1").unwrap(), vec![0, 1]);
         assert_eq!(parse_cpu_list("16-17").unwrap(), vec![16, 17]);
+    }
+
+    /// 🔴 **池作业必须"先全部发出去，调用线程再做自己的首段"**。
+    ///
+    /// 存在理由（2026-10-11）：原实现是「调用线程先同步做完首段，然后才发池作业」
+    /// ⇒ 那段时间里**池内每个 worker 都在空转**；nw 段等长时总耗时 = `T/nw + T/nw`，
+    /// 而最优是 `T/nw` —— **慢一倍，且不报错、不改结果**，纯属白扔。
+    /// 本仓剔除每帧调它两次，实机 `cull_us=1091µs` 里两次都吃这个损失。
+    ///
+    /// 判据是**行为**的，不是文本匹配：
+    ///   * 非首段在**进入**时就记下自己的段号；
+    ///   * 首段**睡 30ms 之后**才记（把"先发后干"与"先干后发"的时序差拉开到必然可辨）；
+    ///   * 若实现回退成"先干首段"，首段会在任何池作业发出之前就记完 ⇒ 断言失败。
+    #[test]
+    fn par_for_each_mut_dispatches_before_working() {
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let pool = scene_pool();
+        if pool.workers() == 0 {
+            // 单核/池起不来时无可并行部分，本判据不适用（显式跳过，不是"静默通过"）
+            eprintln!("跳过：线程池没有 worker，本判据不适用");
+            return;
+        }
+
+        let mut data = vec![0u32; 64 * 1024];
+        let order: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        pool.par_for_each_mut(&mut data, |seg, _start, _slice| {
+            if seg == 0 {
+                // 首段：故意慢，把时序差拉开
+                std::thread::sleep(Duration::from_millis(30));
+                order.lock().unwrap().push(0);
+            } else {
+                // 非首段：一进来就记
+                order.lock().unwrap().push(seg);
+            }
+        });
+
+        let seen = order.lock().unwrap().clone();
+        assert_eq!(seen.len(), pool.workers() + 1, "段数不对: {seen:?}");
+        let head_pos = seen.iter().position(|&s| s == 0).expect("首段没执行");
+        assert_eq!(
+            head_pos,
+            seen.len() - 1,
+            "首段没有排在最后 ⇒ 说明调用线程在【发池作业之前】就把首段干完了 \
+             （池内 worker 全程空转，并行收益只剩一半）。顺序: {seen:?}"
+        );
     }
 }
