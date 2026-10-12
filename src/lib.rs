@@ -3209,6 +3209,26 @@ impl GameApp {
                     let _ = self.game.hud.set_screen_size(is.width as f32, is.height as f32);
                 }
             }
+
+            // 🔴 降级恢复（2026-10-12 补）：`swapchain_broken` 时**每帧**给一次重建机会。
+            //
+            // 上面那段"尺寸保险"只在**尺寸不一致**时才触发；而 Android 切后台再切回来时
+            // 尺寸通常**不变**，`Resized` 也就不来 ⇒ 于是 `resumed()` 里那次重建**一旦失败**，
+            // 就再没有任何重试入口 —— 进程活着、输入有反应、**画面永久黑屏**
+            // （用户 2026-10-12 报的"切屏切回来直接黑屏"）。
+            //
+            // 文档此前声称有"5 秒尺寸自检"，但 `swapchain_recovery_allowed` 的四个调用点
+            // **全在事件回调里**（Resized/Resumed/交换链过期），没有一个是每帧的 ——
+            // 那条自检并不存在。这里把它补上。
+            //
+            // 不会刷屏：`swapchain_recovery_allowed` 内含 `RECREATE_RETRY_MIN_SECS` 限流；
+            // `device_lost` 时它恒假 ⇒ 设备真丢了的场景仍然一次都不重试、不空转。
+            if renderer.swapchain_broken() && renderer.swapchain_recovery_allowed() {
+                log::warn!("交换链处于降级状态（同尺寸下没有 Resized 事件）⇒ 每帧重试一次重建");
+                if let Err(e) = renderer.recreate_swapchain() {
+                    log::error!("降级恢复重建失败：{}", e);
+                }
+            }
             // PT 取景：与光栅化同一相机、同一太阳方向（路径追踪要当烘焙参照，参数必须同源）
             let lu = self.game.light_uniform();
             renderer.set_pt_params(crate::engine::ray_tracer::PtParams {

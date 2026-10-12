@@ -436,6 +436,16 @@ impl Renderer {
     /// 🔴 2026-09-26 再加一层：失败原因若是**设备丢失**，那"下一次成功"永远不会来
     /// （本引擎没有重建设备的路径），置 `device_lost` 之后 `swapchain_recovery_allowed()`
     /// 恒假 ⇒ 调用方不再重试、不再刷日志。见该字段与 `is_device_lost_error` 的文档。
+    /// 交换链是否处于**降级**状态（重建中途失败 ⇒ `frame_suppressed` 会跳过每一帧）。
+    ///
+    /// 为什么需要这个访问器（2026-10-12）：调用方要在**每帧**判断"要不要给一次恢复机会"，
+    /// 而原来只有 `swapchain_recovery_allowed()` —— 它只看"值不值得试"，**看不出当前是不是
+    /// 正处于降级**。于是每帧调用它会变成"每帧都重建交换链"（即使一切正常）。
+    /// 两个判据分工不同：本函数回答"现在坏没坏"，那个回答"现在该不该试"。
+    pub(crate) fn swapchain_broken(&self) -> bool {
+        self.swapchain_broken
+    }
+
     /// 现在**值不值得**再试一次交换链重建（`main.rs` 三处重建入口的判据）。
     /// 语义与判据全在纯函数 `should_retry_swapchain` 里，这里只是把"距上次多久"喂进去。
     pub(crate) fn swapchain_recovery_allowed(&self) -> bool {
