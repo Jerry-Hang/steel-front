@@ -617,47 +617,110 @@ impl World {
     }
 
     /// 物体间 AABB 碰撞：重叠检测 + 各推一半解析（按帧初快照的 AABB 结算）
+    /// 宽相：找出所有 AABB 重叠的**无序对**，按 `(i, j)` 字典序返回。
+    ///
+    /// 纯函数（只看 `aabbs`），因此可以直接拿暴力双循环做等价性判据 —— 见
+    /// `sweep_and_prune_matches_brute_force_pairs`。
+    ///
+    /// 算法：**扫掠-裁剪**。按 `min.x` 升序排一遍，然后对每个 i 只向后扫到
+    /// `aabbs[j].min.x > aabbs[i].max.x` 就停 —— 两个 AABB 重叠 ⇒ x 区间必相交，
+    /// 所以这一步**不丢任何对**。最后排序回 `(i, j)` 字典序，使调用方的访问顺序、
+    /// 事件顺序与原来的暴力双循环**逐位一致**。
+    ///
+    /// 复杂度：稀疏分布下 O(n log n + k)（k = 实际重叠对数），而不是 O(n²)。
+    /// 本仓城市地图有几千个静态障碍，实测这一处占了整帧的一半（见调用点的长注释）。
+    fn overlapping_pairs(aabbs: &[Aabb]) -> Vec<(u32, u32)> {
+        let n = aabbs.len();
+        if n < 2 {
+            return Vec::new();
+        }
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        order.sort_unstable_by(|&a, &b| {
+            let (x, y) = (aabbs[a as usize].min.x, aabbs[b as usize].min.x);
+            x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
+        for oi in 0..n {
+            let i = order[oi] as usize;
+            let max_x = aabbs[i].max.x;
+            for oj in (oi + 1)..n {
+                let j = order[oj] as usize;
+                if aabbs[j].min.x > max_x {
+                    break;
+                }
+                if aabbs[i].overlaps(&aabbs[j]) {
+                    pairs.push(if i < j {
+                        (i as u32, j as u32)
+                    } else {
+                        (j as u32, i as u32)
+                    });
+                }
+            }
+        }
+        pairs.sort_unstable();
+        pairs
+    }
+
     fn resolve_body_pairs(&mut self) {
         let n = self.bodies.len();
         if n < 2 {
             return;
         }
+        // 🔴 宽相：**扫掠-裁剪（sweep-and-prune）**，取代原来的双重循环（2026-10-12）。
+        //
+        // 为什么改（实机实测，这是整帧最大的单一热点）：
+        //   城市地图把每个障碍都建成静态刚体（`map.obstacles`，本机约 4~5 千个），
+        //   而原实现是 `for i in 0..n { for j in (i+1)..n { ... } }` ⇒ **O(n²)**：
+        //   每帧上千万次 `Aabb::overlaps`。实机 `game:` 行读到 `phys_us=3241`（整帧 6500µs），
+        //   而 `physics: 1064 events (overlap=1064 resolved=0)` —— **1064 个事件全是
+        //   静态-静态重叠**（相邻建筑本来就互相压着），它们**永远不需要解析**，
+        //   却每帧都要被全量扫出来。修前/修后的成对集合**必须逐对一致**（见下）。
+        //
+        // 为什么这样改是**安全的逐位等价**（不是"近似"）：
+        //   ① 配对集合**完全由快照 `aabbs` 决定** —— `overlaps()` 读的是快照，
+        //      而下面的解析改的是活的 `self.bodies`。所以"哪些对重叠"是一个纯函数。
+        //   ② 裁剪只按 x 区间：`aabbs[i]` 与 `aabbs[j]` 重叠 ⇒ 两者 x 区间必相交
+        //      ⇒ 只要 `min.x` 已排序，扫到 `min.x > max_x` 就可以安全停。
+        //   ③ 收集完统一 `sort_unstable()` 回 `(i, j)` 字典序 ⇒ **与暴力双循环的访问顺序、
+        //      事件顺序、解析累加顺序完全一致**。
+        //   判据：`sweep_and_prune_matches_brute_force_pairs`（随机 AABB 上逐对比对）。
+        //
+        // ⚠️ 不能改成"跳过静态-静态对"：那样会把 1064 个 `AabbOverlap` 事件一起消掉，
+        //    属于**静默改变行为**。裁剪只减少"比较次数"，一个事件都不少。
         let aabbs: Vec<Aabb> = self.bodies.iter().map(Body::aabb).collect();
-        for i in 0..n {
-            for j in (i + 1)..n {
-                if !aabbs[i].overlaps(&aabbs[j]) {
+        let pairs = Self::overlapping_pairs(&aabbs);
+
+        for &(pi, pj) in &pairs {
+            let (i, j) = (pi as usize, pj as usize);
+            self.emit(CollisionEvent::new(
+                CollisionKind::AabbOverlap,
+                Some(i),
+                Some(j),
+                Vec3::ZERO,
+                0.0,
+            ));
+            if let Some((normal, penetration)) = aabb_separation(&aabbs[i], &aabbs[j]) {
+                let (si, sj) = (self.bodies[i].static_body, self.bodies[j].static_body);
+                // 2026-08-23 静态刚体：静态-静态不解析；静态-动态只推动态方（障碍不被撞动）
+                if si && sj {
                     continue;
                 }
+                if si {
+                    self.bodies[j].position -= normal * penetration;
+                } else if sj {
+                    self.bodies[i].position += normal * penetration;
+                } else {
+                    let half = penetration * 0.5;
+                    self.bodies[i].position += normal * half;
+                    self.bodies[j].position -= normal * half;
+                }
                 self.emit(CollisionEvent::new(
-                    CollisionKind::AabbOverlap,
+                    CollisionKind::AabbResolved,
                     Some(i),
                     Some(j),
-                    Vec3::ZERO,
-                    0.0,
+                    normal,
+                    penetration,
                 ));
-                if let Some((normal, penetration)) = aabb_separation(&aabbs[i], &aabbs[j]) {
-                    let (si, sj) = (self.bodies[i].static_body, self.bodies[j].static_body);
-                    // 2026-08-23 静态刚体：静态-静态不解析；静态-动态只推动态方（障碍不被撞动）
-                    if si && sj {
-                        continue;
-                    }
-                    if si {
-                        self.bodies[j].position -= normal * penetration;
-                    } else if sj {
-                        self.bodies[i].position += normal * penetration;
-                    } else {
-                        let half = penetration * 0.5;
-                        self.bodies[i].position += normal * half;
-                        self.bodies[j].position -= normal * half;
-                    }
-                    self.emit(CollisionEvent::new(
-                        CollisionKind::AabbResolved,
-                        Some(i),
-                        Some(j),
-                        normal,
-                        penetration,
-                    ));
-                }
             }
         }
     }
@@ -1121,5 +1184,81 @@ mod tests {
         assert!(player.collide_world(&world), "发生推挤时应返回 true");
         assert!(!player.collides(&world), "推挤后不应再重叠");
         assert!(!player.collide_world(&world), "无重叠时不应返回 true");
+    }
+    /// 🔴 **扫掠-裁剪必须与暴力双循环给出逐对完全一致的配对集合**。
+    ///
+    /// 存在理由（2026-10-12）：城市地图有几千个静态障碍，原实现是 O(n²) 的
+    /// `for i { for j>i { overlaps() } }`，实机实测 `phys_us=3241`（整帧 6500µs），
+    /// 且每帧 1064 个事件**全是静态-静态重叠**（永不需要解析）。
+    /// 改成扫掠-裁剪后**不允许少一对、也不允许多一对**，更不允许换顺序 ——
+    /// 调用方按 `(i, j)` 顺序 emit 并累加位置修正，顺序变了结果就不逐位一致。
+    ///
+    /// 判据覆盖三类分布（都要）：稀疏均匀 / 大量重叠 / 全部同 x（裁剪最弱的情形）。
+    #[test]
+    fn sweep_and_prune_matches_brute_force_pairs() {
+        // 确定性 LCG，避免引入 dev-dependency
+        let mut seed: u64 = 0x5EED_2026;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as u32 as f32) / (u32::MAX as f32 / 2.0) - 1.0
+        };
+
+        for case in 0..6 {
+            let n = match case {
+                0 => 0usize,
+                1 => 1,
+                2 => 300,
+                3 => 800,
+                4 => 400,
+                _ => 600,
+            };
+            let mut aabbs: Vec<Aabb> = Vec::with_capacity(n);
+            for i in 0..n {
+                let f = i as f32;
+                let (cx, cy, cz, half) = match case {
+                    // 稀疏均匀：几乎不重叠（裁剪收益最大的情形）
+                    2 => (next() * 500.0, next() * 20.0, next() * 500.0, 1.0f32),
+                    // 全部同 x：x 裁剪完全失效（最坏情形，必须仍然正确）
+                    3 => (0.0, next() * 20.0, next() * 50.0, 2.0f32),
+                    // 🔴 精确网格相切：相邻盒的 max.x 恰好等于下一个的 min.x。
+                    //    这一档专门抓"裁剪条件写成 >= 而不是 >" —— 那会丢掉所有相切对，
+                    //    而随机数据几乎永不产生精确相等，所以**必须**有这一档。
+                    4 => ((f % 20.0) * 2.0, 0.0, (f / 20.0).floor() * 2.0, 1.0f32),
+                    // 🔴 x 顺序与下标顺序**相反**：抓"忘了最后那次排序"（顺序会错）。
+                    5 => ((600.0 - f) * 3.0, 0.0, 0.0, 2.0f32),
+                    // 大量重叠
+                    _ => (next() * 20.0, next() * 5.0, next() * 20.0, 4.0f32),
+                };
+                aabbs.push(Aabb::new(
+                    Vec3::new(cx - half, cy - half, cz - half),
+                    Vec3::new(cx + half, cy + half, cz + half),
+                ));
+            }
+
+            // 暴力双循环（参照实现，逐字对应改动前的代码）
+            let mut brute: Vec<(u32, u32)> = Vec::new();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    if aabbs[i].overlaps(&aabbs[j]) {
+                        brute.push((i as u32, j as u32));
+                    }
+                }
+            }
+
+            let swept = World::overlapping_pairs(&aabbs);
+            assert_eq!(
+                swept.len(),
+                brute.len(),
+                "case {case}: 配对数不一致（扫掠 {} vs 暴力 {}）",
+                swept.len(),
+                brute.len()
+            );
+            assert_eq!(swept, brute, "case {case}: 配对集合或顺序不一致");
+            // 顺带钉住"必须是 (i, j) 升序"这件事本身
+            assert!(
+                swept.windows(2).all(|w| w[0] < w[1]),
+                "case {case}: 返回顺序不是 (i, j) 字典序"
+            );
+        }
     }
 }
