@@ -402,9 +402,7 @@ impl Renderer {
                 .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
             self.device.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::COMPUTE_SHADER, vk::DependencyFlags::empty(), &[], &[], &[acc_bar0]);
             // 一次派发多帧：帧索引逐帧推进 => 采样去相关 => 输出收敛参考帧而非 1 spp 噪声图
-            let spp = std::env::var("RV3D_PT_SPP")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
+            let spp = crate::syscfg::parse::<u32>("RV3D_PT_SPP")
                 .filter(|v| (1..=4096).contains(v))
                 .unwrap_or(64u32);
             let self_dep = vk::MemoryBarrier::default()

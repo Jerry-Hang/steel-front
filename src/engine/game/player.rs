@@ -118,7 +118,7 @@ impl Game {
         // 环境变量只解析一次：本函数虽然只在命中的那几帧被调用，
         // 但 `env::var` 带锁 + 扫环境表，没有必要每次付（与 WorldMarker::for_obstacle 同一处理）。
         static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *DISABLED.get_or_init(|| std::env::var("RV3D_NO_DECALS").is_ok()) {
+        if *DISABLED.get_or_init(|| crate::syscfg::is_set("RV3D_NO_DECALS")) {
             return;
         }
         if self.impact_marks.len() >= IMPACT_MARK_MAX {

@@ -350,7 +350,7 @@ impl Renderer {
         // 程序化地面纹理（CPU 画像素 + 烘焙高度场 AO/静态天光，零第三方依赖）。
         // 世界空间对齐：与 build.rs 片元着色器 world-space UV 一致（见 procedural.rs）。
         // RV3D_PROC_TEX=0 回退到 assets/textures/test.png（A/B 验证程序化材质效果）。
-        let (width, height, pixels) = if std::env::var("RV3D_PROC_TEX").as_deref() != Ok("0") {
+        let (width, height, pixels) = if crate::syscfg::cfg("RV3D_PROC_TEX").as_deref() != Some("0") {
             let size = super::procedural::GROUND_TEXTURE_SIZE;
             let height_at = |x: f32, z: f32| terrain_height(x, z);
             (
@@ -717,7 +717,7 @@ impl Renderer {
                 .map_err(|e| format!("创建纹理 Sampler 失败: {}", e))?
         };
 
-        let tex_src = if std::env::var("RV3D_PROC_TEX").as_deref() == Ok("0") {
+        let tex_src = if crate::syscfg::cfg("RV3D_PROC_TEX").as_deref() == Some("0") {
             "assets/textures/test.png"
         } else {
             "程序化地面材质"

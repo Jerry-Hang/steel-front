@@ -183,7 +183,7 @@ impl Renderer {
         // 🔴 2026-09-26 新增 `RV3D_NO_TERRAIN=1`（与 `RV3D_NO_PROPS` / `RV3D_NO_SHADOW` 同一套
         // 对照开关惯例）：**帧预算地图里"关掉一切可关的"仍有 5.4ms，而它只可能是地形网格 +
         // 枪模 + HUD**。没有这条开关就只能猜 —— 而"猜瓶颈"在本仓是明令禁止的（第 37 轮起）。
-        if !self.void_mode && std::env::var("RV3D_NO_TERRAIN").is_err() {
+        if !self.void_mode && !crate::syscfg::is_set("RV3D_NO_TERRAIN") {
         if let Some(mesh) = self.terrain_lods.get(terrain_lod) {
             let terrain_vertex_buffers = [mesh.vertex_buffer];
             let offsets = [0u64];
@@ -605,11 +605,11 @@ impl Renderer {
                 // 用来二选一：**1 个 draw 也慢 ⇒ 顶点/片元着色本身贵**；
                 // **1 个 draw 快很多 ⇒ 逐 draw 的 state 开销贵**（28 次切换）。
                 // 前提：顶点数/三角形数/draw call 数/填充率四个维度都已排除对不上这 3.7ms。
-                let one_draw = std::env::var("RV3D_ONE_PROP_DRAW").is_ok();
+                let one_draw = crate::syscfg::is_set("RV3D_ONE_PROP_DRAW");
                 // 距离直方图只在 RV3D_PROP_STATS=1 时统计（默认零成本）：
                 // 回答"按距离剔除还有多少可剔"——`noprops` 实测 +37%（2026-09-26 新尺子），
                 // 道具仍是最大单项，但**剔除半径**该定在哪要靠这个分布说话。
-                let stats_on = std::env::var("RV3D_PROP_STATS").is_ok();
+                let stats_on = crate::syscfg::is_set("RV3D_PROP_STATS");
                 let mut dist_bins = [0u32; 3]; // <200m / 200..400m / >=400m（XZ 平面距离）
                 let mut drawn_bins = 0u32;
                 let mut drawn_tris = 0u32;

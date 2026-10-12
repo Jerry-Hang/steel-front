@@ -157,7 +157,7 @@ impl Game {
         // （RV3D_NO_SHADOW=0 强制回阴影贴图路径，用于后续排查）
         // 2026-08-28：用户机器全高实测——默认开阴影（RV3D_NO_SHADOW=1 显式关闭）；
         // 阴影覆盖范围加大以适配城市高楼群（扩展 250→400 米，远平面 500→800）
-        let shadow = if std::env::var("RV3D_NO_SHADOW").as_deref() == Ok("1") {
+        let shadow = if crate::syscfg::cfg("RV3D_NO_SHADOW").as_deref() == Some("1") {
             None
         } else {
             Some(ShadowConfig::new(sun.direction, glam::Vec3::ZERO, 400.0, 1.0, 800.0))

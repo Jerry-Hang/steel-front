@@ -482,7 +482,7 @@ impl Game {
         {
             use std::sync::atomic::{AtomicU32, Ordering};
             static TICK: AtomicU32 = AtomicU32::new(0);
-            if std::env::var("RV3D_AI_PROF").is_ok()
+            if crate::syscfg::is_set("RV3D_AI_PROF")
                 && TICK.fetch_add(1, Ordering::Relaxed) % 119 == 0
             {
                 log::info!(
@@ -635,9 +635,7 @@ impl Game {
         //
         // ⚠️ A/B 开关（第 103 轮加）：`RV3D_OCCL_REFRESH=1` 回到"每帧重算"的旧行为。
         // 每次 `update_ai` 只读一次环境变量（**每帧 1 次，不是每实例**，见教训 32）⇒ 不必 OnceLock。默认 4。
-        let occlusion_refresh: u32 = std::env::var("RV3D_OCCL_REFRESH")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
+        let occlusion_refresh: u32 = crate::syscfg::parse::<u32>("RV3D_OCCL_REFRESH")
             .filter(|v| *v >= 1)
             .unwrap_or(4);
         let recompute = self.occl_cache_age == 0 || self.occl_cache.len() != self.npcs.len();
@@ -662,7 +660,7 @@ impl Game {
         {
             use std::sync::atomic::{AtomicU32, Ordering};
             static TICK: AtomicU32 = AtomicU32::new(0);
-            if std::env::var("RV3D_AI_PROF").is_ok()
+            if crate::syscfg::is_set("RV3D_AI_PROF")
                 && TICK.fetch_add(1, Ordering::Relaxed) % 119 == 0
             {
                 log::info!(
@@ -690,7 +688,7 @@ impl Game {
                 stress: self.stress,
                 frame: self.frame_no,
                 decimate_far: self.stress
-                    && std::env::var("RV3D_AI_DECIMATE")
+                    && crate::syscfg::cfg("RV3D_AI_DECIMATE")
                         .map_or(true, |v| v != "off" && v != "0"),
                 ring_inner: theme.ring_inner,
                 ring_outer: theme.ring_outer,

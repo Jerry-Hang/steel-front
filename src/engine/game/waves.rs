@@ -338,9 +338,9 @@ impl Game {
         //   **把两侧半场对调 —— 赢家跟着半场走 = 地图几何；跟着队伍走 = 单位/AI 行为。**
         // `RV3D_SWAP_SIDES=1` 只交换两个半场，不动队伍/人数/角色/任何其它参数，
         // 所以它是干净的**单变量**对照。默认关闭 ⇒ 生产行为逐字节不变。
-        let swap_sides = std::env::var("RV3D_SWAP_SIDES").as_deref() == Ok("1");
+        let swap_sides = crate::syscfg::cfg("RV3D_SWAP_SIDES").as_deref() == Some("1");
         // 见下方 `facing` 的注释：出生时朝向"对面半场"而不是朝向玩家
-        let face_enemy = std::env::var("RV3D_FACE_ENEMY").as_deref() == Ok("1");
+        let face_enemy = crate::syscfg::cfg("RV3D_FACE_ENEMY").as_deref() == Some("1");
         // 🔴 压力模式的出生点必须收口到**主连通域**（2026-09-25 真机实测）：
         // 出生环 150–198m 正好穿过城市街区，`push_out_of_obstacle` 只保证"可通行"，
         // 实测 4 只红方里 2 只落在 **9 格 / 2 格**的小口袋（探针
@@ -421,7 +421,7 @@ impl Game {
         // 而它的判据是导航网格 `is_passable` —— 与建筑视觉体/碰撞盒不是同一套几何。
         // 红方 base_angle=0(+X)、蓝方 π(−X)，城市非镜像对称 ⇒ 两侧落点可能系统性不同。
         // 取景验完即删（教训 20）。
-        if std::env::var("RV3D_NPC_POS").as_deref() == Ok("1") {
+        if crate::syscfg::cfg("RV3D_NPC_POS").as_deref() == Some("1") {
             for n in self.npcs.iter().take(3) {
                 log::info!(
                     "npcpos: #{} team={:?} ({:.1}, {:.1}, {:.1})",

@@ -564,7 +564,7 @@ fn idle_sway(clock: f32) -> (f32, f32) {
 fn gun_diag_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("RV3D_GUN_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+        crate::syscfg::flag("RV3D_GUN_DIAG")
     })
 }
 
@@ -959,8 +959,7 @@ impl GameApp {
         let fatal = None;
         // 取证开关：`RV3D_SHOT_AT=5,15,30` ⇒ 进游戏后第 5/15/30 秒各截一张。
         // 不设 = 空列表 = 逐帧那次判断直接短路，玩家路径零开销、逐字节不变。
-        let shot_pending = std::env::var("RV3D_SHOT_AT")
-            .ok()
+        let shot_pending = crate::syscfg::cfg("RV3D_SHOT_AT")
             .map(|v| parse_shot_at(&v))
             .unwrap_or_default();
         if !shot_pending.is_empty() {
@@ -977,7 +976,7 @@ impl GameApp {
         // PT 曝光标定值：配置文件 → （可被）RV3D_PT_EXPOSURE 覆盖做 A/B。**它不是玩家选项**，
         // 所以停在配置层与调试开关层，不进设置面板（理由见 ray_tracer.rs 的常量注释）。
         game.hud.pt_exposure = cfg.pt_exposure;
-        if let Ok(v) = std::env::var("RV3D_PT_EXPOSURE") {
+        if let Some(v) = crate::syscfg::cfg("RV3D_PT_EXPOSURE") {
             if let Ok(v) = v.trim().parse::<f32>() {
                 game.hud.pt_exposure = v.clamp(
                     engine::ray_tracer::PT_EXPOSURE_MIN,
@@ -1032,7 +1031,7 @@ impl GameApp {
             llm_cap_fps: {
                 // 全局帧率上限（2026-08-23 防 GPU 驻停留态 device lost）：
                 // RV3D_FPS 覆盖；默认 240；LLM 采集模式 90（留 GPU 余量）
-                let llm_on = std::env::var("RV3D_LLM")
+                let llm_on = crate::syscfg::cfg("RV3D_LLM")
                     .map(|v| !(v.is_empty() || v == "0" || v == "off"))
                     .unwrap_or(false);
                 // 2026-08-28 实测：128v128 无上限 311fps @99% GPU；默认 300（LLM 120）
@@ -1092,9 +1091,7 @@ impl GameApp {
                 }
                 parsed
                     .or_else(|| {
-                        std::env::var("RV3D_INSPECT")
-                            .ok()
-                            .and_then(|v| v.parse::<usize>().ok())
+                        crate::syscfg::parse::<usize>("RV3D_INSPECT")
                     })
                     .filter(|&n| (1..=35).contains(&n))
             },
@@ -1130,8 +1127,7 @@ impl GameApp {
     /// 更新逻辑（每帧调用）
     fn update(&mut self) {
         // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。
-        let npc_cam = std::env::var("RV3D_NPC_CAM")
-            .ok()
+        let npc_cam = crate::syscfg::cfg("RV3D_NPC_CAM")
             .and_then(|s| s.parse::<usize>().ok());
         // RV3D_CAM=fly:x,y,z:yaw_deg,pitch_deg：调试固定机位（地图/场景检查用）
         // 两个变量都给时**必须一起进这个分支**（否则 cam_override 为 None 时分支根本不跑），
@@ -1196,7 +1192,7 @@ impl GameApp {
                             .set_flight_pos(glam::Vec3::new(bx + dx, n.position[1] + 1.6, bz + dz));
                         self.camera.yaw = yaw.to_radians();
                         self.camera.pitch = 10.0_f32.to_radians();
-                        if std::env::var("RV3D_NPC_POS").is_ok() {
+                        if crate::syscfg::is_set("RV3D_NPC_POS") {
                             // 假设验证（第 21 轮）：NPC 的 y 恒为 0，而该处地形可能高于 0
                             // ⇒ 士兵被地形埋掉。用**与地形渲染同一个** `terrain_height`，
                             // 不另写一套判据。差 > 1m 即假设成立。
@@ -1354,9 +1350,9 @@ impl GameApp {
             // RV3D_SWITCH_WEAPON=n：进入后自动切到 n 号武器（复现切枪崩溃用）；
             // RV3D_SWITCH_WEAPON_AFTER=秒：延迟切枪（模拟玩一会儿再切）
             let after = env_f32("RV3D_SWITCH_WEAPON_AFTER");
-            let (target, switch_at) = match std::env::var("RV3D_SWITCH_WEAPON") {
-                Ok(n) => (n.parse::<usize>().ok(), after.unwrap_or(0.0)),
-                Err(_) => (None, 0.0),
+            let (target, switch_at) = match crate::syscfg::cfg("RV3D_SWITCH_WEAPON") {
+                Some(n) => (n.parse::<usize>().ok(), after.unwrap_or(0.0)),
+                None => (None, 0.0),
             };
             if let Some(n) = target {
                 if switch_at <= 0.0 {
@@ -1493,12 +1489,12 @@ impl GameApp {
         // 基准挂钩：RV3D_BENCH_YAW / RV3D_BENCH_PITCH（度）每帧强制相机朝向，
         // 供性能基准固定视角用（与 RV3D_NPC_SCALE / RV3D_STRESS_AI 同类的测试环境变量，
         // 不设置则完全不影响正常游玩）。鼠标/后坐力每帧会被覆盖，基准时无需 bot 拖视角。
-        if let Ok(yaw) = std::env::var("RV3D_BENCH_YAW") {
+        if let Some(yaw) = crate::syscfg::cfg("RV3D_BENCH_YAW") {
             if let Ok(y) = yaw.parse::<f32>() {
                 self.camera.yaw = y.to_radians();
             }
         }
-        if let Ok(pitch) = std::env::var("RV3D_BENCH_PITCH") {
+        if let Some(pitch) = crate::syscfg::cfg("RV3D_BENCH_PITCH") {
             if let Ok(p) = pitch.parse::<f32>() {
                 self.camera.pitch = p.to_radians().clamp(
                     -crate::engine::camera::PITCH_LIMIT,
@@ -2659,7 +2655,7 @@ impl GameApp {
             // ⇒ 这条日志把"几何是什么"变成可读的数字，而不是靠像素颜色反推
             //    （marker 的 tint 会经光照与程序化皮肤，读回来的颜色不可靠）。
             //    **量在程序里就直接打出来** —— 这是第 76 轮已经验证过的方法。
-            if let Ok(s) = std::env::var("RV3D_DUMP_NEAR") {
+            if let Some(s) = crate::syscfg::cfg("RV3D_DUMP_NEAR") {
                 // ⚠ 只在**第一次**打印。这段在渲染路径里、每帧都会跑到 ——
                 //    不加守卫就是几十行/秒刷屏，把真正要看的日志冲掉（第 92 轮修）。
                 //    几何在关卡加载后是静态的，一次就够；要看别的机位就重跑一局。
@@ -2909,7 +2905,7 @@ impl GameApp {
             //    在无头 Blender 里合成**同布局预渲染参照帧**（建模/光照/烘焙的独立真值，
             //    不经游戏光栅管线）。坐标系原样输出游戏约定（右手 Y-up，米，道具 yaw 绕 +Y），
             //    轴变换归 Blender 脚本管。一次性导出（写成功才置位，早帧数据不全可重试）。
-            if let Ok(path) = std::env::var("RV3D_EXPORT_CITY") {
+            if let Some(path) = crate::syscfg::cfg("RV3D_EXPORT_CITY") {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static CITY_EXPORTED: AtomicBool = AtomicBool::new(false);
                 if !CITY_EXPORTED.load(Ordering::Relaxed) {
@@ -3045,7 +3041,7 @@ impl GameApp {
                 // "玩家视角"的判定剔掉。实测玩家站在原点时，255 人只有 **16 人**上屏
                 //（`npcvis: 收到 16 个 NPC`，段数 144+128=272），这正是取景一路扑空的真因。
                 // 关掉剔除后调试机位才看得到目标。
-                let cull = std::env::var("RV3D_NO_NPC_CULL").is_err();
+                let cull = !crate::syscfg::is_set("RV3D_NO_NPC_CULL");
                 self
                 .game
                 .npcs
@@ -3473,7 +3469,7 @@ impl ApplicationHandler for GameApp {
                     renderer.set_soldier_mesh(&sv, &si);
                 }
                 // ---- RT core 纯求交吞吐基准（RV3D_PT_BENCH=1）----
-                if std::env::var("RV3D_PT_BENCH").as_deref() == Ok("1") {
+                if crate::syscfg::cfg("RV3D_PT_BENCH").as_deref() == Some("1") {
                     let boxes = vec![
                         crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [50.0, 0.5, 50.0], material: 0 },
                         crate::engine::ray_tracer::PtBox { center: [1.0, 1.0, 0.0], half: [2.0, 2.0, 1.0], material: 1 },
@@ -3488,7 +3484,7 @@ impl ApplicationHandler for GameApp {
                     }
                 }
                 // PT 参考帧（RV3D_PT_VIEW=1）
-                if std::env::var("RV3D_PT_VIEW").as_deref() == Ok("1") {
+                if crate::syscfg::cfg("RV3D_PT_VIEW").as_deref() == Some("1") {
                     let boxes = vec![
                         crate::engine::ray_tracer::PtBox { center: [0.0, -0.5, 0.0], half: [8.0, 0.5, 8.0], material: 0 },
                         crate::engine::ray_tracer::PtBox { center: [0.0, 0.5, -2.0], half: [0.8, 0.8, 0.8], material: 1 },
@@ -3518,7 +3514,7 @@ impl ApplicationHandler for GameApp {
             // 而 PT 出画还要求 `pt_resident.is_some()` ⇒ 那个"强制开"实际**一帧都跑不出来**，
             // 外面只看到"开着、画面没变"（2026-09-25 的 PT 验证就是这么空跑一次）。
             let pt_cfg = crate::config::load().pt_enable;
-            let pt_live_env = std::env::var("RV3D_PT_LIVE").ok();
+            let pt_live_env = crate::syscfg::cfg("RV3D_PT_LIVE");
             renderer.pt_live_enabled = match pt_live_env.as_deref() {
                 Some("1") => true,
                 Some("0") => false,
@@ -3530,7 +3526,7 @@ impl ApplicationHandler for GameApp {
                 // 未设时对齐窗口物理尺寸（2560×1600！）；两者都对齐 8 的倍数
                 // （判据 = `engine::renderer::pt_render_extent` 的单测）
                 let win_sz = window.inner_size();
-                let size_env = std::env::var("RV3D_PT_SIZE").ok().and_then(|v| v.parse::<u32>().ok());
+                let size_env = crate::syscfg::parse::<u32>("RV3D_PT_SIZE");
                 let (pt_w, pt_h) =
                     crate::engine::renderer::pt_render_extent(win_sz.width, win_sz.height, size_env);
                 if let Err(e) = renderer.init_pt_resident(pt_w, pt_h) {
@@ -4434,7 +4430,7 @@ fn run_steel_front(android_app: Option<AndroidApp>) {
 
     // 默认大战场：红 128 vs 蓝 127+玩家（=128v128，2026-08-22 要求海量 NPC 模拟真人压力）；
     // RV3D_STRESS_AI=N 自定义，=0 恢复传统波次模式
-    if std::env::var("RV3D_STRESS_AI").is_err() {
+    if !crate::syscfg::is_set("RV3D_STRESS_AI") {
         std::env::set_var("RV3D_STRESS_AI", "128");
     }
 
@@ -4504,7 +4500,7 @@ fn run_steel_front(android_app: Option<AndroidApp>) {
             .unwrap_or(false);
         // WSLg 的自动判定保留旧条件（WSL **且** 有 Wayland 会话）：纯 X11 的 WSL 本来就走 X11
         let auto_x11 = is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some();
-        let explicit = std::env::var("RV3D_BACKEND").ok();
+        let explicit = crate::syscfg::cfg("RV3D_BACKEND");
         let choice = backend_choice(explicit.as_deref(), auto_x11);
         match choice {
             BackendChoice::X11 => log::info!(
@@ -4568,13 +4564,13 @@ fn run_steel_front(android_app: Option<AndroidApp>) {
     // 无头回环集成测试在 net.rs / game.rs（不依赖 Vulkan/winit）；
     // 远端实体插值渲染（本文件 2579 起的 `entity_state_at`）与断线自动重连（game.rs）**已接线**；
     // 未做：NAT 双进程真机验证、输入预测/回滚（见 net.rs 头部「已接线 / 未做」两行）。
-    let net_role = std::env::var("RV3D_NET").unwrap_or_default();
+    let net_role = crate::syscfg::cfg("RV3D_NET").unwrap_or_default();
     let net_addr =
-        std::env::var("RV3D_NET_ADDR").unwrap_or_else(|_| "127.0.0.1:27015".to_string());
+        crate::syscfg::cfg("RV3D_NET_ADDR").unwrap_or_else(|| "127.0.0.1:27015".to_string());
     // NAT 中继（RV3D_NET_RDV=<host:port> + RV3D_NET_NAME=房间名）：
     // 服务器向中继注册；客户端查询房间名→公网地址直连（NAT 打洞第一步）
-    let net_rdv = std::env::var("RV3D_NET_RDV").ok();
-    let net_name = std::env::var("RV3D_NET_NAME").unwrap_or_else(|_| "steel".to_string());
+    let net_rdv = crate::syscfg::cfg("RV3D_NET_RDV");
+    let net_name = crate::syscfg::cfg("RV3D_NET_NAME").unwrap_or_else(|| "steel".to_string());
     match net_role.as_str() {
         "server" => match Server::bind(&net_addr) {
             Ok(server) => {

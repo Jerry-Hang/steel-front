@@ -9,7 +9,7 @@ use super::*;
 pub(crate) fn npc_pos_log() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("RV3D_NPC_POS").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+        crate::syscfg::flag("RV3D_NPC_POS")
     })
 }
 /// 换弹动作包络（纯函数，可单测）：`p` = 换弹进度 0→1（刚按下 → 完成），返回 `[0, 1]`，
@@ -34,7 +34,7 @@ pub(crate) fn reload_envelope(p: f32) -> f32 {
 pub(crate) fn cull_diag_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("RV3D_CULL_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+        crate::syscfg::flag("RV3D_CULL_DIAG")
     })
 }
 /// `npcpos:` 的发送周期（秒）—— 纯函数，可单测。
@@ -50,7 +50,7 @@ pub(crate) fn npc_pos_period(hz_env: Option<u32>) -> f32 {
 /// `RV3D_NPC_POS_HZ`（只读一次；非法值视为缺省 = 1 Hz）。
 pub(crate) fn npc_pos_hz() -> Option<u32> {
     static HZ: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *HZ.get_or_init(|| std::env::var("RV3D_NPC_POS_HZ").ok().and_then(|v| v.parse::<u32>().ok()))
+    *HZ.get_or_init(|| crate::syscfg::parse::<u32>("RV3D_NPC_POS_HZ"))
 }
 /// 诊断通道的刷新周期（秒）：`RV3D_NPC_POS=1` 时按 `RV3D_NPC_POS_HZ`，否则保持 1 Hz。
 ///
@@ -70,7 +70,7 @@ pub(crate) fn diagnostic_period_secs() -> f32 {
 /// `RV3D_PROJ_DIAG=1`：弹道诊断通道（弹丸去向 / 过期分桶 / 每枪瞄得准不准）。
 pub(crate) fn proj_diag_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RV3D_PROJ_DIAG").as_deref() == Ok("1"))
+    *ON.get_or_init(|| crate::syscfg::cfg("RV3D_PROJ_DIAG").as_deref() == Some("1"))
 }
 /// feed 里一行"某人击杀某人"的文本（`cause` 是武器/爆炸说明，可空）。
 /// **三处调用点（`damage_npc` / NPC 互射 / 联机）共用它** ——

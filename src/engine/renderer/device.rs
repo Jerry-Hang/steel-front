@@ -98,7 +98,7 @@ impl Renderer {
                 .enumerate_instance_layer_properties()
                 .map_err(|e| format!("无法枚举实例层属性: {}", e))?
         };
-        let has_validation = std::env::var("RV3D_VALIDATION").map(|v| v == "1").unwrap_or(false)
+        let has_validation = crate::syscfg::flag("RV3D_VALIDATION")
             && layer_properties.iter().any(|prop| {
                 let name = unsafe { CStr::from_ptr(prop.layer_name.as_ptr()) };
                 name.to_bytes_with_nul() == b"VK_LAYER_KHRONOS_validation\0"
@@ -199,7 +199,7 @@ impl Renderer {
         if candidates.is_empty() {
             return Err("没有找到支持本窗口表面的物理设备".to_string());
         }
-        let gpu_pref = parse_gpu_preference(std::env::var("RV3D_GPU").ok().as_deref());
+        let gpu_pref = parse_gpu_preference(crate::syscfg::cfg("RV3D_GPU").as_deref());
         let pick_list: Vec<(vk::PhysicalDeviceType, String)> =
             candidates.iter().map(|(t, n, _)| (*t, n.clone())).collect();
         let picked = pick_physical_device(&pick_list, &gpu_pref).ok_or_else(|| {
@@ -308,7 +308,7 @@ impl Renderer {
         };
 
         // A/B 取证开关（2026-10-09）：强制走传统顶点管线，用于验证两条路径等价性。
-        let mesh_shader_available = if matches!(std::env::var("RV3D_NO_MESH").as_deref(), Ok("1")) {
+        let mesh_shader_available = if matches!(crate::syscfg::cfg("RV3D_NO_MESH").as_deref(), Some("1")) {
             log::warn!("RV3D_NO_MESH=1：强制关闭网格着色器，走传统顶点管线（A/B 取证）");
             false
         } else {
@@ -604,9 +604,9 @@ impl Renderer {
             hud_glass_pool: vk::DescriptorPool::null(),
             hud_glass_set: vk::DescriptorSet::null(),
             hud_has_glass: false,
-            menu_glass_enabled: match std::env::var("RV3D_MENU_GLASS") {
-                Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false")),
-                Err(_) => true,
+            menu_glass_enabled: match crate::syscfg::cfg("RV3D_MENU_GLASS") {
+                Some(v) => !(v == "0" || v.eq_ignore_ascii_case("false")),
+                None => true,
             },
             shadow_render_pass: vk::RenderPass::null(),
             shadow_framebuffer: vk::Framebuffer::null(),
@@ -645,7 +645,7 @@ impl Renderer {
             ground_detail_memory: vk::DeviceMemory::null(),
             ground_detail_image_view: vk::ImageView::null(),
             // 2026-08-22：默认启用（RV3D_SKIN_TEX=0 关闭纯色回退）——障碍需要表面细节
-            skin_tex_enabled: std::env::var("RV3D_SKIN_TEX").as_deref() != Ok("0"),
+            skin_tex_enabled: crate::syscfg::cfg("RV3D_SKIN_TEX").as_deref() != Some("0"),
             texture_anisotropy_enabled: physical_device_features.sampler_anisotropy != 0,
             hud_pipeline: vk::Pipeline::null(),
             hud_overlay_pipeline: vk::Pipeline::null(),
@@ -693,7 +693,7 @@ impl Renderer {
             prop_sh_index_memory: vk::DeviceMemory::null(),
             prop_sh_index_count: 0,
             prop_sh_bins: Vec::new(),
-            shadow_lod: std::env::var("RV3D_SHADOW_LOD").as_deref() != Ok("0"),
+            shadow_lod: crate::syscfg::cfg("RV3D_SHADOW_LOD").as_deref() != Some("0"),
             frame_frustum: [[0.0f32; 4]; 6],
             frame_cam_pos: glam::Vec3::ZERO,
             last_near_count: 0,

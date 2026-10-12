@@ -110,7 +110,7 @@ pub(crate) fn should_decimate_far(npc: &Npc, frame: u32) -> bool {
 pub(crate) fn ai_diag() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("RV3D_AI_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+        crate::syscfg::flag("RV3D_AI_DIAG")
     })
 }
 /// step_npc 解析"本 NPC 这一帧的目标位置"的唯一规则。

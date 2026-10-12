@@ -443,7 +443,7 @@ fn avx512_allowed_x86() -> bool {
         if !std::is_x86_feature_detected!("avx512f") {
             return false;
         }
-        if std::env::var("RV3D_DISABLE_AVX512").is_ok_and(|v| v == "1" || v == "true") {
+        if crate::syscfg::flag("RV3D_DISABLE_AVX512") {
             return false;
         }
         if cpu_vendor() == CpuVendor::Intel {
@@ -470,7 +470,7 @@ fn avx512_allowed_x86() -> bool {
 #[cfg(target_arch = "x86_64")]
 pub fn forced_simd_path() -> Option<&'static str> {
     static WARNED: OnceLock<bool> = OnceLock::new();
-    let Some(v) = std::env::var("RV3D_FORCE_SIMD").ok() else {
+    let Some(v) = crate::syscfg::cfg("RV3D_FORCE_SIMD") else {
         return None;
     };
     let v = v.trim();
@@ -865,16 +865,16 @@ impl CpuTopology {
     /// `RV3D_CPU_PIN=off` 跳过；`RV3D_CPU_PIN=<掩码>` 精确覆盖；默认绑首簇。
     /// 返回实际生效的 vCPU 集合（未绑定时返回全集合）。
     pub fn pin_main_thread(&self) -> Vec<usize> {
-        let target = match std::env::var("RV3D_CPU_PIN") {
-            Ok(v) if v == "off" => return (0..self.threads).collect(),
-            Ok(v) => match parse_cpu_list(&v) {
+        let target = match crate::syscfg::cfg("RV3D_CPU_PIN") {
+            Some(v) if v == "off" => return (0..self.threads).collect(),
+            Some(v) => match parse_cpu_list(&v) {
                 Some(cpus) => cpus,
                 None => {
                     log::warn!("cpu: RV3D_CPU_PIN 格式无效（期望如 0-7,16-23），使用默认首簇");
                     self.primary_set.clone()
                 }
             },
-            Err(_) => {
+            None => {
                 // 手写调度（RV3D_CPU_PRIME=1）：游戏主线程独占超大核。
                 if crate::syscfg::flag("RV3D_CPU_PRIME") && !self.prime_set.is_empty()
                 {
@@ -1272,8 +1272,8 @@ pub fn ai_pool() -> &'static ThreadPool {
         //     当前"整个 CCD1 给 AI"属于过量配置，可以收窄；
         //   * 帧率随核数**显著上升** ⇒ AI 确实吃满，分配是对的。
         // 例：`RV3D_AI_CPUS=0,1`（1 物理核 2 线程）。
-        let set: Vec<usize> = match std::env::var("RV3D_AI_CPUS") {
-            Ok(v) if !v.trim().is_empty() => match parse_cpu_list(v.trim()) {
+        let set: Vec<usize> = match crate::syscfg::cfg("RV3D_AI_CPUS") {
+            Some(v) if !v.trim().is_empty() => match parse_cpu_list(v.trim()) {
                 Some(list) if !list.is_empty() => {
                     log::info!("cpu: ai_pool 被 RV3D_AI_CPUS 覆盖为 {:?}", list);
                     list

@@ -12,7 +12,7 @@ impl Renderer {
         set: &crate::engine::props::PropSet,
         placements: &[crate::engine::props::PropPlacement],
     ) {
-        if !self.shadow_lod || std::env::var("RV3D_NO_PROPS").as_deref() == Ok("1") {
+        if !self.shadow_lod || crate::syscfg::cfg("RV3D_NO_PROPS").as_deref() == Some("1") {
             return;
         }
         let merged = crate::engine::props::merge_shadow_binned(
@@ -486,16 +486,16 @@ impl Renderer {
         // 那"把地面场从阴影 pass 拿掉"就是一行改动，比两张阴影图简单得多。
         static SKIP_GROUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let skip_ground =
-            *SKIP_GROUND.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_GROUND").is_ok());
+            *SKIP_GROUND.get_or_init(|| crate::syscfg::is_set("RV3D_SHADOW_SKIP_GROUND"));
         let draw_static =
-            draw_static && !*SKIP_STATIC.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_STATIC").is_ok());
+            draw_static && !*SKIP_STATIC.get_or_init(|| crate::syscfg::is_set("RV3D_SHADOW_SKIP_STATIC"));
         let draw_dynamic = draw_dynamic
-            && !*SKIP_DYNAMIC.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_DYNAMIC").is_ok());
+            && !*SKIP_DYNAMIC.get_or_init(|| crate::syscfg::is_set("RV3D_SHADOW_SKIP_DYNAMIC"));
         // 第四/五个门（同一族诊断）：只跳过**地形网格**（257² 网格，High LOD ≈13 万三角形，
         // 量级最大）或只跳过地面实例场，用来分辨"阴影 pass 的顶点量到底花在哪一层地面上"。
         static SKIP_TERRAIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let skip_terrain =
-            *SKIP_TERRAIN.get_or_init(|| std::env::var("RV3D_SHADOW_SKIP_TERRAIN").is_ok());
+            *SKIP_TERRAIN.get_or_init(|| crate::syscfg::is_set("RV3D_SHADOW_SKIP_TERRAIN"));
         // 静态组：地形 / 地面实例场 / marker / 道具；动态组：NPC 盒柱球 / 士兵 GLB。
         // 用"把实例数置 0"实现跳过（`draw_shadow_range` 对 0 会早退），不动绘制逻辑本身。
         let (near_count, far_count) = if draw_static && !skip_ground {

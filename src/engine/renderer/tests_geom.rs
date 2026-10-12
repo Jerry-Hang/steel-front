@@ -949,3 +949,58 @@ fn vertex_output_declarations_match() {
          \n  顶点: {vertex}\n  片元: {fragment}\n"
     );
 }
+
+
+/// 🔴 **`RV3D_*` 开关一律走 `crate::syscfg`，不许用 `std::env::var`**。
+///
+/// 存在理由（2026-10-12）：`syscfg` 的存在就是为了 Android —— **应用进程拿不到自定义
+/// 环境变量**，只能读 `setprop` 对应的系统属性。而本仓曾有 **81 处** 用
+/// `std::env::var("RV3D_...")` 读开关，那些开关在真机上**全是哑的**：
+/// 设了 `debug.sf.ai_diag`、`debug.sf.no_terrain_field`、`debug.sf.debug_shadow` 都毫无反应，
+/// 而代码里看不出任何异常 —— 排查时会一路怀疑到别的地方去。
+/// （同形：教训 36「工具跑不起来本身就是一条要修的缺陷」。）
+///
+/// 判据 = 扫**全部生产源码**，出现 `env::var("RV3D_` 即失败。
+/// 三个正例（`syscfg::cfg` / `flag` / `is_set` / `parse`）都不含这个模式。
+#[test]
+fn rv3d_switches_never_read_std_env() {
+    let mut hits: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    for entry in walkdir_src(std::path::Path::new("src")) {
+        let text = std::fs::read_to_string(&entry).expect("读源码失败");
+        scanned += 1;
+        for (lineno, line) in text.lines().enumerate() {
+            // 跳过注释行（文档里会引用旧写法做说明）
+            let code = line.split("//").next().unwrap_or("");
+            if code.contains("env::var(\"RV3D_") {
+                hits.push(format!("{}:{}", entry.display(), lineno + 1));
+            }
+        }
+    }
+    // fail-closed：扫不到代码说明扫描面坏了，不是"通过"
+    assert!(scanned >= 50, "扫描面异常（只扫到 {scanned} 个文件）⇒ 不是通过");
+    assert!(
+        hits.is_empty(),
+        "这些地方用 std::env::var 读 RV3D_* 开关 ⇒ Android 上会静默失效，\
+         请改用 crate::syscfg::cfg / flag / is_set / parse：\n  {}",
+        hits.join("\n  ")
+    );
+}
+
+/// 递归收集 `dir` 下的所有 `.rs`（测试辅助；不引第三方依赖）。
+fn walkdir_src(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    out
+}

@@ -191,7 +191,7 @@ fn note_astar_work(expanded: u64, pushed: u64) {
 fn diag_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("RV3D_AI_DIAG").is_ok_and(|v| v == "1" || v == "on" || v == "true")
+        crate::syscfg::flag("RV3D_AI_DIAG")
     })
 }
 

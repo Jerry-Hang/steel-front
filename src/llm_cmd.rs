@@ -497,14 +497,13 @@ fn decide_side(side: &SideCtx, name: &str, url: &str) {
 
 impl LlmCommander {
     pub fn from_env() -> Option<LlmCommander> {
-        let url = match std::env::var("RV3D_LLM") {
-            Ok(v) if v == "0" || v == "off" || v.is_empty() => return None,
-            Ok(v) if v == "1" => "http://127.0.0.1:8080".to_string(),
-            Ok(v) => v.trim().to_string(),
-            Err(_) => return None,
+        let url = match crate::syscfg::cfg("RV3D_LLM") {
+            Some(v) if v == "0" || v == "off" || v.is_empty() => return None,
+            Some(v) if v == "1" => "http://127.0.0.1:8080".to_string(),
+            Some(v) => v.trim().to_string(),
+            None => return None,
         };
-        let interval = std::env::var("RV3D_LLM_INTERVAL")
-            .ok()
+        let interval = crate::syscfg::cfg("RV3D_LLM_INTERVAL")
             .and_then(|s| s.parse::<f32>().ok())
             .filter(|v| *v >= 1.0)
             .unwrap_or(90.0);

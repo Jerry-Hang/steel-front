@@ -8,7 +8,7 @@ use super::*;
 /// 光照 UBO 的路径上，不该每帧 `getenv`。
 pub(crate) fn no_ground_detail_tex() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RV3D_NO_GROUND_TEX").as_deref() == Ok("1"))
+    *ON.get_or_init(|| crate::syscfg::cfg("RV3D_NO_GROUND_TEX").as_deref() == Some("1"))
 }
 /// 纯函数：相机到地形中心地面距离 → 基础 LOD 级别
 /// （默认 Medium 画质；非测试构建下仅被 #[cfg(test)] 单元测试调用）

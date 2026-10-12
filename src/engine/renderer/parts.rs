@@ -243,7 +243,7 @@ impl Renderer {
         {
             use std::sync::atomic::{AtomicU32, Ordering};
             static TICK: AtomicU32 = AtomicU32::new(0);
-            if std::env::var("RV3D_NPC_POS").as_deref() == Ok("1")
+            if crate::syscfg::cfg("RV3D_NPC_POS").as_deref() == Some("1")
                 && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
             {
                 log::info!(
@@ -652,7 +652,7 @@ impl Renderer {
         // 按**摆放类型**统计（RV3D_PROP_STATS=1 时打一行）：道具是最大单项（≈38% 帧时间），
         // 但此前只有"总共多少三角形"，不知道是哪几类资产贡献的。**顶点数才是本仓的帧率**
         // （无正常线槽位 ⇒ 每帧提交的顶点跨度就是成本），所以两类数一起给，并按**顶点**排序。
-        if std::env::var("RV3D_PROP_STATS").is_ok() {
+        if crate::syscfg::is_set("RV3D_PROP_STATS") {
             let mut per_type: Vec<(String, u32, u64, u64)> = Vec::new();
             for p in placements {
                 let Some(mesh) = set.get(p.mesh) else { continue };
@@ -721,7 +721,7 @@ impl Renderer {
         // RV3D_NO_PROPS=1：完全跳过道具上传（于是 draw 因 index_count==0 自然不发）。
         // 这是性能 A/B 的诊断门，与 RV3D_NO_SHADOW / RV3D_NO_GROUND_TEX 同一套惯例——
         // 优化前先量清"这个东西到底值多少帧"，否则很可能在优化错的对象。
-        if std::env::var("RV3D_NO_PROPS").as_deref() == Ok("1") {
+        if crate::syscfg::cfg("RV3D_NO_PROPS").as_deref() == Some("1") {
             log::info!("props: RV3D_NO_PROPS=1，跳过上传（合并结果 {} 顶点未提交）", merged.verts.len());
             return;
         }

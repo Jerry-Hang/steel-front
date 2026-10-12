@@ -455,7 +455,7 @@ impl WorldMarker {
                 //    于是"让几何自报家门"的诊断图**自己造出一个四尖星伪影**（§27.5）。
                 //    橙色 g=0.55 < r=1.0 ⇒ 这条判据永远为假，且与其余五色一眼可区分。
                 static DEBUG_KIND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                if *DEBUG_KIND.get_or_init(|| std::env::var("RV3D_DEBUG_KIND").is_ok()) {
+                if *DEBUG_KIND.get_or_init(|| crate::syscfg::is_set("RV3D_DEBUG_KIND")) {
                     let c = match ob.kind {
                         ObstacleKind::Wall => [1.0, 0.0, 0.0],      // 红
                         ObstacleKind::Block => [1.0, 0.55, 0.0],    // 橙（见上：绿色会触发 is_tree）

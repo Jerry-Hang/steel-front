@@ -273,9 +273,7 @@ impl Renderer {
         // ⇒ **拿 PT 做定量对照（与光栅比亮度、比反照率、比砖纹对比度）必须用默认 256**，
         // 小值只可用于"看个大概构图"。2026-09-29 我就是照旧注释把 16/64 当同图对比，
         // 得到了一条假缺陷（PROGRESS §22.11 → §22.11b 更正）。
-        self.pt_spp_target = std::env::var("RV3D_PT_SPP")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
+        self.pt_spp_target = crate::syscfg::parse::<u32>("RV3D_PT_SPP")
             .filter(|v| (1..=4096).contains(v))
             .unwrap_or(256);
         self.pt_frame.set(0);

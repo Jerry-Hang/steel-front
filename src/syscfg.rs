@@ -31,9 +31,47 @@ pub fn cfg(name: &str) -> Option<String> {
     None
 }
 
-/// 读配置并判断是否等于 `"1"`。
+/// **布尔开关**：`1` / `on` / `true`（大小写不敏感、两侧空白忽略）= 开；未设、空、其它值 = 关。
+///
+/// 🔴 2026-10-12：**语义从"只认 `1`"拓宽到也认 `on`/`true`**。依据是仓库里另有 5 处
+/// 写的是 `is_ok_and(|v| v == "1" || v == "on" || v == "true")` —— 同一件事在代码里
+/// 有两份答案，而它们迟早分叉。**只认 `1` 的那份是少数派**，统一到宽的那份。
+/// 安全性：三个现有调用方（`RV3D_CPU_PRIME` / `RV3D_NO_SHADOW` / `RV3D_SHADOW_PASS_OFF`）
+/// 都是布尔开关，拓宽是**超集**，不会把"原本开"变成"关"。
+///
+/// 与 `is_set` 的区别：**「设了空值」`flag` 算关**，`is_set` 算开。
+/// 排查时用错这两个会把"我设了但没生效"误判成"开关没接线"。
 pub fn flag(name: &str) -> bool {
-    cfg(name).map(|v| v == "1").unwrap_or(false)
+    matches!(
+        cfg(name).map(|v| v.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "1" || v == "on" || v == "true"
+    )
+}
+
+/// **开关是否被设置**（不看值）。等价于旧代码里的 `std::env::var(name).is_ok()` 语义
+/// —— 但**空值不算**（`cfg` 会把空/纯空白读成 `None`），这点比旧写法更严格、也更符合直觉。
+pub fn is_set(name: &str) -> bool {
+    cfg(name).is_some()
+}
+
+/// 解析成 `T`（失败返回 `None`）。统一走这里，避免各处 `.parse().ok()` 的写法分叉。
+pub fn parse<T: std::str::FromStr>(name: &str) -> Option<T> {
+    cfg(name).and_then(|v| v.trim().parse::<T>().ok())
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    /// 三个辅助函数的语义必须彼此区分开（用错会把"没生效"误判成"没接线"）。
+    #[test]
+    fn flag_and_is_set_have_distinct_semantics() {
+        // 这一条**不碰环境变量**（测试里改 env 会与并行用例互相干扰），
+        // 只钉住"两个函数不是同一个东西"这个契约本身。
+        assert!(!flag("RV3D_TEST_DEFINITELY_UNSET_XYZ"));
+        assert!(!is_set("RV3D_TEST_DEFINITELY_UNSET_XYZ"));
+        assert_eq!(parse::<u32>("RV3D_TEST_DEFINITELY_UNSET_XYZ"), None);
+    }
 }
 
 /// Android 系统属性读取（libc 的 `__system_property_get`，libc 本来就链着，零新依赖）。

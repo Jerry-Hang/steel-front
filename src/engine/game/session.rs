@@ -122,8 +122,7 @@ impl Game {
             ai_diag_prev_t: 0.0,
             charge_active: false,
             npc_scale: {
-                let v = std::env::var("RV3D_NPC_SCALE")
-                    .ok()
+                let v = crate::syscfg::cfg("RV3D_NPC_SCALE")
                     .and_then(|s| s.parse::<f32>().ok())
                     .unwrap_or(1.0);
                 v.max(0.5)
@@ -131,12 +130,11 @@ impl Game {
             // 大战场判定：变量存在且值非 "0"/"off" → 大战场；无变量/0/off → 波次模式
             // （main.rs 未设置时默认注入 "64"；测试环境无变量 → wave 模式，勿反转）
             stress: !matches!(
-                std::env::var("RV3D_STRESS_AI").as_deref(),
-                Err(_) | Ok("0") | Ok("off")
+                crate::syscfg::cfg("RV3D_STRESS_AI").as_deref(),
+                None | Some("0") | Some("off")
             ),
             // 2026-08-22：默认 128v128（用户要求：以海量 NPC 逼近真人联机压力）
-            stress_sides: std::env::var("RV3D_STRESS_AI")
-                .ok()
+            stress_sides: crate::syscfg::cfg("RV3D_STRESS_AI")
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n >= 4)
                 .unwrap_or(128),
@@ -144,10 +142,10 @@ impl Game {
             command: None,
             llm: crate::llm_cmd::LlmCommander::from_env(),
             player_invincible: {
-                let llm_on = std::env::var("RV3D_LLM")
+                let llm_on = crate::syscfg::cfg("RV3D_LLM")
                     .map(|v| !(v.is_empty() || v == "0" || v == "off"))
                     .unwrap_or(false);
-                let inv = std::env::var("RV3D_INVINCIBLE")
+                let inv = crate::syscfg::cfg("RV3D_INVINCIBLE")
                     .map(|v| v == "1" || v == "on" || v == "true")
                     .unwrap_or(false);
                 inv || llm_on
@@ -158,7 +156,7 @@ impl Game {
             round_kills_red: 0,
             round_kills_blue: 0,
             command_log_at: 0.0,
-            ai_parallel: std::env::var("RV3D_AI_PARALLEL")
+            ai_parallel: crate::syscfg::cfg("RV3D_AI_PARALLEL")
                 .map(|v| v != "off")
                 .unwrap_or(true),
             stage_physics_us: 0,
@@ -173,8 +171,8 @@ impl Game {
             acc_ai_only_us: 0,
             acc_wave_us: 0,
             acc_obj_us: 0,
-            explosion_sim: std::env::var("RV3D_EXPLOSION_SIM")
-                .is_ok_and(|v| v == "1" || v == "true"),
+            explosion_sim: crate::syscfg::cfg("RV3D_EXPLOSION_SIM")
+                .is_some_and(|v| v == "1" || v == "true"),
             shock_points: Vec::new(),
             bench_points: Vec::new(),
             shock_out: Vec::new(),
@@ -202,7 +200,7 @@ impl Game {
                 player
             },
             net_demo: {
-                let enabled = std::env::var("RV3D_NET")
+                let enabled = crate::syscfg::cfg("RV3D_NET")
                     .map(|v| v == "1" || v == "demo")
                     .unwrap_or(false);
                 if !enabled {
@@ -260,7 +258,7 @@ impl Game {
     /// 加载失败仅告警并回退程序化地图（不 panic、不中断启动）。
     pub(crate) fn init_map_system(&mut self) {
         let single = crate::syscfg::cfg("RV3D_MAP").filter(|p| !p.is_empty());
-        let index = std::env::var("RV3D_MAPS").ok().filter(|p| !p.is_empty());
+        let index = crate::syscfg::cfg("RV3D_MAPS").filter(|p| !p.is_empty());
         let (path, list) = if let Some(p) = single {
             (p, Vec::new())
         } else if let Some(idx) = index {
@@ -482,7 +480,7 @@ impl Game {
             // 地图：默认手绘现代城市（不再随机种子生成；RV3D_PROC_MAP=1 回退程序化生成用于 A/B）
             // 生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core / 小核），
             // 生成计算不吃主线程所在簇；join 语义保证返回时地图已就绪。
-            if std::env::var("RV3D_PROC_MAP").as_deref() == Ok("1") {
+            if crate::syscfg::cfg("RV3D_PROC_MAP").as_deref() == Some("1") {
                 self.map =
                     crate::engine::cpu::ai_pool().run_sync(move || generate_level_map(level));
             } else {

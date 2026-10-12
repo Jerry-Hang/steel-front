@@ -54,7 +54,7 @@ impl Renderer {
             .and_then(|v| v.trim().parse::<f32>().ok())
             .unwrap_or(0.0);
         // RV3D_DEBUG_SHADOW=1：片元直出 shadow_factor 灰度（阴影诊断）
-        if std::env::var("RV3D_DEBUG_SHADOW").as_deref() == Ok("1") {
+        if crate::syscfg::cfg("RV3D_DEBUG_SHADOW").as_deref() == Some("1") {
             self.light_data.shadow.config.y = 1.0;
             // D3诊断：仅打印一次实际传入GPU的light_view_proj矩阵（列主序16元素）
             static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -548,7 +548,7 @@ impl Renderer {
         // 第 37 轮量出道具 3.2ms + 地形场 0.87ms 只占 9.44ms 帧的 43%，
         // 剩下的未知要靠逐个开关消掉，而不是靠猜。
         let (marker_near, marker_far) = if self.void_mode
-            || std::env::var("RV3D_NO_MARKERS").is_ok()
+            || crate::syscfg::is_set("RV3D_NO_MARKERS")
         {
             (0, 0)
         } else {
@@ -583,7 +583,7 @@ impl Renderer {
         {
             use std::sync::atomic::{AtomicU32, Ordering};
             static TICK: AtomicU32 = AtomicU32::new(0);
-            if std::env::var("RV3D_SOLDIER_STATS").is_ok()
+            if crate::syscfg::is_set("RV3D_SOLDIER_STATS")
                 && TICK.fetch_add(1, Ordering::Relaxed) % 120 == 0
             {
                 log::info!(
@@ -605,7 +605,7 @@ impl Renderer {
         // 65,536 个地形实例**每帧全部进管线、一个都没被剔除**。与其继续猜 near/far
         // 的语义，不如直接量它值多少毫秒 —— 清零这两个计数即跳过对应 draw call。
         // 与 `RV3D_NO_PROPS` / `RV3D_NO_SHADOW` 同类的对照开关。
-        let (near_count, far_count) = if std::env::var("RV3D_NO_TERRAIN_FIELD").is_ok() {
+        let (near_count, far_count) = if crate::syscfg::is_set("RV3D_NO_TERRAIN_FIELD") {
             (0, 0)
         } else {
             (near_count, far_count)
