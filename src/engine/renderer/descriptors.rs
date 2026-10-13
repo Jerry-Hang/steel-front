@@ -335,7 +335,14 @@ impl Renderer {
         if count == 0 || self.hud_mapped.is_null() {
             return;
         }
-        let mut verts: Vec<HudVertex> = Vec::with_capacity(count * 6);
+        // 🔴 **直接写进映射缓冲，不再先写进临时 `Vec`**（2026-10-13）：
+        // 原来每帧 `Vec::with_capacity(count * 6)` + push + `copy_nonoverlapping` ——
+        // 真机实测这一步约 **200~410µs**（`[prep-diag]` 的「HUD上传 − HUD构建」），
+        // 因为 HUD 的 quad 数量是**几千级**（文字逐字成片），按带宽反推约 1~2MB/帧。
+        // 而 HUD 顶点缓冲本来就是**映射内存**、且按在飞帧槽位分开 ⇒ 直接写既省分配也省那次拷贝。
+        // 越界由 `count` 夹住（容量 `hud_capacity_quads`），与旧写法同一个上界。
+        let dst = self.hud_mapped as *mut HudVertex;
+        let mut vi: usize = 0;
         for q in quads.iter().take(count) {
             let x0 = q.rect.x / w * 2.0 - 1.0;
             let y0 = 1.0 - q.rect.y / h * 2.0;
@@ -348,6 +355,7 @@ impl Renderer {
             let (u1, v1) = ((q.rect.x + q.rect.w) / w, (q.rect.y + q.rect.h) / h);
             // PT 模式（或总开关关掉）时把标志位写成 0 —— 顶点格式恒定，只有这个分量在变
             let g = if q.glass && glass_on { 1.0 } else { 0.0 };
+            // 六个顶点顺序不变（与旧写法逐字段一致：左下/右下/左上/右下/右上/左上）
             for (px, py, u, v) in [
                 (x0, y0, u0, v0),
                 (x1, y0, u1, v0),
@@ -356,19 +364,15 @@ impl Renderer {
                 (x1, y1, u1, v1),
                 (x0, y1, u0, v1),
             ] {
-                verts.push(HudVertex {
-                    pos: [px, py],
-                    color,
-                    uv_glass: [u, v, g],
-                });
+                unsafe {
+                    *dst.add(vi) = HudVertex {
+                        pos: [px, py],
+                        color,
+                        uv_glass: [u, v, g],
+                    };
+                }
+                vi += 1;
             }
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                verts.as_ptr() as *const u8,
-                self.hud_mapped as *mut u8,
-                verts.len() * std::mem::size_of::<HudVertex>(),
-            );
         }
     }
     /// 🧊 HUD 玻璃描述符集（`glass_tex` + `glass_smp`）：**只有一份**，不在在飞帧之间复制 ——

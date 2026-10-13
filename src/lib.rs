@@ -2546,6 +2546,7 @@ impl GameApp {
         // `first_person_gun_mesh`、`set_lights`、`pt_set_scene_markers` …）。
         // **这是整帧里最大的一块没有任何计时器覆盖的时间。** 先把它的占比量出来。
         let prep_start = std::time::Instant::now();
+        let mut t_props: u64 = 0;
         // 第一人称枪模程序化网格（相机姿态）：在借用 renderer 前生成，避免借用冲突。
         // 🔴 **只在武器 key 变化时生成 + 上传**（见 `gun_mesh_uploaded_key` 的文档）：
         // 这把枪有几万顶点，每帧重建+拷贝约 4.6MB，而同一把枪下结果逐帧相同。
@@ -2632,6 +2633,9 @@ impl GameApp {
             } else {
                 self.game.hud_quads(near, far, lod)
             };
+            // 【诊断】把 HUD 的"构建几何"与"上传"分开：`t_hud_build` = 几何构建完的时刻
+            let t_hud_build = prep_start.elapsed().as_micros() as u64;
+            let hud_quad_count = quads.len();
             // 命令输入窗口（Minecraft 风格左下角）：深色半透明底 + 提示符 + 闪烁光标
             if self.command_open && self.game.state() == GameState::Playing {
                 let s = self.game.hud.ui_scale();
@@ -2683,6 +2687,7 @@ impl GameApp {
             }
             renderer.set_hud_quads(&quads);
             renderer.set_lights(&self.game.light_uniform());
+            let t_hud = prep_start.elapsed().as_micros();
             // 世界障碍 marker：关卡地图几何 → 按种类材质着色的实例（复用主 pipeline，
             // 见 renderer.rs MARKER_SLOT_BASE；模型矩阵/材质色统一由 WorldMarker::for_obstacle
             // 构建，与物理刚体 AABB（game.rs apply_level，同 half_w/half_d）严格同尺寸）。
@@ -2922,6 +2927,7 @@ impl GameApp {
             renderer.set_world_markers(&markers);
             renderer.append_markers(&decal_markers);
             renderer.set_emissive_markers(&emissive_markers);
+            let t_mark = prep_start.elapsed().as_micros();
             // ---- GLB 道具几何上传 ----
             // 套件懒加载一次（重载地图不必重新解析 24 个 GLB）；几何只在**地图代号变化**
             // 时重传：一次合并是百万级顶点的 CPU 拷贝，绝不能进每帧路径。
@@ -2944,6 +2950,7 @@ impl GameApp {
                 if let Some(set) = self.prop_set.as_ref() {
                     if !set.is_empty() {
                         renderer.set_props(set, self.game.prop_placements());
+                        t_props = prep_start.elapsed().as_micros() as u64;
                     }
                 }
             }
@@ -3136,6 +3143,7 @@ impl GameApp {
             };
             // （士兵 GLB 的上传已移到 `Renderer::new` 之后，见那里的注释：
             renderer.set_npc_visuals(&npc_visuals);
+            let t_npc = prep_start.elapsed().as_micros();
             // RV3D_CULL_DIAG=1：每秒报一次「NPC 遮挡剔除」的实测成本 —— 先量再改的尺子。
             // 判据 = `cull-diag: <us>/s calls=<N> npcs=<M> bodies=<B>`（关着时零成本）。
             if engine::game::cull_diag_on() && self.last_cull_diag.elapsed().as_secs_f32() >= 1.0 {
@@ -3219,6 +3227,7 @@ impl GameApp {
                 })
                 .collect();
             renderer.set_dead_bodies(&dead_visuals);
+            let t_dead = prep_start.elapsed().as_micros();
 
             // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
             // 枪模仅在第一人称游玩或检视模式渲染：结算/其它相机态下隐藏
@@ -3318,8 +3327,9 @@ impl GameApp {
                 let n = N.fetch_add(1, Ordering::Relaxed);
                 if n % 120 == 0 {
                     log::info!(
-                        "[prep-diag] GameApp 准备段 {}µs（枪模网格 + HUD 几何 + 上传 + PT marker）",
-                        prep_us
+                        "[prep-diag] 合计 {}µs // HUD构建 {} // HUD上传 {} // marker {} // 道具 {} // NPC {} // 尸体 {}  (prep_start 起累加µs; HUD quad 数 {})",
+                        prep_us, t_hud_build, t_hud, t_mark, t_props, t_npc, t_dead,
+                        hud_quad_count
                     );
                 }
             }
