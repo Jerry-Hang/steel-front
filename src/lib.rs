@@ -926,7 +926,12 @@ struct GameApp {
     inspect_armed: bool,
     cam_logged: bool,
     /// RV3D_CAM 调试机位（飞行模式固定位姿；地图/场景检查用）
-    cam_override: Option<(glam::Vec3, f32, f32)>,
+    /// `RV3D_CAM` 的调试机位：`(位置, yaw, pitch, yaw 角速度 rad/s)`。
+    /// 第 4 项非 0 时相机绕 yaw **匀速旋转** —— 这是运动矢量的**解析验证**专用模式，
+    /// 理由见 `build.rs` 里 MV 那段的注释（旋转的屏幕位移与深度无关 ⇒ 全屏均匀、可算）。
+    cam_override: Option<(glam::Vec3, f32, f32, f32)>,
+    /// 旋转机位的累计转角（rad）。只在 `cam_override` 带角速度时使用。
+    cam_spin: f32,
     /// 命令输入缓冲（当前只接受数字，回车切换武器）
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
@@ -1095,6 +1100,7 @@ impl GameApp {
                     })
                     .filter(|&n| (1..=35).contains(&n))
             },
+            cam_spin: 0.0,
             inspect_armed: false,
             cam_logged: false,
             cam_override: crate::syscfg::cfg("RV3D_CAM").and_then(|s| {
@@ -1104,11 +1110,19 @@ impl GameApp {
                 let rot = it.next()?.trim();
                 let p: Vec<f32> = pos.split(',').filter_map(|v| v.trim().parse().ok()).collect();
                 let r: Vec<f32> = rot.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                // 可选第 4 段 = yaw 角速度（度/秒）。用于运动矢量的解析验证：
+                // 旋转的屏幕位移与深度无关 ⇒ 全屏均匀、可以用公式算出期望值。
+                let spin = it
+                    .next()
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .map(|d| d.to_radians())
+                    .unwrap_or(0.0);
                 if p.len() == 3 && r.len() == 2 {
                     Some((
                         glam::Vec3::new(p[0], p[1], p[2]),
                         r[0].to_radians(),
                         r[1].to_radians(),
+                        spin,
                     ))
                 } else {
                     None
@@ -1146,9 +1160,16 @@ impl GameApp {
             // 存在的理由：我按 `RV3D_NPC_POS` 打出的坐标手算过 13 次机位，全部失败
             // （见 docs/PROGRESS.md 第 8–16 轮）。这些坐标程序本来就有 —— 该由程序算，
             // 不该由我猜。`pitch` 取正 = 低头（与鼠标 dy>0 同号，见铁律 C）。
-            if let Some((p, yaw, pitch)) = self.cam_override {
+            if let Some((p, yaw, pitch, yaw_rate)) = self.cam_override {
                 self.camera.set_flight_pos(p);
-                self.camera.yaw = yaw;
+                if yaw_rate != 0.0 {
+                    // 受控匀速旋转（运动矢量解析验证专用）。用**帧内真实 dt** 累加，
+                    // 与着色器里用的 `view` 矩阵同源 ⇒ 期望值可以精确算出来。
+                    self.cam_spin += yaw_rate * dt;
+                    self.camera.yaw = yaw + self.cam_spin;
+                } else {
+                    self.camera.yaw = yaw;
+                }
                 self.camera.pitch = pitch;
             }
             // 🔴 NPC 机位**必须放在 cam_override 之后**：否则同时给 `RV3D_CAM` 时，
