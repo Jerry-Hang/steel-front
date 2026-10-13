@@ -927,7 +927,7 @@ struct GameApp {
     cam_logged: bool,
     /// RV3D_CAM 调试机位（飞行模式固定位姿；地图/场景检查用）
     /// `RV3D_CAM` 的调试机位：`(位置, yaw, pitch, yaw 角速度 rad/s)`。
-    /// 第 4 项非 0 时相机绕 yaw **匀速旋转** —— 这是运动矢量的**解析验证**专用模式，
+    /// 第 4 项非 0 时相机绕 yaw **匀速旋转** —— 这是运动向量的**解析验证**专用模式，
     /// 理由见 `build.rs` 里 MV 那段的注释（旋转的屏幕位移与深度无关 ⇒ 全屏均匀、可算）。
     cam_override: Option<(glam::Vec3, f32, f32, f32)>,
     /// 旋转机位的累计转角（rad）。只在 `cam_override` 带角速度时使用。
@@ -1110,7 +1110,7 @@ impl GameApp {
                 let rot = it.next()?.trim();
                 let p: Vec<f32> = pos.split(',').filter_map(|v| v.trim().parse().ok()).collect();
                 let r: Vec<f32> = rot.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-                // 可选第 4 段 = yaw 角速度（度/秒）。用于运动矢量的解析验证：
+                // 可选第 4 段 = yaw 角速度（度/秒）。用于运动向量的解析验证：
                 // 旋转的屏幕位移与深度无关 ⇒ 全屏均匀、可以用公式算出期望值。
                 let spin = it
                     .next()
@@ -1163,7 +1163,7 @@ impl GameApp {
             if let Some((p, yaw, pitch, yaw_rate)) = self.cam_override {
                 self.camera.set_flight_pos(p);
                 if yaw_rate != 0.0 {
-                    // 受控匀速旋转（运动矢量解析验证专用）。用**帧内真实 dt** 累加，
+                    // 受控匀速旋转（运动向量解析验证专用）。用**帧内真实 dt** 累加，
                     // 与着色器里用的 `view` 矩阵同源 ⇒ 期望值可以精确算出来。
                     self.cam_spin += yaw_rate * dt;
                     self.camera.yaw = yaw + self.cam_spin;
