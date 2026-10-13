@@ -1004,3 +1004,37 @@ fn walkdir_src(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+
+/// 🔴 **`CameraUniform` 的字节偏移必须与 `build.rs` 里 WGSL `ViewProj` 的声明逐一对齐**。
+///
+/// 存在理由（2026-10-13）：排查运动向量的"恒定非零"时，我只能**人工数**
+/// WGSL 里七个 `_mesh_reserved_*` 填够没有 —— 而这类错误**两边都不会报错**：
+/// 偏移差了，着色器读到的就是隔壁字段（本例里是 `planes`/`cam_pos`），
+/// 画面看着正常、只有运动矢量默默是错的。全仓此前**没有任何测试**读过这份布局。
+///
+/// 判据 = 把两边的期望值都写成字面量钉死。**改任一侧的字段顺序/类型都会让它变红**。
+#[test]
+fn camera_uniform_layout_matches_wgsl_view_proj() {
+    use std::mem::{offset_of, size_of};
+    // 这些数字同时对应 build.rs 的 WGSL `struct ViewProj`：
+    //   view 0 / proj 64 / lod_params 128 / _mesh_reserved_a..g 144..256
+    //   / prev_view_proj 256 / debug_params 320
+    assert_eq!(offset_of!(camera_uniform_probe::CameraUniform, view), 0);
+    assert_eq!(offset_of!(camera_uniform_probe::CameraUniform, proj), 64);
+    assert_eq!(offset_of!(camera_uniform_probe::CameraUniform, lod_params), 128);
+    assert_eq!(
+        offset_of!(camera_uniform_probe::CameraUniform, planes),
+        144,
+        "planes 必须紧接 lod_params —— 它对应 WGSL 的 7 个 _mesh_reserved 里的前 6 个"
+    );
+    assert_eq!(offset_of!(camera_uniform_probe::CameraUniform, cam_pos), 240);
+    assert_eq!(
+        offset_of!(camera_uniform_probe::CameraUniform, prev_view_proj),
+        256,
+        "🔴 prev_view_proj 必须在 256 —— 它是 WGSL 里 7 个 _mesh_reserved 之后那个字段。\
+         偏移错了着色器会读到别的矩阵，**不报任何错**，只是运动矢量恒为非零的错值"
+    );
+    assert_eq!(offset_of!(camera_uniform_probe::CameraUniform, debug_params), 320);
+    assert_eq!(size_of::<camera_uniform_probe::CameraUniform>(), 336);
+}

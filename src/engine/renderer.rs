@@ -1213,3 +1213,9 @@ mod tests_geom;
 mod tests_gpu;
 #[cfg(test)]
 mod tests_vk;
+
+/// 只在测试里用：把 `CameraUniform` 以稳定名字暴露给布局判据
+/// （`gpu_layout` 是私有子模块，跨文件测试没法直接 `offset_of!`）。
+pub(crate) mod camera_uniform_probe {
+    pub(crate) use super::gpu_layout::CameraUniform;
+}
