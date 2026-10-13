@@ -1167,6 +1167,7 @@ impl GameApp {
                     // 与着色器里用的 `view` 矩阵同源 ⇒ 期望值可以精确算出来。
                     self.cam_spin += yaw_rate * dt;
                     self.camera.yaw = yaw + self.cam_spin;
+
                 } else {
                     self.camera.yaw = yaw;
                 }
