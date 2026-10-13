@@ -586,9 +586,20 @@ use super::*;
         assert_eq!(game.map.obstacles[idx].hp, ob0.max_hp - 25.0);
         assert_eq!(game.map.obstacles.len(), n);
         assert_eq!(game.world.bodies.len(), n);
+        // 🔴 **摧毁必须递增 `map_generation`**（2026-10-13）。
+        // 语义：`map_generation` = "渲染用的关卡几何是哪一代"。原来只有 `apply_level()`
+        // 递增，而这里是**运行中**唯一会删障碍的地方（可破坏物被打掉）。
+        // 不递增的后果：任何按"代号没变就复用"的缓存（main.rs 的静态障碍 marker 缓存）
+        // 会继续拿旧几何 ⇒ **被打掉的障碍物永远留在画面上**。
+        let gen_before = game.map_generation();
         // 摧毁：清空剩余血量 → 列表同步移除
         game.damage_obstacle(idx, ob0.max_hp);
         assert_eq!(game.map.obstacles.len(), n - 1, "障碍应从渲染列表移除");
+        assert_ne!(
+            game.map_generation(),
+            gen_before,
+            "摧毁障碍后 map_generation 必须变 —— 否则按代号复用的静态几何缓存会画旧数据"
+        );
         assert_eq!(game.world.bodies.len(), n - 1, "物理刚体应同步移除");
         // 被摧毁障碍覆盖的网格格已解除阻挡（NPC 可穿过缺口）
         let g0 = world_to_grid(ob0.x - ob0.half_w, ob0.z - ob0.half_d);

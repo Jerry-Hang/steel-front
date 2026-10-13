@@ -562,6 +562,14 @@ impl Game {
             self.world.bodies.remove(idx);
         }
         self.map.obstacles.remove(idx);
+        // 🔴 **障碍集合变了就要递增 `map_generation`**（2026-10-13）。
+        // `map_generation` 的语义是"**渲染用的关卡几何是哪一代**"——
+        // 原来只有 `apply_level()` 递增，而这里是**运行中**唯一会删障碍的地方
+        // （可破坏物被打掉）。不递增的话，任何按"代号没变就复用"的缓存
+        // （main.rs 的静态障碍 marker 缓存就是这么做的）都会继续拿旧几何
+        // ⇒ **被打掉的障碍物会永远留在画面上**。
+        // 判据：`destroying_an_obstacle_bumps_the_map_generation`。
+        self.map_generation = self.map_generation.wrapping_add(1);
     }
     /// 记入本轮阵亡（`round_kills_*` 的**唯一写入口**）。
     ///

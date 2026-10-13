@@ -941,6 +941,19 @@ struct GameApp {
     /// 而枪模是**按武器 key 缓存**的、姿态走 `fp_gun_pre` 矩阵 ⇒ 同一把枪下逐帧完全相同。
     /// ⇒ 只在 key 变化时重建+上传。切到"不显示枪"时清空它，保证切回来会重传。
     gun_mesh_uploaded_key: Option<String>,
+    /// **静态障碍 marker 的缓存** + 它对应的 `Game::map_generation()`。
+    ///
+    /// 存在的理由（2026-10-13）：`[prep-diag]` 实测准备段里 marker 一项
+    /// （`render_geometry()` 逐件滤 `.filter(shape != None)` + `WorldMarker::for_obstacle()`
+    /// 构造矩阵 + collect）要 **~600µs**，而**城市场景障碍是静态的** ——
+    /// 只有 `apply_level()` 才会换一批。
+    /// `map_generation()` 正是那个"关卡换没换"的判据（`session.rs` 里 `apply_level` 自增）。
+    ///
+    /// ⚠️ 缓存的是**已构造好的 `WorldMarker`**（贵的是逐件的矩阵构造，不是那次拷贝）；
+    /// 使用时 `clone()` 一份再 extend 据点/弹孔 —— 拷贝是 memcpy，比重新构造便宜得多。
+    obstacle_markers_cache: Vec<engine::renderer::WorldMarker>,
+    /// 缓存对应的关卡代号；`None` = 还没建过（首帧必然建一次）。
+    obstacle_markers_gen: Option<u64>,
     /// 命令输入缓冲（当前只接受数字，回车切换武器）
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
@@ -1111,6 +1124,8 @@ impl GameApp {
             },
             cam_spin: 0.0,
             gun_mesh_uploaded_key: None,
+            obstacle_markers_cache: Vec::new(),
+            obstacle_markers_gen: None,
             inspect_armed: false,
             cam_logged: false,
             cam_override: crate::syscfg::cfg("RV3D_CAM").and_then(|s| {
@@ -2734,12 +2749,22 @@ impl GameApp {
                     }
                 }
             }
-            let markers: Vec<engine::renderer::WorldMarker> = self
-                .game
-                .render_geometry()
-                .filter(|o| o.shape != engine::geom::Shape::None)
-                .map(engine::renderer::WorldMarker::for_obstacle)
-                .collect();
+            // 🔴 **静态障碍 marker 走缓存**（按 `map_generation()` 失效）：
+            // 逐件 `.filter(shape != None)` + `for_obstacle()` 构造矩阵实测 ~600µs，
+            // 而城市场景障碍只在 `apply_level()` 时换一批。
+            // 下面那次 `clone()` 只是 memcpy —— 贵的是"构造"，不是"拷贝"。
+            let cur_gen = self.game.map_generation();
+            if self.obstacle_markers_gen != Some(cur_gen) {
+                self.obstacle_markers_cache = self
+                    .game
+                    .render_geometry()
+                    .filter(|o| o.shape != engine::geom::Shape::None)
+                    .map(engine::renderer::WorldMarker::for_obstacle)
+                    .collect();
+                self.obstacle_markers_gen = Some(cur_gen);
+            }
+            let markers: Vec<engine::renderer::WorldMarker> =
+                self.obstacle_markers_cache.clone();
             // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
             // 每据点 = 细高立柱（归属色）+ 扁平板状底盘（归属色，不透明）。
             // 复用 WorldMarker 通道（主 pipeline 实例化），零渲染管线改动。

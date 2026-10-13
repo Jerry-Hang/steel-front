@@ -405,6 +405,11 @@ const _: () = assert!(std::mem::size_of::<InstanceData>() == 80);
 
 /// 世界障碍 marker 输入（模型矩阵 = 平移+缩放，tint = 颜色）。
 /// 由 main.rs 从游戏关卡地图转换而来，经 `set_world_markers` 缓存为实例数据。
+///
+/// `Clone` 是给 main.rs 的**静态障碍缓存**用的（2026-10-13）：缓存已构造好的
+/// `WorldMarker`，每帧 clone 一份再 extend 据点/弹孔 —— clone 是 memcpy，
+/// 比每帧重新 `for_obstacle()` 构造矩阵便宜得多。
+#[derive(Clone)]
 pub struct WorldMarker {
     pub model: glam::Mat4,
     pub tint: [f32; 4],
