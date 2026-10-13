@@ -1894,6 +1894,45 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
 /// （**仓内预烘焙的 Noto Sans SC 字模，纯查表、无系统字体依赖、无 GDI** ——
 /// 旧注释写"Windows GDI 生成"是 2026-09-14 换源之前的说法，已失效）；
 /// 字符之间留 `FONT_SPACING` 像素间距。
+/// 把 `glyph()` 的 5 列位图按列内上下连续像素合并成竖条 quad 后写出。
+///
+/// 与原来"每个点亮的像素一个 quad"的写法**覆盖的像素完全相同**（同一套
+/// `cx + col*scale, y + row*scale, scale, scale` 格），只是把同列里连续的几格并成一条
+/// 高度为 `n*scale` 的竖条 ⇒ 画面逐像素一致、绘制顺序不变，quad 数明显减少。
+/// 依据：真机实测整个菜单 HUD 有 3147 个 quad（`[prep-diag]` 的 `HUD quad 数`），
+/// 而 HUD 一项在准备段里占 400~990µs。
+fn merge_vertical_runs(
+    cols: &[u8],
+    cx: f32,
+    y: f32,
+    scale: f32,
+    color: Color,
+    out: &mut Vec<Quad>,
+) {
+    for (col, byte) in cols.iter().enumerate() {
+        let mut row = 0usize;
+        while row < FONT_ROWS {
+            if (byte >> row) & 1 == 0 {
+                row += 1;
+                continue;
+            }
+            let start = row;
+            while row < FONT_ROWS && (byte >> row) & 1 == 1 {
+                row += 1;
+            }
+            out.push(Quad::new(
+                Rect::new(
+                    cx + col as f32 * scale,
+                    y + start as f32 * scale,
+                    scale,
+                    (row - start) as f32 * scale,
+                ),
+                color,
+            ));
+        }
+    }
+}
+
 pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &mut Vec<Quad>) {
     let mut cx = x;
     for ch in text.chars() {
@@ -1910,49 +1949,45 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
             let cs = scale * 0.714;
             let yoff = y - scale * 0.75;
             if let Some(rows) = glyph_cjk(ch) {
+                // 🔴 **横向连续像素合并成一条**（2026-10-13）：
+                // 原来"每个点亮的像素一个 quad"，一个 12×12 汉字最多 144 个 ——
+                // 真机实测整个菜单 HUD 有 **3147 个 quad**（≈680KB/帧），
+                // `[prep-diag]` 里 HUD 一项就要 400~990µs。
+                // 汉字是竖笔画为主 ⇒ 按行合并后一条覆盖 2~4 格，**覆盖的像素逐格不变、
+                // 颜色不变、绘制顺序不变** ⇒ 画面逐像素一致，只是 quad 少了。
+                // （不引入纹理/图集：那要动着色器与管线，而本仓对管线改动有明确红线。）
                 for (row, byte) in rows.iter().enumerate() {
-                    for col in 0..12 {
-                        if (byte >> (11 - col)) & 1 == 1 {
-                            out.push(Quad::new(
-                                Rect::new(
-                                    cx + col as f32 * cs,
-                                    yoff + row as f32 * cs,
-                                    cs,
-                                    cs,
-                                ),
-                                color,
-                            ));
+                    let mut col = 0usize;
+                    while col < 12 {
+                        if (byte >> (11 - col)) & 1 == 0 {
+                            col += 1;
+                            continue;
                         }
+                        let start = col;
+                        while col < 12 && (byte >> (11 - col)) & 1 == 1 {
+                            col += 1;
+                        }
+                        out.push(Quad::new(
+                            Rect::new(
+                                cx + start as f32 * cs,
+                                yoff + row as f32 * cs,
+                                (col - start) as f32 * cs,
+                                cs,
+                            ),
+                            color,
+                        ));
                     }
                 }
             } else {
                 // 字体缺失：回退 '?'（ASCII 路径）
                 let cols = glyph('?');
-                for (col, byte) in cols.iter().enumerate() {
-                    for row in 0..FONT_ROWS {
-                        if (byte >> row) & 1 == 1 {
-                            out.push(Quad::new(
-                                Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
-                                color,
-                            ));
-                        }
-                    }
-                }
+                merge_vertical_runs(&cols, cx, y, scale, color, out);
             }
             // 中文字距比英文多 1 逻辑像素：汉字笔画密，同字距会显得粘连
             cx += (12.0 * 0.714 + 1.0) * scale;
         } else {
             let cols = glyph(ch);
-            for (col, byte) in cols.iter().enumerate() {
-                for row in 0..FONT_ROWS {
-                    if (byte >> row) & 1 == 1 {
-                        out.push(Quad::new(
-                            Rect::new(cx + col as f32 * scale, y + row as f32 * scale, scale, scale),
-                            color,
-                        ));
-                    }
-                }
-            }
+            merge_vertical_runs(&cols, cx, y, scale, color, out);
             cx += (FONT_COLS as f32 + FONT_SPACING) * scale;
         }
     }
@@ -2209,15 +2244,47 @@ mod tests {
         assert!(out.is_empty(), "空格字形应为全空");
     }
 
+    /// 把 quad 列表摊成"被覆盖的单位格坐标集合"（scale=1 时每个格就是一个字形像素）。
+    fn covered_cells(quads: &[Quad]) -> std::collections::BTreeSet<(i32, i32)> {
+        let mut set = std::collections::BTreeSet::new();
+        for q in quads {
+            let x0 = q.rect.x.round() as i32;
+            let y0 = q.rect.y.round() as i32;
+            let x1 = (q.rect.x + q.rect.w).round() as i32;
+            let y1 = (q.rect.y + q.rect.h).round() as i32;
+            for x in x0..x1 {
+                for y in y0..y1 {
+                    set.insert((x, y));
+                }
+            }
+        }
+        set
+    }
+
+    /// 🔴 **判据是"覆盖的像素集合"，不是"quad 的个数"**（2026-10-13 改）。
+    ///
+    /// 旧断言 `out.len() == 置位像素数` 把"每个点亮像素一个 quad"这个**实现细节**
+    /// 固化成了契约 —— 于是任何合并优化都会把它撞红，即使画面逐像素完全不变。
+    /// 现在按列内上下连续像素合并成竖条，quad 少了但覆盖完全相同；
+    /// 下面这条断言比旧的那条**更强**：它直接钉住"渲染出来的像素"。
     #[test]
     fn render_text_a_produces_glyph_pixels() {
         let mut out = Vec::new();
         render_text("A", 10.0, 20.0, Color::GREEN, 1.0, &mut out);
-        let expected = FONT5X7['A' as usize - 0x20]
-            .iter()
-            .map(|b| b.count_ones())
-            .sum::<u32>();
-        assert_eq!(out.len() as u32, expected, "quad 数应等于字形置位像素数");
+        let glyph_a = &FONT5X7['A' as usize - 0x20];
+        let mut expected = std::collections::BTreeSet::new();
+        for (col, byte) in glyph_a.iter().enumerate() {
+            for row in 0..FONT_ROWS {
+                if (byte >> row) & 1 == 1 {
+                    expected.insert((10 + col as i32, 20 + row as i32));
+                }
+            }
+        }
+        assert_eq!(covered_cells(&out), expected, "覆盖的字形像素必须逐格相同");
+        assert!(
+            !out.is_empty() && (out.len() as u32) <= expected.len() as u32,
+            "合并后 quad 数不得超过置位像素数"
+        );
         for q in &out {
             assert!(q.rect.x >= 10.0 && q.rect.x < 10.0 + FONT_COLS as f32, "像素应落在网格内");
             assert!(q.rect.y >= 20.0 && q.rect.y < 20.0 + FONT_ROWS as f32, "像素应落在网格内");
@@ -2225,16 +2292,39 @@ mod tests {
         }
     }
 
+    /// 合并必须**真的减少** quad：取一个竖笔画多的字形，quad 数要严格小于置位像素数。
+    /// （只断言"覆盖相同"的话，把代码改回逐像素也会全绿 —— 这条用来防止优化被静默退回去去。）
+    #[test]
+    fn render_text_merges_vertical_runs() {
+        let mut out = Vec::new();
+        render_text("H", 0.0, 0.0, Color::WHITE, 1.0, &mut out);
+        let lit = FONT5X7['H' as usize - 0x20]
+            .iter()
+            .map(|b| b.count_ones())
+            .sum::<u32>();
+        assert!(
+            (out.len() as u32) < lit,
+            "H 有竖笔画，合并后 quad 数 {} 应严格小于置位像素数 {}",
+            out.len(),
+            lit
+        );
+    }
+
     #[test]
     fn render_text_advances_cursor_per_char() {
-        let mut out = Vec::new();
-        render_text("!!", 0.0, 0.0, Color::WHITE, 2.0, &mut out);
-        // '!' 字形置位 6 像素，两个字符共 12 个 quad
-        assert_eq!(out.len(), 12);
-        let mut xs: Vec<f32> = out.iter().map(|q| q.rect.x).collect();
-        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let advance = (FONT_COLS as f32 + FONT_SPACING) * 2.0;
-        assert!((xs[6] - xs[0] - advance).abs() < 1e-5, "第二个字符应前进一个字符宽度");
+        // 用 scale=1 让每个格等于 1 单位，便于按整数格比对
+        let mut one = Vec::new();
+        render_text("!", 0.0, 0.0, Color::WHITE, 1.0, &mut one);
+        let mut two = Vec::new();
+        render_text("!!", 0.0, 0.0, Color::WHITE, 1.0, &mut two);
+        let advance = FONT_COLS as i32 + FONT_SPACING as i32;
+        // 第二个字符的覆盖 = 第一个字符的覆盖整体右移 advance 格（且两字符字形相同）
+        let first: std::collections::BTreeSet<(i32, i32)> = covered_cells(&one);
+        let all = covered_cells(&two);
+        let shifted: std::collections::BTreeSet<(i32, i32)> =
+            first.iter().map(|(x, y)| (x + advance, *y)).collect();
+        let expect: std::collections::BTreeSet<(i32, i32)> = first.union(&shifted).copied().collect();
+        assert_eq!(all, expect, "第二个字符应恰好前进一个字符宽度");
     }
 
     #[test]
