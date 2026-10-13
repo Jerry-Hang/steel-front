@@ -751,7 +751,32 @@ impl Renderer {
         // 池大小（调用线程参与首段 → 并发 = workers+1）；段计数数组按需建一次
         let pool = crate::engine::cpu::scene_pool();
         // 段数硬夹 `CULL_MAX_SEGMENTS`（下面两张前缀和表是栈上定长数组，见该常量的注释）
-        let nw = cull_segment_count(pool.workers());
+        // 🔴 **默认完全绕开线程池**（单段、调用线程自己干）；`RV3D_CULL_PARALLEL=1` 可回退。
+        //
+        // 依据（2026-10-13 真机交替 A/B，n=8~9/臂 × 3 对，同轮轮转）：
+        // ```
+        //   第1对  并行 792   串行 778    (-1.8%)
+        //   第2对  并行 1267  串行 444    (-65%)
+        //   第3对  并行 1213  串行 790    (-35%)
+        // ```
+        // **串行三对全胜，中位 1213 → 778（-36%，约 -400µs）。**
+        //
+        // 背景：此前 `cull_us` 一直被当成"逐实例循环"的代价，但实测
+        // **实例数减少 56% 只换来 10~13% 的下降**，而 `RV3D_SCENE_WORKERS` 4 vs 1 的加速是**零**
+        // ⇒ 那笔时间不在循环里，在**每帧固定开销**上 ——
+        // 剔除每帧调 `par_for_each_mut` **两次**（阶段 A/B），每次都要发作业、叫醒 worker、自旋 join。
+        // 手机上这套固定成本 ≈ 单段工作量本身，池子白费。
+        //
+        // ⚠️ `RV3D_SCENE_WORKERS=1` **不是**串行 —— 仍有 1 个 worker 线程 + 主线程 = 2 段，
+        //    所以那个开关量不出这件事，必须用本开关。
+        // ⚠️ **两条路共用同一份每段实现**（`work_a`/`work_b`）⇒ 结果逐位一致，不是"近似"。
+        // ⚠️ 桌面侧未做 A/B（微基准 `cull_parallel_vs_serial_microbench` 可以量）。
+        let cull_serial = !crate::syscfg::flag("RV3D_CULL_PARALLEL");
+        let nw = if cull_serial {
+            1
+        } else {
+            cull_segment_count(pool.workers())
+        };
         if self.seg_near_counts.len() != nw {
             self.seg_near_counts = (0..nw)
                 .map(|_| std::sync::atomic::AtomicU32::new(0))
@@ -771,8 +796,9 @@ impl Renderer {
         let seg_far = &self.seg_far_counts;
         let scratch = &mut self.culled_scratch;
 
-        // ---- 阶段 A：并行剔除 + 近/远分档计数（段内 SIMD 选路，见 cull_spheres_dispatch）----
-        pool.par_for_each_mut(scratch, move |seg, start, seg_slice| {
+        // ---- 阶段 A：剔除 + 近/远分档计数（段内 SIMD 选路，见 cull_spheres_dispatch）----
+        // 每段工作抽成具名闭包，**串行与并行共用同一份实现** ⇒ 两条路结果逐位一致。
+        let work_a = |seg: usize, start: usize, seg_slice: &mut [u32]| {
             let end = start + seg_slice.len();
             // 每段局部剔除结果（段实例数为容量上限，可见数通常远小于此）
             let mut local: Vec<u32> = Vec::with_capacity(seg_slice.len());
@@ -804,7 +830,12 @@ impl Renderer {
             }
             seg_near[seg].store(near, std::sync::atomic::Ordering::Relaxed);
             seg_far[seg].store(far, std::sync::atomic::Ordering::Relaxed);
-        });
+        };
+        if cull_serial {
+            work_a(0, 0, scratch);
+        } else {
+            pool.par_for_each_mut(scratch, work_a);
+        }
 
         // ---- 前缀和（串行，段数 ≤ 9，微秒级）：每段近/远档写入起点 ----
         // 表长 = `CULL_MAX_SEGMENTS`，而 `nw` 已由 `cull_segment_count` 夹到同一上限
@@ -822,7 +853,8 @@ impl Renderer {
 
         // ---- 阶段 B：按段并行压缩上传（近档在前、远档随后；段间偏移由前缀和保证互不相交）----
         let slot_ptr = crate::engine::cpu::SendPtr(slot);
-        pool.par_for_each_mut(scratch, move |seg, _start, seg_slice| {
+        // 同样抽成具名闭包：串行/并行共用（`RV3D_CULL_SERIAL` 见阶段 A 的注释）
+        let work_b = |seg: usize, _start: usize, seg_slice: &mut [u32]| {
             let count = (seg_near[seg].load(std::sync::atomic::Ordering::Relaxed)
                 + seg_far[seg].load(std::sync::atomic::Ordering::Relaxed))
                 as usize;
@@ -858,7 +890,12 @@ impl Renderer {
                     );
                 }
             }
-        });
+        };
+        if cull_serial {
+            work_b(0, 0, scratch);
+        } else {
+            pool.par_for_each_mut(scratch, work_b);
+        }
         (near_total, far_total)
     }
     /// 按运行时指令集选路执行视锥剔除（各档路径与标量逐位一致，非 FMA）：
