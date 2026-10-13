@@ -796,6 +796,9 @@ impl Renderer {
         let seg_far = &self.seg_far_counts;
         let scratch = &mut self.culled_scratch;
 
+        // 【临时诊断】分段计时：把 cull_us 拆成 视锥测试 / 搬运 两半，
+        // 好判断该动哪一半（不重编就能读，`RV3D_CULL_DIAG=1`）。
+        let t_a = std::time::Instant::now();
         // ---- 阶段 A：剔除 + 近/远分档计数（段内 SIMD 选路，见 cull_spheres_dispatch）----
         // 每段工作抽成具名闭包，**串行与并行共用同一份实现** ⇒ 两条路结果逐位一致。
         let work_a = |seg: usize, start: usize, seg_slice: &mut [u32]| {
@@ -836,6 +839,9 @@ impl Renderer {
         } else {
             pool.par_for_each_mut(scratch, work_a);
         }
+
+        // 【临时诊断】阶段 A 结束的时刻（搬运从这之后算起）
+        let t_b = std::time::Instant::now();
 
         // ---- 前缀和（串行，段数 ≤ 9，微秒级）：每段近/远档写入起点 ----
         // 表长 = `CULL_MAX_SEGMENTS`，而 `nw` 已由 `cull_segment_count` 夹到同一上限
@@ -895,6 +901,22 @@ impl Renderer {
             work_b(0, 0, scratch);
         } else {
             pool.par_for_each_mut(scratch, work_b);
+        }
+        if crate::syscfg::flag("RV3D_CULL_DIAG") {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            if n % 60 == 0 {
+                log::info!(
+                    "[cull-diag] 视锥+分档 {}µs  搬运 {}µs  合计 {}µs（visible={} 段数={} 串行={}）",
+                    t_b.duration_since(t_a).as_micros(),
+                    t_a.elapsed().as_micros().saturating_sub(t_b.duration_since(t_a).as_micros()),
+                    t_a.elapsed().as_micros(),
+                    near_total + far_total,
+                    nw,
+                    cull_serial
+                );
+            }
         }
         (near_total, far_total)
     }
