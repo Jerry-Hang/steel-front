@@ -932,6 +932,15 @@ struct GameApp {
     cam_override: Option<(glam::Vec3, f32, f32, f32)>,
     /// 旋转机位的累计转角（rad）。只在 `cam_override` 带角速度时使用。
     cam_spin: f32,
+    /// **当前已上传到 GPU 的枪模对应的武器 key**（`None` = 未上传 / 已被清空）。
+    ///
+    /// 存在的理由（2026-10-13）：`set_first_person_gun_mesh` 原本**每帧**都被调用，
+    /// 而它会把整把枪（本仓 AK-12M = **63283 顶点 × 32B = 2.0MB** + 70479 索引 × 4B = 282KB）
+    /// 拷进映射缓冲；上游 `first_person_gun_mesh()` 还先返回一份**带所有权**的副本
+    /// ⇒ 每帧约 **4.6MB 的无效搬运**。
+    /// 而枪模是**按武器 key 缓存**的、姿态走 `fp_gun_pre` 矩阵 ⇒ 同一把枪下逐帧完全相同。
+    /// ⇒ 只在 key 变化时重建+上传。切到"不显示枪"时清空它，保证切回来会重传。
+    gun_mesh_uploaded_key: Option<String>,
     /// 命令输入缓冲（当前只接受数字，回车切换武器）
     command_buf: String,
     /// 当前武器枪模缓存（构建含光照烘焙，切枪时才重建；帧内只做视空间变换）
@@ -1101,6 +1110,7 @@ impl GameApp {
                     .filter(|&n| (1..=35).contains(&n))
             },
             cam_spin: 0.0,
+            gun_mesh_uploaded_key: None,
             inspect_armed: false,
             cam_logged: false,
             cam_override: crate::syscfg::cfg("RV3D_CAM").and_then(|s| {
@@ -2529,8 +2539,23 @@ impl GameApp {
 
     /// 渲染一帧
     fn render(&mut self) {
-        // 第一人称枪模程序化网格（相机姿态）：在借用 renderer 前生成，避免借用冲突
-        let gun_mesh = self.first_person_gun_mesh();
+        // 【诊断】`GameApp::render()` 的**准备段**计时（起 → 调用 `renderer.render`）。
+        // 存在的理由（2026-10-13）：实测 `cyc = upd + ren` 自洽，但 `ren − frame_us ≈ 2000µs`，
+        // 而 `Renderer::render()` 尾部只有 3 行 ⇒ 那 2000µs 全在本函数**包着**渲染器的那一段
+        // （本函数 2531→3283 共 752 行：`hud_quads` 每帧重建、`set_hud_quads` 上传、
+        // `first_person_gun_mesh`、`set_lights`、`pt_set_scene_markers` …）。
+        // **这是整帧里最大的一块没有任何计时器覆盖的时间。** 先把它的占比量出来。
+        let prep_start = std::time::Instant::now();
+        // 第一人称枪模程序化网格（相机姿态）：在借用 renderer 前生成，避免借用冲突。
+        // 🔴 **只在武器 key 变化时生成 + 上传**（见 `gun_mesh_uploaded_key` 的文档）：
+        // 这把枪有几万顶点，每帧重建+拷贝约 4.6MB，而同一把枪下结果逐帧相同。
+        let gun_key = self.game.active_weapon_key().to_string();
+        let gun_key_changed = self.gun_mesh_uploaded_key.as_deref() != Some(gun_key.as_str());
+        let gun_mesh = if gun_key_changed {
+            self.first_person_gun_mesh()
+        } else {
+            (Vec::new(), Vec::new())
+        };
         // 诊断（每 5 秒一次）：窗口 inner_size vs swapchain extent vs HUD 尺寸
         if self.anim_clock > 5.0 && (self.anim_clock - 5.0) % 5.0 < 0.05 {
             if let Some(win) = &self.window {
@@ -3202,11 +3227,16 @@ impl GameApp {
                 || (self.game.state() == GameState::Playing
                     && self.camera.mode == CameraMode::FirstPerson);
             if show_gun {
-                renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+                if gun_key_changed {
+                    renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
+                    self.gun_mesh_uploaded_key = Some(gun_key.clone());
+                }
                 renderer.set_first_person_gun_model(fp_gun_pre);
             } else {
                 renderer.set_first_person_gun_mesh(&[], &[]);
                 renderer.set_first_person_gun_model(fp_gun_pre);
+                // 清掉 key：否则"隐藏→再显示同一把枪"时 key 没变 ⇒ 不会重传 ⇒ 枪不见了
+                self.gun_mesh_uploaded_key = None;
             }
 
             // 尺寸保险（2026-08-15）：窗口实际尺寸与交换链不一致时重建——
@@ -3279,6 +3309,19 @@ impl GameApp {
             // PT 场景 = 光栅化同一批 WorldMarker（盒集合变化时才重建 BLAS，指纹判定在渲染器内）
             if let Err(e) = renderer.pt_set_scene_markers(&markers) {
                 log::warn!("PT-SCENE 失败: {e}");
+            }
+            // 【诊断】准备段到此为止（下面才是真正的渲染器调用）
+            let prep_us = prep_start.elapsed().as_micros() as u64;
+            {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static N: AtomicU32 = AtomicU32::new(0);
+                let n = N.fetch_add(1, Ordering::Relaxed);
+                if n % 120 == 0 {
+                    log::info!(
+                        "[prep-diag] GameApp 准备段 {}µs（枪模网格 + HUD 几何 + 上传 + PT marker）",
+                        prep_us
+                    );
+                }
             }
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
