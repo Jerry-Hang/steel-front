@@ -30,7 +30,7 @@
 装备是现代系，默认武器 **AK-12 风暴 7.62×39mm**）。
 美术基调按 **2020s 当代东欧/中东战乱城镇**走（混凝土板楼 + 抹灰老城 + 破损，冷灰色调）。
 
-Rust + Vulkan，纯 bin crate。**依赖只有 10 个**（`Cargo.toml`）：
+Rust + Vulkan，lib+bin（桌面 rlib / Android cdylib）。**直接依赖 10 个**（`Cargo.toml`）：
 `ash` 0.38 / `ash-window` 0.13 / `winit` 0.30(rwh_06) / `glam` 0.29 / `raw-window-handle` 0.6 /
 `log` 0.4 / `env_logger` 0.11 / `image` 0.25 / `naga` 30(wgsl-in,spv-out,spv-in) / `rspirv` 0.11。
 **不新增第三方依赖**是硬约束。工具链：rustc 1.96.1（2026-06-26）。
@@ -78,7 +78,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 ## 开发环境
 
-> **环境铁律（勿回退）**：开发/验证 = **Windows** 或 **Linux 原生**（2026-09-28 并存，坑不互替）；
+> **环境铁律（勿回退）**：开发/验证 = **Windows** / **Linux 原生** / **Android**（三平台，坑不互替）；
 > WSL2 材料**全部作废**。Linux 侧见 **`docs/linux-native.md`**（**命令在 §10–§15**，入口 `SteelFront.sh`）。
 
 - **机器**：**ASUS TUF FA608PM**（BIOS FA608PM.309）+ RTX 5060 Laptop + AMD 8940HX，内存 12GB。
