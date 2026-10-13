@@ -718,6 +718,8 @@ pub struct Renderer {
     /// （表现是障碍物闪烁/残影）。⇒ 必须 `slot_version[slot] == markers_version` 才跳。
     marker_slot_version: [u64; 8],
     /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
+    /// 上一帧  的耗时（µs，诊断用；见该函数里的注释）
+    last_marker_upload_us: u64,
     last_marker_near: u32,
     last_marker_far: u32,
     /// NPC 士兵段实例（由 set_npc_visuals 构建，三几何分区：盒/圆柱/球）

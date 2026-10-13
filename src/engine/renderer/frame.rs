@@ -552,7 +552,14 @@ impl Renderer {
         {
             (0, 0)
         } else {
-            self.upload_markers(cam_pos)
+            let t = std::time::Instant::now();
+            let r = self.upload_markers(cam_pos);
+            // 【诊断】`upload_markers` 的耗时（内容未变时会早退 ⇒ 这里应接近 0）
+            // 存在的理由：marker 的"跳过上传"改动效果**在准备段埋点里看不到** ——
+            // 准备段量到的那 ~600µs 是**上游收集**（lib.rs 遍历 `render_geometry()`），
+            // 而本函数在 `render()` 内部。不看这里就没法判断跳过到底有没有生效。
+            self.last_marker_upload_us = t.elapsed().as_micros() as u64;
+            r
         };
         self.last_marker_near = marker_near;
         self.last_marker_far = marker_far;
@@ -635,7 +642,7 @@ impl Renderer {
                 0.0
             };
             log::info!(
-                "visible={}/{} near={} far={} fps={:.1} frame_us={} cull_us={} terrain_us={} wait_fence_us={} acquire_us={} record_us={} submit_us={} present_us={} terrain_lod={} blend={:.3} quality={} marker={} npc={}",
+                "visible={}/{} near={} far={} fps={:.1} frame_us={} cull_us={} terrain_us={} wait_fence_us={} acquire_us={} record_us={} submit_us={} present_us={} terrain_lod={} blend={:.3} quality={} marker={} npc={} mk_up_us={}",
                 near_count + far_count,
                 INSTANCE_COUNT,
                 near_count,
@@ -661,7 +668,11 @@ impl Renderer {
                     + self.last_npc_cyl_near
                     + self.last_npc_cyl_far
                     + self.last_npc_sph_near
-                    + self.last_npc_sph_far
+                    + self.last_npc_sph_far,
+                // 🔴 顺序必须与格式串一致：`marker` / `npc` / `mk_up_us`。
+                // 三个都是 u64，**串位了编译器不会报** —— 而 `marker=` 那几个数是
+                // 排查"某物有没有被画"的第一手依据（铁律 B 里专门有一节讲两个同名 npc）。
+                self.last_marker_upload_us
             );
             self.frame_count = 0;
             self.perf_window_start = Instant::now();
