@@ -436,6 +436,65 @@ impl Renderer {
     /// 🔴 2026-09-26 再加一层：失败原因若是**设备丢失**，那"下一次成功"永远不会来
     /// （本引擎没有重建设备的路径），置 `device_lost` 之后 `swapchain_recovery_allowed()`
     /// 恒假 ⇒ 调用方不再重试、不再刷日志。见该字段与 `is_device_lost_error` 的文档。
+    /// 🔴 **重建 `VkSurfaceKHR`**（2026-10-13）—— Android 切后台再切回来黑屏的真正修法。
+    ///
+    /// 症状（真机实测，日志逐行）：
+    /// ```text
+    /// 生命周期：Suspended（surface 被系统收回），暂停渲染
+    /// 生命周期：Resumed（surface 可用），恢复渲染
+    /// E 重建交换链失败：获取表面能力失败: ERROR_SURFACE_LOST_KHR
+    /// W Resumed 后重建交换链失败（等后续 Resized 重试）
+    /// ⇒ 100% 黑屏（进程活着、输入有反应）
+    /// ```
+    ///
+    /// 根因：Android 切后台时**系统回收原生窗口**，于是 `VkSurfaceKHR` 本身失效。
+    /// `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` 报 `ERROR_SURFACE_LOST_KHR`。
+    /// **光重建交换链永远救不回来**（拿着死 surface 重试多少次都是同一个错）——
+    /// 必须从**当前**窗口句柄重新创建 surface。此前全仓没有这条路径（只有退出时 destroy）。
+    ///
+    /// 顺序上的两个要点：
+    /// 1. **先 `device_wait_idle`**：旧 surface 正被交换链与 framebuffer 引用着；
+    /// 2. **新 surface 建成功之后才销毁旧的**（本仓"上传缓冲先建新的再拆旧的"同款约定）
+    ///    —— 中途失败时原句柄保持有效，不会留下半销毁状态。
+    ///
+    /// 尾部直接复用 `try_recreate_swapchain()`：它已经含 swapchain + HUD framebuffer +
+    /// 离屏场景图 + MSAA/深度/帧缓冲 + 命令缓冲 + 截图资源的完整重建序列（且经真机验证过），
+    /// 这里再抄一份只会分叉。
+    pub(crate) fn recreate_surface(&mut self, window: &winit::window::Window) -> Result<(), String> {
+        log::warn!("重建 Vulkan 表面（旧 surface 已被系统回收，`ERROR_SURFACE_LOST_KHR`）");
+        unsafe { self.device.device_wait_idle() }
+            .map_err(|e| format!("重建表面前等待 GPU 空闲失败: {e}"))?;
+        self.destroy_swapchain();
+
+        let raw_handle = window
+            .window_handle()
+            .map_err(|e| format!("获取窗口句柄失败: {e:?}"))?
+            .as_raw();
+        let display_handle = window
+            .display_handle()
+            .map_err(|e| format!("获取显示句柄失败: {e:?}"))?
+            .as_raw();
+        let new_surface = unsafe {
+            ash_window::create_surface(
+                &self._entry,
+                &self.instance,
+                display_handle,
+                raw_handle,
+                None,
+            )
+            .map_err(|e| format!("重建 Vulkan 表面失败: {e:?}"))?
+        };
+
+        // 新 surface 已经拿到手 ⇒ 这时才换掉旧的（失败路径上面已经 return，旧句柄仍然有效）
+        let old = self.surface;
+        self.surface = new_surface;
+        unsafe { self.surface_loader.destroy_surface(old, None) };
+
+        self.try_recreate_swapchain()?;
+        log::info!("Vulkan 表面重建完成，渲染恢复");
+        Ok(())
+    }
+
     /// 交换链是否处于**降级**状态（重建中途失败 ⇒ `frame_suppressed` 会跳过每一帧）。
     ///
     /// 为什么需要这个访问器（2026-10-12）：调用方要在**每帧**判断"要不要给一次恢复机会"，

@@ -3224,9 +3224,18 @@ impl GameApp {
             // 不会刷屏：`swapchain_recovery_allowed` 内含 `RECREATE_RETRY_MIN_SECS` 限流；
             // `device_lost` 时它恒假 ⇒ 设备真丢了的场景仍然一次都不重试、不空转。
             if renderer.swapchain_broken() && renderer.swapchain_recovery_allowed() {
-                log::warn!("交换链处于降级状态（同尺寸下没有 Resized 事件）⇒ 每帧重试一次重建");
-                if let Err(e) = renderer.recreate_swapchain() {
-                    log::error!("降级恢复重建失败：{}", e);
+                // 同样升级：surface 死了的话，重建交换链是白试，直接走重建 surface。
+                // （没有 window 就只试交换链 —— 但 `render()` 能走到这里说明窗口在。）
+                if let Some(win) = &self.window {
+                    let r = renderer.recreate_swapchain().or_else(|e| {
+                        log::warn!("降级恢复重建交换链失败（{}）⇒ 升级为重建 Vulkan 表面", e);
+                        renderer.recreate_surface(win)
+                    });
+                    if let Err(e) = r {
+                        log::error!("降级恢复重建失败（每帧重试，已限流）：{}", e);
+                    }
+                } else if let Err(e) = renderer.recreate_swapchain() {
+                    log::error!("降级恢复重建失败（每帧重试，已限流）：{}", e);
                 }
             }
             // PT 取景：与光栅化同一相机、同一太阳方向（路径追踪要当烘焙参照，参数必须同源）
@@ -3357,10 +3366,22 @@ impl ApplicationHandler for GameApp {
             if self.suspended {
                 log::info!("生命周期：Resumed（surface 可用），恢复渲染");
                 self.suspended = false;
-                if let Some(renderer) = &mut self.renderer {
+                // 两个字段的不相交借用（同 `render()` 里 `&mut self.renderer` + `&self.window` 的写法）
+                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
                     if renderer.swapchain_recovery_allowed() {
-                        if let Err(e) = renderer.recreate_swapchain() {
-                            log::warn!("Resumed 后重建交换链失败（等后续 Resized 重试）：{}", e);
+                        // 🔴 2026-10-13：**失败要升级成重建 surface**，不能只记一条 warn。
+                        // 实测（真机日志）：Android 切后台时系统回收原生窗口 ⇒
+                        // `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` 报 `ERROR_SURFACE_LOST_KHR`
+                        // ⇒ 拿着死 surface 重建交换链**永远失败**，而"等后续 Resized"
+                        // 在尺寸不变时**永远等不到** ⇒ 永久黑屏（用户报的那个 bug）。
+                        let r = renderer
+                            .recreate_swapchain()
+                            .or_else(|e| {
+                                log::warn!("Resumed 后重建交换链失败（{}）⇒ 升级为重建 Vulkan 表面", e);
+                                renderer.recreate_surface(window)
+                            });
+                        if let Err(e) = r {
+                            log::error!("Resumed 后连表面也重建失败（等后续事件重试）：{}", e);
                         }
                     }
                 }
