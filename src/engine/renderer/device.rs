@@ -563,6 +563,8 @@ impl Renderer {
             instance_center_y: Vec::with_capacity(INSTANCE_COUNT as usize),
             instance_center_z: Vec::with_capacity(INSTANCE_COUNT as usize),
             markers: Vec::new(),
+            markers_version: 1,
+            marker_slot_version: [0; 8], // 全 0 ⇒ 首帧必然 != 版本 1 ⇒ 一定写
             last_marker_near: 0,
             last_marker_far: 0,
             npc_box_parts: Vec::new(),

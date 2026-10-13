@@ -410,14 +410,23 @@ impl Renderer {
     /// 每帧视锥剔除 + 距离 LOD 分档：
     /// 设置世界障碍 marker（关卡切换时由 main.rs 调用；容量截断到 MAX_MARKER_INSTANCES）
     pub(crate) fn set_world_markers(&mut self, markers: &[WorldMarker]) {
-        self.markers = markers
-            .iter()
-            .take(MAX_MARKER_INSTANCES as usize)
-            .map(|m| InstanceData {
-                model: m.model.to_cols_array(),
-                tint: m.tint,
-            })
-            .collect();
+        let n = markers.len().min(MAX_MARKER_INSTANCES as usize);
+        // 🔴 **内容没变就不重建、也不升版本**（2026-10-13）：上游每帧都会重新构造一份
+        // 内容相同的列表（静态城市场景障碍 ~1789 件），而重建 + 上传实测 190~570µs。
+        // 判据是"内容比较"而不是"调用次数" —— 调用次数每帧都在涨，没有区分度。
+        let same = n == self.markers.len()
+            && markers[..n].iter().zip(self.markers.iter()).all(|(m, inst)| {
+                m.tint == inst.tint && m.model.to_cols_array() == inst.model
+            });
+        if same {
+            return;
+        }
+        self.markers.clear();
+        self.markers.extend(markers[..n].iter().map(|m| InstanceData {
+            model: m.model.to_cols_array(),
+            tint: m.tint,
+        }));
+        self.markers_version = self.markers_version.wrapping_add(1);
     }
     /// 追加一批世界 marker（弹孔等每帧变化的实例），容量仍截断到 `MAX_MARKER_INSTANCES`。
     ///
@@ -426,11 +435,18 @@ impl Renderer {
     /// 还会白占 PT 盒容量（`PT_MAX_BOXES`）。
     pub(crate) fn append_markers(&mut self, extra: &[WorldMarker]) {
         let room = (MAX_MARKER_INSTANCES as usize).saturating_sub(self.markers.len());
+        let take = extra.len().min(room);
+        if take == 0 {
+            return;
+        }
         self.markers
-            .extend(extra.iter().take(room).map(|m| InstanceData {
+            .extend(extra[..take].iter().map(|m| InstanceData {
                 model: m.model.to_cols_array(),
                 tint: m.tint,
             }));
+        // ⚠️ **必须升版本**：否则 `upload_markers` 会因为"槽位已是当前版本"而跳过上传，
+        // 弹孔/动态 marker 就永远不上屏。
+        self.markers_version = self.markers_version.wrapping_add(1);
     }
     /// 每帧上传世界障碍 marker 到实例 buffer 的 MARKER_SLOT_BASE 之后区域
     /// （跳过 65536 identity slot，见 MARKER_SLOT_BASE 注释），返回 (近档, 远档) 计数。
@@ -443,6 +459,17 @@ impl Renderer {
             _ => return (0, 0),
         };
         let stride = std::mem::size_of::<InstanceData>();
+        // 🔴 **内容未变且本槽位已写过这个版本 ⇒ 跳过搬运**（2026-10-13）。
+        // 障碍 marker 是静态的，每帧重传那 ~1789 件（143KB）实测要 190~570µs。
+        // 判据必须**按槽位**看（`marker_slot_version[slot] == markers_version`）：
+        // 缓冲按在飞帧槽位分开，只看全局版本会在"版本升了但本槽还没写"时跳过 ⇒ 那一帧用旧数据。
+        // 两条路径（mesh / 非 mesh）在 `near_sq = f32::MAX` 下都返回 `(count, 0)`，故可共用这个早退。
+        let slot_idx = self.current_frame.min(self.marker_slot_version.len() - 1);
+        let marker_count = self.markers.len() as u32;
+        if marker_count > 0 && self.marker_slot_version[slot_idx] == self.markers_version {
+            return (marker_count, 0);
+        }
+        self.marker_slot_version[slot_idx] = self.markers_version;
         if self.mesh_enabled {
             // mesh 路径：不做近/远压缩，顺序写槽位（几何由 shader 按距离自选）。
             // 返回 (count, 0)：计数仍供 draw 范围与性能日志使用。

@@ -702,6 +702,21 @@ pub struct Renderer {
     instance_center_z: Vec<f32>,
     /// 世界障碍 marker（关卡切换时由 main.rs 设置；独立于实例场，见 MARKER_SLOT_BASE）
     markers: Vec<InstanceData>,
+    /// marker 内容的版本号：`set_world_markers` / `append_markers` 真正改动内容时 +1。
+    ///
+    /// 存在的理由（2026-10-13）：marker 是**静态**的（城市场景障碍 ~1789 件），
+    /// 但每帧都在重收集 + 重上传（`[prep-diag]` 实测那一项 190~570µs）。
+    /// ⇒ 内容没变就不必重传。判据用"内容比较"而不是"调用次数"，
+    /// 因为上游每帧都会**重新构造**一份内容相同的列表。
+    markers_version: u64,
+    /// **每个在飞帧槽位上"已经写进去的是哪个版本"**。
+    ///
+    /// 🔴 这个数组是必需的，不能只看 `markers_version` 就跳过：
+    /// 实例缓冲按**在飞帧槽位**分开（`instance_mapped[current_frame]`），
+    /// 版本 N 之前写过槽位 0、之后升到 N+1 只写了槽位 1 —— 此时槽位 0 里还是旧数据。
+    /// 若下一轮轮到槽位 0 却因为"版本已经是 N+1"而跳过，**那一帧会拿旧 marker 去画**
+    /// （表现是障碍物闪烁/残影）。⇒ 必须 `slot_version[slot] == markers_version` 才跳。
+    marker_slot_version: [u64; 8],
     /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
     last_marker_near: u32,
     last_marker_far: u32,
