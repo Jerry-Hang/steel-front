@@ -679,33 +679,86 @@ impl Renderer {
             "InstanceData 必须对齐 std430 步长 80 字节"
         );
 
-        // 256×256 网格：间距 2.0、以原点为中心、y=0 平面（场地 512×512）。
-        // 地面实例用专用平铺 quad 几何（GROUND_VERTS，几何无侧壁），矩阵纯平移，
+        // 地面实例场：**内外双密度**网格（2026-10-13 改，此前是均匀 256×256 @2m）。
+        //
+        // 为什么改（实测）：剔除是整帧最大的单项之一 —— `cull_us ≈ 1000µs`，占 `frame_us` 的 42%，
+        // 而它对 **65536 个实例**逐个做视锥测试。本机线程池对这件事的加速实测是 **零**
+        // （交替 A/B，n=54/臂 × 3 对，4 worker vs 1 worker 差 -0.9% / -0.2% / -6.5%）
+        // ⇒ **只能减工作量**。而屏幕上的地面在近处才需要 2m 的细网格，远处 4m 看不出差别。
+        //
+        // 覆盖范围**逐米不变**（仍是 ±256m = 512×512），格心对齐 ⇒ 无缝隙无重叠：
+        //   外圈 128×128 个 4m 格 = 16384 个 quad
+        //   其中落在 ±128m 内的 64×64 = 4096 格，各自细分成 4 个 2m 格 = 16384 个 quad
+        //   外圈剩余 16384-4096 = 12288 个 quad
+        //   ⇒ 合计 **28672** 个（比原来的 65536 少 **56%**）。
+        //
+        // ⚠️ **不动的两样**：`INSTANCE_COUNT`（仍是 65536，它是 marker/NPC 槽位的基准，
+        //    改它会牵动 `build.rs` 字面量与一批钉死的判据）与实例缓冲容量。
+        //    这里只是"少填一些" ⇒ 槽位布局逐位不变，属于安全改动。
+        //
+        // 地面实例用专用平铺 quad 几何（GROUND_VERTS，几何无侧壁），矩阵 = 平移 × 等比缩放，
         // 高度 = terrain_height + 0.05（略高于地形网格 y=0，避免深度冲突）。
         // 旧版 2×2×2 立方体（顶面 +0.95）与压扁薄片（侧壁 0.2m）都有可见侧壁，
         // 视觉上像一格一格"掀盖纸箱"铺地；平铺 quad 无任何竖立面，地面真正连续。
+        let field_step = 4.0f32;
+        let field_n = 128usize; // 128 × 4m = 512m
+        let field_half = field_step * field_n as f32 * 0.5;
+        let inner_half = 128.0f32; // 内圈半幅（细格区）
+        let inner_step = field_step * 0.5;
         self.instances = Vec::with_capacity(INSTANCE_COUNT as usize);
-        for iz in 0..GRID_SIZE {
-            for ix in 0..GRID_SIZE {
-                let x = (ix as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
-                let z = (iz as f32 - (GRID_SIZE as f32 - 1.0) * 0.5) * 2.0;
-                let y = terrain_height(x, z) + 0.05;
-                let model = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
-                // 半径 = 2×2m quad 半对角线 √(1²+1²)=√2≈1.414（2026-08-15 修正：
-                // 旧 0.5×√2=0.707 低估一半 → 屏幕四角边缘实例被激进剔除穿帮）
-                let r = 2.0f32.sqrt();
-                self.instance_radii.push(r);
-                self.instance_center_x.push(x);
-                self.instance_center_y.push(y);
-                self.instance_center_z.push(z);
-                self.instances.push(InstanceData {
-                    model: model.to_cols_array(),
-                    tint: [0.7, 0.7, 0.7, 1.0],
-                });
+        // 闭包拿不到 &mut self 的多个字段，这里直接按序写入各字段
+        let mut push_quad = |x: f32, z: f32, size: f32| {
+            let y = terrain_height(x, z) + 0.05;
+            // GROUND_VERTS 是 2×2 的 quad（半幅 1）⇒ 缩放系数 = 半边长 = size/2
+            let scale = size * 0.5;
+            let model = glam::Mat4::from_scale_rotation_translation(
+                glam::Vec3::splat(scale),
+                glam::Quat::IDENTITY,
+                glam::Vec3::new(x, y, z),
+            );
+            // 半径 = 半对角线 = √2 × 半边长（2026-08-15 修正过一版：曾低估一半
+            // → 屏幕四角边缘实例被激进剔除穿帮）。**必须随 size 缩放**，否则大格被误剔。
+            self.instance_radii.push(2.0f32.sqrt() * scale);
+            self.instance_center_x.push(x);
+            self.instance_center_y.push(y);
+            self.instance_center_z.push(z);
+            self.instances.push(InstanceData {
+                model: model.to_cols_array(),
+                tint: [0.7, 0.7, 0.7, 1.0],
+            });
+        };
+        for iz in 0..field_n {
+            for ix in 0..field_n {
+                // 格心（对齐到网格中心，覆盖范围与旧的 ±256m 一致）
+                let cx = (ix as f32 + 0.5) * field_step - field_half;
+                let cz = (iz as f32 + 0.5) * field_step - field_half;
+                if cx.abs() < inner_half && cz.abs() < inner_half {
+                    // 内圈：细分成 4 个 2m 格（保持近处地面的平滑）
+                    for dz in [-1.0f32, 1.0] {
+                        for dx in [-1.0f32, 1.0] {
+                            push_quad(
+                                cx + dx * inner_step * 0.5,
+                                cz + dz * inner_step * 0.5,
+                                inner_step,
+                            );
+                        }
+                    }
+                } else {
+                    push_quad(cx, cz, field_step);
+                }
             }
         }
-        // 并行剔除暂存：一次分配整场容量（每段可见索引上限 = 段实例数）
-        self.culled_scratch = vec![0u32; INSTANCE_COUNT as usize];
+        log::info!(
+            "地面实例场：{} 个 quad（内圈 {} 内 {:.1}m 细格，外圈 {:.1}m；覆盖 ±{:.0}m）",
+            self.instances.len(),
+            inner_half,
+            inner_step,
+            field_step,
+            field_half
+        );
+        // 并行剔除暂存：按**实际实例数**分配（不是 INSTANCE_COUNT —— 场地已不是满的，
+        // 按满容量分会越界读 cx/cy/cz）
+        self.culled_scratch = vec![0u32; self.instances.len()];
 
         // 末尾保留 1 个 slot 存 identity 实例（地形 draw 用，仅创建时写入一次），
         // 元素数由 INSTANCE_BUFFER_ELEMS 单一定义（= 最高槽位 + 1），不再在此抄写副本：
