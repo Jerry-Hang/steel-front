@@ -1,7 +1,7 @@
 # AGENTS.md — Steel Front 项目记忆与 AI 交接文档
 
 > **体量约定（请遵守）** —— 本文件每次会话被**完整注入**，是稀缺资源：
-> 它曾膨胀到 200KB，三分之二是重复段落、被推翻后没删的旧结论（见教训 1、2）。
+> 它曾膨胀到 200KB，三分之二是重复段落与没删的旧结论（见教训 1、2）。
 > **只写仍然生效的约束**（铁律 / 未结案 / 教训 / 验收红线）：被推翻的**直接删掉**，不留"错误 + 更正"两段；
 > 已结案的只留一行结论；**进度与时间线一律写进 `docs/PROGRESS.md`**。
 > 目标 **< 48KB**；**硬上限 65,536 B** —— 实测**超出一点点就真会被截断**（2026-09-26 末条教训被截掉，
@@ -34,26 +34,30 @@ Rust + Vulkan，lib+bin（桌面 rlib / Android cdylib）。**直接依赖 10 �
 `ash` 0.38 / `ash-window` 0.13 / `winit` 0.30(rwh_06) / `glam` 0.29 / `raw-window-handle` 0.6 /
 `log` 0.4 / `env_logger` 0.11 / `image` 0.25 / `naga` 30(wgsl-in,spv-out,spv-in) / `rspirv` 0.11。
 **不新增第三方依赖**是硬约束。工具链：rustc 1.96.1（2026-06-26）。
-> ⚠ **例外（2026-10-09，仅 Android 目标）**：`winit` 的 `android-game-activity` feature 会引入**传递依赖** `android-activity`（及其 `ndk` / `ndk-sys` / `jni`）。它是 winit **官方指定的 Android 入口**（Activity 生命周期 + `ANativeWindow` surface + 输入），不是我们另找的轮子；本约束的目的是「别让依赖膨胀、别把可移植性卖出去」，而它恰是为可移植性存在的官方适配层。**桌面直接依赖仍为 10 个，本例外不改变桌面构建图。** 编译须走 `cargo ndk -t arm64-v8a check`（裸 `cargo check` 会因 cc-rs 找不到 `aarch64-linux-android-clang++` 而失败）。
-> **Android 目标实际引入的传递依赖全集（2026-10-09 实测 `cargo tree --target aarch64-linux-android`）**：
-> `android-activity` 0.6.1、`android-properties` 0.2.2、`jni` 0.22.4（+`jni-macros`）、
-> `jni-sys`（0.3.1 / 0.4.1 + `jni-sys-macros`）、`ndk` 0.9.0、`ndk-sys` 0.6.0、`ndk-context` 0.1.1。
-> **全部仅 Android 目标生效；桌面（Windows / Linux）构建图不变（直接依赖仍 10 个）。**
+> ⚠ **例外（2026-10-09，仅 Android 目标）**：`winit` 的 `android-game-activity` 会引入传递依赖
+> `android-activity`（+`ndk`/`ndk-sys`/`jni`）。它是 winit **官方指定的 Android 入口**
+> （Activity 生命周期 + `ANativeWindow` surface + 输入），**桌面直接依赖仍为 10 个**。
+> 编译须走 `cargo ndk -t arm64-v8a check`（裸 `cargo check` 会因 cc-rs 找不到
+> `aarch64-linux-android-clang++` 而失败）。
+> **实际引入的传递依赖全集（2026-10-09 实测 `cargo tree --target aarch64-linux-android`）**：
+> `android-activity` 0.6.1 / `android-properties` 0.2.2 / `jni` 0.22.4（+`jni-macros`）/
+> `jni-sys`（0.3.1、0.4.1 + `jni-sys-macros`）/ `ndk` 0.9.0 / `ndk-sys` 0.6.0 / `ndk-context` 0.1.1，
+> **全部仅 Android 目标生效。**
 
 ### 模块地图（`src/`，按体量）
 
-| 文件 | 行数（2026-09-28 实测） | 职责 |
+| 文件 | 行数（2026-10-14 实测） | 职责 |
 |---|---|---|
 | `engine/renderer.rs` | **1199** | **模块根**：`Renderer` 结构体 + 类型/常量定义 + 子模块声明（`pub(crate) use …::*;` 再导出）。**改 pipeline/shader/swapchain 须先跑冒烟验 VUID** |
 | `engine/renderer/*.rs` | 19 个子模块（100–1105 行） | 按职责拆出（几何/实例/管线/描述符/交换链/PT/纹理/阴影/录制…），清单见 `docs/refactor-plan.md`。`tests_support.rs` 提供**扫整个子树**的源码判据入口 |
 | `engine/game.rs` | **1120** | **模块根**：类型/常量定义 + 子模块声明（同上再导出） |
 | `engine/game/*.rs` | 16 个子模块（63–1136 行） | 按职责拆出（会话/玩家/武器/弹道/AI/波次/联机/地图/诊断 + tests/*）。**两个模块树（40 个文件）全部 ≤ 1200 行** |
-| `main.rs` | 4465 | GameApp + winit 事件循环 + 输入/光标捕获 + 枪模姿态 |
-| `audio.rs` | 2919 | 合成音效与音乐（`audio_out.rs` = 输出层：waveOut / ALSA） |
-| `ui.rs` | 2833 | HUD / 菜单 / 设置 / 键位表 |
-| `engine/city.rs` | 2357 | 程序化城市生成（40+ 条几何/契约测试） |
+| `lib.rs` | **5761** | **主体**：GameApp + 事件循环 + 输入 + 枪模姿态。🔴 Android 编 `cdylib` 导出 `android_main` ⇒ 从 `main.rs` 搬来；`main.rs` 只剩 6 行薄入口。**改事件循环找这里，不是 `main.rs`** |
+| `audio.rs` | 2918 | 合成音效与音乐（`audio_out.rs` = 输出层：waveOut / ALSA） |
+| `ui.rs` | 3069 | HUD / 菜单 / 设置 / 键位表 |
+| `engine/city.rs` | 2609 | 程序化城市生成（40+ 条几何/契约测试） |
 | `engine/ai.rs` | 2133 | A* / 状态机 / 战术角色与掩体点 |
-| `net.rs` | 2406 | UDP 联机（协议魔数 'S'） |
+| `net.rs` | 2412 | UDP 联机（协议魔数 'S'） |
 | `engine/cjk_glyphs.rs` | **1639** | 生成的中文点阵字模，**勿手改**。🔴 守门测试 `source_cjk_codepoints_all_have_glyphs` 重扫 `src/`（**注释里的字也算**）：**红了 = 有人加了没有字模的字**，而**源字体未入库 ⇒ 表不能重建** ⇒ 只能**改写文案**（别拿系统字体顶替：会改字形）。定位 `python tools/find_codepoint.py <HEX> <file>` |
 | `engine/weapons.rs` / `cpu.rs` / `map.rs` / `procedural.rs` / `physics.rs` | 1561 / 1188 / 1290 / 1266 / 1125 | 武器系统 / CPU 拓扑与亲和（🔴 只读）/ TOML 关卡 / 程序化贴图 + 烘焙 / 物理 |
 | `llm_cmd.rs` | 712 | RV3D_LLM 战术指挥通道（HTTP 出站，见下） |
@@ -136,13 +140,12 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
   参数 2048² D32、半宽 400m、near=1/far=800、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
-  🔴 阴影是**两张图**（实测增益见 §21.40(c)）：
-  `shadow_image`(binding 5) 只装静态投射者（地形/地面场/marker/道具）、每
-  `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；`shadow_dyn_image`(binding 10) 只装
-  NPC/士兵、每 `RV3D_SHADOW_EVERY` 帧（默认 2）重画；
-  片元各采一次取 `max()`；`RV3D_NO_SHADOW_SPLIT=1` = 单图旧路径（A/B 对照）。
-  🔴 两张图**必须在 init 时先转 `SHADER_READ_ONLY_OPTIMAL`**（否则采样到未转布局的那张 =
-  VUID-08114），且**主 descriptor pool 的 SAMPLED_IMAGE 计数同步 +1**。
+  🔴 阴影是**两张图**（增益见 §21.40(c)）：`shadow_image`(binding 5) 装静态投射者
+  （地形/地面场/marker/道具）、每 `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；
+  `shadow_dyn_image`(binding 10) 装 NPC/士兵、每 `RV3D_SHADOW_EVERY` 帧（默认 2）重画；
+  片元各采一次取 `max()`；`RV3D_NO_SHADOW_SPLIT=1` = 单图旧路径（A/B）。
+  🔴 两张图**必须在 init 时先转 `SHADER_READ_ONLY_OPTIMAL`**（否则 VUID-08114），
+  且**主 descriptor pool 的 SAMPLED_IMAGE 计数同步 +1**。
   排阴影问题先用 **`RV3D_DEBUG_SHADOW=1`**（R=frag_depth/G=阴影图深度均值），别再静态推矩阵。
 
 **顶点格式与着色**
@@ -167,7 +170,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 地面细节层：`GROUND_DETAIL_BINDING=9`，图像必须 `R8G8B8A8_UNORM`（线性、**非** SRGB）；
   纹素半值编码 `lum*0.5`；`GROUND_DETAIL_SIZE=256` 使 `2.0/256 == GROUND_DETAIL_TEXEL_M=0.0078125`；
   增益 `GROUND_DETAIL_GAIN=2.0`；`build.rs` 以 `light_data.flags.w >= 0.5` 门控并在 `g<=0` 退回 ×1。
-  **改其中一侧必须同时看另一侧**，否则静默"地面变糊"。
+  **改一侧必须同时看另一侧**，否则静默"地面变糊"。
 - 地形程序化高度：`terrain_height` 中央半径 **140m** 内 y=0（含 60×60 安全区、障碍环带 58–130m、
   接火区），之外 ≤15m 确定性值噪声丘陵；`terrain_height_at` 同源。冒烟依赖的站定/接火区仍全平。
 
@@ -220,13 +223,12 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 **呈现模式（2026-09-13）**
 - `RV3D_PRESENT_MODE` = `immediate` / `fifo` / **`mailbox`**；引擎默认 **IMMEDIATE**（基准最稳），
   **玩家路径由 `SteelFront.bat` 设 `mailbox`**（FIFO 在独显直连下等不到 vblank 会锁死）。
-- 🔴 **失焦 ≠ 停止渲染**（2026-09-27 实测 + 修）：失焦后照样全速跑 ⇒ 整机像卡死。**本机是混合输出**：
-  面板 2560x1600@165 挂 **AMD 610M**，游戏跑 **5060** ⇒ 每帧**跨适配器拷贝** + 由合成器在核显合成
-  ⇒ 窄的是**核显的拷贝+合成链**，不是 5060（实测数字见 §21.81(a)）。
-  修法 = **`RV3D_BG_FPS`**（失焦上限，`effective_frame_cap`；**引擎默认 0 = 不限**，否则 perf/冒烟
-  这些失焦跑法会被静默变成 20 fps；玩家路径 `SteelFront.bat` 设 20：fps 165→19.9）。
-  🔴 **GPU Engine 计数器必须按 `luid`（适配器）分组**：按进程名聚合会把两块卡相加 ⇒ 会得出
-  "dwm 只占 0–1%" 的错结论（真值 22–44%）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
+- 🔴 **失焦 ≠ 停止渲染**（2026-09-27 实测 + 修）：失焦后照样全速跑 ⇒ 整机像卡死。**本机混合输出**：
+  面板挂 **AMD 610M**、游戏跑 **5060** ⇒ 每帧**跨适配器拷贝** + 核显合成 ⇒ 窄的是**核显链**
+  （数字见 §21.81(a)）。修法 = **`RV3D_BG_FPS`**（失焦上限；**引擎默认 0 = 不限**，否则 perf/冒烟
+  会被静默变成 20 fps；`SteelFront.bat` 设 20：fps 165→19.9）。
+  🔴 **GPU Engine 计数器必须按 `luid` 分组**：按进程名聚合会把两块卡相加 ⇒ 得出"dwm 只占 0–1%"
+  的错结论（真值 22–44%）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
 - ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（转视角读成"残影"），而 **`PrintWindow` 抓不到它**
   （抓的是已合成帧）⇒ **别用静态截图去证伪"残影"。**
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
@@ -248,19 +250,18 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   判据 `upload_buffers_are_created_before_the_old_ones_are_destroyed`。
 - 🔴 **设备丢失 = 不可恢复**：`device_lost` 粘性位置位后不再提交、不再重试重建（曾实测每帧重试
   1961 轮）。判据 `device_lost_stops_rebuilding` + `should_retry_swapchain`（重建失败后限流 1 Hz）。
-- 🔴 **验证必须覆盖「非默认配置」**：PT 上屏 blit 的目标范围曾写死 `2560x1600`，而**默认窗口就是它**
-  ⇒ 此前每轮 PT 验证都躲过去了；换尺寸就 `VUID-vkCmdBlitImage-dstOffset-00248` 并把设备打掉。
+- 🔴 **验证必须覆盖「非默认配置」**：PT 上屏 blit 曾写死 `2560x1600`，而**默认窗口就是它**
+  ⇒ 此前每轮 PT 验证都躲过去了；换尺寸就 `VUID-vkCmdBlitImage-dstOffset-00248` 打掉设备。
   判据 `blit_regions_never_hardcode_pixel_extents`（非原点 `Offset3D` 不许是纯字面量）。
 - 🔴 **交换链 create info 会被驱动回写**（2026-10-08 实测）：`create_swapchain()` 返回**之后**
   `imageUsage` 会**多出 STORAGE**（**关掉验证层仍回写** ⇒ 不是验证层干的），验证层随后照被改过的
   结构体报 `02275`/`01778`。**引擎用法合法**；对策：**传副本给驱动**、日志只打印我们申请的那份。
 
 **建筑摆放（2026-09-13）**
-- `city.rs::pick_building` 的缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。用 `max` 会按较大方向
-  贴合、另一个方向**必然溢出 footprint** ⇒ 相邻楼互相穿插（用户截图的"乱窗/透视错误"）。
-  **建筑模型本身没问题**，问题一直在摆放。
-- 原注释担心的"无形的墙"由调用方把**碰撞盒设成真实视觉尺寸**来消掉
-  （`building_at` 里按 `half_footprint × scale` 算，±90° 时 x/z 互换）。
+- `city.rs::pick_building` 缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。`max` 会按较大方向贴合、
+  另一方向**必然溢出 footprint** ⇒ 相邻楼穿插（用户截图的"乱窗/透视错误"）。**模型没问题，问题在摆放。**
+- "无形的墙"由调用方把**碰撞盒设成真实视觉尺寸**消掉（`building_at` 按 `half_footprint × scale` 算，
+  ±90° 时 x/z 互换）。
 
 **路径追踪（PT，默认关）**
 - 默认关的最新理由 = "整帧替换光栅画面 + 1 spp 噪声大"，属调试/烘焙参照视图，**不是"命中没修"**。
@@ -293,13 +294,12 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 **弹孔（弹着标记，2026-09-15）**
 - 链路：命中障碍 → `ImpactMark`（环形缓冲 192 / 寿命 30s / 末尾 3s 收缩，`game.rs`）
-  → `main.rs` 转 WorldMarker 方片 → `Renderer::append_markers`（**单独一批、只进光栅列表、
-  不喂 PT**：弹孔每枪都变，混进 `pt_set_scene_markers` 会让 BLAS 指纹每帧重建）。
-  `RV3D_NO_DECALS=1` = 同机位 A/B 的对照组。
-- 🔴 **弹孔贴的是「可见面」**：2026-09-17 起 marker 的**可见尺寸 == 碰撞 AABB**（半幅唯一真源 =
-  `geom::Shape::template_half_extent`，测试 `marker_visible_size_matches_aabb`）⇒ 贴 AABB 入口面
-  就是贴画出来的那层面。**两者必须同源**：可见面一旦比碰撞盒大，弹孔就被几何盖住
-  （"打了枪墙上没有孔"，2026-09-15 实测）。
+  → 转 WorldMarker 方片 → `Renderer::append_markers`（**单独一批、只进光栅列表、不喂 PT**：
+  弹孔每枪都变，混进 `pt_set_scene_markers` 会让 BLAS 指纹每帧重建）。`RV3D_NO_DECALS=1` = A/B 对照。
+- 🔴 **弹孔贴的是「可见面」**：marker 的**可见尺寸 == 碰撞 AABB**（半幅唯一真源 =
+  `geom::Shape::template_half_extent`，判据 `marker_visible_size_matches_aabb`）⇒ 贴 AABB 入口面
+  就是贴画出来的那层面。**两者必须同源**：可见面比碰撞盒大，弹孔就被几何盖住
+  （"墙上没有孔"，2026-09-15 实测）。
 - 🔴 **命中体取「参数 t 最小」的那个**，不是"`world.bodies` 里第一个命中的" ——
   那是**建关顺序**，远处障碍可能排在近处前面 ⇒ 弹孔画在被前面柱子挡住的那面墙上。
 - 方片参数：8cm 见方 / 厚 1.6cm / 沿法线外移 0.4cm（**埋进墙里一半**：既不打 z-fighting，
@@ -379,9 +379,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   **这正是"看不到士兵"的真正原因**，不是模型/遮挡/取景。
 - 🔴 **`RV3D_CAM` 的朝向与 pitch 必须先标定再用来做对照实验**：
   `forward = (-sin(yaw), 0, -cos(yaw))` ⇒ **yaw=90° 面向 −X，不是 +X**；
-  **负 pitch = 抬头**（`-84` 拍到天空），俯看用**正**值（`:0,84`），平视 `:0,0`。
-  **判据：用任何角度参数前，先花一次 run 拿一个已知会在/不在视野里的物体验一次朝向**，
-  别信"yaw=90 应该是往右"这种直觉 —— **规则写了不执行等于没写**。
+  **负 pitch = 抬头**（`-84` 是天空），俯看用**正**值（`:0,84`），平视 `:0,0`。
+  **⇒ 用任何角度前，先花一次 run 拿一个已知会在/不在视野里的物体验朝向**，
+  别信"yaw=90 应该往右"的直觉 —— **规则写了不执行等于没写**。
 
 ### 分辨率
 `RESOLUTIONS` 5 档含 2560x1600；显式配置非预设分辨率会回退首项；
@@ -458,9 +458,9 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 ## 铁律 E — 平台 / 指令集 / 线程
 
 - **不做原生 Metal 后端**（macOS/iOS 走 MoltenVK，零改动）。
-- AArch64 NEON `cull_spheres_neon`（4 实例/批、非 FMA、与标量**逐位一致**）；
-  ash 字符串指针统一 `RawCString`；`sched_setaffinity` 仅 `target_os="linux"` 编译；
-  交叉验证 `cargo check --target aarch64-unknown-linux-gnu`。
+- AArch64 NEON `cull_spheres_neon`（4 实例/批、非 FMA、与标量**逐位一致**）；ash 字符串指针
+  统一 `RawCString`；`sched_setaffinity` 仅 `target_os="linux"` 编译；交叉验证
+  `cargo check --target aarch64-unknown-linux-gnu`。
 - **AVX-512**：AMD Zen4/Zen5 启用；Intel 11 代默认关（能效/降频负收益）；
   Intel 12 代起**防御性关闭**（出厂熔丝禁用，防虚拟化透传）；`RV3D_DISABLE_AVX512=1` 强制关。
 - **线程红线**：攻击态/接火 NPC **必须每帧步进**，降频仅限无感知的非攻击 NPC
@@ -474,13 +474,12 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 ## 铁律 F — 协作 / 上下文 / 工具
 
 - **并行分身**：文件集两两不相交；**分身禁止 cargo**（12GB 只允许一个）**与 git**；
-  `renderer.rs` 上万行**禁止整文件重写**，只许精确 edit；开工前先把在飞改动 commit 成干净基线。
+  上万行的模块树**禁止整文件重写**，只许精确 edit；开工前先把在飞改动 commit 成干净基线。
 - **上下文节约**：不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）、不反汇编（看 .spv 先 `spirv-dis` 到临时文件）；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat`（教训 8）。
-- 🔴 **`cargo check` 不能替代 0 警告闸门**：`check` 与 `build` 的 fingerprint 不同，**`check` 会重放缓存
-  下来的旧诊断**（实测报 28 条 `never used`，同一份代码 `build --release` 是 0 警告）。
-  **判据：`0 警告` 只能用 `cargo build --release` 验** —— 🔴 `cargo test --release` 不算
-  （`cfg(test)` 用到测试专用符号 ⇒ 实测漏报 1 条，§21.75）。⚠️ 实验占着 exe 时
-  `build` 会卡在**链接**，但**编译与警告在此之前已产出** ⇒ 看警告仍有效。
+- 🔴 **`cargo check` 不能替代 0 警告闸门**：它**会重放缓存下来的旧诊断**（实测报 28 条
+  `never used`，同代码 `build --release` 是 0 警告）。**⇒ 0 警告只能用 `cargo build --release` 验**；
+  🔴 `cargo test --release` 也不算（`cfg(test)` 用到测试专用符号 ⇒ 实测漏报 1 条，§21.75）。
+  ⚠️ 实验占着 exe 时 `build` 会卡在**链接**，但**警告在此之前已产出** ⇒ 仍有效。
 - 🔴 **`> file` 重定向会写成 UTF-16**（同一个文件会从 100 KB 变成 180 KB）：
   要取 HEAD 版本做字节比对，用 `git checkout-index` / `git cat-file` 写二进制，或用
   `git diff` / `git status` 判断，**不要用 PowerShell 的 `>`**（教训 7 的另一面）。
@@ -489,10 +488,9 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   引用一律用「」或中文引号（2026-09-23 一天踩了三次）。
 - 🔴 **脚本里取备份必须取"未改动的"那一份**（脚本跑两次 ⇒ 第二次的备份已是剥过的版本，回滚会把坏文件写回去）：备份从 `git show HEAD:` 取，或开头判断"备份已存在则复用"，**回滚用 `git checkout --`**（教训 30）。
 - **看到"规划中"的 dead code，必须回答"那它为什么没被接线"，不许加 `#[allow]` 了事。**
-  现状：**全仓 82 处**（2026-09-26 按编译器判据清掉 27 处陈旧压制，§21.67），
-  其余**绝大多数是有注释的"预留接口"**，属诚实预留不是藏问题。
-  🔴 **要清陈旧压制，判据只能是编译器，不能是文本匹配**：删掉 `#[allow]` 后若仍 0 警告即为陈旧
-  （按符号名频次判定的脚本已弃用）。
+  现状：**全仓 82 处**（2026-09-26 按编译器判据清掉 27 处陈旧压制，§21.67），其余**绝大多数是
+  有注释的"预留接口"**，属诚实预留。🔴 **要清陈旧压制，判据只能是编译器，不能是文本匹配**：
+  删掉 `#[allow]` 后若仍 0 警告即为陈旧（按符号名频次的脚本已弃用）。
 - 🔴 **未结案条目会过期，而"过期的待办"和"错的结论"一样有害**：
   **动某条之前先用 `rg` 确认它引用的符号/文件还在**；**结案一条时必须把条目本身改掉或删掉**
   —— 只不再提的话，下一个人还会照着旧条目去找。
@@ -501,8 +499,8 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   **⇒ 判据：核对定义就用 `rg --fixed-strings "const $NAME"` 把整行打出来用眼睛看。**
   **同一形态：先有结论，再写一个刚好能"证明"它的工具**（一晚踩了四次）。
 - **阈值纪律**：冒烟 `fps_min` 越线先判是不是**首帧窗口**（判据 = 仅首样本越线 +
-  `npc` 计数远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），
-  重跑确认 —— **别改测试、别调阈值**。
+  `npc` 远低于稳态 + `wait_fence ≈ frame`，SPIR-V 重生成后驱动 JIT 冷缓存），重跑确认
+  —— **别改测试、别调阈值**。
 - **验收口径**：`run_smoke_pm.ps1` → `gameplay_smoke_pm.py`，判据 = **`panics==0` + `killed>=1` +
   没有未知 VUID**（三条已验证噪声不计：驱动回写 `02275`/`01778`、RTSS/GamePP 的 `flags-parameter`；
   **别的 VUID 一律 FAIL**）。🔴 **`RV3D_VALIDATION` 未开时脚本明说「VUID 判据不适用」**——
@@ -684,15 +682,14 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
   无界增长）、解除静音后旧枪声齐鸣。判据 = `mixer_retires_voices_even_when_muted`。
   **你省掉的那一步，往往正是它退场的唯一机会**（环形缓冲与寿命表同形）。
 45. **🔴 成本地图三件套：正对照臂 + 同轮轮转 + 每臂 ≥5 对。**
-  ① **正对照臂不快 ⇒ 整批作废**；② **同轮轮转**，不许一个臂连跑几对（外部干扰周期是分钟级）；
-  ③ **1 对时噪声本身 ±20%** ⇒ 1~5% 的效应测不出来。**⇒ 先量 A/A 底噪、n ≥5、报中位差 + 符号一致数。**
+  ① **正对照臂不快 ⇒ 整批作废**；② 不许一个臂连跑几对（干扰周期是分钟级）；
+  ③ **1 对噪声 ±20%** ⇒ 1~5% 的效应测不出。**⇒ 先量 A/A 底噪、n ≥5、报中位差 + 符号一致数。**
 46. **🔴 审计/闸门工具必须有第三种结局：「没跑成」。** 扫描面 = 0 不算通过、读不到输入要
-  fail-closed、**空日志也不算通过**（`history_secret_audit` 在非仓库目录打"没有命中"、
-  **`survive_pm` 的判据整整读了一份空文件**，见 §21.51）。**⇒ 先问：它扫到 0 个时会说什么？**
-  约定 **0 = 真扫过无命中 / 1 = 有命中 / 2 = 根本没扫成**。
-  🔴 **模糊/扫描类判据的自检要写"必须有一部分成功"，不是"必须不崩"**：两版模糊接受率 0/3000 时
+  fail-closed、**空日志也不算通过**（`survive_pm` 的判据整整读过一份空文件，§21.51）。
+  **⇒ 先问：它扫到 0 个时会说什么？** 约定 **0=扫过无命中 / 1=有命中 / 2=根本没扫成**。
+  🔴 **扫描类判据的自检要写"必须有一部分成功"，不是"必须不崩"**：接受率 0/3000 时
   "没 panic"什么都没证明（§21.71）。
-47. **🔴 时间基减法必须 `checked_sub`：`Instant` 的原点是「开机时刻」**，所以
-  `Instant::now() - Duration::from_secs(3600)` 在**机器启动不足 1 小时**时**下溢 panic**；
-  同一份代码在开机几天的机器上一路绿 ⇒ **「上线首小时才炸」**（§21.82）。
-  **⇒ 凡 `now ± Duration` 一律 `checked_sub`/`checked_add` + 显式回退，改完 `rg` 全仓扫一遍。**
+47. **🔴 时间基减法必须 `checked_sub`：`Instant` 原点是「开机时刻」** ⇒
+  `Instant::now() - Duration::from_secs(3600)` 在**开机不足 1 小时**时**下溢 panic**；
+  开机几天的机器上一路绿 ⇒ **「上线首小时才炸」**（§21.82）。
+  **⇒ 凡 `now ± Duration` 一律 `checked_*` + 显式回退，改完 `rg` 全仓扫。**
