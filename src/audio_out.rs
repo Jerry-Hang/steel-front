@@ -55,6 +55,37 @@ use std::sync::{Arc, Mutex};
 /// waveOut 的块大小；ALSA 侧只用它算队列目标（`BUFFER_COUNT × 这个数` 帧）。
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 const FRAMES_PER_BUFFER: usize = 2048;
+
+/// **单个 waveOut 缓冲要分配多少字节**（纯函数：跨平台可测，不依赖声卡）。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出 B12，已对着代码确认）：
+/// `WaveBuffer::new()` 原来写死 `FRAMES_PER_BUFFER * 2 * 2`（**硬编码双声道**），
+/// 而 `submit` 侧算"这一块最多能写多少个样本"用的是**动态的** `self.channels`：
+/// ```text
+/// let mut data = vec![0u8; FRAMES_PER_BUFFER * 2 * 2];   // 8192 字节，写死 2 声道
+/// ...
+/// submit_plan(samples.len(), FRAMES_PER_BUFFER * self.channels as usize)
+/// ```
+/// ⇒ `channels = 6` 时可写 `2048 × 6 = 12288` 个样本 = **24576 字节**，
+/// 而缓冲只有 8192 字节 ⇒ 写入循环里那句裸指针
+/// `*data8.add(i * 2) = ..` 会写到 **+16384 字节处** —— **堆越界，UB**。
+///
+/// 与 ALSA 侧**不一致**：那边明确支持多声道（`pcm_params(48_000, 6)` 有测试）。
+/// 同一件事两个后端两个答案 —— 与 `drop.rs` 手抄销毁清单、`init_msaa_resources`
+/// 两份实现是**同一形态**。
+///
+/// ⚠️ 当前唯一调用方传的是 `2`（`session.rs`）⇒ 尚未触发；但这是个地雷：
+/// 接口收任意声道数，越界又是静默的（不崩、不报错）。
+/// ⚠️ **这条 `allow` 不是"给未接线代码开后门"**（仓库铁律 F）：本函数的**唯一生产调用方**
+/// 是 `WaveBuffer::new`，而它在 `#[cfg(target_os = "windows")]` 里 ⇒ **非 Windows 构建
+/// 结构性地用不到它**（ALSA 那条路的缓冲分配归 alsa-lib 管，不经这里）。
+/// 它仍然必须存在且必须可测：判据 `wave_buffer_holds_everything_submit_may_write`
+/// 是**跨平台**的 —— 越界这件事不该等到"有人在 Windows 上跑 6 声道"才发现。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn wave_buffer_bytes(frames: usize, channels: u16) -> usize {
+    // 声道数为 0 时按 1 算：`WaveFormatEx` 那边同样会退化，至少不分配出 0 字节缓冲
+    frames * channels.max(1) as usize * 2
+}
 /// waveOut 的块数；ALSA 侧只用它算队列目标（见 `alsa::queue_latency_us`）。
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 const BUFFER_COUNT: usize = 4;
@@ -139,8 +170,11 @@ mod win {
     }
 
     impl WaveBuffer {
-        fn new() -> Self {
-            let mut data = vec![0u8; FRAMES_PER_BUFFER * 2 * 2];
+        /// 🔴 **必须按实际声道数分配**（2026-10-15，外部复核指出 B12，已确认）：
+        /// 原来写死双声道，而 `submit` 按动态 `channels` 算可写样本数 ⇒
+        /// `channels > 2` 时裸指针写入直接**堆越界**（见 `wave_buffer_bytes` 的文档）。
+        fn new(channels: u16) -> Self {
+            let mut data = vec![0u8; wave_buffer_bytes(FRAMES_PER_BUFFER, channels)];
             let hdr = WaveHdr {
                 lp_data: data.as_mut_ptr(),
                 dw_buffer_length: (data.len() as u32).min(0x7FFF_FF00),
@@ -188,7 +222,7 @@ mod win {
         }
         let mut buffers = Vec::with_capacity(BUFFER_COUNT);
         for _ in 0..BUFFER_COUNT {
-            buffers.push(WaveBuffer::new());
+            buffers.push(WaveBuffer::new(channels));
         }
         // 🔴 2026-09-23 复查：**prepare 必须在最终地址上做**。
         // 驱动会在 prepare 时把 WAVEHDR 的地址记进它自己的表（`waveOutWrite` 收的是这个地址，
@@ -1220,7 +1254,42 @@ pub fn open_default_sink(sample_rate: u32, channels: u16) -> DefaultSink {
 /// Windows 构建凭空多出一堆 `cfg`。
 #[cfg(test)]
 mod tests {
-    use super::{first_starved_drop, submit_plan, FRAMES_PER_BUFFER};
+    use super::{first_starved_drop, submit_plan, wave_buffer_bytes, FRAMES_PER_BUFFER};
+
+    /// 🔴 **waveOut 缓冲必须装得下 `submit` 可能写入的全部数据。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B12，已对着代码确认）：
+    /// `WaveBuffer::new()` 原来写死 `FRAMES_PER_BUFFER * 2 * 2`（**硬编码双声道**），
+    /// 而 `submit` 按**动态的** `self.channels` 算可写样本数 ⇒ `channels = 6` 时
+    /// 可写 24576 字节、缓冲只有 8192 ⇒ 写入循环里那句**裸指针** `*data8.add(i * 2) = ..`
+    /// 写到 +16384 字节处 —— **堆越界，UB**（不崩、不报错）。
+    ///
+    /// ⚠️ 当前唯一调用方传 `2`（`session.rs`）⇒ 尚未触发。但接口收任意声道数，
+    /// 而 **ALSA 侧明确支持多声道**（`pcm_params(48_000, 6)` 有测试）——
+    /// **同一件事两个后端两个答案**。
+    ///
+    /// 判据断言的是那条被违反的不变式本身：**缓冲字节数 ≥ submit 的上界**。
+    /// 只断言"双声道是 8192"抓不到这个 bug（那一档本来就是对的）。
+    #[test]
+    fn wave_buffer_holds_everything_submit_may_write() {
+        for ch in [1u16, 2, 4, 6, 8] {
+            let bytes = wave_buffer_bytes(FRAMES_PER_BUFFER, ch);
+            // submit 的上界：`FRAMES_PER_BUFFER × channels` 个 **i16 样本**（每样本 2 字节）
+            let writable = FRAMES_PER_BUFFER * ch as usize * 2;
+            assert!(
+                bytes >= writable,
+                "channels={ch}：缓冲只有 {bytes} 字节，而 submit 可能写 {writable} 字节 \
+                 ⇒ 裸指针越界（UB）。原来写死双声道的 `FRAMES_PER_BUFFER * 2 * 2` 正是在这一档翻车"
+            );
+        }
+        // 双声道（当前唯一调用方的取值）顺便钉住，防止修过头
+        assert_eq!(wave_buffer_bytes(FRAMES_PER_BUFFER, 2), 8192);
+        // 声道数为 0 时不许分配出 0 字节缓冲（否则第一次写就越界）
+        assert!(
+            wave_buffer_bytes(FRAMES_PER_BUFFER, 0) > 0,
+            "channels=0 也得分配出非零缓冲，否则写入立刻越界"
+        );
+    }
 
     #[test]
     fn submit_plan_never_exceeds_source_or_capacity() {
