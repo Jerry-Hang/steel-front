@@ -1198,6 +1198,25 @@ impl Client {
                 self.objective = points;
                 None
             }
+            // 🔴 **这条分支此前不存在**（2026-10-15，外部复核指出，已对着代码确认）：
+            // `Refuse` 直接落到下面的 `_ => None` 被静默丢弃。
+            // 后果有两层：
+            //   ① `refused_reason` 的文档写着「Some = 停止重试」，但**全仓从没给它赋过值**
+            //      ⇒ 那句注释是一句一直没做到的说明；
+            //   ② `retry_join` 于是永远不停 ⇒ 版本不匹配时**每 interval 发一次 Join、
+            //      服务器回一次 Refuse**，形成永不停止的往返；更糟的是 `handle_message`
+            //      开头的 `last_rx = now()` 会被每次 Refuse 刷新 ⇒ **客户端以为连接是活的**
+            //      （超时逻辑也不会把它判掉）。
+            NetworkMessage::Refuse { reason } => {
+                if self.refused_reason.is_none() {
+                    log::warn!(
+                        "握手被服务器拒绝（版本不匹配？）⇒ 停止重试。原因：{}",
+                        reason
+                    );
+                }
+                self.refused_reason = Some(reason);
+                None
+            }
             _ => None,
         };
         left
@@ -1330,6 +1349,14 @@ impl Client {
         if self.player_id.is_some() {
             return true;
         }
+        // 🔴 被服务器**明确拒绝**过就不再重试（2026-10-15 补）。
+        // `refused_reason` 的文档一直写着「Some = 停止重试」，但此前它既没被赋值、
+        // 也没被读过 ⇒ 那句话一直没有做到，实际行为是**无限重连**。
+        // 粘性是刻意的：版本不匹配靠重试解决不了，得换客户端/换服务端。
+        // 要恢复重试就新建一个 `Client`（字段在 `connect` 里初始化为 None）。
+        if self.refused_reason.is_some() {
+            return false;
+        }
         if self.last_join_at.elapsed() >= interval {
             let _ = self.send(&NetworkMessage::Join {
                 player_id: 0,
@@ -1348,6 +1375,61 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **被服务器拒绝之后，不许再重试 Join。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：
+    /// `Refuse` 此前落在 `handle_message` 的 `_ => None` 里被静默丢弃
+    /// ⇒ `refused_reason` **永远是 None**（可它的文档一直写着「Some = 停止重试」）
+    /// ⇒ `retry_join` 永远不停。版本不匹配时就是**每 interval 发一次 Join、
+    /// 服务器回一次 Refuse** 的无限往返；更糟的是 `handle_message` 开头的
+    /// `last_rx = now()` 会被每次 Refuse 刷新 ⇒ **客户端以为连接是活的**，
+    /// 连超时逻辑都不会把它判掉。
+    ///
+    /// ⚠️ 判据**不能**写成 `assert!(!client.retry_join(..))`：那个返回值表示「尚未加入」，
+    /// 在**拒绝之前**同样是 false ⇒ 对任何实现都成立（教训 1 的形态）。
+    /// 要证明的是「**没有再发出 Join 报文**」，所以直接看服务器收不收得到。
+    ///
+    /// ⚠️ 还必须带**正对照**：先证明同样的调用在拒绝**之前**确实发得出去 ——
+    /// 否则"没收到"可能只是 `retry_join` 根本不发，判据恒真。
+    #[test]
+    fn refuse_stops_retry_join() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut client = Client::connect(addr).unwrap();
+        let join = NetworkMessage::Join {
+            player_id: 0,
+            name: "p".into(),
+            version: SESSION_VERSION,
+        };
+
+        // ---- 正对照：拒绝之前，retry_join 必须真的发出 Join ----
+        let _ = client.retry_join("p", Duration::ZERO);
+        let (ctrl, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        assert_eq!(ctrl, join, "正对照：收到的应是 Join");
+        assert!(client.refused_reason.is_none(), "此时还不该有拒绝记录");
+
+        // ---- 服务器回一条 Refuse，客户端处理 ----
+        server
+            .send_to(&NetworkMessage::Refuse { reason: "版本不匹配".into() }, from)
+            .unwrap();
+        let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        let _ = client.handle_message(got);
+        assert!(
+            client.refused_reason.is_some(),
+            "收到 Refuse 后必须记下原因 —— 否则下一条判据（停止重试）也就无从判起"
+        );
+
+        // ---- 拒绝之后：同样的调用不再发 Join ----
+        for _ in 0..3 {
+            let _ = client.retry_join("p", Duration::ZERO);
+        }
+        let extra = server.recv_timeout(Duration::from_millis(300)).unwrap();
+        assert!(
+            extra.is_none(),
+            "被拒后仍在重发 Join —— 这就是无限重连风暴（服务器会一直回 Refuse）"
+        );
+    }
+
     /// 测试辅助：**服务端会看到的**本端地址。
     ///
     /// 🔴 2026-10-15：客户端改成按地址族绑 `0.0.0.0:0`（修"跨机联机全部失败"那条）之后，
