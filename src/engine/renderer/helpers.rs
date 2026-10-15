@@ -234,7 +234,7 @@ pub(crate) fn frame_suppressed(gpu_stalled: bool, swapchain_broken: bool) -> boo
 ///
 /// ⚠️ 抽成纯函数**不只是为了好看**：第一版判据是"扫源码看 `return Err` 前 40 行内
 /// 有没有 `gpu_stalled = true`"—— 我**把它放进 `if false {}` 死代码块里反向验证，
-/// 判据照样通过**。文本扫描在这里就是**说谎的闸门**（见 `pitfalls/lying-gates.md`）。
+/// 判据照样通过**。文本扫描在这里就是**说谎的关口**（见 `pitfalls/lying-gates.md`）。
 /// 结论抽成纯函数之后，判据可以直接断言它的返回值。
 pub(crate) fn abort_after_acquire(reason: &str) -> (bool, String) {
     (

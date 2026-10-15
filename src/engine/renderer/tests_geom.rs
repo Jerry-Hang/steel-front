@@ -1323,7 +1323,7 @@ mod cull_sched_microbench {
 /// 🔴 **这条判据为什么是"断言纯函数"而不是"扫源码"**：
 /// 第一版写的是"扫 `render()` 里 `reset_fences`→`queue_submit` 这段，看每个 `return Err`
 /// 之前 40 行内有没有 `self.gpu_stalled = true`"。**反向验证时我把那行塞进了
-/// `if false { ... }` 死代码块，判据照样通过** —— 文本扫描在这里就是**说谎的闸门**
+/// `if false { ... }` 死代码块，判据照样通过** —— 文本扫描在这里就是**说谎的关口**
 /// （`pitfalls/lying-gates.md` 的形态；我在同一批里已经因为"判据匹配到自己的文档"栽过一次）。
 /// ⇒ 把决策抽成纯函数 `abort_after_acquire`，判据直接断言它的返回值。
 #[test]
@@ -1348,7 +1348,7 @@ fn aborting_after_a_successful_acquire_always_stalls_the_renderer() {
 /// 不许有人绕过它写回裸 `?`。
 ///
 /// ⚠️ 这条是源码级判据，所以只做**最不容易失效**的断言 —— 数调用次数，
-/// 而不是匹配周围文本（后者会被注释、死代码、换行格式骗过去）。
+/// 而不是匹配周围文本（后者会被注释、死代码、换行格式绕过去）。
 /// 真正的语义由上面那条纯函数判据保证，这条只负责"接线没被拆掉"。
 #[test]
 fn frame_rs_abort_sites_go_through_the_helper() {
