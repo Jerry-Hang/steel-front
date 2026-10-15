@@ -1251,11 +1251,22 @@ impl Drop for ThreadPool {
     }
 }
 
-/// 环境变量解析：工作线程数（非法/缺省回退 default，下限 1）
+/// 读工作线程数配置（非法/缺省回退 `default`，下限 1）。
+///
+/// 🔴 **2026-10-15 改：走 `crate::syscfg::cfg`，不再直接用 `std::env::var`**
+/// （外部复核指出，已确认）。本文件其余 **8 处**开关（`RV3D_DISABLE_AVX512` /
+/// `RV3D_FORCE_SIMD` / `RV3D_CPU_PRIME` / `RV3D_SCENE_CPUS` / `RV3D_CPU_PIN` /
+/// `RV3D_AI_CPUS` …）全都走 `syscfg`，**只有这一处漏了** ⇒
+/// 在 Android 上用 `setprop debug.sf.scene_workers 4` 调线程数**不生效**
+/// （Android 应用进程拿不到自定义环境变量，`setprop` 是不重编就能调参的唯一通道，
+/// 见 `syscfg` 的文件头说明）。
+///
+/// 桌面行为**不变**：`syscfg::cfg` 同样是"环境变量优先"，只是额外多一层 Android 回退。
+/// 唯一差别是空串/纯空白按"未设置"处理 —— 对 `parse::<usize>()` 而言结果一样（都回退 `default`）。
 fn env_workers(key: &str, default: usize) -> usize {
-    match std::env::var(key) {
-        Ok(v) => v.parse::<usize>().unwrap_or(default).max(1),
-        Err(_) => default,
+    match crate::syscfg::cfg(key) {
+        Some(v) => v.parse::<usize>().unwrap_or(default).max(1),
+        None => default,
     }
 }
 

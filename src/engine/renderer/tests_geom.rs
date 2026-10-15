@@ -960,8 +960,14 @@ fn vertex_output_declarations_match() {
 /// 而代码里看不出任何异常 —— 排查时会一路怀疑到别的地方去。
 /// （同形：教训 36「工具跑不起来本身就是一条要修的缺陷」。）
 ///
-/// 判据 = 扫**全部生产源码**，出现 `env::var("RV3D_` 即失败。
-/// 三个正例（`syscfg::cfg` / `flag` / `is_set` / `parse`）都不含这个模式。
+/// 判据 = 扫**全部生产源码**（`syscfg.rs` 自身除外）：
+/// * `env::var("RV3D_...")`（字面量）⇒ 失败；
+/// * `env::var(<非字面量>)` ⇒ **也失败** —— 间接传名时判据无法确认它读的不是 `RV3D_*`。
+///   这一条是 2026-10-15 补的：旧判据只认字面量，而
+///   `cpu.rs::env_workers("RV3D_SCENE_WORKERS", 8)` 把开关名当参数传、函数体里写
+///   `std::env::var(key)` ⇒ **判据看不见**，于是那处漏网至今。
+///   **判据的模式匹配被间接调用绕过**，是这类判据最典型的失效形态。
+/// * `config.rs` 读 `HOME` / `USERPROFILE`（字面量、非 `RV3D_`）仍然合法。
 #[test]
 fn rv3d_switches_never_read_std_env() {
     let mut hits: Vec<String> = Vec::new();
@@ -969,11 +975,36 @@ fn rv3d_switches_never_read_std_env() {
     for entry in walkdir_src(std::path::Path::new("src")) {
         let text = std::fs::read_to_string(&entry).expect("读源码失败");
         scanned += 1;
+        // `syscfg.rs` 自己就是那唯一允许按**变量名**读 RV3D_* 的地方
+        if entry.file_name().map(|f| f == "syscfg.rs").unwrap_or(false) {
+            continue;
+        }
         for (lineno, line) in text.lines().enumerate() {
             // 跳过注释行（文档里会引用旧写法做说明）
             let code = line.split("//").next().unwrap_or("");
-            if code.contains("env::var(\"RV3D_") {
-                hits.push(format!("{}:{}", entry.display(), lineno + 1));
+            let Some(pos) = code.find("env::var(") else {
+                continue;
+            };
+            let arg = &code[pos + "env::var(".len()..];
+            if arg.starts_with('\"') {
+                // 字面量：只有 RV3D_* 才必须走 syscfg（`config.rs` 读 HOME / USERPROFILE 是合法的）
+                if arg.starts_with("\"RV3D_") {
+                    hits.push(format!("{}:{}  （字面量）", entry.display(), lineno + 1));
+                }
+            } else {
+                // 🔴 **非字面量 = 间接传名 ⇒ 一律算命中。**
+                //
+                // 这条是 2026-10-15 补的，因为旧判据**只认字面量** `env::var("RV3D_`，
+                // 而 `cpu.rs::env_workers("RV3D_SCENE_WORKERS", 8)` 把开关名当**参数**传进去、
+                // 函数体里写的是 `std::env::var(key)` ⇒ **判据看不见**，
+                // 于是"81 处已迁移"之后仍有这一处漏网（`RV3D_SCENE_WORKERS` /
+                // `RV3D_AI_WORKERS` 在 Android 上用 setprop 调不动）。
+                // **判据的模式匹配被间接调用绕过**，是这类判据最典型的失效形态。
+                hits.push(format!(
+                    "{}:{}  （非字面量参数 ⇒ 判据无法确认它读的不是 RV3D_*）",
+                    entry.display(),
+                    lineno + 1
+                ));
             }
         }
     }
