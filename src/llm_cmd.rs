@@ -487,6 +487,49 @@ fn log_decision(side: &str, situation: &str, decision: &str, accepted: bool, not
 // ============================================================
 // 指挥官线程（红蓝双侧独立上下文）
 // ============================================================
+/// **从 llama-server 的响应体里取出「要当作决策解析」的那段文本**（纯函数，可单测）。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出 B9，已确认）：原实现在 `decide_side` 里内联，
+/// 把 `content`（决策）与 `reasoning_content`（推理过程）**拼成一个串**再跨段截取：
+/// ```text
+/// Some(format!("{c}\n{r}"))      // c 在前、r 在后
+/// let b = content.find('{');      // ← c 的第一个 {
+/// let e = content.rfind('}');     // ← 【r 的最后一个 }】只要 r 里有 }
+/// content[b..=e]                  // ⇒ 截出的串 = c + "\n" + r 的尾巴
+/// ```
+/// 推理模型在 `reasoning_content` 里写**任何**带 `}` 的临时片段（JSON 片段、代码块）都会中招
+/// ⇒ 拼出来的串带着多余尾巴 ⇒ `parse_company_cmds` 失败 ⇒ **决策被拒**。
+///
+/// 修法：**不拼接**。优先用 `content`；只有它为空白时才回退到 `reasoning_content`。
+/// 截取 `{}` 那段仍然保留 —— 它现在只面对**单一来源**（例如模型用 markdown 围栏
+/// 把 JSON 包起来），跨段错位的前提已经不存在。
+pub(crate) fn pick_decision_text(resp: &str) -> String {
+    let content = parse_json_fn(resp)
+        .ok()
+        .and_then(|j| {
+            let msg = j.get("choices")?.as_arr()?.first()?.get("message")?;
+            let c = msg
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .trim();
+            let r = msg
+                .get("reasoning_content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .trim();
+            // 优先 content；只有在它为空时才回退 —— **绝不把两者拼起来**
+            Some(if c.is_empty() { r.to_string() } else { c.to_string() })
+        })
+        .unwrap_or_default();
+    let content = content.replace("\r\n", "\n");
+    let (b, e) = (content.find('{'), content.rfind('}'));
+    match (b, e) {
+        (Some(b), Some(e)) if e > b => content[b..=e].to_string(),
+        _ => content.trim().to_string(),
+    }
+}
+
 fn decide_side(side: &SideCtx, name: &str, url: &str) {
     let situation = side.situation.lock().map(|s| s.clone()).unwrap_or_default();
     if situation.trim().is_empty() {
@@ -519,24 +562,10 @@ fn decide_side(side: &SideCtx, name: &str, url: &str) {
     // 名字还暗示有个没用完的"笔记/决策"返回值，读起来像漏了逻辑。直接当语句执行。
     match http_post_json(url, &body, Duration::from_secs(150)) {
         Ok(resp) => {
-            let content = parse_json_fn(&resp)
-                .ok()
-                .and_then(|j| {
-                    let msg = j.get("choices")?.as_arr()?.first()?.get("message")?;
-                    let c = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                    let r = msg.get("reasoning_content").and_then(|c| c.as_str()).unwrap_or("");
-                    Some(format!("{c}\n{r}"))
-                })
-                .unwrap_or_default();
-            let content = content.replace("\r\n", "\n");
-            let content = {
-                let b = content.find('{');
-                let e = content.rfind('}');
-                match (b, e) {
-                    (Some(b), Some(e)) if e > b => content[b..=e].to_string(),
-                    _ => content.trim().to_string(),
-                }
-            };
+            // 见 `pick_decision_text` 的文档：这里原本把 content 与 reasoning_content
+            // **拼起来再跨段截取**，推理模型在 reasoning 里写任何带 `}` 的临时片段都会让
+            // 决策被拒。现在不拼接，且截取逻辑收在一个可单测的纯函数里。
+            let content = pick_decision_text(&resp);
             if !content.starts_with('{') {
                 log::warn!("llmcmd[{name}]: 输出非 JSON（{} 字符）", content.len());
                 log_decision(name, &situation, &content, false, "non_json");
@@ -686,8 +715,8 @@ impl LlmCommander {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_json_fn, parse_url, CompanyCmd, LlmCommander, LlmOrder, Shared, SideCtx,
-        DEFAULT_PATH, MAX_JSON_DEPTH,
+        json_escape, parse_company_cmds, parse_json_fn, parse_url, pick_decision_text, CompanyCmd,
+        LlmCommander, LlmOrder, Shared, SideCtx, DEFAULT_PATH, MAX_JSON_DEPTH,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -701,6 +730,72 @@ mod tests {
     /// 变异从一份"结构齐全"的 JSON 出发（对象/数组/字符串/转义/数字/真假/null 都有），
     /// 按结构分层：改一个字符（多数仍合法）、截断、追加、插入嵌套片段。
     /// 自检（教训 27）：必须有一部分仍解析成功，否则这条测试没走到解析层。
+/// 🔴 **推理过程（`reasoning_content`）里的 `}` 不能把决策 JSON 截坏。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B9，已确认）：原实现把 `content`（决策）与
+    /// `reasoning_content`（推理过程）**拼成一个串**再跨段截取 ——
+    /// `find('{')` 落在 `content` 的开头，而 `rfind('}')` 会落到 **`reasoning_content`
+    /// 的末尾**（只要推理里出现过 `}`）⇒ 截出的串带着多余尾巴 ⇒ 决策被拒。
+    /// 推理模型在推理里写**任何**带 `}` 的临时片段（JSON 片段、代码块）都会中招。
+    ///
+    /// ⚠️ 判据断言的是**整段相等**，不是"能解析"—— 旧写法在推理内容不含 `}` 时也能解析，
+    /// 只断言"能解析"就抓不到这个 bug（教训 42 的形态：测试输入没跨过出问题的那一档）。
+    #[test]
+    fn reasoning_content_with_braces_does_not_corrupt_the_decision() {
+        let decision = r#"{"companies":[{"order":"Assault","x":10.0,"z":20.0}]}"#;
+        // 推理里**故意**放 `}` 与一个完整的小 JSON —— 这正是旧写法会中招的形态
+        let reasoning = "先想想…试一下 {\"order\":\"Hold\"} 好像不行，那就冲锋 }";
+
+        let resp = format!(
+            "{{\"choices\":[{{\"message\":{{\"content\":\"{}\",\"reasoning_content\":\"{}\"}}}}]}}",
+            json_escape(decision),
+            json_escape(reasoning)
+        );
+        let got = pick_decision_text(&resp);
+        assert_eq!(
+            got, decision,
+            "必须原样取到决策 JSON —— 旧写法会把 reasoning 的尾巴拼进来"
+        );
+        // 端到端那一步也要真的过（不然"取对了"但没有意义）
+        assert!(
+            parse_company_cmds(&got, 1).is_ok(),
+            "取到的文本必须能解析成命令，实得 {got}"
+        );
+
+        // 前置对照（教训 27）：推理内容**不含** `}` 时，旧写法也能过 ——
+        // 所以上面那条的区分度全部来自"reasoning 里有 }"，这里把这个前提钉住
+        assert!(reasoning.contains('}'), "本判据的前提是推理内容里真的有 }}");
+
+        // content 为空白 ⇒ 回退到 reasoning_content（别把这条回退路径改没了）
+        let resp2 = format!(
+            "{{\"choices\":[{{\"message\":{{\"content\":\"  \",\"reasoning_content\":\"{}\"}}}}]}}",
+            json_escape(decision)
+        );
+        assert_eq!(
+            pick_decision_text(&resp2),
+            decision,
+            "content 为空时必须回退到 reasoning_content"
+        );
+
+        // 两个都空 ⇒ 空串（不许 panic、不许造出 "{}"）
+        let resp3 = "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning_content\":\"\"}}]}";
+        assert_eq!(pick_decision_text(resp3), "");
+
+        // 模型用 markdown 围栏包 JSON ⇒ `{}` 那段截取仍然要生效
+        let resp4 = format!(
+            "{{\"choices\":[{{\"message\":{{\"content\":\"```json\\n{}\\n```\"}}}}]}}",
+            json_escape(decision)
+        );
+        assert_eq!(
+            pick_decision_text(&resp4),
+            decision,
+            "围栏包裹时仍应截出 {{...}} 那一段"
+        );
+
+        // 响应体整个不是 JSON ⇒ 空串，不 panic
+        assert_eq!(pick_decision_text("not json at all"), "");
+    }
+
     /// 🔴 **回合重开必须清空两侧的 LLM 命令。**
     ///
     /// 存在理由（2026-10-15，外部复核指出"上一轮团灭重开前的旧命令"，已对着代码确认）：
