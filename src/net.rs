@@ -325,17 +325,42 @@ pub fn rdv_resolve(rdv: &str, name: &str) -> io::Result<SocketAddr> {
 }
 
 /// 非阻塞收包（Server/Client 共用）：无数据 Ok(None)，协议错误映射 InvalidData
+/// 单次 `recv_msg` 里**最多跳过**多少条解不开的数据报。
+///
+/// 为什么要有上界：非本协议报文（中继打洞的 `b"PING"`、局域网杂包、端口扫描）是**常态**，
+/// 跳过它们才是正确行为；但**如果对面一直灌**，无界跳过会让这一帧的收包循环空转
+/// ⇒ 超过上界就当作"本帧没数据了"，把控制权还给调用方。
+const MAX_JUNK_SKIP: usize = 32;
+
+/// 收一条**本协议**报文。
+///
+/// 🔴 2026-10-15 修（外部复核指出 B4，已确认）：原来解不开就返回
+/// `Err(InvalidData)`，而所有调用方都写成 `while let Ok(Some(..)) = recv()` ——
+/// **一条杂包就把整帧的收包循环打断**，内核缓冲区里排在它后面的合法玩家报文
+/// 全部要等到下一帧才处理。打洞 `PING` 是每次连接都会发的，这不是边角情况。
+///
+/// 现在：解不开的**跳过并继续收**（最多 [`MAX_JUNK_SKIP`] 条），
+/// 只有真正的 I/O 错误才向上返回 `Err`。
 fn recv_msg(socket: &std::net::UdpSocket) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
     let mut buf = [0u8; MAX_DATAGRAM];
-    match socket.recv_from(&mut buf) {
-        Ok((n, from)) => {
-            let msg = NetworkMessage::decode(&buf[..n])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(Some((msg, from)))
+    for _ in 0..=MAX_JUNK_SKIP {
+        match socket.recv_from(&mut buf) {
+            Ok((n, from)) => match NetworkMessage::decode(&buf[..n]) {
+                Ok(msg) => return Ok(Some((msg, from))),
+                Err(e) => {
+                    // 非本协议 / 畸形报文：**跳过这一条继续收**。
+                    // 用 debug 级：局域网里这类包可能有稳定的背景量，warn 会刷屏。
+                    log::debug!("net: 跳过一条解不开的 {n}B 数据报（{e}）");
+                    continue;
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(e) => return Err(e),
         }
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
-        Err(e) => Err(e),
     }
+    // 跳够上限：对面在灌垃圾，本帧到此为止（别把帧时间耗在丢弃上）
+    log::debug!("net: 连续跳过 {MAX_JUNK_SKIP} 条杂包，本帧收包到此为止");
+    Ok(None)
 }
 
 fn put_f32(buf: &mut Vec<u8>, v: f32) {
@@ -720,6 +745,12 @@ pub struct RemotePlayer {
     pub curr_time: f64,
     /// 网络滞后补偿：渲染时刻 = 本地时刻 - delay（秒）
     pub delay: f64,
+    /// 最近一次收到的 `Position` 序号（**只由 `update_seq` 维护**；`None` = 还没收到过）。
+    ///
+    /// 🔴 2026-10-15 补（外部复核指出 B4，已确认）：`Position` 分支此前把 `seq` 用 `..`
+    /// 直接忽略 ⇒ **乱序/重复包会把位置直接回滚**（UDP 不保证顺序，这是常态而非边角）。
+    /// `Snapshot` 那条路一直有 `seq_is_newer` 判据，只有 `Position` 漏了。
+    last_seq: Option<u32>,
 }
 
 impl RemotePlayer {
@@ -732,6 +763,7 @@ impl RemotePlayer {
             prev_time: time,
             curr_time: time,
             delay: 0.0,
+            last_seq: None,
         }
     }
 
@@ -741,6 +773,30 @@ impl RemotePlayer {
         self.prev_time = self.curr_time;
         self.curr = state;
         self.curr_time = time;
+    }
+
+    /// 收到带**序号**的状态（`Position` 那条路专用）：乱序/重复包**直接丢弃**。
+    ///
+    /// 返回 `false` = 该包过期、状态**没有被改动**（调用方不要再去动 `delay` 之类）。
+    ///
+    /// 为什么和 `update` 分开而不是改 `update` 的签名：快照那条路（`Snapshot` 的 NPC 循环）
+    /// 用的是**整帧的** `seq`，逐实体再判一次会把同帧的实体全判成"重复"。
+    /// 两条路的序号语义不同 ⇒ 分成两个入口，各用各的判据，别硬凑成一个。
+    ///
+    /// 序号判据复用 `seq_is_newer`（它自己就是"快照与目标状态两条丢弃路径"的单一真源，
+    /// 见其文档）—— **不要在这里再写一遍比较**，那正是实例 buffer 那类静默 bug 的来源。
+    pub fn update_seq(&mut self, seq: u32, state: PlayerState, time: f64) -> bool {
+        if let Some(last) = self.last_seq {
+            if !seq_is_newer(seq, last) {
+                return false;
+            }
+        }
+        self.last_seq = Some(seq);
+        self.prev = self.curr;
+        self.prev_time = self.curr_time;
+        self.curr = state;
+        self.curr_time = time;
+        true
     }
 
     /// 时刻 t 的插值状态（自动 clamp，并扣除 delay 做滞后补偿）
@@ -1096,12 +1152,25 @@ impl Client {
                 }
                 None
             }
-            NetworkMessage::Position { player_id, state, .. } => {
+            NetworkMessage::Position { player_id, seq, state } => {
+                // 🔴 两处此前都缺（2026-10-15，外部复核指出 B4，已确认）：
+                //   ① `seq` 被 `..` 忽略 ⇒ **乱序/重复包直接把位置回滚**
+                //      （`Snapshot` 那条路一直有 `seq_is_newer`，只有这里漏了）；
+                //   ② 新建的 `RemotePlayer` 用默认 `delay = 0.0`，而 **`Snapshot` 那条路
+                //      会显式 `e.state.delay = self.interp_delay`**（见 `interp_delay` 的文档：
+                //      "delay 从来没被赋过值（恒 0）⇒ 插值退化成直接用最新快照 ⇒ 一顿一顿地跳"）
+                //      ⇒ **只修了快照那半边，`Position` 这半边一直是跳的。**
                 match self.remote_players.get_mut(&player_id) {
-                    Some(rp) => rp.update(state, t),
+                    Some(rp) => {
+                        if rp.update_seq(seq, state, t) {
+                            rp.delay = self.interp_delay;
+                        }
+                    }
                     None => {
-                        self.remote_players
-                            .insert(player_id, RemotePlayer::new(player_id, state, t));
+                        let mut rp = RemotePlayer::new(player_id, state, t);
+                        rp.last_seq = Some(seq);
+                        rp.delay = self.interp_delay;
+                        self.remote_players.insert(player_id, rp);
                     }
                 }
                 None
@@ -1393,6 +1462,100 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **乱序 / 重复的 `Position` 必须被丢弃，不能把远端玩家的位置回滚。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B4，已确认）：`handle_message` 的
+    /// `NetworkMessage::Position { player_id, state, .. }` 把 `seq` 用 `..` **直接忽略**
+    /// ⇒ UDP 不保证顺序，一个迟到的包就能把远端玩家**拽回旧位置**（然后下一帧再跳回来）。
+    /// `Snapshot` 那条路一直有 `seq_is_newer` 判据，只有 `Position` 漏了。
+    ///
+    /// ⚠️ 判据要**先确认正常路径是通的**（教训 27）：只断言"乱序被丢"的话，
+    /// 一个**永远丢弃所有 Position** 的实现也能通过。
+    #[test]
+    fn out_of_order_position_is_dropped_not_rolled_back() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        let pos = |x: f32, seq: u32| NetworkMessage::Position {
+            player_id: 7,
+            seq,
+            state: PlayerState::new([x, 0.0, 0.0], 0.0),
+        };
+
+        // 正常路径：seq 递增必须被接受，位置跟着走
+        let _ = client.handle_message(pos(10.0, 1));
+        assert_eq!(
+            client.remote_players().get(&7).map(|rp| rp.curr.pos[0]),
+            Some(10.0),
+            "前置失败：正常的 Position 没被接受（后面的判据就什么也没证明）"
+        );
+        let _ = client.handle_message(pos(20.0, 2));
+        assert_eq!(
+            client.remote_players().get(&7).map(|rp| rp.curr.pos[0]),
+            Some(20.0),
+            "seq 递增的 Position 应更新位置"
+        );
+
+        // 乱序：一个更旧的 seq 到达 —— **必须被丢**，不能把位置拽回 10
+        let _ = client.handle_message(pos(10.0, 1));
+        assert_eq!(
+            client.remote_players().get(&7).map(|rp| rp.curr.pos[0]),
+            Some(20.0),
+            "迟到的旧包把位置回滚了 —— 这就是 `seq` 被忽略的后果"
+        );
+
+        // 重复：同一 seq 再来一次，同样丢弃（seq_is_newer 对相等返回 false）
+        let _ = client.handle_message(pos(99.0, 2));
+        assert_eq!(
+            client.remote_players().get(&7).map(|rp| rp.curr.pos[0]),
+            Some(20.0),
+            "重复包（同一 seq）不该改状态"
+        );
+
+        // 再递增：必须恢复接收（别把"丢弃"写成"之后全丢"）
+        let _ = client.handle_message(pos(30.0, 3));
+        assert_eq!(
+            client.remote_players().get(&7).map(|rp| rp.curr.pos[0]),
+            Some(30.0),
+            "乱序包之后，正常递增的包必须照常接受"
+        );
+    }
+
+    /// 🔴 **一条解不开的数据报不许打断整帧的收包循环。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B4，已确认）：`recv_msg` 原来解不开就返回
+    /// `Err(InvalidData)`，而所有调用方都是 `while let Ok(Some(..)) = recv()`
+    /// ⇒ **一条杂包就把整帧的收包循环打断**，排在它后面的合法报文要等下一帧。
+    /// 中继打洞的 `b"PING"` 每次连接都会发 —— 这不是边角情况。
+    ///
+    /// 判据：先塞一条**非本协议**数据报、紧跟着塞一条**合法** Join，
+    /// 然后 `recv()` 必须拿到那条 **Join**（而不是 `None` / `Err`）。
+    #[test]
+    fn junk_datagram_does_not_block_the_valid_one_behind_it() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        // ① 打洞 PING：不是本协议（协议头是魔数 'S'）
+        sock.send_to(b"PING", addr).unwrap();
+        // ② 紧跟着一条合法的 Join
+        let join = NetworkMessage::Join {
+            player_id: 0,
+            name: "p".into(),
+            version: SESSION_VERSION,
+        };
+        sock.send_to(&join.encode(), addr).unwrap();
+
+        // 给内核一点时间把两条都排进队列（本机回环）
+        std::thread::sleep(Duration::from_millis(20));
+
+        let got = server.recv().expect("recv 不该返回 Err（杂包不是 I/O 错误）");
+        let (msg, _from) = got.expect(
+            "recv 返回 None ⇒ 那条杂包把后面的合法报文挡住了（或整批被吞）\
+             —— 这正是「while let Ok(Some(..)) 被一条 Err 打断」的形态",
+        );
+        assert_eq!(msg, join, "应拿到杂包**后面**的那条 Join");
+    }
+
     /// 🔴 **房主（`player_id = 0`）与 0 号 NPC 必须落在不同的实体槽位。**
     ///
     /// 存在理由（2026-10-15，外部复核指出 B3，已对着**两端**代码确认）：
