@@ -217,6 +217,35 @@ pub(crate) fn frame_action(acquire_suboptimal: bool, present: PresentOutcome) ->
 pub(crate) fn frame_suppressed(gpu_stalled: bool, swapchain_broken: bool) -> bool {
     gpu_stalled || swapchain_broken
 }
+/// **在「`acquire_next_image` 已经成功之后」的任何早退点上，必须做的处置。**
+///
+/// 🔴 为什么必须抽成纯函数（2026-10-15，外部复核指出 A3，已对着代码确认）：
+/// 走到那个位置时有两件**有后果**的事已经发生 ——
+///   ① `acquire` 成功 ⇒ `image_available_semaphores[current_frame]` 已被 signal，
+///      而该信号量**不随交换链重建而重建**；
+///   ② `reset_fences` 成功 ⇒ 本槽位围栏已是 **Unsignaled**。
+/// 此时裸 `?` 返回 ⇒ `queue_submit` 永不执行 ⇒ **围栏永不 signal**；
+/// 又因为末尾的 `current_frame` 自增也被跳过 ⇒ 下一帧仍用同一槽位，
+/// 在 `wait_for_fences(5s)` 上死等，连续 3 次超时（**15 秒**）才落 `gpu_stalled`
+/// —— 这段时间整个进程像卡死。
+///
+/// ⇒ 唯一的正确处置是**判定 `gpu_stalled`**：`frame_suppressed` 在 `render()` 开头、
+///   **早于** `wait_for_fences` ⇒ 置位后下一帧在门口就返回，**走不到那个死等**。
+///
+/// ⚠️ 抽成纯函数**不只是为了好看**：第一版判据是"扫源码看 `return Err` 前 40 行内
+/// 有没有 `gpu_stalled = true`"—— 我**把它放进 `if false {}` 死代码块里反向验证，
+/// 判据照样通过**。文本扫描在这里就是**说谎的闸门**（见 `pitfalls/lying-gates.md`）。
+/// 结论抽成纯函数之后，判据可以直接断言它的返回值。
+pub(crate) fn abort_after_acquire(reason: &str) -> (bool, String) {
+    (
+        true,
+        format!(
+            "{} ⇒ 判定 GPU 侧不可用，停止渲染循环\
+             （本槽位围栏已重置却没有 submit，继续跑会在 wait_for_fences 上死等 15 秒）",
+            reason
+        ),
+    )
+}
 /// 这一帧要不要重画阴影图（纯函数，可单测）。见 `Renderer::shadow_every`：隔帧重画，
 /// `every = 1` 就是每帧（A/B 对照）；`void_mode`（检视模式）下从不画。
 pub(crate) fn shadow_due(frame_seq: u64, every: u32, void_mode: bool) -> bool {

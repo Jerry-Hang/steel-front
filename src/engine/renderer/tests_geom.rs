@@ -1308,3 +1308,56 @@ mod cull_sched_microbench {
         }
     }
 }
+
+/// 🔴 **`acquire` 成功之后的任何早退，都必须判定 `gpu_stalled`。**
+///
+/// 存在理由（2026-10-15，外部复核指出 A3，已对着代码确认）：
+/// 走到那个位置时有两件有后果的事已经发生 ——
+///   ① `acquire_next_image` 成功 ⇒ `image_available_semaphores[current_frame]` 已被 signal，
+///      而该信号量**不随交换链重建而重建**；
+///   ② `reset_fences` 成功 ⇒ 本槽位围栏已是 **Unsignaled**。
+/// 此时裸 `?` 返回 ⇒ `queue_submit` 永不执行 ⇒ **围栏永不 signal**；又因为末尾的
+/// `current_frame` 自增也被跳过 ⇒ 下一帧仍用同一槽位，在 `wait_for_fences(5s)` 上死等，
+/// 连续 3 次超时（**15 秒**）才落 `gpu_stalled` —— 这段时间整个进程像卡死。
+///
+/// 🔴 **这条判据为什么是"断言纯函数"而不是"扫源码"**：
+/// 第一版写的是"扫 `render()` 里 `reset_fences`→`queue_submit` 这段，看每个 `return Err`
+/// 之前 40 行内有没有 `self.gpu_stalled = true`"。**反向验证时我把那行塞进了
+/// `if false { ... }` 死代码块，判据照样通过** —— 文本扫描在这里就是**说谎的闸门**
+/// （`pitfalls/lying-gates.md` 的形态；我在同一批里已经因为"判据匹配到自己的文档"栽过一次）。
+/// ⇒ 把决策抽成纯函数 `abort_after_acquire`，判据直接断言它的返回值。
+#[test]
+fn aborting_after_a_successful_acquire_always_stalls_the_renderer() {
+    let (stalled, msg) = abort_after_acquire("测试原因");
+    assert!(
+        stalled,
+        "acquire 成功之后早退**必须**置 gpu_stalled —— 否则围栏永不 signal，\
+         下一帧在 wait_for_fences 上死等 15 秒"
+    );
+    assert!(
+        msg.contains("测试原因"),
+        "日志必须带上原始原因（否则现场只剩一句「卡了 15 秒」，查不下去）"
+    );
+    assert!(
+        msg.contains("死等"),
+        "日志要把**后果**讲明白：这条路的代价是 15 秒死等，不是普通错误"
+    );
+}
+
+/// 配套：`frame.rs` 的**两处**早退点必须都走 `abort_after_acquire`，
+/// 不许有人绕过它写回裸 `?`。
+///
+/// ⚠️ 这条是源码级判据，所以只做**最不容易失效**的断言 —— 数调用次数，
+/// 而不是匹配周围文本（后者会被注释、死代码、换行格式骗过去）。
+/// 真正的语义由上面那条纯函数判据保证，这条只负责"接线没被拆掉"。
+#[test]
+fn frame_rs_abort_sites_go_through_the_helper() {
+    let src = include_str!("frame.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let n = prod.matches("abort_after_acquire(").count();
+    assert!(
+        n >= 2,
+        "frame.rs 里只找到 {n} 处 abort_after_acquire 调用（应 ≥2：录制失败 / \
+         render-finished 信号量缺失）—— 有人把某处改回了裸 `?`？"
+    );
+}

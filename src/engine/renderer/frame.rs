@@ -816,30 +816,54 @@ impl Renderer {
             self.shadow_static_frame = false;
         }
         self.frame_seq = self.frame_seq.wrapping_add(1);
-        self.record_command_buffer(
+        // 🔴 **这个早退点不能裸 `?`**（2026-10-15，外部复核指出，已对着代码确认）。
+        //
+        // 走到这里时已经发生了两件**有后果**的事：
+        //   ① `acquire_next_image` 成功 ⇒ `image_available_semaphores[current_frame]` 已被 signal
+        //   ② 第 519 行 `reset_fences` 成功 ⇒ 本槽位围栏已是 **Unsignaled**
+        // 而裸 `?` 直接返回 ⇒ `queue_submit` 永不执行 ⇒ **围栏永不 signal**。
+        // 又因为末尾那句 `current_frame` 自增也被跳过 ⇒ 下一帧仍用同一个槽位，
+        // 在 419 行 `wait_for_fences(5s)` 上死等 ⇒ 连续 3 次超时（15 秒）后才落 `gpu_stalled`
+        // —— **这段时间整个进程像卡死**。
+        //
+        // 处置与第 519 行 `reset_fences` 失败那条路**保持一致**（那里已经有同样的注释）：
+        // 既然连命令缓冲都录不了，GPU 侧事实上已不可用 ⇒ 直接判定 `gpu_stalled`。
+        // 判据成立的原因：`frame_suppressed` 在 `render()` 开头（409 行）、**早于**
+        // `wait_for_fences`（419 行）⇒ 置位后下一帧在门口就返回，**走不到那个死等**。
+        if let Err(e) = self.record_command_buffer(
             cmd_buffer,
             image_index as usize,
             near_count,
             far_count,
             terrain_lod_index,
-        )?;
+        ) {
+            let (stalled, msg) = abort_after_acquire(&format!("录制命令缓冲失败（{e}）"));
+            self.gpu_stalled = stalled;
+            log::error!("{}", msg);
+            return Err(e);
+        }
         self.stage_record_us = t0.elapsed().as_micros() as u64;
 
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         // ⚠ **按下标 `image_index` 取，不是 `current_frame`** —— 理由见
         // `resize_render_finished_semaphores` 的文档（VUID-vkQueueSubmit-pSignalSemaphores-00067）。
-        let render_finished = *self
-            .render_finished_semaphores
-            .get(image_index as usize)
-            .ok_or_else(|| {
-                format!(
+        // 🔴 同上：这里同样**不能裸 `?`** —— 位置在第 519 行 `reset_fences` 之后，
+        // 早退会让围栏留在 Unsignaled 且 `current_frame` 不自增 ⇒ 下一帧死等 15 秒。
+        let render_finished = match self.render_finished_semaphores.get(image_index as usize) {
+            Some(&sem) => sem,
+            None => {
+                let (stalled, msg) = abort_after_acquire(&format!(
                     "render-finished 信号量缺失：image_index={}，共 {} 个（应等于交换链图像数 {}）",
                     image_index,
                     self.render_finished_semaphores.len(),
                     self.swapchain_images.len()
-                )
-            })?;
+                ));
+                self.gpu_stalled = stalled;
+                log::error!("{}", msg);
+                return Err(msg);
+            }
+        };
         let signal_semaphores = [render_finished];
         let cmd_buffers = [cmd_buffer];
 
