@@ -563,6 +563,7 @@ impl Renderer {
             instance_center_y: Vec::with_capacity(INSTANCE_COUNT as usize),
             instance_center_z: Vec::with_capacity(INSTANCE_COUNT as usize),
             markers: Vec::new(),
+            world_marker_len: 0,
             markers_version: 1,
             last_marker_upload_us: 0,
             marker_slot_version: [0; 8], // 全 0 ⇒ 首帧必然 != 版本 1 ⇒ 一定写

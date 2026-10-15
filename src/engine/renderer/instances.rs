@@ -409,16 +409,50 @@ impl Renderer {
     }
     /// 每帧视锥剔除 + 距离 LOD 分档：
     /// 设置世界障碍 marker（关卡切换时由 main.rs 调用；容量截断到 MAX_MARKER_INSTANCES）
+    /// **"静态世界障碍的内容变没变"的判据**（纯函数：可单测，不必造 `Renderer`）。
+    ///
+    /// 🔴 `stored_static_len` 是**静态前缀**的长度，**不是** `stored.len()`。
+    /// 两者在"场上有弹孔"时必然不等 —— 那正是这条判据存在的理由，
+    /// 详见 `set_world_markers` 里的说明。
+    ///
+    /// `zip` 会在较短的一侧停下 ⇒ 拿 `stored`（可能更长，尾部是弹孔）去 zip
+    /// `incoming[..n]` 正好只比前 n 项，动态那一段不参与比较
+    /// （它的变化由 `append_markers` 自己升版本负责）。
+    pub(crate) fn world_markers_unchanged(
+        incoming: &[WorldMarker],
+        stored: &[InstanceData],
+        stored_static_len: usize,
+    ) -> bool {
+        let n = incoming.len().min(MAX_MARKER_INSTANCES as usize);
+        n == stored_static_len
+            && incoming[..n].iter().zip(stored.iter()).all(|(m, inst)| {
+                m.tint == inst.tint && m.model.to_cols_array() == inst.model
+            })
+    }
+
     pub(crate) fn set_world_markers(&mut self, markers: &[WorldMarker]) {
         let n = markers.len().min(MAX_MARKER_INSTANCES as usize);
         // 🔴 **内容没变就不重建、也不升版本**（2026-10-13）：上游每帧都会重新构造一份
         // 内容相同的列表（静态城市场景障碍 ~1789 件），而重建 + 上传实测 190~570µs。
         // 判据是"内容比较"而不是"调用次数" —— 调用次数每帧都在涨，没有区分度。
-        let same = n == self.markers.len()
-            && markers[..n].iter().zip(self.markers.iter()).all(|(m, inst)| {
-                m.tint == inst.tint && m.model.to_cols_array() == inst.model
-            });
-        if same {
+        // 🔴 **比的是"静态前缀"的长度，不是整表的长度**（2026-10-15，外部复核指出，已确认）：
+        //
+        // 原来写的是 `n == self.markers.len()`。而同一帧紧随其后的 `append_markers`
+        // （`lib.rs` 里两句相邻）会把**弹孔**追加到 `self.markers` 表尾 ⇒
+        // 只要场上有 ≥1 个弹孔，下一帧 `self.markers.len()` = `静态数 + 弹孔数`，
+        // 与这里的 `n`（纯静态件数）**恒不相等** ⇒ `same` 恒假 ⇒
+        //   · 每帧清空重建 1789 件；
+        //   · `markers_version` 每帧自增 **2** 次；
+        //   · `upload_markers` 的 `slot_version == markers_version` 也恒不通过
+        //     ⇒ 退回每帧全量拷贝上传（正是当初要省掉的那 190~570µs）。
+        //
+        // 弹孔寿命 30s ⇒ **开一枪打在墙上，之后 30 秒每帧都全量上传**。
+        // ⇒ 2026-10-13 报的 `mk_up_us 190~570 → 0` **只在纯跑图不开火时成立**。
+        //
+        // 判据仍然只看**前缀**：`zip` 会在较短的一侧停下，所以拿 `self.markers`
+        // （可能更长）去 zip `markers[..n]` 正好只比前 n 项 —— 动态那一段不参与比较，
+        // 它的变化由 `append_markers` 自己升版本负责。
+        if Self::world_markers_unchanged(markers, &self.markers, self.world_marker_len) {
             return;
         }
         self.markers.clear();
@@ -426,6 +460,9 @@ impl Renderer {
             model: m.model.to_cols_array(),
             tint: m.tint,
         }));
+        // 记住静态前缀长度 —— 下一次判据要用它，而不是重建后的 `self.markers.len()`
+        // （后者此刻恰好等于 n，但随后就会被 `append_markers` 改掉）。
+        self.world_marker_len = n;
         self.markers_version = self.markers_version.wrapping_add(1);
     }
     /// 追加一批世界 marker（弹孔等每帧变化的实例），容量仍截断到 `MAX_MARKER_INSTANCES`。

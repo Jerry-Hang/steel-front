@@ -706,7 +706,24 @@ pub struct Renderer {
     instance_center_y: Vec<f32>,
     instance_center_z: Vec<f32>,
     /// 世界障碍 marker（关卡切换时由 main.rs 设置；独立于实例场，见 MARKER_SLOT_BASE）
+    ///
+    /// ⚠️ 这张表里**混着两类**：前 `world_marker_len` 个是**静态**世界障碍（`set_world_markers`
+    /// 每帧重设），其后是**动态**弹孔（`append_markers` 追加）。
+    /// ⇒ "静态内容变没变"的判据只能比**前缀**，不能拿静态件数跟整表长度比 ——
+    /// 见 `set_world_markers` 里那段说明。
     markers: Vec<InstanceData>,
+    /// `markers` 里**静态前缀**的长度（= 上一次 `set_world_markers` 写进来的件数）。
+    ///
+    /// 🔴 2026-10-15 补（外部复核指出，已对着代码确认）：`set_world_markers` 的"内容没变就
+    /// 跳过"判据原来写的是 `n == self.markers.len()`，而**同一帧紧随其后的 `append_markers`
+    /// 会把弹孔追加到表尾**（`lib.rs` 里两句是相邻调用的）⇒ 只要场上有 ≥1 个弹孔，
+    /// 下一帧 `self.markers.len()` 就是 `静态数 + 弹孔数`，与 `n`（纯静态数）**恒不相等**
+    /// ⇒ **跳过优化 100% 失效**，而且 `markers_version` 每帧自增 2 次、`upload_markers`
+    /// 的槽位版本判据也恒不通过 ⇒ 退回每帧全量拷贝（正是那个 190~570µs）。
+    ///
+    /// 弹孔寿命 30s ⇒ **开一枪打在墙上，之后 30 秒每帧都全量上传**。
+    /// 也就是说 2026-10-13 报的 `mk_up_us 190~570 → 0` **只在纯跑图不开火时成立**。
+    world_marker_len: usize,
     /// marker 内容的版本号：`set_world_markers` / `append_markers` 真正改动内容时 +1。
     ///
     /// 存在的理由（2026-10-13）：marker 是**静态**的（城市场景障碍 ~1789 件），

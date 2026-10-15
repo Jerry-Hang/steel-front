@@ -1615,3 +1615,76 @@ fn accel_build_barrier_never_requests_shader_read() {
         "连那个合法的 compute 屏障都扫不到 —— 扫描面有问题"
     );
 }
+
+/// 🔴 **"静态障碍内容没变"的判据必须比「静态前缀」，不能比整表长度。**
+///
+/// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：
+/// `set_world_markers` 原来的判据是 `n == self.markers.len()`，而**同一帧紧随其后的
+/// `append_markers`**（`lib.rs` 里两句相邻）会把**弹孔**追加到 `self.markers` 表尾 ⇒
+/// 只要场上有 ≥1 个弹孔，下一帧 `self.markers.len()` = `静态数 + 弹孔数`，
+/// 与 `n`（纯静态件数）**恒不相等** ⇒
+///   · 每帧清空重建 1789 件静态障碍；
+///   · `markers_version` 每帧自增 **2** 次；
+///   · `upload_markers` 的 `slot_version == markers_version` 也恒不通过
+///     ⇒ **退回每帧全量拷贝上传**（正是当初要省掉的那 190~570µs）。
+///
+/// 弹孔寿命 30 秒 ⇒ **开一枪打在墙上，之后 30 秒每帧都全量上传**。
+/// ⇒ 2026-10-13 报的 `mk_up_us 190~570 → 0` **只在纯跑图不开火时成立**。
+///
+/// ⚠️ 判据**必须包含"旧写法会误判"这一档**：只断言"静态没变时返回 true"抓不到这个 bug ——
+/// 关键在于**表里还有动态项时**它还对不对。
+#[test]
+fn world_marker_skip_compares_the_static_prefix_not_the_whole_table() {
+    let mk = |x: f32| WorldMarker {
+        model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
+        tint: [0.5, 0.5, 0.5, 1.0],
+    };
+    let to_inst = |m: &WorldMarker| InstanceData {
+        model: m.model.to_cols_array(),
+        tint: m.tint,
+    };
+
+    let statics = [mk(1.0), mk(2.0), mk(3.0)];
+    // 表里 = 3 个静态 + 2 个弹孔（弹孔是上一帧 append 进去的）
+    let mut stored: Vec<InstanceData> = statics.iter().map(to_inst).collect();
+    stored.extend([mk(90.0), mk(91.0)].iter().map(to_inst));
+
+    // ① 正确行为：比静态前缀 ⇒ 内容没变 ⇒ **应该跳过**
+    assert!(
+        Renderer::world_markers_unchanged(&statics, &stored, 3),
+        "静态前缀没变时应当判为「不用重建」—— 否则每帧白重建 1789 件"
+    );
+
+    // ② 🔴 **这一条是区分度来源**：旧写法拿 `n` 去比 `stored.len()`（= 5）⇒ 恒不相等。
+    //    把旧判据在这里复现一遍，钉住"它确实会误判"，免得将来有人改回去还觉得没差。
+    let old_verdict = statics.len() == stored.len();
+    assert!(
+        !old_verdict,
+        "旧写法（n == stored.len()）在「表里还有弹孔」时应当判为 false —— \
+         这一档正是 bug 本体；如果它变成 true，说明这条判据的前提已经变了"
+    );
+
+    // ③ 静态内容**真的**变了 ⇒ 必须重建
+    let changed = [mk(1.0), mk(2.0), mk(4.0)];
+    assert!(
+        !Renderer::world_markers_unchanged(&changed, &stored, 3),
+        "第 3 件静态障碍的坐标变了却没判成「要重建」⇒ 玩家会看到旧位置的门/墙"
+    );
+    // tint 变同理（它是 marker 皮肤路径的分支依据）
+    let mut tinted = [mk(1.0), mk(2.0), mk(3.0)];
+    tinted[0].tint = [0.9, 0.1, 0.1, 1.0];
+    assert!(
+        !Renderer::world_markers_unchanged(&tinted, &stored, 3),
+        "tint 变了没判成「要重建」"
+    );
+
+    // ④ 件数变了 ⇒ 必须重建（少一件/多一件都要重建，否则会画出多余的旧障碍）
+    let fewer = &statics[..2];
+    assert!(!Renderer::world_markers_unchanged(fewer, &stored, 3), "静态件数变少应重建");
+
+    // ⑤ 边界：空静态 + 空表 ⇒ 视为没变（别让空关卡每帧重建）
+    assert!(
+        Renderer::world_markers_unchanged(&[], &[], 0),
+        "空表应判为「没变」"
+    );
+}
