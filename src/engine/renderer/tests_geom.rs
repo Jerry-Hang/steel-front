@@ -1457,3 +1457,61 @@ fn pt_debug_entries_release_assets_and_use_the_passed_box_count() {
          `boxes.len()`；用场景的盒数会让片元着色器的盒体/道具分界错位（画错东西且不报错）"
     );
 }
+
+/// 🔴 **初始化 / 重建命令缓冲时不许"占位录制"。**
+///
+/// 存在理由（2026-10-15，外部复核指出 A2，已对着代码确认）：
+/// `init_command_buffers` 与 `recreate_command_buffers` 原来都对每个在飞槽位录一遍
+/// `record_command_buffer(..)`，而那些命令缓冲**永远不会被提交**（`render()` 每帧重录
+/// 当前槽位）。它在"帧内容"上是空操作，**但有副作用** —— PT 通路开着时
+/// `record_command_buffer` 会通过 `Cell` 改渲染器状态：
+///   · 刚置上的 `pt_reset = true`（取景变化 ⇒ 要求清空累积）被下一次占位录制**清成 false**；
+///   · `pt_frame` 被**推进到"在飞槽位数"**。
+/// ⇒ 真正第一帧提交时着色器收到的是 `reset = false, frame = 2`，**首帧清零被整个跳过**
+/// ⇒ 累积图里混进上一轮残影或未初始化数据（PT 默认关，只在开 PT 时表现，
+/// 且表现为"看着像拖影"的静默错误）。
+///
+/// ⚠️ 判据只扫这两个函数体（`render()` 里那次**必须**保留 —— 它是唯一的真正录制路径）。
+#[test]
+fn command_buffer_init_and_recreate_never_pre_record() {
+    let src = include_str!("swapchain.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+
+    for fname in [
+        "pub(crate) fn init_command_buffers(",
+        "pub(crate) fn recreate_command_buffers(",
+    ] {
+        let start = prod
+            .find(fname)
+            .unwrap_or_else(|| panic!("swapchain.rs 里找不到 {fname}"));
+        let rest = &prod[start..];
+        // 函数体的近似边界：下一个同缩进的 `pub(crate) fn `
+        let end = rest[1..]
+            .find("\n    pub(crate) fn ")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        let body = &rest[..end];
+        let code: String = body
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("record_command_buffer"),
+            "{fname} 里又在做占位录制了 —— 那些命令缓冲永不提交，却会推进 PT 的\
+             `pt_reset`/`pt_frame`，导致重建后第一帧不清空累积图。\
+             删掉它：新命令缓冲只有录过才能提交，而唯一的提交路径在 render() 里、\
+             提交前必然先录一次。"
+        );
+    }
+
+    // 前置自检（教训 27）：确认扫描面真的切到了函数体，而不是切了个空串
+    let probe_start = prod.find("pub(crate) fn init_command_buffers(").unwrap();
+    assert!(
+        prod[probe_start..].len() > 200,
+        "函数体切得太短 ⇒ 这条判据可能什么也没扫到"
+    );
+}

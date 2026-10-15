@@ -336,12 +336,28 @@ impl Renderer {
                 .map_err(|e| format!("分配命令缓冲失败: {}", e))?
         };
 
-        // 占位录制（每帧都会重录）：图像下标只用来选 framebuffer，取模防止
-        // 交换链图像数 < 在飞帧数时越界。
-        let fbs = self.framebuffers.len().max(1);
-        for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i % fbs, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
-        }
+        // 🔴 **删除"占位录制"**（2026-10-15，外部复核指出 A2，已对着代码确认）。
+        //
+        // 原来这里对每个在飞槽位录一遍：
+        // ```text
+        // for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
+        //     self.record_command_buffer(command_buffer, i % fbs, INSTANCE_COUNT, 0, ..)?;
+        // }
+        // ```
+        // **这两条命令缓冲永远不会被 `vkQueueSubmit` 提交** —— `render()` 每帧都会重录
+        // 当前槽位（见 `frame.rs` 里 `record_command_buffer` 的调用点），所以占位录制
+        // 在"帧内容"上没有任何作用。
+        //
+        // 但它**有副作用**：`record_command_buffer` 在 PT 通路开着时通过 `Cell`
+        // 直接改渲染器状态（`pt_view_sig` / `pt_reset` / `pt_frame`）——
+        //   · `pt_reset.set(true)`（取景变化 ⇒ 要求清空累积）会被下一次占位录制**清成 false**；
+        //   · `pt_frame` 会被**推进到"在飞槽位数"**。
+        // ⇒ 真正第一帧提交时，着色器收到的已经是 `reset = false, frame = 2`，
+        //   **首帧的累积清零被整个跳过** ⇒ 累积图里混进上一轮的残影或未初始化数据。
+        // PT 默认关，所以只在开 PT 时表现；但那是"看着像拖影"的静默错误。
+        //
+        // ⚠️ 删掉是安全的：新分配的命令缓冲处于 initial 状态，**只有录过才能提交**，
+        // 而唯一的提交路径（`frame.rs`）在提交前必然先录一次。
         Ok(())
     }
     pub(crate) fn init_sync_objects(&mut self) -> Result<(), String> {
@@ -603,10 +619,10 @@ impl Renderer {
                 .allocate_command_buffers(&alloc_info)
                 .map_err(|e| format!("重新分配命令缓冲失败: {}", e))?
         };
-        let fbs = self.framebuffers.len().max(1);
-        for (i, &command_buffer) in self.command_buffers.iter().enumerate() {
-            self.record_command_buffer(command_buffer, i % fbs, INSTANCE_COUNT, 0, TerrainLod::High as usize)?;
-        }
+        // 🔴 同 `init_command_buffers`：**不再做占位录制**（见那里的说明）。
+        // 重建发生在窗口尺寸变化 / 切后台回来 —— 恰恰是 `pt_view_sig` 最可能变化的时刻，
+        // 占位录制会把刚置上的 `pt_reset = true` 清掉、并把 `pt_frame` 推进若干帧
+        // ⇒ 重建后的第一帧不清空累积图。
         Ok(())
     }
     pub(crate) fn destroy_swapchain(&mut self) {
