@@ -37,6 +37,40 @@ pub enum CpuVendor {
 }
 
 /// 检测到的 CPU 拓扑摘要（启动时输出日志，供线程调度决策）
+/// `efficiency` 里的哨兵：**这个 vCPU 没有对应的核条目**。
+///
+/// 用 `0xFF` 而**不是** `0`：按 Win32 的约定，`0` 是"能效核"的**合法取值**
+/// （见 [`EfficiencyClass` 的极性说明](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-processor_relationship)），
+/// 拿它当"未设置"会把空缺位误判成 E 核。
+///
+/// 定义在**共享层**而不是 `win_topology` 里：写入侧（Windows 采集）与读取侧
+/// （跨平台的分组逻辑）**两个平台都要看得见**它，放模块里会只在 Windows 上存在。
+pub const EFF_UNKNOWN: u8 = 0xFF;
+
+/// 按 `EfficiencyClass` 把 vCPU 分成 **(P, E, LE)** 三组（纯函数：**跨平台可单测**）。
+///
+/// 🔴 **极性依据微软官方文档**（2026-10-15 对着原文核实并更正）：
+/// > A core with a **higher value** for the efficiency class has **intrinsically greater
+/// > performance** and less efficiency than a core with a lower value.
+/// > —— <https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-processor_relationship>
+///
+/// ⇒ **值越大性能越高**：`1` = P（性能核）、`0` = E（能效核）、`2` = 更高一档。
+/// 本仓原来写的是「0=P 主簇，1=E」——**整个反了**，在 Intel 混合架构上会把渲染绑到
+/// **E 核**、AI 绑到 **P 核**。
+///
+/// ⚠️ `EFF_UNKNOWN`（空缺位）**不归任何一组** —— 上面那个"是否异构"的判据已经把它排除，
+/// 但它也不该混进 P/E 里。
+///
+/// 抽成纯函数是为了**让这条极性判据在 Linux 上也能跑**（Windows 专有模块本地不编译）。
+pub fn group_by_efficiency(efficiency: &[u8]) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    let n = efficiency.len();
+    (
+        (0..n).filter(|&c| efficiency[c] == 1).collect(),
+        (0..n).filter(|&c| efficiency[c] == 0).collect(),
+        (0..n).filter(|&c| efficiency[c] == 2).collect(),
+    )
+}
+
 pub struct CpuTopology {
     pub vendor: CpuVendor,
     /// 逻辑处理器总数（vCPU）
@@ -80,7 +114,7 @@ struct PlatformTopo {
     cores: Vec<Vec<usize>>,
     /// L3 缓存组（CCX）：每组的逻辑处理器集合
     ccx_groups: Vec<Vec<usize>>,
-    /// 每逻辑处理器能效等级（0=P 1=E 2=LE）
+    /// 每逻辑处理器能效等级（**值越大性能越高**：0=E 1=P 2=更高一档；`EFF_UNKNOWN` = 空缺）
     efficiency: Vec<u8>,
 }
 
@@ -88,6 +122,10 @@ struct PlatformTopo {
 /// 零第三方依赖（kernel32 直接 FFI）；失败返回 None 回退旧逻辑。
 #[cfg(target_os = "windows")]
 mod win_topology {
+    // 哨兵定义在**共享层**（写入侧与读取侧两个平台都要看得见），这里显式引进来。
+    // 🔴 这一条是 `cargo check --target x86_64-pc-windows-msvc` 抓到的 ——
+    // Linux 构建**根本不编译本模块**，本地一路绿也发现不了。
+    use super::EFF_UNKNOWN;
     use super::PlatformTopo;
 
     const REL_PROCESSOR_CORE: u32 = 0;
@@ -241,8 +279,18 @@ mod win_topology {
                 if members.is_empty() {
                     return;
                 }
-                for _ in 0..members.len() {
-                    efficiency.push(pr.efficiency);
+                // 🔴 **按 vCPU 编号落位，不是按条目遍历顺序 push**（2026-10-15，外部复核指出，
+                // 已确认）。原来是 `for _ in 0..members.len() { efficiency.push(..) }`
+                // —— 那让 `efficiency` 的下标是**遍历序号**，而读取侧
+                // （`(0..n).filter(|&c| pt.efficiency[c] == ..)`）把下标当**vCPU 编号**用。
+                // `mask_members` 返回的是掩码里的**真实位号**（可能不从 0 开始、也可能不连续），
+                // 一旦两者不一致，整套"哪些核是 P / 哪些是 E"就整体错位。
+                // 空缺位填哨兵 `EFF_UNKNOWN`（**不能填 0** —— 0 是 E 核的合法取值）。
+                for &c in &members {
+                    if c >= efficiency.len() {
+                        efficiency.resize(c + 1, EFF_UNKNOWN);
+                    }
+                    efficiency[c] = pr.efficiency;
                 }
                 cores.push(members);
             });
@@ -652,17 +700,40 @@ impl CpuTopology {
 
         let (primary_set, secondary_set, le_set, ccx_groups, efficiency, e_cores) =
             if let Some(pt) = &plat {
-                if pt.efficiency.iter().any(|&e| e != 0) {
+                // 🔴 **极性与本仓原来的写法相反**（2026-10-15，外部复核指出，已对着
+                // **微软官方文档**核实）：
+                //
+                // > A core with a **higher value** for the efficiency class has
+                // > **intrinsically greater performance** and less efficiency than a core
+                // > with a lower value for the efficiency class.
+                // > —— <https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-processor_relationship>
+                //
+                // ⇒ **值越大性能越高**：`0` = 能效核（E），`1` = 性能核（P）。
+                // 本仓原来写的是「0=P 主簇，1=E」——**整个反了** ⇒ 在 Intel 混合架构上
+                // 把渲染绑到 **E 核**、AI 绑到 **P 核**，正好反着。
+                //
+                // ⚠️ 「全为 0 ⇒ 不是混合架构」这个判据**本身是对的**，别一起改掉：
+                // 同文档写着 "EfficiencyClass is only nonzero on systems with a
+                // heterogeneous set of cores" ⇒ 同构系统上全是 0。
+                // 所以这里用 `e != 0 && e != EFF_UNKNOWN` 来判断"确实存在异构标记"，
+                // 顺便把空缺位的哨兵排除掉。
+                if pt
+                    .efficiency
+                    .iter()
+                    .any(|&e| e != 0 && e != EFF_UNKNOWN)
+                {
                     // 混合架构（Intel P/E/LE；AMD Zen4C/5C 被系统标记时同样生效）：
-                    // 按能效等级分组：0=P 主簇（渲染/逻辑），1=E（AI/后台），2=LE（音频/低延迟）
-                    let n = pt.efficiency.len();
-                    let p: Vec<usize> = (0..n).filter(|&c| pt.efficiency[c] == 0).collect();
-                    let e: Vec<usize> = (0..n).filter(|&c| pt.efficiency[c] == 1).collect();
-                    let le: Vec<usize> = (0..n).filter(|&c| pt.efficiency[c] == 2).collect();
+                    // 按能效等级分组 —— **值越大性能越高**：
+                    //   0 = E（AI / 后台）· 1 = P（渲染 / 逻辑）· 2 = 更高一档（按"低延迟"用）
+                    // ⚠️ `2` 的语义在不同世代上并不统一（有的机型把"低功耗能效核"也标成 2），
+                    // 这里沿用既有的 `le`（音频/低延迟）用途，不额外加上含义。
+                    // 分组规则见 `group_by_efficiency` 的文档（含极性的官方依据）
+                    let (p, e, le) = group_by_efficiency(&pt.efficiency);
                     // E 核物理数：每物理核（cores 条目）只要有一成员为 E 即计 1
                     let mut ec = 0usize;
                     for core in &pt.cores {
-                        if core.iter().any(|&c| c < pt.efficiency.len() && pt.efficiency[c] == 1) {
+                        // E 核 = EfficiencyClass **0**（值越小越省电，见上面的极性说明）
+                        if core.iter().any(|&c| c < pt.efficiency.len() && pt.efficiency[c] == 0) {
                             ec += 1;
                         }
                     }
@@ -1343,6 +1414,60 @@ pub fn ai_pool() -> &'static ThreadPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+/// 🔴 **`EfficiencyClass` 的极性：值越大性能越高**（微软官方文档）。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出，已对着官方文档原文核实）：
+    /// > A core with a **higher value** for the efficiency class has **intrinsically greater
+    /// > performance** … —— <https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-processor_relationship>
+    ///
+    /// 本仓原来写的是「0=P 主簇，1=E」——**整个反了**：在 Intel 混合架构上会把渲染
+    /// 绑到 **E 核**、AI 绑到 **P 核**。
+    ///
+    /// ⚠️ 这条判据能在 Linux 上跑，是因为分组逻辑被抽成了纯函数
+    /// （`win_topology` 是 Windows 专有模块，本地**根本不编译** —— 极性写反了本地一路绿）。
+    /// 同批的下标错位（`efficiency` 原来按遍历顺序 push、读取却按下标当 vCPU 编号）
+    /// 也是靠这条路径才暴露的。
+    #[test]
+    fn efficiency_class_polarity_is_higher_means_faster() {
+        // 4 个 E 核（class 0）在前、4 个 P 核（class 1）在后
+        let eff = [0u8, 0, 0, 0, 1, 1, 1, 1];
+        let (p, e, le) = group_by_efficiency(&eff);
+        assert_eq!(
+            p,
+            vec![4, 5, 6, 7],
+            "class=1 是**性能核（P）** —— 值越大性能越高（旧写法会把它判成 E）"
+        );
+        assert_eq!(e, vec![0, 1, 2, 3], "class=0 是**能效核（E）**");
+        assert!(le.is_empty(), "没有 class=2 的核");
+
+        // 反过来排（P 在前）：分组必须按**值**走，不能按位置
+        let eff2 = [1u8, 1, 0, 0];
+        let (p2, e2, _) = group_by_efficiency(&eff2);
+        assert_eq!(p2, vec![0, 1], "P 在前时也要分对");
+        assert_eq!(e2, vec![2, 3]);
+
+        // 三档齐全 + 哨兵
+        let eff3 = [0u8, 1, 2, EFF_UNKNOWN];
+        let (p3, e3, le3) = group_by_efficiency(&eff3);
+        assert_eq!(p3, vec![1]);
+        assert_eq!(e3, vec![0]);
+        assert_eq!(le3, vec![2], "class=2 是更高一档（沿用既有 le 用途）");
+        for g in [&p3, &e3, &le3] {
+            assert!(
+                !g.contains(&3),
+                "EFF_UNKNOWN（空缺位）不能落进任何一组，实得 {g:?}"
+            );
+        }
+
+        // 同构系统：全 0 ⇒ 全落 E 组。
+        // ⚠️ 这里断言的是"分组函数如实反映输入"，**不是**"同构系统会走这条路" ——
+        // 那条路由 `e != 0 && e != EFF_UNKNOWN` 的判据挡住（官方文档：EfficiencyClass
+        // 只在异构核系统上非零）。
+        let (p4, e4, _) = group_by_efficiency(&[0u8; 4]);
+        assert!(p4.is_empty(), "全 0 时不该有 P 核");
+        assert_eq!(e4.len(), 4);
+    }
 
     #[test]
     fn parse_cpu_list_supports_ranges_and_lists() {
