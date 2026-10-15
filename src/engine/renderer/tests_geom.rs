@@ -1569,3 +1569,49 @@ fn renderer_drop_releases_msaa_scene_and_hud_render_pass() {
         code.len()
     );
 }
+
+/// 🔴 **`dstStage` 是「加速结构构建」的屏障，`dstAccessMask` 不许带 `SHADER_READ`。**
+///
+/// 存在理由（2026-10-15，外部复核指出 A6，已对着 Vulkan 规范确认）：
+/// `pt_render.rs` 里 BLAS 写完 → TLAS 读的那个屏障，`dstStageMask` 是
+/// `ACCELERATION_STRUCTURE_BUILD_KHR`，而规范要求该阶段下 `dstAccessMask`
+/// **只能**含 `ACCELERATION_STRUCTURE_READ/WRITE` ⇒ 带上 `SHADER_READ` 就是
+/// `VUID-vkCmdPipelineBarrier-dstAccessMask-02816`（**开验证层会直接报出来**）。
+///
+/// ⚠️ 删掉它是安全的："着色器读 TLAS"那条依赖由**另一个**屏障表达
+/// （`dstStage = COMPUTE_SHADER` + `dstAccessMask = ACCELERATION_STRUCTURE_READ_KHR`）。
+///
+/// ⚠️ 本判据刻意写得**窄**：只钉这一个**具体**的非法组合，不做"凡是屏障都检查"的通用扫描。
+/// 通用扫描要么误报（本仓有几十处合法屏障），要么需要真正解析 Vulkan 语义 ——
+/// 那超出源码级判据能可靠做的范围。**窄判据的代价是覆盖面小，收益是不会说谎。**
+#[test]
+fn accel_build_barrier_never_requests_shader_read() {
+    let src = include_str!("pt_render.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !code.contains("ACCELERATION_STRUCTURE_READ_KHR | vk::AccessFlags::SHADER_READ"),
+        "pt_render.rs 里又出现 `ACCELERATION_STRUCTURE_READ_KHR | SHADER_READ` —— \
+         那个组合只会在 `dstStage = ACCELERATION_STRUCTURE_BUILD_KHR` 的屏障里出现，\
+         而该阶段不支持 SHADER_READ ⇒ VUID-vkCmdPipelineBarrier-dstAccessMask-02816。\
+         着色器读 TLAS 的依赖请写在 dstStage = COMPUTE_SHADER 的那个屏障上。"
+    );
+
+    // 前置自检（教训 27）：确认扫描面真的切到了源码，且那个**合法**的屏障还在
+    assert!(
+        code.contains("ACCELERATION_STRUCTURE_BUILD_KHR"),
+        "扫描面里连 ACCELERATION_STRUCTURE_BUILD_KHR 都没有 ⇒ 判据可能什么也没扫到"
+    );
+    assert!(
+        code.contains(".dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR)"),
+        "连那个合法的 compute 屏障都扫不到 —— 扫描面有问题"
+    );
+}

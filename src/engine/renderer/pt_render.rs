@@ -784,9 +784,21 @@ impl Renderer {
             let rbs: [&[vk::AccelerationStructureBuildRangeInfoKHR]; 1] = [ranges.as_slice()];
             ext.cmd_build_acceleration_structures(cmd, &[b_geom], &rbs);
             // BLAS 写完 -> TLAS 读几何/引用其结果，两次构建之间必须有执行依赖
+            //
+            // 🔴 **`dst_access_mask` 里不能带 `SHADER_READ`**（2026-10-15，外部复核指出 A6，
+            // 已对着规范确认）。这个屏障的 `dstStageMask` 是
+            // `ACCELERATION_STRUCTURE_BUILD_KHR`，而规范要求：该阶段下 `dstAccessMask`
+            // **只能**含 `ACCELERATION_STRUCTURE_READ/WRITE`
+            // ⇒ 带上 `SHADER_READ` 就是 `VUID-vkCmdPipelineBarrier-dstAccessMask-02816`
+            // （开验证层会直接报出来）。
+            //
+            // ⚠️ 删掉它是**安全的**："着色器要读 TLAS"那条依赖**由另一个屏障表达** ——
+            // 见 `run_pt_view` / `run_pt_bench` 里紧跟在构建之后的那个：
+            // `src=ACCELERATION_STRUCTURE_WRITE_KHR, dst=ACCELERATION_STRUCTURE_READ_KHR`、
+            // `dstStage=COMPUTE_SHADER`。两处分工不同，别把依赖搬到这个 build→build 屏障上。
             let bb = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
-                .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR | vk::AccessFlags::SHADER_READ);
+                .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
             self.device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
