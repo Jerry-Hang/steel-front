@@ -197,6 +197,26 @@ impl Renderer {
         Ok(())
     }
     pub(crate) fn init_msaa_resources(&mut self) -> Result<(), String> {
+        // 🔴 **先销毁再清空**（2026-10-15，外部复核逼出来的真 bug）。
+        //
+        // 原写法只有三句 `clear()` —— 而 `clear()` **只丢掉句柄值，不销毁 Vulkan 对象**。
+        // 本函数在**每次交换链重建**时都会被 `try_recreate_swapchain()` 调用
+        // （缩放窗口 / 切后台回来 / 换分辨率）⇒ 桌面上每重建一次就**泄漏**一批
+        // MSAA 图像 + 显存 + ImageView，**累积增长、不报任何错**。
+        //
+        // 对照：`init_scene_resources` 一直是"先 destroy 再 clear"（那条路是对的），
+        // 只有 msaa / depth 这两处漏了。Android 上 MSAA 关着（`TYPE_1` 会在建之前 return）
+        // 所以从没暴露 —— **桌面侧才会中招**。
+        // 调用方（`try_recreate_swapchain`）在进来之前已经 `wait_idle`，这里销毁是安全的。
+        for &view in &self.msaa_image_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        for &image in &self.msaa_images {
+            unsafe { self.device.destroy_image(image, None) };
+        }
+        for &memory in &self.msaa_image_memory {
+            unsafe { self.device.free_memory(memory, None) };
+        }
         self.msaa_images.clear();
         self.msaa_image_memory.clear();
         self.msaa_image_views.clear();
@@ -268,6 +288,18 @@ impl Renderer {
     /// 为每个交换链图像创建深度缓冲（D32_SFLOAT Image + depth aspect ImageView）
     pub(crate) fn init_depth_resources(&mut self) -> Result<(), String> {
         let depth_format = vk::Format::D32_SFLOAT;
+        // 🔴 **先销毁再清空** —— 与 `init_msaa_resources` 同一个 bug、同一处修法。
+        // `clear()` 只丢句柄不销毁对象，而本函数每次交换链重建都会被调用
+        // ⇒ 桌面上缩放窗口/切后台回来会**累积泄漏**深度图与显存。
+        for &view in &self.depth_image_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        for &image in &self.depth_images {
+            unsafe { self.device.destroy_image(image, None) };
+        }
+        for &memory in &self.depth_images_memory {
+            unsafe { self.device.free_memory(memory, None) };
+        }
         self.depth_images.clear();
         self.depth_images_memory.clear();
         self.depth_image_views.clear();
