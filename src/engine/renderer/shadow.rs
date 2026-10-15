@@ -44,6 +44,15 @@ impl Renderer {
             }
             self.prop_sh_vertex_buffer = vk::Buffer::null();
             self.prop_sh_index_buffer = vk::Buffer::null();
+            // 🔴 **两个 memory 也必须一起置空**（2026-10-15，外部复核指出第 2 条后半，
+            // 已对着代码确认）。原来只置空了 buffer、漏了 memory ⇒ 一旦下面
+            // `create_host_buffer` 失败**提前 return**，字段里留着的是**已释放的句柄**，
+            // 而 `drop.rs` 用 `!= null` 做守卫（`if self.prop_sh_vertex_memory != null
+            // { free_memory(..) }`）⇒ **二次释放（double free）**。
+            // 同一段里的 `pt_assets.rs` 是**写对了的**（destroy 之后紧跟 `= null`）——
+            // ⇒ 这又是"同一件事两处实现不一致"的形态。
+            self.prop_sh_vertex_memory = vk::DeviceMemory::null();
+            self.prop_sh_index_memory = vk::DeviceMemory::null();
         }
         let (vb, vm) = match self.create_host_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vsize) {
             Ok(v) => v,

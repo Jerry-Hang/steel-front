@@ -1795,3 +1795,113 @@ fn present_support_predicate_is_shared_and_not_hardcoded_to_family_zero() {
         "扫描面不对 —— 连 `present_queue_family_index` 都没扫到"
     );
 }
+
+/// 🔴 **`free_memory` 之后必须把字段置空** —— 否则早退路径会二次释放。
+///
+/// 存在理由（2026-10-15，外部复核指出第 2 条后半，已对着代码确认）：
+/// `set_shadow_props` 销毁旧道具阴影缓冲时**只把两个 `VkBuffer` 置了 `null`，
+/// 漏了对应的两个 `VkDeviceMemory`**。而紧接着的 `create_host_buffer` 一旦失败就
+/// **提前 `return`** ⇒ 字段里留着已释放的句柄，而 `drop.rs` 用 `!= null` 做守卫
+/// （`if self.prop_sh_vertex_memory != vk::DeviceMemory::null() { free_memory(..) }`）
+/// ⇒ **二次释放（double free）**。
+///
+/// ⚠️ 这不是"某一行写错了"，而是**一段四件套只清了两件**的形态：
+/// `buffer` 清了、`memory` 没清。同批的 `pt_assets.rs` 是**写对了的**
+/// （destroy 之后紧跟 `= vk::DeviceMemory::null()`）——
+/// ⇒ 又是"同一件事两处实现不一致"。
+///
+/// 判据：`shadow.rs` 里凡出现 `free_memory`，同一函数的清理段必须把**成对的
+/// memory 字段**置空。这里钉的是那个具体的四元组。
+#[test]
+fn shadow_prop_buffers_null_both_buffer_and_memory_fields() {
+    let src = include_str!("shadow.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for field in [
+        "prop_sh_vertex_buffer",
+        "prop_sh_vertex_memory",
+        "prop_sh_index_buffer",
+        "prop_sh_index_memory",
+    ] {
+        let pat = format!("self.{field} = vk::");
+        assert!(
+            code.contains(&pat),
+            "shadow.rs 里销毁旧道具阴影缓冲后没有把 `{field}` 置空 —— \
+             一旦后面的 `create_host_buffer` 失败提前 return，字段里留着已释放的句柄，\
+             而 `drop.rs` 用 `!= null` 守卫 ⇒ **二次释放**。\
+             （`pt_assets.rs` 同一段是写对的：destroy 之后紧跟 `= vk::DeviceMemory::null()`。）"
+        );
+    }
+
+    // 前置自检（教训 27）：确认扫描面里确实有 free_memory（否则上面可能扫的是空文件）
+    // ⚠️ 释放是在**元组循环**里做的（`for (buf, mem) in [(.., ..), ..]`），
+    // 所以自检要钉那个元组列表，而不是「free_memory(某字段)」那种写法
+    assert!(
+        code.contains("(self.prop_sh_vertex_buffer, self.prop_sh_vertex_memory)"),
+        "扫描面不对 —— 连那两个缓冲/内存的元组列表都没扫到"
+    );
+}
+
+/// 🔴 **`wait_idle_checked()` 必须在"要不要扩容"的判断之前** —— 它保护的是"覆写内容"，不只是"销毁重建"。
+///
+/// 存在理由（2026-10-15，外部复核指出第 2 条前半，已对着代码确认）：
+/// `set_first_person_gun_mesh` 与 `set_props` 原来都只在**扩容分支内**等。
+/// 但枪模/道具的顶点索引缓冲都是**单份**的（不按在飞帧分槽），而这两个函数是从
+/// `lib.rs` 里 **`renderer.render()` 之前**调用的（render 里才 `wait_for_fences`）
+/// ⇒ **上一帧的 GPU 工作可能仍在读这对缓冲时，CPU 就把新数据拷进去了**。
+///
+/// ⚠️ 2026-09-15 那条注释说明当时已意识到"重建会 destroy 正在被 GPU 使用的 buffer
+/// → NVIDIA device lost"，于是把判据改成 `need > capacity`（只增不减）——
+/// **但那防的是"销毁"，没防"覆写内容"**：缓冲还活着、内容在变，GPU 读到的是撕裂的
+/// 顶点/索引（观感上是切枪/换图瞬间一帧几何错乱），不崩、不报错。
+///
+/// 判据是**位置比较**：在各自的函数体里，`wait_idle_checked(` 必须出现在
+/// `growing` 之前。这条能在 Linux 上跑（纯源码级），而这条路径本身要真 GPU。
+#[test]
+fn buffer_overwrite_waits_before_deciding_whether_to_grow() {
+    let src = include_str!("parts.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+
+    for fname in ["fn set_first_person_gun_mesh(", "pub(crate) fn set_props("] {
+        let start = prod
+            .find(fname)
+            .unwrap_or_else(|| panic!("parts.rs 里找不到 {fname}"));
+        let rest = &prod[start..];
+        // 函数体的近似边界：下一个 `    pub(crate) fn ` / `    fn `
+        let end = rest[1..]
+            .find("\n    pub(crate) fn ")
+            .or_else(|| rest[1..].find("\n    fn "))
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        let body = &rest[..end];
+        let code: String = body
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let wait_at = code
+            .find("wait_idle_checked()")
+            .unwrap_or_else(|| panic!("{fname} 里找不到 `wait_idle_checked()` —— 覆写单份缓冲前必须等"));
+        let grow_at = code
+            .find("if growing")
+            .unwrap_or_else(|| panic!("{fname} 里找不到 `if growing` —— 判据的锚点变了，请更新"));
+        assert!(
+            wait_at < grow_at,
+            "{fname} 里 `wait_idle_checked()` 出现在 `if growing` **之后** ⇒ \
+             又变成「只在扩容时等」了，而单份缓冲的**内容覆写**同样会与在飞帧竞态\
+             （切枪/换图瞬间一帧几何撕裂，不崩不报）。"
+        );
+    }
+}

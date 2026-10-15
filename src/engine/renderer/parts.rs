@@ -486,15 +486,30 @@ impl Renderer {
         //   并且真扩容前无条件 `device_wait_idle()`。
         let need_verts = 32768u32.max((verts.len() as u32).next_power_of_two());
         let need_idx = 262_144u32.max((indices.len() as u32).next_power_of_two());
-        if need_verts > self.gun_buffer_capacity_verts
+        let growing = need_verts > self.gun_buffer_capacity_verts
             || need_idx > self.gun_buffer_capacity_idx
             || self.gun_mapped.is_null()
-            || self.gun_vertex_buffer == vk::Buffer::null()
-        {
-            // 真扩容（或首次创建）才等：等待发生在帧与帧之间、不在命令缓冲记录期间，安全。
-            unsafe {
-                self.wait_idle_checked();
-            }
+            || self.gun_vertex_buffer == vk::Buffer::null();
+        // 🔴 **等待必须覆盖"不扩容、只覆写内容"那条路**（2026-10-15，外部复核指出，
+        // 已对着代码确认）。
+        //
+        // 原来只在 `growing` 分支里等。但**枪模缓冲是单份**的（`gun_vertex_buffer` /
+        // `gun_index_buffer`，不按在飞帧分槽），而本函数是从 `lib.rs` 里
+        // **`renderer.render()` 之前**调的（render 里才 `wait_for_fences`）
+        // ⇒ 上一帧的 GPU 工作**可能仍在读这对缓冲**时，CPU 就把新枪的数据拷进去了。
+        //
+        // ⚠️ 而 2026-09-15 那条注释说明：当时已经意识到"重建会 destroy 正在被 GPU 使用的
+        // buffer → NVIDIA device lost"，于是把判据改成 `need > capacity`（**只增不减**）。
+        // **但那防的是"销毁"，没防"覆写内容"** —— 缓冲还活着、内容在变，GPU 读到的是撕裂的
+        // 顶点/索引（观感上是切枪瞬间一帧几何错乱），不崩、不报错。
+        //
+        // 代价：切枪时多一次 `device_wait_idle`。**只在 `gun_key_changed` 时调用**
+        // （见 `lib.rs`，2026-10-13 起不再每帧），所以不在热路径上。
+        // 早期等待还顺带覆盖了 `growing` 那条路（它本来也要等）—— 一次够，别等两遍。
+        unsafe {
+            self.wait_idle_checked();
+        }
+        if growing {
             // 🔴 2026-09-22 复查（灰色地带修复）：**先建新的，成功了再毁旧的**。
             // 旧写法是「先 destroy 两个旧 buffer，再 `create_host_buffer(..).expect(..)`」：
             //  ① 分配失败（显存碎片 / OOM）直接 panic —— 游戏在切枪瞬间整个进程没了；
@@ -730,17 +745,26 @@ impl Renderer {
         let mapped_ok = self.prop_mapped != std::ptr::null_mut()
             && self.prop_vertex_buffer != vk::Buffer::null();
         // 只在"要得更多"或"还没有"时重建（判据 `need > capacity`，不是 `!=`：与枪模同一条理由）
-        if prop_buffer_growth_needed(
+        let growing = prop_buffer_growth_needed(
             need_v,
             self.prop_capacity_verts,
             need_i,
             self.prop_capacity_idx,
             mapped_ok,
-        ) {
-            // 等待发生在帧与帧之间、不在命令缓冲记录期间，安全。
-            unsafe {
-                self.wait_idle_checked();
-            }
+        );
+        // 🔴 **等待必须覆盖"不扩容、只覆写内容"那条路**（2026-10-15，外部复核指出，
+        // 已对着代码确认）—— 与 `set_first_person_gun_mesh` **完全同形**：
+        // 道具顶点/索引缓冲也是**单份**的（不按在飞帧分槽），而本函数从 `lib.rs` 里
+        // `renderer.render()` 之前调用（render 里才 `wait_for_fences`）
+        // ⇒ 上一帧的 GPU 可能仍在读它时，CPU 就把新地图的道具数据拷进去了。
+        //
+        // ⚠️ 复核说"`set_props` 在函数入口无条件等待、只有枪模漏了" ——
+        // **实测不是**：原来这里同样只在 `growing` 分支里等（706 那处等待是给
+        // `prop_attr_buf` 的销毁用的，是另一回事）。**两者同形，所以两个都要修。**
+        unsafe {
+            self.wait_idle_checked();
+        }
+        if growing {
             // 2 的幂向上取整：地图尺寸只会小幅波动，避免每次重载都重建
             let cap_v = need_v.next_power_of_two().max(65_536);
             let cap_i = need_i.next_power_of_two().max(65_536);
