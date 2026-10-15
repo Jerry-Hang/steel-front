@@ -1129,7 +1129,25 @@ impl Client {
                 self.last_snapshot_at = t;
                 // 服务端本机玩家：进插值表（渲染用）+ 权威状态缓存（修正用）
                 self.own_state = Some(player);
-                match self.entities.get_mut(&player_id) {
+                // 🔴 **实体键必须是 `NET_PLAYER_BASE + player_id`，不是裸 `player_id`**
+                //    （2026-10-15，外部复核指出 B3，已对着两端代码确认）。
+                //
+                // `entities` 这张表用的是**实体 id 空间**：
+                //   · NPC 占 `0..NET_PLAYER_BASE`（服务端逐个 NPC 从 0 开始编号）；
+                //   · **玩家占 `NET_PLAYER_BASE` 起** —— 见 `NET_PLAYER_BASE` 的文档
+                //     （服务端把每个客户端当成 `NET_PLAYER_BASE + p.id` 的 NPC 广播，
+                //     `game/net.rs` 里就是 `id: NET_PLAYER_BASE + p.id`），
+                //     以及 `Leave` 的删除键 `NET_PLAYER_BASE.wrapping_add(player_id)`。
+                //
+                // 原写法用裸 `player_id` ⇒ **房主（服务端把该字段恒填 0）被写进 `entities[0]`**，
+                // 与同一条消息里 id 为 0 的 NPC **撞在同一个槽位**：
+                //   · NPC 那一段随后覆盖它 ⇒ 房主在所有客户端画面里消失；
+                //   · 且同一帧对 `entities[0]` 连续两次 `state.update(.., t)` ⇒
+                //     `prev` 是房主坐标、`curr` 是 0 号 NPC 坐标、两个时间戳相同 ⇒ 插值器损坏；
+                //   · 又因为 `Leave` 删的是 `NET_PLAYER_BASE + player_id`（另一个键）
+                //     ⇒ 就算没被覆盖，这个实体也**永远删不掉**。
+                let host_eid = NET_PLAYER_BASE.wrapping_add(player_id);
+                match self.entities.get_mut(&host_eid) {
                     Some(e) => {
                         e.state.update(player, t);
                         e.state.delay = self.interp_delay;
@@ -1137,7 +1155,7 @@ impl Client {
                     }
                     None => {
                         self.entities.insert(
-                            player_id,
+                            host_eid,
                             RemoteEntity {
                                 state: RemotePlayer::new(player_id, player, t),
                                 hp: 100.0,
@@ -1375,6 +1393,75 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **房主（`player_id = 0`）与 0 号 NPC 必须落在不同的实体槽位。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B3，已对着**两端**代码确认）：
+    /// 服务端构造 `Snapshot` 时把 `player_id` **恒填 0**（`game/net.rs`），
+    /// 而 `player` 是房主的状态；同一条消息的 `npcs` 里另有从 **0 开始编号**的 NPC。
+    /// 客户端此前用**裸 `player_id`** 当实体键 ⇒ **房主被写进 `entities[0]`**，
+    /// 与 0 号 NPC 撞在同一个槽位：
+    ///   · NPC 那一段随后覆盖它 ⇒ **房主在所有客户端画面里消失**；
+    ///   · 且同一帧对 `entities[0]` 连续两次 `state.update(.., t)` ⇒ `prev` 是房主坐标、
+    ///     `curr` 是 0 号 NPC 坐标、两个时间戳相同 ⇒ **插值器损坏**；
+    ///   · 又因为 `Leave` 删的是 `NET_PLAYER_BASE + player_id`（**另一个键**）
+    ///     ⇒ 就算没被覆盖，这个实体也**永远删不掉**。
+    ///
+    /// 正确约定：`entities` 用**实体 id 空间** —— NPC 占 `0..NET_PLAYER_BASE`，
+    /// 玩家占 `NET_PLAYER_BASE` 起（见常量文档、`game/net.rs` 的 `NET_PLAYER_BASE + p.id`、
+    /// 以及 `Leave` 的删除键）。三处必须同源。
+    #[test]
+    fn snapshot_host_and_npc_zero_land_in_distinct_slots() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        let host = PlayerState::new([10.0, 0.0, 10.0], 0.0);
+        let npc0 = NpcSnapshot {
+            id: 0,
+            pos: [50.0, 0.0, 50.0],
+            facing: 0.0,
+            hp: 100.0,
+            team: 0,
+            firing: 0,
+        };
+        let _ = client.handle_message(NetworkMessage::Snapshot {
+            seq: 1,
+            time: 1.0,
+            player_id: 0, // 服务端恒填 0
+            player: host,
+            npcs: vec![npc0],
+        });
+
+        let ents = client.entities();
+        // ① 两个槽位**都存在**（旧写法只有 entities[0]，房主那份被覆盖掉）
+        assert!(
+            ents.contains_key(&0),
+            "0 号 NPC 应在 entities[0]（NPC 占 0..NET_PLAYER_BASE）"
+        );
+        let host_key = NET_PLAYER_BASE;
+        assert!(
+            ents.contains_key(&host_key),
+            "房主应在 entities[NET_PLAYER_BASE + 0] —— 旧写法把它写进 entities[0]，与 0 号 NPC 撞位"
+        );
+        // ② 两个槽位**互不覆盖**：各留各的坐标
+        let npc_at = ents[&0].state.state_at(1.0).pos;
+        assert_eq!(
+            [npc_at[0], npc_at[2]],
+            [50.0, 50.0],
+            "0 号 NPC 的坐标被房主覆盖了（或反之）"
+        );
+        let host_at = ents[&host_key].state.state_at(1.0).pos;
+        assert_eq!(
+            [host_at[0], host_at[2]],
+            [10.0, 10.0],
+            "房主的坐标被 0 号 NPC 覆盖了（或反之）"
+        );
+        // ③ 与 `Leave` 的删除键**同源** —— 否则这个实体永远删不掉
+        let _ = client.handle_message(NetworkMessage::Leave { player_id: 0, reason: 0 });
+        assert!(
+            !client.entities().contains_key(&host_key),
+            "Leave 用的键必须与 Snapshot 写入的键一致，否则房主实体永远留在场上"
+        );
+    }
+
     /// 🔴 **被服务器拒绝之后，不许再重试 Join。**
     ///
     /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：
