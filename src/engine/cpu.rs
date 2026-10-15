@@ -1030,6 +1030,37 @@ impl<T: ?Sized> SendPtr<T> {
         self.0
     }
 }
+/// **等 `done` 归零的守卫** —— `par_for_each_mut` 的异常安全命门。
+///
+/// 🔴 为什么必须是 RAII、而不能在函数末尾写一句 `while done != 0 {}`：
+/// `par_for_each_mut` 会把**指向调用方栈上**的 `done` 与闭包 `f` 的裸指针发给 worker
+/// （见那里的 SAFETY 注释，生命周期论证靠"join 之后才返回"）。
+/// 若调用线程在 `f(0, 0, head)` 里 panic，栈展开会**跳过末尾那句等待**、直接销毁 `done` 与 `f`
+/// —— 而 worker 此时可能仍在解引用它们 ⇒ **栈 Use-After-Free（UB）**。
+/// 放进 `Drop` 之后，**正常返回与 panic 展开都会先等 worker 收工**，论证重新成立。
+///
+/// 判据：`par_for_each_mut_waits_for_workers_even_if_the_head_segment_panics`。
+struct WaitOnDrop<'a>(&'a AtomicUsize);
+impl Drop for WaitOnDrop<'_> {
+    fn drop(&mut self) {
+        while self.0.load(Ordering::Acquire) != 0 {
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// **worker 侧的递减守卫** —— 闭包 panic 时也必须递减计数。
+///
+/// 🔴 原来递减语句写在 `fref(w, start, seg)` **之后**：worker 里的闭包一旦 panic，
+/// 这句就被跳过 ⇒ `done` 永远到不了 0 ⇒ **调用线程在那个无上界的 `while` 里死转**
+/// （不报错、不超时、进程像卡死）。放进 `Drop` 之后，展开路径也会递减。
+struct SubOnDrop(SendPtr<AtomicUsize>);
+impl Drop for SubOnDrop {
+    fn drop(&mut self) {
+        unsafe { (*self.0.get()).fetch_sub(1, Ordering::AcqRel) };
+    }
+}
+
 // 手工实现 Copy/Clone：派生会引入 `T: Copy` 隐式约束（AtomicUsize 等不可 Copy 会炸）
 impl<T: ?Sized> Clone for SendPtr<T> {
     fn clone(&self) -> Self {
@@ -1141,12 +1172,18 @@ impl ThreadPool {
         let off0 = bounds[1];
         let done = AtomicUsize::new(nw - 1);
         let done_ptr = SendPtr(&done as *const AtomicUsize as *mut AtomicUsize);
+        // 🔴 **守卫必须在派发之前建立**：它保证"无论正常返回还是 panic 展开，
+        // 都先等 worker 收工再销毁 `done`/`f`"。详见 `WaitOnDrop` 的文档。
+        let _wait = WaitOnDrop(&done);
         // F/T 一律抹成 *mut u8 捕获（u8 恒 'static），作业体内再 cast 回具体类型，
         // 从而不要求调用方闭包/元素类型带 'static 约束（调用方闭包可借局部上下文）。
         let fptr: SendPtr<u8> = SendPtr(&f as *const F as *const u8 as *mut u8);
         for w in 1..nw {
             let (start, end) = (bounds[w], bounds[w + 1]);
             let send_result = self.senders[w - 1].send(PoolMsg::Run(Box::new(move || {
+                // 🔴 **第一句就建守卫**：这样后面 `fref(w, ..)` 无论正常返回还是 panic，
+                // 计数都会被递减（否则调用线程在无上界的 while 里死转）。见 `SubOnDrop`。
+                let _sub = SubOnDrop(done_ptr);
                 // SAFETY:
                 // - ptr 指向 tail 的可变缓冲区，[start-off0, end-off0) 各段互不相交；
                 // - fptr 指向调用方闭包 f，done 计数器归零（AcqRel 同步）后调用方才返回，
@@ -1160,9 +1197,7 @@ impl ThreadPool {
                 };
                 let fref: &F = unsafe { &*(fptr.get() as *const F) };
                 fref(w, start, seg);
-                unsafe {
-                    (*done_ptr.get()).fetch_sub(1, Ordering::AcqRel);
-                }
+                // 递减交给 `_sub` 的 Drop（这里不再手写 —— 手写那句正是 panic 时被跳过的）
             })));
             if send_result.is_err() {
                 // 工作线程未存活（spawn 失败降级）：自行补计，避免死等
@@ -1182,9 +1217,9 @@ impl ThreadPool {
         // 实机 `cull_us=1091µs` 里两次都吃这个损失。判据见
         // `par_for_each_mut_dispatches_before_working`。
         f(0, 0, head);
-        while done.load(Ordering::Acquire) != 0 {
-            std::thread::yield_now();
-        }
+        // 等待交给 `_wait` 的 Drop（它在本函数作用域结束时跑，**panic 展开时也跑**）。
+        // 原写法是在这里手写 `while done.load(Acquire) != 0 { yield_now() }` ——
+        // 一旦上面那句 panic，这个等待会被整段跳过，直接销毁 `done`/`f`。
     }
 
     /// 在池的亲和核上同步执行单个任务并取回结果（线程优化第 3 步：低频重计算换核，
@@ -1352,6 +1387,94 @@ mod tests {
     ///   * 非首段在**进入**时就记下自己的段号；
     ///   * 首段**睡 30ms 之后**才记（把"先发后干"与"先干后发"的时序差拉开到必然可辨）；
     ///   * 若实现回退成"先干首段"，首段会在任何池作业发出之前就记完 ⇒ 断言失败。
+/// 🔴 **worker 里的闭包 panic 时，调用线程不能死转。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：worker 闭包原来是
+    /// ```text
+    /// fref(w, start, seg);
+    /// (*done_ptr.get()).fetch_sub(1, Ordering::AcqRel);   // ← 上一句 panic 就轮不到它
+    /// ```
+    /// 而调用方在末尾是 `while done.load(Acquire) != 0 { yield_now() }` —— **无上界、无超时**。
+    /// ⇒ worker 一 panic，计数永远到不了 0 ⇒ **调用线程死转，进程像卡死**（不报错、不退出）。
+    ///
+    /// ⚠️ 用**本地池**而不是 `scene_pool()`：worker panic 会让那个线程永久退出，
+    /// 污染全局池、影响同批次其他测试。
+    #[test]
+    fn worker_panic_does_not_hang_the_caller() {
+        let pool = ThreadPool::new(&[0], 1, "test-panic-worker");
+        if pool.workers() == 0 {
+            eprintln!("跳过：线程池没有 worker，本判据不适用");
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut data = vec![0u32; 4096];
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pool.par_for_each_mut(&mut data, |seg, _start, slice| {
+                    if seg == 1 {
+                        panic!("worker 段故意 panic（本测试的输入）");
+                    }
+                    slice.fill(1);
+                });
+            }));
+            // 只要**走到了这里**就说明没死转。
+            //
+            // ⚠️ 判据**不能**断言"worker 的 panic 会传播到调用方"：那是**另一个线程**，
+            // spawned 线程的 panic 由它自己展开、不会传给等它的人（`thread::scope` 的 join
+            // 才会传）。所以"返回了"就是本判据要的全部——旧写法在这里会**永远回不来**。
+            let _ = tx.send(());
+        });
+        if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+            panic!(
+                "par_for_each_mut 在 worker panic 后【没有返回】—— `done` 计数卡在非零，\
+                 调用线程在无上界的 while 里死转"
+            );
+        }
+    }
+
+    /// 首段 panic 时 worker 是否已收工（`head_segment_panic_still_waits_for_workers` 用）。
+    ///
+    /// 用 `'static` 计数器而不是局部变量：局部变量在展开时已被销毁，
+    /// **而"读已销毁的栈内存"正是本判据要防的那件事**，不能自己再犯一次。
+    static HEAD_PANIC_WORKERS_DONE: AtomicUsize = AtomicUsize::new(0);
+
+    /// 🔴 **首段 panic 时，栈展开也必须先等 worker 收工。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出，已确认）：`par_for_each_mut` 会把
+    /// **指向调用方栈上**的 `done` 与闭包 `f` 的裸指针发给 worker（生命周期论证靠
+    /// "join 之后才返回"）。而 `2026-10-11` 把首段 `f(0, 0, head)` 移到了**派发之后**
+    /// ⇒ 一旦首段 panic，栈展开会**跳过末尾那句等待**、当场销毁 `done`/`f`，
+    /// 而 worker 可能仍在解引用它们 ⇒ **栈 Use-After-Free（UB）**。
+    ///
+    /// 判据：首段 panic 之后立刻检查——**worker 必须已经跑完**。
+    /// worker 里先 sleep 50ms 再计数，让"没等"与"等了"在时间上分得开。
+    #[test]
+    fn head_segment_panic_still_waits_for_workers() {
+        HEAD_PANIC_WORKERS_DONE.store(0, Ordering::SeqCst);
+        let pool = ThreadPool::new(&[0], 1, "test-panic-head");
+        if pool.workers() == 0 {
+            eprintln!("跳过：线程池没有 worker，本判据不适用");
+            return;
+        }
+        let mut data = vec![0u32; 4096];
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.par_for_each_mut(&mut data, |seg, _start, _slice| {
+                if seg == 0 {
+                    panic!("首段故意 panic（本测试的输入）");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                HEAD_PANIC_WORKERS_DONE.fetch_add(1, Ordering::SeqCst);
+            });
+        }));
+        assert!(r.is_err(), "首段的 panic 应传播到调用方");
+        assert_eq!(
+            HEAD_PANIC_WORKERS_DONE.load(Ordering::SeqCst),
+            1,
+            "首段 panic 后 worker 还没收工 —— `done`/`f` 已被销毁，worker 正在解引用\
+             已释放的栈内存（Use-After-Free UB）"
+        );
+    }
+
     #[test]
     fn par_for_each_mut_dispatches_before_working() {
         use std::sync::Mutex;
