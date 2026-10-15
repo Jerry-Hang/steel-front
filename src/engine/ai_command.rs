@@ -322,12 +322,19 @@ impl Army {
 
         // 2) 营司令决策：按本轮汇总选择态势
         let own_advance = company_reports.iter().map(|r| r.strength).sum::<f32>();
-        let my_c = self
-            .companies
-            .first()
-            .map(|_| company_reports.iter().map(|r| r.centroid).fold([0.0, 0.0], |a, b| [a[0] + b[0], a[1] + b[1]]))
-            .unwrap_or([0.0, 0.0]);
-        let my_c = [my_c[0] / self.companies.len().max(1) as f32, my_c[1] / self.companies.len().max(1) as f32];
+        // 🔴 **必须按存活人数加权，不能按「编制连数」平均**（2026-10-15，外部复核指出，已确认）。
+        //
+        // 原写法把每个连的 `centroid` 直接相加、再除以 `self.companies.len()`（**编制连数**）。
+        // 而**全灭的连**在上面拿到的是 `centroid = [0.0, 0.0]`（那是"没有坐标"的占位，
+        // 不是"它在地图原点"）⇒ 每多一个连全灭，就多一个 `[0,0]` 把全营重心**拽向地图原点**
+        // ⇒ `d_self` 变小 ⇒ 而下面的判据是「我方重心比敌方更靠近地图中心 → 我方压上」
+        // ⇒ **死的连越多，营司令越认定"我军已推进至核心" ⇒ 残局下达全军冲锋。**
+        // 这是"伤亡越重越激进"的反向激励。
+        //
+        // 改成按 `strength`（该连的存活人数）加权 ⇒ 等价于"对本营全部存活士兵求平均"，
+        // 全灭的连权重为 0、自然不参与。`total == 0`（全营打光）时退回 `[0,0]`，
+        // 此时本轮已经结束、这个值不会再被当作"位置"使用。
+        let my_c = weighted_centroid(&company_reports);
         let d_self = (my_c[0] * my_c[0] + my_c[1] * my_c[1]).sqrt();
         let d_enemy = (self.enemy_centroid[0] * self.enemy_centroid[0]
             + self.enemy_centroid[1] * self.enemy_centroid[1])
@@ -375,40 +382,17 @@ impl Army {
                 }
             };
             c.order = order;
-            // 侧翼点：目标线沿垂直方向外推 40m
-            let dx = self.enemy_centroid[0] - my_c[0];
-            let dz = self.enemy_centroid[1] - my_c[1];
-            let dl = (dx * dx + dz * dz).sqrt().max(1.0);
-            let (px, pz) = (-dz / dl, dx / dl); // 垂直
-            let flank_off = match order {
-                CompanyOrder::Flank(s) => 40.0 * s as f32,
-                _ => 0.0,
-            };
-            // 距敌保持 25m（防御/重组保持更远）
-            let keep = match order {
-                CompanyOrder::Regroup => 90.0,
-                CompanyOrder::Hold => 60.0,
-                _ => 25.0,
-            };
-            let en = self.enemy_centroid;
-            let el = (en[0] * en[0] + en[1] * en[1]).sqrt().max(1.0);
-            let back = match order {
-                CompanyOrder::Regroup | CompanyOrder::Hold => -1.0,
-                _ => 1.0,
-            };
-            // 战位铺开（2026-08-26 防排队站一排）：正面连也沿垂直方向横向散开——
-            // 连索引依序 -55/0/+55 米（左中右战位），侧翼连再外推；三连目标线不再汇成一条线
-            let spread = if company_count >= 3 {
-                (ci as f32 - (company_count as f32 - 1.0) / 2.0) * 55.0
-            } else {
-                0.0
-            };
-            c.objective = [
-                (mid[0] - en[0] / el * keep * back).max(-280.0).min(280.0) + px * flank_off
-                    + px * spread,
-                (mid[1] - en[1] / el * keep * back).max(-280.0).min(280.0) + pz * flank_off
-                    + pz * spread,
-            ];
+            // 目标点交给纯函数算 —— 见 `company_objective` 的文档：
+            // 原实现在这里内联，方向向量用错 + `back` 符号写反，把"撤退/进攻"整个颠倒，
+            // 且 clamp 写在加偏移之前导致坐标可达 ±375m（寻路网格只有 ±256m）。
+            c.objective = company_objective(
+                mid,
+                my_c,
+                self.enemy_centroid,
+                order,
+                ci,
+                company_count,
+            );
             c.report = company_reports.get(ci).copied().unwrap_or(CompanyReport {
                 strength: 0.0,
                 centroid: [0.0, 0.0],
@@ -516,6 +500,86 @@ impl Army {
     }
 }
 
+/// **按存活人数加权的全营重心**（纯函数：可单测，不必造 NPC）。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出 B5，已确认）：原实现把各连 `centroid` 直接相加
+/// 再除以**编制连数**，而**全灭的连**拿到的是 `[0.0, 0.0]`（那是"没有坐标"的占位，
+/// **不是**"它在地图原点"）⇒ 每多一个连全灭，就多一个 `[0,0]` 把全营重心**拽向地图原点**。
+/// 而营司令的判据是「我方重心比敌方更靠近地图中心 → 我方压上」
+/// ⇒ **死的连越多，越判"我军已推进至核心" ⇒ 残局全军冲锋**。
+/// 这是"伤亡越重越激进"的反向激励，也是本函数存在的唯一理由。
+///
+/// 按 `strength`（该连存活人数）加权 ⇒ 等价于"对本营全部存活士兵求平均"，
+/// 全灭的连权重为 0、自然不参与。全体阵亡时退回 `[0,0]`（此时本轮已结束，
+/// 这个值不会再被当作"位置"使用）。
+pub(crate) fn weighted_centroid(reports: &[CompanyReport]) -> [f32; 2] {
+    let total = reports.iter().map(|r| r.strength).sum::<f32>();
+    if total <= 0.0 {
+        return [0.0, 0.0];
+    }
+    let s = reports.iter().fold([0.0, 0.0], |a, r| {
+        [
+            a[0] + r.centroid[0] * r.strength,
+            a[1] + r.centroid[1] * r.strength,
+        ]
+    });
+    [s[0] / total, s[1] / total]
+}
+
+/// **一个连的战位目标点**（纯函数：可单测，不必造 NPC）。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出 B6，已确认）：原实现在 `update` 里内联，
+/// 有**两处错**，合起来把"撤退"和"进攻"**整个写反了**：
+///   ① **方向向量用错了参照**：明明已经算好「我方 → 敌方」的单位向量（还拿它求了垂直方向），
+///      却改用「**原点 → 敌方**」的 `en/el` ⇒ 敌我围绕地图中心交战时方向完全脱节；
+///   ② **符号反了**：`Regroup`/`Hold` 取 `back = -1.0`，而算式是 `mid - dir*keep*back`
+///      ⇒ 减一个负数 = **加** ⇒ 目标点落在**中线往敌军腹地**那一侧。
+///      实测语义：`Assault`(`keep=25`) 往我方退 25m、`Regroup`(`keep=90`) 朝敌方冲 90m。
+///
+/// 现在统一成「从敌我中线，沿**我方 → 敌方**方向退开 `standoff` 米」：
+/// 退得越少越贴近敌人（Assault 25m 压上），退得越多越靠后（Hold 60m / Regroup 90m）。
+/// `standoff` 恒为正，方向由单位向量唯一确定 ⇒ 不再有可写反的符号。
+///
+/// ⚠️ **clamp 必须放在最后**：原写法把 `.max(-280).min(280)` 写在加侧翼/战位偏移**之前**
+/// ⇒ 加上 40（侧翼）+ 55（战位铺开）= 95m 后坐标可达 ±375m，
+/// 而寻路网格只有 ±256m ⇒ 目标点落在网格外，NPC 走到边界就卡住。
+pub(crate) fn company_objective(
+    mid: [f32; 2],
+    my_c: [f32; 2],
+    enemy: [f32; 2],
+    order: CompanyOrder,
+    ci: usize,
+    company_count: usize,
+) -> [f32; 2] {
+    let dx = enemy[0] - my_c[0];
+    let dz = enemy[1] - my_c[1];
+    let dl = (dx * dx + dz * dz).sqrt().max(1.0);
+    let (ux, uz) = (dx / dl, dz / dl); // 我方 → 敌方（单位向量）
+    let (px, pz) = (-uz, ux); // 垂直方向
+    let flank_off = match order {
+        CompanyOrder::Flank(s) => 40.0 * s as f32,
+        _ => 0.0,
+    };
+    // 与敌保持的距离：突击 25m（压上）、防守 60m、重组 90m（退得最远）
+    let standoff = match order {
+        CompanyOrder::Regroup => 90.0,
+        CompanyOrder::Hold => 60.0,
+        _ => 25.0,
+    };
+    // 战位铺开（2026-08-26 防排队站一排）：正面连也沿垂直方向横向散开——
+    // 连索引依序 -55/0/+55 米（左中右战位），侧翼连再外推；三连目标线不再汇成一条线
+    let spread = if company_count >= 3 {
+        (ci as f32 - (company_count as f32 - 1.0) / 2.0) * 55.0
+    } else {
+        0.0
+    };
+    let lateral = flank_off + spread;
+    [
+        (mid[0] - ux * standoff + px * lateral).clamp(-250.0, 250.0),
+        (mid[1] - uz * standoff + pz * lateral).clamp(-250.0, 250.0),
+    ]
+}
+
 /// 营司令的态势判定（纯函数：阈值可逐档验证，不必造 NPC）。
 ///
 /// 阈值口径：**连名单内存活 < 本营编制 × 0.55 且本轮战果（敌方阵亡）< 8 → 重组**；否则比敌我
@@ -560,6 +624,101 @@ mod tests {
     fn army_of(n: usize) -> Army {
         let ids: Vec<usize> = (0..n).collect();
         Army::build(Team::Red, &ids)
+    }
+
+    /// 🔴 **全营重心必须按存活人数加权 —— 全灭的连不能把重心拽向地图原点。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B5，已确认）：原实现把各连 `centroid` 直接相加、
+    /// 除以**编制连数**。而**全灭的连**拿到的是 `centroid = [0.0, 0.0]` —— 那是"没有坐标"
+    /// 的占位，**不是**"它在地图原点"。于是每多一个连全灭，就多一个 `[0,0]` 把全营重心
+    /// 往原点拽 ⇒ `d_self` 变小 ⇒ 而判据是「我方重心比敌方更靠近地图中心 → 我方压上」
+    /// ⇒ **死的连越多越判"已推进至核心" ⇒ 残局全军冲锋**（伤亡越重越激进的反向激励）。
+    #[test]
+    fn weighted_centroid_ignores_dead_companies() {
+        let dead = CompanyReport { strength: 0.0, centroid: [0.0, 0.0], contact: false };
+        let alive = CompanyReport { strength: 30.0, centroid: [150.0, 0.0], contact: false };
+
+        let c = weighted_centroid(&[dead, alive]);
+        assert_eq!(
+            c,
+            [150.0, 0.0],
+            "全灭的连（占位 [0,0]）不该参与平均 —— 否则重心被拽向原点"
+        );
+
+        // 旧写法的等价结果（除以连数）：**差距就是这一个判据存在的理由**
+        let old = [(0.0 + 150.0) / 2.0, 0.0];
+        assert_eq!(old, [75.0, 0.0]);
+        assert!(
+            c[0] > old[0] * 1.9,
+            "新的加权重心应比旧的平均值**大近一倍**（实测 {c:?} vs 旧 {old:?}）             —— 差值正是「死掉的连把重心往原点拽」的量"
+        );
+
+        // 按存活人数加权 ⇒ 人数多的连话语权大
+        let big = CompanyReport { strength: 90.0, centroid: [100.0, 0.0], contact: false };
+        let small = CompanyReport { strength: 10.0, centroid: [0.0, 100.0], contact: false };
+        let c2 = weighted_centroid(&[big, small]);
+        assert!(c2[0] > c2[1], "90 人的连应比 10 人的连权重大（实得 {c2:?}）");
+
+        // 边界：全营打光 / 空表 ⇒ [0,0]，且**不 panic**
+        assert_eq!(weighted_centroid(&[]), [0.0, 0.0]);
+        assert_eq!(
+            weighted_centroid(&[CompanyReport { strength: 0.0, centroid: [5.0, 5.0], contact: false }]),
+            [0.0, 0.0]
+        );
+    }
+
+    /// 🔴 **Regroup / Hold 必须后撤，Assault 必须压上；且方向用「我方 → 敌方」。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B6，已确认）：原实现有两处错、合起来把
+    /// "撤退"和"进攻"**整个写反了**：
+    ///   ① 方向向量用「**原点 → 敌方**」而不是「我方 → 敌方」；
+    ///   ② `back` 对 Regroup/Hold 取 `-1.0`，而算式是 `mid - dir*keep*back`
+    ///      ⇒ 减负数 = 加 ⇒ 目标点落到**中线往敌军腹地**那一侧。
+    /// 实测语义：Assault 往我方退 25m、Regroup 朝敌方冲 90m。
+    #[test]
+    fn regroup_and_hold_fall_back_while_assault_presses() {
+        let my_c = [-100.0, 0.0];
+        let enemy = [100.0, 0.0];
+        let mid = [0.0, 0.0];
+        let dist_to_enemy = |o: CompanyOrder| {
+            let p = company_objective(mid, my_c, enemy, o, 1, 3);
+            ((p[0] - enemy[0]).powi(2) + (p[1] - enemy[1]).powi(2)).sqrt()
+        };
+        let a = dist_to_enemy(CompanyOrder::Assault);
+        let h = dist_to_enemy(CompanyOrder::Hold);
+        let r = dist_to_enemy(CompanyOrder::Regroup);
+        assert!(
+            a < h && h < r,
+            "离敌距离必须 Assault < Hold < Regroup（压上 / 后撤 / 退最远），实得 {a:.1} / {h:.1} / {r:.1}"
+        );
+        // 撤退必须退到**我方那一侧**（中线 x=0 的负方向 = 我军方向）
+        let rp = company_objective(mid, my_c, enemy, CompanyOrder::Regroup, 1, 3);
+        assert!(rp[0] < 0.0, "Regroup 的目标点必须落在我方一侧，实得 {rp:?}");
+
+        // ---- 方向必须用「我方 → 敌方」，不是「原点 → 敌方」----
+        // 把敌我放到**偏离原点轴线**的位置：此时两个向量方向明显不同。
+        let my2 = [100.0, 100.0];
+        let en2 = [100.0, 200.0]; // 我方 → 敌方 = (0, +1)；原点 → 敌方 ≈ (0.45, +0.89)
+        let mid2 = [100.0, 150.0];
+        let o2 = company_objective(mid2, my2, en2, CompanyOrder::Regroup, 1, 3);
+        assert!(
+            o2[1] < mid2[1] - 80.0,
+            "Regroup 应沿「我方 → 敌方」的**反方向**退，也就是 z 明显减小，实得 {o2:?}"
+        );
+        assert!(
+            (o2[0] - mid2[0]).abs() < 5.0,
+            "沿敌我连线退开时 x 不该有横向位移（旧写法用原点向量会在这里偏出去），实得 {o2:?}"
+        );
+
+        // ---- clamp 必须在加完偏移之后，且落在寻路网格（±256m）之内 ----
+        let far_mid = [240.0, 240.0];
+        for o in [CompanyOrder::Assault, CompanyOrder::Flank(1), CompanyOrder::Flank(-1)] {
+            let p = company_objective(far_mid, [-240.0, -240.0], [240.0, 240.0], o, 0, 3);
+            assert!(
+                p[0].abs() <= 250.0 && p[1].abs() <= 250.0,
+                "目标点必须落在 ±250 内（寻路网格只有 ±256m），{o:?} 实得 {p:?}"
+            );
+        }
     }
 
     /// 判据：**余数一律归末位**（末连承接余排、末排承接余班）——两处兜底必须是同一个约定。
