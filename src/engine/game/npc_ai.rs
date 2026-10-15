@@ -442,6 +442,22 @@ impl Game {
     /// - 进攻协同：Chase/Attack 过半 → 同步冲锋（压制手除外，保持压制）
     /// - 躲避攻击：移动态受击/被火力威胁 → 侧向弹开（Attack 站定是冒烟瞄准依据，不躲）
     /// - 偷袭绕路：包抄手在玩家未面朝时绕大圈逼近，被发现转侧翼
+/// **遮挡缓存是否仍然对应当前的 NPC 序列**（纯函数：可单测，不必造 NPC）。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出，已对着代码确认）：`occl_cache` 是**按下标**
+/// 缓存的，而 `partition_ai_tiers` **每帧**都会稳定重排 `self.npcs`（Near 在前）
+/// ⇒ 下标语义在刷新窗口内会变，缓存里的遮挡标记会**错误地套到别的 NPC** 身上。
+///
+/// 原来的判据只有 `occl_cache.len() != self.npcs.len()` —— **只能发现增删、发现不了重排**：
+/// 长度一样、检查通过、不报任何错，只是"这个人是不是被挡住"用错了人。
+/// 紧挨着的 `npc_vis` 早就用 `(id, bool)` 解决了同一个问题（它的注释写着"带 id 是为了在
+/// **下标前移**（有人死亡）时立刻发现错位"）—— `occl_cache` 是漏掉的那一个。
+///
+/// 成本：O(n) 比较（255 次），相对它省下的**每帧 56 万次线段-AABB 扫描**可忽略。
+pub(crate) fn occl_cache_matches(cache_ids: &[usize], npc_ids: &[usize]) -> bool {
+    cache_ids.len() == npc_ids.len() && cache_ids.iter().eq(npc_ids.iter())
+}
+
     pub(crate) fn update_ai(&mut self, dt: f32, camera: &Camera) {
         let player = camera.position();
         // 2026-08-24：借用代替克隆（16KB/帧网格拷贝消除；与 self.npcs/map 字段级借用拆分共存）
@@ -638,7 +654,16 @@ impl Game {
         let occlusion_refresh: u32 = crate::syscfg::parse::<u32>("RV3D_OCCL_REFRESH")
             .filter(|v| *v >= 1)
             .unwrap_or(4);
-        let recompute = self.occl_cache_age == 0 || self.occl_cache.len() != self.npcs.len();
+        // 🔴 **判据必须包含"顺序变没变"**（2026-10-15，外部复核指出，已确认）：
+        // 上面第 478 行的 `partition_ai_tiers` **每帧**都会稳定重排 `self.npcs`（Near 在前），
+        // 而 `occl_cache` 是**按下标**缓存的 ⇒ 只比长度的话，重排之后缓存里的遮挡标记会
+        // 错误地套到**别的 NPC** 身上（长度一样、检查通过、不报任何错）。
+        // O(n) 的 id 序列比较（255 次）相对它省下的每帧 56 万次线段-AABB 扫描可以忽略。
+        let order_same = Self::occl_cache_matches(
+            &self.occl_cache_ids,
+            &self.npcs.iter().map(|n| n.id).collect::<Vec<_>>(),
+        );
+        let recompute = self.occl_cache_age == 0 || !order_same;
         let target_occluded: Vec<bool> = if recompute {
             let v = target_occlusion(
                 &self.npcs,
@@ -650,6 +675,9 @@ impl Game {
                 &player,
             );
             self.occl_cache = v.clone();
+            // id 序列与缓存**同时**更新 —— 两者必须同源，否则上面的比较没有意义
+            self.occl_cache_ids.clear();
+            self.occl_cache_ids.extend(self.npcs.iter().map(|n| n.id));
             self.occl_cache_age = occlusion_refresh;
             v
         } else {

@@ -655,6 +655,18 @@ pub struct Game {
     /// 线段-AABB 扫描；遮挡关系在相邻帧之间几乎不变，故每 `OCCLUSION_REFRESH` 帧重算一次。
     /// `occl_cache_age == 0` 表示"该重算了"。
     pub occl_cache: Vec<bool>,
+    /// `occl_cache` 对应的 **NPC id 序列**（与它同时更新）。
+    ///
+    /// 🔴 2026-10-15 补（外部复核指出，已对着代码确认）：`occl_cache` 是**按下标**缓存的，
+    /// 而 `partition_ai_tiers` **每帧**都会稳定重排 `self.npcs`（Near 在前）⇒ 下标语义在
+    /// 刷新窗口内会变，缓存的遮挡标记会**错误地套到别的 NPC** 身上。
+    /// 原来的判据只有 `occl_cache.len() != self.npcs.len()` —— **只能发现增删、发现不了重排**。
+    ///
+    /// ⚠️ 紧挨着的 `npc_vis` 早就用 `(id, bool)` 解决了同一个问题（它的注释写着"带 id 是为了在
+    /// **下标前移**（有人死亡）时立刻发现错位"）—— `occl_cache` 是漏掉的那一个。
+    /// 这里用 id 序列做 O(n) 校验（255 次比较），相对它省下的
+    /// **每帧 56 万次线段-AABB 扫描**便宜三个数量级。
+    pub occl_cache_ids: Vec<usize>,
     pub occl_cache_age: u32,
     /// 遮挡剔除自计时（累计微秒 / 调用次数），只有 `RV3D_CULL_DIAG=1` 时累加；
     /// `main.rs` 每秒读一次并清零（`Cell` = 只读方法也能累加）。

@@ -101,6 +101,7 @@ impl Game {
             spread_scale: 1.0,
             cull_eye_override: None,
             occl_cache: Vec::new(),
+            occl_cache_ids: Vec::new(),
             occl_cache_age: 0,
             occl_us: std::cell::Cell::new(0),
             occl_calls: std::cell::Cell::new(0),

@@ -2,7 +2,13 @@
 // 本模块是 `renderer` 的后代 ⇒ 照旧看得见 Renderer 的私有字段、私有方法与文件作用域私有项；
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 
-/// Camera Uniform 数据（view/proj 两个 4x4 矩阵 + lod_params + 网格着色器扩展字段，256 字节）
+/// Camera Uniform 数据（view/proj 两个 4x4 矩阵 + lod_params + 网格着色器扩展字段，**336 字节**）
+///
+/// ⚠️ 这里原写"256 字节"，在 `2026-10-11` 追加 `prev_view_proj`（4x4）与 `debug_params`
+/// （`[f32; 4]`）之后就已经过期（256 + 64 + 16 = 336），2026-10-15 更正。
+/// **尺寸不写死在注释里靠人记** —— 判据 = `tests_geom.rs::camera_uniform_layout_matches_wgsl_view_proj`
+/// （逐字段钉死偏移 0/64/128/144/240/256/320 与总大小 336），改字段会当场变红。
+/// 注释与判据必须同源：注释写错了不会红，所以真正的真源是那条断言。
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub(crate) struct CameraUniform {

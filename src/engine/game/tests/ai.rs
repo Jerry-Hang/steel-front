@@ -1180,3 +1180,39 @@ use super::*;
             rescanned
         );
     }
+
+/// 🔴 **NPC 顺序一变，遮挡缓存就必须失效。**
+///
+/// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：`Game::occl_cache` 是**按下标**
+/// 缓存的（消费点 `ctx.target_occluded.get(index)`），而 `partition_ai_tiers` **每帧**
+/// 都会稳定重排 `self.npcs`（Near 在前）⇒ 下标语义在刷新窗口内会变，
+/// 缓存里的遮挡标记会**错误地套到别的 NPC** 身上。
+///
+/// 原来的判据只有 `occl_cache.len() != self.npcs.len()` —— **只能发现增删、发现不了重排**：
+/// 长度一样、检查通过、不报任何错，只是"这个人是不是被挡住"用错了人。
+/// 紧挨着的 `npc_vis` 早就用 `(id, bool)` 解决了同一个问题（它的注释写着"带 id 是为了在
+/// **下标前移**（有人死亡）时立刻发现错位"）—— `occl_cache` 是漏掉的那一个。
+///
+/// ⚠️ 最后一条是**区分度来源**：长度相同、只有顺序不同。旧判据在这一条上是**通过**的。
+#[test]
+fn occlusion_cache_invalidates_when_npc_order_changes() {
+    // 同一批 id、同一顺序 ⇒ 仍然有效
+    assert!(
+        Game::occl_cache_matches(&[1, 2, 3], &[1, 2, 3]),
+        "顺序没变时缓存应保持有效（否则每帧都重算，优化就白做了）"
+    );
+    // 🔴 重排：**长度一模一样**，只是顺序变了 ⇒ 必须判为失效
+    assert!(
+        !Game::occl_cache_matches(&[1, 2, 3], &[3, 1, 2]),
+        "长度相同但顺序变了 —— 旧判据只看长度，会把遮挡标记套到别的 NPC 身上"
+    );
+    assert!(
+        !Game::occl_cache_matches(&[1, 2, 3, 4], &[4, 3, 2, 1]),
+        "整段反转同样要判为失效"
+    );
+    // 增删 ⇒ 失效（这一档旧判据本来就能发现，保留以防将来的改动把它丢掉）
+    assert!(!Game::occl_cache_matches(&[1, 2, 3], &[1, 2]));
+    assert!(!Game::occl_cache_matches(&[1, 2], &[1, 2, 3]));
+    // 空 ⇒ 视为有效（没有 NPC，缓存本来就没内容；别让空场景每帧重算）
+    assert!(Game::occl_cache_matches(&[], &[]));
+}
