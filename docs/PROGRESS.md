@@ -776,3 +776,72 @@ marker=5207 npc=126 mk_up_us=0        ← 跳过生效，上传耗时归零（�
   需要一个关卡/几何版本号，本轮没动（不知道有没有现成的版本标识，不敢猜）。
 * NPC 视觉上传（~120µs）。
 * 手机冷却后的完整 fps A/B。
+
+---
+
+## 2026-10-15 —— 外部复核（Gemini 两批共 20 条）逐条核对
+
+> **方法**：复核的每一条都**对着真代码验证**，不照做。结果是「确认属实」「一半对」「否证」三种，
+> 下面只记**确认属实**与**有后续价值**的。
+
+### ✅ 已修并落地（4 条真缺陷 + 1 条顺带抓到的）
+
+| 提交 | 缺陷 | 关键判据 |
+|---|---|---|
+| `4fff017` | `Client::connect` 硬编码 `bind("127.0.0.1:0")` ⇒ **跨机联机全部失败** | `client_connect_never_binds_loopback` + 反向验证 |
+| `988d1b6` | `recreate_surface` 漏维护 `swapchain_broken` ⇒ 切后台回来**多黑约 1 秒** | 对着真机日志复核 |
+| `988d1b6` | `shockwave_pressure` 只有 `debug_assert_eq!` ⇒ Release 下 **Safe API 堆越界 UB** | 两条判据 + 反向验证 |
+| `6c09025` | `init_msaa/depth_resources` **只 clear 不 destroy** ⇒ 桌面每次重建交换链**累积泄漏显存** | 顺着 A4 的线索抓到 |
+| `4d2484e` | `render()` 里 acquire 成功后的**裸 `?` 早退** ⇒ 下一帧死等 **15 秒**才落 `gpu_stalled` | 两条结构性判据 + 两种退化反向验证 |
+
+**`4feb33a`（更早）**：`Renderer::recreate_surface(window)` —— 真正修掉 Android 切后台黑屏
+（根因是 `VkSurfaceKHR` 本身被系统回收）。⚠️ **复现必须用 `input keyevent KEYCODE_APP_SWITCH`，
+不是 Home**（Home 会杀进程 ⇒ 冷启动 ⇒ 永远走不到恢复路径）。
+
+### 🔴 三条最值钱的教训
+
+1. **「验通了」要问一句「它验的是不是唯一能 work 的那条路」**
+   `net_pair.sh`（双进程真机握手）**确实通了** —— 但两个进程**跑在同一台机器、走环回**，
+   正好落在 `bind("127.0.0.1")` 唯一能用的那条路上。
+   **判据没错，是覆盖面缺了这个维度。**
+
+2. **复核说的现象属实 ≠ 它推论的影响面属实**
+   A4 说「`drop.rs` 不调 `destroy_swapchain` ⇒ **每次重建都泄漏**一批 scene 图像」。
+   现象对，**推论错** —— `init_scene_resources` 第一件事就是"先 destroy 再 clear"。
+   **但顺着这条线核对旁边的 `init_msaa/depth_resources` 时，抓到了真的**（那两处只有 `clear()`）。
+   ⇒ **核对复核的价值，一半在证实/否证它，一半在"它指的方向旁边"。**
+
+3. **判据自己会失效，而且有两种形态（本轮各栽一次）**
+   * **「判据匹配到自己的文档」**：`client_connect_never_binds_loopback` 第一版直接对源码
+     `contains`，命中了我自己引用旧代码的那行注释 ⇒ **恒红**。改为剔除注释行。
+   * **「判据匹配到死代码」**：`no_bare_early_return_between_fence_reset_and_submit` 第一版
+     扫「`return Err` 前 40 行内有没有 `gpu_stalled = true`」，**反向验证时我把那行塞进
+     `if false {}` 死代码块，判据照样通过** ⇒ 文本扫描在这里就是失效的。
+     改为**纯函数 `abort_after_acquire` + 直接断言返回值**，并把源码级判据降级为"只数调用次数"。
+
+### ⚠️ 复核里「一半对」的（下一轮）
+
+* **B2（`Refuse` 处理）**：复核说 `handle_message` **完全没有** `Refuse` 分支 —— 实测**分支存在**
+  （`net.rs:407`）。但它的下游 `refused_reason` 字段**从未被赋值**（`grep 'refused_reason *='` 为空）
+  ⇒ **版本不匹配时的重连风暴仍然是真的**。
+* **A4（`drop.rs` 漏释放）**：进程退出时漏 `msaa`/`scene`/`hud_render_pass`。
+  影响面远小于复核说的（Vulkan 对象在进程退出时由驱动回收），**留作下一轮**。
+
+### ⏳ 完全未验的（PT 默认关，影响面待评估）
+
+A2 占位录制改 PT 状态机 / A5 `run_pt_view` 漏 `pt_destroy_assets`+`read_buf` /
+A6 PT 屏障 VUID + 白跑光栅化 pass；
+B3 Snapshot key 碰撞 / B4 Position 漏 `seq` 过滤 / B5 全营重心把空连计入分母 /
+B6 连目标点向量颠倒 / B7 尾数并入后 `leader` 悬空 / B9 `decide_side` 贪婪截取 /
+B10 `http_post_json` 不走 DNS / B12 Windows 音频堆越界（**Linux 机器上验不了**）/
+B13 ALSA 非阻塞 drain。
+**B8（`out.push(c as char)` ⇒ 中文变 Latin-1 乱码）** 与 **B11（`take_red` 只 clone 不 take）**
+已 grep 到实锤，未修。
+
+### 🔴 本轮又犯了一次「门禁红了还提交」
+
+`4d2484e` 提交时 CJK 门是 **FAIL** 的（`闸`/`骗` 两个字无字模），我却提交了 ——
+**这是同一个错误第二次犯**（此前已记录过"run gates separately, confirm green, then commit"）。
+根因：**把门禁和提交放进同一条命令里顺序跑完就算数**。
+⇒ 固化为：提交前**逐项确认五道门禁**（0 警告 / 全量测试 / CJK / 白名单 / 工作树），
+**确认全绿之后再单独发提交命令**。`3aaec7e` 补上了字模缺口。
