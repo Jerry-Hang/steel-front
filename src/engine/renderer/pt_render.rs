@@ -72,8 +72,16 @@ impl Renderer {
         if sig == self.pt_scene_sig && !props_changed {
             return Ok(());
         }
-        self.pt_scene_sig = sig;
-        self.pt_prop_key = prop_key;
+        // 🔴 **指纹绝不能在这里先写**（2026-10-15，外部复核指出第 8 条前半，已确认）：
+        // 原实现把 `pt_scene_sig` / `pt_prop_key` 写在重建**之前**，而下面对应的失败路径
+        // 只回滚了 `pt_resident`、**没有回滚指纹** ⇒ 一次 `build_pt_as` 失败之后，
+        // 下一帧算出**同样的** `sig`/`prop_key` ⇒ `sig == self.pt_scene_sig` 恒真 ⇒
+        // **永远短路、再也不重建**，而 `pt_resident` 里是恢复回来的旧资产 ——
+        // 它的设备地址指向的 `prop_vertex_buffer` 可能已被 `set_props` 销毁 ⇒
+        // **悬空设备地址**（不崩不报，画面默默错）。
+        // 末尾的 `res?` 同理：`pt_scene_rebuild` 失败时指纹已提交、资源却是半新半旧。
+        //
+        // ⇒ 指纹在**每条成功路径的末尾**提交（见下面两处），失败一定保持"该重建"的状态。
         let n = boxes.len();
         if props_changed {
             // 顺序：静默 → 建新（双几何尺寸查询+创建+填充）→ 重写描述符 → 构建+静默 → 销毁旧。
@@ -105,6 +113,9 @@ impl Renderer {
             self.pt_box_count = n;
             self.pt_frame.set(0);
             self.pt_reset.set(true);
+            // ✅ 到这里才算成功：现在提交指纹（前面任何一处 `?` 早退都到不了这里）
+            self.pt_scene_sig = sig;
+            self.pt_prop_key = prop_key;
             log::info!(
                 "PT-SCENE: 道具几何变化 → BLAS 整体重建：盒 {} + 道具三角 {}",
                 n,
@@ -124,6 +135,9 @@ impl Renderer {
         // 场景换了，旧累积全部作废
         self.pt_frame.set(0);
         self.pt_reset.set(true);
+        // ✅ 同上：`res?` 已经过了，到这里才算成功
+        self.pt_scene_sig = sig;
+        self.pt_prop_key = prop_key;
         log::info!("PT-SCENE: 盒 {} 个（WorldMarker 同源）", n);
         Ok(())
     }

@@ -2014,3 +2014,117 @@ fn shadow_pass_emissive_is_gated_and_uses_the_same_geometry_as_the_main_pass() {
         "扫描面不对 —— 连 `record_shadow_pass` 都没扫到"
     );
 }
+
+/// 🔴 **PT 的场景指纹只能在重建【成功之后】提交。**
+///
+/// 存在理由（2026-10-15，外部复核指出第 8 条前半，已对着代码确认）：
+/// `pt_set_scene_markers` 原来把 `pt_scene_sig` / `pt_prop_key` 写在**重建之前**，
+/// 而失败路径只回滚 `pt_resident`、**没有回滚指纹** ⇒ 一次 `build_pt_as` 失败之后，
+/// 下一帧算出**同样的** `sig`/`prop_key` ⇒ 判据 `sig == self.pt_scene_sig` 恒真 ⇒
+/// **永远短路、再也不重建**；而 `pt_resident` 里是恢复回来的旧资产 ——
+/// 它的设备地址指向的 `prop_vertex_buffer` 可能已被 `set_props` 销毁
+/// ⇒ **悬空设备地址**（不崩不报，画面默默错）。
+///
+/// ⚠️ 这类"**缓存在成功后提交**"的不变式在别处也成立（换图 / 道具重建 / upload 的
+/// `marker_slot_version`），本判据只钉 PT 这一处。
+#[test]
+fn pt_scene_fingerprint_is_committed_only_after_a_successful_rebuild() {
+    let src = include_str!("pt_render.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let start = prod
+        .find("pub(crate) fn pt_set_scene_markers(")
+        .expect("pt_render.rs 里找不到 pt_set_scene_markers");
+    let rest = &prod[start..];
+    let end = rest[1..]
+        .find("\n    pub(crate) fn ")
+        .or_else(|| rest[1..].find("\n    fn "))
+        .map(|i| i + 1)
+        .unwrap_or(rest.len());
+    let body = &rest[..end];
+    let code: String = body
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let first_sig_write = code
+        .find("self.pt_scene_sig = sig;")
+        .expect("找不到 `self.pt_scene_sig = sig;` —— 判据的锚点变了，请更新");
+    let branch_at = code
+        .find("if props_changed {")
+        .expect("找不到 `if props_changed {` —— 判据的锚点变了，请更新");
+    assert!(
+        first_sig_write > branch_at,
+        "`self.pt_scene_sig = sig;` 出现在 `if props_changed {{` **之前** ⇒ \
+         又变成「重建前就提交指纹」了：失败路径回滚了资源却没回滚指纹 ⇒ \
+         下一帧判据恒真 ⇒ **永远不再重建**，而残留资产引用的旧道具缓冲可能已被销毁 \
+         （悬空设备地址，不崩不报）。指纹必须在**每条成功路径的末尾**提交。"
+    );
+    // 两条成功路径都提交（少一条 = 那条路径会无限重建）
+    assert_eq!(
+        code.matches("self.pt_scene_sig = sig;").count(),
+        2,
+        "两条成功路径（道具变了 / 只换场景）都要提交指纹 —— 只提交一条的话，\
+         另一条会每帧都判「该重建」而白重建"
+    );
+
+    // 前置自检（教训 27）
+    assert!(
+        code.contains("build_pt_as"),
+        "扫描面不对 —— 连 `build_pt_as` 都没扫到"
+    );
+}
+
+/// 🔴 **写进描述符集的 Buffer 句柄不许是 null —— 三处绑定必须同一条判据。**
+///
+/// 存在理由（2026-10-15，外部复核指出第 8 条后半，已对着代码确认）：
+/// 同一文件里 `init_pt_resident` 与 `run_pt_view` 写的都是
+/// `prop_attr_tris > 0 && prop_attr_buf != vk::Buffer::null()`，
+/// **只有 `pt_refresh_dset` 漏了 `!= null`** ⇒ `set_props` 销毁过 `prop_attr_buf`
+/// 之后若 `prop_tris > 0`，就朝描述符集里写一个 **NULL 句柄**
+/// ⇒ VUID（`VkWriteDescriptorSet` 的 buffer 为 null）+ 未定义行为。
+///
+/// ⇒ 判据 = **凡在 `pt_assets.rs` 里选择 `prop_attr_buf` 作为 binding 4 的表达式，
+/// 都必须带 `!= vk::Buffer::null()`**。
+#[test]
+fn every_prop_attr_descriptor_binding_guards_against_a_null_handle() {
+    let src = include_str!("pt_assets.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // 每一处"条件选 prop_attr_buf"的表达式
+    let mut checked = 0usize;
+    for (i, line) in code.lines().enumerate() {
+        if !line.contains("self.prop_attr_buf") {
+            continue;
+        }
+        // 只看"作为值被选中"的那种行（含 `if`）
+        if !line.contains("if ") {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            line.contains("vk::Buffer::null()"),
+            "pt_assets.rs 第 {} 行把 `self.prop_attr_buf` 当描述符缓冲选中，\
+             却没带 `!= vk::Buffer::null()` 守卫 ⇒ `set_props` 销毁过它之后会朝\
+             描述符集里写 NULL 句柄（VUID + 未定义行为）：{}",
+            i + 1,
+            line.trim()
+        );
+    }
+    assert!(
+        checked >= 2,
+        "只找到 {checked} 处「条件选 prop_attr_buf」的表达式 —— 判据的扫描面不对\
+         （预期至少 2 处：`init_pt_resident` 与 `pt_refresh_dset`）"
+    );
+}

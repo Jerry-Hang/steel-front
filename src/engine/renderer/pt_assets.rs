@@ -656,7 +656,16 @@ impl Renderer {
             range: (PT_MAX_BOXES * 16) as u64,
         };
         let propv_info = vk::DescriptorBufferInfo {
-            buffer: if assets.prop_tris > 0 { self.prop_attr_buf } else { assets.verts_buf },
+            // 🔴 **必须带 `!= null` 守卫**（2026-10-15，外部复核指出第 8 条后半，已确认）：
+            // 同一文件里另外两处（`init_pt_resident` 与 `run_pt_view`）写的都是
+            // `prop_attr_tris > 0 && prop_attr_buf != null`，**只有这里漏了** ⇒
+            // `set_props` 销毁过 `prop_attr_buf` 之后若 `prop_tris > 0`，
+            // 就朝描述符集里写一个 **NULL 句柄** ⇒ VUID + 未定义行为。
+            buffer: if assets.prop_tris > 0 && self.prop_attr_buf != vk::Buffer::null() {
+                self.prop_attr_buf
+            } else {
+                assets.verts_buf
+            },
             offset: 0,
             range: vk::WHOLE_SIZE,
         };
