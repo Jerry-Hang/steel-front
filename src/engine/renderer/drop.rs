@@ -211,6 +211,15 @@ impl Drop for Renderer {
             if self.shadow_render_pass != vk::RenderPass::null() {
                 self.device.destroy_render_pass(self.shadow_render_pass, None);
             }
+            // 🔴 `hud_render_pass` 原来一直漏在这里（2026-10-15，外部复核指出 A4，已确认）：
+            // 本文件只销毁了 `render_pass` 与 `shadow_render_pass`，而 HUD **overlay pass**
+            // 用的是**独立**的 `hud_render_pass`（见 `renderer.rs` 的字段文档）。
+            // 它只在进程退出时漏一次，影响面小；但既然上面两个都销毁了，它没有理由例外。
+            // ⚠️ 顺序同另外两个：**render pass 必须在它对应的 framebuffer 之后销毁** ——
+            // 上面销毁 `hud_framebuffers` 的时机早于这里，顺序是对的。
+            if self.hud_render_pass != vk::RenderPass::null() {
+                self.device.destroy_render_pass(self.hud_render_pass, None);
+            }
             if self.shadow_descriptor_set_layout != vk::DescriptorSetLayout::null() {
                 self.device
                     .destroy_descriptor_set_layout(self.shadow_descriptor_set_layout, None);
@@ -268,6 +277,43 @@ impl Drop for Renderer {
                 .depth_images
                 .iter()
                 .zip(self.depth_images_memory.iter())
+            {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+            }
+
+            // 🔴 **这里是手抄的 `destroy_swapchain` 副本，抄漏了三样**（2026-10-15，
+            // 外部复核指出 A4，已对着代码确认）：
+            //   ① `msaa_*` 三件套（`destroy_swapchain` 里有，这里没有）；
+            //   ② `scene_*` 三件套（`2026-10-11` 新增的离屏场景图，**两处都没有** ——
+            //      重建路径靠 `init_scene_resources` 自己"先拆旧的"兜住，退出时没人管）；
+            //   ③ `hud_render_pass`（只有 `render_pass` / `shadow_render_pass` 被销毁）。
+            //
+            // ⇒ 进程退出时漏释放一批图像/显存与一个 render pass。
+            // **影响面比"每次重建都泄漏"小得多**（Vulkan 对象在进程退出时由驱动回收），
+            // 所以这条排在最后修；但它说明了一个更值钱的问题：
+            // **手抄一份销毁清单 ⇒ 两边静默分叉**（仓库教训 15 的同一形态）。
+            // ⚠️ 本轮只**补齐漏项**，不做"改成调用 `destroy_swapchain()`"的重构 ——
+            // 那要连带删掉上面 5 段重复代码，属独立改动，不该和本修复混在一个提交里。
+            for &view in &self.msaa_image_views {
+                self.device.destroy_image_view(view, None);
+            }
+            for (&image, &memory) in self
+                .msaa_images
+                .iter()
+                .zip(self.msaa_image_memory.iter())
+            {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+            }
+            // 离屏场景图（内部渲染分辨率）—— 顺序与 `init_scene_resources` 的"先拆旧的"一致
+            for &view in &self.scene_image_views {
+                self.device.destroy_image_view(view, None);
+            }
+            for (&image, &memory) in self
+                .scene_images
+                .iter()
+                .zip(self.scene_image_memory.iter())
             {
                 self.device.destroy_image(image, None);
                 self.device.free_memory(memory, None);

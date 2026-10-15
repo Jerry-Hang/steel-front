@@ -1515,3 +1515,57 @@ fn command_buffer_init_and_recreate_never_pre_record() {
         "函数体切得太短 ⇒ 这条判据可能什么也没扫到"
     );
 }
+
+/// 🔴 **`Drop for Renderer` 必须把这三组资源也释放掉。**
+///
+/// 存在理由（2026-10-15，外部复核指出 A4，已对着代码确认）：
+/// `drop.rs` 是**手抄的一份 `destroy_swapchain` 副本**，抄漏了三样 ——
+///   · `msaa_*` 三件套（`destroy_swapchain` 里有，drop 里没有）；
+///   · `scene_*` 三件套（`2026-10-11` 新增的离屏场景图，**两处都没有** ——
+///     重建路径靠 `init_scene_resources` 自己"先拆旧的"兜住，退出时没人管）；
+///   · `hud_render_pass`（只销毁了 `render_pass` / `shadow_render_pass`，
+///     而 HUD overlay 用的是**独立**的 render pass）。
+///
+/// ⚠️ 影响面**比"每次重建都泄漏"小得多**（Vulkan 对象在进程退出时由驱动回收），
+/// 所以这条排在最后修。但**手抄一份销毁清单 ⇒ 两边静默分叉**这件事本身值得钉住
+/// （仓库教训 15 的同一形态：多份副本、单一定义缺失）。
+///
+/// 判据是源码级的 —— `drop.rs` 是退出路径，单测构造不出"真的 drop 一次"的场景；
+/// 这里断言的是**这些字段确实出现在销毁调用里**（注释行照例剔除）。
+#[test]
+fn renderer_drop_releases_msaa_scene_and_hud_render_pass() {
+    let src = include_str!("drop.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for field in [
+        "msaa_images",
+        "msaa_image_memory",
+        "msaa_image_views",
+        "scene_images",
+        "scene_image_memory",
+        "scene_image_views",
+        "hud_render_pass",
+    ] {
+        assert!(
+            code.contains(field),
+            "renderer/drop.rs 里没有释放 `{field}` —— 手抄的销毁清单又和 \
+             `destroy_swapchain` / `init_scene_resources` 分叉了。\
+             （进程退出时漏一次，影响小；但「两份清单静默不一致」才是要防的东西。）"
+        );
+    }
+
+    // 前置自检（教训 27）：确认扫描面不是空串
+    assert!(
+        code.contains("destroy_fence") && code.len() > 2000,
+        "drop.rs 的扫描面看起来不对（长度 {}）⇒ 这条判据可能什么也没扫到",
+        code.len()
+    );
+}
