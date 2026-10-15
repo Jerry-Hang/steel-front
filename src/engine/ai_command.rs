@@ -2,7 +2,15 @@
 //!
 //! 编制（**按代码实测写**，判据 `organization_matches_the_documented_three_three_rule`）：
 //! - 每 **4 人**切 1 个班（最后一班可以不足 4 人）、每 **3 班**成 1 排、每 **3 排**成 1 连；
-//! - 「班长 / 排长 / 连长」都是**本级成员的最后一个**（不额外占编制，`leader` 只做标记）；
+//! - **`leader` 只做标记、不额外占编制**，三级的取值规则**并不相同**（2026-10-15 按代码实测改写，
+//!   旧文案一律写「本级成员的最后一个」，与班的实现不符）：
+//!   · **班长 = 班名单的第一个** —— 必须如此：`soldier_slot` 把班内序号 0 给第一个成员，
+//!     而 `FORMATION_OFFSETS[0]` 就是「班长：前中（箭头）」⇒ 取 `last()` 会把班长挪到殿后位；
+//!   · **排长 / 连长 = 本级名单的最后一个**（`Platoon::leader` / `Company::leader`）。
+//!   ⚠️ 排/连两级目前**无读取方**（见字段上的 `#[allow(dead_code)]`），属**预留**；
+//!   `Company::leader` 只在连报告那处与 `members` 一起被判（`||` 冗余，因为 leader 本就在 members 里）。
+//!   🔴 但**预留字段也必须自洽**：尾数并入会改写 `members`，那时 `leader` 必须跟着重算
+//!   （判据 `leaders_stay_consistent_after_tail_merge`）。
 //! - 128 人 ⇒ **32 班 / 10 排 / 3 连**，且**连名单逐人等于全营**：末尾凑不满 3 个排的那一截
 //!   **并入末位**（末排承接余班、末连承接余排）—— 军情是按连名单汇总的，漏掉一截就是漏一份兵力。
 //!   判据 `every_soldier_is_carried_by_a_company`。⚠️ 不足 33 人（9 个班 = 3 个排）编不成连，
@@ -163,7 +171,7 @@ impl Army {
                 order: CompanyOrder::Assault,
             });
             if squads.len() % 3 == 0 {
-                // 排编制完成：排长 = 本排最后一个班的班长（简单确定性指派）
+                // 排编制完成：排长 = 本排名单的最后一个（确定性指派；见文件头对三级规则的说法）
                 let p_id = platoons.len();
                 let mut pm = Vec::new();
                 for s in &squads[squads.len() - 3..] {
@@ -229,6 +237,25 @@ impl Army {
                 companies[owner[i]].platoon_ids.push(p.id);
                 companies[owner[i]].members.extend(p.members.iter().copied());
             }
+            // 🔴 **并入之后必须重算三级 `leader`**（2026-10-15，外部复核指出 B7，已确认）。
+            //
+            // 上面两步都改写了 `members`（余班并进末排、连名单整体重建），但 `leader` 是
+            // **建编成那一刻写下的快照**，没人更新 ⇒ 并入之后它指向的已经不是"本级名单的
+            // 最后一个"了。目前排/连两级无读取方（预留字段），所以**运行时看不出问题** ——
+            // 但正因如此它才危险：等哪天有人用 `leader`（文件头提到"连长对班长投掷压制的
+            // 指挥权加成"就是计划中的用法），拿到的是一个**静默过期**的 id。
+            // 规则与建编成时**必须同源**（见文件头）：班长取第一个、排长/连长取最后一个。
+            for p in platoons.iter_mut() {
+                p.leader = p.members.last().copied();
+            }
+            for c in companies.iter_mut() {
+                c.leader = c.members.last().copied();
+            }
+        }
+        // 班这一级不受并入影响（余班整班并入末排，班内成员没变），但为让"三级同源"可判，
+        // 这里一并按同一规则重算一次 —— 顺带保证**空班**（理论上不该有）得到 None 而不是陈旧值。
+        for sq in squads.iter_mut() {
+            sq.leader = sq.members.first().copied();
         }
         Army {
             side,
@@ -624,6 +651,79 @@ mod tests {
     fn army_of(n: usize) -> Army {
         let ids: Vec<usize> = (0..n).collect();
         Army::build(Team::Red, &ids)
+    }
+
+    /// 🔴 **三级 `leader` 必须与 `members` 同源，且在「尾数并入」之后仍然成立。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B7，已确认）：`leader` 是**建编成那一刻写下的快照**，
+    /// 而收尾的"余班并进末排 + 连名单整体重建"会改写 `members`，**没人更新 `leader`**
+    /// ⇒ 并入之后它指向的已经不是"本级名单的最后一个"了。
+    ///
+    /// ⚠️ 目前排/连两级**无读取方**（预留字段）⇒ **运行时看不出问题** —— 但正因如此才危险：
+    /// 等哪天有人用 `leader`（文件头提到的"连长对班长投掷压制的指挥权加成"就是计划中的用法），
+    /// 拿到的是一个**静默过期**的 id。**预留字段也必须自洽。**
+    ///
+    /// 规则（与文件头、与建编成处**同源**）：
+    /// * 班长 = 班名单**第一个** —— 必须如此：`soldier_slot` 把班内序号 0 给第一个成员，
+    ///   而 `FORMATION_OFFSETS[0]` 就是「班长：前中（箭头）」；
+    /// * 排长 / 连长 = 本级名单**最后一个**。
+    ///
+    /// 人数取值刻意覆盖两类：**刚好整除**（128）与**有尾数**（37 / 41 / 44 / 100）——
+    /// 后者才会走"并入末位"那段；只测 128 的话这条判据**永远碰不到出问题的那条路径**
+    /// （教训 42 的形态）。
+    #[test]
+    fn leaders_stay_consistent_after_tail_merge() {
+        for n in [33usize, 36, 37, 40, 41, 44, 46, 100, 127, 128] {
+            let a = army_of(n);
+            if a.companies.is_empty() {
+                // 不足 33 人编不成连（见文件头）—— 这条判据对那种规模不适用
+                continue;
+            }
+            for sq in &a.squads {
+                assert_eq!(
+                    sq.leader,
+                    sq.members.first().copied(),
+                    "n={n} 班{}：班长必须是班名单第一个（前中阵位），实得 {:?}",
+                    sq.id,
+                    sq.leader
+                );
+            }
+            for p in &a.platoons {
+                assert_eq!(
+                    p.leader,
+                    p.members.last().copied(),
+                    "n={n} 排{}：排长必须是排名单最后一个（并入余班后要重算），实得 {:?}",
+                    p.id,
+                    p.leader
+                );
+            }
+            for c in &a.companies {
+                assert_eq!(
+                    c.leader,
+                    c.members.last().copied(),
+                    "n={n} 连{}：连长必须是连名单最后一个（并入余排后要重算），实得 {:?}",
+                    c.id,
+                    c.leader
+                );
+                // 派生不变式：连长必须**在本连名单里** —— 连报告那处正是拿 leader 与 members
+                // 一起判的，leader 落在名单外就等于漏一个人（虽然现在 `||` 把它遮住了）
+                if let Some(l) = c.leader {
+                    assert!(
+                        c.members.contains(&l),
+                        "n={n} 连{}：连长 {l} 不在本连名单里（leader 与 members 已经脱节）",
+                        c.id
+                    );
+                }
+            }
+            // 前置自检（教训 27）：这条营**确实发生了并入**，否则上面几步走的是另一条路径
+            if n % 128 != 0 && n > 33 {
+                let carried: usize = a.companies.iter().map(|c| c.members.len()).sum();
+                assert_eq!(
+                    carried, n,
+                    "n={n}：连名单逐人应等于全营（并入没生效的话这条判据测的不是目标路径）"
+                );
+            }
+        }
     }
 
     /// 🔴 **全营重心必须按存活人数加权 —— 全灭的连不能把重心拽向地图原点。**
