@@ -888,4 +888,107 @@ mod vk_failure_path_tests {
     }
 }
 
+/// 🔴 **`run_single_time_commands` 的命令缓冲必须由 RAII 守卫释放，不许留显式释放。**
+///
+/// 存在理由（2026-10-15，外部复核指出第 6 条后半，已对着代码确认）：
+/// 该函数在**分配命令缓冲之后**还有四条 `?` 早退路径
+/// （`begin_command_buffer` / `end_command_buffer` / `queue_submit` / `queue_wait_idle`），
+/// 而原来的 `free_command_buffers` 只在**全成功**时执行
+/// ⇒ **任何一处失败都泄漏一个命令缓冲**（命令池分配数有上限，漏够就堵死后续分配）。
+///
+/// ⚠️ 判据要**双向**：守卫必须在（否则回到泄漏），且函数体里**不许再有**显式
+/// `free_command_buffers`（否则与守卫叠加 = **释放两次**，
+/// 和 `set_shadow_props` 那个二次释放同形）。
+#[test]
+fn single_time_command_buffer_is_freed_by_a_drop_guard_exactly_once() {
+    let src = include_str!("device.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
+    assert!(
+        code.contains("struct CmdBufferGuard"),
+        "device.rs 里找不到 `CmdBufferGuard` —— 一次性命令缓冲又变回「只在全成功时释放」了，\
+         四条 `?` 早退路径每一条都会泄漏一个命令缓冲"
+    );
+    assert!(
+        code.contains("impl Drop for CmdBufferGuard"),
+        "`CmdBufferGuard` 没有 `Drop` 实现 —— 那它就不兜任何早退路径"
+    );
+
+    // 函数体里不许再有显式释放
+    let start = code
+        .find("fn run_single_time_commands(")
+        .expect("找不到 run_single_time_commands");
+    let rest = &code[start..];
+    let end = rest[1..]
+        .find("\n    pub(crate) fn ")
+        .or_else(|| rest[1..].find("\n    fn "))
+        .map(|i| i + 1)
+        .unwrap_or(rest.len());
+    let body = &rest[..end];
+    assert!(
+        !body.contains("free_command_buffers"),
+        "`run_single_time_commands` 里又出现显式 `free_command_buffers` —— \
+         它与 `CmdBufferGuard` 的 Drop 叠加就是**释放两次**（UB）。释放交给守卫，别写第二遍。"
+    );
+    // 前置自检（教训 27）
+    assert!(body.contains("queue_submit"), "扫描面不对 —— 函数体里没有 queue_submit");
+}
+
+/// 🔴 **「无超时参数的等待」必须被显式计数** —— 仓库原有的 `no_unbounded_wait_on_vulkan_calls`
+/// **结构性地抓不到它们**。
+///
+/// 存在理由（2026-10-15，外部复核指出第 6 条前半，已对着代码确认）：
+/// 那条判据的做法是「同一行里既出现某个等待调用、又出现 `u64::MAX`」。
+/// 而 `queue_wait_idle` / `device_wait_idle` 在 Vulkan 里**根本没有超时参数**
+/// ⇒ 它们永远不会和 `u64::MAX` 同现 ⇒ **判据恒过、未覆盖面是静默的**
+/// （这正是本仓教训 46：「工具没覆盖到」也是一种**没跑成**，而它现在没有第三种结局）。
+///
+/// ⚠️ 这不是"改成有界"就能解决的 —— Vulkan 没有给这两个调用提供超时。
+/// 所以这里能做的、也是唯一如实的做法：**把它们数出来并钉住**，
+/// **新增一处无超时等待就会让这条判据变红**，逼人显式回答"这一次为什么可以等"。
+#[test]
+fn idle_waits_without_a_timeout_are_counted_and_pinned() {
+    let full = super::tests_support::renderer_production_sources();
+    let code: Vec<&str> = full
+        .as_str()
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect();
+
+    let idle_waits = code
+        .iter()
+        .filter(|l| l.contains(".queue_wait_idle(") || l.contains(".device_wait_idle("))
+        .count();
+
+    // 现状基线（2026-10-15 实测）。**只允许减少，不允许增加**：
+    // 新增一处就说明有人又加了一个"可能永远不返回"的等待点，而那正是
+    // 2026-09-25 那次"游戏静默卡死"（`LiveKernelEvent` P1=141）的成因形态。
+    // ⚠️ 这个数**必须是实测值，不是估计值**：我第一版写的是 24（猜的），
+    // 而实测只有 9 —— 那样这条判据会**放行 15 处新增**，成为一个"不设防的关卡"。
+    // 底噪型的基线一旦估高，它就从"钉住"退化成"宽心"（同教训 43/45 的噪声底）。
+    const BASELINE: usize = 9;
+    assert!(
+        idle_waits > 0,
+        "检查失效：一处 `queue_wait_idle` / `device_wait_idle` 都没扫到 —— \
+         扫描面塌了（这个数应当是几十）"
+    );
+    assert!(
+        idle_waits <= BASELINE,
+        "无超时的空闲等待从 {BASELINE} 处涨到了 {idle_waits} 处。\
+         Vulkan 没给这两个调用超时参数 ⇒ 它们**可能永远不返回**，而外层看不出区别\
+         （日志停住、无 panic、无 VUID —— 正是 2026-09-25 那次静默卡死的形态）。\
+         新增的每一处都要能回答：为什么这一次可以无界地等？\
+         （确有必要就更新这个基线，并在注释里写清理由。）"
+    );
+}

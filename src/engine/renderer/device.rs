@@ -3,6 +3,33 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// `run_single_time_commands` 里那个一次性命令缓冲的 **RAII 守卫**。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出第 6 条后半，已对着代码确认）：
+/// 该函数在**分配命令缓冲之后**还有四条 `?` 早退路径，而原来的释放语句只在
+/// **全成功**时执行 ⇒ 任何一处失败都泄漏一个命令缓冲。
+/// **守卫保证"只要离开作用域就释放"** —— 正常返回、`?` 早退、panic 展开都覆盖。
+///
+/// ⚠️ 用了守卫之后**不能再留显式 `free_command_buffers`**，否则释放两次
+/// （`VkCommandBuffer` 重复释放是未定义行为，而且这种"双份释放"正是本仓
+/// `set_shadow_props` 那个二次释放的同形）。
+struct CmdBufferGuard<'a> {
+    device: &'a ash::Device,
+    pool: vk::CommandPool,
+    cmd_buffer: vk::CommandBuffer,
+}
+
+impl Drop for CmdBufferGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: `pool` 与 `cmd_buffer` 都来自同一个 `device`，且该缓冲在本守卫
+        // 存续期间是"一次性"用途、不会被别处再释放（本函数是它唯一的持有者）。
+        unsafe {
+            self.device
+                .free_command_buffers(self.pool, &[self.cmd_buffer]);
+        }
+    }
+}
+
 impl Renderer {
     pub(crate) fn new(window: &Window) -> Result<Self, String> {
         let mut renderer = Self::init_instance(window)?;
@@ -970,6 +997,21 @@ impl Renderer {
                 .map_err(|e| format!("分配一次性命令缓冲失败: {}", e))?
         }[0];
 
+        // 🔴 **从这里开始用 RAII 守卫兜住释放**（2026-10-15，外部复核指出第 6 条后半，
+        // 已对着代码确认）：原实现在**分配之后**还有四条 `?` 早退路径
+        // （`begin_command_buffer` / `end_command_buffer` / `queue_submit` /
+        // `queue_wait_idle`），而 `free_command_buffers` 只在**全成功**时走到
+        // ⇒ 任何一处失败都**泄漏一个命令缓冲**，而命令池的分配数是有上限的
+        // （`max_command_buffers`），漏够就把后续分配全堵死。
+        //
+        // 守卫的语义：**只要离开了这个作用域就释放**（正常返回、`?` 早退、甚至 panic
+        // 展开都覆盖）。所以末尾那句显式 `free_command_buffers` 也删掉了 —— 留着会**释放两次**。
+        let guard = CmdBufferGuard {
+            device: &self.device,
+            pool: self.command_pool,
+            cmd_buffer,
+        };
+
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
@@ -995,8 +1037,8 @@ impl Renderer {
             self.device
                 .queue_wait_idle(self.graphics_queue)
                 .map_err(|e| format!("等待一次性命令失败: {}", e))?;
-            self.device.free_command_buffers(self.command_pool, &[cmd_buffer]);
         }
+        drop(guard); // 显式一点：命令已执行完，现在才释放
         Ok(())
     }
     pub(crate) fn wait_idle(&self) -> Result<(), String> {
