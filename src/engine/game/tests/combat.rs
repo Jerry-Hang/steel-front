@@ -532,9 +532,17 @@ use super::*;
         );
         let id = server_game.net_players[0].id;
         assert_eq!(
-            server_game.net_server.as_ref().unwrap().player_id_of(
-                client_game.net_client.as_ref().unwrap().local_addr().unwrap()
-            ),
+            // 🔴 2026-10-15：客户端现在按地址族绑 `0.0.0.0:0`（修跨机联机），
+            // 于是 `local_addr()` 的 IP 是未指定地址，而**服务端注册表里存的键是
+            // "它实际看到的源地址"**（本测试走环回 ⇒ `127.0.0.1:<客户端端口>`）。
+            // 直接拿 `local_addr()` 去查必然查不到 —— 那是断言的前提过时。
+            server_game.net_server.as_ref().unwrap().player_id_of({
+                let cl = client_game.net_client.as_ref().unwrap().local_addr().unwrap();
+                std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    cl.port(),
+                )
+            }),
             Some(id),
             "注册表里应有该客户端的注册"
         );

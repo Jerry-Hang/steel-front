@@ -991,9 +991,29 @@ pub struct Client {
 }
 
 impl Client {
-    /// 连接服务器（客户端本地绑定 127.0.0.1 随机端口）
+    /// 连接服务器（本地绑定**按服务端地址族**选未指定地址，随机端口）。
+    ///
+    /// 🔴 **2026-10-15 修（外部复核指出，已对着代码确认）**：这里原本硬编码
+    /// `UdpSocket::bind("127.0.0.1:0")`（连文档注释都写着"绑定 127.0.0.1"）。
+    /// 绑环回地址的套接字**只能向环回接口发包** —— 传局域网/公网地址时
+    /// `send_to` 直接 `EINVAL`/`ENETUNREACH` ⇒ **除本机回环外任何跨机联机全部失败**。
+    ///
+    /// 为什么仓库里"双进程真机握手已验通"没抓到：那对进程**跑在同一台机器上、走环回**
+    /// ⇒ 正好落在唯一能用的那条路上。**判据本身没错，是覆盖面没覆盖到这个维度。**
+    ///
+    /// 按服务端地址族绑 `0.0.0.0:0`（IPv4）或 `[::]:0`（IPv6），端口交给内核分配。
     pub fn connect(server: impl ToSocketAddrs) -> io::Result<Client> {
-        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        // 先解析出服务端地址（只为确定地址族），再据此选绑定地址
+        let server_addr = server
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "服务端地址解析为空"))?;
+        let bind_addr: SocketAddr = if server_addr.is_ipv4() {
+            SocketAddr::from(([0u8, 0, 0, 0], 0))
+        } else {
+            SocketAddr::from(([0u16; 8], 0))
+        };
+        let socket = UdpSocket::bind(bind_addr)?;
         socket.set_nonblocking(true)?;
         let server = server
             .to_socket_addrs()?
@@ -1328,6 +1348,67 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    /// 测试辅助：**服务端会看到的**本端地址。
+    ///
+    /// 🔴 2026-10-15：客户端改成按地址族绑 `0.0.0.0:0`（修"跨机联机全部失败"那条）之后，
+    /// `client.local_addr()` 的 IP 是**未指定地址 `0.0.0.0`**，而**内核会按目的地址选源地址**
+    /// —— 本模块的单测一律连 `127.0.0.1`，所以服务端看到的源地址是 `127.0.0.1:<同一个端口>`。
+    ///
+    /// 于是"本端绑定地址 == 对端看到的源地址"这个**旧前提不再成立**（它只在绑了具体地址时成立）。
+    /// 四处断言原本都直接拿 `client.local_addr()` 去比，全部换成这个函数 ——
+    /// **不是代码错，是断言的前提过时了。**
+    fn peer_seen_addr(client: &Client) -> std::net::SocketAddr {
+        let a = client.local_addr().unwrap();
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            a.port(),
+        )
+    }
+
+    /// 🔴 **客户端连接路径不得把本地套接字绑到环回地址。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出）：`Client::connect` 原本写死
+    /// `UdpSocket::bind("127.0.0.1:0")` —— 绑环回地址的套接字**只能向环回接口发包**，
+    /// 传局域网/公网地址时 `send_to` 直接 `EINVAL`/`ENETUNREACH`
+    /// ⇒ **除本机回环外任何跨机联机全部失败**。
+    ///
+    /// 为什么 `net_pair.sh`（双进程真机握手）没抓到：那对进程**跑在同一台机器上、走环回**，
+    /// 正好落在唯一能用的那条路上。**判据本身没错，是覆盖面缺了这个维度。**
+    ///
+    /// 这里用源码级判据而不是行为判据：`Client` 不暴露内部 socket，
+    /// 而真连一个网外地址又要依赖网络环境（不该进单测）。
+    /// 判据只扫**非测试段**（`#[cfg(test)]` 之前），否则本文件自己的测试
+    /// `Server::bind("127.0.0.1:0")` 会把判据撞红 —— 那些是合法的（服务器本来就该能绑环回）。
+    #[test]
+    fn client_connect_never_binds_loopback() {
+        let src = include_str!("net.rs");
+        let production = src
+            .split_once("#[cfg(test)]")
+            .map(|(a, _)| a)
+            .unwrap_or(src);
+        // 允许 `Server::bind(addr)` 走参数（那条路本来就由调用方决定绑哪），
+        // 只禁止**把环回地址写成字面量**。
+        //
+        // ⚠️ **必须剔除注释行**：第一版直接对整段做 `contains`，结果命中了我自己
+        // 那行引用旧代码的文档注释（`UdpSocket::bind("127.0.0.1:0")`）⇒ 判据**恒红**。
+        // 这是"判据匹配到自己的文档"这一类失效，仓库里教训 46 同形。
+        let code: String = production
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for pat in ["bind(\"127.0.0.1", "bind(\"localhost"] {
+            assert!(
+                !code.contains(pat),
+                "客户端连接路径出现写死的环回绑定 `{pat}` —— \
+                 绑环回只能发往本机，跨机联机全部失败。应绑 0.0.0.0:0 / [::]:0"
+            );
+        }
+    }
+
     use super::*;
 
     fn state(x: f32, y: f32, z: f32, rot: f32) -> PlayerState {
@@ -1787,7 +1868,13 @@ mod tests {
             };
         client.send(&join_req).unwrap();
         let (got, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
-        assert_eq!(from, client.local_addr().unwrap());
+        // 🔴 **2026-10-15 修断言**：原来写的是 `assert_eq!(from, client.local_addr())` ——
+        // 那假定「本端绑定的地址」==「对端看到的源地址」，而这只在**绑了具体地址**时成立。
+        // 客户端改成按地址族绑 `0.0.0.0:0` 之后（修"跨机联机全部失败"那条），
+        // `local_addr()` 的 IP 是**未指定地址**，而内核按目的地址选的源地址是 `127.0.0.1`
+        // ⇒ 原断言必然不成立。**这是断言的前提过时，不是代码错** —— 改断言，不改回去。
+        // 新断言更精确：分别钉住「端口一致」与「源地址就是环回」这两个事实。
+        assert_eq!(from, peer_seen_addr(&client));
         assert_eq!(got, join_req);
 
         // server：注册 + 回发 Join 确认
@@ -1816,7 +1903,7 @@ mod tests {
         };
         client.send(&pos).unwrap();
         let (got3, from3) = recv_until(|| server.recv(), Duration::from_millis(1000));
-        assert_eq!(from3, client.local_addr().unwrap());
+        assert_eq!(from3, peer_seen_addr(&client));
         assert_eq!(got3, pos);
 
         // server -> client：广播 Action
@@ -2147,7 +2234,13 @@ mod tests {
             .send(&NetworkMessage::Join { player_id: 0, name: "player1".into(), version: SESSION_VERSION })
             .unwrap();
         let (req, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
-        assert_eq!(from, client.local_addr().unwrap());
+        // 🔴 **2026-10-15 修断言**：原来写的是 `assert_eq!(from, client.local_addr())` ——
+        // 那假定「本端绑定的地址」==「对端看到的源地址」，而这只在**绑了具体地址**时成立。
+        // 客户端改成按地址族绑 `0.0.0.0:0` 之后（修"跨机联机全部失败"那条），
+        // `local_addr()` 的 IP 是**未指定地址**，而内核按目的地址选的源地址是 `127.0.0.1`
+        // ⇒ 原断言必然不成立。**这是断言的前提过时，不是代码错** —— 改断言，不改回去。
+        // 新断言更精确：分别钉住「端口一致」与「源地址就是环回」这两个事实。
+        assert_eq!(from, peer_seen_addr(&client));
         assert_eq!(req, NetworkMessage::Join { player_id: 0, name: "player1".into(), version: SESSION_VERSION });
         server.handle_join(from, "player1".into(), SESSION_VERSION).unwrap();
         let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
@@ -2161,7 +2254,7 @@ mod tests {
             .send(&NetworkMessage::Input { seq: 1, time: 0.5, input })
             .unwrap();
         let (msg, from2) = recv_until(|| server.recv(), Duration::from_millis(1000));
-        assert_eq!(from2, client.local_addr().unwrap());
+        assert_eq!(from2, peer_seen_addr(&client));
         match msg {
             NetworkMessage::Input { seq, time, input: got } => {
                 assert_eq!(seq, 1);
