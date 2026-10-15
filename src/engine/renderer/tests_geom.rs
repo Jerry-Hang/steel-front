@@ -1395,3 +1395,65 @@ fn frame_rs_abort_sites_go_through_the_helper() {
          render-finished 信号量缺失）—— 有人把某处改回了裸 `?`？"
     );
 }
+
+/// 🔴 **PT 的两个调试入口必须走 `pt_destroy_assets`，且不许用场景的盒数当本次的盒数。**
+///
+/// 存在理由（2026-10-15，外部复核指出 A5，已对着代码确认，三处都属实）：
+///
+/// **① 漏释放**：`run_pt_view` / `run_pt_bench` 的清理块只写了两句
+/// `ext.destroy_acceleration_structure(tlas/blas)` —— 那销毁的只是**两个 AS 对象**，
+/// 而 `PtAssets` 还持着 **7 组 buffer + device memory**（verts / idx / inst / mat /
+/// scratch / tlas_buf / blas_buf）⇒ **每次调用都永久泄漏一批显存**。
+/// `pt_destroy_assets` 本来就是为这件事写的（`pt_assets.rs`），
+/// `pt_set_scene_markers` 一直在正确使用它 —— 只有这两个调试入口漏了。
+///
+/// **② `run_pt_view` 还漏了回读缓冲**：`read_buf`/`read_mem`（`size*size*4` 字节）
+/// 从头到尾没有一句销毁。
+///
+/// **③ 盒数传错**：`run_pt_view` 收的是 `boxes: &[PtBox]`（任意长度），加速结构也按
+/// `boxes.len()` 建、按 `boxes.len()` 录，**唯独交给 `pack` 的盒体/道具分流边界写成了
+/// `self.pt_box_count`（场景当前的盒数）** ⇒ 两者不等时片元着色器里的分流就错位，
+/// 画错东西且不报错。`record.rs` 那条**是**场景自己建的盒，用 `pt_box_count` 才对 ——
+/// 所以判据只针对 `pt_render.rs`，别一概而论。
+///
+/// ⚠️ 剔除注释行：解释这个坑的注释里**故意**引用了旧的 `self.pt_box_count`。
+#[test]
+fn pt_debug_entries_release_assets_and_use_the_passed_box_count() {
+    let src = include_str!("pt_render.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // ① 三处入口（`pt_set_scene_markers` + 两个调试入口）都要走它
+    let n = code.matches("pt_destroy_assets(").count();
+    assert!(
+        n >= 3,
+        "pt_render.rs 里只有 {n} 处 `pt_destroy_assets` 调用（应 ≥3：道具几何重建 + \
+         run_pt_view + run_pt_bench）—— 有人又只手写两句销毁 AS 了，那会漏掉 PtAssets 里 \
+         7 组 buffer+memory"
+    );
+
+    // ② 不许**读**场景的盒数当成本次的盒数（`record.rs` 那条不在此文件，不受影响）
+    //
+    // ⚠️ 判据只禁**读取**，不禁**写入**：本文件里有 `self.pt_box_count = n;` 两处
+    // （道具几何变化时更新场景自身的盒数），那是**合法的**。
+    // 第一版判据写成 `!code.contains("self.pt_box_count")`，把这两处写入也算了进去
+    // ⇒ 判据恒红。（"判据的模式匹配抓到了不该抓的东西" —— 与判43/判44/判45 同一类。）
+    let reads: Vec<String> = code
+        .lines()
+        .filter(|l| l.contains("self.pt_box_count") && !l.contains("self.pt_box_count ="))
+        .map(|l| l.trim().to_string())
+        .collect();
+    assert!(
+        reads.is_empty(),
+        "pt_render.rs 里**读**了 `self.pt_box_count`：{reads:?}\n\
+         `run_pt_view`/`run_pt_bench` 收的是任意长度的 `boxes`，分流边界必须来自\
+         `boxes.len()`；用场景的盒数会让片元着色器的盒体/道具分界错位（画错东西且不报错）"
+    );
+}

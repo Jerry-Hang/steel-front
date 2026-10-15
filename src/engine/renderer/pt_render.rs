@@ -409,7 +409,12 @@ impl Renderer {
                 .src_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
             for i in 0..spp {
-                let pc = self.pt_params.pack(size, size, i, i == 0, spp, 0.0, (self.pt_box_count * 12) as u32);
+                // 🔴 **盒体/道具的分流边界必须来自本次实际传入的 `boxes`，不是场景当前的
+                // `self.pt_box_count`**（2026-10-15，外部复核指出 A5，已确认）。
+                // 本函数的入参是 `boxes: &[PtBox]`（任意长度），加速结构也是按 `boxes.len()`
+                // 建的（见上面的 `build_pt_as(boxes)` 与 `record_pt_build(.., boxes.len())`）
+                // ⇒ 一旦两者不等，片元着色器里的盒体/道具分界就错位（画错东西、且不报错）。
+                let pc = self.pt_params.pack(size, size, i, i == 0, spp, 0.0, (boxes.len() * 12) as u32);
                 self.device.cmd_push_constants(cb, pipe_layout, vk::ShaderStageFlags::COMPUTE, 0, bytemuck_bytes(&pc));
                 self.device.cmd_dispatch(cb, (size + 7) / 8, (size + 7) / 8, 1);
                 if i + 1 < spp {
@@ -477,6 +482,13 @@ impl Renderer {
                 }
                 std::fs::write("screenshots/pt_ref.bmp", &bmp).map_err(|e| format!("PT bmp: {e}"))?;
             }
+            // 🔴 **回读缓冲必须在这里释放**（2026-10-15，外部复核指出 A5，已确认）：
+            // `read_buf`/`read_mem` 上一版**从头到尾没有一句销毁** —— 每次调用本函数
+            // 就永久泄漏 `size*size*4` 字节的显存 + 一份 host-visible 内存。
+            // ⚠️ 必须写在**它所属的这个块里**（它的作用域到这里就结束了），
+            // 挪到下面的"清理"块会编译不过（那已经是外层作用域）。
+            self.device.destroy_buffer(read_buf, None);
+            self.device.free_memory(read_mem, None);
         }
         // 清理
         unsafe {
@@ -492,9 +504,15 @@ impl Renderer {
             self.device.destroy_image_view(acc_view, None);
             self.device.destroy_image(acc_image, None);
             self.device.free_memory(acc_mem, None);
-            let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
-            ext.destroy_acceleration_structure(assets.tlas, None);
-            ext.destroy_acceleration_structure(assets.blas, None);
+            // 🔴 **销毁 PT 资产要走 `pt_destroy_assets`，不能只手写两句销毁 AS**
+            // （2026-10-15，外部复核指出 A5，已确认）。
+            //
+            // 原写法只销毁 `tlas`/`blas` 两个**加速结构对象**，而 `PtAssets` 还持有
+            // **7 组 buffer + device memory**（verts / idx / inst / mat / scratch / tlas_buf /
+            // blas_buf）—— 那些**一句都没释放** ⇒ 每次调用本函数都永久泄漏一批显存。
+            // `pt_destroy_assets` 本来就是为这件事写的（`pt_assets.rs`），
+            // `pt_set_scene_markers` 一直在正确使用它，只有这两个调试入口漏了。
+            self.pt_destroy_assets(&assets);
         }
         Ok(())
     }
@@ -669,9 +687,9 @@ impl Renderer {
             self.device.destroy_descriptor_pool(dpool, None);
             self.device.destroy_shader_module(vs_module, None);
             self.device.free_command_buffers(self.command_pool, &[cb]);
-            let ext = ash::khr::acceleration_structure::Device::new(&self.instance, &self.device);
-            ext.destroy_acceleration_structure(assets.tlas, None);
-            ext.destroy_acceleration_structure(assets.blas, None);
+            // 🔴 同 `run_pt_view`：必须走 `pt_destroy_assets`，
+            // 只手写两句销毁 AS 会把 `PtAssets` 里那 7 组 buffer+memory 全漏掉。
+            self.pt_destroy_assets(&assets);
         }
         Ok((mrays, hits))
     }
