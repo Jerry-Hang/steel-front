@@ -538,9 +538,9 @@ impl Game {
                         .collect::<Vec<_>>()
                 };
                 let llm_red: Option<Vec<crate::engine::ai_command::CmdOverride>> =
-                    self.llm.as_ref().and_then(|l| l.take_red()).map(to_ov);
+                    self.llm.as_ref().and_then(|l| l.red_orders()).map(to_ov);
                 let llm_blue: Option<Vec<crate::engine::ai_command::CmdOverride>> =
-                    self.llm.as_ref().and_then(|l| l.take_blue()).map(to_ov);
+                    self.llm.as_ref().and_then(|l| l.blue_orders()).map(to_ov);
                 // 军情两个口径：本营阵亡（round_kills_<自己>）与战果（= 敌方阵亡）。
                 // 🔴 重组判据读的是**战果** —— 喂本营阵亡会让那条分支永远不触发（未结案 27）。
                 cmd.0.update(

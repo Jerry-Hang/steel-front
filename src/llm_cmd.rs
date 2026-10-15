@@ -641,18 +641,56 @@ impl LlmCommander {
         }
     }
 
-    pub fn take_red(&self) -> Option<Vec<CompanyCmd>> {
+    /// 红方**当前生效**的连长命令（最近一次推理的结果）。
+    ///
+    /// 🔴 **2026-10-15 改名**（原 `take_red`）—— 名字必须说出它真的做什么。
+    /// 原名说 `take`（取走/消费），实现却是 `clone`（**每次调用都返回同一份**）。
+    /// 外部复核据此判定"旧命令每 0.5 秒重复覆盖营司令决策 180 次，是个 bug"。
+    ///
+    /// **核对后确认：`clone` 是刻意的，错的是名字。** 理由是本模块自己的用途 ——
+    /// `data/llm_decisions.jsonl` 采集「态势 → 决策」训练对。**决策必须真的产生后果**
+    /// 才有采集价值**：若只在一个 0.5 秒节拍上生效（180 拍里的 1 拍），
+    /// 采到的样本就是"决策与结果无关"的噪声。所以语义是**持续生效到下一份命令到来**。
+    /// ⇒ 改成 `clone` 会改变玩法行为，**不能改**；改名字即可。
+    ///
+    /// ⚠️ 但复核顺带提到的另一点**是真的**：「上一轮刚团灭重开前」的旧命令会被继承 ——
+    /// `latest` 此前**从不在回合重置时清空**（写点只有"初始化"与"写入新决策"两处）。
+    /// 见 `clear_orders()`。
+    pub fn red_orders(&self) -> Option<Vec<CompanyCmd>> {
         self.shared.red.latest.lock().ok().and_then(|m| m.clone())
     }
 
-    pub fn take_blue(&self) -> Option<Vec<CompanyCmd>> {
+    /// 蓝方当前生效的连长命令（语义同 `red_orders`）。
+    pub fn blue_orders(&self) -> Option<Vec<CompanyCmd>> {
         self.shared.blue.latest.lock().ok().and_then(|m| m.clone())
+    }
+
+    /// **回合重开时清空两侧的命令。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出"上一轮团灭重开前的旧命令"，已确认）：
+    /// 压力/会战模式每轮兵力耗尽后 `spawn_stress_battle` 清场重开（`waves.rs`），
+    /// 而 `latest` 此前**不在任何地方被清空** ⇒ **新一轮的部队立刻继承上一轮的指令**
+    /// （上一轮是 Assault、新一轮开局就被推着冲锋，而 LLM 要 90 秒后才给出第一份新命令）。
+    ///
+    /// 清空后新一轮会先按营司令自己的态势评估行动，直到 LLM 给出第一份命令为止 ——
+    /// 这正是"每轮从头开始"应有的样子。
+    pub fn clear_orders(&self) {
+        for side in [&self.shared.red, &self.shared.blue] {
+            if let Ok(mut m) = side.latest.lock() {
+                *m = None;
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_json_fn, parse_url, DEFAULT_PATH, MAX_JSON_DEPTH};
+    use super::{
+        parse_json_fn, parse_url, CompanyCmd, LlmCommander, LlmOrder, Shared, SideCtx,
+        DEFAULT_PATH, MAX_JSON_DEPTH,
+    };
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
     /// 🔴 判据：**手写 JSON 解析器不许被畸形输入打崩**。
     ///
@@ -663,6 +701,39 @@ mod tests {
     /// 变异从一份"结构齐全"的 JSON 出发（对象/数组/字符串/转义/数字/真假/null 都有），
     /// 按结构分层：改一个字符（多数仍合法）、截断、追加、插入嵌套片段。
     /// 自检（教训 27）：必须有一部分仍解析成功，否则这条测试没走到解析层。
+    /// 🔴 **回合重开必须清空两侧的 LLM 命令。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出"上一轮团灭重开前的旧命令"，已对着代码确认）：
+    /// 压力/会战模式每轮兵力耗尽后 `spawn_stress_battle` 清场重开（`waves.rs`），
+    /// 而 `latest` 此前**不在任何地方被清空**（写点只有"初始化"与"写入新决策"两处）
+    /// ⇒ **新一轮的部队立刻继承上一轮的指令**（上一轮在 Assault、新一轮开局就被推着冲锋），
+    /// 而 LLM 要 90 秒后才给出第一份新命令。
+    ///
+    /// ⚠️ 判据要**先塞再清**：只断言"清完是 None"对一个**永远返回 None 的实现**也成立
+    /// （教训 1）。所以先确认塞进去能读到，再清、再确认读到的是 None。
+    #[test]
+    fn clear_orders_empties_both_sides() {
+        let shared = Arc::new(Shared {
+            red: SideCtx::new(),
+            blue: SideCtx::new(),
+            stopped: AtomicBool::new(false),
+        });
+        let l = LlmCommander { shared: shared.clone(), handle: None };
+        let mk = |o: LlmOrder| CompanyCmd { order: o, x: 1.0, z: 2.0 };
+
+        // 前置：两侧各塞一份 —— 没有这一步，判据对"永远返回 None"的实现也成立
+        *shared.red.latest.lock().unwrap() = Some(vec![mk(LlmOrder::Assault)]);
+        *shared.blue.latest.lock().unwrap() = Some(vec![mk(LlmOrder::Hold)]);
+        assert!(l.red_orders().is_some(), "前置失败：红方命令没塞进去");
+        assert!(l.blue_orders().is_some(), "前置失败：蓝方命令没塞进去");
+        // 顺带钉住"持续生效"的语义：**连读两次都拿得到同一份**（这是刻意的，不是 take）
+        assert_eq!(l.red_orders(), l.red_orders(), "命令语义是**持续生效到下一份**，不是一次性取走");
+
+        l.clear_orders();
+        assert!(l.red_orders().is_none(), "清空后红方应无命令 —— 否则新一轮继承上一轮的指令");
+        assert!(l.blue_orders().is_none(), "清空后蓝方应无命令（别只清了红方那半边）");
+    }
+
     /// 🔴 **JSON 里的非 ASCII 文本必须原样往返。**
     ///
     /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：`P::string` 原本用

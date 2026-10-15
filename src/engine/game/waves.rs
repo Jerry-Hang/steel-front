@@ -554,6 +554,14 @@ impl Game {
             self.round_winner = None;
             self.stress_round += 1;
             log::info!("battle: 第 {} 轮重开（阵亡清场）", self.stress_round);
+            // 🔴 **必须清掉上一轮残留的 LLM 命令**（2026-10-15 补，外部复核指出，已确认）：
+            // `latest` 此前从不在回合边界被清空 ⇒ 新一轮的部队**立刻继承上一轮的指令**
+            // （上一轮在 Assault、新一轮开局就被推着冲锋），而 LLM 要 90 秒后才给出新命令。
+            // 清空后新一轮先按营司令自己的态势评估行动，直到第一份新命令到来。
+            // 判据 = `clear_orders_empties_both_sides`。
+            if let Some(l) = self.llm.as_ref() {
+                l.clear_orders();
+            }
             self.spawn_stress_battle(player);
         }
     }
