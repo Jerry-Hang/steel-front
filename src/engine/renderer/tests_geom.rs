@@ -1214,27 +1214,30 @@ mod cull_sched_microbench {
             // 🔴 同轮轮转（教训 45 ②）：奇数轮先串行、偶数轮先并行 ——
             //    不许一个臂连跑几轮（外部干扰周期是分钟级）。
             let serial_first = r % 2 == 0;
-            let mut s_res = (0u128, 0u32);
-            let mut p_res = (0u128, 0u32);
-            let mut do_serial = |scratch: &mut [u32]| {
+            // ⚠️ 写成 `if/else` 两端各自求值（而不是先给 `let mut` 初值再在两个分支里赋值）——
+            //    后者编译器会报 `value assigned is never read`，而 `cargo build --release`
+            //    **根本不编译 cfg(test) 代码**，那道 0 警告关口看不见这些。
+            let do_serial = |scratch: &mut [u32]| {
                 let t = std::time::Instant::now();
                 let n = phase_a_serial(&planes, &cx, &cy, &cz, &radii, scratch, near_sq);
                 (t.elapsed().as_micros(), n)
             };
-            let mut do_parallel = |scratch: &mut [u32]| {
+            let do_parallel = |scratch: &mut [u32]| {
                 let t = std::time::Instant::now();
                 let n = phase_a_parallel(
                     pool, nw, &planes, &cx, &cy, &cz, &radii, scratch, near_sq,
                 );
                 (t.elapsed().as_micros(), n)
             };
-            if serial_first {
-                s_res = do_serial(&mut scratch);
-                p_res = do_parallel(&mut scratch);
+            let (s_res, p_res) = if serial_first {
+                let a = do_serial(&mut scratch);
+                let b = do_parallel(&mut scratch);
+                (a, b)
             } else {
-                p_res = do_parallel(&mut scratch);
-                s_res = do_serial(&mut scratch);
-            }
+                let b = do_parallel(&mut scratch);
+                let a = do_serial(&mut scratch);
+                (a, b)
+            };
             // 🔴 两臂**可见数必须相同**，否则测的不是同一件事
             assert_eq!(
                 s_res.1, p_res.1,

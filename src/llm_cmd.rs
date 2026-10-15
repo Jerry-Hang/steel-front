@@ -121,10 +121,21 @@ impl Json {
 struct P<'a> {
     s: &'a [u8],
     i: usize,
+    /// 嵌套深度（进 `obj`/`arr` 时 +1，出来 -1）。
+    ///
+    /// 🔴 **必须有上界**（2026-10-15，外部复核指出，已对着代码确认）：
+    /// `value → obj/arr → value` 是**无限递归**，畸形输入（一万个 `[`）直接**栈溢出 abort**
+    /// —— 而这是一个会被喂**不可信输入**的解析器：LLM 的响应、以及
+    /// `assets.rs::parse_glb` 里 GLB 的 JSON chunk。
+    depth: usize,
 }
 
+/// JSON 嵌套深度上限。glTF 的节点树通常 ≤10 层，LLM 的战术 JSON 只有 2~3 层
+/// ⇒ 64 是"远超正常、又远低于爆栈"的位置。
+const MAX_JSON_DEPTH: usize = 64;
+
 pub fn parse_json_fn(s: &str) -> Result<Json, String> {
-    let mut p = P { s: s.as_bytes(), i: 0 };
+    let mut p = P { s: s.as_bytes(), i: 0, depth: 0 };
     let v = p.value()?;
     p.ws();
     if p.i != p.s.len() {
@@ -178,9 +189,33 @@ impl<'a> P<'a> {
         let txt = String::from_utf8_lossy(&self.s[st..self.i]).to_string();
         txt.parse::<f64>().map(Json::Num).map_err(|_| "JSON 数字解析失败".into())
     }
+    /// 读 4 位十六进制转义数字（`\uXXXX` 的那 4 位）。
+    fn hex4(&mut self) -> Result<u32, String> {
+        let rem = self.s.get(self.i..self.i + 4).ok_or("unicode 转义截断")?;
+        let h = String::from_utf8_lossy(rem).to_string();
+        self.i += 4;
+        u32::from_str_radix(&h, 16).map_err(|_| "unicode 转义非法".to_string())
+    }
+
     fn string(&mut self) -> Result<String, String> {
         self.i += 1;
-        let mut out = String::new();
+        // 🔴 **按字节收集，最后统一按 UTF-8 解码**（2026-10-15，外部复核指出，已确认）。
+        //
+        // 原写法是 `out.push(c as char)`（`out` 是 `String`）—— 而 `c` 是 **`u8`**。
+        // `u8 as char` 把每个字节当成**独立的 Unicode 码点** `U+0080..U+00FF`（Latin-1），
+        // **不是** UTF-8 解码。于是一个汉字（3 字节，如 `硫` = E7 A1 AB）
+        // 会被拆成 `ç¡«` 三个字符 ⇒ **凡是 JSON 里的非 ASCII 文本全部乱码**。
+        //
+        // 影响面**不止 LLM**：`assets.rs::parse_glb` 也用这个解析器读 GLB 的 JSON chunk
+        // ⇒ **GLB 里的中文节点名/材质名同样会变成乱码**。
+        //
+        // 为什么此前没被发现：唯一带非 ASCII 的用例是模糊测试
+        // `json_parser_never_panics_on_mutated_input`，它**只断言"不 panic"**、
+        // 从不校验解析出来的值 ⇒ 乱码照样通过（教训 14「恒真的断言等于没写」的形态）。
+        //
+        // 改成收 `Vec<u8>` 还顺带修好一件事：**非法 UTF-8 现在会报错**，
+        // 而不是像以前那样"总能解析成功、只是内容是错的"。
+        let mut out: Vec<u8> = Vec::new();
         loop {
             let c = *self.s.get(self.i).ok_or("字符串未闭合")?;
             self.i += 1;
@@ -190,7 +225,7 @@ impl<'a> P<'a> {
             if c == b'\\' {
                 let e = *self.s.get(self.i).ok_or("转义未闭合")?;
                 self.i += 1;
-                out.push(match e {
+                let ch = match e {
                     b'n' => '\n',
                     b't' => '\t',
                     b'r' => '\r',
@@ -198,23 +233,55 @@ impl<'a> P<'a> {
                     b'\\' => '\\',
                     b'/' => '/',
                     b'u' => {
-                        let rem = self.s.get(self.i..self.i + 4).ok_or("unicode 转义截断")?;
-                        let h = String::from_utf8_lossy(rem).to_string();
-                        self.i += 4;
-                        let cp = u32::from_str_radix(&h, 16).map_err(|_| "unicode 转义非法")?;
-                        char::from_u32(cp).ok_or("unicode 码点非法")?
+                        // 🔴 **必须支持代理对**（2026-10-15 补）：JSON 用 `\uD800..\uDBFF`
+                        // 紧跟 `\uDC00..\uDFFF` 表示 BMP 之外的码点（emoji、部分汉字）。
+                        // 原实现只读 4 位就 `char::from_u32` —— 对高代理项直接返回 None
+                        // ⇒ 凡是带 emoji 的 LLM 响应、带 emoji 的 GLB 名字**整条解析失败**。
+                        let hi = self.hex4()?;
+                        if (0xD800..0xDC00).contains(&hi) {
+                            // 高代理项：**必须**紧跟 `\uDC00..\uDFFF`
+                            if self.s.get(self.i) != Some(&b'\\') || self.s.get(self.i + 1) != Some(&b'u') {
+                                return Err("高代理项后面没有跟低代理项".into());
+                            }
+                            self.i += 2;
+                            let lo = self.hex4()?;
+                            if !(0xDC00..0xE000).contains(&lo) {
+                                return Err("低代理项不在 DC00..DFFF 区间".into());
+                            }
+                            let cp = 0x1_0000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                            char::from_u32(cp).ok_or("代理对还原出的码点非法")?
+                        } else if (0xDC00..0xE000).contains(&hi) {
+                            // 孤立的低代理项：JSON 里非法
+                            return Err("孤立的低代理项".into());
+                        } else {
+                            char::from_u32(hi).ok_or("unicode 码点非法")?
+                        }
                     }
                     _ => return Err("未知转义".into()),
-                });
+                };
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
             } else if c < 0x20 {
                 return Err("控制字符非法".into());
             } else {
-                out.push(c as char);
+                // 原样收字节（多字节字符的后续字节也走这里）—— 解码留到最后统一做
+                out.push(c);
             }
         }
-        Ok(out)
+        String::from_utf8(out).map_err(|_| "JSON 字符串不是合法 UTF-8".into())
     }
+    /// 进/出 `obj_inner` 的深度守卫（见 `P::depth` 与 `MAX_JSON_DEPTH`）。
     fn obj(&mut self) -> Result<Json, String> {
+        self.depth += 1;
+        if self.depth > MAX_JSON_DEPTH {
+            self.depth -= 1;
+            return Err(format!("JSON 嵌套超过 {MAX_JSON_DEPTH} 层"));
+        }
+        let r = self.obj_inner();
+        self.depth -= 1;
+        r
+    }
+    fn obj_inner(&mut self) -> Result<Json, String> {
         self.i += 1;
         let mut kv = Vec::new();
         loop {
@@ -243,7 +310,18 @@ impl<'a> P<'a> {
         }
         Ok(Json::Obj(kv))
     }
+    /// 同 `obj`：深度守卫 + 真正的实现。
     fn arr(&mut self) -> Result<Json, String> {
+        self.depth += 1;
+        if self.depth > MAX_JSON_DEPTH {
+            self.depth -= 1;
+            return Err(format!("JSON 嵌套超过 {MAX_JSON_DEPTH} 层"));
+        }
+        let r = self.arr_inner();
+        self.depth -= 1;
+        r
+    }
+    fn arr_inner(&mut self) -> Result<Json, String> {
         self.i += 1;
         let mut items = Vec::new();
         loop {
@@ -574,7 +652,7 @@ impl LlmCommander {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_json_fn, parse_url, DEFAULT_PATH};
+    use super::{parse_json_fn, parse_url, DEFAULT_PATH, MAX_JSON_DEPTH};
 
     /// 🔴 判据：**手写 JSON 解析器不许被畸形输入打崩**。
     ///
@@ -585,6 +663,100 @@ mod tests {
     /// 变异从一份"结构齐全"的 JSON 出发（对象/数组/字符串/转义/数字/真假/null 都有），
     /// 按结构分层：改一个字符（多数仍合法）、截断、追加、插入嵌套片段。
     /// 自检（教训 27）：必须有一部分仍解析成功，否则这条测试没走到解析层。
+    /// 🔴 **JSON 里的非 ASCII 文本必须原样往返。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：`P::string` 原本用
+    /// `out.push(c as char)`，而 `c` 是 **`u8`** —— `u8 as char` 把每个字节当成独立的
+    /// Unicode 码点（Latin-1），**不是** UTF-8 解码 ⇒ 一个汉字（3 字节）会被拆成
+    /// `ç¡«` 三个字符。**凡是 JSON 里的非 ASCII 文本全部乱码**，而 `assets.rs::parse_glb`
+    /// 也用这个解析器读 GLB 的 JSON chunk ⇒ **GLB 里的中文节点名/材质名同样会变成乱码**。
+    ///
+    /// 为什么此前没被发现：唯一带非 ASCII 的用例是 `json_parser_never_panics_on_mutated_input`，
+    /// 它**只断言「不 panic」**、从不校验解析出来的值 ⇒ 乱码照样通过
+    /// （教训 14「恒真的断言等于没写」的形态）。
+    ///
+    /// 本判据断言的是**值本身**，所以旧写法必然红。
+    #[test]
+    fn json_strings_roundtrip_non_ascii_exactly() {
+        for want in [
+            "硫",
+            "中文测试",
+            "AK-12 风暴 7.62×39mm",
+            "混合 abc 中文 123",
+            "émoji ünïcode",
+        ] {
+            let src = format!("{{\"k\":\"{want}\"}}");
+            let j = parse_json_fn(&src).unwrap_or_else(|e| panic!("{src} 应能解析，实得 {e}"));
+            let got = j
+                .get("k")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("{src} 应有字符串字段 k"));
+            assert_eq!(
+                got, want,
+                "非 ASCII 必须原样往返 —— 旧写法 `c as char` 会拆成 Latin-1 乱码"
+            );
+        }
+        // 转义出来的非 ASCII 同样要走同一条解码路径（防「只修了裸字节那半边」）
+        let j = parse_json_fn("{\"k\":\"\\u786b\"}").expect("转义应能解析");
+        assert_eq!(
+            j.get("k").and_then(|v| v.as_str()),
+            Some("硫"),
+            "\\u 转义与裸字节必须解出同一个字符"
+        );
+        // ⚠️ 这里原本还想断言「非法 UTF-8 必须报错」，**但那条判据是错的**：
+        // `parse_json_fn(s: &str)` 的参数是 `&str`，**永远不可能**收到非法 UTF-8
+        // （`"\u{e7}\u{a1}"` 是**字符** U+00E7/U+00A1，编码成 UTF-8 是 C3 A7 C2 A1，合法）
+        // ⇒ 我加的那条 `String::from_utf8` 检查**通过公开 API 不可达**。判据删掉，
+        // 解码本身仍保留（它是"按字节收、最后统一解码"这个写法的自然结果）。
+        //
+        // 顺着它发现的**真**缺口在下面：`\u` 只读 4 位 ⇒ **非 BMP 字符（代理对）解不了**。
+        let j = parse_json_fn("{\"k\":\"\\uD83C\\uDFAF\"}").expect("代理对应能解析");
+        assert_eq!(
+            j.get("k").and_then(|v| v.as_str()),
+            Some("\u{1F3AF}"),
+            "非 BMP 字符（emoji）用代理对表示，必须能解出来"
+        );
+        assert_eq!(
+            parse_json_fn("{\"k\":\"\\uD83C\"}").is_err(),
+            true,
+            "孤立的高代理项必须报错"
+        );
+        assert_eq!(
+            parse_json_fn("{\"k\":\"\\uDFAF\"}").is_err(),
+            true,
+            "孤立的低代理项必须报错"
+        );
+    }
+
+    /// 🔴 **深嵌套必须报错，不能爆栈。**
+    ///
+    /// `value → obj/arr → value` 是无限递归，而本解析器会被喂**不可信输入**
+    /// （LLM 响应 + GLB 的 JSON chunk）⇒ 一万个 `[` 就能把线程栈打穿（abort，不是 Err）。
+    ///
+    /// ⚠️ 判据要**双向**：既要断言超限被拒，**也要断言上限之内仍能解析** ——
+    /// 否则一个"永远返回 Err"的实现也能通过（教训 1：不能失败的门槛 / 恒真的断言）。
+    #[test]
+    fn json_deep_nesting_is_rejected_but_normal_depth_parses() {
+        // 上限之内：应能解析
+        let ok = "[".repeat(MAX_JSON_DEPTH) + &"]".repeat(MAX_JSON_DEPTH);
+        assert!(
+            parse_json_fn(&ok).is_ok(),
+            "{MAX_JSON_DEPTH} 层（正好在上限上）应能解析 —— 否则这条判据对任何实现都成立"
+        );
+        // 超限：必须是 Err，不能 abort
+        let deep = "[".repeat(MAX_JSON_DEPTH * 100);
+        // 用 match 而不是 `expect_err` —— `Json` 没实现 `Debug`，
+        // 而 `expect_err` 要求 `T: Debug`（Err 那一侧才需要，这里正好是反的）
+        let e = match parse_json_fn(&deep) {
+            Ok(_) => panic!("超深嵌套必须被拒 —— 接受了就意味着已经爆栈或即将爆栈"),
+            Err(e) => e,
+        };
+        assert!(e.contains("嵌套"), "错误信息应说明是嵌套超限，实得 {e}");
+        // 对象嵌套同样要挡（别只挡数组那半边）
+        let deep_obj = "{\"a\":".repeat(MAX_JSON_DEPTH * 100);
+        assert!(parse_json_fn(&deep_obj).is_err(), "对象嵌套也要挡");
+    }
+
     #[test]
     fn json_parser_never_panics_on_mutated_input() {
         const BASE: &str = r#"{"a":[1,2.5,-3e2,true,false,null,"s\u0041"],"b":{"c":"d"},"e":[]}"#;

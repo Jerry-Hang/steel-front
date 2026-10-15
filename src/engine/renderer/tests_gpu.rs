@@ -872,10 +872,15 @@ fn near_far_classify_microbench() {
     };
     let n = 65536usize;
     // 造出与真实同形的数据：instances 是 80 字节步长的散列目标，center 三轴是连续数组
+    // ⚠️ **不是为了"以后要用"而留的字段** —— `tint` 的唯一作用是把结构体凑到 **80 字节**，
+    //    好让下面 `dst` 与真实实例槽（`STRIDE` 字节/实例）同形。它**不该被读**，
+    //    所以按惯例加下划线前缀；同时用一条编译期断言把这个"唯一作用"钉死 ——
+    //    否则将来有人删掉它会静默改变步长，而基准还是照样跑、只是测的不再是同一件事。
     struct Inst80 {
         model: [f32; 16],
-        tint: [f32; 4],
+        _tint: [f32; 4],
     }
+    const _: () = assert!(std::mem::size_of::<Inst80>() == 80);
     let mut instances: Vec<Inst80> = Vec::with_capacity(n);
     let mut cx = Vec::with_capacity(n);
     let mut cy = Vec::with_capacity(n);
@@ -887,7 +892,7 @@ fn near_far_classify_microbench() {
             next() * 250.0,
         );
         let m = glam::Mat4::from_translation(glam::Vec3::new(x, y, z)).to_cols_array();
-        instances.push(Inst80 { model: m, tint: [0.7, 0.7, 0.7, 1.0] });
+        instances.push(Inst80 { model: m, _tint: [0.7, 0.7, 0.7, 1.0] });
         cx.push(x);
         cy.push(y);
         cz.push(z);
@@ -987,7 +992,6 @@ fn cull_gather_scatter_microbench() {
 
     // 目标：模拟当前帧实例槽（顺序写、每个可见实例 80 字节）
     let mut dst = vec![0u8; idx.len() * STRIDE];
-    let dp = dst.as_mut_ptr() as usize;
 
     // 臂 A：读 + 写（= 阶段 B 干的事）
     let arm_full = |idx: &Vec<u32>, dst: &mut [u8]| {
