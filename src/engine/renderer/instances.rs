@@ -901,7 +901,13 @@ impl Renderer {
         if cull_serial {
             work_a(0, 0, scratch);
         } else {
-            pool.par_for_each_mut(scratch, work_a);
+            // 🔴 用**带段数上限**的版本：`seg_near_counts` 与那两张栈上前缀和表
+            // 都只准备了 `nw`（= `cull_segment_count`）那么长，而
+            // `par_for_each_mut` 自己按 `worker_count + 1` 切 ⇒ 64 worker 以上的机器上
+            // 闭包会收到 `seg = 64` 而数组长 64 ⇒ 越界 panic。
+            // ⚠️ 2026-09-22 那次只夹了调用方分配的长度，没夹实际段数 —— 见
+            // `par_for_each_mut_capped` 的文档。
+            pool.par_for_each_mut_capped(scratch, nw, work_a);
         }
 
         // 【临时诊断】阶段 A 结束的时刻（搬运从这之后算起）
@@ -964,7 +970,8 @@ impl Renderer {
         if cull_serial {
             work_b(0, 0, scratch);
         } else {
-            pool.par_for_each_mut(scratch, work_b);
+            // 同上：阶段 B 也按 seg 索引（`far_prefix` / `seg_far`）
+            pool.par_for_each_mut_capped(scratch, nw, work_b);
         }
         if crate::syscfg::flag("RV3D_CULL_DIAG") {
             use std::sync::atomic::{AtomicU32, Ordering};

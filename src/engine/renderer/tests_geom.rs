@@ -1752,3 +1752,46 @@ fn ground_draw_count_is_the_instance_length_not_the_slot_base() {
         "frame.rs 的扫描面不对"
     );
 }
+
+/// 🔴 **"物理设备能不能呈现到这个表面"的判据只能有一份，且不能写死队列族 0。**
+///
+/// 存在理由（2026-10-15，外部复核指出第 7 条前半，已对着代码确认）：
+/// 筛选物理设备时写死查**队列族 0**，而选定设备后查找 `present_queue_family_index`
+/// 却是**遍历全部队列族** ⇒ 两处判据不一致 ⇒ **呈现能力落在非 0 号队列族的 GPU
+/// 会在筛选阶段被误判成"不支持窗口表面"而直接丢弃**。用户看到的是
+/// "找不到可用物理设备"，而**没有任何一条能查的日志**指出原因。
+///
+/// ⚠️ 判据是源码级的 —— 这条路径要真 GPU 才能跑，本仓的测试没有 headless 设备。
+/// 它钉的是那个**具体**的坏写法（`get_physical_device_surface_support(dev, 0, ..)`
+/// 直接出现在筛选里），并断言共用判据 `device_supports_present` 确实存在。
+#[test]
+fn present_support_predicate_is_shared_and_not_hardcoded_to_family_zero() {
+    let src = include_str!("device.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // 共用判据必须在
+    assert!(
+        code.contains("let device_supports_present ="),
+        "device.rs 里找不到 `device_supports_present` —— 筛选与查找又各写各的判据了"
+    );
+    // 不许再出现"写死队列族 0"的调用（判据内部是 `(0..families.len()).any(..)`，不含这个字面量）
+    assert!(
+        !code.contains("get_physical_device_surface_support(device, 0,"),
+        "device.rs 里又出现写死队列族 0 的呈现支持查询 —— \
+         呈现能力在非 0 号队列族的 GPU 会被误判成不支持、直接在筛选阶段丢掉"
+    );
+
+    // 前置自检（教训 27）：确认扫描面不是空串
+    assert!(
+        code.contains("present_queue_family_index"),
+        "扫描面不对 —— 连 `present_queue_family_index` 都没扫到"
+    );
+}

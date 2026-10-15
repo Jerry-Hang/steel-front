@@ -175,15 +175,34 @@ impl Renderer {
         // 起因：验证时 dGPU 可能被别的任务占着（用户在跑 AI），而本机是**双 GPU 笔记本**
         // （RTX 5060 Laptop + AMD Radeon 集显）—— 没有这个开关就只能跑在独显上。
         // 默认仍是"有窗口表面的设备里优先独显"⇒ 不设 `RV3D_GPU` 时行为与从前逐字一致。
+        // 🔴 **物理设备"能不能呈现到当前表面"的判据必须只有一份**
+        // （2026-10-15，外部复核指出第 7 条，已对着代码确认）。
+        //
+        // 原来这里写死查**队列族 0**：
+        // ```text
+        // surface_loader.get_physical_device_surface_support(device, 0, surface)
+        // ```
+        // 而选定设备之后查找 `present_queue_family_index` 时（本函数下半段）
+        // 却是**遍历全部队列族**。两处判据不一致 ⇒ **呈现能力落在非 0 号队列族的 GPU
+        // 会在筛选阶段被误判成"不支持窗口表面"而直接丢弃**（用户看到的是
+        // "找不到可用物理设备"，而不是任何一条能查的日志）。
+        //
+        // 现在两边走同一个判据：**该设备的任意一个队列族支持呈现**。
+        let device_supports_present = |device: vk::PhysicalDevice| -> bool {
+            let families = unsafe { instance.get_physical_device_queue_family_properties(device) };
+            (0..families.len()).any(|i| unsafe {
+                surface_loader
+                    .get_physical_device_surface_support(device, i as u32, surface)
+                    .unwrap_or(false)
+            })
+        };
+
         let candidates: Vec<(vk::PhysicalDeviceType, String, vk::PhysicalDevice)> = physical_devices
             .iter()
             .filter_map(|&device| {
                 let properties = unsafe { instance.get_physical_device_properties(device) };
-                let surface_support = unsafe {
-                    surface_loader
-                        .get_physical_device_surface_support(device, 0, surface)
-                        .unwrap_or(false)
-                };
+                // 与下面查找 `present_queue_family_index` 用**同一个**判据（见其定义处的说明）
+                let surface_support = device_supports_present(device);
                 if surface_support {
                     let name = unsafe {
                         CStr::from_ptr(properties.device_name.as_ptr())
@@ -233,6 +252,9 @@ impl Renderer {
             .ok_or_else(|| "没有找到图形队列族".to_string())?
             as u32;
 
+        // ⚠️ 这里的"遍历全部队列族"与上面筛选物理设备用的 `device_supports_present`
+        // **必须是同一个判据**（2026-10-15 统一）：上面那个回答"能不能呈现"，
+        // 这里回答"是哪一族"，两者不一致会让部分 GPU 在筛选阶段就被丢掉。
         let present_queue_family_index = queue_families
             .iter()
             .enumerate()

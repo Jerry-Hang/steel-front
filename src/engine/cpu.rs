@@ -1221,11 +1221,36 @@ impl ThreadPool {
         T: Send,
         F: Fn(usize, usize, &mut [T]) + Sync,
     {
+        self.par_for_each_mut_capped(data, usize::MAX, f)
+    }
+
+    /// 同 [`Self::par_for_each_mut`]，但**段数由调用方给上限**。
+    ///
+    /// 🔴 存在理由（2026-10-15，外部复核指出，已对着代码确认）：
+    /// `par_for_each_mut` 固定按 `worker_count + 1` 切段，而调用方（`cull_and_upload`）
+    /// 与段相关的数组有**上界**：`seg_near_counts` 按 `cull_segment_count(workers)`
+    /// （= `(workers+1).min(CULL_MAX_SEGMENTS)`）分配，两张栈上前缀和表也是
+    /// `[u32; CULL_MAX_SEGMENTS]`。
+    ///
+    /// **2026-09-22 那次"修"只夹了调用方分配的那份长度，没夹实际切出来的段数** ⇒
+    /// 64 worker 以上的机器（64C/128T 起）闭包会收到 `seg = 64`，而数组长 64
+    /// ⇒ `seg_near[64]` **越界 panic** —— **同一个 bug 只是从 `near_prefix[64]`
+    /// 换到了 `seg_near[64]`**。（这正是本仓"两份实现静默分叉"的又一形态：
+    /// 段数在两处各算各的，一处夹了一处没夹。）
+    ///
+    /// ⇒ 段数由**调用方**决定，池只负责按这个上限切。
+    /// `max_segments` 为 0 时按 1 段处理（调用线程独做，不会除以 0）。
+    pub fn par_for_each_mut_capped<T, F>(&self, data: &mut [T], max_segments: usize, f: F)
+    where
+        T: Send,
+        F: Fn(usize, usize, &mut [T]) + Sync,
+    {
         let n = data.len();
         if n == 0 {
             return;
         }
-        let nw = self.worker_count + 1;
+        // 段数上限由调用方给：它的段索引数组可能只准备了这个长度
+        let nw = (self.worker_count + 1).min(max_segments.max(1));
         // 均匀段边界：bounds[0]=0 .. bounds[nw]=n（首段归调用线程）
         let mut bounds = Vec::with_capacity(nw + 1);
         for i in 0..=nw {
@@ -1523,6 +1548,64 @@ mod tests {
     ///   * 非首段在**进入**时就记下自己的段号；
     ///   * 首段**睡 30ms 之后**才记（把"先发后干"与"先干后发"的时序差拉开到必然可辨）；
     ///   * 若实现回退成"先干首段"，首段会在任何池作业发出之前就记完 ⇒ 断言失败。
+    /// 🔴 **`par_for_each_mut_capped` 必须真的把段数夹到调用方给的上限。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 7 条后半，已对着代码确认）：
+    /// `par_for_each_mut` 固定按 `worker_count + 1` 切段，而 `cull_and_upload` 里
+    /// `seg_near_counts` 与两张栈上前缀和表**都只有 `cull_segment_count(workers)` 那么长**。
+    /// **2026-09-22 那次"修"只夹了调用方分配的长度、没夹实际切出来的段数** ⇒
+    /// 64 worker 以上的机器（64C/128T 起）闭包会收到 `seg = 64` 而数组长 64
+    /// ⇒ `seg_near[64]` 越界 panic —— **同一个 bug 只是从 `near_prefix[64]`
+    /// 换到了 `seg_near[64]`**。
+    ///
+    /// ⚠️ 判据**必须带正对照**：先证明"不带上限时这个池真的会切出更多段"，
+    /// 否则"夹住了"可能只是因为池本来就只有 1 段 —— 那这条判据什么也没证明。
+    #[test]
+    fn capped_parallel_never_exceeds_the_callers_segment_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let pool = ThreadPool::new(&[0], 1, "test-capped-segs");
+        if pool.workers() == 0 {
+            eprintln!("跳过：线程池没有 worker，本判据不适用");
+            return;
+        }
+
+        let mut data = vec![0u32; 4096];
+
+        // ---- 正对照：不带上限 ⇒ 段号最大到 worker_count（共 workers+1 段）----
+        let max_uncapped = AtomicUsize::new(0);
+        pool.par_for_each_mut(&mut data, |seg, _s, _slice| {
+            max_uncapped.fetch_max(seg, Ordering::Relaxed);
+        });
+        assert_eq!(
+            max_uncapped.load(Ordering::Relaxed),
+            pool.workers(),
+            "正对照失败：不带上限时最大段号应当等于 worker_count —— \
+             如果这里只有 0，说明池根本没并行，下面的判据就没有区分度"
+        );
+
+        // ---- 判据：上限 1 ⇒ 只许有第 0 段 ----
+        let max_capped = AtomicUsize::new(0);
+        pool.par_for_each_mut_capped(&mut data, 1, |seg, _s, _slice| {
+            max_capped.fetch_max(seg, Ordering::Relaxed);
+        });
+        assert_eq!(
+            max_capped.load(Ordering::Relaxed),
+            0,
+            "上限给 1 时出现了更大的段号 ⇒ 调用方按小数组索引会越界 panic。\
+             `cull_and_upload` 的 `seg_near_counts` 就是这么被写坏的。"
+        );
+
+        // ---- 上限 2 ⇒ 段号不超过 1 ----
+        let max2 = AtomicUsize::new(0);
+        pool.par_for_each_mut_capped(&mut data, 2, |seg, _s, _slice| {
+            max2.fetch_max(seg, Ordering::Relaxed);
+        });
+        assert!(
+            max2.load(Ordering::Relaxed) <= 1,
+            "上限给 2 时段号不该超过 1"
+        );
+    }
+
 /// 🔴 **worker 里的闭包 panic 时，调用线程不能死转。**
     ///
     /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：worker 闭包原来是
