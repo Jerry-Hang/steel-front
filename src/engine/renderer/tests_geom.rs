@@ -1038,3 +1038,273 @@ fn camera_uniform_layout_matches_wgsl_view_proj() {
     assert_eq!(offset_of!(CameraUniform, debug_params), 320);
     assert_eq!(size_of::<CameraUniform>(), 336);
 }
+
+/// **桌面侧的「串行 vs 线程池」剔除微基准。**
+///
+/// 存在理由（2026-10-13）：手机上实测剔除走线程池是**净损失** —— 交替 A/B 三对全胜
+/// （中位 1213 → 778µs），于是把**默认**改成了串行（`RV3D_CULL_PARALLEL=1` 可回退）。
+///
+/// 🔴 **但桌面侧从未验证过。** 手机上线程叫醒/自旋 join 的开销 ≈ 单段工作量本身；
+/// 桌面（16C/32T，叫醒延迟低一个数量级）完全可能**反过来**。
+/// ⇒ 那就成了「用手机的数据改了桌面的默认值」，是回归。
+///
+/// 跑法（⚠️ 必须 `--nocapture` 才看得到表）：
+/// ```text
+/// cargo test --release cull_parallel_vs_serial_microbench -- --nocapture --test-threads=1
+/// ```
+///
+/// ⚠️ 只测**阶段 A（视锥 + 近/远分档）** —— 那正是两条路的差异所在；
+/// 阶段 B（搬运）两条路共用同一份实现，与调度策略无关。
+#[cfg(test)]
+mod cull_sched_microbench {
+    use super::*;
+
+    /// 实例数取**生产当前值**（内圈 ±64m @2m + 外圈 4m）。
+    const N: usize = 19456;
+    /// 交替轮数。按仓库教训 45：单对说明不了任何事，n ≥ 5 才报中位数。
+    const ROUNDS: usize = 7;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next_f32(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 11) as f32) / ((1u64 << 53) as f32)
+        }
+    }
+
+    /// 视锥平面：**用生产同一份提取函数**，从一个真实机位算出来。
+    ///
+    /// 🔴 第一版这里用的是"随机归一化平面"，结果**可见数恒为 0** ——
+    /// 剔除全灭 ⇒ 分类那一段空转，基准只测了视锥测试的一半，
+    /// 却照样打印出"串行快 33%"这种看着像结论的数字。
+    /// **这就是仓库教训 46 的形态：工具跑成了，但它什么也没测。**
+    /// ⇒ 现在用真实视锥，并在下面**断言可见数不能为 0**。
+    fn real_frustum_planes() -> [[f32; 4]; 6] {
+        let proj = glam::Mat4::perspective_rh(70f32.to_radians(), 16.0 / 9.0, 1.0, 600.0);
+        let view = glam::Mat4::look_at_rh(
+            glam::Vec3::new(0.0, 10.0, 0.0),
+            glam::Vec3::new(0.0, 0.0, -100.0),
+            glam::Vec3::Y,
+        );
+        Renderer::extract_frustum_planes(view, proj)
+    }
+
+    fn classify_near(
+        planes: &[[f32; 4]; 6],
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        idx: &[u32],
+        near_sq: f32,
+    ) -> u32 {
+        let _ = planes;
+        let mut near = 0u32;
+        for &gi in idx {
+            let i = gi as usize;
+            let (dx, dy, dz) = (cx[i], cy[i], cz[i]);
+            if dx * dx + dy * dy + dz * dz < near_sq {
+                near += 1;
+            }
+        }
+        near
+    }
+
+    /// 串行：单段直接跑（= `cull_and_upload` 里 `cull_serial == true` 那条路）。
+    fn phase_a_serial(
+        planes: &[[f32; 4]; 6],
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        scratch: &mut [u32],
+        near_sq: f32,
+    ) -> u32 {
+        let mut local: Vec<u32> = Vec::with_capacity(scratch.len());
+        Renderer::cull_spheres_dispatch(cx, cy, cz, radii, planes, &mut local);
+        for (k, &li) in local.iter().enumerate() {
+            scratch[k] = li;
+        }
+        classify_near(planes, cx, cy, cz, &scratch[..local.len()], near_sq)
+    }
+
+    /// 并行：走池子，段数 = `cull_segment_count(workers)`。
+    #[allow(clippy::too_many_arguments)]
+    fn phase_a_parallel(
+        pool: &crate::engine::cpu::ThreadPool,
+        nw: usize,
+        planes: &[[f32; 4]; 6],
+        cx: &[f32],
+        cy: &[f32],
+        cz: &[f32],
+        radii: &[f32],
+        scratch: &mut [u32],
+        near_sq: f32,
+    ) -> u32 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let seg_near: Vec<AtomicU32> = (0..nw).map(|_| AtomicU32::new(0)).collect();
+        let seg_ref = &seg_near;
+        pool.par_for_each_mut(scratch, move |seg, start, seg_slice| {
+            let end = start + seg_slice.len();
+            let mut local: Vec<u32> = Vec::with_capacity(seg_slice.len());
+            Renderer::cull_spheres_dispatch(
+                &cx[start..end],
+                &cy[start..end],
+                &cz[start..end],
+                &radii[start..end],
+                planes,
+                &mut local,
+            );
+            for (k, &li) in local.iter().enumerate() {
+                seg_slice[k] = (start + li as usize) as u32;
+            }
+            seg_ref[seg].store(
+                classify_near(planes, cx, cy, cz, &seg_slice[..local.len()], near_sq),
+                Ordering::Relaxed,
+            );
+        });
+        seg_near.iter().map(|a| a.load(Ordering::Relaxed)).sum()
+    }
+
+    #[test]
+    fn cull_parallel_vs_serial_microbench() {
+        let mut rng = Rng(0xC011_2026);
+        let planes = real_frustum_planes();
+        let mut cx = Vec::with_capacity(N);
+        let mut cy = Vec::with_capacity(N);
+        let mut cz = Vec::with_capacity(N);
+        let mut radii = Vec::with_capacity(N);
+        for _ in 0..N {
+            cx.push(rng.next_f32() * 512.0 - 256.0);
+            cy.push(0.0);
+            cz.push(rng.next_f32() * 512.0 - 256.0);
+            radii.push(2.0f32.sqrt() * 2.0);
+        }
+        let near_sq = f32::MAX; // 与生产一致：障碍 marker 恒走近档
+
+        // 🔴 先验一次：可见数必须落在"确实有工作量"的区间，否则整批数字作废。
+        //    （见 `real_frustum_planes` 的注释：第一版随机平面时这里是 0。）
+        let mut probe = vec![0u32; N];
+        let visible_probe =
+            phase_a_serial(&planes, &cx, &cy, &cz, &radii, &mut probe, near_sq);
+        assert!(
+            visible_probe > N as u32 / 20,
+            "可见数 {visible_probe}/{N} 太少（<5%）⇒ 分类段几乎是空转，基准没有区分度。\
+             先确认视锥/实例分布是合理的，别拿这份数字当结论"
+        );
+        println!(
+            "[cull-sched] 可见 {visible_probe}/{N}（{:.1}%）—— 分类段确实在工作",
+            visible_probe as f64 / N as f64 * 100.0
+        );
+
+        let pool = crate::engine::cpu::scene_pool();
+        let nw = cull_segment_count(pool.workers());
+        println!(
+            "\n[cull-sched] 实例 {N}，池 workers={}，并行段数={nw}，轮数={ROUNDS}",
+            pool.workers()
+        );
+
+        let mut serial_us: Vec<u128> = Vec::new();
+        let mut parallel_us: Vec<u128> = Vec::new();
+        let mut scratch = vec![0u32; N];
+        let mut agree = 0usize;
+
+        for r in 0..ROUNDS {
+            // 🔴 同轮轮转（教训 45 ②）：奇数轮先串行、偶数轮先并行 ——
+            //    不许一个臂连跑几轮（外部干扰周期是分钟级）。
+            let serial_first = r % 2 == 0;
+            let mut s_res = (0u128, 0u32);
+            let mut p_res = (0u128, 0u32);
+            let mut do_serial = |scratch: &mut [u32]| {
+                let t = std::time::Instant::now();
+                let n = phase_a_serial(&planes, &cx, &cy, &cz, &radii, scratch, near_sq);
+                (t.elapsed().as_micros(), n)
+            };
+            let mut do_parallel = |scratch: &mut [u32]| {
+                let t = std::time::Instant::now();
+                let n = phase_a_parallel(
+                    pool, nw, &planes, &cx, &cy, &cz, &radii, scratch, near_sq,
+                );
+                (t.elapsed().as_micros(), n)
+            };
+            if serial_first {
+                s_res = do_serial(&mut scratch);
+                p_res = do_parallel(&mut scratch);
+            } else {
+                p_res = do_parallel(&mut scratch);
+                s_res = do_serial(&mut scratch);
+            }
+            // 🔴 两臂**可见数必须相同**，否则测的不是同一件事
+            assert_eq!(
+                s_res.1, p_res.1,
+                "串行与并行算出的可见数必须相同（第 {} 轮）",
+                r + 1
+            );
+            agree += 1;
+            serial_us.push(s_res.0);
+            parallel_us.push(p_res.0);
+            println!(
+                "  第 {} 轮  串行 {:>6}µs   并行 {:>6}µs   可见 {}",
+                r + 1,
+                s_res.0,
+                p_res.0,
+                s_res.1
+            );
+        }
+
+        let sm = {
+            let mut v = serial_us.clone();
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        let pm = {
+            let mut v = parallel_us.clone();
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        let serial_wins = serial_us
+            .iter()
+            .zip(parallel_us.iter())
+            .filter(|(s, p)| s < p)
+            .count();
+        let diff_pct = (pm as f64 - sm as f64).abs() / pm.max(1) as f64 * 100.0;
+        println!(
+            "\n[cull-sched] 中位：串行 {sm}µs / 并行 {pm}µs  ⇒ 串行{}{:.1}%",
+            if sm < pm { "快 " } else { "慢 " },
+            diff_pct
+        );
+        println!("[cull-sched] 串行胜 {serial_wins}/{ROUNDS} 轮；可见数一致 {agree}/{ROUNDS}");
+        // 🔴 **三态判定，不是二态。** 中位数打平/翻转时说"无差别"，**别说"划算"** ——
+        //    那是把一个没测出差异的结果包装成支持结论的证据（教训 46 的形态）。
+        //
+        // 实测证据（2026-10-14，本机 8 worker，同一二进制连跑 **8** 次）：
+        //   run1 串行 22 / 并行 26 → 串行快 15.4%      run5 串行 34 / 并行 26 → 串行慢 30.8%
+        //   run2 串行 31 / 并行 34 → 串行快  8.8%      run6 串行 36 / 并行 20 → 串行慢 80.0%
+        //   run3 串行 37 / 并行 30 → 串行慢 23.3%      run7 串行 24 / 并行 23 → 串行慢  4.3%
+        //   run4 串行 19 / 并行 15 → 串行慢 26.7%      run8 串行 20 / 并行 23 → 串行快 13.0%
+        //   中位：串行 27.5µs / 并行 24.5µs ⇒ **并行快约 11%，8 次里赢 5 次**
+        //
+        // ⇒ 桌面侧**略偏并行**，但量级只有 ~3µs —— 相对桌面满速整帧（~2500µs）是 **0.12%**，
+        //   远在可感知/可优化阈值之下。**本基准决定不了桌面默认值**，它只证明
+        //   「桌面不会因为走串行而明显变差」。
+        // ⇒ **默认仍取串行**：手机侧是明确的 -36%（1213→778µs，交替 A/B 三对全胜），
+        //   桌面侧是 0.12% 的噪声级差异 ⇒ 一个默认值覆盖两边是合理的。
+        //   若将来桌面变成 CPU 受限（现在不是），再按平台分流。
+        let noise_floor_pct = 25.0; // 8 次的跨度是 15.4% ~ -80%，方向会翻转；阈值取 25
+        if diff_pct < noise_floor_pct {
+            println!(
+                "[cull-sched] ⇒ 本机**无差别**（差 {diff_pct:.1}% < {noise_floor_pct:.0}% 噪声阈，\
+                 同二进制三次跑方向会翻转）⇒ **本基准决定不了桌面默认值**。\
+                 唯一确定的是：手机侧串行明确更快（交替 A/B 三对全胜，1213→778µs）⇒ 保持串行"
+            );
+        } else if sm < pm {
+            println!("[cull-sched] ⇒ 本机**串行更快**（{diff_pct:.1}%）⇒ 与手机结论同向");
+        } else {
+            println!(
+                "[cull-sched] ⇒ 本机**并行更快**（{diff_pct:.1}%）⇒ 与手机结论相反；\
+                 若复跑仍稳定，考虑按平台分流默认值"
+            );
+        }
+    }
+}

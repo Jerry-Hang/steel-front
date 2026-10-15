@@ -54,7 +54,29 @@ pub fn shockwave_pressure(
     points: &[[f32; 3]],
     out: &mut [f32],
 ) -> &'static str {
-    debug_assert_eq!(points.len(), out.len());
+    // 🔴 **硬断言，不是 `debug_assert_eq!`**（2026-10-15，外部复核指出，已对着代码确认）。
+    //
+    // 这是一个 **Safe 公开函数**，而下面的 SIMD 内核**只按 `points.len()` 做循环条件**，
+    // 再用裸指针 `_mm512_storeu_ps(out.as_mut_ptr().add(i), …)` 写 `out`
+    // （见 `while i + 16 <= points.len()` 那几处）。
+    // `debug_assert_eq!` 在 `--release` 下**会被完全剔除** ⇒ 一旦调用方传进来的
+    // `out` 比 `points` 短，Safe Rust 代码就会**堆越界写（UB）**，而且不报错。
+    // 标量那条路径用的是安全索引 `out[i]`（越界会 panic）—— 同一个函数的两条路
+    // 行为不一致本身就是缺陷：**不能让"走哪条指令集"决定是 panic 还是 UB。**
+    //
+    // 契约与 `copy_from_slice` 同款：长度不等就 panic。
+    assert_eq!(
+        points.len(),
+        out.len(),
+        "shockwave_pressure: points 与 out 必须等长（SIMD 内核按 points.len() 用裸指针写 out）"
+    );
+    // 退化输入：`radius <= 0` 时 `k = 1/(r*r) = +inf`，若某点恰与 center 重合则
+    // `k*d2 = inf*0 = NaN` ⇒ `a/(1+NaN) * 0` 仍是 **NaN**（`falloff=0` 救不回来），
+    // 破坏本函数"有限输入下不产生 NaN/Inf"的约定。直接给零场。
+    if !(radius > 0.0) || amplitude == 0.0 {
+        out.fill(0.0);
+        return "scalar";
+    }
     #[cfg(target_arch = "x86_64")]
     {
         // 基准用强制选路（RV3D_FORCE_SIMD，见 cpu::forced_simd_path）；仍要求硬件支持
@@ -579,6 +601,53 @@ mod simd_shockwave_tests {
             let path = shockwave_pressure(center, radius, amplitude, &points, &mut out);
             assert_eq!(out, scalar_out, "dispatch({}) 冲击波与标量逐位不一致 (n={})", path, n);
         }
+    }
+
+    /// 🔴 **长度不匹配必须 panic，不能在 Release 下变成堆越界写。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出）：本函数原本只用 `debug_assert_eq!` 校验长度，
+    /// 而它在 `--release` 下**被完全剔除**，SIMD 内核又只按 `points.len()` 用裸指针写 `out`
+    /// ⇒ Safe Rust 里可以静默堆越界。标量那条路用的是安全索引（会 panic）——
+    /// **同一个函数的两条路一个 panic 一个 UB**，这本身就是缺陷。
+    ///
+    /// 判据：长度不等**必须 panic**（与 `copy_from_slice` 同款契约）。
+    #[test]
+    #[should_panic(expected = "必须等长")]
+    fn shockwave_pressure_panics_on_length_mismatch() {
+        let points = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        // out 比 points **短** —— 旧写法在 release 下会越界写
+        let mut out = vec![0.0f32; 1];
+        let _ = shockwave_pressure([0.0, 0.0, 0.0], 10.0, 1.0, &points, &mut out);
+    }
+
+    /// 🔴 **退化输入不得产生 NaN**：`radius <= 0` 时 `k = 1/(r*r) = +inf`，
+    /// 若某点恰与爆心重合则 `k*d2 = inf*0 = NaN`，`falloff = 0` 也压不住它
+    /// （`NaN * 0.0` 仍是 NaN）。修法是入口直接给零场。
+    #[test]
+    fn shockwave_pressure_degenerate_radius_is_all_zero_and_finite() {
+        // 采样点里**故意放一个与爆心完全重合的点** —— 这正是旧写法出 NaN 的那一格
+        let points = [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [3.0, 3.0, 3.0],
+        ];
+        for r in [0.0f32, -1.0] {
+            let mut out = vec![1.0f32; points.len()];
+            let _ = shockwave_pressure([0.0, 0.0, 0.0], r, 1000.0, &points, &mut out);
+            assert!(
+                out.iter().all(|v| *v == 0.0),
+                "radius={r} 应给零场，实得 {out:?}"
+            );
+            assert!(
+                out.iter().all(|v| v.is_finite()),
+                "radius={r} 不得产生 NaN/Inf，实得 {out:?}"
+            );
+        }
+        // amplitude = 0 同理（零振幅不该有任何输出）
+        let mut out = vec![1.0f32; points.len()];
+        let _ = shockwave_pressure([0.0, 0.0, 0.0], 50.0, 0.0, &points, &mut out);
+        assert!(out.iter().all(|v| *v == 0.0), "amplitude=0 应给零场");
     }
 
     #[test]

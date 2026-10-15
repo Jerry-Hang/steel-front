@@ -490,7 +490,26 @@ impl Renderer {
         self.surface = new_surface;
         unsafe { self.surface_loader.destroy_surface(old, None) };
 
-        self.try_recreate_swapchain()?;
+        // 🔴 **标志必须在这里维护**（2026-10-15，外部复核指出，已对着真机日志复核确认）。
+        //
+        // 原来的写法是：`recreate_surface` 全程不碰 `swapchain_broken`，
+        // 而全仓唯一的写点在 `recreate_swapchain()` 里 —— 于是恢复了后台之后：
+        //   ① `recreate_swapchain()` 先失败 ⇒ 置 true
+        //   ② `recreate_surface()` 成功（表面与交换链都建好了）⇒ **标志仍是 true**
+        //   ③ `frame_suppressed` 每帧早退 ⇒ 继续黑屏
+        //   ④ **下一帧**每帧恢复块再调一次 `recreate_swapchain()`，这次成功 ⇒ 才置 false
+        // ⇒ 多黑 `RECREATE_RETRY_MIN_SECS` 那么久，还白重建一次交换链。
+        // 真机日志里"交换链初始化完成"出现**两次**就是这个多跑的回合
+        // （2026-10-13 验证时看到了那两行，但把它当成了无关噪声 —— 是漏判）。
+        //
+        // 现在：拆掉旧交换链之后先置 true 保底（中途失败时保持帧抑制、
+        // 不会拿已销毁的句柄去调 Vulkan），全部重建成功再置 false。
+        self.swapchain_broken = true;
+        if let Err(e) = self.try_recreate_swapchain() {
+            // 失败 ⇒ 保持 true（帧继续被抑制，等下一次限流窗口重试）
+            return Err(e);
+        }
+        self.swapchain_broken = false;
         log::info!("Vulkan 表面重建完成，渲染恢复");
         Ok(())
     }
