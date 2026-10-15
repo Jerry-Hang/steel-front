@@ -1961,3 +1961,56 @@ fn prop_buffer_usage_is_gated_on_runtime_rt_availability() {
         );
     }
 }
+
+/// 🔴 **阴影 pass 里的自发光：既要按动静分流门控，几何也要跟主 pass 一致（球体）。**
+///
+/// 存在理由（2026-10-15，外部复核指出第 5 条，已对着代码确认）：
+///
+/// **① 漏门控**：`record_shadow_pass` 里 marker 走 `draw_static`、NPC/士兵走 `draw_dynamic`，
+/// **只有自发光一个门控都没有** ⇒ 静态阴影图默认每 **30 帧**才重画一次，
+/// 第 30k 帧那一刻场上的枪口焰/爆炸会被画进静态图，
+/// **接下来 29 帧作为静止的方块黑影钉在地上**。自发光是瞬态的 ⇒ 归 `draw_dynamic`。
+///
+/// **② 几何不一致**：主 pass 2026-08-15 就改成了 `sphere_vertex_buffer`
+/// （注释：「改用 UV 球体几何（爆炸球形扩散，不再是一整块立方体）」），
+/// **而阴影 pass 没跟着改** ⇒ 同一个"自发光几何"两处两份实现、一处改了另一处没改 ——
+/// 表现是主画面是球形火光、它投在地上的影子却是方块。
+///
+/// 判据是源码级的（这条路径要真 GPU 跑一帧才看得到），钉的就是这两点。
+#[test]
+fn shadow_pass_emissive_is_gated_and_uses_the_same_geometry_as_the_main_pass() {
+    let src = include_str!("shadow.rs");
+    let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+    let code: String = prod
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // ① 门控：两个 count 都要经过 draw_dynamic
+    for field in ["last_emissive_near", "last_emissive_far"] {
+        let gated = format!("if draw_dynamic {{ self.{field} }} else {{ 0 }}");
+        assert!(
+            code.contains(&gated),
+            "shadow.rs 里 `{field}` 没有按 `draw_dynamic` 门控 —— 自发光是**瞬态**的，\
+             画进静态阴影图（默认每 30 帧才重画）会变成钉在地上 29 帧的方块黑影"
+        );
+    }
+
+    // ② 几何：近档自发光必须用球体（与主 pass 一致）
+    assert!(
+        code.contains("self.sphere_index_count"),
+        "shadow.rs 里的自发光近档没有用球体几何 —— 主 pass 2026-08-15 就改成了 \
+         `sphere_vertex_buffer`（爆炸球形扩散），阴影这边没跟着改的话，\
+         主画面是球、影子是方块"
+    );
+
+    // 前置自检（教训 27）：确认扫描面不是空串
+    assert!(
+        code.contains("fn record_shadow_pass"),
+        "扫描面不对 —— 连 `record_shadow_pass` 都没扫到"
+    );
+}

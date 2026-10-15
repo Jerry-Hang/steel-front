@@ -808,12 +808,30 @@ impl Renderer {
             }
         }
         // 自发光（爆炸闪光等）
+        //
+        // 🔴 **两处都要改**（2026-10-15，外部复核指出第 5 条，已对着代码确认）：
+        //
+        // **① 必须按 `draw_dynamic` 门控。** 同函数里 marker 走 `draw_static`、
+        //    NPC/士兵走 `draw_dynamic`，**只有自发光原来一个门控都没有**。
+        //    而静态阴影图默认每 **30 帧**才重画一次（`RV3D_SHADOW_STATIC_EVERY`）⇒
+        //    第 30k 帧那一刻场上的枪口焰/爆炸会被**画进静态图**，
+        //    接下来 29 帧作为**静止的方块黑影钉在地上**。
+        //    自发光是**瞬态**的 ⇒ 归 `draw_dynamic`（动态图每 2 帧重画）。
+        //
+        // **② 近档几何必须用球体，不是立方体。** 主 pass 在 2026-08-15 就改成了
+        //    `sphere_vertex_buffer`（注释：「改用 UV 球体几何（爆炸球形扩散，
+        //    不再是一整块立方体）」），**而这里没跟着改** ⇒ 同一个"自发光几何"
+        //    两处两份实现、一处改了另一处没改 —— 表现是主画面是球形火光、
+        //    它投在地上的影子却是方块。
+        //    远档那边主 pass 用的就是 `far_*`，与这里一致，不用动。
+        let emissive_near = if draw_dynamic { self.last_emissive_near } else { 0 };
+        let emissive_far = if draw_dynamic { self.last_emissive_far } else { 0 };
         self.draw_shadow_range(
             command_buffer,
-            self.vertex_buffer,
-            self.index_buffer,
-            INDICES.len() as u32,
-            self.last_emissive_near,
+            self.sphere_vertex_buffer,
+            self.sphere_index_buffer,
+            self.sphere_index_count,
+            emissive_near,
             EMISSIVE_SLOT_BASE,
         )?;
         self.draw_shadow_range(
@@ -821,8 +839,8 @@ impl Renderer {
             self.far_vertex_buffer,
             self.far_index_buffer,
             FAR_INDICES.len() as u32,
-            self.last_emissive_far,
-            EMISSIVE_SLOT_BASE + self.last_emissive_near,
+            emissive_far,
+            EMISSIVE_SLOT_BASE + emissive_near,
         )?;
 
         unsafe {
