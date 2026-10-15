@@ -864,13 +864,23 @@ impl Renderer {
             }
         }
 
+        // 🔴 这两条日志原来都印 `INSTANCE_COUNT`（65536），而实例场 2026-10-13 改成
+        // 内外双密度之后**实际只有 19456 个** ⇒ 排查的人会以为"场是满的"。
+        // `INSTANCE_COUNT` 是 **slot 布局基准**（marker/NPC 槽位从它往后排），
+        // 与"实例场里真有多少个"是两回事（2026-10-15 更正）。
         log::info!(
-            "实例缓冲创建完成: {} 个实例，stride {} 字节，{} 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）",
+            "实例缓冲创建完成: {} 个实例（槽位基准 INSTANCE_COUNT={}），stride {} 字节，\
+             {} 帧双缓冲 HOST_VISIBLE|HOST_COHERENT（每帧压缩上传）",
+            self.instances.len(),
             INSTANCE_COUNT,
             std::mem::size_of::<InstanceData>(),
             self.max_frames_in_flight
         );
-        log::info!("instances={} draw_calls=1", INSTANCE_COUNT);
+        log::info!(
+            "instances={} slot_base={} draw_calls=1",
+            self.instances.len(),
+            INSTANCE_COUNT
+        );
         Ok(())
     }
 }

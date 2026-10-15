@@ -236,7 +236,13 @@ impl Renderer {
                 );
             }
             if !self.void_mode {
-                self.draw_mesh_range(command_buffer, mesh, 0, INSTANCE_COUNT);
+                // 🔴 **用 `near_count`，不是 `INSTANCE_COUNT`**（2026-10-15，外部复核指出，
+                // 已确认）：`INSTANCE_COUNT`（65536）是 **slot 布局基准**，而地面实例场
+                // 2026-10-13 改成内外双密度后只有 19456 个 ⇒ 按 65536 下发会**多跑
+                // 46080 个工作组**，读的是未初始化显存。
+                // `near_count` 在 mesh 路径下就是实例场实际长度（见 `frame.rs` 那处），
+                // 非 mesh 路径下是剔除结果 —— 两种语义都是"要画多少个地面实例"，正合适。
+                self.draw_mesh_range(command_buffer, mesh, 0, near_count);
             }
             self.draw_mesh_range(
                 command_buffer,

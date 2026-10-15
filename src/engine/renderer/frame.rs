@@ -537,8 +537,24 @@ impl Renderer {
         } else if self.mesh_enabled {
             // mesh 路径：地面实例场静态一次性上传（见 create_instance_buffer），
             // 完全跳过 CPU SIMD 剔除/压缩——剔除与顶点变换全部移到 GPU mesh shader。
-            // 性能日志 visible 语义 = 已上传槽位数（INSTANCE_COUNT）。
-            (INSTANCE_COUNT, 0)
+            //
+            // 🔴 **这里必须是实例场的实际长度，不是 `INSTANCE_COUNT`**
+            // （2026-10-15，外部复核指出，已对着代码确认）。
+            //
+            // `INSTANCE_COUNT`（= `GRID_SIZE²` = 65536）是 **slot 布局的基准**
+            // （marker / NPC 槽位都从它往后排），**不等于实例场里真的有多少个**。
+            // 2026-10-13 把地面场改成"内外双密度"之后，实际只填了 **19456** 个
+            // （外圈 15360 个 4m 格 + 内圈 1024 格 × 4 个 2m 细分）。
+            //
+            // 原来这里返回 `INSTANCE_COUNT` ⇒ 主 pass（`record.rs` 的 `draw_mesh_range`）
+            // 与阴影 pass（`shadow.rs` 的 `draw_shadow_range`）每帧都按 **65536** 下发
+            // ⇒ **多跑 46080 个工作组**，那些槽位是**未初始化显存**（`create_instance_buffer`
+            // 只拷了 `instances.len()` 那么多字节）。
+            // ⚠️ 当时那条改动只说了"`INSTANCE_COUNT` 不动、只是少填一些 ⇒ 槽位布局逐位不变，
+            // 属于安全改动" —— **槽位布局确实没变，但绘制数是另一回事**。
+            //
+            // 性能日志的 `visible=X/Y` 分母同样失真，一并改（见下面 `log::info!`）。
+            (self.instances.len() as u32, 0)
         } else {
             self.cull_and_upload(view, proj, cam_pos)
         };
@@ -644,7 +660,10 @@ impl Renderer {
             log::info!(
                 "visible={}/{} near={} far={} fps={:.1} frame_us={} cull_us={} terrain_us={} wait_fence_us={} acquire_us={} record_us={} submit_us={} present_us={} terrain_lod={} blend={:.3} quality={} marker={} npc={} mk_up_us={}",
                 near_count + far_count,
-                INSTANCE_COUNT,
+                // 🔴 分母也必须是**实例场实际长度**：`INSTANCE_COUNT` 是槽位基准，
+                // 不是"这一帧能画多少"。用它会印出 `visible=19456/65536` 这种
+                // 看着像"只画了 30%"的假数字（2026-10-15 一并更正）。
+                self.instances.len(),
                 near_count,
                 far_count,
                 fps,
