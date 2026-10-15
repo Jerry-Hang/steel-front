@@ -610,14 +610,33 @@ mod alsa {
         unsafe { (api.recover)(pcm, err as c_int, 1) as c_long }
     }
 
-    /// 收尾：drain（给队列一个播完的机会，理由见 `AlsaSink` 的 `drop`）+ close。
-    /// 返回 close 的结果：0 = 关干净了，< 0 = 没关干净（调用方只记日志，**绝不因此 dlclose**）。
-    pub fn finish(api: &Api, pcm: Pcm) -> c_long {
+    /// 收尾：drain + close。返回 **close** 的结果：
+    /// 0 = 关干净了，< 0 = 没关干净（调用方只记日志，**绝不因此 dlclose**）。
+    ///
+    /// 🔴 **drain 的返回值不再被丢弃**（2026-10-15，外部复核指出 B13，已对着
+    /// **ALSA 维护者的内核补丁原文**核实）：
+    /// > calling drain in non-blocking mode **just return -EAGAIN error**, but doesn't
+    /// > provide any way to sync with draining … when O_NONBLOCK is set, PCM core
+    /// > **sets the stream(s) to DRAIN state but quits ioctl immediately without waiting
+    /// > the whole drain**
+    /// > —— <https://mailman.alsa-project.org/hyperkitty/list/alsa-devel@alsa-project.org/thread/XCGGZFTAC5AVIOUXFMUJTHUP2KS6C5L3/>
+    ///
+    /// 本 PCM 是用 `SND_PCM_NONBLOCK` 打开的 ⇒ **`drain` 不会等队列播完**，
+    /// 它只是把流置为 DRAINING 就返回（本仓 2026-09-28 实测"0.001ms 内返回"正是这个），
+    /// 而紧接着的 `close` 会把队列丢掉。**要真等，只能自己 `poll()` 同步**
+    /// —— 那需要 `snd_pcm_poll_descriptors` 的额外 FFI，且这里是**进程退出路径**，
+    /// 不值得为最后 170ms 引入新的等待面（本仓铁律：**所有等待必须有上界**）。
+    ///
+    /// 所以这里**保留 drain、如实记录它的返回值**：它仍然比 `drop` 好一点点
+    /// （至少把流推进 DRAINING，硬件会把 DMA 里剩下的播完），但**不再谎称"给队列一个机会"**。
+    /// 返回值给调用方记日志，下次有人查"最后一声被切了"时**看得到原因**。
+    pub fn finish(api: &Api, pcm: Pcm) -> (c_long, c_long) {
         // SAFETY: `pcm` 是有效句柄，且调用方保证这是**最后一次**使用它（`AlsaSink::drop` 里已把
         // 它从字段取走、之后不会再传给 submit）⇒ drain/close 各调一次，之后不再触碰。
         unsafe {
-            (api.drain)(pcm);
-            (api.close)(pcm) as c_long
+            let drain_rc = (api.drain)(pcm) as c_long;
+            let close_rc = (api.close)(pcm) as c_long;
+            (drain_rc, close_rc)
         }
     }
 
@@ -1078,17 +1097,42 @@ impl Drop for AlsaSink {
         let Some(api) = alsa::api() else {
             return;
         };
-        // `alsa::finish` = drain + close。选 drain 而不是 `snd_pcm_drop` 的理由：
-        // - `close` 本身就会释放流（ALSA 没有 waveOut 那种 reset→unprepare→close 的强制次序），
-        //   但 close 是**立刻**丢队列 ⇒ 最后那 ~170ms 的枪声会被切掉；
-        // - drain 给队列一个播完的机会，而且**不会把退出路径挂住**：本 PCM 是以
-        //   `SND_PCM_NONBLOCK` 打开的，非阻塞句柄上 drain 不做等待（2026-09-28 实测：用 `null`
-        //   插件打开非阻塞句柄、灌进远超缓冲的帧之后，drain 仍在 0.001ms 内返回，状态转 SETUP）
-        //   ⇒ 满足本仓「所有等待必须有上界」。设备已经消失时它直接返回错误，忽略即可。
-        // - **刻意不用 drop**：那是"立刻丢"。waveOut 那边必须先 reset 是因为 unprepare 要求流已停
-        //   （否则 STILLPLAYING ⇒ 关不掉的句柄 + 回调线程 UAF），ALSA 没有这个约束，所以这里可以选
-        //   「体面收尾」而不是「立刻丢掉」。
-        let rc = alsa::finish(api, pcm);
+        // `alsa::finish` = drain + close。
+        //
+        // 🔴 **这段注释以前写错过，2026-10-15 更正**（外部复核指出 B13，已对着 ALSA
+        // 维护者的内核补丁原文核实）。旧文案说「drain 给队列一个播完的机会」——
+        // **对非阻塞句柄是错的**：
+        // > calling drain in non-blocking mode **just return -EAGAIN error** … when
+        // > O_NONBLOCK is set, PCM core **sets the stream(s) to DRAIN state but quits
+        // > ioctl immediately without waiting the whole drain**
+        // > —— <https://mailman.alsa-project.org/hyperkitty/list/alsa-devel@alsa-project.org/thread/XCGGZFTAC5AVIOUXFMUJTHUP2KS6C5L3/>
+        //
+        // 本 PCM 正是 `SND_PCM_NONBLOCK` 打开的（见 `open_pcm`），本仓 2026-09-28 实测的
+        // "drain 在 0.001ms 内返回"**恰恰就是这个行为的证据** —— 当时把它读成了"不会挂住，
+        // 很好"，而没读出"所以它根本没等、队列还是会被 close 丢掉"。
+        //
+        // 仍然选 drain 而不是 `snd_pcm_drop` 的理由（**缩水后的真实理由**）：
+        // - 它至少把流推进 DRAINING 状态，硬件会把 DMA 里剩下的那点播完；
+        //   `drop` 是"立刻停"，连这一点都没有。
+        // - 要**真**等队列播完只能自己 `poll()` 同步（内核补丁说的就是这条路），
+        //   那需要 `snd_pcm_poll_descriptors` 的额外 FFI；而这里是**进程退出路径**，
+        //   不值得为最后 ~170ms 引入新的等待面（铁律：**所有等待必须有上界**）。
+        // - `close` 本身就会释放流（ALSA 没有 waveOut 那种 reset→unprepare→close 的强制次序）。
+        // - **刻意不用 drop**：waveOut 那边必须先 reset 是因为 unprepare 要求流已停
+        //   （否则 STILLPLAYING ⇒ 关不掉的句柄 + 回调线程 UAF），ALSA 没有这个约束。
+        //
+        // ⇒ **如实记录** drain 的返回值（见 `alsa::finish`）：它大概率是负的（`-EAGAIN`），
+        //   那是**预期**，不是故障；但下次有人查"最后一声被切了"时**看得到原因**。
+        let (drain_rc, rc) = alsa::finish(api, pcm);
+        // drain 在非阻塞句柄上**本就会**立即返回（见 `finish` 的文档，附 ALSA 内核补丁出处）
+        // ⇒ 负返回值是**预期**行为（`-EAGAIN`），不是故障，所以打 debug 而不是 warn。
+        // 但**必须打出来**：否则下次有人查"最后一声枪响被切"时，手上一点线索都没有。
+        if drain_rc < 0 {
+            log::debug!(
+                "audio: snd_pcm_drain rc={}（非阻塞句柄上预期如此，队列由随后的 close 丢弃）",
+                drain_rc
+            );
+        }
         if rc < 0 {
             // close 失败 = 这块 PCM 的内存回不去（进程也快退出了，代价可忽略）。
             // 🔴 **绝不能因为 close 失败就去 dlclose**：库里可能仍持有它的内部引用，卸载等于让
@@ -1204,5 +1248,64 @@ mod tests {
         assert!(first_starved_drop(), "第一次必须返回 true（要打那条 warn）");
         assert!(!first_starved_drop(), "第二次起必须为 false（不刷屏）");
         assert!(!first_starved_drop(), "一直保持 false");
+    }
+}
+
+#[cfg(test)]
+mod finish_contract_tests {
+    //! `alsa::finish` 的契约判据（纯源码级 —— 需要真实 PCM 句柄，跑不了行为测试）。
+
+    /// 🔴 **`snd_pcm_drain` 的返回值不许被丢弃。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出 B13，已对着 ALSA 维护者的内核补丁原文核实）：
+    /// 本 PCM 是用 `SND_PCM_NONBLOCK` 打开的 ⇒ **`drain` 不会等队列播完**
+    /// （"sets the stream(s) to DRAIN state but quits ioctl immediately"），
+    /// 紧接着的 `close` 会把队列丢掉。而原实现是
+    /// ```text
+    /// (api.drain)(pcm);            // ← 返回值【被丢弃】
+    /// (api.close)(pcm) as c_long   // ← 只返回 close 的结果
+    /// ```
+    /// ⇒ **那个「没等」的信号被扔了**，现场只剩"最后一声被切了"这种没法查的现象。
+    ///
+    /// 判据：`(api.drain)(` 必须出现在一个 `let ... =` 绑定里（即结果被接住），
+    /// 且 `finish` 的返回类型是**两个** `c_long`（drain + close 各一个）。
+    #[test]
+    fn pcm_drain_return_value_is_not_discarded() {
+        let src = include_str!("audio_out.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let code: String = prod
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // ① drain 的结果必须被接住
+        let drain_line = code
+            .lines()
+            .find(|l| l.contains("(api.drain)("))
+            .expect("audio_out.rs 里找不到 (api.drain)( 调用 —— 判据的扫描面前提不成立");
+        assert!(
+            drain_line.contains("let ") && drain_line.contains('='),
+            "`(api.drain)(pcm)` 的返回值又被丢弃了 —— 本 PCM 是 NONBLOCK 打开的，\
+             drain 只是把流置为 DRAINING 就立刻返回、**不等队列播完**，\
+             那个负返回值正是「没等」的唯一线索。实得这一行：{}",
+            drain_line.trim()
+        );
+
+        // ② finish 必须同时把两个结果交出去
+        assert!(
+            code.contains("pub fn finish(api: &Api, pcm: Pcm) -> (c_long, c_long)"),
+            "`finish` 的返回类型必须是 `(c_long, c_long)`（drain + close 各一个）—— \
+             只返回 close 的结果会把 drain 的行为整个遮住"
+        );
+
+        // 前置自检（教训 27）：确认扫描面不是空串
+        assert!(
+            code.contains("SND_PCM_NONBLOCK"),
+            "扫描面看起来不对 —— 连 NONBLOCK 常量都没扫到"
+        );
     }
 }
