@@ -576,6 +576,25 @@ pub struct Renderer {
     /// （同一 descriptor set layout + MESH_EXT push constant）。mesh_enabled=false 时
     /// 保持 null 且完全不参与记录阶段，传统顶点管线行为逐字节不变。
     mesh_enabled: bool,
+    /// **逻辑设备是否启用了光追扩展 + 对应特性**（= `Renderer::new` 里的 `rt_available`）。
+    ///
+    /// 🔴 存在的理由（2026-10-15，外部复核指出第 4 条，已对着代码确认）：
+    /// 两个光追相关的 **buffer usage 位**要求设备侧真的启用了对应**特性**：
+    /// * `SHADER_DEVICE_ADDRESS` ⇒ 需要 `bufferDeviceAddress` 特性为 TRUE；
+    /// * `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR` ⇒ 需要
+    ///   `VK_KHR_acceleration_structure` 扩展。
+    ///
+    /// 而 `device.rs` 里这两样都是**按 `rt_available` 条件启用**的
+    /// （`if rt_available { 推扩展 }` / `if rt_available { 挂 bda_features }`）——
+    /// 那段注释还写着"旧代码无条件挂这三个，是这次一并修掉的第二处"。
+    /// **但 `set_props` 里创建道具缓冲时仍然无条件传这两个 usage 位** ⇒
+    /// 在没有光追的设备上（Android / 核显 / `RV3D_NO_MESH=1`）：
+    /// * 验证层必报 VUID；
+    /// * 严格驱动会拒绝分配 ⇒ `create_host_buffer` 失败 ⇒
+    ///   **整座城市的 GLB 道具静默消失**（`set_props` 里是 `log::error!` + return）。
+    ///
+    /// ⇒ **特性启用与 usage 申请必须同源** —— 这个字段就是那个真源。
+    rt_enabled: bool,
     mesh_shader: Option<MeshShaderDevice>,
     mesh_pipeline: vk::Pipeline,
     mesh_pipeline_layout: vk::PipelineLayout,

@@ -1905,3 +1905,59 @@ fn buffer_overwrite_waits_before_deciding_whether_to_grow() {
         );
     }
 }
+
+/// 🔴 **光追相关的 buffer usage 位必须按 `rt_enabled` 门控。**
+///
+/// 存在理由（2026-10-15，外部复核指出第 4 条，已对着代码确认）：
+/// 两个位要求设备侧真的启用了对应**特性** ——
+/// `SHADER_DEVICE_ADDRESS` 要 `bufferDeviceAddress`，
+/// `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR` 要 `VK_KHR_acceleration_structure`；
+/// 而 `device.rs` 是按 `rt_available` **条件启用**的。
+/// 原来 `set_props` 创建道具缓冲时**无条件**传这两个位 ⇒ 无光追设备上：
+/// * 验证层必报 VUID；
+/// * 严格驱动拒绝分配 ⇒ `create_host_buffer` 失败 ⇒ **整座城市的 GLB 道具静默消失**
+///   （调用点是 `log::error!` + return，不 panic）。
+///
+/// ⚠️ 判据要**双向**：既要断言 `rt_enabled=false` 时**没有**那两个位，
+/// 也要断言 `true` 时**有**（否则一个"永远不传"的实现也能通过），
+/// 还要断言基础位（VERTEX/INDEX/STORAGE）始终在 —— 少了它们道具根本画不出来。
+#[test]
+fn prop_buffer_usage_is_gated_on_runtime_rt_availability() {
+    use vk::BufferUsageFlags as U;
+
+    for (name, off) in [
+        ("顶点", Renderer::prop_vertex_usage(false)),
+        ("索引", Renderer::prop_index_usage(false)),
+    ] {
+        assert!(
+            !off.contains(U::SHADER_DEVICE_ADDRESS),
+            "{name}缓冲：无光追时不该申请 SHADER_DEVICE_ADDRESS（设备侧没启用该特性）"
+        );
+        assert!(
+            !off.contains(U::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR),
+            "{name}缓冲：无光追时不该申请 AS 构建输入位（扩展都没启用）"
+        );
+        // 基础位始终要在 —— 少了它们道具根本画不出来（这条防"门控过头"）
+        assert!(
+            off.contains(U::STORAGE_BUFFER),
+            "{name}缓冲：STORAGE_BUFFER 与光追无关（PT 当 albedo 读），必须始终保留"
+        );
+    }
+    assert!(Renderer::prop_vertex_usage(false).contains(U::VERTEX_BUFFER));
+    assert!(Renderer::prop_index_usage(false).contains(U::INDEX_BUFFER));
+
+    // 反向：有光追时两个位都要在（否则 RT 的 BLAS 构建拿不到设备地址）
+    for (name, on) in [
+        ("顶点", Renderer::prop_vertex_usage(true)),
+        ("索引", Renderer::prop_index_usage(true)),
+    ] {
+        assert!(
+            on.contains(U::SHADER_DEVICE_ADDRESS),
+            "{name}缓冲：有光追时必须申请 SHADER_DEVICE_ADDRESS"
+        );
+        assert!(
+            on.contains(U::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR),
+            "{name}缓冲：有光追时必须申请 AS 构建输入位"
+        );
+    }
+}

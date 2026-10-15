@@ -475,6 +475,8 @@ impl Renderer {
             //   VK_EXT_mesh_shader 时（WSLg / dzn）的兼容回退存在，不再接受功能开发，也不与
             //   mesh 路径做双份维护——新特性一律只写 mesh 路径。
             mesh_enabled: mesh_shader_available,
+            // 与上面那个 `if rt_available { ... }` 的**同一个变量** —— 见字段文档
+            rt_enabled: rt_available,
             device_name,
             mesh_shader: mesh_shader_loader,
             mesh_pipeline: vk::Pipeline::null(),

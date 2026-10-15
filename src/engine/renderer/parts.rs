@@ -655,6 +655,42 @@ impl Renderer {
     /// 事故写的：2026-08-18 那次"切到小网格武器触发重建"直接 destroy 了正在被 GPU 使用
     /// 的 buffer，NVIDIA 驱动 device lost、画面卡死。地图重载发生在帧与帧之间、不在命令
     /// 缓冲记录期间，所以这里的等待是安全的；缩小容量同样走这条路，因此必须等。
+/// 道具**顶点**缓冲的 usage（纯函数：可跨平台单测）。
+///
+/// 🔴 两个光追相关位**必须按 `rt_enabled` 门控**（2026-10-15，外部复核指出第 4 条，
+/// 已对着代码确认）：它们要求设备侧真的启用了对应**特性**
+/// （`bufferDeviceAddress` / `VK_KHR_acceleration_structure`），
+/// 而 `device.rs` 里是按 `rt_available` **条件启用**的 ——
+/// **特性启用与 usage 申请必须同源**。
+///
+/// 不门控的后果（无光追设备：Android / 核显 / `RV3D_NO_MESH=1`）：
+
+/// * 验证层必报 VUID；
+/// * 严格驱动拒绝分配 ⇒ `create_host_buffer` 失败 ⇒
+///   **整座城市的 GLB 道具静默消失**（调用点是 `log::error!` + return，不 panic）。
+///
+/// `STORAGE_BUFFER` 与光追无关（PT 着色器把顶点色当 albedo 读），**始终保留**。
+pub(crate) fn prop_vertex_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
+    let base = vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER;
+    if rt_enabled {
+        base | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+    } else {
+        base
+    }
+}
+
+/// 道具**索引**缓冲的 usage（语义同 [`prop_vertex_usage`]，只有基类不同）。
+pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
+    let base = vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER;
+    if rt_enabled {
+        base | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+    } else {
+        base
+    }
+}
+
     pub(crate) fn set_props(
         &mut self,
         set: &crate::engine::props::PropSet,
@@ -782,10 +818,7 @@ impl Renderer {
             // 而且因为旧映射没动，下一次 set_props 还能自己恢复）；
             // 成功路径多占一份旧显存，直到下面 swap 时销毁，代价可忽略。
             let (vb, vm) = match self.create_host_buffer(
-                vk::BufferUsageFlags::VERTEX_BUFFER
-                    | vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                Self::prop_vertex_usage(self.rt_enabled),
                 cap_v as u64 * std::mem::size_of::<Vertex>() as u64,
             ) {
                 Ok(v) => v,
@@ -795,10 +828,7 @@ impl Renderer {
                 }
             };
             let (ib, im) = match self.create_host_buffer(
-                vk::BufferUsageFlags::INDEX_BUFFER
-                    | vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                Self::prop_index_usage(self.rt_enabled),
                 cap_i as u64 * 4,
             ) {
                 Ok(v) => v,
