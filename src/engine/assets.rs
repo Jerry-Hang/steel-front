@@ -156,11 +156,39 @@ fn append_prim(
                 return Err(format!("GLB accessor 不支持的 componentType {other}"));
             }
         };
-        let mut out = Vec::with_capacity(count * comps);
         // 交错时：元素间距 = `stride`，元素内分量间距 = `step`。
         // 密集时 `stride` 为 None ⇒ 退化成原来那句 `off + i * step`（逐位不变，
         // 所以**现有全部资产的行为不受影响**，这一点有测试锁着）。
         let elem_stride = stride.unwrap_or(step * comps);
+
+        // 🔴 **先验界，再分配**（2026-10-15，外部复核指出第 6 条，已对着代码确认）。
+        //
+        // 原来是 `let mut out = Vec::with_capacity(count * comps);` 写在
+        // `if b + step > bin.len()` **之前** —— 而 `count` 直接来自**不可信的 JSON**
+        // （`acc.get("count")... as usize`）。一个畸形 GLB 里写
+        // `"count": 2000000000` ⇒ `count * comps` 是几十亿
+        // ⇒ `Vec::with_capacity` 先按这个数去要内存：**OOM abort 或 capacity overflow
+        // panic**，而且**越界检查根本轮不到执行**。
+        // 这不是"读到坏数据"，是**读之前就先把进程打死**。
+        //
+        // 界怎么取：每个元素至少要占 `step` 个字节（分量不可能比它自己的宽度还短），
+        // 所以 `count` 绝不可能超过 `bin.len() / step`。这个上界与具体排布无关，
+        // 不依赖 `stride`/`off` 的正确性 —— 它只用来**挡住离奇的分配请求**，
+        // 精确的逐元素越界仍由下面那个循环判定（那里才是权威）。
+        let elem_min_bytes = step.max(1);
+        let count_cap = bin.len() / elem_min_bytes + 1;
+        if count > count_cap {
+            return Err(format!(
+                "GLB accessor: count {} 超出二进制块能容纳的上界 {}（bin {} 字节 / 每元素至少 {} 字节）",
+                count,
+                count_cap,
+                bin.len(),
+                elem_min_bytes
+            ));
+        }
+        // 到这里 `count <= bin.len() + 1` ⇒ `count * comps` 不可能溢出，也不可能提出
+        // 离奇的分配请求（`comps` 是常量 2/3/4 这一档）。
+        let mut out = Vec::with_capacity(count * comps);
         for i in 0..count * comps {
             let b = off + (i / comps) * elem_stride + (i % comps) * step;
             if b + step > bin.len() {
@@ -326,6 +354,57 @@ mod tests {
     }
 
     /// 拼一个最小合法 GLB（JSON chunk + BIN chunk），供解析器做无磁盘依赖的回归测试
+
+    /// 🔴 **`count` 离奇时必须在分配【之前】就报错**，不许先按它去要内存。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 6 条，已对着代码确认）：
+    /// `read_acc` 原来是 `let mut out = Vec::with_capacity(count * comps);`
+    /// 写在 `if b + step > bin.len()` **之前**，而 `count` 直接来自**不可信的 JSON**
+    /// ⇒ 畸形 GLB 里写 `"count": 2000000000` 就会先按几十亿元素请求内存
+    /// （**OOM abort / capacity overflow panic**），**而越界检查根本轮不到执行**。
+    ///
+    /// 🔴 **实测把影响面缩小了一档（如实记录）**：本机（Linux，默认
+    /// `vm.overcommit_memory=0`）上 `Vec::with_capacity(24GB)` **不会**失败 ——
+    /// 地址空间是超额分配的、内存按需提交，而循环第一轮就撞上越界检查退出
+    /// ⇒ 实际报的是 `GLB accessor 越界`，**fail-closed 本来就成立**。
+    /// 但在 **Windows / `overcommit_memory=2`** 下，这一句会**直接 abort**
+    /// （不可捕获、无法降级），而那是本仓的主要目标平台之一。
+    ///
+    /// ⇒ 所以这条修复的定位是**加固 + 让报错点名真因**，不是"修一个正在流血的 bug"。
+    ///
+    /// ⚠️ 判据的关键是**断言"报错点名 count"，而不是"没崩"**：
+    /// 无预检时它返回的是一句 `accessor 越界`（原因说不清），
+    /// 有预检时点名 `count 超出…上界`。
+    #[test]
+    fn absurd_accessor_count_is_rejected_before_allocating() {
+        // 一个只有 12 字节 BIN 的 GLB（3 个 f32），却声明 count = 20 亿
+        let json = r#"{"asset":{"version":"2.0"},
+            "buffers":[{"byteLength":12}],
+            "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":2000000000,"type":"VEC3"}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}"#;
+        let bin = vec![0u8; 12];
+        let glb = build_glb(json, &bin);
+        let e = super::parse_glb(&glb)
+            .err()
+            .expect("离奇的 count 必须返回 Err —— 若这里 panic/abort，说明分配发生在验界之前");
+        assert!(
+            e.contains("2000000000") || e.contains("count"),
+            "错误信息应当点出是 `count` 越界（而不是报一句与原因无关的越界）；实得: {e}"
+        );
+
+        // 正对照：正常的 count 必须照常解析成功（别把合法的资产也挡了）
+        let ok_json = r#"{"asset":{"version":"2.0"},
+            "buffers":[{"byteLength":12}],
+            "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":12}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}]}"#;
+        assert!(
+            super::parse_glb(&build_glb(ok_json, &bin)).is_ok(),
+            "合法的单元素 accessor 被误挡了 —— 上界取得太紧"
+        );
+    }
+
     fn build_glb(json: &str, bin: &[u8]) -> Vec<u8> {
         let mut jb = json.as_bytes().to_vec();
         while jb.len() % 4 != 0 {
