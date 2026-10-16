@@ -623,6 +623,21 @@ impl Mixer {
                         v.finished = true;
                         break;
                     }
+                    // 🔴 **空片段（0 帧）必须在这里退队**（2026-10-15，外部复核指出第 2 条，
+                    // 已对着代码确认）：
+                    // `parse_wav` **允许 0 帧的片段**（有测试断言
+                    // `parse_wav(&empty).unwrap().frame_count() == 0`），
+                    // 而 `total` 就是它的帧数 ⇒ `total == 0.0` 时
+                    //   `v.cursor %= 0.0` ⇒ **NaN** ⇒ `NaN as usize == 0`
+                    //   ⇒ 下面 `sample_mono(0)` 对**空的 `samples`** 取下标 ⇒ **panic**。
+                    //
+                    // ⚠️ 它的**兄弟分支**（静音，`advance_voice_cursor`）早就写了这个守卫：
+                    //     `let c = if total > 0.0 { next % total } else { 0.0 };`
+                    // ⇒ 又是"同一件事两处实现、只有一处防了"。
+                    if total <= 0.0 {
+                        v.finished = true;
+                        break;
+                    }
                     v.cursor %= total;
                     fi = v.cursor.floor() as usize;
                 }
@@ -1703,6 +1718,46 @@ fn synth_ambient(sample_rate: u32) -> Arc<AudioClip> {
 
 #[cfg(test)]
 mod tests {
+
+
+    /// 🔴 **0 帧片段 + 循环播放不许 panic。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 2 条，已对着代码确认）：
+    /// `parse_wav` **允许 0 帧的片段**（有测试断言
+    /// `parse_wav(&empty).unwrap().frame_count() == 0`）。
+    /// 而非静音分支里 `v.cursor %= total` **没有** `total > 0` 守卫
+    /// ⇒ `total == 0.0` 时得 `NaN` ⇒ `NaN as usize == 0`
+    /// ⇒ `sample_mono(0)` 对**空的 `samples`** 取下标 ⇒ **panic**。
+    ///
+    /// ⚠️ 它的**兄弟分支**（静音，`advance_voice_cursor`）早就写了这个守卫：
+    ///     `let c = if total > 0.0 { next % total } else { 0.0 };`
+    /// ⇒ 判据要同时覆盖**两条**分支（只测一条的话，另一条再漏也看不出来）。
+    #[test]
+    fn zero_frame_clip_with_looping_does_not_panic_in_either_branch() {
+        let listener = AudioListener::new(Vec3::ZERO);
+        for (label, volume) in [("非静音", 1.0f32), ("静音", 0.0f32)] {
+            let empty = build_clip(44_100, 0, |_| 0.0);
+            assert_eq!(empty.frame_count(), 0, "前提：这确实是个 0 帧片段");
+            let mut mixer = Mixer::new();
+            mixer.set_master(volume);
+            // looping = true 是关键：非循环会在 `!v.looping` 那条路正常退队
+            mixer.play(
+                empty,
+                AudioSource::new(Vec3::ZERO, 1.0),
+                Channel::Sfx,
+                true,
+            );
+            let mut out = vec![0.0; 32];
+            // 多混几次：退队若没生效，第二帧还会再走一遍同一段代码
+            for _ in 0..3 {
+                mixer.mix(&listener, &mut out);
+            }
+            assert!(
+                out.iter().all(|v| v.is_finite()),
+                "{label}分支：混出了非有限值（NaN/Inf）—— 空片段的 `% 0.0` 没被挡住"
+            );
+        }
+    }
 
     /// 🔴 **环境风相位必须有界回绕** —— 否则 8 分钟后**永久冻死**。
     ///
