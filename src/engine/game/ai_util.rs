@@ -376,13 +376,22 @@ pub(crate) fn advance_npc(
                     let npc_g = world_to_grid(npc.position[0], npc.position[2]);
                     let target_g = world_to_grid(target.x, target.z);
                     if stress {
+                        // 🔴 **取"最近"的那个 —— 不能用 `.first()`**
+                        // （2026-10-15，外部复核指出第 1 条时顺带发现的第二处，已确认）：
+                        // 上面注释写的是「**就近**取第一个」，而 `find_cover_shielding`
+                        // 的返回顺序是 `openness` 升序、**`dist` 降序**（那是给
+                        // `Tactic::Retreat` 用的："撤向较远的遮挡掩体"）
+                        // ⇒ `.first()` 拿到的是**离 NPC 最远**的那个，与注释相反。
+                        //
+                        // 穿越障碍带时想的是"就近凑过去"，所以这里显式按 `dist` 取最小。
                         crate::engine::ai::find_cover_shielding(
                             grid,
                             npc_g,
                             target_g,
                             STRESS_COVER_MAX_DIST,
                         )
-                        .first()
+                        .into_iter()
+                        .min_by_key(|c| c.dist)
                         .map(|c| c.pos)
                         .unwrap_or(target_g)
                     } else {

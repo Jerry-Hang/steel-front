@@ -1112,7 +1112,12 @@ pub fn find_cover_shielding(
     }
     let px = (player.x - npc.x) as f32;
     let pz = (player.y - npc.y) as f32;
-    let player_len = (px * px + pz * pz).sqrt();
+    // ⚠️ 这里原来还算了 `player_len` / `block_len` 去做**归一化**：
+    //     `(bx * px + bz * pz) / (block_len * player_len) > 0.0`
+    // 但除数恒为正（两段长度都是 `sqrt` 的结果，且在 `npc != player` 的守卫下
+    // `player_len > 0`）⇒ **归一化对"点积 > 0"这个判据没有任何影响**，
+    // 只是白白开两次方（本函数每帧对每个候选格调用）。现直接比较点积符号。
+    // （另：`n == npc` 时 `block_len == 0` 曾是可能除零，去掉后一并消失。）
     let mut covers = find_cover_points(grid, npc, max_dist);
     covers.retain(|c| {
         NEIGHBOR_OFFSETS.iter().any(|&(dx, dy)| {
@@ -1122,9 +1127,36 @@ pub fn find_cover_shielding(
             }
             let bx = (n.x - npc.x) as f32;
             let bz = (n.y - npc.y) as f32;
-            let block_len = (bx * bx + bz * bz).sqrt();
-            // 阻挡格在 npc → player 方向（点积 > 0）
-            (bx * px + bz * pz) / (block_len * player_len) > 0.0
+            // 【判据 ①】阻挡格在 npc → player 方向（点积 > 0）。
+            // 这就是 `pick_attack_cover` 文档里那句"阻挡格挡在 NPC 与目标之间" —— **不能删**。
+            let between_npc_and_player = (bx * px + bz * pz) > 0.0;
+            if !between_npc_and_player {
+                return false;
+            }
+            // 【判据 ②】**候选格还要在阻挡格远离玩家的那一侧**（2026-10-15，外部复核
+            // 指出第 1 条，已对着代码确认）。
+            //
+            // 🔴 只有 ① 是不够的：对同一个阻挡格 `n`，它的四个邻格算出来的 `bx/bz` 与
+            // `px/pz` **完全一样** ⇒ ① 要么四个全过、要么四个全不过，**根本不区分候选格**。
+            // 于是"站在阻挡格朝向玩家的那一面"（背靠掩体挨打）也会被当成掩体返回，
+            // 而 `.first()` 恰好先取到它。
+            //
+            // 具体：npc=(6,4)、阻挡格=(4,4)、玩家=(2,4) —— ① 对 4 个邻格都成立；
+            // 但候选格 (3,4) 在阻挡格**西侧**（玩家也在西侧）⇒ 站上去，阻挡格在**背后**，
+            // 一点不挡枪。而 (5,4)（东侧）才是真正的遮挡位。
+            //
+            // ⚠️ 判据 ② 用的是**候选格 `c.pos`**（不是 `npc`）：向量 `n - c.pos` 与
+            // `player - c.pos` 同向 ⇔ 从候选格看去，阻挡格挡在自己与玩家之间。
+            // 由于 `n` 是 `c.pos` 的四邻域，这个点积就是 ±1 量级，**不必再开方**。
+            //
+            // ⚠️ **两条都要**：只留 ② 会放行"绕到阻挡格背后"的格子（阻挡格并不在 NPC 与
+            // 玩家之间，NPC 得先绕过去）—— 现有单测 `cover_shielding_requires_blocked_between`
+            // 对那个几何（npc=6 / 阻挡格=7 / 玩家=2）明确断言应当排除，**那条断言是对的**。
+            let cx = (n.x - c.pos.x) as f32;
+            let cy = (n.y - c.pos.y) as f32;
+            let qx = (player.x - c.pos.x) as f32;
+            let qy = (player.y - c.pos.y) as f32;
+            cx * qx + cy * qy > 0.0
         })
     });
     // 撤退掩体排序：封闭性优先（openness 升序），同封闭性取离 NPC 更远者（dist 降序），
@@ -2053,22 +2085,45 @@ mod tests {
         let player = GridPos::new(2, 4); // 玩家在西侧
         let shielded = find_cover_shielding(&map, npc, player, 99);
         assert!(!shielded.is_empty(), "遮挡掩体应有候选");
+        // 🔴 **断言里不许再抄实现的那套公式**（2026-10-15）。
+        // 原来的写法是把实现里的  点积原样复制进断言 ⇒ **恒真、永远抓不到
+        // 任何东西**（判据与实现同源 = 自证）。下面改成断言**几何事实**本身。
         for c in &shielded {
             assert!(map.is_passable(c.pos));
-            // 存在邻接阻挡格且在 npc→player 半平面
-            let ok = NEIGHBOR_OFFSETS.iter().any(|&(dx, dy)| {
+            // 存在这样一个邻接阻挡格：**从候选格看去，它挡在自己与玩家之间**。
+            // 这一条独立于实现怎么算 —— 它直接量"这个位置到底挡不挡枪"。
+            let blocked_between = NEIGHBOR_OFFSETS.iter().any(|&(dx, dy)| {
                 let n = GridPos::new(c.pos.x + dx, c.pos.y + dy);
                 if !map.in_bounds(n) || map.is_passable(n) {
                     return false;
                 }
-                let bx = (n.x - npc.x) as f32;
-                let bz = (n.y - npc.y) as f32;
-                let px = (player.x - npc.x) as f32;
-                let pz = (player.y - npc.y) as f32;
-                bx * px + bz * pz > 0.0
+                let bx = (n.x - c.pos.x) as f32;
+                let bz = (n.y - c.pos.y) as f32;
+                let qx = (player.x - c.pos.x) as f32;
+                let qy = (player.y - c.pos.y) as f32;
+                bx * qx + bz * qy > 0.0
             });
-            assert!(ok, "非遮挡掩体不应返回: {:?}", c.pos);
+            assert!(
+                blocked_between,
+                "返回了「阻挡格不在候选格与玩家之间」的格子 —— 站上去挡不住枪: {:?}",
+                c.pos
+            );
         }
+        // 🔴 **区分度来源**：阻挡格 (4,4) **朝向玩家那一侧**的邻格 (3,4) 必须被排除。
+        // 这一档正是原 bug 的漏掉的那一格：对同一个阻挡格，四个邻格算出的  点积
+        // **完全一样** ⇒ 只用那一条判据会把整圈四格一起放行。
+        let exposed = GridPos::new(3, 4);
+        assert!(
+            !shielded.iter().any(|c| c.pos == exposed),
+            "(3,4) 在阻挡格 (4,4) 的**西侧**、而玩家也在西侧 ⇒ 站上去阻挡格在背后、
+             一点不挡枪，绝不该被当成遮挡掩体（这正是原实现漏掉的那一格）"
+        );
+        // 正对照：真正背弹的那一格必须**在**结果里（否则上面那条断言可能只是"什么都没返回"）
+        let shielded_ok = GridPos::new(5, 4);
+        assert!(
+            shielded.iter().any(|c| c.pos == shielded_ok),
+            "真正背弹的 (5,4)（阻挡格东侧、玩家在西侧）必须被返回 ——              它不在结果里说明过滤过头了"
+        );
         // 玩家与 NPC 同格：无遮挡掩体（防御性）
         assert!(find_cover_shielding(&map, npc, npc, 99).is_empty());
         // 掩体在阻挡格背后（远离玩家一侧）应被排除：NPC 东侧有另一阻挡格时，
