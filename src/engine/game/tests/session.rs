@@ -16,7 +16,7 @@ use super::*;
         game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
             crate::engine::objective::GameRule::Survive { waves: 5 },
         ));
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let camera = Camera::new();
         for expected in 1..=5u32 {
             assert_eq!(game.wave, expected, "波次必须连续推进到 rule.waves");
@@ -45,7 +45,7 @@ use super::*;
         game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
             crate::engine::objective::GameRule::Survive { waves: 1 },
         ));
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let camera = Camera::new();
         game.npcs.clear();
         game.wave_timer = 0.0;
@@ -118,7 +118,7 @@ use super::*;
     #[test]
     fn grenade_self_damage_capped_not_fatal() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.hud.health = 100.0;
         // 玩家在 (0, 1.6, 0)，爆炸在 3m 外（半径 8m 内，fall ≈ 0.625）
         game.spawn_explosion([3.0, 0.0, 0.0], 8.0, 120.0, true);
@@ -928,11 +928,11 @@ use super::*;
     #[test]
     fn restart_clears_kill_feed() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.hud.push_kill("你被击杀了".to_string());
         assert!(!game.hud.kill_feed.is_empty(), "前置：feed 里应有一条");
         game.game_state = GameState::GameOver;
-        game.request_restart(&glam::Vec3::ZERO);
+        game.request_restart();
         assert!(
             game.hud.kill_feed.is_empty(),
             "重开后不得残留上一局的击杀提示"
@@ -957,7 +957,7 @@ use super::*;
         game.obj_state = Some(crate::engine::objective::ObjectiveState::new(
             crate::engine::objective::GameRule::Survive { waves: 2 },
         ));
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.hud.health = 50.0; // 半血，验证补给回复
         game.grenades = 0;
         let camera = Camera::new();
@@ -996,13 +996,13 @@ use super::*;
     #[test]
     fn restart_resets_jump_state() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         // 模拟"冲刺跳之后在空中被打死"：仍在上升 + 带着水平惯性 + 空格一直没松
         game.jump_vel = JUMP_SPEED;
         game.jump_hvel = glam::Vec3::new(6.0, 0.0, 0.0);
         game.jump_pressed = true;
         game.game_state = GameState::GameOver;
-        game.request_restart(&glam::Vec3::ZERO);
+        game.request_restart();
         assert_eq!(game.jump_vel, 0.0, "重开后不得带上一局的上升速度");
         assert_eq!(
             game.jump_hvel,
@@ -1016,7 +1016,7 @@ use super::*;
     #[test]
     fn npc_visibility_refreshes_within_the_window() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.npcs.truncate(1);
         // 3m 高窄柱挡在玩家与 NPC 之间（与 `npc_occluded_by_obstacle_between` 同一套布景）
         game.world.bodies.push(physics::Body::new_static(
@@ -1055,7 +1055,7 @@ use super::*;
     #[test]
     fn npc_occluded_by_obstacle_between() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.npcs.truncate(1);
         // 2026-08-23：自建确定性障碍（3m 高窄柱）——地图障碍部署位置随改版漂移，
         // 高层建筑斜线必挡、低屏障又太矮；自建柱体唯一确定
@@ -1099,5 +1099,57 @@ use super::*;
         assert!(
             game.npc_occluded(0),
             "高墙正后方 NPC 应完全遮挡（双采样均被挡）"
+        );
+    }
+
+    /// 🔴 **三个切地图入口必须都重建据点状态**（多入口同构）。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 9 条，已对着代码确认）：
+    /// 切地图有三个入口 —— `init_map_system`（首次加载）、`reload_current_map`（热重载）、
+    /// **`advance_level`（按 N 进下一关）**，而**只有前两个重建了 `obj_state`**
+    /// ⇒ 进第 2 关后仍在用**第 1 关**的胜负规则与据点位置。
+    ///
+    /// 现在三者共用 `rebuild_obj_state_from_map()`。判据逐入口扫描：
+    /// **每个入口的函数体里都必须出现这个调用**。
+    #[test]
+    fn every_map_switch_entry_rebuilds_the_objective_state() {
+        let src = include_str!("../session.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+
+        for entry in [
+            "fn init_map_system(",
+            "fn reload_current_map(",
+            "fn advance_level(",
+        ] {
+            let start = prod
+                .find(entry)
+                .unwrap_or_else(|| panic!("session.rs 里找不到 {entry}"));
+            let rest = &prod[start..];
+            // 函数体的近似边界：下一个同缩进的 `    pub(crate) fn ` / `    fn `
+            let end = rest[1..]
+                .find("\n    pub(crate) fn ")
+                .or_else(|| rest[1..].find("\n    fn "))
+                .map(|i| i + 1)
+                .unwrap_or(rest.len());
+            let body = &rest[..end];
+            let code: String = body
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                code.contains("rebuild_obj_state_from_map()"),
+                "{entry} 里没有重建据点状态 —— 切到新地图后会继续用**上一张地图**的\n\
+                 胜负规则与据点位置。三个入口（首次加载 / 热重载 / 进下一关）必须同构。"
+            );
+        }
+
+        // 前置自检（教训 27）：确认那个共用函数真的存在
+        assert!(
+            prod.contains("fn rebuild_obj_state_from_map("),
+            "连 `rebuild_obj_state_from_map` 都没有 —— 判据的前提不成立"
         );
     }

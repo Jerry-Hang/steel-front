@@ -1206,7 +1206,7 @@ impl GameApp {
                 // autostart 段 ⇒ 不补这一步，游戏会停在菜单态、**NPC 永远不会生成**。
                 // 13 次取景失败里有相当一部分就是这个（我一直在对着没有士兵的世界摆机位）。
                 if self.game.state() == GameState::StartMenu {
-                    self.game.on_any_key(&self.camera.position());
+                    self.game.on_any_key();
                 }
                 match self.game.npcs.get(i) {
                     Some(n) => {
@@ -1392,7 +1392,7 @@ impl GameApp {
             let st = self.game.state();
             if st == GameState::StartMenu || st == GameState::LoadingMap {
                 log::info!("autostart: RV3D_AUTOSTART=1 自动开始");
-                self.game.on_any_key(&self.camera.position());
+                self.game.on_any_key();
             }
             // RV3D_SWITCH_WEAPON=n：进入后自动切到 n 号武器（复现切枪崩溃用）；
             // RV3D_SWITCH_WEAPON_AFTER=秒：延迟切枪（模拟玩一会儿再切）
@@ -3473,7 +3473,7 @@ impl GameApp {
                 // 开始菜单/加载中：点一下即开局（手机上只有触控，没有键盘）。
                 let st = self.game.state();
                 if st == GameState::StartMenu || st == GameState::LoadingMap {
-                    self.game.on_any_key(&self.camera.position());
+                    self.game.on_any_key();
                     return;
                 }
                 if in_fire_zone && self.touch_fire.is_none() {
@@ -3934,7 +3934,7 @@ impl ApplicationHandler for GameApp {
                         || self.game.state() == GameState::LoadingMap)
                     && key_code != KeyCode::Escape
                 {
-                    self.game.on_any_key(&self.camera.position());
+                    self.game.on_any_key();
                 }
 
                 // 设置面板键位绑定监听：非 ESC 按键完成绑定，ESC 取消；随后不再走常规按键
@@ -4094,7 +4094,7 @@ impl ApplicationHandler for GameApp {
                                     || matches!(st, GameState::Victory(_) | GameState::Defeat)
                                 {
                                     log::info!("game: 重开本关");
-                                    self.game.request_restart(&self.camera.position());
+                                    self.game.request_restart();
                                 } else if st == GameState::Playing && !self.game.settings_open() {
                                     self.game.request_reload();
                                 }
@@ -4252,7 +4252,7 @@ impl ApplicationHandler for GameApp {
                                 || matches!(st, GameState::Victory(_) | GameState::Defeat)
                             {
                                 log::info!("game: Enter 重开本关");
-                                self.game.request_restart(&self.camera.position());
+                                self.game.request_restart();
                             }
                         }
                     }
@@ -4262,7 +4262,7 @@ impl ApplicationHandler for GameApp {
                             log::info!("settings: N 键补给弹药");
                             self.game.give_ammo();
                         } else if pressed && matches!(self.game.state(), GameState::Victory(_)) {
-                            if self.game.advance_level(&self.camera.position()) {
+                            if self.game.advance_level() {
                                 log::info!("game: N 进入下一关");
                             } else {
                                 log::info!("game: 已通关（最后一关完成）");
@@ -4338,7 +4338,7 @@ impl ApplicationHandler for GameApp {
                             // 开始菜单/加载中：点击也视为"任意键"开局（键盘焦点不可靠的环境兜底）
                             let st = self.game.state();
                             if st == GameState::StartMenu || st == GameState::LoadingMap {
-                                self.game.on_any_key(&self.camera.position());
+                                self.game.on_any_key();
                             }
                             if st == GameState::Playing && !self.command_open {
                                 self.fire_requested = true;

@@ -279,52 +279,24 @@ impl Game {
         };
         match crate::engine::map::MapManager::load(&path) {
             Ok(mgr) => {
-                use crate::engine::objective::GameRule;
-                let rule = match mgr.data().rule.kind.as_str() {
-                    "kill" => GameRule::KillCount {
-                        target: mgr.data().rule.target,
-                    },
-                    "time" => GameRule::TimeLimit {
-                        seconds: mgr.data().rule.seconds,
-                    },
-                    "survive" => GameRule::Survive {
-                        waves: mgr.data().rule.waves.max(1),
-                    },
-                    _ => GameRule::CapturePoints {
-                        required: mgr.data().rule.required.max(1),
-                    },
-                };
-                let mut pts = Vec::new();
-                for o in mgr
-                    .data()
-                    .objectives
-                    .iter()
-                    .filter(|o| o.kind.eq_ignore_ascii_case("capture"))
-                {
-                    pts.push(crate::engine::objective::CapturePoint::new(
-                        o.id.clone(),
-                        o.x,
-                        o.z,
-                        o.radius,
-                        o.capture_time,
-                    ));
-                }
-                let mut obj_state = crate::engine::objective::ObjectiveState::new(rule);
-                obj_state.points = pts;
-                log::info!(
-                    "map: 关卡系统启用 {}（{} 出生点 / {} 障碍 / {} 目标，规则 {}）",
-                    mgr.data().name,
-                    mgr.data().spawn_points.len(),
-                    mgr.data().obstacles.len(),
-                    mgr.data().objectives.len(),
-                    obj_state.rule.rule_kind()
-                );
+                // 🔴 **不再内联构建据点状态**（2026-10-15，外部复核指出第 9 条）：
+                // 这里原来自己写了一整份"从 mgr 建 rule + points"的逻辑，而
+                // `reload_current_map` 里也有一份、`advance_level` 那份干脆没有 ——
+                // **同一件事三处实现**（本仓最贵的缺陷形态）。
+                // 现在统一走 `rebuild_obj_state_from_map()`。
+                //
+                // ⚠️ **顺序要紧**：必须**先把 `map_mgr` 装上去**，共用函数才读得到新地图；
+                // 而原来那段内联逻辑在 `self.map_mgr = Some(mgr)` **之前**跑，
+                // 并且用 `self.obj_state.as_ref()`（**旧值**）去推旗杆碰撞体
+                // ⇒ 首次调用时它是 `None`（**那段旗杆一次都没生效过**），
+                // 第二次调用时它已经是上一张地图的（**用错数据**）。
                 self.map_mgr = Some(mgr);
                 self.map_path = Some(path);
                 self.level_list = list;
                 self.level_idx = 0;
+                self.rebuild_obj_state_from_map();
                 // 据点立柱碰撞体（旗杆 0.4m 宽 × 4m 高）：玩家不可穿过据点标记
-                // （修复"穿越障碍物"——据点此前只渲染 marker、无任何碰撞体）
+                // —— 用**本次刚建好的** `obj_state.points`
                 if let Some(obj) = self.obj_state.as_ref() {
                     for pt in &obj.points {
                         self.world.bodies.push(Body::new_static(
@@ -333,7 +305,13 @@ impl Game {
                         ));
                     }
                 }
-                self.obj_state = Some(obj_state);
+                log::info!(
+                    "map: 关卡系统启用 {}（{} 出生点 / {} 障碍 / {} 目标）",
+                    self.map_mgr.as_ref().map(|m| m.data().name.clone()).unwrap_or_default(),
+                    self.map_mgr.as_ref().map(|m| m.data().spawn_points.len()).unwrap_or(0),
+                    self.map_mgr.as_ref().map(|m| m.data().obstacles.len()).unwrap_or(0),
+                    self.obj_state.as_ref().map(|o| o.points.len()).unwrap_or(0),
+                );
                 // 加载完成 → LoadingMap 态（按任意键开玩）
                 self.game_state = GameState::LoadingMap;
             }
@@ -343,22 +321,26 @@ impl Game {
         }
     }
     /// 开始菜单任意键：进入游戏（开始/重开一局）
-    pub(crate) fn on_any_key(&mut self, player: &glam::Vec3) {
+    pub(crate) fn on_any_key(&mut self) {
         if self.game_state == GameState::StartMenu || self.game_state == GameState::LoadingMap {
-            self.start_run(player);
+            self.start_run();
         }
     }
     /// 死亡/失败结算界面 R：重开一局（重开本关）
-    pub(crate) fn request_restart(&mut self, player: &glam::Vec3) {
+    pub(crate) fn request_restart(&mut self) {
         match self.game_state {
             GameState::GameOver | GameState::Victory(_) | GameState::Defeat => {
-                self.start_run(player);
+                self.start_run();
             }
             _ => {}
         }
     }
     /// 开始一局：复位血量/弹药/分数/波次/关卡，重建第 1 关地图，清掉残留 NPC 后生成第 1 波
-    pub(crate) fn start_run(&mut self, player: &glam::Vec3) {
+    /// ⚠️ **不再收 `player` 参数**（2026-10-15）：它原来只用来当刷怪中心，
+    /// 而那是**重置前**的相机位置 ⇒ 死亡重开时第 1 波会按"死亡地点"刷怪。
+    /// 现在一律用 `self.player_body.pos`（本函数内部刚重置好的真实出生点）。
+    /// **参数删掉的好处是：以后没人能再误传一个旧坐标进来。**
+    pub(crate) fn start_run(&mut self) {
         self.hud.health = self.hud.max_health;
         self.hud.ammo = self.hud.max_ammo;
         self.hud.reserve = self.weapons.active_firearm_ref().reserve();
@@ -382,6 +364,10 @@ impl Game {
         self.hit_damages.clear();
         self.impact_marks.clear();
         self.pending_kick = (0.0, 0.0);
+        // ⚠️ 入参 `player` 是**调用方（相机）的位置**，不是下面重置后的出生点。
+        // 原来 `spawn_wave(1, player)` 直接用它 ⇒ **死亡重开时第 1 波按"死亡地点"刷怪**
+        //（2026-10-15，外部复核指出第 9 条，已对着代码确认）。
+        // ⇒ 末尾统一改用 `self.player_body.pos`（重置后的真实出生点）。
         // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
         self.apply_level(1);
         // 关卡系统：玩家出生点用地图 Blue 出生点（未启用时保持原点）
@@ -427,9 +413,20 @@ impl Game {
             self.npcs.clear();
         }
         if self.stress {
-            self.spawn_stress_battle(player);
+            // 用**重置后**的出生点，不用入参（见上面的说明）
+            let spawn_center = glam::Vec3::new(
+                self.player_body.pos.x,
+                self.player_body.pos.y,
+                self.player_body.pos.z,
+            );
+            self.spawn_stress_battle(&spawn_center);
         } else {
-            self.spawn_wave(1, player);
+            let spawn_center = glam::Vec3::new(
+                self.player_body.pos.x,
+                self.player_body.pos.y,
+                self.player_body.pos.z,
+            );
+            self.spawn_wave(1, &spawn_center);
         }
         // 关卡系统：重开本关 → 据点进度/归属/推进方归零（rule 保持当前地图的规则）
         if let Some(obj) = self.obj_state.as_mut() {
@@ -1042,19 +1039,17 @@ impl Game {
             .unwrap_or_default()
     }
     /// 关卡系统热重载（F5）：重新读取当前地图 TOML 并重建物理/AI 网格/据点
-    pub(crate) fn reload_current_map(&mut self) -> Result<(), String> {
-        let Some(path) = self.map_path.clone() else {
-            return Ok(()); // 未启用关卡系统：无事可做
-        };
-        {
-            let Some(mgr) = self.map_mgr.as_mut() else {
-                return Ok(());
-            };
-            mgr.reload(&path)?;
-        }
-        // 重建物理/AI 网格（复用 apply_level 的障碍→刚体/网格逻辑）
-        self.apply_level(self.level);
-        // 重建据点（进度归零，规则沿用新地图的 rule）
+    /// **按当前 `map_mgr` 重建据点状态**（规则 + 占领点）。
+    ///
+    /// 🔴 存在理由（2026-10-15，外部复核指出第 9 条，已对着代码确认）：
+    /// 原来"切地图"有三个入口，**只有两个重建了 `obj_state`**：
+    /// * `init_map_system` ✅ 建；
+    /// * `reload_current_map` ✅ 建（就是下面这段被抽出来的逻辑）；
+    /// * **`advance_level`（按 N 进下一关）❌ 没建** —— 它只换了 `map_mgr` 就调
+    ///   `start_run`，于是**第 2 关继续用第 1 关的胜负规则与据点位置**。
+    ///
+    /// 抽成一个函数之后三个入口调用同一份逻辑 —— 这正是"多入口必须同构"。
+    fn rebuild_obj_state_from_map(&mut self) {
         let rule = {
             let d = self.map_mgr.as_ref().map(|m| &m.data().rule);
             match d.map(|r| r.kind.as_str()) {
@@ -1094,6 +1089,22 @@ impl Game {
             })
             .unwrap_or_default();
         self.obj_state = Some(obj);
+    }
+
+    pub(crate) fn reload_current_map(&mut self) -> Result<(), String> {
+        let Some(path) = self.map_path.clone() else {
+            return Ok(()); // 未启用关卡系统：无事可做
+        };
+        {
+            let Some(mgr) = self.map_mgr.as_mut() else {
+                return Ok(());
+            };
+            mgr.reload(&path)?;
+        }
+        // 重建物理/AI 网格（复用 apply_level 的障碍→刚体/网格逻辑）
+        self.apply_level(self.level);
+        // 重建据点（进度归零，规则沿用新地图的 rule）—— 与另外两个入口共用同一份逻辑
+        self.rebuild_obj_state_from_map();
         log::info!("map: 热重载完成（{}）", path);
         Ok(())
     }
@@ -1101,7 +1112,7 @@ impl Game {
     ///
     /// 2026-09-08：删掉夹在这里的 `player_speed()`——它是一次误插入（把本注释和函数体
     /// 隔开了），且无人调用：持枪摆动取的是玩家脚底实际位移 / dt，见 `main.rs` 那条说明。
-    pub(crate) fn advance_level(&mut self, player: &glam::Vec3) -> bool {
+    pub(crate) fn advance_level(&mut self) -> bool {
         if self.level_list.is_empty() {
             return false; // 单关模式（RV3D_MAP）：无下一关
         }
@@ -1115,7 +1126,11 @@ impl Game {
                 self.map_mgr = Some(mgr);
                 self.map_path = Some(path);
                 self.apply_level(self.level);
-                self.start_run(player);
+                // 🔴 **必须重建据点状态**（2026-10-15，外部复核指出第 9 条）：
+                // 另外两个切图入口（`init_map_system` / `reload_current_map`）都建了，
+                // **只有这里漏了** ⇒ 进第 2 关后仍在用**第 1 关**的胜负规则与据点位置。
+                self.rebuild_obj_state_from_map();
+                self.start_run();
                 log::info!(
                     "map: 进入下一关 {}（第 {} 关）",
                     self.map_mgr

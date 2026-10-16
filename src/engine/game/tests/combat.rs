@@ -12,7 +12,7 @@ use super::*;
     #[test]
     fn ai_target_occlusion_respects_geometry() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.npcs.truncate(1);
         let player = glam::Vec3::new(-40.0, 0.0, 0.0);
         game.player_body.pos = Pv::new(-40.0, 0.0, 0.0);
@@ -46,7 +46,7 @@ use super::*;
     #[test]
     fn player_damage_and_gameover() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         // 把一只 NPC 放到玩家（原点）脚边，保证进入 Attack
         game.npcs[0].position = [1.0, 0.0, 1.0];
         game.hud.health = 6.0;
@@ -64,7 +64,7 @@ use super::*;
     #[test]
     fn death_resets_all_ammo() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         // 消耗当前武器（AK-12M 30 发弹匣）10 发（每发后推进冷却）
         let cam = Camera::new();
         for _ in 0..10 {
@@ -183,7 +183,7 @@ use super::*;
     #[test]
     fn weapon_switch_stability_all_slots() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let cam = Camera::new();
         for slot in 0..ALL_WEAPONS.len() {
             game.switch_weapon(slot);
@@ -621,7 +621,7 @@ use super::*;
     #[test]
     fn fps_player_moves_with_wasd() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let cam = Camera::new(); // yaw=0 → forward -Z
         let start_z = game.player_body.pos.z;
         game.set_movement(true, false, false, false);
@@ -653,7 +653,7 @@ use super::*;
     #[test]
     fn fps_player_collides_with_map_obstacle() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         // 取关卡地图第一个障碍盒（AABB 中心 (x,z) 半宽 half_w/half_d）；
         // 玩家放其 +Z 侧 5m，W 前进（-Z 方向）应被挡在 0.5m（玩家半径）外
         let ob = game.map.obstacles[0];
@@ -678,7 +678,7 @@ use super::*;
     #[test]
     fn player_never_enters_any_obstacle_aabb() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         assert!(!game.world.bodies.is_empty(), "关卡应有障碍刚体");
         let r = game.player_body.radius();
         let mut state = 0x9E3779B97F4A7C15u64;
@@ -712,7 +712,7 @@ use super::*;
     #[test]
     fn firearm_reload_cycle_via_game() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let origin = [0.0, 5.0, 0.0];
         let dir = [0.0, 0.0, -1.0];
         let mut fired = 0;
@@ -737,7 +737,7 @@ use super::*;
     #[test]
     fn fire_applies_recoil_kick() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         assert!(game.fire([0.0, 5.0, 0.0], [0.0, 0.0, -1.0]));
         let (pitch_kick, _) = game.drain_kick();
         assert!(pitch_kick > 0.0, "上跳后坐力应为正");
@@ -747,7 +747,7 @@ use super::*;
     #[test]
     fn projectile_hit_shows_hit_marker() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let npc_pos = game.npcs[0].position;
         assert!(game.fire(
             [npc_pos[0], npc_pos[1] + 2.0, npc_pos[2]],
@@ -765,7 +765,7 @@ use super::*;
     #[test]
     fn wave_profile_drives_spawn() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let p = wave_profile(1);
         assert_eq!(game.npcs.len(), p.count as usize, "波次数量");
         for npc in &game.npcs {
@@ -778,7 +778,7 @@ use super::*;
     #[test]
     fn boss_wave_spawns_slow_tanky_elite() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.spawn_wave(5, &glam::Vec3::ZERO);
         let p = wave_profile(5);
         assert_eq!(p.kind, WaveKind::Boss);
@@ -797,7 +797,7 @@ use super::*;
     #[test]
     fn reinforcement_wave_spawns_mid_wave() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.spawn_wave(3, &glam::Vec3::ZERO);
         let p = wave_profile(3);
         assert_eq!(p.kind, WaveKind::Reinforced);
@@ -823,7 +823,7 @@ use super::*;
     #[test]
     fn special_waves_keep_clear_and_progress() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         // 常规波（波 2）：清掉当前 npc 后应正常推进到波 3
         game.spawn_wave(2, &glam::Vec3::ZERO);
         assert_eq!(game.wave, 2);
@@ -861,7 +861,7 @@ use super::*;
     #[test]
     fn settings_panel_toggle_and_adjust() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         assert!(!game.settings_open(), "初始应关闭");
         game.toggle_settings();
         assert!(game.settings_open(), "toggle 后应打开");
@@ -1169,7 +1169,7 @@ use super::*;
     #[test]
     fn restart_clears_in_flight_grenades_and_explosions() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         // 造一颗"在飞"的手榴弹 + 一团爆炸（都还没过期）
         game.grenades_vec.push(Grenade::new(
             [0.0, 1.5, 0.0],
@@ -1183,7 +1183,7 @@ use super::*;
             "前置：场上应有在飞手榴弹与爆炸"
         );
         game.game_state = GameState::GameOver;
-        game.request_restart(&glam::Vec3::ZERO);
+        game.request_restart();
         assert!(game.grenades_vec.is_empty(), "重开后不得残留上一局的手榴弹");
         assert!(game.explosions.is_empty(), "重开后不得残留上一局的爆炸");
         assert_eq!(game.shake_timer, 0.0, "重开后震屏应归零");

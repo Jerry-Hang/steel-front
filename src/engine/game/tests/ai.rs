@@ -590,7 +590,7 @@ use super::*;
     #[test]
     fn level_advances_after_waves_per_level() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         assert_eq!(game.level, 1);
         let l1 = game.map.obstacles.clone();
         // 快速清完 3 波（每波清空 npcs 后推进 3.3s 倒计时）
@@ -613,7 +613,7 @@ use super::*;
     #[test]
     fn level_does_not_advance_before_last_wave() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.npcs.clear();
         for _ in 0..330 {
             game.update(0.01, &Camera::new());
@@ -667,7 +667,7 @@ use super::*;
     #[test]
     fn hud_game_screen_has_score_wave_crosshair() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.hud.fps = 60.0;
         game.score = 30;
         game.wave = 2;
@@ -874,7 +874,7 @@ use super::*;
         );
         // ② 真在打的一局：波次进攻方从出生起就已知目标
         let mut run = Game::new();
-        run.on_any_key(&glam::Vec3::ZERO);
+        run.on_any_key();
         run.update(1.0 / 60.0, &cam);
         assert!(!run.npcs.is_empty());
         assert!(
@@ -884,7 +884,7 @@ use super::*;
         // ③ 压力模式：红蓝对抗走 pick_stress_targets，不经过这条通道
         let mut stress = Game::new();
         stress.stress = true;
-        stress.on_any_key(&glam::Vec3::ZERO);
+        stress.on_any_key();
         stress.update(1.0 / 60.0, &cam);
         assert!(!stress.npcs.is_empty());
         assert!(
@@ -898,7 +898,7 @@ use super::*;
     #[test]
     fn player_burst_fires_three_rounds() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let shots_before = game.shots;
         let fired = game.fire_burst_player([0.0, 1.6, 0.0], [0.0, 0.0, -1.0], 3);
         assert_eq!(fired, 3, "三连发应打满 3 发");
@@ -927,7 +927,7 @@ use super::*;
     #[test]
     fn start_menu_any_key_begins_run() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         assert_eq!(game.state(), GameState::Playing);
         assert_eq!(game.wave, 1);
         assert_eq!(game.score, 0);
@@ -941,7 +941,7 @@ use super::*;
         game.game_state = GameState::GameOver;
         game.score = 999;
         game.hud.health = 0.0;
-        game.request_restart(&glam::Vec3::ZERO);
+        game.request_restart();
         assert_eq!(game.state(), GameState::Playing);
         assert_eq!(game.score, 0);
         assert_eq!(game.wave, 1);
@@ -952,7 +952,7 @@ use super::*;
     #[test]
     fn wave_spawns_after_clear() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         assert_eq!(game.wave, 1);
         assert_eq!(game.npcs.len(), 6);
         game.npcs.clear();
@@ -971,7 +971,7 @@ use super::*;
     #[test]
     fn wave_scales_count_speed_hp() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let (c1, s1, h1) = (game.npcs.len(), game.npcs[0].speed, game.npcs[0].max_hp);
         game.npcs.clear();
         for _ in 0..320 {
@@ -987,7 +987,7 @@ use super::*;
     #[test]
     fn wave_clear_awards_bonus() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.npcs.clear();
         game.update(0.01, &Camera::new());
         assert_eq!(game.score, WAVE_CLEAR_BONUS, "clearing wave 1 awards bonus");
@@ -996,7 +996,7 @@ use super::*;
     #[test]
     fn spawn_wave_purges_leftovers() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         let old_ids: Vec<usize> = game.npcs.iter().map(|n| n.id).collect();
         game.spawn_wave(3, &glam::Vec3::ZERO);
         assert_eq!(game.npcs.len(), 10, "wave 3 spawns 4+2·3=10");
@@ -1162,7 +1162,7 @@ use super::*;
     #[test]
     fn npc_visibility_cache_notices_index_shifts() {
         let mut game = Game::new();
-        game.on_any_key(&glam::Vec3::ZERO);
+        game.on_any_key();
         game.npcs.truncate(4);
         let starts = game.npc_vis_scans.get();
         game.refresh_npc_visibility();
