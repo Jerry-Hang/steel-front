@@ -2041,7 +2041,7 @@ mod tests {
     /// ⇒ 所有用 `text_width` 居中的中文**系统性偏左**，偏移随字数线性增长。
     ///
     /// ⚠️ 判据用**差分**量步进（`width(两字) - width(一字)`），不用绝对值 ——
-    /// 绝对值会把末尾那次 `- FONT_SPACING` 的修正也搅进来，
+    /// 绝对值会把它和末尾那次 `- FONT_SPACING` 的修正也算进去，
     /// 而差分量恰好只留下"每字步进"，正是要与 `render_text` 对齐的那个量。
     #[test]
     fn text_width_per_char_step_matches_render_text() {
