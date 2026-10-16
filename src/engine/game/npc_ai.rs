@@ -104,16 +104,25 @@ impl Game {
         let yaw_to = yaw_to_target(target_pos.x, target_pos.z, npc.position[0], npc.position[2]);
         let facing_angle = angle_diff(ctx.player_yaw, yaw_to).abs();
         // 绕背判定用的"目标朝向"：普通模式 = 玩家视角；压力模式 = 朝向目标 NPC 的方向
-        // （facing 坐标系：atan2(dz,dx)，与 npc.facing 同源可比）
+        // （facing 坐标系：atan2(dx,dz)，与 npc.facing 同源可比）
         let target_yaw = if ctx.stress && ctx.targets.get(index).copied().flatten().is_some() {
-            (npc.position[2] - target_pos.z).atan2(npc.position[0] - target_pos.x)
+            // 🔴 与 `npc.facing` 同源 ⇒ 也必须用"0 = +Z"（`atan2(dx, dz)`），
+            // 否则改完生产者之后这里会与 `tf`（= 目标的 facing）不同源、
+            // 压力模式的"目标是否面朝我"判定会整体偏 90°。
+            //
+            // ⚠️ **方向不能跟着一起改**：语义是「**目标 → 本 NPC**」的朝向
+            //（拿它去和"目标的 facing"比），所以是 `NPC − 目标`。
+            // 我第一版把两项一起调换 ⇒ 约定对了、方向反了 ⇒
+            // `stress_flanker_tactic_follows_target_facing` 当场红（正面站位判成了 Ambush）。
+            // **这正是那条测试的价值：它钉的是一条语义，不是一串坐标。**
+            (npc.position[0] - target_pos.x).atan2(npc.position[2] - target_pos.z)
         } else {
             ctx.player_yaw
         };
         // 「目标是否面朝本 NPC」：普通模式 = 玩家视角（行为不变）；压力模式 = 目标 NPC 的
         // 朝向 facing 是否大致指向本 NPC（总指挥指令单 #1 阶段二：让 NPC-vs-NPC 触发包抄/偷袭）。
-        // 坐标系：target_yaw = (本NPC.z - 目标.z).atan2(本NPC.x - 目标.x) 即「目标→本NPC」方向，
-        // 与 npc.facing（atan2(dz,dx)）同源可直接比。angle_diff 已处理 ±π 环绕。
+        // 坐标系：target_yaw = (本NPC.x - 目标.x).atan2(本NPC.z - 目标.z) 即「目标→本NPC」方向，
+        // 与 npc.facing（atan2(dx,dz)，0 = +Z）同源可直接比。angle_diff 已处理 ±π 环绕。
         let target_facing = match (ctx.stress, ctx.targets.get(index).copied().flatten()) {
             (true, Some((_, _, tf))) => angle_diff(tf, target_yaw).abs() < std::f32::consts::FRAC_PI_2,
             _ => facing_angle < std::f32::consts::FRAC_PI_2,
@@ -321,10 +330,26 @@ impl Game {
         // 朝向更新：移动时朝移动方向；站定时面向目标（渲染士兵模型用）
         let mdx = npc.position[0] - bx;
         let mdz = npc.position[2] - bz;
+        // 🔴 **统一到"0 = +Z"这一套**（2026-10-15，外部复核指出第 10 条，已对着代码确认）。
+        //
+        // `npc.facing` 的**消费者**全部假设 `facing` 是"绕 Y 的旋转角、0 = +Z"：
+        //   `lib.rs` 的 `NpcVisual { yaw: n.facing }` → `Mat4::from_rotation_y(yaw)`
+        //   （`from_rotation_y(θ)` 把 `(0,0,1)` 映到 `(sin θ, 0, cos θ)`）；
+        //   枪口焰位置 `(sin, cos) * 0.85`（那行注释自己写着"0 = +Z"）；
+        //   网络广播的 `NpcSnapshot.facing`（远端用同一套渲染）。
+        //
+        // 而**生产者**写的是 `atan2(dz, dx)` —— 那是"0 = +X"。
+        // 两者差 `π/2`（`atan2(z,x) = π/2 − atan2(x,z)`）⇒ **所有 NPC 侧着身子走**、
+        // 站立开火时模型与枪口焰一起偏 90°。
+        //
+        // ⚠️ 两处**一起改**才对：
+        //   · 移动时的朝向（原来 `mdz.atan2(mdx)`）；
+        //   · **静止时的朝向**（原来 `(NPC - 目标).atan2(..)`，既用错约定、
+        //     又把方向写反了 —— 与 `waves.rs` 出生时的"目标 − NPC"正好差 180°）。
         if mdx * mdx + mdz * mdz > 1e-6 {
-            npc.facing = mdz.atan2(mdx);
+            npc.facing = mdx.atan2(mdz);
         } else {
-            npc.facing = (npc.position[2] - target_pos.z).atan2(npc.position[0] - target_pos.x);
+            npc.facing = (target_pos.x - npc.position[0]).atan2(target_pos.z - npc.position[2]);
         }
         // 攻击态站定：打位置日志，冒烟 harness 读日志后从对跖点瞄准点射
         if state == NpcState::Attack && prev != NpcState::Attack {

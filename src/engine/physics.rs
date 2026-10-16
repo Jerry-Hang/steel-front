@@ -481,9 +481,26 @@ impl PlayerBody {
     }
 
     /// 是否与任一刚体的 AABB（水平扩展 radius 后）重叠
+    /// 玩家是否与任一刚体**在三维上**重叠。
+    ///
+    /// 🔴 **必须与 `push_out_of_aabb` 同一套判据**（2026-10-15，外部复核指出第 10 条，
+    /// 已对着代码确认）：兄弟方法在 2026-09-13 专门加了 Y 轴判据
+    /// （`if head <= aabb.min.y || feet >= aabb.max.y { return None; }`），
+    /// 好让玩家**能站在矮箱/台基顶上而不被水平推开**；
+    /// 而这里原来只查水平 ⇒ **站在箱顶时 `push_out_of_aabb` 不推、`collides` 却报"重叠"**,
+    /// 两个方法对同一个几何状态给出相反答案。
+    ///
+    /// ⚠️ 现有调用点**全在测试里**（拿它当"推挤后是否还穿透墙"的判据），
+    /// 所以这属于**语义不一致**而不是线上故障；但语义不一致本身就会让下一个人写错判据。
     pub fn collides(&self, world: &World) -> bool {
+        let feet = self.pos.y;
+        let head = self.pos.y + self.eye_height;
         world.bodies.iter().any(|body| {
             let a = body.aabb();
+            // 垂直方向无交集 ⇒ 不算碰撞（与 `push_out_of_aabb` 逐字同源）
+            if head <= a.min.y || feet >= a.max.y {
+                return false;
+            }
             self.pos.x > a.min.x - self.radius
                 && self.pos.x < a.max.x + self.radius
                 && self.pos.z > a.min.z - self.radius
@@ -1162,15 +1179,29 @@ mod tests {
         world
             .bodies
             .push(Body::new(Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.5, 2.0, 0.5)));
+        // 🔴 玩家 y 从 5.0 改成 1.0（2026-10-15）：箱子 aabb 是 y∈[-2,2]，
+        // 而 `collides` 现在**与 `push_out_of_aabb` 一样带 Y 判据**
+        // ⇒ y=5.0 时垂直方向无交集、任何水平位置都不算碰撞（那样这条测试就成了恒假）。
+        // 本测试要量的是**水平外扩**，所以把玩家放进箱子的垂直区间里。
         // 箱面 z = 1.5，玩家圆心 z = 1.7：距箱面 0.2 < radius 0.4 → 碰撞
-        let near = PlayerBody::new(Vec3::new(0.0, 5.0, 1.7), 0.4, 1.6);
+        let near = PlayerBody::new(Vec3::new(0.0, 1.0, 1.7), 0.4, 1.6);
         assert!(near.collides(&world), "距箱面小于 radius 时应判定碰撞");
         // 圆心 z = 1.1：距箱面 0.4 == radius → 相切不算碰撞
-        let touching = PlayerBody::new(Vec3::new(0.0, 5.0, 1.1), 0.4, 1.6);
+        let touching = PlayerBody::new(Vec3::new(0.0, 1.0, 1.1), 0.4, 1.6);
         assert!(!touching.collides(&world), "相切不应判定为碰撞");
         // 圆心 z = 1.0：距箱面 0.5 > radius → 分离
-        let far = PlayerBody::new(Vec3::new(0.0, 5.0, 1.0), 0.4, 1.6);
+        let far = PlayerBody::new(Vec3::new(0.0, 1.0, 1.0), 0.4, 1.6);
         assert!(!far.collides(&world), "分离时不应判定为碰撞");
+
+        // 🔴 **区分度档**：水平完全重叠、但玩家**站在箱子顶上**
+        // ⇒ `collides` 必须为 false（与 `push_out_of_aabb` 同一套判据）。
+        // 这一档正是原实现漏掉的：它只查水平 ⇒ 会报"站在箱顶 = 重叠"。
+        let on_top = PlayerBody::new(Vec3::new(0.0, 2.01, 2.0), 0.4, 1.6);
+        assert!(
+            !on_top.collides(&world),
+            "站在箱子顶上（垂直无交集）不应判定为碰撞 —— 否则与 `push_out_of_aabb` 的\n\
+             「不推开、可以站在上面」直接矛盾"
+        );
     }
 
     #[test]

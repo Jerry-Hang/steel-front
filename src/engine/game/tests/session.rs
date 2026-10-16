@@ -348,9 +348,12 @@ use super::*;
     /// 红 NPC 站在蓝 NPC 背面（蓝 facing 背对红）→ 红应判定「目标背对我」→ Ambush。
     #[test]
     fn stress_flanker_tactic_follows_target_facing() {
-        // 蓝 NPC 面朝 +X 方向（facing = atan2(dz,dx)：dz=0,dx>0 → facing=0）
+        // 🔴 **坐标约定 2026-10-15 改过**（外部复核指出第 10 条）：
+        // `npc.facing` 现在是 `atan2(dx, dz)` —— **0 = +Z**（与渲染 `from_rotation_y`、
+        // 枪口焰 `(sin, cos)`、网络广播同一套）。原注释写的是 `atan2(dz,dx)`、`0 = +X`。
+        // ⇒ 要表达"+X"方向现在是 **`π/2`**（`atan2(1, 0) == FRAC_PI_2`）。
         let mut blue = npc_at(1, Team::Blue, [0.0, 0.0, 0.0]);
-        blue.facing = 0.0; // 面朝 +X
+        blue.facing = std::f32::consts::FRAC_PI_2; // 面朝 +X（0 = +Z 约定下 +X 是 π/2）
         blue.role = TacticalRole::Flanker;
         // 红 NPC 在蓝的正+X 侧 10m（蓝面朝它 → 目标面朝本 NPC）
         let mut red_front = npc_at(0, Team::Red, [10.0, 0.0, 0.0]);

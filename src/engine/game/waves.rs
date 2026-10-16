@@ -228,7 +228,10 @@ impl Game {
             hit_cooldown: 0.0,
             last_hp: hp,
             team: Team::Red,
-            facing: (player.z - z).atan2(player.x - x),
+            // 🔴 与 `npc_ai.rs` 的朝向更新**必须同一套约定**（0 = +Z = `atan2(dx, dz)`）
+            //（2026-10-15，外部复核指出第 10 条）：原来写的是 `atan2(dz, dx)`（0 = +X），
+            // 而渲染/枪口焰/网络都按 +Z 解算 ⇒ **出生瞬间所有 NPC 偏 90°**。
+            facing: (player.x - x).atan2(player.z - z),
             fire_accum: 0.0,
             knockback: [0.0, 0.0],
             grenade_timer: 0.0,
