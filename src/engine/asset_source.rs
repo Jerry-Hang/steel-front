@@ -63,8 +63,19 @@ impl MemSource {
     }
 
     /// 插入一项（路径用 `/` 分隔，与读取时传入的字符串一致）。
+    ///
+    /// 🔴 **这里负责把平台原生分隔符归一化成 `/`**（2026-10-15，外部复核指出第 1 条，
+    /// 已对着代码确认）：`preload_tree` 把 `PathBuf::to_str()` 的结果直接传进来，
+    /// 而那是**平台原生**的 —— **Windows 上 `e.path()` 给出 `assets\maps\index.toml`**
+    /// ⇒ 存进去的键全是反斜杠，而引擎与全部单测都按 `assets/maps/index.toml` 查表
+    /// ⇒ **`HashMap::get` 100% 落空、所有资产都读不到**。
+    /// （本机是 Linux，`to_str()` 本来就是 `/` ⇒ **这个 bug 只在 Windows 上现形**，
+    ///  所以它能在 Linux 上一直绿着跑。）
+    ///
+    /// 归一化放在 `insert` 而不是 `preload_tree`：**这里是唯一的写入入口**，
+    /// 放这儿才能让上面那句文档契约**对每一个调用方都成立**（而不是靠调用方自觉）。
     pub fn insert(&mut self, path: &str, bytes: Vec<u8>) {
-        self.files.insert(path.to_string(), bytes);
+        self.files.insert(path.replace('\\', "/"), bytes);
     }
 
     /// 已载入的条目数。
@@ -215,5 +226,43 @@ mod tests {
         let m = MemSource::preload_tree("assets");
         assert!(m.len() > 0, "assets/ 预载为空，判据失效");
         assert!(m.exists("assets/maps/index.toml"), "关卡索引未被预载");
+    }
+}
+#[cfg(test)]
+mod mem_source_path_tests {
+    use super::*;
+
+    /// 🔴 **`MemSource::insert` 必须把平台原生分隔符归一化成 `/`。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 1 条，已对着代码确认）：
+    /// `preload_tree` 把 `PathBuf::to_str()` 的结果直接传给 `insert`，而那是**平台原生**的
+    /// —— **Windows 上 `e.path()` 给出 `assets\maps\index.toml`**。
+    /// 引擎与全部单测都按 `assets/maps/index.toml` 查表
+    /// ⇒ **`HashMap::get` 100% 落空、`RV3D_ASSETS_FROM_MEMORY=1` 下所有资产都读不到**。
+    ///
+    /// ⚠️ **这个 bug 在 Linux 上永远不会现形**（`to_str()` 本来就是 `/`）⇒
+    /// 判据不能依赖真实文件系统路径，必须**直接喂一个带反斜杠的键**，
+    /// 否则它在开发机上恒绿（这正是它藏了这么久的原因）。
+    #[test]
+    fn insert_normalizes_backslash_paths_to_forward_slash() {
+        let mut m = MemSource::new();
+        // 模拟 Windows 上 `PathBuf::to_str()` 给出来的形态
+        m.insert("assets\\maps\\index.toml", b"x".to_vec());
+        // 引擎按 `/` 查
+        assert!(
+            m.exists("assets/maps/index.toml"),
+            "反斜杠键没有被归一化 ⇒ Windows 上 preload_tree 载入的资产全部查不中"
+        );
+        assert_eq!(m.len(), 1, "归一化后应当只有【一个】键（而不是多出一个反斜杠副本）");
+
+        // 正对照：本来就是 `/` 的键不受影响（别把正常路径改坏）
+        let mut m2 = MemSource::new();
+        m2.insert("assets/maps/index.toml", b"y".to_vec());
+        assert!(m2.exists("assets/maps/index.toml"), "正常的 `/` 路径被改坏了");
+
+        // 混合形态（Windows 上子目录拼接可能出现）
+        let mut m3 = MemSource::new();
+        m3.insert("assets\\guns/ak12.glb", b"z".to_vec());
+        assert!(m3.exists("assets/guns/ak12.glb"), "混合分隔符没有被归一化");
     }
 }
