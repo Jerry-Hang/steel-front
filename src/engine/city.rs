@@ -618,7 +618,7 @@ fn row_houses(
             }
         }
         if ok {
-            for (sx, sz, _, name, scale) in &segs {
+            for (sx, sz, yaw, name, scale) in &segs {
                 // 垂直同源（同 building() 的 GLB 路线）：碰撞顶 = 资产高×scale，
                 // 不再用逻辑层高——3 层排楼的 tall 资产视觉 14.9m 高于旧碰撞 10.05m，
                 // 顶楼立面挡不住子弹。红证：旧写法下新断言报"碰撞顶≠视觉顶"。
@@ -629,8 +629,28 @@ fn row_houses(
                     .map(|m| (m.max[1] - m.min[1]) * scale)
                     .unwrap_or(h)
                     .max(1.0);
+                // 🔴 **水平碰撞核必须用「真实视觉尺寸」，不能直接用槽位 `sw, sd`**
+                // （2026-10-15，外部复核指出第 7 条后半，已对着代码确认）。
+                //
+                // `pick_building` 的缩放取 `min(w/aw, d/ad)` ⇒ **非限制轴上的视觉尺寸
+                // 必然小于槽位尺寸**。而这里原来把槽位 `sw/sd` 直接当碰撞盒
+                // ⇒ 那一轴多出来的部分就是**"无形的墙"**（人撞得到、看不见）——
+                // 正是铁律 B 里 `building()` 专门消掉的那一类。
+                //
+                // ⚠️ **垂直方向早就修了**（`vh` = 资产高 × scale，见上面的"垂直同源"注释），
+                // 只有水平方向没跟上；同一个函数里一半修了一半没修。
+                // ⚠️ 现有判据 `city.rs` 的 `0.5m` 容差放行了"两侧多出的隐形墙边缘"。
+                let (hw0, hd0) = match c.set.index_of(name).and_then(|i| c.set.get(i)) {
+                    Some(m) => m.half_footprint(),
+                    None => (sw * 0.5, sd * 0.5),
+                };
+                let (vw, vd) = (hw0 * 2.0 * scale, hd0 * 2.0 * scale);
+                let quarter = (yaw.abs() - core::f32::consts::FRAC_PI_2).abs() < 0.01;
+                let (bw, bd) = if quarter { (vd, vw) } else { (vw, vd) };
+                // 兜底：绝不比 1m 还小（极端的资产/格子比例下会让碰撞退化）
+                let (bw, bd) = (bw.max(1.0), bd.max(1.0));
                 c.push(
-                    Part::new(ObstacleKind::Building, *sx, *sz, sw, sd, UNDER_GROUND, vh, pal.wall)
+                    Part::new(ObstacleKind::Building, *sx, *sz, bw, bd, UNDER_GROUND, vh, pal.wall)
                         .invisible(),
                 );
             }
