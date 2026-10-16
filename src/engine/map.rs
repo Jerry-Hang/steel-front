@@ -110,6 +110,36 @@ fn err(ln: usize, msg: impl Into<String>) -> String {
 
 /// 字符串内未闭合 `[`/`{` 的净深度（忽略字符串字面量内的括号与转义）。
 /// >0 表示还有未闭合的左括号，需要继续吞并后续行。
+/// 这一行看起来是不是一个**节头**（`[map]` / `[rule]` 这种）。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出第 6 条，已对着代码确认）：
+/// `parse_kv_multiline` 里原来那句守卫是
+/// ```text
+/// if trimmed.starts_with('[') && bracket_depth(&value_str) == 0 { break; }
+/// ```
+/// 而它在 `while bracket_depth(&value_str) > 0 { .. }` **里面**、且这两行之间
+/// `value_str` 没被改过 ⇒ **第二个条件恒为 `false`，`break` 是死代码**。
+///
+/// ⚠️ **影响面比"静默出错"小**（实测）：死代码让节头连同后面所有行被拼进 `value_str`，
+/// 但循环之后 `parse_value` 照样报错，而且**报得又对又准**
+/// （「第 3 行: 缺少 ']' 结束符」—— 正指向数组起始行）。
+/// ⇒ 所以这是**死代码 + 报错信息绕远路**，不是静默失败。
+/// 仍然要改：死代码本身是谎，而且"值未闭合"应当在**撞上节头那一刻**就点名。
+///
+/// ⚠️ **不能简单用 `starts_with('[')` 判断**：多行**嵌套**数组的续行也以 `[` 开头
+/// （`[[1,2],` / `[3,4]]`）。这里要求整行是 `[` + 标识符组成 + `]`，
+/// 节名在 `[1, 2]`（含 , 与空格）、`[[1,2],[3,4]]`（内含 `[`）上都不成立。
+fn looks_like_section_header(line: &str) -> bool {
+    if !line.starts_with('[') || !line.ends_with(']') || line.len() < 3 {
+        return false;
+    }
+    let inner = &line[1..line.len() - 1];
+    !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
+
 fn bracket_depth(s: &str) -> i32 {
     let mut depth: i32 = 0;
     let mut in_str = false;
@@ -313,9 +343,23 @@ impl TomlParser {
             if trimmed.is_empty() {
                 continue;
             }
-            // 拼接行前先检查是否进入了新节（多行数组不应包含 [xxx] 节头）
-            if trimmed.starts_with('[') && bracket_depth(&value_str) == 0 {
-                break;
+            // 🔴 值还没闭合就撞上了新节头 ⇒ **在那一刻就点名"未闭合"**
+            // （2026-10-15，外部复核指出第 6 条）：原来的守卫
+            // `trimmed.starts_with('[') && bracket_depth(&value_str) == 0`
+            // 在 `while bracket_depth(&value_str) > 0` 里**恒为假**（死代码）。
+            // 行为上原来也能报对错（见 `looks_like_section_header` 的说明），
+            // 但报的是"后面某处解析不了"，绕了一圈；这里直接指向真因。
+            // ⚠️ 判据用 `looks_like_section_header` 而非 `starts_with('['')` ——
+            //    多行嵌套数组的续行也以 `[` 开头，不能误判。
+            if looks_like_section_header(trimmed) {
+                return Err(err(
+                    ln,
+                    format!(
+                        "值未闭合（这一行起缺少配对的 ] 或 }}），却在第 {} 行遇到了节头 {}",
+                        self.idx,
+                        trimmed
+                    ),
+                ));
             }
             value_str.push(' ');
             value_str.push_str(trimmed);
@@ -909,6 +953,55 @@ obstacles = [ { type = "wall", position = { x = -40, y = 0.5, z = 15.25 }, size 
         assert_eq!(data.spawn_points[1].z, -12.0);
         assert_eq!(data.obstacles[0].x, -40.0);
         assert_eq!(data.obstacles[0].sz, 0.25);
+    }
+
+
+    /// 🔴 **值未闭合时撞到节头必须在那一刻点名"未闭合"。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 6 条，已对着代码确认）：
+    /// `parse_kv_multiline` 里那句守卫
+    /// `if trimmed.starts_with('[') && bracket_depth(&value_str) == 0 { break; }`
+    /// 在 `while bracket_depth(&value_str) > 0 { .. }` 里**恒为假**（死代码）。
+    ///
+    /// ⚠️ **这条判据只断言不变式，不断言说法** —— 第一版我断言了
+    /// `e.contains("未闭合")`，那是在**测我自己写的那句话**；退化验证时发现
+    /// **原来的死代码版本报的是「第 3 行: 缺少 ']' 结束符」**，同样正确、同样指向
+    /// 数组起始行 ⇒ 我那条断言会把一个**行为没退化的实现**判成红的。
+    /// ⇒ 现在只断言两件必要的事：**必须报错**（fail-closed，不许静默通过），
+    ///   且错误**指向数组起始行**（而不是被误吞的后面那些行）。
+    ///
+    /// ⚠️ 另外必须带**正对照**：合法的多行数组（特别**嵌套**的、续行以 `[` 开头）
+    /// 不许被误伤 —— 否则一个"见到 `[` 就报错"的实现也能过。
+    #[test]
+    fn unterminated_value_hitting_a_section_header_is_reported_as_unterminated() {
+        // ① 缺 `]`：必须报错，且指向数组起始行（第 3 行）
+        let broken = "[map]\nname = \"x\"\nspawns = [\n  1, 2,\n[rule]\nseconds = 10\n";
+        let e = parse_map_toml(broken).expect_err("缺 `]` 的地图必须报错，不能静默通过");
+        assert!(
+            e.contains('3'),
+            "错误应当指向数组起始行（第 3 行），而不是指向被吞进来的后续行；实得: {e}"
+        );
+        assert!(
+            e.contains(']') || e.contains('}'),
+            "错误应当点明是括号没闭合；实得: {e}"
+        );
+
+        // ② 正对照 A：合法的多行数组
+        let ok_array =
+            "[map]\nname = \"x\"\nspawns = [\n  1, 2,\n  3\n]\n[rule]\nseconds = 10\n";
+        assert!(
+            parse_map_toml(ok_array).is_ok(),
+            "合法的多行数组被误伤了 —— 判据过头"
+        );
+
+        // ③ 正对照 B：**嵌套**多行数组（续行以 `[` 开头）—— 最容易误伤的一档
+        let ok_nested =
+            "[map]\nname = \"x\"\nspawns = [\n  [1, 2],\n  [3, 4]\n]\n[rule]\nseconds = 10\n";
+        assert!(
+            parse_map_toml(ok_nested).is_ok(),
+            "合法的**嵌套**多行数组被误伤了 —— 续行以 `[` 开头正是 `looks_like_section_header` \
+             要放过去的那一档"
+        );
     }
 
     #[test]

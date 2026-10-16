@@ -734,14 +734,30 @@ impl WeaponRack {
         }
     }
 
-    /// 按时间步长推进切换计时（向 0 收敛；dt<=0 不推进）+ 当前武器的换弹/冷却计时
+    /// 按时间步长推进切换计时（向 0 收敛；dt<=0 不推进）+ 当前武器的换弹计时。
+    ///
+    /// 🔴 **切换窗口内不推进换弹**（2026-10-15，外部复核指出第 8 条，已对着代码确认）：
+    /// 本结构体的文档契约是「**切换期间（`is_switching` 为 true）游戏侧禁止开火/换弹**」，
+    /// 而原来这里无条件调 `firearm.update(dt)`。`Firearm::update` 现在**唯一**做的事
+    /// 就是换弹倒计时（`if !self.reloading { return; }`）⇒ 那等于在禁止换弹的窗口里
+    /// 照样推进换弹。
+    ///
+    /// 具体后果：某槽位在换弹中途被切走 ⇒ 它的计时**暂停**（只有 `active` 被推进）
+    /// ⇒ 再切回该槽位时，`switch_timer` 正在走、换弹倒计时**同时**继续
+    /// ⇒ **换弹会在切枪动画播完之前就完成**，比"按住这把枪等满换弹时间"短了
+    /// 一个 `switch_time`。
+    ///
+    /// ⇒ 只在 `switch_timer` 已经归零时推进（即切换动作已结束）。
     pub fn update(&mut self, dt: f32) {
         if dt <= 0.0 {
             return;
         }
         self.switch_timer = (self.switch_timer - dt).max(0.0);
-        if let Some((_, firearm)) = self.weapons.get_mut(self.active) {
-            firearm.update(dt);
+        // 切换动作还没走完 ⇒ 本帧不推进换弹（契约：切换期间禁止换弹）
+        if self.switch_timer <= 0.0 {
+            if let Some((_, firearm)) = self.weapons.get_mut(self.active) {
+                firearm.update(dt);
+            }
         }
     }
 
@@ -996,6 +1012,61 @@ mod tests {
         assert_eq!(q.part_multiplier(1.1, 0.0), 1.0);
         assert_eq!(q.part_multiplier(0.7, 0.0), 0.8);
         assert_eq!(q.part_multiplier(0.3, 0.0), 0.6);
+    }
+
+
+    /// 🔴 **切枪窗口内不许推进换弹**（契约：「切换期间游戏侧禁止开火/换弹」）。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 8 条，已对着代码确认）：
+    /// `WeaponRack::update` 原来无条件调 `firearm.update(dt)`，而 `Firearm::update`
+    /// **唯一**做的事就是换弹倒计时 ⇒ 切回一把"换弹中途被切走"的枪时，
+    /// 换弹会在**切枪动画播完之前**就完成（比按住它等满换弹时间短一个 `switch_time`）。
+    ///
+    /// ⚠️ 判据要**双向**：切换期**不许**推进、切换结束后**必须**推进
+    /// （否则一个"永远不推进换弹"的实现也能通过 —— 那是把换弹彻底锁死）。
+    #[test]
+    fn reload_does_not_advance_while_switching_but_resumes_after() {
+        let mk = |name: &'static str| {
+            let w = ProjectileWeapon::new(name, 10.0, 1.0, 200.0, 50.0, 1.0);
+            Firearm::new(w, 5, 20, 2.0, 0.0, 0.0)
+        };
+        let mut rack = WeaponRack::new(
+            vec![("A".to_string(), mk("A")), ("B".to_string(), mk("B"))],
+            0.5,
+        );
+        // 打掉一发，才能开始换弹（`start_reload` 要求弹匣未满）
+        let _ = rack.active_firearm().try_fire([0.0, 1.5, 0.0], [1.0, 0.0, 0.0]);
+        rack.active_firearm().start_reload();
+        assert!(
+            rack.active_firearm_ref().is_reloading(),
+            "前置条件不成立：没能进入换弹状态"
+        );
+
+        // ---- 切到 B 再切回 A：`switch_timer` 重新计时 ----
+        rack.switch_to(1);
+        rack.switch_to(0);
+        assert!(rack.is_switching(), "前置条件不成立：此时应当正在切换");
+
+        let before = rack.active_firearm_ref().reload_progress();
+        rack.update(0.1);
+        assert!(rack.is_switching(), "0.1s 后仍应在切换中（switch_time = 0.5）");
+        assert_eq!(
+            rack.active_firearm_ref().reload_progress(),
+            before,
+            "切枪窗口内换弹进度变了 ⇒ 换弹会在切枪动画播完前完成（契约：切换期间禁止换弹）"
+        );
+
+        // ---- 切换结束后必须恢复推进（否则是把换弹锁死）----
+        for _ in 0..8 {
+            rack.update(0.1); // 0.5s 足够走完
+        }
+        assert!(!rack.is_switching(), "前置条件不成立：切换应当已经结束");
+        let t0 = rack.active_firearm_ref().reload_progress();
+        rack.update(0.1);
+        assert!(
+            rack.active_firearm_ref().reload_progress() < t0,
+            "切换结束后换弹**没有**恢复推进 ⇒ 换弹被永久锁死"
+        );
     }
 
     /// with_ballistics 链式传递：Firearm 内武器发射的投射物带重力与分段
