@@ -81,6 +81,15 @@ impl PropSet {
     /// 扫描目录加载全部 `.glb`。名字取文件名（去扩展名）。排序后返回，使下标稳定。
     pub fn load_dir(dir: &str) -> Result<Self, String> {
         let mut found: Vec<(String, ImportedMesh)> = Vec::new();
+        // 🔴 **这个函数在 Android 上仍然不可用，而且只修一半没有意义**（2026-10-15）：
+        // 外部复核指出第 3 条「资产加载漏走 `asset_source`」，这里**确实**没走；
+        // 但 `AssetSource` 这个 trait **只有 `read` / `read_to_string` / `exists`，
+        // 没有目录列举** ⇒ 就算把下面的 `std::fs::read` 换成抽象层，
+        // **这一句 `read_dir` 在 Android 上照样先失败**（`AAssetManager` 要用
+        // `AAssetDir`），`load_dir` 还是整体 Err ⇒ `prop_set = None` ⇒ 道具全无。
+        // ⇒ 只改读取是**治标**，所以这里**如实标注为已知缺口**、不假装修好了。
+        // 要真修需要给 trait 加一个目录列举方法（`FsSource` 用 `read_dir`、
+        // `MemSource` 按前缀筛、Android 用 `AAssetDir`）—— 那是独立的一件事。
         let entries = std::fs::read_dir(dir).map_err(|e| format!("读取 {dir} 失败: {e}"))?;
         for e in entries.flatten() {
             let path = e.path();

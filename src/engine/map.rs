@@ -708,7 +708,13 @@ pub fn load_map(path: &str) -> Result<MapData, String> {
 /// 返回按列表顺序的关卡文件路径（相对 index.toml 所在目录拼接）。
 /// 至少 1 个条目，否则 Err；条目不做存在性校验（由后续 load_map 报错）。
 pub fn load_map_list(index_path: &str) -> Result<Vec<String>, String> {
-    let text = std::fs::read_to_string(index_path)
+    // 🔴 **走资产抽象层**（2026-10-15，外部复核指出第 3 条，已确认）：
+    // 紧挨着的兄弟函数 `load_map`（第 664 行）早就是
+    // `asset_source::global().read_to_string` 了，**只有这里没跟上**
+    // ⇒ Android / `RV3D_ASSETS_FROM_MEMORY=1` 下关卡列表读不到、
+    // 整个关卡系统**静默**退回程序化地图。**又是「兄弟只改了一半」。**
+    let text = crate::engine::asset_source::global()
+        .read_to_string(index_path)
         .map_err(|e| format!("map: 无法读取关卡列表 {}: {}", index_path, e))?;
     let data = parse_map_list_toml(&text)?;
     if data.is_empty() {

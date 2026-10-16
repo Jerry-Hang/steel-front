@@ -266,3 +266,139 @@ mod mem_source_path_tests {
         assert!(m3.exists("assets/guns/ak12.glb"), "混合分隔符没有被归一化");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Asset-path scan (ASCII on purpose: the CJK glyph table cannot be rebuilt).
+//
+// Invariant: production code must never reach an `assets/...` file through
+// `std::fs::*`. Every asset read has to go through `asset_source::global()`, or
+// Android (`AAssetManager`) and `RV3D_ASSETS_FROM_MEMORY=1` (`MemSource`) break
+// silently -- the read simply fails and the caller falls back to a default.
+//
+// Why a subtree scan and not `include_str!`: this bug class is "one of two
+// siblings was fixed" (load_map vs load_map_list, load_gun_glb vs
+// load_soldier_glb_uncached, load_spirv vs PropSet::load_dir). A judge that
+// only looks at the file it lives in cannot see the sibling. The walk is
+// run-time so it follows future module splits without anyone remembering to
+// update a file list, and it fails closed when the scan surface looks wrong
+// (repo lesson 46: a scanner that reads nothing must not report OK).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod asset_path_scan_tests {
+    use std::path::{Path, PathBuf};
+
+    fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_rs(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    /// Everything before the first `#[cfg(test)]` -- production code only.
+    /// Test bodies legitimately read the checkout with `std::fs`.
+    fn production_part(src: &str) -> &str {
+        match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    /// The complete set of `std::fs` read sites allowed in production code,
+    /// each with the reason it must NOT go through `asset_source`.
+    ///
+    /// Snapshot on purpose. My first version of this judge only flagged lines
+    /// that also contain the literal `assets/`, which made it blind to the very
+    /// bug it was written for: `load_map_list` receives the path as a *variable*
+    /// (`index_path`), so reverting it to `std::fs::read_to_string` kept the
+    /// judge green. Pinning the whole set means any new site turns it red and
+    /// the author has to state why the abstraction is wrong for that file.
+    const ALLOWED_STD_FS_READS: &[(&str, &str)] = &[
+        // config file (~/.steel_front.cfg) -- per-user, never shipped as an asset
+        // config file (~/.steel_front.cfg) -- per-user, never shipped as an asset
+        ("src/config.rs", "fs::read_to_string(path)"),
+        // the abstraction itself: FsSource / MemSource::preload_tree
+        // (these ARE the std::fs side of the trait; Android supplies its own impl)
+        ("src/engine/asset_source.rs", "std::fs::read(path)"),
+        ("src/engine/asset_source.rs", "std::fs::read_dir(&dir)"),
+        ("src/engine/asset_source.rs", "std::fs::read(&p)"),
+        // source-scanning test scaffolding: reads the checkout, not shipped assets
+        ("src/engine/renderer/tests_support.rs", "std::fs::read_to_string(path)"),
+        ("src/engine/renderer/tests_support.rs", "std::fs::read_dir(dir)"),
+        // Windows-only dev helper (a path list next to the exe) -- not an asset
+        ("src/lib.rs", "resource_paths.ini"),
+        // WSL detection -- reads /proc, not the asset tree
+        ("src/lib.rs", "/proc/version"),
+    ];
+
+    #[test]
+    fn only_the_abstraction_and_non_asset_files_use_std_fs_in_production() {
+        let mut files = Vec::new();
+        collect_rs(Path::new("src"), &mut files);
+        assert!(
+            files.len() >= 50,
+            "scan surface looks wrong: only {} .rs files under src/ (tests must run from the crate root)",
+            files.len()
+        );
+
+        let mut found: Vec<(String, String)> = Vec::new();
+        let mut prod_lines = 0usize;
+        for f in &files {
+            let Ok(src) = std::fs::read_to_string(f) else {
+                continue;
+            };
+            let prod = production_part(&src);
+            prod_lines += prod.lines().count();
+            for line in prod.lines() {
+                let t = line.trim();
+                if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+                    continue;
+                }
+                if t.contains("std::fs::read") || t.contains("fs::read_to_string(") || t.contains("fs::read_dir(") {
+                    found.push((f.display().to_string(), t.to_string()));
+                }
+            }
+        }
+        assert!(
+            prod_lines > 20_000,
+            "scan surface looks wrong: only {prod_lines} production lines read"
+        );
+
+        let unexpected: Vec<String> = found
+            .iter()
+            .filter(|pair| {
+                !ALLOWED_STD_FS_READS
+                    .iter()
+                    .any(|(file, frag)| pair.0.ends_with(file) && pair.1.contains(frag))
+            })
+            .map(|(f, l)| format!("{f}: {l}"))
+            .collect();
+
+        assert!(
+            unexpected.is_empty(),
+            "production code reads files with std::fs outside the allowed set.\n\
+             Asset reads must go through asset_source::global(): on Android (AAssetManager) and\n\
+             with RV3D_ASSETS_FROM_MEMORY=1 (MemSource) a direct std::fs read fails and the\n\
+             caller silently falls back to a default (that is how load_map_list, load_soldier_glb\n\
+             and PropSet::load_dir stayed broken). If a NEW site is genuinely not an asset,\n\
+             add it to ALLOWED_STD_FS_READS with the reason.\nUnexpected:\n{}",
+            unexpected.join("\n")
+        );
+        // Fail closed: the snapshot must match reality exactly in the other
+        // direction too, otherwise a stale entry hides a real regression.
+        assert_eq!(
+            found.len(),
+            ALLOWED_STD_FS_READS.len(),
+            "the allowlist has {} entries but {found} std::fs read sites were found -- \n\
+             fix the list (a removed site means an entry is now stale)",
+            ALLOWED_STD_FS_READS.len(),
+            found = found.len()
+        );
+    }
+}

@@ -1818,7 +1818,12 @@ impl GameApp {
 
     fn load_soldier_glb_uncached() -> Option<(Vec<[f32; 11]>, Vec<u32>)> {
         const PATH: &str = "assets/soldier/soldier.glb";
-        let bytes = match std::fs::read(PATH) {
+        // 🔴 **走资产抽象层**（2026-10-15，外部复核指出第 3 条，已确认）：
+        // 原来这里是 `std::fs::read` ⇒ 在 Android（`AAssetManager`）与
+        // `RV3D_ASSETS_FROM_MEMORY=1`（`MemSource`）下**必然失败**；
+        // 而旁边同族的 `load_gun_glb` 在第 5 批已经改过来了
+        // —— **同一件事两处实现、只改了一处**（本仓最贵的缺陷形态）。
+        let bytes = match crate::engine::asset_source::global().read(PATH) {
             Ok(b) => b,
             Err(e) => {
                 log::info!("soldier: 未发现 {PATH}（{e}），NPC 继续用 18 段箱体");
