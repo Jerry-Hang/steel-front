@@ -7,6 +7,11 @@ impl Game {
     /// 投射物是否命中物理刚体/球体（命中即销毁，不产生击杀）。
     /// V3.0 高速弹（710m/s → 每帧 11.8m）不能用单点采样（会跳过小掩体/球体），
     /// 改为上一帧→当前位置的线段与 AABB/球体求交。
+    /// ⚠️ **测试专用**（2026-10-15）：生产结算已经改走 `Game::nearest_segment_hit`
+    /// —— 后者把障碍与 NPC **一起按线段参数 `t` 由近及远排序**，
+    /// 而这个函数只回答「碰没碰到墙」、不看参数 `t`（正是「NPC 站在墙前就打不中」的成因）。
+    /// 生产路径不再调用它；留着是因为 `game/tests/session.rs` 拿它当几何探针。
+    #[cfg(test)]
     pub(crate) fn collide_physics(&self, p: &Projectile) -> bool {
         let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
         let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);

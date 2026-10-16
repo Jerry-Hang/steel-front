@@ -1156,3 +1156,125 @@ use super::*;
             "连 `rebuild_obj_state_from_map` 都没有 —— 判据的前提不成立"
         );
     }
+
+/// 🔴 **结算必须按线段参数 `t` 由近及远**（2026-10-15，外部复核指出第 1 条，已确认）。
+///
+/// 原来 `update_projectiles` 的顺序是「**先** `collide_physics`（墙）→ **再**
+/// `hit_npc_index`（人）」，**两边都不看参数 `t`**：
+/// * `collide_physics` 只要本帧线段碰到**任何**刚体就 `true`；
+/// * `hit_npc_index` 按 `self.npcs` 的**数组顺序**取第一个命中的。
+///
+/// ⇒ NPC 站在墙/掩体前 1~10m 时（`Attack` 与 `CoverSeek` 的**常态**），
+/// 一帧 6~16m 的线段会**同时**穿过 NPC 与它身后的墙，而**墙先被判**
+/// ⇒ 子弹变成墙上的弹孔、眼前的 NPC 毫发无损。
+mod segment_t_ordering_tests {
+    use super::*;
+
+    /// 造一堵墙：中心 (0, 1.2, -10)、半尺寸 4×1.2×0.5 ⇒ 近面 z = -9.5、y ∈ [0, 2.4]。
+    fn put_wall(game: &mut Game) {
+        let aabb = Body::new_static(Pv::new(0.0, 1.2, -10.0), Pv::new(4.0, 1.2, 0.5));
+        let wall = MapObstacle {
+            x: 0.0,
+            z: -10.0,
+            half_w: 4.0,
+            half_d: 0.5,
+            y: 1.2,
+            half_h: 1.2,
+            kind: ObstacleKind::Wall,
+            tint: None,
+            max_hp: 100.0,
+            hp: 100.0,
+            shape: Shape::Legacy,
+        };
+        game.map.obstacles = vec![wall];
+        game.world.bodies.push(aabb);
+    }
+
+    fn fresh_game() -> Game {
+        let mut game = Game::new();
+        game.npcs.clear();
+        game.world.bodies.clear();
+        game.world.spheres.clear();
+        game
+    }
+
+    fn put_npc(game: &mut Game, id: usize, team: Team, z: f32) {
+        let mut n = npc_at(id, team, [0.0, 0.0, z]);
+        n.hp = 100.0;
+        n.max_hp = 100.0;
+        n.last_hp = 100.0;
+        game.npcs.push(n);
+    }
+
+    /// 从原点沿 −Z 打一发：`600 m/s × 1/60 s = 10m` ⇒ 线段 z 从 0 到 −10。
+    /// NPC 命中球心在脚上 1.0m、半径 1.05m ⇒ 从 y=1.0 平射正好穿球心。
+    fn fire_one_frame(game: &mut Game, from_player: bool) {
+        let mut p = Projectile::new([0.0, 1.0, 0.0], [0.0, 0.0, -1.0], 600.0, 400.0, 6.0, 28.0);
+        if from_player {
+            p = p.with_player();
+        }
+        game.projectiles.push(p);
+        game.update_projectiles(1.0 / 60.0, true);
+    }
+
+    /// 🎯 **核心**：NPC 站在墙**前**（`t≈0.5`）⇒ 必须打中它，而不是被身后的墙（`t≈0.95`）吞掉。
+    #[test]
+    fn npc_in_front_of_a_wall_still_takes_the_hit() {
+        let mut game = fresh_game();
+        put_wall(&mut game);
+        put_npc(&mut game, 0, Team::Red, -5.0);
+        fire_one_frame(&mut game, true);
+
+        assert!(
+            !game.npcs.is_empty(),
+            "NPC 不该被一枪（28 伤害 / 100 血）打死 —— 前提就不成立"
+        );
+        assert!(
+            game.npcs[0].hp < 100.0,
+            "站在墙【前】5m 的 NPC 没掉血（hp={}）——\n\
+             本帧线段 z: 0 → −10 同时穿过 NPC（t≈0.5）与墙（t≈0.95），\n\
+             结算必须取 t 小的那个；被墙吞掉就说明又回到了「先判墙、再判人」",
+            game.npcs[0].hp
+        );
+    }
+
+    /// **正对照**：NPC 站在墙**后**（`t≈1.2`，线段够不着）⇒ 墙（`t≈0.95`）先挡下，NPC 不该掉血。
+    /// 没有这一档，"NPC 掉血"就无法区分"按 t 排序对了"和"干脆不判墙了"。
+    #[test]
+    fn npc_behind_the_wall_is_not_hit() {
+        let mut game = fresh_game();
+        put_wall(&mut game);
+        put_npc(&mut game, 0, Team::Red, -12.0);
+        fire_one_frame(&mut game, true);
+
+        assert!(
+            game.npcs[0].hp >= 100.0,
+            "墙【后】的 NPC 不该被打中（hp={}）—— 墙必须先挡下",
+            game.npcs[0].hp
+        );
+    }
+
+    /// 🎯 **友军只跳过它自己**：蓝营友军站在红营敌人**前面**时，
+    /// 旧代码会 `alive.push(p); continue;` 把**整帧线段**一起放过 ⇒ 身后的敌人不掉血。
+    #[test]
+    fn a_friendly_npc_only_shields_itself_not_the_enemy_behind_it() {
+        let mut game = fresh_game();
+        // 蓝营友军在 z=-4（t≈0.4），红营敌人在 z=-7（t≈0.7）
+        put_npc(&mut game, 0, Team::Blue, -4.0);
+        put_npc(&mut game, 1, Team::Red, -7.0);
+        fire_one_frame(&mut game, true);
+
+        assert_eq!(game.npcs.len(), 2, "前提：两个 NPC 都还在");
+        assert!(
+            game.npcs[0].hp >= 100.0,
+            "友军不该受伤（hp={}）",
+            game.npcs[0].hp
+        );
+        assert!(
+            game.npcs[1].hp < 100.0,
+            "友军【身后】的敌人也没掉血（hp={}）——\n\
+             友军穿身只能跳过那一个 NPC，不能把整帧线段上的敌人一起跳过",
+            game.npcs[1].hp
+        );
+    }
+}

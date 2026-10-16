@@ -3,6 +3,26 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// 本帧线段上的一个命中（按参数 `t` 由近及远排序用）。
+///
+/// 见 [`Game::nearest_segment_hit`] 的文档：**结算必须按 `t` 由近及远**，
+/// 不能"先判墙、再判人"。
+pub(crate) enum SegmentHit {
+    /// 障碍。`body` = `world.bodies` 的下标；**球体没有对应项 ⇒ `None`**
+    /// （它只用于"子弹被挡住"，没有 `map.obstacles` 可结算）。
+    Obstacle { t: f32, body: Option<usize> },
+    /// NPC。`idx` = `self.npcs` 的下标，`height` = 命中点世界高度（部位倍率用）
+    Npc { t: f32, idx: usize, height: f32 },
+}
+
+impl SegmentHit {
+    pub(crate) fn t(&self) -> f32 {
+        match self {
+            SegmentHit::Obstacle { t, .. } | SegmentHit::Npc { t, .. } => *t,
+        }
+    }
+}
+
 impl Game {
     /// 尝试开火（受射速冷却限制）。`origin`/`direction` 来自相机；返回是否真的开火。
     /// 内部单发：不做冷却检查，直接扣弹发射并结算后坐（含连发热量压制）/音效/日志。
@@ -450,6 +470,64 @@ impl Game {
     /// 在此之前这里必须乘一个 `visual_half_gain = 2.0` 才能把弹孔推到墙皮上 ——
     /// 那是同一个"可见尺寸翻倍"约定的另一半，不一起改就会把弹孔埋进几何里
     /// （不崩不报，只是"打了枪墙上没有孔"，2026-09-15 实测踩过）。
+    /// 本帧线段上的**最近**命中（按参数 `t` 由近及远）。
+    ///
+    /// 🔴 存在的理由（2026-10-15，外部复核指出第 1 条，已对着代码确认）：
+    /// 原来的结算顺序是「**先** `collide_physics`（墙）→ **再** `hit_npc_index`（人）」，
+    /// **两边都不看参数 `t`**：
+    /// * `collide_physics` 只要本帧线段碰到**任何**刚体就 `return true`；
+    /// * `hit_npc_index` 按 `self.npcs` 的**数组顺序**取第一个命中的。
+    ///
+    /// ⇒ 当 NPC 站在墙/掩体前 1~10m 处（`Attack` 与 `CoverSeek` 的**常态**）时，
+    /// 一帧 6~16m 的线段会**同时**穿过 NPC（`t≈0.2`）与它身后的墙（`t≈0.7`），
+    /// 而墙先被判定 ⇒ **子弹变成墙上的弹孔、眼前的 NPC 毫发无损**。
+    ///
+    /// ⚠️ 这不是新问题：`first_obstacle_hit` 的注释早就写明
+    /// 「取**参数 t 最小**的那个，不能取列表里第一个命中的 —— `world.bodies` 的顺序是
+    /// 建关顺序，不是距离顺序」，**但那条修复只落在弹孔上**，
+    /// 紧挨着的 `hit_obstacle_index` / `hit_npc_index` 仍是数组顺序。
+    /// ⇒ 又是"同一件事两份实现、只改了一处"。
+    ///
+    /// 返回 `idx` 只在 [`SegmentHit::Obstacle`] 且命中**刚体**时有意义
+    /// （球体没有 `map.obstacles` 对应项 ⇒ `None`）。
+    pub(crate) fn nearest_segment_hit(&self, p: &Projectile) -> Option<SegmentHit> {
+        let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
+        let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);
+        let mut best: Option<SegmentHit> = None;
+        let mut consider = |t: f32, hit: SegmentHit| {
+            if t <= 0.0 {
+                return; // t == 0：起点就在里面，没有"打到面"这件事（见 first_obstacle_hit）
+            }
+            if best.as_ref().is_none_or(|b| b.t() > t) {
+                best = Some(hit);
+            }
+        };
+
+        // ① 障碍：刚体（AABB）
+        for (i, body) in self.world.bodies.iter().enumerate() {
+            if let Some((t, _)) = Self::segment_aabb_entry(ax, ay, az, bx, by, bz, &body.aabb()) {
+                consider(t, SegmentHit::Obstacle { t, body: Some(i) });
+            }
+        }
+        // ② 障碍：球体（树冠一类）—— 没有对应的 `map.obstacles` 下标
+        for sph in &self.world.spheres {
+            if let Some(t) = Self::segment_sphere_entry(ax, ay, az, bx, by, bz, sph) {
+                consider(t, SegmentHit::Obstacle { t, body: None });
+            }
+        }
+        // ③ NPC：**跳过"玩家弹打友军"**那种（与原来的穿身规则一致），
+        //    但**只跳过它自己**，不能连它身后的敌人一起跳过。
+        for (i, npc) in self.npcs.iter().enumerate() {
+            if p.from_player() && npc.team == crate::engine::ai::Team::Blue {
+                continue;
+            }
+            if let Some((t, h)) = Self::segment_npc_entry(ax, ay, az, bx, by, bz, npc) {
+                consider(t, SegmentHit::Npc { t, idx: i, height: h });
+            }
+        }
+        best
+    }
+
     pub(crate) fn first_obstacle_hit(&self, p: &Projectile) -> Option<(usize, [f32; 3], [f32; 3])> {
         let a = p.prev_position();
         let b = p.position;
@@ -492,6 +570,9 @@ impl Game {
         best.map(|(_, i, point, normal)| (i, point, normal))
     }
     /// 线段 [A,B] 与球体求交（二次方程判别式，参数 t ∈ [0,1]）
+    /// ⚠️ **测试专用**：只被 `#[cfg(test)]` 的 `collide_physics` 调用
+    /// （生产用 [`Self::segment_sphere_entry`]，它额外返回参数 `t`）。
+    #[cfg(test)]
     pub(crate) fn segment_hits_sphere(
         ax: f32, ay: f32, az: f32,
         bx: f32, by: f32, bz: f32,
@@ -515,17 +596,64 @@ impl Game {
         let t2 = (-b + sq) / (2.0 * a);
         t2 >= 0.0 && t1 <= 1.0
     }
-    /// 投射物命中的障碍刚体下标（球体/未命中返回 None）。
-    /// 下标与 map.obstacles/world.bodies 严格对应（apply_level 同序构建、同序移除）。
-    /// 与 collide_physics 一致使用线段求交（高速弹不穿透掩体）。
-    pub(crate) fn hit_obstacle_index(&self, p: &Projectile) -> Option<usize> {
-        let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
-        let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);
-        self.world.bodies.iter().position(|body| {
-            let aabb = body.aabb();
-            Self::segment_hits_aabb(ax, ay, az, bx, by, bz, &aabb)
-        })
+    /// **球体**的线段入射参数 `t`（`None` = 不相交）。
+    /// 是 `segment_hits_sphere` 的"带 t"版本 —— 后者只回答"碰没碰到"，
+    /// 而按 `t` 排序需要这个数（见 `nearest_segment_hit`）。
+    pub(crate) fn segment_sphere_entry(
+        ax: f32, ay: f32, az: f32,
+        bx: f32, by: f32, bz: f32,
+        s: &crate::engine::physics::SphereBody,
+    ) -> Option<f32> {
+        let (fx, fy, fz) = (ax - s.center.x, ay - s.center.y, az - s.center.z);
+        let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
+        let a = dx * dx + dy * dy + dz * dz;
+        let r2 = s.radius * s.radius;
+        if a < 1e-9 {
+            // 退化成点：在球内就算 t=0（与 `segment_hits_sphere` 同判据）
+            return if fx * fx + fy * fy + fz * fz <= r2 { Some(0.0) } else { None };
+        }
+        let b = 2.0 * (fx * dx + fy * dy + fz * dz);
+        let c = fx * fx + fy * fy + fz * fz - r2;
+        let disc = b * b - 4.0 * a * c;
+        if disc < 0.0 {
+            return None;
+        }
+        let sq = disc.sqrt();
+        let t1 = (-b - sq) / (2.0 * a);
+        let t2 = (-b + sq) / (2.0 * a);
+        if t2 < 0.0 || t1 > 1.0 {
+            return None;
+        }
+        Some(t1.max(0.0))
     }
+
+    /// **单个 NPC** 的线段入射参数 `t` 与命中点世界高度（`None` = 没打中）。
+    /// 与 `hit_npc_index` 的命中球完全同一套参数（中心 +1.0m、半径 1.05m）——
+    /// 这里只是把 `t` 与高度**返回出来**，供按 `t` 排序。
+    pub(crate) fn segment_npc_entry(
+        ax: f32, ay: f32, az: f32,
+        bx: f32, by: f32, bz: f32,
+        npc: &Npc,
+    ) -> Option<(f32, f32)> {
+        let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
+        let len2 = dx * dx + dy * dy + dz * dz;
+        if len2 < 1e-9 {
+            return None;
+        }
+        let cx = npc.position[0];
+        let cy = npc.position[1] + NPC_HIT_CENTER_Y;
+        let cz = npc.position[2];
+        let r = 1.05;
+        let (fx, fy, fz) = (ax - cx, ay - cy, az - cz);
+        let t = (-(fx * dx + fy * dy + fz * dz) / len2).clamp(0.0, 1.0);
+        let (qx, qy, qz) = (fx + t * dx, fy + t * dy, fz + t * dz);
+        if qx * qx + qy * qy + qz * qz <= r * r {
+            Some((t, qy + npc.position[1] + NPC_HIT_CENTER_Y))
+        } else {
+            None
+        }
+    }
+
     /// 障碍受伤结算：扣血至 0 → 摧毁（从物理刚体/AI 网格/渲染 marker 中移除）。
     /// 渲染侧无需改动：main.rs 每帧按 `map_obstacles()` 生成 marker，摧毁后自动不再绘制。
     pub(crate) fn damage_obstacle(&mut self, idx: usize, dmg: f32) {
@@ -539,6 +667,17 @@ impl Game {
         let ob = *ob; // Copy：记录位置/尺寸供解除阻挡
         let kind = ob.kind;
         // 解除 AI 网格阻挡：NPC 寻路可穿过缺口，掩体点随之消失
+        //
+        // 🔴 **不能「把这几格一律清成可通行」**（2026-10-15，外部复核指出第 1 条，
+        // 已对着代码确认）：4m 的格子**经常被多个障碍共享** ——
+        // 打掉一个挨着建筑的小道具（隔离墩/长椅/护柱），
+        // 它覆盖的那几格里只要还压着**存活的建筑/围墙**，无条件清格就等于
+        // **在存活的墙上打开一排可通行的缺口**（NPC 直接从楼里穿过去）。
+        //
+        // ⇒ 正确做法：先清掉本障碍覆盖的格，再**用唯一真源
+        //   `block_obstacle_cells` 把剩下的障碍重新封一遍**
+        //  （`map_util.rs` 那句注释写着「调用方：apply_level 与单测的建网；
+        //    **不许再写第二套循环**」，所以这里复用而不是另写一份判定）。
         let g0 = world_to_grid(ob.x - ob.half_w, ob.z - ob.half_d);
         let g1 = world_to_grid(ob.x + ob.half_w, ob.z + ob.half_d);
         for gx in g0.x..=g1.x {
@@ -548,6 +687,14 @@ impl Game {
                     self.grid.clear(pos);
                 }
             }
+        }
+        // ⚠️ 此刻 `self.map.obstacles` 里**还有**刚被打掉的这一个（下面才 remove）
+        // ⇒ 重新封格时要跳过它自己。
+        for (i, other) in self.map.obstacles.iter().enumerate() {
+            if i == idx {
+                continue;
+            }
+            crate::engine::game::map_util::block_obstacle_cells(&mut self.grid, other);
         }
         log::info!(
             "obstacle: #{} {:?} destroyed at ({:.1}, {:.1})",
@@ -642,6 +789,12 @@ impl Game {
     /// 命中球中心在 NPC 头顶 +0.8、半径 0.8；高速弹（200m/s 每帧 3.3m）避免隧道效应漏判）
     /// 命中检测：返回 (NPC 下标, 命中点相对地面的高度)。
     /// 高度用于部位倍率判定（头 1.5 / 胸 1.0 / 臂 0.8 / 腿 0.6，见设计文档）。
+    /// ⚠️ **测试专用**（2026-10-15）：生产结算改走 [`Self::nearest_segment_hit`]。
+    ///
+    /// 留着的**唯一**理由是 `game/tests/combat.rs` 拿它当「命中球几何」的探针（7 处断言）。
+    /// ⚠️ 但它按 `self.npcs` 的**数组顺序**取第一个命中的 —— **生产不能再用它**，
+    /// 否则"列表里先出现的远目标"会挡住近目标。
+    #[cfg(test)]
     pub(crate) fn hit_npc_index(&self, p: &Projectile) -> Option<(usize, f32)> {
         let (ax, ay, az) = (p.prev_position()[0], p.prev_position()[1], p.prev_position()[2]);
         let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);

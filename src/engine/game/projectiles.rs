@@ -2,6 +2,7 @@
 // 本模块是 `game` 的后代 ⇒ 照旧看得见 Renderer 的私有字段、私有方法与文件作用域私有项；
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
+use crate::engine::game::weapons::SegmentHit;
 
 // 弹道诊断（RV3D_PROJ_DIAG=1 时启用，节流 2s）：默认关闭避免生产日志噪音
 static LAST_PROJ_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -309,47 +310,57 @@ impl Game {
                 alive.push(p);
                 continue;
             }
-            if self.collide_physics(&p) {
-                PROJ_OBSTACLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // 命中障碍：子弹直接消耗（障碍永久存在，枪械不再打爆障碍；
-                // 手榴弹/爆炸物 AoE 仍可摧毁掩体，见爆炸结算）。
-                // 不计入 hit_count → 不触发命中提示/音效（打墙没有"命中反馈"）。
-                // 爆炸弹命中才有 AoE。
-                // 弹着标记（弹孔）：只在**障碍刚体**上留痕 —— 球体（树冠一类）与打空的子弹不留。
-                if let Some((_, point, normal)) = self.first_obstacle_hit(&p) {
-                    self.push_impact_mark(point, normal);
-                }
-                if self.hit_obstacle_index(&p).is_some() && p.explosive() {
-                    self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
-                }
-                continue;
-            }
-            if let Some((idx, hit_h)) = self.hit_npc_index(&p) {
-                // 友军伤害关闭：玩家弹命中同阵营 NPC 穿身而过（不造成伤害/火花/命中计数）
-                if p.from_player()
-                    && self.npcs[idx].team == crate::engine::ai::Team::Blue
-                {
-                    alive.push(p);
+            // 🔴 **按参数 `t` 由近及远结算**（2026-10-15，外部复核指出第 1 条，
+            // 已对着代码确认）。原来这里是「**先** `collide_physics`（墙）→ **再**
+            // `hit_npc_index`（人）」，**两边都不看参数 `t`** ⇒
+            // NPC 站在墙/掩体前 1~10m 时（`Attack` / `CoverSeek` 的常态），
+            // 一帧 6~16m 的线段同时穿过 NPC（`t≈0.2`）与身后的墙（`t≈0.7`），
+            // 而**墙先被判** ⇒ 子弹变成墙上的弹孔、眼前的 NPC 毫发无损。
+            //
+            // ⚠️ `first_obstacle_hit` 的注释早就写明「取参数 `t` 最小的那个」
+            // ——**那条修复只落在弹孔上**，紧挨着的两个函数仍是数组顺序。
+            // 现在统一走 `nearest_segment_hit`（障碍与 NPC 一起按 `t` 排序）。
+            match self.nearest_segment_hit(&p) {
+                Some(SegmentHit::Obstacle { body, .. }) => {
+                    PROJ_OBSTACLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // 命中障碍：子弹直接消耗（障碍永久存在，枪械不再打爆障碍；
+                    // 手榴弹/爆炸物 AoE 仍可摧毁掩体，见爆炸结算）。
+                    // 不计入 hit_count → 不触发命中提示/音效（打墙没有"命中反馈"）。
+                    // 弹着标记（弹孔）：只在**障碍刚体**上留痕 —— 球体（树冠一类）不留。
+                    if body.is_some() {
+                        if let Some((_, point, normal)) = self.first_obstacle_hit(&p) {
+                            self.push_impact_mark(point, normal);
+                        }
+                    }
+                    if body.is_some() && p.explosive() {
+                        self.spawn_explosion(p.position, EXPLOSION_RADIUS, EXPLOSION_DAMAGE, false);
+                    }
                     continue;
                 }
-                hit_count += 1;
-                PROJ_NPC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // V3.0：部位倍率按武器分段表 + 已飞距离查表（投射物携带 part_tiers）
-                let mult = p.part_multiplier(hit_h, self.npcs[idx].position[1]);
-                let dmg = p.damage_at_distance() * mult;
-                // 命中火花点（NPC 身体命中位置）+ 伤害飘字值
-                self.hit_points.push([p.position[0], hit_h, p.position[2]]);
-                self.hit_damages.push(dmg);
-                log::info!(
-                    "weapons: 命中 NPC #{} 高度={:.1} 倍率={:.1} 伤害={:.0} 距离={:.0}m",
-                    self.npcs[idx].id,
-                    hit_h - self.npcs[idx].position[1],
-                    mult,
-                    dmg,
-                    p.distance_traveled()
-                );
-                self.damage_npc(idx, dmg, DamageSource::Player);
-                continue;
+                Some(SegmentHit::Npc { idx, height, .. }) => {
+                    // 友军穿身已经在 `nearest_segment_hit` 里排除了（那里 `continue` 掉
+                    // 玩家弹打蓝营的情况）—— **而且只跳过那一个人**，
+                    // 不再像旧代码那样把整帧线段上的敌人一起跳过。
+                    hit_count += 1;
+                    PROJ_NPC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // V3.0：部位倍率按武器分段表 + 已飞距离查表（投射物携带 part_tiers）
+                    let mult = p.part_multiplier(height, self.npcs[idx].position[1]);
+                    let dmg = p.damage_at_distance() * mult;
+                    // 命中火花点（NPC 身体命中位置）+ 伤害飘字值
+                    self.hit_points.push([p.position[0], height, p.position[2]]);
+                    self.hit_damages.push(dmg);
+                    log::info!(
+                        "weapons: 命中 NPC #{} 高度={:.1} 倍率={:.1} 伤害={:.0} 距离={:.0}m",
+                        self.npcs[idx].id,
+                        height - self.npcs[idx].position[1],
+                        mult,
+                        dmg,
+                        p.distance_traveled()
+                    );
+                    self.damage_npc(idx, dmg, DamageSource::Player);
+                    continue;
+                }
+                None => {}
             }
             // 玩家弹 vs 网络远端玩家（服务器权威命中：杀远端玩家）
             if p.from_player() && self.net_players.iter().any(|q| q.alive) {
@@ -721,21 +732,25 @@ mod projectile_expiry_order_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let collide = code
-            .find("self.collide_physics(&p)")
-            .expect("找不到 collide_physics —— 判据的前提不成立");
-        let npc = code
-            .find("self.hit_npc_index(&p)")
-            .expect("找不到 hit_npc_index —— 判据的前提不成立");
+        // ⚠️ **判据在 2026-10-15 改过锚点**：生产结算已经从
+        // 「先 `collide_physics`（墙）→ 再 `hit_npc_index`（人）」改成
+        // **一条 `nearest_segment_hit`（障碍与 NPC 一起按 `t` 排序）**，
+        // 所以这里钉的是「到期判定必须排在**按 `t` 结算**之后」。
+        let settle = code
+            .find("self.nearest_segment_hit(&p)")
+            .expect("找不到 nearest_segment_hit —— 判据的前提不成立");
+        let _ = code
+            .find("SegmentHit::Npc")
+            .expect("找不到 SegmentHit::Npc —— 判据的前提不成立");
         let first_expiry_after = code
             .match_indices("p.has_expired()")
             .map(|(i, _)| i)
-            .filter(|&i| i > collide && i > npc)
+            .filter(|&i| i > settle)
             .next();
 
         assert!(
             first_expiry_after.is_some(),
-            "`p.has_expired()` 没有出现在 `collide_physics` / `hit_npc_index` **之后** ⇒ \
+            "`p.has_expired()` 没有出现在按 `t` 结算的 `nearest_segment_hit` **之后** ⇒ \
              超出射程那一帧的线段会被整段跳过（末步穿模），\n\
              且 35 把枪的超程伤害档 `(f32::MAX, …)` 永远不可达"
         );
