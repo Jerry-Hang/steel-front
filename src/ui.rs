@@ -373,6 +373,9 @@ impl KeyBindings {
     /// 互斥原因：同一键码同时绑定两个动作时，按下该键会产生歧义行为，
     /// 因此优先保证新绑定生效，冲突动作一律退回默认键位。
     pub fn bind(&mut self, action: BindingAction, code: u32) {
+        // 🔴 **先记下本动作原来的键码**：冲突复位时要用它做**交换**
+        // （2026-10-15，外部复核指出第 3 条后半，已对着代码确认）。
+        let old_code = self.code_for(action);
         let slot = match action {
             BindingAction::Forward => &mut self.move_forward,
             BindingAction::Backward => &mut self.move_backward,
@@ -384,27 +387,44 @@ impl KeyBindings {
             BindingAction::Menu => &mut self.menu,
         };
         *slot = code;
-        // 冲突动作复位：按 Forward→Menu 顺序检查其它动作，凡当前键码 == code 者
-        // 重置回各自的默认键码，避免两个动作共用同一键。
-        for other in [
-            BindingAction::Forward,
-            BindingAction::Backward,
-            BindingAction::Left,
-            BindingAction::Right,
-            BindingAction::Reload,
-            BindingAction::Fire,
-            BindingAction::Menu,
-        ] {
+        // 冲突处理：把 `code` 让给**本次要绑的动作**，原占用者换到本动作的旧键码上。
+        //
+        // 🔴 **两处修正**（2026-10-15，外部复核指出第 3 条，已对着代码确认）：
+        //
+        // **① 遍历 `ALL_ACTIONS`，不要手抄数组。**
+        //    原来这里手抄了一份 **7 元素**数组（`Forward..Menu`，**漏了 `Jump`**），
+        //    而紧跟其后的 `match other` 却有 **8 个分支**（含 `Jump`）
+        //    ⇒ 同一个函数里自相矛盾：`Jump` 分支是**死代码**，
+        //    把「跳跃」绑到某个键、再把别的动作绑到同一个键时，`Jump` **不会**被复位
+        //    ⇒ 两个动作共用一键。
+        //    `ALL_ACTIONS` 的文档本来就写着它是"顺序唯一真源，别再各写一份平行数组"
+        //    —— 这就是第 4 份手抄。
+        //
+        // **② 复位要换成"交换"，不能复位回默认键码。**
+        //    原来的做法是把占用者重置为**它自己的默认键码**。但当 `code` 恰好**就是**
+        //    那个默认键码时（例：把 `Backward` 绑到 `Forward` 的默认键 `41`），
+        //    复位结果还是 `41` ⇒ **两个动作都持有 41**，
+        //    而 `action_for(41)` 按 `ALL_ACTIONS` 顺序返回**第一个**命中的 `Forward`
+        //    ⇒ **玩家刚绑好的 `Backward` 完全失效**（按键仍走 Forward），
+        //    这与本函数注释声明的目标「避免两个动作共用同一键」**直接矛盾**。
+        //    ⇒ 改成交换：占用者拿到**本动作原来的键码**，两边都真的生效。
+        for other in ALL_ACTIONS {
             if other != action && self.code_for(other) == code {
+                // 占用者让出 `code`，换到本动作原来的键码（`old_code`）上
+                let target = if Self::default_code(other) == code {
+                    old_code
+                } else {
+                    Self::default_code(other)
+                };
                 match other {
-                    BindingAction::Forward => self.move_forward = Self::default_code(other),
-                    BindingAction::Backward => self.move_backward = Self::default_code(other),
-                    BindingAction::Left => self.move_left = Self::default_code(other),
-                    BindingAction::Right => self.move_right = Self::default_code(other),
-                    BindingAction::Reload => self.reload = Self::default_code(other),
-                    BindingAction::Fire => self.fire = Self::default_code(other),
-                    BindingAction::Jump => self.jump = Self::default_code(other),
-                    BindingAction::Menu => self.menu = Self::default_code(other),
+                    BindingAction::Forward => self.move_forward = target,
+                    BindingAction::Backward => self.move_backward = target,
+                    BindingAction::Left => self.move_left = target,
+                    BindingAction::Right => self.move_right = target,
+                    BindingAction::Reload => self.reload = target,
+                    BindingAction::Fire => self.fire = target,
+                    BindingAction::Jump => self.jump = target,
+                    BindingAction::Menu => self.menu = target,
                 }
             }
         }
@@ -2605,19 +2625,62 @@ mod tests {
     #[test]
     fn bind_is_mutually_exclusive_with_default_reset() {
         let mut kb = KeyBindings::defaults();
-        // 把 BACKWARD 绑到 W(41)（当前 FORWARD 的键码）→ FORWARD 应复位回默认 W
+        // 🔴 **断言的是契约，不是某一条实现路径**（2026-10-15 改写）：
+        // 这条测试原来把「复位回默认键码」固化了，而那个做法在
+        // 「新键码 == 占用者的默认键码」时会**让两个动作共用一个键**
+        // （把 BACKWARD 绑到 W：FORWARD 复位后**还是** W ⇒ 两条都持有 41，
+        //  而 `action_for(41)` 按 `ALL_ACTIONS` 顺序返回 FORWARD
+        //  ⇒ **玩家刚绑的 BACKWARD 完全失效**，与 `bind` 注释声明的目标直接矛盾）。
+        // ⇒ 现在只断言两条不变式：**新绑定必须生效** + **不许两个动作共用一键**。
+        let assert_no_shared_keys = |kb: &KeyBindings, ctx: &str| {
+            for (i, a) in ALL_ACTIONS.iter().enumerate() {
+                for b in ALL_ACTIONS.iter().skip(i + 1) {
+                    assert_ne!(
+                        kb.code_for(*a),
+                        kb.code_for(*b),
+                        "{ctx}: {:?} 与 {:?} 共用了键码 {}",
+                        a,
+                        b,
+                        kb.code_for(*a)
+                    );
+                }
+            }
+        };
+
+        // 把 BACKWARD 绑到 W(41)（FORWARD 的默认键码）⇒ 两边都必须真的生效
         kb.bind(BindingAction::Backward, 41);
-        assert_eq!(kb.code_for(BindingAction::Backward), 41, "BACKWARD 应占用 W");
-        assert_eq!(kb.code_for(BindingAction::Forward), 41, "FORWARD 应复位回默认 41");
         assert_eq!(
             kb.action_for(41),
-            Some(BindingAction::Forward),
-            "冲突键码应按 Forward→Menu 顺序归属默认动作"
+            Some(BindingAction::Backward),
+            "刚绑的 BACKWARD 没拿到 W ⇒ 玩家的绑定被静默吞掉了"
         );
-        // 把 FORWARD 绑到 SPACE(62)（当前 JUMP 的键码）→ JUMP 应复位回默认 SPACE
+        assert_ne!(
+            kb.code_for(BindingAction::Forward),
+            41,
+            "FORWARD 还占着 W ⇒ 与 BACKWARD 共用一键（`bind` 注释声明的目标正是避免这个）"
+        );
+        assert_eq!(
+            kb.action_for(kb.code_for(BindingAction::Forward)),
+            Some(BindingAction::Forward),
+            "FORWARD 换到的键必须真的归它"
+        );
+        assert_no_shared_keys(&kb, "绑 BACKWARD=W 之后");
+
+        // 把 FORWARD 绑到 SPACE(62)（JUMP 的默认键码）—— 这一档同时覆盖
+        // 「手抄数组漏了 Jump」那个 bug（漏掉时 JUMP 不会被换走 ⇒ 与 FORWARD 共用 62）
         kb.bind(BindingAction::Forward, 62);
-        assert_eq!(kb.code_for(BindingAction::Forward), 62);
-        assert_eq!(kb.code_for(BindingAction::Jump), 62, "JUMP 应复位回默认 62");
+        assert_eq!(
+            kb.action_for(62),
+            Some(BindingAction::Forward),
+            "刚绑的 FORWARD 没拿到 SPACE"
+        );
+        assert_ne!(
+            kb.code_for(BindingAction::Jump),
+            62,
+            "JUMP 还占着 SPACE ⇒ 冲突检查漏掉了 Jump（原来是手抄数组少一个元素造成的）"
+        );
+        assert_no_shared_keys(&kb, "绑 FORWARD=SPACE 之后");
+
         // 未冲突动作不受影响
         assert_eq!(kb.code_for(BindingAction::Right), 22, "RIGHT 应保持 D");
         assert_eq!(kb.code_for(BindingAction::Reload), 36, "RELOAD 应保持 R");
@@ -2640,14 +2703,28 @@ mod tests {
         hud.cancel_rebind();
         assert_eq!(hud.rebinding, None, "取消后应清除 rebinding");
         assert_eq!(hud.key_bindings.code_for(BindingAction::Menu), 54, "取消不应改键");
-        // 再次 begin 且 complete 时冲突键复位
+        // 再次 begin 且 complete 时冲突处理
+        //
+        // 🔴 断言改写成**契约**（2026-10-15）：原来断言 `code_for(Menu) == 54`，
+        // 那正是「两个动作共用 54」的旧行为（`action_for(54)` 会返回顺序靠前的
+        // Forward，于是刚绑的 Forward 生效、Menu 被静默吞掉 —— 反之亦然）。
+        // 现在断言的是两件真正必要的事：**新绑定生效** + **不许共用一键**。
         hud.begin_rebind(BindingAction::Forward);
         assert_eq!(hud.complete_rebind(54), Some(BindingAction::Forward));
-        assert_eq!(hud.key_bindings.code_for(BindingAction::Forward), 54);
         assert_eq!(
+            hud.key_bindings.action_for(54),
+            Some(BindingAction::Forward),
+            "刚绑的 FORWARD 没拿到 ContextMenu 键"
+        );
+        assert_ne!(
             hud.key_bindings.code_for(BindingAction::Menu),
             54,
-            "MENU 应复位回默认 ContextMenu"
+            "MENU 还占着 54 ⇒ 与 FORWARD 共用一键（`bind` 声明的目标正是避免这个）"
+        );
+        assert_eq!(
+            hud.key_bindings.action_for(hud.key_bindings.code_for(BindingAction::Menu)),
+            Some(BindingAction::Menu),
+            "MENU 换到的键必须真的归它"
         );
     }
 
