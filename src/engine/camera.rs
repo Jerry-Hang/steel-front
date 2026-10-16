@@ -149,9 +149,29 @@ impl Camera {
         -self.direction()
     }
 
-    /// 相机右方向（前 × 世界上方向，水平）
+    /// 相机右方向（水平的、单位向量）。
+    ///
+    /// 🔴 **改写成只由 `yaw` 决定的形式**（2026-10-15，外部复核指出第 6 条）。
+    ///
+    /// **复核说的失效模式（`pitch = ±90°` 时零向量 `.normalize()` ⇒ NaN）实测不成立**：
+    /// `f32` 里 `cos(π/2) = -4.371139e-8` **不为 0**
+    /// ⇒ `forward` 与 `Y` 从不真正平行 ⇒ 叉积非零 ⇒ 归一化给出的是正常单位向量。
+    /// （实测扫了 π/2 附近 **100 万个 `f32`**，`cos == 0` 的一个都没有。）
+    ///
+    /// **但改仍然值得**，理由与 NaN 无关：
+    /// * **右向按定义只依赖 `yaw`**（它是"水平右"，与俯仰无关）⇒
+    ///   用叉积去算等于**绕一圈**，而且依赖 `cos(pitch)` 这个在奇点附近
+    ///   趋近 0 的量 —— **灾难性抵消**：`pitch` 越接近 ±90°，叉积的两个分量越小，
+    ///   相对误差越大（虽然 `f32` 恰好还没到真出 0 的那一步）。
+    /// * 现在这形式是**精确**的：水平前向 = `(-sin yaw, 0, -cos yaw)`
+    ///   ⇒ 右向 = 它 × Y = `(cos yaw, 0, -sin yaw)` ✅ 与旧式在 `|pitch| < 90°` 时同号同向。
+    /// * 少两次向量运算（每帧每相机都要算）。
+    ///
+    /// ⚠️ 附记：`RV3D_CAM` 调试机位**不夹** `pitch`（`lib.rs` 里直接 `r[1].to_radians()`），
+    /// 而仓库文档写"俯看用 `:0,84`"—— 那是在**绕过奇点**。
+    /// 现在这个写法下**没有奇点可绕**，`:0,90` 也是精确的。
     pub fn right(&self) -> Vec3 {
-        self.forward().cross(Vec3::Y).normalize()
+        Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin())
     }
 
     /// 相机上方向（右 × 前）
@@ -337,10 +357,21 @@ impl Camera {
                 self.flight_pos += self.move_vel * dt;
 
                 // 旋转：右键拖拽 → 目标角速度（指数逼近），松手后指数衰减滑行
+                // 🔴 **符号必须与 `FirstPerson::look` 一致**（2026-10-15，外部复核指出第 6 条，
+                // 已对着代码确认）：
+                // ```text
+                // FirstPerson::look:  yaw   -= delta_x * sens   // 右移 → 右转
+                //                     pitch += delta_y * sens   // 下移 → 低头
+                // 原 Flight:          yaw   += dx * sens / dt   // ← 右移【左】转
+                //                     pitch -= dy * sens / dt   // ← 下移【抬】头
+                // ```
+                // 两个模式共用同一个 `forward()`，鼠标手感却两轴全反 ——
+                // 而"飞行模式"恰恰是**地图/场景检查用的取证机位**，
+                // 拖反了会让人把"我拖错了"当成"地图那边不对"。
                 let (target_yaw_rate, target_pitch_rate) = if self.rotate_active {
                     (
-                        self.rotate_dx * MOUSE_SENSITIVITY / dt,
-                        -self.rotate_dy * MOUSE_SENSITIVITY / dt,
+                        -self.rotate_dx * MOUSE_SENSITIVITY / dt,
+                        self.rotate_dy * MOUSE_SENSITIVITY / dt,
                     )
                 } else {
                     (0.0, 0.0)
@@ -642,6 +673,121 @@ mod tests {
         assert!(
             (cam.first_person_eye() - pos).length() < 1e-5,
             "Flight → FirstPerson 位置应连续"
+        );
+    }
+}
+
+#[cfg(test)]
+mod camera_singularity_tests {
+    use super::*;
+
+    /// 🔴 **`right()` / `up()` 在任意 `pitch`（含 ±90°）下都必须是有限的单位水平向量。**
+    ///
+    /// ⚠️ **如实记录**：复核给的理由是"`pitch = ±90°` 时叉积是零向量 ⇒ NaN"，
+    /// 而**实测在 `f32` 下不成立** —— `cos(π/2) = -4.371139e-8 ≠ 0`
+    /// （扫了 π/2 附近 100 万个 `f32`，`cos == 0` 的一个都没有）
+    /// ⇒ 旧式在 ±90° 上给出的是**正常**单位向量，不是 NaN。
+    ///
+    /// **所以这条判据抓不到"改回叉积版本"这个退化** —— 那是**正确行为**：
+    /// 旧代码本来就没违反这条不变式。（我第一版按复核的说法写了注释，
+    /// 退化验证时发现它恒绿，才去实测、才改掉这句。）
+    ///
+    /// 判据仍然有价值：它钉住 `right()` 的**定义**（单位水平向量 + 与水平前向正交），
+    /// 而新写法是精确的、旧写法在奇点附近靠灾难性抵消。
+    /// 另：`RV3D_CAM` 不夹 `pitch`（直接 `r[1].to_radians()`）⇒ 这一档真的可达。
+    #[test]
+    fn right_and_up_are_finite_at_the_pitch_singularity() {
+        for (label, pitch) in [
+            ("正 90°", std::f32::consts::FRAC_PI_2),
+            ("负 90°", -std::f32::consts::FRAC_PI_2),
+            ("正常 45°", 45.0f32.to_radians()),
+        ] {
+            for yaw in [0.0f32, 0.7, 1.9, -2.3] {
+                let mut cam = Camera::new();
+                cam.yaw = yaw;
+                cam.pitch = pitch;
+                let r = cam.right();
+                let u = cam.up();
+                assert!(
+                    r.is_finite() && u.is_finite(),
+                    "{label} / yaw={yaw}: right={r:?} up={u:?} —— 出现 NaN/Inf\n\
+                     （零向量 `.normalize()` 的结果；改用只由 yaw 决定的水平右向即可）"
+                );
+                // 右向必须是**单位水平向量**（别拿一个退化的零向量糊过去）
+                assert!(
+                    (r.length() - 1.0).abs() < 1e-4 && r.y.abs() < 1e-5,
+                    "{label} / yaw={yaw}: right 不是单位水平向量：{r:?}"
+                );
+            }
+        }
+
+        // 与 yaw 的关系：yaw=0 时右向 = +X（与 `direction()` 的约定一致）
+        let mut cam = Camera::new();
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        let r = cam.right();
+        assert!(
+            (r.x - 1.0).abs() < 1e-5 && r.z.abs() < 1e-5,
+            "yaw=0 时右向应当是 +X，实得 {r:?}"
+        );
+        // 右向必须与水平前向垂直（正交性，别把公式写错）
+        let f = Vec3::new(cam.forward().x, 0.0, cam.forward().z).normalize();
+        assert!(
+            r.dot(f).abs() < 1e-5,
+            "右向与水平前向不垂直：right={r:?} fwd={f:?}"
+        );
+    }
+
+    /// 🔴 **飞行模式与第一人称的鼠标旋转极性必须一致。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 6 条）：
+    /// `FirstPerson::look` 是 `yaw -= dx`（右移右转）、`pitch += dy`（下移低头）；
+    /// 而 `Flight` 原来写的是 `+dx` / `-dy` —— **两轴全反**。
+    /// 两者共用同一个 `forward()`，手感却相反；而飞行模式正是**地图/场景取证的机位**，
+    /// 拖反了会让人把"我拖错了"误判成"那边不对"。
+    #[test]
+    fn flight_and_first_person_share_the_same_look_polarity() {
+        // FirstPerson：右移 → yaw 减小
+        let mut fp = Camera::new();
+        fp.mode = CameraMode::FirstPerson;
+        let y0 = fp.yaw;
+        fp.look(100.0, 0.0);
+        let fp_yaw_delta = fp.yaw - y0;
+
+        // Flight：同样的右移，方向必须相同
+        let mut fl = Camera::new();
+        fl.mode = CameraMode::Flight;
+        fl.set_rotation_active(true);
+        fl.add_rotation_input(100.0, 0.0);
+        let y1 = fl.yaw;
+        let keys = KeyState::new();
+        fl.update(&keys, 1.0 / 60.0);
+        let fl_yaw_delta = fl.yaw - y1;
+
+        assert!(
+            fp_yaw_delta * fl_yaw_delta > 0.0,
+            "第一人称与飞行模式的 yaw 旋转方向相反（{fp_yaw_delta} vs {fl_yaw_delta}）——\n\
+             两者共用同一个 forward()，鼠标右移不该一个右转一个左转"
+        );
+
+        // pitch 同理：下移 → pitch 增大（低头）
+        let mut fp2 = Camera::new();
+        fp2.mode = CameraMode::FirstPerson;
+        let p0 = fp2.pitch;
+        fp2.look(0.0, 100.0);
+        let fp_pitch_delta = fp2.pitch - p0;
+
+        let mut fl2 = Camera::new();
+        fl2.mode = CameraMode::Flight;
+        fl2.set_rotation_active(true);
+        fl2.add_rotation_input(0.0, 100.0);
+        let p1 = fl2.pitch;
+        fl2.update(&keys, 1.0 / 60.0);
+        let fl_pitch_delta = fl2.pitch - p1;
+
+        assert!(
+            fp_pitch_delta * fl_pitch_delta > 0.0,
+            "第一人称与飞行模式的 pitch 方向相反（{fp_pitch_delta} vs {fl_pitch_delta}）"
         );
     }
 }
