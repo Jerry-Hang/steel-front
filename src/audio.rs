@@ -898,7 +898,12 @@ impl AdsrEnv {
             } else {
                 EnvStage::Decay
             },
-            level: 0.0,
+            // 🔴 **没有起音段时电平必须从 1.0 起步**（2026-10-15，外部复核指出第 2 条，
+            // 已对着代码确认）。原来恒为 `0.0`：`attack == 0` 时直接进 `Decay`，
+            // 而衰减写成 `sustain + (level - sustain) * 因子` ⇒ **从 0 往 0 衰减**
+            // ⇒ `attack = 0, sustain = 0` 的包络**恒输出 0.0**、那个音效**完全不响**
+            //（不崩、不报错、只是没声音 —— 而"没声音"很难被当成 bug 去查）。
+            level: if adsr.attack > 0.0 { 0.0 } else { 1.0 },
             elapsed: 0.0,
         }
     }
@@ -922,8 +927,27 @@ impl AdsrEnv {
                 }
                 EnvStage::Decay => {
                     let k = if adsr.decay > 0.0 { 1.0 / adsr.decay } else { 0.0 };
-                    self.level =
-                        adsr.sustain + (self.level - adsr.sustain) * (-k * self.elapsed).exp();
+                    // 🔴 **每步只能用「本步」的因子，不能用含累积时间的绝对因子**
+                    // （2026-10-15，外部复核指出第 2 条，已对着代码确认并实测）。
+                    //
+                    // 原式是 `level = sustain + (level - sustain) * exp(-k * self.elapsed)`：
+                    // 它把**已经衰减过的 `level`** 再乘一次 **含累积 `elapsed`** 的因子
+                    // ⇒ 逐步叠乘 `∏ e^{-k·n·dt} = e^{-k·dt·N(N+1)/2}`
+                    // ⇒ 包络按**采样数的二次方**很快变没（与采样率强耦合）。
+                    //
+                    // 实测（`decay = 0.8s`，48 kHz，从 1.0 落到 0.001）：
+                    //   原式 **15.1 ms**；标称 800 ms ⇒ **快了 53 倍**
+                    //   ⇒ 爆炸声听起来是"答"的一声、不是"轰"。
+                    //
+                    // 正确形式：每一步乘**本步**因子 `e^{-k·dt}`
+                    // ⇒ 总衰减 `e^{-k·t}`，时间常数正是 `decay`（与采样率无关）。
+                    //
+                    // ⚠️ 遗留（本次不改）：衰减窗口结束那一刻（`elapsed >= decay`）
+                    // 会把 level 直接置成 `sustain`，而指数此时还有 `e^{-1} ≈ 0.37`
+                    // ⇒ 尾巴上有一个 0.37 的台阶。那属于"包络形状"的设计问题，
+                    // 与本次的"二次方很快变没"是两件事，**分开记**。
+                    let step = (-k * dt).exp();
+                    self.level = adsr.sustain + (self.level - adsr.sustain) * step;
                     if self.elapsed >= adsr.decay {
                         if adsr.sustain <= 0.0 {
                             self.stage = EnvStage::Done;
@@ -2565,6 +2589,59 @@ mod tests {
     fn dsp_synth_zero_sample_rate_falls_back() {
         let synth = DspSynth::new(0);
         assert_eq!(synth.sample_rate, 44_100.0);
+    }
+
+
+    /// 🔴 **衰减阶段必须按「本步」因子衰减，不能按累积时间叠乘。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 2 条，已对着代码确认并实测）：
+    /// 原式 `level = sustain + (level - sustain) * exp(-k * elapsed)`
+    /// 在**已经衰减过的 `level`** 上又乘一次**含累积 `elapsed`** 的因子
+    /// ⇒ 逐步叠乘 `∏ e^{-k·n·dt} = e^{-k·dt·N(N+1)/2}`
+    /// ⇒ 包络按**采样数的二次方**很快变没。
+    ///
+    /// 实测（`decay = 0.8s`、48 kHz、从 1.0 落到 0.001）：原式只用 **15.1 ms**，
+    /// 而标称是 800 ms ⇒ **快了 53 倍**（爆炸声变成"答"的一声）。
+    ///
+    /// ⚠️ 判据必须**量时间**而不是量"某个采样点的值" —— 二次方很快变没的特征正是
+    /// "前几毫秒就掉光了"，只看前几个样本反而看不出区别。
+    /// ⚠️ 判据同时钉住**采样率无关**：这是原式与采样率强耦合的那一面。
+    #[test]
+    fn decay_stage_takes_the_nominal_time_and_is_sample_rate_independent() {
+        // 从 1.0 落到 0.5 用掉的时间 = 指数的时间常数刻度（ln2 · decay）
+        let measure = |sr: f32| -> f32 {
+            let adsr = Adsr { attack: 0.0, decay: 0.8, sustain: 0.0, release: 0.0 };
+            let mut env = AdsrEnv::new(adsr);
+            let dt = 1.0 / sr;
+            let mut t = 0.0f32;
+            while t < 5.0 {
+                let v = env.advance(&adsr, dt);
+                t += dt;
+                if v <= 0.5 {
+                    return t;
+                }
+            }
+            f32::NAN
+        };
+        for sr in [22_050.0f32, 48_000.0, 96_000.0] {
+            let t = measure(sr);
+            // 正确实现：t ≈ ln2 × 0.8 = 0.5546 s
+            assert!(
+                (t - 0.5546).abs() < 0.05,
+                "{sr} Hz：落到 0.5 用了 {t:.3}s，应当是 ln2 × decay ≈ 0.555s。\n                 原式（按累积时间叠乘）只要 ~1.6ms —— 二次方很快变没，声音变成\"答\"的一声"
+            );
+        }
+
+        // 🔴 **`attack = 0` 时包络必须从 1.0 起步**，否则那个音效**完全不响**。
+        // 原来 `level` 恒从 `0.0` 起步，而 `attack == 0` 直接进 `Decay`
+        // ⇒ 从 0 往 0 衰减 ⇒ 恒输出 0.0（不崩不报错，只是没声音）。
+        let no_attack = Adsr { attack: 0.0, decay: 0.5, sustain: 0.0, release: 0.0 };
+        let mut env = AdsrEnv::new(no_attack);
+        let first = env.advance(&no_attack, 1.0 / 48_000.0);
+        assert!(
+            first > 0.9,
+            "`attack = 0` 的第一个样本只有 {first} —— 包络从 0 起步 ⇒ 这个音效永远不会响"
+        );
     }
 
     #[test]
