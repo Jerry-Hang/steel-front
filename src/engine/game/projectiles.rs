@@ -3,6 +3,20 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+// 弹道诊断（RV3D_PROJ_DIAG=1 时启用，节流 2s）：默认关闭避免生产日志噪音
+static LAST_PROJ_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// 弹丸**去向**计数（2026-09-25 加）：harness 只有 `hits` 一个数，打了多少发、
+// 有多少打在掩体上、多少飞没了**都看不见** ⇒ "改瞄法到底有没有用"无法判定。
+// 三个计数器在下面三个结算分支里各加一，随 2s 诊断行一起打印并清零。
+static PROJ_OBSTACLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROJ_NPC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROJ_EXPIRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// 过期弹**差多远**（分桶）：<0.5m = 差一点点（瞄点/抖动），0.5–2m = 接近，
+// >2m = 根本不是瞄着它飞的（瞄错目标/几何）。判"该怎么修"全靠这三格。
+static PROJ_MISS_NEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROJ_MISS_MID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROJ_MISS_FAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl Game {
         /// 当前飞行/落地手榴弹位置列表（渲染用：世界内可见手雷实体）
     pub(crate) fn grenade_positions(&self) -> Vec<[f32; 3]> {
@@ -162,20 +176,46 @@ impl Game {
     /// 投射物推进 + 碰撞检测：物理刚体/球体命中即销毁；NPC 命中扣血，hp≤0 移除并计分。
     ///
     /// `allow_kills = false`（GameOver 冻结）：投射物照常飞行/到期，但不判定任何命中。
+    /// **过期弹的收尾**：计数 + 爆炸弹引爆 + 从队列里退掉。
+    ///
+    /// 🔴 抽出来的理由（2026-10-15，外部复核指出第 2 条）：`Projectile::update`
+    /// 原来在**超出射程的当帧**就把 `alive` 置 false，而碰撞阶段见 `!is_alive()` 直接
+    /// `continue` ⇒ **那一步的线段完全不检测**（末步穿模），
+    /// 且 35 把枪的超程伤害档 `(f32::MAX, …)` 永远不可达。
+    ///
+    /// 现在超程判定挪到**碰撞检测之后**，于是"到期"这个分支出现在三处
+    /// （上一帧已死的兜底 / 冻结态 `!allow_kills` / 正常路径末尾）
+    /// ⇒ 收成一个方法，免得同一段逻辑写三遍（本仓最贵的缺陷形态）。
+    fn retire_projectile(&mut self, p: &mut Projectile, allow_kills: bool) {
+        PROJ_EXPIRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if p.min_npc_dist < 0.5 {
+            PROJ_MISS_NEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else if p.min_npc_dist <= 2.0 {
+            PROJ_MISS_MID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            PROJ_MISS_FAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // 弹着点：仅爆炸弹（如未来榴弹武器）过期时引爆 AoE；普通子弹静默消失
+        // （修复：V3.0 高速弹射程尽头"神秘连发爆炸"特效——子弹不是炸弹）
+        if p.explosive() {
+            self.spawn_explosion(
+                p.position,
+                EXPLOSION_RADIUS,
+                if allow_kills { EXPLOSION_DAMAGE } else { 0.0 },
+                true,
+            );
+            self.audio.synth_mut().play_explosion(
+                glam::Vec3::new(p.position[0], p.position[1], p.position[2]),
+                0.45,
+            );
+        }
+        // 显式标记销毁 —— `update` 不再自己判超程（见 `Projectile::update` 的文档），
+        // 所以"退出活动队列"这个决定必须在**这里**落实到状态上，
+        // 免得留下一个 `is_alive() == true` 却已经没人管的幽灵。
+        p.kill();
+    }
+
     pub(crate) fn update_projectiles(&mut self, dt: f32, allow_kills: bool) {
-        // 弹道诊断（RV3D_PROJ_DIAG=1 时启用，节流 2s）：默认关闭避免生产日志噪音
-        static LAST_PROJ_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        // 弹丸**去向**计数（2026-09-25 加）：harness 只有 `hits` 一个数，打了多少发、
-        // 有多少打在掩体上、多少飞没了**都看不见** ⇒ "改瞄法到底有没有用"无法判定。
-        // 三个计数器在下面三个结算分支里各加一，随 2s 诊断行一起打印并清零。
-        static PROJ_OBSTACLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        static PROJ_NPC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        static PROJ_EXPIRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        // 过期弹**差多远**（分桶）：<0.5m = 差一点点（瞄点/抖动），0.5–2m = 接近，
-        // >2m = 根本不是瞄着它飞的（瞄错目标/几何）。判"该怎么修"全靠这三格。
-        static PROJ_MISS_NEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        static PROJ_MISS_MID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        static PROJ_MISS_FAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let diag = proj_diag_on();
         if diag {
             let now_ms = std::time::SystemTime::now()
@@ -254,33 +294,18 @@ impl Game {
         let mut hit_count = 0u32;
         let old = std::mem::take(&mut self.projectiles);
         let mut alive = Vec::with_capacity(old.len());
-        for p in old {
+        for mut p in old {
             if !p.is_alive() {
-                PROJ_EXPIRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if p.min_npc_dist < 0.5 {
-                    PROJ_MISS_NEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                } else if p.min_npc_dist <= 2.0 {
-                    PROJ_MISS_MID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    PROJ_MISS_FAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                // 弹着点：仅爆炸弹（如未来榴弹武器）过期时引爆 AoE；普通子弹静默消失
-                // （修复：V3.0 高速弹射程尽头"神秘连发爆炸"特效——子弹不是炸弹）
-                if p.explosive() {
-                    self.spawn_explosion(
-                        p.position,
-                        EXPLOSION_RADIUS,
-                        if allow_kills { EXPLOSION_DAMAGE } else { 0.0 },
-                        true,
-                    );
-                    self.audio.synth_mut().play_explosion(
-                        glam::Vec3::new(p.position[0], p.position[1], p.position[2]),
-                        0.45,
-                    );
-                }
+                // 上一帧就已销毁（正常路径不该走到 —— 命中即不进 `alive`）⇒ 兜底
+                self.retire_projectile(&mut p, allow_kills);
                 continue;
             }
             if !allow_kills {
+                // 冻结态（GameOver）：投射物**照常飞行、也照常到期**，只是不判命中
+                if p.has_expired() {
+                    self.retire_projectile(&mut p, allow_kills);
+                    continue;
+                }
                 alive.push(p);
                 continue;
             }
@@ -334,6 +359,15 @@ impl Game {
                     self.hud.show_hit_marker();
                     continue;
                 }
+            }
+            // 🔴 **到期判定必须在碰撞检测【之后】**（2026-10-15，外部复核指出第 2 条）：
+            // 放在碰撞之前 ⇒ "超出射程的那一步"的线段被整段跳过 = **末步穿模**，
+            // 而且 35 把枪的超程伤害档 `(f32::MAX, …)` 永远不可达。
+            // 放在这里 ⇒ 那一步照常参与 `collide_physics` / `hit_npc_index`，
+            // 打中了就按命中结算；没打中才按"飞没了"退场。
+            if p.has_expired() {
+                self.retire_projectile(&mut p, allow_kills);
+                continue;
             }
             alive.push(p);
         }
@@ -642,5 +676,74 @@ impl Game {
                 eq
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod projectile_expiry_order_tests {
+    /// 🔴 **到期判定必须排在碰撞检测【之后】**。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 2 条，已对着代码确认）：
+    /// `Projectile::update` 原来在超出射程的**当帧**就把 `alive` 置 false，
+    /// 而碰撞阶段第一句就是
+    /// ```text
+    /// for p in old { if !p.is_alive() { …计数…; continue; }   // ← 直接跳过
+    ///                if self.collide_physics(&p) { … }        // ← 这一步轮不到
+    /// ```
+    /// ⇒ **超出射程那一帧的 `prev_position → position` 线段完全不检测**
+    ///   ⇒ 站在 `[range − 一步, range]` 之间的目标被**穿过去**（末步穿模）。
+    /// 而且 `weapon_data.rs` 里 35 把枪都配了超程伤害档 `(f32::MAX, …)`，
+    /// **没有任何一发子弹能活到 `distance_traveled > range`** ⇒ 那些档全是死数据。
+    ///
+    /// 修法是把 `has_expired()` 挪到碰撞之后。**这条判据钉的就是那个顺序** ——
+    /// 顺序错了功能就退回去，而功能本身要用整个 Game 才能验（这里用位置比较，
+    /// 既便宜又直接对准真实现）。
+    #[test]
+    fn expiry_check_runs_after_collision_checks() {
+        let src = include_str!("projectiles.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let start = prod
+            .find("pub(crate) fn update_projectiles(")
+            .expect("找不到 update_projectiles");
+        let rest = &prod[start..];
+        let end = rest[1..]
+            .find("\n    pub(crate) fn ")
+            .or_else(|| rest[1..].find("\n    fn "))
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        let body = &rest[..end];
+        let code: String = body
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("*") || t.starts_with("/*"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let collide = code
+            .find("self.collide_physics(&p)")
+            .expect("找不到 collide_physics —— 判据的前提不成立");
+        let npc = code
+            .find("self.hit_npc_index(&p)")
+            .expect("找不到 hit_npc_index —— 判据的前提不成立");
+        let first_expiry_after = code
+            .match_indices("p.has_expired()")
+            .map(|(i, _)| i)
+            .filter(|&i| i > collide && i > npc)
+            .next();
+
+        assert!(
+            first_expiry_after.is_some(),
+            "`p.has_expired()` 没有出现在 `collide_physics` / `hit_npc_index` **之后** ⇒ \
+             超出射程那一帧的线段会被整段跳过（末步穿模），\n\
+             且 35 把枪的超程伤害档 `(f32::MAX, …)` 永远不可达"
+        );
+        // 正对照：冻结态那条路也必须在**碰撞之前**判（那条路本来就不做碰撞，
+        // 所以它出现得更早是正常的）—— 这里只确认"后面那处"存在即可。
+        assert!(
+            code.contains("retire_projectile"),
+            "结算没有统一走 `retire_projectile`（三处到期分支应收成一个）"
+        );
     }
 }

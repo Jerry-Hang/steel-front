@@ -395,9 +395,23 @@ impl Projectile {
         tiered_damage(self.damage, self.damage_tiers, self.distance_traveled)
     }
 
-    /// 是否仍存活（射程/寿命耗尽后返回 false）
+    /// 是否仍存活。
+    ///
+    /// ⚠️ **文档在 2026-10-15 更正**：原来写的是"射程/寿命耗尽后返回 false"，
+    /// 而超程/超寿命**已经不再由 `update` 自动销毁**（那会让超程当帧的线段检测不到，
+    /// 见 [`Self::update`]）⇒ 现在要靠调用方：
+    /// * 问"还能不能继续飞" ⇒ [`Self::has_expired`]；
+    /// * 真要销毁 ⇒ [`Self::kill`]。
     pub fn is_alive(&self) -> bool {
         self.alive
+    }
+
+    /// **显式销毁**（调用方在碰撞检测之后决定不再保留它时调用）。
+    ///
+    /// 存在理由：`update` 不再自己判超程（见其文档），所以"销毁"这个动作
+    /// 需要一个公开入口 —— 否则只剩私有字段，调用方想标记都没法标。
+    pub fn kill(&mut self) {
+        self.alive = false;
     }
 
     /// 上一帧位置（segment 命中检测用：高速弹避免隧道效应跳过目标）
@@ -443,9 +457,29 @@ impl Projectile {
             .sqrt();
         self.distance_traveled += speed * dt;
         self.age += dt;
-        if self.distance_traveled >= self.range || self.age >= self.max_lifetime {
-            self.alive = false;
-        }
+        // 🔴 **超程/超寿命【不在这里】销毁**（2026-10-15，外部复核指出第 2 条，
+        // 已对着代码确认）：原来这里直接把 `alive = false`，而调用方
+        // `update_projectiles` 的碰撞阶段是
+        // ```text
+        // for p in old { if !p.is_alive() { …计数…; continue; }   // ← 直接跳过碰撞
+        //                if self.collide_physics(&p) { … }        // ← 这一步轮不到
+        // ```
+        // ⇒ **超出射程那一帧的 `prev_position → position` 线段完全不检测**
+        //   ⇒ 站在 `[range - 一步, range]` 之间的目标被**穿过去**（末步穿模）。
+        // 而且 `weapon_data.rs` 里 35 把枪都配了超程伤害档 `(f32::MAX, …)`，
+        // **没有任何一发子弹能活到 `distance_traveled > range`** ⇒ 那些档全是死数据。
+        //
+        // ⇒ 现在只推进；是否到期由 [`Self::has_expired`] 判，
+        //   **调用方必须在碰撞检测【之后】才调它**。
+        let _ = speed;
+    }
+
+    /// **是否已超出射程或寿命**（只读判据，不销毁）。
+    ///
+    /// ⚠️ 调用顺序要紧：必须在**碰撞检测之后**判定 —— 否则"超出射程的那一步"
+    /// 会被整段跳过（见 [`Self::update`] 里的说明）。
+    pub fn has_expired(&self) -> bool {
+        self.distance_traveled >= self.range || self.age >= self.max_lifetime
     }
 }
 
@@ -941,14 +975,41 @@ mod tests {
 
         proj.update(0.02); // 6 米，仍在射程内
         assert!(proj.is_alive());
+        assert!(!proj.has_expired());
+        let x_in_range = proj.position[0];
 
-        proj.update(0.02); // 累计 12 米，超过射程 10 米 → 销毁
-        assert!(!proj.is_alive());
+        // 🔴 **契约在 2026-10-15 改过**（外部复核指出第 2 条）：超出射程的**当帧**
+        // 不再由 `update` 自己销毁 —— 那一帧的 `prev_position → position` 线段
+        // **必须留给调用方做碰撞检测**，否则站在 `[range - 一步, range]` 之间的目标
+        // 会被整段穿过去（末步穿模）。
+        let prev = proj.position[0];
+        proj.update(0.02); // 累计 12 米，超过射程 10 米
+        assert!(
+            proj.has_expired(),
+            "累计 12m 已超过射程 10m ⇒ `has_expired()` 必须为真"
+        );
+        assert!(
+            proj.is_alive(),
+            "`update` 不该在超程当帧销毁自己 —— 否则这一步的线段检测不到"
+        );
+        // **本帧确实走了一段**（这段就是调用方要拿去检测的那个线段）
+        assert!(
+            proj.position[0] > prev + 5.0,
+            "超程那一帧应当照常推进（本帧线段 = 6m）"
+        );
+        // 而 `prev_position` 正是"线段起点"，调用方靠它做 segment 检测
+        assert_eq!(
+            proj.prev_position()[0], prev,
+            "`prev_position` 必须停在本帧起点（segment 检测的起点）"
+        );
+        assert!(proj.position[0] > x_in_range);
 
-        // 销毁后不再推进
-        let x = proj.position[0];
+        // "销毁后不再推进"这条语义现在归**调用方**（把它从活动队列里摘掉就不再 update）。
+        // `Projectile` 这一层只保证：一旦 `alive = false`，`update` 不再动它。
+        proj.kill();
+        let x_dead = proj.position[0];
         proj.update(1.0);
-        assert_eq!(proj.position[0], x);
+        assert_eq!(proj.position[0], x_dead, "已销毁的不该再推进");
         assert!(!proj.is_alive());
     }
 
@@ -959,9 +1020,23 @@ mod tests {
 
         proj.update(0.6); // 存活 0.6 秒
         assert!(proj.is_alive());
+        assert!(!proj.has_expired(), "0.6s 还没到寿命（1.0s）");
 
-        proj.update(0.5); // 存活 1.1 秒，超过寿命 1.0 秒 → 销毁
-        assert!(!proj.is_alive());
+        // 🔴 **契约在 2026-10-15 改过**（外部复核指出第 2 条）：
+        // `update` **只推进**，不再销毁自己 —— 销毁权交给调用方，
+        // 因为"超出射程的那一步"的线段**必须照常参与碰撞检测**。
+        // 原来 `update` 当场置 `alive = false`，而碰撞阶段见 `!is_alive()` 直接 `continue`
+        // ⇒ 站在 `[range - 一步, range]` 之间的目标被**穿过去**（末步穿模）。
+        proj.update(0.5); // 存活 1.1 秒，超过寿命 1.0 秒
+        assert!(
+            proj.has_expired(),
+            "1.1s 已经超过寿命 1.0s ⇒ `has_expired()` 必须为真"
+        );
+        // 关键：**这时它还在**（让调用方有机会对这一帧的线段做碰撞检测）
+        assert!(
+            proj.is_alive(),
+            "`update` 不该再自己销毁 —— 否则超程那一帧的线段永远检测不到"
+        );
     }
 
     /// V3.0 子弹下坠：重力 > 0 时垂直速度按 g·dt 递减，位置随之弯曲下落
