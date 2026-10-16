@@ -1901,8 +1901,21 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
     }
     let mut w = 0.0f32;
     for ch in text.chars() {
-        // CJK：12 格 × 0.714 + 额外 1 列字距（与 render_text 一致）
-        let cols = if is_cjk(ch) { 12.0 * 0.714 + 1.0 } else { FONT_COLS as f32 };
+        // 🔴 **CJK 的 `cols` 只算"字宽"，不能再含那额外的 1.0 字距**
+        // （2026-10-15，外部复核指出第 3 条，已对着代码确认）。
+        //
+        // `render_text` 两条路径的**每字总步进**（字宽 + 字距）是：
+        //   ASCII ⇒ `(FONT_COLS + FONT_SPACING) * scale`            = (5 + 1) = 6.000
+        //   CJK   ⇒ `(12.0 * 0.714 + 1.0) * scale`                  = 9.568（那 1.0 就是加宽的字距）
+        //
+        // 而这里原来把 CJK 写成 `12.0*0.714 + 1.0`，**紧接着又 `+ FONT_SPACING`**
+        // ⇒ 汉字每字算成 `9.568 + 1.0 = 10.568`，**每个字多 1.0×scale**。
+        // ASCII 那条路是对的（`5 + 1` 与 `render_text` 逐字相等）。
+        //
+        // ⇒ 后果：所有用 `text_width` 居中的中文标题/按钮/击杀提示**系统性偏左**，
+        // 而且偏的量随字数线性增长（"击杀提示"四个字就偏 4 像素×scale）。
+        // 所以这里 CJK 只给**字宽** 12×0.714，字距由末尾那个 `+ FONT_SPACING` 提供。
+        let cols = if is_cjk(ch) { 12.0 * 0.714 } else { FONT_COLS as f32 };
         w += (cols + FONT_SPACING) * scale;
     }
     w - FONT_SPACING * scale
@@ -2016,6 +2029,54 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+/// 🔴 **`text_width` 的每字步进必须与 `render_text` 的游标步进逐字相等。**
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 3 条，已对着代码确认）：
+    /// `render_text` 两条路径的每字总步进（字宽 + 字距）分别是
+    ///   ASCII ⇒ `(FONT_COLS + FONT_SPACING) * scale`
+    ///   CJK   ⇒ `(12.0 * 0.714 + 1.0) * scale`
+    /// 而 `text_width` 原来把 CJK 写成 `cols = 12*0.714 + 1.0`、**又 `+ FONT_SPACING`**
+    /// ⇒ 汉字每字多算 `1.0 * scale`（ASCII 那条路是对的）。
+    /// ⇒ 所有用 `text_width` 居中的中文**系统性偏左**，偏移随字数线性增长。
+    ///
+    /// ⚠️ 判据用**差分**量步进（`width(两字) - width(一字)`），不用绝对值 ——
+    /// 绝对值会把末尾那次 `- FONT_SPACING` 的修正也搅进来，
+    /// 而差分量恰好只留下"每字步进"，正是要与 `render_text` 对齐的那个量。
+    #[test]
+    fn text_width_per_char_step_matches_render_text() {
+        let scale = 1.0f32;
+        let ascii_step = (FONT_COLS as f32 + FONT_SPACING) * scale;
+        let cjk_step = (12.0 * 0.714 + 1.0) * scale;
+
+        // ASCII：两个字符与一个字符之差 = 一个字符的步进
+        let a1 = text_width("A", scale);
+        let a2 = text_width("AB", scale);
+        assert!(
+            (a2 - a1 - ascii_step).abs() < 1e-4,
+            "ASCII 每字步进 {} 与 render_text 的 {} 不等",
+            a2 - a1,
+            ascii_step
+        );
+
+        // CJK：这里就是原 bug 的落点
+        let c1 = text_width("汉", scale);
+        let c2 = text_width("汉汉", scale);
+        assert!(
+            (c2 - c1 - cjk_step).abs() < 1e-4,
+            "CJK 每字步进 {} 与 render_text 的 {} 不等 —— \
+             多出来的部分就是被重复计入的字距（`text_width` 里 CJK 的 cols 已经含了那 1.0，\n\
+             末尾又 `+ FONT_SPACING` 加了一次）⇒ 中文居中会随字数线性偏左",
+            c2 - c1,
+            cjk_step
+        );
+
+        // 前置自检（教训 27）：确认两条步进确实不同（否则这条判据无区分度）
+        assert!(
+            (cjk_step - ascii_step).abs() > 1.0,
+            "前提不成立：CJK 与 ASCII 的步进应当明显不同"
+        );
+    }
 
     fn find_bar(elems: &[HudElement]) -> Option<(&Quad, &Quad, f32)> {
         elems.iter().find_map(|e| match e {
