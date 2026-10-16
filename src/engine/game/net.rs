@@ -3,6 +3,55 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// 🔴 **远端玩家 `NetPlayer::pos[1]` 的语义 = 脚底地面高**（与 `Npc::position[1]`
+/// 以及客户端渲染的 `NpcVisual::pos` 一致）。
+///
+/// 存在理由（2026-10-15，外部复核指出第 8 条，已对着代码确认）：
+/// 同一个字段原来有**三种互相矛盾的用法**：
+/// ```text
+/// 164:  p.pos[1] = terrain_height_at(..) + 1.6      // 当成【眼高】
+/// 332:  eye = [.., p.pos[1] + 1.2, ..]              // 眼高又 +1.2（而 pos[1] 刚被清成 0
+///                                                  //   ⇒ 开火原点恒为 y=1.2，丘陵上在地里）
+/// 414:  dy = ph - (q.pos[1] - 1.6)                   // 命中判定当【眼高】再减 1.6 得脚底
+/// 广播: pos: p.pos                                  // 客户端当【脚底】用（同普通 NPC）
+///                                                   //   ⇒ 远端玩家悬浮 1.6m
+/// ```
+/// ⇒ 现在统一成**脚底**这一个约定，眼高由 [`NET_EYE_HEIGHT`] 显式相加。
+const NET_EYE_HEIGHT: f32 = 1.6;
+
+/// **远端玩家输入 → 水平位移方向**（纯函数：实现与判据**共用同一个函数**）。
+///
+/// 为什么要把方向解算单独抽出来：判据如果自己复刻一遍这段算式，
+/// 那它测的就是**复刻**而不是**实现** —— 改实现判据照样绿（本判据第一版就栽在这）。
+/// 抽出来之后，"实现改了"与"判据红了"是同一件事。
+///
+/// 约定（与 `Camera` 一致，**唯一真源**）：
+/// * `Camera::direction()` = `(cos p·sin yaw, sin p, cos p·cos yaw)`
+/// * `Camera::forward()` = **`-direction()`** ⇒ 水平前向 = `(-sin yaw, -cos yaw)`
+/// * `right = forward × Y` = `(cos yaw, -sin yaw)`，`left = -right`
+fn net_input_delta(yaw: f32, forward: bool, backward: bool, left: bool, right: bool) -> (f32, f32) {
+    let (sy, cy) = (yaw.sin(), yaw.cos());
+    let mut dx = 0.0f32;
+    let mut dz = 0.0f32;
+    if forward {
+        dx -= sy;
+        dz -= cy;
+    }
+    if backward {
+        dx += sy;
+        dz += cy;
+    }
+    if left {
+        dx -= cy;
+        dz += sy;
+    }
+    if right {
+        dx += cy;
+        dz -= sy;
+    }
+    (dx, dz)
+}
+
 impl Game {
     /// 初始化网络环回演示：绑定环回 Server + 连入 Client，发起 Join
     pub(crate) fn init_network_demo() -> Result<NetworkDemo, String> {
@@ -161,7 +210,8 @@ impl Game {
                 log::info!("net: server 远端玩家 #{} 复活 @({:.0},{:.0})", p.id, spawn[0], spawn[1]);
             }
             if p.alive {
-                p.pos[1] = terrain_height_at(p.pos[0], p.pos[2]) + 1.6;
+                // 脚底高（**不再加眼高** —— 加了会让广播出去的 pos 比普通 NPC 高 1.6m）
+                p.pos[1] = terrain_height_at(p.pos[0], p.pos[2]);
             }
         }
         // 每 tick 广播快照：本机玩家 + 全部 NPC + 远端玩家（同一 id 空间，远端用保留基址）
@@ -300,28 +350,34 @@ impl Game {
         let speed = 4.6 * dt;
         let mut dx = 0.0f32;
         let mut dz = 0.0f32;
-        let (sy, cy) = (input.yaw.sin(), input.yaw.cos());
-        if input.forward {
-            dx += sy * speed;
-            dz += cy * speed;
-        }
-        if input.backward {
-            dx -= sy * speed;
-            dz -= cy * speed;
-        }
-        if input.left {
-            dx += cy * speed;
-            dz -= sy * speed;
-        }
-        if input.right {
-            dx -= cy * speed;
-            dz += sy * speed;
-        }
+        // 🔴 **必须用相机那一套约定**（2026-10-15，外部复核指出第 8 条，已对着代码确认）。
+        //
+        // `Camera::direction()` = `(cos p·sin yaw, sin p, cos p·cos yaw)`，
+        // 而 `Camera::forward()` = **`-direction()`** ⇒ 水平前向 = `(-sin yaw, -cos yaw)`；
+        // `right = forward × Y` = `(cos yaw, -sin yaw)`。
+        // `player.rs::move_first_person` 正是这么算的（`dx += fwd.x`）。
+        //
+        // 原来这里写的是 `(+sin, +cos)`（前）、`(+cos, -sin)`（左）—— **四个方向全部反 180°**
+        // ⇒ 客户端按 `W` 前进、服务端把他的权威实体**往后推**，
+        // 不到 0.4 秒位置差就超过 3m 触发 `dx*dx + dz*dz > 9.0` 的行正
+        // ⇒ 客户端被强行拉回，观感是"走两步被拽回去"。
+        let (ux, uz) = net_input_delta(
+            input.yaw,
+            input.forward,
+            input.backward,
+            input.left,
+            input.right,
+        );
+        dx += ux * speed;
+        dz += uz * speed;
         let nx = p.pos[0] + dx;
         let nz = p.pos[2] + dz;
         // 静态障碍 AABB 水平推开（盒体数少，线性扫描可接受）
         let (rx, rz) = resolve_circle_static(&self.world.bodies, nx, nz, 0.45);
-        p.pos = [rx, 0.0, rz];
+        // ⚠️ **y 只改水平落点、不在这里清零**：脚底高由每 tick 那句
+        // `p.pos[1] = terrain_height_at(..)` 统一写（原来这里清 0，
+        // 于是紧跟其后的开火原点 `p.pos[1] + 1.2` 在丘陵上算到地里去了）。
+        p.pos = [rx, p.pos[1], rz];
         p.yaw = input.yaw;
         p.pitch = input.pitch;
         p.last_rx = self.time;
@@ -329,11 +385,14 @@ impl Game {
         p.fire_accum += dt;
         if input.fire && p.fire_accum >= 0.12 {
             p.fire_accum = 0.0;
-            let eye = [p.pos[0], p.pos[1] + 1.2, p.pos[2]];
+            // 眼位 = 脚底 + 眼高（`pos[1]` 现在是脚底，见 `NET_EYE_HEIGHT`）
+            let eye = [p.pos[0], p.pos[1] + NET_EYE_HEIGHT, p.pos[2]];
+            // 朝向 = `Camera::forward()` = `-direction()` ⇒ 水平分量取负号
+            // （原来直接用 `direction()` ⇒ **朝自己背后开枪**）
             let dir = glam::Vec3::new(
-                input.pitch.cos() * input.yaw.sin(),
+                -input.pitch.cos() * input.yaw.sin(),
                 input.pitch.sin(),
-                input.pitch.cos() * input.yaw.cos(),
+                -input.pitch.cos() * input.yaw.cos(),
             );
             self.fire([eye[0], eye[1], eye[2]], [dir.x, dir.y, dir.z]);
             self.net_players[pi].last_fire = self.time;
@@ -411,7 +470,8 @@ impl Game {
             }
             let dx = px - q.pos[0];
             let dz = pz - q.pos[2];
-            let dy = ph - (q.pos[1] - 1.6); // 脚底高
+            // `q.pos[1]` 现在**就是**脚底（见 `NET_EYE_HEIGHT` 的说明），不必再减
+            let dy = ph - q.pos[1];
             if dx * dx + dz * dz <= 0.25 && dy >= 0.0 && dy <= 1.8 {
                 let dmg = p.damage_at_distance();
                 q.hp -= dmg;
@@ -425,5 +485,65 @@ impl Game {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod net_dir_tests {
+    use super::*;
+
+    /// 🔴 **远端玩家的移动方向必须与相机约定一致**（前向 = `-direction()`）。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 8 条，已对着代码确认）：
+    /// `Camera::direction()` = `(cos p·sin yaw, sin p, cos p·cos yaw)`，
+    /// 而 **`Camera::forward()` = `-direction()`** ⇒ 水平前向 = `(-sin yaw, -cos yaw)`；
+    /// `right = forward × Y` = `(cos yaw, -sin yaw)`。
+    /// `player.rs::move_first_person` 正是这么算的。
+    ///
+    /// 服务端原来写的是 `(+sin, +cos)`（前）、`(+cos, -sin)`（左）
+    /// ⇒ **四个方向全部反 180°** ⇒ 客户端按 W 前进、服务端把权威实体往后推
+    /// ⇒ 不到 0.4 秒位置差超过 3m 触发行正 ⇒ 观感"走两步被拽回去"，
+    /// 且**朝自己背后开枪**。
+    ///
+    /// 判据：把服务端的解算复刻成一个纯函数，与 `Camera` 的真值逐方向比对。
+    #[test]
+    fn net_input_direction_matches_the_camera_convention() {
+        // ⚠️ **直接调实现里的那个函数**，不在这里复刻一遍 ——
+        // 复刻的话判据测的是复刻、不是实现（第一版就栽在这）。
+        for yaw in [0.0f32, 0.7, 1.5708, 2.4, 3.1416, -1.1] {
+            let cam = crate::engine::camera::Camera::new();
+            let mut cam = cam;
+            cam.yaw = yaw;
+            let f = cam.forward();
+            let r = cam.right();
+
+            // 前向：服务端解算必须与 camera.forward() 的水平分量同向
+            let (dx, dz) = net_input_delta(yaw, true, false, false, false);
+            let dot_f = dx * f.x + dz * f.z;
+            assert!(
+                dot_f > 0.0,
+                "yaw={yaw:.3}：服务端把 forward 解算成了 ({dx:.3},{dz:.3})，\
+                 而 camera.forward() 的水平分量是 ({:.3},{:.3}) ⇒ **方向反了**（在往后推）",
+                f.x,
+                f.z
+            );
+
+            // 左向：必须与 -right 同向
+            let (lx, lz) = net_input_delta(yaw, false, false, true, false);
+            let dot_l = lx * (-r.x) + lz * (-r.z);
+            assert!(dot_l > 0.0, "yaw={yaw:.3}：left 解算方向与 -camera.right() 相反");
+
+            // 右向：必须与 +right 同向
+            let (rx2, rz2) = net_input_delta(yaw, false, false, false, true);
+            let dot_r = rx2 * r.x + rz2 * r.z;
+            assert!(dot_r > 0.0, "yaw={yaw:.3}：right 解算方向与 camera.right() 相反");
+
+            // 前后必须严格相反（防"两处都反"这种对称错误掩盖单侧问题）
+            let (bx, bz) = net_input_delta(yaw, false, true, false, false);
+            assert!(
+                (dx + bx).abs() < 1e-5 && (dz + bz).abs() < 1e-5,
+                "yaw={yaw:.3}：forward 与 backward 不是严格相反"
+            );
+        }
     }
 }
