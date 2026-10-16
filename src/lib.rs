@@ -1854,7 +1854,17 @@ impl GameApp {
             "assets/guns/ak12.glb".to_string()
         };
         let path: &str = &path;
-        let bytes = match std::fs::read(path) {
+        // 🔴 **读取也必须走资产抽象层**（2026-10-15，外部复核指出第 5 条，已确认）：
+        // 上面那句"存不存在"用的是 `asset_source::global().exists(..)`（Android 走
+        // `AAssetManager`、`RV3D_ASSETS_FROM_MEMORY=1` 走 `MemSource`），
+        // **而这里原来调的是 `std::fs::read`** ⇒ 在 Android 上
+        // `exists()` 在 APK 里找得到、`std::fs::read` 却必然失败
+        // ⇒ **所有 GLB 枪模静默退回程序化枪模**（玩家看到"枪变样了"，日志里只有一句
+        // 误导性的"未发现"）。
+        //
+        // 仓库里另外两处是对的（`map.rs::load_map` 走 `read_to_string`、
+        // `renderer/helpers.rs::load_spirv` 走 `read`）—— **只有这一处只改了一半**。
+        let bytes = match crate::engine::asset_source::global().read(path) {
             Ok(b) => b,
             Err(e) => {
                 log::info!("assets: 未发现 {path}（{e}），使用程序化枪模");
@@ -1972,8 +1982,26 @@ impl GameApp {
     }
 
     fn first_person_gun_mesh(&mut self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
-        // 导入枪模优先（按当前武器 key 缓存；检视与第一人称共用）
-        let gkey = self.game.active_weapon_key().to_string();
+        // 导入枪模优先（按武器 key 缓存；检视与第一人称共用）
+        //
+        // 🔴 **检视模式下必须按"要检视的那把枪"取 key，不能取当前槽位**
+        // （2026-10-15，外部复核指出第 5 条，已对着代码确认）：
+        // 原来这里无条件 `self.game.active_weapon_key()`。而检视模式**从不**
+        // `switch_weapon`（`update()` 只设 `camera.mode = Orbit` 并按
+        // `spec_by_number(n)` 的包围盒算取景距离）⇒ `active_weapon_key()` 恒为 0 号槽
+        // ⇒ **`--inspect=2` 和 `--inspect=35` 画出来的都是 1 号枪**，而相机距离却按
+        // 第 N 号枪算 ⇒ 枪在画面里大小也不对。
+        //
+        // 更要紧的是：下面那个真正读 `self.inspect_weapon` 的分支
+        // （"检视模式：枪模放世界原点上方"）**只有 GLB 加载失败时才可达** ——
+        // 而 `load_gun_glb` 有 `ak12.glb` 兜底、几乎不会失败
+        // ⇒ 那段代码实际上**从来没被执行过**（死分支）。
+        let gkey = match self.inspect_weapon {
+            Some(n) => crate::engine::weapon_data::spec_by_number(n)
+                .map(|s| s.key.to_string())
+                .unwrap_or_else(|| self.game.active_weapon_key().to_string()),
+            None => self.game.active_weapon_key().to_string(),
+        };
         let load = |k: &String| Self::load_gun_glb(k);
         // 只在某把枪**首次**入缓存时打一次几何探针，避免每帧刷屏。
         // 用途：把"枪到底朝屏幕深处还是朝右"从肉眼判断变成一个数——把枪身局部包围盒
@@ -2595,7 +2623,26 @@ impl GameApp {
         // 🔴 **只在武器 key 变化时生成 + 上传**（见 `gun_mesh_uploaded_key` 的文档）：
         // 这把枪有几万顶点，每帧重建+拷贝约 4.6MB，而同一把枪下结果逐帧相同。
         let gun_key = self.game.active_weapon_key().to_string();
-        let gun_key_changed = self.gun_mesh_uploaded_key.as_deref() != Some(gun_key.as_str());
+        // 🔴 **`show_gun` 必须在这里算，而且要参与"要不要生成"的判定**
+        // （2026-10-15，外部复核指出第 5 条，已对着代码确认）。
+        //
+        // 原来 `gun_key_changed` **不看 `show_gun`**，而下面（隐藏分支）每帧把
+        // `gun_mesh_uploaded_key` 清成 `None` ⇒ 形成**反馈环**：
+        //   `!show_gun` ⇒ 清 key ⇒ 下一帧 `gun_key_changed` **恒为 true**
+        //   ⇒ 每帧调 `first_person_gun_mesh()` **克隆整把枪**
+        //     （AK-12M = 63283 顶点 × 32B + 70479 索引 × 4B ≈ **2.3MB**）
+        //   ⇒ 然后在下面 `if show_gun { .. } else { .. }` 的 else 里**直接丢弃**。
+        //
+        // `!show_gun` 覆盖**开始菜单 / 结算画面 / 非检视的 Orbit·Flight 相机**
+        // ⇒ 在菜单里坐着不动，每帧白克隆 2.3MB（分配 + 拷贝 + 释放的churn）。
+        //
+        // 同一个表达式原来在本函数里**写了三遍**（这里一处、`fp_gun_pre` 一处、
+        // 上传处一处）—— 现在收口成这一个变量。
+        let show_gun = self.inspect_weapon.is_some()
+            || (self.game.state() == GameState::Playing
+                && self.camera.mode == CameraMode::FirstPerson);
+        let gun_key_changed =
+            show_gun && self.gun_mesh_uploaded_key.as_deref() != Some(gun_key.as_str());
         let gun_mesh = if gun_key_changed {
             self.first_person_gun_mesh()
         } else {
@@ -2633,12 +2680,9 @@ impl GameApp {
             );
         }
         let fp_gun_pre = {
-            let show = self.inspect_weapon.is_some()
-                || (self.game.state() == GameState::Playing
-                    && self.camera.mode == CameraMode::FirstPerson);
             // 检视模式：顶点已居中到世界坐标，需用单位矩阵
             if self.inspect_weapon.is_some() { glam::Mat4::IDENTITY }
-            else if show { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY }
+            else if show_gun { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY }
         };
 
         if let Some(renderer) = &mut self.renderer {
@@ -3286,9 +3330,6 @@ impl GameApp {
             // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
             // 枪模仅在第一人称游玩或检视模式渲染：结算/其它相机态下隐藏
             // （否则枪模会按锚点漂浮在场景中——2-4 反馈“变成 M1 加兰德”观感）
-            let show_gun = self.inspect_weapon.is_some()
-                || (self.game.state() == GameState::Playing
-                    && self.camera.mode == CameraMode::FirstPerson);
             if show_gun {
                 if gun_key_changed {
                     renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);
