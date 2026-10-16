@@ -102,10 +102,30 @@ pub fn update_point(
 ) -> bool {
     let inv = 1.0 / point.capture_time.max(f32::EPSILON);
 
-    // 规则 1：owner 阵营玩家在场守点 → 保持占领（进度维持，占领后恒为 0）
+    // 规则 1：owner 阵营玩家在场守点 → 保持占领
+    //
+    // 🔴 **但"保持占领"不等于"把敌方残留进度冻在这儿"**
+    // （2026-10-15，外部复核指出第 4 条，已对着代码确认）。
+    //
+    // 原实现无条件 `return false`，而注释假设的是"占领后进度恒为 0" ——
+    // 可 `advancing` 字段的存在恰恰说明**敌方能把进度推起来**：
+    // ```text
+    // ① Blue 占点（progress = 0）
+    // ② Blue 离开、Red 进来推到 0.9      ⇒ advancing = Some(Red)
+    // ③ Red 离开、Blue 回来守点          ⇒ 提前 return ⇒ 0.9 被【永久冻住】
+    // ④ Blue 再离开、Red 再进来          ⇒ advancing 仍是 Some(Red)
+    //                                      ⇒ 不清零、直接续推 ⇒ 0.1 秒就夺点
+    // ```
+    // ⇒ **守方在场反而替攻方保存了进度**（"守点"帮敌人留住 0.9）。
+    //
+    // ⇒ 只有在"没有敌方残留进度要清"时才可以提前返回；
+    //   否则落到下面的衰减路径（规则 3），让那份不属于守方的进度自然归零。
     if let Some(owner) = point.owner {
         if players_inside.contains(&owner) {
-            return false;
+            let has_enemy_residue = point.progress > 0.0 && point.advancing != Some(owner);
+            if !has_enemy_residue {
+                return false;
+            }
         }
     }
 
@@ -368,14 +388,42 @@ mod tests {
 
     #[test]
     fn update_point_owner_present_holds() {
-        // owner 阵营玩家在场守点：进度维持（含敌对在场），不衰减不增长
+        // 🔴 **契约在 2026-10-15 收紧过**（外部复核指出第 4 条）：
+        // 「守方在场」只在**没有敌方残留进度**时才算"保持占领"。
+        //
+        // 原测试给的是**不可达状态**：`owner = Red, progress = 0.3, advancing = None`
+        // —— 没人推却有进度。按规则 2，任何一次归属切换都会把 progress 归零，
+        // 所以 `owner = Some(X) && progress > 0` 的唯一自洽形态是
+        // **`advancing = Some(Y != X)`（敌方推进中、守方不在时的残留）**。
+        //
+        // 而原实现在守方回来时无条件 `return false` ⇒ **把敌方那 0.9 冻住**，
+        // 等守方一走、攻方再来就**直接续推**（"守点"反而替敌人保存了进度）。
+        //
+        // ⇒ 两条分开测：**无残留 ⇒ 保持**；**有敌方残留 ⇒ 衰减**。
         let mut p = pt("A");
         p.owner = Some(Team::Red);
-        p.progress = 0.3;
+        p.progress = 0.0;
+        p.advancing = None;
         let switched = update_point(&mut p, 5.0, &[Team::Red], true);
         assert!(!switched);
         assert_eq!(p.owner, Some(Team::Red));
-        assert!((p.progress - 0.3).abs() < 1e-6);
+        assert_eq!(p.progress, 0.0, "无残留进度时守点应当维持（进度恒 0）");
+
+        // 敌方残留：守方回来必须把它衰减掉，不能冻住
+        let mut q = pt("A");
+        q.owner = Some(Team::Blue);
+        q.progress = 0.9;
+        q.advancing = Some(Team::Red); // 红方推起来、红方走了、蓝方回来守点
+        let before = q.progress;
+        let switched = update_point(&mut q, 1.0, &[Team::Blue], false);
+        assert!(!switched);
+        assert_eq!(q.owner, Some(Team::Blue), "守点在，归属不该变");
+        assert!(
+            q.progress < before,
+            "蓝方在场守点时，红方残留的 {before} 没有被衰减（还是 {}）——\n\
+             那等于「守点」替攻方保存了进度：蓝方一走红方再来就能直接续推",
+            q.progress
+        );
     }
 
     #[test]
