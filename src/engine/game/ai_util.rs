@@ -12,6 +12,37 @@ use super::*;
 /// **为什么中文化是低风险的**：`ui.rs::render_text` 早就有 CJK 分支
 /// （`is_cjk(ch)` → `engine::font_cjk` 的 12×12 点阵），而 HUD 的
 /// `"OBJECTIVE 歼灭敌人 {}/{}"` 一直就是这么渲染的 ⇒ **路径是通的，缺的只是字符串**。
+/// **掩体跃进的选点判据**（纯函数，可单测）。
+///
+/// 语义：从候选掩体里挑一个**比当前位置更靠近目标**的掩体格；没有就返回 `None`
+/// （调用方退回直线推进）。
+///
+/// 🔴 存在理由（2026-10-15，外部复核指出第 7 条，已对着代码确认）：
+/// 原来的写法有两处错，**叠在一起会让 NPC 永久冻死**：
+/// ```text
+/// let cur = npc_g.manhattan(target_g);              // NPC → 目标 的距离
+/// find_cover_points(grid, npc_g, COVER_MAX_DIST)    // ← 第 2 参数是【dist 的基准点】
+///     .into_iter().find(|c| c.dist < cur)           // ← c.dist 却是 npc_g → 候选格
+/// ```
+/// 1. **基准点错了**：`find_cover_points` 用第 2 个参数算 `dist`
+///    （`ai.rs` 里 `let dist = player.manhattan(pos);`）⇒ 传 `npc_g` 得到的 `c.dist`
+///    是"候选格离我多远"，而 `cur` 是"我离目标多远" —— **两个不同的量在比大小**。
+/// 2. **没排除自身格**：`find_cover_points` 会把**NPC 自己站的那一格**也收进来
+///    （只要它四邻域里有阻挡格），而它的 `c.dist == 0`、排序又是
+///    `(openness, dist)` 升序 ⇒ `dist = 0` 排最前 ⇒ `.find(|c| c.dist < cur)`
+///    **永远返回 `npc_g` 自己** ⇒ 目标 = 原地 ⇒ **NPC 从此一步不动**。
+///    （第 3 波起的 `CoverCrawler` 不被冲锋覆盖、全程走这条分支 ⇒
+///      这正是"波次残局有 NPC 停在远处、永远清不掉"。）
+///
+/// ⇒ 正确判据：**候选格到目标**的距离 < **当前位置到目标**的距离，且候选格不能是自身格。
+fn cover_advance_goal(grid: &GridMap, npc_g: GridPos, target_g: GridPos) -> Option<GridPos> {
+    let cur = npc_g.manhattan(target_g);
+    find_cover_points(grid, target_g, COVER_MAX_DIST)
+        .into_iter()
+        .find(|c| c.pos != npc_g && c.pos.manhattan(target_g) < cur)
+        .map(|c| c.pos)
+}
+
 pub(crate) fn team_name(t: Team) -> &'static str {
     match t {
         Team::Red => "红方",
@@ -359,12 +390,8 @@ pub(crate) fn advance_npc(
                 Tactic::CoverAdvance => {
                     let npc_g = world_to_grid(npc.position[0], npc.position[2]);
                     let target_g = world_to_grid(target.x, target.z);
-                    let cur = npc_g.manhattan(target_g);
-                    match find_cover_points(grid, npc_g, COVER_MAX_DIST)
-                        .into_iter()
-                        .find(|c| c.dist < cur)
-                    {
-                        Some(cover) => cover.pos,
+                    match cover_advance_goal(grid, npc_g, target_g) {
+                        Some(cover) => cover,
                         None => target_g,
                     }
                 }
@@ -676,4 +703,70 @@ pub(crate) fn resolve_circle_static(
         }
     }
     (ox, oz)
+}
+
+#[cfg(test)]
+mod ai_util_tests {
+    use super::*;
+
+    /// 🔴 **掩体跃进不许把「NPC 自己站的那一格」当成目标** —— 那会让它永久冻死。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 7 条，已对着代码确认）：
+    /// 原实现同时错两处：
+    /// ```text
+    /// let cur = npc_g.manhattan(target_g);            // NPC → 目标
+    /// find_cover_points(grid, npc_g, COVER_MAX_DIST)  // ← 第 2 参数是 dist 的基准点
+    ///     .find(|c| c.dist < cur)                     // ← c.dist 却是 npc_g → 候选格
+    /// ```
+    /// ① 基准点错了（两个不同的量在比大小）；
+    /// ② **没排除自身格** —— 而 `find_cover_points` 会把 NPC 站的那格收进来
+    ///    （只要它邻接阻挡格），其 `c.dist == 0` 且排序是 `(openness, dist)` 升序
+    ///    ⇒ `.find()` **永远返回自己** ⇒ 目标 = 原地 ⇒ **一步不动**。
+    /// 第 3 波起的 `CoverCrawler` 不被冲锋覆盖、全程走这条分支
+    /// ⇒ 这正是"波次残局有 NPC 停在远处、永远清不掉"。
+    #[test]
+    fn cover_advance_never_picks_the_npcs_own_cell() {
+        // 挡住 (4,4)，NPC 站在它的东邻 (5,4) —— 一个合法的掩体格
+        let mut map = GridMap::new(9, 9);
+        map.block(GridPos::new(4, 4));
+        let npc = GridPos::new(5, 4);
+        // 目标在【西侧】：真正该去的掩体是 (3,4)（它比 (5,4) 更靠近目标）
+        let target = GridPos::new(0, 4);
+
+        let goal = cover_advance_goal(&map, npc, target);
+        assert_ne!(
+            goal,
+            Some(npc),
+            "选了自己站的那一格 ⇒ 目标 = 原地 ⇒ NPC 从此一步不动（永久冻死）"
+        );
+        assert_eq!(
+            goal,
+            Some(GridPos::new(3, 4)),
+            "应当推进到更靠近目标的那个掩体格 (3,4)"
+        );
+
+        // 正对照：NPC **不在**掩体格上时，旧实现也能选对 ⇒ 光靠上面那条抓不到"基准点错"，
+        // 这一条才把「比的是到目标的距离」钉住。
+        let npc_far = GridPos::new(7, 4);
+        let goal2 = cover_advance_goal(&map, npc_far, target);
+        assert!(
+            goal2.is_some(),
+            "NPC 在 (7,4)、目标在 (0,4) 时应当能找到更近的掩体"
+        );
+        let g2 = goal2.unwrap();
+        assert!(
+            g2.manhattan(target) < npc_far.manhattan(target),
+            "选出的掩体 {g2:?} 并没有比当前位置 (7,4) 更靠近目标 (0,4)"
+        );
+
+        // 反向：没有更近的掩体时必须返回 None（调用方退回直线推进），
+        // 不能硬塞一个"离我更近但离目标更远"的格子。
+        let npc_at_cover = GridPos::new(5, 4);
+        let target_east = GridPos::new(8, 4);
+        assert_eq!(
+            cover_advance_goal(&map, npc_at_cover, target_east),
+            None,
+            "目标在东侧时没有任何掩体比当前位置更靠近它 ⇒ 应当退回直线推进"
+        );
+    }
 }
