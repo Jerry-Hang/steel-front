@@ -2497,6 +2497,35 @@ impl GameApp {
         self.game.set_movement(k.forward, k.backward, k.left, k.right);
     }
 
+    /// **退出前的统一收尾 —— 所有退出路径共用这一个。**
+    ///
+    /// 🔴 存在理由（2026-10-15，外部复核指出第 4 条，已对着代码确认）：
+    /// 原来**三个出口各做一半**，而且缺的还不是同一样
+    /// （典型的"多出口不同构"）：
+    ///
+    /// | 出口 | `send_leave()` | `perf_log.finish()` |
+    /// |---|---|---|
+    /// | ① ESC 菜单鼠标点击退出（经 `user_event`）| ❌ 缺 | ✅ |
+    /// | ② 窗口关闭按钮（`CloseRequested`）| ✅ | ❌ 缺 |
+    /// | ③ ESC 菜单键盘 `Enter` 确认退出 | ❌ 缺 | ❌ 缺 |
+    ///
+    /// 各自的代价：
+    /// * 缺 `send_leave` ⇒ 服务端要等 `SERVER_TIMEOUT`(5s) 才摘掉我们，
+    ///   而这 5 秒里**每个客户端都还看得见我们站在原地**；
+    /// * 缺 `perf_log.finish()` ⇒ 性能日志**最后一段没落盘**（而退出前那段往往正是要看的）。
+    ///
+    /// `send_leave` 在单机/服务端模式下是空操作，重复调用也无害
+    /// （服务端收到第一条 `Leave` 就摘人），所以这里可以无条件调。
+    fn begin_exit(&mut self, event_loop: &ActiveEventLoop) {
+        self.game.send_leave();
+        if let Some(pl) = self.perf_log.as_mut() {
+            pl.finish();
+            self.perf_log = None;
+        }
+        self.running = false;
+        event_loop.exit();
+    }
+
     /// 把当前分辨率应用到窗口（尺寸相同则跳过；`Resized` 事件会触发渲染器重建交换链）
     fn apply_resolution(&self) {
         let (w, h) = self.game.hud.resolution();
@@ -3427,6 +3456,14 @@ impl GameApp {
                         self.key_state.backward = dy > dead;
                         self.key_state.left = dx < -dead;
                         self.key_state.right = dx > dead;
+                        // 🔴 **必须同步给游戏**（2026-10-15，外部复核指出第 4 条，已确认）：
+                        // 第一人称的移动**只**来自 `game.set_movement(..)`，而它**只**被
+                        // `sync_game_movement()` 调用（`camera.update(&key_state, ..)`
+                        // 只在 `CameraMode::Flight` 下移动相机；第一人称相机位置每帧由
+                        // `game.player_eye()` 覆盖）。
+                        // 原来这里只改 `GameApp::key_state`、**从不调 `sync_game_movement`**
+                        // ⇒ **Android 触屏端左半屏方向杆在第一人称下完全推不动玩家**。
+                        self.sync_game_movement();
                     }
                 }
                 if let Some((id, lx, ly)) = self.touch_look {
@@ -3445,6 +3482,9 @@ impl GameApp {
                     if id == touch.id {
                         self.touch_move = None;
                         self.key_state.reset();
+                        // 松手同样要同步 —— 否则最后那个方向会**卡住不放**
+                        // （`set_movement` 那边还留着按下时的值）
+                        self.sync_game_movement();
                     }
                 }
                 if let Some((id, _, _)) = self.touch_look {
@@ -3732,12 +3772,8 @@ impl ApplicationHandler for GameApp {
     /// 用户事件（菜单点击退出用代理发送）：收到即退出事件循环
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
         log::info!("input: 收到退出事件，退出游戏");
-        self.running = false;
-        if let Some(pl) = self.perf_log.as_mut() {
-            pl.finish();
-            self.perf_log = None;
-        }
-        event_loop.exit();
+        // 🔴 走统一收尾（原来这里只 `pl.finish()`，**漏了 `send_leave`**）
+        self.begin_exit(event_loop);
     }
 
     fn device_event(
@@ -3795,12 +3831,12 @@ impl ApplicationHandler for GameApp {
             // 关闭窗口请求
             WindowEvent::CloseRequested => {
                 log::info!("窗口关闭请求，退出程序");
-                // 🔴 2026-09-26：正常退出时给服务端发一条 Leave —— 否则服务端要等
-                // SERVER_TIMEOUT(5s) 才摘掉我们，而在这 5 秒里**每个客户端都还看得见我们
-                // 站在原地**（远端玩家实体无条件进画面）。UDP 是同步发送，进程退出前能发出去。
-                self.game.send_leave();
-                self.running = false;
-                event_loop.exit();
+                // 🔴 走统一收尾（原来这里只 `send_leave()`，**漏了 `perf_log.finish()`**
+                // ⇒ 性能日志最后一段没落盘）
+                // 2026-09-26 加的 `send_leave` 理由：不发的话服务端要等
+                // SERVER_TIMEOUT(5s) 才摘掉我们，而这 5 秒里**每个客户端都还看得见我们
+                // 站在原地**（远端玩家实体无条件进画面）。UDP 同步发送，退出前能发出去。
+                self.begin_exit(event_loop);
             }
 
             // 🔴 Android 返回键（2026-10-11 实测 + 修）：**它永远匹配不到下面那条 arm**。
@@ -3952,8 +3988,8 @@ impl ApplicationHandler for GameApp {
                     if pressed && key_code == KeyCode::Enter {
                         if self.game.hud.esc_menu_selection == 0 {
                             log::info!("ESC 菜单：退出游戏");
-                            self.running = false;
-                            event_loop.exit();
+                            // 🔴 走统一收尾（原来这条路径**两个收尾都没做**）
+                            self.begin_exit(event_loop);
                         } else {
                             log::info!("ESC 菜单：打开设置");
                             self.game.hud.esc_menu_open = false;
@@ -3971,12 +4007,23 @@ impl ApplicationHandler for GameApp {
                 // 先按固定键把功能落地；重绑定与 HUD 提示见 docs/PROGRESS.md 待办。
                 // Shift 是按住类（冲刺条件是"按住 + 前进 + 站立 + 未开镜 + 在地面"），
                 // C/Z 是按下即切换（松开不改变姿态）。
+                //
+                // 🔴 **必须带玩法态门控**（2026-10-15，外部复核指出第 4 条，已确认）：
+                // 这几条原来**一个门控都没有** ⇒ 在**设置面板打开**时按 X
+                // 会直接**消耗一个医疗包**（`use_medkit` 真的扣道具），
+                // 按 C / Z 会切蹲/趴，而玩家眼前只有设置面板、完全看不到发生了什么。
+                // ⇒ 与 `/` 那条同一个形态：**改状态的按键漏了"当前在哪个界面"的判断**。
+                let in_gameplay = self.game.state() == GameState::Playing
+                    && !self.game.settings_open()
+                    && !self.game.hud.esc_menu_open;
                 match key_code {
-                    KeyCode::ShiftLeft | KeyCode::ShiftRight => self.game.set_sprint(pressed),
-                    KeyCode::KeyC if pressed => self.game.toggle_crouch(),
-                    KeyCode::KeyZ if pressed => self.game.toggle_prone(),
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight if in_gameplay => {
+                        self.game.set_sprint(pressed)
+                    }
+                    KeyCode::KeyC if pressed && in_gameplay => self.game.toggle_crouch(),
+                    KeyCode::KeyZ if pressed && in_gameplay => self.game.toggle_prone(),
                     // X = 打药（WX 里 X 的 VK 是 88）
-                    KeyCode::KeyX if pressed => self.game.use_medkit(),
+                    KeyCode::KeyX if pressed && in_gameplay => self.game.use_medkit(),
                     _ => {}
                 }
 
@@ -4144,6 +4191,11 @@ impl ApplicationHandler for GameApp {
                         } else if pressed
                             && self.game.state() == GameState::Playing
                             && !self.game.hud.esc_menu_open
+                            // 🔴 **不能漏 `settings_open`**（2026-10-15，外部复核指出第 4 条，
+                            // 已确认）：上面那条分支只处理"设置面板打开时的 **Enter**"，
+                            // 于是设置面板打开时按 `/` 会掉进这里 ⇒ **在设置面板背后打开命令窗口**，
+                            // 而命令窗口会吃掉后续所有按键（含 `Esc`）⇒ 设置面板再也关不掉。
+                            && !self.game.settings_open()
                         {
                             log::info!("command: 打开命令窗口（/）");
                             self.command_open = true;
