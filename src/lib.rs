@@ -779,10 +779,33 @@ struct GameApp {
     /// 于是引擎打出「程序正常退出」并以 **0** 退出 —— 用户解包后跑错目录（缺 assets/mesh.spv）
     /// 看到的就是这个。这是最容易被真人撞上的一类假绿灯（教训 46）。
     fatal: Option<String>,
-    /// winit 窗口
-    window: Option<Window>,
-    /// Vulkan 渲染器
+    /// 🔴 **`renderer` 必须排在 `window` 前面**（2026-10-16 真机实测踩到，见下）。
+    ///
+    /// **Rust 按【声明顺序】析构结构体字段。** 原来是 `window` 在前 ⇒ 退出时
+    /// **窗口（`wl_surface`/`wl_display` 的 wayland 代理）先销毁，交换链后销毁**
+    /// ⇒ 驱动程序在销毁 Vulkan 对象时回头去碰**已经死掉的 wayland 代理**
+    /// ⇒ **`SIGSEGV`（`SEGV_MAPERR`）**。真机核心转储的栈：
+    /// ```text
+    /// #0..#3  libwayland-client.so.0   wl_proxy_marshal_flags
+    /// #4..#7  libnvidia-glcore.so.615.78.08
+    /// #8      <Renderer as Drop>::drop          ← 崩在这里
+    /// #9      drop_in_place<Renderer>
+    /// #10     drop_in_place<GameApp>
+    /// #11     run_steel_front
+    /// ```
+    /// ⚠️ **而引擎日志最后三行是「窗口关闭请求 / 性能日志已保存 / 程序正常退出」**
+    /// —— **主循环是干净退出的**，崩在 `main` 返回之后的析构里。
+    ///
+    /// 顺序修正：**先销毁 `renderer`（它持有所有 Vulkan 对象，包括交换链），
+    /// 再销毁 `window`。**
+    ///
+    /// 📌 判据 `renderer_field_drops_before_the_window`（源码级：只看声明顺序，
+    /// 因为这件事**只能在真机退出时**才暴露，而退出路径恰恰是冒烟最容易漏掉的）。
     renderer: Option<Renderer>,
+    /// winit 窗口
+    ///
+    /// ⚠️ **不要把它挪到 `renderer` 前面**（理由见上）。
+    window: Option<Window>,
     /// FPS 相机
     camera: Camera,
     /// 键盘按键状态
@@ -4915,6 +4938,54 @@ fn rdv_register_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 **`GameApp` 里 `renderer` 必须声明在 `window` 前面。**
+    ///
+    /// 存在理由（2026-10-16 真机实测，一次 300 秒跑法留下核心转储）：
+    /// **Rust 按【声明顺序】析构结构体字段。** 原来是 `window` 在前 ⇒ 退出时
+    /// **winit 窗口（wayland 的 `wl_surface`/`wl_display` 代理）先销毁，
+    /// `Renderer` 后销毁** ⇒ 驱动销毁 Vulkan 对象（交换链）时回头去碰**已死的代理**
+    /// ⇒ **`SIGSEGV`（`SEGV_MAPERR`）**。核心转储的栈：
+    /// ```text
+    /// #0..#3  libwayland-client.so.0   wl_proxy_marshal_flags
+    /// #4..#7  libnvidia-glcore.so.615.78.08
+    /// #8      <Renderer as Drop>::drop
+    /// #9      drop_in_place<Renderer>
+    /// #10     drop_in_place<GameApp>
+    /// #11     run_steel_front
+    /// ```
+    ///
+    /// ⚠️ **它难办的地方在于日志是干净的**：引擎最后三行是
+    /// 「窗口关闭请求 / 性能日志已保存 / **程序正常退出**」——
+    /// 主循环干净退出，崩在 `main` 返回**之后** ⇒
+    /// **只读日志的门禁对它看不见**（当时 `smoke_linux.sh` 就把这次判成了 `ALL-OK`，
+    /// 见同批修的 `--exit-status`）。
+    ///
+    /// ⇒ 这条判据只能**看声明顺序**：这件事没有便宜的运行时观测点，
+    ///   而真机退出恰恰是冒烟最容易漏掉的一段。
+    #[test]
+    fn renderer_field_drops_before_the_window() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find("struct GameApp {")
+            .expect("找不到 struct GameApp —— 判据的前提不成立");
+        let body = &src[start..];
+        let end = body.find('}').expect("struct GameApp 没有闭合");
+        let body = &body[..end];
+
+        let renderer_at = body
+            .find("renderer: Option<Renderer>")
+            .expect("GameApp 里没有 renderer 字段 —— 判据的前提不成立");
+        let window_at = body
+            .find("window: Option<Window>")
+            .expect("GameApp 里没有 window 字段 —— 判据的前提不成立");
+        assert!(
+            renderer_at < window_at,
+            "`window` 声明在 `renderer` 前面 ⇒ 退出时**窗口先销毁、交换链后销毁**\n\
+             ⇒ 驱动销毁 Vulkan 对象时去碰已死的 wayland 代理 ⇒ SIGSEGV。\n\
+             而那次崩溃**日志是干净的**（「程序正常退出」之后就没了），只读日志的门禁抓不到它。"
+        );
+    }
 
     /// 🔴 **判据：`main()` 里的致命错误路径不许以退出码 0 结束。**
     ///

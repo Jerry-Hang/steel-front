@@ -34,6 +34,10 @@ import sys
 import time
 from ctypes import wintypes
 
+# 验证层状态的日志真源（引擎 renderer/device.rs 两个方向都打）
+VALIDATION_ON_MARK = "且验证层可用，已启用"
+VALIDATION_OFF_MARK = "将不使用验证层"
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 # MUST be called before any size query. Without it Windows virtualises GetClientRect
 # for this DPI-unaware process and reports 1706x1066 instead of the real 2560x1600,
@@ -328,7 +332,18 @@ def main():
     # 🔴 VUID 判据必须区分「真扫过 0 条」与「验证层根本没开」（教训 46 同形）：
     #    验证层默认关（RV3D_VALIDATION=1 才开），不开时日志里永远不会有 VUID 字样，
     #    `vuid == 0` 是**结构性恒真**、什么都证明不了。这里显式报告它是否生效。
-    validation_on = os.environ.get("RV3D_VALIDATION", "").strip() not in ("", "0", "false", "False")
+    # 🔴 **真源是引擎日志，不是环境变量**（2026-10-16，与 Linux 侧 `smoke_linux.py` 同步修）：
+    # 那边真机实测踩到了 —— 机器上**验证层没安装**、`RV3D_VALIDATION=1` 却设着
+    # ⇒ 旧写法判成"开"，闸门打印光秃秃的 ALL-OK，而引擎日志明说「将不使用验证层」
+    # ⇒ **`VUID=0` 一次都没真查过**。引擎两个方向都打日志（`renderer/device.rs`）：
+    #   开：`RV3D_VALIDATION=1 且验证层可用，已启用`
+    #   关：`RV3D_VALIDATION 未设置或验证层不可用，将不使用验证层（驱动宽松行为）`
+    if VALIDATION_ON_MARK in txt:
+        validation_on = True
+    else:
+        validation_on = False
+        if VALIDATION_OFF_MARK not in txt:
+            print("VUID 判据：**无法确认** —— 日志里两行验证层状态都没有（按未开处理）", flush=True)
     known_driver = {
         "VUID-VkImageViewCreateInfo-usage-02275": "驱动回写 STORAGE（见 swapchain.rs 注释）",
         "VUID-VkSwapchainCreateInfoKHR-imageFormat-01778": "驱动回写 STORAGE（见 swapchain.rs 注释）",

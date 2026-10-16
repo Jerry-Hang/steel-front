@@ -150,12 +150,21 @@ else
     # 提前退出不一定是失败（可能是面板关闭），但如果日志里没有 Playing 行，判据会判 exit 2。
     echo "smoke_linux: 进程提前退出（引擎自己结束了）—— 继续判据"
 fi
+# 🔴 **退出码必须带进判据**（2026-10-16 真机实测踩到）：
+# 那次 300 秒的跑法**段错误（核心已转储）**，而日志最后三行是
+# 「窗口关闭请求 / 性能日志已保存 / **程序正常退出**」—— **日志看起来是干净的**，
+# 唯一能说明问题的是**进程退出状态**（SIGSEGV = 139）。而当时脚本只是打印了
+# 「进程提前退出」就继续判据，于是闸门给了 `RESULT: ALL-OK`。
+# ⇒ 崩在 `main` 返回**之后**的那类崩溃（析构顺序问题）不会在日志里留痕，
+#   **只看日志的闸门对它是瞎的**。这里把状态码显式交给 python。
+rc=0
+wait "$pid" 2>/dev/null || rc=$?
 cleanup
 trap - EXIT
 
 # 判据交给 python（同一个文件可以被离线复核：任何一次跑完的日志都能重判一遍）
 if [ "$REQUIRE_KILL" = 1 ]; then
-    python3 "$repo/scripts/smoke_linux.py" "$LOG" --require-kill
+    python3 "$repo/scripts/smoke_linux.py" "$LOG" --require-kill --exit-status "$rc"
 else
-    python3 "$repo/scripts/smoke_linux.py" "$LOG"
+    python3 "$repo/scripts/smoke_linux.py" "$LOG" --exit-status "$rc"
 fi

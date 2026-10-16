@@ -86,7 +86,37 @@ def score_track(txt):
     return [int(m.group(1)) for m in SCORE_ONLY.finditer(txt)]
 
 
-def judge(txt, require_kill=False, validation_on=True):
+VALIDATION_ON_MARK = "且验证层可用，已启用"
+VALIDATION_OFF_MARK = "将不使用验证层"
+
+
+def validation_layer_state(txt):
+    """验证层是否**真的**启用 —— 三态，真源是**引擎自己的日志**。
+
+    为什么要读日志而不是读环境变量（2026-10-16 真机实测踩到）：
+    原来这里（以及 Windows 侧的 `gameplay_smoke_pm.py`）取的是
+    `os.environ["RV3D_VALIDATION"]`。而这台机器上**验证层根本没安装**
+    （`/usr/share/vulkan/explicit_layer.d/` 是空的）——
+    环境变量是 `1`，引擎日志明说「RV3D_VALIDATION 未设置或验证层不可用，
+    将不使用验证层」，而闸门照样打印**光秃秃的 `ALL-OK`**
+    ⇒ **`VUID=0` 看起来查过了，其实一次都没查**。
+    这正是本函数想防的那件事（教训 46），只是**取错了真源**。
+
+    引擎两个方向都会打日志（`renderer/device.rs`）：
+      * 开：`RV3D_VALIDATION=1 且验证层可用，已启用`
+      * 关：`RV3D_VALIDATION 未设置或验证层不可用，将不使用验证层（驱动宽松行为）`
+
+    ⇒ 返回 `True` / `False` / **`None`（日志里两行都没有 = 无法确认）**。
+    `None` 按"没开"处理并**明说无法确认**，不许猜成"开了"。
+    """
+    if VALIDATION_ON_MARK in txt:
+        return True
+    if VALIDATION_OFF_MARK in txt:
+        return False
+    return None
+
+
+def judge(txt, require_kill=False, validation_on=True, exit_status=None):
     """⚠️ `validation_on=False` 时 VUID **不参与判定**（并在结论里明说不适用）。
     默认 True：自检用例里那些杜撰的 VUID 要能被判红。"""
     """纯函数：日志文本 -> (exit_code, 给人看的一行结论, 明细 dict)。
@@ -116,6 +146,23 @@ def judge(txt, require_kill=False, validation_on=True):
     #    验证层不开时日志里永远不会有 VUID 字样 ⇒ `vuid == 0` 是**结构性恒真**、什么都证明不了。
     #    （Linux 侧 `smoke_linux.sh` 默认把它打开，所以这个洞平时被掩盖着；
     #      但 `smoke_linux.py` 能被直接调用，且 `RV3D_VALIDATION=0` 一设就退化。）
+    # 🔴 **进程退出状态是硬判据**（2026-10-16 真机实测踩到）：
+    # 那次 300 秒跑法**段错误**，而日志最后三行是「窗口关闭请求 / 性能日志已保存 /
+    # **程序正常退出**」—— 日志完全干净，唯一证据是退出状态（SIGSEGV = 139）。
+    # 崩在 `main` 返回**之后**的析构里（`Renderer::drop` 碰已销毁的 wayland 代理）
+    # ⇒ **只看日志的闸门对这类崩溃是瞎的**。
+    if exit_status is not None and exit_status != 0:
+        hint = ""
+        if exit_status < 0:
+            hint = "（被信号 %d 杀死%s）" % (
+                -exit_status,
+                "：段错误" if -exit_status == 11 else
+                "：SIGABRT（panic/abort）" if -exit_status == 6 else "",
+            )
+        elif exit_status > 128:
+            hint = "（shell 口径的 %d = 信号 %d）" % (exit_status, exit_status - 128)
+        return 1, "FAIL：进程非正常退出，退出状态 %d%s —— 日志可能是干净的" % (
+            exit_status, hint), {"exit_status": exit_status}
     codes = re.findall(r"VUID-[A-Za-z0-9-]+", txt)
     known_hits = {c: codes.count(c) for c in KNOWN_VUID if c in codes}
     unexpected = [c for c in codes if c not in KNOWN_VUID]
@@ -208,15 +255,41 @@ def self_check():
          (G % 0) + (G % 30) + "VUID-VkImageViewCreateInfo-usage-02275\nVUID-vkCmdDraw-None-9999\n", 1, False, True),
         ("验证层没开 => 未知 VUID 也不参与判定（但结论会说不适用）",
          (G % 0) + (G % 30) + "VUID-vkCmdDraw-None-9999\n", 0, False, False),
+        # --- 🔴 退出状态（2026-10-16 真机实测踩到的那条）---
+        # 那次 300 秒跑法**段错误**，而日志最后三行是「窗口关闭请求 / 性能日志已保存 /
+        # **程序正常退出**」⇒ 日志完全干净。崩在 `main` 返回**之后**的析构里
+        # （`Renderer::drop` 碰已销毁的 wayland 代理）⇒ **只看日志的闸门对它是瞎的**。
+        ("退出状态 139（SIGSEGV）=> 失败，哪怕日志干净", (G % 0) + (G % 30), 1, False, True, 139),
+        ("退出状态 -11（python 负号口径）=> 失败", (G % 0) + (G % 30), 1, False, True, -11),
+        ("退出状态 0 => 照常通过", (G % 0) + (G % 30), 0, False, True, 0),
+        ("没给退出状态（离线复核旧日志）=> 不因此失败", (G % 0) + (G % 30), 0, False, True, None),
     ]
     bad = []
     for case in cases:
         name, txt, want, rk = case[0], case[1], case[2], case[3]
         von = case[4] if len(case) > 4 else True
-        got, verdict, _ = judge(txt, require_kill=rk, validation_on=von)
+        st = case[5] if len(case) > 5 else 0
+        got, verdict, _ = judge(txt, require_kill=rk, validation_on=von, exit_status=st)
         if got != want:
             bad.append("%s：期望 exit %d，实得 %d（%s）" % (name, want, got, verdict))
-    return len(cases), bad
+
+    # --- 🔴 验证层真源：必须读【日志】，不是环境变量 ---
+    # 这是本轮真机实测的第二个"说谎的门禁"：本机验证层没装，
+    # `RV3D_VALIDATION=1` 却设着 ⇒ 旧写法判成"开"、打印光秃秃的 ALL-OK，
+    # 而引擎日志明说「将不使用验证层」⇒ VUID 项一次都没真查过。
+    layer_cases = [
+        ("日志说已启用 => True",
+         "RV3D_VALIDATION=1 且验证层可用，已启用\n", True),
+        ("日志说不使用 => False",
+         "RV3D_VALIDATION 未设置或验证层不可用，将不使用验证层（驱动宽松行为）\n", False),
+        ("两行都没有 => None（不许猜成开）", "初始化完成\n", None),
+    ]
+    for name, txt, want in layer_cases:
+        got = validation_layer_state(txt)
+        if got is not want:
+            bad.append("验证层真源 %s：期望 %r，实得 %r" % (name, want, got))
+    n_cases = len(cases) + len(layer_cases)
+    return n_cases, bad
 
 
 def main(argv):
@@ -229,8 +302,28 @@ def main(argv):
         if n == 0:
             return 2
         return 1 if bad else 0
-    args = [a for a in argv[1:] if a != "--require-kill"]
-    require_kill = len(args) != len(argv[1:])
+    require_kill = "--require-kill" in argv[1:]
+    exit_status = None
+    args = []
+    rest = argv[1:]
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--require-kill":
+            i += 1
+        elif rest[i] == "--exit-status":
+            if i + 1 >= len(rest):
+                print("smoke_linux.py: --exit-status 后面要给数字", file=sys.stderr)
+                return 2
+            try:
+                exit_status = int(rest[i + 1])
+            except ValueError:
+                print("smoke_linux.py: --exit-status 要给整数，收到 %r" % rest[i + 1],
+                      file=sys.stderr)
+                return 2
+            i += 2
+        else:
+            args.append(rest[i])
+            i += 1
     if len(args) != 1:
         print("用法: smoke_linux.py <日志路径> [--require-kill]", file=sys.stderr)
         print("      smoke_linux.py --self-check", file=sys.stderr)
@@ -240,12 +333,25 @@ def main(argv):
     print("读取: %s" % (", ".join(got) if got else "(两个文件都不存在)"))
     print("判据档: %s" % ("-RequireKill（与 Windows 同口径，约 88% 稳定）" if require_kill
                           else "默认（确定性：只看 vuid/panics/进过 Playing）"))
-    # 与 Windows 侧同一条判据：验证层没开时 VUID 项不成立，必须显式告知（教训 46）
-    validation_on = os.environ.get("RV3D_VALIDATION", "").strip() not in ("", "0", "false", "False")
-    if not validation_on:
-        print("VUID 判据: **不适用** —— 验证层未开（RV3D_VALIDATION 未设/为 0）。"
-              "这一项恒为 0，不代表查过；要它生效请 RV3D_VALIDATION=1")
-    code, verdict, d = judge(txt, require_kill=require_kill, validation_on=validation_on)
+    # 🔴 **真源是引擎日志，不是环境变量**（2026-10-16 真机实测踩到）：
+    # 本机**验证层没安装**，`RV3D_VALIDATION=1` 是设着的 ⇒ 原来那句
+    # `os.environ.get(...)` 判成"开"，闸门打印光秃秃的 `ALL-OK`，
+    # 而引擎日志明说「验证层不可用，将不使用验证层」⇒ **VUID 项一次都没真查过**。
+    state = validation_layer_state(txt)
+    if state is True:
+        validation_on = True
+    else:
+        validation_on = False
+        env_says = os.environ.get("RV3D_VALIDATION", "").strip() not in ("", "0", "false", "False")
+        if state is None:
+            print("VUID 判据: **不适用** —— 日志里既没有「且验证层可用，已启用」"
+                  "也没有「将不使用验证层」⇒ **无法确认**（按没开处理）。")
+        else:
+            print("VUID 判据: **不适用** —— 日志确认「将不使用验证层」"
+                  "（验证层不可用%s）。这一项恒为 0，不代表查过。"
+                  % ("，尽管 RV3D_VALIDATION=1" if env_says else ""))
+    code, verdict, d = judge(txt, require_kill=require_kill,
+                             validation_on=validation_on, exit_status=exit_status)
     if d:
         print(
             "VUID=%s panics=%s score %s -> %s (delta %s = %s 杀) enemies_last=%s"
