@@ -1031,6 +1031,31 @@ struct AmbientWind {
     lp: f32,
 }
 
+/// **环境风相位的回绕周期（秒）**。
+///
+/// 🔴 为什么是 100.0（2026-10-15，外部复核指出第 2 条，已对着代码确认并实测）：
+/// `AmbientWind::sample` 按**样本**累加 `self.phase += 1.0 / sample_rate`，
+/// 而 `phase` 直接当作秒数喂给两个 LFO（0.13 Hz 截止 LFO、0.07 Hz 增益 LFO）。
+/// `f32` 在 `512.0` 处的 1 ULP = `2^9 × 2^-23 = 2^-14 ≈ 6.1e-5`，
+/// **大于** 48 kHz 下的单样本增量 `2.083e-5` ⇒ 从那一刻起
+/// `phase + dt == phase` **恒成立**（IEEE 754 就近舍入），相位**永久冻死**。
+/// 实测：连续累加在 **第 22,778,016 个样本（474.5 秒 ≈ 7 分 55 秒）**后停在 `phase = 512.0`
+/// ⇒ 两个 LFO 一起变成常数，风声退化为恒定滤波噪声（不再有"呜"的起伏）。
+///
+/// 取 100.0 的理由：两个 LFO 的频率是 `13/100` 与 `7/100` Hz，13 与 7 互质
+/// ⇒ **100 秒正好是两个 LFO 的公共周期**（`0.13 × 100 = 13`、`0.07 × 100 = 7` 都是整数）
+/// ⇒ 在 100 秒处回绕，**两个正弦的相位都连续**，听感上无缝。
+/// 且 `100.0f32` 的 ULP ≈ `7.6e-6` **远小于** 48 kHz 的样本步长 ⇒ 不会再冻。
+const WIND_PHASE_PERIOD: f32 = 100.0;
+
+/// 推进一帧环境风相位（**纯函数：可单测**）。回绕到 [`WIND_PHASE_PERIOD`]。
+fn advance_wind_phase(phase: f32, sample_rate: f32) -> f32 {
+    if sample_rate <= 0.0 {
+        return phase;
+    }
+    (phase + 1.0 / sample_rate) % WIND_PHASE_PERIOD
+}
+
 impl AmbientWind {
     fn new() -> Self {
         Self {
@@ -1053,7 +1078,7 @@ impl AmbientWind {
         self.lp += alpha * (n - self.lp);
         // 0.07Hz 增益 LFO（相位错开 1.7rad，避免与截止 LFO 同相）
         let gain_lfo = 1.0 + 0.35 * (std::f32::consts::TAU * 0.07 * t + 1.7).sin();
-        self.phase += 1.0 / sample_rate;
+        self.phase = advance_wind_phase(self.phase, sample_rate);
         let att = distance_attenuation(listener.position.distance(self.position), DEFAULT_ROLLOFF);
         self.lp * self.volume * gain_lfo * att
     }
@@ -1678,6 +1703,59 @@ fn synth_ambient(sample_rate: u32) -> Arc<AudioClip> {
 
 #[cfg(test)]
 mod tests {
+
+    /// 🔴 **环境风相位必须有界回绕** —— 否则 8 分钟后**永久冻死**。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 2 条，已对着代码确认并实测）：
+    /// `f32` 在 `512.0` 处的 1 ULP = `2^-14 ≈ 6.1e-5`，**大于** 48 kHz 下的
+    /// 单样本增量 `2.083e-5` ⇒ 从那一刻起 `phase + dt == phase` **恒成立**
+    /// ⇒ 相位永久停在 `512.0`，两个 LFO（0.13 Hz / 0.07 Hz）一起变成常数，
+    /// 风声退化为恒定滤波噪声（"呜"的起伏消失）。
+    ///
+    /// 实测（未修前的裸 `+=`）：连续累加在**第 22,778,016 个样本（474.5 秒）**后停住。
+    /// ⇒ 判据必须跑到**越过那个点**，只测几十个样本什么也证明不了。
+    #[test]
+    fn wind_phase_never_freezes_and_wraps_continuously() {
+        // ① 跑过 474.5 秒那个冻结点（用纯函数，不跑 sin，几十毫秒）
+        let dt = 1.0f32 / 48_000.0;
+        let mut p = 0.0f32;
+        let mut frozen_at: Option<u64> = None;
+        let n = (48_000u64 * 700) as usize; // 700 秒，远超 474.5
+        for i in 0..n {
+            let before = p;
+            p = advance_wind_phase(p, 48_000.0);
+            if p == before {
+                frozen_at = Some(i as u64);
+                break;
+            }
+        }
+        assert!(
+            frozen_at.is_none(),
+            "相位在第 {:?} 个样本（{:.1} 秒）处冻死了 —— `+= 1/sample_rate` 在 f32 上\
+             累加到 512.0 之后单样本增量会被 ULP 吞掉（实测裸写法正是 474.5 秒）",
+            frozen_at,
+            frozen_at.unwrap_or(0) as f64 / 48_000.0
+        );
+        // ② 有界（回绕真的生效）
+        assert!(
+            p >= 0.0 && p < WIND_PHASE_PERIOD,
+            "相位 {p} 越出了 [0, {WIND_PHASE_PERIOD}) —— 回绕没生效"
+        );
+        // ③ 回绕周期必须是**两个 LFO 的公共周期**，否则每次回绕都会听出一次相位跳变
+        for hz in [0.13f32, 0.07] {
+            let cycles = hz * WIND_PHASE_PERIOD;
+            assert!(
+                (cycles - cycles.round()).abs() < 1e-3,
+                "回绕周期 {WIND_PHASE_PERIOD}s 不是 {hz}Hz LFO 的整数倍\
+                 （{cycles} 个周期）⇒ 回绕时正弦相位会跳变"
+            );
+        }
+        // ④ 48 kHz 下 100.0f32 的 ULP 必须**小于**单样本步长（这是不冻的前提）
+        assert!(
+            100.0f32.next_up() - 100.0f32 < dt,
+            "100.0f32 的 ULP 已经不小于单样本步长 ⇒ 回绕周期选得太大了"
+        );
+    }
     use super::*;
 
     const EPS: f32 = 1e-6;
