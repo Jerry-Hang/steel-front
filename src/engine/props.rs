@@ -349,6 +349,18 @@ fn merge_binned_impl(
     shadow_lod: bool,
 ) -> BinnedGeometry {
     let mut out = BinnedGeometry::default();
+    // 🔴 **全局包围盒必须从极值起步，不能沿用 `Default` 的 `[0.0; 3]`**
+    // （2026-10-15，外部复核指出第 7 条前半，已对着代码确认）。
+    // 桶内的 `bin_min` / `bin_max` 一直是对的（`f32::MAX` / `f32::MIN`），
+    // 而这里从 `0.0` 起步 ⇒ 只要所有顶点在某轴上全正（或全负），
+    // `out.min`（或 `out.max`）就被**钉死在 0.0**。
+    //
+    // ⚠️ **影响面比复核说的小**：全仓 `BinnedGeometry.min/max` 的消费者只有
+    // `parts.rs` 里**一行 `log::info!`**（"包围盒 x∈[..]"）和一条测试
+    // ⇒ 是**诊断信息失真**，不是渲染错位。但本仓把日志当排障的唯一线索，
+    // 一个恒为 0 的包围盒下限会让人把"道具没摆对"误判成"摆到原点了"。
+    out.min = [f32::MAX; 3];
+    out.max = [f32::MIN; 3];
     if cell <= 0.0 || placements.is_empty() {
         return out;
     }
@@ -976,6 +988,65 @@ mod tests {
         assert!(g.indices.iter().all(|&i| (i as usize) < g.verts.len()));
     }
 
+
+    /// 🔴 **全局包围盒必须从极值起步** —— 用一档"某一轴全为正"的几何来区分。
+    ///
+    /// 存在理由（2026-10-15，外部复核指出第 7 条前半，已对着代码确认）：
+    /// `merge_binned_impl` 的桶内 `bin_min` / `bin_max` 是对的
+    /// （`f32::MAX` / `f32::MIN`），而全局 `out` 原来直接沿用 `BinnedGeometry::default()`
+    /// 的 `min/max = [0.0; 3]` ⇒ 只要**所有顶点在某个轴上全为正**（或全负），
+    /// 那个轴的 `min`（或 `max`）就被**钉死在 0.0**。
+    ///
+    /// ⚠️ **为什么不能靠 `single_bin_of_real_kit_is_bounded_and_non_empty` 抓**：
+    /// 那批道具摆在 `x = 0, 30, 60…`、且建筑原点在底面 ⇒ x/z 两侧都有顶点、
+    /// y 的真实最小值恰好是 0 ⇒ **`[0,0,0]` 默认值与极值初始化结果完全相同**，
+    /// 那条断言对那个 bug **不敏感**（实测：去掉极值初始化它照样绿）。
+    ///
+    /// ⇒ 这里刻意造一个**每个轴都严格大于 0** 的三角形（顶点 `(5,1,5)/(7,1,5)/(5,1,7)`），
+    /// 摆在原点不动 ⇒ 任何"从 0 起步"的实现都会算出 `min = (0,0,0)` 而不是 `(5,1,5)`。
+    #[test]
+    fn merged_bounds_start_from_extremes_not_from_zero() {
+        let set = PropSet {
+            meshes: vec![PropMesh {
+                name: "far_corner_tri".into(),
+                // 每个轴都严格 > 0 —— 这正是区分"从 0 起步"与"从极值起步"的那一档
+                verts: vec![
+                    [5.0f32, 1.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+                    [7.0, 1.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+                    [5.0, 1.0, 7.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+                ],
+                indices: vec![0, 1, 2],
+                min: [5.0, 1.0, 5.0],
+                max: [7.0, 1.0, 7.0],
+            }],
+        };
+        let ps = [PropPlacement::new(0, 0.0, 0.0, 0.0, 1.0, false)];
+        let g = merge_binned(&set, &ps, SINGLE_BIN, |_, _| 0.0);
+        assert!(!g.verts.is_empty(), "前提：合并应当产出顶点");
+
+        // 从顶点反算真值（独立于实现的初始化方式）
+        for k in 0..3 {
+            let lo = g.verts.iter().map(|v| v[k]).fold(f32::MAX, f32::min);
+            let hi = g.verts.iter().map(|v| v[k]).fold(f32::MIN, f32::max);
+            assert_eq!(
+                g.min[k], lo,
+                "轴 {k}：包围盒下限 {} != 顶点实际最小值 {lo} —— \
+                 从 `Default` 的 [0.0;3] 起步时，全正的那个轴会被钉死在 0.0 \
+                 （而 `parts.rs` 的 `log::info!` 正是靠这个数告诉人\"道具摆到哪了\"）",
+                g.min[k]
+            );
+            assert_eq!(g.max[k], hi, "轴 {k}：包围盒上限 {} != 顶点实际最大值 {hi}", g.max[k]);
+        }
+        // 正对照：这档几何确实每个轴都 > 0，否则上面那句"钉死在 0.0"就不成立
+        for k in 0..3 {
+            assert!(
+                g.min[k] > 0.0,
+                "前提不成立：轴 {k} 的最小值不是严格正的（{}）—— 这档构造失去了区分度",
+                g.min[k]
+            );
+        }
+    }
+
     #[test]
     fn single_bin_of_real_kit_is_bounded_and_non_empty() {
         let Some(set) = kit() else { return };
@@ -991,5 +1062,25 @@ mod tests {
         let span = g.max[0] - g.min[0];
         assert!(span > 100.0 && span < 2000.0, "合并后 X 跨度异常：{span}");
         assert!(g.max[1] < 40.0, "合并后高度异常：{}", g.max[1]);
+
+        // 🔴 **包围盒必须与顶点集合的真实极值逐轴相等**
+        // （2026-10-15 加，外部复核指出第 7 条前半）：
+        // 上面两条断言**对那个 bug 不敏感** —— 道具全在 x>0 且从 0 附近起步，
+        // 包围盒下限被钉在 0.0 时 `span` 只差"第一件道具的半宽"，照样落在 [100, 2000] 里。
+        // ⇒ 这里**从顶点反算真值**（独立于实现的初始化方式），逐轴比对。
+        for k in 0..3 {
+            let lo = g.verts.iter().map(|v| v[k]).fold(f32::MAX, f32::min);
+            let hi = g.verts.iter().map(|v| v[k]).fold(f32::MIN, f32::max);
+            assert_eq!(
+                g.min[k], lo,
+                "轴 {k}：包围盒下限 {} != 顶点实际最小值 {lo}                  —— 从 `Default` 的 [0.0;3] 起步会让它在全正的一侧被钉死在 0.0",
+                g.min[k]
+            );
+            assert_eq!(
+                g.max[k], hi,
+                "轴 {k}：包围盒上限 {} != 顶点实际最大值 {hi}",
+                g.max[k]
+            );
+        }
     }
 }
