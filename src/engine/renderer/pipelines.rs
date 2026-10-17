@@ -6,6 +6,74 @@ use super::*;
 impl Renderer {
     pub(crate) fn init_render_pass(&mut self) -> Result<(), String> {
         let msaa = self.msaa_samples;
+        // 🔴 **MSAA 关闭（TYPE_1）必须单独一条路径**（2026-10-17 外部复核指出，已确认）：
+        // 原来无条件声明 `resolve_attachments`，而颜色附件采样数是 1 ⇒ 违反
+        // `VUID-VkSubpassDescription-pResolveAttachments-00848`
+        //（"resolve 引用的颜色附件采样数不能是 1"）；
+        // 且 `init_framebuffers` 会把同一个 `scene_view` 同时绑成
+        // 附件 0 与附件 1（自己 resolve 自己）⇒ 内存别名冲突。
+        // ⇒ TYPE_1 时：**场景图直接当颜色附件**（STORE + TRANSFER_SRC_OPTIMAL 给后续 blit），
+        // 只有 [颜色, 深度] 两个附件，不挂 resolve。
+        if msaa == vk::SampleCountFlags::TYPE_1 {
+            let scene_color = vk::AttachmentDescription::default()
+                .format(self.swapchain_format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            let scene_color_ref = vk::AttachmentReference::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            let scene_color_refs = [scene_color_ref];
+            let depth = vk::AttachmentDescription::default()
+                .format(vk::Format::D32_SFLOAT)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            let depth_ref = vk::AttachmentReference::default()
+                .attachment(1)
+                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            let subpass = vk::SubpassDescription::default()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&scene_color_refs)
+                .depth_stencil_attachment(&depth_ref);
+            let subpasses = [subpass];
+            let attachments = [scene_color, depth];
+            let dependency = vk::SubpassDependency::default()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                )
+                .dst_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                )
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                );
+            let dependencies = [dependency];
+            let ci = vk::RenderPassCreateInfo::default()
+                .attachments(&attachments)
+                .subpasses(&subpasses)
+                .dependencies(&dependencies);
+            self.render_pass = unsafe {
+                self.device
+                    .create_render_pass(&ci, None)
+                    .map_err(|e| format!("创建渲染流程失败（无 MSAA 路径）: {}", e))?
+            };
+            return Ok(());
+        }
         let color_attachment = vk::AttachmentDescription::default()
             .format(self.swapchain_format)
             .samples(msaa)
@@ -1151,12 +1219,22 @@ impl Renderer {
                 // 🔴 三个附件**必须同尺寸**（`VUID-...-pAttachments-00836`）⇒ 都用 `render_extent`。
                 // `image_view`（交换链）在本帧缓冲里**不再出现** —— 它由随后那条 blit 写入。
                 let scene_view = self.scene_image_views[i];
-                let msaa_view = if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
-                    scene_view
-                } else {
-                    self.msaa_image_views[i]
-                };
-                let attachments = [msaa_view, scene_view, self.depth_image_views[i]];
+                // 🔴 **不能把同一个 `scene_view` 绑两次**（2026-10-17 外部复核指出）：
+                // MSAA 关闭时 render pass 只有 [颜色, 深度] 两个附件，这里也必须只绑两个 ——
+                // 原来无条件写 `[msaa_view, scene_view, depth]`，TYPE_1 时 `msaa_view == scene_view`
+                // ⇒ 同一图像既当颜色附件又当 resolve 目标（内存别名冲突）。
+                // 用 `Vec` 而不是定长数组：两个分支长度不同，且 `attachments` 的借用
+                // 必须活到 `create_framebuffer` 之前（定长数组在 if 分支里会提前 drop）。
+                let attachments: Vec<vk::ImageView> =
+                    if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
+                        vec![scene_view, self.depth_image_views[i]]
+                    } else {
+                        vec![
+                            self.msaa_image_views[i],
+                            scene_view,
+                            self.depth_image_views[i],
+                        ]
+                    };
                 let framebuffer_create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(self.render_pass)
                     .attachments(&attachments)

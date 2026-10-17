@@ -513,31 +513,37 @@ mod winding_tests {
     ///
     /// `hw = w/2 - r` 是圆角球心坐标；角片与棱边都加了 `n * r` 推到 `±w/2`，
     /// 只有平面片原来漏了 ⇒ 整圈裂开宽 `r` 的缝（2026-10-17 修复）。
+    ///
+    /// 🔴 **第一版判据是「假守卫」**（2026-10-17 外部复核指出，实测确认）：
+    /// 它数「全表里有多少顶点的 |x| 到达 half」，阈值 16 —— 但**角片与棱边在切点处
+    /// 本来就有 20 个顶点到达** `x = half`（4 个 +X 角片 ×1 + 4 条 +X 棱边 ×4 = 20），
+    /// 所以把 `+ n * r` 去掉后 `reached` 仍 ≥ 16，**断言静默通过**。
+    /// ⇒ 改成**只查 6 个平面片自己的 24 个顶点**（平面片不按 `seg` 细分，每面固定 4 个）。
+    /// 反向验证：去掉 `+ n * r` ⇒ 这 24 个点全部落到 `±hw = 0.4` ⇒ 判据必红。
     #[test]
     fn beveled_box_faces_reach_the_outer_surface() {
         let (w, r) = (1.0f32, 0.1f32);
         let m = beveled_box(w, 1.0, 1.0, r, 3);
-        // 平面片顶点必须真正到达 ±w/2（允许 1e-4 的浮点误差）
         let half = w / 2.0;
-        let mut reached = 0;
-        for v in &m.verts {
-            if (v.pos[0] - half).abs() < 1e-4 {
-                reached += 1;
+        let n = m.verts.len();
+        assert!(n >= 24, "顶点数 {n} < 24，图元结构变了");
+        // 6 个平面片是**最后追加的 24 个顶点**（每面固定 4 个，不按 seg 细分）
+        let faces = &m.verts[n - 24..];
+        let mut on_surface = 0;
+        for v in faces {
+            let p = v.pos;
+            if (p[0].abs() - half).abs() < 1e-4
+                || (p[1].abs() - half).abs() < 1e-4
+                || (p[2].abs() - half).abs() < 1e-4
+            {
+                on_surface += 1;
             }
         }
-        // seg=3 时 +X 面是 4x4 顶点；+X 面的所有顶点 x 都应等于 half
-        assert!(
-            reached >= 16,
-            "只有 {reached} 个顶点到达 +X 外表面（期望 >= 16）——\
-             平面片大概又漏了 `+ n * r`"
+        assert_eq!(
+            on_surface, 24,
+            "6 个平面片的 24 个顶点必须**全部**落在外表面 ±{half}；实际只有 {on_surface} 个\
+             \n⇒ 平面片大概又漏了 `+ n * r`（会与角片/棱边之间裂开宽 r 的缝）"
         );
-        // 且没有任何顶点的 |x| 超过外表面（否则是别处写错了）
-        for v in &m.verts {
-            assert!(
-                v.pos[0].abs() <= half + 1e-4,
-                "顶点越出外表面：pos={:?} 半宽={half}",
-                v.pos
-            );
-        }
     }
 }
+

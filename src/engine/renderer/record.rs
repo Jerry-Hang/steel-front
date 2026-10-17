@@ -85,32 +85,47 @@ impl Renderer {
             )?;
         }
 
-        // clear values 按 attachment 索引寻址：0=MSAA 颜色(CLEAR)、1=resolve(DONT_CARE，
-        // 值被忽略但占位保证索引正确)、2=深度(CLEAR)。旧实现只有 2 个元素 → 深度清除值
-        // 越界读取 → 深度缓冲未清除（垃圾）→ 深度测试随机失败：地面/障碍大面积消失。
-        let clear_values = [
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: if self.void_mode {
-                        [1.0, 1.0, 1.0, 1.0] // 检视模式：白色背景，便于对比透视
-                    } else {
-                        // 白天天空（线性 RGB → sRGB 约浅蓝）；城市地图配套（2026-08-21）
-                        [0.24, 0.36, 0.60, 1.0]
+        // clear values 按 attachment 索引寻址。**元素个数与顺序必须和 render pass 的附件表一致**：
+        //  * MSAA 路径：0=MSAA 颜色(CLEAR)、1=resolve(值被忽略但**必须占位**)、2=深度(CLEAR)；
+        //  * **MSAA 关闭(TYPE_1)**：0=场景颜色(CLEAR)、1=深度(CLEAR) —— **只有两个**。
+        //
+        // 🔴 历史两次同形事故都出在这里（第二次是我自己）：
+        //   1. 旧实现只有 2 个元素而附件有 3 个 → 深度清除值越界读 → 深度缓冲垃圾
+        //      → 深度测试随机失败 → 地面/障碍大面积消失；
+        //   2. 2026-10-17 把 TYPE_1 改成 2 附件后**忘了同步这里** → 深度附件(索引 1)
+        //      拿到那个"resolve 占位值" → 深度没清成 1.0 → **世界全被深度剔除、
+        //      只有 `depth_test=OFF` 的枪模可见**（实测：画面只剩天空色 + HUD + 枪）。
+        // ⇒ 判据：**附件表与 clear_values 的元素个数必须相等**（见 `clear_values_follow_attachment_count` 测试）。
+        let sky = vk::ClearColorValue {
+            float32: if self.void_mode {
+                [1.0, 1.0, 1.0, 1.0] // 检视模式：白色背景，便于对比透视
+            } else {
+                // 白天天空（线性 RGB → sRGB 约浅蓝）；城市地图配套（2026-08-21）
+                [0.24, 0.36, 0.60, 1.0]
+            },
+        };
+        let depth_clear = vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
+        };
+        let clear_values: Vec<vk::ClearValue> =
+            if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
+                // 2 附件：[场景颜色, 深度]
+                vec![vk::ClearValue { color: sky }, depth_clear]
+            } else {
+                // 3 附件：[MSAA 颜色, resolve(占位), 深度]
+                vec![
+                    vk::ClearValue { color: sky },
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 1.0],
+                        },
                     },
-                },
-            },
-            vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
-            },
-            vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
-            },
-        ];
+                    depth_clear,
+                ]
+            };
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::default()
             .render_pass(self.render_pass)

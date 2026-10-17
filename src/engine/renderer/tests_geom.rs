@@ -1753,6 +1753,56 @@ fn ground_draw_count_is_the_instance_length_not_the_slot_base() {
     );
 }
 
+/// 🔴 **主 pass 的 `clear_values` 元素个数必须跟着 render pass 的附件表走。**
+///
+/// 存在理由（2026-10-17）：外部复核指出 MSAA 关闭时 render pass 仍挂 `resolve_attachments`
+/// 且帧缓冲把同一个 `scene_view` 绑两次（违反 VUID-00848 / 内存别名）。我把它改成
+/// **TYPE_1 = 只有 [颜色, 深度] 两个附件**，但**忘了同步 `clear_values`** ——
+/// 它按附件索引寻址，仍是 3 个 ⇒ 深度附件（现在索引 1）拿到那个 resolve 占位值
+/// ⇒ 深度缓冲没清成 1.0 ⇒ **世界全被深度剔除**（实测画面只剩天空色 + HUD + 枪模；
+/// 枪模恰好 `depth_test=OFF`，所以它是唯一还看得见的东西）。
+///
+/// 这是本仓历史上**第二次**同形事故（第一次是 `clear_values` 只有 2 个而附件有 3 个），
+/// ⇒ 判据必须是「**两者**都跟着分支走」，而不是只钉其中一处。
+///
+/// 两处源码都必须含 `TYPE_1` 分支：
+/// * `pipelines.rs::init_render_pass` —— 附件表 2/3 个；
+/// * `record.rs::record_command_buffer` —— `clear_values` 2/3 个。
+#[test]
+fn clear_values_count_follows_the_attachment_table() {
+    // ① record.rs：clear_values 必须按 MSAA 是否关闭分支
+    let rec = include_str!("record.rs");
+    let prod = rec.split("#[cfg(test)]").next().unwrap_or(rec);
+    let start = prod
+        .find("let clear_values")
+        .expect("record.rs 里找不到 clear_values 构造（扫描面不对）");
+    let tail = &prod[start..];
+    let end = tail.find(';').expect("clear_values 没有以分号结束");
+    let block = &tail[..end];
+    assert!(
+        block.contains("TYPE_1"),
+        "`clear_values` 没按「MSAA 是否关闭」分支 ⇒ 元素个数会与附件表错配 ⇒ 深度清除值错位"
+    );
+    assert!(
+        block.matches("depth_clear").count() >= 2,
+        "`clear_values` 的两条分支都要各放一份深度清除值（实际 {} 处）",
+        block.matches("depth_clear").count()
+    );
+
+    // ② pipelines.rs：渲染流程也必须按同样条件分支（两附件 / 三附件）
+    let pipe = include_str!("pipelines.rs");
+    let prod = pipe.split("#[cfg(test)]").next().unwrap_or(pipe);
+    let at = prod
+        .find("fn init_render_pass")
+        .expect("pipelines.rs 里找不到 init_render_pass（扫描面不对）");
+    let body = &prod[at..];
+    let body = &body[..body.find("fn init_msaa_resources").unwrap_or(body.len())];
+    assert!(
+        body.contains("TYPE_1"),
+        "`init_render_pass` 没有「MSAA 关闭」分支 ⇒ 又会出现 resolve_attachments 挂在 1 采样附件上"
+    );
+}
+
 /// 🔴 **"物理设备能不能呈现到这个表面"的判据只能有一份，且不能写死队列族 0。**
 ///
 /// 存在理由（2026-10-15，外部复核指出第 7 条前半，已对着代码确认）：
