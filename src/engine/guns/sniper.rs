@@ -31,9 +31,9 @@ pub fn sv98() -> GunMesh {
         (t(0.082, 0.085, -0.090) * Mat4::from_scale(glam::vec3(0.016, 0.016, 0.016)), sphere(12, 8), BRIGHT),
         (t(0.0, -0.005, 0.010) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
         (t(0.0, -0.030, 0.090), beveled_box(0.035, 0.090, 0.045, 0.008, 4), POLY),
-        (t(0.0, 0.015, 0.010), beveled_box(0.010, 0.030, 0.008, 0.004, 4), DEEP),
+        (t(0.0, -0.019, 0.010), beveled_box(0.010, 0.030, 0.008, 0.004, 4), DEEP),
         (t(0.0, 0.078, 0.585), beveled_box(0.008, 0.020, 0.008, 0.003, 4), DEEP),
-        (t(0.0, 0.075, -0.160), beveled_box(0.050, 0.040, 0.05, 0.008, 4), DARK),
+        (t(0.0, 0.130, -0.160), beveled_box(0.050, 0.040, 0.05, 0.008, 4), DARK),
     ];
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.10 }
@@ -61,7 +61,7 @@ pub fn m2010() -> GunMesh {
         (t(0.0, -0.005, 0.000) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
         (t(0.0, -0.030, 0.100), beveled_box(0.038, 0.110, 0.05, 0.008, 4), POLY),
         (t(0.0, -0.020, -0.050) * Mat4::from_rotation_x(0.35), beveled_box(0.045, 0.090, 0.055, 0.012, 4), SAND),
-        (t(0.0, 0.020, 0.000), beveled_box(0.010, 0.028, 0.008, 0.004, 4), DEEP),
+        (t(0.0, -0.019, 0.000), beveled_box(0.010, 0.028, 0.008, 0.004, 4), DEEP),
         (t(0.0, 0.078, 0.600), beveled_box(0.007, 0.018, 0.007, 0.003, 4), DEEP),
     ];
     let (verts, indices) = assemble(&parts);
@@ -90,7 +90,7 @@ pub fn mrad() -> GunMesh {
         (t(0.0, -0.005, 0.000) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
         (t(0.0, -0.030, 0.095), beveled_box(0.038, 0.115, 0.05, 0.008, 4), POLY),
         (t(0.0, -0.020, -0.045) * Mat4::from_rotation_x(0.35), beveled_box(0.045, 0.095, 0.055, 0.012, 4), OLIVE),
-        (t(0.0, 0.020, 0.000), beveled_box(0.010, 0.028, 0.008, 0.004, 4), DEEP),
+        (t(0.0, -0.019, 0.000), beveled_box(0.010, 0.028, 0.008, 0.004, 4), DEEP),
         (t(0.0, -0.015, 0.300), cylinder(0.012, 0.030, 16), DARK),
     ];
     let (verts, indices) = assemble(&parts);
