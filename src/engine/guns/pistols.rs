@@ -1,5 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz, t};
+use crate::engine::guns::{assemble, GunMesh, ry, rz, t};
 use glam::Mat4;
 
 /// MP-443 乌鸦：9×19 双动手枪，厚实套筒 + 塑料粗握把
@@ -20,7 +20,7 @@ pub fn mp443() -> crate::engine::guns::GunMesh {
         (rx(0.0, -0.043, -0.05, 0.12), beveled_box(0.03, 0.115, 0.035, 0.008, 2), poly),
         (t(0.0, -0.085, -0.05), beveled_box(0.024, 0.062, 0.027, 0.004, 2), black),
         (t(0.0, -0.115, -0.05), beveled_box(0.03, 0.014, 0.033, 0.003, 2), black),
-        (tz(0.0, -0.004, -0.048), torus_arc(0.024, 0.007, 3.30, 6.13, 8, 6), black),
+        (t(0.0, -0.004, -0.048) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.024, 0.007, 3.30, 6.13, 8, 6), black),
         (rx(0.0, -0.02, -0.044, 0.15), beveled_box(0.009, 0.012, 0.007, 0.002, 2), dsteel),
         (t(0.0, 0.073, 0.085), beveled_box(0.009, 0.012, 0.005, 0.002, 2), dsteel),
         (t(0.0, 0.0725, -0.05), beveled_box(0.016, 0.009, 0.008, 0.002, 2), dsteel),
@@ -56,7 +56,7 @@ pub fn rsh12() -> crate::engine::guns::GunMesh {
         (rx(0.0, -0.03, -0.105, 0.28), beveled_box(0.032, 0.095, 0.038, 0.008, 2), poly),
         (rx(-0.019, -0.03, -0.103, 0.28), beveled_box(0.005, 0.078, 0.033, 0.002, 2), wood),
         (rx(0.019, -0.03, -0.103, 0.28), beveled_box(0.005, 0.078, 0.033, 0.002, 2), wood),
-        (tz(0.0, -0.006, -0.055), torus_arc(0.028, 0.007, 3.30, 6.13, 8, 6), black),
+        (t(0.0, -0.006, -0.055) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.007, 3.30, 6.13, 8, 6), black),
         (rx(0.0, -0.024, -0.051, 0.15), beveled_box(0.01, 0.013, 0.008, 0.002, 2), black),
         (t(0.0, 0.052, 0.15), beveled_box(0.011, 0.016, 0.006, 0.002, 2), steel),
         (t(0.0, 0.072, -0.08), beveled_box(0.02, 0.014, 0.01, 0.002, 2), dsteel),
@@ -83,7 +83,7 @@ pub fn m18() -> crate::engine::guns::GunMesh {
         (rx(0.0, -0.035, -0.045, 0.12), beveled_box(0.026, 0.095, 0.032, 0.008, 2), sand),
         (t(0.0, -0.078, -0.045), beveled_box(0.022, 0.055, 0.025, 0.004, 2), black),
         (t(0.0, -0.105, -0.045), beveled_box(0.028, 0.013, 0.03, 0.003, 2), sand),
-        (tz(0.0, -0.004, -0.05), torus_arc(0.021, 0.006, 3.30, 6.13, 8, 6), black),
+        (t(0.0, -0.004, -0.05) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.021, 0.006, 3.30, 6.13, 8, 6), black),
         (rx(0.0, -0.019, -0.046, 0.15), beveled_box(0.008, 0.011, 0.006, 0.002, 2), black),
         (t(0.0, 0.066, 0.075), beveled_box(0.008, 0.011, 0.005, 0.002, 2), dsteel),
         (t(0.0, 0.066, -0.035), beveled_box(0.014, 0.009, 0.007, 0.002, 2), dsteel),
@@ -115,7 +115,7 @@ pub fn mk23() -> crate::engine::guns::GunMesh {
         (rx(0.0, -0.036, -0.052, 0.12), beveled_box(0.03, 0.105, 0.038, 0.008, 2), poly),
         (t(0.0, -0.082, -0.052), beveled_box(0.027, 0.06, 0.03, 0.004, 2), poly),
         (t(0.0, -0.107, -0.052), beveled_box(0.033, 0.013, 0.034, 0.003, 2), poly),
-        (tz(0.0, -0.005, -0.05), torus_arc(0.026, 0.0075, 3.30, 6.13, 8, 6), black),
+        (t(0.0, -0.005, -0.05) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.026, 0.0075, 3.30, 6.13, 8, 6), black),
         (rx(0.0, -0.021, -0.046, 0.15), beveled_box(0.01, 0.013, 0.008, 0.002, 2), black),
         (t(0.0, 0.0735, 0.085), beveled_box(0.009, 0.013, 0.006, 0.002, 2), dsteel),
         (t(0.0, 0.0735, -0.065), beveled_box(0.016, 0.011, 0.008, 0.002, 2), dsteel),
