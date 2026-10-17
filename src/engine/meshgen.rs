@@ -104,13 +104,22 @@ pub fn beveled_box(w: f32, h: f32, d: f32, r: f32, seg: u32) -> Mesh {
                 });
             }
         }
+        // 🔴 **8 个角片里有一半是反绕的**（2026-10-17 实测：176 CCW / 172 CW 里的一半）。
+        // 角片的参数化是 `n = (sx·su·cv, sy·sv, sz·cu·cv)`，三角形绕序的符号
+        // 正比于 `sx·sy·sz` ⇒ **乘积为 -1 的 4 个角必须反绕**。
+        // （`append_transformed` 只统一翻转一次，图元内部必须自身一致。）
+        let flip = sx * sy * sz < 0.0;
         for j in 0..seg {
             for i in 0..seg {
                 let a = base + j * (seg + 1) + i;
                 let b = a + 1;
                 let c0 = a + seg + 1;
                 let d0 = c0 + 1;
-                mesh.indices.extend_from_slice(&[a, b, d0, a, d0, c0]);
+                if flip {
+                    mesh.indices.extend_from_slice(&[a, d0, b, a, c0, d0]);
+                } else {
+                    mesh.indices.extend_from_slice(&[a, b, d0, a, d0, c0]);
+                }
             }
         }
     }
@@ -161,13 +170,26 @@ pub fn beveled_box(w: f32, h: f32, d: f32, r: f32, seg: u32) -> Mesh {
             }
         }
         // 绕序与角片一致（外侧 CCW）
+        // 🔴 **12 条棱边里有 6 条是反绕的**（2026-10-17 实测）。截面从 `n1` 扫到 `n2`，
+        // 三角形绕序的符号对 `axis=0/2` 正比于 `-sign(a)·sign(b)`、对 `axis=1` 正比于
+        // `+sign(a)·sign(b)` ⇒ 该乘积为负的那些棱边必须反绕。
+        let sa = if a > 0.0 { 1.0f32 } else { -1.0 };
+        let sb = if b > 0.0 { 1.0f32 } else { -1.0 };
+        let flip = match axis {
+            0 | 2 => sa * sb > 0.0,
+            _ => sa * sb < 0.0,
+        };
         for j in 0..seg {
             for i in 0..seg {
                 let a0 = base + j * (seg + 1) + i;
                 let b0 = a0 + 1;
                 let c0 = a0 + seg + 1;
                 let d0 = c0 + 1;
-                mesh.indices.extend_from_slice(&[a0, b0, d0, a0, d0, c0]);
+                if flip {
+                    mesh.indices.extend_from_slice(&[a0, d0, b0, a0, c0, d0]);
+                } else {
+                    mesh.indices.extend_from_slice(&[a0, b0, d0, a0, d0, c0]);
+                }
             }
         }
     }
@@ -184,14 +206,29 @@ pub fn beveled_box(w: f32, h: f32, d: f32, r: f32, seg: u32) -> Mesh {
     for (n, p0, p1, p2, p3) in faces {
         let base = mesh.verts.len() as u32;
         for (i, p) in [p0, p1, p2, p3].iter().enumerate() {
+            // 🔴 **必须 `+ n * r` 推到外表面**（2026-10-17 外部复核指出，实测确认）：
+            // `hw/hh/hd` 是**内缩后的圆角球心坐标**（`w/2 - r`），角片（`c + n*r`）与
+            // 棱边（`p0.lerp(..) + n*r`）都推到了 `±w/2`，唯独这里原来直接写 `p` ⇒
+            // 6 个平面比圆角面**内缩 r**，整圈裂开一道宽 r 的缝（`ak12m` 护木 r≈2.4cm）。
+            let outer = *p + n * r;
             mesh.verts.push(GVertex {
-                pos: p.to_array(),
+                pos: outer.to_array(),
                 normal: n.to_array(),
                 uv: [if i % 2 == 0 { 0.0 } else { 1.0 }, if i / 2 == 0 { 0.0 } else { 1.0 }],
                 color: [1.0, 1.0, 1.0],
             });
         }
-        mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        // 🔴 **±Y 两个面要反绕**（2026-10-17 实测：`(p1-p0)×(p2-p0)` 指向盒内）：
+        // 其余四面 `[0,1,2, 0,2,3]` 是外侧 CCW，±Y 必须 `[0,2,1, 0,3,2]`。
+        // 判据 = `winding_tests::every_primitive_is_outward_ccw`。
+        if n.y.abs() > 0.5 {
+            mesh.indices.extend_from_slice(&[
+                base, base + 2, base + 1,
+                base, base + 3, base + 2,
+            ]);
+        } else {
+            mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
     }
 
     mesh
@@ -249,10 +286,14 @@ pub fn frustum(r0: f32, r1: f32, height: f32, seg: u32, caps: bool) -> Mesh {
             for i in 0..seg {
                 let a = base + 1 + i;
                 let b = a + 1;
+                // 🔴 **两个端盖原来都朝内**（2026-10-17 实测：顶盖 `[base,a,b]` 的几何法线
+                // 是 `-Y`、底盖 `[base,b,a]` 是 `+Y`，都与各自的外法线相反）。
+                // 侧面 `[a,c,d,...]` 实测是外侧 CCW（32 CCW / 0 CW），端盖必须与之同向：
+                // 顶盖（外法线 +Y）用 `[base, b, a]`，底盖（外法线 -Y）用 `[base, a, b]`。
                 if n.y > 0.0 {
-                    mesh.indices.extend_from_slice(&[base, a, b]);
-                } else {
                     mesh.indices.extend_from_slice(&[base, b, a]);
+                } else {
+                    mesh.indices.extend_from_slice(&[base, a, b]);
                 }
             }
         }
@@ -325,7 +366,12 @@ pub fn sphere(seg: u32, rings: u32) -> Mesh {
             let b = a + 1;
             let c = a + seg + 1;
             let d = c + 1;
-            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+            // 🔴 **整个球原来的绕序是反的**（2026-10-17 实测：352 个三角形全部 CW，
+            // `(c-a)×(b-a)` 指向球心）。`append_transformed` 统一翻转后，
+            // 反向的图元会只剩背面 ⇒ 球只渲染内壁。改成外侧 CCW：
+            // `[a, b, c]` + `[b, d, c]`（原为 `[a, c, b]` + `[b, c, d]`）。
+            // 判据 = `winding_tests::every_primitive_is_outward_ccw`。
+            mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
         }
     }
     mesh
@@ -396,5 +442,102 @@ mod normal_tests {
             }
         }
         assert!(checked >= 16, "只检查到 {checked} 个顶点，判据没测到东西");
+    }
+}
+
+#[cfg(test)]
+mod winding_tests {
+    use super::*;
+    use glam::Vec3;
+
+    /// 统计一个图元里「几何法线 · 顶点法线」为正 / 为负的三角形数。
+    fn winding_counts(m: &Mesh) -> (usize, usize) {
+        let (mut ccw, mut cw) = (0, 0);
+        for tri in m.indices.chunks(3) {
+            if tri.len() != 3 {
+                continue;
+            }
+            let v = |i: u32| &m.verts[i as usize];
+            let p0 = Vec3::from(v(tri[0]).pos);
+            let p1 = Vec3::from(v(tri[1]).pos);
+            let p2 = Vec3::from(v(tri[2]).pos);
+            let n = (Vec3::from(v(tri[0]).normal)
+                + Vec3::from(v(tri[1]).normal)
+                + Vec3::from(v(tri[2]).normal))
+                / 3.0;
+            let geo = (p1 - p0).cross(p2 - p0);
+            if geo.length_squared() < 1e-16 {
+                continue; // 退化三角形不参与判定
+            }
+            if geo.dot(n) > 0.0 {
+                ccw += 1;
+            } else {
+                cw += 1;
+            }
+        }
+        (ccw, cw)
+    }
+
+    /// 🔴 **每个图元的每个非退化三角形都必须「外侧 CCW」**（2026-10-17 外部复核指出，
+    /// 实测确认并修复）。`Mesh::append_transformed` 对**全部**三角形统一翻转一次绕序
+    /// 来适配主管线的 `front_face = CLOCKWISE + cull BACK` ⇒ **图元内部必须自身一致**；
+    /// 混着就会有一半被背面剔除（实测修复前：`beveled_box` 176/172、`frustum` 端盖 32/32、
+    /// `sphere` 0/352）。
+    ///
+    /// 这条判据的**反向验证**：把任一处索引顺序改回去 ⇒ 对应图元的 `cw` 立刻 > 0。
+    #[test]
+    fn every_primitive_is_outward_ccw() {
+        let cases: [(&str, Mesh, usize); 5] = [
+            ("beveled_box", beveled_box(1.0, 1.0, 1.0, 0.1, 3), 300),
+            ("frustum+caps", frustum(1.0, 1.0, 2.0, 16, true), 60),
+            ("frustum-nocaps", frustum(1.0, 0.5, 2.0, 16, false), 30),
+            ("torus_arc", torus_arc(0.5, 0.1, 0.0, std::f32::consts::TAU, 16, 8), 250),
+            ("sphere", sphere(16, 12), 340),
+        ];
+        for (name, mesh, min_tris) in cases {
+            let (ccw, cw) = winding_counts(&mesh);
+            assert!(
+                ccw + cw >= min_tris,
+                "{name}: 只统计到 {} 个三角形（期望 >= {min_tris}），判据没测到东西",
+                ccw + cw
+            );
+            assert_eq!(
+                cw, 0,
+                "{name}: 有 {cw} 个三角形是 CW（朝内）—— 它们会被背面剔除。\
+                 \n修复：把对应索引顺序反写（外侧 CCW）。详见 `meshgen` 里各图元的注释。"
+            );
+        }
+    }
+
+    /// 🔴 **`beveled_box` 的 6 个平面片必须在外表面 `±w/2`**，不能停在内缩核 `±hw`。
+    ///
+    /// `hw = w/2 - r` 是圆角球心坐标；角片与棱边都加了 `n * r` 推到 `±w/2`，
+    /// 只有平面片原来漏了 ⇒ 整圈裂开宽 `r` 的缝（2026-10-17 修复）。
+    #[test]
+    fn beveled_box_faces_reach_the_outer_surface() {
+        let (w, r) = (1.0f32, 0.1f32);
+        let m = beveled_box(w, 1.0, 1.0, r, 3);
+        // 平面片顶点必须真正到达 ±w/2（允许 1e-4 的浮点误差）
+        let half = w / 2.0;
+        let mut reached = 0;
+        for v in &m.verts {
+            if (v.pos[0] - half).abs() < 1e-4 {
+                reached += 1;
+            }
+        }
+        // seg=3 时 +X 面是 4x4 顶点；+X 面的所有顶点 x 都应等于 half
+        assert!(
+            reached >= 16,
+            "只有 {reached} 个顶点到达 +X 外表面（期望 >= 16）——\
+             平面片大概又漏了 `+ n * r`"
+        );
+        // 且没有任何顶点的 |x| 超过外表面（否则是别处写错了）
+        for v in &m.verts {
+            assert!(
+                v.pos[0].abs() <= half + 1e-4,
+                "顶点越出外表面：pos={:?} 半宽={half}",
+                v.pos
+            );
+        }
     }
 }
