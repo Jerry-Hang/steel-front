@@ -212,7 +212,16 @@ pub fn frustum(r0: f32, r1: f32, height: f32, seg: u32, caps: bool) -> Mesh {
             // 侧面法线：由母线方向与圆周方向叉乘
             let slant = glam::Vec3::new(c * (r1 - r0), height, s * (r1 - r0));
             let tangent = glam::Vec3::new(-s, 0.0, c);
-            let n = tangent.cross(slant).normalize_or_zero();
+            // 🔴 **顺序必须是 `slant × tangent`**（2026-10-17 自查发现，判据见文末
+            // `normal_tests::cylinder_side_normals_point_outward`）：
+            // 代入圆柱（`r1 == r0`）在 θ=0 处：`tangent=(0,0,1)`、`slant=(0,height,0)`，
+            //   `tangent × slant` = `(-height, 0, 0)` ⇒ **朝内**（外法线应是 +X）；
+            //   `slant × tangent` = `(+height, 0, 0)` ⇒ **朝外** ✅
+            // 锥台时该式的 Y 分量 = `r0 - r1`：上窄下宽（r1<r0）得 +Y ⇒ 法线上倾，也对。
+            // ⚠️ 朝内的后果是**静默的**：明暗在 `Mesh::append_transformed` 里按
+            // `ndl = n·L` 烘进顶点色 ⇒ 全部圆柱/圆锥会被"从里往外"照亮，
+            // 不崩、不报 VUID、不打日志。判据在修复前实测 dot=-1。
+            let n = slant.cross(tangent).normalize_or_zero();
             mesh.verts.push(GVertex {
                 pos: [c * rr, y, s * rr],
                 normal: n.to_array(),
@@ -320,4 +329,72 @@ pub fn sphere(seg: u32, rings: u32) -> Mesh {
         }
     }
     mesh
+}
+
+#[cfg(test)]
+mod normal_tests {
+    use super::*;
+    use glam::Vec3;
+
+    /// 圆柱侧面法线必须**朝外**（与位置的水平分量同向）。
+    ///
+    /// 🔴 2026-10-17 自查发现：侧面法线是 `tangent.cross(slant)`，代入圆柱
+    /// （`r1 == r0` ⇒ `slant` 的径向分量为 0）在 θ=0 处得
+    /// `tangent = (0,0,1)`、`slant = (0, height, 0)` ⇒ 叉积 `(-height, 0, 0)`
+    /// ⇒ **指向 -X**，而该处外法线应是 +X ⇒ **整个圆柱/圆锥的侧面法线朝内**。
+    ///
+    /// `Mesh::append_transformed` 用这些法线烘明暗（`ndl = n·L`），
+    /// 朝内 ⇒ **所有圆柱（枪管、弹鼓、护木、柱子）的明暗整个翻面**，
+    /// 而它不崩、不报 VUID、不产生任何日志 —— 典型的静默视觉缺陷。
+    #[test]
+    fn cylinder_side_normals_point_outward() {
+        let m = cylinder(1.0, 2.0, 16);
+        let mut checked = 0;
+        for v in &m.verts {
+            let n = Vec3::from(v.normal);
+            // 按**法线**筛，不按位置筛：盖子的环边顶点与侧面顶点**位置相同**
+            // （y=±1、半径 1），按位置筛会把 ±Y 的盖子法线也查进来。
+            let radial_part = Vec3::new(n.x, 0.0, n.z).length();
+            if radial_part < 0.5 {
+                continue; // 盖子法线是纯 ±Y
+            }
+            let p = Vec3::from(v.pos);
+            let radial = Vec3::new(p.x, 0.0, p.z).normalize();
+            let dot = n.dot(radial);
+            assert!(
+                dot > 0.9,
+                "侧面法线朝内：pos={:?} normal={:?} 外法线应≈{:?} dot={dot}",
+                p.to_array(),
+                n.to_array(),
+                radial.to_array()
+            );
+            checked += 1;
+        }
+        // 教训 27：判据自己要说清「检查了几个」，否则扫 0 个也是绿的
+        assert!(checked >= 16, "只检查到 {checked} 个侧面顶点，判据没测到东西");
+    }
+
+    /// 锥台的侧面法线同样必须朝外（`frustum` 的径向分量非零时也要对）。
+    #[test]
+    fn frustum_side_normals_point_outward() {
+        let m = frustum(1.0, 0.5, 2.0, 16, false);
+        let mut checked = 0;
+        for v in &m.verts {
+            let p = Vec3::from(v.pos);
+            let radial_len = (p.x * p.x + p.z * p.z).sqrt();
+            if radial_len > 0.4 {
+                let n = Vec3::from(v.normal);
+                // 侧面法线的径向分量必须为正（锥面法线有轴向分量，故阈值取 0.3）
+                let outward = n.x * p.x + n.z * p.z;
+                assert!(
+                    outward > 0.3 * radial_len,
+                    "锥台侧面法线朝内：pos={:?} normal={:?} 径向点积={outward}",
+                    p.to_array(),
+                    n.to_array()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 16, "只检查到 {checked} 个顶点，判据没测到东西");
+    }
 }
