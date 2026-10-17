@@ -277,15 +277,45 @@ fn put_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 
+/// 解析中继对 `REG` 的回复（**纯函数**，便于单测）。
+///
+/// 协议：`OK [<SocketAddr>]` / `BAD port` / `BUSY name` / `FULL`。
+///
+/// 🔴 **2026-10-17 外部复核指出**：原来客户端对 `REG` 是 **fire-and-forget**
+/// （`send_to` 之后直接 `Ok(())`）⇒ 中继回的 `BAD port` / `BUSY name` / `FULL`
+/// **一个都收不到**，注册失败在客户端完全静默（而我们上一轮刚加了这三种错误回复）。
+pub fn parse_rdv_reply(line: &str) -> Result<Option<SocketAddr>, String> {
+    let mut it = line.split_whitespace();
+    match it.next() {
+        Some("OK") => Ok(it.next().and_then(|s| s.parse::<SocketAddr>().ok())),
+        Some("BAD") => Err(format!("中继拒绝了端口（{line}）")),
+        Some("BUSY") => Err(format!("房间名已被其它 IP 占用（{line}）")),
+        Some("FULL") => Err(format!("中继注册表已满（{line}）")),
+        other => Err(format!("中继回复无法识别: {other:?}（{line}）")),
+    }
+}
+
 /// 中继注册：通知接入点本机地址（接入点记录其观测到的公网地址）
 /// 返回注册 OK 与否（尽力而为；不做失败重试——客户端可稍后 WHO 检索）
-pub fn rdv_register(rdv: &str, name: &str) -> io::Result<()> {
+pub fn rdv_register(rdv: &str, name: &str) -> io::Result<Option<SocketAddr>> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     let raddr: SocketAddr = rdv
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("中继地址解析失败: {e}")))?;
     sock.send_to(format!("REG {name}").as_bytes(), raddr)?;
-    Ok(())
+    // ⚠️ **这个函数用的是自己新建的临时 socket** ⇒ 读回复是安全的（不会吞游戏包）。
+    // 2s 上限；中继的 `OK <addr>` 带**它观测到的我们的公网地址**（STUN 式反馈），
+    // 旧版中继只回 `OK` ⇒ 解析成 `Ok(None)`，仍然兼容。
+    sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut buf = [0u8; 128];
+    match sock.recv_from(&mut buf) {
+        Ok((n, from)) if from == raddr => {
+            let line = String::from_utf8_lossy(&buf[..n]);
+            parse_rdv_reply(line.trim()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        }
+        Ok(_) => Ok(None), // 不是中继发来的 ⇒ 忽略
+        Err(e) => Err(e),
+    }
 }
 
 /// 中继解析：向接入点查询主机地址（公网观测地址；NAT 打洞第一步）
@@ -2833,5 +2863,33 @@ mod tests {
             client.remote_state_at(7, later).is_none(),
             "已离场的人不该再插值出状态"
         );
+    }
+}
+
+#[cfg(test)]
+mod rdv_reply_tests {
+    use super::parse_rdv_reply;
+
+    /// 🔴 **中继对 `REG` 的回复必须被解析**（2026-10-17，外部复核指出）。
+    ///
+    /// 原来客户端对 `REG` 是 **fire-and-forget**（`send_to` 之后直接 `Ok(())`），
+    /// 而中继会回 `OK` / `BAD port` / `BUSY name` / `FULL` —— **一个都收不到**，
+    /// 注册失败在客户端完全静默（而 `rdv_register_report` 只能报"发送失败"）。
+    ///
+    /// 这条判据钉住四个分支 + `OK <addr>` 的新字段（STUN 式反馈，旧中继无地址仍兼容）。
+    #[test]
+    fn reg_reply_is_parsed_and_errors_are_surfaced() {
+        // 旧版中继：只有 OK，没有地址 ⇒ Ok(None)（向后兼容）
+        assert_eq!(parse_rdv_reply("OK"), Ok(None));
+        // 新版中继：OK 带**观测到的公网地址**
+        let addr: std::net::SocketAddr = "203.0.113.7:54321".parse().unwrap();
+        assert_eq!(parse_rdv_reply("OK 203.0.113.7:54321"), Ok(Some(addr)));
+        // 三种拒绝都必须变成 Err，而不是静默
+        assert!(parse_rdv_reply("BAD port").is_err(), "BAD 必须报错");
+        assert!(parse_rdv_reply("BUSY name").is_err(), "BUSY 必须报错");
+        assert!(parse_rdv_reply("FULL").is_err(), "FULL 必须报错");
+        // 无法识别的回复也不能当成功
+        assert!(parse_rdv_reply("WAT").is_err());
+        assert!(parse_rdv_reply("").is_err());
     }
 }

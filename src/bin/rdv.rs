@@ -72,7 +72,12 @@ fn main() {
                             name.to_string(),
                             (SocketAddr::new(from.ip(), port), now),
                         );
-                        let _ = sock.send_to(b"OK\n", from);
+                        // 🔴 **回带中继观测到的公网地址**（2026-10-17，外部复核指出）：
+                        // 客户端据此校准自己在 NAT 后的**实际映射端口**——这正是 STUN 的基本反馈，
+                        // 没有它客户端只能猜。旧客户端只认第一个词 `OK` ⇒ **向后兼容**。
+                        let observed = SocketAddr::new(from.ip(), port);
+                        log_line(&format!("REG {name} -> {observed}"));
+                        let _ = sock.send_to(format!("OK {observed}\n").as_bytes(), from);
                     }
                 }
             }
