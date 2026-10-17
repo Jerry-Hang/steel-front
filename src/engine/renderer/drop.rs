@@ -48,7 +48,7 @@ impl Drop for Renderer {
                 if b != vk::Buffer::null() { self.device.destroy_buffer(b, None); }
                 if m != vk::DeviceMemory::null() { self.device.free_memory(m, None); }
             }
-                        if self.gun_pipeline_depth != vk::Pipeline::null() {
+            if self.gun_pipeline_depth != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.gun_pipeline_depth, None);
             }
             if self.gun_pipeline != vk::Pipeline::null() {
