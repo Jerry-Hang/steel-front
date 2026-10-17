@@ -1405,6 +1405,17 @@ impl GameApp {
                     inspect_w
                 );
             }
+            // 🔬 取证用：检视模式**自动旋转**（弧度/秒），便于无人值守拍多角度。
+            // 缺省不转（`RV3D_INSPECT_SPIN` 未设 ⇒ 行为与之前逐字节相同）。
+            // 用帧内真实 dt 累加，与着色器用的 view 矩阵同源 ⇒ 角度可精确复算。
+            if let Some(spin) = crate::syscfg::parse::<f32>("RV3D_INSPECT_SPIN") {
+                if spin.is_finite() && spin.abs() > 1e-6 {
+                    // 这里是取证开关，**不需要精确时间基**：用固定 1/60 s 步长即可
+                    // （`dt` 不在该作用域内，而为此把时间基一路传进来不值得）。
+                    // 目的只是"拍几张不同角度的图"，角度偏差几度无影响。
+                    self.camera.yaw += spin * (1.0 / 60.0);
+                }
+            }
             return;
         }
         // RV3D_AUTOSTART=1：测试用自动开始（绕过键盘，进 Playing 复现/冒烟）

@@ -584,12 +584,21 @@ impl Renderer {
         // 检视模式专用枪模管线：与 gun_pipeline 逐字段相同，**只把 depth 状态换成主管线那份**
         // （depth_test + depth_write 都开）。2026-10-17：检视模式此前复用了第一人称的无深度
         // 管线 ⇒ 重叠部件按提交顺序互相覆盖 ⇒ 用户看到的「内部结构可见 / 穿模」就是这个。
+        // 检视专用光栅状态：**关闭背面剔除**。
+        // 理由：程序化枪模由几十个独立图元拼成，作者绕序难免不一致；检视模式只画一把枪
+        // （几万三角形），关剔除的代价可忽略，而它保证**任何角度都不会透出内部**。
+        // 第一人称仍走 `gun_pipeline`（cull BACK），行为不变。
+        // 检视专用光栅状态：**关闭背面剔除**。
+        // 理由：程序化枪模由几十个独立图元拼成，作者绕序难免不一致；检视模式只画一把枪
+        // （几万三角形），关剔除的代价可忽略，而它保证**任何角度都不透出内部**。
+        // 第一人称仍走 `gun_pipeline`（cull BACK），行为不变。
+        let gun_inspect_raster = rasterizer.cull_mode(vk::CullModeFlags::NONE);
         let gun_depth_create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .vertex_input_state(&vertex_input_state)
             .input_assembly_state(&input_assembly)
             .viewport_state(&viewport_state)
-            .rasterization_state(&rasterizer)
+            .rasterization_state(&gun_inspect_raster)
             .multisample_state(&multisampling)
             .depth_stencil_state(&depth_stencil)
             .dynamic_state(&dynamic_state)
