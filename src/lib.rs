@@ -57,6 +57,7 @@ mod audio_out;
 mod llm_cmd;
 mod net;
 mod ui;
+mod log_util;
 mod config;
 mod perf_log;
 mod syscfg;

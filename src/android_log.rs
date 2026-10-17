@@ -25,29 +25,6 @@ fn cstr_lossy(s: &str) -> CString {
     CString::new(cleaned).unwrap_or_default()
 }
 
-/// 按**字节上限**切分，但只在 UTF-8 字符边界上断开。
-///
-/// 为什么不用 `as_bytes().chunks()`：那是按字节切，而中文一个字 3 字节，
-/// 切在中间就得到**非法 UTF-8** ⇒ logcat 里显示成乱码/问号。
-/// 这里走 `char_indices`，保证每一段都是合法 UTF-8。
-fn split_by_bytes(s: &str, max: usize) -> Vec<&str> {
-    if s.len() <= max {
-        return vec![s];
-    }
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    for (i, _) in s.char_indices() {
-        if i - start >= max {
-            out.push(&s[start..i]);
-            start = i;
-        }
-    }
-    if start < s.len() {
-        out.push(&s[start..]);
-    }
-    out
-}
-
 struct LogcatLogger;
 
 impl log::Log for LogcatLogger {
@@ -69,7 +46,7 @@ impl log::Log for LogcatLogger {
         // Android 的 `LOGGER_ENTRY_MAX_PAYLOAD` = **4068 字节**，一次写超过它的部分
         // 会被 logd **静默丢弃**（不报错、不留痕）。留 500 余量给 tag 与分隔符。
         const CHUNK: usize = 3500;
-        for part in split_by_bytes(&full, CHUNK) {
+        for part in crate::log_util::split_by_bytes(&full, CHUNK) {
             let msg = cstr_lossy(part);
             unsafe {
                 __android_log_write(prio, tag.as_ptr(), msg.as_ptr());

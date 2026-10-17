@@ -37,14 +37,31 @@ fn main() {
                     // 🔴 **端口校验**（外部复核指出第 4 条）：只接受 1..=65535。
                     // 原来 `REG foo 0` 会存进一个非法的 0 端口 —— 之后的 PUNCH 打不出去，
                     // 而且给攻击者留了「借 WHO 向任意地址反射 PUNCH」的口子。
-                    let claimed: Option<u16> = fields.next().and_then(|p| p.parse().ok());
-                    let port = match claimed {
-                        Some(p) if p != 0 => p,
-                        _ => from.port(), // 未给/非法 ⇒ 退回数据报的 NAT 观测端口
+                    // 🔴 **显式给了非法端口要拒绝，不能静默回退**（2026-10-17，外部复核指出）：
+                    // 原来 `REG foo 0` / `REG foo abc` 会被当成「没给端口」而回 `OK`
+                    // ⇒ 客户端以为自己注册对了、实际用的是 NAT 观测端口，排障时完全看不出来。
+                    let field = fields.next();
+                    let port = match field {
+                        None => from.port(), // 没给 ⇒ 用 NAT 观测端口
+                        Some(tok) => match tok.parse::<u16>() {
+                            Ok(p) if p != 0 => p,
+                            _ => {
+                                let _ = sock.send_to(b"BAD port\n", from);
+                                continue;
+                            }
+                        },
                     };
                     let now = Instant::now();
                     // 先清过期（顺手清掉死房间）
                     registry.retain(|_, (_, seen)| now.duration_since(*seen) < ENTRY_TTL);
+                    // 防抢注：未过期且**换了源 IP** 的同名注册一律拒
+                    //（否则任何人都能覆写别人的房间名 → 把 PUNCH 反射到任意地址）
+                    if let Some((addr, seen)) = registry.get(name) {
+                        if now.duration_since(*seen) < ENTRY_TTL && addr.ip() != from.ip() {
+                            let _ = sock.send_to(b"BUSY name\n", from);
+                            continue;
+                        }
+                    }
                     let is_new = !registry.contains_key(name);
                     if is_new && registry.len() >= MAX_ENTRIES {
                         // 满了就**拒新键**，不清掉活条目（否则两台主机会互相把对方踢下线）
