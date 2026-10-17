@@ -1,5 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz, t, rx};
+use crate::engine::guns::{assemble, GunMesh, ry, rz, t, rx};
 use glam::Mat4;
 
 pub fn m249() -> crate::engine::guns::GunMesh {
@@ -35,7 +35,7 @@ pub fn m249() -> crate::engine::guns::GunMesh {
         // 握把（后倾）
         (t(0.0, 0.008, -0.185) * rx(0.45), beveled_box(0.032, 0.10, 0.045, 0.012, 3), [0.16, 0.17, 0.19]),
         // 扳机护圈（圆滑U形）
-        (t(0.0, 0.02, -0.15), torus_arc(0.045, 0.008, std::f32::consts::PI, std::f32::consts::PI * 2.0, 8, 6), [0.30, 0.33, 0.37]),
+        (t(0.0, 0.02, -0.15) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.045, 0.008, std::f32::consts::PI, std::f32::consts::PI * 2.0, 8, 6), [0.30, 0.33, 0.37]),
         // 拉机柄
         (t(0.056, 0.115, 0.03), beveled_box(0.05, 0.014, 0.014, 0.006, 2), [0.16, 0.17, 0.19]),
         // 枪托
@@ -78,7 +78,7 @@ pub fn m240l() -> crate::engine::guns::GunMesh {
         // 准星护圈
         (t(0.0, 0.078, 0.625), torus_arc(0.013, 0.0035, 0.0, std::f32::consts::PI * 2.0, 12, 6), [0.62, 0.65, 0.70]),
         // 枪管提把（圆拱形）
-        (t(0.0, 0.085, 0.48), torus_arc(0.045, 0.008, 0.0, std::f32::consts::PI, 8, 6), [0.16, 0.17, 0.19]),
+        (t(0.0, 0.085, 0.48) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.045, 0.008, 0.0, std::f32::consts::PI, 8, 6), [0.16, 0.17, 0.19]),
         // 弹链盒（机匣下）
         (t(0.0, 0.025, -0.14), beveled_box(0.075, 0.055, 0.16, 0.01, 3), [0.48, 0.39, 0.26]),
         // 弹链盒盖
@@ -86,7 +86,7 @@ pub fn m240l() -> crate::engine::guns::GunMesh {
         // 握把（后倾）
         (t(0.0, 0.018, -0.26) * rx(0.45), beveled_box(0.03, 0.095, 0.042, 0.012, 3), [0.16, 0.17, 0.19]),
         // 扳机护圈（圆滑U形）
-        (t(0.0, 0.018, -0.21), torus_arc(0.042, 0.0075, std::f32::consts::PI, std::f32::consts::PI * 2.0, 8, 6), [0.30, 0.33, 0.37]),
+        (t(0.0, 0.018, -0.21) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.042, 0.0075, std::f32::consts::PI, std::f32::consts::PI * 2.0, 8, 6), [0.30, 0.33, 0.37]),
         // 拉机柄
         (t(0.052, 0.115, -0.02), beveled_box(0.045, 0.013, 0.013, 0.005, 2), [0.16, 0.17, 0.19]),
         // 固定枪托

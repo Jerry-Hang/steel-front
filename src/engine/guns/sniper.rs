@@ -1,5 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz, t};
+use crate::engine::guns::{assemble, GunMesh, ry, rz, t};
 use glam::Mat4;
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -29,7 +29,7 @@ pub fn sv98() -> GunMesh {
         (t(0.0, 0.128, -0.070), beveled_box(0.022, 0.030, 0.03, 0.006, 4), POLY),
         (t(0.032, 0.085, -0.090) * rz(), cylinder(0.009, 0.10, 16), BRIGHT),
         (t(0.082, 0.085, -0.090) * Mat4::from_scale(glam::vec3(0.016, 0.016, 0.016)), sphere(12, 8), BRIGHT),
-        (t(0.0, -0.005, 0.010), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
+        (t(0.0, -0.005, 0.010) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
         (t(0.0, -0.030, 0.090), beveled_box(0.035, 0.090, 0.045, 0.008, 4), POLY),
         (t(0.0, 0.015, 0.010), beveled_box(0.010, 0.030, 0.008, 0.004, 4), DEEP),
         (t(0.0, 0.078, 0.585), beveled_box(0.008, 0.020, 0.008, 0.003, 4), DEEP),
@@ -58,7 +58,7 @@ pub fn m2010() -> GunMesh {
         (t(0.0, 0.145, 0.020), beveled_box(0.030, 0.030, 0.10, 0.006, 4), POLY),
         (t(0.032, 0.090, -0.100) * rz(), cylinder(0.0095, 0.10, 16), BRIGHT),
         (t(0.082, 0.090, -0.100) * Mat4::from_scale(glam::vec3(0.017, 0.017, 0.017)), sphere(12, 8), BRIGHT),
-        (t(0.0, -0.005, 0.000), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
+        (t(0.0, -0.005, 0.000) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
         (t(0.0, -0.030, 0.100), beveled_box(0.038, 0.110, 0.05, 0.008, 4), POLY),
         (t(0.0, -0.020, -0.050) * Mat4::from_rotation_x(0.35), beveled_box(0.045, 0.090, 0.055, 0.012, 4), SAND),
         (t(0.0, 0.020, 0.000), beveled_box(0.010, 0.028, 0.008, 0.004, 4), DEEP),
@@ -87,7 +87,7 @@ pub fn mrad() -> GunMesh {
         (t(0.0, 0.148, 0.020), beveled_box(0.030, 0.032, 0.11, 0.006, 4), POLY),
         (t(0.032, 0.092, -0.105) * rz(), cylinder(0.010, 0.105, 16), BRIGHT),
         (t(0.085, 0.092, -0.105) * Mat4::from_scale(glam::vec3(0.018, 0.018, 0.018)), sphere(12, 8), BRIGHT),
-        (t(0.0, -0.005, 0.000), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
+        (t(0.0, -0.005, 0.000) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.006, PI * 1.05, PI * 1.95, 10, 6), DARK),
         (t(0.0, -0.030, 0.095), beveled_box(0.038, 0.115, 0.05, 0.008, 4), POLY),
         (t(0.0, -0.020, -0.045) * Mat4::from_rotation_x(0.35), beveled_box(0.045, 0.095, 0.055, 0.012, 4), OLIVE),
         (t(0.0, 0.020, 0.000), beveled_box(0.010, 0.028, 0.008, 0.004, 4), DEEP),

@@ -1,5 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, torus_arc};
-use crate::engine::guns::{assemble, rz, t, rx};
+use crate::engine::guns::{assemble, ry, rz, t, rx};
 use std::f32::consts::PI;
 
 const STEEL_L: [f32; 3] = [0.62, 0.65, 0.70];
@@ -42,7 +42,7 @@ pub fn pp19() -> crate::engine::guns::GunMesh {
         // 握把
         (t(0.0, -0.062, -0.11) * rx(0.3), beveled_box(0.032, 0.075, 0.05, 0.010, 4), POLY_BLACK),
         // 扳机护圈
-        (t(0.0, -0.025, -0.05), torus_arc(0.03, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, -0.025, -0.05) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.03, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.045, -0.045), beveled_box(0.008, 0.024, 0.006, 0.002, 2), STEEL_D),
         // 折叠托臂 L/R
@@ -88,7 +88,7 @@ pub fn pp9() -> crate::engine::guns::GunMesh {
         // 握把
         (t(0.0, -0.06, -0.11) * rx(0.25), beveled_box(0.032, 0.075, 0.05, 0.010, 4), POLY_BLACK),
         // 扳机护圈
-        (t(0.0, -0.022, -0.075), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, -0.022, -0.075) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.04, -0.07), beveled_box(0.008, 0.022, 0.006, 0.002, 2), STEEL_D),
         // 弹匣
@@ -144,7 +144,7 @@ pub fn vss() -> crate::engine::guns::GunMesh {
         // 木握把
         (t(0.0, -0.055, -0.15) * rx(0.3), beveled_box(0.032, 0.08, 0.05, 0.010, 4), WOOD),
         // 扳机护圈
-        (t(0.0, -0.02, -0.10), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, -0.02, -0.10) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.038, -0.095), beveled_box(0.008, 0.02, 0.006, 0.002, 2), STEEL_D),
         // 10发弹匣
@@ -195,7 +195,7 @@ pub fn asval() -> crate::engine::guns::GunMesh {
         // 握把
         (t(0.0, -0.058, -0.13) * rx(0.28), beveled_box(0.032, 0.08, 0.05, 0.010, 4), POLY_BLACK),
         // 扳机护圈
-        (t(0.0, -0.02, -0.09), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
+        (t(0.0, -0.02, -0.09) * ry(-std::f32::consts::FRAC_PI_2), torus_arc(0.028, 0.005, PI, TAU, 8, 6), DEEP_BLACK),
         // 扳机
         (t(0.0, -0.038, -0.085), beveled_box(0.008, 0.02, 0.006, 0.002, 2), STEEL_D),
         // 20发弹匣
