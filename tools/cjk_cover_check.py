@@ -17,11 +17,14 @@ points (U+674E, U+6234) that had no glyph, and the real gate went red one compil
 This version scans the source tree live, exactly like the test does (lesson 36: a tool that
 cannot fail is not a tool).
 
-Checks performed (both mirror src/engine/font_cjk.rs):
+Checks performed (all mirror src/engine/font_cjk.rs):
   1. every CJK code point in src/**.rs (skipping the generated table and font_cjk.rs itself)
      must have a glyph entry;
   2. the glyph table must have exactly as many entries as the stored `--scan` list, because
-     the gate asserts that too (a stale list is a red gate even when no character is missing).
+     the gate asserts that too (a stale list is a red gate even when no character is missing);
+  3. every code point **in the stored `--scan` list** must have a glyph entry — the gate
+     asserts the list is a *subset* of the table, and a length-only check (check 2) misses
+     "same size, different content" (2026-10-17 added; that case went red one compile later).
 
 Exit code 0 = the gate should pass; 1 = it will fail, and the offending characters and files
 are printed here first.
@@ -109,6 +112,18 @@ def main():
             print("  '%s' (U+%04X)  in %s" % (chr(cp), cp, where))
         print("  fix: rewrite the text to use characters that already have glyphs")
         print("       (the source font is not in the repo, so the table CANNOT be rebuilt)")
+    # 🔴 **只比长度是不够的**（2026-10-17 补）：Rust 的 `all_glyphs_are_used` 除了
+    # `CJK_GLYPHS.len() == used.len()`，还断言「清单里每个字都有字模」（`missing.is_empty()`）。
+    # 只做 `len(stored) != len(table)` 会漏掉**长度相同但内容不同**的情形
+    # （清单里换掉一个字、表里也换掉一个字）—— 那时预检说 OK，40 秒编译后真判据红。
+    stored_missing = sorted(set(stored) - set(table))
+    if stored_missing:
+        failed = True
+        print("MISSING IN TABLE (from stored list): %d" % len(stored_missing))
+        print("  %s" % " ".join("U+%04X" % c for c in stored_missing[:20]))
+        print("  the gate asserts the list is a SUBSET of the table; a length-only check misses this")
+        print("  fix: python tools/extract_cjk_glyphs.py --scan  -- then regenerate the table")
+
     if len(stored) != len(table):
         failed = True
         only_table = sorted(set(table) - set(stored))
