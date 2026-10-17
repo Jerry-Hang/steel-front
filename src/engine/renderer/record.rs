@@ -117,7 +117,14 @@ impl Renderer {
             .framebuffer(self.framebuffers[image_index])
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
-                extent: self.swapchain_extent,
+                // 🔴 **必须是 `render_extent`**（2026-10-17 外部复核指出，已实测确认）：
+                // `init_framebuffers` 给主 pass 的 framebuffer 用的是 `render_extent`
+                // （`RV3D_RENDER_SCALE` 开启时小于 swapchain），而这里原来写的是
+                // `swapchain_extent` ⇒ `render_area` 超出 framebuffer
+                // ⇒ **VUID-VkRenderPassBeginInfo-pNext-02852**，每帧必触发。
+                // 注意 `hud_render_pass` 的 framebuffer 确实是 swapchain 尺寸，
+                // 它那两处 `render_area` 保持 `swapchain_extent` 不动。
+                extent: self.render_extent,
             })
             .clear_values(&clear_values);
 

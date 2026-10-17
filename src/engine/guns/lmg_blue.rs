@@ -45,9 +45,9 @@ pub fn m249() -> crate::engine::guns::GunMesh {
         // 两脚架轴座
         (t(0.0, 0.014, 0.32), beveled_box(0.03, 0.026, 0.05, 0.008, 2), [0.30, 0.33, 0.37]),
         // 两脚架左腿（前倾外撇）
-        (t(0.0, -0.085, 0.33) * Mat4::from_rotation_z(-0.35) * rx(-0.55), cylinder(0.0055, 0.21, 16), [0.30, 0.33, 0.37]),
+        (t(-0.0307, -0.0701, 0.3749) * Mat4::from_rotation_z(-0.35) * rx(-0.55), cylinder(0.0055, 0.21, 16), [0.30, 0.33, 0.37]),
         // 两脚架右腿
-        (t(0.0, -0.085, 0.33) * Mat4::from_rotation_z(0.35) * rx(-0.55), cylinder(0.0055, 0.21, 16), [0.30, 0.33, 0.37]),
+        (t(0.0307, -0.0701, 0.3749) * Mat4::from_rotation_z(0.35) * rx(-0.55), cylinder(0.0055, 0.21, 16), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.11 }
@@ -96,9 +96,9 @@ pub fn m240l() -> crate::engine::guns::GunMesh {
         // 两脚架轴座
         (t(0.0, 0.008, 0.30), beveled_box(0.028, 0.024, 0.045, 0.008, 2), [0.30, 0.33, 0.37]),
         // 两脚架左腿
-        (t(0.0, -0.085, 0.31) * Mat4::from_rotation_z(-0.35) * rx(-0.55), cylinder(0.005, 0.20, 16), [0.30, 0.33, 0.37]),
+        (t(-0.0292, -0.0721, 0.3523) * Mat4::from_rotation_z(-0.35) * rx(-0.55), cylinder(0.005, 0.20, 16), [0.30, 0.33, 0.37]),
         // 两脚架右腿
-        (t(0.0, -0.085, 0.31) * Mat4::from_rotation_z(0.35) * rx(-0.55), cylinder(0.005, 0.20, 16), [0.30, 0.33, 0.37]),
+        (t(0.0292, -0.0721, 0.3523) * Mat4::from_rotation_z(0.35) * rx(-0.55), cylinder(0.005, 0.20, 16), [0.30, 0.33, 0.37]),
     ];
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.425 }

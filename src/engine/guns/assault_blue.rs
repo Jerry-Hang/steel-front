@@ -39,8 +39,9 @@ pub fn hk416() -> crate::engine::guns::GunMesh {
         // 红点镜（粗盒 + 镜片）
         (t(0.0, 0.066, -0.03), beveled_box(0.035, 0.038, 0.065, 0.008, 3), poly),
         (t(0.0, 0.066, -0.0655) * rz(), cylinder(0.014, 0.01, 16), deep),
-        // 准星 / 表尺
+        // 准星（前端）
         (t(0.0, 0.059, 0.14), beveled_box(0.02, 0.028, 0.025, 0.005, 2), dark),
+        // 表尺（后端）
         (t(0.0, 0.058, -0.09), beveled_box(0.018, 0.026, 0.035, 0.005, 2), dark),
         // 辅助推机柄
         (t(0.038, 0.02, -0.045) * Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2), cylinder(0.007, 0.014, 16), deep),
@@ -86,8 +87,9 @@ pub fn mk18() -> crate::engine::guns::GunMesh {
         // 红点镜
         (t(0.0, 0.066, -0.035), beveled_box(0.035, 0.038, 0.065, 0.008, 3), poly),
         (t(0.0, 0.066, -0.0705) * rz(), cylinder(0.014, 0.01, 16), deep),
-        // 准星 / 表尺
+        // 准星（前端）
         (t(0.0, 0.059, 0.065), beveled_box(0.02, 0.028, 0.025, 0.005, 2), dark),
+        // 表尺（后端）
         (t(0.0, 0.058, -0.10), beveled_box(0.018, 0.026, 0.035, 0.005, 2), dark),
     ];
     let (verts, indices) = assemble(&parts);

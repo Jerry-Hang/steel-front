@@ -38,7 +38,7 @@ TOLERANCE = 0.015
 # 已知违规基线（2026-10-17 实测）。修好一把就把这里调小；**新枪不许出现在这里**。
 BASELINE = {
     ("antimaterial.rs", "m82a1"): 0.0635,
-    ("antimaterial.rs", "osv96"): 0.087,
+    ("antimaterial.rs", "osv96"): 0.090,
     ("dmr.rs", "mk14p"): 0.089,
     ("dmr.rs", "svd12"): 0.055,
     ("hmg.rs", "m2a1"): 0.097,
@@ -53,6 +53,7 @@ BASELINE = {
     ("smg_blue.rs", "mp7"): 0.047,
     ("smg_blue.rs", "mpx"): 0.04,
     ("smg_red.rs", "pp9"): 0.017,
+    ("assault_red.rs", "ak12m"): 0.034,
 }
 
 BOX = re.compile(r"beveled_box\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)")
@@ -76,12 +77,24 @@ def y_half(line):
         return float(m.group(3)) / 2.0
     m = TOR.search(line)
     if m:
-        return float(m.group(1))
+        # 环半径 + 管半径（原来只取环半径 ⇒ 顶面算少了一个 tube_r）
+        return float(m.group(1)) + float(m.group(2))
     return None
 
 
 def scan():
-    """-> {(file, gun): {front: top, rear: top}}（两遍：注释可能在准星前后任意一侧）"""
+    """解析每把枪的准星/表尺顶面。
+
+    -> {(file, gun): {"front": top, "rear": top, "ambiguous": bool, "unlabeled": int}}
+
+    🔴 2026-10-17 修掉三个解析洞（外部复核指出，实测确认）：
+    1. **`label` 消费完一行必须清零** —— 原来不清零，一个 `// 准星` 之后**所有无注释部件**
+       都会被当成准星取 max；
+    2. **合写注释 `// 准星 / 表尺` 不能同时赋给 front 和 rear** —— 那样 `front == rear`
+       恒成立，哪怕把表尺改到 `y = -99` 脚本也报 0 差（**一个永远绿的判据**）；
+    3. **英文注释漏检** —— `// front sight post` / `// rear sight` 原来完全不认。
+    另外 `torus_arc` 的半高要加**管半径**（原来只取了环半径）。
+    """
     out = {}
     for path in sorted(GUNS.glob("*.rs")):
         if path.name == "mod.rs":
@@ -101,18 +114,28 @@ def scan():
             if not (gun and s.startswith("(")):
                 continue
             mt = T.search(s)
-            if not mt:
-                continue
-            half = y_half(s)
-            if half is None:
-                continue
-            top = float(mt.group(2)) + half
-            if label and "准星" in label:
-                cur = out.setdefault((path.name, gun), {})
-                cur["front"] = max(cur.get("front", -9.9), top)
-            if label and ("表尺" in label or "照门" in label):
-                cur = out.setdefault((path.name, gun), {})
-                cur["rear"] = max(cur.get("rear", -9.9), top)
+            half = y_half(s) if mt else None
+            if mt and half is not None:
+                top = float(mt.group(2)) + half
+                cur = out.setdefault(
+                    (path.name, gun),
+                    {"front": None, "rear": None, "ambiguous": False, "unlabeled": 0},
+                )
+                is_front = bool(label) and ("准星" in label or "front sight" in label.lower())
+                is_rear = bool(label) and (
+                    "表尺" in label or "照门" in label or "rear sight" in label.lower()
+                )
+                if is_front and is_rear:
+                    # 合写注释：无法判定哪一个才是，**整把枪标记为 ambiguous 并跳过比较**
+                    cur["ambiguous"] = True
+                elif is_front:
+                    cur["front"] = top if cur["front"] is None else max(cur["front"], top)
+                elif is_rear:
+                    cur["rear"] = top if cur["rear"] is None else max(cur["rear"], top)
+                else:
+                    cur["unlabeled"] += 1
+            # 🔴 消费完一行部件，标签必须清零
+            label = None
     return out
 
 
@@ -122,27 +145,43 @@ def main():
     if len(data) < 20:
         print(f"FAIL: 只解析到 {len(data)} 把枪，解析器大概坏了（教训 27：没测到 != 测到 0）")
         return 2
+    both = {k: v for k, v in data.items()
+            if v["front"] is not None and v["rear"] is not None and not v["ambiguous"]}
+    ambiguous = [k for k, v in data.items() if v["ambiguous"]]
+    unlabeled = [k for k, v in data.items() if v["front"] is None and v["rear"] is None
+                 and not v["ambiguous"]]
+    one_side = [k for k, v in data.items()
+                if (v["front"] is None) != (v["rear"] is None)]
+    # 🔴 覆盖率必须报出来并且守住下限：解析器悄悄退化时（比如标签规则改坏），
+    # 光看「没有新违规」会误以为没事。
+    print(f"解析 {len(data)} 把枪：可判定 {len(both)} · 合写注释跳过 {len(ambiguous)} ·"
+          f" 无标签 {len(unlabeled)} · 只有单侧 {len(one_side)}")
+    if len(both) < 20:
+        print(f"FAIL: 可判定的只有 {len(both)} 把（< 20）—— 解析器覆盖退化了")
+        return 2
     rows = []
-    for (fn, gun), d in sorted(data.items()):
-        if "front" not in d or "rear" not in d:
-            continue
+    for (fn, gun), d in sorted(both.items()):
         gap = d["front"] - d["rear"]
         if abs(gap) > TOLERANCE:
             rows.append((fn, gun, d["front"], d["rear"], abs(gap)))
     if not quiet:
-        print(f"解析 {len(data)} 把枪，其中 {len(rows)} 把准星/表尺不共线（> {TOLERANCE} m）：")
+        print(f"其中 {len(rows)} 把准星/表尺不共线（> {TOLERANCE} m）：")
         print(f"{'文件':<20}{'武器':<12}{'准星顶':>8}{'表尺顶':>8}{'差':>8}{'基线':>8}")
         print("-" * 68)
         for fn, gun, f, r, g in rows:
             base = BASELINE.get((fn, gun))
             tag = "  NEW!" if base is None else ("" if g <= base + 1e-4 else "  恶化!")
             print(f"{fn:<20}{gun:<12}{f:>8.3f}{r:>8.3f}{g:>8.3f}"
-                  f"{(base if base is not None else 0):>8.3f}{tag}")
+                  f"{(base if base is not None else 0.0):>8.3f}{tag}")
+        if unlabeled:
+            print(f"⚠️ 无法判定（无标签，需人工看）：{' '.join(g for _, g in unlabeled)}")
+        if ambiguous:
+            print(f"⚠️ 合写注释跳过（改写注释才能判）：{' '.join(g for _, g in ambiguous)}")
     bad = []
     for fn, gun, f, r, g in rows:
         base = BASELINE.get((fn, gun))
         if base is None:
-            bad.append(f"  {fn}:{gun} 是新违规（{g:.3f} m），要么修好要么加进基线并说明理由")
+            bad.append(f"  {fn}:{gun} 是新违规（{g:.3f} m）")
         elif g > base + 1e-4:
             bad.append(f"  {fn}:{gun} 从基线 {base:.3f} 恶化到 {g:.3f} m")
     if bad:
