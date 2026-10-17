@@ -83,12 +83,20 @@ impl WeaponSpec {
     /// 生产路径经 build_firearm → 投射物携带分段；此表供测试与规格校验。
     #[allow(dead_code)]
     pub fn part_multiplier(&self, dist: f32, hit_height_rel: f32) -> f32 {
-        let (_, h, c, a, l) = self
-            .part_tiers
-            .iter()
-            .find(|(limit, ..)| dist <= *limit)
-            .copied()
-            .unwrap_or(*self.part_tiers.last().expect("part_tiers 非空"));
+        // 🔴 与 `weapons.rs::Ballistics::part_multiplier` **保持同一契约**（2026-10-17）：
+        // 那边空表回落固定 1.5/1.0/0.8/0.6，而这里原来没有空表分支 ——
+        // 「同一件事两份实现、只对了一处」是本仓最贵的缺陷形态（前 8 批里 18 条）。
+        // 另外 `.unwrap_or(expr)` 的实参是**急切求值**的：即使 `find` 命中，
+        // `expect("part_tiers 非空")` 也会先执行 ⇒ 空表时会 panic 在拿不到的那条路上。
+        let (_, h, c, a, l) = if self.part_tiers.is_empty() {
+            (f32::MAX, 1.5, 1.0, 0.8, 0.6)
+        } else {
+            self.part_tiers
+                .iter()
+                .find(|(limit, ..)| dist <= *limit)
+                .copied()
+                .unwrap_or_else(|| *self.part_tiers.last().expect("已判非空"))
+        };
         if hit_height_rel >= 1.45 {
             h
         } else if hit_height_rel >= 0.95 {

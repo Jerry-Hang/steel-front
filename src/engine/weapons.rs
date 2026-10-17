@@ -377,7 +377,9 @@ impl Projectile {
                 .iter()
                 .find(|(limit, ..)| self.distance_traveled <= *limit)
                 .copied()
-                .unwrap_or(*self.part_tiers.last().expect("part_tiers 非空"));
+                // `.unwrap_or(expr)` 的实参急切求值 ⇒ 换成 `unwrap_or_else`，
+                // 只有真的 `find` 落空时才碰 `last()`（空表已在上面的分支挡掉）。
+                .unwrap_or_else(|| *self.part_tiers.last().expect("已判非空"));
             if h >= 1.45 {
                 head
             } else if h >= 0.95 {

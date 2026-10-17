@@ -19,6 +19,21 @@ import re
 import sys
 
 
+def is_test_only(path):
+    """整个文件就是测试代码的那些 —— 靠**路径**判断，不靠文件内的 `#[cfg(test)]`。
+
+    🔴 2026-10-17 修：原实现只在文件内部找 `#[cfg(test)]` 来切割，
+    但 `src/engine/game/tests/*.rs`（父模块 `game.rs:1095` 的 `#[cfg(test)] mod tests;` 引入）
+    与 `src/engine/renderer/tests_*.rs`（`renderer.rs:1265-1273` 的 `#[cfg(test)] mod tests_*;`）
+    **文件内部根本没有那个标记** ⇒ 整个测试文件被当成生产代码，44 条命中里 34 条是断言。
+    ⇒ 一个常报 34 条假警报的扫描器等于没人看（教训 26）。
+    """
+    parts = pathlib.Path(path).parts
+    if "tests" in parts[:-1]:
+        return True
+    return pathlib.Path(path).name.startswith("tests_")
+
+
 def default_paths():
     """src/ 下全部 .rs（含 src/engine/ 与任何新加的子目录）。"""
     root = pathlib.Path("src")
@@ -31,7 +46,11 @@ PAT = re.compile(r"\.unwrap\(\)|\.expect\(|panic!\(|unreachable!\(")
 
 def main(paths):
     total = 0
+    skipped = 0
     for path in paths:
+        if is_test_only(path):
+            skipped += 1
+            continue
         try:
             text = io.open(path, encoding="utf-8").read()
         except OSError:
@@ -51,6 +70,8 @@ def main(paths):
                 print("  L%-5d %s" % (i, line[:150]))
             total += len(hits)
     print("total production sites: %d" % total)
+    # 教训 46：审计工具必须说清「扫了什么」—— 排除多少也要报出来
+    print("excluded %d test-only file(s) by path" % skipped)
 
 
 if __name__ == "__main__":

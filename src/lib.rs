@@ -3174,7 +3174,6 @@ impl GameApp {
             // 原来写成 `(id<100k && hp>0) || id==0 || id>=100k`：`id==0` 已被 `id<100k`
             // 覆盖，而 `id>=100k` 恰好是 `id<100k` 的反面，吸收律化简后那段 id 判据是多余的
             // （clippy::nonminimal_bool 报的就是这个）。化简式逐档等价。
-            let net_mode = self.game.net_client.is_some();
             // 🔴 渲染剔除走**分摊刷新缓存**（2026-09-26 实测优化）：
             // 原来每帧对全部 NPC 直接调 `npc_occluded`（每次最坏 2×1240 次 AABB 相交），
             // 而枪口焰那段**又调了一遍** ⇒ 压力场景 510 次/帧、`cull-diag` 实测中位
@@ -3182,8 +3181,14 @@ impl GameApp {
             // 判据 = `cull-diag: <us>/s`（`RV3D_CULL_DIAG=1`）与 `npc_vis_scans`。
             self.game.refresh_npc_visibility();
             let vis = self.game.npc_visibility_flags();
-            let npc_visuals: Vec<engine::renderer::NpcVisual> = if net_mode {
-                let client = self.game.net_client.as_ref().unwrap();
+            // 🔴 用 `if let` 而不是 `is_some()` + `unwrap()`（2026-10-17）：
+            // `prod_panic_sweep` 每次都会把那个 `unwrap` 报成 1 处生产 unwrap。
+            // 它虽然被上一行的 `is_some()` 守着、**当前不可达**，但那是「同一个字段读两遍」
+            // ——中间一旦有人插一行改动字段，就变成 panic。`if let` 把判空与取值合成一次操作，
+            // 顺带把扫描基线清干净（**工具常报 1 条已知项 ⇒ 以后没人读它**）。
+            let npc_visuals: Vec<engine::renderer::NpcVisual> = if let Some(client) =
+                self.game.net_client.as_ref()
+            {
                 client
                     .entities()
                     .iter()
