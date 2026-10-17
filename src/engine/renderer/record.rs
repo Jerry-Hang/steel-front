@@ -738,10 +738,16 @@ impl Renderer {
         //      所以这里必须切到独立管线，而不是继续靠主管线的宽松 depth 状态。
         if self.gun_index_count > 0 && self.gun_vertex_count > 0 {
             unsafe {
+                // 检视模式用带深度测试的枪模管线（`gun_pipeline_depth` 的注释有完整理由）
+                let gun_pipe = if self.gun_depth_test {
+                    self.gun_pipeline_depth
+                } else {
+                    self.gun_pipeline
+                };
                 self.device.cmd_bind_pipeline(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    self.gun_pipeline,
+                    gun_pipe,
                 );
                 self.device.cmd_bind_descriptor_sets(
                     command_buffer,

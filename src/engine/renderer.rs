@@ -907,6 +907,12 @@ pub struct Renderer {
     gun_mapped: *mut std::ffi::c_void,
     gun_vertex_count: u32,
     gun_index_count: u32,
+    /// 检视模式专用的枪模管线：与 `gun_pipeline` 逐字段相同，**只有深度状态不同**
+    /// （depth_test/depth_write 都开）。第一人称必须关深度（枪要恒在墙前、不挡 HUD），
+    /// 但**检视模式**是绕枪观察，关深度会让重叠部件互相覆盖 ⇒ 看到内部结构 / 穿模。
+    gun_pipeline_depth: vk::Pipeline,
+    /// 当前帧枪模是否用带深度测试的管线（检视模式 = true）
+    gun_depth_test: bool,
     gun_buffer_capacity_verts: u32,
     gun_buffer_capacity_idx: u32,
     // ---- 🪖 士兵 GLB 网格（2026-09-13）：走 `self.pipeline`（传统 VERTEX、depth 开）+ 实例化 ----

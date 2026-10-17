@@ -458,6 +458,15 @@ impl Renderer {
     /// （main.rs 用 view⁻¹ × 锚点烘焙），颜色已含材质×烘焙光照。
     /// 用主管线（深度测试关）以 identity 实例（槽 INSTANCE_COUNT）绘制——
     /// 深度测试关闭 = 枪模恒可见（不再需要 z 覆盖 hack，也不写脏深度）。
+    /// 切换枪模管线：`true` = 带深度测试（**检视模式**，绕枪观察需要正确遮挡）；
+    /// `false` = 无深度（第一人称，枪模必须恒在墙前且不挡 HUD）。
+    ///
+    /// 🔴 2026-10-17：检视模式此前复用无深度管线 ⇒ 重叠部件按提交顺序互相覆盖 ⇒
+    /// 「内部结构可见 / 穿模」。这是渲染状态问题，与网格绕序无关。
+    pub(crate) fn set_gun_depth_test(&mut self, on: bool) {
+        self.gun_depth_test = on;
+    }
+
     pub(crate) fn set_first_person_gun_mesh(
         &mut self,
         verts: &[crate::engine::meshgen::GVertex],

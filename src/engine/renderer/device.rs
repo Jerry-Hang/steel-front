@@ -719,6 +719,8 @@ impl Renderer {
             gun_mapped: std::ptr::null_mut(),
             gun_vertex_count: 0,
             gun_index_count: 0,
+            gun_pipeline_depth: vk::Pipeline::null(),
+            gun_depth_test: false,
             gun_buffer_capacity_verts: 0,
             gun_buffer_capacity_idx: 0,
             soldier_vertex_buffer: vk::Buffer::null(),

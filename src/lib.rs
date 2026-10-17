@@ -3364,6 +3364,8 @@ impl GameApp {
             // 第一人称枪模高模网格（已在 render() 入口生成，此处上传）
             // 枪模仅在第一人称游玩或检视模式渲染：结算/其它相机态下隐藏
             // （否则枪模会按锚点漂浮在场景中——2-4 反馈“变成 M1 加兰德”观感）
+            // 检视模式绕枪观察 ⇒ 必须用带深度测试的枪模管线（第一人称则关深度）
+            renderer.set_gun_depth_test(self.inspect_weapon.is_some());
             if show_gun {
                 if gun_key_changed {
                     renderer.set_first_person_gun_mesh(&gun_mesh.0, &gun_mesh.1);

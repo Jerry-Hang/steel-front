@@ -581,6 +581,30 @@ impl Renderer {
                 .remove(0)
         };
 
+        // 检视模式专用枪模管线：与 gun_pipeline 逐字段相同，**只把 depth 状态换成主管线那份**
+        // （depth_test + depth_write 都开）。2026-10-17：检视模式此前复用了第一人称的无深度
+        // 管线 ⇒ 重叠部件按提交顺序互相覆盖 ⇒ 用户看到的「内部结构可见 / 穿模」就是这个。
+        let gun_depth_create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_state)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil)
+            .dynamic_state(&dynamic_state)
+            .color_blend_state(&color_blend_state)
+            .layout(self.pipeline_layout)
+            .render_pass(self.render_pass)
+            .subpass(0);
+
+        self.gun_pipeline_depth = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[gun_depth_create_info], None)
+                .map_err(|(_, e)| format!("创建检视枪模管线失败: {}", e))?
+                .remove(0)
+        };
+
         unsafe {
             self.device.destroy_shader_module(vs_module, None);
             self.device.destroy_shader_module(fs_module, None);
