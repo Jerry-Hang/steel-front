@@ -1886,6 +1886,14 @@ impl GameApp {
     }
 
     fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
+        // 🔬 A/B 开关（2026-10-18）：`RV3D_NO_GUN_GLB=1` 强制走**程序化枪模**。
+        // 存在理由：第一人称一直只验过 GLB 枪模（AK-12M 等 16 把），而**无 GLB 的 19 把**
+        // 走的是 `meshgen` 程序化图元 + `gun_pipeline`（`cull_mode = BACK` + 无深度）——
+        // 这条路**从未有过实机画面证据**。有了这个开关就能在不切枪的前提下拍到它。
+        // 与 `RV3D_NO_SHADOW` / `RV3D_NO_MESH` / `RV3D_NO_DECALS` 同类，仅诊断用。
+        if crate::syscfg::parse::<u8>("RV3D_NO_GUN_GLB") == Some(1) {
+            return None;
+        }
         let path = if crate::engine::asset_source::global()
             .exists(&format!("assets/guns/{key}.glb"))
         {
