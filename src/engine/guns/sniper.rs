@@ -33,7 +33,7 @@ pub fn sv98() -> GunMesh {
         (t(0.0, -0.030, 0.090), beveled_box(0.035, 0.090, 0.045, 0.008, 4), POLY),
         (t(0.0, -0.019, 0.010), beveled_box(0.010, 0.030, 0.008, 0.004, 4), DEEP),
         (t(0.0, 0.078, 0.585), beveled_box(0.008, 0.020, 0.008, 0.003, 4), DEEP),
-        (t(0.0, 0.130, -0.160), beveled_box(0.050, 0.040, 0.05, 0.008, 4), DARK),
+        (t(0.0, 0.128, -0.300), beveled_box(0.052, 0.030, 0.05, 0.008, 4), DARK),
     ];
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.10 }

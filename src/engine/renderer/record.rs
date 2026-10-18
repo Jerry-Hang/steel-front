@@ -875,14 +875,35 @@ impl Renderer {
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(sw_img)
                     .subresource_range(range);
+                // ①·b 🔴 **场景图的 COLOR_ATTACHMENT_OUTPUT → TRANSFER 依赖**（2026-10-18 外部复核指出）：
+                // render pass **只声明了 `EXTERNAL → 0` 的入向依赖**（见 `init_render_pass`），
+                // 省略了 `0 → EXTERNAL` 出向依赖 ⇒ 隐式出向依赖是
+                // `dstStageMask = BOTTOM_OF_PIPE, dstAccessMask = NONE`
+                // ⇒ **主 pass 对颜色附件的写入不保证对随后的 `cmd_blit_image` 可见**
+                // （READ_AFTER_WRITE 竞态；移动端 Tile/异步 Transfer 架构上可能读到未刷回的内容）。
+                // `finalLayout = TRANSFER_SRC_OPTIMAL` 只做布局转换，**不替代内存依赖**。
+                // ⇒ 这里补一条 `oldLayout == newLayout == TRANSFER_SRC_OPTIMAL` 的屏障，
+                // 把 `COLOR_ATTACHMENT_WRITE` 的可见性交给 `TRANSFER_READ`。
+                // 同形先例：下方磨砂玻璃那条路的 ① 屏障（那里已经专门对齐了源阶段）。
+                let scene_ready = vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(scene_img)
+                    .subresource_range(range);
                 self.device.cmd_pipeline_barrier(
                     command_buffer,
-                    vk::PipelineStageFlags::TRANSFER,
+                    // 源阶段必须含 `COLOR_ATTACHMENT_OUTPUT`（场景图写入）与 `TRANSFER`（交换链那条）
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::TRANSFER,
                     vk::PipelineStageFlags::TRANSFER,
                     vk::DependencyFlags::empty(),
                     &[],
                     &[],
-                    &[to_dst],
+                    &[to_dst, scene_ready],
                 );
                 // ② blit（LINEAR = 双线性升采样；全分辨率档下是 1:1 拷贝）
                 let blit = vk::ImageBlit::default()

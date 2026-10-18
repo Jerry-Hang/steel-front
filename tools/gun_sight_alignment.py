@@ -56,6 +56,25 @@ BASELINE = {
     ("assault_red.rs", "ak12m"): 0.034,
 }
 
+# 🔴 **「已知不可判定」基线**（2026-10-18 实测，同形于 BASELINE 的棘轮逻辑）：
+# 这些枪**没法判**，不是"合格"，而是注释里没有可用的语义标签（或只有一侧）。
+# 记录在此 ⇒ **新增的不可判定会 FAIL**，历史遗留不会让门禁永远红。
+# 修法：给源码补一行 `// 准星` / `// 表尺`，然后从本表删掉。
+ONE_SIDE_KNOWN = {
+    ("smg_blue.rs", "p90"),   # 只有 `// 内置瞄具`（既非准星也非表尺）
+    ("smg_red.rs", "vss"),
+    ("smg_red.rs", "asval"),
+}
+UNLABELED_KNOWN = {
+    ("pistols.rs", "mp443"),
+    ("pistols.rs", "rsh12"),
+    ("pistols.rs", "m18"),
+    ("pistols.rs", "mk23"),
+    ("sniper.rs", "sv98"),
+    ("sniper.rs", "m2010"),
+    ("sniper.rs", "mrad"),
+}
+
 BOX = re.compile(r"beveled_box\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)")
 CYL = re.compile(r"cylinder\(\s*([\d.]+)\s*,\s*([\d.]+)")
 FRU = re.compile(r"frustum\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)")
@@ -74,6 +93,12 @@ def y_half(line):
         return float(m.group(1)) if ROTATED.search(line) else float(m.group(2)) / 2.0
     m = FRU.search(line)
     if m:
+        # 🔴 `frustum` 乘了 `* rz()`（= 绕 X 轴 90°）时，**沿 Z 展开的 height 变成了 Y 方向**
+        # ⇒ Y 半高是半径 `max(r0, r1)`，不是 `height / 2`（2026-10-18 复核指出）。
+        # 反向验证：`ak12m` 的准星护翼 `frustum(0.004, 0.006, 0.052)` 乘了 `* rz()`，
+        # 旧写法算 0.026（真实半高 0.006，大 4 倍）。
+        if ROTATED.search(line):
+            return max(float(m.group(1)), float(m.group(2)))
         return float(m.group(3)) / 2.0
     m = TOR.search(line)
     if m:
@@ -178,6 +203,23 @@ def main():
         if ambiguous:
             print(f"⚠️ 合写注释跳过（改写注释才能判）：{' '.join(g for _, g in ambiguous)}")
     bad = []
+    # 🔴 **基线里的枪必须仍然可判定**（2026-10-18 复核指出）：
+    # 否则谁把某把枪的 `// 表尺` 注释删掉，它就从 `both` 掉进 `one_side`，
+    # 而 `bad` 只查 `both` ⇒ **那把手枪会静默脱管、脚本照报 OK**。
+    for (fn, gun) in BASELINE:
+        if (fn, gun) not in both:
+            bad.append(f"  {fn}:{gun} 在基线里但**已无法判定**（标签被删/改名？）")
+    # 🔴 单侧标签 = 标签退化，必须报错而不是只打印一行（把"测不到"当"测到 0"是教训 46 的同形）
+    for fn, gun in one_side:
+        if (fn, gun) in ONE_SIDE_KNOWN:
+            continue
+        d = data[(fn, gun)]
+        side = "准星" if d["front"] is not None else "表尺"
+        bad.append(f"  {fn}:{gun} 只有{side}标签、另一侧缺失 ⇒ 无法比较（注释退化？）")
+    for fn, gun in unlabeled:
+        if (fn, gun) in UNLABELED_KNOWN:
+            continue
+        bad.append(f"  {fn}:{gun} 完全没有准星/表尺标签 ⇒ 无法判定（新枪？补注释）")
     for fn, gun, f, r, g in rows:
         base = BASELINE.get((fn, gun))
         if base is None:
