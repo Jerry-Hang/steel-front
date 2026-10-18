@@ -126,6 +126,11 @@ impl Renderer {
                     depth_clear,
                 ]
             };
+        // 🔴 `clear_values` 按附件索引寻址 ⇒ **元素个数必须等于附件个数**（唯一真源见 helpers）
+        debug_assert_eq!(
+            clear_values.len(),
+            main_pass_attachment_count(self.msaa_samples)
+        );
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::default()
             .render_pass(self.render_pass)

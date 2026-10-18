@@ -6,6 +6,24 @@ use super::*;
 /// `RV3D_NO_GROUND_TEX=1` 时关掉地面微细节层（`light_data.flags.w` 保持 0）。
 /// A/B 诊断门，与 `RV3D_NO_SHADOW` 同一套惯例。**读一次缓存住**：本函数在每帧构建
 /// 光照 UBO 的路径上，不该每帧 `getenv`。
+/// 🔴 **主 pass 的附件个数唯一真源**（2026-10-18 外部复核建议，采纳）。
+///
+/// 这个数在**三处**被独立写出来过，任一处漏改都是静默事故：
+/// * `init_render_pass` —— 附件表 `[颜色, 深度]`（MSAA 关）或 `[颜色, resolve, 深度]`；
+/// * `init_framebuffers` —— 帧缓冲绑定几个 View；
+/// * `record_command_buffer` —— `clear_values` 的**元素个数**（按附件索引寻址，
+///   少一个 ⇒ 深度清除值错位 ⇒ 深度不清 ⇒ 世界全被深度剔除）。
+///
+/// 历史上已经踩过两次（第一次 `clear_values` 2 个 vs 附件 3 个；第二次我改 TYPE_1 路径时
+/// 附件变 2 个但 `clear_values` 仍 3 个）。⇒ 三处统一引用本函数 + `debug_assert_eq!`。
+pub(crate) const fn main_pass_attachment_count(msaa: vk::SampleCountFlags) -> usize {
+    if msaa.as_raw() == vk::SampleCountFlags::TYPE_1.as_raw() {
+        2
+    } else {
+        3
+    }
+}
+
 pub(crate) fn no_ground_detail_tex() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| crate::syscfg::cfg("RV3D_NO_GROUND_TEX").as_deref() == Some("1"))

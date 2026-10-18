@@ -46,6 +46,8 @@ impl Renderer {
                 .depth_stencil_attachment(&depth_ref);
             let subpasses = [subpass];
             let attachments = [scene_color, depth];
+            // 附件个数唯一真源（见 `helpers::main_pass_attachment_count`）
+            debug_assert_eq!(attachments.len(), main_pass_attachment_count(msaa));
             let dependency = vk::SubpassDependency::default()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
@@ -128,6 +130,8 @@ impl Renderer {
             .depth_stencil_attachment(&depth_attachment_ref);
         let subpasses = [subpass];
         let attachments = [color_attachment, resolve_attachment, depth_attachment];
+        // 附件个数唯一真源（见 `helpers::main_pass_attachment_count`）
+        debug_assert_eq!(attachments.len(), main_pass_attachment_count(msaa));
 
         let dependency = vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
@@ -1235,6 +1239,11 @@ impl Renderer {
                             self.depth_image_views[i],
                         ]
                     };
+                // 帧缓冲绑定的 View 个数必须等于主 pass 的附件个数（唯一真源见 helpers）
+                debug_assert_eq!(
+                    attachments.len(),
+                    main_pass_attachment_count(self.msaa_samples)
+                );
                 let framebuffer_create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(self.render_pass)
                     .attachments(&attachments)

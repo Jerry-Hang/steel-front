@@ -220,6 +220,11 @@ def main():
         if (fn, gun) in UNLABELED_KNOWN:
             continue
         bad.append(f"  {fn}:{gun} 完全没有准星/表尺标签 ⇒ 无法判定（新枪？补注释）")
+    # 🔴 合写注释 `// 准星 / 表尺` = 无法判定（2026-10-18 复核指出）：它同时命中两侧，
+    # 旧版只打印一行提示就放过 ⇒ **把某把合格枪改成合写注释就能绕过共线检查**。
+    # 当前全仓 `len(ambiguous) == 0`（`hk416`/`mk18` 已拆开），所以这里无条件拦。
+    for fn, gun in ambiguous:
+        bad.append(f"  {fn}:{gun} 准星/表尺合写在同一行注释 ⇒ 无法判定，请拆成两行注释")
     for fn, gun, f, r, g in rows:
         base = BASELINE.get((fn, gun))
         if base is None:

@@ -1801,6 +1801,18 @@ fn clear_values_count_follows_the_attachment_table() {
         body.contains("TYPE_1"),
         "`init_render_pass` 没有「MSAA 关闭」分支 ⇒ 又会出现 resolve_attachments 挂在 1 采样附件上"
     );
+
+    // ③ 🔴 **三处必须引用同一个唯一真源 `helpers::main_pass_attachment_count`**
+    //（2026-10-18 复核建议：只扫 `TYPE_1` 只能验"写了分支"，验不了"两边数字相等"）。
+    // 少一处 = 有人加/删附件时另两处不会跟着变 ⇒ 历史事故形态（世界被深度剔除）。
+    assert!(
+        include_str!("pipelines.rs").contains("main_pass_attachment_count"),
+        "`pipelines.rs` 没引用 `main_pass_attachment_count` ⇒ 附件数与帧缓冲 View 数不再是同一真源"
+    );
+    assert!(
+        include_str!("record.rs").contains("main_pass_attachment_count"),
+        "`record.rs` 没引用 `main_pass_attachment_count` ⇒ `clear_values` 个数与附件表不再是同一真源"
+    );
 }
 
 /// 🔴 **"物理设备能不能呈现到这个表面"的判据只能有一份，且不能写死队列族 0。**
