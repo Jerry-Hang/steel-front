@@ -29,7 +29,8 @@ pub fn ak12m() -> crate::engine::guns::GunMesh {
         // gas block + 导气孔座
         (t(0.0, 0.062, 0.272), beveled_box(0.040, 0.058, 0.045, 0.010, 4), steel),
         // front sight post + guard wings（加宽三角翼）
-        (t(0.0, 0.108, 0.270), beveled_box(0.016, 0.040, 0.016, 0.005, 4), dark),
+        (t(0.0, 0.142, 0.270), beveled_box(0.016, 0.040, 0.016, 0.005, 4), dark),
+        (t(0.0, 0.1050, 0.270), beveled_box(0.016, 0.034, 0.016, 0.004, 2), dark),  // 准星座增高：补足与表尺的高度差 0.034m
         (t(-0.020, 0.104, 0.270) * rz(), frustum(0.004, 0.006, 0.052, 8, true), black),
         (t(0.020, 0.104, 0.270) * rz(), frustum(0.004, 0.006, 0.052, 8, true), black),
         // rear sight

@@ -4602,10 +4602,25 @@ impl ApplicationHandler for GameApp {
     }
 
     /// 事件队列空闲时调用（主循环体）
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Suspended（Android 切后台）时不渲染：surface 已不可用。
         if !self.running || self.window.is_none() || self.suspended {
             return;
+        }
+
+        // 🔬 **定时正常退出**（`RV3D_EXIT_AFTER=<秒>`，2026-10-18）：
+        // 存在理由：验证「独显退出崩溃」必须走**正常退出路径**（`begin_exit` →
+        // `event_loop.exit()` → 正常 drop 掉 Vulkan 对象）。用 `timeout` / `kill` 是 SIGTERM，
+        // **根本不走销毁路径** ⇒ 验不到那个 bug。而点窗口 X 需要注入输入（违反鼠标安全协议）。
+        // 与 `RV3D_SHOT_AT` 同类，仅诊断用；计时起点锚定在**第一帧之后**（加载期不算）。
+        if let Some(secs) = crate::syscfg::parse::<f32>("RV3D_EXIT_AFTER") {
+            static EXIT_T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+            let t0 = *EXIT_T0.get_or_init(Instant::now);
+            if t0.elapsed().as_secs_f32() >= secs {
+                log::info!("RV3D_EXIT_AFTER={secs:.1}s 已到 ⇒ 走正常退出路径（销毁 Vulkan 对象）");
+                self.begin_exit(event_loop);
+                return;
+            }
         }
 
         // 帧率门控（MAX_FPS=0 时无上限，压测模式不做 sleep/spin）
