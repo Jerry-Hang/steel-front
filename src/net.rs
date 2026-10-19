@@ -331,7 +331,11 @@ pub fn rdv_resolve(rdv: &str, name: &str) -> io::Result<SocketAddr> {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         match sock.recv_from(&mut buf) {
-            Ok((n, _)) => {
+            // 🔴 **只收中继地址的回包**（2026-10-19 外部复核缺陷 3-A，已确认）：兄弟函数
+            // `rdv_register` 早就有 `if from == raddr`，这里漏了 ⇒ 任何能往本机端口发 UDP 的
+            // 进程都能伪造 `ADDR <name> <ip:port>`，把客户端引到任意地址（还会帮攻击者
+            // 反射一次 `PING`）。
+            Ok((n, from)) if from == raddr => {
                 let line = String::from_utf8_lossy(&buf[..n]);
                 let mut it = line.split_whitespace();
                 if it.next() == Some("ADDR") {
@@ -345,6 +349,9 @@ pub fn rdv_resolve(rdv: &str, name: &str) -> io::Result<SocketAddr> {
                         }
                     }
                 }
+            }
+            Ok(_) => {
+                // 非中继来源的杂包：忽略，继续等
             }
             Err(_) => {
                 // 超时继续/wouldblock
@@ -914,12 +921,32 @@ impl Server {
     }
 
     /// 注册客户端地址并分配玩家 id；已注册则返回原 id
-    pub fn register(&mut self, addr: SocketAddr) -> u32 {
-        *self.clients.entry(addr).or_insert_with(|| {
-            let id = self.next_player_id;
-            self.next_player_id += 1;
-            id
-        })
+    pub fn register(&mut self, addr: SocketAddr) -> Option<u32> {
+        // 🔴 **玩家 id 与客户端数都要有上限**（2026-10-19 外部复核缺陷 3-D，已确认）：
+        // `next_player_id` 原来无界累加，而客户端实体键是 `NET_PLAYER_BASE + player_id`
+        // ⇒ 加到 `u32::MAX - NET_PLAYER_BASE` 之后会**回绕落进 NPC id 区间**（0..100_000）
+        // ⇒ 玩家与 NPC 串号。`clients` 字典也没有容量上限（伪造大量源端口的 Join 可撑爆内存）。
+        // 上限取 `NET_PLAYER_BASE`：保证 `NET_PLAYER_BASE + id <= 2*NET_PLAYER_BASE - 1`，
+        // 既不回绕、也不会与 NPC 段（< NET_PLAYER_BASE）重叠。
+        const MAX_CLIENTS: usize = 64;
+        if let Some(id) = self.clients.get(&addr) {
+            return Some(*id);
+        }
+        if self.clients.len() >= MAX_CLIENTS {
+            log::warn!("net: 拒绝注册新客户端（已达上限 {MAX_CLIENTS}）");
+            return None;
+        }
+        if self.next_player_id >= NET_PLAYER_BASE {
+            log::warn!(
+                "net: 拒绝注册新客户端（player_id 已达上限 {}，避免实体 id 回绕）",
+                NET_PLAYER_BASE
+            );
+            return None;
+        }
+        let id = self.next_player_id;
+        self.next_player_id += 1;
+        self.clients.insert(addr, id);
+        Some(id)
     }
 
     /// 查询客户端地址对应的玩家 id
@@ -993,6 +1020,12 @@ impl Server {
     }
 
     /// 发送消息给指定客户端
+    /// 测试用：当前已注册客户端数（判据 `register_refuses_beyond_limits` 用）
+    #[cfg(test)]
+    pub fn client_count_for_test(&self) -> usize {
+        self.clients.len()
+    }
+
     pub fn send_to(&self, msg: &NetworkMessage, to: SocketAddr) -> io::Result<usize> {
         let buf = msg.encode();
         self.socket.send_to(&buf, to)
@@ -1020,7 +1053,13 @@ impl Server {
             self.send_to(&refuse, from)?;
             return Ok(refuse);
         }
-        let player_id = self.register(from);
+        let Some(player_id) = self.register(from) else {
+            let refuse = NetworkMessage::Refuse {
+                reason: "服务器已满（或玩家 id 已耗尽）".to_string(),
+            };
+            self.send_to(&refuse, from)?;
+            return Ok(refuse);
+        };
         let reply = NetworkMessage::Join { player_id, name, version };
         self.send_to(&reply, from)?;
         Ok(reply)
@@ -1165,7 +1204,22 @@ impl Client {
 
     /// 非阻塞接收：无数据时返回 `Ok(None)`
     pub fn recv(&self) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
-        recv_msg(&self.socket)
+        // 🔴 **只接受来自 `self.server` 的数据报**（2026-10-19 外部复核缺陷 3-B，已确认）：
+        // `Client::connect` 只 `UdpSocket::bind`、**没有 `connect(server)`** ⇒ 内核不过滤来源，
+        // 任何发往本机端口的包都会进 `recv()`；而调用方（`game/net.rs:305`）原来把 `from` 丢掉
+        // ⇒ 局域网里的伪造 `Refuse` / `Join` 可以断连或改写 `player_id`。
+        // 兄弟函数 `Server::register` 一直按 `from` 记录，这里补齐同一约束。
+        loop {
+            match recv_msg(&self.socket) {
+                Ok(Some((msg, from))) => {
+                    if from == self.server {
+                        return Ok(Some((msg, from)));
+                    }
+                    log::debug!("net: 丢弃非服务器来源的数据报 {from}（期望 {}）", self.server);
+                }
+                other => return other,
+            }
+        }
     }
 
     /// 处理一条消息：Join 确认记录自身 id；Position 更新远端玩家插值缓冲；
@@ -1267,6 +1321,16 @@ impl Client {
                 }
                 // NPC：位置/朝向进插值表，血量取最新值
                 for npc in npcs {
+                    // 🔴 **跳过与房主实体撞号的 NPC**（2026-10-19 外部复核缺陷 3-C，已确认）：
+                    // 上面刚对 `host_eid` 做过一次 `state.update(.., t)`；若服务端/伪造包在
+                    // `npcs` 里塞入 `id == NET_PLAYER_BASE + player_id`，这里会对**同一实体**
+                    // 在同一帧**第二次** `update(.., t)` ⇒ `prev_time == curr_time`
+                    // ⇒ **插值器损坏**（正是本文件 2026-10-15 修过的那类事故）。
+                    // 正常协议里 NPC id 恒 < NET_PLAYER_BASE，撞号只可能来自坏数据。
+                    if npc.id == host_eid {
+                        log::debug!("net: 快照 NPC id 与房主实体撞号（{}），已跳过", npc.id);
+                        continue;
+                    }
                     let nstate = PlayerState::new(npc.pos, npc.facing);
                     match self.entities.get_mut(&npc.id) {
                         Some(e) => {
@@ -1325,6 +1389,15 @@ impl Client {
             //      开头的 `last_rx = now()` 会被每次 Refuse 刷新 ⇒ **客户端以为连接是活的**
             //      （超时逻辑也不会把它判掉）。
             NetworkMessage::Refuse { reason } => {
+                // 🔴 **已连上的会话忽略 Refuse**（2026-10-19 外部复核缺陷 3-B 后半，已确认）：
+                // `Refuse` 的语义是"你的握手被拒绝"，只应在**还没拿到 player_id** 时处理。
+                // 原来无条件写 `refused_reason` ⇒ 局域网里一个伪造包就能让客户端
+                // **停止重连并认为"服务器拒绝了我"**（`recv` 现在虽已过滤来源，
+                // 但状态机的契约本身也要对）。
+                if self.player_id.is_some() {
+                    log::debug!("net: 已连上的会话忽略 Refuse（{reason}）");
+                    return None;
+                }
                 if self.refused_reason.is_none() {
                     log::warn!(
                         "握手被服务器拒绝（版本不匹配？）⇒ 停止重试。原因：{}",
@@ -1492,6 +1565,95 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **客户端必须丢弃「非服务器来源」的数据报**（2026-10-19 外部复核缺陷 3-B，已确认）。
+    ///
+    /// `Client::connect` 只 `UdpSocket::bind`、没有 `connect(server)` ⇒ 内核不过滤来源，
+    /// 任何能往本机端口发 UDP 的进程都能塞进伪造的 `Refuse`（断连）或 `Join`（改 player_id）。
+    ///
+    /// 判据要**双向**：外来包被丢 + 服务器包照收（否则"永远返回 None"也能绿）。
+    #[test]
+    fn client_ignores_datagrams_from_a_foreign_source() {
+        use std::net::UdpSocket;
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let client = Client::connect(server.local_addr().unwrap()).unwrap();
+        let client_addr = client.local_addr().unwrap();
+        let attacker = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let refuse = NetworkMessage::Refuse { reason: "伪造".into() };
+        let bytes = refuse.encode();
+
+        attacker.send_to(&bytes, client_addr).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(
+            client.recv().unwrap().is_none(),
+            "非服务器来源的数据报必须被丢弃（否则一个伪造 Refuse 就能让客户端断连）"
+        );
+
+        // 正对照：同一个报文从服务器地址发来，必须能收到
+        server.send_to(&refuse, client_addr).unwrap();
+        let got = client.recv().unwrap();
+        assert!(got.is_some(), "服务器来源的数据报必须能收到（正对照）");
+    }
+
+    /// 🔴 **快照里与房主实体撞号的 NPC 必须被跳过**（2026-10-19 外部复核缺陷 3-C，已确认）。
+    ///
+    /// `handle_message` 先对 `host_eid = NET_PLAYER_BASE + player_id` 做一次
+    /// `state.update(.., t)`；若同一快照的 `npcs` 里又有 `id == host_eid`，
+    /// 会对同一实体在同一帧**第二次** update ⇒ `prev_time == curr_time` ⇒ 插值器损坏。
+    #[test]
+    fn snapshot_npc_colliding_with_host_entity_is_skipped() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        let host_eid = NET_PLAYER_BASE; // player_id = 0 ⇒ host_eid = NET_PLAYER_BASE
+        let host = PlayerState::new([1.0, 0.0, 0.0], 0.0);
+        let npc = NpcSnapshot {
+            id: host_eid,
+            pos: [9.0, 0.0, 0.0],
+            facing: 0.0,
+            hp: 50.0,
+            team: 1,
+            firing: 0,
+        };
+        client.handle_message(NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.0,
+            player_id: 0,
+            player: host,
+            npcs: vec![npc],
+        });
+        let e = client.entities().get(&host_eid).expect("房主实体必须存在");
+        assert!(
+            (e.state.curr.pos[0] - 1.0).abs() < 1e-5,
+            "房主位置被撞号 NPC 覆盖了（实际 {}），插值器会被同一帧两次 update 破坏",
+            e.state.curr.pos[0]
+        );
+        assert!((e.hp - 100.0).abs() < 1e-5, "房主血量不该被 NPC 行覆盖");
+    }
+
+    /// 🔴 **玩家 id 与客户端数必须有上限**（2026-10-19 外部复核缺陷 3-D，已确认）。
+    ///
+    /// 无界累加 ⇒ `NET_PLAYER_BASE + player_id` 回绕落进 NPC id 区间 ⇒ 玩家与 NPC 串号。
+    #[test]
+    fn register_refuses_beyond_limits() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        // 正常路径：连续注册拿到递增 id
+        let a: SocketAddr = "127.0.0.1:10001".parse().unwrap();
+        let b: SocketAddr = "127.0.0.1:10002".parse().unwrap();
+        assert_eq!(server.register(a), Some(1));
+        assert_eq!(server.register(b), Some(2));
+        // 已注册的地址重复注册返回同一个 id（不递增）
+        assert_eq!(server.register(a), Some(1));
+        // 上限：客户端数封顶 64
+        for i in 0..100u32 {
+            let addr: SocketAddr = format!("127.0.0.1:{}", 20000 + i).parse().unwrap();
+            let _ = server.register(addr);
+        }
+        assert!(
+            server.client_count_for_test() <= 64,
+            "客户端数必须封顶（实际 {}）",
+            server.client_count_for_test()
+        );
+    }
+
     /// 🔴 **乱序 / 重复的 `Position` 必须被丢弃，不能把远端玩家的位置回滚。**
     ///
     /// 存在理由（2026-10-15，外部复核指出 B4，已确认）：`handle_message` 的
