@@ -845,3 +845,26 @@ B13 ALSA 非阻塞 drain。
 根因：**把门禁和提交放进同一条命令里顺序跑完就算数**。
 ⇒ 固化为：提交前**逐项确认五道门禁**（0 警告 / 全量测试 / CJK / 白名单 / 工作树），
 **确认全绿之后再单独发提交命令**。`3aaec7e` 补上了字模缺口。
+
+### 2026-10-19 深夜：第 12 批外部复核收口 + **"游戏声音吵"的真凶（测试在放音）**
+
+**第 12 批（不受信输入解析 / 状态机 / FFI）收口**：7 条里 **6 条属实已修**（每条配会红的判据，
+并做过一次性回退的批量反向验证），**3 条 FFI 误报被驳回**。明细见
+`~/Desktop/审查/第12批复核结论.md`。未采纳的 4A/4C/5A/5B 都写了不做的理由（签名扩散 /
+有文档意图的早退 / 需要新契约 / 城市网格直角下 2 次迭代够用）。
+
+**音频三连修**（用户连续反馈「声音好大」）：
+1. 感知曲线 `audio::perceptual_volume = v^2.5`（滑块 0.5 → 0.177，约 −15 dB），**只在接线处**应用；
+2. 末级软限幅 `audio::soft_limit`（KNEE 0.6 / CEIL 0.7），实测原来连发会把输出顶到 **0 dBFS**；
+3. **真凶**：`game/tests.rs` 构造 `Game::new()` ⇒ 初始化无条件 `open_default_sink`
+   ⇒ **每跑一次 `cargo test` 都在用户耳机里循环播放环境风声**。用户多次投诉的「游戏声音吵死」
+   其实是测试。修法：`open_silent_sink`（`AlsaSink::silent` / `WaveOutSink::silent`）
+   + `cfg!(test)` 分流，判据 `tests_never_open_the_real_audio_device`。
+   **可验证的副作用：测试套件 20s → 4.6s**；音频看门狗监控一轮完整 `cargo test`，
+   新增音频流 **0**。铁证：`cargo test --no-run` 的测试二进制名
+   `steel_front-56e93f7e2ab86742` 与看门狗抓到的 `PipeWire ALSA [steel_front-56e93f7e2ab86742]` 一致。
+
+**🔴 本轮又两次「门禁没全绿就提交」**：`c9b84e5`（include_str 路径写错 ⇒ test 构建编译失败）与
+`6889031`（duplicated attribute 告警）。两次都只看了 `cargo build --release`
+（**它不编译 `cfg(test)`**，铁律 F 早写过）。已各自补 `1d8f75d` / `b381edb` 修复。
+⇒ **提交前的固定动作：`cargo test --release --no-run` 也要 0 告警**，与 build 同等对待。
