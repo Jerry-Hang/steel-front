@@ -2167,8 +2167,6 @@ mod tests {
         }
     }
 
-    /// 偷袭目标点：优先选玩家朝向背后一侧；相同时确定性取 +1 侧
-    #[test]
     /// 🔴 **侧翼目标点绝不能落在阻挡格里**（2026-10-19 外部复核缺陷 4-B）。
     ///
     /// 反例场景：玩家贴着墙、NPC 在另一侧 ⇒ 旋转 90° 偏移出来的点正好落进墙体。
@@ -2200,6 +2198,8 @@ mod tests {
         assert!(open.is_passable(g));
     }
 
+    /// 偷袭目标点：优先选玩家朝向背后一侧；相同时确定性取 +1 侧
+    #[test]
     fn ambush_goal_prefers_behind_player() {
         let grid = GridMap::new(11, 11);
         let player = GridPos::new(5, 5);
