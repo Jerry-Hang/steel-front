@@ -722,14 +722,34 @@ impl World {
                 if si && sj {
                     continue;
                 }
+                // 🔴 **叠在别的刚体上也要有"支撑"语义**（2026-10-19 外部复核缺陷 5-C，已确认）：
+                // 旧实现只挪位置、从不置 `grounded`/清零 `velocity.y`；而 `step_bodies` 的
+                // `grounded` 只听 `ground_y` ⇒ **放在静态台面上的动态刚体会一直受重力累加速度**
+                // （10 秒后 velocity.y ≈ -98 m/s）⇒ 某帧位移超过台面厚度 ⇒ **直接穿透掉到底面**。
+                // 修法：谁被**沿 +Y 推开**（normal.y 方向判定见下），谁就算 grounded，并把向下速度清零。
+                // 支撑判定：被推开的位移方向 `up = ±normal`，`up.y > 0.5` 才算"踩在上面"。
+                let mut grounded_now: [bool; 2] = [false, false];
                 if si {
                     self.bodies[j].position -= normal * penetration;
+                    grounded_now[1] = -normal.y > 0.5;
                 } else if sj {
                     self.bodies[i].position += normal * penetration;
+                    grounded_now[0] = normal.y > 0.5;
                 } else {
                     let half = penetration * 0.5;
                     self.bodies[i].position += normal * half;
                     self.bodies[j].position -= normal * half;
+                    grounded_now[0] = normal.y > 0.5;
+                    grounded_now[1] = -normal.y > 0.5;
+                }
+                for (k, up) in [(i, grounded_now[0]), (j, grounded_now[1])] {
+                    if !up || self.bodies[k].static_body {
+                        continue;
+                    }
+                    self.bodies[k].grounded = true;
+                    if self.bodies[k].velocity.y < 0.0 {
+                        self.bodies[k].velocity.y = 0.0;
+                    }
                 }
                 self.emit(CollisionEvent::new(
                     CollisionKind::AabbResolved,
@@ -924,6 +944,43 @@ mod tests {
         assert_eq!(event.kind, CollisionKind::SphereResolved);
         assert!((event.penetration - 0.5).abs() < 1e-5);
         assert!(!a.intersects(&b), "解析后不应再相交");
+    }
+
+    /// 🔴 **叠在静态刚体上的动态刚体必须有支撑语义**（2026-10-19 外部复核缺陷 5-C，已确认）。
+    ///
+    /// 旧实现 `resolve_body_pairs` 只挪位置，从不置 `grounded`/清零 `velocity.y`；
+    /// 而 `step_bodies` 的 `grounded` 只听 `ground_y` ⇒ 台面上的动态体一直累加向下速度，
+    /// 直到单帧位移超过台面厚度 ⇒ **直接穿透掉到底面**。
+    /// 反向验证：删掉 `grounded_now` 那段 ⇒ 本判据红（速度会一路变负）。
+    #[test]
+    fn body_resting_on_static_platform_stays_supported() {
+        let mut world = World::new();
+        world.gravity = 9.8;
+        // 静态台面：中心 y=0.5、半高 0.5 ⇒ 顶面 y=1.0
+        let mut platform = Body::new(Vec3::new(0.0, 0.5, 0.0), Vec3::new(2.0, 0.5, 2.0));
+        platform.static_body = true;
+        world.bodies.push(platform);
+        // 动态盒：底面刚好落在台面上方一点，带向下初速度
+        let mut box_body = Body::new(Vec3::new(0.0, 1.3, 0.0), Vec3::new(0.2, 0.2, 0.2));
+        box_body.velocity = Vec3::new(0.0, -3.0, 0.0);
+        world.bodies.push(box_body);
+
+        for _ in 0..180 {
+            world.step(1.0 / 60.0);
+        }
+        let b = &world.bodies[1];
+        let platform_top = 1.0;
+        let bottom = b.position.y - b.half_extents.y;
+        assert!(
+            bottom > platform_top - 0.05,
+            "动态盒穿透进台面了：底面 {bottom} < 台面顶 {platform_top}"
+        );
+        assert!(b.grounded, "叠在静态台面上应判为 grounded");
+        assert!(
+            b.velocity.y > -0.5,
+            "支撑后向下速度应被清零（实际 {} —— 说明`grounded` 从未被置位，重力在无界累加）",
+            b.velocity.y
+        );
     }
 
     #[test]
