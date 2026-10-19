@@ -428,8 +428,18 @@ impl TomlParser {
     }
 
     fn parse_number(&self, ln: usize, s: &str) -> Result<f64, String> {
-        s.parse::<f64>()
-            .map_err(|_| err(ln, format!("无效数字 \"{}\"", s)))
+        let v = s
+            .parse::<f64>()
+            .map_err(|_| err(ln, format!("无效数字 \"{}\"", s)))?;
+        // 🔴 不受信的 TOML（玩家可改关卡文件）必须在这里挡住非有限值：
+        // `f64::parse` **原生接受** "inf" / "-inf" / "NaN"，而一旦坐标/尺寸变成 NaN/inf，
+        // 物理碰撞与渲染实例矩阵会**静默失效**（不崩、不报错、几何消失或乱飞）。
+        // 超出 f32 范围的数（如 1e50）转 `as f32` 也会变 inf ⇒ 同样拒绝。
+        // 判据 = `map_rejects_non_finite_numbers`。
+        if !v.is_finite() || !(v as f32).is_finite() {
+            return Err(err(ln, format!("数字必须是有限值且不超出 f32 范围 \"{}\"", s)));
+        }
+        Ok(v)
     }
 
     /// 从 `s` 起始处扫描配对定界符包裹的内容，返回 (内容切片, 消耗字节数)
@@ -638,7 +648,10 @@ fn rule_str(entries: &[(String, Value)], key: &str) -> Option<String> {
 /// [rule] 节数值（缺失 → None）
 fn rule_usize(entries: &[(String, Value)], key: &str) -> Option<usize> {
     entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-        Value::Num(n) => Some(*n as usize),
+        // 🔴 负数 / 超出 u32 的值一律视为「没写」：原来 `*n as usize` 把负数饱和成 0、
+        // 把 4294967296 之类在 `as u32` 时**静默截断回绕成 0** —— 规则变成另一条，
+        // 而日志里一个字都不说（2026-10-19 外部复核指出，已确认换算链）。
+        Value::Num(n) if *n >= 0.0 && *n <= u32::MAX as f64 => Some(*n as usize),
         _ => None,
     })
 }
@@ -700,6 +713,28 @@ pub fn load_map(path: &str) -> Result<MapData, String> {
             "map: {} 的 [rule] kind = \"{}\" 缺少 {}（或值不是正数）",
             path, kind, key
         ));
+    }
+    // 🔴 据点的半径/占领时长必须为正（2026-10-19 外部复核指出，已确认）：
+    // `radius = 0` ⇒ 判定 `dx²+dz² <= 0` 永远不成立 ⇒ **永远占不了**；
+    // `capture_time = 0` ⇒ `objective.rs` 里 `1.0 / capture_time.max(EPSILON)` 变成 8e6/秒
+    // ⇒ **碰一下 1 帧瞬间占领**。两者都是静默错规则，必须在加载时报出来。
+    // 只校验 `type/kind` 含 "capture" 的条目，其它类型（如 future kinds）不受影响。
+    for o in &data.objectives {
+        if !o.kind.eq_ignore_ascii_case("capture") {
+            continue;
+        }
+        if !(o.radius > 0.0) {
+            return Err(format!(
+                "map: {} 的据点 \"{}\" radius 必须为正（当前 {}）",
+                path, o.id, o.radius
+            ));
+        }
+        if !(o.capture_time > 0.0) {
+            return Err(format!(
+                "map: {} 的据点 \"{}\" capture_time 必须为正（当前 {}）",
+                path, o.id, o.capture_time
+            ));
+        }
     }
     Ok(data)
 }
@@ -884,6 +919,47 @@ obstacles = [ { type = "wall", position = { x = 5, y = 1, z = 5 }, size = { x = 
 "#;
 
     /// 写临时 TOML 文件（系统临时目录，进程号隔离），返回路径
+    /// 🔴 不受信的 TOML 必须挡住非有限值（2026-10-19 外部复核指出）。
+    /// `f64::parse` 原生接受 "inf"/"NaN" ⇒ 一旦坐标变 NaN/inf，物理与渲染**静默失效**。
+    #[test]
+    fn map_rejects_non_finite_numbers() {
+        let base = "[map]\nname = \"x\"\nspawn_points = [ { x = 0, y = 0, z = 0, team = \"blue\" } ]\n";
+        for lit in ["inf", "-inf", "NaN", "1e50"] {
+            let body = format!("{base}obstacles = [ {{ x = {lit}, y = 0, z = 0, sx = 1, sy = 1, sz = 1 }} ]\n");
+            let p0 = write_tmp(&body, &format!("nonfinite_{}", lit.replace(['-','.'], "_")));
+            let err = load_map(p0.to_str().unwrap())
+                .err()
+                .unwrap_or_else(|| panic!("x = {lit} 必须报错（不能静默变成 NaN/inf）"));
+            remove_tmp(&p0);
+            assert!(err.contains("有限值") || err.contains("无效数字"), "错误信息应点明数字非法，实际: {err}");
+        }
+    }
+
+    /// 🔴 据点 radius/capture_time 必须为正（2026-10-19 外部复核指出）：
+    /// `radius = 0` ⇒ 永远进不了圈；`capture_time = 0` ⇒ 1 帧瞬间占领。两者都是静默错规则。
+    #[test]
+    fn capture_objective_requires_positive_radius_and_capture_time() {
+        let head = "[map]\nname = \"x\"\nspawn_points = [ { x = 0, y = 0, z = 0, team = \"blue\" } ]\n";
+        for (frag, key) in [
+            ("radius = 0, capture_time = 8", "radius"),
+            ("radius = 5, capture_time = 0", "capture_time"),
+            ("radius = -1, capture_time = 8", "radius"),
+        ] {
+            let body = format!("{head}objectives = [ {{ id = \"A\", type = \"capture\", position = {{ x = 0, y = 0, z = 0 }}, {frag} }} ]\n");
+            let p0 = write_tmp(&body, &format!("obj_{}", key));
+            let err = load_map(p0.to_str().unwrap())
+                .err()
+                .unwrap_or_else(|| panic!("{frag} 必须报错（静默错规则）"));
+            remove_tmp(&p0);
+            assert!(err.contains(key), "错误信息要点出 {key}，实际: {err}");
+        }
+        // 正对照：正数必须能加载
+        let ok = format!("{head}objectives = [ {{ id = \"A\", type = \"capture\", position = {{ x = 0, y = 0, z = 0 }}, radius = 5, capture_time = 8 }} ]\n");
+        let p0 = write_tmp(&ok, "obj_ok");
+        load_map(p0.to_str().unwrap()).expect("正数参数必须能加载");
+        remove_tmp(&p0);
+    }
+
     fn write_tmp(content: &str, tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "steel_front_map_{}_{}.toml",
@@ -1154,7 +1230,7 @@ obstacles = [ { type = "wall", position = { x = 1, y = 0, z = 1 }, size = { x = 
     /// （"缺省 = 占 1 个点"），没有 `[rule]` 节的地图也靠它 —— 所以下面还钉了一条正对照。
     #[test]
     fn rule_parameters_are_required_per_kind() {
-        let base = "[map]\nname = \"x\"\nspawn_points = [ { x = 0, y = 0, z = 0, team = \"blue\" } ]\nobjectives = [ { id = \"A\", type = \"capture\", position = { x = 0, y = 0, z = 0 }, radius = 5 } ]\n";
+        let base = "[map]\nname = \"x\"\nspawn_points = [ { x = 0, y = 0, z = 0, team = \"blue\" } ]\nobjectives = [ { id = \"A\", type = \"capture\", position = { x = 0, y = 0, z = 0 }, radius = 5, capture_time = 8 } ]\n";
         let cases = [
             ("survive", "[rule]\nkind = \"survive\"\n", "waves"),
             ("kill", "[rule]\nkind = \"kill\"\n", "target"),

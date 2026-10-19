@@ -75,6 +75,9 @@ pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
                     .and_then(|v| v.get("pbrMetallicRoughness"))
                     .and_then(|v| v.get("baseColorFactor"))
                     .and_then(|v| v.as_arr())
+                    // 🔴 必须查长度（2026-10-19 外部复核指出）：`"baseColorFactor": [1.0]`
+                    // 会让 c[1]/c[2] 直接越界 **panic** —— 一个合法 JSON token 就能打死进程。
+                    .filter(|c| c.len() >= 3)
                     .map(|c| [c[0].as_f64().unwrap_or(0.7) as f32, c[1].as_f64().unwrap_or(0.7) as f32, c[2].as_f64().unwrap_or(0.7) as f32])
                     .unwrap_or([0.7, 0.7, 0.7]),
                 None => [0.7, 0.7, 0.7],
@@ -114,14 +117,36 @@ fn append_prim(
             .and_then(|c| c.as_f64())
             .ok_or("accessor 缺 componentType")? as u32;
         let norm = acc.get("normalized").and_then(|b| b.as_bool()).unwrap_or(false);
-        let bv = acc.get("bufferView").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
+        // 🔴 不受信的 JSON 数字转 `usize` 必须**先验域**（2026-10-19 外部复核指出）：
+        // `f64 as usize` 是**饱和**转换 —— 负数 → 0、`1e300` → `usize::MAX`，
+        // 而随后的 `off + …` 在 debug 下溢出 panic、在 release 下**回绕**
+        // ⇒ 绕过 `b + step > bin.len()` 的越界检查，静默读出错误几何。
+        fn raw_offset(v: Option<f64>, field: &str) -> Result<usize, String> {
+            match v {
+                None => Ok(0),
+                Some(x) => {
+                    if !x.is_finite() || x < 0.0 || x > usize::MAX as f64 / 2.0 {
+                        return Err(format!("GLB {field} 非法（{x}）"));
+                    }
+                    Ok(x as usize)
+                }
+            }
+        }
+        let bv = raw_offset(acc.get("bufferView").and_then(|b| b.as_f64()), "bufferView")?;
         let bview = json.get("bufferViews").and_then(|b| b.as_arr()).and_then(|b| b.get(bv));
-        let off = bview
-            .and_then(|b| b.get("byteOffset")).and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
+        let off = raw_offset(
+            bview.and_then(|b| b.get("byteOffset")).and_then(|b| b.as_f64()),
+            "bufferViews[].byteOffset",
+        )?;
         // accessor 自己还能再偏一段：多个 accessor 挤在同一个 bufferView 里时，这是唯一的区分手段。
         // 以前不读它——ak12.glb 正是因此把 mesh0 的 NORMAL 读成了 POSITION、把 mesh1 读成了
         // mesh0 前 988 个顶点的副本。几何全错，却一句错误信息都没有。
-        let off = off + acc.get("byteOffset").and_then(|b| b.as_f64()).unwrap_or(0.0) as usize;
+        let off = off
+            .checked_add(raw_offset(
+                acc.get("byteOffset").and_then(|b| b.as_f64()),
+                "accessors[].byteOffset",
+            )?)
+            .ok_or("GLB accessor byteOffset 相加溢出")?;
         // 🔴 **`bufferViews[].byteStride`（2026-09-14 补，未结案 #21）** —— 与上面那段注释
         // 是**同一个 bug 的上一层**：`byteOffset` 修好之后，**交错缓冲**仍然会读错。
         //
@@ -134,11 +159,13 @@ fn append_prim(
         //
         // 修法是**正确支持**而不是拒绝：`byteStride` 只在 bufferView 上出现，
         // 语义是"相邻两个**元素**（顶点）之间的字节数"；元素内部的分量仍按 `step` 连续。
-        let stride = bview
-            .and_then(|b| b.get("byteStride"))
-            .and_then(|b| b.as_f64())
-            .map(|v| v as usize)
-            .filter(|&v| v > 0);
+        let stride = match bview.and_then(|b| b.get("byteStride")).and_then(|b| b.as_f64()) {
+            None => None,
+            Some(v) => {
+                let st = raw_offset(Some(v), "bufferViews[].byteStride")?;
+                if st > 0 { Some(st) } else { None }
+            }
+        };
         // (bytes per component, divisor applied only when the spec says the value is normalized)
         let (step, div): (usize, f32) = match ctype {
             5120 => (1, if norm { 127.0 } else { 1.0 }),   // BYTE
@@ -190,8 +217,15 @@ fn append_prim(
         // 离奇的分配请求（`comps` 是常量 2/3/4 这一档）。
         let mut out = Vec::with_capacity(count * comps);
         for i in 0..count * comps {
-            let b = off + (i / comps) * elem_stride + (i % comps) * step;
-            if b + step > bin.len() {
+            // 🔴 全程 checked 算术（2026-10-19 外部复核指出）：`off`/`elem_stride` 来自
+            // 不受信 JSON，普通 `+`/`*` 在 debug 下会溢出 panic、在 release 下回绕后
+            // **绕过下面的界检查**静默读错数据。
+            let b = (i / comps)
+                .checked_mul(elem_stride)
+                .and_then(|v| v.checked_add(off))
+                .and_then(|v| v.checked_add((i % comps) * step))
+                .ok_or("GLB accessor 偏移溢出")?;
+            if b.checked_add(step).map_or(true, |end| end > bin.len()) {
                 return Err("GLB accessor 越界".into());
             }
             let v = match ctype {
@@ -471,6 +505,58 @@ mod tests {
             {{\"buffer\":0,\"byteOffset\":{colour_off},\"byteLength\":{colour_len},\"target\":34962}},\
             {{\"buffer\":0,\"byteOffset\":{idx_off},\"byteLength\":12,\"target\":34963}}]}}"
         )
+    }
+
+    /// 🔴 畸形 GLB 的 `baseColorFactor` 短数组**不许 panic**（2026-10-19 外部复核指出）：
+    /// `"baseColorFactor": [1.0]` 会让旧实现的 `c[1]`/`c[2]` 越界 —— 一个合法 JSON token
+    /// 就能把进程打死。修好后应回退默认色、正常解析。
+    #[test]
+    fn glb_short_base_color_factor_does_not_panic() {
+        let mut col = Vec::new();
+        for c in [[1u8, 1, 1, 1], [2, 2, 2, 2], [3, 3, 3, 3]] {
+            col.extend_from_slice(&c);
+        }
+        let mut bin = glb_bin(&col);
+        while bin.len() % 4 != 0 { bin.push(0); }
+        let colour_off = 96usize;
+        let colour_len = 12usize;
+        let idx_off = colour_off + colour_len;
+        let base = glb_json(
+            "{\"bufferView\":3,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"}",
+            colour_off, colour_len, idx_off);
+        // 给 primitive 挂 material 0，并把材质写成**长度 1** 的 baseColorFactor
+        let json = base
+            .replace("\"primitives\":[{\"attributes\"", "\"primitives\":[{\"material\":0,\"attributes\"")
+            .replacen("]}}", "],\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.5]}}]}}", 1);
+        let bytes = build_glb(&json, &bin);
+        let mesh = parse_glb(&bytes).expect("短 baseColorFactor 应回退默认色，而不是 panic");
+        assert_eq!(mesh.verts.len(), 3, "几何仍应正常读出");
+    }
+
+    /// 🔴 畸形 GLB 的 `byteOffset`/`byteStride` 不许静默回绕（2026-10-19 外部复核指出）：
+    /// `f64 as usize` 是**饱和**转换，`1e20` → 天文数字 ⇒ 旧实现 `off + …` 在 debug 下
+    /// 溢出 panic、在 release 下回绕后**绕过越界检查**读出垃圾。修好后应报错。
+    #[test]
+    fn glb_huge_or_negative_byte_offset_is_an_error() {
+        for lit in ["99999999999999999999", "-8"] {
+            let json = glb_json(
+                "{\"bufferView\":3,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"}",
+                96, 12, 108)
+                .replace(
+                    "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}",
+                    &format!("{{\"bufferView\":0,\"byteOffset\":{lit},\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}}"),
+                );
+            let mut bin = glb_bin(&[]);
+            while bin.len() % 4 != 0 { bin.push(0); }
+            let bytes = build_glb(&json, &bin);
+            let err = parse_glb(&bytes)
+                .err()
+                .unwrap_or_else(|| panic!("byteOffset = {lit} 必须报错，不能静默回绕读垃圾"));
+            assert!(
+                err.contains("非法") || err.contains("越界") || err.contains("溢出"),
+                "错误信息要点明偏移非法，实际: {err}"
+            );
+        }
     }
 
     /// Blender 5.x 导出的 COLOR_0 是 VEC4 + UNSIGNED_SHORT + normalized：必须除以 65535，

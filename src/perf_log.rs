@@ -158,6 +158,17 @@ impl PerfLog {
     pub fn frame(&mut self, dt_us: u64, near: u32, snap: &crate::engine::renderer::PerfSnapshot) -> f64 {
         self.frames += 1;
         self.window_frames += 1;
+        // 🔴 **首帧必须重置采样窗口**（2026-10-19 外部复核指出，已确认）：
+        // `start`/`last_sample` 在 `create_at` 时初始化，而它通常在**加载模型/编译着色器/
+        // 构建关卡之前**调用；如果初始化耗时 2.5s，第 1 帧看到的 elapsed 就是 2.5s
+        // ⇒ 立刻打出一个 `fps = 0.4` 的假窗口 ⇒ **`fps_min` 被永远钉死在 0.4**，
+        // 汇总行里的「最低 fps」从第一个采样起就是假的。
+        // 判据 = `first_frame_resets_the_sampling_window`。
+        if self.frames == 1 {
+            let now = std::time::Instant::now();
+            self.start = now;
+            self.last_sample = now;
+        }
         let elapsed = self.last_sample.elapsed().as_secs_f32();
         if elapsed < 1.0 {
             return 0.0;
@@ -256,6 +267,26 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::{window_fps, PerfLog, PERF_LOG_COLUMNS};
+
+    /// 🔴 **首帧必须重置采样窗口**（2026-10-19 外部复核指出，已确认）：
+    /// `create_at` 到首帧之间要加载模型/编译着色器/建关卡；旧实现把这段耗时算进第一个
+    /// 采样窗口 ⇒ 立刻打出 `fps ≈ 0.4` 的假窗口 ⇒ **`fps_min` 被永远钉在 0.4**。
+    /// 反向验证：删掉 `if self.frames == 1 { … }` 那段 ⇒ 本判据红（首帧会返回非 0）。
+    #[test]
+    fn first_frame_resets_the_sampling_window() {
+        let dir = std::env::temp_dir().join(format!("perf_first_frame_{}", std::process::id()));
+        let mut me = PerfLog::create_at(&dir, "test").expect("应能创建日志");
+        // 模拟"加载耗时 > 1s"：创建后睡 1.1s 再喂首帧
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let snap = crate::engine::renderer::PerfSnapshot {
+            frame_us: 8000, cull_us: 0, terrain_us: 0, wait_fence_us: 0,
+            acquire_us: 0, record_us: 0, submit_us: 0, present_us: 0,
+        };
+        let fps = me.frame(8000, 0, &snap);
+        assert_eq!(fps, 0.0, "首帧不该立刻产出采样窗口（否则 fps_min 被钉在 ~0.4）");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     /// 判据：帧率**必须**由"窗口内帧数 / 窗口时长"给出。
     ///
