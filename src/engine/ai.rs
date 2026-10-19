@@ -573,6 +573,7 @@ pub fn reachable_mask(map: &GridMap, from: GridPos) -> Vec<bool> {
     seen
 }
 
+
 /// 由 `parent` 链反推出路径（含起点与终点，顺序 start→goal）
 ///
 /// `max_steps` = 地图格数：**防御性上界**。scratch 复用后 `parent` 是复用的数组，

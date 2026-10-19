@@ -335,6 +335,30 @@ pub struct PlayerBody {
     pub grounded: bool,
 }
 
+/// 🔴 **垂直钳制**：先按天花板压（撞头），再让地面兜底。返回 (钳制后脚底, 是否撞头)。
+///
+/// 顺序有意义：`ceiling - eye_height` 可能低于地面（横梁贴地这种坏几何），
+/// 此时**地面优先**（宁可让头穿一点，也不能把玩家压到地面以下）。
+/// 抽成纯函数是为了让"跳跃穿梁"能脱离 `Game` 直接测（判据 `jump_stops_at_ceiling`）。
+pub fn clamp_vertical(feet_y: f32, eye_height: f32, ground: f32, ceiling: f32) -> (f32, bool) {
+    let mut y = feet_y;
+    let mut hit_ceiling = false;
+    if y + eye_height > ceiling {
+        y = ceiling - eye_height;
+        hit_ceiling = true;
+    }
+    if y < ground {
+        y = ground;
+    }
+    (y, hit_ceiling)
+}
+
+/// 世界碰撞的解析迭代次数上限。
+///
+/// **2 → 4**（2026-10-19）：每次迭代按障碍顺序逐个推，推出去可能立刻又撞下一个盒子；
+/// 4 次覆盖"被两个互相垂直的面连续推"的凹角。正常帧无重叠 ⇒ 第一遍就 `break`，无额外开销。
+const COLLIDE_ITERATIONS: usize = 4;
+
 impl PlayerBody {
     pub fn new(pos: Vec3, radius: f32, eye_height: f32) -> Self {
         Self {
@@ -425,8 +449,17 @@ impl PlayerBody {
     /// 对 `world.bodies` 中每个 AABB 做水平推挤（内部 1-2 次迭代，
     /// 避免一次推挤把玩家挤进相邻刚体）。发生任何推挤时返回 true。
     pub fn collide_world(&mut self, world: &World) -> bool {
+        self.collide_world_iter(world, COLLIDE_ITERATIONS)
+    }
+
+    /// [`collide_world`] 的可传迭代次数版本（**只为判据/对照实验存在**）。
+    fn collide_world_iter(&mut self, world: &World, iterations: usize) -> bool {
+        // 🔴 **迭代次数 2 → 4**（2026-10-19 外部复核缺陷 5-B，已确认）：
+        // 每次迭代按"障碍顺序"逐个推，**推出去的方向可能立刻撞上下一个盒子**（凹角/相邻墙的
+        // 接缝处）⇒ 2 次时仍有残留穿透。4 次覆盖"被两个互相垂直的面连续推"这类锐角；
+        // 每次迭代都有 `if !any { break }`，正常帧（无重叠）依旧只走一遍。
         let mut pushed = false;
-        for _ in 0..2 {
+        for _ in 0..iterations {
             let mut any = false;
             for body in &world.bodies {
                 if self.push_out_of_aabb(&body.aabb()).is_some() {
@@ -475,6 +508,32 @@ impl PlayerBody {
                 && self.pos.z < a.max.z + self.radius
             {
                 best = a.max.y;
+            }
+        }
+        best
+    }
+
+    /// 🔴 **头顶高度**：玩家正上方最低的盒子底面（没有任何东西时为 +∞）。
+    ///
+    /// 存在理由（2026-10-19 外部复核缺陷 5-A，已确认）：`support_height` 早就有了"顶面支撑"，
+    /// 但**没有任何对称的"底面约束"** ⇒ 在横梁/雨棚/集装箱下面起跳时
+    /// `pos.y += jump_vel * dt` 会直接穿过底面（头顶穿模），落到上面去。
+    ///
+    /// 判据与 `push_out_of_aabb` 的水平判据**同一套**（圆心 clamp 到 AABB 后比半径），
+    /// 只取「底面在脚底之上」的盒子（`a.min.y > pos.y`）—— 脚下的盒子不是天花板。
+    pub fn ceiling_height(&self, world: &World) -> f32 {
+        let mut best = f32::INFINITY;
+        for body in &world.bodies {
+            let a = body.aabb();
+            if a.min.y <= self.pos.y || a.min.y >= best {
+                continue;
+            }
+            let closest_x = self.pos.x.clamp(a.min.x, a.max.x);
+            let closest_z = self.pos.z.clamp(a.min.z, a.max.z);
+            let dx = self.pos.x - closest_x;
+            let dz = self.pos.z - closest_z;
+            if dx * dx + dz * dz < self.radius * self.radius {
+                best = a.min.y;
             }
         }
         best
@@ -981,6 +1040,141 @@ mod tests {
             "支撑后向下速度应被清零（实际 {} —— 说明`grounded` 从未被置位，重力在无界累加）",
             b.velocity.y
         );
+    }
+
+    /// 🔴 **跳跃撞到横梁必须停住，不能穿过底面**（2026-10-19 外部复核缺陷 5-A，已确认）。
+    /// 用纯函数 `clamp_vertical` 模拟一整次跳跃（gt=0.016，60 帧），断言脚底始终不越过
+    /// `ceiling - eye_height`，且最终落回地面。
+    /// 反向验证：把 `clamp_vertical` 里的天花板分支删掉 ⇒ 本判据红（脚底会到 1.0 以上）。
+    #[test]
+    fn jump_stops_at_ceiling() {
+        use super::clamp_vertical;
+        let eye = 1.7f32;
+        let ground = 0.0f32;
+        // 横梁底面 1.9m ⇒ 只剩 0.2m 净空；起跳速度 3.3、重力 19.6
+        let ceiling = 1.9f32;
+        let dt = 1.0 / 60.0;
+        let (mut y, mut v) = (0.0f32, 3.3f32);
+        let mut max_y = 0.0f32;
+        for _ in 0..120 {
+            v -= 19.6 * dt;
+            y += v * dt;
+            let (ny, hit) = clamp_vertical(y, eye, ground, ceiling);
+            y = ny;
+            if hit && v > 0.0 {
+                v = 0.0;
+            }
+            if y <= ground {
+                y = ground;
+                v = 0.0;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        assert!(
+            max_y <= ceiling - eye + 1e-4,
+            "脚底最高到 {max_y}（头顶 {}）超过了横梁底面 {ceiling}",
+            max_y + eye
+        );
+        assert!(max_y > 0.0, "前置失败：根本没起跳（后面的判据什么都没证明）");
+        assert!((y - ground).abs() < 1e-4, "最终应落回地面，实际 {y}");
+    }
+
+    /// 🔴 **4 次迭代能解开「2 次解不开」的凹角**（2026-10-19 外部复核缺陷 5-B，已确认但影响很小）。
+    ///
+    /// 场景来自 `collide_iterations_2_vs_4_sweep` 的随机扫描（20000 个密集场景里找到 1 个），
+    /// 这里取首个差异场景固化成确定性判据：
+    /// 2 次迭代后仍与盒子重叠，4 次迭代后不重叠。
+    /// 反向验证：把 `COLLIDE_ITERATIONS` 改回 2 ⇒ 本判据红（`four` 一侧走生产常量）。
+    #[test]
+    fn collide_four_iterations_resolve_a_corner_two_do_not() {
+        use super::*;
+        let mut world = World::new();
+        // 5 个互相压着的静态盒（与扫描脚本输出的几何逐位一致）
+        let boxes = [
+            (-2.352221f32, -1.0790695f32, -0.8372773f32, 0.6202496f32),
+            (-2.585624, -1.0888546, -2.0467155, -0.40673476),
+            (-0.6470039, 0.58209276, -2.169909, 0.22138536),
+            (-1.2299529, 1.0660819, -1.1804259, 0.8176548),
+            (-1.484059, 0.76547277, -2.281639, -0.34580082),
+        ];
+        for (minx, maxx, minz, maxz) in boxes {
+            let mut b = Body::new(
+                Vec3::new((minx + maxx) * 0.5, 1.0, (minz + maxz) * 0.5),
+                Vec3::new((maxx - minx) * 0.5, 1.5, (maxz - minz) * 0.5),
+            );
+            b.static_body = true;
+            world.bodies.push(b);
+        }
+        let start = Vec3::new(-0.2829555, 0.0, -0.39606044);
+        let mut two = PlayerBody::new(start, 0.3, 1.7);
+        let mut four = PlayerBody::new(start, 0.3, 1.7);
+        two.collide_world_iter(&world, 2);
+        four.collide_world(&world);
+        assert!(
+            two.collides(&world),
+            "前置失败：2 次迭代本应残留穿透（本判据失去区分力）"
+        );
+        assert!(
+            !four.collides(&world),
+            "4 次迭代后仍与盒子重叠（位置 {},{})",
+            four.pos.x,
+            four.pos.z
+        );
+    }
+
+    /// 📊 诊断：随机密集场景下 **2 次 vs 4 次**迭代的收敛差异（跑 `--ignored` 看统计）。
+    #[test]
+    #[ignore]
+    fn collide_iterations_2_vs_4_sweep() {
+        use super::*;
+        // 确定性 LCG
+        let mut seed: u64 = 0x1234_5678_9abc_def1;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
+        };
+        let mut diff = 0u32;
+        let mut found = false;
+        let mut unsolved2 = 0u32;
+        let mut unsolved4 = 0u32;
+        for _case in 0..5000 {
+            let mut world = World::new();
+            // 3~6 个互相靠近的盒子（生成凹角/接缝）
+            let n = 3 + (rnd().abs() * 4.0) as usize;
+            for _ in 0..n {
+                let cx = rnd() * 2.0;
+                let cz = rnd() * 2.0;
+                let hx = 0.3 + rnd().abs() * 0.9;
+                let hz = 0.3 + rnd().abs() * 0.9;
+                let mut b = Body::new(Vec3::new(cx, 1.0, cz), Vec3::new(hx, 1.5, hz));
+                b.static_body = true;
+                world.bodies.push(b);
+            }
+            let start = Vec3::new(rnd() * 0.6, 0.0, rnd() * 0.6);
+            let mut a = PlayerBody::new(start, 0.3, 1.7);
+            let mut b = PlayerBody::new(start, 0.3, 1.7);
+            a.collide_world_iter(&world, 2);
+            b.collide_world_iter(&world, 4);
+            let solved_a = !a.collides(&world);
+            let solved_b = !b.collides(&world);
+            if !solved_a { unsolved2 += 1; }
+            if !solved_b { unsolved4 += 1; }
+            let d = (a.pos.x - b.pos.x).abs() + (a.pos.z - b.pos.z).abs();
+            if d > 1e-4 || solved_a != solved_b {
+                if !solved_a && solved_b && !found {
+                    found = true;
+                    println!("  WIN case={_case} start=({}, {})", start.x, start.z);
+                    for bd in &world.bodies {
+                        let a = bd.aabb();
+                        println!("    BOX {} {} {} {} {} {}", a.min.x, a.max.x, a.min.z, a.max.z, a.min.y, a.max.y);
+                    }
+                }
+                if diff < 200 { diff += 1; }
+            }
+        }
+        println!("  5000 场景: 位置/结果不同 {diff} 次；2次未解 {unsolved2}；4次未解 {unsolved4}");
     }
 
     #[test]

@@ -274,6 +274,20 @@ impl Game {
         if self.jump_vel != 0.0 {
             self.jump_vel -= GRAVITY * dt;
             self.player_body.pos.y += self.jump_vel * dt;
+            // 🔴 **撞头约束**（2026-10-19 外部复核缺陷 5-A，已确认）：原来这里只跟 `ground` 比，
+            // 在横梁/雨棚/集装箱下面起跳会**直接穿过底面**（头顶穿模、人落到上面）。
+            // 天花板 = 正上方最低的盒子底面；撞上就把脚底压回去、上升速度清零（不反弹）。
+            let ceiling = self.player_body.ceiling_height(&self.world);
+            let (y, hit_ceiling) = crate::engine::physics::clamp_vertical(
+                self.player_body.pos.y,
+                self.player_body.eye_height,
+                ground,
+                ceiling,
+            );
+            self.player_body.pos.y = y;
+            if hit_ceiling && self.jump_vel > 0.0 {
+                self.jump_vel = 0.0;
+            }
             if self.player_body.pos.y <= ground {
                 self.player_body.pos.y = ground;
                 self.jump_vel = 0.0;
