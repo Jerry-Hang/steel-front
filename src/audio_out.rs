@@ -840,6 +840,21 @@ pub struct WaveOutSink {
 
 #[cfg(target_os = "windows")]
 impl WaveOutSink {
+    /// 🔇 测试专用：永远静默、不打开任何设备。
+    pub fn silent(sample_rate: u32, channels: u16) -> Self {
+        WaveOutSink {
+            sample_rate,
+            channels,
+            #[cfg(target_os = "windows")]
+            handle: 0,
+            #[cfg(target_os = "windows")]
+            ctx: None,
+            #[cfg(target_os = "windows")]
+            buffers: Vec::new(),
+            silenced: true,
+        }
+    }
+
     pub fn new(sample_rate: u32, channels: u16) -> Self {
         #[cfg(target_os = "windows")]
         {
@@ -1017,6 +1032,20 @@ pub struct AlsaSink {
 
 #[cfg(target_os = "linux")]
 impl AlsaSink {
+    /// 🔇 **测试专用**：永远静默、**不打开任何设备**（2026-10-19 事故修复）。
+    ///
+    /// 事故：`Game::new()` 在测试里被调用，而它无条件 `open_default_sink`
+    /// ⇒ 每跑一次 `cargo test` 都会在用户耳机里循环播放环境风声。
+    pub fn silent(sample_rate: u32, channels: u16) -> Self {
+        AlsaSink {
+            sample_rate,
+            channels,
+            pcm: None,
+            scratch: Vec::new(),
+            silenced: true,
+        }
+    }
+
     pub fn new(sample_rate: u32, channels: u16) -> Self {
         let opened = alsa::open_pcm(sample_rate, channels);
         // 错误详情必须在映射成 (句柄, 静默) 之前取出来：`sink_from_open` 只留两态，而
@@ -1228,6 +1257,26 @@ fn first_starved_drop() -> bool {
     !WARNED.swap(true, Ordering::Relaxed)
 }
 
+/// 🔇 **测试专用**的静默 sink：类型与 `open_default_sink` 完全一致，但**不打开设备**。
+///
+/// 存在的理由（2026-10-19 实测事故）：`Game::new()` 在测试里被构造，
+/// 而它原来无条件打开真实声卡 ⇒ **`cargo test` 会在用户耳机里循环播放环境风声**。
+/// 判据 = `tests_never_open_the_real_audio_device`（源码扫描）。
+pub fn open_silent_sink(sample_rate: u32, channels: u16) -> DefaultSink {
+    #[cfg(target_os = "windows")]
+    {
+        WaveOutSink::silent(sample_rate, channels)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        AlsaSink::silent(sample_rate, channels)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        crate::audio::SilentSink::new(sample_rate, channels)
+    }
+}
+
 pub fn open_default_sink(sample_rate: u32, channels: u16) -> DefaultSink {
     #[cfg(target_os = "windows")]
     {
@@ -1255,6 +1304,33 @@ pub fn open_default_sink(sample_rate: u32, channels: u16) -> DefaultSink {
 #[cfg(test)]
 mod tests {
     use super::{first_starved_drop, submit_plan, wave_buffer_bytes, FRAMES_PER_BUFFER};
+
+    /// 🔴 **测试绝不许打开真实声卡**（2026-10-19 实测事故）。
+    ///
+    /// `src/engine/game/tests.rs` 会构造 `Game::new()`，而它初始化音频时原来无条件
+    /// `open_default_sink(48_000, 2)` ⇒ **每跑一次 `cargo test` 都会在用户耳机里
+    /// 循环播放环境风声**（用户多次投诉"游戏声音太大"，一直以为是游戏本体）。
+    ///
+    /// 修法：初始化处按 `cfg!(test)` 分流到 `open_silent_sink`（不碰设备）。
+    /// 反向验证：删掉 `if cfg!(test)` 分支 ⇒ 本判据红。
+    #[test]
+    fn tests_never_open_the_real_audio_device() {
+        let src = include_str!("../engine/game/session.rs");
+        assert!(
+            src.contains("if cfg!(test)"),
+            "游戏初始化音频时必须按 cfg!(test) 分流，否则测试会打开真实声卡"
+        );
+        assert!(
+            src.contains("open_silent_sink(48_000, 2)"),
+            "测试分支必须用 open_silent_sink（静默），不能复用 open_default_sink"
+        );
+        // 正对照：生产路径仍必须真的打开默认 sink（否则"测试通过"是靠把声音整个关掉换来的）
+        assert!(
+            src.contains("open_default_sink(48_000, 2)"),
+            "生产路径必须仍然 open_default_sink —— 否则测试是绿的但游戏没声音"
+        );
+    }
+
 
     /// 🔴 **waveOut 缓冲必须装得下 `submit` 可能写入的全部数据。**
     ///

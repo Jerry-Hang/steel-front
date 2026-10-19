@@ -190,9 +190,20 @@ impl Game {
             map_generation: 0,
             map: LevelMap::default(),
             audio: {
-                let mut player =
-                    AudioPlayer::new(crate::audio_out::open_default_sink(48_000, 2));
-                player.mixer_mut().set_master(0.9);
+                // 🔴 **测试环境绝不打开真实声卡**（2026-10-19 实测事故）：
+                // `src/engine/game/tests.rs` 会 `Game::new()`，而这里原来无条件 `open_default_sink`
+                // ⇒ **每跑一次 `cargo test` 都会在用户耳机里循环播放环境风声**（多次投诉"游戏声音太大"实为此）。
+                // 测试走 `SilentSink`（丢弃样本、不碰设备）。判据 = `tests_never_open_the_real_audio_device`。
+                let sink = if cfg!(test) {
+                    crate::audio_out::open_silent_sink(48_000, 2)
+                } else {
+                    crate::audio_out::open_default_sink(48_000, 2)
+                };
+                let mut player = AudioPlayer::new(sink);
+                // 初始 0.9 也走感知曲线：否则"还没进设置"那几秒会明显偏响
+                player
+                    .mixer_mut()
+                    .set_master(crate::audio::perceptual_volume(0.9));
                 player.mixer_mut().set_channel_volume(Channel::Sfx, 1.0);
                 // 环境风：DSP 慢速调制噪声（真实声卡输出）
                 player
@@ -632,11 +643,15 @@ impl Game {
         self.hud.level = self.level;
         // 命中标记衰减 + 音量同步
         self.hud.tick(dt);
-        self.audio.mixer_mut().set_master(self.hud.volume);
+        // 🔉 感知曲线（见 `audio::perceptual_volume`）：滑块 0.5 ⇒ 实际 0.25（−12 dB）。
+        // 用户在耳机上把音量调到 50% 仍然偏大，就是因为旧接线是**线性**的。
+        self.audio
+            .mixer_mut()
+            .set_master(crate::audio::perceptual_volume(self.hud.volume));
         // 音乐通道独立音量（设置面板 MUSIC 项，0..=1）
         self.audio
             .mixer_mut()
-            .set_channel_volume(Channel::Music, self.hud.music_volume);
+            .set_channel_volume(Channel::Music, crate::audio::perceptual_volume(self.hud.music_volume));
         // 程序化环境音乐：战斗状态开大、菜单/结算调小（1.5s 淡入淡出由 audio 内部插值）
         let music_target = match self.game_state {
             GameState::Playing => 1.0,

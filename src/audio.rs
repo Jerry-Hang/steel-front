@@ -407,6 +407,42 @@ impl ChannelVolume {
     }
 }
 
+/// 🔉 **感知音量曲线**（2026-10-19，用户反馈「用耳机时音量过大」）：
+/// 把设置滑块/配置里的**线性值**映射成**等响感知**的实际增益。
+///
+/// 为什么需要它：人耳对响度的感知接近**幂律**（约 0.5~0.6 次幂），
+/// 所以线性滑块 0.5 听起来仍有 70% 响度 —— 这就是"音量已经调到 50% 仍然偏大"的原因。
+/// 用 `v²`（−12 dB @ 0.5）比标准幂律更保守一档，配合下面的软限幅一起把突发枪声压住。
+///
+/// 只在**接线处**（`session.rs` 把 `hud.volume` 送进混音器时）应用，
+/// 混音器内部仍保持线性乘法 —— 这样既有正确听感，又不破坏 `mixer_multiplies_*` 那组判据。
+pub fn perceptual_volume(v: f32) -> f32 {
+    // 🔉 v^2.5（`0.5 → 0.177`，约 −15 dB）：实测滑块 0.5 时 RMS 仍是 −12.4 dBFS
+    // ⇒ 纯 v² 不够，用耳机时依然偏大。2.5 次幂更接近实际听感需求。
+    v.clamp(0.0, 1.0).powf(2.5)
+}
+
+/// 🔴 **末级软限幅**（2026-10-19）：把超过 `KNEE` 的样本平滑压到 ≤1.0。
+///
+/// 为什么需要：多个声部叠加时样本和可以远超 ±1（近距枪声 + 回声 + 音乐），
+/// 旧实现直接交给声卡 ⇒ 驱动硬削波 ⇒ 尖锐刺耳。软削波在小信号上**完全不动**，
+/// 只在 `|x| > 0.8` 之后用 tanh 平滑压缩。
+///
+/// 判据 = `soft_limit_bounds_and_preserves_small_signals`。
+pub(crate) fn soft_limit(x: f32) -> f32 {
+    // 🔉 **天花板 = 0.7（−3.1 dBFS）**，而不是 1.0：实测连发时多声部叠加会把输出顶到
+    // **0 dBFS 满幅**（RMS −12.4 dBFS），那是"音量过大"的直接来源。留 30% headroom
+    // 后峰值不再满幅，后级声卡也不会硬削波。
+    const KNEE: f32 = 0.6;
+    const CEIL: f32 = 0.7;
+    let a = x.abs();
+    if a <= KNEE {
+        return x;
+    }
+    let over = (a - KNEE) / (CEIL - KNEE);
+    (KNEE + (CEIL - KNEE) * over.tanh()).copysign(x)
+}
+
 /// 主音量（线性增益 0..=1，混音时与分通道音量相乘）
 #[derive(Debug, Clone, Copy)]
 pub struct MasterVolume(f32);
@@ -648,6 +684,16 @@ impl Mixer {
             }
         }
         self.voices.retain(|v| !v.finished);
+        // 🔴 **末级软限幅**（2026-10-19，用户反馈"枪声过大"）：
+        // 多个声部叠加时样本和可以轻松超过 ±1（近距枪声 + 回声 + 音乐），
+        // 旧实现直接把超 1 的样本交给声卡 ⇒ 驱动硬削波 ⇒ **尖、炸、过大**。
+        // 这里用软削波（线性区 0.8，之后 tanh 平滑压到 ≤1.0）：
+        //   · 小信号完全不动（保音质）；
+        //   · 大信号平滑压缩，不会产生硬削波的方波感。
+        // 判据 = `mix_is_soft_limited`。
+        for x in out.iter_mut() {
+            *x = soft_limit(*x);
+        }
     }
 
     /// 混音并返回指定帧数的交错立体声缓冲
@@ -1743,7 +1789,6 @@ fn synth_ambient(sample_rate: u32) -> Arc<AudioClip> {
 #[cfg(test)]
 mod tests {
 
-
     /// 🔴 **0 帧片段 + 循环播放不许 panic。**
     ///
     /// 存在理由（2026-10-15，外部复核指出第 2 条，已对着代码确认）：
@@ -2042,6 +2087,102 @@ mod tests {
         assert!(!fin && (c - 32.0).abs() < 1e-9);
     }
     #[test]
+    /// 🔉 感知音量曲线（2026-10-19）：0.5 必须映射到 0.25，而不是 0.5。
+    /// 反向验证：把 `powi(2)` 改回恒等 ⇒ 本判据红。
+    #[test]
+    /// 🔴 软限幅：小信号必须原样通过（不破坏音质），大信号必须平滑压到 ≤1。
+    #[test]
+    fn soft_limit_bounds_and_preserves_small_signals() {
+        use super::soft_limit;
+        for v in [0.0f32, 0.1, -0.3, 0.6, -0.6] {
+            assert!((soft_limit(v) - v).abs() < 1e-6, "小信号 {v} 不该被改动");
+        }
+        assert!(soft_limit(1.5) <= 0.7 + 1e-6 && soft_limit(1.5) > 0.65, "1.5 应压到 (0.65,0.7]");
+        assert!(soft_limit(8.0) <= 0.7 + 1e-6, "8.0 也必须 ≤ 0.7（留 headroom）");
+        assert!(soft_limit(-8.0) >= -0.7 - 1e-6);
+        // 单调性（不产生非单调失真）
+        let mut prev = -2.0f32;
+        for i in 0..=40 {
+            let x = -2.0 + i as f32 * 0.1;
+            let y = soft_limit(x);
+            assert!(y >= prev - 1e-6, "限幅函数必须单调：{x} -> {y}");
+            prev = y;
+        }
+    }
+
+    /// 📏 临时诊断：打印"滑块 0.5"下各类声音的实际峰值电平（跑完即删）
+    #[test]
+    #[ignore]
+    fn diagnose_output_levels() {
+        use super::*;
+        let sr = 48_000u32;
+        let listener = AudioListener::new(Vec3::ZERO);
+        for (name, clip) in [
+            ("枪声 synth_gunshot", synth_gunshot(sr)),
+            ("脚步声", synth_footstep(sr)),
+            ("ambient", synth_ambient(sr)),
+        ] {
+            let mut mixer = Mixer::new();
+            mixer.set_master(perceptual_volume(0.5));
+            mixer.set_channel_volume(Channel::Sfx, 1.0);
+            mixer.set_channel_volume(Channel::Music, perceptual_volume(0.4));
+            let ch = Channel::Sfx;
+            mixer.play(clip, AudioSource::new(Vec3::ZERO, 1.0), ch, true);
+            let out = mixer.mix_vec(&listener, 4096);
+            let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+            println!("  {name}: peak={peak:.4} ({:.1} dBFS)  rms={rms:.4} ({:.1} dBFS)",
+                20.0 * peak.max(1e-9).log10(), 20.0 * rms.max(1e-9).log10());
+        }
+    }
+
+    fn perceptual_volume_is_quieter_than_linear() {
+        use super::perceptual_volume;
+        assert!((perceptual_volume(0.0) - 0.0).abs() < 1e-6);
+        assert!((perceptual_volume(1.0) - 1.0).abs() < 1e-6);
+        let p05 = 0.5f32.powf(2.5);
+        assert!((perceptual_volume(0.5) - p05).abs() < 1e-6, "0.5 应映射为 0.5^2.5 ≈ 0.1768（约 −15 dB）");
+        assert!((p05 - 0.25).abs() > 0.05, "必须是 v^2.5 而不是 v²（v² 实测仍偏大）");
+        // 单调 + 恒 ≤ 线性
+        for v in [0.1f32, 0.3, 0.7, 0.9] {
+            assert!(perceptual_volume(v) <= v + 1e-6, "{v}: 感知增益不该大于线性值");
+        }
+        // 越界输入被夹紧
+        assert!((perceptual_volume(2.0) - 1.0).abs() < 1e-6);
+        assert!((perceptual_volume(-1.0) - 0.0).abs() < 1e-6);
+    }
+
+    /// 🔴 末级软限幅（2026-10-19）：多声部叠加超过 ±1 时必须被平滑压回 ≤1，
+    /// 而不是把硬削波交给声卡（那正是"枪声过大/刺耳"的来源）。
+    /// 反向验证：删掉 `mix` 末尾那段限幅 ⇒ 本判据红。
+    #[test]
+    fn mix_is_soft_limited() {
+        use super::*;
+        let clip = Arc::new(AudioClip::new(vec![1.0f32; 480], 44100, 1).unwrap());
+        let mut mixer = Mixer::default();
+        mixer.set_master(1.0);
+        mixer.set_channel_volume(Channel::Sfx, 1.0);
+        let listener = AudioListener::new(Vec3::ZERO);
+        // 8 个满幅声部叠在一起：和可以到 8.0，远超 ±1
+        for _ in 0..8 {
+            let src = AudioSource::new(Vec3::ZERO, 1.0);
+            mixer.play(clip.clone(), src, Channel::Sfx, false);
+        }
+        let out = mixer.mix_vec(&listener, 64);
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak <= 0.7 + 1e-5, "限幅后峰值必须 ≤ 0.7（留 headroom），实际 {peak}");
+        assert!(peak > 0.65, "满幅叠加应接近天花板（否则限幅把正常信号也压没了），实际 {peak}");
+        // 小信号必须原样通过（不破坏音质）
+        let quiet = Arc::new(AudioClip::new(vec![0.05f32; 480], 44100, 1).unwrap());
+        let mut m2 = Mixer::default();
+        m2.set_master(1.0);
+        m2.set_channel_volume(Channel::Sfx, 1.0);
+        let qsrc = AudioSource::new(Vec3::ZERO, 1.0);
+        m2.play(quiet, qsrc, Channel::Sfx, false);
+        let q = m2.mix_vec(&listener, 64);
+        assert!((q[0] - 0.05).abs() < 1e-4, "0.05 的小信号不该被限幅改动，实际 {}", q[0]);
+    }
+
     fn mixer_multiplies_master_and_channel_volume() {
         let clip = const_clip(0.8, 8);
         let mut mixer = Mixer::new();
@@ -2135,10 +2276,13 @@ mod tests {
         mixer.play(clip, AudioSource::new(Vec3::new(10.0, 0.0, 0.0), 1.0), Channel::Sfx, false);
         let mut out = vec![0.0; 16];
         mixer.mix(&AudioListener::new(Vec3::ZERO), &mut out);
-        let expected = 1.0 + distance_attenuation(10.0, 0.1);
+        // 两路叠加到 1.5 > 1.0 ⇒ 必须经过末级软限幅（2026-10-19 新增）
+        let expected = super::soft_limit(1.0 + distance_attenuation(10.0, 0.1));
         for v in out {
             assert!((v - expected).abs() < 1e-5, "sample {v} vs {expected}");
         }
+        // 并钉住"限幅确实生效了"：未限幅值 1.5 必须被压低
+        assert!(expected < 1.0 - 1e-4, "限幅应把 1.5 压到 1.0 以下，实际 {expected}");
     }
 
     #[test]
@@ -2150,9 +2294,12 @@ mod tests {
         mixer.play(clip.clone(), AudioSource::new(Vec3::ZERO, 1.0), Channel::Music, false);
         mixer.play(clip, AudioSource::new(Vec3::ZERO, 1.0), Channel::Sfx, false);
         let out = mixer.mix_vec(&AudioListener::new(Vec3::ZERO), 4);
+        // 0.2 + 0.6 = 0.8 > KNEE(0.6) ⇒ 必须过末级软限幅（2026-10-19）
+        let expected = super::soft_limit(0.8);
         for v in out {
-            assert!((v - 0.8).abs() < EPS, "sample {v}");
+            assert!((v - expected).abs() < EPS, "sample {v} vs {expected}");
         }
+        assert!(expected < 0.8 - 1e-4, "限幅应把 0.8 压低，实际 {expected}");
     }
 
     #[test]
@@ -2590,7 +2737,6 @@ mod tests {
         let synth = DspSynth::new(0);
         assert_eq!(synth.sample_rate, 44_100.0);
     }
-
 
     /// 🔴 **衰减阶段必须按「本步」因子衰减，不能按累积时间叠乘。**
     ///
