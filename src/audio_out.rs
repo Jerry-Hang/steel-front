@@ -1315,7 +1315,7 @@ mod tests {
     /// 反向验证：删掉 `if cfg!(test)` 分支 ⇒ 本判据红。
     #[test]
     fn tests_never_open_the_real_audio_device() {
-        let src = include_str!("../engine/game/session.rs");
+        let src = include_str!("engine/game/session.rs");
         assert!(
             src.contains("if cfg!(test)"),
             "游戏初始化音频时必须按 cfg!(test) 分流，否则测试会打开真实声卡"

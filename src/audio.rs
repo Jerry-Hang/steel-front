@@ -2086,11 +2086,28 @@ mod tests {
         let (c, fin) = advance_voice_cursor(2.0, 100.0, false, 30);
         assert!(!fin && (c - 32.0).abs() < 1e-9);
     }
+    /// 🔉 感知音量曲线（2026-10-19）：滑块 0.5 必须映射成 0.5^2.5 ≈ 0.1768（约 −15 dB），
+    /// 而不是线性 0.5。反向验证：把 `powf(2.5)` 改成恒等 ⇒ 本判据红。
     #[test]
-    /// 🔉 感知音量曲线（2026-10-19）：0.5 必须映射到 0.25，而不是 0.5。
-    /// 反向验证：把 `powi(2)` 改回恒等 ⇒ 本判据红。
-    #[test]
-    /// 🔴 软限幅：小信号必须原样通过（不破坏音质），大信号必须平滑压到 ≤1。
+    fn perceptual_volume_is_quieter_than_linear() {
+        use super::perceptual_volume;
+        assert!((perceptual_volume(0.0) - 0.0).abs() < 1e-6);
+        assert!((perceptual_volume(1.0) - 1.0).abs() < 1e-6);
+        let p05 = 0.5f32.powf(2.5);
+        assert!(
+            (perceptual_volume(0.5) - p05).abs() < 1e-6,
+            "0.5 应映射为 0.5^2.5 ≈ 0.1768（约 −15 dB）"
+        );
+        assert!((p05 - 0.25).abs() > 0.05, "必须是 v^2.5 而不是 v²（v² 实测仍偏大）");
+        for v in [0.1f32, 0.3, 0.7, 0.9] {
+            assert!(perceptual_volume(v) <= v + 1e-6, "{v}: 感知增益不该大于线性值");
+        }
+        assert!((perceptual_volume(2.0) - 1.0).abs() < 1e-6, "越界输入要夹紧");
+        assert!((perceptual_volume(-1.0) - 0.0).abs() < 1e-6);
+    }
+
+    /// 🔴 软限幅：小信号必须原样通过（不破坏音质），大信号必须平滑压到 ≤ 0.7。
+    /// 反向验证：把 `CEIL` 改回 1.0 或删掉限幅 ⇒ 本判据红。
     #[test]
     fn soft_limit_bounds_and_preserves_small_signals() {
         use super::soft_limit;
@@ -2136,22 +2153,6 @@ mod tests {
         }
     }
 
-    fn perceptual_volume_is_quieter_than_linear() {
-        use super::perceptual_volume;
-        assert!((perceptual_volume(0.0) - 0.0).abs() < 1e-6);
-        assert!((perceptual_volume(1.0) - 1.0).abs() < 1e-6);
-        let p05 = 0.5f32.powf(2.5);
-        assert!((perceptual_volume(0.5) - p05).abs() < 1e-6, "0.5 应映射为 0.5^2.5 ≈ 0.1768（约 −15 dB）");
-        assert!((p05 - 0.25).abs() > 0.05, "必须是 v^2.5 而不是 v²（v² 实测仍偏大）");
-        // 单调 + 恒 ≤ 线性
-        for v in [0.1f32, 0.3, 0.7, 0.9] {
-            assert!(perceptual_volume(v) <= v + 1e-6, "{v}: 感知增益不该大于线性值");
-        }
-        // 越界输入被夹紧
-        assert!((perceptual_volume(2.0) - 1.0).abs() < 1e-6);
-        assert!((perceptual_volume(-1.0) - 0.0).abs() < 1e-6);
-    }
-
     /// 🔴 末级软限幅（2026-10-19）：多声部叠加超过 ±1 时必须被平滑压回 ≤1，
     /// 而不是把硬削波交给声卡（那正是"枪声过大/刺耳"的来源）。
     /// 反向验证：删掉 `mix` 末尾那段限幅 ⇒ 本判据红。
@@ -2183,6 +2184,9 @@ mod tests {
         assert!((q[0] - 0.05).abs() < 1e-4, "0.05 的小信号不该被限幅改动，实际 {}", q[0]);
     }
 
+    /// 🎚️ 主音量 × 通道音量必须线性相乘（感知曲线只在**接线处**应用，混音器内部保持线性）。
+    /// 反向验证：把 `gain` 改成 `master + channel` 之类 ⇒ 本判据红。
+    #[test]
     fn mixer_multiplies_master_and_channel_volume() {
         let clip = const_clip(0.8, 8);
         let mut mixer = Mixer::new();
