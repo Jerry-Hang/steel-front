@@ -38,18 +38,22 @@ pub fn box_triangles(b: &PtBox, out_verts: &mut [f32; 192]) {
     v!(cx + hx, cy - hy, cz - hz, 1.0, 0.0, 0.0, 0.0, 1.0);
     v!(cx + hx, cy + hy, cz - hz, 1.0, 0.0, 0.0, 1.0, 1.0);
     v!(cx + hx, cy + hy, cz + hz, 1.0, 0.0, 0.0, 1.0, 0.0);
-    v!(cx - hx, cy - hy, cz + hz, 0.0, -1.0, 0.0, 0.0, 0.0);
-    v!(cx + hx, cy - hy, cz + hz, 0.0, -1.0, 0.0, 0.0, 1.0);
-    v!(cx + hx, cy - hy, cz - hz, 0.0, -1.0, 0.0, 1.0, 1.0);
-    v!(cx - hx, cy - hy, cz - hz, 0.0, -1.0, 0.0, 1.0, 0.0);
+    // 🔴 **-Y 面顺序必须与 +Y 面相反**（2026-10-19 外部复核第 4 条，已确认）：
+    // 原来两个面的 (x,z) 顶点顺序完全一样 ⇒ 叉积都指向 +Y ⇒ -Y 面**朝内**（CW）。
+    // PT 当前用 `gl_RayFlagsNoneEXT`（不剔背面）所以暂不可见，但几何法线/绕序应自洽。
+    v!(cx - hx, cy - hy, cz - hz, 0.0, -1.0, 0.0, 0.0, 0.0);
+    v!(cx + hx, cy - hy, cz - hz, 0.0, -1.0, 0.0, 0.0, 1.0);
+    v!(cx + hx, cy - hy, cz + hz, 0.0, -1.0, 0.0, 1.0, 1.0);
+    v!(cx - hx, cy - hy, cz + hz, 0.0, -1.0, 0.0, 1.0, 0.0);
     v!(cx - hx, cy + hy, cz + hz, 0.0, 1.0, 0.0, 0.0, 0.0);
     v!(cx + hx, cy + hy, cz + hz, 0.0, 1.0, 0.0, 0.0, 1.0);
     v!(cx + hx, cy + hy, cz - hz, 0.0, 1.0, 0.0, 1.0, 1.0);
     v!(cx - hx, cy + hy, cz - hz, 0.0, 1.0, 0.0, 1.0, 0.0);
+    // 🔴 **-Z 面同理**：原来与 +Z 面顶点顺序相同 ⇒ 叉积指向 +Z ⇒ 朝内。
     v!(cx - hx, cy - hy, cz - hz, 0.0, 0.0, -1.0, 0.0, 0.0);
-    v!(cx + hx, cy - hy, cz - hz, 0.0, 0.0, -1.0, 0.0, 1.0);
+    v!(cx - hx, cy + hy, cz - hz, 0.0, 0.0, -1.0, 0.0, 1.0);
     v!(cx + hx, cy + hy, cz - hz, 0.0, 0.0, -1.0, 1.0, 1.0);
-    v!(cx - hx, cy + hy, cz - hz, 0.0, 0.0, -1.0, 1.0, 0.0);
+    v!(cx + hx, cy - hy, cz - hz, 0.0, 0.0, -1.0, 1.0, 0.0);
     v!(cx - hx, cy - hy, cz + hz, 0.0, 0.0, 1.0, 0.0, 0.0);
     v!(cx + hx, cy - hy, cz + hz, 0.0, 0.0, 1.0, 0.0, 1.0);
     v!(cx + hx, cy + hy, cz + hz, 0.0, 0.0, 1.0, 1.0, 1.0);
@@ -283,6 +287,32 @@ pub struct PtAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 **12 个三角形必须全部朝外**（2026-10-19 外部复核第 4 条）：
+    /// 旧实现 `-Y` 与 `-Z` 两个面的叉积指向盒内（与顶点法线反向）。
+    /// 反向验证：把这两面改回旧顶点顺序 ⇒ 判据在 4 个三角形上红。
+    #[test]
+    fn box_triangles_are_all_outward_facing() {
+        use glam::Vec3;
+        let b = PtBox { center: [0.0; 3], half: [1.0; 3], material: 1 };
+        let mut verts = [0.0f32; 192];
+        box_triangles(&b, &mut verts);
+        let idx = box_indices();
+        let pos = |i: usize| Vec3::new(verts[i * 8], verts[i * 8 + 1], verts[i * 8 + 2]);
+        let nrm = |i: usize| Vec3::new(verts[i * 8 + 3], verts[i * 8 + 4], verts[i * 8 + 5]);
+        for t in 0..12 {
+            let (i0, i1, i2) = (
+                idx[t * 3] as usize,
+                idx[t * 3 + 1] as usize,
+                idx[t * 3 + 2] as usize,
+            );
+            let geo = (pos(i1) - pos(i0)).cross(pos(i2) - pos(i0));
+            assert!(
+                geo.dot(nrm(i0)) > 0.0,
+                "三角形 {t} 绕序朝内（几何法线与顶点法线反向）"
+            );
+        }
+    }
 
     /// 从 `mix(a, b, move)` 形式里取出两个端点常量（a=静止端、b=运动端）。
     /// 故意不写死数字：判据绑的是着色器**当下**的字面量，改 SPP/win 会立刻把这条测试推到

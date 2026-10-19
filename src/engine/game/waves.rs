@@ -407,10 +407,19 @@ impl Game {
                     //
                     // `RV3D_FACE_ENEMY=1` 把朝向改成**指向对面半场**（真正的敌人方向），
                     // 作为单变量对照。默认关 ⇒ 生产行为不变。
+                    // 🔴 **朝向统一到引擎约定 `0 = +Z`（`atan2(dx, dz)`）**（2026-10-19 外部复核第 3 条，
+                    // 已确认）：同文件的 `spawn_npc_ring` 早就改成了 `atan2(dx, dz)`，这里漏改 ⇒
+                    // 压力会战开局全体 NPC 横转 90°；`RV3D_FACE_ENEMY=1` 的对照臂原写 `PI`/`0.0`
+                    // 让两军分别朝 -Z/+Z（侧身），而不是朝对面半场（±X ⇒ ∓π/2）。
                     facing: if face_enemy {
-                        if base_angle == 0.0 { std::f32::consts::PI } else { 0.0 }
+                        // 红方（`base_angle == 0`）出生在 +X 半场，朝 -X ⇒ -π/2；蓝方朝 +X ⇒ +π/2
+                        if base_angle == 0.0 {
+                            -std::f32::consts::FRAC_PI_2
+                        } else {
+                            std::f32::consts::FRAC_PI_2
+                        }
                     } else {
-                        (player.z - z).atan2(player.x - x)
+                        (player.x - x).atan2(player.z - z)
                     },
                     fire_accum: 0.0,
                     knockback: [0.0, 0.0],

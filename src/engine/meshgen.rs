@@ -38,11 +38,16 @@ impl Mesh {
         diffuse: f32,
     ) {
         let base = out_verts.len() as u32;
+        // 🔴 **法线必须用逆转置矩阵变换**（2026-10-19 外部复核第 8 条，已确认）：
+        // 非等比缩放（压扁/拉长）下直接用 `m` 会让法线向拉伸轴偏倒 ⇒ 烘焙明暗错。
+        // 行列式也决定绕序：负行列式（镜像）已在变换中翻转了手性，此时**不能再翻面**，
+        // 否则整件会变成背面被 `front_face=CLOCKWISE + cull BACK` 剔除（"镜像件黑掉"）。
+        let mat3 = glam::Mat3::from_mat4(m);
+        let normal_mat = mat3.inverse().transpose();
+        let flip_winding = mat3.determinant() >= 0.0;
         for v in &self.verts {
             let p = m.transform_point3(glam::Vec3::from(v.pos));
-            let n = m
-                .transform_vector3(glam::Vec3::from(v.normal))
-                .normalize_or_zero();
+            let n = (normal_mat * glam::Vec3::from(v.normal)).normalize_or_zero();
             let ndl = n.dot(light_dir).max(0.0);
             let shade = ambient + diffuse * ndl;
             let c = [
@@ -56,9 +61,15 @@ impl Mesh {
         // 程序化网格按外侧 CCW 生成 → 屏幕空间判定为背面被剔除 → 整体取反适配
         for chunk in self.indices.chunks(3) {
             if chunk.len() == 3 {
-                out_indices.push(base + chunk[0]);
-                out_indices.push(base + chunk[2]);
-                out_indices.push(base + chunk[1]);
+                if flip_winding {
+                    out_indices.push(base + chunk[0]);
+                    out_indices.push(base + chunk[2]);
+                    out_indices.push(base + chunk[1]);
+                } else {
+                    out_indices.push(base + chunk[0]);
+                    out_indices.push(base + chunk[1]);
+                    out_indices.push(base + chunk[2]);
+                }
             } else {
                 for i in chunk {
                     out_indices.push(base + i);

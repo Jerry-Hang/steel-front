@@ -652,7 +652,13 @@ fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
     let seam = 1.0 - smoothstep(0.02, 0.09, u_edge.min(v_edge));
 
     // 每块混凝土明度抖动 + 骨料颗粒（双频噪点）
-    let tone = 0.88 + unit_from_hash(hash2(row, (u * 8.0) as i32, seed.wrapping_add(40))) * 0.24;
+    // 🔴 明度抖动的**列号必须与砖缝同源**（2026-10-19 外部复核第 5 条，已确认）：
+    // 旧写法 `(u * 8.0) as i32` 用了裸字面量 8（= 每块砖宽的两倍）且**不加 `off`** ⇒
+    // 砖缝按 4 列 + 半块错缝排布，而 `tone` 每 1/8 跳变 ⇒ **每块砖的正中（fu=0.5）被分成
+    // 一明一暗两半**（那里正好没有砂浆缝，肉眼就是一道硬边）。
+    let cols = SKIN_BRICK_COLS as i32;
+    let col = ((u * SKIN_BRICK_COLS + off).floor() as i32).rem_euclid(cols);
+    let tone = 0.88 + unit_from_hash(hash2(row, col, seed.wrapping_add(40))) * 0.24;
     let grain = value_noise(u * 22.0, v * 22.0, 1.0, seed.wrapping_add(41)) * 0.5
         + value_noise(u * 90.0, v * 90.0, 1.0, seed.wrapping_add(42)) * 0.5;
     let base: [f32; 3] = [0.50, 0.50, 0.52];
@@ -1062,6 +1068,25 @@ mod tests {
         assert_eq!((linear_to_srgb(0.5) * 255.0).round() as u32, 188);
         // 0.001 在线性段：0.001*12.92 = 0.01292 → 3.29 → 3
         assert_eq!((linear_to_srgb(0.001) * 255.0).round() as u32, 3);
+    }
+
+    /// 🔴 **砖块明度不能在砖中心出现阶跃**（2026-10-19 外部复核第 5 条）。
+    ///
+    /// 旧实现 `tone` 用裸 `u*8.0` 且不加错缝 `off`，而砖缝按 `SKIN_BRICK_COLS=4` 排布
+    /// ⇒ 每块砖正中（`fu=0.5`，无砂浆缝处）明度跳变，砖被分成一明一暗两半。
+    /// 反向验证：把 `col` 改回 `(u * 8.0) as i32` ⇒ 本判据红。
+    #[test]
+    fn marker_skin_has_no_brick_center_tone_step() {
+        // row = floor(v*4)；v=0.125 ⇒ row=0（偶数行，off=0）
+        let v = 0.125f32;
+        let a = marker_skin(0.1240, v, DEFAULT_SEED);
+        let b = marker_skin(0.1260, v, DEFAULT_SEED);
+        let la: f32 = a.iter().sum();
+        let lb: f32 = b.iter().sum();
+        assert!(
+            (la - lb).abs() < 0.03,
+            "砖中心出现明度阶跃（旧实现把每块砖分成两半）：{la} vs {lb}"
+        );
     }
 
     #[test]

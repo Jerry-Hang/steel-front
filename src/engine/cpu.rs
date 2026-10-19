@@ -628,6 +628,22 @@ fn split_smt_pairs(siblings: &[Vec<usize>]) -> (Vec<usize>, Vec<usize>) {
     (physical, smt)
 }
 
+/// 🔴 **AMD 双簇按「物理核对半」切分**（2026-10-19 外部复核第 2 条，已确认）。
+///
+/// 原生 Linux 的 ACPI 拓扑：先编全部物理主线程（`0..half`），再编全部 SMT 兄弟（`half..threads`）。
+/// 旧实现用「逻辑核号对半」的 `secondary_set = half..threads` 去和物理核集合求交 ⇒ **交集为空**
+/// ⇒ 回退成 `secondary_set` 本身 ⇒ 次簇全是**超线程**（与"延迟敏感任务避开 SMT"相反）。
+/// 这里改为：把物理核排序后对半切（CCD0 / CCD1），与逻辑编号方案无关。
+fn amd_split_physical(physical_all: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
+    if physical_all.len() < 2 {
+        return None;
+    }
+    let mut sorted = physical_all.to_vec();
+    sorted.sort_unstable();
+    let half = sorted.len() / 2;
+    Some((sorted[..half].to_vec(), sorted[half..].to_vec()))
+}
+
 /// 读 sysfs 收集每个物理核心的 SMT 兄弟组，返回 `Vec<group>`。
 /// 任意 CPU 的 `thread_siblings_list` 不可读时返回 None（调用方回退不区分物理/超线程）。
 fn read_smt_siblings(threads: usize) -> Option<Vec<Vec<usize>>> {
@@ -836,16 +852,36 @@ impl CpuTopology {
             match read_smt_siblings(threads) {
                 Some(groups) => {
                     let (physical_all, smt_all) = split_smt_pairs(&groups);
-                    let pp: Vec<usize> = primary_set
+                    let mut pp: Vec<usize> = primary_set
                         .iter()
                         .filter(|c| physical_all.contains(c))
                         .copied()
                         .collect();
-                    let sp: Vec<usize> = secondary_set
+                    let mut sp: Vec<usize> = secondary_set
                         .iter()
                         .filter(|c| physical_all.contains(c))
                         .copied()
                         .collect();
+                    // 🔴 **AMD 双簇：按「物理核」对半切，不是按逻辑核号**（2026-10-19 外部复核第 2 条，已确认）。
+                    //
+                    // 原生 Linux 的标准 ACPI 拓扑是「先编全部物理主线程 0..half，再编全部 SMT 兄弟
+                    // half..threads」（siblings 为 `0,16`、`1,17`…）。旧实现在这之上用
+                    // `secondary_set = half..threads` 去和 physical_all 求交 ⇒ **交集为空**
+                    // ⇒ 回退成 `secondary_set.clone()` ⇒ **ai_pool 被 100% 绑到超线程核**，
+                    // 与模块头「延迟敏感任务避开超线程、杜绝跨 CCD」的目标完全相反。
+                    // WSL2（成对相邻 `0,1`）下旧写法碰巧成立，所以一直没被发现。
+                    let sp_empty = sp.is_empty();
+                    if vendor == CpuVendor::Amd && sp_empty {
+                        if let Some((a, b)) = amd_split_physical(&physical_all) {
+                            log::info!(
+                                "cpu: AMD 双簇按物理核对半切：主簇={} 个 次簇={} 个（逻辑核号对半在原生 Linux 上不可用）",
+                                a.len(),
+                                b.len()
+                            );
+                            pp = a;
+                            sp = b;
+                        }
+                    }
                     let pp = if pp.is_empty() { primary_set.clone() } else { pp };
                     let sp = if sp.is_empty() { secondary_set.clone() } else { sp };
                     (pp, sp, smt_all)
@@ -1296,9 +1332,19 @@ impl ThreadPool {
                 // 递减交给 `_sub` 的 Drop（这里不再手写 —— 手写那句正是 panic 时被跳过的）
             })));
             if send_result.is_err() {
-                // 工作线程未存活（spawn 失败降级）：自行补计，避免死等
+                // 🔴 **工作线程未存活时必须由调用线程补做这一段**（2026-10-19 外部复核 P0，已确认）：
+                // 旧实现只 `fetch_sub` 补计数、**没有执行 `f(w, start, seg)`** ⇒ 该段数据被
+                // **静默跳过**（无日志、无报错）：一旦某个 worker spawn 失败或 panic 退出，
+                // 之后每一帧都会丢掉 `1/nw` 的剔除/并行 AI 工作。
+                // 兄弟函数 `run_sync` 一直有这层回退（同一个坑的另一半），这里补齐。
+                // 先补计数再执行：万一段内 panic，`_wait` 仍能等到其他 worker 收工。
                 unsafe {
                     (*done_ptr.get()).fetch_sub(1, Ordering::AcqRel);
+                    let seg = std::slice::from_raw_parts_mut(
+                        ptr.get().add((start - off0) * std::mem::size_of::<T>()) as *mut T,
+                        end - start,
+                    );
+                    f(w, start, seg);
                 }
             }
         }
@@ -1607,6 +1653,65 @@ mod tests {
     }
 
 /// 🔴 **worker 里的闭包 panic 时，调用线程不能死转。**
+    /// 🔴 **worker 已死时，它那一段必须由调用线程补做**（2026-10-19 外部复核 P0 缺陷）。
+    ///
+    /// 旧实现 `send_result.is_err()` 只 `fetch_sub` 补计数、**不执行 `f(w, start, seg)`**
+    /// ⇒ 该段数据被静默跳过（无日志、无报错）：worker spawn 失败或 panic 退出后，
+    /// 每一帧都会丢掉 `1/nw` 的剔除/并行 AI 工作。
+    /// 反向验证：删掉 `f(w, start, seg)` 回退 ⇒ 本判据红（后半段保持初值）。
+    #[test]
+    fn dead_worker_segments_are_executed_on_the_caller() {
+        let pool = ThreadPool::new(&[0], 1, "test-dead-worker");
+        if pool.workers() == 0 {
+            eprintln!("跳过：线程池没有 worker，本判据不适用");
+            return;
+        }
+        // 第一步：让唯一的 worker 在闭包里 panic 而退出（worker 循环不吞 panic）
+        let mut poison = vec![0u32; 64];
+        pool.par_for_each_mut(&mut poison, |seg, _start, _slice| {
+            if seg == 1 {
+                panic!("故意让 worker 退出（本测试的输入）");
+            }
+        });
+        // panic 在 worker 线程展开，需要一点时间让它真正退出
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // 第二步：worker 已死 ⇒ 尾段必须由调用线程补齐
+        let mut data = vec![0u32; 4096];
+        pool.par_for_each_mut(&mut data, |_seg, _start, slice| slice.fill(7));
+        let skipped = data.iter().filter(|&&v| v == 0).count();
+        assert!(
+            skipped == 0,
+            "worker 已死时仍有 {skipped} 个元素被静默跳过（旧实现在这里只补计数、不执行该段）"
+        );
+    }
+
+    /// 🔴 **AMD 双簇必须按物理核对半切**（2026-10-19 外部复核第 2 条）。
+    ///
+    /// 原生 Linux 拓扑：物理核 `0..16`、SMT 兄弟 `16..32`（siblings 为 `(0,16),(1,17)…`）。
+    /// 旧写法「逻辑核号对半（`16..32`）∩ 物理核」= **空** ⇒ 回退成超线程全集。
+    /// 反向验证：把 `amd_split_physical` 的结果换成旧逻辑 ⇒ 次簇会落进 smt 集合，判据红。
+    #[test]
+    fn amd_dual_ccd_split_uses_physical_cores() {
+        let groups: Vec<Vec<usize>> = (0..16).map(|c| vec![c, c + 16]).collect();
+        let (physical, smt) = split_smt_pairs(&groups);
+        assert_eq!(physical.len(), 16, "16 个物理核");
+        assert!(smt.iter().all(|c| *c >= 16), "SMT 兄弟应为 16..32");
+        let (a, b) = amd_split_physical(&physical).expect("必须能切分");
+        assert_eq!(a, (0..8).collect::<Vec<_>>());
+        assert_eq!(b, (8..16).collect::<Vec<_>>());
+        assert!(
+            b.iter().all(|c| !smt.contains(c)),
+            "次簇必须全在物理核上，不能绑到超线程"
+        );
+        // 反证旧写法：逻辑核号对半后的次簇 ∩ 物理核 = 空（这正是缺陷本身）
+        let secondary_set: Vec<usize> = (16..32).collect();
+        let old = secondary_set
+            .iter()
+            .filter(|c| physical.contains(c))
+            .count();
+        assert_eq!(old, 0, "旧写法在原生 Linux 拓扑下的次簇必须为空");
+    }
+
     ///
     /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：worker 闭包原来是
     /// ```text

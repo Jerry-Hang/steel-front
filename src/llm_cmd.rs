@@ -5,7 +5,7 @@
 //! （数据集采集：微调训练对的原始语料）。玩家无敌观战，兵力先耗尽方判负，
 //! 10 秒自动重置（游戏侧逻辑）。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,9 @@ pub struct CompanyCmd {
 
 /// 一侧的独立上下文：态势 + 最新决策 + 轮回记忆
 struct SideCtx {
+    /// 回合代号：`clear_orders` 每增一次，**在途请求的返回值据此作废**
+    /// （2026-10-19 外部复核第 6 条：回合重置后，上一轮还在飞的 HTTP 响应会把旧命令写回新局）。
+    epoch: AtomicU64,
     situation: Mutex<String>,
     n_companies: Mutex<usize>,
     latest: Mutex<Option<Vec<CompanyCmd>>>,
@@ -48,6 +51,7 @@ struct SideCtx {
 impl SideCtx {
     fn new() -> Self {
         Self {
+            epoch: AtomicU64::new(0),
             situation: Mutex::new(String::new()),
             n_companies: Mutex::new(3),
             latest: Mutex::new(None),
@@ -187,7 +191,14 @@ impl<'a> P<'a> {
             self.i += 1;
         }
         let txt = String::from_utf8_lossy(&self.s[st..self.i]).to_string();
-        txt.parse::<f64>().map(Json::Num).map_err(|_| "JSON 数字解析失败".into())
+        // 🔴 标准库 `f64::from_str` 对 `"1e500"` 返回 **Ok(inf)** 而不是 Err
+        // （2026-10-19 外部复核第 6 条，已确认）：非有限值一旦进 `Json::Num`，
+        // 下游（含共用本解析器的 `assets.rs`）就会拿到 inf/NaN ⇒ 必须在这里拒绝。
+        txt.parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .map(Json::Num)
+            .ok_or_else(|| "JSON 数字解析失败或溢出（必须是有限值）".to_string())
     }
     /// 读 4 位十六进制转义数字（`\uXXXX` 的那 4 位）。
     fn hex4(&mut self) -> Result<u32, String> {
@@ -391,8 +402,52 @@ fn http_post_json(url: &str, body: &str, timeout: Duration) -> Result<String, St
         ));
     }
     let text = String::from_utf8_lossy(&buf).to_string();
-    let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
-    Ok(text[body_start.min(text.len())..].to_string())
+    // 🔴 **必须校验状态行与头终止符**（2026-10-19 外部复核第 6 条，已确认）：
+    // 旧实现找不到 `\r\n\r\n` 时把 `body_start` 回退成 0 ⇒ **把 HTTP 状态行当正文**喂给 JSON
+    // 解析（报出来的是"JSON 解析失败"，指不到真凶）；也从不检查状态码（500 的错误响应会被当正文）。
+    let Some(hdr_end) = text.find("\r\n\r\n") else {
+        return Err("HTTP 响应缺少头终止符（\\r\\n\\r\\n），无法解析".to_string());
+    };
+    let head = &text[..hdr_end];
+    let status_line = head.lines().next().unwrap_or("");
+    let status = status_line.split_whitespace().nth(1).unwrap_or("");
+    if status != "200" {
+        return Err(format!("HTTP 状态非 200（{status_line}）"));
+    }
+    let body = &text[hdr_end + 4..];
+    // 分块传输（Transfer-Encoding: chunked）：本地中继/部分服务端会用，必须解码
+    let chunked = head.to_ascii_lowercase().contains("transfer-encoding: chunked");
+    if chunked {
+        return decode_chunked(body).map_err(|e| format!("chunked 解码失败: {e}"));
+    }
+    Ok(body.to_string())
+}
+
+/// 极简 chunked 解码（`<hex-size>[;ext]\r\n<data>\r\n` … `0\r\n\r\n`）。
+fn decode_chunked(mut body: &str) -> Result<String, String> {
+    let mut out = String::new();
+    loop {
+        let Some(nl) = body.find("\r\n") else {
+            return Err("块大小行缺少 CRLF".to_string());
+        };
+        let size_txt = body[..nl].split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_txt, 16).map_err(|e| format!("块大小非法 {size_txt}: {e}"))?;
+        body = &body[nl + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if body.len() < size {
+            return Err("块数据截断".to_string());
+        }
+        out.push_str(&body[..size]);
+        body = &body[size..];
+        // 每块数据后必须跟 CRLF
+        if let Some(rest) = body.strip_prefix("\r\n") {
+            body = rest;
+        } else {
+            return Err("块数据后缺少 CRLF".to_string());
+        }
+    }
 }
 
 const DEFAULT_PATH: &str = "/v1/chat/completions";
@@ -473,11 +528,22 @@ pub fn parse_company_cmds(content: &str, n_companies: usize) -> Result<Vec<Compa
 
 /// JSON 字符串转义（嵌入 HTTP body 用）
 fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    // 🔴 **`< 0x20` 的全部控制字符都要转义**（2026-10-19 外部复核第 6 条，已确认）：
+    // 旧实现只处理 `\n`/`\r`/`\t`，其余控制字符（`\x08`/`\x0c`/`\x1b`…）原样输出，
+    // 而本文件的 `P::string` 严格拒绝 `c < 0x20` ⇒ **转义结果喂不回自己的解析器**。
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 
@@ -549,6 +615,8 @@ pub(crate) fn pick_decision_text(resp: &str) -> String {
 }
 
 fn decide_side(side: &SideCtx, name: &str, url: &str) {
+    // 请求发出前记下回合代号：返回时若已变（回合重置过）⇒ 本份决策属于上一轮，必须丢弃
+    let epoch = side.epoch.load(Ordering::Acquire);
     let situation = side.situation.lock().map(|s| s.clone()).unwrap_or_default();
     if situation.trim().is_empty() {
         return;
@@ -591,6 +659,12 @@ fn decide_side(side: &SideCtx, name: &str, url: &str) {
             }
             match parse_company_cmds(&content, n) {
                 Ok(cmds) => {
+                    // 🔴 跨回合作废：重置之后才返回的旧决策不许写回新局
+                    if side.epoch.load(Ordering::Acquire) != epoch {
+                        log::info!("llmcmd[{name}]: 决策属上一回合（已重置），丢弃");
+                        log_decision(name, &situation, &content, false, "stale_epoch");
+                        return;
+                    }
                     if let Ok(mut m) = side.latest.lock() {
                         *m = Some(cmds.clone());
                     }
@@ -617,6 +691,17 @@ fn decide_side(side: &SideCtx, name: &str, url: &str) {
             log::warn!("llmcmd[{name}]: HTTP 失败: {e}");
             log_decision(name, &situation, "", false, &format!("http:{e}"));
         }
+    }
+}
+
+impl Drop for LlmCommander {
+    /// 🔴 **析构必须通知后台线程退出**（2026-10-19 外部复核第 6 条，已确认）：
+    /// `Shared::stopped` 此前**全文件没有任何地方置 true**，`LlmCommander` 也没有 Drop
+    /// ⇒ 实例销毁后线程继续按 interval 调 HTTP、写 `data/*.jsonl`。
+    /// 这里只置标志、不 join：线程可能正阻塞在最长 150s 的 HTTP 读上，join 会卡住游戏退出；
+    /// 标志 + `Arc` 保证它下一轮循环自行退出，且不会访问已释放内存（`Shared` 由 Arc 持有）。
+    fn drop(&mut self) {
+        self.shared.stopped.store(true, Ordering::Release);
     }
 }
 
@@ -726,6 +811,13 @@ impl LlmCommander {
             if let Ok(mut m) = side.latest.lock() {
                 *m = None;
             }
+            // 🔴 历史也必须清：上一轮的"态势→决策"对会被拼进新一轮的 prompt，
+            // 让模型按上一轮的局面继续下令（2026-10-19 外部复核第 6 条）。
+            if let Ok(mut h) = side.history.lock() {
+                h.clear();
+            }
+            // 代号自增 ⇒ 正在飞的旧请求返回后会被 `decide_side` 丢弃
+            side.epoch.fetch_add(1, Ordering::AcqRel);
         }
     }
 }
@@ -1114,4 +1206,102 @@ mod tests {
         // （残片 "[::1" 会被 `rsplit_once(':')` 拆成 host="[:" port=1 ⇒ 到连接阶段才失败，可接受）
         let _ = parse_url("http://[::1");
     }
+    /// 🔴 **JSON 数字溢出必须拒绝**（2026-10-19 外部复核第 6 条）。
+    /// `f64::from_str("1e500")` 返回 `Ok(inf)` 而不是 Err ⇒ 旧实现产出 `Json::Num(inf)`。
+    /// 反向验证：删掉 `.filter(|n| n.is_finite())` ⇒ 本判据红。
+    #[test]
+    fn json_number_rejects_non_finite() {
+        assert!(parse_json_fn("1e500").is_err(), "1e500 必须被拒（标准库会返回 inf）");
+        assert!(parse_json_fn("-1e500").is_err());
+        assert!(parse_json_fn("1e308").is_ok(), "有限大数必须照旧可用（不要反过来拒掉合法大数）");
+        assert!(parse_json_fn("1.5e-300").is_ok());
+    }
+
+    /// 🔴 **`json_escape` 的输出必须能被自己的解析器读回**（控制字符也要转义）。
+    /// 反向验证：删掉控制字符分支 ⇒ `parse_json_fn` 报"控制字符非法"，本判据红。
+    #[test]
+    fn json_escape_round_trips_control_chars() {
+        let raw = "bad\x08mid\x1bend\ttab";
+        let doc = format!("{{\"k\":\"{}\"}}", json_escape(raw));
+        let v = parse_json_fn(&doc).expect("转义后的 JSON 必须能被自己读回");
+        assert_eq!(v.get("k").and_then(|x| x.as_str()), Some(raw));
+    }
+
+    /// 🔴 **HTTP 非 200 必须报错**，不能把状态行当正文（旧实现找不到头终止符时 body_start 回退 0）。
+    /// 反向验证：删掉状态码检查 ⇒ 本判据红（会把 "HTTP/1.1 500…" 当 JSON 交给调用方）。
+    #[test]
+    fn http_status_non_200_is_an_error() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut req = [0u8; 1024];
+                let _ = sock.read(&mut req);
+                let _ = sock.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\n\r\n{}");
+            }
+        });
+        let err = http_post_json(
+            &format!("http://127.0.0.1:{port}"),
+            "{}",
+            std::time::Duration::from_secs(3),
+        )
+        .expect_err("500 必须报错");
+        assert!(err.contains("状态非 200"), "错误信息应点明状态码，实际: {err}");
+        let _ = server.join();
+        // 正对照：200 必须照旧可用
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut req = [0u8; 1024];
+                let _ = sock.read(&mut req);
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            }
+        });
+        let ok = http_post_json(
+            &format!("http://127.0.0.1:{port}"),
+            "{}",
+            std::time::Duration::from_secs(3),
+        )
+        .expect("200 必须可用（正对照）");
+        assert_eq!(ok, "{}");
+        let _ = server.join();
+    }
+
+    /// 🔴 **回合重置必须：清 latest、清 history、代号自增**（防在途旧决策写回新局）。
+    #[test]
+    fn clear_orders_resets_history_and_bumps_epoch() {
+        use std::sync::atomic::Ordering as O;
+        let shared = Arc::new(Shared {
+            red: SideCtx::new(),
+            blue: SideCtx::new(),
+            stopped: AtomicBool::new(false),
+        });
+        let cmd = LlmCommander { shared: Arc::clone(&shared), handle: None };
+        shared.red.latest.lock().unwrap().replace(Vec::new());
+        shared.red.history.lock().unwrap().push(("s".into(), "d".into()));
+        let before = shared.red.epoch.load(O::Acquire);
+        cmd.clear_orders();
+        assert!(shared.red.latest.lock().unwrap().is_none(), "latest 必须清空");
+        assert!(shared.red.history.lock().unwrap().is_empty(), "history 必须清空");
+        assert_eq!(shared.red.epoch.load(O::Acquire), before + 1, "代号必须自增");
+        assert_eq!(shared.blue.epoch.load(O::Acquire), 1);
+    }
+
+    /// 🔴 **Drop 必须通知后台线程退出**（旧实现 stopped 全文件没人置 true，也无 Drop）。
+    #[test]
+    fn drop_sets_stopped_flag() {
+        use std::sync::atomic::Ordering as O;
+        let shared = Arc::new(Shared {
+            red: SideCtx::new(),
+            blue: SideCtx::new(),
+            stopped: AtomicBool::new(false),
+        });
+        let cmd = LlmCommander { shared: Arc::clone(&shared), handle: None };
+        drop(cmd);
+        assert!(shared.stopped.load(O::Acquire), "Drop 之后 stopped 必须为 true");
+    }
+
 }

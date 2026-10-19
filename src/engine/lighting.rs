@@ -260,6 +260,12 @@ pub fn blinn_phong_diffuse(normal: Vec3, light_dir: Vec3) -> f32 {
 /// Blinn-Phong 高光系数：`pow(max(dot(n, h), 0), shininess)`，`h = normalize(l + v)`
 #[allow(dead_code)]
 pub fn blinn_phong_specular(normal: Vec3, light_dir: Vec3, view_dir: Vec3, shininess: f32) -> f32 {
+    // 🔴 **背光面不许出高光**（2026-10-19 外部复核第 9 条，已确认）：
+    // 没有这层门控时，`n·l <= 0` 的暗面在掠射观察角下仍能算出 `n·h > 0` ⇒ 背光漏光。
+    // 注意：本文件是 CPU 侧参考实现（渲染用的是 `build.rs` 里的 WGSL，两处要同步看）。
+    if normal.dot(light_dir) <= 0.0 {
+        return 0.0;
+    }
     let half = (light_dir + view_dir).normalize_or_zero();
     normal.dot(half).max(0.0).powf(shininess)
 }
@@ -411,6 +417,20 @@ mod tests {
         );
         // 非法分母（<= 0）按 1.0 处理
         assert_eq!(point_attenuation(1.0, -1.0, 0.0, 0.0), 1.0);
+    }
+
+    /// 🔴 **背光面不许出高光**（2026-10-19 外部复核第 9 条）。
+    /// 反向验证：删掉 `blinn_phong_specular` 开头的 `n·l <= 0` 门控 ⇒ 本判据红。
+    #[test]
+    fn backface_has_no_specular() {
+        let light = DirectionalLight::new(Vec3::new(0.0, -1.0, -1.0).normalize(), Vec3::ONE, 1.0);
+        let view = Vec3::new(0.0, 0.9, 0.4).normalize();
+        let r = directional_radiance(&light, Vec3::Y, view, DEFAULT_SHININESS);
+        assert_eq!(
+            r,
+            Vec3::ZERO,
+            "背光面（n·l < 0）仍有高光：{r:?}（暗面漏光）"
+        );
     }
 
     #[test]
