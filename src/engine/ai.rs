@@ -853,7 +853,22 @@ pub fn flank_goal(grid: &GridMap, player: GridPos, target: GridPos, side: i32, o
         player.x + (px * r).round() as i32,
         player.y + (py * r).round() as i32,
     );
-    GridPos::new(raw.x.clamp(0, max_x), raw.y.clamp(0, max_y))
+    let clamped = GridPos::new(raw.x.clamp(0, max_x), raw.y.clamp(0, max_y));
+    // 🔴 **只 clamp 不够：必须保证落在可通行格**（2026-10-19 外部复核缺陷 4-B，已确认）。
+    //
+    // 玩家贴墙/站在角落时，旋转 90° 偏移出来的点**很容易落进墙体**；而 `find_path_inner`
+    // 对"目标不可通行"是 **O(1) 直接返回 `None`**（不返回部分路径）⇒ 侧翼/包抄单位拿不到
+    // 路径，退化成直线顶墙磨死（`occluded=true`，永远进不了 `Attack`）。
+    // 吸附到最近的可行格（环上限 4：偏移量按 `offset` 量级，4 格足够跨过一格厚的墙）。
+    if grid.is_passable(clamped) {
+        return clamped;
+    }
+    passable_or_nearest(grid, clamped, 4).unwrap_or_else(|| {
+        // 连 4 环内都没有可行格（整片区域被围死）：退回玩家所在格的可通行版本，
+        // 至少不让调用方拿到一个必失败的阻挡目标。
+        passable_or_nearest(grid, player, 4)
+            .unwrap_or_else(|| GridPos::new(player.x.clamp(0, max_x), player.y.clamp(0, max_y)))
+    })
 }
 
 /// 波次类型
@@ -2154,6 +2169,37 @@ mod tests {
 
     /// 偷袭目标点：优先选玩家朝向背后一侧；相同时确定性取 +1 侧
     #[test]
+    /// 🔴 **侧翼目标点绝不能落在阻挡格里**（2026-10-19 外部复核缺陷 4-B）。
+    ///
+    /// 反例场景：玩家贴着墙、NPC 在另一侧 ⇒ 旋转 90° 偏移出来的点正好落进墙体。
+    /// 旧实现只 `clamp` 到地图边界 ⇒ 返回阻挡格 ⇒ `find_path` O(1) 返回 `None`
+    /// ⇒ 侧翼单位拿不到路径，直线顶墙磨死。
+    /// 反向验证：删掉 `flank_goal` 末尾的 `is_passable` 吸附 ⇒ 本判据红。
+    #[test]
+    fn flank_goal_never_lands_in_a_blocked_cell() {
+        let mut grid = GridMap::new(15, 15);
+        // 造一道竖直墙（x = 7）。玩家贴墙西侧 (6,7)、NPC 在玩家**正北** (6,9)
+        // ⇒ 旋转 90° 后偏移方向是 ±X；取 offset = 1 时其中一侧正好落在 (7,7) —— **墙里**。
+        for y in 0..15 {
+            grid.block(GridPos::new(7, y));
+        }
+        let player = GridPos::new(6, 7);
+        let npc = GridPos::new(6, 9);
+        for side in [-1i32, 1] {
+            let g = flank_goal(&grid, player, npc, side, 1);
+            assert!(
+                grid.is_passable(g),
+                "side={side} 的侧翼点 ({},{}) 落在阻挡格里",
+                g.x,
+                g.y
+            );
+        }
+        // 对照：空旷地图上仍然按几何方向选点（别把功能改没了）
+        let open = GridMap::new(15, 15);
+        let g = flank_goal(&open, GridPos::new(7, 7), GridPos::new(10, 7), 1, 4);
+        assert!(open.is_passable(g));
+    }
+
     fn ambush_goal_prefers_behind_player() {
         let grid = GridMap::new(11, 11);
         let player = GridPos::new(5, 5);
