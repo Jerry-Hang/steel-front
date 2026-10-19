@@ -2117,8 +2117,11 @@ mod city_layout_tests {
     /// 而不是等实机截图上出现半道被切断的砂浆缝才发现。
     #[test]
     fn masonry_skin_gate_leaves_an_empty_band() {
-        // 与 build.rs 的 MASONRY_MIN_SPAN 同值；两处不一致时本测试失去意义。
-        const GATE: f32 = 1.5;
+        // 🔴 直接取 `ray_tracer::MASONRY_MIN_SPAN`（2026-10-19 外部复核第 10 条）：
+        // 该常量与 `build.rs` 两份、PT GLSL 一份由 `lib.rs` 的
+        // `masonry_min_span_matches_every_copy` 钉死；这里再手抄一个 `1.5` 就多出一个
+        // 不受约束的副本 —— 改了 build.rs 后本测试仍会"绿"（假守卫）。
+        const GATE: f32 = crate::engine::ray_tracer::MASONRY_MIN_SPAN;
         // 任何一件的跨度都不许贴到阈值这么近以内（实测最近的是 1.45，余量 0.05）。
         const MARGIN: f32 = 0.04;
         let m = generate_city();

@@ -982,7 +982,13 @@ mod tests {
         }
         let img = image::RgbaImage::from_raw(size, size, px.clone())
             .expect("rgba buffer size mismatch");
-        img.save(out).expect("write ground_texture_dump.png");
+        // 🔴 **默认不写盘**（2026-10-19 外部复核第 10 条）：原来无条件 `img.save`
+        // ⇒ 只读构建环境（CI/沙箱）跑单测会直接 panic。要 dump 时显式开
+        // `RV3D_DUMP_CITY_TEX=1`（输出仍走 `screenshots/`，方便与截图对照）。
+        if crate::syscfg::flag("RV3D_DUMP_CITY_TEX") {
+            img.save(out).expect("write ground_texture_dump.png");
+            eprintln!("已写出 screenshots/ground_texture_dump.png（RV3D_DUMP_CITY_TEX=1）");
+        }
         println!("  wrote {}", out.display());
     }
 
