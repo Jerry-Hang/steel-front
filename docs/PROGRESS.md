@@ -889,3 +889,27 @@ B13 ALSA 非阻塞 drain。
 lib 改动仍是 ~13s（rustc 单 crate 编译 12.9s，无法靠加核解决）。
 顺带量到：构建期 CPU 平均 **35%（≈11/32 线程）**，构建图最大并发只有 **2**（1 crate + 2 bin）；
 **测试并行 1.42s vs 单线程 4.81s** ⇒ 日常用并行，只在排查顺序相关问题时加 `--test-threads=1`。
+
+### 2026-10-20 凌晨：第 13 批复核（生成/资产/线程/外部通道）收口
+
+**修复提交 `bbc11a3` + `7aad335`**。10 条判据全部做过「回退即红」验证。
+
+* **[P0] `cpu.rs` 线程池 send 失败静默漏算**：`par_for_each_mut_capped` 只补计数、不执行该段
+  ⇒ worker 一死每帧丢 1/nw 的剔除/AI 工作。已补调用线程回退（`run_sync` 早有，这里漏了）。
+* **`cpu.rs` AMD 双簇**：逻辑核号对半在原生 Linux 上交集为空 ⇒ 次簇全是超线程。改按物理核对半切。
+  判据含"旧写法次簇必须为空"的反证。
+* **`waves.rs` stress 模式朝向**统一到 `atan2(dx,dz)`（原 90° 偏转）。
+* **`procedural.rs` 砖明度列号**与砖缝同源（原来每块砖被分成两半）。
+* **`ray_tracer.rs` `-Y`/`-Z` 面反绕**：属实但 PT 无背面剔除、UV 自算 ⇒ **无视觉影响**，按契约修正。
+* **`meshgen.rs`** 法线改 `(M3^-1)^T`、翻面按行列式符号（当前调用方全是等比 ⇒ 行为不变）。
+* **`lighting.rs`** 背光面高光门控。
+* **`llm_cmd.rs`** 五处：`1e500→inf` 拒绝、`json_escape` 全控制字符、HTTP 状态码/头/chunked、
+  `clear_orders` 清 history + epoch 作废在途请求、`LlmCommander::Drop` 置 `stopped`。
+* **判据卫生**：`city.rs` 的 `MASONRY_MIN_SPAN` 副本改为同源引用（`lib.rs` 早钉了 4 份）；
+  `dump_city_ground_texture_and_report_zones` 默认不写盘（`RV3D_DUMP_CITY_TEX=1` 才写）。
+
+**未结案（登记）**：
+1. **`city.rs` 有/无 `assets/props` 时 `LevelMap::obstacles` 不一致**（Android/缺资产路径）——
+   修法需把资产尺寸契约提升为编译期常量表并让 solid 一律查表，属跨模块重构。
+2. `cpu.rs` 非连续在线核的循环上界 / `probe_per_cpu` 忽略绑核返回值（容器/热插拔场景）。
+3. `city.rs::relief_steps_are_not_coplanar` 未覆盖 decor 层间台阶与 `half_d`。
