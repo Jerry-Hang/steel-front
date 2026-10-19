@@ -790,6 +790,13 @@ impl<S: AudioSink> AudioPlayer<S> {
         for (dst, s) in buf.iter_mut().zip(self.synth_bus.iter()) {
             *dst += s * master;
         }
+        // 🔴 **限幅必须放在「两条总线合并之后」**（2026-10-19 实测修正）：
+        // `Mixer::mix` 内部的限幅只覆盖 clip 声部；合成总线（环境风/音乐）是在它**之后**才加进来的
+        // ⇒ 合成声部绕过限幅。实测录音里峰值仍是 **0 dBFS**（而 CEIL=0.7）就是这条造成的。
+        // 判据 = `final_output_is_limited_after_both_buses_are_mixed`。
+        for x in buf.iter_mut() {
+            *x = soft_limit(*x);
+        }
         self.sink.write(&buf);
     }
 
@@ -2086,6 +2093,31 @@ mod tests {
         let (c, fin) = advance_voice_cursor(2.0, 100.0, false, 30);
         assert!(!fin && (c - 32.0).abs() < 1e-9);
     }
+    /// 🔴 **限幅必须在「两条总线合并之后」**（2026-10-19 实测修正）。
+    ///
+    /// `Mixer::mix` 内部的限幅只覆盖 clip 声部；合成总线（环境风/音乐）是在那之后才加进主缓冲的
+    /// ⇒ 若只在 Mixer 内限幅，合成声部**绕过限幅**。实测录音峰值仍是 0 dBFS（而 CEIL=0.7）
+    /// 就是这条造成的。
+    /// 反向验证：把 `AudioPlayer::tick` 末尾那段 `soft_limit(*x)` 删掉 ⇒ 本判据红。
+    #[test]
+    fn final_output_is_limited_after_both_buses_are_mixed() {
+        let src = include_str!("audio.rs");
+        let tick = src
+            .find("pub fn tick(&mut self, listener: &AudioListener, frames: usize)")
+            .expect("tick 必须存在");
+        let body = &src[tick..];
+        let synth_add = body
+            .find("self.synth_bus.iter()")
+            .expect("tick 里必须有合成总线合并");
+        let limit = body
+            .find("for x in buf.iter_mut() {\n            *x = soft_limit(*x);")
+            .expect("tick 末尾必须对合并后的缓冲做限幅（`*x = soft_limit(*x);`）");
+        assert!(
+            limit > synth_add,
+            "限幅出现在合成总线合并之前 ⇒ 环境风/音乐会绕过限幅"
+        );
+    }
+
     /// 🔉 感知音量曲线（2026-10-19）：滑块 0.5 必须映射成 0.5^2.5 ≈ 0.1768（约 −15 dB），
     /// 而不是线性 0.5。反向验证：把 `powf(2.5)` 改成恒等 ⇒ 本判据红。
     #[test]
