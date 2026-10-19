@@ -379,9 +379,16 @@ fn http_post_json(url: &str, body: &str, timeout: Duration) -> Result<String, St
     {
         use std::io::Read;
         // 读失败（含读超时）同样不能再吞：半截 body 送进 JSON 解析只会得到误导性的错误
-        stream
+        // 有界读取：多读 1 字节用来判定"是否超限"
+        (&stream)
+            .take(MAX_RESPONSE_BYTES as u64 + 1)
             .read_to_end(&mut buf)
             .map_err(|e| format!("读 {addr} 响应失败: {e}"))?;
+    }
+    if buf.len() > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "响应体超过上限 {MAX_RESPONSE_BYTES} 字节（拒绝继续读取，防内存耗尽）"
+        ));
     }
     let text = String::from_utf8_lossy(&buf).to_string();
     let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
@@ -389,6 +396,11 @@ fn http_post_json(url: &str, body: &str, timeout: Duration) -> Result<String, St
 }
 
 const DEFAULT_PATH: &str = "/v1/chat/completions";
+
+/// 🔴 **响应体上限**（2026-10-19 自查发现，随手修）：`read_to_end` 原来没有上限 ——
+/// 端点异常或被中间人利用时可以无限推流 ⇒ 进程内存被吃穿（本机 12GB，游戏还要跑 GPU 资源）。
+/// 8MB 足够容纳任何合理的指挥 JSON（实测响应 < 8KB）。
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 fn parse_url(url: &str) -> Result<(String, u16, String), String> {
     let url = url.trim();
@@ -413,6 +425,12 @@ fn parse_url(url: &str) -> Result<(String, u16, String), String> {
         None => (hp.to_string(), 80),
     };
     let path = if path.is_empty() { DEFAULT_PATH.to_string() } else { path };
+    // 🔴 请求行注入防线（2026-10-19 自查）：`path` 直接拼进 `POST {path} HTTP/1.1`，
+    // 若含 CR/LF 就能**插出额外请求头/请求体**（虽然 URL 来自用户自己的环境变量，
+    // 但"来自环境变量"不等于"一定合法"——本仓在解析类缺陷上已经栽过多次）。
+    if path.contains(['\r', '\n']) {
+        return Err("URL 路径里含换行（CR/LF），拒绝构造请求".to_string());
+    }
     Ok((host, port, path))
 }
 
@@ -715,11 +733,61 @@ impl LlmCommander {
 #[cfg(test)]
 mod tests {
     use super::{
-        json_escape, parse_company_cmds, parse_json_fn, parse_url, pick_decision_text, CompanyCmd,
-        LlmCommander, LlmOrder, Shared, SideCtx, DEFAULT_PATH, MAX_JSON_DEPTH,
+        http_post_json, json_escape, parse_company_cmds, parse_json_fn, parse_url,
+        pick_decision_text, CompanyCmd, LlmCommander, LlmOrder, Shared, SideCtx, DEFAULT_PATH,
+        MAX_JSON_DEPTH, MAX_RESPONSE_BYTES,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+
+    /// 🔴 **响应体必须有上限**（2026-10-19 自查）：`read_to_end` 原来无界，
+    /// 异常端点可无限推流 ⇒ 进程内存耗尽。
+    /// 反向验证：把 `.take(MAX_RESPONSE_BYTES + 1)` 去掉 ⇒ 本判据红（会一直读到 9MB 不报错）。
+    #[test]
+    fn http_response_is_bounded() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定回环失败");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut req = [0u8; 1024];
+                let _ = sock.read(&mut req);
+                // 假装是一个无限推流的异常端点：先头发，再灌超量数据
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+                let chunk = vec![b'x'; 64 * 1024];
+                for _ in 0..(MAX_RESPONSE_BYTES / chunk.len() + 8) {
+                    if sock.write_all(&chunk).is_err() {
+                        break; // 客户端已断开（正是我们要的）
+                    }
+                }
+            }
+        });
+        let err = http_post_json(
+            &format!("http://127.0.0.1:{port}"),
+            "{}",
+            std::time::Duration::from_secs(3),
+        )
+        .expect_err("超限响应必须报错，不能把 8MB+ 全读进内存");
+        assert!(
+            err.contains("超过上限"),
+            "错误信息应点明响应超限，实际: {err}"
+        );
+        let _ = server.join();
+    }
+
+    /// 🔴 **URL 路径不许带 CR/LF**（2026-10-19 自查）：`path` 直接拼进请求行，
+    /// 含换行就能插出额外请求头/请求体。
+    #[test]
+    fn url_path_rejects_crlf_injection() {
+        for bad in ["http://127.0.0.1:8080/a\r\nX: y", "http://h/path\nmore"] {
+            let err = parse_url(bad).expect_err("含 CR/LF 的路径必须拒绝");
+            assert!(err.contains("换行"), "错误信息应点明换行，实际: {err}");
+        }
+        // 正对照：正常 URL 必须照旧可用
+        let (host, port, path) = parse_url("http://127.0.0.1:8080/v1/x").unwrap();
+        assert_eq!((host.as_str(), port, path.as_str()), ("127.0.0.1", 8080, "/v1/x"));
+    }
 
     /// 🔴 判据：**手写 JSON 解析器不许被畸形输入打崩**。
     ///
