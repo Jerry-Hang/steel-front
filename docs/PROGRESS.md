@@ -868,3 +868,24 @@ B13 ALSA 非阻塞 drain。
 `6889031`（duplicated attribute 告警）。两次都只看了 `cargo build --release`
 （**它不编译 `cfg(test)`**，铁律 F 早写过）。已各自补 `1d8f75d` / `b381edb` 修复。
 ⇒ **提交前的固定动作：`cargo test --release --no-run` 也要 0 告警**，与 build 同等对待。
+
+### 2026-10-19 收口：第 12 批全部结案（7/7）+ 编译提速（mold）
+
+**5-A / 5-B 补做**（前一轮记录为"暂不修"）：
+* 5-A 天花板：`PlayerBody::ceiling_height` + 纯函数 `physics::clamp_vertical`
+  （先压天花板、地面优先兜底），跳跃分支接入；判据 `jump_stops_at_ceiling`。
+* 5-B 迭代：**先实验后改** —— 抽出 `collide_world_iter`，5000 个随机密集场景对比 2 vs 4：
+  **127 次结果不同**，找到「2 次解不开、4 次能解开」的确定性案例；改 `COLLIDE_ITERATIONS = 4`，
+  判据 `collide_four_iterations_resolve_a_corner_two_do_not`（常量改回 2 即红）。
+* **4-A 最终不修**：第一版按"目标连通域"过滤掩体是**方向错误**（候选由
+  `find_cover_points(grid, npc, …)` 围绕 NPC 生成 ⇒ 全被滤掉，正对照测试当场否掉）；
+  按 NPC 域过滤则每帧每 NPC 需 16k 格洪泛（200×60fps 不可接受），且跨域已有 `direct_goal` 兜底。
+  **撤销实现并把理由写进提交说明**。
+* 4-C 不修（`find_path` 对阻挡目标早退是**有文档意图**的行为）。
+
+**🔧 编译提速（本机，用户级配置，不进仓库）**：
+`~/.cargo/config.toml` 启用 **mold**（`-C link-arg=-fuse-ld=mold`，系统包非 Rust 依赖；备份 `/tmp/cargo-config.bak`）。
+实测：**只改 `main.rs` 的构建 12.8s → 0.5s**（GNU ld 链接 15MB 二进制原来是主要开销）；
+lib 改动仍是 ~13s（rustc 单 crate 编译 12.9s，无法靠加核解决）。
+顺带量到：构建期 CPU 平均 **35%（≈11/32 线程）**，构建图最大并发只有 **2**（1 crate + 2 bin）；
+**测试并行 1.42s vs 单线程 4.81s** ⇒ 日常用并行，只在排查顺序相关问题时加 `--test-threads=1`。
