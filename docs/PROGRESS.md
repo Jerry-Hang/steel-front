@@ -1084,3 +1084,20 @@ build.rs 中文不进 HUD。
 
 ⚠️ **VUID 判据本轮不适用**：本机未安装 `VK_LAYER_KHRONOS_validation`（sudo 无终端输入密码装不了），
 日志里 0 条 VUID 只是"没开验证层"的结构性结果（教训 46 同形）。
+
+### 2026-10-21 凌晨：定向复查（探针式）—— 5 条跨文件不变量全部通过
+
+主题：**"状态重置 / 失败路径 / 一次性缓存"**。做法不是再读一遍代码，而是**写探针测试**，
+让不变量自己说话（通过后留作回归判据）：
+
+| 探针 | 不变量 | 结果 |
+|---|---|---|
+| `obstacle_destruction_keeps_body_and_obstacle_tables_aligned` | 摧毁障碍后 `world.bodies` 与 `map.obstacles` 仍逐项对齐（下标一一对应是命中/弹孔/伤害的前提） | ✅ 通过 |
+| `killing_an_npc_keeps_remaining_indices_consistent` | `damage_npc` 击杀移除后 `nearest_segment_hit` 返回的下标仍指向正确 NPC | ✅ 通过 |
+| `reload_state_does_not_stick_across_a_weapon_switch` | 换弹中切枪再切回，换弹可完成（不永久卡在 reloading） | ✅ 通过 |
+| `start_run_is_idempotent_for_per_run_state` | 连开两局后所有每局字段一致（新字段漏复位会被抓到） | ✅ 通过 |
+| `objective_victory_evaluation_is_idempotent` | 据点胜利重复判定不改状态/不重写横幅/不重复播报 | ✅ 通过 |
+
+**结论：本主题 5 条不变量当前全部成立，未发现新缺陷**（对比第 14/15 批均抓到过状态残留，
+说明前两轮修复确实生效）。另抽查了全仓 `OnceLock` 清单（29 处，全部是 env 开关/进程级池/
+诊断闩，无跨实例状态污染）与资产全局单例（`install` 仅启动路径调用，无测试污染）。

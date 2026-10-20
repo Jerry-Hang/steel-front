@@ -379,3 +379,206 @@ mod session;
             "远端玩家开火必须真的生成一发世界弹丸"
         );
     }
+
+    // ===== 定向复查探针（2026-10-21）：跨文件不变量，通过后留作回归判据 =====
+
+    /// 探针 1：**障碍摧毁后 `world.bodies` 与 `map.obstacles` 必须继续逐项对齐**
+    /// （两表按下标一一对应是命中结算/弹孔/伤害的前提；任何 remove 不同步 =
+    /// 以后所有子弹打到错误的刚体上）。
+    #[test]
+    fn obstacle_destruction_keeps_body_and_obstacle_tables_aligned() {
+        let mut g = Game::new();
+        g.map.obstacles.clear();
+        g.world.bodies.clear();
+        for (i, (x, z)) in [(0.0f32, -5.0f32), (10.0, -5.0)].into_iter().enumerate() {
+            let half_w = 1.5f32;
+            let half_d = 0.5f32;
+            g.map.obstacles.push(MapObstacle {
+                x,
+                z,
+                half_w,
+                half_d,
+                y: 1.2,
+                half_h: 1.2,
+                kind: ObstacleKind::Wall,
+                tint: None,
+                max_hp: 100.0,
+                hp: 100.0,
+                shape: Shape::Legacy,
+            });
+            g.world.bodies.push(Body::new_static(
+                Pv::new(x, 1.2, z),
+                Pv::new(half_w, 1.2, half_d),
+            ));
+            assert!(i < 2);
+        }
+        g.damage_obstacle(0, 1.0e9);
+        assert_eq!(g.map.obstacles.len(), 1, "只剩一个障碍");
+        assert_eq!(
+            g.world.bodies.len(),
+            g.map.obstacles.len(),
+            "两表长度必须始终相等（下标一一对应）"
+        );
+        let ob = &g.map.obstacles[0];
+        let aabb = g.world.bodies[0].aabb();
+        assert!(
+            (aabb.min.x - (ob.x - ob.half_w)).abs() < 1e-3
+                && (aabb.max.x - (ob.x + ob.half_w)).abs() < 1e-3
+                && (aabb.min.z - (ob.z - ob.half_d)).abs() < 1e-3,
+            "摧毁 #0 后，剩下的刚体与障碍必须还是同一件（body min.x={} vs 障碍 x-half={})",
+            aabb.min.x,
+            ob.x - ob.half_w
+        );
+    }
+
+    /// 探针 2：**`damage_npc` 击杀移除后，剩下的数组下标语义必须一致**
+    /// （`nearest_segment_hit` 返回的是 `self.npcs` 的下标；乱序/错位 = 子弹打错人）。
+    #[test]
+    fn killing_an_npc_keeps_remaining_indices_consistent() {
+        let mut g = Game::new();
+        g.npcs.clear();
+        g.world.bodies.clear();
+        g.world.spheres.clear();
+        let mut a = npc_at(7, Team::Red, [0.0, 0.0, -5.0]);
+        a.hp = 30.0;
+        let mut b = npc_at(9, Team::Red, [0.0, 0.0, -12.0]);
+        b.hp = 100.0;
+        g.npcs = vec![a, b];
+        let killed = g.damage_npc(0, 1.0e9, DamageSource::Player);
+        assert!(killed, "#7 30 血应被一击打死");
+        assert_eq!(g.npcs.len(), 1);
+        assert_eq!(g.npcs[0].id, 9, "剩下的必须是 #9");
+        // 从原点向 −Z 打一发，线段 0..−10：应命中 z=−12 之外？改为线段 0..−20 直接构造
+        let mut p = crate::engine::weapons::Projectile::new(
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            600.0,
+            500.0,
+            2.0,
+            28.0,
+        )
+        .with_player();
+        p.update(1.0 / 30.0); // 一帧飞 20m，穿过 z=−12
+        match g.nearest_segment_hit(&p) {
+            Some(crate::engine::game::weapons::SegmentHit::Npc { idx, .. }) => {
+                assert_eq!(idx, 0, "命中下标应指向剩下的 #9（数组下标 0）");
+                assert_eq!(g.npcs[idx].id, 9);
+            }
+            other => panic!("应命中剩下的 NPC，实际 {:?}", other.map(|h| h.t())),
+        }
+    }
+
+    /// 探针 3：**换弹中切枪再切回，换弹不能永久卡住**（状态机跨武器残留）。
+    #[test]
+    fn reload_state_does_not_stick_across_a_weapon_switch() {
+        let mut g = Game::new();
+        g.on_any_key();
+        // 打一发消耗弹匣，再请求换弹
+        assert!(g.fire_player([0.0, 1.6, 0.0], [0.0, 0.0, -1.0]));
+        g.weapons.update(1.0); // 冷却清零
+        g.request_reload();
+        assert!(
+            g.weapons.active_firearm_ref().is_reloading(),
+            "前提：应当进入换弹状态"
+        );
+        // 切走再切回
+        g.switch_weapon(1);
+        g.weapons.update(0.7);
+        g.switch_weapon(0);
+        g.weapons.update(0.7);
+        // 推进足够长时间：换弹必须能完成（不能永久卡在 reloading）
+        for _ in 0..400 {
+            g.weapons.update(0.02);
+        }
+        assert!(
+            !g.weapons.active_firearm_ref().is_reloading(),
+            "换弹中切枪再切回后，换弹永久卡住（remaining={:.2}s）",
+            g.weapons.active_firearm_ref().reload_progress()
+        );
+        assert!(g.weapons.active_firearm_ref().magazine() > 1, "换弹应已补弹");
+    }
+
+    /// 探针 4：**`start_run` 必须幂等**（连开两局后所有"每局状态"一致）。
+    /// 任何新增的每局字段只要在 `start_run_at` 里漏复位，这里就会分叉。
+    #[test]
+    fn start_run_is_idempotent_for_per_run_state() {
+        let mut g = Game::new();
+        g.on_any_key();
+        g.start_run();
+        let snap1 = (
+            g.hud.health,
+            g.hud.ammo,
+            g.hud.reserve,
+            g.score,
+            g.wave,
+            g.level,
+            g.heal_timer,
+        );
+        let snap1b = (
+            g.grenades,
+            g.medkits,
+            g.projectiles.len(),
+            g.grenades_vec.len(),
+            g.explosions.len(),
+            g.npcs.len(),
+            g.map.obstacles.len(),
+            g.map.props.len(),
+        );
+        assert_eq!(g.stance, Stance::Standing);
+        // 改动一批每局状态后再重开
+        g.hud.health = 1.0;
+        g.hud.ammo = 0;
+        g.score = 999;
+        g.level = 7;
+        g.toggle_prone();
+        g.grenades = 0;
+        g.medkits = 0;
+        g.heal_timer = 2.0;
+        g.projectiles.clear();
+        g.start_run();
+        let snap2 = (
+            g.hud.health,
+            g.hud.ammo,
+            g.hud.reserve,
+            g.score,
+            g.wave,
+            g.level,
+            g.heal_timer,
+        );
+        let snap2b = (
+            g.grenades,
+            g.medkits,
+            g.projectiles.len(),
+            g.grenades_vec.len(),
+            g.explosions.len(),
+            g.npcs.len(),
+            g.map.obstacles.len(),
+            g.map.props.len(),
+        );
+        assert_eq!(snap1, snap2, "两局起始状态必须一致（有每局字段漏复位）");
+        assert_eq!(snap1b, snap2b, "两局起始状态必须一致（有每局字段漏复位）");
+        assert_eq!(g.stance, Stance::Standing, "重开后必须回到站姿");
+    }
+
+    /// 探针 5：**据点胜利判定必须幂等**（重复调用不得重复播报/改状态）。
+    #[test]
+    fn objective_victory_evaluation_is_idempotent() {
+        use crate::engine::ai::Team;
+        use crate::engine::objective::{CapturePoint, GameRule, ObjectiveState};
+        let mut g = Game::new();
+        g.on_any_key();
+        let mut st = ObjectiveState::new(GameRule::CapturePoints { required: 1 });
+        let mut pt = CapturePoint::new("A", 0.0, 0.0, 5.0, 5.0);
+        pt.owner = Some(Team::Blue);
+        st.points.push(pt);
+        g.obj_state = Some(st);
+        g.update_objectives(0.0, &glam::Vec3::ZERO);
+        let state1 = g.game_state;
+        let banner1 = g.hud.victory_banner.clone();
+        let kills1 = g.hud.kill_feed.len();
+        g.update_objectives(0.0, &glam::Vec3::ZERO);
+        assert_eq!(g.game_state, state1, "重复判定不得改变状态");
+        assert_eq!(g.hud.victory_banner, banner1, "重复判定不得重写横幅");
+        assert_eq!(g.hud.kill_feed.len(), kills1, "重复判定不得重复播报");
+    }
+
