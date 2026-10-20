@@ -937,3 +937,28 @@ lib 改动仍是 ~13s（rustc 单 crate 编译 12.9s，无法靠加核解决）�
 1. `city.rs` 有/无 `assets/props` 时 `LevelMap::obstacles` 不一致（已加注入点；还差"碰撞尺寸来自
    编译期资产契约表"的跨模块重构，代价是回退路径的视觉/碰撞需一起改）。
 2. `relief_steps_are_not_coplanar` 仍未覆盖 decor 之间的通用共面（范围太大，需单独设计）。
+
+
+### 2026-10-20 晚（续）：未结案 #1 收口 —— 有无 GLB 资产时碰撞表逐项一致
+
+**提交 `94370f2`**。
+
+* **契约表**：`props.rs::CONTRACT_SIZES`（24 件，名字/宽/深/高）+ `PropSet::contract()`
+  （只有名字与包围盒、无顶点的"决策集"）。值由现有资产实测导出，顺序与 `load_dir` 一致。
+* **City 拆两套数据**：`contract`（挑哪件/缩放/碰撞尺寸，**与资产无关**）+
+  `set`（真实资产，只决定画 GLB 还是程序化盒）。`pick_building` 与全部 8 处
+  `c.prop(...)` 分支改为「先按契约推碰撞核 → 资产在则隐藏核心+摆 GLB；不在则核心可见+装饰」。
+  覆盖：`building` / `row_houses` / 集装箱 / 树 / 沙袋墙 / HESCO / 废车 / 路灯。
+  回退路径的旧碰撞几何（15 个球、两段树干、4.4×2.1 车身…）降级为 `deco`（只画不挡）。
+* **判据（都做过反向验证）**：
+  * `contract_matches_loaded_assets`：契约表 vs 真实资产逐件 1mm 比对；改一个数即红。
+  * `obstacles_are_identical_with_and_without_assets`：两条路径整城生成后
+    **数量 + 每个盒的 (kind,x,y,z,half_w,half_d,half_h) 全等**；把回退沙袋改回 `push`
+    即红（1240 vs 1360 个碰撞盒）。
+* 桌面端行为不变（契约值 = 资产尺寸，1mm 级舍入）；无资产路径的碰撞表与桌面**逐字节一致**。
+
+**仍未结案**：
+1. `city.rs::relief_steps_are_not_coplanar` 只检查"同中心装饰 vs 核心"，未覆盖 decor 之间
+   的通用共面（全城统计：主路径 472 对、回退路径 2700 对；范围太大，需单独设计）。
+2. `relief_steps_are_not_coplanar` 的 GLB 分支覆盖：资产路径下建筑核心为 `Shape::None`，
+   该判据目前只验证回退/可见核心（已在契约化后成为同一套尺寸，风险降低）。
