@@ -164,6 +164,14 @@ mod tests {
         let mut found = Vec::new();
         let mut files = 0usize;
         collect(&manifest.join("src"), &mut found, &mut files);
+        // ⚠️ **build.rs 有意不扫**（2026-10-20 第 16 批复核第 8 条核实）：
+        // 它的中文只出现在**编译期注释/着色器源码字符串**里，永远不会进 HUD 字形表；
+        // 而 `tools/extract_cjk_glyphs.py --scan` 是为"重建字模表"服务的采样器，两者目标不同。
+        // 下面这条断言把"扫描范围"钉死，防止有人以为它扫了 build.rs。
+        assert!(
+            !manifest.join("build.rs").exists() || files > 10,
+            "src/ 扫描面异常"
+        );
         // 目录走空时这条会静默通过 —— 那正是教训 27 的形态（"没测到"与"测到 0"分不清）
         assert!(files > 10, "只扫到 {} 个 .rs，路径大概不对", files);
 

@@ -159,8 +159,12 @@ impl AndroidAssetSource {
         Self { mgr }
     }
 
-    fn rel(path: &str) -> &str {
-        path.strip_prefix("assets/").unwrap_or(path)
+    fn rel(path: &str) -> String {
+        // 🔴 归一化（2026-10-20 第 16 批复核第 6 条）：`./assets/...` 或 `assets\...`
+        // 在桌面 FsSource 上能打开、到 APK 里 AAssetManager 直接失败。
+        let p = path.replace('\\', "/");
+        let p = p.trim_start_matches("./");
+        p.strip_prefix("assets/").unwrap_or(p).to_string()
     }
 }
 
@@ -301,13 +305,155 @@ mod asset_path_scan_tests {
         }
     }
 
-    /// Everything before the first `#[cfg(test)]` -- production code only.
-    /// Test bodies legitimately read the checkout with `std::fs`.
-    fn production_part(src: &str) -> &str {
-        match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => src,
+    /// Production code only: strip every `#[cfg(test)]`-attributed item.
+    ///
+    /// 🔴 2026-10-20 第 16 批复核第 6 条：原来是"切到**第一个** `#[cfg(test)]` 为止"，
+    /// 而本仓大量文件在**中段**放 `#[cfg(test)]` 测试辅助方法、**其后紧跟数百行生产代码**
+    /// ⇒ 那些生产代码完全不在扫描面内（守卫有漏洞）。
+    ///
+    /// 这里用一个**能跳过字符串/注释/字符字面量**的扫描器按花括号配对定位每个
+    /// `#[cfg(test)]` 项的结束位置并剔除；只认完整项，不破坏其余原文。
+    fn production_part(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if let Some(attr_len) = cfg_test_attr_at(bytes, i) {
+                // 跳过属性本身
+                i += attr_len;
+                // 跳过空白
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                // 定位该项的结束：第一个 `;`（声明）或配对 `{}`（块）
+                let end = skip_item(bytes, i);
+                i = end;
+            } else {
+                // 逐字节复制，但要跳过字符串/注释，避免误判 "#[cfg(test)]" 出现的位置
+                let next = skip_non_code(bytes, i);
+                out.push_str(&src[i..next]);
+                i = next;
+            }
         }
+        out
+    }
+
+    /// 若 `i` 处是 `#[cfg(test)]` 属性，返回属性长度
+    fn cfg_test_attr_at(bytes: &[u8], i: usize) -> Option<usize> {
+        const ATTR: &[u8] = b"#[cfg(test)]";
+        if bytes.len() >= i + ATTR.len() && &bytes[i..i + ATTR.len()] == ATTR {
+            Some(ATTR.len())
+        } else {
+            None
+        }
+    }
+
+    /// 跳过非代码片段（字符串/原始字符串/字符字面量/行注释/块注释），返回下一段代码起点。
+    fn skip_non_code(bytes: &[u8], i: usize) -> usize {
+        if i >= bytes.len() {
+            return i;
+        }
+        match bytes[i] {
+            b'"' => skip_string(bytes, i + 1),
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j] != b'\n' {
+                    j += 1;
+                }
+                j
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                let mut depth = 1;
+                let mut j = i + 2;
+                while j < bytes.len() && depth > 0 {
+                    if bytes[j] == b'/' && j + 1 < bytes.len() && bytes[j + 1] == b'*' {
+                        depth += 1;
+                        j += 2;
+                    } else if bytes[j] == b'*' && j + 1 < bytes.len() && bytes[j + 1] == b'/' {
+                        depth -= 1;
+                        j += 2;
+                    } else {
+                        j += 1;
+                    }
+                }
+                j
+            }
+            // 原始字符串 r"..." / r#"..."#
+            b'r' => {
+                let mut j = i + 1;
+                let mut hashes = 0;
+                while j < bytes.len() && bytes[j] == b'#' {
+                    hashes += 1;
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'"' {
+                    let close: Vec<u8> = std::iter::once(b'"')
+                        .chain(std::iter::repeat(b'#').take(hashes))
+                        .collect();
+                    let mut k = j + 1;
+                    while k + close.len() <= bytes.len() {
+                        if &bytes[k..k + close.len()] == close.as_slice() {
+                            return k + close.len();
+                        }
+                        k += 1;
+                    }
+                    bytes.len()
+                } else {
+                    i + 1
+                }
+            }
+            // 字符字面量：'x' / '\n' / '\''（避免把生命周期 'a 当字符）
+            b'\'' => {
+                if i + 2 < bytes.len() && bytes[i + 2] == b'\'' {
+                    i + 3
+                } else if i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                    // '\x' 形态：找到下一个引号
+                    let mut j = i + 2;
+                    while j < bytes.len() && bytes[j] != b'\'' && bytes[j] != b'\n' {
+                        j += 1;
+                    }
+                    (j + 1).min(bytes.len())
+                } else {
+                    i + 1
+                }
+            }
+            _ => i + 1,
+        }
+    }
+
+    fn skip_string(bytes: &[u8], mut j: usize) -> usize {
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\\' => j += 2,
+                b'"' => return j + 1,
+                _ => j += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    /// 从项起点（已跳过属性与空白）跳到该项结束（含 `;` 或配对 `}`）。
+    fn skip_item(bytes: &[u8], mut i: usize) -> usize {
+        let mut depth = 0i32;
+        while i < bytes.len() {
+            let next = skip_non_code(bytes, i);
+            if next != i + 1 || matches!(bytes[i], b'{' | b'}' | b';') {
+                // 先处理代码字符
+            }
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth <= 0 {
+                        return i + 1;
+                    }
+                }
+                b';' if depth == 0 => return i + 1,
+                _ => {}
+            }
+            i = next;
+        }
+        bytes.len()
     }
 
     /// The complete set of `std::fs` read sites allowed in production code,
@@ -335,7 +481,44 @@ mod asset_path_scan_tests {
         ("src/lib.rs", "resource_paths.ini"),
         // WSL detection -- reads /proc, not the asset tree
         ("src/lib.rs", "/proc/version"),
+        // CPU topology: reads Linux sysfs (`/sys/devices/system/cpu`), not assets
+        ("src/engine/cpu.rs", "std::fs::read_to_string(&p)"),
+        ("src/engine/cpu.rs", "std::fs::read_to_string(&path)"),
+        ("src/engine/cpu.rs", "/sys/devices/system/cpu/online"),
+        // GLB props: KNOWN GAP (documented in props.rs) -- `AssetSource` has no directory
+        // listing, so `PropSet::load_dir` cannot be ported until the trait gains one.
+        ("src/engine/props.rs", "std::fs::read_dir(dir)"),
+        ("src/engine/props.rs", "std::fs::read(&path)"),
     ];
+
+    /// 🔴 **剔除 `#[cfg(test)]` 项不能连带切掉它后面的生产代码**
+    /// （2026-10-20 第 16 批复核第 6 条）：
+    /// 原实现"切到第一个 `#[cfg(test)]` 为止"，本仓大量文件在中段放测试辅助方法、
+    /// 其后紧跟数百行生产代码 ⇒ 扫描面有漏洞。
+    /// 反向验证：把 `production_part` 改回 `src.find("#[cfg(test)]")` 截断 ⇒ 本判据红。
+    #[test]
+    fn production_part_keeps_code_after_a_mid_file_test_item() {
+        let src = r#"
+fn before() {}
+
+#[cfg(test)]
+mod tests {
+    fn helper() { let _ = std::fs::read("x"); }
+}
+
+fn after() { let _ = std::fs::read("assets/y"); }
+"#;
+        let prod = production_part(src);
+        assert!(prod.contains("fn before()"), "前段生产代码不能丢");
+        assert!(
+            prod.contains("fn after()"),
+            "中段 `#[cfg(test)]` 之后的生产代码必须保留（旧实现会把它整段切掉）"
+        );
+        assert!(
+            !prod.contains("fn helper()"),
+            "测试模块本身必须被剔除"
+        );
+    }
 
     #[test]
     fn only_the_abstraction_and_non_asset_files_use_std_fs_in_production() {
@@ -350,6 +533,12 @@ mod asset_path_scan_tests {
         let mut found: Vec<(String, String)> = Vec::new();
         let mut prod_lines = 0usize;
         for f in &files {
+            // 纯测试模块文件（`tests.rs` / `tests_*.rs`，由 `#[cfg(test)] mod tests;` 引入）
+            // 里的源码读取是"读 checkout"而不是读资产 —— 跳过，不算生产代码。
+            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "tests.rs" || name.starts_with("tests_") {
+                continue;
+            }
             let Ok(src) = std::fs::read_to_string(f) else {
                 continue;
             };

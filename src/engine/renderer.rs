@@ -249,6 +249,13 @@ const QUALITY_PARAMS: [QualityParams; 3] = [
 
 /// 截图读回时主机侧等待**围栏**的超时（纳秒，2 秒足够完成一帧渲染）。
 /// 两处都用它：等本帧渲染完成（`in_flight_fences[slot]`）与等拷贝命令完成（截图自己的围栏）。
+/// 在飞帧槽位数的硬上限：`marker_slot_version` 用固定数组按 `current_frame` 索引，
+/// 所以槽位数绝不能超过它（初始化处有断言）。
+pub(crate) const MAX_FRAMES_IN_FLIGHT_CAP: usize = 8;
+
+// 编译期绑定：`marker_slot_version` 是固定数组，槽位数（device.rs 里是 2）绝不能超过它。
+const _: () = assert!(2 <= MAX_FRAMES_IN_FLIGHT_CAP);
+
 const SCREENSHOT_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
 
 /// 交换链图像获取的超时（纳秒）。**绝不可以用 `u64::MAX`**：呈现引擎不给图像时
@@ -757,7 +764,9 @@ pub struct Renderer {
     /// 版本 N 之前写过槽位 0、之后升到 N+1 只写了槽位 1 —— 此时槽位 0 里还是旧数据。
     /// 若下一轮轮到槽位 0 却因为"版本已经是 N+1"而跳过，**那一帧会拿旧 marker 去画**
     /// （表现是障碍物闪烁/残影）。⇒ 必须 `slot_version[slot] == markers_version` 才跳。
-    marker_slot_version: [u64; 8],
+    /// 每个在飞帧槽位的 marker 版本号。长度必须与 `max_frames_in_flight` 的上限同源
+    /// （2026-10-20 第 16 批复核第 7 条：原来硬编码 8，没有和运行时槽位数建立任何断言）。
+    marker_slot_version: [u64; MAX_FRAMES_IN_FLIGHT_CAP],
     /// 本帧 marker 近/远档计数（record_command_buffer 读取，render 时更新）
     /// 上一帧  的耗时（µs，诊断用；见该函数里的注释）
     last_marker_upload_us: u64,

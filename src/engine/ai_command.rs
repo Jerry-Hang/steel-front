@@ -97,6 +97,12 @@ pub struct Platoon {
 }
 
 /// 外部（LLM 指挥官）下发的连长命令覆盖：任务 + 目标点
+/// 寻路网格是 ±256m，目标点落在网格外 NPC 会卡在边界 ⇒ 所有"下发目标"统一夹到这里。
+///
+/// 🔴 2026-10-20 第 16 批复核第 4 条：原来三处各写一个数（LLM 280 / 班目标 270 /
+/// 连目标 250），LLM 下发 280 时整连直接站到网格外。
+pub(crate) const NAV_HALF_EXTENT: f32 = 250.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CmdOverride {
     pub order: CompanyOrder,
@@ -294,12 +300,15 @@ impl Army {
         enemy_centroid: [f32; 2],
         llm: Option<&[CmdOverride]>,
     ) {
-        self.tick += dt;
         self.enemy_centroid = enemy_centroid;
         // 不足 33 人（9 个班 = 3 个排）连未编成：跳过指挥层（逐人战术照常）
+        // 🔴 `tick` 必须在判空**之后**才累加（2026-10-20 第 16 批复核第 4 条）：
+        // 原来先 += 再判空 ⇒ 小规模战斗里 tick 无限累积，补员建连后第一个 0.5s 节拍
+        // 立刻被残留时间触发，或读到的 tick 是几千秒。
         if self.companies.is_empty() {
             return;
         }
+        self.tick += dt;
         if self.tick < 0.5 {
             return;
         }
@@ -382,12 +391,22 @@ impl Army {
         // 3) 逐连下发：命令 + 目标点（侧翼命令取垂直方向偏移）
         //    LLM 指挥官覆盖：数量匹配时直接采用外部命令（目标点越界由 llm_cmd 校验过）
         let company_count = self.companies.len();
-        let llm_ok = llm.map(|o| o.len() == company_count).unwrap_or(false);
+        // 🔴 外部坐标不可信（2026-10-20 第 16 批复核第 4 条）：
+        // `f32::NAN.clamp(..) == NaN` ⇒ 必须显式过滤非有限值，否则全连目标点变 NaN；
+        // 同时去掉生产路径上的 `llm.unwrap()`。
+        let llm_orders = llm.filter(|o| {
+            o.len() == company_count
+                && o.iter()
+                    .all(|cmd| cmd.x.is_finite() && cmd.z.is_finite())
+        });
         for (ci, c) in self.companies.iter_mut().enumerate() {
-            if llm_ok {
-                let o = &llm.unwrap()[ci];
+            if let Some(orders) = llm_orders {
+                let o = &orders[ci];
                 c.order = o.order;
-                c.objective = [o.x.clamp(-280.0, 280.0), o.z.clamp(-280.0, 280.0)];
+                c.objective = [
+                    o.x.clamp(-NAV_HALF_EXTENT, NAV_HALF_EXTENT),
+                    o.z.clamp(-NAV_HALF_EXTENT, NAV_HALF_EXTENT),
+                ];
                 c.report = company_reports.get(ci).copied().unwrap_or(CompanyReport {
                     strength: 0.0,
                     centroid: [0.0, 0.0],
@@ -449,8 +468,8 @@ impl Army {
         let off = FORMATION_OFFSETS[*slot % FORMATION_OFFSETS.len()];
         // 以班目标点为锚，班内槽位偏移（不旋转——大战场上可接受并保持确定）
         let mut wp = [squad.objective[0] + off[0], squad.objective[1] + off[1]];
-        wp[0] = wp[0].clamp(-270.0, 270.0);
-        wp[1] = wp[1].clamp(-270.0, 270.0);
+        wp[0] = wp[0].clamp(-NAV_HALF_EXTENT, NAV_HALF_EXTENT);
+        wp[1] = wp[1].clamp(-NAV_HALF_EXTENT, NAV_HALF_EXTENT);
         Some(wp)
     }
 
@@ -602,8 +621,8 @@ pub(crate) fn company_objective(
     };
     let lateral = flank_off + spread;
     [
-        (mid[0] - ux * standoff + px * lateral).clamp(-250.0, 250.0),
-        (mid[1] - uz * standoff + pz * lateral).clamp(-250.0, 250.0),
+        (mid[0] - ux * standoff + px * lateral).clamp(-NAV_HALF_EXTENT, NAV_HALF_EXTENT),
+        (mid[1] - uz * standoff + pz * lateral).clamp(-NAV_HALF_EXTENT, NAV_HALF_EXTENT),
     ]
 }
 
@@ -1008,5 +1027,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 🔴 **LLM 下发的坐标不可信**（2026-10-20 第 16 批复核第 4 条）：
+    /// `f32::NAN.clamp(..)` 仍然是 NaN ⇒ 必须显式过滤非有限值；
+    /// 且所有目标点必须落在寻路网格内（±250m，网格 ±256m）。
+    /// 反向验证：删掉 `is_finite()` 过滤 / 把 clamp 改回 280 ⇒ 本判据红。
+    #[test]
+    fn llm_orders_with_nan_or_out_of_grid_coordinates_are_ignored() {
+        let mut a = army_of(36);
+        let grid = GridMap::new(128, 128);
+        let bad = [CmdOverride {
+            order: CompanyOrder::Assault,
+            x: f32::NAN,
+            z: 280.0,
+        }];
+        a.update(&[], &grid, 0.6, 0, 0, [0.0, 0.0], Some(&bad));
+        for c in &a.companies {
+            assert!(
+                c.objective[0].is_finite() && c.objective[1].is_finite(),
+                "LLM 含 NaN 时目标点不得变成 NaN：{:?}",
+                c.objective
+            );
+            assert!(
+                c.objective[0].abs() <= NAV_HALF_EXTENT && c.objective[1].abs() <= NAV_HALF_EXTENT,
+                "目标点 {:?} 越出寻路网格安全区 ±{NAV_HALF_EXTENT}m",
+                c.objective
+            );
+        }
+        // 正对照：合法 orders 必须生效（别把整条 LLM 覆盖路径关了）
+        let good = [CmdOverride {
+            order: CompanyOrder::Hold,
+            x: 200.0,
+            z: -100.0,
+        }];
+        a.update(&[], &grid, 0.6, 0, 0, [0.0, 0.0], Some(&good));
+        assert_eq!(a.companies[0].order, CompanyOrder::Hold);
+        assert_eq!(a.companies[0].objective, [200.0, -100.0]);
+    }
+
+    /// 🔴 **小规模战斗 `tick` 不得无界累积**（2026-10-20 第 16 批复核第 4 条）。
+    /// 反向验证：把 `self.tick += dt` 移回判空之前 ⇒ 本判据红。
+    #[test]
+    fn tick_does_not_accumulate_before_companies_exist() {
+        let mut a = army_of(10); // 不足 33 人 ⇒ companies 为空
+        assert!(a.companies.is_empty());
+        let grid = GridMap::new(128, 128);
+        for _ in 0..100 {
+            a.update(&[], &grid, 0.05, 0, 0, [0.0, 0.0], None);
+        }
+        assert_eq!(a.tick, 0.0, "未编成时 tick 必须保持 0（实际 {}）", a.tick);
     }
 }

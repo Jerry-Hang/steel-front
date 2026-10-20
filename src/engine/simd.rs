@@ -73,7 +73,15 @@ pub fn shockwave_pressure(
     // 退化输入：`radius <= 0` 时 `k = 1/(r*r) = +inf`，若某点恰与 center 重合则
     // `k*d2 = inf*0 = NaN` ⇒ `a/(1+NaN) * 0` 仍是 **NaN**（`falloff=0` 救不回来），
     // 破坏本函数"有限输入下不产生 NaN/Inf"的约定。直接给零场。
-    if !(radius > 0.0) || amplitude == 0.0 {
+    // 🔴 极小正半径也要拦（2026-10-20 第 16 批复核第 3 条）：
+    // `radius = 1e-20` 是有限正数（过了"大于 0"检查），但 `1/(r*r)` 溢出成 +inf，
+    // 爆心处 `inf * 0 = NaN` ⇒ 输出 NaN，破坏"有限输入无 NaN"契约。
+    let inv_r2 = 1.0 / (radius * radius);
+    if !(radius > 0.0)
+        || !inv_r2.is_finite()
+        || !amplitude.is_finite()
+        || amplitude == 0.0
+    {
         out.fill(0.0);
         return "scalar";
     }
@@ -767,5 +775,22 @@ mod simd_shockwave_tests {
             !warn_forced_simd_unsupported("test-path"),
             "第二次必须被闩住 —— 否则每帧刷屏（这条红了说明 OnceLock 没了）"
         );
+    }
+
+    /// 🔴 **极小有限正半径不得产生 NaN**（2026-10-20 第 16 批复核第 3 条）：
+    /// `radius = 1e-20` 满足 `radius > 0`，但 `1/(r*r)` 溢出 +inf，爆心处 `inf*0 = NaN`。
+    /// 反向验证：把入口守卫改回只判 `!(radius > 0.0) || amplitude == 0.0` ⇒ 本判据红。
+    #[test]
+    fn tiny_positive_radius_never_produces_nan() {
+        let points = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let mut out = [0.0f32; 2];
+        let _ = shockwave_pressure([0.0, 0.0, 0.0], 1e-20, 100.0, &points, &mut out);
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "1e-20 半径下产生了 NaN/Inf: {out:?}"
+        );
+        // 正对照：正常半径仍产生非零场（别把整条路径关掉）
+        let _ = shockwave_pressure([0.0, 0.0, 0.0], 10.0, 100.0, &points, &mut out);
+        assert!(out[0] > 0.0 && out.iter().all(|v| v.is_finite()));
     }
 }

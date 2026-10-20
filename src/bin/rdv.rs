@@ -12,6 +12,16 @@ use std::time::{Duration, Instant};
 const ENTRY_TTL: Duration = Duration::from_secs(120);
 /// 容量上界：常驻服务必须有界（仓库教训 44）。
 const MAX_ENTRIES: usize = 4096;
+/// 单个源 IP 的活跃房间数上限（防单 IP 灌满注册表）。
+const MAX_ROOMS_PER_IP: usize = 4;
+/// 房间名合法字符集与长度（只允许 `[A-Za-z0-9_-]`，1..=32）。
+fn valid_room_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 
 fn log_line(msg: &str) {
     println!("steel-front-rdv: {msg}");
@@ -34,6 +44,22 @@ fn main() {
         match fields.next() {
             Some("REG") => {
                 if let Some(name) = fields.next() {
+                    // 🔴 名字校验（2026-10-20 第 16 批复核第 2 条）：长度/字符集都不设限时，
+                    // 一个包就能塞 500 字节房间名并在 ADDR 回包/日志里原样放大。
+                    if !valid_room_name(name) {
+                        let _ = sock.send_to(b"BAD name\n", from);
+                        continue;
+                    }
+                    // 🔴 单 IP 活跃房间数上限：否则一个源 IP 用 4096 个不同名字
+                    // 就能在 TTL(120s) 内把注册表填满、把正常玩家全挡在 FULL 外。
+                    let same_ip = registry
+                        .values()
+                        .filter(|(a, _)| a.ip() == from.ip())
+                        .count();
+                    if !registry.contains_key(name) && same_ip >= MAX_ROOMS_PER_IP {
+                        let _ = sock.send_to(b"BUSY ip\n", from);
+                        continue;
+                    }
                     // 🔴 **端口校验**（外部复核指出第 4 条）：只接受 1..=65535。
                     // 原来 `REG foo 0` 会存进一个非法的 0 端口 —— 之后的 PUNCH 打不出去，
                     // 而且给攻击者留了「借 WHO 向任意地址反射 PUNCH」的口子。
@@ -98,6 +124,32 @@ fn main() {
                 }
             }
             _ => {}
+        }
+    }
+
+}
+
+/// 名字校验的判据（2026-10-20 第 16 批复核第 2 条）：
+/// 长度/字符集不设限时，一个包能塞 500 字节房间名并在回包/日志里原样放大。
+#[cfg(test)]
+mod tests {
+    use super::valid_room_name;
+
+    #[test]
+    fn room_names_are_bounded_to_safe_identifiers() {
+        for ok in ["room1", "a", "abc-def_123", "x".repeat(32).as_str()] {
+            assert!(valid_room_name(ok), "合法名字被拒: {ok:?}");
+        }
+        for bad in [
+            "",
+            "has space",
+            "bad/name",
+            "newline\n",
+            "控制\u{7}",
+            "x".repeat(33).as_str(),
+            "中文名字",
+        ] {
+            assert!(!valid_room_name(bad), "非法名字被放行: {bad:?}");
         }
     }
 }

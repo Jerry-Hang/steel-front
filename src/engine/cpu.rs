@@ -524,7 +524,7 @@ pub fn forced_simd_path() -> Option<&'static str> {
         return None;
     };
     let v = v.trim();
-    let known = matches!(v, "avx512" | "avx2" | "avx" | "sse4.2" | "scalar");
+    let known = matches!(v, "avx512" | "avx2" | "avx" | "sse4.2" | "neon" | "scalar");
     if !known {
         WARNED.get_or_init(|| {
             log::warn!("cpu: RV3D_FORCE_SIMD 值无效（{v}），忽略并回退自动选路");

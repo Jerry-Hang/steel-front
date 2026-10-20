@@ -141,7 +141,7 @@ pub const ALL_WEAPONS: [WeaponSpec; 35] = [
     WeaponSpec { key: "pkp", name_zh: "PKP 佩切涅格", faction: Faction::Union, caliber: "7.62×54R", magazine: 100, reserve: 200, rpm: 650.0, range: 800.0, reload: 4.5, kick_pitch: 0.0288, kick_yaw: 0.0101, pellets: 1, sound: SoundKind::Lmg, muzzle_velocity: 830.0, gravity: 9.8, spread_moa: 1.3, tiers: &[(100.0, 67.0), (200.0, 60.0), (400.0, 50.0), (600.0, 40.0), (800.0, 33.0), (f32::MAX, 23.0)], part_tiers: &[(100.0, 1.5, 1.0, 0.8, 0.6), (800.0, 1.2, 1.0, 0.8, 0.6), (f32::MAX, 0.8, 1.0, 0.8, 0.6)] },
     WeaponSpec { key: "rope12", name_zh: "绳结 12.7mm", faction: Faction::Union, caliber: "12.7×108mm", magazine: 50, reserve: 150, rpm: 550.0, range: 1200.0, reload: 4.5, kick_pitch: 0.0336, kick_yaw: 0.0118, pellets: 1, sound: SoundKind::Lmg, muzzle_velocity: 900.0, gravity: 9.8, spread_moa: 1.0, tiers: &[(100.0, 67.0), (200.0, 62.0), (400.0, 52.0), (600.0, 42.0), (800.0, 35.0), (1200.0, 28.0), (f32::MAX, 20.0)], part_tiers: &[(1200.0, 2.0, 1.5, 1.2, 1.0), (f32::MAX, 1.5, 1.2, 1.0, 0.8)] },
     WeaponSpec { key: "saiga12", name_zh: "圆木 Saiga-12", faction: Faction::Union, caliber: "12号口径", magazine: 8, reserve: 32, rpm: 240.0, range: 50.0, reload: 2.8, kick_pitch: 0.0360, kick_yaw: 0.0126, pellets: 8, sound: SoundKind::Shotgun, muzzle_velocity: 400.0, gravity: 9.8, spread_moa: 25.0, tiers: &[(50.0, 14.0), (f32::MAX, 8.0)], part_tiers: &[(50.0, 1.5, 1.0, 1.0, 0.8), (f32::MAX, 1.2, 0.8, 0.8, 0.6)] },
-    WeaponSpec { key: "mp443", name_zh: "MP-443 乌鸦", faction: Faction::Union, caliber: "9×19mm", magazine: 18, reserve: 72, rpm: 400.0, range: 50.0, reload: 1.5, kick_pitch: 0.0144, kick_yaw: 0.0050, pellets: 1, sound: SoundKind::Pistol, muzzle_velocity: 380.0, gravity: 9.8, spread_moa: 4.0, tiers: &[(50.0, 25.0), (f32::MAX, 15.0)], part_tiers: &[(10.0, 4.0, 1.0, 0.9, 0.7), (50.0, 1.5, 1.0, 0.9, 0.7), (f32::MAX, 0.8, 1.0, 0.9, 0.7)] },
+    WeaponSpec { key: "mp443", name_zh: "MP-443 乌鸦", faction: Faction::Union, caliber: "9×19mm", magazine: 18, reserve: 72, rpm: 400.0, range: 50.0, reload: 1.5, kick_pitch: 0.0144, kick_yaw: 0.0050, pellets: 1, sound: SoundKind::Pistol, muzzle_velocity: 380.0, gravity: 9.8, spread_moa: 4.0, tiers: &[(50.0, 25.0), (f32::MAX, 15.0)], part_tiers: &[(10.0, 4.0, 1.0, 0.9, 0.7), (50.0, 1.5, 1.0, 0.9, 0.7), (f32::MAX, 1.0, 1.0, 0.9, 0.7)] },
     WeaponSpec { key: "rsh12", name_zh: "RSh-12 撞锤", faction: Faction::Union, caliber: "12.7×55mm", magazine: 5, reserve: 20, rpm: 180.0, range: 75.0, reload: 2.0, kick_pitch: 0.0300, kick_yaw: 0.0105, pellets: 1, sound: SoundKind::Pistol, muzzle_velocity: 400.0, gravity: 9.8, spread_moa: 3.0, tiers: &[(75.0, 40.0), (f32::MAX, 24.0)], part_tiers: &[(75.0, 2.0, 1.5, 1.2, 1.0), (f32::MAX, 1.2, 0.8, 0.7, 0.6)] },
     WeaponSpec { key: "ash12", name_zh: "ASh-12 破城锤", faction: Faction::Union, caliber: "12.7×55mm", magazine: 10, reserve: 30, rpm: 350.0, range: 200.0, reload: 2.6, kick_pitch: 0.0300, kick_yaw: 0.0105, pellets: 1, sound: SoundKind::Rifle, muzzle_velocity: 400.0, gravity: 9.8, spread_moa: 3.0, tiers: &[(50.0, 67.0), (100.0, 60.0), (150.0, 52.0), (200.0, 45.0), (f32::MAX, 28.0)], part_tiers: &[(200.0, 2.0, 1.5, 1.2, 1.0), (f32::MAX, 1.2, 0.8, 0.7, 0.6)] },
     // ============ 同盟（蓝）18-35 ============
@@ -160,8 +160,8 @@ pub const ALL_WEAPONS: [WeaponSpec; 35] = [
     WeaponSpec { key: "m2a1", name_zh: "M2A1 硬汉", faction: Faction::Alliance, caliber: "12.7×99mm", magazine: 50, reserve: 150, rpm: 550.0, range: 1300.0, reload: 4.5, kick_pitch: 0.0289, kick_yaw: 0.0101, pellets: 1, sound: SoundKind::Lmg, muzzle_velocity: 890.0, gravity: 9.8, spread_moa: 1.0, tiers: &[(100.0, 65.0), (200.0, 60.0), (400.0, 50.0), (600.0, 40.0), (800.0, 33.0), (1300.0, 28.0), (f32::MAX, 20.0)], part_tiers: &[(1300.0, 2.0, 1.5, 1.2, 1.0), (f32::MAX, 1.5, 1.2, 1.0, 0.8)] },
     WeaponSpec { key: "m1014", name_zh: "M1014 破门", faction: Faction::Alliance, caliber: "12号口径", magazine: 8, reserve: 32, rpm: 180.0, range: 50.0, reload: 2.8, kick_pitch: 0.0306, kick_yaw: 0.0107, pellets: 8, sound: SoundKind::Shotgun, muzzle_velocity: 400.0, gravity: 9.8, spread_moa: 25.0, tiers: &[(50.0, 13.0), (f32::MAX, 8.0)], part_tiers: &[(50.0, 1.5, 1.0, 1.0, 0.8), (f32::MAX, 1.2, 0.8, 0.8, 0.6)] },
     WeaponSpec { key: "aa12", name_zh: "AA12 风暴", faction: Faction::Alliance, caliber: "12号口径", magazine: 20, reserve: 40, rpm: 300.0, range: 80.0, reload: 2.8, kick_pitch: 0.0298, kick_yaw: 0.0104, pellets: 8, sound: SoundKind::Shotgun, muzzle_velocity: 420.0, gravity: 9.8, spread_moa: 30.0, tiers: &[(50.0, 13.0), (80.0, 10.0), (f32::MAX, 7.0)], part_tiers: &[(50.0, 1.5, 1.0, 1.0, 0.8), (80.0, 1.2, 0.8, 0.8, 0.6), (f32::MAX, 1.0, 0.6, 0.6, 0.5)] },
-    WeaponSpec { key: "m18", name_zh: "M18 信标", faction: Faction::Alliance, caliber: "9×19mm", magazine: 17, reserve: 68, rpm: 400.0, range: 50.0, reload: 1.5, kick_pitch: 0.0122, kick_yaw: 0.0043, pellets: 1, sound: SoundKind::Pistol, muzzle_velocity: 380.0, gravity: 9.8, spread_moa: 4.0, tiers: &[(50.0, 25.0), (f32::MAX, 15.0)], part_tiers: &[(10.0, 4.0, 1.0, 0.9, 0.7), (50.0, 1.5, 1.0, 0.9, 0.7), (f32::MAX, 0.8, 1.0, 0.9, 0.7)] },
-    WeaponSpec { key: "mk23", name_zh: "Mk23 Mod 0 海豹", faction: Faction::Alliance, caliber: ".45 ACP", magazine: 12, reserve: 48, rpm: 300.0, range: 75.0, reload: 1.8, kick_pitch: 0.0184, kick_yaw: 0.0064, pellets: 1, sound: SoundKind::Pistol, muzzle_velocity: 350.0, gravity: 9.8, spread_moa: 3.5, tiers: &[(50.0, 28.0), (75.0, 22.0), (f32::MAX, 14.0)], part_tiers: &[(10.0, 4.0, 1.0, 0.9, 0.7), (75.0, 1.5, 1.0, 0.9, 0.7), (f32::MAX, 0.8, 1.0, 0.9, 0.7)] },
+    WeaponSpec { key: "m18", name_zh: "M18 信标", faction: Faction::Alliance, caliber: "9×19mm", magazine: 17, reserve: 68, rpm: 400.0, range: 50.0, reload: 1.5, kick_pitch: 0.0122, kick_yaw: 0.0043, pellets: 1, sound: SoundKind::Pistol, muzzle_velocity: 380.0, gravity: 9.8, spread_moa: 4.0, tiers: &[(50.0, 25.0), (f32::MAX, 15.0)], part_tiers: &[(10.0, 4.0, 1.0, 0.9, 0.7), (50.0, 1.5, 1.0, 0.9, 0.7), (f32::MAX, 1.0, 1.0, 0.9, 0.7)] },
+    WeaponSpec { key: "mk23", name_zh: "Mk23 Mod 0 海豹", faction: Faction::Alliance, caliber: ".45 ACP", magazine: 12, reserve: 48, rpm: 300.0, range: 75.0, reload: 1.8, kick_pitch: 0.0184, kick_yaw: 0.0064, pellets: 1, sound: SoundKind::Pistol, muzzle_velocity: 350.0, gravity: 9.8, spread_moa: 3.5, tiers: &[(50.0, 28.0), (75.0, 22.0), (f32::MAX, 14.0)], part_tiers: &[(10.0, 4.0, 1.0, 0.9, 0.7), (75.0, 1.5, 1.0, 0.9, 0.7), (f32::MAX, 1.0, 1.0, 0.9, 0.7)] },
     WeaponSpec { key: "m82a1", name_zh: "M82A1", faction: Faction::Alliance, caliber: "12.7×99mm", magazine: 10, reserve: 20, rpm: 40.0, range: 1800.0, reload: 3.8, kick_pitch: 0.0700, kick_yaw: 0.0196, pellets: 1, sound: SoundKind::Sniper, muzzle_velocity: 900.0, gravity: 9.8, spread_moa: 0.4, tiers: &[(100.0, 75.0), (200.0, 70.0), (400.0, 60.0), (600.0, 50.0), (800.0, 42.0), (1800.0, 35.0), (f32::MAX, 25.0)], part_tiers: &[(1800.0, 2.0, 1.5, 1.2, 1.0), (f32::MAX, 1.5, 1.2, 1.0, 0.8)] },
 ];
 
@@ -258,6 +258,12 @@ mod tests {
                 prev_limit = *limit;
                 prev_dmg = *dmg;
             }
+            assert_eq!(
+                spec.tiers.last().unwrap().0,
+                f32::MAX,
+                "{} 伤害档末档必须覆盖到 f32::MAX（否则超程命中落空）",
+                spec.key
+            );
             assert_eq!(spec.base_damage(), spec.tiers[0].1, "{} 基础伤害≠首档", spec.key);
         }
     }
@@ -271,10 +277,19 @@ mod tests {
             for (limit, h, c, a, l) in spec.part_tiers {
                 assert!(*limit > prev, "{} 部位分段不递增", spec.key);
                 assert!(c >= a && a >= l, "{} 倍率顺序异常", spec.key);
-                assert!(h >= l, "{} 头倍率低于腿倍率", spec.key);
+                // 🔴 头必须不低于手臂/腿（2026-10-20 第 16 批复核第 5 条）：
+                // 3 把手枪超程档曾写成头 0.8 < 臂 0.9 —— 打手臂比爆头伤害高。
+                assert!(*h >= *a, "{} 在 {:.0}m 档「爆头倍率({h}) < 手臂倍率({a})」倒挂", spec.key, limit);
+                assert!(*a >= *l, "{} 手臂倍率低于腿倍率", spec.key);
                 assert!(*h > 0.0 && *c > 0.0 && *a > 0.0 && *l > 0.0, "{} 倍率必须为正", spec.key);
                 prev = *limit;
             }
+            assert_eq!(
+                spec.part_tiers.last().unwrap().0,
+                f32::MAX,
+                "{} 部位倍率末档必须覆盖到 f32::MAX（否则超程命中落空）",
+                spec.key
+            );
         }
     }
 
