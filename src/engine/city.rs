@@ -210,6 +210,9 @@ struct City {
     /// 已加载的道具网格集。放在构造器里而不是逐层透传，是为了让二十多个生成函数
     /// 的签名保持原样——它们只需要 `&mut City`。
     set: PropSet,
+    /// 🔴 **编译期契约**（`PropSet::contract()`）：几何/碰撞尺寸的唯一真源。
+    /// 与 `set`（真实资产）分开：`set` 只决定"画不画 GLB"，契约决定"摆什么、多大"。
+    contract: PropSet,
     /// 已按名解析出的网格下标缓存，避免每摆一件就重扫一遍表。
     mesh_cache: std::collections::HashMap<&'static str, usize>,
 }
@@ -221,6 +224,7 @@ impl City {
             decor: Vec::new(),
             props: Vec::new(),
             set: PropSet::default(),
+            contract: PropSet::contract(),
             mesh_cache: std::collections::HashMap::new(),
         }
     }
@@ -268,6 +272,13 @@ impl City {
         Some(i)
     }
 
+    /// 契约尺寸：`(全宽, 全深, 全高)`（米）。
+    fn contract_dims(&self, name: &'static str) -> Option<(f32, f32, f32)> {
+        let m = self.contract.get(self.contract.index_of(name)?)?;
+        let (hx, hz) = m.half_footprint();
+        Some((hx * 2.0, hz * 2.0, m.max[1] - m.min[1]))
+    }
+
     /// 摆一件 GLB 道具。资产没加载到就返回 false，调用方据此退回程序化盒——
     /// 缺资产的后果必须是"画面旧一点"，不能是"城里没有楼"。
     fn prop(&mut self, name: &'static str, x: f32, z: f32, yaw: f32, scale: f32) -> bool {
@@ -308,8 +319,8 @@ impl City {
         let target = (w / d.max(0.01)).ln();
         let mut best: Option<(f32, &'static str, f32)> = None;
         for name in cands {
-            let i = self.set.index_of(name)?;
-            let (hx, hz) = self.set.get(i)?.half_footprint();
+            let (tw, td, _) = self.contract_dims(name)?;
+            let (hx, hz) = (tw * 0.5, td * 0.5);
             let (gw, gd) = (hx * 2.0, hz * 2.0);
             let (aw, ad) = if quarter { (gd, gw) } else { (gw, gd) };
             if aw < 0.5 || ad < 0.5 {
@@ -391,53 +402,44 @@ fn building(
     let h = FLOOR_H * floors as f32;
     let plinth_h = 1.05;
 
-    // GLB 路线：立面细节（窗洞、窗台、角石、檐口、屋顶、店面）全部来自建模资产，
-    // 下面那批薄盒一条都不再生成。碰撞核留在表里（物理/AI/伤害按下标依赖它），但标成
-    // 不可见，否则它的侧面会和 GLB 外墙共面打 z-fighting——那正是缺陷 D11 的成因。
+    // 🔴 **几何与碰撞的唯一真源 = 编译期契约尺寸**（2026-10-20，第 13 批复核第 7 条）：
+    // 以前这里「有资产 ⇒ 按资产实测包围盒算碰撞；没资产 ⇒ 按逻辑槽位算」⇒ 同一张地图
+    // 在桌面/Android 上生成出**不同的 `LevelMap::obstacles`**（物理、A*、出生点全不一样）。
+    // 现在：`pick_building` 与尺寸都走 `PropSet::contract()`（`City::contract`），
+    // 资产只决定「画 GLB 还是画程序化盒」。
     let yaw = City::face_nearest_street(cx, cz);
     let quarter = (yaw.abs() - core::f32::consts::FRAC_PI_2).abs() < 0.01;
-    if let Some((name, scale)) = c.pick_building(w, d, floors, quarter) {
-        if c.prop(name, cx, cz, yaw, scale) {
-            // 🔴🔴 2026-09-13 修（用户"建筑透视错误/一堆建模问题"的根因）：
-            //
-            // ① `pick_building` 原来取 `scale = max(w/gw, d/gd)` —— 按**较大**的那个方向
-            //    贴合 footprint，于是**另一个方向必然溢出**。全城 52 处 `building_tall`
-            //    每栋都插进邻居里，玩家看到的就是"多栋楼的立面互相穿插"，
-            //    一堆窗格以不同角度/深度叠在一起 —— 用户截图里的"乱窗"就是它，
-            //    而**建筑模型本身在 Blender 里渲出来是规整的 4 列 × 5 行窗格**（我核对过）。
-            // ② 原注释担心改成 min 会出现"无形的墙"：碰撞盒用的是 footprint `(w, d)`，
-            //    而 GLB 缩小后视觉体小于它。**但这个顾虑可以直接消掉** —— 把碰撞盒
-            //    改成**真实视觉尺寸**即可，两边同时成立。
-            //
-            // 视觉尺寸 = 资产 footprint × scale；楼绕 +Y 转了 yaw（只取 0 / ±90° / 180°），
-            // ±90° 时 x/z 两个方向互换。
-            // 🔴 垂直同源（2026-09-19）：碰撞顶原来用逻辑层高 FLOOR_H×floors，与
-            //   GLB 视觉高（资产高×scale）脱钩——13 层写字楼的 tall 资产 ×1.667 视觉
-            //   23m、碰撞却 41m ⇒ 楼顶上方 18m 隐形柱；3 层排楼视觉又比碰撞高 4.9m
-            //   ⇒ 可见顶楼被子弹穿过。城内地形恒 0（TERRAIN_FLAT_RADIUS 230 >
-            //   CITY_WALL 215），所以碰撞顶直接取视觉高即可，无需叠地高。
-            let (hw0, hd0, vh0) = match c.set.index_of(name).and_then(|i| c.set.get(i)) {
-                Some(m) => {
-                    let (a, b) = m.half_footprint();
-                    (a, b, m.max[1] - m.min[1])
-                }
-                None => (w * 0.5, d * 0.5, h),
-            };
-            let (vw, vd) = (hw0 * 2.0 * scale, hd0 * 2.0 * scale);
-            let vh = (vh0 * scale).max(1.0);
-            let (bw, bd) = if quarter { (vd, vw) } else { (vw, vd) };
-            // 兜底：绝不比 1m 还小（极端的资产/格子比例下会让碰撞退化）
-            let (bw, bd) = (bw.max(1.0), bd.max(1.0));
-            c.push(
-                Part::new(ObstacleKind::Building, cx, cz, bw, bd, UNDER_GROUND, vh, pal.wall)
-                    .invisible(),
-            );
-            return;
+    let canonical = c.pick_building(w, d, floors, quarter).and_then(|(name, scale)| {
+        let (tw, td, th) = c.contract_dims(name)?;
+        // 视觉/碰撞尺寸 = 契约尺寸 × 等比缩放；绕 +Y 转 ±90° 时 x/z 互换
+        let (vw, vd) = (tw * scale, td * scale);
+        let vh = (th * scale).max(1.0);
+        let (bw, bd) = if quarter { (vd, vw) } else { (vw, vd) };
+        // 兜底：绝不比 1m 还小（极端的资产/格子比例下会让碰撞退化）
+        let (bw, bd) = (bw.max(1.0), bd.max(1.0));
+        // 资产可用 ⇒ 摆 GLB（仅视觉）；碰撞核**两条路径都推**、尺寸逐字节一致
+        let placed = c.prop(name, cx, cz, yaw, scale);
+        let mut core = Part::new(ObstacleKind::Building, cx, cz, bw, bd, UNDER_GROUND, vh, pal.wall);
+        if placed {
+            // 资产路径：核不可见，否则侧面与 GLB 外墙共面打 z-fighting（缺陷 D11 的成因）
+            core = core.invisible();
         }
+        c.push(core);
+        Some((bw, bd, vh, placed))
+    });
+    if matches!(canonical, Some((_, _, _, true))) {
+        return;
     }
-
-    // 结构核心：唯一的挡人盒，从地面到屋顶。
-    c.push(Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall));
+    // 回退路径（无资产）：**用契约视觉尺寸**画程序化立面 —— 与资产路径的碰撞逐字节一致
+    let (w, d, h) = match canonical {
+        Some((bw, bd, vh, _)) => (bw, bd, vh),
+        // 契约里没有该建筑类型（自定义资产集）⇒ 维持旧逻辑
+        None => (w, d, h),
+    };
+    if canonical.is_none() {
+        // 结构核心：唯一的挡人盒，从地面到屋顶。
+        c.push(Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall));
+    }
 
     // 底层裙墙（石材）：外沿凸出核心 `PLINTH_PROTRUDE`，把"楼坐在地上"这件事画出来。
     c.deco(Part::new(
@@ -599,6 +601,8 @@ fn row_houses(
     //   段碰撞精确平铺原 footprint（阻挡格不变），每段 GLB 铺满。任一段拿不到 GLB
     //   则整排退回程序化。判据：invisible_cores_must_be_covered_by_a_prop 升级为
     //   "核心必须被某一件道具的旋转包围盒整体盖住"，旧写法下 26m 核 RED。
+    // 是否已经推过"每段一个碰撞核"（契约可用时）。定义在块外供回退兜底判断。
+    let mut pushed_cores = false;
     {
         let seg_max = 14.0f32;
         let n = ((w.max(d) / seg_max).ceil() as usize).max(1);
@@ -634,56 +638,53 @@ fn row_houses(
                 }
             }
         }
+        // 🔴 **碰撞核尺寸 = 契约尺寸 × 缩放**（2026-10-20 第 13 批复核第 7 条）：
+        // 两条路径（有/无资产）逐字节一致；资产只决定核心可不可见。
+        // 水平方向必须用**真实视觉尺寸**而不是槽位 `sw/sd`（`pick_building` 用
+        // `min(w/aw, d/ad)` ⇒ 非限制轴上视觉更小，直接用槽位会多出"无形的墙"）。
+        let mut all_placed = ok;
         if ok {
             for (sx, sz, yaw, name, scale) in &segs {
-                if !c.prop(name, *sx, *sz, *yaw, *scale) {
-                    ok = false;
+                let Some((tw, td, th)) = c.contract_dims(name) else {
+                    all_placed = false;
                     break;
-                }
-            }
-        }
-        if ok {
-            for (sx, sz, yaw, name, scale) in &segs {
-                // 垂直同源（同 building() 的 GLB 路线）：碰撞顶 = 资产高×scale，
-                // 不再用逻辑层高——3 层排楼的 tall 资产视觉 14.9m 高于旧碰撞 10.05m，
-                // 顶楼立面挡不住子弹。红证：旧写法下新断言报"碰撞顶≠视觉顶"。
-                let vh = c
-                    .set
-                    .index_of(name)
-                    .and_then(|i| c.set.get(i))
-                    .map(|m| (m.max[1] - m.min[1]) * scale)
-                    .unwrap_or(h)
-                    .max(1.0);
-                // 🔴 **水平碰撞核必须用「真实视觉尺寸」，不能直接用槽位 `sw, sd`**
-                // （2026-10-15，外部复核指出第 7 条后半，已对着代码确认）。
-                //
-                // `pick_building` 的缩放取 `min(w/aw, d/ad)` ⇒ **非限制轴上的视觉尺寸
-                // 必然小于槽位尺寸**。而这里原来把槽位 `sw/sd` 直接当碰撞盒
-                // ⇒ 那一轴多出来的部分就是**"无形的墙"**（人撞得到、看不见）——
-                // 正是铁律 B 里 `building()` 专门消掉的那一类。
-                //
-                // ⚠️ **垂直方向早就修了**（`vh` = 资产高 × scale，见上面的"垂直同源"注释），
-                // 只有水平方向没跟上；同一个函数里一半修了一半没修。
-                // ⚠️ 现有判据 `city.rs` 的 `0.5m` 容差放行了"两侧多出的隐形墙边缘"。
-                let (hw0, hd0) = match c.set.index_of(name).and_then(|i| c.set.get(i)) {
-                    Some(m) => m.half_footprint(),
-                    None => (sw * 0.5, sd * 0.5),
                 };
-                let (vw, vd) = (hw0 * 2.0 * scale, hd0 * 2.0 * scale);
                 let quarter = (yaw.abs() - core::f32::consts::FRAC_PI_2).abs() < 0.01;
+                let (vw, vd) = (tw * scale, td * scale);
+                let vh = (th * scale).max(1.0);
                 let (bw, bd) = if quarter { (vd, vw) } else { (vw, vd) };
                 // 兜底：绝不比 1m 还小（极端的资产/格子比例下会让碰撞退化）
                 let (bw, bd) = (bw.max(1.0), bd.max(1.0));
-                c.push(
-                    Part::new(ObstacleKind::Building, *sx, *sz, bw, bd, UNDER_GROUND, vh, pal.wall)
-                        .invisible(),
+                let placed = c.prop(name, *sx, *sz, *yaw, *scale);
+                if !placed {
+                    all_placed = false;
+                }
+                let mut core = Part::new(
+                    ObstacleKind::Building,
+                    *sx,
+                    *sz,
+                    bw,
+                    bd,
+                    UNDER_GROUND,
+                    vh,
+                    pal.wall,
                 );
+                if placed {
+                    core = core.invisible();
+                }
+                c.push(core);
+                pushed_cores = true;
             }
+        }
+        if all_placed && pushed_cores {
             return;
         }
     }
 
-    c.push(Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall));
+    // 契约不可用（`ok == false` 且一个核心都没推）⇒ 旧逻辑的单核心
+    if !pushed_cores {
+        c.push(Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall));
+    }
     c.deco(Part::new(ObstacleKind::Building, cx, cz, w + 0.5, d + 0.5, UNDER_GROUND, 0.80, pal.base));
 
     // 坡屋顶：4 级递减近似。第 0 级就必须内缩，否则侧立面与墙身共面。
@@ -820,33 +821,40 @@ fn warehouse(c: &mut City, cx: f32, cz: f32, seed_i: i32, seed_j: i32) {
             let bx = cx + w * 0.5 + 6.5 + i as f32 * 6.6;
             let bz = cz - d * 0.4 + j as f32 * 6.6;
             let col = colors[(i + j) as usize % 3];
-            if c.prop(CONTAINER_PROPS[(i + j) as usize % 3], bx, bz, 0.0, 1.0) {
-                c.push(
-                    Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, UNDER_GROUND, 2.6, col)
-                        .invisible(),
+            // 🔴 碰撞尺寸走**契约**（与资产无关）：首层 6.1×2.5、顶 2.6；
+            // 资产只决定画 GLB 还是画箱子装饰（2026-10-20 第 13 批复核第 7 条）。
+            let placed = c.prop(CONTAINER_PROPS[(i + j) as usize % 3], bx, bz, 0.0, 1.0);
+            let mut core = Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, UNDER_GROUND, 2.6, col);
+            if placed {
+                core = core.invisible();
+            }
+            c.push(core);
+            if i == 1 && j == 0 {
+                // 第二层：碰撞核与资产路径同尺寸（2.6..5.25）。资产路径抬 2.64 摆箱
+                // （GLB 箱体 2.591 + 顶筋 0.045），回退路径用装饰层面板补 2.6..2.85。
+                let placed2 = c.prop_y(
+                    CONTAINER_PROPS[(i + j + 1) as usize % 3],
+                    bx,
+                    2.64,
+                    bz,
+                    0.0,
+                    1.0,
                 );
-                if i == 1 && j == 0 {
-                    // 第二层：抬一个 GLB 实箱高叠在同一列上。2.85 是回退路径"箱体
-                    // 2.6 + 顶盖 0.25"的和；GLB 箱体 2.591 + 顶筋 0.045 ≈ 2.64，
-                    // 照抄 2.85 会让上层浮空 0.21m，还在 2.6~2.85 留出碰撞空洞。
-                    c.prop_y(
-                        CONTAINER_PROPS[(i + j + 1) as usize % 3],
-                        bx,
-                        2.64,
-                        bz,
-                        0.0,
-                        1.0,
-                    );
-                    c.push(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.6, 5.25, col).invisible());
+                let mut core2 = Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.6, 5.25, col);
+                if placed2 {
+                    core2 = core2.invisible();
                 }
+                c.push(core2);
+            }
+            if placed {
                 continue;
             }
-            c.push(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, UNDER_GROUND, 2.6, col));
+            // 回退视觉（只画不挡）：门端面 + 顶盖；第二层再补一层装饰箱
             c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 0.15, 2.45, DARK));
             c.deco(Part::new(ObstacleKind::Block, bx, bz, 6.2, 2.6, 2.6, 2.85, CONCRETE_DARK));
             if i == 1 && j == 0 {
-                c.push(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.85, 5.45, CONTAINER_GREEN));
-                c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 3.0, 5.30, DARK));
+                c.deco(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.85, 5.25, CONTAINER_GREEN));
+                c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 3.0, 5.25, DARK));
             }
         }
     }
@@ -1071,17 +1079,16 @@ fn park(c: &mut City, cx: f32, cz: f32) {
 fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
     let k = mixf(i, j, 0.85, 1.25);
     let trunk_h = mixf(i + 5, j, 3.0, 4.4);
-    if c.prop("tree_oak", x, z, mixf(i, j + 3, 0.0, std::f32::consts::TAU), k) {
-        // 只留一根细碰撞柱，且必须**严格细于网格树干**（tree_oak 底部半径 0.34m），
-        // 否则方盒会从圆干里戳出来——那是比"碎玻璃冠"更难看的穿帮。
-        // 半宽 0.15 < 0.34·k（k≥0.85 → 0.29），留了一倍余量。
-        c.push(Part::new(ObstacleKind::Tree, x, z, 0.30, 0.30, UNDER_GROUND, trunk_h, TREE_BARK).cyl());
+    let placed = c.prop("tree_oak", x, z, mixf(i, j + 3, 0.0, std::f32::consts::TAU), k);
+    // 🔴 **碰撞柱两条路径一致**（2026-10-20 第 13 批复核第 7 条）：只留一根细柱，
+    // 必须**严格细于网格树干**（tree_oak 底部半径 0.34m），半宽 0.15 < 0.34·k（k≥0.85→0.29）。
+    c.push(Part::new(ObstacleKind::Tree, x, z, 0.30, 0.30, UNDER_GROUND, trunk_h, TREE_BARK).cyl());
+    if placed {
         return;
     }
-    // 回退：没有资产时维持原来的两冠同心方案（见上面的误诊记录，别再叠第三个冠）
-    // 树干：圆柱，底部略粗（两段叠出锥形感）
-    c.push(Part::new(ObstacleKind::Tree, x, z, 0.52 * k, 0.52 * k, UNDER_GROUND, trunk_h * 0.55, TREE_BARK).cyl());
-    c.push(Part::new(ObstacleKind::Tree, x, z, 0.38 * k, 0.38 * k, trunk_h * 0.5, trunk_h + 0.6, TREE_BARK).cyl());
+    // 回退视觉（只画不挡）：两段树干 + 两冠同心方案（见上面的误诊记录，别再叠第三个冠）
+    c.deco(Part::new(ObstacleKind::Tree, x, z, 0.52 * k, 0.52 * k, UNDER_GROUND, trunk_h * 0.55, TREE_BARK).cyl());
+    c.deco(Part::new(ObstacleKind::Tree, x, z, 0.38 * k, 0.38 * k, trunk_h * 0.5, trunk_h + 0.6, TREE_BARK).cyl());
     let leaf = [TREE_LEAF, TREE_LEAF_2, TREE_LEAF_3][(i + j).rem_euclid(3) as usize];
     // 主冠：同心、接近等轴，把树干顶端口罩住
     let r = 2.15 * k;
@@ -1168,17 +1175,21 @@ fn bush(c: &mut City, x: f32, z: f32, seed: i32, base: f32) {
 fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     // 沙袋护墙：优先一整件 GLB（3.3 × 0.75 × 0.72）。旧版逐袋一个扁二十面体，
     // 15 件里每件的碰撞/弹道/渲染成本都要付一遍，而街面上它们本来就糊成一堵墙。
-    if c.prop("sandbag_wall", cx, cz - 7.0, 0.0, 1.0) {
-        c.push(
-            Part::new(ObstacleKind::Barrier, cx, cz - 7.0, 3.3, 0.75, UNDER_GROUND, 0.72, SANDBAG)
-                .invisible(),
-        );
-    } else {
+    // 🔴 碰撞尺寸走契约（两条路径一致）：一整条 3.3×0.75 的沙袋墙盒。
+    // 旧回退是 15 个球体障碍 —— 与桌面端**不是同一个物理世界**（2026-10-20 复核第 7 条）。
+    let placed = c.prop("sandbag_wall", cx, cz - 7.0, 0.0, 1.0);
+    let mut wall = Part::new(ObstacleKind::Barrier, cx, cz - 7.0, 3.3, 0.75, UNDER_GROUND, 0.72, SANDBAG);
+    if placed {
+        wall = wall.invisible();
+    }
+    c.push(wall);
+    if !placed {
+        // 回退视觉（只画不挡）：错缝堆叠的沙袋球
         for row in 0..3i32 {
             for k in 0..5i32 {
                 let px = cx + (k as f32 - 2.0) * 1.35 + (row % 2) as f32 * 0.6;
                 let py = row as f32 * 0.36;
-                c.push(
+                c.deco(
                     Part::new(ObstacleKind::Barrier, px, cz - 7.0, 1.45, 0.70, on_ground(py), py + 0.48, SANDBAG).sph(),
                 );
             }
@@ -1187,14 +1198,17 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     // HESCO 防爆桶：一件 GLB = 网箱 +  liner + 顶部土脊，替掉原来的柱+盖两件套
     for k in 0..4i32 {
         let bx = cx + (k as f32 - 1.5) * 4.2;
-        if c.prop("barrier_hesco", bx, cz + 7.0, 0.0, 1.0) {
-            c.push(
-                Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 2.0, 1.1, UNDER_GROUND, 1.05, SANDBAG)
-                    .invisible(),
-            );
+        let placed = c.prop("barrier_hesco", bx, cz + 7.0, 0.0, 1.0);
+        let mut core = Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 2.0, 1.1, UNDER_GROUND, 1.05, SANDBAG);
+        if placed {
+            core = core.invisible();
+        }
+        c.push(core);
+        if placed {
             continue;
         }
-        c.push(Part::new(ObstacleKind::Block, bx, cz + 7.0, 2.0, 2.0, UNDER_GROUND, 1.5, SANDBAG).cyl());
+        // 回退视觉（只画不挡）：圆柱网箱 + 顶盖球
+        c.deco(Part::new(ObstacleKind::Block, bx, cz + 7.0, 2.0, 2.0, UNDER_GROUND, 1.5, SANDBAG).cyl());
         c.deco(Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 1.7, 1.7, 1.5, 1.95, CONCRETE_DARK).sph());
     }
     // 帐篷：4 级递减近似双坡面。位置在院内西北角（西/北排内缘 ±7.5 各留 ≥0.5m），
@@ -1225,16 +1239,21 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
 
 /// 一辆报废车：优先用 GLB（真轿车侧影），没有资产时退回盒子堆。
 fn wreck_car(c: &mut City, x: f32, z: f32, tint: [f32; 3]) {
-    if c.prop("car_wreck", x, z, mixf(x as i32, z as i32, 0.0, std::f32::consts::TAU), 1.0) {
-        // 碰撞核必须**任意 yaw 下都可证明埋在车壳里**：车体净尺寸 4.62×1.72，核取
-        // 4.0×1.7（半 2.0×0.85 ≤ 车体半 2.31×0.86）。旧核 4.4×2.1 的"埋在车身里"
-        // 是假话——斜 yaw 下旋转 AABB 收缩，核戳出轮廓 0.51m（2026-09-21 门玻璃
-        // 贴回门板后契约测试当场抓获：此前靠悬浮玻璃撑大的假包围盒才通过）。
-        c.push(Part::new(ObstacleKind::Ruin, x, z, 4.0, 1.7, UNDER_GROUND, 1.55, tint).invisible());
+    let placed = c.prop("car_wreck", x, z, mixf(x as i32, z as i32, 0.0, std::f32::consts::TAU), 1.0);
+    // 🔴 碰撞核两条路径一致：必须**任意 yaw 下都可证明埋在车壳里**（车体净尺寸 4.62×1.72，
+    // 核取 4.0×1.7；半 2.0×0.85 ≤ 车体半 2.31×0.86）。旧回退核 4.4×2.1 的"埋在车身里"
+    // 是假话——斜 yaw 下旋转 AABB 收缩，核戳出轮廓 0.51m（2026-09-21 判据抓获）。
+    let mut core = Part::new(ObstacleKind::Ruin, x, z, 4.0, 1.7, UNDER_GROUND, 1.55, tint);
+    if placed {
+        core = core.invisible();
+    }
+    c.push(core);
+    if placed {
         return;
     }
-    c.push(Part::new(ObstacleKind::Ruin, x, z, 4.4, 2.1, UNDER_GROUND, 1.3, tint));
-    c.push(Part::new(ObstacleKind::Ruin, x - 0.4, z, 2.0, 1.95, 1.3, 2.15, WRECK_GLASS));
+    // 回退视觉（只画不挡）：车身薄板 + 车门玻璃
+    c.deco(Part::new(ObstacleKind::Ruin, x, z, 4.4, 2.1, UNDER_GROUND, 1.3, tint));
+    c.deco(Part::new(ObstacleKind::Ruin, x - 0.4, z, 2.0, 1.95, 1.3, 2.15, WRECK_GLASS));
     c.deco(Part::new(ObstacleKind::Ruin, x + 1.9, z, 0.5, 1.9, 0.35, 1.05, GLASS_DARK));
     for (ox, oz) in [(-1.45f32, -1.05), (1.45, -1.05), (-1.45, 1.05), (1.45, 1.05)] {
         c.deco(Part::new(ObstacleKind::Ruin, x + ox, z + oz, 0.78, 0.32, UNDER_GROUND, 0.78, DARK).cyl());
@@ -1246,15 +1265,21 @@ fn wreck_car(c: &mut City, x: f32, z: f32, tint: [f32; 3]) {
 /// 旧版用 mixf 全随机，预渲染检查里灯臂朝建筑、朝院墙，一排街灯没有一个
 /// 照向街面——真实街灯不会有这种布局。
 fn lamp_post(c: &mut City, x: f32, z: f32, yaw: f32) {
-    if c.prop("street_lamp", x, z, yaw, 1.0) {
-        // 碰撞只给一根埋在杆身里的细柱：street_lamp 杆底半径 0.13、往上收，
-        // 半宽 0.10 恒小于它，所以盒子不会从圆杆里戳出来（戳出来比"灯杆是方的"更糟）。
-        c.push(Part::new(ObstacleKind::Block, x, z, 0.20, 0.20, UNDER_GROUND, 4.6, DARK).cyl().invisible());
+    let placed = c.prop("street_lamp", x, z, yaw, 1.0);
+    // 🔴 碰撞柱两条路径一致：一根埋在杆身里的细柱（street_lamp 杆底半径 0.13、往上收，
+    // 半宽 0.10 恒小于它，盒子不会从圆杆里戳出来）。
+    let mut core = Part::new(ObstacleKind::Block, x, z, 0.20, 0.20, UNDER_GROUND, 4.6, DARK).cyl();
+    if placed {
+        core = core.invisible();
+    }
+    c.push(core);
+    if placed {
         return;
     }
-    c.push(Part::new(ObstacleKind::Block, x, z, 0.34, 0.34, UNDER_GROUND, 2.4, DARK).cyl());
-    c.push(Part::new(ObstacleKind::Block, x, z, 0.22, 0.22, 2.4, 6.6, DARK).cyl());
-    c.push(Part::new(ObstacleKind::Block, x, z, 1.5, 0.24, 6.6, 6.85, DARK));
+    // 回退视觉（只画不挡）：两段杆 + 灯臂
+    c.deco(Part::new(ObstacleKind::Block, x, z, 0.34, 0.34, UNDER_GROUND, 2.4, DARK).cyl());
+    c.deco(Part::new(ObstacleKind::Block, x, z, 0.22, 0.22, 2.4, 6.6, DARK).cyl());
+    c.deco(Part::new(ObstacleKind::Block, x, z, 1.5, 0.24, 6.6, 6.85, DARK));
     c.deco(Part::new(ObstacleKind::Block, x + 0.62, z, 0.85, 0.5, 6.32, 6.62, LAMP_GLOW).sph());
     c.deco(Part::new(ObstacleKind::Block, x, z, 0.72, 0.72, UNDER_GROUND, 0.34, GRANITE).cyl());
 }
@@ -2817,6 +2842,46 @@ mod city_layout_tests {
         let src = include_str!("city.rs");
         assert!(src.contains("w + 2.0 * PLINTH_PROTRUDE"), "裙墙没用常量");
         assert!(src.contains("PILASTER_PROTRUDE - pw * 0.5"), "壁柱没用常量");
+    }
+
+    /// 🔴 **有/无 `assets/props` 时，`LevelMap::obstacles` 必须逐项相等**
+    /// （2026-10-20，第 13 批复核第 7 条）。
+    ///
+    /// 模块头写着「缺资产的后果必须是'画面旧一点'」——物理/A*/出生点绝不许跟着变。
+    /// 现在几何与碰撞尺寸一律走 `PropsSet::contract()`（编译期契约），
+    /// 资产只决定画 GLB 还是画程序化盒。
+    /// 反向验证：把任一生成器改回"按资产实测尺寸算碰撞" ⇒ 本判据红。
+    #[test]
+    fn obstacles_are_identical_with_and_without_assets() {
+        let Ok(real) = crate::engine::props::PropSet::load_dir("assets/props") else {
+            eprintln!("跳过：本机没有 assets/props（无法比较两条路径）");
+            return;
+        };
+        let with = generate_city_with_set(real);
+        let without = generate_city_with_set(crate::engine::props::PropSet::default());
+        assert_eq!(
+            with.obstacles.len(),
+            without.obstacles.len(),
+            "有资产 {} 个碰撞盒 vs 无资产 {} 个 —— 碰撞表数量就分叉了",
+            with.obstacles.len(),
+            without.obstacles.len()
+        );
+        for (i, (a, b)) in with.obstacles.iter().zip(without.obstacles.iter()).enumerate() {
+            assert_eq!(a.kind, b.kind, "第 {i} 个碰撞盒的 kind 不同");
+            let same = (a.x - b.x).abs() < 1e-4
+                && (a.z - b.z).abs() < 1e-4
+                && (a.y - b.y).abs() < 1e-4
+                && (a.half_w - b.half_w).abs() < 1e-4
+                && (a.half_d - b.half_d).abs() < 1e-4
+                && (a.half_h - b.half_h).abs() < 1e-4;
+            assert!(
+                same,
+                "第 {i} 个碰撞盒分叉：有资产 ({:.3},{:.3},{:.3}) hw={:.3} hd={:.3} hh={:.3} \
+                 vs 无资产 ({:.3},{:.3},{:.3}) hw={:.3} hd={:.3} hh={:.3}",
+                a.x, a.y, a.z, a.half_w, a.half_d, a.half_h,
+                b.x, b.y, b.z, b.half_w, b.half_d, b.half_h
+            );
+        }
     }
 
 }

@@ -132,6 +132,69 @@ impl PropSet {
     }
 }
 
+/// 🔴 **编译期资产尺寸契约**（2026-10-20，第 13 批复核第 7 条）：
+/// `(名字, 宽, 深, 高)`，单位米，**顺序 = `load_dir` 的稳定排序（按名字）**。
+///
+/// ## 为什么要有这张表
+/// `city.rs` 的碰撞几何原来**依赖"资产是否加载成功"**：桌面端用资产实测包围盒算碰撞，
+/// 而 Android/缺资产环境走程序化回退、生成完全不同的 `LevelMap::obstacles`
+/// ⇒ 同一张地图在两个平台上的物理/A*/出生点全不一样（模块文档却写着
+/// 「缺资产的后果必须是'画面旧一点'」）。
+///
+/// 现在：城市生成**一律用本表做尺寸决策**（[`PropSet::contract`]），
+/// 有资产时只决定"画 GLB 还是画程序化盒"。
+///
+/// ## 维护
+/// `contract_matches_loaded_assets` 会在有资产时逐件比对（1mm 容差）；
+/// 资产改了尺寸而这里没跟 ⇒ 测试当场红。
+pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
+    ("barrel_metal", 0.536, 0.550, 0.880),
+    ("barrier_hesco", 2.631, 1.485, 1.772),
+    ("barrier_jersey", 3.020, 0.600, 0.840),
+    ("building_block", 14.140, 11.065, 10.390),
+    ("building_corner", 11.140, 11.065, 10.390),
+    ("building_shed", 13.140, 9.065, 6.990),
+    ("building_tall", 12.140, 10.065, 13.790),
+    ("building_wide", 18.140, 10.065, 10.390),
+    ("capture_flag", 1.550, 0.260, 1.400),
+    ("capture_point", 5.913, 5.913, 6.640),
+    ("car_wreck", 4.625, 2.310, 1.516),
+    ("container_20ft", 6.148, 2.538, 2.634),
+    ("container_green", 6.148, 2.538, 2.634),
+    ("container_navy", 6.148, 2.538, 2.634),
+    ("crate_wood", 0.665, 0.665, 0.640),
+    ("fence_chainlink", 3.090, 1.646, 2.552),
+    ("fence_wire", 4.132, 2.330, 1.753),
+    ("panel_block", 20.640, 12.640, 17.325),
+    ("rubble_pile", 2.715, 2.352, 0.939),
+    ("sandbag_wall", 3.316, 0.382, 0.754),
+    ("street_lamp", 1.240, 0.440, 4.977),
+    ("tree_oak", 5.594, 5.552, 7.708),
+    ("utility_pole", 3.400, 0.610, 8.000),
+    ("wall_brick", 4.120, 0.400, 1.810),
+];
+
+impl PropSet {
+    /// 由编译期契约表构造的"决策集"：**只有名字与包围盒**，没有顶点。
+    ///
+    /// `city.rs` 用它决定"会摆哪件、缩放多少、碰撞多大"——与资产是否加载无关，
+    /// 因此有/无资产两条路径的碰撞表逐字节一致。
+    pub fn contract() -> Self {
+        let meshes = CONTRACT_SIZES
+            .iter()
+            .map(|&(name, w, d, h)| PropMesh {
+                name: name.to_string(),
+                verts: Vec::new(),
+                indices: Vec::new(),
+                // 与 `PropMesh::from_imported` 同口径：原点在底面中心
+                min: [-w * 0.5, 0.0, -d * 0.5],
+                max: [w * 0.5, h, d * 0.5],
+            })
+            .collect();
+        PropSet { meshes }
+    }
+}
+
 /// 一次道具摆放。`mesh` 是 [`PropSet`] 下标。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PropPlacement {
@@ -1092,4 +1155,34 @@ mod tests {
             );
         }
     }
+
+    /// 🔴 **契约表必须与真实资产逐件一致**（2026-10-20，第 13 批复核第 7 条）。
+    ///
+    /// 契约表是"无资产环境"的唯一尺寸来源；它一旦与资产漂移，桌面端与 Android 端的
+    /// 碰撞表又会分叉。反向验证：改动表里任一数字 ⇒ 本判据红。
+    /// 没有资产时本判据**跳过**（不是恒真：`prop_set` 为空时打印跳过原因）。
+    #[test]
+    fn contract_matches_loaded_assets() {
+        let Ok(set) = PropSet::load_dir("assets/props") else {
+            eprintln!("跳过：本机没有 assets/props（契约表只与真实资产比对）");
+            return;
+        };
+        assert_eq!(
+            CONTRACT_SIZES.len(),
+            set.meshes.len(),
+            "契约表条目数 {} != 资产件数 {} —— 资产增删后必须同步维护契约表",
+            CONTRACT_SIZES.len(),
+            set.meshes.len()
+        );
+        for (i, (&(name, w, d, h), mesh)) in CONTRACT_SIZES.iter().zip(set.meshes.iter()).enumerate() {
+            assert_eq!(name, mesh.name, "第 {i} 件名字顺序不一致（契约表必须按名字排序）");
+            let (hw, hd) = mesh.half_footprint();
+            let (aw, ad, ah) = (hw * 2.0, hd * 2.0, mesh.max[1] - mesh.min[1]);
+            assert!(
+                (w - aw).abs() < 1e-3 && (d - ad).abs() < 1e-3 && (h - ah).abs() < 1e-3,
+                "{name} 契约 ({w}, {d}, {h}) 与资产 ({aw}, {ad}, {ah}) 不一致（>1mm）"
+            );
+        }
+    }
+
 }
