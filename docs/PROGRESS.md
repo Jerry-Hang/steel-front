@@ -977,3 +977,24 @@ lib 改动仍是 ~13s（rustc 单 crate 编译 12.9s，无法靠加核解决）�
 
 **给复核者的 5 个定向题**：状态机完整性（每局状态复位）、输入双路径重复消费、
 鼠标安全（永久锁死/永不抓取）、相机坐标系第二份等价实现、HUD 布局坐标混用。
+
+### 2026-10-21 凌晨：第 14 批复核收口（主循环/输入/视角/HUD 与状态机）
+
+**提交 `a9ce402`**。8/8 现象属实、全部修复，补 **11 条判据**，每条都做过"回退即红"验证。
+
+* **每局状态**：`start_run_at(level)` 拆分（重开=第 1 关、`advance_level`=下一关）——
+  原来 `start_run` 硬编码 `apply_level(1)` 且被 `advance_level` 调用 ⇒ **关卡号永远回 1**；
+  补齐 `stance/sprint_held/heal_timer/grenades/medkits/cull_eye_override` 复位。
+* **GameApp 瞬时状态**：新增 `reset_session_transients()`（按键锁存/开火意图/命令框/尸体/
+  伤害飘字/`last_npc_snapshot`/枪摆动），R/Enter/N 三入口调用。
+* **光标安全**：抽出唯一 `release_cursor_immediately()`，**修复 Windows 透明光标不恢复**
+  （菜单里指针隐形）；菜单键打开设置时立即释放。
+* **蹲/趴物理身高**：toggle 同步 `player_body.eye_height`；顺带修 `toggle_crouch`
+  从卧倒也变下蹲（与注释矛盾）。
+* **保留键**：`is_reserved` 扩到全部硬编码玩法键（B/C/G/X/Z/Slash/Shift/F5/Digit0-9），
+  防重绑后双消费。
+* **胜利提示**：据点/限时胜利设置 `victory_banner`（原来画面冻结、无任何提示）。
+* **ESC 菜单穿透**：关闭菜单后 `return`（原来按 R 会重开、按 X 会吃医疗包）。
+* **命令框坐标**：`command_box_y(screen_h, scale)`，修复 720p 下画到屏幕外。
+
+**第 14 批复核结论**：`~/Desktop/审查/第14批复核结论.md`。
