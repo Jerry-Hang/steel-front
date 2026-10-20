@@ -492,8 +492,20 @@ impl KeyBindings {
 
     /// 保留系统键（设置面板导航/截图/垂直移动/补给），不可作为可重绑定键位
     pub fn is_reserved(code: u32) -> bool {
-        // KeyE=23 / KeyN=32 / KeyQ=35 / Enter=57 / Tab=63 / Escape=114 / F12=170
-        matches!(code, 23 | 32 | 35 | 57 | 63 | 114 | 170)
+        // 🔴 **凡是"硬编码处理、不在 `BindingAction` 表里"的键都必须保留**
+        // （2026-10-20，第 14 批复核第 5 条）：
+        // 这些键在 `lib.rs` 的键盘处理里**先于**绑定表被消费（C/Z/X/Shift 甚至不 return），
+        // 一旦允许绑定到它们，按一下会触发两个动作（例：Jump 绑到 C ⇒ 边蹲边跳；
+        // Reload 绑到 X ⇒ 换弹同时吃掉一个医疗包）。
+        //
+        // 既有保留键：KeyE=23 / KeyN=32 / KeyQ=35 / Enter=57 / Tab=63 / Escape=114 / F12=170
+        // 新增（硬编码玩法键）：KeyB=20(切火) KeyC=21(蹲) KeyG=25(雷) KeyX=42(药)
+        //   KeyZ=44(趴) Slash=49(命令框) ShiftL=60/ShiftR=61(冲刺) F5=163(热重载)
+        //   数字键 Digit0..9 = 5..=14（切枪）
+        matches!(
+            code,
+            20 | 21 | 23 | 25 | 32 | 35 | 42 | 44 | 49 | 57 | 60 | 61 | 63 | 114 | 163 | 170
+        ) || (5..=14).contains(&code)
     }
 }
 
@@ -696,6 +708,15 @@ impl HudState {
 
     /// HUD 分辨率缩放系数：以 1280x800 为设计基准，按实际高度等比放大
     /// （2560x1600 → 2.0，字体/面板/血条等比放大，避免高分辨率下文字过细）
+    /// 命令输入框的 y（设计单位）：**底部上方 46**，必须按实际屏幕高度算。
+    ///
+    /// 🔴 2026-10-20（第 14 批复核第 8 条）：`lib.rs` 原来写死 `800.0` 基准 ——
+    /// 屏幕高 720 时 `s = clamp(720/800,1,3) = 1.0` ⇒ `y = 754 > 720`，
+    /// 整个命令框画在屏幕外（玩家以为 `/` 键坏了）。
+    pub fn command_box_y(screen_h: f32, scale: f32) -> f32 {
+        screen_h - 46.0 * scale
+    }
+
     pub fn ui_scale(&self) -> f32 {
         (self.screen_h / 800.0).clamp(1.0, 3.0)
     }
@@ -3204,4 +3225,53 @@ mod tests {
             );
         }
     }
+
+    /// 🔴 **硬编码处理的功能键必须列入保留键**（2026-10-20，第 14 批复核第 5 条）。
+    /// 反向验证：从 `is_reserved` 里删掉任一键 ⇒ 本判据红。
+    #[test]
+    fn hardcoded_gameplay_keys_are_reserved() {
+        use winit::keyboard::KeyCode;
+        for (name, k) in [
+            ("KeyB", KeyCode::KeyB),
+            ("KeyC", KeyCode::KeyC),
+            ("KeyG", KeyCode::KeyG),
+            ("KeyX", KeyCode::KeyX),
+            ("KeyZ", KeyCode::KeyZ),
+            ("Slash", KeyCode::Slash),
+            ("ShiftLeft", KeyCode::ShiftLeft),
+            ("ShiftRight", KeyCode::ShiftRight),
+            ("F5", KeyCode::F5),
+            ("Digit0", KeyCode::Digit0),
+            ("Digit9", KeyCode::Digit9),
+        ] {
+            assert!(
+                KeyBindings::is_reserved(k as u32),
+                "{name}({}) 是硬编码玩法键，未列入保留键 ⇒ 绑到它会被双消费",
+                k as u32
+            );
+        }
+        // 正对照：普通字母键仍可绑定（别把整张表都保留）
+        for k in [KeyCode::KeyW, KeyCode::KeyR, KeyCode::KeyV] {
+            assert!(!KeyBindings::is_reserved(k as u32), "{k:?} 不应被保留");
+        }
+    }
+
+    /// 🔴 **命令输入框必须完整落在屏幕内**（2026-10-20，第 14 批复核第 8 条）。
+    /// 反向验证：把 `command_box_y` 改回 `(800.0 - 46.0) * scale` ⇒ 720p 下红。
+    #[test]
+    fn command_box_stays_inside_the_screen() {
+        for (w, h) in [(1280.0f32, 720.0f32), (1280.0, 800.0), (1920.0, 1080.0), (2560.0, 1600.0)] {
+            let hud = HudState::new(w, h);
+            let s = hud.ui_scale();
+            let y = HudState::command_box_y(hud.screen_h, s);
+            let h_box = 36.0 * s;
+            assert!(
+                y >= 0.0 && y + h_box <= hud.screen_h + 1e-3,
+                "{w}x{h}: 命令框 y={y}..{} 超出屏幕高度 {}",
+                y + h_box,
+                hud.screen_h
+            );
+        }
+    }
+
 }

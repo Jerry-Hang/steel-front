@@ -352,6 +352,17 @@ impl Game {
     /// 现在一律用 `self.player_body.pos`（本函数内部刚重置好的真实出生点）。
     /// **参数删掉的好处是：以后没人能再误传一个旧坐标进来。**
     pub(crate) fn start_run(&mut self) {
+        // 「重开一局」= 从第 1 关开始（保持既有语义；`advance_level` 走 `start_run_at`）
+        self.start_run_at(1);
+    }
+
+    /// 从**指定关卡**开始一局：`start_run`（= 第 1 关重开）与 `advance_level`（下一关）共用。
+    ///
+    /// 🔴 2026-10-20（第 14 批复核第 1 条）：原来 `start_run` 内部硬编码 `apply_level(1)`，
+    /// 而 `advance_level` 又调 `start_run` ⇒ **进下一关后关卡号被重置回 1**：HUD 永远 LEVEL 1、
+    /// `effective_wave` 的跨关难度加成全部失效，同一张图还会先被 `advance_level`
+    /// `apply_level` 建一遍、再被 `start_run` 建一遍。
+    pub(crate) fn start_run_at(&mut self, level: u32) {
         self.hud.health = self.hud.max_health;
         self.hud.ammo = self.hud.max_ammo;
         self.hud.reserve = self.weapons.active_firearm_ref().reserve();
@@ -385,8 +396,9 @@ impl Game {
         // 原来 `spawn_wave(1, player)` 直接用它 ⇒ **死亡重开时第 1 波按"死亡地点"刷怪**
         //（2026-10-15，外部复核指出第 9 条，已对着代码确认）。
         // ⇒ 末尾统一改用 `self.player_body.pos`（重置后的真实出生点）。
-        // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）
-        self.apply_level(1);
+        // 重开一局 = 从第 1 关全新地图开始（同时把玩家拉回原点安全区）；
+        // `advance_level` 传的是下一关号
+        self.apply_level(level);
         // 关卡系统：玩家出生点用地图 Blue 出生点（未启用时保持原点）
         if let Some(mgr) = self.map_mgr.as_ref() {
             if let Some((sx, sy, sz)) = mgr.spawn_point("blue") {
@@ -407,6 +419,17 @@ impl Game {
         self.jump_vel = 0.0;
         self.jump_hvel = glam::Vec3::ZERO;
         self.jump_pressed = false;
+        // 🔴 **每局状态在重开时必须复位**（2026-10-20 第 14 批复核第 1 条）：
+        // 原来只清了跳跃/移动，姿态、冲刺、打药计时、战术道具库存会带进新一局 ——
+        // 重开后"趴在地上开局"、"手雷/医疗包用光后永久为 0"、"打药计时从上一局继续"。
+        self.stance = Stance::Standing;
+        self.player_body.eye_height = Stance::Standing.eye_height();
+        self.sprint_held = false;
+        self.heal_timer = 0.0;
+        self.grenades = self.grenades_max;
+        self.medkits = self.medkits_max;
+        // 每帧由 lib 重算；置 None 防止重开首帧按"上一局相机位置"做剔除眼位
+        self.cull_eye_override = None;
         self.move_forward = false;
         self.move_backward = false;
         self.move_left = false;
@@ -986,11 +1009,21 @@ impl Game {
             crate::engine::objective::WinState::Victory(team) => {
                 obj.won_team = Some(team);
                 self.game_state = GameState::Victory(team);
+                // 🔴 **必须给玩家一个可见的胜利提示**（2026-10-20 第 14 批复核第 6 条）：
+                // `view.rs` 把 `Victory` 映射到 `HudScreen::Game` 并在非 Playing 时提前返回，
+                // 只有 `victory_banner` 能显示文字；不置它 ⇒ 画面冻结、无声无息，玩家以为卡死。
+                self.hud.victory_banner = Some(if self.level_list.is_empty() {
+                    "VICTORY — 关卡目标达成（按 R 重开）".to_string()
+                } else {
+                    "VICTORY — 关卡目标达成（按 N 下一关 / R 重开）".to_string()
+                });
                 log::info!("objective: 关卡胜利，获胜方 {:?}", team);
             }
             crate::engine::objective::WinState::Defeat => {
                 obj.won_team = Some(player_team.opposite());
                 self.game_state = GameState::Defeat;
+                // 失败由 GAME OVER 结算屏负责；清掉可能残留的胜利横幅
+                self.hud.victory_banner = None;
                 log::info!("objective: 关卡失败（时间到/据点尽失）");
             }
             crate::engine::objective::WinState::None => {}
@@ -1146,12 +1179,14 @@ impl Game {
             Ok(mgr) => {
                 self.map_mgr = Some(mgr);
                 self.map_path = Some(path);
-                self.apply_level(self.level);
-                // 🔴 **必须重建据点状态**（2026-10-15，外部复核指出第 9 条）：
+                // 🔴 不再"先 apply_level 再 start_run"（2026-10-20 第 14 批复核第 1 条）：
+                // `start_run()` 固定从第 1 关开始 ⇒ 关卡号被重置、地图白建两次。
+                // 这里只需要重建据点状态，然后从"下一关"开始一局。
+                // **必须重建据点状态**（2026-10-15，外部复核指出第 9 条）：
                 // 另外两个切图入口（`init_map_system` / `reload_current_map`）都建了，
                 // **只有这里漏了** ⇒ 进第 2 关后仍在用**第 1 关**的胜负规则与据点位置。
                 self.rebuild_obj_state_from_map();
-                self.start_run();
+                self.start_run_at((self.level_idx + 1) as u32);
                 log::info!(
                     "map: 进入下一关 {}（第 {} 关）",
                     self.map_mgr

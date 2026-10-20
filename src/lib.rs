@@ -614,6 +614,17 @@ struct GunSway {
 }
 
 impl GunSway {
+    /// 重开一局时清掉摆动/后坐的动态量（`gain` 是环境变量配置，保留）。
+    fn reset_for_new_run(&mut self) {
+        self.prev_pos = None;
+        self.speed = 0.0;
+        self.strafe = 0.0;
+        self.fore = 0.0;
+        self.stride = 0.0;
+        self.kick = 0.0;
+        self.sprint = 0.0;
+    }
+
     fn new() -> Self {
         Self {
             prev_pos: None,
@@ -2471,19 +2482,6 @@ impl GameApp {
                     if locked { "relative" } else { "absolute" }
                 );
             }
-        } else if !want && self.cursor_captured {
-            self.cursor_grab_logged = 0;
-            let _ = window.set_cursor_grab(CursorGrabMode::None);
-            window.set_cursor_visible(true);
-            self.cursor_captured = false;
-            self.cursor_locked = false;
-            self.abs_baseline_valid = false;
-            self.recenter_pending_until = None;
-            self.lock_observe = None;
-            self.camera.set_rotation_active(false);
-            log::info!("input: cursor released");
-        }
-
         // ---- 锁定态观察：锁到底有没有真的生效（见 `LockObservation`）----
         //
         // 这一段是**诊断 + 一次补救**，不是降级：Wayland 下不能退回 Confined ——
@@ -2533,6 +2531,11 @@ impl GameApp {
                 }
             }
         }
+        } else if !want && self.cursor_captured {
+            self.release_cursor_immediately("sync_cursor");
+        }
+
+
     }
 
     /// 把 WASD 按键状态转发给游戏（FPS 玩家移动）
@@ -2555,17 +2558,57 @@ impl GameApp {
             self.game.hud.esc_menu_open = true;
             self.game.hud.esc_menu_selection = 0;
             if self.cursor_captured {
-                if let Some(window) = &self.window {
-                    let _ = window.set_cursor_grab(CursorGrabMode::None);
-                    window.set_cursor_visible(true);
-                }
-                self.cursor_captured = false;
-                self.cursor_locked = false;
-                self.abs_baseline_valid = false;
-                self.recenter_pending_until = None;
-                log::info!("input: cursor released (ESC menu opened)");
+                self.release_cursor_immediately("ESC menu opened");
             }
         }
+    }
+
+    /// 🔴 **立即释放光标捕获**（唯一实现；2026-10-20 第 14 批复核第 3 条）。
+    ///
+    /// 为什么必须"唯一"：捕获/释放的状态位有 5 个（`cursor_captured` / `cursor_locked` /
+    /// `abs_baseline_valid` / `recenter_pending_until` / `lock_observe`）+ 相机旋转标志，
+    /// 之前两个释放点各写一半，漏一个就是"菜单里鼠标被锁死"或"视角仍在转"。
+    ///
+    /// 另一个关键点：Windows 路径捕获时用的是**1×1 全透明自定义光标**
+    /// （见 `sync_cursor` 里的长说明），释放时**必须恢复 `CursorIcon::Default`** ——
+    /// 原来只 `set_cursor_visible(true)`，玩家进过游戏再按 ESC，指针虽然能动但**完全隐形**。
+    fn release_cursor_immediately(&mut self, reason: &str) {
+        if let Some(window) = &self.window {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+            window.set_cursor(winit::window::CursorIcon::Default);
+        }
+        self.cursor_grab_logged = 0;
+        self.cursor_captured = false;
+        self.cursor_locked = false;
+        self.abs_baseline_valid = false;
+        self.recenter_pending_until = None;
+        self.lock_observe = None;
+        self.camera.set_rotation_active(false);
+        log::info!("input: cursor released ({reason})");
+    }
+
+    /// 每局重开/切关时复位 **GameApp 层**的瞬时状态。
+    ///
+    /// 🔴 2026-10-20（第 14 批复核第 2 条）：`Game::start_run` 只能复位 `Game` 自己的字段，
+    /// 而按键锁存、开火意图、命令框、尸体快照、伤害飘字、枪摆动都活在 `GameApp` 上。
+    /// 重开后它们带着上一局的残留：
+    /// * `key_state.forward` 仍为 true ⇒ 下一次按任意移动键时 `sync_game_movement`
+    ///   会把残留的前进重新同步给游戏（"重开后自己往前跑"）；
+    /// * `fire_requested` 残留 ⇒ 重开首帧自动开一枪；
+    /// * `corpses` / `hit_damage_popups` / `last_npc_snapshot` ⇒ 上一局的尸体与伤害数字
+    ///   留在新一局（快照不清理还会把旧 NPC 当"刚死"再补一批尸体）。
+    fn reset_session_transients(&mut self) {
+        self.key_state.reset();
+        self.fire_requested = false;
+        self.ads_active = false;
+        self.command_open = false;
+        self.command_buf.clear();
+        self.corpses.clear();
+        self.last_npc_snapshot.clear();
+        self.hit_damage_popups.clear();
+        self.gun_sway.reset_for_new_run();
+        self.game.set_movement(false, false, false, false);
     }
 
     fn sync_game_movement(&mut self) {
@@ -2779,7 +2822,9 @@ impl GameApp {
                     if (self.anim_clock * 2.0).sin() > 0.0 { '_' } else { ' ' }
                 });
                 let box_x = 10.0 * s;
-                let box_y = (800.0 - 46.0) * s;
+                // 🔴 按**实际屏幕高度**算（2026-10-20，第 14 批复核第 8 条）：
+                // 写死 800 基准时 720p 下 y=754 > 720 ⇒ 命令框整个画到屏幕外。
+                let box_y = crate::ui::HudState::command_box_y(self.game.hud.screen_h, s);
                 let box_h = 36.0 * s;
                 let text_scale = 2.0 * s;
                 let text_w = crate::ui::text_width(&prompt, text_scale);
@@ -4094,7 +4139,12 @@ impl ApplicationHandler for GameApp {
                         return;
                     }
                     if pressed && key_code != KeyCode::Escape {
+                        // 🔴 **必须 return**（2026-10-20 第 14 批复核第 7 条）：
+                        // 关闭菜单后 `in_gameplay` 立刻变 true，同一按键会继续往下穿透 ——
+                        // 按 R 关菜单会同时"在结算界面重开一局"、按 X 关菜单会**吃掉一个医疗包**、
+                        // 按 G 会当场扔手雷。
                         self.game.hud.esc_menu_open = false;
+                        return;
                     }
                 }
 
@@ -4150,6 +4200,7 @@ impl ApplicationHandler for GameApp {
                                 {
                                     log::info!("game: 重开本关");
                                     self.game.request_restart();
+                                    self.reset_session_transients();
                                 } else if st == GameState::Playing && !self.game.settings_open() {
                                     self.game.request_reload();
                                 }
@@ -4177,6 +4228,12 @@ impl ApplicationHandler for GameApp {
                             if pressed && !self.game.settings_open() {
                                 log::info!("键位菜单键：打开设置面板");
                                 self.game.toggle_settings();
+                                // 🔴 **立即释放捕获**（2026-10-20 第 14 批复核第 3 条）：
+                                // 等下一帧 `sync_cursor` 的话，同一批事件里紧跟的
+                                // `CursorMoved`/鼠标点击仍按"捕获中心"消费 ⇒ 设置面板点不中。
+                                if self.cursor_captured {
+                                    self.release_cursor_immediately("settings opened (Menu key)");
+                                }
                             }
                         }
                     }
@@ -4308,6 +4365,7 @@ impl ApplicationHandler for GameApp {
                             {
                                 log::info!("game: Enter 重开本关");
                                 self.game.request_restart();
+                                self.reset_session_transients();
                             }
                         }
                     }
@@ -4318,6 +4376,7 @@ impl ApplicationHandler for GameApp {
                             self.game.give_ammo();
                         } else if pressed && matches!(self.game.state(), GameState::Victory(_)) {
                             if self.game.advance_level() {
+                                self.reset_session_transients();
                                 log::info!("game: N 进入下一关");
                             } else {
                                 log::info!("game: 已通关（最后一关完成）");
@@ -4979,6 +5038,76 @@ fn rdv_register_report(
 
 #[cfg(test)]
 mod tests {
+
+    /// 按**字符**数截取窗口（源码里有中文，按字节切会踩非 char 边界 panic）。
+    fn src_window(src: &str, start: usize, max_chars: usize) -> &str {
+        let s = &src[start..];
+        let end = s.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(s.len());
+        &s[..end]
+    }
+
+    /// 🔴 **释放光标必须恢复系统箭头**（2026-10-20 第 14 批复核第 3 条）：
+    /// Windows 捕获路径用的是 1×1 全透明自定义光标，释放只 `set_cursor_visible(true)`
+    /// ⇒ 鼠标能动但**完全隐形**。所有释放点必须共用同一个 helper。
+    #[test]
+    fn cursor_release_restores_default_icon_and_is_shared() {
+        let src = include_str!("lib.rs");
+        let start = src.find("fn release_cursor_immediately").expect("必须有统一释放实现");
+        let end = start + src[start..].find("\n    }\n").expect("helper 必须有函数结尾");
+        let body = &src[start..end];
+        assert!(
+            body.contains("CursorIcon::Default"),
+            "释放光标时必须恢复 CursorIcon::Default（否则 Windows 上指针隐形）"
+        );
+        let calls = src.matches("self.release_cursor_immediately(").count();
+        assert!(
+            calls >= 4,
+            "释放点必须共用该 helper（定义 + sync_cursor + ESC 菜单 + 菜单键 = 至少 4 处），实际 {calls}"
+        );
+    }
+
+    /// 🔴 **ESC 菜单用其它键关闭后必须 return**（2026-10-20 第 14 批复核第 7 条）：
+    /// 否则关闭菜单后 `in_gameplay` 立刻变 true，同一按键继续穿透：
+    /// 按 R 关菜单会重开一局、按 X 会吃掉一个医疗包、按 G 会当场扔雷。
+    #[test]
+    fn esc_menu_consumes_the_key_that_closes_it() {
+        let src = include_str!("lib.rs");
+        // 从 ESC 菜单那一块起找（文件里还有一处 StartMenu 的 "非 Escape" 判断，别抓错）
+        let base = src
+            .find("// ESC 菜单导航：Tab 切换选项")
+            .expect("ESC 菜单导航块必须存在");
+        let i = base
+            + src[base..]
+                .find("if pressed && key_code != KeyCode::Escape {")
+                .expect("ESC 菜单兜底分支必须存在");
+        let seg = src_window(&src, i, 1200);
+        assert!(
+            seg.contains("return;"),
+            "关闭 ESC 菜单后必须 return，不能把同一按键继续传给玩法层"
+        );
+    }
+
+    /// 🔴 **重开/切关必须复位 GameApp 层瞬时状态**（2026-10-20 第 14 批复核第 2 条）：
+    /// `Game::start_run` 管不到按键锁存/开火意图/尸体快照/伤害飘字/枪摆动。
+    #[test]
+    fn restart_paths_reset_gameapp_transients() {
+        let src = include_str!("lib.rs");
+        let calls = src.matches(".reset_session_transients()").count();
+        assert!(calls >= 3, "重开与切关路径都必须调用复位（方法定义 + 3 个入口），实际 {calls}");
+        let i = src.find("fn reset_session_transients").expect("必须有复位方法");
+        let body = src_window(&src, i, 1500);
+        for needle in [
+            "key_state.reset()",
+            "fire_requested = false",
+            "command_open = false",
+            "corpses.clear()",
+            "last_npc_snapshot.clear()",
+            "hit_damage_popups.clear()",
+            "gun_sway.reset_for_new_run()",
+        ] {
+            assert!(body.contains(needle), "reset_session_transients 缺少 {needle}");
+        }
+    }
     use super::*;
 
     /// 🔴 **`GameApp` 里 `renderer` 必须声明在 `window` 前面。**

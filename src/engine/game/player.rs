@@ -63,12 +63,20 @@ impl Game {
     /// 转发 WASD 按键状态（FPS 玩家移动；仅 Playing + 第一人称生效）
     /// C 键：站立 ↔ 下蹲（卧倒时按下先回到站立）。日志落在姿态真正变化时。
     pub(crate) fn toggle_crouch(&mut self) {
-        let next = if self.stance == Stance::Crouching {
-            Stance::Standing
-        } else {
+        // 与上面的文档一致：**站姿 → 下蹲；下蹲/卧倒 → 站起**
+        // （2026-10-20 第 14 批复核自查副产物：原实现 `if Crouching {Standing} else {Crouching}`
+        //  从卧倒也变成下蹲，与注释"卧倒时按下先回到站立"矛盾。）
+        let next = if self.stance == Stance::Standing {
             Stance::Crouching
+        } else {
+            Stance::Standing
         };
         self.stance = next;
+        // 🔴 **物理碰撞身高必须跟着姿态走**（2026-10-20 第 14 批复核第 4 条）：
+        // `clamp_vertical`/`push_out_of_aabb`/`collides` 读的都是 `player_body.eye_height`，
+        // 而这里原来只改 `stance` ⇒ 蹲下/卧倒后物理上仍是 1.6m 高：
+        // 视觉已经低于横梁，碰撞却把玩家顶住（或反过来把头顶挤进矮掩体）。
+        self.player_body.eye_height = next.eye_height();
         log::info!("stance: {:?} eye={:.2}m", next, next.eye_height());
     }
     /// Z 键：站立 ↔ 卧倒（下蹲时按下直接转卧倒）。
@@ -79,6 +87,8 @@ impl Game {
             Stance::Prone
         };
         self.stance = next;
+        // 同上：卧倒也要同步物理身高
+        self.player_body.eye_height = next.eye_height();
         log::info!("stance: {:?} eye={:.2}m", next, next.eye_height());
     }
     /// 冲刺键（Shift）按住状态
