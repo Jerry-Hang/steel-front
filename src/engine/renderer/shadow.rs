@@ -82,6 +82,7 @@ impl Renderer {
                             pos: [v[0], v[1], v[2]],
                             color: [v[8], v[9], v[10]],
                             uv: [v[6], v[7]],
+                            normal: [0.0, 0.0, 0.0],
                         };
                     }
                     self.device.unmap_memory(vm);

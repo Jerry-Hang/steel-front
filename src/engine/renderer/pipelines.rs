@@ -497,14 +497,21 @@ impl Renderer {
                 .location(2)
                 .format(vk::Format::R32G32_SFLOAT)
                 .offset(std::mem::offset_of!(Vertex, uv) as u32),
+            // location 3: normal vec3（画质 M2；零向量 = 无数据，片元回退导数法线）
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(3)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(std::mem::offset_of!(Vertex, normal) as u32),
         ];
 
         log::info!(
-            "gun-attr: stride={} pos@{} color@{} uv@{}",
+            "gun-attr: stride={} pos@{} color@{} uv@{} normal@{}",
             std::mem::size_of::<Vertex>(),
             std::mem::offset_of!(Vertex, pos),
             std::mem::offset_of!(Vertex, color),
-            std::mem::offset_of!(Vertex, uv)
+            std::mem::offset_of!(Vertex, uv),
+            std::mem::offset_of!(Vertex, normal)
         );
         let vertex_bindings = [vertex_binding];
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()

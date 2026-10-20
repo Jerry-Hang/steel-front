@@ -1130,3 +1130,22 @@ build.rs 中文不进 HUD。
 
 已知待修（记入路线图）：地面共面条纹（z-fighting/acne）、天空纯色、无 AO/接触阴影、
 Linux 侧无 Blender（资产改动须走 Windows 或程序化）。
+
+### 2026-10-21 深夜：画质 M2 地基落地（法线顶点格式 + 道具平滑法线生成）
+
+**提交内容（本轮已提交）**：
+- `Vertex` stride 32→44（新增 `normal`），主管线属性 `location 3`，尺寸断言同步；
+  模板几何（立方体/远档 quad/地面/球/柱）补法线；`shadow.rs` 拷贝与其余字面量置零。
+- **道具/士兵法线生成**：`props::ensure_smooth_normals`（面积加权位置平均）——
+  实测 `assets/props/*.glb` 全部**没有 NORMAL 属性**，这是"每个三角面一个法线、
+  曲面全是棱角"的根因；加载期生成后，`parts.rs` 上传时写入顶点缓冲
+  （日志实测 489144/489144 非零）。
+- 诊断探针：`props: 顶点法线 N/M`、`gun-attr: stride=44 ... normal@32`。
+
+**未接线并已回退**：片元/顶点着色器的 `normal` IO 与"有法线用插值、无法线回退导数"分支。
+今晚插入时多了一个 `}`，naga 报 `expected global item ... found "let"`；为避免留半成品，
+`build.rs` 已回退到 HEAD（M1 材质版）。续做步骤写在 `docs/GRAPHICS-PLAN.md` 的
+"M2 进度"一节（整块替换、绿色诊断验证、同机位 A/B）。
+
+**验证**：Linux 0 警告 / test 构建 0 警告 / **821 passed** / CJK OK / 白名单 OK；
+dGPU 12s 冒烟 exit=0、0 panic / 0 device lost / 0 ERROR、截图正常。

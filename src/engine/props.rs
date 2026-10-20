@@ -29,6 +29,57 @@ pub struct PropMesh {
     pub max: [f32; 3],
 }
 
+/// 道具 GLB **没有 NORMAL 属性**（`weld_props.py` 的合并流程把它们丢了，2026-10-21 实测：
+/// 全部 assets/props/*.glb 只有 POSITION/COLOR_0/TEXCOORD_0）。没有顶点法线时，片元只能
+/// 用屏幕导数面法线 ⇒ **每个三角面一个法线**，曲面（树冠/车壳）看起来全是棱角。
+///
+/// 这里按**位置平均**生成平滑法线：把共享顶点的所有面法线（面积加权）累加后归一化。
+/// 对凸曲面（树冠 ico、车壳）这是正确的平滑；对 90° 硬边（箱子/楼体）会在棱上形成
+/// 45° 法线 → 视觉上是轻微的"倒角"，比整面死平更接近真实建筑（真实混凝土也有小倒角）。
+/// **已有法线的资产（枪/士兵若带 NORMAL）原样保留**，不覆盖。
+pub(crate) fn ensure_smooth_normals(verts: &mut [[f32; 11]], indices: &[u32]) {
+    let has_normals = verts
+        .iter()
+        .any(|v| v[3] * v[3] + v[4] * v[4] + v[5] * v[5] > 0.25);
+    if has_normals || indices.len() < 3 {
+        return;
+    }
+    let mut acc = vec![[0.0f32; 3]; verts.len()];
+    for tri in indices.chunks_exact(3) {
+        let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        if a >= verts.len() || b >= verts.len() || c >= verts.len() {
+            return; // 坏索引：不生成，交给既有判据报错
+        }
+        let p = |i: usize| [verts[i][0], verts[i][1], verts[i][2]];
+        let (pa, pb, pc) = (p(a), p(b), p(c));
+        let u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+        let v = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        // 面积加权（叉积模长 ∝ 三角形面积的两倍）⇒ 大面主导，小碎面不污染
+        for i in [a, b, c] {
+            acc[i][0] += n[0];
+            acc[i][1] += n[1];
+            acc[i][2] += n[2];
+        }
+    }
+    for (v, n) in verts.iter_mut().zip(acc.iter()) {
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len > 1e-12 {
+            v[3] = n[0] / len;
+            v[4] = n[1] / len;
+            v[5] = n[2] / len;
+        } else {
+            v[3] = 0.0;
+            v[4] = 1.0;
+            v[5] = 0.0;
+        }
+    }
+}
+
 impl PropMesh {
     fn from_imported(name: &str, m: &ImportedMesh) -> Self {
         let mut mesh = PropMesh {
@@ -111,7 +162,14 @@ impl PropSet {
         }
         // 稳定顺序：同名文件在不同文件系统上的枚举顺序不保证一致，而实例下标要用它
         found.sort_by(|a, b| a.0.cmp(&b.0));
-        let meshes = found.iter().map(|(n, m)| PropMesh::from_imported(n, m)).collect();
+        let meshes = found
+            .iter()
+            .map(|(n, m)| {
+                let mut m = m.clone();
+                ensure_smooth_normals(&mut m.verts, &m.indices);
+                PropMesh::from_imported(n, &m)
+            })
+            .collect();
         Ok(PropSet { meshes })
     }
 

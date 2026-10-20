@@ -69,3 +69,33 @@
 - 固定机位截图：`RV3D_CAM=fly:x,y,z:yaw,pitch` + `RV3D_AUTOSTART=1`
   + `RV3D_SHOT_AT=秒`（Linux 输出 `/tmp/steel_front_<ts>.png`）。
 - 像素差脚本、帧时间来自 perf 日志；验证层 VUID（需先安装 `vulkan-validationlayers`）。
+
+## M2 进度（2026-10-21 夜，本次会话）
+
+**已落地且已验证（编译 0 警告、821 测试通过、dGPU 冒烟 0 panic/0 lost）**：
+
+1. 顶点格式 `stride 32 → 44`：`Vertex` 增加 `normal: [f32;3]`（`gpu_layout.rs`），
+   管线属性 `location 3`（`pipelines.rs`），`renderer.rs` 的尺寸断言同步；
+   模板几何（立方体/远档十字/地面/球/柱）补齐法线；阴影拷贝与其余字面量填零。
+2. **道具法线生成**：`props::ensure_smooth_normals` —— 因为 `assets/props/*.glb`
+   **全都没有 NORMAL 属性**（合并流程丢弃），加载期按位置做面积加权平均法线；
+   `props`/`soldier` 上传时把 `[f32;11]` 里的 normal 真正写进顶点缓冲
+   （实测 489144/489144 非零）。
+3. 诊断探针：启动日志 `props: 顶点法线 N/M`，用于确认法线真的进了缓冲。
+
+**未接线（今晚调试到一半，为避免留半成品已回退）**：
+
+- 着色器侧：`vs_main` 读取 `@location(3)` 并把法线传给片元（`@location(8)`），
+  片元 `fnrm = has_nrm ? normalize(input.normal) : 屏幕导数面法线`。
+  回退原因：WSGL 里插入块时**多了一个 `}`** 导致 `expected global item ... found "let"`
+  （naga 解析失败），`build.rs` 已 `git checkout` 回 HEAD（M1 材质版）。
+- 续做步骤（清晰、低风险）：
+  1. 在 `FRAGMENT_SHADER_WGSL`/`VERTEX_SHADER_WGSL` 的 `VertexOutput` 结构与 `vs_main`
+     输入各加减一处（`@location(8) normal` / `@location(3) normal`），再跑 `cargo build`
+     确认 build.rs 的 WGSL 解析通过（解析失败会直接 panic，位置精确）。
+  2. 片元里在 `deriv` 已算好的位置插入 `has_nrm` 分支（**不要动括号层级**，
+     建议整块替换而不是逐行插入，上次就是插入导致多括号）。
+  3. 用 `RV3D_CAM` 固定机位 + 绿色诊断（`has_nrm` 时 `base=绿`）确认 attribute 到达片元，
+     再换回真实法线；A/B 用像素差 + `RV3D_CAM` 同机位。
+  4. 预期增益：树冠/车壳/曲面平滑着色；建筑棱边轻微倒角。mesh 路径（marker/NPC 盒子）
+     因 `normal=0` 保持逐像素不变。

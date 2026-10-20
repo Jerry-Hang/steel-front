@@ -168,6 +168,7 @@ impl Renderer {
                     pos: [sp * ct, cp, sp * st],
                     color: [1.0, 1.0, 1.0],
                     uv: [i as f32 / SEGS as f32, 1.0 - j as f32 / RINGS as f32],
+                    normal: [0.0, 0.0, 0.0],
                 });
             }
         }
@@ -229,14 +230,15 @@ impl Renderer {
                     pos: [ct, y, st],
                     color: [1.0, 1.0, 1.0],
                     uv: [i as f32 / SEGS as f32, j as f32],
+                    normal: [0.0, 0.0, 0.0],
                 });
             }
         }
         // 上下盖中心顶点
         let top_center = verts.len() as u32;
-        verts.push(Vertex { pos: [0.0, 0.5, 0.0], color: [1.0, 1.0, 1.0], uv: [0.5, 1.0] });
+        verts.push(Vertex { pos: [0.0, 0.5, 0.0], color: [1.0, 1.0, 1.0], uv: [0.5, 1.0] , normal: [0.0, 0.0, 0.0] });
         let bottom_center = verts.len() as u32;
-        verts.push(Vertex { pos: [0.0, -0.5, 0.0], color: [1.0, 1.0, 1.0], uv: [0.5, 0.0] });
+        verts.push(Vertex { pos: [0.0, -0.5, 0.0], color: [1.0, 1.0, 1.0], uv: [0.5, 0.0] , normal: [0.0, 0.0, 0.0] });
         let mut indices: Vec<u32> = Vec::with_capacity((SEGS * 6 + SEGS * 6) as usize);
         for i in 0..SEGS {
             let a = i;
@@ -334,6 +336,7 @@ impl Renderer {
                             (x + TERRAIN_HALF) / TERRAIN_UV_SCALE,
                             (z + TERRAIN_HALF) / TERRAIN_UV_SCALE,
                         ],
+                        normal: [0.0, 0.0, 0.0],
                     });
                 }
             }

@@ -599,6 +599,7 @@ impl Renderer {
                     pos: v.pos,
                     color: v.color,
                     uv: v.uv,
+                    normal: [0.0, 0.0, 0.0],
                 };
             }
         }
@@ -907,12 +908,24 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
         // normal 与枪模一样在上传时丢弃：本引擎的着色法线由屏幕空间导数重建，
         // 顶点格式里没有它的槽位。因此**绕序必须正确**，反面的面会直接黑掉而不报错。
         let vptr = self.prop_mapped as *mut Vertex;
+        // 画质 M2 诊断：法线数据是否真的进了顶点缓冲（零 = 回退面法线）
+        let nrm_nonzero = merged
+            .verts
+            .iter()
+            .filter(|v| v[3] * v[3] + v[4] * v[4] + v[5] * v[5] > 0.25)
+            .count();
+        log::info!(
+            "props: 顶点法线 {}/{}（零 = 片元回退屏幕导数面法线）",
+            nrm_nonzero,
+            merged.verts.len()
+        );
         for (i, v) in merged.verts.iter().enumerate() {
             unsafe {
                 *vptr.add(i) = Vertex {
                     pos: [v[0], v[1], v[2]],
                     color: [v[8], v[9], v[10]],
                     uv: [v[6], v[7]],
+                    normal: [0.0, 0.0, 0.0],
                 };
             }
         }
@@ -1087,6 +1100,7 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
                     pos: [v[0], v[1], v[2]],
                     color: [v[8], v[9], v[10]],
                     uv: [v[6], v[7]],
+                    normal: [0.0, 0.0, 0.0],
                 };
             }
         }

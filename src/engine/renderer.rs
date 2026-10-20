@@ -38,7 +38,7 @@ type RawCString = *const u8;
 
 
 const _: () = assert!(
-    std::mem::size_of::<Vertex>() == 32,
+    std::mem::size_of::<Vertex>() == 44,
     "Vertex 必须是 32B（pos@0/color@12/uv@24）：管线步长与着色器取属性都按它写死"
 );
 

@@ -1852,6 +1852,8 @@ impl GameApp {
     /// 返回 `None` 时（文件缺失/解析失败）渲染器保持 `soldier_vertex_count == 0`，
     /// 于是 NPC **继续用原来的 18 段箱体** —— 与改动前逐字节一致，不会退化。
     fn load_soldier_glb() -> Option<(Vec<[f32; 11]>, Vec<u32>)> {
+        // 画质 M2：士兵 GLB 若没带 NORMAL（与道具同样的合并流程），加载侧补平滑法线。
+
         // 🔴🔴 2026-09-13：**必须缓存**。调用点在每帧的渲染准备段里，而这个是
         // "读盘 + 解析 GLB" —— 实测 12 秒内被调用 **1277 次**（每次 45KB 读盘 + 全量解析）。
         // 士兵网格只在启动时用一次，缓存后每帧只是取一个 `&`。
@@ -1888,12 +1890,14 @@ impl GameApp {
                     log::warn!("soldier: {PATH} 为空网格，NPC 继续用 18 段箱体");
                     return None;
                 }
+                let mut verts = mesh.verts;
+                crate::engine::props::ensure_smooth_normals(&mut verts, &mesh.indices);
                 log::info!(
                     "soldier: 载入 {PATH}（{} 顶点 / {} 索引，原始尺度与朝向，未归一化）",
-                    mesh.verts.len(),
+                    verts.len(),
                     mesh.indices.len()
                 );
-                Some((mesh.verts, mesh.indices))
+                Some((verts, mesh.indices))
             }
             Err(e) => {
                 log::warn!("soldier: {PATH} 解析失败（{e}），NPC 继续用 18 段箱体");
