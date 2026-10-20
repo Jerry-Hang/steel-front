@@ -962,3 +962,18 @@ lib 改动仍是 ~13s（rustc 单 crate 编译 12.9s，无法靠加核解决）�
    的通用共面（全城统计：主路径 472 对、回退路径 2700 对；范围太大，需单独设计）。
 2. `relief_steps_are_not_coplanar` 的 GLB 分支覆盖：资产路径下建筑核心为 `Shape::None`，
    该判据目前只验证回退/可见核心（已在契约化后成为同一套尺寸，风险降低）。
+
+### 2026-10-20 晚：第 14 批审查已发出（主循环/输入/视角/HUD 与状态机）
+
+基线 `934d3d2`，10 文件共 12,276 行（`lib.rs` / `ui.rs` / `camera.rs` / `game/session.rs` /
+`game/player.rs` / `game/view.rs` / `game/types.rs` / `game/diag.rs` / `game/collisions.rs` /
+`game/map_util.rs`）。材料在 `~/Desktop/审查/第14批/`。
+
+**发前自查已修 1 条**（提交 `934d3d2`）：
+`session.rs::start_run` 只复位 `settings_open`/`confirm_quit`，**漏了 `esc_menu_open`/
+`esc_menu_selection`** —— 菜单打开时模拟照常推进（无暂停语义）⇒ "开着菜单被打死 → 结算按 R
+重开"后 ESC 遮罩残留到新一局、光标不抓取、选中项停在旧位置。
+判据 `start_run_clears_stale_escape_menu`（删两行复位即红）。
+
+**给复核者的 5 个定向题**：状态机完整性（每局状态复位）、输入双路径重复消费、
+鼠标安全（永久锁死/永不抓取）、相机坐标系第二份等价实现、HUD 布局坐标混用。
