@@ -762,6 +762,23 @@ fn window_dark(nrm: vec3<f32>, world_pos: vec3<f32>, deriv: vec3<f32>) -> f32 {
     return win * (1.0 - 0.7 * mull);
 }
 
+// ---- 画质里程碑 1 用的世界尺度噪声（2026-10-21）----
+fn sf_hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21));
+    q = q + dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+fn sf_vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = sf_hash21(i);
+    let b = sf_hash21(i + vec2<f32>(1.0, 0.0));
+    let c = sf_hash21(i + vec2<f32>(0.0, 1.0));
+    let d = sf_hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // ---- 运动向量调试可视化（RV3D_MV_DEBUG=1，2026-10-11）----
@@ -859,6 +876,39 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let is_canopy = !authored
             && input.flat_flag < 1.5
             && base.g > base.r && base.g > base.b * 1.4;
+    // 🎨 **画质里程碑 1：程序化立面材质**（2026-10-21）。
+    // authored GLB 建筑与 marker 柱/围墙原先只有顶点色：一面 30m 墙在屏幕上是一整块
+    // 均匀色，是"纸片感"的最大来源。这里按**世界尺度**（米，不是逐面 UV）叠三种真实线索，
+    // 并用屏幕足迹 `deriv` 收敛，保证远处不闪：
+    //   ① 预制板缝：竖缝 3.6m、横缝 3.15m（= FLOOR_H），缝宽 3–4cm，暗 30%；
+    //   ② 混凝土颗粒：7Hz 值噪声，±5% 亮度；
+    //   ③ 竖向雨痕：1.7Hz 噪声 × 离地包络，最暗 18%。
+    // 只在"近竖直 + 低饱和 + 非绿"的面生效 —— 树、玻璃、彩色面不碰。
+    if (!is_glass && !is_canopy) {
+        let an = abs(fnrm);
+        let cmax = max(base.r, max(base.g, base.b));
+        let cmin = min(base.r, min(base.g, base.b));
+        let sat = (cmax - cmin) / max(cmax, 1e-3);
+        let vertical = 1.0 - smoothstep(0.55, 0.80, an.y);
+        if (vertical > 0.01 && sat < 0.30 && base.g <= base.r * 1.15) {
+            let along = select(input.world_pos.x, input.world_pos.z, an.z > an.x);
+            let foot_a = max(deriv.x, deriv.z);
+            let foot_y = deriv.y;
+            let dh = abs(fract(along / 3.6 + 0.5) - 0.5) * 3.6;
+            let dv = abs(fract(input.world_pos.y / 3.15 + 0.5) - 0.5) * 3.15;
+            let seam = max(
+                1.0 - smoothstep(0.030, 0.030 + foot_a * 1.5, dh),
+                1.0 - smoothstep(0.038, 0.038 + foot_y * 1.5, dv),
+            );
+            let grain = sf_vnoise(vec2<f32>(along * 7.0, input.world_pos.y * 7.0)) - 0.5;
+            let streak = (sf_vnoise(vec2<f32>(along * 1.7, 3.1)) - 0.5)
+                * smoothstep(0.0, 1.5, input.world_pos.y)
+                * (1.0 - smoothstep(6.0, 22.0, input.world_pos.y));
+            base = base
+                * (1.0 - seam * 0.42 * vertical + grain * 0.16 * vertical
+                   - streak * 0.24 * vertical);
+        }
+    }
         // 树冠杂色（2026-08-23 纸片树修复的第二次修正）：旧实现是**逐像素**随机
         // fract(sin(dot(world_pos.xz))*43758) 且按 uv 域的 detail 收敛——而 mesh 路径
         // ICO/SPH 模板所有顶点 uv 恒为 (0,0) → fwidth(uv)=0 → detail 恒为 1 →

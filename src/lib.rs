@@ -1207,6 +1207,12 @@ impl GameApp {
         // 两个变量都给时**必须一起进这个分支**（否则 cam_override 为 None 时分支根本不跑），
         // 且 NPC 机位要在 cam_override **之后**应用才不会被覆盖。
         if self.cam_override.is_some() || npc_cam.is_some() {
+            // 🔴 固定机位分支 early-return 早于 update() 的 autostart 段
+            // （2026-10-21 画质取景时发现：只给 RV3D_CAM 时永远停在菜单，截到的全是
+            // "PRESS ANY KEY" 覆盖层）。调试机位需要真实游戏态才有 NPC/波次/枪模。
+            if self.game.state() == GameState::StartMenu && env_truthy("RV3D_AUTOSTART") {
+                self.game.on_any_key();
+            }
             // 仍推进帧时间/HUD FPS（避免调试机位下 HUD 恒 0 显像为“卡死”）
             let now = Instant::now();
             let dt = now.duration_since(self.last_frame).as_secs_f32();
