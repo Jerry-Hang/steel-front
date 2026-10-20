@@ -913,3 +913,27 @@ lib 改动仍是 ~13s（rustc 单 crate 编译 12.9s，无法靠加核解决）�
    修法需把资产尺寸契约提升为编译期常量表并让 solid 一律查表，属跨模块重构。
 2. `cpu.rs` 非连续在线核的循环上界 / `probe_per_cpu` 忽略绑核返回值（容器/热插拔场景）。
 3. `city.rs::relief_steps_are_not_coplanar` 未覆盖 decor 层间台阶与 `half_d`。
+
+
+### 2026-10-20 晚：第 13 批未结案 #2 / #3 收口
+
+**提交 `d1ca833`**（判据都做过反向验证）。
+
+* **#2 cpu 非连续在线核 + 绑核恢复**：新增 `parse_online_list`/`cpu_online_ids`，sysfs/CPUID 循环
+  改按**在线核编号**迭代（原来用 `0..数量`，容器 `"0,2,4"`、Android 核动态上下线时会读不存在的核）；
+  `probe_per_cpu` 先 `sched_getaffinity` 保存原掩码、结束时恢复，`sched_setaffinity` 失败则告警弃读。
+  判据 `parse_online_list_handles_non_contiguous_cores` /
+  `probe_per_cpu_restores_the_original_affinity`（先绑 cpu0 单核再验；读 `/proc/thread-self`）。
+  ⚠️ 判据第一版读 `/proc/self/status`（主线程）⇒ 恒真，已自查修正。
+* **#3 角壁柱 vs 裙墙层间台阶**：外沿 0.68 → **0.76**（比裙墙 0.62 多出 `RELIEF_STEP`＝0.14），
+  并把两者提成 `PLINTH_PROTRUDE_MM`/`PILASTER_PROTRUDE_MM` 常量 +
+  **编译期断言**（整数毫米，避开 const 浮点比较）；回退到 680 会直接 E0080 编译失败。
+* **顺带**：`generate_city` 拆出 `generate_city_with_set(PropSet)` —— 让"有无 GLB 资产"两条路径
+  都能在测试里生成（此前有资产的机器上回退几何从没被测过），也是 #1 的注入点。
+* **统计记录**：按"外表面间隙 < RELIEF_STEP"计数，主路径 **472 对**、回退路径 **2700 对**
+  ⇒ 全城层间共面是更大范围的问题，**只修复核点名的裙墙/壁柱对**，其余不设严格判据。
+
+**仍未结案**：
+1. `city.rs` 有/无 `assets/props` 时 `LevelMap::obstacles` 不一致（已加注入点；还差"碰撞尺寸来自
+   编译期资产契约表"的跨模块重构，代价是回退路径的视觉/碰撞需一起改）。
+2. `relief_steps_are_not_coplanar` 仍未覆盖 decor 之间的通用共面（范围太大，需单独设计）。
