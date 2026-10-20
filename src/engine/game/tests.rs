@@ -166,3 +166,19 @@ mod ai;
 mod combat;
 mod session;
 
+    /// 🔴 **重开一局必须清掉 ESC 菜单状态**（2026-10-20 自查发现）。
+    ///
+    /// 菜单打开时 `update()` 照常推进 ⇒ 玩家可以"开着菜单被打死"→ 结算按 R 重开；
+    /// 旧实现只复位 `settings_open`/`confirm_quit`，`esc_menu_open` 会残留到新一局
+    /// （遮罩盖着新局、光标不抓取、选中项停在上一局的位置）。
+    /// 反向验证：删掉 `start_run` 里那两行复位 ⇒ 本判据红。
+    #[test]
+    fn start_run_clears_stale_escape_menu() {
+        let mut game = Game::new();
+        game.hud.esc_menu_open = true;
+        game.hud.esc_menu_selection = 1;
+        game.start_run();
+        assert!(!game.hud.esc_menu_open, "重开后 ESC 菜单必须关闭");
+        assert_eq!(game.hud.esc_menu_selection, 0, "重开后菜单选中项必须归零");
+    }
+

@@ -357,6 +357,12 @@ impl Game {
         self.hud.reserve = self.weapons.active_firearm_ref().reserve();
         self.hud.settings_open = false;
         self.hud.confirm_quit = false;
+        // 🔴 **ESC 菜单也必须复位**（2026-10-20 自查发现）：
+        // `update()` 在菜单打开时**照样推进**（没有暂停语义），所以玩家可以"开着菜单被打死"
+        // → 结算界面按 R 重开 ⇒ `esc_menu_open` 残留到新一局：遮罩盖着新局、光标不抓取、
+        // 菜单项还高亮在上一局的位置。`settings_open`/`confirm_quit` 早就复位了，这条漏了。
+        self.hud.esc_menu_open = false;
+        self.hud.esc_menu_selection = 0;
         self.hud.victory_banner = None;
         // 🔴 2026-09-22 复查补：击杀提示是**每局**的事件流。不清它，上一局的
         // "你被击杀了" / 击杀行会跟到新一局（最多 6s，`KILL_FEED_DURATION`），
