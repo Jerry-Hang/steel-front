@@ -232,7 +232,16 @@ pub fn parse_wav(bytes: &[u8]) -> Result<AudioClip, WavError> {
         other => return Err(WavError::UnsupportedFormat(other)),
     }?;
 
-    AudioClip::new(samples, sample_rate, channels).ok_or(WavError::InvalidChannels(channels))
+    // 🔴 帧对齐检查（2026-10-20 第 15 批复核第 9 条）：
+    // `AudioClip::new` 对 `samples.len() % channels != 0` 也返回 None，而这里原来一律报
+    // `InvalidChannels(channels)` —— 声道数明明合法（如 2），实际是 data 尾部半帧被截断。
+    if channels == 0 {
+        return Err(WavError::InvalidChannels(0));
+    }
+    if samples.len() % channels as usize != 0 {
+        return Err(WavError::Truncated);
+    }
+    AudioClip::new(samples, sample_rate, channels).ok_or(WavError::InvalidSampleRate(sample_rate))
 }
 
 /// 整数 PCM 解码：8 位无符号，16/24/32 位有符号小端，统一转 f32（[-1, 1]）
@@ -1017,7 +1026,11 @@ impl AdsrEnv {
                 }
                 EnvStage::Release => {
                     let k = if adsr.release > 0.0 { 1.0 / adsr.release } else { 0.0 };
-                    self.level = (self.level * (-k * self.elapsed).exp()).max(0.0);
+                    // 🔴 **必须乘本步因子 `e^{-k·dt}`**（2026-10-20 第 15 批复核第 6 条）：
+                    // 这里原来沿用了 Decay 刚修掉的错误写法 —— 乘的是**累积** `elapsed` 的指数，
+                    // 每样本再乘一次 ⇒ 总衰减变成二阶，几十毫秒就归零（听感是一声爆音而不是收尾）。
+                    let step = (-k * dt).exp();
+                    self.level = (self.level * step).max(0.0);
                     if self.elapsed >= adsr.release || self.level <= 1e-5 {
                         self.stage = EnvStage::Done;
                         self.level = 0.0;
@@ -1379,7 +1392,21 @@ impl DspSynth {
         noise_scale: f32,
     ) -> VoiceId {
         if self.voices.len() >= MAX_SYNTH_VOICES {
-            self.voices.remove(0);
+            // 🔴 **丢弃最不响的那个，而不是一律按 FIFO**（2026-10-20 第 15 批复核第 6 条）：
+            // FIFO 会把正在轰鸣的爆炸声/近距枪声挤掉，只因为它的槽位最老 ——
+            // 而挤进来的往往只是远处一声脚步。
+            let quietest = self
+                .voices
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    let key = |v: &SynthVoice| v.env.level * v.volume;
+                    key(a).total_cmp(&key(b))
+                })
+                .map(|(i, _)| i);
+            if let Some(i) = quietest {
+                self.voices.remove(i);
+            }
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -1460,22 +1487,26 @@ fn hash_noise(seed: u64) -> f32 {
 /// - 低音 pad：4 小节和弦循环 + 0.25s 起落包络（小节边界零振幅防爆音）+ 0.13Hz 慢 LFO；
 /// - 行军节奏：底鼓（60→35Hz 下滑正弦）在 1/3 拍、军鼓（散列噪声突发）在 2/4 拍；
 /// - 旋律动机：16 音符五声音阶循环（每拍一音），正弦 + 轻微二次谐波（簧管感）。
-fn music_wave(time_secs: f32, sample_rate: f32) -> f32 {
-    let bar_len = 4.0 * MARCH_BEAT; // 1 小节 4 拍
+fn music_wave(time_secs: f64, sample_rate: f32) -> f32 {
+    // 全部相位用 f64 算（f32 在大时间上是硬缺陷，见 `MusicSynth::time_secs` 的注释），
+    // 最后只把单样本值降成 f32。
+    let tau = std::f64::consts::TAU;
+    let beat_len = MARCH_BEAT as f64;
+    let bar_len = 4.0 * beat_len; // 1 小节 4 拍
     let bar = (time_secs / bar_len).floor();
     let bar_pos = time_secs - bar * bar_len; // 小节内偏移（0..bar_len）
-    let beat = bar_pos / MARCH_BEAT; // 小节内拍号（0..4）
+    let beat = bar_pos / beat_len; // 小节内拍号（0..4）
     let beat_idx = beat.floor();
-    let t_beat = (beat - beat_idx) * MARCH_BEAT; // 拍内偏移（秒）
+    let t_beat = (beat - beat_idx) * beat_len; // 拍内偏移（秒）
 
-    let mut s = 0.0;
+    let mut s = 0.0f64;
 
     // 低音 pad：4 小节和弦循环，0.25s 起落包络 + 0.13Hz 慢 LFO
     let chord = PAD_CHORDS[bar.rem_euclid(4.0) as usize];
     let pad_env = ((bar_pos / 0.25).min(1.0)).min(((bar_len - bar_pos) / 0.25).min(1.0));
-    let lfo = 0.75 + 0.25 * (std::f32::consts::TAU * 0.13 * time_secs + bar * 1.7).sin();
+    let lfo = 0.75 + 0.25 * (tau * 0.13 * time_secs + bar * 1.7).sin();
     for f in chord {
-        s += (std::f32::consts::TAU * f * time_secs).sin() * pad_env * lfo * 0.09;
+        s += (tau * f as f64 * time_secs).sin() * pad_env * lfo * 0.09;
     }
 
     // 行军节奏：底鼓 0/2 拍、军鼓 1/3 拍（鼓点持续 0.2s）
@@ -1483,39 +1514,38 @@ fn music_wave(time_secs: f32, sample_rate: f32) -> f32 {
         match beat_idx as i32 {
             0 | 2 => {
                 let f = 60.0 - 25.0 * (t_beat / 0.2);
-                s += (std::f32::consts::TAU * f * t_beat).sin() * (-t_beat * 18.0).exp() * 0.25;
+                s += (tau * f * t_beat).sin() * (-t_beat * 18.0).exp() * 0.25;
             }
             1 | 3 => {
-                let idx = (time_secs * sample_rate) as u64;
-                s += hash_noise(idx) * (-t_beat * 30.0).exp() * 0.18;
+                let idx = (time_secs * sample_rate as f64) as u64;
+                s += hash_noise(idx) as f64 * (-t_beat * 30.0).exp() * 0.18;
             }
             _ => {}
         }
     }
 
     // 旋律动机：16 音符循环（每拍一音），正弦 + 二次谐波
-    let total_beat = (time_secs / MARCH_BEAT).floor();
+    let total_beat = (time_secs / beat_len).floor();
     let note_idx = total_beat.rem_euclid(16.0) as usize;
-    let t_note = time_secs - total_beat * MARCH_BEAT;
+    let t_note = time_secs - total_beat * beat_len;
     let st = MELODY_MOTIF[note_idx];
     if st >= 0 {
-        let f = 110.0 * 2.0f32.powf(st as f32 / 12.0);
+        let f = (110.0f64) * 2.0f64.powf(st as f64 / 12.0);
         let env = ((t_note / 0.02).min(1.0)) * (-t_note * 3.5).exp();
-        s += ((std::f32::consts::TAU * f * time_secs).sin()
-            + 0.3 * (std::f32::consts::TAU * 2.0 * f * time_secs).sin())
+        s += ((tau * f * time_secs).sin() + 0.3 * (tau * 2.0 * f * time_secs).sin())
             * env
             * 0.08;
     }
 
-    s
+    s as f32
 }
 
 /// 纯函数：渲染 `frames = out.len()/2` 帧环境音乐并累加到 `out`（交错立体声，与混音输出格式一致）。
 /// 起始相位由绝对时间 `time_secs` 决定 → 同参数必得同输出；每样本先乘 `gain` 再钳位 [-1,1]。
-fn render_music_into(time_secs: f32, sample_rate: f32, gain: f32, out: &mut [f32]) {
+fn render_music_into(time_secs: f64, sample_rate: f32, gain: f32, out: &mut [f32]) {
     debug_assert_eq!(out.len() % 2, 0);
     for (i, pair) in out.chunks_exact_mut(2).enumerate() {
-        let t = time_secs + i as f32 / sample_rate;
+        let t = time_secs + i as f64 / sample_rate as f64;
         let s = (music_wave(t, sample_rate) * gain).clamp(-1.0, 1.0);
         pair[0] += s;
         pair[1] += s;
@@ -1532,7 +1562,12 @@ fn render_music_into(time_secs: f32, sample_rate: f32, gain: f32, out: &mut [f32
 pub struct MusicSynth {
     sample_rate: f32,
     /// 累计时间相位（秒）：驱动确定性合成，淡入淡出期间持续推进（波形无缝）
-    time_secs: f32,
+    ///
+    /// 🔴 **必须是 f64**（2026-10-20 第 15 批复核第 9 条）：f32 在 1800s 处的 1 ULP
+    /// ≈ 0.5rad，`sin(ω·t)` 直接退化成量化噪声；而 `+= frames/rate` 在 27 小时后
+    /// 会被 ULP 完全吞掉（时间永久冻死）。wind 那条已经用回绕绕开了同类问题，
+    /// 音乐这里用 f64 更直接（相位由绝对时间驱动，回绕反而会破坏跨样本连续性）。
+    time_secs: f64,
     /// 淡入淡出目标音量（0..=1）
     fade_target: f32,
     /// 当前淡入淡出音量（0..=1）
@@ -1589,7 +1624,8 @@ impl MusicSynth {
         if gain > 0.0 {
             render_music_into(self.time_secs, self.sample_rate, gain, out);
         }
-        self.time_secs += frames as f32 * dt;
+        // f64 累加：f32 在 27 小时后 `+= frames/rate` 会被 ULP 吞掉（时间冻死）
+        self.time_secs += frames as f64 * (1.0 / self.sample_rate as f64);
     }
 }
 
@@ -2878,7 +2914,7 @@ mod tests {
     // ---------- 程序化环境音乐 ----------
 
     /// 用纯函数路径渲染 `frames` 帧音乐（gain 前置乘），返回交错立体声缓冲
-    fn render_music_buffer(time_secs: f32, sample_rate: u32, frames: usize, gain: f32) -> Vec<f32> {
+    fn render_music_buffer(time_secs: f64, sample_rate: u32, frames: usize, gain: f32) -> Vec<f32> {
         let mut out = vec![0.0; frames * 2];
         render_music_into(time_secs, sample_rate as f32, gain, &mut out);
         out
@@ -2887,14 +2923,14 @@ mod tests {
     #[test]
     fn music_wave_is_deterministic_pure() {
         // 同 time_secs → 同输出（纯函数）
-        for t in [0.0f32, 0.5, 1.234, 60.0, 12345.678] {
+        for t in [0.0f64, 0.5, 1.234, 60.0, 12345.678] {
             assert_eq!(music_wave(t, 48_000.0), music_wave(t, 48_000.0), "t={t}");
         }
         // 相位驱动：连续时间推进输出应变化（非常量）
         let mut prev = music_wave(0.0, 48_000.0);
         let mut changed = false;
         for i in 1..100 {
-            let cur = music_wave(i as f32 * 0.001, 48_000.0);
+            let cur = music_wave(i as f64 * 0.001, 48_000.0);
             if (cur - prev).abs() > 1e-6 {
                 changed = true;
                 break;
@@ -3306,5 +3342,119 @@ mod tests {
             s.render(&listener, 240, &mut buf);
         }
         assert_eq!(s.voice_count(), 0, "0.25s 后哨声应结束");
+    }
+
+    /// 🔴 **释音阶段必须按名义时间常数衰减**（2026-10-20 第 15 批复核第 6 条）。
+    /// 旧写法乘的是**累积 elapsed** 的指数（每样本再乘一次 => 二阶衰减），
+    /// 0.4s 的 release 几十毫秒就归零（听感 = 一声爆音截断）。
+    /// 反向验证：把 `let step = (-k * dt).exp()` 改回 `(-k * self.elapsed).exp()` ⇒ 本判据红。
+    #[test]
+    fn release_stage_decays_with_the_nominal_time_constant() {
+        let adsr = Adsr::new(0.0, 0.01, 0.8, 0.4);
+        let mut env = AdsrEnv::new(adsr);
+        let dt = 1.0f32 / 48_000.0;
+        // 先走完 decay 进入 Sustain（level = sustain = 0.8）
+        for _ in 0..600 {
+            env.advance(&adsr, dt);
+        }
+        assert_eq!(env.stage, EnvStage::Sustain);
+        env.release();
+        // 推进 0.1s（release=0.4s 的 1/4）⇒ 期望 0.8 * e^{-0.25} ≈ 0.623
+        for _ in 0..4800 {
+            env.advance(&adsr, dt);
+        }
+        assert!(
+            env.level > 0.55,
+            "Release 0.1s/0.4s 后电平应约 0.62，实际 {}（乘累积 elapsed 时会瞬间归零）",
+            env.level
+        );
+    }
+
+    /// 🔴 **声部满时必须丢弃最不响的那个**（2026-10-20 第 15 批复核第 6 条）：
+    /// 一律 FIFO 会把正在轰鸣的爆炸声挤掉，只因为它的槽位最老。
+    /// 反向验证：把丢弃逻辑改回 `self.voices.remove(0)` ⇒ 本判据红。
+    #[test]
+    fn synth_full_eviction_keeps_the_loudest_voice() {
+        let mut synth = DspSynth::new(48_000);
+        let loud = SynthKind::Explosion;
+        synth.spawn_full(
+            loud,
+            Vec3::ZERO,
+            1.0,
+            Adsr::new(0.0, 1.0, 1.0, 0.5),
+            8000.0,
+            1,
+            40.0,
+            0.5,
+            1.0,
+        );
+        // 用最轻的脚步声把剩下的槽位灌满
+        for i in 0..(MAX_SYNTH_VOICES - 1) {
+            synth.spawn_full(
+                SynthKind::Footstep,
+                Vec3::ZERO,
+                0.02,
+                Adsr::new(0.0, 0.05, 0.0, 0.02),
+                4000.0,
+                i as u32,
+                0.0,
+                0.0,
+                1.0,
+            );
+        }
+        assert_eq!(synth.voice_count(), MAX_SYNTH_VOICES);
+        // 再塞一个更轻的：应丢弃某个轻脚步，而不是爆炸
+        synth.spawn_full(
+            SynthKind::Footstep,
+            Vec3::ZERO,
+            0.01,
+            Adsr::new(0.0, 0.05, 0.0, 0.02),
+            4000.0,
+            999,
+            0.0,
+            0.0,
+            1.0,
+        );
+        assert_eq!(synth.voice_count(), MAX_SYNTH_VOICES);
+        assert!(
+            synth.voices.iter().any(|v| matches!(v.kind, SynthKind::Explosion)),
+            "声部满时不应丢弃正在轰鸣的爆炸声（FIFO 会把最老的它挤掉）"
+        );
+    }
+
+    /// 🔴 **音乐合成器时间必须用 f64**（2026-10-20 第 15 批复核第 9 条）：
+    /// f32 在 27 小时后 `time_secs += 1/rate` 会被 ULP 完全吞掉（时间冻死），
+    /// 且在 1800s 处相位精度已差到 ~0.5rad（高频旋律退化成量化噪声）。
+    /// 反向验证：把 `time_secs` 改回 f32 并把累加改回 `frames as f32 * dt` ⇒ 本判据红。
+    #[test]
+    fn music_synth_time_stays_accurate_after_hours() {
+        let mut m = MusicSynth::new(48_000);
+        m.time_secs = 100_000.0; // 27 小时后
+        let before = m.time_secs;
+        let mut out = vec![0.0f32; 256 * 2];
+        m.render(256, &mut out);
+        assert!(
+            m.time_secs > before,
+            "时间累加被 ULP 吞掉了（f32 在 1e5 处 ULP≈0.0078 > 单帧 0.0053）"
+        );
+        assert!(
+            (m.time_secs - before - 256.0 / 48_000.0).abs() < 1e-6,
+            "f64 累加误差应在 1e-6 内，实际 {}",
+            m.time_secs - before
+        );
+        assert!(out.iter().all(|v| v.is_finite()), "音乐输出必须有限");
+    }
+
+    /// 🔴 **WAV data 半帧必须报 Truncated 而不是 InvalidChannels**
+    /// （2026-10-20 第 15 批复核第 9 条）：声道数明明合法，原实现把帧对齐失败
+    /// 也归到最后那个 `AudioClip::new(...).ok_or(InvalidChannels(channels))`。
+    #[test]
+    fn wav_half_frame_reports_truncated_not_invalid_channels() {
+        // 16-bit 立体声：6 字节 = 3 个样本 = 1.5 帧（半帧）
+        let bytes = build_wav(1, 2, 48_000, 16, &[0u8; 6]);
+        match parse_wav(&bytes) {
+            Err(WavError::Truncated) => {}
+            other => panic!("半帧 WAV 应报 Truncated，实际 {other:?}"),
+        }
     }
 }

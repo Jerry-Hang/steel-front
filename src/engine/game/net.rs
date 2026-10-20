@@ -394,7 +394,9 @@ impl Game {
                 input.pitch.sin(),
                 -input.pitch.cos() * input.yaw.cos(),
             );
-            self.fire([eye[0], eye[1], eye[2]], [dir.x, dir.y, dir.z]);
+            // 🔴 远端开火绝不能调本机的 `self.fire()`（会扣房主弹匣/震房主相机）——
+            // 走无状态的 `fire_remote`（2026-10-20 第 15 批复核第 7 条）。
+            self.fire_remote([eye[0], eye[1], eye[2]], [dir.x, dir.y, dir.z]);
             self.net_players[pi].last_fire = self.time;
         }
     }
@@ -462,29 +464,21 @@ impl Game {
         }
     }
     /// 玩家弹 vs 网络远端玩家命中（胶囊近似：水平 0.5m + 高度 1.8m）
-    pub(crate) fn hit_net_player(&mut self, p: &Projectile) -> bool {
-        let (px, pz, ph) = (p.position[0], p.position[2], p.position[1]);
-        for q in self.net_players.iter_mut() {
-            if !q.alive {
-                continue;
-            }
-            let dx = px - q.pos[0];
-            let dz = pz - q.pos[2];
-            // `q.pos[1]` 现在**就是**脚底（见 `NET_EYE_HEIGHT` 的说明），不必再减
-            let dy = ph - q.pos[1];
-            if dx * dx + dz * dz <= 0.25 && dy >= 0.0 && dy <= 1.8 {
-                let dmg = p.damage_at_distance();
-                q.hp -= dmg;
-                if q.hp <= 0.0 {
-                    q.alive = false;
-                    q.last_rx = self.time;
-                    self.hud.push_kill(format!("击杀联机玩家 #{}", q.id));
-                    log::info!("net: server 远端玩家 #{} 被击杀\n", q.id);
-                }
-                return true;
-            }
+    /// 结算一发子弹对**指定**远端玩家的伤害（命中判定在 `nearest_segment_hit` 里
+    /// 与障碍/NPC 一起按参数 `t` 排序，2026-10-20 第 15 批复核第 8 条）。
+    pub(crate) fn damage_net_player(&mut self, idx: usize, dmg: f32) {
+        let Some(q) = self.net_players.get_mut(idx) else { return };
+        if !q.alive {
+            return;
         }
-        false
+        q.hp -= dmg;
+        if q.hp <= 0.0 {
+            q.alive = false;
+            q.last_rx = self.time;
+            let id = q.id;
+            self.hud.push_kill(format!("击杀联机玩家 #{id}"));
+            log::info!("net: server 远端玩家 #{id} 被击杀\n");
+        }
     }
 }
 

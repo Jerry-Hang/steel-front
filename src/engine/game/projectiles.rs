@@ -360,16 +360,16 @@ impl Game {
                     self.damage_npc(idx, dmg, DamageSource::Player);
                     continue;
                 }
-                None => {}
-            }
-            // 玩家弹 vs 网络远端玩家（服务器权威命中：杀远端玩家）
-            if p.from_player() && self.net_players.iter().any(|q| q.alive) {
-                let hit = self.hit_net_player(&p);
-                if hit {
+                Some(SegmentHit::NetPlayer { idx, .. }) => {
+                    // 远端玩家与障碍/NPC 一起按参数 `t` 排序（2026-10-20 第 15 批复核第 8 条）：
+                    // 原来只在"线段没碰到任何东西"之后用终点单点检测 ⇒ 高速弹会隧道穿过、
+                    // 背靠墙的远端玩家永远打不中。
                     hit_count += 1;
-                    self.hud.show_hit_marker();
+                    let dmg = p.damage_at_distance();
+                    self.damage_net_player(idx, dmg);
                     continue;
                 }
+                None => {}
             }
             // 🔴 **到期判定必须在碰撞检测【之后】**（2026-10-15，外部复核指出第 2 条）：
             // 放在碰撞之前 ⇒ "超出射程的那一步"的线段被整段跳过 = **末步穿模**，
@@ -518,28 +518,11 @@ impl Game {
                 }
             }
         }
-        // 障碍 AoE 伤害：爆炸半径内障碍施加冲击伤害（复用 damage_obstacle 血量体系，
-        // 可摧毁掩体；环带障碍与 TOML 关卡障碍一致生效）。按距离线性衰减（半径边缘 0）。
-        if damage > 0.0 && !self.map.obstacles.is_empty() {
-            let r2 = radius * radius;
-            let mut i = self.map.obstacles.len();
-            while i > 0 {
-                i -= 1;
-                let ob = self.map.obstacles[i];
-                // 障碍中心到爆炸中心距离（水平）
-                let dx = ob.x - center[0];
-                let dz = ob.z - center[2];
-                let d2 = dx * dx + dz * dz;
-                if d2 > r2 {
-                    continue;
-                }
-                let fall = 1.0 - (d2.sqrt() / radius).clamp(0.0, 1.0);
-                self.damage_obstacle(i, damage * fall * EXPLOSION_OBSTACLE_FACTOR);
-            }
-        }
-        if damage <= 0.0 || self.npcs.is_empty() {
-            return;
-        }
+        // 🔴 **先结算 NPC 冲击波，再结算障碍 AoE 伤害**（2026-10-20 第 15 批复核第 4 条）：
+        // 反过来（先 `damage_obstacle` 摧毁掩体、再查 `obstacle_blocks_blast`）时，
+        // 躲在可破坏掩体后的 NPC 在掩体碎裂的**同一发爆炸**里完全享受不到遮挡 —— 
+        // 掩体用自己的命替身后的人挡下这一次冲击波，然后才碎。
+        if damage > 0.0 && !self.npcs.is_empty() {
         let points: Vec<[f32; 3]> = self.npcs.iter().map(|n| n.position).collect();
         let mut falloff = vec![0.0f32; points.len()];
         crate::engine::simd::shockwave_pressure(center, radius, 1.0, &points, &mut falloff);
@@ -569,7 +552,29 @@ impl Game {
             }
             self.damage_npc(i, damage * f, DamageSource::Blast);
         }
+        }
+
+        // 障碍 AoE 伤害：爆炸半径内障碍施加冲击伤害（复用 damage_obstacle 血量体系，
+        // 可摧毁掩体；环带障碍与 TOML 关卡障碍一致生效）。按距离线性衰减（半径边缘 0）。
+        if damage > 0.0 && !self.map.obstacles.is_empty() {
+            let r2 = radius * radius;
+            let mut i = self.map.obstacles.len();
+            while i > 0 {
+                i -= 1;
+                let ob = self.map.obstacles[i];
+                // 障碍中心到爆炸中心距离（水平）
+                let dx = ob.x - center[0];
+                let dz = ob.z - center[2];
+                let d2 = dx * dx + dz * dz;
+                if d2 > r2 {
+                    continue;
+                }
+                let fall = 1.0 - (d2.sqrt() / radius).clamp(0.0, 1.0);
+                self.damage_obstacle(i, damage * fall * EXPLOSION_OBSTACLE_FACTOR);
+            }
+        }
     }
+
     /// 推进爆炸实体生命周期（年龄 + 过期移除）与震屏衰减。每帧调用（update 尾部）。
     pub(crate) fn step_explosions(&mut self, dt: f32) {
         for ex in self.explosions.iter_mut() {

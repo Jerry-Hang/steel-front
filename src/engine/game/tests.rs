@@ -291,3 +291,91 @@ mod session;
         );
     }
 
+    /// 🔴 **连发必须受射速冷却约束**（2026-10-20 第 15 批复核第 1 条）。
+    /// 旧 `fire_burst` 只查切枪计时、不查 `fire_cooldown`，而末尾又把冷却设成
+    /// `interval*rounds` ⇒ 连点左键可按帧连打三连发。
+    /// 反向验证：删掉 `fire_burst` 里的 `if self.fire_cooldown > 0.0` ⇒ 本判据红。
+    #[test]
+    fn burst_fire_respects_the_fire_cooldown() {
+        let mut g = Game::new();
+        g.on_any_key();
+        let first = g.fire_burst_player([0.0, 1.6, 0.0], [0.0, 0.0, -1.0], 3);
+        assert!(first > 0, "首次三连发应打出子弹（前提：默认武器有弹）");
+        assert!(g.fire_cooldown > 0.0, "三连发之后必须立起冷却计时");
+        let second = g.fire_burst_player([0.0, 1.6, 0.0], [0.0, 0.0, -1.0], 3);
+        assert_eq!(
+            second, 0,
+            "冷却期内再次扣扳机必须被拦下（实打 {second} 发）—— 否则射速冷却形同虚设"
+        );
+    }
+
+    /// 🔴 **切枪必须复位上一把枪的冷却与控枪热量**（2026-10-20 第 15 批复核第 3 条）：
+    /// 不清 ⇒ 高射速/三连发后切手枪「切枪动画已结束却扣不动扳机」，
+    /// 或步枪连射热量污染狙击枪首发后坐力。
+    /// 反向验证：删掉 `reset_weapon_transients_after_switch` 里的两行 ⇒ 本判据红。
+    #[test]
+    fn switching_weapon_clears_previous_cooldown_and_heat() {
+        let mut g = Game::new();
+        g.on_any_key();
+        g.fire_cooldown = 2.5;
+        g.auto_heat = 1.0;
+        g.switch_weapon(1);
+        assert_eq!(g.fire_cooldown, 0.0, "切枪后上一把枪的冷却必须清零");
+        assert_eq!(g.auto_heat, 0.0, "切枪后上一把枪的控枪热量必须清零");
+        // 结束切枪硬直后，新武器必须能立即开火
+        g.weapons.update(0.7);
+        assert!(
+            g.fire_player([0.0, 1.6, 0.0], [0.0, 0.0, -1.0]),
+            "切枪完成（0.6s）后新武器应能立即开火，不应被上一把枪的残留冷却卡住"
+        );
+    }
+
+    
+    /// 🔴 **远端玩家开火不得污染房主机体**（2026-10-20 第 15 批复核第 7 条）。
+    /// 旧实现服务端用 `self.fire(...)` 处理远端开火 ⇒ 扣房主弹匣、把后坐力加到房主相机、
+    /// 并把房主自己的 `fire_cooldown` 立起来。现在走无状态的 `fire_remote`。
+    /// 反向验证：把 net.rs 里 `fire_remote` 改回 `self.fire` ⇒ 本判据红。
+    #[test]
+    fn remote_player_fire_does_not_touch_the_host_weapon_state() {
+        let mut g = Game::new();
+        g.on_any_key();
+        g.net_players.push(NetPlayer {
+            id: 1,
+            pos: [50.0, 0.0, 50.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            hp: 100.0,
+            alive: true,
+            last_rx: 0.0,
+            fire_accum: 0.5,
+            last_fire: 0.0,
+        });
+        g.last_dt = 0.016;
+        let ammo_before = g.weapons.active_firearm_ref().magazine();
+        let kick_before = g.pending_kick;
+        let projectiles_before = g.projectiles.len();
+        let input = NetInput {
+            forward: false,
+            backward: false,
+            left: false,
+            right: false,
+            fire: true,
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        g.apply_net_player_input(1, input);
+        assert_eq!(
+            g.weapons.active_firearm_ref().magazine(),
+            ammo_before,
+            "远端玩家开火不应扣减服务端房主本机的弹匣"
+        );
+        assert_eq!(
+            g.pending_kick, kick_before,
+            "远端玩家开火不应给房主本机相机施加后坐力"
+        );
+        assert_eq!(g.fire_cooldown, 0.0, "远端玩家开火不应阻塞房主本机的开火冷却");
+        assert!(
+            g.projectiles.len() > projectiles_before,
+            "远端玩家开火必须真的生成一发世界弹丸"
+        );
+    }

@@ -877,6 +877,13 @@ pub(crate) fn occl_cache_matches(cache_ids: &[usize], npc_ids: &[usize]) -> bool
             }
         }
         for (i, t) in pairs {
+            // 🔴 **已阵亡的不得再开火、也不再吸收伤害**（2026-10-20 第 15 批复核第 5 条）：
+            // 同一帧里 `i` 可能先把 `t` 打死，而 `t` 若排在 `pairs` 后面，仍会
+            // （1）以攻击者身份再开一枪（同归于尽），（2）继续给瞄准它的队友消耗 `fire_accum`。
+            // 冷却是按攻击者累计的，死人白耗一帧 = 下一枪被推迟。
+            if self.npcs[i].hp <= 0.0 || self.npcs[t].hp <= 0.0 {
+                continue;
+            }
             self.npcs[i].fire_accum += dt;
             if self.npcs[i].fire_accum >= 1.0 {
                 self.npcs[i].fire_accum = 0.0;

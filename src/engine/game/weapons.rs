@@ -13,12 +13,18 @@ pub(crate) enum SegmentHit {
     Obstacle { t: f32, body: Option<usize> },
     /// NPC。`idx` = `self.npcs` 的下标，`height` = 命中点世界高度（部位倍率用）
     Npc { t: f32, idx: usize, height: f32 },
+    /// 联机远端玩家。`idx` = `self.net_players` 的下标。
+    /// （2026-10-20 第 15 批复核第 8 条：原来远端玩家只在"线段没碰到任何障碍/NPC"之后
+    /// 用终点单点检测 ⇒ 高速弹隧道穿过、背靠墙的人永远打不中。）
+    NetPlayer { t: f32, idx: usize },
 }
 
 impl SegmentHit {
     pub(crate) fn t(&self) -> f32 {
         match self {
-            SegmentHit::Obstacle { t, .. } | SegmentHit::Npc { t, .. } => *t,
+            SegmentHit::Obstacle { t, .. }
+            | SegmentHit::Npc { t, .. }
+            | SegmentHit::NetPlayer { t, .. } => *t,
         }
     }
 }
@@ -153,22 +159,6 @@ impl Game {
             }
         }
     }
-    /// 单发开火（受冷却与切枪计时约束）；返回是否发射。
-    /// 内部路径（AI/网络/测试）发射的弹不带玩家标记（无友军伤害豁免）。
-    pub(crate) fn fire(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
-        if self.fire_cooldown > 0.0 {
-            return false;
-        }
-        // 切枪计时中禁止开火（纯计时器，无动画）
-        if self.weapons.is_switching() {
-            return false;
-        }
-        let ok = self.fire_shot(origin, direction, false);
-        if ok {
-            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
-        }
-        ok
-    }
     /// 玩家单发开火（main.rs 调用）：弹带玩家标记，命中友军（同阵营 NPC）穿身而过不造成伤害
     pub(crate) fn fire_player(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
         if self.fire_cooldown > 0.0 {
@@ -183,6 +173,54 @@ impl Game {
         }
         ok
     }
+    /// 单发开火（受冷却与切枪计时约束）；返回是否发射。
+    ///
+    /// 🔴 现在**只有测试还走这条路径**：外部的"内部开火"调用方（服务端远端开火）
+    /// 已改为无状态的 [`Self::fire_remote`]（2026-10-20 第 15 批复核第 7 条），
+    /// AI 互射用 `apply_npc_combat` 直接结算、不生成弹丸。`#[cfg(test)]` 让它
+    /// 不再作为生产 API 暴露（顺带避免 dead_code 压制）。
+    #[cfg(test)]
+    pub(crate) fn fire(&mut self, origin: [f32; 3], direction: [f32; 3]) -> bool {
+        if self.fire_cooldown > 0.0 {
+            return false;
+        }
+        // 切枪计时中禁止开火（纯计时器，无动画）
+        if self.weapons.is_switching() {
+            return false;
+        }
+        let ok = self.fire_shot(origin, direction, false);
+        if ok {
+            self.fire_cooldown = self.weapons.active_firearm_ref().fire_interval();
+        }
+        ok
+    }
+
+    /// 远端玩家开火（服务端权威弹道；2026-10-20 第 15 批复核第 7 条）。
+    ///
+    /// 🔴 **绝不能走 `self.fire()`**：那个函数扣的是**本机（房主）**的弹匣、
+    /// 把后坐力累加进 `self.pending_kick`（下一帧加到房主相机上）、
+    /// 还把 `fire_cooldown` / `auto_heat` 算在房主头上 —— 远端玩家在 200m 外开枪，
+    /// 房主的枪会掉子弹、准星会上跳、扳机会被卡住。
+    /// 这里只生成一发世界弹丸 + 3D 枪声，不读也不写任何本机武器状态。
+    pub(crate) fn fire_remote(&mut self, origin: [f32; 3], direction: [f32; 3]) {
+        const REMOTE_SPEED: f32 = 600.0;
+        const REMOTE_RANGE: f32 = 200.0;
+        const REMOTE_LIFETIME: f32 = 2.0;
+        const REMOTE_DAMAGE: f32 = 28.0;
+        let p = Projectile::new(
+            origin,
+            direction,
+            REMOTE_SPEED,
+            REMOTE_RANGE,
+            REMOTE_LIFETIME,
+            REMOTE_DAMAGE,
+        );
+        self.projectiles.push(p);
+        self.audio
+            .synth_mut()
+            .play_shot(glam::Vec3::new(origin[0], origin[1], origin[2]), 1.0);
+    }
+
     /// 连发（Burst2/Burst3 共用这一条路径）：无视冷却快速连打 `rounds` 发，
     /// 之后强制冷却 `rounds ×` 间隔；返回实际发射数（弹匣打空即停）。
     /// 切枪计时中返回 0。`rounds` 由调用方给（`FireMode::burst_rounds()`）。
@@ -201,6 +239,12 @@ impl Game {
         from_player: bool,
     ) -> u32 {
         if self.weapons.is_switching() {
+            return 0;
+        }
+        // 🔴 **连发同样受冷却约束**（2026-10-20 第 15 批复核第 1 条）：
+        // 原来只查 `is_switching`，而末尾又把 `fire_cooldown` 设成 `interval*rounds`，
+        // 下一帧冷却被完全无视 ⇒ 连点左键可以按帧连打三连发（165fps ≈ 每秒 500 发）。
+        if self.fire_cooldown > 0.0 {
             return 0;
         }
         let mut n = 0u32;
@@ -342,6 +386,20 @@ impl Game {
         let prev = self.weapons.active_index();
         self.weapons.switch_to(index);
         self.log_switch_if_changed(prev, "切枪");
+        self.reset_weapon_transients_after_switch(prev);
+    }
+
+    /// 🔴 切枪后清掉**上一把枪**的冷却与控枪热量（2026-10-20 第 15 批复核第 3 条）。
+    ///
+    /// 不清的后果：
+    /// * 高射速/三连发之后切手枪 ⇒ 切枪动画已结束但 `fire_cooldown` 仍 >0 ⇒ 扣不动扳机；
+    /// * 步枪连射把 `auto_heat` 叠满后切狙击枪 ⇒ 狙击枪第一发后坐力被错误压减 55%。
+    /// 只在**真的换了**才清（同槽位重复切换不动）。
+    fn reset_weapon_transients_after_switch(&mut self, prev: usize) {
+        if self.weapons.active_index() != prev {
+            self.fire_cooldown = 0.0;
+            self.auto_heat = 0.0;
+        }
     }
     /// 切枪日志（两条路共用）：**只在真的换成了才打**，且 `tag` 区分是哪条路。
     ///
@@ -369,6 +427,7 @@ impl Game {
             self.weapons.switch_prev();
         }
         self.log_switch_if_changed(prev, "滚轮切枪");
+        self.reset_weapon_transients_after_switch(prev);
     }
     /// 🔴 **切枪动画进度** 0..=1（0 = 刚换手、枪在最低点；1 = 抬回瞄准位）。
     ///
@@ -495,8 +554,13 @@ impl Game {
         let (bx, by, bz) = (p.position[0], p.position[1], p.position[2]);
         let mut best: Option<SegmentHit> = None;
         let mut consider = |t: f32, hit: SegmentHit| {
-            if t <= 0.0 {
-                return; // t == 0：起点就在里面，没有"打到面"这件事（见 first_obstacle_hit）
+            // 🔴 **t == 0 必须算命中**（2026-10-20 第 15 批复核第 2 条）：
+            // `t <= 0.0` 这条规则是从 `first_obstacle_hit`（画弹孔要"入口面"，起点在里面
+            // 没有面可贴）直接照搬过来的，但**伤害判定**不是画弹孔：贴脸时玩家眼位可能已经
+            // 在 NPC 的 1.05m 命中球内（`segment_npc_entry` 把最近点参数 clamp 到 0），
+            // 丢弃 t=0 就等于"越近越打不中"。
+            if t < 0.0 {
+                return;
             }
             if best.as_ref().is_none_or(|b| b.t() > t) {
                 best = Some(hit);
@@ -515,7 +579,23 @@ impl Game {
                 consider(t, SegmentHit::Obstacle { t, body: None });
             }
         }
-        // ③ NPC：**跳过"玩家弹打友军"**那种（与原来的穿身规则一致），
+        // ③ 联机远端玩家（仅玩家弹）：与 NPC 一起按参数 `t` 排序
+        if p.from_player() {
+            for (idx, q) in self.net_players.iter().enumerate() {
+                if !q.alive {
+                    continue;
+                }
+                let half = 0.45;
+                let aabb = crate::engine::physics::Aabb {
+                    min: crate::engine::physics::Vec3::new(q.pos[0] - half, q.pos[1] + 0.05, q.pos[2] - half),
+                    max: crate::engine::physics::Vec3::new(q.pos[0] + half, q.pos[1] + 1.80, q.pos[2] + half),
+                };
+                if let Some((t, _)) = Self::segment_aabb_entry(ax, ay, az, bx, by, bz, &aabb) {
+                    consider(t, SegmentHit::NetPlayer { t, idx });
+                }
+            }
+        }
+        // ④ NPC：**跳过"玩家弹打友军"**那种（与原来的穿身规则一致），
         //    但**只跳过它自己**，不能连它身后的敌人一起跳过。
         for (i, npc) in self.npcs.iter().enumerate() {
             if p.from_player() && npc.team == crate::engine::ai::Team::Blue {

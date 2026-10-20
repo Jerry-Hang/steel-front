@@ -1277,4 +1277,142 @@ mod segment_t_ordering_tests {
             game.npcs[1].hp
         );
     }
+    /// 🔴 **贴脸命中必须算**（2026-10-20 第 15 批复核第 2 条）：
+    /// `nearest_segment_hit` 的 `consider` 直接照搬了画弹孔用的 `t <= 0` 过滤，
+    /// 而 `segment_npc_entry` 的最近点参数在「玩家已在 NPC 命中球内、且球心在枪口身后」
+    /// 时会 clamp 到 0 ⇒ 丢弃 t=0 等于越近越打不中。
+    /// 反向验证：把 `consider` 改回 `if t <= 0.0 { return; }` ⇒ 本判据红。
+    #[test]
+    fn point_blank_shot_inside_the_hit_sphere_registers_a_hit() {
+        let mut game = fresh_game();
+        // 命中球心在脚上 1.0m、半径 1.05m；枪口 (0,1,0) ⇒ 把 NPC 放在 z=+0.4：
+        // 球心在枪口**身后** 0.4m，但枪口仍在命中球内（距离 0.4m < 1.05m）。
+        put_npc(&mut game, 0, Team::Red, 0.4);
+        fire_one_frame(&mut game, true);
+        assert!(
+            game.npcs.first().is_some_and(|n| n.hp < 100.0),
+            "玩家已经在 NPC 命中球内时开枪必须命中（hp={:?}）",
+            game.npcs.first().map(|n| n.hp)
+        );
+    }
+
+    /// 🔴 **可破坏掩体必须在碎裂的同一发爆炸里替身后的人挡下冲击波**
+    /// （2026-10-20 第 15 批复核第 4 条）。
+    /// 旧顺序「先 `damage_obstacle` 摧毁掩体 → 再 `obstacle_blocks_blast` 判遮挡」
+    /// ⇒ 掩体刚被删掉，身后 NPC 直接吃满伤害。
+    /// 反向验证：把障碍 AoE 块挪回 NPC 冲击波之前 ⇒ 本判据红。
+    #[test]
+    fn destructible_cover_blocks_the_blast_that_destroys_it() {
+        let mut game = Game::new();
+        game.stress = true;
+        game.player_invincible = true; // 只测 NPC 侧，别让玩家自伤改变状态
+        game.npcs.clear();
+        game.world.bodies.clear();
+        game.world.spheres.clear();
+        // 路障：100 HP，中心 (0,1.2,-2)，半尺寸 2.0×1.2×0.5
+        game.map.obstacles = vec![MapObstacle {
+            x: 0.0,
+            z: -2.0,
+            half_w: 2.0,
+            half_d: 0.5,
+            y: 1.2,
+            half_h: 1.2,
+            kind: ObstacleKind::Barrier,
+            tint: None,
+            max_hp: 100.0,
+            hp: 100.0,
+            shape: Shape::Legacy,
+        }];
+        game.world
+            .bodies
+            .push(Body::new_static(Pv::new(0.0, 1.2, -2.0), Pv::new(2.0, 1.2, 0.5)));
+        // NPC 躲在路障正后方（z=-4）
+        let mut n = npc_at(0, Team::Red, [0.0, 0.0, -4.0]);
+        n.hp = 100.0;
+        n.max_hp = 100.0;
+        n.last_hp = 100.0;
+        game.npcs.push(n);
+        // 手雷在路障正前方爆炸：距离 2m ⇒ fall=0.75 ⇒ 200×0.75=150 > 100HP，一发炸毁
+        game.spawn_explosion([0.0, 0.5, 0.0], 8.0, 200.0, false);
+        assert!(
+            game.map.obstacles.is_empty(),
+            "路障本身应被这一发炸毁（前提不成立：伤害/血量配置变了）"
+        );
+        assert_eq!(
+            game.npcs[0].hp, 100.0,
+            "路障在碎裂当次必须替身后的 NPC 挡下冲击波（实际 hp={}）",
+            game.npcs[0].hp
+        );
+    }
+
+    /// 🔴 **同帧被击杀的 NPC 不得再开火、也不得继续吸收伤害**
+    /// （2026-10-20 第 15 批复核第 5 条）。
+    /// 反向验证：删掉 `apply_npc_combat` 里的死亡拦截 ⇒ 后手会反杀先手（同归于尽）。
+    #[test]
+    fn a_npc_killed_this_frame_does_not_return_fire() {
+        let mut game = Game::new();
+        game.stress = true;
+        let mut a = npc_at(0, Team::Red, [0.0, 0.0, 0.0]);
+        let mut b = npc_at(1, Team::Blue, [6.0, 0.0, 0.0]);
+        let p = NpcPerception {
+            enemy_visible: true,
+            enemy_in_range: true,
+            ..NpcPerception::default()
+        };
+        a.state_machine.update(p);
+        a.state_machine.update(p);
+        b.state_machine.update(p);
+        b.state_machine.update(p);
+        assert_eq!(a.state_machine.state(), NpcState::Attack);
+        assert_eq!(b.state_machine.state(), NpcState::Attack);
+        // 双方都只剩 5 血：任意一方开火即击杀对方
+        a.hp = 5.0;
+        b.hp = 5.0;
+        game.npcs = vec![a, b];
+        let targets = vec![
+            Some((1, game.npcs[1].position, game.npcs[1].facing)),
+            Some((0, game.npcs[0].position, game.npcs[0].facing)),
+        ];
+        game.apply_npc_combat(1.1, &targets);
+        assert!(
+            game.npcs[1].hp <= 0.0,
+            "先手（pairs 里靠前的 #0）应击杀 #1（hp={}）",
+            game.npcs[1].hp
+        );
+        assert_eq!(
+            game.npcs[0].hp, 5.0,
+            "同帧已被击杀的 NPC 不该反杀先手（hp={}）",
+            game.npcs[0].hp
+        );
+    }
+
+
+    /// 🔴 **远端玩家必须参与 `t` 排序**（2026-10-20 第 15 批复核第 8 条）：
+    /// 旧实现只在"线段没碰到任何障碍/NPC"之后用**终点单点**检测 ⇒
+    /// 背靠墙的远端玩家永远打不中（墙先被判成命中）、高速弹会隧道穿过。
+    /// 反向验证：把 `nearest_segment_hit` 里的远端玩家循环删掉 ⇒ 本判据红。
+    #[test]
+    fn net_player_in_front_of_a_wall_still_takes_the_hit() {
+        let mut game = fresh_game();
+        put_wall(&mut game);
+        game.net_players.push(crate::engine::game::NetPlayer {
+            id: 1,
+            pos: [0.0, 0.0, -5.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            hp: 100.0,
+            alive: true,
+            last_rx: 0.0,
+            fire_accum: 0.0,
+            last_fire: 0.0,
+        });
+        // 线段 z: 0 → -10，同时穿过远端玩家（≈ -5）与墙（≈ -9.5）
+        fire_one_frame(&mut game, true);
+        assert!(
+            game.net_players[0].hp < 100.0,
+            "站在墙【前】5m 的远端玩家没掉血（hp={}）——\
+             结算必须把远端玩家也纳入 `t` 排序，而不是等 `nearest_segment_hit` 返回 None",
+            game.net_players[0].hp
+        );
+    }
 }
