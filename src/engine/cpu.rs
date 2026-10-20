@@ -564,6 +564,7 @@ fn cpu_thread_count() -> usize {
 /// 旧实现只有 `cpu_thread_count()`（数量），所有 `0..threads` 的循环在**非连续在线核**
 /// （容器 `"0,2,4"`、Android 核上线/下线动态变化 `"0-1,4-7"`）上会去读不存在的 `cpu1/cpu3`
 /// ⇒ 读失败整函数返回 `None`（SMT/容量聚类全失效），或把编号 ≥ 数量的合法核丢掉。
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn parse_online_list(s: &str) -> Option<Vec<usize>> {
     let cpus = parse_cpu_list(s.trim())?;
     if cpus.is_empty() { None } else { Some(cpus) }

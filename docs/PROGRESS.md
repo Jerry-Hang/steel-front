@@ -1066,3 +1066,21 @@ HUD/音频/战斗循环；本批补齐渲染器根、武器静态数据、SIMD �
 `env::set_var` 非 unsafe；RDV 无自激循环（PUNCH 被忽略）；强制 avx512 是设计；
 build.rs 中文不进 HUD。
 **第 16 批复核结论**：`~/Desktop/审查/第16批复核结论.md`。
+
+### 2026-10-21 凌晨：改后全量回归 + 真机冒烟（第 16 批之后）
+
+**回归**：`cargo test --release` **816 passed + bin 1 passed**；Linux 构建 0 警告；
+`cargo check --target x86_64-pc-windows-msvc` 0 警告（顺手修了历史遗留：`parse_online_list`
+只被 linux/android 调用 ⇒ 加 `cfg`，Windows 构建不再有 dead-code 警告）。
+
+**真机冒烟**（Wayland + KWin，`RV3D_NO_CAPTURE=1 RV3D_EXIT_AFTER` 定时正常退出）：
+
+| 场景 | 结果 |
+|---|---|
+| dGPU（RTX 5060）压力模式 255 NPC，25s | exit=0；**0 panic / 0 device lost / 0 VUID / 0 ERROR**；稳态 fps 中位 **116–121** |
+| dGPU + `RV3D_MAP=assets/maps/defense_line.toml`（5 出生点/16 障碍/1 目标），30s | exit=0；0 panic；目标系统激活；稳态 fps 中位 **237** |
+| iGPU（AMD 610M RADV），20s | exit=0 但 **device lost（≈4s 处）**；对照基线 `32f2037` 同样 4 次 lost ⇒ **预存在环境问题**（RADV 610M + KWin 合成），非本轮回归 |
+| A/B 性能（current vs 基线 `32f2037`，各 2 轮交替 20s，稳态中位） | current 116.6/120.6 vs 基线 118.5/117.7 ⇒ **无回归**（首轮的 71 是启动低帧拉低均值） |
+
+⚠️ **VUID 判据本轮不适用**：本机未安装 `VK_LAYER_KHRONOS_validation`（sudo 无终端输入密码装不了），
+日志里 0 条 VUID 只是"没开验证层"的结构性结果（教训 46 同形）。
