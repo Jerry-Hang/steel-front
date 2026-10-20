@@ -52,6 +52,17 @@ pub const KERB_EDGE: f32 = BLOCK_EDGE + 2.0 * SIDEWALK;
 /// 新增构件时必须自己保证出挑量满足这条不变量。
 #[cfg(test)]
 const RELIEF_STEP: f32 = 0.14;
+
+/// 裙墙外沿比碰撞核凸出多少（米 ×1000，整数便于编译期比较）。
+const PLINTH_PROTRUDE_MM: u32 = 620;
+/// 角壁柱外沿比碰撞核凸出多少（米 ×1000）。
+const PILASTER_PROTRUDE_MM: u32 = 760;
+/// 🔴 **编译期契约**（2026-10-20，第 13 批复核第 10 条）：壁柱外沿必须比裙墙外沿
+/// 多出至少 `RELIEF_STEP`，否则两面在掠射角下几乎共面（原来 680 vs 620 ⇒ 只差 60mm）。
+/// 用整数毫米做编译期断言：浮点比较在 const 上下文不可用，而这条约束必须在**编译时**拦住。
+const _: () = assert!(PILASTER_PROTRUDE_MM >= PLINTH_PROTRUDE_MM + 140);
+const PLINTH_PROTRUDE: f32 = PLINTH_PROTRUDE_MM as f32 / 1000.0;
+const PILASTER_PROTRUDE: f32 = PILASTER_PROTRUDE_MM as f32 / 1000.0;
 /// 贴墙件的背面埋入墙内的深度（米）——保证背面永远在实体里，不与墙面共面。
 const INSET_BURIED: f32 = 0.20;
 /// 落地件埋入地下的深度（米）——不与地形平面共面。
@@ -428,8 +439,17 @@ fn building(
     // 结构核心：唯一的挡人盒，从地面到屋顶。
     c.push(Part::new(ObstacleKind::Building, cx, cz, w, d, UNDER_GROUND, h, pal.wall));
 
-    // 底层裙墙（石材）：凸出核心 0.62m，把"楼坐在地上"这件事画出来。
-    c.deco(Part::new(ObstacleKind::Building, cx, cz, w + 1.24, d + 1.24, UNDER_GROUND, plinth_h, pal.base));
+    // 底层裙墙（石材）：外沿凸出核心 `PLINTH_PROTRUDE`，把"楼坐在地上"这件事画出来。
+    c.deco(Part::new(
+        ObstacleKind::Building,
+        cx,
+        cz,
+        w + 2.0 * PLINTH_PROTRUDE,
+        d + 2.0 * PLINTH_PROTRUDE,
+        UNDER_GROUND,
+        plinth_h,
+        pal.base,
+    ));
 
     // 逐层：窗带（凸 0.30）+ 层线 collar（凸 0.44，压在窗带上下沿，形成水平阴影线）
     for f in 0..floors {
@@ -464,13 +484,18 @@ fn building(
         ));
     }
 
-    // 角壁柱：四根通高，凸出核心 0.68，把"纸盒直角"变成有厚度的转角。
+    // 角壁柱：四根通高，把"纸盒直角"变成有厚度的转角。
+    // 🔴 外沿必须比**裙墙**（`w + 1.24` ⇒ 凸出 0.62）再多一个 `RELIEF_STEP`（0.14）
+    // （2026-10-20 外部复核第 10 条）：原来壁柱外沿 = `pw - 0.10 = 0.68`，与裙墙只差
+    // **0.06m** ⇒ 掠射角下两面几乎共面，模块文档「任何两层表面之间至少留 RELIEF_STEP」
+    // 在自己点名的构件上就不成立。`-0.02` ⇒ 外沿 = 0.78 − 0.02 = **0.76** = 0.62 + 0.14。
     let pw = 0.78;
+    // 中心偏移由"外沿目标"反解：`outer = center + pw/2 = w/2 + PILASTER_PROTRUDE`
     for (sx, sz) in [(-1.0f32, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
         c.deco(Part::new(
             ObstacleKind::Building,
-            cx + sx * (w * 0.5 + pw * 0.5 - 0.10),
-            cz + sz * (d * 0.5 + pw * 0.5 - 0.10),
+            cx + sx * (w * 0.5 + PILASTER_PROTRUDE - pw * 0.5),
+            cz + sz * (d * 0.5 + PILASTER_PROTRUDE - pw * 0.5),
             pw,
             pw,
             UNDER_GROUND,
@@ -1541,10 +1566,9 @@ fn perimeter(c: &mut City) {
 
 /// 手工城市地图（默认关卡；完整布局见模块头注释）
 pub fn generate_city() -> LevelMap {
-    let mut c = City::new();
     // 道具套件在生成入口装载一次，之后由各生成函数通过 `City::prop` 取用。
     // 读不到目录只意味着退回纯程序化外观，不是错误——所以这里只记一条 info。
-    c.set = match PropSet::load_dir("assets/props") {
+    let set = match PropSet::load_dir("assets/props") {
         Ok(s) => {
             log::info!("props: 载入 {} 件 GLB 道具网格", s.len());
             s
@@ -1554,6 +1578,17 @@ pub fn generate_city() -> LevelMap {
             PropSet::default()
         }
     };
+    generate_city_with_set(set)
+}
+
+/// 🔴 **可注入 `PropSet` 的生成入口**（2026-10-20 拆出，为两件事服务）：
+///
+/// 1. **让"有资产 / 无资产"两条路径都能被测试**：`generate_city()` 会读 `assets/props`，
+///    有资产的机器上跑测试永远走不到回退分支（裙墙/角壁柱/树木回退几何**从没被测过**）。
+/// 2. 为"两条路径的物理碰撞表必须一致"这条未结案（第 13 批复核第 7 条）提供唯一注入点。
+pub fn generate_city_with_set(set: PropSet) -> LevelMap {
+    let mut c = City::new();
+    c.set = set;
     perimeter(&mut c);
     for i in 0..6 {
         for j in 0..6 {
@@ -2291,6 +2326,67 @@ mod city_layout_tests {
         assert!(sph > 100, "细分球件只有 {}：树冠/沙袋又退回二十面体或盒子了", sph);
     }
 
+    /// 📊 临时统计：decor 之间「同一朝向的面」间距 < RELIEF_STEP 的处数（决定判据能否收紧）
+    #[test]
+    #[ignore]
+    fn count_coplanar_relief_violations() {
+        let m = generate_city();
+        let parts: Vec<&MapObstacle> = m
+            .obstacles
+            .iter()
+            .chain(m.decor.iter())
+            .filter(|o| {
+                matches!(o.kind, ObstacleKind::Building | ObstacleKind::Block) && o.shape != Shape::None
+            })
+            .collect();
+        // 按**外表面**比较：同朝向的两个面如果间隙 ∈ (0, RELIEF_STEP)，且它们的 y/z 跨度重叠
+        // （说明两面在空间上真的相邻），就是"掠射角下几乎共面"的候选。
+        let mut weak = 0usize;
+        let mut worst = 0.0f32;
+        let mut sample: Option<(f32, f32, f32, f32)> = None;
+        for a in 0..parts.len() {
+            for b in (a + 1)..parts.len() {
+                let (pa, pb) = (parts[a], parts[b]);
+                if (pa.x - pb.x).abs() > 40.0 || (pa.z - pb.z).abs() > 40.0 {
+                    continue;
+                }
+                let ya = (pa.y - pa.half_h, pa.y + pa.half_h);
+                let yb = (pb.y - pb.half_h, pb.y + pb.half_h);
+                if ya.0 >= yb.1 || yb.0 >= ya.1 {
+                    continue;
+                }
+                for axis in 0..2 {
+                    let (ax, bx, ah, bh) = if axis == 0 {
+                        (pa.x, pb.x, pa.half_w, pb.half_w)
+                    } else {
+                        (pa.z, pb.z, pa.half_d, pb.half_d)
+                    };
+                    let (ra, rb) = if axis == 0 {
+                        ((pa.z - pa.half_d, pa.z + pa.half_d), (pb.z - pb.half_d, pb.z + pb.half_d))
+                    } else {
+                        ((pa.x - pa.half_w, pa.x + pa.half_w), (pb.x - pb.half_w, pb.x + pb.half_w))
+                    };
+                    if ra.0 >= rb.1 || rb.0 >= ra.1 {
+                        continue;
+                    }
+                    for sign in [-1.0f32, 1.0] {
+                        let fa = ax + sign * ah;
+                        let fb = bx + sign * bh;
+                        let gap = (fa - fb).abs();
+                        if gap > 1e-3 && gap < RELIEF_STEP {
+                            weak += 1;
+                            worst = worst.max(RELIEF_STEP - gap);
+                            if sample.is_none() {
+                                sample = Some((fa, fb, gap, rb.1 - rb.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("  外表面间隙 < RELIEF_STEP 的成对数: {weak}（最大缺口 {worst:.3}m）样本 {sample:?}");
+    }
+
     /// 相邻表面之间必须有可辨识的台阶，否则掠射角下两面落到同一批像素。
     ///
     /// 2026-09-03 起泛化为遍历全部实体：原来只抽查 bc(1) 一栋楼，而那条断言的前提是
@@ -2315,7 +2411,8 @@ mod city_layout_tests {
                 if (o.x - core.x).abs() >= 0.1 || (o.z - core.z).abs() >= 0.1 {
                     return false;
                 }
-                if o.half_w <= core.half_w {
+                // 只挑"从核心侧面凸出的立面构件"：任一水平方向比核心宽
+                if o.half_w <= core.half_w && o.half_d <= core.half_d {
                     return false;
                 }
                 let b0 = o.y - o.half_h;
@@ -2323,13 +2420,27 @@ mod city_layout_tests {
                 // 相接（含 5cm 容差）或重叠
                 b0 < c1 + 0.05 && b1 > c0 - 0.05
             }) {
-                assert!(
-                    b.half_w - core.half_w >= RELIEF_STEP - 1e-3,
-                    "{:?} 处的立面构件只凸出核心 {:.3}m，小于最小台阶 {:.2}m",
-                    (core.x, core.z),
-                    b.half_w - core.half_w,
-                    RELIEF_STEP
-                );
+                // 🔴 **两个水平方向都要查**（2026-10-20 外部复核第 10 条）：
+                // 原来只查 `half_w`，而 90° 旋转摆放的建筑会把"立面宽度"换到 `half_d` 上，
+                // 只查一侧时另一侧的共面台阶永远查不出来。
+                if b.half_w > core.half_w {
+                    assert!(
+                        b.half_w - core.half_w >= RELIEF_STEP - 1e-3,
+                        "{:?} 处的立面构件 +x 方向只凸出核心 {:.3}m，小于最小台阶 {:.2}m",
+                        (core.x, core.z),
+                        b.half_w - core.half_w,
+                        RELIEF_STEP
+                    );
+                }
+                if b.half_d > core.half_d {
+                    assert!(
+                        b.half_d - core.half_d >= RELIEF_STEP - 1e-3,
+                        "{:?} 处的立面构件 +z 方向只凸出核心 {:.3}m，小于最小台阶 {:.2}m",
+                        (core.x, core.z),
+                        b.half_d - core.half_d,
+                        RELIEF_STEP
+                    );
+                }
                 checked += 1;
             }
         }
@@ -2630,4 +2741,82 @@ mod city_layout_tests {
             (cpu_hi - cpu_lo).abs()
         );
     }
+    /// 📊 临时：**回退路径**（无 GLB 资产）的立面层间近似共面统计
+    #[test]
+    #[ignore]
+    fn count_fallback_coplanar_violations() {
+        let m = generate_city_with_set(crate::engine::props::PropSet::default());
+        let parts: Vec<&MapObstacle> = m
+            .obstacles
+            .iter()
+            .chain(m.decor.iter())
+            .filter(|o| matches!(o.kind, ObstacleKind::Building | ObstacleKind::Block))
+            .collect();
+        let mut weak = 0usize;
+        let mut worst = 0.0f32;
+        for a in 0..parts.len() {
+            for b in (a + 1)..parts.len() {
+                let (pa, pb) = (parts[a], parts[b]);
+                if (pa.x - pb.x).abs() > 40.0 || (pa.z - pb.z).abs() > 40.0 {
+                    continue;
+                }
+                let ya = (pa.y - pa.half_h, pa.y + pa.half_h);
+                let yb = (pb.y - pb.half_h, pb.y + pb.half_h);
+                if ya.0 >= yb.1 || yb.0 >= ya.1 {
+                    continue;
+                }
+                for axis in 0..2 {
+                    let (ax, bx, ah, bh, ra, rb) = if axis == 0 {
+                        (
+                            pa.x,
+                            pb.x,
+                            pa.half_w,
+                            pb.half_w,
+                            (pa.z - pa.half_d, pa.z + pa.half_d),
+                            (pb.z - pb.half_d, pb.z + pb.half_d),
+                        )
+                    } else {
+                        (
+                            pa.z,
+                            pb.z,
+                            pa.half_d,
+                            pb.half_d,
+                            (pa.x - pa.half_w, pa.x + pa.half_w),
+                            (pb.x - pb.half_w, pb.x + pb.half_w),
+                        )
+                    };
+                    if ra.0 >= rb.1 || rb.0 >= ra.1 {
+                        continue;
+                    }
+                    for sign in [-1.0f32, 1.0] {
+                        let gap = ((ax + sign * ah) - (bx + sign * bh)).abs();
+                        if gap > 1e-3 && gap < RELIEF_STEP {
+                            weak += 1;
+                            worst = worst.max(RELIEF_STEP - gap);
+                        }
+                    }
+                }
+            }
+        }
+        println!("  回退路径：外表面间隙 < RELIEF_STEP 的成对数 {weak}（最大缺口 {worst:.3}m）");
+    }
+
+    /// 🔴 **角壁柱必须比裙墙多凸出一个 RELIEF_STEP**（2026-10-20 外部复核第 10 条）。
+    ///
+    /// 反向验证：把 `PILASTER_PROTRUDE_MM` 改回 680 ⇒ **编译期断言**先红
+    /// （`const _: () = assert!(PILASTER_PROTRUDE_MM >= PLINTH_PROTRUDE_MM + 140)`）；
+    /// 若有人只改浮点常量绕过编译期检查，这条运行时判据兜底。
+    #[test]
+    fn pilaster_protrudes_a_relief_step_past_the_plinth() {
+        assert!(
+            (PILASTER_PROTRUDE - PLINTH_PROTRUDE) >= RELIEF_STEP - 1e-6,
+            "壁柱外沿 {PILASTER_PROTRUDE} 与裙墙外沿 {PLINTH_PROTRUDE} 的差 {} 小于 RELIEF_STEP {RELIEF_STEP}",
+            PILASTER_PROTRUDE - PLINTH_PROTRUDE
+        );
+        // 两个常量必须真的用在 geometry 里（防"加了常量但 building() 没用"）
+        let src = include_str!("city.rs");
+        assert!(src.contains("w + 2.0 * PLINTH_PROTRUDE"), "裙墙没用常量");
+        assert!(src.contains("PILASTER_PROTRUDE - pw * 0.5"), "壁柱没用常量");
+    }
+
 }

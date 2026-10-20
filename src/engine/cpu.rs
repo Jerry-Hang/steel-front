@@ -361,8 +361,9 @@ static TOPOLOGY: OnceLock<CpuTopology> = OnceLock::new();
 /// 返回 `(高容量簇, 低容量簇, 低容量簇核数)`；同构或读不到时返回 `None`（调用方回退旧逻辑）。
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn sysfs_capacity_clusters(threads: usize) -> Option<(Vec<usize>, Vec<usize>, usize)> {
+    let online = online_or_linear(threads);
     let mut caps: Vec<(usize, u32)> = Vec::new();
-    for c in 0..threads {
+    for c in online.iter().copied() {
         let p = format!("/sys/devices/system/cpu/cpu{c}/cpu_capacity");
         let Ok(s) = std::fs::read_to_string(&p) else {
             continue;
@@ -372,7 +373,7 @@ fn sysfs_capacity_clusters(threads: usize) -> Option<(Vec<usize>, Vec<usize>, us
         }
     }
     // 离线核可能读不到：数量对不上就不能用（避免把簇切错）
-    if caps.len() != threads || threads < 2 {
+    if caps.len() != online.len() || online.len() < 2 {
         return None;
     }
     let max = caps.iter().map(|x| x.1).max()?;
@@ -430,6 +431,7 @@ pub fn topology() -> &'static CpuTopology {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 extern "C" {
     fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
+    fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut u64) -> i32;
 }
 
 // Windows 线程亲和（Zero-dep：GetCurrentThread/SetThreadAffinityMask 直接 FFI）。
@@ -556,27 +558,66 @@ fn cpu_thread_count() -> usize {
     count.max(1)
 }
 
+/// 解析 `/sys/devices/system/cpu/online` 的格式（`"0-31"` / `"0,2,4"` / `"0-1,4-7"`）。
+///
+/// 🔴 **返回的是核编号列表，不是数量**（2026-10-19 外部复核第 2 条现象 B）：
+/// 旧实现只有 `cpu_thread_count()`（数量），所有 `0..threads` 的循环在**非连续在线核**
+/// （容器 `"0,2,4"`、Android 核上线/下线动态变化 `"0-1,4-7"`）上会去读不存在的 `cpu1/cpu3`
+/// ⇒ 读失败整函数返回 `None`（SMT/容量聚类全失效），或把编号 ≥ 数量的合法核丢掉。
+fn parse_online_list(s: &str) -> Option<Vec<usize>> {
+    let cpus = parse_cpu_list(s.trim())?;
+    if cpus.is_empty() { None } else { Some(cpus) }
+}
+
+/// 当前**在线**的逻辑核编号列表；sysfs 读不到时返回 `None`（调用方回退 `0..threads`）。
+fn cpu_online_ids() -> Option<Vec<usize>> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let s = std::fs::read_to_string("/sys/devices/system/cpu/online").ok()?;
+        parse_online_list(&s)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        None
+    }
+}
+
+/// 在线核列表；读不到时退化成 `0..threads`（与旧行为逐位一致）。
+fn online_or_linear(threads: usize) -> Vec<usize> {
+    cpu_online_ids().unwrap_or_else(|| (0..threads).collect())
+}
+
 /// 临时把当前线程绑到指定 vCPU，读一个 CPUID leaf，再恢复全集合绑定。
 /// 用于遍历每核的 hybrid core type（Intel leaf 0x1A）。
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 fn probe_per_cpu(leaf: u32) -> Vec<u32> {
-    let threads = cpu_thread_count();
-    let mut out = Vec::with_capacity(threads);
-    for cpu in 0..threads {
+    let online = online_or_linear(cpu_thread_count());
+    let mut out = Vec::with_capacity(online.len());
+    // 🔴 **先保存原亲和掩码**（2026-10-19 外部复核第 2 条现象 C）：
+    // 旧实现最后把掩码重置成 `0..threads` 全集 ⇒ 覆盖掉调用方（如 `taskset`/容器）设的亲和；
+    // 且 `sched_setaffinity` 的返回值被忽略 ⇒ 绑核失败时仍按"已绑到 cpuN"读 CPUID，把 CPUID 记到错的核上。
+    let mut original = [0u64; 16];
+    let saved = unsafe { sched_getaffinity(0, std::mem::size_of::<[u64; 16]>(), original.as_mut_ptr()) } == 0;
+    for cpu in online {
         let mut mask = [0u64; 16];
         mask[cpu / 64] = 1u64 << (cpu % 64);
         unsafe {
-            sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), mask.as_ptr());
+            let rc = sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), mask.as_ptr());
+            if rc != 0 {
+                static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+                WARNED.get_or_init(|| {
+                    log::warn!("cpu: sched_setaffinity(cpu{cpu}) 失败，该核的 CPUID 探测结果不可信（记 0）");
+                });
+                out.push(0);
+                continue;
+            }
             out.push(__cpuid(leaf).eax);
         }
     }
-    // 恢复全集合（避免影响后续线程调度）
-    let mut full = [0u64; 16];
-    for i in 0..threads {
-        full[i / 64] |= 1u64 << (i % 64);
-    }
-    unsafe {
-        sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), full.as_ptr());
+    if saved {
+        unsafe {
+            sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), original.as_ptr());
+        }
     }
     out
 }
@@ -646,9 +687,10 @@ fn amd_split_physical(physical_all: &[usize]) -> Option<(Vec<usize>, Vec<usize>)
 
 /// 读 sysfs 收集每个物理核心的 SMT 兄弟组，返回 `Vec<group>`。
 /// 任意 CPU 的 `thread_siblings_list` 不可读时返回 None（调用方回退不区分物理/超线程）。
-fn read_smt_siblings(threads: usize) -> Option<Vec<Vec<usize>>> {
+fn read_smt_siblings() -> Option<Vec<Vec<usize>>> {
     let mut out: Vec<Vec<usize>> = Vec::new();
-    for cpu in 0..threads {
+    // 🔴 按**在线核编号**迭代，而不是 `0..数量`（非连续在线核时后者会读到不存在的核）
+    for cpu in online_or_linear(cpu_thread_count()) {
         let path = format!("/sys/devices/system/cpu/cpu{}/topology/thread_siblings_list", cpu);
         let s = std::fs::read_to_string(&path).ok()?;
         let members = parse_cpu_list(s.trim())?;
@@ -779,10 +821,12 @@ impl CpuTopology {
                 }
             } else {
                 // 旧逻辑（Linux sysfs / 其它平台）——语义不变
+                // 在线核编号列表（非连续在线核时不能用 0..threads）
+                let online = online_or_linear(threads);
                 let (primary_set, secondary_set, e_cores) = match vendor {
                     CpuVendor::Amd => {
-                        let half = threads / 2;
-                        ((0..half).collect::<Vec<usize>>(), (half..threads).collect::<Vec<usize>>(), 0)
+                        let half = online.len() / 2;
+                        (online[..half].to_vec(), online[half..].to_vec(), 0)
                     }
                     CpuVendor::Intel => {
                         #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -794,9 +838,11 @@ impl CpuTopology {
                                     seen.insert(i);
                                 }
                             }
-                            let e_cpus = seen;
-                            let p: Vec<usize> = (0..threads).filter(|c| !e_cpus.contains(c)).collect();
-                            let e: Vec<usize> = (0..threads).filter(|c| e_cpus.contains(c)).collect();
+                            // `probe_per_cpu` 的结果按**在线核编号顺序**排列 ⇒ 用 online[i] 取编号
+                            let e_cpus: std::collections::HashSet<usize> =
+                                seen.into_iter().filter_map(|i| online.get(i).copied()).collect();
+                            let p: Vec<usize> = online.iter().copied().filter(|c| !e_cpus.contains(c)).collect();
+                            let e: Vec<usize> = online.iter().copied().filter(|c| e_cpus.contains(c)).collect();
                             let e_count = e.len();
                             (p, e, e_count)
                         }
@@ -811,11 +857,11 @@ impl CpuTopology {
                         if let Some((big, little, e)) = sysfs_capacity_clusters(threads) {
                             (big, little, e)
                         } else {
-                            ((0..threads).collect(), Vec::new(), 0)
+                            (online.clone(), Vec::new(), 0)
                         }
                         #[cfg(not(any(target_os = "linux", target_os = "android")))]
                         {
-                            ((0..threads).collect(), Vec::new(), 0)
+                            (online.clone(), Vec::new(), 0)
                         }
                     }
                 };
@@ -849,7 +895,7 @@ impl CpuTopology {
             let sp = if sp.is_empty() { secondary_set.clone() } else { sp };
             (pp, sp, smt_all)
         } else {
-            match read_smt_siblings(threads) {
+            match read_smt_siblings() {
                 Some(groups) => {
                     let (physical_all, smt_all) = split_smt_pairs(&groups);
                     let mut pp: Vec<usize> = primary_set
@@ -1837,4 +1883,70 @@ mod tests {
              （池内 worker 全程空转，并行收益只剩一半）。顺序: {seen:?}"
         );
     }
+    /// 🔴 **在线核解析必须返回编号列表，不是数量**（2026-10-19 外部复核第 2 条现象 B）。
+    /// 反向验证：把 `parse_online_list` 改成返回 `count.max(1)` 的 Vec 就没法表达非连续核，
+    /// 本判据会红。
+    #[test]
+    fn parse_online_list_handles_non_contiguous_cores() {
+        assert_eq!(parse_online_list("0-3").unwrap(), vec![0, 1, 2, 3]);
+        assert_eq!(parse_online_list("0,2,4").unwrap(), vec![0, 2, 4]);
+        assert_eq!(parse_online_list("0-1,4-7").unwrap(), vec![0, 1, 4, 5, 6, 7]);
+        assert!(parse_online_list("").is_none());
+        assert!(parse_online_list("bad").is_none());
+        // 线上取到的真实列表必须非空，且每个编号都在掩码容量内
+        if let Some(ids) = cpu_online_ids() {
+            assert!(!ids.is_empty());
+            assert!(ids.iter().all(|c| *c < 1024), "编号必须落在 cpu_set_t 的 1024 位容量内");
+        }
+    }
+
+    /// 🔴 **CPUID 逐核探测必须恢复调用方原来的亲和掩码**（2026-10-19 外部复核第 2 条现象 C）。
+    /// 旧实现最后把掩码重置成全集 ⇒ 覆盖 `taskset`/容器设的亲和。
+    /// 反向验证：删掉 `saved`/恢复那段 ⇒ 本判据红（掩码被改成全集）。
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn probe_per_cpu_restores_the_original_affinity() {
+        let read_allowed = || -> Option<String> {
+            // 🔴 必须读**当前线程**的掩码：`/proc/self/status` 指线程组 leader（主线程）
+            // ⇒ 探测改的是测试线程的掩码，读主线程永远"没变"，判据会变成恒真。
+            let s = std::fs::read_to_string("/proc/thread-self/status").ok()?;
+            s.lines()
+                .find(|l| l.starts_with("Cpus_allowed_list:"))
+                .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+        };
+        // 保存本线程原始掩码
+        let mut original = [0u64; 16];
+        let saved = unsafe {
+            sched_getaffinity(0, std::mem::size_of::<[u64; 16]>(), original.as_mut_ptr()) == 0
+        };
+        if !saved {
+            eprintln!("跳过：读不到本线程亲和掩码");
+            return;
+        }
+        // 🔴 关键：本机默认亲和就是全集，直接比对没有区分力 ⇒ **先主动绑到 cpu0 单核**
+        // （模拟 taskset/容器）。旧实现探测后会重置成全集 ⇒ 这里必然红。
+        let mut narrow = [0u64; 16];
+        narrow[0] = 1;
+        let narrowed = unsafe {
+            sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), narrow.as_ptr()) == 0
+        };
+        if !narrowed {
+            unsafe {
+                sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), original.as_ptr());
+            }
+            eprintln!("跳过：本环境不允许改亲和（掩码不可写）");
+            return;
+        }
+        let before = read_allowed().unwrap_or_default();
+        let n_online = online_or_linear(cpu_thread_count()).len();
+        let probed = probe_per_cpu(1);
+        assert_eq!(probed.len(), n_online, "必须对每个在线核各探测一次");
+        let after = read_allowed().unwrap_or_default();
+        // 无论断言是否通过，都恢复本线程原始掩码，避免污染同批次其他测试
+        unsafe {
+            sched_setaffinity(0, std::mem::size_of::<[u64; 16]>(), original.as_ptr());
+        }
+        assert_eq!(before, after, "探测后亲和掩码被改写（原 {before}，后 {after}）");
+    }
+
 }
