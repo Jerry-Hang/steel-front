@@ -1149,3 +1149,19 @@ Linux 侧无 Blender（资产改动须走 Windows 或程序化）。
 
 **验证**：Linux 0 警告 / test 构建 0 警告 / **821 passed** / CJK OK / 白名单 OK；
 dGPU 12s 冒烟 exit=0、0 panic / 0 device lost / 0 ERROR、截图正常。
+
+### 2026-10-22：M2 收口 —— 顶点法线进入主光照 + GGX；条纹误报定案
+
+**提交 `922687d`（M2 完成）**：法线 attribute → 片元两处消费（局部效果 + `apply_lighting`
+主光照法线）→ GGX 替换 Blinn-Phong；绿色诊断确认通路；A/B 差异（法线开/关 4.67%、
+相对 M2 前 29.3%/14.5%）；新增 `ensure_smooth_normals_fills_and_preserves` 判据。
+
+**随后（本提交）**：
+- `RV3D_SHADOW_EXTENT` 调试旋钮（默认 400，行为不变）；
+- 城市道具重叠探针：发现 **190 对垂直相交+水平重叠**（联排/街区互压）→ 转为 `#[ignore]`
+  诊断（当前只影响"相机进楼"的非法视角，不修生成器）；
+- **"地面条纹板块"定案**：不是玩家可见缺陷 —— 消融（阴影/贴图/marker/地形）均排除，
+  最终发现调试机位 (85,3,85) 在楼体内部 4m 处，看到的是楼基板与重叠基板共面；
+  玩家正常位置复拍无条纹。实验性的建筑高度抖动已回退。
+
+验收：Linux 0 警告 / test 构建 0 警告 / **822 passed + 5 ignored** / CJK OK / 白名单 OK。

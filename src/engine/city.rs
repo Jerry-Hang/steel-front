@@ -2884,4 +2884,83 @@ mod city_layout_tests {
         }
     }
 
+    /// 诊断（2026-10-21，**已知问题，暂不修**）：城市布局存在约 190 对"垂直相交且水平重叠"
+    /// 的道具（主要是联排/街区互相压住）。当前不影响玩家（不可见的内部面重叠），
+    /// 但会在**相机进入楼体内部**时看到楼基板共面条纹（2026-10-21 画质排查实录：
+    /// 正常玩家位置无条纹；条纹来自把调试机位放进楼里）。
+    /// 修法方向：生成器做占位去重/收缩，而不是渲染侧抖 y。
+    /// 用 `cargo test --release -- --ignored no_severe_prop_overlaps --nocapture` 查看。
+    #[test]
+    #[ignore = "已知：城市布局有约190对道具重叠，待生成器修复；当前仅作诊断"]
+    fn no_severe_prop_overlaps() {
+        let Ok(set) = crate::engine::props::PropSet::load_dir("assets/props") else {
+            eprintln!("跳过：本机没有 assets/props");
+            return;
+        };
+        let Ok(lookup) = crate::engine::props::PropSet::load_dir("assets/props") else {
+            return;
+        };
+        let map = generate_city_with_set(set);
+        // (half_w, half_d, height, name)
+        let dims = |pl: &crate::engine::props::PropPlacement| -> Option<(f32, f32, f32, String)> {
+            let m = lookup.get(pl.mesh)?;
+            let (hw, hd) = m.half_footprint();
+            let h = (m.max[1] - m.min[1]) * pl.scale;
+            Some((hw * pl.scale, hd * pl.scale, h, m.name.clone()))
+        };
+        let mut bad: Vec<String> = Vec::new();
+        for (i, a) in map.props.iter().enumerate() {
+            let Some((aw, ad, ah, an)) = dims(a) else { continue };
+            for b in map.props.iter().skip(i + 1) {
+                let Some((bw, bd, bh, bn)) = dims(b) else { continue };
+                // 垂直区间不相交 ⇒ 合法（堆叠两层集装箱）
+                let ay0 = a.y;
+                let ay1 = a.y + ah;
+                let by0 = b.y;
+                let by1 = b.y + bh;
+                if ay1 <= by0 + 0.05 || by1 <= ay0 + 0.05 {
+                    continue;
+                }
+                let ox = (aw + bw) - (a.x - b.x).abs();
+                let oz = (ad + bd) - (a.z - b.z).abs();
+                if ox > 0.6 && oz > 0.6 {
+                    let area_min = (4.0 * aw * ad).min(4.0 * bw * bd);
+                    if ox * oz > area_min * 0.15 {
+                        bad.push(format!(
+                            "{an} @({:.0},{:.0}) vs {bn} @({:.0},{:.0}) 重叠 {ox:.2}x{oz:.2}m",
+                            a.x, a.z, b.x, b.z
+                        ));
+                    }
+                }
+            }
+        }
+        eprintln!("  props 总数 {}，垂直相交的严重重叠对 {}", map.props.len(), bad.len());
+        // 临时诊断：相机 (85,3,85) 朝 +x+z 方向 40m 内的道具
+        let mut near: Vec<(f32, String, f32, f32, f32)> = map
+            .props
+            .iter()
+            .filter_map(|pl| {
+                let m = lookup.get(pl.mesh)?;
+                let d = ((pl.x - 85.0).powi(2) + (pl.z - 85.0).powi(2)).sqrt();
+                if d <= 40.0 {
+                    Some((d, m.name.clone(), pl.x, pl.z, m.max[1] - m.min[1]))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for n in near.iter().take(12) {
+            eprintln!("    near {} {:.0}m at ({:.0},{:.0}) h={:.1}", n.1, n.0, n.2, n.3, n.4);
+        }
+        for d in bad.iter().take(10) {
+            eprintln!("    {d}");
+        }
+        assert!(
+            bad.is_empty(),
+            "存在 {} 对严重重叠道具（共面处会产生 z-fighting 条纹）",
+            bad.len()
+        );
+    }
+
 }

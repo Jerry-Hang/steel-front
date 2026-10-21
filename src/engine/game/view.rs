@@ -157,10 +157,22 @@ impl Game {
         // （RV3D_NO_SHADOW=0 强制回阴影贴图路径，用于后续排查）
         // 2026-08-28：用户机器全高实测——默认开阴影（RV3D_NO_SHADOW=1 显式关闭）；
         // 阴影覆盖范围加大以适配城市高楼群（扩展 250→400 米，远平面 500→800）
+        // 阴影覆盖半宽（米）。2026-10-22：发现 400m/2048² = **0.39m/纹素**，树冠/柱子的
+        // 高频影子在广场地面上被采样成条纹状走样（关阴影后该区域 98.7% 像素变化 = 确认来源）。
+        // 现在可调，默认先保持 400（历史行为），画质档位实验后再定默认值。
+        let extent = crate::syscfg::parse::<f32>("RV3D_SHADOW_EXTENT")
+            .map(|v| v.clamp(60.0, 800.0))
+            .unwrap_or(400.0);
         let shadow = if crate::syscfg::cfg("RV3D_NO_SHADOW").as_deref() == Some("1") {
             None
         } else {
-            Some(ShadowConfig::new(sun.direction, glam::Vec3::ZERO, 400.0, 1.0, 800.0))
+            Some(ShadowConfig::new(
+                sun.direction,
+                glam::Vec3::ZERO,
+                extent,
+                1.0,
+                2.0 * extent,
+            ))
         };
         LightUniform::build(
             Some(&sun),
