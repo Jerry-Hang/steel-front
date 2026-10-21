@@ -51,6 +51,10 @@ impl Renderer {
         renderer.init_hud_glass_set()?;
         renderer.init_pipeline()?;
         renderer.init_mesh_pipeline()?;
+        // 天空是"可选增强"：失败就退回 clear color，不要因此让整个引擎起不来
+        if let Err(e) = renderer.init_sky_pipeline() {
+            log::error!("天空渐变管线创建失败（退回纯色天空）: {e}");
+        }
         renderer.init_hud()?;
         renderer.init_framebuffers()?;
         renderer.init_hud_overlay()?;
@@ -492,6 +496,8 @@ impl Renderer {
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
             gun_pipeline: vk::Pipeline::null(),
+            sky_pipeline: vk::Pipeline::null(),
+            sky_pipeline_layout: vk::PipelineLayout::null(),
             // 2026-09-05：**恢复网格着色器为唯一主渲染路径**（AGENTS.md 渲染技术路线铁律）。
             // 此前它是硬编码 false，起因是 2026-09-02 的「mesh 路径地面全黑」A/B 结论；但根因
             // 已查明是 `binding 9` 未绑定导致的乘零，而两条管线**共用同一个片元着色器**
@@ -753,6 +759,8 @@ impl Renderer {
             shadow_lod: crate::syscfg::cfg("RV3D_SHADOW_LOD").as_deref() != Some("0"),
             frame_frustum: [[0.0f32; 4]; 6],
             frame_cam_pos: glam::Vec3::ZERO,
+            frame_view: glam::Mat4::IDENTITY,
+            frame_proj: glam::Mat4::IDENTITY,
             last_near_count: 0,
             last_far_count: 0,
             last_terrain_lod_name: "high",

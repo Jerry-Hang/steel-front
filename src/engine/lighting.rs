@@ -622,4 +622,47 @@ mod tests {
              两者必须同时出现在 diffuse + K*spec 这一个式子里"
         );
     }
+    /// 画质 M5 判据：**雾色与天空地平线色必须同源**（2026-10-22 天空渐变落地时立）。
+    ///
+    /// 背景：天空 WGSL 与片元雾色一度各写一份色，远处楼雾化成深蓝而地平线天空是灰白，
+    /// 出现"楼—天"接缝。修法 = `build.rs` 的 `SKY_HORIZON_XYZ` 作为唯一真源，构建期
+    /// 同时注入两份 WGSL。本判据关注三件事：① 占位符还在（没被改回硬编码）；
+    /// ② 注入用的确实是同一个常量；③ 生成出来的运行时常量与天空一致。
+    #[test]
+    fn sky_and_fog_colors_share_one_source() {
+        let build = include_str!("../../build.rs");
+        assert!(
+            build.contains("const FOG_TINT: vec3<f32> = vec3<f32>({FOG_TINT});"),
+            "片元雾色的 FOG_TINT 不再是构建期占位符（有人在 WGSL 里写死了颜色）"
+        );
+        assert!(
+            build.contains(".replace(\"{FOG_TINT}\", &vec3_lit(SKY_HORIZON_XYZ))"),
+            "FOG_TINT 的注入源不是 SKY_HORIZON_XYZ —— 雾色与天空地平线会分叉"
+        );
+        assert!(
+            !build.contains("vec3<f32>(0.24, 0.36, 0.60)"),
+            "build.rs 里仍有旧的硬编码天空/雾色 (0.24, 0.36, 0.60)"
+        );
+        // 生成出来的常量（build.rs 写入 OUT_DIR/shaders.rs）：雾色 == 地平线色
+        let fog = crate::shaders::FOG_TINT_RGB;
+        let horizon = crate::shaders::SKY_HORIZON_RGB;
+        assert_eq!(fog, horizon, "雾色与天空地平线色不同源：{fog:?} vs {horizon:?}");
+        for c in [fog, horizon, crate::shaders::SKY_ZENITH_RGB, crate::shaders::SKY_BELOW_RGB] {
+            for v in c {
+                assert!(
+                    (0.0..=1.0).contains(&v),
+                    "线性空间颜色分量越界（>1 会被 sRGB 编码钳掉）：{c:?}"
+                );
+            }
+        }
+        // 天顶必须比地平线暗（否则"天空渐变"是反的）
+        let lum = |c: [f32; 3]| c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
+        assert!(
+            lum(crate::shaders::SKY_ZENITH_RGB) < lum(horizon),
+            "天顶亮度 {} 不小于地平线 {} —— 渐变方向反了",
+            lum(crate::shaders::SKY_ZENITH_RGB),
+            lum(horizon)
+        );
+    }
+
 }

@@ -14,7 +14,7 @@ struct ViewProj {
     lod_params: vec4<f32>,
     // 🔴 144..256 被**网格路径**的 planes(96B) + cam_pos(16B) 占着。
     // 传统顶点路径不读它们，但**必须显式留位** —— 缓冲布局是按字节数算的，
-    // 漏掉这段填充，下面的 prev_view_proj 就会落在偏移 144 上、读到平面数据
+    // 漏掉这段补充，下面的 prev_view_proj 就会落在偏移 144 上、读到平面数据
     // （而那样**不会报任何错**，只会给出完全错误的运动向量）。
     _mesh_reserved_a: vec4<f32>,
     _mesh_reserved_b: vec4<f32>,
@@ -323,7 +323,8 @@ fn view_distance(input: VertexOutput) -> f32 {
 // 地平线雾色必须与 swapchain clear color 逐分量相同（renderer.rs 的
 // record_command_buffer clear_values[0]，当前 [0.24, 0.36, 0.60]），否则远处几何
 // 与天空之间出现一条硬边。改其中一处必须同步改另一处。
-const FOG_TINT: vec3<f32> = vec3<f32>(0.24, 0.36, 0.60);
+// 构建期注入（真源 = build.rs 的 SKY_HORIZON_XYZ；与天空地平线同色）
+const FOG_TINT: vec3<f32> = vec3<f32>({FOG_TINT});
 
 // 雾：70m 起、630m 满，上限 0.92 而非 1.0 —— 完全抹平会让最远处的楼群整体消失，
 // 保留 8% 反差不只是好看，也是让玩家仍能读出天际线轮廓。
@@ -840,7 +841,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             1.0,
         );
     }
-    // 消融档 3：片元直出常量色（量纯填充/几何下限；默认档 0 不进这里）
+    // 消融档 3：片元直出常量色（量纯补充/几何下限；默认档 0 不进这里）
     if (light_data.shadow.config.w > 2.5 && light_data.shadow.config.w < 3.5) {
         return vec4<f32>(1.0, 0.0, 1.0, 1.0);
     }
@@ -1239,7 +1240,7 @@ var<workgroup> mesh_out: MeshOutput;
 // 本次 mesh draw 的起始实例槽：地面=0 / marker=65537 / NPC=73729 / 自发光=82945 / 枪=83009
 struct MeshPush {
     base_slot: u32,
-    // 填充到 16 字节（与 renderer.rs push constant range size=16 精确一致）
+    // 补充到 16 字节（与 renderer.rs push constant range size=16 精确一致）
     pad: array<u32, 3>,
 }
 // naga 30 用 immediate 地址空间替代 push_constant（SPIR-V 后端映射为 PushConstant 存储类）
@@ -1957,16 +1958,103 @@ fn fs_main() {}
 #[path = "build_spv_rt.rs"]
 mod spv_rt_bench;
 
+// ---- 画质 M5：天空/雾色**单一真源**（2026-10-22）----
+//
+// 为什么要有这几个常量：天空着色器写死一份色、片元雾色再写死一份，两者迟早分叉
+// （"远处楼是深蓝、地平线天空是灰白"的接缝）。这里定义一次，构建期注入两份 WGSL。
+// 单位：**线性 RGB**（交换链是 SRGB 格式，硬件负责编码），与 apply_lighting 同一色域。
+// 注入点见下方 `SKY_SHADER_WGSL.replace(..)` 与 `FRAGMENT_SHADER_WGSL.replace(..)`。
+const SKY_ZENITH_XYZ: [f32; 3] = [0.070, 0.135, 0.360];
+/// 地平线色 = 雾色：远景雾化到地平线时必须与天空同色，否则出现"楼—天"色带。
+const SKY_HORIZON_XYZ: [f32; 3] = [0.455, 0.505, 0.575];
+/// 相机俯视时地平线以下的背景（城市外无几何区域的兜底色）
+const SKY_BELOW_XYZ: [f32; 3] = [0.145, 0.155, 0.165];
+
+fn vec3_lit(c: [f32; 3]) -> String {
+    format!("vec3<f32>({:.6}, {:.6}, {:.6})", c[0], c[1], c[2])
+}
+
+// ---- 天空渐变 + 太阳光晕（2026-10-22，画质 M5 第一步）----
+// 全屏三角形，不需要顶点缓冲 / 描述符：相机基向量与太阳方向走 push constants。
+// 输出**线性空间**颜色（交换链是 SRGB 格式，硬件负责编码），与 apply_lighting 同一色域。
+const SKY_SHADER_WGSL: &str = r#"
+struct SkyPush {
+    // xyz = 相机前向（世界空间，单位长），w = tan(竖直半 FOV)
+    fwd: vec4<f32>,
+    // xyz = 相机右向，w = 宽高比（aspect）
+    right: vec4<f32>,
+    // xyz = 相机上向，w = 太阳强度（0 = 关光晕）
+    up: vec4<f32>,
+    // xyz = 太阳方向（表面→光源，单位长），w 保留
+    sun: vec4<f32>,
+    // xy = 本次渲染分辨率（像素），zw 保留
+    screen: vec4<f32>,
+};
+var<immediate> sky_push: SkyPush;
+
+// 构建期注入（真源 = build.rs 的 SKY_*_XYZ 常量）
+const SKY_ZENITH: vec3<f32> = vec3<f32>({SKY_ZENITH});
+const SKY_HORIZON: vec3<f32> = vec3<f32>({SKY_HORIZON});
+const SKY_BELOW: vec3<f32> = vec3<f32>({SKY_BELOW});
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    // 覆盖整个 NDC 的大三角形：(-1,-1) (3,-1) (-1,3)
+    let x = f32((vi << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(vi & 2u) * 2.0 - 1.0;
+    // z 取 0（配合 depth_test/write 全关；不参与深度）
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let res = max(sky_push.screen.xy, vec2<f32>(1.0, 1.0));
+    // 像素 → NDC（Vulkan framebuffer y 向下、NDC y 向上）
+    let ndc = vec2<f32>(frag.x / res.x * 2.0 - 1.0, 1.0 - frag.y / res.y * 2.0);
+    let tan_half = max(sky_push.fwd.w, 1e-4);
+    let ray = normalize(
+        sky_push.fwd.xyz
+        + sky_push.right.xyz * (ndc.x * tan_half * sky_push.right.w)
+        + sky_push.up.xyz * (ndc.y * tan_half)
+    );
+    // 线性空间天空色（构建期从 Rust 常量注入 ⇒ 与片元雾色同源）
+    let zenith = SKY_ZENITH;
+    let horizon = SKY_HORIZON;
+    let below = SKY_BELOW;
+    var col = mix(horizon, zenith, pow(clamp(ray.y, 0.0, 1.0), 0.42));
+    if (ray.y < 0.0) {
+        // 地平线以下（相机俯视时的背景）：压暗成地雾，避免"倒悬天空"
+        col = mix(horizon, below, clamp(-ray.y * 5.0, 0.0, 1.0));
+    }
+    // 太阳：圆盘 + 大气光晕（方向来自 push constant，与场景方向光同源）
+    let sun_dir = normalize(sky_push.sun.xyz);
+    let s = max(dot(ray, sun_dir), 0.0);
+    let disk = pow(s, 1200.0) * 1.6;
+    let halo = pow(s, 18.0) * 0.14 + pow(s, 4.0) * 0.03;
+    col = col + vec3<f32>(1.0, 0.93, 0.80) * ((disk + halo) * sky_push.up.w);
+    // 抖动：8bit 输出 + 平滑渐变最容易出色带（本仓历史上被当成"条纹缺陷"排查过）
+    let n = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
+    col = col + vec3<f32>(n / 255.0);
+    return vec4<f32>(max(col, vec3<f32>(0.0)), 1.0);
+}
+"#;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let vs_spirv = compile_wgsl(VERTEX_SHADER_WGSL);
-    let fs_spirv = compile_wgsl(FRAGMENT_SHADER_WGSL);
+    let fs_src = FRAGMENT_SHADER_WGSL.replace("{FOG_TINT}", &vec3_lit(SKY_HORIZON_XYZ));
+    let fs_spirv = compile_wgsl(&fs_src);
     let mesh_spirv = compile_wgsl_mesh(MESH_SHADER_WGSL);
     let hud_vs_spirv = compile_wgsl(HUD_VERTEX_SHADER_WGSL);
     let hud_fs_spirv = compile_wgsl(HUD_FRAGMENT_SHADER_WGSL);
     let shadow_vs_spirv = compile_wgsl(SHADOW_VERTEX_SHADER_WGSL);
     let shadow_fs_spirv = compile_wgsl(SHADOW_FRAGMENT_SHADER_WGSL);
+    let sky_src = SKY_SHADER_WGSL
+        .replace("{SKY_ZENITH}", &vec3_lit(SKY_ZENITH_XYZ))
+        .replace("{SKY_HORIZON}", &vec3_lit(SKY_HORIZON_XYZ))
+        .replace("{SKY_BELOW}", &vec3_lit(SKY_BELOW_XYZ));
+    let sky_spirv = compile_wgsl(&sky_src);
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR 环境变量未设置");
     let dest_path = Path::new(&out_dir).join("shaders.rs");
     let mut output = String::new();
@@ -2032,6 +2120,15 @@ fn main() {
     output.push_str("/// 阴影 depth-only 顶点着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const SHADOW_VS_SPIRV: &[u32] = &{:?};\n", shadow_vs_spirv));
+    output.push_str("/// 画质 M5：雾/天空颜色真源（线性 RGB）—— 判据 sky_and_fog_colors_share_one_source\n");
+    output.push_str(&format!("pub const SKY_ZENITH_RGB: [f32; 3] = {:?};\n", SKY_ZENITH_XYZ));
+    output.push_str(&format!("pub const SKY_HORIZON_RGB: [f32; 3] = {:?};\n", SKY_HORIZON_XYZ));
+    output.push_str(&format!("pub const SKY_BELOW_RGB: [f32; 3] = {:?};\n", SKY_BELOW_XYZ));
+    // 雾色 = 地平线色（唯一真源；片元 WGSL 里同一份常量以 {FOG_TINT} 注入）
+    output.push_str(&format!("pub const FOG_TINT_RGB: [f32; 3] = {:?};\n\n", SKY_HORIZON_XYZ));
+    output.push_str("/// 天空渐变着色器 SPIR-V 字节码（vs_main + fs_main 同模块）\n");
+    output.push_str("#[allow(dead_code)]\n");
+    output.push_str(&format!("pub const SKY_SPIRV: &[u32] = &{:?};\n\n", sky_spirv));
     output.push_str("/// 阴影 depth-only 片元着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const SHADOW_FS_SPIRV: &[u32] = &{:?};\n", shadow_fs_spirv));

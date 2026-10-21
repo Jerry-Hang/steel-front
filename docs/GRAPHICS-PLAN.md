@@ -143,3 +143,22 @@ perf 日志另测）；无 VUID（未装验证层，沿用既有口径）。
 
 保留的调试旋钮：`RV3D_SHADOW_EXTENT`（阴影覆盖半宽，默认 400 与历史一致；
 远平面自动 = 2×extent，默认仍是 800）。
+
+## M5 第一步：天空渐变 + 太阳光晕 + 雾色同源（2026-10-22 落地）
+
+**做了什么**：
+- 主 pass 最先画**天空全屏三角形**（`init_sky_pipeline`）：顶点着色器只用 `vertex_index` 生成
+  覆盖 NDC 的大三角形；片元用 `push constant`（80B：相机 fwd/right/up + tan 半 FOV + aspect +
+  太阳方向/强度 + 渲染分辨率）**逐像素重建世界方向**，再按 `dir.y` 做天顶→地平线渐变，
+  叠加太阳圆盘 + 双指数大气光晕；8bit 输出加 ±1/255 抖动防色带。
+- 管线**无顶点缓冲、无描述符集、不写深度**（世界几何随后覆盖），`void_mode`（检视）跳过。
+- **雾色与地平线色单一真源**：`build.rs::SKY_ZENITH_XYZ / SKY_HORIZON_XYZ / SKY_BELOW_XYZ`
+  → 构建期 `.replace()` 注入天空 WGSL 与片元 `FOG_TINT`；生成 `crate::shaders::FOG_TINT_RGB`
+  等常量供判据。判据 `sky_and_fog_colors_share_one_source`（含"天顶必须比地平线暗"）。
+
+**效果实测**（dGPU，2560×1600，固定机位）：
+- 天空从"纯色 clear color"变成俯仰相关渐变；远处楼/树雾化到地平线的颜色与天空连续（无接缝）；
+- 检视模式白底不变；HUD/小地图不受影响；帧率与改动前同档（同一场景 53 fps vs 38→54 波动为 NPC 差异）。
+
+**下一步**：ACES/AgX 色调映射（需先把光照换算到线性域，风险较大，单独里程碑做）、
+SSAO（从深度重建）、阴天/黄昏天空预设（3 组颜色常量 + 环境光联动）。

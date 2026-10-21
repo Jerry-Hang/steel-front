@@ -54,6 +54,13 @@ impl Drop for Renderer {
             if self.gun_pipeline != vk::Pipeline::null() {
                 self.device.destroy_pipeline(self.gun_pipeline, None);
             }
+            if self.sky_pipeline != vk::Pipeline::null() {
+                self.device.destroy_pipeline(self.sky_pipeline, None);
+            }
+            if self.sky_pipeline_layout != vk::PipelineLayout::null() {
+                self.device
+                    .destroy_pipeline_layout(self.sky_pipeline_layout, None);
+            }
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device.destroy_pipeline_layout(self.pipeline_layout, None);
             }

@@ -579,6 +579,10 @@ pub struct Renderer {
     /// 第一人称武器必须恒可见。所以把"不测深度"这个需求**收束到只服务枪模的一条管线上**，
     /// 而不是让整个世界陪着它放弃遮挡。
     gun_pipeline: vk::Pipeline,
+    /// 天空渐变管线（全屏三角形，push constant 传相机基向量/太阳方向；失败时保持 null 并跳过绘制）
+    sky_pipeline: vk::Pipeline,
+    /// 天空管线布局（只有 80B push constant，无描述符集）
+    sky_pipeline_layout: vk::PipelineLayout,
     /// 可选网格着色器路径（VK_EXT_mesh_shader）：mesh 管线 + 独立 pipeline layout
     /// （同一 descriptor set layout + MESH_EXT push constant）。mesh_enabled=false 时
     /// 保持 null 且完全不参与记录阶段，传统顶点管线行为逐字节不变。
@@ -727,7 +731,7 @@ pub struct Renderer {
     seg_far_counts: Vec<std::sync::atomic::AtomicU32>,
     /// 每实例包围球半径（创建时预算，剔除循环查表免每帧 sqrt）
     instance_radii: Vec<f32>,
-    /// 实例球心 SoA（SIMD 剔除用，创建时一次填充，连续内存便于向量化加载）
+    /// 实例球心 SoA（SIMD 剔除用，创建时一次补充，连续内存便于向量化加载）
     instance_center_x: Vec<f32>,
     instance_center_y: Vec<f32>,
     instance_center_z: Vec<f32>,
@@ -933,7 +937,7 @@ pub struct Renderer {
     soldier_index_buffer_memory: vk::DeviceMemory,
     soldier_vertex_count: u32,
     soldier_index_count: u32,
-    /// 本帧要画的士兵实例（每 NPC 一个槽）。`set_npc_visuals` 填，上传后清零。
+    /// 本帧要画的士兵实例（每 NPC 一个槽）。`set_npc_visuals` 补，上传后清零。
     soldier_parts: Vec<InstanceData>,
     /// 本帧实际写入的实例数（= `soldier_parts.len().min(MAX_SOLDIER_INSTANCES)`）
     soldier_drawn: u32,
@@ -987,12 +991,15 @@ pub struct Renderer {
     prop_sh_bins: Vec<crate::engine::props::PropBin>,
     /// RV3D_SHADOW_LOD=0 → 阴影退回全量道具几何（A/B 诊断门，同 RV3D_NO_SHADOW 惯例）
     shadow_lod: bool,
-    /// 本帧视锥 6 平面（法线朝外）。由 `render()` 在写 CameraUniform 的同一处填，
+    /// 本帧视锥 6 平面（法线朝外）。由 `render()` 在写 CameraUniform 的同一处补，
     /// 那时 `record_command_buffer()` 还没被调用，所以道具分桶剔除拿到的一定是本帧的。
     frame_frustum: [[f32; 4]; 6],
-    /// 本帧相机位置（与 `frame_frustum` 同一处填）。用途：`RV3D_PROP_STATS=1` 的距离直方图
+    /// 本帧相机位置（与 `frame_frustum` 同一处补）。用途：`RV3D_PROP_STATS=1` 的距离直方图
     /// —— 它回答"按距离剔除还有多少可剔"，而 `record_command_buffer` 里拿不到 `view`。
     frame_cam_pos: glam::Vec3,
+    /// 本帧相机矩阵（天空 pass 需要基向量；`render()` 里写入）
+    frame_view: glam::Mat4,
+    frame_proj: glam::Mat4,
     /// 上一帧渲染统计（供 HUD / 日志）
     last_near_count: u32,
     last_far_count: u32,

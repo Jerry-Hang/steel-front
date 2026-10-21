@@ -48,7 +48,7 @@ impl Renderer {
         //   0 = 正常（默认，逐位不变）
         //   1 = 跳过逐像素阴影 PCF
         //   2 = apply_lighting 直接返回底色（光照全关）
-        //   3 = 片元直出常量色（纯填充/几何下限）
+        //   3 = 片元直出常量色（纯补充/几何下限）
         // 实机：setprop debug.sf.shadow_mode 1
         self.light_data.shadow.config.w = crate::syscfg::cfg("RV3D_SHADOW_MODE")
             .and_then(|v| v.trim().parse::<f32>().ok())
@@ -543,14 +543,14 @@ impl Renderer {
             //
             // `INSTANCE_COUNT`（= `GRID_SIZE²` = 65536）是 **slot 布局的基准**
             // （marker / NPC 槽位都从它往后排），**不等于实例场里真的有多少个**。
-            // 2026-10-13 把地面场改成"内外双密度"之后，实际只填了 **19456** 个
+            // 2026-10-13 把地面场改成"内外双密度"之后，实际只补了 **19456** 个
             // （外圈 15360 个 4m 格 + 内圈 1024 格 × 4 个 2m 细分）。
             //
             // 原来这里返回 `INSTANCE_COUNT` ⇒ 主 pass（`record.rs` 的 `draw_mesh_range`）
             // 与阴影 pass（`shadow.rs` 的 `draw_shadow_range`）每帧都按 **65536** 下发
             // ⇒ **多跑 46080 个工作组**，那些槽位是**未初始化显存**（`create_instance_buffer`
             // 只拷了 `instances.len()` 那么多字节）。
-            // ⚠️ 当时那条改动只说了"`INSTANCE_COUNT` 不动、只是少填一些 ⇒ 槽位布局逐位不变，
+            // ⚠️ 当时那条改动只说了"`INSTANCE_COUNT` 不动、只是少补一些 ⇒ 槽位布局逐位不变，
             // 属于安全改动" —— **槽位布局确实没变，但绘制数是另一回事**。
             //
             // 性能日志的 `visible=X/Y` 分母同样失真，一并改（见下面 `log::info!`）。
@@ -711,8 +711,10 @@ impl Renderer {
         // 为 false 时也要能剔除；全零平面会让 bin_visible 恒真（退化为不剔除，安全但无效），
         // 所以这里无条件算一次。extract_frustum_planes 是纯算术，成本可忽略。
         self.frame_frustum = Self::extract_frustum_planes(view, proj);
-        // 相机位置与视锥同处填：`RV3D_PROP_STATS=1` 的距离直方图要用它（见字段注释）
+        // 相机位置与视锥同处补：`RV3D_PROP_STATS=1` 的距离直方图要用它（见字段注释）
         self.frame_cam_pos = view.inverse().w_axis.truncate();
+        self.frame_view = view;
+        self.frame_proj = proj;
         let ubo = CameraUniform {
             view,
             proj,

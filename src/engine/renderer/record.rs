@@ -180,6 +180,48 @@ impl Renderer {
             self.device.cmd_set_scissor(command_buffer, 0, &[sc]);
         }
 
+        // ---- 天空渐变 + 太阳光晕（2026-10-22，画质 M5 第一步）----
+        // 全屏三角形最先画、不写深度；世界几何随后覆盖它。相机基向量从本帧 view 矩阵取
+        // （行 0/1 = right/up，行 2 = -forward），太阳方向与场景方向光**同源**。
+        // 检视模式（void）保留白底，不画天空。
+        if self.sky_pipeline != vk::Pipeline::null() && !self.void_mode {
+            let view = self.frame_view;
+            let proj = self.frame_proj;
+            let right = view.row(0).truncate();
+            let up = view.row(1).truncate();
+            let fwd = -view.row(2).truncate();
+            let tan_half = 1.0 / proj.y_axis.y.max(1e-6);
+            let aspect = proj.y_axis.y / proj.x_axis.x.max(1e-6);
+            let sun_dir = self.light_data.directional.direction.truncate();
+            let sky_push = SkyPush {
+                fwd: [fwd.x, fwd.y, fwd.z, tan_half],
+                right: [right.x, right.y, right.z, aspect],
+                up: [up.x, up.y, up.z, self.light_data.directional.color_intensity.w],
+                sun: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+                screen: [
+                    self.render_extent.width as f32,
+                    self.render_extent.height as f32,
+                    0.0,
+                    0.0,
+                ],
+            };
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.sky_pipeline,
+                );
+                self.device.cmd_push_constants(
+                    command_buffer,
+                    self.sky_pipeline_layout,
+                    vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck_bytes(&sky_push),
+                );
+                self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            }
+        }
+
         unsafe {
             self.device.cmd_bind_pipeline(
                 command_buffer,
@@ -637,7 +679,7 @@ impl Renderer {
                 // RV3D_ONE_PROP_DRAW=1：A/B（第 43 轮）—— 不分桶，整份索引一次画完。
                 // 用来二选一：**1 个 draw 也慢 ⇒ 顶点/片元着色本身贵**；
                 // **1 个 draw 快很多 ⇒ 逐 draw 的 state 开销贵**（28 次切换）。
-                // 前提：顶点数/三角形数/draw call 数/填充率四个维度都已排除对不上这 3.7ms。
+                // 前提：顶点数/三角形数/draw call 数/补充率四个维度都已排除对不上这 3.7ms。
                 let one_draw = crate::syscfg::is_set("RV3D_ONE_PROP_DRAW");
                 // 距离直方图只在 RV3D_PROP_STATS=1 时统计（默认零成本）：
                 // 回答"按距离剔除还有多少可剔"——`noprops` 实测 +37%（2026-09-26 新尺子），

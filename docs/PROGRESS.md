@@ -1165,3 +1165,13 @@ dGPU 12s 冒烟 exit=0、0 panic / 0 device lost / 0 ERROR、截图正常。
   玩家正常位置复拍无条纹。实验性的建筑高度抖动已回退。
 
 验收：Linux 0 警告 / test 构建 0 警告 / **822 passed + 5 ignored** / CJK OK / 白名单 OK。
+
+### 2026-10-22：画质 M5 第一步 —— 天空渐变 + 太阳光晕 + 雾色同源
+
+- 新增 `SKY_SHADER_WGSL`（全屏三角形 + push constant 重建视线方向）与 `init_sky_pipeline`
+  （无顶点缓冲/无描述符集/不写深度）；主 pass 最先绘制，世界几何随后覆盖；检视模式跳过。
+- 片元雾色 `FOG_TINT` 与天空地平线色改为**构建期注入的单一真源**（`SKY_*_XYZ`），
+  修掉"远处楼深蓝、地平线灰白"的接缝；判据 `sky_and_fog_colors_share_one_source`。
+- AGENTS.md 铁律 B 同步：顶点格式 stride 44 + 法线槽位、GGX、天空/雾单一真源。
+
+验收：0 警告（构建/测试构建）/ 823 passed + 5 ignored（新增 1 条判据）/ CJK 门 OK / 白名单 OK。

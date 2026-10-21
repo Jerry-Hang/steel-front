@@ -38,6 +38,27 @@ pub(crate) struct CameraUniform {
 
 // 光照 Uniform 类型与布局由 lighting 模块统一维护（`lighting::LightUniform`，352 字节）。
 // 默认全零 = 光照关闭：片元着色器走原「纹理+顶点颜色 50% 混合」路径，向后兼容。
+/// 天空着色器的 push constant（80 字节，与 `build.rs::SKY_SHADER_WGSL` 的 `SkyPush` 逐字段对应）。
+///
+/// 为什么走 push constant 而不是 UBO：天空不需要任何描述符绑定（主 layout 的 camera
+/// binding 只在 VERTEX 阶段可见），push 80B 一次 `cmd_push_constants` 就够；
+/// **改字段必须同步 WGSL**（顺序/类型任何一处不同都是"看着有天空但方向是错的"这类静默错）。
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SkyPush {
+    /// xyz = 相机前向（世界空间单位向量），w = tan(竖直半 FOV)
+    pub(crate) fwd: [f32; 4],
+    /// xyz = 相机右向，w = 宽高比
+    pub(crate) right: [f32; 4],
+    /// xyz = 相机上向，w = 太阳强度（0 = 关光晕）
+    pub(crate) up: [f32; 4],
+    /// xyz = 太阳方向（表面→光源），w 保留
+    pub(crate) sun: [f32; 4],
+    /// xy = 渲染分辨率（像素），zw 保留
+    pub(crate) screen: [f32; 4],
+}
+const _: () = assert!(std::mem::size_of::<SkyPush>() == 80);
+
 /// 立方体顶点数据
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -50,7 +71,7 @@ pub(crate) struct Vertex {
 }
 // 步长契约：主管线把它当 `stride` 用（`size_of::<Vertex>()`），而**着色器把
 // `location 0/1/2 = pos/color/uv` 与 32B 步长当成既成事实**（`build.rs` 的 mesh 路径
-// 与 `铁律 B` 的 "stride=32" 都这么写）。加字段/加填充会让属性整体错位，
+// 与 `铁律 B` 的 "stride=32" 都这么写）。加字段/加补充会让属性整体错位，
 // 而 Vulkan 与驱动**都不报错**（只是画面默默变错）⇒ 在这里把它钉死。
 /// HUD 覆盖层顶点：屏幕空间 NDC 位置（Y 已翻转）+ RGBA 颜色
 #[repr(C)]

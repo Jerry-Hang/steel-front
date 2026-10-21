@@ -85,12 +85,10 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 > **环境铁律（勿回退）**：开发/验证 = **Windows** / **Linux 原生** / **Android**（三平台，坑不互替）；
 > WSL2 材料**全部作废**。Linux 侧见 **`docs/linux-native.md`**（**命令在 §10–§15**，入口 `SteelFront.sh`）。
 
-- **机器**：**ASUS TUF FA608PM**（BIOS FA608PM.309）+ RTX 5060 Laptop + AMD 8940HX，内存 12GB。
-  🔴 **混合输出**：面板 2560x1600@165 挂在 **AMD 610M**（2 CU 核显）上，独显 `display_attached=No`
-  ⇒ 每帧跨卡拷贝 + 合成器在核显合成（实测数字见 §21.81(a)）。**该机型有 MUX 开关**：
-  `Armoury Crate → GPU 模式 → 独显输出`（Linux = `asusctl armoury set gpu_mux_mode 0`）即让面板
-  直连 5060，跨卡拷贝与核显合成一起消失（代价：待机功耗；通常要重启）。🔴 Linux 侧**同构**
-  （KWin Wayland 跑在 610M 上），不是 Windows 独有。
+- **机器**：**ASUS TUF FA608PM** + RTX 5060 Laptop + AMD 8940HX，内存 12GB。分辨率 2560x1600。
+  🔴 **混合输出**：面板挂 **AMD 610M**、独显 `display_attached=No` ⇒ 每帧跨卡拷贝 + 核显合成；
+  MUX 开关（`asusctl armoury set gpu_mux_mode 0`，需重启）可消掉。Linux 侧同构。细节见
+  `docs/linux-native.md` §21.81(a)。
 - **编译**：`cargo build --release`。**测试**：`cargo test --release`（**0 警告**是硬红线；passed 数见 `docs/PROGRESS.md`）。
   UDP 回环测试在沙箱内 bind 会 PermissionDenied → 需提权跑。
 - **GPU 能力（Windows 实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
@@ -106,8 +104,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 ## 铁律 A — 渲染技术路线
 
-> 2026-08-16 决策，取代 2026-08-11 的「网格着色器冻结、传统管线主迭代」（那条**方向完全相反**，
-> 已删除，不要再引用）。
+> 2026-08-16 决策，取代 2026-08-11 的「网格着色器冻结、传统管线主迭代」（已删除，勿再引用）。
 
 - **主开发路径 = `VK_EXT_mesh_shader`（MESH + FRAGMENT）**。所有新渲染功能、性能优化、视觉迭代
   一律在 mesh 路径上做（`build.rs` 的 `MESH_SHADER_WGSL` + `renderer.rs` mesh 管线）。
@@ -139,7 +136,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   （`sun.direction` 直接传，勿加负号）；采样器 `.compare_enable(false)` 手动 PCF
   （comparison sampler 非 Dref 采样报 VUID）；**地形 identity 矩阵必须写到槽位
   `INSTANCE_COUNT`(65536)**，槽位 0 每帧被 `cull_and_upload` 覆盖；
-  参数 2048² D32、半宽 400m、near=1/far=800、3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
+  参数 2048² D32、半宽 400m、near=1/far=800（`RV3D_SHADOW_EXTENT` 可调半宽，远平面 = 2×extent）、
+  3×3 PCF、bias 0.005/0.02；`RV3D_NO_SHADOW=1` 做 A/B。
   🔴 阴影是**两张图**（增益见 §21.40(c)）：`shadow_image`(binding 5) 装静态投射者
   （地形/地面场/marker/道具）、每 `RV3D_SHADOW_STATIC_EVERY` 帧（默认 30）重画；
   `shadow_dyn_image`(binding 10) 装 NPC/士兵、每 `RV3D_SHADOW_EVERY` 帧（默认 2）重画；
@@ -149,8 +147,12 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   排阴影问题先用 **`RV3D_DEBUG_SHADOW=1`**（R=frag_depth/G=阴影图深度均值），别再静态推矩阵。
 
 **顶点格式与着色**
-- `stride=32`，`pos@0 color@12 uv@24`，**没有法线槽位**：法线全部由屏幕空间导数重建
-  → 只能纯平着色；AO / 烘焙光照**必须进顶点色**；**绕序反了的面直接黑掉且不报错**。
+- `stride=44`，`pos@0 color@12 uv@24 normal@32`（**2026-10-22 画质 M2 加法线槽位**）。
+  法线来源：GLB 自带（枪）或加载期 `props::ensure_smooth_normals` 生成（道具/士兵 ——
+  实测 `assets/props/*.glb` **全都没有 NORMAL**）；**零向量 = 无数据**，片元回退屏幕导数
+  面法线（mesh 路径 marker/NPC 盒子逐像素不变）。顶点法线已接进 `apply_lighting` 主光照
+  + GGX 高光 `pbr_specular`（α=sqrt(2/(shininess+2))，`shininess` 语义不变）。
+  AO / 烘焙光照**仍必须进顶点色**；**绕序反了的面直接黑掉且不报错**。
 - 实例场与障碍立方体顶点色**全部白化**，颜色只走 tint；地形实例 tint=0.7 灰、
   marker tint=`WorldMarker.tint`（勿混）。
 - `flat_flag`（顶点着色器按槽位定，别凭记忆写阈值）：**0=地面 / 1=marker / 2=NPC(≥73729) /
@@ -256,6 +258,12 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 - 🔴 **交换链 create info 会被驱动回写**（2026-10-08 实测）：`create_swapchain()` 返回**之后**
   `imageUsage` 会**多出 STORAGE**（**关掉验证层仍回写** ⇒ 不是验证层干的），验证层随后照被改过的
   结构体报 `02275`/`01778`。**引擎用法合法**；对策：**传副本给驱动**、日志只打印我们申请的那份。
+
+**天空 / 雾（2026-10-22）**
+- 主 pass 最先画天空全屏三角形（`init_sky_pipeline`：80B push = 相机基向量 + 半 FOV + 太阳方向，
+  无描述符集、不写深度）；`void_mode` 跳过。
+- 雾色与地平线色单一真源 = `build.rs::SKY_*_XYZ`（构建期注入两份 WGSL）；判据
+  `sky_and_fog_colors_share_one_source`。
 
 **建筑摆放（2026-09-13）**
 - `city.rs::pick_building` 缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。`max` 会按较大方向贴合、
@@ -427,8 +435,8 @@ blender.exe --background --python tools/blender/build_city_kit.py -- <out_dir> [
 blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_prefix> [n]
 ```
 
-- **引擎只给了三条视觉杠杆，别指望第四条**：没有法线槽位 ⇒ **纯平着色**，**细节只能是真几何**；
-  AO/明暗**必须烘进顶点色**；道具 `export_materials="NONE"`，外观**全部**来自顶点色。
+- **视觉杠杆（2026-10-22 更新）**：法线槽位已有，但 GLB 不导出法线（引擎按位置平均生成），
+  所以**曲面能平滑、硬边靠真几何**；AO/明暗**必须烘进顶点色**；道具外观**全部**来自顶点色。
 - **尺寸契约是硬的**：`city.rs` 按**占地**摆放（`building_tall` 最多，实测 **132 处**）。资产越出轮廓就会插进邻居 ⇒ **外挑一律改内凹**（凹阳台 loggia 既是东欧板楼真做法，又不占轮廓）；
   允许的小外挑上限 = **0.06m/侧**（勒脚/窗台）。
 - **层高反解**：总高固定，`上层 = 3.15`（**等于引擎 `FLOOR_H`**），**底层吸收余量**（现值 3.56），
@@ -437,18 +445,12 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   **直接黑掉且不报错**，靠手推绕序是一类静默事故。
 - ⚠ **预览图只对"几何与比例"可信，对"最终颜色"不可信**：预览走 Blender 自己的光照 +
   AgX 视图变换。**颜色判断必须在引擎里做**（`RV3D_CAM` 固定机位取证）。
-- **顶点预算**：`props: 缓冲扩容 顶点 N/2097152` ⇒ **硬容量 2^21 = 2,097,152**，加细节前先看这个数。
-  🔴 **顶点分布（2026-09-26）**：场景 489 144 顶点里 `building_tall`（132 件 × **1872**）占 **50%**、
-  `tree_oak`（372 件 × **500**）占 **38%** ⇒ 要动就动这两类，别看件数。判据 = `RV3D_PROP_STATS=1`。
-  **顶点还是唯一的杠杆** ⇒ 资产改动先用 `propdraw:` 的几何量验收（GLB 已焊接 = 顶点数即真几何）；
-  ⚠️ 道具真实代价 ≈20% 帧时间（§21.83，**不是**旧记录的 5.4%）。
-- 🔴🔴 **道具/GLB 的两条通则（改动前先读）**：
-  1. **`box_project_uv` 的逐面 UV 岛 + `export_normals=True` 的逐面法线都会阻止顶点共享**
-     （`tree_oak` 838 三角形曾被拆成 **2264 顶点**）。真实分布见上"顶点预算"条。
-  2. **引擎根本不需要这两样**（无正常线槽位；`Shape::Authored` 在片元里**跳过**四条会采样 UV 的
-     效果；`assets.rs` 只把 `POSITION` 当硬要求）。
-  ⇒ **改法**：`tools/blender/weld_props.py`（按 pos+color 去重、UV 设常量、**`export_normals=False`**，
-  它是总开关）；验收看 `propdraw:` 的几何量，帧率只确认"换到时间了没有"。
+- **顶点预算**：容量 2^21 = 2,097,152（`props: 缓冲扩容 顶点 N/2097152`）。场景 489k 顶点里
+  `building_tall`(132×1872) 占 50%、`tree_oak`(372×500) 占 38% ⇒ 要动先动这两类；
+  资产改动用 `propdraw:` 几何量验收（GLB 已焊接 = 顶点数即真几何）；道具真实代价 ≈20% 帧时间。
+- 🔴 **道具/GLB 两条通则**：① 逐面 UV 岛 + `export_normals=True` 会阻止顶点共享；
+  ② 引擎**不需要**这两样（`Shape::Authored` 跳过所有采样 UV 的效果，`assets.rs` 只要 POSITION）。
+  ⇒ 改法 = `tools/blender/weld_props.py`（pos+color 去重、UV 常量、`export_normals=False`）。
 - **确定性**：`hash(str)` 每个进程都变（PYTHONHASHSEED），生成器里用 `zlib.crc32`。
 - 同型号建筑的"克隆军团"由 **`props.rs::placement_tint`** 治（逐摆放确定性色调 ±12%），
   不是靠堆更多型号。
