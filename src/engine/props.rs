@@ -1243,4 +1243,30 @@ mod tests {
         }
     }
 
+    /// 画质 M2 判据：**无 NORMAL 属性的道具必须生成单位平滑法线**。
+    /// 反向验证：把 `ensure_smooth_normals` 改成直接 return ⇒ 本判据红。
+    #[test]
+    fn ensure_smooth_normals_fills_and_preserves() {
+        // z=0 平面上的 CCW 四边形：法线应全是 +Z（单位长）
+        let mut verts = vec![
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        ];
+        ensure_smooth_normals(&mut verts, &[0, 1, 2, 0, 2, 3]);
+        for v in &verts {
+            assert!((v[3] * v[3] + v[4] * v[4] + v[5] * v[5] - 1.0).abs() < 1e-4, "法线未归一化");
+            assert!(v[5] > 0.99, "平面法线应指向 +Z，实际 {:?}", &v[3..6]);
+        }
+        // 已有法线（枪/士兵某些导出）必须原样保留，不覆盖
+        let mut with_n = vec![[0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0, 1.0]; 3];
+        ensure_smooth_normals(&mut with_n, &[0, 1, 2]);
+        assert!(with_n.iter().all(|v| v[5] == -1.0), "已有法线被覆盖");
+        // 坏索引：不 panic、不生成（保持零）
+        let mut bad = vec![[0.0f32; 11]; 3];
+        ensure_smooth_normals(&mut bad, &[0, 1, 99]);
+        assert!(bad.iter().all(|v| v[3] == 0.0 && v[4] == 0.0 && v[5] == 0.0));
+    }
+
 }

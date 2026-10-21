@@ -99,3 +99,27 @@
      再换回真实法线；A/B 用像素差 + `RV3D_CAM` 同机位。
   4. 预期增益：树冠/车壳/曲面平滑着色；建筑棱边轻微倒角。mesh 路径（marker/NPC 盒子）
      因 `normal=0` 保持逐像素不变。
+
+## M2 进度更新（2026-10-22：**法线 + GGX 已全线打通**）
+
+上一轮未接线的着色器部分已完成并验证：
+
+1. `VERTEX_SHADER_WGSL`：`@location(3) normal` 输入 → 世界空间变换（零向量保护）
+   → `VertexOutput @location(8) normal`；`FRAGMENT`/`MESH` 两个 `VertexOutput` 同步加字段，
+   mesh 路径恒零（保持旧面着色）。
+2. 片元两处消费顶点法线：
+   - `flat_flag > 0.5` 块里 `fnrm = has_nrm ? normalize(input.normal) : 屏幕导数`，
+     `valid_nrm` 同步切到 1.0（玻璃菲涅耳不再被导数闸门误杀）；
+   - **`apply_lighting` 的主光照法线**也改用插值法线（这是视觉真正变化的那一刀——
+     之前只改了局部效果，主光照仍在用导数法线，所以差异很小）。
+3. **GGX 替换 Blinn-Phong**：`pbr_specular`（Trowbridge-Reitz D + Smith-GGX 可见性，
+   α 由旧 `shininess` 反解 α=sqrt(2/(s+2))，保持高光尺寸手感）。
+4. 验证：
+   - 绿色诊断（有法线涂绿）确认 attribute 全线到达（建筑/树/柱/地面大面积命中）；
+   - 同机位 A/B（法线开/关）差异 **4.67%** 像素（曲面 facet 条纹消失）；
+   - 与 M2 前对比（法线 + GGX）差异 **29.3% / 14.5%** 像素，平均差 6.2/3.2；
+   - 新增 CPU 判据 `ensure_smooth_normals_fills_and_preserves`（单位法线/保留已有/坏索引不 panic）。
+5. 剩余 M2 项：法线扰动（程序化 bump）、按材质 roughness（等 M3 的材质表）。
+
+实测性能：dGPU 2560×1600 同场景 FPS 与 M2 前同档（33→41 波动为场景/NPC 差异，
+perf 日志另测）；无 VUID（未装验证层，沿用既有口径）。

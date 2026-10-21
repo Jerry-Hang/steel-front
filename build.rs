@@ -92,12 +92,15 @@ struct VertexOutput {
     /// 为什么不用 uniform：`FRAGMENT_SHADER_WGSL` 是**独立编译的模块**、里面没有
     /// `camera` 声明（见 `FRAGMENT_SHADER_WGSL` 顶部只有 binding 1/3/7/8/9）。
     @location(7) @interpolate(flat) mv_debug: f32,
+    // 世界空间顶点法线（画质 M2）：零 = 无数据 ⇒ 片元回退屏幕导数面法线
+    @location(8) normal: vec3<f32>,
 }
 @vertex
 fn vs_main(
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) normal: vec3<f32>,
     @builtin(instance_index) instance_index: u32,
 ) -> VertexOutput {
     var output: VertexOutput;
@@ -146,6 +149,9 @@ fn vs_main(
     // 透视校正插值对线性量精确，片元 length() 即真实视距，省掉一个插值属性（雾需要它）。
     // 所有消费端本来就各自 normalize()，语义不变（mesh 路径 write_vertex 同步改）。
     output.view_dir = cam_pos - world_pos.xyz;
+    // 法线：模型空间 → 世界空间（实例矩阵含旋转；零向量 = 无数据，别 normalize(0) 出 NaN）
+    let nrm_w = (inst.model * vec4<f32>(normal, 0.0)).xyz;
+    output.normal = select(vec3<f32>(0.0), normalize(nrm_w), length(nrm_w) > 1e-6);
     output.color = color * inst.tint.rgb;
     output.uv = uv;
     // 材质编码（片元着色器按值分路径）：
@@ -233,6 +239,8 @@ struct VertexOutput {
     @location(5) flat_flag: f32,
     @location(6) mv: vec2<f32>,
     @location(7) @interpolate(flat) mv_debug: f32,
+    // 世界空间顶点法线（画质 M2）：零 = 无数据 ⇒ 片元回退屏幕导数面法线
+    @location(8) normal: vec3<f32>,
 }
 
 @group(0) @binding(1) var texture_sampled: texture_2d<f32>;
@@ -418,10 +426,27 @@ fn bp_diffuse(normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     return max(dot(normal, light_dir), 0.0);
 }
 
-/// Blinn-Phong 高光：pow(max(dot(n, h), 0), shininess)，h = normalize(l + v)
-fn bp_specular(normal: vec3<f32>, light_dir: vec3<f32>, view_dir: vec3<f32>, shininess: f32) -> f32 {
+/// GGX / Trowbridge-Reitz 高光（画质 M2：把旧的 Blinn-Phong 换成物理基础的单瓣 BRDF）。
+///
+/// 粗糙度由旧的 `shininess` 反解：α = sqrt(2/(s+2)) —— s=32 时 α≈0.242，与旧高光尺寸接近，
+/// 保证"换模型不换手感"；GGX 的长尾让掠射角的玻璃/金属更可信。可见性用 Smith-GGX 的
+/// Schlick 近似；菲涅耳基准反射率并入 SPEC_CONTRIB，避免再乘 0.04 把高光压没。
+fn pbr_specular(normal: vec3<f32>, light_dir: vec3<f32>, view_dir: vec3<f32>, shininess: f32) -> f32 {
+    let ndl = max(dot(normal, light_dir), 0.0);
+    if (ndl <= 0.0) {
+        return 0.0;
+    }
     let half_dir = normalize(light_dir + view_dir);
-    return pow(max(dot(normal, half_dir), 0.0), shininess);
+    let ndh = max(dot(normal, half_dir), 0.0);
+    let ndv = max(dot(normal, view_dir), 1e-4);
+    let a = sqrt(2.0 / (shininess + 2.0));
+    let a2 = a * a;
+    let d = ndh * ndh * (a2 - 1.0) + 1.0;
+    let d_term = a2 / max(3.14159265 * d * d, 1e-6);
+    let k = a * 0.5;
+    let gv = ndv / (ndv * (1.0 - k) + k);
+    let gl = ndl / (ndl * (1.0 - k) + k);
+    return d_term * gv * gl;
 }
 
 /// 点光源衰减：1 / (c + l*d + q*d*d)，clamp 到 [0, 1]
@@ -439,7 +464,7 @@ fn evaluate_directional(light: DirectionalLight, normal: vec3<f32>, view_dir: ve
     }
     let light_dir = normalize(light.direction.xyz);
     let diffuse = bp_diffuse(normal, light_dir);
-    let spec = bp_specular(normal, light_dir, view_dir, shininess);
+    let spec = pbr_specular(normal, light_dir, view_dir, shininess);
     return light.color_intensity.xyz * light.color_intensity.w * (diffuse + SPEC_CONTRIB * spec);
 }
 
@@ -454,7 +479,7 @@ fn evaluate_point(light: PointLight, world_pos: vec3<f32>, normal: vec3<f32>, vi
     }
     let light_dir = to_light / dist;
     let diffuse = bp_diffuse(normal, light_dir);
-    let spec = bp_specular(normal, light_dir, view_dir, shininess);
+    let spec = pbr_specular(normal, light_dir, view_dir, shininess);
     let atten = point_attenuation(dist, light.attenuation.x, light.attenuation.y, light.attenuation.z);
     return light.color_intensity.xyz * light.color_intensity.w * atten * (diffuse + SPEC_CONTRIB * spec);
 }
@@ -497,6 +522,15 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     }
     let view_dir = normalize(input.view_dir);
     var normal = safe_face_normal(input.world_pos, view_dir);
+    // 画质 M2：有顶点法线的几何（GLB 道具/建筑，加载期生成）用插值法线 ⇒ 曲面平滑着色；
+    // 没有则保持屏幕导数面法线（mesh 路径 marker/NPC 逐像素不变）。
+    let vn_len = length(input.normal);
+    if (vn_len > 1e-3) {
+        normal = input.normal / vn_len;
+        if (dot(normal, view_dir) < 0.0) {
+            normal = -normal;
+        }
+    }
     let deriv = world_derivatives(input.world_pos);
     var shadow_factor = 0.0;
     var debug_outside = true;
@@ -850,14 +884,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // 退化面（相交缝 sliver）的 cr 模长趋 0 → normalize 出 NaN，会穿透 valid_nrm
         // 的 smoothstep 把 base/光照全染 NaN → 落盘纯黑。与 safe_face_normal 同一相对判据。
         let crl = length(cr);
+        // 画质 M2：有顶点法线就用它（透视校正插值 ⇒ 曲面平滑着色）；没有则回退到
+        // 屏幕导数面法线（保证 mesh 路径的盒子/NPC 与旧行为逐像素一致）。
+        let nrm_len = length(input.normal);
+        let has_nrm = nrm_len > 1e-3;
         var fnrm = select(vdir, cr / max(crl, 1e-9), crl / max(dmax * dmax, 1e-9) > 1e-3);
+        if (has_nrm) {
+            fnrm = input.normal / nrm_len;
+        }
         if (dot(fnrm, vdir) < 0.0) {
             fnrm = -fnrm;
         }
         // 退化法线判据：|cross| / |足迹|² ≈ 两条屏幕导数向量的夹角正弦。
         // 三角形轮廓/亚像素面上它趋 0 → 法线是纯噪声。玻璃的菲涅耳项若不加这道闸，
         // ndv 会随机取到 0 → fres=1 → **每栋楼的轮廓长出一圈亮边**（自己引入的走样）。
-        let valid_nrm = smoothstep(0.03, 0.22, length(cr) / max(dmax * dmax, 1e-6));
+        let valid_nrm = select(
+            smoothstep(0.03, 0.22, length(cr) / max(dmax * dmax, 1e-6)),
+            1.0,
+            has_nrm,
+        );
         // D12：皮肤/迷彩是**逐面 0..1 UV** 域的信号，所以它的收敛量必须用 fwidth(uv)
         // （一个像素盖过面的 1.5% 就该收）。⚠ 这个 detail 不能拿去收敛任何"按米定义"
         // 的信号（窗带/玻璃分格/树冠斑驳）：面的物理尺寸从 0.3m 木箱到 30m 大楼差 100 倍，
@@ -1173,6 +1218,8 @@ struct VertexOutput {
     @location(3) world_pos: vec3<f32>,
     @location(4) view_dir: vec3<f32>,
     @location(5) flat_flag: f32,
+    // mesh 路径暂无顶点法线数据（模板几何仍是面着色）⇒ 恒零，片元走导数回退
+    @location(8) normal: vec3<f32>,
 }
 
 struct MeshPrimitive {
@@ -1425,6 +1472,7 @@ fn write_vertex(
     // 与 vs_main 同步：不归一化，片元用 length() 取真实视距驱动雾。
     v.view_dir = cam - wp.xyz;
     v.flat_flag = flat;
+    v.normal = vec3<f32>(0.0);
     mesh_out.vertices[lid] = v;
 }
 

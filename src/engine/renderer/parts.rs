@@ -599,7 +599,7 @@ impl Renderer {
                     pos: v.pos,
                     color: v.color,
                     uv: v.uv,
-                    normal: [0.0, 0.0, 0.0],
+                    normal: v.normal,
                 };
             }
         }
@@ -925,7 +925,8 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
                     pos: [v[0], v[1], v[2]],
                     color: [v[8], v[9], v[10]],
                     uv: [v[6], v[7]],
-                    normal: [0.0, 0.0, 0.0],
+                    // [f32;11] 布局 = pos(3)+normal(3)+uv(2)+color(3)（画质 M2）
+                    normal: [v[3], v[4], v[5]],
                 };
             }
         }
@@ -1100,7 +1101,8 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
                     pos: [v[0], v[1], v[2]],
                     color: [v[8], v[9], v[10]],
                     uv: [v[6], v[7]],
-                    normal: [0.0, 0.0, 0.0],
+                    // [f32;11] 布局 = pos(3)+normal(3)+uv(2)+color(3)（画质 M2）
+                    normal: [v[3], v[4], v[5]],
                 };
             }
         }
