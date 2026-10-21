@@ -29,7 +29,26 @@ pub const LIGHT_UBO_SIZE: usize = 352;
 /// 按铁律 F："看到'规划中'的 dead code，必须回答'那它为什么没被接线'，
 /// **不许加 `#[allow]` 了事**" —— 而这几个 `allow` 连"没接线"这个前提都不成立，
 /// 是纯粹的陈旧压制，只会掩盖真正新出现的 dead code。
+/// 默认阴影贴图边长（历史默认值；实际生效值见 [`shadow_map_size`]）。
 pub const SHADOW_MAP_SIZE: u32 = 2048;
+
+/// 有效阴影贴图边长：`RV3D_SHADOW_MAP`（**1024..=2048**，默认 [`SHADOW_MAP_SIZE`]）。
+///
+/// ⚠️ 上限 2048 不是随意定的：2026-10-22 实测 4096² D32 在 RTX 5060 + Wayland/PRIME 上
+/// **首帧就 device lost**（fence 5s 超时、日志无 VUID）⇒ 提高分辨率这条路本机走不通，
+/// 阴影锐度只能靠"缩小覆盖范围/级联"解决。1024 保留给低配/性能对照。
+///
+/// 为什么必须**只通过这里**取：着色器用 `shadow.config.x` 推纹素尺寸、Rust 侧用同一个数
+/// 建图/设视口 —— 两边不同就是"阴影整体偏移/错位"的静默错误（本仓惯犯）。
+/// 一次性缓存：env 是进程级常量，跑起来后再改没有意义（测试里也不许改 env）。
+pub fn shadow_map_size() -> u32 {
+    static SIZE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        crate::syscfg::parse::<u32>("RV3D_SHADOW_MAP")
+            .map(|v| v.clamp(1024, 2048))
+            .unwrap_or(SHADOW_MAP_SIZE)
+    })
+}
 // 2026-09-14 **删除** `SHADOW_MAP_FORMAT: u32 = 126`：
 // 它唯一一次出现就是它自己的定义（全仓仅 1 处引用），是 `vk::Format::D32_SFLOAT`
 // 的手抄副本 —— 渲染器直接用 ash 枚举，这个数字常量既没有消费者、也可能与 ash 分叉。
@@ -112,7 +131,7 @@ pub struct ShadowConfig {
 impl ShadowConfig {
     pub fn new(light_dir: Vec3, target: Vec3, extent: f32, near: f32, far: f32) -> Self {
         Self {
-            map_size: SHADOW_MAP_SIZE,
+            map_size: shadow_map_size(),
             depth_bias: DEFAULT_SHADOW_DEPTH_BIAS,
             normal_bias: DEFAULT_SHADOW_NORMAL_BIAS,
             light_dir,
@@ -561,11 +580,30 @@ mod tests {
         assert_eq!(u.points[1].position.w, 0.0);
         assert_eq!(u.shadow.bias.x, DEFAULT_SHADOW_DEPTH_BIAS);
         assert_eq!(u.shadow.bias.y, DEFAULT_SHADOW_NORMAL_BIAS);
-        assert_eq!(u.shadow.config.x, SHADOW_MAP_SIZE as f32);
+        assert_eq!(u.shadow.config.x, shadow.map_size as f32);
         assert_ne!(u.shadow.light_view_proj, Mat4::ZERO);
     }
 
     #[test]
+    /// 画质 M5：阴影贴图分辨率可调（`RV3D_SHADOW_MAP`），且**唯一取用入口**是
+    /// `shadow_map_size()` —— 分配/视口/着色器 `config.x` 三处必须同源。
+    #[test]
+    fn shadow_map_size_is_shared_by_allocation_and_uniform() {
+        let size = shadow_map_size();
+        assert!((1024..=2048).contains(&size), "阴影贴图边长 {size} 超出 1024..=2048");
+        assert_eq!(size, shadow_map_size(), "第二次取值不稳定（缓存失效）");
+        let shadow = ShadowConfig::new(Vec3::Y, Vec3::ZERO, 50.0, 1.0, 200.0);
+        assert_eq!(shadow.map_size, size);
+        let u = LightUniform::build(None, &[], Vec3::ZERO, 0.0, Some(&shadow));
+        assert_eq!(u.shadow.config.x, size as f32);
+        let shadow_rs = std::fs::read_to_string("src/engine/renderer/shadow.rs")
+            .expect("读不到 renderer/shadow.rs（判据扫描面失效）");
+        assert!(shadow_rs.contains("crate::engine::lighting::shadow_map_size()"),
+            "renderer/shadow.rs 没走 shadow_map_size()，分配尺寸可能与 uniform 分叉");
+        assert!(!shadow_rs.contains("use crate::engine::lighting::SHADOW_MAP_SIZE;"),
+            "renderer/shadow.rs 仍直接使用 SHADOW_MAP_SIZE 常量");
+    }
+
     fn build_with_no_lights_stays_disabled() {
         let u = LightUniform::build(None, &[], Vec3::ZERO, 0.0, None);
         assert_eq!(u, LightUniform::default());

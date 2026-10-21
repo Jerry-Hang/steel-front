@@ -130,7 +130,7 @@ impl Renderer {
         );
     }
     pub(crate) fn init_shadow_resources(&mut self) -> Result<(), String> {
-        use crate::engine::lighting::SHADOW_MAP_SIZE;
+        let map_size = crate::engine::lighting::shadow_map_size();
 
         // ---- 1. 阴影图 Image + 内存 + View（静态图 + 动态图，见字段注释）----
         let (shadow_image, shadow_image_memory, shadow_image_view) =
@@ -336,13 +336,13 @@ impl Renderer {
             }
         }
 
-        log::info!("阴影贴图资源创建完成: {}x{} D32_SFLOAT", SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+        log::info!("阴影贴图资源创建完成: {}x{} D32_SFLOAT", map_size, map_size);
         Ok(())
     }
     /// 阴影 depth-only 管线：与主几何共享顶点/实例布局，无颜色附件；
     /// depth bias（constant 1.25 / slope 1.75）缓解斜面 shadow acne。
     pub(crate) fn init_shadow_pipeline(&mut self) -> Result<(), String> {
-        use crate::engine::lighting::SHADOW_MAP_SIZE;
+        let map_size = crate::engine::lighting::shadow_map_size();
 
         let vs_spirv = load_spirv("assets/shadow.vert.spv")?;
         let fs_spirv = load_spirv("assets/shadow.frag.spv")?;
@@ -381,15 +381,15 @@ impl Renderer {
         let viewport = vk::Viewport::default()
             .x(0.0)
             .y(0.0)
-            .width(SHADOW_MAP_SIZE as f32)
-            .height(SHADOW_MAP_SIZE as f32)
+            .width(map_size as f32)
+            .height(map_size as f32)
             .min_depth(0.0)
             .max_depth(1.0);
         let scissor = vk::Rect2D::default()
             .offset(vk::Offset2D { x: 0, y: 0 })
             .extent(vk::Extent2D {
-                width: SHADOW_MAP_SIZE,
-                height: SHADOW_MAP_SIZE,
+                width: map_size,
+                height: map_size,
             });
         let viewports = [viewport];
         let scissors = [scissor];
@@ -481,7 +481,7 @@ impl Renderer {
         draw_static: bool,
         draw_dynamic: bool,
     ) -> Result<(), String> {
-        use crate::engine::lighting::SHADOW_MAP_SIZE;
+        let map_size = crate::engine::lighting::shadow_map_size();
 
         // 🔬 诊断门（只为测量，不影响默认行为）：把阴影 pass 的**静态**投射者与**动态**投射者
         // 分开关掉，用来回答"阴影那 18% 里，静态占多少"。
@@ -573,8 +573,8 @@ impl Renderer {
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: vk::Extent2D {
-                    width: SHADOW_MAP_SIZE,
-                    height: SHADOW_MAP_SIZE,
+                    width: map_size,
+                    height: map_size,
                 },
             })
             .clear_values(&clear_depth);

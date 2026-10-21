@@ -1175,3 +1175,14 @@ dGPU 12s 冒烟 exit=0、0 panic / 0 device lost / 0 ERROR、截图正常。
 - AGENTS.md 铁律 B 同步：顶点格式 stride 44 + 法线槽位、GGX、天空/雾单一真源。
 
 验收：0 警告（构建/测试构建）/ 823 passed + 5 ignored（新增 1 条判据）/ CJK 门 OK / 白名单 OK。
+
+### 2026-10-22：阴影贴图分辨率旋钮 + 4096 device-lost 结论
+
+- 新增 `lighting::shadow_map_size()`（`RV3D_SHADOW_MAP`，1024..=2048，默认 2048）；分配/视口/
+  着色器 `config.x` 三处改为单点取用，判据 `shadow_map_size_is_shared_by_allocation_and_uniform`
+  （含"shadow.rs 不得直接使用常量"的源码扫描）。
+- **实测 4096² D32 首帧 device lost**（2048/1024 正常）⇒ 上限收窄到 2048 并写进注释/路线图；
+  阴影锐度改走"缩范围/级联"。
+- 冒烟：2048 / 1024 各 12s，exit=0、0 panic、0 device lost。
+
+验收：0 警告（构建/测试构建）/ **824 passed + 5 ignored** / CJK 门 OK / 白名单 OK。
