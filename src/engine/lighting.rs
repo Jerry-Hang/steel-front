@@ -584,7 +584,6 @@ mod tests {
         assert_ne!(u.shadow.light_view_proj, Mat4::ZERO);
     }
 
-    #[test]
     /// 画质 M5：阴影贴图分辨率可调（`RV3D_SHADOW_MAP`），且**唯一取用入口**是
     /// `shadow_map_size()` —— 分配/视口/着色器 `config.x` 三处必须同源。
     #[test]
@@ -604,6 +603,39 @@ mod tests {
             "renderer/shadow.rs 仍直接使用 SHADOW_MAP_SIZE 常量");
     }
 
+    /// 画质 M5 判据：**ACES 色调映射系数单一真源**。
+    ///
+    /// 世界片元与天空 pass 是两份独立 WGSL，必须用同一组系数，否则"雾化到地平线的楼"
+    /// 与天空会重新出现接缝。做法 = build.rs 五个 Rust 常量 + 构建期注入两处 + 构建期断言
+    /// （删掉任一处 tonemap 会直接构建失败）；本判据再核对生成系数 == build.rs 常量。
+    #[test]
+    fn aces_tonemap_coefficients_are_shared() {
+        let build = include_str!("../../build.rs");
+        let generated = crate::shaders::ACES_COEFFS;
+        for (name, expect) in [
+            ("ACES_A", generated[0]),
+            ("ACES_B", generated[1]),
+            ("ACES_C", generated[2]),
+            ("ACES_D", generated[3]),
+            ("ACES_E", generated[4]),
+        ] {
+            let needle = format!("const {name}: f32 = ");
+            let at = build.find(&needle).unwrap_or_else(|| panic!("build.rs 里找不到 {name}"));
+            let rest = &build[at + needle.len()..];
+            let end = rest.find(';').expect("常量没有分号结尾");
+            let parsed: f32 = rest[..end].trim().parse().unwrap_or_else(|_| panic!("{name} 之后不是数字"));
+            assert!((parsed - expect).abs() < 1e-6, "{name}: build.rs {parsed} vs shaders.rs {expect}");
+        }
+        assert!(build.matches("aces_inject(").count() >= 2, "aces_inject 没有同时作用于两份 WGSL");
+        assert!(
+            build.contains("片元着色器丢了 ACES tonemap") && build.contains("天空着色器丢了 ACES tonemap"),
+            "构建期硬断言被删 —— 删掉任一处 tonemap 不会再报错"
+        );
+        let exposure = crate::shaders::TONEMAP_EXPOSURE;
+        assert!((0.05..=8.0).contains(&exposure), "曝光 {exposure} 超出合理范围");
+    }
+    
+    #[test]
     fn build_with_no_lights_stays_disabled() {
         let u = LightUniform::build(None, &[], Vec3::ZERO, 0.0, None);
         assert_eq!(u, LightUniform::default());

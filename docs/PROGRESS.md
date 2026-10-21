@@ -1186,3 +1186,14 @@ dGPU 12s 冒烟 exit=0、0 panic / 0 device lost / 0 ERROR、截图正常。
 - 冒烟：2048 / 1024 各 12s，exit=0、0 panic、0 device lost。
 
 验收：0 警告（构建/测试构建）/ **824 passed + 5 ignored** / CJK 门 OK / 白名单 OK。
+
+### 2026-10-22：M5 第二步 —— ACES 色调映射（世界/天空同一条曲线）
+
+- 片元与天空 pass 都加 `aces_tonemap`；系数真源 `build.rs::ACES_A..E + TONEMAP_EXPOSURE`，
+  构建期注入两份 WGSL + 两份"丢了 tonemap"硬断言；判据 `aces_tonemap_coefficients_are_shared`。
+- 同机位 A/B：亮度 96.9→103.7 / 91.2→95.4，过曝面积不变（0.14%），差异像素 43.3% / 55.0%；
+  高光滚降生效（旧管线硬 clamp）。
+- 顺带修掉 lighting 测试区一处重复 `#[test]` 与丢失的 `#[test]` 标记（此前 `build_with_no_lights`
+  实际没在跑），测试数 824 → 825。
+
+验收：0 警告 / **825 passed + 5 ignored** / CJK 门 OK / 白名单 OK。

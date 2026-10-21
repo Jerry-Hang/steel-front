@@ -513,6 +513,22 @@ fn safe_face_normal(wp: vec3<f32>, vdir: vec3<f32>) -> vec3<f32> {
 // 🔴 改这里必须重新构建（build.rs 生成 .spv）；R=1 可一键回退到 4 抽头做 A/B。
 const DYN_PCF_RADIUS: i32 = 0;
 
+/// ACES 近似色调映射（Narkowicz 2015 拟合，画质 M5）。
+///
+/// 输入 = 场景线性辐射（本仓的光照/雾都在这个域里算），输出 = 显示域 [0,1]。
+/// 作用：高光滚降到白而不是硬切（旧管线直接 clamp，过亮区一片死白、失去材质层次）。
+/// 结构光/雾都在 tonemap **之前**混合，这样"雾化到地平线"与天空的颜色关系不变。
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    // 系数由构建期从 Rust 常量注入（真源 = ACES_A..ACES_E；删掉注入会构建期断言失败）
+    let a = {ACES_A};
+    let b = {ACES_B};
+    let c = {ACES_C};
+    let d = {ACES_D};
+    let e = {ACES_E};
+    let y = (x * (a * x + b)) / (x * (c * x + d) + e);
+    return clamp(y, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
     // 消融档 2：光照全关（默认档 0 不进这里）
     if (light_data.shadow.config.w >= 1.5 && light_data.shadow.config.w < 2.5) {
@@ -1089,7 +1105,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             shaded = lit + sheen;
         }
         let fg = fog_amount(view_distance(input));
-        return vec4<f32>(mix(shaded, FOG_TINT, fg) * input.fade, 1.0);
+        return vec4<f32>(aces_tonemap(mix(shaded, FOG_TINT, fg) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
     }
     // 世界空间 UV：地面/地形用 world_pos.xz 映射到全图 [0,1]（覆盖 2*256 米），
     // 与 procedural.rs 烘焙纹理严格对齐（marker/NPC/自发光已走 flat_flag 纯色路径，不采样）。
@@ -1158,7 +1174,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     let lit = apply_lighting(input, mixed);
     let fg2 = fog_amount(view_distance(input));
-    return vec4<f32>(mix(lit, FOG_TINT, fg2) * input.fade, 1.0);
+    return vec4<f32>(aces_tonemap(mix(lit, FOG_TINT, fg2) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
 }
 "#;
 
@@ -1970,6 +1986,17 @@ const SKY_HORIZON_XYZ: [f32; 3] = [0.455, 0.505, 0.575];
 /// 相机俯视时地平线以下的背景（城市外无几何区域的兜底色）
 const SKY_BELOW_XYZ: [f32; 3] = [0.145, 0.155, 0.165];
 
+// ---- 画质 M5：ACES 色调映射系数**单一真源**（2026-10-22）----
+// Narkowicz 2015 拟合：f(x) = (x(ax+b))/(x(cx+d)+e)。世界片元与天空 pass 必须同一条曲线，
+// 否则"雾化到地平线的楼"与天空会裂开；两份 WGSL 都由构建期注入同一组常量。
+const ACES_A: f32 = 2.51;
+const ACES_B: f32 = 0.03;
+const ACES_C: f32 = 2.43;
+const ACES_D: f32 = 0.59;
+const ACES_E: f32 = 0.14;
+/// 曝光基准（1.0 = 保持手调光照亮度；本仓没有物理相机参数）
+const TONEMAP_EXPOSURE: f32 = 1.0;
+
 fn vec3_lit(c: [f32; 3]) -> String {
     format!("vec3<f32>({:.6}, {:.6}, {:.6})", c[0], c[1], c[2])
 }
@@ -1978,6 +2005,16 @@ fn vec3_lit(c: [f32; 3]) -> String {
 // 全屏三角形，不需要顶点缓冲 / 描述符：相机基向量与太阳方向走 push constants。
 // 输出**线性空间**颜色（交换链是 SRGB 格式，硬件负责编码），与 apply_lighting 同一色域。
 const SKY_SHADER_WGSL: &str = r#"
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let a = {ACES_A};
+    let b = {ACES_B};
+    let c = {ACES_C};
+    let d = {ACES_D};
+    let e = {ACES_E};
+    let y = (x * (a * x + b)) / (x * (c * x + d) + e);
+    return clamp(y, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 struct SkyPush {
     // xyz = 相机前向（世界空间，单位长），w = tan(竖直半 FOV)
     fwd: vec4<f32>,
@@ -2034,8 +2071,9 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     col = col + vec3<f32>(1.0, 0.93, 0.80) * ((disk + halo) * sky_push.up.w);
     // 抖动：8bit 输出 + 平滑渐变最容易出色带（本仓历史上被当成"条纹缺陷"排查过）
     let n = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
-    col = col + vec3<f32>(n / 255.0);
-    return vec4<f32>(max(col, vec3<f32>(0.0)), 1.0);
+    col = max(col, vec3<f32>(0.0)) + vec3<f32>(n / 255.0);
+    // 与场景共用同一条 ACES 曲线（否则"楼—天"接缝重新出现）
+    return vec4<f32>(aces_tonemap(col * {TONEMAP_EXPOSURE}), 1.0);
 }
 "#;
 
@@ -2043,17 +2081,34 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let vs_spirv = compile_wgsl(VERTEX_SHADER_WGSL);
-    let fs_src = FRAGMENT_SHADER_WGSL.replace("{FOG_TINT}", &vec3_lit(SKY_HORIZON_XYZ));
+    let aces_inject = |src: String| -> String {
+        src.replace("{ACES_A}", &format!("{ACES_A:.6}"))
+            .replace("{ACES_B}", &format!("{ACES_B:.6}"))
+            .replace("{ACES_C}", &format!("{ACES_C:.6}"))
+            .replace("{ACES_D}", &format!("{ACES_D:.6}"))
+            .replace("{ACES_E}", &format!("{ACES_E:.6}"))
+            .replace("{TONEMAP_EXPOSURE}", &format!("{TONEMAP_EXPOSURE:.6}"))
+    };
+    let fs_src = aces_inject(
+        FRAGMENT_SHADER_WGSL.replace("{FOG_TINT}", &vec3_lit(SKY_HORIZON_XYZ)),
+    );
+    assert!(fs_src.contains("aces_tonemap("), "片元着色器丢了 ACES tonemap");
     let fs_spirv = compile_wgsl(&fs_src);
     let mesh_spirv = compile_wgsl_mesh(MESH_SHADER_WGSL);
     let hud_vs_spirv = compile_wgsl(HUD_VERTEX_SHADER_WGSL);
     let hud_fs_spirv = compile_wgsl(HUD_FRAGMENT_SHADER_WGSL);
     let shadow_vs_spirv = compile_wgsl(SHADOW_VERTEX_SHADER_WGSL);
     let shadow_fs_spirv = compile_wgsl(SHADOW_FRAGMENT_SHADER_WGSL);
-    let sky_src = SKY_SHADER_WGSL
-        .replace("{SKY_ZENITH}", &vec3_lit(SKY_ZENITH_XYZ))
-        .replace("{SKY_HORIZON}", &vec3_lit(SKY_HORIZON_XYZ))
-        .replace("{SKY_BELOW}", &vec3_lit(SKY_BELOW_XYZ));
+    let sky_src = aces_inject(
+        SKY_SHADER_WGSL
+            .replace("{SKY_ZENITH}", &vec3_lit(SKY_ZENITH_XYZ))
+            .replace("{SKY_HORIZON}", &vec3_lit(SKY_HORIZON_XYZ))
+            .replace("{SKY_BELOW}", &vec3_lit(SKY_BELOW_XYZ)),
+    );
+    assert!(
+        sky_src.contains("aces_tonemap("),
+        "天空着色器丢了 ACES tonemap（会与世界雾色接缝）"
+    );
     let sky_spirv = compile_wgsl(&sky_src);
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR 环境变量未设置");
     let dest_path = Path::new(&out_dir).join("shaders.rs");
@@ -2120,6 +2175,9 @@ fn main() {
     output.push_str("/// 阴影 depth-only 顶点着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const SHADOW_VS_SPIRV: &[u32] = &{:?};\n", shadow_vs_spirv));
+    output.push_str("/// 画质 M5：ACES 系数（真源 = build.rs；片元与天空共用；判据 aces_tonemap_coefficients_are_shared）\n");
+    output.push_str(&format!("pub const ACES_COEFFS: [f32; 5] = [{ACES_A}, {ACES_B}, {ACES_C}, {ACES_D}, {ACES_E}];\n"));
+    output.push_str(&format!("pub const TONEMAP_EXPOSURE: f32 = {TONEMAP_EXPOSURE:.6};\n\n"));
     output.push_str("/// 画质 M5：雾/天空颜色真源（线性 RGB）—— 判据 sky_and_fog_colors_share_one_source\n");
     output.push_str(&format!("pub const SKY_ZENITH_RGB: [f32; 3] = {:?};\n", SKY_ZENITH_XYZ));
     output.push_str(&format!("pub const SKY_HORIZON_RGB: [f32; 3] = {:?};\n", SKY_HORIZON_XYZ));
