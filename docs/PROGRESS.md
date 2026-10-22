@@ -1215,3 +1215,24 @@ dGPU 12s 冒烟 exit=0、0 panic / 0 device lost / 0 ERROR、截图正常。
   （`terrain_render_sink`，20m 过渡带）⇒ 交界高差≈0；
 - 地面实例 **19456 → 16146（−17%）**，行条纹指标 **2.45 → 0.80（−67%）**，广场近景差异 0.03%；
 - 同步更新 tests_geom 微基准 N 与 record/frame/geometry 里的数量注释。
+
+### 2026-10-22（续2）：城市布局占位过滤 —— 190 对重叠 → 0 对真实侵入
+
+诊断（`props_do_not_intrude_into_buildings`，全 CPU、无需 GPU）把"垂直相交+水平重叠"
+按类别拆开：tree_oak↔building_tall 105、building_tall↔building_tall 48、
+tree_oak↔tree_oak 16、barrier_hesco↔building 16、container↔(building/tree) 2。
+
+修复：
+1. **生成顺序修正**：树/集装箱改为"登记规格、最后统一落位"。原来 `block_edges` 在
+   `residential_block` 之前就种树、集装箱在街区生成期间就摆，此时**邻块排楼还没进 `solid`**
+   ⇒ 占位过滤看不到它们。现在 `pending_trees` / `pending_containers` 在全城建筑就位后
+   （集装箱先、树后）flush。
+2. **占位过滤**：新增 `contract_half()`（按契约算视觉半幅）、`blocked_by_building()`、
+   `blocked_by_placed_prop()`；树冠插进楼/箱体、HESCO/沙袋/集装箱插进楼时整件跳过。
+   过滤只用**摆放规格表 `specs`**（与资产是否加载无关）——否则会破坏
+   `obstacles_are_identical_with_and_without_assets` 的两条路径一致性。
+3. 判据升级：原 `#[ignore]` 诊断转成常驻测试；四角两条排楼相交（48 对）是 L 形围合设计，
+   且两轴缩放不同（屋顶/基座高度不同）⇒ 只作信息打印；`tree_oak↔tree_oak` 树冠交叠
+   属自然现象，同样豁免。判据同时按 yaw 交换 footprint（排楼 ±90°），修掉一次误报。
+
+结果：真实侵入 **190 → 0**；828 passed。

@@ -215,6 +215,14 @@ struct City {
     contract: PropSet,
     /// 已按名解析出的网格下标缓存，避免每摆一件就重扫一遍表。
     mesh_cache: std::collections::HashMap<&'static str, usize>,
+    /// 待种树（生成顺序修正：树必须在**所有建筑**建好后再种，否则占位过滤看不到邻块楼）
+    pending_trees: Vec<(f32, f32, i32, i32)>,
+    /// 待摆集装箱（同上：邻块排楼可能在本块之后生成）
+    pending_containers: Vec<(f32, f32, [f32; 3], &'static str, Option<&'static str>)>,
+    /// 已登记的摆放规格（名字/位置/缩放）——**与资产是否加载无关**。
+    /// 占位过滤必须用它，不能用 `props`（无资产时 `props` 是空的 ⇒ 两条路径的
+    /// 障碍表会分叉，判据 `obstacles_are_identical_with_and_without_assets` 就是为这个写的）。
+    specs: Vec<(&'static str, f32, f32, f32, f32, f32)>,
 }
 
 impl City {
@@ -226,6 +234,9 @@ impl City {
             set: PropSet::default(),
             contract: PropSet::contract(),
             mesh_cache: std::collections::HashMap::new(),
+            pending_trees: Vec::new(),
+            pending_containers: Vec::new(),
+            specs: Vec::new(),
         }
     }
 
@@ -282,13 +293,60 @@ impl City {
     /// 摆一件 GLB 道具。资产没加载到就返回 false，调用方据此退回程序化盒——
     /// 缺资产的后果必须是"画面旧一点"，不能是"城里没有楼"。
     fn prop(&mut self, name: &'static str, x: f32, z: f32, yaw: f32, scale: f32) -> bool {
+        self.specs.push((name, x, 0.0, z, yaw, scale));
         let Some(mesh) = self.mesh_ix(name) else { return false };
         self.props.push(PropPlacement::new(mesh, x, z, yaw, scale, false));
         true
     }
 
     /// 同 [`Self::prop`]，但带抬升量（堆叠件用）。
+    /// 按**契约**（与资产无关）算某道具在当前缩放下的视觉半幅（米）。
+    /// 用途：摆放前的占位过滤（树冠/箱子不许插进楼里）。
+    fn contract_half(&self, name: &'static str, scale: f32) -> Option<(f32, f32)> {
+        let m = self.contract.get(self.contract.index_of(name)?)?;
+        let (hx, hz) = m.half_footprint();
+        Some((hx * scale, hz * scale))
+    }
+
+    /// 目标点是否与**已存在的实体建筑**水平重叠（`margin` 为额外余量，可为负）。
+    /// 只认 `solid` 里的 `Building` 类（高 > 1m）——那才是立起来的楼体；
+    /// 装饰檐口/窗带/车位线都在 `decor` 表里，不该拦住树。
+    fn blocked_by_building(&self, x: f32, z: f32, half_w: f32, half_d: f32, margin: f32) -> bool {
+        self.solid.iter().any(|o| {
+            o.kind == ObstacleKind::Building
+                && o.half_h * 2.0 > 1.0
+                && (o.x - x).abs() < o.half_w + half_w + margin
+                && (o.z - z).abs() < o.half_d + half_d + margin
+        })
+    }
+
+    /// 目标点是否与**已摆放的非树道具**水平重叠（树冠不许插进集装箱/箱子等）。
+    /// 树的占位过滤要用：树在最后统一落地，此时箱体/障碍都已就位。
+    fn blocked_by_placed_prop(&self, x: f32, z: f32, half_w: f32, half_d: f32, margin: f32) -> bool {
+        self.specs.iter().any(|&(name, sx, _sy, sz, yaw, scale)| {
+            if name == "tree_oak" {
+                return false; // 树冠互相交叠是自然现象
+            }
+            let Some(m) = self
+                .contract
+                .index_of(name)
+                .and_then(|ix| self.contract.get(ix))
+            else {
+                return false;
+            };
+            let (mut hw, mut hd) = m.half_footprint();
+            let quarter = (yaw.abs() - std::f32::consts::FRAC_PI_2).abs() < 0.01;
+            if quarter {
+                std::mem::swap(&mut hw, &mut hd);
+            }
+            (sx - x).abs() < hw * scale + half_w + margin
+                && (sz - z).abs() < hd * scale + half_d + margin
+        })
+    }
+
+
     fn prop_y(&mut self, name: &'static str, x: f32, y: f32, z: f32, yaw: f32, scale: f32) -> bool {
+        self.specs.push((name, x, y, z, yaw, scale));
         let Some(mesh) = self.mesh_ix(name) else { return false };
         self.props.push(PropPlacement::at(mesh, x, y, z, yaw, scale, false));
         true
@@ -813,6 +871,9 @@ fn warehouse(c: &mut City, cx: f32, cz: f32, seed_i: i32, seed_j: i32) {
 
     // 集装箱堆场：GLB 的 ISO 箱体（6.058 × 2.438 × 2.591）自带波纹、门端锁杆、
     // 八角角件与顶部加强筋，正好替掉原来"箱体 + 门端面 + 顶筋"三件套。
+    // 集装箱堆场：**推迟到全城建筑就位后再摆**（2026-10-22 顺序修正）。
+    // 原来在街区生成期间直接摆，邻块（被后处理）的排楼还没进 `solid`，占位过滤看不到，
+    // 结果箱体咬进邻楼（诊断 2 对）。这里只登记规格，`flush_pending_containers` 统一落位。
     let colors = [CONTAINER_RUST, CONTAINER_BLUE, CONTAINER_GREEN];
     const CONTAINER_PROPS: [&'static str; 3] =
         ["container_20ft", "container_navy", "container_green"];
@@ -820,42 +881,60 @@ fn warehouse(c: &mut City, cx: f32, cz: f32, seed_i: i32, seed_j: i32) {
         for j in 0..2i32 {
             let bx = cx + w * 0.5 + 6.5 + i as f32 * 6.6;
             let bz = cz - d * 0.4 + j as f32 * 6.6;
-            let col = colors[(i + j) as usize % 3];
-            // 🔴 碰撞尺寸走**契约**（与资产无关）：首层 6.1×2.5、顶 2.6；
-            // 资产只决定画 GLB 还是画箱子装饰（2026-10-20 第 13 批复核第 7 条）。
-            let placed = c.prop(CONTAINER_PROPS[(i + j) as usize % 3], bx, bz, 0.0, 1.0);
-            let mut core = Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, UNDER_GROUND, 2.6, col);
-            if placed {
-                core = core.invisible();
+            let idx = (i + j) as usize % 3;
+            c.pending_containers.push((
+                bx,
+                bz,
+                colors[idx],
+                CONTAINER_PROPS[idx],
+                if i == 1 && j == 0 {
+                    Some(CONTAINER_PROPS[(i + j + 1) as usize % 3])
+                } else {
+                    None
+                },
+            ));
+        }
+    }
+}
+
+/// 把排队的集装箱真正摆下去（见 `pending_containers` 注释）。
+fn flush_pending_containers(c: &mut City) {
+    let pending = std::mem::take(&mut c.pending_containers);
+    for (bx, bz, col, name, name2) in pending {
+        // 占位过滤：插进楼体/其它道具的整列跳过（含第二层）
+        if c.contract_half(name, 1.0)
+            .map(|(hw, hd)| c.blocked_by_building(bx, bz, hw, hd, 0.05))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        // 🔴 碰撞尺寸走**契约**（与资产无关）：首层 6.1×2.5、顶 2.6；
+        // 资产只决定画 GLB 还是画箱子装饰（2026-10-20 第 13 批复核第 7 条）。
+        let placed = c.prop(name, bx, bz, 0.0, 1.0);
+        let mut core = Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, UNDER_GROUND, 2.6, col);
+        if placed {
+            core = core.invisible();
+        }
+        c.push(core);
+        if let Some(name2) = name2 {
+            // 第二层：碰撞核与资产路径同尺寸（2.6..5.25）。资产路径抬 2.64 摆箱
+            // （GLB 箱体 2.591 + 顶筋 0.045），回退路径用装饰层面板补 2.6..2.85。
+            let placed2 = c.prop_y(name2, bx, 2.64, bz, 0.0, 1.0);
+            let mut core2 = Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.6, 5.25, col);
+            if placed2 {
+                core2 = core2.invisible();
             }
-            c.push(core);
-            if i == 1 && j == 0 {
-                // 第二层：碰撞核与资产路径同尺寸（2.6..5.25）。资产路径抬 2.64 摆箱
-                // （GLB 箱体 2.591 + 顶筋 0.045），回退路径用装饰层面板补 2.6..2.85。
-                let placed2 = c.prop_y(
-                    CONTAINER_PROPS[(i + j + 1) as usize % 3],
-                    bx,
-                    2.64,
-                    bz,
-                    0.0,
-                    1.0,
-                );
-                let mut core2 = Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.6, 5.25, col);
-                if placed2 {
-                    core2 = core2.invisible();
-                }
-                c.push(core2);
-            }
-            if placed {
-                continue;
-            }
-            // 回退视觉（只画不挡）：门端面 + 顶盖；第二层再补一层装饰箱
-            c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 0.15, 2.45, DARK));
-            c.deco(Part::new(ObstacleKind::Block, bx, bz, 6.2, 2.6, 2.6, 2.85, CONCRETE_DARK));
-            if i == 1 && j == 0 {
-                c.deco(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.85, 5.25, CONTAINER_GREEN));
-                c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 3.0, 5.25, DARK));
-            }
+            c.push(core2);
+        }
+        if placed {
+            continue;
+        }
+        // 回退视觉（只画不挡）：门端面 + 顶盖；第二层再补一层装饰箱
+        c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 0.15, 2.45, DARK));
+        c.deco(Part::new(ObstacleKind::Block, bx, bz, 6.2, 2.6, 2.6, 2.85, CONCRETE_DARK));
+        if name2.is_some() {
+            c.deco(Part::new(ObstacleKind::Block, bx, bz, 6.1, 2.5, 2.85, 5.25, CONTAINER_GREEN));
+            c.deco(Part::new(ObstacleKind::Block, bx + 3.2, bz, 0.30, 2.2, 3.0, 5.25, DARK));
         }
     }
 }
@@ -1076,9 +1155,18 @@ fn park(c: &mut City, cx: f32, cz: f32) {
 /// 1. **两个冠而不是三个**，且**同心**（只允许很小的偏心），避免穿插产生的碎片轮廓；
 /// 2. 一律 [`Shape::Sphere`]（42 顶点 / 80 三角），面数够多，平着色下也接近圆润；
 /// 3. 冠高与冠宽接近等轴（不再压成饼），下缘落在树干顶附近，遮住"冠与干的接缝"。
-fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
+fn tree_now(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
     let k = mixf(i, j, 0.85, 1.25);
     let trunk_h = mixf(i + 5, j, 3.0, 4.4);
+    // 树冠插进楼里属于"画出来也不对"（2026-10-22 诊断：105 对 tree_oak↔building_tall）。
+    // 这里直接不种这棵：没有碰撞核、没有回退视觉，等于该点位空着。
+    if let Some((hw, hd)) = c.contract_half("tree_oak", k) {
+        if c.blocked_by_building(x, z, hw, hd, 0.10)
+            || c.blocked_by_placed_prop(x, z, hw, hd, 0.05)
+        {
+            return;
+        }
+    }
     let placed = c.prop("tree_oak", x, z, mixf(i, j + 3, 0.0, std::f32::consts::TAU), k);
     // 🔴 **碰撞柱两条路径一致**（2026-10-20 第 13 批复核第 7 条）：只留一根细柱，
     // 必须**严格细于网格树干**（tree_oak 底部半径 0.34m），半宽 0.15 < 0.34·k（k≥0.85→0.29）。
@@ -1120,6 +1208,20 @@ fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
         )
         .sph(),
     );
+}
+
+/// 排队种树（真正落地见 [`flush_pending_trees`]）：树必须在**所有建筑**建好后再种，
+/// 否则占位过滤看不到邻块楼、树冠就插进楼里（2026-10-22 诊断的 105 对）。
+fn tree(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
+    c.pending_trees.push((x, z, i, j));
+}
+
+/// 把排队的树真正种下去（顺序修正见 [`tree`]）。
+fn flush_pending_trees(c: &mut City) {
+    let pending = std::mem::take(&mut c.pending_trees);
+    for (x, z, i, j) in pending {
+        tree_now(c, x, z, i, j);
+    }
 }
 
 /// 灌木：**四团明显分离的 lobes**，不是一堆互相穿插的球。
@@ -1177,7 +1279,12 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     // 15 件里每件的碰撞/弹道/渲染成本都要付一遍，而街面上它们本来就糊成一堵墙。
     // 🔴 碰撞尺寸走契约（两条路径一致）：一整条 3.3×0.75 的沙袋墙盒。
     // 旧回退是 15 个球体障碍 —— 与桌面端**不是同一个物理世界**（2026-10-20 复核第 7 条）。
-    let placed = c.prop("sandbag_wall", cx, cz - 7.0, 0.0, 1.0);
+    // 占位过滤（2026-10-22）：沙袋墙插进楼里就跳过（含碰撞核/回退视觉）
+    let sandbag_ok = c
+        .contract_half("sandbag_wall", 1.0)
+        .map(|(hw, hd)| !c.blocked_by_building(cx, cz - 7.0, hw, hd, 0.05))
+        .unwrap_or(true);
+    let placed = sandbag_ok && c.prop("sandbag_wall", cx, cz - 7.0, 0.0, 1.0);
     let mut wall = Part::new(ObstacleKind::Barrier, cx, cz - 7.0, 3.3, 0.75, UNDER_GROUND, 0.72, SANDBAG);
     if placed {
         wall = wall.invisible();
@@ -1198,6 +1305,14 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     // HESCO 防爆桶：一件 GLB = 网箱 +  liner + 顶部土脊，替掉原来的柱+盖两件套
     for k in 0..4i32 {
         let bx = cx + (k as f32 - 1.5) * 4.2;
+        // 占位过滤（2026-10-22）：HESCO 咬进楼体时整件跳过（含碰撞核/回退视觉）
+        if c
+            .contract_half("barrier_hesco", 1.0)
+            .map(|(hw, hd)| c.blocked_by_building(bx, cz + 7.0, hw, hd, 0.05))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let placed = c.prop("barrier_hesco", bx, cz + 7.0, 0.0, 1.0);
         let mut core = Part::new(ObstacleKind::Barrier, bx, cz + 7.0, 2.0, 1.1, UNDER_GROUND, 1.05, SANDBAG);
         if placed {
@@ -1776,6 +1891,10 @@ pub fn generate_city_with_set(set: PropSet) -> LevelMap {
         }
     }
     street_furniture(&mut c);
+    // 顺序修正（2026-10-22）：先把推迟的集装箱摆下去（此时全城建筑已就位），再种树
+    // （树的占位过滤也要看得见箱体）。
+    flush_pending_containers(&mut c);
+    flush_pending_trees(&mut c);
     // 画质 M6：街面杂物（纯装饰，不挡路/不挡子弹）
     street_clutter(&mut c);
     // 摆放分类统计（长期保留）：哪类资产命中了、哪类其实一个都没摆上，直接看这行就知道。
@@ -3073,15 +3192,17 @@ mod city_layout_tests {
         }
     }
 
-    /// 诊断（2026-10-21，**已知问题，暂不修**）：城市布局存在约 190 对"垂直相交且水平重叠"
-    /// 的道具（主要是联排/街区互相压住）。当前不影响玩家（不可见的内部面重叠），
-    /// 但会在**相机进入楼体内部**时看到楼基板共面条纹（2026-10-21 画质排查实录：
-    /// 正常玩家位置无条纹；条纹来自把调试机位放进楼里）。
-    /// 修法方向：生成器做占位去重/收缩，而不是渲染侧抖 y。
-    /// 用 `cargo test --release -- --ignored no_severe_prop_overlaps --nocapture` 查看。
+    /// 布局判据（2026-10-22 定案）：**树木/障碍物/集装箱不许插进实体建筑**。
+    ///
+    /// 背景：诊断曾发现 190 对"垂直相交 + 水平重叠"：其中 **105 对 tree_oak 长在楼里、
+    /// 16 对 HESCO 咬进墙身、1 对集装箱插进楼**（这类是"画出来也不对"），
+    /// 其余 48 对是**围合街区四角两条排楼相交**。四角相交是布局设计（L 形围合、无转角楼），
+    /// 且两轴排楼缩放不同 ⇒ 屋顶/基座高度不同、不产生共面 z-fight，因此只作**信息**打印。
+    ///
+    /// 真正的缺陷已由生成侧占位过滤修掉（`blocked_by_building` + `contract_half`）；
+    /// 本判据守回归：以后再往楼体里塞道具会当场变红。
     #[test]
-    #[ignore = "已知：城市布局有约190对道具重叠，待生成器修复；当前仅作诊断"]
-    fn no_severe_prop_overlaps() {
+    fn props_do_not_intrude_into_buildings() {
         let Ok(set) = crate::engine::props::PropSet::load_dir("assets/props") else {
             eprintln!("跳过：本机没有 assets/props");
             return;
@@ -3093,61 +3214,61 @@ mod city_layout_tests {
         // (half_w, half_d, height, name)
         let dims = |pl: &crate::engine::props::PropPlacement| -> Option<(f32, f32, f32, String)> {
             let m = lookup.get(pl.mesh)?;
-            let (hw, hd) = m.half_footprint();
+            let (mut hw, mut hd) = m.half_footprint();
+            // 🔴 判据必须按 **yaw 交换 footprint**：排楼是 ±90° 旋转摆放的，
+            // 用未旋转的 half 会把"实际贴合"误报成重叠（2026-10-22 一次误报 2 对）。
+            let quarter = (pl.yaw.abs() - std::f32::consts::FRAC_PI_2).abs() < 0.01;
+            if quarter {
+                std::mem::swap(&mut hw, &mut hd);
+            }
             let h = (m.max[1] - m.min[1]) * pl.scale;
             Some((hw * pl.scale, hd * pl.scale, h, m.name.clone()))
         };
+        let is_building = |name: &str| name.starts_with("building") || name.starts_with("panel");
         let mut bad: Vec<String> = Vec::new();
+        let mut wings = 0usize;
         for (i, a) in map.props.iter().enumerate() {
             let Some((aw, ad, ah, an)) = dims(a) else { continue };
             for b in map.props.iter().skip(i + 1) {
                 let Some((bw, bd, bh, bn)) = dims(b) else { continue };
-                // 垂直区间不相交 ⇒ 合法（堆叠两层集装箱）
-                let ay0 = a.y;
-                let ay1 = a.y + ah;
-                let by0 = b.y;
-                let by1 = b.y + bh;
+                // 垂直区间不相交 ⇒ 合法（堆叠集装箱）
+                let (ay0, ay1) = (a.y, a.y + ah);
+                let (by0, by1) = (b.y, b.y + bh);
                 if ay1 <= by0 + 0.05 || by1 <= ay0 + 0.05 {
                     continue;
                 }
                 let ox = (aw + bw) - (a.x - b.x).abs();
                 let oz = (ad + bd) - (a.z - b.z).abs();
-                if ox > 0.6 && oz > 0.6 {
-                    let area_min = (4.0 * aw * ad).min(4.0 * bw * bd);
-                    if ox * oz > area_min * 0.15 {
-                        bad.push(format!(
-                            "{an} @({:.0},{:.0}) vs {bn} @({:.0},{:.0}) 重叠 {ox:.2}x{oz:.2}m",
-                            a.x, a.z, b.x, b.z
-                        ));
-                    }
+                if ox <= 0.6 || oz <= 0.6 {
+                    continue;
                 }
+                let area_min = (4.0 * aw * ad).min(4.0 * bw * bd);
+                if ox * oz <= area_min * 0.15 {
+                    continue;
+                }
+                if is_building(&an) && is_building(&bn) {
+                    wings += 1; // 围合街区四角排楼相交：设计如此，仅统计
+                    continue;
+                }
+                if an == bn && an.starts_with("tree") {
+                    // 树冠互相交叠是自然现象（同一片树木里），不作为缺陷
+                    continue;
+                }
+                bad.push(format!(
+                    "{an} @({:.0},{:.0}) vs {bn} @({:.0},{:.0}) 重叠 {ox:.2}x{oz:.2}m",
+                    a.x, a.z, b.x, b.z
+                ));
             }
         }
-        eprintln!("  props 总数 {}，垂直相交的严重重叠对 {}", map.props.len(), bad.len());
-        // 临时诊断：相机 (85,3,85) 朝 +x+z 方向 40m 内的道具
-        let mut near: Vec<(f32, String, f32, f32, f32)> = map
-            .props
-            .iter()
-            .filter_map(|pl| {
-                let m = lookup.get(pl.mesh)?;
-                let d = ((pl.x - 85.0).powi(2) + (pl.z - 85.0).powi(2)).sqrt();
-                if d <= 40.0 {
-                    Some((d, m.name.clone(), pl.x, pl.z, m.max[1] - m.min[1]))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        near.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for n in near.iter().take(12) {
-            eprintln!("    near {} {:.0}m at ({:.0},{:.0}) h={:.1}", n.1, n.0, n.2, n.3, n.4);
+        if wings > 0 {
+            eprintln!("信息：围合街区四角排楼相交 {wings} 对（L 形围合设计，非缺陷）");
         }
         for d in bad.iter().take(10) {
-            eprintln!("    {d}");
+            eprintln!("    侵入：{d}");
         }
         assert!(
             bad.is_empty(),
-            "存在 {} 对严重重叠道具（共面处会产生 z-fighting 条纹）",
+            "有 {} 对树木/障碍物/集装箱插进实体建筑（生成侧占位过滤失效）",
             bad.len()
         );
     }
