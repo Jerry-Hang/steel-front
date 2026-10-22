@@ -2063,6 +2063,35 @@ fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     return clamp(y, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// ---- 程序化云层用的值噪声（2026-10-22）----
+// 只用哈希 + 双线性插值的值噪声，5 个八度；不依赖任何纹理资源或额外 pass。
+fn cloud_hash(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + vec3<f32>(dot(p3, p3.yzx + vec3<f32>(33.33)));
+    return fract((p3.x + p3.y) * p3.z);
+}
+fn cloud_vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = cloud_hash(i);
+    let b = cloud_hash(i + vec2<f32>(1.0, 0.0));
+    let c = cloud_hash(i + vec2<f32>(0.0, 1.0));
+    let d = cloud_hash(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+fn cloud_fbm(p: vec2<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var i = 0; i < 5; i = i + 1) {
+        v = v + amp * cloud_vnoise(q);
+        q = q * 2.03 + vec2<f32>(17.0, 31.0);
+        amp = amp * 0.5;
+    }
+    return v;
+}
+
 struct SkyPush {
     // xyz = 相机前向（世界空间，单位长），w = tan(竖直半 FOV)
     fwd: vec4<f32>,
@@ -2117,6 +2146,23 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let disk = pow(s, 1200.0) * 1.6;
     let halo = pow(s, 18.0) * 0.14 + pow(s, 4.0) * 0.03;
     col = col + vec3<f32>(1.0, 0.93, 0.80) * ((disk + halo) * sky_push.up.w);
+    // ---- 程序化云层（2026-10-22）----
+    // 把视线投影到一块虚拟"云板"（y=1）上：`ray.xz / ray.y` ⇒ 近地平线自然压缩拉长，
+    // 这正是层积云在真实天空里的透视形态；不需要任何纹理资源或额外 pass。
+    // 云量用平滑阈值控制，地平线附近淡出，太阳侧亮、背光侧灰蓝。
+    if (ray.y > 0.012) {
+        let deck = ray.xz / max(ray.y, 0.012);
+        let p = deck * vec2<f32>(1.10, 2.20);
+        let base = cloud_fbm(p);
+        let det = cloud_fbm(p * 3.7 + vec2<f32>(13.0, 7.0));
+        var cov = smoothstep(0.57, 0.66, base + 0.18 * det);
+        cov = cov * smoothstep(0.012, 0.11, ray.y) * (1.0 - 0.30 * smoothstep(0.55, 1.0, ray.y));
+        let lit = 0.52 + 0.48 * max(dot(ray, sun_dir), 0.0);
+        // 云内明暗：用高频层的密度做体积感（密处亮、稀处发蓝灰），避免整片死白
+        let shade = mix(0.72, 1.12, smoothstep(0.30, 0.72, det));
+        let cloud_col = mix(vec3<f32>(0.70, 0.74, 0.82), vec3<f32>(1.12, 1.09, 1.02), lit) * shade;
+        col = mix(col, cloud_col, cov * 1.0);
+    }
     // 抖动：8bit 输出 + 平滑渐变最容易出色带（本仓历史上被当成"条纹缺陷"排查过）
     let n = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
     col = max(col, vec3<f32>(0.0)) + vec3<f32>(n / 255.0);
@@ -2160,6 +2206,10 @@ fn main() {
     assert!(
         sky_src.contains("aces_tonemap("),
         "天空着色器丢了 ACES tonemap（会与世界雾色接缝）"
+    );
+    assert!(
+        sky_src.contains("cloud_fbm("),
+        "天空着色器丢了程序化云层（cloud_fbm）"
     );
     let sky_spirv = compile_wgsl(&sky_src);
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR 环境变量未设置");
