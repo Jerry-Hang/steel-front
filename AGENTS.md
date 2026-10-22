@@ -86,9 +86,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 > WSL2 材料**全部作废**。Linux 侧见 **`docs/linux-native.md`**（**命令在 §10–§15**，入口 `SteelFront.sh`）。
 
 - **机器**：**ASUS TUF FA608PM** + RTX 5060 Laptop + AMD 8940HX，内存 12GB。分辨率 2560x1600。
-  🔴 **混合输出**：面板挂 **AMD 610M**、独显 `display_attached=No` ⇒ 每帧跨卡拷贝 + 核显合成；
-  MUX 开关（`asusctl armoury set gpu_mux_mode 0`，需重启）可消掉。Linux 侧同构。细节见
-  `docs/linux-native.md` §21.81(a)。
+  🔴 **混合输出**：面板挂 **AMD 610M**、独显不直连 ⇒ 每帧跨卡拷贝 + 核显合成；MUX 开关
+  （`asusctl armoury set gpu_mux_mode 0`，需重启）可消掉；细节见 `docs/linux-native.md` §21.81(a)。
 - **编译**：`cargo build --release`。**测试**：`cargo test --release`（**0 警告**是硬红线；passed 数见 `docs/PROGRESS.md`）。
   UDP 回环测试在沙箱内 bind 会 PermissionDenied → 需提权跑。
 - **GPU 能力（Windows 实测，勿回退）**：`VK_EXT_mesh_shader=true`、光追 RT pipeline/AS/ray_query=true、
@@ -231,8 +230,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   会被静默变成 20 fps；`SteelFront.bat` 设 20：fps 165→19.9）。
   🔴 **GPU Engine 计数器必须按 `luid` 分组**：按进程名聚合会把两块卡相加 ⇒ 得出"dwm 只占 0–1%"
   的错结论（真值 22–44%）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
-- ⚠️ **IMMEDIATE 在真实显示器上是持续撕裂**（转视角读成"残影"），而 **`PrintWindow` 抓不到它**
-  （抓的是已合成帧）⇒ **别用静态截图去证伪"残影"。**
+- ⚠️ **IMMEDIATE 在真实显示器上持续撕裂**，而 `PrintWindow` 抓到的是已合成帧 ⇒ 别用静态截图证伪。
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
   `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（`LiveKernelEvent` **P1=141** = TDR；
   换 mailbox 后正常）。"静默"本身也是缺陷：acquire 现在 1s（连 3 次 ⇒ 降级 mailbox 重建）、
@@ -260,10 +258,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   结构体报 `02275`/`01778`。**引擎用法合法**；对策：**传副本给驱动**、日志只打印我们申请的那份。
 
 **天空 / 雾（2026-10-22）**
-- 主 pass 最先画天空全屏三角形（`init_sky_pipeline`：80B push = 相机基向量 + 半 FOV + 太阳方向，
-  无描述符集、不写深度）；`void_mode` 跳过。
-- 雾色与地平线色单一真源 = `build.rs::SKY_*_XYZ`（构建期注入两份 WGSL）；判据
-  `sky_and_fog_colors_share_one_source`。
+- 主 pass 最先画天空全屏三角形（`init_sky_pipeline`：80B push = 相机基向量 + 半 FOV + 太阳方向，无描述符集、不写深度；`void_mode` 跳过）。雾色与地平线色单一真源 = `build.rs::SKY_*_XYZ`（注入两份 WGSL，判据 `sky_and_fog_colors_share_one_source`）。
 
 **建筑摆放（2026-09-13）**
 - `city.rs::pick_building` 缩放是 **`min(w/gw, d/gd)`**（**不是 `max`**）。`max` 会按较大方向贴合、
@@ -435,8 +430,7 @@ blender.exe --background --python tools/blender/build_city_kit.py -- <out_dir> [
 blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_prefix> [n]
 ```
 
-- **视觉杠杆（2026-10-22 更新）**：法线槽位已有，但 GLB 不导出法线（引擎按位置平均生成），
-  所以**曲面能平滑、硬边靠真几何**；AO/明暗**必须烘进顶点色**；道具外观**全部**来自顶点色。
+- **视觉杠杆（2026-10-22）**：GLB 不导出法线（引擎按位置平均）⇒ 曲面可平滑、硬边靠真几何；AO/明暗必须烘进顶点色；道具外观全来自顶点色。
 - **尺寸契约是硬的**：`city.rs` 按**占地**摆放（`building_tall` 最多，实测 **132 处**）。资产越出轮廓就会插进邻居 ⇒ **外挑一律改内凹**（凹阳台 loggia 既是东欧板楼真做法，又不占轮廓）；
   允许的小外挑上限 = **0.06m/侧**（勒脚/窗台）。
 - **层高反解**：总高固定，`上层 = 3.15`（**等于引擎 `FLOOR_H`**），**底层吸收余量**（现值 3.56），
@@ -477,6 +471,9 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
 
 - **并行分身**：文件集两两不相交；**分身禁止 cargo**（12GB 只允许一个）**与 git**；
   上万行的模块树**禁止整文件重写**，只许精确 edit；开工前先把在飞改动 commit 成干净基线。
+- 🔴 **双轨同步（每个项目必做）**：代码进 GitHub 的同时，把改动写进 ACDM 记忆库
+  （`acdm-record <项目> "<摘要>" <仓库内相对文件...>` + `acdm-sync`，store=`~/acdm-store`，
+  规范见 `Jerry-Hang/acdm`）。
 - **上下文节约**：不读编译产物（`target/`、`Cargo.lock`、`*.spv`、`*.rlib`）、不反汇编（看 .spv 先 `spirv-dis` 到临时文件）；**大文件先 rg 定位再限定行号读**；`git diff` 一律 `--stat`（教训 8）。
 - 🔴 **`cargo check` 不能替代 0 警告闸门**：它**会重放缓存下来的旧诊断**（实测报 28 条
   `never used`，同代码 `build --release` 是 0 警告）。**⇒ 0 警告只能用 `cargo build --release` 验**；
@@ -679,9 +676,8 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 43. **🔴 帧率口径：`fps` 必须是「窗口内帧数 / 窗口时长」**，不能是"某一帧的 `1/dt`"（同行
   `frame_us` 是**另一帧** ⇒ 自相矛盾；同一二进制两次能差 48%，据此写过**错误的 +58%**，§21.36/§21.37）。
   **⇒ 先用 `aa_probe.ps1 -Runs 3` / `ab_pair.ps1` 量噪声底，小于它不算数。⚠️ 噪声底非常数（0.2~5.5%）⇒ 每轮现场量。**
-44. **🔴 「跳过某个对象的处理」的分支必须回答：它还会不会自己结束/推进？** `Mixer::mix` 对
-  `gain <= 0.0`（静音）的声部 `continue` ⇒ 游标不前进、声部不退队 ⇒ 每发枪堆一个（`voices`
-  无界增长）、解除静音后旧枪声齐鸣。判据 = `mixer_retires_voices_even_when_muted`。
+44. **🔴 「跳过某个对象的处理」的分支必须回答：它还会不会自己结束/推进？** 静音声部被
+  `continue` 跳过 ⇒ 游标不前进、声部不退队 ⇒ 每发枪堆一个。判据 = `mixer_retires_voices_even_when_muted`。
   **你省掉的那一步，往往正是它退场的唯一机会**（环形缓冲与寿命表同形）。
 45. **🔴 成本地图三件套：正对照臂 + 同轮轮转 + 每臂 ≥5 对。**
   ① **正对照臂不快 ⇒ 整批作废**；② 不许一个臂连跑几对（干扰周期是分钟级）；

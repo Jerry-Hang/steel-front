@@ -1236,3 +1236,11 @@ tree_oak↔tree_oak 16、barrier_hesco↔building 16、container↔(building/tre
    属自然现象，同样豁免。判据同时按 yaw 交换 footprint（排楼 ±90°），修掉一次误报。
 
 结果：真实侵入 **190 → 0**；828 passed。
+
+### 2026-10-22：接入 ACDM 跨设备记忆（双轨）
+
+- 本机既有基础设施：`~/acdm-store`（GitHub `Jerry-Hang/acdm-memory`，`main` 分支）+
+  `~/.local/bin/{acdm-record,acdm-sync,acdm-bootstrap}` + `mem 0.1.0`。
+- steel-front 已确立**双轨**：每次提交后 `acdm-record steel-front "<摘要>" <仓库内相对文件...>`
+  再 `acdm-sync`；换设备 `git pull` 记忆库即可接上上下文。
+- 约定写进 `README.md`（顶部指引）与 `AGENTS.md` 铁律 F；首次事件已记录并推送。

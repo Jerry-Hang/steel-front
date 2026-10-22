@@ -4,6 +4,10 @@
 
 > **🌐 语言 / Language** ：**📖 中文（当前）** ｜ [English ↓](#english)
 
+> 📡 **跨设备记忆（ACDM）**：本项目实行**双轨** —— 代码提交 GitHub，同时把进展/决策写进
+> [acdm-memory](https://github.com/Jerry-Hang/acdm-memory) 记忆库（`acdm-record steel-front "<摘要>" <仓库内相对路径...>` + `acdm-sync`）；
+> 规范见 [Jerry-Hang/acdm](https://github.com/Jerry-Hang/acdm)。换设备后 `git pull` 记忆库即可接上上下文。
+
 ---
 
 ## 重大功能上线时间
