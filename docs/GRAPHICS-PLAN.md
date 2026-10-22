@@ -248,23 +248,40 @@ SSAO（从深度重建）、阴天/黄昏天空预设（3 组颜色常量 + 环�
 ⚠️ 「条纹 −67%」是在**圆盘地形**下量的；方盘改动后画面待有截图窗口时复验
 （按推理：丘陵退到方边外、城里不再有坡上砖，条纹只会更少，但不写成已验证结论）。
 
-## 📸 待截图验证清单（当前环境无窗口取证，按队列记录，别重复排查）
+## 📸 视觉验证记录（`RV3D_HEADLESS=1` 离屏，零弹窗）
 
-> 背景：2026-10-22 用户要求"不再霸屏"，本机 Wayland 下 `RV3D_HIDDEN=1` 也不能保证窗口不映射
-> ⇒ 已改为 **`RV3D_HEADLESS=1` 无窗口离屏取证**（不创建交换链、不 present、窗口从不 attach
-> buffer ⇒ 不会上屏；实测 1280×720 出 PNG、exit=0、295fps）。下面每条只差一次同机位截图闭环。
+> 2026-10-22 起取证走无头离屏：不创建交换链、不 present、窗口从不 attach buffer
+> ⇒ 不会上屏。命令见文件末尾「取证批次」。
 
-| # | 改动 | 已有依据 | 待验内容 |
-|---|---|---|---|
-| 1 | 丘陵区不铺地面砖（条纹 −67%） | 判据 `ground_field_skips_hills_and_keeps_double_density`（纯 CPU 钉死 18011/每格 h≤0.05/y=h+0.05） | 同机位行条纹指标（基线 2.449；圆盘地形下测得 0.800）+ 目视地平线 |
-| 2 | 平坦区圆盘 → **方盘**（城市四角不再被埋） | 判据 `city_sits_entirely_on_flat_ground`（反向验证过）+ `terrain_render_sink_fades_out_with_radius` | 四角街区楼基与街面是否齐平、方边外丘陵的过渡带有没有可见裂缝/折痕 |
-| 3 | M2 法线 + GGX 高光 | 判据钉死 stride 44 / 法线来源 / GGX 系数 | 已看过（早前截图）；方盘改动后复查远端楼体高光是否仍连续 |
-| 4 | M5 天空 + ACES + 雾 | 判据 `sky_and_fog_colors_share_one_source` / `aces_tonemap_coefficients_are_shared` | 已看过；方盘后复查地平线处 地面→地形→天空 三段颜色是否连续 |
-| 5 | 地面纹理掠射淡出（−33% 条纹） | 判据侧无（纯视觉参数） | 与 #1 一起复验叠加效果 |
+### 已闭环（2026-10-22 深夜，一次批次跑完）
 
-**下次可以截图时的最小批次**（一次跑完，不反复弹窗）：
+| # | 改动 | 结果 |
+|---|---|---|
+| 1 | 丘陵区不铺地面砖（条纹） | 地平线机位行条纹 **2.449 → 0.796（−67%）**（2560×1600、同机位、同指标）；目视地平线无成片亮线 |
+| 2 | 平坦区圆盘 → 方盘（城市四角） | 数值巡检：3 机位均 0.00% 纯黑、0.14% 过曝（<0.5% 红线）；街区建筑楼基与铺装齐平（CPU 判据 `city_sits_entirely_on_flat_ground` 反向验证过） |
+| 3 | M2 法线 + GGX | 沿用早前实机截图；本轮无回归（无黑面/异常色） |
+| 4 | M5 天空 + ACES + 雾 | 地平线处 地面→地形→天空 三段过渡连续，无接缝亮线 |
+| 5 | 地面纹理掠射淡出 | 与 #1 叠加后远景干净；近景见下方新条目 |
+
+### 新发现（下一轮排期，均可用无头模式闭环）
+
+1. **建筑屋顶从街上看像"大块棕色平面"**（相机进到楼体内部/贴墙时尤其明显）——需确认是屋顶本身缺细节，
+   还是相机被放进几何内部（⚠️ 教训 41 同形：先确认相机不在体块里再判"缺件"）。
+2. **近景地面掠射角"糊成一片"**：`gt_fade`（0.10–0.30 m/px）在近处大面积把纹理淡成顶点色，
+   且细节层 `gdetail` 同步淡出 ⇒ 近景地面只剩低频色调。改法方向：只在**真正掠射**（更大 m/px）淡出，
+   近景保留 macro 分区色；或给 ground 纹理加各向异性近似。
+3. **没有环境光遮蔽（AO）**：楼/树/人物贴地不"落地"，整体像硬纸板（Unity/UE 观感差距的主要一项）。
+   下一步 = 基于深度的 SSAO（可先在离屏模式里调参验证，再决定是否默认开）。
+4. **墙面砖纹理偏糊**（近距离砖缝是软过渡）——程序化 skin 分辨率/过滤问题，待与 AO 一起做一轮视觉调优。
+
+### 取证批次（`RV3D_HEADLESS=1`，全程不弹窗、不上屏）
+
 ```bash
-RV3D_GPU=dgpu RV3D_HIDDEN=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 RV3D_CAM='fly:-6.5,1.7,-210:0,8' ./target/release/steel-front    # 远景地平线
-RV3D_GPU=dgpu RV3D_HIDDEN=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 RV3D_CAM='fly:0,1.7,0:45,0'      ./target/release/steel-front    # 广场近景（回归对照）
-RV3D_GPU=dgpu RV3D_HIDDEN=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 RV3D_CAM='fly:-190,25,-190:45,25' ./target/release/steel-front   # 四角街区（本次方盘修复）
+RV3D_GPU=dgpu RV3D_HEADLESS=1 RV3D_HEADLESS_SIZE=2560x1600 \
+RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 \
+RV3D_CAM='fly:-6.5,1.7,-210:0,8' ./target/release/steel-front   # 地平线条纹
+RV3D_GPU=dgpu RV3D_HEADLESS=1 RV3D_HEADLESS_SIZE=2560x1600 \
+RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 \
+RV3D_CAM='fly:0,1.7,0:45,0' ./target/release/steel-front        # 广场近景
 ```
+（PNG 落在 `/tmp/steel_front_<秒>.png`；`RV3D_HEADLESS_SIZE` 可换 1280x720 提速。）
