@@ -1126,7 +1126,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 乘法调制保留地形 LOD 的顶点色约定（mesh 路径 terrain_tint 的草地/沙粒分域仍
     // 参与明暗，只是不再染色、不再抬底），同时把原始对比完整送进光照。
     let gtone = dot(input.color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    var mixed = texel.rgb * mix(0.85, 1.15, clamp(gtone, 0.0, 1.0));
+    // 掠射角纹理淡出（2026-10-22）：贴图锚在 512²/512m（1 纹素 = 1m），地面掠射角时
+    // 一个像素覆盖几十个纹素；mip 链只能给"糊"、还带横向摩尔纹带（实测旁路纹理后
+    // 地平线条纹强度 3.66→1.90）。做法 = 按**米/像素足迹**把贴图淡出到顶点色调
+    // （顶点色调是纯色，不含纹素混叠）。0.10–0.30 m/px：更近保持纹理，更远用平色。
+    let gderiv_f = world_derivatives(input.world_pos);
+    let gt_fade = 1.0 - smoothstep(0.10, 0.30, max(gderiv_f.x, gderiv_f.z));
+    var mixed = mix(
+        vec3<f32>(gtone),
+        texel.rgb * mix(0.85, 1.15, clamp(gtone, 0.0, 1.0)),
+        gt_fade,
+    );
     // ---- 地面微细节层（procedural.rs::generate_default_ground_detail_texture）----
     // 烘焙地面纹理锚定在"512² 覆盖 512m"上 → 一个纹素 = 1 米，街面上任何厘米级质感
     // 都不存在，近看就是一张平涂灰纸（"二维化的一个面"在地面上的那半条表现）。
