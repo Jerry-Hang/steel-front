@@ -1452,6 +1452,150 @@ fn block_edges(c: &mut City, cx: f32, cz: f32, i: usize, j: usize) {
 // ============================================================
 
 /// 街道设施：路灯、消防栓、中央隔离带、路口护柱。
+/// 街道杂物规格（画质 M6）：**纯装饰、不碰撞**（进 `decor` 表）。
+///
+/// 为什么值得加：现在街道只有建筑/灯/树，地面与墙根一片空 —— 真实战乱城镇的街面
+/// 永远有碎砖、托盘、轮胎、木箱。这些都是"只画不挡"的装饰件（与树冠/檐口同类），
+/// 不影响导航/碰撞/联机。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClutterPiece {
+    x: f32,
+    z: f32,
+    w: f32,
+    d: f32,
+    h: f32,
+    /// true = 圆柱（轮胎），false = 盒子（碎石/托盘/木箱）
+    round: bool,
+    tint: [f32; 3],
+}
+
+/// 由建筑脚印（x,z,half_w,half_d）生成街道杂物规格：**确定性**（同输入逐字节同输出）。
+///
+/// 摆放规则：每栋楼沿"哈希方位角"往外 0.9–1.8m 处放 1–2 件；
+/// 候选点落在任何建筑脚印（外扩 0.6m）内就跳过 —— 杂物不许插进墙里。
+fn clutter_specs(
+    footprints: &[(f32, f32, f32, f32)],
+    obstacles: &[(f32, f32, f32, f32, f32, f32)],
+) -> Vec<ClutterPiece> {
+    let mut out = Vec::new();
+    for (i, &(bx, bz, hw, hd)) in footprints.iter().enumerate() {
+        let n = if mixf(i as i32, 7, 0.0, 1.0) < 0.55 { 2 } else { 1 };
+        for k in 0..n {
+            // 方位角 + 距离都由 (建筑下标, 件下标) 决定：确定性，且同楼两件不重叠
+            let ang = mixf(i as i32, k as i32 + 11, 0.0, std::f32::consts::TAU);
+            let dist = hw.max(hd) + mixf(i as i32, k as i32 + 23, 0.9, 1.8);
+            let x = bx + ang.cos() * dist;
+            let z = bz + ang.sin() * dist;
+            let blocked = footprints.iter().any(|&(ox, oz, ohw, ohd)| {
+                (ox - x).abs() < ohw + 0.6 && (oz - z).abs() < ohd + 0.6
+            });
+            if blocked {
+                continue;
+            }
+            // 件型先定（高度要参与"被别的件完整包住"的判定）
+
+            // 件型：轮胎(圆柱) / 碎石 / 托盘 / 木箱
+            let pick = mixf(i as i32, k as i32 + 31, 0.0, 1.0);
+            let (w, d, h, round, tint) = if pick < 0.30 {
+                (0.66, 0.66, 0.42, true, [0.115, 0.115, 0.125]) // 轮胎堆
+            } else if pick < 0.62 {
+                (
+                    mixf(i as i32, k as i32 + 41, 0.35, 0.75),
+                    mixf(i as i32, k as i32 + 43, 0.30, 0.65),
+                    mixf(i as i32, k as i32 + 47, 0.16, 0.34),
+                    false,
+                    [0.50, 0.485, 0.455],
+                ) // 碎石/砖块堆
+            } else if pick < 0.84 {
+                (1.20, 1.00, 0.22, false, [0.47, 0.38, 0.27]) // 木托盘
+            } else {
+                (
+                    mixf(i as i32, k as i32 + 53, 0.55, 0.85),
+                    mixf(i as i32, k as i32 + 59, 0.55, 0.85),
+                    mixf(i as i32, k as i32 + 61, 0.45, 0.75),
+                    false,
+                    [0.44, 0.35, 0.24],
+                ) // 木箱
+            };
+            // "被已有几何完整包住 ⇒ 一像素都不画"（城市布局判据）：候选件若整体落在
+            // 某个平台/台阶/箱体内部就跳过。地面埋入量 = PIECE_SINK。
+            let top = h.max(MIN_AXIS + PIECE_SINK) - PIECE_SINK;
+            let bottom = -PIECE_SINK;
+            let enclosed = obstacles.iter().any(|&(ox, oz, ohw, ohd, ob, ot)| {
+                (x - ox).abs() + w * 0.5 <= ohw + 1e-3
+                    && (z - oz).abs() + d * 0.5 <= ohd + 1e-3
+                    && bottom >= ob - 1e-3
+                    && top <= ot + 1e-3
+            });
+            if enclosed {
+                continue;
+            }
+            out.push(ClutterPiece { x, z, w, d, h: top, round, tint });
+        }
+    }
+    out
+}
+
+/// 把街道杂物写进装饰表（不进碰撞/寻路）。只认**实体建筑**（`ObstacleKind::Building`
+/// 且高 > 3m、脚印 > 2m）当锚点：装饰檐口/窗带也在 `Building` 类里，但它们在 `decor`
+/// 表里、不在 `solid` 表里，天然被排除。
+/// 杂物埋入地面的深度（米）：**必须埋**，底面与地形共面会 z-fight（城市布局判据）。
+const PIECE_SINK: f32 = 0.08;
+
+fn street_clutter(c: &mut City) {
+    // A/B 与排查旋钮：关掉街面杂物（与 RV3D_NO_DECALS 同类的对照开关惯例）
+    if crate::syscfg::is_set("RV3D_NO_CLUTTER") {
+        return;
+    }
+    let footprints: Vec<(f32, f32, f32, f32)> = c
+        .solid
+        .iter()
+        .filter(|o| {
+            o.kind == ObstacleKind::Building
+                && o.half_h * 2.0 > 3.0
+                && o.half_w * 2.0 > 2.0
+                && o.half_d * 2.0 > 2.0
+        })
+        .map(|o| (o.x, o.z, o.half_w, o.half_d))
+        .collect();
+    // 已有几何（含装饰）的包围盒，用于"被完整包住就跳过"的判定
+    let obstacles: Vec<(f32, f32, f32, f32, f32, f32)> = c
+        .solid
+        .iter()
+        .chain(c.decor.iter())
+        .map(|o| (o.x, o.z, o.half_w, o.half_d, o.y - o.half_h, o.y + o.half_h))
+        .collect();
+    let pieces = clutter_specs(&footprints, &obstacles);
+    if let Some(p) = pieces.first() {
+        log::info!(
+            "街道杂物：{} 件（纯装饰，不碰撞）；首件 @({:.1},{:.1}) {}x{}x{}",
+            pieces.len(),
+            p.x,
+            p.z,
+            p.w,
+            p.d,
+            p.h
+        );
+    }
+    for p in pieces {
+        let part = Part::new(
+            ObstacleKind::Building,
+            p.x,
+            p.z,
+            p.w,
+            p.d,
+            -PIECE_SINK,
+            p.h,
+            p.tint,
+        );
+        if p.round {
+            c.deco(part.cyl());
+        } else {
+            c.deco(part);
+        }
+    }
+}
+
 fn street_furniture(c: &mut City) {
     for k in [-3i32, -2, -1, 1, 2, 3] {
         let t = k as f32 * STREET_EVERY;
@@ -1632,6 +1776,8 @@ pub fn generate_city_with_set(set: PropSet) -> LevelMap {
         }
     }
     street_furniture(&mut c);
+    // 画质 M6：街面杂物（纯装饰，不挡路/不挡子弹）
+    street_clutter(&mut c);
     // 摆放分类统计（长期保留）：哪类资产命中了、哪类其实一个都没摆上，直接看这行就知道。
     // 之前排查"建筑仍是悬浮板"时只能靠猜，因为日志只给了总数。
     if !c.props.is_empty() {
@@ -1697,6 +1843,49 @@ pub fn ground_zone(x: f32, z: f32) -> u8 {
 #[cfg(test)]
 mod city_layout_tests {
     use super::*;
+
+    /// 画质 M6 判据：街道杂物**确定性 + 不插进建筑 + 尺寸不退化**。
+    /// 反向验证：把 `clutter_specs` 里 `blocked` 检查删掉 ⇒ 本判据红。
+    #[test]
+    fn street_clutter_is_deterministic_and_clear_of_buildings() {
+        let footprints = [
+            (10.0, -20.0, 6.0, 5.0),
+            (-40.0, 30.0, 4.0, 9.0),
+            (0.0, 70.0, 8.0, 6.0),
+        ];
+        let a = clutter_specs(&footprints, &[]);
+        let b = clutter_specs(&footprints, &[]);
+        assert!(!a.is_empty(), "合成脚印没产出任何杂物（生成器退化了）");
+        assert_eq!(a, b, "杂物生成不是确定性的（两次调用结果不同）");
+        for p in &a {
+            for &(fx, fz, fw, fd) in &footprints {
+                assert!(
+                    (p.x - fx).abs() >= fw + 0.5 || (p.z - fz).abs() >= fd + 0.5,
+                    "杂物插进建筑脚印：{p:?} vs ({fx},{fz},{fw},{fd})"
+                );
+            }
+            assert!(
+                p.w >= MIN_AXIS && p.d >= MIN_AXIS && p.h >= 0.1,
+                "杂物尺寸退化（薄片/负尺寸）：{p:?}"
+            );
+        }
+    }
+
+    /// 画质 M6 判据（续）：候选杂物若整个落在已有平台内部，必须跳过（否则一像素不画）。
+    #[test]
+    fn clutter_skips_positions_fully_enclosed_by_existing_geometry() {
+        let footprints = [(0.0, 0.0, 3.0, 3.0)];
+        let clear = clutter_specs(&footprints, &[]);
+        assert!(!clear.is_empty());
+        // 用一块"包住整个街区"的厚平台把全部候选位置罩住 ⇒ 必须一个都不剩
+        let platform = [(0.0, 0.0, 40.0, 40.0, -1.0, 5.0)];
+        let enclosed = clutter_specs(&footprints, &platform);
+        assert!(
+            enclosed.is_empty(),
+            "平台罩住了整片区域，仍有 {} 件杂物生成（它们会被完整包住、不画）",
+            enclosed.len()
+        );
+    }
 
     /// 结构件 + 装饰件总预算：marker 槽上限 8192，超出会被 CPU 剔除按插入顺序
     /// 静默截断——越靠后装的街区整片消失，且没有任何日志。
