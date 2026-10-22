@@ -15,7 +15,7 @@ impl Renderer {
         // ⇒ TYPE_1 时：**场景图直接当颜色附件**（STORE + TRANSFER_SRC_OPTIMAL 给后续 blit），
         // 只有 [颜色, 深度] 两个附件，不挂 resolve。
         if msaa == vk::SampleCountFlags::TYPE_1 {
-            let scene_color = vk::AttachmentDescription::default()
+            let scene_color = vk::AttachmentDescription2::default()
                 .format(self.swapchain_format)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -24,11 +24,12 @@ impl Renderer {
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-            let scene_color_ref = vk::AttachmentReference::default()
+            let scene_color_ref = vk::AttachmentReference2::default()
                 .attachment(0)
-                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .aspect_mask(vk::ImageAspectFlags::COLOR);
             let scene_color_refs = [scene_color_ref];
-            let depth = vk::AttachmentDescription::default()
+            let depth = vk::AttachmentDescription2::default()
                 .format(vk::Format::D32_SFLOAT)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -37,10 +38,11 @@ impl Renderer {
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-            let depth_ref = vk::AttachmentReference::default()
+            let depth_ref = vk::AttachmentReference2::default()
                 .attachment(1)
-                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-            let subpass = vk::SubpassDescription::default()
+                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .aspect_mask(vk::ImageAspectFlags::DEPTH);
+            let subpass = vk::SubpassDescription2::default()
                 .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
                 .color_attachments(&scene_color_refs)
                 .depth_stencil_attachment(&depth_ref);
@@ -48,7 +50,7 @@ impl Renderer {
             let attachments = [scene_color, depth];
             // 附件个数唯一真源（见 `helpers::main_pass_attachment_count`）
             debug_assert_eq!(attachments.len(), main_pass_attachment_count(msaa));
-            let dependency = vk::SubpassDependency::default()
+            let dependency = vk::SubpassDependency2::default()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
                 .src_stage_mask(
@@ -65,18 +67,18 @@ impl Renderer {
                         | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 );
             let dependencies = [dependency];
-            let ci = vk::RenderPassCreateInfo::default()
+            let ci = vk::RenderPassCreateInfo2::default()
                 .attachments(&attachments)
                 .subpasses(&subpasses)
                 .dependencies(&dependencies);
             self.render_pass = unsafe {
                 self.device
-                    .create_render_pass(&ci, None)
+                    .create_render_pass2(&ci, None)
                     .map_err(|e| format!("创建渲染流程失败（无 MSAA 路径）: {}", e))?
             };
             return Ok(());
         }
-        let color_attachment = vk::AttachmentDescription::default()
+        let color_attachment = vk::AttachmentDescription2::default()
             .format(self.swapchain_format)
             .samples(msaa)
             .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -86,13 +88,14 @@ impl Renderer {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
-        let color_attachment_ref = vk::AttachmentReference::default()
+        let color_attachment_ref = vk::AttachmentReference2::default()
             .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .aspect_mask(vk::ImageAspectFlags::COLOR);
         let color_attachment_refs = [color_attachment_ref];
 
         // 解析附件：MSAA 颜色 → **离屏场景图**（TYPE_1）。交换链图像由 `record.rs` 的 blit 写入。
-        let resolve_attachment = vk::AttachmentDescription::default()
+        let resolve_attachment = vk::AttachmentDescription2::default()
             .format(self.swapchain_format)
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -104,12 +107,13 @@ impl Renderer {
             // 不再是 PRESENT_SRC_KHR，而是 `TRANSFER_SRC_OPTIMAL`（给随后那条升采样 blit 当源）。
             // 交换链图像的布局转换现在由那次 blit 负责。
             .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        let resolve_attachment_ref = vk::AttachmentReference::default()
+        let resolve_attachment_ref = vk::AttachmentReference2::default()
             .attachment(1)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .aspect_mask(vk::ImageAspectFlags::COLOR);
 
         // 深度附件（D32_SFLOAT，与颜色同采样数）
-        let depth_attachment = vk::AttachmentDescription::default()
+        let depth_attachment = vk::AttachmentDescription2::default()
             .format(vk::Format::D32_SFLOAT)
             .samples(msaa)
             .load_op(vk::AttachmentLoadOp::CLEAR)
@@ -118,12 +122,13 @@ impl Renderer {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        let depth_attachment_ref = vk::AttachmentReference::default()
+        let depth_attachment_ref = vk::AttachmentReference2::default()
             .attachment(2)
-            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .aspect_mask(vk::ImageAspectFlags::DEPTH);
 
         let resolve_attachment_refs = [resolve_attachment_ref];
-        let subpass = vk::SubpassDescription::default()
+        let subpass = vk::SubpassDescription2::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_attachment_refs)
             .resolve_attachments(&resolve_attachment_refs)
@@ -133,7 +138,7 @@ impl Renderer {
         // 附件个数唯一真源（见 `helpers::main_pass_attachment_count`）
         debug_assert_eq!(attachments.len(), main_pass_attachment_count(msaa));
 
-        let dependency = vk::SubpassDependency::default()
+        let dependency = vk::SubpassDependency2::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
             .dst_subpass(0)
             .src_stage_mask(
@@ -151,14 +156,14 @@ impl Renderer {
             );
         let dependencies = [dependency];
 
-        let render_pass_create_info = vk::RenderPassCreateInfo::default()
+        let render_pass_create_info = vk::RenderPassCreateInfo2::default()
             .attachments(&attachments)
             .subpasses(&subpasses)
             .dependencies(&dependencies);
 
         self.render_pass = unsafe {
             self.device
-                .create_render_pass(&render_pass_create_info, None)
+                .create_render_pass2(&render_pass_create_info, None)
                 .map_err(|e| format!("创建渲染流程失败: {}", e))?
         };
         Ok(())
