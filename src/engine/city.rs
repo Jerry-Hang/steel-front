@@ -3273,4 +3273,43 @@ mod city_layout_tests {
         );
     }
 
+    /// 城市必须整体落在平地上（`terrain_height == 0`）。
+    ///
+    /// 这条把两个常量绑在一起：`TERRAIN_FLAT_RADIUS`(230m) 与城市占地（6×6 街区，外围约 ±215m）。
+    /// 改小平坦半径 / 放大城市 / 把街区挪进丘陵，本判据都会红 —— 否则楼基会被山体吃掉，
+    /// 而"被吃掉"在没截图的阶段完全看不出来，只能靠这种不变式守着。
+    #[test]
+    fn city_sits_entirely_on_flat_ground() {
+        use crate::engine::renderer::terrain_height;
+        let map = generate_city_with_set(PropSet::contract());
+        let mut bad: Vec<String> = Vec::new();
+        for pl in &map.props {
+            let h = terrain_height(pl.x, pl.z);
+            if h.abs() > 1e-6 {
+                bad.push(format!("道具 ({:.1},{:.1}) h={h:.2}", pl.x, pl.z));
+            }
+        }
+        for o in map.obstacles.iter().chain(map.decor.iter()) {
+            let h = terrain_height(o.x, o.z);
+            if h.abs() > 1e-6 {
+                bad.push(format!("{:?} ({:.1},{:.1}) h={h:.2}", o.kind, o.x, o.z));
+            }
+        }
+        for b in bad.iter().take(8) {
+            eprintln!("  丘陵里的城市构件：{b}");
+        }
+        assert!(
+            bad.is_empty(),
+            "有 {} 个城市构件落在丘陵区（城市必须整体在 TERRAIN_FLAT_RADIUS 内）",
+            bad.len()
+        );
+        eprintln!(
+            "信息：{} 个道具 + {} 障碍 + {} 装饰全部在平地（平地半径 {}m）",
+            map.props.len(),
+            map.obstacles.len(),
+            map.decor.len(),
+            crate::engine::renderer::TERRAIN_FLAT_RADIUS
+        );
+    }
+
 }

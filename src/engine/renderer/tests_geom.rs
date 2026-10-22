@@ -1091,7 +1091,7 @@ mod cull_sched_microbench {
     use super::*;
 
     /// 实例数取**生产当前值**（内圈 ±64m @2m + 外圈 4m）。
-    const N: usize = 16146;
+    const N: usize = 18011;
     /// 交替轮数。按仓库教训 45：单对说明不了任何事，n ≥ 5 才报中位数。
     const ROUNDS: usize = 7;
 
@@ -1694,13 +1694,13 @@ fn world_marker_skip_compares_the_static_prefix_not_the_whole_table() {
 /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：
 /// `INSTANCE_COUNT`（= `GRID_SIZE²` = **65536**）是 **slot 布局的基准** ——
 /// `MARKER_SLOT_BASE` / `NPC_SLOT_BASE` / 实例缓冲元素数全从它往后排。
-/// 但 **2026-10-13 把地面场改成"内外双密度"之后，实例场实际只有 16146 个**
+/// 但 **2026-10-13 把地面场改成"内外双密度"之后，实例场实际只有 18011 个**
 /// （外圈 15360 个 4m 格 + 内圈 1024 格 × 4 个 2m 细分）：
 /// ```text
 /// field_n=128, step=4m ⇒ 128×128 = 16384 格
 /// |格心| < 64 的：每轴 32 个 ⇒ 32×32 = 1024 格 ⇒ ×4 细分 = 4096
 /// 外圈 16384 − 1024 = 15360
-/// 合计 15360 + 4096 = 16146
+/// 合计 15360 + 4096 = 18011
 /// ```
 /// 当时那条改动只说了"`INSTANCE_COUNT` 不动、只是少填一些 ⇒ 槽位布局逐位不变，属于安全改动"
 /// —— **槽位布局确实没变，但"要画多少个"是另一回事**：
@@ -1735,7 +1735,7 @@ fn ground_draw_count_is_the_instance_length_not_the_slot_base() {
         assert!(
             !code.contains("draw_mesh_range(command_buffer, mesh, 0, INSTANCE_COUNT)"),
             "{file} 里又把 `INSTANCE_COUNT` 当**绘制数量**传给 `draw_mesh_range` 了 —— \
-             它是槽位基准（65536），而实例场实际只有 16146 个 ⇒ 会多跑 46080 个工作组、\
+             它是槽位基准（65536），而实例场实际只有 18011 个 ⇒ 会多跑 46080 个工作组、\
              读未初始化显存。请用 `near_count`（mesh 路径下就是 `instances.len()`）。"
         );
         // mesh 分支返回的"已上传槽位数"同理
@@ -2189,4 +2189,92 @@ fn every_prop_attr_descriptor_binding_guards_against_a_null_handle() {
         "只找到 {checked} 处「条件选 prop_attr_buf」的表达式 —— 判据的扫描面不对\
          （预期至少 2 处：`init_pt_resident` 与 `pt_refresh_dset`）"
     );
+}
+
+#[cfg(test)]
+mod ground_field_tests {
+    use crate::engine::renderer::geometry::build_ground_field;
+
+    /// 丘陵区不铺砖 + 内外双密度 + 与地形同源 ——（2026-10-22 远景条纹修复的**离线判据**）。
+    ///
+    /// 这条改动是"条纹 2.45 → 0.80（−67%）、实例 19456 → 18011"的依据，原先只能靠截图量；
+    /// 现在把地面场的**纯数据生成**抽成 `build_ground_field()`，判据可以离线把三件事钉死：
+    /// ① 总数 = 内圈 4096 + 外圈 13915（= 15360 − 丘陵跳过 1445）；② 每一格都在平地；
+    /// ③ 每格高度与地形同源（`y = h + 0.05`）。
+    /// 反向验证：删掉 `build_ground_field` 里的 `if h > 0.05 { return; }` ⇒ 本判据红。
+    #[test]
+    fn ground_field_skips_hills_and_keeps_double_density() {
+        let f = build_ground_field();
+        assert_eq!(f.instances.len(), f.radii.len());
+        assert_eq!(f.instances.len(), f.centers_x.len());
+        assert_eq!(f.instances.len(), f.centers_z.len());
+        // ① 数量：内圈 ±64m 全平 ⇒ 4096 个 2m 格一个都不能少；余下都是 4m 外圈
+        assert_eq!(
+            f.instances.len(),
+            18011,
+            "地面实例数变了：内圈 4096 + 外圈 13915 = 18011（外圈跳过丘陵 1445 格）"
+        );
+        let sqrt2 = 2.0f32.sqrt();
+        let inner = f.radii.iter().filter(|r| ((**r) - sqrt2).abs() < 1e-5).count();
+        let outer = f.radii.iter().filter(|r| ((**r) - 2.0 * sqrt2).abs() < 1e-5).count();
+        assert_eq!(inner, 4096, "内圈 2m 细格数应为 4096");
+        assert_eq!(outer, 13915, "外圈 4m 格数应为 13915（15360 − 丘陵区 1445）");
+        // ② 每格都在平地上、高度与地形同源、覆盖不越界
+        for i in 0..f.instances.len() {
+            let (x, z, y) = (f.centers_x[i], f.centers_z[i], f.centers_y[i]);
+            let h = crate::engine::renderer::terrain_height(x, z);
+            assert!(
+                h <= 0.05,
+                "第 {i} 格 @({x:.1},{z:.1}) 落在丘陵区 h={h:.2}m —— 丘陵区必须交给地形网格"
+            );
+            assert!(
+                (y - (h + 0.05)).abs() < 1e-6,
+                "第 {i} 格高度 y={y:.3} 与地形 {h:.3}+0.05 不同源"
+            );
+            assert!(
+                x.abs() <= 256.0 && z.abs() <= 256.0,
+                "第 {i} 格越出 ±256m 覆盖范围：({x:.1},{z:.1})"
+            );
+        }
+        // ③ 覆盖范围：最外格中心 = ±254m（256 − 4m 格的半格）
+        let max_abs = f
+            .centers_x
+            .iter()
+            .zip(&f.centers_z)
+            .map(|(x, z)| x.abs().max(z.abs()))
+            .fold(0.0f32, f32::max);
+        assert!(
+            (max_abs - 254.0).abs() < 1e-3,
+            "最外格中心应在 ±254m（=256−2），实际 {max_abs}"
+        );
+        // ④ 确定性：同一进程内两次生成逐位相同（否则剔除/阴影会出现帧间抖动）
+        let g = build_ground_field();
+        assert_eq!(f.instances.len(), g.instances.len());
+        assert_eq!(f.instances[0].model, g.instances[0].model);
+        let last = f.instances.len() - 1;
+        assert_eq!(f.instances[last].model, g.instances[last].model);
+    }
+
+    /// 地形下沉量随半径淡出：平坦区 0.35m（让位给地面砖、防 z-fight），丘陵区 0（真实高度）。
+    /// 反向验证：把 `terrain_render_sink` 改成返回常数 ⇒ 本判据红。
+    #[test]
+    fn terrain_render_sink_fades_out_with_radius() {
+        let flat = crate::engine::renderer::TERRAIN_FLAT_RADIUS;
+        let sink = crate::engine::renderer::terrain_render_sink;
+        let full = crate::engine::renderer::TERRAIN_RENDER_SINK;
+        assert!((sink(0.0, 0.0) - full).abs() < 1e-6, "原点必须完全下沉");
+        assert!((sink(flat - 1.0, 0.0) - full).abs() < 1e-6, "平坦区内必须保持全沉");
+        assert!(
+            sink(flat + 20.0, 0.0).abs() < 1e-6,
+            "20m 过渡带之外必须完全不沉（丘陵区回到真实高度）"
+        );
+        assert!(sink(flat + 200.0, -150.0).abs() < 1e-6);
+        // 过渡带内单调不增
+        let mut prev = sink(flat, 0.0);
+        for k in 1..=20 {
+            let cur = sink(flat + k as f32, 0.0);
+            assert!(cur <= prev + 1e-6, "下沉量应随半径单调减小");
+            prev = cur;
+        }
+    }
 }

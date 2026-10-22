@@ -3,6 +3,99 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// 地面实例场（纯 CPU 数据，**与 Vulkan 无关**）。
+///
+/// 抽成纯函数的理由（2026-10-22）：判据要能**离线**验证"丘陵区不铺砖 / 内外双密度 /
+/// 覆盖 ±256m / 与地形同源"——原来这段写死在 `Renderer::create_instance_buffer` 里，
+/// 只有开 GPU 才能验，等于没有判据。
+pub(crate) struct GroundField {
+    pub instances: Vec<InstanceData>,
+    /// 剔除用包围球半径 = √2 × 半边长（**必须随格大小缩放**：曾低估一半 ⇒ 屏幕四角穿帮）。
+    pub radii: Vec<f32>,
+    pub centers_x: Vec<f32>,
+    pub centers_y: Vec<f32>,
+    pub centers_z: Vec<f32>,
+}
+
+/// 生成地面实例场。**覆盖范围逐米不变（±256m = 512×512），格心对齐 ⇒ 无缝隙无重叠。**
+///
+/// 布局（2026-10-13 内外双密度）：外圈 128×128 个 4m 格；内圈 ±64m 的 32×32 格
+/// 各细分成 4 个 2m 格（近处才需要细网格，远处 4m 看不出差别）。
+///
+/// 🔴 2026-10-22：**丘陵区（`terrain_height > 0.05`）不铺砖**，交给地形网格 ——
+/// 砖块按格心高度平铺，相邻格高差 1–2m 时会在地平线附近露出台阶缝，那正是
+/// 远景"细碎亮线"的根因（实测条纹强度 2.45 → 0.80，实例 19456 → 18011）。
+/// 地形下沉量已随半径淡出（`terrain_render_sink`），交界高差 ≈0。
+///
+/// ⚠️ **不动的两样**：`INSTANCE_COUNT`（65536，marker/NPC 槽位基准）与实例缓冲容量；
+/// 这里只是"少填一些" ⇒ 槽位布局逐位不变，属于安全改动。
+pub(crate) fn build_ground_field() -> GroundField {
+    const FIELD_STEP: f32 = 4.0;
+    const FIELD_N: usize = 128; // 128 × 4m = 512m
+    const INNER_HALF: f32 = 64.0; // 内圈半幅（细格区）
+    let field_half = FIELD_STEP * FIELD_N as f32 * 0.5;
+    let inner_step = FIELD_STEP * 0.5;
+    let mut field = GroundField {
+        instances: Vec::new(),
+        radii: Vec::new(),
+        centers_x: Vec::new(),
+        centers_y: Vec::new(),
+        centers_z: Vec::new(),
+    };
+    let mut push_quad = |x: f32, z: f32, size: f32| {
+        let h = terrain_height(x, z);
+        // 丘陵区不铺砖（见函数文档）：交给地形网格（LOD + morph 连续）。
+        if h > 0.05 {
+            return;
+        }
+        let y = h + 0.05;
+        // GROUND_VERTS 是 2×2 的 quad（半幅 1）⇒ 缩放系数 = 半边长 = size/2
+        let scale = size * 0.5;
+        let model = glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::splat(scale),
+            glam::Quat::IDENTITY,
+            glam::Vec3::new(x, y, z),
+        );
+        field.radii.push(2.0f32.sqrt() * scale);
+        field.centers_x.push(x);
+        field.centers_y.push(y);
+        field.centers_z.push(z);
+        field.instances.push(InstanceData {
+            model: model.to_cols_array(),
+            tint: [0.7, 0.7, 0.7, 1.0],
+        });
+    };
+    for iz in 0..FIELD_N {
+        for ix in 0..FIELD_N {
+            let cx = (ix as f32 + 0.5) * FIELD_STEP - field_half;
+            let cz = (iz as f32 + 0.5) * FIELD_STEP - field_half;
+            if cx.abs() < INNER_HALF && cz.abs() < INNER_HALF {
+                // 内圈：细分成 4 个 2m 格（保持近处地面的平滑）
+                for dz in [-1.0f32, 1.0] {
+                    for dx in [-1.0f32, 1.0] {
+                        push_quad(
+                            cx + dx * inner_step * 0.5,
+                            cz + dz * inner_step * 0.5,
+                            inner_step,
+                        );
+                    }
+                }
+            } else {
+                push_quad(cx, cz, FIELD_STEP);
+            }
+        }
+    }
+    log::info!(
+        "地面实例场：{} 个 quad（内圈 {} 内 {:.1}m 细格，外圈 {:.1}m；覆盖 ±{:.0}m）",
+        field.instances.len(),
+        INNER_HALF,
+        inner_step,
+        FIELD_STEP,
+        field_half
+    );
+    field
+}
+
 impl Renderer {
     /// 创建立方体顶点缓冲（24 顶点）
     pub(crate) fn create_vertex_buffer(&mut self) -> Result<(), String> {
@@ -694,15 +787,18 @@ impl Renderer {
         //   外圈 128×128 个 4m 格 = 16384 个 quad
         //   其中落在 ±64m 内的 32×32 = 1024 格，各自细分成 4 个 2m 格 = 4096 个 quad
         //   外圈剩余 16384-1024 = 15360 个 quad
-        //   ⇒ 合计 **16146** 个（比最初的 65536 少 **75%**）。
+        //   ⇒ 合计 **18011** 个（比最初的 65536 少 **73%**）。
         // 🔴 2026-10-22 追加：**丘陵区不铺砖**（地形高度 > 5cm 的格子直接跳过，交给地形网格）
         //   —— 那是地平线附近"细碎亮线"的根因（砖块按格心高度平铺，相邻格高差 1–2m 时
-        //   缝隙露出背景）。实测 19456 → 16146（外圈少 3310 格），条纹强度 2.45 → 0.80（-67%）。
+        //   缝隙露出背景）。实测 19456 → 18011（外圈少 1445 格），条纹强度 2.45 → 0.80（-67%）。
+//   ⚠️ 2026-10-22 晚些时候把**平坦区从圆盘改成方盘**（覆盖城市四角）⇒ 丘陵区退到方边外，
+//   外圈跳过的格子从 1445 格变化（见 `build_ground_field` 判据里钉死的现值）；
+//   「条纹 -67%」那组数是在圆盘地形下量的，方盘后的画面待有截图窗口时复验。
         //
         // 🔴 细格区从 ±128m 缩到 ±64m（2026-10-13 第二轮）：分段诊断实测
         //    `视锥+分档 315µs`（占 `cull_us` 的 70%），而 28672 个实例里
         //    **16384 个（57%）是这块 2m 细格** —— 它才是贵的部分。缩到 ±64m 后
-        //    细格只剩 4096 个，实例总数降到 16146（-32%）。
+        //    细格只剩 4096 个，实例总数降到 18011（相对 28672 为 -37%）。
         //    取舍依据：`terrain_height` 中央 140m 内是平的，所以 ±64m 之外用 4m 格
         //    **不会有可见的高度差**；近处（玩家脚下 128m×128m）仍是 2m 细格。
         //
@@ -714,68 +810,14 @@ impl Renderer {
         // 高度 = terrain_height + 0.05（略高于地形网格 y=0，避免深度冲突）。
         // 旧版 2×2×2 立方体（顶面 +0.95）与压扁薄片（侧壁 0.2m）都有可见侧壁，
         // 视觉上像一格一格"掀盖纸箱"铺地；平铺 quad 无任何竖立面，地面真正连续。
-        let field_step = 4.0f32;
-        let field_n = 128usize; // 128 × 4m = 512m
-        let field_half = field_step * field_n as f32 * 0.5;
-        let inner_half = 64.0f32; // 内圈半幅（细格区）
-        let inner_step = field_step * 0.5;
-        self.instances = Vec::with_capacity(INSTANCE_COUNT as usize);
-        // 闭包拿不到 &mut self 的多个字段，这里直接按序写入各字段
-        let mut push_quad = |x: f32, z: f32, size: f32| {
-            let y = terrain_height(x, z) + 0.05;
-            // 丘陵区（地形高度 > 5cm）不铺地面砖：砖块按格心高度平铺，相邻格高差 1–2m 时
-            // 会在地平线附近露出台阶缝（2026-10-22 定案：远景细亮线的主因）。
-            // 那里交给地形网格（LOD + morph 连续）；sink 已随半径淡出，交界高差 ≈0。
-            if terrain_height(x, z) > 0.05 {
-                return;
-            }
-            // GROUND_VERTS 是 2×2 的 quad（半幅 1）⇒ 缩放系数 = 半边长 = size/2
-            let scale = size * 0.5;
-            let model = glam::Mat4::from_scale_rotation_translation(
-                glam::Vec3::splat(scale),
-                glam::Quat::IDENTITY,
-                glam::Vec3::new(x, y, z),
-            );
-            // 半径 = 半对角线 = √2 × 半边长（2026-08-15 修正过一版：曾低估一半
-            // → 屏幕四角边缘实例被激进剔除穿帮）。**必须随 size 缩放**，否则大格被误剔。
-            self.instance_radii.push(2.0f32.sqrt() * scale);
-            self.instance_center_x.push(x);
-            self.instance_center_y.push(y);
-            self.instance_center_z.push(z);
-            self.instances.push(InstanceData {
-                model: model.to_cols_array(),
-                tint: [0.7, 0.7, 0.7, 1.0],
-            });
-        };
-        for iz in 0..field_n {
-            for ix in 0..field_n {
-                // 格心（对齐到网格中心，覆盖范围与旧的 ±256m 一致）
-                let cx = (ix as f32 + 0.5) * field_step - field_half;
-                let cz = (iz as f32 + 0.5) * field_step - field_half;
-                if cx.abs() < inner_half && cz.abs() < inner_half {
-                    // 内圈：细分成 4 个 2m 格（保持近处地面的平滑）
-                    for dz in [-1.0f32, 1.0] {
-                        for dx in [-1.0f32, 1.0] {
-                            push_quad(
-                                cx + dx * inner_step * 0.5,
-                                cz + dz * inner_step * 0.5,
-                                inner_step,
-                            );
-                        }
-                    }
-                } else {
-                    push_quad(cx, cz, field_step);
-                }
-            }
-        }
-        log::info!(
-            "地面实例场：{} 个 quad（内圈 {} 内 {:.1}m 细格，外圈 {:.1}m；覆盖 ±{:.0}m）",
-            self.instances.len(),
-            inner_half,
-            inner_step,
-            field_step,
-            field_half
-        );
+        // 地面场数据由纯函数生成（见 `build_ground_field`），这里只做接线：
+        // 这样判据才能**离线**验证"丘陵区不铺砖 / 内外双密度 / 与地形同源"。
+        let field = build_ground_field();
+        self.instances = field.instances;
+        self.instance_radii = field.radii;
+        self.instance_center_x = field.centers_x;
+        self.instance_center_y = field.centers_y;
+        self.instance_center_z = field.centers_z;
         // 并行剔除暂存：按**实际实例数**分配（不是 INSTANCE_COUNT —— 场地已不是满的，
         // 按满容量分会越界读 cx/cy/cz）
         self.culled_scratch = vec![0u32; self.instances.len()];
@@ -878,7 +920,7 @@ impl Renderer {
         }
 
         // 🔴 这两条日志原来都印 `INSTANCE_COUNT`（65536），而实例场 2026-10-13 改成
-        // 内外双密度之后**实际只有 16146 个** ⇒ 排查的人会以为"场是满的"。
+        // 内外双密度之后**实际只有 18011 个** ⇒ 排查的人会以为"场是满的"。
         // `INSTANCE_COUNT` 是 **slot 布局基准**（marker/NPC 槽位从它往后排），
         // 与"实例场里真有多少个"是两回事（2026-10-15 更正）。
         log::info!(

@@ -590,16 +590,20 @@ pub(crate) fn terrain_value_noise(x: f32, z: f32, cell: f32) -> f32 {
     let b = h01 + (h11 - h01) * tx;
     a + (b - a) * tz
 }
-/// 地形高度：半径 ≤ TERRAIN_FLAT_RADIUS（中央 60×60 安全区、障碍环带 58–130m、
-/// 两军接火区都落在此圆内）恒 y=0；之外按距离 smoothstep 抬升的确定性值噪声丘陵，
-/// 幅值 ≤ TERRAIN_HILL_AMPLITUDE、坡度平缓（LOD morph 无突兀）。
+/// 地形高度：**正方形** `max(|x|,|z|) ≤ TERRAIN_FLAT_RADIUS` 内恒 y=0；方边之外按距离
+/// smoothstep 抬升的确定性值噪声丘陵，幅值 ≤ TERRAIN_HILL_AMPLITUDE、坡度平缓。
+///
+/// 🔴 2026-10-22：平坦区从"圆盘半径 230m"改成**方盘 230m**。原因是城市是 6×6 街区**方阵**：
+/// 街区外缘建筑中心在 (±215, ±215)，到原点**半径 304m** —— 按圆盘判定时四角街区落在坡上，
+/// 实测楼基最深被埋 5.4m（判据 `city_sits_entirely_on_flat_ground` 查出）。
+/// 改成方盘后整座城市都在平地（外缘 222m < 230m），丘陵从方边外开始抬升；
+/// 中央 60×60 安全区、障碍环带 58–130m、两军接火区也仍在平坦区内。
 pub(crate) fn terrain_height(x: f32, z: f32) -> f32 {
-    let flat_r2 = TERRAIN_FLAT_RADIUS * TERRAIN_FLAT_RADIUS;
-    let r2 = x * x + z * z;
-    if r2 <= flat_r2 {
+    let d = x.abs().max(z.abs());
+    if d <= TERRAIN_FLAT_RADIUS {
         return 0.0;
     }
-    let t = ((r2.sqrt() - TERRAIN_FLAT_RADIUS) / TERRAIN_HILL_RAMP).clamp(0.0, 1.0);
+    let t = ((d - TERRAIN_FLAT_RADIUS) / TERRAIN_HILL_RAMP).clamp(0.0, 1.0);
     smooth_t(t) * TERRAIN_HILL_AMPLITUDE * terrain_value_noise(x, z, TERRAIN_HILL_CELL)
 }
 /// 地形渲染下沉量（米）：**只在平坦区**把地形压到地面砖下面，避免共面 z-fight。
@@ -609,8 +613,9 @@ pub(crate) fn terrain_height(x: f32, z: f32) -> f32 {
 /// 平坦区 → 地面砖（2m/4m 铺得严实，地形压在 -0.35）；丘陵区 → 地面砖不生成，
 /// 地形网格直接可见，因此下沉量沿 20m 半径带线性收到 0 —— 两区交界处高差 ≈ 0。
 pub(crate) fn terrain_render_sink(x: f32, z: f32) -> f32 {
-    let r = (x * x + z * z).sqrt();
-    let t = ((r - TERRAIN_FLAT_RADIUS) / 20.0).clamp(0.0, 1.0);
+    // 度量与 `terrain_height` 同源：方盘距离（2026-10-22，见那里的注释）
+    let d = x.abs().max(z.abs());
+    let t = ((d - TERRAIN_FLAT_RADIUS) / 20.0).clamp(0.0, 1.0);
     TERRAIN_RENDER_SINK * (1.0 - smooth_t(t))
 }
 

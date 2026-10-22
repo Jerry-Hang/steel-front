@@ -543,7 +543,7 @@ impl Renderer {
             //
             // `INSTANCE_COUNT`（= `GRID_SIZE²` = 65536）是 **slot 布局的基准**
             // （marker / NPC 槽位都从它往后排），**不等于实例场里真的有多少个**。
-            // 2026-10-13 把地面场改成"内外双密度"之后，实际只补了 **16146** 个
+            // 2026-10-13 把地面场改成"内外双密度"之后，实际只补了 **18011** 个
             // （外圈 15360 个 4m 格 + 内圈 1024 格 × 4 个 2m 细分）。
             //
             // 原来这里返回 `INSTANCE_COUNT` ⇒ 主 pass（`record.rs` 的 `draw_mesh_range`）
@@ -661,7 +661,7 @@ impl Renderer {
                 "visible={}/{} near={} far={} fps={:.1} frame_us={} cull_us={} terrain_us={} wait_fence_us={} acquire_us={} record_us={} submit_us={} present_us={} terrain_lod={} blend={:.3} quality={} marker={} npc={} mk_up_us={}",
                 near_count + far_count,
                 // 🔴 分母也必须是**实例场实际长度**：`INSTANCE_COUNT` 是槽位基准，
-                // 不是"这一帧能画多少"。用它会印出 `visible=16146/65536` 这种
+                // 不是"这一帧能画多少"。用它会印出 `visible=18011/65536` 这种
                 // 看着像"只画了 30%"的假数字（2026-10-15 一并更正）。
                 self.instances.len(),
                 near_count,

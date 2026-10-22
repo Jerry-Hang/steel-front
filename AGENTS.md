@@ -172,8 +172,9 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   纹素半值编码 `lum*0.5`；`GROUND_DETAIL_SIZE=256` 使 `2.0/256 == GROUND_DETAIL_TEXEL_M=0.0078125`；
   增益 `GROUND_DETAIL_GAIN=2.0`；`build.rs` 以 `light_data.flags.w >= 0.5` 门控并在 `g<=0` 退回 ×1。
   **改一侧必须同时看另一侧**，否则静默"地面变糊"。
-- 地形程序化高度：`terrain_height` 中央半径 **140m** 内 y=0（含 60×60 安全区、障碍环带 58–130m、
-  接火区），之外 ≤15m 确定性值噪声丘陵；`terrain_height_at` 同源。冒烟依赖的站定/接火区仍全平。
+- 地形程序化高度：`terrain_height` 在**方盘** `max(|x|,|z|) ≤ 230m` 内 y=0（城市外缘 ±222m
+  含四角 ⇒ 200 万全部在平地；原来按圆盘判定时四角街区被埋 5.4m，判据 `city_sits_entirely_on_flat_ground`），
+  方边外 ≤15m 确定性值噪声丘陵；`terrain_height_at` 同源。
 
 **管线与缓冲**
 - 主管线 `depth_test_enable=true`；**枪模用独立 `gun_pipeline`**（`depth_test=OFF` **且不写深度**，
@@ -228,8 +229,7 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   面板挂 **AMD 610M**、游戏跑 **5060** ⇒ 每帧**跨适配器拷贝** + 核显合成 ⇒ 窄的是**核显链**
   （数字见 §21.81(a)）。修法 = **`RV3D_BG_FPS`**（失焦上限；**引擎默认 0 = 不限**，否则 perf/冒烟
   会被静默变成 20 fps；`SteelFront.bat` 设 20：fps 165→19.9）。
-  🔴 **GPU Engine 计数器必须按 `luid` 分组**：按进程名聚合会把两块卡相加 ⇒ 得出"dwm 只占 0–1%"
-  的错结论（真值 22–44%）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
+  🔴 **GPU Engine 计数器必须按 `luid` 分组**（按进程名聚合会把两块卡相加）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
 - ⚠️ **IMMEDIATE 在真实显示器上持续撕裂**，而 `PrintWindow` 抓到的是已合成帧 ⇒ 别用静态截图证伪。
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
   `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（`LiveKernelEvent` **P1=141** = TDR；

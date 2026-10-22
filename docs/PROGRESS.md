@@ -1244,3 +1244,18 @@ tree_oak↔tree_oak 16、barrier_hesco↔building 16、container↔(building/tre
 - steel-front 已确立**双轨**：每次提交后 `acdm-record steel-front "<摘要>" <仓库内相对文件...>`
   再 `acdm-sync`；换设备 `git pull` 记忆库即可接上上下文。
 - 约定写进 `README.md`（顶部指引）与 `AGENTS.md` 铁律 F；首次事件已记录并推送。
+
+### 2026-10-22（续3）：城市四角落在丘陵里（楼基被埋 5.4m）——平坦区改方盘
+
+- 新判据 `city_sits_entirely_on_flat_ground`（纯 CPU）：城市是 6×6 **方阵**，外缘建筑中心
+  在 (±215,±215) ⇒ 半径 304m；原平坦区按"圆盘半径 230m"判定 ⇒ 四角街区在坡上，
+  楼基最深埋 **5.43m**（反向验证：改回圆盘判定判据即红）。
+- 修复：`terrain_height` / `terrain_render_sink` 的平坦区改为**方盘** `max(|x|,|z|) ≤ 230m`，
+  城市外缘 222m 全部在平地；丘陵从方边外抬升。
+- 顺带把地面场生成抽成纯函数 `geometry::build_ground_field()`，新增离线判据
+  `ground_field_skips_hills_and_keeps_double_density`（总数 18011 = 4096 + 13915、
+  每格 h≤0.05、y=h+0.05、覆盖 ±254m、两次生成逐位一致）与
+  `terrain_render_sink_fades_out_with_radius`；两条都做了**反向验证**（删掉实现即红）。
+- 交叉检查：windows（x86_64-pc-windows-msvc）0 警告；aarch64-linux 仅 1 条**既有**
+  `cpu.rs::sched_getaffinity` dead-code（与本次改动无关）。
+- 验收：0 警告 / **831 passed + 4 ignored** / CJK 门 OK / 白名单 OK。
