@@ -1091,7 +1091,7 @@ mod cull_sched_microbench {
     use super::*;
 
     /// 实例数取**生产当前值**（内圈 ±64m @2m + 外圈 4m）。
-    const N: usize = 19456;
+    const N: usize = 16146;
     /// 交替轮数。按仓库教训 45：单对说明不了任何事，n ≥ 5 才报中位数。
     const ROUNDS: usize = 7;
 
@@ -1694,13 +1694,13 @@ fn world_marker_skip_compares_the_static_prefix_not_the_whole_table() {
 /// 存在理由（2026-10-15，外部复核指出，已对着代码确认）：
 /// `INSTANCE_COUNT`（= `GRID_SIZE²` = **65536**）是 **slot 布局的基准** ——
 /// `MARKER_SLOT_BASE` / `NPC_SLOT_BASE` / 实例缓冲元素数全从它往后排。
-/// 但 **2026-10-13 把地面场改成"内外双密度"之后，实例场实际只有 19456 个**
+/// 但 **2026-10-13 把地面场改成"内外双密度"之后，实例场实际只有 16146 个**
 /// （外圈 15360 个 4m 格 + 内圈 1024 格 × 4 个 2m 细分）：
 /// ```text
 /// field_n=128, step=4m ⇒ 128×128 = 16384 格
 /// |格心| < 64 的：每轴 32 个 ⇒ 32×32 = 1024 格 ⇒ ×4 细分 = 4096
 /// 外圈 16384 − 1024 = 15360
-/// 合计 15360 + 4096 = 19456
+/// 合计 15360 + 4096 = 16146
 /// ```
 /// 当时那条改动只说了"`INSTANCE_COUNT` 不动、只是少填一些 ⇒ 槽位布局逐位不变，属于安全改动"
 /// —— **槽位布局确实没变，但"要画多少个"是另一回事**：
@@ -1735,7 +1735,7 @@ fn ground_draw_count_is_the_instance_length_not_the_slot_base() {
         assert!(
             !code.contains("draw_mesh_range(command_buffer, mesh, 0, INSTANCE_COUNT)"),
             "{file} 里又把 `INSTANCE_COUNT` 当**绘制数量**传给 `draw_mesh_range` 了 —— \
-             它是槽位基准（65536），而实例场实际只有 19456 个 ⇒ 会多跑 46080 个工作组、\
+             它是槽位基准（65536），而实例场实际只有 16146 个 ⇒ 会多跑 46080 个工作组、\
              读未初始化显存。请用 `near_count`（mesh 路径下就是 `instances.len()`）。"
         );
         // mesh 分支返回的"已上传槽位数"同理

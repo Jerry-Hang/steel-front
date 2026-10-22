@@ -602,6 +602,18 @@ pub(crate) fn terrain_height(x: f32, z: f32) -> f32 {
     let t = ((r2.sqrt() - TERRAIN_FLAT_RADIUS) / TERRAIN_HILL_RAMP).clamp(0.0, 1.0);
     smooth_t(t) * TERRAIN_HILL_AMPLITUDE * terrain_value_noise(x, z, TERRAIN_HILL_CELL)
 }
+/// 地形渲染下沉量（米）：**只在平坦区**把地形压到地面砖下面，避免共面 z-fight。
+///
+/// 2026-10-22：原来全图恒定 `TERRAIN_RENDER_SINK`，结果是"丘陵区地面砖（4m 一格、
+/// 按格心高度平铺）与地形之间形成台阶缝，远景地平线出现大量细亮线"。现在的分工是：
+/// 平坦区 → 地面砖（2m/4m 铺得严实，地形压在 -0.35）；丘陵区 → 地面砖不生成，
+/// 地形网格直接可见，因此下沉量沿 20m 半径带线性收到 0 —— 两区交界处高差 ≈ 0。
+pub(crate) fn terrain_render_sink(x: f32, z: f32) -> f32 {
+    let r = (x * x + z * z).sqrt();
+    let t = ((r - TERRAIN_FLAT_RADIUS) / 20.0).clamp(0.0, 1.0);
+    TERRAIN_RENDER_SINK * (1.0 - smooth_t(t))
+}
+
 /// 供 CPU 侧（NPC/实例）查询地形高度，与 GPU 地形完全同源
 pub(crate) fn terrain_height_at(x: f32, z: f32) -> f32 {
     terrain_height(x, z)

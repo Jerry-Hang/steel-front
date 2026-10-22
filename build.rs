@@ -1448,7 +1448,7 @@ fn terrain_tint(x: f32, z: f32) -> vec3<f32> {
     let sand_col = vec3<f32>(0.60, 0.50, 0.28); // 沙黄（干燥处）
     let col = mix(grass, sand_col, smoothstep(0.45, 0.62, biome));
     // 细颗粒明暗抖动（泥土斑驳，±14%）
-    return col * (0.86 + 0.28 * terrain_value_noise(x, z, 1.5));
+    return col * (0.86 + 0.28 * terrain_value_noise(x, z, 1.5)) * 1.0; // keep
 }
 
 /// 高度扰动（轻微法线扰动）：低频起伏 + 高频颗粒，幅度 ±3cm。

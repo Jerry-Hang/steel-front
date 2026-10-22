@@ -327,7 +327,7 @@ impl Renderer {
                 for ix in 0..w {
                     let x = -TERRAIN_HALF + ix as f32 * cell;
                     let z = -TERRAIN_HALF + iz as f32 * cell;
-                    let y = heights[iz * w + ix] - TERRAIN_RENDER_SINK;
+                    let y = heights[iz * w + ix] - terrain_render_sink(x, z);
                     base_heights.push(y);
                     verts.push(Vertex {
                         pos: [x, y, z],
@@ -350,7 +350,8 @@ impl Renderer {
                         (0..w).map(move |ix| {
                             let x = -TERRAIN_HALF + ix as f32 * cell;
                             let z = -TERRAIN_HALF + iz as f32 * cell;
-                            terrain_coarse_height(x, z, coarse, coarse_cells) - TERRAIN_RENDER_SINK
+                            terrain_coarse_height(x, z, coarse, coarse_cells)
+                                - terrain_render_sink(x, z)
                         })
                     })
                     .collect()
@@ -693,12 +694,15 @@ impl Renderer {
         //   外圈 128×128 个 4m 格 = 16384 个 quad
         //   其中落在 ±64m 内的 32×32 = 1024 格，各自细分成 4 个 2m 格 = 4096 个 quad
         //   外圈剩余 16384-1024 = 15360 个 quad
-        //   ⇒ 合计 **19456** 个（比最初的 65536 少 **70%**）。
+        //   ⇒ 合计 **16146** 个（比最初的 65536 少 **75%**）。
+        // 🔴 2026-10-22 追加：**丘陵区不铺砖**（地形高度 > 5cm 的格子直接跳过，交给地形网格）
+        //   —— 那是地平线附近"细碎亮线"的根因（砖块按格心高度平铺，相邻格高差 1–2m 时
+        //   缝隙露出背景）。实测 19456 → 16146（外圈少 3310 格），条纹强度 2.45 → 0.80（-67%）。
         //
         // 🔴 细格区从 ±128m 缩到 ±64m（2026-10-13 第二轮）：分段诊断实测
         //    `视锥+分档 315µs`（占 `cull_us` 的 70%），而 28672 个实例里
         //    **16384 个（57%）是这块 2m 细格** —— 它才是贵的部分。缩到 ±64m 后
-        //    细格只剩 4096 个，实例总数降到 19456（-32%）。
+        //    细格只剩 4096 个，实例总数降到 16146（-32%）。
         //    取舍依据：`terrain_height` 中央 140m 内是平的，所以 ±64m 之外用 4m 格
         //    **不会有可见的高度差**；近处（玩家脚下 128m×128m）仍是 2m 细格。
         //
@@ -719,6 +723,12 @@ impl Renderer {
         // 闭包拿不到 &mut self 的多个字段，这里直接按序写入各字段
         let mut push_quad = |x: f32, z: f32, size: f32| {
             let y = terrain_height(x, z) + 0.05;
+            // 丘陵区（地形高度 > 5cm）不铺地面砖：砖块按格心高度平铺，相邻格高差 1–2m 时
+            // 会在地平线附近露出台阶缝（2026-10-22 定案：远景细亮线的主因）。
+            // 那里交给地形网格（LOD + morph 连续）；sink 已随半径淡出，交界高差 ≈0。
+            if terrain_height(x, z) > 0.05 {
+                return;
+            }
             // GROUND_VERTS 是 2×2 的 quad（半幅 1）⇒ 缩放系数 = 半边长 = size/2
             let scale = size * 0.5;
             let model = glam::Mat4::from_scale_rotation_translation(
@@ -868,7 +878,7 @@ impl Renderer {
         }
 
         // 🔴 这两条日志原来都印 `INSTANCE_COUNT`（65536），而实例场 2026-10-13 改成
-        // 内外双密度之后**实际只有 19456 个** ⇒ 排查的人会以为"场是满的"。
+        // 内外双密度之后**实际只有 16146 个** ⇒ 排查的人会以为"场是满的"。
         // `INSTANCE_COUNT` 是 **slot 布局基准**（marker/NPC 槽位从它往后排），
         // 与"实例场里真有多少个"是两回事（2026-10-15 更正）。
         log::info!(
