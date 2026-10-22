@@ -6,6 +6,8 @@ use super::*;
 impl Renderer {
     pub(crate) fn init_render_pass(&mut self) -> Result<(), String> {
         let msaa = self.msaa_samples;
+        // SSAO 前置：MSAA 开启且设备支持时，主 pass 多一个**非 MSAA 深度 resolve 附件**。
+        let use_resolve = use_depth_resolve(self.depth_resolve_available, msaa);
         // 🔴 **MSAA 关闭（TYPE_1）必须单独一条路径**（2026-10-17 外部复核指出，已确认）：
         // 原来无条件声明 `resolve_attachments`，而颜色附件采样数是 1 ⇒ 违反
         // `VUID-VkSubpassDescription-pResolveAttachments-00848`
@@ -49,7 +51,10 @@ impl Renderer {
             let subpasses = [subpass];
             let attachments = [scene_color, depth];
             // 附件个数唯一真源（见 `helpers::main_pass_attachment_count`）
-            debug_assert_eq!(attachments.len(), main_pass_attachment_count(msaa));
+            debug_assert_eq!(
+                attachments.len(),
+                main_pass_attachment_count(msaa, false)
+            );
             let dependency = vk::SubpassDependency2::default()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
                 .dst_subpass(0)
@@ -128,15 +133,43 @@ impl Renderer {
                 .aspect_mask(vk::ImageAspectFlags::DEPTH);
 
         let resolve_attachment_refs = [resolve_attachment_ref];
-        let subpass = vk::SubpassDescription2::default()
+        // 深度 resolve（SSAO 前置）：MSAA 深度 → 单采样 D32，片元阶段可采样。
+        let depth_resolve_attachment = vk::AttachmentDescription2::default()
+            .format(vk::Format::D32_SFLOAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        let depth_resolve_ref = vk::AttachmentReference2::default()
+            .attachment(3)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
+            .aspect_mask(vk::ImageAspectFlags::DEPTH);
+        let mut dsr = vk::SubpassDescriptionDepthStencilResolve::default()
+            .depth_resolve_mode(vk::ResolveModeFlags::MIN)
+            .stencil_resolve_mode(vk::ResolveModeFlags::NONE)
+            .depth_stencil_resolve_attachment(&depth_resolve_ref);
+        let mut subpass = vk::SubpassDescription2::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(&color_attachment_refs)
             .resolve_attachments(&resolve_attachment_refs)
             .depth_stencil_attachment(&depth_attachment_ref);
+        if use_resolve {
+            // 只有 SubpassDescription2 有 pNext 链（v1 结构不行）——这也是先做 v2 迁移的原因。
+            subpass = subpass.push_next(&mut dsr);
+        }
         let subpasses = [subpass];
-        let attachments = [color_attachment, resolve_attachment, depth_attachment];
+        let mut attachments = vec![color_attachment, resolve_attachment, depth_attachment];
+        if use_resolve {
+            attachments.push(depth_resolve_attachment);
+        }
         // 附件个数唯一真源（见 `helpers::main_pass_attachment_count`）
-        debug_assert_eq!(attachments.len(), main_pass_attachment_count(msaa));
+        debug_assert_eq!(
+            attachments.len(),
+            main_pass_attachment_count(msaa, use_resolve)
+        );
 
         let dependency = vk::SubpassDependency2::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
@@ -365,6 +398,19 @@ impl Renderer {
     /// 为每个交换链图像创建深度缓冲（D32_SFLOAT Image + depth aspect ImageView）
     pub(crate) fn init_depth_resources(&mut self) -> Result<(), String> {
         let depth_format = vk::Format::D32_SFLOAT;
+        // SSAO 前置：深度 resolve 资源（重建路径同样先销毁再清空）
+        for &view in &self.depth_resolve_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        for &image in &self.depth_resolve_images {
+            unsafe { self.device.destroy_image(image, None) };
+        }
+        for &memory in &self.depth_resolve_memory {
+            unsafe { self.device.free_memory(memory, None) };
+        }
+        self.depth_resolve_views.clear();
+        self.depth_resolve_images.clear();
+        self.depth_resolve_memory.clear();
         // 🔴 **先销毁再清空** —— 与 `init_msaa_resources` 同一个 bug、同一处修法。
         // `clear()` 只丢句柄不销毁对象，而本函数每次交换链重建都会被调用
         // ⇒ 桌面上缩放窗口/切后台回来会**累积泄漏**深度图与显存。
@@ -442,11 +488,76 @@ impl Renderer {
             self.depth_images_memory.push(memory);
             self.depth_image_views.push(view);
         }
+        // ---- SSAO 前置：深度 resolve 目标（每交换链图像一张）----
+        // 单采样、可采样；主 pass 以 MIN 模式把 MSAA 深度解析进来。
+        if use_depth_resolve(self.depth_resolve_available, self.msaa_samples) {
+            for _ in 0..self.swapchain_images.len() {
+                let image_info = vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(depth_format)
+                    .extent(vk::Extent3D {
+                        width: self.render_extent.width,
+                        height: self.render_extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(
+                        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                            | vk::ImageUsageFlags::SAMPLED,
+                    )
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+                let image = unsafe {
+                    self.device
+                        .create_image(&image_info, None)
+                        .map_err(|e| format!("创建深度 resolve Image 失败: {}", e))?
+                };
+                let mem_reqs = unsafe { self.device.get_image_memory_requirements(image) };
+                let memory_type = self.pick_memory_type(mem_reqs, true)?;
+                let alloc_info = vk::MemoryAllocateInfo::default()
+                    .allocation_size(mem_reqs.size)
+                    .memory_type_index(memory_type);
+                let memory = unsafe {
+                    self.device
+                        .allocate_memory(&alloc_info, None)
+                        .map_err(|e| format!("分配深度 resolve 内存失败: {}", e))?
+                };
+                unsafe {
+                    self.device
+                        .bind_image_memory(image, memory, 0)
+                        .map_err(|e| format!("绑定深度 resolve 内存失败: {}", e))?;
+                }
+                let view_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(depth_format)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    );
+                let view = unsafe {
+                    self.device
+                        .create_image_view(&view_info, None)
+                        .map_err(|e| format!("创建深度 resolve View 失败: {}", e))?
+                };
+                self.depth_resolve_images.push(image);
+                self.depth_resolve_memory.push(memory);
+                self.depth_resolve_views.push(view);
+            }
+        }
         log::info!(
-            "深度缓冲创建完成: {} 张 {}x{} D32_SFLOAT",
+            "深度缓冲创建完成: {} 张 {}x{} D32_SFLOAT（resolve 目标 {} 张）",
             self.depth_images.len(),
             self.render_extent.width,
-            self.render_extent.height
+            self.render_extent.height,
+            self.depth_resolve_images.len()
         );
         Ok(())
     }
@@ -1241,20 +1352,32 @@ impl Renderer {
                 // ⇒ 同一图像既当颜色附件又当 resolve 目标（内存别名冲突）。
                 // 用 `Vec` 而不是定长数组：两个分支长度不同，且 `attachments` 的借用
                 // 必须活到 `create_framebuffer` 之前（定长数组在 if 分支里会提前 drop）。
+                let use_resolve = use_depth_resolve(
+                    self.depth_resolve_available,
+                    self.msaa_samples,
+                );
                 let attachments: Vec<vk::ImageView> =
                     if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
                         vec![scene_view, self.depth_image_views[i]]
                     } else {
-                        vec![
+                        let mut v = vec![
                             self.msaa_image_views[i],
                             scene_view,
                             self.depth_image_views[i],
-                        ]
+                        ];
+                        // SSAO 前置：第 4 个附件 = 深度 resolve 目标
+                        if use_resolve {
+                            v.push(self.depth_resolve_views[i]);
+                        }
+                        v
                     };
                 // 帧缓冲绑定的 View 个数必须等于主 pass 的附件个数（唯一真源见 helpers）
                 debug_assert_eq!(
                     attachments.len(),
-                    main_pass_attachment_count(self.msaa_samples)
+                    main_pass_attachment_count(
+                        self.msaa_samples,
+                        use_depth_resolve(self.depth_resolve_available, self.msaa_samples),
+                    )
                 );
                 let framebuffer_create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(self.render_pass)

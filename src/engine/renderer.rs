@@ -1055,6 +1055,13 @@ pub struct Renderer {
     prop_attr_tris: u32,
     /// `RV3D_HEADLESS=1`：无窗口离屏取证（不创建交换链、不 present；见 `helpers::headless_mode`）
     headless: bool,
+    /// SSAO 前置（2026-10-22）：设备暴露 supportedDepthResolveModes 且 MSAA 开启时，主 pass
+    /// 多一个**非 MSAA 深度 resolve 附件**（D32，`DEPTH_STENCIL_ATTACHMENT | SAMPLED`，MIN 模式），
+    /// 供后续 SSAO 合成 pass 采样。不支持时整条路径关闭，附件布局与旧版逐字节一致。
+    depth_resolve_available: bool,
+    depth_resolve_images: Vec<vk::Image>,
+    depth_resolve_memory: Vec<vk::DeviceMemory>,
+    depth_resolve_views: Vec<vk::ImageView>,
     /// 离屏模式下这一帧用第几张离屏图像（轮转；等价于 acquire 拿到的 image_index）
     headless_image: u32,
     /// 无头离屏图像的内存（正常模式为空；这些 Image 不归交换链所有，必须自己销毁）

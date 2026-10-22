@@ -404,6 +404,30 @@ impl Renderer {
             device_extensions.push(c"VK_KHR_ray_query".as_ptr());
             device_extensions.push(c"VK_KHR_ray_tracing_pipeline".as_ptr());
         }
+        // ---- SSAO 前置：查询深度 resolve 支持（2026-10-22）----
+        // Vulkan **没有**这功能的 feature flag，只有属性结构
+        // `VkPhysicalDeviceDepthStencilResolveProperties.supportedDepthResolveModes`；
+        // 含 MIN 即可把 MSAA 深度 resolve 到单采样图，无需在设备创建时启用特性。
+        // 🔴 属性结构必须挂 `get_physical_device_properties2`（挂到 features2 的 pNext 链上
+        // 驱动会忽略它 ⇒ 探测恒 false、SSAO 静默不生效；2026-10-22 实测踩到）。
+        let mut dsr_props = vk::PhysicalDeviceDepthStencilResolveProperties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default();
+        props2.p_next = &mut dsr_props as *mut _ as *mut std::ffi::c_void;
+        unsafe {
+            instance.get_physical_device_properties2(physical_device, &mut props2);
+        }
+        let depth_resolve_available = dsr_props
+            .supported_depth_resolve_modes
+            .contains(vk::ResolveModeFlags::MIN);
+        if depth_resolve_available {
+            log::info!(
+                "深度 resolve 可用（modes={:?}）：启用 SSAO 前置（resolve 附件）",
+                dsr_props.supported_depth_resolve_modes
+            );
+        } else {
+            log::warn!("深度 resolve 不可用：SSAO 路径关闭，主 pass 附件与旧版一致");
+        }
+
         let supported_features =
             unsafe { instance.get_physical_device_features(physical_device) };
         let mut physical_device_features = vk::PhysicalDeviceFeatures::default();
@@ -796,6 +820,10 @@ impl Renderer {
             pt_move_base_fwd: std::cell::Cell::new([0.0; 3]),
 
             headless: crate::engine::renderer::helpers::headless_mode(),
+            depth_resolve_available,
+            depth_resolve_images: Vec::new(),
+            depth_resolve_memory: Vec::new(),
+            depth_resolve_views: Vec::new(),
             headless_image: 0,
             headless_image_memory: Vec::new(),
             screenshot_request: None,

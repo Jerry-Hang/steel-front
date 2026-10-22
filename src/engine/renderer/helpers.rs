@@ -62,12 +62,32 @@ pub(crate) fn swapchain_final_layout(headless: bool) -> vk::ImageLayout {
 ///
 /// 历史上已经踩过两次（第一次 `clear_values` 2 个 vs 附件 3 个；第二次我改 TYPE_1 路径时
 /// 附件变 2 个但 `clear_values` 仍 3 个）。⇒ 三处统一引用本函数 + `debug_assert_eq!`。
-pub(crate) const fn main_pass_attachment_count(msaa: vk::SampleCountFlags) -> usize {
-    if msaa.as_raw() == vk::SampleCountFlags::TYPE_1.as_raw() {
+pub(crate) const fn main_pass_attachment_count(
+    msaa: vk::SampleCountFlags,
+    depth_resolve: bool,
+) -> usize {
+    let base = if msaa.as_raw() == vk::SampleCountFlags::TYPE_1.as_raw() {
         2
     } else {
         3
+    };
+    // 深度 resolve 附件只在 MSAA 开启时存在（单采样深度没有可 resolve 的对象）
+    if depth_resolve && msaa.as_raw() != vk::SampleCountFlags::TYPE_1.as_raw() {
+        base + 1
+    } else {
+        base
     }
+}
+
+/// 本次运行是否启用深度 resolve 附件（SSAO 前置）：设备暴露支持的深度 resolve 模式
+/// **且** MSAA 开启。注意 Vulkan **没有**这个特性的 feature flag，只有属性结构
+/// `VkPhysicalDeviceDepthStencilResolveProperties`（`supportedDepthResolveModes`）——
+/// 有属性（且含 MIN）即可用，无需在设备创建时启用。
+pub(crate) fn use_depth_resolve(
+    depth_resolve_available: bool,
+    msaa: vk::SampleCountFlags,
+) -> bool {
+    depth_resolve_available && msaa.as_raw() != vk::SampleCountFlags::TYPE_1.as_raw()
 }
 
 pub(crate) fn no_ground_detail_tex() -> bool {

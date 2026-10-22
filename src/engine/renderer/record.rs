@@ -110,13 +110,15 @@ impl Renderer {
                 stencil: 0,
             },
         };
+        let use_resolve = use_depth_resolve(self.depth_resolve_available, self.msaa_samples);
         let clear_values: Vec<vk::ClearValue> =
             if self.msaa_samples == vk::SampleCountFlags::TYPE_1 {
                 // 2 附件：[场景颜色, 深度]
                 vec![vk::ClearValue { color: sky }, depth_clear]
             } else {
-                // 3 附件：[MSAA 颜色, resolve(占位), 深度]
-                vec![
+                // 3 附件：[MSAA 颜色, resolve(占位), 深度]；SSAO 前置再多 1 个深度 resolve
+                // 附件（load_op=DONT_CARE，清屏值只是占位）。
+                let mut v = vec![
                     vk::ClearValue { color: sky },
                     vk::ClearValue {
                         color: vk::ClearColorValue {
@@ -124,12 +126,19 @@ impl Renderer {
                         },
                     },
                     depth_clear,
-                ]
+                ];
+                if use_resolve {
+                    v.push(vk::ClearValue { color: sky });
+                }
+                v
             };
         // 🔴 `clear_values` 按附件索引寻址 ⇒ **元素个数必须等于附件个数**（唯一真源见 helpers）
         debug_assert_eq!(
             clear_values.len(),
-            main_pass_attachment_count(self.msaa_samples)
+            main_pass_attachment_count(
+                self.msaa_samples,
+                use_depth_resolve(self.depth_resolve_available, self.msaa_samples),
+            )
         );
 
         let render_pass_begin_info = vk::RenderPassBeginInfo::default()

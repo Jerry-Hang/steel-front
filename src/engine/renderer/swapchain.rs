@@ -755,6 +755,23 @@ impl Renderer {
         }
         self.depth_images.clear();
         self.depth_images_memory.clear();
+        // SSAO 前置：深度 resolve 目标（每交换链图像一张）
+        for &view in &self.depth_resolve_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        self.depth_resolve_views.clear();
+        for (&image, &memory) in self
+            .depth_resolve_images
+            .iter()
+            .zip(self.depth_resolve_memory.iter())
+        {
+            unsafe {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+            }
+        }
+        self.depth_resolve_images.clear();
+        self.depth_resolve_memory.clear();
         // MSAA 颜色附件
         for &view in &self.msaa_image_views {
             unsafe { self.device.destroy_image_view(view, None) };
