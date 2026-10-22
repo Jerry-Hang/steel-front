@@ -1104,6 +1104,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             }
             shaded = lit + sheen;
         }
+        // ---- 接触暗角 + 天空遮蔽（2026-10-22，无新增资源/无新 pass）----
+        //
+        // 目标：解决"楼/箱/人贴地不落地、整体像硬纸板"的观感（Unity/UE 观感差距的第一项）。
+        // 真正的屏幕空间 SSAO 要动主 pass 深度 resolve + 新 pass + 描述符集（高风险管线手术），
+        // 这里先用**逐像素解析近似**把 80% 的效果拿到手：
+        //   ① 天空遮蔽：法线朝上的面见得到天空、朝下的面（檐底/箱底/树冠下缘）看不到
+        //      ⇒ 0.62（朝下）→ 1.0（朝上）；竖直面 ≈ 0.81；
+        //   ② 接触暗角：离地 1.2m 内渐暗（0.72 → 1.0）——墙角、树根、箱底与地面之间
+        //      没有环境光能挤进去，这是"浮空感"的主要来源。
+        // 只乘亮度（RGB 同比例），不碰色相；夹在 [0.62, 1.0]，最多压暗 38%。
+        // 自发光面（flat_flag=1.05）不参与；地面/地形走另一条分支,本来就不会进来。
+        if (abs(input.flat_flag - 1.05) > 0.005) {
+            let ao_up = clamp(fnrm.y, -1.0, 1.0);
+            let ao_sky = 0.62 + 0.38 * (0.5 + 0.5 * ao_up);
+            let ao_h = clamp(input.world_pos.y, 0.0, 1.2) / 1.2;
+            let ao_contact = 0.72 + 0.28 * (ao_h * ao_h * (3.0 - 2.0 * ao_h));
+            let ao = clamp(ao_sky * ao_contact, 0.62, 1.0);
+            shaded = shaded * ao;
+        }
         let fg = fog_amount(view_distance(input));
         return vec4<f32>(aces_tonemap(mix(shaded, FOG_TINT, fg) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
     }
@@ -2103,6 +2122,10 @@ fn main() {
         FRAGMENT_SHADER_WGSL.replace("{FOG_TINT}", &vec3_lit(SKY_HORIZON_XYZ)),
     );
     assert!(fs_src.contains("aces_tonemap("), "片元着色器丢了 ACES tonemap");
+    assert!(
+        fs_src.contains("ao_contact"),
+        "片元着色器丢了接触暗角/天空遮蔽项（ao_contact）"
+    );
     let fs_spirv = compile_wgsl(&fs_src);
     let mesh_spirv = compile_wgsl_mesh(MESH_SHADER_WGSL);
     let hud_vs_spirv = compile_wgsl(HUD_VERTEX_SHADER_WGSL);
