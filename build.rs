@@ -1129,7 +1129,21 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 世界空间 UV：地面/地形用 world_pos.xz 映射到全图 [0,1]（覆盖 2*256 米），
     // 与 procedural.rs 烘焙纹理严格对齐（marker/NPC/自发光已走 flat_flag 纯色路径，不采样）。
     let world_uv = (input.world_pos.xz + vec2<f32>(256.0, 256.0)) / 512.0;
-    let texel = textureSample(texture_sampled, texture_sampler, world_uv);
+    // ---- 各向异性近似（2026-10-22）----
+    // 把"每像素世界足迹"拆回**两个屏幕轴向**在 xz 平面上的长度：
+    //   minor = 垂直视线方向的像素间隔（决定还能保住多细的纹理）
+    //   major = 沿视线方向的拉伸（混叠/摩尔纹/横条带的来源）
+    // 掠射角下两者差 1–2 个数量级。原来一律取 max（≈major）⇒ 近景地面在最该有细节的
+    // 地方被判成"纹理太密"而淡成平色（实测放宽淡出阈值只会把远景带坏，PROGRESS 有记录）。
+    // 现在：LOD 用 minor（保住细节），淡出用 major（只在真正拉伸过度时退化成平色）。
+    // 代价：长轴方向仍是"拉伸的纹理"而不是真各向异性过滤 —— 这正是可接受的那部分。
+    let du_xz = dpdx(input.world_pos.xz);
+    let dv_xz = dpdy(input.world_pos.xz);
+    let footprint_minor = max(min(length(du_xz), length(dv_xz)), 1e-5);
+    let footprint_major = max(length(du_xz), length(dv_xz));
+    // 烘焙地面纹理：512m 覆盖 1024 纹素 ⇒ 1 纹素 = 0.5m（与 procedural.rs::GROUND_TEXEL_M 同源）。
+    let macro_lvl = log2(max(footprint_minor / 0.5, 1.0));
+    let texel = textureSampleLevel(texture_sampled, texture_sampler, world_uv, macro_lvl);
     // 地面/地形：**烘焙纹理是唯一的颜色来源**，顶点色只做乘法性明暗调制。
     //
     // 旧式 `mix(input.color, texel.rgb, 0.75)` 是**加法**混合，它给每个像素抬了一个
@@ -1149,8 +1163,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 一个像素覆盖几十个纹素；mip 链只能给"糊"、还带横向摩尔纹带（实测旁路纹理后
     // 地平线条纹强度 3.66→1.90）。做法 = 按**米/像素足迹**把贴图淡出到顶点色调
     // （顶点色调是纯色，不含纹素混叠）。0.10–0.30 m/px：更近保持纹理，更远用平色。
-    let gderiv_f = world_derivatives(input.world_pos);
-    let gt_fade = 1.0 - smoothstep(0.10, 0.30, max(gderiv_f.x, gderiv_f.z));
+    // 淡出只看 **major**（沿视线拉伸）：显式 LOD 已按 minor 保住细节，第二道闸只在
+    // 真正拉伸过度（>1m/像素）时退平，避免把近景判成"纹理太密"。
+    let stretch = footprint_major / footprint_minor;
+    // 拉伸比过大时（各向异性近似失效区）宁可退平，也别把条纹带回来
+    let stretch_fade = 1.0 - smoothstep(4.0, 10.0, stretch);
+    let gt_fade = stretch_fade * (1.0 - smoothstep(0.3, 1.0, footprint_major));
     var mixed = mix(
         vec3<f32>(gtone),
         texel.rgb * mix(0.85, 1.15, clamp(gtone, 0.0, 1.0)),
@@ -1162,9 +1180,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 细节图按 GROUND_DETAIL_METRES 平铺 → 7.8mm/纹素，两个数量级的差距。
     // ⚠ 闸门必须用**米/像素**，不能用视距（本项目已踩过一次：视距闸门在掠射角下
     // 混叠成满屏白点）。每像素盖到 0.25m（=32 纹素）时完全退出。
-    let gderiv = world_derivatives(input.world_pos);
-    let gpx = max(gderiv.x, gderiv.z);
-    let gdetail = 1.0 - smoothstep(0.06, 0.25, gpx);
+    // 细节层也按 **minor** 判：掠射角下细节图（7.8mm/纹素）本该沿被压扁的方向"拉长"，
+    // 而不是整块消失；只在 minor 粗到 >0.6m/像素时完全退出。
+    let gpx = footprint_minor;
+    let gdetail = stretch_fade * (1.0 - smoothstep(0.1, 0.3, gpx));
     // ⚠ 本层由 light_data.flags.w 显式开关，默认关（2026-09-03 定位的"地面全黑/街区黑块"
     // 根因）。binding 9（ground_detail_tex）是本文件里唯一"片元声明了、管线却可能没绑定"
     // 的槽位：set layout 缺项或任一帧描述符漏写 → 驱动给空描述符 → 采样恒 0 → 本层乘法
