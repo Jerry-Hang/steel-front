@@ -649,7 +649,10 @@ fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
     let u_edge = fu.min(1.0 - fu);
     let v_fr = vv.fract();
     let v_edge = v_fr.min(1.0 - v_fr);
-    let seam = 1.0 - smoothstep(0.02, 0.09, u_edge.min(v_edge));
+    // 2026-10-22：砖缝过渡从 0.02–0.09（≈9px 软倒角）收到 0.015–0.040（≈3px）
+    // ——"墙面砖纹理糊"的根因是**纹理本身把砖块画成大倒角过渡**，不是采样/分辨率
+    //（分辨率 512→1024、采样各向异性两假设都已 A/B 证伪，见 PROGRESS）。
+    let seam = 1.0 - smoothstep(0.015, 0.040, u_edge.min(v_edge));
 
     // 每块混凝土明度抖动 + 骨料颗粒（双频噪点）
     // 🔴 明度抖动的**列号必须与砖缝同源**（2026-10-19 外部复核第 5 条，已确认）：
@@ -658,7 +661,9 @@ fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
     // 一明一暗两半**（那里正好没有砂浆缝，肉眼就是一道硬边）。
     let cols = SKIN_BRICK_COLS as i32;
     let col = ((u * SKIN_BRICK_COLS + off).floor() as i32).rem_euclid(cols);
-    let tone = 0.88 + unit_from_hash(hash2(row, col, seed.wrapping_add(40))) * 0.24;
+    // 砖块之间明度差从 ±12% 拉到 ±16%：让砌体在掠射/远处仍有"每块不同"的层次，
+    // 与更硬的砖缝配套；列号仍与砖缝同源（外部复核第 5 条）。
+    let tone = 0.82 + unit_from_hash(hash2(row, col, seed.wrapping_add(40))) * 0.32;
     let grain = value_noise(u * 22.0, v * 22.0, 1.0, seed.wrapping_add(41)) * 0.5
         + value_noise(u * 90.0, v * 90.0, 1.0, seed.wrapping_add(42)) * 0.5;
     let base: [f32; 3] = [0.50, 0.50, 0.52];
@@ -675,7 +680,7 @@ fn marker_skin(u: f32, v: f32, seed: u32) -> [f32; 3] {
         c = lerp3(c, [0.26, 0.27, 0.29], m);
     }
     // 砂浆缝压暗
-    c = lerp3(c, [0.28, 0.29, 0.31], seam * 0.7);
+    c = lerp3(c, [0.24, 0.25, 0.27], seam * 0.85);
     // 最终细噪（防色带）
     let dither = value_noise(u * 128.0, v * 128.0, 1.0, seed.wrapping_add(44)) * 0.035;
     [c[0] + dither, c[1] + dither, c[2] + dither]
