@@ -247,3 +247,23 @@ SSAO（从深度重建）、阴天/黄昏天空预设（3 组颜色常量 + 环�
 
 ⚠️ 「条纹 −67%」是在**圆盘地形**下量的；方盘改动后画面待有截图窗口时复验
 （按推理：丘陵退到方边外、城里不再有坡上砖，条纹只会更少，但不写成已验证结论）。
+
+## 📸 待截图验证清单（当前环境无窗口取证，按队列记录，别重复排查）
+
+> 背景：2026-10-22 用户要求"不再霸屏"，本机 Wayland 下 `RV3D_HIDDEN=1` 也不能保证窗口不映射
+> ⇒ 所有取证暂停。下面每条都已有**离线判据或代码依据**，只差一次同机位截图闭环。
+
+| # | 改动 | 已有依据 | 待验内容 |
+|---|---|---|---|
+| 1 | 丘陵区不铺地面砖（条纹 −67%） | 判据 `ground_field_skips_hills_and_keeps_double_density`（纯 CPU 钉死 18011/每格 h≤0.05/y=h+0.05） | 同机位行条纹指标（基线 2.449；圆盘地形下测得 0.800）+ 目视地平线 |
+| 2 | 平坦区圆盘 → **方盘**（城市四角不再被埋） | 判据 `city_sits_entirely_on_flat_ground`（反向验证过）+ `terrain_render_sink_fades_out_with_radius` | 四角街区楼基与街面是否齐平、方边外丘陵的过渡带有没有可见裂缝/折痕 |
+| 3 | M2 法线 + GGX 高光 | 判据钉死 stride 44 / 法线来源 / GGX 系数 | 已看过（早前截图）；方盘改动后复查远端楼体高光是否仍连续 |
+| 4 | M5 天空 + ACES + 雾 | 判据 `sky_and_fog_colors_share_one_source` / `aces_tonemap_coefficients_are_shared` | 已看过；方盘后复查地平线处 地面→地形→天空 三段颜色是否连续 |
+| 5 | 地面纹理掠射淡出（−33% 条纹） | 判据侧无（纯视觉参数） | 与 #1 一起复验叠加效果 |
+
+**下次可以截图时的最小批次**（一次跑完，不反复弹窗）：
+```bash
+RV3D_GPU=dgpu RV3D_HIDDEN=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 RV3D_CAM='fly:-6.5,1.7,-210:0,8' ./target/release/steel-front    # 远景地平线
+RV3D_GPU=dgpu RV3D_HIDDEN=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 RV3D_CAM='fly:0,1.7,0:45,0'      ./target/release/steel-front    # 广场近景（回归对照）
+RV3D_GPU=dgpu RV3D_HIDDEN=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=7 RV3D_EXIT_AFTER=12 RV3D_CAM='fly:-190,25,-190:45,25' ./target/release/steel-front   # 四角街区（本次方盘修复）
+```

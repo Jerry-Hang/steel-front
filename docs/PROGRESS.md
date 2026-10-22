@@ -1259,3 +1259,6 @@ tree_oak↔tree_oak 16、barrier_hesco↔building 16、container↔(building/tre
 - 交叉检查：windows（x86_64-pc-windows-msvc）0 警告；aarch64-linux 仅 1 条**既有**
   `cpu.rs::sched_getaffinity` dead-code（与本次改动无关）。
 - 验收：0 警告 / **831 passed + 4 ignored** / CJK 门 OK / 白名单 OK。
+
+补充：`docs/GRAPHICS-PLAN.md` 新增「待截图验证清单」——把 5 条需要视觉闭环的改动与已有离线依据
+列成表（含下次最小批次命令），避免下个会话重复凭记忆排查。
