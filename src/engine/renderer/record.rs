@@ -991,12 +991,14 @@ impl Renderer {
                     &[blit],
                     vk::Filter::LINEAR,
                 );
-                // ③ 交换链 TRANSFER_DST → PRESENT_SRC_KHR
+                // ③ 交换链 TRANSFER_DST → 最终布局
+                // 正常 = PRESENT_SRC_KHR；无头离屏 = TRANSFER_SRC_OPTIMAL（离屏图像不能是
+                // PRESENT_SRC —— Vulkan 只允许换链图像用那个布局，且截图读回正好从它拷）。
                 let to_present = vk::ImageMemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(vk::AccessFlags::empty())
                     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .new_layout(crate::engine::renderer::helpers::swapchain_final_layout(self.headless))
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(sw_img)

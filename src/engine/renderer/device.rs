@@ -795,6 +795,9 @@ impl Renderer {
             pt_move_base_cam: std::cell::Cell::new([0.0; 3]),
             pt_move_base_fwd: std::cell::Cell::new([0.0; 3]),
 
+            headless: crate::engine::renderer::helpers::headless_mode(),
+            headless_image: 0,
+            headless_image_memory: Vec::new(),
             screenshot_request: None,
             screenshot_buffers: Vec::new(),
             screenshot_buffers_memory: Vec::new(),

@@ -4,7 +4,93 @@
 use super::*;
 
 impl Renderer {
+    /// 无窗口离屏渲染目标（`RV3D_HEADLESS=1`）：**不创建交换链、不 present**。
+    ///
+    /// 只创建与交换链同格式的离屏 COLOR_ATTACHMENT|TRANSFER_SRC 图像充当"交换链图像"：
+    /// 主 pass 仍然渲进场景图、再 blit 到这些图像（record.rs 的既有路径逐字节不变），
+    /// 最后截图读回 PNG。因为从不向 winit 窗口 attach buffer，窗口不会被映射 = **不上屏**。
+    fn init_headless_target(&mut self) -> Result<(), String> {
+        // 重建路径：先拆旧的
+        for &view in &self.swapchain_image_views {
+            unsafe { self.device.destroy_image_view(view, None) };
+        }
+        for &image in &self.swapchain_images {
+            unsafe { self.device.destroy_image(image, None) };
+        }
+        for &memory in &self.headless_image_memory {
+            unsafe { self.device.free_memory(memory, None) };
+        }
+        self.headless_image_memory.clear();
+        self.swapchain_image_views.clear();
+        self.swapchain_images.clear();
+        // 无头模式没有呈现引擎：图像轮转由 `headless_image` 计数决定，这些信号量不参与。
+        for sem in std::mem::take(&mut self.image_available_semaphores) {
+            unsafe { self.device.destroy_semaphore(sem, None) };
+        }
+        for sem in std::mem::take(&mut self.render_finished_semaphores) {
+            unsafe { self.device.destroy_semaphore(sem, None) };
+        }
+        self.swapchain = vk::SwapchainKHR::null();
+        self.swapchain_format = vk::Format::B8G8R8A8_SRGB;
+        let extent = crate::engine::renderer::helpers::headless_extent();
+        self.swapchain_extent = extent;
+        self.window_extent = extent;
+        const HEADLESS_IMAGES: usize = 3;
+        for _ in 0..HEADLESS_IMAGES {
+            let image_info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(self.swapchain_format)
+                .extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let image = unsafe { self.device.create_image(&image_info, None) }
+                .map_err(|e| format!("创建离屏图像失败: {}", e))?;
+            let reqs = unsafe { self.device.get_image_memory_requirements(image) };
+            let mt = self.pick_memory_type(reqs, true)?;
+            let alloc = vk::MemoryAllocateInfo::default()
+                .allocation_size(reqs.size)
+                .memory_type_index(mt);
+            let memory = unsafe { self.device.allocate_memory(&alloc, None) }
+                .map_err(|e| format!("分配离屏图像内存失败: {}", e))?;
+            unsafe { self.device.bind_image_memory(image, memory, 0) }
+                .map_err(|e| format!("绑定离屏图像内存失败: {}", e))?;
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(self.swapchain_format)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(0)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                );
+            let view = unsafe { self.device.create_image_view(&view_info, None) }
+                .map_err(|e| format!("创建离屏图像视图失败: {}", e))?;
+            self.swapchain_images.push(image);
+            self.headless_image_memory.push(memory);
+            self.swapchain_image_views.push(view);
+        }
+        self.headless_image = 0;
+        log::info!(
+            "RV3D_HEADLESS=1：离屏渲染 {}x{} ×{} 张（不创建交换链、不呈现、不会弹出窗口）",
+            extent.width,
+            extent.height,
+            HEADLESS_IMAGES
+        );
+        Ok(())
+    }
+
     pub(crate) fn init_swapchain(&mut self) -> Result<(), String> {
+        if self.headless {
+            return self.init_headless_target();
+        }
         let surface_capabilities = unsafe {
             self.surface_loader
                 .get_physical_device_surface_capabilities(self.physical_device, self.surface)
@@ -640,6 +726,18 @@ impl Renderer {
             unsafe { self.device.destroy_image_view(image_view, None) };
         }
         self.swapchain_image_views.clear();
+        // 无头离屏：交换链图像是**我们自己创建的**（不归 vkSwapchainKHR 所有）⇒ 必须显式回收；
+        // 正常模式下这个列表由 swapchain 持有，不能在这里 destroy（会二次销毁）。
+        if self.headless {
+            for &image in &self.swapchain_images {
+                unsafe { self.device.destroy_image(image, None) };
+            }
+            self.swapchain_images.clear();
+            for &memory in &self.headless_image_memory {
+                unsafe { self.device.free_memory(memory, None) };
+            }
+            self.headless_image_memory.clear();
+        }
         // 深度资源
         for &view in &self.depth_image_views {
             unsafe { self.device.destroy_image_view(view, None) };

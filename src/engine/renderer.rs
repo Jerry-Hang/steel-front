@@ -1053,6 +1053,12 @@ pub struct Renderer {
     prop_attr_buf: vk::Buffer,
     prop_attr_mem: vk::DeviceMemory,
     prop_attr_tris: u32,
+    /// `RV3D_HEADLESS=1`：无窗口离屏取证（不创建交换链、不 present；见 `helpers::headless_mode`）
+    headless: bool,
+    /// 离屏模式下这一帧用第几张离屏图像（轮转；等价于 acquire 拿到的 image_index）
+    headless_image: u32,
+    /// 无头离屏图像的内存（正常模式为空；这些 Image 不归交换链所有，必须自己销毁）
+    headless_image_memory: Vec<vk::DeviceMemory>,
     /// 截图请求路径（Some 表示本帧渲染完成后读回 swapchain 图像并写 PNG）
     screenshot_request: Option<std::path::PathBuf>,
     /// 截图读回 staging buffer（按 max_frames_in_flight 双缓冲，惰性创建）

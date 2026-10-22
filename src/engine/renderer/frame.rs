@@ -226,7 +226,7 @@ impl Renderer {
             .base_array_layer(0)
             .layer_count(1);
         let barrier_to_transfer = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .old_layout(crate::engine::renderer::helpers::swapchain_final_layout(self.headless))
             .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -236,7 +236,7 @@ impl Renderer {
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
         let barrier_to_present = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .new_layout(crate::engine::renderer::helpers::swapchain_final_layout(self.headless))
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image)
@@ -448,7 +448,15 @@ impl Renderer {
         let t0 = Instant::now();
         // 有限超时 + 分类重试（判据见 `classify_acquire_err`）：呈现引擎不给图像时
         // 不能无限等 —— 先记日志，再降级到 mailbox 重建，最后才报错交出这一帧。
-        let (image_index, suboptimal) = loop {
+        let (image_index, suboptimal) = if self.headless {
+            // 无窗口离屏：没有呈现引擎可 acquire —— 图像按帧轮转"自取"，
+            // 也不需要 image_available 信号量（交换链从未创建，见 `init_headless_target`）。
+            let n = self.swapchain_images.len().max(1) as u32;
+            let idx = self.headless_image % n;
+            self.headless_image = self.headless_image.wrapping_add(1);
+            (idx, false)
+        } else {
+            let pair = loop {
             let r = unsafe {
                 self.swapchain_loader.acquire_next_image(
                     self.swapchain,
@@ -503,6 +511,8 @@ impl Renderer {
                     }
                 },
             }
+            };
+            pair
         };
         self.acquire_timeouts = 0;
         self.stage_acquire_us = t0.elapsed().as_micros() as u64;
@@ -865,34 +875,44 @@ impl Renderer {
         }
         self.stage_record_us = t0.elapsed().as_micros() as u64;
 
-        let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        // ⚠ **按下标 `image_index` 取，不是 `current_frame`** —— 理由见
-        // `resize_render_finished_semaphores` 的文档（VUID-vkQueueSubmit-pSignalSemaphores-00067）。
-        // 🔴 同上：这里同样**不能裸 `?`** —— 位置在第 519 行 `reset_fences` 之后，
-        // 早退会让围栏留在 Unsignaled 且 `current_frame` 不自增 ⇒ 下一帧死等 15 秒。
-        let render_finished = match self.render_finished_semaphores.get(image_index as usize) {
-            Some(&sem) => sem,
-            None => {
-                let (stalled, msg) = abort_after_acquire(&format!(
-                    "render-finished 信号量缺失：image_index={}，共 {} 个（应等于交换链图像数 {}）",
-                    image_index,
-                    self.render_finished_semaphores.len(),
-                    self.swapchain_images.len()
-                ));
-                self.gpu_stalled = stalled;
-                log::error!("{}", msg);
-                return Err(msg);
-            }
-        };
-        let signal_semaphores = [render_finished];
         let cmd_buffers = [cmd_buffer];
-
-        let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&cmd_buffers)
-            .signal_semaphores(&signal_semaphores);
+        // 无头模式既不 acquire 也不 present ⇒ 不参与任何信号量（图像自轮转、由围栏定序）。
+        // 🔴 正常模式下 `render_finished` 的**查找失败**也必须走 `abort_after_acquire`，
+        //    所以这里保持两套分支、别把查找挪进公共路径。
+        // ⚠ 数组必须声明在 `if` **外面**：`vk::SubmitInfo` 持有它们的引用，
+        //    在分支内声明会在 `submit_info` 使用时已析构（E0597）。
+        let mut wait_semaphores = [vk::Semaphore::null()];
+        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let mut render_finished = vk::Semaphore::null();
+        if !self.headless {
+            wait_semaphores[0] = self.image_available_semaphores[self.current_frame];
+            // ⚠ **按下标 `image_index` 取，不是 `current_frame`** —— 理由见
+            // `resize_render_finished_semaphores` 的文档（VUID-vkQueueSubmit-pSignalSemaphores-00067）。
+            render_finished = match self.render_finished_semaphores.get(image_index as usize) {
+                Some(&sem) => sem,
+                None => {
+                    let (stalled, msg) = abort_after_acquire(&format!(
+                        "render-finished 信号量缺失：image_index={}，共 {} 个（应等于交换链图像数 {}）",
+                        image_index,
+                        self.render_finished_semaphores.len(),
+                        self.swapchain_images.len()
+                    ));
+                    self.gpu_stalled = stalled;
+                    log::error!("{}", msg);
+                    return Err(msg);
+                }
+            };
+        }
+        let signal_semaphores = [render_finished];
+        let submit_info = if self.headless {
+            vk::SubmitInfo::default().command_buffers(&cmd_buffers)
+        } else {
+            vk::SubmitInfo::default()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&cmd_buffers)
+                .signal_semaphores(&signal_semaphores)
+        };
 
         let t0 = Instant::now();
         unsafe {
@@ -917,17 +937,22 @@ impl Renderer {
             }
         }
 
-        let swapchains = [self.swapchain];
-        let image_indices = [image_index];
-        let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(&signal_semaphores)
-            .swapchains(&swapchains)
-            .image_indices(&image_indices);
-
         let t0 = Instant::now();
-        let present_result = unsafe {
-            self.swapchain_loader
-                .queue_present(self.present_queue, &present_info)
+        let present_result = if self.headless {
+            // 离屏：**不 present**（窗口从未 attach buffer ⇒ 不会上屏/抢焦点）。
+            // 本帧结果已由上面的截图读回写成 PNG；等价于"呈现成功且无需重建"。
+            Ok(false)
+        } else {
+            let swapchains = [self.swapchain];
+            let image_indices = [image_index];
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+            unsafe {
+                self.swapchain_loader
+                    .queue_present(self.present_queue, &present_info)
+            }
         };
         self.stage_present_us = t0.elapsed().as_micros() as u64;
 

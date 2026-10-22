@@ -229,8 +229,8 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
   面板挂 **AMD 610M**、游戏跑 **5060** ⇒ 每帧**跨适配器拷贝** + 核显合成 ⇒ 窄的是**核显链**
   （数字见 §21.81(a)）。修法 = **`RV3D_BG_FPS`**（失焦上限；**引擎默认 0 = 不限**，否则 perf/冒烟
   会被静默变成 20 fps；`SteelFront.bat` 设 20：fps 165→19.9）。
-  🔴 **GPU Engine 计数器必须按 `luid` 分组**（按进程名聚合会把两块卡相加）。诊断开关 `RV3D_FORCE_UNFOCUSED=1`。
-- ⚠️ **IMMEDIATE 在真实显示器上持续撕裂**，而 `PrintWindow` 抓到的是已合成帧 ⇒ 别用静态截图证伪。
+  🔴 GPU Engine 计数器按 `luid` 分组（否则两卡相加）。开关 `RV3D_FORCE_UNFOCUSED=1`。
+- ⚠️ **IMMEDIATE 在真实显示器上持续撕裂**；静态截图抓的是已合成帧 ⇒ 别用它证伪撕裂。
 - 🔴 **独显长跑用 `mailbox`；且所有 Vulkan 等待必须有上界**（2026-09-25 实测 + 修）：独显 +
   `defense_line` + IMMEDIATE 在第一个 Playing 帧后**静默卡死**（`LiveKernelEvent` **P1=141** = TDR；
   换 mailbox 后正常）。"静默"本身也是缺陷：acquire 现在 1s（连 3 次 ⇒ 降级 mailbox 重建）、
@@ -517,7 +517,7 @@ cargo build --release
 cargo test --release
 # 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
-# LLM 战术指挥会战（红蓝 128v128）；军情不变式判据 = tools\battle_tally_check.py（0=干净 1=有命中 2=没跑成）
+# LLM 会战（判据 tools\battle_tally_check.py：0/1/2）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
 # 截图取证（finally 里 taskkill + 硬超时）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
@@ -534,9 +534,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -S
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
 # 交替 A/B 驱动器（逐对交替 + 顺序轮转 + 配对差中位数 + A/A 底噪；退出码 2 = 批次不全，别当 n≥5 证据）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ab_pair.ps1 -Pairs 5
-# 画面差分（第一道筛子）：差异像素占比 + **差异包围盒**（没包围盒分不清"引擎坏了"和"HUD 数字变了"）
+# 画面差分（第一道筛子）：差异像素占比 + **差异包围盒**
 python scripts\png_diff.py screenshots\a.png screenshots\b.png
 ```
+
+**Linux 无窗口取景**：`RV3D_HEADLESS=1` 离屏渲染（不建交换链、不 present），配 `RV3D_SHOT_AT`
+出 PNG；`RV3D_HEADLESS_SIZE` 控分辨率。判据 `parse_headless_size_clamps_and_falls_back` /
+`final_layout_matches_present_mode`。
 
 ⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
 ---
@@ -685,8 +689,7 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 46. **🔴 审计/闸门工具必须有第三种结局：「没跑成」。** 扫描面 = 0 不算通过、读不到输入要
   fail-closed、**空日志也不算通过**（`survive_pm` 的判据整整读过一份空文件，§21.51）。
   **⇒ 先问：它扫到 0 个时会说什么？** 约定 **0=扫过无命中 / 1=有命中 / 2=根本没扫成**。
-  🔴 **扫描类判据的自检要写"必须有一部分成功"，不是"必须不崩"**：接受率 0/3000 时
-  "没 panic"什么都没证明（§21.71）。
+  🔴 扫描类判据的自检 = "必须有一部分成功"，不是"必须不崩"。
 47. **🔴 时间基减法必须 `checked_sub`：`Instant` 原点是「开机时刻」** ⇒
   `Instant::now() - Duration::from_secs(3600)` 在**开机不足 1 小时**时**下溢 panic**；
   开机几天的机器上一路绿 ⇒ **「上线首小时才炸」**（§21.82）。

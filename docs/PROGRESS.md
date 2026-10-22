@@ -1262,3 +1262,21 @@ tree_oak↔tree_oak 16、barrier_hesco↔building 16、container↔(building/tre
 
 补充：`docs/GRAPHICS-PLAN.md` 新增「待截图验证清单」——把 5 条需要视觉闭环的改动与已有离线依据
 列成表（含下次最小批次命令），避免下个会话重复凭记忆排查。
+
+### 2026-10-22（续4）：RV3D_HEADLESS —— 无窗口离屏取证，彻底解决"霸屏"
+
+用户两次反馈"还是在霸屏"：本机 Wayland 下 winit `with_visible(false)` 不保证窗口不被 map。
+解法 = **离屏渲染**：`RV3D_HEADLESS=1` 时**不创建交换链、不 present**，只创建 3 张离屏
+COLOR_ATTACHMENT|TRANSFER_SRC 图像充当"交换链图像"（主 pass 仍渲进场景图、照旧 blit 过去），
+窗口从不 attach buffer ⇒ xdg-shell 不映射 = **零上屏、零抢焦点**；结果走既有截图读回写 PNG。
+
+- 关键接线：`init_headless_target`（swapchain.rs）、acquire 轮转 / submit 不参与信号量 /
+  present 变成 `Ok(false)`（frame.rs）、离屏图像的落点布局 = `TRANSFER_SRC_OPTIMAL`
+  （`swapchain_final_layout`，record ③ 与截图读回两处同源）、Drop 里**先 framebuffer 后
+  ImageView/Image**（顺序反了实测退出段错误）。
+- 首次实测：`RV3D_HEADLESS=1 RV3D_SHOT_AT=3 RV3D_EXIT_AFTER=8` ⇒ PNG 1280×720、exit=0、295fps、
+  0 panic/0 device lost；`RV3D_HEADLESS_SIZE` 控制离屏分辨率。
+- 判据：`parse_headless_size_clamps_and_falls_back` + `final_layout_matches_present_mode`。
+- 顺带经验：无头模式下窗口尺寸与离屏分辨率本来就不同，**必须跳过"窗口尺寸 vs 交换链尺寸"自检重建**
+  （否则每帧重建；首版实测刷了 18 次日志）。
+- 验收：0 警告 / **833 passed + 4 ignored** / CJK 门 OK / 白名单 OK。

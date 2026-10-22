@@ -14,6 +14,7 @@ impl Drop for Renderer {
             // 释放截图读回资源（staging buffer + fence）
             self.destroy_screenshot_resources();
 
+            // 无头离屏：这些 Image 不归交换链所有，必须显式销毁（正常模式列表为空）
             // 释放同步对象
             for &fence in &self.in_flight_fences {
                 self.device.destroy_fence(fence, None);
@@ -35,6 +36,24 @@ impl Drop for Renderer {
             // HUD overlay 的 framebuffer（只被 PT 通路消费，见 recreate_hud_framebuffers）
             for &framebuffer in &self.hud_framebuffers {
                 self.device.destroy_framebuffer(framebuffer, None);
+            }
+
+            // 无头离屏：交换链图像是**我们自己创建的**，必须显式回收。
+            // 🔴 顺序：**必须在 framebuffer 之后**（framebuffer 引用这些 ImageView；
+            //    先销毁 view 再销毁 framebuffer = 未定义行为，实测退出时段错误）。
+            if self.headless {
+                for &view in &self.swapchain_image_views {
+                    self.device.destroy_image_view(view, None);
+                }
+                self.swapchain_image_views.clear();
+                for &image in &self.swapchain_images {
+                    self.device.destroy_image(image, None);
+                }
+                self.swapchain_images.clear();
+                for &memory in &self.headless_image_memory {
+                    self.device.free_memory(memory, None);
+                }
+                self.headless_image_memory.clear();
             }
 
             // 释放管线

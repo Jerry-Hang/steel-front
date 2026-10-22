@@ -3,6 +3,52 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// `RV3D_HEADLESS=1`：**无窗口离屏取证模式**（2026-10-22）。
+///
+/// 存在理由：本机 Wayland 下 winit 的 `with_visible(false)` 并不保证窗口不被 map（实测仍会上到最前），
+/// 用户明确要求"别再上屏"。离屏模式 **从不向窗口 attach buffer、也从不 present** ⇒
+/// xdg-shell 不会映射窗口（零上屏、零抢焦点），渲染结果走既有 `capture_screenshot` 读回 PNG。
+/// 它同时是唯一能在"不打扰用户"的前提下做视觉验收的路径。
+pub(crate) fn headless_mode() -> bool {
+    crate::syscfg::is_set("RV3D_HEADLESS")
+}
+
+/// 无头模式的离屏分辨率：`RV3D_HEADLESS_SIZE=1280x720`（缺省 1280x720，夹在 320..=8192）。
+///
+/// 为什么不用窗口尺寸：离屏不需要跟显示器一致，小一点能让取证更快（像素成本 ∝ 面积）。
+pub(crate) fn headless_extent() -> vk::Extent2D {
+    let (w, h) = parse_headless_size(crate::syscfg::cfg("RV3D_HEADLESS_SIZE").as_deref());
+    vk::Extent2D { width: w, height: h }
+}
+
+/// `RV3D_HEADLESS_SIZE` 的纯解析（判据 = `parse_headless_size_clamps_and_falls_back`）。
+///
+/// 约定：`"WxH"`（大小写不敏感，允许 `*`），缺省 1280×720；宽夹在 320..=8192、
+/// 高夹在 180..=8192（太小会触发交换链/附件的下限校验，太大浪费显存）。
+pub(crate) fn parse_headless_size(raw: Option<&str>) -> (u32, u32) {
+    let parsed = raw.and_then(|s| {
+        let s = s.trim().to_ascii_lowercase();
+        let (w, h) = s.split_once('x').or_else(|| s.split_once('*'))?;
+        let w: u32 = w.trim().parse().ok()?;
+        let h: u32 = h.trim().parse().ok()?;
+        Some((w, h))
+    });
+    let (w, h) = parsed.unwrap_or((1280, 720));
+    (w.clamp(320, 8192), h.clamp(180, 8192))
+}
+
+/// 交换链图像在本帧结束时应停留的布局。
+///
+/// 🔴 `PRESENT_SRC_KHR` **只能用于换链图像**（Vulkan 规定），离屏模式下那样做会触发验证层；
+/// 离屏图像的正确落点 = `TRANSFER_SRC_OPTIMAL`（正好也是截图读回的源布局）。
+pub(crate) fn swapchain_final_layout(headless: bool) -> vk::ImageLayout {
+    if headless {
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+    } else {
+        vk::ImageLayout::PRESENT_SRC_KHR
+    }
+}
+
 /// `RV3D_NO_GROUND_TEX=1` 时关掉地面微细节层（`light_data.flags.w` 保持 0）。
 /// A/B 诊断门，与 `RV3D_NO_SHADOW` 同一套惯例。**读一次缓存住**：本函数在每帧构建
 /// 光照 UBO 的路径上，不该每帧 `getenv`。

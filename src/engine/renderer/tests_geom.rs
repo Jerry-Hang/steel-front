@@ -2278,3 +2278,42 @@ mod ground_field_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod headless_capture_tests {
+    use crate::engine::renderer::{parse_headless_size, swapchain_final_layout};
+
+    /// 无窗口离屏取值解析：缺省 1280×720、`WxH`/`W*H` 均可、越界夹紧。
+    /// 反向验证：把缺省改成别的值、或去掉 clamp ⇒ 本判据红。
+    #[test]
+    fn parse_headless_size_clamps_and_falls_back() {
+        assert_eq!(parse_headless_size(None), (1280, 720));
+        assert_eq!(parse_headless_size(Some("")), (1280, 720));
+        assert_eq!(parse_headless_size(Some("garbage")), (1280, 720));
+        assert_eq!(parse_headless_size(Some("1920x1080")), (1920, 1080));
+        assert_eq!(parse_headless_size(Some(" 960X540 ")), (960, 540));
+        assert_eq!(parse_headless_size(Some("800*600")), (800, 600));
+        // 夹紧：太小 → 下限；太大 → 上限
+        assert_eq!(parse_headless_size(Some("1x1")), (320, 180));
+        assert_eq!(parse_headless_size(Some("99999x99999")), (8192, 8192));
+        // 只解析出宽、高非法 ⇒ 整体回退缺省（不允许半个尺寸）
+        assert_eq!(parse_headless_size(Some("800x")), (1280, 720));
+        assert_eq!(parse_headless_size(Some("axb")), (1280, 720));
+    }
+
+    /// 交换链图像本帧的落点布局：正常必须是 PRESENT_SRC_KHR；离屏必须是 TRANSFER_SRC_OPTIMAL。
+    ///
+    /// 🔴 这条防的是"离屏图像被摆成 PRESENT_SRC_KHR"——Vulkan 只允许换链图像用那个布局，
+    /// 用了就是验证层错误；而且截图读回正好从 TRANSFER_SRC 拷，两处必须同源。
+    #[test]
+    fn final_layout_matches_present_mode() {
+        assert_eq!(
+            swapchain_final_layout(false),
+            ash::vk::ImageLayout::PRESENT_SRC_KHR
+        );
+        assert_eq!(
+            swapchain_final_layout(true),
+            ash::vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+        );
+    }
+}

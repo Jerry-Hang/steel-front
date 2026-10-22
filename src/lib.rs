@@ -3459,7 +3459,11 @@ impl GameApp {
             let (sw, sh) = renderer.swapchain_size();
             if let Some(win) = &self.window {
                 let is = win.inner_size();
-                if (is.width != sw || is.height != sh) && is.width > 0 && is.height > 0 {
+                // 无头离屏：窗口尺寸与离屏分辨率**本来就不同**（窗口只是 surface 载体），
+                // 不能按窗口尺寸重建；HUD 按离屏分辨率排版。
+                if crate::engine::renderer::headless_mode() {
+                    let _ = self.game.hud.set_screen_size(sw as f32, sh as f32);
+                } else if (is.width != sw || is.height != sh) && is.width > 0 && is.height > 0 {
                     // 🔴 降级/设备丢失时**不再每帧重试**：这一处曾每帧刷 1 条 WARN + 2 条 ERROR
                     // （实测设备丢失后 12 秒 1961 轮、5900 行日志，而画面一帧都不更新）。
                     // 判据 = `Renderer::swapchain_recovery_allowed`。
@@ -3741,8 +3745,13 @@ impl ApplicationHandler for GameApp {
         // 动机（2026-10-22 用户要求）：无人值守截图每跑一次就把游戏窗口弹到最上层、
         // 抢焦点，打扰正在用机器的人。`with_visible(false)` 创建即隐藏，不抢焦点、不遮挡屏幕；
         // Vulkan 仍正常渲染（截帧读的是交换链图像，不是屏幕）。输入/计时/渲染路径不变。
-        let hidden = crate::syscfg::is_set("RV3D_HIDDEN");
-        if hidden {
+        // 无头离屏（`RV3D_HEADLESS=1`）也把窗口隐藏：该模式根本不创建交换链/present，
+        // 窗口只是 Vulkan surface 的载体，从不 attach buffer ⇒ 不会上屏。
+        let headless = crate::engine::renderer::headless_mode();
+        let hidden = crate::syscfg::is_set("RV3D_HIDDEN") || headless;
+        if headless {
+            log::info!("RV3D_HEADLESS=1：无窗口离屏取证（不创建交换链、不呈现，绝不弹出窗口）");
+        } else if hidden {
             log::info!("RV3D_HIDDEN=1：窗口隐藏创建（无人值守取证，不抢焦点）");
         }
         let winit_attr = Window::default_attributes()
