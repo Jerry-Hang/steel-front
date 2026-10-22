@@ -2052,6 +2052,82 @@ fn vec3_lit(c: [f32; 3]) -> String {
 // ---- 天空渐变 + 太阳光晕（2026-10-22，画质 M5 第一步）----
 // 全屏三角形，不需要顶点缓冲 / 描述符：相机基向量与太阳方向走 push constants。
 // 输出**线性空间**颜色（交换链是 SRGB 格式，硬件负责编码），与 apply_lighting 同一色域。
+
+const SSAO_SHADER_WGSL: &str = r#"
+struct SsaoPush {
+    // x = near, y = far, z = 采样半径（像素，1280x720 基准）, w = 强度
+    params: vec4<f32>,
+};
+var<immediate> ssao_push: SsaoPush;
+
+@group(0) @binding(0) var scene_tex: texture_2d<f32>;
+@group(0) @binding(1) var depth_tex: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    // 覆盖整个 NDC 的大三角形：(-1,-1) (3,-1) (-1,3)
+    let x = f32((vi << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(vi & 2u) * 2.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+// 透视深度（0..1）→ 视空间距离（米）。glam perspective_rh：d = 0 → near，d = 1 → far。
+fn linear_depth(d: f32, near: f32, far: f32) -> f32 {
+    return near * far / max(far - d * (far - near), 1e-4);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(depth_tex));
+    let coord = vec2<i32>(i32(frag.x), i32(frag.y));
+    let col = textureLoad(scene_tex, coord, 0);
+    // texture_2d 的 textureLoad 返回 vec4：深度在 .r
+    let d = textureLoad(depth_tex, coord, 0).r;
+    let near = ssao_push.params.x;
+    let far = ssao_push.params.y;
+    let radius_px = ssao_push.params.z;
+    let strength = ssao_push.params.w;
+    // 天空/远平面：不产生 AO（也避免把 clear color 当几何）
+    if (d >= 0.99999 || d <= 0.0) {
+        return col;
+    }
+    let z0 = linear_depth(d, near, far);
+    // 逐像素旋转，把 4 方向采样的条带打散成噪声（4px 级、肉眼近似无感）
+    let rot = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+    var occ = 0.0;
+    var wsum = 0.0;
+    // 3 个半径 × 4 个方向 = 12 taps；半径随视距缩放，保证"世界尺度约 0.35m"的接触带
+    for (var i = 0; i < 3; i = i + 1) {
+        // 半径按像素：14/22/31px（1280x720 基准）。**不要**用 far/z0 缩放 —— 那会把
+        // 低视距地面放大到几百像素，几乎处处过遮挡（2026-10-22 实测 AO 全黑）。
+        let rpx = radius_px * (1.0 + 0.6 * f32(i));
+        for (var k = 0; k < 4; k = k + 1) {
+            let a = rot + f32(k) * 1.5707963 + f32(i) * 0.6;
+            let off = vec2<f32>(cos(a), sin(a)) * rpx;
+            let nc = clamp(coord + vec2<i32>(i32(off.x), i32(off.y)),
+                           vec2<i32>(0, 0), dims - vec2<i32>(1, 1));
+            let dn = textureLoad(depth_tex, nc, 0).r;
+            if (dn >= 0.99999 || dn <= 0.0) {
+                continue;
+            }
+            let zn = linear_depth(dn, near, far);
+            // 邻居更近 ⇒ 它挡住了这一点的天光；遮挡量按"相对深度差/接触带宽"给
+            let dz = z0 - zn;
+            let band = max(0.35, z0 * 0.08);
+            let ao = clamp(dz / band, 0.0, 1.0);
+            let w = 1.0 / (1.0 + f32(i));
+            occ = occ + ao * w;
+            wsum = wsum + w;
+        }
+    }
+    if (wsum <= 0.0) {
+        return col;
+    }
+    let ao = clamp(1.0 - strength * (occ / wsum), 0.0, 1.0);
+    return vec4<f32>(col.rgb * ao, 1.0);
+}
+"#;
+
 const SKY_SHADER_WGSL: &str = r#"
 fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     let a = {ACES_A};
@@ -2212,6 +2288,7 @@ fn main() {
         "天空着色器丢了程序化云层（cloud_fbm）"
     );
     let sky_spirv = compile_wgsl(&sky_src);
+    let ssao_spirv = compile_wgsl(SSAO_SHADER_WGSL);
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR 环境变量未设置");
     let dest_path = Path::new(&out_dir).join("shaders.rs");
     let mut output = String::new();
@@ -2289,6 +2366,9 @@ fn main() {
     output.push_str("/// 天空渐变着色器 SPIR-V 字节码（vs_main + fs_main 同模块）\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const SKY_SPIRV: &[u32] = &{:?};\n\n", sky_spirv));
+    output.push_str("/// SSAO 合成着色器 SPIR-V 字节码\n");
+    output.push_str("#[allow(dead_code)]\n");
+    output.push_str(&format!("pub const SSAO_SPIRV: &[u32] = &{:?};\n\n", ssao_spirv));
     output.push_str("/// 阴影 depth-only 片元着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const SHADOW_FS_SPIRV: &[u32] = &{:?};\n", shadow_fs_spirv));

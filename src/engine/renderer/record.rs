@@ -895,6 +895,13 @@ impl Renderer {
             self.device.cmd_end_render_pass(command_buffer);
         }
 
+        // ---- SSAO 合成 pass（默认关，RV3D_SSAO=1）----
+        // 主 pass 之后、升采样 blit 之前：读场景色 + resolved 深度，输出到 ssao_images，
+        // 随后的 blit 改从它取源。未启用时下面不执行、blit 源仍是场景图 ⇒ 与旧版一致。
+        if self.ssao_active() {
+            self.record_ssao(command_buffer, image_index as usize);
+        }
+
         // ===== 升采样：离屏场景图 → 交换链图像（2026-10-11，内部渲染分辨率）=====
         //
         // 主 pass 渲在 `render_extent`（见 `pipelines.rs::init_scene_resources`），这里用
@@ -912,7 +919,12 @@ impl Renderer {
         //    PT 通路不关心（它自己的屏障用 `old_layout(UNDEFINED)`，因为 PT 覆盖整幅画面）。
         {
             let sw_img = self.swapchain_images[image_index as usize];
-            let scene_img = self.scene_images[image_index as usize];
+            // SSAO 开启时源图换成合成结果（布局同为 TRANSFER_SRC，出口一致）
+            let scene_img = if self.ssao_active() {
+                self.ssao_images[image_index as usize]
+            } else {
+                self.scene_images[image_index as usize]
+            };
             let range = vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,

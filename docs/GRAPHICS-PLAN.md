@@ -310,7 +310,7 @@ RV3D_CAM='fly:0,1.7,0:45,0' ./target/release/steel-front        # 广场近景
 墙面 Laplacian **3.428 vs 3.432**（无差异）⇒ 分辨率不是瓶颈（tile 世界尺寸下 512 已 ~3mm/纹素），
 **回退 512**，不留改动。后续应查 mip/LOD 与砖块明暗生成方式，而不是加分辨率。
 
-## SSAO 实施计划（2026-10-22 探明前置，未开工代码）
+## SSAO 实施记录（2026-10-23 已落地，默认关）
 
 目标：给全场景（**含地面/地形**）加真实深度 AO，补上当前只用解析近似（marker/Authored 的
 天空遮蔽+接触暗角）留下的缺口——墙根/箱底的"地面被压暗"。
@@ -323,7 +323,10 @@ RV3D_CAM='fly:0,1.7,0:45,0' ./target/release/steel-front        # 广场近景
    迁到 `RenderPassCreateInfo2` + `SubpassDescription2`**（附件也要换 `AttachmentDescription2`）。
    这是一个独立、可回归验证的步骤（迁移后默认画面应逐像素不变）。
 
-**步骤（每步单独 commit + 无头 A/B）**：
+**已完成**：v2 迁移（`7631795`）、深度 resolve 附件（`47e941d`）、合成 pass（本轮）。
+默认关（`RV3D_SSAO=1`）；待默认开前需测 2560x1600 + 移动相机时域稳定性与帧成本。
+
+**原步骤（每步单独 commit + 无头 A/B）**：
 1. `RenderPassCreateInfo2/SubpassDescription2` 迁移（不含 resolve）——A/B 逐像素一致。
 2. 加深度 resolve 附件（D32、samples=1、usage `DEPTH_STENCIL_ATTACHMENT | SAMPLED`、
    `finalLayout=DEPTH_STENCIL_READ_ONLY_OPTIMAL`、MIN 模式）——A/B 仍逐像素一致。

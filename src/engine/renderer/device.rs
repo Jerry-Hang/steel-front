@@ -57,6 +57,7 @@ impl Renderer {
         }
         renderer.init_hud()?;
         renderer.init_framebuffers()?;
+        renderer.init_ssao()?;
         renderer.init_hud_overlay()?;
         renderer.init_texture()?;
         renderer.init_shadow_resources()?;
@@ -824,6 +825,18 @@ impl Renderer {
             depth_resolve_images: Vec::new(),
             depth_resolve_memory: Vec::new(),
             depth_resolve_views: Vec::new(),
+            ssao_enabled: depth_resolve_available
+                && crate::syscfg::cfg("RV3D_SSAO").as_deref() == Some("1"),
+            ssao_render_pass: vk::RenderPass::null(),
+            ssao_pipeline: vk::Pipeline::null(),
+            ssao_pipeline_layout: vk::PipelineLayout::null(),
+            ssao_set_layout: vk::DescriptorSetLayout::null(),
+            ssao_pool: vk::DescriptorPool::null(),
+            ssao_sets: Vec::new(),
+            ssao_images: Vec::new(),
+            ssao_image_memory: Vec::new(),
+            ssao_image_views: Vec::new(),
+            ssao_framebuffers: Vec::new(),
             headless_image: 0,
             headless_image_memory: Vec::new(),
             screenshot_request: None,

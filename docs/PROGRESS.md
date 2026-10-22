@@ -1395,3 +1395,23 @@ A/B（双二进制、同机位、无头）：近墙墙面 Laplacian **4.508 → 
 - 半成品（helpers 签名、device 特性、字段、render pass 附件）已**完整 `git checkout` 回退**，
   HEAD 干净、0 警告；计划与步骤已写进 `docs/GRAPHICS-PLAN.md`「SSAO 实施计划」。
 - 教训补记：**先确认目标 API 要求的结构体版本，再动管线**——v1/v2 混用是这类手术最常见的返工点。
+
+### 2026-10-23（续13）：真·SSAO 合成 pass 落地（默认关，RV3D_SSAO=1）
+
+两个前置提交之后（`7631795` v2 render pass 迁移、`47e941d` 深度 resolve 附件），本轮完成合成 pass：
+- 新增 `src/engine/renderer/ssao.rs`：每交换链图像一张 post image（格式同交换链，出口
+  `TRANSFER_SRC`）→ 主 pass 后全屏 pass 读「场景色 + resolved 深度」（`textureLoad`，
+  **零采样器**、零新依赖）→ 升采样 blit 的源改成 post image。
+- 着色器 `SSAO_SHADER_WGSL`（build.rs，运行时编译期生成 SPIR-V）：12 taps（3 半径 × 4 方向，
+  逐像素旋转打散）+ 透视深度线性化 + 相对深度差给遮挡量；输出 `col * clamp(1 - strength*occ,0,1)`。
+- 默认**关**（`RV3D_SSAO=1` 开；设备不支持 depth resolve / MSAA 关闭时自动关）；参数
+  `RV3D_SSAO_STRENGTH`（默认 0.6）、`RV3D_SSAO_RADIUS`（默认 14px）。
+- 调试过程记录（真踩坑）：
+  1) 场景图创建时 usage 只有 `COLOR_ATTACHMENT|TRANSFER_SRC`，**缺 SAMPLED** ⇒ 作为采样图像
+     读回来恒 0（合成全黑）；
+  2) 半径公式误用 `far/z0` 放大到几百像素 ⇒ 处处过遮挡（AO 全黑）；改成 14/22/31px。
+- 验收（无头、1280x720）：开/关对比亮度 **−2.5%（strength 0.35）/ −4.4%（0.6）**；
+  近墙机位墙脚 **−7.6%**、整幅 −3.1%；0 panic / 0 device lost / 纯黑 0%（0.6 档 0.06%）；
+  目视墙脚与地面交界出现自然接触暗部、无光晕伪影。
+- **待办**：默认开之前先测 2560x1600 + 移动相机的时域稳定性（逐像素旋转噪声是否闪）；
+  以及帧成本（新增 1 次全屏 pass）。

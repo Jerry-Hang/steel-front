@@ -264,7 +264,12 @@ impl Renderer {
                 .samples(vk::SampleCountFlags::TYPE_1) // resolve 目标恒为单采样
                 .tiling(vk::ImageTiling::OPTIMAL)
                 // TRANSFER_SRC = 给 `record.rs` 那条升采样 blit 当源
-                .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+                .usage(
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT
+                        | vk::ImageUsageFlags::TRANSFER_SRC
+                        // SSAO：场景图要作为采样图像被合成 pass 读（2026-10-22）
+                        | vk::ImageUsageFlags::SAMPLED,
+                )
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .initial_layout(vk::ImageLayout::UNDEFINED);
             let image = unsafe {

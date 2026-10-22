@@ -1062,6 +1062,19 @@ pub struct Renderer {
     depth_resolve_images: Vec<vk::Image>,
     depth_resolve_memory: Vec<vk::DeviceMemory>,
     depth_resolve_views: Vec<vk::ImageView>,
+    /// SSAO 合成 pass（默认关，`RV3D_SSAO=1`）。管线/render pass/池只建一次；
+    /// 图像/视图/描述符集/framebuffer 按交换链尺寸重建。
+    ssao_enabled: bool,
+    ssao_render_pass: vk::RenderPass,
+    ssao_pipeline: vk::Pipeline,
+    ssao_pipeline_layout: vk::PipelineLayout,
+    ssao_set_layout: vk::DescriptorSetLayout,
+    ssao_pool: vk::DescriptorPool,
+    ssao_sets: Vec<vk::DescriptorSet>,
+    ssao_images: Vec<vk::Image>,
+    ssao_image_memory: Vec<vk::DeviceMemory>,
+    ssao_image_views: Vec<vk::ImageView>,
+    ssao_framebuffers: Vec<vk::Framebuffer>,
     /// 离屏模式下这一帧用第几张离屏图像（轮转；等价于 acquire 拿到的 image_index）
     headless_image: u32,
     /// 无头离屏图像的内存（正常模式为空；这些 Image 不归交换链所有，必须自己销毁）
@@ -1292,6 +1305,7 @@ mod drop;
 
 // 子模块（见 docs/refactor-plan.md）
 mod helpers;
+mod ssao;
 
 // 子模块（见 docs/refactor-plan.md）
 mod gpu_layout;

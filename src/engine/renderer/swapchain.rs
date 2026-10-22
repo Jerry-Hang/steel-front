@@ -683,6 +683,7 @@ impl Renderer {
         self.init_msaa_resources()?;
         self.init_depth_resources()?;
         self.init_framebuffers()?;
+        self.init_ssao()?;
         self.recreate_command_buffers()?;
         // 交换链尺寸/图像已变化：截图读回资源按旧 extent 创建，作废并清掉 pending 请求
         // （下次 capture_screenshot 时惰性重建）
@@ -712,6 +713,8 @@ impl Renderer {
         Ok(())
     }
     pub(crate) fn destroy_swapchain(&mut self) {
+        // SSAO 合成资源（framebuffer/view/image/sets）依赖旧尺寸与旧场景图句柄 ⇒ 先拆
+        let _ = self.destroy_ssao_swapchain_dependent();
         // HUD overlay 的 framebuffer 引用 `swapchain_image_views`，**必须先于它们销毁**
         // （2026-09-15 补：此前这里漏了它，于是每次重建都留下一组悬空句柄）
         for &framebuffer in &self.hud_framebuffers {
