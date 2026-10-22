@@ -3736,11 +3736,21 @@ impl ApplicationHandler for GameApp {
         // 🔴 尺寸一律 `PhysicalSize`：`w`/`h` 与 `monitor.size()` **都是物理像素**，
         // 用 `LogicalSize` 等于让 winit 再乘一次 scale_factor（Windows 那台 scale=1.5 时
         // 就是靠手写的 `/1.5` 抵消的 —— 换个平台必然错）。
+        // 自动化取证模式：窗口**从创建起就不可见**（`RV3D_HIDDEN=1`）。
+        //
+        // 动机（2026-10-22 用户要求）：无人值守截图每跑一次就把游戏窗口弹到最上层、
+        // 抢焦点，打扰正在用机器的人。`with_visible(false)` 创建即隐藏，不抢焦点、不遮挡屏幕；
+        // Vulkan 仍正常渲染（截帧读的是交换链图像，不是屏幕）。输入/计时/渲染路径不变。
+        let hidden = crate::syscfg::is_set("RV3D_HIDDEN");
+        if hidden {
+            log::info!("RV3D_HIDDEN=1：窗口隐藏创建（无人值守取证，不抢焦点）");
+        }
         let winit_attr = Window::default_attributes()
             .with_title(window::WINDOW_TITLE)
             .with_inner_size(winit::dpi::PhysicalSize::new(w, h))
             .with_position(winit::dpi::PhysicalPosition::new(0, 0))
-            .with_decorations(false);
+            .with_decorations(false)
+            .with_visible(!hidden);
 
         let window = match event_loop.create_window(winit_attr) {
             Ok(w) => w,
