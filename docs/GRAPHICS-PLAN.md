@@ -309,3 +309,24 @@ RV3D_CAM='fly:0,1.7,0:45,0' ./target/release/steel-front        # 广场近景
 墙面砖缝偏糊时曾怀疑皮肤纹理分辨率不足：`SKIN_TEXTURE_SIZE` 512 → 1024 双二进制 A/B，
 墙面 Laplacian **3.428 vs 3.432**（无差异）⇒ 分辨率不是瓶颈（tile 世界尺寸下 512 已 ~3mm/纹素），
 **回退 512**，不留改动。后续应查 mip/LOD 与砖块明暗生成方式，而不是加分辨率。
+
+## SSAO 实施计划（2026-10-22 探明前置，未开工代码）
+
+目标：给全场景（**含地面/地形**）加真实深度 AO，补上当前只用解析近似（marker/Authored 的
+天空遮蔽+接触暗角）留下的缺口——墙根/箱底的"地面被压暗"。
+
+**已探明的硬前置（今晚实测）**：
+1. 设备支持：`vulkaninfo` 两卡都能查到 depthStencilResolve（NVIDIA 1.4.351 / AMD 1.4.354）⇒ 可做。
+2. 🔴 **深度 resolve 只能挂在 `VkSubpassDescription2` 上**（`VkSubpassDescriptionDepthStencilResolve`
+   必须进 `pNext` 链）；而主 pass 现在用的是 **v1 结构**（`SubpassDescription` +
+   `RenderPassCreateInfo`，ash 0.38 的 v1 结构没有 `p_next`）⇒ **必须先把 MSAA 主 pass
+   迁到 `RenderPassCreateInfo2` + `SubpassDescription2`**（附件也要换 `AttachmentDescription2`）。
+   这是一个独立、可回归验证的步骤（迁移后默认画面应逐像素不变）。
+
+**步骤（每步单独 commit + 无头 A/B）**：
+1. `RenderPassCreateInfo2/SubpassDescription2` 迁移（不含 resolve）——A/B 逐像素一致。
+2. 加深度 resolve 附件（D32、samples=1、usage `DEPTH_STENCIL_ATTACHMENT | SAMPLED`、
+   `finalLayout=DEPTH_STENCIL_READ_ONLY_OPTIMAL`、MIN 模式）——A/B 仍逐像素一致。
+3. 全屏合成 pass：采样场景色 + resolved 深度，输出到 post image，blit 改为读 post image；
+   `RV3D_SSAO=1` 默认关；`RV3D_SSAO_RADIUS/STRENGTH` 可调。
+4. 无头 A/B 调参（radius/strength/降噪），通过后默认开。

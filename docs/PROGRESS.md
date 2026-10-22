@@ -1383,3 +1383,15 @@ COLOR_ATTACHMENT|TRANSFER_SRC 图像充当"交换链图像"（主 pass 仍渲进
 A/B（双二进制、同机位、无头）：近墙墙面 Laplacian **4.508 → 4.917（+9.1%）**、
 亮度均值 87.7 不变（无整体变暗）、std 40.44→40.46；街道机位差异 0.00%（变化只在不影响
 远景的 mip 高层）。目视：砖缝清晰、砖块层次可辨，无摩尔纹。
+
+### 2026-10-22（续12）：SSAO 前置探明 + 半成品回退（干净基线）
+
+尝试直接在主 pass 加"深度 resolve 附件"，编译期撞到**结构性阻塞**并已确认原因：
+- Vulkan 的 `VkSubpassDescriptionDepthStencilResolve` 只能挂 **`VkSubpassDescription2`** 的 `pNext`；
+- 本项目主 pass 仍是 v1（`SubpassDescription` + `RenderPassCreateInfo`），**ash 0.38 的 v1 结构没有
+  `p_next` 字段**（实测编译错误）⇒ 必须先迁移到 **`RenderPassCreateInfo2`/`SubpassDescription2`/
+  `AttachmentDescription2`**。
+- 设备侧不是瓶颈：`vulkaninfo` 两卡均能查到 depthStencilResolve（NVIDIA 1.4.351 / AMD 1.4.354）。
+- 半成品（helpers 签名、device 特性、字段、render pass 附件）已**完整 `git checkout` 回退**，
+  HEAD 干净、0 警告；计划与步骤已写进 `docs/GRAPHICS-PLAN.md`「SSAO 实施计划」。
+- 教训补记：**先确认目标 API 要求的结构体版本，再动管线**——v1/v2 混用是这类手术最常见的返工点。
