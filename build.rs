@@ -2143,11 +2143,14 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let rot = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) * 6.2831853;
     var occ = 0.0;
     var wsum = 0.0;
-    // 3 个半径 × 4 个方向 = 12 taps；半径随视距缩放，保证"世界尺度约 0.35m"的接触带
+    // 3 个半径 × 4 个方向 = 12 taps。半径以 **720p 为基准、按渲染分辨率缩放**
+    // （2026-10-23）：固定像素半径在 2560x1600 下相对更小 ⇒ 接触带变窄、AO 观感变弱
+    // （实测 720p −4.4% vs 1600p −2.76%）。乘 `dims.y / 720` 后两个分辨率观感一致。
+    let res_scale = clamp(f32(dims.y) / 720.0, 0.5, 4.0);
     for (var i = 0; i < 3; i = i + 1) {
         // 半径按像素：14/22/31px（1280x720 基准）。**不要**用 far/z0 缩放 —— 那会把
         // 低视距地面放大到几百像素，几乎处处过遮挡（2026-10-22 实测 AO 全黑）。
-        let rpx = radius_px * (1.0 + 0.6 * f32(i));
+        let rpx = radius_px * res_scale * (1.0 + 0.6 * f32(i));
         for (var k = 0; k < 4; k = k + 1) {
             let a = rot + f32(k) * 1.5707963 + f32(i) * 0.6;
             let off = vec2<f32>(cos(a), sin(a)) * rpx;
