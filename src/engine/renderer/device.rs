@@ -825,8 +825,11 @@ impl Renderer {
             depth_resolve_images: Vec::new(),
             depth_resolve_memory: Vec::new(),
             depth_resolve_views: Vec::new(),
+            // SSAO **默认开**（2026-10-23 时域稳定性验证通过：静态场景逐像素稳定、
+            // 0.4° 偏航下帧间差异仅 ×1.03）；`RV3D_SSAO=0` 关闭（A/B 对照）。
+            // 设备不支持 depth resolve / MSAA 关闭时 use 条件自然为 false。
             ssao_enabled: depth_resolve_available
-                && crate::syscfg::cfg("RV3D_SSAO").as_deref() == Some("1"),
+                && crate::syscfg::cfg("RV3D_SSAO").as_deref() != Some("0"),
             ssao_render_pass: vk::RenderPass::null(),
             ssao_pipeline: vk::Pipeline::null(),
             ssao_pipeline_layout: vk::PipelineLayout::null(),
