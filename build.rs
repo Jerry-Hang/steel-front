@@ -1085,6 +1085,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 base = base * mix(1.0, 1.0 + (n1 - 0.5) * 0.80 + (n2 - 0.5) * 0.32, lump);
             }
         }
+        // ---- 墙基污渍带（2026-10-23）：雨水溅泥 + 泛碱，离地 ~0.15–1.4m 渐隐 ----
+        // 位置在**光照前最后一步**：marker 混凝土墙与 GLB 立面都走这里（GLB 道具的
+        // flat_flag 实际落在 NPC 区间、并不是 authored，所以不能只给 authored 加）。
+        // 只作用于"近竖直 + 低饱和"的面：树、玻璃、彩色容器不受影响。
+        if (!is_glass && !is_canopy && input.flat_flag > 0.5 && input.flat_flag < 2.5) {
+            let an_g = abs(fnrm);
+            let vertical_g = 1.0 - smoothstep(0.55, 0.80, an_g.y);
+            let cmax_g = max(base.r, max(base.g, base.b));
+            let cmin_g = min(base.r, min(base.g, base.b));
+            let sat_g = (cmax_g - cmin_g) / max(cmax_g, 1e-3);
+            if (vertical_g > 0.01 && sat_g < 0.35) {
+                let along_g = select(input.world_pos.x, input.world_pos.z, an_g.z > an_g.x);
+                let grime_h = 1.0 - smoothstep(0.15, 1.4, input.world_pos.y);
+                let splash = sf_vnoise(vec2<f32>(along_g * 0.75, input.world_pos.y * 0.55 + 11.0));
+                base = base * (1.0 - vertical_g * grime_h * (0.16 + 0.20 * splash));
+            }
+        }
         // 障碍/NPC：应用 Blinn-Phong（同地面路径）——消除纯色剪影的纸片感
         let lit = apply_lighting(input, base);
         var shaded = lit;
