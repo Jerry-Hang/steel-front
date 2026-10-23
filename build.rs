@@ -1102,6 +1102,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 base = base * (1.0 - vertical_g * grime_h * (0.16 + 0.20 * splash));
             }
         }
+        // ---- 窗洞玻璃感（2026-10-23）----
+        // GLB 楼的窗洞是**纯黑矩形**、没有玻璃，远看像一排黑洞。对"近竖直 + 亮度极低"的面
+        // 加一层天光反射（越掠射越强，近似菲涅耳），把黑洞读成玻璃窗。
+        // 只动 marker/NPC 区间（GLB 道具的 flat_flag 落在这里，见 PROGRESS 2026-10-23 记录）。
+        if (!is_glass && !is_canopy && input.flat_flag > 0.5 && input.flat_flag < 2.5) {
+            let an_w = abs(fnrm);
+            let vert_w = 1.0 - smoothstep(0.50, 0.80, an_w.y);
+            let lum_w = dot(base, vec3<f32>(0.2126, 0.7152, 0.0722));
+            if (vert_w > 0.25 && lum_w < 0.05) {
+                let vdir_w = normalize(input.view_dir);
+                let ndv_w = abs(dot(fnrm, vdir_w));
+                let fres_w = pow(1.0 - ndv_w, 3.0);
+                let sky_w = light_data.ambient.rgb * light_data.ambient.w * 2.2;
+                base = base + sky_w * (0.22 + 0.78 * fres_w);
+            }
+        }
         // 障碍/NPC：应用 Blinn-Phong（同地面路径）——消除纯色剪影的纸片感
         let lit = apply_lighting(input, base);
         var shaded = lit;
