@@ -2272,6 +2272,26 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let disk = pow(s, 1200.0) * 1.6;
     let halo = pow(s, 18.0) * 0.14 + pow(s, 4.0) * 0.03;
     col = col + vec3<f32>(1.0, 0.93, 0.80) * ((disk + halo) * sky_push.up.w);
+    // ---- 远景天际线（2026-10-23）：地平线上一圈极淡的楼群剪影 ----
+    // 全部在天空着色器里完成（零几何/零资源）：按方位角取确定性的高度剖面，
+    // 只在 `ray.y ∈ (0, hmax]` 内混入，颜色用 SKY_HORIZON 压暗一档——相当于
+    // "1–2km 外的城市楼群"在空气透视下的残影，给空旷的地平线一点纵深。
+    // 频率刻意做高（两档 az 噪声 + 窄顶边）：读起来是"高低错落的楼"，不是一条雾带。
+    let az = atan2(ray.x, ray.z);
+    // 按方位角切成 ~72 个楼块：块内高度线性过渡、块间跳变 ⇒ 读起来是高低错落的屋顶线，
+    // 而不是一条平滑雾带。高度用确定性哈希（同一方位永远同一栋楼）。
+    let cell = (az / 6.2831853 + 0.5) * 72.0;
+    let ci = floor(cell);
+    let cf = fract(cell);
+    let h0 = cloud_hash(vec2<f32>(ci, 7.7));
+    let h1 = cloud_hash(vec2<f32>(ci + 1.0, 7.7));
+    let hb = mix(h0, h1, smoothstep(0.90, 1.0, cf));
+    // 俯仰角刻度：0.005–0.030 rad ≈ 0.3°–1.7°（≈ 2km 外 10–60m 的楼）
+    let hmax = 0.005 + 0.025 * hb;
+    let skyline = 1.0 - smoothstep(hmax - 0.0020, hmax, ray.y);
+    if (ray.y > 0.0 && skyline > 0.001) {
+        col = mix(col, SKY_HORIZON * 0.62, skyline * 0.80);
+    }
     // ---- 程序化云层（2026-10-22）----
     // 把视线投影到一块虚拟"云板"（y=1）上：`ray.xz / ray.y` ⇒ 近地平线自然压缩拉长，
     // 这正是层积云在真实天空里的透视形态；不需要任何纹理资源或额外 pass。

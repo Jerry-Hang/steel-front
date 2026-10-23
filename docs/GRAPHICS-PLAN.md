@@ -335,3 +335,9 @@ RV3D_CAM='fly:0,1.7,0:45,0' ./target/release/steel-front        # 广场近景
 3. 全屏合成 pass：采样场景色 + resolved 深度，输出到 post image，blit 改为读 post image；
    `RV3D_SSAO=1` 默认关；`RV3D_SSAO_RADIUS/STRENGTH` 可调。
 4. 无头 A/B 调参（radius/strength/降噪），通过后默认开。
+
+### 远景天际线（2026-10-23，已落地）
+
+天空着色器内按方位角生成 ~72 个楼块的高度剖面（块间跳变），在地平线上方混入
+`SKY_HORIZON * 0.62` 的深蓝灰剪影（0.005–0.030 rad ≈ 2km 外楼群）。零几何/零资源；
+城边 26m 机位可见清晰轮廓（1.23% 像素变化），街道平视仅 0.15%（被近楼遮住）。
