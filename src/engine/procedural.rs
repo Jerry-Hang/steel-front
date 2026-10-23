@@ -421,7 +421,7 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
             }
         }
         6 => {
-            // 公园地表（2026-10-23）：干草 + 苔绿，与"荒芜夯土"(zone 0) 区分开。
+            // 公园地表（2026-10-23）：干草 + 草绿，与"荒芜夯土"(zone 0) 区分开。
             // 公园里有树/长椅/灌木，地面若是夯土色会读成"广场上一块泥斑"。
             let d = ground_noise(x, z, 3.4, seed.wrapping_add(67)) * 0.6
                 + ground_noise(x, z, 1.1, seed.wrapping_add(68)) * 0.4;

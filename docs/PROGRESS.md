@@ -1553,7 +1553,7 @@ A/B（换 `assets/triangle.frag.spv`）：近景地面 Laplacian **3.07 → 3.27
 
 修法：
 1. `city.rs::ground_zone`：6×6 街区里 `role=='G'` 返回新分区 **6**（公园），其它未铺装仍 zone 0；
-2. `procedural.rs::city_zone_color` 新增 case 6：干草/苔绿（`[0.105,0.160,0.070]` × k，
+2. `procedural.rs::city_zone_color` 新增 case 6：干草/草绿（`[0.105,0.160,0.070]` × k，
    枯黄草斑 lerp 0.5），与 zone 0 的灰褐夯土区分开；
 3. 诊断工具 `dump_city_ground_texture_and_report_zones` 从 6 分区扩到 7 分区
    （实测 zone 6 占 17,797 纹素、均值 `#576846`）；判据 `ground_zone_agrees_with_block_roles` 同步。
