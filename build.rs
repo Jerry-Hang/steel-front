@@ -1071,6 +1071,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         if (input.flat_flag > 1.5) {
             base = base * (1.0 + 0.45 * pow(1.0 - abs(dot(fnrm, vdir)), 3.0));
         }
+        // ---- Authored 树冠（GLB tree_oak）叶团杂色（2026-10-23）----
+        // `is_canopy` 只覆盖 marker 模板树；GLB 行道树走 authored ⇒ 一整块平绿。
+        // 放在**光照前最后一步**（authored 必经），只改 base 亮度、不改色相。
+        if (authored && !is_glass) {
+            let gsat = input.color.g >= input.color.r * 1.12
+                && input.color.g >= input.color.b * 1.12;
+            if (gsat) {
+                let lump = 1.0 - smoothstep(0.06, 0.30, dmax);
+                let p = input.world_pos.xz;
+                let n1 = vnoise2(p * 0.85 + vec2<f32>(input.world_pos.y * 0.6, 0.0));
+                let n2 = vnoise2(p * 2.7 + vec2<f32>(13.0, 7.0));
+                base = base * mix(1.0, 1.0 + (n1 - 0.5) * 0.80 + (n2 - 0.5) * 0.32, lump);
+            }
+        }
         // 障碍/NPC：应用 Blinn-Phong（同地面路径）——消除纯色剪影的纸片感
         let lit = apply_lighting(input, base);
         var shaded = lit;
