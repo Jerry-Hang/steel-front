@@ -1942,8 +1942,14 @@ pub fn ground_zone(x: f32, z: f32) -> u8 {
     let i = ((x + 137.5) / STREET_EVERY).floor() as i32;
     let j = ((z + 137.5) / STREET_EVERY).floor() as i32;
     if (0..6).contains(&i) && (0..6).contains(&j) {
-        if block_is_paved(block_role(i as usize, j as usize)) {
+        let role = block_role(i as usize, j as usize);
+        if block_is_paved(role) {
             return 5;
+        }
+        // 公园（G）单独一个"干草/苔绿"分区（2026-10-23）：公园里有树/长椅，
+        // 地面若沿用荒芜夯土色（zone 0）会读成"地上一块泥斑"。
+        if role == 'G' {
+            return 6;
         }
         return 0;
     }
@@ -2632,8 +2638,11 @@ mod city_layout_tests {
                     assert_eq!(zone, 4, "街区 ({},{}) role={} 应是广场铺装", i, j, role);
                 } else if block_is_paved(role) {
                     assert_eq!(zone, 5, "街区 ({},{}) role={} 应是地基铺装", i, j, role);
+                } else if role == 'G' {
+                    // 公园单独一个地表分区（zone 6，干草/苔绿）
+                    assert_eq!(zone, 6, "街区 ({},{}) role={} 应是公园地表", i, j, role);
                 } else {
-                    assert_eq!(zone, 0, "街区 ({},{}) role={} 应是草地", i, j, role);
+                    assert_eq!(zone, 0, "街区 ({},{}) role={} 应是荒芜夯土", i, j, role);
                 }
             }
         }

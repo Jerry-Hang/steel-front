@@ -420,6 +420,20 @@ fn city_zone_color(zone: u8, x: f32, z: f32, seed: u32) -> [f32; 3] {
                 base
             }
         }
+        6 => {
+            // 公园地表（2026-10-23）：干草 + 苔绿，与"荒芜夯土"(zone 0) 区分开。
+            // 公园里有树/长椅/灌木，地面若是夯土色会读成"广场上一块泥斑"。
+            let d = ground_noise(x, z, 3.4, seed.wrapping_add(67)) * 0.6
+                + ground_noise(x, z, 1.1, seed.wrapping_add(68)) * 0.4;
+            let k = 0.88 + d * 0.14;
+            let mut c = [0.105 * k, 0.160 * k, 0.070 * k]; // 干草绿（比草坪暗、比夯土绿）
+            let patch = ground_noise(x, z, 7.0, seed.wrapping_add(69));
+            if patch > 0.30 {
+                let m = smoothstep(0.30, 0.80, patch);
+                c = lerp3(c, [0.175, 0.170, 0.095], m * 0.5); // 枯黄草斑
+            }
+            c
+        }
         5 => {
             // 建筑地基/院落铺装：冷灰混凝土地坪，双频斑驳
             // ⚠ `ground_noise` 是 **[-1,1)**（见 [`value_noise`] 的值域警告），所以这里
@@ -941,8 +955,8 @@ mod tests {
         let px = generate_city_ground_texture(size, &flat_height);
         assert_eq!(px.len(), (size as usize) * (size as usize) * 4);
 
-        let mut sums = [[0f64; 3]; 6];
-        let mut cnt = [0u32; 6];
+        let mut sums = [[0f64; 3]; 7];
+        let mut cnt = [0u32; 7];
         let scale = 2.0 * WORLD_HALF / size as f32;
         for py in 0..size {
             let z = -WORLD_HALF + (py as f32 + 0.5) * scale;
@@ -950,7 +964,7 @@ mod tests {
                 let x = -WORLD_HALF + (pxx as f32 + 0.5) * scale;
                 let zone = crate::engine::city::ground_zone(x, z) as usize;
                 let i = ((py * size + pxx) * 4) as usize;
-                if zone < 6 {
+                if zone < 7 {
                     sums[zone][0] += px[i] as f64;
                     sums[zone][1] += px[i + 1] as f64;
                     sums[zone][2] += px[i + 2] as f64;
@@ -958,7 +972,7 @@ mod tests {
                 }
             }
         }
-        let names = ["grass", "sand", "asphalt", "sidewalk", "plaza", "foundation"];
+        let names = ["grass", "sand", "asphalt", "sidewalk", "plaza", "foundation", "park"];
         println!("GROUND TEX DUMP {}x{} ({} m/texel)", size, size, 1.0 / 2.0);
         for (zi, n) in names.iter().enumerate() {
             if cnt[zi] == 0 {
