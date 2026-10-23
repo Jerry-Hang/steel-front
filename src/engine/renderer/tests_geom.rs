@@ -2317,3 +2317,22 @@ mod headless_capture_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ssao_quality_tests {
+    use super::*;
+
+    /// SSAO 在 LOW 画质档关闭、MEDIUM/HIGH 开启，且显式关闭优先。
+    /// 反向验证：把 `ssao_should_run` 改成 `enabled` ⇒ 本判据红（LOW 那条会失败）。
+    #[test]
+    fn ssao_runs_except_on_low_quality() {
+        assert!(ssao_should_run(true, QualityPreset::Medium));
+        assert!(ssao_should_run(true, QualityPreset::High));
+        assert!(
+            !ssao_should_run(true, QualityPreset::Low),
+            "LOW 档必须关闭 SSAO（性能档位约定）"
+        );
+        assert!(!ssao_should_run(false, QualityPreset::High));
+        assert!(!ssao_should_run(false, QualityPreset::Low));
+    }
+}

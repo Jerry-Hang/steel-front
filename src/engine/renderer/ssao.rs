@@ -11,7 +11,8 @@ use super::*;
 impl Renderer {
     /// SSAO 是否启用（默认关）。三条件：显式开关 + 设备支持深度 resolve + MSAA 开启。
     pub(crate) fn ssao_active(&self) -> bool {
-        self.ssao_enabled
+        // LOW 画质档不跑 SSAO（见 helpers::ssao_should_run 的文档）
+        ssao_should_run(self.ssao_enabled, self.quality)
     }
 
     /// 初始化 / 重建 SSAO 资源（幂等：重建路径会先拆旧的再建新的）。

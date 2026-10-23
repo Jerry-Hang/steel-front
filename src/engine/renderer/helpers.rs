@@ -79,6 +79,15 @@ pub(crate) const fn main_pass_attachment_count(
     }
 }
 
+/// SSAO 是否真正参与渲染（2026-10-23）：显式开关 + 画质档位。
+///
+/// 默认开（`RV3D_SSAO` 未设或非 "0"），但 **LOW 画质档关闭** —— 该档的定位是给弱机降负载，
+/// 而 SSAO 是一次全屏 12-tap pass（实测 2560x1600 约 1.4% 帧成本）；MEDIUM/HIGH 保持开启。
+/// 纯函数便于单测（判据见 `tests_geom.rs::ssao_runs_except_on_low_quality`）。
+pub(crate) fn ssao_should_run(enabled: bool, quality: QualityPreset) -> bool {
+    enabled && !matches!(quality, QualityPreset::Low)
+}
+
 /// 本次运行是否启用深度 resolve 附件（SSAO 前置）：设备暴露支持的深度 resolve 模式
 /// **且** MSAA 开启。注意 Vulkan **没有**这个特性的 feature flag，只有属性结构
 /// `VkPhysicalDeviceDepthStencilResolveProperties`（`supportedDepthResolveModes`）——
