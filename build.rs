@@ -1230,7 +1230,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 细节层也按 **minor** 判：掠射角下细节图（7.8mm/纹素）本该沿被压扁的方向"拉长"，
     // 而不是整块消失；只在 minor 粗到 >0.6m/像素时完全退出。
     let gpx = footprint_minor;
-    let gdetail = stretch_fade * (1.0 - smoothstep(0.1, 0.3, gpx));
+    // 细节层（7.8mm/纹素）用**更宽松**的拉伸比闸门（2026-10-23）：近地掠射时
+    // stretch 常到 10+，若沿用宏纹理那档（4–10）会在最该有颗粒的脚下把细节整个关掉。
+    // 细节图被拉长只是"方向性模糊"，不会像宏纹理那样出横向条带 ⇒ 闸门放到 14–45。
+    let gdetail = (1.0 - smoothstep(0.1, 0.3, gpx))
+        * (1.0 - smoothstep(14.0, 45.0, stretch));
     // ⚠ 本层由 light_data.flags.w 显式开关，默认关（2026-09-03 定位的"地面全黑/街区黑块"
     // 根因）。binding 9（ground_detail_tex）是本文件里唯一"片元声明了、管线却可能没绑定"
     // 的槽位：set layout 缺项或任一帧描述符漏写 → 驱动给空描述符 → 采样恒 0 → 本层乘法
@@ -1261,6 +1265,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         var gmod = clamp(g * GROUND_DETAIL_GAIN, 0.5, 2.0);
         if (g <= 0.0) {
             gmod = 1.0;
+        }
+        // 第二层高频细节（2026-10-23）：同一张细节图以不同缩放/相位再采一次，与第一层
+        // 相乘 ⇒ 打散平铺重复感、近景地面多一层"砂石颗粒"。只在细节层已生效的近距离
+        // 像素上多一次取数（`gdetail>0.35`），远距不进这里。
+        if (gdetail > 0.35) {
+            let lvl2 = lvl + 1.5;
+            let g2 = textureSampleLevel(
+                ground_detail_tex, texture_sampler,
+                input.world_pos.xz * (0.41 / GROUND_DETAIL_METRES) + vec2<f32>(0.37, 0.61),
+                lvl2,
+            ).r;
+            gmod = gmod * (0.88 + 0.28 * g2 * GROUND_DETAIL_GAIN * 0.5);
         }
         mixed = mixed * mix(1.0, gmod, gdetail);
     }
