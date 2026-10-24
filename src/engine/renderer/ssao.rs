@@ -428,7 +428,7 @@ impl Renderer {
             let params: [f32; 16] = [
                 near, far, radius, strength, // params
                 tan_half, aspect, lv.x, lv.y, // aux
-                lv.z, 0.40, 6.0, 0.015,       // aux2
+                lv.z, 0.40, 8.0, 0.015,       // aux2
                 // aux3：x = 接触阴影强度（画质档）
                 crate::engine::renderer::helpers::ssao_contact_strength_for(self.quality), 0.0, 0.0,
                 0.0,

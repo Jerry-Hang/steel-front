@@ -2208,11 +2208,14 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let taps = i32(ssao_push.aux2.z);
     let bias = ssao_push.aux2.w;
     var cs = 0.0;
+    var hits = 0.0;
     if (march > 0.0 && taps > 0 && dot(lv, lv) > 0.25) {
         // Vulkan 的 frag.y 向下，而视图空间 +y 向上 ⇒ NDC y 要取反。
         let ndc = vec2<f32>(frag.x / f32(dims.x) * 2.0 - 1.0,
                             1.0 - frag.y / f32(dims.y) * 2.0);
         let pv = vec3<f32>(ndc.x * tan_half * aspect, ndc.y * tan_half, -1.0) * z0;
+        // ⚠ 试过逐像素抖动起点（IGN）：三块区域的高频能量只降 1.6–7.5%，
+        // 比不加抖动（7.4–12.1%）更差 ⇒ 已回退（记录在 PROGRESS）。
         for (var i = 1; i <= taps; i = i + 1) {
             let t = march * f32(i) / f32(taps);
             let q = pv + lv * t;
@@ -2238,10 +2241,12 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
             // 厚度上限随距离收紧：远处像素的一个深度台阶本来就跨很多米。
             let thick = min(0.20, max(0.06, z0 * 0.02));
             if (dzc > bias && dzc < thick) {
-                cs = 1.0;
-                break;
+                hits = hits + 1.0;
             }
         }
+        // 软命中（2026-10-24）：二值判定会在物体边缘产生逐像素噪点；用命中比例
+        // 让 0..1 连续过渡，配合 8 步采样把噪声平滑掉（不引入时域缓冲）。
+        cs = hits / f32(taps);
     }
     // 接触阴影只占强度的一部分（按画质档：Medium 0.30 / High 0.45）：它只补"贴身"那一点。
     let ao = clamp(1.0 - strength * (occ / wsum) - strength * cs * ssao_push.aux3.x, 0.0, 1.0);
