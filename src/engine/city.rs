@@ -402,9 +402,12 @@ impl City {
             // 街在 ±X 侧（街线沿 z 延伸）
             if cx - fx >= 0.0 { core::f32::consts::FRAC_PI_2 } else { -core::f32::consts::FRAC_PI_2 }
         } else if cz - fz >= 0.0 {
-            core::f32::consts::PI
-        } else {
+            // 🔴 2026-10-24 修正：正面朝向 = (-sinθ, 0, -cosθ)。`cz - fz >= 0` 表示
+            // 建筑在街线 +Z 侧 ⇒ 街在 -Z 侧 ⇒ 应朝 -Z，即 θ = 0。
+            // 旧版这里返回 π（朝 +Z），两个分支整体反了 ⇒ 这类店面背对街道。
             0.0
+        } else {
+            core::f32::consts::PI
         }
     }
 
@@ -3321,4 +3324,35 @@ mod city_layout_tests {
         );
     }
 
+}
+#[cfg(test)]
+mod face_street_tests {
+    use super::*;
+
+    /// 正面朝向 = (-sinθ, 0, -cosθ)，与 `City::face_nearest_street` 的注释同源。
+    fn forward(yaw: f32) -> (f32, f32) {
+        (-yaw.sin(), -yaw.cos())
+    }
+
+    /// 反解出的 yaw 必须让正面指向最近的那条街：四个分支各一条。
+    /// 反向验证：把 z 分支再改回 π/0 互换 ⇒ 第 3 条红。
+    #[test]
+    fn facing_points_at_the_nearest_street() {
+        let e = STREET_EVERY;
+        // 分支选择：|dx| <= |dz| 走 X 分支，否则走 Z 分支（与实现同序）。
+        let cases = [
+            (e * 0.05, e * 0.12, (-1.0f32, 0.0f32)), // X 分支：街在 -X 侧
+            (-e * 0.05, e * 0.12, (1.0, 0.0)),       // X 分支：街在 +X 侧
+            (e * 0.12, e * 0.05, (0.0, -1.0)),       // Z 分支：街在 -Z 侧（2026-10-24 修正）
+            (e * 0.12, -e * 0.05, (0.0, 1.0)),       // Z 分支：街在 +Z 侧
+        ];
+        for (cx, cz, (ex, ez)) in cases {
+            let yaw = City::face_nearest_street(cx, cz);
+            let (fx, fz) = forward(yaw);
+            assert!(
+                fx * ex + fz * ez > 0.9,
+                "位置 ({cx},{cz}) 的 yaw={yaw} 正面=({fx},{fz})，应当朝向 ({ex},{ez})"
+            );
+        }
+    }
 }
