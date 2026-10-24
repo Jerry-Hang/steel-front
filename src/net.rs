@@ -77,7 +77,7 @@ pub fn sanitize_log_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len().min(256));
     for (i, c) in s.chars().enumerate() {
         if i >= 128 {
-            out.push('…');
+            out.push_str("...");
             break;
         }
         let unsafe_char = c.is_control() || c == '\u{2028}' || c == '\u{2029}';
@@ -2377,12 +2377,12 @@ mod tests {
         let dirty = "ok\nFAKE VUID=0\r\npanics=0\tdone\u{2028}tail";
         let clean = sanitize_log_field(dirty);
         for bad in ['\n', '\r', '\t', '\u{2028}', '\u{2029}'] {
-            assert!(!clean.contains(bad), "清洗后仍含 {bad:?}：{clean:?}");
+            assert!(!clean.contains(bad), "整理后仍含 {bad:?}：{clean:?}");
         }
         assert!(clean.contains("FAKE"), "内容丢了：{clean:?}");
-        assert_eq!(clean.lines().count(), 1, "清洗后仍跨行：{clean:?}");
+        assert_eq!(clean.lines().count(), 1, "整理后仍跨行：{clean:?}");
         let long: String = std::iter::repeat('x').take(5000).collect();
-        assert!(sanitize_log_field(&long).chars().count() <= 129, "没有截断");
+        assert!(sanitize_log_field(&long).chars().count() <= 131, "没有截断");
     }
 
     /// S2 测试辅助：走完 Join → Challenge → JoinProof → Welcome，返回服务端看到的本端地址。
