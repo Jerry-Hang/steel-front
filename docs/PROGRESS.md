@@ -1708,3 +1708,16 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
 - 🔴 **判据自检教训**：第一版乱序判据发的是 `[7,5,7]`，末尾那次 7 让"无条件覆盖"也能过 ⇒ 假绿。
   收紧成 `[7,5]` 后，退化版 `collapse_input`（直接 insert）**红**，修复版绿。
 - 协议/线格式不变（`SESSION_VERSION` 不动）；客户端的 seq 本来就在发，只是服务端以前丢了。
+
+### 2026-10-24（续34）：修 S6（High）——"服务器已满"不再永久锁死客户端
+
+审计 S6：`Refuse` 一律被当成永久拒绝（`refused_reason` 粘住、`reset_connection` 不清）⇒
+本机开 64 个 socket 占满名额后，真实玩家**永久无法重连，只能重启进程**。
+
+- 服务端拒绝原因加**稳定前缀**（线格式不变）：`VERSION …`（永久）/ `BUSY …`（瞬态）；
+- 客户端 `refuse_is_permanent(reason)` 按前缀分类：`BUSY` 不记永久拒绝，并把 `last_join_at`
+  推到现在 ⇒ 一个 interval 后自动重试；未知原因按永久（不制造重连风暴）；
+- `reset_connection` 清 `refused_reason`（换服务器/重开会话可再试）；
+- 判据：`transient_full_refusal_keeps_retrying`（BUSY 后必须仍重发 Join）、
+  `reset_connection_clears_permanent_refusal`；旧判据 `refuse_stops_retry_join` 保留（VERSION 仍永久）。
+- 反向验证：`refuse_is_permanent` 恒 true ⇒ BUSY 判据红（"满过一次就永远连不上"）。

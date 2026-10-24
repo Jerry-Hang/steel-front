@@ -1048,14 +1048,17 @@ impl Server {
     pub fn handle_join(&mut self, from: SocketAddr, name: String, version: u16) -> io::Result<NetworkMessage> {
         if version != SESSION_VERSION {
             let refuse = NetworkMessage::Refuse {
-                reason: format!("协议版本不匹配（客户端 {version}，服务器 {SESSION_VERSION}）"),
+                // `VERSION` 前缀 = 永久拒绝（重试无用）；客户端按前缀分类，不靠中文文案。
+                reason: format!("VERSION 协议版本不匹配（客户端 {version}，服务器 {SESSION_VERSION}）"),
             };
             self.send_to(&refuse, from)?;
             return Ok(refuse);
         }
         let Some(player_id) = self.register(from) else {
             let refuse = NetworkMessage::Refuse {
-                reason: "服务器已满（或玩家 id 已耗尽）".to_string(),
+                // `BUSY` 前缀 = 瞬态拒绝：客户端必须继续重试（审计 S6：否则 64 个 socket
+                // 就能把真实玩家永久锁在门外）。
+                reason: "BUSY 服务器已满（或玩家 id 已耗尽）".to_string(),
             };
             self.send_to(&refuse, from)?;
             return Ok(refuse);
@@ -1067,6 +1070,15 @@ impl Server {
 }
 
 /// UDP 客户端：连接服务器，维护自身 id、远端玩家插值缓冲与快照实体插值表
+/// `Refuse` 的原因是否属于「重试无用」的永久拒绝。
+///
+/// 只有协议/版本不匹配是永久的；`BUSY`（服务器满、玩家 id 耗尽）是瞬态——
+/// 旧版把所有 Refuse 都当成永久 ⇒ 审计 S6：占满 64 个名额后真实玩家**永远无法重连**。
+/// 未知原因按永久处理（服务器明确说了不，不制造重连风暴）。
+pub fn refuse_is_permanent(reason: &str) -> bool {
+    !reason.starts_with("BUSY") && (reason.starts_with("VERSION") || reason.contains("版本不匹配"))
+}
+
 pub struct Client {
     socket: UdpSocket,
     server: SocketAddr,
@@ -1398,13 +1410,16 @@ impl Client {
                     log::debug!("net: 已连上的会话忽略 Refuse（{reason}）");
                     return None;
                 }
-                if self.refused_reason.is_none() {
-                    log::warn!(
-                        "握手被服务器拒绝（版本不匹配？）⇒ 停止重试。原因：{}",
-                        reason
-                    );
+                if refuse_is_permanent(&reason) {
+                    if self.refused_reason.is_none() {
+                        log::warn!("握手被永久拒绝（版本不匹配）⇒ 停止重试。原因：{}", reason);
+                    }
+                    self.refused_reason = Some(reason);
+                } else {
+                    // 瞬态（BUSY）：不记永久拒绝，推迟一个 interval 再重试。
+                    log::warn!("服务器暂满 ⇒ 稍后重试。原因：{}", reason);
+                    self.last_join_at = Instant::now();
                 }
-                self.refused_reason = Some(reason);
                 None
             }
             _ => None,
@@ -1526,6 +1541,8 @@ impl Client {
         self.objective_rule.clear();
         self.has_objective = false;
         self.objective_seq = 0;
+        // 审计 S6：永久拒绝状态必须随会话重置清掉，否则"满"过一次就再也连不上。
+        self.refused_reason = None;
         // 🔴 时间基减法必须 `checked_sub`：`Instant` 的原点在 Windows 上是**开机时刻**，
         // 所以"进程启动不足 1 小时"时 `Instant::now() - 3600s` 会**下溢 panic**
         // （2026-09-27 早上重启后跑测试，`reset_connection_clears_session_scoped_state`
@@ -1869,6 +1886,61 @@ mod tests {
         assert!(
             extra.is_none(),
             "被拒后仍在重发 Join —— 这就是无限重连风暴（服务器会一直回 Refuse）"
+        );
+    }
+
+    /// 审计 S6：`BUSY`（服务器满）是瞬态 ⇒ 客户端不得记成永久拒绝，且必须继续重发 Join。
+    /// 反向验证：把 `refuse_is_permanent` 改成恒 true ⇒ 本判据红。
+    #[test]
+    fn transient_full_refusal_keeps_retrying() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut client = Client::connect(addr).unwrap();
+        client.retry_join("p", Duration::ZERO);
+        let (_, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        server
+            .send_to(
+                &NetworkMessage::Refuse {
+                    reason: "BUSY 服务器已满（或玩家 id 已耗尽）".into(),
+                },
+                from,
+            )
+            .unwrap();
+        let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        let _ = client.handle_message(got);
+        assert!(
+            client.refused_reason.is_none(),
+            "BUSY 被记成了永久拒绝 ⇒ 服务器满过一次就永远连不上（S6）"
+        );
+        client.last_join_at = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+        let _ = client.retry_join("p", Duration::ZERO);
+        let again = server.recv_timeout(Duration::from_millis(500)).unwrap();
+        assert!(again.is_some(), "BUSY 之后不再重发 Join ⇒ 永久锁死（S6）");
+    }
+
+    /// 审计 S6：`reset_connection` 必须清掉永久拒绝状态（换服务器/重开会话要能再试）。
+    #[test]
+    fn reset_connection_clears_permanent_refusal() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut client = Client::connect(addr).unwrap();
+        client.retry_join("p", Duration::ZERO);
+        let (_, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        server
+            .send_to(
+                &NetworkMessage::Refuse {
+                    reason: "VERSION 协议版本不匹配（客户端 1，服务器 2）".into(),
+                },
+                from,
+            )
+            .unwrap();
+        let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        let _ = client.handle_message(got);
+        assert!(client.refused_reason.is_some(), "版本不匹配必须是永久拒绝");
+        client.reset_connection();
+        assert!(
+            client.refused_reason.is_none(),
+            "reset_connection 没清永久拒绝 ⇒ 重开会话仍被锁死（S6 后半）"
         );
     }
 
