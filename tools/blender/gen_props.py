@@ -421,9 +421,30 @@ def asset_tree():
         blobs.append((math.cos(a) * 1.50, math.sin(a) * 1.50, h + 1.95, 1.50, i))
     blobs.append((0.78, -0.30, h + 3.10, 1.30, 1))   # top cluster
     blobs.append((-0.70, 0.42, h + 3.25, 1.22, 2))
-    for bx, by, bz, br, gi in blobs:
-        icosphere(p, (bx, by, bz), br, greens[gi], subdiv=1, flatten=0.78,
+    # 2026-10-24：逐团抖动 —— 原来 10 个球全是 flatten=0.78、半径按表写死，
+    # 整棵树的冠底就成了"一圈同样高的台面"。零三角形改动：
+    # flatten 0.62..0.92、半径 +/-12%，再按距冠底的高度压暗（0.88x）/提亮（1.08x），
+    # 球与球交叠处自然出现深浅差。
+    for _bi, (bx, by, bz, br, gi) in enumerate(blobs):
+        f = 0.62 + rng.random() * 0.30
+        r = br * (0.88 + rng.random() * 0.24)
+        rel = max(0.0, min(1.0, (bz - h) / 4.7))
+        shade = 0.88 + rel * 0.20
+        col = (greens[gi][0] * shade, greens[gi][1] * shade, greens[gi][2] * shade)
+        icosphere(p, (bx, by, bz), r, col, subdiv=1, flatten=f,
                   jitter=0.13, rng=rng, stretch=(1.0, 1.0, 1.0))
+    # 契约归一化：逐团抖动会改变外轮廓，而 `props.rs::CONTRACT_SIZES` 是 1 mm 硬比对。
+    # 这里把包围盒无差别缩放到契约尺寸（x/y/z 各自缩放 + 底面居中 + min_z=0），
+    # 顶点数与拓扑不变，只把外轮廓按回去。
+    target = (5.594, 5.552, 7.708)
+    xs = [v[0] for v in p.verts]; ys = [v[1] for v in p.verts]; zs = [v[2] for v in p.verts]
+    (x0, x1), (y0, y1), (z0, z1) = (min(xs), max(xs)), (min(ys), max(ys)), (min(zs), max(zs))
+    sx = target[0] / max(1e-6, x1 - x0)
+    sy = target[1] / max(1e-6, y1 - y0)
+    sz = target[2] / max(1e-6, z1 - z0)
+    cx = (x0 + x1) * 0.5
+    cy = (y0 + y1) * 0.5
+    p.verts = [((v[0] - cx) * sx, (v[1] - cy) * sy, (v[2] - z0) * sz) for v in p.verts]
     return p, (6.6, 6.6, h + 4.7)
 
 
@@ -1266,7 +1287,7 @@ def render_preview(names, png_path):
 
 # ----------------------------------------------------------------------------- CLI
 def _args():
-    out = "D:/Rust/steel-front/assets/props"
+    out = "assets/props"
     only = None
     preview = None
     argv = sys.argv
