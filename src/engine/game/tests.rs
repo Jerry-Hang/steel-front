@@ -349,6 +349,8 @@ mod session;
             last_rx: 0.0,
             fire_accum: 0.5,
             last_fire: 0.0,
+            last_input_seq: 0,
+            last_input_time: 0.0,
         });
         g.last_dt = 0.016;
         let ammo_before = g.weapons.active_firearm_ref().magazine();
@@ -363,7 +365,7 @@ mod session;
             yaw: 0.0,
             pitch: 0.0,
         };
-        g.apply_net_player_input(1, input);
+        g.apply_net_player_input(1, input, 1);
         assert_eq!(
             g.weapons.active_firearm_ref().magazine(),
             ammo_before,

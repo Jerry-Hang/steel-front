@@ -1405,6 +1405,8 @@ mod segment_t_ordering_tests {
             last_rx: 0.0,
             fire_accum: 0.0,
             last_fire: 0.0,
+            last_input_seq: 0,
+            last_input_time: 0.0,
         });
         // 线段 z: 0 → -10，同时穿过远端玩家（≈ -5）与墙（≈ -9.5）
         fire_one_frame(&mut game, true);

@@ -29,6 +29,30 @@ const NET_EYE_HEIGHT: f32 = 1.6;
 /// * `Camera::direction()` = `(cos p·sin yaw, sin p, cos p·cos yaw)`
 /// * `Camera::forward()` = **`-direction()`** ⇒ 水平前向 = `(-sin yaw, -cos yaw)`
 /// * `right = forward × Y` = `(cos yaw, -sin yaw)`，`left = -right`
+/// S1 修复（2026-10-24）：输入积分步长的下限/上限（秒）。
+pub(crate) const MIN_INPUT_DT: f32 = 0.001;
+pub(crate) const MAX_INPUT_DT: f32 = 0.05;
+
+/// 真实到达间隔（秒），夹在 [MIN_INPUT_DT, MAX_INPUT_DT]。
+pub(crate) fn input_dt_clamped(last: f32, now: f32) -> f32 {
+    (now - last).clamp(MIN_INPUT_DT, MAX_INPUT_DT)
+}
+
+/// 每客户端每帧只保留 seq 更新的一条 Input（乱序/重放丢弃）。
+pub(crate) fn collapse_input(
+    map: &mut std::collections::HashMap<std::net::SocketAddr, (u32, NetInput)>,
+    from: std::net::SocketAddr,
+    seq: u32,
+    input: NetInput,
+) {
+    let newer = map
+        .get(&from)
+        .map_or(true, |(prev, _)| crate::net::seq_is_newer(seq, *prev));
+    if newer {
+        map.insert(from, (seq, input));
+    }
+}
+
 fn net_input_delta(yaw: f32, forward: bool, backward: bool, left: bool, right: bool) -> (f32, f32) {
     let (sy, cy) = (yaw.sin(), yaw.cos());
     let mut dx = 0.0f32;
@@ -125,7 +149,10 @@ impl Game {
     }
     /// 服务器模式：收客户端输入应用（远端玩家）+ 超时清理 + 每 tick 广播快照
     pub(crate) fn step_net_server(&mut self, camera: &Camera) {
-        let mut inputs: Vec<(std::net::SocketAddr, NetInput)> = Vec::new();
+        // 🔴 S1（2026-10-24）：每客户端每帧只保留"最新且 seq 更新"的一条 Input。
+        // 旧写法把所有包塞进 Vec 再逐条 apply ⇒ 包速率直接变成速度/射速乘数。
+        let mut inputs: std::collections::HashMap<std::net::SocketAddr, (u32, NetInput)> =
+            std::collections::HashMap::new();
         let mut joined: Vec<u32> = Vec::new();
         let mut left: Vec<u32> = Vec::new();
         {
@@ -140,7 +167,9 @@ impl Game {
                             joined.push(id);
                         }
                     }
-                    NetworkMessage::Input { input, .. } => inputs.push((from, input)),
+                    NetworkMessage::Input { seq, input, .. } => {
+                        collapse_input(&mut inputs, from, seq, input)
+                    }
                     // 🔴 2026-09-26：显式离场通知（客户端正常退出会发 Leave）。以前这条落在
                     // `_ => {}`：既不注销注册表、也不清 `net_players` ⇒ 快照里继续带着他。
                     NetworkMessage::Leave { .. } => {
@@ -189,14 +218,16 @@ impl Game {
                     last_rx: self.time,
                     fire_accum: 0.0,
                     last_fire: 0.0,
+                    last_input_seq: 0,
+                    last_input_time: self.time,
                 });
                 log::info!("net: server 远端玩家 #{id} 加入 @({:.0},{:.0})", spawn[0], spawn[1]);
             }
         }
         // 各远端玩家应用最新输入（移动 + 开火，服务器权威）
-        for (from, input) in inputs {
+        for (from, (seq, input)) in inputs {
             if let Some(id) = self.net_server.as_ref().and_then(|s| s.player_id_of(from)) {
-                self.apply_net_player_input(id, input);
+                self.apply_net_player_input(id, input, seq);
             }
         }
         // 远端玩家：死亡复活 + 位置贴地
@@ -337,11 +368,19 @@ impl Game {
     }
     /// 服务端应用客户端输入：移动标志 + 开火（方向 = 输入视角）+ 记录视角供 main.rs 应用
     /// 远端玩家输入应用（服务器权威：移动该玩家 + 从该玩家眼睛开火）
-    pub(crate) fn apply_net_player_input(&mut self, id: u32, input: NetInput) {
+    pub(crate) fn apply_net_player_input(&mut self, id: u32, input: NetInput, seq: u32) {
         let Some(idx) = self.net_players.iter().position(|p| p.id == id) else {
             return;
         };
-        let (pi, dt, alive) = (idx, self.last_dt, self.net_players[idx].alive);
+        // 🔴 S1：乱序 / 重复 seq 一律丢弃（同一帧内已折叠成最新一条）。
+        if !crate::net::seq_is_newer(seq, self.net_players[idx].last_input_seq) {
+            return;
+        }
+        // 🔴 S1：dt 用"距上次接受输入的真实间隔"，而不是整帧 dt —— 否则每包都推进一整帧。
+        let dt = input_dt_clamped(self.net_players[idx].last_input_time, self.time);
+        self.net_players[idx].last_input_seq = seq;
+        self.net_players[idx].last_input_time = self.time;
+        let (pi, alive) = (idx, self.net_players[idx].alive);
         if !alive {
             return;
         }
@@ -539,5 +578,56 @@ mod net_dir_tests {
                 "yaw={yaw:.3}：forward 与 backward 不是严格相反"
             );
         }
+    }
+
+    /// S1 判据：一帧内 10 个 Input 必须折叠成 1 条（最新 seq），位移不得 ×10。
+    /// 反向验证：把 `collapse_input` 改成无条件 insert ⇒ 本判据仍绿但下一条红（乱序）。
+    #[test]
+    fn one_input_packet_per_frame_is_the_speed_baseline() {
+        let addr: std::net::SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let mut map = std::collections::HashMap::new();
+        for seq in 1..=10u32 {
+            collapse_input(
+                &mut map,
+                addr,
+                seq,
+                NetInput { forward: true, backward: false, left: false, right: false, fire: true, yaw: 0.0, pitch: 0.0 },
+            );
+        }
+        assert_eq!(map.len(), 1, "同一客户端一帧只允许留一条输入");
+        assert_eq!(map[&addr].0, 10, "必须保留最新 seq");
+        let dt = input_dt_clamped(10.0, 10.004);
+        let single = 4.6 * dt;
+        let moved: f32 = map.values().map(|_| 4.6 * input_dt_clamped(10.0, 10.004)).sum();
+        assert!(
+            (moved - single).abs() < 1e-3,
+            "10 包/帧把位移放大成 {moved:.3}（单包 {single:.3}）"
+        );
+    }
+
+    /// S1 判据（乱序/重放）：旧 seq 不得覆盖新 seq。
+    /// 反向验证：`collapse_input` 改成无条件 insert ⇒ 这里 7 会被 5 覆盖 ⇒ 红。
+    #[test]
+    fn duplicate_or_stale_input_seq_is_dropped() {
+        let addr: std::net::SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let mut map = std::collections::HashMap::new();
+        // 注意：末尾不要再发一次 7 —— 否则"无条件覆盖"也会留下 7，判据就测不出乱序（实测踩过）。
+        for seq in [7u32, 5] {
+            collapse_input(
+                &mut map,
+                addr,
+                seq,
+                NetInput { forward: true, backward: false, left: false, right: false, fire: false, yaw: 0.0, pitch: 0.0 },
+            );
+        }
+        assert_eq!(map[&addr].0, 7, "乱序/重放把 seq 退回去了");
+    }
+
+    /// S1 判据：dt 取真实间隔并夹紧（防"每包一帧"的超速与长断流瞬移）。
+    #[test]
+    fn input_dt_uses_real_interval_and_is_clamped() {
+        assert!((input_dt_clamped(10.0, 10.004) - 0.004).abs() < 1e-6);
+        assert_eq!(input_dt_clamped(10.0, 20.0), MAX_INPUT_DT, "间隔过大必须夹到上限");
+        assert_eq!(input_dt_clamped(10.0, 9.0), MIN_INPUT_DT, "时间倒退必须夹到下限");
     }
 }

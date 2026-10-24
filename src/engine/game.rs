@@ -540,6 +540,10 @@ pub struct NetPlayer {
     pub fire_accum: f32,
     /// 最近开火时刻（快照 firing 指示）
     pub last_fire: f32,
+    /// 最近接受的输入序号（S1：每帧每客户端只应用一条 + 乱序去重）
+    pub last_input_seq: u32,
+    /// 最近接受输入的时刻（真实 dt = 与它的差，夹在 [MIN_INPUT_DT, MAX_INPUT_DT]）
+    pub last_input_time: f32,
 }
 
 /// 弹着标记（子弹打在障碍表面留下的弹孔）的数量上限。

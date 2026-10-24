@@ -1691,3 +1691,20 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
   4× 放大对比：轮廓与配色一致，只有躯干明暗更平滑（引擎按位置平均法线，符合预期）；
 - 1600p fps：原 293.4 / 焊接 294.0（负载 1.3，噪声内）；
 - 契约：soldier 不在 `CONTRACT_SIZES`（独立目录），包围盒随焊接不变。
+
+### 2026-10-24（续33）：修 S1（Critical）——Input 每帧每客户端只应用一条 + seq 去重 + 真实 dt
+
+安全审计的头号问题：`game/net.rs` 把一帧内收到的**所有** Input 逐条 apply，而步长用整帧 `self.last_dt`
+⇒ **客户端包速率 = 服务端移动速度/射速乘数**（实测 10 包/帧 = 46 m/s、766 发/s、单步 0.767 m 穿墙）。
+
+- `step_net_server`：`Vec<(addr, NetInput)>` → `HashMap<addr, (seq, NetInput)>`，
+  `collapse_input()` 每客户端每帧只留 **seq 更新**的一条（`net::seq_is_newer`，乱序/重放丢弃）；
+- `apply_net_player_input(id, input, seq)`：先过 seq 闸（`NetPlayer.last_input_seq`），
+  再用 `input_dt_clamped(last_input_time, now)`（夹在 **[1 ms, 50 ms]**）作为移动/开火步长；
+- 新增判据三条（均已反向验证）：
+  `one_input_packet_per_frame_is_the_speed_baseline`（10 包/帧位移不得 ×10）、
+  `duplicate_or_stale_input_seq_is_dropped`（`[7,5]` 到达必须留 7）、
+  `input_dt_uses_real_interval_and_is_clamped`；
+- 🔴 **判据自检教训**：第一版乱序判据发的是 `[7,5,7]`，末尾那次 7 让"无条件覆盖"也能过 ⇒ 假绿。
+  收紧成 `[7,5]` 后，退化版 `collapse_input`（直接 insert）**红**，修复版绿。
+- 协议/线格式不变（`SESSION_VERSION` 不动）；客户端的 seq 本来就在发，只是服务端以前丢了。
