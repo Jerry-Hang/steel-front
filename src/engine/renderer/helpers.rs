@@ -88,7 +88,17 @@ pub(crate) const fn main_pass_attachment_count(
 ///   LOW 档不跑 SSAO（见 `ssao_should_run`）⇒ 强度 0；
 ///   MEDIUM 0.45（轻接触暗部，保清晰度）；HIGH 0.75（更强的落地感）。
 /// `RV3D_SSAO_STRENGTH` 显式设置时覆盖（A/B 取证用）。
-pub(crate) fn ssao_strength_for(quality: QualityPreset) -> f32 {
+/// 接触阴影强度按画质档：LOW 不跑到这里（SSAO 整体关），MEDIUM 0.30 / HIGH 0.45。
+    /// 与 `ssao_strength_for` 分开：接触阴影在多采样路径上更贵，档位要能单独降。
+    pub(crate) fn ssao_contact_strength_for(quality: QualityPreset) -> f32 {
+        match quality {
+            QualityPreset::Low => 0.0,
+            QualityPreset::Medium => 0.30,
+            QualityPreset::High => 0.45,
+        }
+    }
+
+    pub(crate) fn ssao_strength_for(quality: QualityPreset) -> f32 {
     match quality {
         QualityPreset::Low => 0.0,
         QualityPreset::Medium => 0.45,

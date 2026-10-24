@@ -2124,6 +2124,8 @@ struct SsaoPush {
     aux: vec4<f32>,
     // x = 视空间光向 z, y = 行进长度（米）, z = 步数, w = 深度偏置（米）
     aux2: vec4<f32>,
+    // x = 接触阴影强度（按画质档），yzw 保留
+    aux3: vec4<f32>,
 };
 var<immediate> ssao_push: SsaoPush;
 
@@ -2241,8 +2243,8 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
             }
         }
     }
-    // 接触阴影只占强度的一部分：它只补"贴身"那一点，不该和 SSAO 同权。
-    let ao = clamp(1.0 - strength * (occ / wsum) - strength * cs * 0.45, 0.0, 1.0);
+    // 接触阴影只占强度的一部分（按画质档：Medium 0.30 / High 0.45）：它只补"贴身"那一点。
+    let ao = clamp(1.0 - strength * (occ / wsum) - strength * cs * ssao_push.aux3.x, 0.0, 1.0);
     return vec4<f32>(col.rgb * ao, 1.0);
 }
 "#;

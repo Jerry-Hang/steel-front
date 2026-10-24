@@ -238,7 +238,7 @@ impl Renderer {
             let push = vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
-                .size(std::mem::size_of::<[f32; 12]>() as u32);
+                .size(std::mem::size_of::<[f32; 16]>() as u32);
             let set_layouts = [self.ssao_set_layout];
             let layout_ci = vk::PipelineLayoutCreateInfo::default()
                 .set_layouts(&set_layouts)
@@ -425,10 +425,13 @@ impl Renderer {
                 .frame_view
                 .transform_vector3(glam::Vec3::new(lw.x, lw.y, lw.z))
                 .normalize_or_zero();
-            let params: [f32; 12] = [
+            let params: [f32; 16] = [
                 near, far, radius, strength, // params
                 tan_half, aspect, lv.x, lv.y, // aux
-                lv.z, 0.40, 6.0, 0.015,       // aux2：行进 0.55m / 8 步 / 偏置 1cm
+                lv.z, 0.40, 6.0, 0.015,       // aux2
+                // aux3：x = 接触阴影强度（画质档）
+                crate::engine::renderer::helpers::ssao_contact_strength_for(self.quality), 0.0, 0.0,
+                0.0,
             ];
             self.device.cmd_push_constants(
                 command_buffer,

@@ -2356,10 +2356,20 @@ mod ssao_quality_tests {
         assert!(src.contains("struct SsaoPush"), "着色器里没有 SsaoPush");
         assert!(src.contains("aux: vec4<f32>"), "缺少 aux（半 FOV/宽高比/光向）");
         assert!(src.contains("aux2: vec4<f32>"), "缺少 aux2（光向 z/行进/步数/偏置）");
+        assert!(src.contains("aux3: vec4<f32>"), "缺少 aux3（接触阴影强度）");
         assert!(
             src.contains("occ / wsum) - strength * cs"),
             "合成式里没有接触阴影项 cs"
         );
-        assert_eq!(std::mem::size_of::<[f32; 12]>(), 48, "push 尺寸应为 48 B");
+        assert_eq!(std::mem::size_of::<[f32; 16]>(), 64, "push 尺寸应为 64 B");
+    }
+
+    /// 接触阴影强度按画质档：LOW 0（整体不跑 SSAO）、MEDIUM 0.30、HIGH 0.45。
+    /// 反向验证：把 HIGH 改成 0.0 ⇒ 红。
+    #[test]
+    fn ssao_contact_strength_tracks_quality() {
+        assert_eq!(super::helpers::ssao_contact_strength_for(QualityPreset::Low), 0.0);
+        assert!((super::helpers::ssao_contact_strength_for(QualityPreset::Medium) - 0.30).abs() < 1e-6);
+        assert!((super::helpers::ssao_contact_strength_for(QualityPreset::High) - 0.45).abs() < 1e-6);
     }
 }

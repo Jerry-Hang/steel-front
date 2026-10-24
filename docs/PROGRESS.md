@@ -1970,3 +1970,12 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
   亮度 105.10→**102.54**；树底/柱后/柱廊内出现暗带，不再整屏变暗。
 - 代价：`RV3D_VALIDATION=1` 跑 8 s **VUID=0**；1600×900 同负载 fps 284–288（旧 284–290，噪声内）。
 - 判据 `ssao_push_declares_contact_shadow_fields`（push 48 B + 着色器字段 + cs 合成项）。
+
+### 2026-10-24（续53）：SSCS 强度接画质档
+
+- `helpers::ssao_contact_strength_for(quality)`：LOW 0（整体不跑 SSAO）/ MEDIUM **0.30** / HIGH **0.45**；
+- SSAO push 48 B → **64 B**（新增 `aux3`，x = 接触强度）；着色器合成式读 `ssao_push.aux3.x`
+  （不再写死 0.45）；
+- 判据：`ssao_contact_strength_tracks_quality`（反向验证：HIGH 改 0 ⇒ 红）、
+  `ssao_push_declares_contact_shadow_fields` 同步扩到 64 B + aux3；
+- 实测 `RV3D_QUALITY=1 vs 2`：全图 **43.38%**、亮度 106.83→102.54（档位确实在校准 AO 与接触阴影）。
