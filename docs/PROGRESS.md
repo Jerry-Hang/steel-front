@@ -1770,3 +1770,14 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
   `join_proof_with_wrong_nonce_is_refused`（**先真发挑战再回错 nonce**；旧版只测无挑战分支 ⇒ 假绿）、
   `client_drops_unsealed_snapshot_after_handshake`；回环握手测试改用 `complete_handshake()`。
 - 已知边界：token 由 std 哈希派生（同网段不可预测即可，不追求密码学强度）；中继/NAT 打洞路径未覆盖。
+
+### 2026-10-24（续38）：修 S7——网络字符串进日志前统一清洗
+
+`Refuse.reason` 由对端任意填写且直接进 `log::warn!`；本仓大量验收判据读日志文本
+（panics/VUID/hits），一条带换行的 reason 就能伪造整行日志。
+
+- 新增 `net::sanitize_log_field()`：控制字符（含 `\n/\r/\t` 与 U+2028/U+2029）换成空格，
+  截到 128 字符 + 省略号；
+- 三个日志点（忽略 Refuse / 永久拒绝 / 暂满重试）全部改用它；
+- 判据 `network_strings_never_inject_log_lines`（清洗后必须单行、内容不丢、超长截断）；
+  反向验证：把函数改成原样返回 ⇒ 红。

@@ -68,6 +68,24 @@ pub const TOKEN_LEN: usize = 16;
 /// 挑战/会话token字节数组（S2）。
 pub type Token = [u8; TOKEN_LEN];
 
+/// S7：把网络来源的字符串压成"一行、有限长"后再进日志。
+///
+/// 验收判据读的就是日志文本（panics/VUID/hits 都在里头），而 `Refuse.reason` 由对端任意填写 ——
+/// 一条带换行的 reason 就能伪造整行日志。控制字符（含 \n/\r/\t 与 U+2028/U+2029）一律换成空格，
+/// 并截到 128 个字符。
+pub fn sanitize_log_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(256));
+    for (i, c) in s.chars().enumerate() {
+        if i >= 128 {
+            out.push('…');
+            break;
+        }
+        let unsafe_char = c.is_control() || c == '\u{2028}' || c == '\u{2029}';
+        out.push(if unsafe_char { ' ' } else { c });
+    }
+    out
+}
+
 /// 生成一枚挑战 nonce（std 哈希；只要求同网段不可预测，不追求密码学强度）。
 fn fresh_nonce(from: SocketAddr) -> Token {
     use std::collections::hash_map::DefaultHasher;
@@ -1667,17 +1685,20 @@ impl Client {
                 // **停止重连并认为"服务器拒绝了我"**（`recv` 现在虽已过滤来源，
                 // 但状态机的契约本身也要对）。
                 if self.player_id.is_some() {
-                    log::debug!("net: 已连上的会话忽略 Refuse（{reason}）");
+                    log::debug!("net: 已连上的会话忽略 Refuse（{}）", sanitize_log_field(&reason));
                     return None;
                 }
                 if refuse_is_permanent(&reason) {
                     if self.refused_reason.is_none() {
-                        log::warn!("握手被永久拒绝（版本不匹配）⇒ 停止重试。原因：{}", reason);
+                        log::warn!(
+                            "握手被永久拒绝（版本不匹配）⇒ 停止重试。原因：{}",
+                            sanitize_log_field(&reason)
+                        );
                     }
                     self.refused_reason = Some(reason);
                 } else {
                     // 瞬态（BUSY）：不记永久拒绝，推迟一个 interval 再重试。
-                    log::warn!("服务器暂满 ⇒ 稍后重试。原因：{}", reason);
+                    log::warn!("服务器暂满 ⇒ 稍后重试。原因：{}", sanitize_log_field(&reason));
                     self.last_join_at = Instant::now();
                 }
                 None
@@ -2347,6 +2368,21 @@ mod tests {
         let got = client.recv().unwrap();
         assert!(got.is_none(), "未封印的 Snapshot 被客户端接受了（S2）");
         assert_eq!(client.snapshot_seq(), 0, "未封印快照不得改写快照状态");
+    }
+
+    /// S7：网络字符串进日志前必须压成一行（否则伪造的 reason 能伪造整行日志）。
+    /// 反向验证：把 `sanitize_log_field` 改成原样返回 ⇒ 本判据红。
+    #[test]
+    fn network_strings_never_inject_log_lines() {
+        let dirty = "ok\nFAKE VUID=0\r\npanics=0\tdone\u{2028}tail";
+        let clean = sanitize_log_field(dirty);
+        for bad in ['\n', '\r', '\t', '\u{2028}', '\u{2029}'] {
+            assert!(!clean.contains(bad), "清洗后仍含 {bad:?}：{clean:?}");
+        }
+        assert!(clean.contains("FAKE"), "内容丢了：{clean:?}");
+        assert_eq!(clean.lines().count(), 1, "清洗后仍跨行：{clean:?}");
+        let long: String = std::iter::repeat('x').take(5000).collect();
+        assert!(sanitize_log_field(&long).chars().count() <= 129, "没有截断");
     }
 
     /// S2 测试辅助：走完 Join → Challenge → JoinProof → Welcome，返回服务端看到的本端地址。
