@@ -171,8 +171,9 @@ def main() -> int:
     sbox(p, (0.0, 0.0, 1.010), (0.310, 0.230, 0.180), FATIGUE_DARK, ao_top=0.88)
     # chest: 0.44 m across the shoulders (real adult male), 0.25 deep, 0.32 tall
     sbox(p, (0.0, 0.0, 1.320), (0.400, 0.250, 0.320), FATIGUE, ao_top=0.97)
-    # armour vest, 0.46 x 0.32 x 0.38 -- deliberately the widest body layer
-    sbox(p, (0.0, 0.005, 1.305), (0.460, 0.320, 0.380), ARMOUR, ao_top=1.0)
+    # armour vest: 上下两段收腰（近似梯形）——肩 0.46、腰 0.36，比一整块方板更像防弹衣
+    sbox(p, (0.0, 0.005, 1.400), (0.460, 0.320, 0.200), ARMOUR, ao_top=1.0)
+    sbox(p, (0.0, 0.005, 1.235), (0.360, 0.300, 0.150), ARMOUR, ao_top=0.96)
     # front plate so the vest is not one flat slab
     sbox(p, (0.0, 0.170, 1.300), (0.300, 0.045, 0.250), ARMOUR_LIGHT, ao_top=1.0)
     # three pouches across the belt line
@@ -195,7 +196,9 @@ def main() -> int:
     # helmet shell 0.255 x 0.285 x 0.145 -- pulled DOWN over the skull so it reads as a
     # helmet rather than a cap floating above it (first preview showed exactly that).
     # helmet: a shallow hex prism flaring outward at the bottom edge (like a real shell)
-    limb(p, (0.0, 0.008, 1.760), (0.0, 0.008, 1.840), 0.132, 0.108, HELMET, seg=6)
+    # 2026-10-24（审计 R3）：原半径 0.132 = 头宽的 1.78 倍，像顶"桶"；收到 0.100，
+    # 下沿压到 1.735（仍盖住额头与护目镜上沿）。
+    limb(p, (0.0, 0.008, 1.735), (0.0, 0.008, 1.840), 0.100, 0.086, HELMET, seg=6)
     # (no separate brim box: the flared helmet prism above already gives a brim, and a
     #  separate box projected past the back of the skull in the preview.)
 
@@ -207,8 +210,11 @@ def main() -> int:
     for s in (-1.0, 1.0):
         # Shoulder pivots sit OUTSIDE the 0.46 m vest (+-0.23). At +-0.225 the arms were
         # half-buried in it and the front view simply had no arms (first preview).
-        sx = s * 0.268
+        # 2026-10-24（审计 R3）：原 0.268 让总宽 0.650 = 身高 35%（线卫体型）。
+        # 收到 0.232，并用一小段三角肌把"马甲 → 手臂"接上，避免悬空肩。
+        sx = s * 0.232
         sz = 1.455
+        limb(p, (s * 0.150, 0.0, 1.445), (sx, 0.0, 1.400), 0.088, 0.074, FATIGUE, seg=6)
         if s > 0:  # right: trigger hand, elbow drops back and down
             ex, ey, ez = sx - 0.020, 0.115, 1.230
             wx, wy, wz = sx - 0.055, 0.235, 1.115
