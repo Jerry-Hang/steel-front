@@ -1990,3 +1990,13 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
   树冠内部 6.73→**5.92（−12.1%）**；亮度 102.90→104.17（软命中平均低于二值）；
 - ⚠ **逐像素抖动起点（IGN）试过并回退**：同三块只降 1.6% / 6.2% / 7.5%，比不加抖动更差；
 - 代价：1600×900 同负载 fps 269–280（旧二值版 222–270，受机器负载影响，判断为无回退）。
+
+### 2026-10-24（续55）：S11 客户端套接字 `connect` 到服务端
+
+- `Client::connect` 在 bind 后调 `UdpSocket::connect(server)`：内核按 peer 过滤来源
+  （用户态 `from == self.server` 保留作双保险），并能收到 ICMP 端口不可达；
+- `send()` 在 connected 时走 `send`（否则退回 `send_to`）；失败只告警、不致命；
+- 判据：`client_socket_is_connected_to_the_server`（`peer_addr()` 必须等于服务端地址；
+  反向验证：跳过 connect ⇒ 红）、`foreign_datagram_never_reaches_a_connected_client`。
+- 未做：重连时若中继换地址，需要重新 `connect` —— 目前 `reset_connection` 不换 server，
+  换地址的路径仍靠"新建 Client"；NAT 打洞未验证（留待下一轮）。

@@ -1311,6 +1311,8 @@ pub fn refuse_is_permanent(reason: &str) -> bool {
 pub struct Client {
     socket: UdpSocket,
     server: SocketAddr,
+    /// S11：套接字是否已 `connect` 到对端（内核过滤 + send 语义）
+    connected: bool,
     player_id: Option<u32>,
     /// 服务器拒绝原因（协议版本不匹配等；Some = 停止重试）
     refused_reason: Option<String>,
@@ -1385,6 +1387,15 @@ impl Client {
         };
         let socket = UdpSocket::bind(bind_addr)?;
         socket.set_nonblocking(true)?;
+        // S11：连上对端 —— 内核按 peer 过滤（用户态那条 `from == self.server` 保留作双保险），
+        // 顺带能收到 ICMP 端口不可达。失败不致命：退回 send_to + 用户态过滤。
+        let connected = match socket.connect(server_addr) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("net: connect({server_addr}) 失败（{e}），退回 send_to + 用户态过滤");
+                false
+            }
+        };
         let server = server
             .to_socket_addrs()?
             .next()
@@ -1392,6 +1403,7 @@ impl Client {
         Ok(Client {
             socket,
             server,
+            connected,
             player_id: None,
             remote_players: HashMap::new(),
             clock_start: Instant::now(),
@@ -1461,7 +1473,11 @@ impl Client {
             _ => msg,
         };
         let buf = outgoing.encode();
-        self.socket.send_to(&buf, self.server)
+        if self.connected {
+            self.socket.send(&buf)
+        } else {
+            self.socket.send_to(&buf, self.server)
+        }
     }
 
     /// 非阻塞接收：无数据时返回 `Ok(None)`
@@ -1804,6 +1820,11 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn token_for_test(&self) -> Option<Token> {
         self.token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connected_for_test(&self) -> bool {
+        self.connected
     }
 
     #[cfg(test)]
@@ -2431,6 +2452,37 @@ mod tests {
         let declared = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
         assert_eq!(declared, bytes.len() - HEADER_LEN, "头部长度与实际载荷不一致");
         assert!(declared <= u16::MAX as usize);
+    }
+
+    /// S11：客户端套接字必须真的 `connect` 到服务端（内核过滤来源 + ICMP 可回收）。
+    /// 反向验证：删掉 `connect` 调用 ⇒ `peer_addr()` 变 Err ⇒ 本判据红。
+    #[test]
+    fn client_socket_is_connected_to_the_server() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = Client::connect(addr).unwrap();
+        assert!(client.connected_for_test(), "connected 标记应为真");
+        let peer = client.socket_for_test().peer_addr().expect("套接字应已 connect");
+        assert_eq!(peer, addr, "套接字的 peer 不是服务端地址");
+    }
+
+    /// S11 的附加行为：外来地址的数据报被内核丢掉（用户态过滤仍在，但不再靠它兜底）。
+    #[test]
+    fn foreign_datagram_never_reaches_a_connected_client() {
+        let server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = Client::connect(addr).unwrap();
+        let foreign = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fake = NetworkMessage::Refuse { reason: "FAKE".into() };
+        foreign
+            .send_to(&fake.encode(), client.socket_for_test().local_addr().unwrap())
+            .unwrap();
+        assert!(client.recv().unwrap().is_none(), "外来数据报被客户端收到了");
+        // 正对照：服务端发的必须还能收到
+        server.send_to(&fake, peer_seen_addr(&client)).unwrap();
+        let (got, from) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        assert_eq!(from, addr);
+        assert!(matches!(got, NetworkMessage::Refuse { .. }));
     }
 
     /// S7：网络字符串进日志前必须压成一行（否则伪造的 reason 能伪造整行日志）。
