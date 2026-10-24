@@ -663,3 +663,19 @@ fn remote_kill_does_not_credit_the_host() {
     assert!(g.npcs.iter().all(|n| n.id != 8), "远端弹没打死红方 NPC");
     assert_eq!(g.score, score_before, "远端击杀记到了房主分数（S8）");
 }
+
+/// S13：远端玩家出生点必须按 id 散开（旧版全部 `(-110, 60)` ⇒ 多人重叠）。
+/// 反向验证：把半径/角度改成常量 0 ⇒ 本判据红。
+#[test]
+fn net_spawn_points_are_spread_around_the_base() {
+    let base = [-110.0f32, 60.0f32];
+    let mut seen = std::collections::HashSet::new();
+    for id in 1..=12u32 {
+        let p = Game::net_spawn_point_for(id);
+        let (dx, dz) = (p[0] - base[0], p[1] - base[1]);
+        let r = (dx * dx + dz * dz).sqrt();
+        assert!((2.9..=6.6).contains(&r), "id={id} 半径 {r:.2} 不在 2.9..6.6");
+        let key = (format!("{:.2},{:.2}", p[0], p[1]));
+        assert!(seen.insert(key), "id={id} 与前面的出生点重叠（S13）");
+    }
+}

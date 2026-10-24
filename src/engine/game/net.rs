@@ -216,9 +216,9 @@ impl Game {
             }
         }
         // Join 注册（借用解耦后执行）：服务器权威远端玩家实体（主机=红营视角，远端=蓝营）
-        let spawn = self.net_spawn_point();
         for id in joined {
             if !self.net_players.iter().any(|p| p.id == id) {
+                let spawn = Self::net_spawn_point_for(id);
                 self.net_players.push(NetPlayer {
                     id,
                     pos: [spawn[0], 0.0, spawn[1]],
@@ -242,9 +242,9 @@ impl Game {
             }
         }
         // 远端玩家：死亡复活 + 位置贴地
-        let spawn = self.net_spawn_point();
         for p in &mut self.net_players {
             if !p.alive && self.time - p.last_rx >= 4.0 {
+                let spawn = Self::net_spawn_point_for(p.id);
                 p.pos = [spawn[0], 0.0, spawn[1]];
                 p.hp = 100.0;
                 p.alive = true;
@@ -465,10 +465,19 @@ impl Game {
             self.net_players[pi].last_fire = self.time;
         }
     }
-    /// 远端玩家出生点（蓝营侧固定点：主机=红营出生区对面）
-    pub(crate) fn net_spawn_point(&self) -> [f32; 2] {
-        [-110.0, 60.0]
-    }
+    /// 远端玩家出生点（S13）：基址 + 按 id 的黄金角环形偏移。
+    ///
+    /// 旧版所有远端玩家都出生在 `(-110, 60)` ⇒ 多人同点完全重叠（互相挡枪线、观感像一个人）。
+    /// 半径 3.0..6.5 m、角度按黄金角散开；y 由每 tick 的 `terrain_height_at` 重算，不会掉出地面。
+    pub(crate) fn net_spawn_point_for(id: u32) -> [f32; 2] {
+        const BASE: [f32; 2] = [-110.0, 60.0];
+        const GOLDEN: f32 = 2.399_963_2;
+        let a = id as f32 * GOLDEN;
+        let r = 3.0 + (id % 12) as f32 * 0.32;
+        [BASE[0] + a.cos() * r, BASE[1] + a.sin() * r]
+}
+
+/// 远端玩家出生点（蓝营侧固定点：主机=红营出生区对面）
     /// 网络环回演示：server 收包回环广播，client 发包/收包做远端插值；不参与帧率逻辑
     pub(crate) fn update_net(&mut self, camera: &Camera) {
         let Some(demo) = &mut self.net_demo else {
