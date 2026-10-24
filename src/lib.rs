@@ -2670,7 +2670,10 @@ impl GameApp {
 
     /// 把当前画质应用到渲染器（设置面板切换后即时生效）
     fn apply_quality(&mut self) {
-        let preset = match self.game.hud.quality_index {
+        // RV3D_QUALITY=0/1/2 覆盖面板画质（A/B / 无窗口取证要能强制低档或高档）。
+        let quality_index =
+            crate::syscfg::parse::<usize>("RV3D_QUALITY").unwrap_or(self.game.hud.quality_index as usize);
+        let preset = match quality_index {
             0 => QualityPreset::Low,
             1 => QualityPreset::Medium,
             _ => QualityPreset::High,
