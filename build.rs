@@ -2163,10 +2163,12 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // （2026-10-23）：固定像素半径在 2560x1600 下相对更小 ⇒ 接触带变窄、AO 观感变弱
     // （实测 720p −4.4% vs 1600p −2.76%）。乘 `dims.y / 720` 后两个分辨率观感一致。
     let res_scale = clamp(f32(dims.y) / 720.0, 0.5, 4.0);
-    for (var i = 0; i < 3; i = i + 1) {
+    // 8 tap（2026-10-24）：12 tap（3 半径）→ 8 tap（2 半径）。2560x1600 实测 SSAO 全屏
+    // pass 成本约 5% fps；去掉最内圈（贡献最小、与中圈重叠最多）省 1/3 采样。
+    for (var i = 0; i < 2; i = i + 1) {
         // 半径按像素：14/22/31px（1280x720 基准）。**不要**用 far/z0 缩放 —— 那会把
         // 低视距地面放大到几百像素，几乎处处过遮挡（2026-10-22 实测 AO 全黑）。
-        let rpx = radius_px * res_scale * (1.0 + 0.6 * f32(i));
+        let rpx = radius_px * res_scale * (1.0 + 0.9 * f32(i));
         for (var k = 0; k < 4; k = k + 1) {
             let a = rot + f32(k) * 1.5707963 + f32(i) * 0.6;
             let off = vec2<f32>(cos(a), sin(a)) * rpx;
