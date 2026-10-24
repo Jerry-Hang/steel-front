@@ -68,6 +68,12 @@ pub const MAX_DATAGRAM: usize = 65507;
 /// 单条快照最多携带的实体数：超出截断（保护 length 字段 u16 上限；本轮 128 NPC 远低于此）
 pub const MAX_SNAPSHOT_NPCS: usize = 1024;
 
+/// 复核 S4（2026-10-24）：客户端实体插值表上限。
+pub const MAX_ENTITIES: usize = 4096;
+
+/// 复核 S4：远端玩家插值表上限（与服务器 MAX_CLIENTS 对齐）。
+pub const MAX_REMOTE_PLAYERS: usize = 64;
+
 /// 解码快照时的**容量提示**：按协议上限封顶。
 ///
 /// 🔴 2026-09-23 复查：`Snapshot` 分支原来是裸的 `Vec::with_capacity(n)`，而 `n` 是
@@ -1263,10 +1269,15 @@ impl Client {
                         }
                     }
                     None => {
-                        let mut rp = RemotePlayer::new(player_id, state, t);
-                        rp.last_seq = Some(seq);
-                        rp.delay = self.interp_delay;
-                        self.remote_players.insert(player_id, rp);
+                        // 复核 S4：只接受玩家 id 空间（< NET_PLAYER_BASE）内的新 id，且表满即忽略。
+                        if player_id < NET_PLAYER_BASE && self.remote_players.len() < MAX_REMOTE_PLAYERS {
+                            let mut rp = RemotePlayer::new(player_id, state, t);
+                            rp.last_seq = Some(seq);
+                            rp.delay = self.interp_delay;
+                            self.remote_players.insert(player_id, rp);
+                        } else {
+                            log::debug!("net: 忽略超量/越界的 Position id={player_id}");
+                        }
                     }
                 }
                 None
@@ -1424,6 +1435,17 @@ impl Client {
             }
             _ => None,
         };
+        // 复核 S4：实体表硬上限，超量按 last_seen 清掉最久未见的（统一入口，任何插入路径都受约束）。
+        if self.entities.len() > MAX_ENTITIES {
+            let mut seen: Vec<(u32, f64)> =
+                self.entities.iter().map(|(id, e)| (*id, e.last_seen)).collect();
+            seen.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let excess = self.entities.len() - MAX_ENTITIES;
+            for (id, _) in seen.into_iter().take(excess) {
+                self.entities.remove(&id);
+            }
+            log::debug!("net: 实体表超限，已清掉 {excess} 个最久未见实体");
+        }
         left
     }
 
@@ -1943,6 +1965,50 @@ mod tests {
             "reset_connection 没清永久拒绝 ⇒ 重开会话仍被锁死（S6 后半）"
         );
     }
+
+    /// 复核 S4：实体插值表必须有硬上限（旧版一条 65KB 快照可塞 ~2,500 个新 id）。
+    /// 反向验证：删掉 `handle_message` 末尾的裁剪 ⇒ 本判据红。
+    #[test]
+    fn snapshot_entity_table_is_bounded() {
+        let mut client = Client::connect("127.0.0.1:9").unwrap();
+        let npcs = (0..(MAX_ENTITIES + 50) as u32)
+            .map(|id| NpcSnapshot { id, pos: [0.0, 0.0, 0.0], facing: 0.0, hp: 100.0, team: 0, firing: 0 })
+            .collect();
+        let _ = client.handle_message(NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.0,
+            player_id: 0,
+            player: PlayerState::new([0.0, 0.0, 0.0], 0.0),
+            npcs,
+        });
+        assert!(
+            client.entities().len() <= MAX_ENTITIES,
+            "实体表 {} 超过上限 {}（S4）",
+            client.entities().len(),
+            MAX_ENTITIES
+        );
+    }
+
+    /// 复核 S4：`Position` 只接受玩家 id 空间内的 id，且远端玩家表有上限。
+    #[test]
+    fn position_for_unknown_or_excess_player_is_ignored() {
+        let mut client = Client::connect("127.0.0.1:9").unwrap();
+        let st = PlayerState::new([1.0, 0.0, 1.0], 0.0);
+        // 越界 id（≥ NET_PLAYER_BASE）必须忽略
+        let _ = client.handle_message(NetworkMessage::Position { player_id: NET_PLAYER_BASE + 7, seq: 1, state: st });
+        assert_eq!(client.remote_players().len(), 0, "越界 player_id 被写进了远端玩家表（S4）");
+        // 合法 id 大量到达 ⇒ 表不得超过 MAX_REMOTE_PLAYERS
+        for id in 0..(MAX_REMOTE_PLAYERS as u32 + 10) {
+            let _ = client.handle_message(NetworkMessage::Position { player_id: id, seq: 1, state: st });
+        }
+        assert!(
+            client.remote_players().len() <= MAX_REMOTE_PLAYERS,
+            "远端玩家表 {} 超过上限 {}（S4）",
+            client.remote_players().len(),
+            MAX_REMOTE_PLAYERS
+        );
+    }
+
 
     /// 测试辅助：**服务端会看到的**本端地址。
     ///

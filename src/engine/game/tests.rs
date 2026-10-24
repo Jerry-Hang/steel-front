@@ -584,3 +584,17 @@ mod session;
         assert_eq!(g.hud.kill_feed.len(), kills1, "重复判定不得重复播报");
     }
 
+/// 复核 S5：远端弹丸并发数必须有上限（旧版 100 包/帧可堆上千发）。
+/// 反向验证：删掉 `fire_remote` 里的上限分支 ⇒ 本判据红。
+#[test]
+fn projectile_pileup_is_capped() {
+    let mut g = Game::new();
+    for _ in 0..400 {
+        g.fire_remote([0.0, 1.6, 0.0], [0.0, 0.0, -1.0]);
+    }
+    assert!(
+        g.projectiles.len() <= 256,
+        "远端弹丸堆到 {} 发（应 ≤256，S5）",
+        g.projectiles.len()
+    );
+}

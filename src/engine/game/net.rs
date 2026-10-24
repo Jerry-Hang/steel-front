@@ -159,7 +159,14 @@ impl Game {
             let Some(server) = self.net_server.as_mut() else {
                 return;
             };
-            while let Ok(Some((msg, from))) = server.recv() {
+            // 复核 S5：单帧收包上限（旧版一帧处理完所有排队包 ⇒ 一个客户端就能打满帧时间）。
+            const MAX_PACKETS_PER_FRAME: usize = 256;
+            let mut packet_budget = MAX_PACKETS_PER_FRAME;
+            while packet_budget > 0 {
+                packet_budget -= 1;
+                let Ok(Some((msg, from))) = server.recv() else {
+                    break;
+                };
                 match msg {
                     NetworkMessage::Join { name, version, .. } => {
                         let _ = server.handle_join(from, name, version);

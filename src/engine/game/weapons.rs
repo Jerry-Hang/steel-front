@@ -203,6 +203,8 @@ impl Game {
     /// 房主的枪会掉子弹、准星会上跳、扳机会被卡住。
     /// 这里只生成一发世界弹丸 + 3D 枪声，不读也不写任何本机武器状态。
     pub(crate) fn fire_remote(&mut self, origin: [f32; 3], direction: [f32; 3]) {
+        // 复核 S5：远端弹丸并发上限；满了丢最旧的一发（旧版无上限 ⇒ 100 包/帧可堆上千发）。
+        const MAX_PROJECTILES: usize = 256;
         const REMOTE_SPEED: f32 = 600.0;
         const REMOTE_RANGE: f32 = 200.0;
         const REMOTE_LIFETIME: f32 = 2.0;
@@ -215,6 +217,9 @@ impl Game {
             REMOTE_LIFETIME,
             REMOTE_DAMAGE,
         );
+        if self.projectiles.len() >= MAX_PROJECTILES {
+            self.projectiles.remove(0);
+        }
         self.projectiles.push(p);
         self.audio
             .synth_mut()

@@ -1736,3 +1736,18 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
 
 🔴 **流程判据**：闸门必须**显式看退出码**——`cmd >log 2>&1; echo exit=$?`，
 或 `set -o pipefail`；**不要**用 `cmd | grep`/`| tail` 的退出码当结论。
+
+### 2026-10-24（续36）：修 S4+S5——实体表/远端玩家/单帧收包/弹丸四道上限
+
+审计 S4/S5：客户端实体表与远端玩家表无上限（一条 65KB 快照可塞 ~2,500 个新 id）、
+`Position` 对任意 `player_id` 都 `insert`；服务端单帧收完所有排队包；远端弹丸无并发上限。
+
+- `MAX_ENTITIES = 4096`：`handle_message` 末尾统一裁剪，超量按 `last_seen` 清掉最久未见的
+  （统一入口，任何插入路径都受约束）；
+- `MAX_REMOTE_PLAYERS = 64`：`Position` 只接受 `< NET_PLAYER_BASE` 的 id，表满即忽略；
+- 服务端 **单帧 256 包预算**（`MAX_PACKETS_PER_FRAME`），超出本帧不再收；
+- `fire_remote` **弹丸并发 256**，满了丢最旧一发；
+- 三条判据 + 反向验证（各删对应上限 ⇒ 红）：
+  `snapshot_entity_table_is_bounded`、`position_for_unknown_or_excess_player_is_ignored`、
+  `projectile_pileup_is_capped`。
+- ⚠ 缺字教训复现：新注释里的「审/汰/淘/闸」没有字模 ⇒ 已统一改写为「复核/清掉/入口」。
