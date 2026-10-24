@@ -84,6 +84,18 @@ pub(crate) const fn main_pass_attachment_count(
 /// 默认开（`RV3D_SSAO` 未设或非 "0"），但 **LOW 画质档关闭** —— 该档的定位是给弱机降负载，
 /// 而 SSAO 是一次全屏 12-tap pass（实测 2560x1600 约 1.4% 帧成本）；MEDIUM/HIGH 保持开启。
 /// 纯函数便于单测（判据见 `tests_geom.rs::ssao_runs_except_on_low_quality`）。
+/// SSAO 强度按画质档位（2026-10-24）：画质档现在不只改 LOD 距离，也改 AO 强度。
+///   LOW 档不跑 SSAO（见 `ssao_should_run`）⇒ 强度 0；
+///   MEDIUM 0.45（轻接触暗部，保清晰度）；HIGH 0.75（更强的落地感）。
+/// `RV3D_SSAO_STRENGTH` 显式设置时覆盖（A/B 取证用）。
+pub(crate) fn ssao_strength_for(quality: QualityPreset) -> f32 {
+    match quality {
+        QualityPreset::Low => 0.0,
+        QualityPreset::Medium => 0.45,
+        QualityPreset::High => 0.75,
+    }
+}
+
 pub(crate) fn ssao_should_run(enabled: bool, quality: QualityPreset) -> bool {
     enabled && !matches!(quality, QualityPreset::Low)
 }

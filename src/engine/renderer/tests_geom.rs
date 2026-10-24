@@ -2335,4 +2335,16 @@ mod ssao_quality_tests {
         assert!(!ssao_should_run(false, QualityPreset::High));
         assert!(!ssao_should_run(false, QualityPreset::Low));
     }
+
+    /// SSAO 强度随画质档递增，且 LOW 为 0；反向验证：把 High 改成 0.45 ⇒ 本判据红。
+    #[test]
+    fn ssao_strength_tracks_quality() {
+        assert_eq!(ssao_strength_for(QualityPreset::Low), 0.0);
+        assert!((ssao_strength_for(QualityPreset::Medium) - 0.45).abs() < 1e-6);
+        assert!((ssao_strength_for(QualityPreset::High) - 0.75).abs() < 1e-6);
+        assert!(
+            ssao_strength_for(QualityPreset::High) > ssao_strength_for(QualityPreset::Medium),
+            "HIGH 的 SSAO 必须比 MEDIUM 强"
+        );
+    }
 }

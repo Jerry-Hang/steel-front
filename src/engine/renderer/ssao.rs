@@ -334,9 +334,11 @@ impl Renderer {
         let radius = crate::syscfg::cfg("RV3D_SSAO_RADIUS")
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(14.0);
+        // 强度默认按画质档（LOW 不跑到这里；MEDIUM 0.45 / HIGH 0.75），
+        // `RV3D_SSAO_STRENGTH` 显式设置时覆盖（A/B 取证）。
         let strength = crate::syscfg::cfg("RV3D_SSAO_STRENGTH")
             .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.6);
+            .unwrap_or_else(|| ssao_strength_for(self.quality));
         let range = vk::ImageSubresourceRange::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
