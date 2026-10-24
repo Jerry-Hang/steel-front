@@ -454,6 +454,7 @@ impl Game {
             p.fire_accum = 0.0;
             // 眼位 = 脚底 + 眼高（`pos[1]` 现在是脚底，见 `NET_EYE_HEIGHT`）
             let eye = [p.pos[0], p.pos[1] + NET_EYE_HEIGHT, p.pos[2]];
+            let owner = p.id;
             // 朝向 = `Camera::forward()` = `-direction()` ⇒ 水平分量取负号
             // （原来直接用 `direction()` ⇒ **朝自己背后开枪**）
             let dir = glam::Vec3::new(
@@ -463,7 +464,7 @@ impl Game {
             );
             // 🔴 远端开火绝不能调本机的 `self.fire()`（会扣房主弹匣/震房主相机）——
             // 走无状态的 `fire_remote`（2026-10-20 第 15 批复核第 7 条）。
-            self.fire_remote([eye[0], eye[1], eye[2]], [dir.x, dir.y, dir.z]);
+            self.fire_remote([eye[0], eye[1], eye[2]], [dir.x, dir.y, dir.z], owner);
             self.net_players[pi].last_fire = self.time;
         }
     }

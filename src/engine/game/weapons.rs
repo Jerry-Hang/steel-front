@@ -202,7 +202,7 @@ impl Game {
     /// 还把 `fire_cooldown` / `auto_heat` 算在房主头上 —— 远端玩家在 200m 外开枪，
     /// 房主的枪会掉子弹、准星会上跳、扳机会被卡住。
     /// 这里只生成一发世界弹丸 + 3D 枪声，不读也不写任何本机武器状态。
-    pub(crate) fn fire_remote(&mut self, origin: [f32; 3], direction: [f32; 3]) {
+    pub(crate) fn fire_remote(&mut self, origin: [f32; 3], direction: [f32; 3], owner: u32) {
         // 复核 S5：远端弹丸并发上限；满了丢最旧的一发（旧版无上限 ⇒ 100 包/帧可堆上千发）。
         const MAX_PROJECTILES: usize = 256;
         const REMOTE_SPEED: f32 = 600.0;
@@ -216,7 +216,8 @@ impl Game {
             REMOTE_RANGE,
             REMOTE_LIFETIME,
             REMOTE_DAMAGE,
-        );
+        )
+        .with_remote_owner(owner);
         if self.projectiles.len() >= MAX_PROJECTILES {
             self.projectiles.remove(0);
         }
@@ -584,10 +585,16 @@ impl Game {
                 consider(t, SegmentHit::Obstacle { t, body: None });
             }
         }
-        // ③ 联机远端玩家（仅玩家弹）：与 NPC 一起按参数 `t` 排序
-        if p.from_player() {
+        // ③ 联机远端玩家（本机弹与远端玩家弹都参与 —— S8：旧版只认 from_player，
+        //    于是远端玩家的子弹永远打不到任何玩家，PvP 事实不存在）
+        let player_bullet = p.from_player() || p.remote_owner().is_some();
+        if player_bullet {
             for (idx, q) in self.net_players.iter().enumerate() {
                 if !q.alive {
+                    continue;
+                }
+                // 不打自己（远端弹的 owner 就是射击者）
+                if p.remote_owner() == Some(q.id) {
                     continue;
                 }
                 let half = 0.45;
@@ -603,7 +610,15 @@ impl Game {
         // ④ NPC：**跳过"玩家弹打友军"**那种（与原来的穿身规则一致），
         //    但**只跳过它自己**，不能连它身后的敌人一起跳过。
         for (i, npc) in self.npcs.iter().enumerate() {
-            if p.from_player() && npc.team == crate::engine::ai::Team::Blue {
+            // 友军豁免按**弹的阵营**判断：本机与远端玩家都属于蓝方（房主也是蓝方，
+            // 见 `damage_npc` 里 `is_enemy = victim != Blue`）⇒ 玩家弹一律穿蓝方 NPC。
+            // S8：旧版只认 `from_player`，远端客户端的弹因此会打自己一方的蓝 NPC。
+            let friendly = if p.from_player() || p.remote_owner().is_some() {
+                Some(crate::engine::ai::Team::Blue)
+            } else {
+                None
+            };
+            if friendly == Some(npc.team) {
                 continue;
             }
             if let Some((t, h)) = Self::segment_npc_entry(ax, ay, az, bx, by, bz, npc) {
@@ -840,7 +855,11 @@ impl Game {
         // （自己人），HUD 却已经 `歼灭敌人 128/128` 并弹出 `VICTORY`，
         // 而小地图上红方还剩一大片 —— 计数把友军伤亡算成了战果。
         let is_enemy = victim_team != crate::engine::ai::Team::Blue;
-        if is_enemy {
+        // S8：只有**本机玩家**的击杀记房主分数；远端客户端的击杀只记录不记分，
+        // 否则一个客户端就能把房主的胜利进度刷上去。
+        // 房主来源 = 本机玩家 / 爆炸（房主手雷）；只有远端客户端的击杀不记房主。
+        let host_kill = !matches!(source, DamageSource::RemotePlayer(_));
+        if is_enemy && host_kill {
             self.score += KILL_SCORE;
         }
         // 击杀提示（右上角 feed）：敌我**都**提示 —— 打死自己人是需要立刻看见的事故。
@@ -848,6 +867,9 @@ impl Game {
         let victim = format!("{} #{id}", team_name(victim_team));
         let line = match source {
             DamageSource::Player => kill_line(KillerLabel::You, &victim, ""),
+            DamageSource::RemotePlayer(id) => {
+                kill_line(KillerLabel::Named(format!("远端 #{id}")), &victim, "")
+            }
             DamageSource::Blast => blast_kill_line(self.last_blast_center, &victim),
         };
         self.hud.push_kill(line);
@@ -861,7 +883,7 @@ impl Game {
         );
         // 任务目标：歼灭数推进（达成 → 胜利横幅/日志，波次推进不受影响）
         // ⚠️ 仅敌方：友军伤亡若也计入，一轮会在敌人尚存时提前"胜利"
-        if is_enemy {
+        if is_enemy && host_kill {
             if self.objective.progress(1) {
                 self.on_objective_complete();
             }

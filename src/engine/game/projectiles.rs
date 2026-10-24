@@ -357,7 +357,12 @@ impl Game {
                         dmg,
                         p.distance_traveled()
                     );
-                    self.damage_npc(idx, dmg, DamageSource::Player);
+                    // S8：远端玩家弹的击杀不记房主（来源带 owner id）。
+                    let source = match p.remote_owner() {
+                        Some(id) => DamageSource::RemotePlayer(id),
+                        None => DamageSource::Player,
+                    };
+                    self.damage_npc(idx, dmg, source);
                     continue;
                 }
                 Some(SegmentHit::NetPlayer { idx, .. }) => {

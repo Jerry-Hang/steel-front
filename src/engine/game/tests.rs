@@ -590,11 +590,76 @@ mod session;
 fn projectile_pileup_is_capped() {
     let mut g = Game::new();
     for _ in 0..400 {
-        g.fire_remote([0.0, 1.6, 0.0], [0.0, 0.0, -1.0]);
+        g.fire_remote([0.0, 1.6, 0.0], [0.0, 0.0, -1.0], 1);
     }
     assert!(
         g.projectiles.len() <= 256,
         "远端弹丸堆到 {} 发（应 ≤256，S5）",
         g.projectiles.len()
     );
+}
+
+/// S8：远端玩家的子弹必须能打到玩家（旧版只认 `from_player`，PvP 事实不存在）。
+/// 反向验证：去掉 `nearest_segment_hit` 里的 `|| p.remote_owner().is_some()` ⇒ 本判据红。
+#[test]
+fn remote_bullet_can_hit_players() {
+    let mut g = Game::new();
+    g.npcs.clear();
+    g.world.bodies.clear();
+    g.world.spheres.clear();
+    for (id, z) in [(1u32, 0.0f32), (2, -6.0)] {
+        g.net_players.push(NetPlayer {
+            id,
+            pos: [0.0, 0.0, z],
+            yaw: 0.0,
+            pitch: 0.0,
+            hp: 100.0,
+            alive: true,
+            last_rx: 0.0,
+            fire_accum: 0.0,
+            last_fire: 0.0,
+            last_input_seq: 0,
+            last_input_time: 0.0,
+        });
+    }
+    let before = g.net_players[1].hp;
+    g.fire_remote([0.0, 1.2, 0.0], [0.0, 0.0, -1.0], 1);
+    for _ in 0..20 {
+        g.update_projectiles(0.004, true);
+    }
+    assert!(g.net_players[1].hp < before, "远端弹打不到玩家（S8）");
+}
+
+/// S8：远端玩家（蓝方）的子弹必须穿过蓝方 NPC（旧版只有本机玩家弹才豁免友军）。
+#[test]
+fn remote_bullet_ignores_own_team_npcs() {
+    let mut g = Game::new();
+    g.npcs.clear();
+    g.world.bodies.clear();
+    g.world.spheres.clear();
+    g.npcs.push(npc_at(7, Team::Blue, [0.0, 0.0, -6.0]));
+    let before = g.npcs[0].hp;
+    g.fire_remote([0.0, 1.2, 0.0], [0.0, 0.0, -1.0], 1);
+    for _ in 0..20 {
+        g.update_projectiles(0.004, true);
+    }
+    assert_eq!(g.npcs[0].hp, before, "远端弹打到了友军 NPC（S8）");
+}
+
+/// S8：远端玩家的击杀不得记到房主的分数上（旧版 `score += KILL_SCORE` 无来源判断）。
+#[test]
+fn remote_kill_does_not_credit_the_host() {
+    let mut g = Game::new();
+    g.npcs.clear();
+    g.world.bodies.clear();
+    g.world.spheres.clear();
+    g.npcs.push(npc_at(8, Team::Red, [0.0, 0.0, -6.0]));
+    g.npcs[0].hp = 1.0;
+    let score_before = g.score;
+    g.fire_remote([0.0, 1.2, 0.0], [0.0, 0.0, -1.0], 1);
+    for _ in 0..20 {
+        g.update_projectiles(0.004, true);
+    }
+    assert!(g.npcs.iter().all(|n| n.id != 8), "远端弹没打死红方 NPC");
+    assert_eq!(g.score, score_before, "远端击杀记到了房主分数（S8）");
 }

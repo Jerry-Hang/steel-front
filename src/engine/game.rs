@@ -923,6 +923,8 @@ pub(crate) enum DamageSource {
     /// 无归属：爆炸/冲击波 —— 同一发 AoE 会同时结算多个目标，
     /// 报"某个人杀的"会是编的。爆炸单独成句（见 `blast_kill_line`）。
     Blast,
+    /// 远端玩家（联机客户端）发射的弹：击杀不记房主的分数/胜利进度（S8）。
+    RemotePlayer(u32),
 }
 
 /// feed 文本里"击杀者"的两种形态（拼装只在 `kill_line` 一处，避免三处格式漂移）。

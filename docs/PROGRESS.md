@@ -1781,3 +1781,21 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
 - 三个日志点（忽略 Refuse / 永久拒绝 / 暂满重试）全部改用它；
 - 判据 `network_strings_never_inject_log_lines`（清洗后必须单行、内容不丢、超长截断）；
   反向验证：把函数改成原样返回 ⇒ 红。
+
+### 2026-10-24（续39）：修 S8——远端弹的归属语义（PvP / 友军豁免 / 计分）
+
+审计 S8：`fire_remote` 造的弹 `from_player=false` ⇒ 远端玩家的子弹**打不到任何玩家**
+（PvP 事实不存在）、**会打自己一方的蓝 NPC**（污染重组判据）、击杀**全记房主**
+（`score` 与胜利进度都被客户端刷）。
+
+- `Projectile` 新增 `remote_owner: Option<u32>`（`with_remote_owner` / `remote_owner`）；
+  `fire_remote(origin, dir, owner)` 由 `apply_net_player_input` 传入 `p.id`；
+- `nearest_segment_hit`：本机弹与远端弹**都参与玩家命中**；远端弹跳过**自己**（owner==q.id）；
+  友军豁免按弹的阵营（本机=Red、远端=Blue），不再只认 `from_player`；
+- `DamageSource::RemotePlayer(u32)`：远端击杀只记账（死亡/击杀提示写「远端 #id」），
+  **不再**给房主 `score` / `objective.progress` / `register_kill`；
+- 判据（均反向验证）：`remote_bullet_can_hit_players`、`remote_bullet_ignores_own_team_npcs`、
+  `remote_kill_does_not_credit_the_host`。
+- ⚠ 测试隔离教训：`Game::new()` 自带 8 个默认 NPC，第一版判据把"我们的 NPC"当成 `npcs[0]`
+  ⇒ 子弹其实打中了默认 NPC、断言却看错了对象。三处测试已 `npcs.clear()` +
+  `world.bodies/spheres.clear()` 后再建场景。

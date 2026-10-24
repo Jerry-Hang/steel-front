@@ -255,6 +255,9 @@ pub struct Projectile {
     explosive: bool,
     /// 是否玩家发射（true = 友军伤害关闭：对同阵营 NPC 穿身而过；AI/网络弹为 false）
     from_player: bool,
+    /// 远端玩家弹的归属（Some(id) = 该客户端的弹；S8）：
+    /// 决定"能不能打玩家 / 能不能打友军 / 击杀记给谁"。
+    remote_owner: Option<u32>,
     /// 是否存活（射程/寿命耗尽后为 false）
     alive: bool,
     /// 上一帧位置（segment 命中检测用；高速弹避免跳过小目标）
@@ -303,6 +306,7 @@ impl Projectile {
             part_tiers: &[],
             explosive: false,
             from_player: false,
+            remote_owner: None,
             alive: true,
             min_npc_dist: f32::MAX,
         }
@@ -355,6 +359,17 @@ impl Projectile {
     /// 是否玩家发射
     pub fn from_player(&self) -> bool {
         self.from_player
+    }
+
+    /// 标记为某个远端玩家发射的弹（S8）。
+    pub fn with_remote_owner(mut self, id: u32) -> Self {
+        self.remote_owner = Some(id);
+        self
+    }
+
+    /// 远端玩家弹的归属者 id（None = 本机玩家/AI 弹）。
+    pub fn remote_owner(&self) -> Option<u32> {
+        self.remote_owner
     }
 
     /// 部位伤害倍率：按已飞行距离查分段表（头/胸/臂/腿，高度阈值与命中球几何一致：
