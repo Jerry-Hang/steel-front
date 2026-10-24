@@ -1751,3 +1751,22 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
   `snapshot_entity_table_is_bounded`、`position_for_unknown_or_excess_player_is_ignored`、
   `projectile_pileup_is_capped`。
 - ⚠ 缺字教训复现：新注释里的「审/汰/淘/闸」没有字模 ⇒ 已统一改写为「复核/清掉/入口」。
+
+### 2026-10-24（续37）：修 S2——Join 挑战应答 + 会话 token（协议升到 3）
+
+审计 S2：身份 == UDP 源地址、无 nonce/token ⇒ 伪造源地址可注册/冒充、伪快照瞬移本机玩家、
+10 B Leave 踢人、序号超前压制真快照。修法（不改任何既有报文结构，字面量零改动）：
+
+- **新增 4 种消息**：`Challenge{nonce}` / `JoinProof{nonce}` / `Welcome{player_id, token}` /
+  `Sealed{token, body}`；`SESSION_VERSION = 3`，旧客户端会被 `VERSION` 永久拒绝（文案已明确）；
+- **握手**：Join → 服务端发 `Challenge`（16 B nonce，存 `pending_nonces`）→ 客户端立即回
+  `JoinProof` 回显 → 服务端比对后才 `register` 并下发派生 token → `Welcome`；
+  伪造源地址收不到挑战 ⇒ 注册不可伪造（同时消掉 S3a 的反射分母）；
+- **封印包**：客户端拿到 token 后，`Input`/`Leave` 自动套 `Sealed`；服务端 `recv` 先验 token
+  再解内层，不符直接丢弃（伪造 Input/Leave 失效）；
+- **下行**：快照与目标状态**逐客户端**用各自 token 封装（`clients_with_tokens()` + `send_raw`）；
+  客户端拿到 token 后**拒绝未封印的 Snapshot/ObjectiveState**（伪造快照瞬移/压制失效）；
+- 判据（均反向验证）：`forged_sealed_packet_is_rejected`（错 token 必须丢）、
+  `join_proof_with_wrong_nonce_is_refused`（**先真发挑战再回错 nonce**；旧版只测无挑战分支 ⇒ 假绿）、
+  `client_drops_unsealed_snapshot_after_handshake`；回环握手测试改用 `complete_handshake()`。
+- 已知边界：token 由 std 哈希派生（同网段不可预测即可，不追求密码学强度）；中继/NAT 打洞路径未覆盖。

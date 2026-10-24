@@ -60,7 +60,48 @@ pub const PROTOCOL_VERSION: u8 = 0x01;
 pub const HEADER_LEN: usize = 5;
 /// 协议版本（wire 布局变更时必须递增：v2 = 快照行含 team/firing）
 /// 服务器拒绝不匹配版本的 Join（客户端收到 Refuse 停止重试）
-pub const SESSION_VERSION: u16 = 2;
+pub const SESSION_VERSION: u16 = 3;
+
+/// 挑战/会话token长度（字节）。S2：Join 挑战应答 + 每次会话一个 16 B token。
+pub const TOKEN_LEN: usize = 16;
+
+/// 挑战/会话token字节数组（S2）。
+pub type Token = [u8; TOKEN_LEN];
+
+/// 生成一枚挑战 nonce（std 哈希；只要求同网段不可预测，不追求密码学强度）。
+fn fresh_nonce(from: SocketAddr) -> Token {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut out = [0u8; TOKEN_LEN];
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for (i, chunk) in out.chunks_mut(8).enumerate() {
+        let mut h = DefaultHasher::new();
+        from.hash(&mut h);
+        nanos.hash(&mut h);
+        i.hash(&mut h);
+        chunk.copy_from_slice(&h.finish().to_be_bytes());
+    }
+    out
+}
+
+/// 由 nonce + 地址 + id 派生会话token。
+fn derive_token(nonce: &Token, from: SocketAddr, id: u32) -> Token {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut out = [0u8; TOKEN_LEN];
+    for (i, chunk) in out.chunks_mut(8).enumerate() {
+        let mut h = DefaultHasher::new();
+        nonce.hash(&mut h);
+        from.hash(&mut h);
+        id.hash(&mut h);
+        i.hash(&mut h);
+        chunk.copy_from_slice(&h.finish().to_be_bytes());
+    }
+    out
+}
 /// 单条 UDP 数据报读取缓冲上限：取 UDP 载荷上限 65507（IPv4）。
 /// 快照需承载 64v64 压力模式全部 NPC（128 × 24B ≈ 3KB），1400 的 MTU 余量会截断快照；
 /// 局域网碎片化可接受，本轮不做分片/重组（见模块头部协议注释）。
@@ -127,6 +168,14 @@ pub enum MessageType {
     ObjectiveState = 0x07,
     /// 服务端 → 客户端：拒绝加入（协议版本不匹配等；reason 文本）
     Refuse = 0x08,
+    /// 服务端 → 客户端：握手挑战（S2），客户端必须回 JoinProof 回显 nonce
+    Challenge = 0x09,
+    /// 客户端 → 服务端：回显挑战 nonce（S2）
+    JoinProof = 0x0A,
+    /// 服务端 → 客户端：会话建立（分配 id + 16 B 会话token）
+    Welcome = 0x0B,
+    /// 任意方向：带token的封装包（body = 完整内层帧，含魔数/版本/类型）
+    Sealed = 0x0C,
 }
 
 impl MessageType {
@@ -141,6 +190,10 @@ impl MessageType {
             0x06 => MessageType::Input,
             0x07 => MessageType::ObjectiveState,
             0x08 => MessageType::Refuse,
+            0x09 => MessageType::Challenge,
+            0x0A => MessageType::JoinProof,
+            0x0B => MessageType::Welcome,
+            0x0C => MessageType::Sealed,
             _ => return None,
         })
     }
@@ -206,6 +259,15 @@ pub enum NetworkMessage {
     Join { player_id: u32, name: String, version: u16 },
     /// 服务端拒绝（协议不匹配等；reason 供客户端显示）
     Refuse { reason: String },
+    /// 服务端挑战（S2）：客户端必须原样回显 `nonce` 才允许注册。
+    Challenge { nonce: [u8; TOKEN_LEN] },
+    /// 客户端回显挑战（S2）。
+    JoinProof { nonce: [u8; TOKEN_LEN] },
+    /// 服务端确认会话（S2）：分配 player_id + 16 B 会话token。
+    Welcome { player_id: u32, token: [u8; TOKEN_LEN] },
+    /// 带token封装（S2）：`body` 是完整内层帧；收包方先校验token再解内层 ——
+    /// 伪造源地址的 Snapshot/Input/Leave 全部失效。
+    Sealed { token: [u8; TOKEN_LEN], body: Vec<u8> },
     /// 玩家离开；reason：0=正常退出，1=超时，2=被踢
     Leave { player_id: u32, reason: u8 },
     /// 玩家状态同步；seq 为发送方单调递增序号
@@ -480,6 +542,22 @@ impl NetworkMessage {
                 p.extend_from_slice(&rb[..n]);
                 (MessageType::Refuse, p)
             }
+            NetworkMessage::Challenge { nonce } => (MessageType::Challenge, nonce.to_vec()),
+            NetworkMessage::JoinProof { nonce } => (MessageType::JoinProof, nonce.to_vec()),
+            NetworkMessage::Welcome { player_id, token } => {
+                let mut p = Vec::with_capacity(4 + TOKEN_LEN);
+                put_u32(&mut p, *player_id);
+                p.extend_from_slice(token);
+                (MessageType::Welcome, p)
+            }
+            NetworkMessage::Sealed { token, body } => {
+                let n = body.len().min(u16::MAX as usize);
+                let mut p = Vec::with_capacity(TOKEN_LEN + 2 + n);
+                p.extend_from_slice(token);
+                p.extend_from_slice(&(n as u16).to_be_bytes());
+                p.extend_from_slice(&body[..n]);
+                (MessageType::Sealed, p)
+            }
             NetworkMessage::Join { player_id, name, version } => {
                 let name = name.as_bytes();
                 let n = name.len().min(255);
@@ -614,6 +692,29 @@ impl NetworkMessage {
                     .map_err(|_| NetError::InvalidName)?;
                 let version = u16::from_be_bytes([r.u8()?, r.u8()?]);
                 NetworkMessage::Join { player_id, name, version }
+            }
+            MessageType::Challenge => {
+                let mut nonce = [0u8; TOKEN_LEN];
+                nonce.copy_from_slice(r.bytes(TOKEN_LEN)?);
+                NetworkMessage::Challenge { nonce }
+            }
+            MessageType::JoinProof => {
+                let mut nonce = [0u8; TOKEN_LEN];
+                nonce.copy_from_slice(r.bytes(TOKEN_LEN)?);
+                NetworkMessage::JoinProof { nonce }
+            }
+            MessageType::Welcome => {
+                let player_id = r.u32()?;
+                let mut token = [0u8; TOKEN_LEN];
+                token.copy_from_slice(r.bytes(TOKEN_LEN)?);
+                NetworkMessage::Welcome { player_id, token }
+            }
+            MessageType::Sealed => {
+                let mut token = [0u8; TOKEN_LEN];
+                token.copy_from_slice(r.bytes(TOKEN_LEN)?);
+                let n = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
+                let body = r.bytes(n)?.to_vec();
+                NetworkMessage::Sealed { token, body }
             }
             MessageType::Refuse => {
                 let len = r.u8()? as usize;
@@ -892,6 +993,12 @@ pub struct Server {
     clients: HashMap<SocketAddr, u32>,
     /// 各客户端最近一次收到数据报的时刻（超时判定用，recv 内更新）
     last_seen: HashMap<SocketAddr, Instant>,
+    /// S2：已发出、等待回显的挑战 nonce
+    pending_nonces: HashMap<SocketAddr, Token>,
+    /// S2：挑战时登记的名字（JoinProof 时回填）
+    pending_names: HashMap<SocketAddr, String>,
+    /// S2：会话token（注册成功后才有；封印包必须与它匹配）
+    tokens: HashMap<SocketAddr, Token>,
 }
 
 impl Server {
@@ -904,6 +1011,9 @@ impl Server {
             next_player_id: 1,
             clients: HashMap::new(),
             last_seen: HashMap::new(),
+            pending_nonces: HashMap::new(),
+            pending_names: HashMap::new(),
+            tokens: HashMap::new(),
         })
     }
 
@@ -967,6 +1077,9 @@ impl Server {
     /// 否则每个客户端都会看到一个站着的幽灵 —— 见 game.rs::step_net_server）。
     pub fn unregister(&mut self, addr: SocketAddr) -> Option<u32> {
         self.last_seen.remove(&addr);
+        self.pending_nonces.remove(&addr);
+        self.pending_names.remove(&addr);
+        self.tokens.remove(&addr);
         self.clients.remove(&addr)
     }
 
@@ -1003,12 +1116,30 @@ impl Server {
 
     /// 非阻塞接收：无数据时返回 `Ok(None)`，协议错误映射为 `InvalidData`
     pub fn recv(&mut self) -> io::Result<Option<(NetworkMessage, SocketAddr)>> {
-        let (msg, from) = match recv_msg(&self.socket)? {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-        self.last_seen.insert(from, Instant::now());
-        Ok(Some((msg, from)))
+        loop {
+            let (msg, from) = match recv_msg(&self.socket)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            self.last_seen.insert(from, Instant::now());
+            match msg {
+                // S2：封印包先校验token，再解内层（伪造源地址的 Input/Leave 在这里被丢掉）。
+                NetworkMessage::Sealed { token, body } => {
+                    if self.tokens.get(&from).copied() != Some(token) {
+                        log::debug!("net: 丢弃token不匹配的封印包（伪造源地址？）");
+                        continue;
+                    }
+                    match NetworkMessage::decode(&body) {
+                        Ok(inner) => return Ok(Some((inner, from))),
+                        Err(e) => {
+                            log::debug!("net: 封印包内层解码失败（{e}），丢弃");
+                            continue;
+                        }
+                    }
+                }
+                other => return Ok(Some((other, from))),
+            }
+        }
     }
 
     /// 阻塞接收直到超时；超时返回 `Ok(None)`
@@ -1060,18 +1191,76 @@ impl Server {
             self.send_to(&refuse, from)?;
             return Ok(refuse);
         }
-        let Some(player_id) = self.register(from) else {
+        // S2：已注册的客户端重发 Join ⇒ 直接重发 Welcome（不重复挑战）。
+        if let (Some(id), Some(token)) = (
+            self.clients.get(&from).copied(),
+            self.tokens.get(&from).copied(),
+        ) {
+            let welcome = NetworkMessage::Welcome { player_id: id, token };
+            self.send_to(&welcome, from)?;
+            return Ok(welcome);
+        }
+        // S2：先发挑战，客户端回显 nonce 后才注册 —— 伪造源地址收不到挑战，注册因此不可伪造。
+        let nonce = fresh_nonce(from);
+        self.pending_nonces.insert(from, nonce);
+        self.pending_names.insert(from, name);
+        let challenge = NetworkMessage::Challenge { nonce };
+        self.send_to(&challenge, from)?;
+        Ok(challenge)
+    }
+
+    /// S2：客户端回显挑战 nonce → 注册并下发会话token（内部已发送 Welcome）。
+    pub fn handle_join_proof(
+        &mut self,
+        from: SocketAddr,
+        nonce: Token,
+        version: u16,
+    ) -> io::Result<NetworkMessage> {
+        if version != SESSION_VERSION {
             let refuse = NetworkMessage::Refuse {
-                // `BUSY` 前缀 = 瞬态拒绝：客户端必须继续重试（安全复核 S6：否则 64 个 socket
-                // 就能把真实玩家永久锁在门外）。
-                reason: "BUSY 服务器已满（或玩家 id 已耗尽）".to_string(),
+                reason: format!("VERSION 协议版本不匹配（客户端 {version}，服务器 {SESSION_VERSION}）"),
             };
             self.send_to(&refuse, from)?;
             return Ok(refuse);
-        };
-        let reply = NetworkMessage::Join { player_id, name, version };
-        self.send_to(&reply, from)?;
-        Ok(reply)
+        }
+        match self.pending_nonces.remove(&from) {
+            Some(expected) if expected == nonce => {
+                let name = self.pending_names.remove(&from).unwrap_or_default();
+                let _ = name;
+                let Some(player_id) = self.register(from) else {
+                    let refuse = NetworkMessage::Refuse {
+                        reason: "BUSY 服务器已满（或玩家 id 已耗尽）".to_string(),
+                    };
+                    self.send_to(&refuse, from)?;
+                    return Ok(refuse);
+                };
+                let token = derive_token(&nonce, from, player_id);
+                self.tokens.insert(from, token);
+                let reply = NetworkMessage::Welcome { player_id, token };
+                self.send_to(&reply, from)?;
+                Ok(reply)
+            }
+            _ => {
+                let refuse = NetworkMessage::Refuse {
+                    reason: "VERSION 握手 nonce 不匹配".to_string(),
+                };
+                self.send_to(&refuse, from)?;
+                Ok(refuse)
+            }
+        }
+    }
+
+    /// S2：已注册客户端与各自token（快照要逐客户端封装）。
+    pub fn clients_with_tokens(&self) -> Vec<(SocketAddr, Token)> {
+        self.clients
+            .keys()
+            .filter_map(|a| self.tokens.get(a).map(|t| (*a, *t)))
+            .collect()
+    }
+
+    /// S2：直接发送原始字节（封印包用）。
+    pub fn send_raw(&self, bytes: &[u8], to: SocketAddr) -> io::Result<usize> {
+        self.socket.send_to(bytes, to)
     }
 }
 
@@ -1131,6 +1320,10 @@ pub struct Client {
     /// 取 delay = 一个快照间隔，渲染点就落回 [prev_time, curr_time] 区间内 ⇒ 平滑，
     /// 代价是 0~1 个快照间隔的显示延迟（标准做法，见 `interp_delay`）。
     interp_delay: f64,
+    /// S2：最近一次收到的挑战 nonce（下一次 Join 必须回显它）
+    pending_nonce: Option<Token>,
+    /// S2：会话token（Welcome 之后才有；Input/Leave 用封印包携带它）
+    token: Option<Token>,
 }
 
 impl Client {
@@ -1171,6 +1364,8 @@ impl Client {
             snapshot_seq: 0,
             snapshot_time: 0.0,
             has_snapshot: false,
+            pending_nonce: None,
+            token: None,
             refused_reason: None,
             own_state: None,
             entities: HashMap::new(),
@@ -1216,7 +1411,22 @@ impl Client {
 
     /// 发送消息到服务器
     pub fn send(&self, msg: &NetworkMessage) -> io::Result<usize> {
-        let buf = msg.encode();
+        // S2：拿到token后，Input/Leave 一律封在token包里 —— 伪造源地址的包服务端直接丢弃。
+        let sealed;
+        let outgoing = match (msg, self.token) {
+            (
+                NetworkMessage::Input { .. } | NetworkMessage::Leave { .. },
+                Some(token),
+            ) => {
+                sealed = NetworkMessage::Sealed {
+                    token,
+                    body: msg.encode(),
+                };
+                &sealed
+            }
+            _ => msg,
+        };
+        let buf = outgoing.encode();
         self.socket.send_to(&buf, self.server)
     }
 
@@ -1231,6 +1441,29 @@ impl Client {
             match recv_msg(&self.socket) {
                 Ok(Some((msg, from))) => {
                     if from == self.server {
+                        // S2：服务端下行同样带token；token不符的快照/目标状态一律丢弃。
+                        if self.token.is_some()
+                            && matches!(
+                                msg,
+                                NetworkMessage::Snapshot { .. } | NetworkMessage::ObjectiveState { .. }
+                            )
+                        {
+                            log::debug!("net: 丢弃未封印的下行状态包（伪造？）");
+                            continue;
+                        }
+                        if let NetworkMessage::Sealed { token, body } = msg {
+                            if self.token != Some(token) {
+                                log::debug!("net: 丢弃token不匹配的下行封印包（伪造？）");
+                                continue;
+                            }
+                            match NetworkMessage::decode(&body) {
+                                Ok(inner) => return Ok(Some((inner, from))),
+                                Err(e) => {
+                                    log::debug!("net: 下行封印包内层解码失败（{e}），丢弃");
+                                    continue;
+                                }
+                            }
+                        }
                         return Ok(Some((msg, from)));
                     }
                     log::debug!("net: 丢弃非服务器来源的数据报 {from}（期望 {}）", self.server);
@@ -1248,6 +1481,22 @@ impl Client {
         self.last_rx = Instant::now();
         let t = self.now();
         let left = match msg {
+            NetworkMessage::Challenge { nonce } => {
+                // S2：收到挑战后立刻回显（JoinProof 不需要token）。
+                self.pending_nonce = Some(nonce);
+                if let Err(e) = self.send(&NetworkMessage::JoinProof { nonce }) {
+                    log::warn!("net: JoinProof 发送失败（{e}）");
+                }
+                None
+            }
+            NetworkMessage::Welcome { player_id, token } => {
+                // S2：会话建立 —— 拿到 id 与token。
+                self.player_id = Some(player_id);
+                self.token = Some(token);
+                log::info!("net: client 会话建立 id={player_id}");
+                None
+            }
+            NetworkMessage::JoinProof { .. } | NetworkMessage::Sealed { .. } => None,
             NetworkMessage::Join { player_id, .. } => {
                 if player_id != 0 && self.player_id.is_none() {
                     self.player_id = Some(player_id);
@@ -1515,6 +1764,16 @@ impl Client {
     }
 
     /// 远端实体插值表（key = 实体 id；NPC 与玩家共用）
+    #[cfg(test)]
+    pub(crate) fn token_for_test(&self) -> Option<Token> {
+        self.token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn socket_for_test(&self) -> &UdpSocket {
+        &self.socket
+    }
+
     pub fn entities(&self) -> &HashMap<u32, RemoteEntity> {
         &self.entities
     }
@@ -1554,6 +1813,8 @@ impl Client {
     /// 判据 = `reset_connection_clears_session_scoped_state`。
     pub fn reset_connection(&mut self) {
         self.player_id = None;
+        self.token = None;
+        self.pending_nonce = None;
         self.entities.clear();
         // 插值缓冲与实体表必须同生共死（见 `prune_stale_entities` 的同一条理由）
         self.remote_players.clear();
@@ -2009,6 +2270,110 @@ mod tests {
         );
     }
 
+
+    /// S2：服务端必须丢弃 token 不匹配的封印包（伪造源地址的 Input/Leave 在这里失效）。
+    /// 反向验证：去掉 `Server::recv` 里的 token 比较 ⇒ 本判据红。
+    #[test]
+    fn forged_sealed_packet_is_rejected() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut client = Client::connect(addr).unwrap();
+        let from = complete_handshake(&mut server, &mut client, "p");
+        // 伪造者：另一个 socket 冒充同一个源地址是不可能的，但可以拿错 token 直接发。
+        let attacker = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let inner = NetworkMessage::Input {
+            seq: 1,
+            time: 0.0,
+            input: net_input(),
+        };
+        let bogus = NetworkMessage::Sealed {
+            token: [0xAB; TOKEN_LEN],
+            body: inner.encode(),
+        };
+        attacker.send_to(&bogus.encode(), addr).unwrap();
+        let got = server.recv_timeout(Duration::from_millis(300)).unwrap();
+        assert!(got.is_none(), "token 不匹配的封印包被服务端接受了（S2）");
+        // 正对照：真 token 的封印包必须被解出来
+        let token = server.clients_with_tokens()[0].1;
+        let good = NetworkMessage::Sealed { token, body: inner.encode() };
+        client.socket_for_test().send_to(&good.encode(), addr).unwrap();
+        let (msg, from2) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        assert_eq!(from2, from);
+        assert!(matches!(msg, NetworkMessage::Input { .. }), "真 token 的封印包应被接受");
+    }
+
+    /// S2：挑战发出后，**nonce 不对**的 JoinProof 必须被拒（且不得注册）。
+    /// 反向验证：把 nonce 比较改成忽略（`Some(_)`）⇒ 本判据红。
+    #[test]
+    fn join_proof_with_wrong_nonce_is_refused() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut client = Client::connect(addr).unwrap();
+        // 真发一次 Join，让服务端生成 pending nonce
+        client
+            .send(&NetworkMessage::Join { player_id: 0, name: "p".into(), version: SESSION_VERSION })
+            .unwrap();
+        let (_, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        let challenge = server.handle_join(from, "p".into(), SESSION_VERSION).unwrap();
+        assert!(matches!(challenge, NetworkMessage::Challenge { .. }));
+        // 回一个错误的 nonce
+        let reply = server.handle_join_proof(from, [0x11; TOKEN_LEN], SESSION_VERSION).unwrap();
+        match reply {
+            NetworkMessage::Refuse { reason } => assert!(
+                reason.starts_with("VERSION"),
+                "错 nonce 必须永久拒绝，实际原因：{reason}"
+            ),
+            other => panic!("期望 Refuse，实际 {other:?}"),
+        }
+        assert_eq!(server.client_count(), 0, "错 nonce 不得注册客户端");
+    }
+
+    /// S2：拿到 token 后，客户端必须丢弃未封印的 Snapshot（伪造源地址注入）。
+    #[test]
+    fn client_drops_unsealed_snapshot_after_handshake() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut client = Client::connect(addr).unwrap();
+        let from = complete_handshake(&mut server, &mut client, "p");
+        assert!(client.token_for_test().is_some(), "握手后客户端必须有 token");
+        let snapshot = NetworkMessage::Snapshot {
+            seq: 7,
+            time: 1.0,
+            player_id: 1,
+            player: PlayerState::new([9.0, 0.0, 9.0], 0.0),
+            npcs: vec![],
+        };
+        server.send_to(&snapshot, from).unwrap();
+        let got = client.recv().unwrap();
+        assert!(got.is_none(), "未封印的 Snapshot 被客户端接受了（S2）");
+        assert_eq!(client.snapshot_seq(), 0, "未封印快照不得改写快照状态");
+    }
+
+    /// S2 测试辅助：走完 Join → Challenge → JoinProof → Welcome，返回服务端看到的本端地址。
+    fn complete_handshake(server: &mut Server, client: &mut Client, name: &str) -> std::net::SocketAddr {
+        let join = NetworkMessage::Join {
+            player_id: 0,
+            name: name.to_string(),
+            version: SESSION_VERSION,
+        };
+        client.send(&join).unwrap();
+        let (req, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        assert_eq!(req, join);
+        let challenge = server.handle_join(from, name.to_string(), SESSION_VERSION).unwrap();
+        assert!(matches!(challenge, NetworkMessage::Challenge { .. }), "握手第一步必须是挑战");
+        let (msg, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        let _ = client.handle_message(msg); // Challenge → 自动回 JoinProof
+        let (proof, from2) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        let nonce = match proof {
+            NetworkMessage::JoinProof { nonce } => nonce,
+            other => panic!("期望 JoinProof，实际 {other:?}"),
+        };
+        let welcome = server.handle_join_proof(from2, nonce, SESSION_VERSION).unwrap();
+        assert!(matches!(welcome, NetworkMessage::Welcome { .. }), "回显正确后必须是 Welcome");
+        let (wmsg, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
+        let _ = client.handle_message(wmsg);
+        from2
+    }
 
     /// 测试辅助：**服务端会看到的**本端地址。
     ///
@@ -2522,39 +2887,10 @@ mod tests {
         let server_addr = server.local_addr().unwrap();
         let mut client = Client::connect(server_addr).unwrap();
 
-        // client -> server：Join 申请
-        let join_req = NetworkMessage::Join {
-                player_id: 0,
-                name: "alice".to_string(),
-                version: SESSION_VERSION,
-            };
-        client.send(&join_req).unwrap();
-        let (got, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
-        // 🔴 **2026-10-15 修断言**：原来写的是 `assert_eq!(from, client.local_addr())` ——
-        // 那假定「本端绑定的地址」==「对端看到的源地址」，而这只在**绑了具体地址**时成立。
-        // 客户端改成按地址族绑 `0.0.0.0:0` 之后（修"跨机联机全部失败"那条），
-        // `local_addr()` 的 IP 是**未指定地址**，而内核按目的地址选的源地址是 `127.0.0.1`
-        // ⇒ 原断言必然不成立。**这是断言的前提过时，不是代码错** —— 改断言，不改回去。
-        // 新断言更精确：分别钉住「端口一致」与「源地址就是环回」这两个事实。
-        assert_eq!(from, peer_seen_addr(&client));
-        assert_eq!(got, join_req);
-
-        // server：注册 + 回发 Join 确认
-        let reply = server.handle_join(from, "alice".to_string(), SESSION_VERSION).unwrap();
-        assert_eq!(
-            reply,
-            NetworkMessage::Join {
-                player_id: 1,
-                name: "alice".to_string(),
-                version: SESSION_VERSION
-            }
-        );
+        // S2 握手（Join → Challenge → JoinProof → Welcome）
+        let from = complete_handshake(&mut server, &mut client, "alice");
         assert_eq!(server.client_count(), 1);
         assert_eq!(server.client_id(from), Some(1));
-
-        // client：收到确认并记录自身 id
-        let (got2, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
-        let _ = client.handle_message(got2);
         assert_eq!(client.player_id(), Some(1));
 
         // client -> server：Position 状态上报
@@ -2891,22 +3227,8 @@ mod tests {
         let server_addr = server.local_addr().unwrap();
         let mut client = Client::connect(server_addr).unwrap();
 
-        // 握手：client Join 申请 → server 分配 id 回 ack → client 记录自身 id
-        client
-            .send(&NetworkMessage::Join { player_id: 0, name: "player1".into(), version: SESSION_VERSION })
-            .unwrap();
-        let (req, from) = recv_until(|| server.recv(), Duration::from_millis(1000));
-        // 🔴 **2026-10-15 修断言**：原来写的是 `assert_eq!(from, client.local_addr())` ——
-        // 那假定「本端绑定的地址」==「对端看到的源地址」，而这只在**绑了具体地址**时成立。
-        // 客户端改成按地址族绑 `0.0.0.0:0` 之后（修"跨机联机全部失败"那条），
-        // `local_addr()` 的 IP 是**未指定地址**，而内核按目的地址选的源地址是 `127.0.0.1`
-        // ⇒ 原断言必然不成立。**这是断言的前提过时，不是代码错** —— 改断言，不改回去。
-        // 新断言更精确：分别钉住「端口一致」与「源地址就是环回」这两个事实。
-        assert_eq!(from, peer_seen_addr(&client));
-        assert_eq!(req, NetworkMessage::Join { player_id: 0, name: "player1".into(), version: SESSION_VERSION });
-        server.handle_join(from, "player1".into(), SESSION_VERSION).unwrap();
-        let (got, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
-        let _ = client.handle_message(got);
+        // S2 握手：Join → Challenge → JoinProof → Welcome（辅助函数内部逐步断言）
+        let from = complete_handshake(&mut server, &mut client, "player1");
         assert_eq!(client.player_id(), Some(1));
         assert!(client.is_connected());
 
@@ -2937,7 +3259,9 @@ mod tests {
                 NpcSnapshot { id: 11, pos: [2.0, 0.0, 2.0], facing: -0.5, hp: 40.0, team: 0 , firing: 0 },
             ],
         };
-        server.send_to(&snapshot, from2).unwrap();
+        let token = server.clients_with_tokens().into_iter().next().expect("握手后应有 token").1;
+        let sealed = NetworkMessage::Sealed { token, body: snapshot.encode() };
+        server.send_to(&sealed, from2).unwrap();
         let (got2, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
         let _ = client.handle_message(got2);
         assert_eq!(client.snapshot_seq(), 1);

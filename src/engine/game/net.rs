@@ -174,6 +174,12 @@ impl Game {
                             joined.push(id);
                         }
                     }
+                    NetworkMessage::JoinProof { nonce } => {
+                        let _ = server.handle_join_proof(from, nonce, crate::net::SESSION_VERSION);
+                        if let Some(id) = server.player_id_of(from) {
+                            joined.push(id);
+                        }
+                    }
                     NetworkMessage::Input { seq, input, .. } => {
                         collapse_input(&mut inputs, from, seq, input)
                     }
@@ -290,7 +296,15 @@ impl Game {
             npcs,
         };
         if let Some(server) = self.net_server.as_ref() {
-            let _ = server.broadcast(&snapshot, None);
+            // S2：快照逐客户端用各自token封装（旧版一次广播，无法带token）。
+            let body = snapshot.encode();
+            for (addr, token) in server.clients_with_tokens() {
+                let sealed = NetworkMessage::Sealed {
+                    token,
+                    body: body.clone(),
+                };
+                let _ = server.send_raw(&sealed.encode(), addr);
+            }
             // 目标状态（据点归属/进度）广播：关卡系统启用时组包（归属码 0=中立/1=Red/2=Blue）。
             // 未启用关卡系统（obj_state=None）→ 空据点列表广播（客户端据此可知无目标）。
             if let Some(obj) = self.obj_state.as_ref() {
@@ -312,7 +326,14 @@ impl Game {
                     rule_kind: obj.rule.rule_kind().to_string(),
                     points,
                 };
-                let _ = server.broadcast(&obj_msg, None);
+                let obj_body = obj_msg.encode();
+                for (addr, token) in server.clients_with_tokens() {
+                    let sealed = NetworkMessage::Sealed {
+                        token,
+                        body: obj_body.clone(),
+                    };
+                    let _ = server.send_raw(&sealed.encode(), addr);
+                }
             }
         }
     }
