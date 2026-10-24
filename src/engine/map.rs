@@ -64,6 +64,9 @@ pub struct MapData {
     pub obstacles: Vec<ObstacleDef>,
     /// 胜负规则（[rule] 节；缺失时默认 CapturePoints{required=1}）
     pub rule: RuleDef,
+    /// 可选时段预设（`sun_elev` / `sun_azim`，角度制）：每张图可以有自己的太阳高度，
+    /// 不设则沿用引擎默认；`RV3D_SUN_ELEV` 仍可覆盖（A/B 用）。
+    pub sun: Option<(f32, f32)>,
 }
 
 /// 胜负规则（TOML `[rule]` 节）：
@@ -526,6 +529,13 @@ fn table_get<'a>(entries: &'a [(String, Value)], key: &str) -> Option<&'a Value>
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
+fn table_num(entries: &[(String, Value)], key: &str) -> Option<f64> {
+    entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+        Value::Num(n) => Some(*n),
+        _ => None,
+    })
+}
+
 fn table_str(entries: &[(String, Value)], key: &str) -> String {
     match table_get(entries, key) {
         Some(Value::Str(s)) => s.clone(),
@@ -621,6 +631,11 @@ fn assemble_map(entries: Vec<(String, Value)>, rule_entries: Vec<(String, Value)
     MapData {
         name: table_str(&entries, "name"),
         description: table_str(&entries, "description"),
+        sun: {
+            let e = table_num(&entries, "sun_elev");
+            let a = table_num(&entries, "sun_azim").unwrap_or(233.0);
+            e.map(|e| (e as f32, a as f32))
+        },
         spawn_points: table_array(&entries, "spawn_points")
             .into_iter()
             .map(parse_spawn_point)
@@ -824,6 +839,11 @@ fn seed_from_name(name: &str) -> u32 {
 }
 
 impl MapManager {
+    /// 当前地图的时段预设（`sun_elev`/`sun_azim`）；未设返回 None。
+    pub fn sun(&self) -> Option<(f32, f32)> {
+        self.current.sun
+    }
+
     /// 加载地图文件（失败返回带原因的 Err）
     pub fn load(path: &str) -> Result<Self, String> {
         let data = load_map(path)?;
@@ -1515,5 +1535,14 @@ required = 2
             ok_count >= 50,
             "3000 条里只解出 {ok_count} 条 ⇒ 测试没走到解析层"
         );
+    }
+
+    /// 时段预设来自关卡 TOML：`defense_line.toml` 里写了 sun_elev/sun_azim，
+    /// 加载后必须读得到（否则"每张图自己的时段"只是注释）。
+    #[test]
+    fn map_sun_keys_are_parsed_from_toml() {
+        let mgr = super::MapManager::load("assets/maps/defense_line.toml")
+            .expect("defense_line.toml 应能加载");
+        assert_eq!(mgr.sun(), Some((14.0, 200.0)));
     }
 }

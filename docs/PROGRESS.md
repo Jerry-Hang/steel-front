@@ -1913,3 +1913,18 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
 - 黄昏（elev=12、azim=200）：天空区 **37.61%**、地面区 **88.70%**、整体亮度 105.1→97.1；
 - 判据：`sun_direction_is_unit_and_follows_elevation`、
   `low_sun_is_warmer_and_dimmer`（反向验证：warm 换成 noon 色 ⇒ 红）。
+
+### 2026-10-24（续49）：时段预设写进关卡 TOML
+
+- `MapData.sun: Option<(elev,azim)>`（TOML 顶层 `sun_elev` / `sun_azim`，`table_num` 解析）；
+- `MapManager::sun()`；`Game::map_sun` 在 `init_map_system` 与 `advance_level` 两处装载；
+- 优先级：`RV3D_SUN_*` > **关卡 TOML** > 引擎默认向量（`view.rs`）；
+- `assets/maps/defense_line.toml` 加 `sun_elev = 14 / sun_azim = 200`（傍晚逆光防线）。
+
+**实测**（`RV3D_MAP=defense_line`）：无时段 vs TOML 时段 **63.86%** 像素、亮度 99.0→88.8；
+env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env 优先级更高）；
+判据 `map_sun_keys_are_parsed_from_toml`。
+
+⚠ 过程中发现两件事：① 第一次 A/B 只差 0.15% —— 因为**截到的是 LoadingMap 蓝屏**，
+世界还没画；② 只写了 `.or_else` 那一步忘了真正落盘（脚本在别的文件断言失败提前退出），
+表现为 `map_sun` 一直被忽略 —— 已用"无时段 vs 有 TOML"重新验证。

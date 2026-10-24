@@ -134,7 +134,13 @@ impl Game {
         use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
         // 太阳：默认沿用历史向量 (-0.4,0.9,-0.3)/1.35；设 RV3D_SUN_ELEV（必要时加
         // RV3D_SUN_AZIM）则按角度重算，低角度自动变暖变弱（`lighting::sun_tint`）。
-        let sun_env = super::lighting::sun_from_env();
+        // 优先级：RV3D_SUN_*（A/B）> 关卡 TOML 的 sun_* > 引擎默认向量。
+        let sun_env = super::lighting::sun_from_env().or_else(|| {
+            self.map_sun.map(|(e, a)| {
+                let (color, scale) = super::lighting::sun_tint(e);
+                (super::lighting::sun_direction(e, a), color, scale)
+            })
+        });
         let sun = match sun_env {
             Some((dir, color, scale)) => DirectionalLight::new(dir, color, 1.35 * scale),
             None => DirectionalLight::new(
