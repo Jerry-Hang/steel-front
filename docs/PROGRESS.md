@@ -1721,3 +1721,18 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
 - 判据：`transient_full_refusal_keeps_retrying`（BUSY 后必须仍重发 Join）、
   `reset_connection_clears_permanent_refusal`；旧判据 `refuse_stops_retry_join` 保留（VERSION 仍永久）。
 - 反向验证：`refuse_is_permanent` 恒 true ⇒ BUSY 判据红（"满过一次就永远连不上"）。
+
+### 2026-10-24（续35）：闸门流程事故——管道把退出码吃掉了，红门也提交了
+
+续34 的提交（`50a2fcb`）在两个闸门**红了**的情况下照样 commit+push 了：
+`python3 tools/cjk_cover_check.py 2>&1 | tail -1` 与 `cargo test ... | grep ...` 的退出码
+是**管道最后一个命令**的，`&&` 链看到的是 0 ⇒ 闸门形同不存在。
+
+两个红因：
+1. **CJK 门**：新注释里的 `审`（U+5BA1）没有字模 ⇒ `source_cjk_codepoints_all_have_glyphs` 红；
+   已把 `审计` 改写为 `安全复核`（源码字体未入库，表不能重建，只能改文案）。
+2. **commit_guard**：审计子代理留下的 7 个 `docs/security/artifacts/*.bin` 未在白名单 ⇒ 全仓扫描拒绝；
+   已移出仓库到 `~/steel-front-audit-artifacts/`（`tools/security/netcode_probe.py artifacts` 可随时重生成）。
+
+🔴 **流程判据**：闸门必须**显式看退出码**——`cmd >log 2>&1; echo exit=$?`，
+或 `set -o pipefail`；**不要**用 `cmd | grep`/`| tail` 的退出码当结论。
