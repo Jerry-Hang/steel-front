@@ -233,10 +233,12 @@ impl Renderer {
                     .module(fs)
                     .name(c"fs_main"),
             ];
+            // 48 B = params + aux + aux2（与 build.rs::SSAO_SHADER_WGSL 的 SsaoPush 逐字段对应）。
+            // ⚠ 改字段必须同时改 `record_ssao` 的 [f32; 12] 字面量与这里。
             let push = vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
-                .size(16);
+                .size(std::mem::size_of::<[f32; 12]>() as u32);
             let set_layouts = [self.ssao_set_layout];
             let layout_ci = vk::PipelineLayoutCreateInfo::default()
                 .set_layouts(&set_layouts)
@@ -415,7 +417,19 @@ impl Renderer {
             };
             self.device
                 .cmd_set_scissor(command_buffer, 0, std::slice::from_ref(&scissor));
-            let params = [near, far, radius, strength];
+            // 接触阴影参数：视空间光向 + 半 FOV/宽高比 + 行进长度/步数/偏置。
+            let tan_half = 1.0 / proj.y_axis.y.max(1e-6);
+            let aspect = proj.y_axis.y / proj.x_axis.x.max(1e-6);
+            let lw = self.light_data.directional.direction;
+            let lv = self
+                .frame_view
+                .transform_vector3(glam::Vec3::new(lw.x, lw.y, lw.z))
+                .normalize_or_zero();
+            let params: [f32; 12] = [
+                near, far, radius, strength, // params
+                tan_half, aspect, lv.x, lv.y, // aux
+                lv.z, 0.40, 6.0, 0.015,       // aux2：行进 0.55m / 8 步 / 偏置 1cm
+            ];
             self.device.cmd_push_constants(
                 command_buffer,
                 self.ssao_pipeline_layout,

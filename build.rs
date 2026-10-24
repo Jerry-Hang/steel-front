@@ -2120,6 +2120,10 @@ const SSAO_SHADER_WGSL: &str = r#"
 struct SsaoPush {
     // x = near, y = far, z = 采样半径（像素，1280x720 基准）, w = 强度
     params: vec4<f32>,
+    // 接触阴影（2026-10-24）：x = tan(竖直半 FOV), y = aspect, z/w = 视空间光向 x/y
+    aux: vec4<f32>,
+    // x = 视空间光向 z, y = 行进长度（米）, z = 步数, w = 深度偏置（米）
+    aux2: vec4<f32>,
 };
 var<immediate> ssao_push: SsaoPush;
 
@@ -2191,7 +2195,54 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     if (wsum <= 0.0) {
         return col;
     }
-    let ao = clamp(1.0 - strength * (occ / wsum), 0.0, 1.0);
+    // ---- 真·屏幕空间接触阴影（SSCS，2026-10-24）----
+    // SSAO 只回答"周围挡了多少天光"；SSCS 回答"太阳到这一点那段短光路是否被挡住"。
+    // 用屏幕坐标 + 线性深度反推视空间位置（透视射线方向由 tan_half/aspect 直接写出，
+    // 不需要逆投影矩阵），再沿视空间光向行进若干步比较深度。
+    let tan_half = ssao_push.aux.x;
+    let aspect = ssao_push.aux.y;
+    let lv = vec3<f32>(ssao_push.aux.z, ssao_push.aux.w, ssao_push.aux2.x);
+    let march = ssao_push.aux2.y;
+    let taps = i32(ssao_push.aux2.z);
+    let bias = ssao_push.aux2.w;
+    var cs = 0.0;
+    if (march > 0.0 && taps > 0 && dot(lv, lv) > 0.25) {
+        // Vulkan 的 frag.y 向下，而视图空间 +y 向上 ⇒ NDC y 要取反。
+        let ndc = vec2<f32>(frag.x / f32(dims.x) * 2.0 - 1.0,
+                            1.0 - frag.y / f32(dims.y) * 2.0);
+        let pv = vec3<f32>(ndc.x * tan_half * aspect, ndc.y * tan_half, -1.0) * z0;
+        for (var i = 1; i <= taps; i = i + 1) {
+            let t = march * f32(i) / f32(taps);
+            let q = pv + lv * t;
+            if (q.z >= -0.05) {
+                continue;
+            }
+            let uv0 = vec2<f32>(q.x / (-q.z) / (tan_half * aspect),
+                                q.y / (-q.z) / tan_half) * 0.5 + vec2<f32>(0.5, 0.5);
+            // 投影回屏幕时同样按"NDC y 向上"换算成行号（与上面 ndc 的定义互逆）。
+            let suv = vec2<f32>(uv0.x, 1.0 - uv0.y);
+            if (suv.x <= 0.0 || suv.x >= 1.0 || suv.y <= 0.0 || suv.y >= 1.0) {
+                continue;
+            }
+            let sc = vec2<i32>(i32(suv.x * f32(dims.x)), i32(suv.y * f32(dims.y)));
+            let ds = textureLoad(depth_tex, sc, 0).r;
+            if (ds >= 0.99999 || ds <= 0.0) {
+                continue;
+            }
+            let zs = linear_depth(ds, near, far);
+            // 🔴 必须同时给"厚度上限"：只比较"采样点更近"会让沿光向越过地表的行进点
+            // 把它背后的地面判成遮挡（实测整幅下半屏被压黑 −33% 亮度）。
+            let dzc = (-q.z) - zs;
+            // 厚度上限随距离收紧：远处像素的一个深度台阶本来就跨很多米。
+            let thick = min(0.20, max(0.06, z0 * 0.02));
+            if (dzc > bias && dzc < thick) {
+                cs = 1.0;
+                break;
+            }
+        }
+    }
+    // 接触阴影只占强度的一部分：它只补"贴身"那一点，不该和 SSAO 同权。
+    let ao = clamp(1.0 - strength * (occ / wsum) - strength * cs * 0.45, 0.0, 1.0);
     return vec4<f32>(col.rgb * ao, 1.0);
 }
 "#;

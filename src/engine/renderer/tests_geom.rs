@@ -2347,4 +2347,19 @@ mod ssao_quality_tests {
             "HIGH 的 SSAO 必须比 MEDIUM 强"
         );
     }
+
+    /// SSCS push 布局必须与着色器字段逐项对应（48 B = params + aux + aux2）。
+    /// 反向验证：删掉 build.rs 里的 `aux2` ⇒ 红。
+    #[test]
+    fn ssao_push_declares_contact_shadow_fields() {
+        let src = std::fs::read_to_string("build.rs").expect("读 build.rs");
+        assert!(src.contains("struct SsaoPush"), "着色器里没有 SsaoPush");
+        assert!(src.contains("aux: vec4<f32>"), "缺少 aux（半 FOV/宽高比/光向）");
+        assert!(src.contains("aux2: vec4<f32>"), "缺少 aux2（光向 z/行进/步数/偏置）");
+        assert!(
+            src.contains("occ / wsum) - strength * cs"),
+            "合成式里没有接触阴影项 cs"
+        );
+        assert_eq!(std::mem::size_of::<[f32; 12]>(), 48, "push 尺寸应为 48 B");
+    }
 }
