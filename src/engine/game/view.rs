@@ -132,11 +132,23 @@ impl Game {
     /// 改这两个数必须同时看 build.rs::apply_lighting 的曲线。
     pub(crate) fn light_uniform(&self) -> super::lighting::LightUniform {
         use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
-        let sun = DirectionalLight::new(
-            glam::Vec3::new(-0.4, 0.9, -0.3).normalize(),
-            glam::Vec3::new(1.0, 0.95, 0.85),
-            1.35,
-        );
+        // 太阳：默认沿用历史向量 (-0.4,0.9,-0.3)/1.35；设 RV3D_SUN_ELEV（必要时加
+        // RV3D_SUN_AZIM）则按角度重算，低角度自动变暖变弱（`lighting::sun_tint`）。
+        let sun_env = super::lighting::sun_from_env();
+        let sun = match sun_env {
+            Some((dir, color, scale)) => DirectionalLight::new(dir, color, 1.35 * scale),
+            None => DirectionalLight::new(
+                glam::Vec3::new(-0.4, 0.9, -0.3).normalize(),
+                glam::Vec3::new(1.0, 0.95, 0.85),
+                1.35,
+            ),
+        };
+        // 低太阳预设：太阳低时环境光同步变暗（0.55→0.55*scale）并略偏冷，
+        // 否则"低太阳只改方向"会被 0.55 的环境光完全盖住（实测整图仅差 0.4 亮度）。
+        let (amb_color, amb_intensity) = match sun_env {
+            Some((_, _, scale)) => (glam::Vec3::new(0.46, 0.47, 0.56), 0.55 * scale),
+            None => (glam::Vec3::new(0.5, 0.55, 0.6), 0.55),
+        };
         let point_a = PointLight::new(
             glam::Vec3::new(0.0, 6.0, 0.0),
             glam::Vec3::new(0.9, 0.6, 0.4),
@@ -177,8 +189,8 @@ impl Game {
         LightUniform::build(
             Some(&sun),
             &[point_a, point_b],
-            glam::Vec3::new(0.5, 0.55, 0.6),
-            0.55,
+            amb_color,
+            amb_intensity,
             shadow.as_ref(),
         )
     }

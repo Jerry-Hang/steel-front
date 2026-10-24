@@ -64,6 +64,38 @@ pub const DEFAULT_SHININESS: f32 = 32.0;
 #[allow(dead_code)]
 pub const SPECULAR_STRENGTH: f32 = 0.4;
 
+/// 太阳方向（表面→光源）：`elev_deg` / `azim_deg` 为角度制。
+///
+/// 与 `RV3D_SUN_ELEV` / `RV3D_SUN_AZIM` 配套：不设时沿用 `view.rs` 的默认向量
+/// （-0.4, 0.9, -0.3，等于 elev≈61°、azim≈233°）。
+pub fn sun_direction(elev_deg: f32, azim_deg: f32) -> Vec3 {
+    let e = elev_deg.to_radians();
+    let a = azim_deg.to_radians();
+    Vec3::new(a.cos() * e.cos(), e.sin(), a.sin() * e.cos()).normalize()
+}
+
+/// 低太阳 → 更暖、更弱：返回 (颜色, 强度系数)。
+///
+/// 60° 以上与现有配平一致（1.0,0.95,0.85）/1.0；10° 附近偏橙红且降到 0.74 强度
+/// （低角度穿过更厚大气，直射能量更低）。只影响方向光，环境光不动。
+pub fn sun_tint(elev_deg: f32) -> (Vec3, f32) {
+    let t = (elev_deg.clamp(10.0, 60.0) - 10.0) / 50.0;
+    let warm = Vec3::new(1.0, 0.62, 0.40);
+    let noon = Vec3::new(1.0, 0.95, 0.85);
+    (warm.lerp(noon, t), 0.62 + 0.38 * t)
+}
+
+/// 从环境变量解析太阳角度；未设置/非法返回 None（沿用默认）。
+///
+/// `RV3D_SUN_ELEV` 建议 8..80；`RV3D_SUN_AZIM` 0..360（0 = +X 方向起算）。
+pub fn sun_from_env() -> Option<(Vec3, Vec3, f32)> {
+    // 必须走 crate::syscfg（Android 上没有进程环境变量；直读 std::env 会静默失效）。
+    let elev = crate::syscfg::parse::<f32>("RV3D_SUN_ELEV")?;
+    let azim = crate::syscfg::parse::<f32>("RV3D_SUN_AZIM").unwrap_or(233.0);
+    let (color, scale) = sun_tint(elev);
+    Some((sun_direction(elev, azim), color, scale))
+}
+
 /// 方向光：`direction` 为从表面指向光源的方向
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DirectionalLight {
@@ -735,4 +767,24 @@ mod tests {
         );
     }
 
+
+    /// 太阳方向：单位长，且 y 分量 = sin(elev)（与阴影/天空共用同一向量）。
+    #[test]
+    fn sun_direction_is_unit_and_follows_elevation() {
+        for (e, a) in [(8.0f32, 0.0f32), (45.0, 90.0), (61.0, 233.0)] {
+            let d = super::sun_direction(e, a);
+            assert!((d.length() - 1.0).abs() < 1e-5, "不是单位向量：{d:?}");
+            assert!((d.y - e.to_radians().sin()).abs() < 1e-4, "elev 不对：{d:?}");
+        }
+    }
+
+    /// 低太阳必须更暖、更弱（10° vs 60°）。反向验证：把 warm 换成 noon 色 ⇒ 红。
+    #[test]
+    fn low_sun_is_warmer_and_dimmer() {
+        let (lo, ilo) = super::sun_tint(10.0);
+        let (hi, ihi) = super::sun_tint(60.0);
+        assert!(lo.z < hi.z, "低太阳的蓝分量没有降低（不暖）：{lo:?} vs {hi:?}");
+        assert!(ilo < ihi, "低太阳强度没有降低：{ilo} vs {ihi}");
+        assert!((ihi - 1.0).abs() < 1e-5, "60° 应回到满强度：{ihi}");
+    }
 }

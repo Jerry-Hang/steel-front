@@ -2281,7 +2281,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let sun_low = clamp(1.0 - max(sky_push.sun.y, 0.0), 0.0, 1.0);
     let warm = vec3<f32>(1.12, 0.88, 0.64);
     let zenith = SKY_ZENITH;
-    let horizon = mix(SKY_HORIZON, SKY_HORIZON * warm, sun_low * 0.22);
+    let horizon = mix(SKY_HORIZON, SKY_HORIZON * warm, sun_low * 0.38);
     let below = SKY_BELOW;
     var col = mix(horizon, zenith, pow(clamp(ray.y, 0.0, 1.0), 0.42));
     if (ray.y < 0.0) {
