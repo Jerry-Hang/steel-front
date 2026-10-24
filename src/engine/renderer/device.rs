@@ -673,6 +673,7 @@ impl Renderer {
             stage_submit_us: 0,
             stage_present_us: 0,
             present_stall_frames: 0,
+        shader_time: 0.0,
             depth_images: Vec::new(),
             depth_images_memory: Vec::new(),
             depth_image_views: Vec::new(),

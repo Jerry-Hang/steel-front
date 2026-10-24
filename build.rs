@@ -2276,8 +2276,12 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         + sky_push.up.xyz * (ndc.y * tan_half)
     );
     // 线性空间天空色（构建期从 Rust 常量注入 ⇒ 与片元雾色同源）
+    // 2026-10-24：太阳越低，地平线越暖（低角度穿过更厚的大气）。当前太阳方向固定，
+    // 这条为后续关卡/时段切换留接口 —— 只改渐变色，不改几何或采样次数。
+    let sun_low = clamp(1.0 - max(sky_push.sun.y, 0.0), 0.0, 1.0);
+    let warm = vec3<f32>(1.12, 0.88, 0.64);
     let zenith = SKY_ZENITH;
-    let horizon = SKY_HORIZON;
+    let horizon = mix(SKY_HORIZON, SKY_HORIZON * warm, sun_low * 0.22);
     let below = SKY_BELOW;
     var col = mix(horizon, zenith, pow(clamp(ray.y, 0.0, 1.0), 0.42));
     if (ray.y < 0.0) {
@@ -2316,7 +2320,11 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // 云量用平滑阈值控制，地平线附近淡出，太阳侧亮、背光侧灰蓝。
     if (ray.y > 0.012) {
         let deck = ray.xz / max(ray.y, 0.012);
-        let p = deck * vec2<f32>(1.10, 2.20);
+        // 2026-10-24：云层缓慢漂移（screen.z = 渲染时刻秒）。风向斜向左上，
+        // 只动云板坐标，不引入纹理/新 pass。
+        let t = sky_push.screen.z;
+        let wind = vec2<f32>(t * 0.0016, t * 0.0009);
+        let p = (deck + wind) * vec2<f32>(1.10, 2.20);
         let base = cloud_fbm(p);
         let det = cloud_fbm(p * 3.7 + vec2<f32>(13.0, 7.0));
         var cov = smoothstep(0.57, 0.66, base + 0.18 * det);

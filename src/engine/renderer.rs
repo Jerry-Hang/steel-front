@@ -808,6 +808,8 @@ pub struct Renderer {
     /// 连续呈现卡顿的帧数（见 `present_stall`）。正常帧必须清零 ——
     /// 漏了清零，几次**偶发**长卡顿会累积成"连续三次"从而误触发降级。
     present_stall_frames: u32,
+    /// 天空着色器用的时间（秒，来自 `Game::time`）：高空漂移/低角度暖色。
+    pub(crate) shader_time: f32,
     depth_images: Vec<vk::Image>,
     depth_images_memory: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,

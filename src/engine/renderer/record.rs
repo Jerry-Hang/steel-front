@@ -210,7 +210,8 @@ impl Renderer {
                 screen: [
                     self.render_extent.width as f32,
                     self.render_extent.height as f32,
-                    0.0,
+                    // z = 时间（秒）：高空漂移 + 低太阳暖色；w 保留
+                    self.shader_time,
                     0.0,
                 ],
             };
