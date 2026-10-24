@@ -111,9 +111,7 @@ impl Game {
         self.net_fire_pending = fire;
     }
     /// 服务器模式最近一次客户端输入视角（main.rs 应用到相机，快照权威视角）
-    pub(crate) fn net_look(&self) -> Option<(f32, f32)> {
-        self.net_look
-    }
+    // S9：net_look getter 已删（无写入点）。
     /// 网络对战模式步进（RV3D_NET=server|client；默认关闭，不破坏单机模式）。
     /// 与旧环回演示（update_net）互斥：演示用 RV3D_NET=1|demo，对战用 server|client。
     pub(crate) fn step_net(&mut self, camera: &Camera) {
@@ -262,32 +260,31 @@ impl Game {
         self.net_snap_seq = self.net_snap_seq.wrapping_add(1);
         let cam_pos = camera.position();
         let player = PlayerState::new([cam_pos.x, cam_pos.y, cam_pos.z], camera.yaw);
+        // 🔴 S12：玩家必须排在最前 —— 编码侧只 `take(MAX_SNAPSHOT_NPCS)`，
+        // 玩家排在末尾时会被 NPC 整体截掉（客户端"所有远端玩家消失"）。
         let mut npcs: Vec<NpcSnapshot> = self
-            .npcs
+            .net_players
             .iter()
-            .map(|n| NpcSnapshot {
-                id: n.id as u32,
-                pos: n.position,
-                facing: n.facing,
-                hp: n.hp,
-                team: match n.team {
-                    Team::Red => 0,
-                    Team::Blue => 1,
-                },
-                firing: if n.state_machine.state() == NpcState::Attack { 1 } else { 0 },
-            })
-            .collect();
-        // 远端玩家 → 保留 id 区（NET_PLAYER_BASE + player_id），客户端据此渲染
-        for p in &self.net_players {
-            npcs.push(NpcSnapshot {
-                id: NET_PLAYER_BASE + p.id,
+            .map(|p| NpcSnapshot {
+                id: NET_PLAYER_BASE.wrapping_add(p.id),
                 pos: p.pos,
                 facing: p.yaw,
                 hp: p.hp,
                 team: 1, // 远端玩家统一蓝营
                 firing: if self.time - p.last_fire < 0.2 { 1 } else { 0 },
-            });
-        }
+            })
+            .collect();
+        npcs.extend(self.npcs.iter().map(|n| NpcSnapshot {
+            id: n.id as u32,
+            pos: n.position,
+            facing: n.facing,
+            hp: n.hp,
+            team: match n.team {
+                Team::Red => 0,
+                Team::Blue => 1,
+            },
+            firing: if n.state_machine.state() == NpcState::Attack { 1 } else { 0 },
+        }));
         let snapshot = NetworkMessage::Snapshot {
             seq: self.net_snap_seq,
             time: self.time,
@@ -375,7 +372,7 @@ impl Game {
         }
         // 自身上行权威校正（2026-08-25）：服务器端本远端实体位置与本地超 3m → 硬对齐（防漂移）
         if let Some(own) = client.player_id() {
-            if let Some(st) = client.entity_state_at(NET_PLAYER_BASE + own, client.now()) {
+            if let Some(st) = client.entity_state_at(NET_PLAYER_BASE.wrapping_add(own), client.now()) {
                 let dx = st.pos[0] - self.player_body.pos.x;
                 let dz = st.pos[2] - self.player_body.pos.z;
                 if dx * dx + dz * dz > 9.0 {

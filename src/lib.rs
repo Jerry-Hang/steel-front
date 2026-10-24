@@ -1727,11 +1727,8 @@ impl GameApp {
             self.camera.add_recoil(kick_pitch, kick_yaw);
         }
 
-        // 服务器模式：客户端输入视角驱动本机相机（快照权威视角；无客户端输入时保持本地视角）
-        if let Some((yaw, pitch)) = self.game.net_look() {
-            self.camera.yaw = yaw;
-            self.camera.pitch = pitch;
-        }
+        // S9：已删掉 net_look 死分支。原注释写明"客户端输入视角驱动本机相机"，但全仓没有
+        // 任何写入点（声明与实现不符）；若按注释接线，同网段客户端就能强行转动房主视角。
 
         // 第一人称枪摆动状态积分（2026-09-01）。
         // 速度取自**玩家脚底的实际位移 / dt**，不用 `game.player_speed()`：后者读

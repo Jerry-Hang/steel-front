@@ -798,7 +798,7 @@ pub struct Game {
     /// 客户端模式：main.rs 转发的本帧开火意图（随 Input 上报）
     net_fire_pending: bool,
     /// 服务器模式：最近一次客户端输入视角（yaw, pitch），main.rs 应用到相机
-    net_look: Option<(f32, f32)>,
+    // S9：net_look 已删（无写入点的死分支）。
     /// 网络状态日志限频（1 秒一条）
     last_net_log: f32,
     /// 游戏主状态（commit a 先提供枚举与查询；e 接入完整状态机）

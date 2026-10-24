@@ -1851,3 +1851,16 @@ A/B（双二进制、公园中央俯视机位）：地面带 **G−R 从 3.9 提
 - 可见性（引擎实拍）：住宅街区俯视 **8.98%** 像素变化（楼梯间在院内抬头可见）；
   广场/街道平视几乎为 0（本来就被女儿墙挡住）；
 - 契约：包围盒逐件不变（1 mm 内）。
+
+### 2026-10-24（续44）：S9 / S10 / S12 低危项收尾
+
+- **S9**：删掉 `net_look` 整条死分支（字段/getter/初始化/lib.rs 读取点）。原注释宣称
+  "客户端输入视角驱动本机相机"，但全仓没有写入点；若按注释接线，同网段客户端就能强行扭动
+  房主视角（审计点名的 Critical 化路径）。
+- **S10**：编码尾部加 `debug_assert!(payload.len() <= u16::MAX)` + 运行期 `min` 截断并告警
+  （当前最大 26.7 KB，余量 38 KB）；`NET_PLAYER_BASE + id` 两种写法统一为 `wrapping_add`。
+- **S12**：解码遇到 `count > MAX_SNAPSHOT_NPCS` 直接 `NetError::OversizedCount`（旧版按报文
+  count 逐条读，实际上限由载荷决定 ≈2,500）；容量注释/算式 24B → **26B**（id4+pos12+facing4+
+  hp4+team1+firing1）；**玩家快照排到最前**（编码侧 `take(1024)` 截断时不再把玩家整体截掉）。
+- 判据：`snapshot_count_above_cap_is_rejected`（反向验证：删判断 ⇒ 红）、
+  `snapshot_payload_length_fits_u16`（头部声明长度 == 实际载荷）。

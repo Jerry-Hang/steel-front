@@ -236,7 +236,7 @@ impl Game {
             net_input_seq: 0,
             net_snap_seq: 0,
             net_fire_pending: false,
-            net_look: None,
+            // S9：net_look 已删。
             last_net_log: 0.0,
             game_state: GameState::StartMenu,
             wave: 1,

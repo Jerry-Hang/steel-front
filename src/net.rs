@@ -333,6 +333,9 @@ pub enum NetError {
     InvalidUtf8,
     /// 名字不是合法 UTF-8
     InvalidName,
+    /// 快照里的 NPC 数超过 `MAX_SNAPSHOT_NPCS`（S12：旧版按报文 count 逐条读，
+    /// 实际可接受上限由载荷长度决定 ≈2,500 条，与常量写明的 1024 不符）
+    OversizedCount,
     /// 浮点字段是 NaN / ±inf（线路边界一律拒绝，见 `Reader::f32` 的理由）
     NonFiniteField,
 }
@@ -347,6 +350,7 @@ impl fmt::Display for NetError {
             NetError::TrailingData => write!(f, "trailing bytes after payload"),
             NetError::InvalidUtf8 => write!(f, "string field is not valid UTF-8"),
             NetError::InvalidName => write!(f, "player name is not valid UTF-8"),
+            NetError::OversizedCount => write!(f, "snapshot count exceeds protocol limit"),
             NetError::NonFiniteField => write!(f, "non-finite float field (NaN or inf)"),
         }
     }
@@ -612,7 +616,8 @@ impl NetworkMessage {
             NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
                 // 固定头：seq(4) + time(4) + player_id(4) + player(16) + count(2)
                 let n = npcs.len().min(MAX_SNAPSHOT_NPCS) as u16;
-                let mut p = Vec::with_capacity(4 + 4 + 4 + 16 + 2 + n as usize * 24);
+                // 每条 26 B：id(4) + pos(12) + facing(4) + hp(4) + team(1) + firing(1)
+                let mut p = Vec::with_capacity(4 + 4 + 4 + 16 + 2 + n as usize * 26);
                 put_u32(&mut p, *seq);
                 put_f32(&mut p, *time);
                 put_u32(&mut p, *player_id);
@@ -621,7 +626,7 @@ impl NetworkMessage {
                 }
                 put_f32(&mut p, player.rot);
                 p.extend_from_slice(&n.to_be_bytes());
-                // 每个 NPC：id(4) + pos(12) + facing(4) + hp(4) = 24B
+                // 每个 NPC：id(4) + pos(12) + facing(4) + hp(4) + team(1) + firing(1) = 26B
                 for npc in npcs.iter().take(MAX_SNAPSHOT_NPCS) {
                     put_u32(&mut p, npc.id);
                     for c in npc.pos {
@@ -676,8 +681,15 @@ impl NetworkMessage {
         buf.push(PROTOCOL_MAGIC);
         buf.push(PROTOCOL_VERSION);
         buf.push(ty as u8);
-        buf.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-        buf.extend_from_slice(&payload);
+        // S10：载荷长度必须 <= u16::MAX。当前最大 26.7 KB（余量 38 KB），但一旦调大
+        // MAX_SNAPSHOT_NPCS 就会静默截断（对端表现为"偶发丢包"，极难查）。
+        debug_assert!(payload.len() <= u16::MAX as usize, "载荷超过 u16 长度上限");
+        let n = payload.len().min(u16::MAX as usize);
+        if payload.len() > n {
+            log::warn!("net: 载荷 {} B 超过 u16 上限，已截断到 {} B", payload.len(), n);
+        }
+        buf.extend_from_slice(&(n as u16).to_be_bytes());
+        buf.extend_from_slice(&payload[..n]);
         buf
     }
 
@@ -774,6 +786,10 @@ impl NetworkMessage {
                 let rot = r.f32()?;
                 let n = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
                 // 容量提示封顶（见 `snapshot_capacity_hint`）：不让伪造的 2 字节 count 触发大分配
+                // S12：n 是报文里的 count；超协议上限直接拒绝，别按它逐条读。
+                if n as usize > MAX_SNAPSHOT_NPCS {
+                    return Err(NetError::OversizedCount);
+                }
                 let mut npcs = Vec::with_capacity(snapshot_capacity_hint(n));
                 for _ in 0..n {
                     let id = r.u32()?;
@@ -2370,6 +2386,53 @@ mod tests {
         assert_eq!(client.snapshot_seq(), 0, "未封印快照不得改写快照状态");
     }
 
+    /// S12：报文里的 NPC count 超过常量上限 → 解码直接拒绝（旧版按 count 逐条读）。
+    /// 反向验证：删掉 decode 里的 `OversizedCount` 判断 ⇒ 本判据红。
+    #[test]
+    fn snapshot_count_above_cap_is_rejected() {
+        let msg = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.0,
+            player_id: 0,
+            player: PlayerState::new([0.0; 3], 0.0),
+            npcs: vec![],
+        };
+        let mut bytes = msg.encode();
+        // 头部 5B + seq4 + time4 + player_id4 + player16 = 33；count 在 33..35
+        let count = (MAX_SNAPSHOT_NPCS + 1) as u16;
+        bytes[33..35].copy_from_slice(&count.to_be_bytes());
+        match NetworkMessage::decode(&bytes) {
+            Err(NetError::OversizedCount) => {}
+            other => panic!("超量 count 未被拒绝：{other:?}"),
+        }
+    }
+
+    /// S10：满容量快照的载荷长度必须仍在 u16 范围内（编码头声明的长度 == 实际载荷）。
+    #[test]
+    fn snapshot_payload_length_fits_u16() {
+        let npcs = (0..MAX_SNAPSHOT_NPCS)
+            .map(|i| NpcSnapshot {
+                id: i as u32,
+                pos: [0.0; 3],
+                facing: 0.0,
+                hp: 100.0,
+                team: 0,
+                firing: 0,
+            })
+            .collect();
+        let msg = NetworkMessage::Snapshot {
+            seq: 1,
+            time: 0.0,
+            player_id: 0,
+            player: PlayerState::new([0.0; 3], 0.0),
+            npcs,
+        };
+        let bytes = msg.encode();
+        let declared = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+        assert_eq!(declared, bytes.len() - HEADER_LEN, "头部长度与实际载荷不一致");
+        assert!(declared <= u16::MAX as usize);
+    }
+
     /// S7：网络字符串进日志前必须压成一行（否则伪造的 reason 能伪造整行日志）。
     /// 反向验证：把 `sanitize_log_field` 改成原样返回 ⇒ 本判据红。
     #[test]
@@ -3197,7 +3260,7 @@ mod tests {
         let count_off = HEADER_LEN + 28;
         bytes[count_off] = 0xFF;
         bytes[count_off + 1] = 0xFF;
-        assert_eq!(NetworkMessage::decode(&bytes), Err(NetError::Truncated));
+        assert_eq!(NetworkMessage::decode(&bytes), Err(NetError::OversizedCount));
     }
 
     /// 快照路径的"任何前缀都不 panic"：去掉尾部若干字节，只能是 `Truncated`
