@@ -2427,6 +2427,18 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let night = clamp(1.0 - sun_dir.y * 3.0, 0.0, 1.0) * smoothstep(0.06, 0.35, ray.y);
         col = col + vec3<f32>(0.95, 0.97, 1.0) * (star * twinkle * night * 0.9 * (1.0 - rain));
     }
+    // 雨丝（2026-10-25）：只画在天空里（传统片元路径没有 light_data，mesh 路径的片元是
+    // 拼接生成的；两处都不好挂 ⇒ 雨丝目前只覆盖天空区域，建筑/地面之上没有雨线）。
+    if (rain > 0.5) {
+        let t = sky_push.screen.z;
+        // 细长条：列宽 ~2px（hash 取整列），长度 ~40px（周期 400px 取 10%）。
+        let rain_lane_x = floor((frag.x + frag.y * 0.10) * 0.5);
+        let rain_h = fract(sin(rain_lane_x * 12.9898) * 43758.5453);
+        let rain_lane = step(0.62, rain_h);
+        let rain_y = fract((frag.y - t * 700.0) * 0.0025 + rain_h * 3.0);
+        let rain_streak = smoothstep(0.90, 1.0, rain_y) * smoothstep(0.0, 0.10, rain_y);
+        col = col + vec3<f32>(0.55, 0.60, 0.70) * (rain_streak * rain_lane * 0.55);
+    }
     // 抖动：8bit 输出 + 平滑渐变最容易出色带（本仓历史上被当成"条纹缺陷"排查过）
     let n = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
     col = max(col, vec3<f32>(0.0)) + vec3<f32>(n / 255.0);
