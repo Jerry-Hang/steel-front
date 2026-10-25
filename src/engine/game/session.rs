@@ -516,7 +516,7 @@ impl Game {
                     shape: Shape::Legacy,
                 });
             }
-            self.map = LevelMap { obstacles, decor: Vec::new(), props: Vec::new() };
+            self.map = LevelMap { obstacles, decor: Vec::new(), props: Vec::new(), lamps: Vec::new() };
         } else {
             // 地图：默认手绘现代城市（不再随机种子生成；RV3D_PROC_MAP=1 回退程序化生成用于 A/B）
             // 生成换核执行（线程优化第 3 步）：走 ai_pool（AMD CCD1 / Intel E-core / 小核），

@@ -412,7 +412,14 @@ impl City {
     }
 
     fn finish(self) -> LevelMap {
-        LevelMap { obstacles: self.solid, decor: self.decor, props: self.props }
+        // 路灯：从摆放规格里挑出来（灯头高度按资产高度 4.977 m 取 4.4 m 的有效发光点）。
+        let lamps = self
+            .specs
+            .iter()
+            .filter(|(name, ..)| *name == "street_lamp")
+            .map(|&(_, x, _y, z, _yaw, _scale)| [x, 4.4, z])
+            .collect();
+        LevelMap { obstacles: self.solid, decor: self.decor, props: self.props, lamps }
     }
 }
 
@@ -3354,5 +3361,14 @@ mod face_street_tests {
                 "位置 ({cx},{cz}) 的 yaw={yaw} 正面=({fx},{fz})，应当朝向 ({ex},{ez})"
             );
         }
+    }
+
+    /// 城市生成必须真的产出路灯坐标（否则低太阳点光永远挪不到任何地方）。
+    #[test]
+    fn city_generates_lamp_positions() {
+        let m = super::generate_city();
+        assert!(!m.lamps.is_empty(), "城市没有路灯坐标");
+        assert!(m.lamps.iter().all(|l| (l[1] - 4.4).abs() < 1e-4), "灯头高度不对");
+        assert!(m.lamps.len() > 20, "路灯数量太少：{}", m.lamps.len());
     }
 }

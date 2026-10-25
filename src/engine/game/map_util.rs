@@ -286,5 +286,5 @@ pub(crate) fn generate_level_map_with_theme(seed: u32, theme: MapTheme) -> Level
             }
         }
     }
-    LevelMap { obstacles, decor: Vec::new(), props: Vec::new() }
+    LevelMap { obstacles, decor: Vec::new(), props: Vec::new(), lamps: Vec::new() }
 }

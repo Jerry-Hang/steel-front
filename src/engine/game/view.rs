@@ -130,7 +130,7 @@ impl Game {
     /// [背光 0.20, 迎光 0.87] 整个区间放回曲线未饱和段；同日质量 pass（c5a2a67）
     /// 因阴影面街道读不清再把两者上调到**当前的 sun=1.35 / 环境 0.55**。
     /// 改这两个数必须同时看 build.rs::apply_lighting 的曲线。
-    pub(crate) fn light_uniform(&self) -> super::lighting::LightUniform {
+    pub(crate) fn light_uniform(&self, cam_xz: [f32; 2]) -> super::lighting::LightUniform {
         use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
         // 太阳：默认沿用历史向量 (-0.4,0.9,-0.3)/1.35；设 RV3D_SUN_ELEV（必要时加
         // RV3D_SUN_AZIM）则按角度重算，低角度自动变暖变弱（`lighting::sun_tint`）。
@@ -165,6 +165,21 @@ impl Game {
             glam::Vec3::new(0.4, 0.7, 1.0),
             1.0,
         );
+        // 低太阳/夜晚：把两个点光挪到离相机最近的路灯上（暖色光池）。
+        // 白天不动：白天开路灯反而会在地面留一块不合理的亮斑。
+        // RV3D_NO_LAMPS=1 关掉路灯（A/B 对照用）。
+        let dusk = sun_env.map(|(d, _, _)| d.y < 0.34).unwrap_or(false)
+            && !crate::syscfg::flag("RV3D_NO_LAMPS");
+        // 🔴 保留原来的两个装饰点光，**再加**两个路灯（uniform 有 4 个槽位）：
+        // 一开始是"替换"，实测路灯 on 反而比 off 更暗（85.94 vs 95.59）——
+        // 原两个本来就在给广场打光，换掉等于减光。
+        let mut points = vec![point_a, point_b];
+        if dusk && !self.map.lamps.is_empty() {
+            let lamp_col = glam::Vec3::new(1.0, 0.78, 0.48);
+            for l in super::lighting::pick_nearest_lamps(&self.map.lamps, cam_xz, 2) {
+                points.push(PointLight::new(glam::Vec3::from_array(l), lamp_col, 7.0));
+            }
+        }
         // 阴影贴图（2026-08-11）：正交光空间以地图中心为 target、半宽 250m，
         // 覆盖障碍环带（58-130m）与两军接火区；相机无现成引用，取原点近似。
         // ShadowConfig.light_dir 语义 = 表面→光源方向，与 sun.direction 一致直接传入
@@ -194,7 +209,7 @@ impl Game {
         };
         LightUniform::build(
             Some(&sun),
-            &[point_a, point_b],
+            &points,
             amb_color,
             amb_intensity,
             shadow.as_ref(),

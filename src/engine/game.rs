@@ -466,6 +466,9 @@ pub struct LevelMap {
     /// 屋顶设备"薄盒——它们在街对面读作一排悬挑板（缺陷 D11）。结构盒留在
     /// `obstacles` 里继续负责碰撞与耐久，所以画面重建完，物理一行没动。
     pub props: Vec<crate::engine::props::PropPlacement>,
+    /// 路灯世界坐标（灯头高度；`[x, y, z]`）。低太阳时把两个点光源挪到离相机最近的两个上，
+    /// 见 `Game::light_uniform`。生成器不产出路灯的地图这里为空。
+    pub lamps: Vec<[f32; 3]>,
 }
 
 

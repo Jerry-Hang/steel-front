@@ -64,6 +64,23 @@ pub const DEFAULT_SHININESS: f32 = 32.0;
 #[allow(dead_code)]
 pub const SPECULAR_STRENGTH: f32 = 0.4;
 
+/// 取离相机最近的 `n` 个路灯（按 xz 距离，距离相同按原顺序 —— 确定性）。
+///
+/// 引擎只有 4 个点光槽位、实际用 2 个；低太阳时把它们挪到玩家身边最近的两个，
+/// 才能看见"脚下的光池"，而不是远处固定的两个装饰灯。
+pub fn pick_nearest_lamps(lamps: &[[f32; 3]], cam_xz: [f32; 2], n: usize) -> Vec<[f32; 3]> {
+    let mut idx: Vec<usize> = (0..lamps.len()).collect();
+    idx.sort_by(|&a, &b| {
+        let da = (lamps[a][0] - cam_xz[0]).powi(2) + (lamps[a][2] - cam_xz[1]).powi(2);
+        let db = (lamps[b][0] - cam_xz[0]).powi(2) + (lamps[b][2] - cam_xz[1]).powi(2);
+        da.partial_cmp(&db)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(&b))
+    });
+    idx.truncate(n);
+    idx.into_iter().map(|i| lamps[i]).collect()
+}
+
 /// 太阳方向（表面→光源）：`elev_deg` / `azim_deg` 为角度制。
 ///
 /// 与 `RV3D_SUN_ELEV` / `RV3D_SUN_AZIM` 配套：不设时沿用 `view.rs` 的默认向量
@@ -786,5 +803,16 @@ mod tests {
         assert!(lo.z < hi.z, "低太阳的蓝分量没有降低（不暖）：{lo:?} vs {hi:?}");
         assert!(ilo < ihi, "低太阳强度没有降低：{ilo} vs {ihi}");
         assert!((ihi - 1.0).abs() < 1e-5, "60° 应回到满强度：{ihi}");
+    }
+
+    /// 路灯挑选必须按距离取最近的两个（不是"表里前两个"）。
+    /// 反向验证：改成 `idx.truncate(n)` 不排序 ⇒ 红。
+    #[test]
+    fn nearest_lamps_are_sorted_by_distance() {
+        let lamps = [[0.0, 4.4, 100.0], [50.0, 4.4, 50.0], [1.0, 4.4, 1.0]];
+        let picked = super::pick_nearest_lamps(&lamps, [0.0, 0.0], 2);
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0], [1.0, 4.4, 1.0], "最近的一个不是 (1,1)");
+        assert_eq!(picked[1], [50.0, 4.4, 50.0], "第二个应为 (50,50)");
     }
 }

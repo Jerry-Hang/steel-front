@@ -689,7 +689,7 @@ use super::*;
     #[test]
     fn light_uniform_enabled() {
         let game = Game::new();
-        let u = game.light_uniform();
+        let u = game.light_uniform([0.0, 0.0]);
         assert!(u.flags.x >= 1.0, "lighting should be enabled");
         assert!(u.directional.direction.w >= 1.0, "directional enabled");
         assert!(u.ambient.w > 0.0, "ambient intensity set");
