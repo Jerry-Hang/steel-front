@@ -182,7 +182,17 @@ impl Game {
                 let db = (b.position[0] - cam[0]).powi(2) + (b.position[2] - cam[2]).powi(2);
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|n| n.position)
+            .map(|n| {
+                // 火把在**手里**，不是在眼睛上：沿朝向偏前 0.35 m、右侧 0.28 m、高度 1.15 m。
+                // facing 语义 = atan2(dx, dz) ⇒ 0 = +Z，forward = (sin, cos)，right = (cos, -sin)。
+                let f = n.facing;
+                let (fx, fz) = (f.sin(), f.cos());
+                [
+                    n.position[0] + fx * 0.35 + fz * 0.28,
+                    n.position[1] + 1.15,
+                    n.position[2] + fz * 0.35 - fx * 0.28,
+                ]
+            })
     }
 
     /// 夜间视距系数：与 `light_uniform` 共用同一太阳高度来源（env > 关卡 TOML > 默认）。

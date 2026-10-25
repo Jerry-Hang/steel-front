@@ -2152,3 +2152,9 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
 - 判据 `rain_flag_parses_from_toml`（反向验证：table_bool 恒 false ⇒ 红）；
 - 实测：白天 rain off/on 全图 **88.38%**、亮度 103.84→94.69；夜间 **93.38%**、115.49→117.41。
 - 明确未做：雨滴粒子、地面湿反光（要新 pass/新资源，另案）。
+
+### 2026-10-25（续69）：NPC 火把改真实手持位置
+
+- `nearest_npc_for_torch` 返回**手里**的位置：沿朝向前 0.35 m、右侧 0.28 m、高度 +1.15 m
+  （facing = atan2(dx,dz) ⇒ forward=(sin,cos), right=(cos,-sin)）；
+- 判据同步：水平偏移 ≈0.448 m、高度 +1.15（不是原来的眼位 +1.5）。

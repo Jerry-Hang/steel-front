@@ -738,8 +738,13 @@ fn torch_picks_the_nearest_alive_enemy() {
     g.npcs.push(npc_at(1, Team::Red, [40.0, 0.0, 0.0]));
     g.npcs.push(npc_at(2, Team::Red, [3.0, 0.0, 0.0]));
     let near = g.nearest_npc_for_torch([0.0, 1.6, 0.0]).expect("应有敌人");
-    assert!((near[0] - 3.0).abs() < 1e-3, "应选最近的（x=3），实际 {near:?}");
+    // 火把在手里：与敌人本体有 ~0.45 m 水平偏移、高度 +1.15（不是眼睛位置）。
+    let dx = near[0] - 3.0;
+    let dz = near[2] - 0.0;
+    let horiz = (dx * dx + dz * dz).sqrt();
+    assert!((horiz - 0.448).abs() < 0.05, "水平偏移应在 0.45 左右，实际 {horiz}");
+    assert!((near[1] - 1.15).abs() < 1e-3, "火把高度应为 +1.15，实际 {}", near[1]);
     g.npcs[1].hp = 0.0; // 最近的死掉 ⇒ 退到另一个
     let next = g.nearest_npc_for_torch([0.0, 1.6, 0.0]).expect("应有敌人");
-    assert!((next[0] - 40.0).abs() < 1e-3, "跳过死者后应选 x=40，实际 {next:?}");
+    assert!((next[0] - 40.0).abs() < 0.5, "跳过死者后应选 x≈40，实际 {next:?}");
 }
