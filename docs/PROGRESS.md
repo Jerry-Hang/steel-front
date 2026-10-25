@@ -2163,7 +2163,7 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
 
 - `rain>0.5` 时在**天空着色器**里叠斜向细线：列宽 ~2px（整列 hash）、长约 40px、
   `screen.z` 驱动下落，`screen.w` 复用阴雨开关；纯 ALU，无新资源/pass。
-- ⚠ **只覆盖天空区域**：传统片元着色器没有 `light_data` 绑定，而 mesh 路径的片元是拼接
+- ⚠ **只覆盖天空区域（已被续71 的全屏 pass 取代，保留作历史）**：传统片元着色器没有 `light_data` 绑定，而 mesh 路径的片元是拼接
   生成的（改它会在两处产生分叉，本轮试过并回退）；建筑/地面之上没有雨线。
   真正全屏雨需要独立的全屏 pass（另案）。
 - 实测（1280×720，仰视机位）：全图 **92.59%**、天空区 **87.44%**、亮度 192.69→198.25；
@@ -2196,3 +2196,50 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
   比值 **1.2509 ≈ ×1.25**。
 - 备注：本轮原计划做"雨天地面湿痕"，但 mesh 路径的片元复用的是 `FRAGMENT_SHADER_WGSL`
   （没有 `light_data` 绑定）⇒ 湿痕需要新 uniform/新 pass，先搁置并记录。
+
+---
+
+## 交接速查（2026-10-25 收尾）
+
+### 一眼看懂当前状态
+- **构建/验收**：`cargo build --release`（0 警告）/ `cargo test --release`（**876 passed + 4 ignored**）/
+  `python3 tools/cjk_cover_check.py`（CJK 字模）/ `python3 tools/commit_guard.py --scan .`（提交白名单）。
+- **无窗口取证**：`RV3D_HEADLESS=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=6 RV3D_EXIT_AFTER=9` + `RV3D_CAM='fly:x,y,z:yaw,pitch'`。
+  ⚠ 只截到 LoadingMap 蓝屏时用 `RV3D_NPC_CAM=1`（会自己进游戏态）。
+
+### 环境开关（都已自证过，可直接用于 A/B）
+| 开关 | 作用 |
+|---|---|
+| `RV3D_SUN_ELEV` / `RV3D_SUN_AZIM` | 太阳高度/方位（覆盖关卡 TOML） |
+| `RV3D_QUALITY=0/1/2` | 画质档（Low 不跑 SSAO；High 强度 0.75） |
+| `RV3D_SSAO_STRENGTH` | 覆盖 SSAO 强度（A/B 用） |
+| `RV3D_NO_FLASHLIGHT=1` | 关手电（同时消除"灯塔效应"视距加成） |
+| `RV3D_BATTERY=0..1` | 初始电量；`RV3D_BATTERY_SECS` 改放电时长（默认 180s） |
+| `RV3D_NO_TORCH=1` | 关 NPC 火把 |
+| `RV3D_RAIN=1` | 阴雨氛围（含全屏雨 pass）；关卡 TOML 也可写 `rain = true` |
+| `RV3D_MAP=assets/maps/defense_line.toml` | 防线图（TOML 自带 `sun_elev=14`） |
+
+### 夜间/天气这条线（本轮新增，按依赖顺序）
+太阳高度（env/TOML）→ 环境光变暗 → 天空压暗 + 星空 + 雾色压暗 → 亮窗（129 扇）+ 路灯光池 →
+玩家手电（电量条、低电变暗、据点回充、**开灯会被 AI 看得更远 ×1.25**）→ NPC 火把（第 4 个点光槽）→
+SSCS 接触阴影 + 烘焙顶点 AO。
+
+### 联机（S1–S13 全关，仅剩真机项）
+协议 **v4**：Join→Challenge→JoinProof→Welcome→Sealed；`PeerHint/Punch/PunchPort` 打洞握手。
+- 已验证：两端互发 Punch、nonce 校验、错 nonce 丢弃、PunchPort 从打洞 socket 发出。
+- **未验证**：真实 NAT 穿透（本地无第二台机器；假 NAT 代理不可信，理由见续65）。
+
+### 已知限制 / 下一轮入口
+1. **雨是屏幕空间叠加**：不被建筑遮挡、地面没有湿痕（要新 uniform/pass）。
+2. **湿地痕**：mesh 片元复用 `FRAGMENT_SHADER_WGSL`（无 `light_data`）⇒ 需新 uniform 或新 pass。
+3. **SSCS 边缘仍有细噪**：软命中已降 7–12%，时域累积未做。
+4. **手电/火把是点光不是聚光**：靠 `range` 收边，近处偏"泛光"。
+5. **打洞真机**：需要第二台机器或端口映射。
+
+### 建议补进 `AGENTS.md`（该文件由 operator 维护，本次未改动）
+```text
+- 调试开关补充：RV3D_QUALITY(0/1/2)、RV3D_SUN_ELEV/AZIM、RV3D_RAIN=1、RV3D_BATTERY=0..1、
+  RV3D_NO_FLASHLIGHT=1、RV3D_NO_TORCH=1（A/B 用，均值已实测）。
+- 夜战闭环：手电开灯 ⇒ AI 视距 ×1.25（ai_sight_factor）；关灯 ⇒ 0.55×（vision_factor_for_sun）。
+- 雨：全屏 pass（RAIN_SPIRV，16B push，主 pass 末尾/HUD 前）；屏幕空间叠加，不被建筑遮挡。
+```
