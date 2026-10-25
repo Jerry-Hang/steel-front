@@ -679,3 +679,16 @@ fn net_spawn_points_are_spread_around_the_base() {
         assert!(seen.insert(key), "id={id} 与前面的出生点重叠（S13）");
     }
 }
+
+/// 夜间视距必须真的接到 AI（`night_vision_factor` 读关卡 TOML 的太阳高度）。
+/// 反向验证：把 `map_sun` 分支删掉 ⇒ 恒 1.0 ⇒ 红。
+#[test]
+fn night_vision_factor_reads_map_sun() {
+    let mut g = Game::new();
+    g.map_sun = Some((4.0, 200.0));
+    let night = g.night_vision_factor();
+    assert!(night < 0.75, "低太阳（4°）时视距系数应明显下降，实际 {night}");
+    g.map_sun = Some((70.0, 233.0));
+    let day = g.night_vision_factor();
+    assert!((day - 1.0).abs() < 0.02, "高太阳（70°）应接近 1.0，实际 {day}");
+}

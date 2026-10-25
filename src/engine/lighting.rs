@@ -64,6 +64,16 @@ pub const DEFAULT_SHININESS: f32 = 32.0;
 #[allow(dead_code)]
 pub const SPECULAR_STRENGTH: f32 = 0.4;
 
+/// 夜间视距系数：太阳越低，NPC 看得越近（玩法：夜里更容易靠近）。
+///
+/// 1.0 = 白天满视距；0.55 = 夜里只剩 55%。用 smoothstep 在 0.02..0.42 之间过渡，
+/// 与天空 `dayk`/雾色同一条太阳高度曲线（三处必须共用，否则"天黑了 AI 还看得老远"）。
+pub fn vision_factor_for_sun(sun_y: f32) -> f32 {
+    let t = ((sun_y - 0.02) / 0.40).clamp(0.0, 1.0);
+    let s = t * t * (3.0 - 2.0 * t);
+    0.55 + 0.45 * s
+}
+
 /// 取离相机最近的 `n` 个路灯（按 xz 距离，距离相同按原顺序 —— 确定性）。
 ///
 /// 引擎只有 4 个点光槽位、实际用 2 个；低太阳时把它们挪到玩家身边最近的两个，
@@ -814,5 +824,15 @@ mod tests {
         assert_eq!(picked.len(), 2);
         assert_eq!(picked[0], [1.0, 4.4, 1.0], "最近的一个不是 (1,1)");
         assert_eq!(picked[1], [50.0, 4.4, 50.0], "第二个应为 (50,50)");
+    }
+
+    /// 夜间视距：白天 1.0、夜里 0.55、且随太阳高度单调。反向验证：改成恒 1.0 ⇒ 红。
+    #[test]
+    fn vision_factor_drops_at_night() {
+        assert!((super::vision_factor_for_sun(0.90) - 1.0).abs() < 1e-5, "白天应为满视距");
+        assert!((super::vision_factor_for_sun(0.0) - 0.55).abs() < 1e-5, "夜里应为 0.55");
+        let a = super::vision_factor_for_sun(0.05);
+        let b = super::vision_factor_for_sun(0.20);
+        assert!(a < b, "视距应随太阳高度单调上升：{a} vs {b}");
     }
 }

@@ -88,7 +88,8 @@ impl Game {
     /// 与旧版串行循环体逐行为一致（普通波次目标=玩家，行为不变；压力模式目标=敌对 NPC）。
     pub(crate) fn step_npc(index: usize, npc: &mut Npc, ctx: &AiStepCtx) {
         // 视野半径：压力模式全场可见（两军立即接火），普通模式保持原值
-        let sight = if ctx.stress { STRESS_SIGHT } else { NPC_SIGHT };
+        // 夜间视距衰减：`ctx.night` 由太阳高度算（白天 1.0）。
+        let sight = if ctx.stress { STRESS_SIGHT } else { NPC_SIGHT } * ctx.night;
         // 目标位置：与遮挡预计算共用 resolve_ai_target，杜绝"按 A 算遮挡、按 B 决策"
         let target_pos = resolve_ai_target(
             index,
@@ -751,6 +752,7 @@ pub(crate) fn occl_cache_matches(cache_ids: &[usize], npc_ids: &[usize]) -> bool
                 // 只有在"真在打的一局"里才把玩家当作已知目标：
                 // 开始菜单的游走（StartMenu 也调 update_ai）必须保持"没看见就随便走"的观感，
                 // 压力模式有自己的一套选目标逻辑（target_known 会让红蓝绕过 pick_stress_targets）。
+                night: self.night_vision_factor(),
                 target_known: self.game_state == GameState::Playing && !self.stress,
                 fallback_targets: &fallback_targets,
                 target_occluded: &target_occluded,

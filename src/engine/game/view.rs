@@ -130,6 +130,20 @@ impl Game {
     /// [背光 0.20, 迎光 0.87] 整个区间放回曲线未饱和段；同日质量 pass（c5a2a67）
     /// 因阴影面街道读不清再把两者上调到**当前的 sun=1.35 / 环境 0.55**。
     /// 改这两个数必须同时看 build.rs::apply_lighting 的曲线。
+    /// 夜间视距系数：与 `light_uniform` 共用同一太阳高度来源（env > 关卡 TOML > 默认）。
+    pub(crate) fn night_vision_factor(&self) -> f32 {
+        let sun_env = super::lighting::sun_from_env().or_else(|| {
+            self.map_sun.map(|(e, a)| {
+                let (color, scale) = super::lighting::sun_tint(e);
+                (super::lighting::sun_direction(e, a), color, scale)
+            })
+        });
+        match sun_env {
+            Some((dir, _, _)) => super::lighting::vision_factor_for_sun(dir.y),
+            None => 1.0,
+        }
+    }
+
     pub(crate) fn light_uniform(&self, cam_xz: [f32; 2]) -> super::lighting::LightUniform {
         use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
         // 太阳：默认沿用历史向量 (-0.4,0.9,-0.3)/1.35；设 RV3D_SUN_ELEV（必要时加

@@ -2046,3 +2046,14 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
 - 实测：天际线机位（俯视城市，1280×720）夜间 **4.80%** 像素、亮度 86.47→86.06；
   白天 **0.08%**（应为 0，实测差来自帧时机导致的云/星空相位，属噪声）；
 - 意义：夜里远景不再"天暗地亮"，地平线雾带与天空一起压暗。
+
+### 2026-10-25（续60）：夜间 AI 视距衰减
+
+- `lighting::vision_factor_for_sun(y)`：`0.55 + 0.45*smoothstep((y-0.02)/0.40)` —— 白天 1.0、
+  夜里 0.55，与天空 `dayk`/雾色共用同一条太阳高度曲线；
+- `Game::night_vision_factor()`：与 `light_uniform` 同源（env > 关卡 TOML > 默认 1.0）；
+- `AiStepCtx.night` 传入 `step_npc`，`sight = (STRESS_SIGHT|NPC_SIGHT) * ctx.night`；
+- 判据：`vision_factor_drops_at_night`（恒 1.0 ⇒ 红）、`night_vision_factor_reads_map_sun`
+  （删 map_sun 分支 ⇒ 红）；
+- **真机接线证据**（`RV3D_AI_DIAG=1`）：默认图 `sight=512`；`defense_line`（sun 14°）
+  `sight=416` = 512 × **0.8125**，与公式逐位一致。

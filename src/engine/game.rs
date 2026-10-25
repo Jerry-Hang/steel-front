@@ -877,6 +877,8 @@ pub(crate) struct AiStepCtx<'a> {
     /// 见 `ai.rs::NpcPerception::target_known` 与 `NpcStateMachine::update`。
     target_known: bool,
     fallback_targets: &'a [[f32; 3]],
+    /// 夜间视距系数（1.0 白天 / 0.55 夜里）：由 `Game::night_vision_factor()` 每帧算一次。
+    night: f32,
     /// 每 NPC 的"目标是否被几何体挡住"。`true` = 挡住。
     ///
     /// 这是"隔墙掉血"的正解。此前 `enemy_visible = dist < sight` **只看距离、零视线检测**，
