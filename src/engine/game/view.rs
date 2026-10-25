@@ -172,6 +172,19 @@ impl Game {
         self.flashlight && self.battery > 0.0
     }
 
+    /// 离相机最近的**存活敌人**位置（火把光源用；没有敌人返回 None）。
+    pub(crate) fn nearest_npc_for_torch(&self, cam: [f32; 3]) -> Option<[f32; 3]> {
+        self.npcs
+            .iter()
+            .filter(|n| n.hp > 0.0)
+            .min_by(|a, b| {
+                let da = (a.position[0] - cam[0]).powi(2) + (a.position[2] - cam[2]).powi(2);
+                let db = (b.position[0] - cam[0]).powi(2) + (b.position[2] - cam[2]).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|n| n.position)
+    }
+
     /// 夜间视距系数：与 `light_uniform` 共用同一太阳高度来源（env > 关卡 TOML > 默认）。
     pub(crate) fn night_vision_factor(&self) -> f32 {
         let sun_env = super::lighting::sun_from_env().or_else(|| {
@@ -246,10 +259,31 @@ impl Game {
                 points[1] = fl;
             }
         }
-        if dusk && !self.map.lamps.is_empty() {
+        if dusk {
             let lamp_col = glam::Vec3::new(1.0, 0.78, 0.48);
-            for l in super::lighting::pick_nearest_lamps(&self.map.lamps, [cam[0], cam[2]], 2) {
-                points.push(PointLight::new(glam::Vec3::from_array(l), lamp_col, 7.0));
+            // 夜里：一个路灯（离相机最近）+ 最近敌人的火把（对等博弈：NPC 也开灯）
+            let mut slots = points.len();
+            if let Some(l) = super::lighting::pick_nearest_lamps(&self.map.lamps, [cam[0], cam[2]], 1)
+                .into_iter()
+                .next()
+            {
+                if slots < super::lighting::MAX_POINT_LIGHTS {
+                    points.push(PointLight::new(glam::Vec3::from_array(l), lamp_col, 7.0));
+                    slots += 1;
+                }
+            }
+            if slots < super::lighting::MAX_POINT_LIGHTS
+                && !crate::syscfg::flag("RV3D_NO_TORCH")
+            {
+                if let Some(npc) = self.nearest_npc_for_torch(cam) {
+                    let mut torch = PointLight::new(
+                        glam::Vec3::new(npc[0], npc[1] + 1.5, npc[2]),
+                        glam::Vec3::new(1.0, 0.72, 0.42),
+                        2.5,
+                    );
+                    torch.range = 12.0; // 点光无锥形，限制到 12 m 才像"火把"而不是探照灯
+                    points.push(torch);
+                }
             }
         }
         // 阴影贴图（2026-08-11）：正交光空间以地图中心为 target、半宽 250m，

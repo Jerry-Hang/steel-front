@@ -729,3 +729,17 @@ fn battery_recharges_inside_objective_radius() {
     g.recharge_battery_near_points([100.0, 100.0], 10.0);
     assert!((g.battery - 0.4).abs() < 1e-5, "据点外不应回充：{}", g.battery);
 }
+
+/// 火把光源取**离相机最近的存活敌人**（不是列表第一个）。反向验证：改成 `.first()` ⇒ 红。
+#[test]
+fn torch_picks_the_nearest_alive_enemy() {
+    let mut g = Game::new();
+    g.npcs.clear();
+    g.npcs.push(npc_at(1, Team::Red, [40.0, 0.0, 0.0]));
+    g.npcs.push(npc_at(2, Team::Red, [3.0, 0.0, 0.0]));
+    let near = g.nearest_npc_for_torch([0.0, 1.6, 0.0]).expect("应有敌人");
+    assert!((near[0] - 3.0).abs() < 1e-3, "应选最近的（x=3），实际 {near:?}");
+    g.npcs[1].hp = 0.0; // 最近的死掉 ⇒ 退到另一个
+    let next = g.nearest_npc_for_torch([0.0, 1.6, 0.0]).expect("应有敌人");
+    assert!((next[0] - 40.0).abs() < 1e-3, "跳过死者后应选 x=40，实际 {next:?}");
+}
