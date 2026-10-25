@@ -249,7 +249,9 @@ impl Game {
             map_mgr: None,
             map_sun: None,
             flashlight: true,
-            battery: 1.0,
+            battery: crate::syscfg::parse::<f32>("RV3D_BATTERY")
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0),
             map_path: None,
             level_list: Vec::new(),
             level_idx: 0,
@@ -659,6 +661,12 @@ impl Game {
                 self.flashlight = false;
                 log::info!("flashlight: 电量耗尽，自动关闭（关灯回充中）");
             }
+        }
+        // 据点电源：站在**任意据点范围内**可快速回充（20 s 充满）——用现成据点几何，
+        // 不新增资产/按键；离开据点就停。
+        {
+            let cp = camera.position();
+            self.recharge_battery_near_points([cp.x, cp.z], dt);
         }
         self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
         // 武器架切换计时/换弹计时 + HUD 武器/弹药/换弹状态同步

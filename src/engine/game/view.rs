@@ -130,6 +130,27 @@ impl Game {
     /// [背光 0.20, 迎光 0.87] 整个区间放回曲线未饱和段；同日质量 pass（c5a2a67）
     /// 因阴影面街道读不清再把两者上调到**当前的 sun=1.35 / 环境 0.55**。
     /// 改这两个数必须同时看 build.rs::apply_lighting 的曲线。
+    /// 据点电源回充：站在任意据点半径内时，`dt` 秒内按 20 s 充满回充。
+    pub(crate) fn recharge_battery_near_points(&mut self, pos: [f32; 2], dt: f32) {
+        if self.battery >= 1.0 {
+            return;
+        }
+        let inside = self.obj_state.as_ref().is_some_and(|o| {
+            o.points.iter().any(|p| {
+                let dx = pos[0] - p.x;
+                let dz = pos[1] - p.z;
+                dx * dx + dz * dz <= (p.radius + 1.0) * (p.radius + 1.0)
+            })
+        });
+        if inside {
+            let before = self.battery;
+            self.battery = (self.battery + dt / 20.0).min(1.0);
+            if before < 1.0 && self.battery >= 1.0 {
+                log::info!("flashlight: 据点电源充满");
+            }
+        }
+    }
+
     /// 手电开关（F 键）：电量耗空时不允许打开。
     pub(crate) fn toggle_flashlight(&mut self) {
         if self.flashlight {
@@ -211,14 +232,14 @@ impl Game {
             let on = self.flashlight_lit() && !crate::syscfg::flag("RV3D_NO_FLASHLIGHT");
             if on {
                 let fpos = super::lighting::flashlight_position(cam, yaw);
+                let (dim, range) = super::lighting::flashlight_dim(self.battery);
                 let mut fl = PointLight::new(
                     glam::Vec3::from_array(fpos),
                     glam::Vec3::new(1.0, 0.95, 0.85),
-                    3.0,
+                    3.0 * dim,
                 );
-                // range 限到 14 m：点光源没有聚光，不限制的话整片广场都会被照亮，
-                // 看起来像路灯而不是手电。
-                fl.range = 14.0;
+                // range 随电量 8..14 m：点光源没有聚光，不限制的话整片广场都会被照亮。
+                fl.range = range;
                 points[1] = fl;
             }
         }

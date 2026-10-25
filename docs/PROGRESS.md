@@ -2080,3 +2080,14 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
   `flashlight_toggle_respects_battery`（删掉电量判断 ⇒ 红）；
 - **真机**：`RV3D_BATTERY_SECS=4` 夜间跑 14 s，日志出现
   `flashlight: 电量耗尽，自动关闭（关灯回充中）`，与公式一致。
+
+### 2026-10-25（续63）：手电亮度随电量 + 据点电源回充
+
+- `lighting::flashlight_dim(battery)`：强度系数 `0.25..1.0`（`sqrt` 曲线，前 75% 几乎不变）、
+  半径 `8..14 m` —— **变暗而不是突然熄灭**，给玩家预警；
+- `Game::recharge_battery_near_points(pos, dt)`：站在**任意据点半径内**（`radius+1 ）`）
+  按 20 s 充满回充；用现成据点几何，不新增资产/按键；离开即停；
+- `RV3D_BATTERY=0..1` 可设初始电量（A/B 与取证用）；
+- 判据（均反向验证）：`flashlight_dims_with_battery`（改成常数 ⇒ 红）、
+  `battery_recharges_inside_objective_radius`（`inside` 恒 true ⇒ 红）；
+- 实测（夜间第一人称）：满电 vs 15% 全图 **38.95%** 像素、亮度 89.45→**85.38**。

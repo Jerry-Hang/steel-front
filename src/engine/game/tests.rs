@@ -707,3 +707,25 @@ fn flashlight_toggle_respects_battery() {
     assert!(!g.flashlight, "空电时不应能打开");
     assert!(!g.flashlight_lit(), "空电时不应点亮");
 }
+
+/// 据点电源：站在据点半径内回充（20 s 满），站在外面不充。
+/// 反向验证：把 `inside` 改成恒 true ⇒ 远处也充；恒 false ⇒ 红（本判据两侧都钉）。
+#[test]
+fn battery_recharges_inside_objective_radius() {
+    use crate::engine::objective::CapturePoint;
+    let mut g = Game::new();
+    let mut obj = g
+        .obj_state
+        .take()
+        .unwrap_or_else(|| crate::engine::objective::ObjectiveState::new(
+            crate::engine::objective::GameRule::CapturePoints { required: 1 },
+        ));
+    obj.points.push(CapturePoint::new("A", 0.0, 0.0, 5.0, 10.0));
+    g.obj_state = Some(obj);
+    g.battery = 0.5;
+    g.recharge_battery_near_points([0.0, 0.0], 10.0);
+    assert!((g.battery - 1.0).abs() < 1e-5, "据点内 10s 应充满：{}", g.battery);
+    g.battery = 0.4;
+    g.recharge_battery_near_points([100.0, 100.0], 10.0);
+    assert!((g.battery - 0.4).abs() < 1e-5, "据点外不应回充：{}", g.battery);
+}

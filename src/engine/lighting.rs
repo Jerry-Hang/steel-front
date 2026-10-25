@@ -64,6 +64,14 @@ pub const DEFAULT_SHININESS: f32 = 32.0;
 #[allow(dead_code)]
 pub const SPECULAR_STRENGTH: f32 = 0.4;
 
+/// 手电亮度随电量：返回 (强度系数 0.25..1.0, 作用半径 8..14 m)。
+///
+/// 电量低时**变暗而不是突然熄灭**（玩家有预警）；`sqrt` 让前 75% 电量几乎不变化。
+pub fn flashlight_dim(battery: f32) -> (f32, f32) {
+    let b = battery.clamp(0.0, 1.0);
+    (0.25 + 0.75 * b.sqrt(), 8.0 + 6.0 * b)
+}
+
 /// 手电电量推进一步（0..1）。开灯耗电（`on_secs` 秒用光），关灯缓慢回充（`off_secs` 秒充满）。
 ///
 /// 纯函数：`Game` 每帧调用，单测直接验（时间基不依赖真实时钟）。
@@ -877,5 +885,17 @@ mod tests {
         assert!((r - 0.5).abs() < 1e-5, "关灯 120s 应回充一半：{r}");
         let f = super::battery_step(0.9, false, 600.0, 180.0, 240.0);
         assert_eq!(f, 1.0, "回充不能超过 1");
+    }
+
+    /// 手电亮度随电量下降（而不是突然熄灭）：满电 1.0/14m，空电 0.25/8m。
+    /// 反向验证：把 `battery` 改成常数 1.0 ⇒ 红。
+    #[test]
+    fn flashlight_dims_with_battery() {
+        let (hi, r_hi) = super::flashlight_dim(1.0);
+        let (lo, r_lo) = super::flashlight_dim(0.0);
+        assert!((hi - 1.0).abs() < 1e-5 && (r_hi - 14.0).abs() < 1e-5);
+        assert!((lo - 0.25).abs() < 1e-5 && (r_lo - 8.0).abs() < 1e-5);
+        let (mid, _) = super::flashlight_dim(0.25);
+        assert!(lo < mid && mid < hi, "亮度应随电量单调：{lo} {mid} {hi}");
     }
 }
