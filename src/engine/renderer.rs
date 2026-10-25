@@ -583,6 +583,9 @@ pub struct Renderer {
     sky_pipeline: vk::Pipeline,
     /// 天空管线布局（只有 80B push constant，无描述符集）
     sky_pipeline_layout: vk::PipelineLayout,
+    /// 全屏雨管线（16B push：秒/rain/分辨率；alpha 混合，画在 HUD 之前）
+    rain_pipeline: vk::Pipeline,
+    rain_pipeline_layout: vk::PipelineLayout,
     /// 可选网格着色器路径（VK_EXT_mesh_shader）：mesh 管线 + 独立 pipeline layout
     /// （同一 descriptor set layout + MESH_EXT push constant）。mesh_enabled=false 时
     /// 保持 null 且完全不参与记录阶段，传统顶点管线行为逐字节不变。

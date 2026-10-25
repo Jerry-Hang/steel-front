@@ -52,6 +52,9 @@ impl Renderer {
         renderer.init_pipeline()?;
         renderer.init_mesh_pipeline()?;
         // 天空是"可选增强"：失败就退回 clear color，不要因此让整个引擎起不来
+        if let Err(e) = renderer.init_rain_pipeline() {
+            log::warn!("雨管线初始化失败（跳过全屏雨）: {e}");
+        }
         if let Err(e) = renderer.init_sky_pipeline() {
             log::error!("天空渐变管线创建失败（退回纯色天空）: {e}");
         }
@@ -521,6 +524,8 @@ impl Renderer {
             pipeline_layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
             gun_pipeline: vk::Pipeline::null(),
+            rain_pipeline: vk::Pipeline::null(),
+            rain_pipeline_layout: vk::PipelineLayout::null(),
             sky_pipeline: vk::Pipeline::null(),
             sky_pipeline_layout: vk::PipelineLayout::null(),
             // 2026-09-05：**恢复网格着色器为唯一主渲染路径**（AGENTS.md 渲染技术路线铁律）。

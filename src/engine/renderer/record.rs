@@ -857,6 +857,32 @@ impl Renderer {
         }
 
         // ---- HUD 覆盖层：自包含 pipeline 与顶点缓冲，追加在主 pass 末尾 ----
+        // 全屏雨：主 pass 末尾、HUD 之前（HUD 保持清晰）。alpha 混合、不写深度。
+        if self.rain && self.rain_pipeline != vk::Pipeline::null() {
+            let push = [
+                self.shader_time,
+                1.0,
+                self.render_extent.width as f32,
+                self.render_extent.height as f32,
+            ];
+            unsafe {
+                self.device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.rain_pipeline,
+                );
+                self.device.cmd_push_constants(
+                    command_buffer,
+                    self.rain_pipeline_layout,
+                    vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck_bytes(&push),
+                );
+                self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            }
+        }
+
+
         // 🧊 有磨砂玻璃面板时**这一处不画**：玻璃要采"面板背后的画面"，而主 pass 里
         // 交换链是 MSAA 解析目标、根本不能采样自己 ⇒ 那种帧改走 overlay pass
         // （先 blit 出模糊图，再画 HUD，见 `record_command_buffer` 末尾）。

@@ -2003,6 +2003,42 @@ fn workgroup_layout_decorations(words: &[u32]) -> (std::collections::HashSet<u32
 }
 
 /// HUD 覆盖层顶点着色器：屏幕空间直通（位置已由 CPU 转为 NDC，Y 翻转完成）
+// 全屏雨（2026-10-25）：独立 pass —— 天空着色器里的版本只覆盖天空；
+// 这里在主 pass 末尾、HUD 之前画一层 alpha 混合的斜向雨线，覆盖所有几何。
+const RAIN_SHADER_WGSL: &str = r#"
+struct RainPush {
+    // x = 秒, y = rain(0/1), z = 屏幕宽, w = 屏幕高
+    params: vec4<f32>,
+};
+var<immediate> rain_push: RainPush;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((vi << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(vi & 2u) * 2.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let t = rain_push.params.x;
+    let rain = rain_push.params.y;
+    let res = rain_push.params.zw;
+    if (rain < 0.5) {
+        return vec4<f32>(0.0);
+    }
+    // 以 720p 为基准缩放，分辨率变化时雨线粗细一致
+    let scale = clamp(res.y / 720.0, 0.5, 4.0);
+    let lane_x = floor((frag.x + frag.y * 0.10) / (2.0 * scale));
+    let h = fract(sin(lane_x * 12.9898) * 43758.5453);
+    let lane = step(0.55, h);
+    let y = fract((frag.y - t * 900.0 * scale) * (0.0025 / scale) + h * 3.0);
+    let streak = smoothstep(0.90, 1.0, y) * smoothstep(0.0, 0.10, y);
+    let a = streak * lane * 0.55;
+    return vec4<f32>(0.62, 0.66, 0.74, a);
+}
+"#;
+
 const HUD_VERTEX_SHADER_WGSL: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -2427,18 +2463,6 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let night = clamp(1.0 - sun_dir.y * 3.0, 0.0, 1.0) * smoothstep(0.06, 0.35, ray.y);
         col = col + vec3<f32>(0.95, 0.97, 1.0) * (star * twinkle * night * 0.9 * (1.0 - rain));
     }
-    // 雨丝（2026-10-25）：只画在天空里（传统片元路径没有 light_data，mesh 路径的片元是
-    // 拼接生成的；两处都不好挂 ⇒ 雨丝目前只覆盖天空区域，建筑/地面之上没有雨线）。
-    if (rain > 0.5) {
-        let t = sky_push.screen.z;
-        // 细长条：列宽 ~2px（hash 取整列），长度 ~40px（周期 400px 取 10%）。
-        let rain_lane_x = floor((frag.x + frag.y * 0.10) * 0.5);
-        let rain_h = fract(sin(rain_lane_x * 12.9898) * 43758.5453);
-        let rain_lane = step(0.62, rain_h);
-        let rain_y = fract((frag.y - t * 700.0) * 0.0025 + rain_h * 3.0);
-        let rain_streak = smoothstep(0.90, 1.0, rain_y) * smoothstep(0.0, 0.10, rain_y);
-        col = col + vec3<f32>(0.55, 0.60, 0.70) * (rain_streak * rain_lane * 0.55);
-    }
     // 抖动：8bit 输出 + 平滑渐变最容易出色带（本仓历史上被当成"条纹缺陷"排查过）
     let n = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
     col = max(col, vec3<f32>(0.0)) + vec3<f32>(n / 255.0);
@@ -2469,6 +2493,7 @@ fn main() {
     );
     let fs_spirv = compile_wgsl(&fs_src);
     let mesh_spirv = compile_wgsl_mesh(MESH_SHADER_WGSL);
+    let rain_spirv = compile_wgsl(RAIN_SHADER_WGSL);
     let hud_vs_spirv = compile_wgsl(HUD_VERTEX_SHADER_WGSL);
     let hud_fs_spirv = compile_wgsl(HUD_FRAGMENT_SHADER_WGSL);
     let shadow_vs_spirv = compile_wgsl(SHADOW_VERTEX_SHADER_WGSL);
@@ -2569,6 +2594,7 @@ fn main() {
     output.push_str("/// SSAO 合成着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const SSAO_SPIRV: &[u32] = &{:?};\n\n", ssao_spirv));
+    output.push_str(&format!("pub const RAIN_SPIRV: &[u32] = &{:?};\n\n", rain_spirv));
     output.push_str("/// 阴影 depth-only 片元着色器 SPIR-V 字节码\n");
     output.push_str("#[allow(dead_code)]\n");
     output.push_str(&format!("pub const SHADOW_FS_SPIRV: &[u32] = &{:?};\n", shadow_fs_spirv));

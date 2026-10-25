@@ -1510,5 +1510,116 @@ impl Renderer {
         log::info!("天空渐变管线创建完成（push constant {}B）", std::mem::size_of::<SkyPush>());
         Ok(())
     }
+    pub(crate) fn init_rain_pipeline(&mut self) -> Result<(), String> {
+        let sky_spirv = crate::shaders::RAIN_SPIRV.to_vec();
+        let vs_module = self.create_shader_module(&sky_spirv)?;
+        let fs_module = self.create_shader_module(&sky_spirv)?;
+        let vs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs_module)
+            .name(c"vs_main");
+        let fs_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs_module)
+            .name(c"fs_main");
+        let shader_stages = [vs_stage, fs_stage];
+
+        // 只有片元阶段读 push constant（顶点只用 vertex_index）
+        let push_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .offset(0)
+            .size(std::mem::size_of::<[f32; 4]>() as u32);
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
+            .push_constant_ranges(std::slice::from_ref(&push_range));
+        self.rain_pipeline_layout = unsafe {
+            self.device
+                .create_pipeline_layout(&layout_info, None)
+                .map_err(|e| format!("创建雨管线布局失败: {e}"))?
+        };
+
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+        let viewport = vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(self.render_extent.width as f32)
+            .height(self.render_extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
+        let scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D { x: 0, y: 0 })
+            .extent(self.render_extent);
+        let viewports = [viewport];
+        let scissors = [scissor];
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&viewports)
+            .scissors(&scissors);
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_bias_enable(false);
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(self.msaa_samples);
+        // 天空不写深度：世界几何随后按正常规则覆盖它
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(false)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::ALWAYS)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
+        let color_write_mask = vk::ColorComponentFlags::R
+            | vk::ColorComponentFlags::G
+            | vk::ColorComponentFlags::B
+            | vk::ColorComponentFlags::A;
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(color_write_mask)
+            .blend_enable(true)
+            // 雨线是**叠加层**：alpha 混合，不写入深度
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD);
+        let color_blend_attachments = [color_blend_attachment];
+        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&color_blend_attachments);
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&dynamic_states);
+        let create_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil)
+            .color_blend_state(&color_blend_state)
+            .dynamic_state(&dynamic_state)
+            .layout(self.rain_pipeline_layout)
+            .render_pass(self.render_pass)
+            .subpass(0);
+        let pipelines = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
+                .map_err(|(_, e)| format!("创建天空管线失败: {e}"))?
+        };
+        self.rain_pipeline = pipelines[0];
+
+        unsafe {
+            self.device.destroy_shader_module(vs_module, None);
+            self.device.destroy_shader_module(fs_module, None);
+        }
+        log::info!("雨管线创建完成（push constant {}B）", std::mem::size_of::<[f32; 4]>());
+        Ok(())
+    }
 
 }
