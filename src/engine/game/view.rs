@@ -242,6 +242,20 @@ impl Game {
         // 🔴 保留原来的两个装饰点光，**再加**两个路灯（uniform 有 4 个槽位）：
         // 一开始是"替换"，实测路灯 on 反而比 off 更暗（85.94 vs 95.59）——
         // 原两个本来就在给广场打光，换掉等于减光。
+        // 阴雨：太阳弱化 + 环境光更冷（与天空灰化配合）。
+        let (sun, amb_color, amb_intensity) = if self.rain {
+            (
+                super::lighting::DirectionalLight::new(
+                    sun.direction,
+                    sun.color * 0.92,
+                    sun.intensity * 0.45,
+                ),
+                glam::Vec3::new(0.30, 0.33, 0.40),
+                amb_intensity * 0.85,
+            )
+        } else {
+            (sun, amb_color, amb_intensity)
+        };
         let mut points = vec![point_a, point_b];
         if dusk {
             // 夜间：玩家手电（替换那个固定的装饰点光，uniform 仍是 4 槽）。

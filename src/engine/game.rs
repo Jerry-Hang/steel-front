@@ -835,6 +835,8 @@ pub struct Game {
     map_mgr: Option<crate::engine::map::MapManager>,
     /// 当前地图的时段预设（TOML `sun_elev`/`sun_azim`）；`RV3D_SUN_*` 可覆盖。
     map_sun: Option<(f32, f32)>,
+    /// 阴雨氛围（`RV3D_RAIN=1` 或关卡 TOML `rain = true`）
+    pub(crate) rain: bool,
     /// 手电开关（F 键切换；默认开）
     flashlight: bool,
     /// 手电电量 0..1（开灯耗电、关灯缓慢回充，见 `lighting::battery_step`）

@@ -3544,6 +3544,7 @@ impl GameApp {
             }
             // 天空着色器时间：高空漂移/低角度暖色（用游戏模拟时间，headless 下也确定）。
             renderer.shader_time = self.game.time;
+            renderer.rain = self.game.rain;
             if let Err(e) = renderer.render(view, proj) {
                 if e == "交换链过期" {
                     log::warn!("交换链过期，尝试重建...");

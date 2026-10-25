@@ -212,7 +212,7 @@ impl Renderer {
                     self.render_extent.height as f32,
                     // z = 时间（秒）：高空漂移 + 低太阳暖色；w 保留
                     self.shader_time,
-                    0.0,
+                      if self.rain { 1.0 } else { 0.0 },
                 ],
             };
             unsafe {

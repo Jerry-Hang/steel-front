@@ -248,6 +248,7 @@ impl Game {
             objective: MissionObjective::new(0),
             map_mgr: None,
             map_sun: None,
+            rain: crate::syscfg::flag("RV3D_RAIN"),
             flashlight: true,
             battery: crate::syscfg::parse::<f32>("RV3D_BATTERY")
                 .unwrap_or(1.0)
@@ -307,8 +308,10 @@ impl Game {
                 // ⇒ 首次调用时它是 `None`（**那段旗杆一次都没生效过**），
                 // 第二次调用时它已经是上一张地图的（**用错数据**）。
                 let map_sun = mgr.sun();
+                let map_rain = mgr.rain();
                 self.map_mgr = Some(mgr);
                 self.map_sun = map_sun;
+                self.rain = map_rain || crate::syscfg::flag("RV3D_RAIN");
                 self.map_path = Some(path);
                 self.level_list = list;
                 self.level_idx = 0;
@@ -1203,8 +1206,10 @@ impl Game {
         match crate::engine::map::MapManager::load(&path) {
             Ok(mgr) => {
                 let map_sun = mgr.sun();
+                let map_rain = mgr.rain();
                 self.map_mgr = Some(mgr);
                 self.map_sun = map_sun;
+                self.rain = map_rain || crate::syscfg::flag("RV3D_RAIN");
                 self.map_path = Some(path);
                 // 🔴 不再"先 apply_level 再 start_run"（2026-10-20 第 14 批复核第 1 条）：
                 // `start_run()` 固定从第 1 关开始 ⇒ 关卡号被重置、地图白建两次。

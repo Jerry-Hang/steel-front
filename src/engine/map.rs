@@ -67,6 +67,8 @@ pub struct MapData {
     /// 可选时段预设（`sun_elev` / `sun_azim`，角度制）：每张图可以有自己的太阳高度，
     /// 不设则沿用引擎默认；`RV3D_SUN_ELEV` 仍可覆盖（A/B 用）。
     pub sun: Option<(f32, f32)>,
+    /// 阴雨氛围开关（TOML `rain = true`）：只影响光照/天空（无粒子）。
+    pub rain: bool,
 }
 
 /// 胜负规则（TOML `[rule]` 节）：
@@ -529,6 +531,10 @@ fn table_get<'a>(entries: &'a [(String, Value)], key: &str) -> Option<&'a Value>
     entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
+fn table_bool(entries: &[(String, Value)], key: &str) -> bool {
+    entries.iter().any(|(k, v)| k == key && matches!(v, Value::Bool))
+}
+
 fn table_num(entries: &[(String, Value)], key: &str) -> Option<f64> {
     entries.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
         Value::Num(n) => Some(*n),
@@ -636,6 +642,7 @@ fn assemble_map(entries: Vec<(String, Value)>, rule_entries: Vec<(String, Value)
             let a = table_num(&entries, "sun_azim").unwrap_or(233.0);
             e.map(|e| (e as f32, a as f32))
         },
+        rain: table_bool(&entries, "rain"),
         spawn_points: table_array(&entries, "spawn_points")
             .into_iter()
             .map(parse_spawn_point)
@@ -842,6 +849,11 @@ impl MapManager {
     /// 当前地图的时段预设（`sun_elev`/`sun_azim`）；未设返回 None。
     pub fn sun(&self) -> Option<(f32, f32)> {
         self.current.sun
+    }
+
+    /// 当前地图是否阴雨氛围。
+    pub fn rain(&self) -> bool {
+        self.current.rain
     }
 
     /// 加载地图文件（失败返回带原因的 Err）
@@ -1544,5 +1556,15 @@ required = 2
         let mgr = super::MapManager::load("assets/maps/defense_line.toml")
             .expect("defense_line.toml 应能加载");
         assert_eq!(mgr.sun(), Some((14.0, 200.0)));
+    }
+
+    /// `rain = true` 必须被解析成 MapData.rain（否则关卡里的阴雨设置是死字段）。
+    /// 反向验证：让 `table_bool` 恒返回 false ⇒ 红。
+    #[test]
+    fn rain_flag_parses_from_toml() {
+        let entries = vec![("rain".to_string(), super::Value::Bool)];
+        assert!(super::table_bool(&entries, "rain"), "rain 键应解析为 true");
+        assert!(!super::table_bool(&entries, "other"), "未知键应为 false");
+        assert!(!super::table_bool(&[], "rain"), "空表应为 false");
     }
 }

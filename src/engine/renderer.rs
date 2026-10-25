@@ -810,6 +810,8 @@ pub struct Renderer {
     present_stall_frames: u32,
     /// 天空着色器用的时间（秒，来自 `Game::time`）：高空漂移/低角度暖色。
     pub(crate) shader_time: f32,
+    /// 阴雨氛围（0/1，经 SkyPush.screen.w 传给天空着色器）
+    pub(crate) rain: bool,
     depth_images: Vec<vk::Image>,
     depth_images_memory: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,
