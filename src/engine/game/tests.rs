@@ -692,3 +692,18 @@ fn night_vision_factor_reads_map_sun() {
     let day = g.night_vision_factor();
     assert!((day - 1.0).abs() < 0.02, "高太阳（70°）应接近 1.0，实际 {day}");
 }
+
+/// 手电开关：有电可开、空电拒绝。反向验证：删掉 `battery > 0.02` 判断 ⇒ 红。
+#[test]
+fn flashlight_toggle_respects_battery() {
+    let mut g = Game::new();
+    g.battery = 0.5;
+    g.flashlight = false;
+    g.toggle_flashlight();
+    assert!(g.flashlight, "有电时应能打开");
+    g.battery = 0.0;
+    g.flashlight = false;
+    g.toggle_flashlight();
+    assert!(!g.flashlight, "空电时不应能打开");
+    assert!(!g.flashlight_lit(), "空电时不应点亮");
+}

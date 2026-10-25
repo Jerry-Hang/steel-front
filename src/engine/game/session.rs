@@ -248,6 +248,8 @@ impl Game {
             objective: MissionObjective::new(0),
             map_mgr: None,
             map_sun: None,
+            flashlight: true,
+            battery: 1.0,
             map_path: None,
             level_list: Vec::new(),
             level_idx: 0,
@@ -646,6 +648,18 @@ impl Game {
         self.frame_no = self.frame_no.wrapping_add(1);
         self.last_dt = dt;
         self.time += dt;
+        // 手电电量：夜间开灯才耗电（白天灯不亮也不耗），关灯缓慢回充。
+        {
+            let night = self.night_vision_factor() < 0.95;
+            let on_secs = crate::syscfg::parse::<f32>("RV3D_BATTERY_SECS").unwrap_or(180.0);
+            let draining = self.flashlight && night;
+            let before = self.battery;
+            self.battery = super::lighting::battery_step(self.battery, draining, dt, on_secs, 240.0);
+            if draining && before > 0.0 && self.battery <= 0.0 {
+                self.flashlight = false;
+                log::info!("flashlight: 电量耗尽，自动关闭（关灯回充中）");
+            }
+        }
         self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
         // 武器架切换计时/换弹计时 + HUD 武器/弹药/换弹状态同步
         self.weapons.update(dt);

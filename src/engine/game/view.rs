@@ -130,6 +130,24 @@ impl Game {
     /// [背光 0.20, 迎光 0.87] 整个区间放回曲线未饱和段；同日质量 pass（c5a2a67）
     /// 因阴影面街道读不清再把两者上调到**当前的 sun=1.35 / 环境 0.55**。
     /// 改这两个数必须同时看 build.rs::apply_lighting 的曲线。
+    /// 手电开关（F 键）：电量耗空时不允许打开。
+    pub(crate) fn toggle_flashlight(&mut self) {
+        if self.flashlight {
+            self.flashlight = false;
+            log::info!("flashlight: 关闭（电量 {:.0}%）", self.battery * 100.0);
+        } else if self.battery > 0.02 {
+            self.flashlight = true;
+            log::info!("flashlight: 打开（电量 {:.0}%）", self.battery * 100.0);
+        } else {
+            log::info!("flashlight: 电量不足，无法打开");
+        }
+    }
+
+    /// 当前是否点亮手电（夜间 + 开关 + 有电）。
+    pub(crate) fn flashlight_lit(&self) -> bool {
+        self.flashlight && self.battery > 0.0
+    }
+
     /// 夜间视距系数：与 `light_uniform` 共用同一太阳高度来源（env > 关卡 TOML > 默认）。
     pub(crate) fn night_vision_factor(&self) -> f32 {
         let sun_env = super::lighting::sun_from_env().or_else(|| {
@@ -190,7 +208,7 @@ impl Game {
         let mut points = vec![point_a, point_b];
         if dusk {
             // 夜间：玩家手电（替换那个固定的装饰点光，uniform 仍是 4 槽）。
-            let on = !crate::syscfg::flag("RV3D_NO_FLASHLIGHT");
+            let on = self.flashlight_lit() && !crate::syscfg::flag("RV3D_NO_FLASHLIGHT");
             if on {
                 let fpos = super::lighting::flashlight_position(cam, yaw);
                 let mut fl = PointLight::new(

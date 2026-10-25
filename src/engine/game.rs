@@ -835,6 +835,10 @@ pub struct Game {
     map_mgr: Option<crate::engine::map::MapManager>,
     /// 当前地图的时段预设（TOML `sun_elev`/`sun_azim`）；`RV3D_SUN_*` 可覆盖。
     map_sun: Option<(f32, f32)>,
+    /// 手电开关（F 键切换；默认开）
+    flashlight: bool,
+    /// 手电电量 0..1（开灯耗电、关灯缓慢回充，见 `lighting::battery_step`）
+    battery: f32,
     /// 当前地图文件路径（F5 热重载用；关卡系统启用时 Some）
     map_path: Option<String>,
     /// 关卡列表（RV3D_MAPS=index.toml 时加载；N 键按序进入下一关）

@@ -64,6 +64,18 @@ pub const DEFAULT_SHININESS: f32 = 32.0;
 #[allow(dead_code)]
 pub const SPECULAR_STRENGTH: f32 = 0.4;
 
+/// 手电电量推进一步（0..1）。开灯耗电（`on_secs` 秒用光），关灯缓慢回充（`off_secs` 秒充满）。
+///
+/// 纯函数：`Game` 每帧调用，单测直接验（时间基不依赖真实时钟）。
+pub fn battery_step(battery: f32, on: bool, dt: f32, on_secs: f32, off_secs: f32) -> f32 {
+    let b = battery.clamp(0.0, 1.0);
+    if on {
+        (b - dt / on_secs.max(1.0)).max(0.0)
+    } else {
+        (b + dt / off_secs.max(1.0)).min(1.0)
+    }
+}
+
 /// 手电位置：相机前方 1.5 m、比眼位略低 0.15 m（照在地面上更明显）。
 pub fn flashlight_position(cam: [f32; 3], yaw: f32) -> [f32; 3] {
     let fwd = [-yaw.sin(), 0.0, -yaw.cos()];
@@ -851,5 +863,19 @@ mod tests {
         assert!((p[1] - 1.55).abs() < 1e-4, "应比眼位低 0.15：{p:?}");
         let q = super::flashlight_position([0.0, 1.7, 0.0], std::f32::consts::FRAC_PI_2);
         assert!((q[0] + 1.5).abs() < 1e-4 && q[2].abs() < 1e-4, "yaw=90° 时应在 -X：{q:?}");
+    }
+
+    /// 电量推进：开灯按 on_secs 用光、关灯按 off_secs 回充、两端夹紧。
+    /// 反向验证：把开灯分支改成返回 b ⇒ 红。
+    #[test]
+    fn battery_drains_and_recharges() {
+        let b = super::battery_step(1.0, true, 60.0, 180.0, 240.0);
+        assert!((b - (1.0 - 60.0 / 180.0)).abs() < 1e-5, "开灯 60s 应耗 1/3：{b}");
+        let e = super::battery_step(0.01, true, 60.0, 180.0, 240.0);
+        assert_eq!(e, 0.0, "电量不能为负");
+        let r = super::battery_step(0.0, false, 120.0, 180.0, 240.0);
+        assert!((r - 0.5).abs() < 1e-5, "关灯 120s 应回充一半：{r}");
+        let f = super::battery_step(0.9, false, 600.0, 180.0, 240.0);
+        assert_eq!(f, 1.0, "回充不能超过 1");
     }
 }

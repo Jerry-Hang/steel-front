@@ -2068,3 +2068,15 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
   前方地面出现光池；白天完全不生效（`dusk=false`）；
 - 判据 `flashlight_sits_ahead_of_the_camera`（yaw=0 → -Z、yaw=90° → -X、低 0.15 m；
   反向验证：返回相机位置 ⇒ 红）。
+
+### 2026-10-25（续62）：手电电量与 F 键开关
+
+- `lighting::battery_step(battery, on, dt, on_secs, off_secs)`：纯函数；
+  开灯按 `RV3D_BATTERY_SECS`（默认 **180 s** 用光）耗电、关灯 240 s 回充，两端夹紧；
+- `Game.flashlight` / `Game.battery`：夜间开灯才耗电（白天灯不亮也不耗）；
+  耗尽**自动关闭**并回充；`toggle_flashlight()` 在电量 ≤2% 时拒绝打开；
+- **F 键**切换（该键此前未占用）；手电灯只在本帧 `flashlight_lit()`（开 && 有电）时占位；
+- 判据：`battery_drains_and_recharges`（开灯分支直接返回 b ⇒ 红）、
+  `flashlight_toggle_respects_battery`（删掉电量判断 ⇒ 红）；
+- **真机**：`RV3D_BATTERY_SECS=4` 夜间跑 14 s，日志出现
+  `flashlight: 电量耗尽，自动关闭（关灯回充中）`，与公式一致。

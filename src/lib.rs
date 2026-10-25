@@ -4342,6 +4342,12 @@ impl ApplicationHandler for GameApp {
                         }
                     }
                     // G：投掷手榴弹（抛物线 + 引信 1.5-2.5s + 爆炸复用）
+                    // F：手电开关（电量耗尽时拒绝打开）
+                    KeyCode::KeyF => {
+                        if pressed {
+                            self.game.toggle_flashlight();
+                        }
+                    }
                     KeyCode::KeyG => {
                         if pressed && self.game.state() == GameState::Playing && !self.game.settings_open() {
                             let eye = self.game.player_eye();
