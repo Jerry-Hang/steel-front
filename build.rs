@@ -2393,6 +2393,23 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         let cloud_col = mix(vec3<f32>(0.70, 0.74, 0.82), vec3<f32>(1.12, 1.09, 1.02), lit) * shade;
         col = mix(col, cloud_col, cov * 1.0);
     }
+    // 低太阳整体压暗天空（云一起压）：否则低太阳下天空仍是正午蓝，星点看着像噪点。
+    // `sun_dir.y` ≥0.42 时为 1.0（白天完全不变）；日落附近降到 0.22。
+    let dayk = mix(0.22, 1.0, smoothstep(0.0, 0.42, sun_dir.y));
+    col = col * dayk;
+    // ---- 夜间星空（2026-10-25）----
+    // 低太阳时给天空加稀疏星点：方向哈希到 3D 单元，单元内按 hash 决定是否有星，
+    // 亮度按第二层 hash 分布，并用 screen.z 做缓慢闪烁。白天 `sun_dir.y` 大 ⇒
+    // `night` 为 0，天空不变 ⇒ 不需要开关。
+    if (ray.y > 0.06) {
+        let star_cell = floor(ray * 220.0);
+        let h = cloud_hash(vec2<f32>(star_cell.x + star_cell.z * 0.37, star_cell.y - star_cell.z * 0.21));
+        let h2 = cloud_hash(vec2<f32>(star_cell.y + star_cell.x * 0.53, star_cell.z + 7.7));
+        let star = smoothstep(0.9962, 1.0, h) * smoothstep(0.30, 0.95, h2);
+        let twinkle = 0.75 + 0.25 * sin(sky_push.screen.z * 1.7 + h * 40.0);
+        let night = clamp(1.0 - sun_dir.y * 3.0, 0.0, 1.0) * smoothstep(0.06, 0.35, ray.y);
+        col = col + vec3<f32>(0.95, 0.97, 1.0) * (star * twinkle * night * 0.9);
+    }
     // 抖动：8bit 输出 + 平滑渐变最容易出色带（本仓历史上被当成"条纹缺陷"排查过）
     let n = fract(sin(dot(frag.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5;
     col = max(col, vec3<f32>(0.0)) + vec3<f32>(n / 255.0);
