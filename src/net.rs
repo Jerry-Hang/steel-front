@@ -307,8 +307,9 @@ pub enum NetworkMessage {
     },
     /// 打洞包：nonce 必须与 PeerHint 下发的一致（防止被第三方当反射目标）。
     Punch { nonce: [u8; TOKEN_LEN] },
-    /// 登记打洞 socket 端口（主 socket 已 connect，内核会挡掉对端直连包）。
-    PunchPort { port: u16 },
+    /// 登记打洞 socket：**必须从打洞 socket 发出**（服务端用观察到的源地址当映射地址），
+    /// 带 token 认证（把这条登记绑到已注册客户端）。
+    PunchPort { token: [u8; TOKEN_LEN] },
     /// 玩家离开；reason：0=正常退出，1=超时，2=被踢
     Leave { player_id: u32, reason: u8 },
     /// 玩家状态同步；seq 为发送方单调递增序号
@@ -605,9 +606,7 @@ impl NetworkMessage {
                 (MessageType::PeerHint, p)
             }
             NetworkMessage::Punch { nonce } => (MessageType::Punch, nonce.to_vec()),
-            NetworkMessage::PunchPort { port } => {
-                (MessageType::PunchPort, port.to_be_bytes().to_vec())
-            }
+            NetworkMessage::PunchPort { token } => (MessageType::PunchPort, token.to_vec()),
             NetworkMessage::Sealed { token, body } => {
                 let n = body.len().min(u16::MAX as usize);
                 let mut p = Vec::with_capacity(TOKEN_LEN + 2 + n);
@@ -790,7 +789,9 @@ impl NetworkMessage {
                 NetworkMessage::Punch { nonce }
             }
             MessageType::PunchPort => {
-                NetworkMessage::PunchPort { port: u16::from_be_bytes([r.u8()?, r.u8()?]) }
+                let mut token = [0u8; TOKEN_LEN];
+                token.copy_from_slice(r.bytes(TOKEN_LEN)?);
+                NetworkMessage::PunchPort { token }
             }
             MessageType::Sealed => {
                 let mut token = [0u8; TOKEN_LEN];
@@ -1085,7 +1086,7 @@ pub struct Server {
     /// S2：挑战时登记的名字（JoinProof 时回填）
     pending_names: HashMap<SocketAddr, String>,
     /// NAT 打洞：客户端登记的打洞 socket 端口（主 socket 已 connect，收不到直连包）
-    punch_ports: HashMap<SocketAddr, u16>,
+    punch_ports: HashMap<SocketAddr, SocketAddr>,
     /// S2：会话token（注册成功后才有；封印包必须与它匹配）
     tokens: HashMap<SocketAddr, Token>,
 }
@@ -1343,11 +1344,15 @@ impl Server {
     }
 
     /// NAT 打洞：登记客户端的打洞 socket 端口（只接受已注册客户端），随后重发配对提示。
-    pub fn handle_punch_port(&mut self, from: SocketAddr, port: u16) {
-        if self.clients.contains_key(&from) {
-            self.punch_ports.insert(from, port);
-            log::info!("net: 打洞端口登记 {from} -> {port}");
+    pub fn handle_punch_port(&mut self, from: SocketAddr, token: Token) {
+        // `from` = 打洞 socket 的**映射地址**（NAT 后就是公网端口）；token 认证归属。
+        let owner = self.tokens.iter().find(|(_, t)| **t == token).map(|(a, _)| *a);
+        if let Some(owner) = owner {
+            self.punch_ports.insert(owner, from);
+            log::info!("net: 打洞端口登记 owner={owner} -> {from}");
             self.exchange_peer_hints();
+        } else {
+            log::debug!("net: 丢弃 token 不匹配的打洞端口登记（{from}）");
         }
     }
 
@@ -1365,7 +1370,9 @@ impl Server {
             std::net::IpAddr::V4(v4) => v4.octets(),
             std::net::IpAddr::V6(_) => [0u8; 4],
         };
-        let punch_port = |a: SocketAddr| self.punch_ports.get(&a).copied().unwrap_or_else(|| a.port());
+        let punch_port = |a: SocketAddr| {
+            self.punch_ports.get(&a).map(|p| p.port()).unwrap_or_else(|| a.port())
+        };
         for i in 0..peers.len() {
             for j in (i + 1)..peers.len() {
                 let (a, ida) = peers[i];
@@ -1687,11 +1694,13 @@ impl Client {
                 // S2：会话建立 —— 拿到 id 与token。
                 self.player_id = Some(player_id);
                 self.token = Some(token);
-                // 把打洞 socket 的端口登记给服务端（PeerHint 会把它发给对端）。
-                if let Ok(local) = self.punch_socket.local_addr() {
-                    if let Err(e) = self.send(&NetworkMessage::PunchPort { port: local.port() }) {
-                        log::warn!("net: 打洞端口登记失败（{e}）");
-                    }
+                // 登记打洞 socket：**从打洞 socket 自己发**，服务端才能看到 NAT 映射后的端口。
+                match self.punch_socket.send_to(
+                    &NetworkMessage::PunchPort { token }.encode(),
+                    self.server,
+                ) {
+                    Ok(_) => log::info!("net: 打洞端口登记已发送"),
+                    Err(e) => log::warn!("net: 打洞端口登记失败（{e}）"),
                 }
                 log::info!("net: client 会话建立 id={player_id}");
                 None
@@ -1997,6 +2006,11 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn token_for_test(&self) -> Option<Token> {
         self.token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn punch_socket_for_test(&self) -> &UdpSocket {
+        &self.punch_socket
     }
 
     #[cfg(test)]
@@ -2637,6 +2651,44 @@ mod tests {
         assert!(declared <= u16::MAX as usize);
     }
 
+    /// 打洞包 nonce 不对 ⇒ 必须丢弃（防止被第三方当反射目标）。反向验证：删 nonce 比较 ⇒ 红。
+    #[test]
+    fn punch_with_wrong_nonce_is_dropped() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut a = Client::connect(addr).unwrap();
+        let mut b = Client::connect(addr).unwrap();
+        complete_handshake(&mut server, &mut a, "a");
+        complete_handshake(&mut server, &mut b, "b");
+        while let Ok(Some((m, from))) = server.recv() {
+            if let NetworkMessage::PunchPort { token } = m {
+                server.handle_punch_port(from, token);
+            }
+        }
+        for c in [&mut a, &mut b] {
+            while let Ok(Some((m, _))) = c.recv() {
+                let _ = c.handle_message(m);
+            }
+        }
+        // 先收掉合法打洞包，记基线；再用错 nonce 打，计数不应变化。
+        std::thread::sleep(Duration::from_millis(40));
+        for _ in 0..20 {
+            let _ = b.recv_punch();
+        }
+        let before = b.punch_ok_for_test();
+        // 直接把错 nonce 打到 **b 自己的打洞 socket**（不是发给对端）
+        let victim = b.punch_socket_for_test().local_addr().unwrap();
+        let attacker = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        attacker
+            .send_to(&NetworkMessage::Punch { nonce: [0x5A; TOKEN_LEN] }.encode(), victim)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        for _ in 0..20 {
+            let _ = b.recv_punch();
+        }
+        assert_eq!(b.punch_ok_for_test(), before, "错 nonce 的打洞包被接受了");
+    }
+
     /// NAT 打洞：两人注册并登记打洞端口后，服务端下发成对 PeerHint，
     /// 两端在**打洞 socket** 上互发 Punch 并各自收到。
     /// 反向验证：删掉 PeerHint 分支里的 `send_to(Punch)` ⇒ punch_ok 停在 0 ⇒ 红。
@@ -2650,8 +2702,8 @@ mod tests {
         complete_handshake(&mut server, &mut b, "b");
         // 服务端读两条 PunchPort 登记 → 触发配对提示
         while let Ok(Some((m, from))) = server.recv() {
-            if let NetworkMessage::PunchPort { port } = m {
-                server.handle_punch_port(from, port);
+            if let NetworkMessage::PunchPort { token } = m {
+                server.handle_punch_port(from, token);
             }
         }
         // 客户端处理 PeerHint（收到后立刻向对端打洞 socket 发包）
@@ -2722,8 +2774,8 @@ mod tests {
     /// 排空服务端队列里的 `PunchPort` 登记（握手后客户端会发，会污染"期望下一条消息"的测试）。
     fn drain_punch_ports(server: &mut Server) {
         while let Ok(Some((m, from))) = server.recv() {
-            if let NetworkMessage::PunchPort { port } = m {
-                server.handle_punch_port(from, port);
+            if let NetworkMessage::PunchPort { token } = m {
+                server.handle_punch_port(from, token);
             }
         }
     }
@@ -2739,8 +2791,8 @@ mod tests {
         // 握手期间可能夹着上一位客户端的 PunchPort 登记：先收下再继续等 Join。
         let (req, from) = loop {
             let (m, f) = recv_until(|| server.recv(), Duration::from_millis(1000));
-            if let NetworkMessage::PunchPort { port } = m {
-                server.handle_punch_port(f, port);
+            if let NetworkMessage::PunchPort { token } = m {
+                server.handle_punch_port(f, token);
                 continue;
             }
             break (m, f);
@@ -2752,8 +2804,8 @@ mod tests {
         let _ = client.handle_message(msg); // Challenge → 自动回 JoinProof
         let (proof, from2) = loop {
             let (m, f) = recv_until(|| server.recv(), Duration::from_millis(1000));
-            if let NetworkMessage::PunchPort { port } = m {
-                server.handle_punch_port(f, port);
+            if let NetworkMessage::PunchPort { token } = m {
+                server.handle_punch_port(f, token);
                 continue;
             }
             break (m, f);
