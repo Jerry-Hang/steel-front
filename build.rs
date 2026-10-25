@@ -328,6 +328,16 @@ const FOG_TINT: vec3<f32> = vec3<f32>({FOG_TINT});
 
 // 雾：70m 起、630m 满，上限 0.92 而非 1.0 —— 完全抹平会让最远处的楼群整体消失，
 // 保留 8% 反差不只是好看，也是让玩家仍能读出天际线轮廓。
+// 低太阳时雾/远景色与天空同源压暗：否则夜里远景仍是白天地平线色，天暗地亮。
+fn fog_tint() -> vec3<f32> {
+    if (light_data.flags.x < 0.5) {
+        return FOG_TINT;
+    }
+    let sy = light_data.directional.direction.y;
+    let dayk = mix(0.22, 1.0, smoothstep(0.0, 0.42, sy));
+    return FOG_TINT * dayk;
+}
+
 fn fog_amount(d: f32) -> f32 {
     let t = clamp((d - 70.0) / 560.0, 0.0, 1.0);
     return t * t * 0.92;
@@ -1171,7 +1181,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             shaded = shaded * ao;
         }
         let fg = fog_amount(view_distance(input));
-        return vec4<f32>(aces_tonemap(mix(shaded, FOG_TINT, fg) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
+        return vec4<f32>(aces_tonemap(mix(shaded, fog_tint(), fg) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
     }
     // 世界空间 UV：地面/地形用 world_pos.xz 映射到全图 [0,1]（覆盖 2*256 米），
     // 与 procedural.rs 烘焙纹理严格对齐（marker/NPC/自发光已走 flat_flag 纯色路径，不采样）。
@@ -1285,7 +1295,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     let lit = apply_lighting(input, mixed);
     let fg2 = fog_amount(view_distance(input));
-    return vec4<f32>(aces_tonemap(mix(lit, FOG_TINT, fg2) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
+    return vec4<f32>(aces_tonemap(mix(lit, fog_tint(), fg2) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
 }
 "#;
 
