@@ -520,6 +520,10 @@ pub struct HudState {
     pub health: f32,
     /// 血量上限
     pub max_health: f32,
+    /// 手电电量 0..1（夜间才显示电量条）
+    pub battery: f32,
+    /// 是否显示电量条（夜间且电量未满；白天不占画面）
+    pub battery_visible: bool,
     /// 当前弹药数
     pub ammo: u32,
     /// 弹匣容量
@@ -641,6 +645,8 @@ impl HudState {
             screen_h,
             health: 100.0,
             max_health: 100.0,
+            battery: 1.0,
+            battery_visible: false,
             ammo: 30,
             max_ammo: 30,
             reserve: 120,
@@ -885,6 +891,24 @@ impl HudState {
             fill: ammo_fill,
             ratio: self.ammo_ratio(),
         });
+          // ---- 手电电量条（弹药条上方，细条；仅夜间未满电时可见）----
+          if self.battery_visible {
+              let bat_h = 8.0;
+              let bat_y = h - margin - bar_h - 6.0 - bat_h;
+              let bat_back = Quad::new(
+                  Rect::new(ammo_x, bat_y, ammo_w, bat_h),
+                  Color::new(0.08, 0.08, 0.10, 0.75),
+              );
+              let bat_fill = Quad::new(
+                  Rect::new(ammo_x + 2.0, bat_y + 2.0, ammo_w - 4.0, bat_h - 4.0),
+                  battery_color(self.battery),
+              );
+              elems.push(HudElement::Bar {
+                  back: bat_back,
+                  fill: bat_fill,
+                  ratio: self.battery.clamp(0.0, 1.0),
+              });
+          }
         elems.push(HudElement::Text {
             text: format!(
                 "{}  AMMO {}/{} +{}  |  GRENADES {}  |  MEDKITS {}{}",
@@ -1754,6 +1778,16 @@ pub enum UiEvent {
 }
 
 /// 根据血量比例返回血条颜色：绿 → 黄 → 红
+/// 电量条颜色：满电偏绿、低电转橙红（与血条同一条视觉语义，但色相不同）。
+pub fn battery_color(ratio: f32) -> Color {
+    let r = ratio.clamp(0.0, 1.0);
+    if r > 0.5 {
+        Color::new(0.35 + 0.35 * (r - 0.5) * 2.0, 0.85, 0.45, 1.0)
+    } else {
+        Color::new(1.0, 0.35 + 0.6 * r * 2.0, 0.25, 1.0)
+    }
+}
+
 pub fn health_color(ratio: f32) -> Color {
     let ratio = ratio.clamp(0.0, 1.0);
     if ratio > 0.5 {
@@ -3274,4 +3308,24 @@ mod tests {
         }
     }
 
+
+    /// 电量条只在 `battery_visible` 时加入布局（白天/满电不占画面）。
+    /// 反向验证：去掉 `if self.battery_visible` ⇒ 红。
+    #[test]
+    fn battery_bar_only_when_visible() {
+        let mut hud = HudState::new(1280.0, 720.0);
+        let bars_hidden = hud
+            .layout_elements()
+            .iter()
+            .filter(|e| matches!(e, HudElement::Bar { .. }))
+            .count();
+        hud.battery_visible = true;
+        hud.battery = 0.4;
+        let bars_shown = hud
+            .layout_elements()
+            .iter()
+            .filter(|e| matches!(e, HudElement::Bar { .. }))
+            .count();
+        assert_eq!(bars_shown, bars_hidden + 1, "可见时应多一条电量条");
+    }
 }

@@ -13,6 +13,9 @@ impl Game {
         self.hud.countdown = self.wave_timer.max(0.0);
         self.hud.survive_waves = self.survive_total_waves();
         self.hud.objective = (self.objective.eliminated, self.objective.target);
+        // 手电电量条：夜间且未满电才显示（白天不占画面）。
+        self.hud.battery = self.battery;
+        self.hud.battery_visible = self.night_vision_factor() < 0.95 && self.battery < 0.999;
         // 关卡系统：据点状态同步到 HUD（id/归属/进度）。
         // 单机 = 本机 obj_state；联机客户端 = 网络 ObjectiveState 广播（归属码 0=中立/1=Red/2=Blue）。
         // 无联机且无关卡系统 → 空列表（HUD 不显示进度条，行为零回归）。

@@ -2119,3 +2119,15 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
   直接发往对端，不经过自己的 NAT 代理，模拟出的映射与真实 NAT 不同 ⇒ 只会验证代理本身。
   **结论：跨 NAT 只能在有两台机器/端口映射时验；当前结论只到"经服务端交换地址后两端互发
   Punch 并校验 nonce"这一层。**
+
+### 2026-10-25（续66）：手电电量 HUD 条
+
+- `HudState` 新增 `battery` / `battery_visible`；`layout_elements()` 在弹药条**上方**画一条
+  8 px 细条（可见时），颜色 `battery_color()`：>50% 偏绿、低电转橙红；
+- `hud_quads` 同步：`battery_visible = night_vision_factor()<0.95 && battery<0.999`
+  （白天不占画面；满电也不显示）；
+- 判据 `battery_bar_only_when_visible`（去掉 `if self.battery_visible` ⇒ 红）；
+- 实测（夜间、关手电照明以隔离 HUD）：全图 **0.11%** 像素差，差异集中在弹药条上方，
+  40% 显示短黄条、约满电显示满绿条。
+- ⚠ 过程中两次"补丁没落盘"（`grep` 验证 `bat_back` 计数为 0）——都已当场发现并用
+  **行号插入**修好；这类失误本轮已出现多次，**改完必须 grep 校验**。
