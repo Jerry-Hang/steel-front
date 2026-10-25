@@ -2185,3 +2185,14 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
   （机器负载噪声内，无明显代价）；
 - 限制（如实记录）：雨是**屏幕空间叠加层**，不会被建筑遮挡、地面没有湿痕/积水；
   真正的立体雨需要世界空间粒子与湿面材质（另案）。
+
+### 2026-10-25（续72）：夜间开手电 ⇒ AI 视距 ×1.25（灯塔效应）
+
+- `lighting::ai_sight_factor(night, player_lit)`：`night × (1.25 if 玩家亮着)`；
+- `Game::player_is_lit()`：手电开着 + 有电 + 夜间（`RV3D_NO_FLASHLIGHT=1` 也视为灭，便于 A/B）；
+- `AiStepCtx.player_lit` 传入 `step_npc`，`sight = base × ai_sight_factor(ctx.night, ctx.player_lit)`；
+- 判据 `flashlight_makes_the_player_easier_to_see_at_night`（忽略 player_lit ⇒ 红）；
+- **真机**（`RV3D_AI_DIAG=1`，夜 elev=4）：开手电 `sight=364`，关手电 `sight=291`，
+  比值 **1.2509 ≈ ×1.25**。
+- 备注：本轮原计划做"雨天地面湿痕"，但 mesh 路径的片元复用的是 `FRAGMENT_SHADER_WGSL`
+  （没有 `light_data` 绑定）⇒ 湿痕需要新 uniform/新 pass，先搁置并记录。

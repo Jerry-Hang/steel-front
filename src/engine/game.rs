@@ -885,6 +885,8 @@ pub(crate) struct AiStepCtx<'a> {
     fallback_targets: &'a [[f32; 3]],
     /// 夜间视距系数（1.0 白天 / 0.55 夜里）：由 `Game::night_vision_factor()` 每帧算一次。
     night: f32,
+    /// 玩家夜里是否亮着（手电）——亮着会被看得更远（×1.25）。
+    player_lit: bool,
     /// 每 NPC 的"目标是否被几何体挡住"。`true` = 挡住。
     ///
     /// 这是"隔墙掉血"的正解。此前 `enemy_visible = dist < sight` **只看距离、零视线检测**，

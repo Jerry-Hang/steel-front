@@ -279,7 +279,8 @@ use super::*;
             let flags_s = vec![false; npcs_s.len()];
             let flags_p = vec![false; npcs_p.len()];
             let ctx_s = AiStepCtx {
-                night: 1.0, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
+                night: 1.0,
+            player_lit: false, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
                 player: &player,
                 player_yaw: 0.0,
                 charge: false,
@@ -301,7 +302,8 @@ use super::*;
                 target_occluded: &[],
             };
             let ctx_p = AiStepCtx {
-                night: 1.0, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
+                night: 1.0,
+            player_lit: false, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
                 player: &player,
                 player_yaw: 0.0,
                 charge: false,
@@ -372,7 +374,8 @@ use super::*;
         let npcs_a = vec![red_front, blue, red_back];
         let targets_a = pick_stress_targets(&npcs_a, STRESS_SIGHT);
         let ctx_a = AiStepCtx {
-            night: 1.0, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
+            night: 1.0,
+            player_lit: false, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
             player: &player,
             player_yaw: 0.0,
             charge: false,
@@ -447,7 +450,8 @@ use super::*;
         let player = glam::Vec3::new(0.0, 0.0, 0.0);
         let flags = vec![false; 2];
         let ctx = AiStepCtx {
-            night: 1.0, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
+            night: 1.0,
+            player_lit: false, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
             player: &player,
             player_yaw: 0.0,
             charge: false,

@@ -413,7 +413,8 @@ use super::*;
         let targets = vec![None];
         for frame in 0..8u32 {
             let ctx = AiStepCtx {
-                night: 1.0, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
+                night: 1.0,
+            player_lit: false, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
                 player: &player,
                 player_yaw: 0.0,
                 charge: false,
@@ -761,7 +762,8 @@ use super::*;
             let mut npc = npc_at(1, Team::Red, [80.0, 0.0, 0.0]);
             for frame in 0..frames {
                 let ctx = AiStepCtx {
-                    night: 1.0, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
+                    night: 1.0,
+            player_lit: false, // 判据里固定白天，夜景行为由 night_vision_factor 单测覆盖
                     player: &player,
                     player_yaw: 0.0,
                     charge: false,

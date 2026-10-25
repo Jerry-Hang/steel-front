@@ -154,6 +154,13 @@ impl Game {
         }
     }
 
+    /// 玩家夜里是否亮着（手电开着且有电、且当前是夜间）——AI 据此看得更远。
+    pub(crate) fn player_is_lit(&self) -> bool {
+        self.flashlight_lit()
+            && !crate::syscfg::flag("RV3D_NO_FLASHLIGHT")
+            && self.night_vision_factor() < 0.95
+    }
+
     /// 手电开关（F 键）：电量耗空时不允许打开。
     pub(crate) fn toggle_flashlight(&mut self) {
         if self.flashlight {

@@ -72,6 +72,14 @@ pub fn flashlight_dim(battery: f32) -> (f32, f32) {
     (0.25 + 0.75 * b.sqrt(), 8.0 + 6.0 * b)
 }
 
+/// AI 视距的总系数：夜间衰减 × 玩家是否亮着（手电 = 灯塔，看得到更远）。
+///
+/// `night` 来自 `vision_factor_for_sun`（1.0 白天 / 0.55 夜里）；`player_lit` 只在夜间有效。
+pub fn ai_sight_factor(night: f32, player_lit: bool) -> f32 {
+    let lit = if player_lit { 1.25 } else { 1.0 };
+    night.clamp(0.0, 1.0) * lit
+}
+
 /// 手电电量推进一步（0..1）。开灯耗电（`on_secs` 秒用光），关灯缓慢回充（`off_secs` 秒充满）。
 ///
 /// 纯函数：`Game` 每帧调用，单测直接验（时间基不依赖真实时钟）。
@@ -897,5 +905,14 @@ mod tests {
         assert!((lo - 0.25).abs() < 1e-5 && (r_lo - 8.0).abs() < 1e-5);
         let (mid, _) = super::flashlight_dim(0.25);
         assert!(lo < mid && mid < hi, "亮度应随电量单调：{lo} {mid} {hi}");
+    }
+
+    /// 夜间开手电 ⇒ AI 视距 ×1.25（白天开灯无效，因为白天本来满视距）。
+    /// 反向验证：忽略 `player_lit` ⇒ 红。
+    #[test]
+    fn flashlight_makes_the_player_easier_to_see_at_night() {
+        assert!((super::ai_sight_factor(1.0, true) - 1.25).abs() < 1e-5);
+        assert!((super::ai_sight_factor(0.55, false) - 0.55).abs() < 1e-5);
+        assert!((super::ai_sight_factor(0.55, true) - 0.6875).abs() < 1e-5);
     }
 }
