@@ -144,7 +144,7 @@ impl Game {
         }
     }
 
-    pub(crate) fn light_uniform(&self, cam_xz: [f32; 2]) -> super::lighting::LightUniform {
+    pub(crate) fn light_uniform(&self, cam: [f32; 3], yaw: f32) -> super::lighting::LightUniform {
         use super::lighting::{DirectionalLight, LightUniform, PointLight, ShadowConfig};
         // 太阳：默认沿用历史向量 (-0.4,0.9,-0.3)/1.35；设 RV3D_SUN_ELEV（必要时加
         // RV3D_SUN_AZIM）则按角度重算，低角度自动变暖变弱（`lighting::sun_tint`）。
@@ -188,9 +188,25 @@ impl Game {
         // 一开始是"替换"，实测路灯 on 反而比 off 更暗（85.94 vs 95.59）——
         // 原两个本来就在给广场打光，换掉等于减光。
         let mut points = vec![point_a, point_b];
+        if dusk {
+            // 夜间：玩家手电（替换那个固定的装饰点光，uniform 仍是 4 槽）。
+            let on = !crate::syscfg::flag("RV3D_NO_FLASHLIGHT");
+            if on {
+                let fpos = super::lighting::flashlight_position(cam, yaw);
+                let mut fl = PointLight::new(
+                    glam::Vec3::from_array(fpos),
+                    glam::Vec3::new(1.0, 0.95, 0.85),
+                    3.0,
+                );
+                // range 限到 14 m：点光源没有聚光，不限制的话整片广场都会被照亮，
+                // 看起来像路灯而不是手电。
+                fl.range = 14.0;
+                points[1] = fl;
+            }
+        }
         if dusk && !self.map.lamps.is_empty() {
             let lamp_col = glam::Vec3::new(1.0, 0.78, 0.48);
-            for l in super::lighting::pick_nearest_lamps(&self.map.lamps, cam_xz, 2) {
+            for l in super::lighting::pick_nearest_lamps(&self.map.lamps, [cam[0], cam[2]], 2) {
                 points.push(PointLight::new(glam::Vec3::from_array(l), lamp_col, 7.0));
             }
         }

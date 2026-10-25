@@ -64,6 +64,12 @@ pub const DEFAULT_SHININESS: f32 = 32.0;
 #[allow(dead_code)]
 pub const SPECULAR_STRENGTH: f32 = 0.4;
 
+/// 手电位置：相机前方 1.5 m、比眼位略低 0.15 m（照在地面上更明显）。
+pub fn flashlight_position(cam: [f32; 3], yaw: f32) -> [f32; 3] {
+    let fwd = [-yaw.sin(), 0.0, -yaw.cos()];
+    [cam[0] + fwd[0] * 1.5, cam[1] - 0.15, cam[2] + fwd[2] * 1.5]
+}
+
 /// 夜间视距系数：太阳越低，NPC 看得越近（玩法：夜里更容易靠近）。
 ///
 /// 1.0 = 白天满视距；0.55 = 夜里只剩 55%。用 smoothstep 在 0.02..0.42 之间过渡，
@@ -834,5 +840,16 @@ mod tests {
         let a = super::vision_factor_for_sun(0.05);
         let b = super::vision_factor_for_sun(0.20);
         assert!(a < b, "视距应随太阳高度单调上升：{a} vs {b}");
+    }
+
+    /// 手电必须在相机前方（yaw=0 ⇒ -Z；yaw=90° ⇒ -X），并略低于眼位。
+    /// 反向验证：改成返回相机位置 ⇒ 红。
+    #[test]
+    fn flashlight_sits_ahead_of_the_camera() {
+        let p = super::flashlight_position([0.0, 1.7, 0.0], 0.0);
+        assert!(p[0].abs() < 1e-4 && (p[2] + 1.5).abs() < 1e-4, "yaw=0 时应在 -Z：{p:?}");
+        assert!((p[1] - 1.55).abs() < 1e-4, "应比眼位低 0.15：{p:?}");
+        let q = super::flashlight_position([0.0, 1.7, 0.0], std::f32::consts::FRAC_PI_2);
+        assert!((q[0] + 1.5).abs() < 1e-4 && q[2].abs() < 1e-4, "yaw=90° 时应在 -X：{q:?}");
     }
 }

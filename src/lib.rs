@@ -2877,7 +2877,7 @@ impl GameApp {
                 popup_y += 20.0 * s;
             }
             renderer.set_hud_quads(&quads);
-            renderer.set_lights(&self.game.light_uniform([self.camera.position().x, self.camera.position().z]));
+            renderer.set_lights(&self.game.light_uniform([self.camera.position().x, self.camera.position().y, self.camera.position().z], self.camera.yaw));
             let t_hud = prep_start.elapsed().as_micros();
             // 世界障碍 marker：关卡地图几何 → 按种类材质着色的实例（复用主 pipeline，
             // 见 renderer.rs MARKER_SLOT_BASE；模型矩阵/材质色统一由 WorldMarker::for_obstacle
@@ -3168,7 +3168,7 @@ impl GameApp {
                     let set_guard = self.prop_set.as_ref();
                     if let Some(set) = set_guard.filter(|s| !s.is_empty()) {
                         if !placements.is_empty() {
-                            let lu = self.game.light_uniform([self.camera.position().x, self.camera.position().z]);
+                            let lu = self.game.light_uniform([self.camera.position().x, self.camera.position().y, self.camera.position().z], self.camera.yaw);
                             let mut mj: Vec<String> = Vec::new();
                             for o in self.game.render_geometry() {
                                 if o.shape == engine::geom::Shape::None {
@@ -3509,7 +3509,7 @@ impl GameApp {
                 }
             }
             // PT 取景：与光栅化同一相机、同一太阳方向（路径追踪要当烘焙参照，参数必须同源）
-            let lu = self.game.light_uniform([self.camera.position().x, self.camera.position().z]);
+            let lu = self.game.light_uniform([self.camera.position().x, self.camera.position().y, self.camera.position().z], self.camera.yaw);
             renderer.set_pt_params(crate::engine::ray_tracer::PtParams {
                 cam: self.camera.position(),
                 fwd: self.camera.forward(),
