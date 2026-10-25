@@ -2091,3 +2091,18 @@ env 覆盖 `RV3D_SUN_ELEV=61` 再差 **64.00%**、亮度回到 97.0（证明 env
 - 判据（均反向验证）：`flashlight_dims_with_battery`（改成常数 ⇒ 红）、
   `battery_recharges_inside_objective_radius`（`inside` 恒 true ⇒ 红）；
 - 实测（夜间第一人称）：满电 vs 15% 全图 **38.95%** 像素、亮度 89.45→**85.38**。
+
+### 2026-10-25（续64）：NAT 打洞握手（协议 v4）
+
+- 新消息：`PeerHint`（对端 IPv4 + **打洞端口** + nonce）、`Punch`（带 nonce）、
+  `PunchPort`（客户端登记打洞 socket 端口）；`SESSION_VERSION = 4`；
+- 🔴 **关键发现**：S11 让客户端 `connect(server)` 之后，内核会**挡掉对端直连包**
+  ⇒ 打洞必须走**第二个未 connect 的 socket**；服务端把它的端口写进 PeerHint；
+- 服务端 `exchange_peer_hints()`：两两下发成对提示（同一 nonce），
+  在 `JoinProof` 后与每次 `PunchPort` 登记后各发一次（端口可能晚到）；
+- 客户端 `recv_punch()`：从打洞 socket 收包、校验 nonce、累计 `punch_ok`；
+  游戏循环每帧收一次；
+- 判据 `nat_punch_exchanges_between_two_clients`：两人注册 → 服务端读两条 PunchPort →
+  两端各收到一条 PeerHint → 互发 Punch → 两端 `punch_ok == 1`；
+  反向验证：删掉发 Punch 的 `send_to` ⇒ 红；
+- **未做**：P2P 数据面（快照仍走服务器转发）、真机跨 NAT 验证（需要第二台机器/端口映射）。
