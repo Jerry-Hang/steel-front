@@ -562,11 +562,14 @@ fn after() { let _ = std::fs::read("assets/y"); }
         let unexpected: Vec<String> = found
             .iter()
             .filter(|pair| {
+                // 🔴 路径分隔符归一：Windows 的 `f.display()` 给 `src\engine\x.rs`，而白名单写 `src/engine/x.rs`
+                // ⇒ 直接用 ends_with 会**全不命中**，12 个合法站点全被报成 Unexpected（实测 2026-10-26）。
+                let path = pair.0.replace('\\', "/");
                 !ALLOWED_STD_FS_READS
                     .iter()
-                    .any(|(file, frag)| pair.0.ends_with(file) && pair.1.contains(frag))
+                    .any(|(file, frag)| path.ends_with(file) && pair.1.contains(frag))
             })
-            .map(|(f, l)| format!("{f}: {l}"))
+            .map(|(f, l)| format!("{}: {l}", f.replace('\\', "/")))
             .collect();
 
         assert!(

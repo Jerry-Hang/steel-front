@@ -2677,7 +2677,12 @@ mod tests {
         }
         let before = b.punch_ok_for_test();
         // 直接把错 nonce 打到 **b 自己的打洞 socket**（不是发给对端）
-        let victim = b.punch_socket_for_test().local_addr().unwrap();
+        // 🔴 Windows：发往未指定地址（0.0.0.0）会报 WSAEADDRNOTAVAIL(10049)，Linux 能路由到 loopback
+        // ⇒ 测试里统一把未指定地址换成 127.0.0.1（实测 2026-10-26）。
+        let mut victim = b.punch_socket_for_test().local_addr().unwrap();
+        if victim.ip().is_unspecified() {
+            victim.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+        }
         let attacker = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         attacker
             .send_to(&NetworkMessage::Punch { nonce: [0x5A; TOKEN_LEN] }.encode(), victim)

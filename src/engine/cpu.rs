@@ -1887,6 +1887,13 @@ mod tests {
     /// 🔴 **在线核解析必须返回编号列表，不是数量**（2026-10-19 外部复核第 2 条现象 B）。
     /// 反向验证：把 `parse_online_list` 改成返回 `count.max(1)` 的 Vec 就没法表达非连续核，
     /// 本判据会红。
+    ///
+    /// 🔴 **必须门到 linux/android**（2026-10-26 Windows 侧实测）：`parse_online_list` 本身是
+    /// `#[cfg(any(target_os = "linux", target_os = "android"))]`（它只为读 sysfs 服务），
+    /// 而本测试原先没有平台门 ⇒ **Windows 上 `cargo test --release` 直接编译不过**（E0425 ×5）。
+    /// Windows 侧 `cpu_online_ids()` 恒返回 `None`（前面的 `if let` 已容错），但函数符号不存在，
+    /// 所以只能用 cfg 门，不能靠运行时回退。
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn parse_online_list_handles_non_contiguous_cores() {
         assert_eq!(parse_online_list("0-3").unwrap(), vec![0, 1, 2, 3]);

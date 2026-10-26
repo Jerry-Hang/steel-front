@@ -5089,7 +5089,11 @@ mod tests {
     /// ⇒ 鼠标能动但**完全隐形**。所有释放点必须共用同一个 helper。
     #[test]
     fn cursor_release_restores_default_icon_and_is_shared() {
-        let src = include_str!("lib.rs");
+        // 🔴 Windows 检出是 CRLF（本机 `core.autocrlf=true`）⇒ 先归一化行尾，
+        // 否则下面搜 `"\n    }\n"` 永远搜不到（实测 2026-10-26）。
+        let raw = include_str!("lib.rs");
+        let src = raw.replace("\r\n", "\n");
+        let src = src.as_str();
         let start = src.find("fn release_cursor_immediately").expect("必须有统一释放实现");
         let end = start + src[start..].find("\n    }\n").expect("helper 必须有函数结尾");
         let body = &src[start..end];

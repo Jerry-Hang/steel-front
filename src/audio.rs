@@ -2137,7 +2137,12 @@ mod tests {
     /// 反向验证：把 `AudioPlayer::tick` 末尾那段 `soft_limit(*x)` 删掉 ⇒ 本判据红。
     #[test]
     fn final_output_is_limited_after_both_buses_are_mixed() {
-        let src = include_str!("audio.rs");
+        // 🔴 Windows 检出是 CRLF（本机 `core.autocrlf=true`）⇒ 先归一化行尾。
+        // 原先直接搜 `"... {\n            *x = ..."` 在 CRLF 下永远搜不到（实测 2026-10-26：
+        // `cargo test --release` 在 Windows 上 4 红，其中两条是这类源码文本扫描）。
+        let raw = include_str!("audio.rs");
+        let src = raw.replace("\r\n", "\n");
+        let src = src.as_str();
         let tick = src
             .find("pub fn tick(&mut self, listener: &AudioListener, frames: usize)")
             .expect("tick 必须存在");
