@@ -2251,3 +2251,11 @@ SSCS 接触阴影 + 烘焙顶点 AO。
   修法：给该判据加 `#[cfg(any(target_os = "linux", target_os = "android"))]`；
 - 顺带清掉测试目标里的 3 个警告（多余括号 / 多余 `mut` / 未用 `from`）；
 - 现在：`cargo check --release --target x86_64-pc-windows-msvc --all-targets` **0 警告 0 错误**。
+
+#### 补记（同日）：真 exe 交叉编译成功
+- 装 `cargo-xwin`（`cargo install cargo-xwin --locked`，0.23.1）后：
+  `XWIN_ACCEPT_LICENSE=1 cargo xwin build --release --target x86_64-pc-windows-msvc`
+  ⇒ `target/x86_64-pc-windows-msvc/release/steel-front.exe`，**10.0 MiB / PE32+ x86-64 / 6 sections**（`file` 实测）。
+- 🔴 坑：不带 `XWIN_ACCEPT_LICENSE=1` 时它卡在 `Downloading MSVC CRT...` 上**无限等 TTY 许可确认**
+  （日志只有一行、缓存目录不增长）⇒ 误判成"网络不通"。实际缓存落在 `~/.cache/cargo-xwin`（1.1 GiB，含 `xwin/DONE`）。
+- ⚠ 未做：Wine 下实跑（本机无 wine）；exe 的子系统是 console（要隐藏控制台得改 `windows_subsystem`）。
