@@ -675,7 +675,7 @@ fn net_spawn_points_are_spread_around_the_base() {
         let (dx, dz) = (p[0] - base[0], p[1] - base[1]);
         let r = (dx * dx + dz * dz).sqrt();
         assert!((2.9..=6.6).contains(&r), "id={id} 半径 {r:.2} 不在 2.9..6.6");
-        let key = (format!("{:.2},{:.2}", p[0], p[1]));
+        let key = format!("{:.2},{:.2}", p[0], p[1]);
         assert!(seen.insert(key), "id={id} 与前面的出生点重叠（S13）");
     }
 }

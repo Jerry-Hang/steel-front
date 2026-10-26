@@ -1895,6 +1895,7 @@ mod tests {
     /// 所以只能用 cfg 门，不能靠运行时回退。
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn parse_online_list_handles_non_contiguous_cores() {
         assert_eq!(parse_online_list("0-3").unwrap(), vec![0, 1, 2, 3]);
         assert_eq!(parse_online_list("0,2,4").unwrap(), vec![0, 2, 4]);

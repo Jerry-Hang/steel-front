@@ -2563,7 +2563,7 @@ mod tests {
     fn join_proof_with_wrong_nonce_is_refused() {
         let mut server = Server::bind("127.0.0.1:0").unwrap();
         let addr = server.local_addr().unwrap();
-        let mut client = Client::connect(addr).unwrap();
+        let client = Client::connect(addr).unwrap();
         // 真发一次 Join，让服务端生成 pending nonce
         client
             .send(&NetworkMessage::Join { player_id: 0, name: "p".into(), version: SESSION_VERSION })
@@ -3680,7 +3680,7 @@ mod tests {
         let mut client = Client::connect(server_addr).unwrap();
 
         // S2 握手：Join → Challenge → JoinProof → Welcome（辅助函数内部逐步断言）
-        let from = complete_handshake(&mut server, &mut client, "player1");
+        let _from = complete_handshake(&mut server, &mut client, "player1");
         assert_eq!(client.player_id(), Some(1));
         assert!(client.is_connected());
         drain_punch_ports(&mut server);

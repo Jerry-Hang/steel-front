@@ -2243,3 +2243,11 @@ SSCS 接触阴影 + 烘焙顶点 AO。
 - 夜战闭环：手电开灯 ⇒ AI 视距 ×1.25（ai_sight_factor）；关灯 ⇒ 0.55×（vision_factor_for_sun）。
 - 雨：全屏 pass（RAIN_SPIRV，16B push，主 pass 末尾/HUD 前）；屏幕空间叠加，不被建筑遮挡。
 ```
+
+### 2026-10-27（续73）：Windows 交叉检查（全目标）修红 + 真 exe 交叉编译
+
+- 🔴 `cargo check --target x86_64-pc-windows-msvc --all-targets` 原本**红**：
+  `parse_online_list` 只在 linux/android 编译，而它的判据没加平台门控 ⇒ Windows 上测试目标编不过。
+  修法：给该判据加 `#[cfg(any(target_os = "linux", target_os = "android"))]`；
+- 顺带清掉测试目标里的 3 个警告（多余括号 / 多余 `mut` / 未用 `from`）；
+- 现在：`cargo check --release --target x86_64-pc-windows-msvc --all-targets` **0 警告 0 错误**。
