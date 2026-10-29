@@ -3,6 +3,23 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// 读取并规整 `assets/textures/ground_detail_asphalt.png`（CC0，ambientCG Asphalt033）。
+///
+/// 约定：源图是**灰度**（RGB 相同），引擎要的是「亮度调制 / 2」⇒ 每通道直接取灰度值。
+/// 尺寸必须是 `GROUND_DETAIL_SIZE`（256）：不是就双线性缩放到该尺寸（近邻会引入噪点）。
+fn load_ground_detail_texture() -> Option<Vec<u8>> {
+    let path = "assets/textures/ground_detail_asphalt.png";
+    let img = image::open(path).ok()?.to_rgba8();
+    let want = super::procedural::GROUND_DETAIL_SIZE;
+    let rgba = if img.width() == want && img.height() == want {
+        img
+    } else {
+        image::imageops::resize(&img, want, want, image::imageops::FilterType::Triangle)
+    };
+    log::info!("地面细节层使用真实贴图 {path}（CC0 / ambientCG Asphalt033）");
+    Some(rgba.into_raw())
+}
+
 impl Renderer {
     /// 创建一张带完整 mip 链的采样纹理：
     /// staging buffer → Image（SAMPLED|TRANSFER_DST|TRANSFER_SRC）→ 逐级 blit 生成 mip →
@@ -767,8 +784,20 @@ impl Renderer {
         // 采样器复用 texture_sampler（binding 3）：REPEAT + LINEAR/LINEAR-mip，
         // 正是平铺细节层要的（build.rs 用 textureSampleLevel 显式选 mip）。
         let detail_size = super::procedural::GROUND_DETAIL_SIZE;
+        // 真实贴图优先（2026-10-29）：`assets/textures/ground_detail_asphalt.png` 是
+        // **ambientCG CC0** 的沥青照片压到 256²、按"亮度调制 / 2"编码后的灰度图。
+        // 它替换的是"程序化噪声砂石"这一层（7.8mm/纹素），近景地面质感差别最直接。
+        // `RV3D_PROC_DETAIL=1` 强制回退程序化版本（做 A/B 用）。
+        let detail_pixels = if crate::syscfg::flag("RV3D_PROC_DETAIL") {
+            super::procedural::generate_default_ground_detail_texture()
+        } else {
+            load_ground_detail_texture().unwrap_or_else(|| {
+                log::warn!("assets/textures/ground_detail_asphalt.png 读取失败 ⇒ 回退程序化细节");
+                super::procedural::generate_default_ground_detail_texture()
+            })
+        };
         let (img, mem, view) = self.create_sampled_image(
-            &super::procedural::generate_default_ground_detail_texture(),
+            &detail_pixels,
             detail_size,
             detail_size,
             vk::Format::R8G8B8A8_UNORM,

@@ -33,3 +33,6 @@ __pycache__/
 
 # 生成器的临时输出目录（Blender 产物先落这里，确认后才入库）
 build/
+
+# 入库的真实地面细节贴图（CC0 / ambientCG Asphalt033）：assets/textures 其余内容仍是生成物
+!assets/textures/ground_detail_asphalt.png
