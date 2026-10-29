@@ -1224,6 +1224,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let ao = clamp(ao_sky * ao_contact, 0.62, 1.0);
             shaded = shaded * ao;
 
+            // 🧱 程序化表面细节（2026-10-29）：真机反馈"柱子/长椅/军箱全是一个色块"。
+            // 根因是道具**只有顶点色**（没有贴图、也没法线细节）。这里先用纯 ALU 补两层：
+            //   ① 砖缝：竖直面按 7.5cm 一层砖 + 24cm 一块、隔行错半块；
+            //   ② 污渍：世界空间 value noise 乘一圈明暗，让大面不再均匀。
+            // 它替代不了贴图，但能把"平涂色块"变成"有砌筑感的表面"。
+            if (abs(fnrm.y) < 0.6) {
+                let course = input.world_pos.y / 0.075;
+                let row = floor(course);
+                let mortar_y = abs(fract(course) - 0.5);
+                let horiz = input.world_pos.x + input.world_pos.z + row * 0.12;
+                let mortar_x = abs(fract(horiz / 0.24) - 0.5);
+                let mortar = max(smoothstep(0.40, 0.5, mortar_y), smoothstep(0.40, 0.5, mortar_x));
+                let grime = 0.86
+                    + 0.26 * vnoise2(input.world_pos.xz * 1.7 + vec2<f32>(input.world_pos.y * 0.9, 0.0));
+                shaded = shaded * grime * (1.0 - 0.32 * mortar);
+            }
+
         // 🏢 立面层线（2026-10-29）：GLB 建筑立面没有层线阴影，远看是一整片平墙。
         // 只作用于 Authored（GLB，flat_flag≈1.25）的**竖直面**：按 city.rs 的 FLOOR_H=3.15
         // 每层压一条极淡的暗线。**不画窗**（GLB 已有真窗，屏幕空间窗带会重演 D11 错位）。

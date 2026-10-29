@@ -2944,6 +2944,12 @@ impl GameApp {
                     .render_geometry()
                     .filter(|o| o.shape != engine::geom::Shape::None)
                     .filter(|o| !skip_building || o.kind != engine::game::ObstacleKind::Building)
+                    // 🔴 高空装饰件（挑檐/窗带/女儿墙）是挂在建筑盒上的：建筑盒不再画之后，
+                    // 它们就成了天空里一排悬空黑条（真机截图）。把离地 4m 以上的 Block 装饰件
+                    // 一并跳过 —— 可见的建筑表面已由 GLB 提供。
+                    .filter(|o| {
+                        !(skip_building && o.kind == engine::game::ObstacleKind::Block && o.y > 4.0)
+                    })
                     .filter(|_| !no_markers)
                     .map(engine::renderer::WorldMarker::for_obstacle)
                     .collect();
