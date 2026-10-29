@@ -855,11 +855,16 @@ fn wet_ground(col: vec3<f32>, input: VertexOutput) -> vec3<f32> {
     if (dot(wn, wv) < 0.0) {
         wn = -wn;
     }
-    let fres = pow(1.0 - clamp(dot(wn, wv), 0.0, 1.0), 4.0);
+    // 🔴 掠射角要**限幅**（2026-10-29 真机：远处平地整片发白）：
+    // 平地法线≈+Y，掠射时 dot→0 ⇒ fres→1，再把雾色（很亮）乘 0.45 打上去，
+    // 于是"地平线附近的地面"变成一大片白楔形。这里把 fres 夹到 0.35 并乘距离衰减。
+    let ndv = clamp(dot(wn, wv), 0.0, 1.0);
+    let fres = min(pow(1.0 - ndv, 4.0), 0.35);
+    let dist_fade = 1.0 - smoothstep(25.0, 90.0, length(input.view_dir));
     // 极轻微的水面流动，避免反光像贴纸。
     let ripple = 0.92 + 0.08 * sin(light_data.weather.z * 1.7 + input.world_pos.x * 0.35
                                 + input.world_pos.z * 0.27);
-    return col * (1.0 - 0.18 * wet) + fog_tint() * (0.45 * fres * wet * ripple);
+    return col * (1.0 - 0.18 * wet) + fog_tint() * (0.28 * fres * wet * ripple * dist_fade);
 }
 
 @fragment
