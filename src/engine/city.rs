@@ -950,6 +950,43 @@ fn flush_pending_containers(c: &mut City) {
 }
 
 /// 中央广场：纪念碑 + 花坛 + 长椅 + 旗杆（地面交给纹理，不放几何地台）。
+/// 可掩体小道具的专属 tint：判据靠它精确识别（`plaza_has_cover_props`）。
+/// ⚠ 别用尺寸当识别条件：0.30 这种半宽和树碰撞柱、护柱都会撞车，判据会变成假绿
+/// （2026-10-29 实测：把调用注释掉，判据照样绿）。
+const COVER_PROP: [f32; 3] = [0.42, 0.40, 0.36];
+
+/// 广场上的可掩体小道具：军箱 ×2 + 油桶 ×2（确定性位置）。
+///
+/// 为什么单独一个函数：`plaza` 已经很长，而这段是"摆几件小物件"的独立活；
+/// 位置/尺寸写死是为了让判据能钉住（`plaza_has_cover_props`），
+/// 而不是靠"看起来像有东西"。
+fn cover_props(c: &mut City, cx: f32, cz: f32) {
+    // (相对 x, 相对 z, 是否军箱)
+    const ITEMS: [(f32, f32, bool); 4] = [(6.4, 3.2, true), (-6.9, 4.6, true), (4.2, -6.6, false), (-4.8, -7.3, false)];
+    for (dx, dz, is_crate) in ITEMS {
+        let x = cx + dx;
+        let z = cz + dz;
+        let name = if is_crate { "crate_military" } else { "barrel_metal" };
+        // 半尺寸取契约表的一半（crate 1.814×0.980×0.301 / barrel 0.599×0.604×0.881）
+        let (hw, hd, h) = if is_crate { (0.907, 0.490, 0.301) } else { (0.300, 0.302, 0.881) };
+        if c.blocked_by_building(x, z, hw, hd, 0.20) || c.blocked_by_placed_prop(x, z, hw, hd, 0.10) {
+            continue;
+        }
+        let yaw = (dx * 0.7 + dz * 1.3).rem_euclid(std::f32::consts::TAU);
+        // 视觉：有资产就画 GLB；没有则下面的碰撞盒自己就是可见形状（marker 路径）
+        let _ = c.prop(name, x, z, yaw, 1.0);
+        // 碰撞：军箱/油桶都是能挡子弹的小掩体
+        // ⚠ 两条约定：
+        // ① `Part::new` 收的是**半尺寸**（与 plaza 的 3.4/3.4 同约定），不要再乘 2；
+        // ② 用 `Shape::None` —— 这一件**只做碰撞核**：可见面是上面的 GLB，
+        //    再画一个同尺寸盒子就是第二次"建筑碰撞盒盖在 GLB 上"的 z-fighting（续75 踩过）。
+        c.push(
+            Part::new(ObstacleKind::Block, x, z, hw, hd, on_ground(0.0), h, COVER_PROP)
+                .shape(Shape::None),
+        );
+    }
+}
+
 fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
     // **不要在这里铺"整块薄抬台"。** 第一版铺了一张 34m×34m、只有 0.29m 厚的板，
     // 实机截图里它就是一张篮球场大小的混凝土桌板浮在地面上——正是本次重构要消灭的
@@ -1105,6 +1142,10 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
     ] {
         bench(c, cx + dx, cz + dz, along);
     }
+    // 📦 可掩体小道具（2026-10-29）：广场原来只有长椅/花坛/喷泉，打起来是"空场"。
+    // 确定性放 2 只军箱 + 2 只油桶（位置写死，跑几次都一样），既有掩体也让画面有层次。
+    // 资产是下载的 CC0：Poly Haven `old_military_crate` / `barrel_03`。
+    cover_props(c, cx, cz);
 }
 
 /// 一条长椅（`along` = 长边沿 x 轴）。
@@ -2187,6 +2228,23 @@ mod city_layout_tests {
     /// 每个广场恰好 4 把椅座、且全部在距广场中心 10m 环上 ——
     /// 锁死"±8 旧环没删、8 把椅叠成长板"（d1pool_b）的修复。
     #[test]
+    /// 每个广场至少 3 件可掩体小道具（军箱/油桶），半尺寸与契约一致。
+    /// 反向验证：把 `cover_props(c, cx, cz)` 注释掉 ⇒ 红。
+    #[test]
+    fn plaza_has_cover_props() {
+        let m = generate_city();
+        for (px, pz) in [(27.5f32, 27.5f32), (-27.5, 27.5), (27.5, -27.5), (-27.5, -27.5)] {
+            let n = m
+                .obstacles
+                .iter()
+                .filter(|o| {
+                    o.tint == Some(COVER_PROP) && (o.x - px).hypot(o.z - pz) < 12.0
+                })
+                .count();
+            assert!(n >= 3, "广场 ({px},{pz}) 只有 {n} 件掩体道具（应 >=3）");
+        }
+    }
+
     fn benches_per_plaza_is_exactly_one_ring() {
         let m = generate_city();
         for (px, pz) in [(27.5f32, 27.5f32), (-27.5, 27.5), (27.5, -27.5), (-27.5, -27.5)] {

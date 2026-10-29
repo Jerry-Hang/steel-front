@@ -206,7 +206,7 @@ impl PropSet {
 /// `contract_matches_loaded_assets` 会在有资产时逐件比对（1mm 容差）；
 /// 资产改了尺寸而这里没跟 ⇒ 测试当场红。
 pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
-    ("barrel_metal", 0.536, 0.550, 0.880),
+    ("barrel_metal", 0.599, 0.604, 0.881),
     ("barrier_hesco", 2.631, 1.485, 1.772),
     ("barrier_jersey", 3.020, 0.600, 0.840),
     ("building_block", 14.140, 11.065, 10.390),
@@ -220,6 +220,7 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("container_20ft", 6.148, 2.538, 2.634),
     ("container_green", 6.148, 2.538, 2.634),
     ("container_navy", 6.148, 2.538, 2.634),
+    ("crate_military", 1.814, 0.980, 0.301),
     ("crate_wood", 0.665, 0.665, 0.640),
     ("downtown_large", 20.644, 16.645, 28.000),
     ("downtown_medium", 15.025, 13.025, 25.009),
