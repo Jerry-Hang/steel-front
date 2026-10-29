@@ -3,6 +3,22 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// 读取 `assets/textures/marker_skin_bricks.png`（CC0 / ambientCG Bricks075A）当作墙体皮肤。
+///
+/// 引擎的 marker（墙/沙袋/护栏）走**皮肤贴图 + 顶点色 tint**：贴图必须是 sRGB 编码的 RGB，
+/// 尺寸等于 `SKIN_TEXTURE_SIZE`（512）。读不到就返回 None ⇒ 调用方回退程序化皮肤。
+fn load_marker_skin_texture(size: u32) -> Option<Vec<u8>> {
+    let path = "assets/textures/marker_skin_bricks.png";
+    let img = image::open(path).ok()?.to_rgba8();
+    let rgba = if img.width() == size && img.height() == size {
+        img
+    } else {
+        image::imageops::resize(&img, size, size, image::imageops::FilterType::Triangle)
+    };
+    log::info!("墙体皮肤使用真实贴图 {path}（CC0 / ambientCG Bricks075A）");
+    Some(rgba.into_raw())
+}
+
 /// 读取并规整 `assets/textures/ground_detail_asphalt.png`（CC0，ambientCG Asphalt033）。
 ///
 /// 约定：源图是**灰度**（RGB 相同），引擎要的是「亮度调制 / 2」⇒ 每通道直接取灰度值。
@@ -758,7 +774,8 @@ impl Renderer {
         // 纹理恒创建（shader 静态引用 binding 7/8，descriptor 必须有效），仅门控采样路径。
         let skin_size = super::procedural::SKIN_TEXTURE_SIZE;
         let (img, mem, view) = self.create_sampled_image(
-            &super::procedural::generate_default_marker_skin_texture(),
+            &load_marker_skin_texture(skin_size)
+                .unwrap_or_else(super::procedural::generate_default_marker_skin_texture),
             skin_size,
             skin_size,
             vk::Format::R8G8B8A8_SRGB,

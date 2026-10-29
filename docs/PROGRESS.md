@@ -2371,3 +2371,18 @@ blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>     
 - 实测：三通道 vs 程序化 全图 **50.32%**、地面带 **71.17%**；
   三通道 + 分区 vs 关分区 全图 **72.30%**、地面带 **97.57%**；
 - 零顶点/零 draw call 成本（只换成一张图的通道读取）。
+
+### 2026-10-29（续80）：墙体皮肤换真实砖贴图；**树换不了**（预算否决，留证据）
+
+**已做：marker 皮肤 → 真实砖墙（CC0）**
+- 素材：**ambientCG Bricks075A（CC0）** 1K `_Color.jpg` → 512² → `assets/textures/marker_skin_bricks.png`；
+- `textures.rs` 皮肤创建处优先加载该文件（读不到回退程序化木板墙）；
+  注意皮肤是 **R8G8B8A8_SRGB + 顶点色 tint** 路径，和地面的 UNORM 线性编码**不是一回事**；
+- 实测（柱廊/护栏视角）皮肤开/关全图 7.38%（该视角 marker 像素少）；砖纹在柱/护栏上可见。
+
+**否决：Poly Haven / Quaternius 的树换不进来（顶点预算）**
+- Poly Haven 的树是照片级 + **alpha 卡**：引擎道具**不采样贴图、没有 alpha cutout**，
+  顶点色化之后叶子会变成实心片 ⇒ 观感反而更差；
+- Quaternius Stylized Nature 的 `CommonTree_1` 原始 6.1k 顶点，抽面到 0.05 仍有 **4.1k**；
+  372 棵 × 4.1k = **1.5M 顶点**，而道具缓冲上限 **2^20 = 1.05M**（当前已用 ~900k）⇒ 直接爆。
+- 结论：要换树必须**先降树的数量或做 LOD/instancing LOD**，这是独立一轮的工作，本轮不做。

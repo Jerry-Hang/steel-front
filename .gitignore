@@ -37,3 +37,4 @@ build/
 # 入库的真实地面细节贴图（CC0 / ambientCG Asphalt033）：assets/textures 其余内容仍是生成物
 !assets/textures/ground_detail_asphalt.png
 !assets/textures/ground_detail_3way.png
+!assets/textures/marker_skin_bricks.png
