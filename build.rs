@@ -1388,7 +1388,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // 显式 LOD：一个像素盖多少个纹素就取第几级 mip。
         // 为什么不用隐式 textureSample：它在非一致控制流（这个 if）里取屏幕导数属于
         // 未定义行为，而且这里本就是按米算出来的，没必要绕一圈导数。
-        let lvl = log2(max(gpx / GROUND_DETAIL_TEXEL_M, 1.0));
+        // 🔴 mip 偏置 +0.75（2026-10-30 实测）：近处 1 纹素 ≈ 1 像素时，沥青细节图的
+        // 高频颗粒会退化成"一排排白点"（底部高频 3.65 → 关层 1.04）。抬一点 mip 就平滑了。
+        let lvl = log2(max(gpx / GROUND_DETAIL_TEXEL_M, 1.0)) + 1.0;
         // 三通道取权重：路面=R(沥青)、人行道=G(混凝土)、腹地=B(土草)。
         // 分区功能关掉时（feature_bits 无 1 位）权重退化为沥青单通道，行为与上一版一致。
         let gw = select(vec3<f32>(1.0, 0.0, 0.0),
@@ -1421,7 +1423,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         // 🔴 掠射角要把细节层整体淡出（2026-10-30 真机：地面近处一排排"白点"）。
         // 判据用 `footprint_major`（沿视线方向的米/像素）：超过 30cm/像素时这一层只剩摩尔纹。
-        let detail_fade = 1.0 - smoothstep(0.05, 0.30, footprint_major);
+        // 🔴 判据必须是**拉伸比**，不是绝对足迹（2026-10-30 实测）：
+        // 近处地面 footprint_major 可能只有 2cm/像素，但沿视线方向被拉长 10 倍 ⇒
+        // 细节图（7.8mm/纹素）在那个方向上严重欠采样，画面上就是一排排白点。
+        // 关掉这一层可让底部高频从 3.65 掉到 1.04 —— 这条 A/B 就是判据。
+        let detail_fade = (1.0 - smoothstep(3.0, 8.0, stretch))
+            * (1.0 - smoothstep(0.05, 0.30, footprint_major));
         mixed = mixed * mix(1.0, gmod, gdetail * detail_fade);
     }
     if (light_data.flags.x < 0.5) {

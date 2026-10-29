@@ -468,7 +468,7 @@ def simplify(obj, keep_uv: bool) -> None:
     log(f"焊接后顶点 {len(me.vertices)} / 三角 {len(me.polygons)}")
 
 
-def export_glb(obj, out_path, name) -> None:
+def export_glb(obj, out_path, name, texcoords: bool = False) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     # 🔴 glTF 导入器会自带一个顶点色属性，加上我们的 "Col" 就会导出 COLOR_0 + COLOR_1
     # （引擎只读一路，多出来的纯属浪费带宽）。导出前只留 "Col"。
@@ -489,7 +489,7 @@ def export_glb(obj, out_path, name) -> None:
         export_apply=True,
         use_selection=True,
         export_normals=False,
-        export_texcoords=False,
+        export_texcoords=texcoords,
         export_materials="NONE",
         export_vertex_color="NAME",
         export_vertex_color_name="Col",
@@ -533,7 +533,7 @@ def main() -> None:
         pack_atlas_and_remap_uv(obj, args["atlas_slot"], args["atlas_out"])
     if args["double_sided"]:
         make_double_sided(obj)
-    export_glb(obj, args["out"], args["name"])
+    export_glb(obj, args["out"], args["name"], texcoords=args["atlas_slot"] is not None)
 
 
 main()

@@ -648,7 +648,19 @@ mod tests {
             assert!(clo >= 0.0 && chi <= 1.001,
                 "{} 顶点色超出 0..=1（[{clo}, {chi}]）——normalized 分量没换算",
                 path.display());
-            assert!(chi > clo, "{} 顶点色全同值，COLOR_0 可能根本没读到", path.display());
+            // 顶点色全同值只有在**没有贴图**时才算缺陷（2026-10-30）：
+            // 走 albedo 图集的道具（GLB 里带 TEXCOORD_0 + `prop_atlas_tex`）本来就靠贴图，
+            // 顶点色退化成单一色调是设计如此。判据改成"要么顶点色有变化，要么带 UV"。
+            if chi <= clo {
+                let raw = std::fs::read(&path).expect("读 GLB");
+                let has_uv = raw.windows(11).any(|w| w == b"TEXCOORD_0\"")
+                    || raw.windows(11).any(|w| w == b"TEXCOORD_0:");
+                assert!(
+                    has_uv,
+                    "{} 顶点色全同值且没有 TEXCOORD_0：既没颜色也没 UV，COLOR_0 可能没读到",
+                    path.display()
+                );
+            }
             assert!(lo[1] > -1.0,
                 "{} 原点不在底面（min.y={}）", path.display(), lo[1]);
             assert!(hi[1] < 40.0,
