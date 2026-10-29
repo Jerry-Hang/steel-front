@@ -1301,9 +1301,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // 腹地：草 / 铺装 由确定性格子噪声决定（11m 一档），避免整片同色
         let lot_h = fract(sin(dot(floor(gp * 0.09), vec2<f32>(12.9898, 78.233))) * 43758.5453);
         let lot = mix(vec3<f32>(0.44, 0.43, 0.41), vec3<f32>(0.17, 0.24, 0.14), step(0.52, lot_h));
-        let zone = vec3<f32>(0.12, 0.13, 0.15) * zone_road
+        var zone = vec3<f32>(0.12, 0.13, 0.15) * zone_road
                  + vec3<f32>(0.55, 0.54, 0.52) * zone_walk
                  + lot * (1.0 - zone_road - zone_walk);
+        // 🛣 路面标线（2026-10-29）：中心虚线 + 两侧车道边线。纯程序化，零资源。
+        // 只在"确实在路面上的像素"生效（zone_road > 0.5），不会画到人行道/草地上。
+        if (zone_road > 0.5) {
+            // 沿哪条路？gq.x 小 ⇒ 这是一条沿 z 走向的路（x≈55k 中心线）
+            let along_z = 1.0 - smoothstep(4.6, 5.6, gq.y);
+            let across = select(gq.x, gq.y, along_z > 0.5);
+            let along = select(input.world_pos.z, input.world_pos.x, along_z > 0.5);
+            // 中心虚线：8 m 一段、5 m 空隙
+            let dash = step(0.42, fract(along / 13.0));
+            let center = (1.0 - smoothstep(0.10, 0.22, across)) * dash;
+            // 车道边线：距中心 3.4 m，实线
+            let edge = 1.0 - smoothstep(0.10, 0.20, abs(across - 3.4));
+            let paint = clamp(center + edge * 0.85, 0.0, 1.0);
+            zone = mix(zone, vec3<f32>(0.72, 0.71, 0.66), paint * 0.85);
+        }
         // 保留贴图/顶点色的明暗起伏：按原亮度比例调制新基色
         let base_lum = clamp(dot(mixed, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.5);
         mixed = zone * (0.62 + 0.85 * base_lum);

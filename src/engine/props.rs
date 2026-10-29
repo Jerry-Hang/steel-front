@@ -229,7 +229,7 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("panel_block", 20.640, 12.640, 17.325),
     ("rubble_pile", 2.715, 2.352, 0.939),
     ("sandbag_wall", 3.316, 0.382, 0.754),
-    ("street_lamp", 1.240, 0.440, 4.977),
+    ("street_lamp", 0.908, 0.494, 4.978),
     ("tree_oak", 5.594, 5.552, 7.708),
     ("utility_pole", 3.400, 0.610, 8.000),
     ("wall_brick", 4.120, 0.400, 1.810),
