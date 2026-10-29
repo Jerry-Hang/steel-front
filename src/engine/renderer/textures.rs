@@ -8,7 +8,13 @@ use super::*;
 /// 约定：源图是**灰度**（RGB 相同），引擎要的是「亮度调制 / 2」⇒ 每通道直接取灰度值。
 /// 尺寸必须是 `GROUND_DETAIL_SIZE`（256）：不是就双线性缩放到该尺寸（近邻会引入噪点）。
 fn load_ground_detail_texture() -> Option<Vec<u8>> {
-    let path = "assets/textures/ground_detail_asphalt.png";
+    // 三通道细节图：R=沥青(ambientCG Asphalt033) / G=混凝土(Concrete034) / B=土草(Ground037)，
+    // 全部 CC0。片元按地面分区取权重混合（路面/人行道/腹地各有自己的质感），仍是一张 256² 图。
+    let path = if std::path::Path::new("assets/textures/ground_detail_3way.png").exists() {
+        "assets/textures/ground_detail_3way.png"
+    } else {
+        "assets/textures/ground_detail_asphalt.png"
+    };
     let img = image::open(path).ok()?.to_rgba8();
     let want = super::procedural::GROUND_DETAIL_SIZE;
     let rgba = if img.width() == want && img.height() == want {

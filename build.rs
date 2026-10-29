@@ -1281,6 +1281,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 拉伸比过大时（各向异性近似失效区）宁可退平，也别把条纹带回来
     let stretch_fade = 1.0 - smoothstep(4.0, 10.0, stretch);
     let gt_fade = stretch_fade * (1.0 - smoothstep(0.3, 1.0, footprint_major));
+    // 🌗 地面分区权重（2026-10-29）：提前算好并留到细节层用 —— 细节图是三通道
+    // （R=沥青 / G=混凝土 / B=土草），按这里的权重取对应通道，路面与人行道才有各自质感。
+    let gq = abs(input.world_pos.xz - round(input.world_pos.xz / 55.0) * 55.0);
+    let gdist = min(gq.x, gq.y);
+    let zone_road = 1.0 - smoothstep(4.6, 5.6, gdist);
+    let zone_walk = smoothstep(4.6, 5.6, gdist) * (1.0 - smoothstep(8.4, 9.6, gdist));
+
     var mixed = mix(
         vec3<f32>(gtone),
         texel.rgb * mix(0.85, 1.15, clamp(gtone, 0.0, 1.0)),
@@ -1291,17 +1298,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // 把地面分成 沥青主干道 / 人行道 / 街区腹地(草或铺装) 三档，**只换基色、保留原有纹理细节**。
     if ((feature_bits & 1u) != 0u) {
         let gp = input.world_pos.xz;
-        // 到最近街道中心线的距离（55 m 网格）
-        let gq = abs(gp - round(gp / 55.0) * 55.0);
-        let gd = min(gq.x, gq.y);
-        let t_road = 1.0 - smoothstep(4.6, 5.6, gd);
-        let t_walk = smoothstep(4.6, 5.6, gd) * (1.0 - smoothstep(8.4, 9.6, gd));
         // 腹地：草 / 铺装 由确定性格子噪声决定（11m 一档），避免整片同色
         let lot_h = fract(sin(dot(floor(gp * 0.09), vec2<f32>(12.9898, 78.233))) * 43758.5453);
         let lot = mix(vec3<f32>(0.44, 0.43, 0.41), vec3<f32>(0.17, 0.24, 0.14), step(0.52, lot_h));
-        let zone = vec3<f32>(0.12, 0.13, 0.15) * t_road
-                 + vec3<f32>(0.55, 0.54, 0.52) * t_walk
-                 + lot * (1.0 - t_road - t_walk);
+        let zone = vec3<f32>(0.12, 0.13, 0.15) * zone_road
+                 + vec3<f32>(0.55, 0.54, 0.52) * zone_walk
+                 + lot * (1.0 - zone_road - zone_walk);
         // 保留贴图/顶点色的明暗起伏：按原亮度比例调制新基色
         let base_lum = clamp(dot(mixed, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.5);
         mixed = zone * (0.62 + 0.85 * base_lum);
@@ -1341,8 +1343,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // 为什么不用隐式 textureSample：它在非一致控制流（这个 if）里取屏幕导数属于
         // 未定义行为，而且这里本就是按米算出来的，没必要绕一圈导数。
         let lvl = log2(max(gpx / GROUND_DETAIL_TEXEL_M, 1.0));
-        let g = textureSampleLevel(ground_detail_tex, texture_sampler,
-                                   input.world_pos.xz / GROUND_DETAIL_METRES, lvl).r;
+        // 三通道取权重：路面=R(沥青)、人行道=G(混凝土)、腹地=B(土草)。
+        // 分区功能关掉时（feature_bits 无 1 位）权重退化为沥青单通道，行为与上一版一致。
+        let gw = select(vec3<f32>(1.0, 0.0, 0.0),
+                        vec3<f32>(zone_road, zone_walk, 1.0 - zone_road - zone_walk),
+                        (feature_bits & 1u) != 0u);
+        let gtex = textureSampleLevel(ground_detail_tex, texture_sampler,
+                                     input.world_pos.xz / GROUND_DETAIL_METRES, lvl).rgb;
+        let g = dot(gtex, gw);
         // 纹素编码约定：r = 亮度调制 / 2（调制 1.0 → 128）。见 GROUND_DETAIL_GAIN 注释。
         // 二级兜底（flag 已开但图本身有问题时）：clamp 到 [0.5,2.0] 且把 g<=0 判为"该层
         // 不参与"。真实纹素域 ≈[0.33,0.61]（procedural.rs::generate_ground_detail_texture
