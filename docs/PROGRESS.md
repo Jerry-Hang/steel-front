@@ -2317,3 +2317,35 @@ SSCS 接触阴影 + 烘焙顶点 AO。
   探针实测该视角下建筑像素的 `flat_flag` 落在 ~2 附近，说明**那些"楼"并不是 Authored GLB 路径**
   ⇒ 下一步必须先用 `RV3D_DUMP_NEAR=25` 点名几何，再决定挂在哪条分支。
 - `RV3D_VALIDATION=1` 8s：**VUID=0**。
+
+### 2026-10-29（续77）：改用**下载的 CC0 资产**（不再手搓建模）
+
+用户明确要求：不要自己搓美术资产，直接去下载。落地如下。
+
+**来源与许可**
+- Quaternius **Downtown City MegaKit**（**CC0** / public domain）：
+  `https://quaternius.itch.io/downtown-city-megakit`（itch 免费包，223 MB，153 个 glTF + 贴图）。
+- 只取其中 3 个**已装配好的楼**：`Building_Large_2` / `Building_Medium_2_001` / `Building_Small_1`。
+
+**导入器（新工具）**：`tools/blender/import_external.py`
+```
+blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>         [--name N] [--target-height M] [--decimate 0.3] [--keep-uv]
+```
+它做：导入 → join 单 mesh → **Cycles 烘焙基础色到顶点色 `Col`** → 应用变换 →
+底面中心归零 → 可选等比缩放 → 可选抽面 → 导出（`export_yup`、`export_normals=False`、
+`export_vertex_color=NAME/Col`）。
+
+🔴 **踩坑（重要）**：第一版按 `Base Color.links[0]` 找 `TEX_IMAGE` 采样，Quaternius 的材质是
+「贴图 → 混合节点 → Principled」，**找不到贴图** ⇒ 全部顶点色退化成材质默认 0.8 灰，
+被引擎自己的判据 `glb_prop_kit_loads_with_valid_range`「顶点色全同值」当场抓住。
+改成 **Cycles bake（target=VERTEX_COLORS）** 后任何节点图都成立（实测 4k 采样出现 994 种颜色）。
+另外 glTF 导入器自带一个顶点色属性，不删就会和 `Col` 一起导出成 `COLOR_0 + COLOR_1`（白占带宽）。
+
+**入库与接线**
+- `assets/props/downtown_large.glb`（28.0 m，7.2k 三角）/ `downtown_medium.glb`（25.0 m，5.0k）/
+  `downtown_small.glb`（17.0 m，4.4k）；顶点 19.0k / 14.6k / 8.0k；
+- `props.rs::CONTRACT_SIZES` 追加三条（**按名字排序**，判据锁这个顺序），尺寸由 GLB 实测写死；
+- `city.rs::pick_building` 把三件挂进 3 层与高层两种街区的候选表 ⇒ 街区里出现真砖楼（带窗/檐口）。
+
+**代价（如实）**：同机位 fps 295 → **185**（第一人称街景）、俯瞰 97；道具顶点缓冲从
+489k 涨到 ~900k+（上限 2^20，仍在带内但接近）。若要再加大楼，必须先做 LOD 或再抽面。

@@ -371,8 +371,8 @@ impl City {
         let cands: &[&'static str] = match floors {
             0 | 1 => &["building_shed"],
             2 => &["building_block", "building_wide", "building_corner"],
-            3 => &["building_tall", "building_wide"],
-            _ => &["panel_block", "building_tall"],
+              3 => &["building_tall", "building_wide", "downtown_small"],
+              _ => &["panel_block", "building_tall", "downtown_medium", "downtown_large"],
         };
         let target = (w / d.max(0.01)).ln();
         let mut best: Option<(f32, &'static str, f32)> = None;
