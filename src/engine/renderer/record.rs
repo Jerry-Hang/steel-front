@@ -713,7 +713,10 @@ impl Renderer {
                     drawn_vert_span = self.prop_vertex_count as u64;
                 } else {
                     for bin in &self.prop_bins {
-                        if !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0) {
+                        // `RV3D_NO_BIN_CULL=1` 关掉分桶剔除，用于排查"边缘整块消失/变白"。
+                        if !crate::syscfg::flag("RV3D_NO_BIN_CULL")
+                            && !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0)
+                        {
                             continue;
                         }
                         drawn_bins += 1;
@@ -818,11 +821,26 @@ impl Renderer {
         if self.gun_index_count > 0 && self.gun_vertex_count > 0 {
             unsafe {
                 // 检视模式用带深度测试的枪模管线（`gun_pipeline_depth` 的注释有完整理由）
-                let gun_pipe = if self.gun_depth_test {
-                    self.gun_pipeline_depth
-                } else {
-                    self.gun_pipeline
-                };
+                // 🔴 第一人称枪模也走**带深度**的管线：先把这个 pass 的深度清成 1.0 ⇒
+                //   ① 自遮挡正确（此前无深度 ⇒ 内部结构按提交顺序盖在表面，
+                //      用户报的"透视窗能看到枪械内部"就是这个）；
+                //   ② 仍恒在场景之上（深度清空，近处的墙不会把枪裁掉）；
+                //   ③ 玻璃等半透明面在枪之前绘制 ⇒ 枪盖住它们（枪在最前，正确）。
+                // 代价：一次全屏深度清（`cmd_clear_attachments`），极便宜。
+                let clear_depth = [vk::ClearAttachment::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .clear_value(vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 },
+                    })];
+                let clear_rect = [vk::ClearRect::default()
+                    .rect(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: self.render_extent,
+                    })
+                    .base_array_layer(0)
+                    .layer_count(1)];
+                self.device.cmd_clear_attachments(command_buffer, &clear_depth, &clear_rect);
+                let gun_pipe = self.gun_pipeline_depth;
                 self.device.cmd_bind_pipeline(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,

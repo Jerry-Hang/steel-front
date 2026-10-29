@@ -2931,10 +2931,20 @@ impl GameApp {
             // 下面那次 `clone()` 只是 memcpy —— 贵的是"构造"，不是"拷贝"。
             let cur_gen = self.game.map_generation();
             if self.obstacle_markers_gen != Some(cur_gen) {
+                // 🔴 **建筑不再画碰撞盒 marker**（2026-10-29 真机定位）：
+                // 建筑本体已经由 GLB 画出来，而它那条"碰撞盒 marker"会在同一位置再画一个
+                // 灰色混凝土壳 —— 壳与立面共面/略大的地方就 z-fighting，用户看到的
+                // "转视角房子在棕和灰之间跳"正是它（A/B 实测：关掉后露出的是棕色 GLB 立面）。
+                // 需要回退排查时用 `RV3D_BUILDING_MARKERS=1`。
+                // `RV3D_NO_MARKERS=1`：连装饰件一起关，用于判断"白色大板"到底来自 marker 还是 GLB。
+                let no_markers = crate::syscfg::flag("RV3D_NO_MARKERS");
+                let skip_building = no_markers || !crate::syscfg::flag("RV3D_BUILDING_MARKERS");
                 self.obstacle_markers_cache = self
                     .game
                     .render_geometry()
                     .filter(|o| o.shape != engine::geom::Shape::None)
+                    .filter(|o| !skip_building || o.kind != engine::game::ObstacleKind::Building)
+                    .filter(|_| !no_markers)
                     .map(engine::renderer::WorldMarker::for_obstacle)
                     .collect();
                 self.obstacle_markers_gen = Some(cur_gen);
