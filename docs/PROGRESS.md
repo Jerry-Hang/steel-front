@@ -2594,3 +2594,14 @@ importer 把源贴图打包成图集、片元采样），否则永远是一堆�
 1. 道具/装饰**没有贴图通道** ⇒ 灌木青绿扁片、长椅/军箱/消防栓仍是单色块（需要 albedo 图集 + UV）；
 2. 树的**树干像圆锥**（抽面把环切塌了）⇒ 换更细干的树或树干免抽面；
 3. 柱廊柱子的**顶盖**在仰视时像开口（待查圆柱 cap 绕序/相机近平面）。
+
+### 2026-10-29（续93）：道具 albedo 图集 —— 第 1 步（管线打通，fail-safe）
+
+- `PROP_ATLAS_BINDING = 12`（SAMPLED_IMAGE）：描述符布局 + 池计数 6→**7** + 每帧写入 + drop 释放；
+- `textures.rs` 先建 **1×1 白图**占位；片元只在 `length(input.uv) > 1e-4` 的件上采样
+  （旧资产/程序化件 UV 全零 ⇒ **跳过采样**，画面与上一版逐像素一致 —— fail-safe）；
+- `RV3D_VALIDATION=1` 8s **VUID=0**（新增 binding 没有打破布局/池）。
+
+**下一步（第 2 步）**：`tools/pack_prop_atlas.py` 把各道具的 base color 贴图打进
+`assets/textures/prop_atlas.png`（2048²，4×4 个 512² 格），importer 用 `--atlas-slot N`
+把 UV 重映射到对应格子；然后重出 crate/bench/hydrant 等件，引擎改成加载该图集。

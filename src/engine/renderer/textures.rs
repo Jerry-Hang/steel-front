@@ -828,6 +828,18 @@ impl Renderer {
         self.ground_detail_image = img;
         self.ground_detail_memory = mem;
         self.ground_detail_image_view = view;
+        // 道具 albedo 图集（binding 12）：先建 1×1 白图 —— 片元只在"有 UV"的件上采样，
+        // 白图 × 顶点色 = 原样，所以这条链路在贴图还没做出来时是 fail-safe 的。
+        let (img, mem, view) = self.create_sampled_image(
+            &[255u8, 255, 255, 255],
+            1,
+            1,
+            vk::Format::R8G8B8A8_SRGB,
+        )?;
+        self.prop_atlas_image = img;
+        self.prop_atlas_memory = mem;
+        self.prop_atlas_image_view = view;
+        log::info!("道具 albedo 图集占位（1x1 白，binding 12）");
         log::info!(
             "地面微细节层初始化完成: {}x{} 覆盖 {}m（{} 纹素/米，UNORM 线性，绑定 binding {}）",
             detail_size,

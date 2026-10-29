@@ -256,6 +256,8 @@ const SPEC_CONTRIB: f32 = 0.4;
 // light UBO/shadow map/shadow sampler/两张皮肤占用）；采样器复用 binding 3 的
 // texture_sampler（REPEAT + LINEAR/LINEAR mip + max_lod=mip_levels-1，正好够用）。
 @group(0) @binding(9) var ground_detail_tex: texture_2d<f32>;
+// 道具 albedo 图集（binding 12）：UV 非零的道具才采样，白图 = 原样（fail-safe）。
+@group(0) @binding(12) var prop_atlas_tex: texture_2d<f32>;
 // 与 procedural.rs 的 GROUND_DETAIL_METRES / GROUND_DETAIL_SIZE 严格同步（改了必须两边改）
 const GROUND_DETAIL_METRES: f32 = 2.0;
 // 一个纹素的米数 = 2.0 / 256
@@ -1224,6 +1226,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let ao = clamp(ao_sky * ao_contact, 0.62, 1.0);
             shaded = shaded * ao;
 
+            // 🖼 道具 albedo 图集（2026-10-29）：带 UV 的件（uv 非零）才采样；
+            // UV 全零 = 旧资产/程序化件 ⇒ 跳过，行为与上一版逐像素一致。
+            if (length(input.uv) > 1e-4) {
+                let tex = textureSample(prop_atlas_tex, texture_sampler, input.uv).rgb;
+                // 采样值直接当反照率调制：白图（1×1）= 1.0 ⇒ 不影响顶点色。
+                shaded = shaded * mix(vec3<f32>(1.0), tex * 1.9, 0.85);
+            }
             // 🧱 程序化表面细节（2026-10-29）：真机反馈"柱子/长椅/军箱全是一个色块"。
             // 根因是道具**只有顶点色**（没有贴图、也没法线细节）。这里先用纯 ALU 补两层：
             //   ① 砖缝：竖直面按 7.5cm 一层砖 + 24cm 一块、隔行错半块；

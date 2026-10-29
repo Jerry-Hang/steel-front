@@ -93,6 +93,13 @@ impl Renderer {
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        // 道具 albedo 图集（binding=12）：片元 `prop_atlas_tex`；UV 全零的件跳过采样，
+        // 所以图集没准备好时整条链路 fail-safe（白图 × 顶点色 = 原样）。
+        let prop_atlas_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(PROP_ATLAS_BINDING)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let bindings = [
             ubo_layout_binding,
             sampled_image_binding,
@@ -106,6 +113,7 @@ impl Renderer {
             npc_skin_binding,
             ground_detail_binding,
             shadow_dyn_binding,
+            prop_atlas_binding,
         ];
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default()
@@ -206,7 +214,8 @@ impl Renderer {
                 // binding 1 地面贴图 + binding 5 静态阴影图 + binding 7/8 marker/NPC 皮肤纹理
                 // + binding 9 地面微细节层 + binding 10 动态阴影图（缺一个 = 该 set 分配失败
                 // → 启动即报错）。加采样图绑定**必须同时改这个数**。
-                .descriptor_count((max_frames * 6) as u32),
+                // binding 12 道具图集也算 SAMPLED_IMAGE
+                .descriptor_count((max_frames * 7) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count((max_frames * 2) as u32),
@@ -549,6 +558,18 @@ impl Renderer {
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&shadow_dyn_infos);
 
+            // 道具 albedo 图集（binding 12）：白色 1×1 时等价于"不采样"，见 textures.rs
+            let prop_atlas_info = vk::DescriptorImageInfo::default()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(self.prop_atlas_image_view)
+                .sampler(self.texture_sampler);
+            let prop_atlas_infos = [prop_atlas_info];
+            let prop_atlas_write = vk::WriteDescriptorSet::default()
+                .dst_set(self.descriptor_sets[i])
+                .dst_binding(PROP_ATLAS_BINDING)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&prop_atlas_infos);
             let writes = [
                 sampled_image_write,
                 sampler_write,
@@ -559,6 +580,7 @@ impl Renderer {
                 npc_skin_write,
                 ground_detail_write,
                 shadow_dyn_write,
+                prop_atlas_write,
             ];
             unsafe {
                 self.device.update_descriptor_sets(&writes, &[]);

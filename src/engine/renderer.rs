@@ -87,6 +87,8 @@ const GROUND_DETAIL_BINDING: u32 = 9;
 /// 10 是本 set layout 里 ground_detail(9) 之后的第一个空位；**必须与 build.rs WGSL 的
 /// `@group(0) @binding(10) var shadow_dyn_map` 同步**。
 const SHADOW_DYN_BINDING: u32 = 10;
+/// 道具 albedo 图集（binding=12 SAMPLED_IMAGE；片元 `prop_atlas_tex`，UV 为 0 的件跳过采样）
+const PROP_ATLAS_BINDING: u32 = 12;
 
 /// 🧊 磨砂玻璃背景模糊图的尺寸（固定，不随交换链变化 —— 理由见 `init_menu_blur`）。
 /// 320×200 ≈ 交换链的 1/8，一次线性 blit 就得到 8×8 盒式平均，正是"毛玻璃"需要的低频。
@@ -902,6 +904,10 @@ pub struct Renderer {
     ground_detail_image: vk::Image,
     ground_detail_memory: vk::DeviceMemory,
     ground_detail_image_view: vk::ImageView,
+    /// 道具 albedo 图集（白色 1×1 = 未启用时的安全值）
+    prop_atlas_image: vk::Image,
+    prop_atlas_memory: vk::DeviceMemory,
+    prop_atlas_image_view: vk::ImageView,
     /// RV3D_SKIN_TEX=1 启用 marker/NPC 皮肤纹理（缺省 0 = 保持纯色路径，冒烟基线不变）
     skin_tex_enabled: bool,
     /// 各向异性过滤是否可用（物理设备支持 samplerAnisotropy 时为 true）

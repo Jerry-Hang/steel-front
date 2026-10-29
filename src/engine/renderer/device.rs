@@ -737,6 +737,9 @@ impl Renderer {
             ground_detail_image: vk::Image::null(),
             ground_detail_memory: vk::DeviceMemory::null(),
             ground_detail_image_view: vk::ImageView::null(),
+            prop_atlas_image: vk::Image::null(),
+            prop_atlas_memory: vk::DeviceMemory::null(),
+            prop_atlas_image_view: vk::ImageView::null(),
             // 2026-08-22：默认启用（RV3D_SKIN_TEX=0 关闭纯色回退）——障碍需要表面细节
             skin_tex_enabled: crate::syscfg::cfg("RV3D_SKIN_TEX").as_deref() != Some("0"),
             texture_anisotropy_enabled: physical_device_features.sampler_anisotropy != 0,

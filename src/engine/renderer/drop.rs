@@ -469,6 +469,11 @@ impl Drop for Renderer {
                     self.ground_detail_memory,
                     self.ground_detail_image_view,
                 ),
+                (
+                    self.prop_atlas_image,
+                    self.prop_atlas_memory,
+                    self.prop_atlas_image_view,
+                ),
             ] {
                 if view != vk::ImageView::null() {
                     self.device.destroy_image_view(view, None);
