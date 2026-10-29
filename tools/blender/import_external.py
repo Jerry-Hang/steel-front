@@ -182,6 +182,38 @@ def simplify(obj, keep_uv: bool) -> None:
         while me.uv_layers:
             me.uv_layers.remove(me.uv_layers[0])
         log("已移除 UV（引擎道具不采样贴图）")
+    # 🔴 量化顶点色再焊接（2026-10-29 实测的根因）：烘焙出来的顶点色是**每个 corner 都不同**的
+    # 连续值，`remove_doubles` 因此几乎合并不了任何顶点 —— 导出的顶点数 ≈ 三角数的 3 倍
+    # （downtown_large 抽面到 7.2k 三角却导出 19k 顶点）。把颜色量化到 6 bit/通道后，
+    # 同面同色的 corner 才能合并，顶点数掉到接近三角数的一半，观感无明显差别。
+    # 🔴 再一个根因（同日实测）：即使量化了，**CORNER 域的顶点色**依然让 glTF 导出器
+    # 把"同一位置不同角颜色不同"的顶点拆开 ⇒ 顶点数 ≈ 三角数 × 2.6。
+    # 改成 **POINT 域**（每顶点一个颜色 = 该点各角的平均）后，硬边不再拆点：
+    # 顶点数降到接近"三角数 / 2"，观感只有轻微平滑（道具本来就是顶点色着色）。
+    col = me.color_attributes.get("Col")
+    if col is not None:
+        per_vert = {}
+        for poly in me.polygons:
+            for li in poly.loop_indices:
+                vi = me.loops[li].vertex_index
+                c = col.data[li].color
+                acc = per_vert.setdefault(vi, [0.0, 0.0, 0.0, 0.0])
+                acc[0] += c[0]
+                acc[1] += c[1]
+                acc[2] += c[2]
+                acc[3] += 1.0
+        me.color_attributes.remove(col)
+        point_col = me.color_attributes.new(name="Col", type="FLOAT_COLOR", domain="POINT")
+        for vi, acc in per_vert.items():
+            n = max(acc[3], 1.0)
+            point_col.data[vi].color = (
+                round((acc[0] / n) * 63.0) / 63.0,
+                round((acc[1] / n) * 63.0) / 63.0,
+                round((acc[2] / n) * 63.0) / 63.0,
+                1.0,
+            )
+        me.color_attributes.active_color = point_col
+        log("顶点色已转 POINT 域并量化到 6 bit（为焊接/减少拆点）")
     # 合并重复顶点（位置+颜色相同）——下载资产的硬边会让顶点翻倍
     bm = bmesh.new()
     bm.from_mesh(me)

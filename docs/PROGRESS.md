@@ -2433,3 +2433,29 @@ blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>     
   `container_navy=8` / `crate_military=8` / `downtown_medium=8` / `sandbag_wall=8` /
   `container_20ft=7` / `building_block=4` / `downtown_large=4` / `downtown_small=4`；
 - 顶点预算 **882,884 / 1,048,576（84%）**。
+
+### 2026-10-29（续84）：顶点色改 POINT 域 —— 下载资产顶点数腰斩（预算 883k→739k）
+
+**为什么做**：LOD 框架这轮**没做**（道具是按街区合并成一个大 buffer 的，按实例切 LOD 要再建
+一套低模合并缓冲 + 双份 bin 范围，属于动管线的活，硬塞容易做半截）。先解决更底层的问题：
+
+**根因（两个，同日实测）**
+1. 烘焙出的顶点色是**每个 corner 都不同**的连续值 ⇒ `remove_doubles` 合并不了任何顶点；
+2. 即便如此，只要颜色在 **CORNER 域**，glTF 导出器仍会按"同位置不同角颜色"拆点
+   ⇒ 顶点数 ≈ 三角数 × 2.6。
+
+**做法**：`import_external.py::simplify`
+- 把烘焙结果**平均成 POINT 域**（每顶点一个颜色）+ 量化到 6 bit/通道，再焊接、再导出。
+
+**实测**
+| 资产 | 之前顶点 | 之后顶点 |
+|---|---|---|
+| downtown_large | 18966 | **9742** |
+| downtown_medium | 14636 | **6484** |
+| downtown_small | 8020 | **4609** |
+| car_wreck | 2951 | **2653** |
+| crate_military | 3394 | **3072** |
+| street_lamp | 1521 | **1511** |
+- 场景道具顶点：**882,884 → 739,328**（上限 1,048,576，占用 84% → **70%**）；
+- 契约尺寸按重出后的实测值同步（小数三位）；
+- 观感：颜色由"每角精确"变"每顶点平均"，道具本来就是顶点色着色，肉眼几乎无差。
