@@ -355,7 +355,18 @@ impl Game {
         let rain = if self.rain { 1.0 } else { 0.0 };
         // 水面反光强度单独可关（RV3D_NO_WET=1），用于把"水光"从"阴雨天光变暗"里隔离出来做 A/B。
         let wet = if self.rain && !crate::syscfg::flag("RV3D_NO_WET") { 1.0 } else { 0.0 };
-        lu.weather = glam::Vec4::new(rain, wet, self.time, 0.0);
+        // weather.w = 画面功能位掩码：1=地面分层、2=立面层线、4=枪体明暗（各自可单独关掉做 A/B）。
+        let mut bits = 0.0f32;
+        if !crate::syscfg::flag("RV3D_NO_GROUND_ZONES") {
+            bits += 1.0;
+        }
+        if !crate::syscfg::flag("RV3D_NO_FACADE_DETAIL") {
+            bits += 2.0;
+        }
+        if !crate::syscfg::flag("RV3D_NO_GUN_SHADE") {
+            bits += 4.0;
+        }
+        lu.weather = glam::Vec4::new(rain, wet, self.time, bits);
         lu
     }
 }

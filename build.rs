@@ -864,6 +864,8 @@ fn wet_ground(col: vec3<f32>, input: VertexOutput) -> vec3<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // 画面功能位掩码（weather.w）：1=地面分层、2=立面层线、4=枪体明暗。
+    let feature_bits = u32(round(light_data.weather.w));
     // ---- 运动向量调试可视化（RV3D_MV_DEBUG=1，2026-10-11）----
     // 这是**运动向量的验收工具**：MV 的符号 / 单位 / 是否恒 0，只能靠它看出来。
     //   0.5 灰 = 无运动；R>0.5 = 向后（或向右）；G>0.5 = 向下
@@ -916,6 +918,21 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
     // 枪模（flat=3）：顶点色已含烘焙光照，直出（不再被实时光照二次处理）
     if (input.flat_flag > 2.5) {
+        // 🔫 近景材质（2026-10-29）：枪模此前是**纯色平涂**（直接 return 顶点色），
+        // 近看没有任何明暗层次 ⇒ 用户"看不出是个游戏"的一大来源。
+        // 用顶点法线 + 主光做一次最便宜的 N·L，并加一圈很窄的边缘光。
+        if ((feature_bits & 4u) != 0u) {
+            let gn = normalize(input.normal);
+            let gv = normalize(-input.view_dir);
+            let gl = normalize(light_data.directional.direction.xyz);
+            let ndl = clamp(dot(gn, gl), 0.0, 1.0);
+            let rim = pow(1.0 - clamp(dot(gn, gv), 0.0, 1.0), 3.0);
+            let base = input.color;
+            // 0.45 + 0.50·N·L：不越过 1.0，避免枪身高光糊成白块（A/B 实测 0.62+0.55 会过曝）。
+            let col = base * (0.45 + 0.50 * ndl)
+                    + vec3<f32>(0.14, 0.15, 0.18) * (rim * 0.5);
+            return vec4<f32>(col * input.fade, 1.0);
+        }
         return vec4<f32>(input.color * input.fade, 1.0);
     }
     // marker/NPC 材质编码路径：flat_flag=1（marker）/ 2（NPC），按顶点 UV 采样
@@ -1201,6 +1218,21 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let ao_contact = 0.72 + 0.28 * (ao_h * ao_h * (3.0 - 2.0 * ao_h));
             let ao = clamp(ao_sky * ao_contact, 0.62, 1.0);
             shaded = shaded * ao;
+
+        // 🏢 立面层线（2026-10-29）：GLB 建筑立面没有层线阴影，远看是一整片平墙。
+        // 只作用于 Authored（GLB，flat_flag≈1.25）的**竖直面**：按 city.rs 的 FLOOR_H=3.15
+        // 每层压一条极淡的暗线。**不画窗**（GLB 已有真窗，屏幕空间窗带会重演 D11 错位）。
+        // 判据不依赖 flat_flag（实测建筑的真实值不在 Authored 区间）：改用**几何启发式**
+        // —— 竖直面 + 距相机 12 m 以外。近处的枪/近身士兵因此不受影响。
+        if ((feature_bits & 2u) != 0u && abs(fnrm.y) < 0.5
+            && length(input.view_dir) > 12.0) {
+            // ① 底层积污：贴地 5.5 m 内渐暗（0.80 → 1.0）。远距离也看得见，是"楼站地上"的锚点。
+            shaded = shaded * mix(0.80, 1.0, smoothstep(0.0, 5.5, input.world_pos.y));
+            // ② 层线做成"上暗下亮"的一条带（0.10 m 宽），比 1cm 细线更抗混叠，近看是层间阴影。
+            let fl = fract(input.world_pos.y / 3.15);
+            let band = smoothstep(0.0, 0.08, fl) * (1.0 - smoothstep(0.08, 0.18, fl));
+            shaded = shaded * (1.0 - 0.45 * band);
+        }
         }
 
         let fg = fog_amount(view_distance(input));
@@ -1254,6 +1286,26 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         texel.rgb * mix(0.85, 1.15, clamp(gtone, 0.0, 1.0)),
         gt_fade,
     );
+    // 🌗 地面分层（2026-10-29）：整片地面此前只有一种灰（顶点色调 + 一张烘焙图），
+    // 远看就是"一坨灰板"。这里按城市路网（真源 = city.rs：STREET_EVERY/ROAD_HALF/SIDEWALK）
+    // 把地面分成 沥青主干道 / 人行道 / 街区腹地(草或铺装) 三档，**只换基色、保留原有纹理细节**。
+    if ((feature_bits & 1u) != 0u) {
+        let gp = input.world_pos.xz;
+        // 到最近街道中心线的距离（55 m 网格）
+        let gq = abs(gp - round(gp / 55.0) * 55.0);
+        let gd = min(gq.x, gq.y);
+        let t_road = 1.0 - smoothstep(4.6, 5.6, gd);
+        let t_walk = smoothstep(4.6, 5.6, gd) * (1.0 - smoothstep(8.4, 9.6, gd));
+        // 腹地：草 / 铺装 由确定性格子噪声决定（11m 一档），避免整片同色
+        let lot_h = fract(sin(dot(floor(gp * 0.09), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        let lot = mix(vec3<f32>(0.44, 0.43, 0.41), vec3<f32>(0.17, 0.24, 0.14), step(0.52, lot_h));
+        let zone = vec3<f32>(0.12, 0.13, 0.15) * t_road
+                 + vec3<f32>(0.55, 0.54, 0.52) * t_walk
+                 + lot * (1.0 - t_road - t_walk);
+        // 保留贴图/顶点色的明暗起伏：按原亮度比例调制新基色
+        let base_lum = clamp(dot(mixed, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.5);
+        mixed = zone * (0.62 + 0.85 * base_lum);
+    }
     // ---- 地面微细节层（procedural.rs::generate_default_ground_detail_texture）----
     // 烘焙地面纹理锚定在"512² 覆盖 512m"上 → 一个纹素 = 1 米，街面上任何厘米级质感
     // 都不存在，近看就是一张平涂灰纸（"二维化的一个面"在地面上的那半条表现）。
