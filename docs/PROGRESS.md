@@ -2515,3 +2515,16 @@ blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>     
 
 **顺带留下的通用能力**：`--cutout/-cutout-cuts/-double-sided`、材质平均色覆盖 ——
 以后铁丝网、灌木、栅栏这类 alpha 资产都能走同一条路，不需要改渲染管线。
+
+### 2026-10-29（续88）：灌木资产试接入 —— **被两条布局不变量挡回**（资产与能力保留）
+
+- 新增资产 `assets/props/bush_real.glb`（Quaternius `Plant_1_Big`，**900 顶点**，
+  已走 `--cutout 0.5 --cutout-cuts 1` + 材质平均色：绿色 (0.26,0.44,0.40)），契约尺寸进表；
+- 第一次接进 `city.rs::bush()`（放成功就 return，避免和程序化 lobes 叠成两丛），结果**两条判据红**：
+  - `planter_bushes_are_clean_domed`：花坛里的灌木必须是**干净的拱顶**（程序化 lobes 保证的），
+    GLB 灌木不满足；
+  - `city_uses_more_than_boxes`：要求场景里 **>100 个细分球**（树冠/灌木），
+    40 处灌木换成实心叶几何后球数掉到阈值以下。
+- ⇒ **接线回退**，程序化灌木保留；资产与 `--cutout` 能力留在库里备用。
+- 顺带记录一条素材坑：Quaternius 的 `Bush_Common` 复用 `Leaves_TwistedTree_C`（**红叶**），
+  平均色 (0.65,0.09,0.09) ⇒ 直接装进城市会是红灌木；绿色得选 `Plant_1_Big`/`Fern`。

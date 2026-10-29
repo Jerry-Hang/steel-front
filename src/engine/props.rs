@@ -214,6 +214,7 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("building_shed", 13.140, 9.065, 6.990),
     ("building_tall", 12.140, 10.065, 13.790),
     ("building_wide", 18.140, 10.065, 10.390),
+    ("bush_real", 0.929, 1.005, 1.200),
     ("capture_flag", 1.550, 0.260, 1.400),
     ("capture_point", 5.913, 5.913, 6.640),
     ("car_wreck", 4.707, 1.932, 1.528),
