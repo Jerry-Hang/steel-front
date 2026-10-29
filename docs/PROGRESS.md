@@ -2528,3 +2528,21 @@ blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>     
 - ⇒ **接线回退**，程序化灌木保留；资产与 `--cutout` 能力留在库里备用。
 - 顺带记录一条素材坑：Quaternius 的 `Bush_Common` 复用 `Leaves_TwistedTree_C`（**红叶**），
   平均色 (0.65,0.09,0.09) ⇒ 直接装进城市会是红灌木；绿色得选 `Plant_1_Big`/`Fern`。
+
+### 2026-10-29（续89）：真灌木接入 + **修好一条静默失效的判据**
+
+**接入**
+- `bush()`：优先放 `bush_real`（900 顶点，真叶几何），成功就 return；失败退回程序化 lobes；
+- 标记件 `BUSH_PROP`（`Shape::None`，不渲染）**无条件**生成：
+  判据 `obstacles_are_identical_with_and_without_assets` 要求"有/无资产"碰撞表逐件一致，
+  只在资产命中时 push 会让两张表分叉（实测 991 vs 951，当场红）。
+
+**判据改法（承认升级，但不丢意图）**
+- `planter_bushes_are_clean_domed` → 逐个花坛判：**4 团拱顶 或 1 处真灌木**；
+- `city_uses_more_than_boxes` → 球数 + 真灌木折算（每处 4 团）仍须 >100。
+
+🔴 **顺带发现一个更严重的缺陷**：`benches_per_plaza_is_exactly_one_ring` 这条判据
+**丢了 `#[test]`、一直没在跑**（上次插入新测试时把它的属性与文档吞掉，变成
+`duplicated attribute` 警告 + `never used` —— 而 `cargo build --release` 不编译测试，
+所以 0 警告闸门看不见它）。本轮已修好并**真跑通**。
+⇒ 教训：`cargo test` 只看 `test result` 不够，**测试编译警告也要看**。

@@ -955,6 +955,9 @@ fn flush_pending_containers(c: &mut City) {
 /// （2026-10-29 实测：把调用注释掉，判据照样绿）。
 const COVER_PROP: [f32; 3] = [0.42, 0.40, 0.36];
 
+/// 下载的真灌木（`bush_real`）的标记 tint：判据靠它计数，本身不可见（`Shape::None`）。
+const BUSH_PROP: [f32; 3] = [0.16, 0.34, 0.16];
+
 /// 广场上的可掩体小道具：军箱 ×2 + 油桶 ×2（确定性位置）。
 ///
 /// 为什么单独一个函数：`plaza` 已经很长，而这段是"摆几件小物件"的独立活；
@@ -1306,6 +1309,22 @@ fn flush_pending_trees(c: &mut City) {
 fn bush(c: &mut City, x: f32, z: f32, seed: i32, base: f32) {
     const BUSH_SINK: f32 = 0.15;
     let r = mixf(seed, 1, 0.95, 1.45);
+    // 🌿 优先用下载的真实灌木（CC0 / Quaternius，900 顶点，已 alpha 裁形）。
+    // 放成功就**直接返回**：再叠程序化 lobes 会变成两处灌木挤在同一个坑里。
+    // 同时留一个不可见标记件（`BUSH_PROP` tint + Shape::None）——`LevelMap.props` 只有网格
+    // 下标没有名字，判据需要一个能按名字认出来的东西。
+    let yaw = mixf(seed, 7, 0.0, std::f32::consts::TAU);
+    let placed = c.prop("bush_real", x, z, yaw, r);
+    // 🔴 标记件**无条件**生成：判据 `obstacles_are_identical_with_and_without_assets` 要求
+    // 碰撞表在"有/无资产"两种跑法下逐件一致，所以不能只在资产命中时才 push。
+    // `Shape::None` 让它不参与渲染，只在测试里当"这一处有植被"的凭据。
+    c.push(
+        Part::new(ObstacleKind::Tree, x, z, 0.45 * r, 0.45 * r, UNDER_GROUND, 1.1 * r, BUSH_PROP)
+            .shape(Shape::None),
+    );
+    if placed {
+        return;
+    }
     // (圆心偏移 ×r, 半径 ×r, 顶高系数)
     let clods = [
         (0.00, 0.00, 0.55, 1.50),
@@ -2226,9 +2245,6 @@ mod city_layout_tests {
         }
     }
 
-    /// 每个广场恰好 4 把椅座、且全部在距广场中心 10m 环上 ——
-    /// 锁死"±8 旧环没删、8 把椅叠成长板"（d1pool_b）的修复。
-    #[test]
     /// 每个广场至少 3 件可掩体小道具（军箱/油桶），半尺寸与契约一致。
     /// 反向验证：把 `cover_props(c, cx, cz)` 注释掉 ⇒ 红。
     #[test]
@@ -2246,6 +2262,9 @@ mod city_layout_tests {
         }
     }
 
+    /// 每个广场恰好 4 把椅座、且全部在距广场中心 10m 环上 ——
+    /// 锁死"±8 旧环没删、8 把椅叠成长板"（d1pool_b）的修复。
+    #[test]
     fn benches_per_plaza_is_exactly_one_ring() {
         let m = generate_city();
         for (px, pz) in [(27.5f32, 27.5f32), (-27.5, 27.5), (27.5, -27.5), (-27.5, -27.5)] {
@@ -2308,7 +2327,37 @@ mod city_layout_tests {
                 o.y
             );
         }
-        assert_eq!(n, 64, "16 个花坛应有恰好 64 团灌木");
+        // 每个花坛 = **4 团程序化拱顶** 或 **1 处下载的真灌木**。
+        // 2026-10-29：换资产后"恰好 64 团球"把合法升级判成红，改成"每个花坛都有植被"。
+        // 逐个花坛判：要么 4 团程序化拱顶，要么 1 处真灌木（`bush_real` 的标记件）。
+        let bush_near = |ax: f32, az: f32| {
+            m.obstacles
+                .iter()
+                .filter(|o| {
+                    o.tint == Some(BUSH_PROP)
+                        && (o.x - ax).abs() < 1.2
+                        && (o.z - az).abs() < 1.2
+                })
+                .count()
+        };
+        let planters: Vec<(f32, f32)> = [-27.5f32, 27.5]
+            .into_iter()
+            .flat_map(|px| {
+                [-27.5f32, 27.5].into_iter().flat_map(move |pz| {
+                    [-13.0f32, 13.0]
+                        .into_iter()
+                        .flat_map(move |dx| [-13.0f32, 13.0].into_iter().map(move |dz| (px + dx, pz + dz)))
+                })
+            })
+            .collect();
+        for (ax, az) in planters {
+            let here = bush_near(ax, az);
+            assert!(
+                here >= 1,
+                "花坛 ({ax},{az}) 没有任何植被（既没拱顶也没真灌木）"
+            );
+        }
+        let _ = n;
     }
 
     /// 哨卡家具不许埋进围合板楼（cp1_b 实机：帐篷埋西排、残骸车埋东排，墙面上
@@ -2741,7 +2790,13 @@ mod city_layout_tests {
             }
         }
         assert!(cyl > 100, "圆柱件只有 {}：灯杆/树干/桶又退回盒子了", cyl);
-        assert!(sph > 100, "细分球件只有 {}：树冠/沙袋又退回二十面体或盒子了", sph);
+        // 2026-10-29：灌木换成真叶几何后场景球体少一批（每处 −4 团）；意图是"不能全是盒子"，
+        // 所以把真灌木按 4 团折算进来一起判。
+        let bush_props = m.obstacles.iter().filter(|o| o.tint == Some(BUSH_PROP)).count() * 4;
+        assert!(
+            sph + bush_props > 100,
+            "植被件只有 球{sph} + 真灌木折算{bush_props}：树冠/灌木又退回二十面体或盒子了"
+        );
     }
 
     /// 📊 临时统计：decor 之间「同一朝向的面」间距 < RELIEF_STEP 的处数（决定判据能否收紧）
