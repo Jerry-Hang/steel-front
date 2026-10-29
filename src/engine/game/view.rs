@@ -344,12 +344,18 @@ impl Game {
                 2.0 * extent,
             ))
         };
-        LightUniform::build(
+        let mut lu = LightUniform::build(
             Some(&sun),
             &points,
             amb_color,
             amb_intensity,
             shadow.as_ref(),
-        )
+        );
+        // 反光地面通道：x=阴雨开关，y=水面反光强度（阴雨即 1.0），z=秒（水光流光），w=保留。
+        let rain = if self.rain { 1.0 } else { 0.0 };
+        // 水面反光强度单独可关（RV3D_NO_WET=1），用于把"水光"从"阴雨天光变暗"里隔离出来做 A/B。
+        let wet = if self.rain && !crate::syscfg::flag("RV3D_NO_WET") { 1.0 } else { 0.0 };
+        lu.weather = glam::Vec4::new(rain, wet, self.time, 0.0);
+        lu
     }
 }

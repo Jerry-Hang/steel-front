@@ -2259,3 +2259,19 @@ SSCS 接触阴影 + 烘焙顶点 AO。
 - 🔴 坑：不带 `XWIN_ACCEPT_LICENSE=1` 时它卡在 `Downloading MSVC CRT...` 上**无限等 TTY 许可确认**
   （日志只有一行、缓存目录不增长）⇒ 误判成"网络不通"。实际缓存落在 `~/.cache/cargo-xwin`（1.1 GiB，含 `xwin/DONE`）。
 - ⚠ 未做：Wine 下实跑（本机无 wine）；exe 的子系统是 console（要隐藏控制台得改 `windows_subsystem`）。
+
+### 2026-10-29（续74）：雨天地面湿痕（LightUniform 新增 weather 通道）
+
+- `LightUniform` 加 `weather: vec4<f32>`（x=阴雨 0/1、y=湿润度、z=秒、w=保留），
+  UBO **352 → 368 B**（Rust/WGSL 两端同步，编译期 assert + 判据双锁）；
+- 着色：新 `wet_ground()` —— 地面/地形（`flat_flag<=0.5`）**反照率 ×0.82** +
+  **掠射角菲涅尔反光**（`pow(1-N·V,4)` × 雾色 ×0.45，带极轻微时间流动）；建筑/道具不参与；
+- 法线用世界坐标屏幕导数取（地面在 mesh 路径没有 NORMAL 依赖），并翻到朝相机一侧；
+- 开关：`RV3D_NO_WET=1` 单独关湿润（把"湿面"从"阴雨天光变暗"里隔离出来做 A/B）；
+- **实测**（雨天固定机位俯看地面）：湿 on/off 全图 **42.26%**、地面带 **55.89%**、
+  地面带亮度 **46.60 → 43.28**；`RV3D_VALIDATION=1` 跑 8 s **VUID=0**；
+- 判据：`weather_channel_is_declared_on_both_sides`（两端声明 + 368B）、
+  `rain_fills_the_weather_channel`（把 wet 恒置 0 ⇒ 红）；
+- 踩坑记录：湿面代码最初插在 marker/authored 分支里（地面走另一条分支）⇒ A/B **0.00%**；
+  两次删除该段时又按「第一个 `}`」切，留下了悬空语句使 WGSL 报 `expected global item … found let`。
+  **⇒ 删代码块要按缩进 0 的 `}` 判定边界，改完立刻 grep/编译验证**。

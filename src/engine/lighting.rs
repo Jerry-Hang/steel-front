@@ -20,7 +20,7 @@ pub const MAX_POINT_LIGHTS: usize = 4;
 pub const LIGHT_UBO_BINDING: u32 = 4;
 /// 光照 Uniform 总大小（字节）：
 /// flags 16 + ambient 16 + directional 32 + 4×PointLight 48 + shadow(mat4 64 + bias 16 + config 16) = 352
-pub const LIGHT_UBO_SIZE: usize = 352;
+pub const LIGHT_UBO_SIZE: usize = 368;
 
 /// Shadow map 默认尺寸（基础实现：2048×2048）
 ///
@@ -290,6 +290,8 @@ pub struct LightUniform {
     pub directional: DirectionalLightUniform,
     pub points: [PointLightUniform; MAX_POINT_LIGHTS],
     pub shadow: ShadowUniform,
+    /// x = 阴雨开关(0/1)，y = 地面水面反光强度(0..1)，z = 秒（水光流光），w = 保留
+    pub weather: Vec4,
 }
 
 impl Default for LightUniform {
@@ -311,11 +313,12 @@ impl Default for LightUniform {
                 bias: Vec4::ZERO,
                 config: Vec4::ZERO,
             },
+            weather: Vec4::ZERO,
         }
     }
 }
 
-/// 编译期校验：布局必须与 WGSL `LightUniform` 一致（std140，352 字节）
+/// 编译期校验：布局必须与 WGSL `LightUniform` 一致（std140，368 字节）
 const _: () = assert!(std::mem::size_of::<LightUniform>() == LIGHT_UBO_SIZE);
 const _: () = assert!(std::mem::size_of::<PointLightUniform>() == 48);
 const _: () = assert!(std::mem::size_of::<ShadowUniform>() == 96);
@@ -914,5 +917,16 @@ mod tests {
         assert!((super::ai_sight_factor(1.0, true) - 1.25).abs() < 1e-5);
         assert!((super::ai_sight_factor(0.55, false) - 0.55).abs() < 1e-5);
         assert!((super::ai_sight_factor(0.55, true) - 0.6875).abs() < 1e-5);
+    }
+
+    /// 反光地面通道必须**两端都声明**：Rust `LightUniform.weather` 与 WGSL 同名字段；
+    /// 尺寸也从 352 增到 368。反向验证：删掉任一端 ⇒ 红（WGSL 侧会静默读出垃圾）。
+    #[test]
+    fn weather_channel_is_declared_on_both_sides() {
+        assert_eq!(std::mem::size_of::<LightUniform>(), 368, "weather 应让 UBO 增到 368B");
+        let build_src = std::fs::read_to_string("build.rs").expect("读 build.rs");
+        assert!(build_src.contains("weather: vec4<f32>"), "WGSL 侧缺 weather 字段");
+        let self_src = std::fs::read_to_string("src/engine/lighting.rs").expect("读 lighting.rs");
+        assert!(self_src.contains("pub weather: Vec4"), "Rust 侧缺 weather 字段");
     }
 }

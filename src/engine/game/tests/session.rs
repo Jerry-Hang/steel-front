@@ -1426,3 +1426,17 @@ mod segment_t_ordering_tests {
         );
     }
 }
+
+/// 阴雨时 `weather.y`（水面反光强度）必须被填成 1；无雨/关水润开关时必须是 0。
+/// 反向验证：把 `wet` 恒置 0.0 ⇒ 红。
+#[test]
+fn rain_fills_the_weather_channel() {
+    let mut g = Game::new();
+    let cam = [0.0, 1.6, 0.0];
+    g.rain = true;
+    let wet = g.light_uniform(cam, 0.0).weather.y;
+    assert!(wet > 0.5, "阴雨时 weather.y 应为 1，实际 {wet}");
+    g.rain = false;
+    let dry = g.light_uniform(cam, 0.0).weather.y;
+    assert!(dry < 0.5, "无雨时 weather.y 应为 0，实际 {dry}");
+}

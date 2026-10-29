@@ -311,6 +311,8 @@ struct LightUniform {
     directional: DirectionalLight,
     points: array<PointLight, 4>,
     shadow: ShadowInfo,
+    // x = 阴雨开关(0/1), y = 地面湿润度(0..1), z = 秒(湿面流光), w = 保留
+    weather: vec4<f32>,
 }
 @group(0) @binding(4) var<uniform> light_data: LightUniform;
 
@@ -840,6 +842,26 @@ fn sf_vnoise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+// 🌧 湿地面（2026-10-29）：阴雨时地面更暗 + 掠射角菲涅尔反光（湿面的亮边）。
+//    只给地面/地形（flat_flag<=0.5）调用；建筑/道具不参与，否则整城像泡在水里。
+fn wet_ground(col: vec3<f32>, input: VertexOutput) -> vec3<f32> {
+    let wet = light_data.weather.y;
+    if (wet <= 0.001) {
+        return col;
+    }
+    let wv = normalize(-input.view_dir);
+    // 不依赖 fs_main 里的局部 fnrm：直接用世界坐标的屏幕导数取面法线，再翻到朝向相机一侧。
+    var wn = normalize(cross(dpdx(input.world_pos), dpdy(input.world_pos)));
+    if (dot(wn, wv) < 0.0) {
+        wn = -wn;
+    }
+    let fres = pow(1.0 - clamp(dot(wn, wv), 0.0, 1.0), 4.0);
+    // 极轻微的水面流动，避免反光像贴纸。
+    let ripple = 0.92 + 0.08 * sin(light_data.weather.z * 1.7 + input.world_pos.x * 0.35
+                                + input.world_pos.z * 0.27);
+    return col * (1.0 - 0.18 * wet) + fog_tint() * (0.45 * fres * wet * ripple);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // ---- 运动向量调试可视化（RV3D_MV_DEBUG=1，2026-10-11）----
@@ -1180,6 +1202,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let ao = clamp(ao_sky * ao_contact, 0.62, 1.0);
             shaded = shaded * ao;
         }
+
         let fg = fog_amount(view_distance(input));
         return vec4<f32>(aces_tonemap(mix(shaded, fog_tint(), fg) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
     }
@@ -1291,11 +1314,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         mixed = mixed * mix(1.0, gmod, gdetail);
     }
     if (light_data.flags.x < 0.5) {
-        return vec4<f32>(mixed * input.fade, 1.0);
+        return vec4<f32>(wet_ground(mixed, input) * input.fade, 1.0);
     }
     let lit = apply_lighting(input, mixed);
     let fg2 = fog_amount(view_distance(input));
-    return vec4<f32>(aces_tonemap(mix(lit, fog_tint(), fg2) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
+    return vec4<f32>(aces_tonemap(mix(wet_ground(lit, input), fog_tint(), fg2) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
 }
 "#;
 
