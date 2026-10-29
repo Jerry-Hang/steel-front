@@ -2546,3 +2546,17 @@ blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>     
 `duplicated attribute` 警告 + `never used` —— 而 `cargo build --release` 不编译测试，
 所以 0 警告闸门看不见它）。本轮已修好并**真跑通**。
 ⇒ 教训：`cargo test` 只看 `test result` 不够，**测试编译警告也要看**。
+
+### 2026-10-29（续90）：街角街道家具（垃圾桶/配电箱）+ 判据改成"按 tint 看有没有真摆上"
+
+- 新增资产（Poly Haven **CC0**）：`trash_can`（1454 顶点）、`utility_box`（1377 顶点），
+  加进契约表；消防栓**故意不换**（程序化 6 个部件、几十顶点，比 3030 顶点的照片扫描件划算）；
+- 摆放：`street_furniture` 里按 `(k+m)%3==0` 的路口，交替放垃圾桶 / 配电箱（确定性），
+  带 `blocked_by_*` 过滤；实测 **trash_can=5 / utility_box=4**；
+- 🔴 判据假绿修复：标记件原来是**无条件** push，把"资产没摆上"也一并计入 ⇒ 退化版照样绿。
+  改成**用 tint 记录是否真的摆上**（`FURNITURE_PROP` vs `FURNITURE_ABSENT`）：
+  `obstacles_are_identical_with_and_without_assets` 只比 kind/位置/尺寸、**不比 tint**，
+  所以既能保证"两条路径碰撞件逐件一致"，判据又有了区分度。
+  反向验证：把 `c.prop(...)` 短路成 false ⇒ `街道家具只有 0 件（应 >=8）` **红**；
+- 顺带把树的稀疏度从 67% 提到 **72%**（腾预算给家具），道具顶点 **944,436 / 1,048,576（90%）**；
+- 新判据 `intersections_have_downloaded_street_furniture`（>=8 件）。

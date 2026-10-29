@@ -958,6 +958,14 @@ const COVER_PROP: [f32; 3] = [0.42, 0.40, 0.36];
 /// 下载的真灌木（`bush_real`）的标记 tint：判据靠它计数，本身不可见（`Shape::None`）。
 const BUSH_PROP: [f32; 3] = [0.16, 0.34, 0.16];
 
+/// 街道家具（消防栓/垃圾桶/配电箱）的标记 tint：判据按它计数，`Shape::None` 不渲染。
+const FURNITURE_PROP: [f32; 3] = [0.30, 0.31, 0.33];
+
+/// 街道家具**没摆上**（缺资产）时的 tint。碰撞件数量/尺寸/位置必须与"摆上了"逐件一致
+/// （`obstacles_are_identical_with_and_without_assets` 只比 kind/位置/尺寸，**不比 tint**），
+/// 所以用 tint 记录"有没有真的摆出 GLB"，判据才有区分度。
+const FURNITURE_ABSENT: [f32; 3] = [0.55, 0.10, 0.55];
+
 /// 广场上的可掩体小道具：军箱 ×2 + 油桶 ×2（确定性位置）。
 ///
 /// 为什么单独一个函数：`plaza` 已经很长，而这段是"摆几件小物件"的独立活；
@@ -1215,7 +1223,7 @@ fn tree_now(c: &mut City, x: f32, z: f32, i: i32, j: i32) {
     // 保留"每片绿地都有树"的分布；判据仍是同一批布局测试（树↔楼不重叠）。
     let skip = ((i.wrapping_mul(73856093) ^ j.wrapping_mul(19349663)) as u32) % 100;
     // 真实树模型 3382 顶点/棵（原 500）⇒ 稀疏到 ~70 棵，把道具顶点压到 92% 左右留余量。
-    if skip < 67 {
+    if skip < 72 {
         return;
     }
     let k = mixf(i, j, 0.85, 1.25);
@@ -1318,8 +1326,9 @@ fn bush(c: &mut City, x: f32, z: f32, seed: i32, base: f32) {
     // 🔴 标记件**无条件**生成：判据 `obstacles_are_identical_with_and_without_assets` 要求
     // 碰撞表在"有/无资产"两种跑法下逐件一致，所以不能只在资产命中时才 push。
     // `Shape::None` 让它不参与渲染，只在测试里当"这一处有植被"的凭据。
+    let bush_tint = if placed { BUSH_PROP } else { FURNITURE_ABSENT };
     c.push(
-        Part::new(ObstacleKind::Tree, x, z, 0.45 * r, 0.45 * r, UNDER_GROUND, 1.1 * r, BUSH_PROP)
+        Part::new(ObstacleKind::Tree, x, z, 0.45 * r, 0.45 * r, UNDER_GROUND, 1.1 * r, bush_tint)
             .shape(Shape::None),
     );
     if placed {
@@ -1790,6 +1799,38 @@ fn street_clutter(c: &mut City) {
 }
 
 fn street_furniture(c: &mut City) {
+    // 🗑 路口街道家具（2026-10-29，下载资产 CC0 / Poly Haven）：
+    // 消防栓仍走程序化（6 个部件、几十个顶点，比 3000 顶点的照片扫描件划算得多）；
+    // 这里补的是城市原来**没有**的两件：垃圾桶与配电箱。
+    for k in -2i32..=2 {
+        for m in -2i32..=2 {
+            if (k + m).rem_euclid(3) != 0 {
+                continue;
+            }
+            let cx = k as f32 * STREET_EVERY + 8.0;
+            let cz = m as f32 * STREET_EVERY + 8.0;
+            let (name, hw, hd, h, dx, dz) = if (k + m).rem_euclid(2) == 0 {
+                ("trash_can", 0.93, 0.30, 0.951, 1.6, -1.4)
+            } else {
+                ("utility_box", 0.31, 0.26, 1.349, -1.7, 1.5)
+            };
+            let x = cx + dx;
+            let z = cz + dz;
+            if c.blocked_by_building(x, z, hw, hd, 0.15)
+                || c.blocked_by_placed_prop(x, z, hw, hd, 0.10)
+            {
+                continue;
+            }
+            let yaw = (k as f32 * 1.3 + m as f32 * 0.7).rem_euclid(std::f32::consts::TAU);
+            let placed = c.prop(name, x, z, yaw, 1.0);
+            // 碰撞件无条件生成（数量/位置/尺寸必须与"无资产"路径逐件一致）；
+            // 用 tint 记录"GLB 有没有真摆上"，判据才不是恒真。
+            let tint = if placed { FURNITURE_PROP } else { FURNITURE_ABSENT };
+            c.push(
+                Part::new(ObstacleKind::Block, x, z, hw, hd, UNDER_GROUND, h, tint).shape(Shape::None),
+            );
+        }
+    }
     for k in [-3i32, -2, -1, 1, 2, 3] {
         let t = k as f32 * STREET_EVERY;
         for side in [-7.0f32, 7.0] {
@@ -2243,6 +2284,19 @@ mod city_layout_tests {
                 );
             }
         }
+    }
+
+    /// 路口要有下载的街道家具（垃圾桶/配电箱），且总数 >= 8。
+    /// 反向验证：把 `street_furniture` 里那段循环注释掉 ⇒ 红。
+    #[test]
+    fn intersections_have_downloaded_street_furniture() {
+        let m = generate_city();
+        let n = m
+            .obstacles
+            .iter()
+            .filter(|o| o.tint == Some(FURNITURE_PROP))
+            .count();
+        assert!(n >= 8, "街道家具只有 {n} 件（应 >=8：垃圾桶/配电箱）");
     }
 
     /// 每个广场至少 3 件可掩体小道具（军箱/油桶），半尺寸与契约一致。
