@@ -44,7 +44,8 @@ def parse_args() -> dict:
     args = {"in": argv[0], "out": argv[1], "name": None, "target_height": None,
             "keep_uv": False, "decimate": None, "rotate_z": 0.0,
             "cutout": 0.0, "cutout_cuts": 3, "double_sided": False,
-            "atlas_slot": None, "atlas_out": "assets/textures/prop_atlas.png"}
+            "atlas_slot": None, "atlas_out": "assets/textures/prop_atlas.png",
+            "slim_trunk": 1.0}
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -74,6 +75,9 @@ def parse_args() -> dict:
             i += 2
         elif a == "--atlas-out":
             args["atlas_out"] = argv[i + 1]
+            i += 2
+        elif a == "--slim-trunk":
+            args["slim_trunk"] = float(argv[i + 1])
             i += 2
         elif a == "--keep-uv":
             args["keep_uv"] = True
@@ -387,6 +391,33 @@ def pack_atlas_and_remap_uv(obj, slot: int, out_path: str) -> None:
     log(f"图集：UV 已重映射到格 {slot}（偏移 {off_u:.3f},{off_v:.3f}，缩放 {scale:.3f}）")
 
 
+def slim_trunk(obj, factor: float, radius: float = 0.60, height: float = 1.8) -> None:
+    """把树干（低位、细半径的顶点）径向收窄 factor 倍，向上平滑过渡。
+
+    为什么需要它（2026-10-29 真机）：下载的风格化树树干是**上细下粗的粗锥**，近看像"圆锥墩子"。
+    换成天然细干的型号不现实（`CommonTree_3` 树干 0.69m 但要 2.4 万顶点，装不进预算），
+    所以在导入期直接把树干收细 —— 只动 `radial < radius` 且 `z < height` 的顶点，
+    枝叶不受影响，且过渡带用 smoothstep 避免折断感。
+    """
+    me = obj.data
+    moved = 0
+    for v in me.vertices:
+        z = v.co.z
+        if z > height:
+            continue
+        rad = (v.co.x * v.co.x + v.co.y * v.co.y) ** 0.5
+        if rad > radius:
+            continue
+        t = 1.0 - (z / height)          # 底部 1 → 顶部 0
+        t = t * t * (3.0 - 2.0 * t)     # smoothstep
+        k = 1.0 + (factor - 1.0) * t
+        v.co.x *= k
+        v.co.y *= k
+        moved += 1
+    me.update()
+    log(f"树干收细 ×{factor:.2f}：移动 {moved} 个顶点（半径<{radius:.2f}m、高度<{height:.2f}m）")
+
+
 def normalize_transform(obj, target_height) -> None:
     me = obj.data
     xs = [v.co.x for v in me.vertices]
@@ -513,6 +544,8 @@ def main() -> None:
     override_colors_from_textures(obj)
     if args["cutout"] > 0.0:
         alpha_cutout(obj, args["cutout"], args["cutout_cuts"])
+    if args["slim_trunk"] != 1.0:
+        slim_trunk(obj, args["slim_trunk"])
     if args["rotate_z"]:
         import math as _m
         me = obj.data
