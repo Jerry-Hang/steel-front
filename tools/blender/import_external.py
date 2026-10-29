@@ -43,7 +43,8 @@ def parse_args() -> dict:
         raise SystemExit("用法: blender -b --python import_external.py -- <in> <out.glb> [--name X] [--target-height H] [--keep-uv]")
     args = {"in": argv[0], "out": argv[1], "name": None, "target_height": None,
             "keep_uv": False, "decimate": None, "rotate_z": 0.0,
-            "cutout": 0.0, "cutout_cuts": 3, "double_sided": False}
+            "cutout": 0.0, "cutout_cuts": 3, "double_sided": False,
+            "atlas_slot": None, "atlas_out": "assets/textures/prop_atlas.png"}
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -68,6 +69,12 @@ def parse_args() -> dict:
         elif a == "--double-sided":
             args["double_sided"] = True
             i += 1
+        elif a == "--atlas-slot":
+            args["atlas_slot"] = int(argv[i + 1])
+            i += 2
+        elif a == "--atlas-out":
+            args["atlas_out"] = argv[i + 1]
+            i += 2
         elif a == "--keep-uv":
             args["keep_uv"] = True
             i += 1
@@ -307,6 +314,79 @@ def make_double_sided(obj) -> None:
     log(f"双面叶片：复制 {len(dup)} 个面（三角 {len(me.polygons)}）")
 
 
+ATLAS_SIZE = 2048
+ATLAS_CELL = 512
+ATLAS_GRID = ATLAS_SIZE // ATLAS_CELL  # 4
+
+
+def pack_atlas_and_remap_uv(obj, slot: int, out_path: str) -> None:
+    """把该物件的 base color 贴图贴进**共享图集**的第 slot 格，并把 UV 重映射进那一格。
+
+    为什么要图集而不是每件一张贴图：引擎只有**一个** `prop_atlas_tex` 绑定（binding 12），
+    所有道具共用一张图；每件占 512² 一格（2048² 共 16 格），UV 平移到 `[cx/4, (cx+1)/4]`。
+    贴图按**最近邻放大**到 512²，避免引入采样器差异（细节靠纹理本身密度）。
+    """
+    import numpy as np
+    me = obj.data
+    if not me.uv_layers.active:
+        log("图集：网格没有 UV ⇒ 跳过")
+        return
+    mats = [slot_m.material for slot_m in obj.material_slots]
+    img = None
+    for m in mats:
+        if m and m.use_nodes:
+            for n in m.node_tree.nodes:
+                if n.type == "TEX_IMAGE" and n.image:
+                    img = n.image
+                    break
+        if img:
+            break
+    # 打开/新建图集
+    import os
+    atlas = None
+    if os.path.exists(out_path):
+        try:
+            atlas = bpy.data.images.load(out_path, check_existing=True)
+        except Exception:
+            atlas = None
+    if atlas is None or tuple(atlas.size) != (ATLAS_SIZE, ATLAS_SIZE):
+        atlas = bpy.data.images.new("prop_atlas", ATLAS_SIZE, ATLAS_SIZE, alpha=False)
+        atlas.pixels.foreach_set(np.ones(ATLAS_SIZE * ATLAS_SIZE * 4, dtype=np.float32))
+    cx = slot % ATLAS_GRID
+    cy = slot // ATLAS_GRID
+    if img is not None:
+        w, h = img.size
+        src = np.empty(w * h * 4, dtype=np.float32)
+        img.pixels.foreach_get(src)
+        src = src.reshape(h, w, 4)
+        # 最近邻采样到 512²
+        ys = (np.arange(ATLAS_CELL) * h // ATLAS_CELL).clip(0, h - 1)
+        xs = (np.arange(ATLAS_CELL) * w // ATLAS_CELL).clip(0, w - 1)
+        cell = src[ys][:, xs]
+        dst = np.empty(ATLAS_SIZE * ATLAS_SIZE * 4, dtype=np.float32)
+        atlas.pixels.foreach_get(dst)
+        dst = dst.reshape(ATLAS_SIZE, ATLAS_SIZE, 4)
+        # 图集原点在左下（Blender 约定），第 0 行是最下面
+        x0 = cx * ATLAS_CELL
+        y0 = cy * ATLAS_CELL
+        dst[y0:y0 + ATLAS_CELL, x0:x0 + ATLAS_CELL] = cell
+        atlas.pixels.foreach_set(dst.reshape(-1))
+        log(f"图集：{img.name} → 格 {slot}（x={cx}, y={cy}）")
+    else:
+        log(f"图集：材质没有贴图 ⇒ 格 {slot} 留白")
+    atlas.filepath_raw = os.path.abspath(out_path)
+    atlas.file_format = "PNG"
+    atlas.save()
+    # UV 重映射进该格
+    scale = 1.0 / ATLAS_GRID
+    off_u = cx * scale
+    off_v = cy * scale
+    uv = me.uv_layers.active.data
+    for d in uv:
+        d.uv = (off_u + d.uv.x * scale, off_v + d.uv.y * scale)
+    log(f"图集：UV 已重映射到格 {slot}（偏移 {off_u:.3f},{off_v:.3f}，缩放 {scale:.3f}）")
+
+
 def normalize_transform(obj, target_height) -> None:
     me = obj.data
     xs = [v.co.x for v in me.vertices]
@@ -447,8 +527,10 @@ def main() -> None:
     normalize_transform(obj, args["target_height"])
     if args["decimate"]:
         decimate(obj, args["decimate"])
-    simplify(obj, args["keep_uv"])
+    simplify(obj, args["keep_uv"] or args["atlas_slot"] is not None)
     # ⚠ 双面必须在**焊接之后**：先复制再 remove_doubles 会把复制的反面当成重复顶点合掉。
+    if args["atlas_slot"] is not None:
+        pack_atlas_and_remap_uv(obj, args["atlas_slot"], args["atlas_out"])
     if args["double_sided"]:
         make_double_sided(obj)
     export_glb(obj, args["out"], args["name"])

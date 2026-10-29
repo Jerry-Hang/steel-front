@@ -830,10 +830,22 @@ impl Renderer {
         self.ground_detail_image_view = view;
         // 道具 albedo 图集（binding 12）：先建 1×1 白图 —— 片元只在"有 UV"的件上采样，
         // 白图 × 顶点色 = 原样，所以这条链路在贴图还没做出来时是 fail-safe 的。
+        // 有图集就加载真图（2048²，4×4 个 512² 格），没有就退回 1×1 白图（fail-safe）。
+        let (atlas_w, atlas_h, atlas_px) = match image::open("assets/textures/prop_atlas.png") {
+            Ok(im) => {
+                let im = im.to_rgba8();
+                log::info!("道具 albedo 图集已加载：{}x{}（binding 12）", im.width(), im.height());
+                (im.width(), im.height(), im.into_raw())
+            }
+            Err(_) => {
+                log::info!("道具 albedo 图集缺省（1x1 白，binding 12）");
+                (1u32, 1u32, vec![255u8, 255, 255, 255])
+            }
+        };
         let (img, mem, view) = self.create_sampled_image(
-            &[255u8, 255, 255, 255],
-            1,
-            1,
+            &atlas_px,
+            atlas_w,
+            atlas_h,
             vk::Format::R8G8B8A8_SRGB,
         )?;
         self.prop_atlas_image = img;

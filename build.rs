@@ -1408,7 +1408,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // 第二层高频细节（2026-10-23）：同一张细节图以不同缩放/相位再采一次，与第一层
         // 相乘 ⇒ 打散平铺重复感、近景地面多一层"砂石颗粒"。只在细节层已生效的近距离
         // 像素上多一次取数（`gdetail>0.35`），远距不进这里。
-        if (gdetail > 0.35) {
+        // 🔴 第二层高频细节只在**真正近的像素**上开（2026-10-30 真机：掠射处整片点状噪点）。
+        // 判据用 `footprint_major`（米/像素）：超过 10cm/像素时这一层只会产生摩尔纹。
+        if (gdetail > 0.35 && footprint_major < 0.10) {
             let lvl2 = lvl + 1.5;
             let g2 = textureSampleLevel(
                 ground_detail_tex, texture_sampler,
@@ -1417,7 +1419,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             ).r;
             gmod = gmod * (0.88 + 0.28 * g2 * GROUND_DETAIL_GAIN * 0.5);
         }
-        mixed = mixed * mix(1.0, gmod, gdetail);
+        // 🔴 掠射角要把细节层整体淡出（2026-10-30 真机：地面近处一排排"白点"）。
+        // 判据用 `footprint_major`（沿视线方向的米/像素）：超过 30cm/像素时这一层只剩摩尔纹。
+        let detail_fade = 1.0 - smoothstep(0.05, 0.30, footprint_major);
+        mixed = mixed * mix(1.0, gmod, gdetail * detail_fade);
     }
     if (light_data.flags.x < 0.5) {
         return vec4<f32>(wet_ground(mixed, input) * input.fade, 1.0);

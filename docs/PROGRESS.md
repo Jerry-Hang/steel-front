@@ -2605,3 +2605,13 @@ importer 把源贴图打包成图集、片元采样），否则永远是一堆�
 **下一步（第 2 步）**：`tools/pack_prop_atlas.py` 把各道具的 base color 贴图打进
 `assets/textures/prop_atlas.png`（2048²，4×4 个 512² 格），importer 用 `--atlas-slot N`
 把 UV 重映射到对应格子；然后重出 crate/bench/hydrant 等件，引擎改成加载该图集。
+
+### 2026-10-30（续94）：道具图集第 2 步（打包 + 采样打通）+ 地面噪点两条排除
+
+- `import_external.py --atlas-slot N`：把该件 base color 贴图**最近邻放大到 512²**、
+  贴进 `assets/textures/prop_atlas.png`（2048²，4×4 格），并把 UV 重映射进对应格；
+- 引擎改成**加载该图集**（缺文件回退 1×1 白）；实测军箱从"深棕平涂"变成有布纹/铁皮质感；
+- 地面细节层加了两道掠射淡出（`footprint_major` 门控 + 第二层 10cm 门控）；
+- 🔴 **未解决**：画面最底部那排"白点"仍在。已排除：SSAO（Q1 对照高频能量 3.665 vs 3.649）、
+  细节层摩尔纹（两道淡出后不变）、地面 z-fighting（地面抬高 0.05→0.12 只从 3.649 降到 3.484，
+  且改动已回退）。下一步要在**同一机位**逐个关 `RV3D_PROC_TEX / NO_SHADOW / NO_DECALS` 定位。
