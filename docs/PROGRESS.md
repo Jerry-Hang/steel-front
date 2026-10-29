@@ -2476,3 +2476,20 @@ blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>     
 属于渲染管线改动，不是换资产。
 
 **⇒ 结论：树这类"靠 alpha 卡片"的资产，在顶点色管道里换不了。** 要么先做 alpha 材质通道，要么继续用手写低模树。
+
+### 2026-10-29（续86）：树的第四条路（离线 alpha 裁形 + 贴图覆盖）也失败
+
+这轮给 `import_external.py` 加了两个**通用能力**（留着有用）：
+- `--cutout <阈值> --cutout-cuts N`：把带 alpha 的叶片卡片**细分后删掉透明区小面** ⇒
+  叶形变成真实几何，不需要渲染端 alpha test（实测 9478 三角 / 7556 顶点）；
+- `override_colors_from_textures`：烘焙后**直接按 UV 采样贴图 RGB** 覆盖顶点色
+  （诊断：Cycles 的 DIFFUSE COLOR bake 对 alpha 材质给的是黑；树皮用这条从灰变正常木色）。
+
+**但树冠仍然全黑**（引擎实拍 + Blender 预览都黑）。诊断数据：
+- 叶子材质 `Leaves_NormalTree` → 贴图 `Leaves_NormalTree_C` 1024²，
+  全图均值 **rgb=(0.22, 0.31, 0.00) alpha=0.223** —— 有绿色分量，蓝通道为 0；
+- 采到的颜色进顶点色后仍是黑 ⇒ 更可能是**叶片卡片的朝向/单面性**问题
+  （引擎按顶点法线做 N·L，卡片背面被剔除或完全背离主光），而不是颜色采样。
+
+**⇒ 结论不变且更硬**：叶子这类资产必须在**渲染端**有 alpha 材质通道（贴图 + `discard` + 双面），
+离线烘几何解决不了。树资产回退，`tree_oak` 仍是 500 顶点低模树。

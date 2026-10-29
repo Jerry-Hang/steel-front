@@ -42,7 +42,8 @@ def parse_args() -> dict:
     if len(argv) < 2:
         raise SystemExit("用法: blender -b --python import_external.py -- <in> <out.glb> [--name X] [--target-height H] [--keep-uv]")
     args = {"in": argv[0], "out": argv[1], "name": None, "target_height": None,
-            "keep_uv": False, "decimate": None, "rotate_z": 0.0}
+            "keep_uv": False, "decimate": None, "rotate_z": 0.0,
+            "cutout": 0.0, "cutout_cuts": 3}
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -57,6 +58,12 @@ def parse_args() -> dict:
             i += 2
         elif a == "--rotate-z":
             args["rotate_z"] = float(argv[i + 1])
+            i += 2
+        elif a == "--cutout":
+            args["cutout"] = float(argv[i + 1])
+            i += 2
+        elif a == "--cutout-cuts":
+            args["cutout_cuts"] = int(argv[i + 1])
             i += 2
         elif a == "--keep-uv":
             args["keep_uv"] = True
@@ -116,6 +123,106 @@ def sample_texture_color(mat, uv):
                 c = base.default_value
                 return (c[0], c[1], c[2], 1.0)
     return (0.5, 0.5, 0.5, 1.0)
+
+
+def _rgba_sampler(mat, threshold: float):
+    """返回 (uv)->alpha 的采样器；材质没有贴图时返回 None。"""
+    if not (mat and mat.use_nodes):
+        return None
+    img = None
+    for n in mat.node_tree.nodes:
+        if n.type == "TEX_IMAGE" and n.image:
+            img = n.image
+            break
+    if img is None:
+        return None
+    w, h = img.size
+    if w == 0 or h == 0:
+        return None
+    px = list(img.pixels)  # 一次性取，逐点访问太慢
+
+    def sample(u, v):
+        px_x = min(w - 1, max(0, int((u % 1.0) * w)))
+        px_y = min(h - 1, max(0, int((v % 1.0) * h)))
+        i = (px_y * w + px_x) * 4
+        return (px[i], px[i + 1], px[i + 2], px[i + 3])
+
+    return sample
+
+
+def override_colors_from_textures(obj) -> None:
+    """对**带贴图**的材质，用 UV 采样的贴图 RGB 覆盖顶点色。
+
+    为什么要这一步（实测）：Cycles 的 DIFFUSE COLOR bake 对 alpha / 半透明材质给的是**黑**，
+    于是叶子烘出来全黑（预览图实锤：树冠是一团黑刺）。改为直接读贴图像素后，
+    叶子有真实绿/棕，且与 alpha 裁形用的是同一张图，轮廓和颜色天然对齐。
+    """
+    me = obj.data
+    col = me.color_attributes.get("Col")
+    if col is None:
+        return
+    mats = [slot.material for slot in obj.material_slots]
+    samplers = {i: _rgba_sampler(m, 0.5) for i, m in enumerate(mats)}
+    if not any(samplers.values()):
+        return
+    uv_layer = me.uv_layers.active.data if me.uv_layers else None
+    if uv_layer is None:
+        return
+    fixed = 0
+    for poly in me.polygons:
+        sample = samplers.get(poly.material_index)
+        if sample is None:
+            continue
+        for li in poly.loop_indices:
+            uv = uv_layer[li].uv
+            r, g, b, _a = sample(uv.x, uv.y)
+            col.data[li].color = (r, g, b, 1.0)
+            fixed += 1
+    log(f"贴图覆盖顶点色：{fixed} 个 corner（叶子/透明材质）")
+
+
+def alpha_cutout(obj, threshold: float, cuts: int) -> None:
+    """把带 alpha 的"叶子卡片"**裁成真实几何**：细分后删掉透明区的小面。
+
+    为什么这么做（2026-10-29 的失败记录）：引擎的道具**只吃顶点色、不采样贴图、没有 alpha test**，
+    所以下载的树叶子要么全黑、要么整片实心方块。与其去改渲染管线加材质通道（那是另一件事），
+    不如在**导入期**把"透明就等于不存在"这件事直接烘进几何：叶片变成真实轮廓，仍然只靠顶点色。
+    """
+    me = obj.data
+    mats = [slot.material for slot in obj.material_slots]
+    samplers = {i: _rgba_sampler(m, threshold) for i, m in enumerate(mats)}
+    if not any(samplers.values()):
+        log("没有找到带 alpha 的贴图 ⇒ 跳过裁形")
+        return
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    uv_lay = bm.loops.layers.uv.active
+    if uv_lay is None:
+        log("网格没有 UV ⇒ 跳过裁形")
+        bm.free()
+        return
+    target_faces = [f for f in bm.faces if samplers.get(f.material_index)]
+    target_edges = {e for f in target_faces for e in f.edges}
+    if not target_edges:
+        bm.free()
+        return
+    bmesh.ops.subdivide_edges(bm, edges=list(target_edges), cuts=cuts, use_grid_fill=True)
+    dead = []
+    for f in bm.faces:
+        sample = samplers.get(f.material_index)
+        if sample is None:
+            continue
+        uvs = [l[uv_lay].uv for l in f.loops]
+        cu = sum(u.x for u in uvs) / len(uvs)
+        cv = sum(u.y for u in uvs) / len(uvs)
+        if sample(cu, cv)[3] < threshold:
+            dead.append(f)
+    if dead:
+        bmesh.ops.delete(bm, geom=dead, context="FACES")
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+    log(f"alpha 裁形完成（阈值 {threshold:.2f}，细分 {cuts}）：删掉 {len(dead)} 个小面，剩 {len(me.polygons)} 三角")
 
 
 def bake_vertex_colors(obj) -> None:
@@ -266,6 +373,9 @@ def main() -> None:
     import_any(args["in"])
     obj = join_meshes()
     bake_vertex_colors(obj)
+    override_colors_from_textures(obj)
+    if args["cutout"] > 0.0:
+        alpha_cutout(obj, args["cutout"], args["cutout_cuts"])
     if args["rotate_z"]:
         import math as _m
         me = obj.data
