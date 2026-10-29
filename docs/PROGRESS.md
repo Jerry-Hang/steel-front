@@ -2421,3 +2421,15 @@ blender -b --python tools/blender/import_external.py -- <in.gltf> <out.glb>     
   （0.30 这个半宽和树碰撞柱、护柱撞车）。改成给掩体道具一个**专属 tint `COVER_PROP`**、
   按 tint 计数，之后退化版才真红（"广场 (27.5,27.5) 只有 0 件"）。
 - 顶点预算：853,604 / 1,048,576（约 81%），仍在带内。
+
+### 2026-10-29（续83）：弃置车换下载资产（Poly Haven `covered_car`，CC0）
+
+- 资产：`covered_car`（盖布车，典型的"院里弃置车"）→ `car_wreck.glb`：
+  **2951 顶点 / 2517 三角**（抽面 0.20），契约尺寸更新为实测 **4.707 × 1.931 × 1.527**；
+- 导入器新增 `--rotate-z DEG`：车长轴原本沿 z，转 90° 后与契约的"长边沿 x"一致
+  （否则碰撞核和车壳会**互相垂直**，斜 yaw 下核会戳出轮廓 —— 这正是 2026-09-21 那条判据的来源）；
+- 实测道具统计（`RV3D_PROP_STATS=1`）：**385 处**摆放 —— `tree_oak=127` / `building_tall=116` /
+  `street_lamp=48` / `barrier_hesco=16` / `container_green=11` / `barrel_metal=8` / `car_wreck=8` /
+  `container_navy=8` / `crate_military=8` / `downtown_medium=8` / `sandbag_wall=8` /
+  `container_20ft=7` / `building_block=4` / `downtown_large=4` / `downtown_small=4`；
+- 顶点预算 **882,884 / 1,048,576（84%）**。

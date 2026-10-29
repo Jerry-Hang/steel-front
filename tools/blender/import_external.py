@@ -42,7 +42,7 @@ def parse_args() -> dict:
     if len(argv) < 2:
         raise SystemExit("用法: blender -b --python import_external.py -- <in> <out.glb> [--name X] [--target-height H] [--keep-uv]")
     args = {"in": argv[0], "out": argv[1], "name": None, "target_height": None,
-            "keep_uv": False, "decimate": None}
+            "keep_uv": False, "decimate": None, "rotate_z": 0.0}
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -54,6 +54,9 @@ def parse_args() -> dict:
             i += 2
         elif a == "--decimate":
             args["decimate"] = float(argv[i + 1])
+            i += 2
+        elif a == "--rotate-z":
+            args["rotate_z"] = float(argv[i + 1])
             i += 2
         elif a == "--keep-uv":
             args["keep_uv"] = True
@@ -231,6 +234,17 @@ def main() -> None:
     import_any(args["in"])
     obj = join_meshes()
     bake_vertex_colors(obj)
+    if args["rotate_z"]:
+        import math as _m
+        me = obj.data
+        ang = _m.radians(args["rotate_z"])
+        ca, sa = _m.cos(ang), _m.sin(ang)
+        for v in me.vertices:
+            x, y = v.co.x, v.co.y
+            v.co.x = x * ca - y * sa
+            v.co.y = x * sa + y * ca
+        me.update()
+        log(f"绕 Z 旋转 {args['rotate_z']:.0f}°（把车长轴从 z 拧到 x）")
     normalize_transform(obj, args["target_height"])
     if args["decimate"]:
         decimate(obj, args["decimate"])
