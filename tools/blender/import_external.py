@@ -43,7 +43,7 @@ def parse_args() -> dict:
         raise SystemExit("用法: blender -b --python import_external.py -- <in> <out.glb> [--name X] [--target-height H] [--keep-uv]")
     args = {"in": argv[0], "out": argv[1], "name": None, "target_height": None,
             "keep_uv": False, "decimate": None, "rotate_z": 0.0,
-            "cutout": 0.0, "cutout_cuts": 3}
+            "cutout": 0.0, "cutout_cuts": 3, "double_sided": False}
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -65,6 +65,9 @@ def parse_args() -> dict:
         elif a == "--cutout-cuts":
             args["cutout_cuts"] = int(argv[i + 1])
             i += 2
+        elif a == "--double-sided":
+            args["double_sided"] = True
+            i += 1
         elif a == "--keep-uv":
             args["keep_uv"] = True
             i += 1
@@ -151,6 +154,7 @@ def _rgba_sampler(mat, threshold: float):
 
 
 def override_colors_from_textures(obj) -> None:
+    fixed = 0
     """对**带贴图**的材质，用 UV 采样的贴图 RGB 覆盖顶点色。
 
     为什么要这一步（实测）：Cycles 的 DIFFUSE COLOR bake 对 alpha / 半透明材质给的是**黑**，
@@ -168,17 +172,44 @@ def override_colors_from_textures(obj) -> None:
     uv_layer = me.uv_layers.active.data if me.uv_layers else None
     if uv_layer is None:
         return
-    fixed = 0
-    for poly in me.polygons:
-        sample = samplers.get(poly.material_index)
+    # 🔴 逐点采样对**叶片**不可靠：alpha 遮罩贴图在叶片外的 RGB 是纯黑，叶片内的 RGB
+    # 也可能接近黑（颜色信息在别处）——实测 2000 个顶点里有 650 个是 (0,0,0)，树冠因此全黑。
+    # 改成**按材质求平均色**（只统计 alpha>0.5 的纹素），同材质的面统一上色。
+    for mi, sample in samplers.items():
         if sample is None:
             continue
-        for li in poly.loop_indices:
-            uv = uv_layer[li].uv
-            r, g, b, _a = sample(uv.x, uv.y)
-            col.data[li].color = (r, g, b, 1.0)
-            fixed += 1
-    log(f"贴图覆盖顶点色：{fixed} 个 corner（叶子/透明材质）")
+        mat = mats[mi]
+        img = None
+        if mat and mat.use_nodes:
+            for n in mat.node_tree.nodes:
+                if n.type == "TEX_IMAGE" and n.image:
+                    img = n.image
+                    break
+        if img is None:
+            continue
+        w, h = img.size
+        px = list(img.pixels)
+        sr = sg = sb = sw = 0.0
+        step = max(1, (w * h) // 4096)  # 采样 4k 点即可
+        for i in range(0, w * h, step):
+            a = px[i * 4 + 3]
+            if a <= 0.5:
+                continue
+            sr += px[i * 4]
+            sg += px[i * 4 + 1]
+            sb += px[i * 4 + 2]
+            sw += 1.0
+        if sw < 1.0:
+            continue
+        mean = (sr / sw, sg / sw, sb / sw, 1.0)
+        log(f"材质 {mi} 平均色 = ({mean[0]:.2f}, {mean[1]:.2f}, {mean[2]:.2f})，来自 {sw:.0f} 个纹素")
+        for poly in me.polygons:
+            if poly.material_index != mi:
+                continue
+            for li in poly.loop_indices:
+                col.data[li].color = mean
+                fixed += 1
+    log(f"贴图覆盖顶点色：{fixed} 个 corner（按材质平均色）")
 
 
 def alpha_cutout(obj, threshold: float, cuts: int) -> None:
@@ -248,6 +279,32 @@ def bake_vertex_colors(obj) -> None:
     bpy.ops.object.bake(type="DIFFUSE", pass_filter={"COLOR"}, target="VERTEX_COLORS", margin=0,
                         use_clear=True)
     log(f"顶点色烘焙完成：{len(me.loops)} 个 corner")
+
+
+def make_double_sided(obj) -> None:
+    """给**带贴图的叶片材质**复制一份反面（法线翻转）。
+
+    为什么要这一步：引擎按顶点法线做 N·L，卡片是单面的 —— 背光那一侧整片偏黑，
+    而叶子本来就该两面可见（真树叶子半透明）。复制反面是"渲染端双面"的离线等价物：
+    不动管线、不加 alpha test，只在导入期把另一半补上。代价是叶片三角翻倍。
+    """
+    me = obj.data
+    mats = [slot.material for slot in obj.material_slots]
+    leaf_idx = {i for i, m in enumerate(mats) if m and m.use_nodes and any(
+        n.type == "TEX_IMAGE" and n.image for n in m.node_tree.nodes)}
+    if not leaf_idx:
+        log("没有带贴图的材质 ⇒ 跳过双面")
+        return
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    faces = [f for f in bm.faces if f.material_index in leaf_idx]
+    ret = bmesh.ops.duplicate(bm, geom=faces)
+    dup = [g for g in ret["geom"] if isinstance(g, bmesh.types.BMFace)]
+    bmesh.ops.reverse_faces(bm, faces=dup)
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+    log(f"双面叶片：复制 {len(dup)} 个面（三角 {len(me.polygons)}）")
 
 
 def normalize_transform(obj, target_height) -> None:
@@ -391,6 +448,9 @@ def main() -> None:
     if args["decimate"]:
         decimate(obj, args["decimate"])
     simplify(obj, args["keep_uv"])
+    # ⚠ 双面必须在**焊接之后**：先复制再 remove_doubles 会把复制的反面当成重复顶点合掉。
+    if args["double_sided"]:
+        make_double_sided(obj)
     export_glb(obj, args["out"], args["name"])
 
 
