@@ -1,5 +1,12 @@
 # Third-Party Notices, Asset Provenance, and Redistribution Checklist
 
+> **Where this file fits (2026-10-30).** The project is dual-licensed: the free
+> path is GNU AGPL-3.0 (verbatim text in [`LICENSE`](./LICENSE)), the optional
+> paid path is in [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md), and
+> [`NOTICE`](./NOTICE) states which grant covers which paths. **This file is the
+> inventory behind those statements** — every "third-party" claim in `NOTICE`
+> points here, per item.
+
 **Required companion to [`LICENSE`](LICENSE). Do not separate the two when
 redistributing this repository.**
 
