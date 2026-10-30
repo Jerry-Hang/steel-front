@@ -402,8 +402,8 @@ python tools\install_guns.py
 | 轨 | 适用对象 | 适用文件 | 费用 |
 |---|---|---|---|
 | **1. 开源** | 任何人、任何规模 | [`LICENSE`](./LICENSE)（AGPL-3.0 原文） | **永久免费** |
-| **2. 闭源 · 中小** | 组织**年营收 < 人民币 2 亿元** | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md)（AGPL §7 **附加许可**：免除 §13 开源义务） | **免费，无需申请、无需联系** |
-| **3. 闭源 · 大型** | 组织**年营收 ≥ 人民币 2 亿元** | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md)（另行签署） | **象征性年费** |
+| **2. 闭源 · 中小** | 组织**季度营收 < 人民币 3000 万元**（年化 1.2 亿） | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md)（AGPL §7 **附加许可**：免除 §13 开源义务） | **免费，无需申请、无需联系** |
+| **3. 闭源 · 大型** | 组织**季度营收 ≥ 人民币 3000 万元**（年化 1.2 亿） | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md)（另行签署） | **象征性年费** |
 
 两句话说明作者的真实意图：
 
@@ -448,8 +448,8 @@ anyone using the project under AGPL-3.0.
 | Track | Who | What applies | Cost |
 |---|---|---|---|
 | **1. Open source** | Anyone, any size | [`LICENSE`](./LICENSE) — GNU AGPL-3.0-or-later, verbatim | **Free, forever** |
-| **2. Closed source, small** | Annual revenue **below CNY 200,000,000** | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an **AGPL §7 additional permission** waiving §13 | **Free**, no application |
-| **3. Closed source, large** | Annual revenue **at or above CNY 200,000,000** | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) — separate written licence | **Symbolic annual fee** |
+| **2. Closed source, small** | Quarterly revenue **below CNY 30,000,000** (annualized CNY 120M) | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an **AGPL §7 additional permission** waiving §13 | **Free**, no application |
+| **3. Closed source, large** | Quarterly revenue **at or above CNY 30,000,000** (annualized CNY 120M) | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) — separate written licence | **Symbolic annual fee** |
 
 Two points that are the author's actual intent:
 

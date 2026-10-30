@@ -19,8 +19,8 @@ takes rights away from anyone who uses the project under AGPL-3.0.
 | Track | Who | What applies | Cost |
 |---|---|---|---|
 | **1. Open source** | Anyone, any size | [`LICENSE`](./LICENSE) — GNU AGPL-3.0-or-later, verbatim | **Free forever** |
-| **2. Closed source, small** | Total annual revenue **below CNY 200,000,000** (≈ USD 28M) | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an **AGPL §7 additional permission**: no source-disclosure duty, no application, no fee | **Free** |
-| **3. Closed source, large** | Total annual revenue **at or above CNY 200,000,000** | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) — separate written license | **Symbolic annual fee** |
+| **2. Closed source, small** | Quarterly revenue **below CNY 30,000,000** (annualized CNY 120M, ≈ USD 17M) | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an **AGPL §7 additional permission**: no source-disclosure duty, no application, no fee | **Free** |
+| **3. Closed source, large** | Quarterly revenue **at or above CNY 30,000,000** (annualized CNY 120M) | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) — separate written license | **Symbolic annual fee** |
 
 Two points worth stating plainly, because they are the author's actual intent:
 

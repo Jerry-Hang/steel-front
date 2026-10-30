@@ -16,10 +16,11 @@ just use the project under [`LICENSE`](./LICENSE).
 
 ## 1. The permission in plain language
 
-**If your organization's total annual revenue is below CNY 200,000,000
-(two hundred million yuan, ≈ USD 28 million) you may ship closed-source builds
-of this software, and run modified versions as a service, WITHOUT the source-
-disclosure obligations of AGPL §13.**
+**If the total revenue of your organization (including its corporate group) for
+its most recently completed fiscal quarter is below CNY 30,000,000 (thirty
+million yuan per quarter — an annualized CNY 120,000,000, ≈ USD 17 million),
+you may ship closed-source builds of this software, and run modified versions as
+a service, WITHOUT the source-disclosure obligations of AGPL §13.**
 
 Concretely, for organizations under that line, all of the following are allowed
 without paying anything and without publishing your code:
@@ -42,7 +43,8 @@ That is all. No application, no email, no registration, no fee.
 
 ## 2. Above the line
 
-If your organization's total annual revenue is **at or above CNY 200,000,000**,
+If your organization's quarterly revenue is **at or above CNY 30,000,000**
+(annualized CNY 120,000,000),
 you have two options, both fine:
 
 1. **Publish your source** under AGPL-3.0 as [`LICENSE`](./LICENSE) requires —
@@ -59,13 +61,19 @@ modifications pays nothing.
 
 ## 3. How "revenue" is measured
 
-- **Total revenue of the legal entity (and its corporate group) over the most
-  recently completed fiscal year**, from **all** business activities — not just
-  the product that embeds this engine.
+- **Measured per quarter, annualized: the line is CNY 30,000,000 of total
+  revenue per fiscal quarter (CNY 120,000,000 per year).** The quarterly figure
+  is what is tested; the annual number is just the same line stated yearly.
+- The number is the **total revenue of the legal entity and its corporate group
+  for that quarter**, from **all** business activities — not just the product
+  that embeds this engine.
 - Multi-entity groups aggregate. If a subsidiary ships the product, the parent
   group's revenue is what counts.
-- A newly formed entity with no closed fiscal year is assessed on a pro-rata
-  annualized basis.
+- **Once you are over the line, you stay over it for that fiscal year** — a
+  single strong quarter is enough; you do not get to average it away.
+- A newly formed entity with no completed quarter is assessed on its run-rate
+  (revenue received so far, annualized). If that run-rate is under the line, you
+  are under the line.
 - **Funding is not revenue.** A pre-revenue startup that raised a large round is
   still under the line; what matters is revenue actually received for goods or
   services. (This is deliberate: the target is companies already extracting

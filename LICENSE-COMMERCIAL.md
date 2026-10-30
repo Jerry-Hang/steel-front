@@ -2,9 +2,9 @@
 
 **Copyright (C) 2026 Huang Shaojie (黄少杰).**
 
-This document covers **one narrow case**: an organization whose annual revenue
-is **at or above CNY 200,000,000** that wants to ship the engine **closed
-source**. Everyone else does not need this file — see the table below.
+This document covers **one narrow case**: an organization whose **quarterly**
+revenue is **at or above CNY 30,000,000** (annualized CNY 120 million) and that
+wants to ship the engine **closed source**. Everyone else does not need this file — see the table below.
 
 ---
 
@@ -13,8 +13,8 @@ source**. Everyone else does not need this file — see the table below.
 | Your situation | What applies | Cost |
 |---|---|---|
 | You publish your source under AGPL-3.0 | [`LICENSE`](./LICENSE) | Free, any company size, forever |
-| Closed source **and** annual revenue **below** CNY 200M | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an AGPL §7 **additional permission** | Free, no application needed |
-| Closed source **and** annual revenue **at or above** CNY 200M | **This file** | Symbolic annual fee |
+| Closed source **and** quarterly revenue **below** CNY 30M (annualized 120M) | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an AGPL §7 **additional permission** | Free, no application needed |
+| Closed source **and** quarterly revenue **at or above** CNY 30M (annualized 120M) | **This file** | Symbolic annual fee |
 
 The middle row is the important one: small studios, solo developers, students
 and hobbyists have a real, written permission to keep their code closed. They
@@ -56,8 +56,8 @@ maintained, not to extract money from you.
 
 Email **<huangshaojie925@gmail.com>** with:
 
-1. legal entity name, country, and the most recent fiscal year's total revenue
-   band (a band is enough — no audited statements required);
+1. legal entity name, country, and the most recent fiscal **quarter's** total
+   revenue band (a band is enough — no audited statements required);
 2. the product the engine will ship in;
 3. whether you need binary distribution, network-service use, or both.
 
