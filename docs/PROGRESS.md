@@ -2647,3 +2647,35 @@ importer 把源贴图打包成图集、片元采样），否则永远是一堆�
   **但实测没有采用**：`y<0.5m` 处的最大半径在收细后反而 0.907m ⇒ 那个宽度不是树干
   （是低垂枝叶），说明"树干像圆锥"的判断需要先定位到真正的树干顶点。
   ⇒ 树资产回退到已提交版本，这条留作下次的线索。
+
+### 2026-10-30（续97）：**开源协议重构**（用户报的"大问题"）
+
+**病根**：旧 `LICENSE` 把「AGPL-3.0 + 附加商业条款（冲突时附加条款优先）」写在同一份文件里。
+这在法律上不成立：
+
+- AGPL-3.0 **§7** 只允许一份**封闭清单**里的附加条款（免责、保留声明、不得虚假来源、名称/商标限制）；
+- **§10** 明确禁止「对接收者施加进一步限制」；
+- 「按季度营收触发」既不在 §7 清单里，又是典型的 further restriction ⇒ **无效**。
+  更糟的读法：整份文件因此不构成 AGPL ⇒ 作品回到「保留所有权利」，比原意更差。
+- 附带缺陷：仓库里**没有 AGPL 原文**（只有一个 URL），而 AGPL §4 要求随程序给出许可证副本。
+
+**改法（标准 dual licensing）**
+| 文件 | 内容 |
+|---|---|
+| `LICENSE` | **GNU AGPL-3.0 原文 661 行，逐字未改**（sha256 `0d96a4ff…abcb0`） |
+| `LICENSE-COMMERCIAL.md` | **独立的可选商业许可**：闭源/嵌入专有产品时另行签署；营收 1000 万/季度以下免费申领。它是"第二条授权"，**不是**给 AGPL 叠条件 |
+| `NOTICE`（新） | 版权归属 + 双许可摘要 + **哪条授权覆盖哪些路径** + 再分发清单 |
+| `THIRD-PARTY-NOTICES.md` | 新增 **§2b 下载资产清单**（Quaternius / Poly Haven / ambientCG，逐件源 + CC0 1.0）；§1 补**真实依赖规模** |
+| `README.md` | 中英两段全部重写为双许可表述，并把"附加条款优先"的历史写清楚 |
+| `Cargo.toml` | 补 `license = "AGPL-3.0-or-later"`（旧版缺这个字段 ⇒ 元数据是 unknown，与 LICENSE 矛盾）、`repository`、`readme` |
+
+**核出来的事实（不是猜的）**
+- `Cargo.lock` 共 **314 个包**（10 个直接依赖），逐个读 `~/.cargo/registry/src/*/*/Cargo.toml`
+  的 `license` 字段：**全部宽松**（MIT 127 / MIT+Apache 12+7+3 / MIT 50 / Apache 9 / BSD 6+4+2 /
+  Unlicense 6 / Zlib / ISC / 0BSD / CC0 / Unicode-3.0），**没有任何 GPL/AGPL/SSPL/Commons-Clause**
+  ⇒ AGPL 与整棵依赖树兼容。63 个是 Linux 构建不参与的平台专用 crate。
+- 本轮下载的资产**全部 CC0 1.0**，因此旧 `LICENSE` 与 `THIRD-PARTY-NOTICES` §2 里
+  「`assets/props/**` 全由本仓脚本生成、归版权人所有」这句**已经不成立** —— 已改为
+  「程序化生成的那批归作者；下载的那批是 CC0，不属于作者，也不受 AGPL/商业许可约束」。
+
+**闸门**：`commit_guard` 的白名单显式扩了 `NOTICE` / `LICENSE-COMMERCIAL.md`（附理由，改动留痕）。

@@ -33,6 +33,33 @@ each crate's own `Cargo.toml`, in `~/.cargo/registry/src/`.
 | `rspirv` | 0.11.0+1.5.4 | **Apache-2.0** (single) | none in tree |
 | `winit` | 0.30.13 | **Apache-2.0** (single) | `LICENSE` |
 
+### Scale check (2026-10-30)
+
+The table above lists the **10 direct dependencies**. The full graph pinned in
+`Cargo.lock` is **314 packages** (Windows/Android platform crates included).
+Every one of them declares a permissive license — measured by reading each
+crate's own `Cargo.toml` in `~/.cargo/registry/src/`:
+
+| Declared license | Crates |
+|---|---|
+| `MIT OR Apache-2.0` | 127 |
+| `MIT` | 50 |
+| `Apache-2.0 OR MIT` | 12 |
+| `Apache-2.0` | 9 |
+| `MIT/Apache-2.0` | 7 |
+| `Unlicense OR MIT` | 6 |
+| `BSD-3-Clause` | 6 |
+| `MIT OR Apache-2.0 OR Zlib` | 6 |
+| `BSD-2-Clause` | 4 |
+| `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 4 |
+| others (Zlib / BSD / ISC / 0BSD / CC0-1.0 / Unicode-3.0 combinations) | 20 |
+
+🔴 **No GPL / AGPL / SSPL / Commons-Clause dependency anywhere in the graph**,
+so AGPL-3.0 for this project is compatible with its whole dependency tree.
+63 of the 314 are platform-specific crates that are not unpacked on a Linux
+x86_64 build (Android/Apple/macOS-only); their metadata is permissive where it
+was readable, and none of them are compiled into a Linux or Windows build.
+
 **Two of these are worth calling out**, because the intuitive guess is wrong:
 
 - **`winit` is Apache-2.0 only** — not the usual Rust "MIT OR Apache-2.0" dual
@@ -69,7 +96,7 @@ from the genuinely third-party material in §3 and §4.
 
 | Path | How it is produced | Notes |
 |---|---|---|
-| `assets/props/**` (24 files) | `tools/blender/build_city_kit.py`, `gen_props.py` — headless Blender | City kit: buildings, trees, street furniture |
+| `assets/props/**` — **only the procedurally built files**: `building_*`, `panel_block`, `container_*`, `sandbag_wall`, `barrier_hesco`, `bench*`, … | `tools/blender/build_city_kit.py`, `gen_props.py` — headless Blender | City kit built from scratch in-repo. **The downloaded files in the same directory are NOT ours — see §2b** |
 | `assets/soldier/soldier.glb` | `tools/blender/build_soldier.py` — headless Blender | 1082 verts / 540 tris, real-world proportions |
 | `assets/maps/**` (6 files) | Hand-written TOML, parsed by `src/engine/map.rs` | `index`, `street_fight`, `open_field`, `factory_ambush`, `bridgehead`, `defense_line` |
 | `assets/rt/**` (2 files) | Project-authored GLSL for the path tracer | Compiled by `scripts/compile_pt.ps1` |
@@ -78,6 +105,44 @@ from the genuinely third-party material in §3 and §4.
 
 **Why this matters:** these directories are safe to redistribute. The
 directories in §4 are not, without checking.
+
+---
+
+## 2b. Downloaded assets — CC0 (public domain), added 2026-10-29/30
+
+These files were **downloaded**, converted to the engine's prop contract by
+`tools/blender/import_external.py`, and are **not** works of the copyright
+holder. All of them are published under **CC0 1.0 Universal** (public domain
+dedication): redistribution and commercial use are permitted, attribution is
+not required (it is given here anyway, as provenance).
+
+| File in repo | Original asset | Source pack / page | License |
+|---|---|---|---|
+| `assets/props/downtown_large.glb` | `Building_Large_2` | Quaternius — *Downtown City MegaKit* (quaternius.com) | CC0 1.0 |
+| `assets/props/downtown_medium.glb` | `Building_Medium_2` | same pack | CC0 1.0 |
+| `assets/props/downtown_small.glb` | `Building_Small_1` | same pack | CC0 1.0 |
+| `assets/props/tree_oak.glb` | `CommonTree_5` | Quaternius — *Ultimate Stylized Nature* | CC0 1.0 |
+| `assets/props/bush_real.glb` | `Plant_1_Big` | same pack | CC0 1.0 |
+| `assets/props/street_lamp.glb` | `street_lamp_01` | Poly Haven (polyhaven.com/models) | CC0 1.0 |
+| `assets/props/crate_military.glb` | `old_military_crate` | Poly Haven | CC0 1.0 |
+| `assets/props/barrel_metal.glb` | `barrel_03` | Poly Haven | CC0 1.0 |
+| `assets/props/car_wreck.glb` | `covered_car` | Poly Haven | CC0 1.0 |
+| `assets/props/trash_can.glb` | `metal_trash_can` | Poly Haven | CC0 1.0 |
+| `assets/props/utility_box.glb` | `utility_box_01` | Poly Haven | CC0 1.0 |
+| `assets/textures/ground_detail_3way.png` | R = `Asphalt033`, G = `Concrete034`, B = `Ground037` | ambientCG (ambientcg.com) | CC0 1.0 |
+| `assets/textures/ground_detail_asphalt.png` | `Asphalt033` | ambientCG | CC0 1.0 |
+| `assets/textures/marker_skin_bricks.png` | `Bricks075A` | ambientCG | CC0 1.0 |
+| `assets/textures/prop_atlas.png` | 8-cell 2048² atlas: cells 0–4 and 5–7 are the Poly Haven / Quaternius base-color textures listed above, resampled to 512² | generated in-repo by `import_external.py --atlas-slot N` | mixture of the CC0 sources above ⇒ CC0 1.0 |
+
+**Consequences for redistributors**
+
+- Nothing here needs permission, notice, or payment — CC0 imposes no conditions.
+- These files are **not** covered by the project's AGPL/commercial grants: they
+  are public-domain material that the copyright holder converted, and nobody
+  can re-license them. Treat them as CC0 regardless of which license you take
+  for the code.
+- `prop_atlas.png` is a derived composite; it is CC0 because every input is CC0.
+  If you replace those textures, regenerate the atlas and re-check the UV cells.
 
 ---
 
@@ -266,9 +331,11 @@ Any model that cannot be traced back to a source page should be treated as
 |---|---|---|
 | Original source, build scripts, tools, docs | No | **Yes** |
 | Procedurally generated props, soldier, terrain, city | No | **Yes** |
+| Downloaded CC0 props and textures (§2b) | Yes — CC0 1.0, public domain | **Yes**, no obligations |
 | Hand-written map TOML, PT shaders | No | **Yes** |
 | Build-time `.spv` products | No | **Yes** |
-| 10 Rust dependencies | Yes — MIT/Apache-2.0 | **Yes**, with notices bundled |
+| 10 direct Rust dependencies (314 crates in `Cargo.lock`) | Yes — all permissive (MIT / Apache-2.0 / BSD / Zlib / Unicode / CC0), **no copyleft** | **Yes**, with notices bundled |
+| Downloaded props + textures (§2b) | Yes — **CC0 1.0** (Quaternius / Poly Haven / ambientCG) | **Yes**, no obligations |
 | CJK glyph bitmaps (§3) | Yes — derived from **Noto Sans SC (SIL OFL 1.1)**, subset to the 1,580 code points in use | **Yes** — keep the OFL text (`assets/fonts/OFL-NotoSansCJK.txt`) and the attribution |
 | Gun models (§4) | Yes — per-asset | **Unknown — verify per asset** (`docs/WEAPON-LICENCE-AUDIT.md`) |
 

@@ -3,6 +3,11 @@ name = "steel-front"
 version = "0.1.0"
 description = "钢铁前线 (Steel Front) - 21 世纪架空世界观大战场 FPS 引擎"
 edition = "2021"
+# 双许可：自由软件路径 = AGPL-3.0-or-later（全文见 LICENSE）；另一条是可选的商业许可
+# （LICENSE-COMMERCIAL.md）。这里声明的是**默认/自由软件**那一条，别写 SPDX 组合符。
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/Jerry-Hang/steel-front"
+readme = "README.md"
 
 # 库目标：桌面给薄 bin 用（rlib）；Android 编 cdylib（.so）以导出 android_main。
 [lib]

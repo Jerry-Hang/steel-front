@@ -1,0 +1,90 @@
+# Steel Front (钢铁前线) — Copyright and Licensing Notice
+
+**Copyright (C) 2026 Huang Shaojie (黄少杰).**
+
+Repository: <https://github.com/Jerry-Hang/steel-front>
+
+This file is the short, human-readable summary. It is **not** the license;
+the licenses themselves are `LICENSE` (GNU AGPL-3.0) and, for commercial use,
+`LICENSE-COMMERCIAL.md`.
+
+---
+
+## 1. Dual licensing: you pick one of two paths
+
+**Path A — free / open source: GNU AGPL-3.0.** The complete, unmodified license
+text is in [`LICENSE`](./LICENSE). You may use, modify, and redistribute this
+project under AGPL-3.0-or-later. If you distribute it, or run a modified
+version as a network service, you must provide the corresponding source under
+the AGPL (§13). There is no fee, no registration, and no need to contact the
+copyright holder, at any company size.
+
+**Path B — commercial license.** If you cannot or do not want to accept
+AGPL-3.0's source-disclosure obligations (for example a closed-source game, or
+embedding this engine in a proprietary product), the copyright holder offers
+this project under a **separate written commercial license**. Terms, including
+the pricing policy, are in [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md).
+
+The two paths are alternatives. Path B does **not** restrict Path A: a
+recipient who obtained the project under AGPL-3.0 keeps every right AGPL-3.0
+grants, and nothing in `LICENSE-COMMERCIAL.md` narrows it. That is the whole
+point of dual licensing — it adds a second, optional grant instead of attaching
+extra conditions to the first one.
+
+> An earlier version of this repository shipped a single `LICENSE` file that
+> was AGPL-3.0 "plus additional commercial terms that prevail over the AGPL"
+> in one document. That construction is not valid: AGPL-3.0 §7 lists the only
+> additional terms permitted (disclaimers, notice preservation, no false claims
+> of origin, name/trademark limits), and §10 forbids imposing any further
+> restriction on recipients. A revenue-triggered restriction is not on that
+> list, so it would have been void — while leaving the project in the far worse
+> position of possibly not being validly licensed at all. It has been replaced
+> by the two-file dual-licensing structure described above.
+
+---
+
+## 2. What these grants cover
+
+| Path | Owner | License |
+|---|---|---|
+| `src/**`, `build.rs`, `build_spv_rt.rs`, `tools/**` (except downloaded inputs), `scripts/**` | Copyright holder | AGPL-3.0 / commercial |
+| `docs/**`, `README.md`, `AGENTS.md`, `NOTICE`, `LICENSE-COMMERCIAL.md` | Copyright holder | AGPL-3.0 / commercial |
+| **Project-authored** assets: `assets/maps/**`, `assets/rt/**`, `assets/soldier/**`, and the procedural props built by `tools/blender/build_city_kit.py` / `gen_props.py` / `build_soldier.py` | Copyright holder | AGPL-3.0 / commercial |
+| **Downloaded CC0 assets** in `assets/props/` (listed per file in `THIRD-PARTY-NOTICES.md` §2b) and the texture pixels inside `assets/textures/**` that came from them | Their original authors, dedicated to the public domain (CC0 1.0) | CC0 1.0 — no permission needed, no attribution required |
+| `assets/guns/**`, `assets/guns_ext/**` | Their respective authors | **Not ours to license** — see `THIRD-PARTY-NOTICES.md` §4 and `docs/WEAPON-LICENCE-AUDIT.md` |
+| `src/engine/cjk_glyphs.rs` (bitmap glyphs extracted from Noto Sans SC) | Font copyright holders | SIL OFL 1.1 — text in `assets/fonts/OFL-NotoSansCJK.txt` |
+| Rust crates from crates.io (314 pinned in `Cargo.lock`, 10 direct) | Their respective authors | Permissive only (MIT / Apache-2.0 / BSD / Zlib / Unicode / CC0); **no copyleft** — see `THIRD-PARTY-NOTICES.md` §1 |
+
+**CC0 material carries no obligations**, so nothing about the public-domain
+assets limits what you may do with them; they are simply not the copyright
+holder's to re-license. The AGPL/commercial grants apply to the original code
+and to the project-authored assets, which is everything the copyright holder
+actually owns here.
+
+---
+
+## 3. Redistribution checklist
+
+Ship these with any binary or source redistribution:
+
+1. [`LICENSE`](./LICENSE) — the full AGPL-3.0 text (a URL is not enough; §4
+   requires conveying a copy);
+2. [`NOTICE`](./NOTICE) — this file;
+3. [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) — dependency and asset
+   provenance;
+4. `assets/fonts/OFL-NotoSansCJK.txt` — required because the font-derived glyph
+   bitmaps are OFL material;
+5. If you are distributing under the commercial license instead, the signed
+   agreement from `LICENSE-COMMERCIAL.md`.
+
+Not required (but welcome): attribution to the CC0 sources in
+`THIRD-PARTY-NOTICES.md` §2b.
+
+---
+
+## 4. Contributions
+
+Unless you explicitly state otherwise, any contribution you intentionally
+submit for inclusion in this project is licensed under AGPL-3.0-or-later, with
+the copyright holder additionally permitted to offer it under the commercial
+license described above (this is what makes dual licensing possible).

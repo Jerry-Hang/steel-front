@@ -397,51 +397,91 @@ python tools\install_guns.py
 
 ## 许可证 / Licence
 
-本项目采用 **AGPL-3.0 + 附加商业使用条款**。
+本项目采用 **双许可（dual licensing）**：由你二选一，而不是"AGPL 上再叠条款"。
 
-**权威条款只有两份文件，本 README 不复制其内容**（历史上这里曾同时存在中英文两份副本，与 `LICENSE` 三方漂移 —— 故全部收敛）：
+| 选项 | 许可 | 什么时候选 |
+|---|---|---|
+| **A. 自由软件** | **GNU AGPL-3.0-or-later**，完整原文就在 [`LICENSE`](./LICENSE) | 你能接受 AGPL §13（分发或以网络服务形式运行修改版时公开源码）。**任何规模的公司都免费、无需联系作者** |
+| **B. 商业许可** | 作者另行签署的**书面商业许可**，条款见 [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | 你要闭源分发、把引擎嵌进专有产品，或无法接受 §13 |
+
+**权威文件只有三份**（本 README 不复制其内容）：
 
 | 文件 | 内容 | 什么时候必须读 |
 |---|---|---|
-| [`LICENSE`](./LICENSE) | AGPL-3.0 基础授权 + 附加商业条款（季度营收 1000 万元分界）+ 联系方式 | 再分发、商用、或闭源使用前 |
-| [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) | 第三方依赖与素材的**逐项来源核实**、再分发清单、以及两项已知风险 | **再分发本仓库或其构建产物之前必读** |
+| [`LICENSE`](./LICENSE) | **GNU AGPL-3.0 原文（661 行，未改动一字）** | 再分发、商用、或闭源使用前 |
+| [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | 可选的商业许可（含季度营收 1000 万元以下的免费政策）+ 联系方式 | 无法接受 AGPL 时 |
+| [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) | 依赖与素材的**逐项来源核实**、§2b 下载资产清单、再分发清单 | **再分发仓库或构建产物之前必读** |
 
-一句话概括：**开源使用永远免费；闭源使用在季度总营收低于人民币 1000 万元时自动免费；达到或超过则需书面商业授权。**
+> 🔴 **2026-10-30 修正**：旧版 `LICENSE` 把"AGPL-3.0 + 附加商业条款（冲突时附加条款优先）"写在同一份文件里。
+> 这个写法**在法律上不成立**：AGPL §7 只允许一份**封闭清单**里的附加条款（免责、保留声明、不得虚假来源、
+> 名称/商标限制），§10 明确禁止对接收者施加进一步限制 —— 按营收触发的限制两者都不属于。
+> 结果只有两种读法：要么附加条款**无效**（接收者直接按 AGPL 走），要么整份文件**根本不是 AGPL**
+> （而"没有有效许可"= 默认保留所有权利，比前者更糟）。现在拆成"AGPL 原文 + 独立可选的商业许可"，
+> 商业意图完全不变，但结构合法。
 
 ⚠️ **再分发前请读这两条**（逐项依据见 `THIRD-PARTY-NOTICES.md`，枪械另见
 [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LICENCE-AUDIT.md)）：
 
 1. ✅ **中文字模已解决**（2026-09-14）：不再来自专有字体，而是从 **Noto Sans SC（SIL OFL 1.1）**
-   重新提取，并裁到源码真正用到的 1,580 个码点；OFL 全文随包发布
+   重新提取，并裁到源码真正用到的码点；OFL 全文随包发布
    （`assets/fonts/OFL-NotoSansCJK.txt`），提取器 `tools/extract_cjk_glyphs.py` 可复现，
-   `cargo test` 会挡住"加了没有字模的字"。**唯一义务 = 保留 OFL 文本与出处**（不叫 Noto 即可，无需改名）。
+   `cargo test` 会挡住"加了没有字模的字"。**唯一义务 = 保留 OFL 文本与出处**。
 2. ⚠️ **枪械模型只完成了部分核实**（§4，2026-09-14：14 件里 4 件确认、2 件较可能，全部 CC BY）：
    **闭源/商业构建发布前，必须按 `docs/WEAPON-LICENCE-AUDIT.md` 逐件核实**；
    若某件不适合再分发，从 `assets/guns*/` 删除即可 —— 引擎对缺模型会回退 `ak12.glb`，**不会坏构建、只降画质**。
 
-**再分发清单（照做即可）**：`LICENSE` + `THIRD-PARTY-NOTICES.md` + `assets/fonts/OFL-NotoSansCJK.txt`
-随包；10 个 Rust 依赖的许可证文本按 §1 逐条附带；`assets/guns*/` 逐件过审；
-`assets/guns/` 与 `assets/rt/` 缺少时不会报错、只会静默回退 —— 打包后请实际清点一次。
+**关于下载的 CC0 资产**（`assets/props/` 里的 11 件、`assets/textures/` 里的 3 张与图集）：
+它们来自 **Quaternius / Poly Haven / ambientCG**，全部 **CC0 1.0（公有领域）**，**不是**作者的版权、
+也**不在** AGPL/商业许可范围内 —— 但 CC0 不要求任何义务，随便用、随便商用，逐件来源见
+`THIRD-PARTY-NOTICES.md` §2b。
+
+**再分发清单（照做即可）**：`LICENSE`（AGPL 全文，§4 要求随包给出全文而不是链接）+ `NOTICE`
++ `THIRD-PARTY-NOTICES.md` + `assets/fonts/OFL-NotoSansCJK.txt` 随包；依赖许可证文本按 §1 附带；
+`assets/guns*/` 逐件过审；`assets/guns/` 与 `assets/rt/` 缺少时不会报错、只会静默回退 ——
+打包后请实际清点一次。
 
 ---
 
-This project is licensed under **AGPL-3.0 with additional commercial terms**.
+This project is **dual-licensed** — pick one of two paths; it is not "AGPL plus
+extra conditions bolted on".
 
-The authoritative text lives in exactly two files — [`LICENSE`](./LICENSE) and
-[`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) — and is deliberately not
-duplicated here, because this README previously carried both a Chinese and an
-English copy that drifted out of sync with `LICENSE`.
+| Option | License | When to pick it |
+|---|---|---|
+| **A. Free software** | **GNU AGPL-3.0-or-later** — the complete, unmodified text is [`LICENSE`](./LICENSE) | You can accept AGPL §13 (publish the corresponding source when you distribute, or when you run a modified version as a network service). Free at any company size, no contact needed. |
+| **B. Commercial** | A separate written license from the copyright holder — terms in [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | You need closed-source distribution, or to embed the engine in a proprietary product. |
 
-**In one line:** open-source use is always free; closed-source use is
-automatically free below CNY 10,000,000 of quarterly revenue, and requires a
-written commercial license at or above it.
+**Authoritative files — exactly three, deliberately not duplicated here**
+(this README used to carry both a Chinese and an English copy that drifted):
+
+| File | Contents |
+|---|---|
+| [`LICENSE`](./LICENSE) | The full GNU AGPL-3.0 text (661 lines, verbatim) |
+| [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | Optional commercial license, including the free-above-CNY-10M-quarterly-revenue policy |
+| [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) | Per-item dependency/asset provenance, the CC0 inventory (§2b), redistribution checklist |
+
+> 🔴 **Fixed on 2026-10-30.** The previous `LICENSE` mixed AGPL-3.0 with
+> "additional commercial terms that prevail over the AGPL" in one document.
+> That construction is not valid: AGPL §7 allows additional terms only from a
+> closed list (disclaimers, notice preservation, no false claims of origin,
+> name/trademark limits) and §10 forbids any further restriction on recipients;
+> a revenue-triggered restriction is neither. Read one way the extra terms are
+> void, read the other way the document is not AGPL at all — and an unlicensed
+> work is "all rights reserved", which is worse for everyone. It is now the
+> two-file dual-licensing structure above: identical business intent, valid
+> legal shape.
+
+**Downloaded CC0 assets** (11 props in `assets/props/`, 3 textures plus the prop
+atlas in `assets/textures/`) come from **Quaternius / Poly Haven / ambientCG**
+and are **CC0 1.0 (public domain)**: not the copyright holder's to re-license,
+but also free of any obligation — commercial use included. Per-file provenance
+is in `THIRD-PARTY-NOTICES.md` §2b.
 
 ⚠️ **Read these two before redistributing** (per-item evidence in `THIRD-PARTY-NOTICES.md`;
 weapon models additionally in [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LICENCE-AUDIT.md)):
 
 1. ✅ **CJK glyphs: resolved (2026-09-14).** They are no longer derived from a proprietary font but
-   re-extracted from **Noto Sans SC (SIL OFL 1.1)**, trimmed to the 1,580 code points the source
-   actually uses. The full OFL text ships at `assets/fonts/OFL-NotoSansCJK.txt`, the extractor
+   re-extracted from **Noto Sans SC (SIL OFL 1.1)**, trimmed to the code points the source actually
+   uses. The full OFL text ships at `assets/fonts/OFL-NotoSansCJK.txt`, the extractor
    (`tools/extract_cjk_glyphs.py`) is reproducible, and `cargo test` rejects any character that has
    no glyph. **The only obligation is keeping the OFL text and the attribution** (nothing here is
    named "Noto", so the Reserved Font Name clause needs no action).
@@ -451,10 +491,12 @@ weapon models additionally in [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LIC
    from `assets/guns*/`: the engine falls back to `ak12.glb`, so the build stays valid and only the
    visuals degrade.
 
-**Redistribution checklist:** ship `LICENSE`, `THIRD-PARTY-NOTICES.md` and
-`assets/fonts/OFL-NotoSansCJK.txt`; attach the license text of each of the 10 Rust dependencies
-(§1 lists them); clear `assets/guns*/` item by item; and count `assets/guns/` + `assets/rt/` after
-packaging — their absence raises no error, it silently falls back to procedural models.
+**Redistribution checklist:** ship `LICENSE` (the full AGPL text — §4 requires
+conveying a copy, a URL is not enough), `NOTICE`, `THIRD-PARTY-NOTICES.md` and
+`assets/fonts/OFL-NotoSansCJK.txt`; attach the license text of each direct Rust dependency
+(§1 lists them; the full graph is 314 crates, all permissive); clear `assets/guns*/` item by item;
+and count `assets/guns/` + `assets/rt/` after packaging — their absence raises no error, it silently
+falls back to procedural models.
 
 ---
 

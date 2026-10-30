@@ -50,7 +50,20 @@ ALLOW_EXT = {
     "log",
 }
 # --- 白名单：无扩展名但必须入库的固定文件名 -----------------------------------
-ALLOW_NAMES = {"LICENSE", ".gitignore", ".gitattributes", ".editorconfig", "Makefile"}
+# `NOTICE` / `LICENSE-COMMERCIAL.md` 是 2026-10-30 双许可改造新增的**许可声明文件**：
+#   LICENSE            = GNU AGPL-3.0 原文（661 行，逐字未改）
+#   NOTICE             = 版权 + 双许可摘要（哪个授权覆盖哪些路径）
+#   LICENSE-COMMERCIAL.md = 可选的商业许可（独立文件，不是给 AGPL 叠条件）
+# 它们是公开发布的许可文本，天然不含密钥；扩展白名单即留痕。
+ALLOW_NAMES = {
+    "LICENSE",
+    "NOTICE",
+    "LICENSE-COMMERCIAL.md",
+    ".gitignore",
+    ".gitattributes",
+    ".editorconfig",
+    "Makefile",
+}
 # --- 白名单：目录前缀（钩子脚本无扩展名） -------------------------------------
 ALLOW_PREFIX = (".githooks/",)
 
