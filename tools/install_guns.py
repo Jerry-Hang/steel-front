@@ -23,7 +23,12 @@ import os
 import shutil
 import sys
 
-SRC_DIR = "assets/guns_ext"
+SRC_DIR = "assets/guns_ext"   # ⚠️ 2026-10-30：该目录已从仓库移除，见下方说明
+# 🔴 2026-10-30 许可清理：`assets/guns_ext/` 已整体删除（15 件与 assets/guns/ 逐字节相同的
+# 重复副本 + 8 件追不到来源的模型的原始 slug 版本）。随之删除的 8 个武器 key：
+#   ak104 / ash12 / pkm / pkp / rpk16 / saiga12 / sv98 / svd12
+# 理由与逐件来源表见 `docs/WEAPON-LICENCE-AUDIT.md`（§「现有资产的来源与许可」）。
+# 本脚本现在只对**仍在** assets/guns/ 里的 key 有意义；SRC_DIR 不存在时应直接跳过而不是报错。
 DST_DIR = "assets/guns"
 REPORT = os.path.join("tools", "blender", "prep_guns_report.json")
 

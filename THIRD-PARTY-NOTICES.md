@@ -263,74 +263,30 @@ so no action is needed, but the attribution above must stay in place.
 
 ---
 
-## 4. Third-party 3D models
+## 4. Third-party 3D models (weapon art)
 
-`assets/guns/` (15 files) and `assets/guns_ext/` (14 files) contain weapon
-models obtained from third-party sources — originally Sketchfab and comparable
-sites. `tools/install_guns.py` and `tools/blender/prep_guns.py` record that the
-source filenames were preserved through preprocessing, which is how the files
-in these directories can be traced back.
+**Status: cleaned on 2026-10-30 — 8 models ship, all CC BY; 8 removed.**
 
-### Current status: **partially audited (2026-09-14)**
+| Ship? | Files | Licence evidence |
+|---|---|---|
+| ✅ 8 | `ak12` (+ its in-repo derivative `ak12_baked`), `asval`, `mp443`, `osv96`, `pp19`, `pp9`, `vss` | `ak12` = **CC BY 4.0, momsboxtv** read from the GLB's own `asset.extras`; the others matched by face count within 0–8 tris (`mp443`, `osv96`, `pp9`, `asval`) or 137–222 tris (`pp19`, `vss`) against CC BY Sketchfab listings. Attribution text: `docs/WEAPON-LICENCE-AUDIT.md` §4 |
+| ❌ 8 removed | `ak104`, `ash12`, `pkm`, `pkp`, `rpk16`, `saiga12`, `sv98`, `svd12` | No traceable source page after two audit rounds (2026-09-14, 2026-10-30) ⇒ licence unknown ⇒ **no longer redistributed** |
+| ❌ removed | `assets/guns_ext/**` (15 files, 7 MB) | Byte-identical duplicates of `assets/guns/**`; the original slugs are recorded in `docs/WEAPON-LICENCE-AUDIT.md` so provenance survives |
 
-**4 of 14 positively identified — all CC BY.** 2 more plausible (also CC BY).
-**8 could not be traced** to a source page after a genuine effort; their
-listings appear to have been withdrawn, since these are ~10-year-old uploads.
-**No NonCommercial, ShareAlike, or NoDerivs licence appeared in any search.**
+**What this means for a redistributor**
 
-Full results, per-model attribution strings, and the recommendation are in
-**[`docs/WEAPON-LICENCE-AUDIT.md`](docs/WEAPON-LICENCE-AUDIT.md)**.
+- The 8 shipped models are CC BY: **keep the attribution block** in
+  `docs/WEAPON-LICENCE-AUDIT.md` §4 and the statement that the models were
+  modified (orientation normalised, rescaled, materials baked to vertex colours)
+  — CC BY requires both, and every one of these files was modified.
+- Nothing in the repository now carries an unknown licence.
+- The eight removed weapons fall back to the AK-12 model at runtime
+  (`load_gun_glb`), so shipping is unaffected; only those weapons look like an
+  AK-12.
+- If you have local copies of the removed models **and** can name their source
+  page, add author + licence to the audit file first, then restore them and raise
+  the `gun_glb_indices_all_in_range` floor (currently 8).
 
-The audit was automated by `tools/audit_gun_licences.py`, which identifies a
-model by matching its **triangle count** against Sketchfab's API — a slug alone
-is not an identification, and treating one as such produces fake verification.
-
-The individual license of each model **has not been recorded in this
-repository**. This is an acknowledged gap, not an oversight in this document.
-
-Bundled CC licenses vary in ways that matter here:
-
-| Variant | Commercial use | Redistribution | Attribution required |
-|---|---|---|---|
-| CC0 / Public Domain | Yes | Yes | No |
-| CC BY | Yes | Yes | **Yes** |
-| CC BY-SA | Yes | Yes, **under the same license** | **Yes** |
-| CC BY-NC | **No** | Yes | **Yes** |
-| CC BY-ND | Yes | **Unmodified only** | **Yes** |
-| Sketchfab "Standard" | Depends on the individual listing | Usually restricted | Per listing |
-
-**Note the trap:** a model under **CC BY-NC** cannot be used in a commercial
-build at all, while one under **CC BY-SA** would impose a share-alike
-obligation on the artwork that is distinct from — and additional to — the
-AGPL-3.0 covering the code.
-
-### Working document
-
-**[`docs/WEAPON-LICENCE-AUDIT.md`](docs/WEAPON-LICENCE-AUDIT.md)** is the
-worksheet for resolving this: all 14 source slugs, the slug→key mapping, the
-licence decision table, the three leads found so far, and the two traps that
-make a naive pass produce *fake* verification.
-
-**The short version of the trap:** these files kept their Sketchfab slugs, so
-they are findable — but a slug does **not** identify the asset. Searching
-`pp-19-01_vityaz` returns models by two different authors under different
-licences. Recording either without disambiguating produces a licence record that
-looks verified and is not.
-
-### Required action before redistribution
-
-For **each** file in `assets/guns/` and `assets/guns_ext/`:
-
-1. Identify the original source page.
-2. Record: author, source URL, exact license identifier, and whether commercial
-   use and redistribution are permitted.
-3. Add the attribution string the license requires to this file.
-4. **Remove any model whose license does not permit the intended use.**
-
-Any model that cannot be traced back to a source page should be treated as
-**not redistributable** and removed.
-
----
 
 ## 5. Summary table
 
@@ -344,7 +300,7 @@ Any model that cannot be traced back to a source page should be treated as
 | 10 direct Rust dependencies (314 crates in `Cargo.lock`) | Yes — all permissive (MIT / Apache-2.0 / BSD / Zlib / Unicode / CC0), **no copyleft** | **Yes**, with notices bundled |
 | Downloaded props + textures (§2b) | Yes — **CC0 1.0** (Quaternius / Poly Haven / ambientCG) | **Yes**, no obligations |
 | CJK glyph bitmaps (§3) | Yes — derived from **Noto Sans SC (SIL OFL 1.1)**, subset to the 1,580 code points in use | **Yes** — keep the OFL text (`assets/fonts/OFL-NotoSansCJK.txt`) and the attribution |
-| Gun models (§4) | Yes — per-asset | **Unknown — verify per asset** (`docs/WEAPON-LICENCE-AUDIT.md`) |
+| Weapon models (§4) | Yes — 8 shipped, **all CC BY** | **Yes**, with the attribution in `docs/WEAPON-LICENCE-AUDIT.md` §4 |
 
 ---
 

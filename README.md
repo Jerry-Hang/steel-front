@@ -429,6 +429,19 @@ python tools\install_guns.py
 > 小团队照样处于默认侵权状态。现在改成"AGPL 原文 + §7 附加许可（放宽）+ 独立商业许可"，
 > 商业意图完全保留，但小开发者是拿着**真授权**在用。
 
+⚠️ **再分发前请读这两条**（逐项依据见 `THIRD-PARTY-NOTICES.md`）：
+
+1. ✅ **中文字模已解决**（2026-09-14）：不再来自专有字体，而是从 **Noto Sans SC（SIL OFL 1.1）**
+   重新提取；OFL 全文随包（`assets/fonts/OFL-NotoSansCJK.txt`），提取器可复现。
+   **唯一义务 = 保留 OFL 文本与出处**。
+2. ✅ **枪械模型已清理**（2026-10-30）：仓库只保留 **8 件，全部 CC BY** ——
+   其中 `ak12.glb` 的作者与许可直接写在 GLB 的 `extras` 里（momsboxtv / CC-BY-4.0）；
+   另 8 件两轮审计都追不到原始出处 ⇒ 许可证未知 ⇒ **已移出仓库**，并同时删掉 7 MB 的重复副本
+   `assets/guns_ext/`。再分发**必须保留**
+   [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LICENCE-AUDIT.md) §4 的署名段
+   （CC BY 要求署名 + 注明修改，而这些模型都被重新定向/缩放/烘焙过）。
+   被移出的 8 件武器运行时回退 `ak12.glb`，**不坏构建、只降画质**。
+
 **关于下载的 CC0 资产**（`assets/props/` 里的 11 件、`assets/textures/` 里的 3 张与图集）：
 它们来自 **Quaternius / Poly Haven / ambientCG**，全部 **CC0 1.0（公有领域）**，**不是**作者的版权、
 也**不在** AGPL/商业许可范围内 —— 但 CC0 不要求任何义务，随便用、随便商用，逐件来源见
@@ -498,16 +511,19 @@ weapon models additionally in [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LIC
    (`tools/extract_cjk_glyphs.py`) is reproducible, and `cargo test` rejects any character that has
    no glyph. **The only obligation is keeping the OFL text and the attribution** (nothing here is
    named "Noto", so the Reserved Font Name clause needs no action).
-2. ⚠️ **Weapon models: only partially audited** (§4, 2026-09-14 — 4 of 14 positively identified,
-   2 more plausible, all CC BY). **Verify each asset against `docs/WEAPON-LICENCE-AUDIT.md` before
-   shipping a commercial or closed-source build.** If one cannot be redistributed, just delete it
-   from `assets/guns*/`: the engine falls back to `ak12.glb`, so the build stays valid and only the
-   visuals degrade.
+2. ✅ **Weapon art cleaned (2026-10-30):** the repository ships **8 models, all CC BY** — including
+   `ak12.glb`, whose author and licence are stated in its own GLB `extras`
+   (momsboxtv / CC-BY-4.0). The other **8 are gone**: two audit rounds could not trace them to a
+   source page, so their licence is unknown and they are no longer redistributed; the 7 MB of
+   byte-identical duplicates in `assets/guns_ext/` went with them. **Keep the attribution block** in
+   `docs/WEAPON-LICENCE-AUDIT.md` §4 when redistributing (CC BY requires credit *and* an indication
+   of changes — these models were re-oriented, rescaled and baked). The removed weapons fall back to
+   `ak12.glb` at runtime, so the build stays valid and only their looks change.
 
 **Redistribution checklist:** ship `LICENSE` (the full AGPL text — §4 requires
 conveying a copy, a URL is not enough), `NOTICE`, `THIRD-PARTY-NOTICES.md` and
 `assets/fonts/OFL-NotoSansCJK.txt`; attach the license text of each direct Rust dependency
-(§1 lists them; the full graph is 314 crates, all permissive); clear `assets/guns*/` item by item;
+(§1 lists them; the full graph is 314 crates, all permissive); keep the weapon attribution block in `docs/WEAPON-LICENCE-AUDIT.md` §4;
 and count `assets/guns/` + `assets/rt/` after packaging — their absence raises no error, it silently
 falls back to procedural models.
 

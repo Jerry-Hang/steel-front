@@ -1,5 +1,52 @@
 # Weapon Model Licence Audit — Results
 
+## 🟢 处置结果（2026-10-30）—— 未识别的一律移出仓库
+
+审计过程保留在下面（§1–§5 原样），**处置动作**如下：
+
+| 动作 | 内容 |
+|---|---|
+| 移出仓库 | `ak104` `ash12` `pkm` `pkp` `rpk16` `saiga12` `sv98` `svd12`（8 件，追不到原始出处，许可证未知） |
+| 一并移出 | `assets/guns_ext/**`（15 件，与 `assets/guns/**` **逐字节相同**的重复副本，7 MB；原始 slug 已抄进下表） |
+| 保留 | `ak12` `ak12_baked` `asval` `mp443` `osv96` `pp19` `pp9` `vss`（8 件） |
+| 新增确认 | **`ak12.glb` 自带 GLB 元数据**：`extras.author = momsboxtv`、`extras.license = CC-BY-4.0` ⇒ 第 5 件**硬证据**确认的 CC BY |
+
+移出后**不需要改代码**：`load_gun_glb` 对缺模型回退 `assets/guns/ak12.glb`，
+实测（2026-10-30，headless）只加载 1 件枪模、fps 249、无错误路径命中，只有外观退化。
+
+**回归判据**：`gun_glb_indices_all_in_range` 的下限 10 → **8**（资产清单的事实值）；
+`cargo test --release` = **880 passed**。
+
+要恢复某件枪：**先补来源页与许可证**，再拷回 `assets/guns/`，并把下限改回去。
+
+---
+
+## 现有资产的来源与许可（逐件，2026-10-30 实测）
+
+| 文件 | 原始 slug | sha256(前16) | 三角 | 许可状态 |
+|---|---|---|---|---|
+| `ak104.glb` | `low_poly_ak104` | `2e75682dbc04c57a` | 6784 | **未识别 — 2026-10-30 移出仓库** |
+| `ak12.glb` | `—(元数据内含作者/许可)` | `80d39627c1c7ad15` | 23493 | CC BY 4.0 — momsboxtv（GLB 内 extras 自带） |
+| `ak12_baked.glb` | `derived from ak12` | `462bb205d059cc19` | 23493 | 本仓派生物（源自 ak12） |
+| `ash12.glb` | `ash_12.7__assault_rifle_shak_12` | `70517db33c4ceb1c` | 9629 | **未识别 — 2026-10-30 移出仓库** |
+| `asval.glb` | `as_val` | `b5abe6086bd89120` | 6434 | CC BY — notcplkerry（Δ71） |
+| `mp443.glb` | `low-poly_mp-443_grach` | `3a6a2917370bd2c2` | 3868 | CC BY — TastyTony（Δ0） |
+| `osv96.glb` | `low-poly_osv-96` | `3ed1b8d13c371bf0` | 6717 | CC BY — TastyTony（Δ4） |
+| `pkm.glb` | `pkm` | `b62c1572ccde9092` | 6750 | **未识别 — 2026-10-30 移出仓库** |
+| `pkp.glb` | `pkp` | `5aafdbf6e5bf59b0` | 5002 | **未识别 — 2026-10-30 移出仓库** |
+| `pp19.glb` | `pp-19-01_vityaz` | `4c0466700a502e59` | 4771 | CC BY（较可能）— veightyfive（Δ137） |
+| `pp9.glb` | `pp-19_bizon` | `ccd33c0d2dc557fc` | 11195 | CC BY — 42manako（Δ8） |
+| `rpk16.glb` | `low-poly_rpk-16` | `85170ae2c3c3c050` | 3864 | **未识别 — 2026-10-30 移出仓库** |
+| `saiga12.glb` | `komrad_12_saiga_12` | `9f6da917b2a323f1` | 9156 | **未识别 — 2026-10-30 移出仓库** |
+| `sv98.glb` | `sv98` | `356015d5e22a2478` | 4906 | **未识别 — 2026-10-30 移出仓库** |
+| `svd12.glb` | `svd_63_cleaned` | `4567bf520d7dfa97` | 3374 | **未识别 — 2026-10-30 移出仓库** |
+| `vss.glb` | `vss_vintorez` | `67bd3a6f1dc0e648` | 9692 | CC BY（较可能）— patrakeevasveta（Δ222） |
+
+
+> `ak12_baked.glb` 是本仓对 `ak12.glb` 的**烘焙派生物**（作者与许可随源文件走）。
+
+---
+
 **Audit run: 2026-09-14.** Supersedes the blank worksheet, kept as
 [`_audit_worksheet_superseded.md`](_audit_worksheet_superseded.md) for its method
 notes and licence decision table.
@@ -42,6 +89,7 @@ solid.
 | `low-poly_osv-96.glb` | Low-Poly OSV-96 | TastyTony | 4 | CC BY |
 | `pp-19_bizon.glb` | PP-19 Bizon | 42manako | 8 | CC BY |
 | `as_val.glb` | Low-Poly AS "Val" | notcplkerry | 71 | CC BY |
+| `ak12.glb` | AK-12M | **momsboxtv** | — | **CC BY 4.0（GLB `extras` 自带，非推测）** |
 
 ## 2. Plausible, not confirmed
 
@@ -55,29 +103,25 @@ recorded as **unconfirmed**, not as verified.
 | `pp-19-01_vityaz.glb` | Low-poly PP-19 Vityaz | veightyfive | 137 | CC BY |
 | `vss_vintorez.glb` | VSS Vintorez | patrakeevasveta | 222 | CC BY |
 
-## 3. Not identified (8)
+## 3. Not identified (8) — **removed from the repository on 2026-10-30**
 
 `ash_12.7__assault_rifle_shak_12` · `komrad_12_saiga_12` · `low-poly_rpk-16` ·
 `low_poly_ak104` · `pkm` · `pkp` · `sv98` · `svd_63_-_dragunov`
 
-Searched with the slug, with the slug de-hyphenated, and with hand-written
-variants (PKM / Pecheneg, SV-98, Dragunov, AK-104, …). No downloadable Sketchfab
-model matched within tolerance.
+Searched with the slug, de-hyphenated, and with hand-written variants (PKM /
+Pecheneg, SV-98, Dragunov, AK-104 …). No downloadable Sketchfab model matched
+within tolerance. A **2026-10-30 re-run** — same method plus a 3% tolerance and
+more query variants (`shak-12`, `saiga 12`, `rpk-16`, `ak-104`, `pecheneg`,
+`svd-63` …) — produced exactly **one** weak candidate (`pkp` → a model named
+`objects` by "PECENEG", 2.4% off). That is a shortlist item, not an
+identification, and was rejected as such.
 
-**Leading explanations, in order of likelihood:**
+**Disposition: removed.** With the source and licence unknown, the files are no
+longer redistributed. `assets/guns_ext/**` (byte-identical duplicates kept for
+provenance) went in the same commit; the original slugs are preserved in the
+table above, which is exactly what a future re-identification needs.
 
-1. **The listings are gone.** These look like ~10-year-old uploads — the one
-   OSV-96 candidate that *did* surface in search was published in 2015. Withdrawn
-   or deleted listings do not appear in the API at all, and no search can find
-   them.
-2. **The face count moved beyond tolerance** — heavier preprocessing than the
-   others, or the author edited the model after it was downloaded.
-3. **They came from a different platform.** The `komrad_12_saiga_12` search
-   surfaced only gta5-mods and 3dwhere — **not** Sketchfab. Its filename also
-   breaks the `low-poly_*` naming pattern every other file shares.
-
-**What "not identified" means: no evidence of a problem, and no evidence of
-safety.** It is not the same as "fine", and it must not be recorded as such.
+**Cost:** none in code — the eight weapons fall back to the AK-12 model.
 
 ---
 
@@ -93,6 +137,9 @@ Weapon models included in this project are used under CC BY 4.0:
   "Low-Poly OSV-96"        by TastyTony    — sketchfab.com/3d-models/none-64cb6e7ee5f240db8004dc10430bf254
   "PP-19 Bizon"            by 42manako     — sketchfab.com/3d-models/none-384b7eb873f6438ca135a20dc67579eb
   "Low-Poly AS \"Val\""    by notcplkerry  — sketchfab.com/3d-models/none-2b8cda7a787d4c2ca8ea51f9baa4a1ec
+  "AK-12M"                 by momsboxtv    — https://sketchfab.com/momsboxtv
+                                         (author/licence read from the GLB's own
+                                          `asset.extras`: license = CC-BY-4.0)
 
 Modifications: models were preprocessed with tools/blender/prep_guns.py
 (orientation normalised, uniformly rescaled, materials baked to vertex colours)
@@ -104,32 +151,17 @@ whether changes were made**, and every one of these files was modified.
 
 ---
 
-## 5. Recommendation
+## 5. Recommendation — superseded by the 2026-10-30 disposition above
 
-**Keep the models. Record the state honestly. Keep it reversible.**
+The original advice was "keep the models, record the state honestly, keep it
+reversible". That was written before this repository had a licensing structure
+of its own. After the 2026-10-30 rework (verbatim AGPL text + a §7 additional
+permission, see [`NOTICE`](../NOTICE)), the project publishes under **stated
+terms** — and a repository cannot both promise a licence and redistribute art
+that nobody can license.
 
-Reasoning:
+So the disposition flipped from "keep and disclose" to **"remove and disclose"**:
+8 models with confirmed or near-confirmed CC BY stay (attribution below), the
+other 8 are gone, and the originals live outside the repository in case a source
+page surfaces later.
 
-- **Six of six identified licences are CC BY.** The pattern is consistent and
-  permissive; Sketchfab's free-download tier is overwhelmingly CC BY, and the
-  three identified files sharing the `low-poly_*` prefix come from a single
-  author's series.
-- **Zero NC / ND / SA licences appeared in any search.** The specific risk this
-  audit was raised to catch — a NonCommercial model hiding among "free"
-  downloads — did not materialise in any sample.
-- **The unresolved eight are unresolved because their listings appear to be
-  gone**, which correlates with age, not with restrictive licensing.
-- **Removal is cheap if it is ever wanted.** `main.rs::load_gun_glb` falls back to
-  `assets/guns/ak12.glb` when a weapon key has no dedicated model, so deleting one
-  degrades that weapon's appearance without breaking the build.
-
-**What this audit does *not* entitle anyone to claim** is that the weapon art is
-cleared. The accurate statement remains:
-
-> **The code is clean to redistribute. Four weapon models are confirmed CC BY,
-> with attribution recorded above. Eight could not be traced to a source page
-> after a genuine effort, and their licences are unknown.**
-
-That sentence should be carried forward rather than softened. If the project is
-ever redistributed at scale or sold, §3 is the list to resolve first — and by
-then the cheapest answer may simply be to regenerate those eight procedurally.
