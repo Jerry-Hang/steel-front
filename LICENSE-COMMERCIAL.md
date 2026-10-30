@@ -1,95 +1,101 @@
-# Steel Front — Commercial License (optional alternative to AGPL-3.0)
+# Steel Front — Commercial License (large organizations, symbolic fee)
 
 **Copyright (C) 2026 Huang Shaojie (黄少杰).**
 
-This document describes the **commercial license** that the copyright holder
-offers as an **alternative** to the free software license. It is not a
-modification of the AGPL, and it does not restrict anyone who uses the project
-under the AGPL.
+This document covers **one narrow case**: an organization whose annual revenue
+is **at or above CNY 200,000,000** that wants to ship the engine **closed
+source**. Everyone else does not need this file — see the table below.
 
 ---
 
-## 1. Two independent grants
+## 1. Which track applies to you
 
-The project is available under **either** of the following, at your option:
-
-| Option | License | When to choose it |
+| Your situation | What applies | Cost |
 |---|---|---|
-| **A. Free software** | GNU Affero GPL v3.0-or-later — full text in [`LICENSE`](./LICENSE) | You can live with AGPL §13: if you distribute the software, or run a modified version over a network, you publish the corresponding source under the AGPL. No fee, at any company size. |
-| **B. Commercial** | A separate written license from the copyright holder, described below | You want to ship closed-source builds, embed the engine in a proprietary product, or otherwise cannot accept AGPL §13. |
+| You publish your source under AGPL-3.0 | [`LICENSE`](./LICENSE) | Free, any company size, forever |
+| Closed source **and** annual revenue **below** CNY 200M | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an AGPL §7 **additional permission** | Free, no application needed |
+| Closed source **and** annual revenue **at or above** CNY 200M | **This file** | Symbolic annual fee |
 
-Option A is a complete license: choosing it means you never need to talk to
-the copyright holder. Option B exists because some users cannot use Option A,
-not because Option A is limited.
-
----
-
-## 2. What the commercial license grants
-
-A commercial license grants, for the term stated in the signed agreement:
-
-- the right to use, modify, and distribute the software **in closed-source
-  form**, without the source-disclosure obligations of AGPL §13;
-- the right to combine it with proprietary code and ship the result;
-- a non-exclusive, non-transferable, worldwide right, limited to the products
-  and legal entity named in the agreement.
-
-It does **not** grant ownership of the copyright, and it does not grant rights
-to third-party material listed in [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md)
-(those remain under their own terms — for practical purposes this is a non-issue
-for the CC0 assets, the OFL font data, and the permissive Rust crates).
+The middle row is the important one: small studios, solo developers, students
+and hobbyists have a real, written permission to keep their code closed. They
+are not relying on anyone's goodwill.
 
 ---
 
-## 3. Pricing policy
+## 2. What the commercial license adds
 
-This is a **pricing policy**, not a condition attached to the AGPL:
+- the §13 source-disclosure obligation does **not** apply to your product;
+- the engine may be modified and embedded in proprietary code, shipped on any
+  platform, as a service or as a binary;
+- a grant that survives acquisition of your studio (transferable with the
+  product, not the company).
 
-- **Quarterly revenue below CNY 10,000,000** (ten million Chinese yuan, or the
-  equivalent in another currency, measured on the licensee's most recently
-  completed fiscal quarter, aggregated across the licensee's whole
-  organization): a commercial license is granted **free of charge on request**.
-- **At or above that threshold**: the fee is agreed in writing before
-  commercial use begins.
+It does **not** add: exclusivity, trademark rights, warranty, support SLA, or
+ownership of copyright. Third-party material keeps its own terms
+([`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md)) — in practice a non-issue
+for the CC0 assets, the OFL glyph data, and the permissive Rust crates.
 
-Requesting a free commercial license below the threshold is a courtesy that
-takes one email. It is **not** required for using the project under the AGPL —
-under the AGPL you owe nothing regardless of revenue, forever.
+---
+
+## 3. The fee
+
+**Symbolic, and deliberately small.** The point is to keep the project
+maintained, not to extract money from you.
+
+- Annual fee, **negotiated by project scale**; the author's stated intent is a
+  token amount that a funded studio will not have to think about.
+- No per-seat, per-title, or revenue-percentage component.
+- No fee at all for the open-source path (§1, row 1) — the author explicitly
+  prefers that studios take it: *opening your engine changes is worth more to
+  this project than a fee.*
+- Payment terms, currency and invoicing are agreed in writing before use.
 
 ---
 
 ## 4. How to obtain one
 
-Write to **<huangshaojie925@gmail.com>** with:
+Email **<huangshaojie925@gmail.com>** with:
 
-1. legal entity name and country;
-2. the product the engine will be embedded in;
-3. whether you need closed-source distribution, or only the network-service
-   exception removed from §13.
+1. legal entity name, country, and the most recent fiscal year's total revenue
+   band (a band is enough — no audited statements required);
+2. the product the engine will ship in;
+3. whether you need binary distribution, network-service use, or both.
 
-Alternatively open an issue at
-<https://github.com/Jerry-Hang/steel-front/issues> and ask for the commercial
-contact. Nothing in this document is itself a grant: the license exists once a
-written agreement is signed by the copyright holder.
+Nothing in this document is itself a grant. The license exists once a written
+agreement is signed by the copyright holder. Until then, this project remains
+available to you under AGPL-3.0 (plus the small-organization permission, if it
+applies).
 
 ---
 
 ## 5. Why the earlier single-file version was replaced
 
-Before 2026-10-30 the repository shipped one `LICENSE` file containing AGPL-3.0
-plus "additional commercial terms" that were declared to prevail over the AGPL
-where they conflicted. That construction does not work:
+Before 2026-10-30 the repository shipped one `LICENSE` file that declared
+"AGPL-3.0 plus additional commercial terms which prevail over the AGPL where
+they conflict". That construction cannot work:
 
-- AGPL-3.0 **§7** permits additional terms only in a closed list — warranty
-  disclaimers, preservation of notices, no misrepresentation of origin,
-  limitations on the use of names/trademarks;
-- AGPL-3.0 **§10** forbids imposing any further restriction on the exercise of
-  the rights the license grants.
+- AGPL **§7** permits additional terms only from a closed list (warranty
+  disclaimers, notice preservation, no misrepresentation of origin, limits on
+  the use of names/trademarks), and every permitted additional term is at most
+  neutral — none may take a right away;
+- AGPL **§10** forbids imposing any further restriction on recipients.
 
-A revenue-triggered restriction on closed-source use is neither. Read one way it
-is void (recipients simply fall back on the AGPL grant), read the other way the
-document is not AGPL at all — and a work that is not validly licensed is
-"all rights reserved" by default, which is worse for everyone including the
-copyright holder. Splitting the offer into a verbatim AGPL text plus this
-separate, optional commercial grant gives exactly the same business outcome
-with a valid legal structure.
+A revenue-triggered restriction is neither, so read one way it is void, and read
+the other way the document is not AGPL at all — leaving the project unlicensed,
+i.e. "all rights reserved", which is strictly worse for everyone.
+
+The current structure fixes that by splitting the intent into the two shapes the
+GPL family actually supports:
+
+1. **relaxing** the license for small organizations ⇒ an *additional
+   permission* ([`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md)), which §7
+   explicitly allows; and
+2. **selling** a separate license to parties who want out of §13 ⇒ a true dual
+   license (this file), which never narrows the AGPL granted to anyone else.
+
+Same business intent as before. Now it is enforceable, and a small developer can
+point to a document instead of trusting an intention.
+
+---
+
+*End of commercial license terms.*

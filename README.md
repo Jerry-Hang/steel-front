@@ -397,38 +397,37 @@ python tools\install_guns.py
 
 ## 许可证 / Licence
 
-本项目采用 **双许可（dual licensing）**：由你二选一，而不是"AGPL 上再叠条款"。
+本项目是**一个 AGPL-3.0 内核 + 一份附加许可**，按你的情况三选一（不是"AGPL 上再叠条款"）：
 
-| 选项 | 许可 | 什么时候选 |
-|---|---|---|
-| **A. 自由软件** | **GNU AGPL-3.0-or-later**，完整原文就在 [`LICENSE`](./LICENSE) | 你能接受 AGPL §13（分发或以网络服务形式运行修改版时公开源码）。**任何规模的公司都免费、无需联系作者** |
-| **B. 商业许可** | 作者另行签署的**书面商业许可**，条款见 [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | 你要闭源分发、把引擎嵌进专有产品，或无法接受 §13 |
+| 轨 | 适用对象 | 适用文件 | 费用 |
+|---|---|---|---|
+| **1. 开源** | 任何人、任何规模 | [`LICENSE`](./LICENSE)（AGPL-3.0 原文） | **永久免费** |
+| **2. 闭源 · 中小** | 组织**年营收 < 人民币 2 亿元** | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md)（AGPL §7 **附加许可**：免除 §13 开源义务） | **免费，无需申请、无需联系** |
+| **3. 闭源 · 大型** | 组织**年营收 ≥ 人民币 2 亿元** | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md)（另行签署） | **象征性年费** |
 
-**权威文件只有三份**（本 README 不复制其内容）：
+两句话说明作者的真实意图：
 
-| 文件 | 内容 | 什么时候必须读 |
-|---|---|---|
-| [`LICENSE`](./LICENSE) | **GNU AGPL-3.0 原文（661 行，未改动一字）** | 再分发、商用、或闭源使用前 |
-| [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | 可选的商业许可（含季度营收 1000 万元以下的免费政策）+ 联系方式 | 无法接受 AGPL 时 |
-| [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) | 依赖与素材的**逐项来源核实**、§2b 下载资产清单、再分发清单 | **再分发仓库或构建产物之前必读** |
+- **个人开发者、学生、中小工作室可以直接闭源发布商业作品，一分钱不用付、也不用问任何人** ——
+  这不是"作者心情好就放过你"，而是第 2 轨那份**书面、不可撤回的授权**；
+- **大型公司更被鼓励走第 1 轨**：把你在引擎侧改的东西开源，比交那笔象征性费用对这个项目更有价值。
+  第 3 轨是给"确实没法开源"的团队留的出口，不是惩罚。
 
-> 🔴 **2026-10-30 修正**：旧版 `LICENSE` 把"AGPL-3.0 + 附加商业条款（冲突时附加条款优先）"写在同一份文件里。
-> 这个写法**在法律上不成立**：AGPL §7 只允许一份**封闭清单**里的附加条款（免责、保留声明、不得虚假来源、
-> 名称/商标限制），§10 明确禁止对接收者施加进一步限制 —— 按营收触发的限制两者都不属于。
-> 结果只有两种读法：要么附加条款**无效**（接收者直接按 AGPL 走），要么整份文件**根本不是 AGPL**
-> （而"没有有效许可"= 默认保留所有权利，比前者更糟）。现在拆成"AGPL 原文 + 独立可选的商业许可"，
-> 商业意图完全不变，但结构合法。
+第 2 轨用的是 AGPL **§7** 允许的 *additional permission*（**放宽**许可）机制，所以合法；
+第 3 轨是作者给出的**第二份独立授权**，不会削减任何其他人的 AGPL 权利。
 
-⚠️ **再分发前请读这两条**（逐项依据见 `THIRD-PARTY-NOTICES.md`，枪械另见
-[`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LICENCE-AUDIT.md)）：
+| 文件 | 内容 |
+|---|---|
+| [`LICENSE`](./LICENSE) | GNU AGPL-3.0 原文 661 行，**逐字未改** |
+| [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) | 中小组织的闭源**附加许可**（营收线、计量口径、"融资不算营收"） |
+| [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | 大组织的商业许可（象征性年费）+ 联系方式 |
+| [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) | 依赖与素材逐项来源、CC0 清单、再分发清单 |
+| [`NOTICE`](./NOTICE) | 版权归属 + 三轨摘要 + 各路径归属表 |
 
-1. ✅ **中文字模已解决**（2026-09-14）：不再来自专有字体，而是从 **Noto Sans SC（SIL OFL 1.1）**
-   重新提取，并裁到源码真正用到的码点；OFL 全文随包发布
-   （`assets/fonts/OFL-NotoSansCJK.txt`），提取器 `tools/extract_cjk_glyphs.py` 可复现，
-   `cargo test` 会挡住"加了没有字模的字"。**唯一义务 = 保留 OFL 文本与出处**。
-2. ⚠️ **枪械模型只完成了部分核实**（§4，2026-09-14：14 件里 4 件确认、2 件较可能，全部 CC BY）：
-   **闭源/商业构建发布前，必须按 `docs/WEAPON-LICENCE-AUDIT.md` 逐件核实**；
-   若某件不适合再分发，从 `assets/guns*/` 删除即可 —— 引擎对缺模型会回退 `ak12.glb`，**不会坏构建、只降画质**。
+> 🔴 **2026-10-30 修正两次**：① 旧 `LICENSE` 是"AGPL + 附加条款（冲突时附加条款优先）"——
+> §7 只允许封闭清单里的附加条款、§10 禁止进一步限制，按营收触发的限制两者都不属于，
+> 该写法**无效**；② 只写"商业许可 + 对小公司睁只眼闭只眼"也不够 —— **"放过你"不是授权**，
+> 小团队照样处于默认侵权状态。现在改成"AGPL 原文 + §7 附加许可（放宽）+ 独立商业许可"，
+> 商业意图完全保留，但小开发者是拿着**真授权**在用。
 
 **关于下载的 CC0 资产**（`assets/props/` 里的 11 件、`assets/textures/` 里的 3 张与图集）：
 它们来自 **Quaternius / Poly Haven / ambientCG**，全部 **CC0 1.0（公有领域）**，**不是**作者的版权、
@@ -442,33 +441,47 @@ python tools\install_guns.py
 
 ---
 
-This project is **dual-licensed** — pick one of two paths; it is not "AGPL plus
-extra conditions bolted on".
+This project is **one AGPL-3.0 core plus one additional permission** — three
+tracks, pick the one that describes you. Nothing here takes rights away from
+anyone using the project under AGPL-3.0.
 
-| Option | License | When to pick it |
-|---|---|---|
-| **A. Free software** | **GNU AGPL-3.0-or-later** — the complete, unmodified text is [`LICENSE`](./LICENSE) | You can accept AGPL §13 (publish the corresponding source when you distribute, or when you run a modified version as a network service). Free at any company size, no contact needed. |
-| **B. Commercial** | A separate written license from the copyright holder — terms in [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | You need closed-source distribution, or to embed the engine in a proprietary product. |
+| Track | Who | What applies | Cost |
+|---|---|---|---|
+| **1. Open source** | Anyone, any size | [`LICENSE`](./LICENSE) — GNU AGPL-3.0-or-later, verbatim | **Free, forever** |
+| **2. Closed source, small** | Annual revenue **below CNY 200,000,000** | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an **AGPL §7 additional permission** waiving §13 | **Free**, no application |
+| **3. Closed source, large** | Annual revenue **at or above CNY 200,000,000** | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) — separate written licence | **Symbolic annual fee** |
 
-**Authoritative files — exactly three, deliberately not duplicated here**
-(this README used to carry both a Chinese and an English copy that drifted):
+Two points that are the author's actual intent:
 
-| File | Contents |
+- **A solo developer or small studio can ship a closed-source game with this
+  engine and owe nothing** — Track 2 is a written, irrevocable grant, not
+  informal tolerance.
+- **Large studios are invited to take Track 1 instead.** Opening your engine-side
+  changes pays nothing and helps this project more than the symbolic fee does;
+  Track 3 exists for teams that genuinely cannot open their source.
+
+Track 2 uses the mechanism AGPL **§7** provides for *additional permissions*
+(terms that relax the licence); relaxing is allowed, adding restrictions is not.
+Track 3 is a genuine second grant, so it never narrows anyone else's AGPL rights.
+
+| Authoritative file | Contents |
 |---|---|
-| [`LICENSE`](./LICENSE) | The full GNU AGPL-3.0 text (661 lines, verbatim) |
-| [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | Optional commercial license, including the free-above-CNY-10M-quarterly-revenue policy |
+| [`LICENSE`](./LICENSE) | GNU AGPL-3.0, 661 lines, verbatim |
+| [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) | The small-organization closed-source permission (threshold, how revenue is measured, "funding is not revenue") |
+| [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) | The large-organization commercial licence + contact |
 | [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) | Per-item dependency/asset provenance, the CC0 inventory (§2b), redistribution checklist |
+| [`NOTICE`](./NOTICE) | Copyright, three-track summary, path-by-path ownership table |
 
-> 🔴 **Fixed on 2026-10-30.** The previous `LICENSE` mixed AGPL-3.0 with
-> "additional commercial terms that prevail over the AGPL" in one document.
-> That construction is not valid: AGPL §7 allows additional terms only from a
-> closed list (disclaimers, notice preservation, no false claims of origin,
-> name/trademark limits) and §10 forbids any further restriction on recipients;
-> a revenue-triggered restriction is neither. Read one way the extra terms are
-> void, read the other way the document is not AGPL at all — and an unlicensed
-> work is "all rights reserved", which is worse for everyone. It is now the
-> two-file dual-licensing structure above: identical business intent, valid
-> legal shape.
+> 🔴 **Fixed on 2026-10-30, twice.** First, the old `LICENSE` mixed AGPL-3.0 with
+> "additional commercial terms that prevail over the AGPL" — §7 allows only a
+> closed list of additional terms and §10 forbids further restrictions, so a
+> revenue-triggered restriction was void (or, read the other way, the document
+> was not AGPL at all, leaving the work "all rights reserved"). Second, a
+> commercial licence plus quietly "looking the other way" for small teams is not
+> enough either: **tolerance is not a grant**, and a small team would still have
+> been technically infringing. The current structure is AGPL verbatim + a §7
+> additional permission (which relaxes) + a separate commercial licence. Same
+> business intent, and now the small developer holds an actual permission.
 
 **Downloaded CC0 assets** (11 props in `assets/props/`, 3 textures plus the prop
 atlas in `assets/textures/`) come from **Quaternius / Poly Haven / ambientCG**

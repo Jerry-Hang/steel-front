@@ -10,38 +10,41 @@ the licenses themselves are `LICENSE` (GNU AGPL-3.0) and, for commercial use,
 
 ---
 
-## 1. Dual licensing: you pick one of two paths
+## 1. Three tracks — pick the one that describes you
 
-**Path A — free / open source: GNU AGPL-3.0.** The complete, unmodified license
-text is in [`LICENSE`](./LICENSE). You may use, modify, and redistribute this
-project under AGPL-3.0-or-later. If you distribute it, or run a modified
-version as a network service, you must provide the corresponding source under
-the AGPL (§13). There is no fee, no registration, and no need to contact the
-copyright holder, at any company size.
+The project is **one AGPL-3.0 core plus one additional permission**, not "AGPL
+with extra conditions bolted on". Everything below is additive: nothing here
+takes rights away from anyone who uses the project under AGPL-3.0.
 
-**Path B — commercial license.** If you cannot or do not want to accept
-AGPL-3.0's source-disclosure obligations (for example a closed-source game, or
-embedding this engine in a proprietary product), the copyright holder offers
-this project under a **separate written commercial license**. Terms, including
-the pricing policy, are in [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md).
+| Track | Who | What applies | Cost |
+|---|---|---|---|
+| **1. Open source** | Anyone, any size | [`LICENSE`](./LICENSE) — GNU AGPL-3.0-or-later, verbatim | **Free forever** |
+| **2. Closed source, small** | Total annual revenue **below CNY 200,000,000** (≈ USD 28M) | [`LICENSE-EXCEPTION.md`](./LICENSE-EXCEPTION.md) — an **AGPL §7 additional permission**: no source-disclosure duty, no application, no fee | **Free** |
+| **3. Closed source, large** | Total annual revenue **at or above CNY 200,000,000** | [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md) — separate written license | **Symbolic annual fee** |
 
-The two paths are alternatives. Path B does **not** restrict Path A: a
-recipient who obtained the project under AGPL-3.0 keeps every right AGPL-3.0
-grants, and nothing in `LICENSE-COMMERCIAL.md` narrows it. That is the whole
-point of dual licensing — it adds a second, optional grant instead of attaching
-extra conditions to the first one.
+Two points worth stating plainly, because they are the author's actual intent:
 
-> An earlier version of this repository shipped a single `LICENSE` file that
-> was AGPL-3.0 "plus additional commercial terms that prevail over the AGPL"
-> in one document. That construction is not valid: AGPL-3.0 §7 lists the only
-> additional terms permitted (disclaimers, notice preservation, no false claims
-> of origin, name/trademark limits), and §10 forbids imposing any further
-> restriction on recipients. A revenue-triggered restriction is not on that
-> list, so it would have been void — while leaving the project in the far worse
-> position of possibly not being validly licensed at all. It has been replaced
-> by the two-file dual-licensing structure described above.
+- **A solo developer or a small studio can ship a closed-source game with this
+  engine and owe nothing.** That is not informal tolerance — Track 2 is a
+  written, irrevocable grant. No lawyer, no email, no registration.
+- **Large studios are explicitly invited to take Track 1 instead.** Opening your
+  engine-side changes pays nothing and helps the project more than the symbolic
+  fee does. Track 3 exists for teams that cannot open their source, not as a
+  penalty.
 
----
+Track 2 uses the mechanism AGPL **§7** provides for *additional permissions*
+(terms that relax the license). That is why it is valid: relaxing is allowed,
+adding restrictions is not. Track 3 is a genuine second grant from the copyright
+holder, so it never narrows anyone else's AGPL rights.
+
+> An earlier version of this repository shipped a single `LICENSE` file that was
+> AGPL-3.0 "plus additional commercial terms which prevail over the AGPL". That
+> is not a valid construction: §7 permits additional terms only from a closed
+> list, and §10 forbids any further restriction on recipients; a
+> revenue-triggered restriction is neither, so it would have been void — or, read
+> the other way, the document would not be AGPL at all, leaving the work
+> "all rights reserved", which is worse for everyone. It has been replaced by
+> the three-track structure above.
 
 ## 2. What these grants cover
 
@@ -74,8 +77,9 @@ Ship these with any binary or source redistribution:
    provenance;
 4. `assets/fonts/OFL-NotoSansCJK.txt` — required because the font-derived glyph
    bitmaps are OFL material;
-5. If you are distributing under the commercial license instead, the signed
-   agreement from `LICENSE-COMMERCIAL.md`.
+5. If you are distributing closed source, also ship the file that gave you that
+   right: `LICENSE-EXCEPTION.md` (small organizations) or the signed agreement
+   from `LICENSE-COMMERCIAL.md` (large organizations).
 
 Not required (but welcome): attribution to the CC0 sources in
 `THIRD-PARTY-NOTICES.md` §2b.
@@ -86,5 +90,6 @@ Not required (but welcome): attribution to the CC0 sources in
 
 Unless you explicitly state otherwise, any contribution you intentionally
 submit for inclusion in this project is licensed under AGPL-3.0-or-later, with
-the copyright holder additionally permitted to offer it under the commercial
-license described above (this is what makes dual licensing possible).
+the copyright holder additionally permitted to offer it under the additional
+permission and the commercial license described above (this is what makes the
+three-track structure possible).

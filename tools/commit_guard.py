@@ -59,6 +59,7 @@ ALLOW_NAMES = {
     "LICENSE",
     "NOTICE",
     "LICENSE-COMMERCIAL.md",
+    "LICENSE-EXCEPTION.md",
     ".gitignore",
     ".gitattributes",
     ".editorconfig",
