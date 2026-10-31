@@ -126,12 +126,17 @@ impl PropMesh {
 #[derive(Debug, Default, Clone)]
 pub struct PropSet {
     pub meshes: Vec<PropMesh>,
+    /// **LOD1（低模）网格**（2026-10-31）：文件名约定 `<base>_lod1.glb`，`name` 存去掉后缀的基名。
+    /// 它们**不进 `CONTRACT_SIZES`**（尺寸契约只约束可见那一档；低模只是同一件东西的简化版，
+    /// 占地必须与整模一致 —— 由 `lod1_matches_full_footprint` 判据钉住）。
+    pub lod1: Vec<PropMesh>,
 }
 
 impl PropSet {
     /// 扫描目录加载全部 `.glb`。名字取文件名（去扩展名）。排序后返回，使下标稳定。
     pub fn load_dir(dir: &str) -> Result<Self, String> {
         let mut found: Vec<(String, ImportedMesh)> = Vec::new();
+        let mut found_lod: Vec<(String, ImportedMesh)> = Vec::new();
         // 🔴 **这个函数在 Android 上仍然不可用，而且只修一半没有意义**（2026-10-15）：
         // 外部复核指出第 3 条「资产加载漏走 `asset_source`」，这里**确实**没走；
         // 但 `AssetSource` 这个 trait **只有 `read` / `read_to_string` / `exists`，
@@ -158,7 +163,12 @@ impl PropSet {
             if m.verts.is_empty() || m.indices.is_empty() {
                 return Err(format!("{} 是空网格", path.display()));
             }
-            found.push((stem, m));
+            // `_lod1` 后缀的件进 LOD 表（基名去掉后缀），其余照旧进主表。
+            if let Some(base) = stem.strip_suffix("_lod1") {
+                found_lod.push((base.to_string(), m));
+            } else {
+                found.push((stem, m));
+            }
         }
         // 稳定顺序：同名文件在不同文件系统上的枚举顺序不保证一致，而实例下标要用它
         found.sort_by(|a, b| a.0.cmp(&b.0));
@@ -170,7 +180,16 @@ impl PropSet {
                 PropMesh::from_imported(n, &m)
             })
             .collect();
-        Ok(PropSet { meshes })
+        found_lod.sort_by(|a, b| a.0.cmp(&b.0));
+        let lod1 = found_lod
+            .iter()
+            .map(|(n, m)| {
+                let mut m = m.clone();
+                ensure_smooth_normals(&mut m.verts, &m.indices);
+                PropMesh::from_imported(n, &m)
+            })
+            .collect();
+        Ok(PropSet { meshes, lod1 })
     }
 
     pub fn len(&self) -> usize {
@@ -183,6 +202,11 @@ impl PropSet {
 
     pub fn get(&self, i: usize) -> Option<&PropMesh> {
         self.meshes.get(i)
+    }
+
+    /// 取某件的低模（没有返回 `None`，调用方回退整模）。
+    pub fn lod1_of(&self, base: &str) -> Option<&PropMesh> {
+        self.lod1.iter().find(|m| m.name == base)
     }
 
     pub fn index_of(&self, name: &str) -> Option<usize> {
@@ -257,7 +281,7 @@ impl PropSet {
                 max: [w * 0.5, h, d * 0.5],
             })
             .collect();
-        PropSet { meshes }
+        PropSet { meshes, lod1: Vec::new() }
     }
 }
 
@@ -411,7 +435,21 @@ pub fn merge_binned(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
 ) -> BinnedGeometry {
-    merge_binned_impl(set, placements, cell, ground, false)
+    merge_binned_impl(set, placements, cell, ground, false, false)
+}
+
+/// **LOD1（低模）合并**（2026-10-31）：与 [`merge_binned`] 同一条分桶/排序路径，
+/// 唯一区别是"有 `_lod1` 的件用低模、没有的仍用整模"。
+///
+/// 🔴 两套必须产生**逐桶一一对应**的分桶序列（同 cell、同迭代顺序），否则远处换模会把
+/// 索引配到别的件上 —— 判据 `lod_bins_align_with_full_bins` 钉住这件事。
+pub fn merge_binned_lod(
+    set: &PropSet,
+    placements: &[PropPlacement],
+    cell: f32,
+    ground: impl Fn(f32, f32) -> f32,
+) -> BinnedGeometry {
+    merge_binned_impl(set, placements, cell, ground, false, true)
 }
 
 /// 阴影专用几何（2026-09-19 建筑 LOD 专项，PROGRESS §13）：与 [`merge_binned`]
@@ -426,7 +464,7 @@ pub fn merge_shadow_binned(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
 ) -> BinnedGeometry {
-    merge_binned_impl(set, placements, cell, ground, true)
+    merge_binned_impl(set, placements, cell, ground, true, false)
 }
 
 /// 2026-09-19 阴影建筑 LOD：名单内的网格在**阴影几何**里被替换为 AABB 盒壳。
@@ -485,6 +523,7 @@ fn merge_binned_impl(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
     shadow_lod: bool,
+    lod: bool,
 ) -> BinnedGeometry {
     let mut out = BinnedGeometry::default();
     // 🔴 **全局包围盒必须从极值起步，不能沿用 `Default` 的 `[0.0; 3]`**
@@ -521,9 +560,15 @@ fn merge_binned_impl(
         let mut bin_max = [f32::MIN; 3];
         for &mi in members {
             let p = placements[mi];
-            let mesh = match set.get(p.mesh) {
+            let full = match set.get(p.mesh) {
                 Some(m) => m,
                 None => continue,
+            };
+            // LOD：有低模用低模，没有用整模；桶序列与整模完全一致（同一 p.mesh、同一顺序）。
+            let mesh = if lod {
+                set.lod1_of(&full.name).unwrap_or(full)
+            } else {
+                full
             };
             // 阴影 LOD：建筑网格换成 AABB 盒壳，走同一条变换+翻面路径，
             // 绕序与实体逐面一致（BOX_INDICES 按资产约定编写）。
@@ -647,6 +692,7 @@ mod tests {
     /// 造一个只含单格三角形的小套件，位置可控，便于精确核对分桶。
     fn one_tri_set() -> PropSet {
         PropSet {
+            lod1: Vec::new(),
             meshes: vec![PropMesh {
                 name: "tri".into(),
                 verts: vec![
@@ -839,6 +885,7 @@ mod tests {
     #[test]
     fn placement_tint_lands_on_color_channels_not_uv() {
         let set = PropSet {
+            lod1: Vec::new(),
             meshes: vec![PropMesh {
                 name: "tri".into(),
                 verts: vec![
@@ -1039,6 +1086,7 @@ mod tests {
             [0.0, 3.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.6, 0.5, 0.25, 0.125],
         ];
         PropSet {
+            lod1: Vec::new(),
             meshes: vec![PropMesh {
                 name: "tri".into(),
                 verts,
@@ -1145,6 +1193,7 @@ mod tests {
     #[test]
     fn merged_bounds_start_from_extremes_not_from_zero() {
         let set = PropSet {
+            lod1: Vec::new(),
             meshes: vec![PropMesh {
                 name: "far_corner_tri".into(),
                 // 每个轴都严格 > 0 —— 这正是区分"从 0 起步"与"从极值起步"的那一档
@@ -1277,4 +1326,55 @@ mod tests {
         assert!(bad.iter().all(|v| v[3] == 0.0 && v[4] == 0.0 && v[5] == 0.0));
     }
 
+}
+
+#[cfg(test)]
+mod lod_tests {
+    use super::*;
+
+    /// **LOD 与整模的分桶必须逐桶对齐**（2026-10-31）：远处桶直接用 `prop_lod_bins[i]`
+    /// 的 first_index/index_count ⇒ 前提是第 i 个桶在两套里是同一批摆放。
+    ///
+    /// 🔴 来自一次真实事故：首版拿整模的 first_index 去画低模缓冲，现场症状是
+    /// "灌木/树被贴成亮绿色块"。这条判据钉住"两套桶顺序一致"这个前提。
+    #[test]
+    fn lod_bins_align_with_full_bins() {
+        let Ok(set) = PropSet::load_dir("assets/props") else {
+            eprintln!("跳过：本机没有 assets/props");
+            return;
+        };
+        if set.lod1.is_empty() {
+            eprintln!("跳过：没有 _lod1 资产");
+            return;
+        }
+        // 用契约表造确定性摆放：每件沿 x 排开，覆盖全部件。
+        let placements: Vec<PropPlacement> = CONTRACT_SIZES
+            .iter()
+            .enumerate()
+            .map(|(i, &(name, ..))| {
+                PropPlacement {
+                    mesh: set.index_of(name).expect("契约里的件必须在套件里"),
+                    x: i as f32 * 12.0,
+                    y: 0.0,
+                    z: 0.0,
+                    yaw: 0.3,
+                    scale: 1.0,
+                    solid: false,
+                }
+            })
+            .collect();
+        let full = merge_binned(&set, &placements, 40.0, |_, _| 0.0);
+        let lod = merge_binned_lod(&set, &placements, 40.0, |_, _| 0.0);
+        assert_eq!(full.bins.len(), lod.bins.len(), "两套分桶数量不同");
+        for (i, (a, b)) in full.bins.iter().zip(lod.bins.iter()).enumerate() {
+            // 容差 5cm：桶心由**几何包围盒**推出，低模与整模的包围盒本来就差一点点
+            // （实测 4.8e-7 与 1.9e-3），这不是顺序错位；**顺序错位会差几十米**。
+            let dx = (a.center[0] - b.center[0]).abs();
+            let dz = (a.center[2] - b.center[2]).abs();
+            assert!(
+                dx < 0.05 && dz < 0.05,
+                "第 {i} 个桶的 center 差太多（dx={dx:.6} dz={dz:.6}）⇒ 两套桶顺序不一致"
+            );
+        }
+    }
 }

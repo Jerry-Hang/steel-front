@@ -1243,6 +1243,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             // 🖼 道具 albedo 图集（2026-10-29）：带 UV 的件（uv 非零）才采样；
             // UV 全零 = 旧资产/程序化件 ⇒ 跳过，行为与上一版逐像素一致。
             if (length(input.uv) > 1e-4) {
+                // ⚠️ 平铺 UV 的**格内回卷**在导出端做（`import_external.py` 先把源 uv
+                // 折进 [0,1) 再重映射到格）。**别在这里写 `floor(uv*4)*0.25 + fract(uv*4)*0.25`
+                // ——那在数学上恒等于 `uv`，什么也修不了**（2026-10-31 我自己踩过这一脚）。
                 let tex = textureSample(prop_atlas_tex, texture_sampler, input.uv).rgb;
                 // 采样值直接当反照率调制：白图（1×1）= 1.0 ⇒ 不影响顶点色。
                 shaded = shaded * mix(vec3<f32>(1.0), tex * 1.9, 0.85);

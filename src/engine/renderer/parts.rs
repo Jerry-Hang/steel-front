@@ -701,6 +701,103 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
     }
 }
 
+    /// **上传 LOD1（低模）几何**（2026-10-31）。
+    ///
+    /// 与主套分开成一个 device-local 缓冲的原因：LOD 只在远处用、而且**永不更新**
+    /// （不随切枪/换关重建），没有理由占用 host-visible 映射窗口 —— 主套要 host-visible
+    /// 是因为它跟着关卡重建并要打 `placement_tint` 日志；LOD 走 staging 一次拷完更省。
+    ///
+    /// 没有 `_lod1` 资产时**整段跳过**（字段保持 null），绘制端会退回"全部用整模"，
+    /// 行为与改动前逐字节一致。
+    fn set_prop_lod_geometry(
+        &mut self,
+        set: &crate::engine::props::PropSet,
+        placements: &[crate::engine::props::PropPlacement],
+    ) {
+        if set.lod1.is_empty() {
+            self.prop_lod_bins.clear();
+            self.prop_lod_vertex_count = 0;
+            self.prop_lod_index_count = 0;
+            return;
+        }
+        let merged = crate::engine::props::merge_binned_lod(set, placements, PROP_BIN_CELL_M, |x, z| {
+            crate::engine::renderer::terrain_height(x, z)
+        });
+        if merged.verts.is_empty() || merged.indices.is_empty() {
+            return;
+        }
+        // 顶点按 44B 摊平（与主套同格式；Vertex 的布局由主套上传那段保证）
+        let mut vb_bytes: Vec<u8> = Vec::with_capacity(merged.verts.len() * 44);
+        for v in &merged.verts {
+            for f in v {
+                vb_bytes.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        let mut ib_bytes: Vec<u8> = Vec::with_capacity(merged.indices.len() * 4);
+        for i in &merged.indices {
+            ib_bytes.extend_from_slice(&i.to_le_bytes());
+        }
+        match self.create_device_local_buffer(
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            &vb_bytes,
+            "prop-lod-vb",
+        ) {
+            Ok((b, m)) => {
+                // 先建后拆：失败路径保留旧句柄（与主套同一纪律）
+                unsafe {
+                    if self.prop_lod_vertex_buffer != vk::Buffer::null() {
+                        self.device.destroy_buffer(self.prop_lod_vertex_buffer, None);
+                    }
+                }
+                unsafe {
+                    if self.prop_lod_vertex_memory != vk::DeviceMemory::null() {
+                        self.device.free_memory(self.prop_lod_vertex_memory, None);
+                    }
+                }
+                self.prop_lod_vertex_buffer = b;
+                self.prop_lod_vertex_memory = m;
+            }
+            Err(e) => {
+                log::warn!("props/LOD: 顶点缓冲上传失败，远处继续用整模: {e}");
+                return;
+            }
+        }
+        match self.create_device_local_buffer(
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &ib_bytes,
+            "prop-lod-ib",
+        ) {
+            Ok((b, m)) => {
+                unsafe {
+                    if self.prop_lod_index_buffer != vk::Buffer::null() {
+                        self.device.destroy_buffer(self.prop_lod_index_buffer, None);
+                    }
+                }
+                unsafe {
+                    if self.prop_lod_index_memory != vk::DeviceMemory::null() {
+                        self.device.free_memory(self.prop_lod_index_memory, None);
+                    }
+                }
+                self.prop_lod_index_buffer = b;
+                self.prop_lod_index_memory = m;
+            }
+            Err(e) => {
+                log::warn!("props/LOD: 索引缓冲上传失败，远处继续用整模: {e}");
+                return;
+            }
+        }
+        self.prop_lod_vertex_count = merged.verts.len() as u32;
+        self.prop_lod_index_count = merged.indices.len() as u32;
+        self.prop_lod_bins = merged.bins.clone();
+        log::info!(
+            "props/LOD: 低模几何 {} 顶点 / {} 三角 / {} 桶（有低模的件 {} 件）",
+            merged.verts.len(),
+            merged.indices.len() / 3,
+            self.prop_lod_bins.len(),
+            set.lod1.len()
+        );
+    }
+
     pub(crate) fn set_props(
         &mut self,
         set: &crate::engine::props::PropSet,
@@ -1006,6 +1103,7 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
             merged.min[0], merged.max[0], merged.min[1], merged.max[1],
             merged.min[2], merged.max[2]
         );
+        self.set_prop_lod_geometry(set, placements);
         self.set_shadow_props(set, placements);
     }
     /// 2026-08-28：第一人称枪的实例模型矩阵 per-frame（bob/后坐走矩阵，顶点静态）

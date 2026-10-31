@@ -389,8 +389,19 @@ def pack_atlas_and_remap_uv(obj, slot: int, out_path: str) -> None:
     off_u = cx * scale
     off_v = cy * scale
     uv = me.uv_layers.active.data
+    # 🔴 **先把源 uv 折进 [0,1) 再重映射**（2026-10-31 实测）：楼的源 uv 是**平铺**的
+    # （实测 u 到 1.25、v 到 1.5），直接 `off + uv*scale` 会把采样点送出本格、串到隔壁格
+    # ——现场症状是"远处的楼整片变成隔壁桶（绿色）的贴图"。
+    # 代价：平铺边界处有接缝（每 tile 一次），但不再串格；非平铺件（uv 本就在 [0,1)）逐位不变。
+    wrapped = 0
     for d in uv:
-        d.uv = (off_u + d.uv.x * scale, off_v + d.uv.y * scale)
+        u = d.uv.x - math.floor(d.uv.x)
+        v = d.uv.y - math.floor(d.uv.y)
+        if (u, v) != (d.uv.x, d.uv.y):
+            wrapped += 1
+        d.uv = (off_u + u * scale, off_v + v * scale)
+    if wrapped:
+        log(f"图集：{wrapped} 个 uv 超界已折回本格（平铺贴图）")
     log(f"图集：UV 已重映射到格 {slot}（偏移 {off_u:.3f},{off_v:.3f}，缩放 {scale:.3f}）")
 
 

@@ -2946,3 +2946,26 @@ CJK 闸门拦了 `湿`，文案已改。
 - 截图确认：棕色塔楼的窗带/砖缝明显更清晰（`/tmp/atlas4k.png`）。
 
 **验证**：VUID=0；build 0 警告；885 passed；CJK OK；guard OK。
+
+### 2026-10-31（续109）：**LOD 框架做出来了（但默认关）** —— 远处楼材质未解
+
+**做了什么**
+- 资产约定 `<base>_lod1.glb`：`PropSet` 分出 `lod1` 表（不进 `CONTRACT_SIZES`），`lod1_of()` 取用；
+- `merge_binned_lod()`：与 `merge_binned` 同一条分桶/排序路径，有低模用低模、没有用整模；
+- `parts.rs`：LOD 几何走 `create_device_local_buffer`（一次性、不映射），日志 `props/LOD: …`；
+- `record.rs`：按 `RV3D_PROP_LOD_DIST`（默认 90m）把桶分两批，近批整模、远批换绑低模缓冲，
+  用**低模桶自己的** first_index/index_count；
+- 生成 6 件低模：downtown_large 24282→**4365**、medium 15858→1636、small 13797→1608、
+  street_lamp 5304→885、car_wreck 5915→1054、crate 8019→1781（10–22%）；
+- **实测收益**：同一机位 1280×720，LOD 开 **275 fps** / 关 **205 fps**（**+34%**）。
+
+**判据**：`lod_bins_align_with_full_bins`（两套分桶逐桶对齐，容差 5cm —— 桶心由包围盒推出，
+实测差 4.8e-7 与 1.9e-3；顺序错位会差几十米）。886 passed。
+
+**🔴 未解决（所以默认关掉）**：开 LOD 时**远处的楼整片变绿**。已排除/已做：
+- 解码确认低模顶点色是**灰**（0.58）不是绿；
+- 已让 lod1 也进图集（原来看不到 UV，采样到格角）；
+- 已把**平铺 UV 折回本格**（楼的源 uv 到 1.25/1.5，之前串格）；
+- 试过在着色器里"格内取模"，但那在数学上**恒等于原式**（floor+fract=x），已撤回并注释。
+⇒ 开关：**默认关**，`RV3D_PROP_LOD=1` 打开；下一轮继续查（线索：只在 LOD 路径出现，
+顶点色/UV 都已排除，怀疑低模 GLB 的材质/描边或 VB 步长）。

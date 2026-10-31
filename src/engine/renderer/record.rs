@@ -697,6 +697,7 @@ impl Renderer {
                 let stats_on = crate::syscfg::is_set("RV3D_PROP_STATS");
                 let mut dist_bins = [0u32; 3]; // <200m / 200..400m / >=400m（XZ 平面距离）
                 let mut drawn_bins = 0u32;
+                let mut far_bins: Vec<usize> = Vec::new();
                 let mut drawn_tris = 0u32;
                 let mut drawn_vert_span = 0u64;
                 if one_draw {
@@ -712,12 +713,35 @@ impl Renderer {
                     drawn_tris = self.prop_index_count / 3;
                     drawn_vert_span = self.prop_vertex_count as u64;
                 } else {
-                    for bin in &self.prop_bins {
+                    // 🪜 **LOD1 分档**（2026-10-31）：近处桶用整模、远处桶换低模缓冲。
+                    // 两套几何**逐桶一一对应**（同 cell、同迭代顺序），所以换绑之后
+                    // first_index/index_count 直接可用，不需要任何索引换算 —— 这条前提由
+                    // `lod_bins_align_with_full_bins` 判据钉住。
+                    // 关掉：`RV3D_NO_PROP_LOD=1`（A/B 对照）；阈值：`RV3D_PROP_LOD_DIST`（米）。
+                    // 🔴 **默认关**（2026-10-31 收尾决定）：框架与测量都成立（开 LOD 时
+                    // 同一机位 205→275 fps），但**远处楼的材质是错的**（整片变绿），根因尚未
+                    // 定位 —— 已知：LOD 几何顶点色是灰的（解码确认），图集格的 UV 也做了
+                    // 平铺回卷，绿仍存在。宁可默认不生效，也不把"绿楼"发出去。
+                    // 打开：`RV3D_PROP_LOD=1`（供下一轮继续查）；A/B 时配合 `RV3D_PROP_LOD_DIST`。
+                    let lod_on = self.prop_lod_index_count > 0
+                        && self.prop_lod_bins.len() == self.prop_bins.len()
+                        && crate::syscfg::flag("RV3D_PROP_LOD");
+                    let lod_dist = crate::syscfg::parse::<f32>("RV3D_PROP_LOD_DIST").unwrap_or(90.0);
+                    for (bi, bin) in self.prop_bins.iter().enumerate() {
                         // `RV3D_NO_BIN_CULL=1` 关掉分桶剔除，用于排查"边缘整块消失/变白"。
                         if !crate::syscfg::flag("RV3D_NO_BIN_CULL")
                             && !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0)
                         {
                             continue;
+                        }
+                        // 远桶留给第二遍（换 LOD 缓冲后统一画），这里只累计近处。
+                        if lod_on {
+                            let dx = bin.center[0] - self.frame_cam_pos.x;
+                            let dz = bin.center[2] - self.frame_cam_pos.z;
+                            if (dx * dx + dz * dz).sqrt() > lod_dist {
+                                far_bins.push(bi);
+                                continue;
+                            }
                         }
                         drawn_bins += 1;
                         drawn_tris += bin.index_count / 3;
@@ -743,6 +767,45 @@ impl Renderer {
                             0,
                             PROP_INSTANCE_INDEX,
                         );
+                    // 第二遍：远桶换 LOD 缓冲后再画（近桶已在上面用整模画完）。
+                    if lod_on && !far_bins.is_empty() {
+                        let lvb = [self.prop_lod_vertex_buffer];
+                        let loff = [0u64];
+                        self.device.cmd_bind_vertex_buffers(command_buffer, 0, &lvb, &loff);
+                        self.device.cmd_bind_index_buffer(
+                            command_buffer,
+                            self.prop_lod_index_buffer,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                        for &bi in &far_bins {
+                            // 🔴 必须用**低模桶自己的** first_index/index_count（2026-10-31 实测踩过）：
+                            // 两套几何的桶序列一一对应，但**顶点/索引偏移完全不同** ——
+                            // 拿整模的 first_index 去画低模缓冲，索引会指到别的件上
+                            // （现场症状：灌木/树被贴成亮绿色块，正是"索引错位"的典型样子）。
+                            let lb = &self.prop_lod_bins[bi];
+                            drawn_bins += 1;
+                            drawn_tris += lb.index_count / 3;
+                            self.device.cmd_draw_indexed(
+                                command_buffer,
+                                lb.index_count,
+                                1,
+                                lb.first_index,
+                                0,
+                                PROP_INSTANCE_INDEX,
+                            );
+                        }
+                        // 末尾把整模缓冲绑回去：后面的绘制若沿用同一绑定不会受影响。
+                        let pvb = [self.prop_vertex_buffer];
+                        let poff = [0u64];
+                        self.device.cmd_bind_vertex_buffers(command_buffer, 0, &pvb, &poff);
+                        self.device.cmd_bind_index_buffer(
+                            command_buffer,
+                            self.prop_index_buffer,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                    }
                     }
                 }
                 // 🪖 士兵 GLB（2026-09-13）：**一次 draw 画完所有实例**。
