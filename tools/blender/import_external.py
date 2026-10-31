@@ -318,8 +318,11 @@ def make_double_sided(obj) -> None:
     log(f"双面叶片：复制 {len(dup)} 个面（三角 {len(me.polygons)}）")
 
 
-ATLAS_SIZE = 2048
-ATLAS_CELL = 512
+# 🔴 2026-10-31 升到 4K：Poly Haven / Quaternius 的源贴图本身是 2048²，
+# 之前每格只给 512² ⇒ 一栋 28m 楼的立面被压到 512，砖缝细节全糊。
+# 现在每格 1024²（4096/1024 = 4 格/边，仍是 16 格）。
+ATLAS_SIZE = 4096
+ATLAS_CELL = 1024
 ATLAS_GRID = ATLAS_SIZE // ATLAS_CELL  # 4
 
 
