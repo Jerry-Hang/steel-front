@@ -3099,3 +3099,14 @@ CJK 闸门拦了 `湿`，文案已改。
 - `THIRD-PARTY-NOTICES.md` §2b 记录来源、许可与"阵列是我们做的处理"。
 
 **验证**：build 0 警告；886 passed；契约与资产一致（2.400 / 0.700 / 0.900）。
+
+### 2026-10-31（续117）：HESCO 换成下载素材（OpenGameArt CC0 / Nobiax）
+
+- 源：<https://opengameart.org/content/hesco-box>（**CC0**，作者 Nobiax；`hesco.7z` 24 MB，
+  内含 `hesco_sand.obj` 160 顶点 / 153 面 + `diffuse.tga` 2048² + 法线）；
+- 复用 `make_sandbag_wall.py`，给它加了 `--cols/--rows`（这次 `1×1`），
+  产物 `barrier_hesco.glb`：**187 顶点 / 306 三角**，归一化到 **1.1 × 1.1 × 1.1 m**；
+- 契约同步（`barrier_hesco` → 1.100/1.100/1.100）；引擎侧零改动（按名字取件）；
+- `THIRD-PARTY-NOTICES.md` §2b 记录来源、作者与许可。
+
+**验证**：build 0 警告；886 passed。

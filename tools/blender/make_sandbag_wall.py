@@ -18,8 +18,8 @@ import sys
 
 import bpy
 
-COLS = 6      # 每排袋数
-ROWS = 3      # 排数
+COLS = 6      # 每排袋数（默认；可用 --cols 覆盖）
+ROWS = 3      # 排数（默认；可用 --rows 覆盖）
 
 
 def args():
@@ -31,6 +31,8 @@ def args():
     ap.add_argument("--length", type=float, default=2.4)
     ap.add_argument("--height", type=float, default=0.9)
     ap.add_argument("--depth", type=float, default=0.7)
+    ap.add_argument("--cols", type=int, default=COLS)
+    ap.add_argument("--rows", type=int, default=ROWS)
     return ap.parse_args(argv)
 
 
@@ -48,16 +50,18 @@ def main():
     sy = max(v.y for v in bb) - min(v.y for v in bb)
     sz = max(v.z for v in bb) - min(v.z for v in bb)
 
-    # 目标：整堵墙 length × depth × height，每袋 = 墙长/COLS × 墙深 × 墙高/ROWS（略放大做压接）
-    bag_x = a.length / COLS * 1.06
+    cols = max(1, a.cols)
+    rows = max(1, a.rows)
+    # 目标：整堵墙 length × depth × height，每袋 = 墙长/cols × 墙深 × 墙高/rows（略放大做压接）
+    bag_x = a.length / cols * 1.06
     bag_y = a.depth
-    bag_z = a.height / ROWS * 1.10
+    bag_z = a.height / rows * 1.10
     kx, ky, kz = bag_x / max(sx, 1e-6), bag_y / max(sy, 1e-6), bag_z / max(sz, 1e-6)
 
     clones = []
-    for row in range(ROWS):
-        stagger = 0.5 if row % 2 else 0.0
-        for col in range(COLS):
+    for row in range(rows):
+        stagger = 0.5 if row % 2 and cols > 1 else 0.0
+        for col in range(cols):
             dup = src.copy()
             dup.data = src.data.copy()
             bpy.context.scene.collection.objects.link(dup)
@@ -128,7 +132,7 @@ def main():
         export_materials="NONE",
     )
     tris = sum(len(p.vertices) - 2 for p in me.polygons)
-    print(f"[sandbag] {a.out}: {len(me.vertices)} 顶点 / {tris} 三角，{COLS}x{ROWS} 袋")
+    print(f"[sandbag] {a.out}: {len(me.vertices)} 顶点 / {tris} 三角，{cols}x{rows} 件")
 
 
 main()
