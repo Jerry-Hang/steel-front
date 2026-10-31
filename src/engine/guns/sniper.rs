@@ -12,7 +12,7 @@ const OLIVE: [f32; 3] = [0.28, 0.35, 0.22];
 const SAND: [f32; 3] = [0.48, 0.39, 0.26];
 
 pub fn sv98() -> GunMesh {
-    let parts = vec![
+    let mut parts = vec![
         (t(0.0, 0.045, 0.345) * rz(), cylinder(0.020, 0.55, 12), DARK),
         (t(0.0, 0.045, 0.670) * rz(), frustum(0.034, 0.030, 0.10, 12, true), DARK),
         (t(0.0, 0.075, 0.020), beveled_box(0.055, 0.075, 0.30, 0.012, 4), DARK),
@@ -35,6 +35,14 @@ pub fn sv98() -> GunMesh {
         (t(0.0, 0.078, 0.585), beveled_box(0.008, 0.020, 0.008, 0.003, 4), DEEP),
         (t(0.0, 0.128, -0.300), beveled_box(0.052, 0.030, 0.05, 0.008, 4), DARK),
     ];
+    parts.extend([
+        // 两脚架（SV-98 的标志）：脚架座 + 两条腿
+        (t(0.0, 0.010, 0.470), beveled_box(0.030, 0.020, 0.040, 0.004, 3), DARK),
+        (t(-0.020, -0.070, 0.455) * Mat4::from_rotation_x(PI - 0.35), cylinder(0.007, 0.170, 8), BRIGHT),
+        (t(0.020, -0.070, 0.455) * Mat4::from_rotation_x(PI - 0.35), cylinder(0.007, 0.170, 8), BRIGHT),
+        // 弹匣（10 发，机匣下方）
+        (t(0.0, -0.055, 0.020), beveled_box(0.048, 0.110, 0.060, 0.008, 3), DARK),
+    ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.10 }
 }

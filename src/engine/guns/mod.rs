@@ -136,6 +136,84 @@ impl GunMesh {
 
 /// 按武器键名取枪模（键名 = weapon_data::WeaponSpec::key；返回局部坐标网格，
 /// 枪口朝 +Z，第一人称使用时由调用方变换锚定）。
+// ============================================================
+// 可复用的"小件"（2026-10-31：给程序化枪补细节用）
+// ============================================================
+//
+// 为什么抽出来：光学镜在两把狙击枪 + 三把步枪上都要有，四把枪各抄一遍就会出现四种
+// 高度/长度，观感不统一，改一处还得改四处。这些函数只返回**零件列表**，由调用方
+// `parts.extend(...)` 拼进自己的 vec，坐标仍是"枪口 +Z / 上方 +Y / 右侧 +X"的局部系。
+
+/// 顶部光学镜：镜筒 + 前后镜圈 + 两个镜座 + 目镜。
+///
+/// `y` = 镜筒中心高度（按各枪的导轨面给），`z` = 镜筒中心前后位置，
+/// `len` = 镜筒长度。返回 6 个零件。
+pub fn optic_sight(y: f32, z: f32, len: f32) -> Vec<(Mat4, crate::engine::meshgen::Mesh, [f32; 3])> {
+    use crate::engine::meshgen::{beveled_box, cylinder, frustum};
+    use std::f32::consts::FRAC_PI_2;
+    let body = [0.13, 0.14, 0.16];
+    let glass = [0.30, 0.42, 0.52];
+    let r = 0.016;
+    vec![
+        // 镜筒（沿 Z）
+        (t(0.0, y, z) * rx(FRAC_PI_2), cylinder(r, len, 12), body),
+        // 前镜圈（亮钢，略大）
+        (t(0.0, y, z + len * 0.5) * rx(FRAC_PI_2), frustum(r * 1.35, r * 1.1, 0.020, 14, true), [0.62, 0.65, 0.70]),
+        // 后目镜（略大）
+        (t(0.0, y, z - len * 0.5) * rx(FRAC_PI_2), frustum(r * 1.15, r * 1.30, 0.022, 14, true), body),
+        // 前镜片（青蓝，一眼看出是玻璃）
+        (t(0.0, y, z + len * 0.5 + 0.011) * rx(FRAC_PI_2), cylinder(r * 1.05, 0.004, 14), glass),
+        // 前镜座
+        (t(0.0, y - r - 0.012, z + len * 0.30), beveled_box(0.026, 0.024, 0.030, 0.005, 3), [0.16, 0.17, 0.19]),
+        // 后镜座
+        (t(0.0, y - r - 0.012, z - len * 0.30), beveled_box(0.026, 0.024, 0.030, 0.005, 3), [0.16, 0.17, 0.19]),
+    ]
+}
+
+/// 弹链：从 `(x, y, z)` 起沿 −Z 垂下一段，`links` 节。返回 `links` 个零件。
+///
+/// 通用机枪与班用机枪靠这条链子一眼可辨（PKM/PKP 的标志性外观），
+/// 但只做"垂下来的一小段"——不做整条链，也不做逐节转动（FP 视角看不出）。
+pub fn ammo_belt(x: f32, y: f32, z: f32, links: usize) -> Vec<(Mat4, crate::engine::meshgen::Mesh, [f32; 3])> {
+    use crate::engine::meshgen::{beveled_box, cylinder};
+    use std::f32::consts::FRAC_PI_2;
+    let brass = [0.72, 0.58, 0.24];
+    let link_col = [0.34, 0.30, 0.20];
+    let mut out = Vec::with_capacity(links);
+    for i in 0..links {
+        let dz = 0.024 * i as f32;
+        let dy = -0.020 * i as f32;
+        // 链节（横夹）
+        out.push((
+            t(x, y + dy, z - dz),
+            beveled_box(0.020, 0.016, 0.012, 0.003, 2),
+            link_col,
+        ));
+        // 露出的弹壳（黄铜）
+        out.push((
+            t(x + 0.013, y + dy + 0.002, z - dz) * rx(FRAC_PI_2),
+            cylinder(0.005, 0.020, 8),
+            brass,
+        ));
+    }
+    out
+}
+
+/// 顶部/侧面导轨：`slots` 个齿。返回 `slots` 个零件。
+pub fn rail(y: f32, z: f32, len: f32, slots: usize, side: f32) -> Vec<(Mat4, crate::engine::meshgen::Mesh, [f32; 3])> {
+    use crate::engine::meshgen::beveled_box;
+    let col = [0.16, 0.17, 0.19];
+    let mut out = Vec::with_capacity(slots + 1);
+    // 底板
+    out.push((t(side, y, z), beveled_box(0.030, 0.010, len, 0.003, 2), col));
+    let step = len / slots as f32;
+    for i in 0..slots {
+        let zz = z - len * 0.5 + step * (i as f32 + 0.5);
+        out.push((t(side, y + 0.008, zz), beveled_box(0.026, 0.008, step * 0.45, 0.002, 2), col));
+    }
+    out
+}
+
 pub fn gun_mesh_by_key(key: &str) -> Option<GunMesh> {
     builder_for(key).map(|f| f())
 }

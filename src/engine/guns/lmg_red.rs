@@ -1,11 +1,11 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz, t, rx, rh};
+use crate::engine::guns::{rail, optic_sight, ammo_belt, assemble, GunMesh, rz, t, rx, rh};
 use glam::Mat4;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 // ===== RPK-16 桦木：轻机枪，AK式厚实机匣（0.07宽），加长粗管，45发扁圆柱弹鼓，厚实桦木护木 + 折叠托 =====
 pub fn rpk16() -> crate::engine::guns::GunMesh {
-    let parts = vec![
+    let mut parts = vec![
         // 机匣：AK式厚实长圆角盒，0.07宽（深钢）
         (t(0.0, 0.085, -0.02), beveled_box(0.070, 0.080, 0.30, 0.014, 3), [0.30, 0.33, 0.37]),
         // 机匣顶盖导轨（黑聚合）
@@ -52,13 +52,15 @@ pub fn rpk16() -> crate::engine::guns::GunMesh {
         // 枪口制退器：粗筒锥台（亮钢）
         (t(0.0, 0.045, 0.615) * rz(), frustum(0.017, 0.022, 0.07, 16, true), [0.62, 0.65, 0.70]),
     ];
+    parts.extend(optic_sight(0.178, -0.02, 0.20));
+    parts.extend(rail(0.150, 0.10, 0.16, 5, 0.0));
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.08 }
 }
 
 // ===== PKM 钢线：通用机枪，右侧弹链盒（0.07×0.16×0.05），粗管+亮钢环，枪口助推器，前端两脚架，桦木托 =====
 pub fn pkm() -> crate::engine::guns::GunMesh {
-    let parts = vec![
+    let mut parts = vec![
         // 机匣：厚实长圆角盒，0.07宽（深钢）
         (t(0.0, 0.085, -0.03), beveled_box(0.070, 0.085, 0.34, 0.012, 3), [0.30, 0.33, 0.37]),
         // 机匣顶盖（黑聚合）
@@ -103,13 +105,22 @@ pub fn pkm() -> crate::engine::guns::GunMesh {
         // 拉机柄球头（黑聚合）
         (t(0.096, 0.09, 0.05) * Mat4::from_scale(glam::vec3(0.021, 0.021, 0.021)), sphere(10, 6), [0.16, 0.17, 0.19]),
     ];
+    parts.extend(ammo_belt(0.105, 0.020, -0.02, 6));
+    parts.extend([
+        // 提把（2026-10-31 补）：两根立柱 + 横梁 —— PKM 机匣顶上的标志件
+        (t(0.0, 0.163, -0.085), beveled_box(0.016, 0.030, 0.016, 0.004, 2), [0.30, 0.33, 0.37]),
+        (t(0.0, 0.163, 0.045), beveled_box(0.016, 0.030, 0.016, 0.004, 2), [0.30, 0.33, 0.37]),
+        (t(0.0, 0.180, -0.020), beveled_box(0.018, 0.012, 0.150, 0.004, 2), [0.30, 0.33, 0.37]),
+        // 枪管下方的隔热护手条（一段薄板，近看时枪身不再只是"一根圆管"）
+        (t(0.0, 0.010, 0.30), beveled_box(0.030, 0.010, 0.26, 0.003, 2), [0.16, 0.17, 0.19]),
+    ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.18 }
 }
 
 // ===== PKP 佩切涅格：通用机枪，重管+散热套筒（粗0.03套细0.02），提把，右侧弹链盒，两脚架，聚合物托 =====
 pub fn pkp() -> crate::engine::guns::GunMesh {
-    let parts = vec![
+    let mut parts = vec![
         // 机匣：厚实长圆角盒，0.07宽（深钢）
         (t(0.0, 0.085, -0.03), beveled_box(0.070, 0.085, 0.34, 0.012, 3), [0.30, 0.33, 0.37]),
         // 机匣顶盖（黑聚合）
@@ -155,6 +166,16 @@ pub fn pkp() -> crate::engine::guns::GunMesh {
         // 拉机柄球头（黑聚合）
         (t(0.096, 0.09, 0.05) * Mat4::from_scale(glam::vec3(0.021, 0.021, 0.021)), sphere(10, 6), [0.16, 0.17, 0.19]),
     ];
+    parts.extend(ammo_belt(0.105, 0.020, -0.02, 6));
+    parts.extend([
+        (t(0.0, 0.163, -0.085), beveled_box(0.016, 0.030, 0.016, 0.004, 2), [0.30, 0.33, 0.37]),
+        (t(0.0, 0.163, 0.045), beveled_box(0.016, 0.030, 0.016, 0.004, 2), [0.30, 0.33, 0.37]),
+        (t(0.0, 0.180, -0.020), beveled_box(0.018, 0.012, 0.150, 0.004, 2), [0.30, 0.33, 0.37]),
+        // 枪管护罩散热孔（PKP 的方孔护罩，三个横向开口）
+        (t(0.0, 0.108, 0.28), beveled_box(0.034, 0.016, 0.026, 0.003, 2), [0.10, 0.10, 0.12]),
+        (t(0.0, 0.108, 0.35), beveled_box(0.034, 0.016, 0.026, 0.003, 2), [0.10, 0.10, 0.12]),
+        (t(0.0, 0.108, 0.42), beveled_box(0.034, 0.016, 0.026, 0.003, 2), [0.10, 0.10, 0.12]),
+    ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.18 }
 }

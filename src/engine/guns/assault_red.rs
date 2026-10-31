@@ -1,5 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum};
-use crate::engine::guns::{assemble, GunMesh, rz, t, rx, rh};
+use crate::engine::guns::{rail, optic_sight, assemble, GunMesh, rz, t, rx, rh};
 
 // ===== AK-12M (5.45x39): black polymer, long handguard + rail, curved 30rd mag,
 //       skeleton folding stock. Stations: stock rear -0.542, receiver -0.30..+0.06,
@@ -78,7 +78,7 @@ pub fn ak12m() -> crate::engine::guns::GunMesh {
 }
 // ===== AK-104 短剑：紧凑AK，短粗管+消焰器，弧形弹匣，折叠托 =====
 pub fn ak104() -> crate::engine::guns::GunMesh {
-    let parts = vec![
+    let mut parts = vec![
         // 机匣：厚实长圆角盒（深钢）
         (t(0.0, 0.0825, -0.03), beveled_box(0.065, 0.075, 0.26, 0.012, 3), [0.30, 0.33, 0.37]),
         // 机匣顶部导轨（黑聚合）
@@ -123,13 +123,19 @@ pub fn ak104() -> crate::engine::guns::GunMesh {
         // 折叠托铰链座（深钢）
         (t(0.0, 0.078, -0.1725), beveled_box(0.058, 0.085, 0.045, 0.01, 3), [0.30, 0.33, 0.37]),
     ];
+    parts.extend(optic_sight(0.162, -0.01, 0.16));
+    parts.extend(rail(0.120, 0.02, 0.10, 4, 0.040));
+    parts.extend([
+        // 前垂直握把（短突击步枪的常见配件，也给"短"一个明确的比例参照）
+        (t(0.0, 0.000, 0.235) * rx(0.06), beveled_box(0.036, 0.095, 0.042, 0.010, 3), [0.16, 0.17, 0.19]),
+    ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 0.75 }
 }
 
 // ===== ASh-12 破城锤：重型突击，粗短枪管+大型枪口制退器，20发短弹匣，粗壮枪身 =====
 pub fn ash12() -> crate::engine::guns::GunMesh {
-    let parts = vec![
+    let mut parts = vec![
         // 机匣：加宽粗壮（深钢）
         (t(0.0, 0.085, -0.03), beveled_box(0.075, 0.08, 0.30, 0.014, 3), [0.30, 0.33, 0.37]),
         // 机匣顶盖（黑聚合）
@@ -174,6 +180,13 @@ pub fn ash12() -> crate::engine::guns::GunMesh {
         // 贴腮板（深钢）
         (t(0.0, 0.155, -0.26), beveled_box(0.05, 0.035, 0.10, 0.01, 3), [0.30, 0.33, 0.37]),
     ];
+    parts.extend(optic_sight(0.184, -0.01, 0.18));
+    parts.extend([
+        // 20 发直弹匣（ASH-12 的特征：又宽又直的弹匣）
+        (t(0.0, -0.075, -0.055), beveled_box(0.052, 0.150, 0.086, 0.010, 3), [0.28, 0.35, 0.22]),
+        // 前握把
+        (t(0.0, 0.005, 0.190) * rx(0.05), beveled_box(0.034, 0.090, 0.040, 0.010, 3), [0.16, 0.17, 0.19]),
+    ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 0.78 }
 }

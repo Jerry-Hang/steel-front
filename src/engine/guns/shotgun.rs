@@ -1,11 +1,11 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere, torus_arc};
-use crate::engine::guns::{assemble, GunMesh, rz, t, rx, rh};
+use crate::engine::guns::{optic_sight, assemble, GunMesh, rz, t, rx, rh};
 use glam::Mat4;
 use std::f32::consts::TAU;
 
 // ===== Saiga-12 圆木：半自动霰弹枪，AK系厚实机匣，粗管，管式弹仓（枪管下方醒目），厚实圆木护木+枪托 =====
 pub fn saiga12() -> crate::engine::guns::GunMesh {
-    let parts = vec![
+    let mut parts = vec![
         // 粗枪管：r=0.02 长 0.52（亮钢）
         (t(0.0, 0.045, 0.25) * rz(), cylinder(0.020, 0.52, 12), [0.62, 0.65, 0.70]),
         // 枪管节套（深钢）
@@ -52,6 +52,16 @@ pub fn saiga12() -> crate::engine::guns::GunMesh {
         // 拉机柄球头（亮钢）
         (t(0.090, 0.10, -0.26) * Mat4::from_scale(glam::vec3(0.016, 0.016, 0.016)), sphere(10, 6), [0.62, 0.65, 0.70]),
     ];
+    parts.extend(optic_sight(0.168, -0.205, 0.16));
+    parts.extend([
+        // 8 发短弹匣
+        (t(0.0, -0.085, -0.155), beveled_box(0.054, 0.135, 0.062, 0.010, 3), [0.10, 0.10, 0.12]),
+        // 护木散热孔（三对，左右各一）
+        (t(-0.030, 0.075, 0.14), beveled_box(0.006, 0.014, 0.030, 0.002, 2), [0.10, 0.10, 0.12]),
+        (t(0.030, 0.075, 0.14), beveled_box(0.006, 0.014, 0.030, 0.002, 2), [0.10, 0.10, 0.12]),
+        (t(-0.030, 0.075, 0.22), beveled_box(0.006, 0.014, 0.030, 0.002, 2), [0.10, 0.10, 0.12]),
+        (t(0.030, 0.075, 0.22), beveled_box(0.006, 0.014, 0.030, 0.002, 2), [0.10, 0.10, 0.12]),
+    ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.15 }
 }

@@ -1,5 +1,5 @@
 use crate::engine::meshgen::{beveled_box, cylinder, frustum, sphere};
-use crate::engine::guns::{assemble, GunMesh, rz, t, rx};
+use crate::engine::guns::{rail, assemble, GunMesh, rz, t, rx};
 use glam::Mat4;
 
 pub fn svd12() -> crate::engine::guns::GunMesh {
@@ -9,7 +9,7 @@ pub fn svd12() -> crate::engine::guns::GunMesh {
     let black: [f32; 3] = [0.16, 0.17, 0.19];
     let deep: [f32; 3] = [0.10, 0.10, 0.12];
     let wood: [f32; 3] = [0.50, 0.34, 0.17];
-    let parts = vec![
+    let mut parts = vec![
         // 1 粗枪管
         (t(0.0, 0.045, 0.325) * rz(), cylinder(0.018, 0.45, 12), bright),
         // 2 枪口制退器
@@ -54,6 +54,16 @@ pub fn svd12() -> crate::engine::guns::GunMesh {
         // 21 斜切托底板
         (t(0.0, 0.080, -0.545) * rx(0.30), beveled_box(0.060, 0.12, 0.02, 0.008, 2), deep),
     ];
+    parts.extend(rail(0.130, -0.02, 0.10, 4, 0.042));
+    parts.extend([
+        // 木护木散热孔（SVD 系特征：护木上三对方孔）
+        (t(-0.030, 0.078, 0.12), beveled_box(0.006, 0.016, 0.032, 0.002, 2), black),
+        (t(0.030, 0.078, 0.12), beveled_box(0.006, 0.016, 0.032, 0.002, 2), black),
+        (t(-0.030, 0.078, 0.21), beveled_box(0.006, 0.016, 0.032, 0.002, 2), black),
+        (t(0.030, 0.078, 0.21), beveled_box(0.006, 0.016, 0.032, 0.002, 2), black),
+        // 10 发弹匣
+        (t(0.0, -0.060, -0.020), beveled_box(0.050, 0.120, 0.062, 0.008, 3), dark),
+    ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.16 }
 }
