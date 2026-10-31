@@ -539,6 +539,17 @@ struct TerrainLodMesh {
 
 
 
+/// 一个 LOD 档位的几何缓冲（与主套逐桶对应）。
+pub(crate) struct PropLodSet {
+    pub(crate) vertex_buffer: vk::Buffer,
+    pub(crate) vertex_memory: vk::DeviceMemory,
+    pub(crate) index_buffer: vk::Buffer,
+    pub(crate) index_memory: vk::DeviceMemory,
+    pub(crate) vertex_count: u32,
+    pub(crate) index_count: u32,
+    pub(crate) bins: Vec<crate::engine::props::PropBin>,
+}
+
 pub struct Renderer {
     _entry: Entry,
     instance: Instance,
@@ -993,15 +1004,9 @@ pub struct Renderer {
     /// 道具的空间分桶（每桶一段连续索引 + 包围球）。见 `engine::props::merge_binned`。
     /// 桶共用同一个 VBO/IBO，剔除只决定发不发某一段索引，不需要重传顶点。
     prop_bins: Vec<crate::engine::props::PropBin>,
-    /// LOD1（低模）道具几何（2026-10-31）：远处桶改画这套缓冲。
-    /// 与主套**逐桶一一对应**（同 cell、同迭代顺序），所以远处只需换绑定、不用换索引基准。
-    prop_lod_vertex_buffer: vk::Buffer,
-    prop_lod_vertex_memory: vk::DeviceMemory,
-    prop_lod_index_buffer: vk::Buffer,
-    prop_lod_index_memory: vk::DeviceMemory,
-    prop_lod_vertex_count: u32,
-    prop_lod_index_count: u32,
-    prop_lod_bins: Vec<crate::engine::props::PropBin>,
+    /// **LOD 档位缓冲**（2026-10-31）：`prop_lods[0]` = LOD1、`prop_lods[1]` = LOD2。
+    /// 每档与主套**逐桶一一对应**（同 cell、同迭代顺序）⇒ 换档只换绑定，不换索引基准。
+    prop_lods: Vec<PropLodSet>,
     /// 阴影专用几何（2026-09-19 建筑 LOD 专项，PROGRESS §14）：名单建筑烘成
     /// AABB 盒壳（`merge_shadow_binned`），只被 shadow pass 绑定；主 pass 不读它。
     /// 缓冲随地图重载整体重建，不做持久映射。

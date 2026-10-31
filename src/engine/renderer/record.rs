@@ -698,6 +698,7 @@ impl Renderer {
                 let mut dist_bins = [0u32; 3]; // <200m / 200..400m / >=400m（XZ 平面距离）
                 let mut drawn_bins = 0u32;
                 let mut far_bins: Vec<usize> = Vec::new();
+                let mut mid_bins: Vec<usize> = Vec::new();
                 let mut drawn_tris = 0u32;
                 let mut drawn_vert_span = 0u64;
                 if one_draw {
@@ -723,10 +724,17 @@ impl Renderer {
                     // 整段 memcpy 让颜色与法线对调 ⇒ 片元拿法线当颜色（(0,1,0)=纯绿）。
                     // 逐字段重排后画面正确，收益保持（同机位 205→275 fps）。
                     // A/B：`RV3D_NO_PROP_LOD=1` 关掉；阈值 `RV3D_PROP_LOD_DIST`（米，默认 90）。
-                    let lod_on = self.prop_lod_index_count > 0
-                        && self.prop_lod_bins.len() == self.prop_bins.len()
-                        && !crate::syscfg::flag("RV3D_NO_PROP_LOD");
-                    let lod_dist = crate::syscfg::parse::<f32>("RV3D_PROP_LOD_DIST").unwrap_or(90.0);
+                    // 三档（2026-10-31）：near = 整模；mid = LOD1；far = LOD2（缺则回退 LOD1）。
+                    let lod_sets: Vec<usize> = self
+                        .prop_lods
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.index_count > 0 && s.bins.len() == self.prop_bins.len())
+                        .map(|(i, _)| i)
+                        .collect();
+                    let lod_on = !lod_sets.is_empty() && !crate::syscfg::flag("RV3D_NO_PROP_LOD");
+                    let mid_dist = crate::syscfg::parse::<f32>("RV3D_PROP_LOD_DIST").unwrap_or(90.0);
+                    let far_dist = crate::syscfg::parse::<f32>("RV3D_PROP_LOD_DIST2").unwrap_or(200.0);
                     for (bi, bin) in self.prop_bins.iter().enumerate() {
                         // `RV3D_NO_BIN_CULL=1` 关掉分桶剔除，用于排查"边缘整块消失/变白"。
                         if !crate::syscfg::flag("RV3D_NO_BIN_CULL")
@@ -738,8 +746,13 @@ impl Renderer {
                         if lod_on {
                             let dx = bin.center[0] - self.frame_cam_pos.x;
                             let dz = bin.center[2] - self.frame_cam_pos.z;
-                            if (dx * dx + dz * dz).sqrt() > lod_dist {
+                            let d = (dx * dx + dz * dz).sqrt();
+                            if d > far_dist && lod_sets.len() >= 2 {
                                 far_bins.push(bi);
+                                continue;
+                            }
+                            if d > mid_dist {
+                                mid_bins.push(bi);
                                 continue;
                             }
                         }
@@ -767,23 +780,32 @@ impl Renderer {
                             0,
                             PROP_INSTANCE_INDEX,
                         );
-                    // 第二遍：远桶换 LOD 缓冲后再画（近桶已在上面用整模画完）。
-                    if lod_on && !far_bins.is_empty() {
-                        let lvb = [self.prop_lod_vertex_buffer];
+                    // 第二/三遍：中距用 LOD1、远距用 LOD2（缺则回退 LOD1）。
+                    // 🔴 每档都必须用**该档自己的** bins 取 first_index/index_count：三套几何
+                    // 的桶序列一一对应，但顶点/索引偏移完全不同。
+                    for (pass, (level, list)) in [
+                        (lod_sets.first().copied(), &mid_bins),
+                        (lod_sets.get(1).copied().or_else(|| lod_sets.first().copied()), &far_bins),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let (Some(level), list) = (level, list) else { continue };
+                        if list.is_empty() {
+                            continue;
+                        }
+                        let set = &self.prop_lods[level];
+                        let lvb = [set.vertex_buffer];
                         let loff = [0u64];
                         self.device.cmd_bind_vertex_buffers(command_buffer, 0, &lvb, &loff);
                         self.device.cmd_bind_index_buffer(
                             command_buffer,
-                            self.prop_lod_index_buffer,
+                            set.index_buffer,
                             0,
                             vk::IndexType::UINT32,
                         );
-                        for &bi in &far_bins {
-                            // 🔴 必须用**低模桶自己的** first_index/index_count（2026-10-31 实测踩过）：
-                            // 两套几何的桶序列一一对应，但**顶点/索引偏移完全不同** ——
-                            // 拿整模的 first_index 去画低模缓冲，索引会指到别的件上
-                            // （现场症状：灌木/树被贴成亮绿色块，正是"索引错位"的典型样子）。
-                            let lb = &self.prop_lod_bins[bi];
+                        for &bi in list {
+                            let lb = &set.bins[bi];
                             drawn_bins += 1;
                             drawn_tris += lb.index_count / 3;
                             self.device.cmd_draw_indexed(
@@ -795,7 +817,10 @@ impl Renderer {
                                 PROP_INSTANCE_INDEX,
                             );
                         }
-                        // 末尾把整模缓冲绑回去：后面的绘制若沿用同一绑定不会受影响。
+                        let _ = pass;
+                    }
+                    // 末尾把整模缓冲绑回去，后面的绘制沿用同一绑定也不会受影响。
+                    if lod_on {
                         let pvb = [self.prop_vertex_buffer];
                         let poff = [0u64];
                         self.device.cmd_bind_vertex_buffers(command_buffer, 0, &pvb, &poff);

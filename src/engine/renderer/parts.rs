@@ -709,27 +709,23 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
     ///
     /// 没有 `_lod1` 资产时**整段跳过**（字段保持 null），绘制端会退回"全部用整模"，
     /// 行为与改动前逐字节一致。
-    fn set_prop_lod_geometry(
-        &mut self,
-        set: &crate::engine::props::PropSet,
-        placements: &[crate::engine::props::PropPlacement],
-    ) {
-        if set.lod1.is_empty() {
-            self.prop_lod_bins.clear();
-            self.prop_lod_vertex_count = 0;
-            self.prop_lod_index_count = 0;
-            return;
-        }
-        let merged = crate::engine::props::merge_binned_lod(set, placements, PROP_BIN_CELL_M, |x, z| {
-            crate::engine::renderer::terrain_height(x, z)
-        });
+    /// **按档位上传 LOD 几何**（2026-10-31 三档）：`level` 1 = `_lod1`，2 = `_lod2`（缺则回退）。
+    ///
+    /// 走 device-local（staging 一次拷完）：LOD 只在远处用、且不随关卡重建，
+    /// 没有理由占 host-visible 映射窗口。
+    fn upload_prop_lod(&mut self, set: &crate::engine::props::PropSet, placements: &[crate::engine::props::PropPlacement], level: u8) {
+        let merged = match level {
+            2 => crate::engine::props::merge_binned_lod2(set, placements, PROP_BIN_CELL_M, |x, z| {
+                crate::engine::renderer::terrain_height(x, z)
+            }),
+            _ => crate::engine::props::merge_binned_lod(set, placements, PROP_BIN_CELL_M, |x, z| {
+                crate::engine::renderer::terrain_height(x, z)
+            }),
+        };
         if merged.verts.is_empty() || merged.indices.is_empty() {
             return;
         }
-        // 🔴 **必须逐字段重排**（2026-10-31 实测踩过）：`merged.verts` 的 `[f32;11]` 布局是
-        //   `pos(3) nrm(3) uv(2) col(3)`（见 props.rs 合并处的说明），而 GPU 侧 `Vertex` 是
-        //   `pos, color, uv, normal`。整段 memcpy 会让**颜色与法线对调** ⇒ 片元拿法线当颜色，
-        //   而楼面的法线是 (0,1,0) 这类轴向量 ⇒ **整栋楼变成纯绿**（本轮的"绿楼"）。
+        // 🔴 必须逐字段重排：`merged.verts` 是 pos/nrm/uv/col，而 `Vertex` 是 pos/col/uv/nrm。
         let mut vb_bytes: Vec<u8> =
             Vec::with_capacity(merged.verts.len() * std::mem::size_of::<Vertex>());
         for v in &merged.verts {
@@ -751,65 +747,64 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
         for i in &merged.indices {
             ib_bytes.extend_from_slice(&i.to_le_bytes());
         }
-        match self.create_device_local_buffer(
-            vk::BufferUsageFlags::VERTEX_BUFFER,
-            &vb_bytes,
-            "prop-lod-vb",
-        ) {
-            Ok((b, m)) => {
-                // 先建后拆：失败路径保留旧句柄（与主套同一纪律）
-                unsafe {
-                    if self.prop_lod_vertex_buffer != vk::Buffer::null() {
-                        self.device.destroy_buffer(self.prop_lod_vertex_buffer, None);
-                    }
-                }
-                unsafe {
-                    if self.prop_lod_vertex_memory != vk::DeviceMemory::null() {
-                        self.device.free_memory(self.prop_lod_vertex_memory, None);
-                    }
-                }
-                self.prop_lod_vertex_buffer = b;
-                self.prop_lod_vertex_memory = m;
-            }
-            Err(e) => {
-                log::warn!("props/LOD: 顶点缓冲上传失败，远处继续用整模: {e}");
+        let vb = self.create_device_local_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, &vb_bytes, "prop-lod-vb");
+        let ib = self.create_device_local_buffer(vk::BufferUsageFlags::INDEX_BUFFER, &ib_bytes, "prop-lod-ib");
+        let (vb, ib) = match (vb, ib) {
+            (Ok(v), Ok(i)) => (v, i),
+            (Err(e), _) | (_, Err(e)) => {
+                log::warn!("props/LOD{level}: 缓冲上传失败，该档不生效: {e}");
                 return;
             }
-        }
-        match self.create_device_local_buffer(
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            &ib_bytes,
-            "prop-lod-ib",
-        ) {
-            Ok((b, m)) => {
-                unsafe {
-                    if self.prop_lod_index_buffer != vk::Buffer::null() {
-                        self.device.destroy_buffer(self.prop_lod_index_buffer, None);
-                    }
-                }
-                unsafe {
-                    if self.prop_lod_index_memory != vk::DeviceMemory::null() {
-                        self.device.free_memory(self.prop_lod_index_memory, None);
-                    }
-                }
-                self.prop_lod_index_buffer = b;
-                self.prop_lod_index_memory = m;
+        };
+        // 先建后拆：失败路径保留旧句柄（与主套同纪律）
+        let old = self.prop_lods.get_mut(level as usize - 1);
+        if let Some(old) = old {
+            unsafe {
+                if old.vertex_buffer != vk::Buffer::null() { self.device.destroy_buffer(old.vertex_buffer, None); }
+                if old.vertex_memory != vk::DeviceMemory::null() { self.device.free_memory(old.vertex_memory, None); }
+                if old.index_buffer != vk::Buffer::null() { self.device.destroy_buffer(old.index_buffer, None); }
+                if old.index_memory != vk::DeviceMemory::null() { self.device.free_memory(old.index_memory, None); }
             }
-            Err(e) => {
-                log::warn!("props/LOD: 索引缓冲上传失败，远处继续用整模: {e}");
-                return;
-            }
+            old.vertex_buffer = vb.0;
+            old.vertex_memory = vb.1;
+            old.index_buffer = ib.0;
+            old.index_memory = ib.1;
+            old.vertex_count = merged.verts.len() as u32;
+            old.index_count = merged.indices.len() as u32;
+            old.bins = merged.bins.clone();
+        } else {
+            self.prop_lods.push(PropLodSet {
+                vertex_buffer: vb.0,
+                vertex_memory: vb.1,
+                index_buffer: ib.0,
+                index_memory: ib.1,
+                vertex_count: merged.verts.len() as u32,
+                index_count: merged.indices.len() as u32,
+                bins: merged.bins.clone(),
+            });
         }
-        self.prop_lod_vertex_count = merged.verts.len() as u32;
-        self.prop_lod_index_count = merged.indices.len() as u32;
-        self.prop_lod_bins = merged.bins.clone();
         log::info!(
-            "props/LOD: 低模几何 {} 顶点 / {} 三角 / {} 桶（有低模的件 {} 件）",
+            "props/LOD{level}: {} 顶点 / {} 三角 / {} 桶",
             merged.verts.len(),
             merged.indices.len() / 3,
-            self.prop_lod_bins.len(),
-            set.lod1.len()
+            merged.bins.len()
         );
+    }
+
+    /// 一次把两个 LOD 档位都准备好（没有对应资产的档位会自动回退成上一档的几何）。
+    fn set_prop_lod_geometry(
+        &mut self,
+        set: &crate::engine::props::PropSet,
+        placements: &[crate::engine::props::PropPlacement],
+    ) {
+        if set.lod1.is_empty() {
+            self.prop_lods.clear();
+            return;
+        }
+        self.upload_prop_lod(set, placements, 1);
+        if !set.lod2.is_empty() {
+            self.upload_prop_lod(set, placements, 2);
+        }
     }
 
     pub(crate) fn set_props(

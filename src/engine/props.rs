@@ -130,6 +130,9 @@ pub struct PropSet {
     /// 它们**不进 `CONTRACT_SIZES`**（尺寸契约只约束可见那一档；低模只是同一件东西的简化版，
     /// 占地必须与整模一致 —— 由 `lod1_matches_full_footprint` 判据钉住）。
     pub lod1: Vec<PropMesh>,
+    /// **LOD2（更远一档）**：约定 `<base>_lod2.glb`。没有就回退 `lod1`，再没有回退整模 ——
+    /// 于是"只有两档资产"的件在三档管线下行为与两档一致。
+    pub lod2: Vec<PropMesh>,
 }
 
 impl PropSet {
@@ -137,6 +140,7 @@ impl PropSet {
     pub fn load_dir(dir: &str) -> Result<Self, String> {
         let mut found: Vec<(String, ImportedMesh)> = Vec::new();
         let mut found_lod: Vec<(String, ImportedMesh)> = Vec::new();
+        let mut found_lod2: Vec<(String, ImportedMesh)> = Vec::new();
         // 🔴 **这个函数在 Android 上仍然不可用，而且只修一半没有意义**（2026-10-15）：
         // 外部复核指出第 3 条「资产加载漏走 `asset_source`」，这里**确实**没走；
         // 但 `AssetSource` 这个 trait **只有 `read` / `read_to_string` / `exists`，
@@ -164,7 +168,9 @@ impl PropSet {
                 return Err(format!("{} 是空网格", path.display()));
             }
             // `_lod1` 后缀的件进 LOD 表（基名去掉后缀），其余照旧进主表。
-            if let Some(base) = stem.strip_suffix("_lod1") {
+            if let Some(base) = stem.strip_suffix("_lod2") {
+                found_lod2.push((base.to_string(), m));
+            } else if let Some(base) = stem.strip_suffix("_lod1") {
                 found_lod.push((base.to_string(), m));
             } else {
                 found.push((stem, m));
@@ -189,7 +195,16 @@ impl PropSet {
                 PropMesh::from_imported(n, &m)
             })
             .collect();
-        Ok(PropSet { meshes, lod1 })
+        found_lod2.sort_by(|a, b| a.0.cmp(&b.0));
+        let lod2 = found_lod2
+            .iter()
+            .map(|(n, m)| {
+                let mut m = m.clone();
+                ensure_smooth_normals(&mut m.verts, &m.indices);
+                PropMesh::from_imported(n, &m)
+            })
+            .collect();
+        Ok(PropSet { meshes, lod1, lod2 })
     }
 
     pub fn len(&self) -> usize {
@@ -207,6 +222,14 @@ impl PropSet {
     /// 取某件的低模（没有返回 `None`，调用方回退整模）。
     pub fn lod1_of(&self, base: &str) -> Option<&PropMesh> {
         self.lod1.iter().find(|m| m.name == base)
+    }
+
+    /// 取更远一档（`_lod2`），没有则回退 `_lod1`，再没有回退 `None`（调用方用整模）。
+    pub fn lod2_of(&self, base: &str) -> Option<&PropMesh> {
+        self.lod2
+            .iter()
+            .find(|m| m.name == base)
+            .or_else(|| self.lod1_of(base))
     }
 
     pub fn index_of(&self, name: &str) -> Option<usize> {
@@ -281,7 +304,7 @@ impl PropSet {
                 max: [w * 0.5, h, d * 0.5],
             })
             .collect();
-        PropSet { meshes, lod1: Vec::new() }
+        PropSet { meshes, lod1: Vec::new(), lod2: Vec::new() }
     }
 }
 
@@ -435,7 +458,7 @@ pub fn merge_binned(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
 ) -> BinnedGeometry {
-    merge_binned_impl(set, placements, cell, ground, false, false)
+    merge_binned_impl(set, placements, cell, ground, false, 0)
 }
 
 /// **LOD1（低模）合并**（2026-10-31）：与 [`merge_binned`] 同一条分桶/排序路径，
@@ -449,7 +472,17 @@ pub fn merge_binned_lod(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
 ) -> BinnedGeometry {
-    merge_binned_impl(set, placements, cell, ground, false, true)
+    merge_binned_impl(set, placements, cell, ground, false, 1)
+}
+
+/// **LOD2 合并**（2026-10-31 三档）：`_lod2` 优先、缺则 `_lod1`、再缺用整模。
+pub fn merge_binned_lod2(
+    set: &PropSet,
+    placements: &[PropPlacement],
+    cell: f32,
+    ground: impl Fn(f32, f32) -> f32,
+) -> BinnedGeometry {
+    merge_binned_impl(set, placements, cell, ground, false, 2)
 }
 
 /// 阴影专用几何（2026-09-19 建筑 LOD 专项，PROGRESS §13）：与 [`merge_binned`]
@@ -464,7 +497,7 @@ pub fn merge_shadow_binned(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
 ) -> BinnedGeometry {
-    merge_binned_impl(set, placements, cell, ground, true, false)
+    merge_binned_impl(set, placements, cell, ground, true, 0)
 }
 
 /// 2026-09-19 阴影建筑 LOD：名单内的网格在**阴影几何**里被替换为 AABB 盒壳。
@@ -523,7 +556,7 @@ fn merge_binned_impl(
     cell: f32,
     ground: impl Fn(f32, f32) -> f32,
     shadow_lod: bool,
-    lod: bool,
+    lod: u8,
 ) -> BinnedGeometry {
     let mut out = BinnedGeometry::default();
     // 🔴 **全局包围盒必须从极值起步，不能沿用 `Default` 的 `[0.0; 3]`**
@@ -567,11 +600,11 @@ fn merge_binned_impl(
             // LOD：有低模用低模，没有用整模；桶序列与整模完全一致（同一 p.mesh、同一顺序）。
             // 诊断开关（2026-10-31）：`RV3D_LOD_FORCE_FULL=1` 让 LOD 路径照走但**用整模几何**。
             // 用来分辨"绿楼"是低模资产本身的问题，还是第二套缓冲/绘制路径的问题。
-            let use_lod_mesh = lod && !crate::syscfg::flag("RV3D_LOD_FORCE_FULL");
-            let mesh = if use_lod_mesh {
-                set.lod1_of(&full.name).unwrap_or(full)
-            } else {
-                full
+            let force_full = crate::syscfg::flag("RV3D_LOD_FORCE_FULL");
+            let mesh = match lod {
+                2 if !force_full => set.lod2_of(&full.name).unwrap_or(full),
+                1 if !force_full => set.lod1_of(&full.name).unwrap_or(full),
+                _ => full,
             };
             // 阴影 LOD：建筑网格换成 AABB 盒壳，走同一条变换+翻面路径，
             // 绕序与实体逐面一致（BOX_INDICES 按资产约定编写）。
@@ -696,6 +729,7 @@ mod tests {
     fn one_tri_set() -> PropSet {
         PropSet {
             lod1: Vec::new(),
+            lod2: Vec::new(),
             meshes: vec![PropMesh {
                 name: "tri".into(),
                 verts: vec![
@@ -889,6 +923,7 @@ mod tests {
     fn placement_tint_lands_on_color_channels_not_uv() {
         let set = PropSet {
             lod1: Vec::new(),
+            lod2: Vec::new(),
             meshes: vec![PropMesh {
                 name: "tri".into(),
                 verts: vec![
@@ -1090,6 +1125,7 @@ mod tests {
         ];
         PropSet {
             lod1: Vec::new(),
+            lod2: Vec::new(),
             meshes: vec![PropMesh {
                 name: "tri".into(),
                 verts,
@@ -1197,6 +1233,7 @@ mod tests {
     fn merged_bounds_start_from_extremes_not_from_zero() {
         let set = PropSet {
             lod1: Vec::new(),
+            lod2: Vec::new(),
             meshes: vec![PropMesh {
                 name: "far_corner_tri".into(),
                 // 每个轴都严格 > 0 —— 这正是区分"从 0 起步"与"从极值起步"的那一档
