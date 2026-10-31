@@ -513,13 +513,14 @@ pub fn generate_city_ground_texture(
 /// 地面微细节 tile 边长（像素）。
 ///
 /// ⚠ **必须与 build.rs 片元着色器的 `GROUND_DETAIL_TEXEL_M` 同步**：那个常量是
-/// `GROUND_DETAIL_METRES / GROUND_DETAIL_SIZE = 2.0 / 256 = 0.0078125`，片元用它算
-/// 显式 mip（`lvl = log2(米每像素 / GROUND_DETAIL_TEXEL_M)`）。历史上这里是 512 而
-/// 着色器仍按 256 写死 → 每个距离都多取一级 mip，细节层整体糊一档（不报 VUID、
-/// 不进日志，只有看图能发现）。要提到 512 就同时把 build.rs 改成 0.00390625。
-pub const GROUND_DETAIL_SIZE: u32 = 256;
+/// `GROUND_DETAIL_METRES / GROUND_DETAIL_SIZE = 2.0 / 512 = 0.00390625`，片元用它算
+/// 显式 mip（`lvl = log2(米每像素 / GROUND_DETAIL_TEXEL_M)`）。历史上出现过"这里 512 而
+/// 着色器按 256 写死"⇒ 每个距离多取一级 mip、细节层整体糊一档（不报 VUID、不进日志）。
+/// 🔴 **2026-10-31 升到 512**（近景地面纹素密度翻倍：256 纹素/米），build.rs 同步改成
+/// 0.00390625；判据 `ground_detail_texel_size_matches_shader_constant` 会拦住两侧分叉。
+pub const GROUND_DETAIL_SIZE: u32 = 512;
 
-/// 一个细节 tile 覆盖的世界边长（米）。256px / 2m = **128 纹素/米**，
+/// 一个细节 tile 覆盖的世界边长（米）。512px / 2m = **256 纹素/米**，
 /// 而宏观地面纹理只有 2 纹素/米 —— 差 64 倍，这正是"地面近看像糊上去的"的量级。
 pub const GROUND_DETAIL_METRES: f32 = 2.0;
 

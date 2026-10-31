@@ -261,7 +261,7 @@ const SPEC_CONTRIB: f32 = 0.4;
 // 与 procedural.rs 的 GROUND_DETAIL_METRES / GROUND_DETAIL_SIZE 严格同步（改了必须两边改）
 const GROUND_DETAIL_METRES: f32 = 2.0;
 // 一个纹素的米数 = 2.0 / 256
-const GROUND_DETAIL_TEXEL_M: f32 = 0.0078125;
+const GROUND_DETAIL_TEXEL_M: f32 = 0.00390625;
 // 纹素 → 亮度调制的增益。约定 **纹素 r = 调制值 / 2**（调制 1.0 → 128），这样
 // 0..2 的调制能完整落进 8bit 而不被 clamp 掉上限（直接存 mod 的话凡是 >1 的
 // 提亮部分全被削成 255，均值会掉到 1 以下，地面整体只会变暗不会变亮）。
