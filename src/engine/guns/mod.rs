@@ -403,11 +403,12 @@ mod gun_geometry_tests {
         //    改成"插进自己覆盖的所有格"后，那份 8 把清单**整体作废**（rope12 直接消失）。
         // 3. 修完 bug 后最差是 `pkm=120mm`，探查发现是**准星悬在枪管上方 88mm**（真悬空，已补准星座）。
         //
-        // 现在的口径：**每把枪都必须能在 ≤60mm 内连成一块**（实测最大值正好 60mm，
-        // 来自 saiga12 的准星座与 ash12 的握把斜撑，都是真实结构）。
+        // 现在的口径：**每把枪都必须能在 ≤20mm 内连成一块**（实测 35 把全部达标）。
+        // 这一步是从 60mm 收紧来的：本轮把 5 把枪的**悬空准星/照门/弹匣/护罩脊**逐个补了
+        // 星座与支柱（saiga12 弹匣、ash12/ak104 准星、m110a1 照门、pkp 脊与表尺座）。
         // 反向验证过：把 pkm 的准星座删掉 ⇒ `pkm=inf` ⇒ 本判据立刻红。
         // ⚠ 仍抓不到"细杆挑大块"这类观感问题（AK-104 那种），那只能看图。
-        let gaps = [0.005f32, 0.010, 0.020, 0.030, 0.040, 0.060];
+        let gaps = [0.010f32, 0.020];
         let mut report: Vec<(f32, String)> = Vec::new();
         for spec in crate::engine::weapon_data::ALL_WEAPONS.iter() {
             let Some(gm) = super::gun_mesh_by_key(spec.key) else { continue };
@@ -433,12 +434,12 @@ mod gun_geometry_tests {
         // 这条断言**比上一版硬**：5mm→60mm 的收紧是量出来的，不是拍的。
         let broken: Vec<String> = report
             .iter()
-            .filter(|(g, _)| *g > 0.060)
+            .filter(|(g, _)| *g > 0.020)
             .map(|(g, k)| format!("{k}={:.0}mm", g * 1000.0))
             .collect();
         assert!(
             broken.is_empty(),
-            "有枪需要 >60mm 才能连成一块（部件离枪身太远）：{}",
+            "有枪需要 >20mm 才能连成一块（部件离枪身太远）：{}",
             broken.join(" ")
         );
     }
