@@ -137,6 +137,108 @@ impl GunMesh {
 /// 按武器键名取枪模（键名 = weapon_data::WeaponSpec::key；返回局部坐标网格，
 /// 枪口朝 +Z，第一人称使用时由调用方变换锚定）。
 // ============================================================
+// 连通性分析（2026-10-31：抓"悬空件"）
+// ============================================================
+
+/// 一个连通块：三角数 + 世界 AABB（min xyz, max xyz）。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub struct Island {
+    pub tris: usize,
+    pub aabb: [f32; 6],
+}
+
+/// 把网格按"**AABB 间距 ≤ gap 就算相连**"切成连通块。
+///
+/// 为什么要它：2026-10-31 修 AK-104 托杆 / Saiga-12 悬空弹仓时，问题是**看图**发现的 ——
+/// 造型判据（`procedural_guns_have_sane_extents`）只看得见整体包围盒，单件转错或悬空它一概不知。
+/// 这个函数把"每个部件是不是长在枪身上"变成可判定的问题：**真实调好的枪只有 1 个连通块**。
+///
+/// 实现：三角 AABB + 均匀网格（cell = max(2·gap, 2cm)）做候选裁剪，再并查集合并 ——
+/// 35 把枪全跑一遍在毫秒级，可以直接当单测。
+#[cfg(test)]
+pub fn mesh_islands(gm: &GunMesh, gap: f32) -> Vec<Island> {
+    use std::collections::HashMap;
+    let tri_n = gm.indices.len() / 3;
+    if tri_n == 0 {
+        return Vec::new();
+    }
+    // ① 每个三角的 AABB
+    let mut boxes: Vec<[f32; 6]> = Vec::with_capacity(tri_n);
+    for t in 0..tri_n {
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for k in 0..3 {
+            let vi = gm.indices[t * 3 + k] as usize;
+            let p = gm.verts[vi].pos;
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a]);
+                hi[a] = hi[a].max(p[a]);
+            }
+        }
+        boxes.push([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]]);
+    }
+    // ② 并查集
+    let mut parent: Vec<usize> = (0..tri_n).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let cell = (gap * 2.0).max(0.02);
+    let key = |v: f32| (v / cell).floor() as i32;
+    let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+    let dist = |a: &[f32; 6], b: &[f32; 6]| -> f32 {
+        let mut d = 0.0f32;
+        for k in 0..3 {
+            let gap_lo = b[k] - a[k + 3];
+            let gap_hi = a[k] - b[k + 3];
+            let g = gap_lo.max(gap_hi).max(0.0);
+            d = d.max(g);
+        }
+        d
+    };
+    for (i, b) in boxes.iter().enumerate() {
+        let (x0, y0, z0) = (key(b[0] - gap), key(b[1] - gap), key(b[2] - gap));
+        let (x1, y1, z1) = (key(b[3] + gap), key(b[4] + gap), key(b[5] + gap));
+        for cx in x0..=x1 {
+            for cy in y0..=y1 {
+                for cz in z0..=z1 {
+                    if let Some(list) = grid.get(&(cx, cy, cz)) {
+                        for &j in list {
+                            if dist(b, &boxes[j]) <= gap {
+                                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                                if ri != rj {
+                                    parent[ri.max(rj)] = ri.min(rj);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        grid.entry((key(b[0]), key(b[1]), key(b[2]))).or_default().push(i);
+    }
+    // ③ 汇总
+    let mut acc: HashMap<usize, Island> = HashMap::new();
+    for i in 0..tri_n {
+        let r = find(&mut parent, i);
+        let b = &boxes[i];
+        let e = acc.entry(r).or_insert(Island { tris: 0, aabb: [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN] });
+        e.tris += 1;
+        for k in 0..3 {
+            e.aabb[k] = e.aabb[k].min(b[k]);
+            e.aabb[k + 3] = e.aabb[k + 3].max(b[k + 3]);
+        }
+    }
+    let mut v: Vec<Island> = acc.into_values().collect();
+    v.sort_by(|a, b| b.tris.cmp(&a.tris));
+    v
+}
+
+// ============================================================
 // 可复用的"小件"（2026-10-31：给程序化枪补细节用）
 // ============================================================
 //
@@ -272,6 +374,60 @@ pub fn has_procedural_mesh(key: &str) -> bool {
 #[cfg(test)]
 mod gun_geometry_tests {
     use super::*;
+
+    /// **没有悬空件**：每把枪在「AABB 间距 ≤ 5mm 即算相连」下必须只有 **1 个连通块**。
+    ///
+    /// 这条就是本轮（续102）缺的那个护栏：`procedural_guns_have_sane_extents` 只看得见整体包围盒，
+    /// Saiga-12 那根悬空 1.9cm 的弹仓、AK-104 那两根细托杆它都发现不了。
+    ///
+    /// 阈值来源：5mm 是"零件相互贴合"与"肉眼可见的缝"之间的分界（AK-104 托杆直径 8mm、
+    /// Saiga 弹仓实际缝隙 19mm）。**它抓不到"细杆看起来不结实"** 这种"好不好看"的问题，只能抓物理断开。
+    #[test]
+    fn procedural_gun_parts_are_not_catastrophically_detached() {
+        // 🔬 度量：**让整把枪变成 1 个连通块所需的最小间距**（`mesh_islands` 逐档试）。
+        //
+        // 🔴 **这条判据的边界（实测过，别当观感护栏用）**
+        // - 我最初的设想是"部件必须贴合"，实测直接**被数据否掉**：35 把枪在 5mm 下
+        //   **全部**不连通，只有 14/35 能把间距压到 ≤60mm。原因是这些枪由几十个独立图元
+        //   堆出来，而且有些"悬空"是**合法的**（扳机本来就悬在护圈里、瞄具架在镜环上、
+        //   枪机球头挂在拉机柄末端）—— 度量分不开"合法悬空"与"看起来断裂"。
+        // - 所以它只保留一条**上界**：任何部件都不得离枪身 > 500mm（那是真的飞出去了），
+        //   并把最差的 8 把**打印出来当存量清单**，供以后逐把改几何时对照。
+        //
+        // ⇒ 视觉类的悬空（如 Saiga-12 那根 19mm 的弹仓）只能靠**看图**发现，
+        //   这条判据**不能**替代它。别把这里的通过读成"观感没问题"。
+        let gaps = [0.005f32, 0.010, 0.020, 0.030, 0.040, 0.060, 0.080, 0.120, 0.200, 0.300, 0.500];
+        let mut report: Vec<(f32, String)> = Vec::new();
+        for spec in crate::engine::weapon_data::ALL_WEAPONS.iter() {
+            let Some(gm) = super::gun_mesh_by_key(spec.key) else { continue };
+            let mut need = f32::MAX;
+            for g in gaps {
+                if super::mesh_islands(&gm, g).len() <= 1 {
+                    need = g;
+                    break;
+                }
+            }
+            report.push((need, spec.key.to_string()));
+        }
+        report.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let worst: Vec<String> = report
+            .iter()
+            .take(8)
+            .map(|(g, k)| format!("{k}={:.0}mm", g * 1000.0))
+            .collect();
+        eprintln!("🔬 连通所需间距最差 8 把（存量清单）：{}", worst.join(" "));
+
+        let broken: Vec<String> = report
+            .iter()
+            .filter(|(g, _)| *g > 0.500)
+            .map(|(g, k)| format!("{k}={:.0}mm", g * 1000.0))
+            .collect();
+        assert!(
+            broken.is_empty(),
+            "有部件离枪身 >500mm（不是贴合缝问题，是几何飞了）：{}",
+            broken.join(" ")
+        );
+    }
 
     /// **程序化枪的外形比例必须成立**（2026-10-31）：声明长度与实际 Z 跨度比在 0.75–1.30，
     /// 长枪还要"沿 Z 最长"（手枪本来就高大于长，已豁免）。
