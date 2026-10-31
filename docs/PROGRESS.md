@@ -3148,3 +3148,21 @@ CJK 闸门拦了 `湿`，文案已改。
   教训同 30：中文/长文件别用脚本做多次就地插入。
 
 **验证**：build 0 警告；886 passed；CJK OK；guard OK。
+
+### 2026-10-31（续121）：桌面启动器（KDE）
+
+- 新增 `scripts/steel_front_launch.sh`：桌面图标的**入口**。`Terminal=false` 的 `.desktop`
+  双击后**没有任何窗口**，而首次启动要先编译几分钟、失败只打到 stderr ⇒ 用户看到的是
+  "双击了什么也没发生"。包装脚本做两件事：① 有终端模拟器就**在终端里**跑 `SteelFront.sh play`
+  （konsole `--hold`，退出后窗口保留以便看报错）；② 没终端就直接跑，失败用 `notify-send` +
+  `zenity` 报出来（附退出码与"去终端看完整报错"的提示）；
+- `install_desktop.sh`：`Exec=` 从 `SteelFront.sh play` 改为指向包装脚本（`ENTRY` 变量），
+  `--check` 的校验文案同步；
+- 已安装并把 `steel-front.desktop` **复制到 `~/Desktop`**（`install -m 755`，可执行）；
+  `desktop-file-validate` 通过，图标 16/24/32/48/64/128/256 + scalable 就位；
+- ⚠️ `gio set metadata::trusted` 在本机不可用（无 gvfs metadata 守护）；KDE Plasma 判据是
+  **可执行位**，已确认 `-rwxr-xr-x`；
+- 无头验证整条链（`STEEL_LAUNCH_IN_TERMINAL=0 RV3D_HEADLESS=1 RV3D_EXIT_AFTER=6`）：
+  构建 → 启动 → 正常退出，`rc=0`，日志 `程序正常退出`（未开可见窗口）。
+
+用法：桌面双击「钢铁前线」；命令行等价 `./SteelFront.sh play`。

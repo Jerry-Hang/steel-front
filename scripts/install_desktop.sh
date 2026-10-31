@@ -56,6 +56,9 @@ while [ -L "$src" ]; do
 done
 REPO="$(cd -- "$(dirname -- "$src")/.." && pwd)"
 LAUNCHER="$REPO/SteelFront.sh"
+# 桌面图标的入口是**包装脚本**（终端里跑 + 失败弹通知）；直接指 SteelFront.sh 时
+# 双击会"什么也没发生"—— Terminal=false 且首次要先编译（教训：体验型缺陷也是缺陷）。
+ENTRY="$REPO/scripts/steel_front_launch.sh"
 ICON_SVG="$REPO/desktop/$APP_ID.svg"
 
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -126,7 +129,7 @@ Name=$APP_NAME
 Name[en]=Steel Front
 Comment=$APP_COMMENT
 Comment[en]=Large-battlefield FPS (Rust + Vulkan)
-Exec="$LAUNCHER" play
+Exec="$ENTRY"
 Path=$REPO
 Icon=$APP_ID
 Terminal=false
@@ -171,7 +174,7 @@ for kv in "Type=Application" "Icon=$APP_ID" "Terminal=false"; do
         echo "  ❌ 缺字段：$kv" >&2; ok=0
     fi
 done
-if grep -qxF -- "Exec=\"$LAUNCHER\" play" "$DESKTOP_FILE" 2>/dev/null; then
+if grep -qxF -- "Exec=\"$ENTRY\"" "$DESKTOP_FILE" 2>/dev/null; then
     echo "  ✅ Exec 指向绝对路径且带 play"
 else
     echo "  ❌ Exec 不对" >&2; ok=0
