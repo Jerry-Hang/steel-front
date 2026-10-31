@@ -136,6 +136,7 @@ not required (it is given here anyway, as provenance).
 | `assets/props/car_wreck.glb` | `covered_car` | Poly Haven | CC0 1.0 |
 | `assets/props/trash_can.glb` | `metal_trash_can` | Poly Haven | CC0 1.0 |
 | `assets/props/utility_box.glb` | `utility_box_01` | Poly Haven | CC0 1.0 |
+| `assets/props/sandbag_wall.glb` | `sandbag_model.obj` + `sandbag_diffuse.png`（**阵列成 6×3 沙袋墙**，由 `tools/blender/make_sandbag_wall.py` 完成） | OpenGameArt — “Simple Sandbags” | CC0 1.0 |
 | `assets/props/bench.glb`（+ `bench_lod1.glb`） | `painted_wooden_bench` | Poly Haven | CC0 1.0 |
 | `assets/props/barrier.glb`（+ `barrier_lod1.glb`） | `concrete_road_barrier` | Poly Haven | CC0 1.0 |
 | `assets/props/barrier2.glb`（+ `barrier2_lod1.glb`） | `concrete_road_barrier_02` | Poly Haven | CC0 1.0 |

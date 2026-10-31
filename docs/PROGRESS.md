@@ -3087,3 +3087,15 @@ CJK 闸门拦了 `湿`，文案已改。
 
 **教训（与教训 33 同形）**：**"是不是盒子"要先看资产，不能凭印象**。
 上一轮 `props: 摆放` 里 container_green=11 已经说明它是 GLB 道具；我却按"纯色盒子"处理。
+
+### 2026-10-31（续116）：沙袋墙换成**下载素材**（OpenGameArt CC0，阵列摆放）
+
+- 源：<https://opengameart.org/content/simple-sandbags>（**CC0**），附 `sandbag_model.obj`（26 顶点）
+  + `sandbag_diffuse.png`（256²）+ 法线贴图；
+- 处理：新脚本 `tools/blender/make_sandbag_wall.py` 把**单个沙袋实例阵列成 6×3 墙**（交错码放），
+  贴图按 UV 采样烘成顶点色，再逐轴缩放到目标外形 —— **素材是下载来的，脚本只做摆放与烘焙**；
+- 产物 `sandbag_wall.glb`：**612 顶点 / 864 三角**，外形 **2.4 × 0.7 × 0.9 m**（契约同步）；
+- 引擎侧无需改代码：`city.rs` 早就按 `"sandbag_wall"` 名字取道具，替换 GLB 即生效；
+- `THIRD-PARTY-NOTICES.md` §2b 记录来源、许可与"阵列是我们做的处理"。
+
+**验证**：build 0 警告；886 passed；契约与资产一致（2.400 / 0.700 / 0.900）。

@@ -281,7 +281,7 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("hydrant", 0.823, 0.299, 0.751),
     ("panel_block", 20.640, 12.640, 17.325),
     ("rubble_pile", 2.715, 2.352, 0.939),
-    ("sandbag_wall", 3.316, 0.382, 0.754),
+    ("sandbag_wall", 2.400, 0.700, 0.900),
     ("street_lamp", 0.905, 0.496, 4.977),
     ("trash_can", 1.864, 0.583, 0.950),
     ("tree_oak", 4.039, 4.642, 7.708),
