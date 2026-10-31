@@ -139,6 +139,7 @@ not required (it is given here anyway, as provenance).
 | `assets/props/sandbag_wall.glb` | `sandbag_model.obj` + `sandbag_diffuse.png`（**阵列成 6×3 沙袋墙**，由 `tools/blender/make_sandbag_wall.py` 完成） | OpenGameArt — “Simple Sandbags” | CC0 1.0 |
 | `assets/props/barrier_hesco.glb` | `hesco_sand.obj` + `diffuse.tga`（Nobiax 的 HESCO 单元，经 `make_sandbag_wall.py --cols 1 --rows 1` 归一化） | OpenGameArt — “Hesco Box” | CC0 1.0 |
 | `assets/props/tent.glb` | `tent02.fbx`（抽面 12% 后烘成顶点色） | OpenGameArt — “Tent 02” | **CC-BY-SA 3.0**（署名 + 相同方式共享）|
+| `assets/props/watchtower.glb` | `wachturm_holz.blend` + `texture_wachturm_holz.png`（合并 80 个网格、贴图采样烘顶点色） | OpenGameArt — “Watchtower wood” | CC0 1.0 |
 | `assets/props/bench.glb`（+ `bench_lod1.glb`） | `painted_wooden_bench` | Poly Haven | CC0 1.0 |
 | `assets/props/barrier.glb`（+ `barrier_lod1.glb`） | `concrete_road_barrier` | Poly Haven | CC0 1.0 |
 | `assets/props/barrier2.glb`（+ `barrier2_lod1.glb`） | `concrete_road_barrier_02` | Poly Haven | CC0 1.0 |

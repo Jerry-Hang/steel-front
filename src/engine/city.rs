@@ -99,6 +99,9 @@ const WRECK_TAN: [f32; 3] = [0.34, 0.32, 0.30];
 const WRECK_GLASS: [f32; 3] = [0.28, 0.26, 0.24];
 const WOOD_BENCH: [f32; 3] = [0.46, 0.34, 0.18];
 const TENT_CAMO: [f32; 3] = [0.36, 0.40, 0.26];
+
+/// 木制哨塔的 tint（回退路径的画盒子颜色，形参只为可读）。
+const TOWER_WOOD: [f32; 3] = [0.42, 0.32, 0.22];
 const FLAG_POLE: [f32; 3] = [0.70, 0.71, 0.73];
 const CURB_STONE: [f32; 3] = [0.52, 0.51, 0.48];
 const LAMP_GLOW: [f32; 3] = [0.85, 0.82, 0.70];
@@ -1467,6 +1470,24 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
             .shape(shape),
         );
     }
+    // 🗼 木制哨塔（OpenGameArt CC0，4.2m）：新增结构，立在院子东侧靠墙处。
+    // 碰撞件两条路照推、有资产时 `Shape::None`；碰撞盒按资产实测（1.57 × 1.854），
+    // 顶面取 4.2 ⇒ 与视觉同高（`invisible_cores_must_be_covered_by_a_prop` 的硬要求）。
+    let (wx, wz) = (cx + 3.2, cz + 9.0);
+    let tower_ok = c.prop("watchtower", wx, wz, 0.0, 1.0);
+    c.push(
+        Part::new(
+            ObstacleKind::Barrier,
+            wx,
+            wz,
+            1.570,
+            1.854,
+            UNDER_GROUND,
+            4.2,
+            TOWER_WOOD,
+        )
+        .shape(if tower_ok { Shape::None } else { Shape::Legacy }),
+    );
     // 车辆残骸：院内东南敞口带（x 留 7.5 内缘余量，z 已出东西排的 ±13 范围）。
     // 旧版 (cx+12, cz+2) 整个埋进东排板楼（cp1_b 右缘墙面上悬空的黑片）。
     wreck_car(c, cx + 4.5, cz + 11.5, WRECK_TAN);

@@ -3134,3 +3134,17 @@ CJK 闸门拦了 `湿`，文案已改。
 - 契约新增 `("tent", 2.968, 2.966, 2.600)`。
 
 **验证**：build 0 警告；886 passed；CJK OK；guard OK。
+
+### 2026-10-31（续120）：新增**木制哨塔**结构（OpenGameArt CC0，4.2m）
+
+- 源：<https://opengameart.org/content/watchtower-wood>（**CC0**，`wachturm_holz.blend` +
+  贴图）；转换脚本临时用（打开 .blend → 合并 80 个网格 → 按 UV 采样贴图烘顶点色 →
+  归一化到 **1.570 × 1.854 × 4.2 m**），产物 `watchtower.glb`：**796 顶点 / 1080 三角**；
+- `city.rs` 在院子东侧新增一座：**碰撞件两条路照推**、有资产时 `Shape::None`；
+  碰撞盒按资产实测、顶面 4.2 与视觉同高（`invisible_cores_must_be_covered_by_a_prop` 硬要求）；
+- 契约新增 `("watchtower", 1.570, 1.854, 4.200)`；实测摆放 `tent=8 / watchtower=8`；
+- 🔴 **踩坑记录**：两次脚本化插入契约表一次插到了测试模块之后（`//!` 模块文档前），一次插成
+  重复行（`tent` 出现两次）⇒ 最终用 `git checkout --` 回滚 + **单次精确编辑**修好；
+  教训同 30：中文/长文件别用脚本做多次就地插入。
+
+**验证**：build 0 警告；886 passed；CJK OK；guard OK。

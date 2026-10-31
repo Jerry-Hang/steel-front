@@ -289,6 +289,7 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("utility_box", 0.627, 0.521, 1.350),
     ("utility_pole", 3.400, 0.610, 8.000),
     ("wall_brick", 4.120, 0.400, 1.810),
+    ("watchtower", 1.570, 1.854, 4.200),
 ];
 
 impl PropSet {
