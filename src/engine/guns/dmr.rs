@@ -62,7 +62,8 @@ pub fn svd12() -> crate::engine::guns::GunMesh {
         (t(-0.030, 0.078, 0.21), beveled_box(0.006, 0.016, 0.032, 0.002, 2), black),
         (t(0.030, 0.078, 0.21), beveled_box(0.006, 0.016, 0.032, 0.002, 2), black),
         // 10 发弹匣
-        (t(0.0, -0.060, -0.020), beveled_box(0.050, 0.120, 0.062, 0.008, 3), dark),
+        // 🔴 弹匣收窄并前移：原来 0.050 宽、z=-0.020，与扳机护圈挤在一起读成一整块
+        (t(0.0, -0.070, -0.075), beveled_box(0.042, 0.105, 0.056, 0.007, 3), dark),
     ]);
     let (verts, indices) = assemble(&parts);
     GunMesh { verts, indices, length: 1.16 }

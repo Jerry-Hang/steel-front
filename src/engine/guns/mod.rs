@@ -273,6 +273,53 @@ pub fn has_procedural_mesh(key: &str) -> bool {
 mod gun_geometry_tests {
     use super::*;
 
+    /// **程序化枪的外形比例必须成立**（2026-10-31）：声明长度与实际 Z 跨度比在 0.75–1.30，
+    /// 长枪还要"沿 Z 最长"（手枪本来就高大于长，已豁免）。
+    ///
+    /// 🔴 **它能抓什么、抓不到什么（反向验证过，别高估）**：
+    /// - 抓得到：整把枪被转到别的轴、`length` 声明与几何脱节、网格为空；
+    /// - **抓不到**：**单个部件**轴向转错。实测把 AK-104 的枪管从 `rz()` 改成 `rx(90°)`
+    ///   （枪管变成竖着的），本判据**照样通过** —— 因为整体包围盒由其它部件撑住。
+    ///   想抓"单件悬空/单件转错"，需要**逐件 AABB 的连通性判据**（part graph），那是另一件事；
+    ///   本轮 AK-104 托杆、Saiga-12 弹仓的问题都是**看图**发现并修掉的，不是这条判据抓的。
+    #[test]
+    fn procedural_guns_have_sane_extents() {
+        let mut checked = 0;
+        for spec in crate::engine::weapon_data::ALL_WEAPONS.iter() {
+            let Some(gm) = super::gun_mesh_by_key(spec.key) else { continue };
+            assert!(!gm.verts.is_empty(), "{}: 程序化网格为空", spec.key);
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for v in &gm.verts {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(v.pos[k]);
+                    hi[k] = hi[k].max(v.pos[k]);
+                }
+            }
+            let (dx, dy, dz) = (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+            let ratio = dz / gm.length.max(1e-4);
+            assert!(
+                (0.75..=1.30).contains(&ratio),
+                "{}: 声明长度 {:.3} 但 Z 跨度 {:.3}（比值 {:.2}）—— 部件轴向可能转错了",
+                spec.key,
+                gm.length,
+                dz,
+                ratio
+            );
+            // 手枪（m18/mp443/…）**本来就是"高大于长"**（握把 + 套筒），不能套这条；
+            // 长枪必须满足"沿 Z 最长"。
+            if gm.length >= 0.60 {
+                assert!(
+                    dz > dy && dz > dx,
+                    "{}: 枪身不沿 Z 展开（dz={dz:.3} dy={dy:.3} dx={dx:.3}）",
+                    spec.key
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 30, "只校验到 {checked} 把程序化枪，预期 >=30");
+    }
+
     /// 🔴 **`rh()` 必须把圆柱的局部 Y 轴转到 ±X**（从机匣右侧伸出的拉机柄）。
     ///
     /// 2026-10-17 实测：`rh()` 原来乘的是 `rz()`（绕 **X** -90°，局部 Y → **Z**）
