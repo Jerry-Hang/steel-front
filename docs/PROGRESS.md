@@ -2736,3 +2736,30 @@ importer 把源贴图打包成图集、片元采样），否则永远是一堆�
 §3 改为「已移出」、§4 补 `ak12` 的作者的归属（CC BY 要求署名 + 注明修改）；
 `THIRD-PARTY-NOTICES.md` §4 整节重写为「8 件保留全 CC BY / 8 件移出」；README 中英两条同步；
 `tools/install_guns.py` 顶部注明 `guns_ext` 已删除与随之删除的 8 个 key。
+
+### 2026-10-31（续100）：被移出的 8 把枪**用自己的程序化模型**补位
+
+**改法**：`load_gun_glb` 的回退顺序从「自己的 GLB → 借 ak12.glb」改成
+「自己的 GLB → **自己的程序化模型**（`engine::guns::has_procedural_mesh`）→ 最后才借 ak12.glb」。
+`engine/guns` 里 35 把枪**本来都有程序化网格**，所以 8 把被移出的枪现在各自有各自的轮廓
+（PKM 长枪管 + 两脚架 + 弹鼓、SVD 长枪管 + 光学镜、Saiga 短粗……），不再全变 AK-12。
+`gun_mesh_by_key` 重构成 `builder_for(key) -> Option<fn() -> GunMesh>` 查表，两个消费者共用一张表，
+不会漂。
+
+**🔴 顺带抓到一个真缺陷**：武器键 `ak12m` 与资产文件名不一致（键 `ak12m`、文件 `ak12.glb`），
+第一次改完 `exists("assets/guns/ak12m.glb")` 恒为 false ⇒ **主力枪静默掉到程序化模型**
+（日志还写着"ak12m 无 GLB"，看起来像资产丢了）。修法：加 `gun_glb_stem(key)` 映射表，
+`ak12m → ak12`。实测恢复：`gun-glb: ak12m ← assets/guns/ak12.glb`、fps 246。
+
+**新判据（两条，都做过反向验证）**
+- `every_weapon_has_a_model_source`：35 个键每个都必须"有 GLB 或有程序化模型"，
+  且**至少 8 个走程序化**（防止判据在"GLB 全在"的机器上恒真）；
+- `removed_gun_glbs_use_their_own_procedural_mesh`：8 个被移出的键必须
+  `load_gun_glb(key) == None` 且 `has_procedural_mesh(key)`；反向验证 = 把那条分支短路成 `false`
+  ⇒ 立刻红（实测报 `ak104 应当返回 None…却拿到了 GLB 网格`）；
+- 另加 `gun_key_maps_to_the_shipped_glb_name` 钉住上面那个文件名映射。
+
+**实机证据**：`RV3D_INSPECT=11`（PKM 程序化检视图，轮廓正确）、
+`RV3D_NO_GUN_GLB=1`（强制全程序化，第一人称 fps 268、枪在锚点上、不飞不埋）。
+
+**回归**：`cargo test --release` = **883 passed**（880 → 883，新增 3 条）。

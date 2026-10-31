@@ -1903,6 +1903,19 @@ impl GameApp {
         }
     }
 
+    /// 武器键 → `assets/guns/` 里的文件名（不含扩展名）。
+    ///
+    /// 🔴 只有 `ak12m` 与文件名不同：键叫 `ak12m`，资产叫 `ak12.glb`。2026-10-31 就因为
+    /// 少了这张表，`exists("assets/guns/ak12m.glb")` 恒为 false ⇒ **主力枪掉到程序化模型**，
+    /// 日志里还写着"ak12m 无 GLB"（看起来像资产丢了）。判据
+    /// `gun_key_maps_to_the_shipped_glb_name` 钉住它。
+    fn gun_glb_stem(key: &str) -> &str {
+        match key {
+            "ak12m" => "ak12",
+            other => other,
+        }
+    }
+
     fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
         // 🔬 A/B 开关（2026-10-18）：`RV3D_NO_GUN_GLB=1` 强制走**程序化枪模**。
         // 存在理由：第一人称一直只验过 GLB 枪模（AK-12M 等 16 把），而**无 GLB 的 19 把**
@@ -1912,11 +1925,21 @@ impl GameApp {
         if crate::syscfg::parse::<u8>("RV3D_NO_GUN_GLB") == Some(1) {
             return None;
         }
+        // 🎯 缺 GLB 时的回退顺序（2026-10-31 改）：**自己的程序化模型优先，其次才是 ak12**。
+        // 旧写法一律借用 `ak12.glb`，于是许可清理后被移出仓库的 8 把枪（ak104 / ash12 / pkm /
+        // pkp / rpk16 / saiga12 / sv98 / svd12）**全变成 AK-12 的外形**——玩家会以为换枪没生效。
+        // 而这 35 把枪在 `engine::guns` 里**本来就有各自的程序化模型**（`has_procedural_mesh`
+        // 不建网格即可判定），所以这里返回 `None`，让调用方走那条路。
+        let stem = Self::gun_glb_stem(key);
         let path = if crate::engine::asset_source::global()
-            .exists(&format!("assets/guns/{key}.glb"))
+            .exists(&format!("assets/guns/{stem}.glb"))
         {
-            format!("assets/guns/{key}.glb")
+            format!("assets/guns/{stem}.glb")
+        } else if crate::engine::guns::has_procedural_mesh(key) {
+            log::info!("assets: {key} 无 GLB ⇒ 使用本键程序化枪模（不再借用 ak12）");
+            return None;
         } else {
+            log::info!("assets: {key} 既无 GLB 也无程序化模型 ⇒ 借用 ak12.glb");
             "assets/guns/ak12.glb".to_string()
         };
         let path: &str = &path;
@@ -5880,6 +5903,90 @@ mod tests {
         // `docs/WEAPON-LICENCE-AUDIT.md` §3）。这条断言的本意是"确实扫到了一批文件"，
         // 不是钉死某个数字，所以跟着资产清单走 8；**不要**为了让数字好看而把模型加回来。
         assert!(checked >= 8, "至少应校验到 8 把 GLB 枪模，实际 {checked}");
+    }
+
+    /// 键与资产文件名必须对得上（2026-10-31 实测踩过）：`ak12m` 的 GLB 叫 `ak12.glb`，
+    /// 少了映射 ⇒ `exists()` 恒 false ⇒ 主力枪静默掉到程序化模型。
+    #[test]
+    fn gun_key_maps_to_the_shipped_glb_name() {
+        assert_eq!(GameApp::gun_glb_stem("ak12m"), "ak12");
+        assert_eq!(GameApp::gun_glb_stem("pkm"), "pkm");
+        // 凡是仓库里真有 GLB 的键，映射后必须能找到文件（反向：把映射改坏 ⇒ 这里红）
+        for entry in std::fs::read_dir("assets/guns").expect("assets/guns 必须存在") {
+            let name = entry.expect("读目录项").file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".glb") else { continue };
+            let key = if stem == "ak12" { "ak12m" } else { stem };
+            assert_eq!(
+                GameApp::gun_glb_stem(key),
+                stem,
+                "键 {key} 映射到 {}，但库里是 {stem}.glb",
+                GameApp::gun_glb_stem(key)
+            );
+        }
+        assert!(
+            GameApp::load_gun_glb("ak12m").is_some(),
+            "ak12m 有 assets/guns/ak12.glb，却返回 None（映射又丢了？）"
+        );
+    }
+
+    /// **每把武器都必须有自己的模型来源**（2026-10-31）：要么 `assets/guns/{key}.glb` 在，
+    /// 要么 `engine::guns` 里有它的程序化模型。两者都没有的键只能借用 `ak12.glb`，
+    /// 换枪就等于没换外观 —— 这正是许可清理后暴露出来的问题。
+    #[test]
+    fn every_weapon_has_a_model_source() {
+        let mut procedural_only = Vec::new();
+        for spec in crate::engine::weapon_data::ALL_WEAPONS.iter() {
+            let glb = format!("assets/guns/{}.glb", spec.key);
+            let has_glb = std::path::Path::new(&glb).exists();
+            let has_proc = crate::engine::guns::has_procedural_mesh(spec.key);
+            assert!(
+                has_glb || has_proc,
+                "武器 '{}' 既没有 {} 也没有程序化模型 ⇒ 会静默借用 ak12 的外形",
+                spec.key,
+                glb
+            );
+            if !has_glb {
+                procedural_only.push(spec.key);
+            }
+        }
+        // 至少要有 8 把走程序化（2026-10-30 许可清理移出的那批），否则说明这个判据
+        // 在"GLB 全在"的机器上恒真、测不到东西。
+        assert!(
+            procedural_only.len() >= 8,
+            "只有 {} 把武器走程序化模型，预期 >=8（被移出仓库的枪应当靠自己的程序化模型）",
+            procedural_only.len()
+        );
+    }
+
+    /// 被移出仓库的 8 件枪模，**必须回落到自己的程序化模型**，而不是 `ak12.glb`。
+    /// 反向验证：把 `load_gun_glb` 里 `has_procedural_mesh` 那条分支删掉 ⇒ 这里拿到 `Some`
+    /// （= ak12 的网格）⇒ 红。
+    #[test]
+    fn removed_gun_glbs_use_their_own_procedural_mesh() {
+        for key in [
+            "ak104", "ash12", "pkm", "pkp", "rpk16", "saiga12", "sv98", "svd12",
+        ] {
+            assert!(
+                !std::path::Path::new(&format!("assets/guns/{key}.glb")).exists(),
+                "{key}.glb 又回到仓库了？许可清理的结论见 docs/WEAPON-LICENCE-AUDIT.md"
+            );
+            assert!(
+                GameApp::load_gun_glb(key).is_none(),
+                "{key} 应当返回 None（走自己的程序化模型），却拿到了 GLB 网格"
+            );
+            assert!(
+                crate::engine::guns::has_procedural_mesh(key),
+                "{key} 没有程序化模型，回退链会掉到 ak12"
+            );
+        }
+        // 有 GLB 的键照旧走 GLB：这条防止"把回退顺序改反了"。
+        // ⚠ 这一条在测试进程里**不能**断言 "ak12m 返回 Some"：`load_gun_glb` 走
+        // `asset_source::global()`，而 10 号那把枪的 GLB 有 2.3 MB、解析要走完整 glTF 路径，
+        // 单元测试只该钉住**回退分支**。反过来钉一条不容易被误改的事实：ak12m 的 GLB 在库里。
+        assert!(
+            std::path::Path::new("assets/guns/ak12.glb").exists(),
+            "ak12m 的 GLB 不在库里 ⇒ 回退链的最后一级也没了"
+        );
     }
 
     /// raw 不可用的平台（本机 Windows）**连试都不许试** `Locked`。

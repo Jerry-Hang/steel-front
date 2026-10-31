@@ -280,9 +280,10 @@ so no action is needed, but the attribution above must stay in place.
   modified (orientation normalised, rescaled, materials baked to vertex colours)
   — CC BY requires both, and every one of these files was modified.
 - Nothing in the repository now carries an unknown licence.
-- The eight removed weapons fall back to the AK-12 model at runtime
-  (`load_gun_glb`), so shipping is unaffected; only those weapons look like an
-  AK-12.
+- The eight removed weapons now render **their own procedural model** at runtime
+  (`engine::guns::has_procedural_mesh` → per-key mesh; the AK-12 GLB is only the
+  last resort when a key has neither), so each still has its own silhouette.
+  Verified with `RV3D_INSPECT=11` (PKM).
 - If you have local copies of the removed models **and** can name their source
   page, add author + licence to the audit file first, then restore them and raise
   the `gun_glb_indices_all_in_range` floor (currently 8).

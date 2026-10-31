@@ -440,7 +440,8 @@ python tools\install_guns.py
    `assets/guns_ext/`。再分发**必须保留**
    [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LICENCE-AUDIT.md) §4 的署名段
    （CC BY 要求署名 + 注明修改，而这些模型都被重新定向/缩放/烘焙过）。
-   被移出的 8 件武器运行时回退 `ak12.glb`，**不坏构建、只降画质**。
+   被移出的 8 件武器**各自回退到自己的程序化模型**（`engine::guns` 里本来就有 35 把枪的程序化网格），
+   所以轮廓各不相同；只有"既无 GLB 又无程序化模型"的键才借 `ak12.glb`。
 
 **关于下载的 CC0 资产**（`assets/props/` 里的 11 件、`assets/textures/` 里的 3 张与图集）：
 它们来自 **Quaternius / Poly Haven / ambientCG**，全部 **CC0 1.0（公有领域）**，**不是**作者的版权、
@@ -517,8 +518,8 @@ weapon models additionally in [`docs/WEAPON-LICENCE-AUDIT.md`](./docs/WEAPON-LIC
    source page, so their licence is unknown and they are no longer redistributed; the 7 MB of
    byte-identical duplicates in `assets/guns_ext/` went with them. **Keep the attribution block** in
    `docs/WEAPON-LICENCE-AUDIT.md` §4 when redistributing (CC BY requires credit *and* an indication
-   of changes — these models were re-oriented, rescaled and baked). The removed weapons fall back to
-   `ak12.glb` at runtime, so the build stays valid and only their looks change.
+   of changes — these models were re-oriented, rescaled and baked). The removed weapons render **their own procedural model** at runtime (each of the 35 keys has
+   one in `engine::guns`); `ak12.glb` is only the last resort for a key that has neither.
 
 **Redistribution checklist:** ship `LICENSE` (the full AGPL text — §4 requires
 conveying a copy, a URL is not enough), `NOTICE`, `THIRD-PARTY-NOTICES.md` and

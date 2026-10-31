@@ -137,45 +137,58 @@ impl GunMesh {
 /// 按武器键名取枪模（键名 = weapon_data::WeaponSpec::key；返回局部坐标网格，
 /// 枪口朝 +Z，第一人称使用时由调用方变换锚定）。
 pub fn gun_mesh_by_key(key: &str) -> Option<GunMesh> {
-    let gm = match key {
-        "ak12m" => assault_red::ak12m(),
-        "ak104" => assault_red::ak104(),
-        "ash12" => assault_red::ash12(),
-        "hk416" => assault_blue::hk416(),
-        "mk18" => assault_blue::mk18(),
-        "pp19" => smg_red::pp19(),
-        "pp9" => smg_red::pp9(),
-        "vss" => smg_red::vss(),
-        "asval" => smg_red::asval(),
-        "mpx" => smg_blue::mpx(),
-        "mp5sd" => smg_blue::mp5sd(),
-        "p90" => smg_blue::p90(),
-        "mp7" => smg_blue::mp7(),
-        "svd12" => dmr::svd12(),
-        "m110a1" => dmr::m110a1(),
-        "mk14p" => dmr::mk14p(),
-        "sv98" => sniper::sv98(),
-        "m2010" => sniper::m2010(),
-        "mrad" => sniper::mrad(),
-        "osv96" => antimaterial::osv96(),
-        "m82a1" => antimaterial::m82a1(),
-        "rpk16" => lmg_red::rpk16(),
-        "pkm" => lmg_red::pkm(),
-        "pkp" => lmg_red::pkp(),
-        "m249" => lmg_blue::m249(),
-        "m240l" => lmg_blue::m240l(),
-        "rope12" => hmg::rope12(),
-        "m2a1" => hmg::m2a1(),
-        "saiga12" => shotgun::saiga12(),
-        "m1014" => shotgun::m1014(),
-        "aa12" => shotgun::aa12(),
-        "mp443" => pistols::mp443(),
-        "rsh12" => pistols::rsh12(),
-        "m18" => pistols::m18(),
-        "mk23" => pistols::mk23(),
+    builder_for(key).map(|f| f())
+}
+
+/// 键 → 构建函数（**只查表，不建网格**）。
+///
+/// 存在的理由（2026-10-31）：`load_gun_glb` 缺 GLB 时要判断"这把枪有没有自己的程序化模型"——
+/// 有就走自己的，没有才借用 `ak12.glb`。旧写法只能靠"把网格建出来看是不是 None"，
+/// 既要付构建成本，又让"缺 GLB"和"没有程序化模型"两件事混在一起。
+fn builder_for(key: &str) -> Option<fn() -> GunMesh> {
+    Some(match key {
+        "ak12m" => assault_red::ak12m,
+        "ak104" => assault_red::ak104,
+        "ash12" => assault_red::ash12,
+        "hk416" => assault_blue::hk416,
+        "mk18" => assault_blue::mk18,
+        "pp19" => smg_red::pp19,
+        "pp9" => smg_red::pp9,
+        "vss" => smg_red::vss,
+        "asval" => smg_red::asval,
+        "mpx" => smg_blue::mpx,
+        "mp5sd" => smg_blue::mp5sd,
+        "p90" => smg_blue::p90,
+        "mp7" => smg_blue::mp7,
+        "svd12" => dmr::svd12,
+        "m110a1" => dmr::m110a1,
+        "mk14p" => dmr::mk14p,
+        "sv98" => sniper::sv98,
+        "m2010" => sniper::m2010,
+        "mrad" => sniper::mrad,
+        "osv96" => antimaterial::osv96,
+        "m82a1" => antimaterial::m82a1,
+        "rpk16" => lmg_red::rpk16,
+        "pkm" => lmg_red::pkm,
+        "pkp" => lmg_red::pkp,
+        "m249" => lmg_blue::m249,
+        "m240l" => lmg_blue::m240l,
+        "rope12" => hmg::rope12,
+        "m2a1" => hmg::m2a1,
+        "saiga12" => shotgun::saiga12,
+        "m1014" => shotgun::m1014,
+        "aa12" => shotgun::aa12,
+        "mp443" => pistols::mp443,
+        "rsh12" => pistols::rsh12,
+        "m18" => pistols::m18,
+        "mk23" => pistols::mk23,
         _ => return None,
-    };
-    Some(gm)
+    })
+}
+
+/// 该键是否有程序化枪模（`gun_mesh_by_key` 是否可能返回 `Some`）—— 不构建网格。
+pub fn has_procedural_mesh(key: &str) -> bool {
+    builder_for(key).is_some()
 }
 
 #[cfg(test)]

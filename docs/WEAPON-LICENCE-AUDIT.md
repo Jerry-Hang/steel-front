@@ -11,8 +11,15 @@
 | 保留 | `ak12` `ak12_baked` `asval` `mp443` `osv96` `pp19` `pp9` `vss`（8 件） |
 | 新增确认 | **`ak12.glb` 自带 GLB 元数据**：`extras.author = momsboxtv`、`extras.license = CC-BY-4.0` ⇒ 第 5 件**硬证据**确认的 CC BY |
 
-移出后**不需要改代码**：`load_gun_glb` 对缺模型回退 `assets/guns/ak12.glb`，
-实测（2026-10-30，headless）只加载 1 件枪模、fps 249、无错误路径命中，只有外观退化。
+移出后的**外观处置（2026-10-31 补齐）**：`load_gun_glb` 的回退顺序改为
+**自己的程序化模型优先，其次才借 `ak12.glb`**（`engine::guns::has_procedural_mesh` 查表判定，
+不建网格）。这 8 把枪在 `src/engine/guns/**` 里本来就有各自的程序化模型，所以现在**各自有各自的轮廓**
+（PKM 有长枪管 + 两脚架 + 弹鼓、SVD 有长枪管 + 光学镜、Saiga 短粗……），不再全部变成 AK-12。
+实测检视图：`RV3D_INSPECT=11`（PKM）。
+
+> 这条顺带修掉了一个**一直存在但没人注意**的缺陷：许可清理之前，任何"没有 GLB"的键也都会借用
+> ak12 的外形。判据 `every_weapon_has_a_model_source` + `removed_gun_glbs_use_their_own_procedural_mesh`
+> 现在把这件事钉死（反向验证：删掉 `has_procedural_mesh` 分支 ⇒ 判据立刻红）。
 
 **回归判据**：`gun_glb_indices_all_in_range` 的下限 10 → **8**（资产清单的事实值）；
 `cargo test --release` = **880 passed**。
