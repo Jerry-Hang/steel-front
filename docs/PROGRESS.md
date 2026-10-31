@@ -3120,3 +3120,17 @@ CJK 闸门拦了 `湿`，文案已改。
 - LOD1 总顶点 628260（原 602132 之前是 8 件时；现在 13 件带低模，桶数 372）。
 
 **验证**：build 0 警告；886 passed；`props/LOD1` / `props/LOD2` 两档均正常上传。
+
+### 2026-10-31（续119）：帐篷换成下载素材（OpenGameArt CC-BY-SA 3.0）
+
+- 源：<https://opengameart.org/content/tent-0>（`Tent02.zip` / `tent02.fbx`），许可 **CC-BY-SA 3.0**
+  —— 全仓第一件 share-alike 资产，已在 `THIRD-PARTY-NOTICES.md` §3 显式标注；
+- 转换：FBX 导入（Blender 5.2 已无 Collada 导入器，`wm.collada_import` 不存在 ⇒ 走 `wm.fbx_import`）
+  → 21 个网格合并 → **抽面 12%** → 顶点色统一军绿 → 归一化到 **2.968 × 2.966 × 2.6 m**；
+  产物 `tent.glb`：**1012 顶点 / 1702 三角**（原 7646 / 14192）；
+- `city.rs` 帐篷段：碰撞件两条路照推、有资产时 `Shape::None`；**四层碰撞顶统一取 2.6**
+  —— 早先按递减压到 1.9 会让 `invisible_cores_must_be_covered_by_a_prop` 红
+  （该判据要求建筑类件碰撞顶 == 视觉顶）；
+- 契约新增 `("tent", 2.968, 2.966, 2.600)`。
+
+**验证**：build 0 警告；886 passed；CJK OK；guard OK。

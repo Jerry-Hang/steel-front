@@ -1445,17 +1445,27 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     // 帐篷：4 级递减近似双坡面。位置在院内西北角（西/北排内缘 ±7.5 各留 ≥0.5m），
     // 旧版 (cx-12, cz) 整个埋进西排板楼（cp1_b，判据 checkpoint_props_stay_out_of_rows）。
     let (tx, tz) = (cx - 4.5, cz - 6.5);
+    // 🏕 帐篷换成下载素材（OpenGameArt “Tent02”，**CC-BY-SA 3.0**，署名见
+    // THIRD-PARTY-NOTICES §3）。碰撞件两条路照推、有资产时 `Shape::None`（与长椅/隔离墩同纪律）；
+    // 尺寸按资产实测（2.968 × 2.966 × 2.6），程序化回退沿用同一套数字 ⇒ 两条路碰撞表逐件一致。
+    let has_asset = c.prop("tent", tx, tz, 0.0, 1.0);
     for s in 0..4i32 {
-        c.push(Part::new(
-            ObstacleKind::Building,
-            tx,
-            tz,
-            5.0 - s as f32 * 1.2,
-            3.6 - s as f32 * 0.8,
-            on_ground(s as f32 * 0.62),
-            (s + 1) as f32 * 0.62,
-            TENT_CAMO,
-        ));
+        let shape = if has_asset { Shape::None } else { Shape::Legacy };
+        c.push(
+            Part::new(
+                ObstacleKind::Building,
+                tx,
+                tz,
+                1.484 - s as f32 * 0.24,
+                1.483 - s as f32 * 0.24,
+                on_ground(0.0),
+                // 所有层的**顶面都取 2.6**：`invisible_cores_must_be_covered_by_a_prop` 要求
+                // 建筑类件的碰撞顶 == 视觉顶（GLB 高 2.6）。早先把上层压低到 1.9 ⇒ 判据红。
+                2.6,
+                TENT_CAMO,
+            )
+            .shape(shape),
+        );
     }
     // 车辆残骸：院内东南敞口带（x 留 7.5 内缘余量，z 已出东西排的 ±13 范围）。
     // 旧版 (cx+12, cz+2) 整个埋进东排板楼（cp1_b 右缘墙面上悬空的黑片）。
