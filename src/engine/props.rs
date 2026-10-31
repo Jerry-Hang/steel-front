@@ -565,7 +565,10 @@ fn merge_binned_impl(
                 None => continue,
             };
             // LOD：有低模用低模，没有用整模；桶序列与整模完全一致（同一 p.mesh、同一顺序）。
-            let mesh = if lod {
+            // 诊断开关（2026-10-31）：`RV3D_LOD_FORCE_FULL=1` 让 LOD 路径照走但**用整模几何**。
+            // 用来分辨"绿楼"是低模资产本身的问题，还是第二套缓冲/绘制路径的问题。
+            let use_lod_mesh = lod && !crate::syscfg::flag("RV3D_LOD_FORCE_FULL");
+            let mesh = if use_lod_mesh {
                 set.lod1_of(&full.name).unwrap_or(full)
             } else {
                 full

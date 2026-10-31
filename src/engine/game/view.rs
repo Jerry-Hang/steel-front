@@ -355,7 +355,7 @@ impl Game {
         let rain = if self.rain { 1.0 } else { 0.0 };
         // 水面反光强度单独可关（RV3D_NO_WET=1），用于把"水光"从"阴雨天光变暗"里隔离出来做 A/B。
         let wet = if self.rain && !crate::syscfg::flag("RV3D_NO_WET") { 1.0 } else { 0.0 };
-        // weather.w = 画面功能位掩码：1=地面分层、2=立面层线、4=枪体明暗、8=地表坡度、16=积水（各自可单独关掉做 A/B）。
+        // weather.w = 画面功能位掩码：1=地面分层、2=立面层线、4=枪体明暗、8=地表坡度、16=积水、32=道具图集（各自可单独关掉做 A/B）。
         let mut bits = 0.0f32;
         if !crate::syscfg::flag("RV3D_NO_GROUND_ZONES") {
             bits += 1.0;
@@ -375,6 +375,11 @@ impl Game {
         // 那样 A/B 量到的是"水面反光 + 积水"的合计，分不出积水自己贡献多少。
         if !crate::syscfg::flag("RV3D_NO_PUDDLE") {
             bits += 16.0;
+        }
+        // 32 = 道具 albedo 图集采样。**只用于诊断**：`RV3D_NO_PROP_ATLAS=1` 关掉后作者件
+        // 退回纯顶点色 —— 用来分辨"颜色不对是贴图采样错"还是"顶点色本身错"。
+        if !crate::syscfg::flag("RV3D_NO_PROP_ATLAS") {
+            bits += 32.0;
         }
         lu.weather = glam::Vec4::new(rain, wet, self.time, bits);
         lu

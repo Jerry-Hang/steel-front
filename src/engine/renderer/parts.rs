@@ -726,12 +726,26 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
         if merged.verts.is_empty() || merged.indices.is_empty() {
             return;
         }
-        // 顶点按 44B 摊平（与主套同格式；Vertex 的布局由主套上传那段保证）
-        let mut vb_bytes: Vec<u8> = Vec::with_capacity(merged.verts.len() * 44);
+        // 🔴 **必须逐字段重排**（2026-10-31 实测踩过）：`merged.verts` 的 `[f32;11]` 布局是
+        //   `pos(3) nrm(3) uv(2) col(3)`（见 props.rs 合并处的说明），而 GPU 侧 `Vertex` 是
+        //   `pos, color, uv, normal`。整段 memcpy 会让**颜色与法线对调** ⇒ 片元拿法线当颜色，
+        //   而楼面的法线是 (0,1,0) 这类轴向量 ⇒ **整栋楼变成纯绿**（本轮的"绿楼"）。
+        let mut vb_bytes: Vec<u8> =
+            Vec::with_capacity(merged.verts.len() * std::mem::size_of::<Vertex>());
         for v in &merged.verts {
-            for f in v {
-                vb_bytes.extend_from_slice(&f.to_le_bytes());
-            }
+            let vert = Vertex {
+                pos: [v[0], v[1], v[2]],
+                normal: [v[3], v[4], v[5]],
+                uv: [v[6], v[7]],
+                color: [v[8], v[9], v[10]],
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&vert as *const Vertex) as *const u8,
+                    std::mem::size_of::<Vertex>(),
+                )
+            };
+            vb_bytes.extend_from_slice(bytes);
         }
         let mut ib_bytes: Vec<u8> = Vec::with_capacity(merged.indices.len() * 4);
         for i in &merged.indices {

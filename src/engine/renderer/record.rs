@@ -718,14 +718,14 @@ impl Renderer {
                     // first_index/index_count 直接可用，不需要任何索引换算 —— 这条前提由
                     // `lod_bins_align_with_full_bins` 判据钉住。
                     // 关掉：`RV3D_NO_PROP_LOD=1`（A/B 对照）；阈值：`RV3D_PROP_LOD_DIST`（米）。
-                    // 🔴 **默认关**（2026-10-31 收尾决定）：框架与测量都成立（开 LOD 时
-                    // 同一机位 205→275 fps），但**远处楼的材质是错的**（整片变绿），根因尚未
-                    // 定位 —— 已知：LOD 几何顶点色是灰的（解码确认），图集格的 UV 也做了
-                    // 平铺回卷，绿仍存在。宁可默认不生效，也不把"绿楼"发出去。
-                    // 打开：`RV3D_PROP_LOD=1`（供下一轮继续查）；A/B 时配合 `RV3D_PROP_LOD_DIST`。
+                    // ✅ **默认开**（2026-10-31 修完"绿楼"之后）：根因是 LOD 顶点打包时
+                    // `[f32;11]`（pos/nrm/uv/col）与 GPU `Vertex`（pos/col/uv/nrm）字段顺序不一致，
+                    // 整段 memcpy 让颜色与法线对调 ⇒ 片元拿法线当颜色（(0,1,0)=纯绿）。
+                    // 逐字段重排后画面正确，收益保持（同机位 205→275 fps）。
+                    // A/B：`RV3D_NO_PROP_LOD=1` 关掉；阈值 `RV3D_PROP_LOD_DIST`（米，默认 90）。
                     let lod_on = self.prop_lod_index_count > 0
                         && self.prop_lod_bins.len() == self.prop_bins.len()
-                        && crate::syscfg::flag("RV3D_PROP_LOD");
+                        && !crate::syscfg::flag("RV3D_NO_PROP_LOD");
                     let lod_dist = crate::syscfg::parse::<f32>("RV3D_PROP_LOD_DIST").unwrap_or(90.0);
                     for (bi, bin) in self.prop_bins.iter().enumerate() {
                         // `RV3D_NO_BIN_CULL=1` 关掉分桶剔除，用于排查"边缘整块消失/变白"。
