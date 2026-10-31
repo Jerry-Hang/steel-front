@@ -544,6 +544,16 @@ fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
+    // 无坡度调用：relief 全 0 时下面的加法是恒等 ⇒ 与旧行为逐位一致。
+    return apply_lighting_slope(input, color, vec2<f32>(0.0, 0.0));
+}
+
+/// 带**地表坡度**的光照版本（2026-10-31）：`slope` 是 (x, z) 方向的法线扰动。
+///
+/// 为什么单开一个入口：地面用**屏幕导数面法线**（`safe_face_normal`），顶点法线为 0 时
+/// `input.normal` 那条分支不会走 ⇒ 想给沥青加起伏，只能在**法线算完之后**再扰动。
+/// 放在这里，两种法线来源都能吃到，旧调用方零改动。
+fn apply_lighting_slope(input: VertexOutput, color: vec3<f32>, slope: vec2<f32>) -> vec3<f32> {
     // 消融档 2：光照全关（默认档 0 不进这里）
     if (light_data.shadow.config.w >= 1.5 && light_data.shadow.config.w < 2.5) {
         return color;
@@ -561,6 +571,10 @@ fn apply_lighting(input: VertexOutput, color: vec3<f32>) -> vec3<f32> {
         if (dot(normal, view_dir) < 0.0) {
             normal = -normal;
         }
+    }
+    // 地表坡度（细节图梯度）：长度 0 时是恒等，不影响任何旧路径。
+    if (length(slope) > 1e-6) {
+        normal = normalize(normal + vec3<f32>(slope.x, 0.0, slope.y));
     }
     let deriv = world_derivatives(input.world_pos);
     var shadow_factor = 0.0;
@@ -1324,6 +1338,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         texel.rgb * mix(0.85, 1.15, clamp(gtone, 0.0, 1.0)),
         gt_fade,
     );
+    // 细节图梯度推出的地表坡度（0 = 不扰动，见 apply_lighting_slope）
+    var ground_slope = vec2<f32>(0.0, 0.0);
     // 🌗 地面分层（2026-10-29）：整片地面此前只有一种灰（顶点色调 + 一张烘焙图），
     // 远看就是"一坨灰板"。这里按城市路网（真源 = city.rs：STREET_EVERY/ROAD_HALF/SIDEWALK）
     // 把地面分成 沥青主干道 / 人行道 / 街区腹地(草或铺装) 三档，**只换基色、保留原有纹理细节**。
@@ -1398,6 +1414,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                         (feature_bits & 1u) != 0u);
         let gtex = textureSampleLevel(ground_detail_tex, texture_sampler,
                                      input.world_pos.xz / GROUND_DETAIL_METRES, lvl).rgb;
+        // 🪨 地表坡度（2026-10-31）：用细节图在 +x / +z 方向各再采一次，取**亮度梯度**当法线扰动。
+        // 这样沥青/混凝土在低太阳下会有真实的颗粒起伏阴影，而不是"平灰面 + 花纹贴图"。
+        // 只在细节层已经生效的近处像素上多两次取数（远处早被 gdetail/detail_fade 关掉）。
+        if ((feature_bits & 8u) != 0u) {
+            let step_m = GROUND_DETAIL_TEXEL_M * 2.0;
+            let gx = textureSampleLevel(ground_detail_tex, texture_sampler,
+                       (input.world_pos.xz + vec2<f32>(step_m, 0.0)) / GROUND_DETAIL_METRES, lvl).r;
+            let gz = textureSampleLevel(ground_detail_tex, texture_sampler,
+                       (input.world_pos.xz + vec2<f32>(0.0, step_m)) / GROUND_DETAIL_METRES, lvl).r;
+            let gg = dot(gtex, gw);
+            // 增益 22 时近处偏"斑驳"（2026-10-31 目视 A/B）⇒ 收到 11、上限收到 0.35：
+            // 保留颗粒起伏，但不再把单纹素噪点放大成一片明暗块。
+            ground_slope = vec2<f32>(gx - gg, gz - gg) * 11.0;
+            let m = length(ground_slope);
+            if (m > 0.35) {
+                ground_slope = ground_slope * (0.35 / m);
+            }
+        }
         let g = dot(gtex, gw);
         // 纹素编码约定：r = 亮度调制 / 2（调制 1.0 → 128）。见 GROUND_DETAIL_GAIN 注释。
         // 二级兜底（flag 已开但图本身有问题时）：clamp 到 [0.5,2.0] 且把 g<=0 判为"该层
@@ -1431,10 +1465,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             * (1.0 - smoothstep(0.05, 0.30, footprint_major));
         mixed = mixed * mix(1.0, gmod, gdetail * detail_fade);
     }
+    // 🌧 雨天地面积水（2026-10-31）：低频噪声成片 → 压暗 albedo，配合既有湿面高光就是"水洼"。
+    // 只在湿面已开（weather.y>0）时生效；`RV3D_NO_WET` 那条路会自动把它一起关掉。
+    if (light_data.weather.y > 0.01 && (feature_bits & 16u) != 0u) {
+        // 两级噪声：大尺度决定"哪里有水"，小尺度打散边缘 —— 0.42 单一尺度时水洼只有 2m 宽，
+        // 在本机位（1.7m 视线平视 100m 路面）里全被压成细碎斑，肉眼读不出"水面"。
+        let pn = vnoise2(input.world_pos.xz * 0.11 + vec2<f32>(3.3, 8.1)) * 0.65
+               + vnoise2(input.world_pos.xz * 0.37 + vec2<f32>(13.7, 5.1)) * 0.35;
+        // 阈值 0.50–0.72 + 压暗 45% + 掺一点雾色（≈天空反射）：0.30 那版实测只有 4% 像素差异、
+        // 肉眼读不出"水洼"，这一版把水面和湿路分开。
+        // 第三次调参：前面两版（0.30 压暗 / 0.45 压暗 + 雾色）实测只有 2–5% 像素差异，
+        // 肉眼读不出水面 —— 因为湿面那层 fresnel 又把亮度补回来了。这一版直接压 55%、
+        // 阈值放宽到 0.45–0.70，并且**不再掺雾色**（掺了反而把水洼抹平）。
+        let puddle = smoothstep(0.45, 0.70, pn) * light_data.weather.y;
+        mixed = mixed * (1.0 - 0.55 * puddle);
+    }
     if (light_data.flags.x < 0.5) {
         return vec4<f32>(wet_ground(mixed, input) * input.fade, 1.0);
     }
-    let lit = apply_lighting(input, mixed);
+    let lit = apply_lighting_slope(input, mixed, ground_slope);
     let fg2 = fog_amount(view_distance(input));
     return vec4<f32>(aces_tonemap(mix(wet_ground(lit, input), fog_tint(), fg2) * {TONEMAP_EXPOSURE}) * input.fade, 1.0);
 }
