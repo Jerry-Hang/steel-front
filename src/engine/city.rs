@@ -1460,11 +1460,25 @@ fn checkpoint(c: &mut City, cx: f32, cz: f32) {
     // 车辆残骸：院内东南敞口带（x 留 7.5 内缘余量，z 已出东西排的 ±13 范围）。
     // 旧版 (cx+12, cz+2) 整个埋进东排板楼（cp1_b 右缘墙面上悬空的黑片）。
     wreck_car(c, cx + 4.5, cz + 11.5, WRECK_TAN);
-    // 拒马
+    // 拒马 → 换成 **Poly Haven 混凝土隔离墩**（CC0，两型轮换；各自带低模）。
+    // 🔴 碰撞件两条路照推（与 bench 同一纪律）：有资产时把可见性切 `Shape::None`，
+    // 可见面交给 GLB —— 早退会让 `obstacles_are_identical_with_and_without_assets` 红。
+    // 尺寸按资产实测（1.506×0.623×0.811 / 1.139×0.320×0.809），碰撞盒沿用原来的 2.2×0.24×1.25
+    // 会让"无形墙"判据失败，所以这里按实测值重算，两条路同一套数值。
     for k in 0..3i32 {
         let px = cx + (k as f32 - 1.0) * 3.4;
-        c.push(Part::new(ObstacleKind::Barrier, px, cz, 2.2, 0.24, UNDER_GROUND, 1.25, METAL_RUST));
-        c.push(Part::new(ObstacleKind::Barrier, px, cz, 0.24, 2.2, UNDER_GROUND, 1.25, METAL_RUST));
+        let round_two = k % 2 == 1;
+        let (name, hw, hd, h) = if round_two {
+            ("barrier2", 1.139 * 0.5, 0.325 * 0.5, 0.809)
+        } else {
+            ("barrier", 1.506 * 0.5, 0.620 * 0.5, 0.812)
+        };
+        let has_asset = c.prop(name, px, cz, 0.0, 1.0);
+        let shape = if has_asset { Shape::None } else { Shape::Legacy };
+        c.push(
+            Part::new(ObstacleKind::Barrier, px, cz, hw * 2.0, hd * 2.0, UNDER_GROUND, h, CONCRETE_LIGHT)
+                .shape(shape),
+        );
     }
 }
 

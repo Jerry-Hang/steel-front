@@ -3056,3 +3056,15 @@ CJK 闸门拦了 `湿`，文案已改。
   `THIRD-PARTY-NOTICES.md` §2b 补 `bench` 的来源与许可。
 
 **验证**：build 0 警告；**886 passed**；CJK OK；guard OK；实拍确认长椅为真木板凳（深红漆）。
+
+### 2026-10-31（续114）：哨卡"拒马"换成混凝土隔离墩（Poly Haven CC0，两型轮换 + 低模）
+
+- 资产：`concrete_road_barrier` → `barrier`（4168 顶点，1.506×0.623×0.811）+ `barrier_lod1`（1511）；
+  `concrete_road_barrier_02` → `barrier2`（2799，1.139×0.320×0.809）+ `barrier2_lod1`（954）；
+  分别进图集**格 10 / 11**；
+- `city.rs` 的拒马循环：按 `k % 2` 轮换两型，碰撞件两条路照推、有资产时 `Shape::None`
+  （与 bench 同一纪律）；碰撞盒按**资产实测**给（原来 2.2×0.24 会超轮廓 ⇒ 无形墙判据红）；
+- 实测摆放：`barrier=16 / barrier2=8`（其余不变，总数 404 → **428 处**）；
+- 文档：`THIRD-PARTY-NOTICES.md` §2b 补两型来源与 CC0。
+
+**验证**：build 0 警告；886 passed；CJK OK；guard OK。

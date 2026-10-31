@@ -137,6 +137,8 @@ not required (it is given here anyway, as provenance).
 | `assets/props/trash_can.glb` | `metal_trash_can` | Poly Haven | CC0 1.0 |
 | `assets/props/utility_box.glb` | `utility_box_01` | Poly Haven | CC0 1.0 |
 | `assets/props/bench.glb`（+ `bench_lod1.glb`） | `painted_wooden_bench` | Poly Haven | CC0 1.0 |
+| `assets/props/barrier.glb`（+ `barrier_lod1.glb`） | `concrete_road_barrier` | Poly Haven | CC0 1.0 |
+| `assets/props/barrier2.glb`（+ `barrier2_lod1.glb`） | `concrete_road_barrier_02` | Poly Haven | CC0 1.0 |
 | `assets/textures/ground_detail_3way.png` | R = `Asphalt033`, G = `Concrete034`, B = `Ground037` | ambientCG (ambientcg.com) | CC0 1.0 |
 | `assets/textures/ground_detail_asphalt.png` | `Asphalt033` | ambientCG | CC0 1.0 |
 | `assets/textures/marker_skin_bricks.png` | `Bricks075A` | ambientCG | CC0 1.0 |

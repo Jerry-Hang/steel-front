@@ -254,6 +254,8 @@ impl PropSet {
 /// 资产改了尺寸而这里没跟 ⇒ 测试当场红。
 pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("barrel_metal", 0.599, 0.604, 0.881),
+    ("barrier", 1.506, 0.623, 0.811),
+    ("barrier2", 1.139, 0.320, 0.809),
     ("barrier_hesco", 2.631, 1.485, 1.772),
     ("barrier_jersey", 3.020, 0.600, 0.840),
     ("bench", 1.247, 0.539, 0.953),
