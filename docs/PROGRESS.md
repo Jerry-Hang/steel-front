@@ -3039,3 +3039,20 @@ CJK 闸门拦了 `湿`，文案已改。
 **实测（1280×720，俯视机位）**：三档 **259.8–260.4 fps** / 两档（把 DIST2 调大）**251.4–252.7** /
 关闭 LOD **203.5–204.2** ⇒ 三档比关闭 **+27%**，比两档 **+3%**。
 俯视截图确认远景楼/树正常（无绿楼、无空洞）。
+
+### 2026-10-31（续113）：广场长椅换成真模型（Poly Haven CC0，带低模）+ 文档更新
+
+- 资产：Poly Haven **`painted_wooden_bench`（CC0）** → `bench.glb`（280 顶点）+ `bench_lod1.glb`（105 顶点），
+  进图集**格 9**（每格 1024²）；
+- `city.rs::bench()` 重写：**碰撞盒两条路（有/无资产）逐件一致** —— 四件碰撞体照推，
+  有资产时把可见性切成 `Shape::None`（盒子不画、可见面交给 GLB）。
+  早退那版会让碰撞表 884 vs 1012 ⇒ `obstacles_are_identical_with_and_without_assets` 当场红；
+- 尺寸按资产实测（**1.247 × 0.539 × 0.953**）统一，程序化回退也用这套 ⇒
+  `invisible_cores_must_be_covered_by_a_prop`（无形墙判据）同时满足；
+- `benches_per_plaza_is_exactly_one_ring` 改为按 **`BENCH_PROP` 标记**计数（与"长椅是 GLB 还是盒子"解耦）；
+- `lod_bins_align_with_full_bins` 容差 5cm → **0.5m**：桶心 = 几何包围盒中心，抽面会改包围盒
+  （实测最大 0.33m），顺序错位仍会差几十米；
+- 文档：README 特性清单补"道具三级 LOD"与"4K 图集 / 512 地面细节"，里程碑表补 2026-10-31 一行；
+  `THIRD-PARTY-NOTICES.md` §2b 补 `bench` 的来源与许可。
+
+**验证**：build 0 警告；**886 passed**；CJK OK；guard OK；实拍确认长椅为真木板凳（深红漆）。

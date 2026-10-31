@@ -958,6 +958,9 @@ const COVER_PROP: [f32; 3] = [0.42, 0.40, 0.36];
 /// 下载的真灌木（`bush_real`）的标记 tint：判据靠它计数，本身不可见（`Shape::None`）。
 const BUSH_PROP: [f32; 3] = [0.16, 0.34, 0.16];
 
+/// 下载的长椅（`bench`）标记 tint；`Shape::None` 不渲染，只供判据计数。
+const BENCH_PROP: [f32; 3] = [0.45, 0.30, 0.12];
+
 /// 街道家具（消防栓/垃圾桶/配电箱）的标记 tint：判据按它计数，`Shape::None` 不渲染。
 const FURNITURE_PROP: [f32; 3] = [0.30, 0.31, 0.33];
 
@@ -1169,15 +1172,41 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
 /// 现在：座板 20cm、靠背 48cm 高（真人靠背也就这个数，旧版 64cm 反而像围栏）、
 /// 腿加粗到 0.28 × 0.60 并坐到座板底下（不再与座面等高相切）。
 fn bench(c: &mut City, x: f32, z: f32, along: bool) {
-    let (w, d) = if along { (2.4, 0.62) } else { (0.62, 2.4) };
-    c.push(Part::new(ObstacleKind::Block, x, z, w, d, 0.34, 0.54, WOOD_BENCH));
-    let (bw, bd) = if along { (w, 0.22) } else { (0.22, d) };
-    let (bx, bz) = if along { (x, z - 0.20) } else { (x - 0.20, z) };
-    c.push(Part::new(ObstacleKind::Block, bx, bz, bw, bd, 0.54, 1.02, WOOD_BENCH));
-    for s in [-1.0f32, 1.0] {
-        let (lx, lz) = if along { (x + s * (w * 0.5 - 0.28), z) } else { (x, z + s * (d * 0.5 - 0.28)) };
-        c.push(Part::new(ObstacleKind::Block, lx, lz, 0.28, 0.56, UNDER_GROUND, 0.36, DARK));
+    // 🪑 下载的长椅（Poly Haven CC0，280 顶点；低模 105 顶点）优先。
+    // 🔴 **碰撞表必须与"无资产"路径逐件一致**（`obstacles_are_identical_with_and_without_assets`）：
+    // 所以四件碰撞体**两条路都照推**，只是有资产时把可见性切成 `Shape::None`
+    // （盒子不画，可见面交给 GLB）。早退那条写法会让碰撞表少 4 件 ⇒ 884 vs 1012。
+    let yaw = if along { 0.0 } else { std::f32::consts::FRAC_PI_2 };
+    let has_asset = c.prop("bench", x, z, yaw, 1.0);
+    // `Part::new` 默认就是画盒子（`Shape::Legacy`）；有资产时切成 `Shape::None` 只留碰撞。
+    let shape = if has_asset { Shape::None } else { Shape::Legacy };
+    // 尺寸按**资产实测**（1.247 × 0.539）：程序化回退也用这一套 ⇒ 两条路碰撞表逐件一致，
+    // 同时保证 `invisible_cores_must_be_covered_by_a_prop` 能通过（核不超出 GLB 轮廓）。
+    let (w, d) = if along { (1.247, 0.539) } else { (0.539, 1.247) };
+    c.push(
+        Part::new(ObstacleKind::Block, x, z, w, d, 0.34, 0.54, WOOD_BENCH).shape(shape),
+    );
+    let (bw, bd) = if along { (w, 0.20) } else { (0.20, d) };
+    let (bx, bz) = if along { (x, z - 0.17) } else { (x - 0.17, z) };
+    c.push(
+        Part::new(ObstacleKind::Block, bx, bz, bw, bd, 0.54, 1.02, WOOD_BENCH).shape(shape),
+    );
+    for sgn in [-1.0f32, 1.0] {
+        let (lx, lz) = if along {
+            (x + sgn * (w * 0.5 - 0.14), z)
+        } else {
+            (x, z + sgn * (d * 0.5 - 0.14))
+        };
+        c.push(
+            Part::new(ObstacleKind::Block, lx, lz, 0.14, 0.45, UNDER_GROUND, 0.36, DARK)
+                .shape(shape),
+        );
     }
+    // 判据专用标记（不渲染）：让"这里有一把长椅"与"长椅是 GLB 还是盒子"解耦。
+    c.push(
+        Part::new(ObstacleKind::Block, x, z, 0.62, 0.27, UNDER_GROUND, 0.95, BENCH_PROP)
+            .shape(Shape::None),
+    );
 }
 
 /// 公园：真树（圆柱树干 + 不压扁的二十面体树冠）+ 灌木 + 座椅 + 垃圾桶。

@@ -256,6 +256,7 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("barrel_metal", 0.599, 0.604, 0.881),
     ("barrier_hesco", 2.631, 1.485, 1.772),
     ("barrier_jersey", 3.020, 0.600, 0.840),
+    ("bench", 1.247, 0.539, 0.953),
     ("building_block", 14.140, 11.065, 10.390),
     ("building_corner", 11.140, 11.065, 10.390),
     ("building_shed", 13.140, 9.065, 6.990),
@@ -1407,12 +1408,12 @@ mod lod_tests {
         let lod = merge_binned_lod(&set, &placements, 40.0, |_, _| 0.0);
         assert_eq!(full.bins.len(), lod.bins.len(), "两套分桶数量不同");
         for (i, (a, b)) in full.bins.iter().zip(lod.bins.iter()).enumerate() {
-            // 容差 5cm：桶心由**几何包围盒**推出，低模与整模的包围盒本来就差一点点
-            // （实测 4.8e-7 与 1.9e-3），这不是顺序错位；**顺序错位会差几十米**。
+            // 容差 0.5m：桶心 = **几何包围盒中心**，抽面会改动包围盒（实测最大差 0.33m，
+            // 出现在低模抽面很重的件上），这不是顺序错位；**顺序错位会差几十米**。
             let dx = (a.center[0] - b.center[0]).abs();
             let dz = (a.center[2] - b.center[2]).abs();
             assert!(
-                dx < 0.05 && dz < 0.05,
+                dx < 0.5 && dz < 0.5,
                 "第 {i} 个桶的 center 差太多（dx={dx:.6} dz={dz:.6}）⇒ 两套桶顺序不一致"
             );
         }
