@@ -3257,3 +3257,19 @@ PT-BLAS:  size=105356672 scratch_build=86027520
 
 ⚠️ 尚未接线到引擎：chunk 目前只是导出产物（`/tmp/city_chunks/`）。接线要处理四件事
 （阴影几何、PT 属性表、分桶剔除、契约表），属于下一轮独立提交，需带 A/B（实例数 / draw 数 / fps）。
+
+### 2026-11-01（续127）：chunk 管线做成**一键**，产物入库
+
+- 新增 `scripts/city_chunks.sh`：① 无头跑一局用 `RV3D_DUMP_ALL` 导出布局 TSV；
+  ② 调 `city_from_dump.py --cell 40` 重建并合并；③ 产物写进 `assets/city_chunks/`。
+  `--dry-run` 只打印计划；缺 Blender 或缺 exe 时退出码 **2**（仓库三态约定）。
+- 实跑结果：**12 个 chunk / 16,836 顶点 / 28,752 三角 / 536 KB**，入库到 `assets/city_chunks/`。
+- 这 12 个 chunk 是**下一轮接线的输入**（接进引擎当大件绘制），现在还不是运行时资产：
+  `assets/props/**` 的契约表只覆盖道具，chunk 走独立目录，不污染 `CONTRACT_SIZES`。
+
+**接线要处理的四件事（下一轮，带 A/B）**：
+1. 静态阴影几何（否则整城没影子）；
+2. PT 属性表（`pt_bake_prop_attrs`）；
+3. 按 chunk 分桶剔除；
+4. 契约/加载路径（独立目录，不并进道具契约）。
+A/B 判据：实例数（现状约 1.8 万 → 12）、draw 数、fps、以及爆炸/NPC 交战时的卡顿占比。
