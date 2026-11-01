@@ -27,6 +27,9 @@ def args():
     ap.add_argument("tsv")
     ap.add_argument("out")
     ap.add_argument("--limit", type=int, default=0, help="只重建前 N 件（调试用）")
+    ap.add_argument("--cell", type=float, default=0.0,
+                    help="按边长为 cell 米的方格**分批导出**（0=整城一个文件）")
+    ap.add_argument("--out-dir", default="", help="--cell 模式下的输出目录")
     return ap.parse_args(argv)
 
 
@@ -85,6 +88,43 @@ def main():
         made += 1
         if made % 300 == 0:
             print(f"   … 已建 {made} 件")
+
+    if a.cell > 0.0:
+        # 按 40m 格分批：每格内的构件合并成一个 chunk 导出（引擎侧按 chunk 当大件绘制）。
+        # 🔴 分格必须在**建几何之后、合并之前**做：按物体的世界坐标中心归格。
+        out_dir = a.out_dir or "."
+        buckets = {}
+        for o in bpy.context.scene.objects:
+            if o.type != "MESH":
+                continue
+            c = o.matrix_world.translation
+            key = (math.floor(c.x / a.cell), math.floor(c.z / a.cell))
+            buckets.setdefault(key, []).append(o)
+        print(f"  分格：{len(buckets)} 个 chunk（边长 {a.cell} m）")
+        total_v = total_t = 0
+        for (cx, cz), objs in sorted(buckets.items()):
+            for o in bpy.context.scene.objects:
+                o.select_set(False)
+            for o in objs:
+                o.select_set(True)
+            bpy.context.view_layer.objects.active = objs[0]
+            bpy.ops.object.join()
+            obj = bpy.context.object
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+            me = obj.data
+            tris = sum(len(p.vertices) - 2 for p in me.polygons)
+            path = f"{out_dir}/city_cell_{cx}_{cz}.glb"
+            bpy.ops.export_scene.gltf(
+                filepath=path, export_format="GLB", use_selection=True, export_apply=True,
+                export_yup=True, export_normals=False, export_texcoords=False,
+                export_vertex_color="NAME", export_vertex_color_name="Col",
+                export_materials="NONE",
+            )
+            total_v += len(me.vertices)
+            total_t += tris
+            print(f"[city] {path}: {len(me.vertices)} 顶点 / {tris} 三角（{len(objs)} 件）")
+        print(f"[city] 合计 {len(buckets)} chunk / {total_v} 顶点 / {total_t} 三角")
+        return
 
     objs = [o for o in bpy.context.scene.objects if o.type == "MESH"]
     for o in objs:
