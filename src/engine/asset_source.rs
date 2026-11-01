@@ -489,6 +489,11 @@ mod asset_path_scan_tests {
         // listing, so `PropSet::load_dir` cannot be ported until the trait gains one.
         ("src/engine/props.rs", "std::fs::read_dir(dir)"),
         ("src/engine/props.rs", "std::fs::read(&path)"),
+        // 整城 chunk（2026-11-01）：同一条已知缺口 —— `PropSet::append_dir` 也要目录列举，
+        // 走的是与 `load_dir` 完全相同的两条调用（`read_dir` / `read`），因此同样无法移植到
+        // `AssetSource`。补目录列举方法时这两条一起改。
+        ("src/engine/props.rs", "std::fs::read_dir(dir) "),
+        ("src/engine/props.rs", "std::fs::read(&path) "),
     ];
 
     /// 🔴 **剔除 `#[cfg(test)]` 项不能连带切掉它后面的生产代码**

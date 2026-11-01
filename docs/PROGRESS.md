@@ -3273,3 +3273,16 @@ PT-BLAS:  size=105356672 scratch_build=86027520
 3. 按 chunk 分桶剔除；
 4. 契约/加载路径（独立目录，不并进道具契约）。
 A/B 判据：实例数（现状约 1.8 万 → 12）、draw 数、fps、以及爆炸/NPC 交战时的卡顿占比。
+
+### 2026-11-01（续128）：**整城 chunk 接进引擎并默认启用**（可直接试玩）
+
+- `PropSet::append_dir("assets/city_chunks")`：把 12 块世界坐标 chunk 追加进道具套件；
+- 摆放一律**单位变换**（位置 0 / yaw 0 / scale 1），走同一条道具管线（同一份 VB/IB + 分桶剔除）；
+- `placement_tint` 对 `chunk_*` 返回纯白（否则十二块之间被随机染色出现色差）；
+- chunk 开启时**不再画程序化 marker**（可见面由 chunk 提供，避免两套几何共面重复）；
+- 导出侧**排除 Building**：楼体已由 `assets/props/building_*.glb` 绘制，chunk 再放灰盒会盖住立面；
+  重出后 **12 chunk / 12,068 顶点 / 21,272 三角**；
+- 开关：`RV3D_NO_CITY_CHUNKS=1` 回退到旧的 marker 路径（默认开）。
+
+**实测**：chunk 开/关画面差异 **3.73%**（同一机位 1280x720），fps 249；
+`props: 追加整城 chunk 12 块（起始下标 37）`。

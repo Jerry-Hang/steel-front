@@ -207,6 +207,42 @@ impl PropSet {
         Ok(PropSet { meshes, lod1, lod2 })
     }
 
+    /// 把某个目录里的 GLB **追加**进套件（2026-11-01：整城 chunk 走这条路）。
+    ///
+    /// chunk 是**世界坐标**几何（在 Blender 里按 40m 格合并导出），摆放时用单位变换；
+    /// 名字加 `chunk_` 前缀，`placement_tint` 对它返回纯白（否则每个 chunk 会被随机染色
+    /// ±12%，十二块之间出现明显色差）。
+    ///
+    /// 返回追加的 `(起始下标, 件数)`；目录不存在时返回 `(0, 0)`（不报错：chunk 是可选资产）。
+    pub fn append_dir(&mut self, dir: &str) -> (usize, usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return (0, 0);
+        };
+        let mut found: Vec<(String, ImportedMesh)> = Vec::new();
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("glb") {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("chunk");
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(m) = crate::engine::assets::parse_glb(&bytes) else { continue };
+            if m.verts.is_empty() || m.indices.is_empty() {
+                continue;
+            }
+            found.push((stem.to_string(), m));
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let start = self.meshes.len();
+        for (stem, m) in found {
+            let mut m = m;
+            ensure_smooth_normals(&mut m.verts, &m.indices);
+            let mesh = PropMesh::from_imported(&format!("chunk_{stem}"), &m);
+            self.meshes.push(mesh);
+        }
+        (start, self.meshes.len() - start)
+    }
+
     pub fn len(&self) -> usize {
         self.meshes.len()
     }
@@ -660,8 +696,14 @@ fn merge_binned_impl(
             let base = out.verts.len() as u32;
             let (sy, cy) = (p.yaw.sin(), p.yaw.cos());
             let gy = ground(p.x, p.z) + p.y;
-            // 同型号内部的差异：见 placement_tint
-            let tint = placement_tint(&p);
+            // 同型号内部的差异：见 placement_tint。
+            // 🔴 chunk 是**世界坐标**几何，不许随机染色（十二块之间会出现明显色差）——
+            //    判据 `chunks_are_not_tinted`。
+            let tint = if mesh.name.starts_with("chunk_") {
+                [1.0, 1.0, 1.0]
+            } else {
+                placement_tint(&p)
+            };
             for v in vsrc {
                 // 绕 +Y 旋转：(x, z) → (x·cosθ + z·sinθ, -x·sinθ + z·cosθ)
                 let vx = v[0] * p.scale;

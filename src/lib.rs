@@ -2988,7 +2988,11 @@ impl GameApp {
                 // "转视角房子在棕和灰之间跳"正是它（A/B 实测：关掉后露出的是棕色 GLB 立面）。
                 // 需要回退排查时用 `RV3D_BUILDING_MARKERS=1`。
                 // `RV3D_NO_MARKERS=1`：连装饰件一起关，用于判断"白色大板"到底来自 marker 还是 GLB。
-                let no_markers = crate::syscfg::flag("RV3D_NO_MARKERS");
+                // 🏙 chunk 开启时，程序化构件（1230 件）的可见面由 chunk 提供 ⇒ 不再画 marker，
+                //    否则两套几何共面重复（z-fighting + 白付 1.8 万实例）。
+                let chunks_on = !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS")
+                    && std::path::Path::new("assets/city_chunks").is_dir();
+                let no_markers = chunks_on || crate::syscfg::flag("RV3D_NO_MARKERS");
                 let skip_building = no_markers || !crate::syscfg::flag("RV3D_BUILDING_MARKERS");
                 self.obstacle_markers_cache = self
                     .game
@@ -3208,9 +3212,19 @@ impl GameApp {
             }
             ps
         }) {
-                    Ok(s) => {
-                        log::info!("props: 渲染侧载入 {} 件网格", s.len());
-                        s
+                    Ok(mut set) => {
+                        // 🏙 **整城 chunk**（2026-11-01）：Blender 里按 40m 格合并导出的
+                        // 世界坐标几何，走**同一条道具管线**（同一份 VB/IB、同一套分桶剔除），
+                        // 于是 1230 个程序化构件从"每帧上万实例"变成十几块合并网格。
+                        // 关闭：`RV3D_NO_CITY_CHUNKS=1`。chunk 缺失时静默跳过（可选资产）。
+                        log::info!("props: 渲染侧载入 {} 件网格", set.len());
+                        if !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS") {
+                            let (start, n) = set.append_dir("assets/city_chunks");
+                            if n > 0 {
+                                log::info!("props: 追加整城 chunk {n} 块（起始下标 {start}）");
+                            }
+                        }
+                        set
                     }
                     Err(e) => {
                         log::info!("props: 渲染侧未载入（{e}），不绘制道具");
@@ -3223,7 +3237,23 @@ impl GameApp {
                 self.prop_map_gen = map_gen;
                 if let Some(set) = self.prop_set.as_ref() {
                     if !set.is_empty() {
-                        renderer.set_props(set, self.game.prop_placements());
+                        // chunk 的世界坐标已在几何里 ⇒ 摆放一律单位变换（位置 0、yaw 0、scale 1）。
+                        // 地面项 `ground(0,0)` 在城市中央压平区恒为 0（见 terrain_height 的方盘判定）。
+                        let mut placements = self.game.prop_placements().to_vec();
+                        for i in 0..set.len() {
+                            if set.get(i).is_some_and(|m| m.name.starts_with("chunk_")) {
+                                placements.push(engine::props::PropPlacement {
+                                    mesh: i,
+                                    x: 0.0,
+                                    y: 0.0,
+                                    z: 0.0,
+                                    yaw: 0.0,
+                                    scale: 1.0,
+                                    solid: false,
+                                });
+                            }
+                        }
+                        renderer.set_props(set, &placements);
                         t_props = prep_start.elapsed().as_micros() as u64;
                     }
                 }

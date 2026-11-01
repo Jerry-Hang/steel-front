@@ -68,6 +68,11 @@ def main():
             continue
         if hw <= 0.0 or hd <= 0.0 or hh <= 0.0:
             continue
+        # 🔴 **建筑一律不进 chunk**（2026-11-01）：楼体已经由 `assets/props/building_*.glb`
+        # 画出来了，chunk 里再来一个同位置灰盒就是共面重复（z-fighting / 灰壳盖住棕色立面）。
+        # 判据：导出日志里的 kind 计数应满足 building=0。
+        if r["kind"] == "Building":
+            continue
         shape = r["shape"]
         if shape == "Cylinder":
             # 引擎的圆柱模板：r=1、y∈[-0.5,0.5]、实例缩放 = 半径(xz) / 半高(y)
