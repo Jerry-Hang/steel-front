@@ -73,6 +73,11 @@ def main():
         # 判据：导出日志里的 kind 计数应满足 building=0。
         if r["kind"] == "Building":
             continue
+        # 🔴 **离地 4m 以上的装饰件一律不进 chunk**（2026-11-01 玩家截图：天空里漂着灰方块）。
+        # 它们（檐口/窗带/女儿墙）是挂在建筑盒上的，而建筑盒已由 GLB 画出来、marker 路径也
+        # 早就跳过它们（`lib.rs` 的 4m 规则）—— 导出时漏了这条，于是整片挂件飘在半空。
+        if y - hh > 4.0:
+            continue
         shape = r["shape"]
         if shape == "Cylinder":
             # 引擎的圆柱模板：r=1、y∈[-0.5,0.5]、实例缩放 = 半径(xz) / 半高(y)
