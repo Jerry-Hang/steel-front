@@ -93,3 +93,9 @@ submit for inclusion in this project is licensed under AGPL-3.0-or-later, with
 the copyright holder additionally permitted to offer it under the additional
 permission and the commercial license described above (this is what makes the
 three-track structure possible).
+
+## 对外授权记录
+
+本仓库整体始终是 AGPL-3.0-or-later（含小团队附加许可与商业授权两条附加轨道）。
+我们对第三方做过的**单次**授权（范围、条件、边界）统一记录在 `docs/licensing-requests.md` ——
+其中每一条都**只覆盖指定快照**，不构成对仓库其余部分或未来提交的概括许可。
