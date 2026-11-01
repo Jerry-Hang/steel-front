@@ -510,7 +510,17 @@ fn safe_face_normal(wp: vec3<f32>, vdir: vec3<f32>) -> vec3<f32> {
     let cr = cross(dx, dy);
     let l = length(cr);
     let dmax = max(length(dx), max(length(dy), 1e-9));
-    var n = select(vdir, cr / max(l, 1e-9), l / (dmax * dmax) > 1e-3);
+    let ok = l / (dmax * dmax) > 1e-3;
+    // 🔴 **回退不能直接用视线方向**（2026-11-01 玩家三张截图定案）：
+    //   圆柱/长条面片在掠射角下 dx 与 dy 几乎平行 ⇒ 叉积趋零 ⇒ 走回退分支。
+    //   旧回退把 `vdir` 当法线，于是那一整片变成"视线方向照明"：**平面单色**，
+    //   并且随俯仰整体变深/变浅；而"导数有效"与"回退"两种着色之间是一条
+    //   **屏幕空间的硬边**（玩家看到的就是"以准星为界、抬头深低头浅"）。
+    //   改为：退化时用**较强的那条屏幕导数**与视线方向叉乘得到面内法线 ——
+    //   它与导数法线在临界处连续，不再出现整片翻转。
+    let tdir = select(dx, dy, length(dy) > length(dx));
+    let alt = cross(normalize(tdir + vec3<f32>(1e-6, 1e-6, 1e-6)), normalize(vdir));
+    var n = select(normalize(alt + vec3<f32>(1e-9, 0.0, 0.0)), cr / max(l, 1e-9), ok);
     if (dot(n, vdir) < 0.0) {
         n = -n;
     }
