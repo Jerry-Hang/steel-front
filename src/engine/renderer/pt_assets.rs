@@ -3,6 +3,14 @@
 // `use super::*;` 把上一层的名字（含它的 use 绑定）转发进来。
 use super::*;
 
+/// PT 的 BLAS 里允许出现的**道具三角上限**（2026-11-01 黑屏事故立的红线）。
+///
+/// 实测：167 万三角 ⇒ BLAS 105 MB + build scratch 86 MB，首帧把设备卡死
+/// （现场症状：窗口全黑 + `等待围栏超时`，而 `nvidia-smi` 显示卡完全正常）。
+/// 40 万三角约对应 25 MB 级 BLAS，是这块卡能稳定吃下的量级。
+/// PT 本身是调试/烘焙视图（默认关），超限时**只保留盒体**远好于把主渲染一起拖死。
+pub(crate) const PT_MAX_PROP_TRIS: usize = 400_000;
+
 impl Renderer {
     /// 构建路径追踪加速结构：盒体场景 → BLAS + TLAS（2026-08-29 阶段2）
     /// PT 实时 v2（2026-08-29 常驻化）：首帧构建 AS/管线/图像，后帧只 dispatch+blit
@@ -408,15 +416,27 @@ impl Renderer {
         //   "hitPrim 全局连续 + pc.g.x 边界"假设——道具最前 21480 三角被当成盒查 boxMats）。
         // 🏢 道具几何只有在**属性表就绪**时才进 BLAS：着色器道具路径读的就是这张表，
         //   没有它分流就无意义（属性表失败时 set_props 已回退为不进）。
-        let prop_tris = if self.prop_attr_tris > 0
-            && self.prop_attr_tris * 3 == self.prop_index_count
-            && self.prop_vertex_buffer != vk::Buffer::null()
-            && self.prop_index_buffer != vk::Buffer::null()
-        {
-            self.prop_attr_tris
-        } else {
-            0
-        };
+        // 🔴 面数上限（2026-11-01 黑屏事故）：道具 LOD/4K 化后长到 167 万三角，照单全收
+        //   会建出 105 MB BLAS + 86 MB build scratch，并在首帧把设备卡死（黑屏 + 等待围栏超时）。
+        //   PT 是调试/烘焙视图，不该让主渲染陪葬 ⇒ 超限只留盒体。
+        let cap = crate::syscfg::parse::<usize>("RV3D_PT_MAX_PROP_TRIS")
+            .unwrap_or(PT_MAX_PROP_TRIS);
+        let over_cap = self.prop_attr_tris as usize > cap;
+        if over_cap {
+            log::warn!(
+                "PT: 道具三角 {} 超过上限 {} ⇒ 本次 BLAS 只含盒体（避免巨型 BLAS 卡死设备）",
+                self.prop_attr_tris,
+                cap
+            );
+        }
+        let bufs_ok = self.prop_vertex_buffer != vk::Buffer::null()
+            && self.prop_index_buffer != vk::Buffer::null();
+        let prop_tris = pt_prop_tris_admitted(
+            self.prop_attr_tris,
+            self.prop_index_count,
+            bufs_ok,
+            cap,
+        );
         assets.prop_tris = prop_tris;
         let vaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.verts_buf); self.device.get_buffer_device_address(&i) };
         let iaddr = unsafe { let i = vk::BufferDeviceAddressInfo::default().buffer(assets.idx_buf); self.device.get_buffer_device_address(&i) };
@@ -743,5 +763,60 @@ impl Renderer {
     /// 每帧取景参数（相机 + 太阳 + 曝光）
     pub(crate) fn set_pt_params(&mut self, p: crate::engine::ray_tracer::PtParams) {
         self.pt_params = p;
+    }
+}
+
+
+/// PT 的 BLAS **是否接收道具几何**（纯函数，便于直接判）。
+///
+/// 三条同时成立才收：① 属性表三角数 > 0；② `prop_attr_tris * 3 == 索引数`（表与几何一致）；
+/// ③ 缓冲非 null；**④ 不超过 `cap`**（2026-11-01 黑屏事故加的那条）。
+///
+/// 🔴 为什么必须有 ④：167 万三角会建出 105 MB BLAS + 86 MB scratch，首帧把设备卡死
+/// （黑屏 + `等待围栏超时`，而 nvidia-smi 一切正常）。PT 是调试视图，超限时只留盒体。
+pub(crate) fn pt_prop_tris_admitted(
+    prop_attr_tris: u32,
+    prop_index_count: u32,
+    buffers_ok: bool,
+    cap: usize,
+) -> u32 {
+    if !buffers_ok || prop_attr_tris == 0 {
+        return 0;
+    }
+    if prop_attr_tris as usize > cap {
+        return 0;
+    }
+    if prop_attr_tris.saturating_mul(3) != prop_index_count {
+        return 0;
+    }
+    prop_attr_tris
+}
+
+#[cfg(test)]
+mod pt_cap_tests {
+    use super::{pt_prop_tris_admitted, PT_MAX_PROP_TRIS};
+
+    /// 正常规模（60 万三角以内）照样进 BLAS —— 别把闸门做成"永远关"。
+    #[test]
+    fn normal_prop_geometry_still_enters_the_blas() {
+        assert_eq!(pt_prop_tris_admitted(300_000, 900_000, true, PT_MAX_PROP_TRIS), 300_000);
+    }
+
+    /// **反向验证**：拿事故里的真实数字（1,678,882 三角）必须被挡下。
+    #[test]
+    fn the_incident_size_is_rejected() {
+        assert_eq!(
+            pt_prop_tris_admitted(1_678_882, 1_678_882 * 3, true, PT_MAX_PROP_TRIS),
+            0,
+            "167 万三角必须在闸门外（那是把设备卡死的那一档）"
+        );
+    }
+
+    /// 缓冲缺失 / 表与索引不一致，同样不收。
+    #[test]
+    fn missing_buffers_or_mismatched_index_count_are_rejected() {
+        assert_eq!(pt_prop_tris_admitted(1000, 3000, false, PT_MAX_PROP_TRIS), 0);
+        assert_eq!(pt_prop_tris_admitted(1000, 2999, true, PT_MAX_PROP_TRIS), 0);
+        assert_eq!(pt_prop_tris_admitted(0, 0, true, PT_MAX_PROP_TRIS), 0);
     }
 }
