@@ -3223,3 +3223,20 @@ PT-BLAS:  size=105356672 scratch_build=86027520
 1. `RV3D_PRESENT_MODE=immediate`（`SteelFront.sh` 现默认 `mailbox`）对比；
 2. `asusctl armoury set gpu_mux_mode 0` + 重启（MUX 直连，消掉跨卡拷贝）后重测；
 3. 若两者都无效，再抓 `present` 侧细粒度埋点——但那属于改代码，需单独立项。
+
+### 2026-11-01（续125）：把整座城导进 Blender 的管线上线（第 1 步）
+
+用户提议"直接在 Blender 里建整个场景"。评估后走**分层**路线：布局仍由 `city.rs` 唯一决定
+（碰撞/寻路/出生点/40 多条布局判据都不动），但**可见几何**可以搬进 Blender 建模并合并导出。
+
+本轮交付（可复现）：
+1. 引擎新增 `RV3D_DUMP_ALL=<path>`：把关卡里**全部**可渲染构件写成 TSV
+   （列：kind shape x y z half_w half_d half_h r g b）。实测程序化构件 **1230 件**
+   （Legacy 756 / Cylinder 425 / Sphere 49）；
+2. 新增 `tools/blender/city_from_dump.py`：读 TSV → 按形状摆盒子/圆柱/球 → 合并 → 导出 GLB。
+   实测产出 `/tmp/city_blockout.glb`：**16,836 顶点 / 28,752 三角**（来自 1230 个构件）；
+3. `preview_glb.py` 出四视图，确认整城轮廓在 Blender 里可见（`/tmp/city_view_1_right.png`）。
+
+**这条路线的真正价值**：把"每帧 1.8 万实例"换成"少量合并网格"的改造有了立足点，
+而且改哪一块都不必动布局判据。下一步：把路缘/柱廊/花坛这类薄壳构件做成真模型（先在 Blender
+里对具体构件重塑），并按 40m 格分批导出 chunk。

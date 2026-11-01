@@ -2921,6 +2921,34 @@ impl GameApp {
             // ⇒ 这条日志把"几何是什么"变成可读的数字，而不是靠像素颜色反推
             //    （marker 的 tint 会经光照与程序化皮肤，读回来的颜色不可靠）。
             //    **量在程序里就直接打出来** —— 这是第 76 轮已经验证过的方法。
+            // 🏗 `RV3D_DUMP_ALL=<路径>`（2026-11-01）：把**全部**可渲染构件导出成 TSV，
+            // 供 `tools/blender/city_from_dump.py` 在 Blender 里重建整座城（把 1.8 万个实例
+            // 烘焙成少量合并网格的路线，见 docs/PROGRESS.md 续125）。
+            // 列：kind shape x y z half_w half_d half_h r g b
+            // 与 `RV3D_DUMP_NEAR` 同样只在第一次落盘（几何在关卡加载后是静态的）。
+            if let Some(path) = crate::syscfg::cfg("RV3D_DUMP_ALL") {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static DUMPED_ALL: AtomicBool = AtomicBool::new(false);
+                if !DUMPED_ALL.swap(true, Ordering::Relaxed) {
+                    let mut out = String::from("kind\tshape\tx\ty\tz\thalf_w\thalf_d\thalf_h\tr\tg\tb\n");
+                    let mut n = 0usize;
+                    for o in self.game.render_geometry() {
+                        if o.shape == engine::geom::Shape::None {
+                            continue;
+                        }
+                        let t = o.tint.unwrap_or([1.0, 1.0, 1.0]);
+                        out.push_str(&format!(
+                            "{:?}\t{:?}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\n",
+                            o.kind, o.shape, o.x, o.y, o.z, o.half_w, o.half_d, o.half_h, t[0], t[1], t[2]
+                        ));
+                        n += 1;
+                    }
+                    match std::fs::write(&path, out) {
+                        Ok(()) => log::info!("RV3D_DUMP_ALL: 已导出 {n} 个构件 → {path}"),
+                        Err(e) => log::warn!("RV3D_DUMP_ALL: 写入 {path} 失败: {e}"),
+                    }
+                }
+            }
             if let Some(s) = crate::syscfg::cfg("RV3D_DUMP_NEAR") {
                 // ⚠ 只在**第一次**打印。这段在渲染路径里、每帧都会跑到 ——
                 //    不加守卫就是几十行/秒刷屏，把真正要看的日志冲掉（第 92 轮修）。
