@@ -418,7 +418,7 @@ impl Renderer {
         //   没有它分流就无意义（属性表失败时 set_props 已回退为不进）。
         // 🔴 面数上限（2026-11-01 黑屏事故）：道具 LOD/4K 化后长到 167 万三角，照单全收
         //   会建出 105 MB BLAS + 86 MB build scratch，并在首帧把设备卡死（黑屏 + 等待围栏超时）。
-        //   PT 是调试/烘焙视图，不该让主渲染陪葬 ⇒ 超限只留盒体。
+        //   PT 是调试/烘焙视图，不该让主渲染受牵连 ⇒ 超限只留盒体。
         let cap = crate::syscfg::parse::<usize>("RV3D_PT_MAX_PROP_TRIS")
             .unwrap_or(PT_MAX_PROP_TRIS);
         let over_cap = self.prop_attr_tris as usize > cap;
@@ -796,7 +796,7 @@ pub(crate) fn pt_prop_tris_admitted(
 mod pt_cap_tests {
     use super::{pt_prop_tris_admitted, PT_MAX_PROP_TRIS};
 
-    /// 正常规模（60 万三角以内）照样进 BLAS —— 别把闸门做成"永远关"。
+    /// 正常规模（60 万三角以内）照样进 BLAS —— 别把限制做成"永远关"。
     #[test]
     fn normal_prop_geometry_still_enters_the_blas() {
         assert_eq!(pt_prop_tris_admitted(300_000, 900_000, true, PT_MAX_PROP_TRIS), 300_000);
@@ -808,7 +808,7 @@ mod pt_cap_tests {
         assert_eq!(
             pt_prop_tris_admitted(1_678_882, 1_678_882 * 3, true, PT_MAX_PROP_TRIS),
             0,
-            "167 万三角必须在闸门外（那是把设备卡死的那一档）"
+            "167 万三角必须在限制外（那是把设备卡死的那一档）"
         );
     }
 
