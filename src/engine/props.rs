@@ -219,6 +219,40 @@ impl PropSet {
         self.meshes.get(i)
     }
 
+    /// **退化 UV 处置**（2026-11-01 玩家实测）：UV 包围盒退化成一点（全部顶点同一个
+    /// `(u,v)`）时，该件整片都采样图集里**同一格** —— 实测 `utility_pole.glb` 的 UV 是常数
+    /// `(0.50, 0.50)`（= 隔离墩那一格），于是 3.4×0.61×8.0 m 的杆子被涂成混凝土色，
+    /// 玩家看到的是"来路不明的圆柱或柱子"。
+    ///
+    /// 处置：把这类 UV **清零**。片元里 `length(input.uv) > 1e-4` 的校验会因此跳过图集采样，
+    /// 退回顶点色（顶点色本来就是烘好的正确颜色）；有正常 UV 的件完全不受影响。
+    ///
+    /// 返回被处置的件数（供调用方打一行日志，免得"悄悄改行为"）。
+    pub fn sanitize_degenerate_uv(&mut self) -> usize {
+        let mut cleaned = 0;
+        for m in &mut self.meshes {
+            let mut u0 = f32::MAX;
+            let mut u1 = f32::MIN;
+            let mut v0 = f32::MAX;
+            let mut v1 = f32::MIN;
+            for v in &m.verts {
+                u0 = u0.min(v[6]);
+                u1 = u1.max(v[6]);
+                v0 = v0.min(v[7]);
+                v1 = v1.max(v[7]);
+            }
+            if m.verts.is_empty() || (u1 - u0) > 1e-3 || (v1 - v0) > 1e-3 {
+                continue;
+            }
+            for v in &mut m.verts {
+                v[6] = 0.0;
+                v[7] = 0.0;
+            }
+            cleaned += 1;
+        }
+        cleaned
+    }
+
     /// 取某件的低模（没有返回 `None`，调用方回退整模）。
     pub fn lod1_of(&self, base: &str) -> Option<&PropMesh> {
         self.lod1.iter().find(|m| m.name == base)
@@ -1421,5 +1455,50 @@ mod lod_tests {
                 "第 {i} 个桶的 center 差太多（dx={dx:.6} dz={dz:.6}）⇒ 两套桶顺序不一致"
             );
         }
+    }
+}
+
+
+#[cfg(test)]
+mod uv_sanitize_tests {
+    use super::*;
+
+    fn prop(name: &str, uvs: &[(f32, f32)]) -> PropMesh {
+        let verts = uvs
+            .iter()
+            .map(|&(u, v)| [0.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, u, v, 0.5, 0.5, 0.5])
+            .collect();
+        PropMesh {
+            name: name.to_string(),
+            verts,
+            indices: vec![0, 1, 2],
+            min: [0.0; 3],
+            max: [1.0; 3],
+        }
+    }
+
+    /// 事故真值：`utility_pole.glb` 的 UV 是常数 (0.50, 0.50) ⇒ 必须被清零。
+    #[test]
+    fn constant_uv_is_zeroed() {
+        let mut set = PropSet {
+            meshes: vec![prop("utility_pole", &[(0.5, 0.5), (0.5, 0.5), (0.5, 0.5)])],
+            lod1: Vec::new(),
+            lod2: Vec::new(),
+        };
+        assert_eq!(set.sanitize_degenerate_uv(), 1);
+        assert!(set.meshes[0].verts.iter().all(|v| v[6] == 0.0 && v[7] == 0.0));
+    }
+
+    /// 反向验证：正常 UV（有跨度）**一个字节都不许动**，否则会把所有贴图件打回纯色。
+    #[test]
+    fn normal_uv_is_left_untouched() {
+        let mut set = PropSet {
+            meshes: vec![prop("bench", &[(0.25, 0.50), (0.31, 0.52), (0.29, 0.60)])],
+            lod1: Vec::new(),
+            lod2: Vec::new(),
+        };
+        assert_eq!(set.sanitize_degenerate_uv(), 0);
+        assert_eq!(set.meshes[0].verts[0][6], 0.25);
+        assert_eq!(set.meshes[0].verts[2][7], 0.60);
     }
 }

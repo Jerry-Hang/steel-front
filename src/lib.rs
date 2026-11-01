@@ -3173,7 +3173,13 @@ impl GameApp {
             // 时重传：一次合并是百万级顶点的 CPU 拷贝，绝不能进每帧路径。
             // 读不到 assets/props 只意味着城市退回纯程序化外观，不是错误。
             if self.prop_set.is_none() {
-                self.prop_set = Some(match engine::props::PropSet::load_dir("assets/props") {
+                self.prop_set = Some(match engine::props::PropSet::load_dir("assets/props").map(|mut ps| {
+            let n = ps.sanitize_degenerate_uv();
+            if n > 0 {
+                log::info!("props: {n} 件退化 UV 已清零（整片采样同一格会串到别的贴图）");
+            }
+            ps
+        }) {
                     Ok(s) => {
                         log::info!("props: 渲染侧载入 {} 件网格", s.len());
                         s
