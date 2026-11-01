@@ -73,6 +73,14 @@ def main():
         # 判据：导出日志里的 kind 计数应满足 building=0。
         if r["kind"] == "Building":
             continue
+        # 🔴 **树/灌木也不算 chunk**（2026-11-01 玩家截图：树干"下半截变浅粉色"）：
+        # 那是程序化的树干圆柱/灌木球，与 `tree_oak.glb` / `bush_real.glb` 叠在同一位置，
+        # 一个受光、一个走平面着色 ⇒ 看起来像"整棵树被一条线切成两色"。
+        # 可见的植被已由 GLB 提供，导出时排除 kind=Tree 与所有球体（灌木/花坛球）。
+        if r["kind"] == "Tree":
+            continue
+        if r["shape"] == "Sphere":
+            continue
         # 🔴 **离地 4m 以上的装饰件一律不进 chunk**（2026-11-01 玩家截图：天空里漂着灰方块）。
         # 它们（檐口/窗带/女儿墙）是挂在建筑盒上的，而建筑盒已由 GLB 画出来、marker 路径也
         # 早就跳过它们（`lib.rs` 的 4m 规则）—— 导出时漏了这条，于是整片挂件飘在半空。
