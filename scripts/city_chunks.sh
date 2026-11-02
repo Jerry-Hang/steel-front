@@ -60,6 +60,10 @@ env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
 
 echo "[2/2] Blender 重建（cell=${CELL}m）→ $OUT_DIR/"
 mkdir -p "$OUT_DIR"
+# 🔴 先清旧 chunk（2026-11-02 实测事故）：导出件的**数量会随过滤规则变化**，
+# 旧文件不清掉就会残留 —— 引擎会把 12 块全加载，其中 4 块是被新规则排除掉的旧内容，
+# 于是"已经删掉的悬空板子"又出现了。判据：目录里的块数必须等于本次导出的块数。
+rm -f "$OUT_DIR"/city_cell_*.glb
 "$BLENDER" -b --python tools/blender/city_from_dump.py -- \
     "$TSV" "$OUT_DIR/unused.glb" --cell "$CELL" --out-dir "$OUT_DIR" 2>&1 \
     | grep -E '\[city\]|分格' || {
