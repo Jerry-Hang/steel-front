@@ -866,6 +866,19 @@ impl Renderer {
                     if stats_on && chunk_bins_drawn > 0 {
                         log::trace!("chunk: 本帧画 {} 块", chunk_bins_drawn);
                     }
+                    // 🔴 **画完必须把绑定切回去**（2026-11-04 实测事故）：chunk 用的是自己的
+                    // VB/IB，若不复原，后面的士兵/粒子等绘制会拿 chunk 的缓冲去解自己的索引
+                    // ⇒ 屏幕上出现**与 chunk 数量无关、也与具体哪一块无关**的大块畸形几何
+                    // （现场就是"天空里两块米色大板"，且留一法/单块加载都测不出来）。
+                    let pvb2 = [self.prop_vertex_buffer];
+                    let poff2 = [0u64];
+                    self.device.cmd_bind_vertex_buffers(command_buffer, 0, &pvb2, &poff2);
+                    self.device.cmd_bind_index_buffer(
+                        command_buffer,
+                        self.prop_index_buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
                 }
                 // 🪖 士兵 GLB（2026-09-13）：**一次 draw 画完所有实例**。
                 //
