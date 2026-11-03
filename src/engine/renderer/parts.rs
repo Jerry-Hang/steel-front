@@ -709,6 +709,79 @@ pub(crate) fn prop_index_usage(rt_enabled: bool) -> vk::BufferUsageFlags {
     ///
     /// 没有 `_lod1` 资产时**整段跳过**（字段保持 null），绘制端会退回"全部用整模"，
     /// 行为与改动前逐字节一致。
+    /// **上传整城 chunk**（2026-11-04）：每块一个 bin 的独立几何，走 device-local。
+    /// 与道具完全分离（不改 `prop_*` 的任何字段），所以多块合并不再与道具共用顶点区间记录。
+    pub(crate) fn set_city_chunks(&mut self, set: &crate::engine::props::ChunkSet) {
+        if set.is_empty() {
+            self.chunk_bins.clear();
+            self.chunk_vertex_count = 0;
+            self.chunk_index_count = 0;
+            return;
+        }
+        let merged = crate::engine::props::merge_chunks(set);
+        if merged.verts.is_empty() || merged.indices.is_empty() {
+            return;
+        }
+        // 逐字段重排（`[f32;11]` 是 pos/nrm/uv/col，`Vertex` 是 pos/col/uv/nrm）
+        let mut vb_bytes: Vec<u8> =
+            Vec::with_capacity(merged.verts.len() * std::mem::size_of::<Vertex>());
+        for v in &merged.verts {
+            let vert = Vertex {
+                pos: [v[0], v[1], v[2]],
+                normal: [v[3], v[4], v[5]],
+                uv: [v[6], v[7]],
+                color: [v[8], v[9], v[10]],
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&vert as *const Vertex) as *const u8,
+                    std::mem::size_of::<Vertex>(),
+                )
+            };
+            vb_bytes.extend_from_slice(bytes);
+        }
+        let mut ib_bytes: Vec<u8> = Vec::with_capacity(merged.indices.len() * 4);
+        for i in &merged.indices {
+            ib_bytes.extend_from_slice(&i.to_le_bytes());
+        }
+        let vb = self.create_device_local_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, &vb_bytes, "chunk-vb");
+        let ib = self.create_device_local_buffer(vk::BufferUsageFlags::INDEX_BUFFER, &ib_bytes, "chunk-ib");
+        let (vb, ib) = match (vb, ib) {
+            (Ok(v), Ok(i)) => (v, i),
+            (Err(e), _) | (_, Err(e)) => {
+                log::warn!("chunk: 缓冲上传失败，本关不画整城 chunk: {e}");
+                return;
+            }
+        };
+        unsafe {
+            if self.chunk_vertex_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.chunk_vertex_buffer, None);
+            }
+            if self.chunk_vertex_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.chunk_vertex_memory, None);
+            }
+            if self.chunk_index_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.chunk_index_buffer, None);
+            }
+            if self.chunk_index_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.chunk_index_memory, None);
+            }
+        }
+        self.chunk_vertex_buffer = vb.0;
+        self.chunk_vertex_memory = vb.1;
+        self.chunk_index_buffer = ib.0;
+        self.chunk_index_memory = ib.1;
+        self.chunk_vertex_count = merged.verts.len() as u32;
+        self.chunk_index_count = merged.indices.len() as u32;
+        self.chunk_bins = merged.bins.clone();
+        log::info!(
+            "chunk: 独立几何 {} 顶点 / {} 三角 / {} 块",
+            merged.verts.len(),
+            merged.indices.len() / 3,
+            self.chunk_bins.len()
+        );
+    }
+
     /// **按档位上传 LOD 几何**（2026-10-31 三档）：`level` 1 = `_lod1`，2 = `_lod2`（缺则回退）。
     ///
     /// 走 device-local（staging 一次拷完）：LOD 只在远处用、且不随关卡重建，

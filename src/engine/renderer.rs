@@ -1007,6 +1007,15 @@ pub struct Renderer {
     /// **LOD 档位缓冲**（2026-10-31）：`prop_lods[0]` = LOD1、`prop_lods[1]` = LOD2。
     /// 每档与主套**逐桶一一对应**（同 cell、同迭代顺序）⇒ 换档只换绑定，不换索引基准。
     prop_lods: Vec<PropLodSet>,
+    /// **整城 chunk 的独立缓冲**（2026-11-04）：每块一个 bin，各自剔除与绘制。
+    /// 与道具套件分开是为了让"多块合并"不再与道具共用顶点区间记录（见 props::ChunkSet 注释）。
+    chunk_vertex_buffer: vk::Buffer,
+    chunk_vertex_memory: vk::DeviceMemory,
+    chunk_index_buffer: vk::Buffer,
+    chunk_index_memory: vk::DeviceMemory,
+    chunk_vertex_count: u32,
+    chunk_index_count: u32,
+    chunk_bins: Vec<crate::engine::props::PropBin>,
     /// 阴影专用几何（2026-09-19 建筑 LOD 专项，PROGRESS §14）：名单建筑烘成
     /// AABB 盒壳（`merge_shadow_binned`），只被 shadow pass 绑定；主 pass 不读它。
     /// 缓冲随地图重载整体重建，不做持久映射。

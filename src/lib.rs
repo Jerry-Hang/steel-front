@@ -3212,18 +3212,12 @@ impl GameApp {
             }
             ps
         }) {
-                    Ok(mut set) => {
+                    Ok(set) => {
                         // 🏙 **整城 chunk**（2026-11-01）：Blender 里按 40m 格合并导出的
                         // 世界坐标几何，走**同一条道具管线**（同一份 VB/IB、同一套分桶剔除），
                         // 于是 1230 个程序化构件从"每帧上万实例"变成十几块合并网格。
                         // 关闭：`RV3D_NO_CITY_CHUNKS=1`。chunk 缺失时静默跳过（可选资产）。
                         log::info!("props: 渲染侧载入 {} 件网格", set.len());
-                        if !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS") {
-                            let (start, n) = set.append_dir("assets/city_chunks");
-                            if n > 0 {
-                                log::info!("props: 追加整城 chunk {n} 块（起始下标 {start}）");
-                            }
-                        }
                         set
                     }
                     Err(e) => {
@@ -3237,23 +3231,15 @@ impl GameApp {
                 self.prop_map_gen = map_gen;
                 if let Some(set) = self.prop_set.as_ref() {
                     if !set.is_empty() {
-                        // chunk 的世界坐标已在几何里 ⇒ 摆放一律单位变换（位置 0、yaw 0、scale 1）。
-                        // 地面项 `ground(0,0)` 在城市中央压平区恒为 0（见 terrain_height 的方盘判定）。
-                        let mut placements = self.game.prop_placements().to_vec();
-                        for i in 0..set.len() {
-                            if set.get(i).is_some_and(|m| m.name.starts_with("chunk_")) {
-                                placements.push(engine::props::PropPlacement {
-                                    mesh: i,
-                                    x: 0.0,
-                                    y: 0.0,
-                                    z: 0.0,
-                                    yaw: 0.0,
-                                    scale: 1.0,
-                                    solid: false,
-                                });
+                        // 整城 chunk 走**独立集合**（2026-11-04）：不再并进道具套件。
+                        // 理由见 `props::ChunkSet`：8 块一起走同一条合并路径会产出错位三角形。
+                        if !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS") {
+                            match engine::props::ChunkSet::load_dir("assets/city_chunks") {
+                                Some(cs) => renderer.set_city_chunks(&cs),
+                                None => log::info!("chunk: assets/city_chunks 为空或不可读"),
                             }
                         }
-                        renderer.set_props(set, &placements);
+                        renderer.set_props(set, self.game.prop_placements());
                         t_props = prep_start.elapsed().as_micros() as u64;
                     }
                 }

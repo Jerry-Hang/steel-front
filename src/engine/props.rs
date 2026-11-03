@@ -207,42 +207,6 @@ impl PropSet {
         Ok(PropSet { meshes, lod1, lod2 })
     }
 
-    /// 把某个目录里的 GLB **追加**进套件（2026-11-01：整城 chunk 走这条路）。
-    ///
-    /// chunk 是**世界坐标**几何（在 Blender 里按 40m 格合并导出），摆放时用单位变换；
-    /// 名字加 `chunk_` 前缀，`placement_tint` 对它返回纯白（否则每个 chunk 会被随机染色
-    /// ±12%，十二块之间出现明显色差）。
-    ///
-    /// 返回追加的 `(起始下标, 件数)`；目录不存在时返回 `(0, 0)`（不报错：chunk 是可选资产）。
-    pub fn append_dir(&mut self, dir: &str) -> (usize, usize) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return (0, 0);
-        };
-        let mut found: Vec<(String, ImportedMesh)> = Vec::new();
-        for e in entries.flatten() {
-            let path = e.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("glb") {
-                continue;
-            }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("chunk");
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            let Ok(m) = crate::engine::assets::parse_glb(&bytes) else { continue };
-            if m.verts.is_empty() || m.indices.is_empty() {
-                continue;
-            }
-            found.push((stem.to_string(), m));
-        }
-        found.sort_by(|a, b| a.0.cmp(&b.0));
-        let start = self.meshes.len();
-        for (stem, m) in found {
-            let mut m = m;
-            ensure_smooth_normals(&mut m.verts, &m.indices);
-            let mesh = PropMesh::from_imported(&format!("chunk_{stem}"), &m);
-            self.meshes.push(mesh);
-        }
-        (start, self.meshes.len() - start)
-    }
-
     pub fn len(&self) -> usize {
         self.meshes.len()
     }
@@ -477,6 +441,95 @@ pub struct BinnedGeometry {
     pub bins: Vec<PropBin>,
     pub min: [f32; 3],
     pub max: [f32; 3],
+}
+
+/// **整城 chunk 的独立几何**（2026-11-04）。
+///
+/// 为什么不再并进 `PropSet`：chunk 是**世界坐标**的大块几何，与道具共用一份合并缓冲区时，
+/// 8 块一起走同一条合并路径会产出错位的三角形（实测：单独加载任一块都正常，8 块全加载才出现
+/// 两块悬空大板）。把它拆成独立集合后：每块一个 bin、各自 first_index，各自剔除，
+/// 不再与 37 件道具的顶点区间记录互相牵连。
+pub struct ChunkSet {
+    pub meshes: Vec<PropMesh>,
+}
+
+impl ChunkSet {
+    /// 扫描目录加载全部 `.glb`（世界坐标，不需要摆放变换）。目录不存在返回 `None`。
+    pub fn load_dir(dir: &str) -> Option<Self> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut found: Vec<(String, ImportedMesh)> = Vec::new();
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("glb") {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("chunk");
+            let bytes = std::fs::read(&path).ok()?;
+            let m = crate::engine::assets::parse_glb(&bytes).ok()?;
+            if m.verts.is_empty() || m.indices.is_empty() {
+                continue;
+            }
+            found.push((stem.to_string(), m));
+        }
+        if found.is_empty() {
+            return None;
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let meshes = found
+            .into_iter()
+            .map(|(stem, mut m)| {
+                ensure_smooth_normals(&mut m.verts, &m.indices);
+                PropMesh::from_imported(&format!("chunk_{stem}"), &m)
+            })
+            .collect();
+        Some(ChunkSet { meshes })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.meshes.is_empty()
+    }
+}
+
+/// 把 chunk 集合烘成**每块一个 bin** 的几何（不做色调抖动、不做地面抬升）。
+pub fn merge_chunks(set: &ChunkSet) -> BinnedGeometry {
+    let mut out = BinnedGeometry {
+        verts: Vec::new(),
+        indices: Vec::new(),
+        bins: Vec::new(),
+        min: [f32::MAX; 3],
+        max: [f32::MIN; 3],
+    };
+    for m in &set.meshes {
+        let first_index = out.indices.len() as u32;
+        let base = out.verts.len() as u32;
+        for v in &m.verts {
+            out.verts.push(*v);
+            for k in 0..3 {
+                out.min[k] = out.min[k].min(v[k]);
+                out.max[k] = out.max[k].max(v[k]);
+            }
+        }
+        for i in &m.indices {
+            out.indices.push(i + base);
+        }
+        let (cx, cy, cz) = (
+            (m.min[0] + m.max[0]) * 0.5,
+            (m.min[1] + m.max[1]) * 0.5,
+            (m.min[2] + m.max[2]) * 0.5,
+        );
+        let dx = (m.max[0] - m.min[0]) * 0.5;
+        let dy = (m.max[1] - m.min[1]) * 0.5;
+        let dz = (m.max[2] - m.min[2]) * 0.5;
+        out.bins.push(PropBin {
+            first_index,
+            index_count: m.indices.len() as u32,
+            center: [cx, cy, cz],
+            radius: (dx * dx + dy * dy + dz * dz).sqrt(),
+            min_vertex: base,
+            max_vertex: base + m.verts.len() as u32 - 1,
+        });
+    }
+    out
 }
 
 /// 每个摆放的确定性色调抖动。

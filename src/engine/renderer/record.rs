@@ -833,6 +833,40 @@ impl Renderer {
                     }
                     }
                 }
+                // 🏙 **整城 chunk**（2026-11-04）：独立缓冲、独立分块剔除。
+                // 与道具分开是为了让"多块合并"不再和道具共用顶点区间记录（那是悬空大板的来源）。
+                if self.chunk_index_count > 0 && !self.chunk_bins.is_empty() {
+                    let cvb = [self.chunk_vertex_buffer];
+                    let coff = [0u64];
+                    self.device.cmd_bind_vertex_buffers(command_buffer, 0, &cvb, &coff);
+                    self.device.cmd_bind_index_buffer(
+                        command_buffer,
+                        self.chunk_index_buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    let mut chunk_bins_drawn = 0u32;
+                    for bin in &self.chunk_bins {
+                        // `RV3D_NO_BIN_CULL=1` 同道具：关掉分块剔除用于排查"整块消失"
+                        if !crate::syscfg::flag("RV3D_NO_BIN_CULL")
+                            && !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0)
+                        {
+                            continue;
+                        }
+                        chunk_bins_drawn += 1;
+                        self.device.cmd_draw_indexed(
+                            command_buffer,
+                            bin.index_count,
+                            1,
+                            bin.first_index,
+                            0,
+                            PROP_INSTANCE_INDEX,
+                        );
+                    }
+                    if stats_on && chunk_bins_drawn > 0 {
+                        log::trace!("chunk: 本帧画 {} 块", chunk_bins_drawn);
+                    }
+                }
                 // 🪖 士兵 GLB（2026-09-13）：**一次 draw 画完所有实例**。
                 //
                 // 与道具/箱体的关键差别：这里是**真正的实例化** —— 网格上传一次，
