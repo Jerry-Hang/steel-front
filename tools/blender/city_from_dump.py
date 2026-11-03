@@ -30,6 +30,10 @@ def args():
     ap.add_argument("--cell", type=float, default=0.0,
                     help="按边长为 cell 米的方格**分批导出**（0=整城一个文件）")
     ap.add_argument("--out-dir", default="", help="--cell 模式下的输出目录")
+    # 诊断用（2026-11-03）：把范围压到一个世界坐标盒里，逐件打印行号 —— 用来给"屏幕上某块东西"
+    # 指名。宽度为 0 表示不过滤。
+    ap.add_argument("--only-box", default="", help="x0,z0,x1,z1（只导出该盒内的构件）")
+    ap.add_argument("--debug-pieces", action="store_true", help="逐件打印 行号/kind/尺寸/位置")
     return ap.parse_args(argv)
 
 
@@ -58,8 +62,16 @@ def main():
         rows = rows[: a.limit]
     print(f"  读入构件 {len(rows)} 件")
 
+    box = None
+    if a.only_box:
+        try:
+            x0, z0, x1, z1 = (float(v) for v in a.only_box.split(","))
+            box = (min(x0, x1), min(z0, z1), max(x0, x1), max(z0, z1))
+        except ValueError:
+            print(f"  --only-box 解析失败：{a.only_box}")
+
     made = 0
-    for r in rows:
+    for row_no, r in enumerate(rows, start=2):
         try:
             x, y, z = float(r["x"]), float(r["y"]), float(r["z"])
             hw, hd, hh = float(r["half_w"]), float(r["half_d"]), float(r["half_h"])
@@ -67,6 +79,8 @@ def main():
         except (KeyError, ValueError):
             continue
         if hw <= 0.0 or hd <= 0.0 or hh <= 0.0:
+            continue
+        if box is not None and not (box[0] <= x <= box[2] and box[1] <= z <= box[3]):
             continue
         # 🔴 **建筑一律不进 chunk**（2026-11-01）：楼体已经由 `assets/props/building_*.glb`
         # 画出来了，chunk 里再来一个同位置灰盒就是共面重复（z-fighting / 灰壳盖住棕色立面）。
@@ -110,6 +124,11 @@ def main():
             o.scale = (hw, hd, hh)
         paint(o, col)
         made += 1
+        if a.debug_pieces:
+            print(
+                f"[piece] tsv行={row_no} kind={r['kind']} shape={shape} "
+                f"底={y - hh:.2f} 高={hh * 2:.2f} 尺寸={hw * 2:.2f}x{hd * 2:.2f} @({x:.1f},{z:.1f})"
+            )
         if made % 300 == 0:
             print(f"   … 已建 {made} 件")
 
