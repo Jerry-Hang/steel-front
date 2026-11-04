@@ -109,8 +109,14 @@ def main():
         shape = r["shape"]
         if shape == "Cylinder":
             # 引擎的圆柱模板：r=1、y∈[-0.5,0.5]、实例缩放 = 半径(xz) / 半高(y)
+            # 🔴 **必须把圆柱转成"轴朝上"**（2026-11-04 定位到的大 bug）：
+            # Blender 的 `primitive_cylinder_add` 圆柱轴是 **Z**（Blender 的 up），而我们把
+            # 世界坐标直接塞进 (x, z, y) ⇒ 轴指向世界 Z，柱廊柱就"躺"成一根 4.65m 长的横筒，
+            # 屏幕上读作斜着横过画面的大板。绕 X 转 90° 让轴对上世界 Y，缩放语义才成立：
+            # 半径 → x/z（hw / hd），半高 → y（hh）。
             bpy.ops.mesh.primitive_cylinder_add(
-                vertices=SEG, radius=1.0, depth=2.0, location=(x, z, y)
+                vertices=SEG, radius=1.0, depth=2.0,
+                location=(x, z, y), rotation=(math.pi * 0.5, 0.0, 0.0),
             )
             o = bpy.context.object
             o.scale = (hw, hh, hd)
