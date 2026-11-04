@@ -900,6 +900,19 @@ impl Renderer {
                     ),
                     std::mem::size_of::<InstanceData>(),
                 );
+                // 🏙 chunk 的 identity 槽：identity 矩阵 + **marker 标签**（1.0）。
+                // 与道具槽的唯一差别就是 `tint.w` —— 这正是"上深下浅分界"的开关。
+                let chunk_marker = InstanceData {
+                    model: glam::Mat4::IDENTITY.to_cols_array(),
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                };
+                std::ptr::copy_nonoverlapping(
+                    &chunk_marker as *const InstanceData as *const u8,
+                    (mapped as *mut u8).add(
+                        CHUNK_INSTANCE_INDEX as usize * std::mem::size_of::<InstanceData>(),
+                    ),
+                    std::mem::size_of::<InstanceData>(),
+                );
             }
         }
 

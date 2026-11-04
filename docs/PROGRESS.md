@@ -3467,3 +3467,19 @@ chunk 的缓冲解自己的索引。已在 `record.rs` 里补上恢复绑定（�
   `renderer/geometry.rs` 的三处映射写入（枪/道具/士兵）必须同步；
 - `tests_geom.rs` 里 65537 / 73729 / 83009 三个数字被钉死，改槽位要一起改并写明理由；
 - 判据：柱廊在开 chunk 与关 chunk 两种模式下**观感一致**（同一机位截图 diff < 2%）。
+
+### 2026-11-05（续139）：**"上深下浅分界"结案 —— chunk 走独立 identity 槽（marker 标签）**
+
+**修法**：`gpu_layout.rs` 新增 `CHUNK_INSTANCE_INDEX = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES - 1`
+（借 marker 区最后一格：chunk 开启时 marker 一定关，互不冲突），`geometry.rs` 往该槽写
+**identity 矩阵 + `tint.w = 1.0`（marker 标签）**，`record.rs` 的 chunk 绘制改用该槽。
+
+**为什么不是新增槽位**：新增会整体后移 `SOLDIER_INSTANCE_BASE`，而 `INSTANCE_BUFFER_ELEMS`
+与 `tests_geom.rs` 里 65537/73729/83009 三个数字是编译期钉死的 —— 改动面大、静默越界风险高
+（2026-09-04 那次"几何整体消失"就是这个入口）。借一格是等价且零风险的。
+
+**验证**：同机位抬头(-12°)/低头(26°)两档截图，柱廊**均匀着色、无分界**（`/tmp/pitch_ab.png`）；
+此前该柱在道具槽下是"上深下浅"且随俯仰移动。
+
+**教训**：同一份几何，**着色分支由实例槽的 `tint.w` 决定**（`Authored`=6.0 vs marker=1.0）。
+"几何对不对"和"走哪条着色分支"是两件事 —— 前几轮我一直在改几何与过滤条件，方向本身就是错的。

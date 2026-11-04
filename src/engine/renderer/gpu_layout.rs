@@ -198,6 +198,18 @@ pub(crate) const GUN_INSTANCE_INDEX: u32 =
 /// 该槽的 `tint.w = Shape::Authored.tag()`(=6.0) 是给 shader 看的，`tint.rgb = 1` 让
 /// 片元直出顶点色（`input.color = vertexColor × tint.rgb`）。
 pub(crate) const PROP_INSTANCE_INDEX: u32 = GUN_INSTANCE_INDEX + 1;
+/// 🏙 **整城 chunk 的 identity 槽**（2026-11-05）。
+///
+/// 为什么"借" marker 区的**最后一个槽**，而不是新增一个槽位：
+/// - 新增槽位要整体后移 `SOLDIER_INSTANCE_BASE`，而 `INSTANCE_BUFFER_ELEMS` 与
+///   `tests_geom.rs` 里 65537/73729/83009 三个数字是**编译期钉死**的（改动面大、风险高）；
+/// - chunk 开启时**marker 一定是关的**（`lib.rs` 里 `no_markers = chunks_on || …`），
+///   这一整个 marker 区都是空的 ⇒ 借最后一格不与他人冲突。
+///
+/// 为什么必须单独一格：`flat_flag` 由**实例槽的 tint.w** 决定，`Shape::Authored`(6.0) 那条
+/// 分支会画"上深下浅"的分界（玩家反复报的那条线），而 marker 标签(1.0) 那条不会。
+/// chunk 本来就是程序化构件的替身，理应走 marker 那条着色分支。
+pub(crate) const CHUNK_INSTANCE_INDEX: u32 = MARKER_SLOT_BASE + MAX_MARKER_INSTANCES - 1;
 /// 🪖 **士兵 GLB 的实例区起点**（2026-09-13）。
 ///
 /// 与道具那个"单个 identity 槽"不同：士兵的位姿**每帧都在变**（人要走动），

@@ -854,13 +854,15 @@ impl Renderer {
                             continue;
                         }
                         chunk_bins_drawn += 1;
+                        // 走 **chunk 专用 identity 槽**（identity 矩阵 + marker 标签）：
+                        // 与道具槽的唯一差别是 `tint.w`，而它决定 `flat_flag` 走哪条着色分支。
                         self.device.cmd_draw_indexed(
                             command_buffer,
                             bin.index_count,
                             1,
                             bin.first_index,
                             0,
-                            PROP_INSTANCE_INDEX,
+                            CHUNK_INSTANCE_INDEX,
                         );
                     }
                     if stats_on && chunk_bins_drawn > 0 {
