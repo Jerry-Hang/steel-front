@@ -3448,3 +3448,22 @@ chunk 的缓冲解自己的索引。已在 `record.rs` 里补上恢复绑定（�
 **教训**：Blender 的 `location` 参数是 **(x, y, z) 且 y 是"深度"**，我为了把引擎的 y-up 塞进去写成
 `location=(x, z, y)` —— 这个"换轴"必须**同时**转几何朝向，否则旋转体就会躺倒。
 立方体不受影响（各向同性），所以只有圆柱露馅。
+
+### 2026-11-05（续138）：柱廊"上深下浅"分界 —— 两假设被否，方案已定形
+
+**关键事实**：同一根柱子，**关 chunk（走 marker 分支）没有分界**，开 chunk（走道具/Authored
+分支 `flat_flag=1.25`）就有一条随俯仰移动的水平分界 ⇒ 分界来自**着色分支差异**，不是几何、不是阴影。
+
+本轮排除：
+- `RV3D_NO_SHADOW=1` → 分界依旧；
+- 临时把 `safe_face_normal` 的回退分支彻底关掉（`ok = true`）→ 分界依旧（**已回滚**）；
+- 直接把 chunk 的绘制改成 `MARKER_SLOT_BASE` → **柱子整体消失**：marker 槽带的是每实例变换，
+  我们的 chunk 顶点已是世界坐标，会被 marker 的实例矩阵再乘一次（**已回滚**）。
+
+**方案（下一轮实施，改动面已摸清）**：新增一个**独立 identity 槽**给 chunk，
+`tint.w` 取 marker 的标签（1.0）而**不是** `Shape::Authored`(6.0)。要点与风险：
+- `gpu_layout.rs` 里槽位是**单一定义 + 编译期断言**（`INSTANCE_BUFFER_ELEMS == 83_779`），
+  且 `SOLDIER_INSTANCE_BASE = PROP_INSTANCE_INDEX + 1` 要整体后移，
+  `renderer/geometry.rs` 的三处映射写入（枪/道具/士兵）必须同步；
+- `tests_geom.rs` 里 65537 / 73729 / 83009 三个数字被钉死，改槽位要一起改并写明理由；
+- 判据：柱廊在开 chunk 与关 chunk 两种模式下**观感一致**（同一机位截图 diff < 2%）。
