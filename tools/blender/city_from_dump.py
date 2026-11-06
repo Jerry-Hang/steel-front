@@ -85,7 +85,11 @@ def main():
         # 🔴 **建筑一律不进 chunk**（2026-11-01）：楼体已经由 `assets/props/building_*.glb`
         # 画出来了，chunk 里再来一个同位置灰盒就是共面重复（z-fighting / 灰壳盖住棕色立面）。
         # 判据：导出日志里的 kind 计数应满足 building=0。
-        if r["kind"] == "Building":
+        # 🔴 **只排"高"的 Building**（2026-11-05）：楼体由 building_*.glb 画，chunk 再来一个
+        # 同位置灰盒会盖住立面。但**扁平的 Building 是台面/水面**（喷泉石台 9×9×0.22、
+        # 水面 8.2×8.2×0.30），它们没有对应的 GLB —— 一律排掉的话，喷泉就只剩中间那根柱子
+        # 孤零零立在广场中央（玩家报的"路中那三个东西一直没去掉"，其实剩下的正是喷泉柱）。
+        if r["kind"] == "Building" and hh * 2.0 > 0.5:
             continue
         # 🔴 **树/灌木也不算 chunk**（2026-11-01 玩家截图：树干"下半截变浅粉色"）：
         # 那是程序化的树干圆柱/灌木球，与 `tree_oak.glb` / `bush_real.glb` 叠在同一位置，
