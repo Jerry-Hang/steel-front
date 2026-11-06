@@ -848,8 +848,11 @@ impl Renderer {
                     let mut chunk_bins_drawn = 0u32;
                     for bin in &self.chunk_bins {
                         // `RV3D_NO_BIN_CULL=1` 同道具：关掉分块剔除用于排查"整块消失"
+                        // 余量 2m → **10m**（2026-11-06 玩家实测）：chunk 一块就是 40m 见方，
+                        // 2m 余量下转视角时整块会在视野边缘"跳进跳出"。chunk 只有十来块，
+                        // 多画几块的代价远小于看得见的剔裂缝。
                         if !crate::syscfg::flag("RV3D_NO_BIN_CULL")
-                            && !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0)
+                            && !crate::engine::props::bin_visible(bin, &self.frame_frustum, 10.0)
                         {
                             continue;
                         }

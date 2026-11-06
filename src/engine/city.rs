@@ -1137,10 +1137,11 @@ fn plaza(c: &mut City, cx: f32, cz: f32, monument: bool) {
         //   ⇒ 统一解法，与花坛同一条：**实心台 + 水面高出台沿**，一个空洞都不留。
         //   石台 9×9 到 0.22；水面 8.2 见方、顶 0.30（高出石沿 8cm）—— 水像是从台子里
         //   漫出来的一层，四周看不到任何内壁；喷泉柱与压顶坐在水面上。
-        c.push(Part::new(ObstacleKind::Building, cx, cz, 9.0, 9.0, UNDER_GROUND, 0.22, GRANITE));
-        c.push(Part::new(ObstacleKind::Building, cx, cz, 8.2, 8.2, UNDER_GROUND, 0.30, GLASS_BLUE));
-        c.push(Part::new(ObstacleKind::Block, cx, cz, 1.3, 1.3, 0.30, 1.75, CONCRETE_LIGHT).cyl());
-        c.deco(Part::new(ObstacleKind::Block, cx, cz, 2.6, 2.6, 1.75, 2.0, GRANITE));
+        // 🔴 **广场中央不再放喷泉**（2026-11-06 玩家三次反馈）：那三件（石台/水面/喷泉柱）
+        // 立在广场正中，读作"路中间来路不明的障碍"。这里改成**平的广场铺装**：
+        // 同尺寸的石板地面（只是地面，没有凸起、没有柱子），既保留广场构图，
+        // 又不再挡住走位与视线。需要喷泉时把下面四行恢复即可（历史见 docs/PROGRESS.md）。
+        c.push(Part::new(ObstacleKind::Building, cx, cz, 9.0, 9.0, UNDER_GROUND, 0.06, GRANITE));
     }
     // 广场树阵（两排，避开中心与出生净空）
     for k in 0..3i32 {
