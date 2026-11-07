@@ -381,6 +381,11 @@ impl Game {
         if !crate::syscfg::flag("RV3D_NO_PROP_ATLAS") {
             bits += 32.0;
         }
+        // 64 = **临时诊断位**（2026-11-07）：`RV3D_BASE_ONLY=1` 时片元只出基色、跳过全部光照。
+        // 用来分"上深下浅的分界来自光照/法线，还是来自基色/UV"——两者修法完全不同。
+        if crate::syscfg::flag("RV3D_BASE_ONLY") {
+            bits += 64.0;
+        }
         lu.weather = glam::Vec4::new(rain, wet, self.time, bits);
         lu
     }

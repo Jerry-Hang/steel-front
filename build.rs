@@ -568,6 +568,11 @@ fn apply_lighting_slope(input: VertexOutput, color: vec3<f32>, slope: vec2<f32>)
     if (light_data.shadow.config.w >= 1.5 && light_data.shadow.config.w < 2.5) {
         return color;
     }
+    // 🧪 诊断位 64（RV3D_BASE_ONLY=1）：只出基色，跳过光照/阴影/雾。
+    // ⚠ 这里不能用 `feature_bits`（那是 fs_main 的局部量），直接读 UBO 的 weather.w。
+    if ((u32(round(light_data.weather.w)) & 64u) != 0u) {
+        return color;
+    }
     if (light_data.flags.x < 0.5) {
         return color;
     }
