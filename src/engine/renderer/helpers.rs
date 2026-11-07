@@ -363,6 +363,28 @@ pub(crate) fn abort_after_acquire(reason: &str) -> (bool, String) {
 }
 /// 这一帧要不要重画阴影图（纯函数，可单测）。见 `Renderer::shadow_every`：隔帧重画，
 /// `every = 1` 就是每帧（A/B 对照）；`void_mode`（检视模式）下从不画。
+/// **重帧自适应**（2026-11-07 真机日志驱动）：上一帧"等 GPU 围栏"超过阈值时，
+/// 本帧**跳过动态阴影重画**。
+///
+/// 依据（`logs/perf_20261106_204658.log`，523 样本）：最慢的 8 帧全是 `wait` 10–13.7 ms
+/// 而 `record` 只有 60–165 µs ⇒ 帧时间尖峰来自 **GPU 被重帧拖住**（爆炸/多 NPC 同帧），
+/// 而动态阴影每 2 帧整张重画正好在那一刻再多花一次。跳过一次阴影更新只让影子晚 1–2 帧跟上，
+/// 换掉的是一次 10 ms 级尖峰。
+///
+/// 阈值取 6 ms：中位 `wait` 只有 0.12 ms，p90 4.8 ms ⇒ 6 ms 只在真正的重帧上触发。
+pub(crate) fn shadow_due_adaptive(
+    frame_seq: u64,
+    every: u32,
+    void_mode: bool,
+    last_wait_us: u64,
+    budget_us: u64,
+) -> bool {
+    if last_wait_us > budget_us {
+        return false;
+    }
+    shadow_due(frame_seq, every, void_mode)
+}
+
 pub(crate) fn shadow_due(frame_seq: u64, every: u32, void_mode: bool) -> bool {
     !void_mode && frame_seq % every.max(1) as u64 == 0
 }
@@ -917,5 +939,31 @@ mod render_extent_tests {
         assert_eq!(RenderTier::parse("0.75"), None, "百分比/倍率不该被接受");
         assert_eq!(RenderTier::parse(""), None);
         assert_eq!(RenderTier::parse("ultra"), None);
+    }
+}
+
+
+#[cfg(test)]
+mod shadow_adaptive_tests {
+    use super::shadow_due_adaptive;
+
+    /// 正常帧（wait 远低于预算）⇒ 完全等于旧行为，隔帧重画照旧。
+    #[test]
+    fn normal_frames_keep_the_old_cadence() {
+        assert!(shadow_due_adaptive(4, 2, false, 100, 6000));
+        assert!(!shadow_due_adaptive(5, 2, false, 100, 6000));
+    }
+
+    /// 重帧（wait 超预算）⇒ 本帧**一定不画**，即使轮到了它。
+    #[test]
+    fn slow_frame_skips_the_shadow_update() {
+        assert!(!shadow_due_adaptive(4, 2, false, 9_000, 6000));
+        assert!(!shadow_due_adaptive(5, 2, false, 13_686, 6000));
+    }
+
+    /// 检视模式（void_mode）依旧从不画 —— 自适应不能把这条规矩打破。
+    #[test]
+    fn void_mode_still_never_draws() {
+        assert!(!shadow_due_adaptive(4, 2, true, 0, 6000));
     }
 }

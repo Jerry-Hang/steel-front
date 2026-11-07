@@ -836,7 +836,20 @@ impl Renderer {
         // 只在真画的那一帧发生），主 pass 照常采样 —— 布局上从 DEPTH_STENCIL_ATTACHMENT_OPTIMAL
         // 到采样所需的 SHADER_READ_ONLY_OPTIMAL 之间那道 barrier 在 `record_shadow_pass` 末尾，
         // 跳帧时图像就停在 SHADER_READ_ONLY_OPTIMAL，主 pass 读它是合法状态。
-        self.shadow_frame = shadow_due(self.frame_seq, self.shadow_every, self.void_mode);
+        // 重帧自适应：上一帧等 GPU 超过 6 ms ⇒ 本帧跳过动态阴影更新（见 helpers::shadow_due_adaptive）。
+        // 关闭：`RV3D_NO_SHADOW_ADAPT=1`（A/B 用）。
+        let shadow_budget_us = crate::syscfg::parse::<u64>("RV3D_SHADOW_WAIT_BUDGET_US").unwrap_or(6000);
+        self.shadow_frame = if crate::syscfg::flag("RV3D_NO_SHADOW_ADAPT") {
+            shadow_due(self.frame_seq, self.shadow_every, self.void_mode)
+        } else {
+            shadow_due_adaptive(
+                self.frame_seq,
+                self.shadow_every,
+                self.void_mode,
+                self.stage_wait_fence_us,
+                shadow_budget_us,
+            )
+        };
         // 静态图单独一条节奏（默认 30 帧一次）：它装的是不动的东西，没必要每帧重画。
         self.shadow_static_frame =
             shadow_static_due(self.frame_seq, self.shadow_static_every, self.void_mode, self.shadow_split);

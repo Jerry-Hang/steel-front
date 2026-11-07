@@ -3588,3 +3588,17 @@ chunk 的缓冲解自己的索引。已在 `record.rs` 里补上恢复绑定（�
 - GPU 尖峰：把"重帧时跳过动态阴影更新"接进去（`RV3D_SHADOW_EVERY` 现在是固定 2 帧），
   这是唯一直接对着 `wait` 尖峰的手段；
 - acquire 4 ms：试 `RV3D_PRESENT_MODE=immediate` 与增加 swapchain 图像数（现为 min+1）。
+
+### 2026-11-07（续145）：**重帧自适应阴影**（对着 `wait` 尖峰的改动）
+
+依据续144 的真机日志：尖峰帧全是 `wait` 10–13.7 ms、`record` 只有 60–165 µs ⇒ GPU 被重帧拖住，
+而动态阴影每 2 帧整张重画正好在那时再多花一次。
+
+- `helpers::shadow_due_adaptive(frame_seq, every, void_mode, last_wait_us, budget_us)`：
+  上一帧等 GPU 超过预算（默认 **6000 µs**）⇒ 本帧**跳过动态阴影更新**；
+- 接入 `frame.rs`（用已有的 `stage_wait_fence_us`，不新增计时）；
+- 开关：`RV3D_NO_SHADOW_ADAPT=1` 关掉自适应（A/B）、`RV3D_SHADOW_WAIT_BUDGET_US` 调阈值；
+- 判据三条：正常帧节奏不变 / 重帧必跳 / 检视模式仍然从不画。
+
+**代价**：重帧那一刻影子晚 1–2 帧跟上（视觉上几乎不可见）；换来的是把 10 ms 级尖峰削掉。
+**待验证**：需要玩家真机再跑一局，对比 `wait` 的 p99/最大值是否下降（我这边无头测不出）。
