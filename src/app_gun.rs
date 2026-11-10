@@ -8,6 +8,7 @@
 use crate::{GUN_AMB_MAX, GUN_AMB_MIN, GUN_DIFF_GAIN, GUN_IDLE_HZ, GUN_KEY_DIR, GUN_SPEC_GAIN, GUN_SPEC_POWER};
 use crate::env_f32;
 use crate::GameApp;
+use crate::{GUN_DARK_LUMA, GUN_REF_ALBEDO};
 use crate::{
     GUN_HIP_DEPTH_M,
     GUN_HIP_HALF_TAN,
@@ -336,5 +337,327 @@ impl GameApp {
                     + GUN_RELOAD_PITCH_RAD * reload,
             )
             * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+    }
+}
+
+impl GameApp {
+    pub(crate) fn first_person_gun_mesh(&mut self) -> (Vec<crate::engine::meshgen::GVertex>, Vec<u32>) {
+        // 导入枪模优先（按武器 key 缓存；检视与第一人称共用）
+        //
+        // 🔴 **检视模式下必须按"要检视的那把枪"取 key，不能取当前槽位**
+        // （2026-10-15，外部复核指出第 5 条，已对着代码确认）：
+        // 原来这里无条件 `self.game.active_weapon_key()`。而检视模式**从不**
+        // `switch_weapon`（`update()` 只设 `camera.mode = Orbit` 并按
+        // `spec_by_number(n)` 的包围盒算取景距离）⇒ `active_weapon_key()` 恒为 0 号槽
+        // ⇒ **`--inspect=2` 和 `--inspect=35` 画出来的都是 1 号枪**，而相机距离却按
+        // 第 N 号枪算 ⇒ 枪在画面里大小也不对。
+        //
+        // 更要紧的是：下面那个真正读 `self.inspect_weapon` 的分支
+        // （"检视模式：枪模放世界原点上方"）**只有 GLB 加载失败时才可达** ——
+        // 而 `load_gun_glb` 有 `ak12.glb` 兜底、几乎不会失败
+        // ⇒ 那段代码实际上**从来没被执行过**（死分支）。
+        let gkey = match self.inspect_weapon {
+            Some(n) => crate::engine::weapon_data::spec_by_number(n)
+                .map(|s| s.key.to_string())
+                .unwrap_or_else(|| self.game.active_weapon_key().to_string()),
+            None => self.game.active_weapon_key().to_string(),
+        };
+        let load = |k: &String| Self::load_gun_glb(k);
+        // 只在某把枪**首次**入缓存时打一次几何探针，避免每帧刷屏。
+        // 用途：把"枪到底朝屏幕深处还是朝右"从肉眼判断变成一个数——把枪身局部包围盒
+        // 的顶点经真实 fp_gun_matrix 变到世界后，分别投影到相机前向与相机右向，
+        // 跨度大的那个才是枪身实际躺着的方向。肉眼已三次给出互相矛盾的结论。
+        let first_load = !self.gun_glbs.contains_key(&gkey);
+        // 先 clone 出来结束对 self.gun_glbs 的可变借用，否则下面没法再 &self 取矩阵/相机
+        let loaded = self
+            .gun_glbs
+            .entry(gkey.clone())
+            .or_insert_with(|| load(&gkey))
+            .clone();
+        if first_load {
+            if let Some((verts, _)) = &loaded {
+                if verts.len() > 8 {
+                    let m = self.fp_gun_matrix();
+                    // 输出**世界空间 AABB 各轴跨度**而不是"沿相机轴的投影长度"：
+                    // 后者要正确解释相机基向量的约定，我上一轮就是被这种间接量误导过。
+                    // 世界 AABB 无法误读——枪指入屏幕则 z 跨度大，横躺则 x 跨度大。
+                    let mut lo = [f32::MAX; 3];
+                    let mut hi = [f32::MIN; 3];
+                    for v in verts.iter() {
+                        let w = m.transform_point3(glam::Vec3::from_slice(&v.pos));
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(w[k]);
+                            hi[k] = hi[k].max(w[k]);
+                        }
+                    }
+                    let f = self.camera.forward();
+                    let r = self.camera.right();
+                    log::info!(
+                        "gun-orient: {gkey} 世界AABB跨度 x={:.3} y={:.3} z={:.3} \
+                         | 相机forward=({:.2},{:.2},{:.2}) right=({:.2},{:.2},{:.2})",
+                        hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2],
+                        f.x, f.y, f.z, r.x, r.y, r.z
+                    );
+                }
+            }
+        }
+        // 下面统一用已取出的 `loaded`，不再持有对 self.gun_glbs 的借用
+        // （函数体后面还要读 self.inspect_weapon / self.ads_blend 等字段）。
+        if let Some((verts, indices)) = loaded {
+            if self.inspect_weapon.is_some() {
+                // 居中到 (0, 1.0, 0)
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v.pos[i]);
+                        mx[i] = mx[i].max(v.pos[i]);
+                    }
+                }
+                let c = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                let moved: Vec<crate::engine::meshgen::GVertex> = verts
+                    .iter()
+                    .map(|v| crate::engine::meshgen::GVertex {
+                        pos: [v.pos[0] - c[0], v.pos[1] - c[1] + 1.0, v.pos[2] - c[2]],
+                        ..*v
+                    })
+                    .collect();
+                return (moved, indices);
+            }
+            // 第一人称：顶点已在加载时静态化到「视空间基座」，每帧仅由实例矩阵驱动
+            // （2026-08-28 残影修复：消除每帧 3MB CPU 重变换）
+            return (verts, indices);
+        }
+        // 检视模式：枪模放世界原点上方（居中），Orbit 相机绕其旋转查看
+        if let Some(n) = self.inspect_weapon {
+            let key = crate::engine::weapon_data::spec_by_number(n)
+                .map(|s| s.key)
+                .unwrap_or("ak12m");
+            if let Some(gm) = crate::engine::guns::gun_mesh_by_key(key) {
+                // 居中：bbox 中心移到 (0, 1.0, 0)（用包围盒中点，顶点均值会偏向部件密集侧）
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &gm.verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v.pos[i]);
+                        mx[i] = mx[i].max(v.pos[i]);
+                    }
+                }
+                let c = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                let verts: Vec<crate::engine::meshgen::GVertex> = gm
+                    .verts
+                    .iter()
+                    .map(|v| crate::engine::meshgen::GVertex {
+                        pos: [v.pos[0] - c[0], v.pos[1] - c[1] + 1.0, v.pos[2] - c[2]],
+                        normal: v.normal,
+                        uv: v.uv,
+                        color: v.color,
+                    })
+                    .collect();
+                return (verts, gm.indices.clone());
+            }
+        }
+        // 当前武器枪模：按键名取模（构建含光照烘焙，缓存避免每帧重建）。
+        // 优雅回退：无网格 / 构建 panic → 记录日志并回退默认 HK416。
+        let key = self.game.active_weapon_key();
+        let gun = match &self.gun_mesh_cache {
+            Some((k, gm)) if k == key => gm.clone(),
+            _ => {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::engine::guns::gun_mesh_by_key(key)
+                }))
+                .unwrap_or(None);
+                let gm = match built {
+                    Some(gm) => gm,
+                    None => {
+                        log::warn!(
+                            "weapons: 枪模回退——键 '{}' 无可用网格，使用默认 HK416",
+                            key
+                        );
+                        crate::engine::guns::gun_mesh_by_key("hk416").unwrap_or_else(|| {
+                            log::error!("weapons: 默认枪模也缺失，使用空网格（枪模不可见）");
+                            crate::engine::guns::GunMesh {
+                                verts: Vec::new(),
+                                indices: Vec::new(),
+                                length: 0.0,
+                            }
+                        })
+                    }
+                };
+                self.gun_mesh_cache = Some((key.to_string(), gm.clone()));
+                gm
+            }
+        };
+        // 程序化枪：返回**局部坐标**顶点，与导入 GLB 分支同一约定——矩阵只在
+        // `render()` 里作为实例 model（fp_gun_pre）施加一次。
+        // 2026-09-01 修复：这里曾先 `gun.transformed(fp_gun_matrix())` 把
+        // view_inv×anchor×scale 烘进顶点，而调用方又把同一个矩阵当作实例 model 再乘
+        // 一次 → 实际变换是 M·M·p。M 含 view_inv，M·M 里的第二个 view_inv 不会被 view
+        // 抵消，枪会被再平移一次相机位置（城区坐标 ±215 m）→ 整支枪飞出画面/
+        // 贴脸乱甩。该分支只在 GLB 缺失时命中（例如 release_dist/game/assets/guns
+        // 未随包发布），所以平时看不见，一旦命中就是彻底坏掉。
+        (gun.verts.clone(), gun.indices.clone())
+    }
+
+    pub(crate) fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
+        // 🔬 A/B 开关（2026-10-18）：`RV3D_NO_GUN_GLB=1` 强制走**程序化枪模**。
+        // 存在理由：第一人称一直只验过 GLB 枪模（AK-12M 等 16 把），而**无 GLB 的 19 把**
+        // 走的是 `meshgen` 程序化图元 + `gun_pipeline`（`cull_mode = BACK` + 无深度）——
+        // 这条路**从未有过实机画面证据**。有了这个开关就能在不切枪的前提下拍到它。
+        // 与 `RV3D_NO_SHADOW` / `RV3D_NO_MESH` / `RV3D_NO_DECALS` 同类，仅诊断用。
+        if crate::syscfg::parse::<u8>("RV3D_NO_GUN_GLB") == Some(1) {
+            return None;
+        }
+        // 🎯 缺 GLB 时的回退顺序（2026-10-31 改）：**自己的程序化模型优先，其次才是 ak12**。
+        // 旧写法一律借用 `ak12.glb`，于是许可清理后被移出仓库的 8 把枪（ak104 / ash12 / pkm /
+        // pkp / rpk16 / saiga12 / sv98 / svd12）**全变成 AK-12 的外形**——玩家会以为换枪没生效。
+        // 而这 35 把枪在 `engine::guns` 里**本来就有各自的程序化模型**（`has_procedural_mesh`
+        // 不建网格即可判定），所以这里返回 `None`，让调用方走那条路。
+        let stem = Self::gun_glb_stem(key);
+        let path = if crate::engine::asset_source::global()
+            .exists(&format!("assets/guns/{stem}.glb"))
+        {
+            format!("assets/guns/{stem}.glb")
+        } else if crate::engine::guns::has_procedural_mesh(key) {
+            log::info!("assets: {key} 无 GLB ⇒ 使用本键程序化枪模（不再借用 ak12）");
+            return None;
+        } else {
+            log::info!("assets: {key} 既无 GLB 也无程序化模型 ⇒ 借用 ak12.glb");
+            "assets/guns/ak12.glb".to_string()
+        };
+        let path: &str = &path;
+        // 🔴 **读取也必须走资产抽象层**（2026-10-15，外部复核指出第 5 条，已确认）：
+        // 上面那句"存不存在"用的是 `asset_source::global().exists(..)`（Android 走
+        // `AAssetManager`、`RV3D_ASSETS_FROM_MEMORY=1` 走 `MemSource`），
+        // **而这里原来调的是 `std::fs::read`** ⇒ 在 Android 上
+        // `exists()` 在 APK 里找得到、`std::fs::read` 却必然失败
+        // ⇒ **所有 GLB 枪模静默退回程序化枪模**（玩家看到"枪变样了"，日志里只有一句
+        // 误导性的"未发现"）。
+        //
+        // 仓库里另外两处是对的（`map.rs::load_map` 走 `read_to_string`、
+        // `renderer/helpers.rs::load_spirv` 走 `read`）—— **只有这一处只改了一半**。
+        let bytes = match crate::engine::asset_source::global().read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::info!("assets: 未发现 {path}（{e}），使用程序化枪模");
+                return None;
+            }
+        };
+        match crate::engine::assets::parse_glb(&bytes) {
+            Ok(mesh) => {
+                if mesh.verts.is_empty() {
+                    log::warn!("assets: {path} 为空网格，回退程序化枪模");
+                    return None;
+                }
+                // 归一化：Sketchfab 原始刻度（本例长轴 Y 约 85 单位）→ 0.94m 真实枪长；
+                // 包围盒数据中心到原点；长轴（最大跨度）对齐 +Z（游戏枪模前向）；Y-up 校正
+                let mut mn = [f32::MAX; 3];
+                let mut mx = [f32::MIN; 3];
+                for v in &mesh.verts {
+                    for i in 0..3 {
+                        mn[i] = mn[i].min(v[i]);
+                        mx[i] = mx[i].max(v[i]);
+                    }
+                }
+                let ext = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+                let long = ext[0].max(ext[1]).max(ext[2]);
+                // 枪模 m 矩阵含 0.5 缩放 → 模型长 1.35m 折算视觉 ~0.68m（AK-12 实枪比例）
+                let scale = 1.35 / long.max(1e-4);
+                // 长轴对齐：Sketchfab Z-up 导出（长轴=Y 85、高=Z 21、宽=X 7，枪竖立）
+                // 绕 X -90°：长轴→-Z、枪顶→+Y；再绕 Y 180° 预旋转（配合 fp_gun_matrix 的
+                // rotY(180°) 双重取负 → 最终枪口朝 -Z（屏幕深处），枪顶朝上
+                let (align, align_name) = if ext[1] >= ext[0] && ext[1] >= ext[2] {
+                    // 长轴=Y（Sketchfab Z-up 竖立枪）：-90°X 立正 + 180°Z 滚转（枪顶朝上、弹匣朝下）
+                    (
+                        glam::Mat4::from_rotation_z(std::f32::consts::PI)
+                            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                            * glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                        "Y-long",
+                    )
+                } else if ext[0] >= ext[1] && ext[0] >= ext[2] {
+                    (glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2), "X-long")
+                } else {
+                    // 长轴已在 Z = 资产已是规范化朝向（枪口 +Z）。由 fp_gun_matrix 的
+                    // rotY(π) 把局部 +Z 转到视空间 -Z，再经 view_inv 即相机前方 —— 与
+                    // `gun_mesh_by_key` 文档约定的「局部枪口朝 +Z」一致，故不需任何旋转。
+                    (glam::Mat4::IDENTITY, "IDENTITY")
+                };
+                let center = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                // 注意：不在此处做任何相机空间变换——FP 帧内与程序化枪共用 fp_gun_matrix
+                // （view_inv × anchor × scale；世界空间 + 每帧跟随相机）
+                // 基色可用性判定：先看整份网格最亮的顶点有多亮。GLB 解析器
+                // （engine/assets.rs）不读 baseColorTexture，只把 baseColorFactor 摊到
+                // 顶点色上，所以"贴图丢了只剩暗调色因子"的资产会给出近乎纯黑的基色
+                // （ak12.glb 实测 0.057/0.077）。此时按**全局最大值**归一到参考反照率：
+                // 保留各材质之间的相对明暗差（0.057 与 0.077 差 34%，归一后仍差 34%），
+                // 只是把它们整体抬到可分辨的亮度；正常资产（luma ≥ 0.18）不改变倍率。
+                let mut luma_max = 0.0f32;
+                for v in &mesh.verts {
+                    let l = 0.2126 * v[8] + 0.7152 * v[9] + 0.0722 * v[10];
+                    luma_max = luma_max.max(l);
+                }
+                let albedo_boost = if luma_max > 1e-5 && luma_max < GUN_DARK_LUMA {
+                    GUN_REF_ALBEDO / luma_max
+                } else {
+                    1.0
+                };
+                // 每个武器 key 只加载一次（结果按 key 缓存），所以这行日志不会刷屏。
+                // 它把两个"错了只会表现为枪看起来怪、不会报错"的决定摊开给人看：
+                // ① align 走了哪条分支——assets/guns 里由 tools/install_guns.py 安装的
+                //    资产是**规范化过的**（枪口 +Z、上 +Y、最长边 1.0），必然走 IDENTITY；
+                //    若哪天它走了别的分支，说明有资产没经过预处理就进来了，朝向是猜的。
+                // ② albedo_boost 是否为 1.0——不为 1 说明该资产基色过黑、走了亮度归一。
+                log::info!(
+                    "gun-glb: {key} ← {path} 顶点={} 索引={} 跨度=({:.2},{:.2},{:.2}) \
+                     align={align_name} luma_max={:.3} albedo_boost={:.2}",
+                    mesh.verts.len(),
+                    mesh.indices.len(),
+                    ext[0], ext[1], ext[2],
+                    luma_max, albedo_boost
+                );
+                let verts: Vec<crate::engine::meshgen::GVertex> = mesh
+                    .verts
+                    .iter()
+                    .map(|v| {
+                        let mut p = glam::Vec3::new(v[0] - center[0], v[1] - center[1], v[2] - center[2]) * scale;
+                        let mut n = glam::Vec3::from_slice(&v[3..6]);
+                        p = align.transform_point3(p);
+                        n = align.transform_vector3(n).normalize_or_zero();
+                        let c = fp_gun_bake_color(n, [v[8], v[9], v[10]], albedo_boost);
+                        crate::engine::meshgen::GVertex {
+                            pos: [p.x, p.y, p.z],
+                            normal: [n.x, n.y, n.z],
+                            uv: [v[6], v[7]],
+                            color: c,
+                        }
+                    })
+                    .collect();
+                log::info!(
+                    "assets: 导入枪模 {path}（{} 顶点 / {} 索引，基色亮度 {:.3} → 反照率增益 ×{:.2}，首色 {:?}）",
+                    verts.len(),
+                    mesh.indices.len(),
+                    luma_max,
+                    albedo_boost,
+                    verts.first().map(|v| v.color)
+                );
+                Some((verts, mesh.indices))
+            }
+            Err(e) => {
+                log::warn!("assets: {path} 解析失败: {e}；回退程序化枪模");
+                None
+            }
+        }
     }
 }
