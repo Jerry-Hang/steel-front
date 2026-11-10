@@ -162,6 +162,14 @@ impl AssetSource for MemSource {
         } else {
             format!("{dir}/")
         };
+        // 🔴 **目录不存在必须报错，不能返回空列表**（2026-11-10，与 `read_dir` 的语义对齐）：
+        // 返回空列表会让 `PropSet::load_from` 得到一个"0 件道具"的套件 ⇒ 上层读成
+        // "本关没有道具"，是那种最难查的静默失败。判据：
+        // `missing_directory_is_an_error_not_an_empty_set`。
+        let has_prefix = self.files.keys().any(|k| k.starts_with(&prefix));
+        if !has_prefix {
+            return Err(format!("内存资产里没有目录: {dir}"));
+        }
         let mut out: Vec<String> = self
             .files
             .keys()
@@ -273,8 +281,8 @@ mod tests {
         assert_eq!(got, vec!["assets/props/a.glb".to_string(), "assets/props/b.glb".to_string()]);
         // 尾斜杠也接受
         assert_eq!(m.list_dir("assets/props/").unwrap().len(), 2);
-        // 不存在的目录 ⇒ 空列表（不是 Err：read_dir 语义）
-        assert!(m.list_dir("assets/nope").unwrap().is_empty());
+        // 不存在的目录 ⇒ **Err**（与 `read_dir` 语义一致；空列表会被上层读成"本关没资产"）
+        assert!(m.list_dir("assets/nope").is_err(), "缺目录必须报错，不能返回空列表");
     }
 
     /// `FsSource::list_dir` 指向一个真实目录时，必须真的列出这个仓库里的道具文件。

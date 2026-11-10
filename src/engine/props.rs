@@ -199,6 +199,20 @@ pub struct PropSet {
 impl PropSet {
     /// 扫描目录加载全部 `.glb`。名字取文件名（去扩展名）。排序后返回，使下标稳定。
     pub fn load_dir(dir: &str) -> Result<Self, String> {
+        Self::load_from(crate::engine::asset_source::global(), dir)
+    }
+
+    /// **从指定来源加载**（2026-11-10，架构改造）：与 `load_dir` 的唯一差别是不再依赖全局单例。
+    ///
+    /// 为什么值得单独开一个入口：
+    /// 1. **可测**：测试可以塞一个 `MemSource`（= Android 那条路径的替身）跑完整加载流程，
+    ///    而不需要往全局 `OnceLock` 里装东西（那个只能装一次，测试之间会互相污染）；
+    /// 2. **可替换**：将来接 `AAssetManager`/网络包/加密包时，调用方直接传实现，不用改这里；
+    /// 3. 依赖方向变清晰：这个函数只认 `AssetSource`，不再碰 `global()`。
+    pub fn load_from(
+        src: &dyn crate::engine::asset_source::AssetSource,
+        dir: &str,
+    ) -> Result<Self, String> {
         let mut found: Vec<(String, ImportedMesh)> = Vec::new();
         let mut found_lod: Vec<(String, ImportedMesh)> = Vec::new();
         let mut found_lod2: Vec<(String, ImportedMesh)> = Vec::new();
@@ -214,7 +228,6 @@ impl PropSet {
         // 🔴 走 `AssetSource`（2026-11-10）：原来这里直接 `std::fs::read_dir` + `std::fs::read`，
         // 于是 **Android 上必然失败**（`AAssetManager` 不走 std::fs）⇒ 道具全无。
         // 现在列举与读取都经过抽象层：桌面 = FsSource，内存 = MemSource，Android 见该模块注释。
-        let src = crate::engine::asset_source::global();
         let entries = src.list_dir(dir)?;
         for path in entries {
             if std::path::Path::new(&path).extension().and_then(|s| s.to_str()) != Some("glb") {
@@ -520,7 +533,15 @@ pub struct ChunkSet {
 impl ChunkSet {
     /// 扫描目录加载全部 `.glb`（世界坐标，不需要摆放变换）。目录不存在返回 `None`。
     pub fn load_dir(dir: &str) -> Option<Self> {
-        let src = crate::engine::asset_source::global();
+        Self::load_from(crate::engine::asset_source::global(), dir)
+    }
+
+    /// 从指定来源加载（与 [`ChunkSet::load_dir`] 的唯一差别：不依赖全局单例，理由同
+    /// [`PropSet::load_from`]）。
+    pub fn load_from(
+        src: &dyn crate::engine::asset_source::AssetSource,
+        dir: &str,
+    ) -> Option<Self> {
         let entries = src.list_dir(dir).ok()?;
         let mut found: Vec<(String, ImportedMesh)> = Vec::new();
         for path in entries {
@@ -1598,6 +1619,60 @@ mod tests {
         assert!(bad.iter().all(|v| v[3] == 0.0 && v[4] == 0.0 && v[5] == 0.0));
     }
 
+}
+
+#[cfg(test)]
+mod load_from_source_tests {
+    use super::*;
+    use crate::engine::asset_source::{AssetSource, FsSource, MemSource};
+
+    /// **端到端**：用 `MemSource` 跑完整的道具加载流程。
+    ///
+    /// 这条判据守的是 **Android 那条路径**：`AAssetManager` 与 `MemSource` 一样，
+    /// 既不支持 `std::fs`、也不允许我们自己造目录 —— 只要"读字节 + 列目录"两个能力齐了，
+    /// 加载器就必须能工作。做法：先用 `FsSource` 从真实仓库取两件道具的字节塞进 `MemSource`，
+    /// 再用 `load_from(&mem, ...)` 加载，断言件数与名字都对。
+    #[test]
+    fn prop_set_loads_through_a_non_fs_source() {
+        let fs = FsSource;
+        let all = fs.list_dir("assets/props").expect("列举真实 assets/props 失败");
+        let picked: Vec<String> = all
+            .into_iter()
+            .filter(|p| p.ends_with(".glb") && !p.contains("_lod1") && !p.contains("_lod2"))
+            .take(2)
+            .collect();
+        assert!(picked.len() >= 2, "assets/props 里不足两件基础网格，判据无法成立");
+
+        let mut mem = MemSource::new();
+        for p in &picked {
+            let bytes = fs.read(p).expect("读取真实道具失败");
+            mem.insert(p, bytes);
+        }
+        // 只喂这两件 ⇒ 加载器必须只看到这两件（说明它真的走了传入的来源）
+        let set = PropSet::load_from(&mem, "assets/props").expect("从 MemSource 加载失败");
+        assert_eq!(set.len(), 2, "从 MemSource 加载到的件数不对");
+        // 而且**不能**看到仓库里其他道具（防"悄悄回退到 std::fs"）
+        assert!(
+            set.len() < 10,
+            "从 MemSource 拿到 {} 件（远多于 2） —— 说明加载器回退到了 std::fs",
+            set.len()
+        );
+    }
+
+    /// 反向验证：来源里没有这个目录时，必须**报错**而不是静默返回空集。
+    /// （空集会让上层以为"本关没有道具"，属于最难查的那类静默失败。）
+    #[test]
+    fn missing_directory_is_an_error_not_an_empty_set() {
+        let mem = MemSource::new();
+        assert!(PropSet::load_from(&mem, "assets/props").is_err());
+    }
+
+    /// `ChunkSet::load_from` 同样走传入来源：给 0 件时返回 `None`（可选资产的语义）。
+    #[test]
+    fn chunk_set_through_source_returns_none_when_empty() {
+        let mem = MemSource::new();
+        assert!(ChunkSet::load_from(&mem, "assets/city_chunks").is_none());
+    }
 }
 
 #[cfg(test)]

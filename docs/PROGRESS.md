@@ -3618,3 +3618,23 @@ chunk 的缓冲解自己的索引。已在 `record.rs` 里补上恢复绑定（�
 
 ⚠️ **Android 侧仍未接**（`AAssetManager` 的 `AAssetDir` 没有实现，显式返回 Err）；
 本轮的价值是把"接口缺能力"变成"只差一个平台实现"，并让桌面/内存两条路真正走通。
+
+### 2026-11-10（续147）：资产加载改成**显式依赖注入** + 端到端判据（Android 路径的替身）
+
+**架构问题**：`PropSet::load_dir` / `ChunkSet::load_dir` 都调 `asset_source::global()`，
+于是 ① 加载器不可测（全局 `OnceLock` 只能装一次，测试之间互相污染）；
+② 调用方无法指定来源（将来接 `AAssetManager`/加密包/网络包只能改这里）。
+
+**改动**：新增 `PropSet::load_from(src, dir)` 与 `ChunkSet::load_from(src, dir)`，
+只认传进来的 `&dyn AssetSource`；原来的 `load_dir` 退化成`load_from(global(), dir)` 的薄包装。
+依赖方向变成「加载器 → 抽象」，全局单例只留在最外层。
+
+**顺带修掉一个我自己引入的语义缺陷**：`MemSource::list_dir` 原先对不存在的目录返回**空列表**，
+而 `read_dir` 是**报错**。空列表会被 `load_from` 读成"0 件道具 ⇒ 本关没有道具"，
+属于最难查的静默失败。现在两者语义一致（缺目录 ⇒ Err）。
+
+**判据（三条，全是端到端）**：
+- `prop_set_loads_through_a_non_fs_source`：用 `FsSource` 取真实两件道具塞进 `MemSource`，
+  `load_from` 后必须**恰好 2 件**，且**不能**看到仓库里其他道具（防"悄悄回退 std::fs"）；
+- `missing_directory_is_an_error_not_an_empty_set`：缺目录必须报错；
+- `chunk_set_through_source_returns_none_when_empty`：可选资产的空语义保持。
