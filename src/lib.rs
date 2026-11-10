@@ -1407,12 +1407,6 @@ impl GameApp {
     /// 少了这张表，`exists("assets/guns/ak12m.glb")` 恒为 false ⇒ **主力枪掉到程序化模型**，
     /// 日志里还写着"ak12m 无 GLB"（看起来像资产丢了）。判据
     /// `gun_key_maps_to_the_shipped_glb_name` 钉住它。
-    fn gun_glb_stem(key: &str) -> &str {
-        match key {
-            "ak12m" => "ak12",
-            other => other,
-        }
-    }
 
     fn load_gun_glb(key: &str) -> Option<(Vec<crate::engine::meshgen::GVertex>, Vec<u32>)> {
         // 🔬 A/B 开关（2026-10-18）：`RV3D_NO_GUN_GLB=1` 强制走**程序化枪模**。
@@ -1737,118 +1731,6 @@ impl GameApp {
     ///
     /// 单独抽出来是因为它同时被 `fp_gun_matrix` 与 `RV3D_GUN_DIAG` 的诊断行用 ——
     /// 诊断必须量**真正参与渲染的那个数**，不能另写一套近似（否则尺子和被测物不是一回事）。
-    fn gun_walk_env(&self) -> f32 {
-        let t = ((self.gun_sway.speed - GUN_SWAY_SPEED_LO)
-            / (GUN_SWAY_SPEED_HI - GUN_SWAY_SPEED_LO))
-            .clamp(0.0, 1.0);
-        let smooth = t * t * (3.0 - 2.0 * t); // Hermite smoothstep：起止斜率为 0
-        let fire_damp = 1.0 - (1.0 - GUN_SWAY_FIRE_DAMP) * self.gun_sway.kick;
-        smooth * fire_damp * self.gun_sway.gain
-    }
-
-    /// 第一人称枪的世界空间矩阵（程序化/导入枪模共用）：view_inv × anchor × scale。
-    /// 开火后坐 + 行走摆动 + ADS 插值 + FOV 缩放（2026-08-27 抽离共享；
-    /// 2026-09-01 摆动/后坐全部改由 `gun_sway` 的连续状态量驱动，见该结构注释）
-    fn fp_gun_matrix(&self) -> glam::Mat4 {
-        let cam = &self.camera;
-        let hip_pos = glam::Vec3::new(0.25, -0.20, -0.60);
-        let ads_pos = glam::Vec3::new(0.0, -0.08, -0.42);
-        let anchor_base = hip_pos.lerp(ads_pos, self.ads_blend);
-        // 屏幕等幅归一化（2026-09-01，修 ADS 摆幅过大）：anchor 是**视空间**平移，
-        // 它在屏幕上的位移 = offset / (锚距 × tan(fov/2))。开镜时锚距 0.60→0.42、
-        // fov 70°→55°，两个因素叠起来把同样的 offset 视觉放大 1.92 倍；
-        // `gun_scale` 下面已经做了 tan(fov/2) 补偿，平移量必须用同一套基准补偿，
-        // 否则"模型不放大、摆动放大"→ 越是精确瞄准枪甩得越凶。
-        let depth_gain = (-anchor_base.z) / GUN_HIP_DEPTH_M;
-        let fov_gain = (cam.fov * 0.5).tan() / GUN_HIP_HALF_TAN;
-        // 横向/垂向偏移的等幅因子；前后偏移只改变成像比例，用 depth_gain
-        let screen_gain = depth_gain * fov_gain;
-        let mut anchor = anchor_base;
-        // ① 后坐：连续指数包络（击发帧置 1 后按 τ=75 ms 衰减）。
-        //    旧实现用 (1-t)² 抛物线 + 0.30 s 硬截止：连发（10 发/秒）时每 0.1 s
-        //    重新从 0.44 跳到 1.0，回落末端还有一次速度不连续 → 抖 + 残影。
-        //    同样要走屏幕等幅补偿：0.07 m 的下蹲在开镜锚距 0.42 m + FOV 55° 下
-        //    占半屏高 32%，而腰射只占 17% —— 不补偿时"开镜连发"就是玩家描述的
-        //    "开镜射击下左右移动甩得特别大"里幅度最大的那个分量。
-        //    视轴方向的前顶只改变成像比例，补偿因子是 depth（不含 tan(fov/2)）。
-        let kick = self.gun_sway.kick;
-        if kick > 0.0 {
-            anchor.y -= 0.07 * kick * screen_gain;
-            anchor.z += 0.05 * kick * depth_gain;
-        }
-        // ② 行走摆动。幅值 = smoothstep(速度) × 开火阻尼 × 诊断增益；三个因子全部
-        //    连续，且 speed 已在 update() 里做过与帧率无关的低通，所以不存在
-        //    "逐帧通断"的阶跃（那是旧实现高频残影的直接来源）。
-        //    ADS 的按轴抑制放在下面各分量里，避免这里再乘一次造成双重衰减。
-        let env = self.gun_walk_env();
-        if env > 1e-6 {
-            let ads = self.ads_blend;
-            let st = self.gun_sway.stride;
-            let two = st * 2.0;
-            // 侧向：1× 步频（一个完整步态周期回到原位一次）
-            let sway = st.sin() * GUN_SWAY_SIDE_M * (1.0 - (1.0 - GUN_SWAY_ADS_SIDE) * ads);
-            // 上下：2× 步频（每个落脚一次冲击），用 -cos 让 phase=0（刚落地）为最低点
-            let bob = -two.cos() * GUN_SWAY_BOB_M * (1.0 - (1.0 - GUN_SWAY_ADS_BOB) * ads);
-            // 前后：2× 步频、与落地错位 1/4 周期（手臂随步伐前后牵动）
-            let fore = (two + std::f32::consts::FRAC_PI_2).sin()
-                * GUN_SWAY_FORE_M
-                * (1.0 - (1.0 - GUN_SWAY_ADS_FORE) * ads);
-            // 侧向"惯性滞后"：与侧移速度反号、按饱和速度归一，最大 0.004 m
-            let lean = -(self.gun_sway.strafe / GUN_SWAY_SPEED_HI).clamp(-1.0, 1.0)
-                * GUN_SWAY_LEAN_M
-                * (1.0 - (1.0 - GUN_SWAY_ADS_SIDE) * ads);
-            anchor.x += (sway + lean) * screen_gain * env;
-            anchor.y += bob * screen_gain * env;
-            anchor.z += fore * depth_gain * env;
-        }
-        let base_scale = 0.50 - 0.03 * self.ads_blend;
-        // 模型缩放与摆动偏移共用同一个 fov 补偿量（fov_gain），保证两条通道
-        // 在腰射/开镜之间视觉一致（旧实现只有这里补了 fov，摆动没补）
-        let gun_scale = fov_gain.clamp(0.5, 1.0) * base_scale;
-        // ④ 切枪动作（2026-09-15）：包络 sin(π·t) 两端为 0 ⇒ 起止速度连续。
-        //    只在真的在切枪时非零：switch_time == 0 时 progress 直接是 1.0 ⇒ sin(π)=0。
-        let (switch_drop, switch_pitch, switch_roll) = {
-            let t = self.game.weapon_switch_progress();
-            let swing = (std::f32::consts::PI * t).sin();
-            (
-                GUN_SWITCH_DROP_M * swing * screen_gain,
-                GUN_SWITCH_PITCH_RAD * swing,
-                GUN_SWITCH_ROLL_RAD * swing,
-            )
-        };
-        anchor.y -= switch_drop;
-        // ⑤ 冲刺姿态（2026-09-26 补）：平滑混合到"压低 + 前倾 + 内收"。
-        //    混合量来自 `GunSway::sprint`（帧率无关低通），所以按住/松开 Shift 都是渐变。
-        let sprint = self.gun_sway.sprint;
-        anchor.y -= GUN_SPRINT_DROP_M * sprint * screen_gain;
-        // ⑥ 换弹动作（2026-09-26 补）：包络中点最大、两端为 0（见 `reload_envelope` 的测试）
-        let reload = crate::engine::game::reload_envelope(
-            1.0 - self.game.hud.reload_progress,
-        );
-        anchor.y -= GUN_RELOAD_DROP_M * reload * screen_gain;
-        // ⑦ 静止呼吸微摆（2026-09-26 补）：只在几乎不动时出现，开镜时再压到 1/4。
-        //    用 `anim_clock` 当相位（已有、单调）⇒ 不需另加计时器；幅值与姿态无关，
-        //    走 `screen_gain` 保持与其它通道的屏幕等幅。
-        let idle_w = (1.0 - env).clamp(0.0, 1.0) * (1.0 - 0.75 * self.ads_blend);
-        let (idle_x, idle_y) = idle_sway(self.anim_clock);
-        anchor.x += idle_x * GUN_IDLE_SWAY_M * screen_gain * idle_w;
-        anchor.y += idle_y * GUN_IDLE_SWAY_M * screen_gain * idle_w;
-        let view_inv = cam.view_matrix().inverse();
-        view_inv
-            * glam::Mat4::from_translation(anchor)
-            * glam::Mat4::from_rotation_z(
-                switch_roll + GUN_SPRINT_ROLL_RAD * sprint + GUN_RELOAD_ROLL_RAD * reload
-                    + GUN_IDLE_ROLL_RAD * idle_x * idle_w,
-            )
-            * glam::Mat4::from_scale(glam::Vec3::splat(gun_scale))
-            * glam::Mat4::from_rotation_x(
-                -0.045
-                    + switch_pitch
-                    + GUN_SPRINT_PITCH_RAD * sprint
-                    + GUN_RELOAD_PITCH_RAD * reload,
-            )
-            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
-    }
 
     /// ESC 菜单鼠标点击命中检测：命中选项矩形则执行对应动作（0=退出 1=设置）。
     /// 矩形布局必须与 ui.rs `esc_menu_elements` 一致（面板 380x240 居中，
