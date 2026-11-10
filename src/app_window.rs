@@ -4,6 +4,7 @@
 // 几个类型，不碰渲染器、不碰游戏状态 ⇒ 搬出来不改变任何行为，却让 lib.rs 少 300 余行。
 //
 // `lib.rs` 里用 `pub(crate) use app_window::*;` 把名字再导出，调用点一个字都不用改。
+
 /// 这不是可选优化，而是捕获态**唯一**的相对视角来源：`window_event` 的
 /// `CursorMoved` 分支在 `cursor_locked` 时直接 `return`（"raw 增量已驱动视角，
 /// 绝对位置只更新基准"），而 `device_event` 的 `MouseMotion` 分支只在
@@ -314,7 +315,7 @@ pub(crate) fn lock_observation(elapsed_ms: u128, motion_delta: u64, window_ms: u
 ///    于是错的是**整条渲染尺寸链**，不只是窗口。
 /// 2. 尺寸被夹小了，而日志照样打印"窗口创建成功: 2560x1600" ⇒ **日志与事实不符**。
 ///
-/// ⇒ 语义定死：**这里的 `w`/`h` 与 `monitor` 全是物理像素**（`crate::config::RESOLUTIONS` 与配置项
+/// ⇒ 语义定死：**这里的 `w`/`h` 与 `monitor` 全是物理像素**（`RESOLUTIONS` 与配置项
 /// 本来就是物理分辨率，`monitor.size()` 也是物理），所以一律用 `PhysicalSize`，
 /// **不再有任何魔法缩放系数**。判据 = `window_request_is_physical_and_clamped`
 /// （它同时钉住"不许再乘除任何常数"与"超屏必须等比缩"）。
