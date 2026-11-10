@@ -3638,3 +3638,24 @@ chunk 的缓冲解自己的索引。已在 `record.rs` 里补上恢复绑定（�
   `load_from` 后必须**恰好 2 件**，且**不能**看到仓库里其他道具（防"悄悄回退 std::fs"）；
 - `missing_directory_is_an_error_not_an_empty_set`：缺目录必须报错；
 - `chunk_set_through_source_returns_none_when_empty`：可选资产的空语义保持。
+
+### 2026-11-10（续148）：`lib.rs` 第一刀 —— 窗口/焦点/截图/帧率上限拆成 `app_window` 模块
+
+**动机**：仓库自己的纪律是"模块树单文件 ≤1200 行"，而 `lib.rs` **6320 行**，早就超了 5 倍。
+它是事件循环 + 输入 + 枪模姿态 + 资产装载 + 世界构建全挤在一起的地方 —— 结构上最大的一块债。
+
+**这一刀搬了什么**（329 行）：`window_is_foreground` / `last_fg_pid` / `my_pid` /
+`cursor_grab_plan` / `parse_shot_at` / `take_due_shots` / `effective_frame_cap` /
+`env_truthy` / `env_f32` / `backend_choice` / `no_capture` / `capture_wanted` /
+`lock_observation` / `window_physical_request` 及其常量与两个小枚举。
+它们只依赖 winit 与几个 crate 内类型，不碰渲染器与游戏状态 ⇒ 搬出去不改变行为。
+`lib.rs` 6320 → **5991 行**，并保留 `pub(crate) use app_window::*;` 让调用点一个字不改。
+
+**校验方式（诚实说明工具的边界）**：`tools/refactor_move_check.py` 报 **FAIL** —— 它要求
+"搬移的文本逐字节一致"，而我为了跨模块可见性加了 `pub(crate)`、并把 `syscfg::` /
+`RESOLUTIONS` 改成全限定路径。这两类改动**无法用"纯移动"表达**。
+⇒ 我用**归一化比对**补上这一环：把 `pub(crate) ` 前缀、`crate::syscfg::`、`crate::config::RESOLUTIONS`
+三类差异抹平后，新旧块 **329 行逐字节一致**（脚本见本轮提交记录），确认没有夹带其它编辑。
+**工具改进项**：给它加 `--normalize-pub` 之类的开关，就能直接吃这种"移动 + 可见性"的重构。
+
+**验收**：build 0 警告 / **899 passed** / CJK OK / guard OK。
