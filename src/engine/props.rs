@@ -1622,6 +1622,84 @@ mod tests {
 }
 
 #[cfg(test)]
+mod merge_chunks_tests {
+    use super::*;
+
+    fn mesh(name: &str, base_xy: f32, tri_off: u32) -> PropMesh {
+        // 两三角的一个小面片：位置整体平移 base_xy，索引各自从 0 开始（模拟"每块独立"）
+        let v = |dx: f32, dy: f32| [base_xy + dx, dy, base_xy, 0.0, 1.0, 0.0, 0.0, 0.0, 0.6, 0.6, 0.6];
+        PropMesh {
+            name: name.to_string(),
+            verts: vec![v(0.0, 0.0), v(2.0, 0.0), v(0.0, 4.0)],
+            indices: vec![0 + tri_off, 1 + tri_off, 2 + tri_off],
+            min: [base_xy, 0.0, base_xy],
+            max: [base_xy + 2.0, 4.0, base_xy],
+        }
+    }
+
+    /// **每块一个 bin**：`merge_chunks` 的输出桶数必须等于块数，且每桶的
+    /// `first_index / index_count` 正好覆盖它自己那段索引。
+    ///
+    /// 这条守着 2026-11-04 那个事故的一半：当时 chunk 与道具共用合并缓冲区，
+    /// 桶的索引区间记错 ⇒ 屏幕上出现与块数无关的畸形几何。
+    #[test]
+    fn one_bin_per_chunk_with_exact_index_ranges() {
+        let set = ChunkSet {
+            meshes: vec![mesh("chunk_a", 0.0, 0), mesh("chunk_b", 10.0, 0)],
+        };
+        let g = merge_chunks(&set);
+        assert_eq!(g.bins.len(), 2, "桶数必须等于块数");
+        assert_eq!(g.indices.len(), 6);
+        for (i, bin) in g.bins.iter().enumerate() {
+            assert_eq!(bin.index_count, 3, "第 {i} 桶该有 3 个索引");
+            assert_eq!(bin.first_index, (i * 3) as u32, "第 {i} 桶的 first_index 不对");
+            // 桶内索引必须落在该桶自己的顶点区间里
+            let lo = bin.min_vertex;
+            let hi = bin.max_vertex;
+            for k in bin.first_index..bin.first_index + bin.index_count {
+                let idx = g.indices[k as usize];
+                assert!(
+                    (lo..=hi).contains(&idx),
+                    "第 {i} 桶的索引 {idx} 超出自己的顶点区间 [{lo},{hi}]"
+                );
+            }
+        }
+    }
+
+    /// **索引必须按块偏移**：第二块的索引要整体加上第一块的顶点数，
+    /// 否则两块会引用同一批顶点（画面表现为"第二块变成第一块的形状"）。
+    #[test]
+    fn indices_of_later_chunks_are_offset_by_vertex_base() {
+        let set = ChunkSet {
+            meshes: vec![mesh("chunk_a", 0.0, 0), mesh("chunk_b", 10.0, 0)],
+        };
+        let g = merge_chunks(&set);
+        assert_eq!(&g.indices[0..3], &[0, 1, 2], "第一块不该被偏移");
+        assert_eq!(&g.indices[3..6], &[3, 4, 5], "第二块必须整体偏移 3（第一块的顶点数）");
+    }
+
+    /// 全局包围盒必须覆盖所有块（含**后面**的块），否则剔除会把远处的块裁掉。
+    #[test]
+    fn global_bounds_cover_all_chunks() {
+        let set = ChunkSet {
+            meshes: vec![mesh("chunk_a", 0.0, 0), mesh("chunk_b", 10.0, 0)],
+        };
+        let g = merge_chunks(&set);
+        assert!((g.min[0] - 0.0).abs() < 1e-4, "min.x 应取所有块的最小值");
+        assert!((g.max[0] - 12.0).abs() < 1e-4, "max.x 应取所有块的最大值（10+2）");
+        assert!((g.max[1] - 4.0).abs() < 1e-4, "max.y 应是块内最高点");
+    }
+
+    /// 空集合 ⇒ 空几何、**0 桶**（调用方据此跳过上传；0 桶时不能去读 bins[0]）。
+    #[test]
+    fn empty_set_yields_no_bins() {
+        let g = merge_chunks(&ChunkSet { meshes: Vec::new() });
+        assert!(g.verts.is_empty() && g.indices.is_empty());
+        assert!(g.bins.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod load_from_source_tests {
     use super::*;
     use crate::engine::asset_source::{AssetSource, FsSource, MemSource};

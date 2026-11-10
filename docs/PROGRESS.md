@@ -3698,3 +3698,19 @@ RESULT: 全部命中（差异仅为 pub(crate) 前缀）
 `lib.rs` **5993 → 5945 行**；899 passed。
 
 **下一步候选**（按体量）：资产装载/world 构建（~200 行）、输入与事件循环分支、HUD 更新循环。
+
+### 2026-11-10（续151）：给 `merge_chunks` 补 4 条判据，并做**反向验证**
+
+`merge_chunks`（整城 chunk 的独立几何）此前没有直接判据 —— 而 2026-11-04 那次"屏幕出现与块数
+无关的畸形几何"正是这条路径的记账问题。补上：
+
+1. `one_bin_per_chunk_with_exact_index_ranges`：桶数 == 块数，每桶的 `first_index`/`index_count`
+   正好覆盖自己那段索引，且**桶内索引落在自己的顶点区间内**；
+2. `indices_of_later_chunks_are_offset_by_vertex_base`：第二块索引必须整体 +前块的顶点数
+   （否则两块引用同一批顶点 ⇒ 画面表现为"第二块变成第一块的形状"）；
+3. `global_bounds_cover_all_chunks`：全局包围盒覆盖所有块（含后面的块），否则剔除会裁掉远处；
+4. `empty_set_yields_no_bins`：空集合 ⇒ 0 桶（调用方据此跳过上传）。
+
+**反向验证（判据必须能红）**：临时把索引偏移去掉（`out.indices.push(*i)`）后，
+`indices_of_later_chunks...` 立刻红（left `[0,1,2]`），`one_bin_per_chunk...` 也红
+（"第 1 桶的索引 0 超出自己的顶点区间 [3,5]"）。改回后全绿 ⇒ 判据确实能抓住这类记账错误。
