@@ -211,22 +211,25 @@ impl PropSet {
         // ⇒ 只改读取是**治标**，所以这里**如实标注为已知缺口**、不假装修好了。
         // 要真修需要给 trait 加一个目录列举方法（`FsSource` 用 `read_dir`、
         // `MemSource` 按前缀筛、Android 用 `AAssetDir`）—— 那是独立的一件事。
-        let entries = std::fs::read_dir(dir).map_err(|e| format!("读取 {dir} 失败: {e}"))?;
-        for e in entries.flatten() {
-            let path = e.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("glb") {
+        // 🔴 走 `AssetSource`（2026-11-10）：原来这里直接 `std::fs::read_dir` + `std::fs::read`，
+        // 于是 **Android 上必然失败**（`AAssetManager` 不走 std::fs）⇒ 道具全无。
+        // 现在列举与读取都经过抽象层：桌面 = FsSource，内存 = MemSource，Android 见该模块注释。
+        let src = crate::engine::asset_source::global();
+        let entries = src.list_dir(dir)?;
+        for path in entries {
+            if std::path::Path::new(&path).extension().and_then(|s| s.to_str()) != Some("glb") {
                 continue;
             }
-            let stem = path
+            let stem = std::path::Path::new(&path)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unnamed")
                 .to_string();
-            let bytes = std::fs::read(&path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+            let bytes = src.read(&path)?;
             let m = crate::engine::assets::parse_glb(&bytes)
-                .map_err(|err| format!("{} 解析失败: {err}", path.display()))?;
+                .map_err(|err| format!("{path} 解析失败: {err}"))?;
             if m.verts.is_empty() || m.indices.is_empty() {
-                return Err(format!("{} 是空网格", path.display()));
+                return Err(format!("{path} 是空网格"));
             }
             // `_lod1` 后缀的件进 LOD 表（基名去掉后缀），其余照旧进主表。
             if let Some(base) = stem.strip_suffix("_lod2") {
@@ -517,15 +520,18 @@ pub struct ChunkSet {
 impl ChunkSet {
     /// 扫描目录加载全部 `.glb`（世界坐标，不需要摆放变换）。目录不存在返回 `None`。
     pub fn load_dir(dir: &str) -> Option<Self> {
-        let entries = std::fs::read_dir(dir).ok()?;
+        let src = crate::engine::asset_source::global();
+        let entries = src.list_dir(dir).ok()?;
         let mut found: Vec<(String, ImportedMesh)> = Vec::new();
-        for e in entries.flatten() {
-            let path = e.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("glb") {
+        for path in entries {
+            if std::path::Path::new(&path).extension().and_then(|s| s.to_str()) != Some("glb") {
                 continue;
             }
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("chunk");
-            let bytes = std::fs::read(&path).ok()?;
+            let stem = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("chunk");
+            let bytes = src.read(&path).ok()?;
             let m = crate::engine::assets::parse_glb(&bytes).ok()?;
             if m.verts.is_empty() || m.indices.is_empty() {
                 continue;

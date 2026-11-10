@@ -3602,3 +3602,19 @@ chunk 的缓冲解自己的索引。已在 `record.rs` 里补上恢复绑定（�
 
 **代价**：重帧那一刻影子晚 1–2 帧跟上（视觉上几乎不可见）；换来的是把 10 ms 级尖峰削掉。
 **待验证**：需要玩家真机再跑一局，对比 `wait` 的 p99/最大值是否下降（我这边无头测不出）。
+
+### 2026-11-10（续146）：补上 `AssetSource` 的**目录列举**（Android 道具/整城加载的真正缺口）
+
+`props::PropSet::load_dir` 与 `props::ChunkSet::load_dir` 原来直接 `std::fs::read_dir` + `read`，
+而 `AssetSource` 只有 read/read_to_string/exists ⇒ **Android 上道具与整城 chunk 必然加载失败**
+（`AAssetManager` 不走 std::fs），白名单里那四条"KNOWN GAP"就是这个。
+
+- 新增 `AssetSource::list_dir`（默认返回 Err ⇒ 未实现的来源行为与改动前一致）；
+- `FsSource` 用 `read_dir` 实现（只返直接子项、排序）；`MemSource` 按前缀筛（同样只返直接子项）；
+- 两处加载器改走 `asset_source::global()`，**彻底移除 `std::fs` 直读**；
+- 白名单删掉 4 条过期条目（含 KNOWN GAP 注释），并登记 `FsSource::list_dir` 内部那一条；
+- 新增判据：`mem_source_list_dir_returns_direct_children_only`、
+  `fs_source_list_dir_lists_real_prop_assets`（后者守着"加载器还能找到资产"）。
+
+⚠️ **Android 侧仍未接**（`AAssetManager` 的 `AAssetDir` 没有实现，显式返回 Err）；
+本轮的价值是把"接口缺能力"变成"只差一个平台实现"，并让桌面/内存两条路真正走通。

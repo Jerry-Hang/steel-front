@@ -32,6 +32,19 @@ pub trait AssetSource: Send + Sync {
 
     /// 资产是否存在。
     fn exists(&self, path: &str) -> bool;
+
+    /// **列出某个目录下的文件名**（不含目录本身），返回形如 `assets/props/a.glb` 的完整相对路径。
+    ///
+    /// 存在的理由（2026-11-10，补续 129 记的那条已知缺口）：`props::PropSet::load_dir` 与
+    /// `props::ChunkSet::load_dir` 需要"目录里有哪些 .glb"，而 `AssetSource` 原先**只有
+    /// read/read_to_string/exists，没有目录列举** ⇒ 两处直接 `std::fs::read_dir`，于是
+    /// **Android 上必然失败**（`AAssetManager` 不走 `std::fs`）。现在把列举也纳入抽象，
+    /// 桌面/内存两种来源立刻可用；Android 侧仍是显式未接（见该实现的注释）。
+    ///
+    /// 默认实现返回 `Err`：这样"没实现列举"的来源行为与改动前**完全一致**（调用方本来就要处理失败）。
+    fn list_dir(&self, dir: &str) -> Result<Vec<String>, String> {
+        Err(format!("该资产来源不支持目录列举: {dir}"))
+    }
 }
 
 /// 文件系统来源（桌面：Windows / Linux 原生）。
@@ -44,6 +57,22 @@ impl AssetSource for FsSource {
 
     fn exists(&self, path: &str) -> bool {
         std::path::Path::new(path).exists()
+    }
+
+    fn list_dir(&self, dir: &str) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| format!("列举目录失败 '{dir}': {e}"))?;
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_file() {
+                if let Some(s) = p.to_str() {
+                    out.push(s.to_string());
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 }
 
@@ -124,6 +153,23 @@ impl AssetSource for MemSource {
 
     fn exists(&self, path: &str) -> bool {
         self.files.contains_key(path)
+    }
+
+    /// 按前缀筛：只返回**直接子项**（`dir/` 之后不再含 `/`），与 `read_dir` 的语义对齐。
+    fn list_dir(&self, dir: &str) -> Result<Vec<String>, String> {
+        let prefix = if dir.ends_with('/') {
+            dir.to_string()
+        } else {
+            format!("{dir}/")
+        };
+        let mut out: Vec<String> = self
+            .files
+            .keys()
+            .filter(|k| k.starts_with(&prefix) && !k[prefix.len()..].contains('/'))
+            .cloned()
+            .collect();
+        out.sort();
+        Ok(out)
     }
 }
 
@@ -211,6 +257,42 @@ mod tests {
         let src = FsSource;
         assert!(!src.exists("assets/__definitely_missing__.spv"));
         assert!(src.read("assets/__definitely_missing__.spv").is_err());
+    }
+
+    /// **`list_dir` 只返回直接子项**（2026-11-10）：`MemSource` 必须与 `read_dir` 的语义对齐，
+    /// 否则 `PropSet::load_dir` 会把子目录里的文件也当成本层资产（现在不会，但一旦有人改成
+    /// 递归就会静默多加载）。判据 = 三层嵌套里只出最外层那两个。
+    #[test]
+    fn mem_source_list_dir_returns_direct_children_only() {
+        let mut m = MemSource::new();
+        m.insert("assets/props/a.glb", vec![1]);
+        m.insert("assets/props/b.glb", vec![2]);
+        m.insert("assets/props/sub/c.glb", vec![3]);
+        m.insert("assets/guns/d.glb", vec![4]);
+        let got = m.list_dir("assets/props").expect("MemSource 必须支持列举");
+        assert_eq!(got, vec!["assets/props/a.glb".to_string(), "assets/props/b.glb".to_string()]);
+        // 尾斜杠也接受
+        assert_eq!(m.list_dir("assets/props/").unwrap().len(), 2);
+        // 不存在的目录 ⇒ 空列表（不是 Err：read_dir 语义）
+        assert!(m.list_dir("assets/nope").unwrap().is_empty());
+    }
+
+    /// `FsSource::list_dir` 指向一个真实目录时，必须真的列出这个仓库里的道具文件。
+    /// （与 `PropSet::load_dir` 走的是同一条路径 ⇒ 这条判据守着"加载器还能找到资产"。）
+    #[test]
+    fn fs_source_list_dir_lists_real_prop_assets() {
+        let src = FsSource;
+        let got = src.list_dir("assets/props").expect("列举 assets/props 失败");
+        assert!(!got.is_empty(), "assets/props 列举为空 ⇒ 道具加载器会静默拿不到任何资产");
+        assert!(
+            got.iter().any(|p| p.ends_with(".glb")),
+            "assets/props 里没有任何 .glb：{:?}",
+            &got.iter().take(5).collect::<Vec<_>>()
+        );
+        assert!(
+            got.iter().all(|p| !p.contains("sub/")),
+            "list_dir 不应递归进子目录"
+        );
     }
 
     #[test]
@@ -473,6 +555,10 @@ mod asset_path_scan_tests {
         // (these ARE the std::fs side of the trait; Android supplies its own impl)
         ("src/engine/asset_source.rs", "std::fs::read(path)"),
         ("src/engine/asset_source.rs", "std::fs::read_dir(&dir)"),
+        // `FsSource::list_dir` 自己的实现（2026-11-10）：这是**抽象层内部**，本来就该用
+        // std::fs —— 与上面三条同类。注意片段的写法定死到 `read_dir(dir).map_err`，
+        // 因为 props.rs 已经不再直读（那边的四条已删）。
+        ("src/engine/asset_source.rs", "std::fs::read_dir(dir).map_err"),
         ("src/engine/asset_source.rs", "std::fs::read(&p)"),
         // source-scanning test scaffolding: reads the checkout, not shipped assets
         ("src/engine/renderer/tests_support.rs", "std::fs::read_to_string(path)"),
@@ -485,15 +571,9 @@ mod asset_path_scan_tests {
         ("src/engine/cpu.rs", "std::fs::read_to_string(&p)"),
         ("src/engine/cpu.rs", "std::fs::read_to_string(&path)"),
         ("src/engine/cpu.rs", "/sys/devices/system/cpu/online"),
-        // GLB props: KNOWN GAP (documented in props.rs) -- `AssetSource` has no directory
-        // listing, so `PropSet::load_dir` cannot be ported until the trait gains one.
-        ("src/engine/props.rs", "std::fs::read_dir(dir)"),
-        ("src/engine/props.rs", "std::fs::read(&path)"),
-        // 整城 chunk（2026-11-01）：同一条已知缺口 —— `PropSet::append_dir` 也要目录列举，
-        // 走的是与 `load_dir` 完全相同的两条调用（`read_dir` / `read`），因此同样无法移植到
-        // `AssetSource`。补目录列举方法时这两条一起改。
-        ("src/engine/props.rs", "std::fs::read_dir(dir) "),
-        ("src/engine/props.rs", "std::fs::read(&path) "),
+        // ✅ GLB props / 整城 chunk（2026-11-10）：**已移植到 `AssetSource::list_dir`**，
+        // 因此这里不再有 `src/engine/props.rs` 的条目。原来那四条（含"KNOWN GAP"注释）已删除
+        // —— 白名单是"当前还有哪些直读点"，站点消失后条目必须一起消失，否则它就是过期数据。
     ];
 
     /// 🔴 **剔除 `#[cfg(test)]` 项不能连带切掉它后面的生产代码**
