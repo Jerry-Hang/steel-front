@@ -3771,3 +3771,18 @@ RESULT: 全部命中（差异仅为 pub(crate) 前缀）
 
 **当前 `app_*` 模块**：`app_window`（335 行，窗口/焦点/截图/帧率上限）、
 `app_gun`（663 行，姿态矩阵 + GLB 加载 + 网格构建 + 顶点色烘焙）。
+
+### 2026-11-10（续155）：第六刀 —— `sync_cursor` 搬进 `app_window`（lib.rs 5201 行）
+
+`sync_cursor`（181 行：焦点 + 游戏态 + 设置/ESC 菜单四条件决定要不要抓光标、锁哪种模式、
+释放时恢复默认图标）整块搬进 `app_window.rs` 的 `impl GameApp`。它与该模块已有的
+`cursor_grab_plan`/`lock_observation`/`window_physical_request` 是同一主题。
+
+**搬完立刻红了一条源码扫描判据**（`cursor_release_restores_default_icon_and_is_shared`）：
+它统计 `self.release_cursor_immediately(` 的调用点，而它只 `include_str!("lib.rs")`
+⇒ 搬家后少一处，报「至少 4 处，实际 3」。**判据该跟着代码走，不是代码跟着判据走**：
+把扫描面改成 `lib.rs + app_window.rs` 拼接，并保持"两段都必须非空"（防 `include_str!` 失效时
+变成恒真断言）。修完后该判据与全量测试都绿。
+
+校验：`move_verify_normalized.py` → 1451..1631（181 行）归一化后逐字节命中。
+`lib.rs` **5382 → 5201 行**（累计 6320 → 5201，**降 1119 行 / 17.7%**）；903 passed。

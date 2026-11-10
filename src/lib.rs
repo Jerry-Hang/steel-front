@@ -1448,187 +1448,6 @@ impl GameApp {
     }
 
     /// 按游戏状态同步光标捕获：Playing = 捕获 + 隐藏；否则释放。
-    fn sync_cursor(&mut self) {
-        // 🔴🔴 2026-09-13 修（用户实测"鼠标完全转不了视角"的根因）：
-        // **焦点不能只靠 `WindowEvent::Focused` 事件**。
-        // 窗口在**创建时就已获得焦点**是启动的常见情形，此时 Windows **不会再发
-        // 一次 `WM_SETFOCUS`** ⇒ winit 不发 `Focused(true)` ⇒ `self.focused` 永远停在
-        // 初值 `false` ⇒ `want` 永远为假 ⇒ **光标永不抓取、视角永不响应鼠标**，
-        // 而键盘与左右键照常工作（它们不经过 `want`）—— 正是用户描述的现象。
-        // 2026-09-12 把初值从 `true` 改成 `false` 修掉了"没焦点却自认为有焦点"，
-        // 但代价就是这一条：**只信事件就永远抓不住**。
-        // ⇒ 直接问操作系统（`Window::has_focus()`），事件只作快速路径。
-        let actually_focused = match &self.window {
-            // 优先直接问系统（见 window_is_foreground 的注释：事件与 has_focus() 都不可靠）
-            Some(w) => window_is_foreground(w).unwrap_or_else(|| w.has_focus()),
-            None => return,
-        };
-        self.focused = actually_focused;
-        let Some(window) = &self.window else {
-            return;
-        };
-        let want = capture_wanted(
-            self.focused,
-            self.game.state() == GameState::Playing,
-            self.game.settings_open(),
-            self.game.hud.esc_menu_open,
-            !no_capture(),
-        );
-        // ESC 菜单/设置面板打开或失焦时释放鼠标（2026-08-15：菜单需鼠标点选）
-        if want && !self.cursor_captured {
-            // Locked：系统级指针锁定 + 相对 MouseMotion，光标不会飞出窗口。
-            // 仅在 raw 相对增量真会到达的平台才用它（见 RAW_MOUSE_MOTION）：
-            // 其余平台退 Confined + 绝对位置路径（Xwayland 与本机 Windows 同路）。
-            let (locked, grabbed) = cursor_grab_plan(
-                RAW_MOUSE_MOTION,
-                || window.set_cursor_grab(CursorGrabMode::Locked).is_ok(),
-                || window.set_cursor_grab(CursorGrabMode::Confined).is_ok(),
-            );
-            // 🔴🔴🔴 2026-09-13 定案（用户"鼠标完全转不了视角"的真正根因）：
-            // **在绝对位置路径上绝不能隐藏光标。**
-            //
-            // winit 0.30 的 Windows 后端（`window_state.rs` 的 `refresh_os_cursor`）这么写：
-            //     if locked        { 钉在窗口中心 1x1 }
-            //     else if HIDDEN   { 钉在窗口中心 1x1 }   ← ← ← 就是这条
-            //     else             { 限制在 client_rect 内 }
-            // 注释说这是为了"防止隐藏的光标去激活任务栏"。对**真相对鼠标**的游戏合理，
-            // 但我们的 Windows 路径是 **Confined + 绝对位置**（见 `RAW_MOUSE_MOTION`）——
-            // 视角完全靠 `CursorMoved` 的 `dx` 算出来。**光标被钉在一个像素上，
-            // `dx` 恒为 0，视角自然纹丝不动**，而键盘与左右键照常工作。
-            //
-            // 实测证据（2026-09-13，在用户真实会话的进程还活着时量的）：
-            //   `GetClipCursor` = 853,533 - 854,534   ⇒ **1×1 像素**
-            //   我自己的诊断里 `mouse=15` 但 `at=(1280,800)` **五条采样完全相同**（没动过）
-            //
-            // ⇒ 只在**真 Locked**（相对鼠标，`DeviceEvent::MouseMotion` 驱动视角）时才隐藏光标。
-            // 绝对路径**不能隐藏**（否则 winit 把指针钉成 1×1），但又不能给玩家看一个箭头 ——
-            // 用户 2026-09-13 反馈"鼠标图标一直浮在中心"。
-            //
-            // ⇒ 第三解：**设一个 1×1 全透明的自定义光标**。
-            // winit 只检查自己的 `CursorFlags::HIDDEN` 标志，**从不看光标图像本身**，
-            // 所以"未隐藏 + 图像透明"同时满足两边的要求：
-            //   * winit 侧 ⇒ 走 `Some(client_rect)`，光标能在窗口内自由移动（视角能转）
-            //   * 玩家侧 ⇒ 屏幕上什么都看不见
-            // 释放时用 `CursorIcon::Default` 恢复系统箭头（菜单里要用）。
-            if locked {
-                window.set_cursor_visible(false);
-            } else {
-                // 用启动时造好的那个 1x1 全透明光标（见 `resumed` 里的注释）。
-                // 它必须由事件循环创建，所以在这里只做 `set_cursor`。
-                match self.blank_cursor.clone() {
-                    Some(c) => {
-                        window.set_cursor_visible(true);
-                        window.set_cursor(c);
-                    }
-                    // 造不出来（驱动拒绝 1×1）就退回可见箭头 —— 能玩优先
-                    None => window.set_cursor_visible(true),
-                }
-            }
-            self.cursor_captured = grabbed || locked;
-            self.cursor_locked = locked;
-            self.abs_baseline_valid = false;
-            // 开始观察这次的锁到底有没有生效（见 `LockObservation`）。
-            // 基准取**当前的** `cursor_evt_count`，所以这个窗口内来一个增量就算确认。
-            if locked {
-                self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
-                self.lock_retried = false;
-            } else {
-                self.lock_observe = None;
-            }
-            if !locked {
-                // WSLg/Xwayland 回退：绝对位置路径。不在捕获瞬间回中——
-                // 指针真实位置未知，等首个 CursorMoved 作基准（abs_baseline_valid）。
-                self.recenter_pending_until = None;
-            } else {
-                // Locked grab 可用：raw 相对增量驱动。捕获瞬间回中隐藏光标，
-                // 150ms 窗口吞掉这次 warp 的 raw 回声（仅此一次 warp）。
-                let size = window.inner_size();
-                let center = winit::dpi::PhysicalPosition::new(
-                    size.width as f64 / 2.0,
-                    size.height as f64 / 2.0,
-                );
-                let _ = window.set_cursor_position(center);
-                self.last_cursor = (center.x, center.y);
-                self.recenter_pending_until = Some(Instant::now() + Duration::from_millis(150));
-            }
-            // 只在**模式变化**时打（见 `cursor_grab_logged` 的注释）：
-            // 抓取持续失败时这段代码每帧都会走到，逐帧打日志会把 logcat 刷爆。
-            let mode: u8 = if locked {
-                2
-            } else if grabbed {
-                1
-            } else {
-                0
-            };
-            if mode != self.cursor_grab_logged {
-                self.cursor_grab_logged = mode;
-                log::info!(
-                    "input: cursor captured (mouse look on, grab={}, look={})",
-                    if locked {
-                        "locked"
-                    } else if grabbed {
-                        "confined"
-                    } else {
-                        "none"
-                    },
-                    if locked { "relative" } else { "absolute" }
-                );
-            }
-        // ---- 锁定态观察：锁到底有没有真的生效（见 `LockObservation`）----
-        //
-        // 这一段是**诊断 + 一次补救**，不是降级：Wayland 下不能退回 Confined ——
-        // `set_cursor_position` 只在已 Locked 时才成功，Confined 下指针撞到窗口边
-        // 就再也转不动（比"完全不转"更难排查）。所以对 NoMotion 的处理是
-        // **补抓一次**（指针此时多半已经 enter 了，而 `apply_on_pointer` 只对
-        // 已 enter 的指针生效 ⇒ 这次多半能成），再不行就**给出明确的提示**。
-        if self.cursor_captured && self.cursor_locked {
-            if let Some((started, motion_at_start)) = self.lock_observe {
-                let delta = self.cursor_evt_count.saturating_sub(motion_at_start);
-                match lock_observation(started.elapsed().as_millis(), delta, LOCK_OBSERVE_MS) {
-                    LockObservation::Pending => {}
-                    LockObservation::Confirmed => {
-                        // 锁确实生效 —— 收工，之后不再观察（也不再补抓）
-                        self.lock_observe = None;
-                    }
-                    LockObservation::NoMotion => {
-                        if !self.lock_retried {
-                            // 指针很可能在抓取之后才进入窗口 ⇒ 补抓一次
-                            self.lock_retried = true;
-                            let ok = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
-                            self.lock_observe = Some((Instant::now(), self.cursor_evt_count));
-                            log::warn!(
-                                "input: 锁定后 {}ms 内一个相对增量都没收到 —— 锁可能没生效，\
-                                 已补抓一次（set_cursor_grab(Locked) -> {}）。\
-                                 原因：winit 在指针尚未 enter 窗口时调 lock_pointer 会\
-                                 **什么都没做却返回 Ok**，且它忽略合成器的确认事件，\
-                                 所以失败无法从返回值看出来。",
-                                LOCK_OBSERVE_MS,
-                                if ok { "Ok" } else { "Err" }
-                            );
-                        } else if !self.lock_fake_warned {
-                            self.lock_fake_warned = true;
-                            self.lock_observe = None;
-                            log::error!(
-                                "input: 🔴 补抓之后仍然零相对增量 ⇒ 本会话的鼠标视角**不会工作**\
-                                 （锁定是假成功）。这不是鼠标故障，是后端差异：Wayland 下\
-                                 Locked 的失败是静默的，且 Confined 也无法回转指针。\
-                                 ⇒ 请用 RV3D_BACKEND=x11 走 Xwayland 重开一局 —— \
-                                 那里 set_cursor_grab(Locked) 会如实返回 NotSupported，\
-                                 引擎会自动落到 Confined + 绝对位置路径，而 X11 的\
-                                 set_cursor_position 走 XWarpPointer 是真的生效的。\
-                                 （本提示只发一次；`cam:` 日志里的 evt 计数可继续观测。）"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        } else if !want && self.cursor_captured {
-            self.release_cursor_immediately("sync_cursor");
-        }
-
-
-    }
 
     /// 把 WASD 按键状态转发给游戏（FPS 玩家移动）
     /// ESC 的语义（2026-10-11 从 `KeyboardInput` 分支里抽出）：
@@ -4242,7 +4061,15 @@ mod tests {
     fn cursor_release_restores_default_icon_and_is_shared() {
         // 🔴 Windows 检出是 CRLF（本机 `core.autocrlf=true`）⇒ 先归一化行尾，
         // 否则下面搜 `"\n    }\n"` 永远搜不到（实测 2026-10-26）。
-        let raw = include_str!("lib.rs");
+        // 🔴 2026-11-10：`sync_cursor` 已搬到 `src/app_window.rs`（lib.rs 拆分），
+        // 而这条判据原本只扫 `lib.rs` ⇒ 搬家后它会把"代码动过"误报成"释放点丢了"。
+        // 判据要跟着代码走：把两处拼起来扫，并且**两条都必须非空**（防止 include 失效
+        // 导致"扫到 0 个"却仍然通过 —— 那是恒真断言）。
+        let raw = format!(
+            "{}\n{}",
+            include_str!("lib.rs"),
+            include_str!("app_window.rs")
+        );
         let src = raw.replace("\r\n", "\n");
         let src = src.as_str();
         let start = src.find("fn release_cursor_immediately").expect("必须有统一释放实现");
