@@ -3786,3 +3786,15 @@ RESULT: 全部命中（差异仅为 pub(crate) 前缀）
 
 校验：`move_verify_normalized.py` → 1451..1631（181 行）归一化后逐字节命中。
 `lib.rs` **5382 → 5201 行**（累计 6320 → 5201，**降 1119 行 / 17.7%**）；903 passed。
+
+### 2026-11-11（续156）：第七刀 —— 士兵资产加载拆出 `app_assets`（lib.rs 5159 行）
+
+搬出 `load_soldier_glb`（18 行，只查缓存）+ `load_soldier_glb_uncached`（35 行，真正解析/装网格）
+到新模块 `app_assets.rs`。与 `app_gun` 里的枪模加载**对称**：两者都是"外部资产 → 引擎网格"。
+
+🔴 一个容易忽略的点：**方法搬进另一个 `impl GameApp` 后，`lib.rs` 里不需要 `pub(crate) use
+app_assets::*;`** —— 固有方法通过类型解析，glob 再导出反而报 `unused import`（0 警告红线当场红）。
+只有**自由函数/常量**才需要 re-export。这条以前几刀没暴露，是因为搬的都是自由函数或结构体。
+
+校验：`move_verify_normalized.py` → 18 + 35 行归一化后逐字节命中。
+`lib.rs` **5201 → 5159 行**（累计 6320 → 5159，**降 1161 行 / 18.4%**）；903 passed。
