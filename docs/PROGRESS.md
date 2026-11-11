@@ -3798,3 +3798,18 @@ app_assets::*;`** —— 固有方法通过类型解析，glob 再导出反而�
 
 校验：`move_verify_normalized.py` → 18 + 35 行归一化后逐字节命中。
 `lib.rs` **5201 → 5159 行**（累计 6320 → 5159，**降 1161 行 / 18.4%**）；903 passed。
+
+### 2026-11-11（续157）：第八刀 —— 触屏输入拆出 `app_touch`（lib.rs 5078 行）
+
+搬出触摸输入整块 **81 行**（文档注释 + `#[cfg(target_os = "android")] impl GameApp` + `handle_touch`）。
+
+🔴 这一刀差点踩坑：`handle_touch` **不是**普通方法，它在一个**独立的条件编译 impl 块**里。
+我第一次只从 `fn handle_touch` 那一行切起，把 `#[cfg(target_os = "android")] impl GameApp {` 头
+留在原地 ⇒ 桌面编译立刻报 `no field touch_move / touch_fire`（这些字段本身也只在 Android 下存在）。
+**⇒ 从 impl 块里搬方法，起点要取到 `impl` 行（连同它的 cfg 属性与文档注释）。**
+
+配套：模块顶部的两条 `use` 也要加 `#[cfg(target_os = "android")]`，否则桌面构建报 unused import
+（0 警告红线）。
+
+校验：`move_verify_normalized.py` → 2494..2574（81 行）归一化后逐字节命中。
+`lib.rs` **5159 → 5078 行**（累计 6320 → 5078，**降 1242 行 / 19.7%**）；903 passed。
