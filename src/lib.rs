@@ -1564,6 +1564,75 @@ impl GameApp {
     }
 
     /// 渲染一帧
+    /// HUD 的**文本叠加层**：命令输入框（含提示行）与伤害飘字。
+    ///
+    /// 从 `render()` 里整块抽出来的（2026-11-11，纯提取，行为不变）。抽成
+    /// **参数化的关联函数**而不是 `&self` 方法，是因为调用点在 `if let Some(renderer) =
+    /// &mut self.renderer` 里面 —— 那时 `self` 已被可变借用，再取 `&self` 直接编译失败
+    /// （E0502）。把"只读输入 + 可变输出"显式列出来，顺带说清了这段到底依赖什么。
+    #[allow(clippy::too_many_arguments)]
+    fn append_hud_text_overlays(
+        command_open: bool,
+        state: GameState,
+        command_buf: &str,
+        anim_clock: f32,
+        hud: &crate::ui::HudState,
+        popups: &[(f32, f32)],
+        quads: &mut Vec<crate::ui::Quad>,
+    ) {
+        // 命令输入窗口（Minecraft 风格左下角）：深色半透明底 + 提示符 + 闪烁光标
+        if command_open && state == GameState::Playing {
+            let s = hud.ui_scale();
+            let prompt = format!("> {}{}", command_buf, {
+                if (anim_clock * 2.0).sin() > 0.0 { '_' } else { ' ' }
+            });
+            let box_x = 10.0 * s;
+            // 🔴 按**实际屏幕高度**算（2026-10-20，第 14 批复核第 8 条）：
+            // 写死 800 基准时 720p 下 y=754 > 720 ⇒ 命令框整个画到屏幕外。
+            let box_y = crate::ui::HudState::command_box_y(hud.screen_h, s);
+            let box_h = 36.0 * s;
+            let text_scale = 2.0 * s;
+            let text_w = crate::ui::text_width(&prompt, text_scale);
+            let box_w = (text_w + 26.0 * s).max(180.0 * s);
+            quads.push(crate::ui::Quad::new(
+                crate::ui::Rect::new(box_x, box_y, box_w, box_h),
+                crate::ui::Color::new(0.06, 0.06, 0.12, 0.72),
+            ));
+            crate::ui::render_text(
+                &prompt,
+                box_x + 10.0 * s,
+                box_y + 8.0 * s,
+                crate::ui::Color::WHITE,
+                text_scale,
+                quads,
+            );
+            // 提示行：武器编号范围说明
+            crate::ui::render_text(
+                "武器编号 1-35（回车切换，Esc 关闭）",
+                box_x + 2.0 * s,
+                box_y - 22.0 * s,
+                crate::ui::Color::YELLOW,
+                1.3 * s,
+                quads,
+            );
+        }
+        // 伤害飘字：准星下方逐条显示（红色，随剩余时间上浮淡出）
+        let s = hud.ui_scale();
+        let mut popup_y = 120.0 * s;
+        for (dmg, remain) in popups {
+            let alpha = (remain / 0.6).clamp(0.0, 1.0);
+            crate::ui::render_text(
+                &format!("-{:.0}", dmg),
+                (hud.screen_w / s) * 0.5 * s + 12.0 * s,
+                popup_y,
+                crate::ui::Color::new(1.0, 0.35 * alpha, 0.25 * alpha, alpha),
+                1.6 * s,
+                quads,
+            );
+            popup_y += 20.0 * s;
+        }
+    }
+
     fn render(&mut self) {
         // 【诊断】`GameApp::render()` 的**准备段**计时（起 → 调用 `renderer.render`）。
         // 存在的理由（2026-10-13）：实测 `cyc = upd + ren` 自洽，但 `ren − frame_us ≈ 2000µs`，
@@ -1678,57 +1747,15 @@ impl GameApp {
             // 【诊断】把 HUD 的"构建几何"与"上传"分开：`t_hud_build` = 几何构建完的时刻
             let t_hud_build = prep_start.elapsed().as_micros() as u64;
             let hud_quad_count = quads.len();
-            // 命令输入窗口（Minecraft 风格左下角）：深色半透明底 + 提示符 + 闪烁光标
-            if self.command_open && self.game.state() == GameState::Playing {
-                let s = self.game.hud.ui_scale();
-                let prompt = format!("> {}{}", self.command_buf, {
-                    if (self.anim_clock * 2.0).sin() > 0.0 { '_' } else { ' ' }
-                });
-                let box_x = 10.0 * s;
-                // 🔴 按**实际屏幕高度**算（2026-10-20，第 14 批复核第 8 条）：
-                // 写死 800 基准时 720p 下 y=754 > 720 ⇒ 命令框整个画到屏幕外。
-                let box_y = crate::ui::HudState::command_box_y(self.game.hud.screen_h, s);
-                let box_h = 36.0 * s;
-                let text_scale = 2.0 * s;
-                let text_w = crate::ui::text_width(&prompt, text_scale);
-                let box_w = (text_w + 26.0 * s).max(180.0 * s);
-                quads.push(crate::ui::Quad::new(
-                    crate::ui::Rect::new(box_x, box_y, box_w, box_h),
-                    crate::ui::Color::new(0.06, 0.06, 0.12, 0.72),
-                ));
-                crate::ui::render_text(
-                    &prompt,
-                    box_x + 10.0 * s,
-                    box_y + 8.0 * s,
-                    crate::ui::Color::WHITE,
-                    text_scale,
-                    &mut quads,
-                );
-                // 提示行：武器编号范围说明
-                crate::ui::render_text(
-                    "武器编号 1-35（回车切换，Esc 关闭）",
-                    box_x + 2.0 * s,
-                    box_y - 22.0 * s,
-                    crate::ui::Color::YELLOW,
-                    1.3 * s,
-                    &mut quads,
-                );
-            }
-            // 伤害飘字：准星下方逐条显示（红色，随剩余时间上浮淡出）
-            let s = self.game.hud.ui_scale();
-            let mut popup_y = 120.0 * s;
-            for (dmg, remain) in &self.hit_damage_popups {
-                let alpha = (remain / 0.6).clamp(0.0, 1.0);
-                crate::ui::render_text(
-                    &format!("-{:.0}", dmg),
-                    (self.game.hud.screen_w / s) * 0.5 * s + 12.0 * s,
-                    popup_y,
-                    crate::ui::Color::new(1.0, 0.35 * alpha, 0.25 * alpha, alpha),
-                    1.6 * s,
-                    &mut quads,
-                );
-                popup_y += 20.0 * s;
-            }
+            Self::append_hud_text_overlays(
+                self.command_open,
+                self.game.state(),
+                &self.command_buf,
+                self.anim_clock,
+                &self.game.hud,
+                &self.hit_damage_popups,
+                &mut quads,
+            );
             renderer.set_hud_quads(&quads);
             renderer.set_lights(&self.game.light_uniform([self.camera.position().x, self.camera.position().y, self.camera.position().z], self.camera.yaw));
             let t_hud = prep_start.elapsed().as_micros();
