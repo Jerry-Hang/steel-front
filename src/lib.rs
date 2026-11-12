@@ -1633,6 +1633,69 @@ impl GameApp {
         }
     }
 
+    /// 自发光 marker：**粒子**（按相机距离由近及远占剩余槽位）+ **手雷**可见小方块。
+    ///
+    /// 从 `render()` 整块抽出（2026-11-12，纯提取）。参数化关联函数的理由同
+    /// `append_hud_text_overlays`：调用点在 `&mut self.renderer` 借用内，取 `&self` 会 E0502。
+    /// 这段只依赖 `particles` / `eye` / `grenade_positions` / 已占槽位数。
+    fn append_particle_emissive_markers(
+        particles: &[Particle],
+        eye: glam::Vec3,
+        grenade_positions: &[[f32; 3]],
+        reserving: usize,
+        emissive_markers: &mut Vec<engine::renderer::WorldMarker>,
+    ) {
+    // 自发光槽位只有 64 个（与 build.rs 的 EMISSIVE_INSTANCE_BASE + 64 严格同步）：
+    // 128v128 压力下上百个 NPC 同时开火，按插入顺序截断会让「远处/将熄的焰」占坑、
+    // 「近处的新焰」被丢弃 —— 玩家面前因此悬浮着几团本不该存在的琥珀色圆盘（D8）。
+    // 策略：爆炸特效保底，剩余槽位按相机距离由近及远分配。
+    const MAX_EMISSIVE: usize = 64;
+    // 预留：爆炸特效已入列的 + 紧随其后要画的手雷（数量很小），剩下的才给粒子
+    let reserved = reserving + grenade_positions.len();
+    let mut cand: Vec<(f32, engine::renderer::WorldMarker)> = particles
+        .iter()
+        .map(|p| {
+            let t = (p.age / p.life).clamp(0.0, 1.0);
+            let size = if p.kind == 0 {
+                p.size * (1.0 - t * 0.7) // 焰：快速收缩
+            } else {
+                p.size
+            };
+            let fade = 1.0 - t;
+            let d = (p.pos[0] - eye.x).powi(2)
+                + (p.pos[1] - eye.y).powi(2)
+                + (p.pos[2] - eye.z).powi(2);
+            (
+                d,
+                engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::from(p.pos))
+                        * glam::Mat4::from_scale(glam::Vec3::splat(size)),
+                    tint: [
+                p.tint[0] * fade,
+                p.tint[1] * fade,
+                p.tint[2] * fade,
+                if p.kind == 0 { 0.0 } else { 1.0 }, // 焰=火，壳=固体
+            ],
+                },
+            )
+        })
+        .collect();
+    cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+    emissive_markers.extend(
+        cand.into_iter()
+            .take(MAX_EMISSIVE.saturating_sub(reserved))
+            .map(|(_, m)| m),
+    );
+    // 手雷可见实体：深橄榄色小方块（飞行/落地均可见，复用 emissive 通道）
+    for gp in grenade_positions {
+        emissive_markers.push(engine::renderer::WorldMarker {
+            model: glam::Mat4::from_translation(glam::Vec3::from(*gp))
+                * glam::Mat4::from_scale(glam::Vec3::splat(0.16)),
+            tint: [0.35, 0.4, 0.12, 1.0],
+        });
+    }
+    }
+
     fn render(&mut self) {
         // 【诊断】`GameApp::render()` 的**准备段**计时（起 → 调用 `renderer.render`）。
         // 存在的理由（2026-10-13）：实测 `cyc = upd + ren` 自洽，但 `ren − frame_us ≈ 2000µs`，
@@ -1971,57 +2034,14 @@ impl GameApp {
                 })
                 .collect();
             // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块。
-            // 自发光槽位只有 64 个（与 build.rs 的 EMISSIVE_INSTANCE_BASE + 64 严格同步）：
-            // 128v128 压力下上百个 NPC 同时开火，按插入顺序截断会让「远处/将熄的焰」占坑、
-            // 「近处的新焰」被丢弃 —— 玩家面前因此悬浮着几团本不该存在的琥珀色圆盘（D8）。
-            // 策略：爆炸特效保底，剩余槽位按相机距离由近及远分配。
-            const MAX_EMISSIVE: usize = 64;
-            let eye = self.camera.position();
-            // 预留：爆炸特效已入列的 + 紧随其后要画的手雷（数量很小），剩下的才给粒子
-            let reserved = emissive_markers.len() + self.game.grenade_positions().len();
-            let mut cand: Vec<(f32, engine::renderer::WorldMarker)> = self
-                .particles
-                .iter()
-                .map(|p| {
-                    let t = (p.age / p.life).clamp(0.0, 1.0);
-                    let size = if p.kind == 0 {
-                        p.size * (1.0 - t * 0.7) // 焰：快速收缩
-                    } else {
-                        p.size
-                    };
-                    let fade = 1.0 - t;
-                    let d = (p.pos[0] - eye.x).powi(2)
-                        + (p.pos[1] - eye.y).powi(2)
-                        + (p.pos[2] - eye.z).powi(2);
-                    (
-                        d,
-                        engine::renderer::WorldMarker {
-                            model: glam::Mat4::from_translation(glam::Vec3::from(p.pos))
-                                * glam::Mat4::from_scale(glam::Vec3::splat(size)),
-                            tint: [
-                        p.tint[0] * fade,
-                        p.tint[1] * fade,
-                        p.tint[2] * fade,
-                        if p.kind == 0 { 0.0 } else { 1.0 }, // 焰=火，壳=固体
-                    ],
-                        },
-                    )
-                })
-                .collect();
-            cand.sort_by(|a, b| a.0.total_cmp(&b.0));
-            emissive_markers.extend(
-                cand.into_iter()
-                    .take(MAX_EMISSIVE.saturating_sub(reserved))
-                    .map(|(_, m)| m),
+            let gps = self.game.grenade_positions();
+            Self::append_particle_emissive_markers(
+                &self.particles,
+                self.camera.position(),
+                &gps,
+                emissive_markers.len(),
+                &mut emissive_markers,
             );
-            // 手雷可见实体：深橄榄色小方块（飞行/落地均可见，复用 emissive 通道）
-            for gp in self.game.grenade_positions() {
-                emissive_markers.push(engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::from(gp))
-                        * glam::Mat4::from_scale(glam::Vec3::splat(0.16)),
-                    tint: [0.35, 0.4, 0.12, 1.0],
-                });
-            }
             // 弹孔：子弹打在障碍表面的着弹标记（`game.rs::impact_marks`）。
             // 单独一批、只追加进光栅 marker 列表 —— 不喂 PT 场景（弹孔每枪都变，
             // 会让 BLAS 指纹每帧重建，也白占 PT 盒容量）。方片的局部 +Z 用

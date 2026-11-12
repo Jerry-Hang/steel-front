@@ -3832,3 +3832,19 @@ app_assets::*;`** —— 固有方法通过类型解析，glob 再导出反而�
 
 `lib.rs` 5078 → 5104 行（抽函数加了签名与文档，行数略增是预期的；这刀的价值是**分节**，
 不是行数）。
+
+### 2026-11-12（续159）：`render()` 第二次切分 —— 粒子/手雷的自发光 marker
+
+把"自发光槽位分配"那段（51 行：粒子按相机距离由近及远占剩余 64 槽位 + 手雷可见小方块）
+抽成 `append_particle_emissive_markers(particles, eye, grenade_positions, reserving, out)`。
+
+**两个坑**（都是"跨行写法"导致的静默失败）：
+1. 原文是 `let eye = self.camera.position();`，我批量把 `self.camera.position()` 换成 `eye`
+   ⇒ 变成了 `let eye = eye;`（**先定义再自赋值**，编译能过、逻辑错）。这类替换必须排除声明行。
+2. 原文 `self` 与 `.particles` **分在两行**，按字面 `self.particles` 替换打不中，编译期才报
+   `expected value, found module self` ⇒ 换行写法要用正则 `self\s*\.particles`。
+
+**验收两条**：
+1. 903 passed / build 0 警告；
+2. 同机位像素对照：差异 **112 / 1,024,000 = 0.0109%**，包围盒 `x[84,105] y[24,37]`
+   = 左上角 FPS 文字（与上一刀同一处，说明两刀都没有动到画面）。
