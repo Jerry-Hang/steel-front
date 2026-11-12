@@ -1887,6 +1887,152 @@ impl GameApp {
         (markers, emissive_markers, decal_markers)
     }
 
+    /// NPC 士兵可视化：把 `game` 里的每只 NPC 折成 `NpcVisual`（位置/朝向/阵营色/相位/动作态）。
+    ///
+    /// 从 `render()` 整块抽出（2026-11-12，纯提取，134 行）。抽成**参数化关联函数**的理由：
+    /// 调用点在 `&mut self.renderer` 借用内，取 `&mut self` 会 E0502；而这段只碰
+    /// `game` / `last_snapshot` / `corpses` / `anim_clock` 四个**互不相交**的字段，
+    /// 显式传参既能编译、也把"它到底改了哪些状态"写在签名上。
+    fn build_npc_visuals(
+        game: &mut crate::engine::game::Game,
+        last_snapshot: &mut std::collections::HashMap<usize, ([f32; 3], f32, [f32; 4])>,
+        corpses: &mut Vec<([f32; 3], f32, [f32; 4], f32)>,
+        anim_clock: f32,
+    ) -> Vec<engine::renderer::NpcVisual> {
+    // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
+    // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）；
+    // 动画字段：移动中摆臂摆腿（步态）、攻击态枪身后坐脉冲
+    let now_ids: std::collections::HashSet<usize> =
+        game.npcs.iter().map(|n| n.id).collect();
+    // 尸体跟踪：本帧消失的 NPC id（被击杀移除）→ 从上一帧快照找回位置/朝向/阵营
+    for id in last_snapshot.keys() {
+        if !now_ids.contains(id) {
+            if let Some((pos, yaw, tint)) = last_snapshot.get(id) {
+                corpses.push((*pos, *yaw, *tint, 0.0));
+            }
+        }
+    }
+    // 更新快照（供下一帧 diff）
+    *last_snapshot = game
+        .npcs
+        .iter()
+        .map(|n| {
+            let tint = match n.team {
+                Team::Red => [0.95, 0.12, 0.08, 1.0],
+                Team::Blue => [0.08, 0.35, 0.98, 1.0],
+            };
+            (n.id, (n.position, n.facing, tint))
+        })
+        .collect();
+    // 客户端联机模式：显示服务器世界（快照实体：位置/朝向/血量来自服务器权威），
+    // 阵营色借用本地同 id NPC 的归属（同一确定性地图/波次，id 对齐）
+    //
+    // 进画面的规则：id 段 >=100_000 是远端玩家、id==0 是本机玩家槽，两者无条件进；
+    // 剩下的都是本地 NPC（id < 100_000），只有活着才进。
+    // 原来写成 `(id<100k && hp>0) || id==0 || id>=100k`：`id==0` 已被 `id<100k`
+    // 覆盖，而 `id>=100k` 恰好是 `id<100k` 的反面，吸收律化简后那段 id 判据是多余的
+    // （clippy::nonminimal_bool 报的就是这个）。化简式逐档等价。
+    // 🔴 渲染剔除走**分摊刷新缓存**（2026-09-26 实测优化）：
+    // 原来每帧对全部 NPC 直接调 `npc_occluded`（每次最坏 2×1240 次 AABB 相交），
+    // 而枪口焰那段**又调了一遍** ⇒ 压力场景 510 次/帧、`cull-diag` 实测中位
+    // **102 ms/s（≈18% 帧预算）**。现在一帧只刷新 1/N 的 NPC，两条路共用同一份结果。
+    // 判据 = `cull-diag: <us>/s`（`RV3D_CULL_DIAG=1`）与 `npc_vis_scans`。
+    game.refresh_npc_visibility();
+    let vis = game.npc_visibility_flags();
+    // 🔴 用 `if let` 而不是 `is_some()` + `unwrap()`（2026-10-17）：
+    // `prod_panic_sweep` 每次都会把那个 `unwrap` 报成 1 处生产 unwrap。
+    // 它虽然被上一行的 `is_some()` 守着、**当前不可达**，但那是「同一个字段读两遍」
+    // ——中间一旦有人插一行改动字段，就变成 panic。`if let` 把判空与取值合成一次操作，
+    // 顺带把扫描基线清干净（**工具常报 1 条已知项 ⇒ 以后没人读它**）。
+    let npc_visuals: Vec<engine::renderer::NpcVisual> = if let Some(client) =
+        game.net_client.as_ref()
+    {
+        client
+            .entities()
+            .iter()
+            .filter(|(id, e)| **id >= net::NET_PLAYER_BASE || **id == 0 || e.hp > 0.0)
+            .map(|(id, e)| {
+                // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
+                let tint = if e.hp > 0.0 {
+                    if e.team == 1 { [0.08, 0.35, 0.98, 1.0] } else { [0.95, 0.12, 0.08, 1.0] }
+                } else {
+                    [0.32, 0.32, 0.32, 1.0]
+                };
+                // 🔴 2026-09-26：这里以前直接用 `e.state.curr`（最新**收到**的那帧），
+                // 于是远端实体按快照频率一顿一顿地跳、包抖动时更明显 ——
+                // `RemotePlayer::delay` 一直是 0，插值器等于没接线。
+                // 现按 `entity_state_at`（客户端内部用"now - 快照间隔"取值）取平滑位置；
+                // 取不到时退回 curr（不改变任何极端情况下的行为）。
+                let st = client
+                    .entity_state_at(*id, client.now())
+                    .unwrap_or(e.state.curr);
+                engine::renderer::NpcVisual {
+                    pos: st.pos,
+                    yaw: st.rot,
+                    tint,
+                    phase: anim_clock,
+                    moving: true,
+                    firing: e.firing,
+                }
+            })
+            .collect()
+    } else {
+        // RV3D_NO_NPC_CULL=1：跳过"玩家看不到就不画"的剔除。
+        //
+        // 该剔除**以玩家眼位为准**（`npc_occluded` 内部用 `player_eye()`，不是相机），
+        // 这在玩法上是**正确**的：玩家隔着楼不该看见人。但**调试相机不是玩家** ——
+        // 用 `RV3D_NPC_CAM` 把相机摆到 160m 外某个 NPC 跟前时，目标仍会被
+        // "玩家视角"的判定剔掉。实测玩家站在原点时，255 人只有 **16 人**上屏
+        //（`npcvis: 收到 16 个 NPC`，段数 144+128=272），这正是取景一路扑空的真因。
+        // 关掉剔除后调试机位才看得到目标。
+        let cull = !crate::syscfg::is_set("RV3D_NO_NPC_CULL");
+        game
+        .npcs
+        .iter()
+        .enumerate()
+        // 隔墙透视修复：被障碍物完全遮挡的 NPC 不渲染（`vis[i]` 即该判定）
+        .filter(|(i, _)| !cull || vis.get(*i).copied().unwrap_or(true))
+        .map(|(_, n)| {
+            let base = last_snapshot
+                .get(&n.id)
+                .map(|(_, _, t)| *t)
+                .unwrap_or(match n.team {
+                    Team::Red => [0.95, 0.12, 0.08, 1.0],
+                    Team::Blue => [0.08, 0.35, 0.98, 1.0],
+                });
+            // 受击反馈：命中瞬间闪白（按剩余强度混合白色）
+            let flash = game.npc_flash(n.id);
+            let tint = if flash > 0.0 {
+                let k = flash * 0.85;
+                [
+                    base[0] + (1.0 - base[0]) * k,
+                    base[1] + (1.0 - base[1]) * k,
+                    base[2] + (1.0 - base[2]) * k,
+                    1.0,
+                ]
+            } else {
+                base
+            };
+            engine::renderer::NpcVisual {
+                pos: n.position,
+                yaw: n.facing,
+                tint,
+                phase: anim_clock,
+                moving: n.speed > 0.5
+                    && matches!(
+                        n.state_machine.state(),
+                        crate::engine::ai::NpcState::Patrol
+                            | crate::engine::ai::NpcState::Chase
+                    ),
+                firing: n.state_machine.state() == crate::engine::ai::NpcState::Attack,
+            }
+        })
+        .collect()
+    };
+    // （士兵 GLB 的上传已移到 `Renderer::new` 之后，见那里的注释：
+        npc_visuals
+    }
+
     fn render(&mut self) {
         // 【诊断】`GameApp::render()` 的**准备段**计时（起 → 调用 `renderer.render`）。
         // 存在的理由（2026-10-13）：实测 `cyc = upd + ren` 自洽，但 `ren − frame_us ≈ 2000µs`，
@@ -2205,140 +2351,12 @@ impl GameApp {
                     }
                 }
             }
-            // NPC 士兵可视化：每个 NPC 由 renderer 展开为 7 段积木人（头/躯干/四肢/枪），
-            // 按朝向旋转，阵营配色（红=敌军、蓝=友军/玩家阵营）；
-            // 动画字段：移动中摆臂摆腿（步态）、攻击态枪身后坐脉冲
-            let now_ids: std::collections::HashSet<usize> =
-                self.game.npcs.iter().map(|n| n.id).collect();
-            // 尸体跟踪：本帧消失的 NPC id（被击杀移除）→ 从上一帧快照找回位置/朝向/阵营
-            for id in self.last_npc_snapshot.keys() {
-                if !now_ids.contains(id) {
-                    if let Some((pos, yaw, tint)) = self.last_npc_snapshot.get(id) {
-                        self.corpses.push((*pos, *yaw, *tint, 0.0));
-                    }
-                }
-            }
-            // 更新快照（供下一帧 diff）
-            self.last_npc_snapshot = self
-                .game
-                .npcs
-                .iter()
-                .map(|n| {
-                    let tint = match n.team {
-                        Team::Red => [0.95, 0.12, 0.08, 1.0],
-                        Team::Blue => [0.08, 0.35, 0.98, 1.0],
-                    };
-                    (n.id, (n.position, n.facing, tint))
-                })
-                .collect();
-            // 客户端联机模式：显示服务器世界（快照实体：位置/朝向/血量来自服务器权威），
-            // 阵营色借用本地同 id NPC 的归属（同一确定性地图/波次，id 对齐）
-            //
-            // 进画面的规则：id 段 >=100_000 是远端玩家、id==0 是本机玩家槽，两者无条件进；
-            // 剩下的都是本地 NPC（id < 100_000），只有活着才进。
-            // 原来写成 `(id<100k && hp>0) || id==0 || id>=100k`：`id==0` 已被 `id<100k`
-            // 覆盖，而 `id>=100k` 恰好是 `id<100k` 的反面，吸收律化简后那段 id 判据是多余的
-            // （clippy::nonminimal_bool 报的就是这个）。化简式逐档等价。
-            // 🔴 渲染剔除走**分摊刷新缓存**（2026-09-26 实测优化）：
-            // 原来每帧对全部 NPC 直接调 `npc_occluded`（每次最坏 2×1240 次 AABB 相交），
-            // 而枪口焰那段**又调了一遍** ⇒ 压力场景 510 次/帧、`cull-diag` 实测中位
-            // **102 ms/s（≈18% 帧预算）**。现在一帧只刷新 1/N 的 NPC，两条路共用同一份结果。
-            // 判据 = `cull-diag: <us>/s`（`RV3D_CULL_DIAG=1`）与 `npc_vis_scans`。
-            self.game.refresh_npc_visibility();
-            let vis = self.game.npc_visibility_flags();
-            // 🔴 用 `if let` 而不是 `is_some()` + `unwrap()`（2026-10-17）：
-            // `prod_panic_sweep` 每次都会把那个 `unwrap` 报成 1 处生产 unwrap。
-            // 它虽然被上一行的 `is_some()` 守着、**当前不可达**，但那是「同一个字段读两遍」
-            // ——中间一旦有人插一行改动字段，就变成 panic。`if let` 把判空与取值合成一次操作，
-            // 顺带把扫描基线清干净（**工具常报 1 条已知项 ⇒ 以后没人读它**）。
-            let npc_visuals: Vec<engine::renderer::NpcVisual> = if let Some(client) =
-                self.game.net_client.as_ref()
-            {
-                client
-                    .entities()
-                    .iter()
-                    .filter(|(id, e)| **id >= net::NET_PLAYER_BASE || **id == 0 || e.hp > 0.0)
-                    .map(|(id, e)| {
-                        // 阵营直接取自快照（服务器权威；NpcSnapshot.team 0=Red 1=Blue）
-                        let tint = if e.hp > 0.0 {
-                            if e.team == 1 { [0.08, 0.35, 0.98, 1.0] } else { [0.95, 0.12, 0.08, 1.0] }
-                        } else {
-                            [0.32, 0.32, 0.32, 1.0]
-                        };
-                        // 🔴 2026-09-26：这里以前直接用 `e.state.curr`（最新**收到**的那帧），
-                        // 于是远端实体按快照频率一顿一顿地跳、包抖动时更明显 ——
-                        // `RemotePlayer::delay` 一直是 0，插值器等于没接线。
-                        // 现按 `entity_state_at`（客户端内部用"now - 快照间隔"取值）取平滑位置；
-                        // 取不到时退回 curr（不改变任何极端情况下的行为）。
-                        let st = client
-                            .entity_state_at(*id, client.now())
-                            .unwrap_or(e.state.curr);
-                        engine::renderer::NpcVisual {
-                            pos: st.pos,
-                            yaw: st.rot,
-                            tint,
-                            phase: self.anim_clock,
-                            moving: true,
-                            firing: e.firing,
-                        }
-                    })
-                    .collect()
-            } else {
-                // RV3D_NO_NPC_CULL=1：跳过"玩家看不到就不画"的剔除。
-                //
-                // 该剔除**以玩家眼位为准**（`npc_occluded` 内部用 `player_eye()`，不是相机），
-                // 这在玩法上是**正确**的：玩家隔着楼不该看见人。但**调试相机不是玩家** ——
-                // 用 `RV3D_NPC_CAM` 把相机摆到 160m 外某个 NPC 跟前时，目标仍会被
-                // "玩家视角"的判定剔掉。实测玩家站在原点时，255 人只有 **16 人**上屏
-                //（`npcvis: 收到 16 个 NPC`，段数 144+128=272），这正是取景一路扑空的真因。
-                // 关掉剔除后调试机位才看得到目标。
-                let cull = !crate::syscfg::is_set("RV3D_NO_NPC_CULL");
-                self
-                .game
-                .npcs
-                .iter()
-                .enumerate()
-                // 隔墙透视修复：被障碍物完全遮挡的 NPC 不渲染（`vis[i]` 即该判定）
-                .filter(|(i, _)| !cull || vis.get(*i).copied().unwrap_or(true))
-                .map(|(_, n)| {
-                    let base = self
-                        .last_npc_snapshot
-                        .get(&n.id)
-                        .map(|(_, _, t)| *t)
-                        .unwrap_or(match n.team {
-                            Team::Red => [0.95, 0.12, 0.08, 1.0],
-                            Team::Blue => [0.08, 0.35, 0.98, 1.0],
-                        });
-                    // 受击反馈：命中瞬间闪白（按剩余强度混合白色）
-                    let flash = self.game.npc_flash(n.id);
-                    let tint = if flash > 0.0 {
-                        let k = flash * 0.85;
-                        [
-                            base[0] + (1.0 - base[0]) * k,
-                            base[1] + (1.0 - base[1]) * k,
-                            base[2] + (1.0 - base[2]) * k,
-                            1.0,
-                        ]
-                    } else {
-                        base
-                    };
-                    engine::renderer::NpcVisual {
-                        pos: n.position,
-                        yaw: n.facing,
-                        tint,
-                        phase: self.anim_clock,
-                        moving: n.speed > 0.5
-                            && matches!(
-                                n.state_machine.state(),
-                                crate::engine::ai::NpcState::Patrol
-                                    | crate::engine::ai::NpcState::Chase
-                            ),
-                        firing: n.state_machine.state() == crate::engine::ai::NpcState::Attack,
-                    }
-                })
-                .collect()
-            };
-            // （士兵 GLB 的上传已移到 `Renderer::new` 之后，见那里的注释：
+            let npc_visuals = Self::build_npc_visuals(
+                &mut self.game,
+                &mut self.last_npc_snapshot,
+                &mut self.corpses,
+                self.anim_clock,
+            );
             renderer.set_npc_visuals(&npc_visuals);
             let t_npc = prep_start.elapsed().as_micros();
             // RV3D_CULL_DIAG=1：每秒报一次「NPC 遮挡剔除」的实测成本 —— 先量再改的尺子。
@@ -2363,6 +2381,9 @@ impl GameApp {
             // 于是为了挑出最多 4 个开火者，每帧对**全部 255 个** NPC 都做了一次遮挡测试
             // （就算它根本没在开火）。现在开火态先出局，遮挡测试只落在少数开火者身上，
             // 而且用的是上面那份**同一份**缓存（`vis`），不再有第二次全量扫描。
+            // `vis` 原本由上面那段（现已抽成 `build_npc_visuals`）计算；这里只是**再读一次**
+            // 同样的可见性标志（纯读，无副作用）—— 抽取不改变语义。
+            let vis = self.game.npc_visibility_flags();
             let mut firing_npcs: Vec<[f32; 3]> = self
                 .game
                 .npcs

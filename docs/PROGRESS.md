@@ -3864,3 +3864,21 @@ app_assets::*;`** —— 固有方法通过类型解析，glob 再导出反而�
 
 **验收两条**：903 passed / 0 警告；同机位像素对照差异 **28 / 1,024,000 = 0.0027%**
 （包围盒 `x[96,105] y[26,31]` = 左上角 FPS 文字）⇒ 画面未变。
+
+### 2026-11-12（续161）：`render()` 第四次切分 —— NPC 可视化（134 行）
+
+抽成 `build_npc_visuals(game, last_snapshot, corpses, anim_clock) -> Vec<NpcVisual>`。
+四个参数都是**互不相交的字段**，所以在 `&mut self.renderer` 借用内也能调用。
+
+**这次踩了三个"跨行/别名"的坑，值得记**：
+1. 链式调用写成 `self\n    .npcs` / `self\n    .last_npc_snapshot` —— 按 `.game` 写死的正则覆盖不到，
+   编译才报 `expected value, found module self`。**改用通用式 `self\s*\n\s*\.` 一次清干净**。
+2. 赋值给 `&mut` 参数要解引用：`last_snapshot = ...collect()` 报
+   `a value of type &mut HashMap cannot be built from an iterator` ⇒ 必须 `*last_snapshot = ...`。
+3. 抽出来的段落**把局部变量 `vis` 带走了**，而它后面（抽出的范围之外）还被 `firing_npcs` 用 ⇒
+   在调用点重新 `let vis = self.game.npc_visibility_flags();`（纯读、无副作用）。
+   **这是"抽取边界只看语句、没看变量生命周期"的典型** —— 下次先 `grep` 该段定义的每个 `let`，
+   看有没有在段外被引用。
+
+**验收两条**：903 passed / 0 警告；同机位像素对照差异 **124 / 1,024,000 = 0.0121%**
+（`x[84,105] y[24,37]` = 左上角 FPS 文字）⇒ 画面未变。
