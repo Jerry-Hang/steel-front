@@ -1696,6 +1696,197 @@ impl GameApp {
     }
     }
 
+    /// 构建本帧的**世界 marker**（障碍盒 / 占领据点 / 自发光 / 弹孔）。
+    ///
+    /// 从 `render()` 整块抽出（2026-11-12，纯提取）。输出三条向量，`renderer.set_*` 留在调用点：
+    /// 这样 `render()` 只负责"算出来 → 交给渲染器"两件事，而这段纯数据构造可以被单独读。
+    ///
+    /// 缓存按 `map_generation` 失效 —— 关卡不变时直接复用上一次的障碍 marker（省掉每帧几百次
+    /// 矩阵构造）。
+    #[allow(clippy::too_many_arguments)]
+    fn build_world_markers(
+        game: &crate::engine::game::Game,
+        cache: &mut Vec<engine::renderer::WorldMarker>,
+        cache_gen: &mut Option<u64>,
+        particles: &[Particle],
+        eye: glam::Vec3,
+    ) -> (
+        Vec<engine::renderer::WorldMarker>,
+        Vec<engine::renderer::WorldMarker>,
+        Vec<engine::renderer::WorldMarker>,
+    ) {
+    let cur_gen = game.map_generation();
+    if *cache_gen != Some(cur_gen) {
+        // 🔴 **建筑不再画碰撞盒 marker**（2026-10-29 真机定位）：
+        // 建筑本体已经由 GLB 画出来，而它那条"碰撞盒 marker"会在同一位置再画一个
+        // 灰色混凝土壳 —— 壳与立面共面/略大的地方就 z-fighting，用户看到的
+        // "转视角房子在棕和灰之间跳"正是它（A/B 实测：关掉后露出的是棕色 GLB 立面）。
+        // 需要回退排查时用 `RV3D_BUILDING_MARKERS=1`。
+        // `RV3D_NO_MARKERS=1`：连装饰件一起关，用于判断"白色大板"到底来自 marker 还是 GLB。
+        // 🏙 chunk 开启时，程序化构件（1230 件）的可见面由 chunk 提供 ⇒ 不再画 marker，
+        //    否则两套几何共面重复（z-fighting + 白付 1.8 万实例）。
+        let chunks_on = !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS")
+            && std::path::Path::new("assets/city_chunks").is_dir();
+        let no_markers = chunks_on || crate::syscfg::flag("RV3D_NO_MARKERS");
+        let skip_building = no_markers || !crate::syscfg::flag("RV3D_BUILDING_MARKERS");
+        *cache = game
+            .render_geometry()
+            .filter(|o| o.shape != engine::geom::Shape::None)
+            .filter(|o| !skip_building || o.kind != engine::game::ObstacleKind::Building)
+            // 🔴 高空装饰件（挑檐/窗带/女儿墙）是挂在建筑盒上的：建筑盒不再画之后，
+            // 它们就成了天空里一排悬空黑条（真机截图）。把离地 4m 以上的 Block 装饰件
+            // 一并跳过 —— 可见的建筑表面已由 GLB 提供。
+            .filter(|o| {
+                !(skip_building && o.kind == engine::game::ObstacleKind::Block && o.y > 4.0)
+            })
+            .filter(|_| !no_markers)
+            .map(engine::renderer::WorldMarker::for_obstacle)
+            .collect();
+        *cache_gen = Some(cur_gen);
+    }
+    let markers: Vec<engine::renderer::WorldMarker> =
+        cache.clone();
+    // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
+    // 每据点 = 细高立柱（归属色）+ 扁平板状底盘（归属色，不透明）。
+    // 复用 WorldMarker 通道（主 pipeline 实例化），零渲染管线改动。
+    let capture_markers: Vec<engine::renderer::WorldMarker> = game
+        .capture_points()
+        .into_iter()
+        .flat_map(|(_id, x, z, radius, owner, _progress)| {
+            let tint = match owner {
+                Some(crate::engine::ai::Team::Blue) => [0.08, 0.35, 0.98, 1.0],
+                Some(crate::engine::ai::Team::Red) => [0.95, 0.12, 0.08, 1.0],
+                None => [0.45, 0.45, 0.45, 1.0],
+            };
+            // 底盘配色：三通道等比缩放 → 色相/饱和度不变，归属色语义（蓝/红/灰）保持
+            let base_tint = [tint[0] * 0.8, tint[1] * 0.8, tint[2] * 0.8, 0.6];
+            [
+                // 立柱（旗杆）：0.4m 见方、高 4m、底面落在地面。
+                // 🔴 `from_scale` 传的是**半尺寸**（立方体模板 ±1，
+                // `renderer.rs:1019 obstacle_model` 用 `scale = half / tmpl`）。
+                // 旧值 (0.4, 4.0, 0.4) 是 2026-09-17 之前"scale = 全尺寸"的写法，
+                // 改约定后没跟着改 ⇒ 实际画出 0.8m 宽、8m 高、底部埋进地里 2m。
+                engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(x, 2.0, z))
+                        * glam::Mat4::from_scale(glam::Vec3::new(0.2, 2.0, 0.2)),
+                    tint,
+                },
+                // 地面底盘：**半径直接取玩法的占领判定半径**，不再写魔数。
+                // D10 根因（保留）：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，
+                // 而地面实例平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；
+                // 玩家视线 ~1.7m 看一层 10cm 的板几乎完全侧向 → 投影不足一像素 →
+                // 底盘"消失"，据点读起来只剩两根电线杆。改为 0.5m 厚低台
+                // （底面埋进地里 5cm 避免与地形之间留缝），顶面离地 ~40cm。
+                // 🔴 第二个根因（本轮修）：这里原先硬编码 `from_scale(10.0, 0.5, 10.0)`
+                // 并注释"半径 5.0 → scale 10.0"——那是"scale = 全尺寸"的旧约定。
+                // 按现在的约定它画的是**半径 10m**，而玩法判定半径是
+                // street_fight 5.0 / bridgehead 5.0·6.0 / defense_line 12.0，
+                // ⇒ 领地标记在前两者上是真实圈子的 **2 倍**、在后者上**反而小一圈**，
+                // 玩家靠它判断"进圈了没有"会被系统性误导。改成由 `radius` 推导，
+                // 魔数消失，这类漂移不可能再回来。
+                // 半高 0.25 + 中心 y=0.20 ⇒ 跨 [−0.05, +0.45]，与上面 D10 的意图逐值一致。
+                engine::renderer::WorldMarker {
+                    model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.20, z))
+                        * glam::Mat4::from_scale(glam::Vec3::new(radius, 0.25, radius)),
+                    tint: base_tint,
+                },
+            ]
+        })
+        .collect();
+    let mut markers = markers;
+    markers.extend(capture_markers);
+    // 爆炸闪光：冲击波球壳随年龄膨胀、颜色转淡；走自发光路径（emissive 槽位，
+    // shader 直出纯色跳过光照/贴图混合），夜间等暗光环境下依然清晰可见
+    // 爆炸多层视觉（4 层同源演算，立体感：火球核 + 贴地冲击波环 + 火柱 + 烟柱）
+    let mut emissive_markers: Vec<engine::renderer::WorldMarker> = game
+        .explosions()
+        .iter()
+        .flat_map(|ex| {
+        let t = (ex.age / ex.lifetime).clamp(0.0, 1.0);
+        let cx = ex.center[0];
+        let cz = ex.center[2];
+        let r = ex.radius;
+        // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）；半透明球形
+        let fireball_t = (t * 2.8).min(1.0);
+        let fb_s = r * (0.2 + 1.2 * fireball_t);
+        let mut out = vec![engine::renderer::WorldMarker {
+            model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.2, cz))
+                * glam::Mat4::from_scale(glam::Vec3::splat(fb_s)),
+            tint: [
+                1.0,
+                0.85 * (1.0 - fireball_t) + 0.2,
+                0.35 * (1.0 - fireball_t),
+                0.0, // tint.w = 火（build.rs 体积光晕分支选择器）
+            ],
+        }];
+        // ② 贴地冲击波环：扁球体（球体几何压扁）沿地面水平扩散 + 高度衰减，半透明
+        let ring_s = r * (0.4 + 1.6 * t);
+        let ring_h = (1.1 * (1.0 - t)).max(0.15);
+        out.push(engine::renderer::WorldMarker {
+            model: glam::Mat4::from_translation(glam::Vec3::new(cx, ring_h * 0.5, cz))
+                * glam::Mat4::from_scale(glam::Vec3::new(ring_s, ring_h, ring_s)),
+            tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, 0.0], // 火
+        });
+        // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），半透明
+        let col_h = 2.2 + 2.6 * t;
+        out.push(engine::renderer::WorldMarker {
+            model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.1 + col_h * 0.5, cz))
+                * glam::Mat4::from_scale(glam::Vec3::new(r * 0.5, col_h, r * 0.5)),
+            tint: [1.0, 0.45 * (1.0 - t), 0.05, 0.0], // 火
+        });
+        // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟），半透明
+        let smoke_s = r * (0.5 + 1.4 * t);
+        let smoke_h = 2.0 + 3.0 * t;
+        out.push(engine::renderer::WorldMarker {
+            model: glam::Mat4::from_translation(glam::Vec3::new(cx, 0.6 + smoke_h * 0.5, cz))
+                * glam::Mat4::from_scale(glam::Vec3::new(smoke_s, smoke_h, smoke_s)),
+            tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, 1.0], // 烟
+        });
+        out
+        })
+        .collect();
+    // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块。
+    let gps = game.grenade_positions();
+    Self::append_particle_emissive_markers(
+        &particles,
+        eye,
+        &gps,
+        emissive_markers.len(),
+        &mut emissive_markers,
+    );
+    // 弹孔：子弹打在障碍表面的着弹标记（`game.rs::impact_marks`）。
+    // 单独一批、只追加进光栅 marker 列表 —— 不喂 PT 场景（弹孔每枪都变，
+    // 会让 BLAS 指纹每帧重建，也白占 PT 盒容量）。方片的局部 +Z 用
+    // `ImpactMark::basis()` 摆到表面法线上，**右手基**是硬要求（否则正面绕序反掉）。
+    let decal_markers: Vec<engine::renderer::WorldMarker> = game
+        .impact_marks()
+        .iter()
+        .map(|m| {
+            let (t, u, n) = m.basis();
+            let half = DECAL_SIZE_M * 0.5 * m.size_envelope();
+            engine::renderer::WorldMarker {
+                model: glam::Mat4::from_cols(
+                    (glam::Vec3::from(t) * half).extend(0.0),
+                    (glam::Vec3::from(u) * half).extend(0.0),
+                    (glam::Vec3::from(n) * (DECAL_THICK_M * 0.5)).extend(0.0),
+                    glam::Vec4::new(
+                        m.pos[0] + m.normal[0] * DECAL_LIFT_M,
+                        m.pos[1] + m.normal[1] * DECAL_LIFT_M,
+                        m.pos[2] + m.normal[2] * DECAL_LIFT_M,
+                        1.0,
+                    ),
+                ),
+                // `Shape::Authored`（tint.w = 6.0）在这里是**故意**用的：
+                // 它让片元跳过"给纯 tint 盒子补细节"的四条程序化效果（窗带/玻璃分格/
+                // 树冠噪声/混凝土皮肤）。弹孔要的就是一块**纯色暗方片** ——
+                // 走 marker 皮肤路径会给它采样一层墙纹，看起来像贴了一块小面板。
+                tint: [0.035, 0.030, 0.026, engine::geom::Shape::TAG_AUTHORED],
+            }
+        })
+        .collect();
+        (markers, emissive_markers, decal_markers)
+    }
+
     fn render(&mut self) {
         // 【诊断】`GameApp::render()` 的**准备段**计时（起 → 调用 `renderer.render`）。
         // 存在的理由（2026-10-13）：实测 `cyc = upd + ren` 自洽，但 `ren − frame_us ≈ 2000µs`，
@@ -1900,179 +2091,13 @@ impl GameApp {
             // 逐件 `.filter(shape != None)` + `for_obstacle()` 构造矩阵实测 ~600µs，
             // 而城市场景障碍只在 `apply_level()` 时换一批。
             // 下面那次 `clone()` 只是 memcpy —— 贵的是"构造"，不是"拷贝"。
-            let cur_gen = self.game.map_generation();
-            if self.obstacle_markers_gen != Some(cur_gen) {
-                // 🔴 **建筑不再画碰撞盒 marker**（2026-10-29 真机定位）：
-                // 建筑本体已经由 GLB 画出来，而它那条"碰撞盒 marker"会在同一位置再画一个
-                // 灰色混凝土壳 —— 壳与立面共面/略大的地方就 z-fighting，用户看到的
-                // "转视角房子在棕和灰之间跳"正是它（A/B 实测：关掉后露出的是棕色 GLB 立面）。
-                // 需要回退排查时用 `RV3D_BUILDING_MARKERS=1`。
-                // `RV3D_NO_MARKERS=1`：连装饰件一起关，用于判断"白色大板"到底来自 marker 还是 GLB。
-                // 🏙 chunk 开启时，程序化构件（1230 件）的可见面由 chunk 提供 ⇒ 不再画 marker，
-                //    否则两套几何共面重复（z-fighting + 白付 1.8 万实例）。
-                let chunks_on = !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS")
-                    && std::path::Path::new("assets/city_chunks").is_dir();
-                let no_markers = chunks_on || crate::syscfg::flag("RV3D_NO_MARKERS");
-                let skip_building = no_markers || !crate::syscfg::flag("RV3D_BUILDING_MARKERS");
-                self.obstacle_markers_cache = self
-                    .game
-                    .render_geometry()
-                    .filter(|o| o.shape != engine::geom::Shape::None)
-                    .filter(|o| !skip_building || o.kind != engine::game::ObstacleKind::Building)
-                    // 🔴 高空装饰件（挑檐/窗带/女儿墙）是挂在建筑盒上的：建筑盒不再画之后，
-                    // 它们就成了天空里一排悬空黑条（真机截图）。把离地 4m 以上的 Block 装饰件
-                    // 一并跳过 —— 可见的建筑表面已由 GLB 提供。
-                    .filter(|o| {
-                        !(skip_building && o.kind == engine::game::ObstacleKind::Block && o.y > 4.0)
-                    })
-                    .filter(|_| !no_markers)
-                    .map(engine::renderer::WorldMarker::for_obstacle)
-                    .collect();
-                self.obstacle_markers_gen = Some(cur_gen);
-            }
-            let markers: Vec<engine::renderer::WorldMarker> =
-                self.obstacle_markers_cache.clone();
-            // 占领据点世界标记（关卡系统 RV3D_MAP/RV3D_MAPS 启用时非空）：
-            // 每据点 = 细高立柱（归属色）+ 扁平板状底盘（归属色，不透明）。
-            // 复用 WorldMarker 通道（主 pipeline 实例化），零渲染管线改动。
-            let capture_markers: Vec<engine::renderer::WorldMarker> = self
-                .game
-                .capture_points()
-                .into_iter()
-                .flat_map(|(_id, x, z, radius, owner, _progress)| {
-                    let tint = match owner {
-                        Some(crate::engine::ai::Team::Blue) => [0.08, 0.35, 0.98, 1.0],
-                        Some(crate::engine::ai::Team::Red) => [0.95, 0.12, 0.08, 1.0],
-                        None => [0.45, 0.45, 0.45, 1.0],
-                    };
-                    // 底盘配色：三通道等比缩放 → 色相/饱和度不变，归属色语义（蓝/红/灰）保持
-                    let base_tint = [tint[0] * 0.8, tint[1] * 0.8, tint[2] * 0.8, 0.6];
-                    [
-                        // 立柱（旗杆）：0.4m 见方、高 4m、底面落在地面。
-                        // 🔴 `from_scale` 传的是**半尺寸**（立方体模板 ±1，
-                        // `renderer.rs:1019 obstacle_model` 用 `scale = half / tmpl`）。
-                        // 旧值 (0.4, 4.0, 0.4) 是 2026-09-17 之前"scale = 全尺寸"的写法，
-                        // 改约定后没跟着改 ⇒ 实际画出 0.8m 宽、8m 高、底部埋进地里 2m。
-                        engine::renderer::WorldMarker {
-                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 2.0, z))
-                                * glam::Mat4::from_scale(glam::Vec3::new(0.2, 2.0, 0.2)),
-                            tint,
-                        },
-                        // 地面底盘：**半径直接取玩法的占领判定半径**，不再写魔数。
-                        // D10 根因（保留）：旧值 y=0.08 + 厚 0.15 → 实体跨 y∈[0.005,0.155]，
-                        // 而地面实例平面在 y=+0.05 正好从中间穿过，顶面只高出 ~10cm；
-                        // 玩家视线 ~1.7m 看一层 10cm 的板几乎完全侧向 → 投影不足一像素 →
-                        // 底盘"消失"，据点读起来只剩两根电线杆。改为 0.5m 厚低台
-                        // （底面埋进地里 5cm 避免与地形之间留缝），顶面离地 ~40cm。
-                        // 🔴 第二个根因（本轮修）：这里原先硬编码 `from_scale(10.0, 0.5, 10.0)`
-                        // 并注释"半径 5.0 → scale 10.0"——那是"scale = 全尺寸"的旧约定。
-                        // 按现在的约定它画的是**半径 10m**，而玩法判定半径是
-                        // street_fight 5.0 / bridgehead 5.0·6.0 / defense_line 12.0，
-                        // ⇒ 领地标记在前两者上是真实圈子的 **2 倍**、在后者上**反而小一圈**，
-                        // 玩家靠它判断"进圈了没有"会被系统性误导。改成由 `radius` 推导，
-                        // 魔数消失，这类漂移不可能再回来。
-                        // 半高 0.25 + 中心 y=0.20 ⇒ 跨 [−0.05, +0.45]，与上面 D10 的意图逐值一致。
-                        engine::renderer::WorldMarker {
-                            model: glam::Mat4::from_translation(glam::Vec3::new(x, 0.20, z))
-                                * glam::Mat4::from_scale(glam::Vec3::new(radius, 0.25, radius)),
-                            tint: base_tint,
-                        },
-                    ]
-                })
-                .collect();
-            let mut markers = markers;
-            markers.extend(capture_markers);
-            // 爆炸闪光：冲击波球壳随年龄膨胀、颜色转淡；走自发光路径（emissive 槽位，
-            // shader 直出纯色跳过光照/贴图混合），夜间等暗光环境下依然清晰可见
-            // 爆炸多层视觉（4 层同源演算，立体感：火球核 + 贴地冲击波环 + 火柱 + 烟柱）
-            let mut emissive_markers: Vec<engine::renderer::WorldMarker> = self
-                .game
-                .explosions()
-                .iter()
-                .flat_map(|ex| {
-                let t = (ex.age / ex.lifetime).clamp(0.0, 1.0);
-                let cx = ex.center[0];
-                let cz = ex.center[2];
-                let r = ex.radius;
-                // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）；半透明球形
-                let fireball_t = (t * 2.8).min(1.0);
-                let fb_s = r * (0.2 + 1.2 * fireball_t);
-                let mut out = vec![engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.2, cz))
-                        * glam::Mat4::from_scale(glam::Vec3::splat(fb_s)),
-                    tint: [
-                        1.0,
-                        0.85 * (1.0 - fireball_t) + 0.2,
-                        0.35 * (1.0 - fireball_t),
-                        0.0, // tint.w = 火（build.rs 体积光晕分支选择器）
-                    ],
-                }];
-                // ② 贴地冲击波环：扁球体（球体几何压扁）沿地面水平扩散 + 高度衰减，半透明
-                let ring_s = r * (0.4 + 1.6 * t);
-                let ring_h = (1.1 * (1.0 - t)).max(0.15);
-                out.push(engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, ring_h * 0.5, cz))
-                        * glam::Mat4::from_scale(glam::Vec3::new(ring_s, ring_h, ring_s)),
-                    tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, 0.0], // 火
-                });
-                // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），半透明
-                let col_h = 2.2 + 2.6 * t;
-                out.push(engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.1 + col_h * 0.5, cz))
-                        * glam::Mat4::from_scale(glam::Vec3::new(r * 0.5, col_h, r * 0.5)),
-                    tint: [1.0, 0.45 * (1.0 - t), 0.05, 0.0], // 火
-                });
-                // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟），半透明
-                let smoke_s = r * (0.5 + 1.4 * t);
-                let smoke_h = 2.0 + 3.0 * t;
-                out.push(engine::renderer::WorldMarker {
-                    model: glam::Mat4::from_translation(glam::Vec3::new(cx, 0.6 + smoke_h * 0.5, cz))
-                        * glam::Mat4::from_scale(glam::Vec3::new(smoke_s, smoke_h, smoke_s)),
-                    tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, 1.0], // 烟
-                });
-                out
-                })
-                .collect();
-            // 粒子（枪口焰/弹壳）转 emissive marker：枪口焰随 age 缩小淡出，弹壳保持小方块。
-            let gps = self.game.grenade_positions();
-            Self::append_particle_emissive_markers(
+            let (markers, emissive_markers, decal_markers) = Self::build_world_markers(
+                &self.game,
+                &mut self.obstacle_markers_cache,
+                &mut self.obstacle_markers_gen,
                 &self.particles,
                 self.camera.position(),
-                &gps,
-                emissive_markers.len(),
-                &mut emissive_markers,
             );
-            // 弹孔：子弹打在障碍表面的着弹标记（`game.rs::impact_marks`）。
-            // 单独一批、只追加进光栅 marker 列表 —— 不喂 PT 场景（弹孔每枪都变，
-            // 会让 BLAS 指纹每帧重建，也白占 PT 盒容量）。方片的局部 +Z 用
-            // `ImpactMark::basis()` 摆到表面法线上，**右手基**是硬要求（否则正面绕序反掉）。
-            let decal_markers: Vec<engine::renderer::WorldMarker> = self
-                .game
-                .impact_marks()
-                .iter()
-                .map(|m| {
-                    let (t, u, n) = m.basis();
-                    let half = DECAL_SIZE_M * 0.5 * m.size_envelope();
-                    engine::renderer::WorldMarker {
-                        model: glam::Mat4::from_cols(
-                            (glam::Vec3::from(t) * half).extend(0.0),
-                            (glam::Vec3::from(u) * half).extend(0.0),
-                            (glam::Vec3::from(n) * (DECAL_THICK_M * 0.5)).extend(0.0),
-                            glam::Vec4::new(
-                                m.pos[0] + m.normal[0] * DECAL_LIFT_M,
-                                m.pos[1] + m.normal[1] * DECAL_LIFT_M,
-                                m.pos[2] + m.normal[2] * DECAL_LIFT_M,
-                                1.0,
-                            ),
-                        ),
-                        // `Shape::Authored`（tint.w = 6.0）在这里是**故意**用的：
-                        // 它让片元跳过"给纯 tint 盒子补细节"的四条程序化效果（窗带/玻璃分格/
-                        // 树冠噪声/混凝土皮肤）。弹孔要的就是一块**纯色暗方片** ——
-                        // 走 marker 皮肤路径会给它采样一层墙纹，看起来像贴了一块小面板。
-                        tint: [0.035, 0.030, 0.026, engine::geom::Shape::TAG_AUTHORED],
-                    }
-                })
-                .collect();
             renderer.set_world_markers(&markers);
             renderer.append_markers(&decal_markers);
             renderer.set_emissive_markers(&emissive_markers);

@@ -3848,3 +3848,19 @@ app_assets::*;`** —— 固有方法通过类型解析，glob 再导出反而�
 1. 903 passed / build 0 警告；
 2. 同机位像素对照：差异 **112 / 1,024,000 = 0.0109%**，包围盒 `x[84,105] y[24,37]`
    = 左上角 FPS 文字（与上一刀同一处，说明两刀都没有动到画面）。
+
+### 2026-11-12（续160）：`render()` 第三次切分 —— 世界 marker 构建（173 行）
+
+抽成 `build_world_markers(game, cache, cache_gen, particles, eye) -> (markers, emissive, decals)`，
+`renderer.set_world_markers / append_markers / set_emissive_markers` 三行留在调用点。
+
+设计要点：
+- **输出三条向量**而不是直接在函数里调渲染器 —— 调用点在 `&mut self.renderer` 借用内，
+  且这样这段就变成"纯数据构造"，可以单独读、单独测；
+- 障碍 marker 的缓存（`obstacle_markers_cache` + `obstacle_markers_gen`）通过 `&mut` 参数传入，
+  与 `self.renderer` 是**不相交字段**，借用检查通过；
+- 方法体内 `self.game.` → `game.`、`self.particles` → `particles`、`self.camera.position()` → `eye`，
+  搬完用 `re.findall(r'self\.\w+')` 确认**残留 0 处**（这是这次学到的自检动作）。
+
+**验收两条**：903 passed / 0 警告；同机位像素对照差异 **28 / 1,024,000 = 0.0027%**
+（包围盒 `x[96,105] y[26,31]` = 左上角 FPS 文字）⇒ 画面未变。
