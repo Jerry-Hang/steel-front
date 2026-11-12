@@ -2033,6 +2033,51 @@ impl GameApp {
         npc_visuals
     }
 
+    /// 尸体可视化：每具尸体一份 `NpcVisual`（躺倒姿态，与活体共用 NPC 槽位区）。
+    ///
+    /// 从 `render()` 抽出（2026-11-12，纯提取）。只读 `corpses`，因此传 `&[...]` 即可。
+    fn build_dead_visuals(
+        corpses: &[([f32; 3], f32, [f32; 4], f32)],
+    ) -> Vec<engine::renderer::NpcVisual> {
+        corpses
+            .iter()
+            .map(|(pos, yaw, tint, _age)| engine::renderer::NpcVisual {
+                pos: *pos,
+                yaw: *yaw,
+                tint: *tint,
+                phase: 0.0,
+                moving: false,
+                firing: false,
+            })
+            .collect()
+    }
+
+    /// PT 取景参数：与光栅化**同一相机、同一太阳方向**（路径追踪当烘焙参照，参数必须同源）。
+    ///
+    /// 从 `render()` 抽出（2026-11-12，纯提取）：只读 `game` 与 `camera`，返回 `PtParams`，
+    /// `set_pt_params` 留在调用点。
+    fn build_pt_params(
+        game: &crate::engine::game::Game,
+        camera: &engine::camera::Camera,
+    ) -> crate::engine::ray_tracer::PtParams {
+// PT 取景：与光栅化同一相机、同一太阳方向（路径追踪要当烘焙参照，参数必须同源）
+let lu = game.light_uniform([camera.position().x, camera.position().y, camera.position().z], camera.yaw);
+crate::engine::ray_tracer::PtParams {
+    cam: camera.position(),
+    fwd: camera.forward(),
+    tan_half_fov: (camera.fov * 0.5).tan(),
+    bounces: 6,
+    sun_dir: lu.directional.direction.truncate(),
+    sun_color: lu.directional.color_intensity.truncate()
+        * lu.directional.color_intensity.w,
+    // 曝光 = 标定值（默认 0.4，见 ray_tracer.rs 的常量注释）：光栅把反照率乘在
+    // tone 之外（alb×(1-exp(-1.55L))），PT 物理正确在之内；0.4 使两模型在
+    // albedo 0.1~0.8 区间分区均值互差 ≤15%。现由 config.rs 持久化、可被
+    // RV3D_PT_EXPOSURE 覆盖，不再是硬编码字面量（未结案 #11 的最后一小项）。
+    exposure: game.hud.pt_exposure,
+}
+    }
+
     fn render(&mut self) {
         // 【诊断】`GameApp::render()` 的**准备段**计时（起 → 调用 `renderer.render`）。
         // 存在的理由（2026-10-13）：实测 `cyc = upd + ren` 自洽，但 `ren − frame_us ≈ 2000µs`，
@@ -2432,18 +2477,7 @@ impl GameApp {
                 });
             }
             // 尸体渲染（躺倒姿态，7 段/具；与活体共用 NPC 槽位区）
-            let dead_visuals: Vec<engine::renderer::NpcVisual> = self
-                .corpses
-                .iter()
-                .map(|(pos, yaw, tint, _age)| engine::renderer::NpcVisual {
-                    pos: *pos,
-                    yaw: *yaw,
-                    tint: *tint,
-                    phase: 0.0,
-                    moving: false,
-                    firing: false,
-                })
-                .collect();
+            let dead_visuals = Self::build_dead_visuals(&self.corpses);
             renderer.set_dead_bodies(&dead_visuals);
             let t_dead = prep_start.elapsed().as_micros();
 
@@ -2520,22 +2554,8 @@ impl GameApp {
                     log::error!("降级恢复重建失败（每帧重试，已限流）：{}", e);
                 }
             }
-            // PT 取景：与光栅化同一相机、同一太阳方向（路径追踪要当烘焙参照，参数必须同源）
-            let lu = self.game.light_uniform([self.camera.position().x, self.camera.position().y, self.camera.position().z], self.camera.yaw);
-            renderer.set_pt_params(crate::engine::ray_tracer::PtParams {
-                cam: self.camera.position(),
-                fwd: self.camera.forward(),
-                tan_half_fov: (self.camera.fov * 0.5).tan(),
-                bounces: 6,
-                sun_dir: lu.directional.direction.truncate(),
-                sun_color: lu.directional.color_intensity.truncate()
-                    * lu.directional.color_intensity.w,
-                // 曝光 = 标定值（默认 0.4，见 ray_tracer.rs 的常量注释）：光栅把反照率乘在
-                // tone 之外（alb×(1-exp(-1.55L))），PT 物理正确在之内；0.4 使两模型在
-                // albedo 0.1~0.8 区间分区均值互差 ≤15%。现由 config.rs 持久化、可被
-                // RV3D_PT_EXPOSURE 覆盖，不再是硬编码字面量（未结案 #11 的最后一小项）。
-                exposure: self.game.hud.pt_exposure,
-            });
+            let pt_params = Self::build_pt_params(&self.game, &self.camera);
+            renderer.set_pt_params(pt_params);
             // PT 场景 = 光栅化同一批 WorldMarker（盒集合变化时才重建 BLAS，指纹判定在渲染器内）
             if let Err(e) = renderer.pt_set_scene_markers(&markers) {
                 log::warn!("PT-SCENE 失败: {e}");
