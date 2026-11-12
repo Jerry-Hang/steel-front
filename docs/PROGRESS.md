@@ -3961,3 +3961,23 @@ OK   978..1256（279 行，归一化后逐字节命中）
 
 **验收两条**：903 passed / 0 警告；同机位像素对照差异 **84 / 1,024,000 = 0.0082%**（仅 FPS 文字）。
 **lib.rs 6320 → 3291 行（降 3029 行 / 47.9%）**；`app_events` 299 行。
+
+### 2026-11-13（续166）：`window_event` 实现体拆出（696 行）—— lib.rs 2601 行
+
+`window_event` 的 696 行实现体整体搬进 `app_events.rs` 的 `handle_window_event`，回调留一行转发。
+校验：`OK 1043..1738（696 行，归一化后逐字节命中）`。
+
+🔴 **这刀第一次做错了，值得记**：我用「从体首往下找第一行列 0 的 `}`」定位结尾，
+但那其实是 **`impl ApplicationHandler` 块的结尾** ⇒ 一口气把 `about_to_wait` 等也搬走了
+（`lib.rs` 一度掉到 2511 行，编译器冒出 **423 条 never used**）。
+**正确做法：从签名的 `) {` 那一行开始做花括号计数**，减到 0 才是这个函数的结尾。
+自检信号很有用：**行数掉得比预期多 + 大面积 never used = 边界切错了**。
+
+另外两条源码扫描判据又红了（都属"判据该跟着代码走"）：
+- `restart_paths_reset_gameapp_transients`：`.reset_session_transients()` 的调用点有一部分在
+  `window_event` 里 ⇒ 扫描面加 `app_events.rs`；
+- `cursor_release_restores_default_icon_and_is_shared`：同理，把 `app_events.rs` 并进扫描面
+  （现在三份：lib.rs / app_window.rs / app_events.rs）。
+
+**验收两条**：903 passed / 0 警告；同机位像素对照差异 **84 / 1,024,000 = 0.0082%**。
+**lib.rs 6320 → 2601 行（降 3719 行 / 58.9%）**；`app_events` 1011 行。
