@@ -3937,3 +3937,27 @@ RESULT: 全部命中（差异仅为 pub(crate) 前缀）
 （`x[84,105] y[24,37]` = 左上角 FPS 文字）。
 
 **lib.rs 6320 → 3556 行（降 2764 行 / 43.7%）**；新模块 `app_update` 612 行。
+
+### 2026-11-12（续165）：`resumed` 实现体拆出 → `app_events.rs`（lib.rs 3291 行）
+
+`ApplicationHandler` 一个类型只能有一份，所以这次**只搬"体"**：把 `resumed` 的 279 行实现体
+抽成 `GameApp::handle_resumed(&mut self, event_loop)`，回调本身留一行转发。
+
+```
+OK   978..1256（279 行，归一化后逐字节命中）
+```
+
+搬完修了 6 个导入（`Instant` / `Window` / `Renderer` / `RESOLUTIONS` / `window_physical_request` /
+`window` / `perf_log`），并去掉因此未用的 `use crate::engine;`。
+
+**两条判据当场红，都是"判据该跟着代码走"**：
+1. `source_cjk_codepoints_all_have_glyphs`：注释里用了「瘦」而字模表没有 ⇒ 改写措辞；
+2. `fatal_startup_paths_never_exit_zero`：它在源码里找「创建窗口失败」「渲染器初始化失败」两个锚点，
+   而这两处随实现体搬到了 `app_events.rs`，判据只扫 `lib.rs` ⇒ 报「检查失效」。
+   **修法要小心**：直接 `format!("{} {}", include_str!("lib.rs"), include_str!("app_events.rs"))`
+   再 `split("#[cfg(test)]")` 是**错的** —— 它会在 lib.rs 的测试模块处截断，整份 app_events 被丢掉，
+   锚点依然找不到（我第一次就这么写，判据立刻又红）。正解是**各自先切掉测试段再拼**，并断言
+   两块内容都在（防 include 失效时变成恒真）。
+
+**验收两条**：903 passed / 0 警告；同机位像素对照差异 **84 / 1,024,000 = 0.0082%**（仅 FPS 文字）。
+**lib.rs 6320 → 3291 行（降 3029 行 / 47.9%）**；`app_events` 299 行。
