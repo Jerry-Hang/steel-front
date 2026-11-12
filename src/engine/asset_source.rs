@@ -629,7 +629,10 @@ fn after() { let _ = std::fs::read("assets/y"); }
             // 纯测试模块文件（`tests.rs` / `tests_*.rs`，由 `#[cfg(test)] mod tests;` 引入）
             // 里的源码读取是"读 checkout"而不是读资产 —— 跳过，不算生产代码。
             let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "tests.rs" || name.starts_with("tests_") {
+            // 2026-11-13：`app_tests.rs` 是 `lib.rs` 拆出来的**纯测试模块**（`#[cfg(test)] mod
+            // app_tests;` 引入），性质与 `tests.rs` / `tests_*.rs` 完全相同 —— 它里面的
+            // `include_str!` / 源码扫描不是"读资产"，跳过，否则会把搬家误报成违规读取。
+            if name == "tests.rs" || name.starts_with("tests_") || name.ends_with("_tests.rs") {
                 continue;
             }
             let Ok(src) = std::fs::read_to_string(f) else {

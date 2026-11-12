@@ -3981,3 +3981,25 @@ OK   978..1256（279 行，归一化后逐字节命中）
 
 **验收两条**：903 passed / 0 警告；同机位像素对照差异 **84 / 1,024,000 = 0.0082%**。
 **lib.rs 6320 → 2601 行（降 3719 行 / 58.9%）**；`app_events` 1011 行。
+
+### 2026-11-13（续167）：`mod tests` 整体搬出 → `app_tests.rs`（lib.rs 1436 行）
+
+`lib.rs` 里的 `mod tests`（1167 行）搬到 `src/app_tests.rs`，原处只剩
+`#[cfg(test)] mod app_tests;`。`super::*` 语义不变（仍是 crate root 的子模块），
+所以测试里对私有字段/私有函数的访问全部照旧。
+
+**这一刀最有价值的发现：一条判据原来一直在"数自己"。**
+`cursor_release_restores_default_icon_and_is_shared` 用
+`src.matches("self.release_cursor_immediately(").count()` 并要求 `>= 4`。
+但**这行字面量本身就写在被扫描的 lib.rs 里**（测试当时还在 `mod tests` 中）⇒ 3 个真实调用点
++ 1 个自身字面量 = 4，"刚好达标"。搬到 `app_tests.rs` 后字面量不再落在扫描面内，计数掉到 3，
+**真相才暴露**。现已按事实钉死 `assert_eq!(calls, 3)` 并写明三个调用点分别是谁。
+⇒ 这就是教训 14（自指判据 = 恒真）的一个新实例，而且它静默了整整两个月。
+
+另外两处判据/工具跟着改：
+- `esc_menu_consumes_the_key_that_closes_it`：ESC 菜单块在 `app_events.rs`，扫描面加它；
+- `asset_source` 的源码扫描器：新增 `*_tests.rs` 跳过规则（纯测试文件里的 `include_str!`
+  不是"读资产"，否则搬家会被误报成违规读取）。
+
+**验收两条**：903 passed / 0 警告；同机位像素对照差异 **120 / 1,024,000 = 0.0117%**。
+**lib.rs 6320 → 1436 行（降 4884 行 / 77.3%）**。
