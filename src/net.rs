@@ -186,6 +186,10 @@ pub enum MessageType {
     ObjectiveState = 0x07,
     /// 服务端 → 客户端：拒绝加入（协议版本不匹配等；reason 文本）
     Refuse = 0x08,
+    /// 服务端 → 客户端：**量化**快照（2026-11-13）。与 `Snapshot` 同语义、更省带宽：
+    /// 每 NPC 26 B → **16 B**（位置 i16@1/64m、朝向 u16@整圈、血量 u16@1/16）。
+    /// 由 `RV3D_NET_QUANT_SNAP=1` 启用；解码侧**两种格式都认**，所以新旧端可混跑。
+    SnapshotQ = 0x10,
     /// 服务端 → 客户端：握手挑战（S2），客户端必须回 JoinProof 回显 nonce
     Challenge = 0x09,
     /// 客户端 → 服务端：回显挑战 nonce（S2）
@@ -221,6 +225,7 @@ impl MessageType {
             0x0D => MessageType::PeerHint,
             0x0E => MessageType::Punch,
             0x0F => MessageType::PunchPort,
+            0x10 => MessageType::SnapshotQ,
             _ => return None,
         })
     }
@@ -387,6 +392,43 @@ impl std::error::Error for NetError {}
 // ---------------------------------------------------------------------------
 
 /// 编码辅助：大端写入
+/// 量化常量（2026-11-13）：位置 1/64 m ≈ 1.6 cm，血量 1/16，朝向整圈映射到 u16。
+pub const SNAP_QUANT_POS_M: f32 = 1.0 / 64.0;
+pub const SNAP_QUANT_HP: f32 = 1.0 / 16.0;
+
+/// 把浮点量化成 i16（超范围**夹住**而不是溢出：越界坐标在网络上没有意义，
+/// 夹住至少保留"在很远的地方"这一信息，而溢出会把它翻到反方向）。
+pub fn quant_i16(v: f32, scale: f32) -> i16 {
+    let q = (v / scale).round();
+    if q.is_nan() {
+        return 0;
+    }
+    q.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+/// `quant_i16` 的逆变换。
+pub fn dequant_i16(q: i16, scale: f32) -> f32 {
+    q as f32 * scale
+}
+
+/// 角度量化：[-π, π] → u16 整圈（分辨率 ≈ 0.00019 rad ≈ 0.011°，远细于网络插值误差）。
+pub fn quant_angle_u16(rad: f32) -> u16 {
+    if !rad.is_finite() {
+        return 0;
+    }
+    let two_pi = std::f32::consts::TAU;
+    let mut r = rad % two_pi;
+    if r < 0.0 {
+        r += two_pi;
+    }
+    ((r / two_pi) * 65535.0).round().clamp(0.0, 65535.0) as u16
+}
+
+/// `quant_angle_u16` 的逆变换，结果落在 [0, 2π)。
+pub fn dequant_angle_u16(q: u16) -> f32 {
+    (q as f32 / 65535.0) * std::f32::consts::TAU
+}
+
 fn put_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
@@ -535,6 +577,15 @@ impl<'a> Reader<'a> {
         Ok(b)
     }
 
+    fn u16(&mut self) -> Result<u16, NetError> {
+        let a = [self.u8()?, self.u8()?];
+        Ok(u16::from_be_bytes(a))
+    }
+
+    fn i16(&mut self) -> Result<i16, NetError> {
+        Ok(self.u16()? as i16)
+    }
+
     fn u32(&mut self) -> Result<u32, NetError> {
         let a = [self.u8()?, self.u8()?, self.u8()?, self.u8()?];
         Ok(u32::from_be_bytes(a))
@@ -649,6 +700,31 @@ impl NetworkMessage {
                 (MessageType::Action, p)
             }
             NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
+                // 量化快照（2026-11-13，`RV3D_NET_QUANT_SNAP=1`）：每 NPC 26B → 16B。
+                // 解码侧两种格式都认（见 `MessageType::SnapshotQ` 分支），所以新旧端可混跑。
+                if crate::syscfg::flag("RV3D_NET_QUANT_SNAP") {
+                    let n = npcs.len().min(MAX_SNAPSHOT_NPCS) as u16;
+                    let mut p = Vec::with_capacity(4 + 4 + 4 + 8 + 2 + n as usize * 16);
+                    put_u32(&mut p, *seq);
+                    put_f32(&mut p, *time);
+                    put_u32(&mut p, *player_id);
+                    for c in player.pos {
+                        p.extend_from_slice(&quant_i16(c, SNAP_QUANT_POS_M).to_be_bytes());
+                    }
+                    p.extend_from_slice(&quant_angle_u16(player.rot).to_be_bytes());
+                    p.extend_from_slice(&n.to_be_bytes());
+                    for npc in npcs.iter().take(MAX_SNAPSHOT_NPCS) {
+                        put_u32(&mut p, npc.id);
+                        for c in npc.pos {
+                            p.extend_from_slice(&quant_i16(c, SNAP_QUANT_POS_M).to_be_bytes());
+                        }
+                        p.extend_from_slice(&quant_angle_u16(npc.facing).to_be_bytes());
+                        p.extend_from_slice(&quant_i16(npc.hp, SNAP_QUANT_HP).to_be_bytes());
+                        p.push(npc.team);
+                        p.push(npc.firing);
+                    }
+                    (MessageType::SnapshotQ, p)
+                } else {
                 // 固定头：seq(4) + time(4) + player_id(4) + player(16) + count(2)
                 let n = npcs.len().min(MAX_SNAPSHOT_NPCS) as u16;
                 // 每条 26 B：id(4) + pos(12) + facing(4) + hp(4) + team(1) + firing(1)
@@ -672,7 +748,8 @@ impl NetworkMessage {
                     p.push(npc.team);
                     p.push(npc.firing);
                 }
-                (MessageType::Snapshot, p)
+                    (MessageType::Snapshot, p)
+                }
             }
             NetworkMessage::Input { seq, time, input } => {
                 // seq(4) + time(4) + 5×bool + yaw(4) + pitch(4) = 21B
@@ -831,6 +908,37 @@ impl NetworkMessage {
                     action_id,
                     value,
                 }
+            }
+            // 量化快照（2026-11-13）：头完全同 `Snapshot`，只有每条 NPC 的编码不同。
+            MessageType::SnapshotQ => {
+                let seq = r.u32()?;
+                let time = r.f32()?;
+                let player_id = r.u32()?;
+                let pos = [
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                ];
+                let rot = dequant_angle_u16(r.u16()?);
+                let n = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
+                if n > MAX_SNAPSHOT_NPCS {
+                    return Err(NetError::OversizedCount);
+                }
+                let mut npcs = Vec::with_capacity(snapshot_capacity_hint(n));
+                for _ in 0..n {
+                    let id = r.u32()?;
+                    let pos = [
+                        dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                        dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                        dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                    ];
+                    let facing = dequant_angle_u16(r.u16()?);
+                    let hp = dequant_i16(r.i16()?, SNAP_QUANT_HP).max(0.0);
+                    let team = r.u8()?;
+                    let firing = r.u8()?;
+                    npcs.push(NpcSnapshot { id, pos, facing, hp, team, firing });
+                }
+                NetworkMessage::Snapshot { seq, time, player_id, player: PlayerState::new(pos, rot), npcs }
             }
             MessageType::Snapshot => {
                 let seq = r.u32()?;
@@ -2116,6 +2224,130 @@ impl Client {
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod quant_snapshot_tests {
+    use super::*;
+
+    fn sample(n: usize) -> NetworkMessage {
+        NetworkMessage::Snapshot {
+            seq: 7,
+            time: 1.25,
+            player_id: 3,
+            player: PlayerState::new([12.345, 1.5, -7.25], 1.0),
+            npcs: (0..n)
+                .map(|i| NpcSnapshot {
+                    id: i as u32,
+                    pos: [i as f32 * 1.5 - 3.0, 0.5, -(i as f32) * 0.75],
+                    facing: (i as f32) * 0.5 - 1.0,
+                    hp: 100.0 - i as f32,
+                    team: (i % 2) as u8,
+                    firing: (i % 3 == 0) as u8,
+                })
+                .collect(),
+        }
+    }
+
+    /// 量化 → 解码后必须落在**可解释的误差**内：位置 ±3cm、朝向 ±0.02rad、血量 ±0.1。
+    /// （1/64m 的量化半步 = 7.8mm，取 3cm 留足余量；超过就说明常量写错了。）
+    #[test]
+    fn quantized_snapshot_roundtrips_within_tolerance() {
+        let orig = sample(8);
+        let bytes = encode_quantized_for_test(&orig);
+        let back = NetworkMessage::decode(&bytes).expect("量化快照必须能解码");
+        match (orig, back) {
+            (
+                NetworkMessage::Snapshot { player: p0, npcs: n0, .. },
+                NetworkMessage::Snapshot { player: p1, npcs: n1, .. },
+            ) => {
+                for k in 0..3 {
+                    assert!((p0.pos[k] - p1.pos[k]).abs() < 0.03, "玩家位置误差过大: {:?} vs {:?}", p0.pos, p1.pos);
+                }
+                assert_eq!(n0.len(), n1.len(), "NPC 数量必须一致");
+                for (a, b) in n0.iter().zip(n1.iter()) {
+                    assert_eq!(a.id, b.id);
+                    assert_eq!(a.team, b.team);
+                    assert_eq!(a.firing, b.firing);
+                    for k in 0..3 {
+                        assert!((a.pos[k] - b.pos[k]).abs() < 0.03, "NPC 位置误差过大");
+                    }
+                    assert!((a.hp - b.hp).abs() < 0.1, "血量误差过大: {} vs {}", a.hp, b.hp);
+                    let d = (a.facing - b.facing).abs();
+                    let d = d.min(std::f32::consts::TAU - d);
+                    assert!(d < 0.02, "朝向误差过大: {} vs {}", a.facing, b.facing);
+                }
+            }
+            _ => panic!("解码后类型不对"),
+        }
+    }
+
+    /// **每 NPC 16 B**（比 f32 版 26 B 小 38%）：这条钉住编码布局，防止有人加字段时忘了算总量。
+    #[test]
+    fn quantized_snapshot_is_16_bytes_per_npc() {
+        for n in [0usize, 1, 7, 64] {
+            let bytes = encode_quantized_for_test(&sample(n));
+            // 数据报头 5 + 载荷头 22（seq4+time4+pid4+pos6+rot2+count2）= 27
+            assert_eq!(bytes.len(), 27 + n * 16, "n={n} 时布局不是 16B/NPC");
+        }
+    }
+
+    /// **量化是幂等的**：把解码值再量化必须得到同一个整数（否则长时间运行会缓慢漂移）。
+    #[test]
+    fn quantization_is_idempotent() {
+        for i in -1000..1000 {
+            let v = i as f32 * 0.037;
+            let q = quant_i16(v, SNAP_QUANT_POS_M);
+            let back = dequant_i16(q, SNAP_QUANT_POS_M);
+            assert_eq!(quant_i16(back, SNAP_QUANT_POS_M), q, "量化不幂等：v={v}");
+        }
+    }
+
+    /// 伪造的超大 count 必须被拒（与 f32 版同一条防线）。
+    #[test]
+    fn quantized_snapshot_rejects_oversized_count() {
+        let mut bytes = encode_quantized_for_test(&sample(0));
+        let n = bytes.len() - 2;
+        let bad = (MAX_SNAPSHOT_NPCS + 1) as u16;
+        bytes[n..].copy_from_slice(&bad.to_be_bytes());
+        assert!(matches!(NetworkMessage::decode(&bytes), Err(NetError::OversizedCount)));
+    }
+
+    /// 测试专用：强制走量化编码（生产路径由 `RV3D_NET_QUANT_SNAP` 决定）。
+    fn encode_quantized_for_test(m: &NetworkMessage) -> Vec<u8> {
+        let NetworkMessage::Snapshot { seq, time, player_id, player, npcs } = m else {
+            panic!("只支持快照")
+        };
+        let n = npcs.len().min(MAX_SNAPSHOT_NPCS) as u16;
+        let mut p = Vec::new();
+        put_u32(&mut p, *seq);
+        put_f32(&mut p, *time);
+        put_u32(&mut p, *player_id);
+        for c in player.pos {
+            p.extend_from_slice(&quant_i16(c, SNAP_QUANT_POS_M).to_be_bytes());
+        }
+        p.extend_from_slice(&quant_angle_u16(player.rot).to_be_bytes());
+        p.extend_from_slice(&n.to_be_bytes());
+        for npc in npcs.iter().take(MAX_SNAPSHOT_NPCS) {
+            put_u32(&mut p, npc.id);
+            for c in npc.pos {
+                p.extend_from_slice(&quant_i16(c, SNAP_QUANT_POS_M).to_be_bytes());
+            }
+            p.extend_from_slice(&quant_angle_u16(npc.facing).to_be_bytes());
+            p.extend_from_slice(&quant_i16(npc.hp, SNAP_QUANT_HP).to_be_bytes());
+            p.push(npc.team);
+            p.push(npc.firing);
+        }
+        // 与生产路径**同一套数据报头**：magic(1) + version(1) + type(1) + len(2) + payload。
+        // 少了这层头，解码会以 InvalidMagic 拒绝（这正是我第一版测试失败的原因）。
+        let mut out = Vec::with_capacity(HEADER_LEN + p.len());
+        out.push(PROTOCOL_MAGIC);
+        out.push(PROTOCOL_VERSION);
+        out.push(MessageType::SnapshotQ as u8);
+        out.extend_from_slice(&(p.len() as u16).to_be_bytes());
+        out.extend_from_slice(&p);
+        out
+    }
+}
 
 #[cfg(test)]
 mod tests {
