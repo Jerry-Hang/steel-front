@@ -24,11 +24,14 @@ fn cursor_release_restores_default_icon_and_is_shared() {
     // 导致"扫到 0 个"却仍然通过 —— 那是恒真断言）。
     // 🔴 2026-11-13：`window_event` 的实现体搬到 `app_events.rs` 后，释放光标的调用点也有
     // 一部分跟着过去了 ⇒ 扫描面加上它（三份都必须非空，防 include 失效时变成恒真）。
+    // 2026-11-13：`release_cursor_immediately` 的**定义**搬到了 `app_init.rs`（构造与同批小方法
+    // 一起搬的）⇒ 扫描面再加一份，否则报"必须有统一释放实现"。
     let raw = format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         include_str!("lib.rs"),
         include_str!("app_window.rs"),
-        include_str!("app_events.rs")
+        include_str!("app_events.rs"),
+        include_str!("app_init.rs")
     );
     let src = raw.replace("\r\n", "\n");
     let src = src.as_str();
@@ -83,7 +86,13 @@ fn esc_menu_consumes_the_key_that_closes_it() {
 fn restart_paths_reset_gameapp_transients() {
     // 🔴 2026-11-13：`window_event` 的实现体已搬到 `src/app_events.rs`，其中也有复位调用点
     // ⇒ 只扫 lib.rs 会把"搬家"误报成"少了一个入口"。两个文件都扫。
-    let joined = format!("{}\n{}", include_str!("lib.rs"), include_str!("app_events.rs"));
+    // 2026-11-13：复位方法本身搬到了 `app_init.rs` ⇒ 扫描面必须含它，否则报"必须有复位方法"。
+    let joined = format!(
+        "{}\n{}\n{}",
+        include_str!("lib.rs"),
+        include_str!("app_events.rs"),
+        include_str!("app_init.rs")
+    );
     let src = joined.as_str();
     let calls = src.matches(".reset_session_transients()").count();
     assert!(calls >= 3, "重开与切关路径都必须调用复位（方法定义 + 3 个入口），实际 {calls}");

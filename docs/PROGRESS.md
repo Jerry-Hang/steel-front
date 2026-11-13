@@ -4003,3 +4003,26 @@ OK   978..1256（279 行，归一化后逐字节命中）
 
 **验收两条**：903 passed / 0 警告；同机位像素对照差异 **120 / 1,024,000 = 0.0117%**。
 **lib.rs 6320 → 1436 行（降 4884 行 / 77.3%）**。
+
+### 2026-11-13（续168）：构造与小方法拆出 → `app_init.rs`（lib.rs 990 行）
+
+搬出 445 行：`GameApp::new()`（构造）+ 紧跟其后的七个小方法
+（`menu_click_hit` / `settings_click` / `toggle_escape_menu` / `release_cursor_immediately` /
+`sync_game_movement` / `reset_session_transients` / `begin_exit` / `apply_resolution` /
+`apply_quality` / `capture_screenshot`）。
+
+```
+OK   520..964（445 行，归一化后逐字节命中）
+```
+
+三个坑：
+1. **方法搬到别的模块后要提升可见性**：`new()` 调用的 10 个方法原本是私有的，跨模块即报
+   `E0624 method is private` ⇒ 逐个改 `pub(crate)`；
+2. **`config::load()` 不能改成全限定**：我一度写成 `crate::config::load()`，工具立刻判 FAIL
+   （移动里夹带路径编辑）⇒ 还原原文写法 + 顶部 `use crate::config;`；
+3. **四条源码扫描判据全部跟着搬家**（这是"判据该跟着代码走"的第 N 次）：
+   - `app_tests` 里的光标释放判据、复位判据（扫描面加 `app_init.rs`）；
+   - `ui.rs::esc_menu_hit_rect_matches_the_drawn_rect` 找 `fn menu_click_hit` ⇒ 改扫 `app_init.rs`。
+
+**验收两条**：903 passed / 0 警告；同机位像素对照差异 **132 / 1,024,000 = 0.0129%**。
+**lib.rs 6320 → 990 行（降 5330 行 / 84.3%）**。

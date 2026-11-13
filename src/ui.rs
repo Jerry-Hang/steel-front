@@ -3217,7 +3217,9 @@ mod tests {
         }
 
         let ui = body(include_str!("ui.rs"), "fn esc_menu_elements");
-        let mn = body(include_str!("lib.rs"), "fn menu_click_hit");
+        // 2026-11-13：`menu_click_hit` 随 `GameApp::new()` 那批方法搬到了 `app_init.rs`
+        // ⇒ 只扫 lib.rs 会报"找不到 fn menu_click_hit"。取实际位置。
+        let mn = body(include_str!("app_init.rs"), "fn menu_click_hit");
 
         // 面板尺寸与内缩：两份必须给同样的数
         for (needle, what) in [("let pw = ", "面板宽"), ("let ph = ", "面板高")] {
