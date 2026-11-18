@@ -459,6 +459,21 @@ impl Game {
                 if ctx.decimate_far && should_decimate_far(npc, ctx.frame) {
                     continue;
                 }
+                // 🔴 **补回被跳过的时间**（2026-11-18）：这一帧真的步进时，`dt` 要乘上
+                // 降频周期，否则远组的速度与计时器只有 1/`AI_FAR_DECIMATE`（在爬行）。
+                // 交互中的 NPC 比例恒为 1（红线：攻击态/接火必须每帧、且不许变快）。
+                let scaled;
+                let ctx = if ctx.decimate_far {
+                    let k = far_decimate_dt_scale(far_npc_is_interacting(npc));
+                    if k == 1.0 {
+                        ctx
+                    } else {
+                        scaled = ctx.with_scaled_dt(k);
+                        &scaled
+                    }
+                } else {
+                    ctx
+                };
                 Self::step_npc(near_len + start + k, npc, ctx);
             }
         });

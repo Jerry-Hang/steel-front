@@ -855,6 +855,7 @@ pub struct Game {
 }
 
 /// 单帧 AI 步进上下文（全部为共享只读数据，供串行/并行两种 runner 复用）
+#[derive(Clone)]
 pub(crate) struct AiStepCtx<'a> {
     player: &'a glam::Vec3,
     player_yaw: f32,
@@ -897,6 +898,19 @@ pub(crate) struct AiStepCtx<'a> {
     /// 也躲不掉——用户报的"穿墙/透视"里最严重的一条其实是这个逻辑洞，不是几何。
     /// 空 slice = 无数据（保持旧行为），供单测与未接线路径使用。
     target_occluded: &'a [bool],
+}
+
+impl<'a> AiStepCtx<'a> {
+    /// 复制一份、把 `dt` 放大 `k` 倍（**远组降频专用**）。
+    ///
+    /// 为什么需要：降频的 NPC 每 `AI_FAR_DECIMATE` 帧才步进一次，若仍按单帧 `dt` 积分，
+    /// 它的速度与各种计时器就只有 `1/AI_FAR_DECIMATE`（2026-11-18 修的真 bug）。
+    /// 补时间必须发生在**步进的那一帧**，所以只能改 ctx 而不能改 NPC 内部。
+    pub(crate) fn with_scaled_dt(&self, k: f32) -> AiStepCtx<'a> {
+        let mut c = self.clone();
+        c.dt *= k;
+        c
+    }
 }
 
 

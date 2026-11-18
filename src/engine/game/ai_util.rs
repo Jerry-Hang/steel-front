@@ -126,15 +126,40 @@ pub(crate) fn ai_tier_of(npc: &Npc, player: &glam::Vec3, stress: bool, params: &
 /// 每 `AI_FAR_DECIMATE` 帧步进一次（确定性按 npc.id 分帧，`frame % N == id % N`
 /// 的帧才步进）；交互中 NPC 恒每帧（红线：攻击态/接火必须每帧）。
 pub(crate) fn should_decimate_far(npc: &Npc, frame: u32) -> bool {
-    if npc.perception.enemy_visible
+    if far_npc_is_interacting(npc) {
+        return false;
+    }
+    frame % AI_FAR_DECIMATE != (npc.id as u32) % AI_FAR_DECIMATE
+}
+
+/// 这只 NPC 是否**正在与玩家实时交互**（感知/受击/被瞄准/追击/攻击）。
+///
+/// 🔴 抽成独立函数是"单一真源"：`should_decimate_far`（要不要跳过这一帧）与
+/// [`far_decimate_dt_scale`]（跳过之后要不要补时间）**必须用同一个判据** ——
+/// 两处各写一遍的话，将来改一处就会让"交互中恒每帧"这条红线静默失效。
+pub(crate) fn far_npc_is_interacting(npc: &Npc) -> bool {
+    npc.perception.enemy_visible
         || npc.perception.took_hit
         || npc.perception.under_fire
         || npc.perception.player_aiming
         || matches!(npc.state_machine.state(), NpcState::Chase | NpcState::Attack)
-    {
-        return false;
+}
+
+/// 远组降频时，**这一次步进该用多少倍 `dt`**。
+///
+/// 🔴 存在理由（2026-11-18 修的真 bug）：被降频的 NPC 每 `AI_FAR_DECIMATE` 帧才步进一次，
+/// 但 `step_npc` 用的仍是**单帧** `dt` ⇒ 它的移动/计时器只有正常速度的 `1/AI_FAR_DECIMATE`。
+/// 压力模式（128v128）下远组 NPC 因此在**爬行**，而且"受伤恢复计时""攻击间隔"这些
+/// 也跟着慢 4 倍 —— 这是"跳过处理"最容易漏的那一半：**跳过之后要补时间**。
+///
+/// 判据：`decimation_preserves_effective_time` —— 一个降频周期内的**有效模拟时间**
+/// 必须与不降频时相同。
+pub(crate) fn far_decimate_dt_scale(interacting: bool) -> f32 {
+    if interacting {
+        1.0
+    } else {
+        AI_FAR_DECIMATE as f32
     }
-    frame % AI_FAR_DECIMATE != (npc.id as u32) % AI_FAR_DECIMATE
 }
 /// `RV3D_AI_DIAG=1`：NPC 停在非 Attack 态时每 5s 打一行"为什么"（未结案 #17 的定位工具，
 /// 见 `step_npc` 里的调用点；默认关 ⇒ 生产行为与日志量不变）。
@@ -768,5 +793,59 @@ mod ai_util_tests {
             None,
             "目标在东侧时没有任何掩体比当前位置更靠近它 ⇒ 应当退回直线推进"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod decimate_time_tests {
+    use super::*;
+
+    /// **降频不得改变有效模拟时间**（2026-11-18）。
+    ///
+    /// 一个降频周期内，无论 NPC 是否交互，累计的"有效 dt"都必须等于
+    /// `AI_FAR_DECIMATE × 单帧 dt` —— 这就是"降频只省 CPU、不改速度"的准确表述。
+    /// 反向验证：把 `far_decimate_dt_scale` 的非交互分支改成 1.0 ⇒ 非交互那一路
+    /// 只累计 1 帧的时间（1/4），本站立刻红。
+    #[test]
+    fn decimation_preserves_effective_time() {
+        let dt = 0.016f64;
+        let n = AI_FAR_DECIMATE as f64;
+        // 非交互：一个周期里只有 1 帧真的步进，但那一帧要补足 n 倍时间
+        let mut eff_far = 0.0f64;
+        let mut steps_far = 0;
+        for frame in 0..AI_FAR_DECIMATE {
+            // 取 id=0：`frame % N != id % N` 时才跳过 ⇒ id%N == 0 ⇒ frame%N==0 那一帧步进
+            let skip = frame % AI_FAR_DECIMATE != 0;
+            if !skip {
+                steps_far += 1;
+                eff_far += dt * far_decimate_dt_scale(false) as f64;
+            }
+        }
+        assert_eq!(steps_far, 1, "非交互远组在一个周期里应当只步进一次");
+        assert!(
+            (eff_far - dt * n).abs() < 1e-12,
+            "非交互远组的有效时间应为 {:.4}s（一个周期），实际 {:.4}s —— \
+             只累计单帧时间就意味着速度只有 1/{AI_FAR_DECIMATE}",
+            dt * n,
+            eff_far
+        );
+
+        // 交互中：每帧都步进、且比例恒为 1 ⇒ 同样累计一个周期的时间
+        let mut eff_near = 0.0f64;
+        for _ in 0..AI_FAR_DECIMATE {
+            eff_near += dt * far_decimate_dt_scale(true) as f64;
+        }
+        assert!(
+            (eff_near - eff_far).abs() < 1e-12,
+            "交互中与远组的有效时间必须相同（{eff_near} vs {eff_far}）"
+        );
+    }
+
+    /// 交互中的 NPC **永远不许**被放大 dt（那会让它跑得比玩家还快）。
+    #[test]
+    fn interacting_npcs_are_never_scaled() {
+        assert_eq!(far_decimate_dt_scale(true), 1.0);
+        assert_eq!(far_decimate_dt_scale(false), AI_FAR_DECIMATE as f32);
     }
 }
