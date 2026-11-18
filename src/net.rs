@@ -190,6 +190,10 @@ pub enum MessageType {
     /// 每 NPC 26 B → **16 B**（位置 i16@1/64m、朝向 u16@整圈、血量 u16@1/16）。
     /// 由 `RV3D_NET_QUANT_SNAP=1` 启用；解码侧**两种格式都认**，所以新旧端可混跑。
     SnapshotQ = 0x10,
+    /// 服务端 → 客户端：**增量**快照（2026-11-18）。与 `Snapshot` 同语义、按"上一帧"做差分：
+    /// 未变的 NPC 只发 id + 1B 位图（1–5 B），变化项才带量化字段。
+    /// 每客户端各自维护基准（见 `Server::snap_bases`）；base 不匹配 ⇒ 自动退回全量。
+    SnapshotD = 0x11,
     /// 服务端 → 客户端：握手挑战（S2），客户端必须回 JoinProof 回显 nonce
     Challenge = 0x09,
     /// 客户端 → 服务端：回显挑战 nonce（S2）
@@ -226,6 +230,7 @@ impl MessageType {
             0x0E => MessageType::Punch,
             0x0F => MessageType::PunchPort,
             0x10 => MessageType::SnapshotQ,
+            0x11 => MessageType::SnapshotD,
             _ => return None,
         })
     }
@@ -283,6 +288,181 @@ pub struct NetInput {
     pub pitch: f32,
 }
 
+/// 增量快照里的单个 NPC 差分（2026-11-18）。
+///
+/// `flags` 的每一位表示"该字段本帧有变化、后面带了它的量化值"：
+/// bit0 = pos、bit1 = facing、bit2 = hp、bit3 = team、bit4 = firing。
+/// `flags == 0` ⇒ 这只 NPC 与基准帧完全相同，**只占 id(4) + flags(1) = 5 B**。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NpcDelta {
+    /// 实体 id
+    pub id: u32,
+    /// 变化位图（见类型文档）
+    pub flags: u8,
+    /// 位置（仅 bit0 置位时有效）
+    pub pos: [f32; 3],
+    /// 朝向（仅 bit1 置位时有效）
+    pub facing: f32,
+    /// 血量（仅 bit2 置位时有效）
+    pub hp: f32,
+    /// 阵营（仅 bit3 置位时有效）
+    pub team: u8,
+    /// 开火态（仅 bit4 置位时有效）
+    pub firing: u8,
+}
+
+/// `NpcDelta::flags` 的位定义（单一真源，编解码两侧都引用这里，别再写字面量）。
+pub const DELTA_POS: u8 = 1 << 0;
+pub const DELTA_FACING: u8 = 1 << 1;
+pub const DELTA_HP: u8 = 1 << 2;
+pub const DELTA_TEAM: u8 = 1 << 3;
+pub const DELTA_FIRING: u8 = 1 << 4;
+
+/// **物化的一帧快照**（客户端插值真正消费的东西）。
+///
+/// 增量包本身不是完整状态，必须叠加到基准帧上才能用 —— 所以客户端的"当前帧"用这个类型，
+/// 而不是 `NetworkMessage`。`apply_delta` 是纯函数，可单测（不需要 socket）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotFrame {
+    /// 快照序号
+    pub seq: u32,
+    /// 服务端模拟时间（秒）
+    pub time: f32,
+    /// 服务端本机玩家 id
+    pub player_id: u32,
+    /// 服务端本机玩家状态
+    pub player: PlayerState,
+    /// 在场 NPC（顺序保持基准帧的，新增的追加在末尾）
+    pub npcs: Vec<NpcSnapshot>,
+}
+
+impl SnapshotFrame {
+    /// 从全量快照字段构造。
+    pub fn new(seq: u32, time: f32, player_id: u32, player: PlayerState, npcs: Vec<NpcSnapshot>) -> Self {
+        Self { seq, time, player_id, player, npcs }
+    }
+}
+
+/// 把"当前帧 NPC 列表"与"基准帧 NPC 列表"做差分（纯函数，可单测）。
+///
+/// 返回 `(deltas, removed)`：
+/// - `deltas` 里每项带 `flags` 位图；**完全没变的项 `flags == 0`**（线路只占 5 B）；
+/// - `removed` 是"基准里有、当前没有"的 id，按基准顺序。
+///
+/// 🔴 **按 id 配对，不按顺序**：服务端的 NPC 列表顺序会随波次刷新而变化，按顺序比会把
+/// 整列表判成"全变了"。同时 `deltas` 按**当前帧顺序**输出，删掉的 id 单独列出。
+pub fn diff_npcs(base: &[NpcSnapshot], cur: &[NpcSnapshot]) -> (Vec<NpcDelta>, Vec<u32>) {
+    // 基准按 id 建索引（同 id 多次出现时取最后一个 —— 服务端不应出现，但别让它 panic）
+    let mut prev: std::collections::HashMap<u32, &NpcSnapshot> = std::collections::HashMap::with_capacity(base.len());
+    for n in base {
+        prev.insert(n.id, n);
+    }
+    let mut deltas = Vec::with_capacity(cur.len());
+    for n in cur {
+        let mut flags = 0u8;
+        if let Some(p) = prev.get(&n.id) {
+            // 位置/朝向用**量化后**的值比较：否则 f32 上的微小抖动会让"没变"永远判成变
+            if quant_i16(p.pos[0], SNAP_QUANT_POS_M) != quant_i16(n.pos[0], SNAP_QUANT_POS_M)
+                || quant_i16(p.pos[1], SNAP_QUANT_POS_M) != quant_i16(n.pos[1], SNAP_QUANT_POS_M)
+                || quant_i16(p.pos[2], SNAP_QUANT_POS_M) != quant_i16(n.pos[2], SNAP_QUANT_POS_M)
+            {
+                flags |= DELTA_POS;
+            }
+            if quant_angle_u16(p.facing) != quant_angle_u16(n.facing) {
+                flags |= DELTA_FACING;
+            }
+            if quant_i16(p.hp, SNAP_QUANT_HP) != quant_i16(n.hp, SNAP_QUANT_HP) {
+                flags |= DELTA_HP;
+            }
+            if p.team != n.team {
+                flags |= DELTA_TEAM;
+            }
+            if p.firing != n.firing {
+                flags |= DELTA_FIRING;
+            }
+        } else {
+            // 新增的 NPC：全字段都带
+            flags = DELTA_POS | DELTA_FACING | DELTA_HP | DELTA_TEAM | DELTA_FIRING;
+        }
+        deltas.push(NpcDelta {
+            id: n.id,
+            flags,
+            pos: n.pos,
+            facing: n.facing,
+            hp: n.hp,
+            team: n.team,
+            firing: n.firing,
+        });
+    }
+    // 当前帧的 id 集合，用于算 removed
+    let cur_ids: std::collections::HashSet<u32> = cur.iter().map(|n| n.id).collect();
+    let mut removed = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for n in base {
+        if !cur_ids.contains(&n.id) && seen.insert(n.id) {
+            removed.push(n.id);
+        }
+    }
+    (deltas, removed)
+}
+
+/// 把增量包**叠加**到基准帧上，得到完整的一帧（纯函数，可单测）。
+///
+/// 语义要点：
+/// - 基准里没有的 id ⇒ **追加**到末尾（保持"新出现的在最后"的约定）；
+/// - `removed` 里的 id ⇒ 删除；
+/// - `flags` 未置位的字段**沿用基准值**（这正是增量的意义所在）。
+pub fn apply_delta(base: &SnapshotFrame, delta: &NetworkMessage) -> Option<SnapshotFrame> {
+    let NetworkMessage::SnapshotDelta { seq, base_seq, time, player_id, player, npcs, removed } = delta else {
+        return None;
+    };
+    if *base_seq != base.seq {
+        // 基准不匹配：交给调用方丢弃（服务端会周期性发全量兜底）
+        return None;
+    }
+    let mut out: Vec<NpcSnapshot> = base.npcs.clone();
+    let mut index: std::collections::HashMap<u32, usize> = out.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+    for d in npcs {
+        match index.get(&d.id).copied() {
+            Some(i) => {
+                let cur = &mut out[i];
+                if d.flags & DELTA_POS != 0 {
+                    cur.pos = d.pos;
+                }
+                if d.flags & DELTA_FACING != 0 {
+                    cur.facing = d.facing;
+                }
+                if d.flags & DELTA_HP != 0 {
+                    cur.hp = d.hp;
+                }
+                if d.flags & DELTA_TEAM != 0 {
+                    cur.team = d.team;
+                }
+                if d.flags & DELTA_FIRING != 0 {
+                    cur.firing = d.firing;
+                }
+            }
+            None => {
+                // 新出现的 NPC：flags 必有全部位（见 diff_npcs），直接整条插入
+                index.insert(d.id, out.len());
+                out.push(NpcSnapshot {
+                    id: d.id,
+                    pos: d.pos,
+                    facing: d.facing,
+                    hp: d.hp,
+                    team: d.team,
+                    firing: d.firing,
+                });
+            }
+        }
+    }
+    if !removed.is_empty() {
+        let gone: std::collections::HashSet<u32> = removed.iter().copied().collect();
+        out.retain(|n| !gone.contains(&n.id));
+    }
+    Some(SnapshotFrame::new(*seq, *time, *player_id, *player, out))
+}
+
 /// 网络消息：Join / Leave / Position / Action / Snapshot / Input
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetworkMessage {
@@ -329,6 +509,17 @@ pub enum NetworkMessage {
         player_id: u32,
         player: PlayerState,
         npcs: Vec<NpcSnapshot>,
+    },
+    /// 服务端 → 客户端：**增量**快照（2026-11-18）。`base_seq` 指明叠加到哪一帧上；
+    /// 客户端没有对应基准时**丢弃本包**（服务端会周期性发全量兜底）。
+    SnapshotDelta {
+        seq: u32,
+        base_seq: u32,
+        time: f32,
+        player_id: u32,
+        player: PlayerState,
+        npcs: Vec<NpcDelta>,
+        removed: Vec<u32>,
     },
     /// 客户端 → 服务端：本帧输入。seq = 客户端输入序号（wrapping），time = 客户端本地时间（秒）
     Input { seq: u32, time: f32, input: NetInput },
@@ -699,6 +890,48 @@ impl NetworkMessage {
                 put_f32(&mut p, *value);
                 (MessageType::Action, p)
             }
+            NetworkMessage::SnapshotDelta { seq, base_seq, time, player_id, player, npcs, removed } => {
+                // 布局：seq(4)+base_seq(4)+time(4)+player_id(4)+player_pos(6)+player_rot(2)+count(2)
+                //       + 每条 [id(4)+flags(1)+变化字段] + removed_count(2) + removed_id(4×)
+                let n = npcs.len().min(MAX_SNAPSHOT_NPCS) as u16;
+                let mut p = Vec::with_capacity(22 + n as usize * 16 + 2 + removed.len() * 4);
+                put_u32(&mut p, *seq);
+                put_u32(&mut p, *base_seq);
+                put_f32(&mut p, *time);
+                put_u32(&mut p, *player_id);
+                for c in player.pos {
+                    p.extend_from_slice(&quant_i16(c, SNAP_QUANT_POS_M).to_be_bytes());
+                }
+                p.extend_from_slice(&quant_angle_u16(player.rot).to_be_bytes());
+                p.extend_from_slice(&n.to_be_bytes());
+                for d in npcs.iter().take(MAX_SNAPSHOT_NPCS) {
+                    put_u32(&mut p, d.id);
+                    p.push(d.flags);
+                    if d.flags & DELTA_POS != 0 {
+                        for c in d.pos {
+                            p.extend_from_slice(&quant_i16(c, SNAP_QUANT_POS_M).to_be_bytes());
+                        }
+                    }
+                    if d.flags & DELTA_FACING != 0 {
+                        p.extend_from_slice(&quant_angle_u16(d.facing).to_be_bytes());
+                    }
+                    if d.flags & DELTA_HP != 0 {
+                        p.extend_from_slice(&quant_i16(d.hp, SNAP_QUANT_HP).to_be_bytes());
+                    }
+                    if d.flags & DELTA_TEAM != 0 {
+                        p.push(d.team);
+                    }
+                    if d.flags & DELTA_FIRING != 0 {
+                        p.push(d.firing);
+                    }
+                }
+                let rn = removed.len().min(MAX_SNAPSHOT_NPCS) as u16;
+                p.extend_from_slice(&rn.to_be_bytes());
+                for id in removed.iter().take(MAX_SNAPSHOT_NPCS) {
+                    put_u32(&mut p, *id);
+                }
+                (MessageType::SnapshotD, p)
+            }
             NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
                 // 量化快照（2026-11-13，`RV3D_NET_QUANT_SNAP=1`）：每 NPC 26B → 16B。
                 // 解码侧两种格式都认（见 `MessageType::SnapshotQ` 分支），所以新旧端可混跑。
@@ -939,6 +1172,66 @@ impl NetworkMessage {
                     npcs.push(NpcSnapshot { id, pos, facing, hp, team, firing });
                 }
                 NetworkMessage::Snapshot { seq, time, player_id, player: PlayerState::new(pos, rot), npcs }
+            }
+            MessageType::SnapshotD => {
+                let seq = r.u32()?;
+                let base_seq = r.u32()?;
+                let time = r.f32()?;
+                let player_id = r.u32()?;
+                let pos = [
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                ];
+                let rot = dequant_angle_u16(r.u16()?);
+                let n = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
+                if n > MAX_SNAPSHOT_NPCS {
+                    return Err(NetError::OversizedCount);
+                }
+                let mut npcs = Vec::with_capacity(snapshot_capacity_hint(n));
+                for _ in 0..n {
+                    let id = r.u32()?;
+                    let flags = r.u8()?;
+                    // 只读"flags 说有位"的那些字段 —— 这样未变的 NPC 真的只花 5 B。
+                    let mut d = NpcDelta { id, flags, pos: [0.0; 3], facing: 0.0, hp: 0.0, team: 0, firing: 0 };
+                    if flags & DELTA_POS != 0 {
+                        d.pos = [
+                            dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                            dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                            dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                        ];
+                    }
+                    if flags & DELTA_FACING != 0 {
+                        d.facing = dequant_angle_u16(r.u16()?);
+                    }
+                    if flags & DELTA_HP != 0 {
+                        d.hp = dequant_i16(r.i16()?, SNAP_QUANT_HP).max(0.0);
+                    }
+                    if flags & DELTA_TEAM != 0 {
+                        d.team = r.u8()?;
+                    }
+                    if flags & DELTA_FIRING != 0 {
+                        d.firing = r.u8()?;
+                    }
+                    npcs.push(d);
+                }
+                let rn = u16::from_be_bytes([r.u8()?, r.u8()?]) as usize;
+                if rn > MAX_SNAPSHOT_NPCS {
+                    return Err(NetError::OversizedCount);
+                }
+                let mut removed = Vec::with_capacity(snapshot_capacity_hint(rn));
+                for _ in 0..rn {
+                    removed.push(r.u32()?);
+                }
+                NetworkMessage::SnapshotDelta {
+                    seq,
+                    base_seq,
+                    time,
+                    player_id,
+                    player: PlayerState::new(pos, rot),
+                    npcs,
+                    removed,
+                }
             }
             MessageType::Snapshot => {
                 let seq = r.u32()?;
@@ -2224,6 +2517,236 @@ impl Client {
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod delta_snapshot_tests {
+    use super::*;
+
+    fn npc(id: u32, x: f32, hp: f32) -> NpcSnapshot {
+        NpcSnapshot { id, pos: [x, 0.5, -x], facing: 0.25, hp, team: 1, firing: 0 }
+    }
+
+    fn frame_of(seq: u32, npcs: Vec<NpcSnapshot>) -> SnapshotFrame {
+        SnapshotFrame::new(seq, 1.0, 3, PlayerState::new([1.0, 2.0, 3.0], 0.5), npcs)
+    }
+
+    fn delta_msg(seq: u32, base_seq: u32, base: &[NpcSnapshot], cur: &[NpcSnapshot]) -> NetworkMessage {
+        let (npcs, removed) = diff_npcs(base, cur);
+        NetworkMessage::SnapshotDelta {
+            seq,
+            base_seq,
+            time: 2.0,
+            player_id: 3,
+            player: PlayerState::new([1.0, 2.0, 3.0], 0.5),
+            npcs,
+            removed,
+        }
+    }
+
+    /// **完全静止的 NPC 只花 5 B**（id 4 + flags 1）。这是整件事的意义所在：
+    /// 场景静下来时带宽应该塌下去，而不是继续按 16 B/NPC 线性支付。
+    #[test]
+    fn still_npcs_cost_only_five_bytes_each() {
+        let base: Vec<NpcSnapshot> = (0..64).map(|i| npc(i, i as f32, 100.0)).collect();
+        // 当前帧与基准**逐位相同**
+        let msg = delta_msg(2, 1, &base, &base);
+        let bytes = msg.encode();
+        // 数据报头 5（magic+ver+type+len2）
+        // + 载荷头 26（seq4+base_seq4+time4+pid4+pos6+rot2+count2）
+        // + 64×5（id4+flags1）+ removed_count 2 = 353
+        assert_eq!(bytes.len(), 5 + 26 + 64 * 5 + 2, "静止场景不该携带任何字段值");
+        // 对照：全量 f32 快照 64 条
+        let full = NetworkMessage::Snapshot {
+            seq: 2, time: 2.0, player_id: 3,
+            player: PlayerState::new([1.0, 2.0, 3.0], 0.5),
+            npcs: base.clone(),
+        };
+        let full_len = full.encode().len();
+        let ratio = bytes.len() as f32 / full_len as f32;
+        assert!(ratio < 0.35, "静止场景应显著小于全量，实际 {:.0}%（{} vs {} B）", ratio * 100.0, bytes.len(), full_len);
+    }
+
+    /// 差分 → 线路 → 解码 → 叠加，结果必须与"直接发全量"在量化误差内一致。
+    #[test]
+    fn delta_roundtrip_matches_full_snapshot() {
+        let base: Vec<NpcSnapshot> = vec![npc(1, 0.0, 100.0), npc(2, 5.0, 80.0), npc(3, -5.0, 60.0)];
+        // 1 号不动；2 号移动+掉血；3 号消失；4 号新出现
+        let cur = vec![npc(1, 0.0, 100.0), npc(2, 6.5, 55.0), npc(4, 12.0, 100.0)];
+        let msg = delta_msg(2, 1, &base, &cur);
+        let wire = msg.encode();
+        let decoded = NetworkMessage::decode(&wire).expect("增量包必须能解码");
+        let applied = apply_delta(&frame_of(1, base.clone()), &decoded).expect("基准匹配时应能应用");
+
+        assert_eq!(applied.seq, 2);
+        assert_eq!(applied.npcs.len(), 3, "应为 1/2/4 三只（3 号被删）");
+        let ids: Vec<u32> = applied.npcs.iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![1, 2, 4], "顺序：基准保持、新的追加在末尾");
+        // 1 号完全沿用基准
+        assert_eq!(applied.npcs[0], base[0], "未变的 NPC 必须逐位沿用基准");
+        // 2 号在量化误差内
+        assert!((applied.npcs[1].pos[0] - 6.5).abs() < 0.03);
+        assert!((applied.npcs[1].hp - 55.0).abs() < 0.1);
+        // 4 号字段齐全
+        assert!((applied.npcs[2].pos[0] - 12.0).abs() < 0.03);
+    }
+
+    /// 基准序号对不上 ⇒ **必须拒绝**（否则会把增量叠到错误的帧上，位置整体漂移）。
+    #[test]
+    fn wrong_base_seq_is_rejected() {
+        let base = vec![npc(1, 0.0, 100.0)];
+        let msg = delta_msg(9, 1, &base, &base);
+        assert!(apply_delta(&frame_of(7, base.clone()), &msg).is_none(), "基准序号不符必须返回 None");
+    }
+
+    /// 按 id 配对而非按顺序：顺序换了但内容没变 ⇒ 仍然全 0 flags。
+    #[test]
+    fn pairing_is_by_id_not_by_position() {
+        let a = npc(1, 0.0, 100.0);
+        let b = npc(2, 5.0, 80.0);
+        let (deltas, removed) = diff_npcs(&[a, b], &[b, a]);
+        assert!(removed.is_empty(), "没有真正消失的 id");
+        assert!(deltas.iter().all(|d| d.flags == 0), "顺序变化不该产生任何字段传输");
+    }
+
+    /// **端到端仿真**：60 帧、含确定性丢包（每 7 帧丢 1 包）与每 30 帧一次全量。
+    ///
+    /// 这条不需要 socket —— 它验证的是**协议逻辑**（差分/应用/兜底/收敛）而不是 UDP 本身。
+    /// 判据：客户端最终看到的 NPC 位置必须与"服务端真值"逐帧收敛，且**不允许出现
+    /// 因为丢了增量包就永久卡住**的情况（每 30 帧的全量兜底必须把它拉回来）。
+    #[test]
+    fn sixty_frame_simulation_converges_despite_packet_loss() {
+        // 服务端真值：8 只 NPC 沿直线缓慢移动
+        let truth = |f: u32| -> Vec<NpcSnapshot> {
+            (0..8u32)
+                .map(|i| NpcSnapshot {
+                    id: i,
+                    pos: [i as f32 + f as f32 * 0.25, 0.5, -(i as f32) - f as f32 * 0.25],
+                    facing: 0.1 * f as f32,
+                    hp: 100.0,
+                    team: (i % 2) as u8,
+                    firing: 0,
+                })
+                .collect()
+        };
+        let mut client: Option<SnapshotFrame> = None;
+        let mut server_base_seq: Option<u32> = None;
+        let mut last_truth = Vec::new();
+        // 🔴 **必须数出"增量真的被应用了多少次"**：否则这条判据是恒真的 ——
+        // 若 `apply_delta` 永远返回 None，客户端只靠每 30 帧的全量也在更新，
+        // 位置照样收敛，测试照样绿（本仓教训 14 的形态，我在这一条上差点又踩一次）。
+        let mut delta_applied = 0usize;
+        let mut full_applied = 0usize;
+
+        for f in 1..=60u32 {
+            let cur = truth(f);
+            last_truth = cur.clone();
+            // 决定本帧发什么：没有基准 or 每 30 帧 ⇒ 全量；否则增量
+            let msg = match server_base_seq {
+                Some(base) if f % 30 != 0 => {
+                    let (npcs, removed) = diff_npcs(&last_base(&cur, base), &cur);
+                    NetworkMessage::SnapshotDelta {
+                        seq: f,
+                        base_seq: base,
+                        time: f as f32 * 0.016,
+                        player_id: 0,
+                        player: PlayerState::new([0.0; 3], 0.0),
+                        npcs,
+                        removed,
+                    }
+                }
+                _ => NetworkMessage::Snapshot {
+                    seq: f,
+                    time: f as f32 * 0.016,
+                    player_id: 0,
+                    player: PlayerState::new([0.0; 3], 0.0),
+                    npcs: cur.clone(),
+                },
+            };
+            // 确定性丢包：每 7 帧丢一包（服务端不知道，这正是真实情形）
+            if f % 7 == 0 {
+                continue;
+            }
+            let wire = msg.encode();
+            let got = NetworkMessage::decode(&wire).expect("每帧都必须可解码");
+            match got {
+                NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
+                    client = Some(SnapshotFrame::new(seq, time, player_id, player, npcs));
+                    server_base_seq = Some(seq);
+                    full_applied += 1;
+                }
+                ref d @ NetworkMessage::SnapshotDelta { seq, .. } => {
+                    if let Some(base) = client.as_ref() {
+                        if let Some(applied) = apply_delta(base, d) {
+                            client = Some(applied);
+                            server_base_seq = Some(seq);
+                            delta_applied += 1;
+                        }
+                        // 应用失败（基准不符）⇒ 本包丢弃；服务端下一帧仍按它的 base 发，
+                        // 直到第 30 帧的全量把它拉回来。这正是要验证的行为。
+                    }
+                }
+                other => panic!("意外消息：{other:?}"),
+            }
+        }
+
+        // 增量必须真的在用：60 帧里每 7 帧丢 1 包、每 30 帧一次全量，
+        // 理论增量包 ≈ 60 - 8(丢) - 2(全量) = 50；要求至少 30 次才能证明这条路真的跑起来了。
+        assert!(
+            delta_applied >= 30,
+            "增量包只成功应用了 {delta_applied} 次（全量 {full_applied} 次）——\
+             说明 apply_delta 基本没生效，这条判据会变成恒真"
+        );
+        let seen = client.expect("60 帧后客户端必须有状态");
+        // 最终一致性：最后一次成功应用的那帧之后，最多再等一个全量周期（30 帧）就应追上
+        assert!(!seen.npcs.is_empty(), "客户端不该看到空场景");
+        let ids: Vec<u32> = seen.npcs.iter().map(|n| n.id).collect();
+        assert_eq!(ids, (0..8).collect::<Vec<_>>(), "8 只 NPC 必须都在（丢包不得让实体永久消失）");
+        // 位置必须落在真值的合理邻域（允许"最多落后一个全量周期"的位移）
+        let max_lag = 30.0 * 0.25 + 0.05;
+        for (a, b) in seen.npcs.iter().zip(last_truth.iter()) {
+            assert!(
+                (a.pos[0] - b.pos[0]).abs() <= max_lag,
+                "NPC {} 位置漂移过大：{} vs {}（允许落后 {max_lag}）",
+                a.id, a.pos[0], b.pos[0]
+            );
+        }
+    }
+
+    /// 仿真的服务端侧基准：它只记得"我上一次成功发出去的全量/增量对应的那批 NPC"。
+    /// 用 `diff_npcs` 需要基准列表 —— 这里按 base 帧号重建（仿真里真值可解析，故不必存表）。
+    fn last_base(cur: &[NpcSnapshot], base_frame: u32) -> Vec<NpcSnapshot> {
+        // 真值是确定性函数，按 base_frame 反推即可（比存表更能暴露"配对错误"）
+        (0..cur.len() as u32)
+            .map(|i| NpcSnapshot {
+                id: i,
+                pos: [i as f32 + base_frame as f32 * 0.25, 0.5, -(i as f32) - base_frame as f32 * 0.25],
+                facing: 0.1 * base_frame as f32,
+                hp: 100.0,
+                team: (i % 2) as u8,
+                firing: 0,
+            })
+            .collect()
+    }
+
+    /// 掉包兜底：基准缺失时服务端改发全量，客户端拿到的是可直接用的完整帧。
+    #[test]
+    fn full_snapshot_still_works_as_fallback() {
+        let npcs = vec![npc(1, 0.0, 100.0)];
+        let full = NetworkMessage::Snapshot {
+            seq: 5, time: 1.0, player_id: 0,
+            player: PlayerState::new([0.0; 3], 0.0),
+            npcs,
+        };
+        let wire = full.encode();
+        match NetworkMessage::decode(&wire).expect("全量必须仍可解码") {
+            NetworkMessage::Snapshot { seq, npcs, .. } => {
+                assert_eq!(seq, 5);
+                assert_eq!(npcs.len(), 1);
+            }
+            other => panic!("解出来不是全量快照：{other:?}"),
+        }
+    }
+}
 
 #[cfg(test)]
 mod quant_snapshot_tests {

@@ -4047,3 +4047,48 @@ OK   520..964（445 行，归一化后逐字节命中）
 
 踩坑：测试第一版忘了**数据报头**（magic/version/type/len）⇒ 解码报 `InvalidMagic`；
 补上后又忘了 `from_byte` 映射 ⇒ 报 `UnknownMessageType(16)`。两者都是"只测了载荷、没测封装"。
+
+### 2026-11-18（续170）：联机**增量快照** SnapshotD（静止 NPC 5 B/只）
+
+接着续169 的量化快照做**差分**这一半（AGENTS 未结案「快照增量压缩」的第二步）。
+
+**协议**：新消息 `MessageType::SnapshotD = 0x11`。载荷头 + 每条
+`id(4) + flags(1) + [变化字段]`，末尾 `removed_count(2) + removed_id(4×)`：
+
+| 情况 | 线路成本 |
+|---|---|
+| 完全没变的 NPC（`flags == 0`） | **5 B** |
+| 只移动 | 5 + 6 = 11 B |
+| 移动 + 掉血 | 5 + 6 + 2 = 13 B |
+| 全字段都变 | 17 B |
+| 全量量化快照（对照） | 16 B |
+
+`flags` 位定义收在 `DELTA_POS / DELTA_FACING / DELTA_HP / DELTA_TEAM / DELTA_FIRING`
+五个常量里（编解码同源，不写字面量）。
+
+**两个纯函数（无 socket，可单测）**：
+- `diff_npcs(base, cur) -> (Vec<NpcDelta>, Vec<u32>)`：**按 id 配对**（顺序变了不算变化）；
+  比较用**量化后**的值，否则 f32 的微小抖动会让"没变"永远判成变；
+- `apply_delta(base, &delta) -> Option<SnapshotFrame>`：`base_seq` 不符返回 `None`，
+  未置位的字段沿用基准，`removed` 里的 id 删除，新 id 追加到末尾。
+
+**六条判据，全部做了反向验证**：
+1. `still_npcs_cost_only_five_bytes_each`：64 只静止 ⇒ 数据报 **353 B**（对照全量 2.1 KB，
+   约 17%）；反向验证：把差分退化成"永远发全字段"⇒ 变 1121 B 判据立刻红；
+2. `delta_roundtrip_matches_full_snapshot`：差分→线路→解码→叠加，结果与全量在量化误差内一致；
+3. `wrong_base_seq_is_rejected`：基准序号不符必须返回 `None`（否则增量的位置会整体漂移）；
+4. `pairing_is_by_id_not_by_position`：顺序变化不得产生任何字段传输；
+5. `full_snapshot_still_works_as_fallback`：全量路径完好（兜底用）；
+6. `sixty_frame_simulation_converges_despite_packet_loss`：60 帧仿真，**每 7 帧丢 1 包**、
+   每 30 帧一次全量兜底，要求 8 只 NPC 全在且位置收敛。
+
+🔴 **第 6 条第一次写成了恒真判据**：如果 `apply_delta` 永远返回 `None`，客户端只靠每 30 帧的
+全量也在更新、位置照样收敛 ⇒ 测试照样绿。加了两处堵漏：**统计增量成功应用次数（要求 ≥30）**，
+以及反向验证（把 `apply_delta` 改成永远 `None` ⇒ 报「增量包只成功应用了 0 次（全量 3 次）」）。
+这正是本仓教训 14 的形态，我在这一条上差点又踩一次。
+
+**当前状态（诚实说明）**：协议、编解码、差分与应用逻辑**全部就绪且有判据**；
+但**服务端发送路径还没切到增量**（`game/net.rs` 仍发全量）。切换需要按客户端存基准帧 +
+周期性全量兜底，而那条路的集成验证要用两个进程跑 UDP 回环 —— 本环境无提权，
+`socket` 相关测试跑不起来（仓库既有记录：「UDP 回环测试在沙箱内 bind 会 PermissionDenied」）。
+⇒ 留到有权限的会话接线并做双进程验证，**不在此处凭推理声称已生效**。
