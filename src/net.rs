@@ -200,6 +200,12 @@ pub enum MessageType {
     /// 没有这条确认，丢一个包就会让客户端拒收后续所有增量，直到下一次全量 ——
     /// 实测（`broadcaster_and_client_converge_under_loss`）30 帧周期里只成功 8 次。
     SnapAck = 0x12,
+    /// 客户端 → 服务端：**恢复已有会话**（2026-11-18，同一 id 重连）。
+    ///
+    /// 客户端带着上次拿到的会话 token 重连；服务端若仍在"退役表"里（未过期）就把
+    /// **原来的 player_id** 还给它，比分/击杀/在别人眼里的身份都不丢。
+    /// 服务端不认（过期/伪造）⇒ 回 `Challenge`，客户端退回正常 Join 握手。
+    Resume = 0x13,
     /// 服务端 → 客户端：握手挑战（S2），客户端必须回 JoinProof 回显 nonce
     Challenge = 0x09,
     /// 客户端 → 服务端：回显挑战 nonce（S2）
@@ -238,6 +244,7 @@ impl MessageType {
             0x10 => MessageType::SnapshotQ,
             0x11 => MessageType::SnapshotD,
             0x12 => MessageType::SnapAck,
+            0x13 => MessageType::Resume,
             _ => return None,
         })
     }
@@ -668,6 +675,8 @@ pub enum NetworkMessage {
     },
     /// 客户端 → 服务端：确认已应用 `seq` 那一帧（增量基准用）。
     SnapAck { seq: u32 },
+    /// 客户端 → 服务端：请求恢复会话（带上次的 token）。
+    Resume { token: Token },
     /// 客户端 → 服务端：本帧输入。seq = 客户端输入序号（wrapping），time = 客户端本地时间（秒）
     Input { seq: u32, time: f32, input: NetInput },
     /// 服务端 → 客户端：目标状态（据点归属/进度）同步。seq = 发送方单调递增序号，
@@ -1037,6 +1046,7 @@ impl NetworkMessage {
                 put_f32(&mut p, *value);
                 (MessageType::Action, p)
             }
+            NetworkMessage::Resume { token } => (MessageType::Resume, token.to_vec()),
             NetworkMessage::SnapAck { seq } => {
                 let mut p = Vec::with_capacity(4);
                 put_u32(&mut p, *seq);
@@ -1324,6 +1334,11 @@ impl NetworkMessage {
                     npcs.push(NpcSnapshot { id, pos, facing, hp, team, firing });
                 }
                 NetworkMessage::Snapshot { seq, time, player_id, player: PlayerState::new(pos, rot), npcs }
+            }
+            MessageType::Resume => {
+                let mut token = [0u8; TOKEN_LEN];
+                token.copy_from_slice(r.bytes(TOKEN_LEN)?);
+                NetworkMessage::Resume { token }
             }
             MessageType::SnapAck => {
                 NetworkMessage::SnapAck { seq: r.u32()? }
@@ -1645,6 +1660,10 @@ pub struct Server {
     punch_ports: HashMap<SocketAddr, SocketAddr>,
     /// S2：会话token（注册成功后才有；封印包必须与它匹配）
     tokens: HashMap<SocketAddr, Token>,
+    /// **退役会话**（2026-11-18）：token → (原 player_id, 退役时刻)。
+    /// 断线/离场时把 token 与 id 存进来，同 token 的重连（`Resume`）可拿回原 id；
+    /// 超过 [`Self::RESUME_TTL`] 的条目在下次访问时清掉。
+    retired: HashMap<Token, (u32, Instant)>,
 }
 
 impl Server {
@@ -1661,6 +1680,7 @@ impl Server {
             punch_ports: HashMap::new(),
             pending_names: HashMap::new(),
             tokens: HashMap::new(),
+            retired: HashMap::new(),
         })
     }
 
@@ -1726,9 +1746,80 @@ impl Server {
         self.last_seen.remove(&addr);
         self.pending_nonces.remove(&addr);
         self.pending_names.remove(&addr);
-        self.tokens.remove(&addr);
         self.punch_ports.remove(&addr);
-        self.clients.remove(&addr)
+        let id = self.clients.remove(&addr);
+        // 会话恢复（2026-11-18）：把 token 与 id 留在退役表里，同 token 的重连可拿回原 id。
+        if let (Some(token), Some(id)) = (self.tokens.remove(&addr), id) {
+            self.retired.insert(token, (id, Instant::now()));
+        }
+        id
+    }
+
+    /// 退役会话的保留时长：**远小于**"玩家可能长时间离开"的量级，又远大于正常抖动。
+    /// 过了这个窗口 token 就作废（重连退化为新 id），避免表无限增长、也避免旧 token 长期可用。
+    pub const RESUME_TTL: Duration = Duration::from_secs(30);
+
+    /// 尝试用 `token` 恢复会话（`Resume` 消息的入口）。
+    ///
+    /// 成功 ⇒ 把 `from` 注册成**原 player_id**、复用原 token，并回 `Welcome`（内部已发送）。
+    /// 失败 ⇒ 回 `Challenge` 走正常握手（不泄漏"这个 token 是否存在"，伪造者拿不到区别）。
+    pub fn handle_resume(&mut self, from: SocketAddr, token: Token) -> io::Result<NetworkMessage> {
+        self.prune_retired();
+        // 🔴 token 可能在**两个地方**，两处都必须认（2026-11-18 判据逼出来的）：
+        //   ① `retired`：已经注销/超时的会话（最常见的断线重连）；
+        //   ② `tokens`：**仍然活跃**的会话 —— 客户端在服务端判超时**之前**就连回来时
+        //      （NAT 重映射、进程重启）走的是这一条。早期版本只查 ①，
+        //      于是"立刻重连"反而拿不到原 id，比"等一会再连"还差。
+        let restored = if let Some((id, _)) = self.retired.remove(&token).filter(|(_, at)| at.elapsed() <= Self::RESUME_TTL) {
+            Some(id)
+        } else {
+            self.tokens
+                .iter()
+                .find(|(a, t)| **t == token && **a != from)
+                .and_then(|(a, _)| self.clients.get(a).copied())
+        };
+        if let Some(id) = restored {
+            // 🔴 同一 id 可能还挂在**另一个**地址上（旧连接没超时，客户端就换了端口重连）：
+            // 先把旧地址彻底摘掉，否则一个 id 会对应两个地址，`player_ids` /
+            // 快照广播都会出现同一个人的两份。
+            let stale: Vec<SocketAddr> = self
+                .clients
+                .iter()
+                .filter(|(a, pid)| **pid == id && **a != from)
+                .map(|(a, _)| *a)
+                .collect();
+            for a in stale {
+                self.last_seen.remove(&a);
+                self.tokens.remove(&a);
+                self.punch_ports.remove(&a);
+                self.clients.remove(&a);
+            }
+            self.clients.insert(from, id);
+            self.tokens.insert(from, token);
+            self.last_seen.insert(from, Instant::now());
+            let welcome = NetworkMessage::Welcome { player_id: id, token };
+            self.send_to(&welcome, from)?;
+            log::info!("net: 会话恢复成功（player #{id}）");
+            return Ok(welcome);
+        }
+        // 恢复失败：走正常挑战流程
+        let nonce = fresh_nonce(from);
+        self.pending_nonces.insert(from, nonce);
+        self.pending_names.insert(from, String::new());
+        let challenge = NetworkMessage::Challenge { nonce };
+        self.send_to(&challenge, from)?;
+        Ok(challenge)
+    }
+
+    /// 清掉过期的退役会话（每次 `handle_resume` 顺手做，避免后台线程）。
+    fn prune_retired(&mut self) {
+        let ttl = Self::RESUME_TTL;
+        self.retired.retain(|_, (_, at)| at.elapsed() <= ttl);
+    }
+
+    /// 当前退役会话数量（判据用）。
+    pub fn retired_count(&self) -> usize {
+        self.retired.len()
     }
 
     /// 已注册客户端数量
@@ -1993,6 +2084,9 @@ pub struct Client {
     snapshot_time: f32,
     /// 是否收到过快照
     has_snapshot: bool,
+    /// **会话恢复用的 token**（2026-11-18）：与 `self.token` 不同，它在 `reset_connection`
+    /// **之后仍然保留** —— 正是靠它才能用**同一个 player_id** 重连（会话恢复）。
+    resume_token: Option<Token>,
     /// **增量快照的基准帧**（2026-11-18）：最近一次成功应用（全量或增量）后的完整状态。
     /// 增量包必须叠在它上面才能用；没有它就只能丢弃本包、等下一次全量。
     snap_base: Option<SnapshotFrame>,
@@ -2093,6 +2187,7 @@ impl Client {
             snapshot_seq: 0,
             snapshot_time: 0.0,
             has_snapshot: false,
+            resume_token: None,
             snap_base: None,
             pending_nonce: None,
             token: None,
@@ -2254,6 +2349,9 @@ impl Client {
                 // S2：会话建立 —— 拿到 id 与token。
                 self.player_id = Some(player_id);
                 self.token = Some(token);
+                // 记住 token 供**会话恢复**用：`reset_connection` 会清 `self.token`，
+                // 但不清这个字段 —— 否则重连就只能拿新 id（旧行为）。
+                self.resume_token = Some(token);
                 // 登记打洞 socket：**从打洞 socket 自己发**，服务端才能看到 NAT 映射后的端口。
                 match self.punch_socket.send_to(
                     &NetworkMessage::PunchPort { token }.encode(),
@@ -2334,8 +2432,6 @@ impl Client {
                     seq, base_seq, time, player_id, player, npcs, removed,
                 };
                 let frame = apply_delta(base, &delta)?;
-                // 回 ACK：服务端据此选下一帧的基准（没有它，丢一个包就要等下一次全量）
-                let _ = self.send(&NetworkMessage::SnapAck { seq });
                 // 🔑 **复用全量分支的全部逻辑**（插值表、实体键、权威修正）—— 不复制一份。
                 return self.handle_message(NetworkMessage::Snapshot {
                     seq: frame.seq,
@@ -2361,6 +2457,11 @@ impl Client {
                     player,
                     npcs.clone(),
                 ));
+                // 🔴 **回 ACK**（2026-11-18）：服务端据此选下一帧的基准。
+                // 早期版本只在**增量**分支回 ACK ⇒ 全量帧不回 ⇒ 服务端永远拿不到基准 ⇒
+                // **一直发全量**（真 socket 集成测试实测 "增量 0 / 全量 40"）。
+                // 放在这里而不是增量分支，是因为增量会递归进本分支 ⇒ 天然只发一次。
+                let _ = self.send(&NetworkMessage::SnapAck { seq });
                 // 快照间隔 → 插值延迟（首个样本直接取间隔，之后滑动平均；上限 0.25s 防卡顿后
                 // 拖出一个巨大的延迟）。见 `interp_delay` 字段的文档。
                 if self.last_snapshot_at > 0.0 {
@@ -2651,6 +2752,40 @@ impl Client {
     /// 「过期」⇒ **新会话的据点消息全被丢弃**，HUD 停在上一局的进度上（不报错、日志干净）。
     /// `remote_players` / `own_state` 同属会话状态，留着就是幽灵实体那类问题的另一半。
     /// 判据 = `reset_connection_clears_session_scoped_state`。
+    /// 请求**恢复会话**（2026-11-18）：带上次的 token 发 `Resume`。
+    ///
+    /// 返回 `true` 表示请求已发出。服务端认得这个 token ⇒ 直接回 `Welcome`（原 id）；
+    /// 不认得 ⇒ 回 `Challenge`，而 `handle_message` 的 Challenge 分支会自动回 `JoinProof`
+    /// ⇒ **重连流程无需分叉**，两种情况都由既有代码接管。
+    /// 设置用于会话恢复的 token。
+    ///
+    /// 用途：① 进程重启后想把上一次的会话接回来（token 可由调用方持久化）；
+    /// ② 测试里构造"换一个 socket 重连"的场景（新 `Client` 没有历史 token）。
+    pub fn set_resume_token(&mut self, token: Token) {
+        self.resume_token = Some(token);
+    }
+
+    /// 当前用于会话恢复的 token（判据与持久化用）。
+    pub fn resume_token(&self) -> Option<Token> {
+        self.resume_token
+    }
+
+    pub fn try_resume(&self) -> bool {
+        let Some(token) = self.resume_token else {
+            return false;
+        };
+        match self.send(&NetworkMessage::Resume { token }) {
+            Ok(_) => {
+                log::info!("net: 尝试恢复会话（带旧 token）");
+                true
+            }
+            Err(e) => {
+                log::warn!("net: 会话恢复请求发送失败（{e}）");
+                false
+            }
+        }
+    }
+
     pub fn reset_connection(&mut self) {
         self.player_id = None;
         self.token = None;
@@ -3916,6 +4051,229 @@ mod tests {
         let (wmsg, _) = recv_until(|| client.recv(), Duration::from_millis(1000));
         let _ = client.handle_message(wmsg);
         from2
+    }
+
+    /// 🔴 **真 socket 集成测试**：真 `Server` + 真 `Client` 走 UDP 回环，跑增量快照。
+    ///
+    /// 为什么必须要这一条（2026-11-18）：纯函数判据只能证明"编解码与差分逻辑自洽"，
+    /// 证明不了"两条真实链路拼起来能用" —— 封装（Sealed）、token 校验、`recv` 的来源过滤、
+    /// ACK 回传这几段都只有在真 socket 上才会执行到。
+    ///
+    /// 覆盖面：40 帧、**每 5 帧丢 1 包**（不发出去）、服务端每帧回收 ACK。
+    /// 判据三条：① 增量包真的被送达并被应用（≥15 次）；② 客户端序号追上最后一次送达；
+    /// ③ 8 只 NPC 全部在实体表里（丢包不得让实体永久消失）。
+    #[test]
+    fn delta_snapshot_over_real_sockets_with_loss() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let mut client = Client::connect(server.local_addr().unwrap()).unwrap();
+        let peer = complete_handshake(&mut server, &mut client, "delta-probe");
+        let token = server
+            .clients_with_tokens()
+            .into_iter()
+            .find(|(a, _)| *a == peer)
+            .map(|(_, t)| t)
+            .expect("握手后应有 token");
+
+        let mut bcast = SnapshotBroadcaster::new(true);
+        bcast.set_full_every(12);
+        let (mut delta_sent, mut full_sent, mut applied, mut delta_applied) = (0usize, 0usize, 0usize, 0usize);
+        let mut last_delivered_seq = 0u32;
+
+        let truth = |f: u32| -> Vec<NpcSnapshot> {
+            (0..8u32)
+                .map(|i| NpcSnapshot {
+                    id: i,
+                    pos: [i as f32 + f as f32 * 0.5, 0.5, -(i as f32)],
+                    facing: 0.2 * f as f32,
+                    hp: 100.0,
+                    team: (i % 2) as u8,
+                    firing: 0,
+                })
+                .collect()
+        };
+
+        for f in 1..=40u32 {
+            let (msg, was_full) = bcast.next_message(
+                peer,
+                f,
+                1.0 + f as f32 * 0.016,
+                0,
+                PlayerState::new([0.0, 1.0, 0.0], 0.0),
+                &truth(f),
+            );
+            if was_full {
+                full_sent += 1;
+            } else {
+                delta_sent += 1;
+            }
+            // 丢包：整包不发（服务端自己也不知道 —— 这正是 ACK 要解决的问题）
+            if f % 5 != 0 {
+                let sealed = NetworkMessage::Sealed { token, body: msg.encode() };
+                server.send_raw(&sealed.encode(), peer).unwrap();
+            }
+            // 客户端收（必须处理掉本帧所有排队包）
+            while let Ok(Some((m, _))) = client.recv() {
+                let is_delta = matches!(m, NetworkMessage::SnapshotDelta { .. });
+                let seq_of = match &m {
+                    NetworkMessage::Snapshot { seq, .. } | NetworkMessage::SnapshotDelta { seq, .. } => *seq,
+                    _ => 0,
+                };
+                // 🔴 **不能用 `handle_message` 的返回值判"有没有应用"**：`Snapshot` 分支
+                // 成功时返回的也是 `None`（返回值语义是"是否拿到了新的 player id"）。
+                // 唯一可靠的可观测量 = **客户端序号是否推进**。
+                let before = client.snapshot_seq();
+                let _ = client.handle_message(m);
+                if client.snapshot_seq() != before {
+                    applied += 1;
+                    last_delivered_seq = seq_of;
+                    if is_delta {
+                        delta_applied += 1;
+                    }
+                }
+            }
+            // 服务端回收 ACK（与 `step_net_server` 里的处理一致）
+            while let Ok(Some((m, from))) = server.recv() {
+                if let NetworkMessage::SnapAck { seq } = m {
+                    bcast.note_ack(from, seq);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(
+            delta_sent >= 20,
+            "发包器应主要发增量（增量 {delta_sent} / 全量 {full_sent}）"
+        );
+        assert!(
+            delta_applied >= 15,
+            "增量包必须真的被应用（增量应用 {delta_applied} 次、送达 {applied} 次、\
+             增量发出 {delta_sent} 次）—— 少了说明 ACK 基准没生效、客户端在拒收"
+        );
+        assert_eq!(
+            client.snapshot_seq(),
+            last_delivered_seq,
+            "客户端序号必须与最后一次送达一致"
+        );
+        // 实体表里 = 8 只 NPC + 服务端本机玩家那一个（`player_id = 0` 也会作为远端实体广播，
+        // 见 `Snapshot` 分支"服务端本机玩家：进插值表"）。所以不按总数断言，按 id 断言。
+        for id in 0..8u32 {
+            assert!(
+                client.entities().contains_key(&id),
+                "NPC {id} 不在实体表里（丢包不得让实体永久消失），现有 id: {:?}",
+                client.entities().keys().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            client.entities().len(),
+            9,
+            "应为 8 NPC + 1 服务端本机玩家，实际 {:?}",
+            client.entities().keys().collect::<Vec<_>>()
+        );
+        // 位置必须已经推进（不是停在第一帧）
+        let last = truth(40);
+        let got = client
+            .entity_state_at(0, client.snapshot_seq() as f64 * 0.016 + 1.0)
+            .expect("实体 0 必须有插值状态");
+        assert!(
+            (got.pos[0] - last[0].pos[0]).abs() < 1.0,
+            "实体 0 的位置应接近最后一次真值（{} vs {}）",
+            got.pos[0],
+            last[0].pos[0]
+        );
+    }
+
+    /// 🔴 **会话恢复的真 socket 判据**（2026-11-18）：断线后用旧 token 重连必须拿回**原 id**。
+    ///
+    /// 这是 AGENTS 未结案里"会话恢复"那一项的验收：旧行为是"重连以新 id 加入"，
+    /// 于是比分/身份/别人眼里的那个人全都换了一个。
+    #[test]
+    fn resume_restores_the_same_player_id() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let mut first = Client::connect(addr).unwrap();
+        let peer_a = complete_handshake(&mut server, &mut first, "resume-probe");
+        let id_before = first.player_id().expect("握手后应有 id");
+        let token = first.resume_token().expect("握手后应记住 token");
+
+        // 排空服务端残留包：客户端拿到 Welcome 后会发一条 PunchPort 登记打洞端口。
+        while let Ok(Some(_)) = server.recv() {}
+
+        // 模拟断线：服务端把这个人注销（Leave / 超时都会走这里）
+        let gone = server.unregister(peer_a);
+        assert_eq!(gone, Some(id_before), "注销应返回原 id");
+        assert_eq!(server.retired_count(), 1, "注销后应留下一条退役会话");
+        assert!(server.player_ids().is_empty(), "注销后注册表应为空");
+
+        // 新 socket 重连（真实场景里是换端口/换 NAT 映射），带旧 token 请求恢复
+        let mut second = Client::connect(addr).unwrap();
+        second.set_resume_token(token);
+        assert!(second.try_resume(), "恢复请求应发送成功");
+        let (msg, _) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        let (token_in, from) = match msg {
+            NetworkMessage::Resume { token } => (token, peer_seen_addr(&second)),
+            other => panic!("期望 Resume，实际 {other:?}"),
+        };
+        let reply = server.handle_resume(from, token_in).unwrap();
+        match reply {
+            NetworkMessage::Welcome { player_id, .. } => {
+                assert_eq!(player_id, id_before, "会话恢复必须拿回**原来的** player id");
+            }
+            other => panic!("恢复应直接回 Welcome，实际 {other:?}"),
+        }
+        // 客户端处理 Welcome 后 id 应恢复
+        let (wmsg, _) = recv_until(|| second.recv(), Duration::from_millis(1000));
+        let _ = second.handle_message(wmsg);
+        assert_eq!(second.player_id(), Some(id_before), "客户端 id 必须恢复");
+        // 退役表被消费掉（同一 token 不能用第二次）
+        assert_eq!(server.retired_count(), 0, "恢复成功后该条目应被移除");
+    }
+
+    /// 未知 token ⇒ **不恢复**，退回正常挑战流程（且不泄漏"这个 token 是否存在"）。
+    #[test]
+    fn unknown_resume_token_falls_back_to_challenge() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let from: SocketAddr = "127.0.0.1:45999".parse().unwrap();
+        let reply = server.handle_resume(from, [0xAB; TOKEN_LEN]).unwrap();
+        assert!(
+            matches!(reply, NetworkMessage::Challenge { .. }),
+            "未知 token 必须退回 Challenge，实际 {reply:?}"
+        );
+    }
+
+    /// 同一 id 换地址恢复时，**旧地址必须被摘掉**。
+    ///
+    /// 真实场景：客户端在旧连接"还没被服务端判超时"的时候就换了端口连回来
+    /// （NAT 重映射、进程重启）—— 此时同一个 id 会同时挂在两个地址上，
+    /// `player_ids` 与快照广播都会出现同一个人的两份。
+    #[test]
+    fn resume_from_new_address_drops_the_stale_one() {
+        let mut server = Server::bind("127.0.0.1:0").unwrap();
+        let addr_of = server.local_addr().unwrap();
+        let mut a = Client::connect(addr_of).unwrap();
+        let peer_a = complete_handshake(&mut server, &mut a, "stale-probe");
+        let id = a.player_id().expect("握手后应有 id");
+        let token = a.resume_token().expect("握手后应记住 token");
+        while let Ok(Some(_)) = server.recv() {}
+        // 旧连接仍注册着（没超时）
+        assert_eq!(server.client_count(), 1);
+
+        let mut b = Client::connect(addr_of).unwrap();
+        b.set_resume_token(token);
+        assert!(b.try_resume());
+        let (msg, _) = recv_until(|| server.recv(), Duration::from_millis(1000));
+        let NetworkMessage::Resume { token: t } = msg else {
+            panic!("期望 Resume，实际 {msg:?}");
+        };
+        let peer_b = peer_seen_addr(&b);
+        assert_ne!(peer_a, peer_b, "两个客户端应来自不同端口");
+        let reply = server.handle_resume(peer_b, t).unwrap();
+        assert!(
+            matches!(reply, NetworkMessage::Welcome { player_id, .. } if player_id == id),
+            "应恢复原 id，实际 {reply:?}"
+        );
+        assert_eq!(server.client_count(), 1, "同一 id 只应占一个地址");
+        let ids = server.player_ids();
+        assert_eq!(ids, vec![id], "注册表里必须只有这一个 id（实际 {ids:?}）");
     }
 
     /// 测试辅助：**服务端会看到的**本端地址。

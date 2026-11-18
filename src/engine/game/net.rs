@@ -170,6 +170,16 @@ impl Game {
                     self.net_bcast.note_ack(from, seq);
                     continue;
                 }
+                // 会话恢复（2026-11-18）：认得 token ⇒ 回 Welcome 并拿回**原 id**；
+                // 不认得 ⇒ 内部回 Challenge，走正常握手。两种情况都不算"新加入"。
+                if let NetworkMessage::Resume { token } = msg {
+                    match server.handle_resume(from, token) {
+                        Ok(NetworkMessage::Welcome { player_id, .. }) => joined.push(player_id),
+                        Ok(_) => {}
+                        Err(e) => log::warn!("net: 会话恢复失败（{e}）"),
+                    }
+                    continue;
+                }
                 match msg {
                     NetworkMessage::Join { name, version, .. } => {
                         let _ = server.handle_join(from, name, version);
@@ -399,6 +409,13 @@ impl Game {
                 "net: client 断线（{}s 无数据），自动重连中...",
                 CLIENT_TIMEOUT.as_secs()
             );
+            // 🔴 **先试会话恢复**（2026-11-18）：带着旧 token 请求拿回**原 player_id**。
+            // 服务端认得 ⇒ 直接回 `Welcome`（比分/身份都不丢）；
+            // 不认得 ⇒ 回 `Challenge`，而 `handle_message` 的 Challenge 分支会自动回
+            // `JoinProof` ⇒ 退化为正常新 id 加入。**两条路都不需要在这里写分支。**
+            // ⚠️ 顺序：必须**先发 Resume 再 reset**（reset 会清 `self.token`，而本帧还要用它
+            // 之外的 `resume_token`；虽然 `resume_token` 会保留，先发更符合直觉且少一类时序疑问）。
+            client.try_resume();
             client.reset_connection();
         }
     }
