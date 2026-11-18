@@ -165,6 +165,11 @@ impl Game {
                 let Ok(Some((msg, from))) = server.recv() else {
                     break;
                 };
+                // 增量快照的确认（2026-11-18）：先摘出来，避免和下面的所有权转移打架。
+                if let NetworkMessage::SnapAck { seq } = msg {
+                    self.net_bcast.note_ack(from, seq);
+                    continue;
+                }
                 match msg {
                     NetworkMessage::Join { name, version, .. } => {
                         let _ = server.handle_join(from, name, version);
@@ -285,20 +290,26 @@ impl Game {
             },
             firing: if n.state_machine.state() == NpcState::Attack { 1 } else { 0 },
         }));
-        let snapshot = NetworkMessage::Snapshot {
-            seq: self.net_snap_seq,
-            time: self.time,
-            player_id: 0,
-            player,
-            npcs,
-        };
+        // 逐客户端组包：`SnapshotBroadcaster` 按各自 ACK 选基准 ——
+        // 启用增量时静止 NPC 只花 5 B，关闭时它永远发全量（与旧行为一致）。
         if let Some(server) = self.net_server.as_ref() {
-            // S2：快照逐客户端用各自token封装（旧版一次广播，无法带token）。
-            let body = snapshot.encode();
-            for (addr, token) in server.clients_with_tokens() {
+            let clients = server.clients_with_tokens();
+            let live: std::collections::HashSet<std::net::SocketAddr> =
+                clients.iter().map(|(a, _)| *a).collect();
+            self.net_bcast.retain_clients(&live);
+            for (addr, token) in clients {
+                let (msg, _sent_full) = self.net_bcast.next_message(
+                    addr,
+                    self.net_snap_seq,
+                    self.time,
+                    0,
+                    player,
+                    &npcs,
+                );
+                // S2：逐客户端用各自 token 封装（旧版一次广播，无法带 token）。
                 let sealed = NetworkMessage::Sealed {
                     token,
-                    body: body.clone(),
+                    body: msg.encode(),
                 };
                 let _ = server.send_raw(&sealed.encode(), addr);
             }

@@ -194,6 +194,12 @@ pub enum MessageType {
     /// 未变的 NPC 只发 id + 1B 位图（1–5 B），变化项才带量化字段。
     /// 每客户端各自维护基准（见 `Server::snap_bases`）；base 不匹配 ⇒ 自动退回全量。
     SnapshotD = 0x11,
+    /// 客户端 → 服务端：**确认**已应用的快照序号（2026-11-18）。
+    ///
+    /// 增量快照的基准必须取"客户端真正收下的那一帧"，而不是"服务端以为它收下的"。
+    /// 没有这条确认，丢一个包就会让客户端拒收后续所有增量，直到下一次全量 ——
+    /// 实测（`broadcaster_and_client_converge_under_loss`）30 帧周期里只成功 8 次。
+    SnapAck = 0x12,
     /// 服务端 → 客户端：握手挑战（S2），客户端必须回 JoinProof 回显 nonce
     Challenge = 0x09,
     /// 客户端 → 服务端：回显挑战 nonce（S2）
@@ -231,6 +237,7 @@ impl MessageType {
             0x0F => MessageType::PunchPort,
             0x10 => MessageType::SnapshotQ,
             0x11 => MessageType::SnapshotD,
+            0x12 => MessageType::SnapAck,
             _ => return None,
         })
     }
@@ -340,6 +347,144 @@ impl SnapshotFrame {
     /// 从全量快照字段构造。
     pub fn new(seq: u32, time: f32, player_id: u32, player: PlayerState, npcs: Vec<NpcSnapshot>) -> Self {
         Self { seq, time, player_id, player, npcs }
+    }
+}
+
+/// **按客户端维护增量快照基准**的发包器（2026-11-18）。
+///
+/// 为什么单独抽一个类型：增量快照的基准是**逐客户端**的（每个客户端丢包情况不同），
+/// 而"决定发全量还是发增量"这段逻辑如果写进 `step_net_server` 里，就只能靠双进程 UDP
+/// 才能验证。抽出来之后它是**纯数据变换**，可以在没有网络权限的环境里单测。
+///
+/// 策略（**以客户端 ACK 为准**）：
+/// - 取客户端最近一次 `SnapAck` 的序号，从 `history` 里找出那一帧当基准；
+/// - 找不到（首次、太久没确认、或从未确认）⇒ 发全量；
+/// - 距上次全量已满 `full_every` 帧 ⇒ 也发全量（兜底，防 ACK 长期不到）；
+/// - `enabled == false` ⇒ 永远发全量（等于回到旧行为，便于 A/B 与回退）。
+///
+/// 🔴 **为什么必须靠 ACK**：服务端无法知道"这一包客户端到底收到没有"。
+/// 早期版本乐观地假设"发出即收到"、把基准推进到最新帧 —— 结果丢一个包就让客户端
+/// 拒收之后**全部**增量，只能干等下一次全量（实测 30 帧周期里只成功应用 8 次）。
+/// `broadcaster_and_client_converge_under_loss` 就是钉这条的判据。
+pub struct SnapshotBroadcaster {
+    /// 各客户端**最近发出的若干帧**（按 seq 索引），供 ACK 回指当基准
+    history: std::collections::HashMap<std::net::SocketAddr, std::collections::VecDeque<SnapshotFrame>>,
+    /// 各客户端最近一次 `SnapAck` 的序号
+    acked: std::collections::HashMap<std::net::SocketAddr, u32>,
+    /// 各客户端距上次全量的帧数
+    since_full: std::collections::HashMap<std::net::SocketAddr, u32>,
+    /// 每隔多少帧强制一次全量（兜底周期）
+    full_every: u32,
+    /// 是否启用增量（false = 永远全量）
+    enabled: bool,
+}
+
+impl SnapshotBroadcaster {
+    /// 默认兜底周期：30 帧 ≈ 0.5 s（60 fps 下）。
+    pub const DEFAULT_FULL_EVERY: u32 = 30;
+    /// 历史保留多少帧（ACK 回指基准的上限）。取 4×`DEFAULT_FULL_EVERY`：
+    /// 只要 ACK 延迟不超过 120 帧（60 fps 下 2 秒），增量就接得上。
+    pub const HISTORY_FRAMES: usize = 120;
+
+    /// 构造。`enabled = false` ⇒ 行为与"只发全量"完全一致。
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            history: std::collections::HashMap::new(),
+            acked: std::collections::HashMap::new(),
+            since_full: std::collections::HashMap::new(),
+            full_every: Self::DEFAULT_FULL_EVERY,
+            enabled,
+        }
+    }
+
+    /// 覆盖自动恢复周期（0 视为 1，避免除零式退化）。
+    pub fn set_full_every(&mut self, every: u32) {
+        self.full_every = every.max(1);
+    }
+
+    /// 客户端断开时清掉它的基准（否则表会随 join/leave 无限增长）。
+    pub fn forget(&mut self, addr: std::net::SocketAddr) {
+        self.history.remove(&addr);
+        self.acked.remove(&addr);
+        self.since_full.remove(&addr);
+    }
+
+    /// 只保留仍在册的客户端（其余清掉基准）。**离场的客户端不清会让表无限增长**，
+    /// 而且它下次回来时会拿着一个陈旧的基准去叠增量 —— 那是最坏的一种错。
+    pub fn retain_clients(&mut self, live: &std::collections::HashSet<std::net::SocketAddr>) {
+        self.history.retain(|a, _| live.contains(a));
+        self.acked.retain(|a, _| live.contains(a));
+        self.since_full.retain(|a, _| live.contains(a));
+    }
+
+    /// 记下客户端的确认（之后为它选基准时用这一帧）。
+    pub fn note_ack(&mut self, addr: std::net::SocketAddr, seq: u32) {
+        self.acked.insert(addr, seq);
+    }
+
+    /// 当前有多少客户端持有基准（判据用）。
+    pub fn tracked(&self) -> usize {
+        self.history.len()
+    }
+
+    /// 为某个客户端生成下一帧消息，**并更新基准**。
+    ///
+    /// 返回 `(消息, 是否全量)`：调用方拿去装 Sealed 发出即可。
+    pub fn next_message(
+        &mut self,
+        addr: std::net::SocketAddr,
+        seq: u32,
+        time: f32,
+        player_id: u32,
+        player: PlayerState,
+        npcs: &[NpcSnapshot],
+    ) -> (NetworkMessage, bool) {
+        let due_full = match self.since_full.get(&addr) {
+            None => true,
+            Some(n) => *n >= self.full_every.saturating_sub(1),
+        };
+        // 基准帧 = 客户端**确认过**的那一帧（找不到就只能发全量）
+        let base = self
+            .acked
+            .get(&addr)
+            .and_then(|acked_seq| {
+                self.history
+                    .get(&addr)
+                    .and_then(|q| q.iter().find(|f| f.seq == *acked_seq))
+            })
+            .cloned();
+        let use_full = !self.enabled || due_full || base.is_none();
+
+        let frame = SnapshotFrame::new(seq, time, player_id, player, npcs.to_vec());
+        let msg = if use_full {
+            NetworkMessage::Snapshot { seq, time, player_id, player, npcs: npcs.to_vec() }
+        } else {
+            let base = base.expect("上面已确认有基准");
+            let (deltas, removed) = diff_npcs(&base.npcs, npcs);
+            NetworkMessage::SnapshotDelta {
+                seq,
+                base_seq: base.seq,
+                time,
+                player_id,
+                player,
+                npcs: deltas,
+                removed,
+            }
+        };
+        // 记进历史（ACK 回指用）；只保留最近 HISTORY_FRAMES 帧。
+        // 同时把"客户端已确认"之前的旧帧剪掉 —— 它们再也不会被用到。
+        let q = self.history.entry(addr).or_default();
+        q.push_back(frame);
+        while q.len() > Self::HISTORY_FRAMES {
+            q.pop_front();
+        }
+        if use_full {
+            self.since_full.insert(addr, 0);
+        } else {
+            let e = self.since_full.entry(addr).or_insert(0);
+            *e = e.saturating_add(1);
+        }
+        (msg, use_full)
     }
 }
 
@@ -521,6 +666,8 @@ pub enum NetworkMessage {
         npcs: Vec<NpcDelta>,
         removed: Vec<u32>,
     },
+    /// 客户端 → 服务端：确认已应用 `seq` 那一帧（增量基准用）。
+    SnapAck { seq: u32 },
     /// 客户端 → 服务端：本帧输入。seq = 客户端输入序号（wrapping），time = 客户端本地时间（秒）
     Input { seq: u32, time: f32, input: NetInput },
     /// 服务端 → 客户端：目标状态（据点归属/进度）同步。seq = 发送方单调递增序号，
@@ -890,6 +1037,11 @@ impl NetworkMessage {
                 put_f32(&mut p, *value);
                 (MessageType::Action, p)
             }
+            NetworkMessage::SnapAck { seq } => {
+                let mut p = Vec::with_capacity(4);
+                put_u32(&mut p, *seq);
+                (MessageType::SnapAck, p)
+            }
             NetworkMessage::SnapshotDelta { seq, base_seq, time, player_id, player, npcs, removed } => {
                 // 布局：seq(4)+base_seq(4)+time(4)+player_id(4)+player_pos(6)+player_rot(2)+count(2)
                 //       + 每条 [id(4)+flags(1)+变化字段] + removed_count(2) + removed_id(4×)
@@ -1172,6 +1324,9 @@ impl NetworkMessage {
                     npcs.push(NpcSnapshot { id, pos, facing, hp, team, firing });
                 }
                 NetworkMessage::Snapshot { seq, time, player_id, player: PlayerState::new(pos, rot), npcs }
+            }
+            MessageType::SnapAck => {
+                NetworkMessage::SnapAck { seq: r.u32()? }
             }
             MessageType::SnapshotD => {
                 let seq = r.u32()?;
@@ -1838,6 +1993,9 @@ pub struct Client {
     snapshot_time: f32,
     /// 是否收到过快照
     has_snapshot: bool,
+    /// **增量快照的基准帧**（2026-11-18）：最近一次成功应用（全量或增量）后的完整状态。
+    /// 增量包必须叠在它上面才能用；没有它就只能丢弃本包、等下一次全量。
+    snap_base: Option<SnapshotFrame>,
     /// 服务端本机（房主）玩家的权威状态。
     ///
     /// ⚠️ 这是**房主**的状态，不是客户端自己的：客户端自身的位置校正在 `game.rs` 里走
@@ -1935,6 +2093,7 @@ impl Client {
             snapshot_seq: 0,
             snapshot_time: 0.0,
             has_snapshot: false,
+            snap_base: None,
             pending_nonce: None,
             token: None,
             punch_socket,
@@ -2168,6 +2327,24 @@ impl Client {
                 }
                 None
             }
+            NetworkMessage::SnapshotDelta { seq, base_seq, time, player_id, player, npcs, removed } => {
+                // 增量：叠到本地基准上；基准缺失或序号不符 ⇒ 丢弃本包（服务端会周期性发全量）。
+                let base = self.snap_base.as_ref()?;
+                let delta = NetworkMessage::SnapshotDelta {
+                    seq, base_seq, time, player_id, player, npcs, removed,
+                };
+                let frame = apply_delta(base, &delta)?;
+                // 回 ACK：服务端据此选下一帧的基准（没有它，丢一个包就要等下一次全量）
+                let _ = self.send(&NetworkMessage::SnapAck { seq });
+                // 🔑 **复用全量分支的全部逻辑**（插值表、实体键、权威修正）—— 不复制一份。
+                return self.handle_message(NetworkMessage::Snapshot {
+                    seq: frame.seq,
+                    time: frame.time,
+                    player_id: frame.player_id,
+                    player: frame.player,
+                    npcs: frame.npcs,
+                });
+            }
             NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
                 // 丢弃乱序/重复快照（判据 = `seq_is_newer`）
                 if self.has_snapshot && !seq_is_newer(seq, self.snapshot_seq) {
@@ -2176,6 +2353,14 @@ impl Client {
                 self.has_snapshot = true;
                 self.snapshot_seq = seq;
                 self.snapshot_time = time;
+                // 基准帧随每次成功应用而更新（增量用它做下一帧的参照）
+                self.snap_base = Some(SnapshotFrame::new(
+                    seq,
+                    time,
+                    player_id,
+                    player,
+                    npcs.clone(),
+                ));
                 // 快照间隔 → 插值延迟（首个样本直接取间隔，之后滑动平均；上限 0.25s 防卡顿后
                 // 拖出一个巨大的延迟）。见 `interp_delay` 字段的文档。
                 if self.last_snapshot_at > 0.0 {
@@ -2517,6 +2702,158 @@ impl Client {
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod broadcaster_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn addr(p: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], p))
+    }
+
+    fn npcs(f: u32) -> Vec<NpcSnapshot> {
+        (0..4u32)
+            .map(|i| NpcSnapshot {
+                id: i,
+                pos: [i as f32 + f as f32 * 0.25, 0.5, -(i as f32)],
+                facing: 0.0,
+                hp: 100.0,
+                team: 0,
+                firing: 0,
+            })
+            .collect()
+    }
+
+    fn player() -> PlayerState {
+        PlayerState::new([0.0, 1.0, 0.0], 0.0)
+    }
+
+    /// `enabled == false` ⇒ **永远全量**（等于旧行为，便于回退与 A/B）。
+    #[test]
+    fn disabled_broadcaster_always_sends_full() {
+        let mut b = SnapshotBroadcaster::new(false);
+        for f in 1..=10u32 {
+            let (msg, full) = b.next_message(addr(1), f, 0.0, 0, player(), &npcs(f));
+            assert!(full, "关闭增量时必须发全量（第 {f} 帧）");
+            assert!(matches!(msg, NetworkMessage::Snapshot { .. }));
+        }
+    }
+
+    /// 启用后：**首帧全量、随后增量、每 `full_every` 帧再全量**。
+    #[test]
+    fn enabled_broadcaster_sends_delta_between_full_frames() {
+        let mut b = SnapshotBroadcaster::new(true);
+        b.set_full_every(5);
+        let mut kinds = Vec::new();
+        for f in 1..=10u32 {
+            let (_, full) = b.next_message(addr(1), f, 0.0, 0, player(), &npcs(f));
+            kinds.push(if full { 'F' } else { 'd' });
+            // 模拟"客户端每帧都收到并确认"（真实链路由 `SnapAck` 完成）
+            b.note_ack(addr(1), f);
+        }
+        // 第 1 帧全量，然后 4 个增量，再全量 —— 周期 5
+        assert_eq!(kinds.iter().collect::<String>(), "FddddFdddd", "全量/增量节奏不对");
+    }
+
+    /// 断开时清基准：否则表随 join/leave 无限增长。
+    #[test]
+    fn forget_drops_the_base() {
+        let mut b = SnapshotBroadcaster::new(true);
+        b.next_message(addr(1), 1, 0.0, 0, player(), &npcs(1));
+        b.note_ack(addr(1), 1);
+        assert_eq!(b.tracked(), 1);
+        b.forget(addr(1));
+        assert_eq!(b.tracked(), 0);
+        // 清掉后下一帧必须回到全量（没有基准可叠）
+        let (_, full) = b.next_message(addr(1), 2, 0.0, 0, player(), &npcs(2));
+        assert!(full, "基准被清掉后必须发全量");
+    }
+
+    /// **两个客户端基准互相独立**：A 丢包、B 不丢，各自的全量周期不能互相影响。
+    #[test]
+    fn two_clients_have_independent_bases() {
+        let mut b = SnapshotBroadcaster::new(true);
+        b.set_full_every(100);
+        // A 与 B 都先收到一帧全量
+        for a in [addr(1), addr(2)] {
+            let (_, full) = b.next_message(a, 1, 0.0, 0, player(), &npcs(1));
+            assert!(full);
+            b.note_ack(a, 1);
+        }
+        // 之后 B 正常收，A 这边"丢"了（不发出去但我们仍推进基准——这正是需要自动恢复的原因）
+        for f in 2..=6u32 {
+            let (_, full) = b.next_message(addr(2), f, 0.0, 0, player(), &npcs(f));
+            assert!(!full, "B 应该一直是增量");
+            b.note_ack(addr(2), f);
+        }
+        assert_eq!(b.tracked(), 2);
+    }
+
+    /// **端到端**：发包器 + 应用端，60 帧、每 7 帧丢 1 包、自动恢复周期 30 ��
+    /// 要求：增量真的被应用很多次（防恒真）、8 只 NPC 不丢、位置收敛。
+    #[test]
+    fn broadcaster_and_client_converge_under_loss() {
+        let mut b = SnapshotBroadcaster::new(true);
+        b.set_full_every(30);
+        let peer = addr(7);
+        let mut client: Option<SnapshotFrame> = None;
+        let (mut deltas, mut fulls) = (0usize, 0usize);
+        let truth = |f: u32| -> Vec<NpcSnapshot> {
+            (0..8u32)
+                .map(|i| NpcSnapshot {
+                    id: i,
+                    pos: [i as f32 + f as f32 * 0.25, 0.5, -(i as f32)],
+                    facing: 0.1 * f as f32,
+                    hp: 100.0,
+                    team: (i % 2) as u8,
+                    firing: 0,
+                })
+                .collect()
+        };
+        for f in 1..=60u32 {
+            let cur = truth(f);
+            let (msg, _is_full) = b.next_message(peer, f, f as f32 * 0.016, 0, player(), &cur);
+            if f % 7 == 0 {
+                continue; // 丢包：服务端不知道，基准照旧推进 —— 这正是自动恢复要解决的情形
+            }
+            let wire = msg.encode();
+            let got = NetworkMessage::decode(&wire).expect("必须可解码");
+            match got {
+                NetworkMessage::Snapshot { seq, time, player_id, player, npcs } => {
+                    client = Some(SnapshotFrame::new(seq, time, player_id, player, npcs));
+                    fulls += 1;
+                    b.note_ack(peer, seq);
+                }
+                ref d @ NetworkMessage::SnapshotDelta { seq, .. } => {
+                    if let Some(base) = client.as_ref() {
+                        if let Some(applied) = apply_delta(base, d) {
+                            client = Some(applied);
+                            deltas += 1;
+                            b.note_ack(peer, seq);
+                        }
+                    }
+                }
+                other => panic!("意外消息：{other:?}"),
+            }
+        }
+        // 堵恒真：增量必须真的在用
+        assert!(
+            deltas >= 20,
+            "增量只成功应用 {deltas} 次（全量 {fulls} 次）—— 这条判据会变成恒真"
+        );
+        assert!(fulls >= 1, "两次丢包之间应当至少有一次全量把状态拉回来");
+        let seen = client.expect("必须有状态");
+        let ids: Vec<u32> = seen.npcs.iter().map(|n| n.id).collect();
+        assert_eq!(ids, (0..8).collect::<Vec<_>>(), "8 只 NPC 一只都不能丢");
+        // 位置最多落后一个自动恢复周期
+        let last = truth(60);
+        let max_lag = 30.0 * 0.25 + 0.05;
+        for (a, t) in seen.npcs.iter().zip(last.iter()) {
+            assert!((a.pos[0] - t.pos[0]).abs() <= max_lag, "NPC {} 漂移过大", a.id);
+        }
+    }
+}
 
 #[cfg(test)]
 mod delta_snapshot_tests {

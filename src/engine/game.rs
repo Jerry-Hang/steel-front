@@ -798,6 +798,9 @@ pub struct Game {
     net_input_seq: u32,
     /// 服务端快照序号（每 tick +1）
     net_snap_seq: u32,
+    /// 服务端**增量快照发包器**（逐客户端基准 + 周期全量兜底，2026-11-18）。
+    /// 开关 `RV3D_NET_DELTA_SNAP=1` 才启用；关闭时它永远发全量，行为与旧版一致。
+    net_bcast: crate::net::SnapshotBroadcaster,
     /// 客户端模式：main.rs 转发的本帧开火意图（随 Input 上报）
     net_fire_pending: bool,
     /// 服务器模式：最近一次客户端输入视角（yaw, pitch），main.rs 应用到相机

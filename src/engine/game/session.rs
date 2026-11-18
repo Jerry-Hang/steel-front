@@ -235,6 +235,7 @@ impl Game {
             net_players: Vec::new(),
             net_input_seq: 0,
             net_snap_seq: 0,
+            net_bcast: crate::net::SnapshotBroadcaster::new(crate::syscfg::flag("RV3D_NET_DELTA_SNAP")),
             net_fire_pending: false,
             // S9：net_look 已删。
             last_net_log: 0.0,
