@@ -4288,3 +4288,22 @@ OK   520..964（445 行，归一化后逐字节命中）
 `#[allow(dead_code)]` 已移除 —— 它真的被用上了。
 
 判据：`pending_log_prunes_acknowledged_inputs`（含回绕与"相等不算更新"两个边界）。
+
+### 2026-11-19（续178）：`InputAck` 只在 seq 推进时发（省每 tick 的重复确认）
+
+`step_net_server` 的发送循环每 tick 都跑一次，而客户端输入约 60 次/秒 ⇒ 原实现会把**同一份确认
+每 tick 重发一遍**（65 个客户端时是纯浪费，也让"这条 ack 是不是新的"无法判定）。
+
+**落地**：`SnapshotBroadcaster::should_send_input_ack(addr, seq) -> bool` —— 逐客户端记住
+"最近已发到哪个 seq"，用 **`seq_is_newer`** 判断是否推进（不是裸比较，seq 会回绕）。
+状态放在发包器里（逐客户端出站记录集中在一处），`retain_clients` / `forget` 一并清理。
+
+**判据三条（都断言次数，不看"能不能发"）**：
+- `ack_is_sent_only_when_seq_advances`：首次发 → 同 seq 连问 10 次一次不发 → 推进后发 → 旧 seq 不发；
+- `ack_throttle_handles_seq_wraparound`：`u32::MAX → 0` 仍算推进；
+- `ack_throttle_is_per_client`：两客户端各自独立，`forget` 后重新视为首次。
+
+🔴 **判据抓出一个哨兵值冲突**：我最初在节流函数里写了 `if seq == 0 { return false }`
+（"还没收到任何输入"），但 **0 回绕后也是合法序号** ⇒ 回绕判据当场红。
+修法是把哨兵**移出**这个函数（它的契约只有"是否推进"），由调用方用 `last_input_seq != 0` 判断
+"有没有输入可确认"；并在判据里留一条断言钉住"这个函数不许特判 0"，防止有人把两件事混回去。

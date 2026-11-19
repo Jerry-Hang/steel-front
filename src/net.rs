@@ -387,6 +387,9 @@ pub struct SnapshotBroadcaster {
     acked: std::collections::HashMap<std::net::SocketAddr, u32>,
     /// 各客户端距上次全量的帧数
     since_full: std::collections::HashMap<std::net::SocketAddr, u32>,
+    /// 各客户端**最近一次已经发出去的** `InputAck` 序号（2026-11-19）。
+    /// 只在这里记录 ⇒ 未推进时不重复发（每 tick 一条 17B 是白花的）。
+    last_ack_sent: std::collections::HashMap<std::net::SocketAddr, u32>,
     /// 每隔多少帧强制一次全量（兜底周期）
     full_every: u32,
     /// 是否启用增量（false = 永远全量）
@@ -406,6 +409,7 @@ impl SnapshotBroadcaster {
             history: std::collections::HashMap::new(),
             acked: std::collections::HashMap::new(),
             since_full: std::collections::HashMap::new(),
+            last_ack_sent: std::collections::HashMap::new(),
             full_every: Self::DEFAULT_FULL_EVERY,
             enabled,
         }
@@ -421,6 +425,7 @@ impl SnapshotBroadcaster {
         self.history.remove(&addr);
         self.acked.remove(&addr);
         self.since_full.remove(&addr);
+        self.last_ack_sent.remove(&addr);
     }
 
     /// 只保留仍在册的客户端（其余清掉基准）。**离场的客户端不清会让表无限增长**，
@@ -429,6 +434,33 @@ impl SnapshotBroadcaster {
         self.history.retain(|a, _| live.contains(a));
         self.acked.retain(|a, _| live.contains(a));
         self.since_full.retain(|a, _| live.contains(a));
+        self.last_ack_sent.retain(|a, _| live.contains(a));
+    }
+
+    /// **只在 `InputAck` 值得发的时候返回 true**（2026-11-19）。
+    ///
+    /// "值得发" = 该客户端的 input seq **相比上次已发确有推进**：
+    /// - 首次（没有记录）⇒ 发；
+    /// - seq 相同/更旧（乱序包被丢弃、或客户端这帧没发输入）⇒ **不发**；
+    /// - seq 更新 ⇒ 发。
+    ///
+    /// 🔴 为什么必须判这个：`step_net_server` 每 tick 都跑一次发送循环，
+    /// 而客户端输入只有 ~60 次/秒 —— 不判的话同一份确认会每 tick 重发一遍，
+    /// 65 个客户端时那是纯粹的带宽浪费，而且会让"这条 ack 是不是新的"变得不可判。
+    ///
+    /// 用 `seq_is_newer` 而不是裸比较：seq 会回绕。
+    pub fn should_send_input_ack(&mut self, addr: std::net::SocketAddr, seq: u32) -> bool {
+        // ⚠️ 这里**不**特判 `seq == 0`：本函数的契约是"是否比上次推进"，
+        // 而 0 回绕后也是合法序号（`u32::MAX → 0`）。"还没收到任何输入"该由调用方判断
+        // （见 `step_net_server` 的 `last_input_seq != 0`）——
+        // 把哨兵混进推进判定会让回绕那天少发一条确认，而且没人会想到去查这里。
+        if let Some(prev) = self.last_ack_sent.get(&addr) {
+            if !crate::net::seq_is_newer(seq, *prev) {
+                return false;
+            }
+        }
+        self.last_ack_sent.insert(addr, seq);
+        true
     }
 
     /// 记下客户端的确认（之后为它选基准时用这一帧）。
@@ -5673,6 +5705,68 @@ mod reconcile_tests {
     }
 }
 
+
+#[cfg(test)]
+mod input_ack_throttle_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn addr(p: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], p))
+    }
+
+    /// **同一份确认只发一次**：这是本优化的全部意义。
+    /// 判据必须能抓住"每 tick 重发"，所以断言的是**次数**而不是"能不能发"。
+    #[test]
+    fn ack_is_sent_only_when_seq_advances() {
+        let mut b = SnapshotBroadcaster::new(true);
+        let a = addr(11);
+        // 首次 ⇒ 发
+        assert!(b.should_send_input_ack(a, 1), "首次确认必须发");
+        // 同一 seq 连问 10 次 ⇒ 一次都不发（模拟同一 tick 之后的 10 个 tick）
+        for _ in 0..10 {
+            assert!(!b.should_send_input_ack(a, 1), "seq 未推进时不得重复发");
+        }
+        // 推进 ⇒ 发
+        assert!(b.should_send_input_ack(a, 2), "seq 推进后必须发");
+        // 旧 seq（乱序/重放）⇒ 不发
+        assert!(!b.should_send_input_ack(a, 1), "旧 seq 不得回退发送");
+        // 本函数**不**特判 0（那是调用方的事）：新客户端第一次问 0 也算"推进"⇒ 发。
+        // 这条断言存在的意义是钉住"哨兵不在这个函数里"，防止有人把两件事混回来。
+        assert!(
+            b.should_send_input_ack(addr(12), 0),
+            "进度判定不该特判 0；\"还没收到输入\"由调用方负责"
+        );
+    }
+
+    /// 回绕：`u32::MAX → 0` 之后仍然算"推进"。
+    #[test]
+    fn ack_throttle_handles_seq_wraparound() {
+        let mut b = SnapshotBroadcaster::new(true);
+        let a = addr(13);
+        assert!(b.should_send_input_ack(a, u32::MAX));
+        assert!(
+            b.should_send_input_ack(a, 0),
+            "回绕之后 0 是新序号，应当发送"
+        );
+        assert!(!b.should_send_input_ack(a, u32::MAX), "回绕后旧值不得重发");
+    }
+
+    /// 两个客户端互不影响（各自的"已发到哪"独立）。
+    #[test]
+    fn ack_throttle_is_per_client() {
+        let mut b = SnapshotBroadcaster::new(true);
+        assert!(b.should_send_input_ack(addr(21), 5));
+        assert!(
+            b.should_send_input_ack(addr(22), 5),
+            "另一个客户端第一次问同一个 seq 也该发"
+        );
+        assert!(!b.should_send_input_ack(addr(21), 5));
+        // 清理后重新计数
+        b.forget(addr(21));
+        assert!(b.should_send_input_ack(addr(21), 5), "forget 后应重新视为首次");
+    }
+}
 
 #[cfg(test)]
 mod pending_log_tests {

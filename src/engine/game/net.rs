@@ -389,7 +389,9 @@ impl Game {
                 // 只在该客户端的 input seq **有推进**时才发，避免每 tick 白占带宽。
                 if let Some(pid) = server.player_id_of(addr) {
                     if let Some(np) = self.net_players.iter().find(|p| p.id == pid) {
-                        if np.last_input_seq != 0 {
+                        // 只在 seq **确有推进**时才发：否则每 tick 重发同一份确认
+                        // （65 个客户端时是纯浪费，也让"这条 ack 是否新"无法判定）。
+                        if self.net_bcast.should_send_input_ack(addr, np.last_input_seq) {
                             let ack = NetworkMessage::InputAck {
                                 seq: np.last_input_seq,
                                 pos: np.pos,
