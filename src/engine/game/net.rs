@@ -391,15 +391,26 @@ impl Game {
         if stale > 0 {
             log::info!("net: 清理 {} 个已离场远端实体（{}s 未出现在快照里）", stale, crate::net::ENTITY_STALE_AFTER);
         }
-        // 自身上行权威校正（2026-08-25）：服务器端本远端实体位置与本地超 3m → 硬对齐（防漂移）
+        // 自身上行权威校正：**三档**（死区忽略 / 按比例收敛 / 超阈值硬对齐）。
+        // 判定本身是纯函数 `net::reconcile_plan`（可单测），这里只做"照它执行"。
+        // 旧实现只有"误差 >3m 就整帧跳过去"一条 ⇒ 小于 3m 的漂移永远不修、
+        // 而一旦跨过 3m 观感就是"被拽一把"（2026-11-19 拆开）。
         if let Some(own) = client.player_id() {
             if let Some(st) = client.entity_state_at(NET_PLAYER_BASE.wrapping_add(own), client.now()) {
                 let dx = st.pos[0] - self.player_body.pos.x;
                 let dz = st.pos[2] - self.player_body.pos.z;
-                if dx * dx + dz * dz > 9.0 {
-                    self.player_body.pos.x = st.pos[0];
-                    self.player_body.pos.z = st.pos[2];
-                    log::debug!("net: client 行正（位置校正 {:.1},{:.1}）", st.pos[0], st.pos[2]);
+                match crate::net::reconcile_plan(dx, dz) {
+                    crate::net::Reconcile::None => {}
+                    crate::net::Reconcile::Blend(k) => {
+                        self.player_body.pos.x += dx * k;
+                        self.player_body.pos.z += dz * k;
+                        log::trace!("net: 位置平滑校正 k={k:.2}（{dx:.2},{dz:.2}）");
+                    }
+                    crate::net::Reconcile::Snap => {
+                        self.player_body.pos.x = st.pos[0];
+                        self.player_body.pos.z = st.pos[2];
+                        log::debug!("net: client 行正（硬对齐 {:.1},{:.1}）", st.pos[0], st.pos[2]);
+                    }
                 }
             }
         }

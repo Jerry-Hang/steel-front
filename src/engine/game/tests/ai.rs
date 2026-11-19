@@ -444,6 +444,62 @@ use super::*;
             }
         }
     }
+    /// 🔴 **`with_scaled_dt` 只放大 dt、其它字段原样保留**（2026-11-18）。
+    ///
+    /// ⚠️ **这里原本写的是"降频组总位移与不降频组一致"，已删除** —— 反向验证时
+    /// （把 `npc_ai.rs` 里的缩放改回 1.0）它**照样通过**，说明那条判据是恒真的：
+    /// 该 NPC 的位移并不与 `dt` 线性（它会走向路点并被吸附），补不补时间结果一样。
+    /// ⇒ 端到端位移**不是**这类不变式的有效量具；真正能钉住它的是：
+    /// ① `ai_util::decimate_time_tests::decimation_preserves_effective_time`（比例本身）；
+    /// ② 本条（ctx 复制语义正确）。
+    /// 这正是"判据必须能红"的又一次现场证明。
+    #[test]
+    fn with_scaled_dt_only_changes_dt() {
+        let game = Game::new();
+        let player = glam::Vec3::new(1.0, 2.0, 3.0);
+        let flags = vec![false; 2];
+        let targets = vec![None];
+        let ctx = AiStepCtx {
+            night: 1.0,
+            player_lit: false,
+            player: &player,
+            player_yaw: 0.5,
+            charge: true,
+            under_fire: &flags,
+            targets: &targets,
+            grid: &game.grid,
+            time: 7.0,
+            dt: 1.0 / 60.0,
+            stress: true,
+            frame: 42,
+            decimate_far: true,
+            ring_inner: MAP_RING_INNER,
+            ring_outer: MAP_RING_OUTER,
+            obstacles: &game.map.obstacles,
+            squad_wps: &[],
+            spectator: false,
+            target_known: true,
+            fallback_targets: &[],
+            target_occluded: &[],
+        };
+        let scaled = ctx.with_scaled_dt(AI_FAR_DECIMATE as f32);
+        assert!(
+            (scaled.dt - ctx.dt * AI_FAR_DECIMATE as f32).abs() < 1e-9,
+            "dt 应放大 {} 倍：{} vs {}",
+            AI_FAR_DECIMATE,
+            scaled.dt,
+            ctx.dt
+        );
+        // 其它字段必须**逐位不变**（否则降频会在别处产生副作用）
+        assert_eq!(scaled.frame, ctx.frame, "frame 不得被改");
+        assert_eq!(scaled.time, ctx.time, "time 不得被改");
+        assert_eq!(scaled.player_yaw, ctx.player_yaw);
+        assert_eq!(scaled.stress, ctx.stress);
+        assert_eq!(scaled.decimate_far, ctx.decimate_far);
+        assert_eq!(scaled.charge, ctx.charge);
+        assert_eq!(scaled.target_known, ctx.target_known);
+    }
+
     #[test]
     fn should_decimate_far_excludes_interactions() {
         // 交互中（感知/受击/被火力威胁/被瞄准/攻击态）永不降频；无交互按 id 分帧

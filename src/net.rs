@@ -495,6 +495,50 @@ impl SnapshotBroadcaster {
     }
 }
 
+/// 自身上行校正的**决策**（纯函数产物，见 [`reconcile_plan`]）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reconcile {
+    /// 误差在死区内 ⇒ **不动**（正常抖动不该被"修正"，那会变成看得见的回弹）
+    None,
+    /// 中等误差 ⇒ 按比例向权威位置靠拢（每帧收敛一部分，观感是平滑的）
+    Blend(f32),
+    /// 误差过大 ⇒ 硬对齐（这已经不是漂移而是失步，例如瞬移/传送）
+    Snap,
+}
+
+/// 校正死区（米）：小于它的误差**一律忽略**。
+/// 取 5cm：小于一个身位，正常网络抖动常在这个量级；修它只会制造回弹。
+pub const RECONCILE_DEADZONE_M: f32 = 0.05;
+/// 硬对齐阈值（米）：超过它就是失步（不是漂移），必须立刻对齐。
+/// 沿用 2026-08-25 的 3m —— 那条是"防止无限漂移"的底线，不该被平滑掉。
+pub const RECONCILE_SNAP_M: f32 = 3.0;
+
+/// 给定水平误差 `(dx, dz)`（**权威 − 本地**），决定这一帧怎么校正。
+///
+/// 🔴 为什么要有死区（2026-11-19）：旧实现只有"误差 >3m 就硬对齐"一条规则 ——
+/// 小于 3m 的漂移**永远不修**（远端玩家看到的位置一直偏着），而一旦跨过 3m 又会
+/// **整帧跳过去**（观感是"被拽一把"）。三档方案把这两件事分开：小误差忽略、
+/// 中误差按比例收敛、大误差才硬对齐。
+///
+/// 判据：`reconcile_has_deadzone_and_hysteresis` + `reconcile_blend_converges`。
+pub fn reconcile_plan(dx: f32, dz: f32) -> Reconcile {
+    if !dx.is_finite() || !dz.is_finite() {
+        // 非有限值（NaN/inf）不许参与运算：直接不动，等下一帧拿到正常数据。
+        return Reconcile::None;
+    }
+    let err = (dx * dx + dz * dz).sqrt();
+    if err <= RECONCILE_DEADZONE_M {
+        return Reconcile::None;
+    }
+    if err >= RECONCILE_SNAP_M {
+        return Reconcile::Snap;
+    }
+    // 比例随误差增大而增大：小误差轻轻拉、接近阈值时拉得更用力，
+    // 上下夹住 [0.10, 0.50] ⇒ 既不会"几乎不修"，也不会"一跳一大截"。
+    let k = (err / RECONCILE_SNAP_M).clamp(0.10, 0.50);
+    Reconcile::Blend(k)
+}
+
 /// 把"当前帧 NPC 列表"与"基准帧 NPC 列表"做差分（纯函数，可单测）。
 ///
 /// 返回 `(deltas, removed)`：
@@ -5418,5 +5462,75 @@ mod rdv_reply_tests {
         // 无法识别的回复也不能当成功
         assert!(parse_rdv_reply("WAT").is_err());
         assert!(parse_rdv_reply("").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+
+    /// 三档边界：死区内忽略、中间插值、超过阈值硬对齐。
+    #[test]
+    fn reconcile_has_deadzone_and_hysteresis() {
+        // 死区内（含边界）⇒ 不动。**这条是旧实现最缺的一档**。
+        assert_eq!(reconcile_plan(0.0, 0.0), Reconcile::None);
+        assert_eq!(reconcile_plan(0.03, 0.03), Reconcile::None);
+        assert_eq!(
+            reconcile_plan(RECONCILE_DEADZONE_M, 0.0),
+            Reconcile::None,
+            "刚好等于死区边界也应忽略"
+        );
+        // 中间 ⇒ 插值，且比例在 (0, 1) 内
+        match reconcile_plan(1.0, 0.0) {
+            Reconcile::Blend(k) => assert!(k > 0.0 && k < 1.0, "插值比例必须严格在 (0,1)：{k}"),
+            other => panic!("1m 误差应为插值，实际 {other:?}"),
+        }
+        // 超过阈值 ⇒ 硬对齐
+        assert_eq!(reconcile_plan(RECONCILE_SNAP_M, 0.0), Reconcile::Snap);
+        assert_eq!(reconcile_plan(10.0, 0.0), Reconcile::Snap);
+        // 非有限值 ⇒ 不动（不制造 NaN 位置）
+        assert_eq!(reconcile_plan(f32::NAN, 0.0), Reconcile::None);
+        assert_eq!(reconcile_plan(f32::INFINITY, 0.0), Reconcile::None);
+    }
+
+    /// 反复应用插值必须**单调收敛**到权威位置（不会震荡、不会越过）。
+    #[test]
+    fn reconcile_blend_converges() {
+        let mut local = 0.0f32;
+        let authoritative = 1.0f32;
+        let mut last = f32::INFINITY;
+        for step in 0..40 {
+            let dx = authoritative - local;
+            match reconcile_plan(dx, 0.0) {
+                Reconcile::None => break,
+                Reconcile::Blend(k) => local += dx * k,
+                Reconcile::Snap => {
+                    local = authoritative;
+                    break;
+                }
+            }
+            let err = (authoritative - local).abs();
+            assert!(err < last, "第 {step} 步误差必须严格减小：{err} vs {last}");
+            last = err;
+        }
+        assert!(
+            (authoritative - local).abs() <= RECONCILE_DEADZONE_M,
+            "40 步内必须收敛进死区，实际误差 {}",
+            (authoritative - local).abs()
+        );
+    }
+
+    /// 比例必须随误差单调不减（否则会出现"误差大反而修得慢"的怪现象）。
+    #[test]
+    fn blend_factor_grows_with_error() {
+        let mut prev = 0.0f32;
+        for i in 1..=30 {
+            let err = i as f32 * 0.1; // 0.1 .. 3.0
+            if let Reconcile::Blend(k) = reconcile_plan(err, 0.0) {
+                assert!(k >= prev, "误差 {err} 的比例 {k} 小于更小误差的比例 {prev}");
+                prev = k;
+            }
+        }
     }
 }
