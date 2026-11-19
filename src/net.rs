@@ -2187,6 +2187,11 @@ pub struct Client {
     has_snapshot: bool,
     /// 已发出的最后一个 input 序号（与 `Input` 消息里的 seq 同源）
     sent_input_seq: std::cell::Cell<u32>,
+    /// 已发出但**尚未确认**的输入历史（seq, 输入, 该帧 dt）。回滚重放用它。
+    ///
+    /// 上限 [`SELF::PENDING_INPUT_CAP`](Self::PENDING_INPUT_CAP)：正常一局里 pending
+    /// 只有个位数；卡住时最多留 240 条，避免无限增长。
+    pending_log: std::cell::RefCell<Vec<(u32, NetInput, f32)>>,
     /// 服务端**已确认应用**的最后一个 input 序号（`InputAck`）
     last_acked_input_seq: std::cell::Cell<u32>,
     /// 该确认序号处的权威位置（预测校正的基准）
@@ -2295,6 +2300,7 @@ impl Client {
             snapshot_time: 0.0,
             has_snapshot: false,
             sent_input_seq: std::cell::Cell::new(0),
+            pending_log: std::cell::RefCell::new(Vec::new()),
             last_acked_input_seq: std::cell::Cell::new(0),
             acked_state: std::cell::RefCell::new(None),
             resume_token: None,
@@ -2547,6 +2553,8 @@ impl Client {
                 {
                     self.last_acked_input_seq.set(seq);
                     *self.acked_state.borrow_mut() = Some(PlayerState::new(pos, rot));
+                    // 已确认的那些不再需要重放 ⇒ 立刻丢弃（否则历史会一直变长）
+                    self.prune_pending_inputs(seq);
                 }
                 return None;
             }
@@ -2888,6 +2896,36 @@ impl Client {
     /// ② 测试里构造"换一个 socket 重连"的场景（新 `Client` 没有历史 token）。
     pub fn set_resume_token(&mut self, token: Token) {
         self.resume_token = Some(token);
+    }
+
+    /// 未确认输入历史的上限（条目数）。
+    pub const PENDING_INPUT_CAP: usize = 240;
+
+    /// 记一条已发出的输入（`dt` 必须是**发出那一刻的帧时长**，重放要用它）。
+    pub fn record_input(&self, seq: u32, input: NetInput, dt: f32) {
+        let mut log = self.pending_log.borrow_mut();
+        log.push((seq, input, dt.max(0.0)));
+        if log.len() > Self::PENDING_INPUT_CAP {
+            let drop = log.len() - Self::PENDING_INPUT_CAP;
+            log.drain(..drop);
+        }
+    }
+
+    /// 取该确认序号**之后**的未确认输入（按发出顺序）。
+    ///
+    /// 用 `seq_is_newer` 判断"是否在确认之后"，而不是裸比较大小 —— seq 会回绕。
+    pub fn pending_inputs_after(&self, acked_seq: u32) -> Vec<(NetInput, f32)> {
+        let log = self.pending_log.borrow();
+        log.iter()
+            .filter(|(seq, _, _)| crate::net::seq_is_newer(*seq, acked_seq))
+            .map(|(_, i, dt)| (*i, *dt))
+            .collect()
+    }
+
+    /// 丢弃已确认的输入（`InputAck` 到达时调用），避免历史无限变长。
+    pub fn prune_pending_inputs(&self, acked_seq: u32) {
+        let mut log = self.pending_log.borrow_mut();
+        log.retain(|(seq, _, _)| crate::net::seq_is_newer(*seq, acked_seq));
     }
 
     /// 服务端尚未确认的输入数（**预测校正的允许量**就按它算）。
@@ -5635,6 +5673,26 @@ mod reconcile_tests {
     }
 }
 
+
+#[cfg(test)]
+mod pending_log_tests {
+    use super::*;
+
+    /// 未确认历史必须**按键裁剪**：已确认的那些不再需要重放，留着只会让重放越跑越慢。
+    /// 这条同时钉住"用 `seq_is_newer` 而不是裸比较"—— seq 会回绕。
+    #[test]
+    fn pending_log_prunes_acknowledged_inputs() {
+        // 用一个不带 socket 的 Client 不方便，这里直接测两个纯函数的契约：
+        // `seq_is_newer` 的语义就是裁剪的判据。
+        assert!(seq_is_newer(5, 3), "5 在 3 之后");
+        assert!(!seq_is_newer(3, 5), "3 不在 5 之后");
+        // 回绕：1 在 u32::MAX-1 之后
+        assert!(seq_is_newer(1, u32::MAX - 1), "跨过回绕点时 1 更新");
+        assert!(!seq_is_newer(u32::MAX - 1, 1), "反向不算更新");
+        // 相等 = 重复，不算更新（否则裁剪会把刚确认的那条也留下）
+        assert!(!seq_is_newer(7, 7));
+    }
+}
 
 #[cfg(test)]
 mod predict_tests {

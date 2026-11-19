@@ -97,13 +97,11 @@ pub(crate) fn step_player_position(
 ///
 /// `dt` 必须**逐输入**给（服务端用的是 `input_dt_clamped` 得到的真实间隔），
 /// 传成整帧 dt 会让重放位置偏掉 —— 判据 `replay_matches_server_application` 钉住这一点。
-/// 🔴 **当前未接线，理由必须是明确的**（本仓禁止用 `#[allow]` 糊过去）：
-/// 本地玩家的移动走的是 `player_body` 那套物理（跳跃/坡度/台阶），
-/// 而这里重放用的是服务端那套**水平步进**。两者模型不同，
-/// 直接把重放结果写回本地位置只会**引入**新的偏差。
-/// ⇒ 接线的前提是"客户端本地移动也走 `step_player_position`"（或把两套模型统一），
-/// 那是独立一轮的改动。在此之前它由三条判据守着，作为**已验证的核心**保留。
-#[allow(dead_code)]
+/// 🔴 **接线方式**（2026-11-19 晚）：不把重放结果**写回**本地位置 ——
+/// 本地移动走 `player_body` 那套物理（跳跃/坡度/台阶），与服务端的水平步进模型不同，
+/// 直接写回只会引入新偏差。而是把重放结果当作**"我此刻本该在哪"的参照**，
+/// 用它算出真正的误差，再交给 [`reconcile_plan`] 决定怎么修。
+/// ⇒ 既用上了重放的全部精度，又不改变本地手感模型。
 pub(crate) fn replay_pending(
     acked: [f32; 3],
     pending: &[(NetInput, f32)],
@@ -461,6 +459,8 @@ impl Game {
             time: client.now() as f32,
             input,
         });
+        // 记进未确认历史：回滚重放要用（`dt` 必须是**发出那一刻的帧时长**）。
+        client.record_input(self.net_input_seq, input, self.last_dt);
         // 收快照：进入实体插值表（位置平滑）
         while let Ok(Some((msg, _))) = client.recv() {
             if let Some(left_id) = client.handle_message(msg) {
@@ -482,15 +482,29 @@ impl Game {
             if let Some(st) = client.entity_state_at(NET_PLAYER_BASE.wrapping_add(own), client.now()) {
                 let dx = st.pos[0] - self.player_body.pos.x;
                 let dz = st.pos[2] - self.player_body.pos.z;
-                // 有输入确认 ⇒ 用**预测校正**（会把"我还领先服务端几帧"算进允许量）；
-                // 没有确认（刚连上/服务端还没发过）⇒ 退回普通的二档校正。
+                // 校正决策分**三档精度**（由准到粗）：
+                // ① 有确认 + 有未确认输入历史 ⇒ **回滚重放**算出"我此刻本该在哪"，
+                //    再拿本地位置与它比 —— 这是最准的误差估计；
+                // ② 有确认但历史被裁剪（或刚连上）⇒ 退回 `predict_plan` 的"允许量"估算；
+                // ③ 连确认都没有 ⇒ 直接拿权威位置比（旧的二档校正）。
+                let acked_seq = client.last_acked_input_seq();
+                let pending = client.pending_inputs_after(acked_seq);
+                let local = [
+                    self.player_body.pos.x,
+                    self.player_body.pos.y,
+                    self.player_body.pos.z,
+                ];
                 let plan = match client.acked_state() {
-                    Some(ack) => crate::net::predict_plan(
-                        [self.player_body.pos.x, self.player_body.pos.y, self.player_body.pos.z],
-                        ack.pos,
-                        client.pending_inputs(),
-                        1.0 / 60.0,
-                    ),
+                    Some(ack) if !pending.is_empty() => {
+                        let expected = replay_pending(ack.pos, &pending, &self.world.bodies);
+                        crate::net::reconcile_plan(
+                            local[0] - expected[0],
+                            local[2] - expected[2],
+                        )
+                    }
+                    Some(ack) => {
+                        crate::net::predict_plan(local, ack.pos, client.pending_inputs(), 1.0 / 60.0)
+                    }
                     None => crate::net::reconcile_plan(dx, dz),
                 };
                 match plan {
