@@ -322,6 +322,26 @@ impl Game {
                     body: msg.encode(),
                 };
                 let _ = server.send_raw(&sealed.encode(), addr);
+                // 输入确认（2026-11-19）：告诉这个客户端"我应用到了你第几个 input、
+                // 那个时刻你的权威位置在哪"。客户端据此算 `pending`（领先几帧），
+                // 从而只修正超出合理领先量的误差 —— 这是输入预测的另一半。
+                // 只在该客户端的 input seq **有推进**时才发，避免每 tick 白占带宽。
+                if let Some(pid) = server.player_id_of(addr) {
+                    if let Some(np) = self.net_players.iter().find(|p| p.id == pid) {
+                        if np.last_input_seq != 0 {
+                            let ack = NetworkMessage::InputAck {
+                                seq: np.last_input_seq,
+                                pos: np.pos,
+                                rot: np.yaw,
+                            };
+                            let acked = NetworkMessage::Sealed {
+                                token,
+                                body: ack.encode(),
+                            };
+                            let _ = server.send_raw(&acked.encode(), addr);
+                        }
+                    }
+                }
             }
             // 目标状态（据点归属/进度）广播：关卡系统启用时组包（归属码 0=中立/1=Red/2=Blue）。
             // 未启用关卡系统（obj_state=None）→ 空据点列表广播（客户端据此可知无目标）。
@@ -399,7 +419,18 @@ impl Game {
             if let Some(st) = client.entity_state_at(NET_PLAYER_BASE.wrapping_add(own), client.now()) {
                 let dx = st.pos[0] - self.player_body.pos.x;
                 let dz = st.pos[2] - self.player_body.pos.z;
-                match crate::net::reconcile_plan(dx, dz) {
+                // 有输入确认 ⇒ 用**预测校正**（会把"我还领先服务端几帧"算进允许量）；
+                // 没有确认（刚连上/服务端还没发过）⇒ 退回普通的二档校正。
+                let plan = match client.acked_state() {
+                    Some(ack) => crate::net::predict_plan(
+                        [self.player_body.pos.x, self.player_body.pos.y, self.player_body.pos.z],
+                        ack.pos,
+                        client.pending_inputs(),
+                        1.0 / 60.0,
+                    ),
+                    None => crate::net::reconcile_plan(dx, dz),
+                };
+                match plan {
                     crate::net::Reconcile::None => {}
                     crate::net::Reconcile::Blend(k) => {
                         self.player_body.pos.x += dx * k;

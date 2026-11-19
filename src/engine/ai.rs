@@ -1671,6 +1671,46 @@ mod tests {
     /// （水平主导取 `+y`、垂直主导取 `+x`）。改成一致旋转后，`u=(1,0)` 的两条断言不变，
     /// `u=(0,1)` 的两条**左右互换**（旋转方向必须自洽，这正是修掉跳变的前提）。
     #[test]
+    /// 🔴 **包抄的两个侧翼必须真的不同**（2026-11-19）。
+    ///
+    /// 这条钉的是"包抄"这件事本身：若 `side` 被忽略（或两侧算出同一格），
+    /// 这种"包抄"就退化成**全部直线冲锋** —— 战术层看起来还在跑，实际没有任何包围发生。
+    /// 反向验证：把 `side` 判断改成恒走 +1 分支 ⇒ 本判据立刻红。
+    #[test]
+    fn flank_sides_are_distinct_and_symmetric() {
+        let map = GridMap::new(40, 40);
+        let player = GridPos::new(20, 20);
+        // 本单位在东侧、几个不同偏移量：两侧都必须存在且互不相同
+        for offset in [1u32, 2, 4, 6] {
+            let a = flank_goal(&map, player, GridPos::new(20 + offset as i32, 20), 1, offset);
+            let b = flank_goal(&map, player, GridPos::new(20 + offset as i32, 20), -1, offset);
+            assert_ne!(a, b, "offset={offset}：两侧翼落在同一格 ⇒ 包抄退化成正冲");
+            // 两侧必须分居玩家两侧（一个 y 更大、一个更小）——
+            // 这正是"从左右两边绕"的可观测量。
+            assert!(
+                (a.y - player.y) * (b.y - player.y) <= 0,
+                "offset={offset}：两侧翼应在玩家两侧，实际 y={} 与 {}（玩家 y={}）",
+                a.y,
+                b.y,
+                player.y
+            );
+        }
+    }
+
+    /// 退化情形：玩家与本单位同格 ⇒ 直接返回玩家位置（不再绕圈）。
+    /// 未做这条时会出现"贴脸还在原地转"的行为。
+    #[test]
+    fn flank_goal_degenerates_when_overlapping() {
+        let map = GridMap::new(20, 20);
+        let same = GridPos::new(7, 9);
+        assert_eq!(
+            flank_goal(&map, same, same, 1, 4),
+            same,
+            "同格时应返回玩家位置"
+        );
+        assert_eq!(flank_goal(&map, same, same, -1, 4), same, "两侧都应如此");
+    }
+
     fn flank_goal_rotates_and_clamps() {
         let map = GridMap::new(10, 10);
         // 本单位在玩家东侧（u=(1,0)）：顺时针 90° → +y

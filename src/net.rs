@@ -206,6 +206,12 @@ pub enum MessageType {
     /// **原来的 player_id** 还给它，比分/击杀/在别人眼里的身份都不丢。
     /// 服务端不认（过期/伪造）⇒ 回 `Challenge`，客户端退回正常 Join 握手。
     Resume = 0x13,
+    /// 服务端 → 客户端：**已应用到的输入序号 + 该序号处的权威位置**（2026-11-19）。
+    ///
+    /// 这是"输入预测"的另一半：客户端据此知道自己领先服务端多少个输入（`pending`），
+    /// 从而**只修正超出合理领先量的那部分误差**。没有它，客户端分不清
+    /// "我真的偏了"和"我只是还领先几帧"—— 后者被硬拉回去就是回弹。
+    InputAck = 0x14,
     /// 服务端 → 客户端：握手挑战（S2），客户端必须回 JoinProof 回显 nonce
     Challenge = 0x09,
     /// 客户端 → 服务端：回显挑战 nonce（S2）
@@ -245,6 +251,7 @@ impl MessageType {
             0x11 => MessageType::SnapshotD,
             0x12 => MessageType::SnapAck,
             0x13 => MessageType::Resume,
+            0x14 => MessageType::InputAck,
             _ => return None,
         })
     }
@@ -495,6 +502,35 @@ impl SnapshotBroadcaster {
     }
 }
 
+/// 预测校正的**提前量预算**：服务端与客户端共用同一个步速（见 `apply_net_player_input`）。
+pub const PLAYER_PREDICT_SPEED_MPS: f32 = 4.6;
+
+/// 输入预测下的校正决策（纯函数，可单测）。
+///
+/// 与 [`reconcile_plan`] 的区别是**多了一项"合理领先量"**：客户端已经发出、但服务端还没
+/// 应用的那些输入（`pending`）会让本地位置**合法地**领先权威位置若干帧。不把这部分算进去，
+/// 客户端会在**完全正常**的时候被反复拉回去 —— 这就是没有预测时那种发紧/回弹的来源。
+pub fn predict_plan(local: [f32; 3], ack: [f32; 3], pending_inputs: u32, dt: f32) -> Reconcile {
+    let dx = ack[0] - local[0];
+    let dz = ack[2] - local[2];
+    if !dx.is_finite() || !dz.is_finite() || !dt.is_finite() {
+        return Reconcile::None;
+    }
+    let err = (dx * dx + dz * dz).sqrt();
+    // `pending` 上限按 240 帧夹住：卡了很久的客户端不该获得无限豁免。
+    let pending = pending_inputs.min(240) as f32;
+    let allowance = RECONCILE_DEADZONE_M + PLAYER_PREDICT_SPEED_MPS * dt.max(0.0) * pending;
+    if err <= allowance {
+        return Reconcile::None;
+    }
+    if err >= RECONCILE_SNAP_M && err >= allowance * 2.0 {
+        return Reconcile::Snap;
+    }
+    let excess = err - allowance;
+    let k = (excess / (err + 1e-6)).clamp(0.10, 0.60);
+    Reconcile::Blend(k)
+}
+
 /// 自身上行校正的**决策**（纯函数产物，见 [`reconcile_plan`]）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Reconcile {
@@ -721,6 +757,8 @@ pub enum NetworkMessage {
     SnapAck { seq: u32 },
     /// 客户端 → 服务端：请求恢复会话（带上次的 token）。
     Resume { token: Token },
+    /// 服务端 → 客户端：已应用的输入序号与该序号处的权威位置。
+    InputAck { seq: u32, pos: [f32; 3], rot: f32 },
     /// 客户端 → 服务端：本帧输入。seq = 客户端输入序号（wrapping），time = 客户端本地时间（秒）
     Input { seq: u32, time: f32, input: NetInput },
     /// 服务端 → 客户端：目标状态（据点归属/进度）同步。seq = 发送方单调递增序号，
@@ -1091,6 +1129,15 @@ impl NetworkMessage {
                 (MessageType::Action, p)
             }
             NetworkMessage::Resume { token } => (MessageType::Resume, token.to_vec()),
+            NetworkMessage::InputAck { seq, pos, rot } => {
+                let mut p = Vec::with_capacity(12);
+                put_u32(&mut p, *seq);
+                for c in pos.iter() {
+                    p.extend_from_slice(&quant_i16(*c, SNAP_QUANT_POS_M).to_be_bytes());
+                }
+                p.extend_from_slice(&quant_angle_u16(*rot).to_be_bytes());
+                (MessageType::InputAck, p)
+            }
             NetworkMessage::SnapAck { seq } => {
                 let mut p = Vec::with_capacity(4);
                 put_u32(&mut p, *seq);
@@ -1378,6 +1425,16 @@ impl NetworkMessage {
                     npcs.push(NpcSnapshot { id, pos, facing, hp, team, firing });
                 }
                 NetworkMessage::Snapshot { seq, time, player_id, player: PlayerState::new(pos, rot), npcs }
+            }
+            MessageType::InputAck => {
+                let seq = r.u32()?;
+                let pos = [
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                    dequant_i16(r.i16()?, SNAP_QUANT_POS_M),
+                ];
+                let rot = dequant_angle_u16(r.u16()?);
+                NetworkMessage::InputAck { seq, pos, rot }
             }
             MessageType::Resume => {
                 let mut token = [0u8; TOKEN_LEN];
@@ -2128,6 +2185,12 @@ pub struct Client {
     snapshot_time: f32,
     /// 是否收到过快照
     has_snapshot: bool,
+    /// 已发出的最后一个 input 序号（与 `Input` 消息里的 seq 同源）
+    sent_input_seq: std::cell::Cell<u32>,
+    /// 服务端**已确认应用**的最后一个 input 序号（`InputAck`）
+    last_acked_input_seq: std::cell::Cell<u32>,
+    /// 该确认序号处的权威位置（预测校正的基准）
+    acked_state: std::cell::RefCell<Option<PlayerState>>,
     /// **会话恢复用的 token**（2026-11-18）：与 `self.token` 不同，它在 `reset_connection`
     /// **之后仍然保留** —— 正是靠它才能用**同一个 player_id** 重连（会话恢复）。
     resume_token: Option<Token>,
@@ -2231,6 +2294,9 @@ impl Client {
             snapshot_seq: 0,
             snapshot_time: 0.0,
             has_snapshot: false,
+            sent_input_seq: std::cell::Cell::new(0),
+            last_acked_input_seq: std::cell::Cell::new(0),
+            acked_state: std::cell::RefCell::new(None),
             resume_token: None,
             snap_base: None,
             pending_nonce: None,
@@ -2284,6 +2350,10 @@ impl Client {
 
     /// 发送消息到服务器
     pub fn send(&self, msg: &NetworkMessage) -> io::Result<usize> {
+        // 记下已发出的 input 序号（`pending_inputs` 要用；`send` 是 `&self` ⇒ 用 Cell）
+        if let NetworkMessage::Input { seq, .. } = msg {
+            self.sent_input_seq.set(*seq);
+        }
         // S2：拿到token后，Input/Leave 一律封在token包里 —— 伪造源地址的包服务端直接丢弃。
         let sealed;
         let outgoing = match (msg, self.token) {
@@ -2468,6 +2538,17 @@ impl Client {
                     }
                 }
                 None
+            }
+            NetworkMessage::InputAck { seq, pos, rot } => {
+                // 只接受**更新**的确认：乱序/重放的旧 ack 会把已被超越的权威位置塞回来，
+                // 直接后果是玩家被往"过去"拉（这正是回滚时最容易写错的地方）。
+                if self.last_acked_input_seq.get() == 0
+                    || crate::net::seq_is_newer(seq, self.last_acked_input_seq.get())
+                {
+                    self.last_acked_input_seq.set(seq);
+                    *self.acked_state.borrow_mut() = Some(PlayerState::new(pos, rot));
+                }
+                return None;
             }
             NetworkMessage::SnapshotDelta { seq, base_seq, time, player_id, player, npcs, removed } => {
                 // 增量：叠到本地基准上；基准缺失或序号不符 ⇒ 丢弃本包（服务端会周期性发全量）。
@@ -2807,6 +2888,25 @@ impl Client {
     /// ② 测试里构造"换一个 socket 重连"的场景（新 `Client` 没有历史 token）。
     pub fn set_resume_token(&mut self, token: Token) {
         self.resume_token = Some(token);
+    }
+
+    /// 服务端尚未确认的输入数（**预测校正的允许量**就按它算）。
+    ///
+    /// `wrapping_sub` 而不是裸减法：seq 是回绕的，两个方向都可能"看起来更大"。
+    pub fn pending_inputs(&self) -> u32 {
+        self.sent_input_seq
+            .get()
+            .wrapping_sub(self.last_acked_input_seq.get())
+    }
+
+    /// 服务端已确认应用到的 input 序号（0 = 还没收到过确认）。
+    pub fn last_acked_input_seq(&self) -> u32 {
+        self.last_acked_input_seq.get()
+    }
+
+    /// 该确认序号处的权威位置（预测校正的基准）。
+    pub fn acked_state(&self) -> Option<PlayerState> {
+        *self.acked_state.borrow()
     }
 
     /// 当前用于会话恢复的 token（判据与持久化用）。
@@ -5532,5 +5632,74 @@ mod reconcile_tests {
                 prev = k;
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod predict_tests {
+    use super::*;
+
+    /// 领先量越大，能容纳的误差越大 —— 否则正常领先会被当成错误反复修正。
+    #[test]
+    fn predict_allowance_grows_with_pending() {
+        let dt = 1.0 / 60.0;
+        let local = [0.0, 0.0, 0.0];
+        // 0.10m：pending=0 时超过 5cm 死区 ⇒ 要修正；pending=3 时在领先量内 ⇒ 不修正。
+        assert!(
+            matches!(predict_plan(local, [0.10, 0.0, 0.0], 0, dt), Reconcile::Blend(_)),
+            "没有未确认输入时，10cm 误差应当被修正"
+        );
+        assert_eq!(
+            predict_plan(local, [0.10, 0.0, 0.0], 3, dt),
+            Reconcile::None,
+            "领先 3 帧时 10cm 可由领先解释 ⇒ 不该修正"
+        );
+        // pending=2 ⇒ allowance ≈ 0.203m
+        assert_eq!(
+            predict_plan(local, [0.15, 0.0, 0.0], 2, dt),
+            Reconcile::None,
+            "0.15m 在允许量内 ⇒ 不动"
+        );
+        assert!(
+            matches!(predict_plan(local, [0.30, 0.0, 0.0], 2, dt), Reconcile::Blend(_)),
+            "0.3m 超出允许量但远不到失步 ⇒ 插值"
+        );
+    }
+
+    /// **合法领先不得被修正**：这是"有没有输入预测"的分界点。
+    #[test]
+    fn predict_ignores_legitimate_lead() {
+        let dt = 1.0 / 60.0;
+        let allowance = RECONCILE_DEADZONE_M + PLAYER_PREDICT_SPEED_MPS * dt * 5.0;
+        let local = [0.0, 0.0, 0.0];
+        assert_eq!(
+            predict_plan(local, [allowance * 0.95, 0.0, 0.0], 5, dt),
+            Reconcile::None,
+            "刚好落在领先量内时必须不动"
+        );
+        match predict_plan(local, [allowance * 1.3, 0.0, 0.0], 5, dt) {
+            Reconcile::Blend(k) => assert!(k > 0.0 && k < 0.61),
+            other => panic!("略超领先量应为插值，实际 {other:?}"),
+        }
+    }
+
+    /// 只有**真失步**才硬对齐；阈值附近但领先很多时不该硬对齐。
+    #[test]
+    fn predict_snaps_only_on_real_desync() {
+        let dt = 1.0 / 60.0;
+        let local = [0.0, 0.0, 0.0];
+        assert_eq!(
+            predict_plan(local, [5.0, 0.0, 0.0], 0, dt),
+            Reconcile::Snap,
+            "5m 误差、没有未确认输入 ⇒ 必须硬对齐"
+        );
+        // 领先 60 帧 ⇒ allowance ≈ 4.6m，3.2m 仍在允许量内
+        assert_eq!(
+            predict_plan(local, [3.2, 0.0, 0.0], 60, dt),
+            Reconcile::None,
+            "领先 60 帧时 3.2m 仍可由领先解释"
+        );
+        assert_eq!(predict_plan(local, [f32::NAN, 0.0, 0.0], 0, dt), Reconcile::None);
     }
 }
