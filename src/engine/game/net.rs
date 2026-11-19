@@ -18,6 +18,11 @@ use super::*;
 /// ```
 /// ⇒ 现在统一成**脚底**这一个约定，眼高由 [`NET_EYE_HEIGHT`] 显式相加。
 const NET_EYE_HEIGHT: f32 = 1.6;
+/// 远端玩家/预测回滚的地面步速（米/秒）。**服务端与客户端必须是同一个数** ——
+/// 不一致的话重放出来的位置永远差一点（表现为"校正收不干净"）。
+const PLAYER_GROUND_SPEED: f32 = 4.6;
+/// 玩家水平碰撞半径（米）：与服务端 `resolve_circle_static` 的调用点一致。
+const NET_PLAYER_RADIUS: f32 = 0.45;
 
 /// **远端玩家输入 → 水平位移方向**（纯函数：实现与判据**共用同一个函数**）。
 ///
@@ -51,6 +56,64 @@ pub(crate) fn collapse_input(
     if newer {
         map.insert(from, (seq, input));
     }
+}
+
+/// 远端玩家/预测回滚共用的**纯步进**（2026-11-19）：给定位置与一帧输入，算出新位置。
+///
+/// 🔴 抽出来的理由：客户端要做**回滚重放**（收到 `InputAck` 后把未确认的输入
+/// 在权威位置上重跑一遍），客户端必须与服务端**用同一段算式** —— 两处各写一份，
+/// 重放出来的位置就永远差一点，表现为"校正永远收不干净"。
+///
+/// 约定（都沿用既有代码，别在这里改）：
+/// - 前向 = `(-sin yaw, -cos yaw)`（`Camera::forward()` 那一套，见 `net_input_delta`）；
+/// - `y` **不在这里改**（脚底高由调用方每 tick 写 `terrain_height_at`）；
+/// - 障碍按半径 [`NET_PLAYER_RADIUS`](0.45m) 推开。
+pub(crate) fn step_player_position(
+    pos: [f32; 3],
+    input: &NetInput,
+    dt: f32,
+    bodies: &[physics::Body],
+) -> [f32; 3] {
+    let (ux, uz) = net_input_delta(
+        input.yaw,
+        input.forward,
+        input.backward,
+        input.left,
+        input.right,
+    );
+    let speed = PLAYER_GROUND_SPEED * dt.max(0.0);
+    let nx = pos[0] + ux * speed;
+    let nz = pos[2] + uz * speed;
+    let (rx, rz) = resolve_circle_static(bodies, nx, nz, NET_PLAYER_RADIUS);
+    [rx, pos[1], rz]
+}
+
+/// **回滚重放**（2026-11-19）：从权威位置出发，把"服务端还没确认的输入"依次重跑。
+///
+/// 这是输入预测的收尾一步 —— 没有它，客户端只能在收到权威状态时**直接接受**
+/// （位置被拉回），或者**忽略**权威状态（漂移越积越大）。有了它，客户端可以说：
+/// "好，你（服务端）在第 k 个输入时我在 P_k；那我从 P_k 把 k+1..N 重跑一遍，
+/// 就得到了**我此刻应该在哪**" —— 既接受权威、又不丢本地已做的移动。
+///
+/// `dt` 必须**逐输入**给（服务端用的是 `input_dt_clamped` 得到的真实间隔），
+/// 传成整帧 dt 会让重放位置偏掉 —— 判据 `replay_matches_server_application` 钉住这一点。
+/// 🔴 **当前未接线，理由必须是明确的**（本仓禁止用 `#[allow]` 糊过去）：
+/// 本地玩家的移动走的是 `player_body` 那套物理（跳跃/坡度/台阶），
+/// 而这里重放用的是服务端那套**水平步进**。两者模型不同，
+/// 直接把重放结果写回本地位置只会**引入**新的偏差。
+/// ⇒ 接线的前提是"客户端本地移动也走 `step_player_position`"（或把两套模型统一），
+/// 那是独立一轮的改动。在此之前它由三条判据守着，作为**已验证的核心**保留。
+#[allow(dead_code)]
+pub(crate) fn replay_pending(
+    acked: [f32; 3],
+    pending: &[(NetInput, f32)],
+    bodies: &[physics::Body],
+) -> [f32; 3] {
+    let mut pos = acked;
+    for (input, dt) in pending {
+        pos = step_player_position(pos, input, *dt, bodies);
+    }
+    pos
 }
 
 fn net_input_delta(yaw: f32, forward: bool, backward: bool, left: bool, right: bool) -> (f32, f32) {
@@ -479,11 +542,8 @@ impl Game {
         if !alive {
             return;
         }
-        // 移动：以 yaw 为前向（服务器统一步长，与本地玩家手感一致）
+        // 移动：**统一走纯函数 `step_player_position`**（客户端回滚重放用的是同一段算式）
         let p = &mut self.net_players[pi];
-        let speed = 4.6 * dt;
-        let mut dx = 0.0f32;
-        let mut dz = 0.0f32;
         // 🔴 **必须用相机那一套约定**（2026-10-15，外部复核指出第 8 条，已对着代码确认）。
         //
         // `Camera::direction()` = `(cos p·sin yaw, sin p, cos p·cos yaw)`，
@@ -495,19 +555,9 @@ impl Game {
         // ⇒ 客户端按 `W` 前进、服务端把他的权威实体**往后推**，
         // 不到 0.4 秒位置差就超过 3m 触发 `dx*dx + dz*dz > 9.0` 的行正
         // ⇒ 客户端被强行拉回，观感是"走两步被拽回去"。
-        let (ux, uz) = net_input_delta(
-            input.yaw,
-            input.forward,
-            input.backward,
-            input.left,
-            input.right,
-        );
-        dx += ux * speed;
-        dz += uz * speed;
-        let nx = p.pos[0] + dx;
-        let nz = p.pos[2] + dz;
-        // 静态障碍 AABB 水平推开（盒体数少，线性扫描可接受）
-        let (rx, rz) = resolve_circle_static(&self.world.bodies, nx, nz, 0.45);
+        // 🔴 位置更新走**纯函数**，与客户端回滚重放共用同一段算式（见 `step_player_position`）。
+        let stepped = step_player_position(p.pos, &input, dt, &self.world.bodies);
+        let (rx, rz) = (stepped[0], stepped[2]);
         // ⚠️ **y 只改水平落点、不在这里清零**：脚底高由每 tick 那句
         // `p.pos[1] = terrain_height_at(..)` 统一写（原来这里清 0，
         // 于是紧跟其后的开火原点 `p.pos[1] + 1.2` 在丘陵上算到地里去了）。
@@ -734,5 +784,109 @@ mod net_dir_tests {
         assert!((input_dt_clamped(10.0, 10.004) - 0.004).abs() < 1e-6);
         assert_eq!(input_dt_clamped(10.0, 20.0), MAX_INPUT_DT, "间隔过大必须夹到上限");
         assert_eq!(input_dt_clamped(10.0, 9.0), MIN_INPUT_DT, "时间倒退必须夹到下限");
+    }
+}
+
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+
+    fn inp(yaw: f32, forward: bool) -> NetInput {
+        NetInput {
+            forward,
+            backward: false,
+            left: false,
+            right: false,
+            fire: false,
+            yaw,
+            pitch: 0.0,
+        }
+    }
+
+    /// 🔴 **重放必须用逐输入的真实 dt**（2026-11-19）。
+    ///
+    /// ⚠️ **这条判据的第一版是错的，记在这里**：它原本写"重放结果 == 服务端一次跑完"，
+    /// 而两边**都调用 `replay_pending`** ⇒ 对称恒真：把 dt 换成整帧常量时两边一起错、
+    /// 判据照样绿（反向验证当场证明）。现在改成与**独立算出的期望值**比：
+    /// 两个各 1/30 秒的输入 ⇒ 位移必须正好是 `2 × 步速 / 30`，
+    /// 用 1/60 代入只能得到一半 ⇒ 立刻红。
+    ///
+    /// 这条守的是"客户端重放与服务端用同一段算式、同一个时间基准"：
+    /// 它不成立的话，每次校正都会留一点残差，表现为"校正永远收不干净 / 位置微微抖动"。
+    #[test]
+    fn replay_matches_server_application() {
+        let bodies: Vec<physics::Body> = Vec::new();
+        let dts = [1.0 / 60.0, 1.0 / 45.0, 1.0 / 90.0, 1.0 / 60.0, 1.0 / 30.0];
+        let inputs: Vec<NetInput> = vec![
+            inp(0.0, true),
+            inp(0.3, true),
+            inp(0.6, true),
+            inp(0.9, false),
+            inp(1.2, true),
+        ];
+        let pairs: Vec<(NetInput, f32)> = inputs.iter().copied().zip(dts.iter().copied()).collect();
+
+        // 拆成两段重放 == 一次跑完（**折叠性质**：能抓住"每轮都从 acked 重算"这类写错）
+        let start = [10.0f32, 0.5, -4.0];
+        let all_at_once = replay_pending(start, &pairs, &bodies);
+        let acked = replay_pending(start, &pairs[..3], &bodies);
+        let replayed = replay_pending(acked, &pairs[3..], &bodies);
+        assert_eq!(
+            replayed, all_at_once,
+            "分段重放必须与一次跑完相同（{replayed:?} vs {all_at_once:?}）"
+        );
+        assert!(
+            (all_at_once[0] - start[0]).abs() + (all_at_once[2] - start[2]).abs() > 0.01,
+            "起点到终点必须有位移，否则判据无效"
+        );
+
+        // 🔑 **与独立期望值比**（这一半才能抓住 dt 被写死）
+        let one_30th = [(inp(0.0, true), 1.0 / 30.0)];
+        let two_30ths = [(inp(0.0, true), 1.0 / 30.0), (inp(0.0, true), 1.0 / 30.0)];
+        let one = replay_pending([0.0; 3], &one_30th, &bodies);
+        let two = replay_pending([0.0; 3], &two_30ths, &bodies);
+        let expect_one = -(PLAYER_GROUND_SPEED * (1.0 / 30.0));
+        assert!(
+            (one[2] - expect_one).abs() < 1e-5,
+            "1/30 秒应前进 {expect_one}，实际 {}（用整帧 1/60 会得到一半）",
+            one[2]
+        );
+        assert!(
+            (two[2] - 2.0 * expect_one).abs() < 1e-5,
+            "两个 1/30 秒应前进 {}，实际 {}",
+            2.0 * expect_one,
+            two[2]
+        );
+        // 同一个输入、不同 dt ⇒ 结果必须**不同**（直接钉住"dt 真的被用上了"）
+        let slow = replay_pending([0.0; 3], &[(inp(0.0, true), 1.0 / 60.0)], &bodies);
+        assert_ne!(one, slow, "1/30 与 1/60 的位移必须不同，否则 dt 被忽略了");
+    }
+
+    /// 没有未确认输入 ⇒ 重放结果就是权威位置本身（幂等）。
+    #[test]
+    fn replay_with_no_pending_is_identity() {
+        let bodies: Vec<physics::Body> = Vec::new();
+        let acked = [1.5f32, 0.0, 2.5];
+        assert_eq!(replay_pending(acked, &[], &bodies), acked);
+    }
+
+    /// 逐输入 dt 与"同样总时长的单步"在无障碍时应当一致（步长可加性的一致性检查）。
+    #[test]
+    fn replay_accumulates_distance_linearly() {
+        let bodies: Vec<physics::Body> = Vec::new();
+        let dt = 1.0 / 60.0;
+        let one = [(inp(0.0, true), dt)];
+        let three = [(inp(0.0, true), dt), (inp(0.0, true), dt), (inp(0.0, true), dt)];
+        let p1 = replay_pending([0.0; 3], &one, &bodies);
+        let p3 = replay_pending([0.0; 3], &three, &bodies);
+        let single_step = PLAYER_GROUND_SPEED * dt;
+        assert!((p1[2] - (-single_step)).abs() < 1e-5, "一帧应前进 {single_step}");
+        assert!(
+            (p3[2] - (-3.0 * single_step)).abs() < 1e-5,
+            "三帧应前进 3 倍：{} vs {}",
+            p3[2],
+            -3.0 * single_step
+        );
     }
 }
