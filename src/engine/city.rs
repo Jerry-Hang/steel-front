@@ -1907,11 +1907,22 @@ fn street_furniture(c: &mut City) {
         }
     }
     for k in [-3i32, -2, -1, 1, 2, 3] {
-        let t = k as f32 * STREET_EVERY;
+        // 🔴 **必须加半格偏移**（2026-11-20，用户实机截图：路灯长在马路正中间）。
+        //
+        // 原来写的是 `t = k as f32 * STREET_EVERY`，而街道中心线**正好**位于
+        // `k * STREET_EVERY`（见 `STREET_EVERY` 的注释）⇒
+        //   · `lamp_post(c, side, t)` 的 z 落在**横街中心线**上
+        //   · `lamp_post(c, t, side)` 的 x 落在**主街中心线**上
+        // 两种摆法都把人行道坐标和"街心"混成了一件事 —— 灯就长到了沥青上。
+        // 命名也顺手改掉：`t` 看起来像"沿街距离"，实际是"街道序号×间距"。
+        //
+        // `+ STREET_EVERY * 0.5` 把沿街坐标挪到**街区中点**（27.5 m），横向仍留 ±7（人行道）。
+        // 判据 `no_solid_prop_sits_on_the_asphalt` 守着这条（改动前它报 80 件违规）。
+        let mid_block = k as f32 * STREET_EVERY + STREET_EVERY * 0.5;
         for side in [-7.0f32, 7.0] {
             // 灯臂越过车道：rotY(yaw)·(+X) = (cos yaw, 0, -sin yaw)
-            lamp_post(c, side, t, if side < 0.0 { 0.0 } else { std::f32::consts::PI });
-            lamp_post(c, t, side, side * std::f32::consts::FRAC_PI_2 / 7.0);
+            lamp_post(c, side, mid_block, if side < 0.0 { 0.0 } else { std::f32::consts::PI });
+            lamp_post(c, mid_block, side, side * std::f32::consts::FRAC_PI_2 / 7.0);
         }
     }
     for k in -2i32..=2 {
@@ -2493,6 +2504,61 @@ mod city_layout_tests {
     /// 只剩几块悬空黑片）。三面围合内缘在街区中心 ±7.5、北排带 dz∈[-13,-7.5]。
     /// 判据：残骸车（Ruin）与帐篷（TENT_CAMO）件的中心 |dx|<7.4 且不落北排带。
     #[test]
+    /// 🔴 **除显式登记的例外，任何碰撞件都不许压在沥青上**（2026-11-20 用户实机截图：
+    /// 路灯长在马路正中间）。
+    ///
+    /// 判据：点到最近街道中心线的距离（两轴取小）< `ROAD_HALF`，且**落在街道长度范围内**
+    /// ⇒ 在沥青上。街道中心线位于 `k * STREET_EVERY`（`STREET_EVERY = 55`，`city.rs:31`），
+    /// 网格 k = -3..3 ⇒ ±165，**超出这个范围那条街根本不存在**（上一版判据漏了这条，
+    /// 报了 96 件、大头都是城边 Building 的假阳性）。
+    ///
+    /// 这条抓的是一整类错误：**把"街道序号 × 间距"当成"沿街坐标"用**。
+    /// 路灯原来写 `lamp_post(c, t, side)` 而 `t = k * STREET_EVERY` ⇒ `x` 正好落在
+    /// **横街中心线**上，灯就长到了马路中间（改动前本条报 **80 件违规**）。
+    ///
+    /// 显式例外（都写清理由，不许为了变绿而放宽判据）：
+    /// - **中央隔离带**：泽西护栏（`CONCRETE`）+ 反光柱 —— 它**本来就该在路中央**；
+    /// - **集装箱堆场**：战乱城区刻意堆在路侧/路面上的 20ft 箱。
+    #[test]
+    fn no_solid_prop_sits_on_the_asphalt() {
+        const ALLOWED_TINTS: [[f32; 3]; 5] = [
+            CONCRETE,                // 中央隔离带：泽西护栏
+            [0.7, 0.71, 0.73],       // 中央隔离带：反光柱
+            CONTAINER_BLUE,          // 集装箱堆场
+            CONTAINER_GREEN,         //
+            CONTAINER_RUST,          //
+        ];
+        let m = generate_city();
+        let dist_to_street = |v: f32| (v - (v / STREET_EVERY).round() * STREET_EVERY).abs();
+        const STREET_END: f32 = 3.0 * STREET_EVERY;
+        let on_asphalt = |x: f32, z: f32| -> bool {
+            (dist_to_street(x) < ROAD_HALF && z.abs() <= STREET_END)
+                || (dist_to_street(z) < ROAD_HALF && x.abs() <= STREET_END)
+        };
+        let allowed = |t: Option<[f32; 3]>| -> bool {
+            t.map(|v| {
+                ALLOWED_TINTS
+                    .iter()
+                    .any(|a| (a[0] - v[0]).abs() < 1e-3 && (a[1] - v[1]).abs() < 1e-3 && (a[2] - v[2]).abs() < 1e-3)
+            })
+            .unwrap_or(false)
+        };
+        let mut bad: Vec<(String, f32, f32)> = Vec::new();
+        for ob in &m.obstacles {
+            if on_asphalt(ob.x, ob.z) && !allowed(ob.tint) {
+                bad.push((format!("{:?}", ob.kind), ob.x, ob.z));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "有 {} 个碰撞件压在沥青上（前 10 个）：{:?}\n\
+             ⇒ 检查是不是把 `k * STREET_EVERY` 直接当了沿街坐标（那等于把件放在横街正中）；\
+             若是新的合法例外，必须加到 `ALLOWED_TINTS` 并写清理由",
+            bad.len(),
+            &bad[..bad.len().min(10)]
+        );
+    }
+
     fn checkpoint_props_stay_out_of_rows() {
         let m = generate_city();
         let near = |v: f32| -> f32 {
