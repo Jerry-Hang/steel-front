@@ -23,6 +23,10 @@ const NET_EYE_HEIGHT: f32 = 1.6;
 const PLAYER_GROUND_SPEED: f32 = 4.6;
 /// 玩家水平碰撞半径（米）：与服务端 `resolve_circle_static` 的调用点一致。
 const NET_PLAYER_RADIUS: f32 = 0.45;
+/// 可直接迈上去的台阶高度（米）：与 `game::PLAYER_STEP_UP` **必须相等**，
+/// 否则重放算出的站立面会与本地物理差一档（矮墙能上不能上的差别）。
+/// 判据 `replay_step_up_matches_the_player`。
+const PLAYER_STEP_UP: f32 = 0.45;
 
 /// **远端玩家输入 → 水平位移方向**（纯函数：实现与判据**共用同一个函数**）。
 ///
@@ -84,8 +88,33 @@ pub(crate) fn step_player_position(
     let speed = PLAYER_GROUND_SPEED * dt.max(0.0);
     let nx = pos[0] + ux * speed;
     let nz = pos[2] + uz * speed;
-    let (rx, rz) = resolve_circle_static(bodies, nx, nz, NET_PLAYER_RADIUS);
+    let (rx, rz) = resolve_circle_static(bodies, nx, pos[1], nz, NET_PLAYER_RADIUS, NET_EYE_HEIGHT);
     [rx, pos[1], rz]
+}
+
+/// 站立面的**垂直收口**：`max(地形高度, 障碍顶面支撑)`（2026-11-20）。
+///
+/// 与 `game::player::step_player` 里那条公式**同源**（都取 `terrain_height_at` 与
+/// `physics::support_height_among` 的较大者）—— 支撑面判定已经抽成公共自由函数，
+/// 这里不再自己写第二份循环。
+///
+/// 为什么重放需要它：`step_player_position` 只做**水平**步进（历史原因：服务端只关心
+/// xz）。而重放要有意义，算出来的位置就必须是"人真正站的地方"—— 站在集装箱顶和站在
+/// 地面上，水平位移相同但 y 差 2.6 m。补上这一步，`replay_pending` 的产物才是完整位置。
+///
+/// ⚠️ 目前**只影响重放的参照**，不会写回本地玩家位置（本地仍走 `player_body` 物理，
+/// 见 `replay_pending` 的注释）。可玩区地形恒为 y=0（判据
+/// `play_area_terrain_is_flat_so_replay_needs_no_slope_term`），所以这一项在平地上
+/// 只会因为**站在障碍上**才与 0 不同。
+pub(crate) fn standing_y(pos: [f32; 3], bodies: &[physics::Body], step_up: f32) -> f32 {
+    let terrain = crate::engine::renderer::terrain_height_at(pos[0], pos[2]);
+    let support = physics::support_height_among(
+        bodies,
+        physics::Vec3::new(pos[0], pos[1], pos[2]),
+        NET_PLAYER_RADIUS,
+        step_up,
+    );
+    terrain.max(support)
 }
 
 /// **回滚重放**（2026-11-19）：从权威位置出发，把"服务端还没确认的输入"依次重跑。
@@ -110,6 +139,9 @@ pub(crate) fn replay_pending(
     let mut pos = acked;
     for (input, dt) in pending {
         pos = step_player_position(pos, input, *dt, bodies);
+        // 每步都收口一次站立面：先水平走、再落到"脚下最高的可站面"上。
+        // 顺序不能反 —— 否则会拿**旧位置**的支撑面去判新位置该站多高。
+        pos[1] = standing_y(pos, bodies, PLAYER_STEP_UP);
     }
     pos
 }
@@ -877,6 +909,61 @@ mod rollback_tests {
         // 同一个输入、不同 dt ⇒ 结果必须**不同**（直接钉住"dt 真的被用上了"）
         let slow = replay_pending([0.0; 3], &[(inp(0.0, true), 1.0 / 60.0)], &bodies);
         assert_ne!(one, slow, "1/30 与 1/60 的位移必须不同，否则 dt 被忽略了");
+    }
+
+    /// 🔴 **重放要把 y 落到站立面上**（2026-11-20）。
+    ///
+    /// 这是"重放从参照升级为真值"缺的那一半：`step_player_position` 只做水平步进，
+    /// 站在集装箱顶和站在地面上的水平位移完全一样、y 差 2.6 m。不补这一步，
+    /// 重放出来的位置只是"投影"，不是"人真正站的地方"。
+    ///
+    /// 反向验证：把 `replay_pending` 里那句 `pos[1] = standing_y(...)` 删掉 ⇒ 立刻红。
+    #[test]
+    fn replay_lands_on_the_supporting_box_top() {
+        // 一只顶面在 y = 1.2 的箱子（中心 0.6、半高 0.6），水平覆盖 ±2 m
+        let bodies = vec![physics::Body::new(
+            physics::Vec3::new(0.0, 0.6, 0.0),
+            physics::Vec3::new(2.0, 0.6, 2.0),
+        )];
+        // 站在箱顶、原地不动（没有移动输入）
+        let still = inp(0.0, false);
+        let start = [0.0f32, 1.2, 0.0];
+        let out = replay_pending(start, &[(still, 1.0 / 60.0)], &bodies);
+        assert!(
+            (out[1] - 1.2).abs() < 1e-4,
+            "站在箱顶时重放的 y 必须仍是 1.2（实际 {}）—— 说明 y 没有落到站立面上",
+            out[1]
+        );
+        // 从地面上开始、且脚下没有箱子 ⇒ y 应为地形 0
+        let out_ground = replay_pending([50.0f32, 0.0, 50.0], &[(still, 1.0 / 60.0)], &bodies);
+        assert!(out_ground[1].abs() < 1e-4, "平地上重放的 y 应为 0，实际 {}", out_ground[1]);
+        // 站在箱顶边缘外侧一点点（半径 0.45 + 半宽 2.0 之外）⇒ 不再被支撑，应落到地形 0
+        let out_off = replay_pending([3.0f32, 1.2, 0.0], &[(still, 1.0 / 60.0)], &bodies);
+        assert!(
+            out_off[1].abs() < 1e-4,
+            "走出箱顶范围后应落回地形 0（实际 {}）—— 否则玩家会站在空气上",
+            out_off[1]
+        );
+    }
+
+    /// 台阶高必须与本地玩家**同一个数**，否则"能不能迈上矮墙"两边判断不一致。
+    /// 反向验证：把 `net::PLAYER_STEP_UP` 改成 0.3 ⇒ 立刻红。
+    #[test]
+    fn replay_step_up_matches_the_player() {
+        let player_src = include_str!("player.rs");
+        assert!(
+            player_src.contains("PLAYER_STEP_UP"),
+            "本地玩家没有用 PLAYER_STEP_UP"
+        );
+        let game_src = include_str!("../game.rs");
+        assert!(
+            game_src.contains("const PLAYER_STEP_UP: f32 = 0.45;"),
+            "game.rs 的 PLAYER_STEP_UP 不再是 0.45 —— 重放侧（net.rs 的同名常量）必须同步"
+        );
+        assert!(
+            (PLAYER_STEP_UP - 0.45).abs() < 1e-6,
+            "重放侧的 PLAYER_STEP_UP = {PLAYER_STEP_UP}，与本地玩家的 0.45 不一致"
+        );
     }
 
     /// 没有未确认输入 ⇒ 重放结果就是权威位置本身（幂等）。

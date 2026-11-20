@@ -4479,3 +4479,38 @@ RV3D_VALIDATION=1 RV3D_AUTO_RESTART=1 RV3D_AUTOFIRE=1`（无窗口、不抢鼠�
 「实测最大 |h| = 0.93385935 @(-2, -222)」。
 
 ⇒ 从此"重放的精确性"不再只是注释里的说法：**平坦区一旦被改小，这条判据会先叫**。
+
+### 2026-11-20（续6）：把支撑面/台阶并进重放 —— 顺带**抓出一个真 bug**（服务端没有 Y 判据）
+
+目标②要求"把坡度/台阶/支撑面并进 `step_player_position`"。做的过程中，新判据**首次运行就红了**，
+而它红的原因是一个**真实的物理 bug**，不是我写错了测试：
+
+🔴 **`resolve_circle_static` 完全没有 Y 判据** ⇒ 站在集装箱/掩体**顶上**的人会被**水平推下去**。
+- 这是 2026-09-13 那次修复的**漏网兄弟**：当时给 `PlayerBody::push_out_of_aabb` 补了 Y 判据
+  + `support_height`，"能站到箱子上"才成立；但**服务端这条路径一直没跟上**。
+- 影响：① 联机时远端玩家一爬上箱子就被推开；② 回滚重放算出的位置永远落不到箱顶
+  （`replay_lands_on_the_supporting_box_top` 就是抓它的那条判据，报"站在箱顶时重放的 y 必须是
+  1.2（实际 0）"）。
+- 取证：`resolve_circle_static` **全仓只有一个调用点**（`step_player_position`），NPC 寻路走的是
+  另一套 `step_with_slide` ⇒ 加 Y 判据**不影响寻路**，改动面可控。
+
+**这轮落地的四件事**：
+1. `physics::support_height_among(bodies, pos, radius, step_up)`：支撑面判定抽成**自由函数**，
+   `PlayerBody::support_height` 改为**委托**它 —— 一份代码两个调用方
+   （方法要 `&World`，回放只有 `&[Body]`，不抽就得写第二份）。
+2. `game::net::standing_y(pos, bodies, step_up)` = `max(terrain_height_at, support_height_among)`，
+   与 `player.rs` 里本地玩家那条公式**同源**。
+3. `replay_pending` **每步都收口一次 y**（先水平走、再落到脚下最高的可站面，顺序不能反）。
+4. `resolve_circle_static` 补 Y 判据（`y + height <= a.min.y || y >= a.max.y` ⇒ 跳过），
+   边界取 `y >= a.max.y` **不推**，否则站上顶面立刻被弹开。
+
+**判据三条，全部反向验证能红**：
+| 判据 | 反向验证注入 | 红时的报错 |
+|---|---|---|
+| `replay_lands_on_the_supporting_box_top` | 删掉 `pos[1] = standing_y(...)` | "站在箱顶时重放的 y 必须仍是 1.2（实际 0）" |
+| `replay_lands_on_the_supporting_box_top` | 删掉 Y 判据 | 同上 ⇒ **这条同时守着那个 bug** |
+| `replay_step_up_matches_the_player` | `net` 的 `PLAYER_STEP_UP` 改 0.30 | "重放侧的 PLAYER_STEP_UP = 0.3，与本地玩家的 0.45 不一致" |
+| `support_height_among_matches_the_method_and_hand_values` | （自由函数与委托方法是对称的，所以另外钉**手算期望值**：站地上够不到 2.0 台面 / y=1.8 时支撑面 2.0 / 横向出半径不支撑） | — |
+
+⚠️ 注意第三条判据的设计：`support_height_among` 与 `PlayerBody::support_height` 是**委托关系**，
+光比它们两个**永远绿**（对称恒真）⇒ 必须再钉手算值。这是本会话第四次踩"对称判据"的变体。

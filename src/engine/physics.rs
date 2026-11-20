@@ -335,6 +335,32 @@ pub struct PlayerBody {
     pub grounded: bool,
 }
 
+/// 站立面支撑高度：脚下（按半径外扩）所有"顶面不高于 `pos.y + step_up`"的盒子顶面的**最大值**；
+/// 没有任何盒子时返回 `f32::NEG_INFINITY`。
+///
+/// 🔴 **这是支撑面的唯一真源**（2026-11-20 从 `PlayerBody::support_height` 抽出来的）。
+/// 抽出来的理由：`PlayerBody` 的版本要 `&World`，而**回滚重放**拿到的只有 `&[Body]`
+/// （见 `game::net::replay_pending`）；为了不再写第二份判定，把它做成自由函数，
+/// 方法委托给它，重放也直接调它 —— 一份代码、两个调用方。
+pub fn support_height_among(bodies: &[Body], pos: Vec3, radius: f32, step_up: f32) -> f32 {
+    let mut best = f32::NEG_INFINITY;
+    let limit = pos.y + step_up;
+    for body in bodies {
+        let a = body.aabb();
+        if a.max.y > limit || a.max.y <= best {
+            continue;
+        }
+        if pos.x > a.min.x - radius
+            && pos.x < a.max.x + radius
+            && pos.z > a.min.z - radius
+            && pos.z < a.max.z + radius
+        {
+            best = a.max.y;
+        }
+    }
+    best
+}
+
 /// 🔴 **垂直钳制**：先按天花板压（撞头），再让地面兜底。返回 (钳制后脚底, 是否撞头)。
 ///
 /// 顺序有意义：`ceiling - eye_height` 可能低于地面（横梁贴地这种坏几何），
@@ -495,22 +521,7 @@ impl PlayerBody {
     /// - `STEP_UP` 是抬脚上限：路缘/台阶能上，1.5m 的护栏不能——必须跳
     /// - 没有任何盒子时为 `f32::NEG_INFINITY`，由调用方与地形高度取 max
     pub fn support_height(&self, world: &World, step_up: f32) -> f32 {
-        let mut best = f32::NEG_INFINITY;
-        let limit = self.pos.y + step_up;
-        for body in &world.bodies {
-            let a = body.aabb();
-            if a.max.y > limit || a.max.y <= best {
-                continue;
-            }
-            if self.pos.x > a.min.x - self.radius
-                && self.pos.x < a.max.x + self.radius
-                && self.pos.z > a.min.z - self.radius
-                && self.pos.z < a.max.z + self.radius
-            {
-                best = a.max.y;
-            }
-        }
-        best
+        support_height_among(&world.bodies, self.pos, self.radius, step_up)
     }
 
     /// 🔴 **头顶高度**：玩家正上方最低的盒子底面（没有任何东西时为 +∞）。
@@ -1402,6 +1413,41 @@ mod tests {
             "垂直区间相交时仍应被挡住，实际位移 {}",
             moved_b.0
         );
+    }
+
+    /// 🔴 **抽出来的自由函数必须与 `PlayerBody::support_height` 逐值一致**（2026-11-20）。
+    ///
+    /// 抽它的目的就是"一份判定、两个调用方"（回滚重放只有 `&[Body]`，拿不到 `&World`）。
+    /// 但"方法委托给自由函数"本身是**对称**的，光比它们两个永远是绿的 ⇒
+    /// 所以这里同时钉**手算的期望值**：箱顶 y=2.0、站地上（limit 0.45）→ 不可站；
+    /// 站到 y=1.8（limit 2.25）→ 支撑面 2.0；横向出半径 → 不可站。
+    /// 反向验证：把自由函数里的 `a.max.y > limit` 改成 `>=` 之外的任一改动都会红。
+    #[test]
+    fn support_height_among_matches_the_method_and_hand_values() {
+        let mut world = World::new();
+        // 顶面 y = 2.0 的高台（中心 y=1.0，半高 1.0）
+        world
+            .bodies
+            .push(Body::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 1.0)));
+        let bodies = world.bodies.clone();
+
+        // 站地上：limit = 0.45 < 2.0 ⇒ 不可站（NEG_INFINITY）
+        let on_ground = PlayerBody::new(Vec3::new(0.0, 0.0, 0.0), 0.4, 1.6);
+        let by_fn = support_height_among(&bodies, on_ground.pos, on_ground.radius, 0.45);
+        assert!(by_fn.is_infinite() && by_fn < 0.0, "站地上不该够到 2.0 的台面");
+        assert_eq!(by_fn, on_ground.support_height(&world, 0.45), "自由函数与方法必须一致");
+
+        // 站到 y=1.8：limit = 2.25 ≥ 2.0 ⇒ 支撑面就是 2.0
+        let stepping = PlayerBody::new(Vec3::new(0.0, 1.8, 0.0), 0.4, 1.6);
+        let by_fn = support_height_among(&bodies, stepping.pos, stepping.radius, 0.45);
+        assert!((by_fn - 2.0).abs() < 1e-6, "抬脚够到时支撑面应为 2.0，实际 {by_fn}");
+        assert_eq!(by_fn, stepping.support_height(&world, 0.45));
+
+        // 横向出半径（半径 0.4 + 半宽 1.0 = 1.4 之外）⇒ 不可站
+        let off = PlayerBody::new(Vec3::new(2.0, 1.8, 0.0), 0.4, 1.6);
+        let by_fn = support_height_among(&bodies, off.pos, off.radius, 0.45);
+        assert!(by_fn.is_infinite() && by_fn < 0.0, "横向出半径不该被支撑");
+        assert_eq!(by_fn, off.support_height(&world, 0.45));
     }
 
     /// `support_height` 的抬脚上限：高过 `step_up` 的面不能被当作支撑，

@@ -697,12 +697,28 @@ pub(crate) fn resolve_circle_obstacles(obs: &[MapObstacle], x: f32, z: f32, r: f
 pub(crate) fn resolve_circle_static(
     bodies: &[physics::Body],
     x: f32,
+    y: f32,
     z: f32,
     r: f32,
+    height: f32,
 ) -> (f32, f32) {
     let mut ox = x;
     let mut oz = z;
     for b in bodies {
+        // 🔴 **Y 判据**（2026-11-20 修的真 bug）：垂直区间不相交的盒体**不参与水平推挤**。
+        //
+        // 旧实现完全没有 Y 判据 ⇒ 站在集装箱/掩体顶上的人会被**水平推下去**。
+        // 这和 2026-09-13 修 `PlayerBody::push_out_of_aabb` 是同一类问题
+        // （那次补了 Y 判据 + `support_height` 才让"能站到箱子上"成立），
+        // 但**服务端这条路径一直没跟上** —— 表现为联机时远端玩家一爬上箱子就被推开，
+        // 以及回滚重放算出的位置永远落不到箱顶（判据
+        // `replay_lands_on_the_supporting_box_top` 就是本次抓出它的那条）。
+        //
+        // 边界取值：`y >= a.max.y`（正好站在顶面）⇒ **不推**，否则站上去立刻被弹开。
+        let a = b.aabb();
+        if y + height <= a.min.y || y >= a.max.y {
+            continue;
+        }
         let (hx, hz) = (b.half_extents.x, b.half_extents.z);
         let cx = (ox - b.position.x).clamp(-hx, hx);
         let cz = (oz - b.position.z).clamp(-hz, hz);
