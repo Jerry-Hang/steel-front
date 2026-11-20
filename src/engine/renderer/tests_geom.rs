@@ -2373,3 +2373,39 @@ mod ssao_quality_tests {
         assert!((super::helpers::ssao_contact_strength_for(QualityPreset::High) - 0.45).abs() < 1e-6);
     }
 }
+
+
+/// 🔴 **路面标线的边沿必须是"像素空间"的**（2026-11-20 实测修复）。
+///
+/// 存在理由：原来的过渡是 `smoothstep(0.10, 0.22, across)` —— 0.12 m 放在**世界空间**。
+/// 而 1.7 m 眼高、2.5 m 外的一条 0.2 m 宽车道线，0.10 m 在屏幕上约 **44 像素**
+/// ⇒ 近处标线糊成一片奶油色糊斑（远看反而像锐的，观感很怪）。
+/// 改成 `±fwidth(across)` 的 1~2 像素过渡后：近景 Laplacian **+4.7%**，
+/// 目视从"糊斑"变成"清晰白色车道线"，且线细到亚像素时 `aa` 自动变大 ⇒ 不闪、不出横向条纹。
+///
+/// 这条判据守的是"过渡宽度必须随像素尺度走"。谁把它改回固定世界宽度，这里立刻红。
+#[test]
+fn road_marking_edge_is_antialiased_in_pixel_space() {
+    let src = include_str!("../../../build.rs");
+    assert!(
+        src.contains("let aa = max(fwidth(across), 0.002);"),
+        "标线边沿没有从 `fwidth(across)` 取像素尺度 ⇒ 近处会重新糊成一片"
+    );
+    assert!(
+        src.contains("smoothstep(0.10 - aa, 0.10 + aa, across)"),
+        "中心虚线没有用 aa 收缩过渡"
+    );
+    assert!(
+        src.contains("smoothstep(0.10 - aa, 0.10 + aa, abs(across - 3.4))"),
+        "车道边线没有用 aa 收缩过渡"
+    );
+    // 反向：旧的固定世界宽度写法不许回来
+    assert!(
+        !src.contains("smoothstep(0.10, 0.22, across)"),
+        "旧的固定世界宽度过渡（0.10..0.22 m）又出现了 —— 那正是「近处糊」的根因"
+    );
+    assert!(
+        !src.contains("smoothstep(0.10, 0.20, abs(across - 3.4))"),
+        "旧的固定世界宽度过渡（车道边线）又出现了"
+    );
+}

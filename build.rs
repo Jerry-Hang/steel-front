@@ -1378,9 +1378,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let along = select(input.world_pos.z, input.world_pos.x, along_z > 0.5);
             // 中心虚线：8 m 一段、5 m 空隙
             let dash = step(0.42, fract(along / 13.0));
-            let center = (1.0 - smoothstep(0.10, 0.22, across)) * dash;
+            // 🔴 **边沿必须在像素空间收窄**（2026-11-20，实测修复）：
+            // 原来把过渡放在**世界空间** 0.12 m 上（固定上下界，不随像素尺度变化），
+            // 近距离时 0.10 m ≈ **44 像素**（1.7 m 眼高、2.5 m 外的 0.2 m 宽车道线）
+            // ⇒ 近处标线糊成一片、远看反而像锐的，观感很怪。
+            // 改成 `±fwidth` 的 1~2 像素过渡：**任何距离都锐利**，且线变细到亚像素时
+            // `aa` 自动变大 ⇒ 不会出现闪烁/摩尔纹（这才是抗锯齿该做的事）。
+            let aa = max(fwidth(across), 0.002);
+            let center = (1.0 - smoothstep(0.10 - aa, 0.10 + aa, across)) * dash;
             // 车道边线：距中心 3.4 m，实线
-            let edge = 1.0 - smoothstep(0.10, 0.20, abs(across - 3.4));
+            let edge = 1.0 - smoothstep(0.10 - aa, 0.10 + aa, abs(across - 3.4));
             let paint = clamp(center + edge * 0.85, 0.0, 1.0);
             zone = mix(zone, vec3<f32>(0.72, 0.71, 0.66), paint * 0.85);
         }
