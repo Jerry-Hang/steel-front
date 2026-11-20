@@ -2409,3 +2409,51 @@ fn road_marking_edge_is_antialiased_in_pixel_space() {
         "旧的固定世界宽度过渡（车道边线）又出现了"
     );
 }
+
+
+/// 🔴 **整个可玩区都在 y=0 的平地上** —— 这是"回滚重放不需要坡度项"的前提（2026-11-20）。
+///
+/// 背景：`net::game::replay_pending`（客户端回滚重放）用的是**纯水平步进**
+/// `step_player_position`，它**不改 y**。这与本地玩家的 `player_body` 物理
+/// （跳跃/坡度/台阶/支撑面）并不是同一个模型 —— 那么重放凭什么还能当参照？
+///
+/// 答案就在这条判据里：`TERRAIN_FLAT_RADIUS = 230` 而城市外缘在 **±222** 内
+/// （见 `renderer.rs:112` 的注释）⇒ **可玩范围内地形恒为 y=0**，坡度项恒等于 0，
+/// 于是"缺坡度"这件事在可玩区里不会产生任何偏差。
+///
+/// ⇒ 如果以后把平坦区改小（或把城市扩到 230 以外），**重放就不再精确**，
+/// 到时必须给 `step_player_position` 补坡度/支撑面项。这条判据就是那个"哨兵"。
+///
+/// 反向验证：把 `TERRAIN_FLAT_RADIUS` 改成 200 ⇒ 立刻红。
+#[test]
+fn play_area_terrain_is_flat_so_replay_needs_no_slope_term() {
+    const PLAY_HALF: f32 = 222.0; // 城市外缘（含四角）
+    let mut worst = 0.0f32;
+    let mut worst_at = (0.0f32, 0.0f32);
+    // 网格采样：步长 11 m，四角与边界都覆盖到（不是只测中心）
+    let mut x = -PLAY_HALF;
+    while x <= PLAY_HALF {
+        let mut z = -PLAY_HALF;
+        while z <= PLAY_HALF {
+            let h = terrain_height(x, z);
+            if h.abs() > worst {
+                worst = h.abs();
+                worst_at = (x, z);
+            }
+            z += 11.0;
+        }
+        x += 11.0;
+    }
+    assert!(
+        worst == 0.0,
+        "可玩区 (±{PLAY_HALF} m) 内地形必须恒为 y=0，实测最大 |h| = {worst} @({}, {}) —— \
+         一旦不为 0，`replay_pending` 的纯水平步进就不再精确，必须同步补坡度/支撑面项",
+        worst_at.0,
+        worst_at.1
+    );
+    // 边界外必须有起伏，否则这条判据在"整张图都被压平"时也会绿（= 恒真）
+    assert!(
+        terrain_height(300.0, 300.0).abs() > 0.0 || terrain_height(260.0, 0.0).abs() > 0.0,
+        "平坦区外应当有丘陵起伏，否则本条判据恒真（无法区分\"真的平坦\"与\"到处都平\"）"
+    );
+}
