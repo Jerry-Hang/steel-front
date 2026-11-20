@@ -4386,3 +4386,33 @@ RV3D_SHOT_AT=6 RV3D_EXIT_AFTER=10 RV3D_CAM='fly:0,1.7,0:45,0'` → `/tmp/steel_f
 钉住 `fwidth(across)` 与 `±aa` 过渡，并**禁止**旧的固定世界宽度写法回来。
 🔴 第一版判据**命中了它自己的注释**（注释里引用了旧字面量）⇒ 改注释措辞后通过。
 同族教训：**扫描类判据必须把自己文档里的示例字面量排除掉**。
+
+### 2026-11-20（续3）：无头长跑一局 + 验证层（覆盖到"死亡 → 重开"，**未到 VICTORY**）
+
+`RV3D_HEADLESS=1 RV3D_AUTOSTART=1 RV3D_MAP=assets/defense_line.toml RV3D_EXIT_AFTER=300
+RV3D_VALIDATION=1 RV3D_AUTO_RESTART=1 RV3D_AUTOFIRE=1`（无窗口、不抢鼠标）。
+
+**实测结果（这轮最重要的数字）**：
+- **VUID = 0**、panic = 0、`device has been lost` = 0 ⇒ 上一轮那个 shader 改动在长跑下也干净；
+- **6 次 死亡 → `autorestart: 死亡 ⇒ 重开本关`**（每约 40 秒一次）⇒ "死亡 + 重开"路径真的跑到了；
+- **VICTORY 0 次** ⇒ `wave == 1`、`enemies == 204` 一直不变，无人操作打不完。
+
+🔴 **第一版长跑（没有 `RV3D_AUTO_RESTART`）什么也没覆盖到**：日志里 `hp=0/100` 之后
+`ai_us=0`、`enemies=204`、`pos=(0.0,0.0)` 全部冻结 300 秒 —— 玩家死了就永远停在结算态，
+**后续波次、换关一次都没跑到**。所以补了一个显式开关（见下）。
+
+**新增 `RV3D_AUTO_RESTART=1`**（`app_update.rs`，**默认关**）：结算态自动推进 ——
+死亡 ⇒ 重开本关；胜利 ⇒ `advance_level()` 进下一关。它是**测试设施**，不是游戏行为变更：
+真实玩家死后仍应停在结算画面等按键。判据 `auto_restart_stays_opt_in`（已反向验证能红）
+钉住它挂在 `env_truthy` 上、且两个分支都在。
+
+**覆盖度诚实结论**：
+| 路径 | 覆盖方式 | 状态 |
+|---|---|---|
+| 启动 → Playing → 战斗 → 死亡 | 本次 300 s 无头长跑（6 次） | ✅ |
+| 死亡 → 重开本关 | 同上（6 次） | ✅ |
+| 换关（`advance_level`） | 既有单测 `advance_level_keeps_the_next_level_number` | ✅（单测级） |
+| 波次清空 → VICTORY → 下一关 | —— | ❌ **无人操作打不完 204 个敌人**，需要真输入 |
+
+⚠️ 另注：本机 `load average` 会到 6+，同一分辨率前后两次 fps 能差 4 倍 ⇒ **任何帧率结论
+都必须逐对交替、报比值与符号一致数**（本轮的 aniso A/B 就是这么做的，见续2）。

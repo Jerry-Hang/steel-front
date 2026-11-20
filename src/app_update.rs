@@ -302,6 +302,34 @@ impl GameApp {
         {
             self.fire_requested = true;
         }
+        // 🔴 `RV3D_AUTO_RESTART=1`：**无人值守长跑**用（2026-11-20）。
+        //
+        // 存在理由：无头长跑（`RV3D_HEADLESS=1` + `RV3D_AUTOSTART=1` + 验证层）没人按键，
+        // 玩家一死就永远停在结算态 —— 实测 300 秒日志里 `hp=0/100`、`ai_us=0`、
+        // `enemies=204` 一直不变 ⇒ **后续波次、换关那几条路径一次都没跑到**。
+        // 而"覆盖波次清空/死亡/换关"正是验收要的东西。
+        //
+        // 语义（与手动一致，不新增游戏逻辑）：死亡 ⇒ 重开本关；胜利 ⇒ 进下一关。
+        // 只在**结算态**触发，进入 Playing 后自然不再命中。
+        static AUTO_RESTART: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *AUTO_RESTART.get_or_init(|| env_truthy("RV3D_AUTO_RESTART")) {
+            match self.game.state() {
+                GameState::GameOver | GameState::Defeat => {
+                    log::info!("autorestart: 死亡 ⇒ 重开本关");
+                    self.game.request_restart();
+                    self.reset_session_transients();
+                }
+                GameState::Victory(_) => {
+                    if self.game.advance_level() {
+                        log::info!("autorestart: 胜利 ⇒ 进入下一关");
+                        self.reset_session_transients();
+                    } else {
+                        log::info!("autorestart: 已通关（最后一关完成）");
+                    }
+                }
+                _ => {}
+            }
+        }
         // 同步光标捕获状态（Playing + 聚焦 = 捕获；菜单/结算/失焦 = 释放）
         self.sync_cursor();
 

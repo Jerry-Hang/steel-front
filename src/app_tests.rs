@@ -1187,3 +1187,31 @@ fn gun_bake_color_keeps_a_readable_gradient() {
         lo
     );
 }
+
+
+/// 🔴 **无人值守重开必须是"显式开关"，不能默认生效**（2026-11-20）。
+///
+/// `RV3D_AUTO_RESTART` 是给**无头长跑**用的钩子（死亡自动重开、胜利自动进下一关），
+/// 让 300 秒无人值守的一局能覆盖"死亡 → 重开"这条路径 —— 之前没它的时候，
+/// 实测日志里 `hp=0/100` 之后一切都停住，后续波次一次都跑不到。
+///
+/// 但它是**测试设施**，绝不能变成默认行为：真实玩家死后应该停在结算画面等按键。
+/// 这条判据钉住"它挂在 `env_truthy` 上"。
+/// 反向验证：把那一行改成无条件 `true` ⇒ 这里立刻红。
+#[test]
+fn auto_restart_stays_opt_in() {
+    let src = include_str!("app_update.rs");
+    assert!(
+        src.contains(r#"env_truthy("RV3D_AUTO_RESTART")"#),
+        "自动重开没有挂在 RV3D_AUTO_RESTART 上 ⇒ 会变成默认行为（玩家死后自己重开）"
+    );
+    // 两个分支都必须存在，否则"胜利 ⇒ 下一关"那条路径又没人覆盖
+    assert!(
+        src.contains("autorestart: 死亡 ⇒ 重开本关"),
+        "死亡分支不见了"
+    );
+    assert!(
+        src.contains("self.game.advance_level()"),
+        "胜利后没有调用 advance_level ⇒ 换关路径失去覆盖"
+    );
+}
