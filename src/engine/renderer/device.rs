@@ -760,7 +760,8 @@ impl Renderer {
             hud_vertex_count: 0,
             hud_render_pass: vk::RenderPass::null(),
             hud_framebuffers: Vec::new(),
-            hud_capacity_quads: 4096,
+            // 容量唯一真源在 `ui::HUD_CAPACITY_QUADS`（判据要拿它跟实测 quad 数比）
+            hud_capacity_quads: crate::ui::HUD_CAPACITY_QUADS,
             gun_vertex_buffer: vk::Buffer::null(),
             gun_vertex_buffer_memory: vk::DeviceMemory::null(),
             gun_index_buffer: vk::Buffer::null(),

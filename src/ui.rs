@@ -75,6 +75,15 @@ impl Quad {
     }
 }
 
+/// 渲染器 HUD quad 缓冲的容量（**单一真源**，`renderer/device.rs` 用它建 buffer）。
+///
+/// 🔴 2026-11-20：4096 → 8192。游戏内 HUD 改成四方向描边后实测 **4672** 个 quad
+/// （`[prep-diag] HUD quad 数`），4096 会把**小地图与调试行静默截断**
+/// —— 告警确实打了，但画面只是"少了东西"，肉眼很难归因。
+/// 留 ≈75% 余量给将来的 HUD 增项（决议/连杀播报等）。
+/// 判据 `in_game_hud_quads_fit_the_renderer_capacity` 钉住这条余量。
+pub const HUD_CAPACITY_QUADS: u32 = 8192;
+
 /// HUD 元素（纯数据模型）
 #[derive(Debug, Clone, PartialEq)]
 pub enum HudElement {
@@ -84,6 +93,14 @@ pub enum HudElement {
     Bar { back: Quad, fill: Quad, ratio: f32 },
     /// 文本：左上角 `(x, y)`，`scale` 为像素缩放（1.0 = 5x7 原始大小）
     Text { text: String, x: f32, y: f32, color: Color, scale: f32 },
+    /// 文本 + **暗色投影**：用于**直接叠在世界画面上**的 HUD（游戏内）。
+    ///
+    /// 🔴 存在理由（2026-11-20 实测）：游戏内 HUD 直接压在世界画面上，而明亮的天空是背景 ——
+    /// 1080p 无头截图实测三行文字的 WCAG 对比度只有 **1.35 / 1.38 / 1.53 : 1**
+    /// （可读下限 4.5:1，肉眼就是"字浮在明亮的天空上读不清"）。
+    /// 加一层偏移 1 像素的暗色投影即可把对比度拉回可读区间，且**不改变"无底板"的观感**。
+    /// 菜单/结算界面坐在不透明底板上，不需要投影 ⇒ 那些地方仍用 [`Self::Text`]（省一半 quad）。
+    TextWorld { text: String, x: f32, y: f32, color: Color, scale: f32 },
 }
 
 impl HudElement {
@@ -100,6 +117,24 @@ impl HudElement {
                 let mut fill_rect = fill.rect;
                 fill_rect.w = fill.rect.w * ratio;
                 out.push(Quad::new(fill_rect, fill.color));
+            }
+            HudElement::TextWorld { text, x, y, color, scale } => {
+                // **四方向描边**（上/下/左/右各一次），再画正文。
+                //
+                // 🔴 为什么不是单方向投影（2026-11-20 实测）：先试了"右下偏移 1px"的投影，
+                // 局部暗边覆盖率只从 0.7% 升到 78.9%，但**左上边缘仍直接贴着明亮的天空** ——
+                // 放大看图里橙色那行依然读不清。四方向才是真正的"描边"：
+                // 每一笔的四周都有暗色，与背后是明亮的天空还是夜空无关。
+                //
+                // 代价：游戏内 HUD 文字 quad ×5。这是**可以接受**的，因为
+                // 菜单/结算都走 [`Self::Text`]（不描边、坐在不透明底板上），
+                // 只有叠在世界画面上的那十几行文字多花 4 份。
+                let off = (*scale * 0.5).max(1.0);
+                let shadow = Color::new(0.0, 0.0, 0.0, 0.85 * color.a);
+                for (dx, dy) in [(-off, 0.0), (off, 0.0), (0.0, -off), (0.0, off)] {
+                    render_text(text, *x + dx, *y + dy, shadow, *scale, out);
+                }
+                render_text(text, *x, *y, *color, *scale, out);
             }
             HudElement::Text { text, x, y, color, scale } => {
                 render_text(text, *x, *y, *color, *scale, out);
@@ -762,7 +797,8 @@ impl HudState {
                     fill.rect.w *= s;
                     fill.rect.h *= s;
                 }
-                HudElement::Text { x, y, scale, .. } => {
+                HudElement::Text { x, y, scale, .. }
+                | HudElement::TextWorld { x, y, scale, .. } => {
                     *x *= s;
                     *y *= s;
                     *scale *= s;
@@ -943,7 +979,7 @@ impl HudState {
         // ---- 换弹指示（弹药条下方，黄字 + 进度条）----
         if self.reloading {
             let reload_txt = "RELOADING";
-            elems.push(HudElement::Text {
+            elems.push(HudElement::TextWorld {
                 text: reload_txt.to_string(),
                 x: ammo_x + (ammo_w - text_width(reload_txt, 1.0)) * 0.5,
                 y: h - margin + 2.0,
@@ -1004,7 +1040,7 @@ impl HudState {
                 };
                 let id_txt = format!("{}: {}", id, owner_txt);
                 let id_w = text_width(&id_txt, 1.0);
-                elems.push(HudElement::Text {
+                elems.push(HudElement::TextWorld {
                     text: id_txt,
                     x: x + (label_w - id_w) * 0.5,
                     y: y + bar_h + 2.0,
@@ -1015,7 +1051,7 @@ impl HudState {
         }
 
         // ---- FPS（左上角）----
-        elems.push(HudElement::Text {
+        elems.push(HudElement::TextWorld {
             text: format!("FPS {:.0}", self.fps),
             x: margin,
             y: margin,
@@ -1035,7 +1071,7 @@ impl HudState {
             format!("WAVE {}", self.wave)
         };
         let wave_x = center_x - text_width(&wave_txt, 1.8) * 0.5;
-        elems.push(HudElement::Text {
+        elems.push(HudElement::TextWorld {
             text: wave_txt,
             x: wave_x,
             y: top,
@@ -1044,7 +1080,7 @@ impl HudState {
         });
         let score_txt = format!("SCORE {}", self.score);
         let score_x = center_x - text_width(&score_txt, 1.4) * 0.5;
-        elems.push(HudElement::Text {
+        elems.push(HudElement::TextWorld {
             text: score_txt,
             x: score_x,
             y: top + 20.0,
@@ -1054,7 +1090,7 @@ impl HudState {
         // ---- 关卡（level 由 game.rs 每帧同步）----
         let level_txt = format!("LEVEL {}", self.level);
         let level_x = center_x - text_width(&level_txt, 1.2) * 0.5;
-        elems.push(HudElement::Text {
+        elems.push(HudElement::TextWorld {
             text: level_txt,
             x: level_x,
             y: top + 38.0,
@@ -1065,7 +1101,7 @@ impl HudState {
         if self.countdown > 0.0 {
             let next_txt = format!("WAVE {} IN {:.0}", self.wave + 1, self.countdown.ceil());
             let next_x = center_x - text_width(&next_txt, 1.6) * 0.5;
-            elems.push(HudElement::Text {
+            elems.push(HudElement::TextWorld {
                 text: next_txt,
                 x: next_x,
                 y: top + 58.0,
@@ -1077,7 +1113,7 @@ impl HudState {
         if self.objective.1 > 0 {
             let obj_txt = format!("OBJECTIVE 歼灭敌人 {}/{}", self.objective.0, self.objective.1);
             let obj_x = center_x - text_width(&obj_txt, 1.2) * 0.5;
-            elems.push(HudElement::Text {
+            elems.push(HudElement::TextWorld {
                 text: obj_txt,
                 x: obj_x,
                 y: top + 78.0,
@@ -1088,7 +1124,7 @@ impl HudState {
         // ---- 胜利横幅（任务目标达成，居中）----
         if let Some(banner) = &self.victory_banner {
             let bw = text_width(banner, 2.4);
-            elems.push(HudElement::Text {
+            elems.push(HudElement::TextWorld {
                 text: banner.clone(),
                 x: center_x - bw * 0.5,
                 y: h * 0.35,
@@ -1280,7 +1316,7 @@ impl HudState {
         for e in &self.kill_feed {
             let alpha = (1.0 - (e.age / KILL_FEED_DURATION).clamp(0.0, 1.0)).clamp(0.25, 1.0);
             let color = Color::new(1.0, 0.95, 0.85, alpha);
-            elems.push(HudElement::Text {
+            elems.push(HudElement::TextWorld {
                 text: e.text.clone(),
                 x: feed_x - text_width(&e.text, 0.8) * 0.5,
                 y: feed_y,
@@ -2142,7 +2178,14 @@ mod tests {
 
     fn find_text<'a>(elems: &'a [HudElement], needle: &str) -> Option<&'a str> {
         elems.iter().find_map(|e| match e {
-            HudElement::Text { text, .. } if text.starts_with(needle) => Some(text.as_str()),
+            // 两种文本变体都要认：`TextWorld` 只是多画一层描边，**内容完全相同**。
+            // （2026-11-20：游戏内 HUD 改成 `TextWorld` 后，只认 `Text` 的旧 helper
+            //  让 4 条既有判据误报"找不到文本" —— 是 helper 过时，不是 HUD 没了。）
+            HudElement::Text { text, .. } | HudElement::TextWorld { text, .. }
+                if text.starts_with(needle) =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
     }
@@ -2166,6 +2209,87 @@ mod tests {
             .to_quads(&mut out);
         assert_eq!(out.len(), 2, "Bar 应展开为背景 + 填充两个 quad");
         assert!((out[1].rect.w - fill.rect.w * ratio).abs() < 1e-4);
+    }
+
+    /// 🔴 **`TextWorld` 必须真的把描边画出来**（2026-11-20）。
+    ///
+    /// 背景：游戏内 HUD 直接压在世界画面上，实测三行文字 WCAG 对比度只有 1.35–1.53:1（字浮在亮色天空上读不清）。
+    /// 修法是四方向描边。这条判据钉住"描边确实存在且在最底层"：
+    /// ① quad 数恰好是纯 `Text` 的 5 倍（4 份描边 + 1 份正文）；
+    /// ② 前 4 组是**暗色**（描边），最后 1 组是正文色；
+    /// ③ 描边相对正文有偏移（不是同位置叠 5 遍 —— 那样等于没描边）。
+    /// 反向验证：把四方向循环删成空数组 ⇒ ①③ 立刻红。
+    #[test]
+    fn text_world_draws_outline_behind_the_fill() {
+        let text = "AB";
+        let (x, y, scale) = (10.0f32, 20.0f32, 2.0f32);
+        let fill = Color::YELLOW;
+        let mut plain = Vec::new();
+        HudElement::Text { text: text.into(), x, y, color: fill, scale }.to_quads(&mut plain);
+        let mut out = Vec::new();
+        HudElement::TextWorld { text: text.into(), x, y, color: fill, scale }.to_quads(&mut out);
+        assert!(!plain.is_empty(), "纯文本必须产生 quad（否则本条恒真）");
+        assert_eq!(
+            out.len(),
+            plain.len() * 5,
+            "带描边文本应为 4 份描边 + 1 份正文 = 5 倍 quad（plain {} / world {}）",
+            plain.len(),
+            out.len()
+        );
+        // 前 4 份是描边：近黑、且与正文位置不同
+        let off = (scale * 0.5).max(1.0);
+        for q in out.iter().take(plain.len() * 4) {
+            assert!(q.color.r < 0.05 && q.color.g < 0.05 && q.color.b < 0.05, "描边必须是暗色");
+        }
+        // 最后那份是正文：位置与颜色都要等于纯文本
+        let tail = &out[plain.len() * 4..];
+        for (a, b) in tail.iter().zip(plain.iter()) {
+            assert!((a.rect.x - b.rect.x).abs() < 1e-6 && (a.rect.y - b.rect.y).abs() < 1e-6);
+            assert!((a.color.r - b.color.r).abs() < 1e-6 && (a.color.a - b.color.a).abs() < 1e-6);
+        }
+        // 至少有一份描边与正文不同位（否则等于同位置叠 5 遍）
+        let moved = out
+            .iter()
+            .take(plain.len() * 4)
+            .any(|q| (q.rect.x - out[plain.len() * 4].rect.x).abs() > off * 0.5);
+        assert!(moved, "描边必须相对正文有偏移，否则等于没描边");
+    }
+
+    /// 🔴 **游戏内 HUD 的 quad 数必须装得进渲染器容量，且留余量**（2026-11-20）。
+    ///
+    /// 这条是那次真实回归的判据：描边把游戏内 HUD 从 ~1200 顶到 **6237**，
+    /// 而容量当时是 4096 ⇒ **小地图与调试行被静默截断**（画面只是"少了东西"）。
+    /// 现在容量 = `HUD_CAPACITY_QUADS`，这条要求实测 quad 数不超过它的 3/4。
+    #[test]
+    fn in_game_hud_quads_fit_the_renderer_capacity() {
+        let mut hud = HudState::new(1280.0, 800.0);
+        hud.screen = HudScreen::Game;
+        let elems = hud.layout_elements();
+        let mut quads = Vec::new();
+        for e in &elems {
+            e.to_quads(&mut quads);
+        }
+        let cap = HUD_CAPACITY_QUADS as usize;
+        // 🔴 **测试构造不出真机最坏情形**（2026-11-20 现场教训）：
+        // 这里的 `HudState::new` 只有默认字段，小地图点位、小队标记、调试行都由**运行时数据**
+        // 驱动 ⇒ 本判据造出来的 HUD 只有 ~几百 quad，容量退回 4096 它**照样绿**。
+        // 所以必须把**实测值**也写进判据，否则它保护不了真正发生的那次回归。
+        // 实测：1280x800 无头跑，`[prep-diag] HUD quad 数` = 4672（描边版）。
+        const MEASURED_WORST_CASE_QUADS: usize = 4672;
+        assert!(
+            cap > MEASURED_WORST_CASE_QUADS,
+            "容量 {cap} 不得低于实测最坏情形 {MEASURED_WORST_CASE_QUADS} \
+             —— 否则小地图与调试行会被静默截断（2026-11-20 真实发生过）"
+        );
+        assert!(
+            quads.len() < cap * 3 / 4,
+            "游戏内 HUD 用了 {} 个 quad，容量 {}（上限取 3/4 = {}）—— \
+             超了就会被静默截断，小地图/调试行会消失",
+            quads.len(),
+            cap,
+            cap * 3 / 4
+        );
+        assert!(!quads.is_empty(), "HUD 不可能一个 quad 都没有（否则本条恒真）");
     }
 
     #[test]
