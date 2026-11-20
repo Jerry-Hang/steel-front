@@ -1215,3 +1215,35 @@ fn auto_restart_stays_opt_in() {
         "胜利后没有调用 advance_level ⇒ 换关路径失去覆盖"
     );
 }
+
+
+/// 🔴 **自动瞄准 / 自动换弹也必须是显式开关**（2026-11-20）。
+///
+/// 它们与 `RV3D_AUTO_RESTART` 同属**无人值守诊断设施**，默认必须关 ——
+/// 玩家不该被自动接管视角，也不该自动换弹。
+///
+/// 为什么要有这两个（实测数据）：只开 `RV3D_AUTOFIRE` 时弹道永远指向相机正前方，
+/// 而 NPC 从 40–80 m 的环上走来 ⇒ 240 s 无人值守里**一次波次都清不掉**；
+/// 补了瞄准后开始有击杀（`score=10` 出现 34 次），但打满 30 发就哑火
+/// （换弹要按键）⇒ 6 个敌人只杀掉 2 个就被围死。补上自动换弹后火力不断，
+/// 但站桩自动玩家的**能力上限**就是清不掉 6 个（见 docs/PROGRESS.md，这是设施边界不是缺陷）。
+#[test]
+fn auto_fire_helpers_stay_opt_in() {
+    let src = include_str!("app_update.rs");
+    assert!(
+        src.contains(r#"env_truthy("RV3D_AUTO_AIM")"#),
+        "自动瞄准没有挂在 RV3D_AUTO_AIM 上 ⇒ 玩家视角会被自动接管"
+    );
+    assert!(
+        src.contains("self.game.magazine_is_empty()"),
+        "没有自动换弹判定 ⇒ AUTOFIRE 打满一匣就哑火（实测只杀掉 2/6 就停火）"
+    );
+    assert!(
+        src.contains("self.game.request_reload()"),
+        "弹匣空了却没有真的请求换弹"
+    );
+    assert!(
+        src.contains("fn auto_aim_at_nearest_npc"),
+        "自动瞄准的实现不见了"
+    );
+}

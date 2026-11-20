@@ -296,10 +296,26 @@ impl GameApp {
             self.game.diag_place_npc([nx, ny, nz]);
         }
         // RV3D_AUTOFIRE=1：自动开火（诊断射击链路：fire 是否发射、弹道是否命中）
+        //
+        // 🔴 2026-11-20 补**自动瞄准**（`RV3D_AUTO_AIM=1`）：只开火不瞄准的话，弹道永远指向
+        // 相机正前方，而 NPC 是从 40–80 m 的**环上**走过来的 —— 实测无人值守 240 s
+        // 一次波次都清不掉（`wave 1 spawned 6 enemies` 反复重开）。加上瞄准之后才能覆盖
+        // "清空波次 → 胜利 → 换关"这条路径。
+        // 两者都**默认关**，只影响无人值守诊断跑，不改变玩家体验。
         static AUTO_FIRE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static AUTO_AIM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *AUTO_FIRE.get_or_init(|| env_truthy("RV3D_AUTOFIRE"))
             && self.game.state() == GameState::Playing
         {
+            if *AUTO_AIM.get_or_init(|| env_truthy("RV3D_AUTO_AIM")) {
+                self.auto_aim_at_nearest_npc();
+            }
+            // 🔴 2026-11-20：**弹匣空了要自己换弹**。不加这一步的话 AUTOFIRE 打满 30 发
+            // 就彻底哑火（换弹要按键），实测无人值守里 6 个敌人只杀掉 2 个就停火、然后被围死
+            // —— 这跟瞄准没关系，是"火力断了"。换弹是玩家本来就有的动作，这里只是替按一下键。
+            if self.game.magazine_is_empty() {
+                self.game.request_reload();
+            }
             self.fire_requested = true;
         }
         // 🔴 `RV3D_AUTO_RESTART=1`：**无人值守长跑**用（2026-11-20）。
@@ -636,5 +652,43 @@ impl GameApp {
             );
             self.last_cam_log = Instant::now();
         }
+    }
+}
+
+
+impl GameApp {
+    /// 把相机朝向最近的可攻击 NPC（仅 `RV3D_AUTO_AIM=1` 时由 AUTOFIRE 调用）。
+    ///
+    /// 用**与开火同源**的约定：`Camera::forward()` = `-direction()`，
+    /// 水平前向 = `(-sin yaw, -cos yaw)`（见 `apply_net_player_input` 的长注释）。
+    /// ⇒ `yaw = atan2(-dx, -dz)`，`pitch = asin(dy / dist)`。
+    /// 只给无人值守诊断用；不参与任何玩家路径。
+    fn auto_aim_at_nearest_npc(&mut self) {
+        let Some((dx, dy, dz)) = self
+            .game
+            .npcs
+            .iter()
+            .filter(|n| n.hp > 0.0)
+            .map(|n| {
+                (
+                    n.position[0] - self.camera.position().x,
+                    n.position[1] - self.camera.position().y,
+                    n.position[2] - self.camera.position().z,
+                )
+            })
+            .min_by(|a, b| {
+                let la = a.0 * a.0 + a.2 * a.2;
+                let lb = b.0 * b.0 + b.2 * b.2;
+                la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        else {
+            return;
+        };
+        let horiz = (dx * dx + dz * dz).sqrt();
+        if horiz < 1e-3 {
+            return;
+        }
+        self.camera.yaw = (-dx).atan2(-dz);
+        self.camera.pitch = (dy / horiz).atan().clamp(-0.9, 0.9);
     }
 }

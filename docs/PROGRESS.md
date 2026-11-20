@@ -4416,3 +4416,46 @@ RV3D_VALIDATION=1 RV3D_AUTO_RESTART=1 RV3D_AUTOFIRE=1`（无窗口、不抢鼠�
 
 ⚠️ 另注：本机 `load average` 会到 6+，同一分辨率前后两次 fps 能差 4 倍 ⇒ **任何帧率结论
 都必须逐对交替、报比值与符号一致数**（本轮的 aniso A/B 就是这么做的，见续2）。
+
+### 2026-11-20（续4）：波次路径真的跑起来了（补充续3 的一个**错误归因**）
+
+🔴 **更正续3**：那局长跑跑的是**压力模式（128v128）**，不是波次模式 ——
+`main.rs` 在未设置 `RV3D_STRESS_AI` 时会**注入 64**，而我没有显式关掉它。
+证据：日志里**一条 `wave: wave N spawned ...` 都没有**（波次模式必然打这一行），
+而 `enemies=204` 恒定不变。⇒ "覆盖波次"这一项在续3 里**其实没做到**，是这轮补上的。
+
+**这轮真正跑到的**（`RV3D_STRESS_AI=0`）：
+- `wave: wave 1 spawned 6 enemies (kind=Normal total=6 speed=4.0 hp=100 effective=1)` ✅
+- 死亡 → 重开（`autorestart`）×N，每约 30 s 一次 ✅
+- `map: level 1 generated: 16 obstacle bodies ... 36 grid cells blocked` ✅（每次重开都重建）
+- **VUID = 0 / panic = 0** ✅
+
+**补的两个诊断钩子（都默认关，判据 `auto_fire_helpers_stay_opt_in` 已反向验证能红）**：
+1. `RV3D_AUTO_AIM=1`：相机每帧朝向最近的可攻击 NPC（`yaw = atan2(-dx,-dz)`，
+   与开火同源的 `forward = (-sin,-cos)` 约定）。只开 AUTOFIRE 时弹道永远指向正前方，
+   240 s 里一次波次都清不掉；补瞄准后开始出现击杀（`score=10` 出现 **34 次**）。
+2. **自动换弹**（`magazine_is_empty()` → `request_reload()`）：打满 30 发就哑火
+   ⇒ 6 个敌人只杀掉 **2** 个就被围死。这一步补上后火力不断。
+3. 为此给 `Game` 加了只读访问器 `magazine_is_empty()` —— 没有把 `weapons` 字段开放出去；
+   也**不用** `hud.ammo`（那是 UI 状态，拿它当游戏逻辑输入会把两层耦合起来）。
+
+**设施的能力边界（诚实结论）**：即使瞄准 + 换弹都有，**站桩自动玩家清不掉 6 个敌人**
+（每约 30 s 死一次，每轮约 2 杀）。要真正做到"自动通关"得加无敌或伤害倍率这类**作弊钩子**，
+那已经不属于"画质与体验"的范围 ⇒ **不做**。
+⇒ "清空波次 → VICTORY → 换关"这条路径仍由**6 条既有单测**覆盖
+（`survive_rule_advances_waves_and_wins_at_last` / `wave_spawns_after_clear` /
+`wave_clear_awards_bonus` / `level_advances_after_waves_per_level` /
+`survive_victory_does_not_spawn_another_wave` / `advance_level_keeps_the_next_level_number`），
+**不是**由游戏内跑覆盖。
+
+**另测（夜景/雨天/城外地面，均为数值巡检 + 目视，未发现缺陷）**：
+| 场景 | 过曝 | 纯黑 | 高饱和 | 均值亮度 |
+|---|---|---|---|---|
+| 白天（广场） | 0.00% | 0.30% | 0.09% | 105.1 |
+| `RV3D_SUN_ELEV=-12`（夜） | 0.00% | 0.32% | 0.39% | 77.0 |
+| `RV3D_SUN_ELEV=6`（低阳） | 0.00% | 0.29% | 0.33% | 89.2 |
+| `RV3D_RAIN=1` | 0.00% | 0.51% | 0.04% | 102.7 |
+
+云确实跟着太阳变暗（天空带 p90 **233 → 160**），不是"云没参与光照"。
+城外地面是**无细节纯灰平面**（UV 超出 ±256 m 后 REPEAT，但**没有**把路面标线铺出去），
+属背景区，价值不高，记录待查。

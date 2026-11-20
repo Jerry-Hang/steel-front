@@ -444,6 +444,15 @@ impl Game {
         self.weapons.switch_progress()
     }
     /// 请求换弹（R 键）；已在换弹/满弹匣/无备弹/切枪中时无副作用
+    /// 当前武器的弹匣是否已空（供**诊断跑**用：`RV3D_AUTOFIRE` 需要替玩家按换弹键）。
+    ///
+    /// 单独暴露这个只读判定而不是把 `weapons` 字段放出去：调用方只需要这一个布尔，
+    /// 开放整个字段等于让外面能改武器状态。`hud.ammo` 不能用 —— 那是 UI 状态，
+    /// 每帧同步一次，拿它当游戏逻辑输入会把 UI 与逻辑耦合起来。
+    pub(crate) fn magazine_is_empty(&self) -> bool {
+        self.weapons.active_firearm_ref().magazine() == 0
+    }
+
     pub(crate) fn request_reload(&mut self) {
         if self.weapons.is_switching() {
             return;
