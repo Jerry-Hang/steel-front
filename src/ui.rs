@@ -1973,6 +1973,74 @@ pub fn glyph_cjk(ch: char) -> Option<[u16; 12]> {
     crate::engine::font_cjk::glyph(ch)
 }
 
+/// **排版标点 → ASCII 的等价替换**（2026-11-20，用户实机截图报的缺陷）。
+///
+/// 🔴 症状：`蓝方 获胜（兵力耗尽）— 10 秒后下一轮` 在游戏里显示成
+/// `蓝方 获胜（兵力耗尽）? 10 秒后下一轮` —— 破折号变成了问号。
+///
+/// 机制：`render_text` 只分「CJK」和「其它」两条路，而 `glyph()` 对 **> 0x7E 的码点一律
+/// 回退 `'?'`**。`is_cjk_char` 又**不含通用标点区**（U+2010–U+2027 等）⇒
+/// 破折号/乘号/间隔号/度数/正负号/箭头这些**排版符号全部渲染成问号**。
+///
+/// 为什么在这里替换、而不是补字模：字模表是 `tools/extract_cjk_glyphs.py` 生成的，
+/// **源字体未入库**（AGENTS 铁律）⇒ 不能为几个符号重建整张表；改文案又治不了下一处。
+/// ⇒ 做等价替换：视觉效果与原文一致到什么程度取决于符号，但**绝不会变成问号**。
+///
+/// 判据：`ui_text_has_no_unrenderable_chars`（含 `char_renders` 与真实横幅文案）。
+pub fn typographic_fallback(ch: char) -> Option<char> {
+    Some(match ch {
+        '\u{2014}' | '\u{2013}' | '\u{2212}' => '-', // — – −
+        '\u{00D7}' => 'x',                            // ×
+        '\u{00B7}' | '\u{2022}' => '.',              // · •
+        '\u{2026}' => '.',                            // …
+        '\u{00B0}' => 'o',                            // °
+        '\u{00B1}' => '+',                            // ±
+        '\u{00B2}' => '2',                            // ²
+        '\u{00B5}' => 'u',                            // µ
+        '\u{2265}' => '>',                            // ≥
+        '\u{2264}' => '<',                            // ≤
+        '\u{2248}' => '~',                            // ≈
+        '\u{2192}' => '>',                            // →
+        '\u{21D2}' => '>',                            // ⇒
+        '\u{2190}' => '<',                            // ←
+        '\u{2018}' | '\u{2019}' => '\'',            // ‘ ’
+        '\u{201C}' | '\u{201D}' => '"',              // “ ”
+        '\u{2460}'..='\u{2468}' => {
+            // ①..⑨ → 1..9（圈号在 UI 里用作序号）
+            char::from_u32('1' as u32 + (ch as u32 - 0x2460)).unwrap_or('?')
+        }
+        _ => return None,
+    })
+}
+
+/// 这个字符能否被**画成有意义的东西**（= 不会变成 `?`）。
+///
+/// 与 `render_text` 的判定**同源**：ASCII 可打印 → 可以；CJK 且字模在表里 → 可以；
+/// 否则看 [`typographic_fallback`] 有没有映射。判据用这个函数，而不是另写一套规则。
+pub fn char_renders(ch: char) -> bool {
+    if (' '..='~').contains(&ch) {
+        return true;
+    }
+    if is_cjk(ch) && glyph_cjk(ch).is_some() {
+        return true;
+    }
+    typographic_fallback(ch).is_some()
+}
+
+/// 一串文案里**会被画成 `?`** 的字符（去重、保序）。空 = 全都能正确显示。
+///
+/// 存在的理由：`?` 是**静默降级** —— 画面只是多了一个问号，没有任何日志、没有任何测试会红。
+/// 把判定做成可调用的函数，判据才能直接问"这段文案有没有问题"。
+pub fn unrenderable_chars(text: &str) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    for ch in text.chars() {
+        if !char_renders(ch) && !out.contains(&ch) {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// 是否中文字符（统一表意/扩展区/全角标点等完整范围，见 font_cjk::is_cjk_char）
 ///
 /// 🔴 同上一条：非 Windows 分支曾经**只覆盖 2 个区间**（统一表意 + CJK 标点），
@@ -2103,14 +2171,24 @@ pub fn render_text(text: &str, x: f32, y: f32, color: Color, scale: f32, out: &m
                     }
                 }
             } else {
-                // 字体缺失：回退 '?'（ASCII 路径）
-                let cols = glyph('?');
+                // 字模缺失：先试排版标点的等价替换，实在没有才回退 '?'
+                let cols = match typographic_fallback(ch) {
+                    Some(ascii) => glyph(ascii),
+                    None => glyph('?'),
+                };
                 merge_vertical_runs(&cols, cx, y, scale, color, out);
             }
             // 中文字距比英文多 1 逻辑像素：汉字笔画密，同字距会显得粘连
             cx += (12.0 * 0.714 + 1.0) * scale;
         } else {
-            let cols = glyph(ch);
+            // 🔴 非 ASCII 的**排版标点**先做等价替换（2026-11-20）：`glyph()` 对 >0x7E 的
+            // 码点一律回退 `'?'`，破折号/乘号/间隔号因此全变成问号（实机截图确认过）。
+            let drawn = if ch.is_ascii() {
+                ch
+            } else {
+                typographic_fallback(ch).unwrap_or(ch)
+            };
+            let cols = glyph(drawn);
             merge_vertical_runs(&cols, cx, y, scale, color, out);
             cx += (FONT_COLS as f32 + FONT_SPACING) * scale;
         }
@@ -2290,6 +2368,44 @@ mod tests {
             cap * 3 / 4
         );
         assert!(!quads.is_empty(), "HUD 不可能一个 quad 都没有（否则本条恒真）");
+    }
+
+    /// 🔴 **UI 文案里不许有"会被画成 `?`"的字符**（2026-11-20，用户实机截图报的缺陷）。
+    ///
+    /// 症状：`蓝方 获胜（兵力耗尽）— 10 秒后下一轮` 显示成 `……（兵力耗尽）? 10 秒……`。
+    /// 根因：`glyph()` 对 >0x7E 的码点一律回退 `'?'`，而 `is_cjk_char` 不含通用标点区
+    /// ⇒ 破折号/乘号/间隔号/度数全部变成问号，**静默且无日志**。
+    ///
+    /// 这条判据直接拿**真实文案**问"有没有问题"，而不是另写一套规则。
+    /// 反向验证：把 `typographic_fallback` 里 `'\u{2014}'` 那一项删掉 ⇒ 立刻红。
+    #[test]
+    fn ui_text_has_no_unrenderable_chars() {
+        // 真实文案（从源码原位抄下来的，不是编的）
+        let cases = [
+            "蓝方 获胜（兵力耗尽）— 10 秒后下一轮",
+            "红方 获胜（兵力耗尽）— 10 秒后下一轮",
+            "平局 获胜（兵力耗尽）— 10 秒后下一轮",
+            "AK-12M 风暴 (7.62×39mm) [连发]",
+            "OBJECTIVE 消灭敌人 0/128",
+            "HP 100/100",
+        ];
+        for c in cases {
+            let bad = unrenderable_chars(c);
+            assert!(
+                bad.is_empty(),
+                "文案「{c}」里有 {} 个字符会被画成 `?`：{bad:?}",
+                bad.len()
+            );
+        }
+        // 未知字符仍应回退 '?'（这条保证上一条不是因为"什么都算能渲染"而恒真）
+        assert!(
+            !char_renders('\u{1F600}'),
+            "表情符号没有字模，必须判为不可渲染（否则本判据恒真）"
+        );
+        // 已覆盖的排版标点逐个验证（不是只测整串）
+        for ch in ['—', '–', '−', '×', '·', '…', '°', '±', '²', 'µ', '≥', '≤', '≈', '→', '①', '⑨'] {
+            assert!(char_renders(ch), "排版标点 {ch:?} 应当有等价替换，否则会变成问号");
+        }
     }
 
     #[test]
