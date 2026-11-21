@@ -339,6 +339,17 @@ impl GameApp {
                 let (x, z) = (pos.x + fwd.x * 8.0, pos.z + fwd.z * 8.0);
                 let y = crate::engine::renderer::terrain_height_at(x, z) + 1.2;
                 self.game.spawn_explosion([x, y, z], 8.0, 0.0, false);
+                // 🔴 `RV3D_BOOM_NO_SHAKE=1`：**关掉爆炸触发的屏幕抖动**（视觉 A/B 专用）。
+                //
+                // 存在理由（2026-11-21 实测，教训 27 的又一形态）：8m 处引爆会落在
+                // `SHAKE_RADIUS` 内 ⇒ `shake_timer` 被拉满 ⇒ **整帧都在晃**。
+                // 于是"改动像素占比"这个指标量到的主要是**抖动**而不是爆炸多大：
+                // 逐层置零时四层加起来只解释 ~1.1 个百分点，而总数是 12.45%
+                // —— 差额全是抖动把整个画面挪了位。
+                // 这个开关只清抖动，不改爆炸几何，A/B 才只反映"爆炸占多少屏幕"。
+                if crate::syscfg::flag("RV3D_BOOM_NO_SHAKE") {
+                    self.game.clear_shake();
+                }
             }
         }
         // 🔴 `RV3D_AUTO_RESTART=1`：**无人值守长跑**用（2026-11-20）。

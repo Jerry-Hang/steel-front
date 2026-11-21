@@ -646,6 +646,13 @@ impl Game {
     }
     /// 渲染与路径追踪应绘制的全部几何 = 障碍 + 装饰件（见 [`LevelMap::decor`]）。
     /// 顺序恒为 obstacles 在前、decor 在后，所以 marker 下标与刚体下标在前 N 个一致。
+    /// 清掉屏幕抖动（**只给视觉 A/B 诊断用**，见 `app_update` 的 `RV3D_BOOM_NO_SHAKE`）。
+    ///
+    /// 为什么需要：爆炸在 8m 内会拉满 `shake_timer` ⇒ 整帧位移 ⇒ "改动像素占比"量到的是抖动。
+    pub(crate) fn clear_shake(&mut self) {
+        self.shake_timer = 0.0;
+    }
+
     pub(crate) fn render_geometry(&self) -> impl Iterator<Item = &MapObstacle> {
         self.map.render_geometry()
     }
