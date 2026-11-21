@@ -2457,3 +2457,43 @@ fn play_area_terrain_is_flat_so_replay_needs_no_slope_term() {
         "平坦区外应当有丘陵起伏，否则本条判据恒真（无法区分\"真的平坦\"与\"到处都平\"）"
     );
 }
+
+
+/// 🔴 **分桶剔除的余量必须足够大**（2026-11-21，用户实机截图："画面边缘剔除过头"）。
+///
+/// 症状：转视角时几何在**屏幕左右边缘**整块跳进跳出。
+/// 取证（无头 A/B，`RV3D_NO_BIN_CULL=1` 当真值，1280×800，三点机位）：
+///
+/// | 道具桶余量 | 与"无剔除"总差异 | **右 15% 边缘** |
+/// |---|---|---|
+/// | 2 m | 1.99% | **12.27%** |
+/// | 6 m | 1.99% | 12.27% |
+/// | 12 m | 2.00% | 12.27% |
+/// | 30 m | 0.04% | **0.00%** |
+///
+/// ⇒ 差异**只出现在边缘**，且要 **>12 m** 才消失：被剔掉的桶其**中心离侧平面十几米**，
+/// 而桶里仍有几何在画面内 ⇒ 桶剔除球的半径**低估了实际绘制的几何范围**。
+/// 最可能的原因：剔除用主 LOD 集的 `prop_bins`，而远处桶是用 `lod_sets[1]/[2]` 的缓冲画的，
+/// 两套 LOD 的 AABB 不同（`tree_oak` 5.54 → `tree_oak_lod1` **5.65**，代理反而更宽）。
+///
+/// 正确解法 = 按 bin 下标取**所有 LOD 集 AABB 的并集**当剔除球（那样余量可退回 2~10 m）。
+/// 在做到那一步之前，先把实测足够的余量**钉死**，禁止有人为了省 draw call 把它调小。
+///
+/// 反向验证：把 30.0 改回 2.0 ⇒ 立刻红。
+#[test]
+fn prop_bin_cull_margin_covers_lod_extent_mismatch() {
+    let src = include_str!("record.rs");
+    assert!(
+        src.contains("bin_visible(bin, &self.frame_frustum, 30.0)"),
+        "道具桶剔除余量必须是 30.0（实测 2/6/12 全部留下 12% 的边缘剔除裂缝）"
+    );
+    assert!(
+        src.contains("bin_visible(bin, &self.frame_frustum, 10.0)"),
+        "chunk 剔除余量必须是 10.0（一块 40m 见方，余量太小会整块跳进跳出）"
+    );
+    // 防止有人只改一处：两个余量不能在源码里变成同一个数（那意味着其中一条被误改）
+    let props = src.matches("frame_frustum, 30.0").count();
+    let chunks = src.matches("frame_frustum, 10.0").count();
+    assert_eq!(props, 1, "道具桶余量应恰好出现在 1 处，实际 {props}");
+    assert_eq!(chunks, 1, "chunk 余量应恰好出现在 1 处，实际 {chunks}");
+}

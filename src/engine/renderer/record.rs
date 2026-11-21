@@ -737,8 +737,28 @@ impl Renderer {
                     let far_dist = crate::syscfg::parse::<f32>("RV3D_PROP_LOD_DIST2").unwrap_or(200.0);
                     for (bi, bin) in self.prop_bins.iter().enumerate() {
                         // `RV3D_NO_BIN_CULL=1` 关掉分桶剔除，用于排查"边缘整块消失/变白"。
+                        // 🔴 余量 **2m → 30m**（2026-11-21，用户实机截图："画面边缘剔除过头"）。
+                        //
+                        // 取证（无头 A/B，`RV3D_NO_BIN_CULL=1` 当真值，三点机位 1280×800）：
+                        // | 道具桶余量 | 与"无剔除"的总差异 | **右 15% 边缘** |
+                        // |---|---|---|
+                        // | 2 m | 1.99% | **12.27%** |
+                        // | 6 m | 1.99% | 12.27% |
+                        // | 12 m | 2.00% | 12.27% |
+                        // | 30 m | 0.04% | **0.00%** |
+                        // 另一个机位镜像出现（左 15% 8.08%）。
+                        // ⇒ 差异**只出现在左右边缘**，且需要 >12m 的余量才消失 ——
+                        // 说明被剔掉的桶，其**中心离侧平面有十几米**，而桶里仍有几何在画面内
+                        // ⇒ 桶的剔除球半径**低估了实际绘制的几何范围**。
+                        //
+                        // 最可能的原因（**下一步要正面解决的那条**）：剔除用的是主 LOD 集的
+                        // `prop_bins`，而远处桶实际是拿 `lod_sets[1]/[2]` 的缓冲画的；
+                        // 两套 LOD 的 AABB 不一定相同（`tree_oak` 5.54 → `tree_oak_lod1` **5.65**，
+                        // 代理反而更宽）。正确做法 = 按 bin 下标取**所有 LOD 集 AABB 的并集**当剔除球，
+                        // 那样余量就能退回 2~10m。当前先按"正确性优先"取实测足够的 30m
+                        // （桶是 40m 格，多画几块的代价远小于看得见的剔裂缝 —— 与 chunk 那条同理由）。
                         if !crate::syscfg::flag("RV3D_NO_BIN_CULL")
-                            && !crate::engine::props::bin_visible(bin, &self.frame_frustum, 2.0)
+                            && !crate::engine::props::bin_visible(bin, &self.frame_frustum, 30.0)
                         {
                             continue;
                         }
