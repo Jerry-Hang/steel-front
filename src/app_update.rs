@@ -318,6 +318,29 @@ impl GameApp {
             }
             self.fire_requested = true;
         }
+        // `RV3D_BOOM_AT=<秒>`：在指定时刻于相机正前方 8 m 生成一发爆炸（**视觉 A/B 专用**）。
+        //
+        // 存在理由：用户报"爆炸是个巨大的橙色多面体"。要把它做成可量化的修复，
+        // 必须先能在无头渲染里**稳定复现**同一帧。这个钩子配合 `RV3D_SHOT_AT=<秒+0.1>`
+        // 就能截到火球膨胀的第 1~3 帧，A/B 两版用同一机位、同一时刻，差异只来自火球几何。
+        // 伤害传 0、击退 false ⇒ 只出视觉，不改玩法状态。
+        // 默认关（不设这个变量就完全不进这条分支）。
+        // ⚠️ `RV3D_BOOM_AT=<周期秒>` 是**周期**（不是"只发一次"）：火球寿命只有 0.35 s，
+        // 只发一次几乎不可能恰好截到（实测三次运行全部错过）。周期 0.20 s ⇒ 任意一帧都有一发。
+        static BOOM_PERIOD: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+        static NEXT_BOOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if let Some(period) = *BOOM_PERIOD.get_or_init(|| crate::syscfg::parse::<f32>("RV3D_BOOM_AT")) {
+            use std::sync::atomic::Ordering;
+            let next = f32::from_bits(NEXT_BOOM.load(Ordering::Relaxed));
+            if self.game.time >= next {
+                NEXT_BOOM.store((self.game.time + period.max(0.05)).to_bits(), Ordering::Relaxed);
+                let pos = self.camera.position();
+                let fwd = self.camera.forward();
+                let (x, z) = (pos.x + fwd.x * 8.0, pos.z + fwd.z * 8.0);
+                let y = crate::engine::renderer::terrain_height_at(x, z) + 1.2;
+                self.game.spawn_explosion([x, y, z], 8.0, 0.0, false);
+            }
+        }
         // 🔴 `RV3D_AUTO_RESTART=1`：**无人值守长跑**用（2026-11-20）。
         //
         // 存在理由：无头长跑（`RV3D_HEADLESS=1` + `RV3D_AUTOSTART=1` + 验证层）没人按键，

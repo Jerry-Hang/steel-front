@@ -255,39 +255,69 @@ impl GameApp {
         let r = ex.radius;
         // ① 火球核：亮黄白，快速膨胀 + 快速淡出（0-0.35 寿命为主）；半透明球形
         let fireball_t = (t * 2.8).min(1.0);
-        let fb_s = r * (0.2 + 1.2 * fireball_t);
+        // 🔴 尺寸（2026-11-21 用户实机截图："爆炸是个巨大的橙色多面体"）：
+        // 旧值 `r * (0.2 + 1.2 t)` 在 `r = 8`（`GRENADE_EXPLOSION_RADIUS`）时**半径到 11.2 m**
+        // —— marker 球模板半幅是 1.0，所以那是**直径 22 m 的不透明橙球**，大半埋在土里，
+        // 露出的穹顶占掉画面 **25.75%**（无头 A/B 实测，包围盒 1049×584 px）。
+        // 火球是"一闪"，不是一块岩石：压到 0.26r（≈2 m 半径）。
+        let fb_s = r * (0.05 + 0.10 * fireball_t);
         let mut out = vec![engine::renderer::WorldMarker {
             model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.2, cz))
                 * glam::Mat4::from_scale(glam::Vec3::splat(fb_s)),
+            // 整体随年龄变暗：自发光路径没有 alpha 可淡出（`tint.w` 是分支选择器），
+            // 所以"淡出"只能靠**把颜色压向黑**。旧写法只压 G/B、R 恒 1.0 ⇒ 尾段仍是一块
+            // 饱和橙色（也是在截图里最显眼的那部分）。
             tint: [
-                1.0,
-                0.85 * (1.0 - fireball_t) + 0.2,
+                1.0 * (1.0 - 0.75 * fireball_t),
+                0.85 * (1.0 - fireball_t) + 0.2 * (1.0 - fireball_t),
                 0.35 * (1.0 - fireball_t),
                 0.0, // tint.w = 火（build.rs 体积光晕分支选择器）
             ],
         }];
         // ② 贴地冲击波环：扁球体（球体几何压扁）沿地面水平扩散 + 高度衰减，半透明
-        let ring_s = r * (0.4 + 1.6 * t);
-        let ring_h = (1.1 * (1.0 - t)).max(0.15);
+        // 旧值 `r * (0.4 + 1.6 t)` 半径到 16 m（直径 32 m）—— 这是"半个屏幕"的主体。
+        // 收到 0.5r（≈4 m 半径）；高度也压低，让它读作"贴地烟尘环"而不是一堵墙。
+        let ring_s = r * (0.08 + 0.15 * t);
+        let ring_h = (0.35 * (1.0 - t)).max(0.10);
         out.push(engine::renderer::WorldMarker {
             model: glam::Mat4::from_translation(glam::Vec3::new(cx, ring_h * 0.5, cz))
                 * glam::Mat4::from_scale(glam::Vec3::new(ring_s, ring_h, ring_s)),
-            tint: [1.0, 0.55 * (1.0 - t) + 0.15, 0.06, 0.0], // 火
+            tint: [
+                (1.0 - 0.8 * t).max(0.0),
+                (0.55 * (1.0 - t) + 0.15) * (1.0 - 0.8 * t),
+                0.06 * (1.0 - t),
+                0.0,
+            ], // 火
         });
         // ③ 火柱：垂直拉长火舌从地面向上（0.5-2 寿命段），半透明
-        let col_h = 2.2 + 2.6 * t;
+        let col_h = 0.55 + 0.55 * t;
         out.push(engine::renderer::WorldMarker {
             model: glam::Mat4::from_translation(glam::Vec3::new(cx, 1.1 + col_h * 0.5, cz))
-                * glam::Mat4::from_scale(glam::Vec3::new(r * 0.5, col_h, r * 0.5)),
-            tint: [1.0, 0.45 * (1.0 - t), 0.05, 0.0], // 火
+                * glam::Mat4::from_scale(glam::Vec3::new(r * 0.07, col_h, r * 0.07)),
+            tint: [
+                (1.0 - 0.8 * t).max(0.0),
+                0.45 * (1.0 - t) * (1.0 - 0.8 * t),
+                0.05 * (1.0 - t),
+                0.0,
+            ], // 火
         });
         // ④ 烟柱：暗色膨胀上浮（后段，营造爆炸余烟），半透明
-        let smoke_s = r * (0.5 + 1.4 * t);
-        let smoke_h = 2.0 + 3.0 * t;
+        // 烟也要收：`r*(0.20+0.45t)` 在 r=8 时半径到 5.2 m，而爆炸常发生在**离镜头 8 m**
+        // 的地方 ⇒ 直径 10 m 的球直接糊满屏幕（实测改后仍是一大块灰）。压到 0.37r。
+        let smoke_s = r * (0.06 + 0.16 * t);
+        let smoke_h = 0.6 + 0.8 * t;
         out.push(engine::renderer::WorldMarker {
             model: glam::Mat4::from_translation(glam::Vec3::new(cx, 0.6 + smoke_h * 0.5, cz))
                 * glam::Mat4::from_scale(glam::Vec3::new(smoke_s, smoke_h, smoke_s)),
-            tint: [0.16 * (1.0 - t) + 0.05, 0.13 * (1.0 - t) + 0.04, 0.1 * (1.0 - t) + 0.03, 1.0], // 烟
+            // 烟压暗 3.5 倍：自发光路径没有 alpha，亮度就是"烟有多厚"。
+            // 旧值亮度 ~0.16 在屏幕上读作**一块亮灰石头**（改后截图仍能看出）；
+            // 真实的烟应当是**暗**的，靠变暗消失而不是靠变透明。
+            tint: [
+                (0.16 * (1.0 - t) + 0.05) * 0.35,
+                (0.13 * (1.0 - t) + 0.04) * 0.35,
+                (0.1 * (1.0 - t) + 0.03) * 0.35,
+                1.0,
+            ], // 烟
         });
         out
         })
