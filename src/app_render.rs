@@ -151,6 +151,18 @@ impl GameApp {
     /// 缓存按 `map_generation` 失效 —— 关卡不变时直接复用上一次的障碍 marker（省掉每帧几百次
     /// 矩阵构造）。
     #[allow(clippy::too_many_arguments)]
+    /// 整城 chunk 是否启用（**显式 opt-in**，2026-11-21）。
+    ///
+    /// 见 `build_world_markers` 里的长注释：目录存在就自动启用会把"可见面"交给一批
+    /// **与当前城市不同步**的 chunk（实测只有 10 块 / 364 KB），而 marker 被全关 ⇒
+    /// 围墙、隔离带这些没有 GLB 替代的结构变成**隐形墙**。
+    /// 现在两处（marker 侧 / 加载侧）共用这一个判据，避免只改一处。
+    fn city_chunks_enabled() -> bool {
+        crate::syscfg::flag("RV3D_CITY_CHUNKS")
+            && !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS")
+            && std::path::Path::new("assets/city_chunks").is_dir()
+    }
+
     fn build_world_markers(
         game: &crate::engine::game::Game,
         cache: &mut Vec<engine::renderer::WorldMarker>,
@@ -172,14 +184,60 @@ impl GameApp {
         // `RV3D_NO_MARKERS=1`：连装饰件一起关，用于判断"白色大板"到底来自 marker 还是 GLB。
         // 🏙 chunk 开启时，程序化构件（1230 件）的可见面由 chunk 提供 ⇒ 不再画 marker，
         //    否则两套几何共面重复（z-fighting + 白付 1.8 万实例）。
-        let chunks_on = !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS")
-            && std::path::Path::new("assets/city_chunks").is_dir();
-        let no_markers = chunks_on || crate::syscfg::flag("RV3D_NO_MARKERS");
+        // 🔴 **chunk 改为显式 opt-in**（2026-11-21）。
+        //
+        // 原写法：只要 `assets/city_chunks/` 目录存在 ⇒ `chunks_on = true` ⇒ `no_markers = true`
+        // ⇒ **1230 件程序化构件的 marker 一件都不画**，可见面全靠那批 chunk。
+        // 而实测目录里只有 **10 个 GLB / 364 KB**（`docs/PROGRESS.md` 记的是 **12 块 / 536 KB**），
+        // 且 chunk 是"从某次 dump 重建的一次性产物"——它与当前城市**不同步**。
+        // 后果：围墙、中央隔离带、广场台基这些**没有 GLB 替代**的结构**完全不画、碰撞照旧**
+        // （`marker=0` 就是它的指纹）。用户报"很多根本看不见物品，但是就是有碰撞箱的东西"。
+        //
+        // 现在：默认**不开** chunk（marker 正常画，只是跳过有 GLB 替代的建筑盒）；
+        // 要用 chunk 做 draw call 实验请显式 `RV3D_CITY_CHUNKS=1`，
+        // 且**必须先确认 chunk 覆盖了全城**（否则就是在拿隐形墙换帧率）。
+        // chunk 开着时必须停画 marker（否则两套几何共面重复）；这是 marker 侧唯一用处，
+        // 加载侧用同一个 `Self::city_chunks_enabled()`，两处不会再走偏。
+        let no_markers = Self::city_chunks_enabled() || crate::syscfg::flag("RV3D_NO_MARKERS");
         let skip_building = no_markers || !crate::syscfg::flag("RV3D_BUILDING_MARKERS");
+        // 🔴 **只有"确实有 GLB 建筑替代"的 Building marker 才能跳过**（2026-11-21）。
+        //
+        // 原写法 `o.kind != Building` 一律跳过，理由是"可见的建筑表面已由 GLB 提供"。
+        // 但城市里还有一批 **Building 类、却没有 GLB 对应物**的结构：
+        //   · **边界围墙**（`city.rs::perimeter`，7 段 × 4 面 + 压顶 + 立柱 + 4 座大门）
+        //   · **中央隔离带**（泽西护栏）
+        //   · 广场台基 / 哨卡平台
+        // ⇒ 它们**一个像素都不画，碰撞体却照建**：玩家会撞到一堵看不见的墙。
+        // 用户实机截图"很多根本看不见物品，但是就是有碰撞箱的东西"就是这一类。
+        //
+        // 取证（无头，机位 `fly:0,1.7,-208:0,8` 正对 z=-215 的围墙）：
+        //   · 默认：`marker=0`，画面里**没有墙**（只有路面）；
+        //   · `RV3D_NO_CITY_CHUNKS=1`：`marker=619`，**仍然没有墙**（Building 被筛掉）；
+        //   · 再加 `RV3D_BUILDING_MARKERS=1`：`marker=1215`，**墙出现**（同时多画了 GLB 楼
+        //     的碰撞盒 ⇒ 两套几何共面）。
+        //
+        // 修法 = 用**摆放位置**判断"这一处有没有 GLB"：GLB 楼的碰撞盒与它的 `PropPlacement`
+        // 中心**重合**（`city.rs` 里 `c.prop(name, x, z, ..)` 与 `Part::new(.., x, z, ..)` 同点），
+        // 而围墙/隔离带没有同点道具 ⇒ 判为"无替代"，照画。
+        // 半径取 **1.5m**（只认中心重合）：取大会把 55m 长墙的中心误判成"有替代"。
+        let prop_pts: Vec<(f32, f32)> = game
+            .prop_placements()
+            .iter()
+            .map(|p| (p.x, p.z))
+            .collect();
+        let has_glb_counterpart = |o: &engine::game::MapObstacle| -> bool {
+            prop_pts
+                .iter()
+                .any(|&(px, pz)| (px - o.x).abs() <= 1.5 && (pz - o.z).abs() <= 1.5)
+        };
         *cache = game
             .render_geometry()
             .filter(|o| o.shape != engine::geom::Shape::None)
-            .filter(|o| !skip_building || o.kind != engine::game::ObstacleKind::Building)
+            .filter(|o| {
+                !skip_building
+                    || o.kind != engine::game::ObstacleKind::Building
+                    || !has_glb_counterpart(o)
+            })
             // 🔴 高空装饰件（挑檐/窗带/女儿墙）是挂在建筑盒上的：建筑盒不再画之后，
             // 它们就成了天空里一排悬空黑条（真机截图）。把离地 4m 以上的 Block 装饰件
             // 一并跳过 —— 可见的建筑表面已由 GLB 提供。
@@ -804,7 +862,9 @@ crate::engine::ray_tracer::PtParams {
                     if !set.is_empty() {
                         // 整城 chunk 走**独立集合**（2026-11-04）：不再并进道具套件。
                         // 理由见 `props::ChunkSet`：8 块一起走同一条合并路径会产出错位三角形。
-                        if !crate::syscfg::flag("RV3D_NO_CITY_CHUNKS") {
+                        // 与上方 marker 侧同一判据：chunk 是**显式 opt-in**（2026-11-21）。
+                        // 否则 marker 照画、chunk 也画 ⇒ 两套几何共面重复。
+                        if Self::city_chunks_enabled() {
                             match engine::props::ChunkSet::load_dir("assets/city_chunks") {
                                 Some(cs) => renderer.set_city_chunks(&cs),
                                 None => log::info!("chunk: assets/city_chunks 为空或不可读"),
