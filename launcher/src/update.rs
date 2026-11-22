@@ -44,6 +44,38 @@ pub fn check_latest() -> Result<(String, Option<String>), String> {
     Ok((tag, zip_url))
 }
 
+/// 在解压目录里找"游戏目录"（含 `steel-front.exe` 的那一层）。
+///
+/// 发布包有两种历史形态，必须都认：
+///   * `game\steel-front.exe`（旧版 v0.1.0 的包结构，也是 `release_dist` 的布局）；
+///   * `<tag>\steel-front.exe` 或 `<tag>\game\steel-front.exe`（如果将来打成带一层目录的 zip）。
+fn find_game_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let has_exe = |p: &std::path::Path| p.join("steel-front.exe").is_file();
+    if has_exe(root) {
+        return Some(root.to_path_buf());
+    }
+    let direct = root.join("game");
+    if has_exe(&direct) {
+        return Some(direct);
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if has_exe(&p) {
+                return Some(p);
+            }
+            let nested = p.join("game");
+            if has_exe(&nested) {
+                return Some(nested);
+            }
+        }
+    }
+    None
+}
+
 /// 下载并替换游戏。zip_url 为 releases 资产 zip；解压到游戏目录（备份旧文件）。
 pub fn download_and_apply(zip_url: &str, game_dir: &str) -> Result<(), String> {
     let tmp_zip = std::env::temp_dir().join("sf_update.zip");
@@ -71,20 +103,7 @@ pub fn download_and_apply(zip_url: &str, game_dir: &str) -> Result<(), String> {
     if !status.success() {
         return Err("更新包解压失败".to_string());
     }
-    // 找到解压出的 steel-front.exe（可能嵌套一层目录）
-    let mut exe_src: Option<std::path::PathBuf> = None;
-    for entry in std::fs::read_dir(&tmp_extract).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let p = entry.path();
-        if p.join("steel-front.exe").exists() {
-            exe_src = Some(p);
-            break;
-        } else if p.ends_with("steel-front.exe") {
-            exe_src = Some(p.parent().map(|x| x.to_path_buf()).unwrap_or(p.clone()));
-            break;
-        }
-    }
-    let exe_src = exe_src.ok_or("更新包中未找到游戏")?;
+    let exe_src = find_game_dir(&tmp_extract).ok_or("更新包中未找到游戏")?;
     // 备份当前游戏（防回滚）
     let backup = std::path::Path::new(game_dir).join("backup_pre_update");
     let _ = std::fs::remove_dir_all(&backup);
