@@ -389,7 +389,6 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("downtown_small", 12.460, 14.536, 17.026),
     ("fence_chainlink", 3.090, 1.646, 2.552),
     ("fence_wire", 4.132, 2.330, 1.753),
-    ("hydrant", 0.823, 0.299, 0.751),
     ("panel_block", 20.640, 12.640, 17.325),
     ("rubble_pile", 2.715, 2.352, 0.939),
     ("sandbag_wall", 2.400, 0.700, 0.900),
