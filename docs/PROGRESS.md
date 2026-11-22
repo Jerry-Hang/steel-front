@@ -4741,3 +4741,23 @@ tint 亮度缩放（`amb*0.35` → `amb*0.35*lum*6`），**改动像素 12.50% �
 `b05d9ae` 之后跑一局，站到任意一栋楼跟前看底座 —— 若砖裙已出现，本条按"隐形 marker"结案。
 ⚠️ 另记：这一轮我**两次**因为机位选错而误判（大门洞、把人行道铺装当成砖墙）——
 `RV3D_CAM` 取证前必须先确认"这个位置本来该有什么"，别拿一张图直接下结论。
+
+### 2026-11-22（Windows 同步复核）：拉取 128 个提交后修 3 处回归
+
+Windows 侧清理 target 后全量重建 + 全量测试，发现 Linux 侧本批提交留下 3 类问题（均已修）：
+
+1. **`CONTRACT_SIZES` 里的 `hydrant` 没有对应资产**（`521bb3a` 一边写"消防栓保持程序化"
+   一边把它插进契约表）⇒ 新判据 `contract_matches_loaded_assets`（37≠36）和
+   `lod_bins_align_with_full_bins`（`index_of("hydrant")` panic）双红。删掉该行即绿；
+2. **测试属性回归**（测试编译 3 条警告，违反"测试编译 0 警告"）：
+   `ai.rs` 旧文档 + 孤儿 `#[test]` 落在 `flank_sides_are_distinct_and_symmetric` 前（重复属性）；
+   `city.rs` 把 `checkpoint_props_stay_out_of_rows` 的文档与 `#[test]` 落在
+   `no_solid_prop_sits_on_the_asphalt` 前（重复属性 + 前者失去 `#[test]` 变成 never used）。
+   两处都按"属性跟着函数走"归位；
+3. **`assets/triangle.frag.spv` 过期**：`build.rs` 最后改动是 `0c5315c`，而 SPV 最后入库是
+   `0b4cf07` ⇒ 库里的不是当前 WGSL 的产物。Windows 侧重新生成后 62508→63172 B，
+   连跑两次 hash 一致（`C1E94C95…`，可复现），已入库刷新。
+
+验收（按退出码）：`cargo build --release` 0 代码警告 / `cargo test --release`
+**944 passed + 4 ignored** / 测试编译 **0 警告** / git clean。
+
