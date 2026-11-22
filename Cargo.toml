@@ -1,6 +1,6 @@
 [package]
 name = "steel-front"
-version = "0.1.0"
+version = "0.2.0"
 description = "钢铁前线 (Steel Front) - 21 世纪架空世界观大战场 FPS 引擎"
 edition = "2021"
 # 双许可：自由软件路径 = AGPL-3.0-or-later（全文见 LICENSE）；另一条是可选的商业许可
