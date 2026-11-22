@@ -4761,3 +4761,25 @@ Windows 侧清理 target 后全量重建 + 全量测试，发现 Linux 侧本批
 验收（按退出码）：`cargo build --release` 0 代码警告 / `cargo test --release`
 **944 passed + 4 ignored** / 测试编译 **0 警告** / git clean。
 
+### 2026-11-22（发行版 v0.2.0 Windows）：启动器自更新修复 + 完整发行目录 + 打包脚本化
+
+距上一版 `v0.1.0`（2026-08-20）两个月，重打 Windows 发行版（`release_dist` + zip **24.6 MB**）。
+
+- 🔴 **启动器自更新此前实际不可用**：`update.rs` 只在解压根层找 `steel-front.exe`，而发行包布局是
+  `game\steel-front.exe` ⇒ 下载完成也报"更新包中未找到游戏"。新增 `find_game_dir`
+  （根 / `game\` / 一层子目录 / `<tag>\game\` 四种布局都认），替换前仍备份到 `backup_pre_update`；
+- `make_release.ps1` 升级为完整发行目录：版本+日期进 `README.txt`、补 `rdv.exe`、
+  `联机主机.bat` / `联机加入.bat`（**源码入库到 `release_assets\`**，此前只存在于被忽略的 release_dist）、
+  `LICENSE` / `README.md`、空 `logs\`；
+- 新增 `scripts\package_windows_zip.ps1` + `tools\zip_release.py`：Python zipfile 给中文文件名
+  打 UTF-8 标志（bsdtar `-a` 在 Windows 上写出的是 GBK 字节且无标志，解压会乱码）；
+- **无头自检（直接用发行包里的 exe）**：`RV3D_HEADLESS=1 RV3D_AUTOSTART=1 RV3D_SHOT_AT=7
+  RV3D_EXIT_AFTER=12` ⇒ exit 0 / "程序正常退出" / 153.8 fps / 证据图
+  `screenshots\release_v0.2.0_headless_*.png`；
+- 版本号 `0.1.0 → 0.2.0`（主 crate + 启动器）。启动器 crate 是独立工程、不在主仓 0 警告闸门内
+  （其 59 条 `non_snake_case` 等为既有历史，未在本轮清理）。
+
+验收（按退出码）：game build 0 警告 / 944 passed + 4 ignored / 测试编译 0 警告 /
+zip `launcher=True game=True` / 中文条目 UTF-8 标志 True。
+
+
