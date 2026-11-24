@@ -4819,3 +4819,11 @@ LOD 代理比本体高 **1 cm**：0.01 m 在任何距离都是亚像素，不构
 （掠射角不露底边）—— 第一版写成 `|minY| > tol`，被 `rubble_pile`（−0.039）误报，已修正。
 白名单 `FLOATING_ALLOW = {capture_flag}`（据点旗杆顶端的旗面，设计如此）。
 `survey()` 的表格也加了 `baseY` / `topY` 两列，资产普查时可直接看。
+
+**判据已落地**：`structural_markers_are_not_skipped_wholesale`（源码级，钉三条）：
+① `city_chunks_enabled()` 存在且要求显式 `RV3D_CITY_CHUNKS=1`；
+② 跳过条件必须含 `has_glb_counterpart`；
+③ **精确到语句**：`let no_markers = Self::city_chunks_enabled()`。
+反向验证：把它换回"目录存在即启用"⇒ 立刻红。
+⚠️ 第一版只查「函数存在 + 出现次数 ≥3」，我注入改动后**仍然绿**（函数还在、别的调用点没动）——
+**判据必须精确到那一行**，否则是"改了等于没改"的典型（见 `docs/pitfalls/lying-gates.md`）。

@@ -2497,3 +2497,48 @@ fn prop_bin_cull_margin_covers_lod_extent_mismatch() {
     assert_eq!(props, 1, "道具桶余量应恰好出现在 1 处，实际 {props}");
     assert_eq!(chunks, 1, "chunk 余量应恰好出现在 1 处，实际 {chunks}");
 }
+
+
+/// 🔴 **结构性 marker 不许被"整类跳过"**（2026-11-21，用户实机截图："很多根本看不见物品，
+/// 但是就是有碰撞箱的东西"）。
+///
+/// 两个叠加的开关曾让 **483 件**结构性碰撞体一个像素都不画：
+/// ① `chunks_on` 只要 `assets/city_chunks/` 目录存在就为真 ⇒ `no_markers` ⇒ marker 全关
+///    （而那批 chunk 只有 10 块 / 364 KB，与当前城市**不同步**）；
+/// ② `skip_building` 把 `kind == Building` **一律**跳过 —— 但边界围墙、住宅围合墙、
+///    中央隔离带、广场台基都是 Building 类**且没有 GLB 替代物**。
+///
+/// 实测（临时诊断）：`props=454`、`Building` 类碰撞件 **679**，其中**只有 196 件有 GLB**，
+/// 剩下 **483 件从未被画**。修法 = chunk 改显式 opt-in + 只跳过"确无 GLB 替代"的建筑盒。
+///
+/// 这条判据钉的是**两条修复语句本身**：谁把它们删掉/放宽，立刻红。
+/// 反向验证：把 `RV3D_CITY_CHUNKS` 改回"目录存在即启用" ⇒ 红。
+#[test]
+fn structural_markers_are_not_skipped_wholesale() {
+    let src = include_str!("../../app_render.rs");
+    // ① chunk 必须是显式 opt-in（不能只凭目录存在）
+    assert!(
+        src.contains("fn city_chunks_enabled()")
+            && src.contains("flag(\"RV3D_CITY_CHUNKS\")"),
+        "city_chunks_enabled() 必须要求显式 RV3D_CITY_CHUNKS=1；\
+         只凭 assets/city_chunks 目录存在就启用会让 1230 件 marker 全关"
+    );
+    // ② 跳过条件必须带"确无 GLB 替代"的判断，不能只有 kind 判据
+    assert!(
+        src.contains("has_glb_counterpart"),
+        "Building marker 的跳过条件必须用 has_glb_counterpart 判断该处确实有 GLB，\
+         否则没有 GLB 的围墙/隔离带会被一起跳过（隐形但能撞）"
+    );
+    // ③ **marker 侧那一行必须走这个判据**（只定义不使用是最常见的"改了等于没改"）。
+    //    精确到语句：任何人把它换回"目录存在即启用"，这条立刻红。
+    assert!(
+        src.contains("let no_markers = Self::city_chunks_enabled()"),
+        "marker 侧的 no_markers 必须由 city_chunks_enabled() 决定；\
+         换回 std::path::Path::new(\"assets/city_chunks\").is_dir() 会让 1230 件 marker 在默认配置下全关"
+    );
+    let uses = src.matches("city_chunks_enabled()").count();
+    assert!(
+        uses >= 3,
+        "city_chunks_enabled() 应被 定义 1 次 + marker 侧/加载侧各调用 1 次，实际出现 {uses} 次"
+    );
+}
