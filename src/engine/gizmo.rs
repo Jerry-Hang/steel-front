@@ -211,6 +211,63 @@ pub fn ray_sphere(ray_o: Vec3, ray_d: Vec3, center: Vec3, radius: f32) -> Option
     }
 }
 
+/// 世界点 → NDC（`screen_ray` 的逆）。
+///
+/// 只用于 gizmo 把手的屏幕投影；`forward` 分量 ≤ 0（点在相机背后）时返回 `None` ——
+/// 那时候投影会翻到屏幕另一侧，不判掉就会"选到背后的那根轴"。
+pub fn project_to_ndc(view: &ViewInfo, p: Vec3) -> Option<(f32, f32)> {
+    let v = p - view.eye;
+    let z = v.dot(view.forward);
+    if z <= 1e-4 {
+        return None;
+    }
+    let t = view.half_fov_y.tan();
+    Some((
+        (v.dot(view.right) / z) / (t * view.aspect.max(1e-4)),
+        (v.dot(view.up) / z) / t,
+    ))
+}
+
+/// 光标到线段的距离（NDC 空间，直接当"屏幕距离"用）。
+fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (vx, vy) = (bx - ax, by - ay);
+    let (wx, wy) = (px - ax, py - ay);
+    let len2 = vx * vx + vy * vy;
+    let t = if len2 > 1e-9 {
+        ((wx * vx + wy * vy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (dx, dy) = (wx - vx * t, wy - vy * t);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// gizmo 把手长度（米）。屏幕上大约 1m 长；太短点不中，太长会盖住整屏。
+pub const GIZMO_LEN: f32 = 1.0;
+/// 命中阈值（NDC）。NDC 的 1 个单位 = 半个屏幕宽，0.06 约等于"离把手 3% 屏宽以内"。
+pub const GIZMO_PICK_EPS: f32 = 0.06;
+
+/// 光标落在哪根轴上（NDC 空间里离投影线段最近、且够近的那根）。
+///
+/// 为什么必须在**屏幕空间**判：三根轴在世界里互相垂直，但在屏幕上可能几乎重合
+/// （正对着某根轴看的时候，那根轴退化成一点）。在世界里判"离哪条线近"会退化成随机。
+///
+/// 返回 `None` = 没抓住任何把手（此时应当当作"点空白处"处理，而不是挑一根最近的）。
+pub fn pick_axis_at_screen(entity: Vec3, view: &ViewInfo, ndc_x: f32, ndc_y: f32) -> Option<Axis> {
+    let origin = project_to_ndc(view, entity)?;
+    let mut best: Option<(Axis, f32)> = None;
+    for axis in [Axis::X, Axis::Y, Axis::Z] {
+        let Some(tip) = project_to_ndc(view, entity + axis.dir() * GIZMO_LEN) else {
+            continue;
+        };
+        let d = dist_to_segment(ndc_x, ndc_y, origin.0, origin.1, tip.0, tip.1);
+        if d <= GIZMO_PICK_EPS && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((axis, d));
+        }
+    }
+    best.map(|(a, _)| a)
+}
+
 /// 投影一次取点：屏幕 NDC → 射线 → 场景里最近的实体（按球判据）。
 ///
 /// `radius` 是**取点半径**（米），不是实体的真实尺寸 —— 场景层还没有包围盒组件。
@@ -239,6 +296,45 @@ pub fn pick_entity(
         }
     }
     best
+}
+
+/// 鼠标式拖拽的完整一步（编辑器左键按下 → 移动 → 抬手 的那条链路）。
+///
+/// 输入是**两次光标位置**（NDC）与实体当前位置；输出是拖动后的新平移。
+/// 这条函数存在的意义：鼠标路径与 AI/脚本路径**共用同一份实现**，
+/// 不会出现"鼠标能拖、接口拖出来不一样"的两套行为（铁律 4 的另一面）。
+///
+/// 返回 `None` 的三种情况都必须当作"没拖动"处理，不许猜：
+/// 光标没落在把手上、影子与轴近平行、相机背后的把手。
+pub fn mouse_drag_translate(
+    view: &ViewInfo,
+    entity: Vec3,
+    from_ndc: (f32, f32),
+    to_ndc: (f32, f32),
+) -> Option<(Axis, Vec3)> {
+    let axis = pick_axis_at_screen(entity, view, from_ndc.0, from_ndc.1)?;
+    let (o0, d0) = screen_ray(
+        view.eye,
+        view.forward,
+        view.right,
+        view.up,
+        view.half_fov_y,
+        view.aspect,
+        from_ndc.0,
+        from_ndc.1,
+    );
+    let drag = TranslateDrag::begin(axis, entity, o0, d0)?;
+    let (o1, d1) = screen_ray(
+        view.eye,
+        view.forward,
+        view.right,
+        view.up,
+        view.half_fov_y,
+        view.aspect,
+        to_ndc.0,
+        to_ndc.1,
+    );
+    drag.drag(o1, d1).map(|p| (axis, p))
 }
 
 #[cfg(test)]
@@ -391,6 +487,74 @@ mod tests {
         let t = ray_sphere(Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0),
             Vec3::new(0.0, 0.0, 20.0), 0.9);
         assert!(t.is_none(), "身后的球不该命中，实际 {t:?}");
+    }
+
+    /// 🔴 光标落在 X 把手附近 ⇒ 选中 X；落在空白处 ⇒ `None`（不许挑一根最近的）。
+    ///
+    /// 相机在原点朝 -Z，实体在 (0,0,-3)。X 把手从 (0,0,-3) 伸到 (1,0,-3)，
+    /// 投影后是屏幕上一段向右的线；Y 把手向上、Z 把手朝相机（投影成很短的一段）。
+    ///
+    /// 反向验证：把 `pick_axis_at_screen` 里的 `d <= GIZMO_PICK_EPS` 去掉（永远取最近）
+    /// ⇒ "落在空白处"那条断言红。
+    #[test]
+    fn gizmo_axis_pick_uses_screen_distance_and_rejects_far_clicks() {
+        let view = ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let entity = Vec3::new(0.0, 0.0, -3.0);
+        // X 把手中点投影
+        let mid = project_to_ndc(&view, entity + Vec3::X * (GIZMO_LEN * 0.5)).unwrap();
+        assert_eq!(
+            pick_axis_at_screen(entity, &view, mid.0, mid.1),
+            Some(Axis::X),
+            "把手中点必须选中 X（投影 {mid:?}）"
+        );
+        // 远离所有把手
+        assert_eq!(
+            pick_axis_at_screen(entity, &view, 0.85, 0.85),
+            None,
+            "空白处不许挑一根最近的"
+        );
+        // 相机背后的把手不许参与：**视线方向不变**，把实体放到 +Z（身后）
+        assert_eq!(
+            pick_axis_at_screen(Vec3::new(0.0, 0.0, 3.0), &view, 0.0, 0.0),
+            None,
+            "相机背后的把手必须被拒绝（投影会翻到屏幕另一侧）"
+        );
+    }
+
+    /// 🔴 **鼠标拖拽整条链路**：抓住 Y 把手往屏幕上方拖 ⇒ 平移沿 +Y 增加。
+    ///
+    /// 这是目标里"拖拽 3D 物体"的验收：从光标位置出发，经选轴 → 起拖 → 落到新平移。
+    /// 反向验证：`mouse_drag_translate` 里把 `pick_axis_at_screen` 换成固定 `Axis::X`
+    /// ⇒ 断言"轴必须是 Y"红。
+    #[test]
+    fn gizmo_mouse_drag_moves_along_the_picked_axis() {
+        let view = ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let entity = Vec3::new(0.0, 0.0, -3.0);
+        let from = project_to_ndc(&view, entity + Vec3::Y * (GIZMO_LEN * 0.5)).unwrap();
+        // 往上拖 0.2 NDC
+        let to = (from.0, from.1 + 0.2);
+        let (axis, moved) =
+            mouse_drag_translate(&view, entity, from, to).expect("应抓住 Y 把手并拖动");
+        assert_eq!(axis, Axis::Y, "抓到的必须是 Y 把手");
+        assert!(moved.y > entity.y + 0.05, "往屏幕上方拖必须抬高物体：{moved:?}");
+        assert!(
+            (moved.x - entity.x).abs() < 1e-4 && (moved.z - entity.z).abs() < 1e-4,
+            "其它两轴不许动：{moved:?}"
+        );
     }
 
     /// 斜视角下也必须是 1.0：射线从 (3,4,10) 朝 -Z 附近偏一点，X 轴过原点。

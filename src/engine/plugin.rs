@@ -362,6 +362,45 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             }
         },
     );
+    // ---- P3d：鼠标式拖拽（与编辑器左键拖动同一条实现）----
+    reg.add_command(
+        "gizmo.mouse_drag",
+        "模拟鼠标拖动把手：gizmo.mouse_drag <ndc0x> <ndc0y> <ndc1x> <ndc1y>",
+        |ctx, args| {
+            let view = ctx.view.ok_or_else(|| "当前没有相机视角".to_string())?;
+            if args.len() < 4 {
+                return Err("参数不足：需要 4 个 NDC 分量".to_string());
+            }
+            let f = |i: usize| -> Result<f32, String> {
+                args[i].parse::<f32>().map_err(|_| format!("第 {i} 个参数不是数字"))
+            };
+            let (x0, y0, x1, y1) = (f(0)?, f(1)?, f(2)?, f(3)?);
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let cur = ctx
+                .scene
+                .local(sel)
+                .map_err(|_| "选中实体句柄失效".to_string())?
+                .translation;
+            match crate::engine::gizmo::mouse_drag_translate(&view, cur, (x0, y0), (x1, y1)) {
+                Some((axis, moved)) => {
+                    ctx.scene
+                        .set_local(
+                            sel,
+                            crate::engine::scene::Transform {
+                                translation: moved,
+                                ..ctx.scene.local(sel).map_err(|_| "句柄失效".to_string())?
+                            },
+                        )
+                        .map_err(|_| "写回失败".to_string())?;
+                    Ok(format!(
+                        "dragged axis={} from=({:.2},{:.2},{:.2}) to=({:.2},{:.2},{:.2})",
+                        axis.name(), cur.x, cur.y, cur.z, moved.x, moved.y, moved.z
+                    ))
+                }
+                None => Ok("dragged none（光标没落在把手上）".to_string()),
+            }
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

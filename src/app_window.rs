@@ -362,9 +362,12 @@ impl GameApp {
         let Some(window) = &self.window else {
             return;
         };
+        // 引擎化 P3d：**编辑态必须放开光标** —— 编辑器要用鼠标点场景树、拖把手，
+        // 光标被锁成 1x1 就什么都点不到。这里把"在玩"收窄成"在玩且处于播放态"；
+        // 不给 `capture_wanted` 加参数（那条函数被单测钉着，语义保持"是否该抓光标"）。
         let want = capture_wanted(
             self.focused,
-            self.game.state() == GameState::Playing,
+            self.game.state() == GameState::Playing && self.mode.is_play(),
             self.game.settings_open(),
             self.game.hud.esc_menu_open,
             !no_capture(),
