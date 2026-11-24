@@ -110,12 +110,15 @@ impl AiServer {
     }
 
     /// 主线程推送一行上报（网络线程会在下个周期发给接收方）。
+    ///
+    /// 🔴 **只保留最新一行**，不是排队。理由：排队会让客户端收到**过期状态**——
+    /// 实测过一次"命令返回 entities=3、上报还报 entities=2"，因为队列里躺着上一帧的行。
+    /// 上报的语义是"当前状态"，过期的那几行没有价值，反而会让人以为操作没生效。
+    /// （需要历史记录请让客户端自己记，服务端只保证"最近"。）
     pub fn push_telemetry(&self, line: impl Into<String>) {
         if let Ok(mut q) = self.telemetry.lock() {
-            // 上限保护：主线程比网络线程快时不能无限堆积。
-            if q.len() < MAX_TELEMETRY_BACKLOG {
-                q.push(line.into());
-            }
+            q.clear();
+            q.push(line.into());
         }
     }
 }
@@ -128,8 +131,6 @@ impl Drop for AiServer {
 
 /// 每帧最多处理多少条请求：防止某个客户端刷屏把一帧的时间全占了（渲染掉帧比"命令慢一拍"更糟）。
 const MAX_REQUESTS_PER_FRAME: usize = 32;
-/// 上报积压上限。
-const MAX_TELEMETRY_BACKLOG: usize = 64;
 
 fn accept_loop(
     listener: TcpListener,
@@ -273,6 +274,37 @@ fn serve_conn(
 mod tests {
     use super::*;
     use std::net::TcpStream as Client;
+
+
+    /// 🔴 上报**只留最新一行**：排队会让客户端读到过期状态。
+    /// 实测过一次"命令返回 entities=3、上报报 entities=2"。
+    ///
+    /// 反向验证：把 `q.clear()` 删掉（改回排队）⇒ 客户端先收到旧的 1，红。
+    #[test]
+    fn telemetry_keeps_only_the_latest_line() {
+        let server = AiServer::start(0).expect("应能绑定");
+        let addr = format!("127.0.0.1:{}", server.port);
+        let mut c = Client::connect(&addr).expect("应能连上");
+        c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut r = BufReader::new(c.try_clone().unwrap());
+        let mut line = String::new();
+        r.read_line(&mut line).unwrap(); // HELLO
+        c.write_all(b"SUB\n").unwrap();
+        line.clear();
+        r.read_line(&mut line).unwrap();
+        assert!(line.starts_with("OK"), "开启上报回执：{line:?}");
+        // 主线程连推三行，客户端只该看到最后一行
+        server.push_telemetry("entities=1");
+        server.push_telemetry("entities=2");
+        server.push_telemetry("entities=3");
+        line.clear();
+        r.read_line(&mut line).unwrap();
+        assert_eq!(
+            line.trim(),
+            "TEL entities=3",
+            "只该收到最新一行（排队会先给 entities=1）：{line:?}"
+        );
+    }
 
     /// 连上 → HELLO → CMD → 主线程回执。**整条链路都测**（含线程、通道、协议）。
     ///

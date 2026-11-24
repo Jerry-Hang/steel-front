@@ -5433,3 +5433,37 @@ scene.instantiate assets/props/barrel_metal.glb
   移动绑了网格的实体会变。
 
 三条注入（高度恒 0 / 签名忽略平移 / 名字对不上也塞一条摆放）**各恰好 1 条红**。
+
+### 2026-11-25：目标队列核对 + 修一处会误导人的上报语义
+
+**逐项核对**（判据数量是此刻实测）：
+
+| 队列项 | 证据 | 结论 |
+|---|---|---|
+| ① P1 渲染读 SceneView | 渲染器只认快照；播放态 A/B **0 px** | 达成 |
+| ② P2 拾取 + 三轴 gizmo | 拖 1m ⇒ 增量 1.0；鼠标全链路 | 达成（判据 9 条） |
+| ③ P3 编辑器壳 | 树 / 检视 / 存盘往返逐字节 | 达成（判据 11 + 7 条） |
+| ④ P7a 插件注册表 | 四阶段顺序 + 双入口命令表 | 达成 |
+| ⑤ P5 AI 控制面 | TCP 命令 + 上报；实例化→改→存盘 | 达成 |
+| ⑥ P6 Play/Edit | 编辑态 `t=0.00` vs 播放 `8.69` | 达成 |
+| ⑦ P4 GLB 骨骼/动画 | 解析 + 三种插值 + CPU 姿势链 + 真实资产 | **部分达成** |
+
+⑦ 还缺：GPU 侧蒙皮（顶点着色器读关节矩阵）与"动画驱动渲染"。
+现在骨骼只在 CPU 侧跑通 —— 能算、能验，但**画面上还没有会动的角色**。
+
+🔴 **端到端演练查出一处误导人的语义**：AI 接口的 `scene.count` 返回 `entities=3`，
+而同一时刻的上报行说 `entities=2` —— 因为上报是**排队**的，客户端读到的可能是 0.25 秒前的行。
+上报的语义是"当前状态"，过期行没有价值却会让人以为操作没生效。
+改成**只保留最新一行**（`push_telemetry` 先 `clear` 再 `push`），并加判据
+`telemetry_keeps_only_the_latest_line`（连推三行，客户端必须只收到最后一行）；
+反向验证：改回排队 ⇒ 先收到 `entities=1`，红。
+
+**端到端"人机共编"演练**（AI 接口驱动，headless）：
+```
+scene.instantiate assets/props/barrel_metal.glb → instantiated #2 verts=654
+gizmo.mouse_drag 0 -0.30 0 -0.20               → dragged none（光标没落在把手上）
+scene.set -3 0 5                               → set #2 pos=(-3.000,0.000,5.000)
+scene.save /tmp/hc.toml                        → saved entities=3
+asset.count                                    → assets=52 pages=7
+```
+存盘里 `mesh = "assets/props/barrel_metal.glb"` 在 ⇒ 建、改、存整条链通。
