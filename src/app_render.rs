@@ -1257,3 +1257,109 @@ crate::engine::ray_tracer::PtParams {
         }
     }
 }
+
+#[cfg(test)]
+mod editor_prop_tests {
+    use super::*;
+    use crate::engine::scene::{Scene, Transform};
+    use glam::Vec3;
+
+    /// 造一个最小的 `PropSet`：只有一件叫 `barrel_metal` 的网格。
+    /// 顶点/索引可以空 —— 本判据测的是"名字到下标"与"摆放数值"，不是几何。
+    fn fake_set() -> crate::engine::props::PropSet {
+        crate::engine::props::PropSet {
+            meshes: vec![crate::engine::props::PropMesh {
+                name: "barrel_metal".to_string(),
+                verts: Vec::new(),
+                indices: Vec::new(),
+                min: [-0.3, 0.0, -0.3],
+                max: [0.3, 0.9, 0.3],
+            }],
+            lod1: Vec::new(),
+            lod2: Vec::new(),
+        }
+    }
+
+    /// 🔴 场景实体 → `PropPlacement`：**数值必须逐一搬到摆放上**（位置/高度/yaw）。
+    ///
+    /// 反向验证：把 `p.y = local.translation.y.max(0.0)` 删掉 ⇒ 高度恒 0，第二条断言红。
+    #[test]
+    fn editor_placements_carry_position_and_height() {
+        let set = fake_set();
+        let mut sc = Scene::new();
+        let id = sc.spawn(
+            None,
+            Transform {
+                translation: Vec3::new(-2.0, 1.5, 4.0),
+                rotation: glam::Quat::from_rotation_y(0.5),
+                scale: Vec3::ONE,
+            },
+        );
+        sc.set_mesh(id, Some("assets/props/barrel_metal.glb".to_string()))
+            .unwrap();
+        let out = GameApp::editor_prop_placements(&set, &sc);
+        assert_eq!(out.len(), 1, "绑定网格的实体应产出一条摆放");
+        let p = &out[0];
+        assert_eq!(p.mesh, 0, "网格下标来自名字匹配");
+        assert!((p.x + 2.0).abs() < 1e-6, "x 要搬过去：{}", p.x);
+        assert!((p.z - 4.0).abs() < 1e-6, "z 要搬过去：{}", p.z);
+        assert!((p.y - 1.5).abs() < 1e-6, "高度要搬过去：{}", p.y);
+        assert!((p.yaw - 0.5).abs() < 1e-6, "yaw 要搬过去：{}", p.yaw);
+        assert!(!p.solid, "编辑器实例不进刚体表");
+    }
+
+    /// 网格名对不上 / 没绑网格的实体 ⇒ **不产生摆放**（否则会画出错误的东西）。
+    #[test]
+    fn editor_placements_skip_unknown_or_unbound_meshes() {
+        let set = fake_set();
+        let mut sc = Scene::new();
+        let a = sc.spawn(None, Transform::IDENTITY);
+        sc.set_mesh(a, Some("assets/props/not_in_set.glb".to_string()))
+            .unwrap();
+        let _b = sc.spawn(None, Transform::IDENTITY); // 没绑网格
+        assert!(
+            GameApp::editor_prop_placements(&set, &sc).is_empty(),
+            "名字对不上与没绑网格都不该产出摆放"
+        );
+    }
+
+    /// 🔴 签名必须**只对几何变化敏感**：改位置要变，改没绑网格的实体不许变，
+    /// 且同样的输入要得到同样的值（否则每帧都在重建全城合并网格）。
+    #[test]
+    fn editor_signature_tracks_geometry_only() {
+        let mut sc = Scene::new();
+        let plain = sc.spawn(None, Transform::IDENTITY);
+        let base = GameApp::editor_prop_signature(&sc);
+
+        // 没绑网格的实体怎么动都不该影响签名
+        sc.set_local(plain, Transform::from_translation(Vec3::new(5.0, 0.0, 0.0)))
+            .unwrap();
+        assert_eq!(
+            GameApp::editor_prop_signature(&sc),
+            base,
+            "没绑网格的实体不该影响签名"
+        );
+
+        // 绑上网格 ⇒ 变
+        sc.set_mesh(plain, Some("assets/props/barrel_metal.glb".to_string()))
+            .unwrap();
+        let with_mesh = GameApp::editor_prop_signature(&sc);
+        assert_ne!(with_mesh, base, "绑网格必须改变签名");
+
+        // 同样的场景再算一次 ⇒ 必须相同（确定性）
+        assert_eq!(
+            GameApp::editor_prop_signature(&sc),
+            with_mesh,
+            "同样的输入必须得到同样的签名"
+        );
+
+        // 移动它 ⇒ 变
+        sc.set_local(plain, Transform::from_translation(Vec3::new(6.0, 0.0, 0.0)))
+            .unwrap();
+        assert_ne!(
+            GameApp::editor_prop_signature(&sc),
+            with_mesh,
+            "移动绑了网格的实体必须改变签名"
+        );
+    }
+}

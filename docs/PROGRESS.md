@@ -5417,3 +5417,19 @@ scene.instantiate assets/props/barrel_metal.glb
 ⚠️ 结构性教训：把三块代码插到 `impl GameApp` 外面过两次（一次插在 `render` 的文档注释
 与函数之间、一次插在 `impl` 闭合之后），第二次还因为先 `git checkout` 把未提交的助手
 一起回滚掉，白重做一遍。**改大文件先用 `grep -n '^impl\|^}'` 确认块边界再动手。**
+
+### 2026-11-25：补上 P3j 的判据缺口（实例摆放与签名）
+
+上一轮记的缺口补掉了：`app_render.rs` 里加 `#[cfg(test)] mod editor_prop_tests`，
+用手工构造的 `PropSet`（一件 `barrel_metal`，几何为空 —— 测的是名字匹配与数值搬运，
+不是几何）覆盖三条：
+
+- `editor_placements_carry_position_and_height`：x/z/y/yaw 逐一搬到 `PropPlacement`，
+  且 `solid == false`（编辑器实例不进刚体表）；
+- `editor_placements_skip_unknown_or_unbound_meshes`：名字对不上、没绑网格 ⇒ **不产出摆放**
+  （否则会画出错误的东西）；
+- `editor_signature_tracks_geometry_only`：没绑网格的实体怎么动都不影响签名、
+  绑上网格会变、同样输入得到同样值（**这条决定了会不会每帧重建全城合并网格**）、
+  移动绑了网格的实体会变。
+
+三条注入（高度恒 0 / 签名忽略平移 / 名字对不上也塞一条摆放）**各恰好 1 条红**。
