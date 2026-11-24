@@ -5149,3 +5149,34 @@ scene.save /tmp/drag_scene.toml               → 文件里 t = [0, 0.42012453, 
 ⚠️ 已知未完成：编辑器方盒现在借用 marker 模板，外观不是最终形态
 （`Shape::Authored` 标签让它跳过窗带/玻璃等程序化效果，但形状仍是 marker 立方体）。
 真正的"编辑器默认物体"等 P4 有了网格组件再做。
+
+### 2026-11-25：引擎化 P4 第一步 —— GLB 骨骼解析与骨骼变换数学
+
+**先摸清前提**：本仓 **53 件 GLB 里 `skins=0`、`animations=0`** —— 一件带骨骼的资产都没有。
+所以这一步不是"接线"，而是把"读"和"算"建起来，用**内存里合成的 skinned GLB** 做判据。
+
+`engine/skin.rs`：
+- `parse_glb_skin(bytes)` —— 读 `skins.joints` / `inverseBindMatrices` / `JOINTS_0` / `WEIGHTS_0`，
+  并沿 `nodes.children` 反查上一层、连乘 TRS 得到每个关节的**绑定姿势世界矩阵**；
+- `skin_position(p, joints, weights, mats)` —— `Σ w_i · (M[j_i] · p)`；
+- `bind_pose_error(skin, positions)` —— **绑定姿势自检**：所有顶点的最大位移，应当 ≈ 0。
+
+权重和不为 1 时按比例归一化、并把剩余比例留在原位置（不把顶点缩向原点 ——
+后者会让缺权重处整个塌陷）。
+
+**可用入口**：`asset.skin_probe <路径>`（编辑器与 AI 接口同一张命令表）。
+实机：
+```
+asset.skin_probe /tmp/skin_test.glb        → joints=2 vertices=3 bind_err=0.000000
+asset.skin_probe assets/props/barrel_metal.glb → 没有骨骼（skins 为空）
+```
+
+🔴 **本会话第三条恒真判据**：我先用纯平移的夹具写"乘序"判据，
+把 `world * inverseBind` 换成 `inverseBind * world` **仍然全绿** ——
+因为**平移可交换**，而且绑定姿势下 `W·W⁻¹ = W⁻¹·W = I` 也恒成立。
+⇒ 乘序只有在**旋转 + 非绑定姿势**下才有区别。补的判据：
+关节绕 Z 转 90°、顶点恰在关节原点上，写反顺序会把它甩到 `(-1, 0, 0)`，位移 1.41m。
+注入验证：报「顶点在关节原点，转多少都不该动：期望 (0,1,0)，实际 (-1,0,0)」。
+
+⚠️ 未做（下一步）：GPU 侧蒙皮（顶点着色器读关节矩阵）与动画采样
+（`animations` 的 sampler 插值）。现在只有 CPU 侧的解析与数学。

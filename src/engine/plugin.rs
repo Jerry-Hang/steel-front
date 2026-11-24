@@ -401,6 +401,27 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             }
         },
     );
+    // ---- P4：骨骼探针（导入骨骼的第一个可用入口）----
+    reg.add_command(
+        "asset.skin_probe",
+        "读 GLB 并报告骨骼与骨骼变换：asset.skin_probe <路径>",
+        |_ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let bytes = std::fs::read(path).map_err(|e| format!("读文件失败：{e}"))?;
+            match crate::engine::skin::parse_glb_skin(&bytes) {
+                Ok(None) => Ok(format!("{path}: 没有骨骼（skins 为空）")),
+                Ok(Some((skin, positions))) => {
+                    let err = crate::engine::skin::bind_pose_error(&skin, &positions);
+                    Ok(format!(
+                        "{path}: joints={} vertices={} bind_err={err:.6}",
+                        skin.joint_count(),
+                        skin.vertex_count()
+                    ))
+                }
+                Err(e) => Err(format!("{path}: {e}")),
+            }
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
