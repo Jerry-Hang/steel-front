@@ -358,6 +358,9 @@ impl GameApp {
     /// * `corpses` / `hit_damage_popups` / `last_npc_snapshot` ⇒ 上一局的尸体与伤害数字
     ///   留在新一局（快照不清理还会把旧 NPC 当"刚死"再补一批尸体）。
     pub(crate) fn reset_session_transients(&mut self) {
+        // 场景层：玩家身体重建后，旧句柄必须换成新的（否则编辑器/AI 接口指着一个
+        // 已经不存在的实体）。这一句就是 `Scene::despawn` 的真实使用者。
+        self.game.respawn_player_entity();
         self.key_state.reset();
         self.fire_requested = false;
         self.ads_active = false;

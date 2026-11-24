@@ -318,6 +318,40 @@ impl GameApp {
             }
             self.fire_requested = true;
         }
+        // `RV3D_SCENE_DIAG=1`：每秒打一行场景层状态（**引擎化 P0 的第一条上报通道**）。
+        //
+        // 它同时是"场景层被真正读取"的证据：编辑器将来显示的世界坐标、AI 接口将来的
+        // `tel.scene` 推流，读的都是这一张表。日志格式刻意做成机读的 key=value，
+        // 以后 aipc 复用同一份序列化，不另发明第二套。
+        if crate::syscfg::flag("RV3D_SCENE_DIAG") {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static LAST: AtomicU32 = AtomicU32::new(0);
+            let now = (self.game.time * 10.0) as u32;
+            if now != LAST.load(Ordering::Relaxed) {
+                LAST.store(now, Ordering::Relaxed);
+                let e = self.game.player_entity();
+                match self.game.scene().world_matrix(e) {
+                    Ok(m) => {
+                        let p = m.w_axis.truncate();
+                        let sc = self.game.scene();
+                        let kids = sc.children(self.game.world_root()).map(|c| c.len()).unwrap_or(0);
+                        let l = sc.local(e).map(|t| t.translation).unwrap_or_default();
+                        log::info!(
+                            "scene: entities={} root_children={} local=({:.2},{:.2},{:.2}) world=({:.2},{:.2},{:.2})",
+                            sc.len(),
+                            kids,
+                            l.x,
+                            l.y,
+                            l.z,
+                            p.x,
+                            p.y,
+                            p.z
+                        );
+                    }
+                    Err(err) => log::warn!("scene: 玩家实体句柄失效 {err:?}"),
+                }
+            }
+        }
         // `RV3D_BOOM_AT=<秒>`：在指定时刻于相机正前方 8 m 生成一发爆炸（**视觉 A/B 专用**）。
         //
         // 存在理由：用户报"爆炸是个巨大的橙色多面体"。要把它做成可量化的修复，

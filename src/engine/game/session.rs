@@ -6,6 +6,18 @@ use super::*;
 impl Game {
     /// 创建游戏中枢：初始化物理演示场景
     pub(crate) fn new() -> Self {
+        // 场景层（引擎化 P0）：先把玩家实体建出来，再在下面把它塞进 `Game`。
+        // 顺序不能反 —— 结构体字面量里没法"spawn 之后把句柄存进同一行"。
+        let mut scene = crate::engine::scene::Scene::new();
+        // 标准形态：一个世界根节点，玩家就挂在它下面。
+        let world_root = scene.spawn(None, crate::engine::scene::Transform::IDENTITY);
+        let player_entity = scene.spawn(
+            None,
+            crate::engine::scene::Transform::from_translation(glam::Vec3::ZERO),
+        );
+        scene
+            .set_parent(player_entity, Some(world_root))
+            .expect("刚建的两个实体必然有效");
         let mut world = physics::World::new();
         world.gravity = 9.8;
         // 地形中央 60×60 区域已压平到 y=0（renderer.rs flatten_mask）；障碍刚体由关卡布局生成
@@ -56,6 +68,9 @@ impl Game {
             });
         }
         let mut game = Self {
+            scene,
+            player_entity,
+            world_root,
             world,
             collisions: Vec::new(),
             total_collisions: 0,
@@ -657,10 +672,54 @@ impl Game {
         self.map.render_geometry()
     }
     /// 每帧推进所有已接入系统
+    /// 把玩家当前脚底位置写进场景层（引擎化 P0 的第一条真实数据流）。
+    ///
+    /// ⚠️ 现阶段**玩家体仍是权威**，场景层是它的镜像；等 P1 把渲染改成读 `SceneView`
+    /// 之后方向会反过来。这条镜像存在的意义是：让"改场景 = 改世界"这条链路先跑通，
+    /// 并且让编辑器/AI 接口有一个稳定句柄可以指着玩家。
+    /// 死亡重开时重置场景里的玩家实体（**这是 `despawn` 的真实使用者**：
+    /// 免得旧句柄在重建后指向一个已经不存在的身体）。
+    pub(crate) fn respawn_player_entity(&mut self) {
+        let _ = self.scene.despawn(self.player_entity);
+        let t = crate::engine::scene::Transform::from_translation(glam::Vec3::ZERO);
+        self.player_entity = self.scene.spawn(None, t);
+        self.scene.set_parent(self.player_entity, Some(self.world_root)).ok();
+    }
+
+    pub(crate) fn sync_player_to_scene(&mut self) {
+        let t = crate::engine::scene::Transform::from_translation(glam::Vec3::new(
+            self.player_body.pos.x,
+            self.player_body.pos.y,
+            self.player_body.pos.z,
+        ));
+        // 句柄恒有效；真失效了说明有人误删了玩家实体 —— 这里重建而不是静默吞掉。
+        if self.scene.set_local(self.player_entity, t).is_err() {
+            self.player_entity =
+                self.scene.spawn(None, t);
+        }
+    }
+
+    /// 场景层只读视图（编辑器 / AI 接口 / 判据都从这里读）。
+    pub fn scene(&self) -> &crate::engine::scene::Scene {
+        &self.scene
+    }
+
+    /// 玩家在场景里的实体句柄。
+    pub fn player_entity(&self) -> crate::engine::scene::EntityId {
+        self.player_entity
+    }
+
+    /// 世界根节点句柄。
+    pub fn world_root(&self) -> crate::engine::scene::EntityId {
+        self.world_root
+    }
+
     pub(crate) fn update(&mut self, dt: f32, camera: &Camera) {
         self.frame_no = self.frame_no.wrapping_add(1);
         self.last_dt = dt;
         self.time += dt;
+        // 场景层镜像（引擎化 P0）：每帧把玩家位置写进 `Scene`。
+        self.sync_player_to_scene();
         // 手电电量：夜间开灯才耗电（白天灯不亮也不耗），关灯缓慢回充。
         {
             let night = self.night_vision_factor() < 0.95;

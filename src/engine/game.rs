@@ -608,6 +608,16 @@ pub struct Game {
     pending_kick: (f32, f32),
     /// 第一人称玩家身体（WASD 移动 + 与演示刚体碰撞，y 每帧贴地形）
     player_body: PlayerBody,
+    /// 场景层（引擎化 P0，见 `docs/ENGINE-PLAN.md`）：玩家是**第一个**接进来的实体。
+    ///
+    /// 这一层将来的角色：编辑器的拖拽、渲染器的提交、AI 接口的操作，改的都是这里的
+    /// `Transform`。现在只接玩家一个，进程内就已经有两个读者（`sync_player_to_scene`
+    /// 的写与判据的读），不是摆设。
+    pub scene: crate::engine::scene::Scene,
+    /// 玩家在场景里的实体句柄。
+    player_entity: crate::engine::scene::EntityId,
+    /// 世界根节点：所有场景实体都挂在它下面（交换/存盘/整树操作的锚点）。
+    world_root: crate::engine::scene::EntityId,
     /// 移动输入标志（main.rs 转发 WASD；仅 Playing + FPS 生效）
     move_forward: bool,
     move_backward: bool,
