@@ -94,6 +94,67 @@ pub fn skin_position(p: Vec3, joints: [u16; 4], weights: [f32; 4], mats: &[Mat4]
     }
 }
 
+
+/// 把权重**预先归一化**到和为 1（全零权重保持全零 = "这个顶点不跟任何骨骼动"）。
+///
+/// 🔴 **这是给 GPU 侧准备的契约**：着色器不会做归一化（那需要分支，而且会把
+/// "权重和不为 1 的坏数据"的语义藏进着色器）。所以上 GPU 之前必须在 CPU 侧归一化，
+/// 使 `Σw = 1` 成立；否则 GPU 与 CPU 会算出不同结果，而**两边的实现各自看都对**。
+///
+/// 归一化之后 [`skin_position`] 与"着色器的直白写法"
+/// （`p' = Σ w_i · (M_i · p)`，不归一化）**逐位一致** —— 判据钉住这条。
+pub fn normalized_weights(skin: &Skin) -> Vec<[f32; 4]> {
+    skin.weights
+        .iter()
+        .map(|w| {
+            let sum: f32 = w.iter().map(|x| x.max(0.0)).sum();
+            if sum <= 1e-6 {
+                return [0.0, 0.0, 0.0, 0.0];
+            }
+            let mut out = [0.0f32; 4];
+            for k in 0..4 {
+                out[k] = w[k].max(0.0) / sum;
+            }
+            out
+        })
+        .collect()
+}
+
+/// **着色器的算法**在这里的一份参照实现：`p' = Σ w_i · (M_i · p)`，不做任何归一化、
+/// 不做"剩余比例留在原位"的补偿。它的唯一用途是给 GPU 侧当契约：
+/// 归一化权重之后，两者必须一致。
+pub fn shader_reference_skin(
+    p: Vec3,
+    joints: [u16; 4],
+    weights: [f32; 4],
+    mats: &[Mat4],
+) -> Vec3 {
+    let mut acc = Vec3::ZERO;
+    for k in 0..4 {
+        let w = weights[k];
+        if w <= 0.0 {
+            continue;
+        }
+        if let Some(m) = mats.get(joints[k] as usize) {
+            acc += m.transform_point3(p) * w;
+        }
+    }
+    acc
+}
+
+/// 关节矩阵缓冲：每个关节一个 16 个 f32（**列主序**，与 WGSL 的 `mat4x4<f32>` 一致）。
+///
+/// GPU 侧要的就是这一段连续内存（将来塞进 storage buffer / uniform 数组）。
+/// 把"展平"这一步放在 CPU 并判据化，是因为着色器里读错 stride 是**静默**的：
+/// 每个数都是合法浮点数，画面只是"骨骼姿势怪"。
+pub fn joint_matrix_buffer(mats: &[Mat4]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(mats.len() * 16);
+    for m in mats {
+        out.extend_from_slice(&m.to_cols_array());
+    }
+    out
+}
+
 /// 绑定姿势自检：返回**所有顶点的最大位移**（应当 ≈ 0）。
 ///
 /// 这条是判据的核心 —— 它同时检验了"矩阵顺序"与"inverseBind 方向"两件事，
@@ -601,6 +662,94 @@ mod tests {
         out.extend_from_slice(b"BIN\0");
         out.extend_from_slice(&bin);
         out
+    }
+
+
+    /// 🔴 **GPU 契约**：权重归一化之后，`skin_position`（带补偿的实现）与
+    /// `shader_reference_skin`（着色器的直白写法）必须**逐位一致**。
+    ///
+    /// 这条决定了将来着色器里能不能省掉归一化分支。用真实 Blender 资产（50/50 权重，
+    /// 和恰好为 1）与一个**故意不归一**的合成 skin（0.3 + 0.3）各测一次。
+    ///
+    /// 反向验证：把 `normalized_weights` 改成"原样返回"⇒ 第二条断言红（0.6 的和会少 40% 位移）。
+    #[test]
+    fn normalized_weights_make_the_shader_formula_exact() {
+        // ① 真实资产：权重本来就和为 1
+        let glb = include_bytes!("../../tools/fixtures/skinned_bar.glb");
+        let (skin, positions) = parse_glb_skin(glb).expect("解析").expect("有骨骼");
+        let mats = skin.matrices();
+        let nw = normalized_weights(&skin);
+        for (i, p) in positions.iter().enumerate() {
+            let a = skin.skin_vertex(i, *p, &mats);
+            let b = shader_reference_skin(*p, skin.joints[i], nw[i], &mats);
+            assert!(
+                (a - b).length() < 1e-6,
+                "v{i} 两种写法必须一致：CPU {a:?} vs 着色器式 {b:?}"
+            );
+        }
+
+        // ② 合成 skin：权重和 = 0.6（不归一），必须靠归一化救回来
+        let bad = Skin {
+            joint_world: vec![Mat4::IDENTITY, Mat4::from_translation(glam::Vec3::new(0.0, 10.0, 0.0))],
+            inverse_bind: vec![Mat4::IDENTITY, Mat4::IDENTITY],
+            joints: vec![[1, 1, 1, 1]],
+            weights: vec![[0.3, 0.3, 0.0, 0.0]],
+        };
+        let p = glam::Vec3::ZERO;
+        let bad_mats = bad.matrices();
+        let nw_bad = normalized_weights(&bad);
+        // 🔴 契约是"**两边都喂归一化后的权重**"。
+        // 注意不能用 `skin_vertex`：它内部读的是**原始权重** [0.3,0.3]，
+        // 而 `skin_position` 有一条"剩余比例留在原位置"的补偿（和 < 1 时按比例混回原始位置），
+        // 于是原始权重下得到 6m（0.6 × 10）、归一化权重下得到 10m —— 两者都对，语义不同。
+        // 我第一版断言写成"归一化后应 10m"却调用了 `skin_vertex`，测出来是 6，正好暴露这点。
+        let cpu_norm = skin_position(p, bad.joints[0], nw_bad[0], &bad_mats);
+        let gpu = shader_reference_skin(p, bad.joints[0], nw_bad[0], &bad_mats);
+        assert!(
+            (cpu_norm.y - 10.0).abs() < 1e-4,
+            "归一化后应整段位移 10m，实际 {}",
+            cpu_norm.y
+        );
+        assert!(
+            (cpu_norm - gpu).length() < 1e-4,
+            "归一化后两写法必须一致：CPU {cpu_norm:?} vs 着色器式 {gpu:?}"
+        );
+        // 原始权重走 `skin_position` 的补偿路径 ⇒ 6m（与上面那条语义不同，但都是对的）
+        let cpu_raw = bad.skin_vertex(0, p, &bad_mats);
+        assert!(
+            (cpu_raw.y - 6.0).abs() < 1e-4,
+            "原始权重下补偿路径应给 6m，实际 {}",
+            cpu_raw.y
+        );
+        // 用**未归一**的权重照着色器写法算 ⇒ 只有 6m，差 4m（这就是为什么要先归一化）
+        let raw = shader_reference_skin(p, bad.joints[0], bad.weights[0], &bad_mats);
+        assert!(
+            (raw.y - 6.0).abs() < 1e-4,
+            "未归一化时着色器式写法应只走 6m（0.6 × 10），实际 {}",
+            raw.y
+        );
+    }
+
+    /// 关节矩阵缓冲必须是**列主序、每关节 16 个 f32**（WGSL 的 `mat4x4<f32>` 约定）。
+    /// 反向验证：改成 `to_cols_array_2d` 的行优先展平 ⇒ 平移分量会跑到错误位置，红。
+    #[test]
+    fn joint_matrix_buffer_is_column_major_and_16_per_joint() {
+        // ① 纯平移：列主序下平移在 12..15
+        let t = Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0));
+        let buf = joint_matrix_buffer(&[t]);
+        assert_eq!(buf.len(), 16, "每关节 16 个 f32");
+        assert_eq!(&buf[12..15], &[1.0, 2.0, 3.0], "平移必须落在 12..15");
+        assert_eq!(buf[15], 1.0);
+
+        // ② 纯旋转：**必须用非对称矩阵**，否则行优先/列主序展开的字节完全相同（判据恒真）。
+        // 我第一版用纯平移，注入"行优先展开"居然没红。
+        // 绕 Y：R = [[c,0,s],[0,1,0],[-s,0,c]]，列主序 ⇒ col0 = (c,0,-s,0) ⇒ buf[2] = -s，
+        // col2 = (s,0,c,0) ⇒ buf[8] = +s。
+        let r = Mat4::from_rotation_y(0.7);
+        let rb = joint_matrix_buffer(&[r]);
+        let sn = 0.7f32.sin();
+        assert!((rb[2] - (-sn)).abs() < 1e-6, "buf[2] 应是 -sinθ：{}", rb[2]);
+        assert!((rb[8] - sn).abs() < 1e-6, "buf[8] 应是 +sinθ：{}", rb[8]);
     }
 
     /// 🔴 **绑定姿势自检**：关节在绑定位时，骨骼变换结果必须与原始顶点一致。

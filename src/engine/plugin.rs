@@ -707,6 +707,64 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // ---- P4e 前置：GPU 侧骨骼变换的**输入清单**探针 ----
+    //
+    // 它报告"如果现在上 GPU，缓冲里会有什么"：关节矩阵个数 × 16 个 f32、
+    // 以及用**着色器算法**（不归一化）算出来的一个顶点位置。
+    // GPU 接线之后，这条命令就是"CPU 与 GPU 应该一致"的对照真值。
+    reg.add_command(
+        "asset.skin_gpu_info",
+        "报告 GPU 侧骨骼变换输入：asset.skin_gpu_info <路径> <t>",
+        |_ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let t: f32 = args
+                .get(1)
+                .ok_or_else(|| "缺时间参数 t".to_string())?
+                .parse()
+                .map_err(|_| "t 不是数字".to_string())?;
+            let bytes = std::fs::read(&path[..]).map_err(|e| format!("读文件失败：{e}"))?;
+            let (json, _bin) = crate::engine::skin::split_glb(&bytes)?;
+            let Some((skin, positions)) = crate::engine::skin::parse_glb_skin(&bytes)? else {
+                return Ok(format!("{path}: 没有骨骼"));
+            };
+            let channels = crate::engine::anim::parse_glb_animations(&bytes)?;
+            let worlds = crate::engine::anim::sample_pose_worlds(&json, 0, &channels, t);
+            let joints: Vec<usize> = json
+                .get("skins")
+                .and_then(|s| s.as_arr())
+                .and_then(|s| s.first())
+                .and_then(|s| s.get("joints"))
+                .and_then(|j| j.as_arr())
+                .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as usize).collect())
+                .unwrap_or_default();
+            // 骨骼矩阵 = 当前世界 × 绑定 inverseBind（与 `posed_positions` 同一公式）
+            let mats: Vec<glam::Mat4> = joints
+                .iter()
+                .enumerate()
+                .map(|(k, node)| {
+                    worlds.get(*node).copied().unwrap_or(glam::Mat4::IDENTITY)
+                        * skin.inverse_bind.get(k).copied().unwrap_or(glam::Mat4::IDENTITY)
+                })
+                .collect();
+            let buf = crate::engine::skin::joint_matrix_buffer(&mats);
+            let nw = crate::engine::skin::normalized_weights(&skin);
+            let p0 = positions.first().copied().unwrap_or(glam::Vec3::ZERO);
+            let q = crate::engine::skin::shader_reference_skin(
+                p0,
+                skin.joints.first().copied().unwrap_or([0; 4]),
+                nw.first().copied().unwrap_or([0.0; 4]),
+                &mats,
+            );
+            Ok(format!(
+                "{path}: t={t:.2} joints={} buffer_floats={} v0=({:.3},{:.3},{:.3})",
+                mats.len(),
+                buf.len(),
+                q.x,
+                q.y,
+                q.z
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

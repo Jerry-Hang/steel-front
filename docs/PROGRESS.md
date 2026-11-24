@@ -5467,3 +5467,38 @@ scene.save /tmp/hc.toml                        → saved entities=3
 asset.count                                    → assets=52 pages=7
 ```
 存盘里 `mesh = "assets/props/barrel_metal.glb"` 在 ⇒ 建、改、存整条链通。
+
+### 2026-11-25：P4e 前置 —— GPU 侧蒙皮的**契约**先在 CPU 侧钉死
+
+动渲染管线之前先把契约固定下来，否则出现"GPU 和 CPU 结果不一致"时两边各自看都对。
+
+新增：
+- `skin::normalized_weights`：把权重归一化到和为 1（全零保持全零 = 不跟任何骨骼动）。
+  **着色器不做归一化**（要分支，还会把坏数据的语义藏进着色器），所以必须在 CPU 侧归一化；
+- `skin::shader_reference_skin`：**着色器算法的参照实现**（`Σ w_i·(M_i·p)`，不归一化、不补偿），
+  唯一用途是当契约；
+- `skin::joint_matrix_buffer`：每关节 16 个 f32 的**列主序**缓冲（将来塞 storage buffer）。
+
+判据 2 条：
+- `normalized_weights_make_the_shader_formula_exact`：喂**归一化后的权重**给两边，
+  结果必须一致（用真实 Blender 资产 + 一个故意不归一的合成 skin）；
+- `joint_matrix_buffer_is_column_major_and_16_per_joint`。
+
+🔴 **这条判据改了三版才对**，三版都是"判据自己不够格"：
+1. 第一版断言"归一化后应位移 10m"却调了 `skin_vertex`（它读**原始**权重，
+   而 `skin_position` 有"剩余比例留在原位置"的补偿）⇒ 实测 6m。契约的准确表述是
+   **"两边都喂归一化后的权重"**，不是"归一化会改变 skin_vertex 的结果"；
+2. 矩阵判据用**纯平移**矩阵 —— 它左右两半字节相同，行优先/列主序展开**完全一致** ⇒ 恒真；
+3. 换成旋转矩阵后我把 −sinθ 的索引写成 `buf[1]`（实际是 `buf[2]`：列主序 `col0=(c,0,-s,0)`），
+   而我又用了 `Mat4::from_rotation_y * translation` 这种**复合**矩阵去断言"平移在 12..15"，
+   实际那是 `R·t` —— 两处都是我自己算错。
+
+最终版：纯平移测 12..15、纯旋转测 `buf[2]=-sinθ` / `buf[8]=+sinθ`；
+注入改成**真正的行优先**（`m.transpose().to_cols_array()`）——
+注意 `to_cols_array_2d()` 展平后与 `to_cols_array()` 逐字节相同，拿它当"行优先注入"是无效注入
+（我第一次这么注入，当然不会红）。
+
+**消费者**：`asset.skin_gpu_info <路径> <t>` —— 报告"如果现在上 GPU，缓冲里会有什么"：
+关节矩阵个数 × 16 个 f32，以及用**着色器算法**算出来的 v0 位置。
+实机：`skinned_bar.glb` at t=1.04 → `joints=2 buffer_floats=32 v0=(0.000,0.000,0.000)`。
+GPU 接线之后，这条命令就是"CPU 与 GPU 应该一致"的对照真值（不是事后另造一套判据）。
