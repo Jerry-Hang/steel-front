@@ -582,6 +582,8 @@ mod asset_path_scan_tests {
         // 骨骼探针（引擎化 P4）：读的是**用户指定的任意 GLB**，不是随包资产，
         // 与 `scene.save/load` 同类。真正的资产读取仍必须走 `AssetSource`。
         ("src/engine/plugin.rs", "std::fs::read(path)"),
+        // 动画探针（引擎化 P4b）：同上，读用户指定的 GLB，不是随包资产。
+        ("src/engine/plugin.rs", "std::fs::read(&path[..])"),
         // CPU topology: reads Linux sysfs (`/sys/devices/system/cpu`), not assets
         ("src/engine/cpu.rs", "std::fs::read_to_string(&p)"),
         ("src/engine/cpu.rs", "std::fs::read_to_string(&path)"),

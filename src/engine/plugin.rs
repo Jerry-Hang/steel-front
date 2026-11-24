@@ -422,6 +422,45 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             }
         },
     );
+    // ---- P4b：动画探针 ----
+    reg.add_command(
+        "asset.anim_probe",
+        "读 GLB 并报告骨骼动画通道与采样：asset.anim_probe <路径>",
+        |_ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let bytes = std::fs::read(&path[..]).map_err(|e| format!("读文件失败：{e}"))?;
+            let channels = crate::engine::anim::parse_glb_animations(&bytes)?;
+            if channels.is_empty() {
+                return Ok(format!("{path}: 没有动画"));
+            }
+            let dur = channels
+                .iter()
+                .map(|c| c.duration())
+                .fold(0.0f32, f32::max);
+            let mid: Vec<String> = channels
+                .iter()
+                .take(3)
+                .map(|c| {
+                    let v = c.sample(dur * 0.5);
+                    format!(
+                        "node{}:{}[{}] mid=({:.3},{:.3},{:.3},{:.3})",
+                        c.node,
+                        c.path,
+                        c.interp.name(),
+                        v.x,
+                        v.y,
+                        v.z,
+                        v.w
+                    )
+                })
+                .collect();
+            Ok(format!(
+                "{path}: channels={} duration={dur:.3} {}",
+                channels.len(),
+                mid.join(" ")
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

@@ -328,7 +328,7 @@ fn node_local(json: &crate::llm_cmd::Json, idx: usize) -> Mat4 {
 /// 与 `assets.rs` 里那个嵌套的 `read_acc` 是两份实现 —— 有意为之：
 /// 那个函数嵌在 `parse_map_mesh` 内部拿不出来，而骨骼要读 MAT4 与 u8 关节号。
 /// 边界写在这里，等 `assets.rs` 哪天把那函数提到模块级，这份就可以删掉。
-fn read_acc_f32(
+pub(crate) fn read_acc_f32(
     json: &crate::llm_cmd::Json,
     bin: &[u8],
     idx: usize,

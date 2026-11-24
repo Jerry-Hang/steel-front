@@ -5180,3 +5180,34 @@ asset.skin_probe assets/props/barrel_metal.glb → 没有骨骼（skins 为空�
 
 ⚠️ 未做（下一步）：GPU 侧蒙皮（顶点着色器读关节矩阵）与动画采样
 （`animations` 的 sampler 插值）。现在只有 CPU 侧的解析与数学。
+
+### 2026-11-25：引擎化 P4b —— 骨骼动画解析与采样（STEP / LINEAR / CUBICSPLINE）
+
+`engine/anim.rs`：`Interp`（三种插值）、`locate`（t 落在哪一段）、`sample_vec`、
+`sample_cubic`（Hermite）、`sample_quat`（**slerp**）、`Channel`（node + path + 采样数据）、
+`parse_glb_animations`（读 `animations[].channels/samplers`）。
+
+三处容易写错、都给了判据：
+1. **端点夹取**：`t` 超出时间轴一律取端值，不外推（外推会让骨头飞出模型）；
+   而且**末帧必须返回末值** —— 第一版 `locate` 让 `t>=末帧` 落到 `(last-1, 1.0)`，
+   STEP 于是返回倒数第二帧的值，被 `anim_step_holds_the_previous_keyframe` 抓住；
+2. **CUBICSPLINE 的切线要乘段长**（`h10 * dt`），漏乘只在段长 ≠ 1 时暴露 ——
+   专门写了 `anim_cubic_scales_tangents_by_segment_length`；
+3. **旋转必须 slerp**。
+
+**可用入口**：`asset.anim_probe <路径>`。实机：
+```
+/tmp/anim_test.glb      → channels=1 duration=1.000 node0:translation[LINEAR] mid=(1.000,0,0,0)
+assets/props/barrel_metal.glb → 没有动画
+```
+（中点 1.0 = (0,0,0)→(2,0,0) 的手算中值。）
+
+🔴 **旋转判据第一版过度指定**：用 180° 夹具时 slerp 走了 −90°，而期望写的是 +90° ——
+两者是不同姿态但**都合法**（180° 的测地线不唯一）。换成 120° 夹具后，
+slerp 在 u=0.25 处角位移恰为 30°（w = cos15° = 0.96593），nlerp 给 0.97063，
+差 0.0047，用 1e-3 容差能可靠区分。
+
+全部 6 条判据做了注入验证：把 slerp 换成 nlerp / STEP 取右端 / 切线漏乘 dt ——
+**每次恰好 1 条红**。
+
+⚠️ 未做：GPU 侧蒙皮（顶点着色器读关节矩阵）。现在只有 CPU 侧的解析与采样。
