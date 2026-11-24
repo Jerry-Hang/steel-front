@@ -4832,3 +4832,23 @@ LOD 代理比本体高 **1 cm**：0.01 m 在任何距离都是亚像素，不构
 （`fb_s = r*(0.05+0.10t)` / `ring_s = r*(0.08+0.15t)` / `col_h = 0.55+0.55t` / `smoke_s = r*(0.06+0.16t)`），
 并显式禁止旧的两条超大项回来。反向验证：把 `0.05+0.10` 改回 `0.2+1.2` ⇒ 红，
 报「火球核的尺寸表达式必须是…（实测 56.87% 画面 vs 现在的 3.51%）」。
+
+### 2026-11-25：引擎化 P0 + P1a（场景层落地 / 渲染器与玩法解耦）
+
+**P0 场景层**（`5f3ec40`）：`engine/scene.rs` —— `EntityId`（带 generation）、`Transform`（T·R·S）、
+上下层级、删除级联、世界矩阵。接到真实路径：`Game` 持有 `scene` + 世界根 + 玩家实体，每帧
+`sync_player_to_scene()` 镜像玩家位置，重开时 `respawn_player_entity()` 重建实体；
+新增 `RV3D_SCENE_DIAG=1` 每秒一行 `scene: entities/root_children/local/world`（机读格式，
+将来 aipc 直接复用）。判据 4 条，全部反向验证能红。
+
+**P1a 解耦**（本提交）：`MapObstacle` / `ObstacleKind` 从 `engine::game` 提到新的 `engine/world.rs`；
+`engine::game` 只做再导出（既有 100+ 处路径零改动），`renderer.rs` 改为从 `engine::world` 取。
+分层判据 `engine_layer_does_not_grow_game_dependencies` 的基线**从 1 降到 0**（硬零）：
+反向验证 = 在 renderer 里加一行对玩法的 use ⇒ 红，报 `["src/engine/renderer.rs:20"]`。
+
+⚠️ 过程中踩的两个坑（都已修）：
+1. **判据自匹配**：判据文件里写完整的 `crate::engine::game` 会让判据命中自己（本会话第二次），
+   改成 `concat!("crate::engine", "::", "game")`；
+2. 断言文案里的 `\n\` 被写成了转义残留，输出时原样打印 —— 报错信息本身也是证据，要能读。
+
+计划见 `docs/ENGINE-PLAN.md`（P0~P7 + 插件体系 P7a~P7c）。

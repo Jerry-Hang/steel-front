@@ -15,7 +15,8 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 use super::lighting::{LightUniform, LIGHT_UBO_BINDING};
 // 障碍 marker 材质/尺寸构建依赖游戏侧障碍定义（仅类型引用，无运行时依赖）
-use crate::engine::game::{MapObstacle, ObstacleKind};
+// 世界几何的类型住 `engine::world`（引擎化 P1a）—— 渲染器**不再**依赖玩法目录。
+use crate::engine::world::{MapObstacle, ObstacleKind};
 // 子模块里的 `super::procedural::…` 需要这条再导出：那段代码原来就在 renderer.rs（`super` 指 engine），
 // 下沉一层后 `super` 变成 renderer。再导出让**搬走的字节保持原样** ——
 // 判据 tools/refactor_move_check.py 因此不需要为它加归一化。

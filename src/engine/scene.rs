@@ -384,7 +384,8 @@ mod tests {
     /// ⇒ 立刻红。
     #[test]
     fn engine_layer_does_not_grow_game_dependencies() {
-        const RENDERER_BASELINE: usize = 1;
+        // P1a 已完成：renderer 对玩法目录的引用降到 **0**，这条从"上限"变成"硬零"。
+        const RENDERER_BASELINE: usize = 0;
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             if let Ok(rd) = std::fs::read_dir(dir) {
                 for e in rd.flatten() {
@@ -413,9 +414,9 @@ mod tests {
         }
         assert!(
             hits.len() <= RENDERER_BASELINE,
-            "引擎目录对 game 的引用从 {RENDERER_BASELINE} 行涨到 {} 行：{hits:?}\\n\\
-             ⇒ 新代码请走 `engine::scene`；要把这两个类型（MapObstacle/ObstacleKind）\\
-             提到 engine 层，别把玩法概念再引进来",
+            "引擎目录对玩法目录的引用从 {RENDERER_BASELINE} 行涨到 {} 行：{hits:?}\\\
+             ；新代码请走 `engine::scene` 或 `engine::world`，别把玩法概念再引进来",
+
             hits.len()
         );
         // 场景层自己是硬 0：它是新代码，没有历史负担
