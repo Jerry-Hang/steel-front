@@ -11,6 +11,7 @@
 //! - `names`：注册了哪些插件（诊断与编辑器面板用）。
 
 use crate::engine::scene::Scene;
+use glam::Vec3;
 
 /// 系统执行阶段。顺序固定（`PreUpdate → Update → PostUpdate → PreRender`），
 /// 与 `runtime` 将来的帧结构一一对应；**不要**按注册顺序执行 —— 那会让"谁先 add
@@ -51,6 +52,9 @@ pub struct PluginCtx<'a> {
     pub dt: f32,
     /// 输出缓冲（诊断/上报用；编辑器面板与 AI 接口读同一份）。
     pub out: Vec<String>,
+    /// **当前选中实体**（编辑器选中的那个；AI 接口也能改它）。
+    /// `None` = 没选中 —— 跟"对选中项操作"有关的命令必须报错而不是猜一个。
+    pub selection: Option<crate::engine::scene::EntityId>,
 }
 
 impl<'a> PluginCtx<'a> {
@@ -60,6 +64,7 @@ impl<'a> PluginCtx<'a> {
             time,
             dt,
             out: Vec::new(),
+            selection: None,
         }
     }
 
@@ -219,6 +224,85 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 .scene
                 .spawn(None, crate::engine::scene::Transform::IDENTITY);
             Ok(format!("spawned entities={} id={id:?}", ctx.scene.len()))
+        },
+    );
+    // ---- P2：三轴 gizmo（射线取点与拖动）----
+    //
+    // 这两条命令就是编辑器鼠标拖动时走的**同一个函数**（`gizmo.rs` 的纯数学）。
+    // `gizmo.pick` 给出沿轴的米制参数，`gizmo.drag` 用两次取点的差写回玩家平移。
+    reg.add_command(
+        "gizmo.pick",
+        "沿轴取点：gizmo.pick <X|Y|Z> <ox> <oy> <oz> <dx> <dy> <dz>",
+        |_ctx, args| {
+            let axis = args
+                .first()
+                .and_then(|s| crate::engine::gizmo::Axis::parse(s))
+                .ok_or_else(|| "缺轴或轴非法（X/Y/Z）".to_string())?;
+            if args.len() < 8 {
+                return Err("参数不足：需要 轴 + 射线原点3 + 方向3".to_string());
+            }
+            let f = |i: usize| -> Result<f32, String> {
+                args[i]
+                    .parse::<f32>()
+                    .map_err(|_| format!("第 {i} 个参数不是数字：{}", args[i]))
+            };
+            let o = glam::Vec3::new(f(1)?, f(2)?, f(3)?);
+            let d = glam::Vec3::new(f(4)?, f(5)?, f(6)?);
+            match crate::engine::gizmo::axis_param(o, d, glam::Vec3::ZERO, axis.dir()) {
+                Some(t) => Ok(format!("t={t:.6} axis={}", axis.name())),
+                None => Err("射线与轴近平行，拒绝取点".to_string()),
+            }
+        },
+    );
+    reg.add_command(
+        "gizmo.drag",
+        "把玩家沿轴拖到新参数：gizmo.drag <X|Y|Z> <t0> <t1>",
+        |ctx, args| {
+            let axis = args
+                .first()
+                .and_then(|s| crate::engine::gizmo::Axis::parse(s))
+                .ok_or_else(|| "缺轴或轴非法（X/Y/Z）".to_string())?;
+            if args.len() < 3 {
+                return Err("参数不足：需要 轴 + t0 + t1".to_string());
+            }
+            let t0: f32 = args[1].parse().map_err(|_| "t0 不是数字".to_string())?;
+            let t1: f32 = args[2].parse().map_err(|_| "t1 不是数字".to_string())?;
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let cur = ctx
+                .scene
+                .world_matrix(sel)
+                .map(|m| m.w_axis.truncate())
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            // 构造两条"恰好取点到 t0 / t1"的射线：与轴垂直、交于 axis*t。
+            // 这样无鼠标的入口（脚本 / AI / 自检）走的也是**鼠标那条数学路径**，
+            // 不是另写一份"直接加增量"的绕过路径。
+            let ray_at = |t: f32| {
+                (
+                    axis.dir() * t + Vec3::new(1.0, 1.0, 0.0),
+                    -Vec3::new(1.0, 1.0, 0.0),
+                )
+            };
+            let (o0, d0) = ray_at(t0);
+            let start = crate::engine::gizmo::TranslateDrag::begin(axis, cur, o0, d0)
+                .ok_or_else(|| "起始射线与轴近平行".to_string())?;
+            let (o1, d1) = ray_at(t1);
+            let moved = start
+                .drag(o1, d1)
+                .ok_or_else(|| "结束射线与轴近平行".to_string())?;
+            ctx.scene
+                .set_local(sel, crate::engine::scene::Transform::from_translation(moved))
+                .map_err(|_| "写回 Transform 失败".to_string())?;
+            Ok(format!(
+                "drag axis={} delta={:.4} from=({:.3},{:.3},{:.3}) to=({:.3},{:.3},{:.3})",
+                start.axis().name(),
+                t1 - t0,
+                cur.x,
+                cur.y,
+                cur.z,
+                moved.x,
+                moved.y,
+                moved.z
+            ))
         },
     );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。

@@ -4880,3 +4880,35 @@ plugin-cmd: plugin.list → plugins=["debug"]; scene.count = …; scene.spawn = 
 ⚠️ 又一次被 dead-code 闸门逼着接线：`Phase::name()`、`PluginCtx::dt`、`command_help()`、
 `plugin_names()` 都先是"规划中的 API"，按本仓纪律**不许加 `#[allow]`**，最后都接进了
 `debug.tick` 的输出与 `plugin.list` 的自描述里 —— 现在每一个都有真实读者。
+
+### 2026-11-25：引擎化 P2 —— 三轴 gizmo 的取点与拖动（纯数学先做对，再接入口）
+
+`engine/gizmo.rs`：`Axis`（X/Y/Z）、`axis_param(ray_o, ray_d, point, axis)`、`TranslateDrag`。
+核心公式（两条方向都是单位向量）：
+```text
+w0 = point - ray_o ;  b = axis·ray_d ;  d = axis·w0 ;  e = ray_d·w0
+t = (b·e - d) / (1 - b²)
+```
+`t` 的单位就是**米**（轴是单位向量）⇒ 两次取点相减直接是这次拖动该产生的位移，
+与分辨率/FOV/相机距离无关 ⇒ **同一个实现既能给鼠标用，也能给 AI 接口用**。
+
+三处刻意的设计：
+- **平行必须拒绝**（`1-b² < 1e-6` ⇒ `None`）：视线几乎沿轴时"最近点"对数值偏差极敏感，
+  继续拖只会让物体以巨大倍率乱跳；
+- **从起点重算而不是累加**：累加会把每帧偏差累积起来，重算只受当前帧影响；
+- **`w0` 方向不能写反**：写成 `ray_o - point` 会让结果整体取反（已反向验证，见下）。
+
+**入口**（同一张命令表，见 P7a）：`gizmo.pick <轴> <射线原点3> <射线方向3>`、
+`gizmo.drag <轴> <t0> <t1>`。`gizmo.drag` **真的写回场景**：它用 `TranslateDrag` 的
+`begin/drag` 走鼠标那条数学路径（构造两条"恰好取到 t0/t1"的垂直线），而不是另写
+一份"直接加增量"的绕过路径。`PluginCtx` 新增 `selection`（当前选中实体），
+由帧循环设为玩家 —— 编辑器的"选中"概念从这一步开始存在。
+
+**实机验证**（headless 640x400）：
+```
+plugin-cmd: gizmo.drag → drag axis=X delta=1.0000 from=(0.000,0.000,0.000) to=(1.000,0.000,0.000)
+```
+⇒ 拖 1.0 m，平移增量**正好 1.0**，与目标里的验收口径一致。
+
+**反向验证**：把 `w0 = point - ray_o` 改成 `ray_o - point` ⇒ 4 条判据里 3 条红，
+报「X 轴参数应为 1.0，实际 -1」。

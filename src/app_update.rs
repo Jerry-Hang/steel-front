@@ -360,8 +360,10 @@ impl GameApp {
         {
             let dt = self.game.last_dt.max(1e-4);
             let time = self.game.time;
+            let sel = Some(self.game.player_entity());
             let mut ctx =
                 crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+            ctx.selection = sel;
             self.plugins.run_frame(&mut ctx);
             for line in &ctx.out {
                 log::info!("{line}");
@@ -376,11 +378,13 @@ impl GameApp {
                 let mut parts = cmd.split_whitespace();
                 let name = parts.next().unwrap_or("").to_string();
                 let args: Vec<&str> = parts.collect();
+                let sel = Some(self.game.player_entity());
                 let mut ctx = crate::engine::plugin::PluginCtx::new(
                     &mut self.game.scene,
                     self.game.time,
                     self.game.last_dt.max(1e-4),
                 );
+                ctx.selection = sel;
                 match self.plugins.run_command(&name, &args, &mut ctx) {
                     Ok(msg) => log::info!("plugin-cmd: {name} → {msg}"),
                     Err(e) => log::warn!("plugin-cmd: {name} 失败：{e}"),
