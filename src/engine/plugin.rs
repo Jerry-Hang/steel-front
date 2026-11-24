@@ -461,6 +461,57 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // ---- P4c：姿势探针（动画 → 关节世界矩阵 → 骨骼变换顶点，整条 CPU 链）----
+    reg.add_command(
+        "asset.pose_probe",
+        "按时间采样姿势并报告顶点位移：asset.pose_probe <路径> <t>",
+        |_ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let t: f32 = args
+                .get(1)
+                .ok_or_else(|| "缺时间参数 t".to_string())?
+                .parse()
+                .map_err(|_| "t 不是数字".to_string())?;
+            let bytes = std::fs::read(&path[..]).map_err(|e| format!("读文件失败：{e}"))?;
+            // 重复解析一次 JSON（探针命令，性能不必在意；不值得为它改解析器签名）
+            let (json, _bin) = crate::engine::skin::split_glb(&bytes)?;
+            let Some((skin, positions)) = crate::engine::skin::parse_glb_skin(&bytes)? else {
+                return Ok(format!("{path}: 没有骨骼"));
+            };
+            let channels = crate::engine::anim::parse_glb_animations(&bytes)?;
+            if channels.is_empty() {
+                return Ok(format!("{path}: 有骨骼但没有动画"));
+            }
+            let joints: Vec<usize> = json
+                .get("skins")
+                .and_then(|s| s.as_arr())
+                .and_then(|s| s.first())
+                .and_then(|s| s.get("joints"))
+                .and_then(|j| j.as_arr())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_f64().unwrap_or(0.0) as usize)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let worlds = crate::engine::anim::sample_pose_worlds(&json, 0, &channels, t);
+            let posed = crate::engine::anim::posed_positions(&skin, &joints, &positions, &worlds);
+            let mut worst = 0.0f32;
+            let mut worst_i = 0;
+            for (i, (a, b)) in positions.iter().zip(&posed).enumerate() {
+                let d = (*b - *a).length();
+                if d > worst {
+                    worst = d;
+                    worst_i = i;
+                }
+            }
+            Ok(format!(
+                "{path}: joints={} channels={} t={t:.2} max_disp={worst:.4} at v{worst_i}",
+                joints.len(),
+                channels.len()
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

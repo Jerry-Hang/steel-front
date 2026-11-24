@@ -584,6 +584,8 @@ mod asset_path_scan_tests {
         ("src/engine/plugin.rs", "std::fs::read(path)"),
         // 动画探针（引擎化 P4b）：同上，读用户指定的 GLB，不是随包资产。
         ("src/engine/plugin.rs", "std::fs::read(&path[..])"),
+        // 姿势探针（引擎化 P4c）：同上，读用户指定的 GLB。
+        ("src/engine/plugin.rs", "std::fs::read(&path[..]).map_err"),
         // CPU topology: reads Linux sysfs (`/sys/devices/system/cpu`), not assets
         ("src/engine/cpu.rs", "std::fs::read_to_string(&p)"),
         ("src/engine/cpu.rs", "std::fs::read_to_string(&path)"),

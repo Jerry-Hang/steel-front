@@ -5211,3 +5211,30 @@ slerp 在 u=0.25 处角位移恰为 30°（w = cos15° = 0.96593），nlerp 给 
 **每次恰好 1 条红**。
 
 ⚠️ 未做：GPU 侧蒙皮（顶点着色器读关节矩阵）。现在只有 CPU 侧的解析与采样。
+
+### 2026-11-25：引擎化 P4c —— CPU 侧完整姿势链（动画 → 世界矩阵 → 变形顶点）
+
+`engine/anim.rs` 补两件：
+- `sample_pose_worlds(json, _, channels, t)`：节点原始局部 TRS → 被通道覆盖
+  （translation / rotation / scale）→ 沿层级连乘得每个节点的世界矩阵；
+- `posed_positions(skin, joints, positions, worlds)`：关节蒙皮矩阵 = **当前世界 × 绑定 inverseBind**，
+  再按权重混合。
+`engine/skin.rs` 导出 `node_parents` / `worlds_from_locals` / `split_glb`（避免第二份切块逻辑）。
+
+**实机（`asset.pose_probe`，合成"骨骼+动画"GLB）**：
+```
+t=0.00 → max_disp=0.0000 at v0
+t=0.50 → max_disp=0.5000 at v1
+t=1.00 → max_disp=1.0000 at v1
+```
+与手算完全一致：关节 1 在 1 秒内从 y=1 线性走到 y=2，权重 1 的顶点位移 = 关节位移。
+
+🔴 **第一次跑出 `t=0` 就有 1.0 的位移**——先怀疑代码，结果是**夹具写错**：
+我把 joint0（node1）也放在了 y=1，而它的 inverseBind 是单位阵 ⇒ 绑定姿势下就偏移 1m。
+教训同 33：**论及数值前先核对自己的输入**。
+
+判据 `cpu_pose_chain_matches_hand_computed_displacements`（三点手算值）+ 注入验证：
+把通道覆盖那段的 `"translation"` 分支改名 ⇒ t=0.5 位移变 0，红。
+
+⚠️ 未做：GPU 侧骨骼变换（顶点着色器读关节矩阵）。现在这条链是 **CPU 侧**的，
+可用于烘焙、预计算、以及"导入后立刻看到姿势"，但还没进渲染管线。

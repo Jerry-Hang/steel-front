@@ -272,7 +272,7 @@ fn node_world(json: &crate::llm_cmd::Json, node_idx: usize) -> Mat4 {
 }
 
 /// 单个节点的局部矩阵：优先 `matrix`（列主序 16 个数），否则 TRS。
-fn node_local(json: &crate::llm_cmd::Json, idx: usize) -> Mat4 {
+pub(crate) fn node_local(json: &crate::llm_cmd::Json, idx: usize) -> Mat4 {
     let Some(node) = json
         .get("nodes")
         .and_then(|n| n.as_arr())
@@ -321,6 +321,81 @@ fn node_local(json: &crate::llm_cmd::Json, idx: usize) -> Mat4 {
         })
         .unwrap_or(Vec3::ONE);
     Mat4::from_scale_rotation_translation(sv, rq, tv)
+}
+
+/// 把 GLB 拆成 `(JSON, BIN)`。**探针命令**与解析器共用，避免两处各写一份切块逻辑。
+pub fn split_glb(
+    bytes: &[u8],
+) -> Result<(crate::llm_cmd::Json, Vec<u8>), String> {
+    if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
+        return Err("非 GLB 文件（缺少 glTF magic）".into());
+    }
+    let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+    let json_end = 20usize
+        .checked_add(json_len)
+        .filter(|&e| e <= bytes.len())
+        .ok_or_else(|| format!("GLB JSON 块长度越界：头里写 {json_len} 字节"))?;
+    let json_str = std::str::from_utf8(&bytes[20..json_end]).map_err(|_| "GLB JSON 非 UTF-8")?;
+    let json =
+        crate::llm_cmd::parse_json_fn(json_str).map_err(|e| format!("GLB JSON 解析失败: {e}"))?;
+    let bin: Vec<u8> = if json_end + 8 <= bytes.len() {
+        let blen = u32::from_le_bytes([
+            bytes[json_end],
+            bytes[json_end + 1],
+            bytes[json_end + 2],
+            bytes[json_end + 3],
+        ]) as usize;
+        bytes[json_end + 8..(json_end + 8 + blen).min(bytes.len())].to_vec()
+    } else {
+        Vec::new()
+    };
+    Ok((json, bin))
+}
+
+/// 建"子 → 上一层"的反查表（每个 node 的上一层下标）。
+pub(crate) fn node_parents(json: &crate::llm_cmd::Json) -> Vec<Option<usize>> {
+    let nodes = json.get("nodes").and_then(|n| n.as_arr());
+    let mut parent: Vec<Option<usize>> = vec![None; nodes.map(|n| n.len()).unwrap_or(0)];
+    if let Some(ns) = nodes {
+        for (pi, n) in ns.iter().enumerate() {
+            if let Some(ch) = n.get("children").and_then(|c| c.as_arr()) {
+                for c in ch {
+                    if let Some(ci) = c.as_f64() {
+                        let ci = ci as usize;
+                        if ci < parent.len() {
+                            parent[ci] = Some(pi);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    parent
+}
+
+/// 按给定的局部矩阵表重算所有节点的世界矩阵（`locals[i]` = 节点 i 的局部矩阵）。
+pub(crate) fn worlds_from_locals(parents: &[Option<usize>], locals: &[Mat4]) -> Vec<Mat4> {
+    let mut out = vec![Mat4::IDENTITY; locals.len()];
+    for i in 0..locals.len() {
+        // 沿链收集（深度有限，骨骼层级通常 < 32）
+        let mut chain = vec![i];
+        let mut cur = i;
+        let mut guard = 0;
+        while let Some(p) = parents.get(cur).copied().flatten() {
+            chain.push(p);
+            cur = p;
+            guard += 1;
+            if guard > 4096 {
+                break;
+            }
+        }
+        let mut m = Mat4::IDENTITY;
+        for &n in chain.iter().rev() {
+            m *= *locals.get(n).unwrap_or(&Mat4::IDENTITY);
+        }
+        out[i] = m;
+    }
+    out
 }
 
 /// 只服务骨骼的最小 accessor 读取器：支持 FLOAT 与整型（`normalized` 感知）+ `byteStride`。

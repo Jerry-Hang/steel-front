@@ -276,6 +276,75 @@ pub fn parse_glb_animations(bytes: &[u8]) -> Result<Vec<Channel>, String> {
     Ok(out)
 }
 
+/// **把动画通道施加到节点局部变换上，再重算世界矩阵**（CPU 侧完整姿势）。
+///
+/// 流程：节点的原始局部 TRS → 被通道覆盖（translation / rotation / scale）→ 沿层级连乘
+/// → 得到每个节点的世界矩阵。返回的 `Vec<Mat4>` 与 `nodes` 同长，**关节用它直接当世界矩阵**。
+///
+/// 为什么按"节点"而不是"关节"组织：动画通道的目标是 node，关节只是 node 的一个子集；
+/// 先算全部节点再挑关节，避免"某个关节的上一层节点没被算"这类静默错误。
+pub fn sample_pose_worlds(
+    json: &crate::llm_cmd::Json,
+    joint_count_hint: usize,
+    channels: &[Channel],
+    t: f32,
+) -> Vec<glam::Mat4> {
+    let parents = crate::engine::skin::node_parents(json);
+    let n = parents.len().max(joint_count_hint);
+    let mut locals: Vec<glam::Mat4> = (0..n)
+        .map(|i| crate::engine::skin::node_local(json, i))
+        .collect();
+    // 通道覆盖：直接改该节点的局部矩阵（一个节点最多三条通道，各改一个分量）
+    for ch in channels {
+        if ch.node >= n {
+            continue;
+        }
+        let v = ch.sample(t);
+        let cur = &mut locals[ch.node];
+        let (mut scale, mut rot, mut trans) = cur.to_scale_rotation_translation();
+        match ch.path.as_str() {
+            "translation" => trans = glam::Vec3::new(v.x, v.y, v.z),
+            "rotation" => {
+                rot = glam::Quat::from_xyzw(v.x, v.y, v.z, v.w).normalize();
+            }
+            "scale" => scale = glam::Vec3::new(v.x, v.y, v.z),
+            _ => continue,
+        }
+        *cur = glam::Mat4::from_scale_rotation_translation(scale, rot, trans);
+    }
+    crate::engine::skin::worlds_from_locals(&parents, &locals)
+}
+
+/// 用一组世界矩阵算出一件骨骼变换网格的**变形后顶点**（CPU 侧骨骼变换）。
+///
+/// `worlds` 与节点同长；`joints` 是关节的节点下标（与 `Skin::inverse_bind` 一一对应）。
+pub fn posed_positions(
+    skin: &crate::engine::skin::Skin,
+    joints: &[usize],
+    positions: &[glam::Vec3],
+    worlds: &[glam::Mat4],
+) -> Vec<glam::Vec3> {
+    // 关节的骨骼变换矩阵 = 该关节**当前**世界矩阵 × 绑定时的 inverseBind
+    let mats: Vec<glam::Mat4> = joints
+        .iter()
+        .enumerate()
+        .map(|(k, node)| {
+            let w = worlds.get(*node).copied().unwrap_or(glam::Mat4::IDENTITY);
+            let ib = skin
+                .inverse_bind
+                .get(k)
+                .copied()
+                .unwrap_or(glam::Mat4::IDENTITY);
+            w * ib
+        })
+        .collect();
+    positions
+        .iter()
+        .enumerate()
+        .map(|(i, p)| skin.skin_vertex(i, *p, &mats))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +415,62 @@ mod tests {
         assert!((c.sample(0.5).x - 1.0).abs() < 1e-5, "中点应为 1.0，实际 {:?}", c.sample(0.5));
         assert!((c.sample(0.0).x).abs() < 1e-6);
         assert!((c.sample(1.0).x - 2.0).abs() < 1e-6);
+    }
+
+    /// 🔴 **CPU 侧整条链**：JSON 节点 → 采样通道 → 世界矩阵 → 骨骼变换顶点。
+    ///
+    /// 用手算值钉死三个时间点：t=0 位移 0（绑定姿势）、t=0.5 位移 0.5、t=1 位移 1.0，
+    /// 且**位移出现在权重 1 的那个顶点上**。
+    ///
+    /// 反向验证：把 `sample_pose_worlds` 里通道覆盖那一段删掉（姿势永远等于绑定姿势）
+    /// ⇒ t=1 的位移变成 0，红。
+    #[test]
+    fn cpu_pose_chain_matches_hand_computed_displacements() {
+        use crate::engine::skin::Skin;
+        use glam::{Mat4, Vec3};
+        // 节点：0=网格节点，1=关节0（原点），2=关节1（y=1）
+        let json = crate::llm_cmd::parse_json_fn(
+            r#"{"nodes":[{"mesh":0},{"translation":[0,0,0]},{"translation":[0,1,0]}]}"#,
+        )
+        .expect("JSON");
+        let channels = vec![Channel {
+            node: 2,
+            path: "translation".to_string(),
+            interp: Interp::Linear,
+            times: vec![0.0, 1.0],
+            values: vec![
+                Vec4::new(0.0, 1.0, 0.0, 0.0),
+                Vec4::new(0.0, 2.0, 0.0, 0.0),
+            ],
+        }];
+        let skin = Skin {
+            joint_world: vec![Mat4::IDENTITY, Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0))],
+            inverse_bind: vec![
+                Mat4::IDENTITY,
+                Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0)),
+            ],
+            joints: vec![[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]],
+            weights: vec![[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0]],
+        };
+        let positions = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.5, 0.0),
+        ];
+        let joints = [1usize, 2];
+
+        let d = |t: f32| -> f32 {
+            let w = sample_pose_worlds(&json, 0, &channels, t);
+            let posed = posed_positions(&skin, &joints, &positions, &w);
+            positions
+                .iter()
+                .zip(&posed)
+                .map(|(a, b)| (*b - *a).length())
+                .fold(0.0f32, f32::max)
+        };
+        assert!(d(0.0) < 1e-5, "t=0 是绑定姿势，位移该为 0，实际 {}", d(0.0));
+        assert!((d(0.5) - 0.5).abs() < 1e-4, "t=0.5 位移该 0.5，实际 {}", d(0.5));
+        assert!((d(1.0) - 1.0).abs() < 1e-4, "t=1.0 位移该 1.0，实际 {}", d(1.0));
     }
 
     /// 🔴 LINEAR：中点必须是两端的中值。手算：(0,0,0) → (2,0,0) 在 t=0.5 得 (1,0,0)。
