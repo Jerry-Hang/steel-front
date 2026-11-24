@@ -4941,3 +4941,41 @@ plugin-cmd: scene.load → loaded entities=2
 ⚠️ 踩到仓库既有的架构判据 `only_the_abstraction_and_non_asset_files_use_std_fs_in_production`：
 生产代码不许直接 `std::fs` 读。场景文件属于**用户数据**（同 `config.rs`），按该判据文档里
 给的例外通道登记进 `ALLOWED_STD_FS_READS` 并写明理由，而不是绕过判据。
+
+### 2026-11-25：引擎化 P5 —— AI 控制面（本机 TCP 行协议，命令 + 实时上报）
+
+`engine/aipc.rs`。默认**关**：只有设 `RV3D_AIPC=<端口>` 才监听，且**只绑 127.0.0.1**
+（一个能改场景、能存盘的接口不该在忘了关的时候被局域网碰到）。
+
+协议（行长文本，机器可解析）：
+```
+S→C: HELLO v1 proto=line cmd=CMD <name> [args...] sub=SUB quit=QUIT
+C→S: CMD <name> [args...]   →  OK <正文> / ERR <原因>
+C→S: SUB / UNSUB            →  每 0.25s 推 TEL key=value ...
+```
+**命令走的是 `PluginRegistry::run_command`** —— 与编辑器按钮同一张表、同一个函数（铁律 4）。
+
+**为什么用通道而不是共享状态**：游戏状态只在主线程；网络线程若持有 `&mut` 就要加锁，
+而主线程每帧只有十几毫秒 —— 任何一把锁都会变成帧时间抖动甚至死锁。所以网络线程只做
+字符串进出，请求经 `mpsc` 交主线程执行（每帧上限 32 条，防止某个客户端把一帧占满）。
+
+**端到端实机验证**（headless + 真 TCP 回环）：
+```
+HELLO: HELLO v1 proto=line cmd=CMD <name> [args...] sub=SUB quit=QUIT
+'CMD scene.spawn'          → OK spawned entities=3 id=EntityId { index: 2, .. }
+'CMD gizmo.drag Z 0 4.0'   → OK drag axis=Z delta=4.0000 from=(0,0,0) to=(0,0,4.000)
+'CMD scene.save /tmp/…'    → OK saved entities=3
+SUB                        → OK subscribed
+TEL: TEL entities=2 t=0.00 world=(0.00,0.00,0.00)
+```
+存盘文件里新实体 `t = [0, 0, 4]` ⇒ **AI 建物体、拖走、落盘**这条链成立。
+
+🔴 **实机测出来一个真 bug（日志两条都对、文件是错的）**：选中项原本每帧重置成玩家，
+于是 `scene.spawn` 把新实体设为选中之后，**下一条命令（下一帧）又回到玩家** ⇒
+`gizmo.drag` 把玩家拖走了、新实体留在原点。两条命令的回执各自都正确，**只有存盘文件是错的**。
+⇒ 选中项提升为 `GameApp` 的持久字段，每帧读写一次。
+
+判据：`aipc_roundtrip_executes_commands_via_main_thread_channel`（含线程/通道/协议全链路）、
+`aipc_reports_unknown_verb_without_dropping_connection`（写错命令不许断线）、
+`ai_command_chain_spawn_drag_save_load_roundtrips`（spawn→drag→save→load 字段逐一相等）。
+反向验证：删掉 `scene.spawn` 里那句 `ctx.selection = Some(id)` ⇒ 读回 z=0 而断言要 4.0，红。

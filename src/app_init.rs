@@ -63,7 +63,23 @@ impl GameApp {
         // 插件注册表：内置调试插件先装上（`RV3D_PLUGIN_CMD` 与 `RV3D_PLUGIN_DIAG` 走它）。
         let mut plugins = crate::engine::plugin::PluginRegistry::new();
         crate::engine::plugin::register_debug_plugin(&mut plugins);
+        // AI 控制面：只有显式给了端口才监听（默认关，且只绑 127.0.0.1）。
+        let aipc = match crate::syscfg::parse::<u16>("RV3D_AIPC") {
+            Some(p) if p > 0 => match crate::engine::aipc::AiServer::start(p) {
+                Ok(s) => {
+                    log::info!("aipc: 实际监听端口 {}", s.port);
+                    Some(s)
+                }
+                Err(e) => {
+                    log::warn!("aipc: {e}");
+                    None
+                }
+            },
+            _ => None,
+        };
         Self {
+            selection: None,
+            aipc,
             plugins,
             plugin_cmd_done: false,
             shot_pending,

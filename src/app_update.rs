@@ -360,14 +360,48 @@ impl GameApp {
         {
             let dt = self.game.last_dt.max(1e-4);
             let time = self.game.time;
-            let sel = Some(self.game.player_entity());
             let mut ctx =
                 crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
-            ctx.selection = sel;
+            ctx.selection = self.selection;
             self.plugins.run_frame(&mut ctx);
+            self.selection = ctx.selection;
             for line in &ctx.out {
                 log::info!("{line}");
             }
+        }
+        // AI 控制面（P5）：把排队的 AI 命令交给**与编辑器同一个**命令表执行，并推上报。
+        //
+        // 顺序很关键：先跑完本帧的插件系统与场景同步，再处理 AI 命令 —— 这样 AI 拿到的
+        // 回执与它下一帧读到的上报是**同一个世界状态**，不会出现"命令说改了、上报还是旧的"。
+        if let Some(aipc) = self.aipc.as_mut() {
+            // 先把要用的标量取出来（都是 Copy），避免同时借 `game` 的两块。
+            let time = self.game.time;
+            let dt = self.game.last_dt.max(1e-4);
+            let plugins = &self.plugins;
+            let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+            ctx.selection = self.selection;
+            aipc.pump(|name, args| {
+                let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                plugins.run_command(name, &argv, &mut ctx)
+            });
+            // 命令可能改了选中项（`scene.spawn` 会接管）—— 写回持久状态。
+            self.selection = ctx.selection;
+            // 上报：机读 key=value，字段与 `RV3D_SCENE_DIAG` 的日志**同源同义**。
+            let e = self.game.player_entity();
+            let world = self
+                .game
+                .scene()
+                .world_matrix(e)
+                .map(|m| m.w_axis.truncate())
+                .unwrap_or_default();
+            aipc.push_telemetry(format!(
+                "entities={} t={:.2} world=({:.2},{:.2},{:.2})",
+                self.game.scene().len(),
+                self.game.time,
+                world.x,
+                world.y,
+                world.z
+            ));
         }
         // `RV3D_PLUGIN_CMD="<命令> [参数...]"`：启动后执行一次并打印结果。
         // 这是命令表的**第二个入口**（第一个是编辑器按钮、第三个将是 AI 接口）——
@@ -378,14 +412,15 @@ impl GameApp {
                 let mut parts = cmd.split_whitespace();
                 let name = parts.next().unwrap_or("").to_string();
                 let args: Vec<&str> = parts.collect();
-                let sel = Some(self.game.player_entity());
                 let mut ctx = crate::engine::plugin::PluginCtx::new(
                     &mut self.game.scene,
                     self.game.time,
                     self.game.last_dt.max(1e-4),
                 );
-                ctx.selection = sel;
-                match self.plugins.run_command(&name, &args, &mut ctx) {
+                ctx.selection = self.selection;
+                let r = self.plugins.run_command(&name, &args, &mut ctx);
+                self.selection = ctx.selection;
+                match r {
                     Ok(msg) => log::info!("plugin-cmd: {name} → {msg}"),
                     Err(e) => log::warn!("plugin-cmd: {name} 失败：{e}"),
                 }

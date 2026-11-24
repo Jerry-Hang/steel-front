@@ -223,6 +223,10 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             let id = ctx
                 .scene
                 .spawn(None, crate::engine::scene::Transform::IDENTITY);
+            // **新建的实体接管选中项**：这样 AI/脚本可以"spawn → drag → save"走通一整条
+            // 不依赖玩家身体的链路。玩家实体是「玩家体位置的镜像」会被每帧覆盖，
+            // 场景自己的实体不会 —— 这是在 P1b/P6 把权威方向翻过来之前的正确用法。
+            ctx.selection = Some(id);
             Ok(format!("spawned entities={} id={id:?}", ctx.scene.len()))
         },
     );
@@ -395,6 +399,47 @@ mod tests {
         let err = reg.run_command("nope", &[], &mut ctx).unwrap_err();
         assert!(err.contains("没有这条命令：nope"), "错误要可读：{err}");
         assert!(err.contains("t.a"), "错误里要列出已注册命令：{err}");
+    }
+
+    /// 🔴 **AI 命令链：spawn → drag → save → load，字段逐一相等**（目标里的验收口径）。
+    ///
+    /// 这条把"命令表"和"存盘"串起来测，而不是各自测各自的：真实用法就是一条命令接着
+    /// 一条命令（中间可能隔好几帧），所以**选中项必须跨命令存活** ——
+    /// 曾经写成"每帧都重置成玩家"，结果 `spawn` 之后 `drag` 把玩家拖走了、
+    /// 新实体留在原点：**两条命令的回执都对，存盘文件里是错的**。
+    ///
+    /// 反向验证：把 `scene.spawn` 里 `ctx.selection = Some(id)` 删掉 ⇒ drag 落到玩家身上，
+    /// 读回来的 `t` 是 0 而断言要 4.0，立刻红。
+    #[test]
+    fn ai_command_chain_spawn_drag_save_load_roundtrips() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        let path = std::env::temp_dir().join("steel_front_aipc_chain.toml");
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let mut ctx = PluginCtx::new(&mut scene, 0.0, 0.016);
+            let r = reg.run_command("scene.spawn", &[], &mut ctx).unwrap();
+            assert!(r.contains("entities=1"), "spawn 回执：{r}");
+            assert!(ctx.selection.is_some(), "spawn 必须接管选中项");
+            let r = reg
+                .run_command("gizmo.drag", &["Z", "0", "4.0"], &mut ctx)
+                .unwrap();
+            assert!(r.contains("delta=4.0000"), "drag 回执：{r}");
+            let r = reg
+                .run_command("scene.save", &[&path_str], &mut ctx)
+                .unwrap();
+            assert!(r.contains("entities=1"), "save 回执：{r}");
+        }
+        // 读回并核对字段（用的是命令背后同一个函数）
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (back, map) = crate::engine::scene_io::from_toml(&text).unwrap();
+        let (_, handle) = map[0];
+        let t = back.local(handle).unwrap().translation;
+        assert!((t.z - 4.0).abs() < 1e-6, "读回的 z 应为 4.0，实际 {t:?}");
+        assert_eq!(t.x, 0.0);
+        assert_eq!(t.y, 0.0);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 内置调试插件必须真的注册上（否则 `RV3D_PLUGIN_CMD` 那条链路是空的）。

@@ -279,6 +279,17 @@ const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// 编辑器/AI 的**当前选中实体**（引擎化 P5）。
+    ///
+    /// 必须是持久状态而不是每帧重建：`scene.spawn` 把新实体设为选中项之后，
+    /// 下一条命令（可能隔好几帧）要还认这个选中项。曾经写成"每帧都设成玩家"，
+    /// 结果 `spawn → drag` 把玩家拖走了、新实体留在原点 —— 日志里两个都对，文件里是错的。
+    selection: Option<crate::engine::scene::EntityId>,
+    /// AI 控制面（引擎化 P5）：`RV3D_AIPC=<端口>` 时开，默认关。
+    ///
+    /// 网络线程只做字符串进出，命令经通道交给主线程执行 —— 与编辑器按钮**同一张表、
+    /// 同一个线程**，行为不会因为来源不同而变（`docs/ENGINE-PLAN.md` 铁律 4）。
+    aipc: Option<crate::engine::aipc::AiServer>,
     /// 插件注册表（引擎化 P7a，见 `docs/ENGINE-PLAN.md` §5）。
     ///
     /// 系统每帧按阶段跑；命令表是**编辑器与 AI 接口共用的唯一入口**。
