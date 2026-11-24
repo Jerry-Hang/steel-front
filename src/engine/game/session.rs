@@ -704,6 +704,15 @@ impl Game {
         &self.scene
     }
 
+    /// 玩家眼位（编辑器切自由相机时的初始位置；也是取点与上报里的"人眼"）。
+    pub fn player_body_eye(&self) -> glam::Vec3 {
+        glam::Vec3::new(
+            self.player_body.pos.x,
+            self.player_body.pos.y + self.player_body.eye_height,
+            self.player_body.pos.z,
+        )
+    }
+
     /// 玩家在场景里的实体句柄。
     pub fn player_entity(&self) -> crate::engine::scene::EntityId {
         self.player_entity

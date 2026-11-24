@@ -10,6 +10,24 @@ use crate::{env_f32, env_truthy, last_fg_pid, my_pid, GameApp, GameState, Partic
 impl GameApp {
 
     /// 更新逻辑（每帧调用）
+    /// 当前相机视角快照（取点命令要用）。抽成一个函数：三处 ctx 构造都必须同源，
+    /// 少填一处就会出现"某个入口取点不准"。
+    pub(crate) fn view_info(&self) -> crate::engine::gizmo::ViewInfo {
+        let aspect = if self.game.hud.screen_h > 0.0 {
+            self.game.hud.screen_w / self.game.hud.screen_h
+        } else {
+            16.0 / 9.0
+        };
+        crate::engine::gizmo::ViewInfo {
+            eye: self.camera.position(),
+            forward: self.camera.forward(),
+            right: self.camera.right(),
+            up: self.camera.up(),
+            half_fov_y: self.camera.fov * 0.5,
+            aspect,
+        }
+    }
+
     pub(crate) fn update(&mut self) {
         // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。
         let npc_cam = crate::syscfg::cfg("RV3D_NPC_CAM")
@@ -352,6 +370,24 @@ impl GameApp {
                 }
             }
         }
+        // 引擎化 P3c：**编辑态用自由相机**（`CameraMode::Flight`）。
+        //
+        // 编辑器的相机不该是玩家眼睛：玩家身体受物理约束，而编辑器要能飞出地面看整张场景。
+        // 第一次进编辑态时把相机摆到玩家眼位，视角不跳；之后由现有的 Flight 输入
+        // （WASD + 鼠标/右键拖拽）驱动，不再每帧被玩家位置覆盖。
+        if self.mode == crate::engine::mode::Mode::Edit
+            && self.camera.mode != crate::engine::camera::CameraMode::Flight
+        {
+            let eye = self.game.player_body_eye();
+            self.camera.set_flight_pos(eye);
+            self.camera.mode = crate::engine::camera::CameraMode::Flight;
+            log::info!(
+                "editor: 切到自由相机 eye=({:.2},{:.2},{:.2})",
+                eye.x,
+                eye.y,
+                eye.z
+            );
+        }
         // 插件系统（引擎化 P7a）：每帧按阶段跑完四个阶段。
         //
         // 放在 `update()` 的**前段**：调试机位（`RV3D_CAM`）会在下面提前 return，
@@ -360,9 +396,11 @@ impl GameApp {
         {
             let dt = self.game.last_dt.max(1e-4);
             let time = self.game.time;
+            let view = self.view_info();
             let mut ctx =
                 crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
             ctx.selection = self.selection;
+            ctx.view = Some(view);
             self.plugins.run_frame(&mut ctx);
             self.selection = ctx.selection;
             for line in &ctx.out {
@@ -378,8 +416,21 @@ impl GameApp {
             let time = self.game.time;
             let dt = self.game.last_dt.max(1e-4);
             let plugins = &self.plugins;
+            let view = crate::engine::gizmo::ViewInfo {
+                eye: self.camera.position(),
+                forward: self.camera.forward(),
+                right: self.camera.right(),
+                up: self.camera.up(),
+                half_fov_y: self.camera.fov * 0.5,
+                aspect: if self.game.hud.screen_h > 0.0 {
+                    self.game.hud.screen_w / self.game.hud.screen_h
+                } else {
+                    16.0 / 9.0
+                },
+            };
             let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
             ctx.selection = self.selection;
+            ctx.view = Some(view);
             aipc.pump(|name, args| {
                 let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 plugins.run_command(name, &argv, &mut ctx)
@@ -412,12 +463,13 @@ impl GameApp {
                 let mut parts = cmd.split_whitespace();
                 let name = parts.next().unwrap_or("").to_string();
                 let args: Vec<&str> = parts.collect();
-                let mut ctx = crate::engine::plugin::PluginCtx::new(
-                    &mut self.game.scene,
-                    self.game.time,
-                    self.game.last_dt.max(1e-4),
-                );
+                let view = self.view_info();
+                let time = self.game.time;
+                let dt = self.game.last_dt.max(1e-4);
+                let mut ctx =
+                    crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
                 ctx.selection = self.selection;
+                ctx.view = Some(view);
                 let r = self.plugins.run_command(&name, &args, &mut ctx);
                 self.selection = ctx.selection;
                 match r {

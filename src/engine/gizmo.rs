@@ -119,9 +119,132 @@ impl TranslateDrag {
     }
 }
 
+
+
+/// 相机视角快照（取点与 gizmo 都要它；**只读**，避免把整个 Camera 塞进插件上下文）。
+#[derive(Debug, Clone, Copy)]
+pub struct ViewInfo {
+    pub eye: Vec3,
+    pub forward: Vec3,
+    pub right: Vec3,
+    pub up: Vec3,
+    /// 垂直半视角（弧度）。
+    pub half_fov_y: f32,
+    /// 宽/高。
+    pub aspect: f32,
+}
+
+impl ViewInfo {
+    /// 用当前视角做一次取点。
+    pub fn pick(
+        &self,
+        scene: &crate::engine::scene::Scene,
+        ndc_x: f32,
+        ndc_y: f32,
+        radius: f32,
+    ) -> Option<(crate::engine::scene::EntityId, f32)> {
+        pick_entity(
+            scene,
+            self.eye,
+            self.forward,
+            self.right,
+            self.up,
+            self.half_fov_y,
+            self.aspect,
+            ndc_x,
+            ndc_y,
+            radius,
+        )
+    }
+}
+
+/// 屏幕坐标 → 世界射线（编辑器取点的第一步）。
+///
+/// `ndc_x/ndc_y` 取 **[-1, 1]**（屏幕中心 = 0,0；y 向上）；`half_fov_y` 是**垂直**半视角（弧度），
+/// `aspect = 宽/高`。返回 `(origin, direction)`，方向已归一化。
+///
+/// 为什么不用投影矩阵求逆：逆矩阵算错时**画面一切正常**，只有取点偏移 —— 而且偏移量随 FOV
+/// 变化，很难看出是数学错。用基向量直接拼，每一项都能手算验证（判据就是手算值）。
+pub fn screen_ray(
+    eye: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    half_fov_y: f32,
+    aspect: f32,
+    ndc_x: f32,
+    ndc_y: f32,
+) -> (Vec3, Vec3) {
+    let t = half_fov_y.tan();
+    // 屏幕右上角对应的偏移：垂直分量按 tan(fov/2)，水平再乘宽高比
+    let dir = forward + right * (ndc_x * t * aspect) + up * (ndc_y * t);
+    (eye, dir.normalize_or_zero())
+}
+
+/// 射线与以 `center` 为球心、`radius` 为半径的球求交，返回**最近的正向参数 t**。
+///
+/// 用球而不是 AABB：场景层目前还没有"每个实体多大"的组件（那是 P4/P3 的活），
+/// 球用一个半径就能描述，且**旋转无关** —— 现在实体只有平移，球与 AABB 的差别看不出来，
+/// 等实体带上包围盒时再换成盒判据（到时要重写这条判据，不是改参数）。
+pub fn ray_sphere(ray_o: Vec3, ray_d: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let d = ray_d.normalize_or_zero();
+    if d == Vec3::ZERO {
+        return None;
+    }
+    let m = ray_o - center;
+    let b = m.dot(d);
+    let c = m.length_squared() - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let sq = disc.sqrt();
+    // 先取较小的根（近交点）；两个都为负 = 球在身后。
+    let t0 = -b - sq;
+    let t1 = -b + sq;
+    if t0 > 0.0 {
+        Some(t0)
+    } else if t1 > 0.0 {
+        Some(t1)
+    } else {
+        None
+    }
+}
+
+/// 投影一次取点：屏幕 NDC → 射线 → 场景里最近的实体（按球判据）。
+///
+/// `radius` 是**取点半径**（米），不是实体的真实尺寸 —— 场景层还没有包围盒组件。
+/// 放 0.9m 是为了"点得中"：太小要像素级对准，太大相邻实体会被抢走。
+///
+/// 返回 `(实体, 沿射线的距离 t)`；距离给编辑器做"由近到远"的调试显示。
+pub fn pick_entity(
+    scene: &crate::engine::scene::Scene,
+    eye: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    half_fov_y: f32,
+    aspect: f32,
+    ndc_x: f32,
+    ndc_y: f32,
+    radius: f32,
+) -> Option<(crate::engine::scene::EntityId, f32)> {
+    let (o, d) = screen_ray(eye, forward, right, up, half_fov_y, aspect, ndc_x, ndc_y);
+    let mut best: Option<(crate::engine::scene::EntityId, f32)> = None;
+    for (id, local) in scene.iter_alive() {
+        if let Some(t) = ray_sphere(o, d, local.translation, radius) {
+            if best.map(|(_, bt)| t < bt).unwrap_or(true) {
+                best = Some((id, t));
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::scene::{EntityId, Scene, Transform};
 
     fn approx(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < 1e-4
@@ -190,6 +313,84 @@ mod tests {
             .drag(Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0))
             .expect("应能拖");
         assert!(approx(back, Vec3::ZERO), "拖回原点应回到 (0,0,0)，实际 {back:?}");
+    }
+
+    /// 🔴 屏幕中心必须打到正前方的东西；偏出去必须打空。
+    ///
+    /// 相机在 (0,0,10) 朝 -Z，垂直半视角 45°：NDC (0,0) 的射线就是 (0,0,-1)，
+    /// 正对原点处的球 ⇒ 命中；NDC (0.9, 0) 偏出 40° 以上 ⇒ 打空。
+    ///
+    /// 反向验证：把 `screen_ray` 里 `forward + right*(...)` 的 `right` 与 `up` 互换 ⇒ 红。
+    #[test]
+    fn screen_ray_hits_dead_center_and_misses_when_offset() {
+        let eye = Vec3::new(0.0, 0.0, 10.0);
+        let (o, d) = screen_ray(
+            eye,
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::X,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            16.0 / 9.0,
+            0.0,
+            0.0,
+        );
+        assert!(approx(o, eye));
+        assert!(approx(d, Vec3::new(0.0, 0.0, -1.0)), "屏幕中心必须是正前方：{d:?}");
+        // 🔴 **必须用非零 NDC**：NDC=(0,0) 时 `right`/`up` 的系数都是 0，
+        // 于是"把 right 和 up 写反"这条最典型的错误**测不出来**（本判据第一版就是这样，
+        // 注入交换后仍然绿 —— 恒真的断言等于没写，见仓库教训 14）。
+        // 半视角 45°（tan=1）、aspect=1 时，NDC=(1,0) 的方向正比于 forward+right。
+        let (_, dx) = screen_ray(
+            eye,
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::X,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            1.0,
+            1.0,
+            0.0,
+        );
+        assert!(dx.x > 0.5, "NDC x=+1 必须偏 +X，实际 {dx:?}");
+        assert!(dx.y.abs() < 1e-5, "NDC y=0 时不许有 Y 分量，实际 {dx:?}");
+        let (_, dy) = screen_ray(
+            eye,
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::X,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            1.0,
+            0.0,
+            1.0,
+        );
+        assert!(dy.y > 0.5, "NDC y=+1 必须偏 +Y，实际 {dy:?}");
+        assert!(dy.x.abs() < 1e-5, "NDC x=0 时不许有 X 分量，实际 {dy:?}");
+        let mut s = Scene::new();
+        let id = s.spawn(None, Transform::from_translation(Vec3::ZERO));
+        let hit = pick_entity(&s, eye, Vec3::new(0.0, 0.0, -1.0), Vec3::X, Vec3::Y,
+            std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.0, 0.0, 0.9);
+        assert_eq!(hit.map(|(h, _)| h), Some(id), "中心应命中原点实体");
+        let miss = pick_entity(&s, eye, Vec3::new(0.0, 0.0, -1.0), Vec3::X, Vec3::Y,
+            std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.95, 0.0, 0.9);
+        assert!(miss.is_none(), "偏出屏幕外的射线不该命中，实际 {miss:?}");
+    }
+
+    /// 同一视线穿过两个球时，必须选中**近的那个**（远的那栋楼不能抢走点击）。
+    #[test]
+    fn pick_takes_the_nearest_entity() {
+        let mut s = Scene::new();
+        let near = s.spawn(None, Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)));
+        let _far = s.spawn(None, Transform::from_translation(Vec3::new(0.0, 0.0, -5.0)));
+        let hit = pick_entity(&s, Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0),
+            Vec3::X, Vec3::Y, std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.0, 0.0, 0.9);
+        assert_eq!(hit.map(|(h, _)| h), Some(near), "应选中近处实体");
+    }
+
+    /// 球在相机背后时必须打空（不能因为 `disc >= 0` 就返回一个负 t）。
+    #[test]
+    fn ray_sphere_ignores_spheres_behind_the_camera() {
+        let t = ray_sphere(Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, 20.0), 0.9);
+        assert!(t.is_none(), "身后的球不该命中，实际 {t:?}");
     }
 
     /// 斜视角下也必须是 1.0：射线从 (3,4,10) 朝 -Z 附近偏一点，X 轴过原点。

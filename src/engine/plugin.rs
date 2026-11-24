@@ -52,6 +52,8 @@ pub struct PluginCtx<'a> {
     pub dt: f32,
     /// 输出缓冲（诊断/上报用；编辑器面板与 AI 接口读同一份）。
     pub out: Vec<String>,
+    /// 当前相机视角（取点命令要用；编辑器与 AI 接口都需要"从这里看到什么"）。
+    pub view: Option<crate::engine::gizmo::ViewInfo>,
     /// **当前选中实体**（编辑器选中的那个；AI 接口也能改它）。
     /// `None` = 没选中 —— 跟"对选中项操作"有关的命令必须报错而不是猜一个。
     pub selection: Option<crate::engine::scene::EntityId>,
@@ -64,6 +66,7 @@ impl<'a> PluginCtx<'a> {
             time,
             dt,
             out: Vec::new(),
+            view: None,
             selection: None,
         }
     }
@@ -91,6 +94,10 @@ struct CommandEntry {
     help: &'static str,
     func: CommandFn,
 }
+
+/// 取点半径（米）。场景层还没有包围盒组件，先用固定球半径：
+/// 太小要像素级对准，太大相邻实体会被抢走。等实体带上包围盒后换成盒判据。
+const PICK_RADIUS: f32 = 0.9;
 
 /// 插件注册表。生命周期 = 进程；构造后不再增删（不做热重载，见计划 §5.3）。
 #[derive(Default)]
@@ -330,6 +337,29 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             let (scene, _map) =
                 crate::engine::scene_io::from_toml(&text).map_err(|e| format!("读回失败：{e}"))?;
             Ok(format!("loaded entities={}", scene.len()))
+        },
+    );
+    // ---- P3c：鼠标取点（编辑器点选与 AI 接口共用）----
+    reg.add_command(
+        "pick.at",
+        "按屏幕坐标点选：pick.at <ndc_x> <ndc_y>（-1..1，屏幕中心 0,0）",
+        |ctx, args| {
+            let view = ctx.view.ok_or_else(|| "当前没有相机视角".to_string())?;
+            if args.len() < 2 {
+                return Err("参数不足：需要 ndc_x ndc_y".to_string());
+            }
+            let x: f32 = args[0].parse().map_err(|_| "ndc_x 不是数字".to_string())?;
+            let y: f32 = args[1].parse().map_err(|_| "ndc_y 不是数字".to_string())?;
+            match view.pick(ctx.scene, x, y, PICK_RADIUS) {
+                Some((id, t)) => {
+                    ctx.selection = Some(id);
+                    Ok(format!(
+                        "picked #{} t={t:.3}",
+                        ctx.scene.index_of(id)
+                    ))
+                }
+                None => Ok("picked none".to_string()),
+            }
         },
     );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
