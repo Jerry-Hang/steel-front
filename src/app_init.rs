@@ -60,7 +60,12 @@ impl GameApp {
         };
         // 画质索引与 ui.rs 选项表对齐；配置异常值回退默认
         game.hud.quality_index = cfg.quality.min(2) as u8;
+        // 插件注册表：内置调试插件先装上（`RV3D_PLUGIN_CMD` 与 `RV3D_PLUGIN_DIAG` 走它）。
+        let mut plugins = crate::engine::plugin::PluginRegistry::new();
+        crate::engine::plugin::register_debug_plugin(&mut plugins);
         Self {
+            plugins,
+            plugin_cmd_done: false,
             shot_pending,
             shot_t0,
             fatal,

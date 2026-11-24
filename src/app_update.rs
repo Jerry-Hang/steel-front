@@ -352,6 +352,41 @@ impl GameApp {
                 }
             }
         }
+        // 插件系统（引擎化 P7a）：每帧按阶段跑完四个阶段。
+        //
+        // 放在 `update()` 的**前段**：调试机位（`RV3D_CAM`）会在下面提前 return，
+        // 插件系统不该因为"在调试机位下"就静默不跑 —— 那会让 `RV3D_PLUGIN_CMD` 的
+        // 联通性自检在最常用的取景方式下失效。
+        {
+            let dt = self.game.last_dt.max(1e-4);
+            let time = self.game.time;
+            let mut ctx =
+                crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+            self.plugins.run_frame(&mut ctx);
+            for line in &ctx.out {
+                log::info!("{line}");
+            }
+        }
+        // `RV3D_PLUGIN_CMD="<命令> [参数...]"`：启动后执行一次并打印结果。
+        // 这是命令表的**第二个入口**（第一个是编辑器按钮、第三个将是 AI 接口）——
+        // 三者调的是同一张表里的同一个函数，不允许有"只有 API 能做"的暗路。
+        if !self.plugin_cmd_done {
+            self.plugin_cmd_done = true;
+            if let Some(cmd) = crate::syscfg::cfg("RV3D_PLUGIN_CMD") {
+                let mut parts = cmd.split_whitespace();
+                let name = parts.next().unwrap_or("").to_string();
+                let args: Vec<&str> = parts.collect();
+                let mut ctx = crate::engine::plugin::PluginCtx::new(
+                    &mut self.game.scene,
+                    self.game.time,
+                    self.game.last_dt.max(1e-4),
+                );
+                match self.plugins.run_command(&name, &args, &mut ctx) {
+                    Ok(msg) => log::info!("plugin-cmd: {name} → {msg}"),
+                    Err(e) => log::warn!("plugin-cmd: {name} 失败：{e}"),
+                }
+            }
+        }
         // `RV3D_BOOM_AT=<秒>`：在指定时刻于相机正前方 8 m 生成一发爆炸（**视觉 A/B 专用**）。
         //
         // 存在理由：用户报"爆炸是个巨大的橙色多面体"。要把它做成可量化的修复，

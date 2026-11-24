@@ -279,6 +279,12 @@ const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// 插件注册表（引擎化 P7a，见 `docs/ENGINE-PLAN.md` §5）。
+    ///
+    /// 系统每帧按阶段跑；命令表是**编辑器与 AI 接口共用的唯一入口**。
+    plugins: crate::engine::plugin::PluginRegistry,
+    /// `RV3D_PLUGIN_CMD` 是否已经执行过（启动后只执行一次）。
+    plugin_cmd_done: bool,
     /// `RV3D_SHOT_AT` 还没到点的时刻（升序）。空 = 不自动截图（默认）。
     /// 用「逐帧取走已到点的」而不是「判等」—— 理由见 `take_due_shots` 的文档。
     shot_pending: Vec<f32>,

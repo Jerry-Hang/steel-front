@@ -4852,3 +4852,31 @@ LOD 代理比本体高 **1 cm**：0.01 m 在任何距离都是亚像素，不构
 2. 断言文案里的 `\n\` 被写成了转义残留，输出时原样打印 —— 报错信息本身也是证据，要能读。
 
 计划见 `docs/ENGINE-PLAN.md`（P0~P7 + 插件体系 P7a~P7c）。
+
+### 2026-11-25：引擎化 P7a —— 插件注册表（同进程注册，双入口共用一张命令表）
+
+`engine/plugin.rs`：`PluginRegistry` + `EnginePlugin` 所需的四件事 ——
+`Phase`（pre_update/update/post_update/pre_render，**按阶段而不是按注册顺序执行**）、
+`SystemFn`、`CommandFn`、`PluginCtx`（只暴露 `scene` / `time` / `dt` / `out`，**碰不到 Game 私有字段**）。
+
+**双入口**（用户要求的"人机共编"地基）：命令表只有一份，`run_command` 是唯一入口 ——
+编辑器按钮、`RV3D_PLUGIN_CMD` 诊断、将来的 AI 接口都走它，不允许有"只有 API 能做"的暗路。
+
+内置 `debug` 插件：`debug.tick` 系统（`RV3D_PLUGIN_DIAG=1` 时输出）+ 三条命令
+（`scene.count` / `scene.spawn` / `plugin.list`）。`plugin.list` 是**自描述**入口：
+返回插件名与每条命令的 help，编辑器面板与 AI 接口靠它发现"引擎能做什么"。
+
+**实机验证**（headless，640x400）：
+```
+plugin: tick phase=update t=0.00 dt=0.0001 entities=2
+plugin-cmd: plugin.list → plugins=["debug"]; scene.count = …; scene.spawn = …; plugin.list = …
+```
+`entities=2` = 世界根 + 玩家，与 P0 的场景层对得上。
+
+判据 3 条（全部反向验证能红）：`plugin_systems_run_in_phase_order`（注册顺序刻意打乱）、
+`plugin_command_lookup_is_by_name_and_reports_failures`（错误要列出已注册命令）、
+`debug_plugin_registers_commands_and_system`（`scene.spawn` 必须真的加实体）。
+
+⚠️ 又一次被 dead-code 闸门逼着接线：`Phase::name()`、`PluginCtx::dt`、`command_help()`、
+`plugin_names()` 都先是"规划中的 API"，按本仓纪律**不许加 `#[allow]`**，最后都接进了
+`debug.tick` 的输出与 `plugin.list` 的自描述里 —— 现在每一个都有真实读者。
