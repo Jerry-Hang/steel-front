@@ -722,6 +722,17 @@ crate::engine::ray_tracer::PtParams {
             // 检视模式：无游戏 HUD（纯枪模检视画面）
             let mut quads = if self.inspect_weapon.is_some() {
                 Vec::new()
+            } else if self.mode == crate::engine::mode::Mode::Edit {
+                // 编辑态：不画游戏 HUD（血量/准星/击杀提示在编辑器里没有意义），
+                // 改画场景树面板 —— 这是 P3b 的"看得见场景"。
+                let scale = self.game.hud.ui_scale();
+                crate::engine::editor::panel_quads(
+                    self.game.scene(),
+                    self.selection,
+                    self.game.hud.screen_w,
+                    self.game.hud.screen_h,
+                    scale,
+                )
             } else {
                 self.game.hud_quads(near, far, lod)
             };

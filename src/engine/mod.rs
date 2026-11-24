@@ -26,6 +26,7 @@ pub mod city;
 pub mod cjk_glyphs;
 pub mod font_cjk;
 pub mod cpu;
+pub mod editor;
 pub mod game;
 pub mod geom;
 pub mod gizmo;
