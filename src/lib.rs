@@ -279,6 +279,8 @@ const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// 编辑器/播放态（引擎化 P6）。默认 `Play` —— 玩家直接跑游戏时行为与改造前一致。
+    mode: crate::engine::mode::Mode,
     /// 编辑器/AI 的**当前选中实体**（引擎化 P5）。
     ///
     /// 必须是持久状态而不是每帧重建：`scene.spawn` 把新实体设为选中项之后，

@@ -580,7 +580,29 @@ impl GameApp {
         self.game.set_net_fire(self.fire_requested);
         // V3.0 散射：开镜时散布缩小到 30%（腰射 100%）
         self.game.set_spread_scale(1.0 - self.ads_blend * 0.7);
-        self.game.update(delta_time, &self.camera);
+        // 引擎化 P6：**这一帧要不要推进玩法，只问这一个纯函数**。
+        //
+        // 编辑态 `advance=false, dt=0` —— 依赖"每帧被调用"的系统（HUD 计时、上报）
+        // 仍按正常节奏走，只是游戏时间不前进。把判断散在调用点会出现"物理跑了但 AI 没跑"
+        // 这种半推进状态，是编辑器里最难查的一类 bug。
+        let (advance, sim_dt) = crate::engine::mode::step_decision(self.mode, false, delta_time);
+        if advance {
+            self.game.update(sim_dt, &self.camera);
+        }
+        // 模式诊断：**两种模式都打**，这样 `t` 可以直接 A/B。
+        //
+        // ⚠️ 两条必须记住的坑：① 节流只能按**帧数**，不能按 `game.time` —— 编辑态时间恒为 0，
+        // 用它做条件会让这行**一次都不打**；② 只在编辑态打的话，"播放态 t 在涨"
+        // 只能靠间接推断，而 `wave: npc` 行数**没有区分度**（那几行全来自建关时刷第一波，
+        // 实测两模式都是 6 行）。
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static FRAMES: AtomicU32 = AtomicU32::new(0);
+            let n = FRAMES.fetch_add(1, Ordering::Relaxed);
+            if n % 60 == 0 {
+                log::info!("mode: {} t={:.2}", self.mode.name(), self.game.time);
+            }
+        }
 
         // 基准挂钩：RV3D_BENCH_YAW / RV3D_BENCH_PITCH（度）每帧强制相机朝向，
         // 供性能基准固定视角用（与 RV3D_NPC_SCALE / RV3D_STRESS_AI 同类的测试环境变量，

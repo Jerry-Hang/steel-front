@@ -34,6 +34,7 @@ pub mod guns;
 pub mod lighting;
 pub mod map;
 pub mod meshgen;
+pub mod mode;
 pub mod objective;
 pub mod physics;
 pub mod plugin;

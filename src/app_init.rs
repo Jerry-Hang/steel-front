@@ -78,6 +78,12 @@ impl GameApp {
             _ => None,
         };
         Self {
+            // `RV3D_EDIT=1` 起手进编辑态（编辑器与 A/B 取证用）；默认播放态。
+            mode: if crate::syscfg::flag("RV3D_EDIT") {
+                crate::engine::mode::Mode::Edit
+            } else {
+                crate::engine::mode::Mode::Play
+            },
             selection: None,
             aipc,
             plugins,

@@ -4979,3 +4979,27 @@ TEL: TEL entities=2 t=0.00 world=(0.00,0.00,0.00)
 `aipc_reports_unknown_verb_without_dropping_connection`（写错命令不许断线）、
 `ai_command_chain_spawn_drag_save_load_roundtrips`（spawn→drag→save→load 字段逐一相等）。
 反向验证：删掉 `scene.spawn` 里那句 `ctx.selection = Some(id)` ⇒ 读回 z=0 而断言要 4.0，红。
+
+### 2026-11-25：引擎化 P6 —— Play / Edit 分离
+
+`engine/mode.rs`：`Mode { Play, Edit }` + 纯函数 `step_decision(mode, paused, raw_dt) -> (推进?, dt)`。
+判断**只问这一个函数**：散在调用点会出现"物理跑了但 AI 没跑"的半推进状态，是编辑器里最难查的一类。
+`RV3D_EDIT=1` 起手进编辑态（默认 Play，玩家体验与改造前完全一致）；`RV3D_EDIT=1` 下 `t` 恒为 0。
+
+**实测 A/B（9 秒同场景，headless 480x300）**：
+```
+播放态：mode: play t=8.69
+编辑态：mode: edit t=0.00
+```
+
+🔴 **第一次选的指标没有区分度**：我先数 `wave: npc` 行数，两模式都是 **6 行** ——
+那 6 行全来自**建关时**刷第一波（`apply_level` → `spawn_wave(1)`），不是 update 里刷的。
+这正是教训 17「同一个现象别用没量纲区分度的量去判」。换成 `game.time` 才有区分度。
+
+🔴 **同一个形态第二次踩**：诊断行原本用 `game.time` 做节流条件（`now != LAST`），
+而编辑态时间恒为 0 ⇒ **一次都不打**，看起来像"模式没生效"。
+（P0 的 `RV3D_SCENE_DIAG` 当时也是这个毛病。）**节流一律按帧数。**
+
+判据 4 条：默认必须是 Play、编辑态 600 帧零推进、播放态推进且 dt 夹在 [0, 0.1]、
+暂停语义。反向验证：把 `if !mode.is_play() || paused` 改成 `if false` ⇒
+报「编辑态不许推进玩法，实际推进了 600 帧」，红。
