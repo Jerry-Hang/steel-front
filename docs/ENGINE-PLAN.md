@@ -98,3 +98,43 @@ aipc/     AI 控制面：命令 API + 遥测推送              （可用 core+e
 - 不做 C# 级脚本系统；AI 接口 + TOML 数据就是扩展面。
 - 不做动态库插件 ABI（Rust 无稳定 ABI）；"插件"= 同进程注册的系统 + 数据驱动内容。
 - 不在本路线里改玩法数值/平衡（那是 `docs/PROGRESS.md` 的另一条线）。
+
+---
+
+## 5. 插件体系（用户 2026-11-24 明确要求，P7）
+
+**为什么是"同进程注册"而不是动态库**：Rust 没有稳定 ABI，`dlopen` 一个 Rust `dylib` 会在
+编译器升级后静默错乱（不崩不报，只是字段错位）。所以插件 = **同进程注册 + 数据驱动清单**，
+与引擎一起编译；对外可替换的部分走 **AI 接口**（P5）而不是 ABI。
+
+### 5.1 三件东西
+
+1. **`EnginePlugin` trait**（`engine/plugin.rs`）
+   ```rust
+   pub trait EnginePlugin {
+       fn name(&self) -> &'static str;
+       /// 注册系统/导入器/命令；只在启动时调用一次
+       fn register(&mut self, reg: &mut Registry);
+       /// 每帧系统（可选）；`ctx` 只能碰场景/输入/上报，碰不到私有字段
+       fn update(&mut self, _ctx: &mut PluginCtx, _dt: f32) {}
+       /// 编辑器面板（可选）：返回要画的 HUD 元素，编辑器负责布局
+       fn editor_ui(&mut self, _ctx: &mut PluginCtx) -> Vec<crate::ui::HudElement> { Vec::new() }
+   }
+   ```
+2. **`Registry`**：`add_system(phase, fn)`、`add_importer(ext, fn)`、`add_command(name, fn)`
+   —— 三者都同时暴露给 **编辑器 UI** 与 **AI 接口**（铁律 4：人能做的 AI 也能做）。
+3. **清单 `plugins/<name>/plugin.toml`**：声明启停、要注册的资产类型、要暴露的命令名。
+   解析复用 `map.rs` 的零依赖 TOML 解析器。
+
+### 5.2 阶段划分（插件线）
+
+- **P7a 注册表骨架**：`Registry` + `EnginePlugin` + 内置一个 `debug_plugin`（画线框盒）。
+  出口判据：`plugin_registry_runs_systems_in_phase_order`（mock 插件记录调用顺序）；
+  `plugin_commands_are_reachable_from_both_ui_and_api`（同一条命令两条入口都能调）。
+- **P7b 资产导入器插件化**：把 GLB 导入拆成 `asset.importer` 注册项（内置 GLB，可被插件覆盖）。
+- **P7c 编辑器面板插件化**：`editor_ui` 返回的 HUD 元素进编辑器停靠区。
+
+### 5.3 明确不做
+
+- 不做热重载（同进程注册的代价；要热重载得走 AI 接口改数据，不是改代码）。
+- 不做沙箱（同进程 = 完全信任；不信任的代码请走 AI 接口的外部进程）。
