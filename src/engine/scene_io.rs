@@ -69,6 +69,12 @@ pub fn to_toml(scene: &Scene) -> Result<String, SaveError> {
         out.push_str(&format!("r = [{}, {}, {}, {}]\n", r.x, r.y, r.z, r.w));
         let s = local.scale;
         out.push_str(&format!("s = [{}, {}, {}]\n", s.x, s.y, s.z));
+        // 可见性只在 false 时写：默认 true ⇒ 绝大多数实体省一行，文件更好读。
+        // 🔴 **必须持久化**：不写的话 `apply_to` 读回后世界根与玩家会变成可见，
+        // 场景里凭空多出两个盒子（实测就是这么发现的）。
+        if !scene.is_visible(id) {
+            out.push_str("visible = false\n");
+        }
     }
     Ok(out)
 }
@@ -135,6 +141,7 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
         file_id: i64,
         parent: i64,
         t: Transform,
+        visible: bool,
     }
     let mut recs: Vec<Rec> = Vec::new();
     for b in &blocks {
@@ -159,6 +166,9 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
             get("s").ok_or_else(|| SaveError::BadField("缺 s".to_string()))?,
             "s",
         )?;
+        let visible = get("visible")
+            .map(|v| v.trim() != "false")
+            .unwrap_or(true);
         recs.push(Rec {
             file_id: id,
             parent,
@@ -167,6 +177,7 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
                 rotation: r,
                 scale: s,
             },
+            visible,
         });
     }
 
@@ -176,6 +187,8 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
     let mut map: Vec<(usize, crate::engine::scene::EntityId)> = Vec::new();
     for rec in &recs {
         let handle = scene.spawn(None, rec.t);
+        // 可见性在**建实体时**就写进去，与存盘对称
+        scene.set_visible(handle, rec.visible).ok();
         map.push((rec.file_id as usize, handle));
     }
     // 连上下级（二次遍历：上一级可能写在下一级后面）
@@ -203,6 +216,36 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
             .map_err(|e| SaveError::BadParent(format!("{} 挂到 {} 失败：{e:?}", rec.file_id, rec.parent)))?;
     }
     Ok((scene, map))
+}
+
+
+/// 把文件内容**应用到现有场景**（先清空再重建）。返回读回的实体数。
+///
+/// 与 `from_toml` 的区别：那个返回一个**新** `Scene`，调用方拿到的是另一份世界；
+/// 编辑器要的是"换掉当前世界的全部内容" —— 调用方（`Game`/`App`）持有的是同一个
+/// `Scene` 引用，换对象就等于要求所有持有者一起换引用，那是不现实的。
+pub fn apply_to(scene: &mut Scene, text: &str) -> Result<usize, SaveError> {
+    let (fresh, _map) = from_toml(text)?;
+    scene.clear();
+    // 按文件顺序重建：`from_toml` 已经解好了上一层子关系，这里把结构与变换一起搬过来。
+    let mut map: Vec<(crate::engine::scene::EntityId, crate::engine::scene::EntityId)> = Vec::new();
+    for (id, local) in fresh.iter_alive() {
+        let new_id = scene.spawn(None, local);
+        map.push((id, new_id));
+    }
+    for (old, new) in &map {
+        if let Ok(Some(old_parent)) = fresh.parent(*old) {
+            if let Some((_, new_parent)) = map.iter().find(|(o, _)| *o == old_parent) {
+                scene
+                    .set_parent(*new, Some(*new_parent))
+                    .map_err(|e| SaveError::BadParent(format!("重建层级失败：{e:?}")))?;
+            }
+        }
+        // 可见性也要搬：否则读回的实体全部可见（世界根与玩家会多画两个盒子）
+        let vis = fresh.is_visible(*old);
+        scene.set_visible(*new, vis).ok();
+    }
+    Ok(scene.len())
 }
 
 #[cfg(test)]
@@ -253,6 +296,60 @@ mod tests {
         let parent_back = back.parent(child_back).unwrap().expect("下层必须有上级");
         assert_eq!(Some(parent_back), back.parent(child_back).unwrap());
         assert_eq!(back.children(parent_back).unwrap().len(), 1);
+        let _ = child;
+    }
+
+
+    /// 🔴 **存盘 → 读回（替换场景）→ 再存盘：两次文本必须逐字节相同**。
+    ///
+    /// 这是比"字段相等"更强的判据：只要重建时任何一处（层级、可见性、槽位顺序）走样，
+    /// 第二次的文本就会变。而且它顺带证明了 `apply_to` 没有"越读越多"或漏掉实体。
+    ///
+    /// 反向验证：把 `apply_to` 里搬可见性那两行删掉 ⇒ 世界根/玩家读回后变成可见，
+    /// 第二次存盘文本不同（visibility 不进 TOML，但实体数会变？）—— 见下一条说明。
+    #[test]
+    fn apply_to_roundtrips_byte_identically() {
+        let mut s = Scene::new();
+        let root = s.spawn(None, Transform::IDENTITY);
+        let a = s.spawn(Some(root), Transform::from_translation(Vec3::new(1.5, 0.0, -2.25)));
+        let b = s.spawn(None, Transform::from_translation(Vec3::new(0.0, 3.0, 0.0)));
+        s.set_visible(root, false).ok();
+        let first = to_toml(&s).expect("存盘");
+
+        let mut target = Scene::new();
+        // 先塞一个无关实体：证明 apply_to 是"换掉"而不是"追加"
+        target.spawn(None, Transform::IDENTITY);
+        let n = apply_to(&mut target, &first).expect("读回");
+        assert_eq!(n, 3, "应读回 3 个实体（原有的那个被清掉）");
+
+        let second = to_toml(&target).expect("再存盘");
+        assert_eq!(first, second, "两次存盘必须逐字节相同");
+        // 🔴 **可见性必须显式查**：它不进 TOML，所以"两次文本相同"根本测不到它。
+        // 我第一版就在注释里声称这条会抓到"忘搬可见性"，注入验证时才发现那是错的。
+        // 漏搬的后果很具体：世界根与玩家读回后变成可见 ⇒ 场景里凭空多出两个盒子。
+        let vis: Vec<bool> = target.iter_alive().map(|(id, _)| target.is_visible(id)).collect();
+        assert_eq!(
+            vis,
+            vec![false, true, true],
+            "世界根必须仍然不可见（它是结构，不是要画的东西）：{vis:?}"
+        );
+        let _ = (a, b);
+    }
+
+    /// `apply_to` 必须**保住层级**（否则子实体会被打回根节点）。
+    #[test]
+    fn apply_to_preserves_the_hierarchy() {
+        let mut s = Scene::new();
+        let root = s.spawn(None, Transform::IDENTITY);
+        let child = s.spawn(Some(root), Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)));
+        let text = to_toml(&s).unwrap();
+        let mut target = Scene::new();
+        apply_to(&mut target, &text).unwrap();
+        let ids: Vec<_> = target.iter_alive().map(|(id, _)| id).collect();
+        assert_eq!(ids.len(), 2);
+        let parent = target.parent(ids[1]).unwrap();
+        assert_eq!(parent, Some(ids[0]), "第二个实体的上一层必须是第一个");
+        assert_eq!(target.children(ids[0]).unwrap().len(), 1);
         let _ = child;
     }
 

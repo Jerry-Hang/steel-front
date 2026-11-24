@@ -102,6 +102,23 @@ impl Scene {
         self.alive
     }
 
+    /// 清空所有实体（读回场景文件前用）。
+    ///
+    /// 实现上**不重建 `Scene`**，而是把每个槽位置为存活=false 并把代号 +1：
+    /// 这样外面持有的旧句柄（编辑器选中项、AI 侧记下的 id）会立刻失效，
+    /// 而不是悄悄指向重建后的新实体。整表换掉看起来更干净，但会让旧句柄指向新实体。
+    pub fn clear(&mut self) {
+        for slot in self.slots.iter_mut() {
+            if slot.alive {
+                slot.alive = false;
+                slot.parent = None;
+                slot.children.clear();
+                slot.generation = slot.generation.wrapping_add(1);
+            }
+        }
+        self.alive = 0;
+    }
+
     /// 是否参与渲染（快照 `SceneView` 只取 true 的）。
     pub fn is_visible(&self, id: EntityId) -> bool {
         self.slots

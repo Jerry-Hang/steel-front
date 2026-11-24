@@ -585,6 +585,22 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // 读回并**替换当前场景**（`scene.load` 仍然只做校验，两者界限分开）：
+    // 编辑器里"打开一个场景"= 换掉整个世界；而"看看这个文件坏没坏"不该动现场。
+    reg.add_command(
+        "scene.load_into",
+        "读回 TOML 并替换当前场景：scene.load_into <路径>",
+        |ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let text =
+                std::fs::read_to_string(&path[..]).map_err(|e| format!("读文件失败：{e}"))?;
+            let n = crate::engine::scene_io::apply_to(ctx.scene, &text)
+                .map_err(|e| format!("读回失败：{e}"))?;
+            // 选中项可能指向被清掉的实体：清空而不是留一个悬空句柄
+            ctx.selection = None;
+            Ok(format!("loaded_into entities={n}"))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

@@ -579,6 +579,8 @@ mod asset_path_scan_tests {
         // 与 `config.rs` 同类。场景文件由编辑器和 AI 接口在运行期写出/读回，
         // 它不在 `assets/**` 里、也不该经过 `AssetSource`（Android 上那是只读的打包资源）。
         ("src/engine/plugin.rs", "std::fs::read_to_string(path)"),
+        // 场景读回（引擎化 P3g）：用户数据，同 scene.save/load。
+        ("src/engine/plugin.rs", "std::fs::read_to_string(&path[..])"),
         // 骨骼探针（引擎化 P4）：读的是**用户指定的任意 GLB**，不是随包资产，
         // 与 `scene.save/load` 同类。真正的资产读取仍必须走 `AssetSource`。
         ("src/engine/plugin.rs", "std::fs::read(path)"),
