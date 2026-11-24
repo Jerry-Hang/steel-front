@@ -99,6 +99,27 @@ impl Scene {
         self.alive
     }
 
+    /// 遍历所有存活实体（槽位顺序）以及它们的局部变换。
+    ///
+    /// 序列化（`engine::scene_io`）与编辑器场景树都靠它 —— 遍历顺序稳定，
+    /// 存出来的文件 diff 才可读（不是每次跑都换一个顺序）。
+    pub fn iter_alive(&self) -> impl Iterator<Item = (EntityId, Transform)> + '_ {
+        self.slots.iter().enumerate().filter_map(|(i, s)| {
+            s.alive.then_some((
+                EntityId {
+                    index: i as u32,
+                    generation: s.generation,
+                },
+                s.local,
+            ))
+        })
+    }
+
+    /// 槽位下标（**只给序列化/诊断用**：它是实现细节，不是身份，身份是 `EntityId`）。
+    pub fn index_of(&self, id: EntityId) -> usize {
+        id.index as usize
+    }
+
     pub fn is_alive(&self, id: EntityId) -> bool {
         self.slots
             .get(id.index as usize)

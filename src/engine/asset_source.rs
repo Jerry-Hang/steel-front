@@ -575,6 +575,10 @@ mod asset_path_scan_tests {
         ("src/lib.rs", "resource_paths.ini"),
         // WSL detection -- reads /proc, not the asset tree
         ("src/lib.rs", "/proc/version"),
+        // 场景存盘/读回（引擎化 P3，2026-11-25）：**用户数据，不是随包资产** ——
+        // 与 `config.rs` 同类。场景文件由编辑器和 AI 接口在运行期写出/读回，
+        // 它不在 `assets/**` 里、也不该经过 `AssetSource`（Android 上那是只读的打包资源）。
+        ("src/engine/plugin.rs", "std::fs::read_to_string(path)"),
         // CPU topology: reads Linux sysfs (`/sys/devices/system/cpu`), not assets
         ("src/engine/cpu.rs", "std::fs::read_to_string(&p)"),
         ("src/engine/cpu.rs", "std::fs::read_to_string(&path)"),

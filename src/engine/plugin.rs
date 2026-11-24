@@ -305,6 +305,29 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // ---- P3：场景存盘 / 读回（编辑器的"改完能留下"，也是 P5 往返判据的前提）----
+    reg.add_command(
+        "scene.save",
+        "把场景存成 TOML：scene.save <路径>",
+        |ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let text = crate::engine::scene_io::to_toml(ctx.scene)
+                .map_err(|e| format!("存盘失败：{e}"))?;
+            std::fs::write(path, text).map_err(|e| format!("写文件失败：{e}"))?;
+            Ok(format!("saved entities={} path={path}", ctx.scene.len()))
+        },
+    );
+    reg.add_command(
+        "scene.load",
+        "从 TOML 读回场景并统计：scene.load <路径>（只读校验，不改当前场景）",
+        |_ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let text = std::fs::read_to_string(path).map_err(|e| format!("读文件失败：{e}"))?;
+            let (scene, _map) =
+                crate::engine::scene_io::from_toml(&text).map_err(|e| format!("读回失败：{e}"))?;
+            Ok(format!("loaded entities={}", scene.len()))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

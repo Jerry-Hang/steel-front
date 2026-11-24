@@ -41,6 +41,7 @@ pub mod props;
 pub mod ray_tracer;
 pub mod renderer;
 pub mod scene;
+pub mod scene_io;
 pub mod simd;
 pub mod weapons;
 pub mod weapon_data;

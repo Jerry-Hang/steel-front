@@ -4912,3 +4912,32 @@ plugin-cmd: gizmo.drag → drag axis=X delta=1.0000 from=(0.000,0.000,0.000) to=
 
 **反向验证**：把 `w0 = point - ray_o` 改成 `ray_o - point` ⇒ 4 条判据里 3 条红，
 报「X 轴参数应为 1.0，实际 -1」。
+
+### 2026-11-25：引擎化 P3 —— 场景存盘 / 读回（TOML，往返逐位相等）
+
+`engine/scene_io.rs`：`to_toml(scene)` / `from_toml(text)`。**先做存盘再做界面**：
+编辑器的价值是"改完能留下"，AI 接口的价值是"它改的东西人能接着改"，两者都要这一条。
+
+格式（`[[entity]]` 段 + `id/parent/t/r/s`）：
+- **id 显式写进文件**：读回靠 id 重建层级；靠数组顺序隐式推上级，在中间删过实体后会错位；
+- **四元数用 xyzw 数组**（与 `glam::Quat::from_xyzw` 一致），不引入欧拉角约定问题；
+- **浮点用 `{}` 默认格式**：Rust 的 f32 Display 是"能还原的最短表示"⇒ 写出去读回来**逐位相等**，
+  判据才能做"字段逐一相等"而不是"差不多"。
+
+命令（同一张表）：`scene.save <路径>` / `scene.load <路径>`。
+实机验证（headless）：
+```
+plugin-cmd: scene.save → saved entities=2 path=/tmp/scene1.toml
+plugin-cmd: scene.load → loaded entities=2
+```
+存出来的文件里 `id=0 parent=-1`（世界根）与 `id=1 parent=0`（玩家）层级正确。
+
+判据 3 条，全部反向验证能红：
+- `scene_toml_roundtrip_preserves_transforms`（用负零 / 1e-7 / 1e-6 缩放 / 非单位四元数打，
+  任何一处截断格式化都会红）；
+- `scene_toml_rejects_dangling_parent`（parent 指向不存在的 id 必须报错，不许静默当根）；
+- `scene_toml_rejects_zero_rotation`（零四元数无法归一化，必须拒）。
+
+⚠️ 踩到仓库既有的架构判据 `only_the_abstraction_and_non_asset_files_use_std_fs_in_production`：
+生产代码不许直接 `std::fs` 读。场景文件属于**用户数据**（同 `config.rs`），按该判据文档里
+给的例外通道登记进 `ALLOWED_STD_FS_READS` 并写明理由，而不是绕过判据。
