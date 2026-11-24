@@ -108,20 +108,22 @@ pub fn panel_quads(
             &mut q,
         );
     }
-    // 底部：选中项
-    let sel_line = match selection {
-        Some(id) if scene.is_alive(id) => format!("选中 #{}", scene.index_of(id)),
-        Some(_) => "选中已失效".to_string(),
-        None => "未选中".to_string(),
-    };
-    crate::ui::render_text(
-        &sel_line,
-        x + PAD * s,
-        h - ROW_H * 1.5 * s,
-        HEAD,
-        text_scale,
-        &mut q,
-    );
+    // 底部：检视块（选中实体的坐标 / 层级 / 可见性）
+    //
+    // 位置从"距底 4 行"起向上排：检视块的行数固定为 4（见 `inspector_lines`），
+    // 所以这里可以写死偏移，不需要先量高度。
+    let lines = inspector_lines(scene, selection);
+    let base_y = h - ROW_H * 1.5 * s - (lines.len() as f32 - 1.0) * ROW_H * s;
+    for (i, line) in lines.iter().enumerate() {
+        crate::ui::render_text(
+            line,
+            x + PAD * s,
+            base_y + i as f32 * ROW_H * s,
+            if i == 0 { HEAD } else { BODY },
+            text_scale,
+            &mut q,
+        );
+    }
     q
 }
 
@@ -143,6 +145,35 @@ pub fn ndc_from_pixel(x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
 pub struct EditorDrag {
     pub entity: crate::engine::scene::EntityId,
     pub drag: crate::engine::gizmo::TranslateDrag,
+}
+
+/// 检视面板要显示的行（**纯函数**，与绘制分离）。
+///
+/// 分成"取数据"和"画"两件事，是因为"面板上显示的数字对不对"只能在这一层判：
+/// quad 画出来之后就没法断言内容了（测试里没法读像素里的字）。
+/// 所以判据测这个函数，绘制只负责把字符串摆上去。
+///
+/// 行序固定：`#id` / `pos x y z` / `parent` / `visible` —— 变化只改内容不改行数，
+/// 面板高度才稳定。
+pub fn inspector_lines(scene: &Scene, selection: Option<EntityId>) -> Vec<String> {
+    let Some(id) = selection else {
+        return vec!["未选中".to_string()];
+    };
+    let Ok(local) = scene.local(id) else {
+        return vec!["选中已失效".to_string()];
+    };
+    let t = local.translation;
+    let parent = match scene.parent(id) {
+        Ok(Some(p)) => format!("#{}", scene.index_of(p)),
+        Ok(None) => "-".to_string(),
+        Err(_) => "?".to_string(),
+    };
+    vec![
+        format!("#{}", scene.index_of(id)),
+        format!("pos {:.3} {:.3} {:.3}", t.x, t.y, t.z),
+        format!("parent {parent}"),
+        format!("visible {}", if scene.is_visible(id) { "on" } else { "off" }),
+    ]
 }
 
 /// 左键按下时的**全部决策**：是否点在实体上？落在哪根把手上？能否起拖？
@@ -237,6 +268,43 @@ mod tests {
             s.spawn(None, Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)));
         }
         s
+    }
+
+    /// 🔴 检视面板显示的四个字段必须与场景**逐字对应**：
+    /// 改了 Transform，面板文字必须跟着变（不是"大概显示了一下"）。
+    ///
+    /// 反向验证：把 `pos {:.3}` 写成固定字符串 ⇒ 改坐标后文字不变，红。
+    #[test]
+    fn inspector_lines_reflect_the_actual_transform() {
+        let mut s = Scene::new();
+        let root = s.spawn(None, Transform::IDENTITY);
+        let e = s.spawn(
+            Some(root),
+            Transform::from_translation(Vec3::new(1.5, -2.0, 3.25)),
+        );
+        let lines = inspector_lines(&s, Some(e));
+        assert_eq!(lines.len(), 4, "行数固定为 4，面板高度才稳定：{lines:?}");
+        assert_eq!(lines[0], format!("#{}", s.index_of(e)));
+        assert_eq!(lines[1], "pos 1.500 -2.000 3.250");
+        assert_eq!(lines[2], format!("parent #{}", s.index_of(root)));
+        assert_eq!(lines[3], "visible on");
+        // 改坐标 ⇒ 文字必须跟着变
+        s.set_local(e, Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)))
+            .unwrap();
+        assert_eq!(inspector_lines(&s, Some(e))[1], "pos 0.000 0.000 0.000");
+        // 关掉可见性 ⇒ 文字跟着变
+        s.set_visible(e, false).unwrap();
+        assert_eq!(inspector_lines(&s, Some(e))[3], "visible off");
+    }
+
+    /// 没选中 / 句柄失效时必须给**明确的文字**，不能空着（空面板看不出是没选中还是坏了）。
+    #[test]
+    fn inspector_lines_are_explicit_when_nothing_is_selected() {
+        let mut s = Scene::new();
+        assert_eq!(inspector_lines(&s, None), vec!["未选中".to_string()]);
+        let e = s.spawn(None, Transform::IDENTITY);
+        s.despawn(e).unwrap();
+        assert_eq!(inspector_lines(&s, Some(e)), vec!["选中已失效".to_string()]);
     }
 
     /// 🔴 **按下 → 拖动 → 写回** 三段全链路（纯函数层，与鼠标走同一份代码）。

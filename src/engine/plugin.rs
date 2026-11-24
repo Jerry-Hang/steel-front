@@ -512,6 +512,79 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // ---- P3f：检视面板的写入口（面板与 AI 接口共用）----
+    //
+    // 检视面板显示的就是 `editor::inspector_lines` 的四个字段；这里提供**同一个**写入口，
+    // 保证"面板上改的"与"AI 改的"落到同一处、走同一条校验。
+    reg.add_command(
+        "scene.set",
+        "设置选中实体的平移：scene.set <x> <y> <z>",
+        |ctx, args| {
+            if args.len() < 3 {
+                return Err("参数不足：需要 x y z".to_string());
+            }
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let mut v = [0.0f32; 3];
+            for i in 0..3 {
+                v[i] = args[i]
+                    .parse()
+                    .map_err(|_| format!("第 {i} 个参数不是数字：{}", args[i]))?;
+            }
+            let local = ctx
+                .scene
+                .local(sel)
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            ctx.scene
+                .set_local(
+                    sel,
+                    crate::engine::scene::Transform {
+                        translation: glam::Vec3::new(v[0], v[1], v[2]),
+                        ..local
+                    },
+                )
+                .map_err(|_| "写回失败".to_string())?;
+            Ok(format!(
+                "set #{} pos=({:.3},{:.3},{:.3})",
+                ctx.scene.index_of(sel),
+                v[0],
+                v[1],
+                v[2]
+            ))
+        },
+    );
+    reg.add_command(
+        "scene.nudge",
+        "按轴微调选中实体：scene.nudge <X|Y|Z> <增量>",
+        |ctx, args| {
+            let axis = args
+                .first()
+                .and_then(|s| crate::engine::gizmo::Axis::parse(s))
+                .ok_or_else(|| "缺轴或轴非法（X/Y/Z）".to_string())?;
+            let d: f32 = args
+                .get(1)
+                .ok_or_else(|| "缺增量".to_string())?
+                .parse()
+                .map_err(|_| "增量不是数字".to_string())?;
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let mut local = ctx
+                .scene
+                .local(sel)
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            local.translation += axis.dir() * d;
+            let t = local.translation;
+            ctx.scene
+                .set_local(sel, local)
+                .map_err(|_| "写回失败".to_string())?;
+            Ok(format!(
+                "nudge {} {:.3} → ({:.3},{:.3},{:.3})",
+                axis.name(),
+                d,
+                t.x,
+                t.y,
+                t.z
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
