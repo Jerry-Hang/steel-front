@@ -15,6 +15,7 @@ pub mod ai;
 pub mod aipc;
 pub mod anim;
 pub mod ai_command;
+pub mod asset_browser;
 pub mod asset_source;
 pub mod assets;
 pub mod camera;

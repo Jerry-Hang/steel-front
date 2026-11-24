@@ -5329,3 +5329,35 @@ scene.count → entities=3
 判据：`apply_to_roundtrips_byte_identically`（两次存盘逐字节相同 + 可见性显式比对）、
 `apply_to_preserves_the_hierarchy`（子实体的上一层必须还在）。
 三条注入（不设可见性 / 不写 visible / 不清空）**各恰好 1 条红**。
+
+### 2026-11-25：引擎化 P3h —— 资产列表（扫描 / 排序 / 分屏 / 选中）
+
+`engine/asset_browser.rs`：`AssetEntry` + `AssetBrowser`（`from_paths` / `scan` / 分屏 /
+选中 / `panel_lines`）。**目录列举走 `AssetSource::list_dir`**，不用 `std::fs`
+（架构判据盯着，而且 Android 上 `AAssetManager` 不走 `std::fs`）。
+
+三态约定：`scan` 返回 `Result` —— 目录读不了 ⇒ `Err`，**不是空列表**。
+"扫到 0 个"和"没扫成"必须能分开，否则编辑器安静地显示空列表，人会以为目录就是空的。
+
+三个刻意的设计：
+- **排序**：文件系统读目录顺序不保证，不排序每次打开顺序都可能变（判据用**故意乱序**的输入测）；
+- **分屏循环**：最后一屏的下一屏是第一屏；空表 `page_count` 仍为 1（否则除零）；
+- **选中跨屏时屏跟着走**：否则会"选中在第 3 屏、屏幕显示第 1 屏"。
+
+**实机**（命令面与面板同一份数据）：
+```
+asset.count              → assets=52 pages=7 empty=false
+asset.browse 0 4         → 资产 1/13 屏（共 52） | >barrel_metal.glb | barrier.glb | …
+asset.step 1 3           → page=0 selected=3 path=Some("assets/props/barrier2_lod1.glb")
+```
+面板实机截图：左下角「资产 1/7 屏（共 52）」+ 8 条按名排序的 `.glb`，当前项带 `>`。
+
+判据 5 条：排序确定（乱序输入）、只收 `.glb`（大小写不敏感）、分屏循环且不除零、
+选中拖屏、面板文字标出选中项。
+
+⚠️ 过程中我先说了一句"闸门漏报 `页`"，**其实是我还没重跑闸门**就下了结论 ——
+一跑就是 FAIL。教训：**"工具说 OK" 之前先确认它真的跑过**（本仓教训 46 的同形：
+空日志不算通过，"没跑"和"通过"必须分开）。
+
+⚠️ 未做：把选中的资产**实例化进场景**（需要给 `SceneDrawItem` 加网格组件，
+现在的快照只带 model+tint，画的是 marker 立方体）。

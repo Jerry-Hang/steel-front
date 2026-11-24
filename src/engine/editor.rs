@@ -127,6 +127,40 @@ pub fn panel_quads(
     q
 }
 
+/// 把资产列表的文字画到面板**左侧下部**（与右侧场景树分开，两块互不遮挡）。
+///
+/// 传 `lines` 而不是 `&AssetBrowser`：绘制层不该知道列表内部结构，
+/// 这样判据测 `panel_lines`、绘制只负责摆位置，两边不会互相绑死。
+pub fn append_asset_lines(
+    lines: Vec<String>,
+    screen_w: f32,
+    screen_h: f32,
+    ui_scale: f32,
+    q: &mut Vec<Quad>,
+) {
+    if lines.is_empty() {
+        return;
+    }
+    let s = ui_scale;
+    let text_scale = 2.0 * s;
+    let w = PANEL_W * s;
+    let x = (screen_w - w * 2.0 - PAD * s).max(0.0);
+    let h = lines.len() as f32 * ROW_H * s + PAD * 2.0 * s;
+    let y0 = (screen_h - h - PAD * s).max(0.0);
+    // 半透明底：压在场景上要能读清字
+    q.push(Quad::new(Rect::new(x, y0, w, h), BG));
+    for (i, line) in lines.iter().enumerate() {
+        crate::ui::render_text(
+            line,
+            x + PAD * s,
+            y0 + PAD * s + i as f32 * ROW_H * s,
+            if i == 0 { HEAD } else { BODY },
+            text_scale,
+            q,
+        );
+    }
+}
+
 /// 像素坐标 → NDC。**winit 的 Y 向下，NDC 的 Y 向上**，所以 y 要翻。
 ///
 /// 这条单独抽出来是因为它是最容易写反的一步，而写反之后"上下颠倒着拖"看起来像

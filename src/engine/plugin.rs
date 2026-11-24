@@ -601,6 +601,72 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             Ok(format!("loaded_into entities={n}"))
         },
     );
+    // ---- P3h：资产列表（命令面，与面板同一份数据）----
+    //
+    // 列表本体在 `App` 里（要读盘、要懒扫描），命令只操作**一份共享的列表
+    // 这里用"按路径重扫 + 分屏 + 选中"的极简形态：命令面能验证排序/分屏/选中，
+    // 面板显示的就是同一份 `panel_lines()`。
+    reg.add_command(
+        "asset.browse",
+        "列资产（分屏）：asset.browse <屏号> [每屏数]",
+        |_ctx, args| {
+            let page: usize = args
+                .first()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let per: usize = args
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8);
+            let mut b = crate::engine::asset_browser::AssetBrowser::scan("assets/props", per)?;
+            for _ in 0..page {
+                b.next_page();
+            }
+            let mut out = b.panel_lines().join(" | ");
+            if let Some(sel) = b.selected() {
+                out.push_str(&format!(" ; selected={}", sel.path));
+            }
+            Ok(out)
+        },
+    );
+    reg.add_command(
+        "asset.count",
+        "报告资产数量：asset.count",
+        |_ctx, _args| {
+            let b = crate::engine::asset_browser::AssetBrowser::scan("assets/props", 8)?;
+            Ok(format!(
+                "assets={} pages={} empty={}",
+                b.len(),
+                b.page_count(),
+                b.is_empty()
+            ))
+        },
+    );
+    // 翻屏/选中的**行为**要给一条能被脚本驱动的入口：`asset.step <前后翻屏 -1/1> <选中位移>`
+    // —— 三个方法（prev_page / move_selection / page）都在这条路径上被真实调用。
+    reg.add_command(
+        "asset.step",
+        "翻屏并移动选中：asset.step <翻屏次数 ±> <选中位移 ±>",
+        |_ctx, args| {
+            let turn: isize = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let shift: isize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut b = crate::engine::asset_browser::AssetBrowser::scan("assets/props", 8)?;
+            for _ in 0..turn.abs() {
+                if turn > 0 {
+                    b.next_page();
+                } else {
+                    b.prev_page();
+                }
+            }
+            b.move_selection(shift);
+            Ok(format!(
+                "page={} selected={} path={:?}",
+                b.page(),
+                b.selected_index(),
+                b.selected().map(|e| e.path.as_str())
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

@@ -279,6 +279,8 @@ const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// 资产列表（引擎化 P3h）。编辑态首次渲染时扫描 `assets/props`。
+    asset_browser: Option<crate::engine::asset_browser::AssetBrowser>,
     /// 编辑器正在进行的拖拽（引擎化 P3e）：左键按住把手时非 None。
     ///
     /// 单独存一个字段而不是塞进 `camera`：它属于编辑器交互，与相机位姿无关；

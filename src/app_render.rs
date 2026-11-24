@@ -731,15 +731,38 @@ crate::engine::ray_tracer::PtParams {
                 Vec::new()
             } else if self.mode == crate::engine::mode::Mode::Edit {
                 // 编辑态：不画游戏 HUD（血量/准星/击杀提示在编辑器里没有意义），
-                // 改画场景树面板 —— 这是 P3b 的"看得见场景"。
+                // 改画场景树 + 检视 + 资产列表 —— 这是 P3b/P3f/P3h 的"看得见"。
+                //
+                // 列表**懒扫描一次**：目录列举要读盘，不能每帧做。
+                // 扫描失败要留下明确状态（`None` + 一行提示），不能安静显示空列表。
+                if self.asset_browser.is_none() {
+                    self.asset_browser = crate::engine::asset_browser::AssetBrowser::scan(
+                        "assets/props",
+                        8,
+                    )
+                    .ok();
+                    if self.asset_browser.is_none() {
+                        log::warn!("editable: 资产目录扫描失败（assets/props 不可读）");
+                    }
+                }
                 let scale = self.game.hud.ui_scale();
-                crate::engine::editor::panel_quads(
+                let mut quads = crate::engine::editor::panel_quads(
                     self.game.scene(),
                     self.selection,
                     self.game.hud.screen_w,
                     self.game.hud.screen_h,
                     scale,
-                )
+                );
+                if let Some(b) = self.asset_browser.as_ref() {
+                    crate::engine::editor::append_asset_lines(
+                        b.panel_lines(),
+                        self.game.hud.screen_w,
+                        self.game.hud.screen_h,
+                        scale,
+                        &mut quads,
+                    );
+                }
+                quads
             } else {
                 self.game.hud_quads(near, far, lod)
             };
