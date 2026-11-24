@@ -343,6 +343,18 @@ impl PropSet {
             .or_else(|| self.lod1_of(base))
     }
 
+    /// 从资产路径取"网格名"：去掉目录与扩展名。
+    ///
+    /// `PropSet` 的 `PropMesh::name` 是**裸文件名去扩展名**（`barrel_metal`），
+    /// 而场景里存的是 `assets/props/barrel_metal.glb`。这两者必须能对上，
+    /// 否则实例化出来的模型永远找不到网格（会静默画成方块）。
+    pub fn asset_stem(path: &str) -> &str {
+        let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        file.strip_suffix(".glb")
+            .or_else(|| file.strip_suffix(".GLB"))
+            .unwrap_or(file)
+    }
+
     pub fn index_of(&self, name: &str) -> Option<usize> {
         self.meshes.iter().position(|m| m.name == name)
     }
@@ -934,6 +946,21 @@ pub fn bin_visible(bin: &PropBin, planes: &[[f32; 4]; 6], margin: f32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 资产路径 → 网格名：**目录要去掉、扩展名要去掉**，否则实例化的模型找不到网格。
+    ///
+    /// 反向验证：只做 `strip_suffix` 不切目录 ⇒ 第一个断言红（会得到带目录的串）。
+    #[test]
+    fn asset_stem_strips_dir_and_extension() {
+        assert_eq!(
+            PropSet::asset_stem("assets/props/barrel_metal.glb"),
+            "barrel_metal"
+        );
+        assert_eq!(PropSet::asset_stem("barrel_metal.glb"), "barrel_metal");
+        assert_eq!(PropSet::asset_stem("assets/props/x.GLB"), "x");
+        assert_eq!(PropSet::asset_stem("assets/props/x"), "x");
+    }
+
+
     use super::*;
 
     /// 让 `merge_binned` 退化成"不分桶"的桶宽：任何有限坐标除以 ∞ 都是 0，

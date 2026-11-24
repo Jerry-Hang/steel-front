@@ -279,6 +279,9 @@ const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// 编辑器实例的道具签名与限流计数（P3j）。
+    editor_prop_sig: u64,
+    editor_prop_frames: u32,
     /// 资产列表（引擎化 P3h）。编辑态首次渲染时扫描 `assets/props`。
     asset_browser: Option<crate::engine::asset_browser::AssetBrowser>,
     /// 编辑器正在进行的拖拽（引擎化 P3e）：左键按住把手时非 None。

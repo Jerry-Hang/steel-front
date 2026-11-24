@@ -11,6 +11,70 @@ use crate::{gun_diag_on, idle_sway, GameApp, GameState, Particle};
 use crate::{DECAL_LIFT_M, DECAL_SIZE_M, DECAL_THICK_M};
 
 impl GameApp {
+    /// 编辑器实例重建的限流帧数（拖动时每帧都变，不能每帧重建整城合并网格）。
+    /// 取 6：60fps 下最多 100ms 滞后，是"跟手稍慢"而不是"卡住"。
+    const EDITOR_PROP_REBUILD_EVERY: u32 = 6;
+
+    /// 编辑器实例的**签名**：只要网格集合或它们的变换变了，值就变。
+    ///
+    /// 用途：`set_props` 会重建整座城市的合并网格（贵），所以只能用"变了才重建"驱动。
+    /// 用 FNV-1a（零依赖、确定性），只喂**与几何有关**的字段。
+    fn editor_prop_signature(scene: &crate::engine::scene::Scene) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for (id, local) in scene.iter_alive() {
+            let Some(mesh) = scene.mesh_of(id) else {
+                continue;
+            };
+            for b in mesh.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+            for v in [local.translation.x, local.translation.y, local.translation.z] {
+                for b in v.to_bits().to_le_bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        h
+    }
+
+    /// 把场景里带网格的实体转成 `PropPlacement`（与城市道具走同一条渲染路径）。
+    ///
+    /// 网格名对不上 ⇒ **跳过并告警**：静默跳过会让人以为"模型没画出来是渲染问题"，
+    /// 而实际是名字对不上（`asset_stem` 的活儿）。
+    fn editor_prop_placements(
+        set: &engine::props::PropSet,
+        scene: &crate::engine::scene::Scene,
+    ) -> Vec<engine::props::PropPlacement> {
+        let mut out = Vec::new();
+        for (id, local) in scene.iter_alive() {
+            let Some(path) = scene.mesh_of(id) else {
+                continue;
+            };
+            let stem = engine::props::PropSet::asset_stem(&path);
+            match set.index_of(stem) {
+                Some(mesh) => {
+                    let yaw = local.rotation.to_euler(glam::EulerRot::YXZ).0;
+                    let mut p = engine::props::PropPlacement::new(
+                        mesh,
+                        local.translation.x,
+                        local.translation.z,
+                        yaw,
+                        1.0,
+                        false,
+                    );
+                    // 道具摆放的 y 是"相对地面的抬升量"，场景实体的 y 是绝对高度；
+                    // 编辑器里把 0 当基准面，所以直接取 max(0)。
+                    p.y = local.translation.y.max(0.0);
+                    out.push(p);
+                }
+                None => log::warn!("editor: 网格名 {stem} 不在道具套件里（{path}）"),
+            }
+        }
+        out
+    }
+
     /// HUD 的**文本叠加层**：命令输入框（含提示行）与伤害飘字。
     ///
     /// 从 `render()` 里整块抽出来的（2026-11-11，纯提取，行为不变）。抽成
@@ -904,8 +968,15 @@ crate::engine::ray_tracer::PtParams {
                 });
             }
             let map_gen = self.game.map_generation();
-            if map_gen != self.prop_map_gen {
+            // 引擎化 P3j：编辑器实例也走道具渲染路径，于是能看到**真实模型**而不是方块代理。
+            // 触发 = 换关 或 实例集合/变换变了；`set_props` 重建全城合并网格，必须限流。
+            let editor_sig = Self::editor_prop_signature(self.game.scene());
+            let editor_changed = editor_sig != self.editor_prop_sig;
+            self.editor_prop_frames = self.editor_prop_frames.wrapping_add(1);
+            let throttle_ok = self.editor_prop_frames % Self::EDITOR_PROP_REBUILD_EVERY == 0;
+            if map_gen != self.prop_map_gen || (editor_changed && throttle_ok) {
                 self.prop_map_gen = map_gen;
+                self.editor_prop_sig = editor_sig;
                 if let Some(set) = self.prop_set.as_ref() {
                     if !set.is_empty() {
                         // 整城 chunk 走**独立集合**（2026-11-04）：不再并进道具套件。
@@ -918,7 +989,9 @@ crate::engine::ray_tracer::PtParams {
                                 None => log::info!("chunk: assets/city_chunks 为空或不可读"),
                             }
                         }
-                        renderer.set_props(set, self.game.prop_placements());
+                        let mut placements = self.game.prop_placements().to_vec();
+                        placements.extend(Self::editor_prop_placements(set, self.game.scene()));
+                        renderer.set_props(set, &placements);
                         t_props = prep_start.elapsed().as_micros() as u64;
                     }
                 }

@@ -5390,3 +5390,30 @@ scene.instantiate assets/props/barrel_metal.glb
 ⚠️ 未做：**真正把模型画出来**。现在实例只记住"用哪个网格 + 尺寸"，渲染仍走 marker 方块 ——
 下一步要改 `SceneDrawItem` 携带网格引用，并在渲染器侧按需加载（`set_props` 会重建整个
 合并缓冲，全城道具一起重算，所以要点"增量合并"而不是每帧重建）。
+
+### 2026-11-25：引擎化 P3j —— 实例化的模型真正画出来（走道具渲染路径）
+
+思路：编辑器实例**不必另开渲染路径**，直接变成 `PropPlacement` 混进城市道具表
+（同一条合并网格 + 分区 draw call），于是画的是真几何。
+
+- `props::PropSet::asset_stem(path)`：`assets/props/barrel_metal.glb` → `barrel_metal`
+  （`PropMesh::name` 是裸名去扩展名；对不上就永远找不到网格，会静默画成方块）；
+- `app_render::editor_prop_signature(scene)`：FNV-1a 只喂网格路径与平移，
+  变了才重建；**按 6 帧限流**（`set_props` 会重建整座城市的合并网格，
+  拖动时每帧都变会让帧时间爆掉 —— 60fps 下最多 100ms 滞后，是"跟手稍慢"而不是"卡住"）；
+- `editor_prop_placements`：网格名对不上时**告警而不是静默跳过**
+  （静默跳过会让人以为是渲染问题）。
+
+**实机 A/B**（headless 800x500 固定机位，`RV3D_NO_HUD=1`）：
+```
+有实例 vs 无实例：diff_px=4494（1.123%），包围盒 100x67
+```
+截图里能看到**真正的金属桶**（带桶箍的圆柱）立在路面上，不是方块代理。
+
+判据：`asset_stem_strips_dir_and_extension`（目录/扩展名/大写/无扩展名四种形态）。
+⚠️ **判据缺口**：`editor_prop_placements` 与 `editor_prop_signature` 只有实机取证，
+没有单测（要造 `PropSet` 夹具，本轮时间不够）。这条已记在这里，下轮补。
+
+⚠️ 结构性教训：把三块代码插到 `impl GameApp` 外面过两次（一次插在 `render` 的文档注释
+与函数之间、一次插在 `impl` 闭合之后），第二次还因为先 `git checkout` 把未提交的助手
+一起回滚掉，白重做一遍。**改大文件先用 `grep -n '^impl\|^}'` 确认块边界再动手。**

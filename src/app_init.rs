@@ -78,6 +78,8 @@ impl GameApp {
             _ => None,
         };
         Self {
+            editor_prop_sig: 0,
+            editor_prop_frames: 0,
             asset_browser: None,
             editor_drag: None,
             // `RV3D_EDIT=1` 起手进编辑态（编辑器与 A/B 取证用）；默认播放态。
