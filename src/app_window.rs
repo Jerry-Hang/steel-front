@@ -343,6 +343,49 @@ pub(crate) fn window_physical_request(w: u32, h: u32, monitor: Option<(u32, u32)
 }
 
 impl GameApp {
+    /// 编辑态左键按下：抓把手（抓不到就只做选中，不改任何 Transform）。
+    ///
+    /// 逻辑全在 `engine::editor::begin_drag` 里（纯函数，有判据覆盖）；
+    /// 这里只负责把 `GameApp` 的字段喂进去再写回 —— 薄适配器，不重复决策。
+    pub(crate) fn editor_begin_drag(&mut self) {
+        let (mx, my) = self.last_cursor;
+        let ndc = crate::engine::editor::ndc_from_pixel(
+            mx as f32,
+            my as f32,
+            self.game.hud.screen_w,
+            self.game.hud.screen_h,
+        );
+        let view = self.view_info();
+        let (sel, drag) = crate::engine::editor::begin_drag(&self.game.scene, &view, ndc, 0.9);
+        self.selection = sel;
+        if let Some(ed) = drag.as_ref() {
+            log::info!(
+                "editor: 开始拖拽 #{}",
+                self.game.scene.index_of(ed.entity)
+            );
+        }
+        self.editor_drag = drag;
+    }
+
+    /// 编辑态鼠标移动：把光标位置换成新的平移写回场景。
+    pub(crate) fn editor_update_drag(&mut self, px: (f32, f32)) {
+        let Some(ed) = self.editor_drag.as_ref() else {
+            return;
+        };
+        let ed = crate::engine::editor::EditorDrag {
+            entity: ed.entity,
+            drag: ed.drag,
+        };
+        let ndc = crate::engine::editor::ndc_from_pixel(
+            px.0,
+            px.1,
+            self.game.hud.screen_w,
+            self.game.hud.screen_h,
+        );
+        let view = self.view_info();
+        crate::engine::editor::update_drag(&mut self.game.scene, &view, &ed, ndc);
+    }
+
     pub(crate) fn sync_cursor(&mut self) {
         // 🔴🔴 2026-09-13 修（用户实测"鼠标完全转不了视角"的根因）：
         // **焦点不能只靠 `WindowEvent::Focused` 事件**。

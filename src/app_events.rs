@@ -783,6 +783,18 @@ impl GameApp {
                 let pressed = state == ElementState::Pressed;
                 match button {
                     MouseButton::Left => {
+                        // 引擎化 P3e：**编辑态的左键 = 拖拽把手**，不转视角、不开火。
+                        //
+                        // 顺序很关键：这一段必须在下面所有分支之前 return，否则会同时
+                        // 转视角（`dragging` 分支）和拖物体，两个动作叠在一起很难看出意图。
+                        if self.mode == crate::engine::mode::Mode::Edit {
+                            if pressed {
+                                self.editor_begin_drag();
+                            } else {
+                                self.editor_drag = None;
+                            }
+                            return;
+                        }
                         // ESC 菜单打开：点击命中选项（退出/设置），不触发开火
                         if pressed && self.game.hud.esc_menu_open {
                             let (mx, my) = self.last_cursor;
@@ -894,6 +906,12 @@ impl GameApp {
                     } else {
                         self.last_cursor = (px, py);
                     }
+                } else if self.mode == crate::engine::mode::Mode::Edit
+                    && self.editor_drag.is_some()
+                {
+                    // 编辑态：光标驱动把手，**不动视角**（视角靠右键拖拽 / WASD）。
+                    self.last_cursor = (px, py);
+                    self.editor_update_drag((px as f32, py as f32));
                 } else {
                     let (dx, dy) = (px - self.last_cursor.0, py - self.last_cursor.1);
                     // 非捕获态拖拽视角（菜单/设置预览 + 冒烟在无焦点环境下的瞄准路径）：

@@ -125,6 +125,106 @@ pub fn panel_quads(
     q
 }
 
+/// 像素坐标 → NDC。**winit 的 Y 向下，NDC 的 Y 向上**，所以 y 要翻。
+///
+/// 这条单独抽出来是因为它是最容易写反的一步，而写反之后"上下颠倒着拖"看起来像
+/// gizmo 选轴错了 —— 两者很难区分，所以给它一条自己的判据。
+pub fn ndc_from_pixel(x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
+    if w <= 0.0 || h <= 0.0 {
+        return (0.0, 0.0);
+    }
+    (2.0 * x / w - 1.0, 1.0 - 2.0 * y / h)
+}
+
+/// 编辑器正在进行的拖拽（左键按住某个把手）。
+///
+/// 存的是**起拖时刻**的 `TranslateDrag`（起点参数 + 起点平移）与目标实体；
+/// 每次鼠标移动都用它从头算新位置，而不是累加增量 —— 累加会把每帧的数值偏差累积起来。
+pub struct EditorDrag {
+    pub entity: crate::engine::scene::EntityId,
+    pub drag: crate::engine::gizmo::TranslateDrag,
+}
+
+/// 左键按下时的**全部决策**：是否点在实体上？落在哪根把手上？能否起拖？
+///
+/// 抽成纯函数（不碰 GameApp）有两个理由：
+/// 1. 鼠标路径与 AI 接口调的是同一份 —— 不会出现"鼠标能拖、接口拖出来不一样"；
+/// 2. 它现在**能被判据覆盖**。之前这段逻辑长在窗口事件里，只能靠真鼠标手测。
+///
+/// 返回 `(选中项, 拖拽)`：点空白 ⇒ `(None, None)`；点中实体但没落在把手上 ⇒ `(Some, None)`
+/// —— 后者是"只选中、不拖"，与 Unity 里点模型体只选中是同一个行为。
+pub fn begin_drag(
+    scene: &Scene,
+    view: &crate::engine::gizmo::ViewInfo,
+    ndc: (f32, f32),
+    pick_radius: f32,
+) -> (
+    Option<EntityId>,
+    Option<EditorDrag>,
+) {
+    let Some((id, _t)) = view.pick(scene, ndc.0, ndc.1, pick_radius) else {
+        return (None, None);
+    };
+    let Ok(local) = scene.local(id) else {
+        return (Some(id), None);
+    };
+    let Some(axis) = crate::engine::gizmo::pick_axis_at_screen(local.translation, view, ndc.0, ndc.1)
+    else {
+        return (Some(id), None);
+    };
+    let (o, d) = crate::engine::gizmo::screen_ray(
+        view.eye,
+        view.forward,
+        view.right,
+        view.up,
+        view.half_fov_y,
+        view.aspect,
+        ndc.0,
+        ndc.1,
+    );
+    match crate::engine::gizmo::TranslateDrag::begin(axis, local.translation, o, d) {
+        Some(drag) => (Some(id), Some(EditorDrag { entity: id, drag })),
+        None => (Some(id), None),
+    }
+}
+
+/// 拖动中的一步：算出新平移并写回场景。返回是否真的写了。
+///
+/// 写回时保留旋转与缩放（只改平移）—— gizmo 现在只有平移轴，若把 rot/scale 一起覆盖，
+/// 用户在这个阶段做的旋转会在下一次拖动时静默丢失。
+pub fn update_drag(
+    scene: &mut Scene,
+    view: &crate::engine::gizmo::ViewInfo,
+    ed: &EditorDrag,
+    ndc: (f32, f32),
+) -> bool {
+    let (o, d) = crate::engine::gizmo::screen_ray(
+        view.eye,
+        view.forward,
+        view.right,
+        view.up,
+        view.half_fov_y,
+        view.aspect,
+        ndc.0,
+        ndc.1,
+    );
+    let Some(moved) = ed.drag.drag(o, d) else {
+        return false;
+    };
+    let Ok(local) = scene.local(ed.entity) else {
+        return false;
+    };
+    scene
+        .set_local(
+            ed.entity,
+            crate::engine::scene::Transform {
+                translation: moved,
+                ..local
+            },
+        )
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +237,88 @@ mod tests {
             s.spawn(None, Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)));
         }
         s
+    }
+
+    /// 🔴 **按下 → 拖动 → 写回** 三段全链路（纯函数层，与鼠标走同一份代码）。
+    ///
+    /// 相机在原点朝 -Z，实体在 (0,0,-3)；抓住 Y 把手往上拖 0.2 NDC ⇒ 只有 Y 增加。
+    ///
+    /// 反向验证：把 `update_drag` 里的 `..local` 去掉（只写 translation、丢掉 rot/scale）
+    /// ⇒ 第二条断言（旋转必须保住）红。
+    #[test]
+    fn begin_and_update_drag_move_the_entity_along_the_handle() {
+        let view = crate::engine::gizmo::ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let mut s = Scene::new();
+        let id = s.spawn(
+            None,
+            Transform {
+                translation: Vec3::new(0.0, 0.0, -3.0),
+                rotation: glam::Quat::from_xyzw(0.0, 0.6, 0.0, 0.8),
+                scale: Vec3::splat(2.0),
+            },
+        );
+        // 光标落在 Y 把手（0..1m）中点
+        let from = crate::engine::gizmo::project_to_ndc(
+            &view,
+            Vec3::new(0.0, 0.0, -3.0) + Vec3::Y * 0.5,
+        )
+        .unwrap();
+        let (sel, drag) = begin_drag(&s, &view, from, 0.9);
+        assert_eq!(sel, Some(id), "应选中该实体");
+        let drag = drag.expect("落在把手上必须能起拖");
+        // 往上拖
+        let to = (from.0, from.1 + 0.2);
+        assert!(update_drag(&mut s, &view, &drag, to), "拖动必须写回");
+        let after = s.local(id).unwrap();
+        assert!(after.translation.y > 0.05, "Y 必须增加：{:?}", after.translation);
+        assert!(
+            (after.translation.x).abs() < 1e-4 && (after.translation.z + 3.0).abs() < 1e-4,
+            "X/Z 不许动：{:?}",
+            after.translation
+        );
+        assert!(
+            (after.scale.x - 2.0).abs() < 1e-6 && (after.rotation.w - 0.8).abs() < 1e-6,
+            "旋转与缩放必须保住：{:?} / {:?}",
+            after.rotation,
+            after.scale
+        );
+    }
+
+    /// 点空白必须**清空选中**且不起拖（否则编辑器里物体再也放不下）。
+    #[test]
+    fn begin_drag_on_empty_space_clears_selection() {
+        let view = crate::engine::gizmo::ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let mut s = Scene::new();
+        s.spawn(None, Transform::from_translation(Vec3::new(0.0, 0.0, -3.0)));
+        let (sel, drag) = begin_drag(&s, &view, (0.9, 0.9), 0.9);
+        assert_eq!(sel, None, "点空白不该选中任何东西");
+        assert!(drag.is_none(), "点空白不该起拖");
+    }
+
+    /// 🔴 像素 → NDC 的映射（含 Y 翻转）。四角与中心钉死。
+    ///
+    /// 反向验证：去掉 `1.0 -`（不翻 Y）⇒ 左上角得 (-1,-1)，红。
+    #[test]
+    fn ndc_from_pixel_flips_y_and_maps_corners() {
+        assert_eq!(ndc_from_pixel(0.0, 0.0, 800.0, 600.0), (-1.0, 1.0));
+        assert_eq!(ndc_from_pixel(800.0, 600.0, 800.0, 600.0), (1.0, -1.0));
+        assert_eq!(ndc_from_pixel(400.0, 300.0, 800.0, 600.0), (0.0, 0.0));
+        // 零尺寸不许除出 inf
+        assert_eq!(ndc_from_pixel(10.0, 10.0, 0.0, 0.0), (0.0, 0.0));
     }
 
     /// 🔴 面板必须**画出选中行**，且只画一行高亮。

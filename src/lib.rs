@@ -279,6 +279,11 @@ const GUN_KEY_DIR: glam::Vec3 = glam::Vec3::new(-0.45, 0.80, -0.30);
 
 /// 游戏应用主管理结构
 struct GameApp {
+    /// 编辑器正在进行的拖拽（引擎化 P3e）：左键按住把手时非 None。
+    ///
+    /// 单独存一个字段而不是塞进 `camera`：它属于编辑器交互，与相机位姿无关；
+    /// 而且松手时只需要把它清掉，不需要回滚相机。
+    editor_drag: Option<crate::engine::editor::EditorDrag>,
     /// 编辑器/播放态（引擎化 P6）。默认 `Play` —— 玩家直接跑游戏时行为与改造前一致。
     mode: crate::engine::mode::Mode,
     /// 编辑器/AI 的**当前选中实体**（引擎化 P5）。

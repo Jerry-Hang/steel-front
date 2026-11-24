@@ -5092,3 +5092,28 @@ scene.save /tmp/drag_scene.toml               → 文件里 t = [0, 0.42012453, 
 以及"抓 Y 往屏幕上方拖 ⇒ 只有 Y 增加"。反向验证：去掉距离阈值 ⇒ 报「空白处不许挑一根最近的」；
 把选轴换成固定 X ⇒ 报「抓到的必须是 Y 把手」。
 ⚠️ 其中"相机背后"那条我第一版写错了（把视线也翻了，实体又回到前面），已改成保持朝向、只挪实体。
+
+### 2026-11-25：引擎化 P3e —— 真实鼠标事件接进编辑器（逻辑抽成纯函数）
+
+- `editor.rs` 补 `ndc_from_pixel`（**Y 要翻**：winit 向下、NDC 向上）与 `EditorDrag`；
+- 把"按下时怎么决策""移动时怎么算"抽成纯函数 `begin_drag` / `update_drag`；
+  `app_window.rs` 的两个方法退化成**薄适配器**（只喂字段、写回结果）。
+  这样鼠标路径与 AI 接口调的是同一份，而且**能被判据覆盖** —— 之前这段长在窗口事件里，
+  只能靠真鼠标手测。
+- 事件接线（`app_events.rs`）：
+  - 左键按下（编辑态）→ `editor_begin_drag()` 后**立刻 return**；
+    顺序很重要：放在"开火/拖拽转视角"之前，否则会同时转视角和拖物体；
+  - 光标移动（编辑态且有拖拽）→ `editor_update_drag()`，**不动视角**（视角靠右键拖 / WASD）；
+  - 左键松开 → 清空 `editor_drag`。
+- 编辑态放开光标（`capture_wanted` 的"在玩"收窄为"在玩且播放态"），否则鼠标被锁成 1×1，
+  面板点不到、把手拖不了。
+
+判据 3 条（全链路在纯函数层）：
+`ndc_from_pixel_flips_y_and_maps_corners`（四角 + 中心 + 零尺寸不除 inf）、
+`begin_and_update_drag_move_the_entity_along_the_handle`（抓 Y 拖上去 ⇒ 只有 Y 变，
+**旋转与缩放必须保住**）、`begin_drag_on_empty_space_clears_selection`。
+反向验证：把 `..local` 换成写死单位四元数与单位缩放 ⇒ 报
+「旋转与缩放必须保住：Quat(0,0,0,1) / Vec3(1,1,1)」，红。
+
+⚠️ 这条判据抓的是一个真实的破坏面：gizmo 现在只有平移轴，
+如果写回时把 rot/scale 一起覆盖，用户在这个阶段做的旋转会在下一次拖动时**静默丢失**。
