@@ -720,7 +720,14 @@ crate::engine::ray_tracer::PtParams {
             // HUD：用上一帧渲染统计生成覆盖层 quad 并上传（首帧统计为 0）
             let (near, far, lod) = renderer.last_stats();
             // 检视模式：无游戏 HUD（纯枪模检视画面）
-            let mut quads = if self.inspect_weapon.is_some() {
+            // `RV3D_NO_HUD=1`：关掉全部 HUD quad（**A/B 取景专用**）。
+            //
+            // 为什么必须有：HUD 左上角有 fps 数字，每次运行都不一样 —— 做"改动前后必须
+            // 逐像素一致"这类判据时，那几个数字会把 0.01% 级别的真实差异埋掉
+            // （实测 A/A 底噪 49 px 全在 HUD 区域，而 A/B 差 151 px，分不清是信号还是噪声）。
+            let mut quads = if crate::syscfg::flag("RV3D_NO_HUD") {
+                Vec::new()
+            } else if self.inspect_weapon.is_some() {
                 Vec::new()
             } else if self.mode == crate::engine::mode::Mode::Edit {
                 // 编辑态：不画游戏 HUD（血量/准星/击杀提示在编辑器里没有意义），
@@ -838,6 +845,13 @@ crate::engine::ray_tracer::PtParams {
             );
             renderer.set_world_markers(&markers);
             renderer.append_markers(&decal_markers);
+            // 引擎化 P1b：**场景实体走 SceneView 快照进渲染**（渲染器不认识 Scene）。
+            // `RV3D_NO_SCENE_DRAW=1` 关掉这条路径，用于 A/B：播放态下场景里没有可见实体，
+            // 关与不开必须**逐像素一致**（png_diff = 0），否则说明这条路径污染了原画面。
+            if !crate::syscfg::flag("RV3D_NO_SCENE_DRAW") {
+                let view = engine::scene_view::SceneView::extract(self.game.scene());
+                renderer.append_scene_view(&view);
+            }
             renderer.set_emissive_markers(&emissive_markers);
             let t_mark = prep_start.elapsed().as_micros();
             // ---- GLB 道具几何上传 ----

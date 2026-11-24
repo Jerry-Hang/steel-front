@@ -29,6 +29,110 @@ impl GameApp {
     }
 
     pub(crate) fn update(&mut self) {
+        // 引擎化 P7a/P5：**插件系统与 AI 接口必须先于一切早退分支**。
+        //
+        // 这里踩过一次：这两个块原来放在 `RV3D_BOOM_AT` 附近（约 390 行），
+        // 而调试机位分支在 204 行就 `return` 了 —— 于是 **`RV3D_CAM` 下插件系统与 AI 接口
+        // 全部不跑**，而 P7a 的注释却写着"放在前段所以调试机位下也会跑"。
+        // 发现方式：用 `RV3D_CAM` 取证时 `RV3D_PLUGIN_CMD=scene.spawn` 一条日志都没有。
+        // ⇒ 凡是"每帧必须发生"的东西，都放在所有 early-return 之前。
+        // 插件系统（引擎化 P7a）：每帧按阶段跑完四个阶段。
+        //
+        // 放在 `update()` 的**前段**：调试机位（`RV3D_CAM`）会在下面提前 return，
+        // 插件系统不该因为"在调试机位下"就静默不跑 —— 那会让 `RV3D_PLUGIN_CMD` 的
+        // 联通性自检在最常用的取景方式下失效。
+        {
+            let dt = self.game.last_dt.max(1e-4);
+            let time = self.game.time;
+            let view = self.view_info();
+            let mut ctx =
+                crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+            ctx.selection = self.selection;
+            ctx.view = Some(view);
+            self.plugins.run_frame(&mut ctx);
+            self.selection = ctx.selection;
+            for line in &ctx.out {
+                log::info!("{line}");
+            }
+        }
+        // AI 控制面（P5）：把排队的 AI 命令交给**与编辑器同一个**命令表执行，并推上报。
+        //
+        // 顺序很关键：先跑完本帧的插件系统与场景同步，再处理 AI 命令 —— 这样 AI 拿到的
+        // 回执与它下一帧读到的上报是**同一个世界状态**，不会出现"命令说改了、上报还是旧的"。
+        if let Some(aipc) = self.aipc.as_mut() {
+            // 先把要用的标量取出来（都是 Copy），避免同时借 `game` 的两块。
+            let time = self.game.time;
+            let dt = self.game.last_dt.max(1e-4);
+            let plugins = &self.plugins;
+            let view = crate::engine::gizmo::ViewInfo {
+                eye: self.camera.position(),
+                forward: self.camera.forward(),
+                right: self.camera.right(),
+                up: self.camera.up(),
+                half_fov_y: self.camera.fov * 0.5,
+                aspect: if self.game.hud.screen_h > 0.0 {
+                    self.game.hud.screen_w / self.game.hud.screen_h
+                } else {
+                    16.0 / 9.0
+                },
+            };
+            let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+            ctx.selection = self.selection;
+            ctx.view = Some(view);
+            aipc.pump(|name, args| {
+                let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                plugins.run_command(name, &argv, &mut ctx)
+            });
+            // 命令可能改了选中项（`scene.spawn` 会接管）—— 写回持久状态。
+            self.selection = ctx.selection;
+            // 上报：机读 key=value，字段与 `RV3D_SCENE_DIAG` 的日志**同源同义**。
+            let e = self.game.player_entity();
+            let world = self
+                .game
+                .scene()
+                .world_matrix(e)
+                .map(|m| m.w_axis.truncate())
+                .unwrap_or_default();
+            aipc.push_telemetry(format!(
+                "entities={} t={:.2} world=({:.2},{:.2},{:.2})",
+                self.game.scene().len(),
+                self.game.time,
+                world.x,
+                world.y,
+                world.z
+            ));
+        }
+        // `RV3D_PLUGIN_CMD="<命令> [参数...]"`：启动后执行一次并打印结果。
+        // 这是命令表的**第二个入口**（第一个是编辑器按钮、第三个将是 AI 接口）——
+        // 三者调的是同一张表里的同一个函数，不允许有"只有 API 能做"的暗路。
+        if !self.plugin_cmd_done {
+            self.plugin_cmd_done = true;
+            if let Some(cmd) = crate::syscfg::cfg("RV3D_PLUGIN_CMD") {
+                // 支持用 `;` 串多条：`scene.spawn; gizmo.drag Z 0 -4`
+                // —— 取证时经常需要"先造再挪"，一条命令做不到。
+                let view = self.view_info();
+                let time = self.game.time;
+                let dt = self.game.last_dt.max(1e-4);
+                let mut ctx =
+                    crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+                ctx.selection = self.selection;
+                ctx.view = Some(view);
+                for one in cmd.split(';') {
+                    let mut it = one.split_whitespace();
+                    let name = it.next().unwrap_or("");
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let argv: Vec<&str> = it.collect();
+                    ctx.view = Some(view);
+                    match self.plugins.run_command(name, &argv, &mut ctx) {
+                        Ok(msg) => log::info!("plugin-cmd: {name} → {msg}"),
+                        Err(e) => log::warn!("plugin-cmd: {name} 失败：{e}"),
+                    }
+                }
+                self.selection = ctx.selection;
+            }
+        }
         // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。
         let npc_cam = crate::syscfg::cfg("RV3D_NPC_CAM")
             .and_then(|s| s.parse::<usize>().ok());
@@ -387,96 +491,6 @@ impl GameApp {
                 eye.y,
                 eye.z
             );
-        }
-        // 插件系统（引擎化 P7a）：每帧按阶段跑完四个阶段。
-        //
-        // 放在 `update()` 的**前段**：调试机位（`RV3D_CAM`）会在下面提前 return，
-        // 插件系统不该因为"在调试机位下"就静默不跑 —— 那会让 `RV3D_PLUGIN_CMD` 的
-        // 联通性自检在最常用的取景方式下失效。
-        {
-            let dt = self.game.last_dt.max(1e-4);
-            let time = self.game.time;
-            let view = self.view_info();
-            let mut ctx =
-                crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
-            ctx.selection = self.selection;
-            ctx.view = Some(view);
-            self.plugins.run_frame(&mut ctx);
-            self.selection = ctx.selection;
-            for line in &ctx.out {
-                log::info!("{line}");
-            }
-        }
-        // AI 控制面（P5）：把排队的 AI 命令交给**与编辑器同一个**命令表执行，并推上报。
-        //
-        // 顺序很关键：先跑完本帧的插件系统与场景同步，再处理 AI 命令 —— 这样 AI 拿到的
-        // 回执与它下一帧读到的上报是**同一个世界状态**，不会出现"命令说改了、上报还是旧的"。
-        if let Some(aipc) = self.aipc.as_mut() {
-            // 先把要用的标量取出来（都是 Copy），避免同时借 `game` 的两块。
-            let time = self.game.time;
-            let dt = self.game.last_dt.max(1e-4);
-            let plugins = &self.plugins;
-            let view = crate::engine::gizmo::ViewInfo {
-                eye: self.camera.position(),
-                forward: self.camera.forward(),
-                right: self.camera.right(),
-                up: self.camera.up(),
-                half_fov_y: self.camera.fov * 0.5,
-                aspect: if self.game.hud.screen_h > 0.0 {
-                    self.game.hud.screen_w / self.game.hud.screen_h
-                } else {
-                    16.0 / 9.0
-                },
-            };
-            let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
-            ctx.selection = self.selection;
-            ctx.view = Some(view);
-            aipc.pump(|name, args| {
-                let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                plugins.run_command(name, &argv, &mut ctx)
-            });
-            // 命令可能改了选中项（`scene.spawn` 会接管）—— 写回持久状态。
-            self.selection = ctx.selection;
-            // 上报：机读 key=value，字段与 `RV3D_SCENE_DIAG` 的日志**同源同义**。
-            let e = self.game.player_entity();
-            let world = self
-                .game
-                .scene()
-                .world_matrix(e)
-                .map(|m| m.w_axis.truncate())
-                .unwrap_or_default();
-            aipc.push_telemetry(format!(
-                "entities={} t={:.2} world=({:.2},{:.2},{:.2})",
-                self.game.scene().len(),
-                self.game.time,
-                world.x,
-                world.y,
-                world.z
-            ));
-        }
-        // `RV3D_PLUGIN_CMD="<命令> [参数...]"`：启动后执行一次并打印结果。
-        // 这是命令表的**第二个入口**（第一个是编辑器按钮、第三个将是 AI 接口）——
-        // 三者调的是同一张表里的同一个函数，不允许有"只有 API 能做"的暗路。
-        if !self.plugin_cmd_done {
-            self.plugin_cmd_done = true;
-            if let Some(cmd) = crate::syscfg::cfg("RV3D_PLUGIN_CMD") {
-                let mut parts = cmd.split_whitespace();
-                let name = parts.next().unwrap_or("").to_string();
-                let args: Vec<&str> = parts.collect();
-                let view = self.view_info();
-                let time = self.game.time;
-                let dt = self.game.last_dt.max(1e-4);
-                let mut ctx =
-                    crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
-                ctx.selection = self.selection;
-                ctx.view = Some(view);
-                let r = self.plugins.run_command(&name, &args, &mut ctx);
-                self.selection = ctx.selection;
-                match r {
-                    Ok(msg) => log::info!("plugin-cmd: {name} → {msg}"),
-                    Err(e) => log::warn!("plugin-cmd: {name} 失败：{e}"),
-                }
-            }
         }
         // `RV3D_BOOM_AT=<秒>`：在指定时刻于相机正前方 8 m 生成一发爆炸（**视觉 A/B 专用**）。
         //

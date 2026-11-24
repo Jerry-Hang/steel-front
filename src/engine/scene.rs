@@ -69,6 +69,9 @@ pub enum SceneError {
 struct Slot {
     generation: u32,
     alive: bool,
+    /// 是否进渲染快照（`SceneView`）。默认 true：`scene.spawn` 出来的东西就是"看得见的物体"；
+    /// 世界根与玩家由 `Game::new` 显式关掉（它们是场景结构，不是要画的东西）。
+    visible: bool,
     parent: Option<EntityId>,
     children: Vec<EntityId>,
     local: Transform,
@@ -97,6 +100,18 @@ impl Scene {
     /// 存活实体数。
     pub fn len(&self) -> usize {
         self.alive
+    }
+
+    /// 是否参与渲染（快照 `SceneView` 只取 true 的）。
+    pub fn is_visible(&self, id: EntityId) -> bool {
+        self.slots
+            .get(id.index as usize)
+            .is_some_and(|s| s.alive && s.generation == id.generation && s.visible)
+    }
+
+    pub fn set_visible(&mut self, id: EntityId, visible: bool) -> Result<(), SceneError> {
+        self.slot_mut(id)?.visible = visible;
+        Ok(())
     }
 
     /// 遍历所有存活实体（槽位顺序）以及它们的局部变换。
@@ -153,6 +168,7 @@ impl Scene {
                 self.slots.push(Slot {
                     generation: 0,
                     alive: false,
+                    visible: true,
                     parent: None,
                     children: Vec::new(),
                     local: Transform::IDENTITY,
@@ -162,6 +178,7 @@ impl Scene {
         };
         let slot = &mut self.slots[index];
         slot.alive = true;
+        slot.visible = true;
         slot.parent = parent;
         slot.children.clear();
         slot.local = local;

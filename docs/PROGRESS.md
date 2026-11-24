@@ -5117,3 +5117,35 @@ scene.save /tmp/drag_scene.toml               → 文件里 t = [0, 0.42012453, 
 
 ⚠️ 这条判据抓的是一个真实的破坏面：gizmo 现在只有平移轴，
 如果写回时把 rot/scale 一起覆盖，用户在这个阶段做的旋转会在下一次拖动时**静默丢失**。
+
+### 2026-11-25：引擎化 P1b —— 渲染器只吃 SceneView 快照（逐像素 A/B 为 0）
+
+`engine/scene_view.rs`：`SceneDrawItem { model, half_extent, tint }` + `SceneView::extract(&Scene)`。
+**渲染器不认识 `Scene` / `EntityId` / `Transform`**，只认快照里的 `model` 与 `tint`
+（入口 `Renderer::append_scene_view`，复用 marker 实例槽位 ⇒ 不新增 draw call）。
+
+`Scene` 加 `visible` 位：`scene.spawn` 默认可见；世界根与玩家在 `Game::new` 里显式关掉
+（它们是场景结构，不是要画的东西）。`RV3D_NO_SCENE_DRAW=1` 是这条路径的 A/B 开关。
+
+**逐像素 A/B（headless 800x500，固定机位，`RV3D_NO_HUD=1`）**：
+| 场景 | A/A（同配置两次） | ON vs OFF |
+|---|---|---|
+| 播放态 | **0 px** | **0 px** |
+| 编辑态（spawn + 拖到 z=-4） | **0 px** | **1255 px**，包围盒 73x31 |
+
+⇒ ① 渲染是确定性的（A/A = 0，**没有噪声底**，之前的 49/151 px 全是 HUD 的 fps 数字）；
+② 播放态这条路径**一个像素都不改**；③ 编辑态它**真的画出东西**，且包围盒尺寸与"4m 处
+1m 立方体"的屏幕足迹吻合。
+
+为此新增 `RV3D_NO_HUD=1`：HUD 左上角的 fps 每次运行都不同，会把 0.01% 级差异完全埋掉
+（第一次 A/B 得 151 px、A/A 得 49 px，同区域、分不清信号与噪声 —— 关掉 HUD 后两者都是 0）。
+
+🔴 **顺带查出一个真缺陷**：插件系统与 AI 接口的代码块原来放在 `update()` 约 390 行，
+而**调试机位分支在 204 行就 `return` 了** ⇒ `RV3D_CAM` 下插件与 AI 接口**全部不跑**，
+而 P7a 的注释还写着"放在前段所以调试机位下也会跑"。发现方式：用 `RV3D_CAM` 取证时
+`RV3D_PLUGIN_CMD=scene.spawn` **一条日志都没有**。已把两块移到所有 early-return 之前，
+并改用例：**凡是"每帧必须发生"的东西，都放在所有 early-return 之前。**
+
+⚠️ 已知未完成：编辑器方盒现在借用 marker 模板，外观不是最终形态
+（`Shape::Authored` 标签让它跳过窗带/玻璃等程序化效果，但形状仍是 marker 立方体）。
+真正的"编辑器默认物体"等 P4 有了网格组件再做。

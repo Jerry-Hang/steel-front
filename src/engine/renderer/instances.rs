@@ -470,6 +470,39 @@ impl Renderer {
     /// 与 `set_world_markers` 分开的理由是 **PT 场景不吃这一批**：弹孔每次开枪都变，
     /// 混进 `pt_set_scene_markers` 会让 BLAS 指纹每帧判"场景变了"而重建，
     /// 还会白占 PT 盒容量（`PT_MAX_BOXES`）。
+    /// **渲染器消费 SceneView 的唯一入口**（引擎化 P1b）。
+    ///
+    /// 渲染器不认识 `Scene`/`EntityId`/`Transform` —— 只认快照里的 `model` 与 `tint`。
+    /// 这条边界就是"把游戏和引擎分开"的落点：以后编辑器、关卡预览、AI 生成的场景
+    /// 都走同一条路，渲染器不用为它们各写一份。
+    ///
+    /// 实现上复用 marker 批次（同一个实例槽位、同一个管线），因此这条路径**不新增 draw call**；
+    /// 代价是场景实体与 marker 共享 `MAX_MARKER_INSTANCES` 上限（超了会被截断并告警）。
+    pub(crate) fn append_scene_view(&mut self, view: &crate::engine::scene_view::SceneView) {
+        if view.is_empty() {
+            return;
+        }
+        let before = self.markers.len();
+        for it in &view.items {
+            let room = (MAX_MARKER_INSTANCES as usize).saturating_sub(self.markers.len());
+            if room == 0 {
+                log::warn!(
+                    "scene_view: marker 槽位已满，丢弃 {} 个场景实体",
+                    view.len() - (self.markers.len() - before)
+                );
+                break;
+            }
+            self.markers.push(InstanceData {
+                model: it.model.to_cols_array(),
+                tint: it.tint,
+            });
+        }
+        if self.markers.len() != before {
+            // 同 `append_markers`：不升版本就不会重新上传。
+            self.markers_version = self.markers_version.wrapping_add(1);
+        }
+    }
+
     pub(crate) fn append_markers(&mut self, extra: &[WorldMarker]) {
         let room = (MAX_MARKER_INSTANCES as usize).saturating_sub(self.markers.len());
         let take = extra.len().min(room);

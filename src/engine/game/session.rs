@@ -18,6 +18,10 @@ impl Game {
         scene
             .set_parent(player_entity, Some(world_root))
             .expect("刚建的两个实体必然有效");
+        // 世界根与玩家**不进渲染快照**：它们是场景结构，不是要画的物体
+        // （玩家由第一人称相机表示；根节点没有几何）。编辑器放的新实体会默认可见。
+        scene.set_visible(world_root, false).ok();
+        scene.set_visible(player_entity, false).ok();
         let mut world = physics::World::new();
         world.gravity = 9.8;
         // 地形中央 60×60 区域已压平到 y=0（renderer.rs flatten_mask）；障碍刚体由关卡布局生成
