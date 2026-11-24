@@ -5238,3 +5238,39 @@ t=1.00 → max_disp=1.0000 at v1
 
 ⚠️ 未做：GPU 侧骨骼变换（顶点着色器读关节矩阵）。现在这条链是 **CPU 侧**的，
 可用于烘焙、预计算、以及"导入后立刻看到姿势"，但还没进渲染管线。
+
+### 2026-11-25：引擎化 P4d —— 真实 Blender 骨骼资产 + 抓到一个真 bug（VEC3 被按 VEC4 读）
+
+用 Blender 5.2.1 headless 生成 `tools/fixtures/skinned_bar.glb`（2 段骨骼 + 3 顶点 +
+1 秒 90° 旋转动画），`tools/blender/make_skinned_fixture.py` 可复现。
+这是**验证资产**，不是游戏美术。
+
+🔴 **抓到真 bug**：`parse_glb_animations` 原来对**所有**通道都按 4 分量读 accessor，
+而 glTF 里 `translation` / `scale` 是 **VEC3**，只有 `rotation` 是 VEC4
+⇒ 每个元素多吃一个 float ⇒ **整条数据错位**。
+
+症状特别有迷惑性：末帧位移从 0.7071 跳到 **1.4142**，看起来像"矩阵顺序错"或"端点处理错"。
+错位后的数值仍是**合理范围内的浮点数**（实测读到的是**时间戳**当位移），画面上的表现只是"动画怪"。
+
+三个发现过程值得记：
+1. 先用**手算**核对末帧（90° 绕 (0,1,0)、50/50 混合 ⇒ 位移 0.7071），实测 1.4142 不符；
+2. 又用**独立 Python 实现**核对 —— **也得到 1.4142**，因为我的 Python 复核**照搬了同一个假设**（按 4 读）；
+   ⇒ 两套实现一致**不能**证明正确，只能证明他们共享同一个错误（本仓教训 27 的同形）；
+3. 把它们各自打印的"采样值"打出来看，发现末帧值是 `[1.0, 0.0, 0.042, 0.083]` ——
+   **那不是位移，是时间戳**，于是定位到分量数。
+
+修法：`accessor_components()` 按 accessor 的 `type` 给分量数（SCALAR/VEC2/VEC3/VEC4），
+未知类型按 4 并告警。
+
+**修复后实测**（`asset.pose_probe`）：
+| t | max_disp | 位置 | 手算 |
+|---|---|---|---|
+| 0.50 | 0.3523 | v2 | u=0.458 ⇒ 41.2° ⇒ 0.3521 ✓ |
+| 1.042 | 0.7071 | v2 | 90° ⇒ (-0.5,1.5,0) ⇒ 0.7071 ✓ |
+
+判据 2 条（真实资产）：`real_blender_skinned_asset_parses_and_binds`（bind_err < 1e-4）、
+`real_blender_asset_animation_moves_the_weighted_vertex`（v2 位移 0.7071、v0/v1 不动）。
+反向验证：把分量数写回常数 4 ⇒ 立即红。
+
+夹具本身也修了一处：Blender 默认关键帧插值是 CONSTANT ⇒ 导出成 STEP ⇒ 末帧突变；
+脚本里显式设 LINEAR（Blender 5.x 的 `Action` 没有 `fcurves`，要遍历 slot 的 channelbag）。

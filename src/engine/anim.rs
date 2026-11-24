@@ -173,6 +173,29 @@ fn to_quat(v: Vec4) -> Quat {
     }
 }
 
+
+/// 读 accessor 的 `type` 得到分量数（SCALAR=1 / VEC3=3 / VEC4=4）。
+/// 未知类型按 4 处理并告警 —— 静默当成 4 会让数据错位，那是本模块刚修过的 bug。
+fn accessor_components(json: &crate::llm_cmd::Json, idx: usize) -> usize {
+    let ty = json
+        .get("accessors")
+        .and_then(|a| a.as_arr())
+        .and_then(|a| a.get(idx))
+        .and_then(|a| a.get("type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("VEC4");
+    match ty {
+        "SCALAR" => 1,
+        "VEC2" => 2,
+        "VEC3" => 3,
+        "VEC4" | "MAT2" | "MAT3" | "MAT4" => 4,
+        other => {
+            log::warn!("anim: 未知 accessor type {other}，按 VEC4 处理");
+            4
+        }
+    }
+}
+
 /// 一条动画通道（node + 属性 + 采样数据）。
 #[derive(Debug, Clone)]
 pub struct Channel {
@@ -258,11 +281,21 @@ pub fn parse_glb_animations(bytes: &[u8]) -> Result<Vec<Channel>, String> {
             };
             let interp = Interp::parse(smp.get("interpolation").and_then(|v| v.as_str()).unwrap_or("LINEAR"));
             let times = crate::engine::skin::read_acc_f32(&json, bin, in_acc as usize, 1)?;
-            // rotation / translation / scale 都是 vec4（rotation 是四元数；translation/scale 第 4 分量无用）
-            let raw = crate::engine::skin::read_acc_f32(&json, bin, out_acc as usize, 4)?;
+            // 🔴 **分量数必须按 accessor 的 `type` 读**，不能一律 4：
+            // glTF 里 translation / scale 是 **VEC3**，只有 rotation 是 VEC4。
+            // 一律按 4 读会让每个元素多吃一个 float ⇒ 整条数据错位，
+            // 而错位后的数值仍在合理范围内（实测读到的是**时间戳**当位移），
+            // 画面上的表现只是"动画怪"，极难定位。
+            // 发现方式：真实 Blender 资产在末帧位移从 0 跳到 1.41 —— 与手算不符。
+            let comps = accessor_components(&json, out_acc as usize);
+            let raw = crate::engine::skin::read_acc_f32(&json, bin, out_acc as usize, comps)?;
             let values: Vec<Vec4> = raw
-                .chunks_exact(4)
-                .map(|c| Vec4::new(c[0], c[1], c[2], c[3]))
+                .chunks_exact(comps)
+                .map(|c| match comps {
+                    3 => Vec4::new(c[0], c[1], c[2], 0.0),
+                    1 => Vec4::new(c[0], 0.0, 0.0, 0.0),
+                    _ => Vec4::new(c[0], c[1], c[2], c[3]),
+                })
                 .collect();
             out.push(Channel {
                 node,

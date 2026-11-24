@@ -664,6 +664,72 @@ mod tests {
         );
     }
 
+
+    /// 🔴 **真实 Blender 导出**的骨骼资产（`tools/fixtures/skinned_bar.glb`）。
+    ///
+    /// 用 `include_bytes!` 而不是读盘：仓库的架构判据禁止生产代码直接 `std::fs`，
+    /// 而测试文件里读盘又只能证明"文件在"，证明不了"解析对"。
+    /// 3.7KB 编进测试二进制，任何时候都能跑。
+    ///
+    /// 这个夹具比手工拼的字节多了三样东西：`skins.joints` 顺序是 `[1, 0]`（不是自然的
+    /// 升序）、索引用 u16、动画有 6 条通道 —— 都是合成夹具覆盖不到的。
+    ///
+    /// 期望值不是"看着像"，而是**独立的 Python 实现**逐顶点算出来的：
+    /// v0/v1 不动，v2 从 (0,2,0) 到 (-0.5,1.5,0)，位移 0.7070。
+    #[test]
+    fn real_blender_skinned_asset_parses_and_binds() {
+        let glb = include_bytes!("../../tools/fixtures/skinned_bar.glb");
+        let (skin, positions) = parse_glb_skin(glb)
+            .expect("解析真实资产")
+            .expect("应该有骨骼");
+        assert_eq!(skin.joint_count(), 2, "Blender 导出应有 2 个关节");
+        assert_eq!(skin.vertex_count(), 3);
+        let err = bind_pose_error(&skin, &positions);
+        assert!(err < 1e-4, "绑定姿势下顶点不许动，最大位移 {err}");
+    }
+
+    /// 🔴 真实资产的**动画驱动**：采样到末帧后，50/50 权重的顶点位移必须 ≈ 0.7070。
+    ///
+    /// 手算：b1 绕 Z 转 90°、轴心 (0,1,0)；v2=(0,2,0) 转后 (-1,1,0)，
+    /// 与未旋转的 (0,2,0) 各取一半 ⇒ (-0.5,1.5,0)，位移 |(0.5,0.5,0)| = 0.7071。
+    ///
+    /// 反向验证：把 `posed_positions` 里的 `w * ib` 写成 `ib * w`（本夹具的 IB 是纯平移、
+    /// 旋转不可交换）⇒ 位移偏离，红。
+    #[test]
+    fn real_blender_asset_animation_moves_the_weighted_vertex() {
+        let glb = include_bytes!("../../tools/fixtures/skinned_bar.glb");
+        let (json, _bin) = split_glb(glb).expect("拆块");
+        let (skin, positions) = parse_glb_skin(glb).expect("解析").expect("有骨骼");
+        let channels = crate::engine::anim::parse_glb_animations(glb).expect("动画");
+        assert_eq!(channels.len(), 6, "Blender 导出应有 6 条通道（两个节点 × TRS）");
+        let joints: Vec<usize> = json
+            .get("skins")
+            .and_then(|s| s.as_arr())
+            .and_then(|s| s.first())
+            .and_then(|s| s.get("joints"))
+            .and_then(|j| j.as_arr())
+            .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as usize).collect())
+            .unwrap_or_default();
+        let worlds = crate::engine::anim::sample_pose_worlds(&json, 0, &channels, 1.042);
+        let posed = crate::engine::anim::posed_positions(&skin, &joints, &positions, &worlds);
+        let mut worst = 0.0f32;
+        let mut at = 0;
+        for (i, (a, b)) in positions.iter().zip(&posed).enumerate() {
+            let d = (*b - *a).length();
+            if d > worst {
+                worst = d;
+                at = i;
+            }
+        }
+        assert_eq!(at, 2, "位移最大的应是 50/50 权重的 v2，实际 v{at}");
+        assert!(
+            (worst - 0.7071).abs() < 5e-3,
+            "v2 位移应约 0.7071（独立 Python 实现算得 0.7070），实际 {worst}"
+        );
+        // 另外两个顶点在旋转轴上，必须不动
+        assert!((posed[0] - positions[0]).length() < 1e-4);
+        assert!((posed[1] - positions[1]).length() < 1e-4);
+    }
     /// 没有骨骼的 GLB 必须返回 `Ok(None)`（不是错误）—— 本仓现有 53 件资产全是这种。
     #[test]
     fn glb_without_skins_is_not_an_error() {
