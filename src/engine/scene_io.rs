@@ -75,6 +75,10 @@ pub fn to_toml(scene: &Scene) -> Result<String, SaveError> {
         if !scene.is_visible(id) {
             out.push_str("visible = false\n");
         }
+        // 网格引用也要持久化：否则"实例化一个模型 → 存盘 → 读回"会变回方块
+        if let Some(mesh) = scene.mesh_of(id) {
+            out.push_str(&format!("mesh = \"{mesh}\"\n"));
+        }
     }
     Ok(out)
 }
@@ -142,6 +146,7 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
         parent: i64,
         t: Transform,
         visible: bool,
+        mesh: Option<String>,
     }
     let mut recs: Vec<Rec> = Vec::new();
     for b in &blocks {
@@ -169,6 +174,8 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
         let visible = get("visible")
             .map(|v| v.trim() != "false")
             .unwrap_or(true);
+        // 网格路径：去掉两端引号（字符串值在 TOML 里是 `mesh = "…"`）
+        let mesh = get("mesh").map(|v| v.trim().trim_matches('"').to_string());
         recs.push(Rec {
             file_id: id,
             parent,
@@ -178,6 +185,7 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
                 scale: s,
             },
             visible,
+            mesh,
         });
     }
 
@@ -189,6 +197,9 @@ pub fn from_toml(text: &str) -> Result<(Scene, Vec<(usize, crate::engine::scene:
         let handle = scene.spawn(None, rec.t);
         // 可见性在**建实体时**就写进去，与存盘对称
         scene.set_visible(handle, rec.visible).ok();
+        if let Some(m) = rec.mesh.clone() {
+            scene.set_mesh(handle, Some(m)).ok();
+        }
         map.push((rec.file_id as usize, handle));
     }
     // 连上下级（二次遍历：上一级可能写在下一级后面）
@@ -244,6 +255,13 @@ pub fn apply_to(scene: &mut Scene, text: &str) -> Result<usize, SaveError> {
         // 可见性也要搬：否则读回的实体全部可见（世界根与玩家会多画两个盒子）
         let vis = fresh.is_visible(*old);
         scene.set_visible(*new, vis).ok();
+        // 🔴 网格引用**也要搬**。判据 `scene_toml_roundtrips_the_mesh_reference` 抓的就是这条：
+        // 只搬变换/层级/可见性的话，"实例化 → 存盘 → 读回"会悄悄退回方块。
+        // 这是同一个形态的第三次（可见性一次、网格一次）：**每加一个逐实体字段，
+        // 就要同时改 `to_toml` / `from_toml` / `apply_to` 三处**。
+        if let Some(m) = fresh.mesh_of(*old) {
+            scene.set_mesh(*new, Some(m)).ok();
+        }
     }
     Ok(scene.len())
 }
@@ -351,6 +369,48 @@ mod tests {
         assert_eq!(parent, Some(ids[0]), "第二个实体的上一层必须是第一个");
         assert_eq!(target.children(ids[0]).unwrap().len(), 1);
         let _ = child;
+    }
+
+
+    /// 🔴 **网格引用必须随场景存盘往返**：否则"实例化一个模型 → 存盘 → 读回"会退回方块。
+    /// 反向验证：删掉 `to_toml` 里写 mesh 那两行 ⇒ 读回后 `mesh_of` 是 None，红。
+    #[test]
+    fn scene_toml_roundtrips_the_mesh_reference() {
+        let mut s = Scene::new();
+        let a = s.spawn(None, Transform::IDENTITY);
+        let b = s.spawn(None, Transform::IDENTITY);
+        s.set_mesh(a, Some("assets/props/barrel_metal.glb".to_string()))
+            .unwrap();
+        let text = to_toml(&s).expect("存盘");
+        assert!(text.contains("mesh = \"assets/props/barrel_metal.glb\""), "文件里要有网格路径");
+
+        let mut target = Scene::new();
+        apply_to(&mut target, &text).unwrap();
+        let ids: Vec<_> = target.iter_alive().map(|(id, _)| id).collect();
+        assert_eq!(
+            target.mesh_of(ids[0]),
+            Some("assets/props/barrel_metal.glb".to_string()),
+            "读回后网格引用必须还在"
+        );
+        assert_eq!(target.mesh_of(ids[1]), None, "没绑网格的实体不许凭空有网格");
+        let _ = b;
+    }
+
+    #[test]
+    fn apply_to_keeps_mesh_on_the_third_entity() {
+        let mut s = Scene::new();
+        let root = s.spawn(None, Transform::IDENTITY);
+        let player = s.spawn(Some(root), Transform::IDENTITY);
+        let mesh_e = s.spawn(None, Transform::from_translation(Vec3::new(0.0, 0.0, -1e-5)));
+        s.set_visible(root, false).unwrap();
+        s.set_visible(player, false).unwrap();
+        s.set_mesh(mesh_e, Some("assets/props/barrel_metal.glb".into())).unwrap();
+        let first = to_toml(&s).unwrap();
+        let mut target = Scene::new();
+        apply_to(&mut target, &first).unwrap();
+        let second = to_toml(&target).unwrap();
+        assert!(second.contains("mesh ="), "第二次存盘丢了网格：\n{second}");
+        assert_eq!(first, second, "两次存盘必须逐字节相同");
     }
 
     /// 读回时 parent 指向不存在的 id 必须报错，而不是静默把它当根节点。

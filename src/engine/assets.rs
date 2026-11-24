@@ -26,6 +26,25 @@ impl ImportedMesh {
 // ---------------------------------------------------------------------------
 // GLB（glTF 2.0 二进制）：JSON chunk（用 llm_cmd 迷你 JSON 解析器，零依赖）+ BIN chunk
 // ---------------------------------------------------------------------------
+/// 顶点包围盒 `(lo, hi)`。没有顶点 ⇒ `None`。
+///
+/// 抽成纯函数是因为编辑器的"实例尺寸"完全取决于它 —— 尺寸判据必须能单独测，
+/// 而不是绑在"某个 GLB 解析出来对不对"上。
+pub fn mesh_bounds(mesh: &ImportedMesh) -> Option<([f32; 3], [f32; 3])> {
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for v in &mesh.verts {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k]);
+            hi[k] = hi[k].max(v[k]);
+        }
+    }
+    if lo.iter().any(|x| !x.is_finite()) || hi.iter().any(|x| !x.is_finite()) {
+        return None;
+    }
+    Some((lo, hi))
+}
+
 pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
         return Err("非 GLB 文件（缺少 glTF magic）".into());
@@ -347,6 +366,36 @@ fn append_prim(
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 包围盒必须**逐轴**取极值：手算一组刻意不对称的顶点，三条轴的下界/上界都要对上。
+    ///
+    /// 反向验证：把 `hi[k] = hi[k].max(...)` 写成 `hi[k] = v[k]` ⇒ 只剩最后一个顶点，红。
+    #[test]
+    fn mesh_bounds_matches_hand_computed_extents() {
+        // 每顶点 11 个分量：pos(3) normal(3) uv(2) color(3)
+        let mk = |x: f32, y: f32, z: f32| [x, y, z, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mesh = ImportedMesh {
+            verts: vec![
+                mk(-1.0, 0.0, 2.0),
+                mk(3.0, -2.0, 0.5),
+                mk(0.5, 4.0, -1.5),
+            ],
+            indices: vec![],
+            base_color: [1.0, 1.0, 1.0],
+        };
+        let (lo, hi) = mesh_bounds(&mesh).expect("有顶点");
+        assert_eq!(lo, [-1.0, -2.0, -1.5], "下界取各轴最小值");
+        assert_eq!(hi, [3.0, 4.0, 2.0], "上界取各轴最大值");
+
+        // 空网格 ⇒ None（不是 0 尺寸的盒子：那会让实例化出一个看不见的点）
+        let empty = ImportedMesh {
+            verts: vec![],
+            indices: vec![],
+            base_color: [1.0, 1.0, 1.0],
+        };
+        assert!(mesh_bounds(&empty).is_none());
+    }
+
+
     use super::*;
     #[test]
     fn glb_baked_color_and_index() {

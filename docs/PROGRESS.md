@@ -5361,3 +5361,32 @@ asset.step 1 3           → page=0 selected=3 path=Some("assets/props/barrier2_
 
 ⚠️ 未做：把选中的资产**实例化进场景**（需要给 `SceneDrawItem` 加网格组件，
 现在的快照只带 model+tint，画的是 marker 立方体）。
+
+### 2026-11-25：引擎化 P3i —— 资产实例化进场景（数据层）
+
+`Scene` 的实体加了一个字段：**网格资产路径**（`Option<String>`）。存的是相对路径而不是加载后的
+几何 —— 场景要能存盘、要能跨进程读回，几何是资产系统的分工。存盘写 `mesh = "assets/props/x.glb"`。
+
+命令 `scene.instantiate <路径>`：经 `AssetSource` 读字节 → `assets::parse_glb` →
+`assets::mesh_bounds`（新抽出的纯函数）算包围盒 → 建实体、绑网格、设选中。
+实机：
+```
+scene.instantiate assets/props/barrel_metal.glb
+  → instantiated #2 mesh=… verts=654 half=(0.300,0.441,0.302)
+```
+
+判据 2 条：`mesh_bounds` 逐轴取极值（手算不对称顶点，三条轴都要对上；空网格返回 None）、
+`scene_toml_roundtrips_the_mesh_reference`（存盘往返后网格引用还在、没绑的不许凭空有）。
+另外补了一条**与实机同形**的 3 实体判据（前两条覆盖不到"第三个实体"这种形状）。
+
+🔴 两次自我纠正，都是"我的判断"而不是代码的问题：
+1. **`apply_to` 漏搬网格** —— 判据抓到的真缺陷（只搬了变换/层级/可见性）。
+   这已经是同一形态的第三次（可见性一次、网格一次）⇒ **每加一个逐实体字段，
+   必须同时改 `to_toml` / `from_toml` / `apply_to` 三处**，这条已写进注释。
+2. **实机仍丢网格，其实是我在拿过期二进制做验证**：`cargo test` 只重建测试二进制，
+   发布版 exe 还是修复前的。重建后 `diff` 立即相同。
+   ⇒ **改完代码做实证前必须 `cargo build --release`**，不能用上一次的 exe 下结论。
+
+⚠️ 未做：**真正把模型画出来**。现在实例只记住"用哪个网格 + 尺寸"，渲染仍走 marker 方块 ——
+下一步要改 `SceneDrawItem` 携带网格引用，并在渲染器侧按需加载（`set_props` 会重建整个
+合并缓冲，全城道具一起重算，所以要点"增量合并"而不是每帧重建）。

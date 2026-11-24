@@ -69,6 +69,11 @@ pub enum SceneError {
 struct Slot {
     generation: u32,
     alive: bool,
+    /// 网格资产路径（`assets/props/x.glb`）。`None` = 没有网格（画方块）。
+    ///
+    /// 存**相对路径**而不是"加载后的几何"：场景要能存盘、要能跨进程读回，
+    /// 而几何是资产系统的分工。等渲染器要画的时候再按路径取（同一路径只加载一次）。
+    mesh: Option<String>,
     /// 是否进渲染快照（`SceneView`）。默认 true：`scene.spawn` 出来的东西就是"看得见的物体"；
     /// 世界根与玩家由 `Game::new` 显式关掉（它们是场景结构，不是要画的东西）。
     visible: bool,
@@ -117,6 +122,20 @@ impl Scene {
             }
         }
         self.alive = 0;
+    }
+
+    /// 该实体的网格资产路径（没有则 `None`）。
+    pub fn mesh_of(&self, id: EntityId) -> Option<String> {
+        self.slots
+            .get(id.index as usize)
+            .filter(|s| s.alive && s.generation == id.generation)
+            .and_then(|s| s.mesh.clone())
+    }
+
+    /// 绑定网格资产。传 `None` 表示恢复成方块。
+    pub fn set_mesh(&mut self, id: EntityId, mesh: Option<String>) -> Result<(), SceneError> {
+        self.slot_mut(id)?.mesh = mesh;
+        Ok(())
     }
 
     /// 是否参与渲染（快照 `SceneView` 只取 true 的）。
@@ -185,6 +204,7 @@ impl Scene {
                 self.slots.push(Slot {
                     generation: 0,
                     alive: false,
+                    mesh: None,
                     visible: true,
                     parent: None,
                     children: Vec::new(),
@@ -196,6 +216,7 @@ impl Scene {
         let slot = &mut self.slots[index];
         slot.alive = true;
         slot.visible = true;
+        slot.mesh = None;
         slot.parent = parent;
         slot.children.clear();
         slot.local = local;

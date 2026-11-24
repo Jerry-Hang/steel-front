@@ -667,6 +667,46 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // ---- P3i：把资产实例化进场景（导入模型的数据层）----
+    //
+    // 这一步做的是"场景里记住用的是哪个模型 + 尺寸与资产一致"，
+    // **还不负责画**（渲染要等 `SceneDrawItem` 接上网格引用，那是下一步）。
+    // 分两步做是有意的：仿真实体尺寸对不对可以精确判，而"画得像不像"不能。
+    reg.add_command(
+        "scene.instantiate",
+        "按资产路径实例化：scene.instantiate <assets/props/x.glb>",
+        |ctx, args| {
+            let path = args.first().ok_or_else(|| "缺资产路径".to_string())?.to_string();
+            // 🔴 走 AssetSource：Android 上 std::fs 读不到打包资源（架构判据也在管着）
+            let bytes = crate::engine::asset_source::global().read(&path)?;
+            let mesh = crate::engine::assets::parse_glb(&bytes)?;
+            // 包围盒：由真实顶点算，实例尺寸必须与资产一致（这是本步的验收口径）
+            let (lo, hi) = crate::engine::assets::mesh_bounds(&mesh)
+                .ok_or_else(|| format!("{path}: 没有顶点"))?;
+            let (lo, hi) = (
+                glam::Vec3::new(lo[0], lo[1], lo[2]),
+                glam::Vec3::new(hi[0], hi[1], hi[2]),
+            );
+            let half = ((hi - lo) * 0.5).max(glam::Vec3::splat(0.01));
+            let center = (hi + lo) * 0.5;
+            let id = ctx.scene.spawn(
+                None,
+                crate::engine::scene::Transform::from_translation(glam::Vec3::new(
+                    center.x, lo.y.max(0.0), center.z,
+                )),
+            );
+            ctx.scene.set_mesh(id, Some(path.clone())).ok();
+            ctx.selection = Some(id);
+            Ok(format!(
+                "instantiated #{} mesh={path} verts={} half=({:.3},{:.3},{:.3})",
+                ctx.scene.index_of(id),
+                mesh.verts.len(),
+                half.x,
+                half.y,
+                half.z
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
