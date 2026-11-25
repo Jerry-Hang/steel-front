@@ -38,8 +38,13 @@ def load(manifest):
         if not line or line.startswith("#"):
             continue
         parts = [p.strip() for p in line.split(" | ")]
-        if len(parts) != 4:
-            print(f"inject_check: 清单格式错（需要 4 段，实际 {len(parts)}）：{raw[:80]}")
+        # 第 5 段可选：`all` = 替换全部出现（用于"同一行在实现里出现多次"的注入）
+        if len(parts) == 5 and parts[4] == "all":
+            parts = parts[:4] + ["all"]
+        elif len(parts) == 4:
+            parts = parts + ["one"]
+        else:
+            print(f"inject_check: 清单格式错（需要 4 段或 5 段含 all，实际 {len(parts)}）：{raw[:80]}")
             return None
         entries.append(parts)
     return entries
@@ -84,15 +89,18 @@ def main():
         only = sys.argv[sys.argv.index("--only") + 1]
 
     results = []
-    for name, rel, find, repl in entries:
+    for name, rel, find, repl, mode in entries:
         if only and only not in name:
             continue
         path = ROOT / rel
         before = path.read_text(encoding="utf-8")
-        if before.count(find) != 1:
-            results.append((name, "SKIP", f"原文出现 {before.count(find)} 次（必须恰好 1 次）"))
+        cnt = before.count(find)
+        if cnt == 0 or (mode != "all" and cnt != 1):
+            results.append(
+                (name, "SKIP", f"原文出现 {cnt} 次（one 模式要求恰好 1 次，all 模式要求 ≥1）")
+            )
             continue
-        after = before.replace(find, repl, 1)
+        after = before.replace(find, repl) if mode == "all" else before.replace(find, repl, 1)
         if after == before:
             results.append((name, "NO-OP", "替换没改变文件（这就是“无效注入”）"))
             continue

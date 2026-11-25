@@ -18,3 +18,5 @@ anim_rotation_uses_slerp_not_lerp | src/engine/anim.rs | Interp::Linear => a.sle
 telemetry_keeps_only_the_latest_line | src/engine/aipc.rs |             q.clear(); |             // 注入：不 clear
 llm_orders_with_nan_or_out_of_grid_coordinates_are_ignored | src/engine/ai_command.rs | .all(|cmd| cmd.x.is_finite() && cmd.z.is_finite()) | .all(|_cmd| true)
 tests_never_open_the_real_audio_device | src/engine/game/session.rs | if cfg!(test) { | if false {
+# （手工注入：判据扫源码字面量，全局替换会改掉它自己的期望值，见 PROGRESS）
+flank_goal_never_lands_in_a_blocked_cell | src/engine/ai.rs |     passable_or_nearest(grid, clamped, 4).unwrap_or_else(|| { |     Some(clamped).unwrap_or_else(|| {

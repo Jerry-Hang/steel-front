@@ -101,3 +101,8 @@ anim_rotation_uses_slerp_not_lerp
 llm_orders_with_nan_or_out_of_grid_coordinates_are_ignored
 # 测试分支不碰声卡：把 if cfg!(test) 改成 if false ⇒ 源码扫描判据红（inject_check 实跑）
 tests_never_open_the_real_audio_device
+# 侧翼吸附：去掉 passable_or_nearest 吸附 ⇒ 目标落进墙里，红（inject_check 实跑）
+flank_goal_never_lands_in_a_blocked_cell
+# 限幅在总线之后：按行只改生产代码那处（take(0) 让循环空转）⇒ 红（手工单点注入）
+#   ⚠️ 不能用全局替换：判据自己搜索的字符串也会被改掉，导致 NOT-RED
+final_output_is_limited_after_both_buses_are_mixed
