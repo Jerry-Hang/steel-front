@@ -56,17 +56,20 @@ impl GameApp {
             self.gizmo_mode = ctx.gizmo_mode;
             self.tree_filter = ctx.tree_filter;
             let bakes = std::mem::take(&mut ctx.bake_requests);
+            let focus = std::mem::take(&mut ctx.focus_to);
             for line in &ctx.out {
                 log::info!("{line}");
             }
             drop(ctx);
             self.apply_bake_requests(bakes);
+            self.apply_focus(focus);
         }
         // AI 控制面（P5）：把排队的 AI 命令交给**与编辑器同一个**命令表执行，并推上报。
         //
         // 顺序很关键：先跑完本帧的插件系统与场景同步，再处理 AI 命令 —— 这样 AI 拿到的
         // 回执与它下一帧读到的上报是**同一个世界状态**，不会出现"命令说改了、上报还是旧的"。
         let mut pending_bakes = Vec::new();
+        let mut pending_focus = None;
         if let Some(aipc) = self.aipc.as_mut() {
             // 先把要用的标量取出来（都是 Copy），避免同时借 `game` 的两块。
             let time = self.game.time;
@@ -98,6 +101,7 @@ impl GameApp {
             self.gizmo_mode = ctx.gizmo_mode;
             self.tree_filter = ctx.tree_filter;
             let bakes = std::mem::take(&mut ctx.bake_requests);
+            pending_focus = std::mem::take(&mut ctx.focus_to);
             drop(ctx);
             pending_bakes = bakes;
             // 上报：机读 key=value，字段与 `RV3D_SCENE_DIAG` 的日志**同源同义**。
@@ -118,6 +122,7 @@ impl GameApp {
             ));
         }
         self.apply_bake_requests(pending_bakes);
+        self.apply_focus(pending_focus);
         // `RV3D_PLUGIN_CMD="<命令> [参数...]"`：启动后执行一次并打印结果。
         // 这是命令表的**第二个入口**（第一个是编辑器按钮、第三个将是 AI 接口）——
         // 三者调的是同一张表里的同一个函数，不允许有"只有 API 能做"的暗路。
@@ -154,8 +159,10 @@ impl GameApp {
               self.tree_filter = ctx.tree_filter;
             self.tree_filter = ctx.tree_filter;
                 let bakes = std::mem::take(&mut ctx.bake_requests);
+                let focus = std::mem::take(&mut ctx.focus_to);
                 drop(ctx);
                 self.apply_bake_requests(bakes);
+                self.apply_focus(focus);
             }
         }
         // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。

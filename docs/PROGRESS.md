@@ -5929,3 +5929,28 @@ grep 抓不到结果就以为是"没红"。**注入要改值，不要删参数**
 3. 更糟的是我在注释里写"反向验证：去掉窗口裁剪 ⇒ 红"，**注入却没红** ——
    因为循环里还有个 `if shown >= MAX_ROWS { break; }` 兜住了上界。
    删掉那个冗余 break 之后，窗口切片才是唯一上界，注入才红。
+
+### 2026-11-25：引擎化 P3r —— 对准选中实体（`editor.focus` + `Home`）
+
+`editor::focus_params(target, view, dist) -> (eye, yaw, pitch)`：**保持当前视线方向**，
+把相机退到实体后方 `dist` 米并调整俯仰让实体落在屏幕中心。
+
+为什么保持方向而不是"从正上方看"：编辑器里连续对准多个实体时，方向突变会让人失去方位感；
+保持方向就像"沿视线走近"。
+
+相机不归 `Scene` 管，所以命令只**算**参数放进 `ctx.focus_to`，由 `App` 在帧末应用
+（与 `selection` / `tree_filter` / `bake_requests` 同一套模式）。
+
+判据 `focus_puts_the_target_at_screen_center`：用反解出的 yaw/pitch 重建视角，
+断言**目标的投影落在 NDC (0,0) 附近（<1e-3）且距离 = dist**。
+这比"相机参数变没变"强：它直接测用户看到的结果。
+反向验证：`eye = target`（相机贴在实体上）⇒ 红。
+
+**实机**：`scene.spawn ; scene.set 12 0 -8 ; editor.focus 5`
+→ `focus #2 eye=(12.00,0.00,-3.00) yaw=0.0° pitch=-0.0°`（从 -Z 方向看，距离 5m ✓）。
+
+⚠️ **这一轮把 `app_update.rs` 搞乱了**：连续用脚本做字符串替换，插出了重复块
+（`drop(ctx)` / `for line in &ctx.out` 各出现两次），借用检查报了一串 E0499，
+我又在坏状态上继续替换，越改越乱。最后 `git checkout -- src/app_update.rs` 回滚，
+按 HEAD 里 `bake_requests` 的**同一形状**一次性重做才干净。
+**教训：同形状的块重复出现时，字符串替换会命中错的那一处；要么用行号，要么先回滚重做。**

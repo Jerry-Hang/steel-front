@@ -630,6 +630,7 @@ impl GameApp {
                         KeyCode::F5 => KeyKind::F5,
                         KeyCode::Delete => KeyKind::Delete,
                         KeyCode::KeyF => KeyKind::F,
+                        KeyCode::Home => KeyKind::Home,
                         _ => KeyKind::Other,
                     };
                     match crate::engine::editor::key_action(self.mode, kind, pressed) {
@@ -648,6 +649,10 @@ impl GameApp {
                         }
                         Some(KeyAction::Delete) => {
                             self.run_editor_command("scene.despawn", &[]);
+                            return;
+                        }
+                        Some(KeyAction::Focus) => {
+                            self.run_editor_command("editor.focus", &[]);
                             return;
                         }
                         Some(KeyAction::CycleFilter) => {

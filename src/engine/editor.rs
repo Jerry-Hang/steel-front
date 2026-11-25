@@ -152,6 +152,34 @@ pub fn panel_quads(
 
 
 
+
+/// 「对准选中实体」的相机参数：返回 `(eye, yaw, pitch)`。
+///
+/// 语义（与 Unity 的 F 相同）：**保持当前视线方向**，把相机退到实体后方 `dist` 米，
+/// 并调整俯仰让实体落在屏幕正中。
+///
+/// 为什么保持方向而不是"从正上方看"：编辑器里连续对准多个实体时，
+/// 方向突然改变会让人失去方位感；保持方向就像"沿着视线走近"。
+pub fn focus_params(
+    target: glam::Vec3,
+    view: &crate::engine::gizmo::ViewInfo,
+    dist: f32,
+) -> (glam::Vec3, f32, f32) {
+    let dist = dist.max(0.1);
+    // 方向取当前视线（水平分量 + 垂直分量都保留），退化时朝 -Z 看
+    let f = if view.forward.length_squared() > 1e-6 {
+        view.forward.normalize()
+    } else {
+        glam::Vec3::new(0.0, 0.0, -1.0)
+    };
+    let eye = target - f * dist;
+    // 由方向反解 yaw/pitch：引擎约定 forward = (-sin yaw, 0, -cos yaw)，
+    // 正的 pitch = 低头（见 AGENTS 铁律 C）。
+    let yaw = (-f.x).atan2(-f.z);
+    let pitch = f.y.asin().clamp(-1.5, 1.5);
+    (eye, yaw, pitch)
+}
+
 /// 场景树的过滤口径。
 ///
 /// 为什么需要它：NPC 镜像进场景之后有 200+ 个实体，而树只显示 `MAX_ROWS` 行 ——
@@ -412,6 +440,8 @@ pub enum KeyAction {
     Delete,
     /// F：切换场景树过滤（全部 / 只看可编辑）。
     CycleFilter,
+    /// Home：把相机对准选中实体。
+    Focus,
 }
 
 /// 按键种类（不直接依赖 winit：引擎层不认识 `KeyCode`）。
@@ -422,6 +452,7 @@ pub enum KeyKind {
     F5,
     Delete,
     F,
+    Home,
     Other,
 }
 
@@ -447,6 +478,7 @@ pub fn key_action(
         KeyKind::F5 => Some(KeyAction::Redo),
         KeyKind::Delete => Some(KeyAction::Delete),
         KeyKind::F => Some(KeyAction::CycleFilter),
+        KeyKind::Home => Some(KeyAction::Focus),
         KeyKind::Other => None,
     }
 }
@@ -660,6 +692,54 @@ pub fn update_drag(
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **对准选中实体**：对准之后，实体的投影必须落在屏幕中心附近。
+    ///
+    /// 这条比"相机参数变没变"强得多：它直接测**用户看到的结果**。
+    /// 阈值 1e-3 NDC ≈ 半像素（屏幕宽 1000px 时）。
+    ///
+    /// 反向验证：把 `eye = target - f * dist` 写成 `eye = target`（相机贴在实体上）⇒ 红。
+    #[test]
+    fn focus_puts_the_target_at_screen_center() {
+        let view = crate::engine::gizmo::ViewInfo {
+            eye: glam::Vec3::new(0.0, 1.7, 10.0),
+            forward: glam::Vec3::new(0.0, 0.0, -1.0),
+            right: glam::Vec3::X,
+            up: glam::Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 16.0 / 9.0,
+        };
+        // 目标偏在一侧、且不在当前视线方向上
+        let target = glam::Vec3::new(7.0, 0.5, -3.0);
+        let (eye, yaw, pitch) = focus_params(target, &view, 5.0);
+        // 用反解出来的 yaw/pitch 重建视角，目标必须居中
+        let f = glam::Vec3::new(-yaw.sin() * pitch.cos(), pitch.sin(), -yaw.cos() * pitch.cos());
+        let after = crate::engine::gizmo::ViewInfo {
+            eye,
+            forward: f.normalize(),
+            right: f.cross(glam::Vec3::Y).normalize(),
+            up: glam::Vec3::ZERO, // 由 `project_to_ndc` 只用 forward/right/up 的正交基重建
+            half_fov_y: view.half_fov_y,
+            aspect: view.aspect,
+        };
+        // up 用 right×forward 补齐（与引擎一致）
+        let after = crate::engine::gizmo::ViewInfo {
+            up: after.right.cross(after.forward).normalize(),
+            ..after
+        };
+        let (nx, ny) = crate::engine::gizmo::project_to_ndc(&after, target).expect("目标应在相机前方");
+        assert!(
+            nx.abs() < 1e-3 && ny.abs() < 1e-3,
+            "对准后目标应在屏幕中心，实际 NDC=({nx:.4},{ny:.4})"
+        );
+        // 距离必须真的是 dist
+        assert!(
+            ((target - eye).length() - 5.0).abs() < 1e-3,
+            "相机到目标的距离应为 5m，实际 {}",
+            (target - eye).length()
+        );
+    }
+
+
     /// 🔴 **滚动窗口必须夹紧**：过滤口径一变（257 条 → 2 条），旧起点会指向虚空，
     /// 面板会空着，而用户以为"实体都没了"。
     ///

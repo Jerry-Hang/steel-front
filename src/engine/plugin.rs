@@ -60,6 +60,9 @@ pub struct PluginCtx<'a> {
     pub bake_requests: Vec<(String, f32)>,
     /// 撤销栈（编辑器与 AI 共用；`run_command` 在改动前后自动记录）。
     pub undo: &'a mut crate::engine::undo::UndoStack,
+    /// 「对准实体」请求 `(eye, yaw, pitch)`。相机不归 `Scene` 管，
+    /// 所以命令只**算**并把参数放这里，由 App 在帧末应用（与 `selection` 同模式）。
+    pub focus_to: Option<(glam::Vec3, f32, f32)>,
     /// 场景树过滤口径（编辑器用 `F` 键、AI 用 `editor.filter`，共用这一份）。
     pub tree_filter: crate::engine::editor::TreeFilter,
     /// 当前 gizmo 模式（编辑器与 AI 共用；命令 `gizmo.mode` 改它）。
@@ -87,6 +90,7 @@ impl<'a> PluginCtx<'a> {
             dt,
             out: Vec::new(),
             bake_requests: Vec::new(),
+            focus_to: None,
             tree_filter: crate::engine::editor::TreeFilter::Editable,
             gizmo_mode: crate::engine::gizmo::Mode::Translate,
             view: None,
@@ -1159,6 +1163,37 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 all.len(),
                 shown.len(),
                 shown.join(" ; ")
+            ))
+        },
+    );
+
+    // 「对准选中实体」：算出 (eye, yaw, pitch) 并通过 `ctx` 交给 App 应用。
+    // 相机不在 `Scene` 里，所以这里只**算**不**设** —— 与 `selection` / `tree_filter` 同一套模式。
+    reg.add_command(
+        "editor.focus",
+        "把相机对准选中实体：editor.focus [距离米]",
+        |ctx, args| {
+            let dist: f32 = args
+                .first()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6.0);
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let local = ctx
+                .scene
+                .local(sel)
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            let view = ctx.view.ok_or_else(|| "当前没有相机视角".to_string())?;
+            let (eye, yaw, pitch) =
+                crate::engine::editor::focus_params(local.translation, &view, dist);
+            ctx.focus_to = Some((eye, yaw, pitch));
+            Ok(format!(
+                "focus #{} eye=({:.2},{:.2},{:.2}) yaw={:.1}° pitch={:.1}°",
+                ctx.scene.index_of(sel),
+                eye.x,
+                eye.y,
+                eye.z,
+                yaw.to_degrees(),
+                pitch.to_degrees()
             ))
         },
     );

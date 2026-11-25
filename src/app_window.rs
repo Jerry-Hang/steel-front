@@ -343,6 +343,25 @@ pub(crate) fn window_physical_request(w: u32, h: u32, monitor: Option<(u32, u32)
 }
 
 impl GameApp {
+    /// 应用一条「对准实体」请求（命令算好参数，这里落到相机上）。
+    ///
+    /// 落在 `App` 而不是命令里：相机是 `App` 的状态，命令只能算。
+    pub(crate) fn apply_focus(&mut self, req: Option<(glam::Vec3, f32, f32)>) {
+        let Some((eye, yaw, pitch)) = req else {
+            return;
+        };
+        self.camera.set_flight_pos(eye);
+        self.camera.yaw = yaw;
+        self.camera.pitch = pitch;
+        log::info!(
+            "编辑器: 相机对准 ({:.2},{:.2},{:.2}) yaw={:.1}°",
+            eye.x,
+            eye.y,
+            eye.z,
+            yaw.to_degrees()
+        );
+    }
+
     /// 编辑态左键：落在**场景树**上就选中那一行，返回是否吃掉点击。
     pub(crate) fn editor_click_scene_tree(&mut self) -> bool {
         let (px, py) = self.last_cursor;
