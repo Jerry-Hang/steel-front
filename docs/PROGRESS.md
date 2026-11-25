@@ -6193,3 +6193,23 @@ wave.info    → OK wave=3 npcs=10 next_in=0.0s      ← 波次号真的变了
 ⇒ P6 的两条性质现在都有**可判定入口**：
 - 编辑态不变：`RV3D_EDIT_PROOF=1` 的哈希在 1320+ 帧内不变；
 - 播放态在跑：同一哈希每帧都变（NPC 在动）+ `wave.info` 的波次号可被外部推进。
+
+### 2026-11-25 终验：目标队列 ①–⑦ 逐条重取证据（不引用旧记录）
+
+| # | 判据 | 本轮实测 |
+|---|---|---|
+| ① | renderer 对 `engine::game` 的引用 | **0** |
+| ② | `gizmo.drag X 0 1.0` | `delta=1.0000 from=(0,0,0) to=(1.000,0,0)` |
+| ③ | 存盘→撤销→读回→再存盘 | `diff` 无输出（**逐字节相同**） |
+| ④ | `plugin_systems_run_in_phase_order` | **ok** |
+| ⑤ | AI 闭环 spawn→set→dump→save→undo→load→save | 全部 `OK`，字段逐一相等 |
+| ⑥ | 编辑态 2460 帧 | `entities=2 bytes=232 hash=90af253d…` **两帧完全相同** |
+| ⑥ | 播放态 60/600/1200 帧 | `hash=f25e61… / 758838… / 966549…` **每帧都变** |
+| ⑥ | 波次可推进 | `wave=1 → wave.spawn 3 → wave=3`，日志 `purged 255 leftover npcs before wave 3` |
+| ⑦ | GLB 骨骼/动画 | `joints=2 verts=3 channels=6 dur=1.042s`｜解析/采样/CPU姿势/烘焙上屏 = **yes**；连续播放/GPU逐顶点 = no |
+
+**终验时我自己又踩了一次教训 46**：第一次跑
+`cargo test -- plugin_registry_runs_systems_in_phase_order ...` 得到
+`0 passed; 1060 filtered out` 却报 `ok` —— **测试名没匹配上，根本没跑**。
+真实名字是 `plugin_systems_run_in_phase_order`（无名里的 `registry`），改正后才真的 1 passed。
+⇒ **凡按名字跑测试，必须核对 `passed ≥ 1`**，否则 `ok` 什么都证明不了。
