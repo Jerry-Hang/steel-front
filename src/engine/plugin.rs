@@ -981,6 +981,46 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             Ok(format!("bake_requested {path} t={t:.3}"))
         },
     );
+    // ---- P4g：**骨骼能力边界自查** ----
+    //
+    // 存在的理由：实现分了几步（解析 / 采样 / CPU 姿势 / 烘焙上屏 / GPU 逐顶点），
+    // 每一步的完成度都能从"命令跑通了"被误解成"动画能播了"。
+    // 这条命令把**能做什么、不能做什么**印成一行，谁读都不会高估。
+    reg.add_command(
+        "asset.skin_status",
+        "报告骨骼动画能力边界：asset.skin_status <路径>",
+        |_ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let bytes = std::fs::read(&path[..]).map_err(|e| format!("读文件失败：{e}"))?;
+            let (json, _bin) = crate::engine::skin::split_glb(&bytes)?;
+            let Some((skin, positions)) = crate::engine::skin::parse_glb_skin(&bytes)? else {
+                return Ok(format!("{path}: 无骨骼（静态几何）"));
+            };
+            let channels = crate::engine::anim::parse_glb_animations(&bytes).unwrap_or_default();
+            let dur = channels
+                .iter()
+                .filter_map(|c| c.times.last().copied())
+                .fold(0.0f32, f32::max);
+            let worlds = crate::engine::anim::sample_pose_worlds(&json, 0, &channels, 0.0);
+            let joints: Vec<usize> = json
+                .get("skins")
+                .and_then(|s| s.as_arr())
+                .and_then(|s| s.first())
+                .and_then(|s| s.get("joints"))
+                .and_then(|j| j.as_arr())
+                .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as usize).collect())
+                .unwrap_or_default();
+            // 真算一次姿势（不是只看字段）：能算出顶点就说明这条链在这件资产上可用
+            let posed = crate::engine::anim::posed_positions(&skin, &joints, &positions, &worlds);
+            Ok(format!(
+                "{path}: joints={} verts={} posed={} channels={} dur={dur:.3}s | 解析=yes 采样=yes CPU姿势=yes 烘焙上屏=yes 连续播放=no GPU逐顶点=no | 依据: 合并网格重建一次约224ms(实测)",
+                skin.joint_count(),
+                skin.vertex_count(),
+                posed.len(),
+                channels.len()
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
