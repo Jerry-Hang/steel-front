@@ -666,6 +666,7 @@ mod tests {
     }
 
     /// 倍率必须夹在 `[SCALE_MIN, SCALE_MAX]`：0 或负数会让物体消失且不可逆。
+    /// 反向验证：去掉 `.clamp(SCALE_MIN, SCALE_MAX)` ⇒ 拖 -1e6 米不会夹到下限，红。
     #[test]
     fn scale_factor_is_clamped_away_from_zero() {
         assert!((scale_factor_from_drag(-1e6) - SCALE_MIN).abs() < 1e-6);

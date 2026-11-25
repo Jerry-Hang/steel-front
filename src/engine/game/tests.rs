@@ -201,6 +201,7 @@ mod session;
         assert_eq!(saved, 2, "只该写出世界根与玩家，实际 {saved} 条：\n{text}");
     }
 
+    /// 反向验证：把镜像的键从 `Npc.id` 换成"已有实体数"（不稳定键）⇒ 重排后实体增加，红。
     #[test]
     fn npc_mirror_uses_stable_ids_and_cleans_up_the_dead() {
         let mut g = Game::new();

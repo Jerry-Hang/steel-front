@@ -24,3 +24,7 @@ flank_sides_are_distinct_and_symmetric | src/engine/ai.rs |     let (px, py) = i
 auto_restart_stays_opt_in | src/app_update.rs | if *AUTO_RESTART.get_or_init(|| env_truthy("RV3D_AUTO_RESTART")) { | if *AUTO_RESTART.get_or_init(|| true) {
 contract_matches_loaded_assets | src/engine/props.rs | ("crate_military", 1.816, 0.976, 0.300), | ("crate_military", 1.816, 0.976, 0.999),
 mesh_bounds_matches_hand_computed_extents | src/engine/assets.rs | hi[k] = hi[k].max(v[k]); | hi[k] = v[k]; | all
+edit_mode_never_advances_the_world | src/engine/mode.rs |     if !mode.is_play() || paused { |     if paused {
+ensure_smooth_normals_fills_and_preserves | src/engine/props.rs |     if indices.len() < 3 { |     if true {
+missing_directory_is_an_error_not_an_empty_set | src/engine/props.rs |         let entries = src.list_dir(dir)?; |         let entries = src.list_dir(dir).unwrap_or_default();
+editor_filter_command_actually_changes_the_state | src/engine/plugin.rs | ctx.tree_filter = f; | let _ = f; | all

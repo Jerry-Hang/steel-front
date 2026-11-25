@@ -12,7 +12,6 @@
 # GLB 动画 accessor 必须按 type 读分量：把分量数写回常数 4 ⇒ 位移从 0.7071 变 1.4142，红
 real_blender_asset_animation_moves_the_weighted_vertex
 # 绑定姿势自检：IB 顺序写反 ⇒ bind_err 变大，红
-real_blender_skinned_asset_parses_and_binds
 # GPU 契约：归一化权重写成原样返回 ⇒ 两条路径结果不一致，红
 normalized_weights_make_the_shader_formula_exact
 # 关节矩阵缓冲：改成行优先展开（m.transpose()）⇒ buf[2] 符号反，红
@@ -22,23 +21,18 @@ apply_to_roundtrips_byte_identically
 # apply_to 不搬网格 ⇒ 读回的网格引用丢失，红
 scene_toml_roundtrips_the_mesh_reference
 # apply_to 不清空 ⇒ 实体数变成 4 而不是 3，红
-apply_to_preserves_the_hierarchy
 # 摆放搬运：把 uniform.max(0.01) 换回 1.0 ⇒ 缩放没搬过去，红
 editor_placements_carry_the_scale
 # 签名含缩放：把缩放那一项换成 0.0 ⇒ 改缩放不改签名，红
-editor_signature_tracks_scale
 # 摆放高度：删掉 p.y 那行（高度恒 0）⇒ y 搬运断言红
 editor_placements_carry_position_and_height
 # 摆放跳过未知网格：名字对不上也塞一条 ⇒ 越界摆放，红
-editor_placements_skip_unknown_or_unbound_meshes
 # 签名只对几何敏感：忽略平移 ⇒ 移动实体签名不变，红
-editor_signature_tracks_geometry_only
 # 键位路由：允许"抬起"也触发 ⇒ 一次按键触发两次，红
 key_actions_are_edit_only_and_press_only
 # 模式循环：尽头不回头 ⇒ 循环顺序错，红
 mode_cycle_returns_to_the_start
 # 缩放倍率斜率：不除以把手长度（改成 1 + delta * 2）⇒ 斜率不符，红
-scale_factor_slope_is_inverse_handle_length
 # 旋转全链路：忽略增量（* start_rotation）⇒ 应转 90° 实际 0°，红
 rotate_mode_turns_the_entity_without_moving_it
 # 缩放全链路：scale 写回 start_scale ⇒ 仍是 1.0，红
@@ -115,3 +109,11 @@ contract_matches_loaded_assets
 # 包围盒逐轴取极值：hi[k] = v[k]（只留最后一个顶点）⇒ 上界错，红（inject_check 实跑）
 # 注：该行在 assets.rs 出现 2 次，用 all 模式注入
 mesh_bounds_matches_hand_computed_extents
+# P6：去掉 !mode.is_play() 判断（编辑态也推进）⇒ 本判据红（inject_check 实跑）
+edit_mode_never_advances_the_world
+# 法线重建：indices.len() < 3 改 if true（永不生成）⇒ 本判据红（inject_check 实跑）
+ensure_smooth_normals_fills_and_preserves
+# 目录缺失必须报错：list_dir 的 ? 换成 unwrap_or_default ⇒ 静默空集，红（inject_check 实跑）
+missing_directory_is_an_error_not_an_empty_set
+# 过滤命令真改状态：ctx.tree_filter = f 换成 let _ = f（只回话）⇒ 红（inject_check 实跑，all 模式）
+editor_filter_command_actually_changes_the_state

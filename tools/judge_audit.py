@@ -237,6 +237,16 @@ def main():
                     f"D {len(unverified)} 条“反向验证”未被记录为已注入验证"
                     f"（补齐 tools/judge_claims_verified.txt 或删掉声称）"
                 )
+        # 🔴 检查 D：记账里**对不上任何声称**的条目 ——
+        # 说明测试改名/删了，或者当时记错了名字。留着会让人以为"已验证"，
+        # 实际那条声称根本没被覆盖（本会话真实发现过 8 条）。
+        claim_names = {c[2] for c in claims}
+        orphans = sorted(n for n in verified if n not in claim_names)
+        if orphans:
+            print(f"  记账里有 {len(orphans)} 条对不上现行声称（改名/已删/记错）：")
+            for n in orphans[:8]:
+                print(f"    {n}")
+            findings.append(f"D 记账里有 {len(orphans)} 条对不上现行声称")
     else:
         print("claim_coverage: 缺少 tools/judge_claims_verified.txt（视为未验证）")
 
