@@ -194,6 +194,11 @@ pub enum DragKind {
         start_ndc: (f32, f32),
         start_rotation: glam::Quat,
     },
+    /// 沿轴等比缩放：记住起点缩放与"这次拖的是哪根轴"，之后从起点重算。
+    Scale {
+        drag: crate::engine::gizmo::TranslateDrag,
+        start_scale: glam::Vec3,
+    },
 }
 
 /// 检视面板要显示的行（**纯函数**，与绘制分离）。
@@ -267,6 +272,33 @@ pub fn begin_drag(
     else {
         return (Some(id), None);
     };
+    // 缩放与平移**共用同一套抓把手**（都要抓住某根轴），只是拖出来的东西不同。
+    if mode == crate::engine::gizmo::Mode::Scale {
+        let (o, d) = crate::engine::gizmo::screen_ray(
+            view.eye,
+            view.forward,
+            view.right,
+            view.up,
+            view.half_fov_y,
+            view.aspect,
+            ndc.0,
+            ndc.1,
+        );
+        let Some(drag) = crate::engine::gizmo::TranslateDrag::begin(axis, local.translation, o, d)
+        else {
+            return (Some(id), None);
+        };
+        return (
+            Some(id),
+            Some(EditorDrag {
+                entity: id,
+                kind: DragKind::Scale {
+                    drag,
+                    start_scale: local.scale,
+                },
+            }),
+        );
+    }
     let (o, d) = crate::engine::gizmo::screen_ray(
         view.eye,
         view.forward,
@@ -322,6 +354,35 @@ pub fn update_drag(
                     ed.entity,
                     crate::engine::scene::Transform {
                         translation: moved,
+                        ..local
+                    },
+                )
+                .is_ok()
+        }
+        DragKind::Scale { drag, start_scale } => {
+            let (o, dd) = crate::engine::gizmo::screen_ray(
+                view.eye,
+                view.forward,
+                view.right,
+                view.up,
+                view.half_fov_y,
+                view.aspect,
+                ndc.0,
+                ndc.1,
+            );
+            let Some(moved) = drag.drag(o, dd) else {
+                return false;
+            };
+            // 沿轴的位移（米）→ 倍率。用 `|moved - start|` 在轴上的投影，
+            // 而不是 `|moved|`：物体不在原点时后者会把离原点的距离也算进去。
+            // `TranslateDrag::drag` 返回的是**新平移**，沿轴位移 = 新平移在轴上减起点。
+            let delta = (moved - drag.start_translation()).dot(drag.axis().dir());
+            let f = crate::engine::gizmo::scale_factor_from_drag(delta);
+            scene
+                .set_local(
+                    ed.entity,
+                    crate::engine::scene::Transform {
+                        scale: start_scale * f,
                         ..local
                     },
                 )
@@ -400,6 +461,51 @@ mod tests {
         assert_eq!(inspector_lines(&s, Some(e)), vec!["选中已失效".to_string()]);
     }
 
+
+
+    /// 🔴 **缩放模式全链路**：抓把手拖 1m ⇒ 缩放翻倍、平移与旋转都不许变。
+    ///
+    /// 反向验证：把 `scale: start_scale * f` 写成 `scale: start_scale` ⇒ 仍是 1.0，红。
+    #[test]
+    fn scale_mode_doubles_after_dragging_one_handle() {
+        let view = crate::engine::gizmo::ViewInfo {
+            eye: Vec3::new(0.0, 0.0, 5.0),
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let mut s = Scene::new();
+        let id = s.spawn(None, Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)));
+        // 🔴 必须先**点中实体**才会抓把手（`pick_entity` 的半径 0.9m），
+        // 所以抓点取把手**中点**（0.5m 处，在半径内），而不是末端 1m 处 —— 后者点不到实体。
+        // 我第一版就取在 1m 处，`begin_drag` 直接返回 None。
+        let grip = Vec3::new(0.5, 0.0, 0.0);
+        let (gx, gy) = crate::engine::gizmo::project_to_ndc(&view, grip).expect("投影");
+        let (sel, drag) = begin_drag(&s, &view, (gx, gy), 0.9, crate::engine::gizmo::Mode::Scale);
+        assert_eq!(sel, Some(id));
+        let drag = drag.expect("抓中把手就该起拖");
+        // 沿 +X 再拖 1m（0.5 → 1.5）：倍率应变 2.0
+        let (tx, ty) = crate::engine::gizmo::project_to_ndc(&view, Vec3::new(1.5, 0.0, 0.0))
+            .expect("投影");
+        assert!(update_drag(&mut s, &view, &drag, (tx, ty)), "必须写回");
+        let after = s.local(id).unwrap();
+        assert!(
+            (after.scale.x - 2.0).abs() < 1e-2,
+            "拖一个把手长度应翻倍，实际 {}",
+            after.scale.x
+        );
+        assert!(
+            (after.translation - Vec3::ZERO).length() < 1e-6,
+            "缩放不许动物体位置：{:?}",
+            after.translation
+        );
+        assert!(
+            (after.rotation - glam::Quat::IDENTITY).length() < 1e-6,
+            "缩放不许动旋转"
+        );
+    }
 
     /// 🔴 **旋转模式的全链路**：按下 → 拖动 → 写回，只改 rotation 不改 translation。
     ///

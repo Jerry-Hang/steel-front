@@ -826,6 +826,42 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             Ok(format!("gizmo_mode={}", m.name()))
         },
     );
+    reg.add_command(
+        "gizmo.scale",
+        "按轴缩放选中实体：gizmo.scale <X|Y|Z> <沿轴位移米数>",
+        |ctx, args| {
+            let axis = args
+                .first()
+                .and_then(|s| crate::engine::gizmo::Axis::parse(s))
+                .ok_or_else(|| "缺轴或轴非法（X/Y/Z）".to_string())?;
+            let delta: f32 = args
+                .get(1)
+                .ok_or_else(|| "缺位移".to_string())?
+                .parse()
+                .map_err(|_| "位移不是数字".to_string())?;
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let mut local = ctx
+                .scene
+                .local(sel)
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            let f = crate::engine::gizmo::scale_factor_from_drag(delta);
+            // 等比缩放（三轴同倍）：`Scale` 模式下把手是"整体缩"，不做单轴拉伸。
+            local.scale *= f;
+            let sc = local.scale;
+            ctx.scene
+                .set_local(sel, local)
+                .map_err(|_| "写回失败".to_string())?;
+            Ok(format!(
+                "scaled #{} {} by {:.3}x → ({:.3},{:.3},{:.3})",
+                ctx.scene.index_of(sel),
+                axis.name(),
+                f,
+                sc.x,
+                sc.y,
+                sc.z
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

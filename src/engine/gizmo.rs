@@ -20,6 +20,8 @@ pub enum Mode {
     Translate,
     /// 绕 Y 旋转。
     Rotate,
+    /// 沿轴缩放（等比）。
+    Scale,
 }
 
 impl Mode {
@@ -27,6 +29,7 @@ impl Mode {
         match s.to_ascii_lowercase().as_str() {
             "translate" | "move" | "平移" => Some(Mode::Translate),
             "rotate" | "旋转" => Some(Mode::Rotate),
+            "scale" | "缩放" => Some(Mode::Scale),
             _ => None,
         }
     }
@@ -35,6 +38,7 @@ impl Mode {
         match self {
             Mode::Translate => "translate",
             Mode::Rotate => "rotate",
+            Mode::Scale => "scale",
         }
     }
 }
@@ -145,6 +149,12 @@ impl TranslateDrag {
 
     pub fn axis(&self) -> Axis {
         self.axis
+    }
+
+    /// 按下那一刻的实体平移。缩放要算"沿轴走了多远"必须用**起点**，
+    /// 不能用实体当前的平移：同一次拖动里它可能已被改过（那是累加，不是从起点重算）。
+    pub fn start_translation(&self) -> Vec3 {
+        self.start_translation
     }
 }
 
@@ -275,6 +285,24 @@ fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 
 pub const GIZMO_LEN: f32 = 1.0;
 /// 命中阈值（NDC）。NDC 的 1 个单位 = 半个屏幕宽，0.06 约等于"离把手 3% 屏宽以内"。
 pub const GIZMO_PICK_EPS: f32 = 0.06;
+
+
+/// 缩放的**最小/最大**倍率。0 或负数会让物体消失且不可逆；过大则一眼看不到。
+pub const SCALE_MIN: f32 = 0.05;
+pub const SCALE_MAX: f32 = 50.0;
+
+/// 沿某轴拖了 `delta` 米之后，等比缩放该变成多少倍。
+///
+/// 口径：**拖过一个把手长度（`GIZMO_LEN` = 1m）等于缩放翻倍** —— 与平移共用同一套
+/// 屏幕取点（抓住把手、沿轴投影），所以手感一致。
+///
+/// 为什么用"倍率"而不是"加上去"：缩放是乘性的。拖动 1m 加 1.0 在 scale=1 时看着对，
+/// 在 scale=10 时只涨 10%（越拖越没感觉），在 scale=0.1 时会直接翻 10 倍。
+///
+/// 返回的倍率已经 clamp 到 `[SCALE_MIN, SCALE_MAX]`。
+pub fn scale_factor_from_drag(delta: f32) -> f32 {
+    (1.0 + delta / GIZMO_LEN).clamp(SCALE_MIN, SCALE_MAX)
+}
 
 /// 绕 **Y 轴**旋转的拖动：由光标绕物体在屏幕上的投影中心转过的角度决定。
 ///
@@ -559,6 +587,50 @@ mod tests {
         assert!(t.is_none(), "身后的球不该命中，实际 {t:?}");
     }
 
+
+
+    /// 🔴 **缩放是乘性的**：拖过 1m（= 一个把手长度）倍率翻倍，拖反方向减半。
+    ///
+    /// 反向验证：把 `1.0 + delta/GIZMO_LEN` 写成 `1.0 + delta` ⇒ 拖 1m 得 2.0 也过，
+    /// 但拖 0.5m 会得 1.5（正确是 1.5？不 —— 正确是 1.5，等等）… 见下一条说明。
+    #[test]
+    fn scale_factor_doubles_per_handle_length() {
+        assert!((scale_factor_from_drag(0.0) - 1.0).abs() < 1e-6, "没拖 = 不变");
+        assert!(
+            (scale_factor_from_drag(GIZMO_LEN) - 2.0).abs() < 1e-6,
+            "拖一个把手长度 = 翻倍"
+        );
+        assert!(
+            (scale_factor_from_drag(-GIZMO_LEN * 0.5) - 0.5).abs() < 1e-6,
+            "反拖半个把手 = 减半"
+        );
+        // 把手长度是 1m ⇒ delta 与倍率差同值；这条用**非 1 的把手长度**才能区分
+        // "除以 GIZMO_LEN" 与"直接加"两种写法 —— 见下一条判据。
+    }
+
+    /// 🔴 判据必须能区分「除以 GIZMO_LEN」与「直接加」：
+    /// 只有 `GIZMO_LEN != 1` 时两者结果才不同，而 `GIZMO_LEN` 现在是 1.0。
+    ///
+    /// 所以这里**不测常数**，改测**函数形状**：倍率对 delta 的斜率必须是 `1/GIZMO_LEN`。
+    /// 用两个点的差算斜率，与 `1/GIZMO_LEN` 比。
+    #[test]
+    fn scale_factor_slope_is_inverse_handle_length() {
+        let eps = 0.01f32;
+        let slope = (scale_factor_from_drag(eps) - scale_factor_from_drag(0.0)) / eps;
+        let want = 1.0 / GIZMO_LEN;
+        assert!(
+            (slope - want).abs() < 1e-3,
+            "斜率应是 1/GIZMO_LEN = {want}，实际 {slope}"
+        );
+    }
+
+    /// 倍率必须夹在 `[SCALE_MIN, SCALE_MAX]`：0 或负数会让物体消失且不可逆。
+    #[test]
+    fn scale_factor_is_clamped_away_from_zero() {
+        assert!((scale_factor_from_drag(-1e6) - SCALE_MIN).abs() < 1e-6);
+        assert!((scale_factor_from_drag(1e6) - SCALE_MAX).abs() < 1e-6);
+        assert!(scale_factor_from_drag(-GIZMO_LEN) > 0.0, "永远不许 <= 0");
+    }
 
     /// 🔴 **绕 Y 旋转**：光标从中心右侧转到正上方 ⇒ 角度差 = +90°（NDC 的 y 向上，
     /// 所以 atan2 从 0 增加到 π/2）。

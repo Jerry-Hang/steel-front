@@ -29,7 +29,12 @@ impl GameApp {
                 h ^= *b as u64;
                 h = h.wrapping_mul(0x0100_0000_01b3);
             }
-            for v in [local.translation.x, local.translation.y, local.translation.z] {
+            for v in [
+                local.translation.x,
+                local.translation.y,
+                local.translation.z,
+                local.scale.x,
+            ] {
                 for b in v.to_bits().to_le_bytes() {
                     h ^= b as u64;
                     h = h.wrapping_mul(0x0100_0000_01b3);
@@ -56,12 +61,16 @@ impl GameApp {
             match set.index_of(stem) {
                 Some(mesh) => {
                     let yaw = local.rotation.to_euler(glam::EulerRot::YXZ).0;
+                    // 🔴 缩放必须搬进摆放：`PropPlacement.scale` 是**等比**的，
+                    // 取三轴平均（非等比缩放在这条管线里表达不了 —— 道具合并是按均匀缩放烘的）。
+                    // 不加这一句的表现是"拖动/命令改了 Transform，画面纹丝不动"。
+                    let uniform = (local.scale.x + local.scale.y + local.scale.z) / 3.0;
                     let mut p = engine::props::PropPlacement::new(
                         mesh,
                         local.translation.x,
                         local.translation.z,
                         yaw,
-                        1.0,
+                        uniform.max(0.01),
                         false,
                     );
                     // 道具摆放的 y 是"相对地面的抬升量"，场景实体的 y 是绝对高度；
@@ -1306,6 +1315,75 @@ mod editor_prop_tests {
         assert!((p.y - 1.5).abs() < 1e-6, "高度要搬过去：{}", p.y);
         assert!((p.yaw - 0.5).abs() < 1e-6, "yaw 要搬过去：{}", p.yaw);
         assert!(!p.solid, "编辑器实例不进刚体表");
+    }
+
+
+    /// 🔴 缩放必须搬进摆放（`PropPlacement.scale` 是等比的 ⇒ 取三轴平均）。
+    /// 不加这一步的表现是"改了 Transform，画面纹丝不动"。
+    ///
+    /// 反向验证：把 `uniform.max(0.01)` 换回 `1.0` ⇒ 第一条断言红。
+    #[test]
+    fn editor_placements_carry_the_scale() {
+        let set = fake_set();
+        let mut sc = Scene::new();
+        let id = sc.spawn(
+            None,
+            Transform {
+                translation: Vec3::ZERO,
+                rotation: glam::Quat::IDENTITY,
+                scale: Vec3::splat(2.5),
+            },
+        );
+        sc.set_mesh(id, Some("assets/props/barrel_metal.glb".to_string()))
+            .unwrap();
+        let out = GameApp::editor_prop_placements(&set, &sc);
+        assert_eq!(out.len(), 1);
+        assert!(
+            (out[0].scale - 2.5).abs() < 1e-6,
+            "缩放应搬到摆放上，实际 {}",
+            out[0].scale
+        );
+
+        // 非等比：取平均（这条管线表达不了单轴拉伸，取平均是**有意的近似**）
+        sc.set_local(
+            id,
+            Transform {
+                translation: Vec3::ZERO,
+                rotation: glam::Quat::IDENTITY,
+                scale: Vec3::new(1.0, 2.0, 3.0),
+            },
+        )
+        .unwrap();
+        let out2 = GameApp::editor_prop_placements(&set, &sc);
+        assert!(
+            (out2[0].scale - 2.0).abs() < 1e-6,
+            "非等比应取平均 2.0，实际 {}",
+            out2[0].scale
+        );
+    }
+
+    /// 🔴 签名必须对缩放敏感：否则改了缩放不会触发合并网格重建，画面不变。
+    #[test]
+    fn editor_signature_tracks_scale() {
+        let mut sc = Scene::new();
+        let id = sc.spawn(None, Transform::IDENTITY);
+        sc.set_mesh(id, Some("assets/props/barrel_metal.glb".to_string()))
+            .unwrap();
+        let base = GameApp::editor_prop_signature(&sc);
+        sc.set_local(
+            id,
+            Transform {
+                translation: Vec3::ZERO,
+                rotation: glam::Quat::IDENTITY,
+                scale: Vec3::splat(2.0),
+            },
+        )
+        .unwrap();
+        assert_ne!(
+            GameApp::editor_prop_signature(&sc),
+            base,
+            "改缩放必须改变签名"
+        );
     }
 
     /// 网格名对不上 / 没绑网格的实体 ⇒ **不产生摆放**（否则会画出错误的东西）。

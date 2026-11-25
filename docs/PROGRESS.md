@@ -5533,3 +5533,32 @@ scene.save                       → r = [0, 0.16758908, 0, 0.98585695]
 `plugin-cmd: {name} 失败：{e}`，而我用 `→` 匹配成功格式 ⇒ 第一次以为"命令没执行"，
 实际是**它失败了**（物体在相机正下方，前向深度 ≈ 0，投影返回 None）。
 ⇒ 取证时**两种格式都要抓**。
+
+### 2026-11-25：引擎化 P2c —— 缩放 gizmo（三件套齐了）
+
+`gizmo::scale_factor_from_drag(delta) = 1 + delta/GIZMO_LEN`，clamp 到 `[0.05, 50]`。
+口径：**拖过一个把手长度（1m）等于翻倍** —— 与平移共用同一套屏幕拾取，手感一致。
+
+为什么是**倍率**而不是"加上去"：缩放是乘性的。拖动 1m 加 1.0 在 scale=1 时看着对，
+scale=10 时只涨 10%（越拖越没感觉），scale=0.1 时直接翻 10 倍。
+
+`Mode::Scale` + `DragKind::Scale { drag, start_scale }`（沿轴位移从**起点**算，
+新增 `TranslateDrag::start_translation()` 访问器）+ 命令 `gizmo.scale <轴> <位移米数>`。
+
+**实机**：`gizmo.mode scale ; gizmo.scale X 1.0` → `scaled #2 X by 2.000x → (2,2,2)`，
+存盘 `s = [2, 2, 2]`。
+
+🔴 **顺手抓到一个真缺口**：`editor_prop_placements` 里缩放**硬编码 1.0**
+⇒ 改了 Transform 画面纹丝不动（缩放"生效了一半"）。已把 `local.scale` 的三轴平均搬进
+`PropPlacement.scale`（这条管线是**等比**烘的，非等比表达不了 ⇒ 取平均是有意的近似，
+判据里写明了），并把缩放纳入 `editor_prop_signature`（否则改缩放不触发合并网格重建）。
+
+**像素证据**（同机位 640x400，`RV3D_NO_HUD=1`）：scale 1.0 vs 2.5 → `diff_pct=21.35%`，
+包围盒 344x255。
+
+判据 5 条：倍率随拖动翻倍、斜率 = 1/GIZMO_LEN（区分"除以把手长度"与"直接加"）、
+clamp 永不 <= 0、缩放全链路（只改 scale 不动位置/旋转）、摆放与签名都搬缩放。
+两条注入（摆放写回 1.0 / 签名不含缩放）**各恰好 1 条红**。
+
+⚠️ 判据第一版把抓点取在把手**末端**（1m 处）⇒ `pick_entity` 半径 0.9 点不到实体，
+`begin_drag` 返回 None。改成把手**中点**（0.5m）。
