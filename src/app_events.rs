@@ -626,6 +626,7 @@ impl GameApp {
                         KeyCode::Tab => KeyKind::Tab,
                         KeyCode::Backspace => KeyKind::Backspace,
                         KeyCode::F5 => KeyKind::F5,
+                        KeyCode::Delete => KeyKind::Delete,
                         _ => KeyKind::Other,
                     };
                     match crate::engine::editor::key_action(self.mode, kind, pressed) {
@@ -640,6 +641,10 @@ impl GameApp {
                         }
                         Some(KeyAction::Redo) => {
                             self.run_editor_command("scene.redo", &[]);
+                            return;
+                        }
+                        Some(KeyAction::Delete) => {
+                            self.run_editor_command("scene.despawn", &[]);
                             return;
                         }
                         None => {}

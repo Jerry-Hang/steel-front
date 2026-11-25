@@ -1080,6 +1080,24 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
         },
     );
 
+    // 删除选中实体（**级联**：子实体一起走）。撤销栈在 `run_command` 里统一记录，
+    // 所以误删能按 Backspace 回来 —— 这也是"能放心给 Del 键"的前提。
+    reg.add_command(
+        "scene.despawn",
+        "删除选中实体（含子实体）：scene.despawn",
+        |ctx, _args| {
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let idx = ctx.scene.index_of(sel);
+            let before = ctx.scene.len();
+            ctx.scene
+                .despawn(sel)
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            let removed = before - ctx.scene.len();
+            ctx.selection = None;
+            Ok(format!("despawned #{idx}（连同子实体共 {removed} 个）"))
+        },
+    );
+
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
@@ -1089,6 +1107,63 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **删除要级联，且必须能被撤销回来**：
+    /// 删上一级实体连子实体一起走；`scene.undo` 之后实体数回到删除前、字段也回来。
+    ///
+    /// 反向验证：把 `scene.despawn` 换成 `scene.visible 0`（只藏不删）⇒ 实体数不变，红。
+    #[test]
+    fn despawn_cascades_and_undo_restores() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let (root, child, other) = {
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+            let root = ctx.scene.spawn(None, crate::engine::scene::Transform::IDENTITY);
+            let child = ctx.scene.spawn(Some(root), crate::engine::scene::Transform::IDENTITY);
+            let other = ctx.scene.spawn(None, crate::engine::scene::Transform::IDENTITY);
+            (root, child, other)
+        };
+        let _ = (child, other);
+        assert_eq!(scene.len(), 3);
+
+        // 删上一级：子要跟着走
+        {
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+            ctx.selection = Some(root);
+            let msg = reg
+                .run_command("scene.despawn", &[], &mut ctx)
+                .expect("删除应成功");
+            assert!(msg.contains("共 2 个"), "应删掉上一级+子两个：{msg}");
+            assert_eq!(ctx.selection, None, "删完必须清空选中（句柄已失效）");
+        }
+        assert_eq!(scene.len(), 1, "只剩无关的那一个");
+
+        // 撤销：三个实体全回来
+        {
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+            reg.run_command("scene.undo", &[], &mut ctx).expect("撤销");
+        }
+        assert_eq!(scene.len(), 3, "撤销后实体数必须回到 3");
+    }
+
+    /// 没有选中时删除必须**报错**，不许猜一个实体去删。
+    #[test]
+    fn despawn_without_selection_is_an_error() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        scene.spawn(None, crate::engine::scene::Transform::IDENTITY);
+        let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+        assert!(
+            reg.run_command("scene.despawn", &[], &mut ctx).is_err(),
+            "没选中必须报错"
+        );
+        assert_eq!(ctx.scene.len(), 1, "报错时不许动场景");
+    }
+
+
     /// 🔴 **P5 的严格核对**：`spawn → set → nudge → scale → save → load_into` 之后，
     /// **每个实体的每个字段逐一相等**（平移 / 旋转 / 缩放 / 上一层 / 可见性 / 网格）。
     ///

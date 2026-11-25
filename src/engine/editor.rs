@@ -305,6 +305,8 @@ pub enum KeyAction {
     Undo,
     /// F5：重做。
     Redo,
+    /// Delete：删除选中实体（撤销栈兜底）。
+    Delete,
 }
 
 /// 按键种类（不直接依赖 winit：引擎层不认识 `KeyCode`）。
@@ -313,6 +315,7 @@ pub enum KeyKind {
     Tab,
     Backspace,
     F5,
+    Delete,
     Other,
 }
 
@@ -336,6 +339,7 @@ pub fn key_action(
         KeyKind::Tab => Some(KeyAction::CycleGizmo),
         KeyKind::Backspace => Some(KeyAction::Undo),
         KeyKind::F5 => Some(KeyAction::Redo),
+        KeyKind::Delete => Some(KeyAction::Delete),
         KeyKind::Other => None,
     }
 }

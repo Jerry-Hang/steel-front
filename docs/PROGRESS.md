@@ -5749,3 +5749,23 @@ joints=2 verts=3 posed=3 channels=6 dur=1.042s |
 
 **回归证据**：面板布局重构后编辑态截图与之前**逐字节相同**（sha256 仍为 `d258b64e…`）
 ⇒ 排版一个像素没动。
+
+### 2026-11-25：引擎化 P3o —— 删除实体（Del 键，撤销兜底）
+
+`scene.despawn`：删除选中实体并**级联**子实体，删完清空选中（句柄已失效）。
+`Del` 键走 `editor::key_action` 的路由（与 Tab/Backspace/F5 同一套），
+所以玩法态不受影响、抬起不触发。
+
+**实机**（一条命令串）：
+```
+spawn → entities=3
+despawn → despawned #2（连同子实体共 1 个）→ count=2
+undo    → entities=3（撤销把删掉的那个带回来）
+```
+
+判据 2 条：`despawn_cascades_and_undo_restores`（删上一级连带子实体、撤销后实体数回 3、
+删完必须清空选中）、`despawn_without_selection_is_an_error`（没选中报错且不许动场景）。
+反向验证：把 `despawn` 换成 `set_visible(0)`（只藏不删）⇒ 实体数不变，红。
+
+⚠️ "能放心给 Del 键"的前提是**撤销栈在 `run_command` 里统一记录** ——
+这一条是 P3k 的设计带来的复利：新命令自动可撤销，不需要另外写逆操作。
