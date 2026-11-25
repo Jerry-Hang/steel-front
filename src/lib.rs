@@ -285,6 +285,8 @@ struct GameApp {
     /// 资产列表（引擎化 P3h）。编辑态首次渲染时扫描 `assets/props`。
     asset_browser: Option<crate::engine::asset_browser::AssetBrowser>,
     /// 编辑器 gizmo 模式（平移/旋转），命令 `gizmo.mode` 与鼠标拖动共用。
+    /// `RV3D_EDIT_PROOF` 的帧计数（编辑态每 60 帧存一次场景哈希）。
+    edit_proof_frames: u64,
     /// 待处理的骨骼姿势烘焙请求（道具套件是懒载入的，早于它就绪的请求要排队）。
     bake_queue: Vec<(String, f32)>,
     /// 撤销栈（引擎化 P3k）。命令表在改动前后自动记录，编辑器与 AI 共用一条栈。

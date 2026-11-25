@@ -1021,6 +1021,65 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // `RV3D_DEBUG_NUDGE=<米>`：每帧把第 0 个实体沿 X 推一点。
+    //
+    // **它只用于"证明测量本身灵敏"**：编辑态自证要求"600 帧哈希全同"，
+    // 而一个永远不变的测量也可能只是"根本没东西会变"——那就成了恒真判据。
+    // 打开这个开关哈希必须变，否则说明自证通道坏了。
+    reg.add_system(Phase::Update, "debug.nudge", |ctx| {
+        let Some(step) = crate::syscfg::cfg("RV3D_DEBUG_NUDGE")
+            .and_then(|s| s.parse::<f32>().ok())
+        else {
+            return;
+        };
+        let ids: Vec<_> = ctx.scene.iter_alive().map(|(id, _)| id).collect();
+        if let Some(&id) = ids.first() {
+            if let Ok(mut local) = ctx.scene.local(id) {
+                local.translation.x += step;
+                ctx.scene.set_local(id, local).ok();
+            }
+        }
+    });
+
+    // 可见性 / 网格绑定：这两个字段**也要能被 AI 改**，否则 P5 的"逐字段核对"
+    // 根本覆盖不到它们（判据里造不出来 ⇒ 等于没测）。
+    reg.add_command(
+        "scene.visible",
+        "设置选中实体可见性：scene.visible <0|1>",
+        |ctx, args| {
+            let on = match args.first().map(|s| &s[..]) {
+                Some("1") | Some("on") | Some("true") => true,
+                Some("0") | Some("off") | Some("false") => false,
+                _ => return Err("参数应是 0 或 1".to_string()),
+            };
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            ctx.scene
+                .set_visible(sel, on)
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            Ok(format!("visible #{} = {on}", ctx.scene.index_of(sel)))
+        },
+    );
+    reg.add_command(
+        "scene.mesh",
+        "绑定/解绑网格资产：scene.mesh <路径|clear>",
+        |ctx, args| {
+            let arg = args.first().ok_or_else(|| "缺路径（或 clear）".to_string())?;
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let mesh = if *arg == "clear" {
+                None
+            } else {
+                Some(arg.to_string())
+            };
+            ctx.scene
+                .set_mesh(sel, mesh.clone())
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            Ok(match mesh {
+                Some(m) => format!("mesh #{} = {m}", ctx.scene.index_of(sel)),
+                None => format!("mesh #{} cleared", ctx.scene.index_of(sel)),
+            })
+        },
+    );
+
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
@@ -1030,6 +1089,131 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **P5 的严格核对**：`spawn → set → nudge → scale → save → load_into` 之后，
+    /// **每个实体的每个字段逐一相等**（平移 / 旋转 / 缩放 / 上一层 / 可见性 / 网格）。
+    ///
+    /// 为什么不比 TOML 文本：文本相等能证明"存盘读回一致"，但不能证明"字段都对"——
+    /// 两者都丢了同一个字段时，文本照样相等。这里比的是**字段值**。
+    ///
+    /// 反向验证：把 `apply_to` 里搬网格那两行删掉 ⇒ 网格字段不等，红。
+    #[test]
+    fn ai_roundtrip_matches_every_field_of_every_entity() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let path = std::env::temp_dir().join("steel_front_p5_roundtrip.toml");
+        let path_s = path.to_string_lossy().to_string();
+
+        // 通过命令表做全套改动（与 AI 接口同一条路）
+        {
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+            // 视角：`gizmo.rotate` 要它（先摆好相机，再让实体出现在相机前方）
+            ctx.view = Some(crate::engine::gizmo::ViewInfo {
+                eye: glam::Vec3::new(0.0, 0.0, 5.0),
+                forward: glam::Vec3::new(0.0, 0.0, -1.0),
+                right: glam::Vec3::X,
+                up: glam::Vec3::Y,
+                half_fov_y: std::f32::consts::FRAC_PI_4,
+                aspect: 1.0,
+            });
+            reg.run_command("scene.spawn", &[], &mut ctx).expect("spawn");
+            // 🔴 必须**真的转一下**：不转的话"旋转字段相等"是恒真的
+            // （注入 `rotation: IDENTITY` 居然是绿的 —— 因为两边都是恒等）。
+            reg.run_command("scene.set", &["0", "0", "0"], &mut ctx).expect("set0");
+            reg.run_command("gizmo.rotate", &["0.2", "0", "0", "0.2"], &mut ctx)
+                .expect("rotate");
+            // 第二条：证明多实体的字段也逐一对比（不是只有一条时凑巧相等）
+            reg.run_command("scene.spawn", &[], &mut ctx).expect("spawn2");
+            reg.run_command("scene.set", &["1.5", "-2.25", "3"], &mut ctx)
+                .expect("set");
+            reg.run_command("scene.nudge", &["Z", "4"], &mut ctx)
+                .expect("nudge");
+            reg.run_command("gizmo.scale", &["X", "1.0"], &mut ctx)
+                .expect("scale");
+            // 🔴 这两个字段必须**在测试里真的被设过**，否则"逐字段相等"覆盖不到它们
+            // （第一版就是没设，注入"不搬网格/不搬可见性"居然然都绿）。
+            reg.run_command("scene.mesh", &["assets/props/barrel_metal.glb"], &mut ctx)
+                .expect("mesh");
+            reg.run_command("scene.visible", &["0"], &mut ctx)
+                .expect("visible");
+            reg.run_command("scene.save", &[&path_s], &mut ctx)
+                .expect("save");
+        }
+
+        // 逐字段快照
+        #[derive(Debug, PartialEq)]
+        struct Snap {
+            t: glam::Vec3,
+            r: glam::Quat,
+            s: glam::Vec3,
+            visible: bool,
+            mesh: Option<String>,
+            parent: Option<usize>,
+        }
+        let snap = |sc: &Scene| -> Vec<Snap> {
+            sc.iter_alive()
+                .map(|(id, local)| Snap {
+                    t: local.translation,
+                    r: local.rotation,
+                    s: local.scale,
+                    visible: sc.is_visible(id),
+                    mesh: sc.mesh_of(id),
+                    parent: sc.parent(id).ok().flatten().map(|p| sc.index_of(p)),
+                })
+                .collect()
+        };
+        let before = snap(&scene);
+        assert!(before.len() >= 2, "至少要有根与新建实体");
+
+        // 读回到**同一个**场景（AI 的实际用法）
+        {
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+            reg.run_command("scene.load_into", &[&path_s], &mut ctx)
+                .expect("load_into");
+        }
+        let after = snap(&scene);
+        assert_eq!(before.len(), after.len(), "实体数必须一致");
+        // 🔴 四元数**不能要求逐位相等**：`from_toml` 读回时会 `normalize()`（刻意行为 ——
+        // 场景文件可能被手工编辑，非单位四元数必须被拉回），而 normalize 会动最后一位
+        // （实测 `0.70710677` → `0.7071068`）。这条是我用"注入 rotation: IDENTITY"做正对照时
+        // 顺手发现的：判据一开始就在比较浮点位，只是恰好没转过东西所以没暴露。
+        //
+        // 所以分两层判：
+        //   ① 数值层：平移/缩放/旋转都用 1e-6 容差（这才是"字段相等"的合理口径）；
+        //   ② 结构层：上一层 / 可见性 / 网格必须**完全相等**（它们是离散值，没有精度问题）。
+        for (i, (a, b)) in before.iter().zip(&after).enumerate() {
+            assert!(
+                (a.t - b.t).length() < 1e-6,
+                "第 {i} 个实体的平移不等：{:?} vs {:?}",
+                a.t,
+                b.t
+            );
+            assert!(
+                (a.s - b.s).length() < 1e-6,
+                "第 {i} 个实体的缩放不等：{:?} vs {:?}",
+                a.s,
+                b.s
+            );
+            assert!(
+                (a.r.normalize().to_array())
+                    .iter()
+                    .zip(b.r.normalize().to_array().iter())
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0f32, f32::max)
+                    < 1e-6,
+                "第 {i} 个实体的旋转不等：{:?} vs {:?}",
+                a.r,
+                b.r
+            );
+            assert_eq!(a.visible, b.visible, "第 {i} 个实体的可见性不等");
+            assert_eq!(a.mesh, b.mesh, "第 {i} 个实体的网格不等");
+            assert_eq!(a.parent, b.parent, "第 {i} 个实体的上一层不等");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;

@@ -457,6 +457,36 @@ impl GameApp {
             }
             self.fire_requested = true;
         }
+        // 🔴 `RV3D_EDIT_PROOF=1`：编辑态的**帧数级**自证 —— 每 60 帧把场景存成 TOML
+        // 并打一次哈希。判据是"所有哈希必须相同"，也就是"编辑态跑多久场景都不变"。
+        //
+        // 为什么要有它：目标要求的是"编辑态 **600 帧**实体不变"，而我之前只量过
+        // `game.time == 0.00`（那是"玩法没推进"，不是"场景没变"）。两者不是一回事：
+        // 场景完全可能被某个每帧跑的同步逻辑改掉（例如 `sync_player_to_scene`）。
+        //
+        // 🔴 **两个模式都打**（带 `mode=` 字段）：编辑态要"全同"，播放态要"变"。
+        // 只打编辑态就没有正对照 —— 一条恒真的测量等于没测（本仓教训 27）。
+        if crate::syscfg::flag("RV3D_EDIT_PROOF") {
+            self.edit_proof_frames += 1;
+            if self.edit_proof_frames % 60 == 0 {
+                let text = crate::engine::scene_io::to_toml(self.game.scene())
+                    .unwrap_or_default();
+                // FNV-1a：零依赖、确定性，只用来判"相等/不等"
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                for b in text.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x0100_0000_01b3);
+                }
+                let n = self.game.scene().len();
+                log::info!(
+                    "edit-proof mode={:?} frame={} entities={n} bytes={} hash={h:016x}",
+                    self.mode,
+                    self.edit_proof_frames,
+                    text.len()
+                );
+            }
+        }
+
         // `RV3D_SCENE_DIAG=1`：每秒打一行场景层状态（**引擎化 P0 的第一条上报通道**）。
         //
         // 它同时是"场景层被真正读取"的证据：编辑器将来显示的世界坐标、AI 接口将来的

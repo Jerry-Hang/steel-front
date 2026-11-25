@@ -78,6 +78,7 @@ impl GameApp {
             _ => None,
         };
         Self {
+            edit_proof_frames: 0,
             bake_queue: Vec::new(),
             undo: crate::engine::undo::UndoStack::new(64),
             gizmo_mode: crate::engine::gizmo::Mode::Translate,
