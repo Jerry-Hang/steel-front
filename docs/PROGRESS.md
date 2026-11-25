@@ -6117,3 +6117,28 @@ for x in buf.iter_mut() {
 
 ⚠️ 这条也解释了一个反直觉现象：**覆盖率数字不是越高越好**。
 把无法证实的记录删掉，覆盖率只涨了 5（41 → 47），但**每一分都站得住**。
+
+### 2026-11-25：端到端验收（交接前的完整跑一遍）+ ACDM 中心库又断了
+
+**通过 AI 接口（TCP）跑完整闭环**，全部 `OK`：
+```
+HELLO v1 proto=line cmd=CMD <name> [args...] sub=SUB quit=QUIT
+scene.instantiate assets/props/barrel_metal.glb → instantiated #2 verts=654 half=(0.300,0.441,0.302)
+scene.set -3 0 4                                → set #2 pos=(-3.000,0.000,4.000)
+gizmo.scale X 1.0                               → scaled #2 by 2.000x → (2.000,2.000,2.000)
+scene.dump 1                                    → entities=3 shown=1 | #0 p=- t=0,0,0 … v=0 ro=0 m=-
+scene.save /tmp/e2e.toml                        → saved entities=3
+scene.undo                                      → undo → entities=3（剩余可撤销=2）
+scene.load_into /tmp/e2e.toml                   → loaded_into entities=3
+scene.save /tmp/e2e2.toml                       → saved entities=3
+asset.count                                     → assets=52 pages=7 empty=false
+asset.skin_status tools/fixtures/skinned_bar.glb → joints=2 verts=3 posed=3 channels=6 dur=1.042s
+                                                  解析=yes 采样=yes CPU姿势=yes 烘焙上屏=yes 连续播放=no GPU逐顶点=no
+```
+**存盘 → 撤销 → 读回 → 再存盘：`diff` 无输出（逐字节相同）** ✓
+
+⚠️ **ACDM 中心库与 VPS 又断了**（本轮两次）：
+- `ssh armbian`（盒子 `100.75.222.116`）三次超时；
+- `origin`（VPS）报"无法读取远程仓库"（先 SSH 断连，后路径不可达）。
+已推到 `github-backup`（`c22f6ba`），本地库也有事件 ⇒ **数据没丢**，只是还没到盒子。
+按规矩不动网络配置。盒子恢复后补一次 `acdm-sync` 即可。
