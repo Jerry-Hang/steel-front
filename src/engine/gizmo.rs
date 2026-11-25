@@ -10,6 +10,35 @@
 
 use glam::Vec3;
 
+
+/// 编辑器 gizmo 模式（与 Unity 的 W/E 对应）。
+///
+/// 放在 `gizmo` 而不是 `editor`：模式改变的是"拖动做什么"，而拖动的实现在这里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// 沿轴平移。
+    Translate,
+    /// 绕 Y 旋转。
+    Rotate,
+}
+
+impl Mode {
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s.to_ascii_lowercase().as_str() {
+            "translate" | "move" | "平移" => Some(Mode::Translate),
+            "rotate" | "旋转" => Some(Mode::Rotate),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Translate => "translate",
+            Mode::Rotate => "rotate",
+        }
+    }
+}
+
 /// 三条世界轴。**不做局部轴**（那是 P3 有旋转后的下一步）：
 /// 现在场景里的实体只有平移有意义，先把它做对。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +275,47 @@ fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 
 pub const GIZMO_LEN: f32 = 1.0;
 /// 命中阈值（NDC）。NDC 的 1 个单位 = 半个屏幕宽，0.06 约等于"离把手 3% 屏宽以内"。
 pub const GIZMO_PICK_EPS: f32 = 0.06;
+
+/// 绕 **Y 轴**旋转的拖动：由光标绕物体在屏幕上的投影中心转过的角度决定。
+///
+/// 为什么用角度差而不是"投影到某条轴上"：旋转没有平移那种"一维轴参数"，
+/// 但"光标绕中心转了多少度"在任意视角下都稳定，而且与物体的屏幕尺寸无关
+/// （手在同一个圆周上转，转出的角度就是转出的角度）。
+///
+/// 返回 `None` 的三种情况都必须当作"没拖动"：物体在相机背后、
+/// 起点或终点离投影中心太近（角度对噪声极敏感）。
+pub fn rotate_delta_y(
+    entity: Vec3,
+    view: &ViewInfo,
+    from_ndc: (f32, f32),
+    to_ndc: (f32, f32),
+) -> Option<f32> {
+    let (cx, cy) = project_to_ndc(view, entity)?;
+    let a0 = angle_around(cx, cy, from_ndc.0, from_ndc.1)?;
+    let a1 = angle_around(cx, cy, to_ndc.0, to_ndc.1)?;
+    let mut d = a1 - a0;
+    // 归一到 (-π, π]：跨 ±π 时不能让一次小拖动变成"转了 350°"
+    while d > std::f32::consts::PI {
+        d -= std::f32::consts::TAU;
+    }
+    while d <= -std::f32::consts::PI {
+        d += std::f32::consts::TAU;
+    }
+    Some(d)
+}
+
+/// 光标相对中心的角度；离中心太近（< 该阈值，NDC）返回 `None`。
+///
+/// 阈值 0.02 ≈ 屏幕宽的 1%：再近的话 1 像素抖动会让角度跳几十度。
+const ROTATE_DEADZONE_NDC: f32 = 0.02;
+
+fn angle_around(cx: f32, cy: f32, px: f32, py: f32) -> Option<f32> {
+    let (dx, dy) = (px - cx, py - cy);
+    if (dx * dx + dy * dy).sqrt() < ROTATE_DEADZONE_NDC {
+        return None;
+    }
+    Some(dy.atan2(dx))
+}
 
 /// 光标落在哪根轴上（NDC 空间里离投影线段最近、且够近的那根）。
 ///
@@ -487,6 +557,78 @@ mod tests {
         let t = ray_sphere(Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 0.0, -1.0),
             Vec3::new(0.0, 0.0, 20.0), 0.9);
         assert!(t.is_none(), "身后的球不该命中，实际 {t:?}");
+    }
+
+
+    /// 🔴 **绕 Y 旋转**：光标从中心右侧转到正上方 ⇒ 角度差 = +90°（NDC 的 y 向上，
+    /// 所以 atan2 从 0 增加到 π/2）。
+    ///
+    /// 反向验证：把 `a1 - a0` 写成 `a0 - a1` ⇒ 得到 −π/2，红。
+    #[test]
+    fn rotate_delta_y_matches_the_swept_angle() {
+        let view = ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let entity = Vec3::new(0.0, 0.0, -3.0);
+        let (cx, cy) = project_to_ndc(&view, entity).unwrap();
+        // 中心右侧 → 中心正上方
+        let from = (cx + 0.2, cy);
+        let to = (cx, cy + 0.2);
+        let d = rotate_delta_y(entity, &view, from, to).expect("应能算角度");
+        assert!(
+            (d - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+            "应转 +90°，实际 {d} rad"
+        );
+    }
+
+    /// 光标离投影中心太近 ⇒ `None`（1 像素抖动会变成几十度，不如拒绝）。
+    #[test]
+    fn rotate_delta_rejects_cursor_near_the_center() {
+        let view = ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let entity = Vec3::new(0.0, 0.0, -3.0);
+        let (cx, cy) = project_to_ndc(&view, entity).unwrap();
+        assert!(
+            rotate_delta_y(entity, &view, (cx, cy), (cx + 0.2, cy)).is_none(),
+            "起点在中心必须拒绝"
+        );
+    }
+
+    /// 跨 ±π 的小拖动必须归一成小角度，不能变成"转了 350°"。
+    #[test]
+    fn rotate_delta_wraps_across_pi() {
+        let view = ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let entity = Vec3::new(0.0, 0.0, -3.0);
+        let (cx, cy) = project_to_ndc(&view, entity).unwrap();
+        // 从 170° 转到 -170°（即跨过分界）⇒ 应该是 +20°，不是 -340°
+        let a0 = 170f32.to_radians();
+        let a1 = (-170f32).to_radians();
+        let from = (cx + 0.2 * a0.cos(), cy + 0.2 * a0.sin());
+        let to = (cx + 0.2 * a1.cos(), cy + 0.2 * a1.sin());
+        let d = rotate_delta_y(entity, &view, from, to).expect("应能算");
+        assert!(
+            (d - 20f32.to_radians()).abs() < 1e-3,
+            "跨 ±π 应得 +20°，实际 {}°",
+            d.to_degrees()
+        );
     }
 
     /// 🔴 光标落在 X 把手附近 ⇒ 选中 X；落在空白处 ⇒ `None`（不许挑一根最近的）。

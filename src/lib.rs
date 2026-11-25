@@ -284,6 +284,8 @@ struct GameApp {
     editor_prop_frames: u32,
     /// 资产列表（引擎化 P3h）。编辑态首次渲染时扫描 `assets/props`。
     asset_browser: Option<crate::engine::asset_browser::AssetBrowser>,
+    /// 编辑器 gizmo 模式（平移/旋转），命令 `gizmo.mode` 与鼠标拖动共用。
+    gizmo_mode: crate::engine::gizmo::Mode,
     /// 编辑器正在进行的拖拽（引擎化 P3e）：左键按住把手时非 None。
     ///
     /// 单独存一个字段而不是塞进 `camera`：它属于编辑器交互，与相机位姿无关；

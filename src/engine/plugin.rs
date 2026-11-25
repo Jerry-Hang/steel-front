@@ -52,6 +52,8 @@ pub struct PluginCtx<'a> {
     pub dt: f32,
     /// 输出缓冲（诊断/上报用；编辑器面板与 AI 接口读同一份）。
     pub out: Vec<String>,
+    /// 当前 gizmo 模式（编辑器与 AI 共用；命令 `gizmo.mode` 改它）。
+    pub gizmo_mode: crate::engine::gizmo::Mode,
     /// 当前相机视角（取点命令要用；编辑器与 AI 接口都需要"从这里看到什么"）。
     pub view: Option<crate::engine::gizmo::ViewInfo>,
     /// **当前选中实体**（编辑器选中的那个；AI 接口也能改它）。
@@ -66,6 +68,7 @@ impl<'a> PluginCtx<'a> {
             time,
             dt,
             out: Vec::new(),
+            gizmo_mode: crate::engine::gizmo::Mode::Translate,
             view: None,
             selection: None,
         }
@@ -763,6 +766,64 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 q.y,
                 q.z
             ))
+        },
+    );
+    // ---- P2b：旋转（绕 Y）----
+    //
+    // 与平移 gizmo 同一套做法：编辑器用鼠标走它，AI/脚本用命令走它，**同一个函数**。
+    reg.add_command(
+        "gizmo.rotate",
+        "绕 Y 旋转选中实体：gizmo.rotate <ndc0x> <ndc0y> <ndc1x> <ndc1y>",
+        |ctx, args| {
+            let view = ctx.view.ok_or_else(|| "当前没有相机视角".to_string())?;
+            if args.len() < 4 {
+                return Err("参数不足：需要 4 个 NDC 分量".to_string());
+            }
+            let f = |i: usize| -> Result<f32, String> {
+                args[i].parse::<f32>().map_err(|_| format!("第 {i} 个参数不是数字"))
+            };
+            let (x0, y0, x1, y1) = (f(0)?, f(1)?, f(2)?, f(3)?);
+            let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            let local = ctx
+                .scene
+                .local(sel)
+                .map_err(|_| "选中实体句柄失效".to_string())?;
+            let d = crate::engine::gizmo::rotate_delta_y(
+                local.translation,
+                &view,
+                (x0, y0),
+                (x1, y1),
+            )
+            .ok_or_else(|| "光标离物体太近或物体在相机背后".to_string())?;
+            // 叠在**现有**旋转上（绕世界 Y 用左乘）：这样连续拖多次能累加
+            let q = glam::Quat::from_rotation_y(d) * local.rotation;
+            ctx.scene
+                .set_local(
+                    sel,
+                    crate::engine::scene::Transform {
+                        rotation: q,
+                        ..local
+                    },
+                )
+                .map_err(|_| "写回失败".to_string())?;
+            Ok(format!(
+                "rotated #{} by {:.1}° (yaw now {:.1}°)",
+                ctx.scene.index_of(sel),
+                d.to_degrees(),
+                q.to_euler(glam::EulerRot::YXZ).0.to_degrees()
+            ))
+        },
+    );
+    reg.add_command(
+        "gizmo.mode",
+        "切换 gizmo 模式：gizmo.mode <translate|rotate>",
+        |ctx, args| {
+            let m = args
+                .first()
+                .and_then(|s| crate::engine::gizmo::Mode::parse(s))
+                .ok_or_else(|| "缺模式或模式非法（translate/rotate）".to_string())?;
+            ctx.gizmo_mode = m;
+            Ok(format!("gizmo_mode={}", m.name()))
         },
     );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。

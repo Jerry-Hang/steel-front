@@ -356,7 +356,8 @@ impl GameApp {
             self.game.hud.screen_h,
         );
         let view = self.view_info();
-        let (sel, drag) = crate::engine::editor::begin_drag(&self.game.scene, &view, ndc, 0.9);
+        let (sel, drag) =
+            crate::engine::editor::begin_drag(&self.game.scene, &view, ndc, 0.9, self.gizmo_mode);
         self.selection = sel;
         if let Some(ed) = drag.as_ref() {
             log::info!(
@@ -372,10 +373,8 @@ impl GameApp {
         let Some(ed) = self.editor_drag.as_ref() else {
             return;
         };
-        let ed = crate::engine::editor::EditorDrag {
-            entity: ed.entity,
-            drag: ed.drag,
-        };
+        // `EditorDrag` 是 Copy：直接复制一份，避免与 `&mut self.game.scene` 冲突
+        let ed = *ed;
         let ndc = crate::engine::editor::ndc_from_pixel(
             px.0,
             px.1,

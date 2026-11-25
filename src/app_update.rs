@@ -48,9 +48,11 @@ impl GameApp {
             let mut ctx =
                 crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
             ctx.selection = self.selection;
+            ctx.gizmo_mode = self.gizmo_mode;
             ctx.view = Some(view);
             self.plugins.run_frame(&mut ctx);
             self.selection = ctx.selection;
+            self.gizmo_mode = ctx.gizmo_mode;
             for line in &ctx.out {
                 log::info!("{line}");
             }
@@ -78,13 +80,15 @@ impl GameApp {
             };
             let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
             ctx.selection = self.selection;
+            ctx.gizmo_mode = self.gizmo_mode;
             ctx.view = Some(view);
             aipc.pump(|name, args| {
                 let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 plugins.run_command(name, &argv, &mut ctx)
             });
-            // 命令可能改了选中项（`scene.spawn` 会接管）—— 写回持久状态。
+            // 命令可能改了选中项（`scene.spawn` 会接管）与 gizmo 模式 —— 写回持久状态。
             self.selection = ctx.selection;
+            self.gizmo_mode = ctx.gizmo_mode;
             // 上报：机读 key=value，字段与 `RV3D_SCENE_DIAG` 的日志**同源同义**。
             let e = self.game.player_entity();
             let world = self
@@ -116,6 +120,7 @@ impl GameApp {
                 let mut ctx =
                     crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
                 ctx.selection = self.selection;
+                ctx.gizmo_mode = self.gizmo_mode;
                 ctx.view = Some(view);
                 for one in cmd.split(';') {
                     let mut it = one.split_whitespace();
@@ -131,6 +136,7 @@ impl GameApp {
                     }
                 }
                 self.selection = ctx.selection;
+                self.gizmo_mode = ctx.gizmo_mode;
             }
         }
         // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。

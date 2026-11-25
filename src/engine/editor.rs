@@ -176,9 +176,24 @@ pub fn ndc_from_pixel(x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
 ///
 /// 存的是**起拖时刻**的 `TranslateDrag`（起点参数 + 起点平移）与目标实体；
 /// 每次鼠标移动都用它从头算新位置，而不是累加增量 —— 累加会把每帧的数值偏差累积起来。
+#[derive(Debug, Clone, Copy)]
 pub struct EditorDrag {
     pub entity: crate::engine::scene::EntityId,
-    pub drag: crate::engine::gizmo::TranslateDrag,
+    /// 这一拖在做的事。**两种模式共用同一个字段名**，因为它们在编辑器里是同一个手势，
+    /// 只是 `gizmo_mode` 不同。
+    pub kind: DragKind,
+}
+
+/// 一次拖动的具体形态。
+#[derive(Debug, Clone, Copy)]
+pub enum DragKind {
+    /// 沿轴平移（起点参数 + 起点平移）。
+    Translate(crate::engine::gizmo::TranslateDrag),
+    /// 绕 Y 旋转：记住起点光标 NDC 与起点四元数，之后从起点重算（与平移同一纪律）。
+    RotateY {
+        start_ndc: (f32, f32),
+        start_rotation: glam::Quat,
+    },
 }
 
 /// 检视面板要显示的行（**纯函数**，与绘制分离）。
@@ -223,6 +238,7 @@ pub fn begin_drag(
     view: &crate::engine::gizmo::ViewInfo,
     ndc: (f32, f32),
     pick_radius: f32,
+    mode: crate::engine::gizmo::Mode,
 ) -> (
     Option<EntityId>,
     Option<EditorDrag>,
@@ -233,6 +249,20 @@ pub fn begin_drag(
     let Ok(local) = scene.local(id) else {
         return (Some(id), None);
     };
+    // 旋转模式：只要点在物体上就开始转（不需要"抓住某根轴"——
+    // 绕 Y 的旋转把手在屏幕上是绕中心的一个圆环，点环上任何位置都等价于记录起始角度）。
+    if mode == crate::engine::gizmo::Mode::Rotate {
+        return (
+            Some(id),
+            Some(EditorDrag {
+                entity: id,
+                kind: DragKind::RotateY {
+                    start_ndc: ndc,
+                    start_rotation: local.rotation,
+                },
+            }),
+        );
+    }
     let Some(axis) = crate::engine::gizmo::pick_axis_at_screen(local.translation, view, ndc.0, ndc.1)
     else {
         return (Some(id), None);
@@ -248,7 +278,13 @@ pub fn begin_drag(
         ndc.1,
     );
     match crate::engine::gizmo::TranslateDrag::begin(axis, local.translation, o, d) {
-        Some(drag) => (Some(id), Some(EditorDrag { entity: id, drag })),
+        Some(drag) => (
+            Some(id),
+            Some(EditorDrag {
+                entity: id,
+                kind: DragKind::Translate(drag),
+            }),
+        ),
         None => (Some(id), None),
     }
 }
@@ -263,31 +299,54 @@ pub fn update_drag(
     ed: &EditorDrag,
     ndc: (f32, f32),
 ) -> bool {
-    let (o, d) = crate::engine::gizmo::screen_ray(
-        view.eye,
-        view.forward,
-        view.right,
-        view.up,
-        view.half_fov_y,
-        view.aspect,
-        ndc.0,
-        ndc.1,
-    );
-    let Some(moved) = ed.drag.drag(o, d) else {
-        return false;
-    };
     let Ok(local) = scene.local(ed.entity) else {
         return false;
     };
-    scene
-        .set_local(
-            ed.entity,
-            crate::engine::scene::Transform {
-                translation: moved,
-                ..local
-            },
-        )
-        .is_ok()
+    match ed.kind {
+        DragKind::Translate(drag) => {
+            let (o, d) = crate::engine::gizmo::screen_ray(
+                view.eye,
+                view.forward,
+                view.right,
+                view.up,
+                view.half_fov_y,
+                view.aspect,
+                ndc.0,
+                ndc.1,
+            );
+            let Some(moved) = drag.drag(o, d) else {
+                return false;
+            };
+            scene
+                .set_local(
+                    ed.entity,
+                    crate::engine::scene::Transform {
+                        translation: moved,
+                        ..local
+                    },
+                )
+                .is_ok()
+        }
+        DragKind::RotateY {
+            start_ndc,
+            start_rotation,
+        } => {
+            let Some(d) =
+                crate::engine::gizmo::rotate_delta_y(local.translation, view, start_ndc, ndc)
+            else {
+                return false;
+            };
+            scene
+                .set_local(
+                    ed.entity,
+                    crate::engine::scene::Transform {
+                        rotation: glam::Quat::from_rotation_y(d) * start_rotation,
+                        ..local
+                    },
+                )
+                .is_ok()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +400,48 @@ mod tests {
         assert_eq!(inspector_lines(&s, Some(e)), vec!["选中已失效".to_string()]);
     }
 
+
+    /// 🔴 **旋转模式的全链路**：按下 → 拖动 → 写回，只改 rotation 不改 translation。
+    ///
+    /// 反向验证：把 `DragKind::RotateY` 分支写成 `* start_rotation`（忽略增量）⇒ 角度不变，红。
+    #[test]
+    fn rotate_mode_turns_the_entity_without_moving_it() {
+        let view = crate::engine::gizmo::ViewInfo {
+            eye: Vec3::ZERO,
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_fov_y: std::f32::consts::FRAC_PI_4,
+            aspect: 1.0,
+        };
+        let mut s = Scene::new();
+        let id = s.spawn(
+            None,
+            Transform::from_translation(Vec3::new(0.0, 0.0, -3.0)),
+        );
+        let (cx, cy) = crate::engine::gizmo::project_to_ndc(&view, Vec3::new(0.0, 0.0, -3.0))
+            .expect("投影");
+        // 从中心右侧拖到中心上方
+        let from = (cx + 0.2, cy);
+        let to = (cx, cy + 0.2);
+        let (sel, drag) = begin_drag(&s, &view, from, 0.9, crate::engine::gizmo::Mode::Rotate);
+        assert_eq!(sel, Some(id));
+        let drag = drag.expect("旋转模式点中物体就该起拖");
+        assert!(update_drag(&mut s, &view, &drag, to), "必须写回");
+        let after = s.local(id).unwrap();
+        let yaw = after.rotation.to_euler(glam::EulerRot::YXZ).0;
+        assert!(
+            (yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "应转 90°，实际 {}°",
+            yaw.to_degrees()
+        );
+        assert!(
+            (after.translation - Vec3::new(0.0, 0.0, -3.0)).length() < 1e-6,
+            "旋转不许动物体位置：{:?}",
+            after.translation
+        );
+    }
+
     /// 🔴 **按下 → 拖动 → 写回** 三段全链路（纯函数层，与鼠标走同一份代码）。
     ///
     /// 相机在原点朝 -Z，实体在 (0,0,-3)；抓住 Y 把手往上拖 0.2 NDC ⇒ 只有 Y 增加。
@@ -372,7 +473,7 @@ mod tests {
             Vec3::new(0.0, 0.0, -3.0) + Vec3::Y * 0.5,
         )
         .unwrap();
-        let (sel, drag) = begin_drag(&s, &view, from, 0.9);
+        let (sel, drag) = begin_drag(&s, &view, from, 0.9, crate::engine::gizmo::Mode::Translate);
         assert_eq!(sel, Some(id), "应选中该实体");
         let drag = drag.expect("落在把手上必须能起拖");
         // 往上拖
@@ -406,7 +507,7 @@ mod tests {
         };
         let mut s = Scene::new();
         s.spawn(None, Transform::from_translation(Vec3::new(0.0, 0.0, -3.0)));
-        let (sel, drag) = begin_drag(&s, &view, (0.9, 0.9), 0.9);
+        let (sel, drag) = begin_drag(&s, &view, (0.9, 0.9), 0.9, crate::engine::gizmo::Mode::Translate);
         assert_eq!(sel, None, "点空白不该选中任何东西");
         assert!(drag.is_none(), "点空白不该起拖");
     }
