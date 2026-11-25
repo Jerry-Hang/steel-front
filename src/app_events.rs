@@ -857,6 +857,10 @@ impl GameApp {
                                 if self.editor_click_asset_panel() {
                                     return;
                                 }
+                                // 场景树同理：右侧面板压在场景上，点它是要选实体，不是点穿。
+                                if self.editor_click_scene_tree() {
+                                    return;
+                                }
                                 self.editor_begin_drag();
                             } else {
                                 self.editor_drag = None;

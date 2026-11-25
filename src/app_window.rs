@@ -343,6 +343,31 @@ pub(crate) fn window_physical_request(w: u32, h: u32, monitor: Option<(u32, u32)
 }
 
 impl GameApp {
+    /// 编辑态左键：落在**场景树**上就选中那一行，返回是否吃掉点击。
+    pub(crate) fn editor_click_scene_tree(&mut self) -> bool {
+        let (px, py) = self.last_cursor;
+        let (px, py) = (px as f32, py as f32);
+        let rows = self.game.scene().len();
+        let Some(row) = crate::engine::editor::tree_row_at(
+            self.game.hud.screen_w,
+            self.game.hud.screen_h,
+            rows,
+            self.game.hud.ui_scale(),
+            px,
+            py,
+        ) else {
+            return false;
+        };
+        // 行号 → 实体句柄（`iter_alive` 的顺序就是绘制顺序，两边必须同源）
+        let ids: Vec<_> = self.game.scene().iter_alive().map(|(id, _)| id).collect();
+        let Some(&id) = ids.get(row) else {
+            return false;
+        };
+        self.selection = Some(id);
+        log::info!("编辑器: 场景树选中 #{}", self.game.scene().index_of(id));
+        true
+    }
+
     /// 编辑态左键：落在资产面板上就"选这一条并实例化"，返回是否吃掉了这次点击。
     ///
     /// 返回 `true` 时调用方要 `return`（不要再走物体拖拽）——

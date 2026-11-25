@@ -59,13 +59,13 @@ pub fn panel_quads(
         text_scale,
         &mut q,
     );
-    y += ROW_H * s + 4.0 * s;
     // 分隔线（用一条很扁的 quad）
     q.push(Quad::new(
-        Rect::new(x + PAD * s, y, w - PAD * 2.0 * s, 1.0 * s),
+        Rect::new(x + PAD * s, y + ROW_H * s + 4.0 * s, w - PAD * 2.0 * s, 1.0 * s),
         DIM,
     ));
-    y += 6.0 * s;
+    // 🔴 行起点来自 `tree_rows_top`（与命中判定同一份加法）
+    y = tree_rows_top(s);
 
     let total = scene.len();
     for (shown, (id, local)) in scene.iter_alive().enumerate() {
@@ -127,6 +127,48 @@ pub fn panel_quads(
     q
 }
 
+
+
+/// 场景树里**第一行**的从上往下的起点（标题 + 实体数 + 分隔线之后）。
+///
+/// 与 `panel_quads` 里的排版必须一致 —— 所以两边都调这个函数，而不是各写一遍加法。
+pub fn tree_rows_top(ui_scale: f32) -> f32 {
+    let s = ui_scale;
+    // 标题 1 行 + 实体数 1 行 + 分隔线
+    PAD * s + ROW_H * s + 2.0 * s + ROW_H * s + 4.0 * s + 6.0 * s
+}
+
+/// 点在场景树上命中**第几个实体**（按 `iter_alive` 的顺序；超出 `MAX_ROWS` 或点在面板外返回 `None`）。
+///
+/// 用途与资产面板同一个道理：布局与命中必须共用一份，否则"点 A 选中 B"。
+pub fn tree_row_at(
+    screen_w: f32,
+    screen_h: f32,
+    rows: usize,
+    ui_scale: f32,
+    px: f32,
+    py: f32,
+) -> Option<usize> {
+    let s = ui_scale;
+    let w = PANEL_W * s;
+    let x = (screen_w - w).max(0.0);
+    if px < x || px > x + w || py < 0.0 || py > screen_h {
+        return None;
+    }
+    let top = tree_rows_top(s);
+    if py < top {
+        return None;
+    }
+    let row = ((py - top) / (ROW_H * s)).floor();
+    if row < 0.0 {
+        return None;
+    }
+    let row = row as usize;
+    if row >= rows.min(MAX_ROWS) {
+        return None;
+    }
+    Some(row)
+}
 
 /// 资产面板的矩形（纯函数：绘制与命中判定**共用这一份布局**）。
 ///
@@ -501,6 +543,36 @@ pub fn update_drag(
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **场景树命中判定**：第 k 行返回 k；标题区/面板外/超出最大行数返回 None。
+    ///
+    /// 反向验证：把 `tree_rows_top(s)` 换成 `0.0`（忘了留标题区）⇒ 点标题会选中第 0 行，红。
+    #[test]
+    fn tree_row_hit_test_skips_the_header() {
+        let (sw, sh, s) = (1280.0f32, 720.0f32, 1.0f32);
+        let rows = 3usize;
+        let w = PANEL_W * s;
+        let x = (sw - w).max(0.0);
+        let cx = x + w * 0.5;
+        let top = tree_rows_top(s);
+        // 标题区（行起点之上）不许命中
+        assert_eq!(tree_row_at(sw, sh, rows, s, cx, top - 1.0), None);
+        // 逐行命中
+        for row in 0..rows {
+            let cy = top + row as f32 * ROW_H * s + 2.0;
+            assert_eq!(
+                tree_row_at(sw, sh, rows, s, cx, cy),
+                Some(row),
+                "第 {row} 行应命中自己"
+            );
+        }
+        // 超出行数（面板空白处）不许命中
+        let beyond = top + rows as f32 * ROW_H * s + 2.0;
+        assert_eq!(tree_row_at(sw, sh, rows, s, cx, beyond), None);
+        // 面板左侧（场景区域）不许命中
+        assert_eq!(tree_row_at(sw, sh, rows, s, x - 10.0, top + 2.0), None);
+    }
+
+
 
     /// 🔴 **资产面板命中判定**：点第 k 条资产要返回 k，点表头/面板外要返回 None。
     ///
