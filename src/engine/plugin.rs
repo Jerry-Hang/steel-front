@@ -1140,6 +1140,29 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
         },
     );
 
+    // ---- AI 侧的结构化场景转储 ----
+    //
+    // 差异化的核心是"AI 能拿到实时数据"，而在此之前只有 `entities=N` 这种计数。
+    // 这条命令把每个实体一行、字段顺序固定地吐出来，外部程序能**定位具体实体**。
+    reg.add_command(
+        "scene.dump",
+        "结构化转储场景（一行一个实体）：scene.dump [最多条数]",
+        |ctx, args| {
+            let limit: usize = args
+                .first()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(64);
+            let all = crate::engine::scene_io::dump_lines(ctx.scene);
+            let shown: Vec<&str> = all.iter().take(limit).map(|s| s.as_str()).collect();
+            Ok(format!(
+                "entities={} shown={} | {}",
+                all.len(),
+                shown.len(),
+                shown.join(" ; ")
+            ))
+        },
+    );
+
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {

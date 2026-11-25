@@ -271,6 +271,52 @@ pub fn apply_to(scene: &mut Scene, text: &str) -> Result<usize, SaveError> {
     Ok(scene.len())
 }
 
+
+/// **结构化转储**（给 AI / 外部工具读，也给编辑器面板用）。
+///
+/// 与 `to_toml` 的区别：那个是**存盘格式**（可读、可手改、要能往返）；
+/// 这个是**报告格式**（一行一个实体、字段顺序固定、便于逐行解析与 diff）。
+///
+/// 行格式（固定顺序，缺值用 `-`）：
+/// ```text
+/// #<idx> p=<parent|-> t=<x>,<y>,<z> r=<x>,<y>,<z>,<w> s=<x>,<y>,<z> v=<0|1> ro=<0|1> m=<mesh|->
+/// ```
+/// 为什么要有它：AI 侧现在只能拿到 `entities=N` 这种计数，看不到"谁在哪"。
+/// 结构化转储让外部程序能**定位具体实体**，而不是只能凭猜发命令。
+pub fn dump_lines(scene: &Scene) -> Vec<String> {
+    let mut out = Vec::with_capacity(scene.len());
+    for (id, local) in scene.iter_alive() {
+        let parent = scene
+            .parent(id)
+            .ok()
+            .flatten()
+            .map(|p| format!("#{}", scene.index_of(p)))
+            .unwrap_or_else(|| "-".to_string());
+        let t = local.translation;
+        let r = local.rotation;
+        let s = local.scale;
+        out.push(format!(
+            "#{} p={parent} t={:.6},{:.6},{:.6} r={:.6},{:.6},{:.6},{:.6} s={:.6},{:.6},{:.6} v={} ro={} m={}",
+            scene.index_of(id),
+            t.x,
+            t.y,
+            t.z,
+            r.x,
+            r.y,
+            r.z,
+            r.w,
+            s.x,
+            s.y,
+            s.z,
+            if scene.is_visible(id) { 1 } else { 0 },
+            if scene.is_readonly(id) { 1 } else { 0 },
+            scene.mesh_of(id).unwrap_or_else(|| "-".to_string()),
+        ));
+    }
+    out
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +462,49 @@ mod tests {
         let second = to_toml(&target).unwrap();
         assert!(second.contains("mesh ="), "第二次存盘丢了网格：\n{second}");
         assert_eq!(first, second, "两次存盘必须逐字节相同");
+    }
+
+    /// 🔴 **结构化转储的字段必须齐全且顺序固定**（外部程序靠逐行解析）。
+    ///
+    /// 反向验证：把 `ro=` 那一段删掉 ⇒ 第一条断言红。
+    #[test]
+    fn dump_lines_has_stable_fields_in_fixed_order() {
+        let mut s = Scene::new();
+        let root = s.spawn(None, Transform::IDENTITY);
+        let e = s.spawn(
+            Some(root),
+            Transform {
+                translation: Vec3::new(1.0, 2.0, 3.0),
+                rotation: glam::Quat::IDENTITY,
+                scale: Vec3::splat(2.0),
+            },
+        );
+        s.set_visible(root, false).unwrap();
+        s.set_readonly(e, true).unwrap();
+        s.set_mesh(e, Some("assets/props/barrel_metal.glb".to_string()))
+            .unwrap();
+        let lines = dump_lines(&s);
+        assert_eq!(lines.len(), 2, "一行一个实体");
+        // 字段顺序与数量固定
+        for (i, line) in lines.iter().enumerate() {
+            for key in [" p=", " t=", " r=", " s=", " v=", " ro=", " m="] {
+                assert!(line.contains(key), "第 {i} 行缺字段 {key}：{line}");
+            }
+            let pos: Vec<usize> = [" p=", " t=", " r=", " s=", " v=", " ro=", " m="]
+                .iter()
+                .map(|k| line.find(k).unwrap())
+                .collect();
+            let mut sorted = pos.clone();
+            sorted.sort_unstable();
+            assert_eq!(pos, sorted, "字段顺序必须固定：{line}");
+        }
+        // 值也要对得上（抽几条）
+        assert!(lines[0].starts_with("#0 p=- "), "{}", lines[0]);
+        assert!(lines[0].contains(" v=0 ro=0 m=-"), "{}", lines[0]);
+        assert!(lines[1].starts_with("#1 p=#0 "), "{}", lines[1]);
+        assert!(lines[1].contains(" t=1.000000,2.000000,3.000000"), "{}", lines[1]);
+        assert!(lines[1].contains(" s=2.000000,2.000000,2.000000"), "{}", lines[1]);
+        assert!(lines[1].contains(" ro=1 m=assets/props/barrel_metal.glb"), "{}", lines[1]);
     }
 
     /// 读回时 parent 指向不存在的 id 必须报错，而不是静默把它当根节点。
