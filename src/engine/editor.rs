@@ -36,6 +36,7 @@ const DIM: Color = Color::new(0.55, 0.57, 0.62, 1.0);
 pub fn panel_quads(
     scene: &Scene,
     selection: Option<EntityId>,
+    filter: TreeFilter,
     screen_w: f32,
     screen_h: f32,
     ui_scale: f32,
@@ -52,7 +53,7 @@ pub fn panel_quads(
     crate::ui::render_text("场景树", x + PAD * s, y, HEAD, text_scale, &mut q);
     y += ROW_H * s + 2.0 * s;
     crate::ui::render_text(
-        &format!("实体 {}", scene.len()),
+        &format!("实体 {} ({})", scene.len(), filter.name()),
         x + PAD * s,
         y,
         DIM,
@@ -67,8 +68,13 @@ pub fn panel_quads(
     // 🔴 行起点来自 `tree_rows_top`（与命中判定同一份加法）
     y = tree_rows_top(s);
 
-    let total = scene.len();
-    for (shown, (id, local)) in scene.iter_alive().enumerate() {
+    // 🔴 行序来自 `tree_rows`（与命中判定同一份）
+    let rows = tree_rows(scene, filter);
+    let total = rows.len();
+    for (shown, id) in rows.iter().copied().enumerate() {
+        let Ok(local) = scene.local(id) else {
+            continue;
+        };
         if shown >= MAX_ROWS {
             break;
         }
@@ -128,6 +134,60 @@ pub fn panel_quads(
 }
 
 
+
+
+/// 场景树的过滤口径。
+///
+/// 为什么需要它：NPC 镜像进场景之后有 200+ 个实体，而树只显示 `MAX_ROWS` 行 ——
+/// 默认看到的前 16 行全是不可编辑的镜像，**自己刚放的东西根本看不见**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeFilter {
+    /// 全部实体（含只读镜像）。
+    All,
+    /// 只显示可编辑的（默认）：编辑器的工作对象。
+    Editable,
+}
+
+impl TreeFilter {
+    pub fn parse(s: &str) -> Option<TreeFilter> {
+        match s.to_ascii_lowercase().as_str() {
+            "all" | "全部" => Some(TreeFilter::All),
+            "editable" | "可编辑" => Some(TreeFilter::Editable),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TreeFilter::All => "all",
+            TreeFilter::Editable => "editable",
+        }
+    }
+
+    /// 循环切换（`F` 键用）。
+    pub fn next(self) -> TreeFilter {
+        match self {
+            TreeFilter::All => TreeFilter::Editable,
+            TreeFilter::Editable => TreeFilter::All,
+        }
+    }
+}
+
+/// 场景树要显示的实体（**顺序即行序**）。
+///
+/// 🔴 这是"显示哪些、什么顺序"的**唯一来源**：绘制、命中判定、点击选中都调它。
+/// 分开写的话，过滤一改就会出现"点第 3 行选中第 5 个"——
+/// 而且因为两边各自都"看起来对"，极难定位。
+pub fn tree_rows(scene: &Scene, filter: TreeFilter) -> Vec<EntityId> {
+    scene
+        .iter_alive()
+        .filter(|(id, _)| match filter {
+            TreeFilter::All => true,
+            TreeFilter::Editable => !scene.is_readonly(*id),
+        })
+        .map(|(id, _)| id)
+        .collect()
+}
 
 /// 场景树里**第一行**的从上往下的起点（标题 + 实体数 + 分隔线之后）。
 ///
@@ -307,6 +367,8 @@ pub enum KeyAction {
     Redo,
     /// Delete：删除选中实体（撤销栈兜底）。
     Delete,
+    /// F：切换场景树过滤（全部 / 只看可编辑）。
+    CycleFilter,
 }
 
 /// 按键种类（不直接依赖 winit：引擎层不认识 `KeyCode`）。
@@ -316,6 +378,7 @@ pub enum KeyKind {
     Backspace,
     F5,
     Delete,
+    F,
     Other,
 }
 
@@ -340,6 +403,7 @@ pub fn key_action(
         KeyKind::Backspace => Some(KeyAction::Undo),
         KeyKind::F5 => Some(KeyAction::Redo),
         KeyKind::Delete => Some(KeyAction::Delete),
+        KeyKind::F => Some(KeyAction::CycleFilter),
         KeyKind::Other => None,
     }
 }
@@ -553,6 +617,34 @@ pub fn update_drag(
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **场景树过滤**：`Editable` 必须滤掉只读镜像、`All` 全留，且**顺序与 `iter_alive` 一致**。
+    ///
+    /// 顺序一致是硬要求：绘制、命中、点击都按这个顺序取第 k 行，
+    /// 顺序一变就会"点第 3 行选中第 5 个"，而两边各自看都对。
+    ///
+    /// 反向验证：把 `filter` 判断去掉（永远全留）⇒ 第一条断言红。
+    #[test]
+    fn tree_rows_respects_the_filter_and_keeps_order() {
+        let mut s = Scene::new();
+        let a = s.spawn(None, Transform::IDENTITY);
+        let b = s.spawn(None, Transform::IDENTITY);
+        let c = s.spawn(None, Transform::IDENTITY);
+        s.set_readonly(b, true).unwrap();
+        assert_eq!(tree_rows(&s, TreeFilter::All), vec![a, b, c], "All 全留且保序");
+        assert_eq!(
+            tree_rows(&s, TreeFilter::Editable),
+            vec![a, c],
+            "Editable 只滤掉只读的，其余保序"
+        );
+        // 口径切换是可预测的（`F` 键按两下回到原处）
+        assert_eq!(TreeFilter::All.next(), TreeFilter::Editable);
+        assert_eq!(TreeFilter::Editable.next(), TreeFilter::All);
+        for f in [TreeFilter::All, TreeFilter::Editable] {
+            assert_eq!(TreeFilter::parse(f.name()), Some(f), "名字与 parse 必须互逆");
+        }
+    }
+
+
     /// 🔴 **场景树命中判定**：第 k 行返回 k；标题区/面板外/超出最大行数返回 None。
     ///
     /// 反向验证：把 `tree_rows_top(s)` 换成 `0.0`（忘了留标题区）⇒ 点标题会选中第 0 行，红。
@@ -870,7 +962,7 @@ mod tests {
     fn editor_panel_highlights_exactly_one_selected_row() {
         let s = scene_with(3);
         let ids: Vec<_> = s.iter_alive().map(|(id, _)| id).collect();
-        let q = panel_quads(&s, Some(ids[1]), 1280.0, 720.0, 1.0);
+        let q = panel_quads(&s, Some(ids[1]), TreeFilter::All, 1280.0, 720.0, 1.0);
         let sel_rows = q
             .iter()
             .filter(|x| x.color.r == ROW_SEL.r && x.color.g == ROW_SEL.g && x.color.b == ROW_SEL.b)
@@ -885,16 +977,16 @@ mod tests {
     /// 反向验证：把行循环改成只画第一行 ⇒ 两者相等，这条红。
     #[test]
     fn editor_panel_draws_a_row_per_entity() {
-        let a = panel_quads(&scene_with(1), None, 1280.0, 720.0, 1.0).len();
-        let b = panel_quads(&scene_with(3), None, 1280.0, 720.0, 1.0).len();
+        let a = panel_quads(&scene_with(1), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
+        let b = panel_quads(&scene_with(3), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
         assert!(b > a, "3 个实体的面板应比 1 个的多出文本 quad（{a} vs {b}）");
     }
 
     /// 超出上限时不许无限增长（HUD quad 容量是有限的），且要给出"还有 N 个"。
     #[test]
     fn editor_panel_is_bounded_and_reports_the_remainder() {
-        let a = panel_quads(&scene_with(MAX_ROWS), None, 1280.0, 720.0, 1.0).len();
-        let b = panel_quads(&scene_with(MAX_ROWS + 5), None, 1280.0, 720.0, 1.0).len();
+        let a = panel_quads(&scene_with(MAX_ROWS), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
+        let b = panel_quads(&scene_with(MAX_ROWS + 5), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
         assert!(
             b <= a + 64,
             "超出 MAX_ROWS 后只应多出一行提示，实际从 {a} 涨到 {b}"

@@ -5819,3 +5819,29 @@ undo    → entities=3（撤销把删掉的那个带回来）
 
 ⚠️ 判据第一版**数错了**：用 `text.matches("[[entity]]")` 把表头注释那行也算进去了
 （3 vs 2）。改成按行首匹配。这是本晚第 N 次"判据的输入/口径不对"。
+
+### 2026-11-25：引擎化 P3p —— 场景树过滤口径（全部 / 只看可编辑）
+
+`editor::TreeFilter { All, Editable }` + `editor::tree_rows(scene, filter)`。
+
+🔴 `tree_rows` 是"显示哪些、什么顺序"的**唯一来源**：绘制、命中判定、点击选中都调它。
+分开写的话，过滤一改就会出现"点第 3 行选中第 5 个"，而两边各自看都"对"。
+（这是本仓第三次在同一个位置收口：资产面板矩形、场景树行起点、现在树行本身。）
+
+默认 `Editable`：编辑器的工作对象。`F` 键切换，AI 用 `editor.filter <all|editable>`。
+面板标题带上口径：`实体 2 (editable)` / `实体 2 (all)`。
+
+🔴 **第一版是个谎报命令**：它只 `emit` 一行、返回 `filter=all`，而**场景里什么都没变**。
+命令说成功、面板没变——这是最坏的一类。改成写进 `ctx.tree_filter`，
+由调用方在帧末写回 `App`（与 `selection` / `gizmo_mode` 同一套）。
+
+判据 2 条：`tree_rows_respects_the_filter_and_keeps_order`（Editable 滤掉只读、其余保序、
+口径切换可预测、name/parse 互逆）、`editor_filter_command_actually_changes_the_state`
+（直接看 `ctx.tree_filter`；非法口径报错且不改状态）。
+反向验证：去掉过滤 ⇒ 红；只回话不改状态 ⇒ 红。
+
+**实机证据**：`editor.filter all` 之后，面板标题从 `实体 2 (editable)` 变成 `实体 2 (all)`。
+
+⚠️ **这条过滤现在几乎看不出效果**，因为 NPC 只在播放态镜像、而编辑态没有 NPC。
+它真正有用的时刻是"编辑态能看到活的世界"——那需要先把玩法权威迁到 `Scene`
+（只读镜像不是迁移）。这一条如实记在这里，免得下一个人以为它没生效。

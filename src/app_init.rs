@@ -80,6 +80,7 @@ impl GameApp {
         Self {
             edit_proof_frames: 0,
             bake_queue: Vec::new(),
+            tree_filter: crate::engine::editor::TreeFilter::Editable,
             undo: crate::engine::undo::UndoStack::new(64),
             gizmo_mode: crate::engine::gizmo::Mode::Translate,
             editor_prop_sig: 0,

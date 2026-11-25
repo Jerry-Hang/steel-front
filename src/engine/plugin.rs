@@ -60,6 +60,8 @@ pub struct PluginCtx<'a> {
     pub bake_requests: Vec<(String, f32)>,
     /// 撤销栈（编辑器与 AI 共用；`run_command` 在改动前后自动记录）。
     pub undo: &'a mut crate::engine::undo::UndoStack,
+    /// 场景树过滤口径（编辑器用 `F` 键、AI 用 `editor.filter`，共用这一份）。
+    pub tree_filter: crate::engine::editor::TreeFilter,
     /// 当前 gizmo 模式（编辑器与 AI 共用；命令 `gizmo.mode` 改它）。
     pub gizmo_mode: crate::engine::gizmo::Mode,
     /// 当前相机视角（取点命令要用；编辑器与 AI 接口都需要"从这里看到什么"）。
@@ -85,6 +87,7 @@ impl<'a> PluginCtx<'a> {
             dt,
             out: Vec::new(),
             bake_requests: Vec::new(),
+            tree_filter: crate::engine::editor::TreeFilter::Editable,
             gizmo_mode: crate::engine::gizmo::Mode::Translate,
             view: None,
             selection: None,
@@ -1119,6 +1122,24 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
         },
     );
 
+    // 场景树过滤口径：编辑器用 `F` 键切，AI 用这条命令切。
+    // 它**不改场景**，只改"看什么"，所以记录逻辑不会把它当改动（前后文本相同）。
+    reg.add_command(
+        "editor.filter",
+        "场景树过滤口径：editor.filter <all|editable>",
+        |ctx, args| {
+            let f = args
+                .first()
+                .and_then(|s| crate::engine::editor::TreeFilter::parse(s))
+                .ok_or_else(|| "缺口径或口径非法（all/editable）".to_string())?;
+            // 🔴 真改状态：第一版只 `emit` 一行、返回 `filter=all`，**场景里什么都没变** ——
+            // 命令说成功、面板没变，是最坏的一类谎报。现在写进 `ctx.tree_filter`，
+            // 由调用方在帧末写回 `App`（与 `selection` / `gizmo_mode` 同一套）。
+            ctx.tree_filter = f;
+            Ok(format!("filter={}", f.name()))
+        },
+    );
+
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
@@ -1128,6 +1149,40 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **`editor.filter` 必须真改状态**，不许只回一句 `filter=all`。
+    ///
+    /// 第一版就是这样：只 `emit` 一行、返回 `filter=all`，而场景里什么都没变 ——
+    /// 命令说成功、面板没变，是最坏的一类谎报。判据直接看 `ctx.tree_filter`。
+    ///
+    /// 反向验证：把 `ctx.tree_filter = f;` 删掉（只返回字符串）⇒ 红。
+    #[test]
+    fn editor_filter_command_actually_changes_the_state() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+        assert_eq!(
+            ctx.tree_filter,
+            crate::engine::editor::TreeFilter::Editable,
+            "默认应是 editable（编辑器的工作对象）"
+        );
+        reg.run_command("editor.filter", &["all"], &mut ctx)
+            .expect("应成功");
+        assert_eq!(
+            ctx.tree_filter,
+            crate::engine::editor::TreeFilter::All,
+            "命令必须真的改掉状态"
+        );
+        reg.run_command("editor.filter", &["editable"], &mut ctx)
+            .expect("应成功");
+        assert_eq!(ctx.tree_filter, crate::engine::editor::TreeFilter::Editable);
+        // 非法口径要报错，且不许改状态
+        assert!(reg.run_command("editor.filter", &["bogus"], &mut ctx).is_err());
+        assert_eq!(ctx.tree_filter, crate::engine::editor::TreeFilter::Editable);
+    }
+
+
     /// 🔴 **只读镜像实体不许被命令改**：报错要**说明原因**，且场景不变。
     ///
     /// 反向验证：把 `reject_readonly` 的调用删掉 ⇒ 命令成功、位置被改，红。

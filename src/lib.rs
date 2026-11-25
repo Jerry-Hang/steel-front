@@ -289,6 +289,8 @@ struct GameApp {
     edit_proof_frames: u64,
     /// 待处理的骨骼姿势烘焙请求（道具套件是懒载入的，早于它就绪的请求要排队）。
     bake_queue: Vec<(String, f32)>,
+    /// 场景树过滤口径（全部 / 只看可编辑）。默认只看可编辑：编辑器的工作对象。
+    tree_filter: crate::engine::editor::TreeFilter,
     /// 撤销栈（引擎化 P3k）。命令表在改动前后自动记录，编辑器与 AI 共用一条栈。
     undo: crate::engine::undo::UndoStack,
     gizmo_mode: crate::engine::gizmo::Mode,

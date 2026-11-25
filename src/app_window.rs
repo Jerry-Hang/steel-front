@@ -347,20 +347,19 @@ impl GameApp {
     pub(crate) fn editor_click_scene_tree(&mut self) -> bool {
         let (px, py) = self.last_cursor;
         let (px, py) = (px as f32, py as f32);
-        let rows = self.game.scene().len();
+        // 🔴 行序来自 `tree_rows`（与绘制、命中判定同一份）
+        let rows = crate::engine::editor::tree_rows(self.game.scene(), self.tree_filter);
         let Some(row) = crate::engine::editor::tree_row_at(
             self.game.hud.screen_w,
             self.game.hud.screen_h,
-            rows,
+            rows.len(),
             self.game.hud.ui_scale(),
             px,
             py,
         ) else {
             return false;
         };
-        // 行号 → 实体句柄（`iter_alive` 的顺序就是绘制顺序，两边必须同源）
-        let ids: Vec<_> = self.game.scene().iter_alive().map(|(id, _)| id).collect();
-        let Some(&id) = ids.get(row) else {
+        let Some(&id) = rows.get(row) else {
             return false;
         };
         self.selection = Some(id);

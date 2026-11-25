@@ -38,6 +38,7 @@ impl GameApp {
         );
         ctx.selection = selection;
         ctx.gizmo_mode = gizmo_mode;
+        ctx.tree_filter = self.tree_filter;
         ctx.view = Some(view);
         match self.plugins.run_command(name, args, &mut ctx) {
             Ok(msg) => log::info!("key→{name}: {msg}"),
@@ -45,6 +46,7 @@ impl GameApp {
         }
         self.selection = ctx.selection;
         self.gizmo_mode = ctx.gizmo_mode;
+        self.tree_filter = ctx.tree_filter;
         let bakes = std::mem::take(&mut ctx.bake_requests);
         drop(ctx);
         self.apply_bake_requests(bakes);
@@ -627,6 +629,7 @@ impl GameApp {
                         KeyCode::Backspace => KeyKind::Backspace,
                         KeyCode::F5 => KeyKind::F5,
                         KeyCode::Delete => KeyKind::Delete,
+                        KeyCode::KeyF => KeyKind::F,
                         _ => KeyKind::Other,
                     };
                     match crate::engine::editor::key_action(self.mode, kind, pressed) {
@@ -645,6 +648,11 @@ impl GameApp {
                         }
                         Some(KeyAction::Delete) => {
                             self.run_editor_command("scene.despawn", &[]);
+                            return;
+                        }
+                        Some(KeyAction::CycleFilter) => {
+                            self.tree_filter = self.tree_filter.next();
+                            log::info!("编辑器: 场景树过滤 = {}", self.tree_filter.name());
                             return;
                         }
                         None => {}

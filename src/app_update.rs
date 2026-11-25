@@ -49,10 +49,12 @@ impl GameApp {
                 crate::engine::plugin::PluginCtx::new(&mut self.game.scene, &mut self.undo, time, dt);
             ctx.selection = self.selection;
             ctx.gizmo_mode = self.gizmo_mode;
+            ctx.tree_filter = self.tree_filter;
             ctx.view = Some(view);
             self.plugins.run_frame(&mut ctx);
             self.selection = ctx.selection;
             self.gizmo_mode = ctx.gizmo_mode;
+            self.tree_filter = ctx.tree_filter;
             let bakes = std::mem::take(&mut ctx.bake_requests);
             for line in &ctx.out {
                 log::info!("{line}");
@@ -85,6 +87,7 @@ impl GameApp {
             let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, &mut self.undo, time, dt);
             ctx.selection = self.selection;
             ctx.gizmo_mode = self.gizmo_mode;
+            ctx.tree_filter = self.tree_filter;
             ctx.view = Some(view);
             aipc.pump(|name, args| {
                 let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -93,6 +96,7 @@ impl GameApp {
             // 命令可能改了选中项（`scene.spawn` 会接管）与 gizmo 模式 —— 写回持久状态。
             self.selection = ctx.selection;
             self.gizmo_mode = ctx.gizmo_mode;
+            self.tree_filter = ctx.tree_filter;
             let bakes = std::mem::take(&mut ctx.bake_requests);
             drop(ctx);
             pending_bakes = bakes;
@@ -129,6 +133,8 @@ impl GameApp {
                     crate::engine::plugin::PluginCtx::new(&mut self.game.scene, &mut self.undo, time, dt);
                 ctx.selection = self.selection;
                 ctx.gizmo_mode = self.gizmo_mode;
+              ctx.tree_filter = self.tree_filter;
+            ctx.tree_filter = self.tree_filter;
                 ctx.view = Some(view);
                 for one in cmd.split(';') {
                     let mut it = one.split_whitespace();
@@ -145,6 +151,8 @@ impl GameApp {
                 }
                 self.selection = ctx.selection;
                 self.gizmo_mode = ctx.gizmo_mode;
+              self.tree_filter = ctx.tree_filter;
+            self.tree_filter = ctx.tree_filter;
                 let bakes = std::mem::take(&mut ctx.bake_requests);
                 drop(ctx);
                 self.apply_bake_requests(bakes);

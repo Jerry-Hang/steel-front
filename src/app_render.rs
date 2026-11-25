@@ -932,6 +932,7 @@ crate::engine::ray_tracer::PtParams {
                 let mut quads = crate::engine::editor::panel_quads(
                     self.game.scene(),
                     self.selection,
+                    self.tree_filter,
                     self.game.hud.screen_w,
                     self.game.hud.screen_h,
                     scale,
