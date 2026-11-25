@@ -11,6 +11,114 @@ use crate::{gun_diag_on, idle_sway, GameApp, GameState, Particle};
 use crate::{DECAL_LIFT_M, DECAL_SIZE_M, DECAL_THICK_M};
 
 impl GameApp {
+    /// 处理本帧累积的烘焙请求：烘好就把**选中项**换成新网格的实例。
+    ///
+    /// 自动实例化是刻意的：`asset.pose_bake` 的用处就是"看看这一帧什么样"，
+    /// 还要再写一条 `scene.instantiate` 就是多余的步骤。要自己挑网格名仍可以用后者。
+    pub(crate) fn apply_bake_requests(&mut self, requests: Vec<(String, f32)>) {
+        // 🔴 道具套件是**懒载入**的（第一次渲染时才读盘），而命令在帧首执行
+        // ⇒ 第一帧的请求必然早于套件就绪。实测把请求丢掉之后，命令回执说"已请求"、
+        // 日志却说"未载入，跳过"，用户看到的是"命令成功了但什么都没发生"。
+        // ⇒ 排队，等套件就绪再处理。
+        self.bake_queue.extend(requests);
+        if self.bake_queue.is_empty() {
+            return;
+        }
+        let Some(set) = self.prop_set.as_mut() else {
+            return;
+        };
+        let requests = std::mem::take(&mut self.bake_queue);
+        for (path, t) in requests {
+            match Self::bake_posed_mesh(set, &path, t) {
+                Ok(name) => {
+                    // 建实体并绑到烘焙出来的网格名上（`scene.instantiate` 走的是路径，
+                    // 这里直接用网格名，所以自己 spawn 一条）
+                    let id = self
+                        .game
+                        .scene
+                        .spawn(None, crate::engine::scene::Transform::IDENTITY);
+                    // 网格字段存"资产路径"，`asset_stem` 会取出文件名 ⇒ 用合成名伪造一条路径
+                    self.game
+                        .scene
+                        .set_mesh(id, Some(format!("assets/props/{name}.glb")))
+                        .ok();
+                    self.selection = Some(id);
+                    // 必须让几何重建（否则新网格不参与合并）
+                    self.editor_prop_sig ^= 0xffff_ffff;
+                    log::info!("bake: {path} t={t:.3} → 网格 {name}，已实例化 #{id:?}");
+                }
+                Err(e) => log::warn!("bake 失败：{e}"),
+            }
+        }
+    }
+
+    /// 把一条烘焙请求变成一个**可实例化的网格名**（塞进道具套件）。
+    ///
+    /// 返回新网格名。失败时说明原因（**不静默**：姿势烘焙失败与"资产没有骨骼"
+    /// 必须能分开，否则用户会以为渲染坏了）。
+    ///
+    /// 网格名 = `posed_<stem>_<t千分位>`：同一资产的不同时刻是**不同的网格**，
+    /// 这样"实例化"就能挑具体某一帧的姿势。
+    fn bake_posed_mesh(
+        prop_set: &mut engine::props::PropSet,
+        path: &str,
+        t: f32,
+    ) -> Result<String, String> {
+        let bytes = engine::asset_source::global().read(path)?;
+        let Some((skin, positions)) = engine::skin::parse_glb_skin(&bytes)? else {
+            return Err(format!("{path}: 没有骨骼"));
+        };
+        let (json, _bin) = engine::skin::split_glb(&bytes)?;
+        let channels = engine::anim::parse_glb_animations(&bytes)?;
+        let worlds = engine::anim::sample_pose_worlds(&json, 0, &channels, t);
+        let joints: Vec<usize> = json
+            .get("skins")
+            .and_then(|s| s.as_arr())
+            .and_then(|s| s.first())
+            .and_then(|s| s.get("joints"))
+            .and_then(|j| j.as_arr())
+            .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as usize).collect())
+            .unwrap_or_default();
+        let posed = engine::anim::posed_positions(&skin, &joints, &positions, &worlds);
+
+        // 完整顶点（pos/normal/uv/color）来自同一个解析器，保证与静态资产同格式
+        let full = engine::assets::parse_glb(&bytes)?;
+        if full.verts.len() != posed.len() {
+            // 三态：不是"没骨骼"，而是"骨骼顶点数与几何顶点数对不上"（多 primitive 资产）
+            return Err(format!(
+                "{path}: 骨骼顶点 {} 与几何顶点 {} 对不上（多 primitive 暂不支持）",
+                posed.len(),
+                full.verts.len()
+            ));
+        }
+        let mut verts = full.verts;
+        for (i, p) in posed.iter().enumerate() {
+            verts[i][0] = p.x;
+            verts[i][1] = p.y;
+            verts[i][2] = p.z;
+        }
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for v in &verts {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+        let stem = engine::props::PropSet::asset_stem(path);
+        let name = format!("posed_{stem}_{}", (t * 1000.0) as i64);
+        if prop_set.index_of(&name).is_none() {
+            prop_set.meshes.push(engine::props::PropMesh {
+                name: name.clone(),
+                verts,
+                indices: full.indices,
+                min: lo,
+                max: hi,
+            });
+        }
+        Ok(name)
+    }
+
     /// 编辑器实例重建的限流帧数（拖动时每帧都变，不能每帧重建整城合并网格）。
     /// 取 6：60fps 下最多 100ms 滞后，是"跟手稍慢"而不是"卡住"。
     const EDITOR_PROP_REBUILD_EVERY: u32 = 6;
@@ -762,6 +870,8 @@ crate::engine::ray_tracer::PtParams {
             else if show_gun { self.fp_gun_matrix() } else { glam::Mat4::IDENTITY }
         };
 
+        // 套件就绪之后，把排队中的烘焙请求处理掉（放在借用 renderer 之前：要 &mut self）
+        self.apply_bake_requests(Vec::new());
         if let Some(renderer) = &mut self.renderer {
             // 投影宽高比取实际窗口尺寸（16:10 等非 16:9 分辨率下不拉伸）
             let aspect = self
@@ -1317,6 +1427,42 @@ mod editor_prop_tests {
         assert!(!p.solid, "编辑器实例不进刚体表");
     }
 
+
+
+    /// 🔴 **骨骼姿势烘焙的端到端判据**：同一资产的两个时刻烘出来的网格
+    /// **顶点数相同但顶点位置不同**，且最大位移 ≈ 0.707（手算：90° 绕 (0,1,0) 旋转、
+    /// 50/50 权重 ⇒ (-0.5,1.5,0)，位移 |(0.5,0.5,0)|）。
+    ///
+    /// 这条同时钉住三件事：GLB 读得到、动画采样对、姿势进了**要渲染的网格**。
+    /// 反向验证：把 `verts[i][0..3] = posed` 那三行删掉（只搬不写）⇒ 两网格相同，红。
+    #[test]
+    fn bake_posed_mesh_moves_the_vertices() {
+        let mut set = crate::engine::props::PropSet {
+            meshes: Vec::new(),
+            lod1: Vec::new(),
+            lod2: Vec::new(),
+        };
+        let a = GameApp::bake_posed_mesh(&mut set, "tools/fixtures/skinned_bar.glb", 0.0)
+            .expect("t=0 应能烘");
+        let b = GameApp::bake_posed_mesh(&mut set, "tools/fixtures/skinned_bar.glb", 1.042)
+            .expect("末帧应能烘");
+        assert_ne!(a, b, "不同时刻必须是不同网格名");
+        let ma = set.index_of(&a).map(|i| set.meshes[i].clone()).expect("网格 a");
+        let mb = set.index_of(&b).map(|i| set.meshes[i].clone()).expect("网格 b");
+        assert_eq!(ma.verts.len(), mb.verts.len(), "顶点数必须相同（只有位置变）");
+        assert_eq!(ma.indices, mb.indices, "索引不许变");
+        let mut worst = 0.0f32;
+        for (va, vb) in ma.verts.iter().zip(&mb.verts) {
+            let d = glam::Vec3::new(vb[0] - va[0], vb[1] - va[1], vb[2] - va[2]).length();
+            if d > worst {
+                worst = d;
+            }
+        }
+        assert!(
+            (worst - 0.7071).abs() < 5e-3,
+            "末帧相对 t=0 的最大位移应约 0.7071，实际 {worst}"
+        );
+    }
 
     /// 🔴 缩放必须搬进摆放（`PropPlacement.scale` 是等比的 ⇒ 取三轴平均）。
     /// 不加这一步的表现是"改了 Transform，画面纹丝不动"。

@@ -53,14 +53,18 @@ impl GameApp {
             self.plugins.run_frame(&mut ctx);
             self.selection = ctx.selection;
             self.gizmo_mode = ctx.gizmo_mode;
+            let bakes = std::mem::take(&mut ctx.bake_requests);
             for line in &ctx.out {
                 log::info!("{line}");
             }
+            drop(ctx);
+            self.apply_bake_requests(bakes);
         }
         // AI 控制面（P5）：把排队的 AI 命令交给**与编辑器同一个**命令表执行，并推上报。
         //
         // 顺序很关键：先跑完本帧的插件系统与场景同步，再处理 AI 命令 —— 这样 AI 拿到的
         // 回执与它下一帧读到的上报是**同一个世界状态**，不会出现"命令说改了、上报还是旧的"。
+        let mut pending_bakes = Vec::new();
         if let Some(aipc) = self.aipc.as_mut() {
             // 先把要用的标量取出来（都是 Copy），避免同时借 `game` 的两块。
             let time = self.game.time;
@@ -89,6 +93,9 @@ impl GameApp {
             // 命令可能改了选中项（`scene.spawn` 会接管）与 gizmo 模式 —— 写回持久状态。
             self.selection = ctx.selection;
             self.gizmo_mode = ctx.gizmo_mode;
+            let bakes = std::mem::take(&mut ctx.bake_requests);
+            drop(ctx);
+            pending_bakes = bakes;
             // 上报：机读 key=value，字段与 `RV3D_SCENE_DIAG` 的日志**同源同义**。
             let e = self.game.player_entity();
             let world = self
@@ -106,6 +113,7 @@ impl GameApp {
                 world.z
             ));
         }
+        self.apply_bake_requests(pending_bakes);
         // `RV3D_PLUGIN_CMD="<命令> [参数...]"`：启动后执行一次并打印结果。
         // 这是命令表的**第二个入口**（第一个是编辑器按钮、第三个将是 AI 接口）——
         // 三者调的是同一张表里的同一个函数，不允许有"只有 API 能做"的暗路。
@@ -137,6 +145,9 @@ impl GameApp {
                 }
                 self.selection = ctx.selection;
                 self.gizmo_mode = ctx.gizmo_mode;
+                let bakes = std::mem::take(&mut ctx.bake_requests);
+                drop(ctx);
+                self.apply_bake_requests(bakes);
             }
         }
         // RV3D_NPC_CAM=<i>：把调试机位吸附到第 i 个 NPC 的斜前方（坐标由程序算）。

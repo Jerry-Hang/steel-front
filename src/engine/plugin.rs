@@ -52,6 +52,12 @@ pub struct PluginCtx<'a> {
     pub dt: f32,
     /// 输出缓冲（诊断/上报用；编辑器面板与 AI 接口读同一份）。
     pub out: Vec<String>,
+    /// 骨骼姿势烘焙请求 `(资产路径, 时间 t)`。
+    ///
+    /// 为什么是"请求"而不是当场烘：烘焙要往**道具套件**里塞一件新网格，
+    /// 而套件由 `App` 持有（`PluginCtx` 只借到 `Scene`）。命令只登记意图，
+    /// `App` 在帧末统一处理 —— 与 `selection` 的写回是同一套模式。
+    pub bake_requests: Vec<(String, f32)>,
     /// 撤销栈（编辑器与 AI 共用；`run_command` 在改动前后自动记录）。
     pub undo: &'a mut crate::engine::undo::UndoStack,
     /// 当前 gizmo 模式（编辑器与 AI 共用；命令 `gizmo.mode` 改它）。
@@ -78,6 +84,7 @@ impl<'a> PluginCtx<'a> {
             time,
             dt,
             out: Vec::new(),
+            bake_requests: Vec::new(),
             gizmo_mode: crate::engine::gizmo::Mode::Translate,
             view: None,
             selection: None,
@@ -951,6 +958,27 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 ctx.undo.can_undo(),
                 ctx.undo.can_redo()
             ))
+        },
+    );
+    // ---- P4f：把某个时刻的骨骼姿势**烘成一件网格** ----
+    //
+    // 为什么要烘：渲染侧的道具管线吃的是**静态合并网格**（一条 draw call 画一堆件），
+    // 没有逐顶点关节属性。GPU 侧骨骼变形要改整条 mesh 着色器（所有几何都依赖它），
+    // 所以在动它之前，先用"把姿势烘进几何"得到**看得见的骨骼动画结果**。
+    // 这条路是实在的：顶点由 CPU 侧同一套公式算（`anim::posed_positions`），
+    // 上屏的确实是变形后的几何，不是占位盒。
+    reg.add_command(
+        "asset.pose_bake",
+        "把骨骼姿势烘成可用资产：asset.pose_bake <路径> <t>",
+        |ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?.to_string();
+            let t: f32 = args
+                .get(1)
+                .ok_or_else(|| "缺时间参数 t".to_string())?
+                .parse()
+                .map_err(|_| "t 不是数字".to_string())?;
+            ctx.bake_requests.push((path.clone(), t));
+            Ok(format!("bake_requested {path} t={t:.3}"))
         },
     );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
