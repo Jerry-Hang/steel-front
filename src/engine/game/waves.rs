@@ -114,6 +114,23 @@ impl Game {
     ///
     /// 出生前清掉残留存活 NPC，保证新旧波不共存；
     /// Boss 波最后一只为主怪（高血量/慢速/攻击距离略长，见 wave_profile）；援军波重置补怪计时。
+    /// 波次状态快照 `(波次号, 存活 NPC 数, 下一波倒计时)`。
+    ///
+    /// 给 AI 接口用：外部程序要能判断"现在第几波、还剩多少人"，否则只能凭猜发命令。
+    pub fn wave_info(&self) -> (u32, usize, f32) {
+        (self.wave, self.npcs.len(), self.wave_timer)
+    }
+
+    /// **按波次号立即刷一波**（AI 接口的命令入口）。
+    ///
+    /// 语义与内部波次推进一致（`spawn_wave` 会先清掉残留存活 NPC 保证新旧波不共存）。
+    /// 存在的理由：外部程序要能**驱动**玩法状态，而不只是读它 ——
+    /// 这也是"AI 能控制游戏"与"AI 只能看"的分界线。
+    pub fn force_wave(&mut self, n: u32) {
+        let eye = self.player_body_eye();
+        self.spawn_wave(n, &eye);
+    }
+
     pub(crate) fn spawn_wave(&mut self, n: u32, player: &glam::Vec3) {
         // 同步波次号：update_waves/update_ai 都按 self.wave 取 profile，直接调用时也必须一致
         self.wave = n;

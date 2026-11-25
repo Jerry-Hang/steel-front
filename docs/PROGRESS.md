@@ -6169,3 +6169,27 @@ mode=Edit frame=60/2820        → hash=90af25…（232 字节）               
 
 ⇒ 教训：**改了 A 的语义，要回头问"谁靠 A 做测量"**。这条与"注释声称会红却没红"同源：
 都是"我以为它在测某件事，其实早就不测了"。
+
+### 2026-11-25：P6 最后一条证据 —— 波次能被读、也能被 AI 推进
+
+P6 队列写的是"播放态**波次仍能刷出**"。之前只能用 `game.time` 在走来间接说明，
+因为波次只在"NPC 清空"后推进，无战斗时观察不到。
+
+新增两条命令（**外部程序既能读玩法状态、也能驱动它**）：
+- `wave.info` → `wave=1 npcs=255 next_in=0.0s`；
+- `wave.spawn <N>` → 立即刷第 N 波（内部走 `spawn_wave`，会先清残留）。
+
+**实机（AIPC，同一局内）**：
+```
+wave.info    → OK wave=1 npcs=255 next_in=0.0s
+wave.spawn 3 → OK wave_spawn_requested 3
+（等 1.2s）
+wave.info    → OK wave=3 npcs=10 next_in=0.0s      ← 波次号真的变了
+日志          → wave: purged 255 leftover npcs before wave 3
+```
+`npcs` 从 255 变 10 是因为新一波是**逐只刷**的（刷到第 10 只时被读到）；
+日志里 "purged 255 … before wave 3" 证明换波时先清了旧波。
+
+⇒ P6 的两条性质现在都有**可判定入口**：
+- 编辑态不变：`RV3D_EDIT_PROOF=1` 的哈希在 1320+ 帧内不变；
+- 播放态在跑：同一哈希每帧都变（NPC 在动）+ `wave.info` 的波次号可被外部推进。

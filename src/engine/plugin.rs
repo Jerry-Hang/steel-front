@@ -60,6 +60,10 @@ pub struct PluginCtx<'a> {
     pub bake_requests: Vec<(String, f32)>,
     /// 撤销栈（编辑器与 AI 共用；`run_command` 在改动前后自动记录）。
     pub undo: &'a mut crate::engine::undo::UndoStack,
+    /// 波次状态快照 `(波次号, 存活 NPC, 倒计时)`，由 App 每帧填好。
+    pub wave_info: Option<(u32, usize, f32)>,
+    /// 请求立即刷某一波（由 App 应用到玩法层）。
+    pub wave_spawn: Option<u32>,
     /// 「对准实体」请求 `(eye, yaw, pitch)`。相机不归 `Scene` 管，
     /// 所以命令只**算**并把参数放这里，由 App 在帧末应用（与 `selection` 同模式）。
     pub focus_to: Option<(glam::Vec3, f32, f32)>,
@@ -90,6 +94,8 @@ impl<'a> PluginCtx<'a> {
             dt,
             out: Vec::new(),
             bake_requests: Vec::new(),
+            wave_info: None,
+            wave_spawn: None,
             focus_to: None,
             tree_filter: crate::engine::editor::TreeFilter::Editable,
             gizmo_mode: crate::engine::gizmo::Mode::Translate,
@@ -1195,6 +1201,32 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 yaw.to_degrees(),
                 pitch.to_degrees()
             ))
+        },
+    );
+
+    // ---- 波次：读与写（P6 的"播放态波次仍能刷出"要有可判定的入口）----
+    //
+    // 光有"实体数"看不出波次在推进（每波都是 255 人，清了再刷），
+    // 所以必须能**读波次号**、也**能主动推进**，否则外部无法验证这条性质。
+    reg.add_command(
+        "wave.info",
+        "报告波次状态：wave.info",
+        |ctx, _args| {
+            let (w, n, t) = ctx.wave_info.ok_or_else(|| "玩法层未就绪".to_string())?;
+            Ok(format!("wave={w} npcs={n} next_in={t:.1}s"))
+        },
+    );
+    reg.add_command(
+        "wave.spawn",
+        "立即刷第 N 波：wave.spawn <N>",
+        |ctx, args| {
+            let n: u32 = args
+                .first()
+                .ok_or_else(|| "缺波次号".to_string())?
+                .parse()
+                .map_err(|_| "波次号不是整数".to_string())?;
+            ctx.wave_spawn = Some(n);
+            Ok(format!("wave_spawn_requested {n}"))
         },
     );
 
