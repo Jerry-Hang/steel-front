@@ -571,6 +571,8 @@ pub struct Game {
     /// `Transform`。现在只接玩家一个，进程内就已经有两个读者（`sync_player_to_scene`
     /// 的写与判据的读），不是摆设。
     pub scene: crate::engine::scene::Scene,
+    /// NPC id → 场景实体句柄（只读镜像，见 `sync_npcs_to_scene`）。
+    npc_entities: std::collections::HashMap<usize, crate::engine::scene::EntityId>,
     /// 玩家在场景里的实体句柄。
     player_entity: crate::engine::scene::EntityId,
     /// 世界根节点：所有场景实体都挂在它下面（交换/存盘/整树操作的锚点）。

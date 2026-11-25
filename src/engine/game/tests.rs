@@ -172,6 +172,42 @@ mod session;
     /// 旧实现只复位 `settings_open`/`confirm_quit`，`esc_menu_open` 会残留到新一局
     /// （遮罩盖着新局、光标不抓取、选中项停在上一局的位置）。
     /// 反向验证：删掉 `start_run` 里那两行复位 ⇒ 本判据红。
+    /// 🔴 **NPC 只读镜像**：进场景 / 重排不增加 / 阵亡者被收掉。
+    ///
+    /// 为什么必须用 `Npc.id` 而不是下标：`partition_ai_tiers` 每帧会重排 `self.npcs`，
+    /// 下标语义不稳定 —— 用下标会让"同一个 NPC"每帧换实体（越跑越多）。
+    ///
+    /// 反向验证：把镜像改成按下标当键 ⇒ 重排后实体数变多，红。
+    #[test]
+    fn npc_mirror_uses_stable_ids_and_cleans_up_the_dead() {
+        let mut g = Game::new();
+        let base = g.scene().len();
+        g.npcs = vec![
+            npc_at(7, Team::Red, [1.0, 0.0, 2.0]),
+            npc_at(11, Team::Red, [3.0, 0.0, 4.0]),
+            npc_at(42, Team::Blue, [5.0, 0.0, 6.0]),
+        ];
+        g.sync_npcs_to_scene();
+        assert_eq!(g.scene().len(), base + 3, "三只都应进场景");
+        // 全部不可见：渲染仍走 NPC 自己的路径，场景这条不许画
+        let invisible = g
+            .scene()
+            .iter_alive()
+            .filter(|(id, _)| g.scene().index_of(*id) >= base)
+            .all(|(id, _)| !g.scene().is_visible(id));
+        assert!(invisible, "镜像实体必须不可见");
+
+        // 重排（模拟 partition_ai_tiers）后仍是三个实体，不许增加
+        g.npcs.reverse();
+        g.sync_npcs_to_scene();
+        assert_eq!(g.scene().len(), base + 3, "重排不许产生新实体");
+
+        // 死掉两只 ⇒ 实体跟着收掉
+        g.npcs.truncate(1);
+        g.sync_npcs_to_scene();
+        assert_eq!(g.scene().len(), base + 1, "阵亡的 NPC 实体必须收掉");
+    }
+
     #[test]
     fn start_run_clears_stale_escape_menu() {
         let mut game = Game::new();

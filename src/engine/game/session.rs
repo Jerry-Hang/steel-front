@@ -72,6 +72,7 @@ impl Game {
             });
         }
         let mut game = Self {
+            npc_entities: std::collections::HashMap::new(),
             scene,
             player_entity,
             world_root,
@@ -703,6 +704,49 @@ impl Game {
         }
     }
 
+    /// 把 NPC 镜像进场景层（只读、不可见、挂在世界根下）。
+    ///
+    /// 用 `Npc.id`（全局唯一且稳定）做键，**不用下标**：`partition_ai_tiers` 每帧
+    /// 会把 `self.npcs` 重排，下标语义不稳定（那条注释就在 `npcs` 字段上）。
+    ///
+    /// 死掉的 NPC 要把实体一起收掉，否则场景会越跑越大。
+    pub(crate) fn sync_npcs_to_scene(&mut self) {
+        let root = self.world_root;
+        let mut live: Vec<(usize, [f32; 3])> = Vec::with_capacity(self.npcs.len());
+        for n in &self.npcs {
+            live.push((n.id, n.position));
+        }
+        for (id, pos) in &live {
+            let t = crate::engine::scene::Transform::from_translation(glam::Vec3::new(
+                pos[0], pos[1], pos[2],
+            ));
+            match self.npc_entities.get(id).copied() {
+                Some(e) if self.scene.set_local(e, t).is_ok() => {}
+                _ => {
+                    let e = self.scene.spawn(Some(root), t);
+                    // 渲染仍走 NPC 自己的路径 ⇒ 场景层这条不许画（否则会多出一堆盒子）
+                    self.scene.set_visible(e, false).ok();
+                    self.npc_entities.insert(*id, e);
+                }
+            }
+        }
+        // 收掉已阵亡的
+        if self.npc_entities.len() != live.len() {
+            let alive: std::collections::HashSet<usize> = live.iter().map(|(id, _)| *id).collect();
+            let dead: Vec<usize> = self
+                .npc_entities
+                .keys()
+                .copied()
+                .filter(|id| !alive.contains(id))
+                .collect();
+            for id in dead {
+                if let Some(e) = self.npc_entities.remove(&id) {
+                    self.scene.despawn(e).ok();
+                }
+            }
+        }
+    }
+
     /// 场景层只读视图（编辑器 / AI 接口 / 判据都从这里读）。
     pub fn scene(&self) -> &crate::engine::scene::Scene {
         &self.scene
@@ -733,6 +777,17 @@ impl Game {
         self.time += dt;
         // 场景层镜像（引擎化 P0）：每帧把玩家位置写进 `Scene`。
         self.sync_player_to_scene();
+        // 🔴 **NPC 只读镜像（P6b）**：让 `Scene` 里也有游戏世界。
+        //
+        // 之前 `Scene` 里只有世界根与玩家两条 —— 于是"编辑态场景不变"这条自证
+        // **在播放态也不变**，因为根本没有东西会动（前一轮的正对照照出来的）。
+        // 现在 NPC 每帧以只读方式镜像进来（`visible = false`：渲染仍走 NPC 自己的路径，
+        // 这里只是让场景层"知道"它们存在）。**这条路径不改一个像素** —— 有 A/B 判据。
+        // `RV3D_NO_NPC_MIRROR=1` 是**逐像素 A/B 的对照臂**：关掉镜像后画面必须一模一样
+        // （NPC 实体是不可见的，渲染仍走原路径）。
+        if !crate::syscfg::flag("RV3D_NO_NPC_MIRROR") {
+            self.sync_npcs_to_scene();
+        }
         // 手电电量：夜间开灯才耗电（白天灯不亮也不耗），关灯缓慢回充。
         {
             let night = self.night_vision_factor() < 0.95;
