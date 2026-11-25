@@ -117,3 +117,5 @@ ensure_smooth_normals_fills_and_preserves
 missing_directory_is_an_error_not_an_empty_set
 # 过滤命令真改状态：ctx.tree_filter = f 换成 let _ = f（只回话）⇒ 红（inject_check 实跑，all 模式）
 editor_filter_command_actually_changes_the_state
+# 报告含只读、存盘跳过只读：给 dump_lines 也加只读过滤 ⇒ 报告看不到 NPC，红（手工注入）
+dump_includes_readonly_while_save_skips_them

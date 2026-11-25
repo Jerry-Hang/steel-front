@@ -507,6 +507,36 @@ mod tests {
         assert!(lines[1].contains(" ro=1 m=assets/props/barrel_metal.glb"), "{}", lines[1]);
     }
 
+    /// 🔴 **`to_toml` 与 `dump_lines` 的差别必须钉死**：
+    /// `to_toml` 跳过只读镜像（存盘不许写 NPC），`dump_lines` **要包含**它们（报告要看全部）。
+    ///
+    /// 为什么这条值钱：编辑态自证（`RV3D_EDIT_PROOF`）用 `dump_lines` 算哈希 ——
+    /// 它一旦改成 `to_toml`，就**看不到 NPC 了**，而"播放态每帧变"正是它的正对照。
+    /// 实测过一次：P6c 让 `to_toml` 跳过只读之后，这条自证悄悄失效，
+    /// 播放态又变回"帧帧相同"，而我当时还以为正对照有效。
+    ///
+    /// 反向验证：把 `dump_lines` 也跳过只读 ⇒ 第一条断言红。
+    #[test]
+    fn dump_includes_readonly_while_save_skips_them() {
+        let mut s = Scene::new();
+        let a = s.spawn(None, Transform::IDENTITY);
+        s.set_readonly(a, true).unwrap();
+        assert_eq!(dump_lines(&s).len(), 1, "报告要包含只读实体");
+        let text = to_toml(&s).expect("存盘");
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("[[entity]]")).count(),
+            0,
+            "存盘不许写只读实体"
+        );
+        // 移动只读实体：报告要变，存盘不变
+        let before_dump = dump_lines(&s);
+        let before_save = to_toml(&s).unwrap();
+        s.set_local(a, Transform::from_translation(Vec3::new(1.0, 2.0, 3.0)))
+            .unwrap();
+        assert_ne!(dump_lines(&s), before_dump, "只读实体移动后报告必须变");
+        assert_eq!(to_toml(&s).unwrap(), before_save, "存盘不受只读实体移动影响");
+    }
+
     /// 读回时 parent 指向不存在的 id 必须报错，而不是静默把它当根节点。
     ///
     /// 反向验证：把 `BadParent` 分支改成 `continue` ⇒ 这条红（测试会读到"没有上级"而失败）。

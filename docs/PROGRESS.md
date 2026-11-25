@@ -6142,3 +6142,30 @@ asset.skin_status tools/fixtures/skinned_bar.glb → joints=2 verts=3 posed=3 ch
 - `origin`（VPS）报"无法读取远程仓库"（先 SSH 断连，后路径不可达）。
 已推到 `github-backup`（`c22f6ba`），本地库也有事件 ⇒ **数据没丢**，只是还没到盒子。
 按规矩不动网络配置。盒子恢复后补一次 `acdm-sync` 即可。
+
+### 2026-11-25：**仪器被别处的正确修改悄悄弄失效**（P6 自证修复）
+
+补 P6「播放态波次仍能刷出」的证据时，发现自证通道输出：
+```
+mode=Play frame=60  entities=257 bytes=287 hash=043fc20c…   ← bytes/hash 是"只有 2 个实体"的值
+mode=Play frame=240 entities=257 bytes=287 hash=043fc20c…   ← 又变回帧帧相同
+```
+根因：**P6c 让 `to_toml` 跳过只读镜像**（这是正确行为，否则存盘会写进 255 个 NPC），
+而自证哈希用的正是 `to_toml` ⇒ **它再也看不到 NPC** ⇒ 播放态重新变成"帧帧相同"。
+
+也就是说：我早先"播放态哈希每 60 帧一变"的结论，**被后来那次正确修复作废了**，
+而当时没有任何东西报警 —— 测量安静地失去敏感度，是最隐蔽的一类失效。
+
+**修法**：自证哈希改用 `dump_lines`（**包含**只读实体，是"报告格式"）。
+修复后实测：
+```
+mode=Play frame=60/240/420/600 → hash=617588…/d2ace6…/380c05…/c16036…   ← 每帧都变（NPC 在动）
+mode=Edit frame=60/2820        → hash=90af25…（232 字节）                 ← 1320 帧以上不动
+```
+
+**判据** `dump_includes_readonly_while_save_skips_them`：`dump_lines` 含只读、
+`to_toml` 不含；移动只读实体后**报告变、存盘不变**。
+反向验证（给 `dump_lines` 也加只读过滤）⇒ 红。
+
+⇒ 教训：**改了 A 的语义，要回头问"谁靠 A 做测量"**。这条与"注释声称会红却没红"同源：
+都是"我以为它在测某件事，其实早就不测了"。

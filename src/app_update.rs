@@ -484,8 +484,11 @@ impl GameApp {
         if crate::syscfg::flag("RV3D_EDIT_PROOF") {
             self.edit_proof_frames += 1;
             if self.edit_proof_frames % 60 == 0 {
-                let text = crate::engine::scene_io::to_toml(self.game.scene())
-                    .unwrap_or_default();
+                // 🔴 **必须用 `dump_lines` 而不是 `to_toml`**：`to_toml` 会跳过只读镜像
+                // （这是 P6c 的正确行为），但那样这条自证的哈希就**看不到 NPC 了** ——
+                // 实测播放态又重新变回"帧帧相同"，而"播放态会变"正是它的正对照。
+                // 这条自证被别处的正确修改悄悄破坏，是这一晚最隐蔽的一类问题。
+                let text = crate::engine::scene_io::dump_lines(self.game.scene()).join("\n");
                 // FNV-1a：零依赖、确定性，只用来判"相等/不等"
                 let mut h: u64 = 0xcbf2_9ce4_8422_2325;
                 for b in text.as_bytes() {
