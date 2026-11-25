@@ -34,6 +34,18 @@ impl Mode {
         }
     }
 
+    /// 循环切换：平移 → 旋转 → 缩放 → 平移。
+    ///
+    /// 编辑器的 `Tab` 走这条（与 Unity 的 W/E/R 同义，只是挤在一个键上）。
+    /// 顺序固定，所以"按两下"是可预测的 —— 有判据钉住这个顺序。
+    pub fn next(self) -> Mode {
+        match self {
+            Mode::Translate => Mode::Rotate,
+            Mode::Rotate => Mode::Scale,
+            Mode::Scale => Mode::Translate,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Mode::Translate => "translate",
@@ -588,6 +600,35 @@ mod tests {
     }
 
 
+
+
+    /// 🔴 模式循环顺序固定：平移 → 旋转 → 缩放 → **回到平移**。
+    /// 顺序固定，"按两下"才是可预测的（否则用户得一直看面板）。
+    ///
+    /// 反向验证：把 `Mode::Scale => Mode::Scale`（尽头不回头）⇒ 第三次循环后不是平移，红。
+    #[test]
+    fn mode_cycle_returns_to_the_start() {
+        let mut m = Mode::Translate;
+        let mut seen = vec![m];
+        for _ in 0..3 {
+            m = m.next();
+            seen.push(m);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Mode::Translate,
+                Mode::Rotate,
+                Mode::Scale,
+                Mode::Translate
+            ],
+            "循环必须是 平移→旋转→缩放→平移"
+        );
+        // 名字与 parse 必须互为逆（HUD/命令回显靠它）
+        for m in [Mode::Translate, Mode::Rotate, Mode::Scale] {
+            assert_eq!(Mode::parse(m.name()), Some(m), "名字与 parse 必须互逆");
+        }
+    }
 
     /// 🔴 **缩放是乘性的**：拖过 1m（= 一个把手长度）倍率翻倍，拖反方向减半。
     ///

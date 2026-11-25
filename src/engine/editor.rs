@@ -209,6 +209,50 @@ pub enum DragKind {
 ///
 /// 行序固定：`#id` / `pos x y z` / `parent` / `visible` —— 变化只改内容不改行数，
 /// 面板高度才稳定。
+/// 编辑态按键能触发的动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    /// Tab：循环 gizmo 模式。
+    CycleGizmo,
+    /// Backspace：撤销。
+    Undo,
+    /// F5：重做。
+    Redo,
+}
+
+/// 按键种类（不直接依赖 winit：引擎层不认识 `KeyCode`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    Tab,
+    Backspace,
+    F5,
+    Other,
+}
+
+/// **编辑态按键路由**：纯函数，四个输入一个输出。
+///
+/// 存在的理由（本仓教训：键盘在 headless 下按不了）：
+/// 把"按键 → 动作"这段逻辑单独判掉，剩下"事件循环有没有把按键喂进来"才是必须真机验证的。
+/// 没有这条，整块按键逻辑只能靠读代码，而"读了就等于做了"是这一晚反复出现的自我说服。
+///
+/// 返回 `None` 表示**不拦截**：交回给系统键处理（例如 `Tab` 在玩法态要切相机）。
+pub fn key_action(
+    mode: crate::engine::mode::Mode,
+    key: KeyKind,
+    pressed: bool,
+) -> Option<KeyAction> {
+    // 只认"按下"，不认"抬起"：否则一次按键会触发两次。
+    if !pressed || mode != crate::engine::mode::Mode::Edit {
+        return None;
+    }
+    match key {
+        KeyKind::Tab => Some(KeyAction::CycleGizmo),
+        KeyKind::Backspace => Some(KeyAction::Undo),
+        KeyKind::F5 => Some(KeyAction::Redo),
+        KeyKind::Other => None,
+    }
+}
+
 pub fn inspector_lines(scene: &Scene, selection: Option<EntityId>) -> Vec<String> {
     let Some(id) = selection else {
         return vec!["未选中".to_string()];
@@ -412,6 +456,8 @@ pub fn update_drag(
 
 #[cfg(test)]
 mod tests {
+
+
     use super::*;
     use crate::engine::scene::Transform;
     use glam::Vec3;
@@ -462,6 +508,36 @@ mod tests {
     }
 
 
+
+
+    /// 🔴 **编辑态按键路由**：Tab/Backspace/F5 只在编辑态、且只在"按下"时生效。
+    ///
+    /// 反向验证：把 `if !pressed || mode != Edit` 里的 `!pressed` 去掉 ⇒ 抬起也会触发，红。
+    #[test]
+    fn key_actions_are_edit_only_and_press_only() {
+        use crate::engine::mode::Mode;
+        // 编辑态 + 按下 ⇒ 有动作
+        assert_eq!(
+            key_action(Mode::Edit, KeyKind::Tab, true),
+            Some(KeyAction::CycleGizmo)
+        );
+        assert_eq!(
+            key_action(Mode::Edit, KeyKind::Backspace, true),
+            Some(KeyAction::Undo)
+        );
+        assert_eq!(
+            key_action(Mode::Edit, KeyKind::F5, true),
+            Some(KeyAction::Redo)
+        );
+        // 抬起 ⇒ 不触发（否则一次按键触发两次）
+        assert_eq!(key_action(Mode::Edit, KeyKind::Tab, false), None);
+        // 玩法态 ⇒ 完全不拦截（Tab 要留给相机切换）
+        for k in [KeyKind::Tab, KeyKind::Backspace, KeyKind::F5] {
+            assert_eq!(key_action(Mode::Play, k, true), None, "玩法态不许拦 {k:?}");
+        }
+        // 其它键 ⇒ 放行
+        assert_eq!(key_action(Mode::Edit, KeyKind::Other, true), None);
+    }
 
     /// 🔴 **缩放模式全链路**：抓把手拖 1m ⇒ 缩放翻倍、平移与旋转都不许变。
     ///

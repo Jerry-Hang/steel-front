@@ -19,6 +19,37 @@ use crate::{
 };
 
 impl GameApp {
+    /// 编辑器按键 → 命令表。**按键不自己实现逻辑**：
+    /// 命令表是编辑器与 AI 的唯一入口，键盘只是又一个入口，走同一条路才不会出现
+    /// "键盘能做到、AI 做不到"或反过来的分叉。
+    fn run_editor_command(&mut self, name: &str) {
+        // 先算好所有需要的值，再借 `game.scene` —— 否则 `view_info()` 会和
+        // `&mut self.game.scene` 撞车（它借 `&self`）。
+        let dt = self.game.last_dt.max(1e-4);
+        let time = self.game.time;
+        let view = self.view_info();
+        let selection = self.selection;
+        let gizmo_mode = self.gizmo_mode;
+        let mut ctx = crate::engine::plugin::PluginCtx::new(
+            &mut self.game.scene,
+            &mut self.undo,
+            time,
+            dt,
+        );
+        ctx.selection = selection;
+        ctx.gizmo_mode = gizmo_mode;
+        ctx.view = Some(view);
+        match self.plugins.run_command(name, &[], &mut ctx) {
+            Ok(msg) => log::info!("key→{name}: {msg}"),
+            Err(e) => log::warn!("key→{name} 失败：{e}"),
+        }
+        self.selection = ctx.selection;
+        self.gizmo_mode = ctx.gizmo_mode;
+        let bakes = std::mem::take(&mut ctx.bake_requests);
+        drop(ctx);
+        self.apply_bake_requests(bakes);
+    }
+
     /// 应用恢复/启动：建窗口与渲染器；Android 上还要从 surface 丢失里恢复。
     pub(crate) fn handle_resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -581,6 +612,38 @@ impl GameApp {
                         }
                     }
                     return;
+                }
+
+                // 🔴 **编辑态的按键先分叉**：编辑器里 Tab 是"切换 gizmo 模式"，不是"切相机"。
+                // 放在下面的系统键 match 之前、并 return，是因为那个 match 里 Tab 已经绑给了
+                // 相机切换 —— 不先返回就会**同时**切两样。
+                //
+                // 决策本身在 `editor::key_action`（纯函数、有判据）：这里只做"把按键翻译成
+                // 种类 + 执行动作"。键盘在 headless 下按不了，所以能判的部分必须单独判掉。
+                {
+                    use crate::engine::editor::{KeyAction, KeyKind};
+                    let kind = match key_code {
+                        KeyCode::Tab => KeyKind::Tab,
+                        KeyCode::Backspace => KeyKind::Backspace,
+                        KeyCode::F5 => KeyKind::F5,
+                        _ => KeyKind::Other,
+                    };
+                    match crate::engine::editor::key_action(self.mode, kind, pressed) {
+                        Some(KeyAction::CycleGizmo) => {
+                            self.gizmo_mode = self.gizmo_mode.next();
+                            log::info!("编辑器: gizmo 模式 = {}", self.gizmo_mode.name());
+                            return;
+                        }
+                        Some(KeyAction::Undo) => {
+                            self.run_editor_command("scene.undo");
+                            return;
+                        }
+                        Some(KeyAction::Redo) => {
+                            self.run_editor_command("scene.redo");
+                            return;
+                        }
+                        None => {}
+                    }
                 }
 
                 // 系统键（不可重绑定）：Tab 设置循环/相机切换，Q/E 升降，N 补给
