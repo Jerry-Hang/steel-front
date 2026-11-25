@@ -5562,3 +5562,32 @@ clamp 永不 <= 0、缩放全链路（只改 scale 不动位置/旋转）、摆�
 
 ⚠️ 判据第一版把抓点取在把手**末端**（1m 处）⇒ `pick_entity` 半径 0.9 点不到实体，
 `begin_drag` 返回 None。改成把手**中点**（0.5m）。
+
+### 2026-11-25：引擎化 P3k —— 撤销 / 重做（快照式）
+
+`engine/undo.rs`：`UndoStack` 只存**整份场景文本快照**，不做逐操作逆运算。理由：
+1. 存盘格式已能**逐字节往返**（判据 `apply_to_roundtrips_byte_identically`）⇒
+   撤销 = 把旧文本 `apply_to` 回去，不必为 `spawn`/`despawn`/`set_parent`/`set_mesh`/缩放 各写一遍逆操作；
+2. 逆操作必须**逐个正确**才不出错，而快照只要"存 → 读回"这一条路径对就够了；
+3. 编辑态场景很小（几十个实体），一份文本几 KB。
+
+⚠️ **代价**：`apply_to` 是清空重建 ⇒ 撤销会**丢掉 generation**，旧句柄全部失效，
+所以两条命令都会把 `selection` 清空。这是刻意取舍（保句柄要做差量补丁 = 又要写逆运算）。
+
+**记录点只有一处**：`run_command` 在命令前后各取一次快照，`before != after` 才记一步。
+理由：命令表是编辑器与 AI 的**唯一入口**，记在这里就保证两条入口都能撤销，
+也不会出现"新加的命令忘了记录"（表现为"有些操作能撤销、有些不能"，而没人知道是哪些）。
+
+**实机**：
+```
+instantiate ; set 0 0 -3 ; set 5 0 -3
+scene.undo_state → past=3 future=0 can_undo=true can_redo=false
+scene.undo       → undo → entities=3 剩余可撤销=2
+scene.undo_state → past=2 future=1 can_undo=true can_redo=true
+scene.undo       → 存盘 t=[0, 0, -0.00005455315]   （回到实例化后的状态）
+```
+另一条：`set 5 0 -3` 后 `undo` 再 `redo` ⇒ 存盘 `t=[5, 0, -3]` ✓。
+
+判据 6 条：撤销/重做成对可逆、新改动清空重做栈、容量丢最旧、空栈返回 None、
+**命令级撤销回到逐字节原状**、**只读命令不许压栈**。
+两条注入（不记录 / 只读也记录）**各恰好 1 条红**。

@@ -285,6 +285,8 @@ struct GameApp {
     /// 资产列表（引擎化 P3h）。编辑态首次渲染时扫描 `assets/props`。
     asset_browser: Option<crate::engine::asset_browser::AssetBrowser>,
     /// 编辑器 gizmo 模式（平移/旋转），命令 `gizmo.mode` 与鼠标拖动共用。
+    /// 撤销栈（引擎化 P3k）。命令表在改动前后自动记录，编辑器与 AI 共用一条栈。
+    undo: crate::engine::undo::UndoStack,
     gizmo_mode: crate::engine::gizmo::Mode,
     /// 编辑器正在进行的拖拽（引擎化 P3e）：左键按住把手时非 None。
     ///

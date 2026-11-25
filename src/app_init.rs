@@ -78,6 +78,7 @@ impl GameApp {
             _ => None,
         };
         Self {
+            undo: crate::engine::undo::UndoStack::new(64),
             gizmo_mode: crate::engine::gizmo::Mode::Translate,
             editor_prop_sig: 0,
             editor_prop_frames: 0,

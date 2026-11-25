@@ -52,6 +52,8 @@ pub struct PluginCtx<'a> {
     pub dt: f32,
     /// 输出缓冲（诊断/上报用；编辑器面板与 AI 接口读同一份）。
     pub out: Vec<String>,
+    /// 撤销栈（编辑器与 AI 共用；`run_command` 在改动前后自动记录）。
+    pub undo: &'a mut crate::engine::undo::UndoStack,
     /// 当前 gizmo 模式（编辑器与 AI 共用；命令 `gizmo.mode` 改它）。
     pub gizmo_mode: crate::engine::gizmo::Mode,
     /// 当前相机视角（取点命令要用；编辑器与 AI 接口都需要"从这里看到什么"）。
@@ -62,9 +64,17 @@ pub struct PluginCtx<'a> {
 }
 
 impl<'a> PluginCtx<'a> {
-    pub fn new(scene: &'a mut Scene, time: f32, dt: f32) -> Self {
+    /// 撤销栈由调用方持有并传进来：**上下文不持有它**，
+    /// 因为上下文是每帧临时的，而撤销栈要活过整个会话。
+    pub fn new(
+        scene: &'a mut Scene,
+        undo: &'a mut crate::engine::undo::UndoStack,
+        time: f32,
+        dt: f32,
+    ) -> Self {
         PluginCtx {
             scene,
+            undo,
             time,
             dt,
             out: Vec::new(),
@@ -189,7 +199,33 @@ impl PluginRegistry {
                     self.command_names()
                 )
             })?;
-        let ret = (entry.func)(ctx, args)?;
+        // 🔴 **撤销记录放在这一处**，而不是每个命令自己记：
+        // 命令表是编辑器与 AI 的**唯一入口**，记在这里就保证两条入口都能撤销，
+        // 也不会出现"新加的命令忘了记录"（那类遗漏在编辑器里极难发现 ——
+        // 表现为"有些操作能撤销、有些不能"，而没人知道是哪些）。
+        //
+        // 撤销/重做自身要排除，否则它们会被自己记录 ⇒ 撤销一步之后栈顶是自己。
+        let track = name != "scene.undo" && name != "scene.redo";
+        let before = if track {
+            crate::engine::scene_io::to_toml(ctx.scene).ok()
+        } else {
+            None
+        };
+        let ret = (entry.func)(ctx, args);
+        if track {
+            if ret.is_ok() {
+                if let Some(before) = before {
+                    // 只有**真的变了**才记录：否则一次只读取的命令也会压一格，
+                    // 用户按两次撤销却什么都没变（"撤销没反应"的典型来源）。
+                    let after = crate::engine::scene_io::to_toml(ctx.scene).unwrap_or_default();
+                    let was = crate::engine::scene_io::to_toml(ctx.scene).is_ok();
+                    if was && after != before {
+                        ctx.undo.record(before);
+                    }
+                }
+            }
+        }
+        let ret = ret?;
         // `plugin.list` 需要看到注册表自身（函数指针拿不到 `self`），
         // 这里用约定标记替换成真正的自描述 —— 编辑器与 AI 读到的就是这份。
         if ret == "SELF" {
@@ -862,6 +898,61 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    // ---- P3k：撤销 / 重做 ----
+    //
+    // 记录在 `run_command` 里统一做（命令表是编辑器与 AI 的唯一入口），
+    // 所以这两条命令**不需要**自己记，只需把快照换回去。
+    //
+    // ⚠️ `apply_to` 是"清空重建" ⇒ 撤销之后**旧句柄全部失效**，选中项必须清掉。
+    reg.add_command(
+        "scene.undo",
+        "撤销上一步场景改动：scene.undo",
+        |ctx, _args| {
+            let current = crate::engine::scene_io::to_toml(ctx.scene)
+                .map_err(|e| format!("取快照失败：{e}"))?;
+            let Some(prev) = ctx.undo.undo(current) else {
+                return Ok("undo: 没有可撤销的步骤".to_string());
+            };
+            let n = crate::engine::scene_io::apply_to(ctx.scene, &prev)
+                .map_err(|e| format!("恢复失败：{e}"))?;
+            ctx.selection = None;
+            Ok(format!(
+                "undo → entities={n} 剩余可撤销={}",
+                ctx.undo.past_len()
+            ))
+        },
+    );
+    reg.add_command(
+        "scene.redo",
+        "重做被撤销的一步：scene.redo",
+        |ctx, _args| {
+            let current = crate::engine::scene_io::to_toml(ctx.scene)
+                .map_err(|e| format!("取快照失败：{e}"))?;
+            let Some(next) = ctx.undo.redo(current) else {
+                return Ok("redo: 没有可重做的步骤".to_string());
+            };
+            let n = crate::engine::scene_io::apply_to(ctx.scene, &next)
+                .map_err(|e| format!("恢复失败：{e}"))?;
+            ctx.selection = None;
+            Ok(format!(
+                "redo → entities={n} 可重做={}",
+                ctx.undo.future_len()
+            ))
+        },
+    );
+    reg.add_command(
+        "scene.undo_state",
+        "报告撤销栈状态：scene.undo_state",
+        |ctx, _args| {
+            Ok(format!(
+                "past={} future={} can_undo={} can_redo={}",
+                ctx.undo.past_len(),
+                ctx.undo.future_len(),
+                ctx.undo.can_undo(),
+                ctx.undo.can_redo()
+            ))
+        },
+    );
     // 自描述命令：编辑器面板与 AI 接口都靠它发现"这个引擎能做什么"。
     // 它必须真的把 help 与插件名打出来 —— 否则 help 字段就只是装饰。
     reg.add_command("plugin.list", "列出已注册插件与命令", |_ctx, _args| {
@@ -876,6 +967,56 @@ mod tests {
     use std::sync::Mutex;
 
     static ORDER: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+    /// 🔴 **命令级的撤销链路**：改 → 撤销 → 场景回到原状（走命令表，与编辑器/AI 同一条路）。
+    ///
+    /// 反向验证：把 `run_command` 里的 `ctx.undo.record(before)` 删掉 ⇒ 撤销栈永远是空的，红。
+    #[test]
+    fn command_level_undo_restores_the_previous_scene() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        let id = scene.spawn(None, crate::engine::scene::Transform::IDENTITY);
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let before = crate::engine::scene_io::to_toml(&scene).unwrap();
+        {
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+            ctx.selection = Some(id);
+            reg.run_command("scene.set", &["3", "4", "5"], &mut ctx)
+                .expect("设置应成功");
+            assert_eq!(ctx.undo.past_len(), 1, "改一次应记一步");
+        }
+        assert_ne!(
+            crate::engine::scene_io::to_toml(&scene).unwrap(),
+            before,
+            "改动应真的落到场景里"
+        );
+        {
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+            reg.run_command("scene.undo", &[], &mut ctx).expect("撤销应成功");
+        }
+        assert_eq!(
+            crate::engine::scene_io::to_toml(&scene).unwrap(),
+            before,
+            "撤销后必须回到改动前的逐字节状态"
+        );
+    }
+
+    /// 🔴 **只读命令不许压栈**：否则用户按两次撤销却什么都没变。
+    ///
+    /// 反向验证：把 `after != before` 判断去掉（改成总是 record）⇒ 第一步就记了，红。
+    #[test]
+    fn read_only_commands_do_not_push_undo_steps() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        scene.spawn(None, crate::engine::scene::Transform::IDENTITY);
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+        reg.run_command("scene.count", &[], &mut ctx).expect("应成功");
+        reg.run_command("plugin.list", &[], &mut ctx).expect("应成功");
+        assert_eq!(ctx.undo.past_len(), 0, "只读命令不许压栈");
+    }
 
     fn sys_a(_ctx: &mut PluginCtx<'_>) {
         ORDER.lock().unwrap().push("a");
@@ -900,7 +1041,8 @@ mod tests {
         reg.add_system(Phase::Update, "a", sys_a);
         reg.add_system(Phase::PostUpdate, "b", sys_b);
         let mut scene = Scene::new();
-        let mut ctx = PluginCtx::new(&mut scene, 0.0, 0.016);
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
         reg.run_frame(&mut ctx);
         assert_eq!(
             *ORDER.lock().unwrap(),
@@ -922,7 +1064,8 @@ mod tests {
         reg.add_command("t.a", "第一个", take);
         reg.add_command("t.b", "第二个", |_c, _a| Ok("b".to_string()));
         let mut scene = Scene::new();
-        let mut ctx = PluginCtx::new(&mut scene, 0.0, 0.016);
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
         assert_eq!(reg.command_names(), vec!["t.a", "t.b"]);
         assert_eq!(reg.run_command("t.a", &["x", "y"], &mut ctx), Ok("n=2".to_string()));
         assert_eq!(HITS.load(Ordering::Relaxed), 1);
@@ -948,7 +1091,8 @@ mod tests {
         let path = std::env::temp_dir().join("steel_front_aipc_chain.toml");
         let path_str = path.to_string_lossy().to_string();
         {
-            let mut ctx = PluginCtx::new(&mut scene, 0.0, 0.016);
+            let mut undo = crate::engine::undo::UndoStack::new(64);
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
             let r = reg.run_command("scene.spawn", &[], &mut ctx).unwrap();
             assert!(r.contains("entities=1"), "spawn 回执：{r}");
             assert!(ctx.selection.is_some(), "spawn 必须接管选中项");
@@ -985,12 +1129,14 @@ mod tests {
         // 命令真的能改场景：spawn 之后实体数 +1
         let mut scene = Scene::new();
         {
-            let mut ctx = PluginCtx::new(&mut scene, 0.0, 0.016);
+            let mut undo = crate::engine::undo::UndoStack::new(64);
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
             let _ = reg.run_command("scene.count", &[], &mut ctx).unwrap();
         }
         let before = scene.len();
         {
-            let mut ctx = PluginCtx::new(&mut scene, 0.0, 0.016);
+            let mut undo = crate::engine::undo::UndoStack::new(64);
+            let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
             let _ = reg.run_command("scene.spawn", &[], &mut ctx).unwrap();
         }
         assert_eq!(scene.len(), before + 1, "scene.spawn 必须真的建实体");

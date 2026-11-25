@@ -46,7 +46,7 @@ impl GameApp {
             let time = self.game.time;
             let view = self.view_info();
             let mut ctx =
-                crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+                crate::engine::plugin::PluginCtx::new(&mut self.game.scene, &mut self.undo, time, dt);
             ctx.selection = self.selection;
             ctx.gizmo_mode = self.gizmo_mode;
             ctx.view = Some(view);
@@ -78,7 +78,7 @@ impl GameApp {
                     16.0 / 9.0
                 },
             };
-            let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+            let mut ctx = crate::engine::plugin::PluginCtx::new(&mut self.game.scene, &mut self.undo, time, dt);
             ctx.selection = self.selection;
             ctx.gizmo_mode = self.gizmo_mode;
             ctx.view = Some(view);
@@ -118,7 +118,7 @@ impl GameApp {
                 let time = self.game.time;
                 let dt = self.game.last_dt.max(1e-4);
                 let mut ctx =
-                    crate::engine::plugin::PluginCtx::new(&mut self.game.scene, time, dt);
+                    crate::engine::plugin::PluginCtx::new(&mut self.game.scene, &mut self.undo, time, dt);
                 ctx.selection = self.selection;
                 ctx.gizmo_mode = self.gizmo_mode;
                 ctx.view = Some(view);
