@@ -44,6 +44,25 @@ Rust + Vulkan，lib+bin（桌面 rlib / Android cdylib）。**直接依赖 10 �
 > `jni-sys`（0.3.1、0.4.1 + `jni-sys-macros`）/ `ndk` 0.9.0 / `ndk-sys` 0.6.0 / `ndk-context` 0.1.1，
 > **全部仅 Android 目标生效。**
 
+## 引擎化（2026-11-25 起，交接见 `docs/HANDOFF-2026-11-25.md`）
+
+游戏**仍可玩**是硬约束；引擎化只加能力，不改玩法。
+
+- **编辑器**（编辑态 `RV3D_EDIT=1`）：场景树（过滤/滚动/点击）、检视面板、资产列表（点击实例化）、
+  平移/旋转/缩放 gizmo、撤销重做、`Home` 对准选中。全部复用 `ui.rs` 的 quad + 点阵字，**没引 egui**。
+- **AI 控制面**（`RV3D_AIPC=<端口>`）：TCP NDJSON，60+ 命令（`scene.*` / `gizmo.*` / `pick.at` /
+  `asset.*` / `editor.*` / `wave.*` / `plugin.list`）+ 每帧上报 + `scene.dump` 结构化转储。
+  **同一条命令编辑器点出来与 AI 发过来走的是同一张命令表**。
+- **分层**：`core ← engine ← {editor, game} ← app / aipc`；判据
+  `engine_layer_does_not_grow_game_dependencies` 钉住「engine 不反向依赖 game」（基线 0）。
+- **六道闸门**（前四硬性，后两道抓「判据自己失效」）见 `docs/ENGINE-PLAN.md` §5.4：
+  ⑤ `python3 tools/judge_audit.py`（无恒真断言 / 无「声称反向验证却没断言」/ 无孤儿记账）
+  ⑥ `python3 tools/judge_audit.py --self-test`（证明 ⑤ 不是永远报 OK 的摆设）。
+- **「注入会红」要记账**：注释里写不算，真跑过才算 ⇒ `tools/inject_check.py` +
+  `tools/injections.txt` + `tools/judge_claims_verified.txt`。当前 48/174 已记账，欠账**只减不增**。
+- 🔴 **`RV3D_EDIT_PROOF` 的哈希必须用 `dump_lines`，不能用 `to_toml`**：后者跳过只读镜像（NPC），
+  用它算哈希就看不到 NPC ⇒ 播放态会假装「帧帧相同」。判据 `dump_includes_readonly_while_save_skips_them`。
+
 ### 模块地图（`src/`，按体量）
 
 | 文件 | 行数（2026-10-14 实测） | 职责 |
@@ -343,18 +362,11 @@ commit 规范 `feat/fix/docs/chore` + 范围前缀（如 `fix(input)`、`docs(AG
 
 ### ⭐ 无焦点视角注入配方（实测标定，误差 0.3%）
 
-`scripts/pm_play.ps1` 已实现下面四条，**照抄即可，别再重推**。缺任何一条都会静默失效：
-
-1. **必须用 `PostMessage`**（`SendInput` 喂前台队列，见上）。
-2. **每步前重按左键**（`WM_LBUTTONDOWN`）**紧接着**投移动：否则 `WM_MOUSELEAVE` → `CursorLeft`
-   → `dragging=false` ⇒ **视角被跳过而移动进了日志**。
-3. **每步用「窗口中心 + step」，不累加**（拖拽路径每事件重设 `last_cursor` 为中心）；步长 400、
-   连续两次差 1px（否则被位置去重丢掉）。
-4. **步间隔 > 150ms（用 300ms）**：`recenter_pending_until` 的 150ms 窗口会吞 `CursorMoved`。
-
-- **实测标定**：1200px（3×400）→ **-170.30°**，模型预测 -170.79°，误差 0.3%
-  （模型 = `yaw -= dx * (0.0005 + sensitivity*0.002)`；`cam:` 日志单位是**度**）。
-- **`SetCursorPos` 驱动真实光标走不通**：游戏收到 **0 个** `CursorMoved`。
+`scripts/pm_play.ps1` 是正确的参照实现，**照抄，别再重推**。四条缺一不可：
+① 必须 `PostMessage`；② **每步前重按左键**再投移动（否则 `CursorLeft` 让 `dragging=false`）；
+③ 每步用「窗口中心 + step」**不累加**（步长 400、每次差 1px）；④ 步间隔 **>150ms（用 300ms）**
+（`recenter_pending_until` 的窗口会吞 `CursorMoved`）。
+实测标定：1200px → **-170.30°**（模型预测 -170.79°，误差 0.3%）；**`SetCursorPos` 走不通**（收到 0 个事件）。
 
 ### 键位与方向
 - **键码一律用 winit 0.30 `KeyCode` 枚举序号**（KeyW=41 / KeyS=37 / KeyA=19 / KeyD=22 /
@@ -510,39 +522,27 @@ blender.exe --background --python tools/blender/preview_glb.py -- <in.glb> <out_
   `RV3D_FORCE_SIMD=avx512|avx2|avx|sse4.2|scalar`（硬件不支持时告警回退）。
 - `cargo clippy --fix` 在本仓**不可用**（build.rs 代码生成缓存行为，反复提示却不改字节），别再试。
 
-### 常用命令
+### 常用命令（Linux 原生；Windows 侧见 `docs/linux-native.md` / `scripts/*.ps1`）
 
-```powershell
-cargo build --release
+```bash
+cargo build --release            # 0 警告只能用这个验（check/test 都不算）
 cargo test --release
-# 游戏冒烟（**用这个**；PostMessage 注入，实测 ALL-OK）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_smoke_pm.ps1
-# LLM 会战（判据 tools\battle_tally_check.py：0/1/2）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_llm_battle.ps1 -Secs 150 -Interval 20
-# 截图取证（finally 里 taskkill + 硬超时）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cap_safe.ps1 -Tag orbit -WarmupSec 8 -HoldSec 2 -Keys 9 -AfterKeysSec 3
-# 多键必须走 -Command，-File 会把 9,9 合并成一个 "9,9"
-powershell -NoProfile -Command "& 'scripts\cap_safe.ps1' -Keys 9,9"
-# 无焦点接管一局（PostMessage 注入：不抢前台、不抓光标、不锁指针）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm_play.ps1 -Tag demo1 -TurnPx 1200 -WalkMs 1500
-# 输入路由诊断：同一按键两种注入各投一次，报游戏线程焦点
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\input_probe.ps1
-# 输入归还校验（解除 ClipCursor + 复核，给 OK/FAIL）；心跳看门狗（**常驻**，别临时 arm，见教训 19）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\release_input.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\play_watchdog.ps1 -StaleSec 30
-# 性能尺子（跑 N 秒，读 logs/perf_*.log 出统计；退出码 0=可用 / 1=没数据 / 2=没稳态窗口）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\perf_run.ps1 -Secs 30
-# 交替 A/B 驱动器（逐对交替 + 顺序轮转 + 配对差中位数 + A/A 底噪；退出码 2 = 批次不全，别当 n≥5 证据）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ab_pair.ps1 -Pairs 5
-# 画面差分（第一道筛子）：差异像素占比 + **差异包围盒**
-python scripts\png_diff.py screenshots\a.png screenshots\b.png
+python3 tools/cjk_cover_check.py # 字模守门：红了就**改写文案**，别加字模
+python3 tools/commit_guard.py --scan .   # 提交白名单 + 密钥扫描
+python3 tools/judge_audit.py     # 判据自检：恒真断言 / 声称无断言 / 孤儿记账
+python3 tools/judge_audit.py --self-test  # 证明上一条不是永远报 OK 的摆设
+python3 tools/inject_check.py    # 按 tools/injections.txt 批量验证"注入会红"
+
+# 无窗口取证（**永远是这四条**，不要开可见窗口）
+RV3D_GPU=dgpu RV3D_HEADLESS=1 RV3D_HEADLESS_SIZE=640x400 RV3D_AUTOSTART=1 \
+RV3D_SHOT_AT=<秒> RV3D_EXIT_AFTER=<秒> ./target/release/steel-front   # → /tmp/steel_front_<epoch>.png
+# 编辑态自证：RV3D_EDIT=1 RV3D_EDIT_PROOF=1（哈希必须帧帧相同）
+# 播放态对照：RV3D_EDIT=0（同一哈希必须帧帧不同）
+# AI 控制面：RV3D_AIPC=<端口>，然后 CMD <命令>（NC 风格，一行一条）
 ```
 
-**Linux 无窗口取景**：`RV3D_HEADLESS=1` 离屏渲染（不建交换链、不 present），配 `RV3D_SHOT_AT`
-出 PNG；`RV3D_HEADLESS_SIZE` 控分辨率。判据 `parse_headless_size_clamps_and_falls_back` /
-`final_layout_matches_present_mode`。
+⚠ 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常是空文件）。
 
-⚠ `cap_safe` / 截图脚本的游戏日志是 **`logs/<tag>.log.err`**（stdout 的 `.log` 常为空文件）。
 ---
 
 ## 铁律 G — 凭据 / 提交白名单（2026-09-22）
@@ -550,6 +550,9 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 - **真实密钥/令牌一律不进仓库**，包括「先提交、回头再删」：历史 blob 清不掉，公网爬虫会收割。
   🔴 **2026-08-21 已真实发生**（`scripts/vision_ps.ps1` / `vision_test.py` 硬编码 DeepSeek key 并推送到公开远端 ——
   见 `docs/PROGRESS.md` 2026-09-22 节）。**密钥只从环境变量或仓库外文件读**，文档写占位符 `<YOUR_KEY>`。
+- 🔴 **凭据只从 `~/.dsh/.credentials.yaml`（600）或环境变量读**，运行时读取、不落盘；
+  **判断某个 key 是否仍有效 = 直接打一次只读接口看 401**（2026-10-24 实测：历史泄露的 DeepSeek key
+  已 401 失效）。**清历史不等于止损，轮换才是**。
 - **提交侧闸门**：`core.hooksPath` → `.githooks`（`scripts/install_git_hooks.ps1` 安装，
   **链式保留** `~/.dsh/gates/hooks` 的 pre-push 密钥门 —— 直接改指会把它**静默**关掉）。
   规则 = 路径白名单 + 路径拒绝表 + 内容扫描，**默认拒绝**；放行要改 `tools/commit_guard.py` 的白名单（改动即留痕）。
@@ -601,11 +604,11 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 
 > 每条只留一行结论 + 判据；案例细节在 `docs/PROGRESS.md`。
 
-- **红蓝阵营不对称**（2026-09-14）：20 轮/臂后噪声主导（臂内极差 41.5 > 臂间差 23.1）⇒ "红方恒胜"等结论撤回。⚠️ 军情行的 `阵亡` = **该营自身阵亡数**、`战果` = 敌方阵亡数（**重组读战果**）。
+- **红蓝阵营不对称**（2026-09-14）：噪声主导，结论撤回。⚠️ 军情行 `阵亡`=该营自身、`战果`=敌方（**重组读战果**）。
 - **障碍 marker 可见尺寸**（2026-09-17 `50b61b9`）：半幅唯一真源 = `geom::Shape::template_half_extent`；判据 `marker_visible_size_matches_aabb`。
 
-0. **`PrintWindow` 对非前台窗口返回冻结帧**：症状不复现。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)`。
-1. ✅ **道具焊接流程**（2026-09-19）：改道具 = 改生成器 → 重跑 → 再焊接，绝不在已焊结果上"补"颜色。
+0. `PrintWindow` 冻结帧：症状不复现。🔴 `cap_safe.ps1` 必须用 `PrintWindow(h, dc, 2)`。
+1. ✅ **道具焊接**：改道具 = 改生成器 → 重跑 → 再焊接，**绝不在已焊结果上补颜色**。
 2. **PT 崩溃 `0xC0000005`**：四个真 bug 全修（见铁律 B PT 段）。
 3. **`config.rs` 不读 `pt_enable`**：`load_from`/`save_to` 都缺 ⇒ 面板开不了 PT。🔴 **「字段存在 + 有人在读」≠「接线完成」，要看 parse 分支。**
 4. **玩家站在 GLB 楼体内部**：`pick_building` 的 `max` → `min`（缩放取 `min`）。
@@ -621,15 +624,15 @@ python scripts\png_diff.py screenshots\a.png screenshots\b.png
 14. **道具进阴影 pass**：已补；🔴 剔除必须用**光源**视锥（照抄相机会让影子随视角缺块）。
 15. **阴影 `normal_bias` 一直在用**；陈旧 `#[allow]` 的判据见铁律 F。
 16. ✅ **`survive` 5 波真机通关**（2026-09-25）：`RV3D_MAP=assets/maps/defense_line.toml` 是唯一开启方式；判据 = `VICTORY` + `waves cleared ['1'..'5']` + `VUID=0 panics=0`（`run_survive_pm.ps1`）。
-18. ✅ **CoverSeek 占比偏低**：是被"全队冲锋"抹掉的、不是掩体不够（只豁免 `CoverCrawler`）；`COVER_SEEK_RANGE` 20→32 无实测支持已回退。判据 = `aidiag: tactic 1s`。
-19. ✅ **毛玻璃菜单已落地**（2026-09-26，约束见铁律 B）；第一人称枪模动画**已补**（冲刺/换弹/呼吸；判据 = `RV3D_GUN_DIAG=1`）。
-20. ✅ **DLSS：不接**（`docs/DLSS-evaluation.md`）：本仓是**顶点瓶颈**（面积 1/4 只 +12%），DLSS 省的是像素。**重开判据**：面积 1/4 而 fps +>40%。
+18. ✅ CoverSeek 占比偏低 = 被全队冲锋抹掉（非掩体不够）；`COVER_SEEK_RANGE` 20→32 已回退。
+19. ✅ 毛玻璃菜单（约束见铁律 B）；枪模动画已补（判据 `RV3D_GUN_DIAG=1`）。
+20. ✅ **DLSS：不接**（本仓是顶点瓶颈，面积 1/4 只 +12%）。**重开判据**：面积 1/4 而 fps +>40%。
 21. **GLB `byteStride`**：已支持交错布局。⚠️ 读错时每个数**都是合法浮点数** ⇒ **凡"支持"都要补一条会红的测试**。
 23. ✅ **`flags-parameter` 那条 VUID**：`RTSS`/`GamePP` 隐式层塞的 `MUTABLE_FORMAT`，非引擎问题（见「验收口径」）。
 24. **广场"坑"** = 水平面绕序反了（判据 `horizontal_winding_tests`）。
 25. ✅ **`ai_us` 单帧尖峰**：出生点小连通域 bug 的下游症状；255 只实测 100% 在 `update_ai`、`astar calls` 中位 0 ⇒ 无尖峰（判据 = `aidiag: stage 1s`）。
-26. ✅ **编制尾数并入末位**（2026-09-26 `7877855`）：连名单逐人等于全营（判据 `every_soldier_is_carried_by_a_company`），重组阈值分母也不再写死 128（`44c7464`）。
-27. ✅ **「重组」死分支修好**（2026-09-26）：判据改成 `存活 < 编制×0.55 且**战果（敌方阵亡）** < 8`，战果由 `game.rs` 按「敌方本轮阵亡」喂进来；军情行现在同时打 `阵亡`（自损，不变式的那个数）与 `战果`。判据 = `regroup_threshold_uses_the_roster_and_the_score` + 真机 `run_llm_battle.ps1`（§21.78）。
+26. ✅ 编制尾数并入末位（判据 `every_soldier_is_carried_by_a_company`）；重组阈值分母不再写死 128。
+27. ✅ 「重组」死分支：判据 = `存活 < 编制×0.55 且战果 < 8`（`regroup_threshold_uses_the_roster_and_the_score`）。
 
 ---
 
