@@ -1,0 +1,89 @@
+# 已**真跑过注入**的"反向验证"声称清单
+#
+# 规则：只有**真的改坏代码、看到测试变红、再改回来**的声称才能写在这里。
+# 静态分析无法证明"注入会红"（那必须真跑一次），所以这份清单是人工记账。
+#
+# 工具：`python3 tools/judge_audit.py --claims` 列出全部声称；
+#       `python3 tools/judge_audit.py` 报覆盖率；`--strict` 把未验证的算作发现。
+# 格式：每行一个测试名（`#` 开头为注释）。日期写在后面，便于日后重验。
+#
+# ── 2026-11-25 会话实际注入过的（每条都真的看到过 red，再还原）──
+
+# GLB 动画 accessor 必须按 type 读分量：把分量数写回常数 4 ⇒ 位移从 0.7071 变 1.4142，红
+real_blender_asset_animation_moves_the_weighted_vertex
+# 绑定姿势自检：IB 顺序写反 ⇒ bind_err 变大，红
+real_blender_skinned_asset_parses_and_binds
+# GPU 契约：归一化权重写成原样返回 ⇒ 两条路径结果不一致，红
+normalized_weights_make_the_shader_formula_exact
+# 关节矩阵缓冲：改成行优先展开（m.transpose()）⇒ buf[2] 符号反，红
+joint_matrix_buffer_is_column_major_and_16_per_joint
+# 可见性持久化：to_toml 不写 visible ⇒ 读回全可见，红
+apply_to_roundtrips_byte_identically
+# apply_to 不搬网格 ⇒ 读回的网格引用丢失，红
+scene_toml_roundtrips_the_mesh_reference
+# apply_to 不清空 ⇒ 实体数变成 4 而不是 3，红
+apply_to_preserves_the_hierarchy
+# 摆放搬运：把 uniform.max(0.01) 换回 1.0 ⇒ 缩放没搬过去，红
+editor_placements_carry_the_scale
+# 签名含缩放：把缩放那一项换成 0.0 ⇒ 改缩放不改签名，红
+editor_signature_tracks_scale
+# 摆放高度：删掉 p.y 那行（高度恒 0）⇒ y 搬运断言红
+editor_placements_carry_position_and_height
+# 摆放跳过未知网格：名字对不上也塞一条 ⇒ 越界摆放，红
+editor_placements_skip_unknown_or_unbound_meshes
+# 签名只对几何敏感：忽略平移 ⇒ 移动实体签名不变，红
+editor_signature_tracks_geometry_only
+# 键位路由：允许"抬起"也触发 ⇒ 一次按键触发两次，红
+key_actions_are_edit_only_and_press_only
+# 模式循环：尽头不回头 ⇒ 循环顺序错，红
+mode_cycle_returns_to_the_start
+# 缩放倍率斜率：不除以把手长度（改成 1 + delta * 2）⇒ 斜率不符，红
+scale_factor_slope_is_inverse_handle_length
+# 旋转全链路：忽略增量（* start_rotation）⇒ 应转 90° 实际 0°，红
+rotate_mode_turns_the_entity_without_moving_it
+# 缩放全链路：scale 写回 start_scale ⇒ 仍是 1.0，红
+scale_mode_doubles_after_dragging_one_handle
+# 撤销：不记录 ⇒ 栈空、撤销无效，红
+command_level_undo_restores_the_previous_scene
+# 撤销只读命令不压栈：总是 record ⇒ 只读命令也占一格，红
+read_only_commands_do_not_push_undo_steps
+# 删除级联：despawn 换成 set_visible(0) ⇒ 实体数不变，红
+despawn_cascades_and_undo_restores
+# 只读实体拒改：去掉 reject_readonly ⇒ 命令成功、位置被改，红
+readonly_entities_reject_edits_with_a_clear_reason
+# 镜像不写进关卡：去掉 to_toml 的只读过滤 ⇒ 多出 NPC 实体，红
+mirror_entities_are_not_written_to_the_scene_file
+# 镜像稳定键：改用"已有数量"当键 ⇒ 重排后实体增加，红
+npc_mirror_uses_stable_ids_and_cleans_up_the_dead
+# 树行过滤：filter 判断去掉 ⇒ Editable 也全留，红
+tree_rows_respects_the_filter_and_keeps_order
+# 过滤命令真改状态：只回话不写 ctx ⇒ 状态不变，红
+editor_filter_command_actually_changes_the_state
+# 滚动夹紧：不夹 ⇒ 起点越界、窗口空，红
+tree_window_clamps_the_scroll_offset
+# 滚动偏移：不加 clamp_scroll ⇒ 视觉行号错，红
+tree_hit_test_adds_the_scroll_offset
+# 面板有界：去掉窗口切片 ⇒ 面板随实体数增长，红
+editor_panel_is_bounded_regardless_of_entity_count
+# 资产命中扣表头：Some(row) 不扣 ⇒ 第一条返回 1，红
+asset_row_hit_test_skips_the_header
+# 树命中留标题区：tree_rows_top 换 0.0 ⇒ 点标题选中第 0 行，红
+tree_row_hit_test_skips_the_header
+# per_page 同源：恒返回 8 ⇒ 第 2 屏首条错位，红
+per_page_comes_from_the_browser_not_the_caller
+# 对准实体：eye = target（贴脸）⇒ 投影不在中心，红
+focus_puts_the_target_at_screen_center
+# 结构化转储 ro 字段：恒 0 ⇒ ro=1 的断言红
+dump_lines_has_stable_fields_in_fixed_order
+# 上报只留最新：改回排队 ⇒ 先收到 entities=1，红
+telemetry_keeps_only_the_latest_line
+# 移动平均/权重和：normalized_weights 不归一 ⇒ 位移 6m 而非 10m，红
+# （与 normalized_weights_make_the_shader_formula_exact 同一测试，上面已记）
+# 资产名解析：只 strip_suffix 不切目录 ⇒ stem 带目录，红
+asset_stem_strips_dir_and_extension
+# 烘焙搬顶点：只搬不写 ⇒ 位移 0，红
+bake_posed_mesh_moves_the_vertices
+# 网格包围盒：逐轴取极值改成取最后一个顶点 ⇒ 上界错，红
+mesh_bounds_matches_hand_computed_extents
+# 检视面板字段：pos 格式换成固定串 ⇒ 改坐标文字不变，红
+inspector_lines_reflect_the_actual_transform

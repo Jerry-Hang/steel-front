@@ -133,6 +133,41 @@ def self_test():
     return 0 if ok else 1
 
 
+CLAIM_PAT = re.compile(r"反向验证[：:]\s*(.+)")
+
+
+def collect_claims():
+    """列出所有"反向验证"声称：[(文件, 行, 测试名, 声称内容)]。
+
+    这一步只是**把话说清楚**：静态分析无法证明"注入真的会红"（那必须真跑一次）。
+    所以它输出清单，由 `tools/judge_claims_verified.txt` 记录哪些**真的注入过**。
+    """
+    out = []
+    for f in sorted(SRC.rglob("*.rs")):
+        text = f.read_text(encoding="utf-8", errors="replace")
+        if "反向验证" not in text:
+            continue
+        for name, line, _body, doc in test_functions(text):
+            m = CLAIM_PAT.search(doc)
+            if m:
+                out.append((str(f.relative_to(ROOT)), line, name, m.group(1).strip()))
+    return out
+
+
+def load_verified():
+    """读取已验证清单（每行一个测试名，`#` 开头是注释）。"""
+    path = ROOT / "tools" / "judge_claims_verified.txt"
+    if not path.exists():
+        return None
+    names = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        names.add(line.split()[0])
+    return names
+
+
 def main():
     if "--self-test" in sys.argv:
         return self_test()
@@ -178,6 +213,33 @@ def main():
     if verbose:
         print(f"judge_audit: 扫了 {len(files)} 个文件、{total_tests} 个测试，"
               f"其中 {with_claim} 个声称做过反向验证")
+    claims = collect_claims()
+    if "--claims" in sys.argv:
+        for rel, line, name, desc in claims:
+            print(f"{rel}:{line} {name} — {desc}")
+        print(f"CLAIMS: {len(claims)} 条")
+        return 0
+
+    verified = load_verified()
+    strict = "--strict" in sys.argv
+    unverified = []
+    if verified is not None:
+        unverified = [c for c in claims if c[2] not in verified]
+        print(f"claim_coverage: 已验证 {len(claims) - len(unverified)} / 共 {len(claims)}")
+        if unverified:
+            print("  未验证（注入了也不确定会红）：")
+            for rel, line, name, _desc in unverified[:12]:
+                print(f"    {rel}:{line} {name}")
+            if len(unverified) > 12:
+                print(f"    …… 还有 {len(unverified) - 12} 条")
+            if strict:
+                findings.append(
+                    f"D {len(unverified)} 条“反向验证”未被记录为已注入验证"
+                    f"（补齐 tools/judge_claims_verified.txt 或删掉声称）"
+                )
+    else:
+        print("claim_coverage: 缺少 tools/judge_claims_verified.txt（视为未验证）")
+
     if findings:
         for x in findings:
             print(x)

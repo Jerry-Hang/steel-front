@@ -138,3 +138,21 @@ aipc/     AI 控制面：命令 API + 遥测推送              （可用 core+e
 
 - 不做热重载（同进程注册的代价；要热重载得走 AI 接口改数据，不是改代码）。
 - 不做沙箱（同进程 = 完全信任；不信任的代码请走 AI 接口的外部进程）。
+
+### 5.4 验收纪律（2026-11-25 补，来自一整晚的教训）
+
+每一步都要过**六道闸门**（前四道是硬的，后两道是"判据自己有没有失效"）：
+
+| # | 命令 | 期望 |
+|---|---|---|
+| ① | `cargo build --release` | 0 警告（`cargo check`/`cargo test` 都不算，见 AGENTS 铁律 F） |
+| ② | `cargo test --release` | 全绿 |
+| ③ | `python3 tools/cjk_cover_check.py` | OK（缺字就改文案，别加字模） |
+| ④ | `python3 tools/commit_guard.py --scan .` | OK |
+| ⑤ | `python3 tools/judge_audit.py` | OK（无"恒真断言 / 声称反向验证却没有断言"） |
+| ⑥ | `python3 tools/judge_audit.py --self-test` | 通行（证明 ⑤ 不是永远报 OK 的摆设） |
+
+**"反向验证"的记账口径**：注释里写"注入 X ⇒ 红"**不算**验证，只有真的改坏、看到红、
+再改回来才算。真跑过的写进 `tools/judge_claims_verified.txt`。
+`judge_audit.py --strict` 把"未记账的声称"当成发现（当前 133 条历史欠账，
+新建的声称必须补账；老的不许再增加）。
