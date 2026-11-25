@@ -6079,3 +6079,19 @@ for x in buf.iter_mut() {
 **全局替换会同时改掉判据自己的期望值**。要验证它必须**只在生产代码那边动手**。
 这也意味着这类判据对"整体重命名"免疫 —— 它测的是"这段代码还在不在"，
 不是"行为对不对"。两种判据各有用途，但不能互相替代。
+
+### 2026-11-25：欠账清理第四轮（39 → 42 / 164）
+
+本轮自动注入确认 4 条，全部 RED：
+- `flank_sides_are_distinct_and_symmetric`（`side` 判断恒走 +1 ⇒ 两侧同格）
+- `auto_restart_stays_opt_in`（`env_truthy("RV3D_AUTO_RESTART")` → `true`）
+- `contract_matches_loaded_assets`（契约表里 `crate_military` 高度 0.300 → 0.999）
+- `mesh_bounds_matches_hand_computed_extents`（`hi[k] = v[k]` 只留最后一个顶点）
+
+自动清单现在 **15 条 / 15 条全 RED**。工具这轮用上了 `all` 模式
+（`hi[k] = hi[k].max(v[k]);` 在 `assets.rs` 出现 2 次，单点模式会 SKIP）。
+
+⚠️ `contract_matches_loaded_assets` 依赖真实资产存在（`assets/props`）——
+它在没有资产的环境会**跳过**而不是恒真（判据里 `eprintln!` 说明跳过原因），
+所以这条在本机是有效的，在 CI 无资产环境里会静默跳过。这类"环境依赖判据"
+需要单独记账，不能假装它到处都成立。

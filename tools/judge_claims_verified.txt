@@ -106,3 +106,12 @@ flank_goal_never_lands_in_a_blocked_cell
 # 限幅在总线之后：按行只改生产代码那处（take(0) 让循环空转）⇒ 红（手工单点注入）
 #   ⚠️ 不能用全局替换：判据自己搜索的字符串也会被改掉，导致 NOT-RED
 final_output_is_limited_after_both_buses_are_mixed
+# 翼侧对称：side 判断恒走 +1 ⇒ 两侧算出同一格，红（inject_check 实跑）
+flank_sides_are_distinct_and_symmetric
+# 自动重开可选：env_truthy 换成 true ⇒ 变成默认行为，红（inject_check 实跑）
+auto_restart_stays_opt_in
+# 契约表与资产一致：改表里一个数字 ⇒ 本判据红（inject_check 实跑，需真实资产）
+contract_matches_loaded_assets
+# 包围盒逐轴取极值：hi[k] = v[k]（只留最后一个顶点）⇒ 上界错，红（inject_check 实跑）
+# 注：该行在 assets.rs 出现 2 次，用 all 模式注入
+mesh_bounds_matches_hand_computed_extents
