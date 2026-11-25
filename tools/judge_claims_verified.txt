@@ -87,3 +87,9 @@ bake_posed_mesh_moves_the_vertices
 mesh_bounds_matches_hand_computed_extents
 # 检视面板字段：pos 格式换成固定串 ⇒ 改坐标文字不变，红
 inspector_lines_reflect_the_actual_transform
+# 感知音量曲线：powf(2.5) 改恒等 ⇒ 0.5 映射变 0.5 而非 0.1768，红（inject_check 实跑）
+perceptual_volume_is_quieter_than_linear
+# 软限幅：CEIL 0.7 → 1.0 ⇒ 1.5 压不到 0.7 以内，红（inject_check 实跑）
+soft_limit_bounds_and_preserves_small_signals
+# 缩放倍率夹紧：去掉 clamp ⇒ 1e6 拖拽得到巨大倍率，红（inject_check 实跑）
+scale_factor_is_clamped_away_from_zero

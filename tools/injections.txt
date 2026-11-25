@@ -1,0 +1,13 @@
+# 「反向验证」声称的可执行清单
+#
+# 每行：测试名 | 文件 | 原文（必须恰好出现 1 次） | 替换成
+# 跑法：python3 tools/inject_check.py [--only 关键字]
+#
+# 规则：只有这里跑出 RED 的，才能写进 tools/judge_claims_verified.txt。
+
+# ── 2026-11-25 本会话实跑确认 ──
+perceptual_volume_is_quieter_than_linear | src/audio.rs | v.clamp(0.0, 1.0).powf(2.5) | v.clamp(0.0, 1.0)
+soft_limit_bounds_and_preserves_small_signals | src/audio.rs | const CEIL: f32 = 0.7; | const CEIL: f32 = 1.0;
+mode_cycle_returns_to_the_start | src/engine/gizmo.rs | Mode::Scale => Mode::Translate, | Mode::Scale => Mode::Scale,
+asset_stem_strips_dir_and_extension | src/engine/props.rs | let file = path.rsplit(['/', '\\']).next().unwrap_or(path); | let file = path;
+scale_factor_is_clamped_away_from_zero | src/engine/gizmo.rs | (1.0 + delta / GIZMO_LEN).clamp(SCALE_MIN, SCALE_MAX) | 1.0 + delta / GIZMO_LEN
