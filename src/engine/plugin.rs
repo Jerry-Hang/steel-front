@@ -558,6 +558,22 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             ))
         },
     );
+    /// 拒绝改只读实体（镜像实体每帧会被玩法层重写）。
+    ///
+    /// 错误文案要**说清是哪一类实体**：只说"不能改"会让人以为是 bug。
+    fn reject_readonly(
+        scene: &crate::engine::scene::Scene,
+        id: crate::engine::scene::EntityId,
+    ) -> Result<(), String> {
+        if scene.is_readonly(id) {
+            return Err(format!(
+                "#{} 是只读镜像实体（每帧由玩法层重写），不能在编辑器里改",
+                scene.index_of(id)
+            ));
+        }
+        Ok(())
+    }
+
     // ---- P3f：检视面板的写入口（面板与 AI 接口共用）----
     //
     // 检视面板显示的就是 `editor::inspector_lines` 的四个字段；这里提供**同一个**写入口，
@@ -570,6 +586,7 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 return Err("参数不足：需要 x y z".to_string());
             }
             let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            reject_readonly(ctx.scene, sel)?;
             let mut v = [0.0f32; 3];
             for i in 0..3 {
                 v[i] = args[i]
@@ -612,6 +629,7 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 .parse()
                 .map_err(|_| "增量不是数字".to_string())?;
             let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            reject_readonly(ctx.scene, sel)?;
             let mut local = ctx
                 .scene
                 .local(sel)
@@ -827,6 +845,7 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             };
             let (x0, y0, x1, y1) = (f(0)?, f(1)?, f(2)?, f(3)?);
             let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            reject_readonly(ctx.scene, sel)?;
             let local = ctx
                 .scene
                 .local(sel)
@@ -883,6 +902,7 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 .parse()
                 .map_err(|_| "位移不是数字".to_string())?;
             let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            reject_readonly(ctx.scene, sel)?;
             let mut local = ctx
                 .scene
                 .local(sel)
@@ -1087,6 +1107,7 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
         "删除选中实体（含子实体）：scene.despawn",
         |ctx, _args| {
             let sel = ctx.selection.ok_or_else(|| "没有选中实体".to_string())?;
+            reject_readonly(ctx.scene, sel)?;
             let idx = ctx.scene.index_of(sel);
             let before = ctx.scene.len();
             ctx.scene
@@ -1107,6 +1128,35 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **只读镜像实体不许被命令改**：报错要**说明原因**，且场景不变。
+    ///
+    /// 反向验证：把 `reject_readonly` 的调用删掉 ⇒ 命令成功、位置被改，红。
+    #[test]
+    fn readonly_entities_reject_edits_with_a_clear_reason() {
+        let mut reg = PluginRegistry::new();
+        register_debug_plugin(&mut reg);
+        let mut scene = Scene::new();
+        let mut undo = crate::engine::undo::UndoStack::new(64);
+        let id = scene.spawn(None, crate::engine::scene::Transform::IDENTITY);
+        scene.set_readonly(id, true).unwrap();
+        let before = scene.local(id).unwrap().translation;
+
+        let mut ctx = PluginCtx::new(&mut scene, &mut undo, 0.0, 0.016);
+        ctx.selection = Some(id);
+        let err = reg
+            .run_command("scene.set", &["9", "9", "9"], &mut ctx)
+            .expect_err("改只读实体必须失败");
+        assert!(err.contains("只读"), "错误里要说明是只读实体：{err}");
+        assert!(
+            (ctx.scene.local(id).unwrap().translation - before).length() < 1e-6,
+            "失败时不许改场景"
+        );
+        // 删除同样被拒绝（否则镜像实体被删掉，玩法层下一帧又建一个，实体越积越多）
+        assert!(reg.run_command("scene.despawn", &[], &mut ctx).is_err());
+        assert!(ctx.scene.local(id).is_ok(), "实体必须还在");
+    }
+
+
     /// 🔴 **删除要级联，且必须能被撤销回来**：
     /// 删上一级实体连子实体一起走；`scene.undo` 之后实体数回到删除前、字段也回来。
     ///

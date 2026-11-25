@@ -56,6 +56,11 @@ pub fn to_toml(scene: &Scene) -> Result<String, SaveError> {
     let mut out = String::from("# steel-front 场景导出（引擎化 P3）\n");
     out.push_str("# [[entity]] id/parent/t/r/s；parent = -1 表示世界根\n");
     for (id, local) in scene.iter_alive() {
+        // 🔴 **镜像实体不写**：它们是每帧由玩法层重写的只读数据，
+        // 写进关卡等于"存一次档就凭空多出 255 个 NPC"。
+        if scene.is_readonly(id) {
+            continue;
+        }
         let parent = scene.parent(id).map_err(|_| SaveError::DanglingParent)?;
         out.push_str("\n[[entity]]\n");
         out.push_str(&format!("id = {}\n", scene.index_of(id)));

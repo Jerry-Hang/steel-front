@@ -726,6 +726,7 @@ impl Game {
                     let e = self.scene.spawn(Some(root), t);
                     // 渲染仍走 NPC 自己的路径 ⇒ 场景层这条不许画（否则会多出一堆盒子）
                     self.scene.set_visible(e, false).ok();
+                    self.scene.set_readonly(e, true).ok();
                     self.npc_entities.insert(*id, e);
                 }
             }

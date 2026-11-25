@@ -69,6 +69,13 @@ pub enum SceneError {
 struct Slot {
     generation: u32,
     alive: bool,
+    /// **只读标记**：这类实体是"镜像"（每帧由玩法层重写），
+    /// 编辑器/命令不许改它，存盘也不写它。
+    ///
+    /// 不加这个标记的后果很具体：镜像实体在场景里可选中、可拖动、可删，
+    /// 而下一帧就被玩法层覆盖 ⇒ 用户看到"改了没反应"；更糟的是**存盘会把它们写进关卡**，
+    /// 下次读回凭空多出一批实体，且看起来像关卡本来就有的。
+    readonly: bool,
     /// 网格资产路径（`assets/props/x.glb`）。`None` = 没有网格（画方块）。
     ///
     /// 存**相对路径**而不是"加载后的几何"：场景要能存盘、要能跨进程读回，
@@ -122,6 +129,21 @@ impl Scene {
             }
         }
         self.alive = 0;
+    }
+
+    /// 该实体是否只读（镜像实体）。
+    pub fn is_readonly(&self, id: EntityId) -> bool {
+        self.slots
+            .get(id.index as usize)
+            .filter(|s| s.alive && s.generation == id.generation)
+            .map(|s| s.readonly)
+            .unwrap_or(false)
+    }
+
+    /// 设置只读标记（镜像实体用；不是"权限"，是"这份数据每帧会被别人重写"的声明）。
+    pub fn set_readonly(&mut self, id: EntityId, on: bool) -> Result<(), SceneError> {
+        self.slot_mut(id)?.readonly = on;
+        Ok(())
     }
 
     /// 该实体的网格资产路径（没有则 `None`）。
@@ -205,6 +227,7 @@ impl Scene {
                     generation: 0,
                     alive: false,
                     mesh: None,
+                    readonly: false,
                     visible: true,
                     parent: None,
                     children: Vec::new(),
@@ -217,6 +240,7 @@ impl Scene {
         slot.alive = true;
         slot.visible = true;
         slot.mesh = None;
+        slot.readonly = false;
         slot.parent = parent;
         slot.children.clear();
         slot.local = local;

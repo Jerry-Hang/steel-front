@@ -361,7 +361,13 @@ pub fn inspector_lines(scene: &Scene, selection: Option<EntityId>) -> Vec<String
         format!("#{}", scene.index_of(id)),
         format!("pos {:.3} {:.3} {:.3}", t.x, t.y, t.z),
         format!("parent {parent}"),
-        format!("visible {}", if scene.is_visible(id) { "on" } else { "off" }),
+        format!(
+            "visible {}",
+            if scene.is_visible(id) { "on" } else { "off" }
+        ),
+        // 🔴 只读要**写在面板上**：这类实体拖不动、删不掉，
+        // 不标出来用户只会以为编辑器坏了。
+        if scene.is_readonly(id) { "只读镜像" } else { "可编辑" }.to_string(),
     ]
 }
 
@@ -633,11 +639,12 @@ mod tests {
             Transform::from_translation(Vec3::new(1.5, -2.0, 3.25)),
         );
         let lines = inspector_lines(&s, Some(e));
-        assert_eq!(lines.len(), 4, "行数固定为 4，面板高度才稳定：{lines:?}");
+        assert_eq!(lines.len(), 5, "行数固定为 5，面板高度才稳定：{lines:?}");
         assert_eq!(lines[0], format!("#{}", s.index_of(e)));
         assert_eq!(lines[1], "pos 1.500 -2.000 3.250");
         assert_eq!(lines[2], format!("parent #{}", s.index_of(root)));
         assert_eq!(lines[3], "visible on");
+        assert_eq!(lines[4], "可编辑", "默认实体应标为可编辑");
         // 改坐标 ⇒ 文字必须跟着变
         s.set_local(e, Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)))
             .unwrap();

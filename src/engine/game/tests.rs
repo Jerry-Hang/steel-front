@@ -178,6 +178,29 @@ mod session;
     /// 下标语义不稳定 —— 用下标会让"同一个 NPC"每帧换实体（越跑越多）。
     ///
     /// 反向验证：把镜像改成按下标当键 ⇒ 重排后实体数变多，红。
+    /// 🔴 **镜像实体绝不能被存进关卡文件**。
+    ///
+    /// 上一轮把 NPC 镜像进 `Scene` 之后，`to_toml` 会把它们一起写出去 ——
+    /// 那意味着"玩家在游戏里按一下存档，关卡文件里就多出 255 个 NPC"。
+    /// 这类污染一旦发生，下次读回就会凭空多出实体，而且**看起来像是关卡本来就有的**。
+    ///
+    /// 反向验证：去掉 `to_toml` 里的只读过滤 ⇒ 实体数变成 3+N，红。
+    #[test]
+    fn mirror_entities_are_not_written_to_the_scene_file() {
+        let mut g = Game::new();
+        g.npcs = vec![
+            npc_at(7, Team::Red, [1.0, 0.0, 2.0]),
+            npc_at(11, Team::Red, [3.0, 0.0, 4.0]),
+        ];
+        g.sync_npcs_to_scene();
+        // 场景里确实有它们（镜像成功）
+        assert!(g.scene().len() >= 4, "镜像应已进场景：{}", g.scene().len());
+        // 但存盘只许有"真正的场景内容"
+        let text = crate::engine::scene_io::to_toml(g.scene()).expect("存盘");
+        let saved = text.lines().filter(|l| l.starts_with("[[entity]]")).count();
+        assert_eq!(saved, 2, "只该写出世界根与玩家，实际 {saved} 条：\n{text}");
+    }
+
     #[test]
     fn npc_mirror_uses_stable_ids_and_cleans_up_the_dead() {
         let mut g = Game::new();
