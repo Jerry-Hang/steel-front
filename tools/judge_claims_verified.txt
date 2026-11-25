@@ -93,3 +93,11 @@ perceptual_volume_is_quieter_than_linear
 soft_limit_bounds_and_preserves_small_signals
 # 缩放倍率夹紧：去掉 clamp ⇒ 1e6 拖拽得到巨大倍率，红（inject_check 实跑）
 scale_factor_is_clamped_away_from_zero
+# 动画 STEP 插值：values[i] 改 values[i+1] ⇒ 0.99 时返回后一帧，红（inject_check 实跑）
+anim_step_holds_the_previous_keyframe
+# 动画旋转：slerp 换成 lerp().normalize() ⇒ 角度不符，红（inject_check 实跑）
+anim_rotation_uses_slerp_not_lerp
+# LLM 坐标过滤：去掉 is_finite 全通过 ⇒ 非有限坐标被采纳，红（inject_check 实跑）
+llm_orders_with_nan_or_out_of_grid_coordinates_are_ignored
+# 测试分支不碰声卡：把 if cfg!(test) 改成 if false ⇒ 源码扫描判据红（inject_check 实跑）
+tests_never_open_the_real_audio_device

@@ -11,3 +11,10 @@ soft_limit_bounds_and_preserves_small_signals | src/audio.rs | const CEIL: f32 =
 mode_cycle_returns_to_the_start | src/engine/gizmo.rs | Mode::Scale => Mode::Translate, | Mode::Scale => Mode::Scale,
 asset_stem_strips_dir_and_extension | src/engine/props.rs | let file = path.rsplit(['/', '\\']).next().unwrap_or(path); | let file = path;
 scale_factor_is_clamped_away_from_zero | src/engine/gizmo.rs | (1.0 + delta / GIZMO_LEN).clamp(SCALE_MIN, SCALE_MAX) | 1.0 + delta / GIZMO_LEN
+
+# ── 2026-11-25 第二轮：声称里写明注入方式的 ──
+anim_step_holds_the_previous_keyframe | src/engine/anim.rs | Interp::Step => values[i], | Interp::Step => values[i + 1],
+anim_rotation_uses_slerp_not_lerp | src/engine/anim.rs | Interp::Linear => a.slerp(b, u), | Interp::Linear => a.lerp(b, u).normalize(),
+telemetry_keeps_only_the_latest_line | src/engine/aipc.rs |             q.clear(); |             // 注入：不 clear
+llm_orders_with_nan_or_out_of_grid_coordinates_are_ignored | src/engine/ai_command.rs | .all(|cmd| cmd.x.is_finite() && cmd.z.is_finite()) | .all(|_cmd| true)
+tests_never_open_the_real_audio_device | src/engine/game/session.rs | if cfg!(test) { | if false {

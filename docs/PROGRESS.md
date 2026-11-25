@@ -6039,3 +6039,22 @@ ROOT=/nonexistent → 2  judge_audit: 扫不成 —— 目录不存在
 ⚠️ 一条重要观察：两条音频声称**第一次"没红"是我注入没落盘**，第二次真注入就红了。
 如果我不加那道 `before != after` 检查，就会把两条**真判据**误判成假的 ——
 **错误的否定和错误的肯定一样贵**。
+
+### 2026-11-25：欠账清理第二轮（35 → 37 / 164），工具闭环跑通
+
+用 `inject_check.py` 批量复核，本轮新增确认：
+- `anim_step_holds_the_previous_keyframe`（`values[i]` → `values[i+1]`）
+- `anim_rotation_uses_slerp_not_lerp`（`slerp` → `lerp().normalize()`）
+- `telemetry_keeps_only_the_latest_line`（删 `q.clear()`）
+- `llm_orders_with_nan_or_out_of_grid_coordinates_are_ignored`（`is_finite` 过滤恒真）
+- `tests_never_open_the_real_audio_device`（`if cfg!(test)` → `if false`）
+
+全部 **RED**，8/8 本轮无误判。覆盖率 **33 → 37 / 164**。
+
+⚠️ 清单格式踩了一次：`inject_check.py` 是**逐行**的（`名 | 文件 | 原 | 换`），
+装不下多行替换（`per_page` 那条要改三行）。所以清单只放"单行可改"的注入；
+多行的验证记录直接写进 `judge_claims_verified.txt` 并注明"手工注入"。
+
+**这轮的判断**：继续按这个节奏，一轮 2~5 条（受编译时间限制），
+剩余 8 轮大约能到 **50/164**。剩下的 114 条里有相当一部分需要读实现才能想出击穿方式，
+不是机械工作 —— 所以我不打算为了数字好看去凑，宁可少而实。
