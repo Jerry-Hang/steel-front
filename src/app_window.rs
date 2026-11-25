@@ -343,6 +343,41 @@ pub(crate) fn window_physical_request(w: u32, h: u32, monitor: Option<(u32, u32)
 }
 
 impl GameApp {
+    /// 编辑态左键：落在资产面板上就"选这一条并实例化"，返回是否吃掉了这次点击。
+    ///
+    /// 返回 `true` 时调用方要 `return`（不要再走物体拖拽）——
+    /// 面板压在场景上方，点面板不该点穿到后面的物体。
+    pub(crate) fn editor_click_asset_panel(&mut self) -> bool {
+        let Some(b) = self.asset_browser.as_ref() else {
+            return false;
+        };
+        let lines = b.panel_lines();
+        // 表头 + 当屏条目 ⇒ 行数就是 `lines.len()`
+        let (px, py) = self.last_cursor;
+        let (px, py) = (px as f32, py as f32);
+        let Some(vis_row) = crate::engine::editor::asset_row_at(
+            self.game.hud.screen_w,
+            self.game.hud.screen_h,
+            lines.len(),
+            self.game.hud.ui_scale(),
+            px,
+            py,
+        ) else {
+            return false;
+        };
+        // 屏内条目下标 → 全局条目下标
+        let page = b.page();
+        let per_page = 8usize;
+        let global = page * per_page + vis_row;
+        let Some(entry) = b.entry_at(global) else {
+            return false;
+        };
+        let path = entry.path.clone();
+        log::info!("编辑器: 点中资产 {path}");
+        self.run_editor_command("scene.instantiate", &[path.as_str()]);
+        true
+    }
+
     /// 编辑态左键按下：抓把手（抓不到就只做选中，不改任何 Transform）。
     ///
     /// 逻辑全在 `engine::editor::begin_drag` 里（纯函数，有判据覆盖）；

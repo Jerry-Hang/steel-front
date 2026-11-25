@@ -127,6 +127,52 @@ pub fn panel_quads(
     q
 }
 
+
+/// 资产面板的矩形（纯函数：绘制与命中判定**共用这一份布局**）。
+///
+/// 分开写的后果很具体：改了绘制里的一个偏移，命中判定还按旧偏移算 ⇒
+/// "点上去没反应"或"点 A 选中 B"，而且看起来像鼠标事件没接上。
+pub fn asset_panel_rect(screen_w: f32, screen_h: f32, line_count: usize, ui_scale: f32) -> Rect {
+    let s = ui_scale;
+    let w = PANEL_W * s;
+    let x = (screen_w - w * 2.0 - PAD * s).max(0.0);
+    let h = line_count as f32 * ROW_H * s + PAD * 2.0 * s;
+    let y0 = (screen_h - h - PAD * s).max(0.0);
+    Rect::new(x, y0, w, h)
+}
+
+/// 点击落在资产面板的**第几条资产**上（0 = 首条；点表头或面板外返回 `None`）。
+///
+/// `line_count` 是 `panel_lines()` 的长度（含表头）；第 0 行是表头 ⇒ 不算资产。
+pub fn asset_row_at(
+    screen_w: f32,
+    screen_h: f32,
+    line_count: usize,
+    ui_scale: f32,
+    px: f32,
+    py: f32,
+) -> Option<usize> {
+    if line_count < 2 {
+        // 只有表头 = 没有资产可点
+        return None;
+    }
+    let r = asset_panel_rect(screen_w, screen_h, line_count, ui_scale);
+    if px < r.x || px > r.x + r.w || py < r.y || py > r.y + r.h {
+        return None;
+    }
+    let s = ui_scale;
+    let row = ((py - r.y - PAD * s) / (ROW_H * s)).floor();
+    if row < 0.0 {
+        return None;
+    }
+    let row = row as usize;
+    // 第 0 行是表头
+    if row == 0 || row >= line_count {
+        return None;
+    }
+    Some(row - 1)
+}
+
 /// 把资产列表的文字画到面板**左侧下部**（与右侧场景树分开，两块互不遮挡）。
 ///
 /// 传 `lines` 而不是 `&AssetBrowser`：绘制层不该知道列表内部结构，
@@ -143,12 +189,11 @@ pub fn append_asset_lines(
     }
     let s = ui_scale;
     let text_scale = 2.0 * s;
-    let w = PANEL_W * s;
-    let x = (screen_w - w * 2.0 - PAD * s).max(0.0);
-    let h = lines.len() as f32 * ROW_H * s + PAD * 2.0 * s;
-    let y0 = (screen_h - h - PAD * s).max(0.0);
+    // 🔴 布局来自 `asset_panel_rect`（与命中判定同一份）
+    let r = asset_panel_rect(screen_w, screen_h, lines.len(), ui_scale);
+    let (x, y0) = (r.x, r.y);
     // 半透明底：压在场景上要能读清字
-    q.push(Quad::new(Rect::new(x, y0, w, h), BG));
+    q.push(Quad::new(r, BG));
     for (i, line) in lines.iter().enumerate() {
         crate::ui::render_text(
             line,
@@ -456,6 +501,35 @@ pub fn update_drag(
 
 #[cfg(test)]
 mod tests {
+
+    /// 🔴 **资产面板命中判定**：点第 k 条资产要返回 k，点表头/面板外要返回 None。
+    ///
+    /// 反向验证：把 `Some(row - 1)` 写成 `Some(row)`（忘了扣表头）⇒ 点第一条会返回 1，红。
+    #[test]
+    fn asset_row_hit_test_skips_the_header() {
+        let (sw, sh, s) = (1280.0f32, 720.0f32, 1.0f32);
+        // 表头 + 3 条资产 = 4 行
+        let lines = 4usize;
+        let r = asset_panel_rect(sw, sh, lines, s);
+        // 面板必须落在屏幕内
+        assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= sw && r.y + r.h <= sh, "{r:?}");
+        // 逐行扫一遍：每一行中点都必须命中对应的资产下标
+        for row in 0..lines {
+            let cy = r.y + PAD * s + row as f32 * ROW_H * s + ROW_H * s * 0.5;
+            let got = asset_row_at(sw, sh, lines, s, r.x + r.w * 0.5, cy);
+            if row == 0 {
+                assert_eq!(got, None, "点表头不该选中资产");
+            } else {
+                assert_eq!(got, Some(row - 1), "第 {row} 行应是资产 {}", row - 1);
+            }
+        }
+        // 面板外
+        assert_eq!(asset_row_at(sw, sh, lines, s, 1.0, 1.0), None);
+        // 只有表头（没有资产）
+        assert_eq!(asset_row_at(sw, sh, 1, s, 100.0, 100.0), None);
+    }
+
+
 
 
     use super::*;

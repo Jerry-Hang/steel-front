@@ -75,6 +75,11 @@ impl AssetBrowser {
         self.entries.get(self.selected)
     }
 
+    /// 全表下标取条目（跨屏用；面板点击要把"屏内下标"换算成它）。
+    pub fn entry_at(&self, idx: usize) -> Option<&AssetEntry> {
+        self.entries.get(idx)
+    }
+
     pub fn selected_index(&self) -> usize {
         self.selected
     }

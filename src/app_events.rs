@@ -22,7 +22,7 @@ impl GameApp {
     /// 编辑器按键 → 命令表。**按键不自己实现逻辑**：
     /// 命令表是编辑器与 AI 的唯一入口，键盘只是又一个入口，走同一条路才不会出现
     /// "键盘能做到、AI 做不到"或反过来的分叉。
-    fn run_editor_command(&mut self, name: &str) {
+    pub(crate) fn run_editor_command(&mut self, name: &str, args: &[&str]) {
         // 先算好所有需要的值，再借 `game.scene` —— 否则 `view_info()` 会和
         // `&mut self.game.scene` 撞车（它借 `&self`）。
         let dt = self.game.last_dt.max(1e-4);
@@ -39,7 +39,7 @@ impl GameApp {
         ctx.selection = selection;
         ctx.gizmo_mode = gizmo_mode;
         ctx.view = Some(view);
-        match self.plugins.run_command(name, &[], &mut ctx) {
+        match self.plugins.run_command(name, args, &mut ctx) {
             Ok(msg) => log::info!("key→{name}: {msg}"),
             Err(e) => log::warn!("key→{name} 失败：{e}"),
         }
@@ -635,11 +635,11 @@ impl GameApp {
                             return;
                         }
                         Some(KeyAction::Undo) => {
-                            self.run_editor_command("scene.undo");
+                            self.run_editor_command("scene.undo", &[]);
                             return;
                         }
                         Some(KeyAction::Redo) => {
-                            self.run_editor_command("scene.redo");
+                            self.run_editor_command("scene.redo", &[]);
                             return;
                         }
                         None => {}
@@ -852,6 +852,11 @@ impl GameApp {
                         // 转视角（`dragging` 分支）和拖物体，两个动作叠在一起很难看出意图。
                         if self.mode == crate::engine::mode::Mode::Edit {
                             if pressed {
+                                // 🔴 **先判资产面板，再判物体拖拽**：面板压在场景上方，
+                                // 点面板时要"选资产"，不是"点穿到后面的物体"。
+                                if self.editor_click_asset_panel() {
+                                    return;
+                                }
                                 self.editor_begin_drag();
                             } else {
                                 self.editor_drag = None;
