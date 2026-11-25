@@ -6250,3 +6250,37 @@ plugin-cmd: asset.texture_probe → /tmp/tex_fixture.glb: textures=1 probe_red=4
 
 **这一步特意不碰渲染管线**：共享 mesh 着色器是承重结构（铁律 A），
 上屏要单独设计（绑定、采样开关、与程序化贴图的优先级），不和"能不能读对"混在一次改动里。
+
+### 2026-11-25：贴图上屏的**契约骨架**（先写判据，再动承重结构）
+
+按用户要求：先写可执行的契约，再实现。落在 `src/engine/tex_atlas.rs`（纯策略，不碰管线）。
+
+**读代码后先纠正了一个前提**：采样路径**已经存在** —— 片元里
+`if (length(input.uv) > 1e-4 && (feature_bits & 32u) != 0u)` 采样 `prop_atlas_tex`
+（= `assets/textures/prop_atlas.png`，**全局一张**，导入脚本手工打图集）。
+⇒ 缺的**不是采样能力**，而是「每个模型自己的贴图怎么进这张图集」。契约贴着既有路径写。
+
+四条契约 + 8 条判据（全部反向可红）：
+
+| 契约 | 判据 | 注入后 |
+|---|---|---|
+| UV 重映射把四角送到格四角 | remap_sends_uv_corners_to_cell_corners | width()→1.0 ⇒ 2 红 |
+| 整图集 = 恒等（旧资产不变） | full_atlas_rect_is_identity | 给 FULL 加偏移 ⇒ 红 |
+| 不许夹紧超界 UV | remap_does_not_clamp_out_of_range_uv | 加 clamp ⇒ 红 |
+| 采样条件与着色器同源 | should_sample_matches_the_shader_condition | 阈值改 1e-9 ⇒ 红 |
+| 特征位 = 着色器里的 32u | feature_bit_matches_the_shader | 改 16 ⇒ 红 |
+| UV 阈值 = 着色器里的数值 | uv_epsilon_matches_the_shader | 改 1e-3 ⇒ 红 |
+| 无贴图回退顶点色 | missing_texture_falls_back_to_vertex_color_not_white | 返回白色 ⇒ 红 |
+| 合成公式与着色器一致 | modulation_formula_matches_the_shader_not_the_comment | — |
+
+🔴 **两次都是「判据自己先失效」，靠注入才抓住**：
+1. uv_epsilon 判据第一版拿 format!("{}", 1e-4) = "0.0001" 去 contains 着色器的 "1e-4"
+   ⇒ **永远失败**。改成从着色器**解析数值**再比常量，两边任一侧改动都会红。
+2. remap_does_not_clamp 第一版用 uv=2.0、格宽 0.5 ⇒ 映射到 1.0，**加 clamp 恰好不变**
+   ⇒ 注入不红。改用 uv=3.0（映射到 1.5）后立刻红。
+
+⚠️ **着色器注释与公式不符（已钉死，别按注释去「修」）**：
+mix(vec3(1.0), tex*1.9, 0.85) 在 tex=1 时是 **1.765 倍**，注释却写「白图 = 1.0 ⇒ 不影响顶点色」。
+判据 modulation_formula_matches_the_shader_not_the_comment 把真实行为钉下来（1.765 / 0.15 / 0.9575）。
+
+模块暂时 #![allow(dead_code)]，理由与**删除条件**写在文件头：接线是下一步，接上后必须删掉。

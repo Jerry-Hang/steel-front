@@ -51,6 +51,7 @@ pub mod skin;
 pub mod scene_io;
 pub mod scene_view;
 pub mod simd;
+pub mod tex_atlas;
 pub mod weapons;
 pub mod weapon_data;
 pub mod window;
