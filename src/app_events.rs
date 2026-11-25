@@ -1053,6 +1053,29 @@ impl GameApp {
 
             // 滚轮：轨道 = 推拉距离；飞行 = 沿视线前进/后退
             WindowEvent::MouseWheel { delta, .. } => {
+                // 🔴 **编辑态 + 光标在右侧面板**：滚轮滚场景树，不推拉相机。
+                // 不加这一条的话，在三维视图里滚一下就会把树滚走，谁也想不到。
+                if self.mode == crate::engine::mode::Mode::Edit {
+                    let (px, _) = self.last_cursor;
+                    if crate::engine::editor::cursor_in_panel(
+                          self.game.hud.screen_w,
+                          self.game.hud.ui_scale(),
+                          px as f32,
+                      ) {
+                        let steps = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+                            MouseScrollDelta::PixelDelta(p) => (p.y / 40.0).round() as i32,
+                        };
+                        let rows = crate::engine::editor::tree_rows(self.game.scene(), self.tree_filter).len();
+                        let next = if steps >= 0 {
+                            self.tree_scroll.saturating_add(steps as usize)
+                        } else {
+                            self.tree_scroll.saturating_sub((-steps) as usize)
+                        };
+                        self.tree_scroll = crate::engine::editor::clamp_scroll(next, rows);
+                        return;
+                    }
+                }
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y as f32,
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.05,

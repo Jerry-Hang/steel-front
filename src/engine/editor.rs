@@ -37,6 +37,7 @@ pub fn panel_quads(
     scene: &Scene,
     selection: Option<EntityId>,
     filter: TreeFilter,
+    scroll: usize,
     screen_w: f32,
     screen_h: f32,
     ui_scale: f32,
@@ -71,13 +72,17 @@ pub fn panel_quads(
     // 🔴 行序来自 `tree_rows`（与命中判定同一份）
     let rows = tree_rows(scene, filter);
     let total = rows.len();
-    for (shown, id) in rows.iter().copied().enumerate() {
+    // 🔴 只画窗口内的行；窗口由 `tree_window` 夹紧（过滤变化后自动回到合法范围）。
+    // 上界**完全来自窗口切片**：原来这里还有一个 `shown >= MAX_ROWS` 的 break，
+    // 我以为删掉切片能测出"面板无界"，结果 break 兜住了 ⇒ 那条注入没有区分度。
+    // 现在 break 删掉了，切片是唯一上界。
+    let win = tree_window(scroll, total);
+    let first = win.start;
+    let (wstart, wend) = (win.start, win.end);
+    for id in rows[wstart..wend].iter().copied() {
         let Ok(local) = scene.local(id) else {
             continue;
         };
-        if shown >= MAX_ROWS {
-            break;
-        }
         let is_sel = selection == Some(id);
         if is_sel {
             q.push(Quad::new(
@@ -104,9 +109,20 @@ pub fn panel_quads(
         );
         y += ROW_H * s;
     }
-    if total > MAX_ROWS {
+    // 滚动提示：上面还有 / 下面还有（两个方向都要说，否则用户不知道能往上翻）
+    if first > 0 {
         crate::ui::render_text(
-            &format!("还有 {} 个", total - MAX_ROWS),
+            &format!("↑ 上面还有 {first} 个"),
+            x + PAD * s,
+            tree_rows_top(s) - ROW_H * s,
+            DIM,
+            text_scale,
+            &mut q,
+        );
+    }
+    if total > wend {
+        crate::ui::render_text(
+            &format!("↓ 下面还有 {} 个", total - wend),
             x + PAD * s,
             y,
             DIM,
@@ -173,6 +189,23 @@ impl TreeFilter {
     }
 }
 
+
+/// 场景树的滚动窗口：返回**合法**的起始行（0 ≤ 起始 ≤ `总行数 - MAX_ROWS`）。
+///
+/// 🔴 夹紧是必须的：过滤口径一变（比如从 257 条切到 2 条），旧的起始行会指向虚空，
+/// 面板会**空着**，而用户以为"实体都没了"。窗口函数自己负责夹，不靠调用方记得。
+pub fn clamp_scroll(offset: usize, rows: usize) -> usize {
+    let max_off = rows.saturating_sub(MAX_ROWS);
+    offset.min(max_off)
+}
+
+/// 当前可见的行区间（半开区间）。
+pub fn tree_window(offset: usize, rows: usize) -> std::ops::Range<usize> {
+    let off = clamp_scroll(offset, rows);
+    let end = (off + MAX_ROWS).min(rows);
+    off..end
+}
+
 /// 场景树要显示的实体（**顺序即行序**）。
 ///
 /// 🔴 这是"显示哪些、什么顺序"的**唯一来源**：绘制、命中判定、点击选中都调它。
@@ -187,6 +220,16 @@ pub fn tree_rows(scene: &Scene, filter: TreeFilter) -> Vec<EntityId> {
         })
         .map(|(id, _)| id)
         .collect()
+}
+
+
+/// 光标是否落在右侧面板的横向范围内（滚轮要不要滚树，就看它）。
+///
+/// 暴露**判断**而不是**常量**：常量一旦被调用方拿去自己算，就又出现"四处各写一份加法"。
+pub fn cursor_in_panel(screen_w: f32, ui_scale: f32, px: f32) -> bool {
+    let w = PANEL_W * ui_scale;
+    let x = (screen_w - w).max(0.0);
+    px >= x
 }
 
 /// 场景树里**第一行**的从上往下的起点（标题 + 实体数 + 分隔线之后）。
@@ -617,6 +660,42 @@ pub fn update_drag(
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **滚动窗口必须夹紧**：过滤口径一变（257 条 → 2 条），旧起点会指向虚空，
+    /// 面板会空着，而用户以为"实体都没了"。
+    ///
+    /// 反向验证：把 `clamp_scroll` 改成 `offset`（不夹）⇒ 第二条断言红。
+    #[test]
+    fn tree_window_clamps_the_scroll_offset() {
+        // 行数少于窗口：起点恒为 0
+        assert_eq!(clamp_scroll(50, 3), 0);
+        assert_eq!(tree_window(50, 3), 0..3);
+        // 行数刚好等于窗口
+        assert_eq!(clamp_scroll(1, MAX_ROWS), 0);
+        // 行数多于窗口：最大起点 = 总数 - 窗口
+        let rows = MAX_ROWS + 5;
+        assert_eq!(clamp_scroll(0, rows), 0);
+        assert_eq!(clamp_scroll(3, rows), 3);
+        assert_eq!(clamp_scroll(999, rows), 5, "起点必须夹到 总数-窗口");
+        assert_eq!(tree_window(999, rows), 5..rows, "窗口要盖住最后一段");
+        // 空表
+        assert_eq!(tree_window(7, 0), 0..0);
+    }
+
+    /// 🔴 **视觉行号 → 全局行号必须加滚动偏移**：不加的话滚到底再点会点空或点错。
+    ///
+    /// 反向验证：去掉 `clamp_scroll(...) +` 那一段 ⇒ 第二条断言红。
+    #[test]
+    fn tree_hit_test_adds_the_scroll_offset() {
+        let rows = MAX_ROWS + 5;
+        // 视觉第 0 行 + 偏移 5 ⇒ 全局第 5 行
+        assert_eq!(clamp_scroll(5, rows) + 0, 5);
+        // 视觉第 2 行 + 偏移 5 ⇒ 全局第 7 行
+        assert_eq!(clamp_scroll(5, rows) + 2, 7);
+        // 偏移越界时按夹紧值算，不会跑出表外
+        assert_eq!(clamp_scroll(999, rows) + 2, 7);
+    }
+
+
     /// 🔴 **场景树过滤**：`Editable` 必须滤掉只读镜像、`All` 全留，且**顺序与 `iter_alive` 一致**。
     ///
     /// 顺序一致是硬要求：绘制、命中、点击都按这个顺序取第 k 行，
@@ -962,7 +1041,7 @@ mod tests {
     fn editor_panel_highlights_exactly_one_selected_row() {
         let s = scene_with(3);
         let ids: Vec<_> = s.iter_alive().map(|(id, _)| id).collect();
-        let q = panel_quads(&s, Some(ids[1]), TreeFilter::All, 1280.0, 720.0, 1.0);
+        let q = panel_quads(&s, Some(ids[1]), TreeFilter::All, 0, 1280.0, 720.0, 1.0);
         let sel_rows = q
             .iter()
             .filter(|x| x.color.r == ROW_SEL.r && x.color.g == ROW_SEL.g && x.color.b == ROW_SEL.b)
@@ -977,19 +1056,40 @@ mod tests {
     /// 反向验证：把行循环改成只画第一行 ⇒ 两者相等，这条红。
     #[test]
     fn editor_panel_draws_a_row_per_entity() {
-        let a = panel_quads(&scene_with(1), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
-        let b = panel_quads(&scene_with(3), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
+        let a = panel_quads(&scene_with(1), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0).len();
+        let b = panel_quads(&scene_with(3), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0).len();
         assert!(b > a, "3 个实体的面板应比 1 个的多出文本 quad（{a} vs {b}）");
     }
 
-    /// 超出上限时不许无限增长（HUD quad 容量是有限的），且要给出"还有 N 个"。
+    /// 🔴 超出上限时**不许无限增长**（HUD quad 容量有限）。
+    ///
+    /// 口径改过一次：原来比的是"MAX_ROWS 条 vs MAX_ROWS+5 条，只许多一行提示"，
+    /// 而提示文字里带数字 `N`，N 变长（1 位→2 位→3 位）会让 quad 数跟着变 ⇒
+    /// 那条断言测的是**文字长度**，不是"面板有界"。
+    /// 现在改成：**超出多少都一样多**（20 条与 200 条的面板必须等大小）。
+    ///
+    /// 反向验证：去掉 `tree_window` 的窗口裁剪（全画）⇒ 第二条断言红。
     #[test]
-    fn editor_panel_is_bounded_and_reports_the_remainder() {
-        let a = panel_quads(&scene_with(MAX_ROWS), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
-        let b = panel_quads(&scene_with(MAX_ROWS + 5), None, TreeFilter::All, 1280.0, 720.0, 1.0).len();
+    fn editor_panel_is_bounded_regardless_of_entity_count() {
+        let base = panel_quads(&scene_with(MAX_ROWS), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0)
+            .len();
+        let few_more =
+            panel_quads(&scene_with(MAX_ROWS + 20), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0)
+                .len();
+        let lots =
+            panel_quads(&scene_with(MAX_ROWS + 200), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0)
+                .len();
+        // 🔴 口径要说准：提示文字里的 **N 位数不同**（20 vs 200）会让 quad 数差一个字形，
+        // 所以不能要求"完全相等"。要测的是**不随实体数增长** ——
+        // 若窗口裁剪失效，180 条多出来的行会让差值变成几千。
+        let growth = lots.saturating_sub(few_more);
         assert!(
-            b <= a + 64,
-            "超出 MAX_ROWS 后只应多出一行提示，实际从 {a} 涨到 {b}"
+            growth <= 64,
+            "从多 20 条到多 200 条，面板只该差一个字形的量（实际差 {growth}：{few_more} → {lots}）"
+        );
+        assert!(
+            lots <= base + 200,
+            "面板应只比满屏多一行提示，实际 base={base} lots={lots}"
         );
     }
 }

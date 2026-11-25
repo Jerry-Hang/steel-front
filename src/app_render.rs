@@ -933,6 +933,7 @@ crate::engine::ray_tracer::PtParams {
                     self.game.scene(),
                     self.selection,
                     self.tree_filter,
+                    self.tree_scroll,
                     self.game.hud.screen_w,
                     self.game.hud.screen_h,
                     scale,

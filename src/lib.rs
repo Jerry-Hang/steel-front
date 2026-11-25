@@ -291,6 +291,8 @@ struct GameApp {
     bake_queue: Vec<(String, f32)>,
     /// 场景树过滤口径（全部 / 只看可编辑）。默认只看可编辑：编辑器的工作对象。
     tree_filter: crate::engine::editor::TreeFilter,
+    /// 场景树滚动起点（行下标）。窗口函数会夹紧，所以这里可以放心加减。
+    tree_scroll: usize,
     /// 撤销栈（引擎化 P3k）。命令表在改动前后自动记录，编辑器与 AI 共用一条栈。
     undo: crate::engine::undo::UndoStack,
     gizmo_mode: crate::engine::gizmo::Mode,

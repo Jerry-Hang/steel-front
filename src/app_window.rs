@@ -359,7 +359,10 @@ impl GameApp {
         ) else {
             return false;
         };
-        let Some(&id) = rows.get(row) else {
+        // 🔴 视觉行号 → 全局行号要加滚动偏移；偏移必须**夹紧**（与绘制同一函数），
+        // 否则滚到底再点会点空。
+        let global = crate::engine::editor::clamp_scroll(self.tree_scroll, rows.len()) + row;
+        let Some(&id) = rows.get(global) else {
             return false;
         };
         self.selection = Some(id);
