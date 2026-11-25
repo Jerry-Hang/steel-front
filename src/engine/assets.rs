@@ -45,16 +45,20 @@ pub fn mesh_bounds(mesh: &ImportedMesh) -> Option<([f32; 3], [f32; 3])> {
     Some((lo, hi))
 }
 
-pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
+/// 切出 GLB 的 JSON 块与 BIN 块。
+///
+/// 🔴 **唯一真源**：几何解析（`parse_glb`）与贴图解析（`asset_texture`）都必须走这里。
+/// 两边各自切一遍的话，越界处理迟早分叉 —— 而 `json_len` 来自**文件头**，是不可信输入
+/// （2026-09-26 变异模糊发现的一次真 panic，判据
+/// `glb_parser_never_panics_on_mutated_bytes_and_keeps_indices_in_range`）。
+///
+/// 返回的 JSON 是**持有所有权**的（`Box::leak` 到 `'static`）：
+/// 调用方一次解析用一次，泄漏量与一次解析的树大小同阶；换来的是签名简单到不会用错。
+pub fn glb_chunks(bytes: &[u8]) -> Result<(&'static crate::llm_cmd::Json, &[u8]), String> {
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
         return Err("非 GLB 文件（缺少 glTF magic）".into());
     }
     let json_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
-    // 🔴 2026-09-26（变异模糊发现的一次**真 panic**）：`json_len` 来自**文件头**，是不可信输入，
-    // 修前直接拿它切片 —— 截断/损坏的 GLB 会让 `parse_glb` panic
-    // （实测 "range end index 872 out of range for slice of length 725"），而正确行为是返回 Err。
-    // 下面那个 BIN 块的切片本来就有 `.min(bytes.len())`，唯独 JSON 块漏了。
-    // 判据 = `glb_parser_never_panics_on_mutated_bytes_and_keeps_indices_in_range`。
     let json_end = 20usize
         .checked_add(json_len)
         .filter(|&e| e <= bytes.len())
@@ -65,14 +69,25 @@ pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
             )
         })?;
     let json_str = std::str::from_utf8(&bytes[20..json_end]).map_err(|_| "GLB JSON 非 UTF-8")?;
-    let json = crate::llm_cmd::parse_json_fn(json_str).map_err(|e| format!("GLB JSON 解析失败: {e}"))?;
-    let bin_start = 20 + json_len;
+    let json = crate::llm_cmd::parse_json_fn(json_str)
+        .map_err(|e| format!("GLB JSON 解析失败: {e}"))?;
+    let bin_start = json_end;
     let bin = if bin_start + 8 <= bytes.len() {
-        let blen = u32::from_le_bytes([bytes[bin_start], bytes[bin_start + 1], bytes[bin_start + 2], bytes[bin_start + 3]]) as usize;
+        let blen = u32::from_le_bytes([
+            bytes[bin_start],
+            bytes[bin_start + 1],
+            bytes[bin_start + 2],
+            bytes[bin_start + 3],
+        ]) as usize;
         &bytes[bin_start + 8..(bin_start + 8 + blen).min(bytes.len())]
     } else {
         &[]
     };
+    Ok((Box::leak(Box::new(json)), bin))
+}
+
+pub fn parse_glb(bytes: &[u8]) -> Result<ImportedMesh, String> {
+    let (json, bin) = glb_chunks(bytes)?;
     // 遍历全部 mesh 的 primitives（多材质合并：一个 GLB = 一个 ImportedMesh）
     let meshes = json
         .get("meshes")

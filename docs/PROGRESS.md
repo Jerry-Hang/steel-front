@@ -6213,3 +6213,40 @@ wave.info    → OK wave=3 npcs=10 next_in=0.0s      ← 波次号真的变了
 `0 passed; 1060 filtered out` 却报 `ok` —— **测试名没匹配上，根本没跑**。
 真实名字是 `plugin_systems_run_in_phase_order`（无名里的 `registry`），改正后才真的 1 passed。
 ⇒ **凡按名字跑测试，必须核对 `passed ≥ 1`**，否则 `ok` 什么都证明不了。
+
+### 2026-11-25：贴图导入（第一步：解析 + 解码 + 探针，不上屏）
+
+此前引擎**完全不读** GLB 的 `images` / `textures` / `materials[].baseColorTexture` ——
+所有资产也确实没有内嵌贴图（实测 `barrel_metal.glb` / `skinned_bar.glb` 的
+`images=0 textures=0`）。所以这是从零开始的功能。
+
+**本次做的是 CPU 侧全链路**（`src/engine/asset_texture.rs`）：
+
+```
+GLB ──► glb_chunks（唯一真源，与几何解析共用） ──► images[i].bufferView 切片
+    ──► PNG/JPEG 解码 ──► Rgba8 {name, w, h, rgba8}
+```
+
+三条**硬设计**：
+1. **只支持内嵌 `bufferView`**，遇到 `uri`（外部文件 / `data:`）**显式报错并说明原因** ——
+   外部文件在 Android 上不可用；静默返回空会被上层误读成"这个模型本来就没贴图"。
+2. `byteOffset` 可选（缺省 0）、`byteLength` 必填；越界**返回 Err 不 panic**（`json_len` 的历史教训）。
+3. 零尺寸图直接拒绝（会让 UV 计算除零）。
+
+**判据 4 条**（全部带反向验证）：
+- `embedded_png_decodes_pixel_for_pixel` —— 代码里现画 2×2 PNG，**逐像素**比对，
+  含半透明像素（alpha 必须保留 128）。反向验证：`to_rgba8()`→`to_rgb8()` ⇒ 红 ✓
+- `glb_without_images_yields_empty_list_not_error` —— 无图 = 空列表，不是错误
+- `external_texture_uri_is_an_explicit_error` —— 错误里必须点出是哪个文件
+- `buffer_view_out_of_range_is_an_error` —— 越界是 Err 不是 panic
+
+**实机（AI 接口）**：新增 `asset.texture_probe <路径>`，与 `asset.skin_probe` / `anim_probe` 同族：
+```
+plugin-cmd: asset.texture_probe → /tmp/tex_fixture.glb: textures=1 probe_red=4x4
+            px0=(255,0,0,255) px_hash=07df6d09b8e8e95a | materials=#0→tex0
+```
+**独立交叉验证**：用 Python + PIL 从同一 GLB 解出像素、用同一 FNV-1a 复算 ⇒
+`px_hash=07df6d09b8e8e95a`，**与 Rust 完全一致**。夹具已入库 `tools/fixtures/tex_4x4.glb`（443 B）。
+
+**这一步特意不碰渲染管线**：共享 mesh 着色器是承重结构（铁律 A），
+上屏要单独设计（绑定、采样开关、与程序化贴图的优先级），不和"能不能读对"混在一次改动里。

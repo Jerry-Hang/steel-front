@@ -481,6 +481,66 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             }
         },
     );
+    // ---- 贴图探针（2026-11-25：GLB 内嵌贴图导入的读侧）----
+    //
+    // 与 `asset.skin_probe` / `asset.anim_probe` 同族：让 AI 能**读到**这个模型有没有贴图、
+    // 多大、像素校验和是多少。有这一条，贴图解析才不是死代码 ——
+    // 而且它给出的 checksum 可以和外部工具算的值直接比对。
+    reg.add_command(
+        "asset.texture_probe",
+        "读 GLB 并报告内嵌贴图：asset.texture_probe <路径>",
+        |_ctx, args| {
+            let path = args.first().ok_or_else(|| "缺路径".to_string())?;
+            let bytes = std::fs::read(path).map_err(|e| format!("读文件失败：{e}"))?;
+            let texs = crate::engine::asset_texture::parse_glb_textures(&bytes)
+                .map_err(|e| format!("{path}: {e}"))?;
+            if texs.is_empty() {
+                return Ok(format!("{path}: 没有内嵌贴图（images 为空）"));
+            }
+            // 逐张报名字/尺寸/像素校验和 + 左上角像素（解码对不对，看这一个数最快）
+            let mut parts = Vec::with_capacity(texs.len());
+            for t in &texs {
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                for b in &t.rgba8 {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                let px = t
+                    .pixel(0, 0)
+                    .map(|p| format!("({},{},{},{})", p[0], p[1], p[2], p[3]))
+                    .unwrap_or_else(|| "<空>".to_string());
+                parts.push(format!("{}={}x{} px0={px} px_hash={h:016x}", t.name, t.width, t.height));
+            }
+            // 材质 → 贴图下标：报告里要有这一层，否则"有贴图"和"贴图被用上"分不清
+            let mats = {
+                let (json, _) = crate::engine::assets::glb_chunks(&bytes)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                (0..8)
+                    .map_while(|m| {
+                        crate::engine::asset_texture::base_color_texture_of(json, m)
+                            .map(|t| (m, t))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mat_txt = if mats.is_empty() {
+                "materials=无引用".to_string()
+            } else {
+                format!(
+                    "materials={}",
+                    mats.iter()
+                        .map(|(m, t)| format!("#{m}→tex{t}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            Ok(format!(
+                "{path}: textures={} {} | {mat_txt}",
+                texs.len(),
+                parts.join("; ")
+            ))
+        },
+    );
+
     // ---- P4b：动画探针 ----
     reg.add_command(
         "asset.anim_probe",
