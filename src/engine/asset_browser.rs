@@ -80,6 +80,15 @@ impl AssetBrowser {
         self.entries.get(idx)
     }
 
+    /// 每屏条数。
+    ///
+    /// 🔴 **必须由列表自己提供**，不许调用方再写一遍（我曾在这里硬编码 `8`，
+    /// 而 `per_page` 是列表自己的状态）—— 两者一旦分叉，点击会选中**另一条**资产，
+    /// 表现为"点上去放错了模型"，而两边各自看都"对"。
+    pub fn per_page(&self) -> usize {
+        self.per_page
+    }
+
     pub fn selected_index(&self) -> usize {
         self.selected
     }
@@ -145,6 +154,27 @@ impl AssetBrowser {
 
 #[cfg(test)]
 mod tests {
+    /// 🔴 **屏内下标 → 全局下标**必须用**列表自己的** `per_page()`，不许调用方另写一个数。
+    ///
+    /// 反向验证：把 `per_page()` 改成恒返回 8 而构造时用 4 ⇒ 下面第 2 屏的断言红。
+    /// （真实事故形态：点击选中了另一条资产，表现为"点上去放错模型"，两边各自看都对。）
+    #[test]
+    fn per_page_comes_from_the_browser_not_the_caller() {
+        let mut b = AssetBrowser::from_paths(paths(10), 4);
+        assert_eq!(b.per_page(), 4, "per_page 要如实报告构造值");
+        assert_eq!(b.page_count(), 3, "10 条 / 每屏 4 条 = 3 屏");
+        b.next_page(); // 第 2 屏（下标从 0 起：page=1）
+        assert_eq!(b.page(), 1);
+        // 第 2 屏的第 0 条 = 全局第 4 条
+        let global = b.page() * b.per_page() + 0;
+        assert_eq!(
+            b.entry_at(global).map(|e| e.name.clone()),
+            Some("m04.glb".to_string()),
+            "屏内下标换算必须用列表自己的 per_page"
+        );
+    }
+
+
     use super::*;
 
     fn paths(n: usize) -> Vec<String> {

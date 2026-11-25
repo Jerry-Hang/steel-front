@@ -391,8 +391,7 @@ impl GameApp {
         };
         // 屏内条目下标 → 全局条目下标
         let page = b.page();
-        let per_page = 8usize;
-        let global = page * per_page + vis_row;
+        let global = page * b.per_page() + vis_row;
         let Some(entry) = b.entry_at(global) else {
             return false;
         };
