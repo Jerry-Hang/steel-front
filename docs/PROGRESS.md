@@ -6927,3 +6927,28 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 `ai_sight_factor`），所以注入极容易、判据也真的能压住 —— **纯函数是判据最好的朋友**。
 
 现状：台账 **160 / 194**（82%）；`injections.txt` 114 条。
+
+### 2026-11-26：欠账 160 → 165 / 193（85%），并**修好两条真缺陷**
+
+| 判据 | 注入 | 备注 |
+|---|---|---|
+| `full_atlas_rect_is_identity` | `FULL` 加 0.01 偏移 | 直接红 |
+| `cell_assignment_is_a_pure_function_of_the_name` | `h % n` → `h % 7` | **修判据后才红** |
+| `json_number_rejects_non_finite` | 去掉 `is_finite` 过滤 | 直接红 |
+| `stack_is_capped_and_drops_the_oldest` | `past.remove(0)` 改成空操作（all） | 直接红 |
+| `feature_bit_matches_the_shader` | 常量 32 → 16 | **修判据后才红** |
+
+🔴 **两个真缺陷（都不是"声称写错"，是判据本身漏了关键断言）**：
+
+1. **`cell_assignment_...` 只验"格号有效 + 同名同格"** —— `h % 7`（写死）产出的格号
+   一样有效（0..7 < 64）⇒ 注入后**通过**。哈希取模的**真正意图是摊开**
+   ⇒ 补覆盖度断言（2000 个名字须覆盖 ≥80% 的格），注入立刻红。
+2. **`feature_bit_matches_the_shader` 用常量拼 needle 去搜源码** —— 把常量改成 16 时，
+   `(feature_bits & 16u)`（反射位）**在着色器里真实存在** ⇒ 照样通过。
+   ⇒ 补 `assert_eq!(FEATURE_AUTHORED_TEX, 32)` 把数值本身锁住。
+
+🔴 另一条是**声称写错**：`should_sample_matches_the_shader_condition` 的断言**两侧都用**
+`UV_EPSILON_SQRT`，改常量不会红（实测 1e-9 仍通过）；常量与着色器的同步由
+`uv_epsilon_matches_the_shader` 负责。已改写成覆盖范围说明。
+
+现状：台账 **165 / 193**（85%）；`injections.txt` 121 条。

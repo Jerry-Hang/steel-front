@@ -351,3 +351,13 @@ flashlight_sits_ahead_of_the_camera
 battery_drains_and_recharges
 flashlight_dims_with_battery
 flashlight_makes_the_player_easier_to_see_at_night
+
+# ── 2026-11-26 第二十四批（FULL 恒等 / 格号分布 / json 非有限数 / undo 上限 / 特征位数值）──
+full_atlas_rect_is_identity
+# 🔴 原判据只验"格号有效 + 同名同格" ⇒ h%7 也过；补覆盖度断言（2000 名字须覆盖 ≥80% 格）后才红
+cell_assignment_is_a_pure_function_of_the_name
+json_number_rejects_non_finite
+# `self.past.remove(0);` 在 undo.rs 出现 2 次（past/future）⇒ all
+stack_is_capped_and_drops_the_oldest
+# 🔴 原判据用常量拼 needle ⇒ 改成 16（水洼位）也能过；补 assert_eq!(常量, 32) 后才红
+feature_bit_matches_the_shader

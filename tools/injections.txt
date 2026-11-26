@@ -126,3 +126,7 @@ flashlight_sits_ahead_of_the_camera | src/engine/lighting.rs |     [cam[0] + fwd
 battery_drains_and_recharges | src/engine/lighting.rs |         (b - dt / on_secs.max(1.0)).max(0.0) |         b
 flashlight_dims_with_battery | src/engine/lighting.rs |     (0.25 + 0.75 * b.sqrt(), 8.0 + 6.0 * b) |     (1.0, 14.0)
 flashlight_makes_the_player_easier_to_see_at_night | src/engine/lighting.rs |     let lit = if player_lit { 1.25 } else { 1.0 }; |     let lit = 1.0;
+full_atlas_rect_is_identity | src/engine/tex_atlas.rs |     pub const FULL: Self = Self::new(0.0, 0.0, 1.0, 1.0); |     pub const FULL: Self = Self::new(0.01, 0.0, 1.0, 1.0);
+cell_assignment_is_a_pure_function_of_the_name | src/engine/tex_atlas.rs |     Some((h % n as u64) as u32) |     Some((h % 7u64) as u32)
+json_number_rejects_non_finite | src/llm_cmd.rs |             .filter(|n| n.is_finite()) |             .filter(|_n| true)
+stack_is_capped_and_drops_the_oldest | src/engine/undo.rs | self.past.remove(0); | let _ = 0; | all

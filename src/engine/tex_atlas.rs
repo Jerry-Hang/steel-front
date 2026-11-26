@@ -643,7 +643,11 @@ mod tests {
     /// 这是"打包工具与游戏各算各的"能成立的前提。若引入任何顺序依赖，
     /// 两边一旦文件集合不同，所有模型 UV 会集体错位。
     ///
-    /// 反向验证：把 `h % n` 换成 `h % 7`（写死）⇒ 第二条断言红。
+    /// 反向验证：把 `h % n` 换成 `h % 7`（写死）⇒ **第三条**断言红。
+    ///
+    /// 🔴 2026-11-26 补第三条（覆盖度）：原来只验"格号有效 + 同名同格"，
+    /// 而 `h % 7` 产出的格号**也**都有效（0..7 < 64）⇒ 注入后**仍然通过**（实测）。
+    /// 哈希取模的真正意图是"**把道具摊开到整张图集上**"，所以要钉覆盖度。
     #[test]
     fn cell_assignment_is_a_pure_function_of_the_name() {
         let g = AtlasGrid::new(8, 8);
@@ -656,6 +660,20 @@ mod tests {
             cell_for_name("barrel_metal", g),
             cell_for_name("tree_oak", g),
             "这两个名字实测落在不同格"
+        );
+        // 🔴 覆盖度：哈希取模的意图是"把道具摊开到整张图集"。
+        // 少了这条，`h % 7`（写死）这种退化写法也能过 —— 它产出的格号一样"有效"。
+        let total = g.cell_count() as u32;
+        let mut hit = vec![false; total as usize];
+        for i in 0..2000u32 {
+            let name = format!("prop_{i}");
+            let c = cell_for_name(&name, g).expect("格数 > 0 必有格");
+            hit[c as usize] = true;
+        }
+        let used = hit.iter().filter(|b| **b).count() as u32;
+        assert!(
+            used * 100 >= total * 80,
+            "2000 个名字只覆盖了 {used}/{total} 格（<80%）—— 哈希分布退化了"
         );
         // 格数为 0 ⇒ None 而不是除零 panic
         assert_eq!(cell_for_name("x", AtlasGrid::new(0, 4)), None);
@@ -958,7 +976,10 @@ mod tests {
 
     /// 🔴 **采样条件必须与着色器逐条同源**（阈值、长度算法、特征位）。
     ///
-    /// 反向验证：把 `UV_EPSILON_SQRT` 改成 `1e-9` ⇒ 第一条断言红。
+    /// 覆盖范围（2026-11-26 说明）：本判据验的是 **`should_sample` 的形状**（零 UV 不采、
+    /// 位清零不采、边界用 `>` 而非 `>=`、按 `length` 而非逐分量）。它的断言**两侧都用**
+    /// `UV_EPSILON_SQRT`，所以改这个常量**不会**让它变红（实测 1e-9 仍通过）——
+    /// 常量与着色器字面量的**同步**由 `uv_epsilon_matches_the_shader` 单独钉住。
     #[test]
     fn should_sample_matches_the_shader_condition() {
         // UV 全零 ⇒ 不采样（旧资产 / 程序化件）
@@ -980,13 +1001,18 @@ mod tests {
     #[test]
     fn feature_bit_matches_the_shader() {
         let src = include_str!("../../build.rs");
+        // 🔴 **数值本身也要钉住**（2026-11-26 补）：原来只用常量拼 needle 去搜源码，
+        // 于是把常量改成 16 也能"通过" —— 因为 `(feature_bits & 16u)`（反射位）
+        // **在着色器里真实存在**。判据必须同时锁住"就是 32"这件事。
+        assert_eq!(
+            FEATURE_AUTHORED_TEX, 32,
+            "道具图集位与着色器约定为 32（1=地面/2=立面/4=枪影/8=地形/16=反射/32=道具图集/64=仅底）"
+        );
         let needle = format!("(feature_bits & {}u)", FEATURE_AUTHORED_TEX);
         assert!(
             src.contains(&needle),
             "着色器里必须存在 `{needle}`；改了特征位就要同步改本模块的常量"
         );
-        let eps = format!("> {}u", 0); // 占位，避免未使用告警
-        let _ = eps;
     }
 
     /// 🔴 UV 阈值必须与着色器源码里的**数值**一致（比字符串比对强）。
