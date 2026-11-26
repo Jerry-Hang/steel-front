@@ -6666,3 +6666,18 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
    decode 里各一份、上下文也相同 ⇒ 改常量（1024→65535）才是可行的注入点。
 
 现状：台账 **100 / 196**（过半）；`injections.txt` 56 条。
+
+### 2026-11-26：欠账 100 → 105 / 196
+
+| 判据 | 注入 |
+|---|---|
+| `join_proof_with_wrong_nonce_is_refused` | `Some(expected) if expected == nonce` → `Some(_) if true` |
+| `forged_sealed_packet_is_rejected` | 封印包 token 比较改成 `if false` |
+| `punch_with_wrong_nonce_is_dropped` | `punch_expected.get(&from) == Some(nonce)` → `if true` |
+| `snapshot_entity_table_is_bounded` | 实体表上限裁剪改成 `if false` |
+| `normal_uv_is_left_untouched` | 判"UV 有跨度"的 `||` 两个条件删掉（正常 UV 也被清零） |
+
+这几条都是**安全语义**（握手 nonce、封印包 token、打洞 nonce、实体表上限），
+全部注入即红 —— 说明联机那套"拒绝"路径是真有判据兜着的，不是只写了注释。
+
+现状：台账 **105 / 196**；`injections.txt` 61 条。

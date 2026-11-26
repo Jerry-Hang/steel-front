@@ -66,3 +66,8 @@ beveled_box_faces_reach_the_outer_surface | src/engine/meshgen.rs |             
 snapshot_count_above_cap_is_rejected | src/net.rs | pub const MAX_SNAPSHOT_NPCS: usize = 1024; | pub const MAX_SNAPSHOT_NPCS: usize = 65535;
 support_height_among_matches_the_method_and_hand_values | src/engine/physics.rs |         if a.max.y > limit || a.max.y <= best { |         if a.max.y > limit + 1000.0 || a.max.y <= best {
 body_resting_on_static_platform_stays_supported | src/engine/physics.rs | grounded_now[1] = -normal.y > 0.5; | grounded_now[1] = false; | all
+join_proof_with_wrong_nonce_is_refused | src/net.rs |             Some(expected) if expected == nonce => { |             Some(_expected) if true => {
+forged_sealed_packet_is_rejected | src/net.rs |                     if self.tokens.get(&from).copied() != Some(token) { |                     if false {
+punch_with_wrong_nonce_is_dropped | src/net.rs |                     if self.punch_expected.get(&from).copied() == Some(nonce) { |                     if true {
+snapshot_entity_table_is_bounded | src/net.rs |         if self.entities.len() > MAX_ENTITIES { |         if false {
+normal_uv_is_left_untouched | src/engine/props.rs |             if m.verts.is_empty() || (u1 - u0) > 1e-3 || (v1 - v0) > 1e-3 { |             if m.verts.is_empty() {
