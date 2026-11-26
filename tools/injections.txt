@@ -76,3 +76,9 @@ duplicate_or_stale_input_seq_is_dropped | src/engine/game/net.rs |     if newer 
 editor_panel_highlights_exactly_one_selected_row | src/engine/editor.rs |         if is_sel { |         if false { | all
 decimation_preserves_effective_time | src/engine/game/ai_util.rs |         AI_FAR_DECIMATE as f32 |         1.0
 editor_panel_draws_a_row_per_entity | src/engine/editor.rs |     for id in rows[wstart..wend].iter().copied() { |     for id in rows[wstart..wstart].iter().copied() {
+marker_skin_has_no_brick_center_tone_step | src/engine/procedural.rs |     let col = ((u * SKIN_BRICK_COLS + off).floor() as i32).rem_euclid(cols); |     let col = ((u * 8.0 + off).floor() as i32).rem_euclid(cols);
+first_frame_resets_the_sampling_window | src/perf_log.rs |         if self.frames == 1 { |         if false {
+tick_does_not_accumulate_before_companies_exist | src/engine/ai_command.rs |         if self.companies.is_empty() { |         if false && self.companies.is_empty() {
+box_triangles_are_all_outward_facing | src/engine/ray_tracer.rs |         idx[(f * 6 + 1) as usize] = b + 1; |         idx[(f * 6 + 1) as usize] = b + 2;
+burst_fire_respects_the_fire_cooldown | src/engine/game/weapons.rs |         if self.fire_cooldown > 0.0 { |         if false { | all
+replay_step_up_matches_the_player | src/engine/game/net.rs | const PLAYER_STEP_UP: f32 = 0.45; | const PLAYER_STEP_UP: f32 = 0.3; | all

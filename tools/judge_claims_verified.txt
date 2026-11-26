@@ -254,3 +254,14 @@ editor_panel_highlights_exactly_one_selected_row
 #    现在只数行文本（BODY/WHITE 色的 quad）⇒ 注入立即红。
 editor_panel_draws_a_row_per_entity
 decimation_preserves_effective_time
+
+# ── 2026-11-26 第十三批（砖缝 / 首帧窗口 / 编制前 tick / box 绕序 / 连发冷却 / 重放台阶）──
+marker_skin_has_no_brick_center_tone_step
+first_frame_resets_the_sampling_window
+# 注入用 `if false && companies.is_empty()` 让"提前 return"失效（单行可行）
+tick_does_not_accumulate_before_companies_exist
+box_triangles_are_all_outward_facing
+# ⚠️ 该行在 weapons.rs 出现 3 次 ⇒ 用 all 模式
+burst_fire_respects_the_fire_cooldown
+# ⚠️ 常量在 net.rs 出现 2 次（含一条断言里的字符串）⇒ all 模式
+replay_step_up_matches_the_player

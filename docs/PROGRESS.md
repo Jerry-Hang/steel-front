@@ -6700,3 +6700,21 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 修法：只数**行文本**（`BODY` / `WHITE` 色的 quad）⇒ 注入立即红。
 
 现状：台账 **110 / 196**；`injections.txt` 65 条。
+
+### 2026-11-26：欠账 110 → 116 / 196（本轮 6 条）
+
+| 判据 | 注入 |
+|---|---|
+| `marker_skin_has_no_brick_center_tone_step` | 砖列数写死 `8.0`（丢掉 `SKIN_BRICK_COLS`） |
+| `first_frame_resets_the_sampling_window` | 首帧重置窗口那段 `if false` |
+| `tick_does_not_accumulate_before_companies_exist` | 提前 return 改 `if false && …` |
+| `box_triangles_are_all_outward_facing` | 索引 `b+1` → `b+2`（一个三角形翻面） |
+| `burst_fire_respects_the_fire_cooldown` | 冷却判断 `if false`（all） |
+| `replay_step_up_matches_the_player` | `PLAYER_STEP_UP` 0.45 → 0.3（all） |
+
+**「all 模式」是本轮的关键**：好几条声称的锚点在文件里出现 2~3 次
+（`if self.fire_cooldown > 0.0 {` 三处、`const PLAYER_STEP_UP` 两处——其中一处
+还是**判据自己 `contains(...)` 里的字符串**）。这类必须用 `all` 让"所有出现都改掉"，
+注入才真的改变行为。**单行锚点 + 唯一性**是理想情况，不是总能满足。
+
+现状：台账 **116 / 196**；`injections.txt` 71 条。
