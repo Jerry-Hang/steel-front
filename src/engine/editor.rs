@@ -1136,9 +1136,19 @@ mod tests {
     /// 反向验证：把行循环改成只画第一行 ⇒ 两者相等，这条红。
     #[test]
     fn editor_panel_draws_a_row_per_entity() {
-        let a = panel_quads(&scene_with(1), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0).len();
-        let b = panel_quads(&scene_with(3), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0).len();
-        assert!(b > a, "3 个实体的面板应比 1 个的多出文本 quad（{a} vs {b}）");
+        // 🔴 **只数"行文本"，不数整块面板**：提示文字里带实体数 `N`，
+        // N 的位数变化会让 quad 数跟着变 ⇒ 直接用 `.len()` 比大小测的是**文字长度**，
+        // 行循环就算被改成空区间也照样"通过"（实测：改成 `rows[wstart..wstart]` 仍然 NOT-RED）。
+        // 隔壁 `editor_panel_bounds_its_rows` 已经因为同一个原因改过一次口径，这条当时漏改。
+        let rows_of = |n: usize| {
+            panel_quads(&scene_with(n), None, TreeFilter::All, 0, 1280.0, 720.0, 1.0)
+                .iter()
+                .filter(|q| q.color == BODY || q.color == Color::WHITE)
+                .count()
+        };
+        let a = rows_of(1);
+        let b = rows_of(3);
+        assert!(b > a, "3 个实体的行文本应比 1 个的多（{a} vs {b}）");
     }
 
     /// 🔴 超出上限时**不许无限增长**（HUD quad 容量有限）。

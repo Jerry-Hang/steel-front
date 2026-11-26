@@ -6681,3 +6681,22 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 全部注入即红 —— 说明联机那套"拒绝"路径是真有判据兜着的，不是只写了注释。
 
 现状：台账 **105 / 196**；`injections.txt` 61 条。
+
+### 2026-11-26：欠账 105 → 110 / 196（并修好一条"代理指标"判据）
+
+| 判据 | 注入 |
+|---|---|
+| `replay_lands_on_the_supporting_box_top` | `pos[1] = standing_y(...)` → `pos[1] = pos[1]` |
+| `duplicate_or_stale_input_seq_is_dropped` | `if newer` → `if true`（无条件覆盖） |
+| `editor_panel_highlights_exactly_one_selected_row` | `if is_sel` → `if false`（all） |
+| `editor_panel_draws_a_row_per_entity` | 行循环区间改成空（**修口径后**才红） |
+| `decimation_preserves_effective_time` | 非交互分支的补时系数 `AI_FAR_DECIMATE` → `1.0` |
+
+🔴 **`editor_panel_draws_a_row_per_entity` 的代理指标有缺陷**（本会话第二个同形案例）：
+它用"整块面板的 quad 数"当代理，而**提示文字里带实体数 `N`** ⇒ N 的位数变化就能让
+"3 个 vs 1 个"仍然成立。实测把行循环区间改成**空的**，这条**依然 NOT-RED**。
+隔壁 `editor_panel_bounds_its_rows` 早就因为同一个原因改过口径（注释里写着
+"那条断言测的是**文字长度**，不是面板有界"），**这条当时漏改**。
+修法：只数**行文本**（`BODY` / `WHITE` 色的 quad）⇒ 注入立即红。
+
+现状：台账 **110 / 196**；`injections.txt` 65 条。

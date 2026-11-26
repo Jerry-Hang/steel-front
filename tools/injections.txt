@@ -71,3 +71,8 @@ forged_sealed_packet_is_rejected | src/net.rs |                     if self.toke
 punch_with_wrong_nonce_is_dropped | src/net.rs |                     if self.punch_expected.get(&from).copied() == Some(nonce) { |                     if true {
 snapshot_entity_table_is_bounded | src/net.rs |         if self.entities.len() > MAX_ENTITIES { |         if false {
 normal_uv_is_left_untouched | src/engine/props.rs |             if m.verts.is_empty() || (u1 - u0) > 1e-3 || (v1 - v0) > 1e-3 { |             if m.verts.is_empty() {
+replay_lands_on_the_supporting_box_top | src/engine/game/net.rs |         pos[1] = standing_y(pos, bodies, PLAYER_STEP_UP); |         pos[1] = pos[1];
+duplicate_or_stale_input_seq_is_dropped | src/engine/game/net.rs |     if newer { |     if true {
+editor_panel_highlights_exactly_one_selected_row | src/engine/editor.rs |         if is_sel { |         if false { | all
+decimation_preserves_effective_time | src/engine/game/ai_util.rs |         AI_FAR_DECIMATE as f32 |         1.0
+editor_panel_draws_a_row_per_entity | src/engine/editor.rs |     for id in rows[wstart..wend].iter().copied() { |     for id in rows[wstart..wstart].iter().copied() {

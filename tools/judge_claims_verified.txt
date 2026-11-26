@@ -244,3 +244,13 @@ forged_sealed_packet_is_rejected
 punch_with_wrong_nonce_is_dropped
 snapshot_entity_table_is_bounded
 normal_uv_is_left_untouched
+
+# ── 2026-11-26 第十二批（重放落地 / 输入去重 / 高亮行 / 行数 / 减频补时）──
+replay_lands_on_the_supporting_box_top
+duplicate_or_stale_input_seq_is_dropped
+editor_panel_highlights_exactly_one_selected_row
+# 🔴 口径修过一次：原来用整块面板的 quad 数当代理，而提示文字带实体数 N ⇒
+#    N 的位数变化就会让"3 个 vs 1 个"仍然成立（行循环改空区间也不红）。
+#    现在只数行文本（BODY/WHITE 色的 quad）⇒ 注入立即红。
+editor_panel_draws_a_row_per_entity
+decimation_preserves_effective_time
