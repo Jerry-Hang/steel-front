@@ -6312,3 +6312,36 @@ CPU 侧现在用属性存在性定死了；着色器那条暂不动（动它就�
 另外两次夹具自身的错（都被"判据红"暴露，说明判据有效）：
 1. 交错布局没写 byteStride ⇒ 解析器按紧凑约定读到相邻顶点的 UV 当位置，UV 全变 0（畸形 GLB）；
 2. 图片的 bufferView 下标写死 1，而带 UV 时它前面多一个 bufferView ⇒ 解码到几何数据、报"格式无法识别"。
+
+### 2026-11-26：贴图上屏第 2 步 —— 名字哈希定格 + 图集打包命令（allow 已删）
+
+**关键设计决定：模型名 → 图集格用 FNV-1a 哈希，不用"排序后的序号"。**
+
+理由是两条代码路径：打包工具（写图集 PNG）与游戏（加载时重映射 UV）**不是同一段代码**。
+用序号意味着两边必须拿到完全相同的文件集合、相同的排序规则与编码 ——
+任何一处不同（多一个文件、locale 差异）都会让**所有模型**的 UV 集体错位。
+哈希只依赖名字本身，两边各算各的必然一致。代价是可能撞格 ⇒ **必须报告冲突**，不能静默。
+
+新增：
+- `cell_for_name(name, grid)` —— 纯函数，同名同格
+- `AtlasInput` / `PackReport{packed, skipped, collisions}` / `pack_props_into_atlas`
+- 命令 `asset.atlas_pack <格数> <输出png> [目录]` —— **生产路径**，不再是只在测试里活着的代码
+
+判据 16 → 19 条，新增 3 条全部反向可红（`h % n` 写死 / 删 collisions.push / 删 skipped.push）。
+
+实机两条：
+```
+asset.atlas_pack 8 /tmp/atlas_gen.png assets/props
+  → atlas 1024x1024 cells=8x8 packed=0 skipped=52 collisions=0
+asset.atlas_pack 4 /tmp/atlas_fix.png /tmp/texprops   （放的是 tex_4x4.glb）
+  → atlas 512x512 cells=4x4 packed=1 skipped=0 collisions=0
+  图集抽样非白 256 个点，首个非白 (0,128)=(255,0,0,255) ✓ 真有像素
+```
+
+🔴 **最重要的结论**：`packed=0 skipped=52` —— **现有 52 件道具资产一件都没有内嵌贴图**
+（与 2026-11-25 的实测一致：`images=0 textures=0`）。
+也就是说，整条链路（解析 → 打包 → 写图集）现在是**通的、有判据的**，
+但要看到画面上出现贴图，**前提是先有带贴图的资产** —— 这是资产侧的工作，不是引擎侧的。
+
+`#![allow(dead_code)]` 已按契约删除：删掉后仍 **0 警告** ⇒ 说明打包代码真的被生产路径用上了
+（这正是契约里写的判定方式：判据是编译器）。

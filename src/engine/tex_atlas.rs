@@ -313,6 +313,98 @@ pub fn pack_glb_into_atlas(
     Ok((mesh, FEATURE_AUTHORED_TEX))
 }
 
+
+// ---------------------------------------------------------------------------
+// 第 2 步：真实资产接线 —— 模型名 → 图集格（两侧各自算，不靠顺序）
+// ---------------------------------------------------------------------------
+
+/// 模型名 → 图集格下标（FNV-1a 哈希取模）。
+///
+/// 🔴 **为什么用哈希而不是"按名字排序后的序号"**：
+/// 打包工具（写图集 PNG）与游戏（加载时重映射 UV）是**两个不同的代码路径**，
+/// 用排序序号意味着两边必须拿到完全相同的模型集合、相同的排序规则、相同的编码 ——
+/// 任何一处不同（多一个文件、locale 排序差异）都会让所有模型的 UV 集体错位。
+/// 哈希只依赖**名字本身**：两边各算各的，结果必然一致。
+///
+/// 代价是**可能撞格**：`Hash` 取模 cell_count 会有冲突，冲突时后写的覆盖先写的，
+/// 表现为"某个道具显示成另一个道具的贴图"。所以：
+/// - 打包时必须**报告冲突**（`PackReport::collisions`），不能静默；
+/// - 格数要远大于模型数（当前 52 件 / 16 格 = 明显不够，实操应给 64 格以上）。
+pub fn cell_for_name(name: &str, grid: AtlasGrid) -> Option<u32> {
+    let n = grid.cell_count();
+    if n == 0 {
+        return None;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some((h % n as u64) as u32)
+}
+
+/// 一件要打包的资产：名字 + GLB 字节。
+pub struct AtlasInput<'a> {
+    pub name: &'a str,
+    pub bytes: &'a [u8],
+}
+
+/// 打包结果报告（给人看，也给判据看）。
+#[derive(Debug, Default, Clone)]
+pub struct PackReport {
+    /// 成功打包的件数与格号。
+    pub packed: Vec<(String, u32)>,
+    /// 没有内嵌贴图（或解析失败）而跳过的件。
+    pub skipped: Vec<(String, String)>,
+    /// 撞格的件：`(格号, 先占者, 后来者)` —— **必须报出来**，静默覆盖表现为"贴图串了"。
+    pub collisions: Vec<(u32, String, String)>,
+}
+
+/// 把若干件资产打进一张图集（每件一个哈希格）。
+///
+/// 返回 `(图集, 报告)`。**没有贴图的件会被跳过并记进 `skipped`** ——
+/// 它们的 UV 不会被重映射（游戏侧同样跳过，因为游戏侧也不知道它们有贴图）。
+pub fn pack_props_into_atlas(
+    inputs: &[AtlasInput<'_>],
+    grid: AtlasGrid,
+    atlas_w: u32,
+    atlas_h: u32,
+) -> (RgbaImage, PackReport) {
+    let mut atlas = RgbaImage::filled(atlas_w, atlas_h, [255, 255, 255, 255]);
+    let mut report = PackReport::default();
+    let mut owner: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    for inp in inputs {
+        let cell = match cell_for_name(inp.name, grid) {
+            Some(c) => c,
+            None => {
+                report.skipped.push((inp.name.to_string(), "图集格数 0".into()));
+                continue;
+            }
+        };
+        let texs = match crate::engine::asset_texture::parse_glb_textures(inp.bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                report.skipped.push((inp.name.to_string(), e));
+                continue;
+            }
+        };
+        let Some(tex) = texs.first() else {
+            report.skipped.push((inp.name.to_string(), "无内嵌贴图".into()));
+            continue;
+        };
+        if let Some(prev) = owner.get(&cell) {
+            report
+                .collisions
+                .push((cell, prev.clone(), inp.name.to_string()));
+        }
+        owner.insert(cell, inp.name.to_string());
+        let rect = grid.cell_rect(cell).expect("cell 已保证在范围内");
+        blit_into_atlas(&mut atlas, rect, tex);
+        report.packed.push((inp.name.to_string(), cell));
+    }
+    (atlas, report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +584,68 @@ mod tests {
         );
         let has_full_uv = mesh.verts.iter().any(|v| v[6] > 0.9 && v[7] > 0.9);
         assert!(has_full_uv, "原 UV 的 (1,1) 角必须还在");
+    }
+
+
+    /// 🔴 **名字 → 格必须是纯函数**：同样的名字永远得到同样的格，与调用顺序无关。
+    ///
+    /// 这是"打包工具与游戏各算各的"能成立的前提。若引入任何顺序依赖，
+    /// 两边一旦文件集合不同，所有模型 UV 会集体错位。
+    ///
+    /// 反向验证：把 `h % n` 换成 `h % 7`（写死）⇒ 第二条断言红。
+    #[test]
+    fn cell_assignment_is_a_pure_function_of_the_name() {
+        let g = AtlasGrid::new(8, 8);
+        let a = cell_for_name("barrel_metal", g);
+        let b = cell_for_name("barrel_metal", g);
+        assert_eq!(a, b, "同名必须同格");
+        assert!(a.unwrap() < g.cell_count(), "格号必须在范围内");
+        // 不同名字一样不同格（不保证，但这两个实测不同）
+        assert_ne!(
+            cell_for_name("barrel_metal", g),
+            cell_for_name("tree_oak", g),
+            "这两个名字实测落在不同格"
+        );
+        // 格数为 0 ⇒ None 而不是除零 panic
+        assert_eq!(cell_for_name("x", AtlasGrid::new(0, 4)), None);
+    }
+
+    /// 🔴 **撞格必须被报告**（静默覆盖会表现为"某个道具显示成另一个的贴图"）。
+    ///
+    /// 反向验证：删掉 `report.collisions.push(...)` 那段 ⇒ 本判据红。
+    #[test]
+    fn collisions_are_reported_not_silently_overwritten() {
+        // 1 格图集 ⇒ 任何两件都必然撞
+        let g = AtlasGrid::new(1, 1);
+        let glb_a = glb_quad_with_texture(true, true);
+        let glb_b = glb_quad_with_texture(true, true);
+        let inputs = vec![
+            AtlasInput { name: "a", bytes: &glb_a },
+            AtlasInput { name: "b", bytes: &glb_b },
+        ];
+        let (_atlas, rep) = pack_props_into_atlas(&inputs, g, 8, 8);
+        assert_eq!(rep.packed.len(), 2, "两件都要打包");
+        assert_eq!(rep.collisions.len(), 1, "必须报告 1 次撞格");
+        let (cell, first, second) = &rep.collisions[0];
+        assert_eq!(*cell, 0);
+        assert_eq!(first, "a");
+        assert_eq!(second, "b");
+    }
+
+    /// 没有内嵌贴图的件 ⇒ 跳过并**说明原因**（不是静默忽略）。
+    ///
+    /// 反向验证：把 `report.skipped.push(...)` 换成 `continue` ⇒ 本判据红。
+    #[test]
+    fn untextured_inputs_are_skipped_with_a_reason() {
+        let g = AtlasGrid::new(4, 4);
+        let glb = glb_quad_with_texture(true, false);
+        let inputs = vec![AtlasInput { name: "plain", bytes: &glb }];
+        let (atlas, rep) = pack_props_into_atlas(&inputs, g, 16, 16);
+        assert!(rep.packed.is_empty(), "没贴图不该打包");
+        assert_eq!(rep.skipped.len(), 1);
+        assert!(rep.skipped[0].1.contains("无内嵌贴图"), "要说明原因：{:?}", rep.skipped[0].1);
+        // 图集保持纯白底板
+        assert_eq!(atlas.pixel(0, 0), Some([255, 255, 255, 255]));
     }
 
     /// 🔴 **网格必须完整覆盖图集且互不重叠**。

@@ -481,6 +481,69 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             }
         },
     );
+    // ---- 图集打包（2026-11-26：贴图上屏第 2 步，写侧）----
+    //
+    // 把 `assets/props/*.glb` 里各自的内嵌贴图打进**一张图集 PNG**（渲染器 binding 12 读的就是它）。
+    // 格号由 `cell_for_name`（名字哈希）决定 —— 打包与游戏加载是两条不同的代码路径，
+    // 只有"只依赖名字"的规则才能保证两边算出同样的格。
+    //
+    // 这一条让打包代码成为**生产路径**（而不是只在测试里活着），同时给 AI 一个可调用的入口。
+    reg.add_command(
+        "asset.atlas_pack",
+        "把 props 目录下的内嵌贴图打进图集 PNG：asset.atlas_pack <格数> <输出png> [目录]",
+        |_ctx, args| {
+            let cells: u32 = args
+                .first()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| "缺格数（如 8 表示 8x8=64 格）".to_string())?;
+            let out = args.get(1).ok_or_else(|| "缺输出路径".to_string())?.to_string();
+            let dir = args.get(2).copied().unwrap_or("assets/props").to_string();
+            let grid = crate::engine::tex_atlas::AtlasGrid::new(cells, cells);
+            // 至少 512 像素一格，保证小图也能看清（道具贴图本来就是小图）
+            let side = (cells * 128).clamp(256, 4096);
+            let mut glbs: Vec<(String, Vec<u8>)> = Vec::new();
+            let rd = std::fs::read_dir(&dir).map_err(|e| format!("读目录 {dir} 失败：{e}"))?;
+            for ent in rd.flatten() {
+                let path = ent.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("glb") {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                if let Ok(bytes) = std::fs::read(&path) {
+                    glbs.push((name, bytes));
+                }
+            }
+            if glbs.is_empty() {
+                return Err(format!("{dir} 里没有 .glb"));
+            }
+            glbs.sort_by(|a, b| a.0.cmp(&b.0)); // 只为输出稳定，格号与顺序无关
+            let inputs: Vec<crate::engine::tex_atlas::AtlasInput<'_>> = glbs
+                .iter()
+                .map(|(n, b)| crate::engine::tex_atlas::AtlasInput { name: n, bytes: b })
+                .collect();
+            let (atlas, rep) = crate::engine::tex_atlas::pack_props_into_atlas(
+                &inputs, grid, side, side,
+            );
+            // 写 PNG
+            let img: image::RgbaImage =
+                image::ImageBuffer::from_raw(atlas.width, atlas.height, atlas.data.clone())
+                    .ok_or_else(|| "图集缓冲尺寸不符".to_string())?;
+            img.save(&out).map_err(|e| format!("写 {out} 失败：{e}"))?;
+            Ok(format!(
+                "atlas {side}x{side} cells={}x{} packed={} skipped={} collisions={} → {out}",
+                grid.cols,
+                grid.rows,
+                rep.packed.len(),
+                rep.skipped.len(),
+                rep.collisions.len()
+            ))
+        },
+    );
+
     // ---- 贴图探针（2026-11-25：GLB 内嵌贴图导入的读侧）----
     //
     // 与 `asset.skin_probe` / `asset.anim_probe` 同族：让 AI 能**读到**这个模型有没有贴图、

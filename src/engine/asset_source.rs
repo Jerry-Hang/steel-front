@@ -590,6 +590,10 @@ mod asset_path_scan_tests {
         ("src/engine/plugin.rs", "std::fs::read(&path[..]).map_err"),
         // GPU 输入探针（P4e 前置）：同上，读用户指定的 GLB。
         ("src/engine/plugin.rs", "std::fs::read(&path[..]).map_err(|e| format!(\"读文件失败"),
+        // 图集打包（2026-11-26）：扫描 props 目录并读其中的 GLB —— 用户指定的目录，
+        // 与探针同类（不是随包资产；Android 上那是只读打包资源，这里只在开发机上跑）。
+        ("src/engine/plugin.rs", "std::fs::read_dir(&dir)"),
+        ("src/engine/plugin.rs", "if let Ok(bytes) = std::fs::read(&path)"),
         // 贴图探针（2026-11-25）：只读用户指定的 GLB，与骨骼/动画探针同类。
         ("src/engine/plugin.rs", "std::fs::read(path).map_err(|e| format!("),
         // 骨骼能力边界自查（P4g）：只读用户指定的 GLB，同场景读回。
