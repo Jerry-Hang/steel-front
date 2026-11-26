@@ -275,3 +275,11 @@ start_run_resets_stance_sprint_heal_and_consumables
 a_npc_killed_this_frame_does_not_return_fire
 # ⚠️ 三处 victory_banner 文案（应力/关卡/目标完成）—— 判据走的是 update_objectives 那条
 objective_victory_sets_a_visible_banner
+
+# ── 2026-11-26 第十五批（朝向最近街道 / 路口街道家具）──
+# z 分支的判据符号反了（>= → <）⇒ 两个分支互换，红
+facing_points_at_the_nearest_street
+# 网格筛选恒跳过 ⇒ 家具 0 件，红
+#   ⚠️ 第一次注入写成 `&& false`（条件恒假）= 反而**更多**家具 ⇒ NOT-RED。
+#      **"删掉过滤"和"让过滤恒真"是两个方向**，要按断言方向选。
+intersections_have_downloaded_street_furniture

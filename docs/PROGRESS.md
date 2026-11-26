@@ -6741,3 +6741,25 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 ⇒ **改多份同形代码之前，先确认判据实际走哪一份**（读判据体，而不是读实现）。
 
 现状：台账 **122 / 196**；`injections.txt` 77 条。
+
+### 2026-11-26：欠账 122 → 124 / 196（本轮只确认 2 条，另记 1 条待办）
+
+| 判据 | 注入 |
+|---|---|
+| `facing_points_at_the_nearest_street` | z 分支符号 `>=` → `<`（分支互换） |
+| `intersections_have_downloaded_street_furniture` | 网格筛选恒跳过（家具 0 件） |
+
+**教训一：注入的方向要和断言的方向一致。**
+`intersections` 的断言是 `n >= 8`（**至少** 8 件）。我第一次写成
+`if 条件 && false` —— 那是"**不过滤**了"，家具**更多** ⇒ NOT-RED。
+要证"这条守卫有用"，必须让它**恒跳过**（`if true`）⇒ 0 件 ⇒ 红。
+**"删掉过滤"和"让过滤恒真"是两个方向，先看断言是下界还是上界。**
+
+**教训二（待办）：`street_clutter_is_deterministic_and_clear_of_buildings` 的守卫压不到。**
+它的 `blocked` 检查挡的是"杂物落进**邻居**脚印"。我给它加了一组并排 11m 的楼
+（各自半宽 6m，中间只剩负间隙），把守卫改成 `if false` **仍然 NOT-RED** ——
+说明按现在的落点几何（每栋楼沿 `dist = hw.max(hd) + 0.9..1.8` 取点），
+那些点即使不被拦也不会落进邻居的判定区。
+⇒ 要验这条得换思路（例如把"放置合法性判定"抽成纯函数单独测），本轮先记为待办。
+
+现状：台账 **124 / 196**；`injections.txt` 79 条 + 1 条带原因的待办注记。

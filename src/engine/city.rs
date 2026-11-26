@@ -2185,6 +2185,20 @@ mod city_layout_tests {
         ];
         let a = clutter_specs(&footprints, &[]);
         let b = clutter_specs(&footprints, &[]);
+        // 🔴 **近邻楼**：上面那三栋相距 20m 以上，杂物根本够不着邻居 ⇒ `blocked` 守卫
+        // 那段**从来没被压到**（实测把它改成 `if false` 仍然通过）。
+        // 这组把两栋楼并排放在 11m 处（各自半宽 6m）⇒ 中间只剩负间隙，必须靠守卫拦。
+        let near = [(0.0, 0.0, 6.0, 5.0), (11.0, 0.0, 6.0, 5.0)];
+        let c = clutter_specs(&near, &[]);
+        assert!(!c.is_empty(), "近邻楼场景不该一件杂物都不产（那说明测试没压到守卫）");
+        for p in &c {
+            for &(fx, fz, fw, fd) in &near {
+                assert!(
+                    (p.x - fx).abs() >= fw + 0.5 || (p.z - fz).abs() >= fd + 0.5,
+                    "杂物插进近邻楼脚印：{p:?} vs ({fx},{fz},{fw},{fd})"
+                );
+            }
+        }
         assert!(!a.is_empty(), "合成脚印没产出任何杂物（生成器退化了）");
         assert_eq!(a, b, "杂物生成不是确定性的（两次调用结果不同）");
         for p in &a {
