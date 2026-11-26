@@ -50,3 +50,10 @@ rotate_delta_y_matches_the_swept_angle | src/engine/gizmo.rs |     let mut d = a
 ndc_from_pixel_flips_y_and_maps_corners | src/engine/editor.rs |     (2.0 * x / w - 1.0, 1.0 - 2.0 * y / h) |     (2.0 * x / w - 1.0, 2.0 * y / h - 1.0)
 gizmo_axis_pick_uses_screen_distance_and_rejects_far_clicks | src/engine/gizmo.rs |         if d <= GIZMO_PICK_EPS && best.map(|(_, bd)| d < bd).unwrap_or(true) { |         if true && best.map(|(_, bd)| d < bd).unwrap_or(true) {
 matrices_multiply_world_before_inverse_bind | src/engine/skin.rs |             .map(|(w, ib)| *w * *ib) |             .map(|(w, ib)| *ib * *w)
+rain_flag_parses_from_toml | src/engine/map.rs |     entries.iter().any(|(k, v)| k == key && matches!(v, Value::Bool)) |     false
+collide_four_iterations_resolve_a_corner_two_do_not | src/engine/physics.rs | const COLLIDE_ITERATIONS: usize = 4; | const COLLIDE_ITERATIONS: usize = 2;
+battery_bar_only_when_visible | src/ui.rs |           if self.battery_visible { |           if true {
+text_world_draws_outline_behind_the_fill | src/ui.rs |                 for (dx, dy) in [(-off, 0.0), (off, 0.0), (0.0, -off), (0.0, off)] { |                 for (dx, dy) in [(0.0f32, 0.0f32); 0] {
+command_box_stays_inside_the_screen | src/ui.rs |         screen_h - 46.0 * scale |         screen_h - 0.0 * scale
+# 待办：ui_text_has_no_unrenderable_chars 未入清单 —— 它只覆盖少数映射（× 改成 U+FFFD 仍通过），
+# 而破折号那行含 `|`，无法做清单锚点（分隔符冲突）。要修的是**测试覆盖面**，不是清单。

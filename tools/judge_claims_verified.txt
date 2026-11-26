@@ -207,3 +207,10 @@ gizmo_axis_pick_uses_screen_distance_and_rejects_far_clicks
 # 🔴 骨骼矩阵顺序：绑定姿势下 w*ib == ib*w == I，**不可判别**；
 #    新判据用非单位 w（旋转+平移）+ 平移 IB，两种顺序结果不同 ⇒ 注入后红
 matrices_multiply_world_before_inverse_bind
+
+# ── 2026-11-26 第七批（地图布尔 / 碰撞迭代 / HUD 电量条 / 描边 / 命令框）──
+rain_flag_parses_from_toml
+collide_four_iterations_resolve_a_corner_two_do_not
+battery_bar_only_when_visible
+text_world_draws_outline_behind_the_fill
+command_box_stays_inside_the_screen

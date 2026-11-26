@@ -6582,3 +6582,27 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 **累计三例同族缺陷**（值得写进教训）：`GIZMO_LEN == 1`、`times=[0,1]`（dt=1）、
 绑定姿势 `w == ib⁻¹` —— **参数取到"退化值"时，两种实现数学上等价，判据就失去区分度**。
 ⇒ 写判据时先问一句：**"我选的输入，能让这两种写法给出不同结果吗？"**
+
+### 2026-11-26：欠账 83 → 88 / 195（本轮确认 5 条 + 1 条如实记为待办）
+
+| 判据 | 注入 |
+|---|---|
+| `rain_flag_parses_from_toml` | `table_bool` 恒返回 `false` |
+| `collide_four_iterations_resolve_a_corner_two_do_not` | `COLLIDE_ITERATIONS` 4 → 2 |
+| `battery_bar_only_when_visible` | `if self.battery_visible` → `if true` |
+| `text_world_draws_outline_behind_the_fill` | 描边四方向循环改空数组 |
+| `command_box_stays_inside_the_screen` | `screen_h - 46.0 * scale` → `- 0.0 * scale` |
+
+🔴 **`ui_text_has_no_unrenderable_chars` 没进清单，原因是真缺陷**（不是懒得做）：
+它声称"删掉 `\u{2014}` 那项就红"，但实测把 **`×` 映射改成 `U+FFFD`（无字模字符）仍然通过**
+⇒ **该测试只覆盖少数几个映射**，名字与覆盖面不符。
+而破折号那一行本身含 `|`，与清单的 `" | "` 分隔符冲突，**连锚点都写不进去**。
+⇒ 记成待办：**要修的是测试覆盖面**（对 `typographic_fallback` 做全量遍历），不是清单格式。
+
+两条工具边界：
+
+- `for (dx, dy) in []` **编译不过**（元素类型推不出）⇒ 空数组要写成 `[(0.0f32, 0.0f32); 0]`。
+  这类"注入写坏了"现在记 `BROKEN`，不会伪装成 RED。
+- 清单分隔符 `" | "` 意味着**锚点里不能有竖线**；含 `|` 的代码行要从别的角度注入。
+
+现状：台账 **88 / 195**；`injections.txt` 含 1 条带原因的待办注记。
