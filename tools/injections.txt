@@ -153,3 +153,5 @@ scene_rejects_cycles | src/engine/scene.rs |                 if c == child { |  
 #   printf '\n#[allow(unused_imports)]\nuse crate::engine::game::Npc as _;\n' >> src/engine/renderer/gpu_layout.rs
 #   cargo test --release -- engine_layer_does_not_grow   → 0 passed; 1 failed（RED）
 #   验证后：git checkout -- src/engine/renderer/gpu_layout.rs
+gizmo_mouse_drag_moves_along_the_picked_axis | src/engine/gizmo.rs |     let axis = pick_axis_at_screen(entity, view, from_ndc.0, from_ndc.1)?; |     let axis = Axis::X;
+ai_roundtrip_matches_every_field_of_every_entity | src/engine/scene_io.rs |         if let Some(m) = fresh.mesh_of(*old) { |         if let Some(m) = fresh.mesh_of(*old).filter(|_| false) {

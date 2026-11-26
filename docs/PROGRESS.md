@@ -7047,3 +7047,19 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 目的是**每条欠账都有可查解释**，而不是留空白让人以为"忘了做"。
 
 现状：台账 **183 / 189**（97%）；`injections.txt` 146 条（含 1 条手工配方）。
+
+### 2026-11-26：欠账 183 → 185 / 189（98%）
+
+| 判据 | 注入 |
+|---|---|
+| `gizmo_mouse_drag_moves_along_the_picked_axis` | 拖动入口把 `pick_axis_at_screen` 换成固定 `Axis::X` |
+| `ai_roundtrip_matches_every_field_of_every_entity` | `apply_to` 不搬网格（`.filter(|_| false)`） |
+
+这两条原本被我归进"C 类（需复杂场景）"，实际都**一次注入就成了** ——
+它们的难点只是"找对那一行"，不是"造场景"。
+⇒ **分类要谨慎**：别用"看起来复杂"当跳过理由；本轮两条 C 类下马，
+`docs/JUDGE-DEBT.md` 里 C 类只剩 2 条（`destructible_cover` / `ai_command_chain`）。
+
+现状：台账 **185 / 189**（98%）；剩余 4 条：A 类 1（`obstacles_identical`，需新增代码）、
+B 类 2（`scale_factor_doubles` / `glb_skin_bind_pose`，退化输入不可判别，各有承接判据）、
+C 类 2（`destructible_cover` / `ai_command_chain`）。

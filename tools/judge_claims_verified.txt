@@ -401,3 +401,9 @@ scene_rejects_cycles
 # ⚠️ 手工注入：往 renderer 子模块追加 `use crate::engine::game::Npc as _;` ⇒ 红
 #    （清单是"单行替换"格式，表达不了"追加一行"，配方记在 injections.txt 末尾）
 engine_layer_does_not_grow_game_dependencies
+
+# ── 2026-11-26 第三十一批（gizmo 拖动固定轴 / 存读往返搬网格）──
+# 拖动入口把 pick_axis_at_screen 换成固定 Axis::X ⇒ 拖动不再沿选中轴，红
+gizmo_mouse_drag_moves_along_the_picked_axis
+# apply_to 不搬网格（.filter(|_| false)）⇒ 网格字段不等，红
+ai_roundtrip_matches_every_field_of_every_entity
