@@ -136,3 +136,5 @@ json_escape_round_trips_control_chars | src/llm_cmd.rs |             c if (c as 
 packing_a_textured_model_remaps_uvs_and_fills_the_cell | src/engine/tex_atlas.rs |     remap_mesh_uvs(&mut mesh.verts, rect, glb_has_texcoord(bytes)); |     let _ = glb_has_texcoord(bytes);
 collisions_are_reported_not_silently_overwritten | src/engine/tex_atlas.rs |         if let Some(prev) = owner.get(&cell) { |         if let Some(prev) = owner.get(&cell).filter(|_| false) {
 hardcoded_gameplay_keys_are_reserved | src/ui.rs |             20 | 21 | 23 | 25 | 32 | 35 | 42 | 44 | 49 | 57 | 60 | 61 | 63 | 114 | 163 | 170 |             23 | 32 | 35 | 57 | 63 | 114 | 170
+tiny_positive_radius_never_produces_nan | src/engine/simd.rs |         || !inv_r2.is_finite() |         || false
+scene_toml_rejects_dangling_parent | src/engine/scene_io.rs |             .ok_or_else(|| { |             .or_else(|| Some(*map.first().map(|(_, h)| h).expect("至少一个"))) .ok_or_else(|| {

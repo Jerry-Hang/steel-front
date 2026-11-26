@@ -372,3 +372,8 @@ packing_a_textured_model_remaps_uvs_and_fills_the_cell
 collisions_are_reported_not_silently_overwritten
 # ⚠️ 只删 F12（170）不红（判据只查"硬编码玩法键"那批）；删掉 20/21/25/42/44/49/60/61 才红
 hardcoded_gameplay_keys_are_reserved
+
+# ── 2026-11-26 第二十七批（极小半径 NaN / 悬空 parent）──
+tiny_positive_radius_never_produces_nan
+# ⚠️ 锚点必须带 12 空格缩进（`.ok_or_else(|| {` 只这一处）
+scene_toml_rejects_dangling_parent

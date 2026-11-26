@@ -6990,3 +6990,22 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 这两条都属于同一类：**"声称说 A 是守卫，其实 B 才是守卫"**。
 
 现状：台账 **171 / 191**（90%）；`injections.txt` 130 条。
+
+### 2026-11-26：欠账 171 → 173 / 190（91%）+ 抓住一条**结构性恒真**
+
+| 判据 | 注入 |
+|---|---|
+| `tiny_positive_radius_never_produces_nan` | `!inv_r2.is_finite()` → `false` |
+| `scene_toml_rejects_dangling_parent` | 悬空 parent 时回退成"随便挑一个" |
+
+🔴🔴 **`weather_channel_is_declared_on_both_sides` 的 Rust 侧断言是结构性恒真**：
+它 `read_to_string("src/engine/lighting.rs")` 然后 `contains("pub weather: Vec4")` ——
+**被扫的文件就是含这条断言的同一个文件**，needle 出现在测试自己的字面量里 ⇒
+**字段删了它也"通过"**。这正是 AGENTS 教训 14（"恒真的断言等于没写"）的又一例，
+而且比之前的例子更隐蔽：**自指扫描**（扫自己所在的文件找自己的字符串）。
+
+修法：改成 `offset_of!(LightUniform, weather) == 352`（368-16），按**布局**判而不是按文本。
+诚实说明：这个偏移断言**很难单独注入**（让偏移变化的改动几乎都会先撞上 368B 尺寸断言），
+所以它是二次保险；主守卫是 WGSL 侧扫描 + 尺寸断言。已把声称改成覆盖范围说明。
+
+现状：台账 **173 / 190**（91%）；`injections.txt` 132 条。

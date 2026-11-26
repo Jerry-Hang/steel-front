@@ -920,13 +920,22 @@ mod tests {
     }
 
     /// 反光地面通道必须**两端都声明**：Rust `LightUniform.weather` 与 WGSL 同名字段；
-    /// 尺寸也从 352 增到 368。反向验证：删掉任一端 ⇒ 红（WGSL 侧会静默读出垃圾）。
+    /// 尺寸也从 352 增到 368。覆盖范围（2026-11-26 说明）：
+    /// - **WGSL 侧**（`build_src.contains("weather: vec4<f32>")`）与**尺寸断言**（368B）
+    ///   仍是有效守卫：改字段类型/顺序会让尺寸不符而红。
+    /// - **Rust 侧原来那条扫源码断言是结构性恒真**（`self_src` 就是含 needle 的同一文件），
+    ///   已改成按 `offset_of!` 判字段偏移（352 = 368 - 16）。
+    ///   注意：偏移断言**很难单独注入** —— 让偏移变化的改动几乎都会先撞上尺寸断言，
+    ///   所以它是"字段还在原位"的二次保险，不是主守卫。
     #[test]
     fn weather_channel_is_declared_on_both_sides() {
         assert_eq!(std::mem::size_of::<LightUniform>(), 368, "weather 应让 UBO 增到 368B");
         let build_src = std::fs::read_to_string("build.rs").expect("读 build.rs");
         assert!(build_src.contains("weather: vec4<f32>"), "WGSL 侧缺 weather 字段");
-        let self_src = std::fs::read_to_string("src/engine/lighting.rs").expect("读 lighting.rs");
-        assert!(self_src.contains("pub weather: Vec4"), "Rust 侧缺 weather 字段");
+        // 🔴 **不能再扫源码字符串**（2026-11-26 修正）：`self_src` 就是**含这行断言的同一个文件**，
+        // needle 出现在测试自己的字面量里 ⇒ `contains` **结构性恒真**，字段删了也"通过"。
+        // 改成按**字段偏移**判定：weather 必须真的在 UBO 尾部（368 - 16 = 352）。
+        let off = std::mem::offset_of!(LightUniform, weather);
+        assert_eq!(off, 352, "weather 必须紧贴 UBO 尾部（偏移 352）；实测 {off}");
     }
 }
