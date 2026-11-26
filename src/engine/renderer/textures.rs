@@ -831,7 +831,16 @@ impl Renderer {
         // 道具 albedo 图集（binding 12）：先建 1×1 白图 —— 片元只在"有 UV"的件上采样，
         // 白图 × 顶点色 = 原样，所以这条链路在贴图还没做出来时是 fail-safe 的。
         // 有图集就加载真图（2048²，4×4 个 512² 格），没有就退回 1×1 白图（fail-safe）。
-        let (atlas_w, atlas_h, atlas_px) = match image::open("assets/textures/prop_atlas.png") {
+        // 🔴 选哪张图集由 `RV3D_PROP_ATLAS_PACKED` 决定，**必须与 props 的 UV 落格同步**：
+        // 开关关 ⇒ 用作者手作图集（UV 不动）；开关开 ⇒ 用打包器生成的图集（UV 已落进哈希格）。
+        // 两边任一侧单独切换 = 所有贴图错位，所以这个路径**只能**由同一个开关驱动。
+        let atlas_path = if crate::syscfg::flag("RV3D_PROP_ATLAS_PACKED") {
+            crate::engine::tex_atlas::GENERATED_ATLAS_PATH
+        } else {
+            "assets/textures/prop_atlas.png"
+        };
+        log::info!("道具图集：{}", atlas_path);
+        let (atlas_w, atlas_h, atlas_px) = match image::open(atlas_path) {
             Ok(im) => {
                 let im = im.to_rgba8();
                 log::info!("道具 albedo 图集已加载：{}x{}（binding 12）", im.width(), im.height());

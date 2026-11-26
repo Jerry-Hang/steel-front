@@ -520,8 +520,20 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
             }
             let dir = args.get(2).copied().unwrap_or("assets/props").to_string();
             let grid = crate::engine::tex_atlas::AtlasGrid::new(cells, cells);
-            // 至少 512 像素一格，保证小图也能看清（道具贴图本来就是小图）
-            let side = (cells * 128).clamp(256, 4096);
+            // 🔴 尺寸取**作者图集的尺寸**：作者 UV 是相对它的，同尺寸才能逐像素不变
+            // ⇒ 差异只可能来自本次写进去的格子（否则会被"整体缩放"污染）。
+            let authored = "assets/textures/prop_atlas.png";
+            let base = image::open(authored).ok().map(|im| {
+                let im = im.to_rgba8();
+                (im.width(), im.height())
+            });
+            let (side_w, side_h) = match base {
+                Some((w, h)) => (w, h),
+                None => {
+                    let s = (cells * 128).clamp(256, 4096);
+                    (s, s)
+                }
+            };
             let mut glbs: Vec<(String, Vec<u8>)> = Vec::new();
             let rd = std::fs::read_dir(&dir).map_err(|e| format!("读目录 {dir} 失败：{e}"))?;
             for ent in rd.flatten() {
@@ -549,21 +561,23 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 .map(|(n, b)| crate::engine::tex_atlas::AtlasInput { name: n, bytes: b })
                 .collect();
             // 以**现有输出图**为底（重复运行不会把上次的结果覆盖掉）；没有就从白板开始
-            let (mut atlas, rep) = crate::engine::tex_atlas::pack_props_into_atlas(
-                &inputs, grid, side, side,
-            );
-            if let Ok(prev) = image::open(&out) {
-                let prev = prev.to_rgba8();
-                if (prev.width(), prev.height()) == (atlas.width, atlas.height) {
-                    // 只保留**本次没写到的**像素：简单做法是把本次结果叠在旧图上
-                    for (i, px) in prev.pixels().enumerate() {
-                        let off = i * 4;
-                        let new_white = atlas.data[off..off + 4] == [255, 255, 255, 255];
-                        if new_white {
-                            atlas.data[off..off + 4].copy_from_slice(&px.0);
+            let (mut atlas, rep) =
+                crate::engine::tex_atlas::pack_props_into_atlas(&inputs, grid, side_w, side_h);
+            // 🔴 以**作者图集**为底：只覆盖本次写到的格子，其余像素原样保留。
+            // 不这么做的话生成图集是白底 —— 其它没有内嵌贴图的道具会全部丢贴图
+            // （实测只写白底时 off vs on 差 15%，而差异主要在树/楼上，不是木箱）。
+            if base.is_some() {
+                if let Ok(im) = image::open(authored) {
+                    let im = im.to_rgba8();
+                    if (im.width(), im.height()) == (atlas.width, atlas.height) {
+                        for (i, px) in im.pixels().enumerate() {
+                            let off = i * 4;
+                            if atlas.data[off..off + 4] == [255, 255, 255, 255] {
+                                atlas.data[off..off + 4].copy_from_slice(&px.0);
+                            }
                         }
+                        log::info!("atlas_pack: 以作者图集 {}x{} 为底", atlas.width, atlas.height);
                     }
-                    log::info!("atlas_pack: 已以现有 {out} 为底合并");
                 }
             }
             // 写 PNG
@@ -572,7 +586,7 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                     .ok_or_else(|| "图集缓冲尺寸不符".to_string())?;
             img.save(&out).map_err(|e| format!("写 {out} 失败：{e}"))?;
             Ok(format!(
-                "atlas {side}x{side} cells={}x{} packed={} skipped={} collisions={} → {out}",
+                "atlas {side_w}x{side_h} cells={}x{} packed={} skipped={} collisions={} → {out}",
                 grid.cols,
                 grid.rows,
                 rep.packed.len(),
