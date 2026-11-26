@@ -89,7 +89,6 @@ start_run_resets_stance_sprint_heal_and_consumables | src/engine/game/session.rs
 a_npc_killed_this_frame_does_not_return_fire | src/engine/game/npc_ai.rs |             if self.npcs[i].hp <= 0.0 || self.npcs[t].hp <= 0.0 { |             if false {
 objective_victory_sets_a_visible_banner | src/engine/game/session.rs |                     "VICTORY — 关卡目标达成（按 R 重开）".to_string() |                     "关卡目标达成（按 R 重开）".to_string()
 facing_points_at_the_nearest_street | src/engine/city.rs |         } else if cz - fz >= 0.0 { |         } else if cz - fz < 0.0 {
-# 待办：street_clutter_is_deterministic_and_clear_of_buildings 未验证 ——
-# blocked 守卫的效果观测不到（已加近邻楼夹具仍 NOT-RED：杂物落点几何不覆盖邻居脚印），
-# 需要换思路（例如暴露一个只做"放置合法性判定"的纯函数再测）。
 intersections_have_downloaded_street_furniture | src/engine/city.rs |             if (k + m).rem_euclid(3) != 0 { |             if true {
+placement_guard_rejects_points_inside_footprints | src/engine/city.rs |     !footprints.iter().any(|&(ox, oz, ohw, ohd)| { |     footprints.iter().any(|&(ox, oz, ohw, ohd)| {
+low_sun_is_warmer_and_dimmer | src/engine/lighting.rs |     (warm.lerp(noon, t), 0.62 + 0.38 * t) |     (warm.lerp(noon, t), 0.62 + 0.38 * t * 0.0 + 0.0 * t)

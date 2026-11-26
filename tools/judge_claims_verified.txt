@@ -283,3 +283,9 @@ facing_points_at_the_nearest_street
 #   ⚠️ 第一次注入写成 `&& false`（条件恒假）= 反而**更多**家具 ⇒ NOT-RED。
 #      **"删掉过滤"和"让过滤恒真"是两个方向**，要按断言方向选。
 intersections_have_downloaded_street_furniture
+
+# ── 2026-11-26 第十六批（放置守卫抽成纯函数后直接钉住）──
+# 把 placement_clear_of_footprints 的 `!` 去掉（语义反了）⇒ 前两条断言红
+placement_guard_rejects_points_inside_footprints
+# 低太阳强度项：0.62+0.38*t 改成常数 ⇒ 强度不随高度变，红
+low_sun_is_warmer_and_dimmer

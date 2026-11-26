@@ -1749,6 +1749,24 @@ struct ClutterPiece {
 /// 由建筑脚印（x,z,half_w,half_d）生成街道杂物规格：**确定性**（同输入逐字节同输出）。
 ///
 /// 摆放规则：每栋楼沿"哈希方位角"往外 0.9–1.8m 处放 1–2 件；
+/// 点 `(x, z)` 是否**避开了所有建筑脚印**（外扩 0.6m 余量）。
+///
+/// 🔴 抽成独立纯函数是**判据需要**（2026-11-26）：原来这段 `any(...)` 内联在
+/// `clutter_specs` 的循环里，而那条判据（`street_clutter_is_deterministic_and_clear_of_buildings`）
+/// 用真实生成器的输出去观测它 —— 实测**观测不到**：把守卫改成 `if false` 仍然通过
+/// （因为落点几何 `dist = hw.max(hd) + 0.9..1.8` 产生的位置即使不被拦也不落进邻居判定区）。
+/// 现在这个判定被单独钉住（判据 `placement_guard_rejects_points_inside_footprints`），
+/// 生成器再调它 —— **行为不变，可观测性变了**。
+pub(crate) fn placement_clear_of_footprints(
+    footprints: &[(f32, f32, f32, f32)],
+    x: f32,
+    z: f32,
+) -> bool {
+    !footprints.iter().any(|&(ox, oz, ohw, ohd)| {
+        (ox - x).abs() < ohw + 0.6 && (oz - z).abs() < ohd + 0.6
+    })
+}
+
 /// 候选点落在任何建筑脚印（外扩 0.6m）内就跳过 —— 杂物不许插进墙里。
 fn clutter_specs(
     footprints: &[(f32, f32, f32, f32)],
@@ -1763,9 +1781,7 @@ fn clutter_specs(
             let dist = hw.max(hd) + mixf(i as i32, k as i32 + 23, 0.9, 1.8);
             let x = bx + ang.cos() * dist;
             let z = bz + ang.sin() * dist;
-            let blocked = footprints.iter().any(|&(ox, oz, ohw, ohd)| {
-                (ox - x).abs() < ohw + 0.6 && (oz - z).abs() < ohd + 0.6
-            });
+            let blocked = !placement_clear_of_footprints(footprints, x, z);
             if blocked {
                 continue;
             }
@@ -2175,7 +2191,36 @@ mod city_layout_tests {
     use super::*;
 
     /// 画质 M6 判据：街道杂物**确定性 + 不插进建筑 + 尺寸不退化**。
-    /// 反向验证：把 `clutter_specs` 里 `blocked` 检查删掉 ⇒ 本判据红。
+
+    /// 🔴 **放置守卫本身必须可判别**（2026-11-26 补）。
+    ///
+    /// 背景：这个判定原来内联在 `clutter_specs` 的循环里，而
+    /// `street_clutter_is_deterministic_and_clear_of_buildings` 用真实生成器的输出
+    /// 去观测它 —— **观测不到**（把守卫改成 `if false` 仍然通过：落点几何
+    /// `dist = hw.max(hd) + 0.9..1.8` 产生的位置即使不被拦也不落进邻居判定区）。
+    /// 所以把判定抽成 `placement_clear_of_footprints`，在这里直接钉住。
+    ///
+    /// 反向验证：把函数体的 `!` 去掉（语义反过来）⇒ 第一条断言红。
+    #[test]
+    fn placement_guard_rejects_points_inside_footprints() {
+        let fp = [(0.0f32, 0.0f32, 6.0f32, 5.0f32)];
+        // 脚印内（含 0.6m 余量）⇒ 不许放
+        assert!(!placement_clear_of_footprints(&fp, 0.0, 0.0), "脚印正中心必须被拒");
+        assert!(
+            !placement_clear_of_footprints(&fp, 6.5, 0.0),
+            "半宽 6 + 余量 0.6 ⇒ x=6.5 仍在判定区内（6.5 < 6.6），必须被拒"
+        );
+        // 判定区外 ⇒ 允许
+        assert!(placement_clear_of_footprints(&fp, 6.7, 0.0), "x=6.7 已出判定区（>6.6），应允许");
+        assert!(placement_clear_of_footprints(&fp, 0.0, 5.7), "z=5.7 已出判定区（>5.6），应允许");
+        // 空脚印 ⇒ 任何点都允许
+        assert!(placement_clear_of_footprints(&[], 0.0, 0.0), "没有建筑时必须允许");
+    }
+
+    /// 覆盖范围（2026-11-26 说明）：本判据压的是**确定性 + 尺寸不退化 + 与远方脚印不重叠**。
+    /// 🔴 它**压不到** `blocked` 守卫本身：夹具里三栋楼相距 20m 以上，落点够不着邻居；
+    /// 实测把守卫改成 `if false` 仍然通过（即便加一组并排 11m 的楼也一样）。
+    /// 守卫的判别力改由 `placement_guard_rejects_points_inside_footprints` 单独钉住。
     #[test]
     fn street_clutter_is_deterministic_and_clear_of_buildings() {
         let footprints = [
