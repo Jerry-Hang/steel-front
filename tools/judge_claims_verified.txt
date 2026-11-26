@@ -341,3 +341,13 @@ amd_dual_ccd_split_uses_physical_cores
 flashlight_toggle_respects_battery
 # ⚠️ 该行出现 2 次（夜视 + light_uniform）⇒ 无缩进锚点 + all
 night_vision_factor_reads_map_sun
+
+# ── 2026-11-26 第二十三批（远程弹丸 / 弹丸上限 / 据点回充 / 手电位置·耗电·变暗·照亮）──
+remote_bullet_can_hit_players
+projectile_pileup_is_capped
+# ⚠️ inside 那行缩进 8 空格（不是 10）
+battery_recharges_inside_objective_radius
+flashlight_sits_ahead_of_the_camera
+battery_drains_and_recharges
+flashlight_dims_with_battery
+flashlight_makes_the_player_easier_to_see_at_night

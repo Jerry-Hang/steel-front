@@ -119,3 +119,10 @@ removed_gun_glbs_use_their_own_procedural_mesh | src/app_gun.rs |         } else
 amd_dual_ccd_split_uses_physical_cores | src/engine/cpu.rs |     Some((sorted[..half].to_vec(), sorted[half..].to_vec())) |     Some((sorted[..0].to_vec(), sorted[0..].to_vec()))
 flashlight_toggle_respects_battery | src/engine/game/view.rs |         } else if self.battery > 0.02 { |         } else if true {
 night_vision_factor_reads_map_sun | src/engine/game/view.rs | let sun_env = super::lighting::sun_from_env().or_else(|| { | let sun_env = super::lighting::sun_from_env().or_else(|| { if true { return None; } | all
+remote_bullet_can_hit_players | src/engine/game/weapons.rs |         let player_bullet = p.from_player() || p.remote_owner().is_some(); |         let player_bullet = p.from_player();
+projectile_pileup_is_capped | src/engine/game/weapons.rs |             self.projectiles.remove(0); |             let _ = 0;
+battery_recharges_inside_objective_radius | src/engine/game/view.rs |         let inside = self.obj_state.as_ref().is_some_and(|o| { |         let inside = true || self.obj_state.as_ref().is_some_and(|o| {
+flashlight_sits_ahead_of_the_camera | src/engine/lighting.rs |     [cam[0] + fwd[0] * 1.5, cam[1] - 0.15, cam[2] + fwd[2] * 1.5] |     [cam[0], cam[1], cam[2]]
+battery_drains_and_recharges | src/engine/lighting.rs |         (b - dt / on_secs.max(1.0)).max(0.0) |         b
+flashlight_dims_with_battery | src/engine/lighting.rs |     (0.25 + 0.75 * b.sqrt(), 8.0 + 6.0 * b) |     (1.0, 14.0)
+flashlight_makes_the_player_easier_to_see_at_night | src/engine/lighting.rs |     let lit = if player_lit { 1.25 } else { 1.0 }; |     let lit = 1.0;

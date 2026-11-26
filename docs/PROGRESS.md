@@ -6906,3 +6906,24 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
    （比删整段安全，也不动类型推断）。
 
 现状：台账 **153 / 194**（79%）；`injections.txt` 107 条。
+
+### 2026-11-26：欠账 153 → 160 / 194（82%），本轮 7 条 —— 单轮最高
+
+| 判据 | 注入 |
+|---|---|
+| `remote_bullet_can_hit_players` | `player_bullet` 去掉 `remote_owner` 项 |
+| `projectile_pileup_is_capped` | 上限时不再丢最旧一发 |
+| `battery_recharges_inside_objective_radius` | `inside` 恒 `true` |
+| `flashlight_sits_ahead_of_the_camera` | 手电位置返回相机位置 |
+| `battery_drains_and_recharges` | 开灯分支直接返回 `b` |
+| `flashlight_dims_with_battery` | 亮度/半径都成常数 |
+| `flashlight_makes_the_player_easier_to_see_at_night` | `player_lit` 恒定 1.0 |
+
+**试运行脚本把单轮产量从 3 条提到 7 条**：每次只改一处、只跑一个测试
+（`cargo test --release -- <名字>`），失败立刻还原。7 条总共 9 次试跑，
+其中 1 次 BROKEN（`battery` 全替换会撞类型标注）、1 次 SKIP（缩进 10 vs 8）。
+
+**手电/电量这一族全是纯函数**（`flashlight_position` / `battery_step` / `flashlight_dim` /
+`ai_sight_factor`），所以注入极容易、判据也真的能压住 —— **纯函数是判据最好的朋友**。
+
+现状：台账 **160 / 194**（82%）；`injections.txt` 114 条。
