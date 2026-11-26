@@ -119,9 +119,535 @@ pub fn fallback_albedo(vertex_color: [f32; 3]) -> [f32; 3] {
     vertex_color
 }
 
+
+// ---------------------------------------------------------------------------
+// 第 1 步：打包（纯 CPU —— 不改渲染，先把"贴图进图集 + UV 落格"做对）
+// ---------------------------------------------------------------------------
+
+/// 图集网格：把整张图集切成 `cols × rows` 格。
+///
+/// 为何用**固定网格**而不是"按尺寸装箱"：本项目要打进去的是几十个小道具贴图，
+/// 网格的确定性（同一批资产每次得到同样的格子）比利用率更重要 ——
+/// 装箱算法一改，所有资产的 UV 全变，而这是最难查的一类回归。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtlasGrid {
+    pub cols: u32,
+    pub rows: u32,
+}
+
+impl AtlasGrid {
+    pub const fn new(cols: u32, rows: u32) -> Self {
+        Self { cols, rows }
+    }
+
+    pub fn cell_count(&self) -> u32 {
+        self.cols * self.rows
+    }
+
+    /// 第 `index` 格（行优先：先横后竖）的 UV 矩形。越界返回 None。
+    ///
+    /// 🔴 **V 轴方向**：图集图像的 v 从**上**往下增长？本引擎的 UV 约定见
+    /// `props` 的采样（`texture_sampler` 是 REPEAT+LINEAR），GLB 的 UV 原点在**左上**，
+    /// 而图像行序是**从上到下** ⇒ 直接用 `row / rows` 作为 v 起点即可，不做翻转。
+    /// 判据 `grid_cells_cover_the_atlas_without_overlap` 只验几何覆盖，
+    /// 方向由真实采样图（`tex_atlas_v_direction_matches_the_image_rows`）钉住。
+    pub fn cell_rect(&self, index: u32) -> Option<AtlasRect> {
+        if self.cols == 0 || self.rows == 0 || index >= self.cell_count() {
+            return None;
+        }
+        let col = index % self.cols;
+        let row = index / self.cols;
+        let cw = 1.0 / self.cols as f32;
+        let ch = 1.0 / self.rows as f32;
+        Some(AtlasRect::new(
+            col as f32 * cw,
+            row as f32 * ch,
+            (col + 1) as f32 * cw,
+            (row + 1) as f32 * ch,
+        ))
+    }
+}
+
+/// 把整张网格的 UV 落进某一格（就地改顶点）。
+///
+/// 顶点布局是 `pos(3) normal(3) uv(2) color(3)`（stride 11），UV 在 `6..8`。
+/// **只动 UV 两个分量**：法线/顶点色/位置一个都不许碰。
+///
+/// 🔴 **是否重映射由"这个 GLB 有没有 TEXCOORD_0"决定，绝不能用"UV 是否全零"判断**。
+///
+/// 我第一版就是按"全零 = 没有 UV"跳过的，结果**四边形的左下角本来就在 (0,0)**，
+/// 那个角没被重映射 —— 画面上是格外面露一条边。
+/// 顺带记一笔：着色器里 `length(input.uv) > 1e-4` 有同一个毛病 ——
+/// 它不是"有没有 UV"的判据，而是"这个插值后的 UV 是否接近原点"的判据；
+/// 对真有 (0,0) 角的模型，那一条边的像素会跳过采样（细线状问题）。
+/// 真正的判据只能是属性存在性（`glb_has_texcoord`），在 CPU 侧一次定死。
+///
+/// 返回被改动的顶点数（没有 UV 属性时返回 0 且不改任何东西）。
+pub fn remap_mesh_uvs(verts: &mut [[f32; 11]], rect: AtlasRect, has_texcoord: bool) -> usize {
+    if !has_texcoord {
+        return 0;
+    }
+    for v in verts.iter_mut() {
+        let out = remap_uv([v[6], v[7]], rect);
+        v[6] = out[0];
+        v[7] = out[1];
+    }
+    verts.len()
+}
+
+/// 这个 GLB 的网格里**是否存在** `TEXCOORD_0` 属性。
+///
+/// 用 JSON 里是否出现该键判定（`parse_glb` 已经把缺失的 UV 填成 (0,0)，
+/// 那些 0 与"真的在原点"无法区分 —— 所以必须回到源数据问）。
+pub fn glb_has_texcoord(bytes: &[u8]) -> bool {
+    const NEEDLE: &[u8] = b"TEXCOORD_0\"";
+    bytes.windows(NEEDLE.len()).any(|w| w == NEEDLE)
+}
+
+/// 一张 RGBA8 图像（图集的容器）。
+#[derive(Clone, Debug)]
+pub struct RgbaImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
+impl RgbaImage {
+    /// 建一张纯色图（图集底板）。
+    ///
+    /// 底板用**白**：着色器的合成是 `shaded * (0.15 + 1.615 * tex)`，
+    /// 白底 = 1.765 倍；只有 `feature_bits & 32` 置位的件才会走到这条路径，
+    /// 所以底板颜色不影响"没贴图的件"。
+    pub fn filled(width: u32, height: u32, rgba: [u8; 4]) -> Self {
+        let mut data = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..(width * height) {
+            data.extend_from_slice(&rgba);
+        }
+        Self { width, height, data }
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let i = ((y * self.width + x) * 4) as usize;
+        self.data.get(i..i + 4).map(|s| [s[0], s[1], s[2], s[3]])
+    }
+}
+
+/// 把一张贴图**最近邻**缩放并写进图集的某个 UV 格。
+///
+/// 用最近邻而不是双线性：确定性最重要 —— 同一输入必须逐字节得到同一张图集，
+/// 否则"图集变了"这类问题会变成不可复现的。视觉上道具贴图本来就是对色块。
+///
+/// 返回写入的像素数（0 = 格子退化，调用方应当报错）。
+pub fn blit_into_atlas(
+    atlas: &mut RgbaImage,
+    rect: AtlasRect,
+    tex: &crate::engine::asset_texture::ImportedTexture,
+) -> u32 {
+    if tex.width == 0 || tex.height == 0 {
+        return 0;
+    }
+    // UV 格 → 像素范围（左闭右开）
+    let x0 = (rect.u0 * atlas.width as f32).round() as i64;
+    let x1 = (rect.u1 * atlas.width as f32).round() as i64;
+    let y0 = (rect.v0 * atlas.height as f32).round() as i64;
+    let y1 = (rect.v1 * atlas.height as f32).round() as i64;
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    if cw <= 0 || ch <= 0 {
+        return 0;
+    }
+    let mut written = 0;
+    for dy in 0..ch {
+        for dx in 0..cw {
+            // 目标像素 → 源纹素（最近邻，取纹素中心）
+            let sx = ((dx as u64 * tex.width as u64) / cw as u64) as u32;
+            let sy = ((dy as u64 * tex.height as u64) / ch as u64) as u32;
+            let Some(px) = tex.pixel(sx.min(tex.width - 1), sy.min(tex.height - 1)) else {
+                continue;
+            };
+            let (px_x, px_y) = ((x0 + dx) as u32, (y0 + dy) as u32);
+            if px_x >= atlas.width || px_y >= atlas.height {
+                continue;
+            }
+            let i = ((px_y * atlas.width + px_x) * 4) as usize;
+            if let Some(slot) = atlas.data.get_mut(i..i + 4) {
+                slot.copy_from_slice(&px);
+                written += 1;
+            }
+        }
+    }
+    written
+}
+
+
+/// 把一个 GLB **整体**打进图集的一格：解析网格 → 解析贴图 → blit → 重映射 UV。
+///
+/// 返回 `(网格, 特征位)`：
+/// - 模型有内嵌贴图 ⇒ 已 blit 并重映射 UV，特征位 = [`FEATURE_AUTHORED_TEX`]；
+/// - 模型**没有**贴图 ⇒ 网格原样返回、UV 不动、特征位 = **0**
+///   （着色器就不会走采样分支 ⇒ 行为与上一版逐像素一致）。
+///
+/// 这条"没有贴图 ⇒ 特征位 0"的约定是关键：如果无条件置位，
+/// 没有贴图的件会去采样图集底板（白）⇒ 被整体提亮 1.765 倍，肉眼可见地变白。
+pub fn pack_glb_into_atlas(
+    bytes: &[u8],
+    grid: AtlasGrid,
+    cell: u32,
+    atlas: &mut RgbaImage,
+) -> Result<(crate::engine::assets::ImportedMesh, u32), String> {
+    let mut mesh = crate::engine::assets::parse_glb(bytes)?;
+    let texs = crate::engine::asset_texture::parse_glb_textures(bytes)?;
+    let Some(tex) = texs.first() else {
+        return Ok((mesh, 0));
+    };
+    let rect = grid
+        .cell_rect(cell)
+        .ok_or_else(|| format!("图集格 {cell} 越界（{}×{}）", grid.cols, grid.rows))?;
+    let written = blit_into_atlas(atlas, rect, tex);
+    if written == 0 {
+        return Err(format!("贴图 {} 写进格 {cell} 时写入 0 像素", tex.name));
+    }
+    remap_mesh_uvs(&mut mesh.verts, rect, glb_has_texcoord(bytes));
+    Ok((mesh, FEATURE_AUTHORED_TEX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::asset_texture::ImportedTexture;
+
+    /// 造一个**带网格且带内嵌贴图**的最小 GLB：一个 quad（4 顶点，UV 铺满）+ 2×2 PNG。
+    ///
+    /// 不依赖任何外部资产：图与几何都在测试里现造，所以这条端到端判据在哪儿都成立。
+    fn glb_quad_with_texture(with_uv: bool, with_texture: bool) -> Vec<u8> {
+        // 🔴 **非交错布局**：每个属性一个 bufferView，不给 byteStride。
+        // 第一版写成"pos+uv 交错、stride 20 但没写 byteStride" ⇒ 解析器按紧凑约定读到的是
+        // 相邻顶点的 UV 当位置，UV 全变成 0（畸形 GLB，不是解析器的错）。
+        let pos: [[f32; 3]; 4] = [
+            [-0.5, 0.0, -0.5],
+            [0.5, 0.0, -0.5],
+            [0.5, 0.0, 0.5],
+            [-0.5, 0.0, 0.5],
+        ];
+        let uv: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+        let idx: [u16; 6] = [0, 1, 2, 0, 2, 3];
+
+        let mut geo: Vec<u8> = Vec::new();
+        let pos_off = geo.len();
+        for v in pos {
+            for f in v {
+                geo.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        let pos_len = geo.len() - pos_off;
+        let uv_off = geo.len();
+        for v in uv {
+            for f in v {
+                geo.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        let uv_len = geo.len() - uv_off;
+        let idx_off = geo.len();
+        for i in idx {
+            geo.extend_from_slice(&i.to_le_bytes());
+        }
+        let idx_len = geo.len() - idx_off;
+
+        // 2×2 PNG（红/绿/蓝/黄）
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        img.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+        img.put_pixel(1, 1, image::Rgba([255, 255, 0, 255]));
+        let mut cb = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut cb, image::ImageFormat::Png)
+            .expect("编码 PNG");
+        let png = cb.into_inner();
+        let png_off = geo.len();
+        geo.extend_from_slice(&png);
+        let png_len = png.len();
+
+        // bufferView 下标：0=位置 1=UV 2=索引 3=贴图
+        let (uv_bv, uv_acc) = if with_uv {
+            (
+                r#",{"buffer":0,"byteOffset":48,"byteLength":32}"#,
+                r#",{"bufferView":1,"componentType":5126,"count":4,"type":"VEC2"}"#,
+            )
+        } else {
+            ("", "")
+        };
+        let (images, textures, materials) = if with_texture {
+            (
+                r#"[{"bufferView":3,"mimeType":"image/png","name":"quad_tex"}]"#.to_string(),
+                r#"[{"source":0}]"#.to_string(),
+                r#"[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}}]"#.to_string(),
+            )
+        } else {
+            ("[]".to_string(), "[]".to_string(), "[]".to_string())
+        };
+        let uv_attr = if with_uv {
+            r#","TEXCOORD_0":1"#
+        } else {
+            ""
+        };
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},
+"buffers":[{{"byteLength":{total}}}],
+"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{pos_len}}}{uv_bv},
+  {{"buffer":0,"byteOffset":{idx_off},"byteLength":{idx_len}}},
+  {{"buffer":0,"byteOffset":{png_off},"byteLength":{png_len}}}],
+"accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3"}}{uv_acc},
+  {{"bufferView":2,"componentType":5123,"count":6,"type":"SCALAR"}}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0{uv_attr}}},"indices":{idx_acc}}}]}}],
+"images":{images},"textures":{textures},"materials":{materials}}}"#,
+            total = geo.len(),
+            pos_len = pos_len,
+            uv_bv = uv_bv,
+            idx_off = idx_off,
+            idx_len = idx_len,
+            png_off = png_off,
+            png_len = png_len,
+            uv_acc = uv_acc,
+            idx_acc = if with_uv { 2 } else { 1 },
+            uv_attr = uv_attr,
+            images = images,
+            textures = textures,
+            materials = materials,
+        );
+        let mut out = Vec::new();
+        out.extend_from_slice(b"glTF");
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&((12 + json.len() + 8 + geo.len()) as u32).to_le_bytes());
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x4E4F534Au32.to_le_bytes());
+        out.extend_from_slice(json.as_bytes());
+        out.extend_from_slice(&(geo.len() as u32).to_le_bytes());
+        out.extend_from_slice(&0x004E4942u32.to_le_bytes());
+        out.extend_from_slice(&geo);
+        out
+    }
+
+    /// 🔴 **端到端**：有贴图的模型 ⇒ UV 落进格、图集里出现正确像素、特征位置位。
+    ///
+    /// 反向验证：把 `pack_glb_into_atlas` 里的 `remap_mesh_uvs(...)` 删掉 ⇒ 第一条 UV 断言红。
+    #[test]
+    fn packing_a_textured_model_remaps_uvs_and_fills_the_cell() {
+        let glb = glb_quad_with_texture(true, true);
+        let grid = AtlasGrid::new(2, 2);
+        let mut atlas = RgbaImage::filled(64, 64, [255, 0, 255, 255]);
+        let (mesh, bits) = pack_glb_into_atlas(&glb, grid, 3, &mut atlas).expect("打包应成功");
+        assert_eq!(bits, FEATURE_AUTHORED_TEX, "有贴图必须置特征位");
+        // 4 个顶点都有非零 UV ⇒ 全部落进第 3 格（右下）
+        let rect = grid.cell_rect(3).unwrap();
+        for v in &mesh.verts {
+            assert!(
+                v[6] >= rect.u0 - 1e-6 && v[6] <= rect.u1 + 1e-6,
+                "uv.u={} 应落在格 [{},{}]",
+                v[6],
+                rect.u0,
+                rect.u1
+            );
+            assert!(
+                v[7] >= rect.v0 - 1e-6 && v[7] <= rect.v1 + 1e-6,
+                "uv.v={} 应落在格 [{},{}]",
+                v[7],
+                rect.v0,
+                rect.v1
+            );
+        }
+        // 格内出现源图的颜色（红/绿/蓝/黄各占 1/4）
+        let (x0, y0, x1, y1) = (32u32, 32u32, 64u32, 64u32);
+        let mid = |x0: u32, y0: u32| atlas.pixel(x0, y0).unwrap();
+        assert_eq!(mid(x0, y0), [255, 0, 0, 255], "格左上 = 红");
+        assert_eq!(mid(x1 - 1, y0), [0, 255, 0, 255], "格右上 = 绿");
+        assert_eq!(mid(x0, y1 - 1), [0, 0, 255, 255], "格左下 = 蓝");
+        assert_eq!(mid(x1 - 1, y1 - 1), [255, 255, 0, 255], "格右下 = 黄");
+        // 其它格仍是底板色
+        assert_eq!(atlas.pixel(0, 0), Some([255, 0, 255, 255]), "格外的图集必须原样");
+    }
+
+    /// 🔴 **没有贴图的模型 ⇒ 特征位 0、UV 不动、图集不动**。
+    ///
+    /// 这是"旧资产行为逐像素不变"的保证。若无条件置位，没贴图的件会去采样白底板
+    /// ⇒ 被整体提亮 1.765 倍，肉眼可见地变白。
+    ///
+    /// 反向验证：把 `let Some(tex) = texs.first() else { return Ok((mesh, 0)); }`
+    /// 改成 `.unwrap_or(&fallback_tex)`（无条件打包）⇒ 第一条断言红。
+    #[test]
+    fn untextured_model_is_left_untouched_and_keeps_the_feature_bit_clear() {
+        let glb = glb_quad_with_texture(true, false);
+        let grid = AtlasGrid::new(2, 2);
+        let before = RgbaImage::filled(64, 64, [255, 0, 255, 255]);
+        let mut atlas = before.clone();
+        let (mesh, bits) = pack_glb_into_atlas(&glb, grid, 0, &mut atlas).expect("打包应成功");
+        assert_eq!(bits, 0, "没有贴图不许置特征位");
+        assert_eq!(atlas.data, before.data, "图集一个字节都不许被改");
+        // UV 保持原样（quad 的 UV 是铺满 [0,1] 的）
+        assert!(
+            mesh.verts.iter().all(|v| v[6] <= 1.0 && v[7] <= 1.0),
+            "UV 不该被重映射到别的格"
+        );
+        let has_full_uv = mesh.verts.iter().any(|v| v[6] > 0.9 && v[7] > 0.9);
+        assert!(has_full_uv, "原 UV 的 (1,1) 角必须还在");
+    }
+
+    /// 🔴 **网格必须完整覆盖图集且互不重叠**。
+    ///
+    /// 只测"某一格算得对"会漏掉"两格算到同一处"这种错误（画面上表现为两个模型
+    /// 抢同一块贴图）。这里用**累加面积**与**两两相交**两条一起钉。
+    ///
+    /// 反向验证：把 `cell_rect` 的 `row = index / cols` 改成 `index % cols` ⇒ 红。
+    #[test]
+    fn grid_cells_cover_the_atlas_without_overlap() {
+        let g = AtlasGrid::new(4, 3);
+        assert_eq!(g.cell_count(), 12);
+        let rects: Vec<_> = (0..g.cell_count()).map(|i| g.cell_rect(i).unwrap()).collect();
+        // 面积和 = 1.0（不重叠 + 全覆盖 的充要条件）
+        let area: f32 = rects.iter().map(|r| r.width() * r.height()).sum();
+        assert!((area - 1.0).abs() < 1e-5, "12 格面积应恰为 1.0，实际 {area}");
+        // 两两不相交（用格子中心判定：任何两格中心不能落在对方格内）
+        for (a, ra) in rects.iter().enumerate() {
+            for (b, rb) in rects.iter().enumerate() {
+                if a == b {
+                    continue;
+                }
+                let ca = [(ra.u0 + ra.u1) * 0.5, (ra.v0 + ra.v1) * 0.5];
+                let inside = ca[0] > rb.u0 && ca[0] < rb.u1 && ca[1] > rb.v0 && ca[1] < rb.v1;
+                assert!(!inside, "第 {a} 格的中心落在了第 {b} 格里");
+            }
+        }
+        // 行优先：第 0 格在左上，第 3 格在右上，第 4 格在第二行左
+        assert_eq!(g.cell_rect(0), Some(AtlasRect::new(0.0, 0.0, 0.25, 1.0 / 3.0)));
+        assert_eq!(g.cell_rect(3), Some(AtlasRect::new(0.75, 0.0, 1.0, 1.0 / 3.0)));
+        assert_eq!(g.cell_rect(4), Some(AtlasRect::new(0.0, 1.0 / 3.0, 0.25, 2.0 / 3.0)));
+        // 越界返回 None，不 panic
+        assert_eq!(g.cell_rect(12), None);
+        assert_eq!(AtlasGrid::new(0, 4).cell_rect(0), None, "0 列必须返回 None 而不是除零");
+    }
+
+    /// 🔴 **UV 落格只改 uv 两个分量**，法线/顶点色/位置一个都不许动。
+    ///
+    /// 反向验证：把 `v[6] = out[0]` 写成 `v[6] = out[0]; v[3] = out[0];`（顺手改了法线）
+    /// ⇒ 第三条断言红。
+    #[test]
+    fn remapping_uvs_leaves_position_normal_color_untouched() {
+        // pos(3) normal(3) uv(2) color(3)
+        // ⚠ uv 不能是 (0,0)：那条走的是"零 UV 保持零"的分支（另有专门判据）。
+        let mut verts = vec![
+            [1.0, 2.0, 3.0, 0.0, 0.0, 1.0, 0.25, 0.5, 0.7, 0.8, 0.9],
+            [4.0, 5.0, 6.0, 0.1, 0.2, 0.3, 1.0, 1.0, 0.4, 0.5, 0.6],
+        ];
+        let before = verts.clone();
+        let n = remap_mesh_uvs(&mut verts, AtlasRect::new(0.5, 0.5, 1.0, 1.0), true);
+        assert_eq!(n, 2, "两个顶点都带 UV");
+        // 位置 / 法线 / 颜色：逐字节不变
+        for (a, b) in verts.iter().zip(before.iter()) {
+            assert_eq!(&a[0..6], &b[0..6], "位置与法线不许动");
+            assert_eq!(&a[8..11], &b[8..11], "顶点色不许动");
+        }
+        // UV 落进格内
+        // uv(0.25,0.5) → (0.5+0.25*0.5, 0.5+0.5*0.5) = (0.625, 0.75)
+        assert_eq!([verts[0][6], verts[0][7]], [0.625, 0.75], "uv(0.25,0.5) 要落进格内");
+        assert_eq!([verts[1][6], verts[1][7]], [1.0, 1.0], "uv(1,1) → 格右上");
+    }
+
+    /// 🔴 **没有 TEXCOORD_0 属性的网格：UV 一个都不许动**（返回 0）。
+    ///
+    /// 而"有属性、某个角恰好是 (0,0)"的网格**必须**被重映射 —— 这两件事不能混。
+    /// 第一版用"UV 全零"当判据，结果四边形的左下角（真在原点）没被重映射。
+    ///
+    /// 反向验证：把 `if !has_texcoord { return 0; }` 删掉 ⇒ 第一条断言红。
+    #[test]
+    fn remapping_is_gated_on_the_attribute_not_on_zero_values() {
+        let rect = AtlasRect::new(0.25, 0.25, 0.5, 0.5);
+        // (a) 没有 TEXCOORD_0：不动
+        let mut no_uv = vec![[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+        assert_eq!(remap_mesh_uvs(&mut no_uv, rect, false), 0, "无属性时返回 0");
+        assert_eq!([no_uv[0][6], no_uv[0][7]], [0.0, 0.0], "无属性时 UV 不许动");
+
+        // (b) 有 TEXCOORD_0：连 (0,0) 角也要映射进格
+        let mut with_uv = vec![
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.5, 1.0, 1.0, 1.0],
+        ];
+        assert_eq!(remap_mesh_uvs(&mut with_uv, rect, true), 2, "两个顶点都要改");
+        assert_eq!([with_uv[0][6], with_uv[0][7]], [0.25, 0.25], "(0,0) 角 → 格左下");
+        assert_eq!([with_uv[1][6], with_uv[1][7]], [0.375, 0.375], "(0.5,0.5) → 格中心");
+    }
+
+    /// 属性存在性判定要认得出 `"TEXCOORD_0"` 这个键。
+    ///
+    /// 反向验证：把 `NEEDLE` 改成 `b"TEXCOORD_1\""` ⇒ 本判据红。
+    #[test]
+    fn texcoord_presence_is_detected_from_the_json() {
+        assert!(glb_has_texcoord(br#"{"attributes":{"POSITION":0,"TEXCOORD_0":1}}"#));
+        assert!(!glb_has_texcoord(br#"{"attributes":{"POSITION":0,"NORMAL":1}}"#));
+    }
+
+    /// 🔴 **blit 要把每个源纹素放到正确位置**（最近邻、整数除法）。
+    ///
+    /// 判据：2×2 图打进 4×4 的图集格 ⇒ 每个源纹素占 2×2 目标像素，
+    /// 四象限颜色正确；**格外的像素一个都不许被改**。
+    ///
+    /// 反向验证：把 `sx` 的 `(dx * w) / cw` 改成 `dx.min(w-1)`（不缩放）⇒ 红。
+    #[test]
+    fn blit_scales_the_texture_into_the_cell_and_touches_nothing_else() {
+        // 2×2：红 绿 / 蓝 黄
+        let tex = ImportedTexture {
+            name: "t".into(),
+            width: 2,
+            height: 2,
+            rgba8: vec![
+                255, 0, 0, 255, // (0,0) 红
+                0, 255, 0, 255, // (1,0) 绿
+                0, 0, 255, 255, // (0,1) 蓝
+                255, 255, 0, 255, // (1,1) 黄
+            ],
+        };
+        // 8×8 图集，底板洋红（便于发现"没写到的格子被误改"）
+        let mut atlas = RgbaImage::filled(8, 8, [255, 0, 255, 255]);
+        // 右下 4×4 格 = uv (0.5,0.5)-(1.0,1.0) ⇒ 像素 (4,4)-(8,8)
+        let written = blit_into_atlas(&mut atlas, AtlasRect::new(0.5, 0.5, 1.0, 1.0), &tex);
+        assert_eq!(written, 16, "4×4 格应写 16 个像素");
+        // 四象限各 2×2
+        assert_eq!(atlas.pixel(4, 4), Some([255, 0, 0, 255]), "左上象限 = 红");
+        assert_eq!(atlas.pixel(5, 4), Some([255, 0, 0, 255]), "左上象限宽 2");
+        assert_eq!(atlas.pixel(6, 4), Some([0, 255, 0, 255]), "右上象限 = 绿");
+        assert_eq!(atlas.pixel(4, 6), Some([0, 0, 255, 255]), "左下象限 = 蓝");
+        assert_eq!(atlas.pixel(7, 7), Some([255, 255, 0, 255]), "右下角 = 黄");
+        // 格外：底板色不变
+        assert_eq!(atlas.pixel(3, 4), Some([255, 0, 255, 255]), "格左边的像素不许被改");
+        assert_eq!(atlas.pixel(4, 3), Some([255, 0, 255, 255]), "格上边的像素不许被改");
+    }
+
+    /// 退化输入不许 panic：0 尺寸贴图、0 像素格。
+    ///
+    /// 反向验证：去掉 `if tex.width == 0 ... return 0` ⇒ 除零 panic。
+    #[test]
+    fn blit_degenerate_inputs_return_zero_not_panic() {
+        let mut atlas = RgbaImage::filled(4, 4, [0, 0, 0, 255]);
+        let empty = ImportedTexture {
+            name: "empty".into(),
+            width: 0,
+            height: 0,
+            rgba8: vec![],
+        };
+        assert_eq!(blit_into_atlas(&mut atlas, AtlasRect::FULL, &empty), 0);
+        // 1×1 的贴图打进极小的格（像素范围可能算成 0 宽）
+        let tiny = ImportedTexture {
+            name: "tiny".into(),
+            width: 1,
+            height: 1,
+            rgba8: vec![1, 2, 3, 255],
+        };
+        let degenerate = AtlasRect::new(0.0, 0.0, 0.0, 0.0);
+        assert_eq!(blit_into_atlas(&mut atlas, degenerate, &tiny), 0, "0 宽格写 0 像素");
+    }
+
+
 
     /// 🔴 **重映射必须把 UV 四角准确送到格四角**。
     ///
