@@ -70,10 +70,74 @@ def run_test(name):
     return (passed and compiled), summary
 
 
+
+# ───────────────────────────────────────────────────────────────────────────
+# 从"声称文本"里**编译**注入：很多声称本身就写着「把 X 改成 Y」。
+#
+# 为什么值得做：欠账 128 条，逐条手写注入是瓶颈。声称文本里已经写明了击穿方式的，
+# 机器可以直接试；只在"原文出现次数恰好 1"时才动手（其余跳过并报告，不猜）。
+# ───────────────────────────────────────────────────────────────────────────
+import re as _re
+import pathlib as _pathlib
+
+# 「把 `X` 改成 `Y`」「把 `X` 写成 `Y`」「`X` 改为 `Y`」
+CLAIM_PATTERNS = [
+    _re.compile(r"把\s*`([^`]+)`\s*(?:改成|写成|改为|换成)\s*`([^`]+)`"),
+    _re.compile(r"`([^`]+)`\s*(?:改成|写成|改为|换成)\s*`([^`]+)`"),
+]
+
+
+def proposals_from_claims():
+    """扫全部声称 → [(测试名, 文件, 原文, 替换)]。
+
+    🔴 归属用 `judge_audit.py` 的 `test_functions()`：声称写在**它自己的测试上方**，
+    "从声称往上找最近的 fn"会**指到上一个测试**（第一版就这么错的，9 条里 8 条张冠李戴）。
+    只收"原文在该文件里**恰好出现 1 次**"的，且跳过含 `...` 的占位写法。
+    """
+    import importlib.util
+
+    root = _pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("ja", root / "tools" / "judge_audit.py")
+    ja = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ja)
+    out = []
+    for f in sorted((root / "src").rglob("*.rs")):
+        text = f.read_text(encoding="utf-8", errors="replace")
+        if "反向验证" not in text:
+            continue
+        rel = str(f.relative_to(root))
+        for name, _line, _body, doc in ja.test_functions(text):
+            if "反向验证" not in doc:
+                continue
+            for pat in CLAIM_PATTERNS:
+                m = pat.search(doc)
+                if not m:
+                    continue
+                find, repl = m.group(1), m.group(2)
+                if "..." in find or "..." in repl:
+                    break
+                if text.count(find) != 1:
+                    break
+                out.append((name, rel, find, repl))
+                break
+    return out
+
+
+def propose():
+    props = proposals_from_claims()
+    for name, rel, find, repl in props:
+        print(f"{name}\t{rel}\t{find}\t{repl}")
+    print(f"PROPOSALS: {len(props)} 条可从声称文本自动编译")
+    return 0
+
+
 def main():
     global MANIFEST
     if "--manifest" in sys.argv:
         MANIFEST = Path(sys.argv[sys.argv.index("--manifest") + 1])
+    if "--propose" in sys.argv:
+        return propose()
+
     if not MANIFEST.exists():
         print(f"inject_check: 跑不成 —— 清单不存在 {MANIFEST}")
         return 2
@@ -104,6 +168,15 @@ def main():
         if after == before:
             results.append((name, "NO-OP", "替换没改变文件（这就是“无效注入”）"))
             continue
+        # 🔴 **注入目标是注释 ⇒ 不算验证**：这个形态已出现三次
+        # （`npcs.len() >= 0`、`tx.send`、`m *= local`）。替换"落盘"了但行为没变，
+        # 于是得出"判据失效"的错误结论。必须在跑测试前拦下来。
+        hit_line = next((l for l in before.splitlines() if find in l), "")
+        if hit_line.strip().startswith("//"):
+            results.append(
+                (name, "COMMENT-ONLY", f"注入目标是注释行：{hit_line.strip()[:60]}")
+            )
+            continue
         path.write_text(after, encoding="utf-8")
         try:
             # 双保险：文件确实变了
@@ -132,7 +205,9 @@ def main():
     print(text)
     REPORT.write_text(text + "\n", encoding="utf-8")
 
-    bad = [r for r in results if r[1] in ("NOT-RED", "SKIP", "NO-OP", "BROKEN")]
+    bad = [
+        r for r in results if r[1] in ("NOT-RED", "SKIP", "NO-OP", "BROKEN", "COMMENT-ONLY")
+    ]
     red = [r for r in results if r[1] == "RED"]
     print(f"\ninject_check: {len(red)} 条确认变红 / {len(results)} 条；"
           f"{len(bad)} 条需人看（明细见 {REPORT.name}）")

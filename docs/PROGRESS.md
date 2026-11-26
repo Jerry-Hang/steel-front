@@ -6475,3 +6475,29 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 规矩不变：**中断后第一件事是 `git status`**。
 
 现状：`judge_claims_verified` **65 / 193**；`tools/injections.txt` **22 条全 RED**、0 条需人看。
+
+### 2026-11-26：注入清单工具链三修（66 / 193，24 条全 RED）
+
+**① 加「从声称文本编译注入」模式**（`inject_check.py --propose`）：
+声称里写「把 `X` 改成 `Y`」的，机器直接试着算注入。产出 **只有 5 条**（其中 3 条已验、
+1 条不可区分）⇒ **大部分声称不是机械可编译的**（多为「删掉某个分支」或散文式描述）。
+结论：它是有用的小工具，**不是**清欠账的主路径。
+
+**② 归属修正**：第一版「从声称往上找最近的 `fn`」把 9 条里 8 条张冠李戴 ——
+声称写在**它自己的测试上方**，往上找会指到**上一个**测试。改用 `judge_audit.test_functions()`
+的正确归属后才对。
+
+**③ 新增 `COMMENT-ONLY` 状态**：注入目标是**注释行**时直接拦下。
+这个形态本会话出现**三次**（`npcs.len() >= 0`、`tx.send`、`m *= local`）——
+替换"落盘"了但行为没变，于是得出"判据失效"的错误结论，浪费三轮。
+现在的四种非成功状态：`NO-OP`（替换没改变文件）/ `COMMENT-ONLY`（改到注释）/
+`BROKEN`（编译失败，判据没跑）/ `NOT-RED`（真改了但没红）。
+**只有 `RED` 才算验证过。**
+
+**④ 两条实战修正**（都是工具/清单指向错位置，不是代码问题）：
+- `scene_transform_composes_through_parents`：声称里的 `m *= local` 在注释里，
+  真实代码是 `m *= self.slot(*e)?.local.matrix()` ⇒ 指向真实行后**红**；
+- `real_blender_asset_animation_moves_the_weighted_vertex`：`w * ib` 在**两个**函数里都有
+  （`Skin::matrices` 与 `posed_positions`），打中前者不红 ⇒ 精确到 `anim.rs` 那行后**红**。
+
+现状：台账 **66 / 193**；`injections.txt` **24 条全 RED**、0 条需人看。

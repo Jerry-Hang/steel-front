@@ -31,3 +31,5 @@ editor_filter_command_actually_changes_the_state | src/engine/plugin.rs | ctx.tr
 gizmo_axis_param_matches_hand_value | src/engine/gizmo.rs |     let w0 = point - ray_o; |     let w0 = ray_o - point;
 screen_ray_hits_dead_center_and_misses_when_offset | src/engine/gizmo.rs |     let dir = forward + right * (ndc_x * t * aspect) + up * (ndc_y * t); |     let dir = forward + up * (ndc_x * t * aspect) + right * (ndc_y * t);
 aipc_roundtrip_executes_commands_via_main_thread_channel | src/engine/aipc.rs |                         match rrx.recv_timeout(Duration::from_millis(500)) { |                         match rrx.recv_timeout(Duration::from_millis(0)) {
+scene_transform_composes_through_parents | src/engine/scene.rs |         m *= self.slot(*e)?.local.matrix(); |         m = self.slot(*e)?.local.matrix();
+real_blender_asset_animation_moves_the_weighted_vertex | src/engine/anim.rs |             w * ib |             ib * w

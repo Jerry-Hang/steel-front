@@ -161,3 +161,13 @@ screen_ray_hits_dead_center_and_misses_when_offset
 scale_factor_is_inverse_in_handle_length_not_just_delta
 # AIPC 回执链路：回执等待超时改 0ms（等价“收不到回执”）⇒ 客户端拿不到 OK，红
 aipc_roundtrip_executes_commands_via_main_thread_channel
+
+# ── 2026-11-26 第三批（父链组合 / 动画驱动）──
+# 父链世界矩阵：m *= local 改成 m = local ⇒ 子节点世界位置 (3,0,0)→(2,0,0)，红
+#   ⚠️ 声称里写的 `m *= local` 在**注释**里，真实代码是 `m *= self.slot(*e)?.local.matrix()`
+scene_transform_composes_through_parents
+# 动画驱动顶点：posed_positions 里 w * ib 写成 ib * w ⇒ 位移偏离 0.7071，红
+#   ⚠️ `w * ib` 在两个函数里都有（Skin::matrices 与 posed_positions），
+#      打中前者不红 —— 必须精确到 anim.rs 的那一行
+real_blender_asset_animation_moves_the_weighted_vertex
+gizmo_axis_param_matches_hand_value
