@@ -134,3 +134,5 @@ http_status_non_200_is_an_error | src/llm_cmd.rs |     if status != "200" { |   
 untextured_inputs_are_skipped_with_a_reason | src/engine/tex_atlas.rs | report.skipped.push((inp.name.to_string(), "无内嵌贴图".into())); | let _ = inp.name.len();
 json_escape_round_trips_control_chars | src/llm_cmd.rs |             c if (c as u32) < 0x20 => out.push_str(&format!("\u{:04x}", c as u32)), |             c if (c as u32) < 0x02 => out.push_str(&format!("\u{:04x}", c as u32)),
 packing_a_textured_model_remaps_uvs_and_fills_the_cell | src/engine/tex_atlas.rs |     remap_mesh_uvs(&mut mesh.verts, rect, glb_has_texcoord(bytes)); |     let _ = glb_has_texcoord(bytes);
+collisions_are_reported_not_silently_overwritten | src/engine/tex_atlas.rs |         if let Some(prev) = owner.get(&cell) { |         if let Some(prev) = owner.get(&cell).filter(|_| false) {
+hardcoded_gameplay_keys_are_reserved | src/ui.rs |             20 | 21 | 23 | 25 | 32 | 35 | 42 | 44 | 49 | 57 | 60 | 61 | 63 | 114 | 163 | 170 |             23 | 32 | 35 | 57 | 63 | 114 | 170

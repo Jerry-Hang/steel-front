@@ -367,3 +367,8 @@ http_status_non_200_is_an_error
 untextured_inputs_are_skipped_with_a_reason
 json_escape_round_trips_control_chars
 packing_a_textured_model_remaps_uvs_and_fills_the_cell
+
+# ── 2026-11-26 第二十六批（撞格报告 / 保留键）──
+collisions_are_reported_not_silently_overwritten
+# ⚠️ 只删 F12（170）不红（判据只查"硬编码玩法键"那批）；删掉 20/21/25/42/44/49/60/61 才红
+hardcoded_gameplay_keys_are_reserved

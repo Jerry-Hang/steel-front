@@ -834,7 +834,10 @@ mod tests {
 
     /// 🔴 **响应体必须有上限**（2026-10-19 自查）：`read_to_end` 原来无界，
     /// 异常端点可无限推流 ⇒ 进程内存耗尽。
-    /// 反向验证：把 `.take(MAX_RESPONSE_BYTES + 1)` 去掉 ⇒ 本判据红（会一直读到 9MB 不报错）。
+    /// 覆盖范围（2026-11-26 说明）：去掉 `.take(MAX+1)` **不会**让本判据红 ——
+    /// 因为紧随其后的 `if buf.len() > MAX_RESPONSE_BYTES { return Err }` 仍然会拦住超限
+    /// （实测把 take 改成 `u64::MAX` 后仍通过）。`take` 的作用是**不发内存**（读到上限就停），
+    /// 属于资源保护而非语义判定；语义判定由长度检查负责。
     #[test]
     fn http_response_is_bounded() {
         use std::io::{Read, Write};

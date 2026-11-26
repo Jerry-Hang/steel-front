@@ -6970,3 +6970,23 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 ⇒ 这是"**有些守卫只在 debug 可验**"的第一个明确案例。
 
 现状：台账 **169 / 192**（88%）；`injections.txt` 126 条。
+
+### 2026-11-26：欠账 169 → 171 / 191（90%）
+
+| 判据 | 注入 |
+|---|---|
+| `collisions_are_reported_not_silently_overwritten` | 撞格检测加 `.filter(|_| false)` |
+| `hardcoded_gameplay_keys_are_reserved` | 从保留表里删掉 20/21/25/42/44/49/60/61 |
+
+**两个新细节**：
+
+1. `hardcoded_gameplay_keys_are_reserved` **只删 F12 不红** —— 判据遍历的是"硬编码玩法键"
+   那批（B/C/G/X/Z/Slash/Shift/F5/Digit0…），F12 不在它的清单里。
+   ⇒ **声称里的"任一键"是错的**：只有清单里的键才压得住。已改声称。
+2. `http_response_is_bounded` 去掉 `.take(MAX+1)` **也不会红**：紧随其后的
+   `if buf.len() > MAX { return Err }` 照样拦住超限（`take` 只是**不放大内存**，属资源保护）。
+   ⇒ 已把声称改成覆盖范围说明。
+
+这两条都属于同一类：**"声称说 A 是守卫，其实 B 才是守卫"**。
+
+现状：台账 **171 / 191**（90%）；`injections.txt` 130 条。
