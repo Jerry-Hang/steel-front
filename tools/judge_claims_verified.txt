@@ -265,3 +265,13 @@ box_triangles_are_all_outward_facing
 burst_fire_respects_the_fire_cooldown
 # ⚠️ 常量在 net.rs 出现 2 次（含一条断言里的字符串）⇒ all 模式
 replay_step_up_matches_the_player
+
+# ── 2026-11-26 第十四批（天气通道 / 进关编号 / 姿态眼高 / 重开复位 / 击杀不反杀 / 胜利横幅）──
+rain_fills_the_weather_channel
+advance_level_keeps_the_next_level_number
+# ⚠️ 该行出现 2 次（蹲/卧各一处）⇒ all 模式
+stance_toggle_syncs_physics_eye_height
+start_run_resets_stance_sprint_heal_and_consumables
+a_npc_killed_this_frame_does_not_return_fire
+# ⚠️ 三处 victory_banner 文案（应力/关卡/目标完成）—— 判据走的是 update_objectives 那条
+objective_victory_sets_a_visible_banner

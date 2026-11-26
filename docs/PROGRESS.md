@@ -6718,3 +6718,26 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 注入才真的改变行为。**单行锚点 + 唯一性**是理想情况，不是总能满足。
 
 现状：台账 **116 / 196**；`injections.txt` 71 条。
+
+### 2026-11-26：欠账 116 → 122 / 196（本轮 6 条，主攻游戏层）
+
+| 判据 | 注入 |
+|---|---|
+| `rain_fills_the_weather_channel` | `wet` 恒 0.0 |
+| `advance_level_keeps_the_next_level_number` | 进关编号恒 `0` |
+| `stance_toggle_syncs_physics_eye_height` | 物理眼高不同步（all） |
+| `start_run_resets_stance_sprint_heal_and_consumables` | 复位值改成 `Prone` |
+| `a_npc_killed_this_frame_does_not_return_fire` | 死亡拦截 `if false` |
+| `objective_victory_sets_a_visible_banner` | 去掉横幅里的 `VICTORY` 字样 |
+
+**本轮最常见的失败：改对了机制、改错了那一份。** 三例同形：
+
+1. `objective_victory`：会话里有**三处** `victory_banner` 文案
+   （应力模式 / 关卡胜利 / 目标完成）。我先改的两处都不是判据走的那条 ⇒ 两次 NOT-RED。
+   **判据调用的是 `update_objectives` 那条**（`关卡目标达成（按 R 重开）`）。
+2. `stance_toggle`：`self.player_body.eye_height = next.eye_height();` 在蹲/卧各一份 ⇒ 必须 `all`。
+3. `objective_victory` 的第三次尝试还踩了**缩进**：清单里我写成 22 空格，真实是 20 空格 ⇒ `SKIP`。
+
+⇒ **改多份同形代码之前，先确认判据实际走哪一份**（读判据体，而不是读实现）。
+
+现状：台账 **122 / 196**；`injections.txt` 77 条。

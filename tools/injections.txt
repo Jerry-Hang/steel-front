@@ -82,3 +82,9 @@ tick_does_not_accumulate_before_companies_exist | src/engine/ai_command.rs |    
 box_triangles_are_all_outward_facing | src/engine/ray_tracer.rs |         idx[(f * 6 + 1) as usize] = b + 1; |         idx[(f * 6 + 1) as usize] = b + 2;
 burst_fire_respects_the_fire_cooldown | src/engine/game/weapons.rs |         if self.fire_cooldown > 0.0 { |         if false { | all
 replay_step_up_matches_the_player | src/engine/game/net.rs | const PLAYER_STEP_UP: f32 = 0.45; | const PLAYER_STEP_UP: f32 = 0.3; | all
+rain_fills_the_weather_channel | src/engine/game/view.rs |         let wet = if self.rain && !crate::syscfg::flag("RV3D_NO_WET") { 1.0 } else { 0.0 }; |         let wet = 0.0;
+advance_level_keeps_the_next_level_number | src/engine/game/session.rs |                 self.start_run_at((self.level_idx + 1) as u32); |                 self.start_run_at(0 as u32);
+stance_toggle_syncs_physics_eye_height | src/engine/game/player.rs |         self.player_body.eye_height = next.eye_height(); |         self.player_body.eye_height = self.player_body.eye_height; | all
+start_run_resets_stance_sprint_heal_and_consumables | src/engine/game/session.rs |         self.stance = Stance::Standing; |         self.stance = Stance::Prone;
+a_npc_killed_this_frame_does_not_return_fire | src/engine/game/npc_ai.rs |             if self.npcs[i].hp <= 0.0 || self.npcs[t].hp <= 0.0 { |             if false {
+objective_victory_sets_a_visible_banner | src/engine/game/session.rs |                     "VICTORY — 关卡目标达成（按 R 重开）".to_string() |                     "关卡目标达成（按 R 重开）".to_string()
