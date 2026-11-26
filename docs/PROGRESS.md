@@ -7009,3 +7009,19 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 所以它是二次保险；主守卫是 WGSL 侧扫描 + 尺寸断言。已把声称改成覆盖范围说明。
 
 现状：台账 **173 / 190**（91%）；`injections.txt` 132 条。
+
+### 2026-11-26：欠账 173 → 178 / 190（94%），本轮 5 条
+
+| 判据 | 注入 |
+|---|---|
+| `untextured_model_is_left_untouched_and_keeps_the_feature_bit_clear` | 无贴图时仍返回特征位 32 |
+| `plugin_systems_run_in_phase_order` | `Phase::ALL` 首项 PreUpdate → PreRender |
+| `plugin_command_lookup_is_by_name_and_reports_failures` | 按名字查找改 `.next()` |
+| `torch_picks_the_nearest_alive_enemy` | 去掉存活过滤 |
+| `net_spawn_points_are_spread_around_the_base` | 出生半径恒 `0.0` |
+
+**一个"差点误判"的细节**：出生点半径改成 `3.0`（**不红**）—— 因为角度仍按黄金角散开、
+且 3.0 落在 2.9..6.6 区间内 ⇒ 判据两侧都满足。改成 `0.0` 才越界。
+⇒ **声称写"常量 0"就要用 0**，别用"看起来差不多"的常数代替。
+
+现状：台账 **178 / 190**（94%）；`injections.txt` 138 条。

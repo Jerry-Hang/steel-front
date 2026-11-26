@@ -138,3 +138,8 @@ collisions_are_reported_not_silently_overwritten | src/engine/tex_atlas.rs |    
 hardcoded_gameplay_keys_are_reserved | src/ui.rs |             20 | 21 | 23 | 25 | 32 | 35 | 42 | 44 | 49 | 57 | 60 | 61 | 63 | 114 | 163 | 170 |             23 | 32 | 35 | 57 | 63 | 114 | 170
 tiny_positive_radius_never_produces_nan | src/engine/simd.rs |         || !inv_r2.is_finite() |         || false
 scene_toml_rejects_dangling_parent | src/engine/scene_io.rs |             .ok_or_else(|| { |             .or_else(|| Some(*map.first().map(|(_, h)| h).expect("至少一个"))) .ok_or_else(|| {
+untextured_model_is_left_untouched_and_keeps_the_feature_bit_clear | src/engine/tex_atlas.rs |         return Ok((mesh, 0)); |         return Ok((mesh, FEATURE_AUTHORED_TEX));
+plugin_systems_run_in_phase_order | src/engine/plugin.rs |         Phase::PreUpdate, |         Phase::PreRender,
+plugin_command_lookup_is_by_name_and_reports_failures | src/engine/plugin.rs |             .find(|c| c.name == name) |             .next()
+torch_picks_the_nearest_alive_enemy | src/engine/game/view.rs |             .filter(|n| n.hp > 0.0) |             .filter(|_n| true)
+net_spawn_points_are_spread_around_the_base | src/engine/game/net.rs |         let r = 3.0 + (id % 12) as f32 * 0.32; |         let r = 0.0;

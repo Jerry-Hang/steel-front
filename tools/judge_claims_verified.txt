@@ -377,3 +377,14 @@ hardcoded_gameplay_keys_are_reserved
 tiny_positive_radius_never_produces_nan
 # ⚠️ 锚点必须带 12 空格缩进（`.ok_or_else(|| {` 只这一处）
 scene_toml_rejects_dangling_parent
+
+# ── 2026-11-26 第二十八批（无贴图不动 / 阶段顺序 / 命令查找 / 火把目标 / 出生点半径）──
+untextured_model_is_left_untouched_and_keeps_the_feature_bit_clear
+# 改 Phase::ALL 的首项（PreUpdate → PreRender）⇒ 顺序错，红
+plugin_systems_run_in_phase_order
+# 按名字查找改成 .next()（只认第一条）⇒ 第二条查不到，红
+plugin_command_lookup_is_by_name_and_reports_failures
+# 去掉存活过滤 ⇒ 可能选中尸体，红（锚点缩进 12 空格）
+torch_picks_the_nearest_alive_enemy
+# 半径恒 0 ⇒ 半径超出 2.9..6.6，红；⚠️ 改成 3.0 **不红**（角度仍散开、且在区间内）
+net_spawn_points_are_spread_around_the_base
