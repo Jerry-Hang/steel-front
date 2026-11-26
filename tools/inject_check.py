@@ -114,7 +114,11 @@ def main():
                 results.append((name, "NO-OP", "git diff 为空"))
                 continue
             passed, summary = run_test(name)
-            if passed:
+            if summary == "编译失败":
+                # 🔴 **编译失败不是"变红"**：判据根本没跑。当成 RED 会把
+                # "注入写坏了" 记成 "判据有效" —— 与假账等价。
+                results.append((name, "BROKEN", "注入导致编译失败（判据没跑，不能算验证过）"))
+            elif passed:
                 results.append((name, "NOT-RED", f"注入后仍然通过 —— {summary}"))
             else:
                 results.append((name, "RED", summary))
@@ -128,7 +132,7 @@ def main():
     print(text)
     REPORT.write_text(text + "\n", encoding="utf-8")
 
-    bad = [r for r in results if r[1] in ("NOT-RED", "SKIP", "NO-OP")]
+    bad = [r for r in results if r[1] in ("NOT-RED", "SKIP", "NO-OP", "BROKEN")]
     red = [r for r in results if r[1] == "RED"]
     print(f"\ninject_check: {len(red)} 条确认变红 / {len(results)} 条；"
           f"{len(bad)} 条需人看（明细见 {REPORT.name}）")

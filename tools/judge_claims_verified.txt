@@ -119,3 +119,45 @@ missing_directory_is_an_error_not_an_empty_set
 editor_filter_command_actually_changes_the_state
 # 报告含只读、存盘跳过只读：给 dump_lines 也加只读过滤 ⇒ 报告看不到 NPC，红（手工注入）
 dump_includes_readonly_while_save_skips_them
+
+# ── 2026-11-25/26 贴图链路（asset_texture + tex_atlas）：均为 inject_check / 手工注入实测 ──
+# 嵌入 PNG 逐像素解码：to_rgba8 → to_rgb8 ⇒ 半透明像素 alpha 变 255，红
+embedded_png_decodes_pixel_for_pixel
+# UV 重映射四角：rect.width()/height() 换成 1.0 ⇒ 2 条断言红
+remap_sends_uv_corners_to_cell_corners
+# 不许夹紧超界 UV：加 .clamp(0,1) ⇒ uv=3.0 映射到 1.0 而非 1.5，红
+remap_does_not_clamp_out_of_range_uv
+# UV 阈值与着色器同源：常量改 1e-3 ⇒ 解析出的着色器阈值对不上，红
+uv_epsilon_matches_the_shader
+# 无贴图回退顶点色：fallback_albedo 返回白色 ⇒ 红
+missing_texture_falls_back_to_vertex_color_not_white
+# 网格完整覆盖：row 改 index % cols ⇒ 两格重叠/覆盖不全，红
+grid_cells_cover_the_atlas_without_overlap
+# UV 落格只动 uv 两分量：顺手写 v[3] ⇒ 法线被改，红
+remapping_uvs_leaves_position_normal_color_untouched
+# 落格按属性存在性而非数值：删掉 has_texcoord 门 ⇒ 无 UV 的件也被改，红
+remapping_is_gated_on_the_attribute_not_on_zero_values
+# TEXCOORD_0 识别：NEEDLE 改成 TEXCOORD_1 ⇒ 2 条断言红
+texcoord_presence_is_detected_from_the_json
+# blit 最近邻缩放：sx 改成 dx.min(w-1)（不缩放）⇒ 象限颜色错，红
+blit_scales_the_texture_into_the_cell_and_touches_nothing_else
+# 无贴图不套用：删掉 if !has_texture 门 ⇒ 没贴图的件 UV 被改，红
+prop_atlas_uvs_are_only_applied_when_there_is_a_texture
+# 打包/加载同名口径：改成带 .glb ⇒ 两侧算出不同格，红
+pack_and_load_agree_on_the_same_name_form
+# 拒写作者图集：is_authored_atlas_path 恒 false ⇒ 第一条断言红
+authored_atlas_path_is_recognised_so_it_cannot_be_overwritten
+# 报告含只读、存盘跳过只读：给 dump_lines 也加只读过滤 ⇒ 报告看不到 NPC，红（手工注入）
+dump_includes_readonly_while_save_skips_them
+
+# ── 2026-11-26 第二批（gizmo / aipc）──
+# 轴参数射线求交：w0 = ray_o - point（反号）⇒ 手臂得 -1，红
+gizmo_axis_param_matches_hand_value
+# 屏幕射线基向量：right 与 up 互换 ⇒ 偏移方向错，红
+screen_ray_hits_dead_center_and_misses_when_offset
+# 缩放倍率与把手长度成反比：delta/len 写成 delta ⇒ 新判据红
+#   ⚠️ 原来的两条（doubles_per_handle_length / slope_is_inverse_handle_length）
+#   在 GIZMO_LEN==1.0 下**无法区分**，实测注入后仍通过 ⇒ 新增带显式把手长度的判据才有区分度
+scale_factor_is_inverse_in_handle_length_not_just_delta
+# AIPC 回执链路：回执等待超时改 0ms（等价“收不到回执”）⇒ 客户端拿不到 OK，红
+aipc_roundtrip_executes_commands_via_main_thread_channel

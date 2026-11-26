@@ -313,7 +313,25 @@ pub const SCALE_MAX: f32 = 50.0;
 ///
 /// 返回的倍率已经 clamp 到 `[SCALE_MIN, SCALE_MAX]`。
 pub fn scale_factor_from_drag(delta: f32) -> f32 {
-    (1.0 + delta / GIZMO_LEN).clamp(SCALE_MIN, SCALE_MAX)
+    scale_factor_from_drag_with(delta, GIZMO_LEN)
+}
+
+/// 同上，但**显式给把手长度**。
+///
+/// 🔴 拆出这个函数是**判据需要**，不是多余的顾虑：
+/// `GIZMO_LEN == 1.0` 时 `delta / GIZMO_LEN` 与 `delta` **在数学上完全相同**，
+/// 所以任何用 `scale_factor_from_drag` 的测试都**无法**区分这两种写法
+/// （实测：注入 `1.0 + delta` 后，`scale_factor_doubles_per_handle_length` 与
+/// `scale_factor_slope_is_inverse_handle_length` 两条**都仍然通过**）。
+/// 有了这个参数，测试可以取 handle_len = 2.0 真正把"除以把手长度"钉住。
+pub fn scale_factor_from_drag_with(delta: f32, handle_len: f32) -> f32 {
+    // 把手长度 0 会让倍率爆掉（除零）；退回标准长度而不是产生 inf
+    let len = if handle_len.abs() < 1e-6 {
+        GIZMO_LEN
+    } else {
+        handle_len
+    };
+    (1.0 + delta / len).clamp(SCALE_MIN, SCALE_MAX)
 }
 
 /// 绕 **Y 轴**旋转的拖动：由光标绕物体在屏幕上的投影中心转过的角度决定。
@@ -663,6 +681,31 @@ mod tests {
             (slope - want).abs() < 1e-3,
             "斜率应是 1/GIZMO_LEN = {want}，实际 {slope}"
         );
+    }
+
+    /// 🔴 **"除以把手长度"必须可被区分** —— 用非 1 的把手长度。
+    ///
+    /// 为什么需要这一条：`GIZMO_LEN == 1.0` 时 `delta / GIZMO_LEN ≡ delta`，
+    /// 所以 `scale_factor_from_drag` 的**任何**测试都无法区分两种写法
+    /// （实测注入 `1.0 + delta` 后，原有两条判据仍然通过 —— 那是判据覆盖不到的地方，不是代码的问题）。
+    ///
+    /// 反向验证：把 `delta / len` 写成 `delta` ⇒ 第二条断言红（2.0/2.0 会变 3.0）。
+    #[test]
+    fn scale_factor_is_inverse_in_handle_length_not_just_delta() {
+        // 把手 2m、拖 2m ⇒ 正好翻倍
+        assert!(
+            (scale_factor_from_drag_with(2.0, 2.0) - 2.0).abs() < 1e-6,
+            "拖一个 2m 把手应翻倍，实际 {}",
+            scale_factor_from_drag_with(2.0, 2.0)
+        );
+        // 同样拖 2m、把手 1m ⇒ 三倍（这里才是两种写法分开的地方）
+        assert!(
+            (scale_factor_from_drag_with(2.0, 1.0) - 3.0).abs() < 1e-6,
+            "把手 1m 拖 2m 应是 3 倍，实际 {}",
+            scale_factor_from_drag_with(2.0, 1.0)
+        );
+        // 把手长度 0 ⇒ 退回标准长度，不产生 inf
+        assert!(scale_factor_from_drag_with(1.0, 0.0).is_finite());
     }
 
     /// 倍率必须夹在 `[SCALE_MIN, SCALE_MAX]`：0 或负数会让物体消失且不可逆。

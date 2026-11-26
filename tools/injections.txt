@@ -10,7 +10,7 @@ perceptual_volume_is_quieter_than_linear | src/audio.rs | v.clamp(0.0, 1.0).powf
 soft_limit_bounds_and_preserves_small_signals | src/audio.rs | const CEIL: f32 = 0.7; | const CEIL: f32 = 1.0;
 mode_cycle_returns_to_the_start | src/engine/gizmo.rs | Mode::Scale => Mode::Translate, | Mode::Scale => Mode::Scale,
 asset_stem_strips_dir_and_extension | src/engine/props.rs | let file = path.rsplit(['/', '\\']).next().unwrap_or(path); | let file = path;
-scale_factor_is_clamped_away_from_zero | src/engine/gizmo.rs | (1.0 + delta / GIZMO_LEN).clamp(SCALE_MIN, SCALE_MAX) | 1.0 + delta / GIZMO_LEN
+scale_factor_is_clamped_away_from_zero | src/engine/gizmo.rs |     (1.0 + delta / len).clamp(SCALE_MIN, SCALE_MAX) |     (1.0 + delta / len)
 
 # ── 2026-11-25 第二轮：声称里写明注入方式的 ──
 anim_step_holds_the_previous_keyframe | src/engine/anim.rs | Interp::Step => values[i], | Interp::Step => values[i + 1],
@@ -28,3 +28,6 @@ edit_mode_never_advances_the_world | src/engine/mode.rs |     if !mode.is_play()
 ensure_smooth_normals_fills_and_preserves | src/engine/props.rs |     if indices.len() < 3 { |     if true {
 missing_directory_is_an_error_not_an_empty_set | src/engine/props.rs |         let entries = src.list_dir(dir)?; |         let entries = src.list_dir(dir).unwrap_or_default();
 editor_filter_command_actually_changes_the_state | src/engine/plugin.rs | ctx.tree_filter = f; | let _ = f; | all
+gizmo_axis_param_matches_hand_value | src/engine/gizmo.rs |     let w0 = point - ray_o; |     let w0 = ray_o - point;
+screen_ray_hits_dead_center_and_misses_when_offset | src/engine/gizmo.rs |     let dir = forward + right * (ndc_x * t * aspect) + up * (ndc_y * t); |     let dir = forward + up * (ndc_x * t * aspect) + right * (ndc_y * t);
+aipc_roundtrip_executes_commands_via_main_thread_channel | src/engine/aipc.rs |                         match rrx.recv_timeout(Duration::from_millis(500)) { |                         match rrx.recv_timeout(Duration::from_millis(0)) {

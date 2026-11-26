@@ -6443,3 +6443,35 @@ asset.atlas_pack 8（缺省路径）                     → atlas 1024x1024 pac
 ```
 RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.png（以作者图集为底）
 ```
+
+### 2026-11-26：判据欠账清理（61 → 65 / 193）+ 三个工具/判据缺陷
+
+**① 两条缩放判据在 `GIZMO_LEN == 1.0` 下根本无法区分。**
+`scale_factor_from_drag(1.0)` 用 `1 + delta/1.0` 与 `1 + delta` **数学上完全相同**，
+所以注入 `1.0 + delta` 后，`scale_factor_doubles_per_handle_length` 与
+`scale_factor_slope_is_inverse_handle_length` **两条都仍然通过**（实测）。
+修法：把公式拆成 `scale_factor_from_drag_with(delta, handle_len)`，
+新判据 `scale_factor_is_inverse_in_handle_length_not_just_delta` 用 **handle_len = 2.0**
+才真正能区分（2m/2m = 2 倍 vs 1m/2m = 3 倍）。注入后确实红。
+⇒ 原来那条"反向验证"是**不可兑现的声称**，已从清单里删掉，换成可兑现的那条。
+
+**② `inject_check` 把"编译失败"记成 RED。**
+一次注入（`drop(rtx)`）让 `rtx` 提前移动、编译失败，工具却报 **RED** ——
+判据根本没跑，却记成"判据有效"，**与假账等价**。
+已加第四种状态 `BROKEN`：编译失败不算验证过。这是本工具第 3 次被自己的失效教到。
+
+**③ 注入改到了注释里。**
+`aipc.rs` 的 `tx.send` 在全文只出现 **1 次**，而那次在**文档注释**里（真实发送跨三行）。
+第一版注入改的是注释 ⇒ 注入"落盘"了但行为没变 ⇒ NOT-RED。
+换成有语义的单行注入（回执等待超时 500ms → 0ms，等价"收不到回执"）后红。
+
+**④ 重构会让注入清单失效。**
+把 `(1.0 + delta / GIZMO_LEN)` 改成 `(1.0 + delta / len)` 之后，
+清单里两条锚点变成"原文出现 0 次"⇒ `SKIP`。已更新锚点。
+⇒ **重构后要跑一次 `inject_check.py`**，否则清单会悄悄腐烂（`SKIP` 不会自己喊）。
+
+**⑤ 中断又留下残留注入**（第二次）：`src/engine/ai.rs` 里留着
+`Some(clamped).unwrap_or_else(...)`（去掉侧翼吸附的注入），`git status` 发现，已还原。
+规矩不变：**中断后第一件事是 `git status`**。
+
+现状：`judge_claims_verified` **65 / 193**；`tools/injections.txt` **22 条全 RED**、0 条需人看。
