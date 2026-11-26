@@ -6846,3 +6846,22 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 ⇒ **先看判据怎么读证据**（跑代码 vs 扫源码），再决定注入点。
 
 现状：台账 **143 / 196**（73%）；`injections.txt` 97 条。
+
+### 2026-11-26：欠账 143 → 145 / 195（本轮 2 条 + 又撤一条假声称）
+
+| 判据 | 注入 |
+|---|---|
+| `point_blank_shot_inside_the_hit_sphere_registers_a_hit` | `t < 0.0` 改回 `t <= 0.0`（丢掉贴脸命中） |
+| `cpu_pose_chain_matches_hand_computed_displacements` | 通道覆盖循环改成空迭代（all） |
+
+🔴 **`for ch in channels {` 在 `anim.rs` 有**两处**、缩进都是 8 空格** ——
+我第一次的锚点带 8 空格 ⇒ 只命中一处（另一处才是判据走的那条）⇒ NOT-RED 两次；
+把锚点改成**不带前导空格** + `all` 模式才两处都改、判据才红。
+⇒ **锚点越"具体"（带缩进）越容易只命中一部分**；当锚点在本文件必然多处出现时，
+**去掉缩进 + all** 反而更可靠。
+
+**又撤掉一条假声称**：`anim_cubic_matches_hand_computed_hermite` 原写
+"漏乘 dt ⇒ dt=2 时差一倍，红"，但它用 `times=[0,1]`（dt=1）**根本压不到**。
+已改成覆盖范围说明，并指向 `cubic_dt_matters_when_the_segment_is_not_unit_length`。
+
+现状：台账 **145 / 195**（74%）；`injections.txt` 99 条。

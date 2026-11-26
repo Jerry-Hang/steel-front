@@ -319,3 +319,9 @@ ssao_push_declares_contact_shadow_fields
 # 源码扫描型判据：改 is_dir 不动它，必须去掉 `flag("RV3D_CITY_CHUNKS")` 那一行
 structural_markers_are_not_skipped_wholesale
 music_synth_time_stays_accurate_after_hours
+
+# ── 2026-11-26 第二十批（贴脸命中 / 姿势通道覆盖）──
+# consider 闭包：t < 0.0 改回 t <= 0.0 ⇒ t=0 被丢弃，贴脸打不中，红
+point_blank_shot_inside_the_hit_sphere_registers_a_hit
+# ⚠️ `for ch in channels {` 在 anim.rs 有**两处**（8 空格缩进一样）⇒ 锚点必须**不带前导空格** + all 模式
+cpu_pose_chain_matches_hand_computed_displacements

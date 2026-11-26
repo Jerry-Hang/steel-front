@@ -572,7 +572,9 @@ mod tests {
         );
     }
 
-    /// 反向验证：把 `h10 * dt` 写成 `h10`（漏乘 dt）⇒ dt=2 时差一倍，红（见下一条）。
+    /// 覆盖范围（2026-11-26 说明）：本判据用 `times = [0, 1]` ⇒ **dt == 1**，
+    /// 此时 `h10 * dt` 与 `h10` **完全相同**，所以它**压不到**"漏乘 dt"（实测注入后仍通过）。
+    /// 该缺陷由 `cubic_dt_matters_when_the_segment_is_not_unit_length`（段长 2 秒）单独钉住。
     #[test]
     fn anim_cubic_matches_hand_computed_hermite() {
         let times = [0.0, 1.0];

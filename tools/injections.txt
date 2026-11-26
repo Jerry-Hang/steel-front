@@ -109,3 +109,5 @@ ground_field_skips_hills_and_keeps_double_density | src/engine/renderer/geometry
 ssao_push_declares_contact_shadow_fields | build.rs |     aux2: vec4<f32>, |     aux2x: vec4<f32>,
 structural_markers_are_not_skipped_wholesale | src/app_render.rs |         crate::syscfg::flag("RV3D_CITY_CHUNKS") |         true
 music_synth_time_stays_accurate_after_hours | src/audio.rs |         self.time_secs += frames as f64 * (1.0 / self.sample_rate as f64); |         self.time_secs = frames as f64 * (1.0 / self.sample_rate as f64);
+point_blank_shot_inside_the_hit_sphere_registers_a_hit | src/engine/game/weapons.rs |             if t < 0.0 { |             if t <= 0.0 {
+cpu_pose_chain_matches_hand_computed_displacements | src/engine/anim.rs | for ch in channels { | for ch in channels.iter().take(0) { | all
