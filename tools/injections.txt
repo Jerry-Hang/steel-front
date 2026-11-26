@@ -55,5 +55,4 @@ collide_four_iterations_resolve_a_corner_two_do_not | src/engine/physics.rs | co
 battery_bar_only_when_visible | src/ui.rs |           if self.battery_visible { |           if true {
 text_world_draws_outline_behind_the_fill | src/ui.rs |                 for (dx, dy) in [(-off, 0.0), (off, 0.0), (0.0, -off), (0.0, off)] { |                 for (dx, dy) in [(0.0f32, 0.0f32); 0] {
 command_box_stays_inside_the_screen | src/ui.rs |         screen_h - 46.0 * scale |         screen_h - 0.0 * scale
-# 待办：ui_text_has_no_unrenderable_chars 未入清单 —— 它只覆盖少数映射（× 改成 U+FFFD 仍通过），
-# 而破折号那行含 `|`，无法做清单锚点（分隔符冲突）。要修的是**测试覆盖面**，不是清单。
+fallback_chain_never_points_at_an_unrenderable_char | src/ui.rs |         '\u{00D7}' => 'x',                            // × |         '\u{00D7}' => '\u{1F600}',                            // ×

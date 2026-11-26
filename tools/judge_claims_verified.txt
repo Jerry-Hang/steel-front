@@ -214,3 +214,8 @@ collide_four_iterations_resolve_a_corner_two_do_not
 battery_bar_only_when_visible
 text_world_draws_outline_behind_the_fill
 command_box_stays_inside_the_screen
+
+# ── 2026-11-26 第八批（回退链的"结果"也必须可渲染）──
+# × 映射改成 emoji ⇒ 新判据红（旧实现只判"有没有映射"，对这类改动完全无感）
+fallback_chain_never_points_at_an_unrenderable_char
+ui_text_has_no_unrenderable_chars

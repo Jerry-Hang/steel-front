@@ -2024,7 +2024,23 @@ pub fn char_renders(ch: char) -> bool {
     if is_cjk(ch) && glyph_cjk(ch).is_some() {
         return true;
     }
-    typographic_fallback(ch).is_some()
+    // 🔴 **回退的"结果"也必须能渲染**，否则"有映射"只是假的保证。
+    //
+    // 原实现只判 `typographic_fallback(ch).is_some()`：把 `×` 映射成 `U+FFFD`
+    // （无字模字符）也照样返回 true ⇒ 判据 `ui_text_has_no_unrenderable_chars`
+    // 对这类改动**完全无感**（实测注入后仍通过）。现在要求映射目标**自己**能画出来。
+    match typographic_fallback(ch) {
+        Some(r) => renders_on_its_own(r),
+        None => false,
+    }
+}
+
+/// 一个字符**不依赖任何回退**就能画出来（ASCII 可打印 / CJK 且有字模）。
+///
+/// 单独抽出来是为了让 `char_renders` 只需一层：回退链不做递归
+/// （映射表里有 `→` 映射到 `->` 这类多字符写法，递归反而容易写出死循环）。
+fn renders_on_its_own(ch: char) -> bool {
+    (' '..='~').contains(&ch) || (is_cjk(ch) && glyph_cjk(ch).is_some())
 }
 
 /// 一串文案里**会被画成 `?`** 的字符（去重、保序）。空 = 全都能正确显示。
@@ -2377,6 +2393,32 @@ mod tests {
     /// ⇒ 破折号/乘号/间隔号/度数全部变成问号，**静默且无日志**。
     ///
     /// 这条判据直接拿**真实文案**问"有没有问题"，而不是另写一套规则。
+
+    /// 🔴 **回退链的每一环都必须落到"自己能渲染"的字符上**。
+    ///
+    /// 这条钉的是 `char_renders` 的实现要求（原实现只判"有没有映射"）：
+    /// 把 `×` 映射成 emoji 或 `U+FFFD`，旧实现一律返回 true ⇒ 判据无感。
+    ///
+    /// 反向验证：把 `'\\u{00D7}' => 'x',` 写成 `=> '\\u{1F600}',` ⇒ 这里必红。
+    #[test]
+    fn fallback_chain_never_points_at_an_unrenderable_char() {
+        // 覆盖 `typographic_fallback` 里所有**单项**映射的输入字符
+        let ins = [
+            '\u{2014}', '\u{2013}', '\u{2212}', '\u{00D7}', '\u{00B7}', '\u{2022}',
+            '\u{2026}', '\u{00B0}', '\u{00B1}', '\u{00B2}', '\u{00B5}', '\u{2265}',
+            '\u{2264}', '\u{2248}', '\u{2192}', '\u{2460}', '\u{2468}',
+        ];
+        for ch in ins {
+            let Some(r) = typographic_fallback(ch) else {
+                continue;
+            };
+            assert!(
+                renders_on_its_own(r),
+                "{ch:?} 回退到 {r:?}，但 {r:?} 自己渲染不出来 —— 等于没修"
+            );
+        }
+    }
+
     /// 反向验证：把 `typographic_fallback` 里 `'\u{2014}'` 那一项删掉 ⇒ 立刻红。
     #[test]
     fn ui_text_has_no_unrenderable_chars() {

@@ -6606,3 +6606,25 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 - 清单分隔符 `" | "` 意味着**锚点里不能有竖线**；含 `|` 的代码行要从别的角度注入。
 
 现状：台账 **88 / 195**；`injections.txt` 含 1 条带原因的待办注记。
+
+### 2026-11-26：修掉上轮的待办 —— `char_renders` 只判"有映射"，不判"映射到的东西能画"
+
+**缺陷**：`char_renders` 原实现末尾是 `typographic_fallback(ch).is_some()`。
+把 `×` 映射成 emoji 或无字模字符，**它照样返回 true** ⇒ 判据
+`ui_text_has_no_unrenderable_chars` 对"回退目标本身渲染不出来"这类改动**完全无感**。
+
+**修法**：抽出 `renders_on_its_own(ch)`（ASCII 可打印 / CJK 且有字模），
+`char_renders` 要求**回退目标自己**满足它。回退链仍然只做一层（映射表里有 `→`→`->`
+这类多字符写法，递归反而容易写出死循环）。
+
+**新增判据** `fallback_chain_never_points_at_an_unrenderable_char`：
+遍历 `typographic_fallback` 里所有单项映射的输入字符（17 个），
+断言"回退目标能自己渲染"。注入 `'\\u{00D7}' => '\\u{1F600}'` 后**红**。
+
+⚠️ 本轮我自己在注入上栽了两次，都记在这里：
+1. **用字面 `×` 去替换源码里的转义写法 `'\\u{00D7}'`** ⇒ `count == 0`、注入根本没落盘，
+   却两次得出"测试无感"的错误结论。**⇒ 注入前先 `grep -F` 确认这串在文件里真的存在。**
+2. 第一次选 `U+FFFD` 作替换目标不够格：它落在全角区，`is_cjk` 可能判它是 CJK ⇒ 区分度不确定。
+   **换 emoji（已知 `!char_renders` 有断言守着）才是有保证的负样本。**
+
+现状：台账 **90 / 196**；`injections.txt` **47 条（46 RED + 1 RED-COMPILE）**、0 条需人看。
