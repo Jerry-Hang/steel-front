@@ -56,3 +56,8 @@ battery_bar_only_when_visible | src/ui.rs |           if self.battery_visible { 
 text_world_draws_outline_behind_the_fill | src/ui.rs |                 for (dx, dy) in [(-off, 0.0), (off, 0.0), (0.0, -off), (0.0, off)] { |                 for (dx, dy) in [(0.0f32, 0.0f32); 0] {
 command_box_stays_inside_the_screen | src/ui.rs |         screen_h - 46.0 * scale |         screen_h - 0.0 * scale
 fallback_chain_never_points_at_an_unrenderable_char | src/ui.rs |         '\u{00D7}' => 'x',                            // × |         '\u{00D7}' => '\u{1F600}',                            // ×
+transient_full_refusal_keeps_retrying | src/net.rs |     !reason.starts_with("BUSY") && (reason.starts_with("VERSION") || reason.contains("版本不匹配")) |     true
+backface_has_no_specular | src/engine/lighting.rs |     if normal.dot(light_dir) <= 0.0 { |     if false {
+vision_factor_drops_at_night | src/engine/lighting.rs |     0.55 + 0.45 * s |     1.0
+network_strings_never_inject_log_lines | src/net.rs |         if i >= 128 { |         if false {
+nearest_lamps_are_sorted_by_distance | src/engine/lighting.rs |     idx.truncate(n); |     idx.truncate(n); idx.reverse();

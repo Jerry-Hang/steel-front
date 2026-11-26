@@ -6628,3 +6628,20 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
    **换 emoji（已知 `!char_renders` 有断言守着）才是有保证的负样本。**
 
 现状：台账 **90 / 196**；`injections.txt` **47 条（46 RED + 1 RED-COMPILE）**、0 条需人看。
+
+### 2026-11-26：欠账 90 → 95 / 196（本轮确认 5 条）
+
+| 判据 | 注入 |
+|---|---|
+| `transient_full_refusal_keeps_retrying` | `refuse_is_permanent` 恒 `true` |
+| `backface_has_no_specular` | 去掉 `n·l <= 0` 门控（`if false`） |
+| `vision_factor_drops_at_night` | 夜视系数改成恒 `1.0` |
+| `network_strings_never_inject_log_lines` | 截断门 `i >= 128` → `if false` |
+| `nearest_lamps_are_sorted_by_distance` | 排序结果 `idx.reverse()` |
+
+⚠️ **`nearest_lamps` 第一次注入选错了点**：我改的是 `.then(a.cmp(&b))`（等距 tie-break），
+而夹具里的三个灯**距离互不相等** ⇒ tie-break 永远不走 ⇒ NOT-RED。
+**⇒ 挑注入点要看夹具覆盖了哪条路径，不能挑"看起来最像排序列"的那一行。**
+改成反转结果（对所有输入都生效）立刻就红。
+
+现状：台账 **95 / 196**（接近半程）；`injections.txt` 52 条。

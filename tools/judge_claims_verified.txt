@@ -219,3 +219,11 @@ command_box_stays_inside_the_screen
 # × 映射改成 emoji ⇒ 新判据红（旧实现只判"有没有映射"，对这类改动完全无感）
 fallback_chain_never_points_at_an_unrenderable_char
 ui_text_has_no_unrenderable_chars
+
+# ── 2026-11-26 第九批（联机拒绝语义 / 背光高光 / 夜视 / 日志净化 / 灯排序）──
+transient_full_refusal_keeps_retrying
+backface_has_no_specular
+vision_factor_drops_at_night
+network_strings_never_inject_log_lines
+# 注意：注入用"把排序结果反转"，不是"改等距 tie-break"（后者对本夹具无效 —— 距离互不相等）
+nearest_lamps_are_sorted_by_distance
