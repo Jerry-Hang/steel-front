@@ -496,7 +496,28 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 .first()
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| "缺格数（如 8 表示 8x8=64 格）".to_string())?;
-            let out = args.get(1).ok_or_else(|| "缺输出路径".to_string())?.to_string();
+            // 与加载侧共用同一个网格口径（tex_atlas::PROP_ATLAS_GRID）
+            if cells != crate::engine::tex_atlas::PROP_ATLAS_GRID.cols {
+                log::warn!(
+                    "atlas_pack: 传入 {cells}x{cells} 与 PROP_ATLAS_GRID {}x{} 不一致 —— \
+                     加载侧按后者算格号，两边不一致会导致贴图错位",
+                    crate::engine::tex_atlas::PROP_ATLAS_GRID.cols,
+                    crate::engine::tex_atlas::PROP_ATLAS_GRID.rows
+                );
+            }
+            let out = args
+                .get(1)
+                .copied()
+                .unwrap_or(crate::engine::tex_atlas::GENERATED_ATLAS_PATH)
+                .to_string();
+            // 🔴 绝不写作者维护的那张（覆盖过一次：4096² 手作图集 → 纯白板，编译器不会报错）
+            if crate::engine::tex_atlas::is_authored_atlas_path(&out) {
+                return Err(format!(
+                    "拒绝写 {out}：那是作者手工维护的图集（现有道具的 UV 全靠它）。\
+                     请写 {} 或别的路径。",
+                    crate::engine::tex_atlas::GENERATED_ATLAS_PATH
+                ));
+            }
             let dir = args.get(2).copied().unwrap_or("assets/props").to_string();
             let grid = crate::engine::tex_atlas::AtlasGrid::new(cells, cells);
             // 至少 512 像素一格，保证小图也能看清（道具贴图本来就是小图）
@@ -508,8 +529,10 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 if path.extension().and_then(|e| e.to_str()) != Some("glb") {
                     continue;
                 }
+                // 🔴 用 **stem**（不带 .glb）：加载侧的道具名就是 stem，
+                // 两边必须同一口径，否则同一个模型落在不同的格（贴图错位）。
                 let name = path
-                    .file_name()
+                    .file_stem()
                     .and_then(|n| n.to_str())
                     .unwrap_or("?")
                     .to_string();
@@ -525,9 +548,24 @@ pub fn register_debug_plugin(reg: &mut PluginRegistry) {
                 .iter()
                 .map(|(n, b)| crate::engine::tex_atlas::AtlasInput { name: n, bytes: b })
                 .collect();
-            let (atlas, rep) = crate::engine::tex_atlas::pack_props_into_atlas(
+            // 以**现有输出图**为底（重复运行不会把上次的结果覆盖掉）；没有就从白板开始
+            let (mut atlas, rep) = crate::engine::tex_atlas::pack_props_into_atlas(
                 &inputs, grid, side, side,
             );
+            if let Ok(prev) = image::open(&out) {
+                let prev = prev.to_rgba8();
+                if (prev.width(), prev.height()) == (atlas.width, atlas.height) {
+                    // 只保留**本次没写到的**像素：简单做法是把本次结果叠在旧图上
+                    for (i, px) in prev.pixels().enumerate() {
+                        let off = i * 4;
+                        let new_white = atlas.data[off..off + 4] == [255, 255, 255, 255];
+                        if new_white {
+                            atlas.data[off..off + 4].copy_from_slice(&px.0);
+                        }
+                    }
+                    log::info!("atlas_pack: 已以现有 {out} 为底合并");
+                }
+            }
             // 写 PNG
             let img: image::RgbaImage =
                 image::ImageBuffer::from_raw(atlas.width, atlas.height, atlas.data.clone())

@@ -239,11 +239,27 @@ impl PropSet {
                 .unwrap_or("unnamed")
                 .to_string();
             let bytes = src.read(&path)?;
-            let m = crate::engine::assets::parse_glb(&bytes)
+            let mut m = crate::engine::assets::parse_glb(&bytes)
                 .map_err(|err| format!("{path} 解析失败: {err}"))?;
             if m.verts.is_empty() || m.indices.is_empty() {
                 return Err(format!("{path} 是空网格"));
             }
+              // 贴图图集（2026-11-26）：模型带内嵌贴图时，把 UV 落进它在图集里的那一格。
+              //
+              // 🔴 默认不动（RV3D_PROP_ATLAS_PACKED 未设 ⇒ 行为与上一版逐字节一致）：
+              // 图集 PNG 只有跑过 asset.atlas_pack 之后才有内容；否则它是纯白图，
+              // 而"有 UV 就采样"会让这些件被整体提亮 1.765 倍 —— 那是可见的颜色回归。
+              if crate::syscfg::flag("RV3D_PROP_ATLAS_PACKED") {
+                  if let Ok(texs) = crate::engine::asset_texture::parse_glb_textures(&bytes) {
+                      let has_tex = !texs.is_empty();
+                      let has_uv = crate::engine::tex_atlas::glb_has_texcoord(&bytes);
+                      if let Some(cell) = crate::engine::tex_atlas::apply_prop_atlas_uvs(
+                          &stem, has_uv, has_tex, &mut m.verts,
+                      ) {
+                          log::info!("props: {stem} 贴图落到图集第 {cell} 格");
+                      }
+                  }
+              }
             // `_lod1` 后缀的件进 LOD 表（基名去掉后缀），其余照旧进主表。
             if let Some(base) = stem.strip_suffix("_lod2") {
                 found_lod2.push((base.to_string(), m));
@@ -395,6 +411,8 @@ pub const CONTRACT_SIZES: &[(&str, f32, f32, f32)] = &[
     ("container_green", 6.148, 2.538, 2.634),
     ("container_navy", 6.148, 2.538, 2.634),
     ("crate_military", 1.816, 0.976, 0.300),
+    // 带内嵌贴图的活样本（2026-11-26）：贴图链路要有一件真资产才看得见效果。
+    ("crate_textured", 0.800, 0.800, 0.808),
     ("crate_wood", 0.665, 0.665, 0.640),
     ("downtown_large", 20.644, 16.645, 28.000),
     ("downtown_medium", 15.056, 13.056, 25.009),

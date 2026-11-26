@@ -343,6 +343,57 @@ pub fn cell_for_name(name: &str, grid: AtlasGrid) -> Option<u32> {
     Some((h % n as u64) as u32)
 }
 
+/// 道具图集的**唯一网格约定**（打包与加载共用，改一处即两边同步）。
+///
+/// 8×8 = 64 格。当前 53 件道具、实际带贴图的只有 1 件，格数远大于需要 ——
+/// 因为格号是**哈希取模**，格数越少撞格概率越高（撞格表现为"贴图串了"，见 `PackReport`）。
+pub const PROP_ATLAS_GRID: AtlasGrid = AtlasGrid::new(8, 8);
+
+/// 道具名 → 图集格的**唯一口径**：用**不带扩展名**的名字（文件 stem）。
+///
+/// 🔴 这一条踩过：打包命令用 `file_name()`（`crate_textured.glb`），
+/// 而加载侧的道具名是 stem（`crate_textured`）—— 同一个模型算出**不同的格**，
+/// 表现为"贴图错位"。所以这里把口径集中成一个函数，两边都调它。
+pub fn prop_cell(stem: &str) -> Option<u32> {
+    cell_for_name(stem, PROP_ATLAS_GRID)
+}
+
+/// 给一件道具的顶点套上图集 UV（**纯策略**，不读文件、不看环境变量）。
+///
+/// 返回 `Some(格号)` = 已重映射；`None` = 不该动（没有贴图 / 没有 UV 属性）。
+/// 调用方决定"要不要真的套用"（例如开关关着就干脆不调）。
+pub fn apply_prop_atlas_uvs(
+    stem: &str,
+    has_texcoord: bool,
+    has_texture: bool,
+    verts: &mut [[f32; 11]],
+) -> Option<u32> {
+    if !has_texture {
+        return None;
+    }
+    let cell = prop_cell(stem)?;
+    let rect = PROP_ATLAS_GRID.cell_rect(cell)?;
+    remap_mesh_uvs(verts, rect, has_texcoord);
+    Some(cell)
+}
+
+/// 这个输出路径**是不是作者手工维护的那张图集**（`prop_atlas.png`）。
+///
+/// 🔴 存在的理由是一次真实事故（2026-11-26，就在本会话里）：
+/// 我拿打包器直接写了 `assets/textures/prop_atlas.png` —— 那是**手工做的 4096×4096 图集**
+/// （75% 像素非白，16.9 MB），现有道具的 UV 全靠它。
+/// 覆盖之后所有道具的贴图都会变成白底板（16.9 MB → 24 KB），而且**编译器不会报错**。
+/// 还好工作区有 git，`git checkout` 拿回来了。
+///
+/// ⇒ 打包器写**另一个文件**（`*_generated.png`）；这一条把它变成不可绕过的约束。
+pub fn is_authored_atlas_path(path: &str) -> bool {
+    let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    file.eq_ignore_ascii_case("prop_atlas.png")
+}
+
+/// 打包器的默认输出路径（与作者图集分开，永不互相覆盖）。
+pub const GENERATED_ATLAS_PATH: &str = "assets/textures/prop_atlas_generated.png";
+
 /// 一件要打包的资产：名字 + GLB 字节。
 pub struct AtlasInput<'a> {
     pub name: &'a str,
@@ -646,6 +697,68 @@ mod tests {
         assert!(rep.skipped[0].1.contains("无内嵌贴图"), "要说明原因：{:?}", rep.skipped[0].1);
         // 图集保持纯白底板
         assert_eq!(atlas.pixel(0, 0), Some([255, 255, 255, 255]));
+    }
+
+
+    /// 🔴 **默认（不套用）时 UV 必须逐字节不变** —— 这是"旧资产行为不变"的保证。
+    ///
+    /// 反向验证：把 `apply_prop_atlas_uvs` 里的 `if !has_texture { return None; }` 删掉
+    /// ⇒ 第二条断言红（没贴图的件也被改了 UV）。
+    #[test]
+    fn prop_atlas_uvs_are_only_applied_when_there_is_a_texture() {
+        let mk = || vec![[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.3, 0.7, 1.0, 1.0, 1.0]];
+        // (a) 没有贴图 ⇒ None 且 UV 不动
+        let mut v = mk();
+        assert_eq!(apply_prop_atlas_uvs("crate_textured", true, false, &mut v), None);
+        assert_eq!([v[0][6], v[0][7]], [0.3, 0.7], "没贴图时 UV 不许动");
+        // (b) 有贴图 + 有 UV ⇒ Some(格) 且 UV 落进格
+        let mut v2 = mk();
+        let cell = apply_prop_atlas_uvs("crate_textured", true, true, &mut v2).expect("应当套用");
+        assert_eq!(Some(cell), prop_cell("crate_textured"), "格号必须与 prop_cell 一致");
+        let rect = PROP_ATLAS_GRID.cell_rect(cell).unwrap();
+        assert!(
+            v2[0][6] >= rect.u0 - 1e-6 && v2[0][6] <= rect.u1 + 1e-6,
+            "uv.u={} 应在格 [{},{}]",
+            v2[0][6],
+            rect.u0,
+            rect.u1
+        );
+    }
+
+    /// 🔴 **打包口径与加载口径必须同源**：都算 stem，不算文件名。
+    ///
+    /// 这条钉住一个真实踩过的坑：打包命令原来用 `file_name()`（带 `.glb`），
+    /// 加载侧用 stem ⇒ 同一个模型算出不同的格。
+    ///
+    /// 反向验证：把 `prop_cell` 改成 `cell_for_name(&format!("{stem}.glb"), ...)` ⇒ 红。
+    #[test]
+    fn pack_and_load_agree_on_the_same_name_form() {
+        let stem = "crate_textured";
+        // 加载侧：prop_cell(stem)
+        let load_cell = prop_cell(stem).unwrap();
+        // 打包侧：命令里用的是 file_stem() ⇒ 也是 stem
+        let pack_cell = cell_for_name(stem, PROP_ATLAS_GRID).unwrap();
+        assert_eq!(load_cell, pack_cell, "两侧必须算出同一个格");
+        // 带扩展名的形式必须**不同**（说明口径确实敏感，不是巧合相同）
+        assert_ne!(
+            cell_for_name("crate_textured.glb", PROP_ATLAS_GRID),
+            Some(load_cell),
+            "带扩展名应当算出另一格 —— 否则这条判据没有区分度"
+        );
+    }
+
+
+    /// 🔴 **打包器不许写作者图集那个文件名**（本会话真实踩过：覆盖了 16.9 MB 手作图集）。
+    ///
+    /// 反向验证：把 `is_authored_atlas_path` 改成恒 `false` ⇒ 第一条断言红。
+    #[test]
+    fn authored_atlas_path_is_recognised_so_it_cannot_be_overwritten() {
+        assert!(is_authored_atlas_path("assets/textures/prop_atlas.png"));
+        assert!(is_authored_atlas_path("/abs/x/prop_atlas.png"));
+        assert!(is_authored_atlas_path("PROP_ATLAS.PNG"), "大小写不敏感");
+        assert!(!is_authored_atlas_path("assets/textures/prop_atlas_generated.png"));
+        assert!(GENERATED_ATLAS_PATH.ends_with("_generated.png"));
+        assert!(!is_authored_atlas_path(GENERATED_ATLAS_PATH), "默认输出路径必须安全");
     }
 
     /// 🔴 **网格必须完整覆盖图集且互不重叠**。

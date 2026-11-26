@@ -6345,3 +6345,53 @@ asset.atlas_pack 4 /tmp/atlas_fix.png /tmp/texprops   （放的是 tex_4x4.glb�
 
 `#![allow(dead_code)]` 已按契约删除：删掉后仍 **0 警告** ⇒ 说明打包代码真的被生产路径用上了
 （这正是契约里写的判定方式：判据是编译器）。
+
+### 2026-11-26：贴图第 3 步 —— 带贴图的真资产 + 加载期 UV 落格（含一次险情）
+
+**① 造了一件带内嵌贴图的真道具** `crate_textured`（`tools/blender/make_textured_crate.py`）：
+
+- 木箱结构：箱体 + 4 根角柱 + 12 根横档，**408 顶点**（不是裸立方体 ——
+  本仓判据 `glb_prop_kit_loads_with_valid_range` 与
+  `prop_meshes_follow_the_meter_and_base_origin_rules` 都要求 `verts > 24`，
+  第一版正好 24 被当场拦下；这条规则的用意就是挡"一个盒子冒充道具"）
+- 64×64 板条贴图（木底 + 横缝 + 四角铆钉）**内嵌进 GLB**；
+- 遵守铁律 D：1 单位 = 1 米、**原点在底面中心**（第一版角柱伸到 −0.004，已修到恰好 0）、
+  单 mesh / 单 primitive / 不导出法线 / COLOR_0 烘 AO；
+- 契约表同步：`("crate_textured", 0.800, 0.800, 0.808)`，`contract_matches_loaded_assets` 通过。
+
+引擎探针实测：
+```
+asset.texture_probe /tmp/crate_textured.glb
+ → textures=1 crate_albedo=64x64 px0=(41,26,15,255) px_hash=e88c2cdca6d717c8 | materials=#0→tex0
+asset.atlas_pack 8 → atlas 1024x1024 packed=1 skipped=52 collisions=0   ← 之前是 packed=0
+```
+
+**② 加载期 UV 落格**（`props.rs`）：
+
+- 纯策略 `apply_prop_atlas_uvs(stem, has_uv, has_tex, verts)` —— 无贴图返回 None、不动 UV；
+- **默认关**（`RV3D_PROP_ATLAS_PACKED=1` 才启用）：图集 PNG 只有跑过 `atlas_pack` 才有内容，
+  否则是纯白图，而"有 UV 就采样"会让这些件被整体提亮 1.765 倍 —— 那是可见的颜色回归；
+- 名字口径统一成 **stem**：`prop_cell(stem)`。打包命令原来用 `file_name()`（带 `.glb`），
+  加载侧用 stem ⇒ **同一个模型算出不同的格**，判据
+  `pack_and_load_agree_on_the_same_name_form` 钉住（并且断言"带扩展名会算出另一格"，
+  否则这条判据没有区分度）。
+
+判据 19 → 22 条，新增 3 条全部反向可红（删 has_texture 门 / 删 remap 调用 / 改成带扩展名 / 恒 false）。
+
+🔴🔴 **本会话最险的一次：我差点把手作图集覆盖掉**。
+第一版打包命令直接写 `assets/textures/prop_atlas.png` —— 那是**作者手工做的 4096×4096 图集**
+（75% 像素非白、16.9 MB），现有 52 件道具的 UV 全靠它。覆盖后它会变成 1024² 的纯白板（24 KB），
+**所有道具贴图全丢，而编译器、测试、闸门一个都不会报**（图集只是一张 PNG）。
+是 `git status` 显示 `M assets/textures/prop_atlas.png` 才被我看见，`git checkout` 拿回来了。
+
+修法（不是"下次小心"，而是让它不可能再发生）：
+- 策略函数 `is_authored_atlas_path(path)` + 判据（大小写不敏感、只看文件名）；
+- 打包命令**硬拒绝**写那个文件名，报错里给出正确路径；
+- 默认输出改成 `assets/textures/prop_atlas_generated.png`；
+- 重复运行时**以现有输出图为底合并**（只覆盖本次写到的像素），不会把上次结果擦掉。
+
+实机两条：
+```
+asset.atlas_pack 8 assets/textures/prop_atlas.png … → 失败：拒绝写…（作者图集）
+asset.atlas_pack 8（缺省路径）                     → atlas 1024x1024 packed=1 → prop_atlas_generated.png
+```
