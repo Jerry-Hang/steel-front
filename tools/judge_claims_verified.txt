@@ -331,3 +331,13 @@ glb_animation_channel_parses_and_samples_midpoint
 net_player_in_front_of_a_wall_still_takes_the_hit
 # ⚠️ 直接删 `..local` 会编译失败（另两处结构体已显式给全字段）⇒ 改 `translation: moved` 为原值
 begin_and_update_drag_move_the_entity_along_the_handle
+
+# ── 2026-11-26 第二十二批（production_part / 枪模程序化分支 / AMD 双簇 / 手电电量门 / 夜视读关卡太阳）──
+# ⚠️ 直接 if false 会编译失败（后面还用 attr_len）⇒ 用 `.filter(|_| false)` 保留绑定
+production_part_keeps_code_after_a_mid_file_test_item
+removed_gun_glbs_use_their_own_procedural_mesh
+# ⚠️ 锚点缩进 4 空格（不是 6）
+amd_dual_ccd_split_uses_physical_cores
+flashlight_toggle_respects_battery
+# ⚠️ 该行出现 2 次（夜视 + light_uniform）⇒ 无缩进锚点 + all
+night_vision_factor_reads_map_sun

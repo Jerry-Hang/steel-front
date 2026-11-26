@@ -114,3 +114,8 @@ cpu_pose_chain_matches_hand_computed_displacements | src/engine/anim.rs | for ch
 glb_animation_channel_parses_and_samples_midpoint | src/engine/anim.rs |             let times = crate::engine::skin::read_acc_f32(&json, bin, in_acc as usize, 1)?; |             let times = crate::engine::skin::read_acc_f32(&json, bin, in_acc as usize + 9999, 1)?;
 net_player_in_front_of_a_wall_still_takes_the_hit | src/engine/game/weapons.rs |             for (idx, q) in self.net_players.iter().enumerate() { |             for (idx, q) in self.net_players.iter().enumerate().take(0) {
 begin_and_update_drag_move_the_entity_along_the_handle | src/engine/editor.rs | translation: moved, | translation: local.translation,
+production_part_keeps_code_after_a_mid_file_test_item | src/engine/asset_source.rs |             if let Some(attr_len) = cfg_test_attr_at(bytes, i) { |             if let Some(attr_len) = cfg_test_attr_at(bytes, i).filter(|_| false) {
+removed_gun_glbs_use_their_own_procedural_mesh | src/app_gun.rs |         } else if crate::engine::guns::has_procedural_mesh(key) { |         } else if false && crate::engine::guns::has_procedural_mesh(key) {
+amd_dual_ccd_split_uses_physical_cores | src/engine/cpu.rs |     Some((sorted[..half].to_vec(), sorted[half..].to_vec())) |     Some((sorted[..0].to_vec(), sorted[0..].to_vec()))
+flashlight_toggle_respects_battery | src/engine/game/view.rs |         } else if self.battery > 0.02 { |         } else if true {
+night_vision_factor_reads_map_sun | src/engine/game/view.rs | let sun_env = super::lighting::sun_from_env().or_else(|| { | let sun_env = super::lighting::sun_from_env().or_else(|| { if true { return None; } | all

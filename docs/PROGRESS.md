@@ -6884,3 +6884,25 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 已改写为"覆盖范围"，说明乱序语义由 `duplicate_or_stale_input_seq_is_dropped` 负责。
 
 现状：台账 **148 / 194**（76%）；`injections.txt` 102 条 + 3 条带原因的注记。
+
+### 2026-11-26：欠账 148 → 153 / 194（本轮 5 条，改用"试运行脚本"打法）
+
+| 判据 | 注入 |
+|---|---|
+| `production_part_keeps_code_after_a_mid_file_test_item` | `cfg_test_attr_at(...)` 后加 `.filter(|_| false)` |
+| `removed_gun_glbs_use_their_own_procedural_mesh` | `has_procedural_mesh` 分支前加 `false &&` |
+| `amd_dual_ccd_split_uses_physical_cores` | 物理核切分成 `[..0]` / `[0..]` |
+| `flashlight_toggle_respects_battery` | `battery > 0.02` → `true` |
+| `night_vision_factor_reads_map_sun` | 闭包里 `return None`（忽略 map_sun） |
+
+**打法改动**：写了个 `/tmp/tryrun.py`（备份 → 改 → 跑单个测试 → 还原 → 报 RED/NOT-RED/BROKEN），
+**一个候选只试一次**，红了才写进清单。上一轮靠"先写清单再跑"，一条要折腾 3~4 次调用；
+这轮 5 条总共 8 次试跑，效率翻倍。
+
+**两个具体手法**：
+1. **`if false` 会编译失败时，用 `.filter(|_| false)` 保留变量绑定**
+   （`production_part` 后面还要用 `attr_len`）⇒ 一个表达式就换掉行为。
+2. **`let x = A.or_else(|| B)` 想让 B 失效**：在闭包开头 `return None;`
+   （比删整段安全，也不动类型推断）。
+
+现状：台账 **153 / 194**（79%）；`injections.txt` 107 条。
