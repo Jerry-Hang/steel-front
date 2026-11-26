@@ -6790,3 +6790,19 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 顺带确认 1 条：`low_sun_is_warmer_and_dimmer`（强度项改成常数 ⇒ 红）。
 
 现状：台账 **126 / 196**；`injections.txt` 81 条；测试数 1087。
+
+### 2026-11-26：欠账 126 → 131 / 196（本轮 5 条）
+
+| 判据 | 注入 |
+|---|---|
+| `switching_weapon_clears_previous_cooldown_and_heat` | 切枪后冷却置 1.0（不清零） |
+| `mix_is_soft_limited` | 软限幅改成恒等（all） |
+| `mixer_multiplies_master_and_channel_volume` | 通道增益 `*` 改成 `+` |
+| `release_stage_decays_with_the_nominal_time_constant` | 步进用 `self.elapsed` 而非 `dt`（all） |
+| `buffer_view_out_of_range_is_an_error` | 越界切片改成 clamp 后不报错 |
+
+**本轮唯一的"卡壳"都是锚点精度**：`mix_is_soft_limited` 与 `release_stage` 的锚点在文件里各有
+3 处 / 2 处（`all` 解决）；`mixer_multiplies` 我一开始把缩进写成 18 空格（真实 16）⇒ SKIP。
+⇒ 缩进错仍然是最高频的废注入来源，**生成条目一律用脚本从真实行取**。
+
+现状：台账 **131 / 196**；`injections.txt` 86 条。

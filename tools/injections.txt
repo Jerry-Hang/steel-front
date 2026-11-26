@@ -92,3 +92,8 @@ facing_points_at_the_nearest_street | src/engine/city.rs |         } else if cz 
 intersections_have_downloaded_street_furniture | src/engine/city.rs |             if (k + m).rem_euclid(3) != 0 { |             if true {
 placement_guard_rejects_points_inside_footprints | src/engine/city.rs |     !footprints.iter().any(|&(ox, oz, ohw, ohd)| { |     footprints.iter().any(|&(ox, oz, ohw, ohd)| {
 low_sun_is_warmer_and_dimmer | src/engine/lighting.rs |     (warm.lerp(noon, t), 0.62 + 0.38 * t) |     (warm.lerp(noon, t), 0.62 + 0.38 * t * 0.0 + 0.0 * t)
+switching_weapon_clears_previous_cooldown_and_heat | src/engine/game/weapons.rs |             self.fire_cooldown = 0.0; |             self.fire_cooldown = 1.0;
+mix_is_soft_limited | src/audio.rs |         *x = soft_limit(*x); |         *x = *x; | all
+mixer_multiplies_master_and_channel_volume | src/audio.rs |                 * self.channels.get(v.channel) |                 + self.channels.get(v.channel)
+release_stage_decays_with_the_nominal_time_constant | src/audio.rs | let step = (-k * dt).exp(); | let step = (-k * self.elapsed).exp(); | all
+buffer_view_out_of_range_is_an_error | src/engine/asset_texture.rs |         let raw = bin.get(off..end).ok_or_else(|| { |         let raw = Some(&bin[off.min(bin.len())..end.min(bin.len())]).ok_or_else(|| {

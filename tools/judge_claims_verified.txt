@@ -289,3 +289,14 @@ intersections_have_downloaded_street_furniture
 placement_guard_rejects_points_inside_footprints
 # 低太阳强度项：0.62+0.38*t 改成常数 ⇒ 强度不随高度变，红
 low_sun_is_warmer_and_dimmer
+
+# ── 2026-11-26 第十七批（切枪清零 / 软限幅 / 混音乘性 / 包络步进 / bufferView 越界）──
+switching_weapon_clears_previous_cooldown_and_heat
+# ⚠️ `*x = soft_limit(*x);` 在 audio.rs 出现 3 次 ⇒ all 模式
+mix_is_soft_limited
+# ⚠️ 缩进必须精确（16 空格）；改成 `+` 后增益变加法，红
+mixer_multiplies_master_and_channel_volume
+# ⚠️ 该行在 audio.rs 出现 2 次（起音/释音各一）⇒ all 模式
+release_stage_decays_with_the_nominal_time_constant
+# 越界切片改成 clamp 后不再报错 ⇒ 红
+buffer_view_out_of_range_is_an_error
