@@ -143,3 +143,13 @@ plugin_systems_run_in_phase_order | src/engine/plugin.rs |         Phase::PreUpd
 plugin_command_lookup_is_by_name_and_reports_failures | src/engine/plugin.rs |             .find(|c| c.name == name) |             .next()
 torch_picks_the_nearest_alive_enemy | src/engine/game/view.rs |             .filter(|n| n.hp > 0.0) |             .filter(|_n| true)
 net_spawn_points_are_spread_around_the_base | src/engine/game/net.rs |         let r = 3.0 + (id % 12) as f32 * 0.32; |         let r = 0.0;
+client_socket_is_connected_to_the_server | src/net.rs |         let connected = match socket.connect(server_addr) { |         let connected = match Ok::<(), std::io::Error>(()) {
+nat_punch_exchanges_between_two_clients | src/net.rs |                         self.punch_ok += 1; |                         self.punch_ok += 0; | all
+remote_player_fire_does_not_touch_the_host_weapon_state | src/engine/game/weapons.rs |         let p = Projectile::new( |         self.fire_cooldown = 1.0; let p = Projectile::new(
+scene_rejects_cycles | src/engine/scene.rs |                 if c == child { |                 if false {
+
+# ── 手工注入（清单格式无法表达"追加一行"，命令记在此处）──
+# engine_layer_does_not_grow_game_dependencies：
+#   printf '\n#[allow(unused_imports)]\nuse crate::engine::game::Npc as _;\n' >> src/engine/renderer/gpu_layout.rs
+#   cargo test --release -- engine_layer_does_not_grow   → 0 passed; 1 failed（RED）
+#   验证后：git checkout -- src/engine/renderer/gpu_layout.rs

@@ -7025,3 +7025,25 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 ⇒ **声称写"常量 0"就要用 0**，别用"看起来差不多"的常数代替。
 
 现状：台账 **178 / 190**（94%）；`injections.txt` 138 条。
+
+### 2026-11-26：欠账 178 → 183 / 189（97%），并建立**欠账台账** `docs/JUDGE-DEBT.md`
+
+本轮确认 5 条：
+
+| 判据 | 注入 |
+|---|---|
+| `client_socket_is_connected_to_the_server` | `socket.connect(...)` 恒 `Ok(())` |
+| `nat_punch_exchanges_between_two_clients` | `punch_ok += 1` → `+= 0`（all） |
+| `remote_player_fire_does_not_touch_the_host_weapon_state` | `fire_remote` 里顺手改 `fire_cooldown` |
+| `scene_rejects_cycles` | 祖先链里"遇到 child"那句 → `if false` |
+| `engine_layer_does_not_grow_game_dependencies` | 往 renderer 子模块**追加**一行 `use crate::engine::game::Npc` |
+
+**新工具缺口**：清单是"单行替换"格式，表达不了"**追加一行**"这种注入
+（分层违规必须靠追加）。已把配方（`printf ... >>` + 还原命令）写进 `injections.txt` 末尾，
+并在 `judge_claims_verified.txt` 里标注"手工注入"。
+
+**建立 `docs/JUDGE-DEBT.md`**：把剩下 6 条欠账按 A/B/C/D 四类列清原因
+（A 需新增代码 / B 退化输入不可判别 / C 需复杂场景 / D 需运行时环境）。
+目的是**每条欠账都有可查解释**，而不是留空白让人以为"忘了做"。
+
+现状：台账 **183 / 189**（97%）；`injections.txt` 146 条（含 1 条手工配方）。

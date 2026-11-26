@@ -757,7 +757,10 @@ mod tests {
     /// 这条同时检验两件事：矩阵相乘的顺序（`world * inverseBind`）、
     /// 以及 inverseBind 的方向（该是"世界 → 绑定"）。任一做错，位移都会是 1m 量级。
     ///
-    /// 反向验证：把 `matrices()` 里的 `*w * *ib` 写成 `*ib * *w` ⇒ 顶点整体偏离 1m，红。
+    /// 覆盖范围（2026-11-26 说明）：把 `matrices()` 的 `*w * *ib` 写成 `*ib * *w`
+    /// **不会**让本判据红 —— 绑定姿势下 `w * ib == I`，两个互逆矩阵换序仍是单位阵
+    /// （实测注入后仍通过）。顺序语义由 `matrices_multiply_world_before_inverse_bind`
+    /// 用**非单位** world 单独钉住。本判据压的是"绑定姿势下顶点不动"这个更强的整体性质。
     #[test]
     fn glb_skin_bind_pose_roundtrips_without_moving_vertices() {
         let glb = make_glb(1.0);

@@ -388,3 +388,16 @@ plugin_command_lookup_is_by_name_and_reports_failures
 torch_picks_the_nearest_alive_enemy
 # 半径恒 0 ⇒ 半径超出 2.9..6.6，红；⚠️ 改成 3.0 **不红**（角度仍散开、且在区间内）
 net_spawn_points_are_spread_around_the_base
+
+# ── 2026-11-26 第二十九批（socket 连接 / 打洞计数 / 远端开火不污染主机）──
+client_socket_is_connected_to_the_server
+# ⚠️ punch_ok += 1 有两处（收包 / 另一路径）⇒ all 模式
+nat_punch_exchanges_between_two_clients
+remote_player_fire_does_not_touch_the_host_weapon_state
+
+# ── 2026-11-26 第三十批（场景成环 / 分层不反向依赖）──
+# ⚠️ 注入点是"祖先链里遇到 child"那句（只删这句才红；换成别的错误变体会编译失败）
+scene_rejects_cycles
+# ⚠️ 手工注入：往 renderer 子模块追加 `use crate::engine::game::Npc as _;` ⇒ 红
+#    （清单是"单行替换"格式，表达不了"追加一行"，配方记在 injections.txt 末尾）
+engine_layer_does_not_grow_game_dependencies
