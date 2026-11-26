@@ -6806,3 +6806,25 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 ⇒ 缩进错仍然是最高频的废注入来源，**生成条目一律用脚本从真实行取**。
 
 现状：台账 **131 / 196**；`injections.txt` 86 条。
+
+### 2026-11-26：欠账 131 → 138 / 196（本轮 6 条，渲染器几何/画质）
+
+| 判据 | 注入 |
+|---|---|
+| `explosion_layers_stay_small` | 火球核 `0.05+0.10t` → `0.2+1.2t`（回到占满屏的旧值） |
+| `ssao_strength_tracks_quality` | High 0.75 → 0.45（与 Medium 相同） |
+| `ssao_contact_strength_tracks_quality` | High 0.75 → 0.0 |
+| `ssao_runs_except_on_low_quality` | 丢掉 `!matches!(quality, Low)` |
+| `terrain_render_sink_fades_out_with_radius` | 下沉量成常数（不随半径衰减） |
+| `play_area_terrain_is_flat_so_replay_needs_no_slope_term` | `TERRAIN_FLAT_RADIUS` 230 → 200 |
+| `prop_bin_cull_margin_covers_lod_extent_mismatch` | 桶剔除余量 30.0 → 2.0 |
+
+**两处值得一提的方法差异**：
+
+1. `play_area_terrain` 我第一次改的是**公式里的 `TERRAIN_FLAT_RADIUS` 引用**（把 `d - R` 换成
+   `d - 200.0`）⇒ NOT-RED。因为那条判据只看**平地范围**，而平地范围由**常量**决定。
+   ⇒ **说"把某常量改掉"时，就改常量本身，别改引用它的表达式**。
+2. `ssao_*` 与 `helpers.rs` 里共有**三处** `QualityPreset::High => …`（8 空格一处、12 空格一处、
+   数组下标一处）⇒ 锚点必须带上缩进才能选对那一处。本轮又踩了一次缩进。
+
+现状：台账 **138 / 196**；`injections.txt` 92 条。

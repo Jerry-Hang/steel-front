@@ -97,3 +97,10 @@ mix_is_soft_limited | src/audio.rs |         *x = soft_limit(*x); |         *x =
 mixer_multiplies_master_and_channel_volume | src/audio.rs |                 * self.channels.get(v.channel) |                 + self.channels.get(v.channel)
 release_stage_decays_with_the_nominal_time_constant | src/audio.rs | let step = (-k * dt).exp(); | let step = (-k * self.elapsed).exp(); | all
 buffer_view_out_of_range_is_an_error | src/engine/asset_texture.rs |         let raw = bin.get(off..end).ok_or_else(|| { |         let raw = Some(&bin[off.min(bin.len())..end.min(bin.len())]).ok_or_else(|| {
+explosion_layers_stay_small | src/app_render.rs |         let fb_s = r * (0.05 + 0.10 * fireball_t); |         let fb_s = r * (0.2 + 1.2 * fireball_t);
+ssao_strength_tracks_quality | src/engine/renderer/helpers.rs |         QualityPreset::High => 0.75, |         QualityPreset::High => 0.45,
+ssao_contact_strength_tracks_quality | src/engine/renderer/helpers.rs |             QualityPreset::High => 0.75, |             QualityPreset::High => 0.0,
+terrain_render_sink_fades_out_with_radius | src/engine/renderer/helpers.rs |     TERRAIN_RENDER_SINK * (1.0 - smooth_t(t)) |     TERRAIN_RENDER_SINK
+play_area_terrain_is_flat_so_replay_needs_no_slope_term | src/engine/renderer.rs | pub const TERRAIN_FLAT_RADIUS: f32 = 230.0; | pub const TERRAIN_FLAT_RADIUS: f32 = 200.0;
+ssao_runs_except_on_low_quality | src/engine/renderer/helpers.rs |     enabled && !matches!(quality, QualityPreset::Low) |     enabled
+prop_bin_cull_margin_covers_lod_extent_mismatch | src/engine/renderer/record.rs | bin_visible(bin, &self.frame_frustum, 30.0) | bin_visible(bin, &self.frame_frustum, 2.0)

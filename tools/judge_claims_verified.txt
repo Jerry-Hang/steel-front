@@ -300,3 +300,14 @@ mixer_multiplies_master_and_channel_volume
 release_stage_decays_with_the_nominal_time_constant
 # 越界切片改成 clamp 后不再报错 ⇒ 红
 buffer_view_out_of_range_is_an_error
+
+# ── 2026-11-26 第十八批（渲染器几何/画质：爆炸层、SSAO、地形下沉、平地、桶剔除余量）──
+explosion_layers_stay_small
+ssao_strength_tracks_quality
+# Helper 里三处 `QualityPreset::High =>` ⇒ 用 8 空格缩进那处（ssao_strength_for）
+ssao_contact_strength_tracks_quality
+ssao_runs_except_on_low_quality
+terrain_render_sink_fades_out_with_radius
+# 常量注入（TERRAIN_FLAT_RADIUS 230→200），不是改公式
+play_area_terrain_is_flat_so_replay_needs_no_slope_term
+prop_bin_cull_margin_covers_lod_extent_mismatch
