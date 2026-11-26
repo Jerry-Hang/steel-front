@@ -910,7 +910,11 @@ mod tests {
 
     /// 退化输入不许 panic：0 尺寸贴图、0 像素格。
     ///
-    /// 反向验证：去掉 `if tex.width == 0 ... return 0` ⇒ 除零 panic。
+    /// 覆盖范围（2026-11-26 说明）：这个守卫在 **release 下压不到**。
+    /// 去掉它之后 `tex.width - 1`（0usize - 1）会**下溢 wrap** 成 `u32::MAX`，
+    /// 而 `pixel()` 自带边界检查返回 `None` ⇒ 循环 `continue`、函数照样返回 0
+    /// （实测注入后仍通过）。守卫的真实价值在 **debug 构建**（下溢直接 panic）
+    /// 以及"不靠下游兜底"。要在 release 下判别它，得让 `pixel()` 不做边界检查 —— 不值当。
     #[test]
     fn blit_degenerate_inputs_return_zero_not_panic() {
         let mut atlas = RgbaImage::filled(4, 4, [0, 0, 0, 255]);

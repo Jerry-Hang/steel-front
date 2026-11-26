@@ -6952,3 +6952,21 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 `uv_epsilon_matches_the_shader` 负责。已改写成覆盖范围说明。
 
 现状：台账 **165 / 193**（85%）；`injections.txt` 121 条。
+
+### 2026-11-26：欠账 165 → 169 / 192（88%）
+
+| 判据 | 注入 |
+|---|---|
+| `http_status_non_200_is_an_error` | 状态码检查 `if false` |
+| `untextured_inputs_are_skipped_with_a_reason` | 跳过原因不再记录 |
+| `json_escape_round_trips_control_chars` | 转义范围 `c < 0x20` → `c < 0x02` |
+| `packing_a_textured_model_remaps_uvs_and_fills_the_cell` | 打包时不再重映射 UV |
+
+🔴 **`blit_degenerate_inputs_return_zero_not_panic` 在 release 下压不到**（已改声称）：
+去掉 `tex.width == 0` 守卫后，`tex.width - 1` 会**下溢 wrap** 成 `u32::MAX`，
+而 `pixel()` 自带边界检查返回 `None` ⇒ `continue`、照样返回 0（实测注入后通过）。
+守卫的价值在 **debug 构建**（下溢 panic）和"不靠下游兜底"。
+要在 release 下判别它，得让 `pixel()` 不做边界检查 —— **不值当**（等于为了测试削弱生产代码）。
+⇒ 这是"**有些守卫只在 debug 可验**"的第一个明确案例。
+
+现状：台账 **169 / 192**（88%）；`injections.txt` 126 条。

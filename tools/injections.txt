@@ -130,3 +130,7 @@ full_atlas_rect_is_identity | src/engine/tex_atlas.rs |     pub const FULL: Self
 cell_assignment_is_a_pure_function_of_the_name | src/engine/tex_atlas.rs |     Some((h % n as u64) as u32) |     Some((h % 7u64) as u32)
 json_number_rejects_non_finite | src/llm_cmd.rs |             .filter(|n| n.is_finite()) |             .filter(|_n| true)
 stack_is_capped_and_drops_the_oldest | src/engine/undo.rs | self.past.remove(0); | let _ = 0; | all
+http_status_non_200_is_an_error | src/llm_cmd.rs |     if status != "200" { |     if false {
+untextured_inputs_are_skipped_with_a_reason | src/engine/tex_atlas.rs | report.skipped.push((inp.name.to_string(), "无内嵌贴图".into())); | let _ = inp.name.len();
+json_escape_round_trips_control_chars | src/llm_cmd.rs |             c if (c as u32) < 0x20 => out.push_str(&format!("\u{:04x}", c as u32)), |             c if (c as u32) < 0x02 => out.push_str(&format!("\u{:04x}", c as u32)),
+packing_a_textured_model_remaps_uvs_and_fills_the_cell | src/engine/tex_atlas.rs |     remap_mesh_uvs(&mut mesh.verts, rect, glb_has_texcoord(bytes)); |     let _ = glb_has_texcoord(bytes);

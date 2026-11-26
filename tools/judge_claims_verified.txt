@@ -361,3 +361,9 @@ json_number_rejects_non_finite
 stack_is_capped_and_drops_the_oldest
 # 🔴 原判据用常量拼 needle ⇒ 改成 16（水洼位）也能过；补 assert_eq!(常量, 32) 后才红
 feature_bit_matches_the_shader
+
+# ── 2026-11-26 第二十五批（HTTP 状态 / 无贴图跳过原因 / JSON 控制字符 / 打包重映射）──
+http_status_non_200_is_an_error
+untextured_inputs_are_skipped_with_a_reason
+json_escape_round_trips_control_chars
+packing_a_textured_model_remaps_uvs_and_fills_the_cell
