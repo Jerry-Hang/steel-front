@@ -311,3 +311,11 @@ terrain_render_sink_fades_out_with_radius
 # 常量注入（TERRAIN_FLAT_RADIUS 230→200），不是改公式
 play_area_terrain_is_flat_so_replay_needs_no_slope_term
 prop_bin_cull_margin_covers_lod_extent_mismatch
+
+# ── 2026-11-26 第十九批（headless 尺寸 / 地面场跳丘陵 / SSAO push / chunk opt-in / 音乐时间）──
+parse_headless_size_clamps_and_falls_back
+ground_field_skips_hills_and_keeps_double_density
+ssao_push_declares_contact_shadow_fields
+# 源码扫描型判据：改 is_dir 不动它，必须去掉 `flag("RV3D_CITY_CHUNKS")` 那一行
+structural_markers_are_not_skipped_wholesale
+music_synth_time_stays_accurate_after_hours

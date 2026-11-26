@@ -6828,3 +6828,21 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
    数组下标一处）⇒ 锚点必须带上缩进才能选对那一处。本轮又踩了一次缩进。
 
 现状：台账 **138 / 196**；`injections.txt` 92 条。
+
+### 2026-11-26：欠账 138 → 143 / 196（本轮 5 条）
+
+| 判据 | 注入 |
+|---|---|
+| `parse_headless_size_clamps_and_falls_back` | 缺省尺寸 1280x720 → 800x600 |
+| `ground_field_skips_hills_and_keeps_double_density` | 跳过丘陵的 `if h > 0.05` → `if false` |
+| `ssao_push_declares_contact_shadow_fields` | `build.rs` 里 `aux2` 改名 |
+| `structural_markers_are_not_skipped_wholesale` | 去掉 `flag("RV3D_CITY_CHUNKS")` 那一行 |
+| `music_synth_time_stays_accurate_after_hours` | 时间累加改成赋值（不累加） |
+
+**新形态：源码扫描型判据不能按"行为"注入。**
+`structural_markers_are_not_skipped_wholesale` 读的是 `include_str!` + `contains(...)`，
+验的是"**源码里有没有那条规则**"。我第一次改 `is_dir()` 的极性 —— 行为确实变了，
+但那条字符串还在 ⇒ NOT-RED。必须**把 `flag("RV3D_CITY_CHUNKS")` 这行整个删掉**才红。
+⇒ **先看判据怎么读证据**（跑代码 vs 扫源码），再决定注入点。
+
+现状：台账 **143 / 196**（73%）；`injections.txt` 97 条。

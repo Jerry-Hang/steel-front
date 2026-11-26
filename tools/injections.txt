@@ -104,3 +104,8 @@ terrain_render_sink_fades_out_with_radius | src/engine/renderer/helpers.rs |    
 play_area_terrain_is_flat_so_replay_needs_no_slope_term | src/engine/renderer.rs | pub const TERRAIN_FLAT_RADIUS: f32 = 230.0; | pub const TERRAIN_FLAT_RADIUS: f32 = 200.0;
 ssao_runs_except_on_low_quality | src/engine/renderer/helpers.rs |     enabled && !matches!(quality, QualityPreset::Low) |     enabled
 prop_bin_cull_margin_covers_lod_extent_mismatch | src/engine/renderer/record.rs | bin_visible(bin, &self.frame_frustum, 30.0) | bin_visible(bin, &self.frame_frustum, 2.0)
+parse_headless_size_clamps_and_falls_back | src/engine/renderer/helpers.rs |     let (w, h) = parsed.unwrap_or((1280, 720)); |     let (w, h) = parsed.unwrap_or((800, 600));
+ground_field_skips_hills_and_keeps_double_density | src/engine/renderer/geometry.rs |         if h > 0.05 { |         if false {
+ssao_push_declares_contact_shadow_fields | build.rs |     aux2: vec4<f32>, |     aux2x: vec4<f32>,
+structural_markers_are_not_skipped_wholesale | src/app_render.rs |         crate::syscfg::flag("RV3D_CITY_CHUNKS") |         true
+music_synth_time_stays_accurate_after_hours | src/audio.rs |         self.time_secs += frames as f64 * (1.0 / self.sample_rate as f64); |         self.time_secs = frames as f64 * (1.0 / self.sample_rate as f64);
