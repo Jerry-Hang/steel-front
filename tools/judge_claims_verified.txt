@@ -196,3 +196,14 @@ dead_worker_segments_are_executed_on_the_caller
 cubic_dt_matters_when_the_segment_is_not_unit_length
 # 编译期断言类声称：改常量 760→680 ⇒ **编译失败就是证据**（inject_check 的 compile 模式）
 pilaster_protrudes_a_relief_step_past_the_plinth
+
+# ── 2026-11-26 第六批（编辑器/撤销/场景视图/骨骼顺序）──
+scene_view_skips_invisible_entities
+recording_a_new_edit_clears_the_redo_stack
+undo_then_redo_returns_to_the_same_state
+rotate_delta_y_matches_the_swept_angle
+ndc_from_pixel_flips_y_and_maps_corners
+gizmo_axis_pick_uses_screen_distance_and_rejects_far_clicks
+# 🔴 骨骼矩阵顺序：绑定姿势下 w*ib == ib*w == I，**不可判别**；
+#    新判据用非单位 w（旋转+平移）+ 平移 IB，两种顺序结果不同 ⇒ 注入后红
+matrices_multiply_world_before_inverse_bind

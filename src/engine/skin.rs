@@ -837,6 +837,45 @@ mod tests {
         assert!(err < 1e-4, "绑定姿势下顶点不许动，最大位移 {err}");
     }
 
+
+    /// 🔴 **`world × inverseBind` 的顺序必须可判别** —— 用**非单位**的世界矩阵。
+    ///
+    /// 原判据 `glb_skin_bind_pose_roundtrips_without_moving_vertices` 在**绑定姿势**下
+    /// `world` 就是绑定世界矩阵 ⇒ `w * ib == I`，而 `ib * w` 也是同一个单位矩阵
+    /// （两个互逆矩阵交换顺序仍是单位阵）⇒ **注入 `ib * w` 后它仍然通过**（实测）。
+    /// 这条用"世界矩阵 = 一个旋转 + 平移、IB 是另一个平移"的组合，
+    /// 两种顺序的结果**不同**，才有区分度。
+    ///
+    /// 反向验证：把 `matrices()` 里的 `*w * *ib` 写成 `*ib * *w` ⇒ 第二条断言红。
+    #[test]
+    fn matrices_multiply_world_before_inverse_bind() {
+        use glam::{Mat4, Quat, Vec3};
+        let w = Mat4::from_rotation_translation(Quat::from_rotation_z(1.2), Vec3::new(0.3, 0.7, 0.0));
+        let ib = Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0));
+        let skin = Skin {
+            joint_world: vec![w],
+            inverse_bind: vec![ib],
+            joints: Vec::new(),
+            weights: Vec::new(),
+        };
+        let m = skin.matrices()[0];
+        // 正确顺序：w * ib
+        let want = w * ib;
+        // ⚠️ 注意比的是 m 与 want **本身**，不是 (m-want) 与 want ——
+        // 我第一版写成后者，于是"完全相等的两个矩阵"也会判失败。
+        assert!(
+            m.to_cols_array()
+                .iter()
+                .zip(want.to_cols_array().iter())
+                .all(|(a, b)| (a - b).abs() < 1e-6),
+            "matrices() 必须是 world × inverseBind"
+        );
+        // 反过来算的结果必须**不同**（否则这条判据没有区分度）
+        let wrong = ib * w;
+        let diff: f32 = (want - wrong).to_cols_array().iter().map(|v| v.abs()).sum();
+        assert!(diff > 1e-3, "本夹具下两种顺序必须产生不同矩阵（差 {diff}）");
+    }
+
     /// 🔴 真实资产的**动画驱动**：采样到末帧后，50/50 权重的顶点位移必须 ≈ 0.7070。
     ///
     /// 手算：b1 绕 Z 转 90°、轴心 (0,1,0)；v2=(0,2,0) 转后 (-1,1,0)，

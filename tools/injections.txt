@@ -43,3 +43,10 @@ pilaster_protrudes_a_relief_step_past_the_plinth | src/engine/city.rs | const PI
 cubic_dt_matters_when_the_segment_is_not_unit_length | src/engine/anim.rs | out_tan * (h10 * dt) | out_tan * (h10) | all
 synth_full_eviction_keeps_the_loudest_voice | src/audio.rs |                 self.voices.remove(i); |                 self.voices.remove(0);
 dead_worker_segments_are_executed_on_the_caller | src/engine/cpu.rs |                     f(w, start, seg); |                     let _ = seg;
+scene_view_skips_invisible_entities | src/engine/scene_view.rs |             if !scene.is_visible(id) { |             if false {
+recording_a_new_edit_clears_the_redo_stack | src/engine/undo.rs |         self.future.clear(); |         let _ = 0;
+undo_then_redo_returns_to_the_same_state | src/engine/undo.rs |         self.past.push(current); |         let _ = current;
+rotate_delta_y_matches_the_swept_angle | src/engine/gizmo.rs |     let mut d = a1 - a0; |     let mut d = a0 - a1;
+ndc_from_pixel_flips_y_and_maps_corners | src/engine/editor.rs |     (2.0 * x / w - 1.0, 1.0 - 2.0 * y / h) |     (2.0 * x / w - 1.0, 2.0 * y / h - 1.0)
+gizmo_axis_pick_uses_screen_distance_and_rejects_far_clicks | src/engine/gizmo.rs |         if d <= GIZMO_PICK_EPS && best.map(|(_, bd)| d < bd).unwrap_or(true) { |         if true && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+matrices_multiply_world_before_inverse_bind | src/engine/skin.rs |             .map(|(w, ib)| *w * *ib) |             .map(|(w, ib)| *ib * *w)

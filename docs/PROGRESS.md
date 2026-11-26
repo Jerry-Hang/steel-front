@@ -6553,3 +6553,32 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
    （这也解释了本轮早些时候一批莫名其妙的 SKIP。）
 
 现状：台账 **76 / 194**；`injections.txt` **34 条**（33 RED + 1 RED-COMPILE）、0 条需人看。
+
+### 2026-11-26：欠账 76 → 83 / 195（41 条：40 RED + 1 RED-COMPILE）
+
+本轮确认 7 条（编辑器/撤销/场景视图/拾取）：
+
+| 判据 | 注入 |
+|---|---|
+| `scene_view_skips_invisible_entities` | 可见性判断改成 `if false` |
+| `recording_a_new_edit_clears_the_redo_stack` | 删掉 `self.future.clear()` |
+| `undo_then_redo_returns_to_the_same_state` | `redo` 不把当前压回 past |
+| `rotate_delta_y_matches_the_swept_angle` | `a1 - a0` → `a0 - a1` |
+| `ndc_from_pixel_flips_y_and_maps_corners` | 去掉 `1.0 -`（不翻 Y） |
+| `gizmo_axis_pick_...rejects_far_clicks` | 距离门 `d <= EPS` → `true` |
+| `matrices_multiply_world_before_inverse_bind` | `w * ib` → `ib * w`（**新判据**） |
+
+🔴 **第三次「单位化吃掉区分度」**：`glb_skin_bind_pose_roundtrips_without_moving_vertices`
+的声称说"顺序反了顶点会偏 1m"，但在**绑定姿势**下 `world` 就是绑定世界矩阵 ⇒
+`w * ib == ib * w == I`（两个互逆矩阵换序仍得单位阵）⇒ **注入后仍然通过**。
+新增 `matrices_multiply_world_before_inverse_bind`：用**非单位** `world`（旋转+平移）
+与平移 IB，两种顺序结果不同（实测差 > 1e-3），注入后红。
+
+⚠️ 我自己在新判据里也写错一次：断言写成 `(m - want) 与 want 逐元素比`，
+于是"两个完全相等的矩阵"也判失败。**差矩阵要和零比，不是和期望值比**。
+
+现状：台账 **83 / 195**；`injections.txt` **41 条**（40 RED + 1 RED-COMPILE）、0 条需人看。
+
+**累计三例同族缺陷**（值得写进教训）：`GIZMO_LEN == 1`、`times=[0,1]`（dt=1）、
+绑定姿势 `w == ib⁻¹` —— **参数取到"退化值"时，两种实现数学上等价，判据就失去区分度**。
+⇒ 写判据时先问一句：**"我选的输入，能让这两种写法给出不同结果吗？"**
