@@ -155,3 +155,5 @@ scene_rejects_cycles | src/engine/scene.rs |                 if c == child { |  
 #   验证后：git checkout -- src/engine/renderer/gpu_layout.rs
 gizmo_mouse_drag_moves_along_the_picked_axis | src/engine/gizmo.rs |     let axis = pick_axis_at_screen(entity, view, from_ndc.0, from_ndc.1)?; |     let axis = Axis::X;
 ai_roundtrip_matches_every_field_of_every_entity | src/engine/scene_io.rs |         if let Some(m) = fresh.mesh_of(*old) { |         if let Some(m) = fresh.mesh_of(*old).filter(|_| false) {
+destructible_cover_blocks_the_blast_that_destroys_it | src/engine/game/projectiles.rs |                 self.damage_obstacle(i, damage * fall * EXPLOSION_OBSTACLE_FACTOR); |                 let _ = (i, damage, fall);
+ai_command_chain_spawn_drag_save_load_roundtrips | src/engine/plugin.rs |             ctx.selection = Some(id); |             let _ = id; | all

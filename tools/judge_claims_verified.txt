@@ -407,3 +407,8 @@ engine_layer_does_not_grow_game_dependencies
 gizmo_mouse_drag_moves_along_the_picked_axis
 # apply_to 不搬网格（.filter(|_| false)）⇒ 网格字段不等，红
 ai_roundtrip_matches_every_field_of_every_entity
+
+# ── 2026-11-26 第三十二批（爆炸打障碍 / spawn 接管选中）—— 原 C 类全部下马 ──
+destructible_cover_blocks_the_blast_that_destroys_it
+# ctx.selection 有 4 处 ⇒ all；去掉后 drag 落到玩家身上，红
+ai_command_chain_spawn_drag_save_load_roundtrips

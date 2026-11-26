@@ -7063,3 +7063,38 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 现状：台账 **185 / 189**（98%）；剩余 4 条：A 类 1（`obstacles_identical`，需新增代码）、
 B 类 2（`scale_factor_doubles` / `glb_skin_bind_pose`，退化输入不可判别，各有承接判据）、
 C 类 2（`destructible_cover` / `ai_command_chain`）。
+
+### 2026-11-26：欠账 185 → **187 / 189（99%）** —— 原 C 类清零，本目标收口
+
+最后两条原 C 类也一次注入就红：
+
+| 判据 | 注入 |
+|---|---|
+| `destructible_cover_blocks_the_blast_that_destroys_it` | 爆炸打障碍改成空操作 |
+| `ai_command_chain_spawn_drag_save_load_roundtrips` | `ctx.selection = Some(id)` 去掉（all） |
+
+🔴 **教训（本目标最值得留下的一条）**：这 6 条原 A/C 类判据，我一开始按"看起来复杂"
+归进"需新增代码 / 需复杂场景"，实际试下来**5 条都能注入** —— 难点几乎都是
+**"找对那一行"**（缩进 + 唯一性），不是"造场景"。
+⇒ **分类要按"我实际试过没有"来定，不是按印象。**
+
+#### 本目标（30 轮）总账
+
+| 项 | 起始 | 最终 |
+|---|---|---|
+| 已验证声称 | 48 / 174（28%） | **187 / 189（99%）** |
+| `injections.txt` 可复跑注入 | 22 条 | **150 条** |
+| 抓到并修好的判据缺陷 | — | **13 处** |
+| 撤掉/改写的不可兑现声称 | — | **8 条** |
+
+其中最重要的几处（都不是"多加一条测试"，而是**判据本身在骗人**）：
+
+1. `weather_channel_is_declared_on_both_sides` —— **自指扫描**：扫自己所在的文件找自己的字符串，
+   **结构性恒真**，字段删了也通过。
+2. `cell_assignment_is_a_pure_function_of_the_name` —— 只验"格号有效"，`h % 7` 也过；
+   补覆盖度断言（2000 名字须覆盖 ≥80% 格）。
+3. `feature_bit_matches_the_shader` —— 用常量拼 needle，改成 16（反射位）也过；补数值锁。
+4. `editor_panel_draws_a_row_per_entity` —— 用整块面板 quad 数当代理，**测的是文字长度**。
+5. `inject_check` 把"编译失败"记成 RED —— 判据根本没跑却记成"验证有效"，**与假账等价**。
+
+完整分类见 **`docs/JUDGE-DEBT.md`**（剩余 2 条都是"退化输入不可判别"，各有承接判据）。
