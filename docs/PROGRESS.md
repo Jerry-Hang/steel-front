@@ -6645,3 +6645,24 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 改成反转结果（对所有输入都生效）立刻就红。
 
 现状：台账 **95 / 196**（接近半程）；`injections.txt` 52 条。
+
+### 2026-11-26：欠账 95 → **100 / 196**（过半）
+
+| 判据 | 注入 |
+|---|---|
+| `jump_stops_at_ceiling` | 去掉天花板分支（`if false`） |
+| `beveled_box_faces_reach_the_outer_surface` | `let outer = *p + n * r` → `*p` |
+| `snapshot_count_above_cap_is_rejected` | `MAX_SNAPSHOT_NPCS` 1024 → 65535 |
+| `support_height_among_matches_the_method_and_hand_values` | `a.max.y > limit` → `> limit + 1000.0` |
+| `body_resting_on_static_platform_stays_supported` | `grounded_now[1] = false`（all） |
+
+三条**注入点选错**的教训（这轮全踩了一遍，值回票价）：
+
+1. **声称自己写着例外**：`support_height` 的声称是"把 `a.max.y > limit` 改成 `>=` **之外**的
+   任一改动都会红"—— 我第一次正好用了 `>=` ⇒ NOT-RED。**读声称要读到"除它之外"那半句。**
+2. **双胞胎分支要看清谁是 i 谁是 j**：`grounded_now[0]` 与 `[1]` 是"被推开的是哪一方"，
+   动态盒是 j（走 `si` 分支）⇒ 改 `[0]` 无效；改 `[1]` 才红。
+3. **逐字相同的两处无法单点定位**：`if n > MAX_SNAPSHOT_NPCS { … }` 在客户端/服务端
+   decode 里各一份、上下文也相同 ⇒ 改常量（1024→65535）才是可行的注入点。
+
+现状：台账 **100 / 196**（过半）；`injections.txt` 56 条。

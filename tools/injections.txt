@@ -61,3 +61,8 @@ backface_has_no_specular | src/engine/lighting.rs |     if normal.dot(light_dir)
 vision_factor_drops_at_night | src/engine/lighting.rs |     0.55 + 0.45 * s |     1.0
 network_strings_never_inject_log_lines | src/net.rs |         if i >= 128 { |         if false {
 nearest_lamps_are_sorted_by_distance | src/engine/lighting.rs |     idx.truncate(n); |     idx.truncate(n); idx.reverse();
+jump_stops_at_ceiling | src/engine/physics.rs |     if y + eye_height > ceiling { |     if false {
+beveled_box_faces_reach_the_outer_surface | src/engine/meshgen.rs |             let outer = *p + n * r; |             let outer = *p;
+snapshot_count_above_cap_is_rejected | src/net.rs | pub const MAX_SNAPSHOT_NPCS: usize = 1024; | pub const MAX_SNAPSHOT_NPCS: usize = 65535;
+support_height_among_matches_the_method_and_hand_values | src/engine/physics.rs |         if a.max.y > limit || a.max.y <= best { |         if a.max.y > limit + 1000.0 || a.max.y <= best {
+body_resting_on_static_platform_stays_supported | src/engine/physics.rs | grounded_now[1] = -normal.y > 0.5; | grounded_now[1] = false; | all

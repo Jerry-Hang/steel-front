@@ -227,3 +227,13 @@ vision_factor_drops_at_night
 network_strings_never_inject_log_lines
 # 注意：注入用"把排序结果反转"，不是"改等距 tie-break"（后者对本夹具无效 —— 距离互不相等）
 nearest_lamps_are_sorted_by_distance
+
+# ── 2026-11-26 第十批（天花板 / 斜切盒外表面 / 快照上限 / 支撑高度 / 台面支撑）──
+jump_stops_at_ceiling
+beveled_box_faces_reach_the_outer_surface
+# 上限用常量注入（1024→65535），因为 if n > MAX 在两处 decode 里逐字相同、无法单点定位
+snapshot_count_above_cap_is_rejected
+# ⚠️ 声称写"改成 >= 之外的任一改动都会红" —— `>=` 恰好是不红的那档（本判据就是用它当边界）
+support_height_among_matches_the_method_and_hand_values
+# ⚠️ 必须改 grounded_now[**1**]：动态盒是 j、静态台面是 i ⇒ 走 si 分支
+body_resting_on_static_platform_stays_supported
