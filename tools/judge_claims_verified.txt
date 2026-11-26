@@ -325,3 +325,9 @@ music_synth_time_stays_accurate_after_hours
 point_blank_shot_inside_the_hit_sphere_registers_a_hit
 # ⚠️ `for ch in channels {` 在 anim.rs 有**两处**（8 空格缩进一样）⇒ 锚点必须**不带前导空格** + all 模式
 cpu_pose_chain_matches_hand_computed_displacements
+
+# ── 2026-11-26 第二十一批（动画通道越界 / 远端玩家命中 / 平移拖拽）──
+glb_animation_channel_parses_and_samples_midpoint
+net_player_in_front_of_a_wall_still_takes_the_hit
+# ⚠️ 直接删 `..local` 会编译失败（另两处结构体已显式给全字段）⇒ 改 `translation: moved` 为原值
+begin_and_update_drag_move_the_entity_along_the_handle

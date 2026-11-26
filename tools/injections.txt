@@ -111,3 +111,6 @@ structural_markers_are_not_skipped_wholesale | src/app_render.rs |         crate
 music_synth_time_stays_accurate_after_hours | src/audio.rs |         self.time_secs += frames as f64 * (1.0 / self.sample_rate as f64); |         self.time_secs = frames as f64 * (1.0 / self.sample_rate as f64);
 point_blank_shot_inside_the_hit_sphere_registers_a_hit | src/engine/game/weapons.rs |             if t < 0.0 { |             if t <= 0.0 {
 cpu_pose_chain_matches_hand_computed_displacements | src/engine/anim.rs | for ch in channels { | for ch in channels.iter().take(0) { | all
+glb_animation_channel_parses_and_samples_midpoint | src/engine/anim.rs |             let times = crate::engine::skin::read_acc_f32(&json, bin, in_acc as usize, 1)?; |             let times = crate::engine::skin::read_acc_f32(&json, bin, in_acc as usize + 9999, 1)?;
+net_player_in_front_of_a_wall_still_takes_the_hit | src/engine/game/weapons.rs |             for (idx, q) in self.net_players.iter().enumerate() { |             for (idx, q) in self.net_players.iter().enumerate().take(0) {
+begin_and_update_drag_move_the_entity_along_the_handle | src/engine/editor.rs | translation: moved, | translation: local.translation,

@@ -6865,3 +6865,22 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
 已改成覆盖范围说明，并指向 `cubic_dt_matters_when_the_segment_is_not_unit_length`。
 
 现状：台账 **145 / 195**（74%）；`injections.txt` 99 条。
+
+### 2026-11-26：欠账 145 → 148 / 194（本轮 3 条 + 一条"分工"假声称）
+
+| 判据 | 注入 |
+|---|---|
+| `glb_animation_channel_parses_and_samples_midpoint` | 输入 accessor 下标 +9999（越界） |
+| `net_player_in_front_of_a_wall_still_takes_the_hit` | 远端玩家循环空迭代 |
+| `begin_and_update_drag_move_the_entity_along_the_handle` | `translation: moved` → 原值（不移动） |
+
+**"删掉 `..local`" 这条声称本身有问题**：`editor.rs` 里 `..local` 有 **3 处**，
+其中两处所在的结构体已显式写全字段 ⇒ 把 `. .local` 换成显式字段会**重复字段、编译失败**
+（工具正确地记成 `BROKEN` 而不是 RED）。可行的等价注入是**让平移量失效**
+（`translation: moved` → `local.translation`），判据立刻红。
+
+**又澄清一条"分工"声称**：`one_input_packet_per_frame_is_the_speed_baseline` 的注释原写
+"改成无条件 insert ⇒ 本判据仍绿但下一条红" —— 这**不是**反向验证，而是**两条判据的分工说明**。
+已改写为"覆盖范围"，说明乱序语义由 `duplicate_or_stale_input_seq_is_dropped` 负责。
+
+现状：台账 **148 / 194**（76%）；`injections.txt` 102 条 + 3 条带原因的注记。

@@ -784,7 +784,10 @@ mod net_dir_tests {
     }
 
     /// S1 判据：一帧内 10 个 Input 必须折叠成 1 条（最新 seq），位移不得 ×10。
-    /// 反向验证：把 `collapse_input` 改成无条件 insert ⇒ 本判据仍绿但下一条红（乱序）。
+    /// 覆盖范围（2026-11-26 说明）：本判据压的是"一帧只取一个输入"的**速率基线**本身。
+    /// 把 `collapse_input` 改成无条件 insert 时，本判据**仍绿**（每条包都会覆盖同一个槽位，
+    /// 速率不变），由 `duplicate_or_stale_input_seq_is_dropped` 负责红 —— 这是**刻意分工**，
+    /// 不是漏测：乱序语义在那边钉住。
     #[test]
     fn one_input_packet_per_frame_is_the_speed_baseline() {
         let addr: std::net::SocketAddr = "127.0.0.1:40000".parse().unwrap();
