@@ -171,3 +171,17 @@ scene_transform_composes_through_parents
 #      打中前者不红 —— 必须精确到 anim.rs 的那一行
 real_blender_asset_animation_moves_the_weighted_vertex
 gizmo_axis_param_matches_hand_value
+
+# ── 2026-11-26 第四批（贴图解析 / 资产列表 / 动画插值 / 广场掩体）──
+# 无 images ⇒ 返回 Err 而非空列表 ⇒ 红
+glb_without_images_yields_empty_list_not_error
+# 外部 uri 分支改 if false ⇒ 不再报错、静默跳过，红
+external_texture_uri_is_an_explicit_error
+# 翻页去掉 % page_count ⇒ 最后一屏翻过头，红
+browser_paging_wraps_and_never_divides_by_zero
+# 排序换成 reverse ⇒ 乱序输入不再规范化，红
+browser_sorts_entries_deterministically
+# 线性插值的 u 写死 0 ⇒ 中点返回左端，红
+anim_linear_interpolates_at_midpoint
+# 广场掩体调用注释掉 ⇒ 无掩体道具，红
+plaza_has_cover_props

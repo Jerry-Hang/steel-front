@@ -6501,3 +6501,25 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
   （`Skin::matrices` 与 `posed_positions`），打中前者不红 ⇒ 精确到 `anim.rs` 那行后**红**。
 
 现状：台账 **66 / 193**；`injections.txt` **24 条全 RED**、0 条需人看。
+
+### 2026-11-26：欠账 66 → 72 / 193（30 条注入全 RED）
+
+本轮确认 6 条，都在**解析器与列表逻辑**这类纯函数上：
+
+| 判据 | 注入 |
+|---|---|
+| `glb_without_images_yields_empty_list_not_error` | 无 images 时返回 `Err` 而非空列表 |
+| `external_texture_uri_is_an_explicit_error` | 把外部 uri 分支改成 `if false` |
+| `browser_paging_wraps_and_never_divides_by_zero` | 翻页去掉 `% page_count()` |
+| `browser_sorts_entries_deterministically` | 排序换成 `entries.reverse()` |
+| `anim_linear_interpolates_at_midpoint` | 插值参数 `u` 写死 `0.0` |
+| `plaza_has_cover_props` | 广场掩体调用注释掉 |
+
+**工具用法上的两点收获**（都写进了本轮脚本 `/tmp/mkentry.py` 的思路）：
+
+1. **按正则定位真实行再算替换**，比手写"原文"可靠得多 —— 手写会因为缩进/上下文
+   导致 `SKIP`（本轮 9 个候选里 5 个是这么废掉的：整行出现 2~5 次、命中 0 次）。
+2. **`let _ = f()` 不是禁用调用**：它仍然调用、只是丢弃返回值 ⇒ 语义上是空操作，
+   注入后 NOT-RED。真要禁用得**注释掉**整行。
+
+现状：台账 **72 / 193**；`injections.txt` **30 条全 RED**。

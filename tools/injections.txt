@@ -33,3 +33,9 @@ screen_ray_hits_dead_center_and_misses_when_offset | src/engine/gizmo.rs |     l
 aipc_roundtrip_executes_commands_via_main_thread_channel | src/engine/aipc.rs |                         match rrx.recv_timeout(Duration::from_millis(500)) { |                         match rrx.recv_timeout(Duration::from_millis(0)) {
 scene_transform_composes_through_parents | src/engine/scene.rs |         m *= self.slot(*e)?.local.matrix(); |         m = self.slot(*e)?.local.matrix();
 real_blender_asset_animation_moves_the_weighted_vertex | src/engine/anim.rs |             w * ib |             ib * w
+glb_without_images_yields_empty_list_not_error | src/engine/asset_texture.rs |         None => return Ok(Vec::new()), |         None => return Err("no images".to_string()),
+external_texture_uri_is_an_explicit_error | src/engine/asset_texture.rs |         if img.get("bufferView").is_none() { |         if false {
+browser_paging_wraps_and_never_divides_by_zero | src/engine/asset_browser.rs |         self.page = (self.page + 1) % self.page_count(); |         self.page = (self.page + 1) + 0;
+browser_sorts_entries_deterministically | src/engine/asset_browser.rs |         entries.sort_by(|a, b| a.name.cmp(&b.name)); |         entries.reverse();
+anim_linear_interpolates_at_midpoint | src/engine/anim.rs |         Interp::Linear => values[i].lerp(values[i + 1], u), |         Interp::Linear => values[i].lerp(values[i + 1], 0.0),
+plaza_has_cover_props | src/engine/city.rs |     cover_props(c, cx, cz); |     // cover_props(c, cx, cz);
