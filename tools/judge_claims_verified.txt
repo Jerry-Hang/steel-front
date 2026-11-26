@@ -185,3 +185,14 @@ browser_sorts_entries_deterministically
 anim_linear_interpolates_at_midpoint
 # 广场掩体调用注释掉 ⇒ 无掩体道具，红
 plaza_has_cover_props
+
+# ── 2026-11-26 第五批（音频丢弃 / 线程池回退 / Hermite dt / 编译期断言）──
+# 满声部丢弃：最不响 → 改回 FIFO remove(0)，红
+synth_full_eviction_keeps_the_loudest_voice
+# worker 未存活时的回退：丢掉 f(w,start,seg) ⇒ 该段静默跳过，红
+dead_worker_segments_are_executed_on_the_caller
+# 🔴 Hermite 的 dt：**必须用非单位段长**才可判别 —— 原判据 times=[0,1]（dt=1）时
+#    h10*dt 与 h10 相同，注入后仍通过；新判据用段长 2 秒，漏乘 dt 时 0.25→0.125，红
+cubic_dt_matters_when_the_segment_is_not_unit_length
+# 编译期断言类声称：改常量 760→680 ⇒ **编译失败就是证据**（inject_check 的 compile 模式）
+pilaster_protrudes_a_relief_step_past_the_plinth

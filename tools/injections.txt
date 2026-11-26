@@ -39,3 +39,7 @@ browser_paging_wraps_and_never_divides_by_zero | src/engine/asset_browser.rs |  
 browser_sorts_entries_deterministically | src/engine/asset_browser.rs |         entries.sort_by(|a, b| a.name.cmp(&b.name)); |         entries.reverse();
 anim_linear_interpolates_at_midpoint | src/engine/anim.rs |         Interp::Linear => values[i].lerp(values[i + 1], u), |         Interp::Linear => values[i].lerp(values[i + 1], 0.0),
 plaza_has_cover_props | src/engine/city.rs |     cover_props(c, cx, cz); |     // cover_props(c, cx, cz);
+pilaster_protrudes_a_relief_step_past_the_plinth | src/engine/city.rs | const PILASTER_PROTRUDE_MM: u32 = 760; | const PILASTER_PROTRUDE_MM: u32 = 680; | compile
+cubic_dt_matters_when_the_segment_is_not_unit_length | src/engine/anim.rs | out_tan * (h10 * dt) | out_tan * (h10) | all
+synth_full_eviction_keeps_the_loudest_voice | src/audio.rs |                 self.voices.remove(i); |                 self.voices.remove(0);
+dead_worker_segments_are_executed_on_the_caller | src/engine/cpu.rs |                     f(w, start, seg); |                     let _ = seg;

@@ -6523,3 +6523,33 @@ RV3D_PLUGIN_CMD="asset.atlas_pack 8"  → assets/textures/prop_atlas_generated.p
    注入后 NOT-RED。真要禁用得**注释掉**整行。
 
 现状：台账 **72 / 193**；`injections.txt` **30 条全 RED**。
+
+### 2026-11-26：欠账 72 → 76 / 194（34 条注入：33 RED + 1 RED-COMPILE）
+
+本轮确认 4 条，并**又抓到一次"单位长度导致不可判别"**：
+
+| 判据 | 注入 | 结果 |
+|---|---|---|
+| `synth_full_eviction_keeps_the_loudest_voice` | 丢弃最不响 → `remove(0)` | RED |
+| `dead_worker_segments_are_executed_on_the_caller` | 回退里丢掉 `f(w,start,seg)` | RED |
+| `cubic_dt_matters_when_the_segment_is_not_unit_length` | 漏乘 `dt` | RED |
+| `pilaster_protrudes_a_relief_step_past_the_plinth` | 常量 760→680 | **RED-COMPILE** |
+
+🔴 **`anim_cubic_matches_hand_computed_hermite` 的声称不可兑现**：它写"漏乘 dt ⇒ dt=2 时差一倍"，
+但判据用 `times=[0,1]` ⇒ **dt=1**，两种写法**完全相同**（实测注入后仍通过）。
+这和 `GIZMO_LEN=1` 那次是**同一个母题**：**单位化参数吃掉了判据的区分度**。
+新增 `cubic_dt_matters_when_the_segment_is_not_unit_length`（段长 2 秒）才有区分度。
+⚠️ 顺带纠正一个我自己的错：`sample_cubic` 收的是**绝对时间**不是归一化 t
+（我第一次传 0.5 得 u=0.25、实测 0.28125；传 1.0 才是 u=0.5 → 0.25）。
+
+工具两处改进（都是被真实失败教出来的）：
+
+1. **`compile` 模式**：编译期断言类声称的证据就是"编译失败"。
+   以前它被记成 `BROKEN`（判据没跑），现在记 `RED-COMPILE` 并算验证通过。
+   ⇒ 证据类型有三种：**测试变红 / 编译失败 / （未来）运行时行为差异**。
+2. **清单解析不能 `strip()` 原文/替换两段**：
+   `f(w, start, seg);` 在 `fref(w, start, seg);` 里也有 ⇒ 去掉缩进后 count=3 ⇒ 永远 SKIP。
+   现在只 strip 前两段（测试名、文件），**原文/替换原样保留**，缩进才能用来区分。
+   （这也解释了本轮早些时候一批莫名其妙的 SKIP。）
+
+现状：台账 **76 / 194**；`injections.txt` **34 条**（33 RED + 1 RED-COMPILE）、0 条需人看。

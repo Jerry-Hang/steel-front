@@ -37,10 +37,16 @@ def load(manifest):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = [p.strip() for p in line.split(" | ")]
+        # 🔴 **只 strip 前两段**（测试名、文件）：原文/替换两段必须**原样保留**，
+        # 否则缩进没法用来区分同一行代码的不同出现位置。
+        # 实测：`f(w, start, seg);` 在 `fref(w, start, seg);` 里也有，
+        # 去掉缩进后 count 变成 3 ⇒ 永远 SKIP。
+        parts = line.split(" | ")
+        parts[:2] = [p.strip() for p in parts[:2]]
         # 第 5 段可选：`all` = 替换全部出现（用于"同一行在实现里出现多次"的注入）
-        if len(parts) == 5 and parts[4] == "all":
-            parts = parts[:4] + ["all"]
+        # 第 5 段：`all` = 替换全部出现；`compile` = **期望编译失败**（编译期断言类声称）
+        if len(parts) == 5 and parts[4] in ("all", "compile"):
+            parts = parts[:4] + [parts[4]]
         elif len(parts) == 4:
             parts = parts + ["one"]
         else:
@@ -187,6 +193,10 @@ def main():
                 results.append((name, "NO-OP", "git diff 为空"))
                 continue
             passed, summary = run_test(name)
+            if summary == "编译失败" and mode == "compile":
+                # 编译期断言的声称：**编译失败就是它该有的证据**
+                results.append((name, "RED-COMPILE", "编译期断言按声称拦住（编译失败即验证通过）"))
+                continue
             if summary == "编译失败":
                 # 🔴 **编译失败不是"变红"**：判据根本没跑。当成 RED 会把
                 # "注入写坏了" 记成 "判据有效" —— 与假账等价。

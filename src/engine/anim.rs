@@ -542,6 +542,36 @@ mod tests {
     /// 🔴 CUBICSPLINE 的**手算值**：v0=v1=0、出切线=1、入切线=0、dt=1，
     /// 在 u=0.5 处 `h10 = 0.125` ⇒ 值 = 0.125。
     ///
+
+    /// 🔴 **dt 必须真的参与运算**，而这一点只有在**段长 ≠ 1** 时才看得出来。
+    ///
+    /// 原判据 `anim_cubic_matches_hand_computed_hermite` 用 `times = [0, 1]` ⇒ `dt == 1`
+    /// ⇒ `h10 * dt` 与 `h10` **完全相同**，所以它无法区分"漏乘 dt"（实测注入后仍通过）。
+    /// 这条把段长换成 2 秒，才有区分度。
+    ///
+    /// 反向验证：把 `out_tan * (h10 * dt)` 写成 `out_tan * h10` ⇒ 0.25 变 0.125，红。
+    #[test]
+    fn cubic_dt_matters_when_the_segment_is_not_unit_length() {
+        // 段长 2 秒；帧0 出切线 (1,0,0,0)，其余全零
+        let times = [0.0, 2.0];
+        let vals = [
+            Vec4::ZERO,
+            Vec4::ZERO,
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+            Vec4::ZERO,
+            Vec4::ZERO,
+            Vec4::ZERO,
+        ];
+        // 🔴 `sample_cubic` 收的是**绝对时间**（`u = (t - times[i]) / dt`），
+        // 所以这里传 1.0 才对应 u = 0.5（我第一次传 0.5 得 u=0.25，实测 0.28125）。
+        let v = sample_cubic(&times, &vals, 1.0);
+        // 手算：h10(0.5) = 0.125，乘 dt=2 ⇒ 0.25
+        assert!(
+            (v.x - 0.25).abs() < 1e-5,
+            "段长 2 秒时出切线应为 h10*dt = 0.125*2 = 0.25，实际 {v:?}"
+        );
+    }
+
     /// 反向验证：把 `h10 * dt` 写成 `h10`（漏乘 dt）⇒ dt=2 时差一倍，红（见下一条）。
     #[test]
     fn anim_cubic_matches_hand_computed_hermite() {
