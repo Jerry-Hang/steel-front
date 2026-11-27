@@ -1047,10 +1047,23 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 1.0 - smoothstep(0.030, 0.030 + foot_a * 1.5, dh),
                 1.0 - smoothstep(0.038, 0.038 + foot_y * 1.5, dv),
             );
-            let grain = sf_vnoise(vec2<f32>(along * 7.0, input.world_pos.y * 7.0)) - 0.5;
+            // 🔴 **高频项必须随距离收敛**（2026-11-27 修）：`grain` 是 7 Hz（≈14cm 颗粒），
+            // 而它原来**完全没有距离淡出** —— 一个像素盖过好几格时值噪声退化成逐像素随机，
+            // 整面墙读作"绒状/布纹/木板"，正是用户截图里那片墙。取证：把皮肤/道具图集/
+            // 程序化贴图**全关**花纹仍在 ⇒ 根因在这条路径。
+            // `fine`：3cm/像素时满幅，16cm/像素归零。`seam`（3cm 板缝）本来有自己的足迹收敛，不动。
+            // 🔴 收敛窗口必须按**半波长**定，不能凭手感：grain 是 7 周期/米 ⇒ 波长 14cm，
+            // 半波长 7cm。一个像素一旦盖过 7cm，这个频率就压在 Nyquist 之上、必然拍成
+            // 斜向点链（8× 放大实测：单像素暗点成对角线，周期约 3px）。
+            // 原来窗口写成 3~16cm，到 7cm 时只衰减到 0.46 —— 所以"改了但几乎没变"
+            // （实测高频能量 19.70 → 19.65）。现在 2cm 满幅、7cm 归零。
+            let fine = 1.0 - smoothstep(0.02, 0.07, dmax);
+            let grain = (sf_vnoise(vec2<f32>(along * 7.0, input.world_pos.y * 7.0)) - 0.5)
+                * fine;
             let streak = (sf_vnoise(vec2<f32>(along * 1.7, 3.1)) - 0.5)
                 * smoothstep(0.0, 1.5, input.world_pos.y)
-                * (1.0 - smoothstep(6.0, 22.0, input.world_pos.y));
+                * (1.0 - smoothstep(6.0, 22.0, input.world_pos.y))
+                * mix(0.35, 1.0, fine);
             base = base
                 * (1.0 - seam * 0.42 * vertical + grain * 0.16 * vertical
                    - streak * 0.24 * vertical);
