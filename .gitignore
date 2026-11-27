@@ -39,3 +39,6 @@ build/
 !assets/textures/ground_detail_3way.png
 !assets/textures/marker_skin_bricks.png
 !assets/textures/prop_atlas.png
+!assets/textures/marker_skin_bricks_generated.png
+!assets/textures/marker_skin_concrete_generated.png
+!assets/textures/ground_detail_asphalt_generated.png

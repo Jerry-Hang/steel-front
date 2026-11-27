@@ -8,7 +8,17 @@ use super::*;
 /// 引擎的 marker（墙/沙袋/护栏）走**皮肤贴图 + 顶点色 tint**：贴图必须是 sRGB 编码的 RGB，
 /// 尺寸等于 `SKIN_TEXTURE_SIZE`（512）。读不到就返回 None ⇒ 调用方回退程序化皮肤。
 fn load_marker_skin_texture(size: u32) -> Option<Vec<u8>> {
-    let path = "assets/textures/marker_skin_bricks.png";
+    // 生成式贴图（2026-11-27）：本地 qwen-image-2.1-turbo 出的无缝砖墙；
+    // 工具链见 tools/make_seamless.py + docs/GENERATED-TEXTURES.md。
+    // RV3D_GEN_TEX_OFF=1 回退 ambientCG 那张（A/B 对照用）。
+    let gen = "assets/textures/marker_skin_bricks_generated.png";
+    let path = if !crate::syscfg::flag("RV3D_GEN_TEX_OFF")
+        && std::path::Path::new(gen).exists()
+    {
+        gen
+    } else {
+        "assets/textures/marker_skin_bricks.png"
+    };
     let img = image::open(path).ok()?.to_rgba8();
     let rgba = if img.width() == size && img.height() == size {
         img
@@ -26,7 +36,12 @@ fn load_marker_skin_texture(size: u32) -> Option<Vec<u8>> {
 fn load_ground_detail_texture() -> Option<Vec<u8>> {
     // 三通道细节图：R=沥青(ambientCG Asphalt033) / G=混凝土(Concrete034) / B=土草(Ground037)，
     // 全部 CC0。片元按地面分区取权重混合（路面/人行道/腹地各有自己的质感），仍是一张 256² 图。
-    let path = if std::path::Path::new("assets/textures/ground_detail_3way.png").exists() {
+    let gen = "assets/textures/ground_detail_asphalt_generated.png";
+    let path = if !crate::syscfg::flag("RV3D_GEN_TEX_OFF")
+        && std::path::Path::new(gen).exists()
+    {
+        gen
+    } else if std::path::Path::new("assets/textures/ground_detail_3way.png").exists() {
         "assets/textures/ground_detail_3way.png"
     } else {
         "assets/textures/ground_detail_asphalt.png"
