@@ -1284,14 +1284,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             //   ② 污渍：世界空间 value noise 乘一圈明暗，让大面不再均匀。
             // 它替代不了贴图，但能把"平涂色块"变成"有砌筑感的表面"。
             if (abs(fnrm.y) < 0.6) {
+                // 🔴 **按半波长收敛**（2026-11-28 修 —— 这是"墙面绒状点链"的真凶）：
+                // 竖向 7.5cm 一层、横向 24cm 一块，而阈值 `smoothstep(0.40,0.5,…)` 极窄 ——
+                // 一个像素盖过 3.75cm 后这两个频率必然拍成**斜向单像素点链**（8× 放大实测周期≈3px）。
+                // 取证：皮肤换纯灰、关道具图集、关程序化贴图、关 SSAO、关阴影全都不消；
+                // 把 `base` 强制成常数也不消 ⇒ 因为它在**光照之后**、对所有近竖直面生效。
+                let fine_m = 1.0 - smoothstep(0.020, 0.050, dmax);
+                let fine_g = 1.0 - smoothstep(0.100, 0.300, dmax);
                 let course = input.world_pos.y / 0.075;
                 let row = floor(course);
                 let mortar_y = abs(fract(course) - 0.5);
                 let horiz = input.world_pos.x + input.world_pos.z + row * 0.12;
                 let mortar_x = abs(fract(horiz / 0.24) - 0.5);
-                let mortar = max(smoothstep(0.40, 0.5, mortar_y), smoothstep(0.40, 0.5, mortar_x));
+                let mortar = max(
+                    smoothstep(0.40, 0.5, mortar_y) * fine_m,
+                    smoothstep(0.40, 0.5, mortar_x) * fine_m,
+                );
                 let grime = 0.86
-                    + 0.26 * vnoise2(input.world_pos.xz * 1.7 + vec2<f32>(input.world_pos.y * 0.9, 0.0));
+                    + 0.26 * fine_g
+                        * vnoise2(input.world_pos.xz * 1.7 + vec2<f32>(input.world_pos.y * 0.9, 0.0));
                 shaded = shaded * grime * (1.0 - 0.32 * mortar);
             }
 
